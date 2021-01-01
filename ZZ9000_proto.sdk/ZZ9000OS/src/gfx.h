@@ -16,6 +16,22 @@
 
 #include <stdint.h>
 
+#define Z3_SCRATCH_ADDR 0x33F0000
+#define ADDR_ADJ 0x1F0000
+
+#define MNTVF_OP_UNUSED 12
+#define MNTVF_OP_SPRITE_XY 13
+#define MNTVF_OP_SPRITE_ADDR 14
+#define MNTVF_OP_SPRITE_DATA 15
+#define MNTVF_OP_MAX 6
+#define MNTVF_OP_HS 7
+#define MNTVF_OP_VS 8
+#define MNTVF_OP_POLARITY 10
+#define MNTVF_OP_SCALE 4
+#define MNTVF_OP_DIMENSIONS 2
+#define MNTVF_OP_COLORMODE 1
+#define MNTVF_OP_REPORT_LINE 17
+
 typedef struct Vec2 {
 	float x;
 	float y;
@@ -30,6 +46,10 @@ typedef struct {
 typedef struct {
 	int32_t a[2];
 } vec2_i32;
+
+void video_formatter_write(uint32_t data, uint16_t op);
+void handle_blitter_dma_op(uint16_t zdata);
+void handle_acc_op(uint16_t zdata);
 
 void set_fb(uint32_t* fb_, uint32_t pitch);
 void update_hw_sprite(uint8_t *data, uint32_t *colors, uint16_t w, uint16_t h);
@@ -73,12 +93,6 @@ void acc_fill_circle(uint32_t dest, uint16_t pitch, int16_t x0, int16_t y0, int1
 void acc_fill_flat_tri(uint32_t dest, TriangleDef *d, uint16_t w, uint16_t h, uint32_t fg_color, uint8_t bpp);
 
 void *get_color_conversion_table(int index);
-
-/*#define MNTVA_COLOR_8BIT     0
-#define MNTVA_COLOR_16BIT565 1
-#define MNTVA_COLOR_32BIT    2
-#define MNTVA_COLOR_1BIT     3
-#define MNTVA_COLOR_15BIT    4*/
 
 enum color_formats {
 	MNTVA_COLOR_8BIT,
@@ -553,6 +567,7 @@ enum gfx_dma_op {
   OP_SPRITE_BITMAP,
   OP_SPRITE_CLUT_BITMAP,
   OP_ETH_USB_OFFSETS,
+  OP_SET_SPLIT_POS,
   OP_NUM,
 };
 
@@ -570,7 +585,18 @@ enum gfx_acc_op {
   ACC_OP_FILL_CIRCLE,
   ACC_OP_DRAW_FLAT_TRI,
   ACC_OP_DRAW_TEX_TRI,
+  ACC_OP_DECOMPRESS,
+  ACC_OP_COMPRESS,
+  ACC_OP_CODEC_OP,
   ACC_OP_NUM,
+};
+
+enum compression_types {
+  ACC_CMPTYPE_SMUSH_CODEC1,
+  ACC_CMPTYPE_SMUSH_CODEC37,
+  ACC_CMPTYPE_SMUSH_CODEC47,
+  ACC_CMPTYPE_IMA_ADPCM_VBR,
+  ACC_CMPTYPE_NUM,
 };
 
 enum gfxdata_offsets {

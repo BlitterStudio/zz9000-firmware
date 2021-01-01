@@ -68,7 +68,7 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REG58   = 0x58,
   REG_ZZ_BITTER_DMA_OP  = 0x5A,
   REG_ZZ_ACC_OP         = 0x5C,
-  REG_ZZ_UNUSED_REG5E   = 0x5E,
+  REG_ZZ_SET_SPLIT_POS  = 0x5E,
 
   REG_ZZ_UNUSED_REG60   = 0x60,
   REG_ZZ_UNUSED_REG62   = 0x62,

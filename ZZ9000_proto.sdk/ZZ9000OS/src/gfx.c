@@ -1441,25 +1441,17 @@ void acc_fill_flat_tri(uint32_t dest, TriangleDef *d, uint16_t w, uint16_t h, ui
 			if (sz >=h )
 				break;
 			if (sz >= 0 && sz < h) {
-				if ((xw1 < 0 && xw1 < 0) || (xw1 >= w && xw2 >= w))
+				uint32_t xed = (xw1 < xw2) ? xw1 : xw2;
+				uint32_t xed2 = (xw1 < xw2) ? xw2 : xw1;
+				xed = ((xed & 0xFFFF0000) >> 16);
+				xed2 = ((xed2 & 0xFFFF0000) >> 16);
+				if ((xed < 0 && xed2 < 0) || (xed >= w && xed2 >= w) || (xed == xed2))
 					goto skip_span;
-				int xed = (xw1 < xw2) ? xw1 : xw2;
-				int xed2 = (xw1 < xw2) ? xw2 : xw1;
 				if (xed < 0) xed = 0;
 				if (xed2 >= w) xed2 = w - 1;
 
 				int clear_w = (xed == xed2) ? 1 : xed2 - xed;
 				memset((uint8_t *)(uint32_t)(dest + xed + (sz * w)), u8_fg, clear_w);
-				//acc_clear_buffer(dest + xed + (sz * w), clear_w, 1, w, u8_fg, 1);
-
-				/*if (xw2 > 0 && xw1 > 0 && xw2 < (w - 1) && xw1 < (w - 1)) {
-					if (xw2 == xw1)
-						((uint8_t *)dest)[xw1 + (sz * w)] = u8_fg;
-					else if (xw1 < xw2)
-						acc_clear_buffer(dest + xw1 + (sz * w), xw2 - xw1, 1, w, u8_fg, 1);
-					else
-						acc_clear_buffer(dest + xw2 + (sz * w), xw1 - xw2, 1, w, u8_fg, 1);
-				}*/
 				skip_span:;
 			}
 			xw1 += xs1;
@@ -1485,25 +1477,17 @@ void acc_fill_flat_tri(uint32_t dest, TriangleDef *d, uint16_t w, uint16_t h, ui
 				break;
 
 			if (sz >= 0 && sz < (h - 1)) {
-				if ((xw1 < 0 && xw1 < 0) || (xw1 >= w && xw2 >= w))
-					goto skip_span2;
 				int xed = (xw1 < xw2) ? xw1 : xw2;
 				int xed2 = (xw1 < xw2) ? xw2 : xw1;
+				xed = ((xed & 0xFFFF0000) >> 16);
+				xed2 = ((xed2 & 0xFFFF0000) >> 16);
+				if ((xed < 0 && xed2 < 0) || (xed >= w && xed2 >= w) || (xed == xed2))
+					goto skip_span2;
 				if (xed < 0) xed = 0;
 				if (xed2 >= w) xed2 = w - 1;
 
 				int clear_w = (xed == xed2) ? 1 : xed2 - xed;
 				memset((uint8_t *)(uint32_t)(dest + xed + (sz * w)), u8_fg, clear_w);
-				//acc_clear_buffer(dest + xed + (sz * w), clear_w, 1, w, u8_fg, 1);
-
-				/*if (xw2 > 0 && xw1 > 0 && xw2 < (w - 1) && xw1 < (w - 1)) {
-					if (xw2 == xw1)
-						((uint8_t *)dest)[xw1 + (sz * w)] = u8_fg;
-					else if (xw1 < xw2)
-						acc_clear_buffer(dest + xw1 + (sz * w), xw2 - xw1, 1, w, u8_fg, 1);
-					else
-						acc_clear_buffer(dest + xw2 + (sz * w), xw1 - xw2, 1, w, u8_fg, 1);
-				}*/
 				skip_span2:;
 			}
 			xw1 += xs3;
