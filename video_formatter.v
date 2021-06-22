@@ -55,6 +55,7 @@ localparam OP_SPRITE_ADDR=14;
 localparam OP_SPRITE_DATA=15;
 localparam OP_VIDEOCAP=16; // we ignore this here, it's snooped by MNTZorro
 localparam OP_REPORT_LINE=17;
+localparam OP_PALETTE_SEL=18; // access secondary 256 colors for screen split
 
 localparam CMODE_8BIT=0;
 localparam CMODE_16BIT=1;
@@ -65,10 +66,11 @@ reg [11:0] screen_width; // = 720;
 reg [11:0] screen_height; // = 576;
 reg scale_x = 0;
 reg scale_y = 1; // amiga boots in 640x256, so double the resolution vertically
-reg [31:0] palette[255:0];
+reg [23:0] palette[511:0];
 reg [2:0] colormode = CMODE_32BIT;
 reg vsync_request;
 reg sync_polarity = 1; // negative polarity
+reg selected_palette = 0;
 
 reg [15:0] screen_h_max; //= 864;
 reg [15:0] screen_v_max; //= 625;
@@ -127,6 +129,7 @@ reg [23:0] sprite_pix; // vga domain
 reg sprite_on; // vga domain
 reg [11:0] vga_report_y; // vga domain
 reg [11:0] vga_report_y_next; // vga domain
+reg vga_selected_palette; // vga domain
 
 always @(posedge m_axis_vid_aclk)
   begin
@@ -218,7 +221,8 @@ begin
   end
   
   case (control_op_in)
-    OP_PALETTE: palette[control_data_in[31:24]] <= control_data_in[23:0];
+    OP_PALETTE: palette[{selected_palette, control_data_in[31:24]}] <= control_data_in[23:0];
+    OP_PALETTE_SEL: selected_palette <= control_data_in[0];
     OP_DIMENSIONS: begin
         screen_height <= control_data_in[31:16];
         screen_width  <= control_data_in[15:0];
@@ -340,6 +344,7 @@ always @(posedge dvi_clk) begin
   vga_sprite_y2 <= vga_sprite_y+(SPRITE_H<<sprite_dbl);
   vga_sprite_dbl <= sprite_dbl;
   vga_report_y_next <= report_y;
+  vga_selected_palette <= selected_palette;
   
   /*
     pipelines (4 clocks):
@@ -409,7 +414,7 @@ always @(posedge dvi_clk) begin
     pixout32_dly <= pixout32;
   pixout32_dly2 <= pixout32_dly;
   
-  palout <= palette[pixout8];
+  palout <= palette[{vga_selected_palette, pixout8}];
   
   case (vga_colormode)
     CMODE_8BIT:  pixout <= palout;
