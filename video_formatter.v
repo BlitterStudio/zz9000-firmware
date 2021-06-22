@@ -277,20 +277,22 @@ begin
   endcase
 end
 
+localparam PIPE_DELAY = 4;
+
 reg [31:0] palout;
 reg [11:0] vga_v_rez;
 reg [11:0] vga_h_rez;
+reg [11:0] vga_h_rez_delayed;
 reg [11:0] vga_v_max;
 reg [11:0] vga_h_max;
 reg [11:0] vga_h_sync_start;
 reg [11:0] vga_h_sync_end;
+reg [11:0] vga_h_sync_start_delayed;
+reg [11:0] vga_h_sync_end_delayed;
 reg [11:0] vga_v_sync_start;
 reg [11:0] vga_v_sync_end;
 reg [11:0] counter_scanout;
 reg [2:0] vga_colormode;
-
-reg [11:0] vga_h_rez_shifted;
-reg [11:0] vga_v_rez_shifted;
 
 reg vga_scale_x = 0;
 reg vga_scale_y = 0;
@@ -315,10 +317,15 @@ reg vga_sync_polarity = 0;
 always @(posedge dvi_clk) begin
   vga_h_rez <= screen_width;
   vga_v_rez <= screen_height;
-  vga_h_max <= screen_h_max;
-  vga_v_max <= screen_v_max;
-  vga_h_sync_start <= screen_h_sync_start; //  + 4
-  vga_h_sync_end <= screen_h_sync_end; //  + 4
+  vga_h_max <= screen_h_max - 1'b1;
+  vga_v_max <= screen_v_max - 1'b1;
+  vga_h_sync_start <= screen_h_sync_start;
+  vga_h_sync_end <= screen_h_sync_end;
+  
+  vga_h_sync_start_delayed <= vga_h_sync_start+PIPE_DELAY;
+  vga_h_sync_end_delayed <= vga_h_sync_end+PIPE_DELAY;
+  vga_h_rez_delayed <= vga_h_rez+PIPE_DELAY;
+  
   vga_v_sync_start <= screen_v_sync_start;
   vga_v_sync_end <= screen_v_sync_end;
   vga_scale_x <= scale_x;
@@ -426,9 +433,9 @@ always @(posedge dvi_clk) begin
   
   dvi_rgb <= (sprite_on && sprite_pix!='hff00ff) ? sprite_pix : pixout;
   
-  if (counter_x > vga_h_max) begin
+  if (counter_x >= vga_h_max) begin
     counter_x <= 0;
-    if (counter_y > vga_v_max) begin
+    if (counter_y >= vga_v_max) begin
       counter_y <= 0;
       sprite_px <= 0;
       sprite_py <= 0;
@@ -475,24 +482,23 @@ always @(posedge dvi_clk) begin
     control_vblank[0] <= 0;
   end
   
-  if (counter_x >= vga_h_sync_start && counter_x < vga_h_sync_end)
+  // 4 clocks pipeline delay
+  if (counter_x >= vga_h_sync_start_delayed && counter_x < vga_h_sync_end_delayed)
     dvi_hsync <= 1^vga_sync_polarity;
   else
     dvi_hsync <= 0^vga_sync_polarity;
-    
-  if (counter_y >= vga_v_sync_start && counter_y < vga_v_sync_end)
-    dvi_vsync <= 1^vga_sync_polarity;
-  else
-    dvi_vsync <= 0^vga_sync_polarity;
   
-  // 4 clocks pipeline delay
-  vga_h_rez_shifted <= vga_h_rez+4;
+  if (counter_x >= vga_h_sync_start_delayed)
+    if (counter_y >= vga_v_sync_start && counter_y < vga_v_sync_end)
+      dvi_vsync <= 1^vga_sync_polarity;
+    else
+      dvi_vsync <= 0^vga_sync_polarity;
   
   // account for 1 line of vdma wrap-around
-  if (counter_y>vga_scale_y && counter_y<=(vga_v_rez + vga_scale_y) && counter_x==4)
+  if (counter_y>vga_scale_y && counter_y<=(vga_v_rez + vga_scale_y) && counter_x==PIPE_DELAY)
     dvi_active_video <= 1;
     
-  if (counter_x==vga_h_rez_shifted)
+  if (counter_x==vga_h_rez_delayed)
     dvi_active_video <= 0;
 end
 
