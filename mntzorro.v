@@ -27,7 +27,7 @@
 //`define VARIANT_2MB           // uses only 2MB address space
 //`define VARIANT_SUPERDENISE   // for A500+ and super denise
 
-`define VARIANT_FW20
+//`define VARIANT_FW20
 
 `define C_S_AXI_DATA_WIDTH 32
 `define C_S_AXI_ADDR_WIDTH 5
@@ -1424,7 +1424,7 @@ module MNTZorro_v0_1_S00_AXI
           z3_curpic <= 0;
           
           videocap_mode_in <= 0;
-          videocap_pitch <= 720; // FIXME? (was 720)
+          videocap_pitch <= 800; // FIXME? (was 720)
           
           if (!z_reset)
             zorro_state <= DECIDE_Z2_Z3;
