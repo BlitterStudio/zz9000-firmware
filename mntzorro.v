@@ -1209,8 +1209,6 @@ module MNTZorro_v0_1_S00_AXI
   reg [11:0] videocap_xoffset;
   reg [11:0] videocap_pitch;
   reg [11:0] videocap_pitch_sync;
-  reg [11:0] videocap_pitch_snoop;
-  reg        videocap_pitch_snooped;
   reg [9:0]  videocap_save_line_done;
   reg [11:0] videocap_save_y;
   reg [31:0] videocap_save_y2;
@@ -1422,9 +1420,6 @@ module MNTZorro_v0_1_S00_AXI
           zorro_ram_read_flag <= 0;
           zorro_ram_write_flag <= 0;
           z3_curpic <= 0;
-          
-          videocap_mode_in <= 0;
-          videocap_pitch <= 800; // FIXME? (was 720)
           
           if (!z_reset)
             zorro_state <= DECIDE_Z2_Z3;
@@ -2251,8 +2246,7 @@ module MNTZorro_v0_1_S00_AXI
     // snoop the screen width for correct capture pitch
     if (video_control_op == 2) begin
       // OP_DIMENSIONS = 2
-      videocap_pitch_snoop <= video_control_data[11:0];
-      videocap_pitch <= videocap_pitch_snoop; // FIXME
+      videocap_pitch <= video_control_data[11:0];
     end
     
     out_reg0 <= ZORRO3 ? last_z3addr : last_addr;
