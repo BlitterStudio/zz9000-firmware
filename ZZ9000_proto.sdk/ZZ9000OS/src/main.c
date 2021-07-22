@@ -23,7 +23,7 @@
 #include "xparameters.h"
 #include "xil_io.h"
 #include "xscugic.h"
-
+#include "xgpiops.h"
 #include "xiicps.h"
 #include "sleep.h"
 #include "xaxivdma.h"
@@ -32,13 +32,12 @@
 #include "xil_exception.h"
 #include "xadcps.h"
 #include "xtime_l.h"
+#include "xil_misc_psreset_api.h"
 
 #include "gfx.h"
 #include "ethernet.h"
 #include "usb.h"
-#include "xgpiops.h"
-
-#include "xil_misc_psreset_api.h"
+#include "interrupt.h"
 
 #include "zz_regs.h"
 #include "zz_video_modes.h"
@@ -189,17 +188,46 @@ void disable_reset_out() {
 	print("GPIO reset disable done.\n\r");
 }
 
-void hdmi_ctrl_init() {
-	int status;
+void hdmi_set_video_mode(u16 htotal, u16 vtotal, u32 pixelclock_hz, u16 vhz, u8 hdmi) {
+	/*
+	 * SII9022 registers
+	 *
+	 0x00, 0x4c,	// PixelClock/10000 - LSB
+	 0x01, 0x1d,	// PixelClock/10000 - MSB
+	 0x02, 0x70,	// Frequency in HZ - LSB
+	 0x03, 0x17,	// Vertical Frequency in HZ - MSB
+	 0x04, 0x70,	// Total Pixels per line - LSB
+	 0x05, 0x06,	// Total Pixels per line - MSB
+	 0x06, 0xEE,	// Total Lines - LSB
+	 0x07, 0x02,	// Total Lines - MSB
+	 0x08, 0x70, // pixel repeat rate?
+	 0x1a, 0x00, // 0: DVI, 1: HDMI
+	 */
+
+	// see also https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/bridge/sii902x.c#L358
+	u8* sii_mode = sii9022_init + 12;
+
+	sii_mode[2 * 0 + 1] = pixelclock_hz / 10000;
+	sii_mode[2 * 1 + 1] = (pixelclock_hz / 10000) >> 8;
+	sii_mode[2 * 2 + 1] = vhz * 100;
+	sii_mode[2 * 3 + 1] = (vhz * 100) >> 8;
+	sii_mode[2 * 4 + 1] = htotal;
+	sii_mode[2 * 5 + 1] = htotal >> 8;
+	sii_mode[2 * 6 + 1] = vtotal;
+	sii_mode[2 * 7 + 1] = vtotal >> 8;
+	sii_mode[2 * 9 + 1] = hdmi;
+}
+
+void hdmi_ctrl_init(struct zz_video_mode *mode) {
 	XIicPs_Config *config;
 	config = XIicPs_LookupConfig(IIC_DEVICE_ID);
-	status = XIicPs_CfgInitialize(&Iic, config, config->BaseAddress);
+	int status = XIicPs_CfgInitialize(&Iic, config, config->BaseAddress);
 	//printf("XIicPs_CfgInitialize: %d\n", status);
 	usleep(10000);
 	//printf("XIicPs is ready: %lx\n", Iic.IsReady);
 
 	status = XIicPs_SelfTest(&Iic);
-	//printf("XIicPs_SelfTest: %x\n", status);
+	printf("XIicPs_SelfTest: %x\n", status);
 
 	status = XIicPs_SetSClk(&Iic, IIC_SCLK_RATE);
 	//printf("XIicPs_SetSClk: %x\n", status);
@@ -220,6 +248,8 @@ void hdmi_ctrl_init() {
 	//printf("[%d] HDCP revision: 0x%x\n",status,buffer[1]);
 	//status = hdmi_ctrl_read_byte(0x3d,buffer);
 	//printf("[%d] hotplug: 0x%x\n", status, buffer[1]);
+
+	//hdmi_set_video_mode(mode->hmax, mode->vmax, mode->phz, mode->vhz, mode->hdmi);
 
 	for (int i = 0; i < sizeof(sii9022_init); i += 2) {
 		status = hdmi_ctrl_write_byte(sii9022_init[i], sii9022_init[i + 1]);
@@ -306,36 +336,6 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 	return XST_SUCCESS;
 }
 
-void hdmi_set_video_mode(u16 htotal, u16 vtotal, u32 pixelclock_hz, u16 vhz, u8 hdmi) {
-	/*
-	 * SII9022 registers
-	 *
-	 0x00, 0x4c,	// PixelClock/10000 - LSB
-	 0x01, 0x1d,	// PixelClock/10000 - MSB
-	 0x02, 0x70,	// Frequency in HZ - LSB
-	 0x03, 0x17,	// Vertical Frequency in HZ - MSB
-	 0x04, 0x70,	// Total Pixels per line - LSB
-	 0x05, 0x06,	// Total Pixels per line - MSB
-	 0x06, 0xEE,	// Total Lines - LSB
-	 0x07, 0x02,	// Total Lines - MSB
-	 0x08, 0x70, // pixel repeat rate?
-	 0x1a, 0x00, // 0: DVI, 1: HDMI
-	 */
-
-	// see also https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/bridge/sii902x.c#L358
-	u8* sii_mode = sii9022_init + 12;
-
-	sii_mode[2 * 0 + 1] = pixelclock_hz / 10000;
-	sii_mode[2 * 1 + 1] = (pixelclock_hz / 10000) >> 8;
-	sii_mode[2 * 2 + 1] = vhz * 100;
-	sii_mode[2 * 3 + 1] = (vhz * 100) >> 8;
-	sii_mode[2 * 4 + 1] = htotal;
-	sii_mode[2 * 5 + 1] = htotal >> 8;
-	sii_mode[2 * 6 + 1] = vtotal;
-	sii_mode[2 * 7 + 1] = vtotal >> 8;
-	sii_mode[2 * 9 + 1] = hdmi;
-}
-
 u32 dump_vdma_status(XAxiVdma *InstancePtr) {
 	u32 status = XAxiVdma_GetStatus(InstancePtr, XAXIVDMA_READ);
 
@@ -405,11 +405,6 @@ void pixelclock_init_2(struct zz_video_mode *mode) {
 	XClk_Wiz_Config conf;
 	XClk_Wiz_CfgInitialize(&clkwiz, &conf, XPAR_CLK_WIZ_0_BASEADDR);
 
-	/*u32 phase = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR, 0x20C);
-	u32 duty = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR, 0x210);
-	u32 divide = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR, 0x208);
-	u32 muldiv = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR, 0x200);*/
-
 	u32 mul = mode->mul;
 	u32 div = mode->div;
 	u32 otherdiv = mode->div2;
@@ -420,15 +415,6 @@ void pixelclock_init_2(struct zz_video_mode *mode) {
 	// load configuration
 	XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR, 0x25C, 0x00000003);
 	//XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR,  0x25C, 0x00000001);
-
-	/*phase = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR, 0x20C);
-	//printf("CLK phase: %lu\n", phase);
-	duty = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR, 0x210);
-	//printf("CLK duty: %lu\n", duty);
-	divide = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR, 0x208);
-	//printf("CLK divide: %lu\n", divide);
-	muldiv = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR, 0x200);
-	//printf("CLK muldiv: %lu\n", muldiv);*/
 }
 
 // FIXME!
@@ -492,7 +478,7 @@ void video_formatter_init(int scalemode, int colormode, int width, int height,
 
 void video_system_init(struct zz_video_mode *mode, int hdiv, int vdiv) {
 	pixelclock_init_2(mode);
-	hdmi_ctrl_init();
+	hdmi_ctrl_init(mode);
 	init_vdma(mode->hres, mode->vres, hdiv, vdiv, (u32)framebuffer + framebuffer_pan_offset);
 }
 
@@ -502,7 +488,7 @@ void video_system_init(struct zz_video_mode *mode, int hdiv, int vdiv) {
 #define MNT_FB_BASE     			0x010000
 
 #define REVISION_MAJOR 1
-#define REVISION_MINOR 8
+#define REVISION_MINOR 9
 
 int scalemode = 0;
 
@@ -643,12 +629,18 @@ void update_hw_sprite_pos(int16_t x, int16_t y) {
 static int videocap_video_mode = ZZVMODE_800x600;
 static int video_mode = ZZVMODE_800x600 | 2 << 12 | MNTVA_COLOR_32BIT << 8;
 static int default_pan_offset = 0x00e00bf8;
+static int interlace_old = 0;
+static int videocap_ntsc_old = 0;
+static int videocap_enabled_old = 1;
+
 static char usb_storage_available = 0;
 static uint32_t usb_storage_read_block = 0;
 static uint32_t usb_storage_write_block = 0;
 
 // ethernet state
 uint16_t ethernet_send_result = 0;
+static int backlog_nag_counter = 0;
+static int interrupt_enabled = 0;
 
 // usb state
 uint16_t usb_status = 0;
@@ -672,13 +664,12 @@ void reset_default_videocap_pan() {
 
 #define INTC_INTERRUPT_ID_0 61 // IRQ_F2P[0:0]
 #define INTC_INTERRUPT_ID_1 62 // IRQ_F2P[1:1]
-static XScuGic intc;
 
 static int isr_flush_count=0;
 
 // interrupt service routine for IRQ_F2P[0:0]
 // vblank + raster position interrupt
-void isr0 (void *intc_inst_ptr) {
+void isr0 (void *dummy) {
 	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 
 	int videocap_enabled = (zstate & (1 << 23));
@@ -716,23 +707,7 @@ void isr0 (void *intc_inst_ptr) {
 
 int fpga_interrupt_init() {
   int result;
-  XScuGic *intc_instance_ptr = &intc;
-  XScuGic_Config *intc_config;
-
-  // get config for interrupt controller
-  intc_config = XScuGic_LookupConfig(XPAR_PS7_SCUGIC_0_DEVICE_ID);
-  if (NULL == intc_config) {
-    return XST_FAILURE;
-  }
-
-  printf("XScuGic_CfgInitialize()\n");
-
-  // initialize the interrupt controller driver
-  result = XScuGic_CfgInitialize(intc_instance_ptr, intc_config, intc_config->CpuBaseAddress);
-
-  if (result != XST_SUCCESS) {
-    return result;
-  }
+  XScuGic *intc_instance_ptr = interrupt_get_intc();
 
   printf("XScuGic_SetPriorityTriggerType()\n");
 
@@ -742,9 +717,10 @@ int fpga_interrupt_init() {
   printf("XScuGic_Connect()\n");
 
   // connect the interrupt service routine isr0 to the interrupt controller
-  result = XScuGic_Connect(intc_instance_ptr, INTC_INTERRUPT_ID_0, (Xil_ExceptionHandler)isr0, (void *)&intc);
+  result = XScuGic_Connect(intc_instance_ptr, INTC_INTERRUPT_ID_0, (Xil_ExceptionHandler)isr0, NULL);
 
   if (result != XST_SUCCESS) {
+	printf("XScuGic_Connect() failed!\n");
     return result;
   }
 
@@ -776,6 +752,7 @@ void handle_amiga_reset() {
 	video_mode = videocap_video_mode | 2 << 12 | MNTVA_COLOR_32BIT << 8;
 
 	sprite_reset();
+	interrupt_configure();
 	ethernet_init();
 	fpga_interrupt_init();
 
@@ -785,8 +762,14 @@ void handle_amiga_reset() {
 	usb_selected_buffer_block = 0;
 	usb_read_write_num_blocks = 1;
 	ethernet_send_result = 0;
+	backlog_nag_counter = 0;
+	interrupt_enabled = 0;
 
 	cur_mem_offset = 0x3500000;
+
+	// reset videocap interlace/ntsc state
+	interlace_old = -1;
+	videocap_ntsc_old = -1;
 
 	// FIXME there should be more state to be reset
 }
@@ -1012,8 +995,6 @@ int main() {
 
 	// zorro state
 	u32 zstate_raw;
-	int interlace_old = 0;
-	int videocap_ntsc_old = 0;
 
 	handle_amiga_reset();
 
@@ -1033,12 +1014,8 @@ int main() {
 	asm("sev");
 	printf("core1 now idling.\n");
 
-	int videocap_enabled_old = 1;
 	int colormode = 0;
 	video_mode = 0x2200;
-
-	int backlog_nag_counter = 0;
-	int interrupt_enabled = 0;
 
 	int custom_video_mode = ZZVMODE_CUSTOM;
 	int custom_vmode_param = VMODE_PARAM_HRES;
@@ -1150,13 +1127,13 @@ int main() {
 					interrupt_enabled = zdata & 1;
 					break;
 				case REG_ZZ_MODE: {
-					//printf("mode change: %lx\n", zdata);
+					// reset interlace tracking
+					interlace_old = -1;
 
 					int mode = zdata & 0xff;
 					colormode = (zdata & 0xf00) >> 8;
 					scalemode = (zdata & 0xf000) >> 12;
-					/*printf("mode: %d color: %d scale: %d\n", mode,
-							colormode, scalemode);*/
+					printf("mode change: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
 					video_mode_init(mode, scalemode, colormode);
 					// remember selected video mode

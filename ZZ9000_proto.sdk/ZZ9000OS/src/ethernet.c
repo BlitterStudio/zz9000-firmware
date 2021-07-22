@@ -26,9 +26,9 @@
 #include <xemacps.h>
 #include <xscugic.h>
 #include "ethernet.h"
+#include "interrupt.h"
 
 static XEmacPs EmacPsInstance;
-static XScuGic IntcInstance;
 
 // could also be 55, 77 (eth1), see interrupts.pdf last page
 // XPS_GEM0_INT_ID == 54
@@ -78,7 +78,7 @@ static void XEmacPsSendHandler(void *Callback);
 static void XEmacPsRecvHandler(void *Callback);
 static void XEmacPsErrorHandler(void *Callback, u8 direction, u32 word);
 LONG setup_phy(XEmacPs * EmacPsInstancePtr);
-static LONG EmacPsSetupIntrSystem(XScuGic *IntcInstancePtr, XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId);
+static LONG EmacPsSetupIntrSystem(XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId);
 
 static u32 micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr);
 
@@ -197,7 +197,6 @@ int ethernet_init() {
 	XEmacPs_Config *Config;
 	long Status;
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
-	XScuGic* IntcInstancePtr = &IntcInstance;
 
 	frames_backlog = 0;
 	frames_received_from_backlog = 0;
@@ -259,7 +258,7 @@ int ethernet_init() {
 	setup_phy(EmacPsInstancePtr);
 
 	// FIXME
-	EmacPsSetupIntrSystem(IntcInstancePtr, EmacPsInstancePtr, EMACPS_IRPT_INTR);
+	EmacPsSetupIntrSystem(EmacPsInstancePtr, EMACPS_IRPT_INTR);
 
 	// init_ethernet_buffers() also starts EmacPS
 	Status = init_ethernet_buffers();
@@ -754,7 +753,6 @@ static u32 micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr)
 *
 * This function setups the interrupt system so interrupts can occur for the
 * EMACPS.
-* @param	IntcInstancePtr is a pointer to the instance of the Intc driver.
 * @param	EmacPsInstancePtr is a pointer to the instance of the EmacPs
 *		driver.
 * @param	EmacPsIntrId is the Interrupt ID and is typically
@@ -765,27 +763,11 @@ static u32 micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr)
 * @note		None.
 *
 *****************************************************************************/
-static LONG EmacPsSetupIntrSystem(XScuGic *IntcInstancePtr, XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId)
+static LONG EmacPsSetupIntrSystem(XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId)
 {
 	LONG Status;
-	XScuGic_Config *GicConfig;
+	XScuGic *IntcInstancePtr = interrupt_get_intc();
 	Xil_ExceptionInit();
-
-	/*
-	 * Initialize the interrupt controller driver so that it is ready to
-	 * use.
-	 */
-	GicConfig = XScuGic_LookupConfig(XPAR_SCUGIC_SINGLE_DEVICE_ID);
-	if (NULL == GicConfig) {
-		printf("GIC: XScuGic_LookupConfig failed\n");
-		return XST_FAILURE;
-	}
-
-	Status = XScuGic_CfgInitialize(IntcInstancePtr, GicConfig, GicConfig->CpuBaseAddress);
-	if (Status != XST_SUCCESS) {
-		printf("GIC: XScuGic_CfgInitialize failed\n");
-		return XST_FAILURE;
-	}
 
 	/*
 	 * Connect the interrupt controller interrupt handler to the hardware
