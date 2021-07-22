@@ -252,7 +252,7 @@ begin
         sync_polarity <= control_data_in[0];
       end
     OP_RESET: begin
-        sync_polarity <= 1;
+        /*sync_polarity <= 1;
         screen_h_max <= 864;
         screen_v_max <= 625;
         screen_h_sync_start <= 732;
@@ -263,7 +263,7 @@ begin
         scale_y <= 1;
         screen_width <= 720;
         screen_height <= 576;
-        colormode <= CMODE_32BIT;
+        colormode <= CMODE_32BIT;*/
       end
     OP_SPRITEXY: begin
         sprite_y <= control_data_in[31:16];
