@@ -217,17 +217,21 @@ void handle_blitter_dma_op(uint16_t zdata)
             SWAP32(data->offset[1]);
 
             uint8_t* bmp_data;
-            
+
             if (zdata == OP_SPRITE_BITMAP)
                 bmp_data = (uint8_t*) ((u32) framebuffer + data->offset[1]);
             else
                 bmp_data = (uint8_t*) ((u32) ADDR_ADJ + data->offset[1]);
 
             clear_hw_sprite();
-            
+
             sprite_x_offset = (int16_t)data->x[0];
             sprite_y_offset = (int16_t)data->y[0];
             sprite_width  = data->x[1];
+            if (zdata == OP_SPRITE_CLUT_BITMAP) {
+                sprite_x_offset = -(sprite_x_offset);
+                sprite_y_offset = -(sprite_y_offset);
+            }
             sprite_height = data->y[1];
 
             if (zdata == OP_SPRITE_BITMAP) {
