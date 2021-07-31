@@ -125,12 +125,6 @@ void handle_blitter_dma_op(uint16_t zdata)
 
                 loop_rows = data->user[0];
 
-                if (data->u8_user[7]) {
-                    printf("RectPattern:\n");
-                    printf("%d, %d - %d, %d\n", data->x[0], data->y[0], data->x[0]+data->x[1], data->y[0]+data->y[1]);
-                    printf("M:%.2X R: %d D: %d\n", data->mask, data->user[0], data->u8_user[GFXDATA_U8_DRAWMODE]);
-                }
-
                 pattern_fill_rect(data->u8_user[GFXDATA_U8_COLORMODE],
                         data->x[0], data->y[0], data->x[1], data->y[1],
                         data->u8_user[GFXDATA_U8_DRAWMODE], data->mask,
@@ -138,12 +132,6 @@ void handle_blitter_dma_op(uint16_t zdata)
                         tmpl_data, 16, loop_rows);
             }
             else {
-                if (data->u8_user[7]) {
-                    printf("RectTemplate:\n");
-                    printf("%d, %d - %d, %d\n", data->x[0], data->y[0], data->x[0]+data->x[1], data->y[0]+data->y[1]);
-                    printf("M:%.2X R: %d D: %d\n", data->mask, data->user[0], data->u8_user[GFXDATA_U8_DRAWMODE]);
-                }
-
                 template_fill_rect(data->u8_user[GFXDATA_U8_COLORMODE], data->x[0],
                         data->y[0], data->x[1], data->y[1], data->u8_user[GFXDATA_U8_DRAWMODE], data->mask,
                         data->rgb[0], data->rgb[1], data->x[2], data->y[2], tmpl_data,
