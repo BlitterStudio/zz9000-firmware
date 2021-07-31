@@ -694,10 +694,12 @@ void isr0 (void *dummy) {
 			// the first line after a switch contains an extraneous word, so we end up
 			// with up to 4 pixels of the other buffer in the first line
 			if (split_pos != 0) {
+				video_formatter_write(1, MNTVF_OP_PALETTE_SEL);
 				init_vdma(vmode_hsize, vmode_vsize, vmode_hdiv, vmode_vdiv, (u32)framebuffer + bgbuf_offset);
 			}
 		} else {
 			// if this is the vblank interrupt, set up the "normal" buffer
+			video_formatter_write(0, MNTVF_OP_PALETTE_SEL);
 			init_vdma(vmode_hsize, vmode_vsize, vmode_hdiv, vmode_vdiv, (u32)framebuffer + framebuffer_pan_offset);
 
 			split_pos = next_split_pos;

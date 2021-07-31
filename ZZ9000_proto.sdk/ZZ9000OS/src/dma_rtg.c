@@ -267,7 +267,7 @@ void handle_blitter_dma_op(uint16_t zdata)
             }
             rtg_pan_offset = framebuffer_pan_offset;
             break;
-        
+
         case OP_SET_SPLIT_POS:
             SWAP16(data->y[0]);
             SWAP32(data->offset[0]);
