@@ -263,12 +263,17 @@ u32 bgbuf_offset = 0;
 
 uint16_t split_pos = 0, next_split_pos = 0;
 u32 framebuffer_pan_offset = 0;
+u32 rtg_pan_offset = 0;
+u32 framebuffer_pan_width = 0;
+u32 framebuffer_color_format = 0;
+u32 blitter_colormode = MNTVA_COLOR_32BIT;
 static u32 blitter_dst_offset = 0;
 static u32 blitter_src_offset = 0;
 static u32 vmode_hsize = 800, vmode_vsize = 600, vmode_hdiv = 1, vmode_vdiv = 2;
 
 extern u32 fb_pitch;
 extern u32 *fb;
+uint8_t stride_div = 1;
 
 //extern uint32_t* fb=0;
 //extern uint32_t fb_pitch=0;
@@ -297,13 +302,16 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 	}
 
 	u32 stride = hsize * (Config->Mm2SStreamWidth >> 3);
+	if (framebuffer_pan_width != 0 && framebuffer_pan_width != (hsize / hdiv)) {
+		stride = (framebuffer_pan_width * (Config->Mm2SStreamWidth >> 3)) * stride_div;
+	}
 
 	XAxiVdma_DmaSetup ReadCfg;
 
 	//printf("VDMA HDIV: %d VDIV: %d\n", hdiv, vdiv);
 
 	ReadCfg.VertSizeInput = vsize / vdiv;
-	ReadCfg.HoriSizeInput = stride / hdiv; // note: changing this breaks the output
+	ReadCfg.HoriSizeInput = (hsize * (Config->Mm2SStreamWidth >> 3)) / hdiv; // note: changing this breaks the output
 	ReadCfg.Stride = stride / hdiv; // note: changing this is not a problem
 	ReadCfg.FrameDelay = 0; /* This example does not test frame delay */
 	ReadCfg.EnableCircularBuf = 1; /* Only 1 buffer, continuous loop */
@@ -494,9 +502,12 @@ int scalemode = 0;
 
 void video_mode_init(int mode, int scalemode, int colormode) {
 	int hdiv = 1, vdiv = 1;
+	stride_div = 1;
 
-	if (scalemode & 1)
+	if (scalemode & 1) {
 		hdiv = 2;
+		stride_div = 2;
+	}
 	if (scalemode & 2)
 		vdiv = 2;
 
@@ -583,14 +594,14 @@ void sprite_reset() {
 }
 
 void update_hw_sprite_pos(int16_t x, int16_t y) {
-	sprite_x = x + sprite_x_offset + 1;
+	sprite_x = x - sprite_x_offset + 1;
 	// horizontally doubled mode
 	if (scalemode & 1)
 		sprite_x_adj = (sprite_x * 2) + 1;
 	else
 		sprite_x_adj = sprite_x + 2;
 
-	sprite_y = y + split_pos + sprite_y_offset + 1;
+	sprite_y = y + split_pos - sprite_y_offset + 1;
 
 	// vertically doubled mode
 	if (scalemode & 2)
@@ -735,7 +746,9 @@ int fpga_interrupt_init() {
 void handle_amiga_reset() {
 	reset_default_videocap_pan();
 
+	framebuffer_pan_width = 0;
 	framebuffer_pan_offset = default_pan_offset;
+	rtg_pan_offset = 0;
 	videocap_area_clear();
 
 	printf("    _______________   ___   ___   ___  \n");
@@ -1104,6 +1117,13 @@ int main() {
 					sprite_x_offset = rect_x1;
 					sprite_y_offset = rect_y1;
 
+					framebuffer_pan_width = rect_x2;
+					framebuffer_color_format = blitter_colormode;
+					framebuffer_pan_offset += (rect_x1 << blitter_colormode);
+					if (split_pos == 0) {
+						framebuffer_pan_offset += (rect_y1 * (framebuffer_pan_width << framebuffer_color_format));
+					}
+					rtg_pan_offset = framebuffer_pan_offset;
 					break;
 
 				case REG_ZZ_BLIT_SRC_HI:
@@ -1759,10 +1779,12 @@ int main() {
 
 					if (videocap_ntsc) {
 						framebuffer_pan_offset = 0x00e00000;
+						framebuffer_pan_width = 0;
 						video_mode_init(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT);
 					} else {
 						// PAL
 						reset_default_videocap_pan();
+						framebuffer_pan_width = 0;
 						framebuffer_pan_offset = default_pan_offset;
 						video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
 					}
@@ -1789,6 +1811,8 @@ int main() {
 			}
 
 			if (videocap_enabled_old != videocap_enabled) {
+				if (!videocap_enabled && rtg_pan_offset != 0)
+					framebuffer_pan_offset = rtg_pan_offset;
 				if (framebuffer_pan_offset >= 0xe00000) {
 					videocap_area_clear();
 				}

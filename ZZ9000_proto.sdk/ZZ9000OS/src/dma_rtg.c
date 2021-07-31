@@ -5,9 +5,13 @@
 
 extern u32* framebuffer;
 extern u32 bgbuf_offset;
+extern u32 framebuffer_color_format;
 extern u32 framebuffer_pan_offset;
+extern u32 rtg_pan_offset;
+extern u32 framebuffer_pan_width;
 extern u32 framebuffer_pan_offset_old;
 extern u32 request_video_align;
+extern u32 blitter_colormode;
 
 extern uint32_t sprite_colors[4];
 
@@ -246,10 +250,18 @@ void handle_blitter_dma_op(uint16_t zdata)
         case OP_PAN:
             SWAP32(data->offset[0]);
             SWAP16(data->x[0]);     SWAP16(data->y[0]);
+            SWAP16(data->x[1]);
+
             sprite_x_offset = (int16_t)data->x[0];
             sprite_y_offset = (int16_t)data->y[0];
 
-            framebuffer_pan_offset = data->offset[0];
+            framebuffer_pan_width = data->x[1];
+            framebuffer_color_format = data->u8_user[GFXDATA_U8_COLORMODE];
+            framebuffer_pan_offset = data->offset[0] + (data->x[0] << data->u8_user[GFXDATA_U8_COLORMODE]);
+            if (split_pos == 0) {
+                framebuffer_pan_offset += (data->y[0] * (framebuffer_pan_width << framebuffer_color_format));
+            }
+            rtg_pan_offset = framebuffer_pan_offset;
             break;
         
         case OP_SET_SPLIT_POS:
