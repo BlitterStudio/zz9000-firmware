@@ -19,8 +19,8 @@
  */
 
 // ZORRO2/3 switch
-//`define ZORRO2
-`define ZORRO3
+`define ZORRO2
+//`define ZORRO3
 
 // use together with ZORRO2:
 //`define VARIANT_ZZ9500        // uses Denise adapter/A500 specific video capture
@@ -1468,9 +1468,9 @@ module MNTZorro_v0_1_S00_AXI
           case (z3addr[15:0])
             'h0000: begin
               if (!z3_curpic) begin
-                data_z3_hi16 <= 'b1000_1111_1111_1111; // zorro 3 (10), no pool link (0), autoboot ROM (0)
+                data_z3_hi16 <= 'b1001_1111_1111_1111; // zorro 3 (10), no pool link (0), autoboot ROM yes (1)
               end else begin
-                data_z3_hi16 <= 'b1010_1111_1111_1111; // zorro 3 (10), pool link (2), autoboot ROM (0)
+                data_z3_hi16 <= 'b1010_1111_1111_1111; // zorro 3 (10), pool link (2), autoboot ROM no (0)
               end
             end
             'h0100: begin
@@ -1520,10 +1520,10 @@ module MNTZorro_v0_1_S00_AXI
             'h0024: data_z3_hi16 <= 'b1111_1111_1111_1111; //
             'h0124: data_z3_hi16 <= 'b1110_1111_1111_1111; //
             
-            /*'h0028: data_z3_hi16 <= 'b1111_1111_1111_1111; // autoboot rom vector (er_InitDiagVec)
-             'h0128: data_z3_hi16 <= 'b1111_1111_1111_1111; // ff7f = ~0080
-             'h002c: data_z3_hi16 <= 'b0111_1111_1111_1111;
-             'h012c: data_z3_hi16 <= 'b1111_1111_1111_1111;*/
+            'h0028: data_z3_hi16 <= 'b1111_1111_1111_1111; // autoboot rom vector (er_InitDiagVec)
+            'h0128: data_z3_hi16 <= 'b1111_1111_1111_1111; // ff7f = ~0080
+            'h002c: data_z3_hi16 <= 'b0111_1111_1111_1111;
+            'h012c: data_z3_hi16 <= 'b1111_1111_1111_1111;
             
             default: data_z3_hi16 <= 'b1111_1111_1111_1110; // FIXME
           endcase
