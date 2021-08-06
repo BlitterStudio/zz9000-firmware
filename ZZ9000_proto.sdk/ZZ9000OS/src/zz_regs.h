@@ -61,16 +61,16 @@ enum zz_reg_offsets {
   REG_ZZ_VBLANK_STATUS  = 0x4C,
   REG_ZZ_UNUSED_REG4E   = 0x4E,
 
-  REG_ZZ_UNUSED_REG50   = 0x50,
-  REG_ZZ_UNUSED_REG52   = 0x52,
-  REG_ZZ_UNUSED_REG54   = 0x54,
-  REG_ZZ_UNUSED_REG56   = 0x56,
-  REG_ZZ_UNUSED_REG58   = 0x58,
+  REG_ZZ_UNUSED_REG50   = 0x50, // These are actually not quite unused, but should
+  REG_ZZ_UNUSED_REG52   = 0x52, // be phased out at some point, since they're pretty
+  REG_ZZ_UNUSED_REG54   = 0x54, // much undocumented.
+  REG_ZZ_UNUSED_REG56   = 0x56, // I should also stop being lazy and rework DoomAttackZZ/060
+  REG_ZZ_UNUSED_REG58   = 0x58, // to use the DMA ACC flip buffer to front command instead. [_Bnu]
   REG_ZZ_BITTER_DMA_OP  = 0x5A,
   REG_ZZ_ACC_OP         = 0x5C,
   REG_ZZ_SET_SPLIT_POS  = 0x5E,
 
-  REG_ZZ_UNUSED_REG60   = 0x60,
+  REG_ZZ_SET_FEATURE    = 0x60,
   REG_ZZ_UNUSED_REG62   = 0x62,
   REG_ZZ_UNUSED_REG64   = 0x64,
   REG_ZZ_UNUSED_REG66   = 0x66,
@@ -159,4 +159,11 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REGFA   = 0xFA,
   REG_ZZ_DEBUG          = 0xFC,
   REG_ZZ_UNUSED_REGFE   = 0xFE,
+};
+
+enum zz9k_card_features {
+  CARD_FEATURE_NONE,
+  CARD_FEATURE_SECONDARY_PALETTE,
+  CARD_FEATURE_NONSTANDARD_VSYNC,
+  CARD_FEATURE_NUM,
 };

@@ -262,6 +262,9 @@ u32* framebuffer = 0;
 u32 bgbuf_offset = 0;
 
 uint16_t split_pos = 0, next_split_pos = 0;
+uint8_t card_feature_enabled[CARD_FEATURE_NUM];
+uint8_t scandoubler_mode_adjust = 0;
+
 u32 framebuffer_pan_offset = 0;
 u32 rtg_pan_offset = 0;
 u32 framebuffer_pan_width = 0;
@@ -694,12 +697,16 @@ void isr0 (void *dummy) {
 			// the first line after a switch contains an extraneous word, so we end up
 			// with up to 4 pixels of the other buffer in the first line
 			if (split_pos != 0) {
-				video_formatter_write(1, MNTVF_OP_PALETTE_SEL);
+				if (card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE]) {
+					video_formatter_write(1, MNTVF_OP_PALETTE_SEL);
+				}
 				init_vdma(vmode_hsize, vmode_vsize, vmode_hdiv, vmode_vdiv, (u32)framebuffer + bgbuf_offset);
 			}
 		} else {
 			// if this is the vblank interrupt, set up the "normal" buffer
-			video_formatter_write(0, MNTVF_OP_PALETTE_SEL);
+			if (card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE]) {
+				video_formatter_write(0, MNTVF_OP_PALETTE_SEL);
+			}
 			init_vdma(vmode_hsize, vmode_vsize, vmode_hdiv, vmode_vdiv, (u32)framebuffer + framebuffer_pan_offset);
 
 			split_pos = next_split_pos;
@@ -745,12 +752,23 @@ int fpga_interrupt_init() {
   return 0;
 }
 
-void handle_amiga_reset() {
-	reset_default_videocap_pan();
+void init_ns_video_mode(uint32_t mode_num) {
+	if (mode_num == ZZVMODE_720x576) {
+		video_mode_init(ZZVMODE_720x576_NS_PAL + scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT);
+	} else {
+		video_mode_init(ZZVMODE_720x480_NS_PAL + scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT);
+	}
+}
 
+void handle_amiga_reset() {
 	framebuffer_pan_width = 0;
 	framebuffer_pan_offset = default_pan_offset;
 	rtg_pan_offset = 0;
+
+	// Used for testing the nonstandard VSync modes without the driver having to enable them.
+	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
+
+	reset_default_videocap_pan();
 	videocap_area_clear();
 
 	printf("    _______________   ___   ___   ___  \n");
@@ -763,7 +781,11 @@ void handle_amiga_reset() {
 	usleep(10000);
 
 	// scalemode 2 (vertical doubling)
-	video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
+	if ((videocap_video_mode == ZZVMODE_720x576 || videocap_video_mode == ZZVMODE_720x480) && card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] != 0) {
+		init_ns_video_mode(videocap_video_mode);
+	} else {
+		video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
+	}
 	video_mode = videocap_video_mode | 2 << 12 | MNTVA_COLOR_32BIT << 8;
 
 	sprite_reset();
@@ -1157,9 +1179,15 @@ int main() {
 					scalemode = (zdata & 0xf000) >> 12;
 					printf("mode change: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
-					video_mode_init(mode, scalemode, colormode);
-					// remember selected video mode
+					if (mode == videocap_video_mode && (videocap_video_mode == ZZVMODE_720x576 || videocap_video_mode == ZZVMODE_720x480)
+						&& card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] != 0) {
+						init_ns_video_mode(mode);
+					}
+					else {
+						video_mode_init(mode, scalemode, colormode);
+					}
 					video_mode = zdata;
+					// remember selected video mode
 					//request_video_align = 1;
 					break;
 				}
@@ -1402,6 +1430,26 @@ int main() {
 				case 0x58: // Set custom video mode without any questions asked.
 					// This assumes that the custom video mode is 640x480 or higher resolution.
 					video_mode_init(custom_video_mode, scalemode, colormode);
+					break;
+
+				case REG_ZZ_SET_FEATURE:
+					switch (blitter_user1) {
+						case CARD_FEATURE_SECONDARY_PALETTE:
+							// Enables/disables the secondary palette on screen split with P96 3.10+
+							card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE] = zdata;
+							break;
+						case CARD_FEATURE_NONSTANDARD_VSYNC:
+							// Enables/disables the nonstandard refresh rates for scandoubled PAL/NTSC HDMI output modes.
+							if (zdata == 2) {
+								scandoubler_mode_adjust = 2;
+							} else {
+								scandoubler_mode_adjust = 0;
+							}
+							card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = zdata;
+							break;
+						default:
+							break;
+					}
 					break;
 
 				case REG_ZZ_P2C: {
@@ -1782,13 +1830,21 @@ int main() {
 					if (videocap_ntsc) {
 						framebuffer_pan_offset = 0x00e00000;
 						framebuffer_pan_width = 0;
-						video_mode_init(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT);
+						if (card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] != 0) {
+							init_ns_video_mode(ZZVMODE_720x480);
+						} else {
+							video_mode_init(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT);
+						}
 					} else {
 						// PAL
 						reset_default_videocap_pan();
 						framebuffer_pan_width = 0;
 						framebuffer_pan_offset = default_pan_offset;
-						video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
+						if (videocap_video_mode == ZZVMODE_720x576 && card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] != 0) {
+							init_ns_video_mode(ZZVMODE_720x576);
+						} else {
+							video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
+						}
 					}
 				}
 				videocap_ntsc_old = videocap_ntsc;
