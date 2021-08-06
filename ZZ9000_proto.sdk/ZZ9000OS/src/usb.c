@@ -56,13 +56,13 @@ int zz_usb_init() {
 
 unsigned long zz_usb_read_blocks(int dev_index, unsigned long blknr, unsigned long blkcnt, void *buffer) {
 	int res = usb_stor_read_direct(dev_index, blknr, blkcnt, buffer);
-	//printf("[USB] read %lu blocks at %lu: %d\n",blkcnt,blknr,res);
+	//printf("[USB] RD %lu# at %lu: [%08lx %08lx]\n",blkcnt,blknr,((uint32_t*)buffer)[0],((uint32_t*)buffer)[1]);
 	return res;
 }
 
 unsigned long zz_usb_write_blocks(int dev_index, unsigned long blknr, unsigned long blkcnt, void *buffer) {
 	int res = usb_stor_write_direct(dev_index, blknr, blkcnt, buffer);
-	//printf("[USB] write %lu blocks at %lu: %d\n",blkcnt,blknr,res);
+	//printf("[USB] WR %lu# at %lu: [%08lx %08lx]\n",blkcnt,blknr,((uint32_t*)buffer)[0],((uint32_t*)buffer)[1]);
 	return res;
 }
 
