@@ -31,6 +31,8 @@
 #define MNTVF_OP_DIMENSIONS 2
 #define MNTVF_OP_COLORMODE 1
 #define MNTVF_OP_REPORT_LINE 17
+#define MNTVF_OP_PALETTE_SEL 18
+#define MNTVF_OP_PALETTE_HI 19
 
 typedef struct Vec2 {
 	float x;
