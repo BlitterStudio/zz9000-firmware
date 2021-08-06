@@ -38,11 +38,10 @@
 #include "ethernet.h"
 #include "usb.h"
 #include "interrupt.h"
+#include "bootrom.h"
 
 #include "zz_regs.h"
 #include "zz_video_modes.h"
-
-typedef u8 uint8_t;
 
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
@@ -227,7 +226,7 @@ void hdmi_ctrl_init(struct zz_video_mode *mode) {
 	//printf("XIicPs is ready: %lx\n", Iic.IsReady);
 
 	status = XIicPs_SelfTest(&Iic);
-	printf("XIicPs_SelfTest: %x\n", status);
+	//printf("XIicPs_SelfTest: %x\n", status);
 
 	status = XIicPs_SetSClk(&Iic, IIC_SCLK_RATE);
 	//printf("XIicPs_SetSClk: %x\n", status);
@@ -966,6 +965,8 @@ int main() {
 
 	memset((u32 *)Z3_SCRATCH_ADDR, 0, sizeof(struct GFXData));
 
+	boot_rom_init();
+
 	disable_reset_out();
 
 	xadc_init();
@@ -1065,15 +1066,11 @@ int main() {
 				if (zaddr >= MNT_FB_BASE) {
 					ptr = mem + zaddr - MNT_FB_BASE;
 				} else if (zaddr < MNT_REG_BASE + 0x8000) {
-					// FIXME remove
-					ptr = (u8*) (RX_FRAME_ADDRESS + zaddr - (MNT_REG_BASE + 0x2000));
-					//printf("ERXF write: %08lx\n", (u32) ptr);
+					// NOP (RX frame is here)
 				} else if (zaddr < MNT_REG_BASE + 0xa000) {
-					ptr = (u8*) (TX_FRAME_ADDRESS + zaddr - (MNT_REG_BASE + 0x8000));
+					// NOP
 				} else if (zaddr < MNT_REG_BASE + 0x10000) {
-					// 0xa000-0xafff: write to block device (usb storage)
-					// TODO: this should be moved to DMA space?
-					ptr = (u8*) (USB_BLOCK_STORAGE_ADDRESS + zaddr - (MNT_REG_BASE + 0xa000) + usb_selected_buffer_block * 512);
+					// NOP
 				}
 
 				// FIXME cache this
@@ -1540,14 +1537,21 @@ int main() {
 					break;
 				}
 				case REG_ZZ_USB_BUFSEL: {
-					//printf("[USB] select buffer: %d\n", zdata);
-					usb_selected_buffer_block = zdata;
-					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, usb_selected_buffer_block);
+					// FIXME: obsolete!
 					break;
 				}
 				case REG_ZZ_DEBUG: {
 					debug_lowlevel = zdata;
 
+					break;
+				}
+				case REG_ZZ_PRINT_CHR: {
+					printf("%c",(int)(zdata&0xff));
+					break;
+				}
+				case REG_ZZ_PRINT_HEX: {
+					// print zdata has hex (follow up by \n via chr!)
+					printf("%04x", (unsigned int)(zdata&0xffff));
 					break;
 				}
 
@@ -1657,20 +1661,18 @@ int main() {
 				if (zaddr >= MNT_FB_BASE) {
 					// read from framebuffer / generic memory
 					ptr = mem + zaddr - MNT_FB_BASE;
-				} else if (zaddr < MNT_REG_BASE + 0x8000) {
-					// 0x2000-0x7fff: FIXME: waste of address space
-					// read from ethernet RX frame
+				} else if (zaddr < MNT_REG_BASE + 0x2000) {
+					// 0x0000-0x1fff: read from ethernet RX frame
 					// disable INT6 interrupt
 					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
 					ptr = (u8*) (ethernet_current_receive_ptr() + zaddr - (MNT_REG_BASE + 0x2000));
 				} else if (zaddr < MNT_REG_BASE + 0xa000) {
+					// FIXME: remove
 					// 0x8000-0x9fff: read from TX frame (unusual)
 					ptr = (u8*) (TX_FRAME_ADDRESS + zaddr - (MNT_REG_BASE + 0x8000));
-					//printf("ETXF read: %08lx\n", (u32) ptr);
 				} else if (zaddr < MNT_REG_BASE + 0x10000) {
 					// 0xa000-0xafff: read from block device (usb storage)
-					// TODO: this should be moved to DMA space?
-					ptr = (u8*) (USB_BLOCK_STORAGE_ADDRESS + zaddr - (MNT_REG_BASE + 0xa000) + usb_selected_buffer_block * 512);
+					// FIXME: obsolete
 				}
 
 				if (z3) {

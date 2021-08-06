@@ -249,6 +249,7 @@ int ethernet_init() {
 	 * address range that starts at address 0x0FF00000 is made uncached.
 	 */
 	Xil_SetTlbAttributes(RX_BD_LIST_START_ADDRESS, STRONG_ORDERED);
+	Xil_SetTlbAttributes(RX_BACKLOG_ADDRESS, STRONG_ORDERED);
 	//Xil_SetTlbAttributes(RX_FRAME_ADDRESS, 0xc02);
 	//Xil_SetTlbAttributes(TX_FRAME_ADDRESS, 0xc02);
 
