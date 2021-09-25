@@ -5,7 +5,7 @@
 * Version: 2018.3
 * DO NOT EDIT.
 *
-* Copyright (C) 2010-2019 Xilinx, Inc. All Rights Reserved.*
+* Copyright (C) 2010-2021 Xilinx, Inc. All Rights Reserved.*
 *Permission is hereby granted, free of charge, to any person obtaining a copy
 *of this software and associated documentation files (the Software), to deal
 *in the Software without restriction, including without limitation the rights
@@ -46,6 +46,11 @@ XIicPs_Config XIicPs_ConfigTable[XPAR_XIICPS_NUM_INSTANCES] =
 		XPAR_PS7_I2C_0_DEVICE_ID,
 		XPAR_PS7_I2C_0_BASEADDR,
 		XPAR_PS7_I2C_0_I2C_CLK_FREQ_HZ
+	},
+	{
+		XPAR_PS7_I2C_1_DEVICE_ID,
+		XPAR_PS7_I2C_1_BASEADDR,
+		XPAR_PS7_I2C_1_I2C_CLK_FREQ_HZ
 	}
 };
 

@@ -26,9 +26,9 @@
 #include <xemacps.h>
 #include <xscugic.h>
 #include "ethernet.h"
+#include "interrupt.h"
 
 static XEmacPs EmacPsInstance;
-static XScuGic IntcInstance;
 
 // could also be 55, 77 (eth1), see interrupts.pdf last page
 // XPS_GEM0_INT_ID == 54
@@ -57,6 +57,8 @@ static volatile u32 frames_received = 0;
 static volatile u16 frames_backlog = 0;
 int frames_received_from_backlog = 0;
 
+u32 PhyAddr;
+
 typedef char EthernetFrame[XEMACPS_MAX_VLAN_FRAME_SIZE_JUMBO] __attribute__ ((aligned(64)));
 
 volatile char* TxFrame = (char*)TX_FRAME_ADDRESS;		/* Transmit buffer */
@@ -78,9 +80,10 @@ static void XEmacPsSendHandler(void *Callback);
 static void XEmacPsRecvHandler(void *Callback);
 static void XEmacPsErrorHandler(void *Callback, u8 direction, u32 word);
 LONG setup_phy(XEmacPs * EmacPsInstancePtr);
-static LONG EmacPsSetupIntrSystem(XScuGic *IntcInstancePtr, XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId);
+static LONG EmacPsSetupIntrSystem(XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId);
 
-static u32 micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr);
+void micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr);
+u32 micrel_auto_negotiate_step2(XEmacPs *xemacpsp, u32 phy_addr);
 
 void XEmacPsClkSetup(XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId, int link_speed)
 {
@@ -114,7 +117,6 @@ void XEmacPsClkSetup(XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId, int link_spee
 		}
 		// SLCR lock
 		*(unsigned int *)(SLCR_LOCK_ADDR) = SLCR_LOCK_KEY_VALUE;
-		sleep(1);
 	}
 }
 
@@ -183,10 +185,6 @@ int init_ethernet_buffers() {
 		return XST_FAILURE;
 	}
 
-	//XEmacPs_Reset(EmacPsInstancePtr);
-	//sleep(1);
-	//printf("EMAC: XEmacPs_Reset done.\n");
-
 	XEmacPs_Start(EmacPsInstancePtr);
 	printf("EMAC: XEmacPs_Start done.\n");
 
@@ -197,7 +195,6 @@ int ethernet_init() {
 	XEmacPs_Config *Config;
 	long Status;
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
-	XScuGic* IntcInstancePtr = &IntcInstance;
 
 	frames_backlog = 0;
 	frames_received_from_backlog = 0;
@@ -250,26 +247,55 @@ int ethernet_init() {
 	 * address range that starts at address 0x0FF00000 is made uncached.
 	 */
 	Xil_SetTlbAttributes(RX_BD_LIST_START_ADDRESS, STRONG_ORDERED);
+	Xil_SetTlbAttributes(RX_BACKLOG_ADDRESS, STRONG_ORDERED);
 	//Xil_SetTlbAttributes(RX_FRAME_ADDRESS, 0xc02);
 	//Xil_SetTlbAttributes(TX_FRAME_ADDRESS, 0xc02);
 
 	XEmacPs_SetMdioDivisor(EmacPsInstancePtr, MDC_DIV_224);
-	sleep(1);
 
 	setup_phy(EmacPsInstancePtr);
 
-	// FIXME
-	EmacPsSetupIntrSystem(IntcInstancePtr, EmacPsInstancePtr, EMACPS_IRPT_INTR);
-
-	// init_ethernet_buffers() also starts EmacPS
-	Status = init_ethernet_buffers();
-	if (Status != XST_SUCCESS) {
-		printf("EMAC: init_ethernet_buffers() error\n");
-		return XST_FAILURE;
-	}
-
 	return XST_SUCCESS;
 }
+
+enum {
+	ETH_TASK_SETUP,
+	ETH_TASK_NEGOTIATE,
+	ETH_TASK_INIT,
+	ETH_TASK_READY
+};
+
+int ethernet_task_state = ETH_TASK_SETUP;
+
+void ethernet_task() {
+	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
+
+	if (ethernet_task_state == ETH_TASK_SETUP) {
+		// FIXME
+		EmacPsSetupIntrSystem(EmacPsInstancePtr, EMACPS_IRPT_INTR);
+
+		ethernet_task_state = ETH_TASK_NEGOTIATE;
+	} else if (ethernet_task_state == ETH_TASK_NEGOTIATE) {
+		int complete = micrel_auto_negotiate_step2(EmacPsInstancePtr, PhyAddr);
+
+		if (complete) {
+			ethernet_task_state = ETH_TASK_INIT;
+		}
+	} else if (ethernet_task_state == ETH_TASK_INIT) {
+		//EmacPsSetupIntrSystem(EmacPsInstancePtr, EMACPS_IRPT_INTR);
+
+		// init_ethernet_buffers() also starts EmacPS
+		u16 status = init_ethernet_buffers();
+		if (status != XST_SUCCESS) {
+			printf("EMAC: init_ethernet_buffers() error\n");
+		}
+
+		ethernet_task_state = ETH_TASK_READY;
+	} else {
+		// ETH_TASK_READY
+	}
+}
+
 
 static void XEmacPsSendHandler(void *Callback)
 {
@@ -466,6 +492,10 @@ uint8_t* ethernet_get_mac_address_ptr() {
 void ethernet_update_mac_address() {
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
 
+	if (ethernet_task_state != ETH_TASK_READY) {
+		return 1;
+	}
+
 	printf("Ethernet: New MAC address %x %x %x %x %x %x\n",
 			EmacPsMAC[0],EmacPsMAC[1],EmacPsMAC[2],EmacPsMAC[3],EmacPsMAC[4],EmacPsMAC[5]);
 
@@ -563,7 +593,6 @@ u32 XEmacPsDetectPHY(XEmacPs * EmacPsInstancePtr)
 LONG setup_phy(XEmacPs * EmacPsInstancePtr)
 {
 	u16 PhyIdentity;
-	u32 PhyAddr;
 
 	PhyAddr = XEmacPsDetectPHY(EmacPsInstancePtr);
 
@@ -639,114 +668,120 @@ LONG setup_phy(XEmacPs * EmacPsInstancePtr)
 
 #define IEEE_1000BASE_STATUS_REG 0x0a
 
-static u32 micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr)
+void micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr)
 {
-	u16 temp;
 	u16 control;
 	u16 status;
-	u16 status_speed;
-	u32 timeout_counter = 0;
 	int link_speed = 100;
-	int auto_negotiate = 1;
 
-	if (auto_negotiate) {
-		printf("PHY: Start Micrel PHY auto negotiation\n");
+	printf("PHY: Start Micrel PHY auto negotiation\n");
 
-		XEmacPs_PhyWrite(xemacpsp,phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 2);
-		XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_MAC, &control);
-		control |= IEEE_RGMII_TXRX_CLOCK_DELAYED_MASK;
-		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_MAC, control);
-		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 0);
+	XEmacPs_PhyWrite(xemacpsp,phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 2);
+	XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_MAC, &control);
+	control |= IEEE_RGMII_TXRX_CLOCK_DELAYED_MASK;
+	XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_MAC, control);
+	XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 0);
 
-		XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_AUTONEGO_ADVERTISE_REG, &control);  //reg 0x04
-		control |= IEEE_ASYMMETRIC_PAUSE_MASK;   //0x0800
-		control |= IEEE_PAUSE_MASK;
-		control |= ADVERTISE_100;
-		control |= ADVERTISE_10;
-		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_AUTONEGO_ADVERTISE_REG, control);
+	XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_AUTONEGO_ADVERTISE_REG, &control);  //reg 0x04
+	control |= IEEE_ASYMMETRIC_PAUSE_MASK;   //0x0800
+	control |= IEEE_PAUSE_MASK;
+	control |= ADVERTISE_100;
+	control |= ADVERTISE_10;
+	XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_AUTONEGO_ADVERTISE_REG, control);
 
-		if (link_speed == 100) {
-			// register 0: 100 mbit
-			XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
-			control &= ~(1<<6);
-			//control |= (1<<13);
-			XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
-
-			// register 9
-			XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_1000BASET_CONTROL_REG, &control);
-			control &= ~(1<<9 | 1<<8);
-			XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_1000BASET_CONTROL_REG,control);
-		} else if (link_speed == 1000) {
-			// register 0: 1000 mbit
-			/*XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
-			control |= (1<<6);
-			control &= ~(1<<13);
-			XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);*/
-
-			// register 9
-			XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_1000BASET_CONTROL_REG, &control);
-			control |= ADVERTISE_1000;
-			XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_1000BASET_CONTROL_REG, control);
-
-			// this is "reserved" according to manual?!
-			// page 0, register 10h
-			XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_COPPER_SPECIFIC_CONTROL_REG,&control);
-			control |= (7 << 12); // max number of gigabit attempts
-			control |= (1 << 11); // enable downshift
-			XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_COPPER_SPECIFIC_CONTROL_REG,control);
-		}
-
-		// register 0
+	if (link_speed == 100) {
+		// register 0: 100 mbit
 		XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
-		if (link_speed == 1000) {
-			control |= IEEE_CTRL_AUTONEGOTIATE_ENABLE;
-		}
-		control |= IEEE_STAT_AUTONEGOTIATE_RESTART;
+		control &= ~(1<<6);
+		//control |= (1<<13);
 		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
 
-		if (link_speed == 1000) {
+		// register 9
+		XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_1000BASET_CONTROL_REG, &control);
+		control &= ~(1<<9 | 1<<8);
+		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_1000BASET_CONTROL_REG,control);
+	} else if (link_speed == 1000) {
+		// register 0: 1000 mbit
+		/*XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
+		control |= (1<<6);
+		control &= ~(1<<13);
+		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);*/
+
+		// register 9
+		XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_1000BASET_CONTROL_REG, &control);
+		control |= ADVERTISE_1000;
+		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_1000BASET_CONTROL_REG, control);
+
+		// this is "reserved" according to manual?!
+		// page 0, register 10h
+		XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_COPPER_SPECIFIC_CONTROL_REG,&control);
+		control |= (7 << 12); // max number of gigabit attempts
+		control |= (1 << 11); // enable downshift
+		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_COPPER_SPECIFIC_CONTROL_REG,control);
+	}
+
+	// register 0
+	XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
+	if (link_speed == 1000) {
+		control |= IEEE_CTRL_AUTONEGOTIATE_ENABLE;
+	}
+	control |= IEEE_STAT_AUTONEGOTIATE_RESTART;
+	XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
+
+	if (link_speed == 1000) {
+		XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
+		control |= IEEE_CTRL_RESET_MASK;
+		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
+
+		while (1) {
 			XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
-			control |= IEEE_CTRL_RESET_MASK;
-			XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
-
-			while (1) {
-				XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
-				if (control & IEEE_CTRL_RESET_MASK) continue; // ??? weird
-				else break;
-			}
+			if (control & IEEE_CTRL_RESET_MASK) continue; // ??? weird
+			else break;
 		}
+	}
 
-		XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_STATUS_REG_OFFSET, &status);
+	XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_STATUS_REG_OFFSET, &status);
 
-		printf("PHY: Waiting for PHY to complete auto negotiation.\n");
+	printf("PHY: Waiting for PHY to complete auto negotiation.\n");
+}
 
-		while ( !(status & IEEE_STAT_AUTONEGOTIATE_COMPLETE) ) {
-			sleep(1);
-			XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_COPPER_SPECIFIC_STATUS_REG_2,  &temp);
-			timeout_counter++;
+u32 micrel_auto_negotiate_step2(XEmacPs *xemacpsp, u32 phy_addr) {
+	u16 status;
+	u16 status_speed;
+	u16 link_speed;
 
-			if (timeout_counter > 2) {
-				printf("PHY: Auto negotiation timeout\n");
-				break;
-			}
-			XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_STATUS_REG_OFFSET, &status);
-		}
+	XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_STATUS_REG_OFFSET, &status);
 
+	if ( status & IEEE_STAT_AUTONEGOTIATE_COMPLETE ) {
 		// http://www.fpgadeveloper.com/2018/05/board-bring-up-myir-myd-y7z010-dev-board.html
 		XEmacPs_PhyRead(xemacpsp, phy_addr, 0x1F, &status_speed);
+
 		if (status_speed & 0x040)
 			link_speed = 1000;
 		else if(status_speed & 0x020)
 			link_speed = 100;
 		else if(status_speed & 0x010)
 			link_speed = 10;
+
+		printf("PHY: Link speed: %d mbit\n",link_speed);
+		XEmacPs_SetOperatingSpeed(xemacpsp, link_speed);
+		XEmacPsClkSetup(xemacpsp, EMACPS_IRPT_INTR, link_speed);
+
+		return link_speed;
+	} else {
+		u16 temp;
+
+		// TODO: why?
+		XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_COPPER_SPECIFIC_STATUS_REG_2, &temp);
+		//timeout_counter++;
+
+		//if (timeout_counter > 2) {
+		//	printf("PHY: Auto negotiation timeout\n");
+		//	break;
+		//}
+
+		return 0;
 	}
-
-	printf("PHY: Link speed: %d mbit\n",link_speed);
-	XEmacPs_SetOperatingSpeed(xemacpsp, link_speed);
-	XEmacPsClkSetup(xemacpsp, EMACPS_IRPT_INTR, link_speed);
-
-	return link_speed;
 }
 
 /****************************************************************************/
@@ -754,7 +789,6 @@ static u32 micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr)
 *
 * This function setups the interrupt system so interrupts can occur for the
 * EMACPS.
-* @param	IntcInstancePtr is a pointer to the instance of the Intc driver.
 * @param	EmacPsInstancePtr is a pointer to the instance of the EmacPs
 *		driver.
 * @param	EmacPsIntrId is the Interrupt ID and is typically
@@ -765,35 +799,10 @@ static u32 micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr)
 * @note		None.
 *
 *****************************************************************************/
-static LONG EmacPsSetupIntrSystem(XScuGic *IntcInstancePtr, XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId)
+static LONG EmacPsSetupIntrSystem(XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId)
 {
 	LONG Status;
-	XScuGic_Config *GicConfig;
-	Xil_ExceptionInit();
-
-	/*
-	 * Initialize the interrupt controller driver so that it is ready to
-	 * use.
-	 */
-	GicConfig = XScuGic_LookupConfig(XPAR_SCUGIC_SINGLE_DEVICE_ID);
-	if (NULL == GicConfig) {
-		printf("GIC: XScuGic_LookupConfig failed\n");
-		return XST_FAILURE;
-	}
-
-	Status = XScuGic_CfgInitialize(IntcInstancePtr, GicConfig, GicConfig->CpuBaseAddress);
-	if (Status != XST_SUCCESS) {
-		printf("GIC: XScuGic_CfgInitialize failed\n");
-		return XST_FAILURE;
-	}
-
-	/*
-	 * Connect the interrupt controller interrupt handler to the hardware
-	 * interrupt handling logic in the processor.
-	 */
-	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_IRQ_INT,
-			(Xil_ExceptionHandler)XScuGic_InterruptHandler,
-			IntcInstancePtr);
+	XScuGic *IntcInstancePtr = interrupt_get_intc();
 
 	/*
 	 * Connect a device driver handler that will be called when an
@@ -826,6 +835,10 @@ static LONG EmacPsSetupIntrSystem(XScuGic *IntcInstancePtr, XEmacPs *EmacPsInsta
 u16 ethernet_send_frame(u16 frame_size) {
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
 	XEmacPs_Bd *BdTxPtr;
+
+	if (ethernet_task_state != ETH_TASK_READY) {
+		return 1;
+	}
 
 	u32 old_frames_tx = FramesTx;
 

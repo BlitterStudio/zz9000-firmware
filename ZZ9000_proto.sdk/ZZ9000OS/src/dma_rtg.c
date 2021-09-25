@@ -5,9 +5,13 @@
 
 extern u32* framebuffer;
 extern u32 bgbuf_offset;
+extern u32 framebuffer_color_format;
 extern u32 framebuffer_pan_offset;
+extern u32 rtg_pan_offset;
+extern u32 framebuffer_pan_width;
 extern u32 framebuffer_pan_offset_old;
 extern u32 request_video_align;
+extern u32 blitter_colormode;
 
 extern uint32_t sprite_colors[4];
 
@@ -121,12 +125,6 @@ void handle_blitter_dma_op(uint16_t zdata)
 
                 loop_rows = data->user[0];
 
-                if (data->u8_user[7]) {
-                    printf("RectPattern:\n");
-                    printf("%d, %d - %d, %d\n", data->x[0], data->y[0], data->x[0]+data->x[1], data->y[0]+data->y[1]);
-                    printf("M:%.2X R: %d D: %d\n", data->mask, data->user[0], data->u8_user[GFXDATA_U8_DRAWMODE]);
-                }
-
                 pattern_fill_rect(data->u8_user[GFXDATA_U8_COLORMODE],
                         data->x[0], data->y[0], data->x[1], data->y[1],
                         data->u8_user[GFXDATA_U8_DRAWMODE], data->mask,
@@ -134,12 +132,6 @@ void handle_blitter_dma_op(uint16_t zdata)
                         tmpl_data, 16, loop_rows);
             }
             else {
-                if (data->u8_user[7]) {
-                    printf("RectTemplate:\n");
-                    printf("%d, %d - %d, %d\n", data->x[0], data->y[0], data->x[0]+data->x[1], data->y[0]+data->y[1]);
-                    printf("M:%.2X R: %d D: %d\n", data->mask, data->user[0], data->u8_user[GFXDATA_U8_DRAWMODE]);
-                }
-
                 template_fill_rect(data->u8_user[GFXDATA_U8_COLORMODE], data->x[0],
                         data->y[0], data->x[1], data->y[1], data->u8_user[GFXDATA_U8_DRAWMODE], data->mask,
                         data->rgb[0], data->rgb[1], data->x[2], data->y[2], tmpl_data,
@@ -213,17 +205,21 @@ void handle_blitter_dma_op(uint16_t zdata)
             SWAP32(data->offset[1]);
 
             uint8_t* bmp_data;
-            
+
             if (zdata == OP_SPRITE_BITMAP)
                 bmp_data = (uint8_t*) ((u32) framebuffer + data->offset[1]);
             else
                 bmp_data = (uint8_t*) ((u32) ADDR_ADJ + data->offset[1]);
 
             clear_hw_sprite();
-            
+
             sprite_x_offset = (int16_t)data->x[0];
             sprite_y_offset = (int16_t)data->y[0];
             sprite_width  = data->x[1];
+            if (zdata == OP_SPRITE_CLUT_BITMAP) {
+                sprite_x_offset = -(sprite_x_offset);
+                sprite_y_offset = -(sprite_y_offset);
+            }
             sprite_height = data->y[1];
 
             if (zdata == OP_SPRITE_BITMAP) {
@@ -246,12 +242,20 @@ void handle_blitter_dma_op(uint16_t zdata)
         case OP_PAN:
             SWAP32(data->offset[0]);
             SWAP16(data->x[0]);     SWAP16(data->y[0]);
+            SWAP16(data->x[1]);
+
             sprite_x_offset = (int16_t)data->x[0];
             sprite_y_offset = (int16_t)data->y[0];
 
-            framebuffer_pan_offset = data->offset[0];
+            framebuffer_pan_width = data->x[1];
+            framebuffer_color_format = data->u8_user[GFXDATA_U8_COLORMODE];
+            framebuffer_pan_offset = data->offset[0] + (data->x[0] << data->u8_user[GFXDATA_U8_COLORMODE]);
+            if (split_pos == 0) {
+                framebuffer_pan_offset += (data->y[0] * (framebuffer_pan_width << framebuffer_color_format));
+            }
+            rtg_pan_offset = framebuffer_pan_offset;
             break;
-        
+
         case OP_SET_SPLIT_POS:
             SWAP16(data->y[0]);
             SWAP32(data->offset[0]);
