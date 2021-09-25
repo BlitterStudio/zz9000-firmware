@@ -24,4 +24,4 @@ masscopy*.sh
 SDK.log.*
 ZZ9000_proto.srcs/sources_1
 ZZ9000_proto.sdk/ZZ9000Test/bootimage/BOOT.bin
-
+fw-archive

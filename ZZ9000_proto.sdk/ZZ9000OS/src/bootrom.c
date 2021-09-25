@@ -10,7 +10,7 @@
 
 const u16 BOOT_ROM[] = {
   0x9000, 0x2000, // WORDWIDE+CONFIGTIME  DAsize
-  0x0032, 0x0020, // DiagPt: 0x32         BootPt: 0x20
+  0x004e, 0x003c, // DiagPt: 0x4e         BootPt: 0x3c
   0x000e, 0x0000, // DevName pointer      Resvd 1
   0x0000,
 
