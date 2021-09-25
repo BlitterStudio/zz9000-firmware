@@ -16,8 +16,10 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <malloc.h>
 #include <math.h>
+
 #include "platform.h"
 #include "xil_printf.h"
 #include "xparameters.h"
@@ -33,6 +35,12 @@
 #include "xadcps.h"
 #include "xtime_l.h"
 #include "xil_misc_psreset_api.h"
+#include "xi2stx.h"
+
+// workaround for typo in xilinx C code
+void Xil_AssertNonVoid() {}
+
+#include "xaudioformatter.h"
 
 #include "gfx.h"
 #include "ethernet.h"
@@ -54,15 +62,24 @@
 #define VDMA_DEVICE_ID	XPAR_AXIVDMA_0_DEVICE_ID
 #define HDMI_I2C_ADDR 	0x3b
 #define IIC_SCLK_RATE	400000
-#define GPIO_DEVICE_ID		XPAR_XGPIOPS_0_DEVICE_ID
+#define GPIO_DEVICE_ID	XPAR_XGPIOPS_0_DEVICE_ID
+#define IIC2_DEVICE_ID	XPAR_XIICPS_1_DEVICE_ID
+#define IIC2_SCLK_RATE	100000
+#define ADAU_I2C_ADDR	0x68
 
 #define I2C_PAUSE 10
 
-// I2C controller instance
+// I2C controller instances
 XIicPs Iic;
+XIicPs Iic2;
 
 // XADC adc converter instance
 XAdcPs Xadc;
+
+// audio state (ZZ9000AX)
+static int adau_enabled = 0;
+#define AUDIO_TX_BUFFER_SIZE 3840*10 // bytes per period * periods
+#define AUDIO_TX_BUFFER_ADDRESS 0x200000
 
 int xadc_init() {
 	printf("xadc_init()...");
@@ -94,60 +111,169 @@ float xadc_get_int_voltage() {
 // software still relies on this legacy register.
 unsigned int cur_mem_offset = 0x3500000;
 
-int hdmi_ctrl_write_byte(u8 addr, u8 value) {
+int i2c_write_byte(XIicPs* iic, u8 i2c_addr, u8 addr, u8 value) {
+
 	u8 buffer[2];
 	buffer[0] = addr;
 	buffer[1] = value;
 	int status;
 
-	while (XIicPs_BusIsBusy(&Iic)) {
-	};
+	/*while (XIicPs_BusIsBusy(iic)) {};
 	usleep(I2C_PAUSE);
-	status = XIicPs_MasterSendPolled(&Iic, buffer, 1, HDMI_I2C_ADDR);
-	while (XIicPs_BusIsBusy(&Iic)) {
-	};
+	status = XIicPs_MasterSendPolled(iic, buffer, 1, i2c_addr);
+	while (XIicPs_BusIsBusy(iic)) {};
 	usleep(I2C_PAUSE);
 	buffer[1] = 0xff;
-	status = XIicPs_MasterRecvPolled(&Iic, buffer + 1, 1, HDMI_I2C_ADDR);
+	status = XIicPs_MasterRecvPolled(iic, buffer + 1, 1, i2c_addr);
+	buffer[1] = value;*/
 
-	//printf("[hdmi] old value of 0x%0x: 0x%0x\n",addr,buffer[1]);
-	buffer[1] = value;
-
-	while (XIicPs_BusIsBusy(&Iic)) {
-	};
-	status = XIicPs_MasterSendPolled(&Iic, buffer, 2, HDMI_I2C_ADDR);
-
-	while (XIicPs_BusIsBusy(&Iic)) {
-	};
+	while (XIicPs_BusIsBusy(iic)) {};
+	status = XIicPs_MasterSendPolled(iic, buffer, 2, i2c_addr);
+	while (XIicPs_BusIsBusy(iic)) {};
 	usleep(I2C_PAUSE);
-	status = XIicPs_MasterSendPolled(&Iic, buffer, 1, HDMI_I2C_ADDR);
 
-	while (XIicPs_BusIsBusy(&Iic)) {
-	};
+	status = XIicPs_MasterSendPolled(iic, buffer, 1, i2c_addr);
+	while (XIicPs_BusIsBusy(iic)) {};
 	usleep(I2C_PAUSE);
 	buffer[1] = 0xff;
-	status = XIicPs_MasterRecvPolled(&Iic, buffer + 1, 1, HDMI_I2C_ADDR);
+	status = XIicPs_MasterRecvPolled(iic, buffer + 1, 1, i2c_addr);
 
 	if (buffer[1] != value) {
-		printf("[hdmi] new value of 0x%x: 0x%x (should be 0x%x)\n", addr,
+		printf("[i2c:%x] new value of 0x%x: 0x%x (should be 0x%x)\n", i2c_addr, addr,
 				buffer[1], value);
 	}
 
 	return status;
 }
 
-int hdmi_ctrl_read_byte(u8 addr, u8* buffer) {
+int i2c_read_byte(XIicPs* iic, u8 i2c_addr, u8 addr, u8* buffer) {
 	buffer[0] = addr;
 	buffer[1] = 0xff;
-	while (XIicPs_BusIsBusy(&Iic)) {
-	};
-	int status = XIicPs_MasterSendPolled(&Iic, buffer, 1, HDMI_I2C_ADDR);
-	while (XIicPs_BusIsBusy(&Iic)) {
-	};
+	while (XIicPs_BusIsBusy(iic)) {};
+	int status = XIicPs_MasterSendPolled(iic, buffer, 1, i2c_addr);
+	while (XIicPs_BusIsBusy(iic)) {};
 	usleep(I2C_PAUSE);
-	status = XIicPs_MasterRecvPolled(&Iic, buffer + 1, 1, HDMI_I2C_ADDR);
+	status = XIicPs_MasterRecvPolled(iic, buffer + 1, 1, i2c_addr);
 
 	return status;
+}
+
+int hdmi_ctrl_write_byte(u8 addr, u8 value) {
+	return i2c_write_byte(&Iic, HDMI_I2C_ADDR, addr, value);
+}
+
+int hdmi_ctrl_read_byte(u8 addr, u8* buffer) {
+	return i2c_read_byte(&Iic, HDMI_I2C_ADDR, addr, buffer);
+}
+
+int adau_write16(u8 i2c_addr, u16 addr, u16 value) {
+	XIicPs* iic = &Iic2;
+	int status;
+	//u8 i2c_addr = ADAU_I2C_ADDR;
+	u8 buffer[4];
+	buffer[0] = addr>>8;
+	buffer[1] = addr&0xff;
+	buffer[2] = value>>8;
+	buffer[3] = value&0xff;
+
+	int timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			printf("ADAU I2C write16 timeout.\n");
+			return -1;
+		}
+	}
+	status = XIicPs_MasterSendPolled(iic, buffer, 4, i2c_addr);
+
+	return status;
+}
+
+int adau_write24(u8 i2c_addr, u16 addr, u32 value) {
+	XIicPs* iic = &Iic2;
+	int status;
+	//u8 i2c_addr = ADAU_I2C_ADDR;
+	u8 buffer[5];
+	buffer[0] = addr>>8;
+	buffer[1] = addr&0xff;
+	buffer[2] = (value>>16)&0xff;
+	buffer[3] = (value>>8)&0xff;
+	buffer[4] = value&0xff;
+
+	int timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			printf("ADAU I2C write24 timeout.\n");
+			return -1;
+		}
+	}
+	status = XIicPs_MasterSendPolled(iic, buffer, 5, i2c_addr);
+
+	return status;
+}
+
+int adau_read16(u8 i2c_addr, u16 addr, u8* buffer) {
+	XIicPs* iic = &Iic2;
+	int status1;
+	//u8 i2c_addr = ADAU_I2C_ADDR;
+	u8 abuffer[2];
+	abuffer[0] = addr>>8;
+	abuffer[1] = addr&0xff;
+
+	XIicPs_SetOptions(iic, XIICPS_REP_START_OPTION);
+
+	int timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			printf("ADAU I2C read16a timeout.\n");
+			return -1;
+		}
+	}
+	status1 = XIicPs_MasterSendPolled(iic, abuffer, 2, i2c_addr);
+	XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
+	XIicPs_MasterRecvPolled(iic, buffer, 2, i2c_addr);
+	timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			printf("ADAU I2C read16b timeout.\n");
+			return -1;
+		}
+	}
+
+	return status1;
+}
+
+int adau_read24(u8 i2c_addr, u16 addr, u8* buffer) {
+	XIicPs* iic = &Iic2;
+	int status1;
+	//u8 i2c_addr = ADAU_I2C_ADDR;
+	u8 abuffer[2];
+	abuffer[0] = addr>>8;
+	abuffer[1] = addr&0xff;
+
+	XIicPs_SetOptions(iic, XIICPS_REP_START_OPTION);
+	while (XIicPs_BusIsBusy(iic)) {};
+	status1 = XIicPs_MasterSendPolled(iic, abuffer, 2, i2c_addr);
+	XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
+	XIicPs_MasterRecvPolled(iic, buffer, 3, i2c_addr);
+	int timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			printf("ADAU I2C read24 timeout.\n");
+			return -1;
+		}
+	}
+
+	return status1;
 }
 
 static u8 sii9022_init[] = {
@@ -184,7 +310,16 @@ void disable_reset_out() {
 	usleep(10000);
 	XGpioPs_WritePin(&Gpio, output_pin, 1);
 
-	print("GPIO reset disable done.\n\r");
+	print("GPIO ethernet reset done.\n");
+
+	int adau_reset = 11;
+	XGpioPs_SetDirectionPin(&Gpio, adau_reset, 1);
+	XGpioPs_SetOutputEnablePin(&Gpio, adau_reset, 1);
+	XGpioPs_WritePin(&Gpio, adau_reset, 0);
+	usleep(10000);
+	XGpioPs_WritePin(&Gpio, adau_reset, 1);
+
+	print("GPIO ADAU reset done.\n");
 }
 
 void hdmi_set_video_mode(u16 htotal, u16 vtotal, u32 pixelclock_hz, u16 vhz, u8 hdmi) {
@@ -256,6 +391,139 @@ void hdmi_ctrl_init(struct zz_video_mode *mode) {
 	}
 }
 
+XI2s_Tx i2s;
+XAudioFormatter audio_formatter;
+
+void init_adau(u32* audio_buffer) {
+	XIicPs_Config* i2c_config;
+	i2c_config = XIicPs_LookupConfig(IIC2_DEVICE_ID);
+	int status = XIicPs_CfgInitialize(&Iic2, i2c_config, i2c_config->BaseAddress);
+	printf("[adau] XIicPs_CfgInitialize 2: %d\n", status);
+	usleep(10000);
+	printf("[adau] XIicPs 2 is ready: %lx\n", Iic2.IsReady);
+	status = XIicPs_SelfTest(&Iic2);
+	printf("[adau] XIicPs_SelfTest: %x\n", status);
+
+	if (status != 0) {
+		printf("[adau] I2C instance 2 self test failed.");
+		return;
+	}
+
+	status = XIicPs_SetSClk(&Iic2, IIC2_SCLK_RATE);
+	printf("[adau] XIicPs_SetSClk: %x\n", status);
+
+	u8 rbuf[5];
+	u8 i = 0x34;
+
+	//usleep(10000);
+	// DSP core control: set ADM, DAM, CR
+	status = adau_write16(i, 2076, (1<<4)|(1<<3)|(1<<2));
+	if (status == 0) {
+		printf("[adau] write DSP core control: %d\n", i);
+		printf("[adau] ZZ9000AX detected.");
+	} else {
+		printf("[adau] ZZ9000AX not detected.");
+		return;
+	}
+
+	adau_enabled = 1;
+
+	status = adau_read16(i, 2076, rbuf);
+	if (status == 0) {
+		printf("[adau] read: %d %x %x\n", i, rbuf[0], rbuf[1]);
+	}
+
+	// DAC setup: DS = 01
+	status = adau_write16(i, 2087, 1);
+	printf("[adau] write DAC setup: %d\n", status);
+
+	rbuf[0] = 0;
+	rbuf[1] = 0;
+
+	status = adau_read16(i, 2087, rbuf);
+	printf("[adau] read from 2087: %02x%02x (status: %d)\n", rbuf[0], rbuf[1], status);
+
+	// TODO: OBP/OLRP
+	u16 MS  = 1<<11; // clock master output
+	//u16 OBF = (0<<10)|(0<<9);    // bclock = 49.152/16 = mclk/4 = 3.072mhz
+	u16 OBF = (1<<10)|(0<<9);    // bclock = 49.152/4 = mclk = 12.288mhz
+	u16 OLF = (0<<8)|(0<<7);    // lrclock = 49.152/1024 = word clock = 48khz?!
+	u16 MSB = 0;    // msb 1
+	u16 OWL = 1<<1; // 16 bit
+	status = adau_write16(i, 0x081e, MS|OBF|OLF|MSB|OWL);
+	printf("[adau] write serial output control: %d\n", status);
+
+	u32 MP0 = 1<<2; // MP02 digital input 0
+	u32 MP1 = 1<<6; //
+	u32 MP2 = 1<<10; //
+	u32 MP3 = 1<<14; //
+	u32 MP4 = 1<<18; // MP42 serial clock in
+	u32 MP5 = 1<<22; // MP52 serial clock in
+
+	u32 MP6 = 1<<2; //
+	u32 MP7 = 1<<6; //
+	u32 MP8 = 1<<10; //
+	u32 MP9 = 1<<14; //
+	u32 MP10 = 1<<18; // MP102 set (serial clock out)
+	u32 MP11 = 1<<22; // MP112 set (serial clock out)
+	status = adau_write24(i, 0x0820, MP0|MP1|MP2|MP3|MP4|MP5);
+	printf("[adau] write MP control 0x820: %d\n", status);
+	status = adau_write24(i, 0x0821, MP6|MP7|MP8|MP9|MP10|MP11);
+	printf("[adau] write MP control 0x821: %d\n", status);
+
+	status = adau_read24(i, 0x0820, rbuf);
+	printf("[adau] read from 0x820: %02x%02x%02x (status: %d)\n", rbuf[0], rbuf[1], rbuf[2], status);
+	status = adau_read24(i, 0x0821, rbuf);
+	printf("[adau] read from 0x821: %02x%02x%02x (status: %d)\n", rbuf[0], rbuf[1], rbuf[2], status);
+
+	XI2stx_Config* i2s_config = XI2s_Tx_LookupConfig(XPAR_XI2STX_0_DEVICE_ID);
+	status = XI2s_Tx_CfgInitialize(&i2s, i2s_config, i2s_config->BaseAddress);
+
+	printf("[adau] I2S_TX cfg status: %d\n", status);
+
+	printf("[adau] I2S Dwidth: %d\n", i2s.Config.DWidth);
+	printf("[adau] I2S MaxNumChannels: %d\n", i2s.Config.MaxNumChannels);
+
+	XI2s_Tx_JustifyEnable(&i2s, 0);
+
+	XAudioFormatter_Config* af_config = XAudioFormatter_LookupConfig(XPAR_XAUDIOFORMATTER_0_DEVICE_ID);
+	audio_formatter.BaseAddress = af_config->BaseAddress;
+
+	status = XAudioFormatter_CfgInitialize(&audio_formatter, af_config);
+
+	printf("[adau] AudioFormatter cfg status: %d\n", status);
+
+	// reset the goddamn register
+	XAudioFormatter_WriteReg(audio_formatter.BaseAddress,
+			XAUD_FORMATTER_CTRL + XAUD_FORMATTER_MM2S_OFFSET, 0);
+
+	XAudioFormatterHwParams af_params;
+	af_params.buf_addr = (u32)audio_buffer;
+	af_params.bits_per_sample = BIT_DEPTH_16;
+	af_params.periods = 8; // 1 second = 192000 bytes
+	af_params.active_ch = 2;
+	// must be multiple of 32*channels = 64
+	af_params.bytes_per_period = 3840;
+
+	XAudioFormatterSetFsMultiplier(&audio_formatter, 48000*256, 48000); // mclk = 256 * Fs // this doesn't really seem to change anything?!
+
+	printf("[adau] XAudioFormatterSetFsMultiplier\n");
+	XAudioFormatterSetHwParams(&audio_formatter, &af_params);
+	printf("[adau] XAudioFormatterSetHwParams\n");
+
+	XAudioFormatter_InterruptDisable(&audio_formatter, 1<<14); // timeout
+	printf("[adau] XAudioFormatter_InterruptDisable\n");
+	XAudioFormatter_InterruptEnable(&audio_formatter, 1<<13); // IOC
+	printf("[adau] XAudioFormatter_InterruptEnable\n");
+
+	XAudioFormatterDMAStart(&audio_formatter);
+	printf("[adau] XAudioFormatterDMAStart done.\n");
+
+	XI2s_Tx_Enable(&i2s, 1);
+	printf("[adau] XI2s_Tx_Enable\n");
+
+}
+
 XAxiVdma vdma;
 u32* framebuffer = 0;
 u32 bgbuf_offset = 0;
@@ -302,6 +570,9 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 				status);
 		//return status;
 	}
+
+	//printf("VDMA MM2S DRE: %d\n", vdma.HasMm2SDRE);
+	//printf("VDMA Config MM2S DRE: %d\n", Config->HasMm2SDRE);
 
 	u32 stride = hsize * (Config->Mm2SStreamWidth >> 3);
 	if (framebuffer_pan_width != 0 && framebuffer_pan_width != (hsize / hdiv)) {
@@ -502,7 +773,39 @@ void video_system_init(struct zz_video_mode *mode, int hdiv, int vdiv) {
 
 int scalemode = 0;
 
+static int interrupt_enabled_audio = 0;
+static int interrupt_waiting_audio = 0;
+static int audio_buffer_collision = 0;
+static uint32_t audio_scale = 1;
+
+int isra_count = 0;
+
+// audio formatter interrupt, triggered whenever a period is completed
+void isr_audio (void *dummy) {
+	uint32_t val = XAudioFormatter_ReadReg(XPAR_XAUDIOFORMATTER_0_BASEADDR, XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET);
+	val |= (1<<31); // clear irq
+	XAudioFormatter_WriteReg(XPAR_XAUDIOFORMATTER_0_BASEADDR,
+		XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET, val);
+
+	/*if (isra_count++>100) {
+		printf("[isra]\n");
+		isra_count = 0;
+	}*/
+
+	if (interrupt_enabled_audio) {
+		interrupt_waiting_audio = 1;
+
+		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 1);
+		usleep(1);
+		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
+	} else {
+		interrupt_waiting_audio = 0;
+	}
+}
+
 void video_mode_init(int mode, int scalemode, int colormode) {
+	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
+
 	int hdiv = 1, vdiv = 1;
 	stride_div = 1;
 
@@ -513,9 +816,11 @@ void video_mode_init(int mode, int scalemode, int colormode) {
 	if (scalemode & 2)
 		vdiv = 2;
 
-	if (colormode == 0)
+	// 8 bit
+	if (colormode == MNTVA_COLOR_8BIT)
 		hdiv *= 4;
-	if (colormode == 1)
+
+	if (colormode == MNTVA_COLOR_16BIT565 || colormode == MNTVA_COLOR_15BIT)
 		hdiv *= 2;
 
 	struct zz_video_mode *vmode = &preset_video_modes[mode];
@@ -641,7 +946,9 @@ void update_hw_sprite_pos(int16_t x, int16_t y) {
 // default to more compatible 60hz mode
 static int videocap_video_mode = ZZVMODE_800x600;
 static int video_mode = ZZVMODE_800x600 | 2 << 12 | MNTVA_COLOR_32BIT << 8;
-static int default_pan_offset = 0x00e00bf8;
+//static int default_pan_offset = 0x00e00bf8;
+//static int default_pan_offset = 0x00e008d8;
+static int default_pan_offset = 0x00dff2f8;
 static int interlace_old = 0;
 static int videocap_ntsc_old = 0;
 static int videocap_enabled_old = 1;
@@ -653,7 +960,9 @@ static uint32_t usb_storage_write_block = 0;
 // ethernet state
 uint16_t ethernet_send_result = 0;
 static int backlog_nag_counter = 0;
-static int interrupt_enabled = 0;
+static int interrupt_enabled_ethernet = 0;
+static int interrupt_signal_ethernet = 0;
+static int interrupt_waiting_ethernet = 0;
 
 // usb state
 uint16_t usb_status = 0;
@@ -664,12 +973,13 @@ uint32_t usb_read_write_num_blocks = 1;
 uint32_t debug_lowlevel = 0;
 
 void videocap_area_clear() {
-	fb_fill(0x00e00000 / 4);
+	fb_fill(0x00dff000 / 4);
 }
 
-void reset_default_videocap_pan() {
-	if (videocap_video_mode == ZZVMODE_800x600) {
-		default_pan_offset = 0x00e00bf8;
+void reset_default_videocap_pan(int ntsc) {
+	if (!ntsc && videocap_video_mode == ZZVMODE_800x600) {
+		//default_pan_offset = 0x00e00bf8;
+		default_pan_offset = 0x00dff2f8;
 	} else {
 		default_pan_offset = 0x00e00000;
 	}
@@ -680,13 +990,17 @@ void reset_default_videocap_pan() {
 
 static int isr_flush_count=0;
 
+int vblank_count = 0;
+
 // interrupt service routine for IRQ_F2P[0:0]
 // vblank + raster position interrupt
 void isr0 (void *dummy) {
 	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 
-	int videocap_enabled = (zstate & (1 << 23));
 	int vblank = (zstate & (1 << 21));
+	int videocap_enabled = (zstate & (1 << 23));
+	int videocap_ntsc = (zstate & (1 << 22));
+	int interlace = !!(zstate & (1 << 24));
 
 	// videocap vdma handling is still in main loop
 	if (!videocap_enabled) {
@@ -710,18 +1024,95 @@ void isr0 (void *dummy) {
 
 			split_pos = next_split_pos;
 		}
+	} else {
+		// FIXME magic constant
+		if (framebuffer_pan_offset >= 0x00dff000) {
+			// we are looking at the videocap area
+			// so set up the right mode for it
+
+			int videocap_reset = 0;
+
+			if (!videocap_enabled_old) {
+				videocap_area_clear();
+				// force mode cleanup
+				videocap_reset = 1;
+			}
+
+			if (sprite_enabled) {
+				sprite_hide();
+			}
+
+			if (videocap_ntsc != videocap_ntsc_old || videocap_reset) {
+				// change between ntsc+pal
+				videocap_area_clear();
+
+				if (videocap_ntsc) {
+					// NTSC
+					reset_default_videocap_pan(1);
+					framebuffer_pan_width = 0;
+					framebuffer_pan_offset = default_pan_offset;
+					if (card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
+						init_ns_video_mode(ZZVMODE_720x480);
+					} else {
+						video_mode_init(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT);
+					}
+				} else {
+					// PAL
+					reset_default_videocap_pan(0);
+					framebuffer_pan_width = 0;
+					framebuffer_pan_offset = default_pan_offset;
+					if (videocap_video_mode == ZZVMODE_720x576 && card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
+						init_ns_video_mode(ZZVMODE_720x576);
+					} else {
+						video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
+					}
+				}
+			}
+
+			if (interlace != interlace_old || videocap_reset) {
+				// interlace has changed, we need to reconfigure vdma for the new screen height
+				vmode_vdiv = 2;
+				if (interlace) {
+					vmode_vdiv = 1;
+				}
+				videocap_area_clear();
+				init_vdma(vmode_hsize, vmode_vsize, 1, vmode_vdiv, (u32)framebuffer + framebuffer_pan_offset);
+				video_formatter_valign();
+				printf("videocap interlace mode changed to %d.\n", interlace);
+			}
+
+			interlace_old = interlace;
+			videocap_ntsc_old = videocap_ntsc;
+			videocap_enabled_old = videocap_enabled;
+		} else {
+			videocap_enabled_old = 0;
+			videocap_ntsc_old = 0;
+			interlace_old = 0;
+		}
 	}
 
 	// flush the data caches synchronized to full frames
 	if (!vblank || (split_pos == 0)) {
-		//if (isr_flush_count > 0) {
-			Xil_L1DCacheFlush();
-			Xil_L2CacheFlush();
-			isr_flush_count = 0;
-		//} else {
-		//	isr_flush_count++;
-		//}
+		Xil_L1DCacheFlush();
+		Xil_L2CacheFlush();
+		isr_flush_count = 0;
+
+		if ((interrupt_signal_ethernet && interrupt_enabled_ethernet)) {
+			// interrupt amiga (trigger int6/2)
+			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 1);
+			usleep(1);
+			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
+
+			// FIXME legacy behavior
+			interrupt_signal_ethernet = 0;
+		}
 	}
+
+	vblank_count++;
+	/*if (vblank_count>100) {
+		printf("[isrv]\n");
+		vblank_count=0;
+	}*/
 }
 
 int fpga_interrupt_init() {
@@ -731,12 +1122,14 @@ int fpga_interrupt_init() {
   printf("XScuGic_SetPriorityTriggerType()\n");
 
   // set the priority of IRQ_F2P[0:0] to 0xA0 (highest 0xF8, lowest 0x00) and a trigger for a rising edge 0x3.
-  XScuGic_SetPriorityTriggerType(intc_instance_ptr, INTC_INTERRUPT_ID_0, 0xA0, 0x3);
+  XScuGic_SetPriorityTriggerType(intc_instance_ptr, INTC_INTERRUPT_ID_0, 0xA0, 0x3); // vblank / split
+  XScuGic_SetPriorityTriggerType(intc_instance_ptr, INTC_INTERRUPT_ID_1, 0x90, 0x3); // audio formatter
 
   printf("XScuGic_Connect()\n");
 
   // connect the interrupt service routine isr0 to the interrupt controller
   result = XScuGic_Connect(intc_instance_ptr, INTC_INTERRUPT_ID_0, (Xil_ExceptionHandler)isr0, NULL);
+  result = XScuGic_Connect(intc_instance_ptr, INTC_INTERRUPT_ID_1, (Xil_ExceptionHandler)isr_audio, NULL);
 
   if (result != XST_SUCCESS) {
 	printf("XScuGic_Connect() failed!\n");
@@ -747,11 +1140,14 @@ int fpga_interrupt_init() {
 
   // enable interrupts for IRQ_F2P[0:0]
   XScuGic_Enable(intc_instance_ptr, INTC_INTERRUPT_ID_0);
+  // enable interrupts for IRQ_F2P[1:1]
+  XScuGic_Enable(intc_instance_ptr, INTC_INTERRUPT_ID_1);
 
   return 0;
 }
 
 void init_ns_video_mode(uint32_t mode_num) {
+	printf("init_ns_video_mode(%d)\n", mode_num);
 	if (mode_num == ZZVMODE_720x576) {
 		video_mode_init(ZZVMODE_720x576_NS_PAL + scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT);
 	} else {
@@ -767,8 +1163,10 @@ void handle_amiga_reset() {
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
 	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
 
-	reset_default_videocap_pan();
-	videocap_area_clear();
+	videocap_enabled_old = 0;
+
+	//reset_default_videocap_pan(0);
+	//videocap_area_clear();
 
 	printf("    _______________   ___   ___   ___  \n");
 	printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
@@ -777,20 +1175,17 @@ void handle_amiga_reset() {
 	printf("    / /__ / /__  / /| |_| | |_| | |_| |\n");
 	printf("   /_____/_____|/_/  \\___/ \\___/ \\___/ \n\n");
 
-	usleep(10000);
+	//usleep(10000);
 
 	// scalemode 2 (vertical doubling)
-	if ((videocap_video_mode == ZZVMODE_720x576 || videocap_video_mode == ZZVMODE_720x480) && card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] != 0) {
+	/*if ((videocap_video_mode == ZZVMODE_720x576 || videocap_video_mode == ZZVMODE_720x480) && card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] != 0) {
 		init_ns_video_mode(videocap_video_mode);
 	} else {
 		video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
 	}
-	video_mode = videocap_video_mode | 2 << 12 | MNTVA_COLOR_32BIT << 8;
+	video_mode = videocap_video_mode | 2 << 12 | MNTVA_COLOR_32BIT << 8;*/
 
 	sprite_reset();
-	interrupt_configure();
-	ethernet_init();
-	fpga_interrupt_init();
 
 	usb_storage_available = zz_usb_init();
 
@@ -799,15 +1194,24 @@ void handle_amiga_reset() {
 	usb_read_write_num_blocks = 1;
 	ethernet_send_result = 0;
 	backlog_nag_counter = 0;
-	interrupt_enabled = 0;
+	interrupt_enabled_ethernet = 0;
+	interrupt_enabled_audio = 0;
 
 	cur_mem_offset = 0x3500000;
 
 	// reset videocap interlace/ntsc state
-	interlace_old = -1;
-	videocap_ntsc_old = -1;
+	//interlace_old = -1;
+	//videocap_ntsc_old = -1;
+
+	next_split_pos = 0;
+
+	// FIXME temporary: clear audio buffer on reset
+	memset(AUDIO_TX_BUFFER_ADDRESS, 0, AUDIO_TX_BUFFER_SIZE);
 
 	// FIXME there should be more state to be reset
+
+	// clear interrupt holding amiga
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
 }
 
 uint16_t arm_app_output_event_serial = 0;
@@ -1034,7 +1438,17 @@ int main() {
 	// zorro state
 	u32 zstate_raw;
 
+	/*for (int i=0; i<5; i++) {
+		printf("Initial sleep...\n");
+		sleep(1);
+	}*/
+
+	interrupt_configure();
+	ethernet_init();
+
 	handle_amiga_reset();
+	init_adau(framebuffer);
+	fpga_interrupt_init();
 
 	printf("launch core1...\n");
 	volatile uint32_t* core1_addr = (volatile uint32_t*) 0xFFFFFFF0;
@@ -1090,9 +1504,11 @@ int main() {
 				} else if (zaddr < MNT_REG_BASE + 0x8000) {
 					// NOP (RX frame is here)
 				} else if (zaddr < MNT_REG_BASE + 0xa000) {
-					// NOP
+					// 0x8000 - 0x9fff ETH TX frame (Z2)
+					ptr = (u8*)TX_FRAME_ADDRESS + zaddr - MNT_REG_BASE - 0x8000;
 				} else if (zaddr < MNT_REG_BASE + 0x10000) {
-					// NOP
+					// 0xa000 - 0xffff USB block storage (Z2)
+					ptr = (u8*)USB_BLOCK_STORAGE_ADDRESS + zaddr - MNT_REG_BASE - 0xa000;
 				}
 
 				// FIXME cache this
@@ -1162,10 +1578,25 @@ int main() {
 
 				case REG_ZZ_COLORMODE:
 					blitter_colormode = zdata;
+					// hack
+					if (blitter_colormode == MNTVA_COLOR_15BIT) blitter_colormode = MNTVA_COLOR_16BIT565;
 					break;
 				case REG_ZZ_CONFIG:
 					// enable/disable INT6, currently used to signal incoming ethernet packets
-					interrupt_enabled = zdata & 1;
+					if (zdata & 8) {
+						// clear/ack
+						if (zdata & 16) {
+							printf("[clear] eth\n");
+							interrupt_waiting_ethernet = 0;
+						}
+						if (zdata & 32) {
+							//printf("[clear] audio\n");
+							interrupt_waiting_audio = 0;
+						}
+					} else {
+						printf("[enable] eth: %d\n", zdata);
+						interrupt_enabled_ethernet = zdata & 1;
+					}
 					break;
 				case REG_ZZ_MODE: {
 					// reset interlace tracking
@@ -1176,22 +1607,15 @@ int main() {
 					scalemode = (zdata & 0xf000) >> 12;
 					printf("mode change: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
-					if (mode == videocap_video_mode && (videocap_video_mode == ZZVMODE_720x576 || videocap_video_mode == ZZVMODE_720x480)
-						&& card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] != 0) {
-						init_ns_video_mode(mode);
-					}
-					else {
-						video_mode_init(mode, scalemode, colormode);
-					}
-					video_mode = zdata;
+					video_mode_init(mode, scalemode, colormode);
 					// remember selected video mode
-					//request_video_align = 1;
+					video_mode = zdata;
 					break;
 				}
 				case REG_ZZ_VCAP_MODE:
-					//printf("videocap default mode select: %lx\n", zdata);
+					printf("videocap default mode select: %lx\n", zdata);
 
-					videocap_video_mode = zdata &0xff;
+					videocap_video_mode = zdata & 0xff;
 					break;
 				//case REG_ZZ_SPRITE_X:
 				case REG_ZZ_SPRITE_Y:
@@ -1432,10 +1856,12 @@ int main() {
 				case REG_ZZ_SET_FEATURE:
 					switch (blitter_user1) {
 						case CARD_FEATURE_SECONDARY_PALETTE:
+							printf("[feature] SECONDARY_PALETTE: %d\n",zdata);
 							// Enables/disables the secondary palette on screen split with P96 3.10+
 							card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE] = zdata;
 							break;
 						case CARD_FEATURE_NONSTANDARD_VSYNC:
+							printf("[feature] NONSTANDARD_VSYNC: %d\n",zdata);
 							// Enables/disables the nonstandard refresh rates for scandoubled PAL/NTSC HDMI output modes.
 							if (zdata == 2) {
 								scandoubler_mode_adjust = 2;
@@ -1512,6 +1938,9 @@ int main() {
 				case REG_ZZ_SET_SPLIT_POS:
 					bgbuf_offset = blitter_src_offset;
 					next_split_pos = zdata;
+
+					printf("split_pos: %d\n", split_pos);
+					printf("next_split_pos: %d\n", next_split_pos);
 
 					video_formatter_write(split_pos, MNTVF_OP_REPORT_LINE);
 					break;
@@ -1602,6 +2031,13 @@ int main() {
 					printf("%04x", (unsigned int)(zdata&0xffff));
 					break;
 				}
+				case 0xF4: {
+					// FIXME temp
+					// audio config
+					printf("[enable] audio: %d\n", zdata);
+					interrupt_enabled_audio = zdata & 1;
+					break;
+				}
 
 				// ARM core 2 execution
 				case REG_ZZ_ARM_RUN_HI:
@@ -1686,6 +2122,48 @@ int main() {
 					arm_app_input_event_serial++;
 					arm_app_input_event_ack = 0;
 					break;
+				case REG_ZZ_UNUSED_REG70:
+					{
+						// byteswap audio buffer
+						uint32_t offset = zdata<<8; // *256
+						uint16_t* data = (uint16_t*)(((void*)AUDIO_TX_BUFFER_ADDRESS)+offset);
+
+						if (audio_scale > 1) {
+							// for lower freqs that are divisions of 48000Hz
+							int k = (3840/2)/audio_scale-1;
+							for (int i=3840/2-audio_scale; i>=0; i-=audio_scale) {
+								uint16_t s = __builtin_bswap16(data[k]);
+								data[i] = s;
+								for (int j=1; j<audio_scale; j++) {
+									data[i+j] = s;
+								}
+								k--;
+							}
+						} else {
+							// 48000Hz
+							for (int i=0; i<3840/2; i++) {
+								data[i] = __builtin_bswap16(data[i]);
+							}
+						}
+
+						u32 txcount = XAudioFormatterGetDMATransferCount(&audio_formatter);
+
+						// is the distance of reader (audio dma) and writer (amiga) in the ring buffer too small?
+						// then signal this condition so amiga can adjust
+						if (abs(txcount-offset) < 3840) {
+							audio_buffer_collision = 1;
+							printf("[aswap] ring collision %d\n", abs(txcount-offset));
+						} else {
+							audio_buffer_collision = 0;
+						}
+
+						printf("[aswap] d-a: %ld scl: %d\n",txcount-offset,audio_scale);
+
+						break;
+					}
+				case REG_ZZ_UNUSED_REG74:
+					audio_scale = zdata;
+					break;
 				}
 			}
 
@@ -1709,18 +2187,23 @@ int main() {
 				if (zaddr >= MNT_FB_BASE) {
 					// read from framebuffer / generic memory
 					ptr = mem + zaddr - MNT_FB_BASE;
-				} else if (zaddr < MNT_REG_BASE + 0x2000) {
+				} else if (zaddr < MNT_REG_BASE + 0x6000) {
 					// 0x0000-0x1fff: read from ethernet RX frame
-					// disable INT6 interrupt
-					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
+					// used by Z2
 					ptr = (u8*) (ethernet_current_receive_ptr() + zaddr - (MNT_REG_BASE + 0x2000));
+				} else if (zaddr < MNT_REG_BASE + 0x8000) {
+					// 0x6000-0x7fff: boot ROM
+					// used by Z2
+					//printf("READ ROM: %08lx\n",zaddr);
+					ptr = (u8*) (BOOT_ROM_ADDRESS + zaddr - (MNT_REG_BASE + 0x6000));
 				} else if (zaddr < MNT_REG_BASE + 0xa000) {
-					// FIXME: remove
 					// 0x8000-0x9fff: read from TX frame (unusual)
+					// FIXME: remove
 					ptr = (u8*) (TX_FRAME_ADDRESS + zaddr - (MNT_REG_BASE + 0x8000));
 				} else if (zaddr < MNT_REG_BASE + 0x10000) {
 					// 0xa000-0xafff: read from block device (usb storage)
-					// FIXME: obsolete
+					// used by Z2
+					ptr = (u8*) (USB_BLOCK_STORAGE_ADDRESS + zaddr - (MNT_REG_BASE + 0xa000));
 				}
 
 				if (z3) {
@@ -1731,10 +2214,18 @@ int main() {
 					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1,
 							b1 | b2 | b3 | b4);
 				} else {
-					u16 ubyte = ptr[0] << 8;
-					u16 lbyte = ptr[1];
-					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1,
-							ubyte | lbyte);
+					if (zaddr >= MNT_REG_BASE + 0x6000 && zaddr < MNT_REG_BASE + 0x8000) {
+						u16 ubyte = ptr[0] << 8;
+						u16 lbyte = ptr[1];
+						//printf("READ ROM: [%04x]",ubyte|lbyte);
+						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1,
+								ubyte | lbyte);
+					} else {
+						u16 ubyte = ptr[0] << 8;
+						u16 lbyte = ptr[1];
+						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1,
+								ubyte | lbyte);
+					}
 				}
 			} else if (zaddr >= MNT_REG_BASE) {
 				// read ARM "register"
@@ -1790,6 +2281,17 @@ int main() {
 						data = ((int16_t)(xadc_get_int_voltage()*100.0)) << 16;
 						break;
 					}
+					case REG_ZZ_CONFIG: {
+						//printf("read 0x04: a: %d e: %d\n", interrupt_waiting_audio, interrupt_waiting_ethernet);
+						data = ((interrupt_waiting_audio<<1)|(interrupt_waiting_ethernet))<<16;
+						break;
+					}
+					case REG_ZZ_UNUSED_REG70: {
+						// misc status bits
+						//printf("read 0x70: %d\n", audio_buffer_collision);
+						data = (audio_buffer_collision)<<16;
+						break;
+					}
 				}
 
 				if (z3) {
@@ -1811,73 +2313,16 @@ int main() {
 		} else {
 			// there are no read/write requests, we can do other housekeeping
 
-			int videocap_enabled = (zstate_raw & (1 << 23));
-			int videocap_ntsc = (zstate_raw & (1<<22));
+			ethernet_task();
 
-			// FIXME magic constant
-			if (videocap_enabled && framebuffer_pan_offset >= 0xe00000) {
-				if (sprite_enabled) {
-					sprite_hide();
-				}
-
-				if (!videocap_enabled_old) {
-					videocap_area_clear();
-					videocap_ntsc_old = 0;
-				}
-
-				if (videocap_ntsc != videocap_ntsc_old) {
-					// change between ntsc+pal
-					videocap_area_clear();
-
-					if (videocap_ntsc) {
-						framebuffer_pan_offset = 0x00e00000;
-						framebuffer_pan_width = 0;
-						if (card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] != 0) {
-							init_ns_video_mode(ZZVMODE_720x480);
-						} else {
-							video_mode_init(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT);
-						}
-					} else {
-						// PAL
-						reset_default_videocap_pan();
-						framebuffer_pan_width = 0;
-						framebuffer_pan_offset = default_pan_offset;
-						if (videocap_video_mode == ZZVMODE_720x576 && card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] != 0) {
-							init_ns_video_mode(ZZVMODE_720x576);
-						} else {
-							video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
-						}
-					}
-				}
-				videocap_ntsc_old = videocap_ntsc;
-
-				int interlace = !!(zstate_raw & (1 << 24));
-				if (interlace != interlace_old) {
-					// interlace has changed, we need to reconfigure vdma for the new screen height
-					vmode_vdiv = 2;
-					if (interlace) {
-						vmode_vdiv = 1;
-					}
-					videocap_area_clear();
-					init_vdma(vmode_hsize, vmode_vsize, 1, vmode_vdiv, (u32)framebuffer + framebuffer_pan_offset);
-					video_formatter_valign();
-					printf("videocap interlace mode changed to %d.\n", interlace);
-				}
-				interlace_old = interlace;
-			}
-			else {
-				if(!sprite_enabled)
-					sprite_enabled = 1;
-			}
-
-			if (videocap_enabled_old != videocap_enabled) {
+			// FIXME unclear
+			/*if (videocap_enabled_old != videocap_enabled) {
 				if (!videocap_enabled && rtg_pan_offset != 0)
 					framebuffer_pan_offset = rtg_pan_offset;
-				if (framebuffer_pan_offset >= 0xe00000) {
-					videocap_area_clear();
-				}
+
+				videocap_area_clear();
 				videocap_enabled_old = videocap_enabled;
-			}
+			}*/
 
 			if (zstate == 0) {
 				// RESET
@@ -1909,14 +2354,12 @@ int main() {
 		// check for queued up ethernet frames
 		int ethernet_backlog = ethernet_get_backlog();
 		if (ethernet_backlog > 0 && backlog_nag_counter > 5000) {
-			// interrupt amiga (trigger int6/2)
-			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 1);
-			usleep(1);
-			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
+			interrupt_signal_ethernet = 1;
+			interrupt_waiting_ethernet = 1;
 			backlog_nag_counter = 0;
 		}
 
-		if (interrupt_enabled && ethernet_backlog > 0) {
+		if (interrupt_enabled_ethernet && ethernet_backlog > 0) {
 			backlog_nag_counter++;
 		}
 	}
