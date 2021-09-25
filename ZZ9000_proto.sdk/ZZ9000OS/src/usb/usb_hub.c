@@ -115,7 +115,6 @@ int usb_get_port_status(struct usb_device *dev, int port, void *data)
 	return ret;
 }
 
-
 static void usb_hub_power_on(struct usb_hub_device *hub)
 {
 	int i;
@@ -124,7 +123,7 @@ static void usb_hub_power_on(struct usb_hub_device *hub)
 
 	dev = hub->pusb_dev;
 
-	printf("[usb-hub] enabling power on all ports\n");
+	//printf("[usb-hub] enabling power on all ports\n");
 	for (i = 0; i < dev->maxchild; i++) {
 		usb_set_port_feature(dev, i + 1, USB_PORT_FEAT_POWER);
 		//printf("port %d returns %lX\n", i + 1, dev->status);
@@ -297,10 +296,10 @@ int usb_hub_port_connect_change(struct usb_device *dev, int port)
 	}
 
 	portstatus = le16_to_cpu(portsts->wPortStatus);
-	printf("[usb-hub] portstatus %x, change %x, %s\n",
+	/*printf("[usb-hub] portstatus %x, change %x, %s\n",
 	      portstatus,
 	      le16_to_cpu(portsts->wPortChange),
-	      portspeed(portstatus));
+	      portspeed(portstatus));*/
 
 	/* Clear the connection change status */
 	usb_clear_port_feature(dev, port + 1, USB_PORT_FEAT_C_CONNECTION);
@@ -604,15 +603,15 @@ static int usb_hub_configure(struct usb_device *dev)
 			descriptor->u.hs.PortPowerCtrlMask[i];
 
 	dev->maxchild = descriptor->bNbrPorts;
-	printf("[usb-hub] %d ports detected\n", dev->maxchild);
+	//printf("[usb-hub] %d ports detected\n", dev->maxchild);
 
 	hubCharacteristics = get_unaligned(&hub->desc.wHubCharacteristics);
 	switch (hubCharacteristics & HUB_CHAR_LPSM) {
 	case 0x00:
-		printf("[usb-hub] ganged power switching\n");
+		//printf("[usb-hub] ganged power switching\n");
 		break;
 	case 0x01:
-		printf("[usb-hub] individual port power switching\n");
+		//printf("[usb-hub] individual port power switching\n");
 		break;
 	case 0x02:
 	case 0x03:
@@ -620,12 +619,12 @@ static int usb_hub_configure(struct usb_device *dev)
 		break;
 	}
 
-	if (hubCharacteristics & HUB_CHAR_COMPOUND)
-		printf("[usb-hub] part of a compound device\n");
-	else
-		printf("[usb-hub] standalone hub\n");
+	//if (hubCharacteristics & HUB_CHAR_COMPOUND)
+	//	printf("[usb-hub] part of a compound device\n");
+	//else
+	//	printf("[usb-hub] standalone hub\n");
 
-	switch (hubCharacteristics & HUB_CHAR_OCPM) {
+	/*switch (hubCharacteristics & HUB_CHAR_OCPM) {
 	case 0x00:
 		printf("[usb-hub] global over-current protection\n");
 		break;
@@ -636,7 +635,7 @@ static int usb_hub_configure(struct usb_device *dev)
 	case 0x18:
 		printf("[usb-hub] no over-current protection\n");
 		break;
-	}
+	}*/
 
 	switch (dev->descriptor.bDeviceProtocol) {
 	case USB_HUB_PR_FS:
@@ -667,36 +666,36 @@ static int usb_hub_configure(struct usb_device *dev)
 	case HUB_TTTT_8_BITS:
 		if (dev->descriptor.bDeviceProtocol != 0) {
 			hub->tt.think_time = 666;
-			printf("[usb-hub] TT requires at most %d FS bit times (%d ns)\n",
-			      8, hub->tt.think_time);
+			//printf("[usb-hub] TT requires at most %d FS bit times (%d ns)\n",
+			//      8, hub->tt.think_time);
 		}
 		break;
 	case HUB_TTTT_16_BITS:
 		hub->tt.think_time = 666 * 2;
-		printf("[usb-hub] TT requires at most %d FS bit times (%d ns)\n",
-		      16, hub->tt.think_time);
+		//printf("[usb-hub] TT requires at most %d FS bit times (%d ns)\n",
+		//      16, hub->tt.think_time);
 		break;
 	case HUB_TTTT_24_BITS:
 		hub->tt.think_time = 666 * 3;
-		printf("[usb-hub] TT requires at most %d FS bit times (%d ns)\n",
-		      24, hub->tt.think_time);
+		//printf("[usb-hub] TT requires at most %d FS bit times (%d ns)\n",
+		//      24, hub->tt.think_time);
 		break;
 	case HUB_TTTT_32_BITS:
 		hub->tt.think_time = 666 * 4;
-		printf("[usb-hub] TT requires at most %d FS bit times (%d ns)\n",
-		      32, hub->tt.think_time);
+		//printf("[usb-hub] TT requires at most %d FS bit times (%d ns)\n",
+		//      32, hub->tt.think_time);
 		break;
 	}
 
-	printf("[usb-hub] power on to power good time: %dms\n",
+	/*printf("[usb-hub] power on to power good time: %dms\n",
 	      descriptor->bPwrOn2PwrGood * 2);
 	printf("[usb-hub] hub controller current requirement: %dmA\n",
-	      descriptor->bHubContrCurrent);
+	      descriptor->bHubContrCurrent);*/
 
-	for (i = 0; i < dev->maxchild; i++)
+	/*for (i = 0; i < dev->maxchild; i++)
 		printf("[usb-hub] port %d is%s removable\n", i + 1,
 		      hub->desc.u.hs.DeviceRemovable[(i + 1) / 8] & \
-		      (1 << ((i + 1) % 8)) ? " not" : "");
+		      (1 << ((i + 1) % 8)) ? " not" : "");*/
 
 	if (sizeof(struct usb_hub_status) > USB_BUFSIZ) {
 		printf("usb_hub_configure: failed to get Status - " \
