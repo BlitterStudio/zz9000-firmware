@@ -1159,6 +1159,7 @@ void handle_amiga_reset() {
 	framebuffer_pan_width = 0;
 	framebuffer_pan_offset = default_pan_offset;
 	rtg_pan_offset = 0;
+	next_split_pos = split_pos = 0;
 
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
 	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
