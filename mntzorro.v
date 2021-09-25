@@ -931,7 +931,14 @@ module MNTZorro_v0_1_S00_AXI
 
   (* mark_debug = "true" *) reg [7:0] zorro_state = COLD;
   reg [7:0] dtack_counter;
+`ifdef ZORRO2
+  // experimentally found for TF536
+  reg [5:0] dtack_timeout = 'h02; // number of cycles before we turn off our dtack signal
+`else
   reg [5:0] dtack_timeout = 6; // number of cycles before we turn off our dtack signal
+`endif
+  //reg [7:0] dataout_time = 'h02;
+
   reg [23:0] last_addr;
   reg [23:0] last_read_addr;
   reg [15:0] last_data;
@@ -1671,8 +1678,8 @@ module MNTZorro_v0_1_S00_AXI
                 8'h04: data_out <= 'b1111_1111_1111_1111; // product number
                 8'h06: data_out <= 'b1100_1111_1111_1111; // (3)
 
-                //8'h08: data_out <= 'b1110_1111_1111_1111; // flags inverted 0011
-                //8'h0a: data_out <= 'b1110_1111_1111_1111; // inverted 0001 = OS sized
+                //8'h08: data_out <= 'b1111_1111_1111_1111; // flags inverted 0000
+                //8'h0a: data_out <= 'b1111_1111_1111_1111; // inverted 0000 = log=phys
 
                 8'h10: data_out <= 'b1001_1111_1111_1111; // manufacturer high byte inverted (02)
                 8'h12: data_out <= 'b0010_1111_1111_1111; //
@@ -1818,6 +1825,10 @@ module MNTZorro_v0_1_S00_AXI
         end
         WAIT_READ2C: begin
           zorro_state <= WAIT_READ2D;
+          //if (dtack_counter>dataout_time) // FIXME tune this
+          //  zorro_state <= WAIT_READ2D;
+
+          dtack_counter <= dtack_counter + 1'b1;
         end
         WAIT_READ2D: begin
           dtack_counter <= 0;
@@ -1874,9 +1885,8 @@ module MNTZorro_v0_1_S00_AXI
           m00_axi_wvalid_z3 <= 0;
           z_ovr <= 0;
 
-          // FIXME
           dtack_counter <= dtack_counter + 1'b1;
-          if (dtack_counter >= 10) begin
+          if (dtack_counter >= dtack_timeout) begin
             dtack <= 0;
           end
 
@@ -2202,6 +2212,7 @@ module MNTZorro_v0_1_S00_AXI
             'h12: videocap_address[15:0] <= regdata_in[15:0];
             'h14: videocap_pitch <= regdata_in[15:0];
             'h20: if (regdata_in[5:0]>0) dtack_timeout <= regdata_in[5:0];
+            //'h24: dataout_time[7:0]     <= regdata_in[7:0];
             //'h14: zorro_interrupt <= regdata_in[0];
             //'h10: E7M_PSINCDEC <= regdata_in[0];
             //'h12: E7M_PSEN     <= regdata_in[0];
