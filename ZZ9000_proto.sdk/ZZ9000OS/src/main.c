@@ -533,7 +533,6 @@ uint8_t card_feature_enabled[CARD_FEATURE_NUM];
 uint8_t scandoubler_mode_adjust = 0;
 
 u32 framebuffer_pan_offset = 0;
-u32 rtg_pan_offset = 0;
 u32 framebuffer_pan_width = 0;
 u32 framebuffer_color_format = 0;
 u32 blitter_colormode = MNTVA_COLOR_32BIT;
@@ -948,10 +947,12 @@ static int videocap_video_mode = ZZVMODE_800x600;
 static int video_mode = ZZVMODE_800x600 | 2 << 12 | MNTVA_COLOR_32BIT << 8;
 //static int default_pan_offset = 0x00e00bf8;
 //static int default_pan_offset = 0x00e008d8;
-static int default_pan_offset = 0x00dff2f8;
+static int default_pan_offset_pal_800x600 = 0x00dff2f8;
+static int default_pan_offset_pal = 0x00e00000;
+static int default_pan_offset_ntsc = 0x00e00000;
 static int interlace_old = 0;
 static int videocap_ntsc_old = 0;
-static int videocap_enabled_old = 1;
+static int videocap_enabled_old = 0;
 
 static char usb_storage_available = 0;
 static uint32_t usb_storage_read_block = 0;
@@ -974,15 +975,6 @@ uint32_t debug_lowlevel = 0;
 
 void videocap_area_clear() {
 	fb_fill(0x00dff000 / 4);
-}
-
-void reset_default_videocap_pan(int ntsc) {
-	if (!ntsc && videocap_video_mode == ZZVMODE_800x600) {
-		//default_pan_offset = 0x00e00bf8;
-		default_pan_offset = 0x00dff2f8;
-	} else {
-		default_pan_offset = 0x00e00000;
-	}
 }
 
 #define INTC_INTERRUPT_ID_0 61 // IRQ_F2P[0:0]
@@ -1048,25 +1040,31 @@ void isr0 (void *dummy) {
 
 				if (videocap_ntsc) {
 					// NTSC
-					reset_default_videocap_pan(1);
+					printf("videocap: ntsc\n");
 					framebuffer_pan_width = 0;
-					framebuffer_pan_offset = default_pan_offset;
+					framebuffer_pan_offset = default_pan_offset_ntsc;
 					if (card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
 						init_ns_video_mode(ZZVMODE_720x480);
 					} else {
-						video_mode_init(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT);
+						//video_mode_init(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT);
+						video_mode_init(ZZVMODE_800x600, 2, MNTVA_COLOR_32BIT);
 					}
 				} else {
 					// PAL
-					reset_default_videocap_pan(0);
+					printf("videocap: pal\n");
 					framebuffer_pan_width = 0;
-					framebuffer_pan_offset = default_pan_offset;
+					if (videocap_video_mode == ZZVMODE_800x600) {
+						framebuffer_pan_offset = default_pan_offset_pal_800x600;
+					} else {
+						framebuffer_pan_offset = default_pan_offset_pal;
+					}
 					if (videocap_video_mode == ZZVMODE_720x576 && card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
 						init_ns_video_mode(ZZVMODE_720x576);
 					} else {
 						video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
 					}
 				}
+				videocap_reset = 1;
 			}
 
 			if (interlace != interlace_old || videocap_reset) {
@@ -1157,8 +1155,7 @@ void init_ns_video_mode(uint32_t mode_num) {
 
 void handle_amiga_reset() {
 	framebuffer_pan_width = 0;
-	framebuffer_pan_offset = default_pan_offset;
-	rtg_pan_offset = 0;
+	framebuffer_pan_offset = default_pan_offset_pal_800x600;
 	next_split_pos = split_pos = 0;
 
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
@@ -1177,14 +1174,6 @@ void handle_amiga_reset() {
 	printf("   /_____/_____|/_/  \\___/ \\___/ \\___/ \n\n");
 
 	//usleep(10000);
-
-	// scalemode 2 (vertical doubling)
-	/*if ((videocap_video_mode == ZZVMODE_720x576 || videocap_video_mode == ZZVMODE_720x480) && card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] != 0) {
-		init_ns_video_mode(videocap_video_mode);
-	} else {
-		video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
-	}
-	video_mode = videocap_video_mode | 2 << 12 | MNTVA_COLOR_32BIT << 8;*/
 
 	sprite_reset();
 
@@ -1561,7 +1550,6 @@ int main() {
 					if (split_pos == 0) {
 						framebuffer_pan_offset += (rect_y1 * (framebuffer_pan_width << framebuffer_color_format));
 					}
-					rtg_pan_offset = framebuffer_pan_offset;
 					break;
 
 				case REG_ZZ_BLIT_SRC_HI:
@@ -2315,15 +2303,6 @@ int main() {
 			// there are no read/write requests, we can do other housekeeping
 
 			ethernet_task();
-
-			// FIXME unclear
-			/*if (videocap_enabled_old != videocap_enabled) {
-				if (!videocap_enabled && rtg_pan_offset != 0)
-					framebuffer_pan_offset = rtg_pan_offset;
-
-				videocap_area_clear();
-				videocap_enabled_old = videocap_enabled;
-			}*/
 
 			if (zstate == 0) {
 				// RESET

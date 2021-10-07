@@ -7,7 +7,6 @@ extern u32* framebuffer;
 extern u32 bgbuf_offset;
 extern u32 framebuffer_color_format;
 extern u32 framebuffer_pan_offset;
-extern u32 rtg_pan_offset;
 extern u32 framebuffer_pan_width;
 extern u32 framebuffer_pan_offset_old;
 extern u32 request_video_align;
@@ -253,7 +252,6 @@ void handle_blitter_dma_op(uint16_t zdata)
             if (split_pos == 0) {
                 framebuffer_pan_offset += (data->y[0] * (framebuffer_pan_width << framebuffer_color_format));
             }
-            rtg_pan_offset = framebuffer_pan_offset;
             break;
 
         case OP_SET_SPLIT_POS:
