@@ -533,7 +533,6 @@ uint8_t card_feature_enabled[CARD_FEATURE_NUM];
 uint8_t scandoubler_mode_adjust = 0;
 
 u32 framebuffer_pan_offset = 0;
-u32 rtg_pan_offset = 0;
 u32 framebuffer_pan_width = 0;
 u32 framebuffer_color_format = 0;
 u32 blitter_colormode = MNTVA_COLOR_32BIT;
@@ -714,22 +713,24 @@ void pixelclock_init_2(struct zz_video_mode *mode) {
 #define mntzorro_write(BaseAddress, RegOffset, Data) \
   	Xil_Out32((BaseAddress) + (RegOffset), (u32)(Data))
 
+#define VF_DLY ;
+
+// ONLY isr0 is allowed to call this!
 void video_formatter_valign() {
 	// vertical alignment
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, 1);
-	usleep(1);
+	VF_DLY;
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0x80000000 + 0x5); // OP_VSYNC
-	usleep(1);
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, 0);
-	usleep(1);
+	VF_DLY;
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0x80000000); // NOP
-	usleep(1);
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0); // NOP
-	usleep(1);
+	VF_DLY;
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0); // clear
+	VF_DLY;
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, 0); // unlock access, NOP
+	VF_DLY;
 }
 
-#define VF_DLY ;
-
+// ONLY isr0 is allowed to call this!
 void video_formatter_write(uint32_t data, uint16_t op) {
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, data);
 	VF_DLY;
@@ -739,7 +740,7 @@ void video_formatter_write(uint32_t data, uint16_t op) {
 	VF_DLY;
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0); // clear
 	VF_DLY;
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, 0); // clear
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, 0); // unlock access, NOP
 	VF_DLY;
 }
 
@@ -845,7 +846,6 @@ int16_t sprite_y = 0, sprite_y_adj = 0, sprite_y_base = 0;
 int16_t sprite_x_offset = 0;
 int16_t sprite_y_offset = 0;
 
-uint16_t sprite_enabled = 0;
 uint8_t sprite_width  = 16;
 uint8_t sprite_height = 16;
 
@@ -855,52 +855,120 @@ int16_t sprite_clip_x = 0, sprite_clip_y = 0;
 
 uint32_t sprite_colors[4] = { 0x00ff00ff, 0x00000000, 0x00000000, 0x00000000 };
 
-uint8_t sprite_template[16*16] = {
-		0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,
-		0,0,0,3,3,1,1,0,0,0,0,0,0,0,0,0,
-		0,0,0,2,3,3,3,1,1,0,0,0,0,0,0,0,
-		0,0,0,2,3,3,3,3,3,1,1,0,0,0,0,0,
-		0,0,0,0,2,3,3,3,3,3,3,1,1,0,0,0,
-		0,0,0,0,2,3,3,3,3,3,3,3,3,1,1,0,
-		0,0,0,0,0,2,3,3,3,3,3,3,3,3,2,0,
-		0,0,0,0,0,2,3,3,3,3,3,3,3,2,2,0,
-		0,0,0,0,0,0,2,3,3,3,3,3,3,2,0,0,
-		0,0,0,0,0,0,2,3,3,3,3,3,3,1,0,0,
-		0,0,0,0,0,0,0,2,3,3,2,2,3,3,1,0,
-		0,0,0,0,0,0,0,2,3,2,2,2,2,3,3,1,
-		0,0,0,0,0,0,0,0,2,2,0,0,2,2,3,2,
-		0,0,0,0,0,0,0,0,2,0,0,0,0,2,2,2,
-		0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,
-		0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-};
+int sprite_request_update_pos = 0;
+int sprite_request_update_data = 0;
+int sprite_request_show = 0;
+int sprite_request_hide = 0;
+int sprite_request_pos_x = 0;
+int sprite_request_pos_y = 0;
+int sprite_showing = 0;
+int split_request_pos = 0;
 
-void sprite_hide() {
-	sprite_x = 2000;
-	sprite_y = 2000;
-	sprite_enabled = 0;
-	video_formatter_write((sprite_y << 16) | sprite_x, MNTVF_OP_SPRITE_XY);
+// FIXME: move all sprite and video formatter related things to another file
+void update_hw_sprite(uint8_t *data, uint32_t *colors, uint16_t w, uint16_t h)
+{
+	uint8_t cur_bit = 0x80;
+	uint8_t cur_color = 0, out_pos = 0, iter_offset = 0;
+	uint8_t line_pitch = (w / 8) * 2;
+	uint8_t cur_bytes[8];
+
+	for (uint8_t y_line = 0; y_line < h; y_line++) {
+		if (w <= 16) {
+			cur_bytes[0] = data[y_line * line_pitch];
+			cur_bytes[1] = data[(y_line * line_pitch) + 2];
+			cur_bytes[2] = data[(y_line * line_pitch) + 1];
+			cur_bytes[3] = data[(y_line * line_pitch) + 3];
+		}
+		else {
+			cur_bytes[0] = data[y_line * line_pitch];
+			cur_bytes[1] = data[(y_line * line_pitch) + 4];
+			cur_bytes[2] = data[(y_line * line_pitch) + 1];
+			cur_bytes[3] = data[(y_line * line_pitch) + 5];
+			cur_bytes[4] = data[(y_line * line_pitch) + 2];
+			cur_bytes[5] = data[(y_line * line_pitch) + 6];
+			cur_bytes[6] = data[(y_line * line_pitch) + 3];
+			cur_bytes[7] = data[(y_line * line_pitch) + 7];
+		}
+
+		while (out_pos < 8) {
+			for (uint8_t i = 0; i < line_pitch; i += 2) {
+				cur_color = (cur_bytes[i] & cur_bit) ? 1 : 0;
+				if (cur_bytes[i + 1] & cur_bit) cur_color += 2;
+
+				sprite_buf[(y_line * 32) + out_pos + iter_offset] = colors[cur_color] & 0x00ffffff;
+				iter_offset += 8;
+			}
+
+			out_pos++;
+			cur_bit >>= 1;
+			iter_offset = 0;
+		}
+		cur_bit = 0x80;
+		out_pos = 0;
+	}
+
+	sprite_request_update_data = 1;
 }
 
-void sprite_reset() {
-	sprite_hide();
+void update_hw_sprite_clut(uint8_t *data_, uint8_t *colors, uint16_t w, uint16_t h, uint8_t keycolor)
+{
+	uint8_t *data = data_;
+	uint8_t color[4];
 
-	for (int y=0; y<16; y++) {
-		for (int x=0; x<16; x++) {
-			uint8_t addr = y*16+x;
-			uint32_t data = 0xff00ff;
-			if (sprite_template[y*16+x]==1) {
-				data = 0xffffff;
-			} else if (sprite_template[y*16+x]==2) {
-				data = 0x000000;
-			} else if (sprite_template[y*16+x]==3) {
-				data = (255-15*y)<<16;
+	for (int y = 0; y < h && y < 48; y++) {
+		for (int x = 0; x < w && x < 32; x++) {
+			if (data[x] == keycolor) {
+				*((uint32_t *)color) = 0x00ff00ff;
 			}
-			video_formatter_write((addr << 24) | data, MNTVF_OP_SPRITE_DATA);
+			else {
+				color[0] = colors[(data[x] * 3)+2];
+				color[1] = colors[(data[x] * 3)+1];
+				color[2] = colors[(data[x] * 3)];
+				color[3] = 0x00;
+				if (*((uint32_t *)color) == 0x00FF00FF)
+					*((uint32_t *)color) = 0x00FE00FE;
+			}
+			sprite_buf[(y * 32) + x] = *((uint32_t *)color);
 		}
+		data += w;
+	}
+
+	sprite_request_update_data = 1;
+}
+
+void clear_hw_sprite()
+{
+	for (uint16_t i = 0; i < 32 * 48; i++) {
+		sprite_buf[i] = 0x00ff00ff;
+	}
+	//sprite_request_update_data = 1;
+}
+
+void _clip_hw_sprite(int16_t offset_x, int16_t offset_y)
+{
+	uint16_t xo = 0, yo = 0;
+	if (offset_x < 0)
+		xo = -offset_x;
+	if (offset_y < 0)
+		yo = -offset_y;
+
+	for (int y = 0; y < 48; y++) {
+		//printf("CLIP %02d: ",y);
+		for (int x = 0; x < 32; x++) {
+			video_formatter_write((y * 32) + x, 14);
+			if (x < 32 - xo && y < 48 - yo) {
+				//printf("%06lx", sprite_buf[((y + yo) * 32) + (x + xo)] & 0x00ffffff);
+				video_formatter_write(sprite_buf[((y + yo) * 32) + (x + xo)] & 0x00ffffff, 15);
+			} else {
+				//printf("%06lx", 0x00ff00ff);
+				video_formatter_write(0x00ff00ff, 15);
+			}
+		}
+		//printf("\n");
 	}
 }
 
-void update_hw_sprite_pos(int16_t x, int16_t y) {
+void _update_hw_sprite_pos(int16_t x, int16_t y) {
 	sprite_x = x - sprite_x_offset + 1;
 	// horizontally doubled mode
 	if (scalemode & 1)
@@ -918,7 +986,7 @@ void update_hw_sprite_pos(int16_t x, int16_t y) {
 
 	if (sprite_x < 0 || sprite_y < 0) {
 		if (sprite_clip_x != sprite_x || sprite_clip_y != sprite_y) {
-			clip_hw_sprite((sprite_x < 0) ? sprite_x : 0, (sprite_y < 0) ? sprite_y : 0);
+			_clip_hw_sprite((sprite_x < 0) ? sprite_x : 0, (sprite_y < 0) ? sprite_y : 0);
 		}
 		sprite_clipped = 1;
 		if (sprite_x < 0) {
@@ -931,10 +999,15 @@ void update_hw_sprite_pos(int16_t x, int16_t y) {
 		}
 	}
 	else if (sprite_clipped && sprite_x >= 0 && sprite_y >= 0) {
-		clip_hw_sprite(0, 0);
+		_clip_hw_sprite(0, 0);
 		sprite_clipped = 0;
 	}
-	video_formatter_write((sprite_y_adj << 16) | sprite_x_adj, MNTVF_OP_SPRITE_XY);
+}
+
+void update_hw_sprite_pos(int16_t x, int16_t y) {
+	sprite_request_pos_x = x;
+	sprite_request_pos_y = y;
+	sprite_request_update_pos = 1;
 }
 
 // this mode can be changed by amiga software to select a different resolution / framerate for
@@ -946,12 +1019,12 @@ void update_hw_sprite_pos(int16_t x, int16_t y) {
 // default to more compatible 60hz mode
 static int videocap_video_mode = ZZVMODE_800x600;
 static int video_mode = ZZVMODE_800x600 | 2 << 12 | MNTVA_COLOR_32BIT << 8;
-//static int default_pan_offset = 0x00e00bf8;
-//static int default_pan_offset = 0x00e008d8;
-static int default_pan_offset = 0x00dff2f8;
+static int default_pan_offset_pal_800x600 = 0x00dff2f8;
+static int default_pan_offset_pal = 0x00e00000;
+static int default_pan_offset_ntsc = 0x00e00000;
 static int interlace_old = 0;
 static int videocap_ntsc_old = 0;
-static int videocap_enabled_old = 1;
+static int videocap_enabled_old = 0;
 
 static char usb_storage_available = 0;
 static uint32_t usb_storage_read_block = 0;
@@ -976,15 +1049,6 @@ void videocap_area_clear() {
 	fb_fill(0x00dff000 / 4);
 }
 
-void reset_default_videocap_pan(int ntsc) {
-	if (!ntsc && videocap_video_mode == ZZVMODE_800x600) {
-		//default_pan_offset = 0x00e00bf8;
-		default_pan_offset = 0x00dff2f8;
-	} else {
-		default_pan_offset = 0x00e00000;
-	}
-}
-
 #define INTC_INTERRUPT_ID_0 61 // IRQ_F2P[0:0]
 #define INTC_INTERRUPT_ID_1 62 // IRQ_F2P[1:1]
 
@@ -1002,7 +1066,6 @@ void isr0 (void *dummy) {
 	int videocap_ntsc = (zstate & (1 << 22));
 	int interlace = !!(zstate & (1 << 24));
 
-	// videocap vdma handling is still in main loop
 	if (!videocap_enabled) {
 		if (!vblank) {
 			// if this is not the vblank interrupt, set up the split buffer
@@ -1021,8 +1084,6 @@ void isr0 (void *dummy) {
 				video_formatter_write(0, MNTVF_OP_PALETTE_SEL);
 			}
 			init_vdma(vmode_hsize, vmode_vsize, vmode_hdiv, vmode_vdiv, (u32)framebuffer + framebuffer_pan_offset);
-
-			split_pos = next_split_pos;
 		}
 	} else {
 		// FIXME magic constant
@@ -1038,35 +1099,45 @@ void isr0 (void *dummy) {
 				videocap_reset = 1;
 			}
 
-			if (sprite_enabled) {
-				sprite_hide();
+			if (sprite_showing) {
 			}
 
 			if (videocap_ntsc != videocap_ntsc_old || videocap_reset) {
 				// change between ntsc+pal
 				videocap_area_clear();
 
+				// hide sprite
+				sprite_request_hide = 1;
+
 				if (videocap_ntsc) {
 					// NTSC
-					reset_default_videocap_pan(1);
+					printf("videocap: ntsc\n");
 					framebuffer_pan_width = 0;
-					framebuffer_pan_offset = default_pan_offset;
+					framebuffer_pan_offset = default_pan_offset_ntsc;
 					if (card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
 						init_ns_video_mode(ZZVMODE_720x480);
 					} else {
 						video_mode_init(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT);
+
+						// use this if there are problems with 720x480
+						//video_mode_init(ZZVMODE_800x600, 2, MNTVA_COLOR_32BIT);
 					}
 				} else {
 					// PAL
-					reset_default_videocap_pan(0);
+					printf("videocap: pal\n");
 					framebuffer_pan_width = 0;
-					framebuffer_pan_offset = default_pan_offset;
+					if (videocap_video_mode == ZZVMODE_800x600) {
+						framebuffer_pan_offset = default_pan_offset_pal_800x600;
+					} else {
+						framebuffer_pan_offset = default_pan_offset_pal;
+					}
 					if (videocap_video_mode == ZZVMODE_720x576 && card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
 						init_ns_video_mode(ZZVMODE_720x576);
 					} else {
 						video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
 					}
 				}
+				videocap_reset = 1;
 			}
 
 			if (interlace != interlace_old || videocap_reset) {
@@ -1106,13 +1177,39 @@ void isr0 (void *dummy) {
 			// FIXME legacy behavior
 			interrupt_signal_ethernet = 0;
 		}
+
+		if (sprite_request_show) {
+			sprite_showing = 1;
+			sprite_request_show = 0;
+		}
+
+		if (sprite_request_update_data) {
+			_clip_hw_sprite(0, 0);
+			sprite_request_update_data = 0;
+		}
+
+		if (sprite_request_update_pos) {
+			_update_hw_sprite_pos(sprite_request_pos_x, sprite_request_pos_y);
+			video_formatter_write((sprite_y_adj << 16) | sprite_x_adj, MNTVF_OP_SPRITE_XY);
+			sprite_request_update_pos = 0;
+		}
+
+		if (sprite_request_hide) {
+			sprite_x = 2000;
+			sprite_y = 2000;
+			video_formatter_write((sprite_y << 16) | sprite_x, MNTVF_OP_SPRITE_XY);
+			sprite_showing = 0;
+			sprite_request_hide = 0;
+		}
+
+		// handle screen dragging
+		if (split_request_pos != split_pos) {
+			split_pos = split_request_pos;
+			video_formatter_write(split_pos, MNTVF_OP_REPORT_LINE);
+		}
 	}
 
 	vblank_count++;
-	/*if (vblank_count>100) {
-		printf("[isrv]\n");
-		vblank_count=0;
-	}*/
 }
 
 int fpga_interrupt_init() {
@@ -1157,17 +1254,14 @@ void init_ns_video_mode(uint32_t mode_num) {
 
 void handle_amiga_reset() {
 	framebuffer_pan_width = 0;
-	framebuffer_pan_offset = default_pan_offset;
-	rtg_pan_offset = 0;
-	next_split_pos = split_pos = 0;
+	framebuffer_pan_offset = default_pan_offset_pal_800x600;
+	split_request_pos = 0;
+	sprite_request_hide = 1;
 
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
 	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
 
 	videocap_enabled_old = 0;
-
-	//reset_default_videocap_pan(0);
-	//videocap_area_clear();
 
 	printf("    _______________   ___   ___   ___  \n");
 	printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
@@ -1175,18 +1269,6 @@ void handle_amiga_reset() {
 	printf("     / /   / / \\__, | | | | | | | | | |\n");
 	printf("    / /__ / /__  / /| |_| | |_| | |_| |\n");
 	printf("   /_____/_____|/_/  \\___/ \\___/ \\___/ \n\n");
-
-	//usleep(10000);
-
-	// scalemode 2 (vertical doubling)
-	/*if ((videocap_video_mode == ZZVMODE_720x576 || videocap_video_mode == ZZVMODE_720x480) && card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] != 0) {
-		init_ns_video_mode(videocap_video_mode);
-	} else {
-		video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
-	}
-	video_mode = videocap_video_mode | 2 << 12 | MNTVA_COLOR_32BIT << 8;*/
-
-	sprite_reset();
 
 	usb_storage_available = zz_usb_init();
 
@@ -1198,13 +1280,8 @@ void handle_amiga_reset() {
 	interrupt_enabled_ethernet = 0;
 	interrupt_enabled_audio = 0;
 
+	// FIXME document
 	cur_mem_offset = 0x3500000;
-
-	// reset videocap interlace/ntsc state
-	//interlace_old = -1;
-	//videocap_ntsc_old = -1;
-
-	next_split_pos = 0;
 
 	// FIXME temporary: clear audio buffer on reset
 	memset(AUDIO_TX_BUFFER_ADDRESS, 0, AUDIO_TX_BUFFER_SIZE);
@@ -1561,7 +1638,6 @@ int main() {
 					if (split_pos == 0) {
 						framebuffer_pan_offset += (rect_y1 * (framebuffer_pan_width << framebuffer_color_format));
 					}
-					rtg_pan_offset = framebuffer_pan_offset;
 					break;
 
 				case REG_ZZ_BLIT_SRC_HI:
@@ -1587,7 +1663,7 @@ int main() {
 					if (zdata & 8) {
 						// clear/ack
 						if (zdata & 16) {
-							printf("[clear] eth\n");
+							//printf("[clear] eth\n");
 							interrupt_waiting_ethernet = 0;
 						}
 						if (zdata & 32) {
@@ -1620,7 +1696,7 @@ int main() {
 					break;
 				//case REG_ZZ_SPRITE_X:
 				case REG_ZZ_SPRITE_Y:
-					if (!sprite_enabled)
+					if (!sprite_showing)
 						break;
 
 					sprite_x_base = (int16_t)rect_x1;
@@ -1631,11 +1707,11 @@ int main() {
 					break;
 				case REG_ZZ_SPRITE_BITMAP: {
 					if (zdata == 1) { // Hardware sprite enabled
-						sprite_enabled = 1;
+						sprite_request_show = 1;
 						break;
 					}
 					else if (zdata == 2) { // Hardware sprite disabled
-						sprite_hide();
+						sprite_request_show = 0;
 						break;
 					}
 
@@ -1938,12 +2014,10 @@ int main() {
 
 				case REG_ZZ_SET_SPLIT_POS:
 					bgbuf_offset = blitter_src_offset;
-					next_split_pos = zdata;
+					split_request_pos = zdata;
 
 					printf("split_pos: %d\n", split_pos);
-					printf("next_split_pos: %d\n", next_split_pos);
-
-					video_formatter_write(split_pos, MNTVF_OP_REPORT_LINE);
+					printf("split_request_pos: %d\n", split_request_pos);
 					break;
 
 				// Ethernet
@@ -2315,15 +2389,6 @@ int main() {
 			// there are no read/write requests, we can do other housekeeping
 
 			ethernet_task();
-
-			// FIXME unclear
-			/*if (videocap_enabled_old != videocap_enabled) {
-				if (!videocap_enabled && rtg_pan_offset != 0)
-					framebuffer_pan_offset = rtg_pan_offset;
-
-				videocap_area_clear();
-				videocap_enabled_old = videocap_enabled;
-			}*/
 
 			if (zstate == 0) {
 				// RESET

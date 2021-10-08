@@ -7,7 +7,6 @@ extern u32* framebuffer;
 extern u32 bgbuf_offset;
 extern u32 framebuffer_color_format;
 extern u32 framebuffer_pan_offset;
-extern u32 rtg_pan_offset;
 extern u32 framebuffer_pan_width;
 extern u32 framebuffer_pan_offset_old;
 extern u32 request_video_align;
@@ -20,9 +19,11 @@ extern int16_t sprite_y, sprite_y_adj, sprite_y_base;
 extern int16_t sprite_x_offset;
 extern int16_t sprite_y_offset;
 extern uint16_t split_pos, next_split_pos;
-extern uint16_t sprite_enabled;
+extern uint16_t sprite_showing;
 extern uint8_t sprite_width;
 extern uint8_t sprite_height;
+
+extern int split_request_pos;
 
 void handle_blitter_dma_op(uint16_t zdata)
 {
@@ -186,7 +187,7 @@ void handle_blitter_dma_op(uint16_t zdata)
             break;
 
         case OP_SPRITE_XY:
-            if (!sprite_enabled)
+            if (!sprite_showing)
                 break;
 
             SWAP16(data->x[0]);     SWAP16(data->y[0]);
@@ -253,16 +254,14 @@ void handle_blitter_dma_op(uint16_t zdata)
             if (split_pos == 0) {
                 framebuffer_pan_offset += (data->y[0] * (framebuffer_pan_width << framebuffer_color_format));
             }
-            rtg_pan_offset = framebuffer_pan_offset;
             break;
 
         case OP_SET_SPLIT_POS:
             SWAP16(data->y[0]);
             SWAP32(data->offset[0]);
             bgbuf_offset = data->offset[0];
-            next_split_pos = data->y[0];
 
-            video_formatter_write(data->y[0], MNTVF_OP_REPORT_LINE);
+            split_request_pos = data->y[0];
             break;
 
         default:

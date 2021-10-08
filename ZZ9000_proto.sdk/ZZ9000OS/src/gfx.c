@@ -29,8 +29,7 @@ void set_fb(uint32_t* fb_, uint32_t pitch) {
 	fb_pitch=pitch;
 }
 
-extern uint32_t* sprite_buf;
-void video_formatter_write(uint32_t data, uint16_t op);
+extern int sprite_request_update_data;
 
 uint8_t color_map_16_to_8[65536];
 
@@ -41,107 +40,6 @@ void *get_color_conversion_table(int index)
 			return (void *)color_map_16_to_8;
 		default:
 			return 0;
-	}
-}
-
-void update_hw_sprite(uint8_t *data, uint32_t *colors, uint16_t w, uint16_t h)
-{
-	uint8_t cur_bit = 0x80;
-	uint8_t cur_color = 0, out_pos = 0, iter_offset = 0;
-	uint8_t line_pitch = (w / 8) * 2;
-	uint8_t cur_bytes[8];
-
-	for (uint8_t y_line = 0; y_line < h; y_line++) {
-		if (w <= 16) {
-			cur_bytes[0] = data[y_line * line_pitch];
-			cur_bytes[1] = data[(y_line * line_pitch) + 2];
-			cur_bytes[2] = data[(y_line * line_pitch) + 1];
-			cur_bytes[3] = data[(y_line * line_pitch) + 3];
-		}
-		else {
-			cur_bytes[0] = data[y_line * line_pitch];
-			cur_bytes[1] = data[(y_line * line_pitch) + 4];
-			cur_bytes[2] = data[(y_line * line_pitch) + 1];
-			cur_bytes[3] = data[(y_line * line_pitch) + 5];
-			cur_bytes[4] = data[(y_line * line_pitch) + 2];
-			cur_bytes[5] = data[(y_line * line_pitch) + 6];
-			cur_bytes[6] = data[(y_line * line_pitch) + 3];
-			cur_bytes[7] = data[(y_line * line_pitch) + 7];
-		}
-
-		while(out_pos < 8) {
-			for (uint8_t i = 0; i < line_pitch; i += 2) {
-				cur_color = (cur_bytes[i] & cur_bit) ? 1 : 0;
-				if (cur_bytes[i + 1] & cur_bit) cur_color += 2;
-
-				sprite_buf[(y_line * 32) + out_pos + iter_offset] = colors[cur_color] & 0x00ffffff;
-
-				video_formatter_write(((y_line * 32) + out_pos + iter_offset), 14);
-				video_formatter_write(colors[cur_color] & 0x00ffffff, 15);
-				iter_offset += 8;
-			}
-
-			out_pos++;
-			cur_bit >>= 1;
-			iter_offset = 0;
-		}
-		cur_bit = 0x80;
-		out_pos = 0;
-	}
-}
-
-void update_hw_sprite_clut(uint8_t *data_, uint8_t *colors, uint16_t w, uint16_t h, uint8_t keycolor)
-{
-	uint8_t *data = data_;
-	uint8_t color[4];
-
-	for (int y = 0; y < h && y < 48; y++) {
-		for (int x = 0; x < w && x < 32; x++) {
-			if (data[x] == keycolor) {
-				*((int *)color) = 0x00ff00ff;
-			}
-			else {
-				//memcpy(&color, &colors[data[x]*3], 3);
-				color[0] = colors[(data[x] * 3)+2];
-				color[1] = colors[(data[x] * 3)+1];
-				color[2] = colors[(data[x] * 3)];
-				color[3] = 0x00;
-				if (*((int *)color) == 0x00FF00FF)
-					*((int *)color) = 0x00FE00FE;
-			}
-			sprite_buf[(y * 32) + x] = *((int *)color);
-			video_formatter_write((y * 32) + x, 14);
-			video_formatter_write(sprite_buf[(y * 32) + x] & 0x00ffffff, 15);
-		}
-		data += w;
-	}
-}
-
-void clip_hw_sprite(int16_t offset_x, int16_t offset_y)
-{
-	uint16_t xo = 0, yo = 0;
-	if (offset_x < 0)
-		xo = -offset_x;
-	if (offset_y < 0)
-		yo = -offset_y;
-
-	for (int y = 0; y < 48; y++) {
-		for (int x = 0; x < 32; x++) {
-			video_formatter_write((y * 32) + x, 14);
-			if (x < 32 - xo && y < 48 - yo)
-				video_formatter_write(sprite_buf[((y + yo) * 32) + (x + xo)] & 0x00ffffff, 15);
-			else
-				video_formatter_write(0x00ff00ff, 15);
-		}
-	}
-}
-
-void clear_hw_sprite()
-{
-	for (uint16_t i = 0; i < 32 * 48; i++) {
-		sprite_buf[i] = 0x00ff00ff;
-		video_formatter_write(i, 14);
-		video_formatter_write(0xff00ff, 15);
 	}
 }
 
