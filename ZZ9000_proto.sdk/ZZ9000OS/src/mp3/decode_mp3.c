@@ -12,8 +12,8 @@ int decode_mp3(char * input_buffer, size_t input_buffer_size, char * output_buff
     mp3dec_ex_t mp3d;
     mp3dec_frame_info_t frame_info;
     memset(&frame_info, 0, sizeof(frame_info));
-    // sets up input_buffer as mp3d->file.buffer
-    int ret = mp3dec_ex_open_buf(&mp3d, input_buffer, input_buffer_size, 0);
+    // // sets up input_buffer as mp3d->file.buffer
+    int ret = mp3dec_ex_open_buf(&mp3d, input_buffer, input_buffer_size, MP3D_DO_NOT_SCAN);
     if (ret) {
       printf("mp3dec_ex_open_buf failed: %d\n", ret);
       exit(ret);
