@@ -36,6 +36,7 @@
 #include "xtime_l.h"
 #include "xil_misc_psreset_api.h"
 #include "xi2stx.h"
+#include "xi2srx.h"
 
 // workaround for typo in xilinx C code
 void Xil_AssertNonVoid() {}
@@ -215,6 +216,59 @@ int adau_write24(u8 i2c_addr, u16 addr, u32 value) {
 	return status;
 }
 
+// for storing 40 bit program words
+int adau_write40(u8 i2c_addr, u16 addr, u8* data) {
+	XIicPs* iic = &Iic2;
+	int status;
+	u8 buffer[7];
+	buffer[0] = addr>>8;
+	buffer[1] = addr&0xff;
+	buffer[2] = data[0];
+	buffer[3] = data[1];
+	buffer[4] = data[2];
+	buffer[5] = data[3];
+	buffer[6] = data[4];
+
+	int timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			printf("ADAU I2C write40 timeout.\n");
+			return -1;
+		}
+	}
+
+	status = XIicPs_MasterSendPolled(iic, buffer, 2+5, i2c_addr);
+	return status;
+}
+
+// for storing 32 bit parameter words
+int adau_write32(u8 i2c_addr, u16 addr, u8* data) {
+	XIicPs* iic = &Iic2;
+	int status;
+	u8 buffer[6];
+	buffer[0] = addr>>8;
+	buffer[1] = addr&0xff;
+	buffer[2] = data[0];
+	buffer[3] = data[1];
+	buffer[4] = data[2];
+	buffer[5] = data[3];
+
+	int timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			printf("ADAU I2C write40 timeout.\n");
+			return -1;
+		}
+	}
+
+	status = XIicPs_MasterSendPolled(iic, buffer, 2+4, i2c_addr);
+	return status;
+}
+
 int adau_read16(u8 i2c_addr, u16 addr, u8* buffer) {
 	XIicPs* iic = &Iic2;
 	int status1;
@@ -391,8 +445,24 @@ void hdmi_ctrl_init(struct zz_video_mode *mode) {
 	}
 }
 
+#include "adau.h"
+
 XI2s_Tx i2s;
+XI2s_Rx i2srx;
 XAudioFormatter audio_formatter;
+XAudioFormatter audio_formatter_rx;
+
+void program_adau(u8* program, u32 program_len, u8* params, u32 param_len) {
+	for (u32 i = 0; i < program_len; i+=5) {
+		int res = adau_write40(0x34, 1024+i/5, &program[i]);
+		printf("[adau_write40] %lx: %d\n", i, res);
+	}
+
+	for (u32 i = 0; i < param_len; i+=4) {
+		int res = adau_write32(0x34, 0+i/4, &params[i]);
+		printf("[adau_write32] %lx: %d\n", i, res);
+	}
+}
 
 void init_adau(u32* audio_buffer) {
 	XIicPs_Config* i2c_config;
@@ -442,6 +512,8 @@ void init_adau(u32* audio_buffer) {
 
 	status = adau_read16(i, 2087, rbuf);
 	printf("[adau] read from 2087: %02x%02x (status: %d)\n", rbuf[0], rbuf[1], status);
+
+	program_adau(Program_Data_IC_1, sizeof(Program_Data_IC_1), Param_Data_IC_1, sizeof(Param_Data_IC_1));
 
 	// TODO: OBP/OLRP
 	u16 MS  = 1<<11; // clock master output
@@ -513,15 +585,59 @@ void init_adau(u32* audio_buffer) {
 
 	XAudioFormatter_InterruptDisable(&audio_formatter, 1<<14); // timeout
 	printf("[adau] XAudioFormatter_InterruptDisable\n");
-	XAudioFormatter_InterruptEnable(&audio_formatter, 1<<13); // IOC
+	XAudioFormatter_InterruptDisable(&audio_formatter, 1<<13); // IOC
 	printf("[adau] XAudioFormatter_InterruptEnable\n");
 
-	XAudioFormatterDMAStart(&audio_formatter);
-	printf("[adau] XAudioFormatterDMAStart done.\n");
+	// set up i2s receiver
 
+	XAudioFormatter_Config* af_config_rx = XAudioFormatter_LookupConfig(XPAR_XAUDIOFORMATTER_1_DEVICE_ID);
+	audio_formatter_rx.BaseAddress = af_config_rx->BaseAddress;
+
+	status = XAudioFormatter_CfgInitialize(&audio_formatter_rx, af_config_rx);
+
+	printf("[adau] AudioFormatter RX cfg status: %d\n", status);
+
+	XAudioFormatter_WriteReg(audio_formatter_rx.BaseAddress,
+			XAUD_FORMATTER_CTRL + XAUD_FORMATTER_S2MM_OFFSET, 0);
+
+	XAudioFormatterHwParams afrx_params;
+	afrx_params.buf_addr = (u32)0x220000; // FIXME
+	afrx_params.bits_per_sample = BIT_DEPTH_16;
+	afrx_params.periods = 8; // 1 second = 192000 bytes
+	afrx_params.active_ch = 2;
+	// must be multiple of 32*channels = 64
+	afrx_params.bytes_per_period = 3840;
+
+	XAudioFormatterSetFsMultiplier(&audio_formatter_rx, 48000*256, 48000);
+	printf("[adau] RX XAudioFormatterSetFsMultiplier\n");
+	XAudioFormatterSetHwParams(&audio_formatter_rx, &afrx_params);
+	printf("[adau] RX XAudioFormatterSetHwParams\n");
+
+	XAudioFormatter_InterruptDisable(&audio_formatter_rx, 1<<14); // timeout
+	printf("[adau] RX XAudioFormatter_InterruptDisable\n");
+	XAudioFormatter_InterruptDisable(&audio_formatter_rx, 1<<13); // IOC
+	/*XAudioFormatter_InterruptEnable(&audio_formatter_rx, 1<<13); // IOC
+	printf("[adau] RX XAudioFormatter_InterruptEnable\n");*/
+
+	XI2srx_Config* i2srx_config = XI2s_Rx_LookupConfig(XPAR_XI2SRX_0_DEVICE_ID);
+	status = XI2s_Rx_CfgInitialize(&i2srx, i2srx_config, i2srx_config->BaseAddress);
+
+	//printf("[adau] I2S_RX cfg status: %d\n", status);
+
+	//printf("[adau] I2S_RX Dwidth: %d\n", i2srx.Config.DWidth);
+	//printf("[adau] I2S_RX MaxNumChannels: %d\n", i2srx.Config.MaxNumChannels);
+
+	XI2s_Rx_Enable(&i2srx, 1);
+	printf("[adau] XI2s_Rx_Enable\n");
+	XAudioFormatterDMAStart(&audio_formatter_rx);
+	printf("[adau] RX XAudioFormatterDMAStart done.\n");
+
+	XAudioFormatter_InterruptEnable(&audio_formatter, 1<<13); // IOC
+	printf("[adau] XAudioFormatter_InterruptEnable\n");
 	XI2s_Tx_Enable(&i2s, 1);
 	printf("[adau] XI2s_Tx_Enable\n");
-
+	XAudioFormatterDMAStart(&audio_formatter);
+	printf("[adau] XAudioFormatterDMAStart done.\n");
 }
 
 XAxiVdma vdma;
@@ -540,12 +656,9 @@ static u32 blitter_dst_offset = 0;
 static u32 blitter_src_offset = 0;
 static u32 vmode_hsize = 800, vmode_vsize = 600, vmode_hdiv = 1, vmode_vdiv = 2;
 
-extern u32 fb_pitch;
+// FIXME
 extern u32 *fb;
 uint8_t stride_div = 1;
-
-//extern uint32_t* fb=0;
-//extern uint32_t fb_pitch=0;
 
 // 32bit: hdiv=1, 16bit: hdiv=2, 8bit: hdiv=4, ...
 int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
@@ -782,16 +895,16 @@ static uint32_t audio_scale = 1;
 int isra_count = 0;
 
 // audio formatter interrupt, triggered whenever a period is completed
-void isr_audio (void *dummy) {
+void isr_audio(void *dummy) {
 	uint32_t val = XAudioFormatter_ReadReg(XPAR_XAUDIOFORMATTER_0_BASEADDR, XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET);
 	val |= (1<<31); // clear irq
 	XAudioFormatter_WriteReg(XPAR_XAUDIOFORMATTER_0_BASEADDR,
 		XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET, val);
 
-	/*if (isra_count++>100) {
+	if (isra_count++>100) {
 		printf("[isra]\n");
 		isra_count = 0;
-	}*/
+	}
 
 	if (interrupt_enabled_audio) {
 		interrupt_waiting_audio = 1;
@@ -801,6 +914,21 @@ void isr_audio (void *dummy) {
 		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
 	} else {
 		interrupt_waiting_audio = 0;
+	}
+}
+
+int israrx_count = 0;
+
+// audio formatter interrupt, triggered whenever a period is completed
+void isr_audio_rx(void *dummy) {
+	uint32_t val = XAudioFormatter_ReadReg(XPAR_XAUDIOFORMATTER_1_BASEADDR, XAUD_FORMATTER_STS + XAUD_FORMATTER_S2MM_OFFSET);
+	val |= (1<<31); // clear irq
+	XAudioFormatter_WriteReg(XPAR_XAUDIOFORMATTER_1_BASEADDR,
+		XAUD_FORMATTER_STS + XAUD_FORMATTER_S2MM_OFFSET, val);
+
+	if (israrx_count++>100) {
+		printf("[isra_rx]\n");
+		israrx_count = 0;
 	}
 }
 
@@ -1022,8 +1150,8 @@ static int video_mode = ZZVMODE_800x600 | 2 << 12 | MNTVA_COLOR_32BIT << 8;
 static int default_pan_offset_pal_800x600 = 0x00dff2f8;
 static int default_pan_offset_pal = 0x00e00000;
 static int default_pan_offset_ntsc = 0x00e00000;
-static int interlace_old = 0;
-static int videocap_ntsc_old = 0;
+static int interlace_old = -1;
+static int videocap_ntsc_old = -1;
 static int videocap_enabled_old = 0;
 
 static char usb_storage_available = 0;
@@ -1051,6 +1179,7 @@ void videocap_area_clear() {
 
 #define INTC_INTERRUPT_ID_0 61 // IRQ_F2P[0:0]
 #define INTC_INTERRUPT_ID_1 62 // IRQ_F2P[1:1]
+#define INTC_INTERRUPT_ID_2 63 // IRQ_F2P[2:2] // FIXME: validate
 
 static int isr_flush_count=0;
 
@@ -1079,7 +1208,7 @@ void isr0 (void *dummy) {
 				init_vdma(vmode_hsize, vmode_vsize, vmode_hdiv, vmode_vdiv, (u32)framebuffer + bgbuf_offset);
 			}
 		} else {
-			// if this is the vblank interrupt, set up the "normal" buffer
+			// if this is the vblank interrupt, set up the "normal" buffer in split mode
 			if (card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE]) {
 				video_formatter_write(0, MNTVF_OP_PALETTE_SEL);
 			}
@@ -1088,6 +1217,7 @@ void isr0 (void *dummy) {
 	} else {
 		// FIXME magic constant
 		if (framebuffer_pan_offset >= 0x00dff000) {
+			// videocap is enabled and
 			// we are looking at the videocap area
 			// so set up the right mode for it
 
@@ -1097,9 +1227,6 @@ void isr0 (void *dummy) {
 				videocap_area_clear();
 				// force mode cleanup
 				videocap_reset = 1;
-			}
-
-			if (sprite_showing) {
 			}
 
 			if (videocap_ntsc != videocap_ntsc_old || videocap_reset) {
@@ -1156,14 +1283,16 @@ void isr0 (void *dummy) {
 			videocap_ntsc_old = videocap_ntsc;
 			videocap_enabled_old = videocap_enabled;
 		} else {
+			// not looking at the videocap area
 			videocap_enabled_old = 0;
-			videocap_ntsc_old = 0;
-			interlace_old = 0;
+			videocap_ntsc_old = -1;
+			interlace_old = -1;
 		}
 	}
 
-	// flush the data caches synchronized to full frames
+	// on vblanks, handle arm cache flush, amiga interrupts and sprites
 	if (!vblank || (split_pos == 0)) {
+		// flush the data caches synchronized to full frames
 		Xil_L1DCacheFlush();
 		Xil_L2CacheFlush();
 		isr_flush_count = 0;
@@ -1220,13 +1349,15 @@ int fpga_interrupt_init() {
 
   // set the priority of IRQ_F2P[0:0] to 0xA0 (highest 0xF8, lowest 0x00) and a trigger for a rising edge 0x3.
   XScuGic_SetPriorityTriggerType(intc_instance_ptr, INTC_INTERRUPT_ID_0, 0xA0, 0x3); // vblank / split
-  XScuGic_SetPriorityTriggerType(intc_instance_ptr, INTC_INTERRUPT_ID_1, 0x90, 0x3); // audio formatter
+  XScuGic_SetPriorityTriggerType(intc_instance_ptr, INTC_INTERRUPT_ID_1, 0x90, 0x3); // audio formatter TX
+  XScuGic_SetPriorityTriggerType(intc_instance_ptr, INTC_INTERRUPT_ID_2, 0x90, 0x3); // audio formatter RX
 
   printf("XScuGic_Connect()\n");
 
   // connect the interrupt service routine isr0 to the interrupt controller
   result = XScuGic_Connect(intc_instance_ptr, INTC_INTERRUPT_ID_0, (Xil_ExceptionHandler)isr0, NULL);
   result = XScuGic_Connect(intc_instance_ptr, INTC_INTERRUPT_ID_1, (Xil_ExceptionHandler)isr_audio, NULL);
+  result = XScuGic_Connect(intc_instance_ptr, INTC_INTERRUPT_ID_2, (Xil_ExceptionHandler)isr_audio_rx, NULL);
 
   if (result != XST_SUCCESS) {
 	printf("XScuGic_Connect() failed!\n");
@@ -1239,6 +1370,8 @@ int fpga_interrupt_init() {
   XScuGic_Enable(intc_instance_ptr, INTC_INTERRUPT_ID_0);
   // enable interrupts for IRQ_F2P[1:1]
   XScuGic_Enable(intc_instance_ptr, INTC_INTERRUPT_ID_1);
+  // enable interrupts for IRQ_F2P[2:2]
+  XScuGic_Enable(intc_instance_ptr, INTC_INTERRUPT_ID_2);
 
   return 0;
 }
@@ -1556,9 +1689,6 @@ int main() {
 		u32 writereq = (zstate & (1 << 31));
 		u32 readreq = (zstate & (1 << 30));
 
-		zstate = zstate & 0xff;
-		if (zstate > 52) zstate = 52;
-
 		if (writereq) {
 			u32 zaddr = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG0);
 			u32 zdata = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG1);
@@ -1631,6 +1761,10 @@ int main() {
 					// cursor offset support for p96 split screen
 					sprite_x_offset = rect_x1;
 					sprite_y_offset = rect_y1;
+
+					// FIXME: document/comment this. rect_x1/x2/y1 are used for panning inside of a screen
+					// together with blitter_colormode
+					// TODO: rework to dedicated registers because this makes it hard to debug
 
 					framebuffer_pan_width = rect_x2;
 					framebuffer_color_format = blitter_colormode;
@@ -2015,9 +2149,6 @@ int main() {
 				case REG_ZZ_SET_SPLIT_POS:
 					bgbuf_offset = blitter_src_offset;
 					split_request_pos = zdata;
-
-					printf("split_pos: %d\n", split_pos);
-					printf("split_request_pos: %d\n", split_request_pos);
 					break;
 
 				// Ethernet
@@ -2248,14 +2379,9 @@ int main() {
 		} else if (readreq) {
 			uint32_t zaddr = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG0);
 
-			if (debug_lowlevel) {
-				printf("READ: %08lx\n",zaddr);
-			}
-			u32 z3 = (zstate_raw & (1 << 25)); // TODO cache
+			//printf("READ: %08lx\n",zaddr);
+			u32 z3 = (zstate_raw & (1 << 25));
 
-			if (zaddr > 0x10000000) {
-				printf("ERRR: illegal address %08lx\n", zaddr);
-			}
 			if (zaddr >= MNT_FB_BASE || zaddr >= MNT_REG_BASE + 0x2000) {
 				u8* ptr = mem;
 
@@ -2290,22 +2416,23 @@ int main() {
 							b1 | b2 | b3 | b4);
 				} else {
 					if (zaddr >= MNT_REG_BASE + 0x6000 && zaddr < MNT_REG_BASE + 0x8000) {
+						// autoboot rom
 						u16 ubyte = ptr[0] << 8;
 						u16 lbyte = ptr[1];
 						//printf("READ ROM: [%04x]",ubyte|lbyte);
-						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1,
-								ubyte | lbyte);
+						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1, ubyte | lbyte);
 					} else {
 						u16 ubyte = ptr[0] << 8;
 						u16 lbyte = ptr[1];
-						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1,
-								ubyte | lbyte);
+						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1, ubyte | lbyte);
 					}
 				}
 			} else if (zaddr >= MNT_REG_BASE) {
 				// read ARM "register"
 				uint32_t data = 0;
 				uint32_t zaddr32 = zaddr & 0xffffffc;
+
+				//printf("REGR: %lx (%d)\n", zaddr, zaddr & 2);
 
 				switch (zaddr32) {
 					case REG_ZZ_VBLANK_STATUS:
@@ -2406,9 +2533,9 @@ int main() {
 				u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 				u32 writereq = (zstate & (1 << 31));
 				u32 readreq = (zstate & (1 << 30));
-				if (need_req_ack == 1 && !writereq)
+				if (need_req_ack == 1 && !writereq) // no more write request?
 					break;
-				if (need_req_ack == 2 && !readreq)
+				if (need_req_ack == 2 && !readreq) // no more read request?
 					break;
 				if ((zstate & 0xff) == 0)
 					break; // reset
