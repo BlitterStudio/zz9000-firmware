@@ -48,6 +48,7 @@ void Xil_AssertNonVoid() {}
 #include "usb.h"
 #include "interrupt.h"
 #include "bootrom.h"
+#include "mp3/mp3.h"
 
 #include "zz_regs.h"
 #include "zz_video_modes.h"
