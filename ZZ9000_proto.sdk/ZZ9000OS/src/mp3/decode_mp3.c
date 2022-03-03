@@ -8,7 +8,7 @@
 // TODO: adapt decode_mp3 interface to more specific requirements ("call a decode_mp3() function via a ZZ9000 register giving source and dest (uint32_t) pointers")
 // TODO: status register where Amiga can pull result (OK/Error/busy)
 
-int decode_mp3(char * input_buffer, size_t input_buffer_size, char * output_buffer, size_t output_buffer_size) {
+int decode_mp3(unsigned char * input_buffer, size_t input_buffer_size, unsigned char * output_buffer, size_t output_buffer_size) {
     mp3dec_ex_t mp3d;
     mp3dec_frame_info_t frame_info;
     memset(&frame_info, 0, sizeof(frame_info));
