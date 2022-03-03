@@ -2329,7 +2329,7 @@ int main() {
 					arm_app_input_event_serial++;
 					arm_app_input_event_ack = 0;
 					break;
-				case REG_ZZ_UNUSED_REG70:
+				case REG_ZZ_AUDIO_SWAB:
 					{
 						// byteswap audio buffer
 						uint32_t offset = zdata<<8; // *256
@@ -2368,9 +2368,24 @@ int main() {
 
 						break;
 					}
-				case REG_ZZ_UNUSED_REG74:
+				case REG_ZZ_AUDIO_SCALE:
 					audio_scale = zdata;
 					break;
+				case REG_ZZ_MP3_DECODE:
+					{
+						uint8_t* input_buffer = (uint8_t*)fb + 0x30000;
+						size_t input_buffer_size = 0x200000-0x30000;
+						uint8_t* output_buffer = (uint8_t*)fb + 0x200000;
+						size_t output_buffer_size = 0x1000000;
+
+						decode_mp3(input_buffer, input_buffer_size, output_buffer, output_buffer_size);
+
+						uint16_t* data = (uint16_t*)output_buffer;
+						for (int i=0; i<output_buffer_size/2; i++) {
+							data[i] = __builtin_bswap16(data[i]);
+						}
+						break;
+					}
 				}
 			}
 
@@ -2489,7 +2504,7 @@ int main() {
 						data = ((interrupt_waiting_audio<<1)|(interrupt_waiting_ethernet))<<16;
 						break;
 					}
-					case REG_ZZ_UNUSED_REG70: {
+					case REG_ZZ_AUDIO_SWAB: {
 						// misc status bits
 						//printf("read 0x70: %d\n", audio_buffer_collision);
 						data = (audio_buffer_collision)<<16;
