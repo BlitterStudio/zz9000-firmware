@@ -1,6 +1,6 @@
 #include "bootrom.h"
 #include "xil_types.h"
-#include "ethernet.h"
+#include "memorymap.h"
 #include <stdio.h>
 
 // zzusb.device converted to an array

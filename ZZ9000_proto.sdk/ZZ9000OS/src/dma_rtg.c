@@ -1,31 +1,12 @@
 #include <stdio.h>
-#include "gfx.h"
 #include <xil_types.h>
+#include "memorymap.h"
+#include "zz_video_modes.h"
+#include "gfx.h"
+#include "video.h"
 #include "xil_printf.h"
 
-extern u32* framebuffer;
-extern u32 bgbuf_offset;
-extern u32 framebuffer_color_format;
-extern u32 framebuffer_pan_offset;
-extern u32 framebuffer_pan_width;
-extern u32 framebuffer_pan_offset_old;
-extern u32 request_video_align;
-extern u32 blitter_colormode;
-
-extern uint32_t sprite_colors[4];
-
-extern int16_t sprite_x, sprite_x_adj, sprite_x_base;
-extern int16_t sprite_y, sprite_y_adj, sprite_y_base;
-extern int16_t sprite_x_offset;
-extern int16_t sprite_y_offset;
-extern uint16_t split_pos, next_split_pos;
-extern uint16_t sprite_showing;
-extern uint8_t sprite_width;
-extern uint8_t sprite_height;
-
-extern int split_request_pos;
-
-void handle_blitter_dma_op(uint16_t zdata)
+void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
 {
     struct GFXData *data = (struct GFXData*)((u32)Z3_SCRATCH_ADDR);
     switch(zdata) {
@@ -37,7 +18,7 @@ void handle_blitter_dma_op(uint16_t zdata)
             SWAP16(data->pitch[0]);
             SWAP32(data->offset[0]);
 
-            set_fb((uint32_t*) ((u32) framebuffer + data->offset[0]),
+            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
             if (data->user[1] == 0xFFFF && data->mask == 0xFF)
@@ -58,7 +39,7 @@ void handle_blitter_dma_op(uint16_t zdata)
             SWAP16(data->pitch[0]);
             SWAP32(data->offset[0]);
 
-            set_fb((uint32_t*) ((u32) framebuffer + data->offset[0]),
+            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
             if (data->mask == 0xFF)
@@ -77,7 +58,7 @@ void handle_blitter_dma_op(uint16_t zdata)
             SWAP16(data->pitch[0]);		SWAP16(data->pitch[1]);
             SWAP32(data->offset[0]);	SWAP32(data->offset[1]);
 
-            set_fb((uint32_t*) ((u32) framebuffer + data->offset[0]),
+            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
             switch (zdata) {
@@ -85,18 +66,18 @@ void handle_blitter_dma_op(uint16_t zdata)
                 if (data->mask == 0xFF || (data->mask != 0xFF && data->u8_user[GFXDATA_U8_COLORMODE] != MNTVA_COLOR_8BIT))
                     copy_rect_nomask(data->x[0], data->y[0], data->x[1], data->y[1], data->x[2],
                                     data->y[2], data->u8_user[GFXDATA_U8_COLORMODE],
-                                    (uint32_t*) ((u32) framebuffer + data->offset[0]),
+                                    (uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                                     data->pitch[0], MINTERM_SRC);
                 else 
                     copy_rect(data->x[0], data->y[0], data->x[1], data->y[1], data->x[2],
                             data->y[2], data->u8_user[GFXDATA_U8_COLORMODE],
-                            (uint32_t*) ((u32) framebuffer + data->offset[0]),
+                            (uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                             data->pitch[0], data->mask);
                 break;
             case 4: // BlitRectNoMaskComplete
                 copy_rect_nomask(data->x[0], data->y[0], data->x[1], data->y[1], data->x[2],
                                 data->y[2], data->u8_user[GFXDATA_U8_COLORMODE],
-                                (uint32_t*) ((u32) framebuffer + data->offset[1]),
+                                (uint32_t*) ((u32)vs->framebuffer + data->offset[1]),
                                 data->pitch[1], data->minterm);
                 break;
             }
@@ -110,9 +91,9 @@ void handle_blitter_dma_op(uint16_t zdata)
             SWAP16(data->pitch[0]);		SWAP16(data->pitch[1]);
             SWAP32(data->offset[0]);	SWAP32(data->offset[1]);
 
-            uint8_t* tmpl_data = (uint8_t*) ((u32) framebuffer
+            uint8_t* tmpl_data = (uint8_t*) ((u32)vs->framebuffer
                     + data->offset[1]);
-            set_fb((uint32_t*) ((u32) framebuffer + data->offset[0]),
+            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
 
@@ -153,10 +134,10 @@ void handle_blitter_dma_op(uint16_t zdata)
             SWAP16(data->user[0]);
             SWAP16(data->user[1]);
 
-            uint8_t* bmp_data = (uint8_t*) ((u32) framebuffer
+            uint8_t* bmp_data = (uint8_t*) ((u32)vs->framebuffer
                     + data->offset[1]);
 
-            set_fb((uint32_t*) ((u32) framebuffer + data->offset[0]),
+            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
             if (zdata == OP_P2C) {
@@ -180,20 +161,20 @@ void handle_blitter_dma_op(uint16_t zdata)
             SWAP16(data->pitch[0]);
             SWAP32(data->offset[0]);
 
-            set_fb((uint32_t*) ((u32) framebuffer + data->offset[0]),
+            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
             invert_rect(data->x[0], data->y[0], data->x[1], data->y[1],
                     data->mask, data->u8_user[GFXDATA_U8_COLORMODE]);
             break;
 
         case OP_SPRITE_XY:
-            if (!sprite_showing)
+            if (!vs->sprite_showing)
                 break;
 
             SWAP16(data->x[0]);     SWAP16(data->y[0]);
 
-            sprite_x_base = (int16_t)data->x[0];
-            sprite_y_base = (int16_t)data->y[0];
+            vs->sprite_x_base = (int16_t)data->x[0];
+            vs->sprite_y_base = (int16_t)data->y[0];
 
             update_hw_sprite_pos((int16_t)data->x[0], (int16_t)data->y[0]);
             break;
@@ -208,35 +189,36 @@ void handle_blitter_dma_op(uint16_t zdata)
             uint8_t* bmp_data;
 
             if (zdata == OP_SPRITE_BITMAP)
-                bmp_data = (uint8_t*) ((u32) framebuffer + data->offset[1]);
+                bmp_data = (uint8_t*) ((u32)vs->framebuffer + data->offset[1]);
             else
                 bmp_data = (uint8_t*) ((u32) ADDR_ADJ + data->offset[1]);
 
             clear_hw_sprite();
 
-            sprite_x_offset = (int16_t)data->x[0];
-            sprite_y_offset = (int16_t)data->y[0];
-            sprite_width  = data->x[1];
+            vs->sprite_x_offset = (int16_t)data->x[0];
+            vs->sprite_y_offset = (int16_t)data->y[0];
+            vs->sprite_width  = data->x[1];
             if (zdata == OP_SPRITE_CLUT_BITMAP) {
-                sprite_x_offset = -(sprite_x_offset);
-                sprite_y_offset = -(sprite_y_offset);
+            	vs->sprite_x_offset = -(vs->sprite_x_offset);
+            	vs->sprite_y_offset = -(vs->sprite_y_offset);
             }
-            sprite_height = data->y[1];
+            vs->sprite_height = data->y[1];
 
             if (zdata == OP_SPRITE_BITMAP) {
-                update_hw_sprite(bmp_data, sprite_colors, sprite_width, sprite_height);
+                update_hw_sprite(bmp_data);
             }
             else {
                 //printf("Making a %dx%d cursor (%i %i)\n", sprite_width, sprite_height, sprite_x_offset, sprite_y_offset);
-                update_hw_sprite_clut(bmp_data, data->clut1, sprite_width, sprite_height, data->u8offset);
+                update_hw_sprite_clut(bmp_data, data->clut1,
+                		vs->sprite_width, vs->sprite_height, data->u8offset);
             }
-            update_hw_sprite_pos(sprite_x_base, sprite_y_base);
+            update_hw_sprite_pos(vs->sprite_x_base, vs->sprite_y_base);
             break;
         }
         case OP_SPRITE_COLOR: {
-            sprite_colors[data->u8offset] = data->rgb[0];
-            if (data->u8offset != 0 && sprite_colors[data->u8offset] == 0xff00ff)
-                sprite_colors[data->u8offset] = 0xfe00fe;
+            vs->sprite_colors[data->u8offset] = data->rgb[0];
+            if (data->u8offset != 0 && vs->sprite_colors[data->u8offset] == 0xff00ff)
+            	vs->sprite_colors[data->u8offset] = 0xfe00fe;
             break;
         }
 
@@ -245,23 +227,23 @@ void handle_blitter_dma_op(uint16_t zdata)
             SWAP16(data->x[0]);     SWAP16(data->y[0]);
             SWAP16(data->x[1]);
 
-            sprite_x_offset = (int16_t)data->x[0];
-            sprite_y_offset = (int16_t)data->y[0];
+            vs->sprite_x_offset = (int16_t)data->x[0];
+            vs->sprite_y_offset = (int16_t)data->y[0];
 
-            framebuffer_pan_width = data->x[1];
-            framebuffer_color_format = data->u8_user[GFXDATA_U8_COLORMODE];
-            framebuffer_pan_offset = data->offset[0] + (data->x[0] << data->u8_user[GFXDATA_U8_COLORMODE]);
-            if (split_pos == 0) {
-                framebuffer_pan_offset += (data->y[0] * (framebuffer_pan_width << framebuffer_color_format));
+            vs->framebuffer_pan_width = data->x[1];
+            u32 framebuffer_color_format = data->u8_user[GFXDATA_U8_COLORMODE];
+            vs->framebuffer_pan_offset = data->offset[0] + (data->x[0] << data->u8_user[GFXDATA_U8_COLORMODE]);
+            if (vs->split_pos == 0) {
+            	vs->framebuffer_pan_offset += (data->y[0] * (vs->framebuffer_pan_width << framebuffer_color_format));
             }
             break;
 
         case OP_SET_SPLIT_POS:
             SWAP16(data->y[0]);
             SWAP32(data->offset[0]);
-            bgbuf_offset = data->offset[0];
+            vs->bgbuf_offset = data->offset[0];
 
-            split_request_pos = data->y[0];
+            vs->split_request_pos = data->y[0];
             break;
 
         default:

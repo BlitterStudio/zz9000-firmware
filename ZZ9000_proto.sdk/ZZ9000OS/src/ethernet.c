@@ -27,6 +27,7 @@
 #include <xscugic.h>
 #include "ethernet.h"
 #include "interrupt.h"
+#include "memorymap.h"
 
 static XEmacPs EmacPsInstance;
 

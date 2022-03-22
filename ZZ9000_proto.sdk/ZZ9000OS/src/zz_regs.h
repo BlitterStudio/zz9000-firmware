@@ -14,6 +14,9 @@
  *
  */
 
+#ifndef ZZ_REGS_H
+#define ZZ_REGS_H
+
 // Registers offsets relative to the register base, although the offset on the ARM side is always 0.
 enum zz_reg_offsets {
   REG_ZZ_UNUSED_REG00   = 0x00,
@@ -61,11 +64,11 @@ enum zz_reg_offsets {
   REG_ZZ_VBLANK_STATUS  = 0x4C,
   REG_ZZ_UNUSED_REG4E   = 0x4E,
 
-  REG_ZZ_UNUSED_REG50   = 0x50, // These are actually not quite unused, but should
-  REG_ZZ_UNUSED_REG52   = 0x52, // be phased out at some point, since they're pretty
-  REG_ZZ_UNUSED_REG54   = 0x54, // much undocumented.
-  REG_ZZ_UNUSED_REG56   = 0x56, // I should also stop being lazy and rework DoomAttackZZ/060
-  REG_ZZ_UNUSED_REG58   = 0x58, // to use the DMA ACC flip buffer to front command instead. [_Bnu]
+  REG_ZZ_SCRATCH_COPY   = 0x50,
+  REG_ZZ_CVMODE_PARAM   = 0x52,
+  REG_ZZ_CVMODE_VAL     = 0x54,
+  REG_ZZ_CVMODE_SEL     = 0x56,
+  REG_ZZ_CVMODE         = 0x58,
   REG_ZZ_BITTER_DMA_OP  = 0x5A,
   REG_ZZ_ACC_OP         = 0x5C,
   REG_ZZ_SET_SPLIT_POS  = 0x5E,
@@ -82,9 +85,9 @@ enum zz_reg_offsets {
   REG_ZZ_AUDIO_SWAB     = 0x70,
   REG_ZZ_UNUSED_REG72   = 0x72,
   REG_ZZ_AUDIO_SCALE    = 0x74,
-  REG_ZZ_MP3_DECODE     = 0x76,
-  REG_ZZ_UNUSED_REG78   = 0x78,
-  REG_ZZ_UNUSED_REG7A   = 0x7A,
+  REG_ZZ_DECODE         = 0x76,
+  REG_ZZ_DECODER_PARAM  = 0x78,
+  REG_ZZ_DECODER_VAL    = 0x7A,
   REG_ZZ_UNUSED_REG7C   = 0x7C,
   REG_ZZ_UNUSED_REG7E   = 0x7E,
 
@@ -153,7 +156,7 @@ enum zz_reg_offsets {
 
   REG_ZZ_PRINT_CHR      = 0xF0,
   REG_ZZ_PRINT_HEX      = 0xF2,
-  REG_ZZ_UNUSED_REGF4   = 0xF4,
+  REG_ZZ_AUDIO_CONFIG   = 0xF4,
   REG_ZZ_UNUSED_REGF6   = 0xF6,
   REG_ZZ_UNUSED_REGF8   = 0xF8,
   REG_ZZ_UNUSED_REGFA   = 0xFA,
@@ -167,3 +170,5 @@ enum zz9k_card_features {
   CARD_FEATURE_NONSTANDARD_VSYNC,
   CARD_FEATURE_NUM,
 };
+
+#endif

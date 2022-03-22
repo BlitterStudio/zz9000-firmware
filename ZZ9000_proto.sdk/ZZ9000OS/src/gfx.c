@@ -20,6 +20,7 @@
 #include <string.h>
 #include <math.h>
 #include "gfx.h"
+#include "zz_video_modes.h"
 
 uint32_t* fb=0;
 uint32_t fb_pitch=0;

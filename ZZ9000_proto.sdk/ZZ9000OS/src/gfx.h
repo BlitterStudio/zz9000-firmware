@@ -15,24 +15,7 @@
 */
 
 #include <stdint.h>
-
-#define Z3_SCRATCH_ADDR 0x33F0000
-#define ADDR_ADJ 0x1F0000
-
-#define MNTVF_OP_UNUSED 12
-#define MNTVF_OP_SPRITE_XY 13
-#define MNTVF_OP_SPRITE_ADDR 14
-#define MNTVF_OP_SPRITE_DATA 15
-#define MNTVF_OP_MAX 6
-#define MNTVF_OP_HS 7
-#define MNTVF_OP_VS 8
-#define MNTVF_OP_POLARITY 10
-#define MNTVF_OP_SCALE 4
-#define MNTVF_OP_DIMENSIONS 2
-#define MNTVF_OP_COLORMODE 1
-#define MNTVF_OP_REPORT_LINE 17
-#define MNTVF_OP_PALETTE_SEL 18
-#define MNTVF_OP_PALETTE_HI 19
+#include "video.h"
 
 typedef struct Vec2 {
 	float x;
@@ -50,15 +33,10 @@ typedef struct {
 } vec2_i32;
 
 void video_formatter_write(uint32_t data, uint16_t op);
-void handle_blitter_dma_op(uint16_t zdata);
+void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata);
 void handle_acc_op(uint16_t zdata);
 
 void set_fb(uint32_t* fb_, uint32_t pitch);
-void update_hw_sprite(uint8_t *data, uint32_t *colors, uint16_t w, uint16_t h);
-void update_hw_sprite_clut(uint8_t *data_, uint8_t *colors, uint16_t w, uint16_t h, uint8_t keycolor);
-void update_hw_sprite_pos(int16_t x, int16_t y);
-void clip_hw_sprite(int16_t offset_x, int16_t offset_y);
-void clear_hw_sprite();
 
 void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t rect_rgb, uint32_t color_format, uint8_t mask);
 void fill_rect_solid(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t rect_rgb, uint32_t color_format);
@@ -95,14 +73,6 @@ void acc_fill_circle(uint32_t dest, uint16_t pitch, int16_t x0, int16_t y0, int1
 void acc_fill_flat_tri(uint32_t dest, TriangleDef *d, uint16_t w, uint16_t h, uint32_t fg_color, uint8_t bpp);
 
 void *get_color_conversion_table(int index);
-
-enum color_formats {
-	MNTVA_COLOR_8BIT,
-	MNTVA_COLOR_16BIT565,
-	MNTVA_COLOR_32BIT,
-	MNTVA_COLOR_15BIT,
-	MNTVA_COLOR_NUM,
-};
 
 #define SWAP16(a) a = __builtin_bswap16(a)
 #define SWAP32(a) a = __builtin_bswap32(a)
