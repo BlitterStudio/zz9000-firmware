@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "gfx.h"
+#include "memorymap.h"
 #include <xil_types.h>
 #include "xil_printf.h"
 #include "compression/compression.h"
@@ -8,8 +9,6 @@
 extern unsigned int cur_mem_offset;
 extern uint8_t imc_tables_initialized;
 int current_c37_encoder = -1;
-
-#define Z3_OUTPUT_ADDR 0x3400000
 
 void handle_acc_op(uint16_t zdata)
 {

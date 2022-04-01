@@ -17,5 +17,7 @@ ELFSIZE :=
 # Every subdirectory with source files must be described here
 SUBDIRS := \
 src \
+src/compression/audio \
+src/mp3 \
 src/usb \
 

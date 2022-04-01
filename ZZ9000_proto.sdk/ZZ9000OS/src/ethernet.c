@@ -27,6 +27,7 @@
 #include <xscugic.h>
 #include "ethernet.h"
 #include "interrupt.h"
+#include "memorymap.h"
 
 static XEmacPs EmacPsInstance;
 
@@ -282,8 +283,6 @@ void ethernet_task() {
 			ethernet_task_state = ETH_TASK_INIT;
 		}
 	} else if (ethernet_task_state == ETH_TASK_INIT) {
-		//EmacPsSetupIntrSystem(EmacPsInstancePtr, EMACPS_IRPT_INTR);
-
 		// init_ethernet_buffers() also starts EmacPS
 		u16 status = init_ethernet_buffers();
 		if (status != XST_SUCCESS) {

@@ -200,6 +200,9 @@ module MNTZorro_v0_1_S00_AXI
    output reg [7:0]  video_control_op_out,
    output reg video_control_interlace_out,
    input wire [1:0] video_control_vblank_in,
+   
+   // ZZ9000AX peripheral reset
+   output reg zz9000ax_reset_out,
 
    // Xilinx AXI4-Lite implementation starts here ==============================
 
@@ -675,8 +678,9 @@ module MNTZorro_v0_1_S00_AXI
   reg zorro_read;
   reg zorro_write;
 
-  reg zorro_interrupt = 1;
-  assign ZORRO_INT6 = zorro_interrupt;
+  reg [7:0] zorro_interrupt_req = 10;
+  reg [7:0] zorro_interrupt_len = 10;
+  assign ZORRO_INT6 = (zorro_interrupt_req != 8'h00);
 
   reg [15:0] data_in;
   reg [31:0] rr_data;
@@ -910,7 +914,6 @@ module MNTZorro_v0_1_S00_AXI
 
   localparam WAIT_READ2B = 41; // delay states
   localparam WAIT_READ2C = 42;
-  localparam WAIT_READ2D = 54;
 
   localparam WAIT_WRITE_DMA_Z3 = 43;
   localparam WAIT_WRITE_DMA_Z3_FINALIZE = 44;
@@ -928,16 +931,20 @@ module MNTZorro_v0_1_S00_AXI
   localparam WAIT_READ_DMA_Z3 = 54;
   localparam WAIT_READ_DMA_Z3B = 55;
   localparam WAIT_READ_DMA_Z3C = 56;
+  
+  localparam WAIT_READ2D = 57;
+  localparam WAIT_READ3B = 58;
+  localparam WAIT_READ3C = 59;
 
   (* mark_debug = "true" *) reg [7:0] zorro_state = COLD;
   reg [7:0] dtack_counter;
 `ifdef ZORRO2
-  // experimentally found for TF536
-  reg [5:0] dtack_timeout = 'h02; // number of cycles before we turn off our dtack signal
+  // experimentally found *2* for TF536
+  // FIXME low values slow down z2 on a3000
+  reg [5:0] dtack_timeout = 2; // number of cycles before we turn off our dtack signal
 `else
   reg [5:0] dtack_timeout = 6; // number of cycles before we turn off our dtack signal
 `endif
-  //reg [7:0] dataout_time = 'h02;
 
   reg [23:0] last_addr;
   reg [23:0] last_read_addr;
@@ -1272,13 +1279,6 @@ module MNTZorro_v0_1_S00_AXI
     //m01_axi_awqos <= 'h0;
     m01_axi_wlast <= 'h1;
     m01_axi_bready <= 'h1;
-
-`ifdef ZORRO2
-    // ZORRO2 doesn't implement AXI DMA read yet
-    m00_axi_araddr  <= 0;
-    m00_axi_arvalid <= 0;
-    m00_axi_rready <= 0;
-`endif
   end
 
   (* mark_debug = "true" *) reg [9:0] videocap_x_sync;
@@ -1430,6 +1430,8 @@ module MNTZorro_v0_1_S00_AXI
           reg_high <= 0;
           ram_low <= 0;
           ram_high <= 0;
+          
+          zz9000ax_reset_out <= 0;
 
           if (!z_reset)
             zorro_state <= DECIDE_Z2_Z3;
@@ -1438,6 +1440,8 @@ module MNTZorro_v0_1_S00_AXI
         end
 
         DECIDE_Z2_Z3: begin
+          zz9000ax_reset_out <= 1;
+          
 `ifdef ZORRO2
           if (z2addr_autoconfig) begin
             zorro_state <= Z2_CONFIGURING;
@@ -1749,29 +1753,29 @@ module MNTZorro_v0_1_S00_AXI
               dataout <= 0;
               slaven <= 1;
               z_ovr <= 1;
-              zaddr_regpart <= z2_mapped_addr;
+              zaddr_regpart <= z2_mapped_addr[15:0];
               zorro_state <= Z2_REGWRITE;
 
             end else if (z2_read && z2addr_in_reg) begin
               // read from registers
               dataout_enable <= 1;
               dataout <= 1;
-              data_out <= default_data; //'hffff;
+              data_out <= default_data;
               slaven <= 1;
               z_ovr <= 1;
-              zaddr_regpart <= z2_mapped_addr;
+              zaddr_regpart <= z2_mapped_addr[15:0];
               zorro_state <= Z2_REGREAD;
 
             end else if (z2_read && z2addr_in_ram) begin
               // read RAM
               // request ram access from arbiter
               last_addr <= z2_mapped_addr-ram_low; // differently done in z3
-              data_out <= default_data; //'hffff;
+              data_out <= default_data;
               dataout_enable <= 1;
               dataout <= 1;
               slaven <= 1;
               z_ovr <= 1;
-              zorro_state <= WAIT_READ3;
+              zorro_state <= WAIT_READ;
 
             end else if (z2_write && z2addr_in_ram) begin
               // write RAM
@@ -1802,39 +1806,82 @@ module MNTZorro_v0_1_S00_AXI
             zorro_state <= REGWRITE;
           end
         end
-        WAIT_READ3: begin
-          zorro_ram_read_addr <= last_addr;
-          zorro_ram_read_request <= 1;
-          zorro_state <= WAIT_READ2;
+        
+        // =================
+        
+        WAIT_READ: begin
+          if (last_addr<'h2000)
+            // read via ARM
+            zorro_state <= WAIT_READ3;
+          else begin
+            // read via AXI DMA
+            if (last_addr>='ha000 && last_addr<'h10000)
+              m00_axi_araddr  <= (`USB_BLOCK_STORAGE_ADDRESS - 32'ha000) + {last_addr[23:2],2'b00};
+            else
+            if (last_addr>='h8000 && last_addr<'hA000)
+              m00_axi_araddr  <= (`TX_FRAME_ADDRESS - 32'h8000) + {last_addr[23:2],2'b00};
+            else
+            if (last_addr>='h2000 && last_addr<'h6000)
+              m00_axi_araddr  <= (`RX_BACKLOG_ADDRESS - 32'h2000) + {last_addr[23:2],2'b00} + {eth_rx_frame_select, 11'h0}; // 11'h0 is FRAME_SIZE = 2048
+            else
+            if (last_addr>='h6000 && last_addr<'h8000)
+              m00_axi_araddr  <= (`BOOT_ROM_ADDRESS - 32'h6000) + {last_addr[23:2],2'b00};
+            else
+              m00_axi_araddr  <= `ARM_MEMORY_START + {last_addr[23:2],2'b00};
+  
+            m00_axi_arvalid  <= 1;
+            if (m00_axi_arready) begin
+              zorro_state <= WAIT_READ2;
+            end
+            
+          end
         end
+        
         WAIT_READ2: begin
-          // FIXME there can be a race here where read_request is immediately cancelled
-          if (zorro_ram_read_flag) begin
-            zorro_ram_read_request <= 0;
-
-            data_out <= axi_reg1[15:0];
-            zorro_state <= WAIT_READ2B;
+          m00_axi_arvalid <= 0;
+          if (m00_axi_rvalid) begin
+            zorro_state <= WAIT_READ2D;
+            
+            // le endian swap
+            if (last_addr[1] == 1)
+              data_out <= {m00_axi_rdata[23:16], m00_axi_rdata[31:24]};
+            else
+              data_out <= {m00_axi_rdata[7:0], m00_axi_rdata[15:8]};
           end
         end
-        WAIT_READ2B: begin
-          // FIXME trying to fix the race using the same approach as in Z3
-          if (!zorro_ram_read_flag) begin
-            dtack_counter <= 0;
-            zorro_state <= WAIT_READ2C;
-          end
-        end
-        WAIT_READ2C: begin
-          zorro_state <= WAIT_READ2D;
-          //if (dtack_counter>dataout_time) // FIXME tune this
-          //  zorro_state <= WAIT_READ2D;
-
-          dtack_counter <= dtack_counter + 1'b1;
-        end
+        
         WAIT_READ2D: begin
+          // delay state 3
           dtack_counter <= 0;
           dtack <= 1;
           zorro_state <= Z2_ENDCYCLE;
         end
+        
+        WAIT_READ3: begin
+          // read via ARM
+          zorro_ram_read_addr <= last_addr;
+          zorro_ram_read_request <= 1;
+          zorro_state <= WAIT_READ3B;
+        end
+        
+        WAIT_READ3B: begin
+          if (zorro_ram_read_flag) begin
+            zorro_ram_read_request <= 0;
+
+            data_out <= axi_reg1[15:0];
+            zorro_state <= WAIT_READ3C;
+          end
+        end
+        
+        WAIT_READ3C: begin
+          if (!zorro_ram_read_flag) begin
+            dtack_counter <= 0;
+            zorro_state <= WAIT_READ2D;
+          end
+        end
+        
+        // =================
+        
         WAIT_WRITE: begin
           if (z2_datastrobe_synced) begin
             zorro_write_capture_bytes <= {~znUDS_sync[2],~znLDS_sync[2]}; // FIXME was 1
@@ -2090,7 +2137,6 @@ module MNTZorro_v0_1_S00_AXI
             m00_axi_araddr  <= `ARM_MEMORY_START + (z3_mapped_addr/*&32'hfffffffc*/); // max 256MB
 
           m00_axi_arvalid  <= 1;
-//          m00_axi_rready <= 1;
           if (m00_axi_arready) begin
             zorro_state <= WAIT_READ_DMA_Z3B;
           end
@@ -2098,7 +2144,6 @@ module MNTZorro_v0_1_S00_AXI
 
         WAIT_READ_DMA_Z3B: begin
           m00_axi_arvalid <= 0;
-//          m00_axi_rready <= 1;
           if (m00_axi_rvalid) begin
             zorro_state <= Z3_ENDCYCLE;
             data_z3_hi16 <= {m00_axi_rdata[7:0], m00_axi_rdata[15:8]};
@@ -2213,7 +2258,7 @@ module MNTZorro_v0_1_S00_AXI
             'h14: videocap_pitch <= regdata_in[15:0];
             'h20: if (regdata_in[5:0]>0) dtack_timeout <= regdata_in[5:0];
             //'h24: dataout_time[7:0]     <= regdata_in[7:0];
-            //'h14: zorro_interrupt <= regdata_in[0];
+            //'h24: zorro_interrupt_len <= regdata_in[7:0];
             //'h10: E7M_PSINCDEC <= regdata_in[0];
             //'h12: E7M_PSEN     <= regdata_in[0];
           endcase
@@ -2231,8 +2276,11 @@ module MNTZorro_v0_1_S00_AXI
     end else
       video_control_axi <= 0;
 
-    if (axi_reg2[30]==1'b1) begin
-      zorro_interrupt <= axi_reg2[0];
+    if (zorro_interrupt_req == 0) begin
+      if (axi_reg2[30] == 1 && axi_reg2[0] == 1)
+        zorro_interrupt_req <= zorro_interrupt_len;
+    end else begin
+      zorro_interrupt_req = zorro_interrupt_req - 1'b1;
     end
 
     // read / write request acknowledged by ARM

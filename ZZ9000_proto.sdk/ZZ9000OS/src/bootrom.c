@@ -1,6 +1,6 @@
 #include "bootrom.h"
 #include "xil_types.h"
-#include "ethernet.h"
+#include "memorymap.h"
 #include <stdio.h>
 
 // zzusb.device converted to an array
@@ -42,5 +42,5 @@ void boot_rom_init() {
     ramp8[0x400 + i] = zzusb_device[i];
   }
 
-  printf("boot_rom_init() done.\n");
+  printf("boot_rom_init() done.\r\n");
 }

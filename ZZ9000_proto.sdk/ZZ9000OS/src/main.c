@@ -26,276 +26,38 @@
 #include "xil_io.h"
 #include "xscugic.h"
 #include "xgpiops.h"
-#include "xiicps.h"
 #include "sleep.h"
-#include "xaxivdma.h"
 #include "xil_cache.h"
-#include "xclk_wiz.h"
 #include "xil_exception.h"
-#include "xadcps.h"
+#include "xclk_wiz.h"
 #include "xtime_l.h"
-#include "xil_misc_psreset_api.h"
 #include "xi2stx.h"
+#include "xi2srx.h"
 
 // workaround for typo in xilinx C code
 void Xil_AssertNonVoid() {}
 
-#include "xaudioformatter.h"
-
+#include "memorymap.h"
+#include "mntzorro.h"
+#include "video.h"
+#include "hdmi.h"
 #include "gfx.h"
 #include "ethernet.h"
 #include "usb.h"
 #include "interrupt.h"
 #include "bootrom.h"
+#include "core2.h"
+#include "adc.h"
+#include "ax.h"
+#include "mp3/mp3.h"
 
 #include "zz_regs.h"
 #include "zz_video_modes.h"
 
-#define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
-#define A9_RST1_MASK 		0x00000002
-#define A9_CLKSTOP1_MASK	0x00000020
+#define REVISION_MAJOR 1
+#define REVISION_MINOR 10
 
-#define XSLCR_LOCK_ADDR		(XSLCR_BASEADDR + 0x4)
-#define XSLCR_LOCK_CODE		0x0000767B
-
-#define IIC_DEVICE_ID	XPAR_XIICPS_0_DEVICE_ID
-#define VDMA_DEVICE_ID	XPAR_AXIVDMA_0_DEVICE_ID
-#define HDMI_I2C_ADDR 	0x3b
-#define IIC_SCLK_RATE	400000
 #define GPIO_DEVICE_ID	XPAR_XGPIOPS_0_DEVICE_ID
-#define IIC2_DEVICE_ID	XPAR_XIICPS_1_DEVICE_ID
-#define IIC2_SCLK_RATE	100000
-#define ADAU_I2C_ADDR	0x68
-
-#define I2C_PAUSE 10
-
-// I2C controller instances
-XIicPs Iic;
-XIicPs Iic2;
-
-// XADC adc converter instance
-XAdcPs Xadc;
-
-// audio state (ZZ9000AX)
-static int adau_enabled = 0;
-#define AUDIO_TX_BUFFER_SIZE 3840*10 // bytes per period * periods
-#define AUDIO_TX_BUFFER_ADDRESS 0x200000
-
-int xadc_init() {
-	printf("xadc_init()...");
-	XAdcPs_Config* cfg;
-	cfg = XAdcPs_LookupConfig(XPAR_XADCPS_0_DEVICE_ID);
-	XAdcPs_CfgInitialize(&Xadc, cfg, cfg->BaseAddress);
-	int status = XAdcPs_SelfTest(&Xadc);
-	printf("xadc_init() done: %d", status);
-	return status;
-}
-
-float xadc_get_temperature() {
-	u16 raw = XAdcPs_GetAdcData(&Xadc, XADCPS_CH_TEMP);
-	return XAdcPs_RawToTemperature(raw);
-}
-
-float xadc_get_aux_voltage() {
-	u16 raw = XAdcPs_GetAdcData(&Xadc, XADCPS_CH_VCCAUX);
-	return XAdcPs_RawToVoltage(raw);
-}
-
-float xadc_get_int_voltage() {
-	u16 raw = XAdcPs_GetAdcData(&Xadc, XADCPS_CH_VCCINT);
-	return XAdcPs_RawToVoltage(raw);
-}
-
-// This is the absolute offset in ZZ9000 RAM for the "framebuffer transfer register",
-// which can be replaced by the DMA acceleration functionality entirely, but some
-// software still relies on this legacy register.
-unsigned int cur_mem_offset = 0x3500000;
-
-int i2c_write_byte(XIicPs* iic, u8 i2c_addr, u8 addr, u8 value) {
-
-	u8 buffer[2];
-	buffer[0] = addr;
-	buffer[1] = value;
-	int status;
-
-	/*while (XIicPs_BusIsBusy(iic)) {};
-	usleep(I2C_PAUSE);
-	status = XIicPs_MasterSendPolled(iic, buffer, 1, i2c_addr);
-	while (XIicPs_BusIsBusy(iic)) {};
-	usleep(I2C_PAUSE);
-	buffer[1] = 0xff;
-	status = XIicPs_MasterRecvPolled(iic, buffer + 1, 1, i2c_addr);
-	buffer[1] = value;*/
-
-	while (XIicPs_BusIsBusy(iic)) {};
-	status = XIicPs_MasterSendPolled(iic, buffer, 2, i2c_addr);
-	while (XIicPs_BusIsBusy(iic)) {};
-	usleep(I2C_PAUSE);
-
-	status = XIicPs_MasterSendPolled(iic, buffer, 1, i2c_addr);
-	while (XIicPs_BusIsBusy(iic)) {};
-	usleep(I2C_PAUSE);
-	buffer[1] = 0xff;
-	status = XIicPs_MasterRecvPolled(iic, buffer + 1, 1, i2c_addr);
-
-	if (buffer[1] != value) {
-		printf("[i2c:%x] new value of 0x%x: 0x%x (should be 0x%x)\n", i2c_addr, addr,
-				buffer[1], value);
-	}
-
-	return status;
-}
-
-int i2c_read_byte(XIicPs* iic, u8 i2c_addr, u8 addr, u8* buffer) {
-	buffer[0] = addr;
-	buffer[1] = 0xff;
-	while (XIicPs_BusIsBusy(iic)) {};
-	int status = XIicPs_MasterSendPolled(iic, buffer, 1, i2c_addr);
-	while (XIicPs_BusIsBusy(iic)) {};
-	usleep(I2C_PAUSE);
-	status = XIicPs_MasterRecvPolled(iic, buffer + 1, 1, i2c_addr);
-
-	return status;
-}
-
-int hdmi_ctrl_write_byte(u8 addr, u8 value) {
-	return i2c_write_byte(&Iic, HDMI_I2C_ADDR, addr, value);
-}
-
-int hdmi_ctrl_read_byte(u8 addr, u8* buffer) {
-	return i2c_read_byte(&Iic, HDMI_I2C_ADDR, addr, buffer);
-}
-
-int adau_write16(u8 i2c_addr, u16 addr, u16 value) {
-	XIicPs* iic = &Iic2;
-	int status;
-	//u8 i2c_addr = ADAU_I2C_ADDR;
-	u8 buffer[4];
-	buffer[0] = addr>>8;
-	buffer[1] = addr&0xff;
-	buffer[2] = value>>8;
-	buffer[3] = value&0xff;
-
-	int timeout = 0;
-	while (XIicPs_BusIsBusy(iic)) {
-		usleep(1);
-		timeout++;
-		if (timeout>10000) {
-			printf("ADAU I2C write16 timeout.\n");
-			return -1;
-		}
-	}
-	status = XIicPs_MasterSendPolled(iic, buffer, 4, i2c_addr);
-
-	return status;
-}
-
-int adau_write24(u8 i2c_addr, u16 addr, u32 value) {
-	XIicPs* iic = &Iic2;
-	int status;
-	//u8 i2c_addr = ADAU_I2C_ADDR;
-	u8 buffer[5];
-	buffer[0] = addr>>8;
-	buffer[1] = addr&0xff;
-	buffer[2] = (value>>16)&0xff;
-	buffer[3] = (value>>8)&0xff;
-	buffer[4] = value&0xff;
-
-	int timeout = 0;
-	while (XIicPs_BusIsBusy(iic)) {
-		usleep(1);
-		timeout++;
-		if (timeout>10000) {
-			printf("ADAU I2C write24 timeout.\n");
-			return -1;
-		}
-	}
-	status = XIicPs_MasterSendPolled(iic, buffer, 5, i2c_addr);
-
-	return status;
-}
-
-int adau_read16(u8 i2c_addr, u16 addr, u8* buffer) {
-	XIicPs* iic = &Iic2;
-	int status1;
-	//u8 i2c_addr = ADAU_I2C_ADDR;
-	u8 abuffer[2];
-	abuffer[0] = addr>>8;
-	abuffer[1] = addr&0xff;
-
-	XIicPs_SetOptions(iic, XIICPS_REP_START_OPTION);
-
-	int timeout = 0;
-	while (XIicPs_BusIsBusy(iic)) {
-		usleep(1);
-		timeout++;
-		if (timeout>10000) {
-			printf("ADAU I2C read16a timeout.\n");
-			return -1;
-		}
-	}
-	status1 = XIicPs_MasterSendPolled(iic, abuffer, 2, i2c_addr);
-	XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
-	XIicPs_MasterRecvPolled(iic, buffer, 2, i2c_addr);
-	timeout = 0;
-	while (XIicPs_BusIsBusy(iic)) {
-		usleep(1);
-		timeout++;
-		if (timeout>10000) {
-			printf("ADAU I2C read16b timeout.\n");
-			return -1;
-		}
-	}
-
-	return status1;
-}
-
-int adau_read24(u8 i2c_addr, u16 addr, u8* buffer) {
-	XIicPs* iic = &Iic2;
-	int status1;
-	//u8 i2c_addr = ADAU_I2C_ADDR;
-	u8 abuffer[2];
-	abuffer[0] = addr>>8;
-	abuffer[1] = addr&0xff;
-
-	XIicPs_SetOptions(iic, XIICPS_REP_START_OPTION);
-	while (XIicPs_BusIsBusy(iic)) {};
-	status1 = XIicPs_MasterSendPolled(iic, abuffer, 2, i2c_addr);
-	XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
-	XIicPs_MasterRecvPolled(iic, buffer, 3, i2c_addr);
-	int timeout = 0;
-	while (XIicPs_BusIsBusy(iic)) {
-		usleep(1);
-		timeout++;
-		if (timeout>10000) {
-			printf("ADAU I2C read24 timeout.\n");
-			return -1;
-		}
-	}
-
-	return status1;
-}
-
-static u8 sii9022_init[] = {
-	0x1e, 0x00,// TPI Device Power State Control Data (R/W)
-	0x09, 0x00, //
-	0x0a, 0x00,
-
-	0x60, 0x04, 0x3c, 0x01,	// TPI Interrupt Enable (R/W)
-
-	0x1a, 0x10,	// TPI System Control (R/W)
-
-	0x00, 0x4c,	// PixelClock/10000 - LSB          u16:6
-	0x01, 0x1d,	// PixelClock/10000 - MSB
-	0x02, 0x70,	// Frequency in HZ - LSB
-	0x03, 0x17,	// Vertical Frequency in HZ - MSB
-	0x04, 0x70,	// Total Pixels per line - LSB
-	0x05, 0x06,	// Total Pixels per line - MSB
-	0x06, 0xEE,	// Total Lines - LSB
-	0x07, 0x02,	// Total Lines - MSB
-	0x08, 0x70, // pixel repeat rate?
-	0x1a, 0x00, // CTRL_DATA - bit 1 causes 2 purple extra columns on DVI monitors (probably HDMI mode)
-};
 
 void disable_reset_out() {
 	XGpioPs Gpio;
@@ -309,9 +71,9 @@ void disable_reset_out() {
 	XGpioPs_WritePin(&Gpio, output_pin, 0);
 	usleep(10000);
 	XGpioPs_WritePin(&Gpio, output_pin, 1);
+	print("[gpio] ethernet reset done.\r\n");
 
-	print("GPIO ethernet reset done.\n");
-
+	// FIXME
 	int adau_reset = 11;
 	XGpioPs_SetDirectionPin(&Gpio, adau_reset, 1);
 	XGpioPs_SetOutputEnablePin(&Gpio, adau_reset, 1);
@@ -319,712 +81,20 @@ void disable_reset_out() {
 	usleep(10000);
 	XGpioPs_WritePin(&Gpio, adau_reset, 1);
 
-	print("GPIO ADAU reset done.\n");
+	print("[gpio] ADAU reset done.\r\n");
 }
 
-void hdmi_set_video_mode(u16 htotal, u16 vtotal, u32 pixelclock_hz, u16 vhz, u8 hdmi) {
-	/*
-	 * SII9022 registers
-	 *
-	 0x00, 0x4c,	// PixelClock/10000 - LSB
-	 0x01, 0x1d,	// PixelClock/10000 - MSB
-	 0x02, 0x70,	// Frequency in HZ - LSB
-	 0x03, 0x17,	// Vertical Frequency in HZ - MSB
-	 0x04, 0x70,	// Total Pixels per line - LSB
-	 0x05, 0x06,	// Total Pixels per line - MSB
-	 0x06, 0xEE,	// Total Lines - LSB
-	 0x07, 0x02,	// Total Lines - MSB
-	 0x08, 0x70, // pixel repeat rate?
-	 0x1a, 0x00, // 0: DVI, 1: HDMI
-	 */
-
-	// see also https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/bridge/sii902x.c#L358
-	u8* sii_mode = sii9022_init + 12;
-
-	sii_mode[2 * 0 + 1] = pixelclock_hz / 10000;
-	sii_mode[2 * 1 + 1] = (pixelclock_hz / 10000) >> 8;
-	sii_mode[2 * 2 + 1] = vhz * 100;
-	sii_mode[2 * 3 + 1] = (vhz * 100) >> 8;
-	sii_mode[2 * 4 + 1] = htotal;
-	sii_mode[2 * 5 + 1] = htotal >> 8;
-	sii_mode[2 * 6 + 1] = vtotal;
-	sii_mode[2 * 7 + 1] = vtotal >> 8;
-	sii_mode[2 * 9 + 1] = hdmi;
-}
-
-void hdmi_ctrl_init(struct zz_video_mode *mode) {
-	XIicPs_Config *config;
-	config = XIicPs_LookupConfig(IIC_DEVICE_ID);
-	int status = XIicPs_CfgInitialize(&Iic, config, config->BaseAddress);
-	//printf("XIicPs_CfgInitialize: %d\n", status);
-	usleep(10000);
-	//printf("XIicPs is ready: %lx\n", Iic.IsReady);
-
-	status = XIicPs_SelfTest(&Iic);
-	//printf("XIicPs_SelfTest: %x\n", status);
-
-	status = XIicPs_SetSClk(&Iic, IIC_SCLK_RATE);
-	//printf("XIicPs_SetSClk: %x\n", status);
-
-	usleep(2500);
-
-	// reset
-	status = hdmi_ctrl_write_byte(0xc7, 0);
-
-	u8 buffer[2];
-	status = hdmi_ctrl_read_byte(0x1b, buffer);
-	//printf("[%d] TPI device id: 0x%x\n", status, buffer[1]);
-	status = hdmi_ctrl_read_byte(0x1c, buffer);
-	//printf("[%d] TPI revision 1: 0x%x\n",status,buffer[1]);
-	//status = hdmi_ctrl_read_byte(0x1d,buffer);
-	//printf("[%d] TPI revision 2: 0x%x\n",status,buffer[1]);
-	//status = hdmi_ctrl_read_byte(0x30,buffer);
-	//printf("[%d] HDCP revision: 0x%x\n",status,buffer[1]);
-	//status = hdmi_ctrl_read_byte(0x3d,buffer);
-	//printf("[%d] hotplug: 0x%x\n", status, buffer[1]);
-
-	//hdmi_set_video_mode(mode->hmax, mode->vmax, mode->phz, mode->vhz, mode->hdmi);
-
-	for (int i = 0; i < sizeof(sii9022_init); i += 2) {
-		status = hdmi_ctrl_write_byte(sii9022_init[i], sii9022_init[i + 1]);
-		usleep(1);
-	}
-}
-
-XI2s_Tx i2s;
-XAudioFormatter audio_formatter;
-
-void init_adau(u32* audio_buffer) {
-	XIicPs_Config* i2c_config;
-	i2c_config = XIicPs_LookupConfig(IIC2_DEVICE_ID);
-	int status = XIicPs_CfgInitialize(&Iic2, i2c_config, i2c_config->BaseAddress);
-	printf("[adau] XIicPs_CfgInitialize 2: %d\n", status);
-	usleep(10000);
-	printf("[adau] XIicPs 2 is ready: %lx\n", Iic2.IsReady);
-	status = XIicPs_SelfTest(&Iic2);
-	printf("[adau] XIicPs_SelfTest: %x\n", status);
-
-	if (status != 0) {
-		printf("[adau] I2C instance 2 self test failed.");
-		return;
-	}
-
-	status = XIicPs_SetSClk(&Iic2, IIC2_SCLK_RATE);
-	printf("[adau] XIicPs_SetSClk: %x\n", status);
-
-	u8 rbuf[5];
-	u8 i = 0x34;
-
-	//usleep(10000);
-	// DSP core control: set ADM, DAM, CR
-	status = adau_write16(i, 2076, (1<<4)|(1<<3)|(1<<2));
-	if (status == 0) {
-		printf("[adau] write DSP core control: %d\n", i);
-		printf("[adau] ZZ9000AX detected.");
-	} else {
-		printf("[adau] ZZ9000AX not detected.");
-		return;
-	}
-
-	adau_enabled = 1;
-
-	status = adau_read16(i, 2076, rbuf);
-	if (status == 0) {
-		printf("[adau] read: %d %x %x\n", i, rbuf[0], rbuf[1]);
-	}
-
-	// DAC setup: DS = 01
-	status = adau_write16(i, 2087, 1);
-	printf("[adau] write DAC setup: %d\n", status);
-
-	rbuf[0] = 0;
-	rbuf[1] = 0;
-
-	status = adau_read16(i, 2087, rbuf);
-	printf("[adau] read from 2087: %02x%02x (status: %d)\n", rbuf[0], rbuf[1], status);
-
-	// TODO: OBP/OLRP
-	u16 MS  = 1<<11; // clock master output
-	//u16 OBF = (0<<10)|(0<<9);    // bclock = 49.152/16 = mclk/4 = 3.072mhz
-	u16 OBF = (1<<10)|(0<<9);    // bclock = 49.152/4 = mclk = 12.288mhz
-	u16 OLF = (0<<8)|(0<<7);    // lrclock = 49.152/1024 = word clock = 48khz?!
-	u16 MSB = 0;    // msb 1
-	u16 OWL = 1<<1; // 16 bit
-	status = adau_write16(i, 0x081e, MS|OBF|OLF|MSB|OWL);
-	printf("[adau] write serial output control: %d\n", status);
-
-	u32 MP0 = 1<<2; // MP02 digital input 0
-	u32 MP1 = 1<<6; //
-	u32 MP2 = 1<<10; //
-	u32 MP3 = 1<<14; //
-	u32 MP4 = 1<<18; // MP42 serial clock in
-	u32 MP5 = 1<<22; // MP52 serial clock in
-
-	u32 MP6 = 1<<2; //
-	u32 MP7 = 1<<6; //
-	u32 MP8 = 1<<10; //
-	u32 MP9 = 1<<14; //
-	u32 MP10 = 1<<18; // MP102 set (serial clock out)
-	u32 MP11 = 1<<22; // MP112 set (serial clock out)
-	status = adau_write24(i, 0x0820, MP0|MP1|MP2|MP3|MP4|MP5);
-	printf("[adau] write MP control 0x820: %d\n", status);
-	status = adau_write24(i, 0x0821, MP6|MP7|MP8|MP9|MP10|MP11);
-	printf("[adau] write MP control 0x821: %d\n", status);
-
-	status = adau_read24(i, 0x0820, rbuf);
-	printf("[adau] read from 0x820: %02x%02x%02x (status: %d)\n", rbuf[0], rbuf[1], rbuf[2], status);
-	status = adau_read24(i, 0x0821, rbuf);
-	printf("[adau] read from 0x821: %02x%02x%02x (status: %d)\n", rbuf[0], rbuf[1], rbuf[2], status);
-
-	XI2stx_Config* i2s_config = XI2s_Tx_LookupConfig(XPAR_XI2STX_0_DEVICE_ID);
-	status = XI2s_Tx_CfgInitialize(&i2s, i2s_config, i2s_config->BaseAddress);
-
-	printf("[adau] I2S_TX cfg status: %d\n", status);
-
-	printf("[adau] I2S Dwidth: %d\n", i2s.Config.DWidth);
-	printf("[adau] I2S MaxNumChannels: %d\n", i2s.Config.MaxNumChannels);
-
-	XI2s_Tx_JustifyEnable(&i2s, 0);
-
-	XAudioFormatter_Config* af_config = XAudioFormatter_LookupConfig(XPAR_XAUDIOFORMATTER_0_DEVICE_ID);
-	audio_formatter.BaseAddress = af_config->BaseAddress;
-
-	status = XAudioFormatter_CfgInitialize(&audio_formatter, af_config);
-
-	printf("[adau] AudioFormatter cfg status: %d\n", status);
-
-	// reset the goddamn register
-	XAudioFormatter_WriteReg(audio_formatter.BaseAddress,
-			XAUD_FORMATTER_CTRL + XAUD_FORMATTER_MM2S_OFFSET, 0);
-
-	XAudioFormatterHwParams af_params;
-	af_params.buf_addr = (u32)audio_buffer;
-	af_params.bits_per_sample = BIT_DEPTH_16;
-	af_params.periods = 8; // 1 second = 192000 bytes
-	af_params.active_ch = 2;
-	// must be multiple of 32*channels = 64
-	af_params.bytes_per_period = 3840;
-
-	XAudioFormatterSetFsMultiplier(&audio_formatter, 48000*256, 48000); // mclk = 256 * Fs // this doesn't really seem to change anything?!
-
-	printf("[adau] XAudioFormatterSetFsMultiplier\n");
-	XAudioFormatterSetHwParams(&audio_formatter, &af_params);
-	printf("[adau] XAudioFormatterSetHwParams\n");
-
-	XAudioFormatter_InterruptDisable(&audio_formatter, 1<<14); // timeout
-	printf("[adau] XAudioFormatter_InterruptDisable\n");
-	XAudioFormatter_InterruptEnable(&audio_formatter, 1<<13); // IOC
-	printf("[adau] XAudioFormatter_InterruptEnable\n");
-
-	XAudioFormatterDMAStart(&audio_formatter);
-	printf("[adau] XAudioFormatterDMAStart done.\n");
-
-	XI2s_Tx_Enable(&i2s, 1);
-	printf("[adau] XI2s_Tx_Enable\n");
-
-}
-
-XAxiVdma vdma;
-u32* framebuffer = 0;
-u32 bgbuf_offset = 0;
-
-uint16_t split_pos = 0, next_split_pos = 0;
-uint8_t card_feature_enabled[CARD_FEATURE_NUM];
-uint8_t scandoubler_mode_adjust = 0;
-
-u32 framebuffer_pan_offset = 0;
-u32 framebuffer_pan_width = 0;
-u32 framebuffer_color_format = 0;
 u32 blitter_colormode = MNTVA_COLOR_32BIT;
 static u32 blitter_dst_offset = 0;
 static u32 blitter_src_offset = 0;
-static u32 vmode_hsize = 800, vmode_vsize = 600, vmode_hdiv = 1, vmode_vdiv = 2;
 
-extern u32 fb_pitch;
-extern u32 *fb;
-uint8_t stride_div = 1;
+struct ZZ_VIDEO_STATE* video_state;
 
-//extern uint32_t* fb=0;
-//extern uint32_t fb_pitch=0;
-
-// 32bit: hdiv=1, 16bit: hdiv=2, 8bit: hdiv=4, ...
-int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
-	int status;
-	XAxiVdma_Config *Config;
-
-	Config = XAxiVdma_LookupConfig(VDMA_DEVICE_ID);
-
-	if (!Config) {
-		printf("VDMA not found for ID %d\r\n", VDMA_DEVICE_ID);
-		return XST_FAILURE;
-	}
-
-	/*XAxiVdma_DmaStop(&vdma, XAXIVDMA_READ);
-	 XAxiVdma_Reset(&vdma, XAXIVDMA_READ);
-	 XAxiVdma_ClearDmaChannelErrors(&vdma, XAXIVDMA_READ, XAXIVDMA_SR_ERR_ALL_MASK);*/
-
-	status = XAxiVdma_CfgInitialize(&vdma, Config, Config->BaseAddress);
-	if (status != XST_SUCCESS) {
-		printf("VDMA Configuration Initialization failed, status: 0x%X\r\n",
-				status);
-		//return status;
-	}
-
-	//printf("VDMA MM2S DRE: %d\n", vdma.HasMm2SDRE);
-	//printf("VDMA Config MM2S DRE: %d\n", Config->HasMm2SDRE);
-
-	u32 stride = hsize * (Config->Mm2SStreamWidth >> 3);
-	if (framebuffer_pan_width != 0 && framebuffer_pan_width != (hsize / hdiv)) {
-		stride = (framebuffer_pan_width * (Config->Mm2SStreamWidth >> 3)) * stride_div;
-	}
-
-	XAxiVdma_DmaSetup ReadCfg;
-
-	//printf("VDMA HDIV: %d VDIV: %d\n", hdiv, vdiv);
-
-	ReadCfg.VertSizeInput = vsize / vdiv;
-	ReadCfg.HoriSizeInput = (hsize * (Config->Mm2SStreamWidth >> 3)) / hdiv; // note: changing this breaks the output
-	ReadCfg.Stride = stride / hdiv; // note: changing this is not a problem
-	ReadCfg.FrameDelay = 0; /* This example does not test frame delay */
-	ReadCfg.EnableCircularBuf = 1; /* Only 1 buffer, continuous loop */
-	ReadCfg.EnableSync = 0; /* Gen-Lock */
-	ReadCfg.PointNum = 0;
-	ReadCfg.EnableFrameCounter = 0; /* Endless transfers */
-	ReadCfg.FixedFrameStoreAddr = 0; /* We are not doing parking */
-
-	ReadCfg.FrameStoreStartAddr[0] = bufpos;
-
-	//printf("VDMA Framebuffer at 0x%x\n", ReadCfg.FrameStoreStartAddr[0]);
-
-	status = XAxiVdma_DmaConfig(&vdma, XAXIVDMA_READ, &ReadCfg);
-	if (status != XST_SUCCESS) {
-		printf("VDMA Read channel config failed, status: 0x%X\r\n", status);
-		return status;
-	}
-
-	status = XAxiVdma_DmaSetBufferAddr(&vdma, XAXIVDMA_READ, ReadCfg.FrameStoreStartAddr);
-	if (status != XST_SUCCESS) {
-		printf("VDMA Read channel set buffer address failed, status: 0x%X\r\n", status);
-		return status;
-	}
-
-	status = XAxiVdma_DmaStart(&vdma, XAXIVDMA_READ);
-	if (status != XST_SUCCESS) {
-		printf("VDMA Failed to start DMA engine (read channel), status: 0x%X\r\n", status);
-		return status;
-	}
-	return XST_SUCCESS;
-}
-
-u32 dump_vdma_status(XAxiVdma *InstancePtr) {
-	u32 status = XAxiVdma_GetStatus(InstancePtr, XAXIVDMA_READ);
-
-	xil_printf("Read channel dump\n\r");
-	xil_printf("\tMM2S DMA Control Register: %x\r\n",
-			XAxiVdma_ReadReg(InstancePtr->ReadChannel.ChanBase,
-					XAXIVDMA_CR_OFFSET));
-	xil_printf("\tMM2S DMA Status Register: %x\r\n",
-			XAxiVdma_ReadReg(InstancePtr->ReadChannel.ChanBase,
-					XAXIVDMA_SR_OFFSET));
-	xil_printf("\tMM2S HI_FRMBUF Reg: %x\r\n",
-			XAxiVdma_ReadReg(InstancePtr->ReadChannel.ChanBase,
-					XAXIVDMA_HI_FRMBUF_OFFSET));
-	xil_printf("\tFRMSTORE Reg: %d\r\n",
-			XAxiVdma_ReadReg(InstancePtr->ReadChannel.ChanBase,
-					XAXIVDMA_FRMSTORE_OFFSET));
-	xil_printf("\tBUFTHRES Reg: %d\r\n",
-			XAxiVdma_ReadReg(InstancePtr->ReadChannel.ChanBase,
-					XAXIVDMA_BUFTHRES_OFFSET));
-	xil_printf("\tMM2S Vertical Size Register: %d\r\n",
-			XAxiVdma_ReadReg(InstancePtr->ReadChannel.ChanBase,
-					XAXIVDMA_MM2S_ADDR_OFFSET + XAXIVDMA_VSIZE_OFFSET));
-	xil_printf("\tMM2S Horizontal Size Register: %d\r\n",
-			XAxiVdma_ReadReg(InstancePtr->ReadChannel.ChanBase,
-					XAXIVDMA_MM2S_ADDR_OFFSET + XAXIVDMA_HSIZE_OFFSET));
-	xil_printf("\tMM2S Frame Delay and Stride Register: %d\r\n",
-			XAxiVdma_ReadReg(InstancePtr->ReadChannel.ChanBase,
-					XAXIVDMA_MM2S_ADDR_OFFSET + XAXIVDMA_STRD_FRMDLY_OFFSET));
-	xil_printf("\tMM2S Start Address 1: %x\r\n",
-			XAxiVdma_ReadReg(InstancePtr->ReadChannel.ChanBase,
-					XAXIVDMA_MM2S_ADDR_OFFSET + XAXIVDMA_START_ADDR_OFFSET));
-
-	xil_printf("VDMA status: ");
-	if (status & XAXIVDMA_SR_HALTED_MASK)
-		xil_printf("halted\n");
-	else
-		xil_printf("running\n");
-	if (status & XAXIVDMA_SR_IDLE_MASK)
-		xil_printf("idle\n");
-	if (status & XAXIVDMA_SR_ERR_INTERNAL_MASK)
-		xil_printf("internal err\n");
-	if (status & XAXIVDMA_SR_ERR_SLAVE_MASK)
-		xil_printf("slave err\n");
-	if (status & XAXIVDMA_SR_ERR_DECODE_MASK)
-		xil_printf("decode err\n");
-	if (status & XAXIVDMA_SR_ERR_FSZ_LESS_MASK)
-		xil_printf("FSize Less Mismatch err\n");
-	if (status & XAXIVDMA_SR_ERR_LSZ_LESS_MASK)
-		xil_printf("LSize Less Mismatch err\n");
-	if (status & XAXIVDMA_SR_ERR_SG_SLV_MASK)
-		xil_printf("SG slave err\n");
-	if (status & XAXIVDMA_SR_ERR_SG_DEC_MASK)
-		xil_printf("SG decode err\n");
-	if (status & XAXIVDMA_SR_ERR_FSZ_MORE_MASK)
-		xil_printf("FSize More Mismatch err\n");
-
-	return status;
-}
-
-void fb_fill(uint32_t offset) {
-	memset(framebuffer + offset, 0, 1280 * 1024 * 4);
-}
-
-static XClk_Wiz clkwiz;
-
-void pixelclock_init_2(struct zz_video_mode *mode) {
-	XClk_Wiz_Config conf;
-	XClk_Wiz_CfgInitialize(&clkwiz, &conf, XPAR_CLK_WIZ_0_BASEADDR);
-
-	u32 mul = mode->mul;
-	u32 div = mode->div;
-	u32 otherdiv = mode->div2;
-
-	XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR, 0x200, (mul << 8) | div);
-	XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR, 0x208, otherdiv);
-
-	// load configuration
-	XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR, 0x25C, 0x00000003);
-	//XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR,  0x25C, 0x00000001);
-}
-
-// FIXME!
-#define MNTZ_BASE_ADDR 0x43C00000
-
-#define MNTZORRO_REG0 0
-#define MNTZORRO_REG1 4
-#define MNTZORRO_REG2 8
-#define MNTZORRO_REG3 12
-#define MNTZORRO_REG4 16
-#define MNTZORRO_REG5 20
-
-#define mntzorro_read(BaseAddress, RegOffset) \
-    Xil_In32((BaseAddress) + (RegOffset))
-
-#define mntzorro_write(BaseAddress, RegOffset, Data) \
-  	Xil_Out32((BaseAddress) + (RegOffset), (u32)(Data))
-
-#define VF_DLY ;
-
-// ONLY isr0 is allowed to call this!
-void video_formatter_valign() {
-	// vertical alignment
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, 1);
-	VF_DLY;
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0x80000000 + 0x5); // OP_VSYNC
-	VF_DLY;
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0x80000000); // NOP
-	VF_DLY;
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0); // clear
-	VF_DLY;
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, 0); // unlock access, NOP
-	VF_DLY;
-}
-
-// ONLY isr0 is allowed to call this!
-void video_formatter_write(uint32_t data, uint16_t op) {
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, data);
-	VF_DLY;
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0x80000000 | op); // OP_MAX (vmax | hmax)
-	VF_DLY;
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0x80000000); // NOP
-	VF_DLY;
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0); // clear
-	VF_DLY;
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, 0); // unlock access, NOP
-	VF_DLY;
-}
-
-void video_formatter_init(int scalemode, int colormode, int width, int height,
-		int htotal, int vtotal, int hss, int hse, int vss, int vse,
-		int polarity) {
-	video_formatter_write((vtotal << 16) | htotal, MNTVF_OP_MAX);
-	video_formatter_write((height << 16) | width, MNTVF_OP_DIMENSIONS);
-	video_formatter_write((hss << 16) | hse, MNTVF_OP_HS);
-	video_formatter_write((vss << 16) | vse, MNTVF_OP_VS);
-	video_formatter_write(polarity, MNTVF_OP_POLARITY);
-	video_formatter_write(scalemode, MNTVF_OP_SCALE);
-	video_formatter_write(colormode, MNTVF_OP_COLORMODE);
-
-	video_formatter_valign();
-}
-
-void video_system_init(struct zz_video_mode *mode, int hdiv, int vdiv) {
-	pixelclock_init_2(mode);
-	hdmi_ctrl_init(mode);
-	init_vdma(mode->hres, mode->vres, hdiv, vdiv, (u32)framebuffer + framebuffer_pan_offset);
-}
-
-// Our address space is relative to the autoconfig base address (for example, it could be 0x600000)
-#define MNT_REG_BASE    			0x000000
-// Frame buffer/graphics memory starts at 64KB, leaving ample space for general purpose registers.
-#define MNT_FB_BASE     			0x010000
-
-#define REVISION_MAJOR 1
-#define REVISION_MINOR 9
-
-int scalemode = 0;
-
-static int interrupt_enabled_audio = 0;
-static int interrupt_waiting_audio = 0;
-static int audio_buffer_collision = 0;
-static uint32_t audio_scale = 1;
-
-int isra_count = 0;
-
-// audio formatter interrupt, triggered whenever a period is completed
-void isr_audio (void *dummy) {
-	uint32_t val = XAudioFormatter_ReadReg(XPAR_XAUDIOFORMATTER_0_BASEADDR, XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET);
-	val |= (1<<31); // clear irq
-	XAudioFormatter_WriteReg(XPAR_XAUDIOFORMATTER_0_BASEADDR,
-		XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET, val);
-
-	/*if (isra_count++>100) {
-		printf("[isra]\n");
-		isra_count = 0;
-	}*/
-
-	if (interrupt_enabled_audio) {
-		interrupt_waiting_audio = 1;
-
-		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 1);
-		usleep(1);
-		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
-	} else {
-		interrupt_waiting_audio = 0;
-	}
-}
-
-void video_mode_init(int mode, int scalemode, int colormode) {
-	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
-
-	int hdiv = 1, vdiv = 1;
-	stride_div = 1;
-
-	if (scalemode & 1) {
-		hdiv = 2;
-		stride_div = 2;
-	}
-	if (scalemode & 2)
-		vdiv = 2;
-
-	// 8 bit
-	if (colormode == MNTVA_COLOR_8BIT)
-		hdiv *= 4;
-
-	if (colormode == MNTVA_COLOR_16BIT565 || colormode == MNTVA_COLOR_15BIT)
-		hdiv *= 2;
-
-	struct zz_video_mode *vmode = &preset_video_modes[mode];
-
-	video_system_init(vmode, hdiv, vdiv);
-
-	video_formatter_init(scalemode, colormode,
-			vmode->hres, vmode->vres,
-			vmode->hmax, vmode->vmax,
-			vmode->hstart, vmode->hend,
-			vmode->vstart, vmode->vend,
-			vmode->polarity);
-
-	vmode_hsize = vmode->hres;
-	vmode_vsize = vmode->vres;
-	vmode_vdiv = vdiv;
-	vmode_hdiv = hdiv;
-}
-
-int16_t sprite_x = 0, sprite_x_adj = 0, sprite_x_base = 0;
-int16_t sprite_y = 0, sprite_y_adj = 0, sprite_y_base = 0;
-int16_t sprite_x_offset = 0;
-int16_t sprite_y_offset = 0;
-
-uint8_t sprite_width  = 16;
-uint8_t sprite_height = 16;
-
-uint32_t sprite_buf[32 * 48];
-uint8_t sprite_clipped = 0;
-int16_t sprite_clip_x = 0, sprite_clip_y = 0;
-
-uint32_t sprite_colors[4] = { 0x00ff00ff, 0x00000000, 0x00000000, 0x00000000 };
-
-int sprite_request_update_pos = 0;
-int sprite_request_update_data = 0;
-int sprite_request_show = 0;
-int sprite_request_hide = 0;
-int sprite_request_pos_x = 0;
-int sprite_request_pos_y = 0;
-int sprite_showing = 0;
-int split_request_pos = 0;
-
-// FIXME: move all sprite and video formatter related things to another file
-void update_hw_sprite(uint8_t *data, uint32_t *colors, uint16_t w, uint16_t h)
-{
-	uint8_t cur_bit = 0x80;
-	uint8_t cur_color = 0, out_pos = 0, iter_offset = 0;
-	uint8_t line_pitch = (w / 8) * 2;
-	uint8_t cur_bytes[8];
-
-	for (uint8_t y_line = 0; y_line < h; y_line++) {
-		if (w <= 16) {
-			cur_bytes[0] = data[y_line * line_pitch];
-			cur_bytes[1] = data[(y_line * line_pitch) + 2];
-			cur_bytes[2] = data[(y_line * line_pitch) + 1];
-			cur_bytes[3] = data[(y_line * line_pitch) + 3];
-		}
-		else {
-			cur_bytes[0] = data[y_line * line_pitch];
-			cur_bytes[1] = data[(y_line * line_pitch) + 4];
-			cur_bytes[2] = data[(y_line * line_pitch) + 1];
-			cur_bytes[3] = data[(y_line * line_pitch) + 5];
-			cur_bytes[4] = data[(y_line * line_pitch) + 2];
-			cur_bytes[5] = data[(y_line * line_pitch) + 6];
-			cur_bytes[6] = data[(y_line * line_pitch) + 3];
-			cur_bytes[7] = data[(y_line * line_pitch) + 7];
-		}
-
-		while (out_pos < 8) {
-			for (uint8_t i = 0; i < line_pitch; i += 2) {
-				cur_color = (cur_bytes[i] & cur_bit) ? 1 : 0;
-				if (cur_bytes[i + 1] & cur_bit) cur_color += 2;
-
-				sprite_buf[(y_line * 32) + out_pos + iter_offset] = colors[cur_color] & 0x00ffffff;
-				iter_offset += 8;
-			}
-
-			out_pos++;
-			cur_bit >>= 1;
-			iter_offset = 0;
-		}
-		cur_bit = 0x80;
-		out_pos = 0;
-	}
-
-	sprite_request_update_data = 1;
-}
-
-void update_hw_sprite_clut(uint8_t *data_, uint8_t *colors, uint16_t w, uint16_t h, uint8_t keycolor)
-{
-	uint8_t *data = data_;
-	uint8_t color[4];
-
-	for (int y = 0; y < h && y < 48; y++) {
-		for (int x = 0; x < w && x < 32; x++) {
-			if (data[x] == keycolor) {
-				*((uint32_t *)color) = 0x00ff00ff;
-			}
-			else {
-				color[0] = colors[(data[x] * 3)+2];
-				color[1] = colors[(data[x] * 3)+1];
-				color[2] = colors[(data[x] * 3)];
-				color[3] = 0x00;
-				if (*((uint32_t *)color) == 0x00FF00FF)
-					*((uint32_t *)color) = 0x00FE00FE;
-			}
-			sprite_buf[(y * 32) + x] = *((uint32_t *)color);
-		}
-		data += w;
-	}
-
-	sprite_request_update_data = 1;
-}
-
-void clear_hw_sprite()
-{
-	for (uint16_t i = 0; i < 32 * 48; i++) {
-		sprite_buf[i] = 0x00ff00ff;
-	}
-	//sprite_request_update_data = 1;
-}
-
-void _clip_hw_sprite(int16_t offset_x, int16_t offset_y)
-{
-	uint16_t xo = 0, yo = 0;
-	if (offset_x < 0)
-		xo = -offset_x;
-	if (offset_y < 0)
-		yo = -offset_y;
-
-	for (int y = 0; y < 48; y++) {
-		//printf("CLIP %02d: ",y);
-		for (int x = 0; x < 32; x++) {
-			video_formatter_write((y * 32) + x, 14);
-			if (x < 32 - xo && y < 48 - yo) {
-				//printf("%06lx", sprite_buf[((y + yo) * 32) + (x + xo)] & 0x00ffffff);
-				video_formatter_write(sprite_buf[((y + yo) * 32) + (x + xo)] & 0x00ffffff, 15);
-			} else {
-				//printf("%06lx", 0x00ff00ff);
-				video_formatter_write(0x00ff00ff, 15);
-			}
-		}
-		//printf("\n");
-	}
-}
-
-void _update_hw_sprite_pos(int16_t x, int16_t y) {
-	sprite_x = x - sprite_x_offset + 1;
-	// horizontally doubled mode
-	if (scalemode & 1)
-		sprite_x_adj = (sprite_x * 2) + 1;
-	else
-		sprite_x_adj = sprite_x + 2;
-
-	sprite_y = y + split_pos - sprite_y_offset + 1;
-
-	// vertically doubled mode
-	if (scalemode & 2)
-		sprite_y_adj = sprite_y *= 2;
-	else
-		sprite_y_adj = sprite_y;
-
-	if (sprite_x < 0 || sprite_y < 0) {
-		if (sprite_clip_x != sprite_x || sprite_clip_y != sprite_y) {
-			_clip_hw_sprite((sprite_x < 0) ? sprite_x : 0, (sprite_y < 0) ? sprite_y : 0);
-		}
-		sprite_clipped = 1;
-		if (sprite_x < 0) {
-			sprite_x_adj = 0;
-			sprite_clip_x = sprite_x;
-		}
-		if (sprite_y < 0) {
-			sprite_y_adj = 0;
-			sprite_clip_y = sprite_y;
-		}
-	}
-	else if (sprite_clipped && sprite_x >= 0 && sprite_y >= 0) {
-		_clip_hw_sprite(0, 0);
-		sprite_clipped = 0;
-	}
-}
-
-void update_hw_sprite_pos(int16_t x, int16_t y) {
-	sprite_request_pos_x = x;
-	sprite_request_pos_y = y;
-	sprite_request_update_pos = 1;
-}
-
-// this mode can be changed by amiga software to select a different resolution / framerate for
-// native video capture
-//static int videocap_video_mode = ZZVMODE_720x576;
-//static int video_mode = ZZVMODE_720x576|2<<12|MNTVA_COLOR_32BIT<<8;
-//static int default_pan_offset = 0x00e00000;
-
-// default to more compatible 60hz mode
-static int videocap_video_mode = ZZVMODE_800x600;
-static int video_mode = ZZVMODE_800x600 | 2 << 12 | MNTVA_COLOR_32BIT << 8;
-static int default_pan_offset_pal_800x600 = 0x00dff2f8;
-static int default_pan_offset_pal = 0x00e00000;
-static int default_pan_offset_ntsc = 0x00e00000;
-static int interlace_old = 0;
-static int videocap_ntsc_old = 0;
-static int videocap_enabled_old = 0;
+// FIXME
+// This is the absolute offset in ZZ9000 RAM for the "framebuffer transfer register",
+// which can be replaced by the DMA acceleration functionality entirely, but some
+// software still relies on this legacy register.
+unsigned int cur_mem_offset = 0x3500000;
 
 static char usb_storage_available = 0;
 static uint32_t usb_storage_read_block = 0;
@@ -1032,237 +102,22 @@ static uint32_t usb_storage_write_block = 0;
 
 // ethernet state
 uint16_t ethernet_send_result = 0;
-static int backlog_nag_counter = 0;
-static int interrupt_enabled_ethernet = 0;
-static int interrupt_signal_ethernet = 0;
-static int interrupt_waiting_ethernet = 0;
+int eth_backlog_nag_counter = 0;
+int interrupt_waiting_ethernet = 0;
 
 // usb state
 uint16_t usb_status = 0;
-// we can read or write a number of USB blocks at once, and amiga can select which one is mapped at the USB storage buffer area
-uint32_t usb_selected_buffer_block = 0;
 uint32_t usb_read_write_num_blocks = 1;
 // debug things like individual reads/writes, greatly slowing the system down
 uint32_t debug_lowlevel = 0;
 
-void videocap_area_clear() {
-	fb_fill(0x00dff000 / 4);
-}
-
-#define INTC_INTERRUPT_ID_0 61 // IRQ_F2P[0:0]
-#define INTC_INTERRUPT_ID_1 62 // IRQ_F2P[1:1]
-
-static int isr_flush_count=0;
-
-int vblank_count = 0;
-
-// interrupt service routine for IRQ_F2P[0:0]
-// vblank + raster position interrupt
-void isr0 (void *dummy) {
-	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
-
-	int vblank = (zstate & (1 << 21));
-	int videocap_enabled = (zstate & (1 << 23));
-	int videocap_ntsc = (zstate & (1 << 22));
-	int interlace = !!(zstate & (1 << 24));
-
-	if (!videocap_enabled) {
-		if (!vblank) {
-			// if this is not the vblank interrupt, set up the split buffer
-			// TODO: VDMA doesn't seem to like switching buffers in the middle of a frame.
-			// the first line after a switch contains an extraneous word, so we end up
-			// with up to 4 pixels of the other buffer in the first line
-			if (split_pos != 0) {
-				if (card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE]) {
-					video_formatter_write(1, MNTVF_OP_PALETTE_SEL);
-				}
-				init_vdma(vmode_hsize, vmode_vsize, vmode_hdiv, vmode_vdiv, (u32)framebuffer + bgbuf_offset);
-			}
-		} else {
-			// if this is the vblank interrupt, set up the "normal" buffer
-			if (card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE]) {
-				video_formatter_write(0, MNTVF_OP_PALETTE_SEL);
-			}
-			init_vdma(vmode_hsize, vmode_vsize, vmode_hdiv, vmode_vdiv, (u32)framebuffer + framebuffer_pan_offset);
-		}
-	} else {
-		// FIXME magic constant
-		if (framebuffer_pan_offset >= 0x00dff000) {
-			// we are looking at the videocap area
-			// so set up the right mode for it
-
-			int videocap_reset = 0;
-
-			if (!videocap_enabled_old) {
-				videocap_area_clear();
-				// force mode cleanup
-				videocap_reset = 1;
-			}
-
-			if (sprite_showing) {
-			}
-
-			if (videocap_ntsc != videocap_ntsc_old || videocap_reset) {
-				// change between ntsc+pal
-				videocap_area_clear();
-
-				// hide sprite
-				sprite_request_hide = 1;
-
-				if (videocap_ntsc) {
-					// NTSC
-					printf("videocap: ntsc\n");
-					framebuffer_pan_width = 0;
-					framebuffer_pan_offset = default_pan_offset_ntsc;
-					if (card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
-						init_ns_video_mode(ZZVMODE_720x480);
-					} else {
-						video_mode_init(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT);
-
-						// use this if there are problems with 720x480
-						//video_mode_init(ZZVMODE_800x600, 2, MNTVA_COLOR_32BIT);
-					}
-				} else {
-					// PAL
-					printf("videocap: pal\n");
-					framebuffer_pan_width = 0;
-					if (videocap_video_mode == ZZVMODE_800x600) {
-						framebuffer_pan_offset = default_pan_offset_pal_800x600;
-					} else {
-						framebuffer_pan_offset = default_pan_offset_pal;
-					}
-					if (videocap_video_mode == ZZVMODE_720x576 && card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
-						init_ns_video_mode(ZZVMODE_720x576);
-					} else {
-						video_mode_init(videocap_video_mode, 2, MNTVA_COLOR_32BIT);
-					}
-				}
-				videocap_reset = 1;
-			}
-
-			if (interlace != interlace_old || videocap_reset) {
-				// interlace has changed, we need to reconfigure vdma for the new screen height
-				vmode_vdiv = 2;
-				if (interlace) {
-					vmode_vdiv = 1;
-				}
-				videocap_area_clear();
-				init_vdma(vmode_hsize, vmode_vsize, 1, vmode_vdiv, (u32)framebuffer + framebuffer_pan_offset);
-				video_formatter_valign();
-				printf("videocap interlace mode changed to %d.\n", interlace);
-			}
-
-			interlace_old = interlace;
-			videocap_ntsc_old = videocap_ntsc;
-			videocap_enabled_old = videocap_enabled;
-		} else {
-			videocap_enabled_old = 0;
-			videocap_ntsc_old = 0;
-			interlace_old = 0;
-		}
-	}
-
-	// flush the data caches synchronized to full frames
-	if (!vblank || (split_pos == 0)) {
-		Xil_L1DCacheFlush();
-		Xil_L2CacheFlush();
-		isr_flush_count = 0;
-
-		if ((interrupt_signal_ethernet && interrupt_enabled_ethernet)) {
-			// interrupt amiga (trigger int6/2)
-			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 1);
-			usleep(1);
-			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
-
-			// FIXME legacy behavior
-			interrupt_signal_ethernet = 0;
-		}
-
-		if (sprite_request_show) {
-			sprite_showing = 1;
-			sprite_request_show = 0;
-		}
-
-		if (sprite_request_update_data) {
-			_clip_hw_sprite(0, 0);
-			sprite_request_update_data = 0;
-		}
-
-		if (sprite_request_update_pos) {
-			_update_hw_sprite_pos(sprite_request_pos_x, sprite_request_pos_y);
-			video_formatter_write((sprite_y_adj << 16) | sprite_x_adj, MNTVF_OP_SPRITE_XY);
-			sprite_request_update_pos = 0;
-		}
-
-		if (sprite_request_hide) {
-			sprite_x = 2000;
-			sprite_y = 2000;
-			video_formatter_write((sprite_y << 16) | sprite_x, MNTVF_OP_SPRITE_XY);
-			sprite_showing = 0;
-			sprite_request_hide = 0;
-		}
-
-		// handle screen dragging
-		if (split_request_pos != split_pos) {
-			split_pos = split_request_pos;
-			video_formatter_write(split_pos, MNTVF_OP_REPORT_LINE);
-		}
-	}
-
-	vblank_count++;
-}
-
-int fpga_interrupt_init() {
-  int result;
-  XScuGic *intc_instance_ptr = interrupt_get_intc();
-
-  printf("XScuGic_SetPriorityTriggerType()\n");
-
-  // set the priority of IRQ_F2P[0:0] to 0xA0 (highest 0xF8, lowest 0x00) and a trigger for a rising edge 0x3.
-  XScuGic_SetPriorityTriggerType(intc_instance_ptr, INTC_INTERRUPT_ID_0, 0xA0, 0x3); // vblank / split
-  XScuGic_SetPriorityTriggerType(intc_instance_ptr, INTC_INTERRUPT_ID_1, 0x90, 0x3); // audio formatter
-
-  printf("XScuGic_Connect()\n");
-
-  // connect the interrupt service routine isr0 to the interrupt controller
-  result = XScuGic_Connect(intc_instance_ptr, INTC_INTERRUPT_ID_0, (Xil_ExceptionHandler)isr0, NULL);
-  result = XScuGic_Connect(intc_instance_ptr, INTC_INTERRUPT_ID_1, (Xil_ExceptionHandler)isr_audio, NULL);
-
-  if (result != XST_SUCCESS) {
-	printf("XScuGic_Connect() failed!\n");
-    return result;
-  }
-
-  printf("XScuGic_Enable()\n");
-
-  // enable interrupts for IRQ_F2P[0:0]
-  XScuGic_Enable(intc_instance_ptr, INTC_INTERRUPT_ID_0);
-  // enable interrupts for IRQ_F2P[1:1]
-  XScuGic_Enable(intc_instance_ptr, INTC_INTERRUPT_ID_1);
-
-  return 0;
-}
-
-void init_ns_video_mode(uint32_t mode_num) {
-	printf("init_ns_video_mode(%d)\n", mode_num);
-	if (mode_num == ZZVMODE_720x576) {
-		video_mode_init(ZZVMODE_720x576_NS_PAL + scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT);
-	} else {
-		video_mode_init(ZZVMODE_720x480_NS_PAL + scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT);
-	}
-}
+// audio state (ZZ9000AX)
+static int audio_buffer_collision = 0;
+static uint32_t audio_scale = 48000/50;
+static uint32_t audio_offset = 0;
+static int adau_enabled = 0;
 
 void handle_amiga_reset() {
-	framebuffer_pan_width = 0;
-	framebuffer_pan_offset = default_pan_offset_pal_800x600;
-	split_request_pos = 0;
-	sprite_request_hide = 1;
-
-	// Used for testing the nonstandard VSync modes without the driver having to enable them.
-	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
-
-	videocap_enabled_old = 0;
-
 	printf("    _______________   ___   ___   ___  \n");
 	printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
 	printf("      / /   / / (_) | | | | | | | | | |\n");
@@ -1270,217 +125,74 @@ void handle_amiga_reset() {
 	printf("    / /__ / /__  / /| |_| | |_| | |_| |\n");
 	printf("   /_____/_____|/_/  \\___/ \\___/ \\___/ \n\n");
 
-	usb_storage_available = zz_usb_init();
+	video_reset();
 
+	// stop audio
+	audio_set_tx_buffer((uint8_t*)AUDIO_TX_BUFFER_ADDRESS);
+	audio_silence();
+	audio_set_rx_buffer((uint8_t*)AUDIO_RX_BUFFER_ADDRESS);
+
+	// usb
+	usb_storage_available = zz_usb_init();
 	usb_status = 0;
-	usb_selected_buffer_block = 0;
 	usb_read_write_num_blocks = 1;
+
+	// ethernet
 	ethernet_send_result = 0;
-	backlog_nag_counter = 0;
-	interrupt_enabled_ethernet = 0;
-	interrupt_enabled_audio = 0;
+	eth_backlog_nag_counter = 0;
+	video_state->interrupt_enabled_ethernet = 0;
 
 	// FIXME document
 	cur_mem_offset = 0x3500000;
 
-	// FIXME temporary: clear audio buffer on reset
-	memset(AUDIO_TX_BUFFER_ADDRESS, 0, AUDIO_TX_BUFFER_SIZE);
+	// FIXME
+	memset((u32 *)Z3_SCRATCH_ADDR, 0, sizeof(struct GFXData));
 
-	// FIXME there should be more state to be reset
+	// FIXME temporary: clear audio buffer on reset
+	memset((void*)AUDIO_TX_BUFFER_ADDRESS, 0, AUDIO_TX_BUFFER_SIZE);
+
+	// FIXME test content for audio buffer
+	/*int16_t* adata = (uint16_t*)(((void*)AUDIO_TX_BUFFER_ADDRESS));
+	float f = 1;
+	for (int i=0; i<AUDIO_TX_BUFFER_SIZE/2; i++) {
+		adata[i] = (sin((float)i/200.0)*65536)*f;
+		f-=0.0001;
+	}*/
+
+	adau_enabled = audio_adau_init(1);
 
 	// clear interrupt holding amiga
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
+
+	// Used for testing the nonstandard VSync modes without the driver having to enable them.
+	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
 }
-
-uint16_t arm_app_output_event_serial = 0;
-uint16_t arm_app_output_event_code = 0;
-char arm_app_output_event_ack = 0;
-uint16_t arm_app_output_events_blocking = 0;
-uint16_t arm_app_output_putchar_to_events = 0;
-uint16_t arm_app_input_event_serial = 0;
-uint16_t arm_app_input_event_code = 0;
-char arm_app_input_event_ack = 0;
-
-uint32_t arm_app_output_events_timeout = 100000;
-
-void arm_app_put_event_code(uint16_t code) {
-	arm_app_output_event_code = code;
-	arm_app_output_event_ack = 0;
-	arm_app_output_event_serial++;
-}
-
-char arm_app_output_event_acked() {
-	return arm_app_output_event_ack;
-}
-
-void arm_app_set_output_events_blocking(char blocking) {
-	arm_app_output_events_blocking = blocking;
-}
-
-void arm_app_set_output_putchar_to_events(char putchar_enabled) {
-	arm_app_output_putchar_to_events = putchar_enabled;
-}
-
-uint16_t arm_app_get_event_serial() {
-	return arm_app_input_event_serial;
-}
-
-uint16_t arm_app_get_event_code() {
-	arm_app_input_event_ack = 1;
-	return arm_app_input_event_code;
-}
-
-int __attribute__ ((visibility ("default"))) _putchar(char c) {
-	if (arm_app_output_putchar_to_events) {
-		if (arm_app_output_events_blocking) {
-			for (uint32_t i = 0; i < arm_app_output_events_timeout; i++) {
-				usleep(1);
-				if (arm_app_output_event_ack)
-					break;
-			}
-		}
-		arm_app_put_event_code(c);
-	}
-	return putchar(c);
-}
-
-struct ZZ9K_ENV {
-	uint32_t api_version;
-	uint32_t argv[8];
-	uint32_t argc;
-
-	int (*fn_putchar)(char);
-	void (*fn_set_output_putchar_to_events)(char);
-	void (*fn_set_output_events_blocking)(char);
-	void (*fn_put_event_code)(uint16_t);
-	uint16_t (*fn_get_event_serial)();
-	uint16_t (*fn_get_event_code)();
-	char (*fn_output_event_acked)();
-};
-
-void arm_exception_handler_id_reset(void *callback);
-void arm_exception_handler_id_data_abort(void *callback);
-void arm_exception_handler_id_prefetch_abort(void *callback);
-void arm_exception_handler_illinst(void *callback);
-void DataAbort_InterruptHandler(void *InstancePtr);
-
-volatile struct ZZ9K_ENV arm_run_env;
-volatile void (*core1_trampoline)(volatile struct ZZ9K_ENV* env);
-volatile int core2_execute = 0;
-
-#pragma GCC push_options
-#pragma GCC optimize ("O1")
-// core1_loop is executed on core1 (vs core0)
-void core1_loop() {
-	asm("mov	r0, r0");
-	asm("mrc	p15, 0, r1, c1, c0, 2");
-	/* read cp access control register (CACR) into r1 */
-	asm("orr	r1, r1, #(0xf << 20)");
-	/* enable full access for p10 & p11 */
-	asm("mcr	p15, 0, r1, c1, c0, 2");
-	/* write back into CACR */
-
-	// enable FPU
-	asm("fmrx	r1, FPEXC");
-	/* read the exception register */
-	asm("orr	r1,r1, #0x40000000");
-	/* set VFP enable bit, leave the others in orig state */
-	asm("fmxr	FPEXC, r1");
-	/* write back the exception register */
-
-	// enable flow prediction
-	asm("mrc	p15,0,r0,c1,c0,0");
-	/* flow prediction enable */
-	asm("orr	r0, r0, #(0x01 << 11)");
-	/* #0x8000 */
-	asm("mcr	p15,0,r0,c1,c0,0");
-
-	asm("mrc	p15,0,r0,c1,c0,1");
-	/* read Auxiliary Control Register */
-	asm("orr	r0, r0, #(0x1 << 2)");
-	/* enable Dside prefetch */
-	asm("orr	r0, r0, #(0x1 << 1)");
-	/* enable L2 Prefetch hint */
-	asm("mcr	p15,0,r0,c1,c0,1");
-	/* write Auxiliary Control Register */
-
-	// stack
-	asm("mov sp, #0x06000000");
-
-	volatile uint32_t* addr = 0;
-	addr[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
-	addr[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
-
-	// FIXME these don't seem to do anything useful yet
-	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_RESET,
-			(Xil_ExceptionHandler) arm_exception_handler_id_reset, NULL);
-	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_DATA_ABORT_INT,
-			(Xil_ExceptionHandler) arm_exception_handler_id_data_abort, NULL);
-	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_PREFETCH_ABORT_INT,
-			(Xil_ExceptionHandler) arm_exception_handler_id_prefetch_abort, NULL);
-	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_UNDEFINED_INT,
-			(Xil_ExceptionHandler) arm_exception_handler_illinst, NULL);
-
-	while (1) {
-		while (!core2_execute) {
-			usleep(1);
-		}
-		core2_execute = 0;
-		printf("[CPU1] executing at %p.\n", core1_trampoline);
-		Xil_DCacheFlush();
-		Xil_ICacheInvalidate();
-
-		asm("push {r0-r12}");
-		// FIXME HACK save our stack pointer in 0x10000
-		asm("mov r0, #0x00010000");
-		asm("str sp, [r0]");
-
-		core1_trampoline(&arm_run_env);
-
-		asm("mov r0, #0x00010000");
-		asm("ldr sp, [r0]");
-		asm("pop {r0-r12}");
-	}
-}
-#pragma GCC pop_options
 
 int main() {
-	const char* zstates[53] = { "RESET   ", "Z2_CONF ", "Z2_IDLE ", "WAIT_WRI",
-			"WAIT_WR2", "Z2WRIFIN", "WAIT_RD ", "WAIT_RD2", "WAIT_RD3",
-			"CONFIGED", "CONF_CLR", "D_Z2_Z3 ", "Z3_IDLE ", "Z3_WRITE_UPP",
-			"Z3_WRITE_LOW", "Z3_READ_UP", "Z3_READ_LOW", "Z3_READ_DLY",
-			"Z3_READ_DLY1", "Z3_READ_DLY2", "Z3_WRITE_PRE", "Z3_WRITE_FIN",
-			"Z3_ENDCYCLE", "Z3_DTACK", "Z3_CONFIG", "Z2_REGWRITE", "REGWRITE",
-			"REGREAD", "Z2_REGR_POST", "Z3_REGR_POST", "Z3_REGWRITE",
-			"Z2_REGREAD", "Z3_REGREAD", "NONE_33", "Z2_PRE_CONF", "Z2_ENDCYCLE",
-			"NONE_36", "NONE_37", "NONE_38", "RESET_DVID", "COLD", "WR2B",
-			"WR2C", "Z3DMA1", "Z3DMA2", "Z3_AUTOCONF_RD", "Z3_AUTOCONF_WR",
-			"Z3_AUTOCONF_RD_DLY", "Z3_AUTOCONF_RD_DLY2", "Z3_REGWRITE_PRE",
-			"Z3_REGREAD_PRE", "Z3_WRITE_PRE2", "UNDEF", };
-
 	init_platform();
-
-	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_DATA_ABORT_INT,
-			(Xil_ExceptionHandler) arm_exception_handler_id_data_abort, NULL);
-	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_PREFETCH_ABORT_INT,
-			(Xil_ExceptionHandler) arm_exception_handler_id_prefetch_abort, NULL);
-	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_UNDEFINED_INT,
-			(Xil_ExceptionHandler) arm_exception_handler_illinst, NULL);
-
-	memset((u32 *)Z3_SCRATCH_ADDR, 0, sizeof(struct GFXData));
 
 	boot_rom_init();
 
 	disable_reset_out();
 
+	video_state = video_init();
+
 	xadc_init();
 
-	// FIXME constant
-	framebuffer = (u32*) 0x00200000;
-	int need_req_ack = 0;
-	u8* mem = (u8*) framebuffer;
+	interrupt_configure();
 
-	// blitter etc
+	ethernet_init();
+
+	handle_amiga_reset();
+
+	fpga_interrupt_connect(isr_video, isr_audio, isr_audio_rx);
+
+	// ARM app run environment
+	arm_app_init();
+	volatile struct ZZ9K_ENV* arm_run_env = arm_app_get_run_env();
+	uint32_t arm_run_address = 0;
+
+	// graphics temporary registers
 	uint16_t rect_x1 = 0;
 	uint16_t rect_x2 = 0;
 	uint16_t rect_x3 = 0;
@@ -1492,72 +204,33 @@ int main() {
 	uint32_t rect_rgb2 = 0;
 	uint32_t blitter_colormode = MNTVA_COLOR_32BIT;
 	uint16_t blitter_src_pitch = 0;
-
 	uint16_t blitter_user1 = 0;
 	uint16_t blitter_user2 = 0;
-	uint16_t blitter_user3 = 0;
-	uint16_t blitter_user4 = 0;
 
-	// ARM app run environment
-	arm_run_env.api_version = 1;
-	arm_run_env.fn_putchar = _putchar;
-	arm_run_env.fn_get_event_code = arm_app_get_event_code;
-	arm_run_env.fn_get_event_serial = arm_app_get_event_serial;
-	arm_run_env.fn_output_event_acked = arm_app_output_event_acked;
-	arm_run_env.fn_put_event_code = arm_app_put_event_code;
-	arm_run_env.fn_set_output_events_blocking =
-			arm_app_set_output_events_blocking;
-	arm_run_env.fn_set_output_putchar_to_events =
-			arm_app_set_output_putchar_to_events;
-
-	arm_run_env.argc = 0;
-	uint32_t arm_run_address = 0;
+	// custom video mode
+	int custom_video_mode = ZZVMODE_CUSTOM;
+	int custom_vmode_param = VMODE_PARAM_HRES;
 
 	// zorro state
 	u32 zstate_raw;
+	int need_req_ack = 0;
 
-	/*for (int i=0; i<5; i++) {
-		printf("Initial sleep...\n");
-		sleep(1);
-	}*/
+	// audio parameters (buffer locations)
+	const int ZZ_NUM_AUDIO_PARAMS = 4;
+	uint16_t audio_params[ZZ_NUM_AUDIO_PARAMS];
+	int audio_param = 0; // selected parameter
 
-	interrupt_configure();
-	ethernet_init();
-
-	handle_amiga_reset();
-	init_adau(framebuffer);
-	fpga_interrupt_init();
-
-	printf("launch core1...\n");
-	volatile uint32_t* core1_addr = (volatile uint32_t*) 0xFFFFFFF0;
-	*core1_addr = (uint32_t) core1_loop;
-	// Place some machine code in strategic positions that will catch core1 if it crashes
-	// FIXME: clean this up and turn into a debug handler / monitor
-	volatile uint32_t* core1_addr2 = (volatile uint32_t*) 0x140; // catch 1
-	core1_addr2[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
-	core1_addr2[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
-
-	core1_addr2 = (volatile uint32_t*) 0x100; // catch 2
-	core1_addr2[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
-	core1_addr2[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
-
-	asm("sev");
-	printf("core1 now idling.\n");
-
-	int colormode = 0;
-	video_mode = 0x2200;
-
-	int custom_video_mode = ZZVMODE_CUSTOM;
-	int custom_vmode_param = VMODE_PARAM_HRES;
+	// decoder parameters (mp3 etc)
+	const int ZZ_NUM_DECODER_PARAMS = 8;
+	uint16_t decoder_params[ZZ_NUM_DECODER_PARAMS];
+	int decoder_param = 0; // selected parameter
+	int decoder_bytes_decoded = 0;
 
 	while (1) {
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 		zstate_raw = zstate;
 		u32 writereq = (zstate & (1 << 31));
 		u32 readreq = (zstate & (1 << 30));
-
-		zstate = zstate & 0xff;
-		if (zstate > 52) zstate = 52;
 
 		if (writereq) {
 			u32 zaddr = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG0);
@@ -1575,10 +248,10 @@ int main() {
 			if (zaddr > 0x10000000) {
 				printf("ERRW illegal address %08lx\n", zaddr);
 			} else if (zaddr >= MNT_FB_BASE || zaddr >= MNT_REG_BASE + 0x2000) {
-				u8* ptr = mem;
+				u8* ptr = (u8*)FRAMEBUFFER_ADDRESS;
 
 				if (zaddr >= MNT_FB_BASE) {
-					ptr = mem + zaddr - MNT_FB_BASE;
+					ptr = ptr + zaddr - MNT_FB_BASE;
 				} else if (zaddr < MNT_REG_BASE + 0x8000) {
 					// NOP (RX frame is here)
 				} else if (zaddr < MNT_REG_BASE + 0xa000) {
@@ -1623,20 +296,24 @@ int main() {
 				switch (zaddr) {
 				// Various blitter/video registers
 				case REG_ZZ_PAN_HI:
-					framebuffer_pan_offset = zdata << 16;
+					video_state->framebuffer_pan_offset = zdata << 16;
 					break;
 				case REG_ZZ_PAN_LO:
-					framebuffer_pan_offset |= zdata;
+					video_state->framebuffer_pan_offset |= zdata;
 
-					// cursor offset support for p96 split screen
-					sprite_x_offset = rect_x1;
-					sprite_y_offset = rect_y1;
+					// FIXME cursor offset support for p96 split screen
+					video_state->sprite_x_offset = rect_x1;
+					video_state->sprite_y_offset = rect_y1;
 
-					framebuffer_pan_width = rect_x2;
-					framebuffer_color_format = blitter_colormode;
-					framebuffer_pan_offset += (rect_x1 << blitter_colormode);
-					if (split_pos == 0) {
-						framebuffer_pan_offset += (rect_y1 * (framebuffer_pan_width << framebuffer_color_format));
+					// FIXME: document/comment this. rect_x1/x2/y1 are used for panning inside of a screen
+					// together with blitter_colormode
+					// TODO: rework to dedicated registers because this makes it hard to debug
+
+					video_state->framebuffer_pan_width = rect_x2;
+					u32 framebuffer_color_format = blitter_colormode;
+					video_state->framebuffer_pan_offset += (rect_x1 << blitter_colormode);
+					if (video_state->split_pos == 0) {
+						video_state->framebuffer_pan_offset += (rect_y1 * (video_state->framebuffer_pan_width << framebuffer_color_format));
 					}
 					break;
 
@@ -1663,76 +340,70 @@ int main() {
 					if (zdata & 8) {
 						// clear/ack
 						if (zdata & 16) {
-							//printf("[clear] eth\n");
+							printf("[clear] eth\n");
 							interrupt_waiting_ethernet = 0;
 						}
 						if (zdata & 32) {
-							//printf("[clear] audio\n");
-							interrupt_waiting_audio = 0;
+							audio_clear_interrupt();
 						}
 					} else {
-						printf("[enable] eth: %d\n", zdata);
-						interrupt_enabled_ethernet = zdata & 1;
+						printf("[enable] eth: %d\n", (int)zdata);
+						video_state->interrupt_enabled_ethernet = zdata & 1;
 					}
 					break;
 				case REG_ZZ_MODE: {
-					// reset interlace tracking
-					interlace_old = -1;
-
 					int mode = zdata & 0xff;
-					colormode = (zdata & 0xf00) >> 8;
-					scalemode = (zdata & 0xf000) >> 12;
-					printf("mode change: %d color: %d scale: %d\n", mode, colormode, scalemode);
+					int colormode = (zdata & 0xf00) >> 8;
+					int scalemode = (zdata & 0xf000) >> 12;
 
 					video_mode_init(mode, scalemode, colormode);
+
+					// FIXME
 					// remember selected video mode
-					video_mode = zdata;
+					// video_mode = zdata;
 					break;
 				}
 				case REG_ZZ_VCAP_MODE:
 					printf("videocap default mode select: %lx\n", zdata);
-
-					videocap_video_mode = zdata & 0xff;
+					video_state->videocap_video_mode = zdata & 0xff;
 					break;
 				//case REG_ZZ_SPRITE_X:
 				case REG_ZZ_SPRITE_Y:
-					if (!sprite_showing)
+					if (!video_state->sprite_showing)
 						break;
 
-					sprite_x_base = (int16_t)rect_x1;
-					sprite_y_base = (int16_t)rect_y1;
-
-					update_hw_sprite_pos(sprite_x_base, sprite_y_base);
+					video_state->sprite_x_base = (int16_t)rect_x1;
+					video_state->sprite_y_base = (int16_t)rect_y1;
+					update_hw_sprite_pos(video_state->sprite_x_base, video_state->sprite_y_base);
 
 					break;
 				case REG_ZZ_SPRITE_BITMAP: {
 					if (zdata == 1) { // Hardware sprite enabled
-						sprite_request_show = 1;
+						hw_sprite_show(1);
 						break;
 					}
 					else if (zdata == 2) { // Hardware sprite disabled
-						sprite_request_show = 0;
+						hw_sprite_show(0);
 						break;
 					}
 
-					uint8_t* bmp_data = (uint8_t*) ((u32) framebuffer
+					uint8_t* bmp_data = (uint8_t*) ((u32) video_state->framebuffer
 							+ blitter_src_offset);
 
+					video_state->sprite_x_offset = rect_x1;
+					video_state->sprite_y_offset = rect_y1;
+					video_state->sprite_width  = rect_x2;
+					video_state->sprite_height = rect_y2;
+
 					clear_hw_sprite();
-
-					sprite_x_offset = rect_x1;
-					sprite_y_offset = rect_y1;
-					sprite_width  = rect_x2;
-					sprite_height = rect_y2;
-
-					update_hw_sprite(bmp_data, sprite_colors, sprite_width, sprite_height);
-					update_hw_sprite_pos(sprite_x_base, sprite_y_base);
+					update_hw_sprite(bmp_data);
+					update_hw_sprite_pos();
 					break;
 				}
 				case REG_ZZ_SPRITE_COLORS: {
-					sprite_colors[zdata] = (blitter_user1 << 16) | blitter_user2;
-					if (zdata != 0 && sprite_colors[zdata] == 0xff00ff)
-                		sprite_colors[zdata] = 0xfe00fe;
+					video_state->sprite_colors[zdata] = (blitter_user1 << 16) | blitter_user2;
+					if (zdata != 0 && video_state->sprite_colors[zdata] == 0xff00ff)
+						video_state->sprite_colors[zdata] = 0xfe00fe;
 					break;
 				}
 				case REG_ZZ_SRC_PITCH:
@@ -1768,10 +439,10 @@ int main() {
 					blitter_user2 = zdata;
 					break;
 				case REG_ZZ_USER3:
-					blitter_user3 = zdata;
+					// FIXME unused
 					break;
 				case REG_ZZ_USER4:
-					blitter_user4 = zdata;
+					// FIXME unused
 					break;
 
 				case REG_ZZ_RGB_HI:
@@ -1799,13 +470,13 @@ int main() {
 
 				// DMA RTG rendering
 				case REG_ZZ_BITTER_DMA_OP: {
-					handle_blitter_dma_op(zdata);
+					handle_blitter_dma_op(video_state, zdata);
 					break;
 				}
 
 				// RTG rendering
 				case REG_ZZ_FILLRECT:
-					set_fb((uint32_t*) ((u32) framebuffer + blitter_dst_offset),
+					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 					uint8_t mask = zdata;
 
@@ -1818,7 +489,7 @@ int main() {
 					break;
 
 				case REG_ZZ_COPYRECT: {
-					set_fb((uint32_t*) ((u32) framebuffer + blitter_dst_offset),
+					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 					mask = (blitter_colormode >> 8);
 
@@ -1827,20 +498,20 @@ int main() {
 						if (mask == 0xFF || (mask != 0xFF && (blitter_colormode & 0x0F)) != MNTVA_COLOR_8BIT)
 							copy_rect_nomask(rect_x1, rect_y1, rect_x2, rect_y2, rect_x3,
 											rect_y3, blitter_colormode & 0x0F,
-											(uint32_t*) ((u32) framebuffer
+											(uint32_t*) ((u32)video_state->framebuffer
 													+ blitter_dst_offset),
 											blitter_dst_pitch, MINTERM_SRC);
 						else
 							copy_rect(rect_x1, rect_y1, rect_x2, rect_y2, rect_x3,
 									rect_y3, blitter_colormode & 0x0F,
-									(uint32_t*) ((u32) framebuffer
+									(uint32_t*) ((u32)video_state->framebuffer
 											+ blitter_dst_offset),
 									blitter_dst_pitch, mask);
 						break;
 					case 2: // BlitRectNoMaskComplete
 						copy_rect_nomask(rect_x1, rect_y1, rect_x2, rect_y2, rect_x3,
 										rect_y3, blitter_colormode & 0x0F,
-										(uint32_t*) ((u32) framebuffer
+										(uint32_t*) ((u32)video_state->framebuffer
 												+ blitter_src_offset),
 										blitter_src_pitch, mask); // Mask in this case is minterm/opcode.
 						break;
@@ -1851,9 +522,9 @@ int main() {
 
 				case REG_ZZ_FILLTEMPLATE: {
 					uint8_t draw_mode = blitter_colormode >> 8;
-					uint8_t* tmpl_data = (uint8_t*) ((u32) framebuffer
+					uint8_t* tmpl_data = (uint8_t*) ((u32)video_state->framebuffer
 							+ blitter_src_offset);
-					set_fb((uint32_t*) ((u32) framebuffer + blitter_dst_offset),
+					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
 					uint8_t bpp = 2 * (blitter_colormode & 0xff);
@@ -1883,37 +554,40 @@ int main() {
 					break;
 				}
 
-				case 0x50: { // Copy crap from scratch area
+				case REG_ZZ_SCRATCH_COPY: { // Copy from scratch area
+					// FIXME for what?
 					for (int i = 0; i < rect_y1; i++) {
-						memcpy	((uint32_t*) ((u32) framebuffer + framebuffer_pan_offset + (i * rect_x1)),
+						memcpy	((uint32_t*) ((u32)video_state->framebuffer + video_state->framebuffer_pan_offset + (i * rect_x1)),
 								 (uint32_t*) ((u32)Z3_SCRATCH_ADDR + (i * rect_x1)),
 								 rect_x1);
 					}
 					break;
 				}
 
-				case 0x52: // Custom video mode param
+				case REG_ZZ_CVMODE_PARAM: // Custom video mode param
+					// FIXME
 					custom_vmode_param = zdata;
 					break;
 
-				case 0x54: { // Custom video mode data
-					int *target = &preset_video_modes[custom_video_mode].hres;
+				case REG_ZZ_CVMODE_VAL: { // Custom video mode data
+					struct zz_video_mode* vm = get_custom_video_mode_ptr(custom_video_mode);
+					int *target = &vm->hres;
 					switch(custom_vmode_param) {
-						case VMODE_PARAM_VRES: target = &preset_video_modes[custom_video_mode].vres; break;
-						case VMODE_PARAM_HSTART: target = &preset_video_modes[custom_video_mode].hstart; break;
-						case VMODE_PARAM_HEND: target = &preset_video_modes[custom_video_mode].hend; break;
-						case VMODE_PARAM_HMAX: target = &preset_video_modes[custom_video_mode].hmax; break;
-						case VMODE_PARAM_VSTART: target = &preset_video_modes[custom_video_mode].vstart; break;
-						case VMODE_PARAM_VEND: target = &preset_video_modes[custom_video_mode].vend; break;
-						case VMODE_PARAM_VMAX: target = &preset_video_modes[custom_video_mode].vmax; break;
-						case VMODE_PARAM_POLARITY: target = &preset_video_modes[custom_video_mode].polarity; break;
-						case VMODE_PARAM_MHZ: target = &preset_video_modes[custom_video_mode].mhz; break;
-						case VMODE_PARAM_PHZ: target = &preset_video_modes[custom_video_mode].phz; break;
-						case VMODE_PARAM_VHZ: target = &preset_video_modes[custom_video_mode].vhz; break;
-						case VMODE_PARAM_HDMI: target = &preset_video_modes[custom_video_mode].hdmi; break;
-						case VMODE_PARAM_MUL: target = &preset_video_modes[custom_video_mode].mul; break;
-						case VMODE_PARAM_DIV: target = &preset_video_modes[custom_video_mode].div; break;
-						case VMODE_PARAM_DIV2: target = &preset_video_modes[custom_video_mode].div2; break;
+						case VMODE_PARAM_VRES: target = &vm->vres; break;
+						case VMODE_PARAM_HSTART: target = &vm->hstart; break;
+						case VMODE_PARAM_HEND: target = &vm->hend; break;
+						case VMODE_PARAM_HMAX: target = &vm->hmax; break;
+						case VMODE_PARAM_VSTART: target = &vm->vstart; break;
+						case VMODE_PARAM_VEND: target = &vm->vend; break;
+						case VMODE_PARAM_VMAX: target = &vm->vmax; break;
+						case VMODE_PARAM_POLARITY: target = &vm->polarity; break;
+						case VMODE_PARAM_MHZ: target = &vm->mhz; break;
+						case VMODE_PARAM_PHZ: target = &vm->phz; break;
+						case VMODE_PARAM_VHZ: target = &vm->vhz; break;
+						case VMODE_PARAM_HDMI: target = &vm->hdmi; break;
+						case VMODE_PARAM_MUL: target = &vm->mul; break;
+						case VMODE_PARAM_DIV: target = &vm->div; break;
+						case VMODE_PARAM_DIV2: target = &vm->div2; break;
 						default: break;
 					}
 
@@ -1921,31 +595,31 @@ int main() {
 					break;
 				}
 
-				case 0x56: // Set custom video mode index
+				case REG_ZZ_CVMODE_SEL: // Set custom video mode index
 					custom_video_mode = zdata;
 					break;
 
-				case 0x58: // Set custom video mode without any questions asked.
+				case REG_ZZ_CVMODE: // Set custom video mode without any questions asked.
 					// This assumes that the custom video mode is 640x480 or higher resolution.
-					video_mode_init(custom_video_mode, scalemode, colormode);
+					video_mode_init(custom_video_mode, video_state->scalemode, video_state->colormode);
 					break;
 
 				case REG_ZZ_SET_FEATURE:
 					switch (blitter_user1) {
 						case CARD_FEATURE_SECONDARY_PALETTE:
-							printf("[feature] SECONDARY_PALETTE: %d\n",zdata);
+							printf("[feature] SECONDARY_PALETTE: %lu\n",zdata);
 							// Enables/disables the secondary palette on screen split with P96 3.10+
-							card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE] = zdata;
+							video_state->card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE] = zdata;
 							break;
 						case CARD_FEATURE_NONSTANDARD_VSYNC:
-							printf("[feature] NONSTANDARD_VSYNC: %d\n",zdata);
+							printf("[feature] NONSTANDARD_VSYNC: %lu\n",zdata);
 							// Enables/disables the nonstandard refresh rates for scandoubled PAL/NTSC HDMI output modes.
 							if (zdata == 2) {
-								scandoubler_mode_adjust = 2;
+								video_state->scandoubler_mode_adjust = 2;
 							} else {
-								scandoubler_mode_adjust = 0;
+								video_state->scandoubler_mode_adjust = 0;
 							}
-							card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = zdata;
+							video_state->card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = zdata;
 							break;
 						default:
 							break;
@@ -1957,10 +631,10 @@ int main() {
 					uint8_t planes = (zdata & 0xFF00) >> 8;
 					uint8_t mask = (zdata & 0xFF);
 					uint8_t layer_mask = blitter_user2;
-					uint8_t* bmp_data = (uint8_t*) ((u32) framebuffer
+					uint8_t* bmp_data = (uint8_t*) ((u32)video_state->framebuffer
 							+ blitter_src_offset);
 
-					set_fb((uint32_t*) ((u32) framebuffer + blitter_dst_offset),
+					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
 					p2c_rect(rect_x1, 0, rect_x2, rect_y2, rect_x3,
@@ -1974,10 +648,10 @@ int main() {
 					uint8_t planes = (zdata & 0xFF00) >> 8;
 					uint8_t mask = (zdata & 0xFF);
 					uint8_t layer_mask = blitter_user2;
-					uint8_t* bmp_data = (uint8_t*) ((u32) framebuffer
+					uint8_t* bmp_data = (uint8_t*) ((u32)video_state->framebuffer
 							+ blitter_src_offset);
 
-					set_fb((uint32_t*) ((u32) framebuffer + blitter_dst_offset),
+					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 					p2d_rect(rect_x1, 0, rect_x2, rect_y2, rect_x3,
 							rect_y3, draw_mode, planes, mask, layer_mask, rect_rgb,
@@ -1987,7 +661,7 @@ int main() {
 
 				case REG_ZZ_DRAWLINE: {
 					uint8_t draw_mode = blitter_colormode >> 8;
-					set_fb((uint32_t*) ((u32) framebuffer + blitter_dst_offset),
+					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
 					// rect_x3 contains the pattern. if all bits are set for both the mask and the pattern,
@@ -2006,18 +680,15 @@ int main() {
 				}
 
 				case REG_ZZ_INVERTRECT:
-					set_fb((uint32_t*) ((u32) framebuffer + blitter_dst_offset),
+					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 					invert_rect(rect_x1, rect_y1, rect_x2, rect_y2,
 							zdata & 0xFF, blitter_colormode);
 					break;
 
 				case REG_ZZ_SET_SPLIT_POS:
-					bgbuf_offset = blitter_src_offset;
-					split_request_pos = zdata;
-
-					printf("split_pos: %d\n", split_pos);
-					printf("split_request_pos: %d\n", split_request_pos);
+					video_state->bgbuf_offset = blitter_src_offset;
+					video_state->split_request_pos = zdata;
 					break;
 
 				// Ethernet
@@ -2094,7 +765,10 @@ int main() {
 				}
 				case REG_ZZ_DEBUG: {
 					debug_lowlevel = zdata;
-
+					break;
+				}
+				case REG_ZZ_DEBUG_TIMER: {
+					audio_debug_timer(zdata);
 					break;
 				}
 				case REG_ZZ_PRINT_CHR: {
@@ -2106,11 +780,9 @@ int main() {
 					printf("%04x", (unsigned int)(zdata&0xffff));
 					break;
 				}
-				case 0xF4: {
-					// FIXME temp
+				case REG_ZZ_AUDIO_CONFIG: {
 					// audio config
-					printf("[enable] audio: %d\n", zdata);
-					interrupt_enabled_audio = zdata & 1;
+					audio_set_interrupt_enabled((int)(zdata & 1));
 					break;
 				}
 
@@ -2119,126 +791,138 @@ int main() {
 					arm_run_address = ((u32) zdata) << 16;
 					break;
 				case REG_ZZ_ARM_RUN_LO:
-					// TODO checksum?
 					arm_run_address |= zdata;
-
-					*core1_addr = (uint32_t) core1_loop;
-					core1_addr2[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
-					core1_addr2[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
-
-					printf("[ARM_RUN] %lx\n", arm_run_address);
-					if (arm_run_address > 0) {
-						core1_trampoline = (volatile void (*)(
-								volatile struct ZZ9K_ENV*)) arm_run_address;
-						printf("[ARM_RUN] signaling second core.\n");
-						Xil_DCacheFlush();
-						Xil_ICacheInvalidate();
-						core2_execute = 1;
-						Xil_DCacheFlush();
-						Xil_ICacheInvalidate();
-					} else {
-						core1_trampoline = 0;
-						core2_execute = 0;
-					}
-
-					// FIXME move this out of here
-					// sequence to reset cpu1 taken from https://xilinx-wiki.atlassian.net/wiki/spaces/A/pages/18842504/XAPP1079+Latest+Information
-
-					Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
-					uint32_t RegVal = Xil_In32(A9_CPU_RST_CTRL);
-					RegVal |= A9_RST1_MASK;
-					Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-					RegVal |= A9_CLKSTOP1_MASK;
-					Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-					RegVal &= ~A9_RST1_MASK;
-					Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-					RegVal &= ~A9_CLKSTOP1_MASK;
-					Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-					Xil_Out32(XSLCR_LOCK_ADDR, XSLCR_LOCK_CODE);
-
-					dmb();
-					dsb();
-					isb();
-					asm("sev");
+					arm_app_run(arm_run_address);
 					break;
 				case REG_ZZ_ARM_ARGC:
-					arm_run_env.argc = zdata;
+					arm_run_env->argc = zdata;
 					break;
 				case REG_ZZ_ARM_ARGV0:
-					arm_run_env.argv[0] = ((u32) zdata) << 16;
+					arm_run_env->argv[0] = ((u32) zdata) << 16;
 					break;
 				case REG_ZZ_ARM_ARGV1:
-					arm_run_env.argv[0] |= zdata;
-					printf("ARG0 set: %lx\n", arm_run_env.argv[0]);
+					arm_run_env->argv[0] |= zdata;
 					break;
 				case REG_ZZ_ARM_ARGV2:
-					arm_run_env.argv[1] = ((u32) zdata) << 16;
+					arm_run_env->argv[1] = ((u32) zdata) << 16;
 					break;
 				case REG_ZZ_ARM_ARGV3:
-					arm_run_env.argv[1] |= zdata;
-					printf("ARG1 set: %lx\n", arm_run_env.argv[1]);
+					arm_run_env->argv[1] |= zdata;
 					break;
 				case REG_ZZ_ARM_ARGV4:
-					arm_run_env.argv[2] = ((u32) zdata) << 16;
+					arm_run_env->argv[2] = ((u32) zdata) << 16;
 					break;
 				case REG_ZZ_ARM_ARGV5:
-					arm_run_env.argv[2] |= zdata;
-					printf("ARG2 set: %lx\n", arm_run_env.argv[2]);
+					arm_run_env->argv[2] |= zdata;
 					break;
 				case REG_ZZ_ARM_ARGV6:
-					arm_run_env.argv[3] = ((u32) zdata) << 16;
+					arm_run_env->argv[3] = ((u32) zdata) << 16;
 					break;
 				case REG_ZZ_ARM_ARGV7:
-					arm_run_env.argv[3] |= zdata;
-					printf("ARG3 set: %lx\n", arm_run_env.argv[3]);
+					arm_run_env->argv[3] |= zdata;
 					break;
 				case REG_ZZ_ARM_EV_CODE:
-					arm_app_input_event_code = zdata;
-					arm_app_input_event_serial++;
-					arm_app_input_event_ack = 0;
+					arm_app_input_event(zdata);
 					break;
-				case REG_ZZ_UNUSED_REG70:
+				case REG_ZZ_AUDIO_SWAB:
 					{
-						// byteswap audio buffer
-						uint32_t offset = zdata<<8; // *256
-						uint16_t* data = (uint16_t*)(((void*)AUDIO_TX_BUFFER_ADDRESS)+offset);
-
-						if (audio_scale > 1) {
-							// for lower freqs that are divisions of 48000Hz
-							int k = (3840/2)/audio_scale-1;
-							for (int i=3840/2-audio_scale; i>=0; i-=audio_scale) {
-								uint16_t s = __builtin_bswap16(data[k]);
-								data[i] = s;
-								for (int j=1; j<audio_scale; j++) {
-									data[i+j] = s;
-								}
-								k--;
-							}
-						} else {
-							// 48000Hz
-							for (int i=0; i<3840/2; i++) {
-								data[i] = __builtin_bswap16(data[i]);
-							}
-						}
-
-						u32 txcount = XAudioFormatterGetDMATransferCount(&audio_formatter);
-
-						// is the distance of reader (audio dma) and writer (amiga) in the ring buffer too small?
-						// then signal this condition so amiga can adjust
-						if (abs(txcount-offset) < 3840) {
-							audio_buffer_collision = 1;
-							printf("[aswap] ring collision %d\n", abs(txcount-offset));
-						} else {
-							audio_buffer_collision = 0;
-						}
-
-						printf("[aswap] d-a: %ld scl: %d\n",txcount-offset,audio_scale);
+						int byteswap = 1;
+						if (zdata&(1<<15)) byteswap = 0;
+						audio_offset = (zdata&0x7fff)<<8; // *256
+						audio_buffer_collision = audio_swab(audio_scale, audio_offset, byteswap);
 
 						break;
 					}
-				case REG_ZZ_UNUSED_REG74:
+				case REG_ZZ_AUDIO_SCALE:
 					audio_scale = zdata;
 					break;
+				case REG_ZZ_AUDIO_PARAM:
+
+					printf("[REG_ZZ_AUDIO_PARAM] %lx\n", zdata);
+
+					// DECODER PARAMS:
+					// 0: tx buffer offset hi
+					// 1: tx buffer offset lo
+					// 2: rx buffer offset hi
+					// 3: rx buffer offset lo
+
+					if (zdata<ZZ_NUM_AUDIO_PARAMS) {
+						audio_param = zdata;
+					} else {
+						audio_param = 0;
+					}
+					break;
+				case REG_ZZ_AUDIO_VAL:
+
+					printf("[REG_ZZ_AUDIO_VAL] %lx\n", zdata);
+
+					audio_params[audio_param] = zdata;
+					if (audio_param == 1) {
+						uint8_t* addr = (uint8_t*)video_state->framebuffer +
+								((audio_params[0]<<16)|audio_params[1]);
+						audio_set_tx_buffer(addr);
+					} else if (audio_param == 3) {
+						uint8_t* addr = (uint8_t*)video_state->framebuffer +
+								((audio_params[2]<<16)|audio_params[3]);
+						audio_set_rx_buffer(addr);
+					}
+					break;
+				case REG_ZZ_DECODER_PARAM:
+					if (zdata<ZZ_NUM_DECODER_PARAMS) {
+						decoder_param = zdata;
+					} else {
+						decoder_param = 0;
+					}
+					break;
+				case REG_ZZ_DECODER_VAL:
+					decoder_params[decoder_param] = zdata;
+					break;
+				case REG_ZZ_DECODE:
+					{
+						// DECODER PARAMS:
+						// 0: input buffer offset hi
+						// 1: input buffer offset lo
+						// 2: input buffer size hi
+						// 3: input buffer size lo
+						// 4: output buffer offset hi
+						// 5: output buffer offset lo
+						// 6: output buffer size hi
+						// 7: output buffer size lo
+
+						uint8_t* input_buffer = (uint8_t*)video_state->framebuffer
+								+ ((decoder_params[0]<<16)|decoder_params[1]);
+						size_t input_buffer_size = (decoder_params[2]<<16)|decoder_params[3];
+
+						uint8_t* output_buffer = (uint8_t*)video_state->framebuffer
+								+ ((decoder_params[4]<<16)|decoder_params[5]);
+						size_t output_buffer_size = (decoder_params[6]<<16)|decoder_params[7];
+
+						if (zdata == 0) {
+							printf("[decode:mp3:%d] %p (%x) -> %p (%x)\n", (int)zdata, input_buffer, input_buffer_size,
+									output_buffer, output_buffer_size);
+
+							decode_mp3_init(input_buffer, input_buffer_size);
+							decoder_bytes_decoded = -1;
+						} else {
+							int max_samples = output_buffer_size;
+							int mp3_freq = mp3_get_hz();
+							if (mp3_freq != 48000) {
+								uint8_t* temp_buffer = output_buffer + AUDIO_TX_BUFFER_SIZE; // FIXME hack
+								max_samples = mp3_get_hz()/50 * 2;
+
+								decoder_bytes_decoded = decode_mp3_samples(temp_buffer, max_samples);
+
+								// resample
+								resample_s16((int16_t*)temp_buffer, (int16_t*)output_buffer,
+										mp3_get_hz(), 48000, AUDIO_BYTES_PER_PERIOD / 4);
+
+							} else {
+								decoder_bytes_decoded = decode_mp3_samples(output_buffer, max_samples);
+							}
+						}
+
+						break;
+					}
 				}
 			}
 
@@ -2248,20 +932,15 @@ int main() {
 		} else if (readreq) {
 			uint32_t zaddr = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG0);
 
-			if (debug_lowlevel) {
-				printf("READ: %08lx\n",zaddr);
-			}
-			u32 z3 = (zstate_raw & (1 << 25)); // TODO cache
+			//printf("READ: %08lx\n",zaddr);
+			u32 z3 = (zstate_raw & (1 << 25));
 
-			if (zaddr > 0x10000000) {
-				printf("ERRR: illegal address %08lx\n", zaddr);
-			}
 			if (zaddr >= MNT_FB_BASE || zaddr >= MNT_REG_BASE + 0x2000) {
-				u8* ptr = mem;
+				u8* ptr = (u8*) FRAMEBUFFER_ADDRESS;
 
 				if (zaddr >= MNT_FB_BASE) {
 					// read from framebuffer / generic memory
-					ptr = mem + zaddr - MNT_FB_BASE;
+					ptr = ptr + zaddr - MNT_FB_BASE;
 				} else if (zaddr < MNT_REG_BASE + 0x6000) {
 					// 0x0000-0x1fff: read from ethernet RX frame
 					// used by Z2
@@ -2290,16 +969,15 @@ int main() {
 							b1 | b2 | b3 | b4);
 				} else {
 					if (zaddr >= MNT_REG_BASE + 0x6000 && zaddr < MNT_REG_BASE + 0x8000) {
+						// autoboot rom
 						u16 ubyte = ptr[0] << 8;
 						u16 lbyte = ptr[1];
 						//printf("READ ROM: [%04x]",ubyte|lbyte);
-						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1,
-								ubyte | lbyte);
+						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1, ubyte | lbyte);
 					} else {
 						u16 ubyte = ptr[0] << 8;
 						u16 lbyte = ptr[1];
-						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1,
-								ubyte | lbyte);
+						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1, ubyte | lbyte);
 					}
 				}
 			} else if (zaddr >= MNT_REG_BASE) {
@@ -2307,14 +985,14 @@ int main() {
 				uint32_t data = 0;
 				uint32_t zaddr32 = zaddr & 0xffffffc;
 
+				//printf("REGR: %lx (%d)\n", zaddr, zaddr & 2);
+
 				switch (zaddr32) {
 					case REG_ZZ_VBLANK_STATUS:
 						data = (zstate_raw & (1 << 21));
 						break;
 					case REG_ZZ_ARM_EV_SERIAL:
-						data = (arm_app_output_event_serial << 16)
-								| arm_app_output_event_code;
-						arm_app_output_event_ack = 1;
+						data = arm_app_output_event();
 						break;
 					case REG_ZZ_ETH_MAC_HI: {
 						uint8_t* mac = ethernet_get_mac_address_ptr();
@@ -2358,13 +1036,23 @@ int main() {
 					}
 					case REG_ZZ_CONFIG: {
 						//printf("read 0x04: a: %d e: %d\n", interrupt_waiting_audio, interrupt_waiting_ethernet);
-						data = ((interrupt_waiting_audio<<1)|(interrupt_waiting_ethernet))<<16;
+						data = ((audio_get_interrupt()<<1)|(interrupt_waiting_ethernet))<<16;
 						break;
 					}
-					case REG_ZZ_UNUSED_REG70: {
+					case REG_ZZ_AUDIO_SWAB: {
 						// misc status bits
 						//printf("read 0x70: %d\n", audio_buffer_collision);
 						data = (audio_buffer_collision)<<16;
+						break;
+					}
+					case REG_ZZ_AUDIO_CONFIG: {
+						// is ZZ9000AX present?
+						data = (adau_enabled)<<16;
+						break;
+					}
+					case REG_ZZ_DECODER_VAL: {
+						// used to determine if MP3 decoding has finished
+						data = decoder_bytes_decoded;
 						break;
 					}
 				}
@@ -2387,10 +1075,9 @@ int main() {
 			need_req_ack = 2;
 		} else {
 			// there are no read/write requests, we can do other housekeeping
-
 			ethernet_task();
 
-			if (zstate == 0) {
+			if ((zstate & 0xff) == 0) {
 				// RESET
 				handle_amiga_reset();
 			}
@@ -2406,9 +1093,9 @@ int main() {
 				u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 				u32 writereq = (zstate & (1 << 31));
 				u32 readreq = (zstate & (1 << 30));
-				if (need_req_ack == 1 && !writereq)
+				if (need_req_ack == 1 && !writereq) // no more write request?
 					break;
-				if (need_req_ack == 2 && !readreq)
+				if (need_req_ack == 2 && !readreq) // no more read request?
 					break;
 				if ((zstate & 0xff) == 0)
 					break; // reset
@@ -2419,52 +1106,17 @@ int main() {
 
 		// check for queued up ethernet frames
 		int ethernet_backlog = ethernet_get_backlog();
-		if (ethernet_backlog > 0 && backlog_nag_counter > 5000) {
-			interrupt_signal_ethernet = 1;
+		if (ethernet_backlog > 0 && eth_backlog_nag_counter > 5000) {
+			video_state->interrupt_signal_ethernet = 1;
 			interrupt_waiting_ethernet = 1;
-			backlog_nag_counter = 0;
+			eth_backlog_nag_counter = 0;
 		}
 
-		if (interrupt_enabled_ethernet && ethernet_backlog > 0) {
-			backlog_nag_counter++;
+		if (video_state->interrupt_enabled_ethernet && ethernet_backlog > 0) {
+			eth_backlog_nag_counter++;
 		}
 	}
 
 	cleanup_platform();
 	return 0;
-}
-
-void arm_exception_handler_id_reset(void *callback) {
-	printf("id_reset: arm_exception_handler()!\n");
-	while (1) {
-	}
-}
-
-void arm_exception_handler_id_data_abort(void *callback) {
-	printf("id_data_abort: arm_exception_handler()!\n");
-	while (1) {
-	}
-}
-
-void arm_exception_handler_id_prefetch_abort(void *callback) {
-	printf("id_prefetch_abort: arm_exception_handler()!\n");
-	while (1) {
-	}
-}
-
-void arm_exception_handler(void *callback) {
-	printf("arm_exception_handler()!\n");
-	while (1) {
-	}
-}
-
-void arm_exception_handler_illinst(void *callback) {
-	printf("arm_exception_handler_illinst()!\n");
-	while (1) {
-	}
-}
-
-void DataAbort_InterruptHandler(void *InstancePtr) {
-	while(1) {
-	}
 }
