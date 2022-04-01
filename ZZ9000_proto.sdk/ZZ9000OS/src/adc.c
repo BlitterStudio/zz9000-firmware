@@ -5,12 +5,12 @@
 XAdcPs Xadc;
 
 int xadc_init() {
-	printf("[adc] xadc_init()...");
+	printf("[adc] xadc_init()...\n");
 	XAdcPs_Config* cfg;
 	cfg = XAdcPs_LookupConfig(XPAR_XADCPS_0_DEVICE_ID);
 	XAdcPs_CfgInitialize(&Xadc, cfg, cfg->BaseAddress);
 	int status = XAdcPs_SelfTest(&Xadc);
-	printf("[adc] xadc_init() done: %d", status);
+	printf("[adc] xadc_init() done: %d\n", status);
 	return status;
 }
 
