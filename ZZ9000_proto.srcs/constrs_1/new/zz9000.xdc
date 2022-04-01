@@ -261,6 +261,8 @@ set_property IOSTANDARD LVCMOS33 [get_ports I2SO_LRCLK]
 set_property IOSTANDARD LVCMOS33 [get_ports I2SO_BCLK]
 set_property IOSTANDARD LVCMOS33 [get_ports I2SO_D0]
 set_property IOSTANDARD LVCMOS33 [get_ports I2SO_MCLK]
+set_property IOSTANDARD LVCMOS33 [get_ports I2SI_D0]
+set_property IOSTANDARD LVCMOS33 [get_ports I2SO_RESETn]
 
 create_clock -period 80.000 -name i2s_mclk -add [get_ports I2SO_BCLK]
 
@@ -268,16 +270,11 @@ set_property PACKAGE_PIN U18 [get_ports I2SO_BCLK]
 set_property PACKAGE_PIN W16 [get_ports I2SO_LRCLK]
 set_property PACKAGE_PIN V16 [get_ports I2SO_D0]
 set_property PACKAGE_PIN R18 [get_ports I2SO_MCLK]
+set_property PACKAGE_PIN T17 [get_ports I2SI_D0]
+set_property PACKAGE_PIN U19 [get_ports I2SO_RESETn]
 
 #set_property IOSTANDARD LVCMOS33 [get_ports HDMI_INTN]
 #set_property PACKAGE_PIN W19 [get_ports HDMI_INTN]
-
-#set_property PACKAGE_PIN B9 [get_ports I2C0_sda_io]
-#set_property PACKAGE_PIN B13 [get_ports I2C0_scl_io]
-#set_property IOSTANDARD LVCMOS33 [get_ports I2C0_scl_io]
-#set_property IOSTANDARD LVCMOS33 [get_ports I2C0_sda_io]
-#set_property PULLUP true [get_ports I2C0_sda_io]
-#set_property PULLUP true [get_ports I2C0_scl_io]
 
 # well...
 create_clock -period 35.000 -name amiga_e7m -add [get_ports ZORRO_E7M]
