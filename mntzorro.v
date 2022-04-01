@@ -200,6 +200,9 @@ module MNTZorro_v0_1_S00_AXI
    output reg [7:0]  video_control_op_out,
    output reg video_control_interlace_out,
    input wire [1:0] video_control_vblank_in,
+   
+   // ZZ9000AX peripheral reset
+   output reg zz9000ax_reset_out,
 
    // Xilinx AXI4-Lite implementation starts here ==============================
 
@@ -675,8 +678,9 @@ module MNTZorro_v0_1_S00_AXI
   reg zorro_read;
   reg zorro_write;
 
-  reg zorro_interrupt = 1;
-  assign ZORRO_INT6 = zorro_interrupt;
+  reg [7:0] zorro_interrupt_req = 10;
+  reg [7:0] zorro_interrupt_len = 10;
+  assign ZORRO_INT6 = (zorro_interrupt_req != 8'h00);
 
   reg [15:0] data_in;
   reg [31:0] rr_data;
@@ -1426,6 +1430,8 @@ module MNTZorro_v0_1_S00_AXI
           reg_high <= 0;
           ram_low <= 0;
           ram_high <= 0;
+          
+          zz9000ax_reset_out <= 0;
 
           if (!z_reset)
             zorro_state <= DECIDE_Z2_Z3;
@@ -1434,6 +1440,8 @@ module MNTZorro_v0_1_S00_AXI
         end
 
         DECIDE_Z2_Z3: begin
+          zz9000ax_reset_out <= 1;
+          
 `ifdef ZORRO2
           if (z2addr_autoconfig) begin
             zorro_state <= Z2_CONFIGURING;
@@ -2250,7 +2258,7 @@ module MNTZorro_v0_1_S00_AXI
             'h14: videocap_pitch <= regdata_in[15:0];
             'h20: if (regdata_in[5:0]>0) dtack_timeout <= regdata_in[5:0];
             //'h24: dataout_time[7:0]     <= regdata_in[7:0];
-            //'h14: zorro_interrupt <= regdata_in[0];
+            //'h24: zorro_interrupt_len <= regdata_in[7:0];
             //'h10: E7M_PSINCDEC <= regdata_in[0];
             //'h12: E7M_PSEN     <= regdata_in[0];
           endcase
@@ -2268,8 +2276,11 @@ module MNTZorro_v0_1_S00_AXI
     end else
       video_control_axi <= 0;
 
-    if (axi_reg2[30]==1'b1) begin
-      zorro_interrupt <= axi_reg2[0];
+    if (zorro_interrupt_req == 0) begin
+      if (axi_reg2[30] == 1 && axi_reg2[0] == 1)
+        zorro_interrupt_req <= zorro_interrupt_len;
+    end else begin
+      zorro_interrupt_req = zorro_interrupt_req - 1'b1;
     end
 
     // read / write request acknowledged by ARM
