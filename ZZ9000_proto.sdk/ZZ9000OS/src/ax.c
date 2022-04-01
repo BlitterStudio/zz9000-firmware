@@ -10,6 +10,9 @@
 #include "mntzorro.h"
 #include "sleep.h"
 #include "stdlib.h"
+#include "ax.h"
+#include "memorymap.h"
+#include "xtime_l.h"
 
 #define IIC2_DEVICE_ID	XPAR_XIICPS_1_DEVICE_ID
 #define IIC2_SCLK_RATE	100000
@@ -20,6 +23,9 @@ XI2s_Tx i2s;
 XI2s_Rx i2srx;
 XAudioFormatter audio_formatter;
 XAudioFormatter audio_formatter_rx;
+
+static uint8_t* audio_tx_buffer = (uint8_t*)AUDIO_TX_BUFFER_ADDRESS;
+static uint8_t* audio_rx_buffer = (uint8_t*)AUDIO_RX_BUFFER_ADDRESS;
 
 int adau_write16(u8 i2c_addr, u16 addr, u16 value) {
 	XIicPs* iic = &Iic2;
@@ -183,100 +189,18 @@ int adau_read24(u8 i2c_addr, u16 addr, u8* buffer) {
 void program_adau(u8* program, u32 program_len, u8* params, u32 param_len) {
 	for (u32 i = 0; i < program_len; i+=5) {
 		int res = adau_write40(0x34, 1024+i/5, &program[i]);
-		printf("[adau_write40] %lx: %d\n", i, res);
+		if (res != 0) printf("[adau_write40] %lx: %d\n", i, res);
 	}
 
 	for (u32 i = 0; i < param_len; i+=4) {
 		int res = adau_write32(0x34, 0+i/4, &params[i]);
-		printf("[adau_write32] %lx: %d\n", i, res);
+		if (res != 0) printf("[adau_write32] %lx: %d\n", i, res);
 	}
 }
 
-// returns 1 if adau1701 found, otherwise 0
-int audio_adau_init(uint32_t* audio_buffer) {
-	XIicPs_Config* i2c_config;
-	i2c_config = XIicPs_LookupConfig(IIC2_DEVICE_ID);
-	int status = XIicPs_CfgInitialize(&Iic2, i2c_config, i2c_config->BaseAddress);
-	printf("[adau] XIicPs_CfgInitialize 2: %d\n", status);
-	usleep(10000);
-	printf("[adau] XIicPs 2 is ready: %lx\n", Iic2.IsReady);
-	status = XIicPs_SelfTest(&Iic2);
-	printf("[adau] XIicPs_SelfTest: %x\n", status);
-
-	if (status != 0) {
-		printf("[adau] I2C instance 2 self test failed.");
-		return 0;
-	}
-
-	status = XIicPs_SetSClk(&Iic2, IIC2_SCLK_RATE);
-	printf("[adau] XIicPs_SetSClk: %x\n", status);
-
-	u8 rbuf[5];
-	u8 i = 0x34;
-
-	//usleep(10000);
-	// DSP core control: set ADM, DAM, CR
-	status = adau_write16(i, 2076, (1<<4)|(1<<3)|(1<<2));
-	if (status == 0) {
-		printf("[adau] write DSP core control: %d\n", i);
-		printf("[adau] ZZ9000AX detected.");
-	} else {
-		printf("[adau] ZZ9000AX not detected.");
-		return 0;
-	}
-
-	status = adau_read16(i, 2076, rbuf);
-	if (status == 0) {
-		printf("[adau] read: %d %x %x\n", i, rbuf[0], rbuf[1]);
-	}
-
-	// DAC setup: DS = 01
-	status = adau_write16(i, 2087, 1);
-	printf("[adau] write DAC setup: %d\n", status);
-
-	rbuf[0] = 0;
-	rbuf[1] = 0;
-
-	status = adau_read16(i, 2087, rbuf);
-	printf("[adau] read from 2087: %02x%02x (status: %d)\n", rbuf[0], rbuf[1], status);
-
-	program_adau(Program_Data_IC_1, sizeof(Program_Data_IC_1), Param_Data_IC_1, sizeof(Param_Data_IC_1));
-
-	// TODO: OBP/OLRP
-	u16 MS  = 1<<11; // clock master output
-	//u16 OBF = (0<<10)|(0<<9);    // bclock = 49.152/16 = mclk/4 = 3.072mhz
-	u16 OBF = (1<<10)|(0<<9);    // bclock = 49.152/4 = mclk = 12.288mhz
-	u16 OLF = (0<<8)|(0<<7);    // lrclock = 49.152/1024 = word clock = 48khz?!
-	u16 MSB = 0;    // msb 1
-	u16 OWL = 1<<1; // 16 bit
-	status = adau_write16(i, 0x081e, MS|OBF|OLF|MSB|OWL);
-	printf("[adau] write serial output control: %d\n", status);
-
-	u32 MP0 = 1<<2; // MP02 digital input 0
-	u32 MP1 = 1<<6; //
-	u32 MP2 = 1<<10; //
-	u32 MP3 = 1<<14; //
-	u32 MP4 = 1<<18; // MP42 serial clock in
-	u32 MP5 = 1<<22; // MP52 serial clock in
-
-	u32 MP6 = 1<<2; //
-	u32 MP7 = 1<<6; //
-	u32 MP8 = 1<<10; //
-	u32 MP9 = 1<<14; //
-	u32 MP10 = 1<<18; // MP102 set (serial clock out)
-	u32 MP11 = 1<<22; // MP112 set (serial clock out)
-	status = adau_write24(i, 0x0820, MP0|MP1|MP2|MP3|MP4|MP5);
-	printf("[adau] write MP control 0x820: %d\n", status);
-	status = adau_write24(i, 0x0821, MP6|MP7|MP8|MP9|MP10|MP11);
-	printf("[adau] write MP control 0x821: %d\n", status);
-
-	status = adau_read24(i, 0x0820, rbuf);
-	printf("[adau] read from 0x820: %02x%02x%02x (status: %d)\n", rbuf[0], rbuf[1], rbuf[2], status);
-	status = adau_read24(i, 0x0821, rbuf);
-	printf("[adau] read from 0x821: %02x%02x%02x (status: %d)\n", rbuf[0], rbuf[1], rbuf[2], status);
-
+void audio_init_i2s() {
 	XI2stx_Config* i2s_config = XI2s_Tx_LookupConfig(XPAR_XI2STX_0_DEVICE_ID);
-	status = XI2s_Tx_CfgInitialize(&i2s, i2s_config, i2s_config->BaseAddress);
+	int status = XI2s_Tx_CfgInitialize(&i2s, i2s_config, i2s_config->BaseAddress);
 
 	printf("[adau] I2S_TX cfg status: %d\n", status);
 
@@ -297,7 +221,7 @@ int audio_adau_init(uint32_t* audio_buffer) {
 			XAUD_FORMATTER_CTRL + XAUD_FORMATTER_MM2S_OFFSET, 0);
 
 	XAudioFormatterHwParams af_params;
-	af_params.buf_addr = (u32)audio_buffer;
+	af_params.buf_addr = (u32)audio_tx_buffer;
 	af_params.bits_per_sample = BIT_DEPTH_16;
 	af_params.periods = AUDIO_NUM_PERIODS; // 1 second = 192000 bytes
 	af_params.active_ch = 2;
@@ -328,7 +252,7 @@ int audio_adau_init(uint32_t* audio_buffer) {
 			XAUD_FORMATTER_CTRL + XAUD_FORMATTER_S2MM_OFFSET, 0);
 
 	XAudioFormatterHwParams afrx_params;
-	afrx_params.buf_addr = (u32)AUDIO_RX_BUFFER_ADDRESS;
+	afrx_params.buf_addr = (u32)audio_rx_buffer;
 	afrx_params.bits_per_sample = BIT_DEPTH_16;
 	afrx_params.periods = AUDIO_NUM_PERIODS; // 1 second = 192000 bytes
 	afrx_params.active_ch = 2;
@@ -365,12 +289,115 @@ int audio_adau_init(uint32_t* audio_buffer) {
 	printf("[adau] XI2s_Tx_Enable\n");
 	XAudioFormatterDMAStart(&audio_formatter);
 	printf("[adau] XAudioFormatterDMAStart done.\n");
+}
+
+// returns 1 if adau1701 found, otherwise 0
+// set audio_tx_buffer and audio_rx_buffer before!
+int audio_adau_init(int program_dsp) {
+	XIicPs_Config* i2c_config;
+	i2c_config = XIicPs_LookupConfig(IIC2_DEVICE_ID);
+	int status = XIicPs_CfgInitialize(&Iic2, i2c_config, i2c_config->BaseAddress);
+	printf("[adau] XIicPs_CfgInitialize 2: %d\n", status);
+	usleep(10000);
+	printf("[adau] XIicPs 2 is ready: %lx\n", Iic2.IsReady);
+	status = XIicPs_SelfTest(&Iic2);
+	printf("[adau] XIicPs_SelfTest: %x\n", status);
+
+	if (status != 0) {
+		printf("[adau] I2C instance 2 self test failed.");
+		return 0;
+	}
+
+	status = XIicPs_SetSClk(&Iic2, IIC2_SCLK_RATE);
+	printf("[adau] XIicPs_SetSClk: %x\n", status);
+
+	u8 rbuf[5];
+	u8 i = 0x34;
+
+	//usleep(10000);
+	// DSP core control: set ADM, DAM, CR
+	status = adau_write16(i, 2076, (1<<4)|(1<<3)|(1<<2));
+	if (status == 0) {
+		printf("[adau] write DSP core control: %d\n", i);
+		printf("\n[adau] ~~~~ ZZ9000AX detected. ~~~~\n\n");
+	} else {
+		printf("[adau] ZZ9000AX not detected.\n");
+		return 0;
+	}
+
+	status = adau_read16(i, 2076, rbuf);
+	if (status == 0) {
+		printf("[adau] read: %d %x %x\n", i, rbuf[0], rbuf[1]);
+	}
+
+	// DAC setup: DS = 01
+	status = adau_write16(i, 2087, 1);
+	printf("[adau] write DAC setup: %d\n", status);
+
+	rbuf[0] = 0;
+	rbuf[1] = 0;
+
+	status = adau_read16(i, 2087, rbuf);
+	printf("[adau] read from 2087: %02x%02x (status: %d)\n", rbuf[0], rbuf[1], status);
+
+	if (program_dsp) {
+		program_adau(Program_Data_IC_1, sizeof(Program_Data_IC_1), Param_Data_IC_1, sizeof(Param_Data_IC_1));
+	}
+
+	// TODO: OBP/OLRP
+	u16 MS  = 1<<11; // clock master output
+	//u16 OBF = (0<<10)|(0<<9);    // bclock = 49.152/16 = mclk/4 = 3.072mhz
+	u16 OBF = (1<<10)|(0<<9);    // bclock = 49.152/4 = mclk = 12.288mhz
+	u16 OLF = (0<<8)|(0<<7);    // lrclock = 49.152/1024 = word clock = 48khz?!
+	u16 MSB = 0;    // msb 1
+	u16 OWL = 1<<1; // 16 bit
+	status = adau_write16(i, 0x081e, MS|OBF|OLF|MSB|OWL);
+	printf("[adau] write serial output control: %d\n", status);
+
+	u32 MP0 = 1<<2; // MP02 digital input 0
+	u32 MP1 = 1<<6; //
+	u32 MP2 = 1<<10; //
+	u32 MP3 = 1<<14; //
+	u32 MP4 = 1<<18; // MP42 serial clock in
+	u32 MP5 = 1<<22; // MP52 serial clock in
+
+	u32 MP6 = 1<<2; //
+	u32 MP7 = 1<<6; //
+	u32 MP8 = 1<<10; //
+	u32 MP9 = 1<<14; //
+	u32 MP10 = 1<<18; // MP102 set (serial clock out)
+	u32 MP11 = 1<<22; // MP112 set (serial clock out)
+	status = adau_write24(i, 0x0820, MP0|MP1|MP2|MP3|MP4|MP5);
+	printf("[adau] write MP control 0x820: %d\n", status);
+	status = adau_write24(i, 0x0821, MP6|MP7|MP8|MP9|MP10|MP11);
+	printf("[adau] write MP control 0x821: %d\n", status);
+
+	status = adau_read24(i, 0x0820, rbuf);
+	printf("[adau] read from 0x820: %02x%02x%02x (status: %d)\n", rbuf[0], rbuf[1], rbuf[2], status);
+	status = adau_read24(i, 0x0821, rbuf);
+	printf("[adau] read from 0x821: %02x%02x%02x (status: %d)\n", rbuf[0], rbuf[1], rbuf[2], status);
+
+	audio_init_i2s();
 
 	return 1;
 }
 
 static int interrupt_enabled_audio = 0;
 static uint32_t interrupt_waiting_audio = 0;
+
+XTime debug_time_start = 0;
+
+void audio_debug_timer(int zdata) {
+	if (zdata == 0) {
+		XTime_GetTime(&debug_time_start);
+	} else {
+		XTime debug_time_stop;
+		XTime_GetTime(&debug_time_stop);
+		printf("%x;%09.2f us\n", (uint8_t)zdata,
+				1.0 * (debug_time_stop-debug_time_start) / (COUNTS_PER_SECOND/1000000));
+		XTime_GetTime(&debug_time_start);
+	}
+}
 
 int isra_count = 0;
 
@@ -381,16 +408,17 @@ void isr_audio(void *dummy) {
 	XAudioFormatter_WriteReg(XPAR_XAUDIOFORMATTER_0_BASEADDR,
 		XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET, val);
 
-	if (isra_count++>100) {
+	if (isra_count++>1000) {
 		printf("[isra]\n");
 		isra_count = 0;
 	}
 
 	if (interrupt_enabled_audio) {
+		audio_debug_timer(0);
+
 		interrupt_waiting_audio = 1;
 
 		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 1);
-		usleep(1);
 		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
 	} else {
 		interrupt_waiting_audio = 0;
@@ -402,6 +430,7 @@ uint32_t audio_get_interrupt() {
 }
 
 void audio_clear_interrupt() {
+	//printf("[clear] audio\n");
 	interrupt_waiting_audio = 0;
 }
 
@@ -414,7 +443,7 @@ void isr_audio_rx(void *dummy) {
 	XAudioFormatter_WriteReg(XPAR_XAUDIOFORMATTER_1_BASEADDR,
 		XAUD_FORMATTER_STS + XAUD_FORMATTER_S2MM_OFFSET, val);
 
-	if (israrx_count++>100) {
+	if (israrx_count++>1000) {
 		printf("[isra_rx]\n");
 		israrx_count = 0;
 	}
@@ -427,45 +456,96 @@ uint32_t audio_get_dma_transfer_count() {
 void audio_set_interrupt_enabled(int en) {
 	printf("[audio] enable irq: %d\n", en);
 	interrupt_enabled_audio = en;
+
+	audio_silence();
 }
 
 // offset = offset from audio tx buffer
 // returns audio_buffer_collision (1 or 0)
-int audio_swab(int audio_scale, uint32_t offset) {
+int audio_swab(int audio_buf_samples, uint32_t offset, int byteswap) {
 	int audio_buffer_collision = 0;
-	uint16_t* data = (uint16_t*)(((void*)AUDIO_TX_BUFFER_ADDRESS)+offset);
+	uint16_t* data = (uint16_t*)(audio_tx_buffer + offset);
+	int audio_freq = audio_buf_samples * 50;
 
-	if (audio_scale > 1) {
-		// for lower freqs that are divisions of 48000Hz
-		int k = (3840/2)/audio_scale-1;
-		for (int i=3840/2-audio_scale; i>=0; i-=audio_scale) {
-			uint16_t s = __builtin_bswap16(data[k]);
-			data[i] = s;
-			for (int j=1; j<audio_scale; j++) {
-				data[i+j] = s;
-			}
-			k--;
-		}
-	} else {
-		// 48000Hz
-		for (int i=0; i<3840/2; i++) {
+	//printf("[audio:%d] play: %d +%lu\n", byteswap, audio_freq, offset);
+
+	// byteswap
+	if (byteswap) {
+		for (int i=0; i < audio_buf_samples * 2; i++) {
 			data[i] = __builtin_bswap16(data[i]);
 		}
+	}
+
+	// FIXME missing filter, wonky address calculation
+	// resample if other freq
+	if (audio_freq != 48000) {
+		resample_s16((int16_t*)(audio_tx_buffer + offset),
+				(int16_t*)(audio_tx_buffer+0x20000), audio_freq, 48000, audio_buf_samples);
+		memcpy(audio_tx_buffer + offset, audio_tx_buffer+0x20000, AUDIO_BYTES_PER_PERIOD);
 	}
 
 	u32 txcount = audio_get_dma_transfer_count();
 
 	// is the distance of reader (audio dma) and writer (amiga) in the ring buffer too small?
 	// then signal this condition so amiga can adjust
-	if (abs(txcount-offset) < 3840) {
+	if (abs(txcount-offset) < AUDIO_BYTES_PER_PERIOD) {
 		audio_buffer_collision = 1;
-		printf("[aswap] ring collision %d\n", abs(txcount-offset));
+		//printf("[aswap] ring collision %d\n", abs(txcount-offset));
 	} else {
 		audio_buffer_collision = 0;
 	}
 
-	printf("[aswap] d-a: %ld scl: %d\n",txcount-offset,audio_scale);
+	if (audio_buffer_collision) {
+		printf("[aswap] d-a: %ld\n",txcount-offset);
+	}
 
 	return audio_buffer_collision;
 }
 
+uint32_t resample_s16(int16_t *input, int16_t *output,
+		int inSampleRate, int outSampleRate, uint32_t inputSize) {
+    const uint32_t channels = 2;
+
+    //printf("[resample] %p -> %p (%d -> %d) %lu bytes\n",
+    //		input, output, inSampleRate, outSampleRate, inputSize);
+
+    uint32_t outputSize = 3840/4; // (uint32_t) (inputSize * (double) outSampleRate / (double) inSampleRate);
+    //outputSize -= outputSize % channels;
+
+    double stepDist = ((double) inSampleRate / (double) outSampleRate);
+    const uint64_t fixedFraction = (1LL << 32);
+    const double normFixed = (1.0 / (1LL << 32));
+    uint64_t step = ((uint64_t) (stepDist * fixedFraction + 0.5));
+    uint64_t curOffset = 0;
+
+    // HACK: glue at the end
+    input[inputSize*2]   = input[(inputSize-1)*2];
+    input[inputSize*2+1] = input[(inputSize-1)*2+1];
+
+    for (uint32_t i = 0; i < outputSize; i++) {
+        for (uint32_t c = 0; c < channels; c++) {
+            *output++ = (int16_t) (input[c] + (input[c + channels] - input[c]) * (
+                    (double) (curOffset >> 32) + ((curOffset & (fixedFraction - 1)) * normFixed)));
+        }
+        curOffset += step;
+        input += (curOffset >> 32) * channels;
+        curOffset &= (fixedFraction - 1);
+    }
+    return outputSize;
+}
+
+void audio_set_tx_buffer(uint8_t* addr) {
+	printf("[audio] set tx buffer: %p\n", addr);
+	audio_tx_buffer = addr;
+	audio_init_i2s();
+}
+
+void audio_set_rx_buffer(uint8_t* addr) {
+	printf("[audio] set rx buffer: %p\n", addr);
+	audio_rx_buffer = addr;
+	audio_init_i2s();
+}
+
+void audio_silence() {
+	memset(audio_tx_buffer, 0, AUDIO_TX_BUFFER_SIZE);
+}

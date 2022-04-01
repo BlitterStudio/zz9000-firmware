@@ -71,7 +71,7 @@ void disable_reset_out() {
 	XGpioPs_WritePin(&Gpio, output_pin, 0);
 	usleep(10000);
 	XGpioPs_WritePin(&Gpio, output_pin, 1);
-	print("[gpio] ethernet reset done.\n");
+	print("[gpio] ethernet reset done.\r\n");
 
 	// FIXME
 	int adau_reset = 11;
@@ -81,7 +81,7 @@ void disable_reset_out() {
 	usleep(10000);
 	XGpioPs_WritePin(&Gpio, adau_reset, 1);
 
-	print("[gpio] ADAU reset done.\n");
+	print("[gpio] ADAU reset done.\r\n");
 }
 
 u32 blitter_colormode = MNTVA_COLOR_32BIT;
@@ -102,9 +102,8 @@ static uint32_t usb_storage_write_block = 0;
 
 // ethernet state
 uint16_t ethernet_send_result = 0;
-static int backlog_nag_counter = 0;
-static int interrupt_enabled_ethernet = 0;
-static int interrupt_waiting_ethernet = 0;
+int eth_backlog_nag_counter = 0;
+int interrupt_waiting_ethernet = 0;
 
 // usb state
 uint16_t usb_status = 0;
@@ -114,7 +113,8 @@ uint32_t debug_lowlevel = 0;
 
 // audio state (ZZ9000AX)
 static int audio_buffer_collision = 0;
-static uint32_t audio_scale = 1;
+static uint32_t audio_scale = 48000/50;
+static uint32_t audio_offset = 0;
 static int adau_enabled = 0;
 
 void handle_amiga_reset() {
@@ -127,6 +127,11 @@ void handle_amiga_reset() {
 
 	video_reset();
 
+	// stop audio
+	audio_set_tx_buffer((uint8_t*)AUDIO_TX_BUFFER_ADDRESS);
+	audio_silence();
+	audio_set_rx_buffer((uint8_t*)AUDIO_RX_BUFFER_ADDRESS);
+
 	// usb
 	usb_storage_available = zz_usb_init();
 	usb_status = 0;
@@ -134,8 +139,8 @@ void handle_amiga_reset() {
 
 	// ethernet
 	ethernet_send_result = 0;
-	backlog_nag_counter = 0;
-	interrupt_enabled_ethernet = 0;
+	eth_backlog_nag_counter = 0;
+	video_state->interrupt_enabled_ethernet = 0;
 
 	// FIXME document
 	cur_mem_offset = 0x3500000;
@@ -154,6 +159,8 @@ void handle_amiga_reset() {
 		f-=0.0001;
 	}*/
 
+	adau_enabled = audio_adau_init(1);
+
 	// clear interrupt holding amiga
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
 
@@ -168,7 +175,7 @@ int main() {
 
 	disable_reset_out();
 
-	video_init();
+	video_state = video_init();
 
 	xadc_init();
 
@@ -177,8 +184,6 @@ int main() {
 	ethernet_init();
 
 	handle_amiga_reset();
-
-	adau_enabled = audio_adau_init((uint32_t*)AUDIO_TX_BUFFER_ADDRESS);
 
 	fpga_interrupt_connect(isr_video, isr_audio, isr_audio_rx);
 
@@ -209,6 +214,11 @@ int main() {
 	// zorro state
 	u32 zstate_raw;
 	int need_req_ack = 0;
+
+	// audio parameters (buffer locations)
+	const int ZZ_NUM_AUDIO_PARAMS = 4;
+	uint16_t audio_params[ZZ_NUM_AUDIO_PARAMS];
+	int audio_param = 0; // selected parameter
 
 	// decoder parameters (mp3 etc)
 	const int ZZ_NUM_DECODER_PARAMS = 8;
@@ -329,7 +339,7 @@ int main() {
 					if (zdata & 8) {
 						// clear/ack
 						if (zdata & 16) {
-							//printf("[clear] eth\n");
+							printf("[clear] eth\n");
 							interrupt_waiting_ethernet = 0;
 						}
 						if (zdata & 32) {
@@ -337,7 +347,7 @@ int main() {
 						}
 					} else {
 						printf("[enable] eth: %d\n", (int)zdata);
-						interrupt_enabled_ethernet = zdata & 1;
+						video_state->interrupt_enabled_ethernet = zdata & 1;
 					}
 					break;
 				case REG_ZZ_MODE: {
@@ -754,7 +764,10 @@ int main() {
 				}
 				case REG_ZZ_DEBUG: {
 					debug_lowlevel = zdata;
-
+					break;
+				}
+				case REG_ZZ_DEBUG_TIMER: {
+					audio_debug_timer(zdata);
 					break;
 				}
 				case REG_ZZ_PRINT_CHR: {
@@ -813,13 +826,40 @@ int main() {
 					break;
 				case REG_ZZ_AUDIO_SWAB:
 					{
-						// byteswap audio buffer
-						uint32_t offset = zdata<<8; // *256
-						audio_buffer_collision = audio_swab(audio_scale, offset);
+						int byteswap = 1;
+						if (zdata&(1<<15)) byteswap = 0;
+						audio_offset = (zdata&0x7fff)<<8; // *256
+						audio_buffer_collision = audio_swab(audio_scale, audio_offset, byteswap);
+
 						break;
 					}
 				case REG_ZZ_AUDIO_SCALE:
 					audio_scale = zdata;
+					break;
+				case REG_ZZ_AUDIO_PARAM:
+					// DECODER PARAMS:
+					// 0: tx buffer offset hi
+					// 1: tx buffer offset lo
+					// 2: rx buffer offset hi
+					// 3: rx buffer offset lo
+
+					if (zdata<ZZ_NUM_AUDIO_PARAMS) {
+						audio_param = zdata;
+					} else {
+						audio_param = 0;
+					}
+					break;
+				case REG_ZZ_AUDIO_VAL:
+					audio_params[audio_param] = zdata;
+					if (audio_param == 1) {
+						uint8_t* addr = (uint8_t*)video_state->framebuffer +
+								((audio_params[0]<<16)|audio_params[1]);
+						audio_set_tx_buffer(addr);
+					} else if (audio_param == 3) {
+						uint8_t* addr = (uint8_t*)video_state->framebuffer +
+								((audio_params[2]<<16)|audio_params[3]);
+						audio_set_rx_buffer(addr);
+					}
 					break;
 				case REG_ZZ_DECODER_PARAM:
 					if (zdata<ZZ_NUM_DECODER_PARAMS) {
@@ -851,15 +891,30 @@ int main() {
 								+ ((decoder_params[4]<<16)|decoder_params[5]);
 						size_t output_buffer_size = (decoder_params[6]<<16)|decoder_params[7];
 
-						printf("[decode:mp3] %p (%x) -> %p (%x)\n", input_buffer, input_buffer_size,
-								output_buffer, output_buffer_size);
+						if (zdata == 0) {
+							printf("[decode:mp3:%d] %p (%x) -> %p (%x)\n", (int)zdata, input_buffer, input_buffer_size,
+									output_buffer, output_buffer_size);
 
-						decode_mp3(input_buffer, input_buffer_size, output_buffer, output_buffer_size);
+							decode_mp3_init(input_buffer, input_buffer_size);
+						} else {
+							int max_samples = output_buffer_size;
+							int mp3_freq = mp3_get_hz();
+							if (mp3_freq < 48000) {
+								uint8_t* temp_buffer = output_buffer + 8*3840; // FIXME hack
+								max_samples = mp3_get_hz()/50*2;
+								//printf("[mp3] f: %d max: %d\n", mp3_get_hz(), max_samples);
 
-						uint16_t* data = (uint16_t*)output_buffer;
-						for (int i=0; i<output_buffer_size/2; i++) {
-							data[i] = __builtin_bswap16(data[i]);
+								decode_mp3_samples(temp_buffer, max_samples);
+
+								// resample
+								resample_s16((int16_t*)temp_buffer, (int16_t*)output_buffer,
+										mp3_get_hz(), 48000, max_samples/2);
+
+							} else {
+								decode_mp3_samples(output_buffer, max_samples);
+							}
 						}
+
 						break;
 					}
 				}
@@ -1004,10 +1059,9 @@ int main() {
 			need_req_ack = 2;
 		} else {
 			// there are no read/write requests, we can do other housekeeping
-
 			ethernet_task();
 
-			if (zstate == 0) {
+			if ((zstate & 0xff) == 0) {
 				// RESET
 				handle_amiga_reset();
 			}
@@ -1036,14 +1090,14 @@ int main() {
 
 		// check for queued up ethernet frames
 		int ethernet_backlog = ethernet_get_backlog();
-		if (ethernet_backlog > 0 && backlog_nag_counter > 5000) {
+		if (ethernet_backlog > 0 && eth_backlog_nag_counter > 5000) {
 			video_state->interrupt_signal_ethernet = 1;
 			interrupt_waiting_ethernet = 1;
-			backlog_nag_counter = 0;
+			eth_backlog_nag_counter = 0;
 		}
 
-		if (interrupt_enabled_ethernet && ethernet_backlog > 0) {
-			backlog_nag_counter++;
+		if (video_state->interrupt_enabled_ethernet && ethernet_backlog > 0) {
+			eth_backlog_nag_counter++;
 		}
 	}
 

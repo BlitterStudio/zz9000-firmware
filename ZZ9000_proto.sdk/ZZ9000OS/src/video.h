@@ -64,7 +64,7 @@ struct ZZ_VIDEO_STATE {
 	int interrupt_signal_ethernet;
 };
 
-void video_init();
+struct ZZ_VIDEO_STATE* video_init();
 void video_reset();
 void isr_video(void *dummy);
 void video_mode_init(int mode, int scalemode, int colormode);

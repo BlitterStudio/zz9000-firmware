@@ -85,11 +85,11 @@ enum zz_reg_offsets {
   REG_ZZ_AUDIO_SWAB     = 0x70,
   REG_ZZ_UNUSED_REG72   = 0x72,
   REG_ZZ_AUDIO_SCALE    = 0x74,
-  REG_ZZ_DECODE         = 0x76,
-  REG_ZZ_DECODER_PARAM  = 0x78,
-  REG_ZZ_DECODER_VAL    = 0x7A,
-  REG_ZZ_UNUSED_REG7C   = 0x7C,
-  REG_ZZ_UNUSED_REG7E   = 0x7E,
+  REG_ZZ_AUDIO_PARAM    = 0x76,
+  REG_ZZ_AUDIO_VAL      = 0x78,
+  REG_ZZ_DECODER_PARAM  = 0x7A,
+  REG_ZZ_DECODER_VAL    = 0x7C,
+  REG_ZZ_DECODE         = 0x7E,
 
   REG_ZZ_ETH_TX         = 0x80,
   REG_ZZ_ETH_RX         = 0x82,
@@ -161,7 +161,7 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REGF8   = 0xF8,
   REG_ZZ_UNUSED_REGFA   = 0xFA,
   REG_ZZ_DEBUG          = 0xFC,
-  REG_ZZ_UNUSED_REGFE   = 0xFE,
+  REG_ZZ_DEBUG_TIMER    = 0xFE,
 };
 
 enum zz9k_card_features {

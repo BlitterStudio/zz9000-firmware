@@ -5,13 +5,13 @@
 #define AUDIO_BYTES_PER_PERIOD      3840
 
 #define FRAMEBUFFER_ADDRESS         0x00200000
-#define AUDIO_TX_BUFFER_ADDRESS     0x00200000
 #define AUDIO_TX_BUFFER_SIZE        (AUDIO_BYTES_PER_PERIOD * AUDIO_NUM_PERIODS)
-#define AUDIO_RX_BUFFER_ADDRESS     0x00220000  // FIXME
 
-#define Z3_SCRATCH_ADDR             0x033F0000  // FIXME
-#define ADDR_ADJ                    0x001F0000
+#define Z3_SCRATCH_ADDR             0x033F0000 // FIXME @ _Bnu
+#define ADDR_ADJ                    0x001F0000 // FIXME @ _Bnu
 
+#define AUDIO_TX_BUFFER_ADDRESS     0x3FC00000 // default, changed by driver
+#define AUDIO_RX_BUFFER_ADDRESS     0x3FC20000 // default, changed by driver
 #define TX_BD_LIST_START_ADDRESS    0x3FD00000
 #define RX_BD_LIST_START_ADDRESS    0x3FD08000
 #define TX_FRAME_ADDRESS            0x3FD10000

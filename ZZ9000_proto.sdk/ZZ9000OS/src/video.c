@@ -61,7 +61,7 @@ struct ZZ_VIDEO_STATE* video_get_state() {
 	return &vs;
 }
 
-void video_init() {
+struct ZZ_VIDEO_STATE* video_init() {
 	vs.framebuffer = (u32*) FRAMEBUFFER_ADDRESS;
 
 	// default to more compatible 60hz mode
@@ -70,6 +70,8 @@ void video_init() {
 	vs.colormode = 0;
 
 	video_reset();
+
+	return video_get_state();
 }
 
 void video_reset() {
@@ -326,7 +328,6 @@ void isr_video(void *dummy) {
 		if ((vs.interrupt_signal_ethernet && vs.interrupt_enabled_ethernet)) {
 			// interrupt amiga (trigger int6/2)
 			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 1);
-			usleep(1);
 			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
 
 			// FIXME legacy behavior
