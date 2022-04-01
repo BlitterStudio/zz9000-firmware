@@ -480,8 +480,8 @@ int audio_swab(int audio_buf_samples, uint32_t offset, int byteswap) {
 	// resample if other freq
 	if (audio_freq != 48000) {
 		resample_s16((int16_t*)(audio_tx_buffer + offset),
-				(int16_t*)(audio_tx_buffer+0x20000), audio_freq, 48000, audio_buf_samples);
-		memcpy(audio_tx_buffer + offset, audio_tx_buffer+0x20000, AUDIO_BYTES_PER_PERIOD);
+				(int16_t*)(audio_tx_buffer+AUDIO_TX_BUFFER_SIZE), audio_freq, 48000, AUDIO_BYTES_PER_PERIOD);
+		memcpy(audio_tx_buffer + offset, audio_tx_buffer+AUDIO_TX_BUFFER_SIZE, AUDIO_BYTES_PER_PERIOD);
 	}
 
 	u32 txcount = audio_get_dma_transfer_count();
@@ -502,36 +502,31 @@ int audio_swab(int audio_buf_samples, uint32_t offset, int byteswap) {
 	return audio_buffer_collision;
 }
 
-uint32_t resample_s16(int16_t *input, int16_t *output,
-		int inSampleRate, int outSampleRate, uint32_t inputSize) {
+/*static double filtered[2];
+static double lpf_beta = 0.05;
+
+void audio_set_filter_param(uint32_t zdata) {
+	lpf_beta = ((double)zdata)/1000.0;
+	printf("[lpf:beta] %f\n", lpf_beta);
+}*/
+
+void resample_s16(int16_t *input, int16_t *output,
+		int in_sample_rate, int out_sample_rate, int output_samples) {
     const uint32_t channels = 2;
+    double step_dist = ((double)in_sample_rate / (double)out_sample_rate);
+    double cur = 0;
 
-    //printf("[resample] %p -> %p (%d -> %d) %lu bytes\n",
-    //		input, output, inSampleRate, outSampleRate, inputSize);
+    for (int i = 0; i < output_samples; i++) {
+    	int in_pos = ((int)cur)*channels;
+    	int out_pos = i*channels;
 
-    uint32_t outputSize = 3840/4; // (uint32_t) (inputSize * (double) outSampleRate / (double) inSampleRate);
-    //outputSize -= outputSize % channels;
-
-    double stepDist = ((double) inSampleRate / (double) outSampleRate);
-    const uint64_t fixedFraction = (1LL << 32);
-    const double normFixed = (1.0 / (1LL << 32));
-    uint64_t step = ((uint64_t) (stepDist * fixedFraction + 0.5));
-    uint64_t curOffset = 0;
-
-    // HACK: glue at the end
-    input[inputSize*2]   = input[(inputSize-1)*2];
-    input[inputSize*2+1] = input[(inputSize-1)*2+1];
-
-    for (uint32_t i = 0; i < outputSize; i++) {
         for (uint32_t c = 0; c < channels; c++) {
-            *output++ = (int16_t) (input[c] + (input[c + channels] - input[c]) * (
-                    (double) (curOffset >> 32) + ((curOffset & (fixedFraction - 1)) * normFixed)));
+        	int16_t sample = input[in_pos + c];
+        	//filtered[c] = filtered[c] - (lpf_beta * (filtered[c] - ((double)sample)));
+        	output[out_pos + c] = sample;
         }
-        curOffset += step;
-        input += (curOffset >> 32) * channels;
-        curOffset &= (fixedFraction - 1);
+        cur += step_dist;
     }
-    return outputSize;
 }
 
 void audio_set_tx_buffer(uint8_t* addr) {

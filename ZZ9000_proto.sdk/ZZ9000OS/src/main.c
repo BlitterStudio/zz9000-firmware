@@ -224,6 +224,7 @@ int main() {
 	const int ZZ_NUM_DECODER_PARAMS = 8;
 	uint16_t decoder_params[ZZ_NUM_DECODER_PARAMS];
 	int decoder_param = 0; // selected parameter
+	int decoder_bytes_decoded = 0;
 
 	while (1) {
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
@@ -780,7 +781,6 @@ int main() {
 					break;
 				}
 				case REG_ZZ_AUDIO_CONFIG: {
-					// FIXME temp
 					// audio config
 					audio_set_interrupt_enabled((int)(zdata & 1));
 					break;
@@ -837,6 +837,9 @@ int main() {
 					audio_scale = zdata;
 					break;
 				case REG_ZZ_AUDIO_PARAM:
+
+					printf("[REG_ZZ_AUDIO_PARAM] %lx\n", zdata);
+
 					// DECODER PARAMS:
 					// 0: tx buffer offset hi
 					// 1: tx buffer offset lo
@@ -850,6 +853,9 @@ int main() {
 					}
 					break;
 				case REG_ZZ_AUDIO_VAL:
+
+					printf("[REG_ZZ_AUDIO_VAL] %lx\n", zdata);
+
 					audio_params[audio_param] = zdata;
 					if (audio_param == 1) {
 						uint8_t* addr = (uint8_t*)video_state->framebuffer +
@@ -896,22 +902,22 @@ int main() {
 									output_buffer, output_buffer_size);
 
 							decode_mp3_init(input_buffer, input_buffer_size);
+							decoder_bytes_decoded = -1;
 						} else {
 							int max_samples = output_buffer_size;
 							int mp3_freq = mp3_get_hz();
-							if (mp3_freq < 48000) {
-								uint8_t* temp_buffer = output_buffer + 8*3840; // FIXME hack
-								max_samples = mp3_get_hz()/50*2;
-								//printf("[mp3] f: %d max: %d\n", mp3_get_hz(), max_samples);
+							if (mp3_freq != 48000) {
+								uint8_t* temp_buffer = output_buffer + AUDIO_TX_BUFFER_SIZE; // FIXME hack
+								max_samples = mp3_get_hz()/50 * 2;
 
-								decode_mp3_samples(temp_buffer, max_samples);
+								decoder_bytes_decoded = decode_mp3_samples(temp_buffer, max_samples);
 
 								// resample
 								resample_s16((int16_t*)temp_buffer, (int16_t*)output_buffer,
-										mp3_get_hz(), 48000, max_samples/2);
+										mp3_get_hz(), 48000, AUDIO_BYTES_PER_PERIOD / 4);
 
 							} else {
-								decode_mp3_samples(output_buffer, max_samples);
+								decoder_bytes_decoded = decode_mp3_samples(output_buffer, max_samples);
 							}
 						}
 
@@ -1037,6 +1043,16 @@ int main() {
 						// misc status bits
 						//printf("read 0x70: %d\n", audio_buffer_collision);
 						data = (audio_buffer_collision)<<16;
+						break;
+					}
+					case REG_ZZ_AUDIO_CONFIG: {
+						// is ZZ9000AX present?
+						data = (adau_enabled)<<16;
+						break;
+					}
+					case REG_ZZ_DECODER_VAL: {
+						// used to determine if MP3 decoding has finished
+						data = decoder_bytes_decoded;
 						break;
 					}
 				}

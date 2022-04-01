@@ -10,5 +10,7 @@ uint32_t audio_get_dma_transfer_count();
 int audio_swab(int audio_buf_samples, uint32_t offset, int byteswap);
 void audio_set_tx_buffer(uint8_t* addr);
 void audio_set_rx_buffer(uint8_t* addr);
-uint32_t resample_s16(int16_t *input, int16_t *output, int inSampleRate, int outSampleRate, uint32_t inputSize);
+void resample_s16(int16_t *input, int16_t *output,
+		int in_sample_rate, int out_sample_rate, int output_samples);
+void audio_set_filter_param(uint32_t zdata);
 void audio_silence();
