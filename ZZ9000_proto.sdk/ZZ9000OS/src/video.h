@@ -58,10 +58,6 @@ struct ZZ_VIDEO_STATE {
 	uint32_t sprite_colors[4];
 
 	uint8_t card_feature_enabled[CARD_FEATURE_NUM];
-
-	// FIXME this does not belong here
-	int interrupt_enabled_ethernet;
-	int interrupt_signal_ethernet;
 };
 
 struct ZZ_VIDEO_STATE* video_init();

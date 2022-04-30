@@ -3,7 +3,7 @@
  * MNT ZZ9000 Amiga Graphics and Coprocessor Card Firmware
  * Zorro 2/3 AXI4-Lite Interface, 24-bit Video Capture (AXI DMA)
  *
- * Copyright (C) 2019-2020, Lukas F. Hartmann <lukas@mntre.com>
+ * Copyright (C) 2019-2022, Lukas F. Hartmann <lukas@mntre.com>
  *                          MNT Research GmbH, Berlin
  *                          https://mntre.com
  *
@@ -464,7 +464,7 @@ module MNTZorro_v0_1_S00_AXI
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
                     // Respective byte enables are asserted as per write strobes
-                    // Slave register 4
+                    // Slave register 5
                     slv_reg5[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
               default : begin
@@ -650,7 +650,6 @@ module MNTZorro_v0_1_S00_AXI
   (* mark_debug = "true" *) reg [31:0] z3_mapped_addr;
   (* mark_debug = "true" *) reg [31:0] z3_read_addr;
   (* mark_debug = "true" *) reg [15:0] z3_read_data;
-  reg z3_din_latch;
   (* mark_debug = "true" *) reg z3_fcs_state;
   (* mark_debug = "true" *) reg z3_end_cycle;
 
@@ -675,12 +674,13 @@ module MNTZorro_v0_1_S00_AXI
   reg z_cfgin_lo;
   reg z3_confdone;
 
-  reg zorro_read;
-  reg zorro_write;
+  (* mark_debug = "true" *) reg zorro_read;
+  (* mark_debug = "true" *) reg zorro_write;
 
-  reg [7:0] zorro_interrupt_req = 10;
-  reg [7:0] zorro_interrupt_len = 10;
-  assign ZORRO_INT6 = (zorro_interrupt_req != 8'h00);
+  (* mark_debug = "true" *) reg zorro_interrupt_req = 0;
+  reg [7:0] zorro_interrupt_len = 'hff; // FIXME
+  (* mark_debug = "true" *) reg zorro_interrupt_pulse = 1;
+  assign ZORRO_INT6 = zorro_interrupt_pulse;
 
   reg [15:0] data_in;
   reg [31:0] rr_data;
@@ -690,11 +690,11 @@ module MNTZorro_v0_1_S00_AXI
   // ram arbiter
   (* mark_debug = "true" *) reg zorro_ram_read_request;
   (* mark_debug = "true" *) reg zorro_ram_write_request;
-  reg [31:0] zorro_ram_read_addr;
-  reg [3:0] zorro_ram_read_bytes;
-  reg [31:0] zorro_ram_write_addr;
-  reg [31:0] zorro_ram_write_data;
-  reg [3:0] zorro_ram_write_bytes;
+  (* mark_debug = "true" *) reg [31:0] zorro_ram_read_addr;
+  (* mark_debug = "true" *) reg [3:0] zorro_ram_read_bytes;
+  (* mark_debug = "true" *) reg [31:0] zorro_ram_write_addr;
+  (* mark_debug = "true" *) reg [31:0] zorro_ram_write_data;
+  (* mark_debug = "true" *) reg [3:0] zorro_ram_write_bytes;
 
   reg [15:0] default_data = 'hffff; // causes read/write glitches on A2000 (data bus interference) when 0
   reg [1:0] zorro_write_capture_bytes;
@@ -935,6 +935,7 @@ module MNTZorro_v0_1_S00_AXI
   localparam WAIT_READ2D = 57;
   localparam WAIT_READ3B = 58;
   localparam WAIT_READ3C = 59;
+  localparam Z3_WRITE_FINALIZE2 = 60;
 
   (* mark_debug = "true" *) reg [7:0] zorro_state = COLD;
   reg [7:0] dtack_counter;
@@ -945,6 +946,8 @@ module MNTZorro_v0_1_S00_AXI
 `else
   reg [5:0] dtack_timeout = 6; // number of cycles before we turn off our dtack signal
 `endif
+
+  (* mark_debug = "true" *) reg [31:0] debug_counter = 0;
 
   reg [23:0] last_addr;
   reg [23:0] last_read_addr;
@@ -961,7 +964,7 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] axi_reg2;
   reg [31:0] axi_reg3;
   reg [31:0] axi_reg4;
-  reg [31:0] axi_reg5;
+  (* mark_debug = "true" *) reg [31:0] axi_reg5;
   reg [20:0] eth_rx_frame_select;
 
   reg [31:0] video_control_data_zorro;
@@ -982,29 +985,29 @@ module MNTZorro_v0_1_S00_AXI
   reg videocap_mode;
   reg videocap_mode_in;
   reg [31:0] videocap_address = `VIDEOCAP_ADDR;
-  (* mark_debug = "true" *) reg [6:0] videocap_hs;
-  (* mark_debug = "true" *) reg [6:0] videocap_vs;
+  reg [6:0] videocap_hs;
+  reg [6:0] videocap_vs;
   reg [23:0] videocap_rgbin = 0;
 
-  (* mark_debug = "true" *) reg [9:0] videocap_x;
-  (* mark_debug = "true" *) reg [9:0] videocap_y;
-  (* mark_debug = "true" *) reg [9:0] videocap_x2;
-  (* mark_debug = "true" *) reg videocap_x_done;
-  (* mark_debug = "true" *) reg [9:0] videocap_y2;
-  (* mark_debug = "true" *) reg [9:0] videocap_y_sync;
-  (* mark_debug = "true" *) reg [9:0] videocap_ymax;
-  (* mark_debug = "true" *) reg [9:0] videocap_ymax2;
-  (* mark_debug = "true" *) reg [9:0] videocap_ymax_sync;
-  (* mark_debug = "true" *) reg [9:0] videocap_y3;
+  reg [9:0] videocap_x;
+  reg [9:0] videocap_y;
+  reg [9:0] videocap_x2;
+  reg videocap_x_done;
+  reg [9:0] videocap_y2;
+  reg [9:0] videocap_y_sync;
+  reg [9:0] videocap_ymax;
+  reg [9:0] videocap_ymax2;
+  reg [9:0] videocap_ymax_sync;
+  reg [9:0] videocap_y3;
   reg vc_next_lace_field = 0;
   reg [3:0] vc_shortlines = 0;
 
   parameter VCAPW = 799;
   reg [31:0] videocap_buf  [0:VCAPW];
   reg videocap_lace_field;
-  (* mark_debug = "true" *) reg videocap_interlace;
-  (* mark_debug = "true" *) reg videocap_ntsc;
-  (* mark_debug = "true" *) reg [7:0] videocap_hs_pulse_width;
+  reg videocap_interlace;
+  reg videocap_ntsc;
+  reg [7:0] videocap_hs_pulse_width;
 
   reg E7M_PSEN = 0;
   reg E7M_PSINCDEC = 0;
@@ -1216,19 +1219,19 @@ module MNTZorro_v0_1_S00_AXI
 
   end
 
-  (* mark_debug = "true" *) reg [11:0] videocap_save_x;
+  reg [11:0] videocap_save_x;
   reg [11:0] videocap_pitch;
-  (* mark_debug = "true" *) reg [11:0] videocap_pitch_sync;
-  (* mark_debug = "true" *) reg [9:0]  videocap_save_line_done;
-  (* mark_debug = "true" *) reg [31:0] videocap_save_addr;
-  (* mark_debug = "true" *) reg [3:0]  videocap_save_state = 0;
+  reg [11:0] videocap_pitch_sync;
+  reg [9:0]  videocap_save_line_done;
+  reg [31:0] videocap_save_addr;
+  reg [3:0]  videocap_save_state = 0;
 
   reg videocap_mode_sync;
 
-  (* mark_debug = "true" *) reg [31:0] m01_axi_awaddr_out;
-  (* mark_debug = "true" *) reg [31:0] m01_axi_wdata_out;
-  (* mark_debug = "true" *) reg m01_axi_awvalid_out = 0;
-  (* mark_debug = "true" *) reg m01_axi_wvalid_out = 0;
+  reg [31:0] m01_axi_awaddr_out;
+  reg [31:0] m01_axi_wdata_out;
+  reg m01_axi_awvalid_out = 0;
+  reg m01_axi_wvalid_out = 0;
 
   reg [31:0] m00_axi_awaddr_z3;
   reg [31:0] m00_axi_wdata_z3;
@@ -1281,14 +1284,14 @@ module MNTZorro_v0_1_S00_AXI
     m01_axi_bready <= 'h1;
   end
 
-  (* mark_debug = "true" *) reg [9:0] videocap_x_sync;
-  (* mark_debug = "true" *) reg [9:0] vc_saving_line;
-  (* mark_debug = "true" *) reg [9:0] videocap_y_sync2;
+  reg [9:0] videocap_x_sync;
+  reg [9:0] vc_saving_line;
+  reg [9:0] videocap_y_sync2;
 
   // pipeline stages for videocap save addr calculation
-  (* mark_debug = "true" *) reg [23:0] vc_saveaddr1;
-  (* mark_debug = "true" *) reg [31:0] vc_saveaddr2;
-  (* mark_debug = "true" *) reg [31:0] vc_saveaddr3;
+  reg [23:0] vc_saveaddr1;
+  reg [31:0] vc_saveaddr2;
+  reg [31:0] vc_saveaddr3;
 
   always @(posedge S_AXI_ACLK) begin
     // VIDEOCAP
@@ -1430,8 +1433,6 @@ module MNTZorro_v0_1_S00_AXI
           reg_high <= 0;
           ram_low <= 0;
           ram_high <= 0;
-          
-          zz9000ax_reset_out <= 0;
 
           if (!z_reset)
             zorro_state <= DECIDE_Z2_Z3;
@@ -1440,8 +1441,6 @@ module MNTZorro_v0_1_S00_AXI
         end
 
         DECIDE_Z2_Z3: begin
-          zz9000ax_reset_out <= 1;
-          
 `ifdef ZORRO2
           if (z2addr_autoconfig) begin
             zorro_state <= Z2_CONFIGURING;
@@ -2103,6 +2102,11 @@ module MNTZorro_v0_1_S00_AXI
         end
 
         Z3_WRITE_UPPER: begin
+          // trace writes to arm test register
+          if (z3_mapped_addr == 'h008c) begin
+            debug_counter <= debug_counter + 1;
+          end
+        
           last_z3addr <= z3_mapped_addr;
           zorro_ram_write_addr  <= z3_mapped_addr;
           zorro_ram_write_bytes <= {z3_ds3,z3_ds2,z3_ds1,z3_ds0};
@@ -2115,6 +2119,12 @@ module MNTZorro_v0_1_S00_AXI
         Z3_WRITE_FINALIZE: begin
           if (zorro_ram_write_flag) begin
             zorro_ram_write_request <= 0; // acknowledge write request done
+            zorro_state <= Z3_WRITE_FINALIZE2;
+          end
+        end
+        
+        Z3_WRITE_FINALIZE2: begin
+          if (!zorro_ram_write_flag) begin
             zorro_state <= Z3_ENDCYCLE;
             dtack <= 1;
             slaven <= 0;
@@ -2231,6 +2241,9 @@ module MNTZorro_v0_1_S00_AXI
               // this flag is read by Amiga software to check if all writes are done
               rr_data <= video_control_vblank << 16; //zorro_ram_write_request;
             end
+            'h30: begin
+              rr_data <= debug_counter;
+            end
             default: begin
               rr_data[31:16] <= REVISION;
               rr_data[15:0]  <= REVISION;
@@ -2258,9 +2271,11 @@ module MNTZorro_v0_1_S00_AXI
             'h14: videocap_pitch <= regdata_in[15:0];
             'h20: if (regdata_in[5:0]>0) dtack_timeout <= regdata_in[5:0];
             //'h24: dataout_time[7:0]     <= regdata_in[7:0];
-            //'h24: zorro_interrupt_len <= regdata_in[7:0];
+            'h24: zorro_interrupt_len <= regdata_in[7:0];
             //'h10: E7M_PSINCDEC <= regdata_in[0];
             //'h12: E7M_PSEN     <= regdata_in[0];
+            //'h30: debug_counter <= debug_counter + 1;
+            'h34: debug_counter <= 0;
           endcase
         end
       endcase
@@ -2276,12 +2291,24 @@ module MNTZorro_v0_1_S00_AXI
     end else
       video_control_axi <= 0;
 
-    if (zorro_interrupt_req == 0) begin
-      if (axi_reg2[30] == 1 && axi_reg2[0] == 1)
-        zorro_interrupt_req <= zorro_interrupt_len;
-    end else begin
-      zorro_interrupt_req = zorro_interrupt_req - 1'b1;
+    // IRQ line to amiga
+    if (axi_reg5[1] == 1) begin
+      zorro_interrupt_pulse <= axi_reg5[0];
+      //if (zorro_interrupt_req == 0 && axi_reg5[0] == 1) begin
+        // start IRQ pulse only once on rising edge of zorro_interrupt_req (axi_reg5[0])
+      //  zorro_interrupt_pulse <= zorro_interrupt_len;
+      //end
+      //zorro_interrupt_req <= axi_reg5[0];
+      
+      //if (zorro_interrupt_pulse == 'hff && axi_reg5[0] == 0)
+      //  zorro_interrupt_pulse <= 0;
     end
+    
+    //if (zorro_interrupt_pulse > 0 && zorro_interrupt_pulse < 'hff)
+    //  zorro_interrupt_pulse <= zorro_interrupt_pulse - 1'b1;
+    
+    if (axi_reg5[3] == 1)
+      zz9000ax_reset_out <= axi_reg5[2];
 
     // read / write request acknowledged by ARM
     zorro_ram_read_flag  <= axi_reg0[30];
@@ -2289,9 +2316,10 @@ module MNTZorro_v0_1_S00_AXI
 
     axi_reg0 <= slv_reg0;
     axi_reg1 <= slv_reg1;
-    axi_reg2 <= slv_reg2;
-    axi_reg3 <= slv_reg3;
+    axi_reg2 <= slv_reg2; // ARM video control
+    axi_reg3 <= slv_reg3; // ARM video control
     eth_rx_frame_select <= slv_reg4;
+    axi_reg5 <= slv_reg5; // Amiga IRQ
 
     if (video_control_axi) begin
       video_control_data <= video_control_data_axi;

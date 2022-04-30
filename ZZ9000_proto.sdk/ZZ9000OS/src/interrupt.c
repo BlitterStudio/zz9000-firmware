@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "interrupt.h"
+#include "mntzorro.h"
 
 static XScuGic intc_handle;
 
@@ -74,4 +75,30 @@ int fpga_interrupt_connect(void* isr_video, void* isr_audio_tx, void* isr_audio_
   XScuGic_Enable(intc_instance_ptr, INTC_INTERRUPT_ID_2);
 
   return 0;
+}
+
+static uint32_t amiga_interrupts = 0;
+
+void amiga_interrupt_set(uint32_t bit) {
+	//printf("[airq] +%lu\n", bit);
+	// set bit
+	amiga_interrupts |= bit;
+
+	if (amiga_interrupts != 0) {
+		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 2 | 1);
+	}
+}
+
+uint32_t amiga_interrupt_get() {
+	return amiga_interrupts;
+}
+
+void amiga_interrupt_clear(uint32_t bit) {
+	//printf("[airq] -%lu\n", bit);
+	// unset bit
+	amiga_interrupts = amiga_interrupts & ~bit;
+
+	if (amiga_interrupts == 0) {
+		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 2 | 0);
+	}
 }
