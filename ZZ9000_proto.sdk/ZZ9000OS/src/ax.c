@@ -8,6 +8,7 @@
 #include "xi2srx.h"
 #include "xaudioformatter.h"
 #include "mntzorro.h"
+#include "interrupt.h"
 #include "sleep.h"
 #include "stdlib.h"
 #include "ax.h"
@@ -203,7 +204,6 @@ void audio_init_i2s() {
 	int status = XI2s_Tx_CfgInitialize(&i2s, i2s_config, i2s_config->BaseAddress);
 
 	printf("[adau] I2S_TX cfg status: %d\n", status);
-
 	printf("[adau] I2S Dwidth: %d\n", i2s.Config.DWidth);
 	printf("[adau] I2S MaxNumChannels: %d\n", i2s.Config.MaxNumChannels);
 
@@ -214,7 +214,7 @@ void audio_init_i2s() {
 
 	status = XAudioFormatter_CfgInitialize(&audio_formatter, af_config);
 
-	printf("[adau] AudioFormatter cfg status: %d\n", status);
+	//printf("[adau] AudioFormatter cfg status: %d\n", status);
 
 	// reset the goddamn register
 	XAudioFormatter_WriteReg(audio_formatter.BaseAddress,
@@ -229,15 +229,9 @@ void audio_init_i2s() {
 	af_params.bytes_per_period = AUDIO_BYTES_PER_PERIOD;
 
 	XAudioFormatterSetFsMultiplier(&audio_formatter, 48000*256, 48000); // mclk = 256 * Fs // this doesn't really seem to change anything?!
-
-	printf("[adau] XAudioFormatterSetFsMultiplier\n");
 	XAudioFormatterSetHwParams(&audio_formatter, &af_params);
-	printf("[adau] XAudioFormatterSetHwParams\n");
-
 	XAudioFormatter_InterruptDisable(&audio_formatter, 1<<14); // timeout
-	printf("[adau] XAudioFormatter_InterruptDisable\n");
 	XAudioFormatter_InterruptDisable(&audio_formatter, 1<<13); // IOC
-	printf("[adau] XAudioFormatter_InterruptEnable\n");
 
 	// set up i2s receiver
 
@@ -245,8 +239,7 @@ void audio_init_i2s() {
 	audio_formatter_rx.BaseAddress = af_config_rx->BaseAddress;
 
 	status = XAudioFormatter_CfgInitialize(&audio_formatter_rx, af_config_rx);
-
-	printf("[adau] AudioFormatter RX cfg status: %d\n", status);
+	//printf("[adau] AudioFormatter RX cfg status: %d\n", status);
 
 	XAudioFormatter_WriteReg(audio_formatter_rx.BaseAddress,
 			XAUD_FORMATTER_CTRL + XAUD_FORMATTER_S2MM_OFFSET, 0);
@@ -260,12 +253,9 @@ void audio_init_i2s() {
 	afrx_params.bytes_per_period = AUDIO_BYTES_PER_PERIOD;
 
 	XAudioFormatterSetFsMultiplier(&audio_formatter_rx, 48000*256, 48000);
-	printf("[adau] RX XAudioFormatterSetFsMultiplier\n");
 	XAudioFormatterSetHwParams(&audio_formatter_rx, &afrx_params);
-	printf("[adau] RX XAudioFormatterSetHwParams\n");
 
 	XAudioFormatter_InterruptDisable(&audio_formatter_rx, 1<<14); // timeout
-	printf("[adau] RX XAudioFormatter_InterruptDisable\n");
 	XAudioFormatter_InterruptDisable(&audio_formatter_rx, 1<<13); // IOC
 	/*XAudioFormatter_InterruptEnable(&audio_formatter_rx, 1<<13); // IOC
 	printf("[adau] RX XAudioFormatter_InterruptEnable\n");*/
@@ -279,14 +269,17 @@ void audio_init_i2s() {
 	//printf("[adau] I2S_RX MaxNumChannels: %d\n", i2srx.Config.MaxNumChannels);
 
 	XI2s_Rx_Enable(&i2srx, 1);
-	printf("[adau] XI2s_Rx_Enable\n");
 	XAudioFormatterDMAStart(&audio_formatter_rx);
-	printf("[adau] RX XAudioFormatterDMAStart done.\n");
+
+
+	printf("[adau] XAudioFormatter_InterruptEnable...\n");
 
 	XAudioFormatter_InterruptEnable(&audio_formatter, 1<<13); // IOC
-	printf("[adau] XAudioFormatter_InterruptEnable\n");
+
+	printf("[adau] XI2s_Tx_Enable...\n");
 	XI2s_Tx_Enable(&i2s, 1);
-	printf("[adau] XI2s_Tx_Enable\n");
+
+	printf("[adau] XAudioFormatterDMAStart...\n");
 	XAudioFormatterDMAStart(&audio_formatter);
 	printf("[adau] XAudioFormatterDMAStart done.\n");
 }
@@ -383,7 +376,6 @@ int audio_adau_init(int program_dsp) {
 }
 
 static int interrupt_enabled_audio = 0;
-static uint32_t interrupt_waiting_audio = 0;
 
 XTime debug_time_start = 0;
 
@@ -408,30 +400,14 @@ void isr_audio(void *dummy) {
 	XAudioFormatter_WriteReg(XPAR_XAUDIOFORMATTER_0_BASEADDR,
 		XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET, val);
 
-	if (isra_count++>1000) {
+	if (isra_count++>100) {
 		printf("[isra]\n");
 		isra_count = 0;
 	}
 
 	if (interrupt_enabled_audio) {
-		audio_debug_timer(0);
-
-		interrupt_waiting_audio = 1;
-
-		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 1);
-		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
-	} else {
-		interrupt_waiting_audio = 0;
+		amiga_interrupt_set(AMIGA_INTERRUPT_AUDIO);
 	}
-}
-
-uint32_t audio_get_interrupt() {
-	return interrupt_waiting_audio;
-}
-
-void audio_clear_interrupt() {
-	//printf("[clear] audio\n");
-	interrupt_waiting_audio = 0;
 }
 
 int israrx_count = 0;
@@ -457,12 +433,16 @@ void audio_set_interrupt_enabled(int en) {
 	printf("[audio] enable irq: %d\n", en);
 	interrupt_enabled_audio = en;
 
+	if (!en) {
+		amiga_interrupt_clear(AMIGA_INTERRUPT_AUDIO);
+	}
+
 	audio_silence();
 }
 
 // offset = offset from audio tx buffer
 // returns audio_buffer_collision (1 or 0)
-int audio_swab(int audio_buf_samples, uint32_t offset, int byteswap) {
+int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap) {
 	int audio_buffer_collision = 0;
 	uint16_t* data = (uint16_t*)(audio_tx_buffer + offset);
 	int audio_freq = audio_buf_samples * 50;
@@ -480,8 +460,11 @@ int audio_swab(int audio_buf_samples, uint32_t offset, int byteswap) {
 	// resample if other freq
 	if (audio_freq != 48000) {
 		resample_s16((int16_t*)(audio_tx_buffer + offset),
-				(int16_t*)(audio_tx_buffer+AUDIO_TX_BUFFER_SIZE), audio_freq, 48000, AUDIO_BYTES_PER_PERIOD);
-		memcpy(audio_tx_buffer + offset, audio_tx_buffer+AUDIO_TX_BUFFER_SIZE, AUDIO_BYTES_PER_PERIOD);
+				(int16_t*)((uint8_t*)audio_tx_buffer+AUDIO_TX_BUFFER_SIZE*2),
+				audio_freq,
+				48000,
+				AUDIO_BYTES_PER_PERIOD/4);
+		memcpy(audio_tx_buffer + offset, (uint8_t*)audio_tx_buffer+AUDIO_TX_BUFFER_SIZE*2, AUDIO_BYTES_PER_PERIOD);
 	}
 
 	u32 txcount = audio_get_dma_transfer_count();
@@ -502,45 +485,71 @@ int audio_swab(int audio_buf_samples, uint32_t offset, int byteswap) {
 	return audio_buffer_collision;
 }
 
-/*static double filtered[2];
-static double lpf_beta = 0.05;
+double resample_cur = 0;
+double resample_psampl = 0;
+double resample_psampr = 0;
 
-void audio_set_filter_param(uint32_t zdata) {
-	lpf_beta = ((double)zdata)/1000.0;
-	printf("[lpf:beta] %f\n", lpf_beta);
-}*/
+void resample_s16(int16_t *input, int16_t *output, int in_sample_rate,
+		int out_sample_rate, int output_samples) {
+	double step_dist = ((double) in_sample_rate / (double) out_sample_rate);
+	double cur = resample_cur;
+	int in_pos1 = 0, in_pos2 = 0;
+	double sample1l = 0, sample2l = 0, sample1r = 0, sample2r = 0;
 
-void resample_s16(int16_t *input, int16_t *output,
-		int in_sample_rate, int out_sample_rate, int output_samples) {
-    const uint32_t channels = 2;
-    double step_dist = ((double)in_sample_rate / (double)out_sample_rate);
-    double cur = 0;
+	int inmax = (int) (step_dist * 960.0) - 1;
 
-    for (int i = 0; i < output_samples; i++) {
-    	int in_pos = ((int)cur)*channels;
-    	int out_pos = i*channels;
+	for (uint32_t i = 0; i < output_samples; i++) {
+		in_pos1 = ((int) cur) - 1;
+		in_pos2 = (int) cur;
 
-        for (uint32_t c = 0; c < channels; c++) {
-        	int16_t sample = input[in_pos + c];
-        	//filtered[c] = filtered[c] - (lpf_beta * (filtered[c] - ((double)sample)));
-        	output[out_pos + c] = sample;
-        }
-        cur += step_dist;
-    }
+		// FIXME hack
+		if (in_pos2 > inmax) {
+			in_pos2 = inmax;
+			in_pos1 = inmax - 1;
+		}
+
+		double frac2 = cur - (1 + in_pos1);
+		double frac1 = (double) 1.0 - frac2;
+
+		if (in_pos1 == -1) {
+			sample1l = frac1 * resample_psampl;
+			sample1r = frac1 * resample_psampr;
+		} else {
+			sample1l = frac1 * (double) input[in_pos1 * 2 + 0];
+			sample1r = frac1 * (double) input[in_pos1 * 2 + 1];
+		}
+		sample2l = frac2 * (double) input[in_pos2 * 2 + 0];
+		sample2r = frac2 * (double) input[in_pos2 * 2 + 1];
+
+		output[i * 2 + 0] = (int16_t) (sample1l + sample2l);
+		output[i * 2 + 1] = (int16_t) (sample1r + sample2r);
+
+		cur += step_dist;
+	}
+
+	resample_cur = cur - (int) cur;
+	resample_psampl = (double) input[in_pos2 * 2 + 0];
+	resample_psampr = (double) input[in_pos2 * 2 + 1];
+}
+
+void reset_resampling() {
+	resample_cur = 0;
+	resample_psampl = 0;
+	resample_psampr = 0;
 }
 
 void audio_set_tx_buffer(uint8_t* addr) {
 	printf("[audio] set tx buffer: %p\n", addr);
 	audio_tx_buffer = addr;
-	audio_init_i2s();
+	reset_resampling();
 }
 
 void audio_set_rx_buffer(uint8_t* addr) {
 	printf("[audio] set rx buffer: %p\n", addr);
 	audio_rx_buffer = addr;
-	audio_init_i2s();
 }
 
 void audio_silence() {
 	memset(audio_tx_buffer, 0, AUDIO_TX_BUFFER_SIZE);
+	reset_resampling();
 }
