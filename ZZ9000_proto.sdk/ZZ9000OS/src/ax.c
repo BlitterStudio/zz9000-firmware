@@ -14,6 +14,8 @@
 #include "ax.h"
 #include "memorymap.h"
 #include "xtime_l.h"
+#include "math.h"
+#include "ax.h"
 
 #define IIC2_DEVICE_ID	XPAR_XIICPS_1_DEVICE_ID
 #define IIC2_SCLK_RATE	100000
@@ -187,15 +189,18 @@ int adau_read24(u8 i2c_addr, u16 addr, u8* buffer) {
 	return status1;
 }
 
-void program_adau(u8* program, u32 program_len, u8* params, u32 param_len) {
-	for (u32 i = 0; i < program_len; i+=5) {
-		int res = adau_write40(0x34, 1024+i/5, &program[i]);
-		if (res != 0) printf("[adau_write40] %lx: %d\n", i, res);
-	}
 
+void audio_program_adau_params(u8* params, u32 param_len) {
 	for (u32 i = 0; i < param_len; i+=4) {
 		int res = adau_write32(0x34, 0+i/4, &params[i]);
 		if (res != 0) printf("[adau_write32] %lx: %d\n", i, res);
+	}
+}
+
+void audio_program_adau(u8* program, u32 program_len) {
+	for (u32 i = 0; i < program_len; i+=5) {
+		int res = adau_write40(0x34, 1024+i/5, &program[i]);
+		if (res != 0) printf("[adau_write40] %lx: %d\n", i, res);
 	}
 }
 
@@ -271,7 +276,6 @@ void audio_init_i2s() {
 	XI2s_Rx_Enable(&i2srx, 1);
 	XAudioFormatterDMAStart(&audio_formatter_rx);
 
-
 	printf("[adau] XAudioFormatter_InterruptEnable...\n");
 
 	XAudioFormatter_InterruptEnable(&audio_formatter, 1<<13); // IOC
@@ -333,10 +337,6 @@ int audio_adau_init(int program_dsp) {
 	status = adau_read16(i, 2087, rbuf);
 	printf("[adau] read from 2087: %02x%02x (status: %d)\n", rbuf[0], rbuf[1], status);
 
-	if (program_dsp) {
-		program_adau(Program_Data_IC_1, sizeof(Program_Data_IC_1), Param_Data_IC_1, sizeof(Param_Data_IC_1));
-	}
-
 	// TODO: OBP/OLRP
 	u16 MS  = 1<<11; // clock master output
 	//u16 OBF = (0<<10)|(0<<9);    // bclock = 49.152/16 = mclk/4 = 3.072mhz
@@ -371,6 +371,13 @@ int audio_adau_init(int program_dsp) {
 	printf("[adau] read from 0x821: %02x%02x%02x (status: %d)\n", rbuf[0], rbuf[1], rbuf[2], status);
 
 	audio_init_i2s();
+
+	if (program_dsp) {
+		audio_program_adau(Program_Data_IC_1, sizeof(Program_Data_IC_1));
+		audio_program_adau_params(Param_Data_IC_1, sizeof(Param_Data_IC_1));
+		audio_adau_set_lpf_params(23900);
+		audio_adau_set_mixer_vol(128, 64);
+	}
 
 	return 1;
 }
@@ -552,4 +559,100 @@ void audio_set_rx_buffer(uint8_t* addr) {
 void audio_silence() {
 	memset(audio_tx_buffer, 0, AUDIO_TX_BUFFER_SIZE);
 	reset_resampling();
+}
+
+// sources:
+// https://webaudio.github.io/Audio-EQ-Cookbook/audio-eq-cookbook.html
+// https://wiki.analog.com/resources/tools-software/sigmastudio/usingsigmastudio/systemimplementation
+// https://ez.analog.com/dsp/sigmadsp/f/q-a/104470/nth-order-filter-coefficient-calculations
+// https://wiki.analog.com/resources/tools-software/sigmastudio/toolbox/filters/general2ndorder
+// https://ez.analog.com/dsp/sigmadsp/f/q-a/65510/parameters-with-adau1701
+
+void adau_to_5_23(double param_dec, uint8_t* param_hex) {
+	long param223;
+	long param227;
+
+	// multiply decimal number by 2^23
+	param223 = param_dec * (1 << 23);
+
+	// convert to positive binary
+	param227 = param223 + (1 << 27);
+
+	param_hex[3] = (uint8_t) param227;
+	param_hex[2] = (uint8_t) (param227 >> 8);
+	param_hex[1] = (uint8_t) (param227 >> 16);
+	param_hex[0] = (uint8_t) (param227 >> 24);
+
+	// invert sign bit to get correct sign
+	param_hex[0] = param_hex[0] ^ 0x08;
+}
+
+double flt_omega(double fs, double f0) {
+	return 2.0 * M_PI * (f0 / fs);
+}
+
+double flt_alpha(double fs, double f0) {
+	double omega = flt_omega(fs, f0);
+	double Q = 1.0 / sqrt(2.0);
+	return sin(omega) / (2.0 * Q);
+}
+
+void audio_adau_set_lpf_params(int f0) {
+	double gain = 1; // FIXME unused
+	int fs = 48000;
+
+	printf("[lpf] f0: %d\n", f0);
+
+	double omega = flt_omega(fs, f0);
+	double alpha = flt_alpha(fs, f0);
+
+	double a0 = 1.0 + alpha;
+	double a1 = -2.0 * cos(omega);
+	double a2 = 1.0 - alpha;
+	double b0 = (1.0 - cos(omega)) / 2.0;
+	double b1 = 1.0 - cos(omega);
+	double b2 = b0;
+
+	a1 /= a0;
+	a2 /= a0;
+	b0 /= a0;
+	b1 /= a0;
+	b2 /= a0;
+
+	a1 = -a1;
+	a2 = -a2;
+
+	uint8_t buf[4];
+
+	adau_to_5_23(b0, buf);
+	adau_write32(0x34, 0, buf);
+	printf("[lpf] b0: %f\t%02x %02x %02x %02x\n", b0, buf[0], buf[1], buf[2], buf[3]);
+	adau_to_5_23(b1, buf);
+	adau_write32(0x34, 1, buf);
+	printf("[lpf] b1: %f\t%02x %02x %02x %02x\n", b1, buf[0], buf[1], buf[2], buf[3]);
+	adau_to_5_23(b2, buf);
+	adau_write32(0x34, 2, buf);
+	printf("[lpf] b2: %f\t%02x %02x %02x %02x\n", b2, buf[0], buf[1], buf[2], buf[3]);
+	adau_to_5_23(a1, buf);
+	adau_write32(0x34, 3, buf);
+	printf("[lpf] a1: %f\t%02x %02x %02x %02x\n", a1, buf[0], buf[1], buf[2], buf[3]);
+	adau_to_5_23(a2, buf);
+	adau_write32(0x34, 4, buf);
+	printf("[lpf] a2: %f\t%02x %02x %02x %02x\n\n", a2, buf[0], buf[1], buf[2], buf[3]);
+}
+
+// vol range: 0-255. 127 = 0db
+// vol1: paula
+// vol2: i2s
+void audio_adau_set_mixer_vol(int vol1, int vol2) {
+	double v1 = ((double)vol1)/127.0;
+	double v2 = ((double)vol2)/127.0;
+
+	printf("[vol] v1: %f v2: %f\n", v1, v2);
+
+	uint8_t buf[4];
+	adau_to_5_23(v1, buf);
+	adau_write32(0x34, 5, buf);
+	adau_to_5_23(v2, buf);
+	adau_write32(0x34, 6, buf);
 }
