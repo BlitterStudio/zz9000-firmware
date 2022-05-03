@@ -55,7 +55,7 @@ void Xil_AssertNonVoid() {}
 #include "zz_video_modes.h"
 
 #define REVISION_MAJOR 1
-#define REVISION_MINOR 10
+#define REVISION_MINOR 11
 
 #define GPIO_DEVICE_ID	XPAR_XGPIOPS_0_DEVICE_ID
 
@@ -155,7 +155,7 @@ void handle_amiga_reset() {
 	// FIXME
 	memset((u32 *)Z3_SCRATCH_ADDR, 0, sizeof(struct GFXData));
 
-	// FIXME temporary: clear audio buffer on reset
+	// clear audio buffer on reset
 	memset((void*)AUDIO_TX_BUFFER_ADDRESS, 0, AUDIO_TX_BUFFER_SIZE);
 
 	// FIXME test content for audio buffer
@@ -195,9 +195,9 @@ int main() {
 
 	ethernet_init();
 
-	handle_amiga_reset();
-
 	fpga_interrupt_connect(isr_video, isr_audio, isr_audio_rx);
+
+	handle_amiga_reset();
 
 	// ARM app run environment
 	arm_app_init();
@@ -228,7 +228,7 @@ int main() {
 	int need_req_ack = 0;
 
 	// audio parameters (buffer locations)
-	const int ZZ_NUM_AUDIO_PARAMS = 4;
+	const int ZZ_NUM_AUDIO_PARAMS = 12;
 	uint16_t audio_params[ZZ_NUM_AUDIO_PARAMS];
 	int audio_param = 0; // selected parameter
 	int audio_request_init = 0;
@@ -349,7 +349,6 @@ int main() {
 					if (blitter_colormode == MNTVA_COLOR_15BIT) blitter_colormode = MNTVA_COLOR_16BIT565;
 					break;
 				case REG_ZZ_CONFIG:
-					printf("[ZZ_CONFIG] %lx\n", zdata);
 					// enable/disable INT6, currently used to signal incoming ethernet packets
 					if (zdata & 8) {
 						// clear/ack
@@ -874,11 +873,18 @@ int main() {
 				case REG_ZZ_AUDIO_PARAM:
 					printf("[REG_ZZ_AUDIO_PARAM] %lx\n", zdata);
 
-					// DECODER PARAMS:
+					// AUDIO PARAMS:
 					// 0: tx buffer offset hi
 					// 1: tx buffer offset lo
 					// 2: rx buffer offset hi
 					// 3: rx buffer offset lo
+					// 4: dsp program offset hi
+					// 5: dsp program offset lo
+					// 6: dsp params offset hi
+					// 7: dsp params offset lo
+					// 8: dsp upload program + params or params only (length in zdata)
+					// 9: dsp set lowpass filter
+					// 10: dsp set volumes
 
 					if (zdata<ZZ_NUM_AUDIO_PARAMS) {
 						audio_param = zdata;
@@ -894,7 +900,7 @@ int main() {
 					if (audio_param == 1) {
 						uint8_t* addr = (uint8_t*)video_state->framebuffer +
 								((audio_params[0]<<16)|audio_params[1]);
-						if (addr<0x100000*128) {
+						if (((uint32_t)addr-(uint32_t)video_state->framebuffer)<0x100000*128) {
 							audio_set_tx_buffer(addr);
 							audio_request_init = 1;
 						} else {
@@ -903,12 +909,31 @@ int main() {
 					} else if (audio_param == 3) {
 						uint8_t* addr = (uint8_t*)video_state->framebuffer +
 								((audio_params[2]<<16)|audio_params[3]);
-						if (addr<0x100000*128) {
+						if (((uint32_t)addr-(uint32_t)video_state->framebuffer)<0x100000*128) {
 							audio_set_rx_buffer(addr);
 							audio_request_init = 1;
 						} else {
 							printf("[audio] illegal tx address: 0x%p\n", addr);
 						}
+					} else if (audio_param == 8) {
+						uint8_t* program_ptr = (uint8_t*)video_state->framebuffer +
+								((audio_params[4]<<16)|audio_params[5]);
+						uint8_t* params_ptr = (uint8_t*)video_state->framebuffer +
+								((audio_params[6]<<16)|audio_params[7]);
+
+						if (zdata == 0) {
+							printf("[audio] reprogramming from 0x%p and 0x%p\n", program_ptr, params_ptr);
+							audio_program_adau(program_ptr, 5120);
+							audio_program_adau_params(params_ptr, 4096);
+						} else {
+							printf("[audio] programming %ld params from 0x%p\n", zdata, params_ptr);
+							audio_program_adau_params(params_ptr, zdata);
+						}
+					} else if (audio_param == 9) {
+						// set lowpass filter params by cutoff freq (works only if default program is loaded!)
+						audio_adau_set_lpf_params(audio_params[9]);
+					} else if (audio_param == 10) {
+						audio_adau_set_mixer_vol(zdata&0xff, (zdata>>8)&0xff);
 					}
 					break;
 				case REG_ZZ_DECODER_PARAM:
