@@ -34,17 +34,20 @@
 *******************************************************************/
 
 #include "xparameters.h"
-#include "xadcps.h"
+#include "xi2srx.h"
 
 /*
 * The configuration table for devices
 */
 
-XAdcPs_Config XAdcPs_ConfigTable[XPAR_XADCPS_NUM_INSTANCES] =
+XI2srx_Config XI2srx_ConfigTable[XPAR_XI2SRX_NUM_INSTANCES] =
 {
 	{
-		XPAR_PS7_XADC_0_DEVICE_ID,
-		XPAR_PS7_XADC_0_BASEADDR
+		XPAR_I2S_RECEIVER_0_DEVICE_ID,
+		XPAR_I2S_RECEIVER_0_BASEADDR,
+		XPAR_I2S_RECEIVER_0_DWIDTH,
+		XPAR_I2S_RECEIVER_0_IS_MASTER,
+		XPAR_I2S_RECEIVER_0_NUM_CHANNELS
 	}
 };
 
