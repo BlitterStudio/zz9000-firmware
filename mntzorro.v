@@ -936,6 +936,7 @@ module MNTZorro_v0_1_S00_AXI
   localparam WAIT_READ3B = 58;
   localparam WAIT_READ3C = 59;
   localparam Z3_WRITE_FINALIZE2 = 60;
+  localparam Z2_WRITE_FINALIZE2 = 61;
 
   (* mark_debug = "true" *) reg [7:0] zorro_state = COLD;
   reg [7:0] dtack_counter;
@@ -1611,7 +1612,7 @@ module MNTZorro_v0_1_S00_AXI
 
 `ifdef ZORRO3
           if (z3_ram_low) begin
-            z3_ram_high  <= z3_ram_low + `Z3_SIZE_64MB;
+            z3_ram_high  <= z3_ram_low + `Z3_SIZE_128MB;
             z3_reg_low   <= z3_ram_low + 'h1000;
             z3_reg_high  <= z3_ram_low + 'h2000;
           end
@@ -1893,6 +1894,11 @@ module MNTZorro_v0_1_S00_AXI
           end
         end
         WAIT_WRITE2: begin
+          // trace writes to arm test register
+          //if (last_addr == 'h008c) begin
+          //  debug_counter <= debug_counter + 1;
+          //end
+        
           zorro_ram_write_addr  <= last_addr;
           zorro_ram_write_bytes <= {2'b0,zorro_write_capture_bytes};
           zorro_ram_write_data  <= {16'b0,zorro_write_capture_data};
@@ -1922,11 +1928,19 @@ module MNTZorro_v0_1_S00_AXI
         end
         Z2_WRITE_FINALIZE: begin
           if (zorro_ram_write_flag) begin
-            dtack <= 1;
-            zorro_state <= Z2_ENDCYCLE;
+            zorro_state <= Z2_WRITE_FINALIZE2;
             zorro_ram_write_request <= 0;
           end
         end
+        
+        Z2_WRITE_FINALIZE2: begin
+          if (!zorro_ram_write_flag) begin
+            zorro_state <= Z2_ENDCYCLE;
+            dtack <= 1;
+            //slaven <= 0;
+          end
+        end
+        
         Z2_ENDCYCLE: begin
           m00_axi_wvalid_z3 <= 0;
           z_ovr <= 0;
@@ -2103,9 +2117,9 @@ module MNTZorro_v0_1_S00_AXI
 
         Z3_WRITE_UPPER: begin
           // trace writes to arm test register
-          if (z3_mapped_addr == 'h008c) begin
-            debug_counter <= debug_counter + 1;
-          end
+          //if (z3_mapped_addr == 'h008c) begin
+          //  debug_counter <= debug_counter + 1;
+          //end
         
           last_z3addr <= z3_mapped_addr;
           zorro_ram_write_addr  <= z3_mapped_addr;
@@ -2242,7 +2256,7 @@ module MNTZorro_v0_1_S00_AXI
               rr_data <= video_control_vblank << 16; //zorro_ram_write_request;
             end
             'h30: begin
-              rr_data <= debug_counter;
+              rr_data <= debug_counter << 16;
             end
             default: begin
               rr_data[31:16] <= REVISION;
