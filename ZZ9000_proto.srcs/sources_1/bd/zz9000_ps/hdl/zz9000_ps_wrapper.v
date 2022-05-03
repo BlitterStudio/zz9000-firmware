@@ -1,7 +1,7 @@
 //Copyright 1986-2018 Xilinx, Inc. All Rights Reserved.
 //--------------------------------------------------------------------------------
 //Tool Version: Vivado v.2018.3 (lin64) Build 2405991 Thu Dec  6 23:36:41 MST 2018
-//Date        : Thu Sep 23 23:36:32 2021
+//Date        : Tue May  3 20:29:47 2022
 //Host        : mntmn-i9 running 64-bit Debian GNU/Linux 11 (bullseye)
 //Command     : generate_target zz9000_ps_wrapper.bd
 //Design      : zz9000_ps_wrapper
@@ -31,10 +31,12 @@ module zz9000_ps_wrapper
     FIXED_IO_ps_clk,
     FIXED_IO_ps_porb,
     FIXED_IO_ps_srstb,
+    I2SI_D0,
     I2SO_BCLK,
     I2SO_D0,
     I2SO_LRCLK,
     I2SO_MCLK,
+    I2SO_RESETn,
     VCAP_B0,
     VCAP_B1,
     VCAP_B2,
@@ -113,10 +115,12 @@ module zz9000_ps_wrapper
   inout FIXED_IO_ps_clk;
   inout FIXED_IO_ps_porb;
   inout FIXED_IO_ps_srstb;
+  input I2SI_D0;
   input I2SO_BCLK;
   output I2SO_D0;
   input I2SO_LRCLK;
   output I2SO_MCLK;
+  output [0:0]I2SO_RESETn;
   input VCAP_B0;
   input VCAP_B1;
   input VCAP_B2;
@@ -196,10 +200,12 @@ module zz9000_ps_wrapper
   wire FIXED_IO_ps_clk;
   wire FIXED_IO_ps_porb;
   wire FIXED_IO_ps_srstb;
+  wire I2SI_D0;
   wire I2SO_BCLK;
   wire I2SO_D0;
   wire I2SO_LRCLK;
   wire I2SO_MCLK;
+  wire [0:0]I2SO_RESETn;
   wire VCAP_B0;
   wire VCAP_B1;
   wire VCAP_B2;
@@ -280,10 +286,12 @@ module zz9000_ps_wrapper
         .FIXED_IO_ps_clk(FIXED_IO_ps_clk),
         .FIXED_IO_ps_porb(FIXED_IO_ps_porb),
         .FIXED_IO_ps_srstb(FIXED_IO_ps_srstb),
+        .I2SI_D0(I2SI_D0),
         .I2SO_BCLK(I2SO_BCLK),
         .I2SO_D0(I2SO_D0),
         .I2SO_LRCLK(I2SO_LRCLK),
         .I2SO_MCLK(I2SO_MCLK),
+        .I2SO_RESETn(I2SO_RESETn),
         .VCAP_B0(VCAP_B0),
         .VCAP_B1(VCAP_B1),
         .VCAP_B2(VCAP_B2),

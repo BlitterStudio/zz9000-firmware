@@ -5,7 +5,7 @@
 * Version: 2018.3
 * DO NOT EDIT.
 *
-* Copyright (C) 2010-2021 Xilinx, Inc. All Rights Reserved.*
+* Copyright (C) 2010-2022 Xilinx, Inc. All Rights Reserved.*
 *Permission is hereby granted, free of charge, to any person obtaining a copy
 *of this software and associated documentation files (the Software), to deal
 *in the Software without restriction, including without limitation the rights
@@ -55,6 +55,20 @@ XAudioFormatter_Config XAudioFormatter_ConfigTable[XPAR_XAUDIOFORMATTER_NUM_INST
 		XPAR_AUDIO_FORMATTER_0_PACKING_MODE_S2MM,
 		XPAR_AUDIO_FORMATTER_0_S2MM_ADDR_WIDTH,
 		XPAR_AUDIO_FORMATTER_0_S2MM_DATAFORMAT
+	},
+	{
+		XPAR_AUDIO_FORMATTER_1_DEVICE_ID,
+		XPAR_AUDIO_FORMATTER_1_BASEADDR,
+		XPAR_AUDIO_FORMATTER_1_INCLUDE_MM2S,
+		XPAR_AUDIO_FORMATTER_1_INCLUDE_S2MM,
+		XPAR_AUDIO_FORMATTER_1_MAX_NUM_CHANNELS_MM2S,
+		XPAR_AUDIO_FORMATTER_1_MAX_NUM_CHANNELS_S2MM,
+		XPAR_AUDIO_FORMATTER_1_MM2S_ADDR_WIDTH,
+		XPAR_AUDIO_FORMATTER_1_MM2S_DATAFORMAT,
+		XPAR_AUDIO_FORMATTER_1_PACKING_MODE_MM2S,
+		XPAR_AUDIO_FORMATTER_1_PACKING_MODE_S2MM,
+		XPAR_AUDIO_FORMATTER_1_S2MM_ADDR_WIDTH,
+		XPAR_AUDIO_FORMATTER_1_S2MM_DATAFORMAT
 	}
 };
 

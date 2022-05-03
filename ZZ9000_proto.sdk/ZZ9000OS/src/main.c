@@ -55,7 +55,7 @@ void Xil_AssertNonVoid() {}
 #include "zz_video_modes.h"
 
 #define REVISION_MAJOR 1
-#define REVISION_MINOR 10
+#define REVISION_MINOR 11
 
 #define GPIO_DEVICE_ID	XPAR_XGPIOPS_0_DEVICE_ID
 
@@ -103,7 +103,7 @@ static uint32_t usb_storage_write_block = 0;
 // ethernet state
 uint16_t ethernet_send_result = 0;
 int eth_backlog_nag_counter = 0;
-int interrupt_waiting_ethernet = 0;
+int interrupt_enabled_ethernet = 0;
 
 // usb state
 uint16_t usb_status = 0;
@@ -116,6 +116,12 @@ static int audio_buffer_collision = 0;
 static uint32_t audio_scale = 48000/50;
 static uint32_t audio_offset = 0;
 static int adau_enabled = 0;
+int interrupt_enabled_audio = 0;
+
+// debug test state
+static uint32_t zz_debug_test_counter = 0;
+static uint32_t zz_debug_test_prev = 0;
+static uint32_t zz_debug_test_ms = 0;
 
 void handle_amiga_reset() {
 	printf("    _______________   ___   ___   ___  \n");
@@ -140,7 +146,8 @@ void handle_amiga_reset() {
 	// ethernet
 	ethernet_send_result = 0;
 	eth_backlog_nag_counter = 0;
-	video_state->interrupt_enabled_ethernet = 0;
+	interrupt_enabled_ethernet = 0;
+	interrupt_enabled_audio = 0;
 
 	// FIXME document
 	cur_mem_offset = 0x3500000;
@@ -148,7 +155,7 @@ void handle_amiga_reset() {
 	// FIXME
 	memset((u32 *)Z3_SCRATCH_ADDR, 0, sizeof(struct GFXData));
 
-	// FIXME temporary: clear audio buffer on reset
+	// clear audio buffer on reset
 	memset((void*)AUDIO_TX_BUFFER_ADDRESS, 0, AUDIO_TX_BUFFER_SIZE);
 
 	// FIXME test content for audio buffer
@@ -159,10 +166,15 @@ void handle_amiga_reset() {
 		f-=0.0001;
 	}*/
 
+	// reset ADAU
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 0);
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 4);
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 0);
+
 	adau_enabled = audio_adau_init(1);
 
 	// clear interrupt holding amiga
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
+	amiga_interrupt_clear(0xffffffff);
 
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
 	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
@@ -183,9 +195,9 @@ int main() {
 
 	ethernet_init();
 
-	handle_amiga_reset();
-
 	fpga_interrupt_connect(isr_video, isr_audio, isr_audio_rx);
+
+	handle_amiga_reset();
 
 	// ARM app run environment
 	arm_app_init();
@@ -216,9 +228,10 @@ int main() {
 	int need_req_ack = 0;
 
 	// audio parameters (buffer locations)
-	const int ZZ_NUM_AUDIO_PARAMS = 4;
+	const int ZZ_NUM_AUDIO_PARAMS = 12;
 	uint16_t audio_params[ZZ_NUM_AUDIO_PARAMS];
 	int audio_param = 0; // selected parameter
+	int audio_request_init = 0;
 
 	// decoder parameters (mp3 etc)
 	const int ZZ_NUM_DECODER_PARAMS = 8;
@@ -340,15 +353,18 @@ int main() {
 					if (zdata & 8) {
 						// clear/ack
 						if (zdata & 16) {
-							printf("[clear] eth\n");
-							interrupt_waiting_ethernet = 0;
+							amiga_interrupt_clear(AMIGA_INTERRUPT_ETH);
 						}
 						if (zdata & 32) {
-							audio_clear_interrupt();
+							amiga_interrupt_clear(AMIGA_INTERRUPT_AUDIO);
 						}
 					} else {
 						printf("[enable] eth: %d\n", (int)zdata);
-						video_state->interrupt_enabled_ethernet = zdata & 1;
+						interrupt_enabled_ethernet = zdata & 1;
+
+						if (!interrupt_enabled_ethernet) {
+							amiga_interrupt_clear(AMIGA_INTERRUPT_ETH);
+						}
 					}
 					break;
 				case REG_ZZ_MODE: {
@@ -836,15 +852,39 @@ int main() {
 				case REG_ZZ_AUDIO_SCALE:
 					audio_scale = zdata;
 					break;
-				case REG_ZZ_AUDIO_PARAM:
+				case REG_ZZ_UNUSED_REG8C:
+					// set up a test (set sleep time, and set counter to 0)
+					zz_debug_test_ms = zdata;
+					zz_debug_test_counter = 0;
+					zz_debug_test_prev = 0;
+					printf("[zzdebug] test reset, time: %lu\n", zz_debug_test_ms);
+					break;
 
+				case REG_ZZ_UNUSED_REG8E:
+					// increase counter by one and compare with the number we are sent
+					if (zdata > 0 && zz_debug_test_prev != zdata-1) {
+						printf("[zzdebug] loss! zdata: %lu prev: %lu counter: %lu\n", zdata, zz_debug_test_prev, zz_debug_test_counter);
+					}
+					usleep(zz_debug_test_ms*1000);
+					zz_debug_test_counter++;
+					zz_debug_test_prev = zdata;
+					break;
+
+				case REG_ZZ_AUDIO_PARAM:
 					printf("[REG_ZZ_AUDIO_PARAM] %lx\n", zdata);
 
-					// DECODER PARAMS:
+					// AUDIO PARAMS:
 					// 0: tx buffer offset hi
 					// 1: tx buffer offset lo
 					// 2: rx buffer offset hi
 					// 3: rx buffer offset lo
+					// 4: dsp program offset hi
+					// 5: dsp program offset lo
+					// 6: dsp params offset hi
+					// 7: dsp params offset lo
+					// 8: dsp upload program + params or params only (length in zdata)
+					// 9: dsp set lowpass filter
+					// 10: dsp set volumes
 
 					if (zdata<ZZ_NUM_AUDIO_PARAMS) {
 						audio_param = zdata;
@@ -860,11 +900,40 @@ int main() {
 					if (audio_param == 1) {
 						uint8_t* addr = (uint8_t*)video_state->framebuffer +
 								((audio_params[0]<<16)|audio_params[1]);
-						audio_set_tx_buffer(addr);
+						if (((uint32_t)addr-(uint32_t)video_state->framebuffer)<0x100000*128) {
+							audio_set_tx_buffer(addr);
+							audio_request_init = 1;
+						} else {
+							printf("[audio] illegal tx address: 0x%p\n", addr);
+						}
 					} else if (audio_param == 3) {
 						uint8_t* addr = (uint8_t*)video_state->framebuffer +
 								((audio_params[2]<<16)|audio_params[3]);
-						audio_set_rx_buffer(addr);
+						if (((uint32_t)addr-(uint32_t)video_state->framebuffer)<0x100000*128) {
+							audio_set_rx_buffer(addr);
+							audio_request_init = 1;
+						} else {
+							printf("[audio] illegal tx address: 0x%p\n", addr);
+						}
+					} else if (audio_param == 8) {
+						uint8_t* program_ptr = (uint8_t*)video_state->framebuffer +
+								((audio_params[4]<<16)|audio_params[5]);
+						uint8_t* params_ptr = (uint8_t*)video_state->framebuffer +
+								((audio_params[6]<<16)|audio_params[7]);
+
+						if (zdata == 0) {
+							printf("[audio] reprogramming from 0x%p and 0x%p\n", program_ptr, params_ptr);
+							audio_program_adau(program_ptr, 5120);
+							audio_program_adau_params(params_ptr, 4096);
+						} else {
+							printf("[audio] programming %ld params from 0x%p\n", zdata, params_ptr);
+							audio_program_adau_params(params_ptr, zdata);
+						}
+					} else if (audio_param == 9) {
+						// set lowpass filter params by cutoff freq (works only if default program is loaded!)
+						audio_adau_set_lpf_params(audio_params[9]);
+					} else if (audio_param == 10) {
+						audio_adau_set_mixer_vol(zdata&0xff, (zdata>>8)&0xff);
 					}
 					break;
 				case REG_ZZ_DECODER_PARAM:
@@ -1035,8 +1104,7 @@ int main() {
 						break;
 					}
 					case REG_ZZ_CONFIG: {
-						//printf("read 0x04: a: %d e: %d\n", interrupt_waiting_audio, interrupt_waiting_ethernet);
-						data = ((audio_get_interrupt()<<1)|(interrupt_waiting_ethernet))<<16;
+						data = (amiga_interrupt_get())<<16;
 						break;
 					}
 					case REG_ZZ_AUDIO_SWAB: {
@@ -1053,6 +1121,11 @@ int main() {
 					case REG_ZZ_DECODER_VAL: {
 						// used to determine if MP3 decoding has finished
 						data = decoder_bytes_decoded;
+						break;
+					}
+					case REG_ZZ_UNUSED_REG8C: {
+						// sleep test for reads
+						data = zz_debug_test_counter;
 						break;
 					}
 				}
@@ -1081,6 +1154,13 @@ int main() {
 				// RESET
 				handle_amiga_reset();
 			}
+
+			if (audio_request_init) {
+				audio_debug_timer(0);
+				audio_init_i2s();
+				audio_request_init = 0;
+				audio_debug_timer(1);
+			}
 		}
 
 		// TODO: potential hang, timeout?
@@ -1107,12 +1187,11 @@ int main() {
 		// check for queued up ethernet frames
 		int ethernet_backlog = ethernet_get_backlog();
 		if (ethernet_backlog > 0 && eth_backlog_nag_counter > 5000) {
-			video_state->interrupt_signal_ethernet = 1;
-			interrupt_waiting_ethernet = 1;
+			amiga_interrupt_set(AMIGA_INTERRUPT_ETH);
 			eth_backlog_nag_counter = 0;
 		}
 
-		if (video_state->interrupt_enabled_ethernet && ethernet_backlog > 0) {
+		if (interrupt_enabled_ethernet && ethernet_backlog > 0) {
 			eth_backlog_nag_counter++;
 		}
 	}

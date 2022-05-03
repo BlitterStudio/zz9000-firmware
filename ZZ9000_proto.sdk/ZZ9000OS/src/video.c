@@ -325,15 +325,6 @@ void isr_video(void *dummy) {
 		Xil_L2CacheFlush();
 		isr_flush_count = 0;
 
-		if ((vs.interrupt_signal_ethernet && vs.interrupt_enabled_ethernet)) {
-			// interrupt amiga (trigger int6/2)
-			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 1);
-			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, (1 << 30) | 0);
-
-			// FIXME legacy behavior
-			vs.interrupt_signal_ethernet = 0;
-		}
-
 		if (sprite_request_show) {
 			vs.sprite_showing = 1;
 			sprite_request_show = 0;
