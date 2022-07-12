@@ -29,9 +29,9 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
                 draw_line(data->x[0], data->y[0], data->x[1], data->y[1],
                         data->user[0], data->user[1], data->user[2], data->rgb[0], data->rgb[1],
                         data->u8_user[GFXDATA_U8_COLORMODE], data->mask, data->u8_user[GFXDATA_U8_DRAWMODE]);
-            
+
             break;
-        
+
         case OP_FILLRECT:
             SWAP16(data->x[0]);		SWAP16(data->x[1]);
             SWAP16(data->y[0]);		SWAP16(data->y[1]);
@@ -68,7 +68,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
                                     data->y[2], data->u8_user[GFXDATA_U8_COLORMODE],
                                     (uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                                     data->pitch[0], MINTERM_SRC);
-                else 
+                else
                     copy_rect(data->x[0], data->y[0], data->x[1], data->y[1], data->x[2],
                             data->y[2], data->u8_user[GFXDATA_U8_COLORMODE],
                             (uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
@@ -119,7 +119,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
                         data->rgb[0], data->rgb[1], data->x[2], data->y[2], tmpl_data,
                         data->pitch[1]);
             }
-            
+
             break;
         }
 
@@ -146,7 +146,6 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
                         data->user[0], data->pitch[1], bmp_data);
             }
             else {
-                SWAP32(data->rgb[0]);
                 p2d_rect(data->x[0], 0, data->x[1], data->y[1], data->x[2],
                         data->y[2], data->minterm, data->user[1], data->mask, data->user[0],
                         data->rgb[0], data->pitch[1], bmp_data, data->u8_user[GFXDATA_U8_COLORMODE]);
