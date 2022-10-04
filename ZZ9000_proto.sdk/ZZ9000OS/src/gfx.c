@@ -492,8 +492,136 @@ void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 	}
 }
 
-void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint32_t color_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src, uint32_t color_format)
-{
+uint8_t reverse_lookup(uint32_t *bmp_pal, uint8_t planes, uint32_t fg_color) {
+	uint8_t num_colors = (1<<planes) - 1;
+
+	for(uint8_t i=0; i<num_colors; i++) {
+		if(bmp_pal[i] == fg_color) {
+			return i;
+		}
+	}
+	return 0;
+}
+
+void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint32_t color_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src, uint32_t color_format) {
+	uint32_t *dp = fb + (dy * fb_pitch);
+
+	uint8_t cur_bit, base_bit, base_byte;
+	uint16_t cur_byte = 0;
+
+	uint32_t plane_size = src_line_pitch * h;
+	uint32_t *bmp_pal = (uint32_t *)bmp_data_src;
+	uint8_t *bmp_data = bmp_data_src + (256 * 4);
+
+	cur_bit = base_bit = (0x80 >> (sx % 8));
+	cur_byte = base_byte = ((sx / 8) % src_line_pitch);
+
+	for (int16_t line_y = 0; line_y < h; line_y++) {
+		for (int16_t x = dx; x < dx + w; x++) {
+
+			uint8_t b=0,nb=0,c,d=0;
+			switch(draw_mode) {
+				case MINTERM_FALSE:
+					d = 0;
+				break;
+				case MINTERM_NOR:
+					DECODE_PLANAR_PIXEL(b);
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = ~(c | b);
+				break;
+				case MINTERM_ONLYDST:
+					DECODE_INVERTED_PLANAR_PIXEL(nb);
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = c & nb;
+				break;
+				case MINTERM_NOTSRC:
+					DECODE_INVERTED_PLANAR_PIXEL(nb);
+					d = nb;
+				break;
+				case MINTERM_ONLYSRC:
+					DECODE_PLANAR_PIXEL(b);
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = (~c) & b;
+				break;
+				case MINTERM_INVERT:
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = ~c;
+				break;
+				case MINTERM_EOR:
+					DECODE_PLANAR_PIXEL(b);
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = c ^ b;
+				break;
+				case MINTERM_NAND:
+					DECODE_PLANAR_PIXEL(b);
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = ~(c & b);
+				break;
+				case MINTERM_AND:
+					DECODE_PLANAR_PIXEL(b);
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = c & b;
+				break;
+				case MINTERM_NEOR:
+					DECODE_PLANAR_PIXEL(b);
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = ~(c ^ b);
+				break;
+				case MINTERM_DST:
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = c;
+				break;
+				case MINTERM_NOTONLYSRC:
+					DECODE_INVERTED_PLANAR_PIXEL(nb);
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = c | nb;
+				break;
+				case MINTERM_SRC:
+					DECODE_PLANAR_PIXEL(b);
+					d = b;
+				break;
+				case MINTERM_NOTONLYDST:
+					DECODE_PLANAR_PIXEL(b);
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = (~c) | b;
+				break;
+				case MINTERM_OR:
+					DECODE_PLANAR_PIXEL(b);
+					c = reverse_lookup(bmp_pal, planes, dp[x]);
+					d = c | b;
+				break;
+				case MINTERM_TRUE:
+					d = (1<<planes) - 1;
+				break;
+			}
+
+			switch (color_format) {
+				case MNTVA_COLOR_16BIT565:
+					((uint16_t *)dp)[x] = bmp_pal[d];
+					break;
+				case MNTVA_COLOR_32BIT:
+					dp[x] = bmp_pal[d];
+					break;
+			}
+
+			if ((cur_bit >>= 1) == 0) {
+				cur_bit = 0x80;
+				cur_byte++;
+				cur_byte %= src_line_pitch;
+			}
+
+		}
+		dp += fb_pitch;
+		if ((line_y + sy + 1) % h)
+			bmp_data += src_line_pitch;
+		else
+			bmp_data = bmp_data_src;
+		cur_bit = base_bit;
+		cur_byte = base_byte;
+	}
+}
+
+void orig_p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint32_t color_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src, uint32_t color_format) {
 	uint32_t *dp = fb + (dy * fb_pitch);
 
 	uint8_t cur_bit, base_bit, base_byte;
