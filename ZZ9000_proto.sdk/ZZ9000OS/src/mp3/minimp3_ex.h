@@ -23,8 +23,8 @@
 /* compile-time config */
 #define MINIMP3_PREDECODE_FRAMES 2 /* frames to pre-decode and skip after seek (to fill internal structures) */
 /*#define MINIMP3_SEEK_IDX_LINEAR_SEARCH*/ /* define to use linear index search instead of binary search on seek */
-#define MINIMP3_IO_SIZE (128*1024) /* io buffer size for streaming functions, must be greater than MINIMP3_BUF_SIZE */
-#define MINIMP3_BUF_SIZE (16*1024) /* buffer which can hold minimum 10 consecutive mp3 frames (~16KB) worst case */
+#define MINIMP3_IO_SIZE  (4*1024) /* io buffer size for streaming functions, must be greater than MINIMP3_BUF_SIZE */
+#define MINIMP3_BUF_SIZE (4*1024) /* used to be: buffer which can hold minimum 10 consecutive mp3 frames (~16KB) worst case */
 /*#define MINIMP3_SCAN_LIMIT (256*1024)*/ /* how many bytes will be scanned to search first valid mp3 frame, to prevent stall on large non-mp3 files */
 #define MINIMP3_ENABLE_RING 0      /* WIP enable hardware magic ring buffer if available, to make less input buffer memmove(s) in callback IO mode */
 

@@ -1,10 +1,68 @@
 #include <stdio.h>
+#include <xil_cache.h>
 #include "mp3.h"
 #define MINIMP3_IMPLEMENTATION 1
 #include "minimp3_ex.h"
 
+#define SWAP16(a) a = __builtin_bswap16(a)
+#define SWAP32(a) a = __builtin_bswap32(a)
+
 static mp3dec_ex_t mp3d;
+static mp3dec_io_t mp3io;
 static mp3dec_frame_info_t frame_info;
+static uint8_t* FifoAddr;
+static unsigned long FifoSize = 0;
+static unsigned short OldFifoWriteIdx = 0;
+static unsigned short FifoWriteIdx = 0; // in
+static unsigned short FifoReadIdx  = 0; // out
+
+static size_t read_cb(void *buf, size_t size, void *user_data) {
+	unsigned long BytesRead = 0;
+	long BytesToRead = size;
+	unsigned char *src = user_data;
+	unsigned char *dst = buf;
+
+	while(BytesToRead) {
+		// If FiFo is empty then exit the loop.
+		if(FifoReadIdx == FifoWriteIdx) break;
+		dst[BytesRead++] = src[FifoReadIdx++];
+		if(FifoReadIdx >= FifoSize) FifoReadIdx = 0;
+		BytesToRead--;
+	}
+
+	return BytesRead;
+}
+
+static int seek_cb(uint64_t position, void *user_data) {
+	FifoReadIdx = position % FifoSize;
+	return 0;
+}
+
+void fifo_clear(void) {
+	FifoReadIdx  = 0;
+	FifoWriteIdx = 0;
+}
+
+void fifo_set_write_index(unsigned short aWriteIndex) {
+	FifoWriteIdx = aWriteIndex;
+	// New data has arrived from the 68k size.
+	// We need to invalidate the data cache where the data came in.
+	if(FifoWriteIdx > OldFifoWriteIdx) {
+		// Invalidate range from old til new.
+		Xil_DCacheInvalidateRange((INTPTR)&FifoAddr[OldFifoWriteIdx], FifoWriteIdx-OldFifoWriteIdx);
+	}
+	else {
+		// 1. Invalidate range from old til end.
+		Xil_DCacheInvalidateRange((INTPTR)&FifoAddr[OldFifoWriteIdx], FifoSize-OldFifoWriteIdx);
+		// 2. Invalidate range from beginning til new.
+		Xil_DCacheInvalidateRange((INTPTR)&FifoAddr[0], FifoWriteIdx);
+	}
+	OldFifoWriteIdx = FifoWriteIdx;
+}
+
+unsigned short fifo_get_read_index(void) {
+	return FifoReadIdx;
+}
 
 int decode_mp3_samples(void* output_buffer, int max_samples) {
 	int max_bytes = max_samples * 2;
@@ -12,6 +70,9 @@ int decode_mp3_samples(void* output_buffer, int max_samples) {
 	int total_bytes_decoded = 0;
 
 	//printf("[mp3] out_offset: %d max_bytes: %d\n", out_offset, max_bytes);
+
+	// Clear destination buffer before trying to decode.
+	memset(output_buffer, 0, max_bytes);
 
 	// this will point into mp3d->buffer, which is defined on the stack
 	// as mp3d_sample_t buffer[MINIMP3_MAX_SAMPLES_PER_FRAME]
@@ -40,6 +101,23 @@ int decode_mp3_samples(void* output_buffer, int max_samples) {
 	}
 
 	return total_bytes_decoded;
+}
+
+int decode_mp3_init_fifo(uint8_t* input_buffer, size_t input_buffer_size) {
+	memset(&frame_info, 0, sizeof(frame_info));
+
+	FifoSize   = input_buffer_size;
+	FifoAddr   = input_buffer;
+	mp3io.read = read_cb;
+	mp3io.seek = seek_cb;
+	mp3io.read_data = mp3io.seek_data = input_buffer;
+
+	int ret = mp3dec_ex_open_cb(&mp3d, &mp3io, MP3D_DO_NOT_SCAN);
+	if (ret) {
+		printf("mp3dec_ex_open_cb failed: %d\n", ret);
+	}
+
+	return ret;
 }
 
 int decode_mp3_init(uint8_t* input_buffer, size_t input_buffer_size) {
