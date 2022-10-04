@@ -3,6 +3,7 @@
 #include "platform.h"
 #include "xparameters.h"
 #include "adau.h"
+#include "adau_PARAM.h"
 #include "xiicps.h"
 #include "xi2stx.h"
 #include "xi2srx.h"
@@ -625,19 +626,19 @@ void audio_adau_set_lpf_params(int f0) {
 	uint8_t buf[4];
 
 	adau_to_5_23(b0, buf);
-	adau_write32(0x34, 0, buf);
+	adau_write32(0x34, MOD_GENFILTER1_ALG0_STAGE0_B0_ADDR, buf);
 	printf("[lpf] b0: %f\t%02x %02x %02x %02x\n", b0, buf[0], buf[1], buf[2], buf[3]);
 	adau_to_5_23(b1, buf);
-	adau_write32(0x34, 1, buf);
+	adau_write32(0x34, MOD_GENFILTER1_ALG0_STAGE0_B1_ADDR, buf);
 	printf("[lpf] b1: %f\t%02x %02x %02x %02x\n", b1, buf[0], buf[1], buf[2], buf[3]);
 	adau_to_5_23(b2, buf);
-	adau_write32(0x34, 2, buf);
+	adau_write32(0x34, MOD_GENFILTER1_ALG0_STAGE0_B2_ADDR, buf);
 	printf("[lpf] b2: %f\t%02x %02x %02x %02x\n", b2, buf[0], buf[1], buf[2], buf[3]);
 	adau_to_5_23(a1, buf);
-	adau_write32(0x34, 3, buf);
+	adau_write32(0x34, MOD_GENFILTER1_ALG0_STAGE0_A1_ADDR, buf);
 	printf("[lpf] a1: %f\t%02x %02x %02x %02x\n", a1, buf[0], buf[1], buf[2], buf[3]);
 	adau_to_5_23(a2, buf);
-	adau_write32(0x34, 4, buf);
+	adau_write32(0x34, MOD_GENFILTER1_ALG0_STAGE0_A2_ADDR, buf);
 	printf("[lpf] a2: %f\t%02x %02x %02x %02x\n\n", a2, buf[0], buf[1], buf[2], buf[3]);
 }
 
@@ -652,7 +653,136 @@ void audio_adau_set_mixer_vol(int vol1, int vol2) {
 
 	uint8_t buf[4];
 	adau_to_5_23(v1, buf);
-	adau_write32(0x34, 5, buf);
+	adau_write32(0x34, MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR, buf);
 	adau_to_5_23(v2, buf);
-	adau_write32(0x34, 6, buf);
+	adau_write32(0x34, MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR, buf);
 }
+
+void audio_adau_set_prefactor(int pre) {
+	double p;
+
+	if(pre > 100) pre = 100;
+	if(pre <   0) pre =   0;
+
+	p = .01f * (double)pre;
+
+	uint8_t buf[4];
+	adau_to_5_23(p, buf);
+	adau_write32(0x34, MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_ADDR, buf);
+	adau_write32(0x34, MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR, buf);
+}
+
+void audio_adau_set_vol_pan(int vol, int pan) {
+	LONG VolL, VolR;
+	double vl, vr;
+
+	VolL = vol;
+	if(pan > 50) VolL -= 2*(pan-50);
+	VolR = vol;
+	if(pan < 50) VolR -= 2*(50-pan);
+
+	if(VolL > 100) VolL = 100;
+	if(VolR > 100) VolR = 100;
+	if(VolL <   0) VolL =   0;
+	if(VolR <   0) VolR =   0;
+
+	vl = .01f * (double)VolL;
+	vr = .01f * (double)VolR;
+
+	uint8_t buf[4];
+	adau_to_5_23(vl, buf);
+	adau_write32(0x34, MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR, buf);
+	adau_to_5_23(vr, buf);
+	adau_write32(0x34, MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR, buf);
+}
+
+double eq_omega(double fs, double f0) {
+	return 2.0 * M_PI * (f0 / fs);
+}
+
+double eq_alpha(double fs, double f0) {
+	double omega = eq_omega(fs, f0);
+	double Q = 1.2247449;
+	return sin(omega) / (2.0 * Q);
+}
+
+// gain range: 0 = -12dB .. 50 = 0dB .. 100 = 12 dB
+void audio_adau_set_eq_gain(int band, int gain) {
+	if(band > 9) return;
+	// These are the classic 
+	static const double BandFreqs[10] = {
+		31.25, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0
+	};
+	double dBBoost = ((float)gain-50.0f)*12.0/50.0;
+	double gainLinear = 1.0;
+	double A= pow(10.0, dBBoost / 40.0);
+	double fs = 48000.0f;
+	double f0 = BandFreqs[band];
+
+	double omega = eq_omega(fs, f0);
+	double alpha = eq_alpha(fs, f0);
+	
+	double a0 = 1.0 + alpha/A;
+	double a1 = -2.0 * cos(omega);
+	double a2 = 1.0 - alpha/A;
+	double b0 = (1 + alpha*A) * gainLinear;
+	double b1 = -(2.0 * cos(omega)) * gainLinear;
+	double b2 = (1.0 - alpha*A) * gainLinear;
+
+	a1 /= a0;
+	a2 /= a0;
+	b0 /= a0;
+	b1 /= a0;
+	b2 /= a0;
+
+	a1 = -a1;
+	a2 = -a2;	
+
+	printf("[equ] band: %d dB: %.1lf\n", band, dBBoost);
+
+	// https://ez.analog.com/dsp/sigmadsp/w/documents/5182/implementing-safeload-writes-on-the-adau1701
+	uint8_t buf[5];
+	buf[0] = 0;
+
+	// Safeload Data 0, address 0x0810
+	adau_to_5_23(b0, &buf[1]);
+	adau_write40(0x34, 0x0810, buf);
+
+	// Safeload Address 0, address 0x0815
+	adau_write16(0x34, 0x0815, MOD_EQUALIZER_ALG0_STAGE0_B0_ADDR + band*5);
+
+	// Safeload Data 1, address 0x0811
+	adau_to_5_23(b1, &buf[1]);
+	adau_write40(0x34, 0x0811, buf);
+
+	// Safeload Address 1, address 0x0816
+	adau_write16(0x34, 0x0816, MOD_EQUALIZER_ALG0_STAGE0_B1_ADDR + band*5);
+
+	// Safeload Data 2, address 0x0812
+	adau_to_5_23(b2, &buf[1]);
+	adau_write40(0x34, 0x0812, buf);
+
+	// Safeload Address 2, address 0x0817
+	adau_write16(0x34, 0x0817, MOD_EQUALIZER_ALG0_STAGE0_B2_ADDR + band*5);
+
+	// Safeload Data 3, address 0x0813
+	adau_to_5_23(a1, &buf[1]);
+	adau_write40(0x34, 0x0813, buf);
+
+	// Safeload Address 3, address 0x0818
+	adau_write16(0x34, 0x0818, MOD_EQUALIZER_ALG0_STAGE0_A0_ADDR + band*5);
+
+	// Safeload Data 4, address 0x0814
+	adau_to_5_23(a2, &buf[1]);
+	adau_write40(0x34, 0x0814, buf);
+
+	// Safeload Address 4, address 0x0819
+	adau_write16(0x34, 0x0819, MOD_EQUALIZER_ALG0_STAGE0_A1_ADDR + band*5);
+
+	// Initiate safeload transfer bit, address 0x081C
+	adau_write16(0x34, 0x081C, 0x003C);
+
+	usleep(25);
+
+}
+

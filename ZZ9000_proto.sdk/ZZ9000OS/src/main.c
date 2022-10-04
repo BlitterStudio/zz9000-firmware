@@ -228,7 +228,6 @@ int main() {
 	int need_req_ack = 0;
 
 	// audio parameters (buffer locations)
-	const int ZZ_NUM_AUDIO_PARAMS = 12;
 	uint16_t audio_params[ZZ_NUM_AUDIO_PARAMS];
 	int audio_param = 0; // selected parameter
 	int audio_request_init = 0;
@@ -873,19 +872,6 @@ int main() {
 				case REG_ZZ_AUDIO_PARAM:
 					printf("[REG_ZZ_AUDIO_PARAM] %lx\n", zdata);
 
-					// AUDIO PARAMS:
-					// 0: tx buffer offset hi
-					// 1: tx buffer offset lo
-					// 2: rx buffer offset hi
-					// 3: rx buffer offset lo
-					// 4: dsp program offset hi
-					// 5: dsp program offset lo
-					// 6: dsp params offset hi
-					// 7: dsp params offset lo
-					// 8: dsp upload program + params or params only (length in zdata)
-					// 9: dsp set lowpass filter
-					// 10: dsp set volumes
-
 					if (zdata<ZZ_NUM_AUDIO_PARAMS) {
 						audio_param = zdata;
 					} else {
@@ -893,33 +879,32 @@ int main() {
 					}
 					break;
 				case REG_ZZ_AUDIO_VAL:
-
 					printf("[REG_ZZ_AUDIO_VAL] %lx\n", zdata);
 
 					audio_params[audio_param] = zdata;
-					if (audio_param == 1) {
+					if (audio_param == AP_TX_BUF_OFFS_LO) {
 						uint8_t* addr = (uint8_t*)video_state->framebuffer +
-								((audio_params[0]<<16)|audio_params[1]);
+								((audio_params[AP_TX_BUF_OFFS_HI]<<16)|audio_params[AP_TX_BUF_OFFS_LO]);
 						if (((uint32_t)addr-(uint32_t)video_state->framebuffer)<0x100000*128) {
 							audio_set_tx_buffer(addr);
 							audio_request_init = 1;
 						} else {
 							printf("[audio] illegal tx address: 0x%p\n", addr);
 						}
-					} else if (audio_param == 3) {
+					} else if (audio_param == AP_RX_BUF_OFFS_LO) {
 						uint8_t* addr = (uint8_t*)video_state->framebuffer +
-								((audio_params[2]<<16)|audio_params[3]);
+								((audio_params[AP_RX_BUF_OFFS_HI]<<16)|audio_params[AP_RX_BUF_OFFS_LO]);
 						if (((uint32_t)addr-(uint32_t)video_state->framebuffer)<0x100000*128) {
 							audio_set_rx_buffer(addr);
 							audio_request_init = 1;
 						} else {
 							printf("[audio] illegal tx address: 0x%p\n", addr);
 						}
-					} else if (audio_param == 8) {
+					} else if (audio_param == AP_DSP_UPLOAD) {
 						uint8_t* program_ptr = (uint8_t*)video_state->framebuffer +
-								((audio_params[4]<<16)|audio_params[5]);
+								((audio_params[AP_DSP_PROG_OFFS_HI]<<16)|audio_params[AP_DSP_PROG_OFFS_LO]);
 						uint8_t* params_ptr = (uint8_t*)video_state->framebuffer +
-								((audio_params[6]<<16)|audio_params[7]);
+								((audio_params[AP_DSP_PARAM_OFFS_HI]<<16)|audio_params[AP_DSP_PARAM_OFFS_LO]);
 
 						if (zdata == 0) {
 							printf("[audio] reprogramming from 0x%p and 0x%p\n", program_ptr, params_ptr);
@@ -929,11 +914,17 @@ int main() {
 							printf("[audio] programming %ld params from 0x%p\n", zdata, params_ptr);
 							audio_program_adau_params(params_ptr, zdata);
 						}
-					} else if (audio_param == 9) {
+					} else if (audio_param == AP_DSP_SET_LOWPASS) {
 						// set lowpass filter params by cutoff freq (works only if default program is loaded!)
-						audio_adau_set_lpf_params(audio_params[9]);
-					} else if (audio_param == 10) {
+						audio_adau_set_lpf_params(zdata);
+					} else if (audio_param == AP_DSP_SET_VOLUMES) {
 						audio_adau_set_mixer_vol(zdata&0xff, (zdata>>8)&0xff);
+					} else if (audio_param == AP_DSP_SET_PREFACTOR) {
+						audio_adau_set_prefactor(zdata);
+					} else if ((audio_param >= AP_DSP_SET_EQ_BAND1) && (audio_param <= AP_DSP_SET_EQ_BAND10)) {
+						audio_adau_set_eq_gain(audio_param-AP_DSP_SET_EQ_BAND1, zdata);
+					} else if (audio_param == AP_DSP_SET_STEREO_VOLUME) {
+						audio_adau_set_vol_pan(zdata&0xff, (zdata>>8)&0xff);
 					}
 					break;
 				case REG_ZZ_DECODER_PARAM:
