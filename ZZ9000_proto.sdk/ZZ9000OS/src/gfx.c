@@ -180,17 +180,22 @@ void copy_rect_nomask(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h
 	else {
 		for (uint16_t y_line = 0; y_line < h; y_line++) {
 			if (x_reverse) {
-				for (int16_t x = w; x >= 0; x--) {
+				for (int16_t x = w-1; x >= 0; x--) {
 					if (color_format == MNTVA_COLOR_8BIT) {
 						u8_fg = ((uint8_t *)sp)[rect_sx + x];
 						HANDLE_MINTERM_PIXEL_8(u8_fg, ((uint8_t *)dp)[rect_x1 + x]);
 					}
 					else {
-						if (color_format == MNTVA_COLOR_16BIT565)
+						if (color_format == MNTVA_COLOR_16BIT565) {
 							fg_color = ((uint16_t *)sp)[rect_sx + x];
-						else
+							uint16_t* dpx1 = (uint16_t*)dp + rect_x1;
+							HANDLE_MINTERM_PIXEL_16_32(fg_color, dpx1);
+						}
+						else {
 							fg_color = sp[rect_sx + x];
-						HANDLE_MINTERM_PIXEL_16_32(fg_color, dp);
+							uint32_t* dpx1 = dp + rect_x1;
+							HANDLE_MINTERM_PIXEL_16_32(fg_color, dpx1);
+						}
 					}
 				}
 			}
@@ -201,11 +206,16 @@ void copy_rect_nomask(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h
 						HANDLE_MINTERM_PIXEL_8(u8_fg, ((uint8_t *)dp)[rect_x1 + x]);
 					}
 					else {
-						if (color_format == MNTVA_COLOR_16BIT565)
+						if (color_format == MNTVA_COLOR_16BIT565) {
 							fg_color = ((uint16_t *)sp)[rect_sx + x];
-						else
+							uint16_t* dpx1 = (uint16_t*)dp + rect_x1;
+							HANDLE_MINTERM_PIXEL_16_32(fg_color, dpx1);
+						}
+						else {
 							fg_color = sp[rect_sx + x];
-						HANDLE_MINTERM_PIXEL_16_32(fg_color, dp);
+							uint32_t* dpx1 = dp + rect_x1;
+							HANDLE_MINTERM_PIXEL_16_32(fg_color, dpx1);
+						}
 					}
 				}
 			}
