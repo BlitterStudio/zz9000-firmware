@@ -58,6 +58,10 @@ static volatile u32 frames_received = 0;
 static volatile u16 frames_backlog = 0;
 int frames_received_from_backlog = 0;
 
+#define ETH_PHY_TYPE_MICREL 0
+#define ETH_PHY_TYPE_MOTORCOMM 1
+static int eth_phy_type = ETH_PHY_TYPE_MICREL;
+
 u32 PhyAddr;
 
 typedef char EthernetFrame[XEMACPS_MAX_VLAN_FRAME_SIZE_JUMBO] __attribute__ ((aligned(64)));
@@ -603,7 +607,15 @@ LONG setup_phy(XEmacPs * EmacPsInstancePtr)
 	XEmacPs_PhyRead(EmacPsInstancePtr, PhyAddr, PHY_DETECT_REG1, &PhyIdentity);
 
 	if (PhyIdentity == PHY_ID_MICREL_KSZ9031) {
+		eth_phy_type = ETH_PHY_TYPE_MICREL;
 		printf("EMAC: MICREL KSZ9031 PHY detected\n");
+		micrel_auto_negotiate(EmacPsInstancePtr, PhyAddr);
+		return XST_SUCCESS;
+	}
+	else if (PhyIdentity == 0x4f51) {
+		// black 2022 ZYNQ module with new PHY MotorComm YT8531S
+		eth_phy_type = ETH_PHY_TYPE_MOTORCOMM;
+		printf("EMAC: MOTORCOMM TY8531S PHY detected\n");
 		micrel_auto_negotiate(EmacPsInstancePtr, PhyAddr);
 		return XST_SUCCESS;
 	}
@@ -671,11 +683,19 @@ void micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr)
 {
 	u16 control;
 	u16 status;
+	// FIXME make configurable
 	int link_speed = 100;
 
-	printf("PHY: Start Micrel PHY auto negotiation\n");
+	if (eth_phy_type == ETH_PHY_TYPE_MOTORCOMM) {
+		printf("PHY: Start Ethernet PHY auto negotiation (MotorComm)\n");
 
-	XEmacPs_PhyWrite(xemacpsp,phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 2);
+		// access IEEE MII regs
+		XEmacPs_PhyWrite(xemacpsp, phy_addr, 0x100, 0x6);
+	} else {
+		printf("PHY: Start Ethernet PHY auto negotiation (Micrel)\n");
+	}
+
+	XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 2);
 	XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_MAC, &control);
 	control |= IEEE_RGMII_TXRX_CLOCK_DELAYED_MASK;
 	XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_MAC, control);
@@ -692,10 +712,11 @@ void micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr)
 		// register 0: 100 mbit
 		XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
 		control &= ~(1<<6);
+		// FIXME: why is this disabled?
 		//control |= (1<<13);
 		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
 
-		// register 9
+		// register 9, disable 1000base-t
 		XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_1000BASET_CONTROL_REG, &control);
 		control &= ~(1<<9 | 1<<8);
 		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_1000BASET_CONTROL_REG,control);
@@ -741,31 +762,48 @@ void micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr)
 
 	XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_STATUS_REG_OFFSET, &status);
 
-	printf("PHY: Waiting for PHY to complete auto negotiation.\n");
+	printf("PHY: Waiting for PHY to complete auto negotiation (status: %x).\n", status);
 }
 
 u32 micrel_auto_negotiate_step2(XEmacPs *xemacpsp, u32 phy_addr) {
 	u16 status;
 	u16 status_speed;
-	u16 link_speed;
+	u16 link_speed = 0;
 
 	XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_STATUS_REG_OFFSET, &status);
 
-	if ( status & IEEE_STAT_AUTONEGOTIATE_COMPLETE ) {
-		// http://www.fpgadeveloper.com/2018/05/board-bring-up-myir-myd-y7z010-dev-board.html
-		XEmacPs_PhyRead(xemacpsp, phy_addr, 0x1F, &status_speed);
+	printf("PHY status: %x\n", status);
 
-		if (status_speed & 0x040)
-			link_speed = 1000;
-		else if(status_speed & 0x020)
-			link_speed = 100;
-		else if(status_speed & 0x010)
-			link_speed = 10;
+	if (status & IEEE_STAT_AUTONEGOTIATE_COMPLETE) {
+		if (eth_phy_type == ETH_PHY_TYPE_MOTORCOMM) {
+			// https://datasheet.lcsc.com/szlcsc/2106070236_Motorcomm-YT8511C_C2685351.pdf
+			XEmacPs_PhyRead(xemacpsp, phy_addr, 0x11, &status_speed);
 
-		printf("PHY: Link speed: %d mbit\n",link_speed);
+			if ((status_speed & 0xc000) == 0)
+				link_speed = 10;
+			else if ((status_speed & 0xc000) == 0x4000)
+				link_speed = 100;
+			else if ((status_speed & 0xc000) == 0x8000)
+				link_speed = 1000;
+
+			printf("PHY (MotorComm): Link speed: %d mbit (status: %x)\n", link_speed, status_speed);
+			printf("PHY (MotorComm): Link up: %x\n", (status_speed&(1<<10))>>10);
+		} else {
+			// http://www.fpgadeveloper.com/2018/05/board-bring-up-myir-myd-y7z010-dev-board.html
+			XEmacPs_PhyRead(xemacpsp, phy_addr, 0x1F, &status_speed);
+
+			if (status_speed & 0x040)
+				link_speed = 1000;
+			else if (status_speed & 0x020)
+				link_speed = 100;
+			else if (status_speed & 0x010)
+				link_speed = 10;
+
+			printf("PHY (Micrel): Link speed: %d mbit\n", link_speed);
+		}
+
 		XEmacPs_SetOperatingSpeed(xemacpsp, link_speed);
 		XEmacPsClkSetup(xemacpsp, EMACPS_IRPT_INTR, link_speed);
-
 		return link_speed;
 	} else {
 		u16 temp;
