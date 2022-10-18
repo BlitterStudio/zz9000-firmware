@@ -55,7 +55,7 @@ void Xil_AssertNonVoid() {}
 #include "zz_video_modes.h"
 
 #define REVISION_MAJOR 1
-#define REVISION_MINOR 11
+#define REVISION_MINOR 12
 
 #define GPIO_DEVICE_ID	XPAR_XGPIOPS_0_DEVICE_ID
 
