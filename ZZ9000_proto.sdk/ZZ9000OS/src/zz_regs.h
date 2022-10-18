@@ -83,7 +83,7 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REG6E   = 0x6E,
 
   REG_ZZ_AUDIO_SWAB     = 0x70,
-  REG_ZZ_UNUSED_REG72   = 0x72,
+  REG_ZZ_DECODER_FIFO   = 0x72,
   REG_ZZ_AUDIO_SCALE    = 0x74,
   REG_ZZ_AUDIO_PARAM    = 0x76,
   REG_ZZ_AUDIO_VAL      = 0x78,
