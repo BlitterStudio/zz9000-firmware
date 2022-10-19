@@ -288,6 +288,8 @@ void ethernet_task() {
 		}
 	} else if (ethernet_task_state == ETH_TASK_INIT) {
 		// init_ethernet_buffers() also starts EmacPS
+		printf("EMAC: init_ethernet_buffers\n");
+
 		u16 status = init_ethernet_buffers();
 		if (status != XST_SUCCESS) {
 			printf("EMAC: init_ethernet_buffers() error\n");
@@ -771,8 +773,6 @@ u32 micrel_auto_negotiate_step2(XEmacPs *xemacpsp, u32 phy_addr) {
 	u16 link_speed = 0;
 
 	XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_STATUS_REG_OFFSET, &status);
-
-	printf("PHY status: %x\n", status);
 
 	if (status & IEEE_STAT_AUTONEGOTIATE_COMPLETE) {
 		if (eth_phy_type == ETH_PHY_TYPE_MOTORCOMM) {
