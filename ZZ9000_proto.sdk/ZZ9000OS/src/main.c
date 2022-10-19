@@ -238,6 +238,9 @@ int main() {
 	int decoder_param = 0; // selected parameter
 	int decoder_bytes_decoded = 0;
 
+	// idle task counter (used for ethernet negotiation)
+	int idle_task_count = 0;
+
 	while (1) {
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 		zstate_raw = zstate;
@@ -1148,7 +1151,12 @@ int main() {
 			need_req_ack = 2;
 		} else {
 			// there are no read/write requests, we can do other housekeeping
-			ethernet_task();
+			idle_task_count++;
+
+			if (idle_task_count > 30000000) {
+				ethernet_task();
+				idle_task_count=0;
+			}
 
 			if ((zstate & 0xff) == 0) {
 				// RESET
