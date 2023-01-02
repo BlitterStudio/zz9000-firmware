@@ -55,7 +55,7 @@ void Xil_AssertNonVoid() {}
 #include "zz_video_modes.h"
 
 #define REVISION_MAJOR 1
-#define REVISION_MINOR 12
+#define REVISION_MINOR 13
 
 #define GPIO_DEVICE_ID	XPAR_XGPIOPS_0_DEVICE_ID
 
@@ -316,7 +316,7 @@ int main() {
 				case REG_ZZ_PAN_LO:
 					video_state->framebuffer_pan_offset |= zdata;
 
-					// FIXME cursor offset support for p96 split screen
+					// cursor offset support for p96 panning
 					video_state->sprite_x_offset = rect_x1;
 					video_state->sprite_y_offset = rect_y1;
 
@@ -327,9 +327,7 @@ int main() {
 					video_state->framebuffer_pan_width = rect_x2;
 					u32 framebuffer_color_format = blitter_colormode;
 					video_state->framebuffer_pan_offset += (rect_x1 << blitter_colormode);
-					if (video_state->split_pos == 0) {
-						video_state->framebuffer_pan_offset += (rect_y1 * (video_state->framebuffer_pan_width << framebuffer_color_format));
-					}
+					video_state->framebuffer_pan_offset += (rect_y1 * (video_state->framebuffer_pan_width << framebuffer_color_format));
 					break;
 
 				case REG_ZZ_BLIT_SRC_HI:
@@ -361,7 +359,7 @@ int main() {
 							amiga_interrupt_clear(AMIGA_INTERRUPT_AUDIO);
 						}
 					} else {
-						printf("[enable] eth: %d\n", (int)zdata);
+						//printf("[enable] eth: %d\n", (int)zdata);
 						interrupt_enabled_ethernet = zdata & 1;
 
 						if (!interrupt_enabled_ethernet) {
@@ -392,7 +390,7 @@ int main() {
 
 					video_state->sprite_x_base = (int16_t)rect_x1;
 					video_state->sprite_y_base = (int16_t)rect_y1;
-					update_hw_sprite_pos(video_state->sprite_x_base, video_state->sprite_y_base);
+					update_hw_sprite_pos();
 
 					break;
 				case REG_ZZ_SPRITE_BITMAP: {
@@ -1153,7 +1151,7 @@ int main() {
 			// there are no read/write requests, we can do other housekeeping
 			idle_task_count++;
 
-			if (idle_task_count > 30000000) {
+			if (idle_task_count > 10000000) {
 				ethernet_task();
 				idle_task_count=0;
 			}
@@ -1168,6 +1166,12 @@ int main() {
 				audio_init_i2s();
 				audio_request_init = 0;
 				audio_debug_timer(1);
+			}
+
+			// check for queued up ethernet frames and interrupt amiga
+			if (interrupt_enabled_ethernet && ethernet_get_backlog()) {
+				amiga_interrupt_set(AMIGA_INTERRUPT_ETH);
+				eth_backlog_nag_counter = 0;
 			}
 		}
 
@@ -1190,17 +1194,6 @@ int main() {
 			}
 			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG0, 0);
 			need_req_ack = 0;
-		}
-
-		// check for queued up ethernet frames
-		int ethernet_backlog = ethernet_get_backlog();
-		if (ethernet_backlog > 0 && eth_backlog_nag_counter > 5000) {
-			amiga_interrupt_set(AMIGA_INTERRUPT_ETH);
-			eth_backlog_nag_counter = 0;
-		}
-
-		if (interrupt_enabled_ethernet && ethernet_backlog > 0) {
-			eth_backlog_nag_counter++;
 		}
 	}
 

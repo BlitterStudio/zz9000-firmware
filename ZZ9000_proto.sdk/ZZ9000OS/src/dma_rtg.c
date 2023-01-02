@@ -223,7 +223,8 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
 
         case OP_PAN:
             SWAP32(data->offset[0]);
-            SWAP16(data->x[0]);     SWAP16(data->y[0]);
+            SWAP16(data->x[0]);
+            SWAP16(data->y[0]);
             SWAP16(data->x[1]);
 
             vs->sprite_x_offset = (int16_t)data->x[0];
@@ -232,9 +233,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             vs->framebuffer_pan_width = data->x[1];
             u32 framebuffer_color_format = data->u8_user[GFXDATA_U8_COLORMODE];
             vs->framebuffer_pan_offset = data->offset[0] + (data->x[0] << data->u8_user[GFXDATA_U8_COLORMODE]);
-            if (vs->split_pos == 0) {
-            	vs->framebuffer_pan_offset += (data->y[0] * (vs->framebuffer_pan_width << framebuffer_color_format));
-            }
+            vs->framebuffer_pan_offset += (data->y[0] * (vs->framebuffer_pan_width << framebuffer_color_format));
             break;
 
         case OP_SET_SPLIT_POS:
