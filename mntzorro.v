@@ -19,13 +19,13 @@
  */
 
 // ZORRO2/3 switch
-//`define ZORRO2
+//`define ZORRO2 
 `define ZORRO3
 
-// use together with ZORRO2:
+// use only together with ZORRO2:
 //`define VARIANT_ZZ9500        // uses Denise adapter/A500 specific video capture
 //`define VARIANT_2MB           // uses only 2MB address space
-//`define VARIANT_SUPERDENISE   // for A500+ and super denise
+`define VARIANT_SUPERDENISE   // for A500+ and super denise
 
 //`define VARIANT_FW20
 `define VARIANT_Z3_FASTRAM
@@ -637,7 +637,6 @@ module MNTZorro_v0_1_S00_AXI
   reg [15:0] data_z3_hi16;
   reg [15:0] data_z3_low16;
   reg z3_curpic = 0;
-  reg z3_cold_boot = 1;
 
   (* mark_debug = "true" *) reg [15:0] data_z3_hi16_latched;
   (* mark_debug = "true" *) reg [15:0] data_z3_low16_latched;
@@ -755,11 +754,8 @@ module MNTZorro_v0_1_S00_AXI
   endgenerate
 
   // autoconf output signal
-
   reg z_confout = 0;
   assign ZORRO_NCFGOUT = ZORRO_NCFGIN?1'b1:(~z_confout);
-
-  reg [7:0] video_debug_reg;
 
 `ifdef VARIANT_FW20
     assign arm_interrupt = zorro_ram_write_request | zorro_ram_read_request;
@@ -859,8 +855,6 @@ module MNTZorro_v0_1_S00_AXI
     z_reset <= z_reset_delayed;
     z_cfgin <= (znCFGIN_sync==3'b000);
     z_cfgin_lo <= (znCFGIN_sync==3'b111);
-
-    //video_debug_reg <= video_debug;
   end // always @ (posedge S_AXI_ACLK)
 
   reg [15:0] REVISION = 'h7a09; // z9
@@ -1403,7 +1397,8 @@ module MNTZorro_v0_1_S00_AXI
 
     if (/*z_cfgin_lo ||*/ z_reset) begin
       zorro_state <= RESET;
-    end //else
+    end
+    
       case (zorro_state)
 
         COLD: begin
@@ -1449,9 +1444,7 @@ module MNTZorro_v0_1_S00_AXI
 `endif
 
 `ifdef ZORRO3
-          if (z3addr_autoconfig) begin
-            zorro_state <= Z3_CONFIGURING;
-          end
+          zorro_state <= Z3_CONFIGURING;
 `endif
         end
 
@@ -1551,14 +1544,12 @@ module MNTZorro_v0_1_S00_AXI
                 end else begin
                   z3_fast_low[31:16] <= z3_din_high_s2;
                 end
-                z_confout <= 1;
                 z3_confdone <= 1;
               end
               'hXX48: begin
               end
               'hXX4c: begin
                 // shutup
-                z_confout <= 1;
                 z3_confdone <= 1;
               end
             endcase
@@ -1621,19 +1612,16 @@ module MNTZorro_v0_1_S00_AXI
           if (z3_fast_low)
             z3_fast_high  <= z3_fast_low + `Z3_SIZE_256MB;
 
-          if (!z3_curpic && !z3_cold_boot) begin
+          if (!z3_curpic) begin
             z3_curpic <= 1'b1;
             z3_confdone <= 0;
-            z_confout <= 0;
             zorro_state <= Z3_CONFIGURING;
           end else begin
             z3_curpic <= 1'b0;
-            z_confout <= 1;
             zorro_state <= CONFIGURED_CLEAR;
           end
 `else
           z3_curpic <= 1'b0;
-          z_confout <= 1;
           zorro_state <= CONFIGURED_CLEAR;
 `endif
 
@@ -1644,12 +1632,7 @@ module MNTZorro_v0_1_S00_AXI
         end
 
         CONFIGURED_CLEAR: begin
-          // FIXME: there's a hard-to-debug bug
-          // which marks the RAM expansion as "defective" on first
-          // boot from SD card, but it works anyway.
-          // here, the workaround is to activate the RAM only from the second
-          // autoconfig cycle onwards.
-          z3_cold_boot <= 0;
+          z_confout <= 1;
 `ifdef ZORRO3
           zorro_state <= Z3_IDLE;
 `else
@@ -1740,7 +1723,6 @@ module MNTZorro_v0_1_S00_AXI
         end
         Z2_PRE_CONFIGURED: begin
           if (!z2_addr_valid) begin
-            z_confout<=1;
             zorro_state <= CONFIGURED;
           end
         end
@@ -2252,8 +2234,7 @@ module MNTZorro_v0_1_S00_AXI
              rr_data <= video_control_op;
             end*/
             'h00: begin
-              // this flag is read by Amiga software to check if all writes are done
-              rr_data <= video_control_vblank << 16; //zorro_ram_write_request;
+              rr_data <= video_control_vblank << 16;
             end
             'h30: begin
               rr_data <= debug_counter << 16;
