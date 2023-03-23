@@ -215,6 +215,7 @@ int main() {
 	uint32_t rect_rgb = 0;
 	uint32_t rect_rgb2 = 0;
 	uint32_t blitter_colormode = MNTVA_COLOR_32BIT;
+	uint32_t blitter_colormode_hibyte = 0;
 	uint16_t blitter_src_pitch = 0;
 	uint16_t blitter_user1 = 0;
 	uint16_t blitter_user2 = 0;
@@ -243,6 +244,9 @@ int main() {
 
 	while (1) {
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
+		if (debug_lowlevel && (zstate_raw&0xff)!=(zstate&0xff)) {
+			printf("ZSTATE: %x\n", zstate);
+		}
 		zstate_raw = zstate;
 		u32 writereq = (zstate & (1 << 31));
 		u32 readreq = (zstate & (1 << 30));
@@ -344,9 +348,12 @@ int main() {
 					break;
 
 				case REG_ZZ_COLORMODE:
-					blitter_colormode = zdata;
-					// hack
-					if (blitter_colormode == MNTVA_COLOR_15BIT) blitter_colormode = MNTVA_COLOR_16BIT565;
+					blitter_colormode = zdata & 0x0f;
+					blitter_colormode_hibyte = zdata >> 8;
+					// hack to use 16 bit gfx ops with 15 bit
+					if (blitter_colormode == MNTVA_COLOR_15BIT) {
+						blitter_colormode = MNTVA_COLOR_16BIT565;
+					}
 					break;
 				case REG_ZZ_CONFIG:
 					// enable/disable INT6, currently used to signal incoming ethernet packets
@@ -507,26 +514,25 @@ int main() {
 				case REG_ZZ_COPYRECT: {
 					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
-					mask = (blitter_colormode >> 8);
 
 					switch (zdata) {
 					case 1: // Regular BlitRect
-						if (mask == 0xFF || (mask != 0xFF && (blitter_colormode & 0x0F)) != MNTVA_COLOR_8BIT)
+						if (mask == 0xFF || (mask != 0xFF && (blitter_colormode)) != MNTVA_COLOR_8BIT)
 							copy_rect_nomask(rect_x1, rect_y1, rect_x2, rect_y2, rect_x3,
-											rect_y3, blitter_colormode & 0x0F,
+											rect_y3, blitter_colormode,
 											(uint32_t*) ((u32)video_state->framebuffer
 													+ blitter_dst_offset),
 											blitter_dst_pitch, MINTERM_SRC);
 						else
 							copy_rect(rect_x1, rect_y1, rect_x2, rect_y2, rect_x3,
-									rect_y3, blitter_colormode & 0x0F,
+									rect_y3, blitter_colormode,
 									(uint32_t*) ((u32)video_state->framebuffer
 											+ blitter_dst_offset),
 									blitter_dst_pitch, mask);
 						break;
 					case 2: // BlitRectNoMaskComplete
 						copy_rect_nomask(rect_x1, rect_y1, rect_x2, rect_y2, rect_x3,
-										rect_y3, blitter_colormode & 0x0F,
+										rect_y3, blitter_colormode,
 										(uint32_t*) ((u32)video_state->framebuffer
 												+ blitter_src_offset),
 										blitter_src_pitch, mask); // Mask in this case is minterm/opcode.
@@ -537,13 +543,13 @@ int main() {
 				}
 
 				case REG_ZZ_FILLTEMPLATE: {
-					uint8_t draw_mode = blitter_colormode >> 8;
+					uint8_t draw_mode = blitter_colormode_hibyte;
 					uint8_t* tmpl_data = (uint8_t*) ((u32)video_state->framebuffer
 							+ blitter_src_offset);
 					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
-					uint8_t bpp = 2 * (blitter_colormode & 0xff);
+					uint8_t bpp = 2 * blitter_colormode;
 					if (bpp == 0)
 						bpp = 1;
 					uint16_t loop_rows = 0;
@@ -555,13 +561,13 @@ int main() {
 						loop_rows = zdata & 0xff;
 						mask = blitter_user1;
 						blitter_src_pitch = 16;
-						pattern_fill_rect((blitter_colormode & 0x0F), rect_x1,
+						pattern_fill_rect(blitter_colormode, rect_x1,
 								rect_y1, rect_x2, rect_y2, draw_mode, mask,
 								rect_rgb, rect_rgb2, rect_x3, rect_y3, tmpl_data,
 								blitter_src_pitch, loop_rows);
 					}
 					else {
-						template_fill_rect((blitter_colormode & 0x0F), rect_x1,
+						template_fill_rect(blitter_colormode, rect_x1,
 								rect_y1, rect_x2, rect_y2, draw_mode, mask,
 								rect_rgb, rect_rgb2, rect_x3, rect_y3, tmpl_data,
 								blitter_src_pitch);
@@ -643,7 +649,7 @@ int main() {
 					break;
 
 				case REG_ZZ_P2C: {
-					uint8_t draw_mode = blitter_colormode >> 8;
+					uint8_t draw_mode = blitter_colormode_hibyte;
 					uint8_t planes = (zdata & 0xFF00) >> 8;
 					uint8_t mask = (zdata & 0xFF);
 					uint8_t layer_mask = blitter_user2;
@@ -660,7 +666,7 @@ int main() {
 				}
 
 				case REG_ZZ_P2D: {
-					uint8_t draw_mode = blitter_colormode >> 8;
+					uint8_t draw_mode = blitter_colormode_hibyte;
 					uint8_t planes = (zdata & 0xFF00) >> 8;
 					uint8_t mask = (zdata & 0xFF);
 					uint8_t layer_mask = blitter_user2;
@@ -671,12 +677,12 @@ int main() {
 							blitter_dst_pitch);
 					p2d_rect(rect_x1, 0, rect_x2, rect_y2, rect_x3,
 							rect_y3, draw_mode, planes, mask, layer_mask, rect_rgb,
-							blitter_src_pitch, bmp_data, (blitter_colormode & 0x0F));
+							blitter_src_pitch, bmp_data, blitter_colormode);
 					break;
 				}
 
 				case REG_ZZ_DRAWLINE: {
-					uint8_t draw_mode = blitter_colormode >> 8;
+					uint8_t draw_mode = blitter_colormode_hibyte;
 					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
@@ -686,11 +692,11 @@ int main() {
 					if (rect_x3 == 0xFFFF && zdata == 0xFF)
 						draw_line_solid(rect_x1, rect_y1, rect_x2, rect_y2,
 								blitter_user1, rect_rgb,
-								(blitter_colormode & 0x0F));
+								blitter_colormode);
 					else
 						draw_line(rect_x1, rect_y1, rect_x2, rect_y2,
 								blitter_user1, rect_x3, rect_y3, rect_rgb,
-								rect_rgb2, (blitter_colormode & 0x0F), zdata,
+								rect_rgb2, blitter_colormode, zdata,
 								draw_mode);
 					break;
 				}
@@ -780,7 +786,7 @@ int main() {
 					break;
 				}
 				case REG_ZZ_DEBUG: {
-					debug_lowlevel = zdata;
+					//debug_lowlevel = zdata;
 					break;
 				}
 				case REG_ZZ_DEBUG_TIMER: {
@@ -1002,7 +1008,9 @@ int main() {
 		} else if (readreq) {
 			uint32_t zaddr = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG0);
 
-			//printf("READ: %08lx\n",zaddr);
+			if (debug_lowlevel) {
+				printf("READ: %08lx\n",zaddr);
+			}
 			u32 z3 = (zstate_raw & (1 << 25));
 
 			if (zaddr >= MNT_FB_BASE || zaddr >= MNT_REG_BASE + 0x2000) {
