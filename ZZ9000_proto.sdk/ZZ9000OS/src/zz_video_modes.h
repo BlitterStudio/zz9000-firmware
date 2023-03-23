@@ -18,6 +18,7 @@ enum zz_video_modes {
 	ZZVMODE_720x480_NS_PAL,		// Non-standard "60Hz" (PAL Amiga)
 	ZZVMODE_720x576_NS_NTSC,	// Non-standard "50Hz" (NTSC Amiga)
 	ZZVMODE_720x480_NS_NTSC,	// Non-standard "60Hz" (NTSC Amiga)
+	ZZVMODE_640x400,
 	ZZVMODE_CUSTOM,
 	ZZVMODE_NUM,
 };

@@ -378,8 +378,6 @@ void ethernet_alloc_rx_frames() {
     }
 }
 
-int frame_receive_lock = 0;
-
 static void XEmacPsRecvHandler(void *Callback)
 {
 	u32 status;
@@ -463,9 +461,7 @@ int ethernet_get_backlog() {
 }
 
 int ethernet_receive_frame() {
-	// TODO disable interrupts while here
-
-	uint8_t* frm = ethernet_current_receive_ptr();
+	//printf("[eth rx] %d / %d\n", frames_received_from_backlog, frames_backlog);
 	//printf("ethernet_receive_frame: %d bytes: %d serial: %d\n", frames_received_from_backlog, frm[0]<<8|frm[1], frm[2]<<8|frm[3]);
 
 	if (frames_backlog>0) {
@@ -479,8 +475,8 @@ int ethernet_receive_frame() {
 		}
 	} else {
 		// this is NOT an error, Amiga wants data and there is no data on RX buffers
-//		printf("EMAC: ethernet_receive_frame() called but backlog is empty\n");
 	}
+
 	return(frames_received_from_backlog);
 }
 

@@ -55,7 +55,7 @@ void Xil_AssertNonVoid() {}
 #include "zz_video_modes.h"
 
 #define REVISION_MAJOR 1
-#define REVISION_MINOR 12
+#define REVISION_MINOR 13
 
 #define GPIO_DEVICE_ID	XPAR_XGPIOPS_0_DEVICE_ID
 
@@ -215,6 +215,7 @@ int main() {
 	uint32_t rect_rgb = 0;
 	uint32_t rect_rgb2 = 0;
 	uint32_t blitter_colormode = MNTVA_COLOR_32BIT;
+	uint32_t blitter_colormode_hibyte = 0;
 	uint16_t blitter_src_pitch = 0;
 	uint16_t blitter_user1 = 0;
 	uint16_t blitter_user2 = 0;
@@ -243,6 +244,9 @@ int main() {
 
 	while (1) {
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
+		if (debug_lowlevel && (zstate_raw&0xff)!=(zstate&0xff)) {
+			printf("ZSTATE: %x\n", zstate);
+		}
 		zstate_raw = zstate;
 		u32 writereq = (zstate & (1 << 31));
 		u32 readreq = (zstate & (1 << 30));
@@ -316,7 +320,7 @@ int main() {
 				case REG_ZZ_PAN_LO:
 					video_state->framebuffer_pan_offset |= zdata;
 
-					// FIXME cursor offset support for p96 split screen
+					// cursor offset support for p96 panning
 					video_state->sprite_x_offset = rect_x1;
 					video_state->sprite_y_offset = rect_y1;
 
@@ -327,9 +331,7 @@ int main() {
 					video_state->framebuffer_pan_width = rect_x2;
 					u32 framebuffer_color_format = blitter_colormode;
 					video_state->framebuffer_pan_offset += (rect_x1 << blitter_colormode);
-					if (video_state->split_pos == 0) {
-						video_state->framebuffer_pan_offset += (rect_y1 * (video_state->framebuffer_pan_width << framebuffer_color_format));
-					}
+					video_state->framebuffer_pan_offset += (rect_y1 * (video_state->framebuffer_pan_width << framebuffer_color_format));
 					break;
 
 				case REG_ZZ_BLIT_SRC_HI:
@@ -346,9 +348,12 @@ int main() {
 					break;
 
 				case REG_ZZ_COLORMODE:
-					blitter_colormode = zdata;
-					// hack
-					if (blitter_colormode == MNTVA_COLOR_15BIT) blitter_colormode = MNTVA_COLOR_16BIT565;
+					blitter_colormode = zdata & 0x0f;
+					blitter_colormode_hibyte = zdata >> 8;
+					// hack to use 16 bit gfx ops with 15 bit
+					if (blitter_colormode == MNTVA_COLOR_15BIT) {
+						blitter_colormode = MNTVA_COLOR_16BIT565;
+					}
 					break;
 				case REG_ZZ_CONFIG:
 					// enable/disable INT6, currently used to signal incoming ethernet packets
@@ -361,7 +366,7 @@ int main() {
 							amiga_interrupt_clear(AMIGA_INTERRUPT_AUDIO);
 						}
 					} else {
-						printf("[enable] eth: %d\n", (int)zdata);
+						//printf("[enable] eth: %d\n", (int)zdata);
 						interrupt_enabled_ethernet = zdata & 1;
 
 						if (!interrupt_enabled_ethernet) {
@@ -392,7 +397,7 @@ int main() {
 
 					video_state->sprite_x_base = (int16_t)rect_x1;
 					video_state->sprite_y_base = (int16_t)rect_y1;
-					update_hw_sprite_pos(video_state->sprite_x_base, video_state->sprite_y_base);
+					update_hw_sprite_pos();
 
 					break;
 				case REG_ZZ_SPRITE_BITMAP: {
@@ -509,26 +514,25 @@ int main() {
 				case REG_ZZ_COPYRECT: {
 					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
-					mask = (blitter_colormode >> 8);
 
 					switch (zdata) {
 					case 1: // Regular BlitRect
-						if (mask == 0xFF || (mask != 0xFF && (blitter_colormode & 0x0F)) != MNTVA_COLOR_8BIT)
+						if (mask == 0xFF || (mask != 0xFF && (blitter_colormode)) != MNTVA_COLOR_8BIT)
 							copy_rect_nomask(rect_x1, rect_y1, rect_x2, rect_y2, rect_x3,
-											rect_y3, blitter_colormode & 0x0F,
+											rect_y3, blitter_colormode,
 											(uint32_t*) ((u32)video_state->framebuffer
 													+ blitter_dst_offset),
 											blitter_dst_pitch, MINTERM_SRC);
 						else
 							copy_rect(rect_x1, rect_y1, rect_x2, rect_y2, rect_x3,
-									rect_y3, blitter_colormode & 0x0F,
+									rect_y3, blitter_colormode,
 									(uint32_t*) ((u32)video_state->framebuffer
 											+ blitter_dst_offset),
 									blitter_dst_pitch, mask);
 						break;
 					case 2: // BlitRectNoMaskComplete
 						copy_rect_nomask(rect_x1, rect_y1, rect_x2, rect_y2, rect_x3,
-										rect_y3, blitter_colormode & 0x0F,
+										rect_y3, blitter_colormode,
 										(uint32_t*) ((u32)video_state->framebuffer
 												+ blitter_src_offset),
 										blitter_src_pitch, mask); // Mask in this case is minterm/opcode.
@@ -539,13 +543,13 @@ int main() {
 				}
 
 				case REG_ZZ_FILLTEMPLATE: {
-					uint8_t draw_mode = blitter_colormode >> 8;
+					uint8_t draw_mode = blitter_colormode_hibyte;
 					uint8_t* tmpl_data = (uint8_t*) ((u32)video_state->framebuffer
 							+ blitter_src_offset);
 					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
-					uint8_t bpp = 2 * (blitter_colormode & 0xff);
+					uint8_t bpp = 2 * blitter_colormode;
 					if (bpp == 0)
 						bpp = 1;
 					uint16_t loop_rows = 0;
@@ -557,13 +561,13 @@ int main() {
 						loop_rows = zdata & 0xff;
 						mask = blitter_user1;
 						blitter_src_pitch = 16;
-						pattern_fill_rect((blitter_colormode & 0x0F), rect_x1,
+						pattern_fill_rect(blitter_colormode, rect_x1,
 								rect_y1, rect_x2, rect_y2, draw_mode, mask,
 								rect_rgb, rect_rgb2, rect_x3, rect_y3, tmpl_data,
 								blitter_src_pitch, loop_rows);
 					}
 					else {
-						template_fill_rect((blitter_colormode & 0x0F), rect_x1,
+						template_fill_rect(blitter_colormode, rect_x1,
 								rect_y1, rect_x2, rect_y2, draw_mode, mask,
 								rect_rgb, rect_rgb2, rect_x3, rect_y3, tmpl_data,
 								blitter_src_pitch);
@@ -645,7 +649,7 @@ int main() {
 					break;
 
 				case REG_ZZ_P2C: {
-					uint8_t draw_mode = blitter_colormode >> 8;
+					uint8_t draw_mode = blitter_colormode_hibyte;
 					uint8_t planes = (zdata & 0xFF00) >> 8;
 					uint8_t mask = (zdata & 0xFF);
 					uint8_t layer_mask = blitter_user2;
@@ -662,7 +666,7 @@ int main() {
 				}
 
 				case REG_ZZ_P2D: {
-					uint8_t draw_mode = blitter_colormode >> 8;
+					uint8_t draw_mode = blitter_colormode_hibyte;
 					uint8_t planes = (zdata & 0xFF00) >> 8;
 					uint8_t mask = (zdata & 0xFF);
 					uint8_t layer_mask = blitter_user2;
@@ -673,12 +677,12 @@ int main() {
 							blitter_dst_pitch);
 					p2d_rect(rect_x1, 0, rect_x2, rect_y2, rect_x3,
 							rect_y3, draw_mode, planes, mask, layer_mask, rect_rgb,
-							blitter_src_pitch, bmp_data, (blitter_colormode & 0x0F));
+							blitter_src_pitch, bmp_data, blitter_colormode);
 					break;
 				}
 
 				case REG_ZZ_DRAWLINE: {
-					uint8_t draw_mode = blitter_colormode >> 8;
+					uint8_t draw_mode = blitter_colormode_hibyte;
 					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
@@ -688,11 +692,11 @@ int main() {
 					if (rect_x3 == 0xFFFF && zdata == 0xFF)
 						draw_line_solid(rect_x1, rect_y1, rect_x2, rect_y2,
 								blitter_user1, rect_rgb,
-								(blitter_colormode & 0x0F));
+								blitter_colormode);
 					else
 						draw_line(rect_x1, rect_y1, rect_x2, rect_y2,
 								blitter_user1, rect_x3, rect_y3, rect_rgb,
-								rect_rgb2, (blitter_colormode & 0x0F), zdata,
+								rect_rgb2, blitter_colormode, zdata,
 								draw_mode);
 					break;
 				}
@@ -782,7 +786,7 @@ int main() {
 					break;
 				}
 				case REG_ZZ_DEBUG: {
-					debug_lowlevel = zdata;
+					//debug_lowlevel = zdata;
 					break;
 				}
 				case REG_ZZ_DEBUG_TIMER: {
@@ -1004,7 +1008,9 @@ int main() {
 		} else if (readreq) {
 			uint32_t zaddr = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG0);
 
-			//printf("READ: %08lx\n",zaddr);
+			if (debug_lowlevel) {
+				printf("READ: %08lx\n",zaddr);
+			}
 			u32 z3 = (zstate_raw & (1 << 25));
 
 			if (zaddr >= MNT_FB_BASE || zaddr >= MNT_REG_BASE + 0x2000) {
@@ -1153,7 +1159,7 @@ int main() {
 			// there are no read/write requests, we can do other housekeeping
 			idle_task_count++;
 
-			if (idle_task_count > 30000000) {
+			if (idle_task_count > 10000000) {
 				ethernet_task();
 				idle_task_count=0;
 			}
@@ -1168,6 +1174,12 @@ int main() {
 				audio_init_i2s();
 				audio_request_init = 0;
 				audio_debug_timer(1);
+			}
+
+			// check for queued up ethernet frames and interrupt amiga
+			if (interrupt_enabled_ethernet && ethernet_get_backlog()) {
+				amiga_interrupt_set(AMIGA_INTERRUPT_ETH);
+				eth_backlog_nag_counter = 0;
 			}
 		}
 
@@ -1190,17 +1202,6 @@ int main() {
 			}
 			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG0, 0);
 			need_req_ack = 0;
-		}
-
-		// check for queued up ethernet frames
-		int ethernet_backlog = ethernet_get_backlog();
-		if (ethernet_backlog > 0 && eth_backlog_nag_counter > 5000) {
-			amiga_interrupt_set(AMIGA_INTERRUPT_ETH);
-			eth_backlog_nag_counter = 0;
-		}
-
-		if (interrupt_enabled_ethernet && ethernet_backlog > 0) {
-			eth_backlog_nag_counter++;
 		}
 	}
 

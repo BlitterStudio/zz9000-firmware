@@ -31,6 +31,7 @@ struct zz_video_mode preset_video_modes[ZZVMODE_NUM] = {
 	{    720,       480,    720,    752,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      61, 5, 49 }, // 720x480 non-standard VSync (PAL Amiga)
 	{    720,       576,    732,    796,    864,    581,    586,    625,    1,          27,     27000000,       50,             0,      59, 7, 31 }, // 720x576 non-standard VSync (NTSC Amiga)
 	{    720,       480,    720,    752,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      37, 3, 49 }, // 720x480 non-standard VSync (NTSC Amiga)
+    {    640,       400,    656,    752,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      15, 1, 60 },
     // The final entry here is the custom video mode, accessible through registers for debug purposes.
     {    1280,      720,    1390,   1430,   1650,   725,    730,    750,    0,          75,     75000000,       60,             0,      15, 1, 20 },
 };
@@ -351,7 +352,9 @@ void isr_video(void *dummy) {
 
 		// handle screen dragging
 		if (vs.split_request_pos != vs.split_pos) {
-			vs.split_pos = vs.split_request_pos;
+			int scale = 1;
+			if (vs.scalemode & 2) scale = 2;
+			vs.split_pos = vs.split_request_pos * scale;
 			video_formatter_write(vs.split_pos, MNTVF_OP_REPORT_LINE);
 		}
 	}
@@ -453,8 +456,6 @@ void video_system_init(struct zz_video_mode *mode, int hdiv, int vdiv) {
 	hdmi_ctrl_init(mode);
 	init_vdma(mode->hres, mode->vres, hdiv, vdiv, (u32)vs.framebuffer + vs.framebuffer_pan_offset);
 }
-
-int scalemode = 0;
 
 void video_mode_init(int mode, int scalemode, int colormode) {
 	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
@@ -610,16 +611,16 @@ void _clip_hw_sprite(int16_t offset_x, int16_t offset_y)
 void _update_hw_sprite_pos(int16_t x, int16_t y) {
 	vs.sprite_x = x - vs.sprite_x_offset + 1;
 	// horizontally doubled mode
-	if (scalemode & 1)
+	if (vs.scalemode & 1)
 		vs.sprite_x_adj = (vs.sprite_x * 2) + 1;
 	else
 		vs.sprite_x_adj = vs.sprite_x + 2;
 
-	vs.sprite_y = y + vs.split_pos - vs.sprite_y_offset + 1;
+	vs.sprite_y = y - vs.sprite_y_offset + 1;
 
 	// vertically doubled mode
-	if (scalemode & 2)
-		vs.sprite_y_adj = vs.sprite_y *= 2;
+	if (vs.scalemode & 2)
+		vs.sprite_y_adj = vs.sprite_y * 2;
 	else
 		vs.sprite_y_adj = vs.sprite_y;
 
