@@ -350,10 +350,6 @@ int main() {
 				case REG_ZZ_COLORMODE:
 					blitter_colormode = zdata & 0x0f;
 					blitter_colormode_hibyte = zdata >> 8;
-					// hack to use 16 bit gfx ops with 15 bit
-					if (blitter_colormode == MNTVA_COLOR_15BIT) {
-						blitter_colormode = MNTVA_COLOR_16BIT565;
-					}
 					break;
 				case REG_ZZ_CONFIG:
 					// enable/disable INT6, currently used to signal incoming ethernet packets
@@ -492,7 +488,7 @@ int main() {
 				}
 
 				// DMA RTG rendering
-				case REG_ZZ_BITTER_DMA_OP: {
+				case REG_ZZ_BLITTER_DMA_OP: {
 					handle_blitter_dma_op(video_state, zdata);
 					break;
 				}
@@ -512,12 +508,13 @@ int main() {
 					break;
 
 				case REG_ZZ_COPYRECT: {
+					mask = blitter_colormode_hibyte;
 					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
 					switch (zdata) {
 					case 1: // Regular BlitRect
-						if (mask == 0xFF || (mask != 0xFF && (blitter_colormode)) != MNTVA_COLOR_8BIT)
+						if (mask == 0xFF || (mask != 0xFF && (blitter_colormode != MNTVA_COLOR_8BIT)))
 							copy_rect_nomask(rect_x1, rect_y1, rect_x2, rect_y2, rect_x3,
 											rect_y3, blitter_colormode,
 											(uint32_t*) ((u32)video_state->framebuffer

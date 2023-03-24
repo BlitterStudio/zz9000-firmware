@@ -32,6 +32,7 @@ struct zz_video_mode preset_video_modes[ZZVMODE_NUM] = {
 	{    720,       576,    732,    796,    864,    581,    586,    625,    1,          27,     27000000,       50,             0,      59, 7, 31 }, // 720x576 non-standard VSync (NTSC Amiga)
 	{    720,       480,    720,    752,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      37, 3, 49 }, // 720x480 non-standard VSync (NTSC Amiga)
     {    640,       400,    656,    752,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      15, 1, 60 },
+    {    1920,      800,    2024,   2224,   2528,   801,    804,    828,    0,          125,    125000000,      60,             0,      15, 1, 12 },
     // The final entry here is the custom video mode, accessible through registers for debug purposes.
     {    1280,      720,    1390,   1430,   1650,   725,    730,    750,    0,          75,     75000000,       60,             0,      15, 1, 20 },
 };
