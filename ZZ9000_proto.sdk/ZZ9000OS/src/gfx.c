@@ -62,6 +62,7 @@ void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint3
 				break;
 			case MNTVA_COLOR_32BIT:
 			case MNTVA_COLOR_16BIT565:
+			case MNTVA_COLOR_15BIT:
 				while(x < rect_x2) {
 					// The mask isn't used at all for 16/32-bit
 					SET_FG_PIXEL;
@@ -89,6 +90,7 @@ void fill_rect_solid(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h,
 				memset((uint8_t *)p + rect_x1, (uint8_t)(rect_rgb >> 24), w);
 				break;
 			case MNTVA_COLOR_16BIT565:
+			case MNTVA_COLOR_15BIT:
 				x = rect_x1;
 				p16 = (uint16_t *)p;
 				while(x < rect_x2) {
@@ -161,6 +163,7 @@ void copy_rect_nomask(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h
 						memmove((uint8_t *)dp + rect_x1, (uint8_t *)sp + rect_sx, w);
 					break;
 				case MNTVA_COLOR_16BIT565:
+				case MNTVA_COLOR_15BIT:
 					if (!x_reverse)
 						memcpy((uint16_t *)dp + rect_x1, (uint16_t *)sp + rect_sx, w * 2);
 					else
@@ -186,7 +189,7 @@ void copy_rect_nomask(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h
 						HANDLE_MINTERM_PIXEL_8(u8_fg, ((uint8_t *)dp)[rect_x1 + x]);
 					}
 					else {
-						if (color_format == MNTVA_COLOR_16BIT565) {
+						if (color_format == MNTVA_COLOR_16BIT565 || color_format == MNTVA_COLOR_15BIT) {
 							fg_color = ((uint16_t *)sp)[rect_sx + x];
 							uint16_t* dpx1 = (uint16_t*)dp + rect_x1;
 							HANDLE_MINTERM_PIXEL_16_32(fg_color, dpx1);
@@ -206,7 +209,7 @@ void copy_rect_nomask(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h
 						HANDLE_MINTERM_PIXEL_8(u8_fg, ((uint8_t *)dp)[rect_x1 + x]);
 					}
 					else {
-						if (color_format == MNTVA_COLOR_16BIT565) {
+						if (color_format == MNTVA_COLOR_16BIT565 || color_format == MNTVA_COLOR_15BIT) {
 							fg_color = ((uint16_t *)sp)[rect_sx + x];
 							uint16_t* dpx1 = (uint16_t*)dp + rect_x1;
 							HANDLE_MINTERM_PIXEL_16_32(fg_color, dpx1);
@@ -265,7 +268,7 @@ void copy_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint1
 	if (draw_mode == JAM1) { \
 		if(pattern & cur_bit) { \
 			if (!inversion) { \
-				if (mask == 0xFF || color_format == MNTVA_COLOR_16BIT565 || color_format == MNTVA_COLOR_32BIT) { SET_FG_PIXEL; } \
+				if (mask == 0xFF || color_format == MNTVA_COLOR_16BIT565 || color_format == MNTVA_COLOR_15BIT || color_format == MNTVA_COLOR_32BIT) { SET_FG_PIXEL; } \
 				else { SET_FG_PIXEL8_MASK(0) } \
 			} \
 			else { INVERT_PIXEL; } \
@@ -274,14 +277,14 @@ void copy_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint1
 	else { \
 		if(pattern & cur_bit) { \
 			if (!inversion) { \
-				if (mask == 0xFF || color_format == MNTVA_COLOR_16BIT565 || color_format == MNTVA_COLOR_32BIT) { SET_FG_PIXEL; } \
+				if (mask == 0xFF || color_format == MNTVA_COLOR_16BIT565 || color_format == MNTVA_COLOR_15BIT || color_format == MNTVA_COLOR_32BIT) { SET_FG_PIXEL; } \
 				else { SET_FG_PIXEL8_MASK(0); } \
 			} \
 			else { INVERT_PIXEL; } /* JAM2 and complement is kind of useless, as it ends up being the same visual result as JAM1 and a pattern of 0xFFFF */ \
 		} \
 		else { \
 			if (!inversion) { \
-				if (mask == 0xFF || color_format == MNTVA_COLOR_16BIT565 || color_format == MNTVA_COLOR_32BIT) { SET_BG_PIXEL; } \
+				if (mask == 0xFF || color_format == MNTVA_COLOR_16BIT565 || color_format == MNTVA_COLOR_15BIT || color_format == MNTVA_COLOR_32BIT) { SET_BG_PIXEL; } \
 				else { SET_BG_PIXEL8_MASK(0); } \
 			} \
 			else { INVERT_PIXEL; } \
@@ -607,6 +610,7 @@ void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 
 			switch (color_format) {
 				case MNTVA_COLOR_16BIT565:
+				case MNTVA_COLOR_15BIT:
 					((uint16_t *)dp)[x] = bmp_pal[d];
 					break;
 				case MNTVA_COLOR_32BIT:
@@ -657,6 +661,7 @@ void orig_p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, in
 			if (mask == 0xFF && (draw_mode == 0x0C || draw_mode == 0x03)) {
 				switch (color_format) {
 					case MNTVA_COLOR_16BIT565:
+					case MNTVA_COLOR_15BIT:
 						((uint16_t *)dp)[x] = fg_color;
 						break;
 					case MNTVA_COLOR_32BIT:
@@ -811,6 +816,7 @@ engage_cheat_codes:;
 					memcpy(&((uint8_t *)dp)[rect_x1], &((uint8_t *)sp)[rect_x1], w);
 					break;
 				case MNTVA_COLOR_16BIT565:
+				case MNTVA_COLOR_15BIT:
 					memcpy(&((uint16_t *)dp)[rect_x1], &((uint16_t *)sp)[rect_x1], w * 2);
 					break;
 				case MNTVA_COLOR_32BIT:
@@ -1005,6 +1011,7 @@ void acc_clear_buffer(uint32_t addr, uint16_t w, uint16_t h, uint16_t pitch_, ui
 			memset(dp, u8_fg, h * pitch);
 			break;
 		case MNTVA_COLOR_16BIT565:
+		case MNTVA_COLOR_15BIT:
 		case MNTVA_COLOR_32BIT:
 			for (int y = 0; y < h; y++) {
 				for (int x = 0; x < w; y++) {
@@ -1101,6 +1108,7 @@ void acc_blit_rect_16to8(uint32_t src, uint32_t dest, uint16_t x, uint16_t y, ui
 				case MNTVA_COLOR_8BIT: \
 					dp[x + x2 + (y * pitch)] = u8_fg; break; \
 				case MNTVA_COLOR_16BIT565: \
+				case MNTVA_COLOR_15BIT: \
 					((uint16_t *)dp)[x + x2 + (y * pitch)] = fg_color; break; \
 				case MNTVA_COLOR_32BIT: \
 					((uint32_t *)dp)[x + x2 + (y * pitch)] = fg_color; break; \
@@ -1177,6 +1185,7 @@ void acc_fill_rect(uint32_t dest, uint16_t pitch, int16_t x, int16_t y, int16_t 
 					j = w;
 					break;
 				case MNTVA_COLOR_16BIT565:
+				case MNTVA_COLOR_15BIT:
 					((uint16_t *)dp)[x] = fg_color;
 					break;
 				case MNTVA_COLOR_32BIT:
@@ -1240,6 +1249,7 @@ void acc_draw_circle(uint32_t dest, uint16_t pitch, int16_t x, int16_t y, int16_
 				BLOTCIRCLE(dp, u8_fg);
 				break;
 			case MNTVA_COLOR_16BIT565:
+			case MNTVA_COLOR_15BIT:
 				BLOTCIRCLE(((uint16_t *)dp), fg_color);
 				break;
 			case MNTVA_COLOR_32BIT:
@@ -1273,6 +1283,7 @@ void acc_fill_circle(uint32_t dest, uint16_t pitch, int16_t x0, int16_t y0, int1
 						dp[rx + (y * pitch)] = u8_fg;
 					break;
 				case MNTVA_COLOR_16BIT565:
+				case MNTVA_COLOR_15BIT:
 					CHKBLOT(rx, y)
 						((uint16_t *)dp)[rx + (y * pitch)] = fg_color;
 					break;

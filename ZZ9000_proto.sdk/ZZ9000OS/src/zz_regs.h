@@ -69,7 +69,7 @@ enum zz_reg_offsets {
   REG_ZZ_CVMODE_VAL     = 0x54,
   REG_ZZ_CVMODE_SEL     = 0x56,
   REG_ZZ_CVMODE         = 0x58,
-  REG_ZZ_BITTER_DMA_OP  = 0x5A,
+  REG_ZZ_BLITTER_DMA_OP = 0x5A,
   REG_ZZ_ACC_OP         = 0x5C,
   REG_ZZ_SET_SPLIT_POS  = 0x5E,
 
