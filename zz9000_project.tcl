@@ -149,7 +149,7 @@ if {[string equal [get_filesets -quiet sources_1] ""]} {
 
 # Set IP repository paths
 set obj [get_filesets sources_1]
-set_property "ip_repo_paths" "[file normalize "$origin_dir/../ip_repo/MNTZorro_1.0"]" $obj
+set_property "ip_repo_paths" "[file normalize "$origin_dir/ip_repo/MNTZorro_1.0"]" $obj
 
 # Rebuild user ip_repo's index before adding any source files
 update_ip_catalog -rebuild
@@ -169,7 +169,7 @@ set imported_files [import_files -fileset sources_1 $files]
 # None
 
 # Set 'sources_1' fileset file properties for local files
-set file "ZZ9000_proto/mntzorro.v"
+set file "mntzorro.v"
 set file_obj [get_files -of_objects [get_filesets sources_1] [list "*$file"]]
 set_property -name "path_mode" -value "RelativeOnly" -objects $file_obj
 
