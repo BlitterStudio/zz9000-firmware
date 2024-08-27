@@ -103,7 +103,7 @@ if { $::argc > 0 } {
 set orig_proj_dir "[file normalize "$origin_dir/"]"
 
 # Create project
-create_project ${_xil_proj_name_} ./${_xil_proj_name_} -part xc7z020clg400-1
+create_project -force ${_xil_proj_name_} ./${_xil_proj_name_} -part xc7z020clg400-1
 
 # Set the directory path for the new project
 set proj_dir [get_property directory [current_project]]
@@ -115,7 +115,7 @@ set_property -name "dsa.accelerator_binary_content" -value "bitstream" -objects 
 set_property -name "dsa.accelerator_binary_format" -value "xclbin2" -objects $obj
 set_property -name "dsa.description" -value "Vivado generated DSA" -objects $obj
 set_property -name "dsa.dr_bd_base_address" -value "0" -objects $obj
-set_property -name "dsa.emu_dir" -value "emu" -objects $obj
+#set_property -name "dsa.emu_dir" -value "emu" -objects $obj
 set_property -name "dsa.flash_interface_type" -value "bpix16" -objects $obj
 set_property -name "dsa.flash_offset_address" -value "0" -objects $obj
 set_property -name "dsa.flash_size" -value "1024" -objects $obj
