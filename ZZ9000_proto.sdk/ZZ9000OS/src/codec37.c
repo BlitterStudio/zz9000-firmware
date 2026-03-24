@@ -390,11 +390,11 @@ void Codec37Decoder_proc4WithoutFDFE(int idx, byte *dst, const byte *src, int32 
 	} while (--bh);
 }
 
-inline uint16 READ_UINT16(const void *ptr) {
+static inline uint16 READ_UINT16(const void *ptr) {
 	return *(const uint16 *)(ptr);
 }
 
-inline uint32 READ_UINT32(const void *ptr) {
+static inline uint32 READ_UINT32(const void *ptr) {
 	return *(const uint32 *)(ptr);
 }
 
