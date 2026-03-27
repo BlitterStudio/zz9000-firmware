@@ -86,22 +86,22 @@ int32 clip_int32(int32 v, int32 amin, int32 amax) {
 	return v;
 }
 
-inline uint16 READ_BE_UINT16(const void *ptr) {
+static inline uint16 READ_BE_UINT16(const void *ptr) {
 	const uint8 *b = (const uint8 *)ptr;
 	return (b[0] << 8) | b[1];
 }
 
-inline uint32 READ_BE_UINT32(const void *ptr) {
+static inline uint32 READ_BE_UINT32(const void *ptr) {
 	const uint8 *b = (const uint8 *)ptr;
 	return (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | (b[3]);
 }
 
-inline void WRITE_BE_UINT16(void *ptr, uint16 value) {
+static inline void WRITE_BE_UINT16(void *ptr, uint16 value) {
 	uint8 *b = (uint8 *)ptr;
 	b[0] = (uint8)(value >> 8);
 	b[1] = (uint8)(value >> 0);
 }
-inline void WRITE_BE_UINT32(void *ptr, uint32 value) {
+static inline void WRITE_BE_UINT32(void *ptr, uint32 value) {
 	uint8 *b = (uint8 *)ptr;
 	b[0] = (uint8)(value >> 24);
 	b[1] = (uint8)(value >> 16);

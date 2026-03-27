@@ -91,16 +91,16 @@ int Codec47Decoder_GetCur()
 		(dst)[1] = val;	\
 	} while (0)
 
-inline int32 ABS(int32 x)
+static inline int32 ABS(int32 x)
 {
     return (x >= 0) ? x : -x;
 }
 
-inline uint16 READ_UINT16(const void *ptr) {
+static inline uint16 READ_UINT16(const void *ptr) {
 	return *(const uint16 *)(ptr);
 }
 
-inline uint32 READ_UINT32(const void *ptr) {
+static inline uint32 READ_UINT32(const void *ptr) {
 	return *(const uint32 *)(ptr);
 }
 
@@ -541,7 +541,7 @@ void c47_decode2(int idx, byte *dst, const byte *src, int width, int height, con
 	} while (--bh);
 }
 
-inline void SWAP(uint8_t *a, uint8_t *b) {
+static inline void SWAP(uint8_t *a, uint8_t *b) {
     uint8_t *tmp = b;
     b = a;
     a = tmp;
