@@ -6,6 +6,7 @@
 #include "xclk_wiz.h"
 #include "hdmi.h"
 #include <sleep.h>
+#include "xil_cache_l.h"
 
 #define VDMA_DEVICE_ID	XPAR_AXIVDMA_0_DEVICE_ID
 

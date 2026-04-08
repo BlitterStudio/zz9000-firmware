@@ -494,7 +494,7 @@ void ethernet_update_mac_address() {
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
 
 	if (ethernet_task_state != ETH_TASK_READY) {
-		return 1;
+		return;
 	}
 
 	printf("Ethernet: New MAC address %x %x %x %x %x %x\n",
