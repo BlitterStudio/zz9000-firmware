@@ -117,6 +117,7 @@ static uint32_t audio_scale = 48000/50;
 static uint32_t audio_offset = 0;
 static int adau_enabled = 0;
 int interrupt_enabled_audio = 0;
+int interrupt_enabled_vblank = 0;
 
 // debug test state
 static uint32_t zz_debug_test_counter = 0;
@@ -148,6 +149,7 @@ void handle_amiga_reset() {
 	eth_backlog_nag_counter = 0;
 	interrupt_enabled_ethernet = 0;
 	interrupt_enabled_audio = 0;
+	interrupt_enabled_vblank = 0;
 
 	// FIXME document
 	cur_mem_offset = 0x3500000;
@@ -351,24 +353,34 @@ int main() {
 					blitter_colormode = zdata & 0x0f;
 					blitter_colormode_hibyte = zdata >> 8;
 					break;
-				case REG_ZZ_CONFIG:
-					// enable/disable INT6, currently used to signal incoming ethernet packets
-					if (zdata & 8) {
-						// clear/ack
-						if (zdata & 16) {
-							amiga_interrupt_clear(AMIGA_INTERRUPT_ETH);
-						}
-						if (zdata & 32) {
-							amiga_interrupt_clear(AMIGA_INTERRUPT_AUDIO);
+			case REG_ZZ_CONFIG:
+				// enable/disable INT6 for ethernet, audio, and vblank
+				if (zdata & 8) {
+					// clear/ack
+					if (zdata & 16) {
+						amiga_interrupt_clear(AMIGA_INTERRUPT_ETH);
+					}
+					if (zdata & 32) {
+						amiga_interrupt_clear(AMIGA_INTERRUPT_AUDIO);
+					}
+					if (zdata & 64) {
+						amiga_interrupt_clear(AMIGA_INTERRUPT_VBLANK);
+					}
+				} else {
+					if (zdata & 128) {
+						// bit 7 = vblank-only mode, only modify vblank enable
+						interrupt_enabled_vblank = (zdata >> 1) & 1;
+						if (!interrupt_enabled_vblank) {
+							amiga_interrupt_clear(AMIGA_INTERRUPT_VBLANK);
 						}
 					} else {
 						//printf("[enable] eth: %d\n", (int)zdata);
 						interrupt_enabled_ethernet = zdata & 1;
-
 						if (!interrupt_enabled_ethernet) {
 							amiga_interrupt_clear(AMIGA_INTERRUPT_ETH);
 						}
 					}
+				}
 					break;
 				case REG_ZZ_MODE: {
 					int mode = zdata & 0xff;

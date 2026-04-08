@@ -244,6 +244,26 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             vs->split_request_pos = data->y[0];
             break;
 
+        case OP_SET_PALETTE: {
+            SWAP16(data->user[0]);
+            SWAP16(data->user[1]);
+            uint16_t start = data->user[0];
+            uint16_t count = data->user[1];
+            uint16_t op = data->u8_user[0] ? 19 : 3;
+
+            if (count > 256) count = 256;
+
+            for (uint16_t i = 0; i < count; i++) {
+                uint32_t idx = (start + i) & 0xFF;
+                uint32_t r = data->clut1[i * 3];
+                uint32_t g = data->clut1[i * 3 + 1];
+                uint32_t b = data->clut1[i * 3 + 2];
+                uint32_t xrgb = (idx << 24) | (r << 16) | (g << 8) | b;
+                video_formatter_write(xrgb, op);
+            }
+            break;
+        }
+
         default:
             break;
     }
