@@ -131,9 +131,40 @@ void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uin
 
 	for (uint16_t cur_y = rect_y1; cur_y < rect_y2; cur_y++) {
 		x = rect_x1;
-		while (x < rect_x2) {
-			INVERT_PIXEL;
-			x++;
+		switch (color_format) {
+		case MNTVA_COLOR_8BIT:
+			while (x < rect_x2) {
+				((uint8_t *)dp)[x] ^= mask;
+				x++;
+			}
+			break;
+		case MNTVA_COLOR_16BIT565:
+		case MNTVA_COLOR_15BIT:
+			while (x + 4 <= rect_x2) {
+				((uint16_t *)dp)[x] ^= 0xFFFF;
+				((uint16_t *)dp)[x+1] ^= 0xFFFF;
+				((uint16_t *)dp)[x+2] ^= 0xFFFF;
+				((uint16_t *)dp)[x+3] ^= 0xFFFF;
+				x += 4;
+			}
+			while (x < rect_x2) {
+				((uint16_t *)dp)[x] ^= 0xFFFF;
+				x++;
+			}
+			break;
+		case MNTVA_COLOR_32BIT:
+			while (x + 4 <= rect_x2) {
+				dp[x] ^= 0xFFFFFFFF;
+				dp[x+1] ^= 0xFFFFFFFF;
+				dp[x+2] ^= 0xFFFFFFFF;
+				dp[x+3] ^= 0xFFFFFFFF;
+				x += 4;
+			}
+			while (x < rect_x2) {
+				dp[x] ^= 0xFFFFFFFF;
+				x++;
+			}
+			break;
 		}
 		dp += fb_pitch;
 	}
@@ -414,33 +445,68 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 	ix = dy_abs >> 1;
 	iy = dx_abs >> 1;
 
-	SET_FG_PIXEL;
-
-	if (dx_abs >= dy_abs) {
-		if (!len) len = dx_abs;
-		for (uint16_t i = 0; i < len; i++) {
-			iy += dy_abs;
-			if (iy >= dx_abs) {
-				iy -= dx_abs;
-				dp += line_step;
-			}
-			x += (x_reverse) ? -1 : 1;
-
-			SET_FG_PIXEL;
-		}
-	}
-	else {
-		if (!len) len = dy_abs;
-		for (uint16_t i = 0; i < len; i++) {
-			ix += dx_abs;
-			if (ix >= dy_abs) {
-				ix -= dy_abs;
+	switch (color_format) {
+	case MNTVA_COLOR_8BIT:
+		((uint8_t *)dp)[x] = u8_fg;
+		if (dx_abs >= dy_abs) {
+			if (!len) len = dx_abs;
+			for (uint16_t i = 0; i < len; i++) {
+				iy += dy_abs;
+				if (iy >= dx_abs) { iy -= dx_abs; dp += line_step; }
 				x += (x_reverse) ? -1 : 1;
+				((uint8_t *)dp)[x] = u8_fg;
 			}
-			dp += line_step;
-
-			SET_FG_PIXEL;
+		} else {
+			if (!len) len = dy_abs;
+			for (uint16_t i = 0; i < len; i++) {
+				ix += dx_abs;
+				if (ix >= dy_abs) { ix -= dy_abs; x += (x_reverse) ? -1 : 1; }
+				dp += line_step;
+				((uint8_t *)dp)[x] = u8_fg;
+			}
 		}
+		break;
+	case MNTVA_COLOR_16BIT565:
+	case MNTVA_COLOR_15BIT:
+		((uint16_t *)dp)[x] = fg_color;
+		if (dx_abs >= dy_abs) {
+			if (!len) len = dx_abs;
+			for (uint16_t i = 0; i < len; i++) {
+				iy += dy_abs;
+				if (iy >= dx_abs) { iy -= dx_abs; dp += line_step; }
+				x += (x_reverse) ? -1 : 1;
+				((uint16_t *)dp)[x] = fg_color;
+			}
+		} else {
+			if (!len) len = dy_abs;
+			for (uint16_t i = 0; i < len; i++) {
+				ix += dx_abs;
+				if (ix >= dy_abs) { ix -= dy_abs; x += (x_reverse) ? -1 : 1; }
+				dp += line_step;
+				((uint16_t *)dp)[x] = fg_color;
+			}
+		}
+		break;
+	case MNTVA_COLOR_32BIT:
+		dp[x] = fg_color;
+		if (dx_abs >= dy_abs) {
+			if (!len) len = dx_abs;
+			for (uint16_t i = 0; i < len; i++) {
+				iy += dy_abs;
+				if (iy >= dx_abs) { iy -= dx_abs; dp += line_step; }
+				x += (x_reverse) ? -1 : 1;
+				dp[x] = fg_color;
+			}
+		} else {
+			if (!len) len = dy_abs;
+			for (uint16_t i = 0; i < len; i++) {
+				ix += dx_abs;
+				if (ix >= dy_abs) { ix -= dy_abs; x += (x_reverse) ? -1 : 1; }
+				dp += line_step;
+				dp[x] = fg_color;
+			}
+		}
+		break;
 	}
 }
 
