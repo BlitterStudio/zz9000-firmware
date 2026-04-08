@@ -175,7 +175,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             vs->sprite_x_base = (int16_t)data->x[0];
             vs->sprite_y_base = (int16_t)data->y[0];
 
-            _update_hw_sprite_pos((int16_t)data->x[0], (int16_t)data->y[0]);
+            update_hw_sprite_pos();
             break;
 
         case OP_SPRITE_CLUT_BITMAP:
@@ -211,7 +211,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
                 update_hw_sprite_clut(bmp_data, data->clut1,
                 		vs->sprite_width, vs->sprite_height, data->u8offset);
             }
-            _update_hw_sprite_pos(vs->sprite_x_base, vs->sprite_y_base);
+            update_hw_sprite_pos();
             break;
         }
         case OP_SPRITE_COLOR: {
