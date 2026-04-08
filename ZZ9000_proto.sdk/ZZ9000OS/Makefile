@@ -6,7 +6,7 @@ CC = arm-none-eabi-gcc
 SIZE = arm-none-eabi-size
 
 # CPU/FPU flags matching original Xilinx SDK config
-CPU_FLAGS = -mcpu=cortex-a9 -mfpu=vfpv3 -mfloat-abi=hard
+CPU_FLAGS = -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard
 
 # Paths
 SRC_DIR = src

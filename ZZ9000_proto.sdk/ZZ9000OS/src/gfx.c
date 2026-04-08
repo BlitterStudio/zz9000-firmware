@@ -19,6 +19,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifdef __ARM_NEON__
+#include <arm_neon.h>
+#endif
 #include "gfx.h"
 #include "zz_video_modes.h"
 
@@ -26,18 +29,34 @@ uint32_t* fb=0;
 uint32_t fb_pitch=0;
 
 static inline void memset16(uint16_t *dst, uint16_t val, uint32_t count) {
+#ifdef __ARM_NEON__
+	uint16x8_t v = vdupq_n_u16(val);
+	while (count >= 8) {
+		vst1q_u16(dst, v);
+		dst += 8; count -= 8;
+	}
+#else
 	while (count >= 4) {
 		dst[0] = val; dst[1] = val; dst[2] = val; dst[3] = val;
 		dst += 4; count -= 4;
 	}
+#endif
 	while (count--) *dst++ = val;
 }
 
 static inline void memset32(uint32_t *dst, uint32_t val, uint32_t count) {
+#ifdef __ARM_NEON__
+	uint32x4_t v = vdupq_n_u32(val);
+	while (count >= 4) {
+		vst1q_u32(dst, v);
+		dst += 4; count -= 4;
+	}
+#else
 	while (count >= 4) {
 		dst[0] = val; dst[1] = val; dst[2] = val; dst[3] = val;
 		dst += 4; count -= 4;
 	}
+#endif
 	while (count--) *dst++ = val;
 }
 
@@ -140,6 +159,18 @@ void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uin
 			break;
 		case MNTVA_COLOR_16BIT565:
 		case MNTVA_COLOR_15BIT:
+#ifdef __ARM_NEON__
+			{
+				uint16_t *p16 = (uint16_t *)dp + x;
+				uint16_t remaining = rect_x2 - x;
+				uint16x8_t ones = vdupq_n_u16(0xFFFF);
+				while (remaining >= 8) {
+					vst1q_u16(p16, veorq_u16(vld1q_u16(p16), ones));
+					p16 += 8; remaining -= 8;
+				}
+				x = rect_x2 - remaining;
+			}
+#else
 			while (x + 4 <= rect_x2) {
 				((uint16_t *)dp)[x] ^= 0xFFFF;
 				((uint16_t *)dp)[x+1] ^= 0xFFFF;
@@ -147,12 +178,25 @@ void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uin
 				((uint16_t *)dp)[x+3] ^= 0xFFFF;
 				x += 4;
 			}
+#endif
 			while (x < rect_x2) {
 				((uint16_t *)dp)[x] ^= 0xFFFF;
 				x++;
 			}
 			break;
 		case MNTVA_COLOR_32BIT:
+#ifdef __ARM_NEON__
+			{
+				uint32_t *p32 = dp + x;
+				uint16_t remaining = rect_x2 - x;
+				uint32x4_t ones = vdupq_n_u32(0xFFFFFFFF);
+				while (remaining >= 4) {
+					vst1q_u32(p32, veorq_u32(vld1q_u32(p32), ones));
+					p32 += 4; remaining -= 4;
+				}
+				x = rect_x2 - remaining;
+			}
+#else
 			while (x + 4 <= rect_x2) {
 				dp[x] ^= 0xFFFFFFFF;
 				dp[x+1] ^= 0xFFFFFFFF;
@@ -160,6 +204,7 @@ void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uin
 				dp[x+3] ^= 0xFFFFFFFF;
 				x += 4;
 			}
+#endif
 			while (x < rect_x2) {
 				dp[x] ^= 0xFFFFFFFF;
 				x++;
