@@ -1,12 +1,21 @@
 # ZZ9000OS Standalone Makefile
 # Replaces Xilinx SDK auto-generated build system
-# Requires: ARM GNU Toolchain (brew install --cask gcc-arm-embedded)
+#
+# Requires: ARM GNU Toolchain with newlib (NOT picolibc)
+#
+# macOS:  brew install --cask gcc-arm-embedded
+# Linux:  Download the official toolchain from:
+#         https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads
+#         (The Debian gcc-arm-none-eabi package uses picolibc, which is
+#         incompatible with the Xilinx BSP that depends on newlib internals
+#         like _impure_ptr and stdout.)
+#
+# Tested with: arm-none-eabi-gcc 12.2, 14.2, 15.2 (Arm GNU Toolchain)
 
 CC = arm-none-eabi-gcc
 SIZE = arm-none-eabi-size
 
-# CPU/FPU flags matching original Xilinx SDK config
-CPU_FLAGS = -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard
+CPU_FLAGS = -mcpu=cortex-a9 -marm -mfpu=neon -mfloat-abi=hard
 
 # Paths
 SRC_DIR = src
@@ -18,10 +27,15 @@ BUILD_DIR = build
 # Include paths
 INCLUDES = -I$(SRC_DIR) -I$(BSP_INC)
 
-# Compiler flags
-CFLAGS = $(CPU_FLAGS) $(INCLUDES) -Wall -O2 -c
-CFLAGS += -ffunction-sections -fdata-sections
-CFLAGS += -Wno-incompatible-pointer-types -Wno-return-mismatch -Wno-implicit-function-declaration
+# Common flags (shared by all optimization levels)
+COMMON_FLAGS = $(INCLUDES) -Wall -c
+COMMON_FLAGS += -ffunction-sections -fdata-sections
+COMMON_FLAGS += -fno-unwind-tables -fno-asynchronous-unwind-tables
+COMMON_FLAGS += -fno-strict-aliasing
+COMMON_FLAGS += -Wno-incompatible-pointer-types -Wno-return-mismatch -Wno-implicit-function-declaration
+
+# -O2 flags (default for all files)
+CFLAGS = $(CPU_FLAGS) $(COMMON_FLAGS) -O2
 
 # Linker flags
 LDFLAGS = $(CPU_FLAGS)
@@ -63,7 +77,7 @@ C_SRCS = \
 	$(SRC_DIR)/usb/usb.c \
 	$(SRC_DIR)/newlib_compat.c
 
-# Object files (in build dir, preserving subdirectory structure)
+# Object files
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS))
 
 # Output
@@ -78,6 +92,14 @@ $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 	@echo 'Done.'
 
+# --- Per-file rules ---
+
+# ulpi.c: GCC 15 null-pointer offset UB workaround (-O0 for this file only)
+$(BUILD_DIR)/usb/ulpi.o: $(SRC_DIR)/usb/ulpi.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O0 -o $@ $<
+
+# Default rule for all other files (-O2)
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $<
