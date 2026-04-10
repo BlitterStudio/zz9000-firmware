@@ -1,9 +1,9 @@
 /*
  * MNT ZZ9000 Amiga Graphics and Coprocessor Card Operating System (ZZ9000OS)
  *
- * Copyright (C) 2019, Lukas F. Hartmann <lukas@mntre.com>
- *                     MNT Research GmbH, Berlin
- *                     https://mntre.com
+ * Copyright (C) 2019-2026, Lucie L. Hartmann <lucie@mntre.com>
+ *                          MNT Research GmbH, Berlin
+ *                          https://mntre.com
  *
  * More Info: https://mntre.com/zz9000
  *
@@ -55,7 +55,7 @@ void Xil_AssertNonVoid() {}
 #include "zz_video_modes.h"
 
 #define REVISION_MAJOR 1
-#define REVISION_MINOR 13
+#define REVISION_MINOR 14
 
 #define GPIO_DEVICE_ID	XPAR_XGPIOPS_0_DEVICE_ID
 
