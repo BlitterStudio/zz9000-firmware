@@ -1,9 +1,9 @@
 /*
  * MNT ZZ9000 Amiga Graphics and Coprocessor Card Operating System (ZZ9000OS)
  *
- * Copyright (C) 2020, Lukas F. Hartmann <lukas@mntre.com>
- *                     MNT Research GmbH, Berlin
- *                     https://mntre.com
+ * Copyright (C) 2020-2026, Lucie L. Hartmann <lucie@mntre.com>
+ *                          MNT Research GmbH, Berlin
+ *                          https://mntre.com
  *
  * More Info: https://mntre.com/zz9000
  *

@@ -3,7 +3,7 @@
  * MNT ZZ9000 Amiga Graphics and Coprocessor Card Firmware
  * Video Stream Formatter
  *
- * Copyright (C) 2019-2021, Lukas F. Hartmann <lukas@mntre.com>
+ * Copyright (C) 2019-2026, Lucie L. Hartmann <lucie@mntre.com>
  *                          MNT Research GmbH, Berlin
  *                          https://mntre.com
  *

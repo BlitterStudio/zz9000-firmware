@@ -3,7 +3,7 @@
  * MNT ZZ9000 Amiga Graphics and Coprocessor Card Firmware
  * Zorro 2/3 AXI4-Lite Interface, 24-bit Video Capture (AXI DMA)
  *
- * Copyright (C) 2019-2022, Lukas F. Hartmann <lukas@mntre.com>
+ * Copyright (C) 2019-2026, Lucie L. Hartmann <lucie@mntre.com>
  *                          MNT Research GmbH, Berlin
  *                          https://mntre.com
  *

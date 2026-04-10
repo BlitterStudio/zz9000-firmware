@@ -80,7 +80,7 @@ Schematics are in the manual (PDF): https://mntre.com/media/ZZ9000_info_md/zz900
 
 If not stated otherwise in specific source code files, everything here is:
 
-Copyright (C) 2016-2019, Lukas F. Hartmann <lukas@mntre.com>
+Copyright (C) 2016-2026, Lucie L. Hartmann <lucie@mntre.com>
 MNT Research GmbH, Berlin
 https://mntre.com
 
