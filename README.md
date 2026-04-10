@@ -87,6 +87,12 @@ https://mntre.com
 SPDX-License-Identifier: GPL-3.0-or-later
 https://spdx.org/licenses/GPL-3.0-or-later.html
 
+Scanline bitstream patches original by Xanxi, adapted for firmware 1.13+
+by Dimitris Panokostas (midwan).
+
+RTG performance optimizations (NEON intrinsics, compiler flags, batch
+palette transfer, operation fusion) by Dimitris Panokostas.
+
 # Making the Platform Cable Work
 
 First, `apt install fxload`
