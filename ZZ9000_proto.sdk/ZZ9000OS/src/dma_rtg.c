@@ -194,6 +194,9 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
 
             clear_hw_sprite();
 
+            int double_sprite = (data->x[1] >> 8) & 1;
+            int hires_sprite = (data->y[1] >> 8) & 1;
+
             vs->sprite_x_offset = (int16_t)data->x[0];
             vs->sprite_y_offset = (int16_t)data->y[0];
             vs->sprite_width  = data->x[1];
@@ -204,7 +207,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             vs->sprite_height = data->y[1];
 
             if (zdata == OP_SPRITE_BITMAP) {
-                update_hw_sprite(bmp_data);
+                update_hw_sprite(bmp_data, double_sprite, hires_sprite);
             }
             else {
                 //printf("Making a %dx%d cursor (%i %i)\n", sprite_width, sprite_height, sprite_x_offset, sprite_y_offset);
