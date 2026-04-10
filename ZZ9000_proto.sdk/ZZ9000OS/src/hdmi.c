@@ -106,7 +106,18 @@ void hdmi_set_video_mode(u16 htotal, u16 vtotal, u32 pixelclock_hz, u16 vhz, u8 
 	sii_mode[2 * 9 + 1] = hdmi;
 }
 
+static int hdmi_initialized = 0;
+
 void hdmi_ctrl_init(struct zz_video_mode *mode) {
+	// The SiI9022 DVI encoder is configured once at boot. Subsequent mode
+	// switches only change the pixel clock (via clock wizard) and FPGA
+	// video formatter — the SiI9022 auto-adapts to the input in DVI mode.
+	// Skipping the full I2C reinit avoids a 16ms+ blocking delay and chip
+	// reset inside the ISR that caused NTSC videocap black screens.
+	if (hdmi_initialized) {
+		return;
+	}
+
 	XIicPs_Config *config;
 	config = XIicPs_LookupConfig(IIC_DEVICE_ID);
 	int status = XIicPs_CfgInitialize(&Iic, config, config->BaseAddress);
@@ -130,18 +141,12 @@ void hdmi_ctrl_init(struct zz_video_mode *mode) {
 	//printf("[%d] TPI device id: 0x%x\n", status, buffer[1]);
 	status = hdmi_ctrl_read_byte(0x1c, buffer);
 	//printf("[%d] TPI revision 1: 0x%x\n",status,buffer[1]);
-	//status = hdmi_ctrl_read_byte(0x1d,buffer);
-	//printf("[%d] TPI revision 2: 0x%x\n",status,buffer[1]);
-	//status = hdmi_ctrl_read_byte(0x30,buffer);
-	//printf("[%d] HDCP revision: 0x%x\n",status,buffer[1]);
-	//status = hdmi_ctrl_read_byte(0x3d,buffer);
-	//printf("[%d] hotplug: 0x%x\n", status, buffer[1]);
-
-	//hdmi_set_video_mode(mode->hmax, mode->vmax, mode->phz, mode->vhz, mode->hdmi);
 
 	for (int i = 0; i < sizeof(sii9022_init); i += 2) {
 		status = hdmi_ctrl_write_byte(sii9022_init[i], sii9022_init[i + 1]);
 		usleep(1);
 	}
+
+	hdmi_initialized = 1;
 }
 

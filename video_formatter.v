@@ -35,7 +35,8 @@ module video_formatter(
   input [31:0] control_data,
   input [7:0] control_op,
   input control_interlace,
-  output reg [1:0]control_vblank
+  output reg [1:0]control_vblank,
+  input [7:0] scanline_intensity
 );
 
 localparam OP_COLORMODE=1;
@@ -131,6 +132,8 @@ reg sprite_on; // vga domain
 reg [11:0] vga_report_y; // vga domain
 reg [11:0] vga_report_y_next; // vga domain
 reg vga_selected_palette; // vga domain
+reg [7:0]  vga_scanline_intensity;
+reg [31:0] pixout_sl;
 
 always @(posedge m_axis_vid_aclk)
   begin
@@ -309,6 +312,10 @@ reg [3:0] counter_subpixel = 0;
 
 reg vga_sync_polarity = 0;
 
+wire [15:0] sl_r_full = {8'h00, pixout[23:16]} * {8'h00, (8'd255 - vga_scanline_intensity)};
+wire [15:0] sl_g_full = {8'h00, pixout[15:8]}  * {8'h00, (8'd255 - vga_scanline_intensity)};
+wire [15:0] sl_b_full = {8'h00, pixout[7:0]}   * {8'h00, (8'd255 - vga_scanline_intensity)};
+
 always @(posedge dvi_clk) begin
   vga_h_rez <= screen_width;
   vga_v_rez <= screen_height;
@@ -324,7 +331,7 @@ always @(posedge dvi_clk) begin
   vga_v_sync_start <= screen_v_sync_start;
   vga_v_sync_end <= screen_v_sync_end;
   vga_scale_x <= scale_x;
-  vga_scale_y <= scale_y;
+  vga_scale_y <= control_interlace ? 1'b0 : scale_y;
   vga_colormode <= colormode;
   vga_sync_polarity <= sync_polarity;
   if (counter_y == 0) begin
@@ -336,6 +343,7 @@ always @(posedge dvi_clk) begin
   vga_sprite_dbl <= sprite_dbl;
   vga_report_y_next <= report_y;
   vga_selected_palette <= selected_palette;
+  vga_scanline_intensity <= scanline_intensity;
 
   /*
     pipelines (4 clocks):
@@ -428,7 +436,15 @@ always @(posedge dvi_clk) begin
     sprite_on <= 0;
   end
 
-  dvi_rgb <= (sprite_on && sprite_pix!='hff00ff) ? sprite_pix : pixout;
+  if (vga_scale_y && counter_y[0] && vga_scanline_intensity > 0)
+    pixout_sl <= {8'b0, 
+                  sl_r_full[15:8],
+                  sl_g_full[15:8],
+                  sl_b_full[15:8]};
+  else
+    pixout_sl <= pixout;
+
+  dvi_rgb <= (sprite_on && sprite_pix!='hff00ff) ? sprite_pix : pixout_sl;
 
   if (counter_x >= vga_h_max) begin
     counter_x <= 0;

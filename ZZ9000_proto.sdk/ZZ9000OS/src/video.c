@@ -27,7 +27,7 @@ struct zz_video_mode preset_video_modes[ZZVMODE_NUM] = {
     {    1920,      1080,   2008,   2052,   2200,   1084,   1089,   1125,   0,          150,    150000000,      60,             0,      15, 1, 10 },
     {    720,       576,    732,    796,    864,    581,    586,    625,    1,          27,     27000000,       50,             0,      45, 2, 83 },
     {    1920,      1080,   2448,   2492,   2640,   1084,   1089,   1125,   0,          150,    150000000,      50,             0,      15, 1, 10 },
-    {    720,       480,    720,    752,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      19, 1, 75 },
+    {    720,       480,    736,    768,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      19, 1, 75 },
     {    640,       512,    840,    968,    1056,   601,    605,    628,    0,          40,     40000000,       60,             0,      14, 1, 35 },
 	{	 1600,		1200,	1704,	1880,	2160,	1201,	1204,	1242,	0,			161,	16089999,		60,				0,		21, 1, 13 },
 	{	 2560,		1440,	2680,	2944,	3328,	1441,	1444,	1465,	0,			146,	15846000,		30,				0,		41, 2, 14 },
@@ -54,6 +54,7 @@ int sprite_request_pos_y = 0;
 
 void _update_hw_sprite_pos(int16_t x, int16_t y);
 void _clip_hw_sprite(int16_t offset_x, int16_t offset_y);
+static void video_mode_init_internal(int mode, int scalemode, int colormode, int skip_vdma);
 
 // FIXME integrate with memory map
 static int default_pan_offset_pal = 0x00e00000;
@@ -171,9 +172,9 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 void init_ns_video_mode(uint32_t mode_num) {
 	printf("init_ns_video_mode(%lu)\n", mode_num);
 	if (mode_num == ZZVMODE_720x576) {
-		video_mode_init(ZZVMODE_720x576_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT);
+		video_mode_init_internal(ZZVMODE_720x576_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT, 1);
 	} else {
-		video_mode_init(ZZVMODE_720x480_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT);
+		video_mode_init_internal(ZZVMODE_720x480_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT, 1);
 	}
 }
 
@@ -277,10 +278,7 @@ void isr_video(void *dummy) {
 					if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
 						init_ns_video_mode(ZZVMODE_720x480);
 					} else {
-						video_mode_init(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT);
-
-						// use this if there are problems with 720x480
-						//video_mode_init(ZZVMODE_800x600, 2, MNTVA_COLOR_32BIT);
+						video_mode_init_internal(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT, 1);
 					}
 				} else {
 					// PAL
@@ -294,7 +292,7 @@ void isr_video(void *dummy) {
 					if (vs.videocap_video_mode == ZZVMODE_720x576 && vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
 						init_ns_video_mode(ZZVMODE_720x576);
 					} else {
-						video_mode_init(vs.videocap_video_mode, 2, MNTVA_COLOR_32BIT);
+						video_mode_init_internal(vs.videocap_video_mode, 2, MNTVA_COLOR_32BIT, 1);
 					}
 				}
 				videocap_reset = 1;
@@ -467,7 +465,12 @@ void video_system_init(struct zz_video_mode *mode, int hdiv, int vdiv) {
 	init_vdma(mode->hres, mode->vres, hdiv, vdiv, (u32)vs.framebuffer + vs.framebuffer_pan_offset);
 }
 
-void video_mode_init(int mode, int scalemode, int colormode) {
+void video_system_init_no_vdma(struct zz_video_mode *mode) {
+	pixelclock_init_2(mode);
+	hdmi_ctrl_init(mode);
+}
+
+static void video_mode_init_internal(int mode, int scalemode, int colormode, int skip_vdma) {
 	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
 	// reset interlace tracking
@@ -496,7 +499,11 @@ void video_mode_init(int mode, int scalemode, int colormode) {
 
 	struct zz_video_mode *vmode = &preset_video_modes[mode];
 
-	video_system_init(vmode, hdiv, vdiv);
+	if (skip_vdma) {
+		video_system_init_no_vdma(vmode);
+	} else {
+		video_system_init(vmode, hdiv, vdiv);
+	}
 
 	video_formatter_init(scalemode, colormode,
 			vmode->hres, vmode->vres,
@@ -512,49 +519,95 @@ void video_mode_init(int mode, int scalemode, int colormode) {
 	vs.vmode_hdiv = hdiv;
 }
 
-void update_hw_sprite(uint8_t *data)
+void video_mode_init(int mode, int scalemode, int colormode) {
+	video_mode_init_internal(mode, scalemode, colormode, 0);
+}
+
+void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite)
 {
 	uint8_t cur_bit = 0x80;
 	uint8_t cur_color = 0, out_pos = 0, iter_offset = 0;
-	uint8_t cur_bytes[8];
+	uint8_t cur_bytes[16] = {0};
 	uint32_t *colors = vs.sprite_colors;
 	uint16_t w = vs.sprite_width;
 	uint16_t h = vs.sprite_height;
+	if (h > 48) h = 48;
 	uint8_t line_pitch = (w / 8) * 2;
 
-	for (uint8_t y_line = 0; y_line < h; y_line++) {
-		if (w <= 16) {
-			cur_bytes[0] = data[y_line * line_pitch];
-			cur_bytes[1] = data[(y_line * line_pitch) + 2];
-			cur_bytes[2] = data[(y_line * line_pitch) + 1];
-			cur_bytes[3] = data[(y_line * line_pitch) + 3];
-		}
-		else {
-			cur_bytes[0] = data[y_line * line_pitch];
-			cur_bytes[1] = data[(y_line * line_pitch) + 4];
-			cur_bytes[2] = data[(y_line * line_pitch) + 1];
-			cur_bytes[3] = data[(y_line * line_pitch) + 5];
-			cur_bytes[4] = data[(y_line * line_pitch) + 2];
-			cur_bytes[5] = data[(y_line * line_pitch) + 6];
-			cur_bytes[6] = data[(y_line * line_pitch) + 3];
-			cur_bytes[7] = data[(y_line * line_pitch) + 7];
-		}
-
-		while (out_pos < 8) {
-			for (uint8_t i = 0; i < line_pitch; i += 2) {
-				cur_color = (cur_bytes[i] & cur_bit) ? 1 : 0;
-				if (cur_bytes[i + 1] & cur_bit) cur_color += 2;
-
-				sprite_buf[(y_line * 32) + out_pos + iter_offset] = colors[cur_color] & 0x00ffffff;
-				iter_offset += 8;
+	if (!double_sprite) {
+		for (uint8_t y_line = 0; y_line < h; y_line++) {
+			if (w <= 16) {
+				cur_bytes[0] = data[(y_line * line_pitch) + 0];
+				cur_bytes[1] = data[(y_line * line_pitch) + 2];
+				cur_bytes[2] = data[(y_line * line_pitch) + 1];
+				cur_bytes[3] = data[(y_line * line_pitch) + 3];
+			}
+			else {
+				cur_bytes[0] = data[(y_line * line_pitch) + 0];
+				cur_bytes[1] = data[(y_line * line_pitch) + 4];
+				cur_bytes[2] = data[(y_line * line_pitch) + 1];
+				cur_bytes[3] = data[(y_line * line_pitch) + 5];
+				cur_bytes[4] = data[(y_line * line_pitch) + 2];
+				cur_bytes[5] = data[(y_line * line_pitch) + 6];
+				cur_bytes[6] = data[(y_line * line_pitch) + 3];
+				cur_bytes[7] = data[(y_line * line_pitch) + 7];
 			}
 
-			out_pos++;
-			cur_bit >>= 1;
-			iter_offset = 0;
+			while (out_pos < 8) {
+				for (uint8_t i = 0; i < line_pitch; i += 2) {
+					cur_color = (cur_bytes[i] & cur_bit) ? 1 : 0;
+					if (cur_bytes[i + 1] & cur_bit) cur_color += 2;
+
+					sprite_buf[(y_line * 32) + out_pos + iter_offset] = colors[cur_color] & 0x00ffffff;
+					iter_offset += 8;
+				}
+
+				out_pos++;
+				cur_bit >>= 1;
+				iter_offset = 0;
+			}
+			cur_bit = 0x80;
+			out_pos = 0;
 		}
-		cur_bit = 0x80;
-		out_pos = 0;
+	}
+	else {
+		for (uint8_t y_line = 0; y_line < h / 2; y_line++) {
+			if (!hires_sprite) {
+				cur_bytes[0] = data[(y_line * line_pitch / 2) + 0];
+				cur_bytes[1] = data[(y_line * line_pitch / 2) + 2];
+				cur_bytes[2] = data[(y_line * line_pitch / 2) + 1];
+				cur_bytes[3] = data[(y_line * line_pitch / 2) + 3];
+			}
+			else {
+				cur_bytes[0] = data[(y_line * line_pitch) + 0];
+				cur_bytes[1] = data[(y_line * line_pitch) + 4];
+				cur_bytes[2] = data[(y_line * line_pitch) + 1];
+				cur_bytes[3] = data[(y_line * line_pitch) + 5];
+				cur_bytes[4] = data[(y_line * line_pitch) + 2];
+				cur_bytes[5] = data[(y_line * line_pitch) + 6];
+				cur_bytes[6] = data[(y_line * line_pitch) + 3];
+				cur_bytes[7] = data[(y_line * line_pitch) + 7];
+			}
+
+			while (out_pos < 8) {
+				for (uint8_t i = 0; i < line_pitch / 2; i += 2) {
+					cur_color = (cur_bytes[i] & cur_bit) ? 1 : 0;
+					if (cur_bytes[i + 1] & cur_bit) cur_color += 2;
+
+					sprite_buf[((y_line * 2    ) * 32) + (out_pos * 2    ) + iter_offset * 2] = colors[cur_color] & 0x00ffffff;
+					sprite_buf[((y_line * 2    ) * 32) + (out_pos * 2 + 1) + iter_offset * 2] = colors[cur_color] & 0x00ffffff;
+					sprite_buf[((y_line * 2 + 1) * 32) + (out_pos * 2    ) + iter_offset * 2] = colors[cur_color] & 0x00ffffff;
+					sprite_buf[((y_line * 2 + 1) * 32) + (out_pos * 2 + 1) + iter_offset * 2] = colors[cur_color] & 0x00ffffff;
+					iter_offset += 8;
+				}
+
+				out_pos++;
+				cur_bit >>= 1;
+				iter_offset = 0;
+			}
+			cur_bit = 0x80;
+			out_pos = 0;
+		}
 	}
 
 	sprite_request_update_data = 1;

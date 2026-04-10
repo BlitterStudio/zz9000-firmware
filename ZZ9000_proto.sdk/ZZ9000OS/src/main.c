@@ -423,11 +423,15 @@ int main() {
 
 					video_state->sprite_x_offset = rect_x1;
 					video_state->sprite_y_offset = rect_y1;
+
+					int double_sprite = (rect_x2 >> 8) & 1;
+					int hires_sprite = (rect_y2 >> 8) & 1;
+
 					video_state->sprite_width  = rect_x2;
 					video_state->sprite_height = rect_y2;
 
 					clear_hw_sprite();
-					update_hw_sprite(bmp_data);
+					update_hw_sprite(bmp_data, double_sprite, hires_sprite);
 					update_hw_sprite_pos();
 					break;
 				}
