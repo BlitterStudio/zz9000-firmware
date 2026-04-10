@@ -1,27 +1,39 @@
+# Vivado / Xilinx SDK generated files
 ZZ9000_proto.cache
-wave
-*.log
-*.str
-*.jou
-*.hdf
-ZZ9000_proto.srcs/sources_1/bd
 ZZ9000_proto.runs
 ZZ9000_proto.sim
 ZZ9000_proto.hw
 ZZ9000_proto.tmp
 ZZ9000_proto.ip_user_files
+ZZ9000_proto.srcs/sources_1/bd
+ZZ9000_proto.srcs/sources_1
 .metadata
 .sdk
+webtalk
+
+# Xilinx IDE files
+*.log
+*.str
+*.jou
+*.hdf
 .cproject
 .project
 .sdkproject
 .settings
 _metadata
-webtalk
+SDK.log.*
+
+# Build outputs
+ZZ9000_proto.sdk/ZZ9000OS/build/
+bootgen/
+bootimage_work/BOOT.bin
+
+# OS files
+.DS_Store
+
+# Misc
 attic
 bak
-masscopy*.sh
-SDK.log.*
-ZZ9000_proto.srcs/sources_1
-ZZ9000_proto.sdk/ZZ9000Test/bootimage/BOOT.bin
 fw-archive
+masscopy*.sh
+wave
