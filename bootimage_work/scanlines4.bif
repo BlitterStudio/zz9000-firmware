@@ -1,0 +1,6 @@
+the_ROM_image:
+{
+  [bootloader] /Users/midwan/Downloads/zz9000/scanlines/ZZ9000FSBL.elf
+  /Users/midwan/Downloads/zz9000/scanlines/zz9000_ps_wrapper.bit
+  /Users/midwan/Gitlab/zz9000-firmware/ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+}

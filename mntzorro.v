@@ -199,6 +199,7 @@ module MNTZorro_v0_1_S00_AXI
    output reg [31:0] video_control_data_out,
    output reg [7:0]  video_control_op_out,
    output reg video_control_interlace_out,
+   output reg [7:0] scanline_intensity_out,
    input wire [1:0] video_control_vblank_in,
    
    // ZZ9000AX peripheral reset
@@ -973,6 +974,7 @@ module MNTZorro_v0_1_S00_AXI
   reg        video_control_vblank; // from input
   reg        video_control_hblank; // from input
   reg        video_control_interlace;
+  reg [7:0]  scanline_intensity = 8'h00;
 
   reg zorro_ram_read_flag;
   reg zorro_ram_write_flag ;
@@ -1120,17 +1122,30 @@ module MNTZorro_v0_1_S00_AXI
     // by looking at the pulse width of it
     // direct sampling from denise
     if(videocap_hs[6:1]=='b000111 && videocap_hs_pulse_width>=128) begin
-      if (videocap_ymax[0]) begin
+      // 31kHz progressive: full frame >= 400 lines
+      // 15kHz interlaced: single field < 400 lines
+      if (videocap_ymax>='h190)
+        videocap_interlace <= 0;
+      else if (videocap_ymax[0]) begin
         videocap_interlace <= 1;
       end else begin
         videocap_interlace <= 0;
       end
       videocap_lace_field <= vc_next_lace_field;
 
-      if (videocap_ymax>='h130)
-        videocap_ntsc <= 0;
-      else
-        videocap_ntsc <= 1;
+      if (videocap_ymax>='h190) begin
+        // progressive: PAL ~625, NTSC ~525
+        if (videocap_ymax>='h23a)
+          videocap_ntsc <= 0;
+        else
+          videocap_ntsc <= 1;
+      end else begin
+        // interlaced field: PAL ~304, NTSC ~262
+        if (videocap_ymax>='h130)
+          videocap_ntsc <= 0;
+        else
+          videocap_ntsc <= 1;
+      end
 
       if (videocap_interlace) begin
         videocap_y2 <= 0;
@@ -1142,17 +1157,30 @@ module MNTZorro_v0_1_S00_AXI
 `else
     // with videoslot machines, we have a real VSYNC to work with
     if (videocap_vs[6:1]=='b111000) begin
-      if (videocap_ymax[0]!=videocap_ymax2[0])
+      // 31kHz progressive: full frame >= 400 lines
+      // 15kHz interlaced: single field < 400 lines
+      if (videocap_ymax>='h190)
+        videocap_interlace <= 0;
+      else if (videocap_ymax[0]!=videocap_ymax2[0])
         videocap_interlace <= 1;
       else
         videocap_interlace <= 0;
 
       videocap_lace_field <= videocap_ymax[0];
 
-      if (videocap_ymax>='h138)
-        videocap_ntsc <= 0;
-      else
-        videocap_ntsc <= 1;
+      if (videocap_ymax>='h190) begin
+        // progressive: PAL ~625, NTSC ~525
+        if (videocap_ymax>='h23a)
+          videocap_ntsc <= 0;
+        else
+          videocap_ntsc <= 1;
+      end else begin
+        // interlaced field: PAL ~312, NTSC ~262
+        if (videocap_ymax>='h138)
+          videocap_ntsc <= 0;
+        else
+          videocap_ntsc <= 1;
+      end
 
       if (videocap_interlace) begin
         videocap_y2 <= 0;
@@ -2260,7 +2288,7 @@ module MNTZorro_v0_1_S00_AXI
             'h04: video_control_op_zorro[7:0]     <= regdata_in[7:0]; // FIXME
             'h06: videocap_mode_in <= regdata_in[0];
             //'h08: E7M_RESET <= regdata_in[0];
-            //'h0a: E7M_PWRDWN <= regdata_in[0];
+            'h0a: scanline_intensity <= regdata_in[7:0];
             'h10: videocap_address[31:16] <= regdata_in[15:0];
             'h12: videocap_address[15:0] <= regdata_in[15:0];
             'h14: videocap_pitch <= regdata_in[15:0];
@@ -2329,6 +2357,7 @@ module MNTZorro_v0_1_S00_AXI
     video_control_vblank   <= video_control_vblank_in[0];
     video_control_hblank   <= video_control_vblank_in[1];
     video_control_interlace_out <= video_control_interlace;
+    scanline_intensity_out <= scanline_intensity;
 
     // snoop the screen width for correct capture pitch
     if (video_control_op == 2) begin
