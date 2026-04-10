@@ -54,6 +54,7 @@ int sprite_request_pos_y = 0;
 
 void _update_hw_sprite_pos(int16_t x, int16_t y);
 void _clip_hw_sprite(int16_t offset_x, int16_t offset_y);
+static void video_mode_init_internal(int mode, int scalemode, int colormode, int skip_vdma);
 
 // FIXME integrate with memory map
 static int default_pan_offset_pal = 0x00e00000;
@@ -171,9 +172,9 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 void init_ns_video_mode(uint32_t mode_num) {
 	printf("init_ns_video_mode(%lu)\n", mode_num);
 	if (mode_num == ZZVMODE_720x576) {
-		video_mode_init(ZZVMODE_720x576_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT);
+		video_mode_init_internal(ZZVMODE_720x576_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT, 1);
 	} else {
-		video_mode_init(ZZVMODE_720x480_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT);
+		video_mode_init_internal(ZZVMODE_720x480_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT, 1);
 	}
 }
 
@@ -277,10 +278,7 @@ void isr_video(void *dummy) {
 					if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
 						init_ns_video_mode(ZZVMODE_720x480);
 					} else {
-						video_mode_init(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT);
-
-						// use this if there are problems with 720x480
-						//video_mode_init(ZZVMODE_800x600, 2, MNTVA_COLOR_32BIT);
+						video_mode_init_internal(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT, 1);
 					}
 				} else {
 					// PAL
@@ -294,7 +292,7 @@ void isr_video(void *dummy) {
 					if (vs.videocap_video_mode == ZZVMODE_720x576 && vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
 						init_ns_video_mode(ZZVMODE_720x576);
 					} else {
-						video_mode_init(vs.videocap_video_mode, 2, MNTVA_COLOR_32BIT);
+						video_mode_init_internal(vs.videocap_video_mode, 2, MNTVA_COLOR_32BIT, 1);
 					}
 				}
 				videocap_reset = 1;
@@ -467,7 +465,12 @@ void video_system_init(struct zz_video_mode *mode, int hdiv, int vdiv) {
 	init_vdma(mode->hres, mode->vres, hdiv, vdiv, (u32)vs.framebuffer + vs.framebuffer_pan_offset);
 }
 
-void video_mode_init(int mode, int scalemode, int colormode) {
+void video_system_init_no_vdma(struct zz_video_mode *mode) {
+	pixelclock_init_2(mode);
+	hdmi_ctrl_init(mode);
+}
+
+static void video_mode_init_internal(int mode, int scalemode, int colormode, int skip_vdma) {
 	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
 	// reset interlace tracking
@@ -496,7 +499,11 @@ void video_mode_init(int mode, int scalemode, int colormode) {
 
 	struct zz_video_mode *vmode = &preset_video_modes[mode];
 
-	video_system_init(vmode, hdiv, vdiv);
+	if (skip_vdma) {
+		video_system_init_no_vdma(vmode);
+	} else {
+		video_system_init(vmode, hdiv, vdiv);
+	}
 
 	video_formatter_init(scalemode, colormode,
 			vmode->hres, vmode->vres,
@@ -510,6 +517,10 @@ void video_mode_init(int mode, int scalemode, int colormode) {
 	vs.vmode_vsize = vmode->vres;
 	vs.vmode_vdiv = vdiv;
 	vs.vmode_hdiv = hdiv;
+}
+
+void video_mode_init(int mode, int scalemode, int colormode) {
+	video_mode_init_internal(mode, scalemode, colormode, 0);
 }
 
 void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite)
