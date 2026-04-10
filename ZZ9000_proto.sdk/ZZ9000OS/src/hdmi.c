@@ -1,4 +1,6 @@
 #include "xiicps.h"
+#include <stdio.h>
+#include <sleep.h>
 
 #define IIC_DEVICE_ID	XPAR_XIICPS_0_DEVICE_ID
 #define HDMI_I2C_ADDR 	0x3b

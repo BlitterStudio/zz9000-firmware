@@ -4,8 +4,9 @@
 #define ZZ_INTERRUPT_H
 
 // IRQ mask bits
-#define AMIGA_INTERRUPT_ETH   1
-#define AMIGA_INTERRUPT_AUDIO 2
+#define AMIGA_INTERRUPT_ETH    1
+#define AMIGA_INTERRUPT_AUDIO  2
+#define AMIGA_INTERRUPT_VBLANK 4
 
 XScuGic* interrupt_get_intc();
 int interrupt_configure();

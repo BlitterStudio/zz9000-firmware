@@ -2,16 +2,20 @@
 #include <stdio.h>
 #include "video.h"
 #include "mntzorro.h"
+#include "interrupt.h"
 #include "xaxivdma.h"
 #include "xclk_wiz.h"
 #include "hdmi.h"
 #include <sleep.h>
+#include "xil_cache_l.h"
 
 #define VDMA_DEVICE_ID	XPAR_AXIVDMA_0_DEVICE_ID
 
 static struct ZZ_VIDEO_STATE vs;
 static XAxiVdma vdma;
 static XClk_Wiz clkwiz;
+
+extern int interrupt_enabled_vblank;
 
 struct zz_video_mode preset_video_modes[ZZVMODE_NUM] = {
     //   HRES       VRES    HSTART  HEND    HMAX    VSTART  VEND    VMAX    POLARITY    MHZ     PIXELCLOCK HZ   VERTICAL HZ     HDMI    MUL/DIV/DIV2
@@ -361,6 +365,11 @@ void isr_video(void *dummy) {
 	}
 
 	vblank_count++;
+
+	// signal vblank interrupt to Amiga for P96 BIF_VBLANKINTERRUPT support
+	if (vblank && interrupt_enabled_vblank) {
+		amiga_interrupt_set(AMIGA_INTERRUPT_VBLANK);
+	}
 }
 
 u32 dump_vdma_status(XAxiVdma *InstancePtr) {

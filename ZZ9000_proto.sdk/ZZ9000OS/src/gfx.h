@@ -15,6 +15,9 @@
 */
 
 #include <stdint.h>
+#ifdef __ARM_NEON__
+#include <arm_neon.h>
+#endif
 #include "video.h"
 
 typedef struct Vec2 {
@@ -235,6 +238,37 @@ enum gfx_minterm_modes {
 			break; \
 	}
 
+#ifdef __ARM_NEON__
+#define SET_FG_OR_BG_PIXELS \
+	switch (color_format) { \
+		case MNTVA_COLOR_8BIT: \
+			if (cur_byte & 0x80) SET_FG_PIXEL8(0) else SET_BG_PIXEL8(0) \
+			if (cur_byte & 0x40) SET_FG_PIXEL8(1) else SET_BG_PIXEL8(1) \
+			if (cur_byte & 0x20) SET_FG_PIXEL8(2) else SET_BG_PIXEL8(2) \
+			if (cur_byte & 0x10) SET_FG_PIXEL8(3) else SET_BG_PIXEL8(3) \
+			if (cur_byte & 0x08) SET_FG_PIXEL8(4) else SET_BG_PIXEL8(4) \
+			if (cur_byte & 0x04) SET_FG_PIXEL8(5) else SET_BG_PIXEL8(5) \
+			if (cur_byte & 0x02) SET_FG_PIXEL8(6) else SET_BG_PIXEL8(6) \
+			if (cur_byte & 0x01) SET_FG_PIXEL8(7) else SET_BG_PIXEL8(7) \
+			break; \
+		case MNTVA_COLOR_16BIT565: { \
+			uint16x8_t _bv = vdupq_n_u16(cur_byte); \
+			uint16x8_t _bits = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01}; \
+			uint16x8_t _mask = vcgtq_u16(vandq_u16(_bv, _bits), vdupq_n_u16(0)); \
+			vst1q_u16(((uint16_t *)dp) + x, vbslq_u16(_mask, vdupq_n_u16(fg_color), vdupq_n_u16(bg_color))); \
+			break; } \
+		case MNTVA_COLOR_32BIT: { \
+			uint32x4_t _fv = vdupq_n_u32(fg_color), _gv = vdupq_n_u32(bg_color); \
+			uint32x4_t _bv_hi = vdupq_n_u32(cur_byte); \
+			uint32x4_t _bits_hi = {0x80, 0x40, 0x20, 0x10}; \
+			uint32x4_t _bits_lo = {0x08, 0x04, 0x02, 0x01}; \
+			uint32x4_t _mhi = vcgtq_u32(vandq_u32(_bv_hi, _bits_hi), vdupq_n_u32(0)); \
+			uint32x4_t _mlo = vcgtq_u32(vandq_u32(_bv_hi, _bits_lo), vdupq_n_u32(0)); \
+			vst1q_u32(dp + x, vbslq_u32(_mhi, _fv, _gv)); \
+			vst1q_u32(dp + x + 4, vbslq_u32(_mlo, _fv, _gv)); \
+			break; } \
+	}
+#else
 #define SET_FG_OR_BG_PIXELS \
 	switch (color_format) { \
 		case MNTVA_COLOR_8BIT: \
@@ -268,6 +302,7 @@ enum gfx_minterm_modes {
 			if (cur_byte & 0x01) SET_FG_PIXEL32(7) else SET_BG_PIXEL32(7) \
 			break; \
 	}
+#endif
 
 #define SET_FG_OR_BG_PIXELS_MASK \
 	switch (color_format) { \
@@ -539,6 +574,7 @@ enum gfx_dma_op {
   OP_SPRITE_CLUT_BITMAP,
   OP_ETH_USB_OFFSETS,
   OP_SET_SPLIT_POS,
+  OP_SET_PALETTE,
   OP_NUM,
 };
 
