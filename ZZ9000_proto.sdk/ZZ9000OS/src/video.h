@@ -65,7 +65,7 @@ void video_reset();
 void isr_video(void *dummy);
 void video_mode_init(int mode, int scalemode, int colormode);
 void hw_sprite_show(int show);
-void update_hw_sprite(uint8_t *data);
+void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite);
 void update_hw_sprite_clut(uint8_t *data_, uint8_t *colors, uint16_t w, uint16_t h, uint8_t keycolor);
 void update_hw_sprite_pos(void);
 void _update_hw_sprite_pos(int16_t x, int16_t y);

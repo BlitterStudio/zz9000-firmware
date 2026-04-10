@@ -512,49 +512,91 @@ void video_mode_init(int mode, int scalemode, int colormode) {
 	vs.vmode_hdiv = hdiv;
 }
 
-void update_hw_sprite(uint8_t *data)
+void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite)
 {
 	uint8_t cur_bit = 0x80;
 	uint8_t cur_color = 0, out_pos = 0, iter_offset = 0;
-	uint8_t cur_bytes[8];
+	uint8_t cur_bytes[16] = {0};
 	uint32_t *colors = vs.sprite_colors;
 	uint16_t w = vs.sprite_width;
 	uint16_t h = vs.sprite_height;
+	if (h > 48) h = 48;
 	uint8_t line_pitch = (w / 8) * 2;
 
-	for (uint8_t y_line = 0; y_line < h; y_line++) {
-		if (w <= 16) {
-			cur_bytes[0] = data[y_line * line_pitch];
-			cur_bytes[1] = data[(y_line * line_pitch) + 2];
-			cur_bytes[2] = data[(y_line * line_pitch) + 1];
-			cur_bytes[3] = data[(y_line * line_pitch) + 3];
-		}
-		else {
-			cur_bytes[0] = data[y_line * line_pitch];
-			cur_bytes[1] = data[(y_line * line_pitch) + 4];
-			cur_bytes[2] = data[(y_line * line_pitch) + 1];
-			cur_bytes[3] = data[(y_line * line_pitch) + 5];
-			cur_bytes[4] = data[(y_line * line_pitch) + 2];
-			cur_bytes[5] = data[(y_line * line_pitch) + 6];
-			cur_bytes[6] = data[(y_line * line_pitch) + 3];
-			cur_bytes[7] = data[(y_line * line_pitch) + 7];
-		}
-
-		while (out_pos < 8) {
-			for (uint8_t i = 0; i < line_pitch; i += 2) {
-				cur_color = (cur_bytes[i] & cur_bit) ? 1 : 0;
-				if (cur_bytes[i + 1] & cur_bit) cur_color += 2;
-
-				sprite_buf[(y_line * 32) + out_pos + iter_offset] = colors[cur_color] & 0x00ffffff;
-				iter_offset += 8;
+	if (!double_sprite) {
+		for (uint8_t y_line = 0; y_line < h; y_line++) {
+			if (w <= 16) {
+				cur_bytes[0] = data[(y_line * line_pitch) + 0];
+				cur_bytes[1] = data[(y_line * line_pitch) + 2];
+				cur_bytes[2] = data[(y_line * line_pitch) + 1];
+				cur_bytes[3] = data[(y_line * line_pitch) + 3];
+			}
+			else {
+				cur_bytes[0] = data[(y_line * line_pitch) + 0];
+				cur_bytes[1] = data[(y_line * line_pitch) + 4];
+				cur_bytes[2] = data[(y_line * line_pitch) + 1];
+				cur_bytes[3] = data[(y_line * line_pitch) + 5];
+				cur_bytes[4] = data[(y_line * line_pitch) + 2];
+				cur_bytes[5] = data[(y_line * line_pitch) + 6];
+				cur_bytes[6] = data[(y_line * line_pitch) + 3];
+				cur_bytes[7] = data[(y_line * line_pitch) + 7];
 			}
 
-			out_pos++;
-			cur_bit >>= 1;
-			iter_offset = 0;
+			while (out_pos < 8) {
+				for (uint8_t i = 0; i < line_pitch; i += 2) {
+					cur_color = (cur_bytes[i] & cur_bit) ? 1 : 0;
+					if (cur_bytes[i + 1] & cur_bit) cur_color += 2;
+
+					sprite_buf[(y_line * 32) + out_pos + iter_offset] = colors[cur_color] & 0x00ffffff;
+					iter_offset += 8;
+				}
+
+				out_pos++;
+				cur_bit >>= 1;
+				iter_offset = 0;
+			}
+			cur_bit = 0x80;
+			out_pos = 0;
 		}
-		cur_bit = 0x80;
-		out_pos = 0;
+	}
+	else {
+		for (uint8_t y_line = 0; y_line < h / 2; y_line++) {
+			if (!hires_sprite) {
+				cur_bytes[0] = data[(y_line * line_pitch / 2) + 0];
+				cur_bytes[1] = data[(y_line * line_pitch / 2) + 2];
+				cur_bytes[2] = data[(y_line * line_pitch / 2) + 1];
+				cur_bytes[3] = data[(y_line * line_pitch / 2) + 3];
+			}
+			else {
+				cur_bytes[0] = data[(y_line * line_pitch) + 0];
+				cur_bytes[1] = data[(y_line * line_pitch) + 4];
+				cur_bytes[2] = data[(y_line * line_pitch) + 1];
+				cur_bytes[3] = data[(y_line * line_pitch) + 5];
+				cur_bytes[4] = data[(y_line * line_pitch) + 2];
+				cur_bytes[5] = data[(y_line * line_pitch) + 6];
+				cur_bytes[6] = data[(y_line * line_pitch) + 3];
+				cur_bytes[7] = data[(y_line * line_pitch) + 7];
+			}
+
+			while (out_pos < 8) {
+				for (uint8_t i = 0; i < line_pitch / 2; i += 2) {
+					cur_color = (cur_bytes[i] & cur_bit) ? 1 : 0;
+					if (cur_bytes[i + 1] & cur_bit) cur_color += 2;
+
+					sprite_buf[((y_line * 2    ) * 32) + (out_pos * 2    ) + iter_offset * 2] = colors[cur_color] & 0x00ffffff;
+					sprite_buf[((y_line * 2    ) * 32) + (out_pos * 2 + 1) + iter_offset * 2] = colors[cur_color] & 0x00ffffff;
+					sprite_buf[((y_line * 2 + 1) * 32) + (out_pos * 2    ) + iter_offset * 2] = colors[cur_color] & 0x00ffffff;
+					sprite_buf[((y_line * 2 + 1) * 32) + (out_pos * 2 + 1) + iter_offset * 2] = colors[cur_color] & 0x00ffffff;
+					iter_offset += 8;
+				}
+
+				out_pos++;
+				cur_bit >>= 1;
+				iter_offset = 0;
+			}
+			cur_bit = 0x80;
+			out_pos = 0;
+		}
 	}
 
 	sprite_request_update_data = 1;
