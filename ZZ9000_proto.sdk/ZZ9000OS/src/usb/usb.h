@@ -590,6 +590,8 @@ bool usb_device_has_child_on_port(struct usb_device *parent, int port);
 
 int usb_hub_probe(struct usb_device *dev, int ifnum);
 void usb_hub_reset(void);
+int usb_hub_port_reset(struct usb_device *dev, int port,
+		       unsigned short *portstat);
 
 /*
  * usb_find_usb2_hub_address_port() - Get hub address and port for TT setting

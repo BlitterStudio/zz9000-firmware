@@ -1693,8 +1693,8 @@ module MNTZorro_v0_1_S00_AXI
                 8'h04: data_out <= 'b1111_1111_1111_1111; // product number
                 8'h06: data_out <= 'b1100_1111_1111_1111; // (3)
 
-                //8'h08: data_out <= 'b1111_1111_1111_1111; // flags inverted 0000
-                //8'h0a: data_out <= 'b1111_1111_1111_1111; // inverted 0000 = log=phys
+                8'h08: data_out <= 'b0111_1111_1111_1111; // er_Type=0x80 (ERTF_DIAGVALID), er_Flags=0x00
+                8'h0a: data_out <= 'b1111_1111_1111_1111; // er_Flags=0x00 (log=phys)
 
                 8'h10: data_out <= 'b1001_1111_1111_1111; // manufacturer high byte inverted (02)
                 8'h12: data_out <= 'b0010_1111_1111_1111; //

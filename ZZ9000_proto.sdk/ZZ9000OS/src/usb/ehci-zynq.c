@@ -62,44 +62,68 @@ int ehci_zynq_probe(struct zynq_ehci_priv *priv)
 	ulpi_vp.port_num = 0;
 
 	//printf("[ehci-zynq] viewport_addr: %p\n", &priv->ehci->ulpi_viewpoint);
+// lifted from https://elixir.bootlin.com/u-boot/latest/source/drivers/usb/host/ehci-fsl.c#L275
+/* Set to Host mode */
+setbits_le32(&ehci->usbmode, CM_HOST);
 
-	// lifted from https://elixir.bootlin.com/u-boot/latest/source/drivers/usb/host/ehci-fsl.c#L275
-	/* Set to Host mode */
-	setbits_le32(&ehci->usbmode, CM_HOST);
+// Enable controller and select ULPI interface in CONTROL register
+// bit 10: ULPI_SEL, bit 2: USB_EN
+out_be32(&ehci->control, PHY_CLK_SEL_ULPI | USB_EN);
 
-	// FIXME: need to figure out which of these are necessary
+out_be32(&ehci->prictrl, 0x0000000c);
+out_be32(&ehci->age_cnt_limit, 0x00000040);
 
-	setbits_le32(&ehci->portsc, USB_EN);
-	usleep(1000); /* delay required for PHY Clk to appear */
-	out_le32(&(hcor)->or_portsc[0], PORT_PTS_ULPI);
+// SICTRL bit 0 (SITP) should be 0 for ULPI
+out_be32(&ehci->sictrl, 0);
 
-	out_be32(&ehci->prictrl, 0x0000000c);
-	out_be32(&ehci->age_cnt_limit, 0x00000040);
-	out_be32(&ehci->sictrl, 0x00000001);
+// Select ULPI interface in PORTSC
+clrsetbits_le32(&ehci->portsc, PORT_PTS_MSK, PORT_PTS_ULPI);
 
-	in_le32(&ehci->usbmode);
+usleep(10000); /* delay required for PHY Clk to appear */
 
-	/* ULPI set flags */
+in_le32(&ehci->usbmode);
 
-	ret = ulpi_init(&ulpi_vp);
-	if (ret) {
-		puts("zynq ULPI viewport init failed\n");
-		return -1;
-	}
+/* ULPI set flags */
 
-	// dp and dm pulldown = host mode (really?)
-	// extvbusind = vbus indicator input
-	ulpi_write(&ulpi_vp, &ulpi->otg_ctrl,
-		   ULPI_OTG_DP_PULLDOWN | ULPI_OTG_DM_PULLDOWN |
-		   ULPI_OTG_EXTVBUSIND);
-	ulpi_write(&ulpi_vp, &ulpi->function_ctrl,
-		   ULPI_FC_FULL_SPEED | ULPI_FC_OPMODE_NORMAL |
-		   ULPI_FC_SUSPENDM);
-	ulpi_write(&ulpi_vp, &ulpi->iface_ctrl, 0);
+ret = ulpi_init(&ulpi_vp);
+if (ret) {
+	puts("zynq ULPI viewport init failed\n");
+	return -1;
+}
 
-	/* drive external vbus switch */
-	ulpi_write(&ulpi_vp, &ulpi->otg_ctrl_set,
-		   ULPI_OTG_DRVVBUS | ULPI_OTG_DRVVBUS_EXT);
+// dp and dm pulldown = host mode
+// extvbusind = vbus indicator input
+ulpi_write(&ulpi_vp, &ulpi->otg_ctrl,
+	   ULPI_OTG_DP_PULLDOWN | ULPI_OTG_DM_PULLDOWN |
+	   ULPI_OTG_EXTVBUSIND);
+
+/*
+ * Put the ULPI PHY in FS/LS (FS4LS) composite mode. XCVR_SELECT = 11.
+ *
+ * Earlier we used ULPI_FC_HIGH_SPEED (XCVR = 00) relying on HS chirp
+ * to auto-downgrade. That works for FS devices but wedges LS devices:
+ * the HC keeps PR=1 forever because the PHY never completes LS
+ * speed negotiation in HS mode, even with PORTSC.PFSC set. FS4LS puts
+ * the PHY in FS electrical mode and enables LS preamble support
+ * through the integrated TT, which is the supported path for root-hub
+ * LS attach on ChipIdea TDI.
+ *
+ * Tradeoff: HS devices (mass storage, hubs) will enumerate at FS
+ * (12 Mbit/s). Acceptable for keyboards/mice; revisit with dynamic
+ * XCVR switching if HS mass-storage performance is needed.
+ */
+ulpi_write(&ulpi_vp, &ulpi->function_ctrl,
+	   ULPI_FC_FS4LS | ULPI_FC_OPMODE_NORMAL |
+	   ULPI_FC_SUSPENDM);
+
+ulpi_write(&ulpi_vp, &ulpi->iface_ctrl, 0);
+
+/* drive external vbus switch */
+ulpi_write(&ulpi_vp, &ulpi->otg_ctrl_set,
+	   ULPI_OTG_DRVVBUS | ULPI_OTG_DRVVBUS_EXT);
+
+usleep(10000);
+
 
 	// FIXME removing this made it work! probably because there is another ehci_reset in there?
 	//return ehci_register(&priv->ehcictrl, hccr, hcor, NULL, 0, USB_INIT_HOST);

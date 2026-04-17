@@ -44,6 +44,8 @@ void Xil_AssertNonVoid() {}
 #include "gfx.h"
 #include "ethernet.h"
 #include "usb.h"
+#include "sd_storage.h"
+#include "sd_boot.h"
 #include "interrupt.h"
 #include "bootrom.h"
 #include "core2.h"
@@ -53,6 +55,7 @@ void Xil_AssertNonVoid() {}
 
 #include "zz_regs.h"
 #include "zz_video_modes.h"
+#include "usb_proxy.h"
 
 #define REVISION_MAJOR 1
 #define REVISION_MINOR 14
@@ -100,14 +103,34 @@ static char usb_storage_available = 0;
 static uint32_t usb_storage_read_block = 0;
 static uint32_t usb_storage_write_block = 0;
 
+static char sd_storage_available_flag = 0;
+
+static volatile int usb_proxy_pending = 0;
+static int err_throttle = 0;
+static uint32_t sd_storage_read_block = 0;
+static uint32_t sd_storage_write_block = 0;
+
 // ethernet state
 uint16_t ethernet_send_result = 0;
 int eth_backlog_nag_counter = 0;
 int interrupt_enabled_ethernet = 0;
 
 // usb state
+// Protocol: 0 = idle/error, 0xFFFF = busy (transfer in progress), other = success (blocks transferred)
+#define USB_STATUS_BUSY 0xFFFF
 uint16_t usb_status = 0;
+uint16_t usb_proxy_status = 0;
 uint32_t usb_read_write_num_blocks = 1;
+static volatile int usb_read_pending = 0;
+static volatile int usb_write_pending = 0;
+
+#define SD_STATUS_BUSY 0xFFFF
+uint16_t sd_status = 0;
+uint32_t sd_read_write_num_blocks = 1;
+static volatile int sd_read_pending = 0;
+static volatile int sd_write_pending = 0;
+
+uint16_t sd_boot_status = 0;
 // debug things like individual reads/writes, greatly slowing the system down
 uint32_t debug_lowlevel = 0;
 
@@ -143,6 +166,19 @@ void handle_amiga_reset() {
 	usb_storage_available = zz_usb_init();
 	usb_status = 0;
 	usb_read_write_num_blocks = 1;
+	usb_read_pending = 0;
+	usb_write_pending = 0;
+
+	// sd card
+	sd_storage_available_flag = (sd_storage_init() == 0) ? 1 : 0;
+	sd_status = 0;
+	sd_read_write_num_blocks = 1;
+	sd_read_pending = 0;
+	sd_write_pending = 0;
+
+	if (sd_storage_available_flag) {
+		sd_boot_init();
+	}
 
 	// ethernet
 	ethernet_send_result = 0;
@@ -230,6 +266,10 @@ int main() {
 	u32 zstate_raw;
 	int need_req_ack = 0;
 
+	struct zorro_rd_log { u32 off; u8 b[4]; };
+	static struct zorro_rd_log zrd_log[32];
+	static int zrd_count = 0;
+
 	// audio parameters (buffer locations)
 	uint16_t audio_params[ZZ_NUM_AUDIO_PARAMS];
 	int audio_param = 0; // selected parameter
@@ -245,6 +285,24 @@ int main() {
 	int idle_task_count = 0;
 
 	while (1) {
+		if (usb_read_pending) {
+			usb_status = zz_usb_read_blocks(0, usb_storage_read_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
+			usb_read_pending = 0;
+		}
+		if (usb_write_pending) {
+			usb_status = zz_usb_write_blocks(0, usb_storage_write_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
+			usb_write_pending = 0;
+		}
+
+		if (sd_read_pending) {
+			sd_status = sd_storage_read_blocks(sd_storage_read_block, sd_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
+			sd_read_pending = 0;
+		}
+		if (sd_write_pending) {
+			sd_status = sd_storage_write_blocks(sd_storage_write_block, sd_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
+			sd_write_pending = 0;
+		}
+
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 		if (debug_lowlevel && (zstate_raw&0xff)!=(zstate&0xff)) {
 			printf("ZSTATE: %x\n", zstate);
@@ -760,28 +818,32 @@ int main() {
 					usb_storage_write_block = ((u32) zdata) << 16;
 					break;
 				}
-				case REG_ZZ_USBBLK_TX_LO: {
-					usb_storage_write_block |= zdata;
-					if (usb_storage_available) {
-						usb_status = zz_usb_write_blocks(0, usb_storage_write_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
-					} else {
-						printf("[USB] TX but no storage available!\n");
-					}
-					break;
+			case REG_ZZ_USBBLK_TX_LO: {
+				usb_storage_write_block |= zdata;
+				if (usb_storage_available) {
+					usb_status = USB_STATUS_BUSY;
+					usb_write_pending = 1;
+				} else {
+					usb_status = 0;
+					printf("[USB] TX but no storage available!\n");
 				}
+				break;
+			}
 				case REG_ZZ_USBBLK_RX_HI: {
 					usb_storage_read_block = ((u32) zdata) << 16;
 					break;
 				}
-				case REG_ZZ_USBBLK_RX_LO: {
-					usb_storage_read_block |= zdata;
-					if (usb_storage_available) {
-						usb_status = zz_usb_read_blocks(0, usb_storage_read_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
-					} else {
-						printf("[USB] RX but no storage available!\n");
-					}
-					break;
+			case REG_ZZ_USBBLK_RX_LO: {
+				usb_storage_read_block |= zdata;
+				if (usb_storage_available) {
+					usb_status = USB_STATUS_BUSY;
+					usb_read_pending = 1;
+				} else {
+					usb_status = 0;
+					printf("[USB] RX but no storage available!\n");
 				}
+				break;
+			}
 				case REG_ZZ_USB_STATUS: {
 					//printf("[USB] write to status/blocknum register: %d\n", zdata);
 					if (zdata==0) {
@@ -796,6 +858,57 @@ int main() {
 				}
 				case REG_ZZ_USB_BUFSEL: {
 					// FIXME: obsolete!
+					break;
+				}
+				case REG_ZZ_USB_PROXY_CMD: {
+					usb_proxy_status = 1;
+					usb_proxy_pending = 1;
+					break;
+				}
+				case REG_ZZ_SDBLK_TX_HI: {
+					sd_storage_write_block = ((u32) zdata) << 16;
+					break;
+				}
+			case REG_ZZ_SDBLK_TX_LO: {
+				sd_storage_write_block |= zdata;
+				if (sd_storage_available_flag) {
+					sd_status = SD_STATUS_BUSY;
+					sd_write_pending = 1;
+				} else {
+					sd_status = 0;
+				}
+				break;
+			}
+				case REG_ZZ_SDBLK_RX_HI: {
+					sd_storage_read_block = ((u32) zdata) << 16;
+					break;
+				}
+			case REG_ZZ_SDBLK_RX_LO: {
+				sd_storage_read_block |= zdata;
+				if (sd_storage_available_flag) {
+					sd_status = SD_STATUS_BUSY;
+					sd_read_pending = 1;
+				} else {
+					sd_status = 0;
+				}
+				break;
+			}
+				case REG_ZZ_SD_STATUS: {
+					if (zdata == 0) {
+						// TODO: implement SD reset/reinit
+					} else {
+						sd_read_write_num_blocks = zdata;
+					}
+					break;
+				}
+				case REG_ZZ_SD_BOOT_CMD: {
+					if (zdata == 1) {
+						sd_boot_status = sd_boot_get_info((void*)USB_BLOCK_STORAGE_ADDRESS);
+					} else if (zdata >= 2 && zdata < 10) {
+						uint32_t fs_size = 0;
+						int fs_idx = zdata - 2;
+						sd_boot_status = sd_boot_load_fs(fs_idx, (void*)USB_BLOCK_STORAGE_ADDRESS, &fs_size);
+					}
 					break;
 				}
 				case REG_ZZ_DEBUG: {
@@ -1046,9 +1159,18 @@ int main() {
 					// FIXME: remove
 					ptr = (u8*) (TX_FRAME_ADDRESS + zaddr - (MNT_REG_BASE + 0x8000));
 				} else if (zaddr < MNT_REG_BASE + 0x10000) {
-					// 0xa000-0xafff: read from block device (usb storage)
-					// used by Z2
 					ptr = (u8*) (USB_BLOCK_STORAGE_ADDRESS + zaddr - (MNT_REG_BASE + 0xa000));
+					{
+						u32 off = zaddr - (MNT_REG_BASE + 0xa000);
+						if (off >= 60 && off < 80 && zrd_count < 32) {
+							zrd_log[zrd_count].off = off;
+							zrd_log[zrd_count].b[0] = ptr[0];
+							zrd_log[zrd_count].b[1] = ptr[1];
+							zrd_log[zrd_count].b[2] = ptr[2];
+							zrd_log[zrd_count].b[3] = ptr[3];
+							zrd_count++;
+						}
+					}
 				}
 
 				if (z3) {
@@ -1063,7 +1185,6 @@ int main() {
 						// autoboot rom
 						u16 ubyte = ptr[0] << 8;
 						u16 lbyte = ptr[1];
-						//printf("READ ROM: [%04x]",ubyte|lbyte);
 						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1, ubyte | lbyte);
 					} else {
 						u16 ubyte = ptr[0] << 8;
@@ -1108,12 +1229,11 @@ int main() {
 						break;
 					case REG_ZZ_USB_CAPACITY: {
 						if (usb_storage_available) {
-							printf("[USB] query capacity: %lx\n",zz_usb_storage_capacity(0));
 							data = zz_usb_storage_capacity(0);
 						} else {
-							printf("[USB] query capacity: no device.\n");
 							data = 0;
 						}
+						data |= usb_proxy_status;
 						break;
 					}
 					case REG_ZZ_TEMPERATURE: {
@@ -1146,8 +1266,23 @@ int main() {
 						break;
 					}
 					case REG_ZZ_UNUSED_REG8C: {
-						// sleep test for reads
 						data = zz_debug_test_counter;
+						break;
+					}
+					case REG_ZZ_SD_STATUS: {
+						data = sd_status << 16;
+						break;
+					}
+					case REG_ZZ_SD_CAPACITY: {
+						if (sd_storage_available_flag) {
+							data = sd_storage_capacity();
+						} else {
+							data = 0;
+						}
+						break;
+					}
+					case REG_ZZ_SD_BOOT_STATUS: {
+						data = sd_boot_status << 16;
 						break;
 					}
 				}
@@ -1171,6 +1306,30 @@ int main() {
 		} else {
 			// there are no read/write requests, we can do other housekeeping
 			idle_task_count++;
+
+			if (usb_proxy_pending) {
+				volatile struct ZZUSBCommand *proxy_cmd =
+					(volatile struct ZZUSBCommand *)USB_BLOCK_STORAGE_ADDRESS;
+				uint8_t *proxy_data = (uint8_t *)USB_BLOCK_STORAGE_ADDRESS + ZZUSB_DATA_OFFSET;
+				u32 proxy_buf_size = 24576;
+				usb_proxy_pending = 0;
+				Xil_DCacheInvalidateRange((u32)proxy_cmd, proxy_buf_size);
+				__asm__ __volatile__("dsb" ::: "memory");
+
+				uint16_t result = usb_proxy_handle_command(proxy_cmd, proxy_data);
+
+				Xil_DCacheFlushRange((u32)proxy_data, proxy_buf_size - ZZUSB_DATA_OFFSET);
+				__asm__ __volatile__("dsb" ::: "memory");
+				Xil_DCacheFlushRange((u32)proxy_cmd + 16, 8);
+				__asm__ __volatile__("dsb" ::: "memory");
+
+				put_be16(&proxy_cmd->status, result);
+				Xil_DCacheFlushRange((u32)proxy_cmd, 32);
+				__asm__ __volatile__("dsb" ::: "memory");
+
+				usb_proxy_status = 0;
+				zrd_count = 0;
+			}
 
 			if (idle_task_count > 10000000) {
 				ethernet_task();

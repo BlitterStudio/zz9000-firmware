@@ -1,20 +1,13 @@
 #!/bin/bash
 set -e
 
-# ZZ9000 Scanline Bitstream Build Script
+# ZZ9000 Bitstream Build Script
 # Run on x86_64 Linux with Vivado 2018.3 installed
-#
-# Original scanline bitstream by Xanxi, adapted for firmware 1.13+
-# by Dimitris Panokostas (midwan).
-#
-# The scanline ports (scanline_intensity on video_formatter,
-# scanline_intensity_out on mntzorro) and interlace auto-disable
-# are baked into the committed Verilog source. No patches needed.
 #
 # Usage:
 #   1. Copy the entire zz9000-firmware directory to your Linux machine
-#   2. Run: bash build_scanlines.sh [/path/to/Vivado/2018.3] [/path/to/SDK/2018.3]
-#   3. Copy the resulting BOOT_scanlines.bin back to ZZ9000 MicroSD
+#   2. Run: bash build_bitstream.sh [/path/to/Vivado/2018.3] [/path/to/SDK/2018.3]
+#   3. Copy the resulting BOOT.bin back to ZZ9000 MicroSD
 
 VIVADO_DIR="${1:-/opt/Xilinx/Vivado/2018.3}"
 SDK_DIR="${2:-/opt/Xilinx/SDK/2018.3}"
@@ -29,33 +22,26 @@ if [ ! -f "$VIVADO_DIR/settings64.sh" ]; then
 fi
 
 echo "================================================"
-echo " ZZ9000 Scanline Bitstream Build"
+echo " ZZ9000 Bitstream Build"
 echo " Vivado: $VIVADO_DIR"
 echo " SDK:    $SDK_DIR"
 echo "================================================"
 echo ""
 
 # Step 1: Source Vivado and create project
-echo "[1/5] Creating Vivado project..."
+echo "[1/4] Creating Vivado project..."
 source "$VIVADO_DIR/settings64.sh"
 rm -rf ZZ9000_proto
 vivado -mode batch -source zz9000_project.tcl -tclargs --origin_dir .
 echo "  Done."
 
-# Step 2: Add scanline port connection to block design
-# The scanline_intensity ports exist in the committed Verilog but the
-# block design (.tcl) doesn't wire them — this step creates the connection.
-echo "[2/5] Connecting scanline_intensity port in block design..."
-vivado -mode batch -source build_add_scanline_port.tcl
-echo "  Done."
-
-# Step 3: Synthesize, implement, generate bitstream
-echo "[3/5] Running synthesis + implementation + bitstream (this takes 15-30 min)..."
+# Step 2: Synthesize, implement, generate bitstream
+echo "[2/4] Running synthesis + implementation + bitstream (this takes 15-30 min)..."
 vivado -mode batch -source build_run_synthesis.tcl
 echo "  Done."
 
-# Step 4: Generate FSBL
-echo "[4/5] Generating FSBL..."
+# Step 3: Generate FSBL
+echo "[3/4] Generating FSBL..."
 FSBL_ELF=""
 if [ -f "$SDK_DIR/bin/xsct" ]; then
     source "$SDK_DIR/settings64.sh" 2>/dev/null || true
@@ -70,11 +56,11 @@ TCLEOF
     echo "  FSBL generated: $FSBL_ELF"
 else
     echo "  WARNING: Xilinx SDK (xsct) not found at $SDK_DIR"
-    echo "  Generate FSBL manually in Xilinx SDK, or use the extracted one."
+    echo "  Generate FSBL manually in Xilinx SDK, or use the pre-built one."
 fi
 
-# Step 5: Package BOOT.bin
-echo "[5/5] Packaging BOOT.bin..."
+# Step 4: Package BOOT.bin
+echo "[4/4] Packaging BOOT.bin..."
 BITSTREAM=$(find ZZ9000_proto -name "zz9000_ps_wrapper.bit" -path "*/impl_1/*" | head -1)
 ZZ9000OS_ELF="ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf"
 
@@ -96,16 +82,15 @@ the_ROM_image:
   $ZZ9000OS_ELF
 }
 EOF
-    bootgen -image _boot.bif -arch zynq -w on -o BOOT_scanlines.bin
+    bootgen -image _boot.bif -arch zynq -w on -o BOOT.bin
     echo ""
     echo "================================================"
     echo " SUCCESS!"
-    echo " BOOT.bin: $(pwd)/BOOT_scanlines.bin"
-    echo " Size: $(stat -c%s BOOT_scanlines.bin 2>/dev/null || stat -f%z BOOT_scanlines.bin) bytes"
+    echo " BOOT.bin: $(pwd)/BOOT.bin"
+    echo " Size: $(stat -c%s BOOT.bin 2>/dev/null || stat -f%z BOOT.bin) bytes"
     echo "================================================"
     echo ""
-    echo " Copy BOOT_scanlines.bin to ZZ9000 MicroSD as BOOT.bin"
-    echo " Then use: ZZScanlines 128  (for 50% scanline intensity)"
+    echo " Copy BOOT.bin to ZZ9000 MicroSD"
 else
     echo ""
     echo "================================================"

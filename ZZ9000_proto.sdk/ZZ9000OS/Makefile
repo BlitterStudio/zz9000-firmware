@@ -33,6 +33,7 @@ COMMON_FLAGS += -ffunction-sections -fdata-sections
 COMMON_FLAGS += -fno-unwind-tables -fno-asynchronous-unwind-tables
 COMMON_FLAGS += -fno-strict-aliasing
 COMMON_FLAGS += -Wno-incompatible-pointer-types -Wno-return-mismatch -Wno-implicit-function-declaration
+COMMON_FLAGS += -DCONFIG_EHCI_IS_TDI
 
 # -O2 flags (default for all files)
 CFLAGS = $(CPU_FLAGS) $(COMMON_FLAGS) -O2
@@ -75,6 +76,9 @@ C_SRCS = \
 	$(SRC_DIR)/usb/usb_hub.c \
 	$(SRC_DIR)/usb/usb_storage.c \
 	$(SRC_DIR)/usb/usb.c \
+	$(SRC_DIR)/sd_storage.c \
+	$(SRC_DIR)/sd_boot.c \
+	$(SRC_DIR)/usb_proxy.c \
 	$(SRC_DIR)/newlib_compat.c
 
 # Object files

@@ -409,7 +409,6 @@ void isr_audio(void *dummy) {
 		XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET, val);
 
 	if (isra_count++>100) {
-		printf("[isra]\n");
 		isra_count = 0;
 	}
 
@@ -428,7 +427,6 @@ void isr_audio_rx(void *dummy) {
 		XAUD_FORMATTER_STS + XAUD_FORMATTER_S2MM_OFFSET, val);
 
 	if (israrx_count++>1000) {
-		printf("[isra_rx]\n");
 		israrx_count = 0;
 	}
 }

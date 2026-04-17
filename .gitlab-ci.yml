@@ -43,14 +43,14 @@ firmware-build:
       make -C /tmp/bootgen -j$(nproc)
       BOOTGEN=/tmp/bootgen/bootgen
       echo "Bootgen built successfully"
-      # Generate BOOT.bin using bootgen with the scanline bitstream
+      # Generate BOOT.bin using bootgen
       # bootgen creates the partition table automatically — no hardcoded offsets
       ELF_PATH="ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf"
       cat > bootimage_work/ci.bif << BIFEOF
       the_ROM_image:
       {
         [bootloader] bootimage_work/FSBL_exec.elf
-        bootimage_work/zz9000_ps_wrapper_scanlines.bit
+        bootimage_work/zz9000_ps_wrapper.bit
         ${ELF_PATH}
       }
       BIFEOF

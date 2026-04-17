@@ -907,7 +907,7 @@ int usb_alloc_device(struct usb_device *udev)
 	return 0;
 }
 
-static int usb_hub_port_reset(struct usb_device *dev, struct usb_device *hub)
+static int usb_new_dev_port_reset(struct usb_device *dev, struct usb_device *hub)
 {
 	if (!hub)
 		usb_reset_root_port(dev);
@@ -1034,7 +1034,7 @@ static int usb_prepare_device(struct usb_device *dev, int addr, bool do_read,
 	err = usb_setup_descriptor(dev, do_read);
 	if (err)
 		return err;
-	err = usb_hub_port_reset(dev, parent);
+	err = usb_new_dev_port_reset(dev, parent);
 	if (err)
 		return err;
 
@@ -1207,6 +1207,12 @@ bool usb_device_has_child_on_port(struct usb_device *parent, int port)
 void usb_find_usb2_hub_address_port(struct usb_device *udev,
 			       uint8_t *hub_address, uint8_t *hub_port)
 {
+	if (udev->parent && udev->parent->parent == NULL) {
+		*hub_address = 0;
+		*hub_port = udev->portnr;
+		return;
+	}
+
 	/* Find out the nearest parent which is high speed */
 	while (udev->parent->parent != NULL)
 		if (udev->parent->speed != USB_SPEED_HIGH) {

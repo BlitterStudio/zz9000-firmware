@@ -144,6 +144,7 @@ static void ehci_set_usbmode(struct ehci_ctrl *ctrl)
 
 	reg_ptr = (uint32_t *)((u8 *)&ctrl->hcor->or_usbcmd + USBMODE);
 	tmp = ehci_readl(reg_ptr);
+	printf("[usbmode] before: %08x\n", tmp);
 	tmp |= USBMODE_CM_HC;
 #if defined(CONFIG_EHCI_MMIO_BIG_ENDIAN)
 	tmp |= USBMODE_BE;
@@ -151,6 +152,8 @@ static void ehci_set_usbmode(struct ehci_ctrl *ctrl)
 	tmp &= ~USBMODE_BE;
 #endif
 	ehci_writel(reg_ptr, tmp);
+	tmp = ehci_readl(reg_ptr);
+	printf("[usbmode] after: %08x\n", tmp);
 }
 
 static void ehci_powerup_fixup(struct ehci_ctrl *ctrl, uint32_t *status_reg,
@@ -309,7 +312,7 @@ static void ehci_update_endpt2_dev_n_port(struct usb_device *udev,
 				     QH_ENDPT2_HUBADDR(hubaddr));
 }
 
-static int
+int
 ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
 		   int length, struct devrequest *req)
 {
@@ -429,8 +432,9 @@ ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
 		QH_ENDPT1_DEVADDR(usb_pipedevice(pipe));
 
 	/* Force FS for fsl HS quirk */
+	uint8_t eps = ehci_encode_speed(dev->speed);
 	if (!ctrl->has_fsl_erratum_a005275)
-		endpt |= QH_ENDPT1_EPS(ehci_encode_speed(dev->speed));
+		endpt |= QH_ENDPT1_EPS(eps);
 	else
 		endpt |= QH_ENDPT1_EPS(ehci_encode_speed(QH_FULL_SPEED));
 
@@ -438,6 +442,7 @@ ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
 	endpt = QH_ENDPT2_MULT(1) | QH_ENDPT2_UFCMASK(0) | QH_ENDPT2_UFSMASK(0);
 	qh->qh_endpt2 = cpu_to_hc32(endpt);
 	ehci_update_endpt2_dev_n_port(dev, qh);
+	flush_dcache_range((unsigned long)qh, ALIGN_END_ADDR(struct QH, qh, 1));
 	qh->qh_overlay.qt_next = cpu_to_hc32(QT_NEXT_TERMINATE);
 	qh->qh_overlay.qt_altnext = cpu_to_hc32(QT_NEXT_TERMINATE);
 
@@ -619,8 +624,37 @@ ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
 			ALIGN((unsigned long)buffer + length, ARCH_DMA_MINALIGN));
 
 	/* Check that the TD processing happened */
-	if (QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE)
-		printf("EHCI timed out on TD - token=%#lx\n", token);
+	if (QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE) {
+		printf("EHCI timeout\n");
+		printf("[ehci-dbg] === AFTER TIMEOUT ===\n");
+		printf("[ehci-dbg] cmd=%08x sts=%08x asynclist=%08x configflag=%08x portsc=%08x\n",
+		       ehci_readl(&ctrl->hcor->or_usbcmd),
+		       ehci_readl(&ctrl->hcor->or_usbsts),
+		       ehci_readl(&ctrl->hcor->or_asynclistaddr),
+		       ehci_readl(&ctrl->hcor->or_configflag),
+		       ehci_readl(&ctrl->hcor->or_portsc[0]));
+		printf("[ehci-dbg] qh_endpt1=%08x qh_endpt2=%08x\n",
+		       hc32_to_cpu(qh->qh_endpt1),
+		       hc32_to_cpu(qh->qh_endpt2));
+		printf("[ehci-dbg] qh_overlay after: next=%08x altnext=%08x token=%08x\n",
+		       hc32_to_cpu(qh->qh_overlay.qt_next),
+		       hc32_to_cpu(qh->qh_overlay.qt_altnext),
+		       hc32_to_cpu(qh->qh_overlay.qt_token));
+		for (int i = 0; i < qtd_count; i++) {
+			printf("[ehci-dbg] qtd[%d] after: next=%08x altnext=%08x token=%08x buf0=%08x\n",
+			       i,
+			       hc32_to_cpu(qtd[i].qt_next),
+			       hc32_to_cpu(qtd[i].qt_altnext),
+			       hc32_to_cpu(qtd[i].qt_token),
+			       hc32_to_cpu(qtd[i].qt_buffer[0]));
+		}
+		printf("[ehci-dbg] dev: addr=%d speed=%d maxpkt=%d ep=%d dir=%s\n",
+		       dev->devnum, dev->speed, dev->maxpacketsize,
+		       usb_pipeendpoint(pipe),
+		       usb_pipein(pipe) ? "IN" : "OUT");
+		printf("[ehci-dbg] pipe=%08lx req=%p buffer=%p length=%d\n",
+		       pipe, req, buffer, length);
+	}
 
 	/* Disable async schedule. */
 	cmd = ehci_readl(&ctrl->hcor->or_usbcmd);
@@ -1279,7 +1313,6 @@ static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 		return NULL;
 	}
 
-	printf("Enter create_int_queue\n");
 	if (usb_pipetype(pipe) != PIPE_INTERRUPT) {
 		printf("non-interrupt pipe (type=%lu)", usb_pipetype(pipe));
 		return NULL;
@@ -1349,11 +1382,10 @@ static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 
 		td->qt_next = cpu_to_hc32(QT_NEXT_TERMINATE);
 		td->qt_altnext = cpu_to_hc32(QT_NEXT_TERMINATE);
-		printf("communication direction is '%s'\n",
-		      usb_pipein(pipe) ? "in" : "out");
 		td->qt_token = cpu_to_hc32(
 			QT_TOKEN_DT(toggle) |
 			(elementsize << 16) |
+			(3 << 10) | /* CERR=3 */
 			((usb_pipein(pipe) ? 1 : 0) << 8) | /* IN/OUT token */
 			0x80); /* active */
 		td->qt_buffer[0] =
@@ -1404,7 +1436,6 @@ static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 	}
 	ctrl->periodic_schedules++;
 
-	printf("Exit create_int_queue\n");
 	return result;
 fail3:
 	if (result->tds)
@@ -1425,6 +1456,9 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 	struct qTD *cur_td;
 	uint32_t token, toggle;
 	unsigned long pipe = queue->pipe;
+	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
+
+	(void)ctrl;
 
 	/* depleted queue */
 	if (cur == NULL) {
@@ -1437,12 +1471,45 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 				ALIGN_END_ADDR(struct qTD, cur_td, 1));
 	token = hc32_to_cpu(cur_td->qt_token);
 	if (QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE) {
-		printf("Exit poll_int_queue with no completed intr transfer. token is %lx\n", token);
+		/*
+		 * Silent hot path: mouse/keyboard NAK every microframe
+		 * while idle, so printing here would block the UART and
+		 * starve the Zorro bus handler. Diagnostics available via
+		 * the completion / destroy paths.
+		 */
 		return NULL;
 	}
 
 	toggle = QT_TOKEN_GET_DT(token);
 	usb_settoggle(dev, usb_pipeendpoint(pipe), usb_pipeout(pipe), toggle);
+
+	/*
+	 * Round-9 status decoding — propagate all error classes that
+	 * a regular EHCI async path would surface. Mirroring the
+	 * async/bulk path lets the Amiga driver see CRC/BUF/BABBLE
+	 * errors exactly the way it expects.
+	 */
+	dev->act_len = queue->elementsize - QT_TOKEN_GET_TOTALBYTES(token);
+	switch (QT_TOKEN_GET_STATUS(token) &
+		~(QT_TOKEN_STATUS_SPLITXSTATE | QT_TOKEN_STATUS_PERR)) {
+	case 0:
+		dev->status = 0;
+		break;
+	case QT_TOKEN_STATUS_HALTED:
+		dev->status = USB_ST_STALLED;
+		break;
+	case QT_TOKEN_STATUS_ACTIVE | QT_TOKEN_STATUS_DATBUFERR:
+	case QT_TOKEN_STATUS_DATBUFERR:
+		dev->status = USB_ST_BUF_ERR;
+		break;
+	case QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_BABBLEDET:
+	case QT_TOKEN_STATUS_BABBLEDET:
+		dev->status = USB_ST_BABBLE_DET;
+		break;
+	default:
+		dev->status = USB_ST_CRC_ERR;
+		break;
+	}
 
 	if (!(cur->qh_link & QH_LINK_TERMINATE))
 		queue->current++;
@@ -1453,8 +1520,6 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 				ALIGN_END_ADDR(char, cur->buffer,
 					       queue->elementsize));
 
-	printf("Exit poll_int_queue with completed intr transfer. token is %lx at %p (first at %p)\n",
-	      token, cur, queue->first);
 	return cur->buffer;
 }
 
@@ -1475,9 +1540,7 @@ static int _ehci_destroy_int_queue(struct usb_device *dev,
 	struct QH *cur = &ctrl->periodic_queue;
 	timeout = get_timer(0) + 500; /* abort after 500ms */
 	while (!(cur->qh_link & cpu_to_hc32(QH_LINK_TERMINATE))) {
-		printf("considering %p, with qh_link %lx\n", cur, cur->qh_link);
 		if (NEXT_QH(cur) == queue->first) {
-			printf("found candidate. removing from chain\n");
 			cur->qh_link = queue->last->qh_link;
 			flush_dcache_range((unsigned long)cur,
 					   ALIGN_END_ADDR(struct QH, cur, 1));
@@ -1506,6 +1569,18 @@ out:
 	return result;
 }
 
+/*
+ * Interrupt-xfer poll budget: keep it short so the ZZ9000 main loop can
+ * return to servicing the Amiga Zorro bus quickly. An idle HID device
+ * (mouse/keyboard) NAKs the IN token forever and the qTD never retires;
+ * the old 100 ms budget starved Zorro DTACK and guru-reset the Amiga.
+ * 16 ms gives the integrated TT room for ~16 FS-split cycles so actual
+ * device activity has a good chance of retiring a qTD within one
+ * Poseidon call, but still well below the Zorro-bus blocking budget we
+ * proved safe at 4 ms (no guru observed under continuous HID polling).
+ */
+#define EHCI_INT_POLL_MS 16
+
 static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 				void *buffer, int length, int interval)
 {
@@ -1514,32 +1589,49 @@ static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 	unsigned long timeout;
 	int result = 0, ret;
 
-	//printf("dev=%p, pipe=%lu, buffer=%p, length=%d, interval=%d",
-	//      dev, pipe, buffer, length, interval);
-
 	queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer, interval);
 	if (!queue)
 		return -1;
 
-	timeout = get_timer(0) + USB_TIMEOUT_MS(pipe);
+	timeout = get_timer(0) + EHCI_INT_POLL_MS;
 	while ((backbuffer = _ehci_poll_int_queue(dev, queue)) == NULL)
 		if (get_timer(0) > timeout) {
-			printf("Timeout poll on interrupt endpoint\n");
-			result = -ETIMEDOUT;
+			/*
+			 * No qTD retired within our poll window. For an
+			 * interrupt endpoint this is normal USB behavior —
+			 * the device NAK'd the IN token because it has no
+			 * new report yet (idle mouse / keyboard).
+			 *
+			 * Report this to callers as a clean success with
+			 * zero bytes, NOT an error. Returning an error
+			 * (previously USB_ST_NAK_REC -> ZZUSB_STATUS_NAK
+			 * -> UHIOERR_TIMEOUT on the Amiga side) makes
+			 * Poseidon flag the endpoint as dead after a
+			 * handful of idle polls. USB spec semantics: a
+			 * NAK just means "no data this cycle, poll again."
+			 */
+			dev->status = 0;
+			dev->act_len = 0;
 			break;
 		}
 
-	if (backbuffer != buffer) {
+	/*
+	 * If we fell through with a non-NULL backbuffer but it isn't
+	 * our expected buffer pointer, treat that as a programming
+	 * error (never seen in practice). Still destroy the queue
+	 * before returning so the periodic list stays clean.
+	 */
+	if (backbuffer && backbuffer != buffer) {
 		printf("got wrong buffer back (%p instead of %p)\n",
 		      backbuffer, buffer);
-		return -EINVAL;
+		dev->status = USB_ST_BUF_ERR;
+		result = -EINVAL;
 	}
 
 	ret = _ehci_destroy_int_queue(dev, queue);
-	if (ret < 0)
-		return ret;
+	if (ret < 0 && result == 0)
+		result = ret;
 
-	/* everything worked out fine */
 	return result;
 }
 
