@@ -22,5 +22,13 @@ fi
 
 echo "[firmware] toolchain: $(arm-none-eabi-gcc --version | head -1)"
 make -C ZZ9000_proto.sdk/ZZ9000OS "$@"
-arm-none-eabi-size ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
-echo "[firmware] done: ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf"
+
+# Only report size when the ELF actually exists (skips cases like
+# `./build_firmware.sh clean` where the ELF was just removed).
+ELF=ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+if [ -f "$ELF" ]; then
+    arm-none-eabi-size "$ELF"
+    echo "[firmware] done: $ELF"
+else
+    echo "[firmware] done (no ELF produced — target was likely 'clean')."
+fi

@@ -33,7 +33,7 @@ firmware-build:
       make -C /tmp/bootgen -j"$(nproc)"
       export BOOTGEN=/tmp/bootgen/bootgen
       # Build firmware + package BOOT.bin via the same scripts humans run.
-      ./build_firmware.sh clean
+      # Fresh clone every pipeline — no need to `make clean` first.
       ./build_firmware.sh
       ./build_bootimage.sh
   artifacts:
