@@ -36,7 +36,10 @@ module video_formatter(
   input [7:0] control_op,
   input control_interlace,
   output reg [1:0]control_vblank,
-  input [7:0] scanline_intensity
+  input [7:0] scanline_intensity,
+  input [1:0] scanline_width,
+  input        scanline_parity,
+  input [7:0]  scanline_intensity2
 );
 
 localparam OP_COLORMODE=1;
@@ -132,8 +135,12 @@ reg sprite_on; // vga domain
 reg [11:0] vga_report_y; // vga domain
 reg [11:0] vga_report_y_next; // vga domain
 reg vga_selected_palette; // vga domain
-reg [7:0]  vga_scanline_intensity;
+reg [1:0]  vga_scanline_width;
+reg        vga_scanline_parity;
+reg vga_scanlines_en;
 reg [31:0] pixout_sl;
+reg [11:0] counter_y_d1;
+reg [11:0] counter_y_d2;
 
 always @(posedge m_axis_vid_aclk)
   begin
@@ -312,10 +319,6 @@ reg [3:0] counter_subpixel = 0;
 
 reg vga_sync_polarity = 0;
 
-wire [15:0] sl_r_full = {8'h00, pixout[23:16]} * {8'h00, (8'd255 - vga_scanline_intensity)};
-wire [15:0] sl_g_full = {8'h00, pixout[15:8]}  * {8'h00, (8'd255 - vga_scanline_intensity)};
-wire [15:0] sl_b_full = {8'h00, pixout[7:0]}   * {8'h00, (8'd255 - vga_scanline_intensity)};
-
 always @(posedge dvi_clk) begin
   vga_h_rez <= screen_width;
   vga_v_rez <= screen_height;
@@ -331,7 +334,7 @@ always @(posedge dvi_clk) begin
   vga_v_sync_start <= screen_v_sync_start;
   vga_v_sync_end <= screen_v_sync_end;
   vga_scale_x <= scale_x;
-  vga_scale_y <= control_interlace ? 1'b0 : scale_y;
+  vga_scale_y <= scale_y;
   vga_colormode <= colormode;
   vga_sync_polarity <= sync_polarity;
   if (counter_y == 0) begin
@@ -343,7 +346,10 @@ always @(posedge dvi_clk) begin
   vga_sprite_dbl <= sprite_dbl;
   vga_report_y_next <= report_y;
   vga_selected_palette <= selected_palette;
-  vga_scanline_intensity <= scanline_intensity;
+  vga_scanline_width      <= scanline_width;
+  vga_scanline_parity     <= scanline_parity;
+  vga_scanlines_en <= !control_interlace &&
+                    (scale_y || (vga_v_rez < 350));
 
   /*
     pipelines (4 clocks):
@@ -436,13 +442,56 @@ always @(posedge dvi_clk) begin
     sprite_on <= 0;
   end
 
-  if (vga_scale_y && counter_y[0] && vga_scanline_intensity > 0)
-    pixout_sl <= {8'b0, 
-                  sl_r_full[15:8],
-                  sl_g_full[15:8],
-                  sl_b_full[15:8]};
-  else
+counter_y_d1 <= counter_y;
+counter_y_d2 <= counter_y_d1;
+
+if (!vga_scanlines_en || vga_scanline_width == 2'b00) begin
     pixout_sl <= pixout;
+end else case (vga_scanline_width)
+    2'b01: begin
+        // mode 1: 100/0 - one line in two black
+        if (counter_y_d2[0] == vga_scanline_parity)
+            pixout_sl <= 32'b0;
+        else
+            pixout_sl <= pixout;
+    end
+    2'b10: begin
+        // mode 2: 100/62 - alternating full / 62.5% (no black lines)
+        // 62.5% = >>1 (50%) + >>3 (12.5%)
+        if (counter_y_d2[0] == vga_scanline_parity)
+            pixout_sl <= pixout;
+        else
+            pixout_sl <= {8'b0,
+                ({1'b0, pixout[23:17]} + {3'b0, pixout[23:19]}),
+                ({1'b0, pixout[15:9]}  + {3'b0, pixout[15:11]}),
+                ({1'b0, pixout[7:1]}   + {3'b0, pixout[7:3]})
+            };
+    end
+    2'b11: begin
+        // mode 3: 100/75/50/75 - soft gradient over 4 lines
+        // 75% = >>1 (50%) + >>2 (25%)
+        // 50% = >>1
+        case (counter_y_d2[1:0] ^ {1'b0, vga_scanline_parity})
+            2'b00: pixout_sl <= pixout;
+            2'b01: pixout_sl <= {8'b0,
+                ({1'b0, pixout[23:17]} + {2'b0, pixout[23:18]}),
+                ({1'b0, pixout[15:9]}  + {2'b0, pixout[15:10]}),
+                ({1'b0, pixout[7:1]}   + {2'b0, pixout[7:2]})
+            };
+            2'b10: pixout_sl <= {8'b0,
+                1'b0, pixout[23:17],
+                1'b0, pixout[15:9],
+                1'b0, pixout[7:1]
+            };
+            2'b11: pixout_sl <= {8'b0,
+                ({1'b0, pixout[23:17]} + {2'b0, pixout[23:18]}),
+                ({1'b0, pixout[15:9]}  + {2'b0, pixout[15:10]}),
+                ({1'b0, pixout[7:1]}   + {2'b0, pixout[7:2]})
+            };
+        endcase
+    end
+    default: pixout_sl <= pixout;
+endcase
 
   dvi_rgb <= (sprite_on && sprite_pix!='hff00ff) ? sprite_pix : pixout_sl;
 
