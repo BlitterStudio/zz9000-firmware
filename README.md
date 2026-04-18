@@ -87,11 +87,24 @@ https://mntre.com
 SPDX-License-Identifier: GPL-3.0-or-later
 https://spdx.org/licenses/GPL-3.0-or-later.html
 
-Scanline bitstream patches original by Xanxi, adapted for firmware 1.13+
-by Dimitris Panokostas (midwan).
+Scanline bitstream patches (V1 intensity scanlines and V2 multi-mode
+scanlines with parity control) by Xanxi, adapted for
+firmware 1.13+ / 1.14 by Dimitris Panokostas (midwan). V2 adds three
+patterns (classic / soft / gradient) with odd/even parity, gated to
+AGA scandoubled modes and RTG resolutions below 350 lines; it leaves
+the V1 intensity registers decoded but unused.
 
 RTG performance optimizations (NEON intrinsics, compiler flags, batch
 palette transfer, operation fusion) by Dimitris Panokostas.
+
+USB 2.0 host stack on the ARM side (EHCI + USB command proxy, Zynq
+AXI stability fixes — USBMODE_SDIS, ULPI dynamic XCVR switching,
+BURSTSIZE, TXFIFO threshold, direct-DMA bulk transfers from the shared
+mailbox) by Dimitris Panokostas.
+
+Scanlines V2 block-design integration (the TCL wiring that connects
+mntzorro's scanline outputs to video_formatter) and the split
+firmware/bitstream/bootimage build scripts by Dimitris Panokostas.
 
 # Making the Platform Cable Work
 

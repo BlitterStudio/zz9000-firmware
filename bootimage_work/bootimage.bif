@@ -1,6 +1,8 @@
+// BIF manifest for the ZZ9000 BOOT.bin.
+// Paths are repo-root-relative; run bootgen from the repo root.
 the_ROM_image:
 {
-  [bootloader] /Users/midwan/Gitlab/zz9000-firmware/bootimage_work/FSBL_exec.elf
-  /Users/midwan/Gitlab/zz9000-firmware/bootimage_work/zz9000_ps_wrapper.bit
-  /Users/midwan/Gitlab/zz9000-firmware/ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+  [bootloader] bootimage_work/FSBL_exec.elf
+  bootimage_work/zz9000_ps_wrapper.bit
+  ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
 }

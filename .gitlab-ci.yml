@@ -12,9 +12,9 @@ firmware-build:
       set -euo pipefail
       apt-get update -qq
       apt-get install -y -qq wget xz-utils make ca-certificates python3 g++ libssl-dev flex bison git
-      # Download the official ARM toolchain with newlib.
-      # Debian's gcc-arm-none-eabi uses picolibc which is incompatible
-      # with the Xilinx BSP (references newlib internals like _impure_ptr).
+      # Official Arm GNU Toolchain with newlib. Debian's gcc-arm-none-eabi
+      # uses picolibc which is incompatible with the Xilinx BSP (references
+      # newlib internals like _impure_ptr).
       HOST_ARCH=$(dpkg --print-architecture)
       case "$HOST_ARCH" in
         amd64)  TC_HOST="x86_64" ;;
@@ -24,40 +24,18 @@ firmware-build:
       TC_VER="13.2.rel1"
       TC_DIR="arm-gnu-toolchain-${TC_VER}-${TC_HOST}-arm-none-eabi"
       TOOLCHAIN_URL="https://developer.arm.com/-/media/Files/downloads/gnu/${TC_VER}/binrel/${TC_DIR}.tar.xz"
-      echo "Downloading toolchain for ${TC_HOST}: ${TOOLCHAIN_URL}"
       wget -q "$TOOLCHAIN_URL" -O toolchain.tar.xz
-      ls -lh toolchain.tar.xz
       tar xf toolchain.tar.xz -C /opt
       TC_BIN=$(find /opt -name arm-none-eabi-gcc -type f | head -1 | xargs dirname)
-      echo "Toolchain bin: ${TC_BIN}"
       export PATH="${TC_BIN}:$PATH"
-      arm-none-eabi-gcc --version
-      # Build firmware
-      cd ZZ9000_proto.sdk/ZZ9000OS
-      make clean
-      make
-      arm-none-eabi-size build/ZZ9000OS.elf
-      cd ../..
-      # Build Xilinx bootgen from source (generates BOOT.bin from BIF manifest)
+      # Build bootgen from source (same binary humans use locally).
       git clone --depth 1 https://github.com/Xilinx/bootgen.git /tmp/bootgen
-      make -C /tmp/bootgen -j$(nproc)
-      BOOTGEN=/tmp/bootgen/bootgen
-      echo "Bootgen built successfully"
-      # Generate BOOT.bin using bootgen
-      # bootgen creates the partition table automatically — no hardcoded offsets
-      ELF_PATH="ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf"
-      cat > bootimage_work/ci.bif << BIFEOF
-      the_ROM_image:
-      {
-        [bootloader] bootimage_work/FSBL_exec.elf
-        bootimage_work/zz9000_ps_wrapper.bit
-        ${ELF_PATH}
-      }
-      BIFEOF
-      echo "BIF contents:"
-      cat bootimage_work/ci.bif
-      $BOOTGEN -arch zynq -image bootimage_work/ci.bif -w on -o bootimage_work/BOOT.bin
-      ls -lh bootimage_work/BOOT.bin
+      make -C /tmp/bootgen -j"$(nproc)"
+      export BOOTGEN=/tmp/bootgen/bootgen
+      # Build firmware + package BOOT.bin via the same scripts humans run.
+      ./build_firmware.sh clean
+      ./build_firmware.sh
+      ./build_bootimage.sh
   artifacts:
     paths:
       - ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
