@@ -396,22 +396,30 @@ static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
     else
         pipe = usb_sndbulkpipe(&dev, endpoint);
 
-    if (!is_in && data_len > 0) {
-        memcpy(dma_buf, data_buf, data_len);
-        Xil_DCacheFlushRange((u32)dma_buf, ALIGN(data_len, 32));
-    } else if (is_in && data_len > 0) {
-        Xil_DCacheInvalidateRange((u32)dma_buf, ALIGN(data_len, 32));
+    /* DMA directly from/to the shared mailbox (USB_BLOCK_STORAGE_ADDRESS
+     * + ZZUSB_DATA_OFFSET). The mailbox is 64-byte aligned in DDR and
+     * reachable by the EHCI DMA engine, so the dma_buf bounce copy is
+     * pure overhead. Skipping it saves one 8KB DDR→DDR memcpy plus one
+     * cache op per bulk chunk. Fall back to dma_buf if the caller did
+     * not provide a buffer (shouldn't happen for bulk, but defensive). */
+    uint8_t *xfer_buf = data_buf ? data_buf : dma_buf;
+
+    if (data_len > 0) {
+        if (!is_in) {
+            Xil_DCacheFlushRange((u32)xfer_buf, ALIGN(data_len, 32));
+        } else {
+            Xil_DCacheInvalidateRange((u32)xfer_buf, ALIGN(data_len, 32));
+        }
     }
 
-    int result = ehci_submit_async(&dev, pipe, data_len > 0 ? dma_buf : NULL,
+    int result = ehci_submit_async(&dev, pipe, data_len > 0 ? xfer_buf : NULL,
                                     data_len, NULL);
 
     save_toggle(dev_addr, &dev);
 
     if (result >= 0 && dev.status == 0) {
         if (is_in && data_len > 0 && dev.act_len > 0) {
-            Xil_DCacheInvalidateRange((u32)dma_buf, ALIGN(dev.act_len, 32));
-            memcpy(data_buf, dma_buf, dev.act_len);
+            Xil_DCacheInvalidateRange((u32)xfer_buf, ALIGN(dev.act_len, 32));
         }
         put_be32(&cmd->actual_length, dev.act_len);
         return ZZUSB_STATUS_OK;
