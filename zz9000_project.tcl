@@ -373,6 +373,10 @@ proc create_hier_cell_video { parentCell nameHier } {
   create_bd_pin -dir I control_interlace
   create_bd_pin -dir I -from 7 -to 0 control_op
   create_bd_pin -dir O -from 1 -to 0 control_vblank
+  # Scanlines V2 boundary pins on the "video" sub-BD
+  create_bd_pin -dir I -from 1 -to 0 scanline_width
+  create_bd_pin -dir I scanline_parity
+  create_bd_pin -dir I -from 7 -to 0 scanline_intensity2
   create_bd_pin -dir O -from 31 -to 0 dvi_rgb
   create_bd_pin -dir I -type clk m_axi_mm2s_aclk
   create_bd_pin -dir I -type clk s_axi_lite_aclk
@@ -418,6 +422,10 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_data [get_bd_pins control_data] [get_bd_pins video_formatter_0/control_data]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_interlace [get_bd_pins control_interlace] [get_bd_pins video_formatter_0/control_interlace]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_op [get_bd_pins control_op] [get_bd_pins video_formatter_0/control_op]
+  # Scanlines V2: propagate the sub-BD boundary pins down to video_formatter_0
+  connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_width_out [get_bd_pins scanline_width] [get_bd_pins video_formatter_0/scanline_width]
+  connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_parity_out [get_bd_pins scanline_parity] [get_bd_pins video_formatter_0/scanline_parity]
+  connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_intensity2_out [get_bd_pins scanline_intensity2] [get_bd_pins video_formatter_0/scanline_intensity2]
   connect_bd_net -net clk_1 [get_bd_pins VGA_PCLK] [get_bd_pins video_formatter_0/dvi_clk]
   connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins aresetn] [get_bd_pins axis_data_fifo_0/s_axis_aresetn] [get_bd_pins video_formatter_0/aresetn]
   connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins m_axi_mm2s_aclk] [get_bd_pins axi_vdma_0/m_axi_mm2s_aclk] [get_bd_pins axi_vdma_0/m_axis_mm2s_aclk] [get_bd_pins axis_data_fifo_0/s_axis_aclk] [get_bd_pins video_formatter_0/m_axis_vid_aclk]
@@ -1229,6 +1237,10 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_data [get_bd_pins MNTZorro_v0_1_S00_AXI_0/video_control_data_out] [get_bd_pins video/control_data]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_interlace [get_bd_pins MNTZorro_v0_1_S00_AXI_0/video_control_interlace_out] [get_bd_pins video/control_interlace]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_op [get_bd_pins MNTZorro_v0_1_S00_AXI_0/video_control_op_out] [get_bd_pins video/control_op]
+  # Scanlines V2: wire mntzorro's scanline outputs into the video sub-BD
+  connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_width_out [get_bd_pins MNTZorro_v0_1_S00_AXI_0/scanline_width_out] [get_bd_pins video/scanline_width]
+  connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_parity_out [get_bd_pins MNTZorro_v0_1_S00_AXI_0/scanline_parity_out] [get_bd_pins video/scanline_parity]
+  connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_intensity2_out [get_bd_pins MNTZorro_v0_1_S00_AXI_0/scanline_intensity2_out] [get_bd_pins video/scanline_intensity2]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_zz900ax_reset_out [get_bd_ports I2SO_RESETn] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/zz9000ax_reset_out]
   connect_bd_net -net Net [get_bd_ports ZORRO_ADDR] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/ZORRO_ADDR]
   connect_bd_net -net Net1 [get_bd_ports ZORRO_DATA] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/ZORRO_DATA]
