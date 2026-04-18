@@ -1,8 +1,13 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*-
  * Copyright (c) 2007-2008, Juniper Networks, Inc.
  * Copyright (c) 2008, Michael Trimarchi <trimarchimichael@yahoo.it>
  * All rights reserved.
+ *
+ * ZZ9000 modifications:
+ *
+ * Copyright (C) 2026 MNT Research GmbH
+ * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
  */
 
 #ifndef USB_EHCI_H
@@ -267,6 +272,14 @@ struct zynq_ehci_priv {
 	struct usb_ehci *ehci;
 };
 int ehci_zynq_probe(struct zynq_ehci_priv *priv);
+
+/*
+ * Runtime ULPI XCVR-select switch for the Zynq PS USB ChipIdea
+ * EHCI. Called from the reset handler to drop the PHY into FS4LS
+ * mode when a low-speed device is attached, or switch back to HS
+ * mode for high-speed devices. See ehci-zynq.c for rationale.
+ */
+int ehci_zynq_set_phy_mode(int for_low_speed);
 
 /**
  * ehci_set_controller_info() - Set up private data for the controller

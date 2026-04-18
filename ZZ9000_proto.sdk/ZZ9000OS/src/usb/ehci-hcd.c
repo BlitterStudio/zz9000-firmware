@@ -1,6 +1,14 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0+
 /*-
- * Copyright (c) 2007-2008, Juniper Networks, Inc. */
+ * Copyright (c) 2007-2008, Juniper Networks, Inc.
+ *
+ * ZZ9000 modifications (integrated TT for LS/FS, async-ring timeout
+ * recovery, NAK-on-idle-interrupt behaviour, silenced hot-path
+ * printfs, int-queue leak fix, dev->act_len on int-completion, etc.)
+ *
+ * Copyright (C) 2026 MNT Research GmbH
+ * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
+ */
 
 #include <errno.h>
 #include <asm/byteorder.h>
@@ -669,6 +677,61 @@ ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
 	}
 
 	token = hc32_to_cpu(qh->qh_overlay.qt_token);
+
+	/*
+	 * On timeout (qTD still ACTIVE after USB_TIMEOUT_MS) or HALTED,
+	 * scrub the async-ring state so the next ehci_submit_async call
+	 * starts fresh:
+	 *
+	 *   1. Point qh_list.qh_link back at qh_list itself (no dangling
+	 *      pointer to the stack-allocated qh we're about to unwind).
+	 *   2. Zero qh_list.qh_overlay and set its qt_next / qt_altnext
+	 *      to TERMINATE — otherwise the HC, on the next async-enable,
+	 *      may resume from the cached overlay state (which may still
+	 *      have the HALTED bit or a stale qTD pointer).
+	 *   3. Clear any W1C error bits in USBSTS so subsequent
+	 *      handshakes don't misinterpret stale flags.
+	 *   4. Ensure dev->status conveys a mapped error code. Leaving
+	 *      it as USB_ST_NOT_PROC propagates as the generic
+	 *      ZZUSB_STATUS_ERROR and the driver has no useful
+	 *      response — map it to USB_ST_CRC_ERR which upper layers
+	 *      handle as a transaction error that can be retried.
+	 *
+	 * Without this cleanup, a USB ethernet device that glitched and
+	 * left a stuck qTD would poison the next transfer's queue head
+	 * (we saw "token=80020d50" on the retried bulk IN), cascading
+	 * into further failures.
+	 */
+	if (QT_TOKEN_GET_STATUS(token) &
+	    (QT_TOKEN_STATUS_ACTIVE | QT_TOKEN_STATUS_HALTED)) {
+		ctrl->qh_list.qh_link = cpu_to_hc32(
+			virt_to_phys(&ctrl->qh_list) | QH_LINK_TYPE_QH);
+		memset(&ctrl->qh_list.qh_overlay, 0,
+		       sizeof(ctrl->qh_list.qh_overlay));
+		ctrl->qh_list.qh_overlay.qt_next =
+			cpu_to_hc32(QH_LINK_TERMINATE);
+		ctrl->qh_list.qh_overlay.qt_altnext =
+			cpu_to_hc32(QH_LINK_TERMINATE);
+		flush_dcache_range((unsigned long)&ctrl->qh_list,
+			ALIGN_END_ADDR(struct QH, &ctrl->qh_list, 1));
+
+		/* Clear W1C error status bits */
+		uint32_t sts = ehci_readl(&ctrl->hcor->or_usbsts);
+		ehci_writel(&ctrl->hcor->or_usbsts, sts & 0x3f);
+
+		/*
+		 * qTD still ACTIVE after USB_TIMEOUT_MS — the transfer
+		 * didn't retire. Give callers a mapped error (CRC) so
+		 * they can retry or surface the failure instead of
+		 * seeing the uninitialised USB_ST_NOT_PROC. The Amiga
+		 * driver's per-unit zz_PortDead sticky flag handles
+		 * "device unreachable" escalation if multiple errors
+		 * occur in a row.
+		 */
+		if (QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE)
+			dev->status = USB_ST_CRC_ERR;
+	}
+
 	if (!(QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE)) {
 		//printf("TOKEN=%#lx\n", token);
 		switch (QT_TOKEN_GET_STATUS(token) &

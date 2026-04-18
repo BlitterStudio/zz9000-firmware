@@ -14,6 +14,11 @@
  *
  * Adapted for U-Boot:
  * (C) Copyright 2001 Denis Peter, MPL AG Switzerland
+ *
+ * ZZ9000 modifications:
+ *
+ * Copyright (C) 2026 MNT Research GmbH
+ * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
  */
 
 /*

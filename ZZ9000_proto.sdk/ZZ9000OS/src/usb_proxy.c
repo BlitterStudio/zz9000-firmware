@@ -1,3 +1,26 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * ZZ9000 USB Proxy — ARM-side USB host controller command handler
+ * for the Poseidon USB stack running on the m68k Amiga.
+ *
+ * Copyright (C) 2026 MNT Research GmbH
+ * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <stdio.h>
 #include <string.h>
 #include <sleep.h>
@@ -128,21 +151,29 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
 
     /*
      * Detect pre-reset line state. On a USB 2.0 root port, LS devices
-     * show line status = K (D- pull-up). We must tell the ChipIdea
-     * integrated TT to skip the HS chirp sequence for LS, otherwise
-     * PR will never be cleared — the HC sits waiting for a chirp
-     * response the LS device can never produce, which is exactly the
-     * "reset: PR didn't clear" wedge observed on Zynq.
+     * show line status = K (D- pull-up); FS/HS devices show J.
      *
      * Line status bits 11:10; K = 01.
      */
     is_low_speed_pre = ((reg_pre & 0x00000C00) == PORTSC_LS_K);
 
     /*
+     * Dynamic ULPI transceiver-select switch. HS mode is the default
+     * resting state for the PHY (see ehci-zynq.c init), so HS devices
+     * negotiate 480 Mbit/s natively. For LS devices, HS chirp
+     * negotiation wedges the HC, so we drop the PHY to FS4LS mode
+     * BEFORE asserting port reset. The call gives the PHY a few
+     * microseconds to settle before we kick the reset.
+     */
+    ehci_zynq_set_phy_mode(is_low_speed_pre);
+    udelay(100);
+
+    /*
      * Assert reset: set PR=1, clear PE, and preserve other bits.
      * W1C bits (CSC/PEC/OCC) must be written as 0 so we don't
      * accidentally acknowledge changes we haven't processed yet.
-     * For LS devices also set PFSC to disable HS chirp.
+     * For LS devices also set PFSC to disable HS chirp on the HC
+     * side (defensive; PHY is already in FS4LS).
      */
     reg = reg_pre;
     reg &= ~EHCI_PS_CLEAR;
@@ -239,6 +270,13 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
     int speed_usb = zz_speed_to_usb(speed_zz);
     int hw_speed = get_real_speed_from_hw();
     int data_len = be32(&cmd->data_length);
+
+    /* No per-control-xfer trace in the hot path: the UART is
+     * polled-blocking and every line costs milliseconds of
+     * firmware time, turning a 1-second enumeration into 10+
+     * seconds and a mass-storage mount into minutes. The
+     * [usb-proxy] ctrl fail / set_addr / reset prints below
+     * still fire for rare events and are enough for triage. */
 
     if (hw_speed >= 0 && hw_speed != speed_usb) {
         speed_usb = hw_speed;
@@ -345,6 +383,10 @@ static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
     int data_len = be32(&cmd->data_length);
     int is_in = (be16(&cmd->direction) & 0x80);
 
+    /* Per-transfer CBW decode disabled — uncomment for deep
+     * mass-storage debugging. Uses volatile to avoid GCC -O2
+     * coalescing byte reads into a misaligned LDR that traps. */
+
     struct usb_device dev;
     prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint);
 
@@ -374,7 +416,9 @@ static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
         put_be32(&cmd->actual_length, dev.act_len);
         return ZZUSB_STATUS_OK;
     } else {
-        printf("[usb-proxy] bulk fail: addr=%d ep=%d result=%d status=%lx\n",
+        /* Keep the failure print — it's rare and tells us why a
+         * bulk transfer errored. */
+        printf("[bulk] FAIL addr=%d ep=%d result=%d status=%lx\n",
                dev_addr, endpoint, result, dev.status);
         put_be32(&cmd->actual_length, 0);
         return usb_status_to_zz(dev.status);

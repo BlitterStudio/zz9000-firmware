@@ -34,6 +34,13 @@ COMMON_FLAGS += -fno-unwind-tables -fno-asynchronous-unwind-tables
 COMMON_FLAGS += -fno-strict-aliasing
 COMMON_FLAGS += -Wno-incompatible-pointer-types -Wno-return-mismatch -Wno-implicit-function-declaration
 COMMON_FLAGS += -DCONFIG_EHCI_IS_TDI
+# TXFIFO threshold tuning: raises the EHCI TX FIFO fill threshold
+# from 2 to 4 DWORDs before a transaction is launched. Compensates
+# for DDR / AXI pipeline latency on platforms where the RTG engine
+# contests the AXI bus — the EHCI controller would otherwise drain
+# its FIFO faster than DDR can refill it, producing Data Buffer
+# Errors (status=0x20) on HS bulk OUT.
+COMMON_FLAGS += -DCONFIG_USB_EHCI_TXFIFO_THRESH=4
 
 # -O2 flags (default for all files)
 CFLAGS = $(CPU_FLAGS) $(COMMON_FLAGS) -O2

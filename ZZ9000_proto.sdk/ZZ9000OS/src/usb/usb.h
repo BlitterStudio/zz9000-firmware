@@ -7,6 +7,10 @@
  * (C) Copyright 2015 Google, Inc
  * Note: Part of this code has been derived from linux
  *
+ * ZZ9000 modifications:
+ *
+ * Copyright (C) 2026 MNT Research GmbH
+ * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
  */
 #ifndef _USB_H_
 #define _USB_H_

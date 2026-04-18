@@ -3,6 +3,12 @@
  * (C) Copyright 2014, Xilinx, Inc
  *
  * USB Low level initialization(Specific to zynq)
+ *
+ * ZZ9000 modifications (ULPI FS4LS XCVR mode for low-speed root-port
+ * support, SICTRL / CONTROL register setup for ChipIdea TDI).
+ *
+ * Copyright (C) 2026 MNT Research GmbH
+ * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
  */
 
 #include "usb.h"
@@ -63,8 +69,22 @@ int ehci_zynq_probe(struct zynq_ehci_priv *priv)
 
 	//printf("[ehci-zynq] viewport_addr: %p\n", &priv->ehci->ulpi_viewpoint);
 // lifted from https://elixir.bootlin.com/u-boot/latest/source/drivers/usb/host/ehci-fsl.c#L275
-/* Set to Host mode */
-setbits_le32(&ehci->usbmode, CM_HOST);
+/* Set to Host mode + Stream Disable.
+ *
+ * SDIS (bit 4 on Zynq PS USB) disables the EHCI controller's
+ * streaming/prefetch mode. Streaming mode expects AXI reads/writes
+ * to keep up with the USB transfer rate; on a Zorro III card where
+ * AXI is shared with the RTG graphics engine, AXI bandwidth drops
+ * during frame updates and streaming reads hit qTD data-buffer
+ * errors (status 0x20) on HS bulk IN — exactly what we saw on the
+ * SanDisk USB stick. With SDIS set, the EHCI prefills its FIFO
+ * fully before starting the transaction, trading a small amount of
+ * throughput for reliability across the AXI bus.
+ *
+ * This is the standard Zynq / FSL / ChipIdea EHCI workaround;
+ * Xilinx's XUsbPs driver also recommends SDIS for host mode.
+ */
+setbits_le32(&ehci->usbmode, CM_HOST | SDIS);
 
 // Enable controller and select ULPI interface in CONTROL register
 // bit 10: ULPI_SEL, bit 2: USB_EN
@@ -72,6 +92,19 @@ out_be32(&ehci->control, PHY_CLK_SEL_ULPI | USB_EN);
 
 out_be32(&ehci->prictrl, 0x0000000c);
 out_be32(&ehci->age_cnt_limit, 0x00000040);
+
+/*
+ * AXI burst-size tuning. EHCI DMA shares the AXI bus with the RTG
+ * graphics engine; when graphics is busy, AXI arbitration can stall
+ * small bursts and trigger EHCI Data Buffer Errors on HS bulk
+ * transfers. Raising burst size amortises arbitration overhead:
+ *   TXPBURST = 16 DWORDs (64 bytes per AXI burst)
+ *   RXPBURST = 16 DWORDs (64 bytes per AXI burst)
+ * This is the Xilinx-recommended default for Zynq PS USB; higher
+ * values (32/64 DWORDs) may be explored if bulk throughput is still
+ * contested by graphics.
+ */
+out_be32(&ehci->burstsize, 0x00001010);
 
 // SICTRL bit 0 (SITP) should be 0 for ULPI
 out_be32(&ehci->sictrl, 0);
@@ -98,22 +131,20 @@ ulpi_write(&ulpi_vp, &ulpi->otg_ctrl,
 	   ULPI_OTG_EXTVBUSIND);
 
 /*
- * Put the ULPI PHY in FS/LS (FS4LS) composite mode. XCVR_SELECT = 11.
+ * Start the ULPI PHY in HS (XCVR_SELECT = 00) mode so high-speed
+ * devices (mass storage, hubs) get full 480 Mbit/s throughput.
  *
- * Earlier we used ULPI_FC_HIGH_SPEED (XCVR = 00) relying on HS chirp
- * to auto-downgrade. That works for FS devices but wedges LS devices:
- * the HC keeps PR=1 forever because the PHY never completes LS
- * speed negotiation in HS mode, even with PORTSC.PFSC set. FS4LS puts
- * the PHY in FS electrical mode and enables LS preamble support
- * through the integrated TT, which is the supported path for root-hub
- * LS attach on ChipIdea TDI.
+ * Earlier revisions hard-coded FS4LS as a workaround for LS devices
+ * wedging the reset path: PHY in HS mode wouldn't complete LS
+ * chirp negotiation, PR stayed latched, and the HC hung.
  *
- * Tradeoff: HS devices (mass storage, hubs) will enumerate at FS
- * (12 Mbit/s). Acceptable for keyboards/mice; revisit with dynamic
- * XCVR switching if HS mass-storage performance is needed.
+ * The fix is dynamic mode switching (see ehci_zynq_set_phy_mode_ls
+ * below), called by usb_proxy's reset handler when it detects a
+ * low-speed device by line state. HS is the default resting state;
+ * we only dip into FS4LS for LS attach, then switch back.
  */
 ulpi_write(&ulpi_vp, &ulpi->function_ctrl,
-	   ULPI_FC_FS4LS | ULPI_FC_OPMODE_NORMAL |
+	   ULPI_FC_HIGH_SPEED | ULPI_FC_OPMODE_NORMAL |
 	   ULPI_FC_SUSPENDM);
 
 ulpi_write(&ulpi_vp, &ulpi->iface_ctrl, 0);
@@ -128,4 +159,33 @@ usleep(10000);
 	// FIXME removing this made it work! probably because there is another ehci_reset in there?
 	//return ehci_register(&priv->ehcictrl, hccr, hcor, NULL, 0, USB_INIT_HOST);
 	return 0;
+}
+
+/*
+ * Runtime ULPI transceiver-select switch. Called from the reset
+ * handler (usb_proxy.c handle_reset_port) right after it detects
+ * the attached device's line state, BEFORE it asserts port reset.
+ *
+ *   for_low_speed = 1  -> ULPI_FC_FS4LS (LS/FS composite mode)
+ *   for_low_speed = 0  -> ULPI_FC_HIGH_SPEED (HS mode)
+ *
+ * This lets us keep the PHY in HS mode by default (so HS devices
+ * get native 480 Mbit/s throughput) while temporarily dropping to
+ * FS4LS for LS attachments, which won't complete chirp negotiation
+ * in HS mode on this ChipIdea controller.
+ */
+int ehci_zynq_set_phy_mode(int for_low_speed)
+{
+	struct usb_ehci *ehci = (struct usb_ehci *)USB_BASE_ADDR;
+	struct ulpi_viewport ulpi_vp;
+	struct ulpi_regs *ulpi = (struct ulpi_regs *)0;
+	unsigned xcvr;
+
+	ulpi_vp.viewport_addr = (u32)&ehci->ulpi_viewpoint;
+	ulpi_vp.port_num = 0;
+
+	xcvr = for_low_speed ? ULPI_FC_FS4LS : ULPI_FC_HIGH_SPEED;
+
+	return ulpi_write(&ulpi_vp, &ulpi->function_ctrl,
+	                  xcvr | ULPI_FC_OPMODE_NORMAL | ULPI_FC_SUSPENDM);
 }
