@@ -53,7 +53,7 @@ LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -L$(BSP_LIB)
 
 # Libraries (order matters for --start-group)
-LIBS = -lm -Wl,--start-group,-lxil,-lgcc,-lc,--end-group
+LIBS = -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
 
 # Source files
 C_SRCS = \
@@ -108,15 +108,19 @@ $(TARGET): $(OBJS)
 # ulpi.c: GCC 15 null-pointer offset UB workaround (-O0 for this file only)
 $(BUILD_DIR)/usb/ulpi.o: $(SRC_DIR)/usb/ulpi.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O0 -o $@ $<
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O0 -MMD -MP -o $@ $<
 
-# Default rule for all other files (-O2)
+# Default rule for all other files (-O2).
+# -MMD emits a .d file next to the .o listing every header the source
+# pulled in; we -include them below so header changes force a rebuild.
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -o $@ $<
 
 size: $(TARGET)
 	$(SIZE) $(TARGET)
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+-include $(OBJS:.o=.d)

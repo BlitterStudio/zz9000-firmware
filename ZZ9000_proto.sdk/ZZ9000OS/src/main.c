@@ -266,10 +266,6 @@ int main() {
 	u32 zstate_raw;
 	int need_req_ack = 0;
 
-	struct zorro_rd_log { u32 off; u8 b[4]; };
-	static struct zorro_rd_log zrd_log[32];
-	static int zrd_count = 0;
-
 	// audio parameters (buffer locations)
 	uint16_t audio_params[ZZ_NUM_AUDIO_PARAMS];
 	int audio_param = 0; // selected parameter
@@ -871,12 +867,15 @@ int main() {
 				}
 			case REG_ZZ_SDBLK_TX_LO: {
 				sd_storage_write_block |= zdata;
-				if (sd_storage_available_flag) {
-					sd_status = SD_STATUS_BUSY;
-					sd_write_pending = 1;
-				} else {
-					sd_status = 0;
-				}
+				/* Always dispatch — sd_storage_write_blocks() returns
+				 * 0xFF when the HDF is not open (no card, or closed
+				 * after an f_sync failure), which the m68k driver then
+				 * surfaces as an I/O error. The old "silently succeed"
+				 * fallback when the availability flag was clear left
+				 * the guest consuming whatever stale bytes were in the
+				 * shared buffer. */
+				sd_status = SD_STATUS_BUSY;
+				sd_write_pending = 1;
 				break;
 			}
 				case REG_ZZ_SDBLK_RX_HI: {
@@ -885,12 +884,10 @@ int main() {
 				}
 			case REG_ZZ_SDBLK_RX_LO: {
 				sd_storage_read_block |= zdata;
-				if (sd_storage_available_flag) {
-					sd_status = SD_STATUS_BUSY;
-					sd_read_pending = 1;
-				} else {
-					sd_status = 0;
-				}
+				/* See REG_ZZ_SDBLK_TX_LO above: always dispatch so the
+				 * read function can surface 0xFF for a closed HDF. */
+				sd_status = SD_STATUS_BUSY;
+				sd_read_pending = 1;
 				break;
 			}
 				case REG_ZZ_SD_STATUS: {
@@ -902,12 +899,39 @@ int main() {
 					break;
 				}
 				case REG_ZZ_SD_BOOT_CMD: {
-					if (zdata == 1) {
+					/* BOOT_CMD encoding: bits [3:0] = cmd, [15:4] = chunk.
+					 * Single 16-bit register write from the m68k driver. */
+					u32 cmd_word = zdata & 0xFFFF;
+					u32 cmd = cmd_word & 0xF;
+					u32 chunk_idx = (cmd_word >> 4) & 0xFFF;
+					if (cmd == 1) {
 						sd_boot_status = sd_boot_get_info((void*)USB_BLOCK_STORAGE_ADDRESS);
-					} else if (zdata >= 2 && zdata < 10) {
+						Xil_DCacheFlushRange((UINTPTR)USB_BLOCK_STORAGE_ADDRESS, 24u * 1024u);
+						printf("[SD] GETINFO -> %d\n", sd_boot_status);
+					} else if (cmd >= 2 && cmd < 10) {
+						/* LOADFS streams one 16 KB chunk at a time: the
+						 * shared buffer is only 24 KB visible on the bus,
+						 * so filesystems bigger than that must be read in
+						 * pieces. chunk_idx selects which 16 KB slice. */
 						uint32_t fs_size = 0;
-						int fs_idx = zdata - 2;
-						sd_boot_status = sd_boot_load_fs(fs_idx, (void*)USB_BLOCK_STORAGE_ADDRESS, &fs_size);
+						int fs_idx = cmd - 2;
+						uint32_t chunk_offset = chunk_idx * (16u * 1024u);
+						sd_boot_status = sd_boot_load_fs_chunk(fs_idx, chunk_offset,
+						                                      16u * 1024u,
+						                                      (void*)USB_BLOCK_STORAGE_ADDRESS,
+						                                      &fs_size);
+						/* Push ARM D-cache writes to DDR so the Zorro-bus
+						 * read (via AXI_HP, non-coherent) sees fresh bytes. */
+						Xil_DCacheFlushRange((UINTPTR)USB_BLOCK_STORAGE_ADDRESS, 16u * 1024u);
+						if (sd_boot_status != 0 || chunk_idx == 0) {
+							printf("[SD] LOADFS idx=%d chunk=%lu off=%lu -> %d bytes=%lu\n",
+							       fs_idx, (unsigned long)chunk_idx,
+							       (unsigned long)chunk_offset,
+							       sd_boot_status, (unsigned long)fs_size);
+						}
+					} else {
+						printf("[SD] BOOT_CMD: cmd %lu out of range\n",
+						       (unsigned long)cmd);
 					}
 					break;
 				}
@@ -1149,28 +1173,21 @@ int main() {
 					// 0x0000-0x1fff: read from ethernet RX frame
 					// used by Z2
 					ptr = (u8*) (ethernet_current_receive_ptr() + zaddr - (MNT_REG_BASE + 0x2000));
-				} else if (zaddr < MNT_REG_BASE + 0x8000) {
-					// 0x6000-0x7fff: boot ROM
-					// used by Z2
-					//printf("READ ROM: %08lx\n",zaddr);
+				} else if (zaddr < MNT_REG_BASE + 0x6000 + BOOT_ROM_SIZE) {
+					// 0x6000..(0x6000+BOOT_ROM_SIZE): boot ROM.
+					// Must clamp to BOOT_ROM_SIZE — boot_rom_init() only
+					// initializes/flushes that many bytes, and the FPGA
+					// maps the rest of the pre-framebuffer window to
+					// other DDR regions (ethernet TX frame etc.), so
+					// reads past here would expose uninitialized memory.
 					ptr = (u8*) (BOOT_ROM_ADDRESS + zaddr - (MNT_REG_BASE + 0x6000));
 				} else if (zaddr < MNT_REG_BASE + 0xa000) {
-					// 0x8000-0x9fff: read from TX frame (unusual)
-					// FIXME: remove
-					ptr = (u8*) (TX_FRAME_ADDRESS + zaddr - (MNT_REG_BASE + 0x8000));
+					// 0x8000..0x9fff: ethernet TX frame (matches the
+					// FPGA's AXI-DMA mapping so both bulk-path and
+					// ARM-serviced accesses see the same bytes).
+					ptr = (u8*) ((UINTPTR)TX_FRAME_ADDRESS + zaddr - (MNT_REG_BASE + 0x8000));
 				} else if (zaddr < MNT_REG_BASE + 0x10000) {
 					ptr = (u8*) (USB_BLOCK_STORAGE_ADDRESS + zaddr - (MNT_REG_BASE + 0xa000));
-					{
-						u32 off = zaddr - (MNT_REG_BASE + 0xa000);
-						if (off >= 60 && off < 80 && zrd_count < 32) {
-							zrd_log[zrd_count].off = off;
-							zrd_log[zrd_count].b[0] = ptr[0];
-							zrd_log[zrd_count].b[1] = ptr[1];
-							zrd_log[zrd_count].b[2] = ptr[2];
-							zrd_log[zrd_count].b[3] = ptr[3];
-							zrd_count++;
-						}
-					}
 				}
 
 				if (z3) {
@@ -1328,7 +1345,6 @@ int main() {
 				__asm__ __volatile__("dsb" ::: "memory");
 
 				usb_proxy_status = 0;
-				zrd_count = 0;
 			}
 
 			if (idle_task_count > 10000000) {

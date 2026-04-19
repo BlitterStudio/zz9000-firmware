@@ -1,9 +1,10 @@
 /*
  * MNT ZZ9000 SD Boot Metadata Interface
  * Copyright (C) 2026, MNT Research GmbH
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Parses MBR + Amiga RDB from SD card, provides boot metadata
+ * Parses the Amiga RDB of a FAT-hosted HDF, provides boot metadata
  * to the m68k boot ROM driver via shared buffer and registers.
  */
 
@@ -13,30 +14,18 @@
 #include <stdint.h>
 
 #define SD_BOOT_MAGIC           0x5344424F
-#define SD_BOOT_VERSION         1
+#define SD_BOOT_VERSION         2
 #define SD_BOOT_MAX_PARTITIONS  16
 #define SD_BOOT_MAX_FILESYSTEMS 4
 
+/* All multi-byte values below are transported in big-endian byte order
+ * so the 68k driver can read them natively. The firmware copies the
+ * on-disk bytes pass-through where possible; natively-computed fields
+ * get an explicit be32() conversion. */
 struct sd_boot_partition {
-    uint32_t start_block;
-    uint32_t total_blocks;
-    uint32_t dos_type;
-    uint32_t flags;
-    uint32_t size_block;
-    uint32_t surfaces;
-    uint32_t sectors_per_block;
-    uint32_t blocks_per_track;
-    uint32_t reserved;
-    uint32_t pre_alloc;
-    uint32_t interleave;
-    uint32_t low_cyl;
-    uint32_t high_cyl;
-    uint32_t num_buffer;
-    uint32_t buf_mem_type;
-    uint32_t max_transfer;
-    uint32_t mask;
-    uint32_t boot_priority;
-    uint32_t drive_name[8];
+    uint32_t flags;               /* pb_Flags (bit 0 = bootable) */
+    uint32_t environment[20];     /* pb_Environment (DOSEnvec) */
+    uint32_t drive_name[8];       /* pb_DriveName (BSTR, 32 bytes) */
 };
 
 struct sd_boot_filesystem {
@@ -68,6 +57,10 @@ struct sd_boot_info {
 
 int sd_boot_init(void);
 int sd_boot_get_info(void *buffer);
-int sd_boot_load_fs(int fs_index, void *buffer, uint32_t *out_size);
+/* Copy one chunk of the filesystem blob from the internal fs_buf into
+ * the shared buffer, starting at byte `offset`, up to `chunk_size`
+ * bytes. Short chunks at EOF are fine (remainder ignored). */
+int sd_boot_load_fs_chunk(int fs_index, uint32_t offset, uint32_t chunk_size,
+                          void *buffer, uint32_t *out_size);
 
 #endif
