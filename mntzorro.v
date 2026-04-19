@@ -708,6 +708,10 @@ module MNTZorro_v0_1_S00_AXI
   reg z3_ds2;
   reg z3_ds1;
   reg z3_ds0;
+  reg z3_read_latched = 0;
+  reg [31:0] z3_write_addr_latched = 0;
+  reg [31:0] z3_write_data_latched = 0;
+  reg [3:0] z3_write_bytes_latched = 0;
 
   // level shifter direction pins
   assign ZORRO_DATADIR     = ZORRO_DOE & (dataout_enable | dataout_z3); // d2-d9  d10-15, d0-d1
@@ -720,10 +724,14 @@ module MNTZorro_v0_1_S00_AXI
   wire ZORRO_ADDR_T = ~(ZORRO_DOE & dataout_z3);
 
   reg z_ovr = 0;
+`ifdef ZORRO3
+  // Z3 slaves must respond in address phase, before DOE starts the data phase.
+  assign ZORRO_NCINH = (slaven && !z3_fcs_state) ? 1'b1 : 1'b0; // inverse
+  assign ZORRO_NSLAVE = (slaven && !z3_fcs_state) ? 1'b0 : 1'b1;
+`else
   assign ZORRO_NCINH = z_ovr?1'b1:1'b0; // inverse
-
-  // "slave" signals are gated by master's FCS signal
   assign ZORRO_NSLAVE = (ZORRO_DOE & slaven)?1'b0:1'b1; // cannot gate by FCS for Z2
+`endif
   assign ZORRO_NDTACK = (ZORRO_DOE & dtack) ?1'b1:1'b0; // inverse, pull-down transistor on output
   wire [22:0] z3_addr_out = {data_z3_low16_latched, 7'bZZZ_ZZZZ}; // FIXME this creates tri-cell warning?
   //wire [22:0] z3_addr_out = {data_z3_low16_latched, 7'b111_1111}; // FIXME this creates tri-cell warning?
@@ -824,6 +832,7 @@ module MNTZorro_v0_1_S00_AXI
       2'b10: begin
         z3_fcs_state <= 0;
         z3addr <= z3addr2;
+        z3_read_latched <= zREAD_sync[0];
       end
     endcase
 
@@ -1433,6 +1442,10 @@ module MNTZorro_v0_1_S00_AXI
           z3_fast_high <= 0;
           z3_reg_low <= 0;
           z3_reg_high <= 0;
+          z3_read_latched <= 0;
+          z3_write_addr_latched <= 0;
+          z3_write_data_latched <= 0;
+          z3_write_bytes_latched <= 0;
           reg_low <= 0;
           reg_high <= 0;
           ram_low <= 0;
@@ -1566,7 +1579,7 @@ module MNTZorro_v0_1_S00_AXI
 
         Z3_CONFIGURING: begin
           if (z_cfgin && z3addr_autoconfig) begin
-            if (zorro_read) begin
+            if (z3_read_latched) begin
               // autoconfig ROM
               zorro_state <= Z3_AUTOCONF_READ;
               slaven <= 1;
@@ -1994,23 +2007,23 @@ module MNTZorro_v0_1_S00_AXI
           if (z3_fcs_state==0) begin
             // falling edge of /FCS
 
-            if (zorro_write && z3addr_in_reg) begin
+            if (!z3_read_latched && z3addr_in_reg) begin
               // FIXME doesn't support 32 bit access
               // write to register
               zorro_state <= Z3_REGWRITE_PRE;
               slaven <= 1;
-            end else if (zorro_read && z3addr_in_reg) begin
+            end else if (z3_read_latched && z3addr_in_reg) begin
               // read registers
               data_z3_hi16 <= default_data;
               data_z3_low16 <= default_data;
               zorro_state <= Z3_REGREAD_PRE;
               slaven <= 1;
-            end else if (z3addr_in_ram && zorro_write) begin
+            end else if (z3addr_in_ram && !z3_read_latched) begin
               // write to memory
               slaven <= 1;
 
               zorro_state <= Z3_WRITE_PRE;
-            end else if (z3addr_in_ram && zorro_read) begin
+            end else if (z3addr_in_ram && z3_read_latched) begin
               // read from memory
               data_z3_hi16  <= default_data;
               data_z3_low16 <= default_data;
@@ -2083,12 +2096,14 @@ module MNTZorro_v0_1_S00_AXI
           if (!zorro_ram_read_flag) begin
             zorro_state <= Z3_ENDCYCLE;
             dtack <= 1;
-            slaven <= 0;
           end
         end
 
         Z3_WRITE_PRE: begin
           if (z3_ds0||z3_ds1||z3_ds2||z3_ds3) begin
+            z3_write_addr_latched <= z3_mapped_addr;
+            z3_write_bytes_latched <= {z3_ds3,z3_ds2,z3_ds1,z3_ds0};
+            z3_write_data_latched <= {z3_din_high_s2,z3_din_low_s2};
             zorro_state <= Z3_WRITE_PRE2;
           end
         end
@@ -2098,7 +2113,7 @@ module MNTZorro_v0_1_S00_AXI
 `ifdef VARIANT_FW20
           zorro_state <= Z3_WRITE_UPPER;
 `else
-          if (z3_mapped_addr<'h2000)
+          if (z3_write_addr_latched<'h2000)
             zorro_state <= Z3_WRITE_UPPER;
           else
             zorro_state <= WAIT_WRITE_DMA_Z3;
@@ -2111,10 +2126,10 @@ module MNTZorro_v0_1_S00_AXI
           //  debug_counter <= debug_counter + 1;
           //end
         
-          last_z3addr <= z3_mapped_addr;
-          zorro_ram_write_addr  <= z3_mapped_addr;
-          zorro_ram_write_bytes <= {z3_ds3,z3_ds2,z3_ds1,z3_ds0};
-          zorro_ram_write_data  <= {z3_din_high_s2,z3_din_low_s2};
+          last_z3addr <= z3_write_addr_latched;
+          zorro_ram_write_addr  <= z3_write_addr_latched;
+          zorro_ram_write_bytes <= z3_write_bytes_latched;
+          zorro_ram_write_data  <= z3_write_data_latched;
           zorro_ram_write_request <= 1;
 
           zorro_state <= Z3_WRITE_FINALIZE;
@@ -2131,7 +2146,6 @@ module MNTZorro_v0_1_S00_AXI
           if (!zorro_ram_write_flag) begin
             zorro_state <= Z3_ENDCYCLE;
             dtack <= 1;
-            slaven <= 0;
           end
         end
 
@@ -2168,18 +2182,18 @@ module MNTZorro_v0_1_S00_AXI
         end
 
         WAIT_WRITE_DMA_Z3: begin
-          m00_axi_wstrb_z3   <= {z3_ds0, z3_ds1, z3_ds2, z3_ds3};
-          if ( (z3_mapped_addr>='hA000)&&(z3_mapped_addr<'h10000) )
-            m00_axi_awaddr_z3 <= (`USB_BLOCK_STORAGE_ADDRESS - 32'hA000) + z3_mapped_addr;
+          m00_axi_wstrb_z3   <= {z3_write_bytes_latched[0], z3_write_bytes_latched[1], z3_write_bytes_latched[2], z3_write_bytes_latched[3]};
+          if ( (z3_write_addr_latched>='hA000)&&(z3_write_addr_latched<'h10000) )
+            m00_axi_awaddr_z3 <= (`USB_BLOCK_STORAGE_ADDRESS - 32'hA000) + z3_write_addr_latched;
           else
-          if ( (z3_mapped_addr>='h8000)&&(z3_mapped_addr<'hA000) )
-            m00_axi_awaddr_z3 <= (`TX_FRAME_ADDRESS - 32'h8000) + z3_mapped_addr;
+          if ( (z3_write_addr_latched>='h8000)&&(z3_write_addr_latched<'hA000) )
+            m00_axi_awaddr_z3 <= (`TX_FRAME_ADDRESS - 32'h8000) + z3_write_addr_latched;
           else
-          if ( (z3_mapped_addr>='h2000)&&(z3_mapped_addr<'h8000) ) // this is marked in main.c as "FIXME remove"
-            m00_axi_awaddr_z3 <= (`RX_FRAME_ADDRESS - 32'h2000) + z3_mapped_addr;
+          if ( (z3_write_addr_latched>='h2000)&&(z3_write_addr_latched<'h8000) ) // this is marked in main.c as "FIXME remove"
+            m00_axi_awaddr_z3 <= (`RX_FRAME_ADDRESS - 32'h2000) + z3_write_addr_latched;
           else
-            m00_axi_awaddr_z3  <= `ARM_MEMORY_START + (z3_mapped_addr/*&32'hfffffffc*/); // max 256MB
-          m00_axi_wdata_z3   <= {z3_din_low_s2[7:0], z3_din_low_s2[15:8], z3_din_high_s2[7:0], z3_din_high_s2[15:8]};
+            m00_axi_awaddr_z3  <= `ARM_MEMORY_START + z3_write_addr_latched; // max 256MB
+          m00_axi_wdata_z3   <= {z3_write_data_latched[7:0], z3_write_data_latched[15:8], z3_write_data_latched[23:16], z3_write_data_latched[31:24]};
 
           m00_axi_awvalid_z3  <= 1;
           if (m00_axi_awready) begin
