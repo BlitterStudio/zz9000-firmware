@@ -722,8 +722,15 @@ module MNTZorro_v0_1_S00_AXI
   reg z_ovr = 0;
   assign ZORRO_NCINH = z_ovr?1'b1:1'b0; // inverse
 
+`ifdef ZORRO3
+  // Z3 slaves must respond in the address phase (after /FCS falls, before
+  // /DOE), which is required for coexistence with another spec-compliant Z3
+  // slave like the A4091. The previous DOE-gated form asserts too late.
+  assign ZORRO_NSLAVE = (slaven && !z3_fcs_state) ? 1'b0 : 1'b1;
+`else
   // "slave" signals are gated by master's FCS signal
   assign ZORRO_NSLAVE = (ZORRO_DOE & slaven)?1'b0:1'b1; // cannot gate by FCS for Z2
+`endif
   assign ZORRO_NDTACK = (ZORRO_DOE & dtack) ?1'b1:1'b0; // inverse, pull-down transistor on output
   wire [22:0] z3_addr_out = {data_z3_low16_latched, 7'bZZZ_ZZZZ}; // FIXME this creates tri-cell warning?
   //wire [22:0] z3_addr_out = {data_z3_low16_latched, 7'b111_1111}; // FIXME this creates tri-cell warning?
