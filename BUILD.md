@@ -57,11 +57,28 @@ depending on your QSPI/SD boot setup), power-cycle the Amiga.
 
 ## CI
 
-[`.gitlab-ci.yml`](.gitlab-ci.yml) runs on every push: installs the ARM
-toolchain, builds bootgen from source, then runs `./build_firmware.sh`
+The GitHub Actions workflow
+[`.github/workflows/build.yml`](.github/workflows/build.yml) runs on
+every push and pull request: installs the Arm GNU Toolchain (cached),
+builds bootgen from source (cached), then runs `./build_firmware.sh`
 + `./build_bootimage.sh` against the committed bitstream. It does **not**
 run Vivado — any HDL change must include an updated
 `bootimage_work/zz9000_ps_wrapper.bit` for CI to pick up the new logic.
+Build artifacts (`ZZ9000OS.elf`, `BOOT.bin`) are uploaded per run.
+
+### Cutting a release
+
+Push a `v*` tag (e.g. `v1.14`, or `v1.15-rc1` for a pre-release) and
+the workflow will build the firmware and publish a GitHub Release with
+`BOOT-<tag>.bin` + `ZZ9000OS-<tag>.elf` attached and auto-generated
+release notes:
+
+```bash
+git tag -a v1.14 -m "Firmware 1.14"
+git push origin v1.14
+```
+
+Tags containing `-` are marked as pre-releases.
 
 ## Why `bootimage_work/` is the canonical output dir
 

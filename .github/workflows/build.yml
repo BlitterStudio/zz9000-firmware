@@ -1,0 +1,149 @@
+name: Build firmware
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch/PR. Never cancel tag builds —
+# those feed the release job.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: firmware + BOOT.bin
+    runs-on: ubuntu-latest
+    env:
+      ARM_TOOLCHAIN_VERSION: 13.2.rel1
+      ARM_TOOLCHAIN_DIR: ${{ github.workspace }}/.toolchain/arm-gnu-toolchain
+      BOOTGEN_REF: master
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            wget xz-utils make ca-certificates python3 g++ libssl-dev flex bison
+
+      # Arm GNU Toolchain with newlib. Ubuntu's gcc-arm-none-eabi package
+      # uses picolibc, which is incompatible with the Xilinx BSP (references
+      # newlib internals like _impure_ptr).
+      - name: Cache Arm GNU Toolchain
+        id: toolchain-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.ARM_TOOLCHAIN_DIR }}
+          key: arm-gnu-toolchain-${{ env.ARM_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Download Arm GNU Toolchain
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          case "${{ runner.arch }}" in
+            X64)   TC_HOST=x86_64  ;;
+            ARM64) TC_HOST=aarch64 ;;
+            *)     echo "Unsupported runner arch: ${{ runner.arch }}"; exit 1 ;;
+          esac
+          TC_BASE="arm-gnu-toolchain-${ARM_TOOLCHAIN_VERSION}-${TC_HOST}-arm-none-eabi"
+          URL="https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_TOOLCHAIN_VERSION}/binrel/${TC_BASE}.tar.xz"
+          mkdir -p "${ARM_TOOLCHAIN_DIR}"
+          wget -q "$URL" -O toolchain.tar.xz
+          tar xf toolchain.tar.xz --strip-components=1 -C "${ARM_TOOLCHAIN_DIR}"
+          rm toolchain.tar.xz
+
+      - name: Add toolchain to PATH
+        run: echo "${ARM_TOOLCHAIN_DIR}/bin" >> "$GITHUB_PATH"
+
+      # bootgen is Xilinx's boot image packager. Not packaged by any distro,
+      # so we build from source and cache the binary between runs.
+      - name: Cache bootgen
+        id: bootgen-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/.toolchain/bootgen
+          key: bootgen-${{ env.BOOTGEN_REF }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build bootgen from source
+        if: steps.bootgen-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${BOOTGEN_REF}" https://github.com/Xilinx/bootgen.git bootgen-src
+          make -C bootgen-src -j"$(nproc)"
+          mkdir -p "${{ github.workspace }}/.toolchain/bootgen"
+          cp bootgen-src/bootgen "${{ github.workspace }}/.toolchain/bootgen/bootgen"
+
+      - name: Export BOOTGEN
+        run: echo "BOOTGEN=${{ github.workspace }}/.toolchain/bootgen/bootgen" >> "$GITHUB_ENV"
+
+      - name: Build firmware (ZZ9000OS.elf)
+        run: ./build_firmware.sh
+
+      - name: Package boot image (BOOT.bin)
+        run: ./build_bootimage.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: zz9000-firmware-${{ github.sha }}
+          path: |
+            ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+            bootimage_work/BOOT.bin
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout (for release notes generation)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: zz9000-firmware-${{ github.sha }}
+          path: dist
+
+      - name: Stage and rename release assets
+        id: stage
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p release
+          cp "dist/bootimage_work/BOOT.bin" "release/BOOT-${TAG}.bin"
+          cp "dist/ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf" "release/ZZ9000OS-${TAG}.elf"
+          # Pre-release if tag contains a hyphen (v1.14-rc1, v1.14-beta, …).
+          if [[ "$TAG" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          ls -lh release/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          FLAGS=(--generate-notes --title "ZZ9000 firmware ${TAG}")
+          if [[ "${{ steps.stage.outputs.prerelease }}" == "true" ]]; then
+            FLAGS+=(--prerelease)
+          fi
+          gh release create "$TAG" "${FLAGS[@]}" \
+            "release/BOOT-${TAG}.bin" \
+            "release/ZZ9000OS-${TAG}.elf"
