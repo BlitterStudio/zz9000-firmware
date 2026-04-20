@@ -7,7 +7,6 @@
  * ZZ9000 modifications (ULPI FS4LS XCVR mode for low-speed root-port
  * support, SICTRL / CONTROL register setup for ChipIdea TDI).
  *
- * Copyright (C) 2026 MNT Research GmbH
  * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
  */
 

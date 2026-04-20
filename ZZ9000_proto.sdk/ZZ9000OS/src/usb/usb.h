@@ -9,7 +9,6 @@
  *
  * ZZ9000 modifications:
  *
- * Copyright (C) 2026 MNT Research GmbH
  * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
  */
 #ifndef _USB_H_

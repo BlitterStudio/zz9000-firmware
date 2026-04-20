@@ -1,6 +1,5 @@
 /*
- * MNT ZZ9000 SD Card Storage
- * Copyright (C) 2026, MNT Research GmbH
+ * ZZ9000 SD Card Storage
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
