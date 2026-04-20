@@ -1,6 +1,16 @@
-# MNT ZZ9000 ZYNQ FPGA Code and ZZ9000OS C/ARM Code
+# ZZ9000 ZYNQ FPGA + ZZ9000OS ARM Code — BlitterStudio fork
 
-MNT ZZ9000 is a graphics and ARM coprocessor card for Amiga computers equipped with Zorro slots. It is based on a Xilinx ZYNQ Z-7020 chip that combines 7-series FPGA fabric with dual ARM Cortex-A9 CPUs clocked at 666MHz. The current version has 1GB of DDR3 RAM and no eMMC soldered.
+> **Fork notice.** This repository is an independent fork and continued
+> development of the original MNT ZZ9000 FPGA/firmware sources. It is
+> maintained by Dimitris Panokostas / **BlitterStudio** and is **not
+> affiliated with, endorsed by, or supported by MNT Research GmbH**.
+> The ZZ9000 hardware itself is designed and manufactured by MNT
+> Research GmbH — hardware questions belong with them; firmware issues
+> and fork-specific discussion belong here.
+>
+> Upstream (pre-fork): https://source.mnt.re/amiga/zz9000-firmware
+
+The ZZ9000 is a graphics and ARM coprocessor card for Amiga computers equipped with Zorro slots. It is based on a Xilinx ZYNQ Z-7020 chip that combines 7-series FPGA fabric with dual ARM Cortex-A9 CPUs clocked at 666MHz. The current version has 1GB of DDR3 RAM and no eMMC soldered.
 
 This repository contains the sources for the FPGA logic as well as the miniature "operating system" that runs on the ARM core 0 and instruments core 1 for user applications.
 

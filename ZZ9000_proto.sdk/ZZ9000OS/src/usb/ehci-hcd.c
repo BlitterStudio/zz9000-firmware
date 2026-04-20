@@ -6,7 +6,6 @@
  * recovery, NAK-on-idle-interrupt behaviour, silenced hot-path
  * printfs, int-queue leak fix, dev->act_len on int-completion, etc.)
  *
- * Copyright (C) 2026 MNT Research GmbH
  * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
  */
 

@@ -4,7 +4,6 @@
  * ZZ9000 USB Proxy — command mailbox protocol between the m68k
  * Poseidon USB driver and the ARM firmware's EHCI host stack.
  *
- * Copyright (C) 2026 MNT Research GmbH
  * Copyright (C) 2026 Dimitris Panokostas <midwan@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify
