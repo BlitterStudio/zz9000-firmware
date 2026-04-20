@@ -1,4 +1,4 @@
-# ZZ9000 ZYNQ FPGA + ZZ9000OS ARM Code — BlitterStudio fork
+# ZZ9000 FPGA + ZZ9000OS — BlitterStudio fork
 
 > **Fork notice.** This repository is an independent fork and continued
 > development of the original MNT ZZ9000 FPGA/firmware sources. It is
@@ -10,119 +10,135 @@
 >
 > Upstream (pre-fork): https://source.mnt.re/amiga/zz9000-firmware
 
-The ZZ9000 is a graphics and ARM coprocessor card for Amiga computers equipped with Zorro slots. It is based on a Xilinx ZYNQ Z-7020 chip that combines 7-series FPGA fabric with dual ARM Cortex-A9 CPUs clocked at 666MHz. The current version has 1GB of DDR3 RAM and no eMMC soldered.
+The ZZ9000 is a graphics and ARM coprocessor card for Amiga computers
+with Zorro II/III slots. It is built around a Xilinx Zynq-7020: 7-series
+FPGA fabric next to a dual-core ARM Cortex-A9 at 666 MHz, with 1 GB of
+DDR3. This repository holds the FPGA logic (Zorro bus, video formatter,
+scanline generator, AXI plumbing) and the small bare-metal firmware
+(ZZ9000OS) that runs on the ARM and drives it.
 
-This repository contains the sources for the FPGA logic as well as the miniature "operating system" that runs on the ARM core 0 and instruments core 1 for user applications.
+Current firmware revision: **1.14**.
 
-Warning: this is still in the process of cleanup. Many hacks have been made.
+## What this fork adds on top of upstream
 
-# Requirements
+- **Scanlines V2** — three patterns (classic / soft / gradient) with
+  odd/even parity, gated to AGA scandoubled modes and RTG resolutions
+  below 350 lines. V1 intensity scanlines still work. Original patches
+  by Xanxi, adapted by midwan.
+- **RTG performance** — NEON intrinsics for pixel fill/blit paths,
+  batch palette transfer, operation fusion, and tuned compiler flags.
+- **USB 2.0 host stack (ARM side)** — EHCI driver plus a USB command
+  proxy, with Zynq AXI stability fixes (USBMODE_SDIS, ULPI dynamic XCVR
+  switching, BURSTSIZE, TXFIFO threshold) and direct-DMA bulk transfers
+  straight from the shared mailbox. Previously unused on the card.
+- **SD boot** — HDF-on-FAT storage backend and an autoboot ROM path, so
+  the Amiga can boot from an image file on the ZZ9000's microSD.
+- **Videocap fixes** — NTSC black-screen on RTG→capture switch, interlace
+  detection hardening, big-sprite 2×2 doubling, `double_sprite` /
+  `hires_sprite` flag propagation through the Z2 and Z3 sprite paths.
+- **GCC 15 toolchain** — standalone Makefile build that no longer needs
+  Xilinx's ancient Eclipse SDK. See [BUILD.md](BUILD.md).
+- **CI** — GitHub Actions workflow that builds firmware + BOOT.bin on
+  every push/PR using the committed bitstream, and publishes a GitHub
+  Release with `BOOT.bin` + `ZZ9000OS.elf` attached when a `v*` tag is
+  pushed ([.github/workflows/build.yml](.github/workflows/build.yml)).
 
-Currently requires Xilinx Vivado Webpack version.
+## Building
 
-# Getting around the Code
+See **[BUILD.md](BUILD.md)** for the current, supported build flow
+(three composable scripts, same path CI takes):
+
+- [`build_firmware.sh`](build_firmware.sh) — ARM firmware ELF
+- [`build_bitstream.sh`](build_bitstream.sh) — FPGA bitstream (needs Vivado 2018.3)
+- [`build_bootimage.sh`](build_bootimage.sh) — packages everything into `BOOT.bin`
+
+Firmware-only iteration only needs `arm-none-eabi-gcc` + `bootgen` — no
+Vivado, no Xilinx SDK. The committed bitstream in `bootimage_work/` is
+the CI source of truth; commit a new one alongside any HDL change.
+
+To (re)generate the Vivado project from scratch:
+```
+source /path/to/Xilinx/Vivado/2018.3/settings64.sh
+cd zz9000-firmware
+vivado -mode tcl -source zz9000_project.tcl
+```
+
+## Repository layout
 
 The interesting bits:
 
-- `mntzorro.v` is the Zorro 2/3 interface and 24-bit video capture engine, AXI4-Lite interface
-- `video_formatter.v` is the AXI video stream formatter that reinterprets and controls an incoming 32-bit word stream as 8-bit palette indexed, 16-bit 565 or 24-bit RGBX pixels and outputs a 24-bit true color parallel RGB stream with horizontal and vertical sync
-- `zz9000-fw/ZZ9000_proto.sdk/ZZ9000OS/src`
-  - `main.c` is the main entrypoint of ZZ9000OS.elf which runs on the ARM core 0 and talks to `MNTZorro` and `video_formatter` in the FPGA fabric
-  - `gfx.c` graphics acceleration routines, currently mainly rect fill and copy
-  - `ethernet.c` low-level ethernet driver/framer
-- `ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc` XDC constraints file that contains the pin/ball mappings and some timing voodoo
+- [`mntzorro.v`](mntzorro.v) — Zorro II/III bus interface, 24-bit video
+  capture engine, AXI4-Lite master into the rest of the design.
+- [`video_formatter.v`](video_formatter.v) — AXI-Stream formatter that
+  reinterprets a 32-bit word stream as 8-bit palette, 16-bit RGB565, or
+  24-bit RGBX, and emits a 24-bit parallel RGB stream with H/V sync.
+- [`ZZ9000_proto.sdk/ZZ9000OS/src/`](ZZ9000_proto.sdk/ZZ9000OS/src/) — ZZ9000OS firmware (bare-metal, runs on Cortex-A9 core 0):
+  - `main.c` — entrypoint, register dispatch, IRQ wiring
+  - `gfx.c`, `dma_rtg.c` — RTG accel (rect, blit, pan, sprites)
+  - `ethernet.c` — KSZ9031 driver / framer
+  - `usb.c`, `usb_proxy.c` — EHCI host + Amiga-side proxy
+  - `sd_boot.c` — HDF-on-FAT SD boot path
+- [`ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc`](ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc) — pin/ball mapping and timing constraints.
+- [`zz9000_project.tcl`](zz9000_project.tcl) — exported Vivado block design (source of truth for the project).
+- [`bootimage_work/`](bootimage_work/) — canonical output directory; holds the committed `FSBL_exec.elf`, bitstream, and generated `BOOT.bin`.
 
 ![ZZ9000 Block Design](gfx/zz9000-bd.png?raw=true "ZZ9000 Block Design")
 
-# Set up Vivado Project
+## Flashing
 
-As Vivado projects are not suitable for version control, the Vivado project / block design is exported as a TCL script `zz9000_project.tcl`.
+Copy `bootimage_work/BOOT.bin` to the ZZ9000's microSD (rename per your
+QSPI/SD boot setup), reseat, power-cycle the Amiga.
 
-Start Vivado from your terminal in tcl mode:
+## Hardware connectivity
+
+Schematics are in the manual (PDF):
+<https://mntre.com/media/ZZ9000_info_md/zz9000-manual.pdf>
+
+- DVI (via non-HDMI-compliant HDMI connector), SiliconImage 9022 encoder
+- Gigabit Ethernet, Micrel KSZ9031 PHY
+- microSD slot (firmware + SD boot)
+- USB 2.0 host port (wired up by this fork)
+
+## License
+
+SPDX-License-Identifier: **GPL-3.0-or-later** —
+<https://spdx.org/licenses/GPL-3.0-or-later.html>
+
+Per-file copyright headers are authoritative. Pre-fork copyrights on
+the original sources are preserved in-tree and belong to their original
+authors — see the [upstream repository][upstream] for the canonical
+pre-fork notices. Fork-specific changes are copyright their respective
+contributors under the same GPL-3.0-or-later terms.
+
+[upstream]: https://source.mnt.re/amiga/zz9000-firmware
+
+### Fork contributions
+
+- **Scanlines** — V1 intensity scanlines and V2 multi-mode scanlines
+  (classic / soft / gradient with parity control) by Xanxi, adapted for
+  firmware 1.13+ / 1.14 by Dimitris Panokostas (midwan). V2 leaves the
+  V1 intensity registers decoded but unused.
+- **Scanlines V2 block-design integration** (TCL wiring between
+  mntzorro's scanline outputs and video_formatter) and the split
+  firmware / bitstream / bootimage build scripts — Dimitris Panokostas.
+- **RTG performance** — NEON intrinsics, compiler flags, batch palette
+  transfer, operation fusion — Dimitris Panokostas.
+- **USB 2.0 host stack on the ARM side** — EHCI + USB command proxy,
+  Zynq AXI stability fixes (USBMODE_SDIS, ULPI dynamic XCVR switching,
+  BURSTSIZE, TXFIFO threshold, direct-DMA bulk transfers from the shared
+  mailbox) — Dimitris Panokostas.
+- **SD boot** (HDF-on-FAT storage backend, autoboot ROM),
+  videocap / sprite fixes, GCC 15 build, and CI pipeline —
+  Dimitris Panokostas.
+
+## Making the Xilinx Platform Cable work (Linux)
 
 ```
-source /path/to/Xilinx/Vivado/2018.3/settings64.sh
-cd /place/where/you/checked/out/zz9000-firmware
-vivado -mode tcl
+sudo apt install fxload
+sudo cp -r xilinx-xusb /etc/xilinx-xusb
 ```
 
-Then, execute in the Vivado TCL shell:
-
-```
-source zz9000_project.tcl
-exit
-```
-
-A folder `ZZ9000_proto` should have been created. Start Vivado normally (GUI) and navigate in the Open Project dialog to `zz9000-firmware/ZZ9000_proto` and open `ZZ9000_proto.xpr`. 
-
-After a while you should be able to select "Run Synthesis" in Flow Navigator, and after that completes, "Run Implementation" and finally "Generate Bitstream". Finally, select "Export Hardware" from the "File" menu and check "Include Bitstream". Export to "Local to Project". Then, open the SDK by selecting "Launch SDK" from the "File" menu. Leave everything at "Local to Project" and click OK.
-
-Your SDK workspace will start with the `zz9000_ps_wrapper_hw_platform_0` project.
-
-To recreate a project for ZZ9000OS, go to "File" / "New" / "Application Project". Enter "ZZ9000OS" as the Project name and click "Next". Select "Empty Application". Click "Finish". Right click "ZZ9000OS" in your Project Explorer and select "Import". Select "General" / "File System", click "Next". Select the `ZZ9000_proto.sdk` / `ZZ9000OS` subfolder in your `zz9000-firmware` folder. Check the checkmark next to "ZZ9000OS". Click Finish. Select "Yes to all" in the overwrite dialog. Now you will be able to build ZZ9000OS.
-
-Before the next step, configure your BSP Project. Expand the ZZ9000OS_bsp node and double click `system.mss`. Click "Modify this BSP's Settings". Check `xilffs` in the Supported Libraries.
-
-To recreate the bootloader project, go to "File" / "New" / "Application Project". Enter "ZZ9000FSBL" as the Project name, select "Use existing" under Target Software and click "Next". Select "Zynq FSBL". Click "Finish".
-
-# Building BOOT.bin
-
-The Eclipse-based Vivado SDK has a built-in tool (Menu "Xilinx" / "Create Boot Image") to generate the boot image `BOOT.bin`. To prepare, open `ZZ9000_proto.sdk/ZZ9000OS/bootimage/ZZ9000OS.bif` in a text editor and change the absolute paths to match the correct ELF files on your filesystem.
-
-In the "Create Boot Image" dialog, select "Import from existing BIF file" and select the definition file `ZZ9000_proto.sdk/ZZ9000OS/bootimage/ZZ9000OS.bif` and click "Create Image".
-
-`BOOT.bin` contains 3 files (“partitions”):
-
-- `FSBL.elf` (first stage bootloader, written in C, Xilinx default)
-- FPGA bitfile (synthesized by Vivado from Verilog sources and Block Design)
-- `ZZ9000OS.elf` (ZZ9000OS ARM executable, written in C)
-
-# Hardware Connectivity
-
-Schematics are in the manual (PDF): https://mntre.com/media/ZZ9000_info_md/zz9000-manual.pdf
-
-- DVI (via non-HDMI compliant HDMI connector) with SiliconImage 9022 encoder
-- Gigabit Ethernet port with Micrel KSZ9031 PHY
-- MicroSD slot (for firmware loading)
-- USB 2.0 port (not yet used)
-
-# License / Copyright
-
-If not stated otherwise in specific source code files, everything here is:
-
-Copyright (C) 2016-2026, Lucie L. Hartmann <lucie@mntre.com>
-MNT Research GmbH, Berlin
-https://mntre.com
-
-SPDX-License-Identifier: GPL-3.0-or-later
-https://spdx.org/licenses/GPL-3.0-or-later.html
-
-Scanline bitstream patches (V1 intensity scanlines and V2 multi-mode
-scanlines with parity control) by Xanxi, adapted for
-firmware 1.13+ / 1.14 by Dimitris Panokostas (midwan). V2 adds three
-patterns (classic / soft / gradient) with odd/even parity, gated to
-AGA scandoubled modes and RTG resolutions below 350 lines; it leaves
-the V1 intensity registers decoded but unused.
-
-RTG performance optimizations (NEON intrinsics, compiler flags, batch
-palette transfer, operation fusion) by Dimitris Panokostas.
-
-USB 2.0 host stack on the ARM side (EHCI + USB command proxy, Zynq
-AXI stability fixes — USBMODE_SDIS, ULPI dynamic XCVR switching,
-BURSTSIZE, TXFIFO threshold, direct-DMA bulk transfers from the shared
-mailbox) by Dimitris Panokostas.
-
-Scanlines V2 block-design integration (the TCL wiring that connects
-mntzorro's scanline outputs to video_formatter) and the split
-firmware/bitstream/bootimage build scripts by Dimitris Panokostas.
-
-# Making the Platform Cable Work
-
-First, `apt install fxload`
-
-Copy the `xilinx-xusb` folder to `/etc/xilinx-xusb`.
-
-Edit `/etc/udev/rules.d/xusbdfwu.rules` with the following content:
+Create `/etc/udev/rules.d/xusbdfwu.rules` with:
 
 ```
 # version 0003
@@ -135,5 +151,5 @@ SUBSYSTEM=="usb", ACTION=="add", ATTRS{idVendor}=="03fd", ATTRS{idProduct}=="001
 SUBSYSTEM=="usb", ACTION=="add", ATTRS{idVendor}=="03fd", ATTRS{idProduct}=="0015", RUN+="/sbin/fxload -v -t fx2 -I /etc/xilinx-xusb/xusb_xse.hex -D $tempnode"
 ```
 
-This will make udev launch fxload whenever the platform cable is plugged in. Fxload will in turn load those hex files (firmware) into the cable. The LED on the cable should then turn green.
-
+udev will launch fxload whenever the platform cable is plugged in,
+loading those hex firmwares onto it. The cable LED should turn green.
