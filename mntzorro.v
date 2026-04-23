@@ -517,21 +517,6 @@ module MNTZorro_v0_1_S00_AXI
               end
             endcase
           end
-        // Hard-clear the ARM-ack bits in slv_reg0 while z_reset is
-        // asserted. Placed AFTER the write case so NBA last-write-wins
-        // forces bits 30/31 to 0 even when the ARM is concurrently
-        // writing byte lane 3 (which covers those bits). Without this
-        // ordering, an ARM write to reg0 coincident with reset could
-        // leave either ack bit high, and the post-reset fresh-ack
-        // epoch gate in the FSM block would never observe them low —
-        // leaving ARM-serviced Zorro reads/writes deadlocked on
-        // exactly the stale-ACK case this clear is meant to prevent.
-        // The ARM must not depend on writing ack during reset anyway,
-        // so bits 30/31 are safe to stomp here.
-        if (z_reset) begin
-          slv_reg0[30] <= 1'b0;
-          slv_reg0[31] <= 1'b0;
-        end
       end
     end
 
@@ -992,19 +977,6 @@ module MNTZorro_v0_1_S00_AXI
   localparam Z3_RXBUF_AR_WAIT = 63;
 `endif
 
-  // Explicit AR-wait states for single-beat reads. These close the
-  // false-handshake hazard where WAIT_READ_DMA_Z3 / WAIT_READ would
-  // previously sample m00_axi_arready in the same cycle ARVALID was
-  // NBA-assigned to 1. Because m00_axi_arvalid is a registered output,
-  // an ARREADY sampled before ARVALID is bus-visible reflects an idle
-  // slave, not an accepted transfer; if the slave withdrew ARREADY
-  // once ARVALID actually rose, the FSM would advance to the R-wait
-  // state with no handshake ever completing and hang waiting for a
-  // beat that never arrives. The dedicated AR-wait states hold
-  // ARVALID stable until a real ARVALID&&ARREADY handshake occurs.
-  localparam Z3_SINGLE_AR_WAIT = 64;
-  localparam Z2_AR_WAIT        = 65;
-
   (* mark_debug = "true" *) reg [7:0] zorro_state = COLD;
   reg [7:0] dtack_counter;
 `ifdef ZORRO2
@@ -1055,40 +1027,9 @@ module MNTZorro_v0_1_S00_AXI
   reg [7:0]  rxbuf_fill_count_snap  = 0;
   // Fill-completion bookkeeping: we only publish the line if the burst
   // delivered all 8 beats with OKAY responses. A short burst or error
-  // response leaves rxbuf_valid low and falls through to a bounded retry.
+  // response leaves rxbuf_valid low and falls through to a miss retry.
   reg        rxbuf_fill_error       = 0;
   reg        rxbuf_fill_req_seen    = 0;
-  // Retry bound: caps how many times a single Zorro cycle can reissue
-  // a miss burst. Selector-handoff aborts recover naturally once the
-  // firmware stops writing slv_reg4, but a hard AXI fault would loop
-  // forever without a bound. After the bound is hit we give the Amiga
-  // a deterministic default-word completion so the bus does not hang.
-  reg [2:0]  rxbuf_retry_count      = 0;
-  // Slot-poison state. When a single backlog slot hits the retry bound,
-  // we latch a sticky poison bit against that selector. All subsequent
-  // reads of the same slot return 0xFFFFFFFF without touching AXI, so
-  // the driver reads a consistent all-ones image and its frame-level
-  // size/content sanity gate drops the frame deterministically rather
-  // than quietly absorbing one fabricated longword of payload.
-  //
-  // Poison is keyed on BOTH selector value AND the slv_reg4 write
-  // generation captured at fill time. A firmware queue-drain rewrite
-  // of REG4 back to the same numeric value still bumps the generation,
-  // so poison auto-clears on that edge; and poison uses the captured
-  // burst snapshot, not the live selector, so poisoning during
-  // selector churn cannot tag a slot the failed burst never read.
-  reg        rxbuf_slot_poison       = 0;
-  reg [20:0] rxbuf_poison_sel        = 0;
-  reg [7:0]  rxbuf_poison_count_snap = 0;
-  // AR/beat-level timeout counter. Covers two hang cases that the
-  // retry bound alone cannot: (a) slave never asserts arready after
-  // the master drives arvalid, and (b) slave accepts AR but never
-  // returns any rvalid beat. At 100 MHz ACLK the 12-bit saturation
-  // is ~40.96 us — comfortably longer than Zynq PS DDR worst-case
-  // latency (including DRAM refresh) but short enough that a wedged
-  // slave does not hold the Amiga Zorro cycle indefinitely. On
-  // timeout the slot is poisoned and the cycle fail-closes.
-  reg [11:0] rxbuf_timeout_count     = 0;
 `endif
 
   reg [31:0] video_control_data_zorro;
@@ -1109,51 +1050,6 @@ module MNTZorro_v0_1_S00_AXI
 
   reg zorro_ram_read_flag;
   reg zorro_ram_write_flag ;
-  // Generic AXI read-response tracker. Set when m00_axi_arvalid is
-  // accepted (arvalid && arready) by any read path — backlog burst,
-  // single-beat WAIT_READ_DMA_Z3B, any future reader — and cleared
-  // when the transaction's final beat arrives (rvalid && rlast). A
-  // mid-transaction z_reset uses this to hold the RESET state until
-  // the slave's response has drained, so the first post-reset read
-  // cannot consume R beats that belong to a pre-reset transaction.
-  // Tracking is unconditional (post-case), so it fires even if the
-  // per-state FSM branch doesn't see the handshake directly — e.g.,
-  // when z_reset wins the case and the acceptance happened on the
-  // reset edge.
-  reg axi_r_outstanding = 0;
-  // Single-beat AXI read timeout. Covers the hang where the slave
-  // backpressures after ARVALID really rises (the pre-fix code
-  // sampled ARREADY in the same cycle ARVALID was NBA-assigned, so
-  // it could decide the handshake succeeded when the bus transfer
-  // never actually occurred, leaving WAIT_READ_DMA_Z3B waiting for
-  // an RVALID that will never come). 12 bits @ 100 MHz saturates in
-  // ~40 us — orders of magnitude longer than any healthy single-beat
-  // latency but short enough that a fault does not hold the Amiga
-  // bus. On saturation the state fails closed with 0xFFFFFFFF.
-  reg [11:0] axi_single_timeout_count = 0;
-  // RESET drain-timeout safety net. The in-state timeout paths
-  // (Z3_RXBUF_FILL_R, WAIT_READ_DMA_Z3B, WAIT_READ2) retire an
-  // orphan transaction by force-clearing axi_r_outstanding, which
-  // handles the common case where the timeout fires during normal
-  // FSM operation. But a z_reset that arrives mid-burst bypasses
-  // those case branches entirely (reset-dominant if/else), so the
-  // in-state clear never runs and the flag can still be pinned in
-  // RESET if the slave never emits RLAST. 20 bits saturates in
-  // ~10 ms @ 100 MHz — long enough that a transient stall always
-  // resolves via natural drain first, short enough that a warm
-  // Amiga reset can always recover the card without a PS reboot.
-  reg [19:0] reset_drain_count = 0;
-  // Post-reset ARM handshake epoch gate. Forces zorro_ram_*_flag low
-  // after z_reset until we have observed the corresponding ack bit in
-  // slv_reg0 (the AXI-lite mirror of ARM's writes) go LOW at least
-  // once. The ARM firmware is asynchronous and may have left a
-  // pre-reset ack bit asserted; without this gate, the very first
-  // post-reset Z3_READ_DELAY1 / Z3_WRITE_FINALIZE cycle would
-  // immediately complete against that stale ack. The gate opens only
-  // after a clearing edge, so the next real ARM ack is a legitimate
-  // rising edge against a zero baseline.
-  reg ack0_fresh_post_reset = 1'b1;
-  reg ack1_fresh_post_reset = 1'b1;
 
   reg videocap_mode;
   reg videocap_mode_in;
@@ -1575,49 +1471,9 @@ module MNTZorro_v0_1_S00_AXI
     videocap_mode <= videocap_mode_in;
 
     if (/*z_cfgin_lo ||*/ z_reset) begin
-      // Reset dominates the FSM: the case body below runs only in
-      // the else-branch so a mid-burst RLAST or ARREADY can never
-      // override this zorro_state<=RESET with a trailing transition
-      // (Verilog NBA "last write wins" would otherwise let the case
-      // branch clobber the reset). Critical Amiga-facing signals and
-      // the RX-line-buffer publish path are force-cleared here so a
-      // stale hit cannot leak a pre-reset line onto the Amiga bus.
       zorro_state <= RESET;
-      dtack <= 0;
-      slaven <= 0;
-      dataout_enable <= 0;
-      dataout_z3 <= 0;
-      // Cancel any in-flight ARM-serviced Zorro RAM transaction. The
-      // ARM firmware loop polls these request/flag bits every cycle
-      // and services them unconditionally; leaving them asserted
-      // during z_reset lets a request issued just before reset still
-      // execute (and ack) during the reset pulse, turning reset into
-      // a non-barrier for the ARM path.
-      zorro_ram_read_request  <= 0;
-      zorro_ram_write_request <= 0;
-      zorro_ram_read_flag     <= 0;
-      zorro_ram_write_flag    <= 0;
-      // Arm the epoch gate. The post-reset cycles must observe a
-      // clearing edge on slv_reg0's ack bits before zorro_ram_*_flag
-      // can go high again, so a stale ACK left in the AXI-lite regs
-      // by pre-reset ARM firmware cannot satisfy the first post-reset
-      // Z3 read/write completion.
-      ack0_fresh_post_reset   <= 0;
-      ack1_fresh_post_reset   <= 0;
-`ifdef RX_BACKLOG_LINEBUF
-      rxbuf_valid <= 0;
-      // Drop any sticky slot poison on reset so the first post-reset
-      // read of the (firmware-rearmed) backlog is not gated by a
-      // pre-reset fault latch.
-      rxbuf_slot_poison <= 0;
-`endif
-      // Force ARVALID low so any AR phase pre-reset is no longer
-      // outstanding on the AXI AR channel. The unconditional tracker
-      // after the case still catches an (arvalid && arready) that
-      // fires on this exact edge — axi_r_outstanding is tracked
-      // outside this branch and stays correct across the reset.
-      m00_axi_arvalid <= 0;
-    end else
+    end
+    
       case (zorro_state)
 
         COLD: begin
@@ -1662,50 +1518,10 @@ module MNTZorro_v0_1_S00_AXI
           rxbuf_fill_req_seen    <= 0;
           rxbuf_frame_sel_snap   <= 0;
           rxbuf_tag              <= 0;
-          rxbuf_retry_count      <= 3'd0;
-          rxbuf_timeout_count    <= 12'd0;
 `endif
-          // Force arvalid low; if any read was issued before the
-          // z_reset arrived, hold this RESET state until the
-          // outstanding AXI R beats drain so the next post-reset
-          // read cannot consume leftover beats from the pre-reset
-          // transaction. axi_r_outstanding covers every read path
-          // (backlog burst and single-beat), so reset is a real
-          // barrier for the AXI side regardless of where the read
-          // originated. The unconditional post-case tracker sets
-          // and clears this flag every cycle.
-          m00_axi_arvalid        <= 1'b0;
 
-          // RESET exit policy:
-          //   - Normal: exit on !z_reset && !axi_r_outstanding. The
-          //     in-state timeout paths clear the flag on their own,
-          //     so under almost every fault model we reach this
-          //     branch cleanly.
-          //   - Safety net: a z_reset that arrives mid-burst bypasses
-          //     the case branches entirely (reset-dominant if/else),
-          //     so the in-state timeout retire never runs. If the
-          //     slave also never emits RLAST, axi_r_outstanding stays
-          //     pinned and RESET would hang forever. After
-          //     reset_drain_count saturates (~10 ms @ 100 MHz),
-          //     force-clear the flag and exit. The tradeoff — a
-          //     late RVALID beat being consumed by the first
-          //     post-reset read — is bounded and far preferable to
-          //     a permanent warm-reset lockout requiring a PS
-          //     reboot to recover.
-          if (!z_reset) begin
-            if (!axi_r_outstanding) begin
-              reset_drain_count <= 20'd0;
-              zorro_state <= DECIDE_Z2_Z3;
-            end else if (&reset_drain_count) begin
-              axi_r_outstanding <= 1'b0;
-              reset_drain_count <= 20'd0;
-              zorro_state <= DECIDE_Z2_Z3;
-            end else begin
-              reset_drain_count <= reset_drain_count + 20'd1;
-            end
-          end else begin
-            reset_drain_count <= 20'd0;
-          end
+          if (!z_reset)
+            zorro_state <= DECIDE_Z2_Z3;
 
           videocap_mode_in <= 1;
         end
@@ -2069,14 +1885,6 @@ module MNTZorro_v0_1_S00_AXI
           if (last_addr<'h2000)
             // read via ARM
             zorro_state <= WAIT_READ3;
-          else if (axi_r_outstanding) begin
-            // A prior AXI read is still in flight (late-draining
-            // burst, post-timeout transaction, etc.). Fail-close the
-            // Z2 read with 0xFFFF so bus releases and no new AR
-            // collides with the pending response.
-            data_out <= 16'hFFFF;
-            zorro_state <= WAIT_READ2D;
-          end
           else begin
             // read via AXI DMA
             if (last_addr>='ha000 && last_addr<'h10000)
@@ -2092,57 +1900,25 @@ module MNTZorro_v0_1_S00_AXI
               m00_axi_araddr  <= (`BOOT_ROM_ADDRESS - 32'h6000) + {last_addr[23:2],2'b00};
             else
               m00_axi_araddr  <= `ARM_MEMORY_START + {last_addr[23:2],2'b00};
-
-            // Force single-beat defaults. A prior RX backlog fill
-            // may have left arlen=7/arburst=INCR behind — inheriting
-            // those here would spawn an 8-beat burst that WAIT_READ2
-            // only consumes one beat of, leaving seven more to drain
-            // into later reads.
-            m00_axi_arlen   <= 'h0;
-            m00_axi_arburst <= 'h0;
-            m00_axi_arvalid <= 1;
-            axi_single_timeout_count <= 12'd0;
-            zorro_state <= Z2_AR_WAIT;
+  
+            m00_axi_arvalid  <= 1;
+            if (m00_axi_arready) begin
+              zorro_state <= WAIT_READ2;
+            end
+            
           end
         end
-
-        Z2_AR_WAIT: begin
-          // Same contract as Z3_SINGLE_AR_WAIT — hold ARVALID until
-          // a real VALID&&READY handshake occurs, never advance on a
-          // pre-bus-visible ARREADY sample, and bound the wait so a
-          // stalled slave does not wedge the Z2 cycle.
-          if (m00_axi_arready) begin
-            m00_axi_arvalid          <= 1'b0;
-            axi_single_timeout_count <= 12'd0;
-            zorro_state              <= WAIT_READ2;
-          end else if (&axi_single_timeout_count) begin
-            m00_axi_arvalid <= 1'b0;
-            data_out        <= 16'hFFFF;
-            zorro_state     <= WAIT_READ2D;
-          end else begin
-            axi_single_timeout_count <= axi_single_timeout_count + 12'd1;
-          end
-        end
-
+        
         WAIT_READ2: begin
+          m00_axi_arvalid <= 0;
           if (m00_axi_rvalid) begin
             zorro_state <= WAIT_READ2D;
-
+            
             // le endian swap
             if (last_addr[1] == 1)
               data_out <= {m00_axi_rdata[23:16], m00_axi_rdata[31:24]};
             else
               data_out <= {m00_axi_rdata[7:0], m00_axi_rdata[15:8]};
-          end else if (&axi_single_timeout_count) begin
-            // Same orphan-retire rationale as Z3B: force-clear the
-            // outstanding-read tracker on timeout so a stalled Z2
-            // AXI read does not pin the flag and contaminate
-            // unrelated read windows.
-            axi_r_outstanding <= 1'b0;
-            data_out    <= 16'hFFFF;
-            zorro_state <= WAIT_READ2D;
-          end else begin
-            axi_single_timeout_count <= axi_single_timeout_count + 12'd1;
           end
         end
         
@@ -2444,32 +2220,6 @@ module MNTZorro_v0_1_S00_AXI
         WAIT_READ_DMA_Z3: begin
 `ifdef RX_BACKLOG_LINEBUF
           if (z3_mapped_addr>='h2000 && z3_mapped_addr<'h6000) begin
-            // Fail-closed poison check runs before hit/miss. Once a
-            // slot hits the retry bound, every subsequent read from
-            // that same (selector, generation) returns 0xFFFFFFFF
-            // without issuing a burst, which guarantees the driver
-            // sees a consistent all-ones image (size-field and body
-            // both poisoned). The frame-level sanity gate then drops
-            // the frame wholesale rather than absorbing one fabricated
-            // longword of payload.
-            //
-            // Keyed on BOTH selector and the slv_reg4 write generation
-            // captured at poison time, plus gated with
-            // slv_reg4_wr_this_cycle exactly like the cache hit. A
-            // firmware queue-drain rewrite of REG4 back to the same
-            // numeric value still bumps slv_reg4_write_count, so
-            // auto-clear fires on that edge and the first post-drain
-            // frame in the same-numbered slot is NOT fail-closed.
-            if (rxbuf_slot_poison
-                && rxbuf_poison_sel == eth_rx_frame_select
-                && rxbuf_poison_count_snap == slv_reg4_write_count
-                && !slv_reg4_wr_this_cycle) begin
-              data_z3_hi16  <= 16'hFFFF;
-              data_z3_low16 <= 16'hFFFF;
-              dataout_z3    <= 1;
-              dtack         <= 1;
-              zorro_state   <= Z3_ENDCYCLE;
-            end else
             // RX backlog path: try line buffer first, else issue 8-beat burst fill
             // Hit predicate. Two independent guards protect against
             // slv_reg4 handoffs that the cache hasn't processed yet:
@@ -2492,23 +2242,6 @@ module MNTZorro_v0_1_S00_AXI
               dataout_z3 <= 1;
               dtack <= 1;
               zorro_state <= Z3_ENDCYCLE;
-            end else if (axi_r_outstanding) begin
-              // A prior AXI read transaction is still in flight — most
-              // likely a post-AR timeout whose rlast never arrived, or
-              // a slave that is streaming beats slowly. Issuing a new
-              // AR here would conflict with the pending transaction,
-              // and any late rvalid beat on the old one would be
-              // consumed by the new burst's FILL_R state. Fail-close
-              // this Zorro cycle instead so the bus releases; the
-              // drain tracker continues to wait for rlast on the old
-              // transaction. Cache hits above still serve normally,
-              // so legitimate reads from already-filled lines are
-              // not blocked by the drain.
-              data_z3_hi16  <= 16'hFFFF;
-              data_z3_low16 <= 16'hFFFF;
-              dataout_z3    <= 1;
-              dtack         <= 1;
-              zorro_state   <= Z3_ENDCYCLE;
             end else begin
               // MISS — issue one 8-beat INCR burst to fill the 32-byte line.
               // All AR values and cache metadata are latched here and held
@@ -2540,30 +2273,15 @@ module MNTZorro_v0_1_S00_AXI
               // the fill rather than revalidating against a line that was
               // read from a now-superseded slot.
               rxbuf_fill_count_snap  <= slv_reg4_write_count;
-              rxbuf_timeout_count    <= 12'd0;
-              // Always transition through Z3_RXBUF_AR_WAIT; never treat
-              // the same-cycle ARREADY sample as an accepted handshake.
-              // m00_axi_arvalid is a register whose NBA update to 1
-              // only becomes visible on the bus at the next ACLK edge,
-              // so an ARREADY sampled here reflects an idle slave, not
-              // a completed ARVALID&&ARREADY transfer. Advancing to
-              // Z3_RXBUF_FILL_R on that sample would hang if the slave
-              // drops ARREADY once ARVALID rises (no beats ever arrive).
-              zorro_state <= Z3_RXBUF_AR_WAIT;
+              if (m00_axi_arready) begin
+                zorro_state <= Z3_RXBUF_FILL_R;
+              end else begin
+                zorro_state <= Z3_RXBUF_AR_WAIT;
+              end
             end
           end else
 `endif
-          if (axi_r_outstanding) begin
-            // Same drain-gate rationale as the backlog miss path: a
-            // prior AXI read is still in flight, so issuing a new AR
-            // here would collide with its pending rvalid stream.
-            // Fail-close this non-backlog Zorro read instead.
-            data_z3_hi16  <= 16'hFFFF;
-            data_z3_low16 <= 16'hFFFF;
-            dataout_z3    <= 1;
-            dtack         <= 1;
-            zorro_state   <= Z3_ENDCYCLE;
-          end else begin
+          begin
             if (z3_mapped_addr>='ha000 && z3_mapped_addr<'h10000)
               m00_axi_araddr  <= (`USB_BLOCK_STORAGE_ADDRESS - 32'ha000) + z3_mapped_addr;
             else
@@ -2578,64 +2296,26 @@ module MNTZorro_v0_1_S00_AXI
             else
               m00_axi_araddr  <= `ARM_MEMORY_START + (z3_mapped_addr/*&32'hfffffffc*/); // max 256MB
 
-            // Force single-beat defaults on every non-backlog issue,
-            // independent of RX_BACKLOG_LINEBUF, so a prior backlog
-            // fill's arlen=7/arburst=INCR cannot leak into this
-            // single-beat request and leave extra R beats draining
-            // into later reads.
+`ifdef RX_BACKLOG_LINEBUF
+            // Restore single-beat defaults in case a prior backlog fill left arlen=7
             m00_axi_arlen   <= 'h0;
             m00_axi_arburst <= 'h0;
-            m00_axi_arvalid <= 1;
-            axi_single_timeout_count <= 12'd0;
-            zorro_state <= Z3_SINGLE_AR_WAIT;
-          end
-        end
-
-        Z3_SINGLE_AR_WAIT: begin
-          // Hold ARVALID stable (no NBA) until the slave asserts
-          // ARREADY with ARVALID actually visible on the bus. Only
-          // then is the handshake real. On completion, drop ARVALID
-          // and enter the R-wait state; on timeout, fail-close the
-          // Zorro cycle.
-          if (m00_axi_arready) begin
-            m00_axi_arvalid          <= 1'b0;
-            axi_single_timeout_count <= 12'd0;
-            zorro_state              <= WAIT_READ_DMA_Z3B;
-          end else if (&axi_single_timeout_count) begin
-            m00_axi_arvalid <= 1'b0;
-            data_z3_hi16    <= 16'hFFFF;
-            data_z3_low16   <= 16'hFFFF;
-            dataout_z3      <= 1;
-            dtack           <= 1;
-            zorro_state     <= Z3_ENDCYCLE;
-          end else begin
-            axi_single_timeout_count <= axi_single_timeout_count + 12'd1;
+`endif
+            m00_axi_arvalid  <= 1;
+            if (m00_axi_arready) begin
+              zorro_state <= WAIT_READ_DMA_Z3B;
+            end
           end
         end
 
         WAIT_READ_DMA_Z3B: begin
+          m00_axi_arvalid <= 0;
           if (m00_axi_rvalid) begin
             zorro_state <= Z3_ENDCYCLE;
             data_z3_hi16 <= {m00_axi_rdata[7:0], m00_axi_rdata[15:8]};
             data_z3_low16 <= {m00_axi_rdata[23:16], m00_axi_rdata[31:24]};
             dataout_z3 <= 1; // enable data output
             dtack <= 1;
-          end else if (&axi_single_timeout_count) begin
-            // No RVALID within the timeout window. Retire the
-            // orphaned transaction by force-clearing
-            // axi_r_outstanding so unrelated AXI-backed reads are
-            // not fail-closed to 0xFFFF indefinitely and so RESET
-            // can exit. The tradeoff (a late beat may be misrouted
-            // if the slave resumes) is bounded and preferable to
-            // permanent contamination of other read windows.
-            axi_r_outstanding <= 1'b0;
-            data_z3_hi16  <= 16'hFFFF;
-            data_z3_low16 <= 16'hFFFF;
-            dataout_z3    <= 1;
-            dtack         <= 1;
-            zorro_state   <= Z3_ENDCYCLE;
-          end else begin
-            axi_single_timeout_count <= axi_single_timeout_count + 12'd1;
           end
         end
 
@@ -2644,54 +2324,15 @@ module MNTZorro_v0_1_S00_AXI
           // Hold ARVALID and all AR-phase values stable (no assignment
           // = NBA retains previous value) until the slave accepts the
           // address. AXI requires master to keep araddr/arlen/arburst
-          // unchanged while ARVALID is high and ARREADY is low. Only
-          // here, where ARVALID is known to be visible on the bus (it
-          // was registered out one cycle ago in WAIT_READ_DMA_Z3), is
-          // an ARREADY sample a valid handshake. Deassert ARVALID as
-          // soon as the transfer is accepted so the slave sees a
-          // single-cycle AR phase, not a phantom second request.
+          // unchanged while ARVALID is high and ARREADY is low.
           if (m00_axi_arready) begin
-            m00_axi_arvalid <= 1'b0;
-            rxbuf_timeout_count <= 12'd0;
             zorro_state <= Z3_RXBUF_FILL_R;
-          end else if (&rxbuf_timeout_count) begin
-            // AR never accepted within the timeout window. Poison the
-            // captured slot snapshot (not the live selector) and fail
-            // closed, so the Zorro cycle completes instead of hanging
-            // forever on a wedged slave. The post-case tracker keeps
-            // axi_r_outstanding correct in the unlikely case the slave
-            // does eventually accept — the late response drains on
-            // rready=1 and rlast clears the flag.
-            m00_axi_arvalid         <= 1'b0;
-            // Restore single-beat defaults so a subsequent Z2/Z3
-            // single-beat issue does not inherit arlen=7/arburst=INCR
-            // from this aborted burst and spawn an 8-beat read when
-            // only one beat is expected.
-            m00_axi_arlen           <= 'h0;
-            m00_axi_arburst         <= 'h0;
-            rxbuf_valid             <= 1'b0;
-            rxbuf_retry_count       <= 3'd0;
-            rxbuf_slot_poison       <= 1'b1;
-            rxbuf_poison_sel        <= rxbuf_frame_sel_snap;
-            rxbuf_poison_count_snap <= rxbuf_fill_count_snap;
-            data_z3_hi16            <= 16'hFFFF;
-            data_z3_low16           <= 16'hFFFF;
-            dataout_z3              <= 1;
-            dtack                   <= 1;
-            zorro_state             <= Z3_ENDCYCLE;
-          end else begin
-            rxbuf_timeout_count <= rxbuf_timeout_count + 12'd1;
           end
         end
 
         Z3_RXBUF_FILL_R: begin
           m00_axi_arvalid <= 0;
           if (m00_axi_rvalid) begin
-            // Reset the inter-beat timeout on every data beat — the
-            // timeout is "no progress for N cycles," not "whole burst
-            // must complete in N cycles," so a slow-draining slave is
-            // fine as long as each beat arrives within the window.
-            rxbuf_timeout_count <= 12'd0;
             rxbuf_data[rxbuf_fill_idx] <= m00_axi_rdata;
             // Early-serve the requested longword only while the burst is
             // still covering a slot that has not been superseded. A write
@@ -2718,18 +2359,15 @@ module MNTZorro_v0_1_S00_AXI
             // starting a new cycle before the burst drains, leaving
             // slaven/rxbuf state stale across cycles.
             if (m00_axi_rlast) begin
-              // Restore single-beat AXI defaults. The unconditional
-              // post-case tracker handles clearing axi_r_outstanding
-              // on this same cycle (rvalid && rlast), so no per-state
-              // write is needed here.
-              m00_axi_arlen      <= 'h0;
-              m00_axi_arburst    <= 'h0;
+              // Restore single-beat AXI defaults regardless of outcome.
+              m00_axi_arlen   <= 'h0;
+              m00_axi_arburst <= 'h0;
               // Commit only if every predicate for a trustworthy fill
               // holds: selector stable, no error on any beat, the burst
               // actually delivered all 8 beats (rlast must coincide with
               // the 8th-beat index, i.e. fill_idx == 7 pre-increment),
               // and the requested beat was seen. Otherwise fall back to
-              // a bounded retry rather than publish a partial line.
+              // a miss retry rather than publish a partial line.
               // `rxbuf_fill_req_seen` is an NBA-updated flag, so when the
               // requested beat coincides with the last beat (offset 0x1c
               // = beat 7) the register is still 0 during this cycle's
@@ -2743,80 +2381,22 @@ module MNTZorro_v0_1_S00_AXI
                   && rxbuf_fill_idx == 3'd7
                   && (rxbuf_fill_req_seen
                       || rxbuf_fill_idx == z3_mapped_addr[4:2])) begin
-                rxbuf_valid       <= 1'b1;
-                rxbuf_retry_count <= 3'd0;
+                rxbuf_valid <= 1'b1;
                 dtack <= 1;
                 zorro_state <= Z3_ENDCYCLE;
-              end else if (rxbuf_retry_count >= 3'd3) begin
-                // Retry bound exhausted. Rather than complete with a
-                // single fabricated longword of payload (which would
-                // let the frame body stream continue with one bad dword
-                // silently wedged in the middle), latch a sticky slot
-                // poison against the BURST SNAPSHOT that actually
-                // failed — not the live selector, which may already
-                // have churned to a new slot. The fail-closed check
-                // at the top of WAIT_READ_DMA_Z3 then forces every
-                // subsequent read of (snap_sel, snap_count) to
-                // 0xFFFFFFFF too, so the driver's frame-level
-                // size/content sanity gate sees a consistent all-ones
-                // image and drops the whole frame. Poison clears
-                // automatically when the firmware either advances
-                // selector or bumps the slv_reg4 write generation.
-                rxbuf_valid             <= 1'b0;
-                rxbuf_retry_count       <= 3'd0;
-                rxbuf_slot_poison       <= 1'b1;
-                rxbuf_poison_sel        <= rxbuf_frame_sel_snap;
-                rxbuf_poison_count_snap <= rxbuf_fill_count_snap;
-                data_z3_hi16      <= 16'hFFFF;
-                data_z3_low16     <= 16'hFFFF;
-                dataout_z3        <= 1;
-                dtack             <= 1;
-                zorro_state       <= Z3_ENDCYCLE;
               end else begin
                 // Either the slot was superseded, the burst reported an
                 // error, it short-returned rlast before 8 beats, or the
                 // requested word never arrived. Discard the fill, clear
-                // any early-latched data lines, bump the retry count,
-                // and re-enter the hit/miss decision. The next pass
-                // will miss (rxbuf_valid is low) and issue a fresh
-                // burst against the current selector.
-                rxbuf_valid       <= 1'b0;
-                rxbuf_retry_count <= rxbuf_retry_count + 3'd1;
-                dataout_z3        <= 0;
-                zorro_state       <= WAIT_READ_DMA_Z3;
+                // any early-latched data lines, and re-enter the hit/
+                // miss decision. The next pass will miss (rxbuf_valid is
+                // low) and issue a fresh burst against the current
+                // selector.
+                rxbuf_valid <= 1'b0;
+                dataout_z3  <= 0;
+                zorro_state <= WAIT_READ_DMA_Z3;
               end
             end
-          end else if (&rxbuf_timeout_count) begin
-            // No rvalid beat observed within the per-beat timeout
-            // window. Slave is wedged — retire the orphaned
-            // transaction by force-clearing axi_r_outstanding so the
-            // FSM does not leak fabricated 0xFFFF reads into
-            // unrelated AXI windows (boot ROM, USB, ARM memory) and
-            // so the next z_reset can exit RESET without hanging on
-            // a dead flag. A late rvalid that arrives after the
-            // force-clear would be consumed by whatever state is
-            // active (rready is tied high); that is a bounded
-            // tradeoff — at worst it corrupts one downstream read,
-            // which the driver's sanity gate rejects — versus the
-            // far worse alternatives of permanent contamination or
-            // permanent reset hang. The post-case tracker still
-            // fires on arvalid&&arready for future transactions, so
-            // normal tracking resumes on the next issue.
-            axi_r_outstanding       <= 1'b0;
-            rxbuf_valid             <= 1'b0;
-            rxbuf_retry_count       <= 3'd0;
-            rxbuf_slot_poison       <= 1'b1;
-            rxbuf_poison_sel        <= rxbuf_frame_sel_snap;
-            rxbuf_poison_count_snap <= rxbuf_fill_count_snap;
-            m00_axi_arlen           <= 'h0;
-            m00_axi_arburst         <= 'h0;
-            data_z3_hi16            <= 16'hFFFF;
-            data_z3_low16           <= 16'hFFFF;
-            dataout_z3              <= 1;
-            dtack                   <= 1;
-            zorro_state             <= Z3_ENDCYCLE;
-          end else begin
-            rxbuf_timeout_count <= rxbuf_timeout_count + 12'd1;
           end
         end
 `endif
@@ -2941,24 +2521,6 @@ module MNTZorro_v0_1_S00_AXI
         end
       endcase
 
-    // Unconditional AXI read-response tracker. Runs AFTER the case
-    // so it is the single source of truth for whether a read is
-    // outstanding, regardless of which FSM branch (if any) issued or
-    // consumed it. Because NBA last-write-wins, these assignments
-    // override any per-state writes on the same cycle — in practice
-    // the per-state writes have been removed so the tracker is
-    // authoritative. Runs even under z_reset so a handshake that
-    // fires on the reset edge is captured and drained correctly.
-    // Ordering: set first, then clear. For a single-master read port,
-    // a new (arvalid && arready) cannot overlap another transaction's
-    // (rvalid && rlast), so the two if-statements are mutually
-    // exclusive per cycle — the explicit order just documents the
-    // invariant.
-    if (m00_axi_arvalid && m00_axi_arready)
-      axi_r_outstanding <= 1'b1;
-    if (m00_axi_rvalid && m00_axi_rlast)
-      axi_r_outstanding <= 1'b0;
-
     // PSEN reset
     //if (E7M_PSEN==1'b1) E7M_PSEN <= 1'b0;
 
@@ -2989,51 +2551,16 @@ module MNTZorro_v0_1_S00_AXI
     if (axi_reg5[3] == 1)
       zz9000ax_reset_out <= axi_reg5[2];
 
-    // read / write request acknowledged by ARM.
-    //
-    // Two layers of protection so that a stale pre-reset ACK bit
-    // cannot satisfy a post-reset Z3 completion:
-    //   1. While z_reset is asserted, zero-force axi_reg0/1 and
-    //      suppress zorro_ram_*_flag resample. This handles the
-    //      in-reset window.
-    //   2. After z_reset drops, the ack*_fresh_post_reset gate holds
-    //      zorro_ram_*_flag low until slv_reg0 is observed with the
-    //      corresponding ack bit CLEARED at least once. The ARM
-    //      firmware writes slv_reg0 asynchronously; if a pre-reset
-    //      request had its ACK bit left high in slv_reg0, this gate
-    //      makes the FSM ignore it until ARM has had a chance to
-    //      clear the bit, so the next ARM ack is a real rising edge.
-    if (!z_reset) begin
-      if (!slv_reg0[30]) ack0_fresh_post_reset <= 1'b1;
-      if (!slv_reg0[31]) ack1_fresh_post_reset <= 1'b1;
+    // read / write request acknowledged by ARM
+    zorro_ram_read_flag  <= axi_reg0[30];
+    zorro_ram_write_flag <= axi_reg0[31];
 
-      zorro_ram_read_flag  <= axi_reg0[30] & ack0_fresh_post_reset;
-      zorro_ram_write_flag <= axi_reg0[31] & ack1_fresh_post_reset;
-
-      axi_reg0 <= slv_reg0;
-      axi_reg1 <= slv_reg1;
-    end else begin
-      axi_reg0 <= 32'h0;
-      axi_reg1 <= 32'h0;
-    end
-
+    axi_reg0 <= slv_reg0;
+    axi_reg1 <= slv_reg1;
     axi_reg2 <= slv_reg2; // ARM video control
     axi_reg3 <= slv_reg3; // ARM video control
     eth_rx_frame_select <= slv_reg4;
     axi_reg5 <= slv_reg5; // Amiga IRQ
-
-`ifdef RX_BACKLOG_LINEBUF
-    // Auto-clear sticky slot poison on ANY slv_reg4 generation change.
-    // Matches the cache-validity predicate: poison is only meaningful
-    // while (selector, write_count) still equal the captured burst
-    // snapshot. A queue-drain firmware rewrite of REG4 back to the
-    // same numeric value still bumps slv_reg4_write_count, so poison
-    // does not stick across an intended refill. Runs every ACLK.
-    if (rxbuf_slot_poison
-        && (rxbuf_poison_sel != eth_rx_frame_select
-            || rxbuf_poison_count_snap != slv_reg4_write_count))
-      rxbuf_slot_poison <= 1'b0;
-`endif
 
     if (video_control_axi) begin
       video_control_data <= video_control_data_axi;
