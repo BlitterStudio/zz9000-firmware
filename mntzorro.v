@@ -1483,9 +1483,30 @@ module MNTZorro_v0_1_S00_AXI
     videocap_mode <= videocap_mode_in;
 
     if (/*z_cfgin_lo ||*/ z_reset) begin
+      // Reset dominates the FSM: the case body below runs only in
+      // the else-branch so a mid-burst RLAST or ARREADY can never
+      // override this zorro_state<=RESET with a trailing transition
+      // (Verilog NBA "last write wins" would otherwise let the case
+      // branch clobber the reset). Critical Amiga-facing signals and
+      // the RX-line-buffer publish path are force-cleared here so a
+      // stale hit cannot leak a pre-reset line onto the Amiga bus.
       zorro_state <= RESET;
-    end
-    
+      dtack <= 0;
+      slaven <= 0;
+      dataout_enable <= 0;
+      dataout_z3 <= 0;
+`ifdef RX_BACKLOG_LINEBUF
+      rxbuf_valid <= 0;
+      // Force ARVALID low so a burst issued pre-reset is no longer
+      // outstanding on the AXI AR channel. Still drain remaining R
+      // beats from any already-accepted burst (arvalid&&arready fired
+      // before reset asserted) so the next post-reset miss does not
+      // consume leftover beats as if they were its own.
+      m00_axi_arvalid <= 0;
+      if (m00_axi_rvalid && m00_axi_rlast)
+        rxbuf_ar_in_flight <= 0;
+`endif
+    end else
       case (zorro_state)
 
         COLD: begin
@@ -2296,12 +2317,15 @@ module MNTZorro_v0_1_S00_AXI
               // the fill rather than revalidating against a line that was
               // read from a now-superseded slot.
               rxbuf_fill_count_snap  <= slv_reg4_write_count;
-              if (m00_axi_arready) begin
-                rxbuf_ar_in_flight <= 1'b1;
-                zorro_state <= Z3_RXBUF_FILL_R;
-              end else begin
-                zorro_state <= Z3_RXBUF_AR_WAIT;
-              end
+              // Always transition through Z3_RXBUF_AR_WAIT; never treat
+              // the same-cycle ARREADY sample as an accepted handshake.
+              // m00_axi_arvalid is a register whose NBA update to 1
+              // only becomes visible on the bus at the next ACLK edge,
+              // so an ARREADY sampled here reflects an idle slave, not
+              // a completed ARVALID&&ARREADY transfer. Advancing to
+              // Z3_RXBUF_FILL_R on that sample would hang if the slave
+              // drops ARREADY once ARVALID rises (no beats ever arrive).
+              zorro_state <= Z3_RXBUF_AR_WAIT;
             end
           end else
 `endif
@@ -2348,10 +2372,16 @@ module MNTZorro_v0_1_S00_AXI
           // Hold ARVALID and all AR-phase values stable (no assignment
           // = NBA retains previous value) until the slave accepts the
           // address. AXI requires master to keep araddr/arlen/arburst
-          // unchanged while ARVALID is high and ARREADY is low.
+          // unchanged while ARVALID is high and ARREADY is low. Only
+          // here, where ARVALID is known to be visible on the bus (it
+          // was registered out one cycle ago in WAIT_READ_DMA_Z3), is
+          // an ARREADY sample a valid handshake. Deassert ARVALID as
+          // soon as the transfer is accepted so the slave sees a
+          // single-cycle AR phase, not a phantom second request.
           if (m00_axi_arready) begin
+            m00_axi_arvalid    <= 1'b0;
             rxbuf_ar_in_flight <= 1'b1;
-            zorro_state <= Z3_RXBUF_FILL_R;
+            zorro_state        <= Z3_RXBUF_FILL_R;
           end
         end
 
