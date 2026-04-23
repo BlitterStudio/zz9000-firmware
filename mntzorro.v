@@ -31,13 +31,6 @@
 `define VARIANT_Z3_FASTRAM
 `define VARIANT_AUTOBOOT        // enable autoboot ROM
 
-// Line-buffered RX backlog reads: a single 8-beat AXI burst fills an
-// on-chip 32-byte line; sequential Z3 longword reads hit the line
-// instead of paying the full PS DDR round-trip per word. Scoped to the
-// RX backlog window (z3_mapped_addr in [h2000, h6000)); all other read
-// paths are unchanged. Comment out to fall back to single-beat reads.
-`define RX_BACKLOG_LINEBUF
-
 `define C_S_AXI_DATA_WIDTH 32
 `define C_S_AXI_ADDR_WIDTH 5
 `ifdef VARIANT_2MB
@@ -421,17 +414,6 @@ module MNTZorro_v0_1_S00_AXI
   // and the slave is ready to accept the write address and write data.
   assign slv_reg_wren = axi_wready && S_AXI_WVALID && axi_awready && S_AXI_AWVALID;
 
-`ifdef RX_BACKLOG_LINEBUF
-  // Same-cycle write-to-slv_reg4 detect. The registered `slv_reg4_write_count`
-  // reflects the write one ACLK later, which leaves a 1-cycle window in which
-  // a concurrent backlog hit-check could still see the old counter. This
-  // combinational decode closes that window: the hit predicate in the Zorro
-  // FSM consults it directly, so a write landing on the same ACLK as a read
-  // evaluation forces an immediate miss.
-  wire slv_reg4_wr_this_cycle = slv_reg_wren
-       && (axi_awaddr[ADDR_LSB+OPT_MEM_ADDR_BITS:ADDR_LSB] == 3'h4);
-`endif
-
   always @( posedge S_AXI_ACLK )
     begin
       if ( S_AXI_ARESETN == 1'b0 )
@@ -442,15 +424,6 @@ module MNTZorro_v0_1_S00_AXI
           slv_reg3 <= 0;
           slv_reg4 <= 0;
           slv_reg5 <= 0;
-`ifdef RX_BACKLOG_LINEBUF
-          // Reset the write-count alongside slv_reg4 so the AXI-lite
-          // reset domain cannot diverge from the Zorro FSM's view of
-          // the selector-write generation. The FSM's post-case check
-          // (rxbuf_saw_write_count vs slv_reg4_write_count) will observe
-          // the mismatch on the cycles following reset and clear
-          // rxbuf_valid before any stale hit can be served.
-          slv_reg4_write_count <= 0;
-`endif
         end
       else begin
         if (slv_reg_wren)
@@ -484,22 +457,13 @@ module MNTZorro_v0_1_S00_AXI
                     // Slave register 3
                     slv_reg3[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
-              3'h4: begin
+              3'h4:
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
                     // Respective byte enables are asserted as per write strobes
                     // Slave register 4
                     slv_reg4[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
-`ifdef RX_BACKLOG_LINEBUF
-                // Monotonic counter of slv_reg4 writes. Used by the Zorro
-                // FSM to detect (a) any write since miss issue, and (b) a
-                // write landing on the same cycle as a hit evaluation. Two
-                // writes within one 30-ACLK burst would be needed to alias
-                // back to the same value, which the firmware cannot produce.
-                slv_reg4_write_count <= slv_reg4_write_count + 8'd1;
-`endif
-              end
               3'h5:
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
@@ -972,11 +936,6 @@ module MNTZorro_v0_1_S00_AXI
   localparam Z3_WRITE_FINALIZE2 = 60;
   localparam Z2_WRITE_FINALIZE2 = 61;
 
-`ifdef RX_BACKLOG_LINEBUF
-  localparam Z3_RXBUF_FILL_R = 62;
-  localparam Z3_RXBUF_AR_WAIT = 63;
-`endif
-
   (* mark_debug = "true" *) reg [7:0] zorro_state = COLD;
   reg [7:0] dtack_counter;
 `ifdef ZORRO2
@@ -1006,31 +965,6 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] axi_reg4;
   (* mark_debug = "true" *) reg [31:0] axi_reg5;
   reg [20:0] eth_rx_frame_select;
-
-`ifdef RX_BACKLOG_LINEBUF
-  // 32-byte line buffer for RX backlog reads (8 x 32-bit words).
-  // Tag stores the AXI line base; frame-sel snapshot + write-toggle ensure
-  // that any firmware write to slv_reg4 (slot handoff, including same-value
-  // resets when the queue drains) forces a miss on the next hit check.
-  reg [31:0] rxbuf_data [0:7];
-  reg [31:0] rxbuf_tag;
-  reg        rxbuf_valid = 0;
-  reg [2:0]  rxbuf_fill_idx;
-  reg [20:0] rxbuf_frame_sel_snap;
-  // Monotonic counter of slv_reg4 writes. Wider than a toggle so two
-  // writes within one burst (a pathological handoff pattern) cannot
-  // alias back to the same value. 8 bits is overkill for the practical
-  // write rate (at most one write per Amiga packet, ~10 us apart; burst
-  // window is ~300 ns) but is cheap and forecloses that class of bug.
-  reg [7:0]  slv_reg4_write_count   = 0;
-  reg [7:0]  rxbuf_saw_write_count  = 0;
-  reg [7:0]  rxbuf_fill_count_snap  = 0;
-  // Fill-completion bookkeeping: we only publish the line if the burst
-  // delivered all 8 beats with OKAY responses. A short burst or error
-  // response leaves rxbuf_valid low and falls through to a miss retry.
-  reg        rxbuf_fill_error       = 0;
-  reg        rxbuf_fill_req_seen    = 0;
-`endif
 
   reg [31:0] video_control_data_zorro;
   reg [7:0] video_control_op_zorro;
@@ -1332,10 +1266,9 @@ module MNTZorro_v0_1_S00_AXI
     m00_axi_wlast <= 'h1;
     m00_axi_bready <= 'h1;
 
-    // m00_axi_arlen and m00_axi_arburst are driven by the Z3 FSM
-    // below (RX backlog line-buffer can issue 8-beat bursts); keeping
-    // a second driver here produces MDRV-1 DRC errors.
+    m00_axi_arlen <= 'h0;
     m00_axi_arsize <= 'h2;
+    m00_axi_arburst <= 'h0;
     m00_axi_arcache <= 'hf; //was 3
     m00_axi_arlock <= 'h0;
     m00_axi_arprot <= 'h0;
@@ -1504,21 +1437,6 @@ module MNTZorro_v0_1_S00_AXI
           reg_high <= 0;
           ram_low <= 0;
           ram_high <= 0;
-          m00_axi_arlen   <= 'h0;
-          m00_axi_arburst <= 'h0;
-`ifdef RX_BACKLOG_LINEBUF
-          // Clear the full line-buffer bookkeeping so a z_reset leaves
-          // no cache metadata behind that could match the post-reset
-          // selector (eth_rx_frame_select=0) and serve a pre-reset line.
-          rxbuf_valid            <= 0;
-          rxbuf_saw_write_count  <= 0;
-          rxbuf_fill_count_snap  <= 0;
-          rxbuf_fill_idx         <= 3'd0;
-          rxbuf_fill_error       <= 0;
-          rxbuf_fill_req_seen    <= 0;
-          rxbuf_frame_sel_snap   <= 0;
-          rxbuf_tag              <= 0;
-`endif
 
           if (!z_reset)
             zorro_state <= DECIDE_Z2_Z3;
@@ -2218,93 +2136,23 @@ module MNTZorro_v0_1_S00_AXI
         end
 
         WAIT_READ_DMA_Z3: begin
-`ifdef RX_BACKLOG_LINEBUF
-          if (z3_mapped_addr>='h2000 && z3_mapped_addr<'h6000) begin
-            // RX backlog path: try line buffer first, else issue 8-beat burst fill
-            // Hit predicate. Two independent guards protect against
-            // slv_reg4 handoffs that the cache hasn't processed yet:
-            //   1. rxbuf_saw_write_count == slv_reg4_write_count — covers
-            //      writes from earlier cycles that the FSM has registered.
-            //   2. !slv_reg4_wr_this_cycle — combinational, covers the
-            //      same-ACLK case where a write is firing right now in the
-            //      AXI slave block and the registered counter won't update
-            //      until the next edge.
-            if (rxbuf_valid
-                && rxbuf_frame_sel_snap == eth_rx_frame_select
-                && rxbuf_saw_write_count == slv_reg4_write_count
-                && !slv_reg4_wr_this_cycle
-                && rxbuf_tag[31:5] == (((`RX_BACKLOG_ADDRESS - 32'h2000)
-                                       + {z3_mapped_addr[23:5], 5'b0}
-                                       + {eth_rx_frame_select, 11'h0}) >> 5)) begin
-              // HIT — serve this longword directly from the line buffer
-              data_z3_hi16  <= {rxbuf_data[z3_mapped_addr[4:2]][7:0],   rxbuf_data[z3_mapped_addr[4:2]][15:8]};
-              data_z3_low16 <= {rxbuf_data[z3_mapped_addr[4:2]][23:16], rxbuf_data[z3_mapped_addr[4:2]][31:24]};
-              dataout_z3 <= 1;
-              dtack <= 1;
-              zorro_state <= Z3_ENDCYCLE;
-            end else begin
-              // MISS — issue one 8-beat INCR burst to fill the 32-byte line.
-              // All AR values and cache metadata are latched here and held
-              // stable in Z3_RXBUF_AR_WAIT until the AXI slave accepts the
-              // address. Recomputing araddr under AR backpressure would be
-              // an AXI protocol violation (master must not change address
-              // while ARVALID is high) and would also race a concurrent
-              // slv_reg4 change — fetching slot A while tagging as slot B.
-              m00_axi_araddr  <= (`RX_BACKLOG_ADDRESS - 32'h2000)
-                                 + {z3_mapped_addr[23:5], 5'b0}
-                                 + {eth_rx_frame_select, 11'h0};
-              m00_axi_arlen   <= 'h7; // 8 beats
-              m00_axi_arburst <= 'h1; // INCR
-              m00_axi_arvalid <= 1;
-              rxbuf_tag              <= (`RX_BACKLOG_ADDRESS - 32'h2000)
-                                        + {z3_mapped_addr[23:5], 5'b0}
-                                        + {eth_rx_frame_select, 11'h0};
-              rxbuf_frame_sel_snap   <= eth_rx_frame_select;
-              rxbuf_fill_idx         <= 3'd0;
-              rxbuf_valid            <= 1'b0;
-              rxbuf_fill_error       <= 1'b0;
-              rxbuf_fill_req_seen    <= 1'b0;
-              // Capture the selector-write generation at miss-issue. The
-              // miss address is derived from the registered eth_rx_frame_select,
-              // which still reflects the pre-write selector this cycle. So
-              // the correct snapshot is the registered counter as-is — if a
-              // write is also firing this ACLK, it bumps the counter on the
-              // next edge, and the rlast check sees a mismatch and aborts
-              // the fill rather than revalidating against a line that was
-              // read from a now-superseded slot.
-              rxbuf_fill_count_snap  <= slv_reg4_write_count;
-              if (m00_axi_arready) begin
-                zorro_state <= Z3_RXBUF_FILL_R;
-              end else begin
-                zorro_state <= Z3_RXBUF_AR_WAIT;
-              end
-            end
-          end else
-`endif
-          begin
-            if (z3_mapped_addr>='ha000 && z3_mapped_addr<'h10000)
-              m00_axi_araddr  <= (`USB_BLOCK_STORAGE_ADDRESS - 32'ha000) + z3_mapped_addr;
-            else
-            if (z3_mapped_addr>='h8000 && z3_mapped_addr<'hA000)
-              m00_axi_araddr  <= (`TX_FRAME_ADDRESS - 32'h8000) + z3_mapped_addr;
-            else
-            if (z3_mapped_addr>='h2000 && z3_mapped_addr<'h6000)
-              m00_axi_araddr  <= (`RX_BACKLOG_ADDRESS - 32'h2000) + z3_mapped_addr + {eth_rx_frame_select, 11'h0}; // 11'h0 is FRAME_SIZE = 2048
-            else
-            if (z3_mapped_addr>='h6000 && z3_mapped_addr<'h8000)
-              m00_axi_araddr  <= (`BOOT_ROM_ADDRESS - 32'h6000) + z3_mapped_addr;
-            else
-              m00_axi_araddr  <= `ARM_MEMORY_START + (z3_mapped_addr/*&32'hfffffffc*/); // max 256MB
+          if (z3_mapped_addr>='ha000 && z3_mapped_addr<'h10000)
+            m00_axi_araddr  <= (`USB_BLOCK_STORAGE_ADDRESS - 32'ha000) + z3_mapped_addr;
+          else
+          if (z3_mapped_addr>='h8000 && z3_mapped_addr<'hA000)
+            m00_axi_araddr  <= (`TX_FRAME_ADDRESS - 32'h8000) + z3_mapped_addr;
+          else
+          if (z3_mapped_addr>='h2000 && z3_mapped_addr<'h6000)
+            m00_axi_araddr  <= (`RX_BACKLOG_ADDRESS - 32'h2000) + z3_mapped_addr + {eth_rx_frame_select, 11'h0}; // 11'h0 is FRAME_SIZE = 2048
+          else
+          if (z3_mapped_addr>='h6000 && z3_mapped_addr<'h8000)
+            m00_axi_araddr  <= (`BOOT_ROM_ADDRESS - 32'h6000) + z3_mapped_addr;
+          else
+            m00_axi_araddr  <= `ARM_MEMORY_START + (z3_mapped_addr/*&32'hfffffffc*/); // max 256MB
 
-`ifdef RX_BACKLOG_LINEBUF
-            // Restore single-beat defaults in case a prior backlog fill left arlen=7
-            m00_axi_arlen   <= 'h0;
-            m00_axi_arburst <= 'h0;
-`endif
-            m00_axi_arvalid  <= 1;
-            if (m00_axi_arready) begin
-              zorro_state <= WAIT_READ_DMA_Z3B;
-            end
+          m00_axi_arvalid  <= 1;
+          if (m00_axi_arready) begin
+            zorro_state <= WAIT_READ_DMA_Z3B;
           end
         end
 
@@ -2318,88 +2166,6 @@ module MNTZorro_v0_1_S00_AXI
             dtack <= 1;
           end
         end
-
-`ifdef RX_BACKLOG_LINEBUF
-        Z3_RXBUF_AR_WAIT: begin
-          // Hold ARVALID and all AR-phase values stable (no assignment
-          // = NBA retains previous value) until the slave accepts the
-          // address. AXI requires master to keep araddr/arlen/arburst
-          // unchanged while ARVALID is high and ARREADY is low.
-          if (m00_axi_arready) begin
-            zorro_state <= Z3_RXBUF_FILL_R;
-          end
-        end
-
-        Z3_RXBUF_FILL_R: begin
-          m00_axi_arvalid <= 0;
-          if (m00_axi_rvalid) begin
-            rxbuf_data[rxbuf_fill_idx] <= m00_axi_rdata;
-            // Early-serve the requested longword only while the burst is
-            // still covering a slot that has not been superseded. A write
-            // that lands mid-burst (captured in slv_reg4_write_count or
-            // firing combinationally this cycle) invalidates the miss's
-            // slot identity, so subsequent beats are drained but never
-            // forwarded to the Amiga data lines.
-            if (rxbuf_fill_idx == z3_mapped_addr[4:2]
-                && rxbuf_fill_count_snap == slv_reg4_write_count
-                && !slv_reg4_wr_this_cycle
-                && m00_axi_rresp == 2'b00) begin
-              data_z3_hi16  <= {m00_axi_rdata[7:0],   m00_axi_rdata[15:8]};
-              data_z3_low16 <= {m00_axi_rdata[23:16], m00_axi_rdata[31:24]};
-              dataout_z3 <= 1;
-              rxbuf_fill_req_seen <= 1'b1;
-            end
-            // Sticky error flag: any non-OKAY rresp poisons the fill.
-            if (m00_axi_rresp != 2'b00)
-              rxbuf_fill_error <= 1'b1;
-            rxbuf_fill_idx <= rxbuf_fill_idx + 3'd1;
-            // DTACK is deliberately deferred until rlast so that the
-            // FSM does not release handshake while still occupying
-            // the AXI R channel. Early-DTACK would risk the Amiga
-            // starting a new cycle before the burst drains, leaving
-            // slaven/rxbuf state stale across cycles.
-            if (m00_axi_rlast) begin
-              // Restore single-beat AXI defaults regardless of outcome.
-              m00_axi_arlen   <= 'h0;
-              m00_axi_arburst <= 'h0;
-              // Commit only if every predicate for a trustworthy fill
-              // holds: selector stable, no error on any beat, the burst
-              // actually delivered all 8 beats (rlast must coincide with
-              // the 8th-beat index, i.e. fill_idx == 7 pre-increment),
-              // and the requested beat was seen. Otherwise fall back to
-              // a miss retry rather than publish a partial line.
-              // `rxbuf_fill_req_seen` is an NBA-updated flag, so when the
-              // requested beat coincides with the last beat (offset 0x1c
-              // = beat 7) the register is still 0 during this cycle's
-              // evaluation. OR in the same-beat decode so a beat-7
-              // requested word can publish without a spurious retry that
-              // would reissue the same burst forever.
-              if (rxbuf_fill_count_snap == slv_reg4_write_count
-                  && !slv_reg4_wr_this_cycle
-                  && !rxbuf_fill_error
-                  && m00_axi_rresp == 2'b00
-                  && rxbuf_fill_idx == 3'd7
-                  && (rxbuf_fill_req_seen
-                      || rxbuf_fill_idx == z3_mapped_addr[4:2])) begin
-                rxbuf_valid <= 1'b1;
-                dtack <= 1;
-                zorro_state <= Z3_ENDCYCLE;
-              end else begin
-                // Either the slot was superseded, the burst reported an
-                // error, it short-returned rlast before 8 beats, or the
-                // requested word never arrived. Discard the fill, clear
-                // any early-latched data lines, and re-enter the hit/
-                // miss decision. The next pass will miss (rxbuf_valid is
-                // low) and issue a fresh burst against the current
-                // selector.
-                rxbuf_valid <= 1'b0;
-                dataout_z3  <= 0;
-                zorro_state <= WAIT_READ_DMA_Z3;
-              end
-            end
-          end
-        end
-`endif
 
         WAIT_WRITE_DMA_Z3: begin
           m00_axi_wstrb_z3   <= {z3_ds0, z3_ds1, z3_ds2, z3_ds3};
@@ -2595,21 +2361,6 @@ module MNTZorro_v0_1_S00_AXI
 
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
                 video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank, 12'b0, zorro_state};
-
-`ifdef RX_BACKLOG_LINEBUF
-    // Any firmware write to slv_reg4 (the RX-slot selector register) is a
-    // slot-handoff signal, even when the value written equals the current
-    // one — firmware rewrites slv_reg4 = 0 on queue-drain reset, and the
-    // new contents of slot 0 must not be served from the old cached line.
-    // Placing this after the state-machine case ensures it overrides any
-    // rxbuf_valid <= 1 that the burst-fill completion might have scheduled
-    // in the same cycle.
-    rxbuf_saw_write_count <= slv_reg4_write_count;
-    if (slv_reg4_write_count != rxbuf_saw_write_count
-        || slv_reg4_wr_this_cycle) begin
-      rxbuf_valid <= 1'b0;
-    end
-`endif
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;
