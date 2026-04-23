@@ -13,6 +13,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
+    # Auto-discover common toolchain installs before giving up, so a fresh
+    # terminal without Homebrew in PATH still works on macOS.
+    for candidate in \
+        /opt/homebrew/bin \
+        /usr/local/bin \
+        /Applications/ArmGNUToolchain/*/*/bin; do
+        if [ -x "$candidate/arm-none-eabi-gcc" ]; then
+            PATH="$candidate:$PATH"
+            break
+        fi
+    done
+fi
+
+if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
     echo "ERROR: arm-none-eabi-gcc not on PATH." >&2
     echo "  macOS: brew install --cask gcc-arm-embedded" >&2
     echo "  Linux: install the official Arm GNU Toolchain (NOT Debian's gcc-arm-none-eabi," >&2
