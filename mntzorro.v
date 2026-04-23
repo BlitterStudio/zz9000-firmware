@@ -453,6 +453,25 @@ module MNTZorro_v0_1_S00_AXI
 `endif
         end
       else begin
+        // Hard-clear the ARM-ack bits in slv_reg0 while z_reset is
+        // asserted. Without this the AXI-lite regs keep whatever
+        // pre-reset ack value the ARM firmware wrote last — ARM is
+        // asynchronous and may not clear them on its own Amiga-reset
+        // path (and older firmware builds provably don't). The
+        // post-reset fresh-ack epoch gate in the FSM block still
+        // needs to see slv_reg0[30:31] go LOW at least once before
+        // it opens; by guaranteeing that low baseline here, the
+        // gate opens deterministically on reset release rather than
+        // depending on ARM cooperation to avoid a bus deadlock.
+        // ARM-initiated writes to other byte lanes / other registers
+        // still take precedence on the same cycle because the per-
+        // byte case below writes AFTER this clear (NBA last-write-
+        // wins), so a live ARM ack write during reset is preserved
+        // on its other bits but the two ack bits snap to 0.
+        if (z_reset) begin
+          slv_reg0[30] <= 1'b0;
+          slv_reg0[31] <= 1'b0;
+        end
         if (slv_reg_wren)
           begin
             case ( axi_awaddr[ADDR_LSB+OPT_MEM_ADDR_BITS:ADDR_LSB] )
@@ -1093,6 +1112,16 @@ module MNTZorro_v0_1_S00_AXI
   // when z_reset wins the case and the acceptance happened on the
   // reset edge.
   reg axi_r_outstanding = 0;
+  // Single-beat AXI read timeout. Covers the hang where the slave
+  // backpressures after ARVALID really rises (the pre-fix code
+  // sampled ARREADY in the same cycle ARVALID was NBA-assigned, so
+  // it could decide the handshake succeeded when the bus transfer
+  // never actually occurred, leaving WAIT_READ_DMA_Z3B waiting for
+  // an RVALID that will never come). 12 bits @ 100 MHz saturates in
+  // ~40 us — orders of magnitude longer than any healthy single-beat
+  // latency but short enough that a fault does not hold the Amiga
+  // bus. On saturation the state fails closed with 0xFFFFFFFF.
+  reg [11:0] axi_single_timeout_count = 0;
   // RESET drain timeout. Forces an exit from RESET even when
   // axi_r_outstanding is stuck high — the slave may be genuinely
   // wedged and never produce the final rlast. At 100 MHz, 16 bits
@@ -1635,17 +1664,21 @@ module MNTZorro_v0_1_S00_AXI
 
           // Drain-timeout safety net. A genuinely wedged slave that
           // never produces rlast would otherwise pin the FSM in
-          // RESET forever. After the counter saturates, force-clear
-          // axi_r_outstanding (m00_axi_rready is tied high, so any
-          // late beats that do arrive are consumed without corrupting
-          // state) and release the reset. The post-case tracker will
-          // re-set axi_r_outstanding only on a fresh AR accept.
+          // RESET forever. After the counter saturates, release
+          // RESET but LEAVE axi_r_outstanding set so the drain gate
+          // on every new-AR issue path continues to fail-close all
+          // reads with 0xFFFFFFFF until the slave does eventually
+          // send rlast (or never — in which case the Amiga keeps
+          // seeing all-ones for backlog/ROM/USB reads, which the
+          // driver's sanity gate rejects). Force-clearing the flag
+          // here would be unsafe: a slave that resumes later would
+          // deliver rvalid beats that could be consumed by the first
+          // post-reset read as if they were its own data.
           if (!z_reset) begin
             if (!axi_r_outstanding) begin
               reset_drain_count <= 16'd0;
               zorro_state <= DECIDE_Z2_Z3;
             end else if (&reset_drain_count) begin
-              axi_r_outstanding <= 1'b0;
               reset_drain_count <= 16'd0;
               zorro_state <= DECIDE_Z2_Z3;
             end else begin
@@ -2492,6 +2525,7 @@ module MNTZorro_v0_1_S00_AXI
             m00_axi_arburst <= 'h0;
 `endif
             m00_axi_arvalid  <= 1;
+            axi_single_timeout_count <= 12'd0;
             if (m00_axi_arready) begin
               zorro_state <= WAIT_READ_DMA_Z3B;
             end
@@ -2506,6 +2540,22 @@ module MNTZorro_v0_1_S00_AXI
             data_z3_low16 <= {m00_axi_rdata[23:16], m00_axi_rdata[31:24]};
             dataout_z3 <= 1; // enable data output
             dtack <= 1;
+          end else if (&axi_single_timeout_count) begin
+            // No RVALID within the timeout window. Most likely cause:
+            // the slave withdrew ARREADY between the same-cycle sample
+            // above (stale/idle) and the cycle ARVALID actually rose
+            // on the bus, so no handshake ever completed. Fail-close
+            // the Zorro cycle with 0xFFFFFFFF so the bus releases.
+            // The drain gate at WAIT_READ_DMA_Z3 then prevents any
+            // new AR from issuing until a late RVALID&&RLAST (if one
+            // ever arrives) clears axi_r_outstanding.
+            data_z3_hi16  <= 16'hFFFF;
+            data_z3_low16 <= 16'hFFFF;
+            dataout_z3    <= 1;
+            dtack         <= 1;
+            zorro_state   <= Z3_ENDCYCLE;
+          end else begin
+            axi_single_timeout_count <= axi_single_timeout_count + 12'd1;
           end
         end
 
