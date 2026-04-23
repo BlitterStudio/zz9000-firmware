@@ -2179,8 +2179,14 @@ module MNTZorro_v0_1_S00_AXI
 `ifdef RX_BACKLOG_LINEBUF
           if (z3_mapped_addr>='h2000 && z3_mapped_addr<'h6000) begin
             // RX backlog path: try line buffer first, else issue 8-beat burst fill
+            // Also gate the hit check on the undelayed write-toggle: the
+            // AXI slv_reg4 write-handler and this FSM are separate always
+            // blocks, so rxbuf_saw_write_toggle trails slv_reg4_write_toggle
+            // by one clock. Force a miss when a write is still unseen by
+            // the post-case invalidation, closing the 1-cycle stale window.
             if (rxbuf_valid
                 && rxbuf_frame_sel_snap == eth_rx_frame_select
+                && rxbuf_saw_write_toggle == slv_reg4_write_toggle
                 && rxbuf_tag[31:5] == (((`RX_BACKLOG_ADDRESS - 32'h2000)
                                        + {z3_mapped_addr[23:5], 5'b0}
                                        + {eth_rx_frame_select, 11'h0}) >> 5)) begin
