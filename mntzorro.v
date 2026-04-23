@@ -996,6 +996,19 @@ module MNTZorro_v0_1_S00_AXI
   localparam Z3_RXBUF_AR_WAIT = 63;
 `endif
 
+  // Explicit AR-wait states for single-beat reads. These close the
+  // false-handshake hazard where WAIT_READ_DMA_Z3 / WAIT_READ would
+  // previously sample m00_axi_arready in the same cycle ARVALID was
+  // NBA-assigned to 1. Because m00_axi_arvalid is a registered output,
+  // an ARREADY sampled before ARVALID is bus-visible reflects an idle
+  // slave, not an accepted transfer; if the slave withdrew ARREADY
+  // once ARVALID actually rose, the FSM would advance to the R-wait
+  // state with no handshake ever completing and hang waiting for a
+  // beat that never arrives. The dedicated AR-wait states hold
+  // ARVALID stable until a real ARVALID&&ARREADY handshake occurs.
+  localparam Z3_SINGLE_AR_WAIT = 64;
+  localparam Z2_AR_WAIT        = 65;
+
   (* mark_debug = "true" *) reg [7:0] zorro_state = COLD;
   reg [7:0] dtack_counter;
 `ifdef ZORRO2
@@ -2050,6 +2063,14 @@ module MNTZorro_v0_1_S00_AXI
           if (last_addr<'h2000)
             // read via ARM
             zorro_state <= WAIT_READ3;
+          else if (axi_r_outstanding) begin
+            // A prior AXI read is still in flight (late-draining
+            // burst, post-timeout transaction, etc.). Fail-close the
+            // Z2 read with 0xFFFF so bus releases and no new AR
+            // collides with the pending response.
+            data_out <= 16'hFFFF;
+            zorro_state <= WAIT_READ2D;
+          end
           else begin
             // read via AXI DMA
             if (last_addr>='ha000 && last_addr<'h10000)
@@ -2065,25 +2086,52 @@ module MNTZorro_v0_1_S00_AXI
               m00_axi_araddr  <= (`BOOT_ROM_ADDRESS - 32'h6000) + {last_addr[23:2],2'b00};
             else
               m00_axi_araddr  <= `ARM_MEMORY_START + {last_addr[23:2],2'b00};
-  
-            m00_axi_arvalid  <= 1;
-            if (m00_axi_arready) begin
-              zorro_state <= WAIT_READ2;
-            end
-            
+
+            // Force single-beat defaults. A prior RX backlog fill
+            // may have left arlen=7/arburst=INCR behind — inheriting
+            // those here would spawn an 8-beat burst that WAIT_READ2
+            // only consumes one beat of, leaving seven more to drain
+            // into later reads.
+            m00_axi_arlen   <= 'h0;
+            m00_axi_arburst <= 'h0;
+            m00_axi_arvalid <= 1;
+            axi_single_timeout_count <= 12'd0;
+            zorro_state <= Z2_AR_WAIT;
           end
         end
-        
+
+        Z2_AR_WAIT: begin
+          // Same contract as Z3_SINGLE_AR_WAIT — hold ARVALID until
+          // a real VALID&&READY handshake occurs, never advance on a
+          // pre-bus-visible ARREADY sample, and bound the wait so a
+          // stalled slave does not wedge the Z2 cycle.
+          if (m00_axi_arready) begin
+            m00_axi_arvalid          <= 1'b0;
+            axi_single_timeout_count <= 12'd0;
+            zorro_state              <= WAIT_READ2;
+          end else if (&axi_single_timeout_count) begin
+            m00_axi_arvalid <= 1'b0;
+            data_out        <= 16'hFFFF;
+            zorro_state     <= WAIT_READ2D;
+          end else begin
+            axi_single_timeout_count <= axi_single_timeout_count + 12'd1;
+          end
+        end
+
         WAIT_READ2: begin
-          m00_axi_arvalid <= 0;
           if (m00_axi_rvalid) begin
             zorro_state <= WAIT_READ2D;
-            
+
             // le endian swap
             if (last_addr[1] == 1)
               data_out <= {m00_axi_rdata[23:16], m00_axi_rdata[31:24]};
             else
               data_out <= {m00_axi_rdata[7:0], m00_axi_rdata[15:8]};
+          end else if (&axi_single_timeout_count) begin
+            data_out    <= 16'hFFFF;
+            zorro_state <= WAIT_READ2D;
+          end else begin
+            axi_single_timeout_count <= axi_single_timeout_count + 12'd1;
           end
         end
         
@@ -2519,21 +2567,42 @@ module MNTZorro_v0_1_S00_AXI
             else
               m00_axi_araddr  <= `ARM_MEMORY_START + (z3_mapped_addr/*&32'hfffffffc*/); // max 256MB
 
-`ifdef RX_BACKLOG_LINEBUF
-            // Restore single-beat defaults in case a prior backlog fill left arlen=7
+            // Force single-beat defaults on every non-backlog issue,
+            // independent of RX_BACKLOG_LINEBUF, so a prior backlog
+            // fill's arlen=7/arburst=INCR cannot leak into this
+            // single-beat request and leave extra R beats draining
+            // into later reads.
             m00_axi_arlen   <= 'h0;
             m00_axi_arburst <= 'h0;
-`endif
-            m00_axi_arvalid  <= 1;
+            m00_axi_arvalid <= 1;
             axi_single_timeout_count <= 12'd0;
-            if (m00_axi_arready) begin
-              zorro_state <= WAIT_READ_DMA_Z3B;
-            end
+            zorro_state <= Z3_SINGLE_AR_WAIT;
+          end
+        end
+
+        Z3_SINGLE_AR_WAIT: begin
+          // Hold ARVALID stable (no NBA) until the slave asserts
+          // ARREADY with ARVALID actually visible on the bus. Only
+          // then is the handshake real. On completion, drop ARVALID
+          // and enter the R-wait state; on timeout, fail-close the
+          // Zorro cycle.
+          if (m00_axi_arready) begin
+            m00_axi_arvalid          <= 1'b0;
+            axi_single_timeout_count <= 12'd0;
+            zorro_state              <= WAIT_READ_DMA_Z3B;
+          end else if (&axi_single_timeout_count) begin
+            m00_axi_arvalid <= 1'b0;
+            data_z3_hi16    <= 16'hFFFF;
+            data_z3_low16   <= 16'hFFFF;
+            dataout_z3      <= 1;
+            dtack           <= 1;
+            zorro_state     <= Z3_ENDCYCLE;
+          end else begin
+            axi_single_timeout_count <= axi_single_timeout_count + 12'd1;
           end
         end
 
         WAIT_READ_DMA_Z3B: begin
-          m00_axi_arvalid <= 0;
           if (m00_axi_rvalid) begin
             zorro_state <= Z3_ENDCYCLE;
             data_z3_hi16 <= {m00_axi_rdata[7:0], m00_axi_rdata[15:8]};
@@ -2583,6 +2652,12 @@ module MNTZorro_v0_1_S00_AXI
             // does eventually accept — the late response drains on
             // rready=1 and rlast clears the flag.
             m00_axi_arvalid         <= 1'b0;
+            // Restore single-beat defaults so a subsequent Z2/Z3
+            // single-beat issue does not inherit arlen=7/arburst=INCR
+            // from this aborted burst and spawn an 8-beat read when
+            // only one beat is expected.
+            m00_axi_arlen           <= 'h0;
+            m00_axi_arburst         <= 'h0;
             rxbuf_valid             <= 1'b0;
             rxbuf_retry_count       <= 3'd0;
             rxbuf_slot_poison       <= 1'b1;
