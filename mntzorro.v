@@ -2105,6 +2105,11 @@ module MNTZorro_v0_1_S00_AXI
             else
               data_out <= {m00_axi_rdata[7:0], m00_axi_rdata[15:8]};
           end else if (&axi_single_timeout_count) begin
+            // Same orphan-retire rationale as Z3B: force-clear the
+            // outstanding-read tracker on timeout so a stalled Z2
+            // AXI read does not pin the flag and contaminate
+            // unrelated read windows.
+            axi_r_outstanding <= 1'b0;
             data_out    <= 16'hFFFF;
             zorro_state <= WAIT_READ2D;
           end else begin
@@ -2587,14 +2592,14 @@ module MNTZorro_v0_1_S00_AXI
             dataout_z3 <= 1; // enable data output
             dtack <= 1;
           end else if (&axi_single_timeout_count) begin
-            // No RVALID within the timeout window. Most likely cause:
-            // the slave withdrew ARREADY between the same-cycle sample
-            // above (stale/idle) and the cycle ARVALID actually rose
-            // on the bus, so no handshake ever completed. Fail-close
-            // the Zorro cycle with 0xFFFFFFFF so the bus releases.
-            // The drain gate at WAIT_READ_DMA_Z3 then prevents any
-            // new AR from issuing until a late RVALID&&RLAST (if one
-            // ever arrives) clears axi_r_outstanding.
+            // No RVALID within the timeout window. Retire the
+            // orphaned transaction by force-clearing
+            // axi_r_outstanding so unrelated AXI-backed reads are
+            // not fail-closed to 0xFFFF indefinitely and so RESET
+            // can exit. The tradeoff (a late beat may be misrouted
+            // if the slave resumes) is bounded and preferable to
+            // permanent contamination of other read windows.
+            axi_r_outstanding <= 1'b0;
             data_z3_hi16  <= 16'hFFFF;
             data_z3_low16 <= 16'hFFFF;
             dataout_z3    <= 1;
@@ -2754,13 +2759,21 @@ module MNTZorro_v0_1_S00_AXI
             end
           end else if (&rxbuf_timeout_count) begin
             // No rvalid beat observed within the per-beat timeout
-            // window. Slave is wedged — poison the slot and complete
-            // the Zorro cycle with fail-closed data so the Amiga is
-            // not held indefinitely. axi_r_outstanding remains set;
-            // if the slave ever does respond, late beats drain on
-            // rready=1 and rlast clears the flag via the post-case
-            // tracker. If it never responds, the next z_reset drains
-            // the flag before RESET can exit.
+            // window. Slave is wedged — retire the orphaned
+            // transaction by force-clearing axi_r_outstanding so the
+            // FSM does not leak fabricated 0xFFFF reads into
+            // unrelated AXI windows (boot ROM, USB, ARM memory) and
+            // so the next z_reset can exit RESET without hanging on
+            // a dead flag. A late rvalid that arrives after the
+            // force-clear would be consumed by whatever state is
+            // active (rready is tied high); that is a bounded
+            // tradeoff — at worst it corrupts one downstream read,
+            // which the driver's sanity gate rejects — versus the
+            // far worse alternatives of permanent contamination or
+            // permanent reset hang. The post-case tracker still
+            // fires on arvalid&&arready for future transactions, so
+            // normal tracking resumes on the next issue.
+            axi_r_outstanding       <= 1'b0;
             rxbuf_valid             <= 1'b0;
             rxbuf_retry_count       <= 3'd0;
             rxbuf_slot_poison       <= 1'b1;
