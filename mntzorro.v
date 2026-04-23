@@ -1288,9 +1288,10 @@ module MNTZorro_v0_1_S00_AXI
     m00_axi_wlast <= 'h1;
     m00_axi_bready <= 'h1;
 
-    m00_axi_arlen <= 'h0;
+    // m00_axi_arlen and m00_axi_arburst are driven by the Z3 FSM
+    // below (RX backlog line-buffer can issue 8-beat bursts); keeping
+    // a second driver here produces MDRV-1 DRC errors.
     m00_axi_arsize <= 'h2;
-    m00_axi_arburst <= 'h0;
     m00_axi_arcache <= 'hf; //was 3
     m00_axi_arlock <= 'h0;
     m00_axi_arprot <= 'h0;
@@ -1459,6 +1460,8 @@ module MNTZorro_v0_1_S00_AXI
           reg_high <= 0;
           ram_low <= 0;
           ram_high <= 0;
+          m00_axi_arlen   <= 'h0;
+          m00_axi_arburst <= 'h0;
 `ifdef RX_BACKLOG_LINEBUF
           rxbuf_valid <= 0;
 `endif
@@ -2238,17 +2241,23 @@ module MNTZorro_v0_1_S00_AXI
           m00_axi_arvalid <= 0;
           if (m00_axi_rvalid) begin
             rxbuf_data[rxbuf_fill_idx] <= m00_axi_rdata;
-            // Release DTACK as soon as the requested beat arrives; keep
-            // filling the rest of the line in the background.
+            // Latch the requested longword onto the Zorro data bus as
+            // soon as its beat arrives; data lines hold stable while
+            // the rest of the burst drains.
             if (rxbuf_fill_idx == z3_mapped_addr[4:2]) begin
               data_z3_hi16  <= {m00_axi_rdata[7:0],   m00_axi_rdata[15:8]};
               data_z3_low16 <= {m00_axi_rdata[23:16], m00_axi_rdata[31:24]};
               dataout_z3 <= 1;
-              dtack <= 1;
             end
             rxbuf_fill_idx <= rxbuf_fill_idx + 3'd1;
+            // DTACK is deliberately deferred until rlast so that the
+            // FSM does not release handshake while still occupying
+            // the AXI R channel. Early-DTACK would risk the Amiga
+            // starting a new cycle before the burst drains, leaving
+            // slaven/rxbuf state stale across cycles.
             if (m00_axi_rlast) begin
               rxbuf_valid <= 1'b1;
+              dtack <= 1;
               // Restore single-beat defaults for subsequent non-backlog reads
               m00_axi_arlen   <= 'h0;
               m00_axi_arburst <= 'h0;
