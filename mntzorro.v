@@ -442,6 +442,15 @@ module MNTZorro_v0_1_S00_AXI
           slv_reg3 <= 0;
           slv_reg4 <= 0;
           slv_reg5 <= 0;
+`ifdef RX_BACKLOG_LINEBUF
+          // Reset the write-count alongside slv_reg4 so the AXI-lite
+          // reset domain cannot diverge from the Zorro FSM's view of
+          // the selector-write generation. The FSM's post-case check
+          // (rxbuf_saw_write_count vs slv_reg4_write_count) will observe
+          // the mismatch on the cycles following reset and clear
+          // rxbuf_valid before any stale hit can be served.
+          slv_reg4_write_count <= 0;
+`endif
         end
       else begin
         if (slv_reg_wren)
@@ -1498,7 +1507,17 @@ module MNTZorro_v0_1_S00_AXI
           m00_axi_arlen   <= 'h0;
           m00_axi_arburst <= 'h0;
 `ifdef RX_BACKLOG_LINEBUF
-          rxbuf_valid <= 0;
+          // Clear the full line-buffer bookkeeping so a z_reset leaves
+          // no cache metadata behind that could match the post-reset
+          // selector (eth_rx_frame_select=0) and serve a pre-reset line.
+          rxbuf_valid            <= 0;
+          rxbuf_saw_write_count  <= 0;
+          rxbuf_fill_count_snap  <= 0;
+          rxbuf_fill_idx         <= 3'd0;
+          rxbuf_fill_error       <= 0;
+          rxbuf_fill_req_seen    <= 0;
+          rxbuf_frame_sel_snap   <= 0;
+          rxbuf_tag              <= 0;
 `endif
 
           if (!z_reset)
@@ -2349,12 +2368,19 @@ module MNTZorro_v0_1_S00_AXI
               // the 8th-beat index, i.e. fill_idx == 7 pre-increment),
               // and the requested beat was seen. Otherwise fall back to
               // a miss retry rather than publish a partial line.
+              // `rxbuf_fill_req_seen` is an NBA-updated flag, so when the
+              // requested beat coincides with the last beat (offset 0x1c
+              // = beat 7) the register is still 0 during this cycle's
+              // evaluation. OR in the same-beat decode so a beat-7
+              // requested word can publish without a spurious retry that
+              // would reissue the same burst forever.
               if (rxbuf_fill_count_snap == slv_reg4_write_count
                   && !slv_reg4_wr_this_cycle
                   && !rxbuf_fill_error
                   && m00_axi_rresp == 2'b00
                   && rxbuf_fill_idx == 3'd7
-                  && rxbuf_fill_req_seen) begin
+                  && (rxbuf_fill_req_seen
+                      || rxbuf_fill_idx == z3_mapped_addr[4:2])) begin
                 rxbuf_valid <= 1'b1;
                 dtack <= 1;
                 zorro_state <= Z3_ENDCYCLE;
