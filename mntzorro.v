@@ -31,6 +31,13 @@
 `define VARIANT_Z3_FASTRAM
 `define VARIANT_AUTOBOOT        // enable autoboot ROM
 
+// Line-buffered RX backlog reads: a single 8-beat AXI burst fills an
+// on-chip 32-byte line; sequential Z3 longword reads hit the line
+// instead of paying the full PS DDR round-trip per word. Scoped to the
+// RX backlog window (z3_mapped_addr in [h2000, h6000)); all other read
+// paths are unchanged. Comment out to fall back to single-beat reads.
+`define RX_BACKLOG_LINEBUF
+
 `define C_S_AXI_DATA_WIDTH 32
 `define C_S_AXI_ADDR_WIDTH 5
 `ifdef VARIANT_2MB
@@ -936,6 +943,10 @@ module MNTZorro_v0_1_S00_AXI
   localparam Z3_WRITE_FINALIZE2 = 60;
   localparam Z2_WRITE_FINALIZE2 = 61;
 
+`ifdef RX_BACKLOG_LINEBUF
+  localparam Z3_RXBUF_FILL_R = 62;
+`endif
+
   (* mark_debug = "true" *) reg [7:0] zorro_state = COLD;
   reg [7:0] dtack_counter;
 `ifdef ZORRO2
@@ -965,6 +976,17 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] axi_reg4;
   (* mark_debug = "true" *) reg [31:0] axi_reg5;
   reg [20:0] eth_rx_frame_select;
+
+`ifdef RX_BACKLOG_LINEBUF
+  // 32-byte line buffer for RX backlog reads (8 x 32-bit words).
+  // Tag stores the AXI line base; frame-sel snapshot ensures a slot
+  // advance on the PS side automatically invalidates (miss on next check).
+  reg [31:0] rxbuf_data [0:7];
+  reg [31:0] rxbuf_tag;
+  reg        rxbuf_valid = 0;
+  reg [2:0]  rxbuf_fill_idx;
+  reg [20:0] rxbuf_frame_sel_snap;
+`endif
 
   reg [31:0] video_control_data_zorro;
   reg [7:0] video_control_op_zorro;
@@ -1437,6 +1459,9 @@ module MNTZorro_v0_1_S00_AXI
           reg_high <= 0;
           ram_low <= 0;
           ram_high <= 0;
+`ifdef RX_BACKLOG_LINEBUF
+          rxbuf_valid <= 0;
+`endif
 
           if (!z_reset)
             zorro_state <= DECIDE_Z2_Z3;
@@ -2136,23 +2161,64 @@ module MNTZorro_v0_1_S00_AXI
         end
 
         WAIT_READ_DMA_Z3: begin
-          if (z3_mapped_addr>='ha000 && z3_mapped_addr<'h10000)
-            m00_axi_araddr  <= (`USB_BLOCK_STORAGE_ADDRESS - 32'ha000) + z3_mapped_addr;
-          else
-          if (z3_mapped_addr>='h8000 && z3_mapped_addr<'hA000)
-            m00_axi_araddr  <= (`TX_FRAME_ADDRESS - 32'h8000) + z3_mapped_addr;
-          else
-          if (z3_mapped_addr>='h2000 && z3_mapped_addr<'h6000)
-            m00_axi_araddr  <= (`RX_BACKLOG_ADDRESS - 32'h2000) + z3_mapped_addr + {eth_rx_frame_select, 11'h0}; // 11'h0 is FRAME_SIZE = 2048
-          else
-          if (z3_mapped_addr>='h6000 && z3_mapped_addr<'h8000)
-            m00_axi_araddr  <= (`BOOT_ROM_ADDRESS - 32'h6000) + z3_mapped_addr;
-          else
-            m00_axi_araddr  <= `ARM_MEMORY_START + (z3_mapped_addr/*&32'hfffffffc*/); // max 256MB
+`ifdef RX_BACKLOG_LINEBUF
+          if (z3_mapped_addr>='h2000 && z3_mapped_addr<'h6000) begin
+            // RX backlog path: try line buffer first, else issue 8-beat burst fill
+            if (rxbuf_valid
+                && rxbuf_frame_sel_snap == eth_rx_frame_select
+                && rxbuf_tag[31:5] == (((`RX_BACKLOG_ADDRESS - 32'h2000)
+                                       + {z3_mapped_addr[23:5], 5'b0}
+                                       + {eth_rx_frame_select, 11'h0}) >> 5)) begin
+              // HIT — serve this longword directly from the line buffer
+              data_z3_hi16  <= {rxbuf_data[z3_mapped_addr[4:2]][7:0],   rxbuf_data[z3_mapped_addr[4:2]][15:8]};
+              data_z3_low16 <= {rxbuf_data[z3_mapped_addr[4:2]][23:16], rxbuf_data[z3_mapped_addr[4:2]][31:24]};
+              dataout_z3 <= 1;
+              dtack <= 1;
+              zorro_state <= Z3_ENDCYCLE;
+            end else begin
+              // MISS — issue one 8-beat INCR burst to fill the 32-byte line
+              m00_axi_araddr  <= (`RX_BACKLOG_ADDRESS - 32'h2000)
+                                 + {z3_mapped_addr[23:5], 5'b0}
+                                 + {eth_rx_frame_select, 11'h0};
+              m00_axi_arlen   <= 'h7; // 8 beats
+              m00_axi_arburst <= 'h1; // INCR
+              m00_axi_arvalid <= 1;
+              rxbuf_tag            <= (`RX_BACKLOG_ADDRESS - 32'h2000)
+                                      + {z3_mapped_addr[23:5], 5'b0}
+                                      + {eth_rx_frame_select, 11'h0};
+              rxbuf_frame_sel_snap <= eth_rx_frame_select;
+              rxbuf_fill_idx       <= 3'd0;
+              rxbuf_valid          <= 1'b0;
+              if (m00_axi_arready) begin
+                zorro_state <= Z3_RXBUF_FILL_R;
+              end
+            end
+          end else
+`endif
+          begin
+            if (z3_mapped_addr>='ha000 && z3_mapped_addr<'h10000)
+              m00_axi_araddr  <= (`USB_BLOCK_STORAGE_ADDRESS - 32'ha000) + z3_mapped_addr;
+            else
+            if (z3_mapped_addr>='h8000 && z3_mapped_addr<'hA000)
+              m00_axi_araddr  <= (`TX_FRAME_ADDRESS - 32'h8000) + z3_mapped_addr;
+            else
+            if (z3_mapped_addr>='h2000 && z3_mapped_addr<'h6000)
+              m00_axi_araddr  <= (`RX_BACKLOG_ADDRESS - 32'h2000) + z3_mapped_addr + {eth_rx_frame_select, 11'h0}; // 11'h0 is FRAME_SIZE = 2048
+            else
+            if (z3_mapped_addr>='h6000 && z3_mapped_addr<'h8000)
+              m00_axi_araddr  <= (`BOOT_ROM_ADDRESS - 32'h6000) + z3_mapped_addr;
+            else
+              m00_axi_araddr  <= `ARM_MEMORY_START + (z3_mapped_addr/*&32'hfffffffc*/); // max 256MB
 
-          m00_axi_arvalid  <= 1;
-          if (m00_axi_arready) begin
-            zorro_state <= WAIT_READ_DMA_Z3B;
+`ifdef RX_BACKLOG_LINEBUF
+            // Restore single-beat defaults in case a prior backlog fill left arlen=7
+            m00_axi_arlen   <= 'h0;
+            m00_axi_arburst <= 'h0;
+`endif
+            m00_axi_arvalid  <= 1;
+            if (m00_axi_arready) begin
+              zorro_state <= WAIT_READ_DMA_Z3B;
+            end
           end
         end
 
@@ -2166,6 +2232,31 @@ module MNTZorro_v0_1_S00_AXI
             dtack <= 1;
           end
         end
+
+`ifdef RX_BACKLOG_LINEBUF
+        Z3_RXBUF_FILL_R: begin
+          m00_axi_arvalid <= 0;
+          if (m00_axi_rvalid) begin
+            rxbuf_data[rxbuf_fill_idx] <= m00_axi_rdata;
+            // Release DTACK as soon as the requested beat arrives; keep
+            // filling the rest of the line in the background.
+            if (rxbuf_fill_idx == z3_mapped_addr[4:2]) begin
+              data_z3_hi16  <= {m00_axi_rdata[7:0],   m00_axi_rdata[15:8]};
+              data_z3_low16 <= {m00_axi_rdata[23:16], m00_axi_rdata[31:24]};
+              dataout_z3 <= 1;
+              dtack <= 1;
+            end
+            rxbuf_fill_idx <= rxbuf_fill_idx + 3'd1;
+            if (m00_axi_rlast) begin
+              rxbuf_valid <= 1'b1;
+              // Restore single-beat defaults for subsequent non-backlog reads
+              m00_axi_arlen   <= 'h0;
+              m00_axi_arburst <= 'h0;
+              zorro_state <= Z3_ENDCYCLE;
+            end
+          end
+        end
+`endif
 
         WAIT_WRITE_DMA_Z3: begin
           m00_axi_wstrb_z3   <= {z3_ds0, z3_ds1, z3_ds2, z3_ds3};
