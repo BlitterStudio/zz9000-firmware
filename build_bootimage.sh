@@ -19,11 +19,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Locate bootgen.
+# Locate bootgen. In-tree bootgen/ is the usual build location from the
+# sibling bootgen repo; fall back to an older out-of-tree spot for
+# historical macOS setups.
 if [ -n "${BOOTGEN:-}" ]; then
     : # use explicit override
 elif command -v bootgen >/dev/null 2>&1; then
     BOOTGEN=$(command -v bootgen)
+elif [ -x "$SCRIPT_DIR/bootgen/bootgen" ]; then
+    BOOTGEN="$SCRIPT_DIR/bootgen/bootgen"
 elif [ -x /Users/midwan/Gitlab/bootgen/bootgen ]; then
     BOOTGEN=/Users/midwan/Gitlab/bootgen/bootgen
 else
