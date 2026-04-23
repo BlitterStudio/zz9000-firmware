@@ -1495,16 +1495,34 @@ module MNTZorro_v0_1_S00_AXI
       slaven <= 0;
       dataout_enable <= 0;
       dataout_z3 <= 0;
+      // Cancel any in-flight ARM-serviced Zorro RAM transaction. The
+      // ARM firmware loop polls these request/flag bits every cycle
+      // and services them unconditionally; leaving them asserted
+      // during z_reset lets a request issued just before reset still
+      // execute (and ack) during the reset pulse, turning reset into
+      // a non-barrier for the ARM path.
+      zorro_ram_read_request  <= 0;
+      zorro_ram_write_request <= 0;
+      zorro_ram_read_flag     <= 0;
+      zorro_ram_write_flag    <= 0;
 `ifdef RX_BACKLOG_LINEBUF
       rxbuf_valid <= 0;
       // Force ARVALID low so a burst issued pre-reset is no longer
-      // outstanding on the AXI AR channel. Still drain remaining R
-      // beats from any already-accepted burst (arvalid&&arready fired
-      // before reset asserted) so the next post-reset miss does not
-      // consume leftover beats as if they were its own.
+      // outstanding on the AXI AR channel.
       m00_axi_arvalid <= 0;
+      // If ARVALID was visible on the bus this cycle and ARREADY
+      // fires, the AXI slave has committed to delivering 8 R beats
+      // regardless of what the FSM does. Latch rxbuf_ar_in_flight=1
+      // HERE, in the dominant reset branch, so RESET cannot exit
+      // before those beats drain — otherwise the first post-reset
+      // miss would consume them as if they were its own. The later
+      // "rlast clears the flag" clause stays after this one so a
+      // simultaneous rlast (if the burst completes on the reset
+      // edge) still wins, via NBA last-write-wins.
+      if (m00_axi_arvalid && m00_axi_arready)
+        rxbuf_ar_in_flight <= 1'b1;
       if (m00_axi_rvalid && m00_axi_rlast)
-        rxbuf_ar_in_flight <= 0;
+        rxbuf_ar_in_flight <= 1'b0;
 `endif
     end else
       case (zorro_state)
