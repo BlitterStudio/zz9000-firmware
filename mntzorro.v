@@ -1047,11 +1047,17 @@ module MNTZorro_v0_1_S00_AXI
   // reads of the same slot return 0xFFFFFFFF without touching AXI, so
   // the driver reads a consistent all-ones image and its frame-level
   // size/content sanity gate drops the frame deterministically rather
-  // than quietly absorbing one fabricated longword of payload. The
-  // poison clears automatically when the firmware advances slv_reg4
-  // past this slot (new selector != poison selector).
-  reg        rxbuf_slot_poison      = 0;
-  reg [20:0] rxbuf_poison_sel       = 0;
+  // than quietly absorbing one fabricated longword of payload.
+  //
+  // Poison is keyed on BOTH selector value AND the slv_reg4 write
+  // generation captured at fill time. A firmware queue-drain rewrite
+  // of REG4 back to the same numeric value still bumps the generation,
+  // so poison auto-clears on that edge; and poison uses the captured
+  // burst snapshot, not the live selector, so poisoning during
+  // selector churn cannot tag a slot the failed burst never read.
+  reg        rxbuf_slot_poison       = 0;
+  reg [20:0] rxbuf_poison_sel        = 0;
+  reg [7:0]  rxbuf_poison_count_snap = 0;
 `endif
 
   reg [31:0] video_control_data_zorro;
@@ -1072,6 +1078,17 @@ module MNTZorro_v0_1_S00_AXI
 
   reg zorro_ram_read_flag;
   reg zorro_ram_write_flag ;
+  // Post-reset ARM handshake epoch gate. Forces zorro_ram_*_flag low
+  // after z_reset until we have observed the corresponding ack bit in
+  // slv_reg0 (the AXI-lite mirror of ARM's writes) go LOW at least
+  // once. The ARM firmware is asynchronous and may have left a
+  // pre-reset ack bit asserted; without this gate, the very first
+  // post-reset Z3_READ_DELAY1 / Z3_WRITE_FINALIZE cycle would
+  // immediately complete against that stale ack. The gate opens only
+  // after a clearing edge, so the next real ARM ack is a legitimate
+  // rising edge against a zero baseline.
+  reg ack0_fresh_post_reset = 1'b1;
+  reg ack1_fresh_post_reset = 1'b1;
 
   reg videocap_mode;
   reg videocap_mode_in;
@@ -1515,6 +1532,13 @@ module MNTZorro_v0_1_S00_AXI
       zorro_ram_write_request <= 0;
       zorro_ram_read_flag     <= 0;
       zorro_ram_write_flag    <= 0;
+      // Arm the epoch gate. The post-reset cycles must observe a
+      // clearing edge on slv_reg0's ack bits before zorro_ram_*_flag
+      // can go high again, so a stale ACK left in the AXI-lite regs
+      // by pre-reset ARM firmware cannot satisfy the first post-reset
+      // Z3 read/write completion.
+      ack0_fresh_post_reset   <= 0;
+      ack1_fresh_post_reset   <= 0;
 `ifdef RX_BACKLOG_LINEBUF
       rxbuf_valid <= 0;
       // Drop any sticky slot poison on reset so the first post-reset
@@ -2298,13 +2322,24 @@ module MNTZorro_v0_1_S00_AXI
           if (z3_mapped_addr>='h2000 && z3_mapped_addr<'h6000) begin
             // Fail-closed poison check runs before hit/miss. Once a
             // slot hits the retry bound, every subsequent read from
-            // that same selector returns 0xFFFFFFFF without issuing a
-            // burst, which guarantees the driver sees a consistent
-            // all-ones image (size-field and body both poisoned). The
-            // frame-level sanity gate then drops the frame wholesale
-            // rather than absorbing one fabricated longword of payload.
+            // that same (selector, generation) returns 0xFFFFFFFF
+            // without issuing a burst, which guarantees the driver
+            // sees a consistent all-ones image (size-field and body
+            // both poisoned). The frame-level sanity gate then drops
+            // the frame wholesale rather than absorbing one fabricated
+            // longword of payload.
+            //
+            // Keyed on BOTH selector and the slv_reg4 write generation
+            // captured at poison time, plus gated with
+            // slv_reg4_wr_this_cycle exactly like the cache hit. A
+            // firmware queue-drain rewrite of REG4 back to the same
+            // numeric value still bumps slv_reg4_write_count, so
+            // auto-clear fires on that edge and the first post-drain
+            // frame in the same-numbered slot is NOT fail-closed.
             if (rxbuf_slot_poison
-                && rxbuf_poison_sel == eth_rx_frame_select) begin
+                && rxbuf_poison_sel == eth_rx_frame_select
+                && rxbuf_poison_count_snap == slv_reg4_write_count
+                && !slv_reg4_wr_this_cycle) begin
               data_z3_hi16  <= 16'hFFFF;
               data_z3_low16 <= 16'hFFFF;
               dataout_z3    <= 1;
@@ -2494,17 +2529,21 @@ module MNTZorro_v0_1_S00_AXI
                 // single fabricated longword of payload (which would
                 // let the frame body stream continue with one bad dword
                 // silently wedged in the middle), latch a sticky slot
-                // poison against this selector. The fail-closed check
+                // poison against the BURST SNAPSHOT that actually
+                // failed — not the live selector, which may already
+                // have churned to a new slot. The fail-closed check
                 // at the top of WAIT_READ_DMA_Z3 then forces every
-                // subsequent read of this slot to 0xFFFFFFFF too, so
-                // the driver's frame-level size/content sanity gate
-                // sees a consistent all-ones image and drops the whole
-                // frame. Poison clears when the firmware advances
-                // slv_reg4 past the poisoned slot.
-                rxbuf_valid       <= 1'b0;
-                rxbuf_retry_count <= 3'd0;
-                rxbuf_slot_poison <= 1'b1;
-                rxbuf_poison_sel  <= eth_rx_frame_select;
+                // subsequent read of (snap_sel, snap_count) to
+                // 0xFFFFFFFF too, so the driver's frame-level
+                // size/content sanity gate sees a consistent all-ones
+                // image and drops the whole frame. Poison clears
+                // automatically when the firmware either advances
+                // selector or bumps the slv_reg4 write generation.
+                rxbuf_valid             <= 1'b0;
+                rxbuf_retry_count       <= 3'd0;
+                rxbuf_slot_poison       <= 1'b1;
+                rxbuf_poison_sel        <= rxbuf_frame_sel_snap;
+                rxbuf_poison_count_snap <= rxbuf_fill_count_snap;
                 data_z3_hi16      <= 16'hFFFF;
                 data_z3_low16     <= 16'hFFFF;
                 dataout_z3        <= 1;
@@ -2679,16 +2718,25 @@ module MNTZorro_v0_1_S00_AXI
       zz9000ax_reset_out <= axi_reg5[2];
 
     // read / write request acknowledged by ARM.
-    // Gate on !z_reset so the dominant reset branch's zero-clear of
-    // zorro_ram_read_flag/write_flag and axi_reg0/axi_reg1 is not
-    // immediately overwritten by a resample of pre-reset slv_reg0/1.
-    // Without this gate, an ARM ack bit set just before the reset
-    // pulse would survive the reset and get latched into the FSM on
-    // the first post-reset cycle, satisfying Z3_READ_DELAY1 /
-    // Z3_WRITE_FINALIZE for a request the ARM never saw.
+    //
+    // Two layers of protection so that a stale pre-reset ACK bit
+    // cannot satisfy a post-reset Z3 completion:
+    //   1. While z_reset is asserted, zero-force axi_reg0/1 and
+    //      suppress zorro_ram_*_flag resample. This handles the
+    //      in-reset window.
+    //   2. After z_reset drops, the ack*_fresh_post_reset gate holds
+    //      zorro_ram_*_flag low until slv_reg0 is observed with the
+    //      corresponding ack bit CLEARED at least once. The ARM
+    //      firmware writes slv_reg0 asynchronously; if a pre-reset
+    //      request had its ACK bit left high in slv_reg0, this gate
+    //      makes the FSM ignore it until ARM has had a chance to
+    //      clear the bit, so the next ARM ack is a real rising edge.
     if (!z_reset) begin
-      zorro_ram_read_flag  <= axi_reg0[30];
-      zorro_ram_write_flag <= axi_reg0[31];
+      if (!slv_reg0[30]) ack0_fresh_post_reset <= 1'b1;
+      if (!slv_reg0[31]) ack1_fresh_post_reset <= 1'b1;
+
+      zorro_ram_read_flag  <= axi_reg0[30] & ack0_fresh_post_reset;
+      zorro_ram_write_flag <= axi_reg0[31] & ack1_fresh_post_reset;
 
       axi_reg0 <= slv_reg0;
       axi_reg1 <= slv_reg1;
@@ -2703,11 +2751,15 @@ module MNTZorro_v0_1_S00_AXI
     axi_reg5 <= slv_reg5; // Amiga IRQ
 
 `ifdef RX_BACKLOG_LINEBUF
-    // Auto-clear sticky slot poison as soon as the firmware advances
-    // slv_reg4 past the poisoned slot. Runs every ACLK so the
-    // fail-closed window is exactly one drained slot; the next slot
-    // starts clean.
-    if (rxbuf_slot_poison && rxbuf_poison_sel != eth_rx_frame_select)
+    // Auto-clear sticky slot poison on ANY slv_reg4 generation change.
+    // Matches the cache-validity predicate: poison is only meaningful
+    // while (selector, write_count) still equal the captured burst
+    // snapshot. A queue-drain firmware rewrite of REG4 back to the
+    // same numeric value still bumps slv_reg4_write_count, so poison
+    // does not stick across an intended refill. Runs every ACLK.
+    if (rxbuf_slot_poison
+        && (rxbuf_poison_sel != eth_rx_frame_select
+            || rxbuf_poison_count_snap != slv_reg4_write_count))
       rxbuf_slot_poison <= 1'b0;
 `endif
 
