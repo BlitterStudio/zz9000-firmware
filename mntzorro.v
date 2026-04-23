@@ -1027,9 +1027,21 @@ module MNTZorro_v0_1_S00_AXI
   reg [7:0]  rxbuf_fill_count_snap  = 0;
   // Fill-completion bookkeeping: we only publish the line if the burst
   // delivered all 8 beats with OKAY responses. A short burst or error
-  // response leaves rxbuf_valid low and falls through to a miss retry.
+  // response leaves rxbuf_valid low and falls through to a bounded retry.
   reg        rxbuf_fill_error       = 0;
   reg        rxbuf_fill_req_seen    = 0;
+  // Retry bound: caps how many times a single Zorro cycle can reissue
+  // a miss burst. Selector-handoff aborts recover naturally once the
+  // firmware stops writing slv_reg4, but a hard AXI fault would loop
+  // forever without a bound. After the bound is hit we give the Amiga
+  // a deterministic default-word completion so the bus does not hang.
+  reg [2:0]  rxbuf_retry_count      = 0;
+  // Outstanding-burst tracker. Set when the AXI slave accepts our AR
+  // handshake, cleared on rlast. A mid-burst z_reset uses this to hold
+  // the RESET state until the in-flight 8 beats have drained, so the
+  // first post-reset miss cannot consume leftover R beats from the
+  // pre-reset transaction.
+  reg        rxbuf_ar_in_flight     = 0;
 `endif
 
   reg [31:0] video_control_data_zorro;
@@ -1518,10 +1530,21 @@ module MNTZorro_v0_1_S00_AXI
           rxbuf_fill_req_seen    <= 0;
           rxbuf_frame_sel_snap   <= 0;
           rxbuf_tag              <= 0;
-`endif
+          rxbuf_retry_count      <= 3'd0;
+          // Force arvalid low; if a burst was issued before the z_reset
+          // arrived, hold this RESET state until the remaining R beats
+          // drain so the next post-reset miss cannot consume leftover
+          // beats from the pre-reset transaction.
+          m00_axi_arvalid        <= 1'b0;
+          if (m00_axi_rvalid && m00_axi_rlast)
+            rxbuf_ar_in_flight   <= 1'b0;
 
+          if (!z_reset && !rxbuf_ar_in_flight)
+            zorro_state <= DECIDE_Z2_Z3;
+`else
           if (!z_reset)
             zorro_state <= DECIDE_Z2_Z3;
+`endif
 
           videocap_mode_in <= 1;
         end
@@ -2274,6 +2297,7 @@ module MNTZorro_v0_1_S00_AXI
               // read from a now-superseded slot.
               rxbuf_fill_count_snap  <= slv_reg4_write_count;
               if (m00_axi_arready) begin
+                rxbuf_ar_in_flight <= 1'b1;
                 zorro_state <= Z3_RXBUF_FILL_R;
               end else begin
                 zorro_state <= Z3_RXBUF_AR_WAIT;
@@ -2326,6 +2350,7 @@ module MNTZorro_v0_1_S00_AXI
           // address. AXI requires master to keep araddr/arlen/arburst
           // unchanged while ARVALID is high and ARREADY is low.
           if (m00_axi_arready) begin
+            rxbuf_ar_in_flight <= 1'b1;
             zorro_state <= Z3_RXBUF_FILL_R;
           end
         end
@@ -2359,15 +2384,17 @@ module MNTZorro_v0_1_S00_AXI
             // starting a new cycle before the burst drains, leaving
             // slaven/rxbuf state stale across cycles.
             if (m00_axi_rlast) begin
-              // Restore single-beat AXI defaults regardless of outcome.
-              m00_axi_arlen   <= 'h0;
-              m00_axi_arburst <= 'h0;
+              // Restore single-beat AXI defaults and release the
+              // outstanding-burst flag regardless of outcome.
+              m00_axi_arlen      <= 'h0;
+              m00_axi_arburst    <= 'h0;
+              rxbuf_ar_in_flight <= 1'b0;
               // Commit only if every predicate for a trustworthy fill
               // holds: selector stable, no error on any beat, the burst
               // actually delivered all 8 beats (rlast must coincide with
               // the 8th-beat index, i.e. fill_idx == 7 pre-increment),
               // and the requested beat was seen. Otherwise fall back to
-              // a miss retry rather than publish a partial line.
+              // a bounded retry rather than publish a partial line.
               // `rxbuf_fill_req_seen` is an NBA-updated flag, so when the
               // requested beat coincides with the last beat (offset 0x1c
               // = beat 7) the register is still 0 during this cycle's
@@ -2381,20 +2408,38 @@ module MNTZorro_v0_1_S00_AXI
                   && rxbuf_fill_idx == 3'd7
                   && (rxbuf_fill_req_seen
                       || rxbuf_fill_idx == z3_mapped_addr[4:2])) begin
-                rxbuf_valid <= 1'b1;
+                rxbuf_valid       <= 1'b1;
+                rxbuf_retry_count <= 3'd0;
                 dtack <= 1;
                 zorro_state <= Z3_ENDCYCLE;
+              end else if (rxbuf_retry_count >= 3'd3) begin
+                // Retry bound exhausted. A persistent AXI fault on the
+                // backlog window would otherwise spin here forever and
+                // wedge the Amiga Zorro cycle. Complete the read with a
+                // deterministic default (all-ones, which matches the
+                // cold-boot poison pattern the driver's frame-level
+                // sanity gate already rejects) so the bus handshake
+                // finishes and the driver drops the frame at the next
+                // sanity check.
+                rxbuf_valid       <= 1'b0;
+                rxbuf_retry_count <= 3'd0;
+                data_z3_hi16      <= 16'hFFFF;
+                data_z3_low16     <= 16'hFFFF;
+                dataout_z3        <= 1;
+                dtack             <= 1;
+                zorro_state       <= Z3_ENDCYCLE;
               end else begin
                 // Either the slot was superseded, the burst reported an
                 // error, it short-returned rlast before 8 beats, or the
                 // requested word never arrived. Discard the fill, clear
-                // any early-latched data lines, and re-enter the hit/
-                // miss decision. The next pass will miss (rxbuf_valid is
-                // low) and issue a fresh burst against the current
-                // selector.
-                rxbuf_valid <= 1'b0;
-                dataout_z3  <= 0;
-                zorro_state <= WAIT_READ_DMA_Z3;
+                // any early-latched data lines, bump the retry count,
+                // and re-enter the hit/miss decision. The next pass
+                // will miss (rxbuf_valid is low) and issue a fresh
+                // burst against the current selector.
+                rxbuf_valid       <= 1'b0;
+                rxbuf_retry_count <= rxbuf_retry_count + 3'd1;
+                dataout_z3        <= 0;
+                zorro_state       <= WAIT_READ_DMA_Z3;
               end
             end
           end
