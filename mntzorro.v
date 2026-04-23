@@ -1131,6 +1131,18 @@ module MNTZorro_v0_1_S00_AXI
   // latency but short enough that a fault does not hold the Amiga
   // bus. On saturation the state fails closed with 0xFFFFFFFF.
   reg [11:0] axi_single_timeout_count = 0;
+  // RESET drain-timeout safety net. The in-state timeout paths
+  // (Z3_RXBUF_FILL_R, WAIT_READ_DMA_Z3B, WAIT_READ2) retire an
+  // orphan transaction by force-clearing axi_r_outstanding, which
+  // handles the common case where the timeout fires during normal
+  // FSM operation. But a z_reset that arrives mid-burst bypasses
+  // those case branches entirely (reset-dominant if/else), so the
+  // in-state clear never runs and the flag can still be pinned in
+  // RESET if the slave never emits RLAST. 20 bits saturates in
+  // ~10 ms @ 100 MHz — long enough that a transient stall always
+  // resolves via natural drain first, short enough that a warm
+  // Amiga reset can always recover the card without a PS reboot.
+  reg [19:0] reset_drain_count = 0;
   // Post-reset ARM handshake epoch gate. Forces zorro_ram_*_flag low
   // after z_reset until we have observed the corresponding ack bit in
   // slv_reg0 (the AXI-lite mirror of ARM's writes) go LOW at least
@@ -1664,19 +1676,36 @@ module MNTZorro_v0_1_S00_AXI
           // and clears this flag every cycle.
           m00_axi_arvalid        <= 1'b0;
 
-          // No drain-timeout / force-exit escape hatch. If the slave
-          // is genuinely wedged and never emits RLAST, the card
-          // stays quarantined in RESET forever — which means Amiga
-          // sees no ZZ9000 on the next boot until a PS hard reset.
-          // That is the fail-safe choice: releasing RESET with
-          // axi_r_outstanding still asserted would either contaminate
-          // all AXI-backed windows (boot ROM, USB, shared apertures)
-          // with fabricated 0xFFFF reads, or risk a late R beat being
-          // consumed by a post-reset read as its own data. Neither is
-          // acceptable. A transient stall recovers automatically once
-          // RLAST arrives and the post-case tracker clears the flag.
-          if (!z_reset && !axi_r_outstanding)
-            zorro_state <= DECIDE_Z2_Z3;
+          // RESET exit policy:
+          //   - Normal: exit on !z_reset && !axi_r_outstanding. The
+          //     in-state timeout paths clear the flag on their own,
+          //     so under almost every fault model we reach this
+          //     branch cleanly.
+          //   - Safety net: a z_reset that arrives mid-burst bypasses
+          //     the case branches entirely (reset-dominant if/else),
+          //     so the in-state timeout retire never runs. If the
+          //     slave also never emits RLAST, axi_r_outstanding stays
+          //     pinned and RESET would hang forever. After
+          //     reset_drain_count saturates (~10 ms @ 100 MHz),
+          //     force-clear the flag and exit. The tradeoff — a
+          //     late RVALID beat being consumed by the first
+          //     post-reset read — is bounded and far preferable to
+          //     a permanent warm-reset lockout requiring a PS
+          //     reboot to recover.
+          if (!z_reset) begin
+            if (!axi_r_outstanding) begin
+              reset_drain_count <= 20'd0;
+              zorro_state <= DECIDE_Z2_Z3;
+            end else if (&reset_drain_count) begin
+              axi_r_outstanding <= 1'b0;
+              reset_drain_count <= 20'd0;
+              zorro_state <= DECIDE_Z2_Z3;
+            end else begin
+              reset_drain_count <= reset_drain_count + 20'd1;
+            end
+          end else begin
+            reset_drain_count <= 20'd0;
+          end
 
           videocap_mode_in <= 1;
         end
