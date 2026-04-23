@@ -453,25 +453,6 @@ module MNTZorro_v0_1_S00_AXI
 `endif
         end
       else begin
-        // Hard-clear the ARM-ack bits in slv_reg0 while z_reset is
-        // asserted. Without this the AXI-lite regs keep whatever
-        // pre-reset ack value the ARM firmware wrote last — ARM is
-        // asynchronous and may not clear them on its own Amiga-reset
-        // path (and older firmware builds provably don't). The
-        // post-reset fresh-ack epoch gate in the FSM block still
-        // needs to see slv_reg0[30:31] go LOW at least once before
-        // it opens; by guaranteeing that low baseline here, the
-        // gate opens deterministically on reset release rather than
-        // depending on ARM cooperation to avoid a bus deadlock.
-        // ARM-initiated writes to other byte lanes / other registers
-        // still take precedence on the same cycle because the per-
-        // byte case below writes AFTER this clear (NBA last-write-
-        // wins), so a live ARM ack write during reset is preserved
-        // on its other bits but the two ack bits snap to 0.
-        if (z_reset) begin
-          slv_reg0[30] <= 1'b0;
-          slv_reg0[31] <= 1'b0;
-        end
         if (slv_reg_wren)
           begin
             case ( axi_awaddr[ADDR_LSB+OPT_MEM_ADDR_BITS:ADDR_LSB] )
@@ -536,6 +517,21 @@ module MNTZorro_v0_1_S00_AXI
               end
             endcase
           end
+        // Hard-clear the ARM-ack bits in slv_reg0 while z_reset is
+        // asserted. Placed AFTER the write case so NBA last-write-wins
+        // forces bits 30/31 to 0 even when the ARM is concurrently
+        // writing byte lane 3 (which covers those bits). Without this
+        // ordering, an ARM write to reg0 coincident with reset could
+        // leave either ack bit high, and the post-reset fresh-ack
+        // epoch gate in the FSM block would never observe them low —
+        // leaving ARM-serviced Zorro reads/writes deadlocked on
+        // exactly the stale-ACK case this clear is meant to prevent.
+        // The ARM must not depend on writing ack during reset anyway,
+        // so bits 30/31 are safe to stomp here.
+        if (z_reset) begin
+          slv_reg0[30] <= 1'b0;
+          slv_reg0[31] <= 1'b0;
+        end
       end
     end
 
@@ -1135,13 +1131,6 @@ module MNTZorro_v0_1_S00_AXI
   // latency but short enough that a fault does not hold the Amiga
   // bus. On saturation the state fails closed with 0xFFFFFFFF.
   reg [11:0] axi_single_timeout_count = 0;
-  // RESET drain timeout. Forces an exit from RESET even when
-  // axi_r_outstanding is stuck high — the slave may be genuinely
-  // wedged and never produce the final rlast. At 100 MHz, 16 bits
-  // saturates in ~655 us, which is orders of magnitude longer than
-  // any healthy Zynq PS DDR drain and short enough that reset
-  // recovery does not hang if the interconnect is faulted.
-  reg [15:0] reset_drain_count = 0;
   // Post-reset ARM handshake epoch gate. Forces zorro_ram_*_flag low
   // after z_reset until we have observed the corresponding ack bit in
   // slv_reg0 (the AXI-lite mirror of ARM's writes) go LOW at least
@@ -1675,31 +1664,19 @@ module MNTZorro_v0_1_S00_AXI
           // and clears this flag every cycle.
           m00_axi_arvalid        <= 1'b0;
 
-          // Drain-timeout safety net. A genuinely wedged slave that
-          // never produces rlast would otherwise pin the FSM in
-          // RESET forever. After the counter saturates, release
-          // RESET but LEAVE axi_r_outstanding set so the drain gate
-          // on every new-AR issue path continues to fail-close all
-          // reads with 0xFFFFFFFF until the slave does eventually
-          // send rlast (or never — in which case the Amiga keeps
-          // seeing all-ones for backlog/ROM/USB reads, which the
-          // driver's sanity gate rejects). Force-clearing the flag
-          // here would be unsafe: a slave that resumes later would
-          // deliver rvalid beats that could be consumed by the first
-          // post-reset read as if they were its own data.
-          if (!z_reset) begin
-            if (!axi_r_outstanding) begin
-              reset_drain_count <= 16'd0;
-              zorro_state <= DECIDE_Z2_Z3;
-            end else if (&reset_drain_count) begin
-              reset_drain_count <= 16'd0;
-              zorro_state <= DECIDE_Z2_Z3;
-            end else begin
-              reset_drain_count <= reset_drain_count + 16'd1;
-            end
-          end else begin
-            reset_drain_count <= 16'd0;
-          end
+          // No drain-timeout / force-exit escape hatch. If the slave
+          // is genuinely wedged and never emits RLAST, the card
+          // stays quarantined in RESET forever — which means Amiga
+          // sees no ZZ9000 on the next boot until a PS hard reset.
+          // That is the fail-safe choice: releasing RESET with
+          // axi_r_outstanding still asserted would either contaminate
+          // all AXI-backed windows (boot ROM, USB, shared apertures)
+          // with fabricated 0xFFFF reads, or risk a late R beat being
+          // consumed by a post-reset read as its own data. Neither is
+          // acceptable. A transient stall recovers automatically once
+          // RLAST arrives and the post-case tracker clears the flag.
+          if (!z_reset && !axi_r_outstanding)
+            zorro_state <= DECIDE_Z2_Z3;
 
           videocap_mode_in <= 1;
         end
