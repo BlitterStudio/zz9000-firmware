@@ -995,8 +995,9 @@ module MNTZorro_v0_1_S00_AXI
   reg        rxbuf_valid = 0;
   reg [2:0]  rxbuf_fill_idx;
   reg [20:0] rxbuf_frame_sel_snap;
-  reg        slv_reg4_write_toggle  = 0;
-  reg        rxbuf_saw_write_toggle = 0;
+  reg        slv_reg4_write_toggle     = 0;
+  reg        rxbuf_saw_write_toggle    = 0;
+  reg        rxbuf_fill_toggle_snap    = 0;
 `endif
 
   reg [31:0] video_control_data_zorro;
@@ -2197,12 +2198,16 @@ module MNTZorro_v0_1_S00_AXI
               m00_axi_arlen   <= 'h7; // 8 beats
               m00_axi_arburst <= 'h1; // INCR
               m00_axi_arvalid <= 1;
-              rxbuf_tag            <= (`RX_BACKLOG_ADDRESS - 32'h2000)
-                                      + {z3_mapped_addr[23:5], 5'b0}
-                                      + {eth_rx_frame_select, 11'h0};
-              rxbuf_frame_sel_snap <= eth_rx_frame_select;
-              rxbuf_fill_idx       <= 3'd0;
-              rxbuf_valid          <= 1'b0;
+              rxbuf_tag              <= (`RX_BACKLOG_ADDRESS - 32'h2000)
+                                        + {z3_mapped_addr[23:5], 5'b0}
+                                        + {eth_rx_frame_select, 11'h0};
+              rxbuf_frame_sel_snap   <= eth_rx_frame_select;
+              rxbuf_fill_idx         <= 3'd0;
+              rxbuf_valid            <= 1'b0;
+              // Capture the selector-write generation at miss-issue time so
+              // that a firmware write to slv_reg4 during the burst discards
+              // the fill (see rlast handling below).
+              rxbuf_fill_toggle_snap <= slv_reg4_write_toggle;
               if (m00_axi_arready) begin
                 zorro_state <= Z3_RXBUF_FILL_R;
               end
@@ -2267,7 +2272,15 @@ module MNTZorro_v0_1_S00_AXI
             // starting a new cycle before the burst drains, leaving
             // slaven/rxbuf state stale across cycles.
             if (m00_axi_rlast) begin
-              rxbuf_valid <= 1'b1;
+              // Only revalidate the cache if no slv_reg4 write happened
+              // between the miss issue and rlast. Any write during the
+              // burst means the slot identity changed (or may have
+              // changed — queue drain rewrites slv_reg4 with the same
+              // value) and the filled line is potentially stale.
+              if (rxbuf_fill_toggle_snap == slv_reg4_write_toggle)
+                rxbuf_valid <= 1'b1;
+              else
+                rxbuf_valid <= 1'b0;
               dtack <= 1;
               // Restore single-beat defaults for subsequent non-backlog reads
               m00_axi_arlen   <= 'h0;
