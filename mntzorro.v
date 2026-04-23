@@ -965,6 +965,7 @@ module MNTZorro_v0_1_S00_AXI
 
 `ifdef RX_BACKLOG_LINEBUF
   localparam Z3_RXBUF_FILL_R = 62;
+  localparam Z3_RXBUF_AR_WAIT = 63;
 `endif
 
   (* mark_debug = "true" *) reg [7:0] zorro_state = COLD;
@@ -1015,6 +1016,11 @@ module MNTZorro_v0_1_S00_AXI
   reg [7:0]  slv_reg4_write_count   = 0;
   reg [7:0]  rxbuf_saw_write_count  = 0;
   reg [7:0]  rxbuf_fill_count_snap  = 0;
+  // Fill-completion bookkeeping: we only publish the line if the burst
+  // delivered all 8 beats with OKAY responses. A short burst or error
+  // response leaves rxbuf_valid low and falls through to a miss retry.
+  reg        rxbuf_fill_error       = 0;
+  reg        rxbuf_fill_req_seen    = 0;
 `endif
 
   reg [31:0] video_control_data_zorro;
@@ -2218,7 +2224,13 @@ module MNTZorro_v0_1_S00_AXI
               dtack <= 1;
               zorro_state <= Z3_ENDCYCLE;
             end else begin
-              // MISS — issue one 8-beat INCR burst to fill the 32-byte line
+              // MISS — issue one 8-beat INCR burst to fill the 32-byte line.
+              // All AR values and cache metadata are latched here and held
+              // stable in Z3_RXBUF_AR_WAIT until the AXI slave accepts the
+              // address. Recomputing araddr under AR backpressure would be
+              // an AXI protocol violation (master must not change address
+              // while ARVALID is high) and would also race a concurrent
+              // slv_reg4 change — fetching slot A while tagging as slot B.
               m00_axi_araddr  <= (`RX_BACKLOG_ADDRESS - 32'h2000)
                                  + {z3_mapped_addr[23:5], 5'b0}
                                  + {eth_rx_frame_select, 11'h0};
@@ -2231,6 +2243,8 @@ module MNTZorro_v0_1_S00_AXI
               rxbuf_frame_sel_snap   <= eth_rx_frame_select;
               rxbuf_fill_idx         <= 3'd0;
               rxbuf_valid            <= 1'b0;
+              rxbuf_fill_error       <= 1'b0;
+              rxbuf_fill_req_seen    <= 1'b0;
               // Capture the selector-write generation at miss-issue. The
               // miss address is derived from the registered eth_rx_frame_select,
               // which still reflects the pre-write selector this cycle. So
@@ -2242,6 +2256,8 @@ module MNTZorro_v0_1_S00_AXI
               rxbuf_fill_count_snap  <= slv_reg4_write_count;
               if (m00_axi_arready) begin
                 zorro_state <= Z3_RXBUF_FILL_R;
+              end else begin
+                zorro_state <= Z3_RXBUF_AR_WAIT;
               end
             end
           end else
@@ -2285,6 +2301,16 @@ module MNTZorro_v0_1_S00_AXI
         end
 
 `ifdef RX_BACKLOG_LINEBUF
+        Z3_RXBUF_AR_WAIT: begin
+          // Hold ARVALID and all AR-phase values stable (no assignment
+          // = NBA retains previous value) until the slave accepts the
+          // address. AXI requires master to keep araddr/arlen/arburst
+          // unchanged while ARVALID is high and ARREADY is low.
+          if (m00_axi_arready) begin
+            zorro_state <= Z3_RXBUF_FILL_R;
+          end
+        end
+
         Z3_RXBUF_FILL_R: begin
           m00_axi_arvalid <= 0;
           if (m00_axi_rvalid) begin
@@ -2297,11 +2323,16 @@ module MNTZorro_v0_1_S00_AXI
             // forwarded to the Amiga data lines.
             if (rxbuf_fill_idx == z3_mapped_addr[4:2]
                 && rxbuf_fill_count_snap == slv_reg4_write_count
-                && !slv_reg4_wr_this_cycle) begin
+                && !slv_reg4_wr_this_cycle
+                && m00_axi_rresp == 2'b00) begin
               data_z3_hi16  <= {m00_axi_rdata[7:0],   m00_axi_rdata[15:8]};
               data_z3_low16 <= {m00_axi_rdata[23:16], m00_axi_rdata[31:24]};
               dataout_z3 <= 1;
+              rxbuf_fill_req_seen <= 1'b1;
             end
+            // Sticky error flag: any non-OKAY rresp poisons the fill.
+            if (m00_axi_rresp != 2'b00)
+              rxbuf_fill_error <= 1'b1;
             rxbuf_fill_idx <= rxbuf_fill_idx + 3'd1;
             // DTACK is deliberately deferred until rlast so that the
             // FSM does not release handshake while still occupying
@@ -2312,20 +2343,29 @@ module MNTZorro_v0_1_S00_AXI
               // Restore single-beat AXI defaults regardless of outcome.
               m00_axi_arlen   <= 'h0;
               m00_axi_arburst <= 'h0;
+              // Commit only if every predicate for a trustworthy fill
+              // holds: selector stable, no error on any beat, the burst
+              // actually delivered all 8 beats (rlast must coincide with
+              // the 8th-beat index, i.e. fill_idx == 7 pre-increment),
+              // and the requested beat was seen. Otherwise fall back to
+              // a miss retry rather than publish a partial line.
               if (rxbuf_fill_count_snap == slv_reg4_write_count
-                  && !slv_reg4_wr_this_cycle) begin
-                // Burst completed cleanly against the same selector the
-                // miss was issued under — publish the line and finish
-                // the Amiga cycle.
+                  && !slv_reg4_wr_this_cycle
+                  && !rxbuf_fill_error
+                  && m00_axi_rresp == 2'b00
+                  && rxbuf_fill_idx == 3'd7
+                  && rxbuf_fill_req_seen) begin
                 rxbuf_valid <= 1'b1;
                 dtack <= 1;
                 zorro_state <= Z3_ENDCYCLE;
               end else begin
-                // A selector handoff happened during the burst. Discard
-                // the fill, clear any data lines we might have latched
-                // before the handoff was observed, and re-enter the
-                // hit/miss decision — which will re-evaluate against
-                // the new eth_rx_frame_select and issue a fresh burst.
+                // Either the slot was superseded, the burst reported an
+                // error, it short-returned rlast before 8 beats, or the
+                // requested word never arrived. Discard the fill, clear
+                // any early-latched data lines, and re-enter the hit/
+                // miss decision. The next pass will miss (rxbuf_valid is
+                // low) and issue a fresh burst against the current
+                // selector.
                 rxbuf_valid <= 1'b0;
                 dataout_z3  <= 0;
                 zorro_state <= WAIT_READ_DMA_Z3;
