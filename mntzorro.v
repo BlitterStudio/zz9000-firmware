@@ -1042,6 +1042,16 @@ module MNTZorro_v0_1_S00_AXI
   // first post-reset miss cannot consume leftover R beats from the
   // pre-reset transaction.
   reg        rxbuf_ar_in_flight     = 0;
+  // Slot-poison state. When a single backlog slot hits the retry bound,
+  // we latch a sticky poison bit against that selector. All subsequent
+  // reads of the same slot return 0xFFFFFFFF without touching AXI, so
+  // the driver reads a consistent all-ones image and its frame-level
+  // size/content sanity gate drops the frame deterministically rather
+  // than quietly absorbing one fabricated longword of payload. The
+  // poison clears automatically when the firmware advances slv_reg4
+  // past this slot (new selector != poison selector).
+  reg        rxbuf_slot_poison      = 0;
+  reg [20:0] rxbuf_poison_sel       = 0;
 `endif
 
   reg [31:0] video_control_data_zorro;
@@ -1507,6 +1517,10 @@ module MNTZorro_v0_1_S00_AXI
       zorro_ram_write_flag    <= 0;
 `ifdef RX_BACKLOG_LINEBUF
       rxbuf_valid <= 0;
+      // Drop any sticky slot poison on reset so the first post-reset
+      // read of the (firmware-rearmed) backlog is not gated by a
+      // pre-reset fault latch.
+      rxbuf_slot_poison <= 0;
       // Force ARVALID low so a burst issued pre-reset is no longer
       // outstanding on the AXI AR channel.
       m00_axi_arvalid <= 0;
@@ -2282,6 +2296,21 @@ module MNTZorro_v0_1_S00_AXI
         WAIT_READ_DMA_Z3: begin
 `ifdef RX_BACKLOG_LINEBUF
           if (z3_mapped_addr>='h2000 && z3_mapped_addr<'h6000) begin
+            // Fail-closed poison check runs before hit/miss. Once a
+            // slot hits the retry bound, every subsequent read from
+            // that same selector returns 0xFFFFFFFF without issuing a
+            // burst, which guarantees the driver sees a consistent
+            // all-ones image (size-field and body both poisoned). The
+            // frame-level sanity gate then drops the frame wholesale
+            // rather than absorbing one fabricated longword of payload.
+            if (rxbuf_slot_poison
+                && rxbuf_poison_sel == eth_rx_frame_select) begin
+              data_z3_hi16  <= 16'hFFFF;
+              data_z3_low16 <= 16'hFFFF;
+              dataout_z3    <= 1;
+              dtack         <= 1;
+              zorro_state   <= Z3_ENDCYCLE;
+            end else
             // RX backlog path: try line buffer first, else issue 8-beat burst fill
             // Hit predicate. Two independent guards protect against
             // slv_reg4 handoffs that the cache hasn't processed yet:
@@ -2461,16 +2490,21 @@ module MNTZorro_v0_1_S00_AXI
                 dtack <= 1;
                 zorro_state <= Z3_ENDCYCLE;
               end else if (rxbuf_retry_count >= 3'd3) begin
-                // Retry bound exhausted. A persistent AXI fault on the
-                // backlog window would otherwise spin here forever and
-                // wedge the Amiga Zorro cycle. Complete the read with a
-                // deterministic default (all-ones, which matches the
-                // cold-boot poison pattern the driver's frame-level
-                // sanity gate already rejects) so the bus handshake
-                // finishes and the driver drops the frame at the next
-                // sanity check.
+                // Retry bound exhausted. Rather than complete with a
+                // single fabricated longword of payload (which would
+                // let the frame body stream continue with one bad dword
+                // silently wedged in the middle), latch a sticky slot
+                // poison against this selector. The fail-closed check
+                // at the top of WAIT_READ_DMA_Z3 then forces every
+                // subsequent read of this slot to 0xFFFFFFFF too, so
+                // the driver's frame-level size/content sanity gate
+                // sees a consistent all-ones image and drops the whole
+                // frame. Poison clears when the firmware advances
+                // slv_reg4 past the poisoned slot.
                 rxbuf_valid       <= 1'b0;
                 rxbuf_retry_count <= 3'd0;
+                rxbuf_slot_poison <= 1'b1;
+                rxbuf_poison_sel  <= eth_rx_frame_select;
                 data_z3_hi16      <= 16'hFFFF;
                 data_z3_low16     <= 16'hFFFF;
                 dataout_z3        <= 1;
@@ -2644,16 +2678,38 @@ module MNTZorro_v0_1_S00_AXI
     if (axi_reg5[3] == 1)
       zz9000ax_reset_out <= axi_reg5[2];
 
-    // read / write request acknowledged by ARM
-    zorro_ram_read_flag  <= axi_reg0[30];
-    zorro_ram_write_flag <= axi_reg0[31];
+    // read / write request acknowledged by ARM.
+    // Gate on !z_reset so the dominant reset branch's zero-clear of
+    // zorro_ram_read_flag/write_flag and axi_reg0/axi_reg1 is not
+    // immediately overwritten by a resample of pre-reset slv_reg0/1.
+    // Without this gate, an ARM ack bit set just before the reset
+    // pulse would survive the reset and get latched into the FSM on
+    // the first post-reset cycle, satisfying Z3_READ_DELAY1 /
+    // Z3_WRITE_FINALIZE for a request the ARM never saw.
+    if (!z_reset) begin
+      zorro_ram_read_flag  <= axi_reg0[30];
+      zorro_ram_write_flag <= axi_reg0[31];
 
-    axi_reg0 <= slv_reg0;
-    axi_reg1 <= slv_reg1;
+      axi_reg0 <= slv_reg0;
+      axi_reg1 <= slv_reg1;
+    end else begin
+      axi_reg0 <= 32'h0;
+      axi_reg1 <= 32'h0;
+    end
+
     axi_reg2 <= slv_reg2; // ARM video control
     axi_reg3 <= slv_reg3; // ARM video control
     eth_rx_frame_select <= slv_reg4;
     axi_reg5 <= slv_reg5; // Amiga IRQ
+
+`ifdef RX_BACKLOG_LINEBUF
+    // Auto-clear sticky slot poison as soon as the firmware advances
+    // slv_reg4 past the poisoned slot. Runs every ACLK so the
+    // fail-closed window is exactly one drained slot; the next slot
+    // starts clean.
+    if (rxbuf_slot_poison && rxbuf_poison_sel != eth_rx_frame_select)
+      rxbuf_slot_poison <= 1'b0;
+`endif
 
     if (video_control_axi) begin
       video_control_data <= video_control_data_axi;
