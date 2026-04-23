@@ -464,13 +464,21 @@ module MNTZorro_v0_1_S00_AXI
                     // Slave register 3
                     slv_reg3[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
-              3'h4:
+              3'h4: begin
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
                     // Respective byte enables are asserted as per write strobes
                     // Slave register 4
                     slv_reg4[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
+`ifdef RX_BACKLOG_LINEBUF
+                // Signal the Zorro FSM that the RX-slot selector was rewritten.
+                // Any write forces RX line-buffer invalidation, even when the
+                // firmware rewrites slv_reg4 with the same value it already
+                // held (queue drain -> slot-0 reuse).
+                slv_reg4_write_toggle <= ~slv_reg4_write_toggle;
+`endif
+              end
               3'h5:
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
@@ -979,13 +987,16 @@ module MNTZorro_v0_1_S00_AXI
 
 `ifdef RX_BACKLOG_LINEBUF
   // 32-byte line buffer for RX backlog reads (8 x 32-bit words).
-  // Tag stores the AXI line base; frame-sel snapshot ensures a slot
-  // advance on the PS side automatically invalidates (miss on next check).
+  // Tag stores the AXI line base; frame-sel snapshot + write-toggle ensure
+  // that any firmware write to slv_reg4 (slot handoff, including same-value
+  // resets when the queue drains) forces a miss on the next hit check.
   reg [31:0] rxbuf_data [0:7];
   reg [31:0] rxbuf_tag;
   reg        rxbuf_valid = 0;
   reg [2:0]  rxbuf_fill_idx;
   reg [20:0] rxbuf_frame_sel_snap;
+  reg        slv_reg4_write_toggle  = 0;
+  reg        rxbuf_saw_write_toggle = 0;
 `endif
 
   reg [31:0] video_control_data_zorro;
@@ -2461,6 +2472,20 @@ module MNTZorro_v0_1_S00_AXI
 
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
                 video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank, 12'b0, zorro_state};
+
+`ifdef RX_BACKLOG_LINEBUF
+    // Any firmware write to slv_reg4 (the RX-slot selector register) is a
+    // slot-handoff signal, even when the value written equals the current
+    // one — firmware rewrites slv_reg4 = 0 on queue-drain reset, and the
+    // new contents of slot 0 must not be served from the old cached line.
+    // Placing this after the state-machine case ensures it overrides any
+    // rxbuf_valid <= 1 that the burst-fill completion might have scheduled
+    // in the same cycle.
+    rxbuf_saw_write_toggle <= slv_reg4_write_toggle;
+    if (slv_reg4_write_toggle != rxbuf_saw_write_toggle) begin
+      rxbuf_valid <= 1'b0;
+    end
+`endif
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;
