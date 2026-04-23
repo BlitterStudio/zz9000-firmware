@@ -49,8 +49,8 @@
 `define BOOT_ROM_ADDRESS          32'h3fcf0000 // 1Kb boot rom
 `define TX_FRAME_ADDRESS          32'h3fd10000 // ethernet tx buffer
 `define RX_FRAME_ADDRESS          32'h3fd20000 // ethernet rx buffer (unused?)
-`define RX_BACKLOG_ADDRESS        32'h3fe00000 // ethernet rx buffer
-`define USB_BLOCK_STORAGE_ADDRESS 32'h3fe10000
+`define RX_BACKLOG_ADDRESS        32'h3fe00000 // ethernet rx buffer (128 slots x 2 KB = 256 KB)
+`define USB_BLOCK_STORAGE_ADDRESS 32'h3fe40000 // must sit past RX_BACKLOG (grew from 64 KB to 256 KB)
 `define FRAME_SIZE 24'h2048 // max ethernet frame size
 
 `define C_M00_AXI_TARGET_SLAVE_BASE_ADDR 32'h10000000
