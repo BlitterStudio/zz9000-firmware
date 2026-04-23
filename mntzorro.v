@@ -1093,6 +1093,13 @@ module MNTZorro_v0_1_S00_AXI
   // when z_reset wins the case and the acceptance happened on the
   // reset edge.
   reg axi_r_outstanding = 0;
+  // RESET drain timeout. Forces an exit from RESET even when
+  // axi_r_outstanding is stuck high — the slave may be genuinely
+  // wedged and never produce the final rlast. At 100 MHz, 16 bits
+  // saturates in ~655 us, which is orders of magnitude longer than
+  // any healthy Zynq PS DDR drain and short enough that reset
+  // recovery does not hang if the interconnect is faulted.
+  reg [15:0] reset_drain_count = 0;
   // Post-reset ARM handshake epoch gate. Forces zorro_ram_*_flag low
   // after z_reset until we have observed the corresponding ack bit in
   // slv_reg0 (the AXI-lite mirror of ARM's writes) go LOW at least
@@ -1626,8 +1633,27 @@ module MNTZorro_v0_1_S00_AXI
           // and clears this flag every cycle.
           m00_axi_arvalid        <= 1'b0;
 
-          if (!z_reset && !axi_r_outstanding)
-            zorro_state <= DECIDE_Z2_Z3;
+          // Drain-timeout safety net. A genuinely wedged slave that
+          // never produces rlast would otherwise pin the FSM in
+          // RESET forever. After the counter saturates, force-clear
+          // axi_r_outstanding (m00_axi_rready is tied high, so any
+          // late beats that do arrive are consumed without corrupting
+          // state) and release the reset. The post-case tracker will
+          // re-set axi_r_outstanding only on a fresh AR accept.
+          if (!z_reset) begin
+            if (!axi_r_outstanding) begin
+              reset_drain_count <= 16'd0;
+              zorro_state <= DECIDE_Z2_Z3;
+            end else if (&reset_drain_count) begin
+              axi_r_outstanding <= 1'b0;
+              reset_drain_count <= 16'd0;
+              zorro_state <= DECIDE_Z2_Z3;
+            end else begin
+              reset_drain_count <= reset_drain_count + 16'd1;
+            end
+          end else begin
+            reset_drain_count <= 16'd0;
+          end
 
           videocap_mode_in <= 1;
         end
@@ -2374,6 +2400,23 @@ module MNTZorro_v0_1_S00_AXI
               dataout_z3 <= 1;
               dtack <= 1;
               zorro_state <= Z3_ENDCYCLE;
+            end else if (axi_r_outstanding) begin
+              // A prior AXI read transaction is still in flight — most
+              // likely a post-AR timeout whose rlast never arrived, or
+              // a slave that is streaming beats slowly. Issuing a new
+              // AR here would conflict with the pending transaction,
+              // and any late rvalid beat on the old one would be
+              // consumed by the new burst's FILL_R state. Fail-close
+              // this Zorro cycle instead so the bus releases; the
+              // drain tracker continues to wait for rlast on the old
+              // transaction. Cache hits above still serve normally,
+              // so legitimate reads from already-filled lines are
+              // not blocked by the drain.
+              data_z3_hi16  <= 16'hFFFF;
+              data_z3_low16 <= 16'hFFFF;
+              dataout_z3    <= 1;
+              dtack         <= 1;
+              zorro_state   <= Z3_ENDCYCLE;
             end else begin
               // MISS — issue one 8-beat INCR burst to fill the 32-byte line.
               // All AR values and cache metadata are latched here and held
@@ -2418,7 +2461,17 @@ module MNTZorro_v0_1_S00_AXI
             end
           end else
 `endif
-          begin
+          if (axi_r_outstanding) begin
+            // Same drain-gate rationale as the backlog miss path: a
+            // prior AXI read is still in flight, so issuing a new AR
+            // here would collide with its pending rvalid stream.
+            // Fail-close this non-backlog Zorro read instead.
+            data_z3_hi16  <= 16'hFFFF;
+            data_z3_low16 <= 16'hFFFF;
+            dataout_z3    <= 1;
+            dtack         <= 1;
+            zorro_state   <= Z3_ENDCYCLE;
+          end else begin
             if (z3_mapped_addr>='ha000 && z3_mapped_addr<'h10000)
               m00_axi_araddr  <= (`USB_BLOCK_STORAGE_ADDRESS - 32'ha000) + z3_mapped_addr;
             else
