@@ -82,7 +82,7 @@ Build artifacts (`ZZ9000OS.elf`, `BOOT.bin`) are uploaded per run.
 
 ### Cutting a release
 
-Push a `v*` tag (e.g. `v1.14`, or `v1.15-rc1` for a pre-release) and
+Push a `v*` tag (e.g. `v2.0.0`, or `v2.0.0-rc1` for a pre-release) and
 the workflow will build the firmware and publish a GitHub Release with
 `BOOT-<tag>.bin`, `ZZ9000OS-<tag>.elf`, and old-style
 `zz9000-firmware-<tag>-<variant>.zip` archives attached. Each ZIP
@@ -90,8 +90,8 @@ contains a directory with the user-facing `BOOT.bin` file to copy to the
 ZZ9000 microSD card.
 
 ```bash
-git tag -a v1.14 -m "Firmware 1.14"
-git push origin v1.14
+git tag -a v2.0.0 -m "Firmware 2.0.0"
+git push origin v2.0.0
 ```
 
 Tags containing `-` are marked as pre-releases.

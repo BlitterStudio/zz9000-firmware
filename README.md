@@ -76,7 +76,7 @@ CI's source of truth; commit a new one alongside any HDL change.
 
 ## Releases
 
-Pushing a tag matching `v*` (e.g. `v1.14`, `v2026.04`) triggers the CI
+Pushing a tag matching `v*` (e.g. `v2.0.0`, `v2026.04`) triggers the CI
 build and then publishes a GitHub Release with `BOOT-<tag>.bin`,
 `ZZ9000OS-<tag>.elf`, and `zz9000-firmware-<tag>-<variant>.zip`
 archives attached. Each ZIP contains a `BOOT.bin`, matching the old
@@ -86,8 +86,8 @@ generated automatically from commits and merged PRs since the previous
 tag.
 
 ```bash
-git tag -a v1.14 -m "Firmware 1.14"
-git push origin v1.14
+git tag -a v2.0.0 -m "Firmware 2.0.0"
+git push origin v2.0.0
 ```
 
 ## Flashing
@@ -117,7 +117,7 @@ Schematics are in the manual (PDF):
 
 - **Scanlines** — V1 intensity scanlines and V2 multi-mode scanlines
   (classic / soft / gradient with parity control) by Xanxi, adapted for
-  firmware 1.13+ / 1.14 by Dimitris Panokostas (midwan). V2 leaves the
+  firmware 2.0.0 by Dimitris Panokostas (midwan). V2 leaves the
   V1 intensity registers decoded but unused.
 - **Scanlines V2 block-design integration** (TCL wiring between
   mntzorro's scanline outputs and video_formatter) and the split

@@ -57,8 +57,8 @@ void Xil_AssertNonVoid() {}
 #include "zz_video_modes.h"
 #include "usb_proxy.h"
 
-#define REVISION_MAJOR 1
-#define REVISION_MINOR 14
+#define REVISION_MAJOR 2
+#define REVISION_MINOR 0
 
 #define GPIO_DEVICE_ID	XPAR_XGPIOPS_0_DEVICE_ID
 
