@@ -4,6 +4,7 @@
  * Copyright (C) 2019-2026, Lucie L. Hartmann <lucie@mntre.com>
  *                          MNT Research GmbH, Berlin
  *                          https://mntre.com
+ * Copyright (C) 2026,      Dimitris Panokostas <midwan@gmail.com>
  *
  * More Info: https://mntre.com/zz9000
  *
@@ -63,6 +64,85 @@ static inline void memset32(uint32_t *dst, uint32_t val, uint32_t count) {
 void set_fb(uint32_t* fb_, uint32_t pitch) {
 	fb=fb_;
 	fb_pitch=pitch;
+}
+
+static inline void draw_vertical_line_solid(uint32_t *dp, int16_t x, int32_t line_step,
+	uint32_t count, uint32_t fg_color, uint8_t u8_fg, uint32_t color_format)
+{
+	switch (color_format) {
+	case MNTVA_COLOR_8BIT: {
+		uint8_t *p = (uint8_t *)dp + x;
+		int32_t step = line_step * (int32_t)sizeof(uint32_t);
+		while (count >= 4) {
+			p[0] = u8_fg;
+			p[step] = u8_fg;
+			p[step * 2] = u8_fg;
+			p[step * 3] = u8_fg;
+			p += step * 4;
+			count -= 4;
+		}
+		while (count--) {
+			*p = u8_fg;
+			p += step;
+		}
+		break;
+	}
+	case MNTVA_COLOR_16BIT565:
+	case MNTVA_COLOR_15BIT: {
+		uint16_t *p = (uint16_t *)dp + x;
+		int32_t step = line_step * 2;
+		while (count >= 4) {
+			p[0] = fg_color;
+			p[step] = fg_color;
+			p[step * 2] = fg_color;
+			p[step * 3] = fg_color;
+			p += step * 4;
+			count -= 4;
+		}
+		while (count--) {
+			*p = fg_color;
+			p += step;
+		}
+		break;
+	}
+	case MNTVA_COLOR_32BIT: {
+		uint32_t *p = dp + x;
+		while (count >= 4) {
+			p[0] = fg_color;
+			p[line_step] = fg_color;
+			p[line_step * 2] = fg_color;
+			p[line_step * 3] = fg_color;
+			p += line_step * 4;
+			count -= 4;
+		}
+		while (count--) {
+			*p = fg_color;
+			p += line_step;
+		}
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+static inline void draw_horizontal_line_solid(uint32_t *dp, int16_t x,
+	uint32_t count, uint32_t fg_color, uint8_t u8_fg, uint32_t color_format)
+{
+	switch (color_format) {
+	case MNTVA_COLOR_8BIT:
+		memset((uint8_t *)dp + x, u8_fg, count);
+		break;
+	case MNTVA_COLOR_16BIT565:
+	case MNTVA_COLOR_15BIT:
+		memset16((uint16_t *)dp + x, fg_color, count);
+		break;
+	case MNTVA_COLOR_32BIT:
+		memset32(dp + x, fg_color, count);
+		break;
+	default:
+		break;
+	}
 }
 
 extern int sprite_request_update_data;
@@ -487,6 +567,20 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 	dy = y2 - y1;
 	dx_abs = abs(dx);
 	dy_abs = abs(dy);
+
+	if (!len)
+		len = (dx_abs >= dy_abs) ? dx_abs : dy_abs;
+	if (dx_abs == 0) {
+		draw_vertical_line_solid(dp, x, line_step, (uint32_t)len + 1,
+			fg_color, u8_fg, color_format);
+		return;
+	}
+	if (dy_abs == 0) {
+		draw_horizontal_line_solid(dp, x_reverse ? x - len : x,
+			(uint32_t)len + 1, fg_color, u8_fg, color_format);
+		return;
+	}
+
 	ix = dy_abs >> 1;
 	iy = dx_abs >> 1;
 
