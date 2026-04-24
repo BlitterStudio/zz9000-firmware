@@ -738,23 +738,40 @@ module MNTZorro_v0_1_S00_AXI
 `endif
   wire z3_addr_phase_match = (!z_confout && !ZORRO_NCFGIN && z3_addr_phase_autoconfig) ||
                              (z_confout && (z3_addr_phase_in_reg || z3_addr_phase_in_ram));
-  wire z3_fcs_assert_clk = ~ZORRO_NFCS;
-  wire z3_fcs_clear = ZORRO_NFCS || !ZORRO_NIORST;
-  (* IOB = "TRUE" *) reg z3_nslave_out = 1'b1;
-  (* IOB = "TRUE" *) reg z3_ncinh_out = 1'b0;
-  (* mark_debug = "true" *) wire z3_addr_phase_claim = !z3_nslave_out;
+  wire z3_fcs_reset = !ZORRO_NIORST;
+  wire z3_nslave_out;
+  wire z3_ncinh_out;
+  (* mark_debug = "true" *) wire z3_addr_phase_claim = z3_ncinh_out;
 
-  // Capture the decoded address at /FCS assertion, while Z3 address bits are
-  // guaranteed valid, and hold the claim until /FCS ends the cycle.
-  always @(posedge z3_fcs_assert_clk or posedge z3_fcs_clear) begin
-    if (z3_fcs_clear) begin
-      z3_nslave_out <= 1'b1;
-      z3_ncinh_out <= 1'b0;
-    end else begin
-      z3_nslave_out <= !z3_addr_phase_match;
-      z3_ncinh_out <= z3_addr_phase_match;
-    end
-  end
+  // Use /FCS as a DDR output clock: the falling edge captures the decoded
+  // address-phase claim, and the rising edge releases it for the next cycle.
+  ODDR #(
+    .DDR_CLK_EDGE("OPPOSITE_EDGE"),
+    .INIT(1'b1),
+    .SRTYPE("ASYNC")
+  ) z3_nslave_oddr (
+    .Q(z3_nslave_out),
+    .C(ZORRO_NFCS),
+    .CE(1'b1),
+    .D1(1'b1),
+    .D2(!z3_addr_phase_match),
+    .R(1'b0),
+    .S(z3_fcs_reset)
+  );
+
+  ODDR #(
+    .DDR_CLK_EDGE("OPPOSITE_EDGE"),
+    .INIT(1'b0),
+    .SRTYPE("ASYNC")
+  ) z3_ncinh_oddr (
+    .Q(z3_ncinh_out),
+    .C(ZORRO_NFCS),
+    .CE(1'b1),
+    .D1(1'b0),
+    .D2(z3_addr_phase_match),
+    .R(z3_fcs_reset),
+    .S(1'b0)
+  );
 
   assign ZORRO_NCINH = z3_ncinh_out; // inverse
   assign ZORRO_NSLAVE = z3_nslave_out;
