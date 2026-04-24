@@ -122,13 +122,13 @@ enum gfx_minterm_modes {
 	dp[x+a] = bg_color;
 
 #define SET_FG_PIXEL8_MASK(a) \
-	((uint8_t *)dp)[x + a] = u8_fg ^ (((uint8_t *)dp)[x + a] & (mask ^ 0xFF));
+	((uint8_t *)dp)[x + a] = (((uint8_t *)dp)[x + a] & (uint8_t)~mask) | (u8_fg & mask);
 #define SET_BG_PIXEL8_MASK(a) \
-	((uint8_t *)dp)[x + a] = u8_bg ^ (((uint8_t *)dp)[x + a] & (mask ^ 0xFF));
+	((uint8_t *)dp)[x + a] = (((uint8_t *)dp)[x + a] & (uint8_t)~mask) | (u8_bg & mask);
 #define SET_FG_PIXEL16_MASK(a) \
-	((uint16_t *)dp)[x + a] = fg_color ^ (((uint16_t *)dp)[x + a] & (color_mask ^ 0xFFFF));
+	((uint16_t *)dp)[x + a] = (((uint16_t *)dp)[x + a] & (uint16_t)~color_mask) | (fg_color & color_mask);
 #define SET_FG_PIXEL32_MASK(a) \
-	dp[x + a] = fg_color ^ (dp[x + a] & (color_mask ^ 0xFFFFFFFF));
+	dp[x + a] = (dp[x + a] & ~color_mask) | (fg_color & color_mask);
 
 #define SET_FG_PIXEL \
 	switch (color_format) { \
