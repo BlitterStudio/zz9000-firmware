@@ -30,7 +30,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            wget xz-utils make ca-certificates python3 g++ libssl-dev flex bison
+            wget xz-utils make ca-certificates python3 g++ libssl-dev flex bison zip
 
       # Arm GNU Toolchain with newlib. Ubuntu's gcc-arm-none-eabi package
       # uses picolibc, which is incompatible with the Xilinx BSP (references
@@ -85,8 +85,15 @@ jobs:
       - name: Build firmware (ZZ9000OS.elf)
         run: ./build_firmware.sh
 
-      - name: Package boot image (BOOT.bin)
-        run: ./build_bootimage.sh
+      - name: Package release assets
+        run: |
+          set -euo pipefail
+          BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
+          ARGS=(--tag "$BUILD_LABEL" --output release_assets)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ARGS+=(--require-all)
+          fi
+          ./build_release_assets.sh "${ARGS[@]}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -95,6 +102,7 @@ jobs:
           path: |
             ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
             bootimage_work/BOOT.bin
+            release_assets/*
           if-no-files-found: error
           retention-days: 14
 
@@ -124,8 +132,15 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           mkdir -p release
-          cp "dist/bootimage_work/BOOT.bin" "release/BOOT-${TAG}.bin"
-          cp "dist/ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf" "release/ZZ9000OS-${TAG}.elf"
+          find dist -type f \( \
+            -name 'BOOT-*.bin' -o \
+            -name 'ZZ9000OS-*.elf' -o \
+            -name 'zz9000-firmware-*.zip' \
+          \) -exec cp {} release/ \;
+          if ! find release -maxdepth 1 -type f | grep -q .; then
+            echo "ERROR: no release assets staged." >&2
+            exit 1
+          fi
           # Pre-release if tag contains a hyphen (v1.14-rc1, v1.14-beta, …).
           if [[ "$TAG" == *-* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
@@ -144,6 +159,5 @@ jobs:
           if [[ "${{ steps.stage.outputs.prerelease }}" == "true" ]]; then
             FLAGS+=(--prerelease)
           fi
-          gh release create "$TAG" "${FLAGS[@]}" \
-            "release/BOOT-${TAG}.bin" \
-            "release/ZZ9000OS-${TAG}.elf"
+          mapfile -t ASSETS < <(find release -maxdepth 1 -type f | sort)
+          gh release create "$TAG" "${FLAGS[@]}" "${ASSETS[@]}"

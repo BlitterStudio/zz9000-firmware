@@ -718,18 +718,70 @@ module MNTZorro_v0_1_S00_AXI
   // data/addr out signals are gated by master's DOE signal
   wire ZORRO_DATA_T = ~(ZORRO_DOE & (dataout_enable | dataout_z3));
   wire ZORRO_ADDR_T = ~(ZORRO_DOE & dataout_z3);
+  wire [15:0] ZORRO_DATA_IN;
+  wire [22:0] ZORRO_ADDR_IN;
+
+  // autoconf output signal
+  reg z_confout = 0;
+  assign ZORRO_NCFGOUT = ZORRO_NCFGIN?1'b1:(~z_confout);
 
   reg z_ovr = 0;
-  assign ZORRO_NCINH = z_ovr?1'b1:1'b0; // inverse
+`ifdef ZORRO3
+  wire [31:0] z3_addr_phase_bus = {ZORRO_DATA_IN[15:8], ZORRO_ADDR_IN[22:1], 2'b00};
+  wire z3_addr_phase_autoconfig = (z3_addr_phase_bus[31:16] == 16'hff00);
+  wire z3_addr_phase_in_reg = (z3_addr_phase_bus >= z3_reg_low) && (z3_addr_phase_bus < z3_reg_high);
+`ifdef VARIANT_Z3_FASTRAM
+  wire z3_addr_phase_in_ram = ((z3_addr_phase_bus >= z3_ram_low) && (z3_addr_phase_bus < z3_ram_high)) ||
+                              ((z3_addr_phase_bus >= z3_fast_low) && (z3_addr_phase_bus < z3_fast_high));
+`else
+  wire z3_addr_phase_in_ram = (z3_addr_phase_bus >= z3_ram_low) && (z3_addr_phase_bus < z3_ram_high);
+`endif
+  wire z3_addr_phase_match = (!z_confout && !ZORRO_NCFGIN && z3_addr_phase_autoconfig) ||
+                             (z_confout && (z3_addr_phase_in_reg || z3_addr_phase_in_ram));
+  wire z3_fcs_reset = !ZORRO_NIORST;
+  wire z3_nslave_out;
+  wire z3_ncinh_out;
+  (* mark_debug = "true" *) wire z3_addr_phase_claim = z3_ncinh_out;
 
-  // "slave" signals are gated by master's FCS signal
+  // Use /FCS as a DDR output clock: the falling edge captures the decoded
+  // address-phase claim, and the rising edge releases it for the next cycle.
+  ODDR #(
+    .DDR_CLK_EDGE("OPPOSITE_EDGE"),
+    .INIT(1'b1),
+    .SRTYPE("ASYNC")
+  ) z3_nslave_oddr (
+    .Q(z3_nslave_out),
+    .C(ZORRO_NFCS),
+    .CE(1'b1),
+    .D1(1'b1),
+    .D2(!z3_addr_phase_match),
+    .R(1'b0),
+    .S(z3_fcs_reset)
+  );
+
+  ODDR #(
+    .DDR_CLK_EDGE("OPPOSITE_EDGE"),
+    .INIT(1'b0),
+    .SRTYPE("ASYNC")
+  ) z3_ncinh_oddr (
+    .Q(z3_ncinh_out),
+    .C(ZORRO_NFCS),
+    .CE(1'b1),
+    .D1(1'b0),
+    .D2(z3_addr_phase_match),
+    .R(z3_fcs_reset),
+    .S(1'b0)
+  );
+
+  assign ZORRO_NCINH = z3_ncinh_out; // inverse
+  assign ZORRO_NSLAVE = z3_nslave_out;
+`else
+  assign ZORRO_NCINH = z_ovr?1'b1:1'b0; // inverse
   assign ZORRO_NSLAVE = (ZORRO_DOE & slaven)?1'b0:1'b1; // cannot gate by FCS for Z2
+`endif
   assign ZORRO_NDTACK = (ZORRO_DOE & dtack) ?1'b1:1'b0; // inverse, pull-down transistor on output
   wire [22:0] z3_addr_out = {data_z3_low16_latched, 7'bZZZ_ZZZZ}; // FIXME this creates tri-cell warning?
   //wire [22:0] z3_addr_out = {data_z3_low16_latched, 7'b111_1111}; // FIXME this creates tri-cell warning?
-
-  wire [15:0] ZORRO_DATA_IN;
-  wire [22:0] ZORRO_ADDR_IN;
 
   genvar i;
 
@@ -756,10 +808,6 @@ module MNTZorro_v0_1_S00_AXI
             );
     end
   endgenerate
-
-  // autoconf output signal
-  reg z_confout = 0;
-  assign ZORRO_NCFGOUT = ZORRO_NCFGIN?1'b1:(~z_confout);
 
 `ifdef VARIANT_FW20
     assign arm_interrupt = zorro_ram_write_request | zorro_ram_read_request;
