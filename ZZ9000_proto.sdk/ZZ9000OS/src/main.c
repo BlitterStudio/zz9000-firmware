@@ -106,7 +106,6 @@ static uint32_t usb_storage_write_block = 0;
 static char sd_storage_available_flag = 0;
 
 static volatile int usb_proxy_pending = 0;
-static int err_throttle = 0;
 static uint32_t sd_storage_read_block = 0;
 static uint32_t sd_storage_write_block = 0;
 
@@ -263,7 +262,7 @@ int main() {
 	int custom_vmode_param = VMODE_PARAM_HRES;
 
 	// zorro state
-	u32 zstate_raw;
+	u32 zstate_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 	int need_req_ack = 0;
 
 	// audio parameters (buffer locations)
@@ -301,7 +300,7 @@ int main() {
 
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 		if (debug_lowlevel && (zstate_raw&0xff)!=(zstate&0xff)) {
-			printf("ZSTATE: %x\n", zstate);
+			printf("ZSTATE: %lx\n", zstate);
 		}
 		zstate_raw = zstate;
 		u32 writereq = (zstate & (1 << 31));
