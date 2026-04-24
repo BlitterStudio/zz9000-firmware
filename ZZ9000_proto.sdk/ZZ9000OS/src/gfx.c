@@ -198,9 +198,18 @@ void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint3
 void fill_rect_solid(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t rect_rgb, uint32_t color_format)
 {
 	uint32_t* p = fb + (rect_y1 * fb_pitch);
-	uint16_t* p16;
-	uint16_t rect_y2 = rect_y1 + h, rect_x2 = rect_x1 + w;
-	uint16_t x;
+	uint16_t rect_y2 = rect_y1 + h;
+
+	if (w == 1) {
+		draw_vertical_line_solid(p, rect_x1, fb_pitch, h, rect_rgb,
+				rect_rgb >> 24, color_format);
+		return;
+	}
+	if (h == 1) {
+		draw_horizontal_line_solid(p, rect_x1, w, rect_rgb,
+				rect_rgb >> 24, color_format);
+		return;
+	}
 
 	for (uint16_t cur_y = rect_y1; cur_y < rect_y2; cur_y++) {
 		switch(color_format) {
