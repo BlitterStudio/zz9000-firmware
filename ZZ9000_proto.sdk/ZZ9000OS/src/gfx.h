@@ -129,12 +129,17 @@ enum gfx_minterm_modes {
 	((uint16_t *)dp)[x + a] = (((uint16_t *)dp)[x + a] & (uint16_t)~color_mask) | (fg_color & color_mask);
 #define SET_FG_PIXEL32_MASK(a) \
 	dp[x + a] = (dp[x + a] & ~color_mask) | (fg_color & color_mask);
+#define SET_PIXEL16_MASKED(d, v) \
+	((uint16_t *)(d))[x] = (((uint16_t *)(d))[x] & (uint16_t)~color_mask) | ((uint16_t)(v) & (uint16_t)color_mask);
+#define SET_PIXEL32_MASKED(d, v) \
+	((uint32_t *)(d))[x] = (((uint32_t *)(d))[x] & ~color_mask) | ((uint32_t)(v) & color_mask);
 
 #define SET_FG_PIXEL \
 	switch (color_format) { \
 		case MNTVA_COLOR_8BIT: \
 			SET_FG_PIXEL8(0); break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			SET_FG_PIXEL16(0); break; \
 		case MNTVA_COLOR_32BIT: \
 			SET_FG_PIXEL32(0); break; \
@@ -145,6 +150,7 @@ enum gfx_minterm_modes {
 		case MNTVA_COLOR_8BIT: \
 			SET_FG_PIXEL8_MASK(0); break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			SET_FG_PIXEL16(0); break; \
 		case MNTVA_COLOR_32BIT: \
 			SET_FG_PIXEL32(0); break; \
@@ -155,6 +161,7 @@ enum gfx_minterm_modes {
 		case MNTVA_COLOR_8BIT: \
 			SET_BG_PIXEL8(0); break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			SET_BG_PIXEL16(0); break; \
 		case MNTVA_COLOR_32BIT: \
 			SET_BG_PIXEL32(0); break; \
@@ -165,6 +172,7 @@ enum gfx_minterm_modes {
 		case MNTVA_COLOR_8BIT: \
 			SET_BG_PIXEL8_MASK(0); break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			SET_BG_PIXEL16(0); break; \
 		case MNTVA_COLOR_32BIT: \
 			SET_BG_PIXEL32(0); break; \
@@ -183,6 +191,7 @@ enum gfx_minterm_modes {
 			if (cur_byte & 0x01) SET_FG_PIXEL8(7); \
 			break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			if (cur_byte & 0x80) SET_FG_PIXEL16(0); \
 			if (cur_byte & 0x40) SET_FG_PIXEL16(1); \
 			if (cur_byte & 0x20) SET_FG_PIXEL16(2); \
@@ -217,6 +226,7 @@ enum gfx_minterm_modes {
 			if (cur_byte & 0x01) SET_FG_PIXEL8_MASK(7); \
 			break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			if (cur_byte & 0x80) SET_FG_PIXEL16(0); \
 			if (cur_byte & 0x40) SET_FG_PIXEL16(1); \
 			if (cur_byte & 0x20) SET_FG_PIXEL16(2); \
@@ -251,7 +261,8 @@ enum gfx_minterm_modes {
 			if (cur_byte & 0x02) SET_FG_PIXEL8(6) else SET_BG_PIXEL8(6) \
 			if (cur_byte & 0x01) SET_FG_PIXEL8(7) else SET_BG_PIXEL8(7) \
 			break; \
-		case MNTVA_COLOR_16BIT565: { \
+		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: { \
 			uint16x8_t _bv = vdupq_n_u16(cur_byte); \
 			uint16x8_t _bits = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01}; \
 			uint16x8_t _mask = vcgtq_u16(vandq_u16(_bv, _bits), vdupq_n_u16(0)); \
@@ -282,6 +293,7 @@ enum gfx_minterm_modes {
 			if (cur_byte & 0x01) SET_FG_PIXEL8(7) else SET_BG_PIXEL8(7) \
 			break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			if (cur_byte & 0x80) SET_FG_PIXEL16(0) else SET_BG_PIXEL16(0) \
 			if (cur_byte & 0x40) SET_FG_PIXEL16(1) else SET_BG_PIXEL16(1) \
 			if (cur_byte & 0x20) SET_FG_PIXEL16(2) else SET_BG_PIXEL16(2) \
@@ -317,6 +329,7 @@ enum gfx_minterm_modes {
 			if (cur_byte & 0x01) SET_FG_PIXEL8_MASK(7) else SET_BG_PIXEL8_MASK(7) \
 			break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			if (cur_byte & 0x80) SET_FG_PIXEL16(0) else SET_BG_PIXEL16(0) \
 			if (cur_byte & 0x40) SET_FG_PIXEL16(1) else SET_BG_PIXEL16(1) \
 			if (cur_byte & 0x20) SET_FG_PIXEL16(2) else SET_BG_PIXEL16(2) \
@@ -343,6 +356,7 @@ enum gfx_minterm_modes {
 		case MNTVA_COLOR_8BIT: \
 			((uint8_t *)dp)[x] ^= mask; break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			((uint16_t *)dp)[x] ^= 0xFFFF; break; \
 		case MNTVA_COLOR_32BIT: \
 			dp[x] ^= 0xFFFFFFFF; break; \
@@ -353,6 +367,7 @@ enum gfx_minterm_modes {
 		case MNTVA_COLOR_8BIT: \
 			((uint8_t *)dp)[x] = u8_fg ^ 0xFF; break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			((uint16_t *)dp)[x] ^= fg_color; break; \
 		case MNTVA_COLOR_32BIT: \
 			dp[x] ^= fg_color; break; \
@@ -363,6 +378,7 @@ enum gfx_minterm_modes {
 		case MNTVA_COLOR_8BIT: \
 			((uint8_t *)dp)[x] ^= u8_bg; break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			((uint16_t *)dp)[x] ^= bg_color; break; \
 		case MNTVA_COLOR_32BIT: \
 			dp[x] ^= bg_color; break; \
@@ -381,6 +397,7 @@ enum gfx_minterm_modes {
 			if (cur_byte & 0x01) ((uint8_t *)dp)[x+7] ^= mask; \
 			break; \
 		case MNTVA_COLOR_16BIT565: \
+		case MNTVA_COLOR_15BIT: \
 			if (cur_byte & 0x80) ((uint16_t *)dp)[x] ^= 0xFFFF; \
 			if (cur_byte & 0x40) ((uint16_t *)dp)[x+1] ^= 0xFFFF; \
 			if (cur_byte & 0x20) ((uint16_t *)dp)[x+2] ^= 0xFFFF; \
@@ -444,99 +461,111 @@ enum gfx_minterm_modes {
 		case MINTERM_NOR: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
+				case MNTVA_COLOR_15BIT: \
 					s &= ~(((uint16_t *)d)[x]); \
-					SET_FG_PIXEL16_MASK(0); break; \
+					SET_PIXEL16_MASKED(d, s); break; \
 				case MNTVA_COLOR_32BIT: \
-					s &= ~(d[x]); \
-					SET_FG_PIXEL32_MASK(0); break; \
+					s &= ~(((uint32_t *)d)[x]); \
+					SET_PIXEL32_MASKED(d, s); break; \
 			} break; \
 		case MINTERM_ONLYDST: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
+				case MNTVA_COLOR_15BIT: \
 					((uint16_t *)d)[x] = ((uint16_t *)d)[x] & ~(s); break; \
 				case MNTVA_COLOR_32BIT: \
-					d[x] = d[x] & ~(s); break; \
+					((uint32_t *)d)[x] = ((uint32_t *)d)[x] & ~(s); break; \
 			} break; \
 		case MINTERM_ONLYSRC: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
+				case MNTVA_COLOR_15BIT: \
 					s &= (((uint16_t *)d)[x] ^ 0xFFFF); \
-					SET_FG_PIXEL16_MASK(0); break; \
+					SET_PIXEL16_MASKED(d, s); break; \
 				case MNTVA_COLOR_32BIT: \
-					s &= (d[x] ^ 0x00FFFFFF); \
-					SET_FG_PIXEL32_MASK(0); break; \
+					s &= (((uint32_t *)d)[x] ^ 0x00FFFFFF); \
+					SET_PIXEL32_MASKED(d, s); break; \
 			} break; \
 		case MINTERM_INVERT: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
+				case MNTVA_COLOR_15BIT: \
 					((uint16_t *)d)[x] ^= 0xFFFF; break; \
 				case MNTVA_COLOR_32BIT: \
-					d[x] ^= 0x00FFFFFF; break; \
+					((uint32_t *)d)[x] ^= 0x00FFFFFF; break; \
 			} break; \
 		case MINTERM_EOR: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
+				case MNTVA_COLOR_15BIT: \
 					((uint16_t *)d)[x] ^= s; break; \
 				case MNTVA_COLOR_32BIT: \
-					d[x] ^= s; break; \
+					((uint32_t *)d)[x] ^= s; break; \
 			} break; \
 		case MINTERM_NAND: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
+				case MNTVA_COLOR_15BIT: \
 					s = ~(((uint16_t *)d)[x] | ~(s)) & color_mask; \
-					SET_FG_PIXEL16_MASK(0); break; \
+					SET_PIXEL16_MASKED(d, s); break; \
 				case MNTVA_COLOR_32BIT: \
-					s = ~(d[x] | ~(s)) & color_mask; \
-					SET_FG_PIXEL32_MASK(0); break; \
+					s = ~(((uint32_t *)d)[x] | ~(s)) & color_mask; \
+					SET_PIXEL32_MASKED(d, s); break; \
 			} break; \
 		case MINTERM_AND: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
+				case MNTVA_COLOR_15BIT: \
 					s &= ((uint16_t *)d)[x]; \
-					SET_FG_PIXEL16_MASK(0); break; \
+					SET_PIXEL16_MASKED(d, s); break; \
 				case MNTVA_COLOR_32BIT: \
-					s &= d[x]; \
-					SET_FG_PIXEL32_MASK(0); break; \
+					s &= ((uint32_t *)d)[x]; \
+					SET_PIXEL32_MASKED(d, s); break; \
 			} break; \
 		case MINTERM_NEOR: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
+				case MNTVA_COLOR_15BIT: \
 					((uint16_t *)d)[x] ^= ~(s & color_mask); break; \
 				case MNTVA_COLOR_32BIT: \
-					d[x] ^= ~(s & color_mask); break; \
+					((uint32_t *)d)[x] ^= ~(s & color_mask); break; \
 			} break; \
 		case MINTERM_DST: /* This one does nothing. */ \
 			return; break; \
 		case MINTERM_NOTONLYSRC: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
+				case MNTVA_COLOR_15BIT: \
 					((uint16_t *)d)[x] |= (s & color_mask); break; \
 				case MNTVA_COLOR_32BIT: \
-					d[x] |= (s & color_mask); break; \
+					((uint32_t *)d)[x] |= (s & color_mask); break; \
 			} break; \
 		case MINTERM_NOTSRC: \
 		case MINTERM_SRC: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
-					SET_FG_PIXEL16_MASK(0); break; \
+				case MNTVA_COLOR_15BIT: \
+					SET_PIXEL16_MASKED(d, s); break; \
 				case MNTVA_COLOR_32BIT: \
-					SET_FG_PIXEL32_MASK(0); break; \
+					SET_PIXEL32_MASKED(d, s); break; \
 			} break; \
 		case MINTERM_NOTONLYDST: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
-					((uint16_t *)d)[x] = ~(((uint16_t *)d)[x] & s) & color_mask; \
-					SET_FG_PIXEL16_MASK(0); break; \
+				case MNTVA_COLOR_15BIT: \
+					s = ~(((uint16_t *)d)[x] & s) & color_mask; \
+					SET_PIXEL16_MASKED(d, s); break; \
 				case MNTVA_COLOR_32BIT: \
-					d[x] = ~(d[x] & s) & color_mask; \
-					SET_FG_PIXEL32_MASK(0); break; \
+					s = ~(((uint32_t *)d)[x] & s) & color_mask; \
+					SET_PIXEL32_MASKED(d, s); break; \
 			} break; \
 		case MINTERM_OR: \
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
+				case MNTVA_COLOR_15BIT: \
 					((uint16_t *)d)[x] |= (s & color_mask); break; \
 				case MNTVA_COLOR_32BIT: \
-					d[x] |= (s & color_mask); break; \
+					((uint32_t *)d)[x] |= (s & color_mask); break; \
 			} break; \
 	}
 

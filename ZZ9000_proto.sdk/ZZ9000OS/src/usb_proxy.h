@@ -80,7 +80,7 @@ struct ZZUSBCommand {
     uint8_t  reserved[6];
 } __attribute__((packed));
 
-static inline uint16_t be16(const volatile uint16_t *p) {
+static inline uint16_t be16(const volatile void *p) {
     volatile uint8_t *b = (volatile uint8_t *)p;
     return ((uint16_t)b[0] << 8) | b[1];
 }
@@ -90,24 +90,24 @@ static inline uint16_t be16(const volatile uint16_t *p) {
  * wLength) directly from its IoUsbHW API structure, which stores them
  * in USB-native little-endian format.  Using be16() on these would
  * incorrectly byte-swap them. */
-static inline uint16_t le16(const volatile uint16_t *p) {
+static inline uint16_t le16(const volatile void *p) {
     volatile uint8_t *b = (volatile uint8_t *)p;
     return ((uint16_t)b[1] << 8) | b[0];
 }
 
-static inline uint32_t be32(const volatile uint32_t *p) {
+static inline uint32_t be32(const volatile void *p) {
     volatile uint8_t *b = (volatile uint8_t *)p;
     return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
            ((uint32_t)b[2] << 8) | b[3];
 }
 
-static inline void put_be16(volatile uint16_t *p, uint16_t v) {
+static inline void put_be16(volatile void *p, uint16_t v) {
     volatile uint8_t *b = (volatile uint8_t *)p;
     b[0] = (v >> 8) & 0xff;
     b[1] = v & 0xff;
 }
 
-static inline void put_be32(volatile uint32_t *p, uint32_t v) {
+static inline void put_be32(volatile void *p, uint32_t v) {
     volatile uint8_t *b = (volatile uint8_t *)p;
     b[0] = (v >> 24) & 0xff;
     b[1] = (v >> 16) & 0xff;
