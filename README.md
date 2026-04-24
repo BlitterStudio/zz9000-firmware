@@ -41,8 +41,9 @@ drives it. Companion AmigaOS drivers live in
 - **GCC 15 toolchain** — standalone Makefile build that no longer needs
   Xilinx's ancient Eclipse SDK. See [BUILD.md](BUILD.md).
 - **CI + releases** — GitHub Actions pipeline builds firmware + BOOT.bin
-  on every push/PR and publishes tagged GitHub Releases with the
-  artifacts attached ([.github/workflows/build.yml](.github/workflows/build.yml)).
+  on every push/PR and publishes tagged GitHub Releases with old-style
+  firmware ZIPs containing the user-facing `BOOT.bin`
+  ([.github/workflows/build.yml](.github/workflows/build.yml)).
 
 ## Repository layout
 
@@ -75,10 +76,13 @@ CI's source of truth; commit a new one alongside any HDL change.
 ## Releases
 
 Pushing a tag matching `v*` (e.g. `v1.14`, `v2026.04`) triggers the CI
-build and then publishes a GitHub Release with `BOOT-<tag>.bin` and
-`ZZ9000OS-<tag>.elf` attached. Tags containing a `-` (e.g. `v1.15-rc1`)
-are marked as pre-releases. Release notes are generated automatically
-from commits and merged PRs since the previous tag.
+build and then publishes a GitHub Release with `BOOT-<tag>.bin`,
+`ZZ9000OS-<tag>.elf`, and `zz9000-firmware-<tag>-<variant>.zip`
+archives attached. Each ZIP contains a `BOOT.bin`, matching the old
+release format users copy to the microSD card. Tags containing a `-`
+(e.g. `v1.15-rc1`) are marked as pre-releases. Release notes are
+generated automatically from commits and merged PRs since the previous
+tag.
 
 ```bash
 git tag -a v1.14 -m "Firmware 1.14"
@@ -90,6 +94,13 @@ git push origin v1.14
 Copy `bootimage_work/BOOT.bin` (or the tagged `BOOT-<tag>.bin` from a
 release) to the ZZ9000's microSD — rename per your QSPI/SD boot setup —
 reseat, and power-cycle the Amiga.
+
+For release downloads, use the ZIP variant for the machine: `zorro3` for
+A3000/A4000, `zorro2` or `zorro2-2mb` for A2000, `a500` or `a500-2mb`
+for A500 with the ZZ9500CX Denise adapter, and `a500plus` for A500+ /
+Super Denise. Tagged releases require those variant bitstreams to be
+committed under `bootimage_work/variants/`. Deprecated no-USB-autoboot
+builds are not published.
 
 ## Hardware connectivity
 

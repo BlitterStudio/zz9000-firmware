@@ -8,6 +8,7 @@ outputs land in `bootimage_work/`. CI runs the same scripts.
 | [`build_firmware.sh`](build_firmware.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf` | `arm-none-eabi-gcc` (Arm GNU Toolchain with newlib) |
 | [`build_bitstream.sh`](build_bitstream.sh) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Linux |
 | [`build_bootimage.sh`](build_bootimage.sh) | `bootimage_work/BOOT.bin` | `bootgen` |
+| [`build_release_assets.sh`](build_release_assets.sh) | old-style ZIPs under `release/` | `bootgen`, `zip` |
 
 The scripts are composable — nothing calls anything else implicitly.
 
@@ -70,8 +71,10 @@ Build artifacts (`ZZ9000OS.elf`, `BOOT.bin`) are uploaded per run.
 
 Push a `v*` tag (e.g. `v1.14`, or `v1.15-rc1` for a pre-release) and
 the workflow will build the firmware and publish a GitHub Release with
-`BOOT-<tag>.bin` + `ZZ9000OS-<tag>.elf` attached and auto-generated
-release notes:
+`BOOT-<tag>.bin`, `ZZ9000OS-<tag>.elf`, and old-style
+`zz9000-firmware-<tag>-<variant>.zip` archives attached. Each ZIP
+contains a directory with the user-facing `BOOT.bin` file to copy to the
+ZZ9000 microSD card.
 
 ```bash
 git tag -a v1.14 -m "Firmware 1.14"
@@ -79,6 +82,15 @@ git push origin v1.14
 ```
 
 Tags containing `-` are marked as pre-releases.
+
+CI cannot run Vivado, so it packages variants from committed bitstreams.
+The default Zorro III bitstream is `bootimage_work/zz9000_ps_wrapper.bit`.
+Zorro II / A500 / 2MB variant bitstreams live under
+`bootimage_work/variants/`; see
+[`bootimage_work/variants/README.md`](bootimage_work/variants/README.md).
+Tagged release builds require all listed variant bitstreams, while
+branch/PR builds package whatever is present. The deprecated
+no-USB-autoboot variant is intentionally skipped.
 
 ## Why `bootimage_work/` is the canonical output dir
 
