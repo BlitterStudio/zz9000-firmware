@@ -1,8 +1,14 @@
 # Release Variant Bitstreams
 
 GitHub Actions cannot rebuild FPGA bitstreams because the project still
-requires Vivado 2018.3. Tagged release CI requires every bitstream listed
-here; branch and PR CI package the variants that are present.
+requires Vivado 2018.3. Build these on the Vivado machine with:
+
+```bash
+./build_variant_bitstreams.sh
+```
+
+Tagged release CI requires every bitstream listed here; branch and PR CI
+package the variants that are present.
 
 | Variant | Bitstream |
 |---|---|

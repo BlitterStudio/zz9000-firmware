@@ -67,6 +67,7 @@ scripts, same path CI takes:
 |---|---|---|
 | [`build_firmware.sh`](build_firmware.sh)   | `ZZ9000OS.elf`                  | `arm-none-eabi-gcc` (Arm GNU Toolchain with newlib) |
 | [`build_bitstream.sh`](build_bitstream.sh) | `zz9000_ps_wrapper.bit`         | Vivado 2018.3 (Linux)                               |
+| [`build_variant_bitstreams.sh`](build_variant_bitstreams.sh) | release variant `.bit` files | Vivado 2018.3 (Linux)                               |
 | [`build_bootimage.sh`](build_bootimage.sh) | `BOOT.bin`                      | `bootgen`                                           |
 
 Firmware-only iteration needs `arm-none-eabi-gcc` + `bootgen` — no
@@ -98,9 +99,9 @@ reseat, and power-cycle the Amiga.
 For release downloads, use the ZIP variant for the machine: `zorro3` for
 A3000/A4000, `zorro2` or `zorro2-2mb` for A2000, `a500` or `a500-2mb`
 for A500 with the ZZ9500CX Denise adapter, and `a500plus` for A500+ /
-Super Denise. Tagged releases require those variant bitstreams to be
-committed under `bootimage_work/variants/`. Deprecated no-USB-autoboot
-builds are not published.
+Super Denise. Build those bitstreams on a Vivado machine with
+`./build_variant_bitstreams.sh`, then commit the resulting files under
+`bootimage_work/`. Deprecated no-USB-autoboot builds are not published.
 
 ## Hardware connectivity
 
