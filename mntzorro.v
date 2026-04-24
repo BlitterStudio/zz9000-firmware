@@ -31,6 +31,14 @@
 `define VARIANT_Z3_FASTRAM
 `define VARIANT_AUTOBOOT        // enable autoboot ROM
 
+// Line-buffered RX backlog reads: on a miss, issue one 8-beat AXI
+// burst to fill a 32-byte on-chip line. On subsequent sequential
+// longword reads in the same line, serve directly from BRAM instead
+// of paying a full PS DDR round-trip. Scoped to the RX backlog
+// window (z3_mapped_addr in [h2000, h6000)); all other read paths
+// are unchanged. Comment out to fall back to single-beat reads.
+`define RX_BACKLOG_LINEBUF
+
 `define C_S_AXI_DATA_WIDTH 32
 `define C_S_AXI_ADDR_WIDTH 5
 `ifdef VARIANT_2MB
@@ -936,6 +944,10 @@ module MNTZorro_v0_1_S00_AXI
   localparam Z3_WRITE_FINALIZE2 = 60;
   localparam Z2_WRITE_FINALIZE2 = 61;
 
+`ifdef RX_BACKLOG_LINEBUF
+  localparam Z3_RXBUF_FILL_R = 62;
+`endif
+
   (* mark_debug = "true" *) reg [7:0] zorro_state = COLD;
   reg [7:0] dtack_counter;
 `ifdef ZORRO2
@@ -965,6 +977,18 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] axi_reg4;
   (* mark_debug = "true" *) reg [31:0] axi_reg5;
   reg [20:0] eth_rx_frame_select;
+
+`ifdef RX_BACKLOG_LINEBUF
+  // 32-byte on-chip line buffer for RX backlog reads (8 longwords).
+  // Tag is the line-aligned AXI address; frame-sel snapshot lets a
+  // PS-side slot advance auto-invalidate via tag mismatch on the
+  // next hit check (no explicit invalidate path needed here).
+  reg [31:0] rxbuf_data [0:7];
+  reg [31:0] rxbuf_tag;
+  reg        rxbuf_valid = 0;
+  reg [2:0]  rxbuf_fill_idx;
+  reg [20:0] rxbuf_frame_sel_snap;
+`endif
 
   reg [31:0] video_control_data_zorro;
   reg [7:0] video_control_op_zorro;
@@ -1266,9 +1290,15 @@ module MNTZorro_v0_1_S00_AXI
     m00_axi_wlast <= 'h1;
     m00_axi_bready <= 'h1;
 
+`ifdef RX_BACKLOG_LINEBUF
+    // m00_axi_arlen and m00_axi_arburst are driven by the Z3 FSM so
+    // that the RX backlog miss can issue an 8-beat INCR burst. A
+    // second driver here would produce a DRC MDRV-1 error.
+`else
     m00_axi_arlen <= 'h0;
-    m00_axi_arsize <= 'h2;
     m00_axi_arburst <= 'h0;
+`endif
+    m00_axi_arsize <= 'h2;
     m00_axi_arcache <= 'hf; //was 3
     m00_axi_arlock <= 'h0;
     m00_axi_arprot <= 'h0;
@@ -1437,6 +1467,11 @@ module MNTZorro_v0_1_S00_AXI
           reg_high <= 0;
           ram_low <= 0;
           ram_high <= 0;
+`ifdef RX_BACKLOG_LINEBUF
+          m00_axi_arlen   <= 'h0;
+          m00_axi_arburst <= 'h0;
+          rxbuf_valid     <= 0;
+`endif
 
           if (!z_reset)
             zorro_state <= DECIDE_Z2_Z3;
@@ -2136,6 +2171,42 @@ module MNTZorro_v0_1_S00_AXI
         end
 
         WAIT_READ_DMA_Z3: begin
+`ifdef RX_BACKLOG_LINEBUF
+          if (z3_mapped_addr>='h2000 && z3_mapped_addr<'h6000) begin
+            // RX backlog window: try the line buffer first; on miss,
+            // issue an 8-beat INCR burst to fill the 32-byte line.
+            if (rxbuf_valid
+                && rxbuf_frame_sel_snap == eth_rx_frame_select
+                && rxbuf_tag[31:5] == (((`RX_BACKLOG_ADDRESS - 32'h2000)
+                                       + {z3_mapped_addr[23:5], 5'b0}
+                                       + {eth_rx_frame_select, 11'h0}) >> 5)) begin
+              // HIT — serve this longword directly from BRAM
+              data_z3_hi16  <= {rxbuf_data[z3_mapped_addr[4:2]][7:0],   rxbuf_data[z3_mapped_addr[4:2]][15:8]};
+              data_z3_low16 <= {rxbuf_data[z3_mapped_addr[4:2]][23:16], rxbuf_data[z3_mapped_addr[4:2]][31:24]};
+              dataout_z3 <= 1;
+              dtack <= 1;
+              zorro_state <= Z3_ENDCYCLE;
+            end else begin
+              // MISS — issue one 8-beat INCR burst
+              m00_axi_araddr  <= (`RX_BACKLOG_ADDRESS - 32'h2000)
+                                 + {z3_mapped_addr[23:5], 5'b0}
+                                 + {eth_rx_frame_select, 11'h0};
+              m00_axi_arlen   <= 'h7; // 8 beats
+              m00_axi_arburst <= 'h1; // INCR
+              m00_axi_arvalid <= 1;
+              rxbuf_tag            <= (`RX_BACKLOG_ADDRESS - 32'h2000)
+                                      + {z3_mapped_addr[23:5], 5'b0}
+                                      + {eth_rx_frame_select, 11'h0};
+              rxbuf_frame_sel_snap <= eth_rx_frame_select;
+              rxbuf_fill_idx       <= 3'd0;
+              rxbuf_valid          <= 1'b0;
+              if (m00_axi_arready) begin
+                zorro_state <= Z3_RXBUF_FILL_R;
+              end
+            end
+          end else
+`endif
+          begin
           if (z3_mapped_addr>='ha000 && z3_mapped_addr<'h10000)
             m00_axi_araddr  <= (`USB_BLOCK_STORAGE_ADDRESS - 32'ha000) + z3_mapped_addr;
           else
@@ -2150,11 +2221,52 @@ module MNTZorro_v0_1_S00_AXI
           else
             m00_axi_araddr  <= `ARM_MEMORY_START + (z3_mapped_addr/*&32'hfffffffc*/); // max 256MB
 
+`ifdef RX_BACKLOG_LINEBUF
+          // Restore single-beat defaults in case a prior backlog burst left arlen=7
+          m00_axi_arlen   <= 'h0;
+          m00_axi_arburst <= 'h0;
+`endif
           m00_axi_arvalid  <= 1;
           if (m00_axi_arready) begin
             zorro_state <= WAIT_READ_DMA_Z3B;
           end
+          end
         end
+
+`ifdef RX_BACKLOG_LINEBUF
+        Z3_RXBUF_FILL_R: begin
+          m00_axi_arvalid <= 0;
+          if (m00_axi_rvalid) begin
+            rxbuf_data[rxbuf_fill_idx] <= m00_axi_rdata;
+            // Release DTACK the moment the requested longword arrives;
+            // subsequent beats keep filling the line in the background.
+            // This is the 347b280 tolerant behavior: if the slave or
+            // interconnect doesn't deliver all 8 beats, we still
+            // release the Zorro cycle as long as the requested beat
+            // came through. The rlast check below transitions state
+            // regardless of fill completion.
+            if (rxbuf_fill_idx == z3_mapped_addr[4:2]) begin
+              data_z3_hi16  <= {m00_axi_rdata[7:0],   m00_axi_rdata[15:8]};
+              data_z3_low16 <= {m00_axi_rdata[23:16], m00_axi_rdata[31:24]};
+              dataout_z3 <= 1;
+              dtack <= 1;
+            end
+            rxbuf_fill_idx <= rxbuf_fill_idx + 3'd1;
+            if (m00_axi_rlast) begin
+              // Burst drained. Mark cache line valid only if the full
+              // 8 beats came in (fill_idx pre-increment == 7); a short
+              // burst leaves the line partial so subsequent reads miss
+              // and retry rather than serve stale/garbage for uncovered
+              // beats. Restore single-beat defaults either way.
+              m00_axi_arlen   <= 'h0;
+              m00_axi_arburst <= 'h0;
+              if (rxbuf_fill_idx == 3'd7)
+                rxbuf_valid <= 1'b1;
+              zorro_state <= Z3_ENDCYCLE;
+            end
+          end
+        end
+`endif
 
         WAIT_READ_DMA_Z3B: begin
           m00_axi_arvalid <= 0;
@@ -2327,6 +2439,14 @@ module MNTZorro_v0_1_S00_AXI
     axi_reg3 <= slv_reg3; // ARM video control
     eth_rx_frame_select <= slv_reg4;
     axi_reg5 <= slv_reg5; // Amiga IRQ
+
+`ifdef RX_BACKLOG_LINEBUF
+    // Any change to the selector means the firmware handed off a new
+    // slot; invalidate the cache so the next backlog read cannot serve
+    // stale data from the previous slot. Detects a differing source.
+    if (slv_reg4 != eth_rx_frame_select)
+      rxbuf_valid <= 1'b0;
+`endif
 
     if (video_control_axi) begin
       video_control_data <= video_control_data_axi;
