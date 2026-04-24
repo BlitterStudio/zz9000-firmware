@@ -42,16 +42,8 @@ Three findings from `mntzorro.v` + `zz9000.xdc`:
 
 The push-model plan and this cacheable plan both have the same root
 cause: the PCB does not give the FPGA the bus signals needed to
-accelerate Zorro III data transfer — bursts require MTCR/MTACK, which
-are unrouted.
-
-**Note, however, that hardware is not the whole story.** Observed RX
-(~0.28 MB/s, see Results below) is only ~7% of even a conservative
-estimate of the Z3 single-longword slave-read ceiling. There is clearly
-substantial software-side headroom as well; the MTCR/MTACK gap would
-explain a remaining factor of 3–4× above that, not the full ~40×
-gap from line rate. Driver-side profiling is the right next step —
-see the "What's actually limiting RX" section.
+accelerate Zorro III data transfer. The ~4 MB/s ceiling is a hardware
+ceiling on these cards.
 
 ## What we're shipping anyway
 
@@ -106,89 +98,29 @@ fixes both the firmware pointer and the FPGA AXI address.
   is non-trivial and we'd need real before/after numbers to justify
   it. Park as a future exploration.
 
-## Results (measured)
+## Validation plan
 
-Sustained HTTP download on the A4000/060 with Roadshow, before and
-after the backlog + USB relocation change.
-
-| Metric | Baseline (backlog=32) | After (backlog=128) |
-|---|---|---|
-| Sustained RX throughput | ~2300 kbit/s (~0.28 MB/s) | ~2300 kbit/s (~0.28 MB/s) |
-| `Overruns` / packet drops | ~43.3% | ~46.1% |
-| `BadData` | ~6.5% | **~3.9%** |
-| TX throughput (reference) | ~10 Mbit/s (~1.25 MB/s) | ~10 Mbit/s (~1.25 MB/s) |
-
-Interpretation:
-
-- **Throughput unchanged** (~0.28 MB/s). The bigger ring did not raise
-  the sustained rate because the consumer side (Amiga CPU draining
-  the ring via MMIO) is the bottleneck, not the producer-side buffer
-  capacity.
-- **Drop rate essentially unchanged** — within noise. The hypothesis
-  that "a bigger ring absorbs bursty HTTP arrivals" assumed the Amiga
-  drains fast enough on average; it doesn't, so a bigger ring just
-  fills more and drops at the same sustained cadence.
-- **BadData halved** (6.5% → 3.9%), which is the single quantifiable
-  win — fewer torn/late frames reaching the driver. This is why the
-  change is still worth keeping despite no throughput gain.
-- **RX/TX asymmetry is huge** (RX 0.28 MB/s vs TX 1.25 MB/s, ~4.5×).
-  Even on a bus where writes are naturally faster than reads (writes
-  are posted, reads stall), this gap is larger than expected.
-
-Conclusion: backlog bump is retained as a small quality improvement,
-but the real RX bottleneck is **not** backlog capacity.
-
-## What's actually limiting RX
-
-With RX at ~0.28 MB/s and the conservative Z3 single-longword MMIO
-ceiling in the ~4 MB/s range, we are at ~7% of even the unburst-able
-ceiling. Burst reads (MTCR/MTACK) can raise that ceiling to ~14-16
-MB/s, but they will not close the 14× gap below the current ceiling.
-Something else is dominating per-frame cost.
-
-Likely suspects (need profiling on the driver side, `zz9000-drivers`
-repo, not firmware):
-
-1. **Per-frame MMIO overhead** — if each RX frame incurs N small
-   register reads (size, status, flags) before the payload, per-frame
-   latency dominates over per-byte bandwidth. Even 1 KB frames at
-   150 frames/sec land at ~0.22 MB/s — which matches what we see.
-2. **SANA-II `CopyFromBuff` / pool allocation cost per frame.** TCP
-   stack on 040/060 is not free.
-3. **RX buffers landing in Chip RAM.** Chip RAM writes are ~3.5 MB/s
-   on their own and contend with the OCS/AGA chipset. If the driver
-   doesn't force Fast RAM allocation for pool buffers, that alone is
-   a hard ceiling.
-4. **Driver poll / IRQ cadence.** If the driver drains only at task
-   schedule points (~50-200 Hz), sustained rate is capped by how
-   many frames can be drained per scheduling slice.
-
-Next action: profile one RX frame end-to-end on the Amiga, attribute
-the time, attack the top contributor. This work lives in
-`zz9000-drivers`, not this repo.
+1. Baseline zznetstats with current firmware — capture
+   `PacketsReceived` / `Overruns` / `BadData` deltas.
+2. Flash new bitstream + firmware with bumped backlog.
+3. Re-run same download test on both A4000/040 and A4000/060.
+4. Compare drop rates. If they don't fall meaningfully, the bottleneck
+   is fully at the per-cycle Z3 rate, and the backlog bump is
+   wasted DDR.
 
 ## The real fix (hardware roadmap)
 
-Separately from the driver-side work above, the next PCB rev should
-add the three Zorro signals that are currently `x` (no-connect):
+Documented here so the next PCB rev has the full ask:
 
-- **`/MTACK`** — Zorro slot pin 48B. Needs a new FPGA output +
-  open-collector NPN driver (same pattern as Q1/Q2 for `/DTACK` and
-  `/CINH`).
-- **`/MTCR`** — Zorro slot pin 18C. Needs a new FPGA input pin
-  (resolve the C20/`VCAP_R7` conflict). Pass through a spare 74LVC8T245
-  section or add one.
-- **`/BGACK`** — Zorro slot pin 62B. Needed for bus mastering.
-  Another open-collector NPN.
-
-**Good news from re-reading the schematic** (`gfx/amiga-zz9000.svg`):
-the bidirectional transceivers needed for the card to drive the bus
-as master are already present (U1-U6 are all 74LVC8T245 with
-FPGA-controlled direction on DIRDATA / DIRADDR / DIRADDR2). No buffer
-redesign is required — bus mastering just needs BGACK routed and
-firmware to drive `ZORRO_ADDRDIR2` dynamically instead of tying it
-to 0. See [zz9000-pcb-designer-brief.md](zz9000-pcb-designer-brief.md)
-for the full PCB-side ask.
+- Route `/MTACK` from FPGA to Zorro slot pin E11. Enables burst slave.
+- Route `/MTCR` back (undo the VCAP_R7 reassignment, or reuse another
+  pin). Without this the FPGA can't detect the master's burst
+  request.
+- Wire bidirectional transceivers so the FPGA can drive address and
+  data strobes, not just listen. Needed for push-model RX (see
+  [zz9000net-rx-pushmodel-plan.md](zz9000net-rx-pushmodel-plan.md)).
+- With all three, both the burst-slave path and the push-model path
+  become implementable.
 
 ## Cross-references
 
