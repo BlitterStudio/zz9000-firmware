@@ -25,6 +25,7 @@ MEMORY
 {
    ps7_ddr_0 : ORIGIN = 0x100000, LENGTH = 0x07F00000
    ps7_ddr_hi : ORIGIN = 0x08000000, LENGTH = 0x10000000
+   bootrom_ddr : ORIGIN = 0x3FCF0000, LENGTH = 0x2000
    ps7_ram_0 : ORIGIN = 0x0, LENGTH = 0x30000
    ps7_ram_1 : ORIGIN = 0xFFFF0000, LENGTH = 0xFE00
 }
@@ -284,5 +285,9 @@ _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
 } > ps7_ddr_hi
 
 _end = .;
-}
 
+.bootrom_image : {
+   KEEP(*(.bootrom_image))
+} > bootrom_ddr
+ASSERT(SIZEOF(.bootrom_image) == 0x2000, "bootrom_image must be exactly 8 KB")
+}

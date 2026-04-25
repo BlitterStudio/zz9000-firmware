@@ -34,7 +34,20 @@ if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! command -v arm-none-eabi-objcopy >/dev/null 2>&1; then
+    echo "ERROR: arm-none-eabi-objcopy not on PATH." >&2
+    echo "  Install the full Arm GNU Toolchain and make sure its bin directory is on PATH." >&2
+    exit 1
+fi
+
+if ! command -v "${CC_FOR_BUILD:-cc}" >/dev/null 2>&1; then
+    echo "ERROR: host C compiler not found." >&2
+    echo "  Set CC_FOR_BUILD=/path/to/cc, or install the platform C compiler." >&2
+    exit 1
+fi
+
 echo "[firmware] toolchain: $(arm-none-eabi-gcc --version | head -1)"
+echo "[firmware] host cc:   $(${CC_FOR_BUILD:-cc} --version 2>/dev/null | head -1 || printf '%s' "${CC_FOR_BUILD:-cc}")"
 make -C ZZ9000_proto.sdk/ZZ9000OS "$@"
 
 # Only report size when the ELF actually exists (skips cases like

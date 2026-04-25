@@ -13,7 +13,9 @@
 # Tested with: arm-none-eabi-gcc 12.2, 14.2, 15.2 (Arm GNU Toolchain)
 
 CC = arm-none-eabi-gcc
+OBJCOPY = arm-none-eabi-objcopy
 SIZE = arm-none-eabi-size
+CC_FOR_BUILD ?= cc
 
 CPU_FLAGS = -mcpu=cortex-a9 -marm -mfpu=neon -mfloat-abi=hard
 
@@ -43,7 +45,8 @@ COMMON_FLAGS += -DCONFIG_EHCI_IS_TDI
 COMMON_FLAGS += -DCONFIG_USB_EHCI_TXFIFO_THRESH=4
 
 # -O2 flags (default for all files)
-CFLAGS = $(CPU_FLAGS) $(COMMON_FLAGS) -O2
+EXTRA_CFLAGS ?=
+CFLAGS = $(CPU_FLAGS) $(COMMON_FLAGS) -O2 $(EXTRA_CFLAGS)
 
 # Linker flags
 LDFLAGS = $(CPU_FLAGS)
@@ -90,11 +93,15 @@ C_SRCS = \
 
 # Object files
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS))
+BOOTROM_TOOL = $(BUILD_DIR)/make_bootrom_image
+BOOTROM_IMAGE_BIN = $(BUILD_DIR)/bootrom_image.bin
+BOOTROM_IMAGE_OBJ = $(BUILD_DIR)/bootrom_image.o
+OBJS += $(BOOTROM_IMAGE_OBJ)
 
 # Output
 TARGET = $(BUILD_DIR)/ZZ9000OS.elf
 
-.PHONY: all clean size
+.PHONY: all clean size FORCE
 
 all: $(TARGET) size
 
@@ -104,6 +111,18 @@ $(TARGET): $(OBJS)
 	@echo 'Done.'
 
 # --- Per-file rules ---
+
+$(BOOTROM_TOOL): ../../util/make_bootrom_image.c $(SRC_DIR)/bootrom_layout.h $(SRC_DIR)/bootrom.h $(SRC_DIR)/diag-code.h $(SRC_DIR)/zzsd-device.h
+	@mkdir -p $(dir $@)
+	$(CC_FOR_BUILD) -Wall -Wextra -Werror -std=c99 -o $@ $<
+
+$(BOOTROM_IMAGE_BIN): $(BOOTROM_TOOL) FORCE
+	$< $@
+
+$(BOOTROM_IMAGE_OBJ): $(BOOTROM_IMAGE_BIN)
+	$(OBJCOPY) -I binary -O elf32-littlearm -B arm \
+		--rename-section .data=.bootrom_image,alloc,load,readonly,data,contents \
+		$< $@
 
 # ulpi.c: GCC 15 null-pointer offset UB workaround (-O0 for this file only)
 $(BUILD_DIR)/usb/ulpi.o: $(SRC_DIR)/usb/ulpi.c
