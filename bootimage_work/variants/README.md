@@ -13,6 +13,7 @@ package the variants that are present.
 | Variant | Bitstream |
 |---|---|
 | Zorro III / A3000 / A4000 | `bootimage_work/zz9000_ps_wrapper.bit` |
+| Zorro III / A3000 / A4000, no Zorro RAM | `bootimage_work/variants/zz9000_ps_wrapper-zorro3-nofast.bit` |
 | Zorro II 4MB / A2000 | `bootimage_work/variants/zz9000_ps_wrapper-zorro2.bit` |
 | Zorro II 2MB / A2000 | `bootimage_work/variants/zz9000_ps_wrapper-zorro2-2mb.bit` |
 | A500 4MB / ZZ9500CX Denise adapter | `bootimage_work/variants/zz9000_ps_wrapper-a500.bit` |

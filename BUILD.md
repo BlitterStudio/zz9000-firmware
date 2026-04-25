@@ -35,12 +35,12 @@ does not run Vivado) picks up the change on the next pipeline.
 ```bash
 ./build_variant_bitstreams.sh
 ```
-This builds the default Zorro III bitstream and the Zorro II / A500 /
-2MB variants, copies them to the release paths under `bootimage_work/`,
-and restores `mntzorro.v` afterward. You can also pass one or more
-variant names, for example:
+This builds the default Zorro III bitstream and the Zorro III no-RAM /
+Zorro II / A500 / 2MB variants, copies them to the release paths under
+`bootimage_work/`, and restores `mntzorro.v` afterward. You can also
+pass one or more variant names, for example:
 ```bash
-./build_variant_bitstreams.sh zorro2 zorro2-2mb a500plus
+./build_variant_bitstreams.sh zorro3-nofast zorro2 zorro2-2mb a500plus
 ```
 
 **Clean rebuild** — no Vivado, uses the committed bitstream:
@@ -98,7 +98,7 @@ Tags containing `-` are marked as pre-releases.
 
 CI cannot run Vivado, so it packages variants from committed bitstreams.
 The default Zorro III bitstream is `bootimage_work/zz9000_ps_wrapper.bit`.
-Zorro II / A500 / 2MB variant bitstreams live under
+The Zorro III no-RAM, Zorro II, A500, and 2MB variant bitstreams live under
 `bootimage_work/variants/`; see
 [`bootimage_work/variants/README.md`](bootimage_work/variants/README.md).
 Build them with `./build_variant_bitstreams.sh` on a Vivado machine.

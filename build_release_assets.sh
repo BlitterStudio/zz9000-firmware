@@ -85,6 +85,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 variant_defs=(
     "zorro3|bootimage_work/zz9000_ps_wrapper.bit|Zorro III, A3000/A4000"
+    "zorro3-nofast|bootimage_work/variants/zz9000_ps_wrapper-zorro3-nofast.bit|Zorro III, A3000/A4000, no Zorro RAM"
     "zorro2|bootimage_work/variants/zz9000_ps_wrapper-zorro2.bit|Zorro II 4MB, A2000"
     "zorro2-2mb|bootimage_work/variants/zz9000_ps_wrapper-zorro2-2mb.bit|Zorro II 2MB, A2000"
     "a500|bootimage_work/variants/zz9000_ps_wrapper-a500.bit|A500 4MB, ZZ9500CX Denise adapter"
