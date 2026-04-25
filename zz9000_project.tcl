@@ -66,6 +66,7 @@ proc print_help {} {
   puts "$script_file"
   puts "$script_file -tclargs \[--origin_dir <path>\]"
   puts "$script_file -tclargs \[--project_name <name>\]"
+  puts "$script_file -tclargs \[--no-autoboot\]"
   puts "$script_file -tclargs \[--help\]\n"
   puts "Usage:"
   puts "Name                   Description"
@@ -77,10 +78,13 @@ proc print_help {} {
   puts "\[--project_name <name>\] Create project with the specified name. Default"
   puts "                       name is the name of the project from where this"
   puts "                       script was generated.\n"
+  puts "\[--no-autoboot\]        Build without advertising the Zorro autoboot ROM.\n"
   puts "\[--help\]               Print help information for this script"
   puts "-------------------------------------------------------------------------\n"
   exit 0
 }
+
+set no_autoboot 0
 
 if { $::argc > 0 } {
   for {set i 0} {$i < $::argc} {incr i} {
@@ -88,6 +92,7 @@ if { $::argc > 0 } {
     switch -regexp -- $option {
       "--origin_dir"   { incr i; set origin_dir [lindex $::argv $i] }
       "--project_name" { incr i; set _xil_proj_name_ [lindex $::argv $i] }
+      "--no-autoboot"  { set no_autoboot 1 }
       "--help"         { print_help }
       default {
         if { [regexp {^-} $option] } {
@@ -156,6 +161,12 @@ update_ip_catalog -rebuild
 
 # Set 'sources_1' fileset object
 set obj [get_filesets sources_1]
+if { $no_autoboot } {
+  set verilog_defines [get_property verilog_define $obj]
+  lappend verilog_defines VARIANT_DISABLE_AUTOBOOT
+  set_property verilog_define $verilog_defines $obj
+  puts "INFO: VARIANT_DISABLE_AUTOBOOT set; Zorro autoboot ROM will not be advertised."
+}
 # Import local files from the original project
 set files [list \
  [file normalize "${origin_dir}/mntzorro.v" ]\

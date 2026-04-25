@@ -29,7 +29,9 @@
 
 //`define VARIANT_FW20
 `define VARIANT_Z3_FASTRAM
+`ifndef VARIANT_DISABLE_AUTOBOOT
 `define VARIANT_AUTOBOOT        // enable autoboot ROM
+`endif
 
 `define C_S_AXI_DATA_WIDTH 32
 `define C_S_AXI_ADDR_WIDTH 5
@@ -1580,7 +1582,11 @@ module MNTZorro_v0_1_S00_AXI
             'h0024: data_z3_hi16 <= 'b1111_1111_1111_1111; //
             'h0124: data_z3_hi16 <= 'b1110_1111_1111_1111; // */
 
+`ifdef VARIANT_AUTOBOOT
             'h0028: data_z3_hi16 <= 'b1001_1111_1111_1111; // autoboot rom vector (er_InitDiagVec)
+`else
+            'h0028: data_z3_hi16 <= 'b1111_1111_1111_1111;
+`endif
             'h0128: data_z3_hi16 <= 'b1111_1111_1111_1111; // = ~0x6000
             'h002c: data_z3_hi16 <= 'b1111_1111_1111_1111;
             'h012c: data_z3_hi16 <= 'b1111_1111_1111_1111;
@@ -1738,7 +1744,11 @@ module MNTZorro_v0_1_S00_AXI
                 8'h24: data_out <= 'b1111_1111_1111_1111; //
                 8'h26: data_out <= 'b1110_1111_1111_1111; // */
 
+`ifdef VARIANT_AUTOBOOT
                 8'h28: data_out <= 'b1001_1111_1111_1111; // autoboot rom vector (er_InitDiagVec)
+`else
+                8'h28: data_out <= 'b1111_1111_1111_1111;
+`endif
                 8'h2a: data_out <= 'b1111_1111_1111_1111; // = ~0x6000
                 8'h2c: data_out <= 'b1111_1111_1111_1111;
                 8'h2e: data_out <= 'b1111_1111_1111_1111;

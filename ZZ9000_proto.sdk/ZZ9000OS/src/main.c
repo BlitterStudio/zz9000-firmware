@@ -60,6 +60,14 @@ void Xil_AssertNonVoid() {}
 #define REVISION_MAJOR 2
 #define REVISION_MINOR 0
 
+#ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
+#define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
+#endif
+
+#ifndef ENABLE_LEGACY_USB_BLOCK_STORAGE
+#define ENABLE_LEGACY_USB_BLOCK_STORAGE 0
+#endif
+
 #define GPIO_DEVICE_ID	XPAR_XGPIOPS_0_DEVICE_ID
 
 void disable_reset_out() {
@@ -100,8 +108,10 @@ struct ZZ_VIDEO_STATE* video_state;
 unsigned int cur_mem_offset = 0x3500000;
 
 static char usb_storage_available = 0;
+#if ENABLE_LEGACY_USB_BLOCK_STORAGE
 static uint32_t usb_storage_read_block = 0;
 static uint32_t usb_storage_write_block = 0;
+#endif
 
 static char sd_storage_available_flag = 0;
 
@@ -146,13 +156,56 @@ static uint32_t zz_debug_test_counter = 0;
 static uint32_t zz_debug_test_prev = 0;
 static uint32_t zz_debug_test_ms = 0;
 
-void handle_amiga_reset() {
+enum amiga_reset_mode {
+	AMIGA_RESET_FAST = 0,
+	AMIGA_RESET_INIT_MEDIA = 1,
+};
+
+static void reset_storage_request_state() {
+	usb_status = 0;
+	usb_read_write_num_blocks = 1;
+#if ENABLE_LEGACY_USB_BLOCK_STORAGE
+	usb_read_pending = 0;
+	usb_write_pending = 0;
+#endif
+	usb_proxy_pending = 0;
+	usb_proxy_status = 0;
+
+	sd_status = 0;
+	sd_read_write_num_blocks = 1;
+	sd_read_pending = 0;
+	sd_write_pending = 0;
+	sd_boot_status = 0;
+}
+
+static void init_storage_services() {
+#if ENABLE_LEGACY_USB_BLOCK_STORAGE
+	usb_storage_available = zz_usb_init();
+#else
+	/* Keep the EHCI host initialized for the Poseidon proxy, but do not
+	 * scan or expose the old USB mass-storage block device path. SD HDF
+	 * boot is the supported autoboot storage path now. */
+	zz_usb_host_init();
+	usb_storage_available = 0;
+	printf("[USB] legacy block storage disabled; using proxy/SD paths only.\r\n");
+#endif
+
+	// sd card
+	sd_storage_available_flag = (sd_storage_init() == 0) ? 1 : 0;
+	if (sd_storage_available_flag) {
+		sd_boot_init();
+	}
+}
+
+void handle_amiga_reset(enum amiga_reset_mode mode) {
 	printf("    _______________   ___   ___   ___  \n");
 	printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
 	printf("      / /   / / (_) | | | | | | | | | |\n");
 	printf("     / /   / / \\__, | | | | | | | | | |\n");
 	printf("    / /__ / /__  / /| |_| | |_| | |_| |\n");
 	printf("   /_____/_____|/_/  \\___/ \\___/ \\___/ \n\n");
+	printf("[reset] Amiga reset (%s)\r\n",
+	       mode == AMIGA_RESET_INIT_MEDIA ? "media init" : "fast");
 
 	video_reset();
 
@@ -161,22 +214,9 @@ void handle_amiga_reset() {
 	audio_silence();
 	audio_set_rx_buffer((uint8_t*)AUDIO_RX_BUFFER_ADDRESS);
 
-	// usb
-	usb_storage_available = zz_usb_init();
-	usb_status = 0;
-	usb_read_write_num_blocks = 1;
-	usb_read_pending = 0;
-	usb_write_pending = 0;
-
-	// sd card
-	sd_storage_available_flag = (sd_storage_init() == 0) ? 1 : 0;
-	sd_status = 0;
-	sd_read_write_num_blocks = 1;
-	sd_read_pending = 0;
-	sd_write_pending = 0;
-
-	if (sd_storage_available_flag) {
-		sd_boot_init();
+	reset_storage_request_state();
+	if (mode == AMIGA_RESET_INIT_MEDIA) {
+		init_storage_services();
 	}
 
 	// ethernet
@@ -234,7 +274,11 @@ int main() {
 
 	fpga_interrupt_connect(isr_video, isr_audio, isr_audio_rx);
 
-	handle_amiga_reset();
+#if ZZ9000_SKIP_INITIAL_MEDIA_INIT
+	handle_amiga_reset(AMIGA_RESET_FAST);
+#else
+	handle_amiga_reset(AMIGA_RESET_INIT_MEDIA);
+#endif
 
 	// ARM app run environment
 	arm_app_init();
@@ -263,6 +307,7 @@ int main() {
 
 	// zorro state
 	u32 zstate_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
+	int amiga_reset_seen = ((zstate_raw & 0xff) == 0);
 	int need_req_ack = 0;
 
 	// audio parameters (buffer locations)
@@ -280,6 +325,7 @@ int main() {
 	int idle_task_count = 0;
 
 	while (1) {
+#if ENABLE_LEGACY_USB_BLOCK_STORAGE
 		if (usb_read_pending) {
 			usb_status = zz_usb_read_blocks(0, usb_storage_read_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
 			usb_read_pending = 0;
@@ -288,6 +334,7 @@ int main() {
 			usb_status = zz_usb_write_blocks(0, usb_storage_write_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
 			usb_write_pending = 0;
 		}
+#endif
 
 		if (sd_read_pending) {
 			sd_status = sd_storage_read_blocks(sd_storage_read_block, sd_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
@@ -810,10 +857,15 @@ int main() {
 					break;
 				}
 				case REG_ZZ_USBBLK_TX_HI: {
+#if ENABLE_LEGACY_USB_BLOCK_STORAGE
 					usb_storage_write_block = ((u32) zdata) << 16;
+#else
+					usb_status = 0;
+#endif
 					break;
 				}
 			case REG_ZZ_USBBLK_TX_LO: {
+#if ENABLE_LEGACY_USB_BLOCK_STORAGE
 				usb_storage_write_block |= zdata;
 				if (usb_storage_available) {
 					usb_status = USB_STATUS_BUSY;
@@ -822,13 +874,21 @@ int main() {
 					usb_status = 0;
 					printf("[USB] TX but no storage available!\n");
 				}
+#else
+				usb_status = 0;
+#endif
 				break;
 			}
 				case REG_ZZ_USBBLK_RX_HI: {
+#if ENABLE_LEGACY_USB_BLOCK_STORAGE
 					usb_storage_read_block = ((u32) zdata) << 16;
+#else
+					usb_status = 0;
+#endif
 					break;
 				}
 			case REG_ZZ_USBBLK_RX_LO: {
+#if ENABLE_LEGACY_USB_BLOCK_STORAGE
 				usb_storage_read_block |= zdata;
 				if (usb_storage_available) {
 					usb_status = USB_STATUS_BUSY;
@@ -837,9 +897,13 @@ int main() {
 					usb_status = 0;
 					printf("[USB] RX but no storage available!\n");
 				}
+#else
+				usb_status = 0;
+#endif
 				break;
 			}
 				case REG_ZZ_USB_STATUS: {
+#if ENABLE_LEGACY_USB_BLOCK_STORAGE
 					//printf("[USB] write to status/blocknum register: %d\n", zdata);
 					if (zdata==0) {
 						// reset USB
@@ -849,6 +913,9 @@ int main() {
 						// set number of blocks to read/write at once
 						usb_read_write_num_blocks = zdata;
 					}
+#else
+					usb_status = 0;
+#endif
 					break;
 				}
 				case REG_ZZ_USB_BUFSEL: {
@@ -1244,11 +1311,15 @@ int main() {
 						data = usb_status << 16;
 						break;
 					case REG_ZZ_USB_CAPACITY: {
+#if ENABLE_LEGACY_USB_BLOCK_STORAGE
 						if (usb_storage_available) {
 							data = zz_usb_storage_capacity(0);
 						} else {
 							data = 0;
 						}
+#else
+						data = 0;
+#endif
 						data |= usb_proxy_status;
 						break;
 					}
@@ -1352,8 +1423,12 @@ int main() {
 			}
 
 			if ((zstate & 0xff) == 0) {
-				// RESET
-				handle_amiga_reset();
+				if (!amiga_reset_seen) {
+					handle_amiga_reset(AMIGA_RESET_FAST);
+					amiga_reset_seen = 1;
+				}
+			} else {
+				amiga_reset_seen = 0;
 			}
 
 			if (audio_request_init) {

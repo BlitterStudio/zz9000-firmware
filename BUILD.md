@@ -5,7 +5,7 @@ outputs land in `bootimage_work/`. CI runs the same scripts.
 
 | Script | What it builds | Needs |
 |---|---|---|
-| [`build_firmware.sh`](build_firmware.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf` | `arm-none-eabi-gcc` (Arm GNU Toolchain with newlib) |
+| [`build_firmware.sh`](build_firmware.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf` | `arm-none-eabi-gcc` (Arm GNU Toolchain with newlib), host `cc` |
 | [`build_bitstream.sh`](build_bitstream.sh) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Linux |
 | [`build_variant_bitstreams.sh`](build_variant_bitstreams.sh) | all release variant `.bit` files | Vivado 2018.3 on Linux |
 | [`build_bootimage.sh`](build_bootimage.sh) | `bootimage_work/BOOT.bin` | `bootgen` |
@@ -30,6 +30,14 @@ bitstream:
 ```
 Commit the updated `bootimage_work/zz9000_ps_wrapper.bit` so CI (which
 does not run Vivado) picks up the change on the next pipeline.
+
+For cold-boot diagnostics, `./build_bitstream.sh --no-autoboot` builds a
+bitstream that does not advertise the Zorro autoboot ROM.
+
+Legacy USB mass-storage block support is disabled in firmware by
+default. SD HDF boot and the Poseidon USB proxy remain enabled. For an
+old-driver regression test, rebuild firmware with
+`EXTRA_CFLAGS=-DENABLE_LEGACY_USB_BLOCK_STORAGE=1`.
 
 **Release variant bitstreams** — on the Vivado box:
 ```bash
@@ -62,6 +70,10 @@ depending on your QSPI/SD boot setup), power-cycle the Amiga.
   - Linux: download from <https://developer.arm.com/downloads> — do **not**
     use Debian's `gcc-arm-none-eabi` package; it uses picolibc and is
     incompatible with the Xilinx BSP.
+- **Host C compiler** (firmware helper): `build_firmware.sh` uses `cc`
+  to generate an 8 KB boot ROM image from the checked-in diag/device
+  arrays, then embeds it as an initialized ELF section. Override with
+  `$CC_FOR_BUILD` if needed.
 - **`bootgen`** (packaging):
   - Prebuilt: <https://github.com/Xilinx/bootgen> (clone + `make`). The
     script finds it via `$BOOTGEN`, then `$PATH`, then a Mac default of
@@ -115,3 +127,7 @@ no-USB-autoboot variant is intentionally skipped.
   used by humans and CI.
 - The bitstream lives there because that's where `bootgen` reads it
   from per the BIF, and committing it makes CI work without Vivado.
+- The firmware ELF contains an initialized 8 KB `.bootrom_image` segment
+  at `0x3FCF0000`, so FSBL preloads the Zorro autoboot ROM before
+  `main()` starts. The default BOOT image layout still stays
+  `FSBL -> bitstream -> ZZ9000OS`.

@@ -17,7 +17,7 @@
 #define TX_FRAME_ADDRESS            0x3FD10000
 #define RX_FRAME_ADDRESS            0x3FD20000
 #define RX_BACKLOG_ADDRESS          0x3FE00000 // 128 * 2048 space (256 kB) — must match FRAME_MAX_BACKLOG
-#define USB_BLOCK_STORAGE_ADDRESS   0x3FE40000 // must sit past RX_BACKLOG; same 1 MB MMU page as 0x3FE00000
+#define USB_BLOCK_STORAGE_ADDRESS   0x3FE40000 // legacy name; shared SD boot / USB proxy buffer
 #define BOOT_ROM_ADDRESS            0x3FCF0000
 #define RX_FRAME_PAD 4
 #define FRAME_SIZE 2048
@@ -27,7 +27,7 @@
 
 // 0x2000 - 0x7fff   ETH RX
 // 0x8000 - 0x9fff   ETH TX
-// 0xa000 - 0xffff   USB BLOCK
+// 0xa000 - 0xffff   shared IO buffer (legacy USB block window)
 
 // Frame buffer/graphics memory starts at 64KB (relative to card address), leaving ample space for general purpose registers.
 #define MNT_FB_BASE     			0x00010000

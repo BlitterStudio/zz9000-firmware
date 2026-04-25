@@ -29,6 +29,7 @@
 #include "ethernet.h"
 
 struct zynq_ehci_priv _zynq_ehci;
+static int usb_host_initialized = 0;
 
 /*
  * https://www.cypress.com/file/134171/download
@@ -40,13 +41,23 @@ capabilities by an exchange of device requests. The requests that the host uses 
 standard requests and must support these requests on all USB devices."
  */
 
-// returns 1 if storage device available
-int zz_usb_init() {
+int zz_usb_host_init() {
+	if (usb_host_initialized)
+		return 0;
+
 	printf("[USB] trying to probe zynq ehci...\n");
 	ehci_zynq_probe(&_zynq_ehci);
 	printf("[USB] probed!\n");
 	usb_init();
 	printf("[USB] initialized!\n");
+	usb_host_initialized = 1;
+
+	return 0;
+}
+
+// returns 1 if storage device available
+int zz_usb_init() {
+	zz_usb_host_init();
 
 	if (!usb_stor_scan(1)) {
 		return 1;

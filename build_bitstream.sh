@@ -16,6 +16,38 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+usage() {
+    cat >&2 <<'EOF'
+Usage: ./build_bitstream.sh [--no-autoboot]
+
+Options:
+  --no-autoboot  Synthesize a diagnostic bitstream that does not advertise
+                 the Zorro autoboot ROM.
+EOF
+}
+
+PROJECT_ARGS=(--origin_dir .)
+NO_AUTOBOOT=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --no-autoboot)
+            NO_AUTOBOOT=1
+            PROJECT_ARGS+=(--no-autoboot)
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
 VIVADO_DIR="${VIVADO_DIR:-/opt/Xilinx/Vivado/2018.3}"
 
 if [ ! -f "$VIVADO_DIR/settings64.sh" ]; then
@@ -25,6 +57,9 @@ if [ ! -f "$VIVADO_DIR/settings64.sh" ]; then
 fi
 
 echo "[bitstream] Vivado: $VIVADO_DIR"
+if [ "$NO_AUTOBOOT" -eq 1 ]; then
+    echo "[bitstream] autoboot ROM: disabled"
+fi
 # shellcheck disable=SC1091
 source "$VIVADO_DIR/settings64.sh"
 
@@ -34,7 +69,7 @@ source "$VIVADO_DIR/settings64.sh"
 #    historically caused silent failures.
 echo "[bitstream] regenerating project from zz9000_project.tcl"
 rm -rf ZZ9000_proto
-vivado -mode batch -source zz9000_project.tcl -tclargs --origin_dir .
+vivado -mode batch -source zz9000_project.tcl -tclargs "${PROJECT_ARGS[@]}"
 
 # 2. Synthesise → implement → write bitstream (15-30 min on a decent box).
 echo "[bitstream] running synthesis + implementation + write_bitstream"

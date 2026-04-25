@@ -27,6 +27,9 @@ SDK.log.*
 ZZ9000_proto.sdk/ZZ9000OS/build/
 bootgen/
 bootimage_work/BOOT.bin
+bootimage_work/BOOT-*.bin
+bootimage_work/bootrom.bin
+release/
 
 # OS files
 .DS_Store

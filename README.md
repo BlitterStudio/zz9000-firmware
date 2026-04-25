@@ -65,14 +65,15 @@ scripts, same path CI takes:
 
 | Script | Builds | Needs |
 |---|---|---|
-| [`build_firmware.sh`](build_firmware.sh)   | `ZZ9000OS.elf`                  | `arm-none-eabi-gcc` (Arm GNU Toolchain with newlib) |
+| [`build_firmware.sh`](build_firmware.sh)   | `ZZ9000OS.elf`                  | `arm-none-eabi-gcc` (Arm GNU Toolchain with newlib), host `cc` |
 | [`build_bitstream.sh`](build_bitstream.sh) | `zz9000_ps_wrapper.bit`         | Vivado 2018.3 (Linux)                               |
 | [`build_variant_bitstreams.sh`](build_variant_bitstreams.sh) | release variant `.bit` files | Vivado 2018.3 (Linux)                               |
 | [`build_bootimage.sh`](build_bootimage.sh) | `BOOT.bin`                      | `bootgen`                                           |
 
-Firmware-only iteration needs `arm-none-eabi-gcc` + `bootgen` — no
-Vivado, no Xilinx SDK. The committed bitstream in `bootimage_work/` is
-CI's source of truth; commit a new one alongside any HDL change.
+Firmware-only iteration needs `arm-none-eabi-gcc`, a host C compiler,
+and `bootgen` — no Vivado, no Xilinx SDK. The committed bitstream in
+`bootimage_work/` is CI's source of truth; commit a new one alongside
+any HDL change.
 
 ## Releases
 
