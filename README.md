@@ -105,6 +105,24 @@ Build those bitstreams on a Vivado machine with
 `./build_variant_bitstreams.sh`, then commit the resulting files under
 `bootimage_work/`. Deprecated no-USB-autoboot builds are not published.
 
+## Amiga-side MMU/cache setup
+
+On 68040/68060 systems, configure any ZZ9000 Zorro II RAM and the
+optional Zorro III FastRAM range as data no-cache / cache inhibited in
+your Amiga-side MMU tool. The exact option name depends on the MMU
+package; in MuLibs/MMULib terms this is typically a `Data NoCache` or
+`CacheInhibit` mapping for the configured Zorro RAM range.
+
+This is recommended because the 68040/68060 data cache can turn ordinary
+accesses to slow Zorro memory into cache-line fill, copyback, or push
+traffic that costs more than it saves and can overload marginal bus
+combinations. Leave the instruction cache enabled. 68030 systems do not
+need this workaround.
+
+If a 68040/68060 machine remains unstable with Zorro III FastRAM enabled,
+use the `zorro3-nofast` firmware variant to disable the extra Zorro RAM
+advertisement.
+
 ## Hardware connectivity
 
 Schematics are in the manual (PDF):
