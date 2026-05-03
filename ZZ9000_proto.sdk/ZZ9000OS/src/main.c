@@ -670,7 +670,6 @@ int main() {
 
 					if (zdata & 0x8000) {
 						// pattern mode
-						// TODO yoffset
 						loop_rows = zdata & 0xff;
 						mask = blitter_user1;
 						blitter_src_pitch = 16;

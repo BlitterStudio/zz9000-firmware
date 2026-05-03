@@ -170,6 +170,19 @@ void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint3
 		x = rect_x1;
 		switch(color_format) {
 			case MNTVA_COLOR_8BIT:
+#ifdef __ARM_NEON__
+				{
+					uint8_t *p8 = (uint8_t *)dp + x;
+					uint16_t remaining = rect_x2 - x;
+					uint8x16_t vfg = vdupq_n_u8(u8_fg & mask);
+					uint8x16_t vmask = vdupq_n_u8(mask);
+					while (remaining >= 16) {
+						vst1q_u8(p8, vbslq_u8(vmask, vfg, vld1q_u8(p8)));
+						p8 += 16; remaining -= 16;
+					}
+					x = rect_x2 - remaining;
+				}
+#endif
 				while(x < rect_x2) {
 					SET_FG_PIXEL8_MASK(0);
 					x++;
@@ -177,16 +190,10 @@ void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint3
 				break;
 		case MNTVA_COLOR_16BIT565:
 		case MNTVA_COLOR_15BIT:
-			while(x < rect_x2) {
-				((uint16_t *)dp)[x] = fg_color;
-				x++;
-			}
+			memset16((uint16_t *)dp + x, fg_color, rect_x2 - x);
 			break;
 		case MNTVA_COLOR_32BIT:
-			while(x < rect_x2) {
-				dp[x] = fg_color;
-				x++;
-			}
+			memset32(dp + x, fg_color, rect_x2 - x);
 			break;
 		default:
 			break;
@@ -241,6 +248,26 @@ void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uin
 		x = rect_x1;
 		switch (color_format) {
 		case MNTVA_COLOR_8BIT:
+#ifdef __ARM_NEON__
+			{
+				uint8_t *p8 = (uint8_t *)dp + x;
+				uint16_t remaining = rect_x2 - x;
+				uint8x16_t vmask = vdupq_n_u8(mask);
+				while (remaining >= 16) {
+					vst1q_u8(p8, veorq_u8(vld1q_u8(p8), vmask));
+					p8 += 16; remaining -= 16;
+				}
+				x = rect_x2 - remaining;
+			}
+#else
+			while (x + 4 <= rect_x2) {
+				((uint8_t *)dp)[x] ^= mask;
+				((uint8_t *)dp)[x+1] ^= mask;
+				((uint8_t *)dp)[x+2] ^= mask;
+				((uint8_t *)dp)[x+3] ^= mask;
+				x += 4;
+			}
+#endif
 			while (x < rect_x2) {
 				((uint8_t *)dp)[x] ^= mask;
 				x++;
@@ -433,7 +460,21 @@ void copy_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint1
 			}
 		}
 		else {
-			for (int32_t x = 0; x < w; x++) {
+			int32_t x = 0;
+#ifdef __ARM_NEON__
+			{
+				uint8_t *d8 = (uint8_t *)dp + rect_x1;
+				uint8_t *s8 = (uint8_t *)sp + rect_sx;
+				uint8x16_t vmask = vdupq_n_u8(mask);
+				int32_t remaining = w;
+				while (remaining >= 16) {
+					vst1q_u8(d8, vbslq_u8(vmask, vld1q_u8(s8), vld1q_u8(d8)));
+					d8 += 16; s8 += 16; remaining -= 16;
+				}
+				x = w - remaining;
+			}
+#endif
+			for (; x < w; x++) {
 				((uint8_t *)dp)[rect_x1 + x] = (((uint8_t *)dp)[rect_x1 + x] & (mask ^ 0xFF)) | (((uint8_t *)sp)[rect_sx + x] & mask);
 			}
 		}
@@ -1283,9 +1324,8 @@ void acc_clear_buffer(uint32_t addr, uint16_t w, uint16_t h, uint16_t pitch_, ui
 		case MNTVA_COLOR_15BIT:
 		case MNTVA_COLOR_32BIT:
 			for (int y = 0; y < h; y++) {
-				for (int x = 0; x < w; y++) {
+				for (int x = 0; x < w; x++) {
 					SET_FG_PIXEL;
-					x++;
 				}
 				dp += pitch;
 			}
