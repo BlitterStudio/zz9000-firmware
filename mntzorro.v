@@ -738,7 +738,14 @@ module MNTZorro_v0_1_S00_AXI
 `else
   wire z3_addr_phase_in_ram = (z3_addr_phase_bus >= z3_ram_low) && (z3_addr_phase_bus < z3_ram_high);
 `endif
-  wire z3_addr_phase_match = (!z_confout && !ZORRO_NCFGIN && z3_addr_phase_autoconfig) ||
+  // Use the synchronized z_cfgin (active-high: 1 when /CFGIN has been low for
+  // 3 consecutive ACLK cycles) instead of the raw !ZORRO_NCFGIN.  The raw pin
+  // is susceptible to metastability at the ODDR capture edge on systems with
+  // additional Zorro-3 bus loading (e.g. A3000 + A4091), where /CFGIN may not
+  // have settled by the time /FCS first falls during autoconfig.  Using the
+  // synchronized version ensures a glitch-free, stable input to the ODDR while
+  // still deassert /SLAVE+/CINH correctly once z_confout goes high.
+  wire z3_addr_phase_match = (!z_confout && z_cfgin && z3_addr_phase_autoconfig) ||
                              (z_confout && (z3_addr_phase_in_reg || z3_addr_phase_in_ram));
   wire z3_fcs_reset = !ZORRO_NIORST;
   wire z3_nslave_out;
