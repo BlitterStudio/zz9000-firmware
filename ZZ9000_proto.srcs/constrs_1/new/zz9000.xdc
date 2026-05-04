@@ -279,6 +279,36 @@ set_property PACKAGE_PIN U19 [get_ports {I2SO_RESETn[0]}]
 # well...
 create_clock -period 35.000 -name amiga_e7m -add [get_ports ZORRO_E7M]
 
+# ZORRO_NFCS is used as the ODDR clock (C input) for the z3_nslave_oddr and
+# z3_ncinh_oddr primitives that drive /SLAVE and /CINH.  Declaring it as a
+# clock lets Vivado analyse the combinatorial D2 setup path (z3_addr_phase_match,
+# sourced from ACLK-domain registers) against the falling edge of ZORRO_NFCS.
+# ZORRO_NFCS idles high and falls to start a Z3 bus cycle (active-low /FCS).
+# Minimum Z3 cycle ≈ 140 ns; waveform {0 70} = rising at 0 ns, falling at 70 ns.
+create_clock -period 140.000 -name zorro_fcs -waveform {0 70} -add [get_ports ZORRO_NFCS]
+
+# Address and data bus inputs are sampled combinatorially into z3_addr_phase_bus
+# before the ODDR captures D2 on the falling /FCS edge.  Per Z3 spec, ADDR/DATA
+# are stable at least 15 ns before /FCS falls, giving ~55 ns of slack with 100 ns
+# max input delay relative to the falling edge at t=70 ns (100 ns delay means the
+# signal arrives no later than t=70+100-140=30 ns before the next rising edge,
+# i.e. comfortably before the falling edge at t=70 ns in the same cycle).
+set_input_delay -clock zorro_fcs -clock_fall -max 100.000 [get_ports {ZORRO_DATA[*]}]
+set_input_delay -clock zorro_fcs -clock_fall -max 100.000 [get_ports {ZORRO_ADDR[*]}]
+
+# /CFGIN is an async input that is only consumed by the ACLK-domain synchronizer
+# (znCFGIN_sync), not by the ODDR D2 path.  Suppress the unconstrained-path
+# warning Vivado would otherwise emit for this port.
+set_false_path -from [get_ports ZORRO_NCFGIN]
+
+# ACLK-domain registers driving the ODDR D2 combinatorial path (z_confout,
+# z3_ram_low, z3_reg_low, z3_fast_low) are stable for the full /FCS cycle; they
+# only change on 100 MHz ACLK edges, far from the asynchronous /FCS falling edge.
+# Grant 13 ACLK cycles of multicycle setup slack (100 MHz / 7 MHz ≈ 14 cycles).
+# The paired hold value of 12 prevents the tool from tightening the hold check.
+set_multicycle_path -setup 13 -end -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
+set_multicycle_path -hold  12 -end -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
+
 set_false_path -from [get_clocks clk_fpga_0] -to [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]]
 
 set_false_path -from [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]] -to [get_clocks clk_fpga_0]
