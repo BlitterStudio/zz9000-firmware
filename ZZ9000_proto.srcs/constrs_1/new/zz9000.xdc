@@ -295,6 +295,12 @@ create_clock -period 140.000 -name zorro_fcs -waveform {0 70} -add [get_ports ZO
 # i.e. comfortably before the falling edge at t=70 ns in the same cycle).
 set_input_delay -clock zorro_fcs -clock_fall -max 100.000 [get_ports {ZORRO_DATA[*]}]
 set_input_delay -clock zorro_fcs -clock_fall -max 100.000 [get_ports {ZORRO_ADDR[*]}]
+# These same ports are also consumed by ACLK-domain registers (z3addr2, z3_din_*,
+# zdata_in_sync2, zaddr) which are properly handled by the ACLK synchronizer chain.
+# Suppress the spurious zorro_fcs→clk_fpga_0 setup violations Vivado would otherwise
+# report for those paths due to the 100 ns input delay above.
+set_false_path -from [get_ports {ZORRO_DATA[*]}] -to [get_clocks clk_fpga_0]
+set_false_path -from [get_ports {ZORRO_ADDR[*]}] -to [get_clocks clk_fpga_0]
 
 # /CFGIN is an async input that is only consumed by the ACLK-domain synchronizer
 # (znCFGIN_sync), not by the ODDR D2 path.  Suppress the unconstrained-path
@@ -305,9 +311,10 @@ set_false_path -from [get_ports ZORRO_NCFGIN]
 # z3_ram_low, z3_reg_low, z3_fast_low) are stable for the full /FCS cycle; they
 # only change on 100 MHz ACLK edges, far from the asynchronous /FCS falling edge.
 # Grant 13 ACLK cycles of multicycle setup slack (100 MHz / 7 MHz ≈ 14 cycles).
-# The paired hold value of 12 prevents the tool from tightening the hold check.
-set_multicycle_path -setup 13 -end -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
-set_multicycle_path -hold  12 -end -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
+# -setup uses -end (relax destination latch edge, correct for fast-src→slow-dst).
+# -hold uses -start (correct paired convention for -setup -end, avoids TIMING-29).
+set_multicycle_path -setup 13 -end   -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
+set_multicycle_path -hold  12 -start -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
 
 set_false_path -from [get_clocks clk_fpga_0] -to [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]]
 
