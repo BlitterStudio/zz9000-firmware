@@ -312,9 +312,12 @@ set_false_path -from [get_ports ZORRO_NCFGIN]
 # only change on 100 MHz ACLK edges, far from the asynchronous /FCS falling edge.
 # Grant 13 ACLK cycles of multicycle setup slack (100 MHz / 7 MHz ≈ 14 cycles).
 # -setup uses -end (relax destination latch edge, correct for fast-src→slow-dst).
-# -hold uses -start (correct paired convention for -setup -end, avoids TIMING-29).
-set_multicycle_path -setup 13 -end   -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
-set_multicycle_path -hold  12 -start -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
+# Hold does not need relaxation for a fast→slow multicycle: the default hold=0
+# with -end is correct (source must not change in the same destination cycle).
+# Explicitly setting hold=0 -end suppresses the TIMING-29 inconsistency warning
+# that Vivado emits when setup uses -end but no matching hold override is present.
+set_multicycle_path -setup 13 -end -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
+set_multicycle_path -hold   0 -end -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
 
 set_false_path -from [get_clocks clk_fpga_0] -to [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]]
 
