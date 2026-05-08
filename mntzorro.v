@@ -738,19 +738,11 @@ module MNTZorro_v0_1_S00_AXI
 `else
   wire z3_addr_phase_in_ram = (z3_addr_phase_bus >= z3_ram_low) && (z3_addr_phase_bus < z3_ram_high);
 `endif
-  // Drive the ODDR D2 (address-phase claim) from purely combinatorial address
-  // decode, WITHOUT any z_cfgin guard.  The Z3 bus master (Kickstart
-  // expansion.library) will only issue autoconfig cycles to the board whose
-  // /CFGIN is already low; if our /CFGIN is not yet asserted, those 0xFF00xxxx
-  // cycles simply won't appear on the bus.  Adding z_cfgin here introduced a
-  // timing hazard: z_cfgin is an S_AXI_ACLK-domain register (~100 MHz, 3-stage
-  // synchronizer = ~30 ns latency), so its combinatorial fanout to the ODDR D2
-  // input can violate the ODDR setup time relative to the asynchronous /FCS
-  // falling edge on systems with additional Z3 bus loading (e.g. A3000/A4000 +
-  // A4091).  The /CFGIN check still lives in the FSM (Z3_CONFIGURING state)
-  // where it prevents us from asserting /DTACK to cycles we don't own; the ODDR
-  // only needs to drive /SLAVE+/CINH promptly within 25 ns of /FCS falling.
-  wire z3_addr_phase_match = (!z_confout && z3_addr_phase_autoconfig) ||
+  // Autoconfig claims must still be qualified by raw /CFGIN so ZZ9000 does not
+  // assert /SLAVE+/CINH while another card owns the autoconfig slot.  Do not use
+  // the synchronized z_cfgin here: its ACLK latency is too slow for the Z3
+  // address phase, where /SLAVE+/CINH must be valid shortly after /FCS falls.
+  wire z3_addr_phase_match = (!z_confout && !ZORRO_NCFGIN && z3_addr_phase_autoconfig) ||
                              (z_confout && (z3_addr_phase_in_reg || z3_addr_phase_in_ram));
   wire z3_fcs_reset = !ZORRO_NIORST;
   wire z3_nslave_out;
