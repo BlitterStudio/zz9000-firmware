@@ -75,9 +75,7 @@ if [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf ]; then
 fi
 
 mkdir -p "$OUT_DIR"
-rm -f "$OUT_DIR"/zz9000-firmware-"$TAG"-*.zip \
-      "$OUT_DIR/BOOT-$TAG.bin" \
-      "$OUT_DIR/ZZ9000OS-$TAG.elf"
+rm -f "$OUT_DIR"/zz9000-firmware-"$TAG"-*.zip
 TMP_DIR="$OUT_DIR/.tmp"
 rm -rf "$TMP_DIR"
 mkdir -p "$TMP_DIR"
@@ -121,12 +119,9 @@ for def in "${variant_defs[@]}"; do
     created+=("$zip_path")
 
     if [ "$variant" = zorro3 ]; then
-        cp "$boot_bin" "$OUT_DIR/BOOT-${TAG}.bin"
         cp "$boot_bin" bootimage_work/BOOT.bin
     fi
 done
-
-cp ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf "$OUT_DIR/ZZ9000OS-${TAG}.elf"
 
 if [ "${#missing[@]}" -gt 0 ]; then
     if [ "$REQUIRE_ALL" -eq 1 ]; then

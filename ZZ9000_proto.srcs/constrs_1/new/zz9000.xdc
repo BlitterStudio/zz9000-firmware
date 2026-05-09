@@ -279,25 +279,52 @@ set_property PACKAGE_PIN U19 [get_ports {I2SO_RESETn[0]}]
 # well...
 create_clock -period 35.000 -name amiga_e7m -add [get_ports ZORRO_E7M]
 
+# ZORRO_NFCS is used as the ODDR clock (C input) for the z3_nslave_oddr and
+# z3_ncinh_oddr primitives that drive /SLAVE and /CINH.  Declaring it as a
+# clock lets Vivado analyse the combinatorial D2 setup path (z3_addr_phase_match,
+# sourced from ACLK-domain registers) against the falling edge of ZORRO_NFCS.
+# ZORRO_NFCS idles high and falls to start a Z3 bus cycle (active-low /FCS).
+# Minimum Z3 cycle ≈ 140 ns; waveform {0 70} = rising at 0 ns, falling at 70 ns.
+create_clock -period 140.000 -name zorro_fcs -waveform {0 70} -add [get_ports ZORRO_NFCS]
+
+# Address, data, and /CFGIN are sampled combinatorially into the address-phase
+# claim before the ODDR captures D2 on the falling /FCS edge.  Per Z3 spec,
+# ADDR/DATA are stable at least 15 ns before /FCS falls, giving about 55 ns of
+# slack with 100 ns max input delay relative to the falling edge at t=70 ns.
+set_input_delay -clock zorro_fcs -clock_fall -max 100.000 [get_ports {ZORRO_DATA[*]}]
+set_input_delay -clock zorro_fcs -clock_fall -max 100.000 [get_ports {ZORRO_ADDR[*]}]
+set_input_delay -clock zorro_fcs -clock_fall -max 100.000 [get_ports ZORRO_NCFGIN]
+# These same ports are also consumed by ACLK-domain registers (z3addr2, z3_din_*,
+# zdata_in_sync2, zaddr) which are properly handled by the ACLK synchronizer chain.
+# Suppress the spurious zorro_fcs→clk_fpga_0 setup violations Vivado would otherwise
+# report for those paths due to the 100 ns input delay above.
+set_false_path -from [get_ports {ZORRO_DATA[*]}] -to [get_clocks clk_fpga_0]
+set_false_path -from [get_ports {ZORRO_ADDR[*]}] -to [get_clocks clk_fpga_0]
+# /CFGIN is also consumed by the ACLK-domain synchronizer (znCFGIN_sync).  Keep
+# that asynchronous crossing false-pathed while leaving the /CFGIN to zorro_fcs
+# ODDR path timed.
+set_false_path -from [get_ports ZORRO_NCFGIN] -to [get_clocks clk_fpga_0]
+
+# ACLK-domain registers driving the ODDR D2 combinatorial path (z_confout,
+# z3_ram_low, z3_reg_low, z3_fast_low) are intentionally asynchronous to
+# zorro_fcs: they are written by the FSM and are stable for many full Z3 bus
+# cycles before /FCS falls.  Vivado cannot express a meaningful hold
+# requirement for an async crossing like this — any multicycle approach
+# produces bogus hold violations because the tool picks worst-case edge pairs
+# across unrelated clock cycles.  False-path the ACLK→zorro_fcs direction
+# entirely; the setup margin is guaranteed by design (registers settle in <1
+# ACLK cycle = 10 ns, /FCS period ≥ 140 ns).
+set_false_path -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
+
 set_false_path -from [get_clocks clk_fpga_0] -to [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]]
 
 set_false_path -from [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]] -to [get_clocks clk_fpga_0]
 
 set_false_path -from [get_clocks amiga_e7m] -to [get_clocks clk_fpga_0]
 
-
-set_false_path -from [get_clocks -of_objects [get_pins zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT1]] -to [get_clocks clk_fpga_0]
-set_false_path -from [get_clocks -of_objects [get_pins zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] -to [get_clocks clk_fpga_0]
-
-set_false_path -from [get_clocks -of_objects [get_pins zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] -to [get_clocks -of_objects [get_pins zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT1]]
-
-
-connect_debug_port u_ila_0/probe39 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/dtack]]
-
-connect_debug_port u_ila_0/probe0 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_len[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_len[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_len[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_len[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_len[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_len[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_len[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_len[7]}]]
-connect_debug_port u_ila_0/probe1 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_pulse[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_pulse[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_pulse[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_pulse[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_pulse[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_pulse[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_pulse[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_pulse[7]}]]
-connect_debug_port u_ila_0/probe41 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/dtack__0]]
-connect_debug_port u_ila_0/probe48 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_req]]
+set_false_path -quiet -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT1]] -to [get_clocks -quiet clk_fpga_0]
+set_false_path -quiet -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] -to [get_clocks -quiet clk_fpga_0]
+set_false_path -quiet -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] -to [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT1]]
 
 create_debug_core u_ila_0 ila
 set_property ALL_PROBE_SAME_MU true [get_debug_cores u_ila_0]

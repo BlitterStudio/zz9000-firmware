@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    name: firmware + BOOT.bin
+    name: Build & package firmware
     runs-on: ubuntu-latest
     env:
       ARM_TOOLCHAIN_VERSION: 13.2.rel1
@@ -99,10 +99,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: zz9000-firmware-${{ github.sha }}
-          path: |
-            ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
-            bootimage_work/BOOT.bin
-            release_assets/*
+          path: release_assets/*.zip
           if-no-files-found: error
           retention-days: 14
 
@@ -132,11 +129,7 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           mkdir -p release
-          find dist -type f \( \
-            -name 'BOOT-*.bin' -o \
-            -name 'ZZ9000OS-*.elf' -o \
-            -name 'zz9000-firmware-*.zip' \
-          \) -exec cp {} release/ \;
+          find dist -type f -name 'zz9000-firmware-*.zip' -exec cp {} release/ \;
           if ! find release -maxdepth 1 -type f | grep -q .; then
             echo "ERROR: no release assets staged." >&2
             exit 1

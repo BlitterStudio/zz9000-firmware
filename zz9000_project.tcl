@@ -384,7 +384,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   create_bd_pin -dir I control_interlace
   create_bd_pin -dir I -from 7 -to 0 control_op
   create_bd_pin -dir O -from 1 -to 0 control_vblank
-  # Scanlines V2 boundary pins on the "video" sub-BD
+  # Scanlines boundary pins on the "video" sub-BD
+  create_bd_pin -dir I -from 7 -to 0 scanline_intensity
   create_bd_pin -dir I -from 1 -to 0 scanline_width
   create_bd_pin -dir I scanline_parity
   create_bd_pin -dir I -from 7 -to 0 scanline_intensity2
@@ -433,7 +434,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_data [get_bd_pins control_data] [get_bd_pins video_formatter_0/control_data]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_interlace [get_bd_pins control_interlace] [get_bd_pins video_formatter_0/control_interlace]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_op [get_bd_pins control_op] [get_bd_pins video_formatter_0/control_op]
-  # Scanlines V2: propagate the sub-BD boundary pins down to video_formatter_0
+  # Scanlines: propagate the sub-BD boundary pins down to video_formatter_0
+  connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_intensity_out [get_bd_pins scanline_intensity] [get_bd_pins video_formatter_0/scanline_intensity]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_width_out [get_bd_pins scanline_width] [get_bd_pins video_formatter_0/scanline_width]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_parity_out [get_bd_pins scanline_parity] [get_bd_pins video_formatter_0/scanline_parity]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_intensity2_out [get_bd_pins scanline_intensity2] [get_bd_pins video_formatter_0/scanline_intensity2]
@@ -1248,7 +1250,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_data [get_bd_pins MNTZorro_v0_1_S00_AXI_0/video_control_data_out] [get_bd_pins video/control_data]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_interlace [get_bd_pins MNTZorro_v0_1_S00_AXI_0/video_control_interlace_out] [get_bd_pins video/control_interlace]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_op [get_bd_pins MNTZorro_v0_1_S00_AXI_0/video_control_op_out] [get_bd_pins video/control_op]
-  # Scanlines V2: wire mntzorro's scanline outputs into the video sub-BD
+  # Scanlines: wire mntzorro's scanline outputs into the video sub-BD
+  connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_intensity_out [get_bd_pins MNTZorro_v0_1_S00_AXI_0/scanline_intensity_out] [get_bd_pins video/scanline_intensity]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_width_out [get_bd_pins MNTZorro_v0_1_S00_AXI_0/scanline_width_out] [get_bd_pins video/scanline_width]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_parity_out [get_bd_pins MNTZorro_v0_1_S00_AXI_0/scanline_parity_out] [get_bd_pins video/scanline_parity]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_intensity2_out [get_bd_pins MNTZorro_v0_1_S00_AXI_0/scanline_intensity2_out] [get_bd_pins video/scanline_intensity2]
