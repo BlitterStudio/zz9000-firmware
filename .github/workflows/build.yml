@@ -85,11 +85,29 @@ jobs:
       - name: Build firmware (ZZ9000OS.elf)
         run: ./build_firmware.sh
 
-      - name: Package release assets
+      - name: Package release assets (standard)
         run: |
           set -euo pipefail
           BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
           ARGS=(--tag "$BUILD_LABEL" --output release_assets)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ARGS+=(--require-all)
+          fi
+          ./build_release_assets.sh "${ARGS[@]}"
+
+      # Alternate firmware flavor: native PAL Amiga ~49.92Hz videocap default.
+      # Same bitstream variants, different ZZ9000OS.elf build. See issue #7.
+      - name: Build firmware (ns-pal flavor)
+        run: |
+          set -euo pipefail
+          ./build_firmware.sh clean
+          EXTRA_CFLAGS=-DDEFAULT_NS_VIDEOCAP=1 ./build_firmware.sh
+
+      - name: Package release assets (ns-pal)
+        run: |
+          set -euo pipefail
+          BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
+          ARGS=(--tag "$BUILD_LABEL" --output release_assets --firmware-flavor ns-pal)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             ARGS+=(--require-all)
           fi

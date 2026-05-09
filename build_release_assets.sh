@@ -16,17 +16,29 @@ cd "$SCRIPT_DIR"
 usage() {
     cat >&2 <<'EOF'
 Usage: ./build_release_assets.sh [--tag TAG] [--output DIR] [--require-all]
+                                 [--firmware-flavor SUFFIX]
 
 Options:
-  --tag TAG       Release/build label used in archive names (default: local)
-  --output DIR    Directory to write release assets into (default: release)
-  --require-all   Fail if any known variant bitstream is missing
+  --tag TAG               Release/build label used in archive names
+                          (default: local)
+  --output DIR            Directory to write release assets into
+                          (default: release)
+  --require-all           Fail if any known variant bitstream is missing
+  --firmware-flavor SUFFIX
+                          Append SUFFIX to each archive name, e.g. "ns-pal"
+                          produces zz9000-firmware-<tag>-<variant>-ns-pal.zip.
+                          Use this when packaging an alternate ZZ9000OS.elf
+                          flavor (the script does not rebuild firmware —
+                          the caller is expected to do that). Skips the
+                          canonical bootimage_work/BOOT.bin overwrite so the
+                          standard-flavor BOOT.bin remains the local default.
 EOF
 }
 
 TAG=local
 OUT_DIR=release
 REQUIRE_ALL=0
+FIRMWARE_FLAVOR=
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -52,6 +64,15 @@ while [ "$#" -gt 0 ]; do
             REQUIRE_ALL=1
             shift
             ;;
+        --firmware-flavor)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --firmware-flavor needs a value." >&2
+                usage
+                exit 1
+            fi
+            FIRMWARE_FLAVOR=$2
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -75,7 +96,21 @@ if [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf ]; then
 fi
 
 mkdir -p "$OUT_DIR"
-rm -f "$OUT_DIR"/zz9000-firmware-"$TAG"-*.zip
+if [ -n "$FIRMWARE_FLAVOR" ]; then
+    rm -f "$OUT_DIR"/zz9000-firmware-"$TAG"-*-"$FIRMWARE_FLAVOR".zip
+else
+    # Standard pass: clean only un-suffixed archives so a previous
+    # alternate-flavor pass in the same output dir is preserved.
+    for f in "$OUT_DIR"/zz9000-firmware-"$TAG"-*.zip; do
+        [ -e "$f" ] || continue
+        base=$(basename "$f" .zip)
+        # Skip archives that end with one of the known-flavor suffixes.
+        case "$base" in
+            *-ns-pal) continue ;;
+        esac
+        rm -f "$f"
+    done
+fi
 TMP_DIR="$OUT_DIR/.tmp"
 rm -rf "$TMP_DIR"
 mkdir -p "$TMP_DIR"
@@ -102,12 +137,18 @@ for def in "${variant_defs[@]}"; do
         continue
     fi
 
-    archive_dir="zz9000-firmware-${TAG}-${variant}"
+    if [ -n "$FIRMWARE_FLAVOR" ]; then
+        archive_dir="zz9000-firmware-${TAG}-${variant}-${FIRMWARE_FLAVOR}"
+        flavor_label=" [${FIRMWARE_FLAVOR}]"
+    else
+        archive_dir="zz9000-firmware-${TAG}-${variant}"
+        flavor_label=""
+    fi
     archive_root="$TMP_DIR/$archive_dir"
     boot_bin="$archive_root/BOOT.bin"
     zip_path="$OUT_DIR/${archive_dir}.zip"
 
-    echo "[release] building $variant: $label"
+    echo "[release] building $variant${flavor_label}: $label"
     mkdir -p "$archive_root"
     ./build_bootimage.sh --bitstream "$bitstream" --output "$boot_bin"
 
@@ -118,7 +159,9 @@ for def in "${variant_defs[@]}"; do
     )
     created+=("$zip_path")
 
-    if [ "$variant" = zorro3 ]; then
+    # Only the standard-flavor zorro3 build refreshes the canonical
+    # local BOOT.bin — alternate flavors are release artifacts only.
+    if [ "$variant" = zorro3 ] && [ -z "$FIRMWARE_FLAVOR" ]; then
         cp "$boot_bin" bootimage_work/BOOT.bin
     fi
 done
