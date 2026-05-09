@@ -95,27 +95,6 @@ if [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf ]; then
     exit 1
 fi
 
-mkdir -p "$OUT_DIR"
-if [ -n "$FIRMWARE_FLAVOR" ]; then
-    rm -f "$OUT_DIR"/zz9000-firmware-"$TAG"-*-"$FIRMWARE_FLAVOR".zip
-else
-    # Standard pass: clean only un-suffixed archives so a previous
-    # alternate-flavor pass in the same output dir is preserved.
-    for f in "$OUT_DIR"/zz9000-firmware-"$TAG"-*.zip; do
-        [ -e "$f" ] || continue
-        base=$(basename "$f" .zip)
-        # Skip archives that end with one of the known-flavor suffixes.
-        case "$base" in
-            *-ns-pal) continue ;;
-        esac
-        rm -f "$f"
-    done
-fi
-TMP_DIR="$OUT_DIR/.tmp"
-rm -rf "$TMP_DIR"
-mkdir -p "$TMP_DIR"
-trap 'rm -rf "$TMP_DIR"' EXIT
-
 variant_defs=(
     "zorro3|bootimage_work/zz9000_ps_wrapper.bit|Zorro III, A3000/A4000"
     "zorro3-nofast|bootimage_work/variants/zz9000_ps_wrapper-zorro3-nofast.bit|Zorro III, A3000/A4000, no Zorro RAM"
@@ -125,6 +104,22 @@ variant_defs=(
     "a500-2mb|bootimage_work/variants/zz9000_ps_wrapper-a500-2mb.bit|A500 2MB, ZZ9500CX Denise adapter"
     "a500plus|bootimage_work/variants/zz9000_ps_wrapper-a500plus.bit|A500+ or Super Denise, ZZ9500CX Denise adapter"
 )
+
+mkdir -p "$OUT_DIR"
+# Each pass deletes only the exact archive names it's about to (re)write,
+# so other-flavor passes in the same output dir aren't disturbed.
+for def in "${variant_defs[@]}"; do
+    IFS='|' read -r variant _ _ <<< "$def"
+    if [ -n "$FIRMWARE_FLAVOR" ]; then
+        rm -f "$OUT_DIR/zz9000-firmware-${TAG}-${variant}-${FIRMWARE_FLAVOR}.zip"
+    else
+        rm -f "$OUT_DIR/zz9000-firmware-${TAG}-${variant}.zip"
+    fi
+done
+TMP_DIR="$OUT_DIR/.tmp"
+rm -rf "$TMP_DIR"
+mkdir -p "$TMP_DIR"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 created=()
 missing=()

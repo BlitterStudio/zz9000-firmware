@@ -50,9 +50,12 @@ This flips `video_init()` to default to 720x576 at the Amiga's native
 ~49.92 Hz and pre-enables `CARD_FEATURE_NONSTANDARD_VSYNC`, so videocap
 locks to the chipset rate from cold boot. CI also packages this as the
 `ns-pal` release flavor (e.g. `zz9000-firmware-<tag>-zorro3-ns-pal.zip`)
-alongside the standard archives. Not all HDMI sinks accept the
-non-standard timing — that's why the standard build keeps the 60 Hz
-default.
+alongside the standard archives. **PAL Amiga only**: the genlock clock
+defaults assume a PAL chipset master, so on an NTSC machine you'd see
+clock-mismatch artifacts until the host driver loads and corrects it
+— use the standard build there instead. Not all HDMI sinks accept the
+non-standard timing either, which is why the standard build keeps the
+60 Hz default.
 
 **Release variant bitstreams** — on the Vivado box:
 ```bash
