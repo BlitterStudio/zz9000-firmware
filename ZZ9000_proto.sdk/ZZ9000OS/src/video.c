@@ -71,9 +71,21 @@ struct ZZ_VIDEO_STATE* video_get_state() {
 struct ZZ_VIDEO_STATE* video_init() {
 	vs.framebuffer = (u32*) FRAMEBUFFER_ADDRESS;
 
+#ifdef DEFAULT_NS_VIDEOCAP
+	// Driverless boot (no startup-sequence, floppy boot, etc.) never gets
+	// CARD_FEATURE_NONSTANDARD_VSYNC flipped on by the host driver, so
+	// videocap defaults to 800x600/60Hz scaling and PAL chipset output
+	// stutters from the rate mismatch. This variant defaults to the native
+	// PAL Amiga 720x576 / ~49.92Hz videocap path so demos look right out
+	// of cold boot. See issue #7.
+	vs.videocap_video_mode = ZZVMODE_720x576;
+	vs.video_mode = ZZVMODE_720x576 | 2 << 12 | MNTVA_COLOR_32BIT << 8;
+	vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
+#else
 	// default to more compatible 60hz mode
 	vs.videocap_video_mode = ZZVMODE_800x600;
 	vs.video_mode = ZZVMODE_800x600 | 2 << 12 | MNTVA_COLOR_32BIT << 8;
+#endif
 	vs.colormode = 0;
 
 	video_reset();
