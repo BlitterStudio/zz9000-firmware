@@ -1065,6 +1065,17 @@ module MNTZorro_v0_1_S00_AXI
   reg videocap_interlace;
   reg videocap_ntsc;
   reg [7:0] videocap_hs_pulse_width;
+  reg [9:0] videocap_vsync_x = 0;
+
+  localparam [9:0] VIDEOCAP_INTERLACE_PHASE_DELTA = 10'h80;
+  wire [9:0] videocap_vsync_phase_abs_delta =
+      (videocap_x > videocap_vsync_x) ?
+      (videocap_x - videocap_vsync_x) :
+      (videocap_vsync_x - videocap_x);
+  wire [9:0] videocap_vsync_phase_delta =
+      (videocap_vsync_phase_abs_delta > 10'h200) ?
+      (10'h3ff - videocap_vsync_phase_abs_delta + 1'b1) :
+      videocap_vsync_phase_abs_delta;
 
   reg E7M_PSEN = 0;
   reg E7M_PSINCDEC = 0;
@@ -1182,11 +1193,14 @@ module MNTZorro_v0_1_S00_AXI
     // by looking at the pulse width of it
     // direct sampling from denise
     if(videocap_hs[6:1]=='b000111 && videocap_hs_pulse_width>=128) begin
-      // 31kHz progressive: full frame >= 400 lines, never interlaced
-      // 15kHz interlaced: per-field count < 400, alternates per field
+      // 31kHz progressive: full frame >= 400 lines, never interlaced.
+      // 15kHz interlace is identified by field phase, not by total line
+      // count parity. NTSC nonlace can jitter by one counted line when
+      // switching from RTG, which made it look interlaced and caused the
+      // formatter to read 480 lines from a 240-line capture.
       if (videocap_ymax>='h190) begin
         videocap_interlace <= 0;
-      end else if (videocap_ymax[0]) begin
+      end else if (vc_next_lace_field != videocap_lace_field) begin
         videocap_interlace <= 1;
       end else begin
         videocap_interlace <= 0;
@@ -1217,15 +1231,20 @@ module MNTZorro_v0_1_S00_AXI
 `else
     // with videoslot machines, we have a real VSYNC to work with
     if (videocap_vs[6:1]=='b111000) begin
-      // 31kHz progressive: full frame >= 400 lines, never interlaced
-      // 15kHz interlaced: per-field count < 400, parity flips between fields
+      // 31kHz progressive: full frame >= 400 lines, never interlaced.
+      // 15kHz interlace has alternating VSYNC phase; nonlace does not.
+      // Line-count parity alone is not reliable on NTSC after RTG->native
+      // switches because the count can jitter by one line. Compare the
+      // circular phase distance so a stable edge near counter wrap does
+      // not look like a half-line jump.
       if (videocap_ymax>='h190)
         videocap_interlace <= 0;
-      else if (videocap_ymax[0]!=videocap_ymax2[0])
+      else if (videocap_vsync_phase_delta >= VIDEOCAP_INTERLACE_PHASE_DELTA)
         videocap_interlace <= 1;
       else
         videocap_interlace <= 0;
 
+      videocap_vsync_x <= videocap_x;
       videocap_lace_field <= videocap_ymax[0];
 
       if (videocap_ymax>='h190) begin

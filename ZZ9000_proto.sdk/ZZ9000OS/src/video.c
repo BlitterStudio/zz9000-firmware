@@ -64,8 +64,18 @@ static int default_pan_offset_pal_800x600 = 0x00dff2f8;
 static int isr_flush_count = 0;
 int vblank_count = 0;
 
+#define VIDEOCAP_MODE_STABLE_VBLANKS 2
+
 struct ZZ_VIDEO_STATE* video_get_state() {
 	return &vs;
+}
+
+static void videocap_detection_reset() {
+	vs.videocap_ntsc_old = -1;
+	vs.interlace_old = -1;
+	vs.videocap_ntsc_candidate = -1;
+	vs.interlace_candidate = -1;
+	vs.videocap_mode_stable_count = 0;
 }
 
 struct ZZ_VIDEO_STATE* video_init() {
@@ -95,6 +105,7 @@ struct ZZ_VIDEO_STATE* video_init() {
 
 void video_reset() {
 	vs.videocap_enabled_old = 0;
+	videocap_detection_reset();
 	vs.framebuffer_pan_width = 0;
 	vs.framebuffer_pan_offset = default_pan_offset_pal_800x600;
 	vs.split_request_pos = 0;
@@ -229,14 +240,30 @@ void video_formatter_write(uint32_t data, uint16_t op) {
 	VF_DLY;
 }
 
+static int videocap_detection_is_stable(int videocap_ntsc, int interlace) {
+	if (videocap_ntsc != vs.videocap_ntsc_candidate ||
+			interlace != vs.interlace_candidate) {
+		vs.videocap_ntsc_candidate = videocap_ntsc;
+		vs.interlace_candidate = interlace;
+		vs.videocap_mode_stable_count = 1;
+		return 0;
+	}
+
+	if (vs.videocap_mode_stable_count < VIDEOCAP_MODE_STABLE_VBLANKS) {
+		vs.videocap_mode_stable_count++;
+	}
+
+	return vs.videocap_mode_stable_count >= VIDEOCAP_MODE_STABLE_VBLANKS;
+}
+
 // interrupt service routine for IRQ_F2P[0:0]
 // vblank + raster position interrupt
 void isr_video(void *dummy) {
 	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 
-	int vblank = (zstate & (1 << 21));
-	int videocap_enabled = (zstate & (1 << 23));
-	int videocap_ntsc = (zstate & (1 << 22));
+	int vblank = !!(zstate & (1 << 21));
+	int videocap_enabled = !!(zstate & (1 << 23));
+	int videocap_ntsc = !!(zstate & (1 << 22));
 	int interlace = !!(zstate & (1 << 24));
 
 	if (!videocap_enabled) {
@@ -260,77 +287,86 @@ void isr_video(void *dummy) {
 			init_vdma(vs.vmode_hsize, vs.vmode_vsize, vs.vmode_hdiv, vs.vmode_vdiv,
 					(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 		}
+		vs.videocap_enabled_old = 0;
+		videocap_detection_reset();
 	} else {
 		// FIXME magic constant
 		if (vs.framebuffer_pan_offset >= 0x00dff000) {
 			// videocap is enabled and
 			// we are looking at the videocap area
 			// so set up the right mode for it
+			if (vblank) {
+				int videocap_reset = 0;
 
-			int videocap_reset = 0;
-
-			if (!vs.videocap_enabled_old) {
-				videocap_area_clear();
-				// force mode cleanup
-				videocap_reset = 1;
-			}
-
-			if (videocap_ntsc != vs.videocap_ntsc_old || videocap_reset) {
-				// change between ntsc+pal
-				videocap_area_clear();
-
-				// hide sprite
-				sprite_request_hide = 1;
-
-				if (videocap_ntsc) {
-					// NTSC
-					printf("videocap: ntsc\n");
-					vs.framebuffer_pan_width = 0;
-					vs.framebuffer_pan_offset = default_pan_offset_ntsc;
-					if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
-						init_ns_video_mode(ZZVMODE_720x480);
-					} else {
-						video_mode_init_internal(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT, 1);
-					}
-				} else {
-					// PAL
-					printf("videocap: pal\n");
-					vs.framebuffer_pan_width = 0;
-					if (vs.videocap_video_mode == ZZVMODE_800x600) {
-						vs.framebuffer_pan_offset = default_pan_offset_pal_800x600;
-					} else {
-						vs.framebuffer_pan_offset = default_pan_offset_pal;
-					}
-					if (vs.videocap_video_mode == ZZVMODE_720x576 && vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
-						init_ns_video_mode(ZZVMODE_720x576);
-					} else {
-						video_mode_init_internal(vs.videocap_video_mode, 2, MNTVA_COLOR_32BIT, 1);
-					}
+				if (!vs.videocap_enabled_old) {
+					videocap_area_clear();
+					videocap_detection_reset();
+					vs.videocap_enabled_old = videocap_enabled;
 				}
-				videocap_reset = 1;
-			}
 
-			if (interlace != vs.interlace_old || videocap_reset) {
-				// interlace has changed, we need to reconfigure vdma for the new screen height
-				vs.vmode_vdiv = 2;
-				if (interlace) {
-					vs.vmode_vdiv = 1;
+				videocap_reset = (vs.videocap_ntsc_old < 0 || vs.interlace_old < 0);
+				int videocap_detection_stable =
+						videocap_detection_is_stable(videocap_ntsc, interlace);
+
+				if (videocap_detection_stable &&
+						(videocap_ntsc != vs.videocap_ntsc_old || videocap_reset)) {
+					// change between ntsc+pal
+					videocap_area_clear();
+
+					// hide sprite
+					sprite_request_hide = 1;
+
+					if (videocap_ntsc) {
+						// NTSC
+						printf("videocap: ntsc\n");
+						vs.framebuffer_pan_width = 0;
+						vs.framebuffer_pan_offset = default_pan_offset_ntsc;
+						if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
+							init_ns_video_mode(ZZVMODE_720x480);
+						} else {
+							video_mode_init_internal(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT, 1);
+						}
+					} else {
+						// PAL
+						printf("videocap: pal\n");
+						vs.framebuffer_pan_width = 0;
+						if (vs.videocap_video_mode == ZZVMODE_800x600) {
+							vs.framebuffer_pan_offset = default_pan_offset_pal_800x600;
+						} else {
+							vs.framebuffer_pan_offset = default_pan_offset_pal;
+						}
+						if (vs.videocap_video_mode == ZZVMODE_720x576 && vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
+							init_ns_video_mode(ZZVMODE_720x576);
+						} else {
+							video_mode_init_internal(vs.videocap_video_mode, 2, MNTVA_COLOR_32BIT, 1);
+						}
+					}
+					videocap_reset = 1;
 				}
-				videocap_area_clear();
-				init_vdma(vs.vmode_hsize, vs.vmode_vsize, 1, vs.vmode_vdiv,
-						(u32)vs.framebuffer + vs.framebuffer_pan_offset);
-				video_formatter_valign();
-				printf("videocap interlace mode changed to %d.\n", interlace);
-			}
 
-			vs.interlace_old = interlace;
-			vs.videocap_ntsc_old = videocap_ntsc;
-			vs.videocap_enabled_old = videocap_enabled;
+				if (videocap_detection_stable &&
+						(interlace != vs.interlace_old || videocap_reset)) {
+					// interlace has changed, we need to reconfigure vdma for the new screen height
+					vs.vmode_vdiv = 2;
+					if (interlace) {
+						vs.vmode_vdiv = 1;
+					}
+					videocap_area_clear();
+					init_vdma(vs.vmode_hsize, vs.vmode_vsize, 1, vs.vmode_vdiv,
+							(u32)vs.framebuffer + vs.framebuffer_pan_offset);
+					video_formatter_valign();
+					printf("videocap interlace mode changed to %d.\n", interlace);
+				}
+
+				if (videocap_detection_stable) {
+					vs.interlace_old = interlace;
+					vs.videocap_ntsc_old = videocap_ntsc;
+				}
+			}
 		} else {
 			// not looking at the videocap area
 			vs.videocap_enabled_old = 0;
-			vs.videocap_ntsc_old = -1;
-			vs.interlace_old = -1;
+			videocap_detection_reset();
 		}
 	}
 

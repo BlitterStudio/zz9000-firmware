@@ -36,6 +36,9 @@ struct ZZ_VIDEO_STATE {
 	int interlace_old;
 	int videocap_ntsc_old;
 	int videocap_enabled_old;
+	int interlace_candidate;
+	int videocap_ntsc_candidate;
+	uint8_t videocap_mode_stable_count;
 	uint16_t split_request_pos;
 	uint16_t split_pos;
 	uint32_t bgbuf_offset;
