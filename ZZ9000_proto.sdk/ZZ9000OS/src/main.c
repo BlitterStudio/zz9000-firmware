@@ -366,11 +366,9 @@ int main() {
 			uint16_t result;
 			switch (fwup_pending_cmd) {
 			case FWUP_CMD_OPEN:
-				/* Filename is staged in the shared buffer. Invalidate
-				 * the cache so we read the bytes the Amiga just wrote
-				 * over Zorro/AXI_HP, not stale cache lines. Cap at 256
-				 * bytes — far past the 64-char name limit, but cheap. */
-				Xil_DCacheInvalidateRange((UINTPTR)USB_BLOCK_STORAGE_ADDRESS, 256);
+				/* Filename bytes were staged by the ARM Zorro request
+				 * loop as CPU stores into the shared buffer, so reading
+				 * them directly preserves dirty cache lines. */
 				result = fw_update_open((const char*)USB_BLOCK_STORAGE_ADDRESS);
 				break;
 			case FWUP_CMD_WRITE:

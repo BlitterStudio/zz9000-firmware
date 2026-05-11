@@ -15,11 +15,46 @@
 #define FWUP_MAX_CHUNK   24576u
 #define FWUP_VOLUME      "0:"
 #define FWUP_NAME_MAX    64
+#define FWUP_PATH_MAX    (FWUP_NAME_MAX + 4) /* "0:/" + name + NUL */
+#define FWUP_TEMP_PATH   FWUP_VOLUME "/ZZFWUP.TMP"
+#define FWUP_BACKUP_PATH FWUP_VOLUME "/ZZFWUP.BAK"
 
 static FIL  fwup_file;
 static int  fwup_open_flag = 0;
-static char fwup_path[FWUP_NAME_MAX + 4]; /* "0:/" + name + NUL */
+static char fwup_path[FWUP_PATH_MAX];
 static uint32_t fwup_bytes_written = 0;
+
+static int ascii_upper(int c) {
+    return (c >= 'a' && c <= 'z') ? (c - ('a' - 'A')) : c;
+}
+
+static int ascii_ieq(const char *a, const char *b) {
+    while (*a && *b) {
+        if (ascii_upper((unsigned char)*a) != ascii_upper((unsigned char)*b)) {
+            return 0;
+        }
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static int is_reserved_name(const char *name) {
+    return ascii_ieq(name, "ZZFWUP.TMP") || ascii_ieq(name, "ZZFWUP.BAK");
+}
+
+static uint16_t map_open_error(FRESULT fr) {
+    return (fr == FR_NOT_READY || fr == FR_NO_FILESYSTEM || fr == FR_NOT_ENABLED)
+               ? FWUP_ERR_NO_SD
+               : FWUP_ERR_OPEN;
+}
+
+static uint16_t map_path_error(FRESULT fr) {
+    if (fr == FR_INVALID_NAME || fr == FR_INVALID_DRIVE) {
+        return FWUP_ERR_BAD_NAME;
+    }
+    return map_open_error(fr);
+}
 
 /* Allow `[A-Za-z0-9._-]` plus a single optional leading '/'. Rejects
  * '..', backslash, ':' (FatFs volume prefix), control chars, and any
@@ -50,6 +85,9 @@ static int validate_name(const char *raw, char *out_path) {
     if (p[0] == '.' && (p[1] == '\0' || (p[1] == '.' && p[2] == '\0'))) {
         return 0;
     }
+    if (is_reserved_name(p)) {
+        return 0;
+    }
 
     /* "0:/" + filename + NUL. */
     out_path[0] = '0';
@@ -66,35 +104,87 @@ static void close_silent(void) {
         fwup_open_flag = 0;
     }
     fwup_bytes_written = 0;
-    fwup_path[0] = '\0';
+}
+
+static uint16_t commit_temp_file(void) {
+    FRESULT fr = f_unlink(FWUP_BACKUP_PATH);
+    if (fr != FR_OK && fr != FR_NO_FILE) {
+        printf("[FWUP] COMMIT unlink stale backup failed: %d\n", (int)fr);
+        return FWUP_ERR_CLOSE;
+    }
+
+    int have_backup = 0;
+    fr = f_rename(fwup_path, FWUP_BACKUP_PATH);
+    if (fr == FR_OK) {
+        have_backup = 1;
+    } else if (fr != FR_NO_FILE) {
+        printf("[FWUP] COMMIT backup(%s) failed: %d\n", fwup_path, (int)fr);
+        return FWUP_ERR_CLOSE;
+    }
+
+    fr = f_rename(FWUP_TEMP_PATH, fwup_path);
+    if (fr != FR_OK) {
+        printf("[FWUP] COMMIT rename(%s -> %s) failed: %d\n",
+               FWUP_TEMP_PATH, fwup_path, (int)fr);
+        if (have_backup) {
+            FRESULT fr_restore = f_rename(FWUP_BACKUP_PATH, fwup_path);
+            if (fr_restore != FR_OK) {
+                printf("[FWUP] COMMIT restore(%s) failed: %d\n",
+                       fwup_path, (int)fr_restore);
+            }
+        }
+        return FWUP_ERR_CLOSE;
+    }
+
+    if (have_backup) {
+        fr = f_unlink(FWUP_BACKUP_PATH);
+        if (fr != FR_OK && fr != FR_NO_FILE) {
+            printf("[FWUP] COMMIT cleanup backup failed: %d\n", (int)fr);
+        }
+    }
+    return FWUP_OK;
 }
 
 uint16_t fw_update_open(const char *name_buf) {
-    if (fwup_open_flag) {
+    if (fwup_open_flag || fwup_path[0] != '\0') {
         /* Caller forgot to CLOSE/ABORT the previous transfer. Discard
-         * it rather than leak the FIL — the new OPEN wins. */
+         * it rather than leak the FIL/temp file — the new OPEN wins. */
         printf("[FWUP] OPEN with prior file still open (%s); discarding\n", fwup_path);
         close_silent();
+        f_unlink(FWUP_TEMP_PATH);
+        fwup_path[0] = '\0';
     }
 
-    char path[FWUP_NAME_MAX + 4];
+    char path[FWUP_PATH_MAX];
     if (!validate_name(name_buf, path)) {
         printf("[FWUP] OPEN: rejected filename\n");
         return FWUP_ERR_BAD_NAME;
     }
 
-    FRESULT fr = f_open(&fwup_file, path, FA_CREATE_ALWAYS | FA_WRITE);
+    FILINFO info;
+    FRESULT fr = f_stat(path, &info);
+    if (fr != FR_OK && fr != FR_NO_FILE) {
+        printf("[FWUP] OPEN path check(%s) failed: %d\n", path, (int)fr);
+        return map_path_error(fr);
+    }
+
+    fr = f_unlink(FWUP_TEMP_PATH);
+    if (fr != FR_OK && fr != FR_NO_FILE) {
+        printf("[FWUP] OPEN unlink stale temp failed: %d\n", (int)fr);
+        return map_open_error(fr);
+    }
+
+    fr = f_open(&fwup_file, FWUP_TEMP_PATH, FA_CREATE_ALWAYS | FA_WRITE);
     if (fr != FR_OK) {
-        printf("[FWUP] OPEN(%s) failed: %d\n", path, (int)fr);
-        return (fr == FR_NOT_READY || fr == FR_NO_FILESYSTEM) ? FWUP_ERR_NO_SD
-                                                              : FWUP_ERR_OPEN;
+        printf("[FWUP] OPEN(%s for %s) failed: %d\n", FWUP_TEMP_PATH, path, (int)fr);
+        return map_open_error(fr);
     }
 
     fwup_open_flag = 1;
     fwup_bytes_written = 0;
     strncpy(fwup_path, path, sizeof(fwup_path) - 1);
     fwup_path[sizeof(fwup_path) - 1] = '\0';
-    printf("[FWUP] OPEN %s\n", fwup_path);
+    printf("[FWUP] OPEN %s via %s\n", fwup_path, FWUP_TEMP_PATH);
     return FWUP_OK;
 }
 
@@ -102,10 +192,10 @@ uint16_t fw_update_write(const void *buf, uint32_t len) {
     if (!fwup_open_flag) return FWUP_ERR_STATE;
     if (len == 0 || len > FWUP_MAX_CHUNK) return FWUP_ERR_LEN;
 
-    /* The Amiga staged this chunk via Zorro byte writes (AXI_HP into
-     * DDR, non-coherent with the ARM D-cache). Invalidate the range so
-     * f_write reads the fresh bytes rather than stale cache lines. */
-    Xil_DCacheInvalidateRange((UINTPTR)buf, len);
+    /* Zorro writes are staged by the ARM request loop as CPU stores into
+     * cacheable DDR. Clean the range before f_write so any direct SD DMA
+     * path inside FatFs sees the fresh bytes in memory. */
+    Xil_DCacheFlushRange((UINTPTR)buf, len);
 
     UINT n_written = 0;
     FRESULT fr = f_write(&fwup_file, buf, len, &n_written);
@@ -136,6 +226,11 @@ uint16_t fw_update_close(void) {
                fwup_path, (int)fr_sync, (int)fr_close);
         return FWUP_ERR_CLOSE;
     }
+    uint16_t commit_status = commit_temp_file();
+    if (commit_status != FWUP_OK) {
+        return commit_status;
+    }
+
     printf("[FWUP] CLOSE %s (%lu bytes)\n", fwup_path,
            (unsigned long)fwup_bytes_written);
     fwup_bytes_written = 0;
@@ -156,13 +251,14 @@ uint16_t fw_update_abort(void) {
     close_silent();
 
     if (saved_path[0] != '\0') {
-        FRESULT fr = f_unlink(saved_path);
+        FRESULT fr = f_unlink(FWUP_TEMP_PATH);
         if (fr != FR_OK && fr != FR_NO_FILE) {
-            printf("[FWUP] ABORT unlink(%s) failed: %d\n", saved_path, (int)fr);
+            printf("[FWUP] ABORT unlink(%s) failed: %d\n", FWUP_TEMP_PATH, (int)fr);
         } else {
             printf("[FWUP] ABORT %s\n", saved_path);
         }
     }
+    fwup_path[0] = '\0';
     return FWUP_OK;
 }
 

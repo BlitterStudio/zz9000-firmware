@@ -13,10 +13,13 @@
  * Protocol (see main.c register handlers, REG_ZZ_FWUP_*):
  *   1. Amiga stages NUL-terminated filename in the 24 KB shared
  *      buffer at USB_BLOCK_STORAGE_ADDRESS, writes REG_ZZ_FWUP_CMD = OPEN.
+ *      The firmware opens a temporary root file; the target is not
+ *      replaced at this point.
  *   2. For each chunk: Amiga stages up to 24 KB in the shared buffer,
  *      writes REG_ZZ_FWUP_LEN = chunk_bytes, REG_ZZ_FWUP_CMD = WRITE.
- *   3. Amiga writes REG_ZZ_FWUP_CMD = CLOSE to finalize.
- *   4. ABORT (cmd 4) at any time discards the partial file.
+ *   3. Amiga writes REG_ZZ_FWUP_CMD = CLOSE to finalize and commit the
+ *      temporary file over the requested target.
+ *   4. ABORT (cmd 4) at any time discards the temporary file.
  *
  * REG_ZZ_FWUP_STATUS reads 0xFFFF while a command is in flight, 0 on
  * success, or one of FWUP_ERR_* on failure.
@@ -47,8 +50,8 @@ enum fw_update_status {
 };
 
 /* Filename is read from `name_buf` (NUL-terminated, max 64 chars after
- * the optional leading '/'). Opens FA_CREATE_ALWAYS — truncates any
- * existing file. */
+ * the optional leading '/'). Opens a temporary file; the requested
+ * target is replaced only by fw_update_close(). */
 uint16_t fw_update_open(const char *name_buf);
 
 /* Appends `len` bytes from `buf` to the open file. `len` must be > 0
@@ -58,8 +61,7 @@ uint16_t fw_update_write(const void *buf, uint32_t len);
 /* f_sync + f_close. After CLOSE the state machine returns to IDLE. */
 uint16_t fw_update_close(void);
 
-/* Closes + f_unlink any partially-written file. Safe to call from any
- * state. */
+/* Closes + f_unlink the temporary file. Safe to call from any state. */
 uint16_t fw_update_abort(void);
 
 /* Reset transient state (called on Amiga reset). Same effect as ABORT

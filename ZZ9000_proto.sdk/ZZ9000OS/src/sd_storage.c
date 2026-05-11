@@ -36,6 +36,12 @@ static uint32_t hdf_capacity_blocks = 0;
 int sd_storage_init(void) {
     FRESULT fr;
 
+    if (hdf_open) {
+        f_close(&hdf_file);
+    }
+    hdf_open = 0;
+    hdf_capacity_blocks = 0;
+
     fr = f_mount(&fatfs, HDF_VOLUME "/", 1);
     if (fr != FR_OK) {
         printf("[SD] f_mount(%s) failed: %d (no card / not FAT?)\n",
@@ -50,8 +56,8 @@ int sd_storage_init(void) {
         fr = f_open(&hdf_file, HDF_PATH, FA_READ | FA_OPEN_EXISTING);
         if (fr != FR_OK) {
             printf("[SD] HDF open (%s) failed: %d\n", HDF_PATH, (int)fr);
-            f_mount(NULL, HDF_VOLUME "/", 0);
-            return -1;
+            printf("[SD] FAT volume remains mounted for firmware-file push\n");
+            return 0;
         }
         printf("[SD] HDF opened read-only\n");
     }
@@ -60,8 +66,8 @@ int sd_storage_init(void) {
     if (size_bytes < SD_BLOCK_SIZE) {
         printf("[SD] HDF too small: %llu bytes\n", (unsigned long long)size_bytes);
         f_close(&hdf_file);
-        f_mount(NULL, HDF_VOLUME "/", 0);
-        return -1;
+        printf("[SD] FAT volume remains mounted for firmware-file push\n");
+        return 0;
     }
 
     hdf_capacity_blocks = (uint32_t)(size_bytes / SD_BLOCK_SIZE);
