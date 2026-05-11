@@ -210,6 +210,7 @@ static void init_storage_services() {
 	// sd card
 	sd_storage_available_flag = (sd_storage_init() == 0) ? 1 : 0;
 	if (sd_storage_available_flag) {
+		fw_update_cleanup_backups();
 		sd_boot_init();
 	}
 }

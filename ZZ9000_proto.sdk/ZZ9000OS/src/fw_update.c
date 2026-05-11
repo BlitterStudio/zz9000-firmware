@@ -44,6 +44,10 @@ static int is_reserved_name(const char *name) {
     return ascii_ieq(name, "ZZFWUP.TMP") || ascii_ieq(name, "ZZFWUP.BAK");
 }
 
+static void backup_slot_path(char *backup_path, size_t backup_path_size, int slot) {
+    snprintf(backup_path, backup_path_size, FWUP_VOLUME "/ZZFWUP%02d.BAK", slot);
+}
+
 static uint16_t map_open_error(FRESULT fr) {
     return (fr == FR_NOT_READY || fr == FR_NO_FILESYSTEM || fr == FR_NOT_ENABLED)
                ? FWUP_ERR_NO_SD
@@ -121,7 +125,7 @@ static int reserve_backup_path(char *backup_path, size_t backup_path_size) {
     }
 
     for (int slot = 0; slot < FWUP_BACKUP_SLOTS; slot++) {
-        snprintf(backup_path, backup_path_size, FWUP_VOLUME "/ZZFWUP%02d.BAK", slot);
+        backup_slot_path(backup_path, backup_path_size, slot);
         fr = f_stat(backup_path, &info);
         if (fr == FR_NO_FILE) {
             return 1;
@@ -172,6 +176,28 @@ static uint16_t commit_temp_file(void) {
         printf("[FWUP] COMMIT kept previous file at %s\n", backup_path);
     }
     return FWUP_OK;
+}
+
+void fw_update_cleanup_backups(void) {
+    FRESULT fr = f_unlink(FWUP_BACKUP_PATH);
+    if (fr == FR_OK) {
+        printf("[FWUP] cleanup removed %s\n", FWUP_BACKUP_PATH);
+    } else if (fr != FR_NO_FILE) {
+        printf("[FWUP] cleanup unlink(%s) failed: %d\n",
+               FWUP_BACKUP_PATH, (int)fr);
+    }
+
+    for (int slot = 0; slot < FWUP_BACKUP_SLOTS; slot++) {
+        char backup_path[FWUP_PATH_MAX];
+        backup_slot_path(backup_path, sizeof(backup_path), slot);
+        fr = f_unlink(backup_path);
+        if (fr == FR_OK) {
+            printf("[FWUP] cleanup removed %s\n", backup_path);
+        } else if (fr != FR_NO_FILE) {
+            printf("[FWUP] cleanup unlink(%s) failed: %d\n",
+                   backup_path, (int)fr);
+        }
+    }
 }
 
 uint16_t fw_update_open(const char *name_buf) {
