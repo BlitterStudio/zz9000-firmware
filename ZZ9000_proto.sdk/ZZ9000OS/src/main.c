@@ -46,6 +46,7 @@ void Xil_AssertNonVoid() {}
 #include "usb.h"
 #include "sd_storage.h"
 #include "sd_boot.h"
+#include "fw_update.h"
 #include "interrupt.h"
 #include "bootrom.h"
 #include "core2.h"
@@ -140,6 +141,16 @@ static volatile int sd_read_pending = 0;
 static volatile int sd_write_pending = 0;
 
 uint16_t sd_boot_status = 0;
+
+/* Firmware-file push state (REG_ZZ_FWUP_*). Same BUSY-then-result
+ * protocol as the SD block path: writing REG_ZZ_FWUP_CMD sets
+ * fwup_pending + fwup_status = 0xFFFF, the main loop runs the FatFs
+ * call, then the m68k driver polls REG_ZZ_FWUP_STATUS. */
+#define FWUP_STATUS_BUSY 0xFFFF
+static uint16_t fwup_status = 0;
+static uint16_t fwup_pending_cmd = 0;
+static uint32_t fwup_pending_len = 0;
+static volatile int fwup_pending = 0;
 // debug things like individual reads/writes, greatly slowing the system down
 uint32_t debug_lowlevel = 0;
 
@@ -176,6 +187,12 @@ static void reset_storage_request_state() {
 	sd_read_pending = 0;
 	sd_write_pending = 0;
 	sd_boot_status = 0;
+
+	fw_update_reset();
+	fwup_status = 0;
+	fwup_pending = 0;
+	fwup_pending_cmd = 0;
+	fwup_pending_len = 0;
 }
 
 static void init_storage_services() {
@@ -343,6 +360,35 @@ int main() {
 		if (sd_write_pending) {
 			sd_status = sd_storage_write_blocks(sd_storage_write_block, sd_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
 			sd_write_pending = 0;
+		}
+
+		if (fwup_pending) {
+			uint16_t result;
+			switch (fwup_pending_cmd) {
+			case FWUP_CMD_OPEN:
+				/* Filename is staged in the shared buffer. Invalidate
+				 * the cache so we read the bytes the Amiga just wrote
+				 * over Zorro/AXI_HP, not stale cache lines. Cap at 256
+				 * bytes — far past the 64-char name limit, but cheap. */
+				Xil_DCacheInvalidateRange((UINTPTR)USB_BLOCK_STORAGE_ADDRESS, 256);
+				result = fw_update_open((const char*)USB_BLOCK_STORAGE_ADDRESS);
+				break;
+			case FWUP_CMD_WRITE:
+				result = fw_update_write((const void*)USB_BLOCK_STORAGE_ADDRESS,
+				                         fwup_pending_len);
+				break;
+			case FWUP_CMD_CLOSE:
+				result = fw_update_close();
+				break;
+			case FWUP_CMD_ABORT:
+				result = fw_update_abort();
+				break;
+			default:
+				result = FWUP_ERR_UNKNOWN;
+				break;
+			}
+			fwup_status = result;
+			fwup_pending = 0;
 		}
 
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
@@ -963,6 +1009,23 @@ int main() {
 					}
 					break;
 				}
+				case REG_ZZ_FWUP_LEN: {
+					/* Length of the next WRITE chunk, in bytes. Latched
+					 * separately so the m68k driver can stage data,
+					 * write LEN, then write CMD = WRITE in one go. */
+					fwup_pending_len = zdata & 0xFFFF;
+					break;
+				}
+				case REG_ZZ_FWUP_CMD: {
+					/* CMD register write triggers the operation. We
+					 * defer the actual FatFs call to the main loop so
+					 * the Zorro request can be ack'd promptly; the
+					 * driver polls REG_ZZ_FWUP_STATUS for completion. */
+					fwup_pending_cmd = zdata & 0xFFFF;
+					fwup_status = FWUP_STATUS_BUSY;
+					fwup_pending = 1;
+					break;
+				}
 				case REG_ZZ_SD_BOOT_CMD: {
 					/* BOOT_CMD encoding: bits [3:0] = cmd, [15:4] = chunk.
 					 * Single 16-bit register write from the m68k driver. */
@@ -1369,6 +1432,10 @@ int main() {
 					}
 					case REG_ZZ_SD_BOOT_STATUS: {
 						data = sd_boot_status << 16;
+						break;
+					}
+					case REG_ZZ_FWUP_STATUS: {
+						data = fwup_status << 16;
 						break;
 					}
 				}
