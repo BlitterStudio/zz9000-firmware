@@ -18,6 +18,7 @@
 #define FWUP_PATH_MAX    (FWUP_NAME_MAX + 4) /* "0:/" + name + NUL */
 #define FWUP_TEMP_PATH   FWUP_VOLUME "/ZZFWUP.TMP"
 #define FWUP_BACKUP_PATH FWUP_VOLUME "/ZZFWUP.BAK"
+#define FWUP_BACKUP_SLOTS 100
 
 static FIL  fwup_file;
 static int  fwup_open_flag = 0;
@@ -106,17 +107,48 @@ static void close_silent(void) {
     fwup_bytes_written = 0;
 }
 
+static int reserve_backup_path(char *backup_path, size_t backup_path_size) {
+    FILINFO info;
+    FRESULT fr = f_stat(FWUP_BACKUP_PATH, &info);
+    if (fr == FR_NO_FILE) {
+        strncpy(backup_path, FWUP_BACKUP_PATH, backup_path_size - 1);
+        backup_path[backup_path_size - 1] = '\0';
+        return 1;
+    }
+    if (fr != FR_OK) {
+        printf("[FWUP] COMMIT backup path check failed: %d\n", (int)fr);
+        return 0;
+    }
+
+    for (int slot = 0; slot < FWUP_BACKUP_SLOTS; slot++) {
+        snprintf(backup_path, backup_path_size, FWUP_VOLUME "/ZZFWUP%02d.BAK", slot);
+        fr = f_stat(backup_path, &info);
+        if (fr == FR_NO_FILE) {
+            return 1;
+        }
+        if (fr != FR_OK) {
+            printf("[FWUP] COMMIT backup slot check(%s) failed: %d\n",
+                   backup_path, (int)fr);
+            return 0;
+        }
+    }
+
+    printf("[FWUP] COMMIT no free backup path; remove old ZZFWUP*.BAK files\n");
+    return 0;
+}
+
 static uint16_t commit_temp_file(void) {
-    FRESULT fr = f_unlink(FWUP_BACKUP_PATH);
-    if (fr != FR_OK && fr != FR_NO_FILE) {
-        printf("[FWUP] COMMIT unlink stale backup failed: %d\n", (int)fr);
+    char backup_path[FWUP_PATH_MAX];
+    if (!reserve_backup_path(backup_path, sizeof(backup_path))) {
         return FWUP_ERR_CLOSE;
     }
 
     int have_backup = 0;
-    fr = f_rename(fwup_path, FWUP_BACKUP_PATH);
+    FRESULT fr = f_rename(fwup_path, backup_path);
     if (fr == FR_OK) {
         have_backup = 1;
+        printf("[FWUP] COMMIT saved previous %s as %s\n",
+               fwup_path, backup_path);
     } else if (fr != FR_NO_FILE) {
         printf("[FWUP] COMMIT backup(%s) failed: %d\n", fwup_path, (int)fr);
         return FWUP_ERR_CLOSE;
@@ -127,7 +159,7 @@ static uint16_t commit_temp_file(void) {
         printf("[FWUP] COMMIT rename(%s -> %s) failed: %d\n",
                FWUP_TEMP_PATH, fwup_path, (int)fr);
         if (have_backup) {
-            FRESULT fr_restore = f_rename(FWUP_BACKUP_PATH, fwup_path);
+            FRESULT fr_restore = f_rename(backup_path, fwup_path);
             if (fr_restore != FR_OK) {
                 printf("[FWUP] COMMIT restore(%s) failed: %d\n",
                        fwup_path, (int)fr_restore);
@@ -137,10 +169,7 @@ static uint16_t commit_temp_file(void) {
     }
 
     if (have_backup) {
-        fr = f_unlink(FWUP_BACKUP_PATH);
-        if (fr != FR_OK && fr != FR_NO_FILE) {
-            printf("[FWUP] COMMIT cleanup backup failed: %d\n", (int)fr);
-        }
+        printf("[FWUP] COMMIT kept previous file at %s\n", backup_path);
     }
     return FWUP_OK;
 }
