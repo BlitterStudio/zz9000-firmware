@@ -1065,6 +1065,11 @@ module MNTZorro_v0_1_S00_AXI
   reg videocap_interlace;
   reg videocap_ntsc;
   reg [7:0] videocap_hs_pulse_width;
+  // Maximum HSYNC pulse width observed in the current field; reset at frame
+  // boundary. Stable per-frame reading is required for the diagnostic
+  // exposed via REG_ZZ_VIDEOCAP_STATS — a raw snapshot of pulse_width
+  // varies pulse-by-pulse and would be misleading under genlock/CSYNC.
+  reg [7:0] videocap_hs_pulse_width_max;
   reg [9:0] videocap_vsync_x = 0;
 
   localparam [9:0] VIDEOCAP_INTERLACE_PHASE_DELTA = 10'h80;
@@ -1188,6 +1193,12 @@ module MNTZorro_v0_1_S00_AXI
     end else if (videocap_hs=='b111111)
       videocap_hs_pulse_width<=0;
 
+    // Latch peak pulse width seen since last frame boundary. The frame-
+    // boundary blocks below reset this; their assignment comes later in
+    // the always block, so its non-blocking write wins on the reset cycle.
+    if (videocap_hs_pulse_width > videocap_hs_pulse_width_max)
+      videocap_hs_pulse_width_max <= videocap_hs_pulse_width;
+
 `ifdef VARIANT_ZZ9500
     // on A500, HSYNC is really CSYNC and we can recognize vertical sync
     // by looking at the pulse width of it
@@ -1228,6 +1239,8 @@ module MNTZorro_v0_1_S00_AXI
         videocap_y2 <= 0;
         videocap_y3 <= 0;
       end
+
+      videocap_hs_pulse_width_max <= 0;
 `else
     // with videoslot machines, we have a real VSYNC to work with
     if (videocap_vs[6:1]=='b111000) begin
@@ -1268,6 +1281,8 @@ module MNTZorro_v0_1_S00_AXI
         videocap_y2 <= 0;
         videocap_y3 <= 0;
       end
+
+      videocap_hs_pulse_width_max <= 0;
 `endif
 
       if (videocap_y2!=0) begin
@@ -1397,11 +1412,13 @@ module MNTZorro_v0_1_S00_AXI
 
   // Diagnostic snapshots of raw videocap state for firmware/host readout
   // (issue #11 genlock split-screen investigation).
-  // 2-FF synchronizer from e7m_shifted domain to S_AXI_ACLK domain.
-  reg [9:0] videocap_ymax_diag_a;
-  reg [9:0] videocap_ymax_diag_b;
-  reg [7:0] videocap_hs_pw_diag_a;
-  reg [7:0] videocap_hs_pw_diag_b;
+  // 2-FF synchronizer from e7m_shifted domain to S_AXI_ACLK domain. The
+  // ASYNC_REG attribute tells Vivado to place the pair adjacent and treat
+  // the path as a CDC for timing analysis.
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_ymax_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_ymax_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_diag_b;
 
   always @(posedge S_AXI_ACLK) begin
     // VIDEOCAP
@@ -1409,10 +1426,14 @@ module MNTZorro_v0_1_S00_AXI
     // pass interlace mode to video control block
     video_control_interlace <= videocap_interlace;
 
-    // sync raw videocap counters into AXI clock domain for diagnostic readout
+    // sync raw videocap counters into AXI clock domain for diagnostic readout.
+    // Pulse width crosses as the top 2 bits of the per-field maximum, so the
+    // reading reflects "did anything wide happen this field" rather than the
+    // value of the most recent pulse (which under genlock CSYNC varies pulse
+    // to pulse).
     videocap_ymax_diag_a  <= videocap_ymax;
     videocap_ymax_diag_b  <= videocap_ymax_diag_a;
-    videocap_hs_pw_diag_a <= videocap_hs_pulse_width;
+    videocap_hs_pw_diag_a <= videocap_hs_pulse_width_max[7:6];
     videocap_hs_pw_diag_b <= videocap_hs_pw_diag_a;
 
     videocap_pitch_sync <= videocap_pitch;
@@ -2481,11 +2502,12 @@ module MNTZorro_v0_1_S00_AXI
     //          `-- 24                   `-- 23         `-- 22 `-- 7:0
 
     // Bits 19:8 expose live videocap counters for diagnostics (issue #11):
-    //   bits 19:18 = videocap_hs_pulse_width[7:6] (2-bit width tier)
-    //   bits 17:8  = videocap_ymax[9:0]           (lines per detected field)
+    //   bits 19:18 = top 2 bits of the per-field max HSYNC pulse width
+    //                (0=short, 3=very wide)
+    //   bits 17:8  = videocap_ymax[9:0] (lines per detected field)
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
                 video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank,
-                videocap_hs_pw_diag_b[7:6], videocap_ymax_diag_b[9:0], zorro_state};
+                videocap_hs_pw_diag_b, videocap_ymax_diag_b, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;
