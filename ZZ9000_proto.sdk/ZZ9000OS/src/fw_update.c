@@ -18,8 +18,6 @@
 #define FWUP_PATH_MAX    (FWUP_NAME_MAX + 4) /* "0:/" + name + NUL */
 #define FWUP_TEMP_PATH   FWUP_VOLUME "/ZZFWUP.TMP"
 #define FWUP_DISCARD_PATH FWUP_VOLUME "/ZZFWUP.DEL"
-#define FWUP_LEGACY_BACKUP_PATH FWUP_VOLUME "/ZZFWUP.BAK"
-#define FWUP_LEGACY_BACKUP_SLOTS 100
 #define FWUP_DISCARD_SLOTS 8
 
 static FIL  fwup_file;
@@ -56,13 +54,6 @@ static int ascii_iprefix(const char *s, const char *prefix) {
 
 static int is_reserved_name(const char *name) {
     return ascii_iprefix(name, "ZZFWUP");
-}
-
-static void legacy_backup_slot_path(char *backup_path,
-                                    size_t backup_path_size,
-                                    int slot) {
-    snprintf(backup_path, backup_path_size, FWUP_VOLUME "/ZZFWUP%02d.BAK",
-             slot);
 }
 
 static void discard_slot_path(char *discard_path,
@@ -316,19 +307,6 @@ void fw_update_cleanup_backups(void) {
         }
     }
 
-    fr = f_unlink(FWUP_LEGACY_BACKUP_PATH);
-    if (fr == FR_OK) {
-        printf("[FWUP] cleanup removed legacy %s\n", FWUP_LEGACY_BACKUP_PATH);
-    }
-
-    for (int slot = 0; slot < FWUP_LEGACY_BACKUP_SLOTS; slot++) {
-        char legacy_path[FWUP_PATH_MAX];
-        legacy_backup_slot_path(legacy_path, sizeof(legacy_path), slot);
-        fr = f_unlink(legacy_path);
-        if (fr == FR_OK) {
-            printf("[FWUP] cleanup removed legacy %s\n", legacy_path);
-        }
-    }
 }
 
 uint16_t fw_update_open(const char *name_buf) {

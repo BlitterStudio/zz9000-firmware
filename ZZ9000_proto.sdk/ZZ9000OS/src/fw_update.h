@@ -62,8 +62,8 @@ uint16_t fw_update_write(const void *buf, uint32_t len);
 uint16_t fw_update_close(void);
 
 /* Deletes stale internal discard files left when replacing an existing
- * visible .bak backup, plus legacy ZZFWUP*.BAK files from older builds.
- * Intended for boot/reset-time cleanup, not during the live CLOSE path. */
+ * visible .bak backup. Intended for boot/reset-time cleanup, not during
+ * the live CLOSE path. */
 void fw_update_cleanup_backups(void);
 
 /* Closes + f_unlink the temporary file. Safe to call from any state. */
