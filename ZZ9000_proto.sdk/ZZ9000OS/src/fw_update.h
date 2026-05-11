@@ -61,9 +61,9 @@ uint16_t fw_update_write(const void *buf, uint32_t len);
 /* f_sync + f_close. After CLOSE the state machine returns to IDLE. */
 uint16_t fw_update_close(void);
 
-/* Deletes stale backup files left by previously successful updates.
- * Intended for boot/reset-time cleanup after the new BOOT.bin is
- * already running, not during the live CLOSE path. */
+/* Deletes stale internal discard files left when replacing an existing
+ * visible .bak backup, plus legacy ZZFWUP*.BAK files from older builds.
+ * Intended for boot/reset-time cleanup, not during the live CLOSE path. */
 void fw_update_cleanup_backups(void);
 
 /* Closes + f_unlink the temporary file. Safe to call from any state. */

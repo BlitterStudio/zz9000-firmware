@@ -17,8 +17,10 @@
 #define FWUP_NAME_MAX    64
 #define FWUP_PATH_MAX    (FWUP_NAME_MAX + 4) /* "0:/" + name + NUL */
 #define FWUP_TEMP_PATH   FWUP_VOLUME "/ZZFWUP.TMP"
-#define FWUP_BACKUP_PATH FWUP_VOLUME "/ZZFWUP.BAK"
-#define FWUP_BACKUP_SLOTS 100
+#define FWUP_DISCARD_PATH FWUP_VOLUME "/ZZFWUP.DEL"
+#define FWUP_LEGACY_BACKUP_PATH FWUP_VOLUME "/ZZFWUP.BAK"
+#define FWUP_LEGACY_BACKUP_SLOTS 100
+#define FWUP_DISCARD_SLOTS 8
 
 static FIL  fwup_file;
 static int  fwup_open_flag = 0;
@@ -40,12 +42,34 @@ static int ascii_ieq(const char *a, const char *b) {
     return *a == '\0' && *b == '\0';
 }
 
-static int is_reserved_name(const char *name) {
-    return ascii_ieq(name, "ZZFWUP.TMP") || ascii_ieq(name, "ZZFWUP.BAK");
+static int ascii_iprefix(const char *s, const char *prefix) {
+    while (*prefix) {
+        if (ascii_upper((unsigned char)*s) !=
+            ascii_upper((unsigned char)*prefix)) {
+            return 0;
+        }
+        s++;
+        prefix++;
+    }
+    return 1;
 }
 
-static void backup_slot_path(char *backup_path, size_t backup_path_size, int slot) {
-    snprintf(backup_path, backup_path_size, FWUP_VOLUME "/ZZFWUP%02d.BAK", slot);
+static int is_reserved_name(const char *name) {
+    return ascii_iprefix(name, "ZZFWUP");
+}
+
+static void legacy_backup_slot_path(char *backup_path,
+                                    size_t backup_path_size,
+                                    int slot) {
+    snprintf(backup_path, backup_path_size, FWUP_VOLUME "/ZZFWUP%02d.BAK",
+             slot);
+}
+
+static void discard_slot_path(char *discard_path,
+                              size_t discard_path_size,
+                              int slot) {
+    snprintf(discard_path, discard_path_size, FWUP_VOLUME "/ZZFWUP%02d.DEL",
+             slot);
 }
 
 static uint16_t map_open_error(FRESULT fr) {
@@ -111,50 +135,132 @@ static void close_silent(void) {
     fwup_bytes_written = 0;
 }
 
-static int reserve_backup_path(char *backup_path, size_t backup_path_size) {
-    FILINFO info;
-    FRESULT fr = f_stat(FWUP_BACKUP_PATH, &info);
-    if (fr == FR_NO_FILE) {
-        strncpy(backup_path, FWUP_BACKUP_PATH, backup_path_size - 1);
-        backup_path[backup_path_size - 1] = '\0';
-        return 1;
+static int make_backup_path(const char *target_path,
+                            char *backup_path,
+                            size_t backup_path_size) {
+    const char *name = target_path;
+    if (name[0] == '0' && name[1] == ':' && name[2] == '/') {
+        name += 3;
     }
-    if (fr != FR_OK) {
-        printf("[FWUP] COMMIT backup path check failed: %d\n", (int)fr);
+
+    size_t len = strlen(name);
+    if (len == 0 || len > FWUP_NAME_MAX || backup_path_size < FWUP_PATH_MAX) {
         return 0;
     }
 
-    for (int slot = 0; slot < FWUP_BACKUP_SLOTS; slot++) {
-        backup_slot_path(backup_path, backup_path_size, slot);
-        fr = f_stat(backup_path, &info);
+    char backup_name[FWUP_NAME_MAX + 1];
+    memcpy(backup_name, name, len + 1);
+
+    char *dot = NULL;
+    for (char *p = backup_name; *p; p++) {
+        if (*p == '.') dot = p;
+    }
+
+    const char *ext = (dot && ascii_ieq(dot + 1, "bak")) ? "old" : "bak";
+    size_t base_len = dot ? (size_t)(dot - backup_name) : len;
+    if (dot && base_len + 4 <= FWUP_NAME_MAX) {
+        backup_name[base_len] = '.';
+        backup_name[base_len + 1] = ext[0];
+        backup_name[base_len + 2] = ext[1];
+        backup_name[base_len + 3] = ext[2];
+        backup_name[base_len + 4] = '\0';
+    } else if (!dot && len + 4 <= FWUP_NAME_MAX) {
+        backup_name[len] = '.';
+        backup_name[len + 1] = ext[0];
+        backup_name[len + 2] = ext[1];
+        backup_name[len + 3] = ext[2];
+        backup_name[len + 4] = '\0';
+    } else {
+        backup_name[FWUP_NAME_MAX - 4] = '.';
+        backup_name[FWUP_NAME_MAX - 3] = ext[0];
+        backup_name[FWUP_NAME_MAX - 2] = ext[1];
+        backup_name[FWUP_NAME_MAX - 1] = ext[2];
+        backup_name[FWUP_NAME_MAX] = '\0';
+    }
+
+    snprintf(backup_path, backup_path_size, FWUP_VOLUME "/%s", backup_name);
+    return !ascii_ieq(target_path, backup_path);
+}
+
+static int reserve_discard_path(char *discard_path, size_t discard_path_size) {
+    FILINFO info;
+    FRESULT fr = f_stat(FWUP_DISCARD_PATH, &info);
+    if (fr == FR_NO_FILE) {
+        strncpy(discard_path, FWUP_DISCARD_PATH, discard_path_size - 1);
+        discard_path[discard_path_size - 1] = '\0';
+        return 1;
+    }
+    if (fr != FR_OK) {
+        printf("[FWUP] COMMIT discard path check failed: %d\n", (int)fr);
+        return 0;
+    }
+
+    for (int slot = 0; slot < FWUP_DISCARD_SLOTS; slot++) {
+        discard_slot_path(discard_path, discard_path_size, slot);
+        fr = f_stat(discard_path, &info);
         if (fr == FR_NO_FILE) {
             return 1;
         }
         if (fr != FR_OK) {
-            printf("[FWUP] COMMIT backup slot check(%s) failed: %d\n",
-                   backup_path, (int)fr);
+            printf("[FWUP] COMMIT discard slot check(%s) failed: %d\n",
+                   discard_path, (int)fr);
             return 0;
         }
     }
 
-    printf("[FWUP] COMMIT no free backup path; remove old ZZFWUP*.BAK files\n");
+    printf("[FWUP] COMMIT no free discard path; reboot to clean ZZFWUP*.DEL\n");
     return 0;
 }
 
 static uint16_t commit_temp_file(void) {
     char backup_path[FWUP_PATH_MAX];
-    if (!reserve_backup_path(backup_path, sizeof(backup_path))) {
+    if (!make_backup_path(fwup_path, backup_path, sizeof(backup_path))) {
+        printf("[FWUP] COMMIT cannot derive backup path for %s\n", fwup_path);
         return FWUP_ERR_CLOSE;
     }
 
+    FILINFO info;
     int have_backup = 0;
-    FRESULT fr = f_rename(fwup_path, backup_path);
+    int displaced_backup = 0;
+    char discard_path[FWUP_PATH_MAX];
+    discard_path[0] = '\0';
+
+    FRESULT fr = f_stat(fwup_path, &info);
     if (fr == FR_OK) {
-        have_backup = 1;
-        printf("[FWUP] COMMIT saved previous %s as %s\n",
-               fwup_path, backup_path);
+        fr = f_stat(backup_path, &info);
+        if (fr == FR_OK) {
+            if (!reserve_discard_path(discard_path, sizeof(discard_path))) {
+                return FWUP_ERR_CLOSE;
+            }
+            fr = f_rename(backup_path, discard_path);
+            if (fr != FR_OK) {
+                printf("[FWUP] COMMIT displace backup(%s -> %s) failed: %d\n",
+                       backup_path, discard_path, (int)fr);
+                return FWUP_ERR_CLOSE;
+            }
+            displaced_backup = 1;
+        } else if (fr != FR_NO_FILE) {
+            printf("[FWUP] COMMIT backup check(%s) failed: %d\n",
+                   backup_path, (int)fr);
+            return FWUP_ERR_CLOSE;
+        }
+
+        fr = f_rename(fwup_path, backup_path);
+        if (fr == FR_OK) {
+            have_backup = 1;
+            printf("[FWUP] COMMIT saved previous %s as %s\n",
+                   fwup_path, backup_path);
+        } else {
+            printf("[FWUP] COMMIT backup(%s -> %s) failed: %d\n",
+                   fwup_path, backup_path, (int)fr);
+            if (displaced_backup) {
+                f_rename(discard_path, backup_path);
+            }
+            return FWUP_ERR_CLOSE;
+        }
     } else if (fr != FR_NO_FILE) {
-        printf("[FWUP] COMMIT backup(%s) failed: %d\n", fwup_path, (int)fr);
+        printf("[FWUP] COMMIT target check(%s) failed: %d\n",
+               fwup_path, (int)fr);
         return FWUP_ERR_CLOSE;
     }
 
@@ -169,33 +275,58 @@ static uint16_t commit_temp_file(void) {
                        fwup_path, (int)fr_restore);
             }
         }
+        if (displaced_backup) {
+            FRESULT fr_restore = f_rename(discard_path, backup_path);
+            if (fr_restore != FR_OK) {
+                printf("[FWUP] COMMIT restore backup(%s) failed: %d\n",
+                       backup_path, (int)fr_restore);
+            }
+        }
         return FWUP_ERR_CLOSE;
     }
 
     if (have_backup) {
         printf("[FWUP] COMMIT kept previous file at %s\n", backup_path);
     }
+    if (displaced_backup) {
+        printf("[FWUP] COMMIT old backup queued for cleanup at %s\n",
+               discard_path);
+    }
     return FWUP_OK;
 }
 
 void fw_update_cleanup_backups(void) {
-    FRESULT fr = f_unlink(FWUP_BACKUP_PATH);
+    FRESULT fr = f_unlink(FWUP_DISCARD_PATH);
     if (fr == FR_OK) {
-        printf("[FWUP] cleanup removed %s\n", FWUP_BACKUP_PATH);
+        printf("[FWUP] cleanup removed %s\n", FWUP_DISCARD_PATH);
     } else if (fr != FR_NO_FILE) {
         printf("[FWUP] cleanup unlink(%s) failed: %d\n",
-               FWUP_BACKUP_PATH, (int)fr);
+               FWUP_DISCARD_PATH, (int)fr);
     }
 
-    for (int slot = 0; slot < FWUP_BACKUP_SLOTS; slot++) {
-        char backup_path[FWUP_PATH_MAX];
-        backup_slot_path(backup_path, sizeof(backup_path), slot);
-        fr = f_unlink(backup_path);
+    for (int slot = 0; slot < FWUP_DISCARD_SLOTS; slot++) {
+        char discard_path[FWUP_PATH_MAX];
+        discard_slot_path(discard_path, sizeof(discard_path), slot);
+        fr = f_unlink(discard_path);
         if (fr == FR_OK) {
-            printf("[FWUP] cleanup removed %s\n", backup_path);
+            printf("[FWUP] cleanup removed %s\n", discard_path);
         } else if (fr != FR_NO_FILE) {
             printf("[FWUP] cleanup unlink(%s) failed: %d\n",
-                   backup_path, (int)fr);
+                   discard_path, (int)fr);
+        }
+    }
+
+    fr = f_unlink(FWUP_LEGACY_BACKUP_PATH);
+    if (fr == FR_OK) {
+        printf("[FWUP] cleanup removed legacy %s\n", FWUP_LEGACY_BACKUP_PATH);
+    }
+
+    for (int slot = 0; slot < FWUP_LEGACY_BACKUP_SLOTS; slot++) {
+        char legacy_path[FWUP_PATH_MAX];
+        legacy_backup_slot_path(legacy_path, sizeof(legacy_path), slot);
+        fr = f_unlink(legacy_path);
+        if (fr == FR_OK) {
+            printf("[FWUP] cleanup removed legacy %s\n", legacy_path);
         }
     }
 }
