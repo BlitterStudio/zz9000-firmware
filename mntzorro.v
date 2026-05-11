@@ -1395,11 +1395,25 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] vc_saveaddr2;
   reg [31:0] vc_saveaddr3;
 
+  // Diagnostic snapshots of raw videocap state for firmware/host readout
+  // (issue #11 genlock split-screen investigation).
+  // 2-FF synchronizer from e7m_shifted domain to S_AXI_ACLK domain.
+  reg [9:0] videocap_ymax_diag_a;
+  reg [9:0] videocap_ymax_diag_b;
+  reg [7:0] videocap_hs_pw_diag_a;
+  reg [7:0] videocap_hs_pw_diag_b;
+
   always @(posedge S_AXI_ACLK) begin
     // VIDEOCAP
 
     // pass interlace mode to video control block
     video_control_interlace <= videocap_interlace;
+
+    // sync raw videocap counters into AXI clock domain for diagnostic readout
+    videocap_ymax_diag_a  <= videocap_ymax;
+    videocap_ymax_diag_b  <= videocap_ymax_diag_a;
+    videocap_hs_pw_diag_a <= videocap_hs_pulse_width;
+    videocap_hs_pw_diag_b <= videocap_hs_pw_diag_a;
 
     videocap_pitch_sync <= videocap_pitch;
 
@@ -2466,8 +2480,12 @@ module MNTZorro_v0_1_S00_AXI
     //            video_control_interlace, videocap_mode, 15'b0, zorro_state};
     //          `-- 24                   `-- 23         `-- 22 `-- 7:0
 
+    // Bits 19:8 expose live videocap counters for diagnostics (issue #11):
+    //   bits 19:18 = videocap_hs_pulse_width[7:6] (2-bit width tier)
+    //   bits 17:8  = videocap_ymax[9:0]           (lines per detected field)
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
-                video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank, 12'b0, zorro_state};
+                video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank,
+                videocap_hs_pw_diag_b[7:6], videocap_ymax_diag_b[9:0], zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;
