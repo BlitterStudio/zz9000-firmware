@@ -1283,15 +1283,15 @@ int main() {
 
 				switch (zaddr32) {
 					case REG_ZZ_VBLANK_STATUS:
-						data = (zstate_raw & (1 << 21));
-						break;
-					case REG_ZZ_VIDEOCAP_STATS:
-						// Diagnostic readout for genlock split-screen (issue #11).
-						// Format (low 16 bits returned at 0x4E):
-						//   [9:0]   videocap_ymax  (lines per detected field)
-						//   [11:10] videocap_hs_pulse_width >> 6 (0=short, 3=very wide)
-						//   [15:12] reserved (0)
-						data = (zstate_raw >> 8) & 0xFFF;
+						// zaddr32 strips bit 1, so this case also serves
+						// REG_ZZ_VIDEOCAP_STATS (0x4E) on the lower 16 bits.
+						//   0x4C (upper): vblank flag at bit 21
+						//   0x4E (lower): diagnostic packing (issue #11)
+						//     [9:0]   videocap_ymax  (lines per detected field)
+						//     [11:10] videocap_hs_pulse_width >> 6 (0=short, 3=very wide)
+						//     [15:12] reserved (0)
+						data = (zstate_raw & (1 << 21))
+						     | ((zstate_raw >> 8) & 0xFFF);
 						break;
 					case REG_ZZ_ARM_EV_SERIAL:
 						data = arm_app_output_event();
