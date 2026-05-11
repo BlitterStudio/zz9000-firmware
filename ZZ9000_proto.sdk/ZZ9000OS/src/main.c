@@ -1434,8 +1434,16 @@ int main() {
 						data = sd_boot_status << 16;
 						break;
 					}
-					case REG_ZZ_FWUP_STATUS: {
-						data = fwup_status << 16;
+					case REG_ZZ_FWUP_LEN: {
+						/* REG_ZZ_FWUP_STATUS (0xCE) shares its 4-byte
+						 * read group with REG_ZZ_FWUP_LEN (0xCC): the
+						 * switch key above is zaddr & 0xfffffffc, so a
+						 * read of 0xCE lands on this case. Put status
+						 * in the low 16 bits — a Z2 read of 0xCE then
+						 * picks the lower half, and a Z3 read of 0xCC
+						 * picks the full word with status in the low
+						 * half (LEN is write-only, upper half ignored). */
+						data = fwup_status;
 						break;
 					}
 				}
