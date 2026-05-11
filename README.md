@@ -35,6 +35,9 @@ drives it. Companion AmigaOS drivers live in
   straight from the shared mailbox. Previously unused on the card.
 - **SD boot** — HDF-on-FAT storage backend and an autoboot ROM path, so
   the Amiga can boot from an image file on the ZZ9000's microSD.
+- **Amiga-side firmware/file updates** — FWUP register protocol for
+  pushing `BOOT.bin` or other root-level files onto the ZZ9000 FAT32
+  microSD from AmigaOS, without removing the card.
 - **Videocap fixes** — NTSC black-screen on RTG→capture switch, interlace
   detection hardening, big-sprite 2×2 doubling, `double_sprite` /
   `hires_sprite` flag propagation through the Z2 and Z3 sprite paths.
@@ -97,6 +100,20 @@ Copy `bootimage_work/BOOT.bin` (or the tagged `BOOT-<tag>.bin` from a
 release) to the ZZ9000's microSD — rename per your QSPI/SD boot setup —
 reseat, and power-cycle the Amiga.
 
+Firmware builds with FWUP support can also receive a new `BOOT.bin`
+from AmigaOS using the `ZZFwUpdate` tool from
+[zz9000-drivers](https://github.com/BlitterStudio/zz9000-drivers).
+The tool writes through the ZZ9000 register window to the FAT32
+microSD card, so the card can stay installed. The firmware stages the
+upload through a temporary file, then replaces the target on close; if
+an existing file is replaced, it is kept as a same-name `.bak` backup
+such as `BOOT.bak`.
+
+After replacing `BOOT.bin`, power-cycle the Amiga so the ZZ9000 boots
+from the new image. FWUP accepts flat root-level filenames only: up to
+64 characters, simple ASCII letters/digits plus `.`, `_`, and `-`, with
+no path separators.
+
 For release downloads, use the ZIP variant for the machine: `zorro3` for
 A3000/A4000, `zorro3-nofast` for A3000/A4000 without Zorro RAM,
 `zorro2` or `zorro2-2mb` for A2000, `a500` or `a500-2mb` for A500 with
@@ -155,8 +172,9 @@ Schematics are in the manual (PDF):
   Zynq AXI stability fixes (USBMODE_SDIS, ULPI dynamic XCVR switching,
   BURSTSIZE, TXFIFO threshold, direct-DMA bulk transfers from the shared
   mailbox) — Dimitris Panokostas.
-- **SD boot** (HDF-on-FAT storage backend, autoboot ROM), videocap /
-  sprite fixes, GCC 15 build, and CI pipeline — Dimitris Panokostas.
+- **SD boot** (HDF-on-FAT storage backend, autoboot ROM), FWUP file-push
+  protocol, videocap / sprite fixes, GCC 15 build, and CI pipeline —
+  Dimitris Panokostas.
 - **Upstream firmware sources** (pre-fork) — see the fork notice above.
 
 Per-file copyright notices are preserved in each source file.
