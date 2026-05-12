@@ -19,19 +19,17 @@
  */
 
 // ZORRO2/3 switch
-//`define ZORRO2 
+//`define ZORRO2
 `define ZORRO3
 
 // use only together with ZORRO2:
 //`define VARIANT_ZZ9500        // uses Denise adapter/A500 specific video capture
 //`define VARIANT_2MB           // uses only 2MB address space
-`define VARIANT_SUPERDENISE   // for A500+ and super denise
+//`define VARIANT_SUPERDENISE   // for A500+ and super denise
 
 //`define VARIANT_FW20
 `define VARIANT_Z3_FASTRAM
-`ifndef VARIANT_DISABLE_AUTOBOOT
 `define VARIANT_AUTOBOOT        // enable autoboot ROM
-`endif
 
 `define C_S_AXI_DATA_WIDTH 32
 `define C_S_AXI_ADDR_WIDTH 5
@@ -1065,6 +1063,13 @@ module MNTZorro_v0_1_S00_AXI
   reg videocap_interlace;
   reg videocap_ntsc;
   reg [7:0] videocap_hs_pulse_width;
+  // Per-field max/min HSYNC pulse width, reset at frame boundary. Max
+  // captures the widest pulse seen; min captures the narrowest. Comparing
+  // them tells genlock failure modes apart: max-only-wide => some pulses
+  // got wide (CSYNC during VBI), both-wide => every pulse is wide
+  // (polarity inversion / EXTSYNC retiming).
+  reg [7:0] videocap_hs_pulse_width_max;
+  reg [7:0] videocap_hs_pulse_width_min = 8'hff;
   reg [9:0] videocap_vsync_x = 0;
 
   localparam [9:0] VIDEOCAP_INTERLACE_PHASE_DELTA = 10'h80;
@@ -1185,8 +1190,22 @@ module MNTZorro_v0_1_S00_AXI
     if (videocap_hs==0) begin
       if (videocap_hs_pulse_width<'hff)
         videocap_hs_pulse_width<=videocap_hs_pulse_width+1;
-    end else if (videocap_hs=='b111111)
+    end else if (videocap_hs=='b111111) begin
       videocap_hs_pulse_width<=0;
+      // The just-ended pulse's final width is still in pulse_width on
+      // this cycle (non-blocking reset takes effect next cycle), so
+      // capture it for the per-field min latch. Sampling continuously
+      // like the max latch does would lock min to 0 because pulse_width
+      // starts each pulse at 0.
+      if (videocap_hs_pulse_width < videocap_hs_pulse_width_min)
+        videocap_hs_pulse_width_min <= videocap_hs_pulse_width;
+    end
+
+    // Latch peak pulse width seen since last frame boundary. The frame-
+    // boundary blocks below reset this; their assignment comes later in
+    // the always block, so its non-blocking write wins on the reset cycle.
+    if (videocap_hs_pulse_width > videocap_hs_pulse_width_max)
+      videocap_hs_pulse_width_max <= videocap_hs_pulse_width;
 
 `ifdef VARIANT_ZZ9500
     // on A500, HSYNC is really CSYNC and we can recognize vertical sync
@@ -1228,6 +1247,9 @@ module MNTZorro_v0_1_S00_AXI
         videocap_y2 <= 0;
         videocap_y3 <= 0;
       end
+
+      videocap_hs_pulse_width_max <= 0;
+      videocap_hs_pulse_width_min <= 8'hff;
 `else
     // with videoslot machines, we have a real VSYNC to work with
     if (videocap_vs[6:1]=='b111000) begin
@@ -1268,6 +1290,9 @@ module MNTZorro_v0_1_S00_AXI
         videocap_y2 <= 0;
         videocap_y3 <= 0;
       end
+
+      videocap_hs_pulse_width_max <= 0;
+      videocap_hs_pulse_width_min <= 8'hff;
 `endif
 
       if (videocap_y2!=0) begin
@@ -1395,11 +1420,35 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] vc_saveaddr2;
   reg [31:0] vc_saveaddr3;
 
+  // Diagnostic snapshots of raw videocap state for firmware/host readout
+  // (issue #11 genlock split-screen investigation).
+  // 2-FF synchronizer from e7m_shifted domain to S_AXI_ACLK domain. The
+  // ASYNC_REG attribute tells Vivado to place the pair adjacent and treat
+  // the path as a CDC for timing analysis.
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_ymax_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_ymax_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_min_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_min_diag_b;
+
   always @(posedge S_AXI_ACLK) begin
     // VIDEOCAP
 
     // pass interlace mode to video control block
     video_control_interlace <= videocap_interlace;
+
+    // sync raw videocap counters into AXI clock domain for diagnostic readout.
+    // Pulse width crosses as the top 2 bits of the per-field maximum, so the
+    // reading reflects "did anything wide happen this field" rather than the
+    // value of the most recent pulse (which under genlock CSYNC varies pulse
+    // to pulse).
+    videocap_ymax_diag_a      <= videocap_ymax;
+    videocap_ymax_diag_b      <= videocap_ymax_diag_a;
+    videocap_hs_pw_diag_a     <= videocap_hs_pulse_width_max[7:6];
+    videocap_hs_pw_diag_b     <= videocap_hs_pw_diag_a;
+    videocap_hs_pw_min_diag_a <= videocap_hs_pulse_width_min[7:6];
+    videocap_hs_pw_min_diag_b <= videocap_hs_pw_min_diag_a;
 
     videocap_pitch_sync <= videocap_pitch;
 
@@ -2466,8 +2515,19 @@ module MNTZorro_v0_1_S00_AXI
     //            video_control_interlace, videocap_mode, 15'b0, zorro_state};
     //          `-- 24                   `-- 23         `-- 22 `-- 7:0
 
+    // Bits 23:8 expose live videocap counters for diagnostics (issue #11).
+    // Comparing max and min separates "every pulse wide" (polarity flip /
+    // EXTSYNC retiming) from "some pulses wide" (CSYNC pulses in VBI):
+    //   bits 23:22 = top 2 bits of per-field MIN HSYNC pulse width
+    //   bits 19:18 = top 2 bits of per-field MAX HSYNC pulse width
+    //                (0=short, 3=very wide)
+    //   bits 17:8  = videocap_ymax[9:0] (lines per detected field)
+    // Note: pw_min replaces videocap_ntsc/videocap_mode in bits 23:22.
+    // Those fields were not consumed by firmware; vblank remains at bit
+    // 21 so the existing driver/firmware vblank read is unaffected.
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
-                video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank, 12'b0, zorro_state};
+                video_control_interlace, videocap_hs_pw_min_diag_b, video_control_vblank, video_control_hblank,
+                videocap_hs_pw_diag_b, videocap_ymax_diag_b, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;
