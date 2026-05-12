@@ -1181,12 +1181,13 @@ module MNTZorro_v0_1_S00_AXI
      .PWRDWN(E7M_PWRDWN),
      .RST(E7M_RESET));
 
-  // Polarity-aware HSYNC pattern matchers.  The 6-cycle "stable" patterns
-  // and 3-cycle-delayed edge patterns mirror the pre-existing matchers for
-  // the inverted-polarity case.  videocap_hs is [6:0] with bit[0] newest.
+  // Polarity-aware HSYNC pattern matchers.  videocap_hs is [6:0] with
+  // bit[0] newest; "stable" fires every cycle the input is at the sync
+  // level (so the pulse-width counter ticks across the whole tip), while
+  // "end" fires once 3 cycles after the trailing edge.
   wire videocap_hs_sync_stable =
-      videocap_hs_inverted ? (videocap_hs == 7'b0111111)   // 6 high samples after a 0
-                           : (videocap_hs == 7'b0000000);  // 7 stable low samples
+      videocap_hs_inverted ? (videocap_hs == 7'b1111111)   // stably high
+                           : (videocap_hs == 7'b0000000);  // stably low
   wire videocap_hs_sync_end =
       videocap_hs_inverted ? (videocap_hs[6:1] == 6'b111000)   // 3-cycle-old falling edge
                            : (videocap_hs[6:1] == 6'b000111);  // 3-cycle-old rising edge
