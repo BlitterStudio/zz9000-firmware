@@ -88,6 +88,7 @@ C_SRCS = \
 	$(SRC_DIR)/usb/usb.c \
 	$(SRC_DIR)/sd_storage.c \
 	$(SRC_DIR)/sd_boot.c \
+	$(SRC_DIR)/fw_update.c \
 	$(SRC_DIR)/usb_proxy.c \
 	$(SRC_DIR)/newlib_compat.c
 
