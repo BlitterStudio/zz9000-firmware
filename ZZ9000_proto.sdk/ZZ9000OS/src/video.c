@@ -493,31 +493,6 @@ void pixelclock_init_2(struct zz_video_mode *mode) {
 	//XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR,  0x25C, 0x00000001);
 }
 
-void video_formatter_init(int scalemode, int colormode, int width, int height,
-		int htotal, int vtotal, int hss, int hse, int vss, int vse,
-		int polarity) {
-	video_formatter_write((vtotal << 16) | htotal, MNTVF_OP_MAX);
-	video_formatter_write((height << 16) | width, MNTVF_OP_DIMENSIONS);
-	video_formatter_write((hss << 16) | hse, MNTVF_OP_HS);
-	video_formatter_write((vss << 16) | vse, MNTVF_OP_VS);
-	video_formatter_write(polarity, MNTVF_OP_POLARITY);
-	video_formatter_write(scalemode, MNTVF_OP_SCALE);
-	video_formatter_write(colormode, MNTVF_OP_COLORMODE);
-
-	video_formatter_valign();
-}
-
-void video_system_init(struct zz_video_mode *mode, int hdiv, int vdiv) {
-	pixelclock_init_2(mode);
-	hdmi_ctrl_init(mode);
-	init_vdma(mode->hres, mode->vres, hdiv, vdiv, (u32)vs.framebuffer + vs.framebuffer_pan_offset);
-}
-
-void video_system_init_no_vdma(struct zz_video_mode *mode) {
-	pixelclock_init_2(mode);
-	hdmi_ctrl_init(mode);
-}
-
 static void video_mode_init_internal(int mode, int scalemode, int colormode, int skip_vdma) {
 	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
@@ -547,20 +522,37 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 
 	struct zz_video_mode *vmode = &preset_video_modes[mode];
 
-	if (skip_vdma) {
-		video_system_init_no_vdma(vmode);
-	} else {
-		video_system_init(vmode, hdiv, vdiv);
+	// Reset input state machine before reconfiguring to prevent stale line fetches.
+	video_formatter_valign();
+
+	// Program new timing parameters while pixel clock is still at the old
+	// frequency.  The VGA counters in video_formatter.v must hold the new
+	// geometry before dvi_clk changes, otherwise a mid-line counter wrap
+	// causes a visible horizontal split (the "split picture" NTSC bug).
+	video_formatter_write((vmode->vmax << 16) | vmode->hmax, MNTVF_OP_MAX);
+	video_formatter_write((vmode->vres << 16) | vmode->hres, MNTVF_OP_DIMENSIONS);
+	video_formatter_write((vmode->hstart << 16) | vmode->hend, MNTVF_OP_HS);
+	video_formatter_write((vmode->vstart << 16) | vmode->vend, MNTVF_OP_VS);
+	video_formatter_write(vmode->polarity, MNTVF_OP_POLARITY);
+	video_formatter_write(scalemode, MNTVF_OP_SCALE);
+	video_formatter_write(colormode, MNTVF_OP_COLORMODE);
+
+	// Now safe to switch the pixel clock — VGA counters already have new geometry.
+	pixelclock_init_2(vmode);
+	hdmi_ctrl_init(vmode);
+
+	// Xilinx MMCM re-lock after reconfiguration: ~10-100 µs.
+	// Safe in ISR context: usleep is a busy-wait spin on the ARM Global Timer.
+	usleep(100);
+
+	if (!skip_vdma) {
+		init_vdma(vmode->hres, vmode->vres, hdiv, vdiv,
+				(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 	}
 
-	video_formatter_init(scalemode, colormode,
-			vmode->hres, vmode->vres,
-			vmode->hmax, vmode->vmax,
-			vmode->hstart, vmode->hend,
-			vmode->vstart, vmode->vend,
-			vmode->polarity);
+	// Re-sync input state machine with the now-stable output timing.
+	video_formatter_valign();
 
-	// FIXME ???
 	vs.vmode_hsize = vmode->hres;
 	vs.vmode_vsize = vmode->vres;
 	vs.vmode_vdiv = vdiv;
