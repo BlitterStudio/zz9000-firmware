@@ -1062,7 +1062,19 @@ module MNTZorro_v0_1_S00_AXI
   reg videocap_lace_field;
   reg videocap_interlace;
   reg videocap_ntsc;
+  // Polarity-tolerant HSYNC width tracking.  The "sync tip" is the SHORTER
+  // of the low/high intervals — for valid analog video the duty ratio is
+  // ~10:1, so per-line auto-detect is unambiguous.  Default polarity is
+  // active-low (videocap_hs_inverted=0); Toaster EXTSYNC flips it.
+  // videocap_hs_pulse_width continues to mean "duration of the current sync
+  // tip", so downstream consumers stay polarity-agnostic.
   reg [7:0] videocap_hs_pulse_width;
+  reg [7:0] videocap_hs_low_width  = 0;
+  reg [7:0] videocap_hs_high_width = 0;
+  reg [7:0] videocap_hs_low_last   = 0;
+  reg [7:0] videocap_hs_high_last  = 0;
+  reg       videocap_hs_inverted   = 1'b0;
+  reg [3:0] videocap_hs_invert_streak = 4'h0;
   // Per-field max/min HSYNC pulse width, reset at frame boundary. Max
   // captures the widest pulse seen; min captures the narrowest. Comparing
   // them tells genlock failure modes apart: max-only-wide => some pulses
@@ -1169,6 +1181,20 @@ module MNTZorro_v0_1_S00_AXI
      .PWRDWN(E7M_PWRDWN),
      .RST(E7M_RESET));
 
+  // Polarity-aware HSYNC pattern matchers.  The 6-cycle "stable" patterns
+  // and 3-cycle-delayed edge patterns mirror the pre-existing matchers for
+  // the inverted-polarity case.  videocap_hs is [6:0] with bit[0] newest.
+  wire videocap_hs_sync_stable =
+      videocap_hs_inverted ? (videocap_hs == 7'b0111111)   // 6 high samples after a 0
+                           : (videocap_hs == 7'b0000000);  // 7 stable low samples
+  wire videocap_hs_sync_end =
+      videocap_hs_inverted ? (videocap_hs[6:1] == 6'b111000)   // 3-cycle-old falling edge
+                           : (videocap_hs[6:1] == 6'b000111);  // 3-cycle-old rising edge
+  // Edge detectors for the raw low/high intervals (independent of polarity);
+  // used to keep the dual width counters in sync with the input.
+  wire videocap_hs_low_ended  = (videocap_hs[6:1] == 6'b000111);
+  wire videocap_hs_high_ended = (videocap_hs[6:1] == 6'b111000);
+
   always @(posedge e7m_shifted) begin
     videocap_vs <= {videocap_vs[5:0], VCAP_VSYNC};
     videocap_hs <= {videocap_hs[5:0], VCAP_HSYNC};
@@ -1187,11 +1213,57 @@ module MNTZorro_v0_1_S00_AXI
                         VCAP_B7,VCAP_B6,VCAP_B5,VCAP_B4,VCAP_B3,VCAP_B2,VCAP_B1,VCAP_B0};
     `endif
 
-    if (videocap_hs==0) begin
-      if (videocap_hs_pulse_width<'hff)
-        videocap_hs_pulse_width<=videocap_hs_pulse_width+1;
-    end else if (videocap_hs=='b111111) begin
-      videocap_hs_pulse_width<=0;
+    // Raw per-polarity width counters: tick during the current 0 / 1
+    // interval, latch on the matching edge.  These feed the polarity
+    // auto-detect below.  Saturating at 8'hff is fine; the comparator
+    // only needs ordering ("which side is shorter"), not absolute width.
+    if (videocap_hs == 0) begin
+      if (videocap_hs_low_width < 8'hff)
+        videocap_hs_low_width <= videocap_hs_low_width + 1;
+    end else if (videocap_hs == 7'b1111111) begin
+      if (videocap_hs_high_width < 8'hff)
+        videocap_hs_high_width <= videocap_hs_high_width + 1;
+    end
+    if (videocap_hs_low_ended) begin
+      videocap_hs_low_last  <= videocap_hs_low_width;
+      videocap_hs_low_width <= 0;
+    end
+    if (videocap_hs_high_ended) begin
+      videocap_hs_high_last  <= videocap_hs_high_width;
+      videocap_hs_high_width <= 0;
+    end
+
+    // Polarity auto-detect.  Sync tip is the shorter interval; flip the
+    // master polarity register only after 16 consecutive consistent
+    // observations (one per edge, ~8 full lines).  During NTSC VBI the
+    // 3-line broad-pulse interval makes the duty cycle briefly invert on
+    // its own (~6 disagreement edges); ~25-line PAL VBI is similar; 16
+    // safely rides through both.  Mode-switch latency at ~8 lines is
+    // ~500µs at 15.7kHz — imperceptible.  At reset both _last counters
+    // are 0 so this stays gated until real measurements arrive.
+    if ((videocap_hs_low_ended || videocap_hs_high_ended) &&
+        videocap_hs_low_last != 8'h00 && videocap_hs_high_last != 8'h00) begin
+      if ((videocap_hs_high_last < videocap_hs_low_last) != videocap_hs_inverted) begin
+        if (videocap_hs_invert_streak == 4'hf) begin
+          videocap_hs_inverted      <= ~videocap_hs_inverted;
+          videocap_hs_invert_streak <= 4'h0;
+        end else begin
+          videocap_hs_invert_streak <= videocap_hs_invert_streak + 1'b1;
+        end
+      end else begin
+        videocap_hs_invert_streak <= 4'h0;
+      end
+    end
+
+    // Polarity-agnostic sync-tip width counter.  Ticks while the input is
+    // at the active sync level; latches and resets on the sync-end edge.
+    // All downstream consumers (CSYNC-VSYNC detection, per-field min/max
+    // diagnostic) read this register, so they remain unchanged.
+    if (videocap_hs_sync_stable) begin
+      if (videocap_hs_pulse_width < 8'hff)
+        videocap_hs_pulse_width <= videocap_hs_pulse_width + 1;
+    end else if (videocap_hs_sync_end) begin
+      videocap_hs_pulse_width <= 0;
       // The just-ended pulse's final width is still in pulse_width on
       // this cycle (non-blocking reset takes effect next cycle), so
       // capture it for the per-field min latch. Sampling continuously
@@ -1211,7 +1283,7 @@ module MNTZorro_v0_1_S00_AXI
     // on A500, HSYNC is really CSYNC and we can recognize vertical sync
     // by looking at the pulse width of it
     // direct sampling from denise
-    if(videocap_hs[6:1]=='b000111 && videocap_hs_pulse_width>=128) begin
+    if(videocap_hs_sync_end && videocap_hs_pulse_width>=128) begin
       // 31kHz progressive: full frame >= 400 lines, never interlaced.
       // 15kHz interlace is identified by field phase, not by total line
       // count parity. NTSC nonlace can jitter by one counted line when
@@ -1299,7 +1371,7 @@ module MNTZorro_v0_1_S00_AXI
         videocap_ymax <= videocap_y2;
         videocap_ymax2 <= videocap_ymax;
       end
-    end else if (videocap_hs[6:1]=='b000111) begin
+    end else if (videocap_hs_sync_end) begin
       videocap_x  <= 0;
       videocap_x2 <= 0;
 
