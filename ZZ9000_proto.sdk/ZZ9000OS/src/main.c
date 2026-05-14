@@ -1345,7 +1345,12 @@ int main() {
 
 				switch (zaddr32) {
 					case REG_ZZ_VBLANK_STATUS:
-						data = (zstate_raw & (1 << 21));
+						if (zaddr & 2) {
+							/* REG_ZZ_VIDEOCAP_STATS (0x4E) shares this 32-bit group. */
+							data = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG2) & 0x3fff;
+						} else {
+							data = (zstate_raw & (1 << 21));
+						}
 						break;
 					case REG_ZZ_ARM_EV_SERIAL:
 						data = arm_app_output_event();
