@@ -1181,20 +1181,42 @@ module MNTZorro_v0_1_S00_AXI
      .PWRDWN(E7M_PWRDWN),
      .RST(E7M_RESET));
 
-  // Polarity-aware HSYNC pattern matchers.  videocap_hs is [6:0] with
-  // bit[0] newest; "stable" fires every cycle the input is at the sync
-  // level (so the pulse-width counter ticks across the whole tip), while
-  // "end" fires once 3 cycles after the trailing edge.
-  wire videocap_hs_sync_stable =
-      videocap_hs_inverted ? (videocap_hs == 7'b1111111)   // stably high
-                           : (videocap_hs == 7'b0000000);  // stably low
-  wire videocap_hs_sync_end =
-      videocap_hs_inverted ? (videocap_hs[6:1] == 6'b111000)   // 3-cycle-old falling edge
-                           : (videocap_hs[6:1] == 6'b000111);  // 3-cycle-old rising edge
   // Edge detectors for the raw low/high intervals (independent of polarity);
   // used to keep the dual width counters in sync with the input.
   wire videocap_hs_low_ended  = (videocap_hs[6:1] == 6'b000111);
   wire videocap_hs_high_ended = (videocap_hs[6:1] == 6'b111000);
+  // HSYNC pattern matchers.
+  //
+  // ZZ9500 (denise CSYNC) is hard-wired active-low so we keep the original
+  // polarity-aware matchers there; the >=128-cycle broad-pulse threshold
+  // used to detect vertical sync depends on the polarity-aware counter.
+  //
+  // For every other variant the input can arrive polarity-inverted under
+  // Toaster genlock (issue #11) and the 16-edge polarity-detect streak can
+  // fail to lock if VBI / EXTSYNC retiming introduces brief disagreements.
+  // Decide the sync edge live per line from low_last vs high_last so there
+  // is no warmup window and no streak-reset trap: whichever interval is
+  // shorter IS the sync tip, fire sync_end 3 cycles after its trailing
+  // edge.  sync_stable picks the matching level for the pulse_width
+  // counter so the 8-bit value still tracks the sync tip even on inverted
+  // polarity (only consumed by the ZZ9500 threshold check above; harmless
+  // elsewhere).
+`ifdef VARIANT_ZZ9500
+  wire videocap_hs_sync_stable =
+      videocap_hs_inverted ? (videocap_hs == 7'b1111111)
+                           : (videocap_hs == 7'b0000000);
+  wire videocap_hs_sync_end =
+      videocap_hs_inverted ? (videocap_hs[6:1] == 6'b111000)
+                           : (videocap_hs[6:1] == 6'b000111);
+`else
+  wire videocap_hs_sync_end =
+      (videocap_hs_low_ended  && videocap_hs_low_last  < videocap_hs_high_last) ||
+      (videocap_hs_high_ended && videocap_hs_high_last < videocap_hs_low_last);
+  wire videocap_hs_sync_stable =
+      (videocap_hs_low_last < videocap_hs_high_last)
+        ? (videocap_hs == 7'b0000000)
+        : (videocap_hs == 7'b1111111);
+`endif
   // SHORTER of the two most recently latched intervals — that is the sync
   // tip for either polarity.  Drives the per-field min/max diagnostic so
   // the reported tier is meaningful even if polarity-detect fails to flip
