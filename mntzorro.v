@@ -19,17 +19,19 @@
  */
 
 // ZORRO2/3 switch
-//`define ZORRO2
+//`define ZORRO2 
 `define ZORRO3
 
 // use only together with ZORRO2:
 //`define VARIANT_ZZ9500        // uses Denise adapter/A500 specific video capture
 //`define VARIANT_2MB           // uses only 2MB address space
-//`define VARIANT_SUPERDENISE   // for A500+ and super denise
+`define VARIANT_SUPERDENISE   // for A500+ and super denise
 
 //`define VARIANT_FW20
 `define VARIANT_Z3_FASTRAM
+`ifndef VARIANT_DISABLE_AUTOBOOT
 `define VARIANT_AUTOBOOT        // enable autoboot ROM
+`endif
 
 `define C_S_AXI_DATA_WIDTH 32
 `define C_S_AXI_ADDR_WIDTH 5
@@ -1062,26 +1064,7 @@ module MNTZorro_v0_1_S00_AXI
   reg videocap_lace_field;
   reg videocap_interlace;
   reg videocap_ntsc;
-  // Polarity-tolerant HSYNC width tracking.  Measure both the low and the
-  // high interval per line as 12-bit saturating counters (e7m_shifted is
-  // ~14 MHz so an NTSC active line ≈ 824 cycles, comfortably inside 12 bits;
-  // an 8-bit counter would saturate, hiding the difference between sync
-  // tip and active line and breaking any polarity-detect that depends on
-  // it).  The "shorter" of the two latched widths IS the sync tip — true
-  // for both normal and Toaster-inverted polarity, and for ZZ9500 CSYNC.
-  reg [7:0]  videocap_hs_pulse_width;
-  reg [11:0] videocap_hs_low_width  = 0;
-  reg [11:0] videocap_hs_high_width = 0;
-  reg [11:0] videocap_hs_low_last   = 0;
-  reg [11:0] videocap_hs_high_last  = 0;
-  reg        videocap_hs_inverted   = 1'b0;
-  reg [3:0]  videocap_hs_invert_streak = 4'h0;
-  // Per-field max/min of the SHORTER of (low_last, high_last) — i.e. the
-  // sync-tip width regardless of polarity. Saturating 12-bit so a clean
-  // 4.7µs sync tip lands well below tier 1 while a fully wide line lands
-  // in tier 3.  Reset at frame boundary.  Diagnostic exposes top 2 bits.
-  reg [11:0] videocap_hs_pulse_width_max;
-  reg [11:0] videocap_hs_pulse_width_min = 12'hfff;
+  reg [7:0] videocap_hs_pulse_width;
   reg [9:0] videocap_vsync_x = 0;
 
   localparam [9:0] VIDEOCAP_INTERLACE_PHASE_DELTA = 10'h80;
@@ -1181,52 +1164,6 @@ module MNTZorro_v0_1_S00_AXI
      .PWRDWN(E7M_PWRDWN),
      .RST(E7M_RESET));
 
-  // Edge detectors for the raw low/high intervals (independent of polarity);
-  // used to keep the dual width counters in sync with the input.
-  wire videocap_hs_low_ended  = (videocap_hs[6:1] == 6'b000111);
-  wire videocap_hs_high_ended = (videocap_hs[6:1] == 6'b111000);
-  // HSYNC pattern matchers.
-  //
-  // ZZ9500 (denise CSYNC) is hard-wired active-low so we keep the original
-  // polarity-aware matchers there; the >=128-cycle broad-pulse threshold
-  // used to detect vertical sync depends on the polarity-aware counter.
-  //
-  // For every other variant the input can arrive polarity-inverted under
-  // Toaster genlock (issue #11) and the 16-edge polarity-detect streak can
-  // fail to lock if VBI / EXTSYNC retiming introduces brief disagreements.
-  // Decide the sync edge live per line from low_last vs high_last so there
-  // is no warmup window and no streak-reset trap: whichever interval is
-  // shorter IS the sync tip, fire sync_end 3 cycles after its trailing
-  // edge.  sync_stable picks the matching level for the pulse_width
-  // counter so the 8-bit value still tracks the sync tip even on inverted
-  // polarity (only consumed by the ZZ9500 threshold check above; harmless
-  // elsewhere).
-`ifdef VARIANT_ZZ9500
-  wire videocap_hs_sync_stable =
-      videocap_hs_inverted ? (videocap_hs == 7'b1111111)
-                           : (videocap_hs == 7'b0000000);
-  wire videocap_hs_sync_end =
-      videocap_hs_inverted ? (videocap_hs[6:1] == 6'b111000)
-                           : (videocap_hs[6:1] == 6'b000111);
-`else
-  wire videocap_hs_sync_end =
-      (videocap_hs_low_ended  && videocap_hs_low_last  < videocap_hs_high_last) ||
-      (videocap_hs_high_ended && videocap_hs_high_last < videocap_hs_low_last);
-  wire videocap_hs_sync_stable =
-      (videocap_hs_low_last < videocap_hs_high_last)
-        ? (videocap_hs == 7'b0000000)
-        : (videocap_hs == 7'b1111111);
-`endif
-  // SHORTER of the two most recently latched intervals — that is the sync
-  // tip for either polarity.  Drives the per-field min/max diagnostic so
-  // the reported tier is meaningful even if polarity-detect fails to flip
-  // (e.g. on a Toaster EXTSYNC waveform that does not resemble a clean
-  // inversion).  No dependency on videocap_hs_inverted.
-  wire [11:0] videocap_hs_short_width =
-      (videocap_hs_low_last < videocap_hs_high_last)
-        ? videocap_hs_low_last
-        : videocap_hs_high_last;
-
   always @(posedge e7m_shifted) begin
     videocap_vs <= {videocap_vs[5:0], VCAP_VSYNC};
     videocap_hs <= {videocap_hs[5:0], VCAP_HSYNC};
@@ -1245,79 +1182,17 @@ module MNTZorro_v0_1_S00_AXI
                         VCAP_B7,VCAP_B6,VCAP_B5,VCAP_B4,VCAP_B3,VCAP_B2,VCAP_B1,VCAP_B0};
     `endif
 
-    // Raw per-polarity width counters: tick during the current 0 / 1
-    // interval, latch on the matching edge.  Saturating 12-bit so a full
-    // ~58µs active line (~824 cycles at 14 MHz e7m) does not saturate
-    // alongside a ~4.7µs sync tip (~67 cycles) — an 8-bit counter pegged
-    // both sides at 0xff under high clock or weird waveforms and hid the
-    // size difference that polarity-detect / shortest-tip logic needs.
-    if (videocap_hs == 0) begin
-      if (videocap_hs_low_width < 12'hfff)
-        videocap_hs_low_width <= videocap_hs_low_width + 1;
-    end else if (videocap_hs == 7'b1111111) begin
-      if (videocap_hs_high_width < 12'hfff)
-        videocap_hs_high_width <= videocap_hs_high_width + 1;
-    end
-    if (videocap_hs_low_ended) begin
-      videocap_hs_low_last  <= videocap_hs_low_width;
-      videocap_hs_low_width <= 0;
-    end
-    if (videocap_hs_high_ended) begin
-      videocap_hs_high_last  <= videocap_hs_high_width;
-      videocap_hs_high_width <= 0;
-    end
-
-    // Polarity auto-detect.  Sync tip is the shorter interval; flip the
-    // master polarity register only after 16 consecutive consistent
-    // observations (one per edge, ~8 full lines).  During NTSC VBI the
-    // 3-line broad-pulse interval makes the duty cycle briefly invert on
-    // its own (~6 disagreement edges); ~25-line PAL VBI is similar; 16
-    // safely rides through both.  Mode-switch latency at ~8 lines is
-    // ~500µs at 15.7kHz — imperceptible.  At reset both _last counters
-    // are 0 so this stays gated until real measurements arrive.
-    if ((videocap_hs_low_ended || videocap_hs_high_ended) &&
-        videocap_hs_low_last != 12'h000 && videocap_hs_high_last != 12'h000) begin
-      if ((videocap_hs_high_last < videocap_hs_low_last) != videocap_hs_inverted) begin
-        if (videocap_hs_invert_streak == 4'hf) begin
-          videocap_hs_inverted      <= ~videocap_hs_inverted;
-          videocap_hs_invert_streak <= 4'h0;
-        end else begin
-          videocap_hs_invert_streak <= videocap_hs_invert_streak + 1'b1;
-        end
-      end else begin
-        videocap_hs_invert_streak <= 4'h0;
-      end
-    end
-
-    // Polarity-aware 8-bit sync-tip counter, kept for the ZZ9500 CSYNC-
-    // VSYNC threshold below (>=128 catches a half-line VBI broad pulse).
-    // Diagnostic min/max are NOT derived from this any more — see below.
-    if (videocap_hs_sync_stable) begin
-      if (videocap_hs_pulse_width < 8'hff)
-        videocap_hs_pulse_width <= videocap_hs_pulse_width + 1;
-    end else if (videocap_hs_sync_end) begin
-      videocap_hs_pulse_width <= 0;
-    end
-
-    // Polarity-agnostic per-field min/max of the SHORTER latched interval.
-    // videocap_hs_short_width = min(low_last, high_last) is the sync-tip
-    // width regardless of which way HSYNC swings.  Gated on both _last
-    // having real values so a fresh-out-of-reset short_width==0 does not
-    // immediately latch the min to 0.  Sampled continuously: short_width
-    // is only changed by edge-driven _last writes, so non-edge cycles see
-    // a stable value and the registers do not jitter.
-    if (videocap_hs_low_last != 12'h000 && videocap_hs_high_last != 12'h000) begin
-      if (videocap_hs_short_width > videocap_hs_pulse_width_max)
-        videocap_hs_pulse_width_max <= videocap_hs_short_width;
-      if (videocap_hs_short_width < videocap_hs_pulse_width_min)
-        videocap_hs_pulse_width_min <= videocap_hs_short_width;
-    end
+    if (videocap_hs==0) begin
+      if (videocap_hs_pulse_width<'hff)
+        videocap_hs_pulse_width<=videocap_hs_pulse_width+1;
+    end else if (videocap_hs=='b111111)
+      videocap_hs_pulse_width<=0;
 
 `ifdef VARIANT_ZZ9500
     // on A500, HSYNC is really CSYNC and we can recognize vertical sync
     // by looking at the pulse width of it
     // direct sampling from denise
-    if(videocap_hs_sync_end && videocap_hs_pulse_width>=128) begin
+    if(videocap_hs[6:1]=='b000111 && videocap_hs_pulse_width>=128) begin
       // 31kHz progressive: full frame >= 400 lines, never interlaced.
       // 15kHz interlace is identified by field phase, not by total line
       // count parity. NTSC nonlace can jitter by one counted line when
@@ -1353,9 +1228,6 @@ module MNTZorro_v0_1_S00_AXI
         videocap_y2 <= 0;
         videocap_y3 <= 0;
       end
-
-      videocap_hs_pulse_width_max <= 0;
-      videocap_hs_pulse_width_min <= 12'hfff;
 `else
     // with videoslot machines, we have a real VSYNC to work with
     if (videocap_vs[6:1]=='b111000) begin
@@ -1396,16 +1268,13 @@ module MNTZorro_v0_1_S00_AXI
         videocap_y2 <= 0;
         videocap_y3 <= 0;
       end
-
-      videocap_hs_pulse_width_max <= 0;
-      videocap_hs_pulse_width_min <= 12'hfff;
 `endif
 
       if (videocap_y2!=0) begin
         videocap_ymax <= videocap_y2;
         videocap_ymax2 <= videocap_ymax;
       end
-    end else if (videocap_hs_sync_end) begin
+    end else if (videocap_hs[6:1]=='b000111) begin
       videocap_x  <= 0;
       videocap_x2 <= 0;
 
@@ -1526,35 +1395,11 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] vc_saveaddr2;
   reg [31:0] vc_saveaddr3;
 
-  // Diagnostic snapshots of raw videocap state for firmware/host readout
-  // (issue #11 genlock split-screen investigation).
-  // 2-FF synchronizer from e7m_shifted domain to S_AXI_ACLK domain. The
-  // ASYNC_REG attribute tells Vivado to place the pair adjacent and treat
-  // the path as a CDC for timing analysis.
-  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_ymax_diag_a;
-  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_ymax_diag_b;
-  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_diag_a;
-  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_diag_b;
-  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_min_diag_a;
-  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_min_diag_b;
-
   always @(posedge S_AXI_ACLK) begin
     // VIDEOCAP
 
     // pass interlace mode to video control block
     video_control_interlace <= videocap_interlace;
-
-    // sync raw videocap counters into AXI clock domain for diagnostic readout.
-    // Pulse width crosses as the top 2 bits of the per-field maximum, so the
-    // reading reflects "did anything wide happen this field" rather than the
-    // value of the most recent pulse (which under genlock CSYNC varies pulse
-    // to pulse).
-    videocap_ymax_diag_a      <= videocap_ymax;
-    videocap_ymax_diag_b      <= videocap_ymax_diag_a;
-    videocap_hs_pw_diag_a     <= videocap_hs_pulse_width_max[11:10];
-    videocap_hs_pw_diag_b     <= videocap_hs_pw_diag_a;
-    videocap_hs_pw_min_diag_a <= videocap_hs_pulse_width_min[11:10];
-    videocap_hs_pw_min_diag_b <= videocap_hs_pw_min_diag_a;
 
     videocap_pitch_sync <= videocap_pitch;
 
@@ -2621,19 +2466,8 @@ module MNTZorro_v0_1_S00_AXI
     //            video_control_interlace, videocap_mode, 15'b0, zorro_state};
     //          `-- 24                   `-- 23         `-- 22 `-- 7:0
 
-    // Bits 23:8 expose live videocap counters for diagnostics (issue #11).
-    // Comparing max and min separates "every pulse wide" (polarity flip /
-    // EXTSYNC retiming) from "some pulses wide" (CSYNC pulses in VBI):
-    //   bits 23:22 = top 2 bits of per-field MIN HSYNC pulse width
-    //   bits 19:18 = top 2 bits of per-field MAX HSYNC pulse width
-    //                (0=short, 3=very wide)
-    //   bits 17:8  = videocap_ymax[9:0] (lines per detected field)
-    // Note: pw_min replaces videocap_ntsc/videocap_mode in bits 23:22.
-    // Those fields were not consumed by firmware; vblank remains at bit
-    // 21 so the existing driver/firmware vblank read is unaffected.
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
-                video_control_interlace, videocap_hs_pw_min_diag_b, video_control_vblank, video_control_hblank,
-                videocap_hs_pw_diag_b, videocap_ymax_diag_b, zorro_state};
+                video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank, 12'b0, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;
