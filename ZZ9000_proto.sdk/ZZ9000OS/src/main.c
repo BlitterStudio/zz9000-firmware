@@ -1345,17 +1345,7 @@ int main() {
 
 				switch (zaddr32) {
 					case REG_ZZ_VBLANK_STATUS:
-						// zaddr32 strips bit 1, so this case also serves
-						// REG_ZZ_VIDEOCAP_STATS (0x4E) on the lower 16 bits.
-						//   0x4C (upper): vblank flag at bit 21
-						//   0x4E (lower): diagnostic packing (issue #11)
-						//     [9:0]   videocap_ymax (lines per detected field)
-						//     [11:10] pulse_width_max top-2 bits (0=short, 3=very wide)
-						//     [13:12] pulse_width_min top-2 bits (0=short, 3=very wide)
-						//     [15:14] reserved (0)
-						data = (zstate_raw & (1 << 21))
-						     | ((zstate_raw >> 8) & 0xFFF)
-						     | (((zstate_raw >> 22) & 0x3) << 12);
+						data = (zstate_raw & (1 << 21));
 						break;
 					case REG_ZZ_ARM_EV_SERIAL:
 						data = arm_app_output_event();
