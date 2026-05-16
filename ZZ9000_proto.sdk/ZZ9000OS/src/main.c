@@ -115,6 +115,22 @@ static uint32_t usb_storage_write_block = 0;
 #endif
 
 static char sd_storage_available_flag = 0;
+static uint32_t mntzorro_reg4_shadow = 0;
+
+#define MNTZORRO_REG4_VIDEOCAP_DIAG_PAGE_SHIFT 28
+#define MNTZORRO_REG4_VIDEOCAP_DIAG_PAGE_MASK  0xf0000000U
+#define MNTZORRO_REG4_ETH_FRAME_MASK           0x001fffffU
+
+static u32 videocap_diag_read_page(u32 page) {
+	u32 old_reg4 = mntzorro_reg4_shadow;
+	u32 diag_reg4 = (old_reg4 & ~MNTZORRO_REG4_VIDEOCAP_DIAG_PAGE_MASK)
+	              | ((page << MNTZORRO_REG4_VIDEOCAP_DIAG_PAGE_SHIFT)
+	                 & MNTZORRO_REG4_VIDEOCAP_DIAG_PAGE_MASK);
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG4, diag_reg4);
+	u32 data = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG2);
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG4, old_reg4);
+	return data;
+}
 
 static volatile int usb_proxy_pending = 0;
 static uint32_t sd_storage_read_block = 0;
@@ -878,7 +894,11 @@ int main() {
 				case REG_ZZ_ETH_RX: {
 					//printf("RECV eth frame sz: %ld\n",zdata);
 					int frfb = ethernet_receive_frame();
-					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG4, frfb);
+					mntzorro_reg4_shadow =
+						(mntzorro_reg4_shadow & ~MNTZORRO_REG4_ETH_FRAME_MASK)
+						| ((u32)frfb & MNTZORRO_REG4_ETH_FRAME_MASK);
+					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG4,
+							mntzorro_reg4_shadow);
 					break;
 				}
 				case REG_ZZ_ETH_MAC_HI: {
@@ -1345,8 +1365,73 @@ int main() {
 
 				switch (zaddr32) {
 					case REG_ZZ_VBLANK_STATUS:
-						data = (zstate_raw & (1 << 21));
+						/* REG_ZZ_VIDEOCAP_STATS (0x4E) shares this 32-bit group.
+						 * Read the diagnostic payload from the same zstate snapshot
+						 * as vblank; direct MNTZORRO_REG2 readback is less reliable
+						 * while video formatter writes also target that AXI slot.
+						 *
+						 * 0x4C upper: vblank flag at zstate bit 21.
+						 * 0x4E lower:
+						 *   bits  9:0  detected field/line count
+						 *   bits 11:10 HSYNC pulse-width max tier
+						 *   bits 13:12 HSYNC pulse-width min tier
+						 *   bit     14 selected HSYNC edge/polarity
+						 *   bit     15 detected interlace flag
+						 */
+						data = (zstate_raw & (1 << 21))
+						     | ((zstate_raw >> 8) & 0x0fff)
+						     | (((zstate_raw >> 26) & 0x3) << 12)
+						     | (((zstate_raw >> 29) & 0x1) << 14)
+						     | (((zstate_raw >> 24) & 0x1) << 15);
 						break;
+					case REG_ZZ_SET_FEATURE: {
+						/* Read-only VideoCap diagnostic pair:
+						 * 0x60 upper: magic/version marker ('VC')
+						 * 0x62 lower:
+						 *   bits 13:10 diagnostic ABI version
+						 *   bit      9 capture enabled
+						 *   bit      8 NTSC detected
+						 *   bit      7 capture interlace detected
+						 *   bit      6 formatter interlace output
+						 *   bit      5 selected HSYNC polarity
+						 *   bit      4 fall edge would be selected
+						 *   bit      3 low HSYNC pulse was wide
+						 *   bit      2 rising-edge line count valid
+						 *   bit      1 falling-edge line count valid
+						 *   bit      0 detected field parity
+						 */
+						u32 diag3 = videocap_diag_read_page(3);
+						data = (0x5643 << 16) | (diag3 & 0x3fff);
+						break;
+					}
+					case REG_ZZ_VIDEOCAP_DIAG_Y3MAX: {
+						/* 0x64 upper: max capture line index written last frame
+						 * 0x66 lower: formatter vertical max currently selected
+						 */
+						u32 diag1 = videocap_diag_read_page(1);
+						data = (((diag1 >> 20) & 0x03ff) << 16)
+						     | ((diag1 >> 10) & 0x03ff);
+						break;
+					}
+					case REG_ZZ_VIDEOCAP_DIAG_XLEN: {
+						/* 0x68 upper: selected-edge line length
+						 * 0x6A lower: VSYNC phase delta used for interlace detect
+						 */
+						u32 diag1 = videocap_diag_read_page(1);
+						u32 diag2 = videocap_diag_read_page(2);
+						data = ((diag1 & 0x03ff) << 16)
+						     | ((diag2 >> 20) & 0x03ff);
+						break;
+					}
+					case REG_ZZ_VIDEOCAP_DIAG_RISELINES: {
+						/* 0x6C upper: lines counted from rising HSYNC edges
+						 * 0x6E lower: lines counted from falling HSYNC edges
+						 */
+						u32 diag2 = videocap_diag_read_page(2);
+						data = (((diag2 >> 10) & 0x03ff) << 16)
+						     | (diag2 & 0x03ff);
+						break;
+					}
 					case REG_ZZ_ARM_EV_SERIAL:
 						data = arm_app_output_event();
 						break;
