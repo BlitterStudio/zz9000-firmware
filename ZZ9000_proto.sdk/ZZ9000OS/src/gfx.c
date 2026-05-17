@@ -748,6 +748,28 @@ static inline uint64_t p2c_decode_8pixels(uint8_t **pp, uint8_t planes,
 {
 	uint64_t out = 0;
 
+	if (planes == 8 && layer_mask == 0xff) {
+		if (invert) {
+			return p2c_byte_lut[pp[0][cur_byte] ^ 0xff] |
+				(p2c_byte_lut[pp[1][cur_byte] ^ 0xff] << 1) |
+				(p2c_byte_lut[pp[2][cur_byte] ^ 0xff] << 2) |
+				(p2c_byte_lut[pp[3][cur_byte] ^ 0xff] << 3) |
+				(p2c_byte_lut[pp[4][cur_byte] ^ 0xff] << 4) |
+				(p2c_byte_lut[pp[5][cur_byte] ^ 0xff] << 5) |
+				(p2c_byte_lut[pp[6][cur_byte] ^ 0xff] << 6) |
+				(p2c_byte_lut[pp[7][cur_byte] ^ 0xff] << 7);
+		}
+
+		return p2c_byte_lut[pp[0][cur_byte]] |
+			(p2c_byte_lut[pp[1][cur_byte]] << 1) |
+			(p2c_byte_lut[pp[2][cur_byte]] << 2) |
+			(p2c_byte_lut[pp[3][cur_byte]] << 3) |
+			(p2c_byte_lut[pp[4][cur_byte]] << 4) |
+			(p2c_byte_lut[pp[5][cur_byte]] << 5) |
+			(p2c_byte_lut[pp[6][cur_byte]] << 6) |
+			(p2c_byte_lut[pp[7][cur_byte]] << 7);
+	}
+
 	for (uint8_t plane = 0; plane < planes && plane < 8; plane++) {
 		uint8_t plane_bit = (uint8_t)(1u << plane);
 		if (layer_mask & plane_bit) {
