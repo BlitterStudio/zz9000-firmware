@@ -100,6 +100,7 @@
 
 /* We are 32-bit machine */
 #define MAXIMUM_IMAGE_WORD_LEN 0x40000000
+#define U32_MAX_VALUE 0xFFFFFFFFU
 #define MD5_CHECKSUM_SIZE   16
 
 /**************************** Type Definitions *******************************/
@@ -141,6 +142,114 @@ extern u32 Silicon_Version;
 extern u32 FlashReadBaseAddress;
 extern u8 LinearBootDeviceFlag;
 extern XDcfg *DcfgInstPtr;
+#ifdef XPAR_PS7_QSPI_LINEAR_0_S_AXI_BASEADDR
+extern u32 QspiFlashSize;
+#endif
+
+static u32 WordCountToBytes(u32 Words, u32 AllowZero, u32 *Bytes)
+{
+	if ((Words == 0U) && (AllowZero == 0U)) {
+		return XST_FAILURE;
+	}
+
+	if (Words > (U32_MAX_VALUE >> WORD_LENGTH_SHIFT)) {
+		return XST_FAILURE;
+	}
+
+	*Bytes = Words << WORD_LENGTH_SHIFT;
+	return XST_SUCCESS;
+}
+
+static u32 AddU32(u32 Value, u32 Addend, u32 *Result)
+{
+	if (Value > (U32_MAX_VALUE - Addend)) {
+		return XST_FAILURE;
+	}
+
+	*Result = Value + Addend;
+	return XST_SUCCESS;
+}
+
+static u32 RangeWithin(u32 Address, u32 LengthBytes, u32 Base, u32 Limit)
+{
+	u32 EndAddress;
+
+	if (LengthBytes == 0U) {
+		return XST_FAILURE;
+	}
+
+	if (AddU32(Address, LengthBytes - 1U, &EndAddress) != XST_SUCCESS) {
+		return XST_FAILURE;
+	}
+
+	if ((Address < Base) || (EndAddress > Limit)) {
+		return XST_FAILURE;
+	}
+
+	return XST_SUCCESS;
+}
+
+static u32 ValidateDdrRange(u32 Address, u32 LengthBytes)
+{
+	if (RangeWithin(Address, LengthBytes, DDR_START_ADDR, DDR_END_ADDR) != XST_SUCCESS) {
+		fsbl_printf(DEBUG_GENERAL,
+				"INVALID_LOAD_RANGE addr=0x%08lx len=0x%08lx\r\n",
+				Address, LengthBytes);
+		return XST_FAILURE;
+	}
+
+	return XST_SUCCESS;
+}
+
+static u32 ValidatePartitionDdrRange(PartHeader *Header)
+{
+	u32 LengthWords;
+	u32 LengthBytes;
+
+	LengthWords = Header->ImageWordLen;
+	if ((SignedPartitionFlag == 1U) || (PartitionChecksumFlag == 1U)) {
+		LengthWords = Header->PartitionWordLen;
+	}
+	if ((PSPartitionFlag == 1U) && (Header->DataWordLen > LengthWords)) {
+		LengthWords = Header->DataWordLen;
+	}
+
+	if (WordCountToBytes(LengthWords, 0U, &LengthBytes) != XST_SUCCESS) {
+		fsbl_printf(DEBUG_GENERAL, "INVALID_PARTITION_LENGTH\r\n");
+		return XST_FAILURE;
+	}
+
+	if (PSPartitionFlag == 1U) {
+		return ValidateDdrRange(Header->LoadAddr, LengthBytes);
+	}
+
+	if ((PLPartitionFlag == 1U) &&
+			((LinearBootDeviceFlag == 0U) ||
+			 (SignedPartitionFlag == 1U) ||
+			 (PartitionChecksumFlag == 1U))) {
+		return ValidateDdrRange(DDR_TEMP_START_ADDR, LengthBytes);
+	}
+
+	return XST_SUCCESS;
+}
+
+static u32 ValidateLinearBootSourceRange(u32 SourceAddress, u32 LengthBytes)
+{
+#ifdef XPAR_PS7_QSPI_LINEAR_0_S_AXI_BASEADDR
+	if (FlashReadBaseAddress == XPS_QSPI_LINEAR_BASEADDR) {
+		if ((QspiFlashSize == 0U) ||
+				(SourceAddress >= QspiFlashSize) ||
+				(LengthBytes > (QspiFlashSize - SourceAddress))) {
+			fsbl_printf(DEBUG_GENERAL,
+					"INVALID_QSPI_RANGE addr=0x%08lx len=0x%08lx size=0x%08lx\r\n",
+					SourceAddress, LengthBytes, QspiFlashSize);
+			return XST_FAILURE;
+		}
+	}
+#endif
+
+	return XST_SUCCESS;
+}
 
 /*****************************************************************************/
 /**
@@ -432,6 +541,14 @@ u32 LoadBootImage(void)
 		}
 
 		if (PSPartitionFlag && (PartitionLoadAddr > DDR_END_ADDR)) {
+			fsbl_printf(DEBUG_GENERAL,
+					"INVALID_LOAD_ADDRESS_FAIL\r\n");
+			OutputStatus(INVALID_LOAD_ADDRESS_FAIL);
+			FsblFallback();
+		}
+
+		Status = ValidatePartitionDdrRange(HeaderPtr);
+		if (Status != XST_SUCCESS) {
 			fsbl_printf(DEBUG_GENERAL,
 					"INVALID_LOAD_ADDRESS_FAIL\r\n");
 			OutputStatus(INVALID_LOAD_ADDRESS_FAIL);
@@ -931,6 +1048,7 @@ u32 IsLastPartition(struct HeaderArray *H)
 u32 ValidateHeader(PartHeader *Header)
 {
 	struct HeaderArray *Hap;
+	u32 LengthBytes;
 
     Hap = (struct HeaderArray *)Header;
 
@@ -953,7 +1071,10 @@ u32 ValidateHeader(PartHeader *Header)
     /*
      * Validate partition data size
      */
-	if (Header->ImageWordLen > MAXIMUM_IMAGE_WORD_LEN) {
+	if ((Header->ImageWordLen > MAXIMUM_IMAGE_WORD_LEN) ||
+			(WordCountToBytes(Header->ImageWordLen, 0U, &LengthBytes) != XST_SUCCESS) ||
+			(WordCountToBytes(Header->DataWordLen, 0U, &LengthBytes) != XST_SUCCESS) ||
+			(WordCountToBytes(Header->PartitionWordLen, 0U, &LengthBytes) != XST_SUCCESS)) {
 		fsbl_printf(DEBUG_GENERAL, "INVALID_PARTITION_LENGTH\r\n");
 		return XST_FAILURE;
 	}
@@ -1059,22 +1180,24 @@ u32 PartitionMove(u32 ImageBaseAddress, PartHeader *Header)
     u32 SourceAddr;
     u32 Status;
     u8 SecureTransferFlag = 0;
-    u32 LoadAddr;
-    u32 ImageWordLen;
-    u32 DataWordLen;
+	u32 LoadAddr;
+	u32 ImageWordLen;
+	u32 DataWordLen;
+	u32 PartitionOffsetBytes;
+	u32 ImageLengthBytes;
 
 	SourceAddr = ImageBaseAddress;
-	SourceAddr += Header->PartitionStart<<WORD_LENGTH_SHIFT;
+	if (WordCountToBytes(Header->PartitionStart, 1U, &PartitionOffsetBytes) != XST_SUCCESS) {
+		fsbl_printf(DEBUG_GENERAL, "INVALID_PARTITION_START\r\n");
+		return XST_FAILURE;
+	}
+	if (AddU32(SourceAddr, PartitionOffsetBytes, &SourceAddr) != XST_SUCCESS) {
+		fsbl_printf(DEBUG_GENERAL, "INVALID_PARTITION_START\r\n");
+		return XST_FAILURE;
+	}
 	LoadAddr = Header->LoadAddr;
 	ImageWordLen = Header->ImageWordLen;
 	DataWordLen = Header->DataWordLen;
-
-	/*
-	 * Add flash base address for linear boot devices
-	 */
-	if (LinearBootDeviceFlag) {
-		SourceAddr += FlashReadBaseAddress;
-	}
 
 	/*
 	 * Partition encrypted
@@ -1090,6 +1213,23 @@ u32 PartitionMove(u32 ImageBaseAddress, PartHeader *Header)
 	if (SignedPartitionFlag || PartitionChecksumFlag) {
 		ImageWordLen = Header->PartitionWordLen;
 		DataWordLen = Header->PartitionWordLen;
+	}
+
+	/*
+	 * Add flash base address for linear boot devices.
+	 */
+	if (LinearBootDeviceFlag) {
+		if (WordCountToBytes(ImageWordLen, 0U, &ImageLengthBytes) != XST_SUCCESS) {
+			fsbl_printf(DEBUG_GENERAL, "INVALID_PARTITION_LENGTH\r\n");
+			return XST_FAILURE;
+		}
+		if (ValidateLinearBootSourceRange(SourceAddr, ImageLengthBytes) != XST_SUCCESS) {
+			return XST_FAILURE;
+		}
+		if (AddU32(SourceAddr, FlashReadBaseAddress, &SourceAddr) != XST_SUCCESS) {
+			fsbl_printf(DEBUG_GENERAL, "INVALID_PARTITION_START\r\n");
+			return XST_FAILURE;
+		}
 	}
 
 	/*
@@ -1345,4 +1485,3 @@ u32 CalcPartitionChecksum(u32 SourceAddr, u32 DataLength, u8 *Checksum)
 
     return XST_SUCCESS;
 }
-

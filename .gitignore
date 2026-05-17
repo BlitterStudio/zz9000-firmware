@@ -1,4 +1,5 @@
 # Vivado / Xilinx SDK generated files
+ZZ9000_proto/
 ZZ9000_proto.cache
 ZZ9000_proto.runs
 ZZ9000_proto.sim
@@ -22,6 +23,7 @@ webtalk
 .settings
 _metadata
 SDK.log.*
+NONE/
 
 # Build outputs
 ZZ9000_proto.sdk/ZZ9000OS/build/

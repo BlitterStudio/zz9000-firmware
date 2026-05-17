@@ -202,6 +202,20 @@ extern u8 LinearBootDeviceFlag;
 u8 ReadBuffer[DATA_SIZE + DATA_OFFSET + DUMMY_SIZE];
 u8 WriteBuffer[DATA_OFFSET + DUMMY_SIZE];
 
+static u32 ValidateQspiRange(u32 SourceAddress, u32 LengthBytes)
+{
+	if ((LengthBytes == 0U) || (QspiFlashSize == 0U) ||
+			(SourceAddress >= QspiFlashSize) ||
+			(LengthBytes > (QspiFlashSize - SourceAddress))) {
+		fsbl_printf(DEBUG_GENERAL,
+				"QSPI read out of range addr=0x%08lx len=0x%08lx size=0x%08lx\r\n",
+				SourceAddress, LengthBytes, QspiFlashSize);
+		return XST_FAILURE;
+	}
+
+	return XST_SUCCESS;
+}
+
 /******************************************************************************/
 /**
 *
@@ -599,6 +613,7 @@ u32 QspiAccess( u32 SourceAddress, u32 DestinationAddress, u32 LengthBytes)
 	u32 BankSel = 0;
 	u32 LqspiCrReg;
 	u32 Status;
+	u32 AccessLengthBytes = LengthBytes;
 	u8 BankSwitchFlag = 1;
 
 	/*
@@ -608,14 +623,26 @@ u32 QspiAccess( u32 SourceAddress, u32 DestinationAddress, u32 LengthBytes)
 		/*
 		 * Check for non-word tail, add bytes to cover the end
 		 */
-		if ((LengthBytes%4) != 0){
-			LengthBytes += (4 - (LengthBytes & 0x00000003));
+		if ((AccessLengthBytes%4) != 0){
+			if (AccessLengthBytes > 0xFFFFFFFCU) {
+				fsbl_printf(DEBUG_GENERAL, "QSPI read length overflow\r\n");
+				return XST_FAILURE;
+			}
+			AccessLengthBytes += (4 - (AccessLengthBytes & 0x00000003));
+		}
+
+		if (ValidateQspiRange(SourceAddress, AccessLengthBytes) != XST_SUCCESS) {
+			return XST_FAILURE;
 		}
 
 		memcpy((void*)DestinationAddress,
 		      (const void*)(SourceAddress + FlashReadBaseAddress),
-		      (size_t)LengthBytes);
+		      (size_t)AccessLengthBytes);
 	} else {
+		if (ValidateQspiRange(SourceAddress, AccessLengthBytes) != XST_SUCCESS) {
+			return XST_FAILURE;
+		}
+
 		/*
 		 * Non Linear access
 		 */
@@ -874,4 +901,3 @@ u32 SendBankSelect(u8 BankSel)
 	return XST_SUCCESS;
 }
 #endif
-
