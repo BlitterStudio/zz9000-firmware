@@ -55,6 +55,9 @@
 #define ZZUSB_SPEED_FULL        1
 #define ZZUSB_SPEED_HIGH        2
 
+#define ZZUSB_FLAG_SPLIT        0x0001
+#define ZZUSB_FLAG_RESET_FSLS   0x0002
+
 #define ZZUSB_CMD_SIZE          48
 #define ZZUSB_DATA_OFFSET       64
 #define ZZUSB_MAX_XFER          (24576 - ZZUSB_DATA_OFFSET)
@@ -77,8 +80,14 @@ struct ZZUSBCommand {
     uint16_t setup_wValue;
     uint16_t setup_wIndex;
     uint16_t setup_wLength;
-    uint8_t  reserved[6];
+    uint16_t split_hub_addr;
+    uint16_t split_hub_port;
+    uint16_t flags;
+    uint16_t reserved;
 } __attribute__((packed));
+
+typedef char ZZUSBCommand_size_must_match_protocol[
+    (sizeof(struct ZZUSBCommand) == ZZUSB_CMD_SIZE) ? 1 : -1];
 
 static inline uint16_t be16(const volatile void *p) {
     volatile uint8_t *b = (volatile uint8_t *)p;

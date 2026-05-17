@@ -30,6 +30,7 @@
 
 struct zynq_ehci_priv _zynq_ehci;
 static int usb_host_initialized = 0;
+static int usb_host_scan_mode = -1;
 
 /*
  * https://www.cypress.com/file/134171/download
@@ -41,23 +42,31 @@ capabilities by an exchange of device requests. The requests that the host uses 
 standard requests and must support these requests on all USB devices."
  */
 
-int zz_usb_host_init() {
-	if (usb_host_initialized)
+static int zz_usb_host_init_mode(int scan_bus) {
+	if (usb_host_initialized && usb_host_scan_mode == scan_bus)
 		return 0;
 
 	printf("[USB] trying to probe zynq ehci...\n");
 	ehci_zynq_probe(&_zynq_ehci);
 	printf("[USB] probed!\n");
-	usb_init();
-	printf("[USB] initialized!\n");
+	if (scan_bus)
+		usb_init();
+	else
+		usb_init_proxy_only();
+	printf("[USB] initialized%s!\n", scan_bus ? "" : " (proxy-only)");
 	usb_host_initialized = 1;
+	usb_host_scan_mode = scan_bus;
 
 	return 0;
 }
 
+int zz_usb_host_init() {
+	return zz_usb_host_init_mode(0);
+}
+
 // returns 1 if storage device available
 int zz_usb_init() {
-	zz_usb_host_init();
+	zz_usb_host_init_mode(1);
 
 	if (!usb_stor_scan(1)) {
 		return 1;

@@ -151,7 +151,7 @@ static void ehci_set_usbmode(struct ehci_ctrl *ctrl)
 
 	reg_ptr = (uint32_t *)((u8 *)&ctrl->hcor->or_usbcmd + USBMODE);
 	tmp = ehci_readl(reg_ptr);
-	printf("[usbmode] before: %08x\n", tmp);
+	printf("[usbmode] before: %08lx\n", (unsigned long)tmp);
 	tmp |= USBMODE_CM_HC;
 #if defined(CONFIG_EHCI_MMIO_BIG_ENDIAN)
 	tmp |= USBMODE_BE;
@@ -160,7 +160,7 @@ static void ehci_set_usbmode(struct ehci_ctrl *ctrl)
 #endif
 	ehci_writel(reg_ptr, tmp);
 	tmp = ehci_readl(reg_ptr);
-	printf("[usbmode] after: %08x\n", tmp);
+	printf("[usbmode] after: %08lx\n", (unsigned long)tmp);
 }
 
 static void ehci_powerup_fixup(struct ehci_ctrl *ctrl, uint32_t *status_reg,
@@ -309,19 +309,39 @@ static void ehci_update_endpt2_dev_n_port(struct usb_device *udev,
 {
 	uint8_t portnr = 0;
 	uint8_t hubaddr = 0;
+	int parent_devnum = -1;
 
 	if (udev->speed != USB_SPEED_LOW && udev->speed != USB_SPEED_FULL)
 		return;
 
-	usb_find_usb2_hub_address_port(udev, &hubaddr, &portnr);
+	if (udev->parent) {
+		parent_devnum = udev->parent->devnum;
+	}
+
+	/*
+	 * A FS/LS device directly attached to the root port does not sit
+	 * behind an external high-speed hub TT. U-Boot's generic helper also
+	 * returns hub address 0 for this case, but keep the direct-root case
+	 * explicit here because the proxy path builds synthetic usb_device
+	 * objects rather than using the full hub enumerator.
+	 */
+	if (!udev->parent ||
+	    (udev->parent && udev->parent->parent == NULL) ||
+	    (udev->devnum == 0 && parent_devnum <= 1 && udev->portnr == 1)) {
+		hubaddr = 0;
+		portnr = udev->portnr ? udev->portnr : 1;
+	} else {
+		usb_find_usb2_hub_address_port(udev, &hubaddr, &portnr);
+	}
 
 	qh->qh_endpt2 |= cpu_to_hc32(QH_ENDPT2_PORTNUM(portnr) |
 				     QH_ENDPT2_HUBADDR(hubaddr));
 }
 
-int
-ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
-		   int length, struct devrequest *req)
+static int
+ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
+		   void *buffer, int length, struct devrequest *req,
+		   unsigned long timeout_ms)
 {
 	ALLOC_ALIGN_BUFFER(struct QH, qh, 1, USB_DMA_MINALIGN);
 	struct qTD *qtd;
@@ -601,7 +621,7 @@ ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
 	/* Wait for TDs to be processed. */
 	ts = get_timer(0);  // FIXME
 	vtd = &qtd[qtd_counter - 1];
-	timeout = USB_TIMEOUT_MS(pipe);
+	timeout = timeout_ms ? timeout_ms : USB_TIMEOUT_MS(pipe);
 	do {
 		/* Invalidate dcache */
 		invalidate_dcache_range((unsigned long)&ctrl->qh_list,
@@ -634,28 +654,28 @@ ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
 	if (QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE) {
 		printf("EHCI timeout\n");
 		printf("[ehci-dbg] === AFTER TIMEOUT ===\n");
-		printf("[ehci-dbg] cmd=%08x sts=%08x asynclist=%08x configflag=%08x portsc=%08x\n",
-		       ehci_readl(&ctrl->hcor->or_usbcmd),
-		       ehci_readl(&ctrl->hcor->or_usbsts),
-		       ehci_readl(&ctrl->hcor->or_asynclistaddr),
-		       ehci_readl(&ctrl->hcor->or_configflag),
-		       ehci_readl(&ctrl->hcor->or_portsc[0]));
-		printf("[ehci-dbg] qh_endpt1=%08x qh_endpt2=%08x\n",
-		       hc32_to_cpu(qh->qh_endpt1),
-		       hc32_to_cpu(qh->qh_endpt2));
-		printf("[ehci-dbg] qh_overlay after: next=%08x altnext=%08x token=%08x\n",
-		       hc32_to_cpu(qh->qh_overlay.qt_next),
-		       hc32_to_cpu(qh->qh_overlay.qt_altnext),
-		       hc32_to_cpu(qh->qh_overlay.qt_token));
+		printf("[ehci-dbg] cmd=%08lx sts=%08lx asynclist=%08lx configflag=%08lx portsc=%08lx\n",
+		       (unsigned long)ehci_readl(&ctrl->hcor->or_usbcmd),
+		       (unsigned long)ehci_readl(&ctrl->hcor->or_usbsts),
+		       (unsigned long)ehci_readl(&ctrl->hcor->or_asynclistaddr),
+		       (unsigned long)ehci_readl(&ctrl->hcor->or_configflag),
+		       (unsigned long)ehci_readl(&ctrl->hcor->or_portsc[0]));
+		printf("[ehci-dbg] qh_endpt1=%08lx qh_endpt2=%08lx\n",
+		       (unsigned long)hc32_to_cpu(qh->qh_endpt1),
+		       (unsigned long)hc32_to_cpu(qh->qh_endpt2));
+		printf("[ehci-dbg] qh_overlay after: next=%08lx altnext=%08lx token=%08lx\n",
+		       (unsigned long)hc32_to_cpu(qh->qh_overlay.qt_next),
+		       (unsigned long)hc32_to_cpu(qh->qh_overlay.qt_altnext),
+		       (unsigned long)hc32_to_cpu(qh->qh_overlay.qt_token));
 		for (int i = 0; i < qtd_count; i++) {
-			printf("[ehci-dbg] qtd[%d] after: next=%08x altnext=%08x token=%08x buf0=%08x\n",
+			printf("[ehci-dbg] qtd[%d] after: next=%08lx altnext=%08lx token=%08lx buf0=%08lx\n",
 			       i,
-			       hc32_to_cpu(qtd[i].qt_next),
-			       hc32_to_cpu(qtd[i].qt_altnext),
-			       hc32_to_cpu(qtd[i].qt_token),
-			       hc32_to_cpu(qtd[i].qt_buffer[0]));
+			       (unsigned long)hc32_to_cpu(qtd[i].qt_next),
+			       (unsigned long)hc32_to_cpu(qtd[i].qt_altnext),
+			       (unsigned long)hc32_to_cpu(qtd[i].qt_token),
+			       (unsigned long)hc32_to_cpu(qtd[i].qt_buffer[0]));
 		}
-		printf("[ehci-dbg] dev: addr=%d speed=%d maxpkt=%d ep=%d dir=%s\n",
+		printf("[ehci-dbg] dev: addr=%d speed=%d maxpkt=%d ep=%lu dir=%s\n",
 		       dev->devnum, dev->speed, dev->maxpacketsize,
 		       usb_pipeendpoint(pipe),
 		       usb_pipein(pipe) ? "IN" : "OUT");
@@ -773,6 +793,20 @@ ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
 fail:
 	free(qtd);
 	return -1;
+}
+
+int ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
+		   int length, struct devrequest *req)
+{
+	return ehci_submit_async_internal(dev, pipe, buffer, length, req, 0);
+}
+
+int ehci_submit_async_timeout(struct usb_device *dev, unsigned long pipe,
+		   void *buffer, int length, struct devrequest *req,
+		   unsigned long timeout_ms)
+{
+	return ehci_submit_async_internal(dev, pipe, buffer, length, req,
+					  timeout_ms);
 }
 
 static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
@@ -1321,12 +1355,12 @@ enable_periodic(struct ehci_ctrl *ctrl)
 	ehci_writel(&hcor->or_usbcmd, cmd);
 
 	ret = handshake((uint32_t *)&hcor->or_usbsts,
-			STS_PSS, STS_PSS, 100 * 1000);
+			STS_PSS, STS_PSS, 1000);
 	if (ret < 0) {
 		printf("EHCI failed: timeout when enabling periodic list\n");
 		return -ETIMEDOUT;
 	}
-	udelay(1000);
+	udelay(100);
 	return 0;
 }
 
@@ -1342,7 +1376,7 @@ disable_periodic(struct ehci_ctrl *ctrl)
 	ehci_writel(&hcor->or_usbcmd, cmd);
 
 	ret = handshake((uint32_t *)&hcor->or_usbsts,
-			STS_PSS, 0, 100 * 1000);
+			STS_PSS, 0, 1000);
 	if (ret < 0) {
 		printf("EHCI failed: timeout when disabling periodic list\n");
 		return -ETIMEDOUT;
@@ -1600,7 +1634,7 @@ static int _ehci_destroy_int_queue(struct usb_device *dev,
 	ctrl->periodic_schedules--;
 
 	struct QH *cur = &ctrl->periodic_queue;
-	timeout = get_timer(0) + 500; /* abort after 500ms */
+	timeout = get_timer(0) + 20; /* abort after 20ms */
 	while (!(cur->qh_link & cpu_to_hc32(QH_LINK_TERMINATE))) {
 		if (NEXT_QH(cur) == queue->first) {
 			cur->qh_link = queue->last->qh_link;
@@ -1636,12 +1670,13 @@ out:
  * return to servicing the Amiga Zorro bus quickly. An idle HID device
  * (mouse/keyboard) NAKs the IN token forever and the qTD never retires;
  * the old 100 ms budget starved Zorro DTACK and guru-reset the Amiga.
- * 16 ms gives the integrated TT room for ~16 FS-split cycles so actual
- * device activity has a good chance of retiring a qTD within one
- * Poseidon call, but still well below the Zorro-bus blocking budget we
- * proved safe at 4 ms (no guru observed under continuous HID polling).
+ * Keep this below the Zorro-bus blocking budget. A high-speed hub with
+ * a few idle HID-style interrupt endpoints can otherwise make the ARM
+ * spend most of its time polling EHCI instead of servicing the Amiga.
+ * Missed reports are harmless: the Amiga-side driver keeps the IOR
+ * queued and retries later.
  */
-#define EHCI_INT_POLL_MS 16
+#define EHCI_INT_POLL_MS 2
 
 static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 				void *buffer, int length, int interval)

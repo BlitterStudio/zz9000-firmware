@@ -274,11 +274,12 @@ int ehci_zynq_probe(struct zynq_ehci_priv *priv);
 
 /*
  * Runtime ULPI XCVR-select switch for the Zynq PS USB ChipIdea
- * EHCI. Called from the reset handler to drop the PHY into FS4LS
- * mode when a low-speed device is attached, or switch back to HS
- * mode for high-speed devices. See ehci-zynq.c for rationale.
+ * EHCI. Called from the reset handler to use FS4LS while resetting
+ * FS/LS devices, and then to select the actual post-reset device
+ * speed. See ehci-zynq.c for rationale.
  */
 int ehci_zynq_set_phy_mode(int for_low_speed);
+int ehci_zynq_set_phy_speed(enum usb_device_speed speed);
 
 /**
  * ehci_set_controller_info() - Set up private data for the controller
@@ -321,5 +322,8 @@ int ehci_shutdown_phy(struct udevice *dev, struct phy *phy);
 
 int ehci_submit_async(struct usb_device *dev, unsigned long pipe,
 		      void *buffer, int length, struct devrequest *req);
+int ehci_submit_async_timeout(struct usb_device *dev, unsigned long pipe,
+		      void *buffer, int length, struct devrequest *req,
+		      unsigned long timeout_ms);
 
 #endif /* USB_EHCI_H */

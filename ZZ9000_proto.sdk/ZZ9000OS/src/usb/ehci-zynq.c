@@ -161,30 +161,41 @@ usleep(10000);
 }
 
 /*
- * Runtime ULPI transceiver-select switch. Called from the reset
- * handler (usb_proxy.c handle_reset_port) right after it detects
- * the attached device's line state, BEFORE it asserts port reset.
- *
- *   for_low_speed = 1  -> ULPI_FC_FS4LS (LS/FS composite mode)
- *   for_low_speed = 0  -> ULPI_FC_HIGH_SPEED (HS mode)
- *
- * This lets us keep the PHY in HS mode by default (so HS devices
- * get native 480 Mbit/s throughput) while temporarily dropping to
- * FS4LS for LS attachments, which won't complete chirp negotiation
- * in HS mode on this ChipIdea controller.
+ * Runtime ULPI transceiver-select switch. The reset handler first
+ * uses FS4LS while asserting root-port reset for FS/LS devices, then
+ * selects the actual post-reset wire speed before the first packet.
+ * LS devices time out if we leave the PHY in FS4LS for the data phase:
+ * the EHCI QH says low-speed, but the ULPI transmitter remains in the
+ * reset helper mode.
  */
-int ehci_zynq_set_phy_mode(int for_low_speed)
+static int ehci_zynq_set_phy_xcvr(unsigned xcvr)
 {
 	struct usb_ehci *ehci = (struct usb_ehci *)USB_BASE_ADDR;
 	struct ulpi_viewport ulpi_vp;
 	struct ulpi_regs *ulpi = (struct ulpi_regs *)0;
-	unsigned xcvr;
 
 	ulpi_vp.viewport_addr = (u32)&ehci->ulpi_viewpoint;
 	ulpi_vp.port_num = 0;
 
-	xcvr = for_low_speed ? ULPI_FC_FS4LS : ULPI_FC_HIGH_SPEED;
-
 	return ulpi_write(&ulpi_vp, &ulpi->function_ctrl,
 	                  xcvr | ULPI_FC_OPMODE_NORMAL | ULPI_FC_SUSPENDM);
+}
+
+int ehci_zynq_set_phy_mode(int for_low_speed)
+{
+	return ehci_zynq_set_phy_xcvr(for_low_speed ?
+				      ULPI_FC_FS4LS : ULPI_FC_HIGH_SPEED);
+}
+
+int ehci_zynq_set_phy_speed(enum usb_device_speed speed)
+{
+	switch (speed) {
+	case USB_SPEED_LOW:
+		return ehci_zynq_set_phy_xcvr(ULPI_FC_LOW_SPEED);
+	case USB_SPEED_FULL:
+		return ehci_zynq_set_phy_xcvr(ULPI_FC_FULL_SPEED);
+	case USB_SPEED_HIGH:
+	default:
+		return ehci_zynq_set_phy_xcvr(ULPI_FC_HIGH_SPEED);
+	}
 }

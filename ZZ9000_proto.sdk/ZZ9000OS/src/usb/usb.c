@@ -54,6 +54,20 @@ static int dev_index;
 
 #define CONFIG_USB_MAX_CONTROLLER_COUNT 1
 
+static void usb_reset_device_table(void)
+{
+	int i;
+
+	dev_index = 0;
+	asynch_allowed = 1;
+	usb_hub_reset();
+
+	for (i = 0; i < USB_MAX_DEVICE; i++) {
+		memset(&usb_dev[i], 0, sizeof(struct usb_device));
+		usb_dev[i].devnum = -1;
+	}
+}
+
 /***************************************************************************
  * Init USB Device
  */
@@ -65,15 +79,7 @@ int usb_init(void)
 	int controllers_initialized = 0;
 	int ret;
 
-	dev_index = 0;
-	asynch_allowed = 1;
-	usb_hub_reset();
-
-	/* first make all devices unknown */
-	for (i = 0; i < USB_MAX_DEVICE; i++) {
-		memset(&usb_dev[i], 0, sizeof(struct usb_device));
-		usb_dev[i].devnum = -1;
-	}
+	usb_reset_device_table();
 
 	/* init low_level USB */
 	for (i = 0; i < CONFIG_USB_MAX_CONTROLLER_COUNT; i++) {
@@ -125,6 +131,48 @@ int usb_init(void)
 		puts("USB error: all controllers failed lowlevel init\n");
 
 	return usb_started ? 0 : -ENODEV;
+}
+
+int usb_init_proxy_only(void)
+{
+	void *ctrl = NULL;
+	struct usb_device *dev;
+	int ret;
+
+	usb_started = 0;
+	usb_reset_device_table();
+
+	printf("USB0:   ");
+	ret = usb_lowlevel_init(0, USB_INIT_HOST, &ctrl);
+	if (ret) {
+		printf("lowlevel init failed\n");
+		return ret;
+	}
+
+	/*
+	 * Poseidon owns device enumeration. Create only the synthetic root
+	 * device entry used by proxy split-transaction parent chains, and
+	 * do not walk external hubs or configure downstream devices here.
+	 */
+	ret = usb_alloc_new_device(ctrl, &dev);
+	if (ret)
+		return ret;
+	/*
+	 * This is not a real enumerated device. It represents the EHCI root
+	 * hub for proxy-created parent chains, whose control pipe address is
+	 * 0. Leaving usb_alloc_new_device()'s normal devnum=1 here makes the
+	 * generic EHCI TT helper encode hub address 1 for direct root-port
+	 * FS/LS transfers, which is wrong and causes low-speed EP0 timeouts.
+	 */
+	dev->devnum = 0;
+	dev->speed = USB_SPEED_HIGH;
+	dev->maxpacketsize = PACKET_SIZE_64;
+	dev->parent = NULL;
+	dev->portnr = 0;
+	usb_started = 1;
+
+	printf("[usb] proxy-only init; synthetic root devnum=0; bus scan skipped\n");
+	return 0;
 }
 
 /******************************************************************************

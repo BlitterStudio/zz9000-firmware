@@ -33,8 +33,17 @@
 #define ALIGN(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
 #endif
 
+#define ZZUSB_PROXY_MAX_TIMEOUT_MS 1000
+
+/* PORTSC bits (Zynq/ChipIdea extensions beyond standard EHCI) */
+#define PORTSC_PFSC     (1U << 24)  /* Port Force Full Speed Connect */
+#define PORTSC_PHCD     (1U << 23)  /* PHY Clock Disable (suspend) */
+#define PORTSC_LS_K     (1U << 10)  /* Line status K = low-speed attach */
+#define PORTSC_LS_MASK  0x00000C00
+
 static unsigned int toggle_bits[128][2];
 static uint8_t dma_buf[24576] __attribute__((aligned(32)));
+static int root_port_speed_zz = ZZUSB_SPEED_FULL;
 
 static struct ehci_ctrl *get_ehci_ctrl(void)
 {
@@ -53,18 +62,93 @@ static int zz_speed_to_usb(int zz)
     }
 }
 
-static int get_real_speed_from_hw(void)
+static int portsc_to_zz_speed(uint32_t reg)
 {
-    struct ehci_ctrl *ctrl = get_ehci_ctrl();
-    if (!ctrl) return -1;
-    uint32_t reg = ehci_readl(&ctrl->hcor->or_portsc[0]);
-    int pspd = (reg >> 26) & 0x3;
-    if (pspd == 2) return 3;  /* USB_SPEED_HIGH = 3 in enum */
-    if (pspd == 1) return 1;  /* USB_SPEED_LOW = 1 in enum */
-    return 2;  /* USB_SPEED_FULL = 2 in enum */
+    int pspd = PORTSC_PSPD(reg);
+
+    if (pspd == PORTSC_PSPD_HS)
+        return ZZUSB_SPEED_HIGH;
+    if (pspd == PORTSC_PSPD_LS || (reg & PORTSC_LS_MASK) == PORTSC_LS_K)
+        return ZZUSB_SPEED_LOW;
+    return ZZUSB_SPEED_FULL;
 }
+
+static int read_data_length(volatile struct ZZUSBCommand *cmd,
+                            uint32_t *data_len)
+{
+    *data_len = be32(&cmd->data_length);
+    if (*data_len > ZZUSB_MAX_XFER) {
+        printf("[usb-proxy] bad data_length=%lu max=%lu\n",
+               (unsigned long)*data_len, (unsigned long)ZZUSB_MAX_XFER);
+        put_be32(&cmd->actual_length, 0);
+        return 0;
+    }
+    return 1;
+}
+
+static unsigned long read_timeout_ms(volatile struct ZZUSBCommand *cmd)
+{
+    uint32_t timeout_ms = be32(&cmd->timeout_ms);
+
+    /*
+     * The Amiga side is blocked while a proxy command is in flight.
+     * Respect explicit request timeouts, but cap them so a dead device
+     * cannot hold the Zorro bus for several seconds in firmware.
+     */
+    if (timeout_ms > ZZUSB_PROXY_MAX_TIMEOUT_MS)
+        timeout_ms = ZZUSB_PROXY_MAX_TIMEOUT_MS;
+
+    return timeout_ms;
+}
+
+static int read_split(volatile struct ZZUSBCommand *cmd,
+                      int *hub_addr, int *hub_port)
+{
+    uint16_t flags = be16(&cmd->flags);
+
+    *hub_addr = be16(&cmd->split_hub_addr);
+    *hub_port = be16(&cmd->split_hub_port);
+
+    if (!(flags & ZZUSB_FLAG_SPLIT))
+        return 0;
+    if (*hub_addr <= 0 || *hub_addr >= 128)
+        return 0;
+    if (*hub_port <= 0 || *hub_port > 15)
+        return 0;
+
+    return 1;
+}
+
+static void drop_direct_root_split(struct ehci_ctrl *ctrl,
+                                   const char *tag,
+                                   int speed_usb,
+                                   struct usb_device **split_hub_ptr,
+                                   int *split_hub_addr,
+                                   int *split_hub_port)
+{
+    uint32_t portsc_now;
+
+    if (!ctrl || !split_hub_ptr || !*split_hub_ptr)
+        return;
+    if (speed_usb != USB_SPEED_LOW && speed_usb != USB_SPEED_FULL)
+        return;
+
+    portsc_now = ehci_readl(&ctrl->hcor->or_portsc[0]);
+    if (PORTSC_PSPD(portsc_now) == PORTSC_PSPD_HS)
+        return;
+
+    printf("[usb-proxy] %s direct root: ignoring split hub=%d port=%d portsc=%08x\n",
+           tag, *split_hub_addr, *split_hub_port,
+           (unsigned int)portsc_now);
+    *split_hub_ptr = NULL;
+    *split_hub_addr = 0;
+    *split_hub_port = 0;
+}
+
 static void prep_dev(struct usb_device *dev, int addr, int speed_usb,
-                     int maxpkt, int endpoint)
+                     int maxpkt, int endpoint,
+                     struct usb_device *split_hub,
+                     int split_hub_addr, int split_hub_port)
 {
     struct usb_device *root;
 
@@ -78,7 +162,18 @@ static void prep_dev(struct usb_device *dev, int addr, int speed_usb,
     dev->controller = get_ehci_ctrl();
     dev->status = USB_ST_NOT_PROC;
     root = usb_get_dev_index(0);
-    if (root && (speed_usb == USB_SPEED_LOW || speed_usb == USB_SPEED_FULL)) {
+
+    if (root && split_hub && (speed_usb == USB_SPEED_LOW || speed_usb == USB_SPEED_FULL)) {
+        memset(split_hub, 0, sizeof(*split_hub));
+        split_hub->devnum = split_hub_addr;
+        split_hub->speed = USB_SPEED_HIGH;
+        split_hub->maxpacketsize = 64;
+        split_hub->controller = dev->controller;
+        split_hub->parent = root;
+        split_hub->portnr = 1;
+        dev->parent = split_hub;
+        dev->portnr = split_hub_port;
+    } else if (root && (speed_usb == USB_SPEED_LOW || speed_usb == USB_SPEED_FULL)) {
         dev->parent = root;
         dev->portnr = 1;
     }
@@ -104,21 +199,16 @@ static void save_toggle(int addr, struct usb_device *dev)
 
 static uint16_t usb_status_to_zz(unsigned long status)
 {
+    if (status & (USB_ST_BABBLE_DET | USB_ST_BUF_ERR))
+        return ZZUSB_STATUS_BABBLE;
+    if (status & USB_ST_CRC_ERR)
+        return ZZUSB_STATUS_CRC;
     if (status & USB_ST_STALLED)
         return ZZUSB_STATUS_STALL;
     if (status & USB_ST_NAK_REC)
         return ZZUSB_STATUS_NAK;
-    if (status & USB_ST_CRC_ERR)
-        return ZZUSB_STATUS_CRC;
-    if (status & (USB_ST_BABBLE_DET | USB_ST_BUF_ERR))
-        return ZZUSB_STATUS_BABBLE;
     return ZZUSB_STATUS_ERROR;
 }
-
-/* PORTSC bits (Zynq/ChipIdea extensions beyond standard EHCI) */
-#define PORTSC_PFSC  (1U << 24)  /* Port Force Full Speed Connect */
-#define PORTSC_PHCD  (1U << 23)  /* PHY Clock Disable (suspend) */
-#define PORTSC_LS_K  (1U << 10)  /* Line status K = low-speed attach */
 
 static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
 {
@@ -129,9 +219,14 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
     uint32_t *portsc = (uint32_t *)&ctrl->hcor->or_portsc[0];
     uint32_t reg_pre, reg, reg_after_hold;
     int ret;
-    int is_low_speed_pre;
+    int reset_flags;
+    int speed_hint;
+    int use_fsls_reset;
 
     reg_pre = ehci_readl(portsc);
+    reset_flags = be16(&cmd->flags);
+    speed_hint = be16(&cmd->speed);
+    use_fsls_reset = (reset_flags & ZZUSB_FLAG_RESET_FSLS) ? 1 : 0;
 
     /*
      * If the port already has PR=1 latched from a prior wedged attempt,
@@ -140,11 +235,21 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
      * zeroed so we don't inadvertently ACK status changes).
      */
     if (reg_pre & EHCI_PS_PR) {
+        if (use_fsls_reset)
+            ehci_zynq_set_phy_mode(1);
         reg = reg_pre & ~EHCI_PS_CLEAR;
+        if (use_fsls_reset)
+            reg |= PORTSC_PFSC;
+        else
+            reg &= ~PORTSC_PFSC;
         reg &= ~EHCI_PS_PR;
         ehci_writel(portsc, reg);
-        /* brief settle */
-        udelay(100);
+        for (int i = 0; i < 800; i++) {
+            reg_pre = ehci_readl(portsc);
+            if (!(reg_pre & EHCI_PS_PR))
+                break;
+            udelay(5);
+        }
         reg_pre = ehci_readl(portsc);
     }
 
@@ -153,33 +258,43 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
      * show line status = K (D- pull-up); FS/HS devices show J.
      *
      * Line status bits 11:10; K = 01.
+     *
+     * The Amiga-side root hub code only sets ZZUSB_FLAG_RESET_FSLS for a
+     * confirmed low-speed root attach. Full-speed and high-speed devices
+     * both present J before reset, so a full-speed pre-reset hint must not
+     * force PFSC or high-speed chirp will be suppressed for USB2/USB3
+     * devices. Keep this hint explicit: ZZUSB_SPEED_LOW is encoded as 0,
+     * so a zero/unknown speed value alone must not force FS/LS mode.
      */
-    is_low_speed_pre = ((reg_pre & 0x00000C00) == PORTSC_LS_K);
+    if ((reg_pre & PORTSC_LS_MASK) == PORTSC_LS_K)
+        use_fsls_reset = 1;
 
     /*
      * Dynamic ULPI transceiver-select switch. HS mode is the default
      * resting state for the PHY (see ehci-zynq.c init), so HS devices
-     * negotiate 480 Mbit/s natively. For LS devices, HS chirp
-     * negotiation wedges the HC, so we drop the PHY to FS4LS mode
+     * negotiate 480 Mbit/s natively. For FS/LS devices, HS chirp
+     * negotiation can wedge the HC, so we drop the PHY to FS4LS mode
      * BEFORE asserting port reset. The call gives the PHY a few
      * microseconds to settle before we kick the reset.
      */
-    ehci_zynq_set_phy_mode(is_low_speed_pre);
+    ehci_zynq_set_phy_mode(use_fsls_reset);
     udelay(100);
 
     /*
      * Assert reset: set PR=1, clear PE, and preserve other bits.
      * W1C bits (CSC/PEC/OCC) must be written as 0 so we don't
      * accidentally acknowledge changes we haven't processed yet.
-     * For LS devices also set PFSC to disable HS chirp on the HC
+     * For FS/LS devices also set PFSC to disable HS chirp on the HC
      * side (defensive; PHY is already in FS4LS).
      */
     reg = reg_pre;
     reg &= ~EHCI_PS_CLEAR;
     reg |= EHCI_PS_PR;
     reg &= ~EHCI_PS_PE;
-    if (is_low_speed_pre)
+    if (use_fsls_reset)
         reg |= PORTSC_PFSC;
+    else
+        reg &= ~PORTSC_PFSC;
     ehci_writel(portsc, reg);
 
     /* USB 2.0 spec: hold reset for 50ms on root ports. */
@@ -212,18 +327,30 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
         udelay(5);
     }
     if (ret < 0) {
+        int stuck_speed;
+
         reg = ehci_readl(portsc);
+        stuck_speed = portsc_to_zz_speed(reg);
+        root_port_speed_zz = stuck_speed;
+        put_be16(&cmd->speed, stuck_speed);
         printf("[usb-proxy] reset: PR didn't clear "
-               "(pre=%08x after_hold=%08x now=%08x)\n",
+               "(pre=%08x after_hold=%08x now=%08x hint=%d path=%d speed=%d)\n",
                (unsigned int)reg_pre,
                (unsigned int)reg_after_hold,
-               (unsigned int)reg);
+               (unsigned int)reg,
+               speed_hint,
+               use_fsls_reset,
+               stuck_speed);
+        if (stuck_speed == ZZUSB_SPEED_LOW)
+            return ZZUSB_STATUS_OFFLINE;
         return ZZUSB_STATUS_ERROR;
     }
 
     reg = ehci_readl(portsc);
 
     if (!(reg & EHCI_PS_CS)) {
+        root_port_speed_zz = ZZUSB_SPEED_FULL;
+        ehci_zynq_set_phy_speed(USB_SPEED_HIGH);
         printf("[usb-proxy] reset: no device connected after reset "
                "(portsc=%08x)\n", (unsigned int)reg);
         return ZZUSB_STATUS_ERROR;
@@ -236,11 +363,20 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
         return ZZUSB_STATUS_ERROR;
     }
 
-    int pspd = PORTSC_PSPD(reg);
-    int zz_speed;
-    if (pspd == PORTSC_PSPD_HS) zz_speed = ZZUSB_SPEED_HIGH;
-    else if (pspd == PORTSC_PSPD_LS) zz_speed = ZZUSB_SPEED_LOW;
-    else zz_speed = ZZUSB_SPEED_FULL;
+    int zz_speed = portsc_to_zz_speed(reg);
+    int usb_speed = zz_speed_to_usb(zz_speed);
+    int phy_rc;
+    root_port_speed_zz = zz_speed;
+
+    /*
+     * FS4LS is useful while asserting reset because it avoids the
+     * ChipIdea PR latch problem on FS/LS attach. Once the controller has
+     * classified the device, switch the ULPI function-control register to
+     * the actual wire speed before the first address-0 transaction.
+     */
+    phy_rc = ehci_zynq_set_phy_speed(usb_speed);
+    udelay(100);
+    reg = ehci_readl(portsc);
 
     /* USB 2.0 TRSTRCY recovery. 10 ms is the spec floor. */
     mdelay(10);
@@ -248,9 +384,10 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
     toggle_bits[0][0] = 0;
     toggle_bits[0][1] = 0;
 
-    printf("[usb-proxy] reset done: speed=%d portsc=%08x%s\n",
+    printf("[usb-proxy] reset done: speed=%d portsc=%08x phy=%d%s\n",
            zz_speed, (unsigned int)reg,
-           is_low_speed_pre ? " (LS/PFSC path)" : "");
+           phy_rc,
+           use_fsls_reset ? " (FSLS/PFSC path)" : "");
     put_be16(&cmd->speed, zz_speed);
     return ZZUSB_STATUS_OK;
 }
@@ -267,8 +404,17 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
     int maxpkt = be16(&cmd->max_pkt_size);
     int speed_zz = be16(&cmd->speed);
     int speed_usb = zz_speed_to_usb(speed_zz);
-    int hw_speed = get_real_speed_from_hw();
-    int data_len = be32(&cmd->data_length);
+    uint32_t portsc_now = 0;
+    uint32_t data_len_u32;
+    if (!read_data_length(cmd, &data_len_u32))
+        return ZZUSB_STATUS_BADPARAM;
+    int data_len = (int)data_len_u32;
+    int split_hub_addr = 0;
+    int split_hub_port = 0;
+    struct usb_device split_hub;
+    struct usb_device *split_hub_ptr =
+        read_split(cmd, &split_hub_addr, &split_hub_port) ? &split_hub : NULL;
+    int direct_root_addr0 = 0;
 
     /* No per-control-xfer trace in the hot path: the UART is
      * polled-blocking and every line costs milliseconds of
@@ -277,15 +423,62 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
      * [usb-proxy] ctrl fail / set_addr / reset prints below
      * still fire for rare events and are enough for triage. */
 
-    if (hw_speed >= 0 && hw_speed != speed_usb) {
-        speed_usb = hw_speed;
+    if (dev_addr == 0 && endpoint == 0) {
+        int root_speed_zz;
+        int root_pspd;
+
+        portsc_now = ehci_readl(&ctrl->hcor->or_portsc[0]);
+        root_pspd = PORTSC_PSPD(portsc_now);
+        root_speed_zz = (root_pspd == PORTSC_PSPD_HS)
+                        ? ZZUSB_SPEED_HIGH : root_port_speed_zz;
+        if (root_pspd != PORTSC_PSPD_HS) {
+            if (split_hub_ptr) {
+                printf("[usb-proxy] ctrl0 direct root: ignoring split hub=%d port=%d portsc=%08x\n",
+                       split_hub_addr, split_hub_port,
+                       (unsigned int)portsc_now);
+                split_hub_ptr = NULL;
+                split_hub_addr = 0;
+                split_hub_port = 0;
+            }
+            direct_root_addr0 = 1;
+        }
+        if (root_speed_zz != speed_zz) {
+            printf("[usb-proxy] ctrl0 root speed override: cmd=%d port=%d portsc=%08x\n",
+                   speed_zz, root_speed_zz, (unsigned int)portsc_now);
+            speed_zz = root_speed_zz;
+            speed_usb = zz_speed_to_usb(speed_zz);
+            put_be16(&cmd->speed, speed_zz);
+        }
     }
+
+    drop_direct_root_split(ctrl, "ctrl", speed_usb,
+                           &split_hub_ptr,
+                           &split_hub_addr, &split_hub_port);
 
     if (endpoint == 0 && speed_usb == USB_SPEED_HIGH && maxpkt < 64)
         maxpkt = 64;
 
+    if (direct_root_addr0 &&
+        speed_zz == ZZUSB_SPEED_LOW &&
+        cmd->setup_bRequestType == 0x80 &&
+        cmd->setup_bRequest == 0x06 &&
+        le16(&cmd->setup_wValue) == 0x0100) {
+        /*
+         * The Zynq/ChipIdea EHCI root port does not retire direct
+         * low-speed EP0 transactions here, even with the QH and ULPI
+         * speed set correctly. Fail fast so the Amiga-side driver can
+         * hide the unsupported direct-LS device without blocking Zorro
+         * long enough to crash the OS. LS behind a high-speed hub still
+         * uses the split path above.
+         */
+        printf("[usb-proxy] direct LS root EP0 unsupported; offline\n");
+        put_be32(&cmd->actual_length, 0);
+        return ZZUSB_STATUS_OFFLINE;
+    }
+
     struct usb_device dev;
-    prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint);
+    prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint,
+             split_hub_ptr, split_hub_addr, split_hub_port);
 
     unsigned long pipe;
     if (cmd->setup_bRequestType & 0x80)
@@ -315,7 +508,17 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
         buf = dma_buf;
     }
 
-    int result = ehci_submit_async(&dev, pipe, buf, data_len, &setup);
+    unsigned long timeout_ms = read_timeout_ms(cmd);
+    if (direct_root_addr0 &&
+        speed_usb == USB_SPEED_LOW &&
+        setup.requesttype == 0x80 &&
+        setup.request == 0x06 &&
+        setup.value == 0x0100) {
+        timeout_ms = 25;
+    }
+
+    int result = ehci_submit_async_timeout(&dev, pipe, buf, data_len, &setup,
+                                           timeout_ms);
 
     save_toggle(dev_addr, &dev);
 
@@ -375,19 +578,35 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
 static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
                              uint8_t *data_buf)
 {
+    struct ehci_ctrl *ctrl = get_ehci_ctrl();
+    if (!ctrl)
+        return ZZUSB_STATUS_ERROR;
+
     int dev_addr = be32(&cmd->dev_addr);
     int endpoint = be16(&cmd->endpoint);
     int maxpkt = be16(&cmd->max_pkt_size);
     int speed_usb = zz_speed_to_usb(be16(&cmd->speed));
-    int data_len = be32(&cmd->data_length);
+    uint32_t data_len_u32;
+    if (!read_data_length(cmd, &data_len_u32))
+        return ZZUSB_STATUS_BADPARAM;
+    int data_len = (int)data_len_u32;
     int is_in = (be16(&cmd->direction) & 0x80);
 
     /* Per-transfer CBW decode disabled — uncomment for deep
      * mass-storage debugging. Uses volatile to avoid GCC -O2
      * coalescing byte reads into a misaligned LDR that traps. */
 
+    int split_hub_addr = 0;
+    int split_hub_port = 0;
+    struct usb_device split_hub;
     struct usb_device dev;
-    prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint);
+    struct usb_device *split_hub_ptr =
+        read_split(cmd, &split_hub_addr, &split_hub_port) ? &split_hub : NULL;
+    drop_direct_root_split(ctrl, "bulk", speed_usb,
+                           &split_hub_ptr,
+                           &split_hub_addr, &split_hub_port);
+    prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint,
+             split_hub_ptr, split_hub_addr, split_hub_port);
 
     unsigned long pipe;
     if (is_in)
@@ -411,8 +630,10 @@ static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
         }
     }
 
-    int result = ehci_submit_async(&dev, pipe, data_len > 0 ? xfer_buf : NULL,
-                                    data_len, NULL);
+    int result = ehci_submit_async_timeout(&dev, pipe,
+                                           data_len > 0 ? xfer_buf : NULL,
+                                           data_len, NULL,
+                                           read_timeout_ms(cmd));
 
     save_toggle(dev_addr, &dev);
 
@@ -435,15 +656,31 @@ static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
 static uint16_t handle_int_xfer(volatile struct ZZUSBCommand *cmd,
                             uint8_t *data_buf)
 {
+    struct ehci_ctrl *ctrl = get_ehci_ctrl();
+    if (!ctrl)
+        return ZZUSB_STATUS_ERROR;
+
     int dev_addr = be32(&cmd->dev_addr);
     int endpoint = be16(&cmd->endpoint);
     int maxpkt = be16(&cmd->max_pkt_size);
     int speed_usb = zz_speed_to_usb(be16(&cmd->speed));
-    int data_len = be32(&cmd->data_length);
+    uint32_t data_len_u32;
+    if (!read_data_length(cmd, &data_len_u32))
+        return ZZUSB_STATUS_BADPARAM;
+    int data_len = (int)data_len_u32;
     int is_in = (be16(&cmd->direction) & 0x80);
 
+    int split_hub_addr = 0;
+    int split_hub_port = 0;
+    struct usb_device split_hub;
     struct usb_device dev;
-    prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint);
+    struct usb_device *split_hub_ptr =
+        read_split(cmd, &split_hub_addr, &split_hub_port) ? &split_hub : NULL;
+    drop_direct_root_split(ctrl, "int", speed_usb,
+                           &split_hub_ptr,
+                           &split_hub_addr, &split_hub_port);
+    prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint,
+             split_hub_ptr, split_hub_addr, split_hub_port);
 
     unsigned long pipe;
     if (is_in)
@@ -490,13 +727,26 @@ static uint16_t handle_int_xfer(volatile struct ZZUSBCommand *cmd,
 
 static uint16_t handle_clear_stall(volatile struct ZZUSBCommand *cmd)
 {
+    struct ehci_ctrl *ctrl = get_ehci_ctrl();
+    if (!ctrl)
+        return ZZUSB_STATUS_ERROR;
+
     int dev_addr = be32(&cmd->dev_addr);
     int endpoint = be16(&cmd->endpoint);
     int maxpkt = be16(&cmd->max_pkt_size);
     int speed_usb = zz_speed_to_usb(be16(&cmd->speed));
 
+    int split_hub_addr = 0;
+    int split_hub_port = 0;
+    struct usb_device split_hub;
     struct usb_device dev;
-    prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint);
+    struct usb_device *split_hub_ptr =
+        read_split(cmd, &split_hub_addr, &split_hub_port) ? &split_hub : NULL;
+    drop_direct_root_split(ctrl, "clear-stall", speed_usb,
+                           &split_hub_ptr,
+                           &split_hub_addr, &split_hub_port);
+    prep_dev(&dev, dev_addr, speed_usb, maxpkt, endpoint,
+             split_hub_ptr, split_hub_addr, split_hub_port);
 
     /* Direction convention matches the rest of the driver: bit 7 of
      * `direction` selects IN (0x80) vs OUT (0x00). */
@@ -541,11 +791,8 @@ static uint16_t handle_check_port(volatile struct ZZUSBCommand *cmd)
     if (!(reg & EHCI_PS_CS))
         return ZZUSB_STATUS_OFFLINE;
 
-    int pspd = PORTSC_PSPD(reg);
-    int zz_speed;
-    if (pspd == PORTSC_PSPD_HS) zz_speed = ZZUSB_SPEED_HIGH;
-    else if (pspd == PORTSC_PSPD_LS) zz_speed = ZZUSB_SPEED_LOW;
-    else zz_speed = ZZUSB_SPEED_FULL;
+    int zz_speed = portsc_to_zz_speed(reg);
+    root_port_speed_zz = zz_speed;
 
     put_be16(&cmd->speed, zz_speed);
     return ZZUSB_STATUS_OK;
