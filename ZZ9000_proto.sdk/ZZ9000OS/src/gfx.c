@@ -723,12 +723,90 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 			break; \
 	}
 
+static uint64_t p2c_byte_lut[256];
+static uint8_t p2c_byte_lut_initialized;
+
+static void p2c_byte_lut_init(void)
+{
+	if (p2c_byte_lut_initialized)
+		return;
+
+	for (uint16_t byte = 0; byte < 256; byte++) {
+		uint64_t out = 0;
+		for (uint8_t pixel = 0; pixel < 8; pixel++) {
+			if (byte & (0x80 >> pixel))
+				out |= (uint64_t)1 << (pixel * 8);
+		}
+		p2c_byte_lut[byte] = out;
+	}
+
+	p2c_byte_lut_initialized = 1;
+}
+
+static inline uint64_t p2c_decode_8pixels(uint8_t **pp, uint8_t planes,
+	uint8_t layer_mask, uint16_t cur_byte, uint8_t invert)
+{
+	uint64_t out = 0;
+
+	if (planes == 8 && layer_mask == 0xff) {
+		if (invert) {
+			return p2c_byte_lut[pp[0][cur_byte] ^ 0xff] |
+				(p2c_byte_lut[pp[1][cur_byte] ^ 0xff] << 1) |
+				(p2c_byte_lut[pp[2][cur_byte] ^ 0xff] << 2) |
+				(p2c_byte_lut[pp[3][cur_byte] ^ 0xff] << 3) |
+				(p2c_byte_lut[pp[4][cur_byte] ^ 0xff] << 4) |
+				(p2c_byte_lut[pp[5][cur_byte] ^ 0xff] << 5) |
+				(p2c_byte_lut[pp[6][cur_byte] ^ 0xff] << 6) |
+				(p2c_byte_lut[pp[7][cur_byte] ^ 0xff] << 7);
+		}
+
+		return p2c_byte_lut[pp[0][cur_byte]] |
+			(p2c_byte_lut[pp[1][cur_byte]] << 1) |
+			(p2c_byte_lut[pp[2][cur_byte]] << 2) |
+			(p2c_byte_lut[pp[3][cur_byte]] << 3) |
+			(p2c_byte_lut[pp[4][cur_byte]] << 4) |
+			(p2c_byte_lut[pp[5][cur_byte]] << 5) |
+			(p2c_byte_lut[pp[6][cur_byte]] << 6) |
+			(p2c_byte_lut[pp[7][cur_byte]] << 7);
+	}
+
+	for (uint8_t plane = 0; plane < planes && plane < 8; plane++) {
+		uint8_t plane_bit = (uint8_t)(1u << plane);
+		if (layer_mask & plane_bit) {
+			uint8_t byte = pp[plane][cur_byte];
+			out |= p2c_byte_lut[invert ? (byte ^ 0xff) : byte] << plane;
+		}
+	}
+
+	return out;
+}
+
+static inline void p2d_store_8pixels(uint32_t *dp, int16_t x, uint64_t pixels,
+	uint32_t *bmp_pal, uint32_t color_format)
+{
+	switch (color_format) {
+	case MNTVA_COLOR_16BIT565:
+	case MNTVA_COLOR_15BIT: {
+		uint16_t *d16 = (uint16_t *)dp + x;
+		for (uint8_t i = 0; i < 8; i++)
+			d16[i] = bmp_pal[(pixels >> (i * 8)) & 0xff];
+		break;
+	}
+	case MNTVA_COLOR_32BIT:
+		for (uint8_t i = 0; i < 8; i++)
+			dp[x + i] = bmp_pal[(pixels >> (i * 8)) & 0xff];
+		break;
+	}
+}
+
 void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src)
 {
 	uint32_t *dp = fb + (dy * fb_pitch);
 
 	uint8_t cur_bit, base_bit, base_byte;
 	uint16_t cur_byte = 0, u8_fg = 0;
+	uint8_t direct_copy = (mask == 0xFF && (draw_mode == MINTERM_SRC || draw_mode == MINTERM_NOTSRC));
+	uint8_t invert_planar = draw_mode & 0x01;
 
 	uint32_t plane_size = src_line_pitch * h;
 	uint8_t *bmp_data = bmp_data_src;
@@ -740,28 +818,57 @@ void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 	cur_bit = base_bit = (0x80 >> (sx % 8));
 	cur_byte = base_byte = ((sx / 8) % src_line_pitch);
 
+	if (direct_copy)
+		p2c_byte_lut_init();
+
 	for (int16_t line_y = 0; line_y < h; line_y++) {
-		for (int16_t x = dx; x < dx + w; x++) {
-			u8_fg = 0;
-			if (draw_mode & 0x01) // If bit 1 is set, the inverted planar data is always used.
-				DECODE_INVERTED_PLANAR_PIXEL(u8_fg)
-			else
-				DECODE_PLANAR_PIXEL(u8_fg)
-			
-			if (mask == 0xFF && (draw_mode == MINTERM_SRC || draw_mode == MINTERM_NOTSRC)) {
-				((uint8_t *)dp)[x] = u8_fg;
-				goto skip;
+		int16_t x = dx;
+		int16_t rect_x2 = dx + w;
+
+		if (direct_copy) {
+			uint8_t *dst = (uint8_t *)dp;
+			while (x < rect_x2) {
+				if (cur_bit == 0x80 && x + 8 <= rect_x2) {
+					uint64_t pixels = p2c_decode_8pixels(pp, planes, layer_mask,
+						cur_byte, invert_planar);
+					memcpy(dst + x, &pixels, sizeof(pixels));
+					x += 8;
+					cur_byte++;
+					if (cur_byte >= src_line_pitch) cur_byte = 0;
+					continue;
+				}
+
+				u8_fg = 0;
+				if (invert_planar)
+					DECODE_INVERTED_PLANAR_PIXEL(u8_fg)
+				else
+					DECODE_PLANAR_PIXEL(u8_fg)
+
+				dst[x] = u8_fg;
+				x++;
+				if ((cur_bit >>= 1) == 0) {
+					cur_bit = 0x80;
+					cur_byte++;
+					if (cur_byte >= src_line_pitch) cur_byte = 0;
+				}
 			}
-
-		HANDLE_MINTERM_PIXEL_8(u8_fg, ((uint8_t *)dp)[x]);
-
-		skip:;
-		if ((cur_bit >>= 1) == 0) {
-			cur_bit = 0x80;
-			cur_byte++;
-			if (cur_byte >= src_line_pitch) cur_byte = 0;
 		}
+		else {
+			for (; x < rect_x2; x++) {
+				u8_fg = 0;
+				if (draw_mode & 0x01) // If bit 1 is set, the inverted planar data is always used.
+					DECODE_INVERTED_PLANAR_PIXEL(u8_fg)
+				else
+					DECODE_PLANAR_PIXEL(u8_fg)
 
+				HANDLE_MINTERM_PIXEL_8(u8_fg, ((uint8_t *)dp)[x]);
+
+				if ((cur_bit >>= 1) == 0) {
+					cur_bit = 0x80;
+					cur_byte++;
+					if (cur_byte >= src_line_pitch) cur_byte = 0;
+				}
+			}
 		}
 		dp += fb_pitch;
 		if ((line_y + sy + 1) % h) {
@@ -807,10 +914,10 @@ static inline uint8_t reverse_lookup(uint32_t *bmp_pal, uint8_t planes, uint32_t
 void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint32_t color_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src, uint32_t color_format) {
 	uint32_t *dp = fb + (dy * fb_pitch);
 
-	rl_cache_invalidate();
-
 	uint8_t cur_bit, base_bit, base_byte;
 	uint16_t cur_byte = 0;
+	uint8_t direct_copy = (draw_mode == MINTERM_SRC || draw_mode == MINTERM_NOTSRC);
+	uint8_t invert_planar = draw_mode & 0x01;
 
 	uint32_t plane_size = src_line_pitch * h;
 	uint32_t *bmp_pal = (uint32_t *)bmp_data_src;
@@ -823,101 +930,137 @@ void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 	cur_bit = base_bit = (0x80 >> (sx % 8));
 	cur_byte = base_byte = ((sx / 8) % src_line_pitch);
 
+	if (direct_copy)
+		p2c_byte_lut_init();
+	else
+		rl_cache_invalidate();
+
 	for (int16_t line_y = 0; line_y < h; line_y++) {
-		for (int16_t x = dx; x < dx + w; x++) {
+		int16_t x = dx;
+		int16_t rect_x2 = dx + w;
 
-			uint8_t b=0,nb=0,c,d=0;
-			switch(draw_mode) {
-				case MINTERM_FALSE:
-					d = 0;
-				break;
-				case MINTERM_NOR:
-					DECODE_PLANAR_PIXEL(b);
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = ~(c | b);
-				break;
-				case MINTERM_ONLYDST:
-					DECODE_INVERTED_PLANAR_PIXEL(nb);
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = c & nb;
-				break;
-				case MINTERM_NOTSRC:
-					DECODE_INVERTED_PLANAR_PIXEL(nb);
-					d = nb;
-				break;
-				case MINTERM_ONLYSRC:
-					DECODE_PLANAR_PIXEL(b);
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = (~c) & b;
-				break;
-				case MINTERM_INVERT:
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = ~c;
-				break;
-				case MINTERM_EOR:
-					DECODE_PLANAR_PIXEL(b);
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = c ^ b;
-				break;
-				case MINTERM_NAND:
-					DECODE_PLANAR_PIXEL(b);
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = ~(c & b);
-				break;
-				case MINTERM_AND:
-					DECODE_PLANAR_PIXEL(b);
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = c & b;
-				break;
-				case MINTERM_NEOR:
-					DECODE_PLANAR_PIXEL(b);
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = ~(c ^ b);
-				break;
-				case MINTERM_DST:
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = c;
-				break;
-				case MINTERM_NOTONLYSRC:
-					DECODE_INVERTED_PLANAR_PIXEL(nb);
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = c | nb;
-				break;
-				case MINTERM_SRC:
-					DECODE_PLANAR_PIXEL(b);
-					d = b;
-				break;
-				case MINTERM_NOTONLYDST:
-					DECODE_PLANAR_PIXEL(b);
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = (~c) | b;
-				break;
-				case MINTERM_OR:
-					DECODE_PLANAR_PIXEL(b);
-					c = reverse_lookup(bmp_pal, planes, dp[x]);
-					d = c | b;
-				break;
-				case MINTERM_TRUE:
-					d = (1<<planes) - 1;
-				break;
+		if (direct_copy) {
+			while (x < rect_x2) {
+				if (cur_bit == 0x80 && x + 8 <= rect_x2) {
+					uint64_t pixels = p2c_decode_8pixels(pp, planes, layer_mask,
+						cur_byte, invert_planar);
+					p2d_store_8pixels(dp, x, pixels, bmp_pal, color_format);
+					x += 8;
+					cur_byte++;
+					if (cur_byte >= src_line_pitch) cur_byte = 0;
+					continue;
+				}
+
+				uint8_t d = 0;
+				if (invert_planar)
+					DECODE_INVERTED_PLANAR_PIXEL(d)
+				else
+					DECODE_PLANAR_PIXEL(d)
+
+				switch (color_format) {
+					case MNTVA_COLOR_16BIT565:
+					case MNTVA_COLOR_15BIT:
+						((uint16_t *)dp)[x] = bmp_pal[d];
+						break;
+					case MNTVA_COLOR_32BIT:
+						dp[x] = bmp_pal[d];
+						break;
+				}
+
+				x++;
+				if ((cur_bit >>= 1) == 0) {
+					cur_bit = 0x80;
+					cur_byte++;
+					if (cur_byte >= src_line_pitch) cur_byte = 0;
+				}
 			}
-
-			switch (color_format) {
-				case MNTVA_COLOR_16BIT565:
-				case MNTVA_COLOR_15BIT:
-					((uint16_t *)dp)[x] = bmp_pal[d];
-					break;
-				case MNTVA_COLOR_32BIT:
-					dp[x] = bmp_pal[d];
-					break;
-			}
-
-		if ((cur_bit >>= 1) == 0) {
-			cur_bit = 0x80;
-			cur_byte++;
-			if (cur_byte >= src_line_pitch) cur_byte = 0;
 		}
+		else {
+			for (; x < rect_x2; x++) {
+				uint8_t b=0,nb=0,c,d=0;
+				switch(draw_mode) {
+					case MINTERM_FALSE:
+						d = 0;
+					break;
+					case MINTERM_NOR:
+						DECODE_PLANAR_PIXEL(b);
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = ~(c | b);
+					break;
+					case MINTERM_ONLYDST:
+						DECODE_INVERTED_PLANAR_PIXEL(nb);
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = c & nb;
+					break;
+					case MINTERM_ONLYSRC:
+						DECODE_PLANAR_PIXEL(b);
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = (~c) & b;
+					break;
+					case MINTERM_INVERT:
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = ~c;
+					break;
+					case MINTERM_EOR:
+						DECODE_PLANAR_PIXEL(b);
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = c ^ b;
+					break;
+					case MINTERM_NAND:
+						DECODE_PLANAR_PIXEL(b);
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = ~(c & b);
+					break;
+					case MINTERM_AND:
+						DECODE_PLANAR_PIXEL(b);
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = c & b;
+					break;
+					case MINTERM_NEOR:
+						DECODE_PLANAR_PIXEL(b);
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = ~(c ^ b);
+					break;
+					case MINTERM_DST:
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = c;
+					break;
+					case MINTERM_NOTONLYSRC:
+						DECODE_INVERTED_PLANAR_PIXEL(nb);
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = c | nb;
+					break;
+					case MINTERM_NOTONLYDST:
+						DECODE_PLANAR_PIXEL(b);
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = (~c) | b;
+					break;
+					case MINTERM_OR:
+						DECODE_PLANAR_PIXEL(b);
+						c = reverse_lookup(bmp_pal, planes, dp[x]);
+						d = c | b;
+					break;
+					case MINTERM_TRUE:
+						d = (1<<planes) - 1;
+					break;
+				}
 
+				switch (color_format) {
+					case MNTVA_COLOR_16BIT565:
+					case MNTVA_COLOR_15BIT:
+						((uint16_t *)dp)[x] = bmp_pal[d];
+						break;
+					case MNTVA_COLOR_32BIT:
+						dp[x] = bmp_pal[d];
+						break;
+				}
+
+				if ((cur_bit >>= 1) == 0) {
+					cur_bit = 0x80;
+					cur_byte++;
+					if (cur_byte >= src_line_pitch) cur_byte = 0;
+				}
+			}
 		}
 		dp += fb_pitch;
 		if ((line_y + sy + 1) % h) {

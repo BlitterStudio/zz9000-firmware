@@ -32,6 +32,7 @@ bootimage_work/BOOT.bin
 bootimage_work/BOOT-*.bin
 bootimage_work/bootrom.bin
 release/
+test/rtg/build/
 
 # OS files
 .DS_Store
