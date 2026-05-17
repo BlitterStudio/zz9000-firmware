@@ -26,6 +26,7 @@ void ethernet_update_mac_address();
 uint8_t* ethernet_current_receive_ptr();
 int ethernet_get_backlog();
 void ethernet_task();
+void ethernet_reset_for_amiga();
 
 #define FRAME_MAX_BACKLOG 128
 

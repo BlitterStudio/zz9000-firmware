@@ -238,6 +238,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	}
 
 	// ethernet
+	ethernet_reset_for_amiga();
 	ethernet_send_result = 0;
 	eth_backlog_nag_counter = 0;
 	interrupt_enabled_ethernet = 0;

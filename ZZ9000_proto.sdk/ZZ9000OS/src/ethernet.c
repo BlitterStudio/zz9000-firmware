@@ -17,6 +17,7 @@
 */
 
 #include <stdio.h>
+#include <string.h>
 #include "platform.h"
 #include <xil_printf.h>
 #include <xil_cache.h>
@@ -28,6 +29,11 @@
 #include "ethernet.h"
 #include "interrupt.h"
 #include "memorymap.h"
+#include "mntzorro.h"
+
+#ifndef ETH_DEBUG_VERBOSE
+#define ETH_DEBUG_VERBOSE 0
+#endif
 
 static XEmacPs EmacPsInstance;
 
@@ -57,6 +63,9 @@ static volatile u16 frame_serial = 0;
 static volatile u32 frames_received = 0;
 static volatile u16 frames_backlog = 0;
 int frames_received_from_backlog = 0;
+static volatile int frames_dropped = 0;
+static volatile int frames_backlog_full = 0;
+static volatile int tx_recoveries = 0;
 
 #define ETH_PHY_TYPE_MICREL 0
 #define ETH_PHY_TYPE_MOTORCOMM 1
@@ -191,7 +200,9 @@ int init_ethernet_buffers() {
 	}
 
 	XEmacPs_Start(EmacPsInstancePtr);
+#if ETH_DEBUG_VERBOSE
 	printf("EMAC: XEmacPs_Start done.\n");
+#endif
 
 	return XST_SUCCESS;
 }
@@ -271,6 +282,115 @@ enum {
 };
 
 int ethernet_task_state = ETH_TASK_SETUP;
+
+static void ethernet_log_status(const char *reason) {
+#if ETH_DEBUG_VERBOSE
+	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
+	u32 BaseAddress = EmacPsInstancePtr->Config.BaseAddress;
+
+	printf("EMAC[%s]: state=%d backlog=%u cursor=%d serial=%u rx=%lu tx=%lu drops=%d full=%d txrec=%d errors=%ld\n",
+	       reason,
+	       ethernet_task_state,
+	       (unsigned int)frames_backlog,
+	       frames_received_from_backlog,
+	       (unsigned int)frame_serial,
+	       (unsigned long)frames_received,
+	       (unsigned long)FramesTx,
+	       frames_dropped,
+	       frames_backlog_full,
+	       tx_recoveries,
+	       (long)DeviceErrors);
+
+	if (!BaseAddress) {
+		printf("EMAC[%s]: registers unavailable\n", reason);
+		return;
+	}
+
+	XEmacPs_BdRing* rxring = &(XEmacPs_GetRxRing(EmacPsInstancePtr));
+	XEmacPs_BdRing* txring = &(XEmacPs_GetTxRing(EmacPsInstancePtr));
+
+	printf("EMAC[%s]: nwctrl=%08lx isr=%08lx imr=%08lx rxsr=%08lx txsr=%08lx\n",
+	       reason,
+	       (unsigned long)XEmacPs_ReadReg(BaseAddress, XEMACPS_NWCTRL_OFFSET),
+	       (unsigned long)XEmacPs_ReadReg(BaseAddress, XEMACPS_ISR_OFFSET),
+	       (unsigned long)XEmacPs_ReadReg(BaseAddress, XEMACPS_IMR_OFFSET),
+	       (unsigned long)XEmacPs_ReadReg(BaseAddress, XEMACPS_RXSR_OFFSET),
+	       (unsigned long)XEmacPs_ReadReg(BaseAddress, XEMACPS_TXSR_OFFSET));
+
+	printf("EMAC[%s]: rxbd free=%lu hw=%lu pre=%lu post=%lu all=%lu txbd free=%lu hw=%lu pre=%lu post=%lu all=%lu\n",
+	       reason,
+	       (unsigned long)rxring->FreeCnt,
+	       (unsigned long)rxring->HwCnt,
+	       (unsigned long)rxring->PreCnt,
+	       (unsigned long)rxring->PostCnt,
+	       (unsigned long)rxring->AllCnt,
+	       (unsigned long)txring->FreeCnt,
+	       (unsigned long)txring->HwCnt,
+	       (unsigned long)txring->PreCnt,
+	       (unsigned long)txring->PostCnt,
+	       (unsigned long)txring->AllCnt);
+#else
+	(void)reason;
+#endif
+}
+
+static void ethernet_clear_host_state() {
+	frames_backlog = 0;
+	frames_received_from_backlog = 0;
+	frame_serial = 0;
+	frames_received = 0;
+	FramesRx = 0;
+	FramesTx = 0;
+	frames_dropped = 0;
+	frames_backlog_full = 0;
+
+	for (int i = 0; i < FRAME_MAX_BACKLOG; i++) {
+		memset((void*)(RX_BACKLOG_ADDRESS + i * FRAME_SIZE), 0, RX_FRAME_PAD);
+	}
+
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG4, 0);
+}
+
+static int ethernet_restart_dma(const char *reason) {
+	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
+	u32 BaseAddress = EmacPsInstancePtr->Config.BaseAddress;
+
+	ethernet_log_status(reason);
+
+	XEmacPs_Stop(EmacPsInstancePtr);
+
+	if (BaseAddress) {
+		u32 status;
+
+		status = XEmacPs_ReadReg(BaseAddress, XEMACPS_TXSR_OFFSET);
+		XEmacPs_WriteReg(BaseAddress, XEMACPS_TXSR_OFFSET, status);
+
+		status = XEmacPs_ReadReg(BaseAddress, XEMACPS_RXSR_OFFSET);
+		XEmacPs_WriteReg(BaseAddress, XEMACPS_RXSR_OFFSET, status);
+
+		status = XEmacPs_ReadReg(BaseAddress, XEMACPS_ISR_OFFSET);
+		XEmacPs_WriteReg(BaseAddress, XEMACPS_ISR_OFFSET, status);
+	}
+
+	ethernet_clear_host_state();
+
+	int Status = init_ethernet_buffers();
+	if (Status != XST_SUCCESS) {
+		printf("EMAC: DMA restart failed (%s): %d\n", reason, Status);
+		return XST_FAILURE;
+	}
+
+	ethernet_log_status("dma-restart-after");
+	return XST_SUCCESS;
+}
+
+void ethernet_reset_for_amiga() {
+	ethernet_log_status("amiga-reset-before");
+
+	ethernet_clear_host_state();
+
+	ethernet_log_status("amiga-reset-after");
+}
 
 void ethernet_task() {
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
@@ -427,7 +547,13 @@ static void XEmacPsRecvHandler(void *Callback)
 
 				//printf("bd %d [%d] copied from %p to %p\n", bd_idx, rx_bytes, frame_ptr, frame_bl_ptr);
 			} else {
-				//printf("EMAC: frames_backlog full\n");
+				frames_backlog_full++;
+				if (frames_backlog_full == 1 || (frames_backlog_full % 16) == 0) {
+					printf("EMAC: RX backlog full count=%d backlog=%u cursor=%d\n",
+					       frames_backlog_full,
+					       (unsigned int)frames_backlog,
+					       frames_received_from_backlog);
+				}
 			}
 
 			XEmacPs_BdClearRxNew(cur_bd_ptr);
@@ -484,8 +610,6 @@ u32 get_frames_received() {
 	return frames_received;
 }
 
-static int frames_dropped = 0;
-
 uint8_t* ethernet_get_mac_address_ptr() {
 	return (uint8_t*)&EmacPsMAC;
 }
@@ -499,15 +623,19 @@ void ethernet_update_mac_address() {
 
 	printf("Ethernet: New MAC address %x %x %x %x %x %x\n",
 			EmacPsMAC[0],EmacPsMAC[1],EmacPsMAC[2],EmacPsMAC[3],EmacPsMAC[4],EmacPsMAC[5]);
+	ethernet_log_status("mac-update-before");
 
 	XEmacPs_Stop(EmacPsInstancePtr);
+	ethernet_clear_host_state();
 
 	int Status = XEmacPs_SetMacAddress(EmacPsInstancePtr, EmacPsMAC, 1);
 	if (Status != XST_SUCCESS) {
 		printf("EMAC: Error setting MAC address\n");
 	}
 
-	XEmacPs_Start(EmacPsInstancePtr);
+	ethernet_restart_dma("mac-update-restart");
+
+	ethernet_log_status("mac-update-after");
 }
 
 static void XEmacPsErrorHandler(void *Callback, u8 Direction, u32 ErrorWord)
@@ -890,6 +1018,7 @@ u16 ethernet_send_frame(u16 frame_size) {
 
 	if (Status != XST_SUCCESS) {
 		printf("ERROR: BdRingAlloc error: %ld\n",Status);
+		ethernet_log_status("tx-bd-alloc-error");
 
 		// lets unstick this
 		//init_ethernet_buffers();
@@ -905,6 +1034,7 @@ u16 ethernet_send_frame(u16 frame_size) {
 
 	if (Status != XST_SUCCESS) {
 		printf("ERROR: BdRingToHw error: %ld\n",Status);
+		ethernet_log_status("tx-bd-to-hw-error");
 		return 3;
 	}
 
@@ -919,7 +1049,10 @@ u16 ethernet_send_frame(u16 frame_size) {
 		// 1ms
 		if (counter>10) {
 			printf("ERROR: timeout in ethernet_send_frame waiting for tx!\n");
-			//init_ethernet_buffers();
+			ethernet_log_status("tx-timeout");
+			tx_recoveries++;
+			printf("EMAC: TX recovery #%d\n", tx_recoveries);
+			ethernet_restart_dma("tx-timeout-restart");
 			return 4;
 		}
 	}
