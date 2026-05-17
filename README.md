@@ -19,29 +19,6 @@ drivers and tools live in
 >
 > Original upstream: <https://source.mnt.re/amiga/zz9000-firmware>
 
-## Current Release
-
-The release being prepared from this tree is `v2.1.0`. The firmware
-version register reports `2.1` to Amiga-side software.
-
-Highlights since `v2.0.1`:
-
-- Faster RTG paths, including improved planar conversion, tuned NEON
-  routines, palette batching, and host-side RTG regression tests.
-- More robust Ethernet receive backlog handling, backlog DMA, and warm
-  reset recovery.
-- USB proxy reset and split-transaction fixes for the ARM-side EHCI host
-  stack used by Poseidon.
-- Amiga-side firmware and file updates through the FWUP register
-  protocol, so `BOOT.bin` and other root-level files can be pushed to
-  the ZZ9000 FAT32 microSD card without removing it.
-- Video capture fixes for NTSC/interlace detection and a packaged
-  native-PAL videocap firmware flavor for driverless PAL boot sessions.
-- FSBL boot image bounds checks and Zorro III/A4091 coexistence timing
-  fixes, with rebuilt committed bitstreams for the supported variants.
-- Release packaging now publishes the standard and `ns-pal` ZIP variants
-  from CI.
-
 ## Features
 
 - Zorro II and Zorro III bus interface for RTG, memory windows, registers,
@@ -58,28 +35,12 @@ Highlights since `v2.0.1`:
 - Reproducible firmware and release ZIP builds without Xilinx SDK; Vivado
   2018.3 is only needed when rebuilding FPGA bitstreams.
 
-## Downloads and Variants
+## Installing Firmware
 
 Tagged releases attach old-style ZIPs that each contain a user-facing
-`BOOT.bin`. Use the ZIP whose variant matches the target machine:
-
-| Variant | Use for |
-|---|---|
-| `zorro3` | A3000/A4000 with Zorro III FastRAM enabled |
-| `zorro3-nofast` | A3000/A4000 without the extra Zorro RAM advertisement |
-| `zorro2` | A2000, Zorro II, 4 MB window |
-| `zorro2-2mb` | A2000, Zorro II, 2 MB window |
-| `a500` | A500 with ZZ9500CX Denise adapter, 4 MB window |
-| `a500-2mb` | A500 with ZZ9500CX Denise adapter, 2 MB window |
-| `a500plus` | A500+ or Super Denise with ZZ9500CX Denise adapter |
-
-Most users should install the standard flavor. The `ns-pal` flavor is
-for PAL Amiga setups that boot without the host driver and need native
-~49.92 Hz videocap timing from cold boot. Use the standard flavor on
-NTSC machines or when the display does not accept the non-standard PAL
-timing.
-
-## Installing Firmware
+`BOOT.bin`. Release notes and change history live on the
+[GitHub Releases](https://github.com/BlitterStudio/zz9000-firmware/releases)
+page.
 
 The direct update path is:
 
@@ -100,6 +61,26 @@ same-name `.bak` backup, such as `BOOT.bak`.
 FWUP accepts flat root-level filenames only: up to 64 characters, simple
 ASCII letters/digits plus `.`, `_`, and `-`, with no path separators.
 Power-cycle the Amiga after replacing `BOOT.bin`.
+
+## Firmware Variants
+
+Use the ZIP whose variant matches the target machine:
+
+| Variant | Use for |
+|---|---|
+| `zorro3` | A3000/A4000 with Zorro III FastRAM enabled |
+| `zorro3-nofast` | A3000/A4000 without the extra Zorro RAM advertisement |
+| `zorro2` | A2000, Zorro II, 4 MB window |
+| `zorro2-2mb` | A2000, Zorro II, 2 MB window |
+| `a500` | A500 with ZZ9500CX Denise adapter, 4 MB window |
+| `a500-2mb` | A500 with ZZ9500CX Denise adapter, 2 MB window |
+| `a500plus` | A500+ or Super Denise with ZZ9500CX Denise adapter |
+
+Most users should install the standard flavor. The `ns-pal` flavor is
+for PAL Amiga setups that boot without the host driver and need native
+~49.92 Hz videocap timing from cold boot. Use the standard flavor on
+NTSC machines or when the display does not accept the non-standard PAL
+timing.
 
 ## Building
 
