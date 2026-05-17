@@ -1,208 +1,222 @@
 [![CI](https://github.com/BlitterStudio/zz9000-firmware/actions/workflows/build.yml/badge.svg)](https://github.com/BlitterStudio/zz9000-firmware/actions/workflows/build.yml)
 
-# ZZ9000 Firmware (FPGA + ZZ9000OS) — BlitterStudio fork
-
-> **Fork notice.** This repository is an independent fork and continued
-> development of the original MNT ZZ9000 FPGA/firmware sources. It is
-> maintained by Dimitris Panokostas / **BlitterStudio** and is **not
-> affiliated with, endorsed by, or supported by MNT Research GmbH**.
-> The ZZ9000 hardware itself is designed and manufactured by MNT
-> Research GmbH — hardware questions belong with them; firmware issues
-> and fork-specific discussion belong in this repo's
-> [Issues](https://github.com/BlitterStudio/zz9000-firmware/issues).
->
-> Upstream (pre-fork): https://source.mnt.re/amiga/zz9000-firmware
+# ZZ9000 Firmware
 
 FPGA logic and bare-metal ARM firmware for the MNT ZZ9000 Zorro II/III
-graphics and coprocessor card. Built around a Xilinx Zynq-7020 (7-series
-FPGA fabric + dual Cortex-A9 at 666 MHz, 1 GB DDR3). This repository
-holds the Zorro bus interface, video formatter, scanline generator, AXI
-plumbing, and the small `ZZ9000OS` firmware that runs on the ARM and
-drives it. Companion AmigaOS drivers live in
-[zz9000-drivers](https://github.com/BlitterStudio/zz9000-drivers).
+graphics and coprocessor card.
 
-## What this fork adds on top of upstream
+This repository contains the Zorro bus interface, video formatter,
+scanline generator, AXI plumbing, boot image layout, and `ZZ9000OS`
+firmware that runs on the Zynq-7020 ARM core. The matching Amiga-side
+drivers and tools live in
+[BlitterStudio/zz9000-drivers](https://github.com/BlitterStudio/zz9000-drivers).
 
-- **Scanlines V2** — three patterns (classic / soft / gradient) with
-  odd/even parity, gated to AGA scandoubled modes and RTG resolutions
-  below 350 lines. V1 intensity scanlines still work. Original patches
-  by Xanxi, adapted by midwan.
-- **RTG performance** — NEON intrinsics for pixel fill/blit paths,
-  batch palette transfer, operation fusion, and tuned compiler flags.
-- **USB 2.0 host stack (ARM side)** — EHCI driver plus a USB command
-  proxy, with Zynq AXI stability fixes (USBMODE_SDIS, ULPI dynamic XCVR
-  switching, BURSTSIZE, TXFIFO threshold) and direct-DMA bulk transfers
-  straight from the shared mailbox. Previously unused on the card.
-- **SD boot** — HDF-on-FAT storage backend and an autoboot ROM path, so
-  the Amiga can boot from an image file on the ZZ9000's microSD.
-- **Amiga-side firmware/file updates** — FWUP register protocol for
-  pushing `BOOT.bin` or other root-level files onto the ZZ9000 FAT32
-  microSD from AmigaOS, without removing the card.
-- **Videocap fixes** — NTSC black-screen on RTG→capture switch, interlace
-  detection hardening, big-sprite 2×2 doubling, `double_sprite` /
-  `hires_sprite` flag propagation through the Z2 and Z3 sprite paths.
-- **GCC 15 toolchain** — standalone Makefile build that no longer needs
-  Xilinx's ancient Eclipse SDK. See [BUILD.md](BUILD.md).
-- **CI + releases** — GitHub Actions pipeline builds firmware + BOOT.bin
-  on every push/PR and publishes tagged GitHub Releases with old-style
-  firmware ZIPs containing the user-facing `BOOT.bin`
-  ([.github/workflows/build.yml](.github/workflows/build.yml)).
+> **Fork notice:** this is the BlitterStudio firmware fork, maintained by
+> Dimitris Panokostas / midwan. It continues the original MNT ZZ9000
+> firmware sources, but is not affiliated with, endorsed by, or supported
+> by MNT Research GmbH. Hardware support questions belong with MNT;
+> firmware issues for this fork belong in this repository.
+>
+> Original upstream: <https://source.mnt.re/amiga/zz9000-firmware>
 
-## Repository layout
+## Current Release
 
-| Path | What it is |
-|------|------------|
-| [`mntzorro.v`](mntzorro.v) | Zorro II/III bus interface, 24-bit video capture engine, AXI4-Lite master into the rest of the design. |
-| [`video_formatter.v`](video_formatter.v) | AXI-Stream formatter: reinterprets 32-bit word stream as 8-bit palette / RGB565 / RGBX and emits 24-bit parallel RGB with H/V sync. |
-| [`ZZ9000_proto.sdk/ZZ9000OS/src/`](ZZ9000_proto.sdk/ZZ9000OS/src/) | ZZ9000OS firmware (Cortex-A9 core 0) — boot, RTG accel, Ethernet, USB host, SD boot, audio. |
-| [`ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc`](ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc) | Pin/ball mapping and timing constraints. |
-| [`zz9000_project.tcl`](zz9000_project.tcl) | Exported Vivado block design — source of truth for the project. |
-| [`bootimage_work/`](bootimage_work/) | Canonical output directory. Holds committed `FSBL_exec.elf`, bitstream, and generated `BOOT.bin`. |
+The release being prepared from this tree is `v2.1.0`. The firmware
+version register reports `2.1` to Amiga-side software.
 
-![ZZ9000 Block Design](gfx/zz9000-bd.png?raw=true "ZZ9000 Block Design")
+Highlights since `v2.0.1`:
+
+- Faster RTG paths, including improved planar conversion, tuned NEON
+  routines, palette batching, and host-side RTG regression tests.
+- More robust Ethernet receive backlog handling, backlog DMA, and warm
+  reset recovery.
+- USB proxy reset and split-transaction fixes for the ARM-side EHCI host
+  stack used by Poseidon.
+- Amiga-side firmware and file updates through the FWUP register
+  protocol, so `BOOT.bin` and other root-level files can be pushed to
+  the ZZ9000 FAT32 microSD card without removing it.
+- Video capture fixes for NTSC/interlace detection and a packaged
+  native-PAL videocap firmware flavor for driverless PAL boot sessions.
+- FSBL boot image bounds checks and Zorro III/A4091 coexistence timing
+  fixes, with rebuilt committed bitstreams for the supported variants.
+- Release packaging now publishes the standard and `ns-pal` ZIP variants
+  from CI.
+
+## Features
+
+- Zorro II and Zorro III bus interface for RTG, memory windows, registers,
+  interrupts, boot ROM, and DMA-style firmware services.
+- RTG acceleration paths in `ZZ9000OS` for fills, blits, pattern drawing,
+  planar conversion, palette updates, and sprite/video state.
+- Scanlines V2 with classic, soft, and gradient patterns plus parity
+  control, gated to RTG modes below 350 lines and AGA scandoubled modes.
+- SD HDF boot support from the ZZ9000 microSD card.
+- USB 2.0 host support through the ARM EHCI stack and Amiga-side USB
+  command proxy.
+- Gigabit Ethernet support through the Zynq GEM and ZZ9000 shared
+  register/mailbox protocol.
+- Reproducible firmware and release ZIP builds without Xilinx SDK; Vivado
+  2018.3 is only needed when rebuilding FPGA bitstreams.
+
+## Downloads and Variants
+
+Tagged releases attach old-style ZIPs that each contain a user-facing
+`BOOT.bin`. Use the ZIP whose variant matches the target machine:
+
+| Variant | Use for |
+|---|---|
+| `zorro3` | A3000/A4000 with Zorro III FastRAM enabled |
+| `zorro3-nofast` | A3000/A4000 without the extra Zorro RAM advertisement |
+| `zorro2` | A2000, Zorro II, 4 MB window |
+| `zorro2-2mb` | A2000, Zorro II, 2 MB window |
+| `a500` | A500 with ZZ9500CX Denise adapter, 4 MB window |
+| `a500-2mb` | A500 with ZZ9500CX Denise adapter, 2 MB window |
+| `a500plus` | A500+ or Super Denise with ZZ9500CX Denise adapter |
+
+Most users should install the standard flavor. The `ns-pal` flavor is
+for PAL Amiga setups that boot without the host driver and need native
+~49.92 Hz videocap timing from cold boot. Use the standard flavor on
+NTSC machines or when the display does not accept the non-standard PAL
+timing.
+
+## Installing Firmware
+
+The direct update path is:
+
+1. Download or build the correct release ZIP.
+2. Extract its `BOOT.bin`.
+3. Copy `BOOT.bin` to the ZZ9000 FAT32 microSD card, using the filename
+   required by the card's QSPI/SD boot setup.
+4. Power-cycle the Amiga.
+
+Firmware builds with FWUP support can also receive a new `BOOT.bin` from
+AmigaOS using `ZZFwUpdate` from
+[zz9000-drivers](https://github.com/BlitterStudio/zz9000-drivers). FWUP
+writes through the ZZ9000 register window to the mounted FAT32 microSD
+card, stages the upload through a temporary file, then replaces the
+target on close. If an existing file is replaced, it is kept as a
+same-name `.bak` backup, such as `BOOT.bak`.
+
+FWUP accepts flat root-level filenames only: up to 64 characters, simple
+ASCII letters/digits plus `.`, `_`, and `-`, with no path separators.
+Power-cycle the Amiga after replacing `BOOT.bin`.
 
 ## Building
 
-See **[BUILD.md](BUILD.md)** for the full build flow. Three composable
-scripts, same path CI takes:
-
-| Script | Builds | Needs |
-|---|---|---|
-| [`build_firmware.sh`](build_firmware.sh)   | `ZZ9000OS.elf`                  | `arm-none-eabi-gcc` (Arm GNU Toolchain with newlib), host `cc` |
-| [`build_bitstream.sh`](build_bitstream.sh) | `zz9000_ps_wrapper.bit`         | Vivado 2018.3 (Linux)                               |
-| [`build_variant_bitstreams.sh`](build_variant_bitstreams.sh) | release variant `.bit` files | Vivado 2018.3 (Linux)                               |
-| [`build_bootimage.sh`](build_bootimage.sh) | `BOOT.bin`                      | `bootgen`                                           |
-
-Firmware-only iteration needs `arm-none-eabi-gcc`, a host C compiler,
-and `bootgen` — no Vivado, no Xilinx SDK. The committed bitstream in
-`bootimage_work/` is CI's source of truth; commit a new one alongside
-any HDL change.
-
-## Releases
-
-Pushing a tag matching `v*` (e.g. `v2.0.0`, `v2026.04`) triggers the CI
-build and then publishes a GitHub Release with `BOOT-<tag>.bin`,
-`ZZ9000OS-<tag>.elf`, and `zz9000-firmware-<tag>-<variant>.zip`
-archives attached. Each ZIP contains a `BOOT.bin`, matching the old
-release format users copy to the microSD card. Tags containing a `-`
-(e.g. `v1.15-rc1`) are marked as pre-releases. Release notes are
-generated automatically from commits and merged PRs since the previous
-tag.
+See [BUILD.md](BUILD.md) for the complete build flow and toolchain
+details. On this repo, the normal firmware/BOOT image loop uses the
+committed bitstream in `bootimage_work/` and does not require Vivado:
 
 ```bash
-git tag -a v2.0.0 -m "Firmware 2.0.0"
-git push origin v2.0.0
+export PATH="$PWD/.toolchain/arm-gnu-toolchain/bin:$PATH"
+./build_firmware.sh clean
+./build_firmware.sh
+BOOTGEN="$PWD/.toolchain/bootgen/bootgen" ./build_bootimage.sh
 ```
 
-## Flashing
+The build scripts are intentionally composable:
 
-Copy `bootimage_work/BOOT.bin` (or the tagged `BOOT-<tag>.bin` from a
-release) to the ZZ9000's microSD — rename per your QSPI/SD boot setup —
-reseat, and power-cycle the Amiga.
+| Script | Output |
+|---|---|
+| [`build_firmware.sh`](build_firmware.sh) | `ZZ9000OS.elf` |
+| [`build_bootimage.sh`](build_bootimage.sh) | `BOOT.bin` |
+| [`build_release_assets.sh`](build_release_assets.sh) | release ZIPs |
+| [`build_bitstream.sh`](build_bitstream.sh) | default FPGA bitstream |
+| [`build_variant_bitstreams.sh`](build_variant_bitstreams.sh) | release variant bitstreams |
 
-Firmware builds with FWUP support can also receive a new `BOOT.bin`
-from AmigaOS using the `ZZFwUpdate` tool from
-[zz9000-drivers](https://github.com/BlitterStudio/zz9000-drivers).
-The tool writes through the ZZ9000 register window to the FAT32
-microSD card, so the card can stay installed. The firmware stages the
-upload through a temporary file, then replaces the target on close; if
-an existing file is replaced, it is kept as a same-name `.bak` backup
-such as `BOOT.bak`.
+Vivado 2018.3 is required only for bitstream rebuilds. CI does not run
+Vivado, so HDL changes must commit the rebuilt bitstream files under
+`bootimage_work/`.
 
-After replacing `BOOT.bin`, power-cycle the Amiga so the ZZ9000 boots
-from the new image. FWUP accepts flat root-level filenames only: up to
-64 characters, simple ASCII letters/digits plus `.`, `_`, and `-`, with
-no path separators.
+## Testing
 
-For release downloads, use the ZIP variant for the machine: `zorro3` for
-A3000/A4000, `zorro3-nofast` for A3000/A4000 without Zorro RAM,
-`zorro2` or `zorro2-2mb` for A2000, `a500` or `a500-2mb` for A500 with
-the ZZ9500CX Denise adapter, and `a500plus` for A500+ / Super Denise.
-Build those bitstreams on a Vivado machine with
-`./build_variant_bitstreams.sh`, then commit the resulting files under
-`bootimage_work/`. Deprecated no-USB-autoboot builds are not published.
+Firmware builds are covered by the GitHub Actions workflow in
+[`.github/workflows/build.yml`](.github/workflows/build.yml). The host
+RTG regression harness can be run locally:
 
-## Amiga-side MMU/cache setup
+```bash
+make -C test/rtg test
+make -C test/rtg bench
+```
 
-On 68040/68060 systems, configure any pure ZZ9000 RAM window in your
+Hardware validation is still required before treating performance or bus
+timing changes as proven.
+
+## Release Process
+
+Release CI is tag-driven. Push a `v*` tag and the workflow builds the
+standard and `ns-pal` firmware flavors, packages every committed variant
+bitstream, and publishes a GitHub Release. Tags containing `-`, such as
+`v2.1.0-rc1`, are marked as pre-releases.
+
+```bash
+git tag -a v2.1.0 -m "Firmware 2.1.0"
+git push origin v2.1.0
+```
+
+## Repository Layout
+
+| Path | Purpose |
+|---|---|
+| [`mntzorro.v`](mntzorro.v) | Zorro II/III bus interface, register window, video capture engine, and AXI bridge |
+| [`video_formatter.v`](video_formatter.v) | AXI-Stream video formatter and 24-bit RGB output path |
+| [`ZZ9000_proto.sdk/ZZ9000OS/src/`](ZZ9000_proto.sdk/ZZ9000OS/src/) | Bare-metal ARM firmware sources |
+| [`ZZ9000_proto.sdk/ZZ9000FSBL/src/`](ZZ9000_proto.sdk/ZZ9000FSBL/src/) | First-stage bootloader sources |
+| [`ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc`](ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc) | FPGA pin mapping and timing constraints |
+| [`zz9000_project.tcl`](zz9000_project.tcl) | Exported Vivado project/block design source |
+| [`bootimage_work/`](bootimage_work/) | Committed FSBL and bitstream inputs used by local and CI boot image builds |
+| [`test/rtg/`](test/rtg/) | Host-side RTG correctness and benchmark harness |
+
+![ZZ9000 block design](gfx/zz9000-bd.png?raw=true)
+
+## Amiga MMU and Cache Notes
+
+On 68040/68060 systems, configure any pure ZZ9000 RAM window in the
 Amiga-side MMU tool. For the optional Zorro III FastRAM range,
-`Writethrough` has shown the best performance on tested systems because
-CPU reads can still benefit from cache while writes reach the board
-immediately. In MuLibs/MMULib terms, this is typically:
+`Writethrough` has shown the best tested performance because CPU reads
+can still benefit from cache while writes reach the board immediately.
+In MuLibs/MMULib terms, this is typically:
 
-```
+```text
 For 28014 5 SetCacheMode {base} {size} Valid Writethrough
 ```
 
-Avoid `CopyBack` for ZZ9000 RAM unless you know the driver and workload
-are cache-coherent; dirty cache lines can otherwise remain on the CPU
-instead of reaching the board when expected. Keep MMIO, register, boot,
-USB, Ethernet, and other FPGA/ARM shared windows cache inhibited or data
-no-cache. On systems that become unstable with `Writethrough`, fall back
-to a `Data NoCache` / `CacheInhibit` mapping for the configured Zorro RAM
-range. Leave the instruction cache enabled. 68030 systems do not need
-this workaround.
+Avoid `CopyBack` for ZZ9000 RAM unless the driver and workload are known
+to be cache-coherent. Keep MMIO, register, boot, USB, Ethernet, and other
+FPGA/ARM shared windows cache inhibited or data no-cache. If a machine is
+unstable with `Writethrough`, fall back to `Data NoCache` /
+`CacheInhibit` for the configured Zorro RAM range. Leave instruction
+cache enabled. 68030 systems do not need this workaround.
 
 If a 68040/68060 machine remains unstable with Zorro III FastRAM enabled,
-use the `zorro3-nofast` firmware variant to disable the extra Zorro RAM
-advertisement.
+use the `zorro3-nofast` firmware variant.
 
-## Hardware connectivity
+## Hardware
 
-Schematics are in the manual (PDF):
+The ZZ9000 is built around a Xilinx Zynq-7020 with FPGA fabric, dual
+Cortex-A9 cores, and 1 GB DDR3. Main board interfaces:
+
+- DVI output through the Silicon Image 9022 encoder
+- Gigabit Ethernet through the Micrel KSZ9031 PHY
+- FAT32 microSD card for firmware images and SD boot
+- USB 2.0 host port
+
+The hardware manual and schematics are available from MNT:
 <https://mntre.com/media/ZZ9000_info_md/zz9000-manual.pdf>
-
-- DVI (via non-HDMI-compliant HDMI connector), SiliconImage 9022 encoder
-- Gigabit Ethernet, Micrel KSZ9031 PHY
-- microSD slot (firmware + SD boot)
-- USB 2.0 host port (wired up by this fork)
 
 ## Credits
 
-- **Scanlines** — V1 intensity scanlines and V2 multi-mode scanlines
-  (classic / soft / gradient with parity control) by Xanxi, adapted for
-  firmware 2.0.0 by Dimitris Panokostas (midwan). V2 leaves the
-  V1 intensity registers decoded but unused.
-- **Scanlines V2 block-design integration** (TCL wiring between
-  mntzorro's scanline outputs and video_formatter) and the split
-  firmware / bitstream / bootimage build scripts — Dimitris Panokostas.
-- **RTG performance** — NEON intrinsics, compiler flags, batch palette
-  transfer, operation fusion — Dimitris Panokostas.
-- **USB 2.0 host stack on the ARM side** — EHCI + USB command proxy,
-  Zynq AXI stability fixes (USBMODE_SDIS, ULPI dynamic XCVR switching,
-  BURSTSIZE, TXFIFO threshold, direct-DMA bulk transfers from the shared
-  mailbox) — Dimitris Panokostas.
-- **SD boot** (HDF-on-FAT storage backend, autoboot ROM), FWUP file-push
-  protocol, videocap / sprite fixes, GCC 15 build, and CI pipeline —
-  Dimitris Panokostas.
-- **Upstream firmware sources** (pre-fork) — see the fork notice above.
+- Original MNT ZZ9000 firmware sources: MNT Research GmbH and upstream
+  contributors.
+- Scanlines V1/V2: Xanxi, adapted for this fork by Dimitris Panokostas.
+- BlitterStudio fork features, including RTG performance work, USB host
+  stack integration, SD boot, FWUP, videocap fixes, GCC build scripts,
+  CI packaging, and release infrastructure: Dimitris Panokostas.
 
-Per-file copyright notices are preserved in each source file.
+Per-file copyright notices are preserved in the source tree.
 
 ## License
 
-SPDX-License-Identifier: **GPL-3.0-or-later**
-<https://spdx.org/licenses/GPL-3.0-or-later.html>
+SPDX-License-Identifier: `GPL-3.0-or-later`
 
-## Xilinx Platform Cable setup (Linux)
-
-```bash
-sudo apt install fxload
-sudo cp -r xilinx-xusb /etc/xilinx-xusb
-```
-
-Create `/etc/udev/rules.d/xusbdfwu.rules` with:
-
-```
-# version 0003
-ATTRS{idVendor}=="03fd", ATTRS{idProduct}=="0008", MODE="666"
-SUBSYSTEM=="usb", ACTION=="add", ATTRS{idVendor}=="03fd", ATTRS{idProduct}=="0007", RUN+="/sbin/fxload -v -t fx2 -I /etc/xilinx-xusb/xusbdfwu.hex -D $tempnode"
-SUBSYSTEM=="usb", ACTION=="add", ATTRS{idVendor}=="03fd", ATTRS{idProduct}=="0009", RUN+="/sbin/fxload -v -t fx2 -I /etc/xilinx-xusb/xusb_xup.hex -D $tempnode"
-SUBSYSTEM=="usb", ACTION=="add", ATTRS{idVendor}=="03fd", ATTRS{idProduct}=="000d", RUN+="/sbin/fxload -v -t fx2 -I /etc/xilinx-xusb/xusb_emb.hex -D $tempnode"
-SUBSYSTEM=="usb", ACTION=="add", ATTRS{idVendor}=="03fd", ATTRS{idProduct}=="000f", RUN+="/sbin/fxload -v -t fx2 -I /etc/xilinx-xusb/xusb_xlp.hex -D $tempnode"
-SUBSYSTEM=="usb", ACTION=="add", ATTRS{idVendor}=="03fd", ATTRS{idProduct}=="0013", RUN+="/sbin/fxload -v -t fx2 -I /etc/xilinx-xusb/xusb_xp2.hex -D $tempnode"
-SUBSYSTEM=="usb", ACTION=="add", ATTRS{idVendor}=="03fd", ATTRS{idProduct}=="0015", RUN+="/sbin/fxload -v -t fx2 -I /etc/xilinx-xusb/xusb_xse.hex -D $tempnode"
-```
-
-udev will launch fxload whenever the platform cable is plugged in,
-loading those hex firmwares onto it. The cable LED should turn green.
+See [LICENSE](LICENSE).

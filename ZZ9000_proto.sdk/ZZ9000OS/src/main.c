@@ -59,7 +59,7 @@ void Xil_AssertNonVoid() {}
 #include "usb_proxy.h"
 
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 0
+#define REVISION_MINOR 1
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0

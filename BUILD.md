@@ -99,6 +99,23 @@ depending on your QSPI/SD boot setup), power-cycle the Amiga.
 - **Vivado 2018.3** (bitstream): set `$VIVADO_DIR` if not at
   `/opt/Xilinx/Vivado/2018.3`.
 
+## Xilinx Platform Cable setup
+
+Vivado/JTAG workflows on Linux may need the legacy Xilinx USB firmware
+loader rules. The repository includes the required firmware blobs and
+udev rules under [`xilinx-xusb/`](xilinx-xusb/):
+
+```bash
+sudo apt install fxload
+sudo mkdir -p /etc/xilinx-xusb
+sudo cp xilinx-xusb/*.hex /etc/xilinx-xusb/
+sudo cp xilinx-xusb/xusbdfwu.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+```
+
+udev will run `fxload` when the platform cable is plugged in. The cable
+LED should turn green after the firmware loads.
+
 ## CI
 
 The GitHub Actions workflow
@@ -108,20 +125,20 @@ builds bootgen from source (cached), then runs `./build_firmware.sh`
 + `./build_bootimage.sh` against the committed bitstream. It does **not**
 run Vivado — any HDL change must include an updated
 `bootimage_work/zz9000_ps_wrapper.bit` for CI to pick up the new logic.
-Build artifacts (`ZZ9000OS.elf`, `BOOT.bin`) are uploaded per run.
+Release-style ZIP artifacts are uploaded per run.
 
 ### Cutting a release
 
-Push a `v*` tag (e.g. `v2.0.0`, or `v2.0.0-rc1` for a pre-release) and
+Push a `v*` tag (e.g. `v2.1.0`, or `v2.1.0-rc1` for a pre-release) and
 the workflow will build the firmware and publish a GitHub Release with
-`BOOT-<tag>.bin`, `ZZ9000OS-<tag>.elf`, and old-style
-`zz9000-firmware-<tag>-<variant>.zip` archives attached. Each ZIP
-contains a directory with the user-facing `BOOT.bin` file to copy to the
-ZZ9000 microSD card.
+old-style `zz9000-firmware-<tag>-<variant>.zip` archives attached. Each
+ZIP contains a directory with the user-facing `BOOT.bin` file to copy to
+the ZZ9000 microSD card. The workflow packages both the standard firmware
+flavor and the `ns-pal` flavor.
 
 ```bash
-git tag -a v2.0.0 -m "Firmware 2.0.0"
-git push origin v2.0.0
+git tag -a v2.1.0 -m "Firmware 2.1.0"
+git push origin v2.1.0
 ```
 
 Tags containing `-` are marked as pre-releases.
