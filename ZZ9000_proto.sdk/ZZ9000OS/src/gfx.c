@@ -723,12 +723,50 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 			break; \
 	}
 
+static uint64_t p2c_byte_lut[256];
+static uint8_t p2c_byte_lut_initialized;
+
+static void p2c_byte_lut_init(void)
+{
+	if (p2c_byte_lut_initialized)
+		return;
+
+	for (uint16_t byte = 0; byte < 256; byte++) {
+		uint64_t out = 0;
+		for (uint8_t pixel = 0; pixel < 8; pixel++) {
+			if (byte & (0x80 >> pixel))
+				out |= (uint64_t)1 << (pixel * 8);
+		}
+		p2c_byte_lut[byte] = out;
+	}
+
+	p2c_byte_lut_initialized = 1;
+}
+
+static inline uint64_t p2c_decode_8pixels(uint8_t **pp, uint8_t planes,
+	uint8_t layer_mask, uint16_t cur_byte, uint8_t invert)
+{
+	uint64_t out = 0;
+
+	for (uint8_t plane = 0; plane < planes && plane < 8; plane++) {
+		uint8_t plane_bit = (uint8_t)(1u << plane);
+		if (layer_mask & plane_bit) {
+			uint8_t byte = pp[plane][cur_byte];
+			out |= p2c_byte_lut[invert ? (byte ^ 0xff) : byte] << plane;
+		}
+	}
+
+	return out;
+}
+
 void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src)
 {
 	uint32_t *dp = fb + (dy * fb_pitch);
 
 	uint8_t cur_bit, base_bit, base_byte;
 	uint16_t cur_byte = 0, u8_fg = 0;
+	uint8_t direct_copy = (mask == 0xFF && (draw_mode == MINTERM_SRC || draw_mode == MINTERM_NOTSRC));
+	uint8_t invert_planar = draw_mode & 0x01;
 
 	uint32_t plane_size = src_line_pitch * h;
 	uint8_t *bmp_data = bmp_data_src;
@@ -740,28 +778,57 @@ void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 	cur_bit = base_bit = (0x80 >> (sx % 8));
 	cur_byte = base_byte = ((sx / 8) % src_line_pitch);
 
+	if (direct_copy)
+		p2c_byte_lut_init();
+
 	for (int16_t line_y = 0; line_y < h; line_y++) {
-		for (int16_t x = dx; x < dx + w; x++) {
-			u8_fg = 0;
-			if (draw_mode & 0x01) // If bit 1 is set, the inverted planar data is always used.
-				DECODE_INVERTED_PLANAR_PIXEL(u8_fg)
-			else
-				DECODE_PLANAR_PIXEL(u8_fg)
-			
-			if (mask == 0xFF && (draw_mode == MINTERM_SRC || draw_mode == MINTERM_NOTSRC)) {
-				((uint8_t *)dp)[x] = u8_fg;
-				goto skip;
+		int16_t x = dx;
+		int16_t rect_x2 = dx + w;
+
+		if (direct_copy) {
+			uint8_t *dst = (uint8_t *)dp;
+			while (x < rect_x2) {
+				if (cur_bit == 0x80 && x + 8 <= rect_x2) {
+					uint64_t pixels = p2c_decode_8pixels(pp, planes, layer_mask,
+						cur_byte, invert_planar);
+					memcpy(dst + x, &pixels, sizeof(pixels));
+					x += 8;
+					cur_byte++;
+					if (cur_byte >= src_line_pitch) cur_byte = 0;
+					continue;
+				}
+
+				u8_fg = 0;
+				if (invert_planar)
+					DECODE_INVERTED_PLANAR_PIXEL(u8_fg)
+				else
+					DECODE_PLANAR_PIXEL(u8_fg)
+
+				dst[x] = u8_fg;
+				x++;
+				if ((cur_bit >>= 1) == 0) {
+					cur_bit = 0x80;
+					cur_byte++;
+					if (cur_byte >= src_line_pitch) cur_byte = 0;
+				}
 			}
-
-		HANDLE_MINTERM_PIXEL_8(u8_fg, ((uint8_t *)dp)[x]);
-
-		skip:;
-		if ((cur_bit >>= 1) == 0) {
-			cur_bit = 0x80;
-			cur_byte++;
-			if (cur_byte >= src_line_pitch) cur_byte = 0;
 		}
+		else {
+			for (; x < rect_x2; x++) {
+				u8_fg = 0;
+				if (draw_mode & 0x01) // If bit 1 is set, the inverted planar data is always used.
+					DECODE_INVERTED_PLANAR_PIXEL(u8_fg)
+				else
+					DECODE_PLANAR_PIXEL(u8_fg)
 
+				HANDLE_MINTERM_PIXEL_8(u8_fg, ((uint8_t *)dp)[x]);
+
+				if ((cur_bit >>= 1) == 0) {
+					cur_bit = 0x80;
+					cur_byte++;
+					if (cur_byte >= src_line_pitch) cur_byte = 0;
+				}
+			}
 		}
 		dp += fb_pitch;
 		if ((line_y + sy + 1) % h) {
