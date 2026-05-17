@@ -346,6 +346,7 @@ static uint8_t ref_minterm_index(uint8_t src, uint8_t dst, uint8_t mode)
 		return src ^ dst;
 	case MINTERM_DST:
 		return dst;
+	case MINTERM_NOTSRC:
 	case MINTERM_SRC:
 		return src;
 	case MINTERM_OR:
@@ -578,6 +579,16 @@ static void test_p2d(void)
 	ref_p2d_rect(1, 0, 9, 8, P2D_W, P2D_H, MINTERM_SRC,
 		P2D_PLANES, 0x07, P2D_PITCH, data, MNTVA_COLOR_16BIT565);
 	check_frame("p2d_rect src 16");
+
+	for (int i = 0; i < 256; i++)
+		pal[i] = 0xff000000u | (uint32_t)(i * 0x00010101u);
+	make_planar(planes, P2D_PLANES, P2D_PITCH, P2D_H, 0x5005);
+	seed_frame(0x5006);
+	p2d_rect(4, 0, 7, 5, P2D_W, P2D_H, MINTERM_NOTSRC,
+		P2D_PLANES, 0xff, 0x07, 0x00ffffff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
+	ref_p2d_rect(4, 0, 7, 5, P2D_W, P2D_H, MINTERM_NOTSRC,
+		P2D_PLANES, 0x07, P2D_PITCH, data, MNTVA_COLOR_32BIT);
+	check_frame("p2d_rect notsrc 32");
 }
 
 static void test_template(void)
@@ -678,6 +689,30 @@ static void bench_p2c(void)
 		B_PLANES, 0xff, 0xff, B_PITCH, planar);
 }
 
+static void bench_p2d(void)
+{
+	enum {
+		B_W = 72,
+		B_H = 48,
+		B_PITCH = 12,
+		B_PLANES = 8,
+		B_BYTES = 256 * 4 + B_PLANES * B_PITCH * B_H,
+	};
+	static uint8_t data[B_BYTES];
+	static int initialized;
+
+	if (!initialized) {
+		uint32_t *pal = (uint32_t *)data;
+		for (int i = 0; i < 256; i++)
+			pal[i] = 0xff000000u | (uint32_t)(i * 0x00010101u);
+		make_planar(data + 256 * 4, B_PLANES, B_PITCH, B_H, 0x7002);
+		initialized = 1;
+	}
+
+	p2d_rect(3, 0, 8, 8, B_W, B_H, MINTERM_SRC,
+		B_PLANES, 0xff, 0xff, 0x00ffffff, B_PITCH, data, MNTVA_COLOR_32BIT);
+}
+
 static void run_benchmarks(void)
 {
 	seed_frame(0x7000);
@@ -685,6 +720,7 @@ static void run_benchmarks(void)
 	bench_one("fill_rect_solid 32", bench_fill32, 120000);
 	bench_one("copy_rect_nomask 32", bench_copy32, 120000);
 	bench_one("p2c_rect src 8 planes", bench_p2c, 20000);
+	bench_one("p2d_rect src 8 planes", bench_p2d, 20000);
 	printf("checksum %016llx\n", (unsigned long long)checksum_words(actual_fb, FB_WORDS));
 }
 
