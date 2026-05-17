@@ -78,14 +78,16 @@ int fpga_interrupt_connect(void* isr_video, void* isr_audio_tx, void* isr_audio_
 }
 
 static uint32_t amiga_interrupts = 0;
+static int amiga_interrupt_line_asserted = 1;
 
 void amiga_interrupt_set(uint32_t bit) {
 	//printf("[airq] +%lu\n", bit);
 	// set bit
 	amiga_interrupts |= bit;
 
-	if (amiga_interrupts != 0) {
+	if (amiga_interrupts != 0 && !amiga_interrupt_line_asserted) {
 		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 2 | 1);
+		amiga_interrupt_line_asserted = 1;
 	}
 }
 
@@ -98,7 +100,8 @@ void amiga_interrupt_clear(uint32_t bit) {
 	// unset bit
 	amiga_interrupts = amiga_interrupts & ~bit;
 
-	if (amiga_interrupts == 0) {
+	if (amiga_interrupts == 0 && amiga_interrupt_line_asserted) {
 		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 2 | 0);
+		amiga_interrupt_line_asserted = 0;
 	}
 }
