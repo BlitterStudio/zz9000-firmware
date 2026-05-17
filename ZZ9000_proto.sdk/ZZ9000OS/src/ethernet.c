@@ -64,11 +64,14 @@ static volatile u32 frames_received = 0;
 static volatile u16 frames_backlog = 0;
 static volatile u16 frames_backlog_read = 0;
 static volatile u16 frames_backlog_write = 0;
+static volatile u16 frames_backlog_reserved = 0;
+static volatile u16 frames_backlog_reserve = 0;
 static volatile int frames_dropped = 0;
 static volatile int frames_backlog_full = 0;
 static volatile int tx_recoveries = 0;
 static volatile int rx_backpressure = 0;
 static volatile int rx_pause_frames = 0;
+static volatile int rx_slot_mismatch = 0;
 
 #define ETH_PHY_TYPE_MICREL 0
 #define ETH_PHY_TYPE_MOTORCOMM 1
@@ -79,7 +82,6 @@ u32 PhyAddr;
 typedef char EthernetFrame[XEMACPS_MAX_VLAN_FRAME_SIZE_JUMBO] __attribute__ ((aligned(64)));
 
 volatile char* TxFrame = (char*)TX_FRAME_ADDRESS;		/* Transmit buffer */
-volatile char* RxFrame = (char*)RX_FRAME_ADDRESS;		/* Receive buffer */
 
 /*
  * Buffer descriptors are allocated in uncached memory. The memory is made
@@ -92,12 +94,20 @@ volatile char* RxFrame = (char*)RX_FRAME_ADDRESS;		/* Receive buffer */
 #define PHY_DETECT_REG2 3
 #define PHY_ID_MARVELL	0x141
 #define PHY_ID_MICREL_KSZ9031 0x22
+#define ETH_INVALID_BACKLOG_SLOT 0xffff
 
 static void XEmacPsSendHandler(void *Callback);
 static void XEmacPsRecvHandler(void *Callback);
 static void XEmacPsErrorHandler(void *Callback, u8 direction, u32 word);
 LONG setup_phy(XEmacPs * EmacPsInstancePtr);
 static LONG EmacPsSetupIntrSystem(XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId);
+static void ethernet_clear_host_state();
+static int ethernet_prepare_rx_bd(XEmacPs_BdRing *rxring, XEmacPs_Bd *rxbd);
+
+#define XEMACPS_BD_TO_INDEX(ringptr, bdptr)				\
+	(((u32)bdptr - (u32)(ringptr)->BaseBdAddr) / (ringptr)->Separation)
+
+static u16 rx_bd_backlog_slot[RXBD_CNT];
 
 static u16 ethernet_next_backlog_slot(u16 slot)
 {
@@ -108,9 +118,27 @@ static u16 ethernet_next_backlog_slot(u16 slot)
 	return slot;
 }
 
+static u16 ethernet_previous_backlog_slot(u16 slot)
+{
+	if (slot == 0) {
+		return FRAME_MAX_BACKLOG - 1;
+	}
+	return slot - 1;
+}
+
+static uint8_t *ethernet_backlog_slot_ptr(u16 slot)
+{
+	return (uint8_t *)(RX_BACKLOG_ADDRESS + slot * FRAME_SIZE);
+}
+
+static uint8_t *ethernet_backlog_payload_ptr(u16 slot)
+{
+	return ethernet_backlog_slot_ptr(slot) + RX_FRAME_PAD;
+}
+
 static void ethernet_clear_backlog_slot(u16 slot)
 {
-	memset((void*)(RX_BACKLOG_ADDRESS + slot * FRAME_SIZE), 0, RX_FRAME_PAD);
+	memset(ethernet_backlog_slot_ptr(slot), 0, RX_FRAME_PAD);
 }
 
 void micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr);
@@ -208,12 +236,20 @@ int init_ethernet_buffers() {
 	}
 	BdRxPtr = BdRxSet;
 	for (int i=0; i<RXBD_CNT; i++) {
-		XEmacPs_BdSetAddressRx(BdRxPtr, RxFrame + FRAME_SIZE*i);
+		Status = ethernet_prepare_rx_bd(&(XEmacPs_GetRxRing(EmacPsInstancePtr)), BdRxPtr);
+		if (Status != XST_SUCCESS) {
+			printf("EMAC: Error preparing RxBD\n");
+			XEmacPs_BdRingUnAlloc(&(XEmacPs_GetRxRing(EmacPsInstancePtr)), RXBD_CNT, BdRxSet);
+			ethernet_clear_host_state();
+			return XST_FAILURE;
+		}
 		BdRxPtr = XEmacPs_BdRingNext(&(XEmacPs_GetRxRing(EmacPsInstancePtr)), BdRxPtr);
 	}
 	Status = XEmacPs_BdRingToHw(&(XEmacPs_GetRxRing(EmacPsInstancePtr)), RXBD_CNT, BdRxSet);
 	if (Status != XST_SUCCESS) {
 		printf("EMAC: Error committing RxBD to HW\n");
+		XEmacPs_BdRingUnAlloc(&(XEmacPs_GetRxRing(EmacPsInstancePtr)), RXBD_CNT, BdRxSet);
+		ethernet_clear_host_state();
 		return XST_FAILURE;
 	}
 
@@ -233,12 +269,17 @@ int ethernet_init() {
 	frames_backlog = 0;
 	frames_backlog_read = 0;
 	frames_backlog_write = 0;
+	frames_backlog_reserved = 0;
+	frames_backlog_reserve = 0;
 
 	DeviceErrors = 0;
 	FramesTx = 0;
 	FramesRx = 0;
 	frame_serial = 0;
 	frames_received = 0;
+	for (int i = 0; i < RXBD_CNT; i++) {
+		rx_bd_backlog_slot[i] = ETH_INVALID_BACKLOG_SLOT;
+	}
 
 	Config = XEmacPs_LookupConfig(XPAR_XEMACPS_0_DEVICE_ID);
 	Status = XEmacPs_CfgInitialize(EmacPsInstancePtr, Config, Config->BaseAddress);
@@ -312,6 +353,11 @@ int ethernet_task_state = ETH_TASK_SETUP;
 #define ETH_BACKLOG_LOW_WATERMARK (ETH_BACKLOG_HIGH_WATERMARK / 2)
 #define ETH_PAUSE_QUANTUM 0x0800
 
+static u16 ethernet_backlog_pending()
+{
+	return frames_backlog + frames_backlog_reserved;
+}
+
 static int ethernet_pause_rx_irq()
 {
 	if (ethernet_task_state != ETH_TASK_READY) {
@@ -349,12 +395,15 @@ static void ethernet_log_status(const char *reason) {
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
 	u32 BaseAddress = EmacPsInstancePtr->Config.BaseAddress;
 
-	printf("EMAC[%s]: state=%d backlog=%u read=%u write=%u serial=%u rx=%lu tx=%lu drops=%d full=%d bp=%d pause=%d txrec=%d errors=%ld\n",
+	printf("EMAC[%s]: state=%d backlog=%u reserved=%u pending=%u read=%u write=%u reserve=%u serial=%u rx=%lu tx=%lu drops=%d full=%d bp=%d pause=%d mismatch=%d txrec=%d errors=%ld\n",
 	       reason,
 	       ethernet_task_state,
 	       (unsigned int)frames_backlog,
+	       (unsigned int)frames_backlog_reserved,
+	       (unsigned int)ethernet_backlog_pending(),
 	       (unsigned int)frames_backlog_read,
 	       (unsigned int)frames_backlog_write,
+	       (unsigned int)frames_backlog_reserve,
 	       (unsigned int)frame_serial,
 	       (unsigned long)frames_received,
 	       (unsigned long)FramesTx,
@@ -362,6 +411,7 @@ static void ethernet_log_status(const char *reason) {
 	       frames_backlog_full,
 	       rx_backpressure,
 	       rx_pause_frames,
+	       rx_slot_mismatch,
 	       tx_recoveries,
 	       (long)DeviceErrors);
 
@@ -402,6 +452,8 @@ static void ethernet_clear_host_state() {
 	frames_backlog = 0;
 	frames_backlog_read = 0;
 	frames_backlog_write = 0;
+	frames_backlog_reserved = 0;
+	frames_backlog_reserve = 0;
 	frame_serial = 0;
 	frames_received = 0;
 	FramesRx = 0;
@@ -410,6 +462,11 @@ static void ethernet_clear_host_state() {
 	frames_backlog_full = 0;
 	rx_backpressure = 0;
 	rx_pause_frames = 0;
+	rx_slot_mismatch = 0;
+
+	for (int i = 0; i < RXBD_CNT; i++) {
+		rx_bd_backlog_slot[i] = ETH_INVALID_BACKLOG_SLOT;
+	}
 
 	for (int i = 0; i < FRAME_MAX_BACKLOG; i++) {
 		ethernet_clear_backlog_slot(i);
@@ -454,9 +511,13 @@ static int ethernet_restart_dma(const char *reason) {
 void ethernet_reset_for_amiga() {
 	ethernet_log_status("amiga-reset-before");
 
-	int paused = ethernet_pause_rx_irq();
-	ethernet_clear_host_state();
-	ethernet_resume_rx_irq(paused);
+	if (ethernet_task_state == ETH_TASK_READY) {
+		ethernet_restart_dma("amiga-reset");
+	} else {
+		int paused = ethernet_pause_rx_irq();
+		ethernet_clear_host_state();
+		ethernet_resume_rx_irq(paused);
+	}
 
 	ethernet_log_status("amiga-reset-after");
 }
@@ -531,15 +592,51 @@ static void XEmacPsSendHandler(void *Callback)
 	}
 }
 
-#define XEMACPS_BD_TO_INDEX(ringptr, bdptr)				\
-	(((u32)bdptr - (u32)(ringptr)->BaseBdAddr) / (ringptr)->Separation)
+static int ethernet_prepare_rx_bd(XEmacPs_BdRing *rxring, XEmacPs_Bd *rxbd) {
+	if (ethernet_backlog_pending() >= ETH_BACKLOG_HIGH_WATERMARK) {
+		rx_backpressure = 1;
+		ethernet_send_pause_frame();
+		return XST_FAILURE;
+	}
+
+	u32 bd_index = XEMACPS_BD_TO_INDEX(rxring, rxbd);
+	u16 backlog_slot = frames_backlog_reserve;
+
+	ethernet_clear_backlog_slot(backlog_slot);
+	rx_bd_backlog_slot[bd_index] = backlog_slot;
+	frames_backlog_reserve = ethernet_next_backlog_slot(frames_backlog_reserve);
+	frames_backlog_reserved++;
+
+	XEmacPs_BdClearRxNew(rxbd);
+	XEmacPs_BdSetAddressRx(rxbd, ethernet_backlog_payload_ptr(backlog_slot));
+
+	return XST_SUCCESS;
+}
+
+static void ethernet_unprepare_rx_bd(XEmacPs_BdRing *rxring, XEmacPs_Bd *rxbd) {
+	u32 bd_index = XEMACPS_BD_TO_INDEX(rxring, rxbd);
+	u16 backlog_slot = rx_bd_backlog_slot[bd_index];
+
+	if (backlog_slot == ETH_INVALID_BACKLOG_SLOT) {
+		return;
+	}
+
+	rx_bd_backlog_slot[bd_index] = ETH_INVALID_BACKLOG_SLOT;
+	if (frames_backlog_reserved > 0) {
+		frames_backlog_reserved--;
+	}
+
+	/* This is only used immediately after preparing the newest BD. */
+	frames_backlog_reserve = ethernet_previous_backlog_slot(frames_backlog_reserve);
+	ethernet_clear_backlog_slot(backlog_slot);
+}
 
 void ethernet_alloc_rx_frames() {
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
 	XEmacPs_BdRing* rxring = &(XEmacPs_GetRxRing(EmacPsInstancePtr));
 	XEmacPs_Bd* rxbd;
 
-	if (frames_backlog >= ETH_BACKLOG_HIGH_WATERMARK) {
+	if (ethernet_backlog_pending() >= ETH_BACKLOG_HIGH_WATERMARK) {
 		rx_backpressure = 1;
 		ethernet_send_pause_frame();
 		return;
@@ -547,22 +644,25 @@ void ethernet_alloc_rx_frames() {
 
 	int free_bds = XEmacPs_BdRingGetFreeCnt(rxring);
 
-	for (int i=0; i<free_bds; i++) {
+	for (int i=0; i<free_bds && ethernet_backlog_pending() < ETH_BACKLOG_HIGH_WATERMARK; i++) {
 
 		int Status = XEmacPs_BdRingAlloc(rxring, 1, &rxbd);
 		if (Status != XST_SUCCESS) {
 			printf("EMAC: Error allocating RxBD\n");
 		} else {
-
-			int bd_index=XEMACPS_BD_TO_INDEX(rxring, rxbd);
-			XEmacPs_BdClearRxNew(rxbd);
-			XEmacPs_BdSetAddressRx(rxbd, RxFrame+bd_index*FRAME_SIZE); // FIXME redundant?
+			Status = ethernet_prepare_rx_bd(rxring, rxbd);
+			if (Status != XST_SUCCESS) {
+				XEmacPs_BdRingUnAlloc(rxring, 1, rxbd);
+				break;
+			}
 
 			Status = XEmacPs_BdRingToHw(rxring, 1, rxbd);
 			if (Status != XST_SUCCESS) {
 				printf("EMAC: Error committing RxBD to HW\n");
 
+				ethernet_unprepare_rx_bd(rxring, rxbd);
 				XEmacPs_BdRingUnAlloc(rxring, 1, rxbd); // FIXME double check
+				break;
 			}
 		}
 	}
@@ -600,19 +700,29 @@ static void XEmacPsRecvHandler(void *Callback)
 
 			u32 bd_idx = XEMACPS_BD_TO_INDEX(rxring, cur_bd_ptr);
 			int rx_bytes = XEmacPs_BdGetLength(cur_bd_ptr);
+			u16 backlog_slot = rx_bd_backlog_slot[bd_idx];
 
-			uint8_t* frame_ptr = (uint8_t*)(RxFrame + bd_idx*FRAME_SIZE);
+			if (frames_backlog_reserved > 0) {
+				frames_backlog_reserved--;
+			}
+			rx_bd_backlog_slot[bd_idx] = ETH_INVALID_BACKLOG_SLOT;
 
-			//printf("EMAC: RX: %d [%d] bd_idx: %d\n", frame_serial, rx_bytes, bd_idx);
+			//printf("EMAC: RX: %d [%d] bd_idx: %d slot: %d\n", frame_serial, rx_bytes, bd_idx, backlog_slot);
 
-			Xil_DCacheInvalidateRange((UINTPTR)frame_ptr, FRAME_SIZE);
-
-			if (frames_backlog<FRAME_MAX_BACKLOG) {
-				// copy the frame to the backlog (frames that amiga hasn't fetched yet)
-				uint16_t backlog_slot = frames_backlog_write;
-				uint8_t* frame_bl_ptr = (uint8_t*)(RX_BACKLOG_ADDRESS+backlog_slot*FRAME_SIZE);
-				memcpy(frame_bl_ptr+RX_FRAME_PAD, frame_ptr, rx_bytes);
-
+			if (backlog_slot == ETH_INVALID_BACKLOG_SLOT) {
+				frames_dropped++;
+			} else if (rx_bytes > (FRAME_SIZE - RX_FRAME_PAD)) {
+				frames_dropped++;
+				ethernet_clear_backlog_slot(backlog_slot);
+			} else if (backlog_slot != frames_backlog_write || frames_backlog >= FRAME_MAX_BACKLOG) {
+				if (frames_backlog >= FRAME_MAX_BACKLOG) {
+					frames_backlog_full++;
+				}
+				frames_dropped++;
+				rx_slot_mismatch++;
+				ethernet_clear_backlog_slot(backlog_slot);
+			} else {
+				uint8_t* frame_bl_ptr = ethernet_backlog_slot_ptr(backlog_slot);
 				*(frame_bl_ptr)   = (rx_bytes&0xff00)>>8;
 				*(frame_bl_ptr+1) = (rx_bytes&0xff);
 				*(frame_bl_ptr+2) = (frame_serial&0xff00)>>8;
@@ -621,16 +731,7 @@ static void XEmacPsRecvHandler(void *Callback)
 				frames_backlog_write = ethernet_next_backlog_slot(frames_backlog_write);
 				frames_backlog++;
 
-				//printf("bd %d [%d] copied from %p to %p\n", bd_idx, rx_bytes, frame_ptr, frame_bl_ptr);
-			} else {
-				frames_backlog_full++;
-				if (frames_backlog_full == 1 || (frames_backlog_full % 16) == 0) {
-					printf("EMAC: RX backlog full count=%d backlog=%u read=%u write=%u\n",
-					       frames_backlog_full,
-					       (unsigned int)frames_backlog,
-					       (unsigned int)frames_backlog_read,
-					       (unsigned int)frames_backlog_write);
-				}
+				//printf("bd %d [%d] armed slot %p\n", bd_idx, rx_bytes, frame_bl_ptr);
 			}
 
 			XEmacPs_BdClearRxNew(cur_bd_ptr);
@@ -639,7 +740,7 @@ static void XEmacPsRecvHandler(void *Callback)
 			frames_received++;
 		}
 
-		if (frames_backlog >= ETH_BACKLOG_HIGH_WATERMARK) {
+		if (ethernet_backlog_pending() >= ETH_BACKLOG_HIGH_WATERMARK) {
 			rx_backpressure = 1;
 			ethernet_send_pause_frame();
 		}
@@ -668,6 +769,34 @@ int ethernet_get_backlog() {
 	return frames_backlog;
 }
 
+u16 ethernet_get_rx_status() {
+	u16 ready = frames_backlog;
+	u16 reserved = frames_backlog_reserved;
+
+	if (ready > 0xff) {
+		ready = 0xff;
+	}
+	if (reserved > 0x7f) {
+		reserved = 0x7f;
+	}
+
+	return (rx_backpressure ? 0x8000 : 0) | (reserved << 8) | ready;
+}
+
+u16 ethernet_get_rx_stats() {
+	u16 dropped = frames_dropped;
+	u16 pause = rx_pause_frames;
+
+	if (dropped > 0xff) {
+		dropped = 0xff;
+	}
+	if (pause > 0xff) {
+		pause = 0xff;
+	}
+
+	return (dropped << 8) | pause;
+}
+
 int ethernet_receive_frame() {
 	//printf("[eth rx] backlog %d read %d write %d\n", frames_backlog, frames_backlog_read, frames_backlog_write);
 
@@ -684,7 +813,7 @@ int ethernet_receive_frame() {
 		// this is NOT an error, Amiga wants data and there is no data on RX buffers
 	}
 
-	if (rx_backpressure && frames_backlog <= ETH_BACKLOG_LOW_WATERMARK) {
+	if (rx_backpressure && ethernet_backlog_pending() <= ETH_BACKLOG_LOW_WATERMARK) {
 		rx_backpressure = 0;
 		ethernet_alloc_rx_frames();
 	}

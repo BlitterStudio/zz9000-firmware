@@ -25,6 +25,8 @@ uint8_t* ethernet_get_mac_address_ptr();
 void ethernet_update_mac_address();
 uint8_t* ethernet_current_receive_ptr();
 int ethernet_get_backlog();
+u16 ethernet_get_rx_status();
+u16 ethernet_get_rx_stats();
 void ethernet_task();
 void ethernet_reset_for_amiga();
 

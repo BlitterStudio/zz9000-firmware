@@ -162,11 +162,6 @@ static int adau_enabled = 0;
 int interrupt_enabled_audio = 0;
 int interrupt_enabled_vblank = 0;
 
-// debug test state
-static uint32_t zz_debug_test_counter = 0;
-static uint32_t zz_debug_test_prev = 0;
-static uint32_t zz_debug_test_ms = 0;
-
 enum amiga_reset_mode {
 	AMIGA_RESET_FAST = 0,
 	AMIGA_RESET_INIT_MEDIA = 1,
@@ -1136,24 +1131,6 @@ int main() {
 				case REG_ZZ_AUDIO_SCALE:
 					audio_scale = zdata;
 					break;
-				case REG_ZZ_UNUSED_REG8C:
-					// set up a test (set sleep time, and set counter to 0)
-					zz_debug_test_ms = zdata;
-					zz_debug_test_counter = 0;
-					zz_debug_test_prev = 0;
-					printf("[zzdebug] test reset, time: %lu\n", zz_debug_test_ms);
-					break;
-
-				case REG_ZZ_UNUSED_REG8E:
-					// increase counter by one and compare with the number we are sent
-					if (zdata > 0 && zz_debug_test_prev != zdata-1) {
-						printf("[zzdebug] loss! zdata: %lu prev: %lu counter: %lu\n", zdata, zz_debug_test_prev, zz_debug_test_counter);
-					}
-					usleep(zz_debug_test_ms*1000);
-					zz_debug_test_counter++;
-					zz_debug_test_prev = zdata;
-					break;
-
 				case REG_ZZ_AUDIO_PARAM:
 					printf("[REG_ZZ_AUDIO_PARAM] %lx\n", zdata);
 
@@ -1414,8 +1391,9 @@ int main() {
 						data = decoder_bytes_decoded;
 						break;
 					}
-					case REG_ZZ_UNUSED_REG8C: {
-						data = zz_debug_test_counter;
+					case REG_ZZ_ETH_RX_STATUS: {
+						data = ((uint32_t)ethernet_get_rx_status() << 16)
+						     | ethernet_get_rx_stats();
 						break;
 					}
 					case REG_ZZ_SD_STATUS: {
