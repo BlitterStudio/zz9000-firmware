@@ -30,7 +30,7 @@ void ethernet_reset_for_amiga();
 
 #define FRAME_MAX_BACKLOG 128
 
-#define RXBD_CNT       1	/* Number of RxBDs to use */
+#define RXBD_CNT       32	/* Number of RxBDs to use */
 #define TXBD_CNT       2	/* Number of TxBDs to use */
 
 #endif
