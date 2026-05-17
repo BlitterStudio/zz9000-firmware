@@ -601,6 +601,11 @@ u32 QspiAccess( u32 SourceAddress, u32 DestinationAddress, u32 LengthBytes)
 	u32 Status;
 	u8 BankSwitchFlag = 1;
 
+	/* Validate length to prevent buffer overflow from attacker-controlled flash metadata */
+	if (LengthBytes == 0 || LengthBytes > 0x4000000U) {
+		return XST_FAILURE;
+	}
+
 	/*
 	 * Linear access check
 	 */
