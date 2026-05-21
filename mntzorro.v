@@ -1051,6 +1051,8 @@ module MNTZorro_v0_1_S00_AXI
   reg [9:0] videocap_x2;
   reg videocap_x_done;
   reg [9:0] videocap_y2;
+  reg [9:0] videocap_y2_rise = 0;
+  reg [9:0] videocap_y2_fall = 0;
   reg [9:0] videocap_y_sync;
   reg [9:0] videocap_ymax;
   reg [9:0] videocap_ymax2;
@@ -1065,9 +1067,65 @@ module MNTZorro_v0_1_S00_AXI
   reg videocap_interlace;
   reg videocap_ntsc;
   reg [7:0] videocap_hs_pulse_width;
+  reg [7:0] videocap_hs_pw_max = 0;
+  reg [7:0] videocap_hs_pw_min = 8'hff;
+  reg videocap_hs_polarity = 0; // 0: normal/rising, 1: inverted/falling
   reg [9:0] videocap_vsync_x = 0;
+  reg [9:0] videocap_xmax = 0;
+  reg [9:0] videocap_y3_max = 0;
+  reg [9:0] videocap_y3_max_last = 0;
+  reg [9:0] videocap_vsync_phase_delta_last = 0;
+  reg [9:0] videocap_y2_rise_last = 0;
+  reg [9:0] videocap_y2_fall_last = 0;
+  reg [7:0] videocap_hs_pw_max_last = 0;
+  reg [7:0] videocap_hs_pw_min_last = 8'hff;
 
   localparam [9:0] VIDEOCAP_INTERLACE_PHASE_DELTA = 10'h80;
+  localparam [9:0] VIDEOCAP_NTSC_FIELD_MIN = 10'd250;
+  localparam [9:0] VIDEOCAP_NTSC_FIELD_MAX = 10'd275;
+  localparam [9:0] VIDEOCAP_PAL_FIELD_MIN  = 10'd300;
+  localparam [9:0] VIDEOCAP_PAL_FIELD_MAX  = 10'd325;
+
+  wire videocap_hs_edge_rise = (videocap_hs[6:1] == 6'b000111);
+  wire videocap_hs_edge_fall = (videocap_hs[6:1] == 6'b111000);
+  wire videocap_y2_rise_valid =
+      ((videocap_y2_rise >= VIDEOCAP_NTSC_FIELD_MIN) &&
+       (videocap_y2_rise <= VIDEOCAP_NTSC_FIELD_MAX)) ||
+      ((videocap_y2_rise >= VIDEOCAP_PAL_FIELD_MIN) &&
+       (videocap_y2_rise <= VIDEOCAP_PAL_FIELD_MAX));
+  wire videocap_y2_fall_valid =
+      ((videocap_y2_fall >= VIDEOCAP_NTSC_FIELD_MIN) &&
+       (videocap_y2_fall <= VIDEOCAP_NTSC_FIELD_MAX)) ||
+      ((videocap_y2_fall >= VIDEOCAP_PAL_FIELD_MIN) &&
+       (videocap_y2_fall <= VIDEOCAP_PAL_FIELD_MAX));
+  wire videocap_hs_low_pulse_wide = (videocap_hs_pw_min[7:6] == 2'b11);
+  wire videocap_hs_select_fall =
+      videocap_y2_fall_valid && (!videocap_y2_rise_valid || videocap_hs_low_pulse_wide);
+  wire videocap_ymax_field_valid =
+      ((videocap_ymax >= VIDEOCAP_NTSC_FIELD_MIN) &&
+       (videocap_ymax <= VIDEOCAP_NTSC_FIELD_MAX)) ||
+      ((videocap_ymax >= VIDEOCAP_PAL_FIELD_MIN) &&
+       (videocap_ymax <= VIDEOCAP_PAL_FIELD_MAX));
+  wire videocap_ymax2_field_valid =
+      ((videocap_ymax2 >= VIDEOCAP_NTSC_FIELD_MIN) &&
+       (videocap_ymax2 <= VIDEOCAP_NTSC_FIELD_MAX)) ||
+      ((videocap_ymax2 >= VIDEOCAP_PAL_FIELD_MIN) &&
+       (videocap_ymax2 <= VIDEOCAP_PAL_FIELD_MAX));
+  // Video Toaster genlock retimes VSYNC close enough to HSYNC that the
+  // phase detector can miss interlace. Only fall back to line-count parity
+  // when the measured HSYNC pulse shape also says we are on the wide,
+  // inverted/retimed signal seen in diagnostics.
+  wire videocap_wide_sync_lace_candidate =
+      videocap_hs_select_fall &&
+      videocap_hs_low_pulse_wide &&
+      videocap_ymax_field_valid &&
+      videocap_ymax2_field_valid &&
+      (videocap_ymax[0] != videocap_ymax2[0]);
+`ifdef VARIANT_ZZ9500
+  wire videocap_hs_selected_edge = videocap_hs_edge_rise;
+`else
+  wire videocap_hs_selected_edge = videocap_hs_polarity ? videocap_hs_edge_fall : videocap_hs_edge_rise;
+`endif
   wire [9:0] videocap_vsync_phase_abs_delta =
       (videocap_x > videocap_vsync_x) ?
       (videocap_x - videocap_vsync_x) :
@@ -1076,7 +1134,6 @@ module MNTZorro_v0_1_S00_AXI
       (videocap_vsync_phase_abs_delta > 10'h200) ?
       (10'h3ff - videocap_vsync_phase_abs_delta + 1'b1) :
       videocap_vsync_phase_abs_delta;
-
   reg E7M_PSEN = 0;
   reg E7M_PSINCDEC = 0;
   reg E7M_RESET = 0;
@@ -1188,11 +1245,35 @@ module MNTZorro_v0_1_S00_AXI
     end else if (videocap_hs=='b111111)
       videocap_hs_pulse_width<=0;
 
+    if (videocap_hs_pulse_width > videocap_hs_pw_max)
+      videocap_hs_pw_max <= videocap_hs_pulse_width;
+
+    if (videocap_hs=='b111111 && videocap_hs_pulse_width!=0 && videocap_hs_pulse_width < videocap_hs_pw_min)
+      videocap_hs_pw_min <= videocap_hs_pulse_width;
+
+`ifndef VARIANT_ZZ9500
+    if (videocap_vs[6:1] != 6'b111000) begin
+      if (videocap_hs_edge_rise && videocap_y2_rise != 10'h3ff)
+        videocap_y2_rise <= videocap_y2_rise + 1'b1;
+
+      if (videocap_hs_edge_fall && videocap_y2_fall != 10'h3ff)
+        videocap_y2_fall <= videocap_y2_fall + 1'b1;
+    end
+`endif
+
 `ifdef VARIANT_ZZ9500
     // on A500, HSYNC is really CSYNC and we can recognize vertical sync
     // by looking at the pulse width of it
     // direct sampling from denise
     if(videocap_hs[6:1]=='b000111 && videocap_hs_pulse_width>=128) begin
+      videocap_y3_max_last <= videocap_y3_max;
+      videocap_y3_max <= 0;
+      videocap_vsync_phase_delta_last <= videocap_vsync_phase_delta;
+      videocap_y2_rise_last <= videocap_y2_rise;
+      videocap_y2_fall_last <= videocap_y2_fall;
+      videocap_hs_pw_max_last <= videocap_hs_pw_max;
+      videocap_hs_pw_min_last <= videocap_hs_pw_min;
+
       // 31kHz progressive: full frame >= 400 lines, never interlaced.
       // 15kHz interlace is identified by field phase, not by total line
       // count parity. NTSC nonlace can jitter by one counted line when
@@ -1231,6 +1312,19 @@ module MNTZorro_v0_1_S00_AXI
 `else
     // with videoslot machines, we have a real VSYNC to work with
     if (videocap_vs[6:1]=='b111000) begin
+      videocap_y3_max_last <= videocap_y3_max;
+      videocap_y3_max <= 0;
+      videocap_vsync_phase_delta_last <= videocap_vsync_phase_delta;
+      videocap_y2_rise_last <= videocap_y2_rise;
+      videocap_y2_fall_last <= videocap_y2_fall;
+      videocap_hs_pw_max_last <= videocap_hs_pw_max;
+      videocap_hs_pw_min_last <= videocap_hs_pw_min;
+
+      if (videocap_hs_select_fall)
+        videocap_hs_polarity <= 1'b1;
+      else
+        videocap_hs_polarity <= 1'b0;
+
       // 31kHz progressive: full frame >= 400 lines, never interlaced.
       // 15kHz interlace has alternating VSYNC phase; nonlace does not.
       // Line-count parity alone is not reliable on NTSC after RTG->native
@@ -1239,7 +1333,8 @@ module MNTZorro_v0_1_S00_AXI
       // not look like a half-line jump.
       if (videocap_ymax>='h190)
         videocap_interlace <= 0;
-      else if (videocap_vsync_phase_delta >= VIDEOCAP_INTERLACE_PHASE_DELTA)
+      else if ((videocap_vsync_phase_delta >= VIDEOCAP_INTERLACE_PHASE_DELTA) ||
+               videocap_wide_sync_lace_candidate)
         videocap_interlace <= 1;
       else
         videocap_interlace <= 0;
@@ -1268,13 +1363,19 @@ module MNTZorro_v0_1_S00_AXI
         videocap_y2 <= 0;
         videocap_y3 <= 0;
       end
+
+      videocap_hs_pw_max <= 0;
+      videocap_hs_pw_min <= 8'hff;
+      videocap_y2_rise <= 0;
+      videocap_y2_fall <= 0;
 `endif
 
       if (videocap_y2!=0) begin
         videocap_ymax <= videocap_y2;
         videocap_ymax2 <= videocap_ymax;
       end
-    end else if (videocap_hs[6:1]=='b000111) begin
+    end else if (videocap_hs_selected_edge) begin
+      videocap_xmax <= videocap_x;
       videocap_x  <= 0;
       videocap_x2 <= 0;
 
@@ -1295,10 +1396,15 @@ module MNTZorro_v0_1_S00_AXI
 `endif
 
       if (videocap_y2>'h1a) begin
-        if (videocap_interlace)
+        if (videocap_interlace) begin
           videocap_y3 <= videocap_y3 + 2'b10;
-        else
+          if ((videocap_y3 + 2'b10) > videocap_y3_max)
+            videocap_y3_max <= videocap_y3 + 2'b10;
+        end else begin
           videocap_y3 <= videocap_y3 + 1'b1;
+          if ((videocap_y3 + 1'b1) > videocap_y3_max)
+            videocap_y3_max <= videocap_y3 + 1'b1;
+        end
       end
 
       videocap_y2 <= videocap_y2 + 1'b1;
@@ -1395,8 +1501,94 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] vc_saveaddr2;
   reg [31:0] vc_saveaddr3;
 
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_ymax_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_ymax_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_max_tier_a;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_max_tier_b;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_min_tier_a;
+  (* ASYNC_REG = "TRUE" *) reg [1:0] videocap_hs_pw_min_tier_b;
+  (* ASYNC_REG = "TRUE" *) reg videocap_hs_polarity_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg videocap_hs_polarity_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_xmax_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_xmax_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_y3_max_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_y3_max_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_vsync_phase_delta_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_vsync_phase_delta_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_y2_rise_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_y2_rise_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_y2_fall_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [9:0] videocap_y2_fall_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg [7:0] videocap_hs_pw_max_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [7:0] videocap_hs_pw_max_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg [7:0] videocap_hs_pw_min_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg [7:0] videocap_hs_pw_min_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg videocap_ntsc_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg videocap_ntsc_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg videocap_interlace_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg videocap_interlace_diag_b;
+  (* ASYNC_REG = "TRUE" *) reg videocap_lace_field_diag_a;
+  (* ASYNC_REG = "TRUE" *) reg videocap_lace_field_diag_b;
+
+  wire videocap_y2_rise_diag_valid =
+      ((videocap_y2_rise_diag_b >= VIDEOCAP_NTSC_FIELD_MIN) &&
+       (videocap_y2_rise_diag_b <= VIDEOCAP_NTSC_FIELD_MAX)) ||
+      ((videocap_y2_rise_diag_b >= VIDEOCAP_PAL_FIELD_MIN) &&
+       (videocap_y2_rise_diag_b <= VIDEOCAP_PAL_FIELD_MAX));
+  wire videocap_y2_fall_diag_valid =
+      ((videocap_y2_fall_diag_b >= VIDEOCAP_NTSC_FIELD_MIN) &&
+       (videocap_y2_fall_diag_b <= VIDEOCAP_NTSC_FIELD_MAX)) ||
+      ((videocap_y2_fall_diag_b >= VIDEOCAP_PAL_FIELD_MIN) &&
+       (videocap_y2_fall_diag_b <= VIDEOCAP_PAL_FIELD_MAX));
+  wire videocap_hs_low_pulse_wide_diag = (videocap_hs_pw_min_diag_b[7:6] == 2'b11);
+  wire videocap_hs_select_fall_diag =
+      videocap_y2_fall_diag_valid &&
+      (!videocap_y2_rise_diag_valid || videocap_hs_low_pulse_wide_diag);
+  wire [13:0] videocap_diag_flags = {
+      4'h1,                      // diagnostic ABI version
+      videocap_mode_sync,
+      videocap_ntsc_diag_b,
+      videocap_interlace_diag_b,
+      video_control_interlace,
+      videocap_hs_polarity_diag_b,
+      videocap_hs_select_fall_diag,
+      videocap_hs_low_pulse_wide_diag,
+      videocap_y2_rise_diag_valid,
+      videocap_y2_fall_diag_valid,
+      videocap_lace_field_diag_b
+  };
+
   always @(posedge S_AXI_ACLK) begin
     // VIDEOCAP
+
+    videocap_ymax_diag_a <= videocap_ymax;
+    videocap_ymax_diag_b <= videocap_ymax_diag_a;
+    videocap_hs_pw_max_tier_a <= videocap_hs_pw_max[7:6];
+    videocap_hs_pw_max_tier_b <= videocap_hs_pw_max_tier_a;
+    videocap_hs_pw_min_tier_a <= videocap_hs_pw_min[7:6];
+    videocap_hs_pw_min_tier_b <= videocap_hs_pw_min_tier_a;
+    videocap_hs_polarity_diag_a <= videocap_hs_polarity;
+    videocap_hs_polarity_diag_b <= videocap_hs_polarity_diag_a;
+    videocap_xmax_diag_a <= videocap_xmax;
+    videocap_xmax_diag_b <= videocap_xmax_diag_a;
+    videocap_y3_max_diag_a <= videocap_y3_max_last;
+    videocap_y3_max_diag_b <= videocap_y3_max_diag_a;
+    videocap_vsync_phase_delta_diag_a <= videocap_vsync_phase_delta_last;
+    videocap_vsync_phase_delta_diag_b <= videocap_vsync_phase_delta_diag_a;
+    videocap_y2_rise_diag_a <= videocap_y2_rise_last;
+    videocap_y2_rise_diag_b <= videocap_y2_rise_diag_a;
+    videocap_y2_fall_diag_a <= videocap_y2_fall_last;
+    videocap_y2_fall_diag_b <= videocap_y2_fall_diag_a;
+    videocap_hs_pw_max_diag_a <= videocap_hs_pw_max_last;
+    videocap_hs_pw_max_diag_b <= videocap_hs_pw_max_diag_a;
+    videocap_hs_pw_min_diag_a <= videocap_hs_pw_min_last;
+    videocap_hs_pw_min_diag_b <= videocap_hs_pw_min_diag_a;
+    videocap_ntsc_diag_a <= videocap_ntsc;
+    videocap_ntsc_diag_b <= videocap_ntsc_diag_a;
+    videocap_interlace_diag_a <= videocap_interlace;
+    videocap_interlace_diag_b <= videocap_interlace_diag_a;
+    videocap_lace_field_diag_a <= videocap_lace_field;
+    videocap_lace_field_diag_b <= videocap_lace_field_diag_a;
 
     // pass interlace mode to video control block
     video_control_interlace <= videocap_interlace;
@@ -2461,13 +2653,35 @@ module MNTZorro_v0_1_S00_AXI
 
     out_reg0 <= ZORRO3 ? last_z3addr : last_addr;
     out_reg1 <= zorro_ram_write_data;
-    out_reg2 <= last_z3addr;
+    case (slv_reg4[31:28])
+      4'h1:
+        out_reg2 <= {2'b01, videocap_y3_max_diag_b, videocap_ymax_sync[9:0],
+                     videocap_xmax_diag_b};
+      4'h2:
+        out_reg2 <= {2'b10, videocap_vsync_phase_delta_diag_b,
+                     videocap_y2_rise_diag_b, videocap_y2_fall_diag_b};
+      4'h3:
+        out_reg2 <= {2'b11, videocap_hs_pw_max_diag_b,
+                     videocap_hs_pw_min_diag_b, videocap_diag_flags};
+      default:
+        out_reg2 <= {16'b0, video_control_interlace, videocap_hs_polarity_diag_b,
+                     videocap_hs_pw_min_tier_b, videocap_hs_pw_max_tier_b,
+                     videocap_ymax_diag_b};
+    endcase
     //out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
     //            video_control_interlace, videocap_mode, 15'b0, zorro_state};
     //          `-- 24                   `-- 23         `-- 22 `-- 7:0
 
-    out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
-                video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank, 12'b0, zorro_state};
+    // Preserve the established status bits used by firmware/video.c:
+    //   24 interlace, 23 videocap_mode, 22 NTSC, 21 vblank, 20 hblank.
+    // When no write request is pending, bits 29:26 carry extra diagnostic
+    // state for REG_ZZ_VIDEOCAP_STATS: 29=edge, 28=reserved, 27:26=min tier.
+    out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request,
+                (zorro_ram_write_request ? zorro_ram_write_bytes :
+                 {videocap_hs_polarity_diag_b, 1'b0, videocap_hs_pw_min_tier_b}),
+                ZORRO3, video_control_interlace, videocap_mode, videocap_ntsc,
+                video_control_vblank, video_control_hblank, videocap_hs_pw_max_tier_b,
+                videocap_ymax_diag_b, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;
