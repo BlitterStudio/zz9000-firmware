@@ -1,6 +1,14 @@
+# Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 open_project ZZ9000_proto/ZZ9000_proto.xpr
 
-set njobs [exec nproc]
+set njobs 4
+if { [info exists ::env(NUMBER_OF_PROCESSORS)] } {
+    set njobs $::env(NUMBER_OF_PROCESSORS)
+} elseif { ![catch {exec nproc} detected_jobs] } {
+    set njobs $detected_jobs
+}
 puts "Using $njobs parallel jobs"
 
 reset_run synth_1

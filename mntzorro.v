@@ -6,6 +6,7 @@
  * Copyright (C) 2019-2026, Lucie L. Hartmann <lucie@mntre.com>
  *                          MNT Research GmbH, Berlin
  *                          https://mntre.com
+ * Copyright (C) 2026,      Dimitris Panokostas <midwan@gmail.com>
  *
  * Contributors: _Bnu, shanshe
  *
@@ -917,6 +918,29 @@ module MNTZorro_v0_1_S00_AXI
 
   reg [15:0] REVISION = 'h7a09; // z9
 
+  localparam [15:0] SDK_REG_MAGIC_VALUE = 16'h5a39;
+  localparam [15:0] SDK_REG_VERSION = 16'h0200;
+  localparam [31:0] SDK_MAILBOX_ARM_ADDRESS = 32'h3fe43000;
+  localparam [15:0] SDK_REG_MAGIC = 16'h0100;
+  localparam [15:0] SDK_REG_VERSION_OFFS = 16'h0102;
+  localparam [15:0] SDK_REG_MAILBOX_HI = 16'h0104;
+  localparam [15:0] SDK_REG_MAILBOX_LO = 16'h0106;
+  localparam [15:0] SDK_REG_DOORBELL = 16'h0108;
+  localparam [15:0] SDK_REG_STATUS = 16'h010a;
+  localparam [15:0] SDK_REG_IRQ_ACK = 16'h010c;
+  // Z3 word writes on the low data lane arrive with bit 1 set in REGWRITE.
+  localparam [15:0] SDK_REG_DOORBELL_Z3_LO = 16'h010a;
+  localparam [15:0] SDK_REG_IRQ_ACK_Z3_LO = 16'h010e;
+  localparam [15:0] SDK_REG_DIAG_WRITE = 16'h0110;
+  localparam [15:0] SDK_REG_DIAG_WRITE_LO = 16'h0112;
+  localparam [15:0] SDK_REG_DIAG_DATA = 16'h0114;
+  localparam [15:0] SDK_REG_DIAG_DATA_LO = 16'h0116;
+  localparam [15:0] SDK_REG_DIAG_Z3ADDR = 16'h0118;
+  localparam [15:0] SDK_REG_DIAG_Z3ADDR_LO = 16'h011a;
+  localparam [15:0] SDK_REG_OFFSET_MASK = 16'h0fff;
+  localparam [31:0] SDK_CTRL_DOORBELL_CLEAR = 32'h20000000;
+  localparam [31:0] SDK_CTRL_IRQ_ACK_CLEAR = 32'h10000000;
+
   // main FSM
   localparam RESET = 0;
   localparam Z2_CONFIGURING = 1;
@@ -1019,6 +1043,14 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] axi_reg4;
   (* mark_debug = "true" *) reg [31:0] axi_reg5;
   reg [20:0] eth_rx_frame_select;
+  reg sdk_doorbell_pending;
+  reg sdk_irq_ack_pending;
+  reg [15:0] sdk_last_regwrite_addr;
+  reg [15:0] sdk_last_regwrite_data;
+  reg [3:0] sdk_last_regwrite_strobes;
+  reg [31:0] sdk_last_z3addr;
+  reg [15:0] sdk_doorbell_early_count;
+  reg [15:0] sdk_irq_ack_early_count;
 
   reg [31:0] video_control_data_zorro;
   reg [7:0] video_control_op_zorro;
@@ -1505,6 +1537,11 @@ module MNTZorro_v0_1_S00_AXI
     if (/*z_cfgin_lo ||*/ z_reset) begin
       zorro_state <= RESET;
     end
+
+    if ((axi_reg0 & SDK_CTRL_DOORBELL_CLEAR) != 0)
+      sdk_doorbell_pending <= 0;
+    if ((axi_reg0 & SDK_CTRL_IRQ_ACK_CLEAR) != 0)
+      sdk_irq_ack_pending <= 0;
     
       case (zorro_state)
 
@@ -1526,6 +1563,14 @@ module MNTZorro_v0_1_S00_AXI
           zorro_ram_write_request <= 0;
           zorro_ram_read_flag <= 0;
           zorro_ram_write_flag <= 0;
+          sdk_doorbell_pending <= 0;
+          sdk_irq_ack_pending <= 0;
+          sdk_last_regwrite_addr <= 0;
+          sdk_last_regwrite_data <= 0;
+          sdk_last_regwrite_strobes <= 0;
+          sdk_last_z3addr <= 0;
+          sdk_doorbell_early_count <= 0;
+          sdk_irq_ack_early_count <= 0;
           z3_ram_low <= 0;
           z3_ram_high <= 0;
           z3_fast_low <= 0;
@@ -2104,7 +2149,24 @@ module MNTZorro_v0_1_S00_AXI
             if (zorro_write && z3addr_in_reg) begin
               // FIXME doesn't support 32 bit access
               // write to register
-              zorro_state <= Z3_REGWRITE_PRE;
+              sdk_last_z3addr <= z3addr;
+              case (z3addr[15:0] & SDK_REG_OFFSET_MASK)
+                SDK_REG_DOORBELL: begin
+                  sdk_doorbell_pending <= 1;
+                  sdk_doorbell_early_count <= sdk_doorbell_early_count + 1;
+                  dtack <= 1;
+                  zorro_state <= Z3_ENDCYCLE;
+                end
+                SDK_REG_IRQ_ACK: begin
+                  sdk_irq_ack_pending <= 1;
+                  sdk_irq_ack_early_count <= sdk_irq_ack_early_count + 1;
+                  dtack <= 1;
+                  zorro_state <= Z3_ENDCYCLE;
+                end
+                default: begin
+                  zorro_state <= Z3_REGWRITE_PRE;
+                end
+              endcase
               slaven <= 1;
             end else if (zorro_read && z3addr_in_reg) begin
               // read registers
@@ -2341,22 +2403,61 @@ module MNTZorro_v0_1_S00_AXI
           zorro_state <= Z2_REGREAD_POST;
 `endif
 
-          case (regread_addr&'hff)
-            /*'h00: begin
-             rr_data <= video_control_data;
+          case (regread_addr & SDK_REG_OFFSET_MASK)
+            SDK_REG_MAGIC: begin
+              rr_data[31:16] <= SDK_REG_MAGIC_VALUE;
+              rr_data[15:0]  <= SDK_REG_VERSION;
             end
-             'h04: begin
-             rr_data <= video_control_op;
-            end*/
-            'h00: begin
-              rr_data <= video_control_vblank << 16;
+            SDK_REG_VERSION_OFFS: begin
+              rr_data[31:16] <= SDK_REG_VERSION;
+              rr_data[15:0]  <= SDK_REG_VERSION;
             end
-            'h30: begin
-              rr_data <= debug_counter << 16;
+            SDK_REG_MAILBOX_HI,
+            SDK_REG_MAILBOX_LO: begin
+              rr_data <= SDK_MAILBOX_ARM_ADDRESS;
+            end
+            SDK_REG_DOORBELL,
+            SDK_REG_STATUS: begin
+              rr_data[31:16] <= 16'h0000;
+              rr_data[15:0]  <= {14'h0000, sdk_irq_ack_pending,
+                                  sdk_doorbell_pending};
+            end
+            SDK_REG_DIAG_WRITE,
+            SDK_REG_DIAG_WRITE_LO: begin
+              rr_data[31:16] <= sdk_last_regwrite_addr;
+              rr_data[15:0]  <= {8'h00, sdk_last_regwrite_strobes,
+                                  sdk_irq_ack_pending, sdk_doorbell_pending,
+                                  2'b00};
+            end
+            SDK_REG_DIAG_DATA,
+            SDK_REG_DIAG_DATA_LO: begin
+              rr_data[31:16] <= sdk_last_regwrite_data;
+              rr_data[15:0]  <= {sdk_irq_ack_early_count[7:0],
+                                  sdk_doorbell_early_count[7:0]};
+            end
+            SDK_REG_DIAG_Z3ADDR,
+            SDK_REG_DIAG_Z3ADDR_LO: begin
+              rr_data <= sdk_last_z3addr;
             end
             default: begin
-              rr_data[31:16] <= REVISION;
-              rr_data[15:0]  <= REVISION;
+              case (regread_addr&'hff)
+                /*'h00: begin
+                 rr_data <= video_control_data;
+                end
+                 'h04: begin
+                 rr_data <= video_control_op;
+                end*/
+                'h00: begin
+                  rr_data <= video_control_vblank << 16;
+                end
+                'h30: begin
+                  rr_data <= debug_counter << 16;
+                end
+                default: begin
+                  rr_data[31:16] <= REVISION;
+                  rr_data[15:0]  <= REVISION;
+                end
+              endcase
             end
           endcase
         end
@@ -2369,28 +2470,40 @@ module MNTZorro_v0_1_S00_AXI
           zorro_state <= Z2_ENDCYCLE;
 `endif
 
-          case (regwrite_addr&'hff)
-            'h00: video_control_data_zorro[31:16] <= regdata_in[15:0];
-            'h02: video_control_data_zorro[15:0]  <= regdata_in[15:0];
-            'h04: video_control_op_zorro[7:0]     <= regdata_in[7:0]; // FIXME
-            'h06: videocap_mode_in <= regdata_in[0];
-			'h08: scanline_intensity  <= regdata_in[7:0];
-            'h0A: scanline_intensity2 <= regdata_in[7:0];
-            'h0C: scanline_width      <= regdata_in[1:0];
-            'h0E: scanline_parity     <= regdata_in[0];
-            //'h08: E7M_RESET <= regdata_in[0];
-            //'h0a: E7M_PWRDWN <= regdata_in[0];
-            'h10: videocap_address[31:16] <= regdata_in[15:0];
-            'h12: videocap_address[15:0] <= regdata_in[15:0];
-            'h14: videocap_pitch <= regdata_in[15:0];
-            'h20: if (regdata_in[5:0]>0) dtack_timeout <= regdata_in[5:0];
-            //'h24: dataout_time[7:0]     <= regdata_in[7:0];
-            'h24: zorro_interrupt_len <= regdata_in[7:0];
-            //'h10: E7M_PSINCDEC <= regdata_in[0];
-            //'h12: E7M_PSEN     <= regdata_in[0];
-            //'h30: debug_counter <= debug_counter + 1;
-            'h34: debug_counter <= 0;
+          case (regwrite_addr & SDK_REG_OFFSET_MASK)
+            SDK_REG_DOORBELL,
+            SDK_REG_DOORBELL_Z3_LO: sdk_doorbell_pending <= 1;
+            SDK_REG_IRQ_ACK,
+            SDK_REG_IRQ_ACK_Z3_LO: sdk_irq_ack_pending <= 1;
+            default: begin
+              case (regwrite_addr&'hff)
+                'h00: video_control_data_zorro[31:16] <= regdata_in[15:0];
+                'h02: video_control_data_zorro[15:0]  <= regdata_in[15:0];
+                'h04: video_control_op_zorro[7:0]     <= regdata_in[7:0]; // FIXME
+                'h06: videocap_mode_in <= regdata_in[0];
+                'h08: scanline_intensity  <= regdata_in[7:0];
+                'h0A: scanline_intensity2 <= regdata_in[7:0];
+                'h0C: scanline_width      <= regdata_in[1:0];
+                'h0E: scanline_parity     <= regdata_in[0];
+                //'h08: E7M_RESET <= regdata_in[0];
+                //'h0a: E7M_PWRDWN <= regdata_in[0];
+                'h10: videocap_address[31:16] <= regdata_in[15:0];
+                'h12: videocap_address[15:0] <= regdata_in[15:0];
+                'h14: videocap_pitch <= regdata_in[15:0];
+                'h20: if (regdata_in[5:0]>0) dtack_timeout <= regdata_in[5:0];
+                //'h24: dataout_time[7:0]     <= regdata_in[7:0];
+                'h24: zorro_interrupt_len <= regdata_in[7:0];
+                //'h10: E7M_PSINCDEC <= regdata_in[0];
+                //'h12: E7M_PSEN     <= regdata_in[0];
+                //'h30: debug_counter <= debug_counter + 1;
+                'h34: debug_counter <= 0;
+              endcase
+            end
           endcase
+
+          sdk_last_regwrite_addr <= regwrite_addr;
+          sdk_last_regwrite_data <= regdata_in;
+          sdk_last_regwrite_strobes <= {z3_ds3, z3_ds2, z3_ds1, z3_ds0};
         end
       endcase
 
@@ -2467,7 +2580,8 @@ module MNTZorro_v0_1_S00_AXI
     //          `-- 24                   `-- 23         `-- 22 `-- 7:0
 
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
-                video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank, 12'b0, zorro_state};
+                video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank,
+                sdk_doorbell_pending, sdk_irq_ack_pending, 10'b0, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;
