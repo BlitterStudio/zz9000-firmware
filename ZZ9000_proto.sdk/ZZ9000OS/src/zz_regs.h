@@ -4,6 +4,7 @@
  * Copyright (C) 2020-2026, Lucie L. Hartmann <lucie@mntre.com>
  *                          MNT Research GmbH, Berlin
  *                          https://mntre.com
+ * Copyright (C) 2026,      Dimitris Panokostas <midwan@gmail.com>
  *
  * More Info: https://mntre.com/zz9000
  *
@@ -163,6 +164,17 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REGFA   = 0xFA,
   REG_ZZ_DEBUG          = 0xFC,
   REG_ZZ_DEBUG_TIMER    = 0xFE,
+
+  REG_ZZ_SDK_MAGIC      = 0x100,
+  REG_ZZ_SDK_VERSION    = 0x102,
+  REG_ZZ_SDK_MAILBOX_HI = 0x104,
+  REG_ZZ_SDK_MAILBOX_LO = 0x106,
+  REG_ZZ_SDK_DOORBELL   = 0x108,
+  REG_ZZ_SDK_STATUS     = 0x10A,
+  REG_ZZ_SDK_IRQ_ACK    = 0x10C,
+  REG_ZZ_SDK_DIAG_WRITE = 0x110,
+  REG_ZZ_SDK_DIAG_DATA  = 0x114,
+  REG_ZZ_SDK_DIAG_ZADDR = 0x118,
 };
 
 enum zz9k_card_features {

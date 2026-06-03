@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 typedef enum {
 	DECODE_CLEAR,
 	DECODE_INIT,
@@ -12,3 +17,4 @@ unsigned short fifo_get_read_index(void);
 int decode_mp3_samples(void* output_buffer, int max_samples);
 int mp3_get_hz();
 int mp3_get_channels();
+unsigned long mp3_get_bytes_consumed(void);

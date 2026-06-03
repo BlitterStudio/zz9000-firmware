@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 
 // FIXME allocate this memory properly
 
@@ -5,10 +10,12 @@
 #define AUDIO_BYTES_PER_PERIOD      3840
 
 #define FRAMEBUFFER_ADDRESS         0x00200000
+// Frame buffer/graphics memory starts at 64KB (relative to card address), leaving ample space for general purpose registers.
+#define MNT_FB_BASE     			0x00010000
 #define AUDIO_TX_BUFFER_SIZE        (AUDIO_BYTES_PER_PERIOD * AUDIO_NUM_PERIODS)
 
 #define Z3_SCRATCH_ADDR             0x033F0000 // FIXME @ _Bnu
-#define ADDR_ADJ                    0x001F0000 // FIXME @ _Bnu
+#define ADDR_ADJ                    (FRAMEBUFFER_ADDRESS - MNT_FB_BASE) // FIXME @ _Bnu
 
 #define AUDIO_TX_BUFFER_ADDRESS     0x3FC00000 // default, changed by driver
 #define AUDIO_RX_BUFFER_ADDRESS     0x3FC20000 // default, changed by driver
@@ -19,6 +26,49 @@
 #define RX_BACKLOG_ADDRESS          0x3FE00000 // 128 * 2048 space (256 kB) — must match FRAME_MAX_BACKLOG
 #define USB_BLOCK_STORAGE_ADDRESS   0x3FE40000 // legacy name; shared SD boot / USB proxy buffer
 #define BOOT_ROM_ADDRESS            0x3FCF0000
+
+#define RTG_TEMPLATE_SCRATCH_ADDRESS 0x03400000
+#define RTG_TEMPLATE_SCRATCH_SIZE    0x00100000
+#define RTG_TEMPLATE_SCRATCH_END \
+    (RTG_TEMPLATE_SCRATCH_ADDRESS + RTG_TEMPLATE_SCRATCH_SIZE)
+
+#define LEGACY_SURFACE_HEAP_ADDRESS RTG_TEMPLATE_SCRATCH_END
+#define LEGACY_SURFACE_HEAP_SIZE    0x02B00000
+#define LEGACY_SURFACE_HEAP_END \
+    (LEGACY_SURFACE_HEAP_ADDRESS + LEGACY_SURFACE_HEAP_SIZE)
+
+#define SDK_LOW_DDR_RESERVED_END     0x08000000
+
+// SDK v2 host-visible heap. Keep this below the 0x033f0000 scratch area used
+// by the firmware until the SDK owns a formally reserved allocator region.
+#define SDK_SHARED_HEAP_ADDRESS     0x03000000
+#define SDK_SHARED_HEAP_SIZE        0x003F0000
+#define SDK_SHARED_HEAP_END \
+    (SDK_SHARED_HEAP_ADDRESS + SDK_SHARED_HEAP_SIZE)
+// SDK ARM-local surface heap. This is card-side DDR only and intentionally
+// starts after the RTG template scratch and legacy accelerator surface heap.
+#define SDK_LOCAL_SURFACE_HEAP_ADDRESS 0x06000000
+#define SDK_LOCAL_SURFACE_HEAP_SIZE    0x02000000
+#define SDK_LOCAL_SURFACE_HEAP_END \
+    (SDK_LOCAL_SURFACE_HEAP_ADDRESS + SDK_LOCAL_SURFACE_HEAP_SIZE)
+
+#if SDK_LOCAL_SURFACE_HEAP_ADDRESS < LEGACY_SURFACE_HEAP_END
+#error "SDK ARM-local heap overlaps legacy accelerator surface heap"
+#endif
+
+#if SDK_SHARED_HEAP_END > Z3_SCRATCH_ADDR
+#error "SDK shared heap overlaps Z3 scratch area"
+#endif
+
+#if SDK_LOCAL_SURFACE_HEAP_END > SDK_LOW_DDR_RESERVED_END
+#error "SDK ARM-local heap exceeds low DDR reservation"
+#endif
+
+// SDK v2 bootstrap mailbox. The Amiga side reaches this through the existing
+// board window at 0xd000, inside the legacy 0xa000..0xffff shared I/O buffer.
+#define SDK_MAILBOX_WINDOW_OFFSET   0x0000D000
+#define SDK_MAILBOX_ADDRESS \
+	(USB_BLOCK_STORAGE_ADDRESS + (SDK_MAILBOX_WINDOW_OFFSET - 0x0000A000))
 #define RX_FRAME_PAD 4
 #define FRAME_SIZE 2048
 
@@ -28,6 +78,3 @@
 // 0x2000 - 0x7fff   ETH RX
 // 0x8000 - 0x9fff   ETH TX
 // 0xa000 - 0xffff   shared IO buffer (legacy USB block window)
-
-// Frame buffer/graphics memory starts at 64KB (relative to card address), leaving ample space for general purpose registers.
-#define MNT_FB_BASE     			0x00010000

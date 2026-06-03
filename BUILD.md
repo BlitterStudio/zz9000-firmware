@@ -1,12 +1,19 @@
 # Building the ZZ9000 firmware
 
+Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+SPDX-License-Identifier: GPL-3.0-or-later
+
 Three small scripts, each doing one thing, run from the repo root. All
 outputs land in `bootimage_work/`. CI runs the same scripts.
 
 | Script | What it builds | Needs |
 |---|---|---|
 | [`build_firmware.sh`](build_firmware.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf` | `arm-none-eabi-gcc` (Arm GNU Toolchain with newlib), host `cc` |
+| [`build_libjpeg_turbo.sh`](build_libjpeg_turbo.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/libjpeg-turbo/.../libjpeg.a` | Arm GNU Toolchain, `cmake`, `make`, `wget` |
+| [`build_zlib.sh`](build_zlib.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/zlib/.../libz.a` | Arm GNU Toolchain, `cmake`, `make`, `wget` |
+| [`build_libpng.sh`](build_libpng.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/libpng/.../liblibpng16_static.a` | Arm GNU Toolchain, `cmake`, `make`, `wget`; calls `build_zlib.sh` |
 | [`build_bitstream.sh`](build_bitstream.sh) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Linux |
+| [`build_bitstream.ps1`](build_bitstream.ps1) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Windows |
 | [`build_variant_bitstreams.sh`](build_variant_bitstreams.sh) | all release variant `.bit` files | Vivado 2018.3 on Linux |
 | [`build_bootimage.sh`](build_bootimage.sh) | `bootimage_work/BOOT.bin` | `bootgen` |
 | [`build_release_assets.sh`](build_release_assets.sh) | old-style ZIPs under `release/` | `bootgen`, `zip` |
@@ -16,11 +23,26 @@ The scripts are composable — nothing calls anything else implicitly.
 ## Common flows
 
 **ARM firmware change only** (most iteration loops). Uses the committed
-bitstream:
+bitstream. `build_firmware.sh` automatically downloads, verifies, and builds
+the libjpeg-turbo, zlib, and libpng static dependencies under
+`ZZ9000OS/build/deps/` when needed:
 ```bash
 ./build_firmware.sh
 ./build_bootimage.sh
 ```
+
+On Windows or on a machine without the Arm toolchain installed, use Docker.
+This follows the CI toolchain path and writes a separate BOOT image by
+default:
+```powershell
+.\build_firmware_docker.ps1
+```
+or from a POSIX shell:
+```bash
+./build_firmware_docker.sh
+```
+The Docker wrappers cache the official Arm GNU Toolchain and bootgen in Docker
+volumes named `zz9000-arm-toolchain` and `zz9000-bootgen`.
 
 **HDL change (bitstream rebuild)** — requires a Linux box with Vivado:
 ```bash
@@ -28,11 +50,16 @@ bitstream:
 ./build_firmware.sh        # in case firmware wasn't built yet
 ./build_bootimage.sh
 ```
+On Windows with Vivado 2018.3:
+```powershell
+.\build_bitstream.ps1
+```
 Commit the updated `bootimage_work/zz9000_ps_wrapper.bit` so CI (which
 does not run Vivado) picks up the change on the next pipeline.
 
 For cold-boot diagnostics, `./build_bitstream.sh --no-autoboot` builds a
-bitstream that does not advertise the Zorro autoboot ROM.
+bitstream that does not advertise the Zorro autoboot ROM. The PowerShell
+equivalent is `.\build_bitstream.ps1 -NoAutoboot`.
 
 Legacy USB mass-storage block support is disabled in firmware by
 default. SD HDF boot and the Poseidon USB proxy remain enabled. For an
@@ -96,8 +123,11 @@ depending on your QSPI/SD boot setup), power-cycle the Amiga.
   - Prebuilt: <https://github.com/Xilinx/bootgen> (clone + `make`). The
     script finds it via `$BOOTGEN`, then `$PATH`, then a Mac default of
     `/Users/midwan/Gitlab/bootgen/bootgen`.
-- **Vivado 2018.3** (bitstream): set `$VIVADO_DIR` if not at
-  `/opt/Xilinx/Vivado/2018.3`.
+- **Vivado 2018.3** (bitstream):
+  - Linux: set `$VIVADO_DIR` if not at `/opt/Xilinx/Vivado/2018.3`.
+  - Windows: `build_bitstream.ps1` checks `$env:VIVADO_BAT`,
+    `$env:VIVADO_DIR`, `D:\Xilinx\Vivado\2018.3\bin\vivado.bat`, then
+    `C:\Xilinx\Vivado\2018.3\bin\vivado.bat`.
 
 ## Xilinx Platform Cable setup
 

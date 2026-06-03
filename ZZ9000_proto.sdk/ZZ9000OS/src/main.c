@@ -4,6 +4,7 @@
  * Copyright (C) 2019-2026, Lucie L. Hartmann <lucie@mntre.com>
  *                          MNT Research GmbH, Berlin
  *                          https://mntre.com
+ * Copyright (C) 2026,      Dimitris Panokostas <midwan@gmail.com>
  *
  * More Info: https://mntre.com/zz9000
  *
@@ -57,6 +58,7 @@ void Xil_AssertNonVoid() {}
 #include "zz_regs.h"
 #include "zz_video_modes.h"
 #include "usb_proxy.h"
+#include "sdk_mailbox.h"
 
 #define REVISION_MAJOR 2
 #define REVISION_MINOR 1
@@ -70,6 +72,14 @@ void Xil_AssertNonVoid() {}
 #endif
 
 #define GPIO_DEVICE_ID	XPAR_XGPIOPS_0_DEVICE_ID
+
+#if SDK_ENABLE_HDL_DOORBELL
+static void mntzorro_pulse_control(uint32_t mask)
+{
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG0, mask);
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG0, 0);
+}
+#endif
 
 void disable_reset_out() {
 	XGpioPs Gpio;
@@ -106,7 +116,7 @@ struct ZZ_VIDEO_STATE* video_state;
 // This is the absolute offset in ZZ9000 RAM for the "framebuffer transfer register",
 // which can be replaced by the DMA acceleration functionality entirely, but some
 // software still relies on this legacy register.
-unsigned int cur_mem_offset = 0x3500000;
+unsigned int cur_mem_offset = LEGACY_SURFACE_HEAP_ADDRESS;
 
 static char usb_storage_available = 0;
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
@@ -124,6 +134,20 @@ static uint32_t sd_storage_write_block = 0;
 uint16_t ethernet_send_result = 0;
 int eth_backlog_nag_counter = 0;
 int interrupt_enabled_ethernet = 0;
+
+static uint32_t sdk_diag_last_reg_write_addr = 0;
+static uint32_t sdk_diag_last_reg_write_raw_addr = 0;
+static uint32_t sdk_diag_last_reg_write_data = 0;
+static uint32_t sdk_diag_last_reg_write_ds = 0;
+static uint32_t sdk_diag_doorbell_count = 0;
+static uint32_t sdk_diag_irq_ack_count = 0;
+static uint32_t sdk_diag_task_count = 0;
+static volatile uint32_t sdk_mailbox_register_events = 0;
+
+#define SDK_MAILBOX_EVENT_DOORBELL 1U
+#define SDK_MAILBOX_EVENT_IRQ_ACK  2U
+#define SDK_MAILBOX_EVENT_IRQ_ENABLE 4U
+#define SDK_MAILBOX_EVENT_IRQ_DISABLE 8U
 
 // usb state
 // Protocol: 0 = idle/error, 0xFFFF = busy (transfer in progress), other = success (blocks transferred)
@@ -241,7 +265,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	interrupt_enabled_vblank = 0;
 
 	// FIXME document
-	cur_mem_offset = 0x3500000;
+	cur_mem_offset = LEGACY_SURFACE_HEAP_ADDRESS;
 
 	// FIXME
 	memset((u32 *)Z3_SCRATCH_ADDR, 0, sizeof(struct GFXData));
@@ -266,6 +290,16 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 
 	// clear interrupt holding amiga
 	amiga_interrupt_clear(0xffffffff);
+
+	sdk_mailbox_init();
+	sdk_diag_last_reg_write_addr = 0;
+	sdk_diag_last_reg_write_raw_addr = 0;
+	sdk_diag_last_reg_write_data = 0;
+	sdk_diag_last_reg_write_ds = 0;
+	sdk_diag_doorbell_count = 0;
+	sdk_diag_irq_ack_count = 0;
+	sdk_diag_task_count = 0;
+	sdk_mailbox_register_events = 0;
 
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
 	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
@@ -337,6 +371,7 @@ int main() {
 
 	// idle task counter (used for ethernet negotiation)
 	int idle_task_count = 0;
+	uint32_t sdk_mailbox_poll_divider = 0;
 
 	while (1) {
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
@@ -384,6 +419,11 @@ int main() {
 			}
 			fwup_status = result;
 			fwup_pending = 0;
+			/* The firmware-update staging buffer is the same legacy
+			 * 0xa000..0xffff window used by the SDK bootstrap mailbox.
+			 * WRITE chunks may overwrite the mailbox, so restore it
+			 * once the chunk has been consumed by FatFs. */
+			sdk_mailbox_init();
 		}
 
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
@@ -442,6 +482,7 @@ int main() {
 				//printf("REGW: %08lx <- %08lx [%d%d%d%d]\n",zaddr,zdata,!!ds3,!!ds2,!!ds1,!!ds0);
 
 				u32 z3 = (zstate_raw & (1 << 25));
+				u32 raw_zaddr = zaddr;
 				if (z3) {
 					// convert 32bit to 16bit addresses
 					if (ds3 && ds2) {
@@ -454,6 +495,11 @@ int main() {
 					}
 				}
 				//printf("CONV: %08lx <- %08lx\n",zaddr,zdata);
+				sdk_diag_last_reg_write_addr = zaddr;
+				sdk_diag_last_reg_write_raw_addr = raw_zaddr;
+				sdk_diag_last_reg_write_data = zdata & 0xffff;
+				sdk_diag_last_reg_write_ds =
+					(!!ds3 << 3) | (!!ds2 << 2) | (!!ds1 << 1) | !!ds0;
 
 				switch (zaddr) {
 				// Various blitter/video registers
@@ -506,6 +552,9 @@ int main() {
 					}
 					if (zdata & 64) {
 						amiga_interrupt_clear(AMIGA_INTERRUPT_VBLANK);
+					}
+					if (zdata & 128) {
+						amiga_interrupt_clear(AMIGA_INTERRUPT_SDK);
 					}
 				} else {
 					if (zdata & 128) {
@@ -1080,6 +1129,25 @@ int main() {
 					audio_set_interrupt_enabled((int)(zdata & 1));
 					break;
 				}
+				case REG_ZZ_SDK_DOORBELL:
+					sdk_mailbox_register_events |= SDK_MAILBOX_EVENT_DOORBELL;
+					sdk_diag_doorbell_count++;
+					break;
+				case REG_ZZ_SDK_IRQ_ACK:
+					if (zdata & 1) {
+						sdk_mailbox_register_events |=
+							SDK_MAILBOX_EVENT_IRQ_ACK;
+						sdk_diag_irq_ack_count++;
+					}
+					if (zdata & 2) {
+						sdk_mailbox_register_events |=
+							SDK_MAILBOX_EVENT_IRQ_ENABLE;
+					}
+					if (zdata & 4) {
+						sdk_mailbox_register_events |=
+							SDK_MAILBOX_EVENT_IRQ_DISABLE;
+					}
+					break;
 
 				// ARM core 2 execution
 				case REG_ZZ_ARM_RUN_HI:
@@ -1346,6 +1414,33 @@ int main() {
 					case REG_ZZ_FW_VERSION:
 						data = (REVISION_MAJOR << 24 | REVISION_MINOR << 16);
 						break;
+					case REG_ZZ_SDK_MAGIC:
+						sdk_mailbox_activate();
+						data = (SDK_MAILBOX_REG_MAGIC_VALUE << 16)
+						     | ((SDK_MAILBOX_ABI_MAJOR << 8) | SDK_MAILBOX_ABI_MINOR);
+						break;
+					case REG_ZZ_SDK_MAILBOX_HI:
+						sdk_mailbox_activate();
+						data = sdk_mailbox_address();
+						break;
+					case REG_ZZ_SDK_DOORBELL:
+						sdk_mailbox_activate();
+						data = sdk_mailbox_status();
+						break;
+					case REG_ZZ_SDK_DIAG_WRITE:
+						data = ((sdk_diag_last_reg_write_addr & 0xffff) << 16)
+						     | ((sdk_diag_last_reg_write_ds & 0xf) << 12)
+						     | ((sdk_diag_task_count & 0xff) << 4)
+						     | (sdk_mailbox_register_events & 0xf);
+						break;
+					case REG_ZZ_SDK_DIAG_DATA:
+						data = ((sdk_diag_last_reg_write_data & 0xffff) << 16)
+						     | ((sdk_diag_irq_ack_count & 0xff) << 8)
+						     | (sdk_diag_doorbell_count & 0xff);
+						break;
+					case REG_ZZ_SDK_DIAG_ZADDR:
+						data = sdk_diag_last_reg_write_raw_addr;
+						break;
 					case REG_ZZ_USB_STATUS:
 						data = usb_status << 16;
 						break;
@@ -1472,6 +1567,41 @@ int main() {
 			if (idle_task_count > 10000000) {
 				ethernet_task();
 				idle_task_count=0;
+			}
+
+			if (sdk_mailbox_register_events) {
+				uint32_t events = sdk_mailbox_register_events;
+				sdk_mailbox_register_events = 0;
+				if (events & SDK_MAILBOX_EVENT_IRQ_DISABLE)
+					sdk_mailbox_irq_disable();
+				if (events & SDK_MAILBOX_EVENT_IRQ_ACK)
+					sdk_mailbox_ack_irq();
+				if (events & SDK_MAILBOX_EVENT_IRQ_ENABLE)
+					sdk_mailbox_irq_enable();
+				if (events & SDK_MAILBOX_EVENT_DOORBELL)
+					sdk_mailbox_doorbell();
+				sdk_mailbox_task();
+				sdk_diag_task_count++;
+			}
+
+#if SDK_ENABLE_HDL_DOORBELL
+			if (zstate & MNTZORRO_STATUS_SDK_IRQ_ACK) {
+				sdk_mailbox_ack_irq();
+				mntzorro_pulse_control(MNTZORRO_CTRL_SDK_IRQ_ACK_CLEAR);
+				sdk_mailbox_task();
+				sdk_diag_task_count++;
+			}
+			if (zstate & MNTZORRO_STATUS_SDK_DOORBELL) {
+				sdk_mailbox_doorbell();
+				mntzorro_pulse_control(MNTZORRO_CTRL_SDK_DOORBELL_CLEAR);
+				sdk_mailbox_task();
+				sdk_diag_task_count++;
+			}
+#endif
+			sdk_mailbox_poll_divider++;
+			if ((sdk_mailbox_poll_divider & 0xffU) == 0) {
+				sdk_mailbox_task();
+				sdk_diag_task_count++;
 			}
 
 			if ((zstate & 0xff) == 0) {

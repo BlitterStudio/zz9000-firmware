@@ -1,4 +1,8 @@
 # ZZ9000OS Standalone Makefile
+#
+# Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # Replaces Xilinx SDK auto-generated build system
 #
 # Requires: ARM GNU Toolchain with newlib (NOT picolibc)
@@ -25,9 +29,32 @@ BSP_DIR = ../zz9000_bsp_new/ps7_cortexa9_0
 BSP_INC = $(BSP_DIR)/include
 BSP_LIB = $(BSP_DIR)/lib
 BUILD_DIR = build
+LIBJPEG_TURBO_VERSION ?= 3.1.4.1
+LIBJPEG_TURBO_DIR ?= $(BUILD_DIR)/deps/libjpeg-turbo/$(LIBJPEG_TURBO_VERSION)
+LIBJPEG_TURBO_SRC ?= $(LIBJPEG_TURBO_DIR)/src
+LIBJPEG_TURBO_BUILD ?= $(LIBJPEG_TURBO_DIR)/build-simd
+LIBJPEG_TURBO_LIB ?= $(LIBJPEG_TURBO_BUILD)/libjpeg.a
+ZLIB_VERSION ?= 1.3.2
+ZLIB_DIR ?= $(BUILD_DIR)/deps/zlib/$(ZLIB_VERSION)
+ZLIB_SRC ?= $(ZLIB_DIR)/src
+ZLIB_BUILD ?= $(ZLIB_DIR)/build
+ZLIB_LIB ?= $(ZLIB_BUILD)/libz.a
+LIBPNG_VERSION ?= 1.6.58
+LIBPNG_DIR ?= $(BUILD_DIR)/deps/libpng/$(LIBPNG_VERSION)
+LIBPNG_SRC ?= $(LIBPNG_DIR)/src
+LIBPNG_BUILD ?= $(LIBPNG_DIR)/build-neon
+LIBPNG_LIB ?= $(LIBPNG_BUILD)/liblibpng16_static.a
+LZMA_SDK_VERSION ?= 26.01
+LZMA_SDK_DIR ?= $(BUILD_DIR)/deps/lzma-sdk/$(LZMA_SDK_VERSION)
+LZMA_SDK_SRC ?= $(LZMA_SDK_DIR)/src
+LZMA_SDK_BUILD ?= $(LZMA_SDK_DIR)/build
 
 # Include paths
 INCLUDES = -I$(SRC_DIR) -I$(BSP_INC)
+INCLUDES += -I$(LIBJPEG_TURBO_BUILD) -I$(LIBJPEG_TURBO_SRC)/src
+INCLUDES += -I$(ZLIB_SRC)
+INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)
+INCLUDES += -I$(LZMA_SDK_SRC)/C
 
 # Common flags (shared by all optimization levels)
 COMMON_FLAGS = $(INCLUDES) -Wall -c
@@ -56,7 +83,7 @@ LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -L$(BSP_LIB)
 
 # Libraries (order matters for --start-group)
-LIBS = -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
+LIBS = $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
 
 # Source files
 C_SRCS = \
@@ -90,10 +117,18 @@ C_SRCS = \
 	$(SRC_DIR)/sd_boot.c \
 	$(SRC_DIR)/fw_update.c \
 	$(SRC_DIR)/usb_proxy.c \
+	$(SRC_DIR)/sdk_compression.c \
+	$(SRC_DIR)/sdk_crypto.c \
+	$(SRC_DIR)/sdk_image_stream.c \
+	$(SRC_DIR)/sdk_jpeg.c \
+	$(SRC_DIR)/sdk_surface.c \
+	$(SRC_DIR)/sdk_mailbox.c \
 	$(SRC_DIR)/newlib_compat.c
 
 # Object files
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS))
+OBJS += $(LZMA_SDK_BUILD)/LzmaDec.o
+OBJS += $(LZMA_SDK_BUILD)/Lzma2Dec.o
 BOOTROM_TOOL = $(BUILD_DIR)/make_bootrom_image
 BOOTROM_IMAGE_BIN = $(BUILD_DIR)/bootrom_image.bin
 BOOTROM_IMAGE_OBJ = $(BUILD_DIR)/bootrom_image.o
@@ -106,10 +141,36 @@ TARGET = $(BUILD_DIR)/ZZ9000OS.elf
 
 all: $(TARGET) size
 
-$(TARGET): $(OBJS)
+$(TARGET): $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 	@echo 'Done.'
+
+$(LIBJPEG_TURBO_LIB):
+	@echo 'Building libjpeg-turbo dependency...'
+	cd ../.. && bash ./build_libjpeg_turbo.sh
+
+$(ZLIB_LIB):
+	@echo 'Building zlib dependency...'
+	cd ../.. && bash ./build_zlib.sh
+
+$(LIBPNG_LIB): $(ZLIB_LIB)
+	@echo 'Building libpng dependency...'
+	cd ../.. && bash ./build_libpng.sh
+
+$(LZMA_SDK_SRC)/C/LzmaDec.c:
+	@echo 'Fetching LZMA SDK dependency...'
+	cd ../.. && bash ./build_lzma_sdk.sh
+
+$(LZMA_SDK_SRC)/C/Lzma2Dec.c: $(LZMA_SDK_SRC)/C/LzmaDec.c
+
+$(LZMA_SDK_BUILD)/LzmaDec.o: $(LZMA_SDK_SRC)/C/LzmaDec.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -o $@ $<
+
+$(LZMA_SDK_BUILD)/Lzma2Dec.o: $(LZMA_SDK_SRC)/C/Lzma2Dec.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -o $@ $<
 
 # --- Per-file rules ---
 

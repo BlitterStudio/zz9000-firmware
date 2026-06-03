@@ -9,6 +9,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#if defined(__MINGW32__) && !defined(__USE_MINGW_ANSI_STDIO)
+#define __USE_MINGW_ANSI_STDIO 1
+#endif
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

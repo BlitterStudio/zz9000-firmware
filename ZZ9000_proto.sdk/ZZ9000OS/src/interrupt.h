@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 #include <xscugic.h>
 
 #ifndef ZZ_INTERRUPT_H
@@ -7,6 +12,7 @@
 #define AMIGA_INTERRUPT_ETH    1
 #define AMIGA_INTERRUPT_AUDIO  2
 #define AMIGA_INTERRUPT_VBLANK 4
+#define AMIGA_INTERRUPT_SDK    8
 
 XScuGic* interrupt_get_intc();
 int interrupt_configure();

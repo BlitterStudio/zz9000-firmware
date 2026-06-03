@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Package BOOT.bin from the committed boot inputs.
 #
@@ -92,6 +94,8 @@ elif command -v bootgen >/dev/null 2>&1; then
     BOOTGEN=$(command -v bootgen)
 elif [ -x "$SCRIPT_DIR/bootgen/bootgen" ]; then
     BOOTGEN="$SCRIPT_DIR/bootgen/bootgen"
+elif [ -x "$SCRIPT_DIR/bootgen/build/bin/bootgen" ]; then
+    BOOTGEN="$SCRIPT_DIR/bootgen/build/bin/bootgen"
 elif [ -x /Users/midwan/Gitlab/bootgen/bootgen ]; then
     BOOTGEN=/Users/midwan/Gitlab/bootgen/bootgen
 else

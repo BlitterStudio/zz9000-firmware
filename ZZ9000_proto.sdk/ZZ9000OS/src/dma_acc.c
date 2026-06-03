@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 #include <stdio.h>
 #include "gfx.h"
 #include "memorymap.h"
@@ -162,6 +167,11 @@ void handle_acc_op(uint16_t zdata)
             }
             if (!sfc_size) {
                 printf("Refusing to allocate 0 bytes for you.\n");
+                break;
+            }
+            if (cur_mem_offset >= LEGACY_SURFACE_HEAP_END ||
+                sfc_size > (LEGACY_SURFACE_HEAP_END - cur_mem_offset)) {
+                printf("not enough legacy surface heap for %d bytes.\n", sfc_size);
                 break;
             }
 

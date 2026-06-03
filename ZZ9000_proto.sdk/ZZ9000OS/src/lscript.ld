@@ -41,8 +41,8 @@ SECTIONS
 .text : {
    KEEP (*(.vectors))
    *(.boot)
-   *(.text)
-   *(.text.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o) .text)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o) .text.*)
    *(.gnu.linkonce.t.*)
    *(.plt)
    *(.gnu_warning)
@@ -64,8 +64,8 @@ SECTIONS
 
 .rodata : {
    __rodata_start = .;
-   *(.rodata)
-   *(.rodata.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o) .rodata)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o) .rodata.*)
    *(.gnu.linkonce.r.*)
    __rodata_end = .;
 } > ps7_ddr_0
@@ -229,14 +229,43 @@ SECTIONS
    __tbss_end = .;
 } > ps7_ddr_0
 
+__firmware_low_end = .;
+__framebuffer_start = 0x00200000;
+ASSERT(__firmware_low_end <= __framebuffer_start, "firmware low sections overlap framebuffer memory")
+
+.sdk_codec_text : {
+   . = ALIGN(16);
+   __sdk_codec_text_start = .;
+   *LzmaDec.o(.text)
+   *LzmaDec.o(.text.*)
+   *LzmaDec.o(.rodata)
+   *LzmaDec.o(.rodata.*)
+   *Lzma2Dec.o(.text)
+   *Lzma2Dec.o(.text.*)
+   *Lzma2Dec.o(.rodata)
+   *Lzma2Dec.o(.rodata.*)
+   *sdk_compression.o(.text)
+   *sdk_compression.o(.text.*)
+   *sdk_compression.o(.rodata)
+   *sdk_compression.o(.rodata.*)
+   *sdk_image_stream.o(.text)
+   *sdk_image_stream.o(.text.*)
+   *sdk_image_stream.o(.rodata)
+   *sdk_image_stream.o(.rodata.*)
+   . = ALIGN(16);
+   __sdk_codec_text_end = .;
+} > ps7_ddr_hi
+
 .bss (NOLOAD) : {
+   . = ALIGN(16);
    __bss_start = .;
    *(.bss)
    *(.bss.*)
    *(.gnu.linkonce.b.*)
    *(COMMON)
+   . = ALIGN(16);
    __bss_end = .;
-} > ps7_ddr_0
+} > ps7_ddr_hi
 
 _SDA_BASE_ = __sdata_start + ((__sbss_end - __sdata_start) / 2 );
 

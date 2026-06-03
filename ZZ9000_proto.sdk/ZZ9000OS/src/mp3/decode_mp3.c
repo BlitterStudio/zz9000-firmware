@@ -1,6 +1,12 @@
+/*
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 #include <stdio.h>
 #include <xil_cache.h>
 #include "mp3.h"
+#include "mp3_backend_config.h"
 #define MINIMP3_IMPLEMENTATION 1
 #include "minimp3_ex.h"
 
@@ -137,4 +143,8 @@ int mp3_get_hz() {
 
 int mp3_get_channels() {
 	return mp3d.info.channels;
+}
+
+unsigned long mp3_get_bytes_consumed(void) {
+	return (unsigned long)mp3d.offset;
 }

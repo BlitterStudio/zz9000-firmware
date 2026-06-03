@@ -1,3 +1,6 @@
+# Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 name: Build firmware
 
 on:
@@ -30,7 +33,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            wget xz-utils make ca-certificates python3 g++ libssl-dev flex bison zip
+            wget xz-utils make cmake perl ca-certificates python3 g++ libssl-dev flex bison zip
 
       # Arm GNU Toolchain with newlib. Ubuntu's gcc-arm-none-eabi package
       # uses picolibc, which is incompatible with the Xilinx BSP (references
@@ -77,7 +80,15 @@ jobs:
           git clone --depth 1 --branch "${BOOTGEN_REF}" https://github.com/Xilinx/bootgen.git bootgen-src
           make -C bootgen-src -j"$(nproc)"
           mkdir -p "${{ github.workspace }}/.toolchain/bootgen"
-          cp bootgen-src/bootgen "${{ github.workspace }}/.toolchain/bootgen/bootgen"
+          if [ -x bootgen-src/bootgen ]; then
+            cp bootgen-src/bootgen "${{ github.workspace }}/.toolchain/bootgen/bootgen"
+          elif [ -x bootgen-src/build/bin/bootgen ]; then
+            cp bootgen-src/build/bin/bootgen "${{ github.workspace }}/.toolchain/bootgen/bootgen"
+          else
+            find bootgen-src -maxdepth 4 -type f -name bootgen -print
+            echo "bootgen executable not found after build" >&2
+            exit 1
+          fi
 
       - name: Export BOOTGEN
         run: echo "BOOTGEN=${{ github.workspace }}/.toolchain/bootgen/bootgen" >> "$GITHUB_ENV"

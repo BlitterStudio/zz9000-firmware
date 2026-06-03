@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Rebuild the ARM firmware (ZZ9000OS.elf).
 #
@@ -48,6 +50,13 @@ fi
 
 echo "[firmware] toolchain: $(arm-none-eabi-gcc --version | head -1)"
 echo "[firmware] host cc:   $(${CC_FOR_BUILD:-cc} --version 2>/dev/null | head -1 || printf '%s' "${CC_FOR_BUILD:-cc}")"
+
+if [ "$#" -eq 0 ] || [ "$1" != "clean" ] || [ "$#" -gt 1 ]; then
+    bash ./build_libjpeg_turbo.sh
+    bash ./build_libpng.sh
+    bash ./build_lzma_sdk.sh
+fi
+
 make -C ZZ9000_proto.sdk/ZZ9000OS "$@"
 
 # Only report size when the ELF actually exists (skips cases like

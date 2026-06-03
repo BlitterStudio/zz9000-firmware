@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 #include "platform.h"
 #include "memorymap.h"
 #include "xil_io.h"
@@ -12,8 +17,14 @@
 #define MNTZORRO_REG4 16
 #define MNTZORRO_REG5 20
 
+#define MNTZORRO_STATUS_SDK_IRQ_ACK     (1UL << 18)
+#define MNTZORRO_STATUS_SDK_DOORBELL    (1UL << 19)
+
+#define MNTZORRO_CTRL_SDK_IRQ_ACK_CLEAR  (1UL << 28)
+#define MNTZORRO_CTRL_SDK_DOORBELL_CLEAR (1UL << 29)
+
 #define mntzorro_read(BaseAddress, RegOffset) \
-    Xil_In32((BaseAddress) + (RegOffset))
+  Xil_In32((BaseAddress) + (RegOffset))
 
 #define mntzorro_write(BaseAddress, RegOffset, Data) \
   	Xil_Out32((BaseAddress) + (RegOffset), (u32)(Data))

@@ -26,6 +26,7 @@ SDK.log.*
 NONE/
 
 # Build outputs
+build/
 ZZ9000_proto.sdk/ZZ9000OS/build/
 bootgen/
 bootimage_work/BOOT.bin

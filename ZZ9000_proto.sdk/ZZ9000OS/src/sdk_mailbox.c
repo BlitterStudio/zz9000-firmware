@@ -1,0 +1,4018 @@
+/*
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ *
+ * ZZ9000 SDK v2 mailbox dispatcher.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+#include <stdint.h>
+#include <string.h>
+#include "xil_cache.h"
+#include "xtime_l.h"
+#include "sdk_mailbox.h"
+#include "sdk_compression.h"
+#include "sdk_crypto.h"
+#include "sdk_image_stream.h"
+#include "sdk_jpeg.h"
+#include "sdk_surface.h"
+#include "memorymap.h"
+#include "interrupt.h"
+#include "video.h"
+#include "mp3/mp3.h"
+#include "mp3/minimp3.h"
+
+#define SDK_MAILBOX_REQUEST_OFFSET     SDK_MAILBOX_DESCRIPTOR_SIZE
+#define SDK_MAILBOX_COMPLETION_OFFSET  \
+	(SDK_MAILBOX_REQUEST_OFFSET + \
+	 (SDK_MAILBOX_RING_ENTRIES * SDK_MAILBOX_ENTRY_SIZE))
+#define SDK_MAILBOX_TOTAL_SIZE         \
+	(SDK_MAILBOX_COMPLETION_OFFSET + \
+	 (SDK_MAILBOX_RING_ENTRIES * SDK_MAILBOX_ENTRY_SIZE))
+#define SDK_MAILBOX_CAPABILITY_BITS    \
+	(SDK_CAP_MAILBOX | SDK_TRANSPORT_CAPABILITY_BITS | \
+	 SDK_CAP_SERVICE_DISCOVERY | \
+	 SDK_CAP_SHARED_ALLOC | SDK_CAP_SURFACES | \
+	 SDK_CAP_FRAMEBUFFER_SURFACE | SDK_CAP_IMAGE_DECODE | \
+	 SDK_CAP_IMAGE_SCALE | SDK_CAP_AUDIO_DECODE | \
+	 SDK_CAP_MEMORY_OPS | SDK_CAP_CRYPTO | \
+	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION)
+#define SDK_AUDIO_STREAM_MIN_INPUT_BYTES (16U * 1024U)
+
+typedef char SDKMailbox_must_fit_legacy_io_window[
+	((SDK_MAILBOX_WINDOW_OFFSET + SDK_MAILBOX_TOTAL_SIZE) <= 0x00010000U) ?
+	1 : -1
+];
+
+struct SDKMailboxDescriptor {
+	uint8_t magic[4];
+	uint8_t abi_major[2];
+	uint8_t abi_minor[2];
+	uint8_t descriptor_size[4];
+	uint8_t request_ring_offset[4];
+	uint8_t request_ring_entries[4];
+	uint8_t request_head[4];
+	uint8_t request_tail[4];
+	uint8_t completion_ring_offset[4];
+	uint8_t completion_ring_entries[4];
+	uint8_t completion_head[4];
+	uint8_t completion_tail[4];
+	uint8_t capability_bits[4];
+	uint8_t reserved[80];
+};
+
+struct SDKMailboxEntry {
+	uint8_t request_id[4];
+	uint8_t opcode[2];
+	uint8_t status[2];
+	uint8_t flags[2];
+	uint8_t payload_len[2];
+	uint8_t user_cookie[4];
+	uint8_t payload[48];
+};
+
+struct SDKCapsPayload {
+	uint8_t magic[4];
+	uint8_t abi_major[2];
+	uint8_t abi_minor[2];
+	uint8_t capability_bits[4];
+	uint8_t max_inline_payload[4];
+	uint8_t max_shared_buffers[4];
+	uint8_t max_surfaces[4];
+	uint8_t firmware_version[4];
+	uint8_t request_ring_entries[4];
+	uint8_t completion_ring_entries[4];
+	uint8_t reserved[12];
+};
+
+struct SDKQueryServicePayload {
+	uint8_t service_id[4];
+	uint8_t reserved[44];
+};
+
+struct SDKServiceInfoPayload {
+	uint8_t service_id[4];
+	uint8_t version[4];
+	uint8_t capability_bits[4];
+	uint8_t flags[4];
+	uint8_t opcode_base[4];
+	uint8_t opcode_count[4];
+	uint8_t max_inline_payload[4];
+	uint8_t name[20];
+};
+
+struct SDKServiceDescriptor {
+	uint32_t service_id;
+	uint32_t version;
+	uint32_t capability_bits;
+	uint32_t flags;
+	uint32_t opcode_base;
+	uint32_t opcode_count;
+	const char *name;
+};
+
+struct SDKAllocSharedPayload {
+	uint8_t length[4];
+	uint8_t alignment[4];
+	uint8_t flags[4];
+	uint8_t reserved[36];
+};
+
+struct SDKSharedBufferInfoPayload {
+	uint8_t handle[4];
+	uint8_t arm_addr[4];
+	uint8_t length[4];
+	uint8_t flags[4];
+	uint8_t reserved[32];
+};
+
+struct SDKFreeSharedPayload {
+	uint8_t handle[4];
+	uint8_t reserved[44];
+};
+
+struct SDKMemFillPayload {
+	uint8_t handle[4];
+	uint8_t offset[4];
+	uint8_t length[4];
+	uint8_t value;
+	uint8_t reserved[35];
+};
+
+struct SDKMemCopyPayload {
+	uint8_t dst_handle[4];
+	uint8_t dst_offset[4];
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t length[4];
+	uint8_t flags[4];
+	uint8_t reserved[24];
+};
+
+struct SDKDiagPayload {
+	uint8_t requests_completed[4];
+	uint8_t requests_failed[4];
+	uint8_t last_status[4];
+	uint8_t pending_requests[4];
+	uint8_t shared_buffers_used[4];
+	uint8_t shared_heap_total[4];
+	uint8_t shared_heap_free[4];
+	uint8_t shared_heap_largest_free[4];
+	uint8_t mailbox_arm_addr[4];
+	uint8_t mailbox_ring_entries[4];
+	uint8_t surfaces_used[4];
+	uint8_t allocator_invalid_slots[4];
+};
+
+struct SDKDiagTimingPayload {
+	uint8_t version[4];
+	uint8_t timer_hz[4];
+	uint8_t requests_timed[4];
+	uint8_t total_us[4];
+	uint8_t surface_requests[4];
+	uint8_t surface_us[4];
+	uint8_t audio_requests[4];
+	uint8_t audio_us[4];
+	uint8_t last_opcode[4];
+	uint8_t last_us[4];
+	uint8_t max_opcode[4];
+	uint8_t max_us[4];
+};
+
+struct SDKSurfaceInfoPayload {
+	uint8_t handle[4];
+	uint8_t arm_addr[4];
+	uint8_t width[4];
+	uint8_t height[4];
+	uint8_t pitch[4];
+	uint8_t format[4];
+	uint8_t flags[4];
+	uint8_t length[4];
+	uint8_t reserved[16];
+};
+
+struct SDKAllocSurfacePayload {
+	uint8_t width[4];
+	uint8_t height[4];
+	uint8_t format[4];
+	uint8_t flags[4];
+	uint8_t pitch[4];
+	uint8_t reserved[28];
+};
+
+struct SDKFreeSurfacePayload {
+	uint8_t handle[4];
+	uint8_t reserved[44];
+};
+
+struct SDKScaleImagePayload {
+	uint8_t src_surface[4];
+	uint8_t dst_surface[4];
+	uint8_t src_x[4];
+	uint8_t src_y[4];
+	uint8_t src_w[4];
+	uint8_t src_h[4];
+	uint8_t dst_x[4];
+	uint8_t dst_y[4];
+	uint8_t dst_w[4];
+	uint8_t dst_h[4];
+	uint8_t filter[4];
+	uint8_t flags[4];
+};
+
+struct SDKScaleImageClippedPayload {
+	uint8_t src_surface[4];
+	uint8_t dst_surface[4];
+	uint8_t src_x[2];
+	uint8_t src_y[2];
+	uint8_t src_w[2];
+	uint8_t src_h[2];
+	uint8_t dst_x[2];
+	uint8_t dst_y[2];
+	uint8_t dst_w[2];
+	uint8_t dst_h[2];
+	uint8_t clip_x[2];
+	uint8_t clip_y[2];
+	uint8_t clip_w[2];
+	uint8_t clip_h[2];
+	uint8_t filter[4];
+	uint8_t flags[4];
+	uint8_t reserved[8];
+};
+
+struct SDKImageDecodePayload {
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t dst_surface[4];
+	uint8_t dst_x[4];
+	uint8_t dst_y[4];
+	uint8_t dst_width[4];
+	uint8_t dst_height[4];
+	uint8_t output_format[4];
+	uint8_t flags[4];
+	uint8_t reserved[8];
+};
+
+struct SDKImageDecodeResultPayload {
+	uint8_t width[4];
+	uint8_t height[4];
+	uint8_t output_format[4];
+	uint8_t flags[4];
+	uint8_t bytes_written[4];
+	uint8_t reserved[28];
+};
+
+struct SDKImageSessionBeginPayload {
+	uint8_t codec[4];
+	uint8_t output_mode[4];
+	uint8_t dst_surface[4];
+	uint8_t dst_x[4];
+	uint8_t dst_y[4];
+	uint8_t dst_width[4];
+	uint8_t dst_height[4];
+	uint8_t output_format[4];
+	uint8_t tile_handle[4];
+	uint8_t tile_stride[4];
+	uint8_t tile_rows[4];
+	uint8_t flags[4];
+};
+
+struct SDKImageSessionFeedPayload {
+	uint8_t session[4];
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t flags[4];
+	uint8_t reserved[28];
+};
+
+struct SDKImageSessionResultPayload {
+	uint8_t session[4];
+	uint8_t state[4];
+	uint8_t image_width[4];
+	uint8_t image_height[4];
+	uint8_t output_format[4];
+	uint8_t tile_x[4];
+	uint8_t tile_y[4];
+	uint8_t tile_width[4];
+	uint8_t tile_height[4];
+	uint8_t bytes_consumed[4];
+	uint8_t bytes_written[4];
+	uint8_t flags[4];
+};
+
+struct SDKImageSessionClosePayload {
+	uint8_t session[4];
+	uint8_t flags[4];
+	uint8_t reserved[40];
+};
+
+struct SDKAudioDecodePayload {
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t dst_handle[4];
+	uint8_t dst_offset[4];
+	uint8_t dst_capacity[4];
+	uint8_t output_hz[4];
+	uint8_t output_channels[4];
+	uint8_t output_format[4];
+	uint8_t flags[4];
+	uint8_t reserved[8];
+};
+
+struct SDKAudioDecodeResultPayload {
+	uint8_t bytes_consumed[4];
+	uint8_t bytes_written[4];
+	uint8_t sample_rate[4];
+	uint8_t channels[4];
+	uint8_t sample_format[4];
+	uint8_t frames_written[4];
+	uint8_t flags[4];
+	uint8_t reserved[20];
+};
+
+struct SDKAudioStreamBeginPayload {
+	uint8_t mp3_ring_handle[4];
+	uint8_t mp3_ring_capacity[4];
+	uint8_t pcm_ring_handle[4];
+	uint8_t pcm_ring_capacity[4];
+	uint8_t output_hz[4];
+	uint8_t output_channels[4];
+	uint8_t output_format[4];
+	uint8_t low_water_bytes[4];
+	uint8_t high_water_bytes[4];
+	uint8_t flags[4];
+	uint8_t reserved[8];
+};
+
+struct SDKAudioStreamFeedPayload {
+	uint8_t session[4];
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t flags[4];
+	uint8_t reserved[28];
+};
+
+struct SDKAudioStreamReadPayload {
+	uint8_t session[4];
+	uint8_t pcm_read[4];
+	uint8_t flags[4];
+	uint8_t reserved[36];
+};
+
+struct SDKAudioStreamClosePayload {
+	uint8_t session[4];
+	uint8_t flags[4];
+	uint8_t reserved[40];
+};
+
+struct SDKAudioStreamResultPayload {
+	uint8_t session[4];
+	uint8_t state[4];
+	uint8_t sample_rate[4];
+	uint8_t channels[4];
+	uint8_t sample_format[4];
+	uint8_t mp3_read[4];
+	uint8_t pcm_write[4];
+	uint8_t pcm_read[4];
+	uint8_t frames_decoded[4];
+	uint8_t bytes_consumed[4];
+	uint8_t bytes_produced[4];
+	uint8_t flags[4];
+};
+
+struct SDKSurfaceFillPayload {
+	uint8_t surface[4];
+	uint8_t x[4];
+	uint8_t y[4];
+	uint8_t width[4];
+	uint8_t height[4];
+	uint8_t color[4];
+	uint8_t flags[4];
+	uint8_t reserved[20];
+};
+
+struct SDKSurfaceCopyPayload {
+	uint8_t src_surface[4];
+	uint8_t dst_surface[4];
+	uint8_t src_x[4];
+	uint8_t src_y[4];
+	uint8_t dst_x[4];
+	uint8_t dst_y[4];
+	uint8_t width[4];
+	uint8_t height[4];
+	uint8_t flags[4];
+	uint8_t reserved[12];
+};
+
+struct SDKCryptoHashPayload {
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t dst_handle[4];
+	uint8_t dst_offset[4];
+	uint8_t key_handle[4];
+	uint8_t key_offset[4];
+	uint8_t key_length[4];
+	uint8_t algorithm[4];
+	uint8_t flags[4];
+	uint8_t reserved[8];
+};
+
+struct SDKCryptoStreamPayload {
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t dst_handle[4];
+	uint8_t dst_offset[4];
+	uint8_t key_handle[4];
+	uint8_t key_offset[4];
+	uint8_t nonce_handle[4];
+	uint8_t nonce_offset[4];
+	uint8_t counter[4];
+	uint8_t algorithm[4];
+	uint8_t flags[4];
+};
+
+struct SDKCryptoAeadPayload {
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t dst_handle[4];
+	uint8_t dst_offset[4];
+	uint8_t aad_handle[4];
+	uint8_t aad_offset[4];
+	uint8_t aad_length[4];
+	uint8_t key_handle[4];
+	uint8_t key_offset[4];
+	uint8_t nonce_handle[4];
+	uint8_t flags[4];
+};
+
+struct SDKCryptoResultPayload {
+	uint8_t bytes_written[4];
+	uint8_t algorithm[4];
+	uint8_t flags[4];
+	uint8_t reserved[36];
+};
+
+struct SDKDecompressPayload {
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t dst_handle[4];
+	uint8_t dst_offset[4];
+	uint8_t dst_capacity[4];
+	uint8_t algorithm[4];
+	uint8_t flags[4];
+	uint8_t reserved[16];
+};
+
+struct SDKDecompressTestPayload {
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t output_limit[4];
+	uint8_t algorithm[4];
+	uint8_t flags[4];
+	uint8_t reserved[24];
+};
+
+struct SDKDecompressStreamBeginPayload {
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t output_limit[4];
+	uint8_t algorithm[4];
+	uint8_t flags[4];
+	uint8_t reserved[24];
+};
+
+struct SDKDecompressStreamReadPayload {
+	uint8_t session[4];
+	uint8_t dst_handle[4];
+	uint8_t dst_offset[4];
+	uint8_t dst_capacity[4];
+	uint8_t flags[4];
+	uint8_t reserved[28];
+};
+
+struct SDKDecompressStreamFeedPayload {
+	uint8_t session[4];
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t flags[4];
+	uint8_t reserved[28];
+};
+
+struct SDKDecompressStreamClosePayload {
+	uint8_t session[4];
+	uint8_t flags[4];
+	uint8_t reserved[40];
+};
+
+struct SDKDecompressResultPayload {
+	uint8_t bytes_consumed[4];
+	uint8_t bytes_written[4];
+	uint8_t checksum[4];
+	uint8_t algorithm[4];
+	uint8_t flags[4];
+	uint8_t reserved[28];
+};
+
+struct SDKDecompressStreamResultPayload {
+	uint8_t session[4];
+	uint8_t bytes_consumed[4];
+	uint8_t bytes_written[4];
+	uint8_t checksum[4];
+	uint8_t algorithm[4];
+	uint8_t flags[4];
+	uint8_t reserved[24];
+};
+
+struct SDKSharedBuffer {
+	uint32_t handle;
+	uint32_t address;
+	uint32_t length;
+	uint32_t flags;
+	uint8_t in_use;
+};
+
+struct SDKSurface {
+	uint32_t handle;
+	uint32_t address;
+	uint32_t width;
+	uint32_t height;
+	uint32_t pitch;
+	uint32_t format;
+	uint32_t flags;
+	uint32_t length;
+	uint8_t in_use;
+};
+
+struct SDKAudioStream {
+	uint32_t id;
+	struct SDKSharedBuffer *mp3_ring;
+	struct SDKSharedBuffer *pcm_ring;
+	uint32_t mp3_capacity;
+	uint32_t pcm_capacity;
+	uint32_t input_offset;
+	uint32_t input_length;
+	uint32_t pcm_read;
+	uint32_t pcm_write;
+	uint32_t pcm_used;
+	uint32_t low_water_bytes;
+	uint32_t high_water_bytes;
+	uint32_t sample_rate;
+	uint32_t channels;
+	uint32_t sample_format;
+	uint32_t frames_decoded;
+	uint32_t bytes_consumed;
+	uint32_t bytes_produced;
+	uint32_t output_frame_limit;
+	int eof;
+	int initialized;
+	int backpressure;
+	int vbr_checked;
+	int decode_complete;
+	mp3dec_t decoder;
+	mp3d_sample_t scratch[MINIMP3_MAX_SAMPLES_PER_FRAME];
+};
+
+typedef char SDKMailboxDescriptor_must_be_128_bytes[
+	(sizeof(struct SDKMailboxDescriptor) == SDK_MAILBOX_DESCRIPTOR_SIZE) ? 1 : -1
+];
+typedef char SDKMailboxEntry_must_be_64_bytes[
+	(sizeof(struct SDKMailboxEntry) == SDK_MAILBOX_ENTRY_SIZE) ? 1 : -1
+];
+typedef char SDKCapsPayload_must_fit_inline[
+	(sizeof(struct SDKCapsPayload) <= 48U) ? 1 : -1
+];
+typedef char SDKQueryServicePayload_must_be_48_bytes[
+	(sizeof(struct SDKQueryServicePayload) == 48U) ? 1 : -1
+];
+typedef char SDKServiceInfoPayload_must_be_48_bytes[
+	(sizeof(struct SDKServiceInfoPayload) == 48U) ? 1 : -1
+];
+typedef char SDKAllocSharedPayload_must_be_48_bytes[
+	(sizeof(struct SDKAllocSharedPayload) == 48U) ? 1 : -1
+];
+typedef char SDKSharedBufferInfoPayload_must_be_48_bytes[
+	(sizeof(struct SDKSharedBufferInfoPayload) == 48U) ? 1 : -1
+];
+typedef char SDKFreeSharedPayload_must_be_48_bytes[
+	(sizeof(struct SDKFreeSharedPayload) == 48U) ? 1 : -1
+];
+typedef char SDKMemFillPayload_must_be_48_bytes[
+	(sizeof(struct SDKMemFillPayload) == 48U) ? 1 : -1
+];
+typedef char SDKMemCopyPayload_must_be_48_bytes[
+	(sizeof(struct SDKMemCopyPayload) == 48U) ? 1 : -1
+];
+typedef char SDKDiagPayload_must_be_48_bytes[
+	(sizeof(struct SDKDiagPayload) == 48U) ? 1 : -1
+];
+typedef char SDKDiagTimingPayload_must_be_48_bytes[
+	(sizeof(struct SDKDiagTimingPayload) == 48U) ? 1 : -1
+];
+typedef char SDKSurfaceInfoPayload_must_be_48_bytes[
+	(sizeof(struct SDKSurfaceInfoPayload) == 48U) ? 1 : -1
+];
+typedef char SDKAllocSurfacePayload_must_be_48_bytes[
+	(sizeof(struct SDKAllocSurfacePayload) == 48U) ? 1 : -1
+];
+typedef char SDKFreeSurfacePayload_must_be_48_bytes[
+	(sizeof(struct SDKFreeSurfacePayload) == 48U) ? 1 : -1
+];
+typedef char SDKScaleImagePayload_must_be_48_bytes[
+	(sizeof(struct SDKScaleImagePayload) == 48U) ? 1 : -1
+];
+typedef char SDKScaleImageClippedPayload_must_be_48_bytes[
+	(sizeof(struct SDKScaleImageClippedPayload) == 48U) ? 1 : -1
+];
+typedef char SDKImageDecodePayload_must_be_48_bytes[
+	(sizeof(struct SDKImageDecodePayload) == 48U) ? 1 : -1
+];
+typedef char SDKImageDecodeResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKImageDecodeResultPayload) == 48U) ? 1 : -1
+];
+typedef char SDKImageSessionBeginPayload_must_be_48_bytes[
+	(sizeof(struct SDKImageSessionBeginPayload) == 48U) ? 1 : -1
+];
+typedef char SDKImageSessionFeedPayload_must_be_48_bytes[
+	(sizeof(struct SDKImageSessionFeedPayload) == 48U) ? 1 : -1
+];
+typedef char SDKImageSessionResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKImageSessionResultPayload) == 48U) ? 1 : -1
+];
+typedef char SDKImageSessionClosePayload_must_be_48_bytes[
+	(sizeof(struct SDKImageSessionClosePayload) == 48U) ? 1 : -1
+];
+typedef char SDKAudioDecodePayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioDecodePayload) == 48U) ? 1 : -1
+];
+typedef char SDKAudioDecodeResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioDecodeResultPayload) == 48U) ? 1 : -1
+];
+typedef char SDKAudioStreamBeginPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioStreamBeginPayload) == 48U) ? 1 : -1
+];
+typedef char SDKAudioStreamFeedPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioStreamFeedPayload) == 48U) ? 1 : -1
+];
+typedef char SDKAudioStreamReadPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioStreamReadPayload) == 48U) ? 1 : -1
+];
+typedef char SDKAudioStreamClosePayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioStreamClosePayload) == 48U) ? 1 : -1
+];
+typedef char SDKAudioStreamResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioStreamResultPayload) == 48U) ? 1 : -1
+];
+typedef char SDKSurfaceFillPayload_must_be_48_bytes[
+	(sizeof(struct SDKSurfaceFillPayload) == 48U) ? 1 : -1
+];
+typedef char SDKSurfaceCopyPayload_must_be_48_bytes[
+	(sizeof(struct SDKSurfaceCopyPayload) == 48U) ? 1 : -1
+];
+typedef char SDKCryptoHashPayload_must_be_48_bytes[
+	(sizeof(struct SDKCryptoHashPayload) == 48U) ? 1 : -1
+];
+typedef char SDKCryptoStreamPayload_must_be_48_bytes[
+	(sizeof(struct SDKCryptoStreamPayload) == 48U) ? 1 : -1
+];
+typedef char SDKCryptoAeadPayload_must_be_48_bytes[
+	(sizeof(struct SDKCryptoAeadPayload) == 48U) ? 1 : -1
+];
+typedef char SDKCryptoResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKCryptoResultPayload) == 48U) ? 1 : -1
+];
+typedef char SDKDecompressPayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressPayload) == 48U) ? 1 : -1
+];
+typedef char SDKDecompressTestPayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressTestPayload) == 48U) ? 1 : -1
+];
+typedef char SDKDecompressResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressResultPayload) == 48U) ? 1 : -1
+];
+typedef char SDKDecompressStreamBeginPayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressStreamBeginPayload) == 48U) ? 1 : -1
+];
+typedef char SDKDecompressStreamReadPayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressStreamReadPayload) == 48U) ? 1 : -1
+];
+typedef char SDKDecompressStreamFeedPayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressStreamFeedPayload) == 48U) ? 1 : -1
+];
+typedef char SDKDecompressStreamClosePayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressStreamClosePayload) == 48U) ? 1 : -1
+];
+typedef char SDKDecompressStreamResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressStreamResultPayload) == 48U) ? 1 : -1
+];
+
+static volatile int sdk_mailbox_pending;
+static volatile int sdk_mailbox_active;
+static volatile int sdk_completion_irq_enabled;
+static uint16_t sdk_status;
+static struct SDKSharedBuffer shared_buffers[SDK_MAX_SHARED_BUFFERS];
+static struct SDKSurface surfaces[SDK_MAX_SURFACES];
+static struct SDKAudioStream audio_streams[SDK_MAX_AUDIO_STREAMS];
+static uint32_t next_shared_handle;
+static uint32_t next_surface_handle;
+static uint32_t next_audio_stream_id;
+static uint32_t requests_completed;
+static uint32_t requests_failed;
+static uint32_t timing_requests_timed;
+static uint32_t timing_total_us;
+static uint32_t timing_surface_requests;
+static uint32_t timing_surface_us;
+static uint32_t timing_audio_requests;
+static uint32_t timing_audio_us;
+static uint32_t timing_last_opcode;
+static uint32_t timing_last_us;
+static uint32_t timing_max_opcode;
+static uint32_t timing_max_us;
+
+static uint32_t surface_format_bytes(uint32_t format);
+
+static const struct SDKServiceDescriptor sdk_services[] = {
+	{
+		SDK_SERVICE_CORE,
+		0x00020000U,
+		SDK_CAP_MAILBOX | SDK_CAP_POLLING_COMPLETION |
+			SDK_CAP_SERVICE_DISCOVERY,
+		SDK_SERVICE_FLAG_FIRMWARE,
+		SDK_SERVICE_CORE,
+		5,
+		"core"
+	},
+	{
+		SDK_SERVICE_MEMORY,
+		0x00020000U,
+		SDK_CAP_SHARED_ALLOC | SDK_CAP_MEMORY_OPS,
+		SDK_SERVICE_FLAG_FIRMWARE,
+		SDK_SERVICE_MEMORY,
+		4,
+		"memory"
+	},
+	{
+		SDK_SERVICE_SURFACE,
+		0x00020000U,
+		SDK_CAP_SURFACES | SDK_CAP_FRAMEBUFFER_SURFACE |
+			SDK_CAP_SURFACE_OPS,
+		SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_ZERO_COPY,
+		SDK_SERVICE_SURFACE,
+		5,
+		"surface"
+	},
+	{
+		SDK_SERVICE_IMAGE,
+		0x00020000U,
+		SDK_CAP_IMAGE_SCALE | SDK_CAP_IMAGE_DECODE,
+		SDK_SERVICE_FLAG_FIRMWARE |
+			SDK_SERVICE_FLAG_IMAGE_STREAMING_INPUT |
+			SDK_SERVICE_FLAG_IMAGE_TILE_OUTPUT |
+			SDK_SERVICE_FLAG_IMAGE_FRAMEBUFFER_OUTPUT |
+			SDK_SERVICE_FLAG_IMAGE_SCALE_BILINEAR |
+			SDK_SERVICE_FLAG_IMAGE_SCALE_CLIPPED |
+			SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA |
+			SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT,
+		SDK_SERVICE_IMAGE,
+		8,
+		"image"
+	},
+	{
+		SDK_SERVICE_CODEC,
+		0x00020000U,
+		SDK_CAP_COMPRESSION,
+		SDK_SERVICE_FLAG_FIRMWARE |
+			SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW |
+			SDK_SERVICE_FLAG_CODEC_ZLIB |
+			SDK_SERVICE_FLAG_CODEC_GZIP |
+			SDK_SERVICE_FLAG_CODEC_LZMA_ALONE |
+			SDK_SERVICE_FLAG_CODEC_LZMA2 |
+			SDK_SERVICE_FLAG_CODEC_CHECKSUM |
+			SDK_SERVICE_FLAG_CODEC_DECOMPRESS_TEST |
+			SDK_SERVICE_FLAG_CODEC_DECOMPRESS_STREAM |
+			SDK_SERVICE_FLAG_CODEC_DECOMPRESS_FEED |
+			SDK_SERVICE_FLAG_CODEC_DEFLATE_FEED |
+			SDK_SERVICE_FLAG_CODEC_ZLIB_FEED |
+			SDK_SERVICE_FLAG_CODEC_GZIP_FEED,
+		SDK_SERVICE_CODEC,
+		6,
+		"codec"
+	},
+	{
+		SDK_SERVICE_AUDIO,
+		0x00020000U,
+		SDK_CAP_AUDIO_DECODE,
+		SDK_SERVICE_FLAG_FIRMWARE |
+			SDK_SERVICE_FLAG_AUDIO_MP3_DECODE |
+			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM,
+		SDK_SERVICE_AUDIO,
+		7,
+		"audio"
+	},
+	{
+		SDK_SERVICE_CRYPTO,
+		0x00020000U,
+		SDK_CAP_CRYPTO,
+		SDK_SERVICE_FLAG_FIRMWARE,
+		SDK_SERVICE_CRYPTO,
+		3,
+		"crypto"
+	},
+	{
+		SDK_SERVICE_DIAG,
+		0x00020000U,
+		SDK_CAP_DIAGNOSTICS,
+		SDK_SERVICE_FLAG_FIRMWARE,
+		SDK_SERVICE_DIAG,
+		2,
+		"diag"
+	}
+};
+
+static inline uint16_t get_be16(const volatile void *p)
+{
+	const volatile uint8_t *b = (const volatile uint8_t *)p;
+	return ((uint16_t)b[0] << 8) | b[1];
+}
+
+static inline uint32_t get_be32(const volatile void *p)
+{
+	const volatile uint8_t *b = (const volatile uint8_t *)p;
+	return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+	       ((uint32_t)b[2] << 8) | b[3];
+}
+
+static inline void put_be16(volatile void *p, uint16_t value)
+{
+	volatile uint8_t *b = (volatile uint8_t *)p;
+	b[0] = (value >> 8) & 0xff;
+	b[1] = value & 0xff;
+}
+
+static inline void put_be32(volatile void *p, uint32_t value)
+{
+	volatile uint8_t *b = (volatile uint8_t *)p;
+	b[0] = (value >> 24) & 0xff;
+	b[1] = (value >> 16) & 0xff;
+	b[2] = (value >> 8) & 0xff;
+	b[3] = value & 0xff;
+}
+
+static uint32_t saturated_add_u32(uint32_t value, uint32_t increment)
+{
+	if (0xffffffffU - value < increment)
+		return 0xffffffffU;
+	return value + increment;
+}
+
+static uint32_t timing_delta_us(XTime start, XTime end)
+{
+	uint64_t delta = (uint64_t)(end - start);
+	uint64_t us;
+
+	if (COUNTS_PER_SECOND == 0U)
+		return 0U;
+	us = (delta * 1000000ULL) / (uint64_t)COUNTS_PER_SECOND;
+	if (us > 0xffffffffULL)
+		return 0xffffffffU;
+	return (uint32_t)us;
+}
+
+static void record_request_timing(uint32_t opcode, uint32_t elapsed_us)
+{
+	uint32_t service = opcode & 0xff00U;
+
+	timing_requests_timed = saturated_add_u32(timing_requests_timed, 1U);
+	timing_total_us = saturated_add_u32(timing_total_us, elapsed_us);
+	timing_last_opcode = opcode;
+	timing_last_us = elapsed_us;
+	if (elapsed_us >= timing_max_us) {
+		timing_max_opcode = opcode;
+		timing_max_us = elapsed_us;
+	}
+	if (service == SDK_SERVICE_SURFACE) {
+		timing_surface_requests =
+			saturated_add_u32(timing_surface_requests, 1U);
+		timing_surface_us =
+			saturated_add_u32(timing_surface_us, elapsed_us);
+	} else if (service == SDK_SERVICE_AUDIO) {
+		timing_audio_requests =
+			saturated_add_u32(timing_audio_requests, 1U);
+		timing_audio_us =
+			saturated_add_u32(timing_audio_us, elapsed_us);
+	}
+}
+
+static inline volatile struct SDKMailboxDescriptor *descriptor(void)
+{
+	return (volatile struct SDKMailboxDescriptor *)SDK_MAILBOX_ADDRESS;
+}
+
+static inline volatile struct SDKMailboxEntry *request_ring(void)
+{
+	return (volatile struct SDKMailboxEntry *)
+		(SDK_MAILBOX_ADDRESS + SDK_MAILBOX_REQUEST_OFFSET);
+}
+
+static inline volatile struct SDKMailboxEntry *completion_ring(void)
+{
+	return (volatile struct SDKMailboxEntry *)
+		(SDK_MAILBOX_ADDRESS + SDK_MAILBOX_COMPLETION_OFFSET);
+}
+
+static uint32_t next_index(uint32_t index)
+{
+	index++;
+	if (index >= SDK_MAILBOX_RING_ENTRIES)
+		index = 0;
+	return index;
+}
+
+static int descriptor_valid(volatile struct SDKMailboxDescriptor *desc)
+{
+	uint32_t request_head;
+	uint32_t request_tail;
+	uint32_t completion_head;
+	uint32_t completion_tail;
+
+	if (get_be32(desc->magic) != SDK_MAILBOX_MAGIC)
+		return 0;
+	if (get_be16(desc->abi_major) != SDK_MAILBOX_ABI_MAJOR)
+		return 0;
+	if (get_be32(desc->descriptor_size) != sizeof(*desc))
+		return 0;
+	if (get_be32(desc->request_ring_offset) != SDK_MAILBOX_REQUEST_OFFSET)
+		return 0;
+	if (get_be32(desc->completion_ring_offset) != SDK_MAILBOX_COMPLETION_OFFSET)
+		return 0;
+	if (get_be32(desc->request_ring_entries) != SDK_MAILBOX_RING_ENTRIES)
+		return 0;
+	if (get_be32(desc->completion_ring_entries) != SDK_MAILBOX_RING_ENTRIES)
+		return 0;
+	if ((get_be32(desc->capability_bits) & SDK_CAP_MAILBOX) == 0)
+		return 0;
+
+	request_head = get_be32(desc->request_head);
+	request_tail = get_be32(desc->request_tail);
+	completion_head = get_be32(desc->completion_head);
+	completion_tail = get_be32(desc->completion_tail);
+	if (request_head >= SDK_MAILBOX_RING_ENTRIES ||
+	    request_tail >= SDK_MAILBOX_RING_ENTRIES ||
+	    completion_head >= SDK_MAILBOX_RING_ENTRIES ||
+	    completion_tail >= SDK_MAILBOX_RING_ENTRIES) {
+		return 0;
+	}
+
+	return 1;
+}
+
+static void copy_payload(volatile uint8_t *dst, const volatile uint8_t *src,
+                         uint32_t length)
+{
+	uint32_t i;
+	for (i = 0; i < length; i++)
+		dst[i] = src[i];
+}
+
+static void copy_name(volatile uint8_t *dst, const char *src)
+{
+	uint32_t i;
+
+	for (i = 0; i < 20U; i++) {
+		if (src && src[i] != '\0')
+			dst[i] = (uint8_t)src[i];
+		else
+			dst[i] = 0;
+	}
+}
+
+static const struct SDKServiceDescriptor *find_service(uint32_t service_id)
+{
+	uint32_t i;
+
+	for (i = 0; i < sizeof(sdk_services) / sizeof(sdk_services[0]); i++) {
+		if (sdk_services[i].service_id == service_id)
+			return &sdk_services[i];
+	}
+
+	return 0;
+}
+
+static uint32_t service_flags(const struct SDKServiceDescriptor *service)
+{
+	uint32_t flags;
+
+	if (!service)
+		return 0;
+
+	flags = service->flags;
+	if (service->service_id == SDK_SERVICE_IMAGE) {
+		flags |= sdk_jpeg_service_flags();
+		flags |= SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA;
+	}
+
+	return flags;
+}
+
+static void write_completion(volatile struct SDKMailboxEntry *dst,
+                             volatile struct SDKMailboxEntry *src,
+                             uint16_t status, uint16_t payload_len)
+{
+	put_be32(dst->request_id, get_be32(src->request_id));
+	put_be16(dst->opcode, get_be16(src->opcode));
+	put_be16(dst->status, status);
+	put_be16(dst->flags, get_be16(src->flags));
+	put_be16(dst->payload_len, payload_len);
+	put_be32(dst->user_cookie, get_be32(src->user_cookie));
+}
+
+static uint16_t complete_status(volatile struct SDKMailboxEntry *req,
+                                volatile struct SDKMailboxEntry *comp,
+                                uint16_t status)
+{
+	write_completion(comp, req, status, 0);
+	return status;
+}
+
+static uint16_t complete_image_session_result(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t status,
+	const struct SDKImageStreamResult *result)
+{
+	volatile struct SDKImageSessionResultPayload *payload;
+
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*payload));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	payload = (volatile struct SDKImageSessionResultPayload *)comp->payload;
+	put_be32(payload->session, result->session);
+	put_be32(payload->state, result->state);
+	put_be32(payload->image_width, result->image_width);
+	put_be32(payload->image_height, result->image_height);
+	put_be32(payload->output_format, result->output_format);
+	put_be32(payload->tile_x, result->tile_x);
+	put_be32(payload->tile_y, result->tile_y);
+	put_be32(payload->tile_width, result->tile_width);
+	put_be32(payload->tile_height, result->tile_height);
+	put_be32(payload->bytes_consumed, result->bytes_consumed);
+	put_be32(payload->bytes_written, result->bytes_written);
+	put_be32(payload->flags, result->flags);
+	return SDK_STATUS_OK;
+}
+
+static int is_power_of_two(uint32_t value)
+{
+	return value != 0 && (value & (value - 1U)) == 0;
+}
+
+static uint32_t align_up(uint32_t value, uint32_t alignment)
+{
+	if (alignment == 0)
+		alignment = 16U;
+	if (!is_power_of_two(alignment))
+		return 0;
+	if (value > (uint32_t)(0xffffffffU - (alignment - 1U)))
+		return 0;
+	return (value + alignment - 1U) & ~(alignment - 1U);
+}
+
+static int range_valid(uint32_t address, uint32_t length,
+                       uint32_t base, uint32_t size)
+{
+	uint32_t end = base + size;
+
+	if (length == 0 || length > size)
+		return 0;
+	if (address < base || address >= end)
+		return 0;
+	if (length > (end - address))
+		return 0;
+	return 1;
+}
+
+static int heap_range_valid(uint32_t address, uint32_t length)
+{
+	return range_valid(address, length,
+	                   SDK_SHARED_HEAP_ADDRESS, SDK_SHARED_HEAP_SIZE);
+}
+
+static int local_surface_range_valid(uint32_t address, uint32_t length)
+{
+	return range_valid(address, length,
+	                   SDK_LOCAL_SURFACE_HEAP_ADDRESS,
+	                   SDK_LOCAL_SURFACE_HEAP_SIZE);
+}
+
+static int shared_buffer_live(const struct SDKSharedBuffer *buffer)
+{
+	if (!buffer || !buffer->in_use)
+		return 0;
+	if (buffer->handle == 0 || buffer->handle == SDK_INVALID_HANDLE)
+		return 0;
+	return heap_range_valid(buffer->address, buffer->length);
+}
+
+static int surface_is_arm_local(const struct SDKSurface *surface)
+{
+	return surface && ((surface->flags & SDK_SURFACE_FLAG_ARM_LOCAL) != 0U);
+}
+
+static void prepare_surface_for_arm_read(const struct SDKSurface *surface)
+{
+	if (!surface || surface_is_arm_local(surface))
+		return;
+	Xil_DCacheInvalidateRange((INTPTR)surface->address, surface->length);
+}
+
+static void flush_surface_rect(const struct SDKSurface *surface,
+                               uint32_t x, uint32_t y,
+                               uint32_t width, uint32_t height)
+{
+	uint32_t bytes_per_pixel;
+	uint32_t row_bytes;
+	uint32_t row;
+
+	if (!surface || width == 0U || height == 0U ||
+	    x >= surface->width || y >= surface->height ||
+	    width > (surface->width - x) ||
+	    height > (surface->height - y)) {
+		return;
+	}
+
+	bytes_per_pixel = surface_format_bytes(surface->format);
+	if (bytes_per_pixel == 0U ||
+	    x > (0xffffffffU / bytes_per_pixel) ||
+	    width > (0xffffffffU / bytes_per_pixel)) {
+		return;
+	}
+
+	row_bytes = width * bytes_per_pixel;
+	if (row_bytes == 0U ||
+	    (x * bytes_per_pixel) > surface->pitch ||
+	    row_bytes > (surface->pitch - (x * bytes_per_pixel))) {
+		return;
+	}
+
+	if (x == 0U && row_bytes == surface->pitch) {
+		uint64_t offset = (uint64_t)y * surface->pitch;
+		uint64_t length = (uint64_t)height * surface->pitch;
+		if (offset > 0xffffffffULL || length > 0xffffffffULL ||
+		    length > (0xffffffffULL - offset)) {
+			return;
+		}
+		Xil_DCacheFlushRange((INTPTR)(surface->address + (uint32_t)offset),
+		                     (uint32_t)length);
+		return;
+	}
+
+	for (row = 0U; row < height; row++) {
+		uint64_t offset = ((uint64_t)y + row) * surface->pitch;
+		offset += (uint64_t)x * bytes_per_pixel;
+		if (offset > 0xffffffffULL) {
+			return;
+		}
+		Xil_DCacheFlushRange((INTPTR)(surface->address + (uint32_t)offset),
+		                     row_bytes);
+	}
+}
+
+static int surface_live(const struct SDKSurface *surface)
+{
+	uint32_t bytes_per_pixel;
+
+	if (!surface || !surface->in_use)
+		return 0;
+	if (surface->handle == 0 || surface->handle == SDK_INVALID_HANDLE ||
+	    surface->handle == SDK_SURFACE_HANDLE_FRAMEBUFFER)
+		return 0;
+	if (surface->width == 0 || surface->height == 0 || surface->pitch == 0)
+		return 0;
+	bytes_per_pixel = surface_format_bytes(surface->format);
+	if (bytes_per_pixel == 0 ||
+	    surface->width > (0xffffffffU / bytes_per_pixel))
+		return 0;
+	if (surface->pitch < surface->width * bytes_per_pixel)
+		return 0;
+	if (surface->height > (0xffffffffU / surface->pitch))
+		return 0;
+	if (surface->length != surface->pitch * surface->height)
+		return 0;
+	if (surface_is_arm_local(surface))
+		return local_surface_range_valid(surface->address,
+		                                 surface->length);
+	return heap_range_valid(surface->address, surface->length);
+}
+
+static uint32_t sanitize_allocator_metadata(void)
+{
+	uint32_t i;
+	uint32_t invalid = 0;
+
+	for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
+		if (shared_buffers[i].in_use &&
+		    !shared_buffer_live(&shared_buffers[i])) {
+			memset(&shared_buffers[i], 0, sizeof(shared_buffers[i]));
+			invalid++;
+		}
+	}
+
+	for (i = 0; i < SDK_MAX_SURFACES; i++) {
+		if (surfaces[i].in_use && !surface_live(&surfaces[i])) {
+			memset(&surfaces[i], 0, sizeof(surfaces[i]));
+			invalid++;
+		}
+	}
+
+	return invalid;
+}
+
+static struct SDKSharedBuffer *find_shared_buffer(uint32_t handle)
+{
+	uint32_t i;
+
+	for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
+		if (shared_buffer_live(&shared_buffers[i]) &&
+		    shared_buffers[i].handle == handle)
+			return &shared_buffers[i];
+	}
+
+	return 0;
+}
+
+static struct SDKSharedBuffer *find_free_buffer_slot(void)
+{
+	uint32_t i;
+
+	for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
+		if (!shared_buffer_live(&shared_buffers[i]))
+			return &shared_buffers[i];
+	}
+
+	return 0;
+}
+
+static struct SDKSurface *find_surface(uint32_t handle)
+{
+	uint32_t i;
+
+	for (i = 0; i < SDK_MAX_SURFACES; i++) {
+		if (surface_live(&surfaces[i]) && surfaces[i].handle == handle)
+			return &surfaces[i];
+	}
+
+	return 0;
+}
+
+static struct SDKSurface *find_free_surface_slot(void)
+{
+	uint32_t i;
+
+	for (i = 0; i < SDK_MAX_SURFACES; i++) {
+		if (!surface_live(&surfaces[i]))
+			return &surfaces[i];
+	}
+
+	return 0;
+}
+
+static uint32_t count_used_shared_buffers(void)
+{
+	uint32_t i;
+	uint32_t used = 0;
+
+	for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
+		if (shared_buffer_live(&shared_buffers[i]))
+			used++;
+	}
+
+	return used;
+}
+
+static uint32_t count_used_surfaces(void)
+{
+	uint32_t i;
+	uint32_t used = 0;
+
+	for (i = 0; i < SDK_MAX_SURFACES; i++) {
+		if (surface_live(&surfaces[i]))
+			used++;
+	}
+
+	return used;
+}
+
+static uint32_t find_allocation_end_containing(uint32_t address,
+                                               int local_surfaces)
+{
+	uint32_t i;
+
+	if (!local_surfaces) {
+		for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
+			uint32_t start;
+			uint32_t end;
+
+			if (!shared_buffer_live(&shared_buffers[i]))
+				continue;
+
+			start = shared_buffers[i].address;
+			end = start + shared_buffers[i].length;
+			if (address >= start && address < end)
+				return end;
+		}
+	}
+
+	for (i = 0; i < SDK_MAX_SURFACES; i++) {
+		uint32_t start;
+		uint32_t end;
+
+		if (!surface_live(&surfaces[i]))
+			continue;
+		if (surface_is_arm_local(&surfaces[i]) != local_surfaces)
+			continue;
+
+		start = surfaces[i].address;
+		end = start + surfaces[i].length;
+		if (address >= start && address < end)
+			return end;
+	}
+
+	return 0;
+}
+
+static uint32_t find_next_allocation_start(uint32_t address, uint32_t heap_end,
+                                           int local_surfaces)
+{
+	uint32_t i;
+	uint32_t next = heap_end;
+
+	if (!local_surfaces) {
+		for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
+			if (shared_buffer_live(&shared_buffers[i]) &&
+			    shared_buffers[i].address >= address &&
+			    shared_buffers[i].address < next) {
+				next = shared_buffers[i].address;
+			}
+		}
+	}
+
+	for (i = 0; i < SDK_MAX_SURFACES; i++) {
+		if (surface_live(&surfaces[i]) &&
+		    surface_is_arm_local(&surfaces[i]) == local_surfaces &&
+		    surfaces[i].address >= address &&
+		    surfaces[i].address < next) {
+			next = surfaces[i].address;
+		}
+	}
+
+	return next;
+}
+
+static void heap_free_stats(uint32_t *free_total, uint32_t *largest_free)
+{
+	uint32_t cursor = SDK_SHARED_HEAP_ADDRESS;
+	uint32_t heap_end = SDK_SHARED_HEAP_ADDRESS + SDK_SHARED_HEAP_SIZE;
+	uint32_t total = 0;
+	uint32_t largest = 0;
+
+	while (cursor < heap_end) {
+		uint32_t alloc_end = find_allocation_end_containing(cursor, 0);
+		uint32_t next_alloc;
+		uint32_t free_len;
+
+		if (alloc_end != 0) {
+			cursor = alloc_end;
+			continue;
+		}
+
+		next_alloc = find_next_allocation_start(cursor, heap_end, 0);
+		free_len = next_alloc - cursor;
+		total += free_len;
+		if (free_len > largest)
+			largest = free_len;
+		cursor = next_alloc;
+	}
+
+	*free_total = total;
+	*largest_free = largest;
+}
+
+static int buffer_range_valid(const struct SDKSharedBuffer *buffer,
+                              uint32_t offset, uint32_t length)
+{
+	if (!buffer)
+		return 0;
+	if (offset > buffer->length)
+		return 0;
+	if (length > (buffer->length - offset))
+		return 0;
+	return 1;
+}
+
+static int ranges_overlap(uint32_t offset_a, uint32_t length_a,
+                          uint32_t offset_b, uint32_t length_b)
+{
+	if (length_a == 0U || length_b == 0U)
+		return 0;
+	if (offset_a > (0xffffffffU - length_a) ||
+	    offset_b > (0xffffffffU - length_b)) {
+		return 1;
+	}
+	return offset_a < (offset_b + length_b) &&
+	       offset_b < (offset_a + length_a);
+}
+
+static uint32_t next_handle(void)
+{
+	uint32_t handle = next_shared_handle++;
+
+	if (next_shared_handle == 0 || next_shared_handle == 0xffffffffU)
+		next_shared_handle = 1;
+	if (handle == 0 || handle == 0xffffffffU)
+		handle = next_handle();
+
+	return handle;
+}
+
+static uint32_t find_free_region_in(uint32_t base, uint32_t size,
+                                    uint32_t length, uint32_t alignment,
+                                    int local_surfaces)
+{
+	uint32_t heap_end = base + size;
+	uint32_t candidate = align_up(base, alignment);
+	uint32_t i;
+
+	while (candidate != 0 && candidate < heap_end &&
+	       length <= (heap_end - candidate)) {
+		int collision = 0;
+
+		if (!local_surfaces) {
+			for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
+				uint32_t block_start;
+				uint32_t block_end;
+
+				if (!shared_buffer_live(&shared_buffers[i]))
+					continue;
+
+				block_start = shared_buffers[i].address;
+				block_end = block_start + shared_buffers[i].length;
+				if (candidate + length <= block_start ||
+				    candidate >= block_end)
+					continue;
+
+				candidate = align_up(block_end, alignment);
+				collision = 1;
+				break;
+			}
+		}
+
+		if (collision)
+			continue;
+
+		for (i = 0; i < SDK_MAX_SURFACES; i++) {
+			uint32_t block_start;
+			uint32_t block_end;
+
+			if (!surface_live(&surfaces[i]))
+				continue;
+			if (surface_is_arm_local(&surfaces[i]) != local_surfaces)
+				continue;
+
+			block_start = surfaces[i].address;
+			block_end = block_start + surfaces[i].length;
+			if (candidate + length <= block_start || candidate >= block_end)
+				continue;
+
+			candidate = align_up(block_end, alignment);
+			collision = 1;
+			break;
+		}
+
+		if (!collision)
+			return candidate;
+	}
+
+	return 0;
+}
+
+static uint32_t find_free_region(uint32_t length, uint32_t alignment)
+{
+	return find_free_region_in(SDK_SHARED_HEAP_ADDRESS,
+	                           SDK_SHARED_HEAP_SIZE,
+	                           length, alignment, 0);
+}
+
+static uint32_t find_free_local_surface_region(uint32_t length,
+                                               uint32_t alignment)
+{
+	return find_free_region_in(SDK_LOCAL_SURFACE_HEAP_ADDRESS,
+	                           SDK_LOCAL_SURFACE_HEAP_SIZE,
+	                           length, alignment, 1);
+}
+
+static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
+                                    volatile struct SDKMailboxEntry *comp,
+                                    uint16_t payload_len)
+{
+	volatile struct SDKAllocSharedPayload *payload;
+	volatile struct SDKSharedBufferInfoPayload *info;
+	struct SDKSharedBuffer *slot;
+	uint32_t length;
+	uint32_t alignment;
+	uint32_t flags;
+	uint32_t address;
+
+	if (payload_len < 12U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKAllocSharedPayload *)req->payload;
+	length = get_be32(payload->length);
+	alignment = get_be32(payload->alignment);
+	flags = get_be32(payload->flags);
+	if (alignment == 0)
+		alignment = 16U;
+	if (length == 0 || length > SDK_SHARED_HEAP_SIZE ||
+	    !is_power_of_two(alignment))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	sanitize_allocator_metadata();
+	slot = find_free_buffer_slot();
+	if (!slot)
+		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
+	memset(slot, 0, sizeof(*slot));
+
+	address = find_free_region(length, alignment);
+	if (address == 0)
+		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
+
+	slot->handle = next_handle();
+	slot->address = address;
+	slot->length = length;
+	slot->flags = flags;
+	slot->in_use = 1;
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*info));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	info = (volatile struct SDKSharedBufferInfoPayload *)comp->payload;
+	put_be32(info->handle, slot->handle);
+	put_be32(info->arm_addr, slot->address);
+	put_be32(info->length, slot->length);
+	put_be32(info->flags, slot->flags);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_free_shared(volatile struct SDKMailboxEntry *req,
+                                   volatile struct SDKMailboxEntry *comp,
+                                   uint16_t payload_len)
+{
+	volatile struct SDKFreeSharedPayload *payload;
+	struct SDKSharedBuffer *buffer;
+	uint32_t handle;
+
+	if (payload_len < 4U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKFreeSharedPayload *)req->payload;
+	handle = get_be32(payload->handle);
+	buffer = find_shared_buffer(handle);
+	if (!buffer)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	memset(buffer, 0, sizeof(*buffer));
+	return complete_status(req, comp, SDK_STATUS_OK);
+}
+
+static uint16_t handle_mem_fill(volatile struct SDKMailboxEntry *req,
+                                volatile struct SDKMailboxEntry *comp,
+                                uint16_t payload_len)
+{
+	volatile struct SDKMemFillPayload *payload;
+	struct SDKSharedBuffer *buffer;
+	uint32_t handle;
+	uint32_t offset;
+	uint32_t length;
+
+	if (payload_len < 13U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKMemFillPayload *)req->payload;
+	handle = get_be32(payload->handle);
+	offset = get_be32(payload->offset);
+	length = get_be32(payload->length);
+	buffer = find_shared_buffer(handle);
+	if (!buffer)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (!buffer_range_valid(buffer, offset, length))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	if (length != 0) {
+		memset((void *)(uintptr_t)(buffer->address + offset),
+		       payload->value, length);
+		Xil_DCacheFlushRange((INTPTR)(buffer->address + offset), length);
+	}
+
+	return complete_status(req, comp, SDK_STATUS_OK);
+}
+
+static uint16_t handle_mem_copy(volatile struct SDKMailboxEntry *req,
+                                volatile struct SDKMailboxEntry *comp,
+                                uint16_t payload_len)
+{
+	volatile struct SDKMemCopyPayload *payload;
+	struct SDKSharedBuffer *dst;
+	struct SDKSharedBuffer *src;
+	uint32_t dst_offset;
+	uint32_t src_offset;
+	uint32_t length;
+
+	if (payload_len < 20U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKMemCopyPayload *)req->payload;
+	dst = find_shared_buffer(get_be32(payload->dst_handle));
+	src = find_shared_buffer(get_be32(payload->src_handle));
+	dst_offset = get_be32(payload->dst_offset);
+	src_offset = get_be32(payload->src_offset);
+	length = get_be32(payload->length);
+	if (!dst || !src)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (!buffer_range_valid(dst, dst_offset, length) ||
+	    !buffer_range_valid(src, src_offset, length))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	if (length != 0) {
+		Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
+		                          length);
+		memmove((void *)(uintptr_t)(dst->address + dst_offset),
+		        (const void *)(uintptr_t)(src->address + src_offset),
+		        length);
+		Xil_DCacheFlushRange((INTPTR)(dst->address + dst_offset), length);
+	}
+
+	return complete_status(req, comp, SDK_STATUS_OK);
+}
+
+static uint32_t color_mode_surface_format(uint32_t color_mode)
+{
+	switch (color_mode) {
+	case MNTVA_COLOR_8BIT:
+		return SDK_SURFACE_FORMAT_INDEX8;
+	case MNTVA_COLOR_16BIT565:
+		return SDK_SURFACE_FORMAT_RGB565;
+	case MNTVA_COLOR_15BIT:
+		return SDK_SURFACE_FORMAT_RGB555;
+	case MNTVA_COLOR_32BIT:
+		return SDK_SURFACE_FORMAT_BGRA8888;
+	default:
+		return SDK_SURFACE_FORMAT_UNKNOWN;
+	}
+}
+
+static uint32_t surface_format_bytes(uint32_t format)
+{
+	return sdk_surface_format_bytes(format);
+}
+
+static uint32_t next_surface_id(void)
+{
+	uint32_t handle = SDK_SURFACE_HANDLE_BASE | next_surface_handle++;
+
+	if (next_surface_handle == 0)
+		next_surface_handle = 1;
+
+	return handle;
+}
+
+static uint16_t write_surface_completion(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	const struct SDKSurface *surface_info)
+{
+	volatile struct SDKSurfaceInfoPayload *payload;
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*payload));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	payload = (volatile struct SDKSurfaceInfoPayload *)comp->payload;
+	put_be32(payload->handle, surface_info->handle);
+	put_be32(payload->arm_addr, surface_info->address);
+	put_be32(payload->width, surface_info->width);
+	put_be32(payload->height, surface_info->height);
+	put_be32(payload->pitch, surface_info->pitch);
+	put_be32(payload->format, surface_info->format);
+	put_be32(payload->flags, surface_info->flags);
+	put_be32(payload->length, surface_info->length);
+	return SDK_STATUS_OK;
+}
+
+static int fill_framebuffer_surface(struct SDKSurface *surface_info)
+{
+	struct ZZ_VIDEO_STATE *state = video_get_state();
+	struct zz_video_mode *mode;
+	uint32_t mode_index;
+	uint32_t bytes_per_pixel;
+	uint32_t pitch_pixels;
+
+	if (!state)
+		return 0;
+
+	mode_index = (uint32_t)(state->video_mode & 0xff);
+	if (mode_index >= ZZVMODE_NUM)
+		mode_index = ZZVMODE_800x600;
+	mode = get_custom_video_mode_ptr(mode_index);
+
+	memset(surface_info, 0, sizeof(*surface_info));
+	surface_info->handle = SDK_SURFACE_HANDLE_FRAMEBUFFER;
+	surface_info->address = (uint32_t)(uintptr_t)state->framebuffer +
+	                        state->framebuffer_pan_offset;
+	surface_info->width = state->vmode_hsize ?
+	                      state->vmode_hsize : (uint32_t)mode->hres;
+	surface_info->height = state->vmode_vsize ?
+	                       state->vmode_vsize : (uint32_t)mode->vres;
+	if (state->scalemode & 1)
+		surface_info->width /= 2U;
+	if (state->scalemode & 2)
+		surface_info->height /= 2U;
+	if (surface_info->width == 0 || surface_info->height == 0)
+		return 0;
+
+	surface_info->format =
+		color_mode_surface_format((uint32_t)state->colormode);
+	bytes_per_pixel = surface_format_bytes(surface_info->format);
+	if (bytes_per_pixel == 0)
+		return 0;
+
+	pitch_pixels = state->framebuffer_pan_width ?
+	               state->framebuffer_pan_width : surface_info->width;
+	surface_info->pitch = pitch_pixels * bytes_per_pixel;
+	surface_info->flags = SDK_SURFACE_FLAG_CPU_VISIBLE |
+	                      SDK_SURFACE_FLAG_FRAMEBUFFER |
+	                      SDK_SURFACE_FLAG_DISPLAYED;
+	surface_info->length = surface_info->pitch * surface_info->height;
+	surface_info->in_use = 1;
+	return 1;
+}
+
+static uint16_t handle_map_framebuffer_surface(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp)
+{
+	struct SDKSurface surface_info;
+
+	if (!fill_framebuffer_surface(&surface_info))
+		return complete_status(req, comp, SDK_STATUS_INTERNAL_ERROR);
+
+	return write_surface_completion(req, comp, &surface_info);
+}
+
+static int get_surface_info(uint32_t handle, struct SDKSurface *surface_info)
+{
+	struct SDKSurface *surface;
+
+	if (handle == SDK_SURFACE_HANDLE_FRAMEBUFFER)
+		return fill_framebuffer_surface(surface_info);
+
+	surface = find_surface(handle);
+	if (!surface)
+		return 0;
+
+	*surface_info = *surface;
+	return 1;
+}
+
+static int surface_range_valid(const struct SDKSurface *surface_info,
+                               uint32_t x, uint32_t y,
+                               uint32_t width, uint32_t height)
+{
+	if (!surface_info || width == 0 || height == 0)
+		return 0;
+	if (x > surface_info->width || y > surface_info->height)
+		return 0;
+	if (width > (surface_info->width - x))
+		return 0;
+	if (height > (surface_info->height - y))
+		return 0;
+	return 1;
+}
+
+static uint16_t handle_alloc_surface(volatile struct SDKMailboxEntry *req,
+                                     volatile struct SDKMailboxEntry *comp,
+                                     uint16_t payload_len)
+{
+	volatile struct SDKAllocSurfacePayload *payload;
+	struct SDKSurface *slot;
+	uint32_t width;
+	uint32_t height;
+	uint32_t format;
+	uint32_t flags;
+	uint32_t pitch;
+	uint32_t bytes_per_pixel;
+	uint32_t length;
+	uint32_t address;
+	int arm_local;
+
+	if (payload_len < 20U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKAllocSurfacePayload *)req->payload;
+	width = get_be32(payload->width);
+	height = get_be32(payload->height);
+	format = get_be32(payload->format);
+	flags = get_be32(payload->flags);
+	pitch = get_be32(payload->pitch);
+	bytes_per_pixel = surface_format_bytes(format);
+	arm_local = (flags & SDK_SURFACE_FLAG_ARM_LOCAL) != 0U;
+
+	if (width == 0 || height == 0 || bytes_per_pixel == 0)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (pitch == 0)
+		pitch = width * bytes_per_pixel;
+	if (pitch < width * bytes_per_pixel)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (height > (0xffffffffU / pitch))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	length = pitch * height;
+	if (length == 0)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (arm_local && length > SDK_LOCAL_SURFACE_HEAP_SIZE)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (!arm_local && length > SDK_SHARED_HEAP_SIZE)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	sanitize_allocator_metadata();
+	slot = find_free_surface_slot();
+	if (!slot)
+		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
+
+	address = arm_local ? find_free_local_surface_region(length, 64U) :
+	                      find_free_region(length, 64U);
+	if (address == 0)
+		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
+
+	memset(slot, 0, sizeof(*slot));
+	slot->handle = next_surface_id();
+	slot->address = address;
+	slot->width = width;
+	slot->height = height;
+	slot->pitch = pitch;
+	slot->format = format;
+	if (arm_local)
+		slot->flags = (flags | SDK_SURFACE_FLAG_ARM_LOCAL) &
+		              ~SDK_SURFACE_FLAG_CPU_VISIBLE;
+	else
+		slot->flags = flags | SDK_SURFACE_FLAG_CPU_VISIBLE;
+	slot->length = length;
+	slot->in_use = 1;
+
+	memset((void *)(uintptr_t)address, 0, length);
+	Xil_DCacheFlushRange((INTPTR)address, length);
+
+	return write_surface_completion(req, comp, slot);
+}
+
+static uint16_t handle_free_surface(volatile struct SDKMailboxEntry *req,
+                                    volatile struct SDKMailboxEntry *comp,
+                                    uint16_t payload_len)
+{
+	volatile struct SDKFreeSurfacePayload *payload;
+	struct SDKSurface *surface;
+	uint32_t handle;
+
+	if (payload_len < 4U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKFreeSurfacePayload *)req->payload;
+	handle = get_be32(payload->handle);
+	if (handle == SDK_SURFACE_HANDLE_FRAMEBUFFER)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	surface = find_surface(handle);
+	if (!surface)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	memset(surface, 0, sizeof(*surface));
+	return complete_status(req, comp, SDK_STATUS_OK);
+}
+
+static uint16_t handle_scale_image(volatile struct SDKMailboxEntry *req,
+                                   volatile struct SDKMailboxEntry *comp,
+                                   uint16_t payload_len)
+{
+	volatile struct SDKScaleImagePayload *payload;
+	struct SDKSurface src;
+	struct SDKSurface dst;
+	uint32_t src_x;
+	uint32_t src_y;
+	uint32_t src_w;
+	uint32_t src_h;
+	uint32_t dst_x;
+	uint32_t dst_y;
+	uint32_t dst_w;
+	uint32_t dst_h;
+	uint32_t filter;
+	uint32_t bytes_per_pixel;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKScaleImagePayload *)req->payload;
+	if (!get_surface_info(get_be32(payload->src_surface), &src) ||
+	    !get_surface_info(get_be32(payload->dst_surface), &dst)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	}
+
+	src_x = get_be32(payload->src_x);
+	src_y = get_be32(payload->src_y);
+	src_w = get_be32(payload->src_w);
+	src_h = get_be32(payload->src_h);
+	dst_x = get_be32(payload->dst_x);
+	dst_y = get_be32(payload->dst_y);
+	dst_w = get_be32(payload->dst_w);
+	dst_h = get_be32(payload->dst_h);
+	filter = get_be32(payload->filter);
+
+	if (filter != SDK_SCALE_NEAREST && filter != SDK_SCALE_BILINEAR)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (src.format != dst.format)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (!surface_range_valid(&src, src_x, src_y, src_w, src_h) ||
+	    !surface_range_valid(&dst, dst_x, dst_y, dst_w, dst_h)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	bytes_per_pixel = surface_format_bytes(src.format);
+	if (bytes_per_pixel == 0)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (filter == SDK_SCALE_BILINEAR && bytes_per_pixel != 4U)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	prepare_surface_for_arm_read(&src);
+	if (!sdk_surface_scale_rect((uint8_t *)(uintptr_t)dst.address,
+	                            dst.width, dst.height, dst.pitch,
+	                            (const uint8_t *)(uintptr_t)src.address,
+	                            src.width, src.height, src.pitch,
+	                            src.format, src_x, src_y, src_w, src_h,
+	                            dst_x, dst_y, dst_w, dst_h, filter)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+	flush_surface_rect(&dst, dst_x, dst_y, dst_w, dst_h);
+
+	return complete_status(req, comp, SDK_STATUS_OK);
+}
+
+static uint16_t handle_scale_image_clipped(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKScaleImageClippedPayload *payload;
+	struct SDKSurface src;
+	struct SDKSurface dst;
+	uint32_t src_x;
+	uint32_t src_y;
+	uint32_t src_w;
+	uint32_t src_h;
+	uint32_t dst_x;
+	uint32_t dst_y;
+	uint32_t dst_w;
+	uint32_t dst_h;
+	uint32_t clip_x;
+	uint32_t clip_y;
+	uint32_t clip_w;
+	uint32_t clip_h;
+	uint32_t filter;
+	uint32_t bytes_per_pixel;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKScaleImageClippedPayload *)req->payload;
+	if (!get_surface_info(get_be32(payload->src_surface), &src) ||
+	    !get_surface_info(get_be32(payload->dst_surface), &dst)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	}
+
+	src_x = get_be16(payload->src_x);
+	src_y = get_be16(payload->src_y);
+	src_w = get_be16(payload->src_w);
+	src_h = get_be16(payload->src_h);
+	dst_x = get_be16(payload->dst_x);
+	dst_y = get_be16(payload->dst_y);
+	dst_w = get_be16(payload->dst_w);
+	dst_h = get_be16(payload->dst_h);
+	clip_x = get_be16(payload->clip_x);
+	clip_y = get_be16(payload->clip_y);
+	clip_w = get_be16(payload->clip_w);
+	clip_h = get_be16(payload->clip_h);
+	filter = get_be32(payload->filter);
+
+	if (filter != SDK_SCALE_NEAREST && filter != SDK_SCALE_BILINEAR)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (src.format != dst.format)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (!surface_range_valid(&src, src_x, src_y, src_w, src_h) ||
+	    !surface_range_valid(&dst, dst_x, dst_y, dst_w, dst_h) ||
+	    clip_w == 0U || clip_h == 0U) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	bytes_per_pixel = surface_format_bytes(src.format);
+	if (bytes_per_pixel == 0)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (filter == SDK_SCALE_BILINEAR && bytes_per_pixel != 4U)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	prepare_surface_for_arm_read(&src);
+	if (!sdk_surface_scale_rect_clipped(
+		    (uint8_t *)(uintptr_t)dst.address,
+		    dst.width, dst.height, dst.pitch,
+		    (const uint8_t *)(uintptr_t)src.address,
+		    src.width, src.height, src.pitch, src.format,
+		    src_x, src_y, src_w, src_h,
+		    dst_x, dst_y, dst_w, dst_h,
+		    clip_x, clip_y, clip_w, clip_h, filter)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+	flush_surface_rect(&dst, dst_x, dst_y, dst_w, dst_h);
+
+	return complete_status(req, comp, SDK_STATUS_OK);
+}
+
+static int decode_bounds(uint32_t surface_limit, uint32_t offset,
+                         uint32_t requested, uint32_t *bounds)
+{
+	if (offset > surface_limit)
+		return 0;
+	if (requested == 0U) {
+		*bounds = surface_limit;
+		return 1;
+	}
+	if (requested > (0xffffffffU - offset))
+		return 0;
+	if ((offset + requested) > surface_limit)
+		return 0;
+	*bounds = offset + requested;
+	return 1;
+}
+
+static uint16_t handle_decode_jpeg(volatile struct SDKMailboxEntry *req,
+                                   volatile struct SDKMailboxEntry *comp,
+                                   uint16_t payload_len)
+{
+	volatile struct SDKImageDecodePayload *payload;
+	volatile struct SDKImageDecodeResultPayload *result;
+	struct SDKSharedBuffer *src;
+	struct SDKSurface dst;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t dst_x;
+	uint32_t dst_y;
+	uint32_t dst_width;
+	uint32_t dst_height;
+	uint32_t output_format;
+	uint32_t flags;
+	uint32_t bytes_written = 0;
+	uint32_t image_width = 0;
+	uint32_t image_height = 0;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKImageDecodePayload *)req->payload;
+	src = find_shared_buffer(get_be32(payload->src_handle));
+	if (!src || !get_surface_info(get_be32(payload->dst_surface), &dst))
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	src_offset = get_be32(payload->src_offset);
+	src_length = get_be32(payload->src_length);
+	dst_x = get_be32(payload->dst_x);
+	dst_y = get_be32(payload->dst_y);
+	output_format = get_be32(payload->output_format);
+	flags = get_be32(payload->flags);
+
+	if (flags != 0U)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (output_format != dst.format)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (output_format != SDK_SURFACE_FORMAT_ARGB8888 &&
+	    output_format != SDK_SURFACE_FORMAT_RGBA8888 &&
+	    output_format != SDK_SURFACE_FORMAT_BGRA8888 &&
+	    output_format != SDK_SURFACE_FORMAT_RGB888) {
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	}
+	if (!buffer_range_valid(src, src_offset, src_length) ||
+	    src_length == 0U) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+	if (!decode_bounds(dst.width, dst_x, get_be32(payload->dst_width),
+	                   &dst_width) ||
+	    !decode_bounds(dst.height, dst_y, get_be32(payload->dst_height),
+	                   &dst_height)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
+	                          src_length);
+	if (!sdk_jpeg_decode_to_surface(
+	            (const uint8_t *)(uintptr_t)(src->address + src_offset),
+	            src_length, (uint8_t *)(uintptr_t)dst.address,
+	            dst_width, dst_height, dst.pitch, output_format,
+	            dst_x, dst_y, &image_width, &image_height,
+	            &bytes_written)) {
+		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
+	}
+
+	flush_surface_rect(&dst, dst_x, dst_y, dst_width, dst_height);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKImageDecodeResultPayload *)comp->payload;
+	put_be32(result->width, image_width);
+	put_be32(result->height, image_height);
+	put_be32(result->output_format, output_format);
+	put_be32(result->flags, 0U);
+	put_be32(result->bytes_written, bytes_written);
+	return SDK_STATUS_OK;
+}
+
+static void byteswap_pcm16(uint8_t *data, uint32_t bytes)
+{
+	uint32_t i;
+	uint8_t tmp;
+
+	for (i = 0U; i + 1U < bytes; i += 2U) {
+		tmp = data[i];
+		data[i] = data[i + 1U];
+		data[i + 1U] = tmp;
+	}
+}
+
+static uint16_t handle_decode_mp3(volatile struct SDKMailboxEntry *req,
+                                  volatile struct SDKMailboxEntry *comp,
+                                  uint16_t payload_len)
+{
+	volatile struct SDKAudioDecodePayload *payload;
+	volatile struct SDKAudioDecodeResultPayload *result;
+	struct SDKSharedBuffer *src;
+	struct SDKSharedBuffer *dst;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t dst_offset;
+	uint32_t dst_capacity;
+	uint32_t output_hz;
+	uint32_t output_channels;
+	uint32_t output_format;
+	uint32_t flags;
+	uint32_t sample_rate;
+	uint32_t channels;
+	uint32_t bytes_written;
+	uint32_t bytes_consumed;
+	uint32_t frames_written;
+	uint8_t *dst_ptr;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKAudioDecodePayload *)req->payload;
+	src = find_shared_buffer(get_be32(payload->src_handle));
+	dst = find_shared_buffer(get_be32(payload->dst_handle));
+	if (!src || !dst)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	src_offset = get_be32(payload->src_offset);
+	src_length = get_be32(payload->src_length);
+	dst_offset = get_be32(payload->dst_offset);
+	dst_capacity = get_be32(payload->dst_capacity);
+	output_hz = get_be32(payload->output_hz);
+	output_channels = get_be32(payload->output_channels);
+	output_format = get_be32(payload->output_format);
+	flags = get_be32(payload->flags);
+
+	if (!buffer_range_valid(src, src_offset, src_length) ||
+	    !buffer_range_valid(dst, dst_offset, dst_capacity) ||
+	    src_length == 0U || dst_capacity < 2U) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+	if ((flags & ~SDK_AUDIO_DECODE_FLAG_EXPECT_END) != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
+	    output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE) {
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	}
+
+	Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
+	                          src_length);
+	if (decode_mp3_init((uint8_t *)(uintptr_t)(src->address + src_offset),
+	                    src_length) != 0) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	sample_rate = (uint32_t)mp3_get_hz();
+	channels = (uint32_t)mp3_get_channels();
+	if (sample_rate == 0U || channels == 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if ((output_hz != 0U && output_hz != sample_rate) ||
+	    (output_channels != 0U && output_channels != channels)) {
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	}
+
+	dst_capacity &= ~1UL;
+	dst_ptr = (uint8_t *)(uintptr_t)(dst->address + dst_offset);
+	bytes_written = (uint32_t)decode_mp3_samples(dst_ptr,
+	                                            (int)(dst_capacity / 2U));
+	bytes_consumed = (uint32_t)mp3_get_bytes_consumed();
+	if (bytes_consumed > src_length)
+		bytes_consumed = src_length;
+	if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+		byteswap_pcm16(dst_ptr, bytes_written);
+	Xil_DCacheFlushRange((INTPTR)dst_ptr, dst_capacity);
+
+	frames_written = bytes_written / (2U * channels);
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKAudioDecodeResultPayload *)comp->payload;
+	put_be32(result->bytes_consumed, bytes_consumed);
+	put_be32(result->bytes_written, bytes_written);
+	put_be32(result->sample_rate, sample_rate);
+	put_be32(result->channels, channels);
+	put_be32(result->sample_format, output_format);
+	put_be32(result->frames_written, frames_written);
+	put_be32(result->flags,
+	         (bytes_consumed >= src_length) ? SDK_AUDIO_DECODE_RESULT_END : 0U);
+	return SDK_STATUS_OK;
+}
+
+static struct SDKAudioStream *find_audio_stream(uint32_t session)
+{
+	uint32_t i;
+
+	if (session == 0U)
+		return 0;
+	for (i = 0; i < SDK_MAX_AUDIO_STREAMS; i++) {
+		if (audio_streams[i].id == session)
+			return &audio_streams[i];
+	}
+	return 0;
+}
+
+static struct SDKAudioStream *alloc_audio_stream(void)
+{
+	uint32_t i;
+
+	for (i = 0; i < SDK_MAX_AUDIO_STREAMS; i++) {
+		if (audio_streams[i].id == 0U) {
+			uint32_t id = next_audio_stream_id++;
+
+			if (next_audio_stream_id == 0U)
+				next_audio_stream_id = 1U;
+			memset(&audio_streams[i], 0, sizeof(audio_streams[i]));
+			audio_streams[i].id = id;
+			return &audio_streams[i];
+		}
+	}
+	return 0;
+}
+
+static void free_audio_stream(struct SDKAudioStream *stream)
+{
+	if (stream)
+		memset(stream, 0, sizeof(*stream));
+}
+
+static uint32_t audio_stream_pcm_free(const struct SDKAudioStream *stream)
+{
+	if (!stream || stream->pcm_used >= stream->pcm_capacity)
+		return 0;
+	return stream->pcm_capacity - stream->pcm_used;
+}
+
+static void flush_audio_pcm_written(const struct SDKAudioStream *stream,
+                                    uint8_t *dst, uint32_t offset,
+                                    uint32_t bytes)
+{
+	uint32_t first;
+
+	if (!stream || !dst || bytes == 0U || stream->pcm_capacity == 0U)
+		return;
+	if (offset >= stream->pcm_capacity)
+		offset %= stream->pcm_capacity;
+	first = stream->pcm_capacity - offset;
+	if (first > bytes)
+		first = bytes;
+	Xil_DCacheFlushRange((INTPTR)(dst + offset), first);
+	if (bytes > first)
+		Xil_DCacheFlushRange((INTPTR)dst, bytes - first);
+}
+
+static void audio_stream_pcm_write(struct SDKAudioStream *stream,
+                                   const uint8_t *src, uint32_t bytes)
+{
+	uint8_t *dst = (uint8_t *)(uintptr_t)stream->pcm_ring->address;
+	uint32_t first = stream->pcm_capacity - stream->pcm_write;
+
+	if (first > bytes)
+		first = bytes;
+	memcpy(dst + stream->pcm_write, src, first);
+	if (bytes > first)
+		memcpy(dst, src + first, bytes - first);
+	stream->pcm_write = (stream->pcm_write + bytes) % stream->pcm_capacity;
+	stream->pcm_used += bytes;
+	stream->bytes_produced += bytes;
+}
+
+static void audio_stream_consume_input(struct SDKAudioStream *stream,
+                                       uint32_t bytes)
+{
+	if (bytes >= stream->input_length) {
+		stream->input_offset = 0U;
+		stream->input_length = 0;
+		return;
+	}
+	stream->input_offset += bytes;
+	stream->input_length -= bytes;
+}
+
+static void audio_stream_discard_input(struct SDKAudioStream *stream)
+{
+	uint32_t bytes;
+
+	if (!stream || stream->input_length == 0U)
+		return;
+	bytes = stream->input_length;
+	audio_stream_consume_input(stream, bytes);
+	stream->bytes_consumed += bytes;
+}
+
+static void audio_stream_compact_input(struct SDKAudioStream *stream)
+{
+	uint8_t *input;
+
+	if (!stream || stream->input_offset == 0U || stream->input_length == 0U)
+		return;
+	input = (uint8_t *)(uintptr_t)stream->mp3_ring->address;
+	memmove(input, input + stream->input_offset, stream->input_length);
+	stream->input_offset = 0U;
+}
+
+static uint32_t audio_stream_get_be32(const uint8_t *data)
+{
+	return ((uint32_t)data[0] << 24) |
+	       ((uint32_t)data[1] << 16) |
+	       ((uint32_t)data[2] << 8) |
+	       (uint32_t)data[3];
+}
+
+static int audio_stream_check_vbr_tag(const uint8_t *frame,
+                                      uint32_t frame_size,
+                                      uint32_t *frame_count)
+{
+	uint32_t tag_off;
+	uint32_t flags;
+
+	if (!frame || !frame_count || frame_size < 12U)
+		return 0;
+	tag_off = 4U;
+	if ((frame[1] & 1U) == 0U)
+		tag_off += 2U;
+	if ((frame[1] & 0x08U) != 0U)
+		tag_off += ((frame[3] & 0xC0U) == 0xC0U) ? 17U : 32U;
+	else
+		tag_off += ((frame[3] & 0xC0U) == 0xC0U) ? 9U : 17U;
+	if (tag_off > frame_size || frame_size - tag_off < 12U)
+		return 0;
+	if (memcmp(frame + tag_off, "Xing", 4U) != 0 &&
+	    memcmp(frame + tag_off, "Info", 4U) != 0)
+		return 0;
+	flags = frame[tag_off + 7U];
+	if ((flags & 1U) == 0U)
+		return -1;
+	tag_off += 8U;
+	if (frame_size - tag_off < 4U)
+		return 0;
+	*frame_count = audio_stream_get_be32(frame + tag_off);
+	if (*frame_count == 0U)
+		return 0;
+	return 1;
+}
+
+static int audio_stream_needs_more_input(const struct SDKAudioStream *stream)
+{
+	return stream &&
+	       stream->input_length < SDK_AUDIO_STREAM_MIN_INPUT_BYTES &&
+	       !stream->eof;
+}
+
+static int audio_stream_process_vbr_tag(struct SDKAudioStream *stream,
+                                        const uint8_t *input,
+                                        const mp3dec_frame_info_t *info)
+{
+	uint32_t frame_count = 0U;
+	uint32_t frame_size;
+	int ret;
+
+	if (!stream || !input || !info || stream->vbr_checked ||
+	    info->frame_bytes <= info->frame_offset)
+		return 0;
+	stream->vbr_checked = 1;
+	frame_size = (uint32_t)(info->frame_bytes - info->frame_offset);
+	ret = audio_stream_check_vbr_tag(
+		input + info->frame_offset, frame_size, &frame_count);
+	if (ret > 0)
+		stream->output_frame_limit = frame_count;
+	return ret != 0;
+}
+
+static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
+{
+	const uint32_t frame_pcm_bytes =
+		MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t);
+	uint32_t produced_this_call = 0U;
+	uint32_t max_pcm_this_call;
+	uint32_t pcm_flush_start;
+	uint32_t progress = 0U;
+	uint8_t *input;
+	uint8_t *pcm_dst;
+
+	if (!stream || !stream->mp3_ring || !stream->pcm_ring)
+		return 0;
+	input = (uint8_t *)(uintptr_t)stream->mp3_ring->address;
+	pcm_dst = (uint8_t *)(uintptr_t)stream->pcm_ring->address;
+	if (stream->decode_complete) {
+		if (stream->input_length != 0U) {
+			audio_stream_discard_input(stream);
+			return 1U;
+		}
+		return 0;
+	}
+	max_pcm_this_call = stream->high_water_bytes;
+	if (max_pcm_this_call == 0U ||
+	    max_pcm_this_call > stream->pcm_capacity)
+		max_pcm_this_call = stream->pcm_capacity;
+	if (max_pcm_this_call < frame_pcm_bytes)
+		max_pcm_this_call = frame_pcm_bytes;
+	pcm_flush_start = stream->pcm_write;
+
+	while (stream->input_length > 0U &&
+	       audio_stream_pcm_free(stream) >= frame_pcm_bytes) {
+		mp3dec_frame_info_t info;
+		int samples;
+		uint32_t consumed;
+		uint32_t bytes;
+
+		if (audio_stream_needs_more_input(stream))
+			break;
+		if (produced_this_call != 0U &&
+		    (max_pcm_this_call - produced_this_call) <
+		        frame_pcm_bytes) {
+			break;
+		}
+		memset(&info, 0, sizeof(info));
+		samples = mp3dec_decode_frame(
+			&stream->decoder,
+			input + stream->input_offset,
+			(int)stream->input_length,
+			stream->scratch, &info);
+		consumed = (uint32_t)info.frame_bytes;
+		if (consumed == 0U)
+			break;
+		if (stream->eof && stream->frames_decoded != 0U &&
+		    info.frame_offset != 0) {
+			audio_stream_discard_input(stream);
+			progress = 1U;
+			break;
+		}
+
+		if (samples > 0) {
+			if (stream->sample_rate == 0U) {
+				stream->sample_rate = (uint32_t)info.hz;
+				stream->channels = (uint32_t)info.channels;
+			}
+			if ((uint32_t)info.hz != stream->sample_rate ||
+			    (uint32_t)info.channels != stream->channels) {
+				break;
+			}
+			if (audio_stream_process_vbr_tag(
+				    stream, input + stream->input_offset,
+				    &info)) {
+				bytes = 0U;
+			} else if (stream->output_frame_limit != 0U &&
+			           stream->frames_decoded >=
+			                   stream->output_frame_limit) {
+				stream->decode_complete = 1;
+				bytes = 0U;
+			} else {
+				bytes = (uint32_t)samples *
+				        (uint32_t)info.channels *
+				        sizeof(mp3d_sample_t);
+			}
+			if (bytes != 0U) {
+				if (stream->sample_format ==
+				    SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+					byteswap_pcm16((uint8_t *)stream->scratch,
+					               bytes);
+				audio_stream_pcm_write(
+					stream, (uint8_t *)stream->scratch, bytes);
+				stream->frames_decoded++;
+				produced_this_call += bytes;
+				progress = 1U;
+				if (stream->output_frame_limit != 0U &&
+				    stream->frames_decoded >=
+				            stream->output_frame_limit)
+					stream->decode_complete = 1;
+			}
+		}
+
+		audio_stream_consume_input(stream, consumed);
+		stream->bytes_consumed += consumed;
+		progress = 1U;
+		if (stream->decode_complete) {
+			audio_stream_discard_input(stream);
+			break;
+		}
+	}
+
+	if (produced_this_call != 0U)
+		flush_audio_pcm_written(stream, pcm_dst, pcm_flush_start,
+		                        produced_this_call);
+	return progress;
+}
+
+static uint32_t audio_stream_state(const struct SDKAudioStream *stream)
+{
+	if (!stream)
+		return SDK_AUDIO_STREAM_STATE_ERROR;
+	if (stream->eof && stream->input_length == 0U && stream->pcm_used == 0U)
+		return SDK_AUDIO_STREAM_STATE_DONE;
+	if (audio_stream_needs_more_input(stream))
+		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
+	if (stream->input_length == 0U &&
+	    stream->pcm_used < stream->pcm_capacity)
+		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
+	return SDK_AUDIO_STREAM_STATE_STREAMING;
+}
+
+static uint32_t audio_stream_result_flags(const struct SDKAudioStream *stream)
+{
+	uint32_t flags = 0U;
+
+	if (!stream)
+		return 0;
+	if (stream->pcm_used != 0U)
+		flags |= SDK_AUDIO_STREAM_RESULT_PCM_READY;
+	if (audio_stream_needs_more_input(stream))
+		flags |= SDK_AUDIO_STREAM_RESULT_NEED_INPUT;
+	if (stream->eof && stream->input_length == 0U &&
+	    stream->pcm_used == 0U)
+		flags |= SDK_AUDIO_STREAM_RESULT_DONE;
+	if (stream->backpressure)
+		flags |= SDK_AUDIO_STREAM_RESULT_BACKPRESSURE;
+	return flags;
+}
+
+static uint16_t complete_audio_stream_result(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t status,
+	const struct SDKAudioStream *stream)
+{
+	volatile struct SDKAudioStreamResultPayload *result;
+
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKAudioStreamResultPayload *)comp->payload;
+	put_be32(result->session, stream->id);
+	put_be32(result->state, audio_stream_state(stream));
+	put_be32(result->sample_rate, stream->sample_rate);
+	put_be32(result->channels, stream->channels);
+	put_be32(result->sample_format, stream->sample_format);
+	put_be32(result->mp3_read, stream->bytes_consumed);
+	put_be32(result->pcm_write, stream->pcm_write);
+	put_be32(result->pcm_read, stream->pcm_read);
+	put_be32(result->frames_decoded, stream->frames_decoded);
+	put_be32(result->bytes_consumed, stream->bytes_consumed);
+	put_be32(result->bytes_produced, stream->bytes_produced);
+	put_be32(result->flags, audio_stream_result_flags(stream));
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_audio_stream_begin(volatile struct SDKMailboxEntry *req,
+                                          volatile struct SDKMailboxEntry *comp,
+                                          uint16_t payload_len)
+{
+	volatile struct SDKAudioStreamBeginPayload *payload;
+	struct SDKSharedBuffer *mp3_ring;
+	struct SDKSharedBuffer *pcm_ring;
+	struct SDKAudioStream *stream;
+	uint32_t mp3_capacity;
+	uint32_t pcm_capacity;
+	uint32_t output_hz;
+	uint32_t output_channels;
+	uint32_t output_format;
+	uint32_t low_water_bytes;
+	uint32_t high_water_bytes;
+	uint32_t flags;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioStreamBeginPayload *)req->payload;
+	mp3_ring = find_shared_buffer(get_be32(payload->mp3_ring_handle));
+	pcm_ring = find_shared_buffer(get_be32(payload->pcm_ring_handle));
+	if (!mp3_ring || !pcm_ring)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	mp3_capacity = get_be32(payload->mp3_ring_capacity);
+	pcm_capacity = get_be32(payload->pcm_ring_capacity);
+	output_hz = get_be32(payload->output_hz);
+	output_channels = get_be32(payload->output_channels);
+	output_format = get_be32(payload->output_format);
+	low_water_bytes = get_be32(payload->low_water_bytes);
+	high_water_bytes = get_be32(payload->high_water_bytes);
+	flags = get_be32(payload->flags);
+	if (flags != 0U || output_hz != 0U || output_channels != 0U)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
+	    output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (mp3_capacity == 0U || pcm_capacity <
+	    (MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t)) ||
+	    mp3_capacity > mp3_ring->length ||
+	    pcm_capacity > pcm_ring->length ||
+	    low_water_bytes >= mp3_capacity ||
+	    high_water_bytes >= pcm_capacity) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	stream = alloc_audio_stream();
+	if (!stream)
+		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
+	stream->mp3_ring = mp3_ring;
+	stream->pcm_ring = pcm_ring;
+	stream->mp3_capacity = mp3_capacity;
+	stream->pcm_capacity = pcm_capacity & ~1UL;
+	stream->low_water_bytes = low_water_bytes;
+	stream->high_water_bytes = high_water_bytes & ~1UL;
+	stream->sample_format = output_format;
+	mp3dec_init(&stream->decoder);
+	stream->initialized = 1;
+	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
+}
+
+static uint16_t handle_audio_stream_feed(volatile struct SDKMailboxEntry *req,
+                                         volatile struct SDKMailboxEntry *comp,
+                                         uint16_t payload_len)
+{
+	volatile struct SDKAudioStreamFeedPayload *payload;
+	struct SDKAudioStream *stream;
+	struct SDKSharedBuffer *src;
+	uint32_t session;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t flags;
+	uint8_t *dst;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioStreamFeedPayload *)req->payload;
+	session = get_be32(payload->session);
+	stream = find_audio_stream(session);
+	if (!stream)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	src_length = get_be32(payload->src_length);
+	flags = get_be32(payload->flags);
+	if ((flags & ~SDK_AUDIO_STREAM_FEED_EOF) != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (src_length != 0U) {
+		src = find_shared_buffer(get_be32(payload->src_handle));
+		src_offset = get_be32(payload->src_offset);
+		if (!src || !buffer_range_valid(src, src_offset, src_length))
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+		if (src_length > stream->mp3_capacity - stream->input_length) {
+			stream->backpressure = 1;
+			return complete_audio_stream_result(req, comp,
+			                                   SDK_STATUS_OK,
+			                                   stream);
+		}
+		if (stream->input_offset + stream->input_length + src_length >
+		    stream->mp3_capacity) {
+			audio_stream_compact_input(stream);
+		}
+		Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
+		                          src_length);
+		dst = (uint8_t *)(uintptr_t)stream->mp3_ring->address;
+		memcpy(dst + stream->input_offset + stream->input_length,
+		       (const void *)(uintptr_t)(src->address + src_offset),
+		       src_length);
+		stream->input_length += src_length;
+		stream->backpressure = 0;
+	}
+	if ((flags & SDK_AUDIO_STREAM_FEED_EOF) != 0U)
+		stream->eof = 1;
+	audio_stream_decode(stream);
+	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
+}
+
+static uint16_t handle_audio_stream_read(volatile struct SDKMailboxEntry *req,
+                                         volatile struct SDKMailboxEntry *comp,
+                                         uint16_t payload_len)
+{
+	volatile struct SDKAudioStreamReadPayload *payload;
+	struct SDKAudioStream *stream;
+	uint32_t session;
+	uint32_t pcm_read;
+	uint32_t flags;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioStreamReadPayload *)req->payload;
+	session = get_be32(payload->session);
+	stream = find_audio_stream(session);
+	if (!stream)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	pcm_read = get_be32(payload->pcm_read);
+	flags = get_be32(payload->flags);
+	if (flags != 0U || pcm_read > stream->pcm_used)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	stream->pcm_read = (stream->pcm_read + pcm_read) % stream->pcm_capacity;
+	stream->pcm_used -= pcm_read;
+	audio_stream_decode(stream);
+	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
+}
+
+static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
+                                          volatile struct SDKMailboxEntry *comp,
+                                          uint16_t payload_len)
+{
+	volatile struct SDKAudioStreamClosePayload *payload;
+	struct SDKAudioStream snapshot;
+	struct SDKAudioStream *stream;
+	uint32_t session;
+	uint32_t flags;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioStreamClosePayload *)req->payload;
+	session = get_be32(payload->session);
+	flags = get_be32(payload->flags);
+	if (flags != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	stream = find_audio_stream(session);
+	if (!stream)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	snapshot = *stream;
+	free_audio_stream(stream);
+	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, &snapshot);
+}
+
+static uint16_t validate_image_session_buffers(
+	struct SDKImageStreamBegin *begin)
+{
+	struct SDKSurface dst;
+	struct SDKSharedBuffer *tile;
+	uint32_t tile_length;
+
+	if (begin->output_mode == SDK_IMAGE_OUTPUT_SURFACE ||
+	    begin->output_mode == SDK_IMAGE_OUTPUT_FRAMEBUFFER) {
+		if (!get_surface_info(begin->dst_surface, &dst))
+			return SDK_STATUS_BAD_HANDLE;
+		if (begin->output_format != dst.format)
+			return SDK_STATUS_UNSUPPORTED;
+		if (!surface_range_valid(&dst, begin->dst_x, begin->dst_y,
+		                         begin->dst_width,
+		                         begin->dst_height)) {
+			return SDK_STATUS_BAD_REQUEST;
+		}
+		begin->dst_address = (uintptr_t)dst.address;
+		begin->dst_pitch = dst.pitch;
+		begin->dst_length = dst.length;
+		return SDK_STATUS_OK;
+	}
+
+	if (begin->output_mode == SDK_IMAGE_OUTPUT_TILE_BUFFER) {
+		tile = find_shared_buffer(begin->tile_handle);
+		if (!tile)
+			return SDK_STATUS_BAD_HANDLE;
+		if (begin->tile_rows != 0U &&
+		    begin->tile_stride > (0xffffffffU / begin->tile_rows)) {
+			return SDK_STATUS_BAD_REQUEST;
+		}
+		tile_length = begin->tile_stride * begin->tile_rows;
+		if (tile_length == 0U || tile_length > tile->length)
+			return SDK_STATUS_BAD_REQUEST;
+		begin->tile_address = (uintptr_t)tile->address;
+		begin->tile_length = tile->length;
+		return SDK_STATUS_OK;
+	}
+
+	return SDK_STATUS_BAD_REQUEST;
+}
+
+static void flush_image_session_output(const struct SDKImageStreamResult *result)
+{
+	if (result && result->flush_address != 0U && result->flush_length != 0U)
+		Xil_DCacheFlushRange((INTPTR)result->flush_address,
+		                     result->flush_length);
+}
+
+static uint16_t handle_image_session_begin(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKImageSessionBeginPayload *payload;
+	struct SDKImageStreamBegin begin;
+	struct SDKImageStreamResult result;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKImageSessionBeginPayload *)req->payload;
+	memset(&begin, 0, sizeof(begin));
+	begin.codec = get_be32(payload->codec);
+	begin.output_mode = get_be32(payload->output_mode);
+	begin.dst_surface = get_be32(payload->dst_surface);
+	begin.dst_x = get_be32(payload->dst_x);
+	begin.dst_y = get_be32(payload->dst_y);
+	begin.dst_width = get_be32(payload->dst_width);
+	begin.dst_height = get_be32(payload->dst_height);
+	begin.output_format = get_be32(payload->output_format);
+	begin.tile_handle = get_be32(payload->tile_handle);
+	begin.tile_stride = get_be32(payload->tile_stride);
+	begin.tile_rows = get_be32(payload->tile_rows);
+	begin.flags = get_be32(payload->flags);
+
+	status = validate_image_session_buffers(&begin);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+
+	status = sdk_image_stream_begin(&begin, &result);
+	return complete_image_session_result(req, comp, status, &result);
+}
+
+static uint16_t handle_image_session_feed(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKImageSessionFeedPayload *payload;
+	struct SDKImageStreamFeed feed;
+	struct SDKImageStreamResult result;
+	struct SDKSharedBuffer *src;
+	const uint8_t *src_data = 0;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKImageSessionFeedPayload *)req->payload;
+	memset(&feed, 0, sizeof(feed));
+	feed.session = get_be32(payload->session);
+	feed.src_handle = get_be32(payload->src_handle);
+	feed.src_offset = get_be32(payload->src_offset);
+	feed.src_length = get_be32(payload->src_length);
+	feed.flags = get_be32(payload->flags);
+
+	src = find_shared_buffer(feed.src_handle);
+	if (!src)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (!buffer_range_valid(src, feed.src_offset, feed.src_length))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	if (feed.src_length != 0U) {
+		src_data = (const uint8_t *)(uintptr_t)
+			(src->address + feed.src_offset);
+		Xil_DCacheInvalidateRange((INTPTR)(src->address +
+		                          feed.src_offset),
+		                          feed.src_length);
+	}
+
+	status = sdk_image_stream_feed(&feed, src_data, &result);
+	if (status == SDK_STATUS_OK)
+		flush_image_session_output(&result);
+	return complete_image_session_result(req, comp, status, &result);
+}
+
+static uint16_t handle_image_session_close(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKImageSessionClosePayload *payload;
+	uint32_t session;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKImageSessionClosePayload *)req->payload;
+	session = get_be32(payload->session);
+	status = sdk_image_stream_close(session);
+	return complete_status(req, comp, status);
+}
+
+static uint16_t handle_fill_surface(volatile struct SDKMailboxEntry *req,
+                                    volatile struct SDKMailboxEntry *comp,
+                                    uint16_t payload_len)
+{
+	volatile struct SDKSurfaceFillPayload *payload;
+	struct SDKSurface surface;
+	uint32_t x;
+	uint32_t y;
+	uint32_t width;
+	uint32_t height;
+	uint32_t color;
+	uint32_t flags;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKSurfaceFillPayload *)req->payload;
+	if (!get_surface_info(get_be32(payload->surface), &surface))
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	x = get_be32(payload->x);
+	y = get_be32(payload->y);
+	width = get_be32(payload->width);
+	height = get_be32(payload->height);
+	color = get_be32(payload->color);
+	flags = get_be32(payload->flags);
+
+	if (flags != 0U)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (!sdk_surface_fill_rect((uint8_t *)(uintptr_t)surface.address,
+	                           surface.width, surface.height,
+	                           surface.pitch, surface.format,
+	                           x, y, width, height, color)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	flush_surface_rect(&surface, x, y, width, height);
+	return complete_status(req, comp, SDK_STATUS_OK);
+}
+
+static uint16_t handle_copy_surface(volatile struct SDKMailboxEntry *req,
+                                    volatile struct SDKMailboxEntry *comp,
+                                    uint16_t payload_len)
+{
+	volatile struct SDKSurfaceCopyPayload *payload;
+	struct SDKSurface src;
+	struct SDKSurface dst;
+	uint32_t src_x;
+	uint32_t src_y;
+	uint32_t dst_x;
+	uint32_t dst_y;
+	uint32_t width;
+	uint32_t height;
+	uint32_t flags;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKSurfaceCopyPayload *)req->payload;
+	if (!get_surface_info(get_be32(payload->src_surface), &src) ||
+	    !get_surface_info(get_be32(payload->dst_surface), &dst)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	}
+
+	src_x = get_be32(payload->src_x);
+	src_y = get_be32(payload->src_y);
+	dst_x = get_be32(payload->dst_x);
+	dst_y = get_be32(payload->dst_y);
+	width = get_be32(payload->width);
+	height = get_be32(payload->height);
+	flags = get_be32(payload->flags);
+
+	if (flags != 0U)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (src.format != dst.format)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	prepare_surface_for_arm_read(&src);
+	if (!sdk_surface_copy_rect((uint8_t *)(uintptr_t)dst.address,
+	                           dst.width, dst.height, dst.pitch,
+	                           (const uint8_t *)(uintptr_t)src.address,
+	                           src.width, src.height, src.pitch,
+	                           src.format, src_x, src_y, dst_x,
+	                           dst_y, width, height)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	flush_surface_rect(&dst, dst_x, dst_y, width, height);
+	return complete_status(req, comp, SDK_STATUS_OK);
+}
+
+static uint16_t crypto_digest_length(uint32_t algorithm)
+{
+	switch (algorithm) {
+	case SDK_CRYPTO_HASH_SHA1:
+		return SDK_SHA1_DIGEST_SIZE;
+	case SDK_CRYPTO_HASH_SHA256:
+		return SDK_SHA256_DIGEST_SIZE;
+	case SDK_CRYPTO_HASH_POLY1305:
+		return SDK_POLY1305_TAG_SIZE;
+	default:
+		return 0;
+	}
+}
+
+static uint16_t handle_crypto_hash(volatile struct SDKMailboxEntry *req,
+                                   volatile struct SDKMailboxEntry *comp,
+                                   uint16_t payload_len)
+{
+	volatile struct SDKCryptoHashPayload *payload;
+	volatile struct SDKCryptoResultPayload *result;
+	struct SDKSharedBuffer *src;
+	struct SDKSharedBuffer *dst;
+	struct SDKSharedBuffer *key;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t dst_offset;
+	uint32_t key_offset;
+	uint32_t key_length;
+	uint32_t algorithm;
+	uint32_t flags;
+	uint32_t key_required;
+	uint16_t digest_length;
+	uint8_t digest[SDK_SHA256_DIGEST_SIZE];
+	const uint8_t *src_data;
+	const uint8_t *key_data;
+
+	if (payload_len < 40U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKCryptoHashPayload *)req->payload;
+	algorithm = get_be32(payload->algorithm);
+	flags = get_be32(payload->flags);
+	if ((flags & ~SDK_CRYPTO_HASH_FLAG_HMAC) != 0)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (algorithm == SDK_CRYPTO_HASH_POLY1305 &&
+	    flags != 0)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (algorithm != SDK_CRYPTO_HASH_SHA1 &&
+	    algorithm != SDK_CRYPTO_HASH_SHA256 &&
+	    (flags & SDK_CRYPTO_HASH_FLAG_HMAC) != 0) {
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	}
+
+	digest_length = crypto_digest_length(algorithm);
+	if (digest_length == 0)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	src = find_shared_buffer(get_be32(payload->src_handle));
+	dst = find_shared_buffer(get_be32(payload->dst_handle));
+	src_offset = get_be32(payload->src_offset);
+	src_length = get_be32(payload->src_length);
+	dst_offset = get_be32(payload->dst_offset);
+	if (!buffer_range_valid(src, src_offset, src_length) ||
+	    src_length == 0 ||
+	    !buffer_range_valid(dst, dst_offset, digest_length)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	}
+
+	key = 0;
+	key_offset = get_be32(payload->key_offset);
+	key_length = get_be32(payload->key_length);
+	key_required = (flags & SDK_CRYPTO_HASH_FLAG_HMAC) != 0 ||
+	               algorithm == SDK_CRYPTO_HASH_POLY1305;
+	if (key_required) {
+		key = find_shared_buffer(get_be32(payload->key_handle));
+		if (!buffer_range_valid(key, key_offset, key_length) ||
+		    key_length == 0) {
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+		}
+		if (algorithm == SDK_CRYPTO_HASH_POLY1305 &&
+		    key_length != SDK_POLY1305_KEY_SIZE) {
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		}
+	}
+
+	src_data = (const uint8_t *)(uintptr_t)(src->address + src_offset);
+	Xil_DCacheInvalidateRange((INTPTR)src_data, src_length);
+	if (key_required) {
+		key_data = (const uint8_t *)(uintptr_t)(key->address + key_offset);
+		Xil_DCacheInvalidateRange((INTPTR)key_data, key_length);
+		if (algorithm == SDK_CRYPTO_HASH_POLY1305)
+			sdk_poly1305(key_data, src_data, src_length, digest);
+		else if (algorithm == SDK_CRYPTO_HASH_SHA1)
+			sdk_hmac_sha1(key_data, key_length, src_data, src_length,
+			              digest);
+		else
+			sdk_hmac_sha256(key_data, key_length, src_data, src_length,
+			                digest);
+	} else {
+		if (algorithm == SDK_CRYPTO_HASH_SHA1)
+			sdk_sha1(src_data, src_length, digest);
+		else
+			sdk_sha256(src_data, src_length, digest);
+	}
+
+	memcpy((void *)(uintptr_t)(dst->address + dst_offset),
+	       digest, digest_length);
+	Xil_DCacheFlushRange((INTPTR)(dst->address + dst_offset),
+	                     digest_length);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKCryptoResultPayload *)comp->payload;
+	put_be32(result->bytes_written, digest_length);
+	put_be32(result->algorithm, algorithm);
+	put_be32(result->flags, flags);
+	memset(digest, 0, sizeof(digest));
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_crypto_stream(volatile struct SDKMailboxEntry *req,
+                                     volatile struct SDKMailboxEntry *comp,
+                                     uint16_t payload_len)
+{
+	volatile struct SDKCryptoStreamPayload *payload;
+	volatile struct SDKCryptoResultPayload *result;
+	struct SDKSharedBuffer *src;
+	struct SDKSharedBuffer *dst;
+	struct SDKSharedBuffer *key;
+	struct SDKSharedBuffer *nonce;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t dst_offset;
+	uint32_t key_offset;
+	uint32_t nonce_offset;
+	uint32_t counter;
+	uint32_t algorithm;
+	uint32_t flags;
+	const uint8_t *src_data;
+	const uint8_t *key_data;
+	const uint8_t *nonce_data;
+	uint8_t *dst_data;
+
+	if (payload_len < sizeof(struct SDKCryptoStreamPayload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKCryptoStreamPayload *)req->payload;
+	algorithm = get_be32(payload->algorithm);
+	flags = get_be32(payload->flags);
+	if (flags != 0)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (algorithm != SDK_CRYPTO_STREAM_CHACHA20)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	src = find_shared_buffer(get_be32(payload->src_handle));
+	dst = find_shared_buffer(get_be32(payload->dst_handle));
+	key = find_shared_buffer(get_be32(payload->key_handle));
+	nonce = find_shared_buffer(get_be32(payload->nonce_handle));
+	src_offset = get_be32(payload->src_offset);
+	src_length = get_be32(payload->src_length);
+	dst_offset = get_be32(payload->dst_offset);
+	key_offset = get_be32(payload->key_offset);
+	nonce_offset = get_be32(payload->nonce_offset);
+	counter = get_be32(payload->counter);
+
+	if (!buffer_range_valid(src, src_offset, src_length) ||
+	    src_length == 0 ||
+	    !buffer_range_valid(dst, dst_offset, src_length) ||
+	    !buffer_range_valid(key, key_offset, SDK_CHACHA20_KEY_SIZE) ||
+	    !buffer_range_valid(nonce, nonce_offset, SDK_CHACHA20_NONCE_SIZE)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	}
+
+	src_data = (const uint8_t *)(uintptr_t)(src->address + src_offset);
+	dst_data = (uint8_t *)(uintptr_t)(dst->address + dst_offset);
+	key_data = (const uint8_t *)(uintptr_t)(key->address + key_offset);
+	nonce_data = (const uint8_t *)(uintptr_t)(nonce->address + nonce_offset);
+	Xil_DCacheInvalidateRange((INTPTR)src_data, src_length);
+	Xil_DCacheInvalidateRange((INTPTR)key_data, SDK_CHACHA20_KEY_SIZE);
+	Xil_DCacheInvalidateRange((INTPTR)nonce_data, SDK_CHACHA20_NONCE_SIZE);
+
+	sdk_chacha20_xor(key_data, nonce_data, counter,
+	                 src_data, dst_data, src_length);
+	Xil_DCacheFlushRange((INTPTR)dst_data, src_length);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKCryptoResultPayload *)comp->payload;
+	put_be32(result->bytes_written, src_length);
+	put_be32(result->algorithm, algorithm);
+	put_be32(result->flags, flags);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
+                                   volatile struct SDKMailboxEntry *comp,
+                                   uint16_t payload_len)
+{
+	volatile struct SDKCryptoAeadPayload *payload;
+	volatile struct SDKCryptoResultPayload *result;
+	struct SDKSharedBuffer *src;
+	struct SDKSharedBuffer *dst;
+	struct SDKSharedBuffer *aad;
+	struct SDKSharedBuffer *key;
+	struct SDKSharedBuffer *nonce;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t src_total;
+	uint32_t dst_offset;
+	uint32_t aad_offset;
+	uint32_t aad_length;
+	uint32_t key_offset;
+	uint32_t flags;
+	const uint8_t *src_data;
+	const uint8_t *aad_data;
+	const uint8_t *key_data;
+	const uint8_t *nonce_data;
+	uint8_t *dst_data;
+	uint8_t tag[SDK_POLY1305_TAG_SIZE];
+
+	if (payload_len < sizeof(struct SDKCryptoAeadPayload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKCryptoAeadPayload *)req->payload;
+	flags = get_be32(payload->flags);
+	if ((flags & ~SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	src = find_shared_buffer(get_be32(payload->src_handle));
+	dst = find_shared_buffer(get_be32(payload->dst_handle));
+	key = find_shared_buffer(get_be32(payload->key_handle));
+	nonce = find_shared_buffer(get_be32(payload->nonce_handle));
+	src_offset = get_be32(payload->src_offset);
+	src_length = get_be32(payload->src_length);
+	dst_offset = get_be32(payload->dst_offset);
+	aad_offset = get_be32(payload->aad_offset);
+	aad_length = get_be32(payload->aad_length);
+	key_offset = get_be32(payload->key_offset);
+
+	if (src_length == 0U || src_length > (0xffffffffU - SDK_POLY1305_TAG_SIZE))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	src_total = src_length;
+	if ((flags & SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0)
+		src_total += SDK_POLY1305_TAG_SIZE;
+
+	if (!buffer_range_valid(src, src_offset, src_total) ||
+	    !buffer_range_valid(key, key_offset, SDK_CHACHA20_KEY_SIZE) ||
+	    !buffer_range_valid(nonce, 0, SDK_CHACHA20_NONCE_SIZE)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	}
+	if ((flags & SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0) {
+		if (!buffer_range_valid(dst, dst_offset, src_length))
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	} else if (!buffer_range_valid(dst, dst_offset,
+	                               src_length + SDK_POLY1305_TAG_SIZE)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	}
+
+	aad = 0;
+	aad_data = 0;
+	if (aad_length != 0U) {
+		aad = find_shared_buffer(get_be32(payload->aad_handle));
+		if (!buffer_range_valid(aad, aad_offset, aad_length))
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+		aad_data = (const uint8_t *)(uintptr_t)(aad->address + aad_offset);
+	}
+
+	src_data = (const uint8_t *)(uintptr_t)(src->address + src_offset);
+	dst_data = (uint8_t *)(uintptr_t)(dst->address + dst_offset);
+	key_data = (const uint8_t *)(uintptr_t)(key->address + key_offset);
+	nonce_data = (const uint8_t *)(uintptr_t)nonce->address;
+	Xil_DCacheInvalidateRange((INTPTR)src_data, src_total);
+	if (aad_length != 0U)
+		Xil_DCacheInvalidateRange((INTPTR)aad_data, aad_length);
+	Xil_DCacheInvalidateRange((INTPTR)key_data, SDK_CHACHA20_KEY_SIZE);
+	Xil_DCacheInvalidateRange((INTPTR)nonce_data, SDK_CHACHA20_NONCE_SIZE);
+
+	if ((flags & SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0) {
+		if (!sdk_chacha20_poly1305_decrypt(
+			    key_data, nonce_data, aad_data, aad_length,
+			    src_data, src_length,
+			    src_data + src_length, dst_data)) {
+			return complete_status(req, comp, SDK_STATUS_IO_ERROR);
+		}
+		Xil_DCacheFlushRange((INTPTR)dst_data, src_length);
+	} else {
+		sdk_chacha20_poly1305_encrypt(key_data, nonce_data,
+		                              aad_data, aad_length,
+		                              src_data, src_length,
+		                              dst_data, tag);
+		memcpy(dst_data + src_length, tag, sizeof(tag));
+		Xil_DCacheFlushRange((INTPTR)dst_data,
+		                     src_length + SDK_POLY1305_TAG_SIZE);
+	}
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKCryptoResultPayload *)comp->payload;
+	put_be32(result->bytes_written,
+	         (flags & SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0 ?
+	         src_length : src_length + SDK_POLY1305_TAG_SIZE);
+	put_be32(result->algorithm, SDK_CRYPTO_AEAD_CHACHA20_POLY1305);
+	put_be32(result->flags, flags);
+	memset(tag, 0, sizeof(tag));
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
+                                  volatile struct SDKMailboxEntry *comp,
+                                  uint16_t payload_len)
+{
+	volatile struct SDKDecompressPayload *payload;
+	volatile struct SDKDecompressResultPayload *reply;
+	struct SDKSharedBuffer *src;
+	struct SDKSharedBuffer *dst;
+	struct SDKDecompressResult result;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t dst_offset;
+	uint32_t dst_capacity;
+	uint32_t algorithm;
+	uint32_t flags;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKDecompressPayload *)req->payload;
+	src = find_shared_buffer(get_be32(payload->src_handle));
+	dst = find_shared_buffer(get_be32(payload->dst_handle));
+	src_offset = get_be32(payload->src_offset);
+	src_length = get_be32(payload->src_length);
+	dst_offset = get_be32(payload->dst_offset);
+	dst_capacity = get_be32(payload->dst_capacity);
+	algorithm = get_be32(payload->algorithm);
+	flags = get_be32(payload->flags);
+
+	if (!src || !dst)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (src_length == 0U || dst_capacity == 0U ||
+	    !buffer_range_valid(src, src_offset, src_length) ||
+	    !buffer_range_valid(dst, dst_offset, dst_capacity)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+	if (src == dst &&
+	    ranges_overlap(src_offset, src_length, dst_offset, dst_capacity)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
+	                          src_length);
+	status = sdk_decompress_buffer(
+		algorithm, flags,
+		(const uint8_t *)(uintptr_t)(src->address + src_offset),
+		src_length,
+		(uint8_t *)(uintptr_t)(dst->address + dst_offset),
+		dst_capacity,
+		&result);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+
+	Xil_DCacheFlushRange((INTPTR)(dst->address + dst_offset),
+	                     result.bytes_written);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*reply));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	reply = (volatile struct SDKDecompressResultPayload *)comp->payload;
+	put_be32(reply->bytes_consumed, result.bytes_consumed);
+	put_be32(reply->bytes_written, result.bytes_written);
+	put_be32(reply->checksum, result.checksum);
+	put_be32(reply->algorithm, result.algorithm);
+	put_be32(reply->flags, result.flags);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_decompress_test(volatile struct SDKMailboxEntry *req,
+                                       volatile struct SDKMailboxEntry *comp,
+                                       uint16_t payload_len)
+{
+	volatile struct SDKDecompressTestPayload *payload;
+	volatile struct SDKDecompressResultPayload *reply;
+	struct SDKSharedBuffer *src;
+	struct SDKDecompressResult result;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t output_limit;
+	uint32_t algorithm;
+	uint32_t flags;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKDecompressTestPayload *)req->payload;
+	src = find_shared_buffer(get_be32(payload->src_handle));
+	src_offset = get_be32(payload->src_offset);
+	src_length = get_be32(payload->src_length);
+	output_limit = get_be32(payload->output_limit);
+	algorithm = get_be32(payload->algorithm);
+	flags = get_be32(payload->flags);
+
+	if (!src)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (src_length == 0U || output_limit == 0U ||
+	    !buffer_range_valid(src, src_offset, src_length)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
+	                          src_length);
+	status = sdk_decompress_test_buffer(
+		algorithm, flags,
+		(const uint8_t *)(uintptr_t)(src->address + src_offset),
+		src_length, output_limit, &result);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*reply));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	reply = (volatile struct SDKDecompressResultPayload *)comp->payload;
+	put_be32(reply->bytes_consumed, result.bytes_consumed);
+	put_be32(reply->bytes_written, result.bytes_written);
+	put_be32(reply->checksum, result.checksum);
+	put_be32(reply->algorithm, result.algorithm);
+	put_be32(reply->flags, result.flags);
+	return SDK_STATUS_OK;
+}
+
+static void write_decompress_stream_result(
+	volatile struct SDKDecompressStreamResultPayload *reply,
+	const struct SDKDecompressStreamResult *result)
+{
+	put_be32(reply->session, result->session);
+	put_be32(reply->bytes_consumed, result->bytes_consumed);
+	put_be32(reply->bytes_written, result->bytes_written);
+	put_be32(reply->checksum, result->checksum);
+	put_be32(reply->algorithm, result->algorithm);
+	put_be32(reply->flags, result->flags);
+}
+
+static uint16_t handle_decompress_stream_begin(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKDecompressStreamBeginPayload *payload;
+	volatile struct SDKDecompressStreamResultPayload *reply;
+	struct SDKSharedBuffer *src;
+	struct SDKDecompressStreamResult result;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t output_limit;
+	uint32_t algorithm;
+	uint32_t flags;
+	uint16_t status;
+	int feed_input;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKDecompressStreamBeginPayload *)req->payload;
+	src_offset = get_be32(payload->src_offset);
+	src_length = get_be32(payload->src_length);
+	output_limit = get_be32(payload->output_limit);
+	algorithm = get_be32(payload->algorithm);
+	flags = get_be32(payload->flags);
+	feed_input = (flags & SDK_DECOMPRESS_FLAG_FEED_INPUT) != 0U;
+
+	if (output_limit == 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (feed_input) {
+		if (get_be32(payload->src_handle) != SDK_INVALID_HANDLE ||
+		    src_offset != 0U || src_length != 0U) {
+			return complete_status(req, comp,
+			                       SDK_STATUS_BAD_REQUEST);
+		}
+		src = 0;
+	} else {
+		src = find_shared_buffer(get_be32(payload->src_handle));
+		if (!src)
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+		if (src_length == 0U ||
+		    !buffer_range_valid(src, src_offset, src_length)) {
+			return complete_status(req, comp,
+			                       SDK_STATUS_BAD_REQUEST);
+		}
+		Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
+		                          src_length);
+	}
+
+	status = sdk_decompress_stream_begin(
+		algorithm, flags,
+		src ? (const uint8_t *)(uintptr_t)(src->address + src_offset) : 0,
+		src_length, output_limit, &result);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*reply));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	reply = (volatile struct SDKDecompressStreamResultPayload *)
+		comp->payload;
+	write_decompress_stream_result(reply, &result);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_decompress_stream_read(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKDecompressStreamReadPayload *payload;
+	volatile struct SDKDecompressStreamResultPayload *reply;
+	struct SDKSharedBuffer *dst;
+	struct SDKDecompressStreamResult result;
+	uint32_t session;
+	uint32_t dst_offset;
+	uint32_t dst_capacity;
+	uint32_t flags;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKDecompressStreamReadPayload *)req->payload;
+	session = get_be32(payload->session);
+	dst = find_shared_buffer(get_be32(payload->dst_handle));
+	dst_offset = get_be32(payload->dst_offset);
+	dst_capacity = get_be32(payload->dst_capacity);
+	flags = get_be32(payload->flags);
+
+	if (!dst)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (session == 0U || dst_capacity == 0U || flags != 0U ||
+	    !buffer_range_valid(dst, dst_offset, dst_capacity)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	status = sdk_decompress_stream_read(
+		session,
+		(uint8_t *)(uintptr_t)(dst->address + dst_offset),
+		dst_capacity, &result);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+	if (result.bytes_written != 0U) {
+		Xil_DCacheFlushRange((INTPTR)(dst->address + dst_offset),
+		                     result.bytes_written);
+	}
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*reply));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	reply = (volatile struct SDKDecompressStreamResultPayload *)
+		comp->payload;
+	write_decompress_stream_result(reply, &result);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_decompress_stream_feed(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKDecompressStreamFeedPayload *payload;
+	volatile struct SDKDecompressStreamResultPayload *reply;
+	struct SDKSharedBuffer *src;
+	struct SDKDecompressStreamResult result;
+	uint32_t session;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t flags;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKDecompressStreamFeedPayload *)req->payload;
+	session = get_be32(payload->session);
+	src = find_shared_buffer(get_be32(payload->src_handle));
+	src_offset = get_be32(payload->src_offset);
+	src_length = get_be32(payload->src_length);
+	flags = get_be32(payload->flags);
+
+	if (!src)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (session == 0U || src_length == 0U ||
+	    (flags & ~SDK_DECOMPRESS_STREAM_FEED_EOF) != 0U ||
+	    !buffer_range_valid(src, src_offset, src_length)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
+	                          src_length);
+	status = sdk_decompress_stream_feed(
+		session,
+		(const uint8_t *)(uintptr_t)(src->address + src_offset),
+		src_length, flags, &result);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*reply));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	reply = (volatile struct SDKDecompressStreamResultPayload *)
+		comp->payload;
+	write_decompress_stream_result(reply, &result);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_decompress_stream_close(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKDecompressStreamClosePayload *payload;
+	uint32_t session;
+	uint32_t flags;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKDecompressStreamClosePayload *)req->payload;
+	session = get_be32(payload->session);
+	flags = get_be32(payload->flags);
+	if (session == 0U || flags != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	status = sdk_decompress_stream_close(session);
+	return complete_status(req, comp, status);
+}
+
+static uint16_t handle_diag_read(volatile struct SDKMailboxEntry *req,
+                                 volatile struct SDKMailboxEntry *comp,
+                                 uint32_t pending_requests)
+{
+	volatile struct SDKDiagPayload *diag;
+	uint32_t free_total;
+	uint32_t largest_free;
+	uint32_t invalid_slots;
+
+	invalid_slots = sanitize_allocator_metadata();
+	heap_free_stats(&free_total, &largest_free);
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*diag));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	diag = (volatile struct SDKDiagPayload *)comp->payload;
+	put_be32(diag->requests_completed, requests_completed);
+	put_be32(diag->requests_failed, requests_failed);
+	put_be32(diag->last_status, sdk_status);
+	put_be32(diag->pending_requests, pending_requests);
+	put_be32(diag->shared_buffers_used, count_used_shared_buffers());
+	put_be32(diag->shared_heap_total, SDK_SHARED_HEAP_SIZE);
+	put_be32(diag->shared_heap_free, free_total);
+	put_be32(diag->shared_heap_largest_free, largest_free);
+	put_be32(diag->mailbox_arm_addr, SDK_MAILBOX_ADDRESS);
+	put_be32(diag->mailbox_ring_entries, SDK_MAILBOX_RING_ENTRIES);
+	put_be32(diag->surfaces_used, count_used_surfaces());
+	put_be32(diag->allocator_invalid_slots, invalid_slots);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_diag_timing(volatile struct SDKMailboxEntry *req,
+                                   volatile struct SDKMailboxEntry *comp)
+{
+	volatile struct SDKDiagTimingPayload *timing;
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*timing));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	timing = (volatile struct SDKDiagTimingPayload *)comp->payload;
+	put_be32(timing->version, 1U);
+	put_be32(timing->timer_hz, COUNTS_PER_SECOND);
+	put_be32(timing->requests_timed, timing_requests_timed);
+	put_be32(timing->total_us, timing_total_us);
+	put_be32(timing->surface_requests, timing_surface_requests);
+	put_be32(timing->surface_us, timing_surface_us);
+	put_be32(timing->audio_requests, timing_audio_requests);
+	put_be32(timing->audio_us, timing_audio_us);
+	put_be32(timing->last_opcode, timing_last_opcode);
+	put_be32(timing->last_us, timing_last_us);
+	put_be32(timing->max_opcode, timing_max_opcode);
+	put_be32(timing->max_us, timing_max_us);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_query_service(volatile struct SDKMailboxEntry *req,
+                                     volatile struct SDKMailboxEntry *comp,
+                                     uint16_t payload_len)
+{
+	volatile struct SDKQueryServicePayload *query;
+	volatile struct SDKServiceInfoPayload *info;
+	const struct SDKServiceDescriptor *service;
+	uint32_t service_id;
+
+	if (payload_len < 4U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	query = (volatile struct SDKQueryServicePayload *)req->payload;
+	service_id = get_be32(query->service_id);
+	service = find_service(service_id);
+	if (!service)
+		return complete_status(req, comp, SDK_STATUS_NOT_FOUND);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*info));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	info = (volatile struct SDKServiceInfoPayload *)comp->payload;
+	put_be32(info->service_id, service->service_id);
+	put_be32(info->version, service->version);
+	put_be32(info->capability_bits, service->capability_bits);
+	put_be32(info->flags, service_flags(service));
+	put_be32(info->opcode_base, service->opcode_base);
+	put_be32(info->opcode_count, service->opcode_count);
+	put_be32(info->max_inline_payload, sizeof(req->payload));
+	copy_name(info->name, service->name);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
+                               volatile struct SDKMailboxEntry *comp,
+                               uint32_t pending_requests)
+{
+	uint16_t opcode = get_be16(req->opcode);
+	uint16_t payload_len = get_be16(req->payload_len);
+
+	if (payload_len > sizeof(req->payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	switch (opcode) {
+	case SDK_OP_NOP:
+		write_completion(comp, req, SDK_STATUS_OK, 0);
+		return SDK_STATUS_OK;
+	case SDK_OP_PING:
+		write_completion(comp, req, SDK_STATUS_OK, payload_len);
+		copy_payload(comp->payload, req->payload, payload_len);
+		return SDK_STATUS_OK;
+	case SDK_OP_QUERY_CAPS: {
+		volatile struct SDKCapsPayload *caps =
+			(volatile struct SDKCapsPayload *)comp->payload;
+		write_completion(comp, req, SDK_STATUS_OK, sizeof(*caps));
+		memset((void *)comp->payload, 0, sizeof(comp->payload));
+		put_be32(caps->magic, SDK_MAILBOX_MAGIC);
+		put_be16(caps->abi_major, SDK_MAILBOX_ABI_MAJOR);
+		put_be16(caps->abi_minor, SDK_MAILBOX_ABI_MINOR);
+		put_be32(caps->capability_bits, SDK_MAILBOX_CAPABILITY_BITS);
+		put_be32(caps->max_inline_payload, sizeof(req->payload));
+		put_be32(caps->max_shared_buffers, SDK_MAX_SHARED_BUFFERS);
+		put_be32(caps->max_surfaces, SDK_MAX_SURFACES + 1U);
+		put_be32(caps->firmware_version, 0);
+		put_be32(caps->request_ring_entries, SDK_MAILBOX_RING_ENTRIES);
+		put_be32(caps->completion_ring_entries, SDK_MAILBOX_RING_ENTRIES);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_QUERY_SERVICE:
+		return handle_query_service(req, comp, payload_len);
+	case SDK_OP_ALLOC_SHARED:
+		return handle_alloc_shared(req, comp, payload_len);
+	case SDK_OP_FREE_SHARED:
+		return handle_free_shared(req, comp, payload_len);
+	case SDK_OP_MEM_FILL:
+		return handle_mem_fill(req, comp, payload_len);
+	case SDK_OP_MEM_COPY:
+		return handle_mem_copy(req, comp, payload_len);
+	case SDK_OP_ALLOC_SURFACE:
+		return handle_alloc_surface(req, comp, payload_len);
+	case SDK_OP_FREE_SURFACE:
+		return handle_free_surface(req, comp, payload_len);
+	case SDK_OP_MAP_FRAMEBUFFER_SURFACE:
+		return handle_map_framebuffer_surface(req, comp);
+	case SDK_OP_FILL_SURFACE:
+		return handle_fill_surface(req, comp, payload_len);
+	case SDK_OP_COPY_SURFACE:
+		return handle_copy_surface(req, comp, payload_len);
+	case SDK_OP_SCALE_IMAGE:
+		return handle_scale_image(req, comp, payload_len);
+	case SDK_OP_SCALE_IMAGE_CLIPPED:
+		return handle_scale_image_clipped(req, comp, payload_len);
+	case SDK_OP_DECODE_JPEG:
+		return handle_decode_jpeg(req, comp, payload_len);
+	case SDK_OP_DECODE_PNG:
+	case SDK_OP_DECODE_GIF:
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	case SDK_OP_DECODE_MP3:
+		return handle_decode_mp3(req, comp, payload_len);
+	case SDK_OP_AUDIO_STREAM_BEGIN:
+		return handle_audio_stream_begin(req, comp, payload_len);
+	case SDK_OP_AUDIO_STREAM_FEED:
+		return handle_audio_stream_feed(req, comp, payload_len);
+	case SDK_OP_AUDIO_STREAM_READ:
+		return handle_audio_stream_read(req, comp, payload_len);
+	case SDK_OP_AUDIO_STREAM_CLOSE:
+		return handle_audio_stream_close(req, comp, payload_len);
+	case SDK_OP_IMAGE_SESSION_BEGIN:
+		return handle_image_session_begin(req, comp, payload_len);
+	case SDK_OP_IMAGE_SESSION_FEED:
+		return handle_image_session_feed(req, comp, payload_len);
+	case SDK_OP_IMAGE_SESSION_CLOSE:
+		return handle_image_session_close(req, comp, payload_len);
+	case SDK_OP_DECOMPRESS:
+		return handle_decompress(req, comp, payload_len);
+	case SDK_OP_DECOMPRESS_TEST:
+		return handle_decompress_test(req, comp, payload_len);
+	case SDK_OP_DECOMPRESS_STREAM_BEGIN:
+		return handle_decompress_stream_begin(req, comp, payload_len);
+	case SDK_OP_DECOMPRESS_STREAM_READ:
+		return handle_decompress_stream_read(req, comp, payload_len);
+	case SDK_OP_DECOMPRESS_STREAM_FEED:
+		return handle_decompress_stream_feed(req, comp, payload_len);
+	case SDK_OP_DECOMPRESS_STREAM_CLOSE:
+		return handle_decompress_stream_close(req, comp, payload_len);
+	case SDK_OP_CRYPTO_HASH:
+		return handle_crypto_hash(req, comp, payload_len);
+	case SDK_OP_CRYPTO_STREAM:
+		return handle_crypto_stream(req, comp, payload_len);
+	case SDK_OP_CRYPTO_AEAD:
+		return handle_crypto_aead(req, comp, payload_len);
+	case SDK_OP_DIAG_READ:
+		return handle_diag_read(req, comp, pending_requests);
+	case SDK_OP_DIAG_TIMING:
+		return handle_diag_timing(req, comp);
+	default:
+		write_completion(comp, req, SDK_STATUS_UNSUPPORTED, 0);
+		return SDK_STATUS_UNSUPPORTED;
+	}
+}
+
+void sdk_mailbox_init(void)
+{
+	volatile struct SDKMailboxDescriptor *desc = descriptor();
+
+	memset((void *)SDK_MAILBOX_ADDRESS, 0, SDK_MAILBOX_TOTAL_SIZE);
+	put_be32(desc->magic, SDK_MAILBOX_MAGIC);
+	put_be16(desc->abi_major, SDK_MAILBOX_ABI_MAJOR);
+	put_be16(desc->abi_minor, SDK_MAILBOX_ABI_MINOR);
+	put_be32(desc->descriptor_size, sizeof(*desc));
+	put_be32(desc->request_ring_offset, SDK_MAILBOX_REQUEST_OFFSET);
+	put_be32(desc->request_ring_entries, SDK_MAILBOX_RING_ENTRIES);
+	put_be32(desc->completion_ring_offset, SDK_MAILBOX_COMPLETION_OFFSET);
+	put_be32(desc->completion_ring_entries, SDK_MAILBOX_RING_ENTRIES);
+	put_be32(desc->capability_bits, SDK_MAILBOX_CAPABILITY_BITS);
+
+	sdk_status = SDK_STATUS_OK;
+	sdk_mailbox_active = 0;
+	sdk_mailbox_pending = 0;
+	sdk_completion_irq_enabled = 0;
+	next_shared_handle = 1;
+	next_surface_handle = 1;
+	next_audio_stream_id = 1;
+	requests_completed = 0;
+	requests_failed = 0;
+	timing_requests_timed = 0;
+	timing_total_us = 0;
+	timing_surface_requests = 0;
+	timing_surface_us = 0;
+	timing_audio_requests = 0;
+	timing_audio_us = 0;
+	timing_last_opcode = 0;
+	timing_last_us = 0;
+	timing_max_opcode = 0;
+	timing_max_us = 0;
+	memset(shared_buffers, 0, sizeof(shared_buffers));
+	memset(surfaces, 0, sizeof(surfaces));
+	memset(audio_streams, 0, sizeof(audio_streams));
+	sdk_decompress_stream_reset_all();
+	sdk_image_stream_init();
+	amiga_interrupt_clear(AMIGA_INTERRUPT_SDK);
+
+	Xil_DCacheFlushRange(SDK_MAILBOX_ADDRESS, SDK_MAILBOX_TOTAL_SIZE);
+	__asm__ __volatile__("dsb" ::: "memory");
+}
+
+void sdk_mailbox_activate(void)
+{
+	sdk_mailbox_active = 1;
+}
+
+void sdk_mailbox_doorbell(void)
+{
+	sdk_mailbox_active = 1;
+	sdk_mailbox_pending = 1;
+}
+
+void sdk_mailbox_ack_irq(void)
+{
+	amiga_interrupt_clear(AMIGA_INTERRUPT_SDK);
+}
+
+void sdk_mailbox_irq_enable(void)
+{
+	sdk_completion_irq_enabled = 1;
+	amiga_interrupt_clear(AMIGA_INTERRUPT_SDK);
+}
+
+void sdk_mailbox_irq_disable(void)
+{
+	sdk_completion_irq_enabled = 0;
+	amiga_interrupt_clear(AMIGA_INTERRUPT_SDK);
+}
+
+void sdk_mailbox_task(void)
+{
+	volatile struct SDKMailboxDescriptor *desc = descriptor();
+	volatile struct SDKMailboxEntry *req_ring = request_ring();
+	volatile struct SDKMailboxEntry *comp_ring = completion_ring();
+	uint32_t req_head;
+	uint32_t req_tail;
+	uint32_t comp_head;
+	uint32_t comp_tail;
+	uint32_t next_comp_tail;
+	int completed_any = 0;
+
+	if (!sdk_mailbox_active && !sdk_mailbox_pending)
+		return;
+
+	req_head = get_be32(desc->request_head);
+	req_tail = get_be32(desc->request_tail);
+	if (!sdk_mailbox_pending && req_head == req_tail)
+		return;
+
+	if (!descriptor_valid(desc)) {
+		sdk_mailbox_pending = 0;
+		sdk_status = SDK_STATUS_UNSUPPORTED;
+		return;
+	}
+
+	/*
+	 * The Amiga side owns request_tail, completion_head, and request
+	 * entries. Do not flush this whole window here: a stale ARM cache line
+	 * can overwrite a freshly acknowledged completion_head and make the
+	 * completion ring appear full. ARM-owned descriptor/completion writes
+	 * are flushed at their write sites.
+	 */
+	Xil_DCacheInvalidateRange(SDK_MAILBOX_ADDRESS, SDK_MAILBOX_TOTAL_SIZE);
+	__asm__ __volatile__("dsb" ::: "memory");
+
+	if (!descriptor_valid(desc)) {
+		sdk_mailbox_pending = 0;
+		sdk_status = SDK_STATUS_UNSUPPORTED;
+		return;
+	}
+
+	req_head = get_be32(desc->request_head);
+	req_tail = get_be32(desc->request_tail);
+	comp_head = get_be32(desc->completion_head);
+	comp_tail = get_be32(desc->completion_tail);
+
+	while (req_head != req_tail) {
+		uint32_t pending_requests;
+		uint32_t opcode;
+		XTime timing_start;
+		XTime timing_end;
+
+		next_comp_tail = next_index(comp_tail);
+		if (next_comp_tail == comp_head) {
+			sdk_status = SDK_STATUS_BUSY;
+			break;
+		}
+
+		if (req_tail >= req_head)
+			pending_requests = req_tail - req_head;
+		else
+			pending_requests = SDK_MAILBOX_RING_ENTRIES - req_head + req_tail;
+
+		opcode = get_be16(req_ring[req_head].opcode);
+		XTime_GetTime(&timing_start);
+		sdk_status = handle_request(&req_ring[req_head],
+		                            &comp_ring[comp_tail],
+		                            pending_requests);
+		XTime_GetTime(&timing_end);
+		record_request_timing(opcode,
+		                      timing_delta_us(timing_start,
+		                                      timing_end));
+		requests_completed++;
+		completed_any = 1;
+		if (sdk_status != SDK_STATUS_OK)
+			requests_failed++;
+		Xil_DCacheFlushRange((INTPTR)&comp_ring[comp_tail],
+		                     sizeof(comp_ring[comp_tail]));
+
+		req_head = next_index(req_head);
+		comp_tail = next_comp_tail;
+		put_be32(desc->request_head, req_head);
+		put_be32(desc->completion_tail, comp_tail);
+		Xil_DCacheFlushRange((INTPTR)desc, sizeof(*desc));
+		__asm__ __volatile__("dsb" ::: "memory");
+	}
+
+	if (req_head == req_tail)
+		sdk_mailbox_pending = 0;
+
+	if (completed_any && sdk_completion_irq_enabled)
+		amiga_interrupt_set(AMIGA_INTERRUPT_SDK);
+}
+
+uint16_t sdk_mailbox_status(void)
+{
+	return sdk_status;
+}
+
+uint32_t sdk_mailbox_address(void)
+{
+	return SDK_MAILBOX_ADDRESS;
+}

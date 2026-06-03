@@ -1,0 +1,271 @@
+/*
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ *
+ * ZZ9000 SDK v2 mailbox dispatcher.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+#ifndef SDK_MAILBOX_H
+#define SDK_MAILBOX_H
+
+#include <stdint.h>
+
+#define SDK_MAILBOX_MAGIC              0x5a5a394bUL
+#define SDK_MAILBOX_REG_MAGIC_VALUE    0x5a39U
+#define SDK_MAILBOX_ABI_MAJOR          2U
+#define SDK_MAILBOX_ABI_MINOR          0U
+#define SDK_MAILBOX_ENTRY_SIZE         64U
+#define SDK_MAILBOX_DESCRIPTOR_SIZE    128U
+#define SDK_MAILBOX_RING_ENTRIES       64U
+
+#define SDK_STATUS_OK                  0U
+#define SDK_STATUS_QUEUED              1U
+#define SDK_STATUS_BUSY                2U
+#define SDK_STATUS_UNSUPPORTED         3U
+#define SDK_STATUS_BAD_REQUEST         4U
+#define SDK_STATUS_BAD_HANDLE          5U
+#define SDK_STATUS_NO_MEMORY           6U
+#define SDK_STATUS_IO_ERROR            9U
+#define SDK_STATUS_NOT_FOUND           10U
+#define SDK_STATUS_INTERNAL_ERROR      0xffffU
+
+#define SDK_CAP_MAILBOX                (1U << 0)
+#define SDK_CAP_IRQ_COMPLETION         (1U << 1)
+#define SDK_CAP_SHARED_ALLOC           (1U << 2)
+#define SDK_CAP_SURFACES               (1U << 3)
+#define SDK_CAP_FRAMEBUFFER_SURFACE    (1U << 4)
+#define SDK_CAP_IMAGE_DECODE           (1U << 5)
+#define SDK_CAP_IMAGE_SCALE            (1U << 6)
+#define SDK_CAP_AUDIO_DECODE           (1U << 7)
+#define SDK_CAP_CRYPTO                 (1U << 8)
+#define SDK_CAP_MEMORY_OPS             (1U << 10)
+#define SDK_CAP_DIAGNOSTICS            (1U << 11)
+#define SDK_CAP_DOORBELL               (1U << 12)
+#define SDK_CAP_POLLING_COMPLETION     (1U << 13)
+#define SDK_CAP_SERVICE_DISCOVERY      (1U << 14)
+#define SDK_CAP_SURFACE_OPS            (1U << 15)
+#define SDK_CAP_COMPRESSION            (1U << 16)
+
+#ifndef SDK_ENABLE_HDL_TRANSPORT
+#define SDK_ENABLE_HDL_TRANSPORT       0
+#endif
+
+#ifndef SDK_ENABLE_HDL_DOORBELL
+#define SDK_ENABLE_HDL_DOORBELL        0
+#endif
+
+#ifndef SDK_ENABLE_COMPLETION_IRQ
+#define SDK_ENABLE_COMPLETION_IRQ      1
+#endif
+
+#if SDK_ENABLE_COMPLETION_IRQ
+#define SDK_IRQ_CAPABILITY_BITS        SDK_CAP_IRQ_COMPLETION
+#else
+#define SDK_IRQ_CAPABILITY_BITS        0
+#endif
+
+#if SDK_ENABLE_HDL_DOORBELL
+#define SDK_DOORBELL_CAPABILITY_BITS   SDK_CAP_DOORBELL
+#else
+#define SDK_DOORBELL_CAPABILITY_BITS   0
+#endif
+
+#define SDK_TRANSPORT_CAPABILITY_BITS \
+	(SDK_CAP_POLLING_COMPLETION | SDK_IRQ_CAPABILITY_BITS | \
+	 SDK_DOORBELL_CAPABILITY_BITS)
+
+#define SDK_SERVICE_CORE               0x0000U
+#define SDK_SERVICE_MEMORY             0x0100U
+#define SDK_SERVICE_SURFACE            0x0200U
+#define SDK_SERVICE_IMAGE              0x0400U
+#define SDK_SERVICE_AUDIO              0x0500U
+#define SDK_SERVICE_CODEC              0x0600U
+#define SDK_SERVICE_CRYPTO             0x0800U
+#define SDK_SERVICE_DIAG               0x0900U
+
+#define SDK_SERVICE_FLAG_FIRMWARE      (1U << 0)
+#define SDK_SERVICE_FLAG_MODULE        (1U << 1)
+#define SDK_SERVICE_FLAG_ASYNC         (1U << 2)
+#define SDK_SERVICE_FLAG_ZERO_COPY     (1U << 3)
+#define SDK_SERVICE_FLAG_IMAGE_JPEG_BASELINE    (1U << 16)
+#define SDK_SERVICE_FLAG_IMAGE_JPEG_PROGRESSIVE (1U << 17)
+#define SDK_SERVICE_FLAG_IMAGE_JPEG_DIRECT_BGRA (1U << 18)
+#define SDK_SERVICE_FLAG_IMAGE_JPEG_SCALING     (1U << 19)
+#define SDK_SERVICE_FLAG_IMAGE_STREAMING_INPUT  (1U << 20)
+#define SDK_SERVICE_FLAG_IMAGE_TILE_OUTPUT      (1U << 21)
+#define SDK_SERVICE_FLAG_IMAGE_FRAMEBUFFER_OUTPUT (1U << 22)
+#define SDK_SERVICE_FLAG_IMAGE_SCALE_BILINEAR   (1U << 23)
+#define SDK_SERVICE_FLAG_IMAGE_SCALE_CLIPPED    (1U << 24)
+#define SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA  (1U << 25)
+#define SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT    (1U << 26)
+#define SDK_SERVICE_FLAG_AUDIO_MP3_DECODE       (1U << 16)
+#define SDK_SERVICE_FLAG_AUDIO_MP3_STREAM       (1U << 20)
+#define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
+#define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)
+#define SDK_SERVICE_FLAG_CODEC_GZIP             (1U << 18)
+#define SDK_SERVICE_FLAG_CODEC_LZ4_BLOCK        (1U << 19)
+#define SDK_SERVICE_FLAG_CODEC_LZMA_ALONE       (1U << 20)
+#define SDK_SERVICE_FLAG_CODEC_CHECKSUM         (1U << 21)
+#define SDK_SERVICE_FLAG_CODEC_DECOMPRESS_TEST  (1U << 22)
+#define SDK_SERVICE_FLAG_CODEC_DECOMPRESS_STREAM (1U << 23)
+#define SDK_SERVICE_FLAG_CODEC_DECOMPRESS_FEED  (1U << 24)
+#define SDK_SERVICE_FLAG_CODEC_DEFLATE_FEED     (1U << 25)
+#define SDK_SERVICE_FLAG_CODEC_ZLIB_FEED        (1U << 26)
+#define SDK_SERVICE_FLAG_CODEC_GZIP_FEED        (1U << 27)
+#define SDK_SERVICE_FLAG_CODEC_LZMA2            (1U << 28)
+
+#define SDK_OP_NOP                     0x0000U
+#define SDK_OP_QUERY_CAPS              0x0001U
+#define SDK_OP_PING                    0x0002U
+#define SDK_OP_QUERY_SERVICE           0x0004U
+
+#define SDK_OP_ALLOC_SHARED            0x0100U
+#define SDK_OP_FREE_SHARED             0x0101U
+#define SDK_OP_MEM_FILL                0x0102U
+#define SDK_OP_MEM_COPY                0x0103U
+
+#define SDK_OP_ALLOC_SURFACE           0x0200U
+#define SDK_OP_FREE_SURFACE            0x0201U
+#define SDK_OP_MAP_FRAMEBUFFER_SURFACE 0x0202U
+#define SDK_OP_FILL_SURFACE            0x0203U
+#define SDK_OP_COPY_SURFACE            0x0204U
+
+#define SDK_OP_SCALE_IMAGE             0x0400U
+#define SDK_OP_DECODE_JPEG             0x0401U
+#define SDK_OP_DECODE_PNG              0x0402U
+#define SDK_OP_DECODE_GIF              0x0403U
+#define SDK_OP_IMAGE_SESSION_BEGIN     0x0404U
+#define SDK_OP_IMAGE_SESSION_FEED      0x0405U
+#define SDK_OP_IMAGE_SESSION_CLOSE     0x0406U
+#define SDK_OP_SCALE_IMAGE_CLIPPED     0x0407U
+
+#define SDK_OP_DECODE_MP3              0x0500U
+#define SDK_OP_AUDIO_STREAM_BEGIN      0x0503U
+#define SDK_OP_AUDIO_STREAM_FEED       0x0504U
+#define SDK_OP_AUDIO_STREAM_READ       0x0505U
+#define SDK_OP_AUDIO_STREAM_CLOSE      0x0506U
+
+#define SDK_OP_DECOMPRESS              0x0600U
+#define SDK_OP_DECOMPRESS_TEST         0x0601U
+#define SDK_OP_DECOMPRESS_STREAM_BEGIN 0x0602U
+#define SDK_OP_DECOMPRESS_STREAM_READ  0x0603U
+#define SDK_OP_DECOMPRESS_STREAM_CLOSE 0x0604U
+#define SDK_OP_DECOMPRESS_STREAM_FEED  0x0605U
+
+#define SDK_OP_CRYPTO_HASH             0x0800U
+#define SDK_OP_CRYPTO_STREAM           0x0801U
+#define SDK_OP_CRYPTO_AEAD             0x0802U
+
+#define SDK_OP_DIAG_READ               0x0900U
+#define SDK_OP_DIAG_TIMING             0x0901U
+
+#define SDK_MAX_SHARED_BUFFERS         32U
+#define SDK_MAX_SURFACES               16U
+#define SDK_SURFACE_HANDLE_FRAMEBUFFER 0x80000000UL
+#define SDK_SURFACE_HANDLE_BASE        0x40000000UL
+
+#define SDK_SURFACE_FORMAT_UNKNOWN     0U
+#define SDK_SURFACE_FORMAT_RGB565      1U
+#define SDK_SURFACE_FORMAT_ARGB8888    2U
+#define SDK_SURFACE_FORMAT_RGBA8888    3U
+#define SDK_SURFACE_FORMAT_INDEX8      4U
+#define SDK_SURFACE_FORMAT_PLANAR      5U
+#define SDK_SURFACE_FORMAT_RGB555      6U
+#define SDK_SURFACE_FORMAT_BGRA8888    7U
+#define SDK_SURFACE_FORMAT_RGB888      8U
+
+#define SDK_SURFACE_FLAG_CPU_VISIBLE   (1U << 0)
+#define SDK_SURFACE_FLAG_FRAMEBUFFER   (1U << 1)
+#define SDK_SURFACE_FLAG_DISPLAYED     (1U << 2)
+#define SDK_SURFACE_FLAG_SHARED_BUFFER (1U << 3)
+#define SDK_SURFACE_FLAG_ARM_LOCAL     (1U << 4)
+
+#define SDK_SCALE_NEAREST              0U
+#define SDK_SCALE_BILINEAR             1U
+#define SDK_SCALE_BICUBIC              2U
+#define SDK_SCALE_LANCZOS3             3U
+
+#define SDK_INVALID_HANDLE             0xffffffffUL
+
+#define SDK_MAX_IMAGE_SESSIONS         4U
+
+#define SDK_IMAGE_CODEC_JPEG           1U
+#define SDK_IMAGE_CODEC_PNG            2U
+#define SDK_IMAGE_CODEC_GIF            3U
+
+#define SDK_IMAGE_OUTPUT_SURFACE       1U
+#define SDK_IMAGE_OUTPUT_FRAMEBUFFER   2U
+#define SDK_IMAGE_OUTPUT_TILE_BUFFER   3U
+
+#define SDK_IMAGE_DECODE_FLAG_FIT             (1U << 0)
+#define SDK_IMAGE_DECODE_FLAG_PRESERVE_ASPECT (1U << 1)
+#define SDK_IMAGE_DECODE_FLAG_DITHER          (1U << 2)
+
+#define SDK_IMAGE_SESSION_FEED_EOF     (1U << 0)
+
+#define SDK_IMAGE_SESSION_STATE_NEED_INPUT   1U
+#define SDK_IMAGE_SESSION_STATE_HEADER_READY 2U
+#define SDK_IMAGE_SESSION_STATE_TILE_READY   3U
+#define SDK_IMAGE_SESSION_STATE_COMPLETE     4U
+#define SDK_IMAGE_SESSION_STATE_ERROR        5U
+
+#define SDK_IMAGE_SESSION_RESULT_HEADER_READY (1U << 0)
+#define SDK_IMAGE_SESSION_RESULT_PARTIAL      (1U << 1)
+#define SDK_IMAGE_SESSION_RESULT_SCALED       (1U << 2)
+
+#define SDK_AUDIO_SAMPLE_FORMAT_NONE   0U
+#define SDK_AUDIO_SAMPLE_FORMAT_S16LE  1U
+#define SDK_AUDIO_SAMPLE_FORMAT_S16BE  2U
+#define SDK_AUDIO_DECODE_FLAG_EXPECT_END (1U << 0)
+#define SDK_AUDIO_DECODE_RESULT_END    (1U << 0)
+#define SDK_MAX_AUDIO_STREAMS          4U
+#define SDK_AUDIO_STREAM_FEED_EOF      (1U << 0)
+#define SDK_AUDIO_STREAM_STATE_NEED_INPUT 1U
+#define SDK_AUDIO_STREAM_STATE_STREAMING  2U
+#define SDK_AUDIO_STREAM_STATE_DONE       3U
+#define SDK_AUDIO_STREAM_STATE_ERROR      4U
+#define SDK_AUDIO_STREAM_RESULT_NEED_INPUT (1U << 0)
+#define SDK_AUDIO_STREAM_RESULT_PCM_READY  (1U << 1)
+#define SDK_AUDIO_STREAM_RESULT_DONE       (1U << 2)
+#define SDK_AUDIO_STREAM_RESULT_BACKPRESSURE (1U << 3)
+
+#define SDK_CRYPTO_HASH_NONE           0U
+#define SDK_CRYPTO_HASH_SHA1           1U
+#define SDK_CRYPTO_HASH_SHA256         2U
+#define SDK_CRYPTO_HASH_POLY1305       6U
+#define SDK_CRYPTO_HASH_FLAG_HMAC      (1U << 0)
+#define SDK_CRYPTO_STREAM_NONE         0U
+#define SDK_CRYPTO_STREAM_CHACHA20     1U
+#define SDK_CRYPTO_AEAD_NONE           0U
+#define SDK_CRYPTO_AEAD_CHACHA20_POLY1305 1U
+#define SDK_CRYPTO_AEAD_FLAG_DECRYPT   (1U << 0)
+
+#define SDK_COMPRESSION_NONE           0U
+#define SDK_COMPRESSION_DEFLATE_RAW    1U
+#define SDK_COMPRESSION_ZLIB           2U
+#define SDK_COMPRESSION_GZIP           3U
+#define SDK_COMPRESSION_LZ4_BLOCK      4U
+#define SDK_COMPRESSION_LZMA_ALONE     5U
+#define SDK_COMPRESSION_LZMA2          6U
+
+#define SDK_DECOMPRESS_FLAG_EXPECT_END (1U << 0)
+#define SDK_DECOMPRESS_FLAG_FEED_INPUT (1U << 1)
+
+#define SDK_DECOMPRESS_STREAM_FEED_EOF (1U << 0)
+
+#define SDK_DECOMPRESS_RESULT_STREAM_END      (1U << 0)
+#define SDK_DECOMPRESS_RESULT_CHECKSUM_VALID  (1U << 1)
+#define SDK_DECOMPRESS_RESULT_NEED_INPUT      (1U << 2)
+
+void sdk_mailbox_init(void);
+void sdk_mailbox_activate(void);
+void sdk_mailbox_doorbell(void);
+void sdk_mailbox_ack_irq(void);
+void sdk_mailbox_irq_enable(void);
+void sdk_mailbox_irq_disable(void);
+void sdk_mailbox_task(void);
+uint16_t sdk_mailbox_status(void);
+uint32_t sdk_mailbox_address(void);
+
+#endif /* SDK_MAILBOX_H */
