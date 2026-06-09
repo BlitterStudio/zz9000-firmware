@@ -122,6 +122,13 @@ enum zz_reg_offsets {
   REG_ZZ_ARM_EV_SERIAL  = 0xB0,
   REG_ZZ_ARM_EV_CODE    = 0xB2,
 
+  REG_ZZ_SDBLK_TX_HI    = 0xB4,
+  REG_ZZ_SDBLK_TX_LO    = 0xB6,
+  REG_ZZ_SDBLK_RX_HI    = 0xB8,
+  REG_ZZ_SDBLK_RX_LO    = 0xBA,
+  REG_ZZ_SD_STATUS       = 0xBC,
+  REG_ZZ_UNUSED_BBE      = 0xBE,
+
   REG_ZZ_FW_VERSION     = 0xC0,
   REG_ZZ_SD_BOOT_CMD    = 0xC2,
   REG_ZZ_SD_BOOT_STATUS = 0xC4,
@@ -139,13 +146,6 @@ enum zz_reg_offsets {
   REG_ZZ_USB_BUFSEL     = 0xDA,
   REG_ZZ_USB_CAPACITY   = 0xDC,
   REG_ZZ_USB_PROXY_CMD  = 0xDE,
-
-  REG_ZZ_SDBLK_TX_HI    = 0xB4,
-  REG_ZZ_SDBLK_TX_LO    = 0xB6,
-  REG_ZZ_SDBLK_RX_HI    = 0xB8,
-  REG_ZZ_SDBLK_RX_LO    = 0xBA,
-  REG_ZZ_SD_STATUS       = 0xBC,
-  REG_ZZ_UNUSED_BBE      = 0xBE,
 
   REG_ZZ_TEMPERATURE    = 0xE0,
   REG_ZZ_VOLTAGE_AUX    = 0xE2,
