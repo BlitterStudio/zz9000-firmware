@@ -129,16 +129,18 @@ void core1_loop() {
 		Xil_DCacheFlush();
 		Xil_ICacheInvalidate();
 
-		asm("push {r0-r12}");
-		// FIXME HACK save our stack pointer in 0x10000
-		asm("mov r0, #0x00010000");
-		asm("str sp, [r0]");
+		if (core1_trampoline) {
+			asm("push {r0-r12}");
+			// FIXME HACK save our stack pointer in 0x10000
+			asm("mov r0, #0x00010000");
+			asm("str sp, [r0]");
 
-		core1_trampoline(&arm_run_env);
+			core1_trampoline(&arm_run_env);
 
-		asm("mov r0, #0x00010000");
-		asm("ldr sp, [r0]");
-		asm("pop {r0-r12}");
+			asm("mov r0, #0x00010000");
+			asm("ldr sp, [r0]");
+			asm("pop {r0-r12}");
+		}
 	}
 }
 #pragma GCC pop_options
@@ -195,14 +197,22 @@ void arm_app_run(uint32_t arm_run_address) {
 		core1_trampoline = (volatile void (*)(
 				volatile struct ZZ9K_ENV*)) arm_run_address;
 		printf("[ARM_RUN] signaling second core.\n");
+		// publish the trampoline (and app code/env) before the execute flag
+		// becomes visible to core1
 		Xil_DCacheFlush();
 		Xil_ICacheInvalidate();
+		dmb();
+		dsb();
 		core2_execute = 1;
 		Xil_DCacheFlush();
 		Xil_ICacheInvalidate();
 	} else {
 		core1_trampoline = 0;
+		Xil_DCacheFlush();
+		dmb();
+		dsb();
 		core2_execute = 0;
+		Xil_DCacheFlush();
 	}
 
 	// FIXME move this out of here
