@@ -20,6 +20,9 @@
 #define SDK_CHACHA20_BLOCK_SIZE 64U
 #define SDK_POLY1305_KEY_SIZE 32U
 #define SDK_POLY1305_TAG_SIZE 16U
+#define SDK_X25519_KEY_SIZE    32U
+#define SDK_X25519_POINT_SIZE  32U
+#define SDK_X25519_SHARED_SIZE 32U
 
 void sdk_sha1(const uint8_t *data, uint32_t length,
               uint8_t digest[SDK_SHA1_DIGEST_SIZE]);
@@ -59,5 +62,11 @@ int sdk_chacha20_poly1305_decrypt(
 	uint32_t ciphertext_length,
 	const uint8_t tag[SDK_POLY1305_TAG_SIZE],
 	uint8_t *plaintext);
+
+/* X25519 scalar multiplication (RFC 7748). Returns 1 on success, 0 if the
+ * result is the all-zero (small-order) point and must be rejected. */
+int sdk_x25519(const uint8_t scalar[SDK_X25519_KEY_SIZE],
+               const uint8_t point[SDK_X25519_POINT_SIZE],
+               uint8_t shared[SDK_X25519_SHARED_SIZE]);
 
 #endif /* SDK_CRYPTO_H */

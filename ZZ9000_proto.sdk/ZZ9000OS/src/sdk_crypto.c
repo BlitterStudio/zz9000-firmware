@@ -7,6 +7,7 @@
  */
 
 #include "sdk_crypto.h"
+#include "bearssl/bearssl_ec.h"
 #include <string.h>
 
 typedef struct SDKSHA256Context {
@@ -838,4 +839,18 @@ int sdk_chacha20_poly1305_decrypt(
 	                 ciphertext_length);
 	memset(expected, 0, sizeof(expected));
 	return 1;
+}
+
+int sdk_x25519(const uint8_t scalar[32], const uint8_t point[32],
+               uint8_t shared[32])
+{
+	const br_ec_impl *ec = &br_ec_c25519_m31;
+	uint8_t buf[32];
+	uint32_t ok;
+
+	memcpy(buf, point, 32);
+	/* BearSSL mul: scalar*point in place on buf; curve id 29 = Curve25519 */
+	ok = ec->mul(buf, 32, scalar, 32, BR_EC_curve25519);
+	memcpy(shared, buf, 32);
+	return (int)ok; /* ok==0 means small-order point -> all-zero shared */
 }
