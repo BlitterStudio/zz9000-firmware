@@ -369,7 +369,7 @@ int main() {
 	int decoder_bytes_decoded = 0;
 
 	// idle task counter (used for ethernet negotiation)
-	int idle_task_count = 0;
+	XTime eth_task_last_run = 0;
 	uint32_t sdk_mailbox_poll_divider = 0;
 
 	while (1) {
@@ -1538,7 +1538,6 @@ int main() {
 			need_req_ack = 2;
 		} else {
 			// there are no read/write requests, we can do other housekeeping
-			idle_task_count++;
 
 			if (usb_proxy_pending) {
 				volatile struct ZZUSBCommand *proxy_cmd =
@@ -1563,9 +1562,15 @@ int main() {
 				usb_proxy_status = 0;
 			}
 
-			if (idle_task_count > 10000000) {
-				ethernet_task();
-				idle_task_count=0;
+			{
+				// service the ethernet state machine every 10 ms; the old
+				// idle-iteration counter left it starved for seconds
+				XTime eth_now;
+				XTime_GetTime(&eth_now);
+				if (eth_now - eth_task_last_run > (COUNTS_PER_SECOND / 100)) {
+					ethernet_task();
+					eth_task_last_run = eth_now;
+				}
 			}
 
 			if (sdk_mailbox_register_events) {
