@@ -183,7 +183,6 @@ static int audio_buffer_collision = 0;
 static uint32_t audio_scale = 48000/50;
 static uint32_t audio_offset = 0;
 static int adau_enabled = 0;
-int interrupt_enabled_audio = 0;
 int interrupt_enabled_vblank = 0;
 
 enum amiga_reset_mode {
@@ -261,7 +260,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	ethernet_send_result = 0;
 	eth_backlog_nag_counter = 0;
 	interrupt_enabled_ethernet = 0;
-	interrupt_enabled_audio = 0;
+	audio_set_interrupt_enabled(0);
 	interrupt_enabled_vblank = 0;
 
 	// FIXME document
