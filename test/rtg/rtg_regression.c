@@ -244,6 +244,39 @@ static void ref_copy_rect_masked_8(uint16_t dx, uint16_t dy, uint16_t w, uint16_
 	free(tmp);
 }
 
+static void ref_blit_bytes(uint16_t dx, uint16_t dy, uint16_t w, uint16_t h,
+	const uint8_t *src, uint16_t src_pitch, uint16_t dest_pitch)
+{
+	uint8_t *tmp = malloc((size_t)w * h);
+	uint8_t *dst_base = (uint8_t *)expected_fb;
+
+	if (!tmp) {
+		printf("FAIL alloc blit temp\n");
+		exit(2);
+	}
+	for (uint16_t y = 0; y < h; y++)
+		memcpy(tmp + (size_t)y * w, src + (size_t)y * src_pitch, w);
+	for (uint16_t y = 0; y < h; y++)
+		memcpy(dst_base + dx + ((size_t)(dy + y) * dest_pitch),
+			tmp + (size_t)y * w, w);
+	free(tmp);
+}
+
+static void ref_blit_bytes_masked(uint16_t dx, uint16_t dy, uint16_t w, uint16_t h,
+	const uint8_t *src, uint16_t src_pitch, uint16_t dest_pitch, uint8_t mask_color)
+{
+	uint8_t *dst_base = (uint8_t *)expected_fb;
+
+	for (uint16_t y = 0; y < h; y++) {
+		const uint8_t *srow = src + (size_t)y * src_pitch;
+		uint8_t *drow = dst_base + dx + ((size_t)(dy + y) * dest_pitch);
+		for (uint16_t x = 0; x < w; x++) {
+			if (srow[x] != mask_color)
+				drow[x] = srow[x];
+		}
+	}
+}
+
 static void ref_draw_line_solid(int16_t x1, int16_t y1, int16_t x2_delta, int16_t y2_delta,
 	uint16_t len, uint32_t color, uint32_t color_format)
 {
@@ -623,6 +656,34 @@ static void test_template(void)
 	check_frame("template_fill_rect jam1 32");
 }
 
+static void test_acc_blit(void)
+{
+	const uint16_t row_bytes = FB_PITCH_WORDS * sizeof(uint32_t);
+
+	seed_frame(0xa001);
+	acc_blit_rect((uintptr_t)((uint8_t *)actual_fb + 5 * row_bytes + 3),
+		(uintptr_t)actual_fb, 40, 30, 24, 9, row_bytes, row_bytes, 0, 0);
+	ref_blit_bytes(40, 30, 24, 9,
+		(uint8_t *)expected_fb + 5 * row_bytes + 3, row_bytes, row_bytes);
+	check_frame("acc_blit_rect forward");
+
+	/* Overlapping downward move: dest rect starts 4 rows below the source
+	 * rect, so a correct implementation must copy bottom-up (mode 1). */
+	seed_frame(0xa002);
+	acc_blit_rect((uintptr_t)((uint8_t *)actual_fb + 10 * row_bytes + 8),
+		(uintptr_t)actual_fb, 8, 14, 32, 12, row_bytes, row_bytes, 1, 0);
+	ref_blit_bytes(8, 14, 32, 12,
+		(uint8_t *)expected_fb + 10 * row_bytes + 8, row_bytes, row_bytes);
+	check_frame("acc_blit_rect reverse overlap");
+
+	seed_frame(0xa003);
+	acc_blit_rect((uintptr_t)((uint8_t *)actual_fb + 2 * row_bytes + 1),
+		(uintptr_t)actual_fb, 60, 40, 20, 7, row_bytes, row_bytes, 2, 0x42);
+	ref_blit_bytes_masked(60, 40, 20, 7,
+		(uint8_t *)expected_fb + 2 * row_bytes + 1, row_bytes, row_bytes, 0x42);
+	check_frame("acc_blit_rect masked");
+}
+
 static uint64_t monotime_ns(void)
 {
 	struct timespec ts;
@@ -732,6 +793,7 @@ static void run_tests(void)
 	test_planar();
 	test_p2d();
 	test_template();
+	test_acc_blit();
 }
 
 int main(int argc, char **argv)
