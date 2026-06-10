@@ -77,6 +77,17 @@ int __attribute__ ((visibility ("default"))) _putchar(char c) {
 volatile void (*core1_trampoline)(volatile struct ZZ9K_ENV* env);
 volatile int core2_execute = 0;
 
+struct core_fault_slot core1_fault __attribute__((aligned(32))) = { CORE_FAULT_NONE, {0} };
+
+static void record_fault(uint32_t code, const char *name)
+{
+	core1_fault.code = code;
+	Xil_DCacheFlushRange((INTPTR)&core1_fault, sizeof(core1_fault));
+	printf("%s: arm_exception_handler()!\n", name);
+	while (1) {
+	}
+}
+
 #pragma GCC push_options
 #pragma GCC optimize ("O1")
 // core1_loop is executed on core1 (vs core0)
@@ -252,31 +263,21 @@ uint32_t arm_app_output_event() {
 }
 
 void arm_exception_handler_id_reset(void *callback) {
-	printf("id_reset: arm_exception_handler()!\n");
-	while (1) {
-	}
+	record_fault(CORE_FAULT_RESET, "id_reset");
 }
 
 void arm_exception_handler_id_data_abort(void *callback) {
-	printf("id_data_abort: arm_exception_handler()!\n");
-	while (1) {
-	}
+	record_fault(CORE_FAULT_DATA_ABORT, "id_data_abort");
 }
 
 void arm_exception_handler_id_prefetch_abort(void *callback) {
-	printf("id_prefetch_abort: arm_exception_handler()!\n");
-	while (1) {
-	}
+	record_fault(CORE_FAULT_PREFETCH_ABORT, "id_prefetch_abort");
 }
 
 void arm_exception_handler(void *callback) {
-	printf("arm_exception_handler()!\n");
-	while (1) {
-	}
+	record_fault(CORE_FAULT_GENERIC, "generic");
 }
 
 void arm_exception_handler_illinst(void *callback) {
-	printf("arm_exception_handler_illinst()!\n");
-	while (1) {
-	}
+	record_fault(CORE_FAULT_UNDEF, "illinst");
 }

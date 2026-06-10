@@ -379,6 +379,7 @@ int main() {
 	// last time the ethernet state machine was serviced
 	XTime eth_task_last_run = 0;
 	uint32_t sdk_mailbox_poll_divider = 0;
+	uint32_t core1_fault_reported = CORE_FAULT_NONE;
 
 	while (1) {
 		watchdog_kick();
@@ -1615,6 +1616,17 @@ int main() {
 			if ((sdk_mailbox_poll_divider & 0xffU) == 0) {
 				sdk_mailbox_task();
 				sdk_diag_task_count++;
+
+				// surface coprocessor (core1) crashes; the slot owns its
+				// cache line, so the invalidate cannot drop core0 data
+				Xil_DCacheInvalidateRange((INTPTR)&core1_fault,
+						sizeof(core1_fault));
+				if (core1_fault.code != CORE_FAULT_NONE &&
+				    core1_fault.code != core1_fault_reported) {
+					printf("[core2] coprocessor core FAULT, code %lu\n",
+					       (unsigned long)core1_fault.code);
+					core1_fault_reported = core1_fault.code;
+				}
 			}
 
 			if ((zstate & 0xff) == 0) {

@@ -23,3 +23,19 @@ void arm_exception_handler_id_reset(void *callback);
 void arm_exception_handler_id_data_abort(void *callback);
 void arm_exception_handler_id_prefetch_abort(void *callback);
 void arm_exception_handler_illinst(void *callback);
+
+// Fault latch written by the exception handlers (usually crashed core1
+// apps) and polled by the core0 main loop. The slot owns a whole cache
+// line so core0 can invalidate-and-read it without touching its own data.
+#define CORE_FAULT_NONE            0u
+#define CORE_FAULT_RESET           1u
+#define CORE_FAULT_DATA_ABORT      2u
+#define CORE_FAULT_PREFETCH_ABORT  3u
+#define CORE_FAULT_UNDEF           4u
+#define CORE_FAULT_GENERIC         5u
+
+struct core_fault_slot {
+	volatile uint32_t code;
+	uint32_t pad[7];
+};
+extern struct core_fault_slot core1_fault;
