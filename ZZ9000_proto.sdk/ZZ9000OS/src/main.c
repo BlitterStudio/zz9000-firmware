@@ -53,6 +53,7 @@ void Xil_AssertNonVoid() {}
 #include "core2.h"
 #include "adc.h"
 #include "ax.h"
+#include "watchdog.h"
 #include "mp3/mp3.h"
 
 #include "zz_regs.h"
@@ -322,6 +323,8 @@ int main() {
 
 	interrupt_configure();
 
+	watchdog_init();
+
 	ethernet_init();
 
 	fpga_interrupt_connect(isr_video, isr_audio, isr_audio_rx);
@@ -373,11 +376,12 @@ int main() {
 	int decoder_param = 0; // selected parameter
 	int decoder_bytes_decoded = 0;
 
-	// idle task counter (used for ethernet negotiation)
+	// last time the ethernet state machine was serviced
 	XTime eth_task_last_run = 0;
 	uint32_t sdk_mailbox_poll_divider = 0;
 
 	while (1) {
+		watchdog_kick();
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
 		if (usb_read_pending) {
 			usb_status = zz_usb_read_blocks(0, usb_storage_read_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
