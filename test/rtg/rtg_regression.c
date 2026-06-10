@@ -684,6 +684,40 @@ static void test_acc_blit(void)
 	check_frame("acc_blit_rect masked");
 }
 
+static void ref_clear_rows(uint16_t w, uint16_t h, uint16_t pitch_px,
+	uint32_t color, int bpp)
+{
+	for (uint16_t y = 0; y < h; y++) {
+		uint8_t *row = (uint8_t *)expected_fb + (size_t)y * pitch_px * bpp;
+		for (uint16_t x = 0; x < w; x++) {
+			if (bpp == 1)
+				row[x] = (uint8_t)(color >> 24);
+			else if (bpp == 2)
+				((uint16_t *)row)[x] = (uint16_t)color;
+			else
+				((uint32_t *)row)[x] = color;
+		}
+	}
+}
+
+static void test_acc_clear(void)
+{
+	seed_frame(0x8001);
+	acc_clear_buffer((uintptr_t)actual_fb, 60, 40, 256, 0x00003456, 2);
+	ref_clear_rows(60, 40, 256, 0x00003456, 2);
+	check_frame("acc_clear_buffer 16");
+
+	seed_frame(0x8002);
+	acc_clear_buffer((uintptr_t)actual_fb, 50, 30, 128, 0xdeadbeef, 4);
+	ref_clear_rows(50, 30, 128, 0xdeadbeef, 4);
+	check_frame("acc_clear_buffer 32");
+
+	seed_frame(0x8003);
+	acc_clear_buffer((uintptr_t)actual_fb, 70, 50, 512, 0xa5000000, 1);
+	ref_clear_rows(70, 50, 512, 0xa5000000, 1);
+	check_frame("acc_clear_buffer 8");
+}
+
 static uint64_t monotime_ns(void)
 {
 	struct timespec ts;
@@ -722,6 +756,11 @@ static void bench_fill8(void)
 static void bench_fill32(void)
 {
 	fill_rect_solid(3, 2, 80, 48, 0xff336699, MNTVA_COLOR_32BIT);
+}
+
+static void bench_clear32(void)
+{
+	acc_clear_buffer((uintptr_t)actual_fb, 80, 48, FB_PITCH_WORDS, 0xff336699, 4);
 }
 
 static void bench_copy32(void)
@@ -779,6 +818,7 @@ static void run_benchmarks(void)
 	seed_frame(0x7000);
 	bench_one("fill_rect_solid 8", bench_fill8, 200000);
 	bench_one("fill_rect_solid 32", bench_fill32, 120000);
+	bench_one("acc_clear_buffer 32", bench_clear32, 120000);
 	bench_one("copy_rect_nomask 32", bench_copy32, 120000);
 	bench_one("p2c_rect src 8 planes", bench_p2c, 20000);
 	bench_one("p2d_rect src 8 planes", bench_p2d, 20000);
@@ -794,6 +834,7 @@ static void run_tests(void)
 	test_p2d();
 	test_template();
 	test_acc_blit();
+	test_acc_clear();
 }
 
 int main(int argc, char **argv)

@@ -1447,13 +1447,13 @@ void template_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y
 	}
 
 // Generic graphics acceleration functionality
-void acc_clear_buffer(uint32_t addr, uint16_t w, uint16_t h, uint16_t pitch_, uint32_t fg_color, uint32_t color_format_)
+void acc_clear_buffer(uintptr_t addr, uint16_t w, uint16_t h, uint16_t pitch_, uint32_t fg_color, uint32_t color_format_)
 {
 	if (!w || !h || !addr)
 		return;
 
 	uint16_t pitch = pitch_ * color_format_;
-	uint8_t* dp = (uint8_t*)((uint32_t)addr);
+	uint8_t* dp = (uint8_t*)addr;
 	uint8_t u8_fg = fg_color >> 24;
 
 	uint8_t color_format = MNTVA_COLOR_8BIT;
@@ -1461,15 +1461,21 @@ void acc_clear_buffer(uint32_t addr, uint16_t w, uint16_t h, uint16_t pitch_, ui
 
 	switch(color_format) {
 		case MNTVA_COLOR_8BIT:
-			memset(dp, u8_fg, h * pitch);
+			for (int y = 0; y < h; y++) {
+				memset(dp, u8_fg, w);
+				dp += pitch;
+			}
 			break;
 		case MNTVA_COLOR_16BIT565:
 		case MNTVA_COLOR_15BIT:
+			for (int y = 0; y < h; y++) {
+				memset16((uint16_t *)dp, (uint16_t)fg_color, w);
+				dp += pitch;
+			}
+			break;
 		case MNTVA_COLOR_32BIT:
 			for (int y = 0; y < h; y++) {
-				for (int x = 0; x < w; x++) {
-					SET_FG_PIXEL;
-				}
+				memset32((uint32_t *)dp, fg_color, w);
 				dp += pitch;
 			}
 			break;
