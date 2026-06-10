@@ -72,6 +72,35 @@ void set_fb(uint32_t* fb_, uint32_t pitch) {
 	fb_pitch=pitch;
 }
 
+static uint8_t* fb_limit = 0;
+
+void set_fb_limit(void* limit) {
+	fb_limit = (uint8_t*)limit;
+}
+
+/* Returns how many of the requested h rows starting at row y1 fit entirely
+ * below fb_limit. Returns h unchanged when no limit is configured. Row size
+ * is fb_pitch words; for the template/pattern ops fb_pitch is bytes, which
+ * makes this strictly more conservative there (never less safe). */
+static uint16_t clamp_rows_to_fb_limit(uint32_t y1, uint16_t h)
+{
+	uint8_t *row0;
+	size_t row_bytes, rows_fit;
+
+	if (!fb_limit || !fb)
+		return h;
+	row_bytes = (size_t)fb_pitch * sizeof(uint32_t);
+	if (row_bytes == 0)
+		return h;
+	row0 = (uint8_t *)fb + (size_t)y1 * row_bytes;
+	if (row0 >= fb_limit)
+		return 0;
+	rows_fit = (size_t)(fb_limit - row0) / row_bytes;
+	if (h > rows_fit)
+		h = (uint16_t)rows_fit;
+	return h;
+}
+
 static inline void draw_vertical_line_solid(uint32_t *dp, int32_t x, int32_t line_step,
 	uint32_t count, uint32_t fg_color, uint8_t u8_fg, uint32_t color_format)
 {
@@ -167,6 +196,10 @@ void *get_color_conversion_table(int index)
 
 void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t fg_color, uint32_t color_format, uint8_t mask)
 {
+	h = clamp_rows_to_fb_limit(rect_y1, h);
+	if (!h)
+		return;
+
 	uint32_t* dp = fb + (rect_y1 * fb_pitch);
 	uint8_t u8_fg = fg_color >> 24;
 	uint16_t rect_y2 = rect_y1 + h, rect_x2 = rect_x1 + w;
@@ -210,6 +243,10 @@ void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint3
 
 void fill_rect_solid(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t rect_rgb, uint32_t color_format)
 {
+	h = clamp_rows_to_fb_limit(rect_y1, h);
+	if (!h)
+		return;
+
 	uint32_t* p = fb + (rect_y1 * fb_pitch);
 	uint16_t rect_y2 = rect_y1 + h;
 
@@ -245,6 +282,10 @@ void fill_rect_solid(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h,
 
 void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint8_t mask, uint32_t color_format)
 {
+	h = clamp_rows_to_fb_limit(rect_y1, h);
+	if (!h)
+		return;
+
 	uint32_t* dp = fb + (rect_y1 * fb_pitch);
 	uint16_t x;
 
@@ -340,6 +381,10 @@ void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uin
 void copy_rect_nomask(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint16_t rect_sx, uint16_t rect_sy, uint32_t color_format, uint32_t* sp_src, uint32_t src_pitch, uint8_t draw_mode)
 {
 	if (w == 0 || h == 0)
+		return;
+
+	h = clamp_rows_to_fb_limit(rect_y1, h);
+	if (!h)
 		return;
 
 	uint32_t* dp = fb + (rect_y1 * fb_pitch);
@@ -439,6 +484,10 @@ void copy_rect_nomask(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h
 void copy_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint16_t rect_sx, uint16_t rect_sy, uint32_t color_format, uint32_t* sp_src, uint32_t src_pitch, uint8_t mask)
 {
 	if (w == 0 || h == 0)
+		return;
+
+	h = clamp_rows_to_fb_limit(rect_y1, h);
+	if (!h)
 		return;
 
 	uint32_t* dp = fb + (rect_y1 * fb_pitch);
@@ -807,6 +856,14 @@ static inline void p2d_store_8pixels(uint32_t *dp, int16_t x, uint64_t pixels,
 
 void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src)
 {
+	/* h also sets the source plane stride and wrap below, so only the row
+	 * loop bound is clamped (h_draw), never h itself. */
+	if (dy < 0 || h <= 0)
+		return;
+	int16_t h_draw = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h);
+	if (!h_draw)
+		return;
+
 	uint32_t *dp = fb + (dy * fb_pitch);
 
 	uint8_t cur_bit, base_bit, base_byte;
@@ -827,7 +884,7 @@ void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 	if (direct_copy)
 		p2c_byte_lut_init();
 
-	for (int16_t line_y = 0; line_y < h; line_y++) {
+	for (int16_t line_y = 0; line_y < h_draw; line_y++) {
 		int16_t x = dx;
 		int16_t rect_x2 = dx + w;
 
@@ -918,6 +975,14 @@ static inline uint8_t reverse_lookup(uint32_t *bmp_pal, uint8_t planes, uint32_t
 }
 
 void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint32_t color_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src, uint32_t color_format) {
+	/* h also sets the source plane stride and wrap below, so only the row
+	 * loop bound is clamped (h_draw), never h itself. */
+	if (dy < 0 || h <= 0)
+		return;
+	int16_t h_draw = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h);
+	if (!h_draw)
+		return;
+
 	uint32_t *dp = fb + (dy * fb_pitch);
 
 	uint8_t cur_bit, base_bit, base_byte;
@@ -941,7 +1006,7 @@ void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 	else
 		rl_cache_invalidate();
 
-	for (int16_t line_y = 0; line_y < h; line_y++) {
+	for (int16_t line_y = 0; line_y < h_draw; line_y++) {
 		int16_t x = dx;
 		int16_t rect_x2 = dx + w;
 
@@ -1167,6 +1232,10 @@ void pattern_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y1
 	uint16_t x_offset, uint16_t y_offset,
 	uint8_t *tmpl_data, uint16_t tmpl_pitch, uint16_t loop_rows)
 {
+	h = clamp_rows_to_fb_limit(rect_y1, h);
+	if (!h)
+		return;
+
 	uint32_t rect_x2 = rect_x1 + w;
 	uint32_t *dp = fb + (rect_y1 * (fb_pitch / 4));
 	uint8_t* tmpl_base = tmpl_data;
@@ -1330,6 +1399,10 @@ void template_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y
 	uint16_t x_offset, uint16_t y_offset,
 	uint8_t *tmpl_data, uint16_t tmpl_pitch)
 {
+	h = clamp_rows_to_fb_limit(rect_y1, h);
+	if (!h)
+		return;
+
 	uint32_t rect_x2 = rect_x1 + w;
 	uint32_t *dp = fb + (rect_y1 * (fb_pitch / 4));
 

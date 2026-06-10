@@ -40,6 +40,9 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata);
 void handle_acc_op(uint16_t zdata);
 
 void set_fb(uint32_t* fb_, uint32_t pitch);
+// Upper bound for fb-relative rect writes (end of legal video/surface
+// memory). 0 disables clamping.
+void set_fb_limit(void* limit);
 
 // ARM-side video memory write indicator, consumed by the video ISR cache flush
 extern volatile int video_fb_dirty;

@@ -314,6 +314,10 @@ int main() {
 
 	video_state = video_init();
 
+	// RTG rect ops may write anywhere in framebuffer + legacy surface
+	// memory, but never past it into the SDK heaps and beyond
+	set_fb_limit((uint8_t *)(uintptr_t)LEGACY_SURFACE_HEAP_END);
+
 	xadc_init();
 
 	interrupt_configure();

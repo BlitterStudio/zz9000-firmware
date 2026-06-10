@@ -21,7 +21,14 @@ enum {
 	FB_WORDS = FB_PITCH_WORDS * FB_H,
 };
 
-static uint32_t actual_fb[FB_WORDS];
+/* The guard zone sits directly after the fb inside one object so clamp-test
+ * overruns land somewhere deterministic; check_guard verifies it is never
+ * written. */
+static struct {
+	uint32_t fb[FB_WORDS];
+	uint32_t guard[FB_PITCH_WORDS * 16];
+} actual_buf;
+#define actual_fb (actual_buf.fb)
 static uint32_t expected_fb[FB_WORDS];
 static uint32_t rng_state;
 static unsigned failures;
@@ -718,6 +725,45 @@ static void test_acc_clear(void)
 	check_frame("acc_clear_buffer 8");
 }
 
+static void check_guard(const char *name)
+{
+	const uint8_t *g = (const uint8_t *)actual_buf.guard;
+
+	for (size_t i = 0; i < sizeof(actual_buf.guard); i++) {
+		if (g[i] != 0x5c) {
+			printf("FAIL %-30s guard byte=%zu actual=%02x expected=5c\n",
+				name, i, g[i]);
+			failures++;
+			return;
+		}
+	}
+	printf("ok   %s\n", name);
+}
+
+static void test_fb_limit_clamp(void)
+{
+	seed_frame(0xb001);
+	memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+	set_fb_limit((uint8_t *)actual_fb + sizeof(actual_fb));
+
+	/* Rect of 12 rows starting 4 rows above the buffer end: only the 4 rows
+	 * that fully fit below the limit may be written; the rest would land in
+	 * the guard zone. */
+	fill_rect_solid(10, FB_H - 4, 20, 12, 0x77000000, MNTVA_COLOR_8BIT);
+	ref_fill_rect_solid(10, FB_H - 4, 20, 4, 0x77000000, MNTVA_COLOR_8BIT);
+	check_frame("fill_rect_solid clamped");
+	check_guard("fill_rect_solid guard");
+
+	seed_frame(0xb002);
+	memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+	invert_rect(5, FB_H - 2, 30, 10, 0xff, MNTVA_COLOR_8BIT);
+	ref_invert_rect(5, FB_H - 2, 30, 2, 0xff, MNTVA_COLOR_8BIT);
+	check_frame("invert_rect clamped");
+	check_guard("invert_rect guard");
+
+	set_fb_limit(0);
+}
+
 static uint64_t monotime_ns(void)
 {
 	struct timespec ts;
@@ -835,6 +881,7 @@ static void run_tests(void)
 	test_template();
 	test_acc_blit();
 	test_acc_clear();
+	test_fb_limit_clamp();
 }
 
 int main(int argc, char **argv)
