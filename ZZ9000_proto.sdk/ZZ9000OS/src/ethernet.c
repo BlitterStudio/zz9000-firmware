@@ -1095,10 +1095,16 @@ void micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr)
 		control |= IEEE_CTRL_RESET_MASK;
 		XEmacPs_PhyWrite(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
 
+		int reset_timeout = 0;
 		while (1) {
 			XEmacPs_PhyRead(xemacpsp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
-			if (control & IEEE_CTRL_RESET_MASK) continue; // ??? weird
-			else break;
+			if (!(control & IEEE_CTRL_RESET_MASK))
+				break;
+			usleep(100);
+			if (++reset_timeout > 10000) {
+				printf("PHY: reset did not complete, continuing anyway.\n");
+				break;
+			}
 		}
 	}
 

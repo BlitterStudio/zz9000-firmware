@@ -122,7 +122,7 @@ int adau_write32(u8 i2c_addr, u16 addr, u8* data) {
 		usleep(1);
 		timeout++;
 		if (timeout>10000) {
-			printf("ADAU I2C write40 timeout.\n");
+			printf("ADAU I2C write32 timeout.\n");
 			return -1;
 		}
 	}
@@ -173,11 +173,19 @@ int adau_read24(u8 i2c_addr, u16 addr, u8* buffer) {
 	abuffer[1] = addr&0xff;
 
 	XIicPs_SetOptions(iic, XIICPS_REP_START_OPTION);
-	while (XIicPs_BusIsBusy(iic)) {};
+	int timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			printf("ADAU I2C read24a timeout.\n");
+			return -1;
+		}
+	}
 	status1 = XIicPs_MasterSendPolled(iic, abuffer, 2, i2c_addr);
 	XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
 	XIicPs_MasterRecvPolled(iic, buffer, 3, i2c_addr);
-	int timeout = 0;
+	timeout = 0;
 	while (XIicPs_BusIsBusy(iic)) {
 		usleep(1);
 		timeout++;

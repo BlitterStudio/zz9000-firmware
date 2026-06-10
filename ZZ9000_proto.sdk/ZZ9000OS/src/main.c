@@ -1626,8 +1626,8 @@ int main() {
 			}
 		}
 
-		// TODO: potential hang, timeout?
 		if (need_req_ack) {
+			u32 ack_spins = 0;
 			while (1) {
 				// 1. fpga needs to respond to flag bit 31 or 30 going high (signals request fulfilled)
 				// 2. it does that by clearing the request bit
@@ -1642,6 +1642,11 @@ int main() {
 					break;
 				if ((zstate & 0xff) == 0)
 					break; // reset
+				if (++ack_spins > 10000000) {
+					printf("[zorro] request ack timeout (state %08lx)\n",
+					       (unsigned long)zstate);
+					break;
+				}
 			}
 			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG0, 0);
 			need_req_ack = 0;
