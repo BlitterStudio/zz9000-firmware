@@ -29,11 +29,6 @@
 uint32_t* fb=0;
 uint32_t fb_pitch=0;
 
-/* Set whenever the ARM touches video memory; the video ISR flushes the data
- * caches on the next frame boundary and clears it. Every software gfx op is
- * preceded by a set_fb() call, which makes set_fb the master set-point. */
-volatile int video_fb_dirty = 1;
-
 static inline void memset16(uint16_t *dst, uint16_t val, uint32_t count) {
 #ifdef __ARM_NEON__
 	uint16x8_t v = vdupq_n_u16(val);
@@ -67,7 +62,6 @@ static inline void memset32(uint32_t *dst, uint32_t val, uint32_t count) {
 }
 
 void set_fb(uint32_t* fb_, uint32_t pitch) {
-	video_fb_dirty = 1;
 	fb=fb_;
 	fb_pitch=pitch;
 }

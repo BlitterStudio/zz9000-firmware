@@ -64,6 +64,17 @@ Hardware validation is still required for performance/bus timing changes.
 | `zz9000_project.tcl` | Vivado project/block design source |
 | `bootimage_work/` | Committed FSBL, bitstreams, BIF — canonical output dir |
 
+### Cache-coherency gotcha (read before touching cache code)
+
+The Zorro bridge's main AXI master enters the PS through **S_AXI_ACP** (cache-coherent,
+snoops/allocates L1/L2), while the GEM ethernet, VDMA, and audio formatter DMAs use
+non-coherent HP/dedicated ports straight to DDR. The **full L1+L2 flush in the video
+ISR** (`video.c`, `isr_video`) is what keeps these two worlds coherent — it is NOT just
+for ARM-written framebuffer data. Making it conditional broke ethernet RX (the Amiga
+read stale L2 lines instead of fresh GEM-written frames; June 2026). The fact that a
+buffer is mapped uncached for the ARM does **not** protect it: the FPGA's ACP
+transactions hit L2 regardless of the ARM's MMU attributes.
+
 ## Firmware Variants
 
 7 variants controlled by Verilog `` `define `` blocks in `mntzorro.v`:

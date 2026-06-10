@@ -44,9 +44,6 @@ void set_fb(uint32_t* fb_, uint32_t pitch);
 // memory). 0 disables clamping.
 void set_fb_limit(void* limit);
 
-// ARM-side video memory write indicator, consumed by the video ISR cache flush
-extern volatile int video_fb_dirty;
-
 void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t rect_rgb, uint32_t color_format, uint8_t mask);
 void fill_rect_solid(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t rect_rgb, uint32_t color_format);
 
