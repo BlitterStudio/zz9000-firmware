@@ -268,6 +268,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 
 	// FIXME
 	memset((u32 *)Z3_SCRATCH_ADDR, 0, sizeof(struct GFXData));
+	video_fb_dirty = 1;
 
 	// clear audio buffer on reset
 	memset((void*)AUDIO_TX_BUFFER_ADDRESS, 0, AUDIO_TX_BUFFER_SIZE);

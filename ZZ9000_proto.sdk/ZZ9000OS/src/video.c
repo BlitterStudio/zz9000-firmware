@@ -16,6 +16,7 @@ static XAxiVdma vdma;
 static XClk_Wiz clkwiz;
 
 extern int interrupt_enabled_vblank;
+extern volatile int video_fb_dirty;
 
 struct zz_video_mode preset_video_modes[ZZVMODE_NUM] = {
     //   HRES       VRES    HSTART  HEND    HMAX    VSTART  VEND    VMAX    POLARITY    MHZ     PIXELCLOCK HZ   VERTICAL HZ     HDMI    MUL/DIV/DIV2
@@ -207,6 +208,7 @@ void fb_fill(uint32_t offset) {
 
 void videocap_area_clear() {
 	fb_fill(0x00dff000 / 4);
+	video_fb_dirty = 1;
 }
 
 #define VF_DLY ;
@@ -372,9 +374,14 @@ void isr_video(void *dummy) {
 
 	// on vblanks, handle arm cache flush, amiga interrupts and sprites
 	if (!vblank || (vs.split_pos == 0)) {
-		// flush the data caches synchronized to full frames
-		Xil_L1DCacheFlush();
-		Xil_L2CacheFlush();
+		// flush the data caches synchronized to full frames, but only when
+		// the ARM touched video memory since the last flush (cleared before
+		// flushing so a racing write re-marks the frame dirty)
+		if (video_fb_dirty) {
+			video_fb_dirty = 0;
+			Xil_L1DCacheFlush();
+			Xil_L2CacheFlush();
+		}
 		isr_flush_count = 0;
 
 		if (sprite_request_show) {

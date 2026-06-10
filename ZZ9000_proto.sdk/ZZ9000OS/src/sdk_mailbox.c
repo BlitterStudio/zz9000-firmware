@@ -22,6 +22,8 @@
 #include "mp3/mp3.h"
 #include "mp3/minimp3.h"
 
+extern volatile int video_fb_dirty;
+
 #define SDK_MAILBOX_REQUEST_OFFSET     SDK_MAILBOX_DESCRIPTOR_SIZE
 #define SDK_MAILBOX_COMPLETION_OFFSET  \
 	(SDK_MAILBOX_REQUEST_OFFSET + \
@@ -3736,6 +3738,9 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
                                uint32_t pending_requests)
 {
 	uint16_t opcode = get_be16(req->opcode);
+	/* SDK ops can write surfaces the VDMA scans out; make sure the next
+	 * frame boundary flushes the data caches. */
+	video_fb_dirty = 1;
 	uint16_t payload_len = get_be16(req->payload_len);
 
 	if (payload_len > sizeof(req->payload))

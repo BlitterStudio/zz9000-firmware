@@ -20,6 +20,8 @@ void handle_acc_op(uint16_t zdata)
     struct GFXData *data = (struct GFXData*)((u32)Z3_SCRATCH_ADDR);
     //int cf_bpp[MNTVA_COLOR_NUM] = { 1, 2, 4, -8, 2, };
 
+    video_fb_dirty = 1;
+
     switch (zdata) {
         // SURFACE BLIT OPS
         case ACC_OP_NONE: {
