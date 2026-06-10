@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include "interrupt.h"
 #include "mntzorro.h"
+#include "xil_exception.h"
+#include "xpseudo_asm.h"
 
 static XScuGic intc_handle;
 
@@ -77,18 +79,23 @@ int fpga_interrupt_connect(void* isr_video, void* isr_audio_tx, void* isr_audio_
   return 0;
 }
 
-static uint32_t amiga_interrupts = 0;
-static int amiga_interrupt_line_asserted = 1;
+static volatile uint32_t amiga_interrupts = 0;
+static volatile int amiga_interrupt_line_asserted = 1;
 
+/* set/clear are called from both ISRs and the main loop; the read-modify-
+ * write of the shared state and the matching INT line update must not be
+ * interleaved, so they run with IRQs masked (restore-safe from ISR context). */
 void amiga_interrupt_set(uint32_t bit) {
-	//printf("[airq] +%lu\n", bit);
-	// set bit
-	amiga_interrupts |= bit;
+	u32 cpsr = mfcpsr();
+	mtcpsr(cpsr | XIL_EXCEPTION_IRQ);
 
+	amiga_interrupts |= bit;
 	if (amiga_interrupts != 0 && !amiga_interrupt_line_asserted) {
 		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 2 | 1);
 		amiga_interrupt_line_asserted = 1;
 	}
+
+	mtcpsr(cpsr);
 }
 
 uint32_t amiga_interrupt_get() {
@@ -96,12 +103,14 @@ uint32_t amiga_interrupt_get() {
 }
 
 void amiga_interrupt_clear(uint32_t bit) {
-	//printf("[airq] -%lu\n", bit);
-	// unset bit
-	amiga_interrupts = amiga_interrupts & ~bit;
+	u32 cpsr = mfcpsr();
+	mtcpsr(cpsr | XIL_EXCEPTION_IRQ);
 
+	amiga_interrupts = amiga_interrupts & ~bit;
 	if (amiga_interrupts == 0 && amiga_interrupt_line_asserted) {
 		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 2 | 0);
 		amiga_interrupt_line_asserted = 0;
 	}
+
+	mtcpsr(cpsr);
 }
