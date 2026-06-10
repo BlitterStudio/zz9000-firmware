@@ -50,7 +50,7 @@ LZMA_SDK_SRC ?= $(LZMA_SDK_DIR)/src
 LZMA_SDK_BUILD ?= $(LZMA_SDK_DIR)/build
 
 # Include paths
-INCLUDES = -I$(SRC_DIR) -I$(BSP_INC)
+INCLUDES = -I$(SRC_DIR) -I$(SRC_DIR)/bearssl -I$(BSP_INC)
 INCLUDES += -I$(LIBJPEG_TURBO_BUILD) -I$(LIBJPEG_TURBO_SRC)/src
 INCLUDES += -I$(ZLIB_SRC)
 INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)
@@ -78,6 +78,7 @@ CFLAGS = $(CPU_FLAGS) $(COMMON_FLAGS) -O2 $(EXTRA_CFLAGS)
 # Linker flags
 LDFLAGS = $(CPU_FLAGS)
 LDFLAGS += -Wl,-build-id=none
+LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -specs=$(SRC_DIR)/Xilinx.spec
 LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -L$(BSP_LIB)
@@ -119,6 +120,29 @@ C_SRCS = \
 	$(SRC_DIR)/usb_proxy.c \
 	$(SRC_DIR)/sdk_compression.c \
 	$(SRC_DIR)/sdk_crypto.c \
+	$(SRC_DIR)/bearssl/ec_c25519_m31.c \
+	$(SRC_DIR)/bearssl/ec_curve25519.c \
+	$(SRC_DIR)/bearssl/ccopy.c \
+	$(SRC_DIR)/bearssl/i31_add.c \
+	$(SRC_DIR)/bearssl/i31_bitlen.c \
+	$(SRC_DIR)/bearssl/i31_decmod.c \
+	$(SRC_DIR)/bearssl/i31_decode.c \
+	$(SRC_DIR)/bearssl/i31_decred.c \
+	$(SRC_DIR)/bearssl/i31_encode.c \
+	$(SRC_DIR)/bearssl/i31_fmont.c \
+	$(SRC_DIR)/bearssl/i31_iszero.c \
+	$(SRC_DIR)/bearssl/i31_moddiv.c \
+	$(SRC_DIR)/bearssl/i31_modpow.c \
+	$(SRC_DIR)/bearssl/i31_modpow2.c \
+	$(SRC_DIR)/bearssl/i31_montmul.c \
+	$(SRC_DIR)/bearssl/i31_mulacc.c \
+	$(SRC_DIR)/bearssl/i31_muladd.c \
+	$(SRC_DIR)/bearssl/i31_ninv31.c \
+	$(SRC_DIR)/bearssl/i31_reduce.c \
+	$(SRC_DIR)/bearssl/i31_rshift.c \
+	$(SRC_DIR)/bearssl/i31_sub.c \
+	$(SRC_DIR)/bearssl/i31_tmont.c \
+	$(SRC_DIR)/bearssl/i32_div32.c \
 	$(SRC_DIR)/sdk_image_stream.c \
 	$(SRC_DIR)/sdk_jpeg.c \
 	$(SRC_DIR)/sdk_surface.c \
