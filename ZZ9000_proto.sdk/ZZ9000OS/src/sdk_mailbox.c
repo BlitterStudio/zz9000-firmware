@@ -459,6 +459,18 @@ struct SDKCryptoResultPayload {
 	uint8_t reserved[36];
 };
 
+struct SDKCryptoKXPayload {
+	uint8_t scalar_handle[4];
+	uint8_t scalar_offset[4];
+	uint8_t point_handle[4];
+	uint8_t point_offset[4];
+	uint8_t dst_handle[4];
+	uint8_t dst_offset[4];
+	uint8_t algorithm[4];
+	uint8_t flags[4];
+	uint8_t reserved[16];
+};
+
 struct SDKDecompressPayload {
 	uint8_t src_handle[4];
 	uint8_t src_offset[4];
@@ -823,9 +835,9 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		SDK_SERVICE_CRYPTO,
 		0x00020000U,
 		SDK_CAP_CRYPTO,
-		SDK_SERVICE_FLAG_FIRMWARE,
+		SDK_SERVICE_FLAG_FIRMWARE | SDK_CRYPTO_FLAG_X25519,
 		SDK_SERVICE_CRYPTO,
-		3,
+		4,
 		"crypto"
 	},
 	{
@@ -3325,6 +3337,67 @@ static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
 	return SDK_STATUS_OK;
 }
 
+static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
+                                  volatile struct SDKMailboxEntry *comp,
+                                  uint16_t payload_len)
+{
+	volatile struct SDKCryptoKXPayload *p;
+	volatile struct SDKCryptoResultPayload *result;
+	struct SDKSharedBuffer *scalar;
+	struct SDKSharedBuffer *point;
+	struct SDKSharedBuffer *dst;
+	const uint8_t *scalar_data;
+	const uint8_t *point_data;
+	uint8_t *dst_data;
+	uint8_t shared[SDK_X25519_SHARED_SIZE];
+	uint32_t algorithm;
+	uint32_t scalar_off;
+	uint32_t point_off;
+	uint32_t dst_off;
+
+	if (payload_len < sizeof(struct SDKCryptoKXPayload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	p = (volatile struct SDKCryptoKXPayload *)req->payload;
+	algorithm = get_be32(p->algorithm);
+	if (algorithm != SDK_CRYPTO_KX_X25519)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	scalar = find_shared_buffer(get_be32(p->scalar_handle));
+	point  = find_shared_buffer(get_be32(p->point_handle));
+	dst    = find_shared_buffer(get_be32(p->dst_handle));
+	scalar_off = get_be32(p->scalar_offset);
+	point_off  = get_be32(p->point_offset);
+	dst_off    = get_be32(p->dst_offset);
+
+	if (!buffer_range_valid(scalar, scalar_off, SDK_X25519_KEY_SIZE)   ||
+	    !buffer_range_valid(point,  point_off,  SDK_X25519_POINT_SIZE) ||
+	    !buffer_range_valid(dst,    dst_off,    SDK_X25519_SHARED_SIZE))
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	scalar_data = (const uint8_t *)(uintptr_t)(scalar->address + scalar_off);
+	point_data  = (const uint8_t *)(uintptr_t)(point->address  + point_off);
+	dst_data    = (uint8_t *)(uintptr_t)(dst->address + dst_off);
+
+	Xil_DCacheInvalidateRange((INTPTR)scalar_data, SDK_X25519_KEY_SIZE);
+	Xil_DCacheInvalidateRange((INTPTR)point_data,  SDK_X25519_POINT_SIZE);
+
+	if (!sdk_x25519(scalar_data, point_data, shared))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	memcpy(dst_data, shared, SDK_X25519_SHARED_SIZE);
+	Xil_DCacheFlushRange((INTPTR)dst_data, SDK_X25519_SHARED_SIZE);
+	memset(shared, 0, sizeof(shared));  /* scrub stack copy */
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKCryptoResultPayload *)comp->payload;
+	put_be32(result->bytes_written, SDK_X25519_SHARED_SIZE);
+	put_be32(result->algorithm, SDK_CRYPTO_KX_X25519);
+	put_be32(result->flags, 0U);
+	return SDK_STATUS_OK;
+}
+
 static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
                                   volatile struct SDKMailboxEntry *comp,
                                   uint16_t payload_len)
@@ -3829,6 +3902,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_crypto_stream(req, comp, payload_len);
 	case SDK_OP_CRYPTO_AEAD:
 		return handle_crypto_aead(req, comp, payload_len);
+	case SDK_OP_CRYPTO_KX:
+		return handle_crypto_kx(req, comp, payload_len);
 	case SDK_OP_DIAG_READ:
 		return handle_diag_read(req, comp, pending_requests);
 	case SDK_OP_DIAG_TIMING:

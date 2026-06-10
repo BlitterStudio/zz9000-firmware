@@ -156,6 +156,9 @@
 #define SDK_OP_CRYPTO_HASH             0x0800U
 #define SDK_OP_CRYPTO_STREAM           0x0801U
 #define SDK_OP_CRYPTO_AEAD             0x0802U
+#define SDK_OP_CRYPTO_KX               0x0803U
+#define SDK_CRYPTO_KX_X25519           1U
+#define SDK_CRYPTO_FLAG_X25519         (1U << 16)  /* crypto service capability bit */
 
 #define SDK_OP_DIAG_READ               0x0900U
 #define SDK_OP_DIAG_TIMING             0x0901U
