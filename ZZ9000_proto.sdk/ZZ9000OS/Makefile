@@ -152,6 +152,11 @@ C_SRCS = \
 	$(SRC_DIR)/bearssl/ec_secp256r1.c \
 	$(SRC_DIR)/bearssl/ec_secp384r1.c \
 	$(SRC_DIR)/bearssl/ec_secp521r1.c \
+	$(SRC_DIR)/bearssl/aes_ct.c \
+	$(SRC_DIR)/bearssl/aes_ct_enc.c \
+	$(SRC_DIR)/bearssl/aes_ct_ctr.c \
+	$(SRC_DIR)/bearssl/ghash_ctmul.c \
+	$(SRC_DIR)/bearssl/gcm.c \
 	$(SRC_DIR)/sdk_image_stream.c \
 	$(SRC_DIR)/sdk_jpeg.c \
 	$(SRC_DIR)/sdk_surface.c \
