@@ -40,7 +40,7 @@ SECTIONS
 {
 .text : {
    KEEP (*(.vectors))
-   *(.boot)
+   KEEP (*(.boot))
    *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o) .text)
    *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o) .text.*)
    *(.gnu.linkonce.t.*)
@@ -159,7 +159,7 @@ SECTIONS
 
 .mmu_tbl (ALIGN(16384)) : {
    __mmu_tbl_start = .;
-   *(.mmu_tbl)
+   KEEP (*(.mmu_tbl))
    __mmu_tbl_end = .;
 } > ps7_ddr_0
 
