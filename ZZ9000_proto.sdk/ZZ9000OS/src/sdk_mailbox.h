@@ -169,6 +169,7 @@
 #define SDK_SERVICE_FLAG_CRYPTO_P256       (1U << 17)
 #define SDK_SERVICE_FLAG_CRYPTO_ECDSA_P256 (1U << 18)
 #define SDK_SERVICE_FLAG_CRYPTO_RSA_2048   (1U << 19)
+#define SDK_SERVICE_FLAG_CRYPTO_AES_GCM    (1U << 20)
 
 /* Crypto verify payload: 48 bytes to match the inline mailbox entry size and
  * the SDK ZZ9KCryptoVerifyPayload byte-for-byte. All fields are big-endian
@@ -274,7 +275,17 @@ struct SDKCryptoVerifyPayload {
 #define SDK_CRYPTO_STREAM_CHACHA20     1U
 #define SDK_CRYPTO_AEAD_NONE           0U
 #define SDK_CRYPTO_AEAD_CHACHA20_POLY1305 1U
+#define SDK_CRYPTO_AEAD_AES128_GCM     2U
+#define SDK_CRYPTO_AEAD_AES256_GCM     3U
 #define SDK_CRYPTO_AEAD_FLAG_DECRYPT   (1U << 0)
+
+/* The AEAD payload has no algorithm field, so the AEAD algorithm rides in the
+ * flags field at bits 8-15. A zero algorithm nibble means the legacy default,
+ * ChaCha20-Poly1305, so existing callers stay byte-compatible. */
+#define SDK_CRYPTO_AEAD_ALG_SHIFT      8
+#define SDK_CRYPTO_AEAD_ALG_MASK       (0xFFU << 8)
+#define SDK_CRYPTO_AEAD_FLAG_GET_ALG(flags) \
+	(((flags) & SDK_CRYPTO_AEAD_ALG_MASK) >> SDK_CRYPTO_AEAD_ALG_SHIFT)
 
 #define SDK_COMPRESSION_NONE           0U
 #define SDK_COMPRESSION_DEFLATE_RAW    1U

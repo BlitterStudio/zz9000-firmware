@@ -9,6 +9,9 @@
 #include "sdk_crypto.h"
 #include "bearssl/bearssl_ec.h"
 #include "bearssl/bearssl_rsa.h"
+#include "bearssl/bearssl_block.h"
+#include "bearssl/bearssl_aead.h"
+#include "bearssl/bearssl_hash.h"
 #include <string.h>
 
 typedef struct SDKSHA256Context {
@@ -957,4 +960,50 @@ int sdk_rsa_verify_pkcs1_sha256(const uint8_t modulus[SDK_RSA_2048_KEY_BYTES],
 		memset(hash_out, 0, sizeof(hash_out));
 		return diff == 0;
 	}
+}
+
+void sdk_aes_gcm_encrypt(const uint8_t *key, uint32_t key_length,
+                         const uint8_t nonce[SDK_AES_GCM_NONCE_SIZE],
+                         const uint8_t *aad, uint32_t aad_length,
+                         const uint8_t *plaintext, uint32_t plaintext_length,
+                         uint8_t *ciphertext,
+                         uint8_t tag[SDK_AES_GCM_TAG_SIZE])
+{
+	br_aes_ct_ctr_keys bc;
+	br_gcm_context gc;
+
+	br_aes_ct_ctr_init(&bc, key, key_length);
+	br_gcm_init(&gc, &bc.vtable, br_ghash_ctmul);
+	br_gcm_reset(&gc, nonce, SDK_AES_GCM_NONCE_SIZE);
+	if (aad_length != 0U)
+		br_gcm_aad_inject(&gc, aad, aad_length);
+	br_gcm_flip(&gc);
+	/* br_gcm_run works in place; produce ciphertext from plaintext first. */
+	if (ciphertext != plaintext)
+		memcpy(ciphertext, plaintext, plaintext_length);
+	br_gcm_run(&gc, 1, ciphertext, plaintext_length);
+	br_gcm_get_tag(&gc, tag);
+}
+
+int sdk_aes_gcm_decrypt(const uint8_t *key, uint32_t key_length,
+                        const uint8_t nonce[SDK_AES_GCM_NONCE_SIZE],
+                        const uint8_t *aad, uint32_t aad_length,
+                        const uint8_t *ciphertext, uint32_t ciphertext_length,
+                        const uint8_t tag[SDK_AES_GCM_TAG_SIZE],
+                        uint8_t *plaintext)
+{
+	br_aes_ct_ctr_keys bc;
+	br_gcm_context gc;
+
+	br_aes_ct_ctr_init(&bc, key, key_length);
+	br_gcm_init(&gc, &bc.vtable, br_ghash_ctmul);
+	br_gcm_reset(&gc, nonce, SDK_AES_GCM_NONCE_SIZE);
+	if (aad_length != 0U)
+		br_gcm_aad_inject(&gc, aad, aad_length);
+	br_gcm_flip(&gc);
+	/* GHASH covers the ciphertext; run in place after copying it across. */
+	if (plaintext != ciphertext)
+		memcpy(plaintext, ciphertext, ciphertext_length);
+	br_gcm_run(&gc, 0, plaintext, ciphertext_length);
+	return br_gcm_check_tag(&gc, tag) != 0 ? 1 : 0;
 }

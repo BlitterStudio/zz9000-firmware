@@ -838,7 +838,8 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_CRYPTO_X25519 |
 			SDK_SERVICE_FLAG_CRYPTO_P256 |
 			SDK_SERVICE_FLAG_CRYPTO_ECDSA_P256 |
-			SDK_SERVICE_FLAG_CRYPTO_RSA_2048,
+			SDK_SERVICE_FLAG_CRYPTO_RSA_2048 |
+			SDK_SERVICE_FLAG_CRYPTO_AES_GCM,
 		SDK_SERVICE_CRYPTO,
 		5,
 		"crypto"
@@ -3245,6 +3246,8 @@ static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
 	uint32_t aad_length;
 	uint32_t key_offset;
 	uint32_t flags;
+	uint32_t algorithm;
+	uint32_t key_size;
 	const uint8_t *src_data;
 	const uint8_t *aad_data;
 	const uint8_t *key_data;
@@ -3257,8 +3260,26 @@ static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
 
 	payload = (volatile struct SDKCryptoAeadPayload *)req->payload;
 	flags = get_be32(payload->flags);
-	if ((flags & ~SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0)
+	if ((flags & ~(SDK_CRYPTO_AEAD_FLAG_DECRYPT | SDK_CRYPTO_AEAD_ALG_MASK)) != 0)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	/* The algorithm rides in the flags; a zero nibble is the legacy default. */
+	algorithm = SDK_CRYPTO_AEAD_FLAG_GET_ALG(flags);
+	if (algorithm == SDK_CRYPTO_AEAD_NONE)
+		algorithm = SDK_CRYPTO_AEAD_CHACHA20_POLY1305;
+	switch (algorithm) {
+	case SDK_CRYPTO_AEAD_CHACHA20_POLY1305:
+		key_size = SDK_CHACHA20_KEY_SIZE;
+		break;
+	case SDK_CRYPTO_AEAD_AES128_GCM:
+		key_size = SDK_AES128_KEY_SIZE;
+		break;
+	case SDK_CRYPTO_AEAD_AES256_GCM:
+		key_size = SDK_AES256_KEY_SIZE;
+		break;
+	default:
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	}
 
 	src = find_shared_buffer(get_be32(payload->src_handle));
 	dst = find_shared_buffer(get_be32(payload->dst_handle));
@@ -3279,8 +3300,8 @@ static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
 		src_total += SDK_POLY1305_TAG_SIZE;
 
 	if (!buffer_range_valid(src, src_offset, src_total) ||
-	    !buffer_range_valid(key, key_offset, SDK_CHACHA20_KEY_SIZE) ||
-	    !buffer_range_valid(nonce, 0, SDK_CHACHA20_NONCE_SIZE)) {
+	    !buffer_range_valid(key, key_offset, key_size) ||
+	    !buffer_range_valid(nonce, 0, SDK_AES_GCM_NONCE_SIZE)) {
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	}
 	if ((flags & SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0) {
@@ -3307,25 +3328,40 @@ static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
 	Xil_DCacheInvalidateRange((INTPTR)src_data, src_total);
 	if (aad_length != 0U)
 		Xil_DCacheInvalidateRange((INTPTR)aad_data, aad_length);
-	Xil_DCacheInvalidateRange((INTPTR)key_data, SDK_CHACHA20_KEY_SIZE);
-	Xil_DCacheInvalidateRange((INTPTR)nonce_data, SDK_CHACHA20_NONCE_SIZE);
+	Xil_DCacheInvalidateRange((INTPTR)key_data, key_size);
+	Xil_DCacheInvalidateRange((INTPTR)nonce_data, SDK_AES_GCM_NONCE_SIZE);
 
 	if ((flags & SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0) {
-		if (!sdk_chacha20_poly1305_decrypt(
+		int ok;
+		if (algorithm == SDK_CRYPTO_AEAD_CHACHA20_POLY1305) {
+			ok = sdk_chacha20_poly1305_decrypt(
 			    key_data, nonce_data, aad_data, aad_length,
 			    src_data, src_length,
-			    src_data + src_length, dst_data)) {
-			return complete_status(req, comp, SDK_STATUS_IO_ERROR);
+			    src_data + src_length, dst_data);
+		} else {
+			ok = sdk_aes_gcm_decrypt(
+			    key_data, key_size, nonce_data, aad_data, aad_length,
+			    src_data, src_length,
+			    src_data + src_length, dst_data);
 		}
+		if (!ok)
+			return complete_status(req, comp, SDK_STATUS_IO_ERROR);
 		Xil_DCacheFlushRange((INTPTR)dst_data, src_length);
 	} else {
-		sdk_chacha20_poly1305_encrypt(key_data, nonce_data,
-		                              aad_data, aad_length,
-		                              src_data, src_length,
-		                              dst_data, tag);
+		if (algorithm == SDK_CRYPTO_AEAD_CHACHA20_POLY1305) {
+			sdk_chacha20_poly1305_encrypt(key_data, nonce_data,
+			                              aad_data, aad_length,
+			                              src_data, src_length,
+			                              dst_data, tag);
+		} else {
+			sdk_aes_gcm_encrypt(key_data, key_size, nonce_data,
+			                    aad_data, aad_length,
+			                    src_data, src_length,
+			                    dst_data, tag);
+		}
 		memcpy(dst_data + src_length, tag, sizeof(tag));
 		Xil_DCacheFlushRange((INTPTR)dst_data,
-		                     src_length + SDK_POLY1305_TAG_SIZE);
+		                     src_length + SDK_AES_GCM_TAG_SIZE);
 	}
 
 	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
@@ -3333,8 +3369,8 @@ static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
 	result = (volatile struct SDKCryptoResultPayload *)comp->payload;
 	put_be32(result->bytes_written,
 	         (flags & SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0 ?
-	         src_length : src_length + SDK_POLY1305_TAG_SIZE);
-	put_be32(result->algorithm, SDK_CRYPTO_AEAD_CHACHA20_POLY1305);
+	         src_length : src_length + SDK_AES_GCM_TAG_SIZE);
+	put_be32(result->algorithm, algorithm);
 	put_be32(result->flags, flags);
 	memset(tag, 0, sizeof(tag));
 	return SDK_STATUS_OK;

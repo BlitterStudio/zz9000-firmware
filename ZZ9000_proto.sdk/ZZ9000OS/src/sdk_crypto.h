@@ -21,6 +21,10 @@
 #define SDK_CHACHA20_BLOCK_SIZE 64U
 #define SDK_POLY1305_KEY_SIZE 32U
 #define SDK_POLY1305_TAG_SIZE 16U
+#define SDK_AES128_KEY_SIZE 16U
+#define SDK_AES256_KEY_SIZE 32U
+#define SDK_AES_GCM_NONCE_SIZE 12U
+#define SDK_AES_GCM_TAG_SIZE 16U
 #define SDK_X25519_KEY_SIZE      32U
 #define SDK_X25519_POINT_SIZE    32U
 #define SDK_X25519_SHARED_SIZE   32U
@@ -75,6 +79,31 @@ int sdk_chacha20_poly1305_decrypt(
 	const uint8_t *ciphertext,
 	uint32_t ciphertext_length,
 	const uint8_t tag[SDK_POLY1305_TAG_SIZE],
+	uint8_t *plaintext);
+
+/* AES-GCM (NIST SP 800-38D) via BearSSL. key_length is 16 (AES-128) or 32
+ * (AES-256); nonce is 12 bytes; the 16-byte tag is produced/checked
+ * separately. The encrypt path writes plaintext_length ciphertext bytes plus
+ * the tag; decrypt verifies the tag and returns 1 on success, 0 on mismatch. */
+void sdk_aes_gcm_encrypt(
+	const uint8_t *key,
+	uint32_t key_length,
+	const uint8_t nonce[SDK_AES_GCM_NONCE_SIZE],
+	const uint8_t *aad,
+	uint32_t aad_length,
+	const uint8_t *plaintext,
+	uint32_t plaintext_length,
+	uint8_t *ciphertext,
+	uint8_t tag[SDK_AES_GCM_TAG_SIZE]);
+int sdk_aes_gcm_decrypt(
+	const uint8_t *key,
+	uint32_t key_length,
+	const uint8_t nonce[SDK_AES_GCM_NONCE_SIZE],
+	const uint8_t *aad,
+	uint32_t aad_length,
+	const uint8_t *ciphertext,
+	uint32_t ciphertext_length,
+	const uint8_t tag[SDK_AES_GCM_TAG_SIZE],
 	uint8_t *plaintext);
 
 /* X25519 scalar multiplication (RFC 7748). Returns 1 on success, 0 if the
