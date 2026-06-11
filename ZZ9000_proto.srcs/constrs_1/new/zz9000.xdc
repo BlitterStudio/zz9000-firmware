@@ -1,3 +1,8 @@
+# Compress the configuration bitstream (skips repeated frames); the Zynq
+# PCAP path loads compressed bitstreams transparently and BOOT.bin shrinks
+# by roughly 2.5 MB.
+set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]
+
 set_property PACKAGE_PIN K17 [get_ports VCAP_B2]
 set_property PACKAGE_PIN F20 [get_ports VCAP_B1]
 set_property PACKAGE_PIN F19 [get_ports VCAP_B0]
