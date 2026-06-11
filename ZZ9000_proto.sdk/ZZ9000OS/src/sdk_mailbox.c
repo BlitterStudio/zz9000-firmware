@@ -835,9 +835,12 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		SDK_SERVICE_CRYPTO,
 		0x00020000U,
 		SDK_CAP_CRYPTO,
-		SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_CRYPTO_X25519,
+		SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_CRYPTO_X25519 |
+			SDK_SERVICE_FLAG_CRYPTO_P256 |
+			SDK_SERVICE_FLAG_CRYPTO_ECDSA_P256 |
+			SDK_SERVICE_FLAG_CRYPTO_RSA_2048,
 		SDK_SERVICE_CRYPTO,
-		4,
+		5,
 		"crypto"
 	},
 	{
@@ -3349,7 +3352,7 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 	const uint8_t *scalar_data;
 	const uint8_t *point_data;
 	uint8_t *dst_data;
-	uint8_t shared[SDK_X25519_SHARED_SIZE];
+	uint8_t shared[SDK_P256_SHARED_SIZE];  /* max shared secret size */
 	uint32_t algorithm;
 	uint32_t flags;
 	uint32_t scalar_off;
@@ -3361,8 +3364,6 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 
 	p = (volatile struct SDKCryptoKXPayload *)req->payload;
 	algorithm = get_be32(p->algorithm);
-	if (algorithm != SDK_CRYPTO_KX_X25519)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	flags = get_be32(p->flags);
 	if (flags != 0U)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
@@ -3374,33 +3375,178 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 	point_off  = get_be32(p->point_offset);
 	dst_off    = get_be32(p->dst_offset);
 
-	if (!buffer_range_valid(scalar, scalar_off, SDK_X25519_KEY_SIZE)   ||
-	    !buffer_range_valid(point,  point_off,  SDK_X25519_POINT_SIZE) ||
-	    !buffer_range_valid(dst,    dst_off,    SDK_X25519_SHARED_SIZE))
-		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (algorithm == SDK_CRYPTO_KX_X25519) {
+		uint8_t xshared[SDK_X25519_SHARED_SIZE];
 
-	scalar_data = (const uint8_t *)(uintptr_t)(scalar->address + scalar_off);
-	point_data  = (const uint8_t *)(uintptr_t)(point->address  + point_off);
-	dst_data    = (uint8_t *)(uintptr_t)(dst->address + dst_off);
+		if (!buffer_range_valid(scalar, scalar_off, SDK_X25519_KEY_SIZE)   ||
+		    !buffer_range_valid(point,  point_off,  SDK_X25519_POINT_SIZE) ||
+		    !buffer_range_valid(dst,    dst_off,    SDK_X25519_SHARED_SIZE))
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 
-	Xil_DCacheInvalidateRange((INTPTR)scalar_data, SDK_X25519_KEY_SIZE);
-	Xil_DCacheInvalidateRange((INTPTR)point_data,  SDK_X25519_POINT_SIZE);
+		scalar_data = (const uint8_t *)(uintptr_t)(scalar->address + scalar_off);
+		point_data  = (const uint8_t *)(uintptr_t)(point->address  + point_off);
+		dst_data    = (uint8_t *)(uintptr_t)(dst->address + dst_off);
 
-	if (!sdk_x25519(scalar_data, point_data, shared)) {
-		memset(shared, 0, sizeof(shared));
+		Xil_DCacheInvalidateRange((INTPTR)scalar_data, SDK_X25519_KEY_SIZE);
+		Xil_DCacheInvalidateRange((INTPTR)point_data,  SDK_X25519_POINT_SIZE);
+
+		if (!sdk_x25519(scalar_data, point_data, xshared)) {
+			memset(xshared, 0, sizeof(xshared));
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		}
+
+		memcpy(dst_data, xshared, SDK_X25519_SHARED_SIZE);
+		Xil_DCacheFlushRange((INTPTR)dst_data, SDK_X25519_SHARED_SIZE);
+		memset(xshared, 0, sizeof(xshared));  /* scrub stack copy */
+
+		write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+		memset((void *)comp->payload, 0, sizeof(comp->payload));
+		result = (volatile struct SDKCryptoResultPayload *)comp->payload;
+		put_be32(result->bytes_written, SDK_X25519_SHARED_SIZE);
+		put_be32(result->algorithm, SDK_CRYPTO_KX_X25519);
+		put_be32(result->flags, 0U);
+		return SDK_STATUS_OK;
+
+	} else if (algorithm == SDK_CRYPTO_KX_P256) {
+		if (!buffer_range_valid(scalar, scalar_off, SDK_P256_KEY_SIZE)   ||
+		    !buffer_range_valid(point,  point_off,  SDK_P256_POINT_SIZE) ||
+		    !buffer_range_valid(dst,    dst_off,    SDK_P256_SHARED_SIZE))
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+		scalar_data = (const uint8_t *)(uintptr_t)(scalar->address + scalar_off);
+		point_data  = (const uint8_t *)(uintptr_t)(point->address  + point_off);
+		dst_data    = (uint8_t *)(uintptr_t)(dst->address + dst_off);
+
+		Xil_DCacheInvalidateRange((INTPTR)scalar_data, SDK_P256_KEY_SIZE);
+		Xil_DCacheInvalidateRange((INTPTR)point_data,  SDK_P256_POINT_SIZE);
+
+		if (!sdk_p256_ecdh(scalar_data, point_data, shared)) {
+			memset(shared, 0, sizeof(shared));
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		}
+
+		memcpy(dst_data, shared, SDK_P256_SHARED_SIZE);
+		Xil_DCacheFlushRange((INTPTR)dst_data, SDK_P256_SHARED_SIZE);
+		memset(shared, 0, sizeof(shared));  /* scrub stack copy */
+
+		write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+		memset((void *)comp->payload, 0, sizeof(comp->payload));
+		result = (volatile struct SDKCryptoResultPayload *)comp->payload;
+		put_be32(result->bytes_written, SDK_P256_SHARED_SIZE);
+		put_be32(result->algorithm, SDK_CRYPTO_KX_P256);
+		put_be32(result->flags, 0U);
+		return SDK_STATUS_OK;
+
+	} else {
+        return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+    }
+}
+
+static uint16_t handle_crypto_verify(volatile struct SDKMailboxEntry *req,
+                                     volatile struct SDKMailboxEntry *comp,
+                                     uint16_t payload_len)
+{
+	volatile struct SDKCryptoVerifyPayload *p;
+	volatile struct SDKCryptoResultPayload *result;
+	struct SDKSharedBuffer *hash_buf;
+	struct SDKSharedBuffer *sig_buf;
+	struct SDKSharedBuffer *key_buf;
+	const uint8_t *hash_data;
+	const uint8_t *sig_data;
+	const uint8_t *key_data;
+	uint8_t hash[SDK_SHA256_DIGEST_SIZE];
+	uint32_t algorithm;
+	uint32_t hash_off;
+	uint32_t sig_off;
+	uint32_t key_off;
+	int verified = 0;
+
+	if (payload_len < sizeof(struct SDKCryptoVerifyPayload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	}
 
-	memcpy(dst_data, shared, SDK_X25519_SHARED_SIZE);
-	Xil_DCacheFlushRange((INTPTR)dst_data, SDK_X25519_SHARED_SIZE);
-	memset(shared, 0, sizeof(shared));  /* scrub stack copy */
+	p = (volatile struct SDKCryptoVerifyPayload *)req->payload;
+	algorithm = get_be32(p->algorithm);
+	hash_off  = get_be32(p->hash_offset);
+	sig_off   = get_be32(p->sig_offset);
+	key_off   = get_be32(p->key_offset);
+
+	hash_buf = find_shared_buffer(get_be32(p->hash_handle));
+	sig_buf  = find_shared_buffer(get_be32(p->sig_handle));
+	key_buf  = find_shared_buffer(get_be32(p->key_handle));
+
+	/* The caller supplies a precomputed 32-byte SHA-256 digest. */
+	if (!buffer_range_valid(hash_buf, hash_off, SDK_SHA256_DIGEST_SIZE))
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	hash_data = (const uint8_t *)(uintptr_t)(hash_buf->address + hash_off);
+
+	if (algorithm == SDK_CRYPTO_VERIFY_ECDSA_P256_SHA256) {
+		uint8_t pubkey[SDK_P256_ECDSA_POINT_SIZE];
+		uint8_t signature[SDK_P256_ECDSA_SIG_SIZE];
+
+		/* key buffer = 65-byte uncompressed point, signature = raw r||s. */
+		if (!buffer_range_valid(key_buf, key_off, SDK_P256_ECDSA_POINT_SIZE) ||
+		    !buffer_range_valid(sig_buf, sig_off, SDK_P256_ECDSA_SIG_SIZE))
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+		key_data = (const uint8_t *)(uintptr_t)(key_buf->address + key_off);
+		sig_data = (const uint8_t *)(uintptr_t)(sig_buf->address + sig_off);
+
+		Xil_DCacheInvalidateRange((INTPTR)hash_data, SDK_SHA256_DIGEST_SIZE);
+		Xil_DCacheInvalidateRange((INTPTR)key_data,  SDK_P256_ECDSA_POINT_SIZE);
+		Xil_DCacheInvalidateRange((INTPTR)sig_data,  SDK_P256_ECDSA_SIG_SIZE);
+
+		memcpy(hash, hash_data, SDK_SHA256_DIGEST_SIZE);
+		memcpy(pubkey, key_data, SDK_P256_ECDSA_POINT_SIZE);
+		memcpy(signature, sig_data, SDK_P256_ECDSA_SIG_SIZE);
+
+		verified = sdk_ecdsa_verify_p256(pubkey, signature, hash);
+
+		memset(pubkey, 0, sizeof(pubkey));
+		memset(signature, 0, sizeof(signature));
+
+	} else if (algorithm == SDK_CRYPTO_VERIFY_RSA_PKCS1_2048_SHA256) {
+		uint8_t modulus[SDK_RSA_2048_KEY_BYTES];
+		uint8_t exponent[4];
+		uint8_t signature[SDK_RSA_SHA256_SIG_SIZE];
+
+		/* key buffer = 256-byte modulus followed by 4-byte BE exponent. */
+		if (!buffer_range_valid(key_buf, key_off,
+		                        SDK_RSA_2048_KEY_BYTES + 4U) ||
+		    !buffer_range_valid(sig_buf, sig_off, SDK_RSA_SHA256_SIG_SIZE))
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+		key_data = (const uint8_t *)(uintptr_t)(key_buf->address + key_off);
+		sig_data = (const uint8_t *)(uintptr_t)(sig_buf->address + sig_off);
+
+		Xil_DCacheInvalidateRange((INTPTR)hash_data, SDK_SHA256_DIGEST_SIZE);
+		Xil_DCacheInvalidateRange((INTPTR)key_data,
+		                          SDK_RSA_2048_KEY_BYTES + 4);
+		Xil_DCacheInvalidateRange((INTPTR)sig_data,  SDK_RSA_SHA256_SIG_SIZE);
+
+		memcpy(hash, hash_data, SDK_SHA256_DIGEST_SIZE);
+		memcpy(modulus, key_data, SDK_RSA_2048_KEY_BYTES);
+		memcpy(exponent, key_data + SDK_RSA_2048_KEY_BYTES, 4);
+		memcpy(signature, sig_data, SDK_RSA_SHA256_SIG_SIZE);
+
+		verified = sdk_rsa_verify_pkcs1_sha256(modulus, exponent, 4U,
+		                                       signature, hash);
+
+		memset(modulus, 0, sizeof(modulus));
+		memset(exponent, 0, sizeof(exponent));
+		memset(signature, 0, sizeof(signature));
+
+	} else {
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	}
 
 	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
 	memset((void *)comp->payload, 0, sizeof(comp->payload));
 	result = (volatile struct SDKCryptoResultPayload *)comp->payload;
-	put_be32(result->bytes_written, SDK_X25519_SHARED_SIZE);
-	put_be32(result->algorithm, SDK_CRYPTO_KX_X25519);
+	put_be32(result->bytes_written, verified ? 1U : 0U);
+	put_be32(result->algorithm, algorithm);
 	put_be32(result->flags, 0U);
+
+	memset(hash, 0, sizeof(hash));
 	return SDK_STATUS_OK;
 }
 
@@ -3910,6 +4056,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_crypto_aead(req, comp, payload_len);
 	case SDK_OP_CRYPTO_KX:
 		return handle_crypto_kx(req, comp, payload_len);
+	case SDK_OP_CRYPTO_VERIFY:
+		return handle_crypto_verify(req, comp, payload_len);
 	case SDK_OP_DIAG_READ:
 		return handle_diag_read(req, comp, pending_requests);
 	case SDK_OP_DIAG_TIMING:

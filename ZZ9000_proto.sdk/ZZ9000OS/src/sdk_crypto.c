@@ -8,6 +8,7 @@
 
 #include "sdk_crypto.h"
 #include "bearssl/bearssl_ec.h"
+#include "bearssl/bearssl_rsa.h"
 #include <string.h>
 
 typedef struct SDKSHA256Context {
@@ -862,4 +863,98 @@ int sdk_x25519(const uint8_t scalar[32], const uint8_t point[32],
 	for (i = 0; i < 32; i++)
 		nonzero |= shared[i];
 	return ok != 0 && nonzero != 0;
+}
+
+int sdk_p256_ecdh(const uint8_t scalar[32], const uint8_t peer_point[65],
+                   uint8_t shared[32])
+{
+	const br_ec_impl *ec = &br_ec_p256_m31;
+	uint8_t buf[65];  /* working copy of the peer point */
+	size_t xoff;
+	size_t xlen;
+	uint32_t ok;
+
+	memcpy(buf, peer_point, 65);
+	/* BearSSL mul: scalar*point in place on buf; curve id 23 = secp256r1.
+	 * Returns 0 if the point is not valid on the curve. */
+	ok = ec->mul(buf, 65, scalar, 32, BR_EC_secp256r1);
+	/* Extract X coordinate from the result point (offset/length via xoff()) */
+	xoff = ec->xoff(BR_EC_secp256r1, &xlen);
+	memcpy(shared, buf + xoff, xlen);  /* xlen == 32 for P-256 */
+	memset(buf, 0, sizeof(buf));  /* scrub stack copy */
+	return ok != 0;
+}
+
+int sdk_ecdsa_verify_p256(const uint8_t pubkey[SDK_P256_ECDSA_POINT_SIZE],
+                           const uint8_t signature[SDK_P256_ECDSA_SIG_SIZE],
+                           const uint8_t hash[SDK_SHA256_DIGEST_SIZE])
+{
+	const br_ec_impl *ec = &br_ec_p256_m31;
+	br_ec_public_key pk;
+	uint8_t pub_buf[SDK_P256_ECDSA_POINT_SIZE];
+	uint8_t sig_buf[SDK_P256_ECDSA_SIG_SIZE];
+	uint32_t ok;
+
+	memcpy(pub_buf, pubkey, sizeof(pub_buf));
+	memcpy(sig_buf, signature, sizeof(sig_buf));
+
+	pk.curve = BR_EC_secp256r1;
+	pk.q = pub_buf;
+	pk.qlen = sizeof(pub_buf);
+
+	ok = br_ecdsa_i31_vrfy_raw(ec, hash, SDK_SHA256_DIGEST_SIZE, &pk, sig_buf,
+	                           sizeof(sig_buf));
+
+	memset(pub_buf, 0, sizeof(pub_buf));
+	memset(sig_buf, 0, sizeof(sig_buf));
+	return ok != 0;
+}
+
+int sdk_rsa_verify_pkcs1_sha256(const uint8_t modulus[SDK_RSA_2048_KEY_BYTES],
+                                 const uint8_t *exponent,
+                                 size_t exponent_len,
+                                 const uint8_t signature[SDK_RSA_SHA256_SIG_SIZE],
+                                 const uint8_t hash[SDK_SHA256_DIGEST_SIZE])
+{
+	br_rsa_public_key pk;
+	uint8_t mod_buf[SDK_RSA_2048_KEY_BYTES];
+	uint8_t exp_buf[4];
+	uint8_t sig_buf[SDK_RSA_SHA256_SIG_SIZE];
+	uint8_t hash_out[SDK_SHA256_DIGEST_SIZE];
+	uint32_t ok;
+
+	memcpy(mod_buf, modulus, sizeof(mod_buf));
+	if (exponent_len > sizeof(exp_buf))
+		return 0;
+	memcpy(exp_buf, exponent, exponent_len);
+	memcpy(sig_buf, signature, sizeof(sig_buf));
+
+	pk.n = mod_buf;
+	pk.nlen = sizeof(mod_buf);
+	pk.e = exp_buf;
+	pk.elen = (size_t)exponent_len;
+
+	ok = br_rsa_i31_pkcs1_vrfy(sig_buf, sizeof(sig_buf), BR_HASH_OID_SHA256,
+	                            SDK_SHA256_DIGEST_SIZE, &pk, hash_out);
+
+	if (!ok) {
+		memset(mod_buf, 0, sizeof(mod_buf));
+		memset(exp_buf, 0, sizeof(exp_buf));
+		memset(sig_buf, 0, sizeof(sig_buf));
+		return 0;
+	}
+
+	/* BearSSL extracted the hash from PKCS#1 padding into hash_out.
+	 * Compare it with the caller's pre-computed SHA-256 digest in constant time. */
+	{
+		uint8_t diff = 0;
+		unsigned i;
+		for (i = 0; i < SDK_SHA256_DIGEST_SIZE; i++)
+			diff |= hash_out[i] ^ hash[i];
+		memset(mod_buf, 0, sizeof(mod_buf));
+		memset(exp_buf, 0, sizeof(exp_buf));
+		memset(sig_buf, 0, sizeof(sig_buf));
+		memset(hash_out, 0, sizeof(hash_out));
+		return diff == 0;
+	}
 }

@@ -159,6 +159,38 @@
 #define SDK_OP_CRYPTO_AEAD             0x0802U
 #define SDK_OP_CRYPTO_KX               0x0803U
 #define SDK_CRYPTO_KX_X25519           1U
+#define SDK_CRYPTO_KX_P256             2U
+
+#define SDK_OP_CRYPTO_VERIFY           0x0804U
+#define SDK_CRYPTO_VERIFY_ECDSA_P256_SHA256        1U
+#define SDK_CRYPTO_VERIFY_RSA_PKCS1_2048_SHA256    2U
+
+#define SDK_SERVICE_FLAG_CRYPTO_X25519     (1U << 16)
+#define SDK_SERVICE_FLAG_CRYPTO_P256       (1U << 17)
+#define SDK_SERVICE_FLAG_CRYPTO_ECDSA_P256 (1U << 18)
+#define SDK_SERVICE_FLAG_CRYPTO_RSA_2048   (1U << 19)
+
+/* Crypto verify payload: 48 bytes to match the inline mailbox entry size and
+ * the SDK ZZ9KCryptoVerifyPayload byte-for-byte. All fields are big-endian
+ * uint32_t encoded as byte arrays. The caller supplies a precomputed SHA-256
+ * digest (hash_*), the signature (sig_*), and the public key (key_*). For
+ * ECDSA-P256 the key buffer is the 65-byte uncompressed point and the
+ * signature is raw r||s (64 bytes); for RSA-PKCS1-2048 the key buffer is the
+ * 256-byte modulus followed by the 4-byte big-endian public exponent and the
+ * signature is 256 bytes. */
+struct SDKCryptoVerifyPayload {
+	uint8_t algorithm[4];
+	uint8_t hash_handle[4];
+	uint8_t hash_offset[4];
+	uint8_t hash_length[4];
+	uint8_t sig_handle[4];
+	uint8_t sig_offset[4];
+	uint8_t sig_length[4];
+	uint8_t key_handle[4];
+	uint8_t key_offset[4];
+	uint8_t key_length[4];
+	uint8_t reserved[8];
+};
 
 #define SDK_OP_DIAG_READ               0x0900U
 #define SDK_OP_DIAG_TIMING             0x0901U
