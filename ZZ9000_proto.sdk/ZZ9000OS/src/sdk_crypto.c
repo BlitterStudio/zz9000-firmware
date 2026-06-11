@@ -913,31 +913,35 @@ int sdk_ecdsa_verify_p256(const uint8_t pubkey[SDK_P256_ECDSA_POINT_SIZE],
 	return ok != 0;
 }
 
-int sdk_rsa_verify_pkcs1_sha256(const uint8_t modulus[SDK_RSA_2048_KEY_BYTES],
+int sdk_rsa_verify_pkcs1_sha256(const uint8_t *modulus,
+                                 size_t modulus_len,
                                  const uint8_t *exponent,
                                  size_t exponent_len,
-                                 const uint8_t signature[SDK_RSA_SHA256_SIG_SIZE],
+                                 const uint8_t *signature,
+                                 size_t signature_len,
                                  const uint8_t hash[SDK_SHA256_DIGEST_SIZE])
 {
 	br_rsa_public_key pk;
-	uint8_t mod_buf[SDK_RSA_2048_KEY_BYTES];
+	uint8_t mod_buf[SDK_RSA_MAX_KEY_BYTES];
 	uint8_t exp_buf[4];
-	uint8_t sig_buf[SDK_RSA_SHA256_SIG_SIZE];
+	uint8_t sig_buf[SDK_RSA_MAX_KEY_BYTES];
 	uint8_t hash_out[SDK_SHA256_DIGEST_SIZE];
 	uint32_t ok;
 
-	memcpy(mod_buf, modulus, sizeof(mod_buf));
-	if (exponent_len > sizeof(exp_buf))
+	if (modulus_len == 0 || modulus_len > sizeof(mod_buf) ||
+	    signature_len == 0 || signature_len > sizeof(sig_buf) ||
+	    exponent_len == 0 || exponent_len > sizeof(exp_buf))
 		return 0;
+	memcpy(mod_buf, modulus, modulus_len);
 	memcpy(exp_buf, exponent, exponent_len);
-	memcpy(sig_buf, signature, sizeof(sig_buf));
+	memcpy(sig_buf, signature, signature_len);
 
 	pk.n = mod_buf;
-	pk.nlen = sizeof(mod_buf);
+	pk.nlen = modulus_len;
 	pk.e = exp_buf;
 	pk.elen = (size_t)exponent_len;
 
-	ok = br_rsa_i31_pkcs1_vrfy(sig_buf, sizeof(sig_buf), BR_HASH_OID_SHA256,
+	ok = br_rsa_i31_pkcs1_vrfy(sig_buf, signature_len, BR_HASH_OID_SHA256,
 	                            SDK_SHA256_DIGEST_SIZE, &pk, hash_out);
 
 	if (!ok) {

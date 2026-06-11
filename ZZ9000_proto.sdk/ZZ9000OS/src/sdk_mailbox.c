@@ -3541,31 +3541,39 @@ static uint16_t handle_crypto_verify(volatile struct SDKMailboxEntry *req,
 		memset(signature, 0, sizeof(signature));
 
 	} else if (algorithm == SDK_CRYPTO_VERIFY_RSA_PKCS1_2048_SHA256) {
-		uint8_t modulus[SDK_RSA_2048_KEY_BYTES];
+		uint8_t modulus[SDK_RSA_MAX_KEY_BYTES];
 		uint8_t exponent[4];
-		uint8_t signature[SDK_RSA_SHA256_SIG_SIZE];
+		uint8_t signature[SDK_RSA_MAX_KEY_BYTES];
+		uint32_t key_len = get_be32(p->key_length);
+		uint32_t sig_len = get_be32(p->sig_length);
+		uint32_t mod_len;
 
-		/* key buffer = 256-byte modulus followed by 4-byte BE exponent. */
-		if (!buffer_range_valid(key_buf, key_off,
-		                        SDK_RSA_2048_KEY_BYTES + 4U) ||
-		    !buffer_range_valid(sig_buf, sig_off, SDK_RSA_SHA256_SIG_SIZE))
+		/* key buffer = modulus (variable) followed by a 4-byte BE exponent;
+		 * the signature width equals the modulus width (RSA-2048/3072/4096). */
+		if (key_len < 4U + 1U || key_len > SDK_RSA_MAX_KEY_BYTES + 4U)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		mod_len = key_len - 4U;
+		if (sig_len != mod_len || sig_len > SDK_RSA_MAX_KEY_BYTES)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+		if (!buffer_range_valid(key_buf, key_off, key_len) ||
+		    !buffer_range_valid(sig_buf, sig_off, sig_len))
 			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 
 		key_data = (const uint8_t *)(uintptr_t)(key_buf->address + key_off);
 		sig_data = (const uint8_t *)(uintptr_t)(sig_buf->address + sig_off);
 
 		Xil_DCacheInvalidateRange((INTPTR)hash_data, SDK_SHA256_DIGEST_SIZE);
-		Xil_DCacheInvalidateRange((INTPTR)key_data,
-		                          SDK_RSA_2048_KEY_BYTES + 4);
-		Xil_DCacheInvalidateRange((INTPTR)sig_data,  SDK_RSA_SHA256_SIG_SIZE);
+		Xil_DCacheInvalidateRange((INTPTR)key_data, key_len);
+		Xil_DCacheInvalidateRange((INTPTR)sig_data, sig_len);
 
 		memcpy(hash, hash_data, SDK_SHA256_DIGEST_SIZE);
-		memcpy(modulus, key_data, SDK_RSA_2048_KEY_BYTES);
-		memcpy(exponent, key_data + SDK_RSA_2048_KEY_BYTES, 4);
-		memcpy(signature, sig_data, SDK_RSA_SHA256_SIG_SIZE);
+		memcpy(modulus, key_data, mod_len);
+		memcpy(exponent, key_data + mod_len, 4);
+		memcpy(signature, sig_data, sig_len);
 
-		verified = sdk_rsa_verify_pkcs1_sha256(modulus, exponent, 4U,
-		                                       signature, hash);
+		verified = sdk_rsa_verify_pkcs1_sha256(modulus, mod_len, exponent, 4U,
+		                                       signature, sig_len, hash);
 
 		memset(modulus, 0, sizeof(modulus));
 		memset(exponent, 0, sizeof(exponent));

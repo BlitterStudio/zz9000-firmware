@@ -38,9 +38,12 @@
 #define SDK_P256_ECDSA_SIG_SIZE    64U
 #define SDK_P256_ECDSA_POINT_SIZE  65U  /* uncompressed public key: 0x04 || X || Y */
 
-/* RSA-2048 PKCS#1 v1.5 with SHA-256 */
+/* RSA PKCS#1 v1.5 with SHA-256. The modulus/signature width is variable
+ * (RSA-2048/3072/4096); BearSSL's br_rsa_i31 verify is size-agnostic up to
+ * BR_MAX_RSA_SIZE (4096). */
 #define SDK_RSA_2048_KEY_BYTES     256U
 #define SDK_RSA_SHA256_SIG_SIZE    256U
+#define SDK_RSA_MAX_KEY_BYTES      512U   /* 4096-bit modulus / signature */
 
 void sdk_sha1(const uint8_t *data, uint32_t length,
               uint8_t digest[SDK_SHA1_DIGEST_SIZE]);
@@ -129,16 +132,19 @@ int sdk_ecdsa_verify_p256(const uint8_t pubkey[SDK_P256_ECDSA_POINT_SIZE],
                            const uint8_t signature[SDK_P256_ECDSA_SIG_SIZE],
                            const uint8_t hash[SDK_SHA256_DIGEST_SIZE]);
 
-/* RSA-2048 PKCS#1 v1.5 verification with SHA-256.
-   modulus = RSA public modulus (256 bytes, big-endian),
+/* RSA PKCS#1 v1.5 verification with SHA-256, for any modulus width up to
+   SDK_RSA_MAX_KEY_BYTES (RSA-2048/3072/4096).
+   modulus = RSA public modulus (modulus_len bytes, big-endian),
    exponent = RSA public exponent (big-endian),
-   signature = PKCS#1 v1.5 padded signature (256 bytes),
+   signature = PKCS#1 v1.5 padded signature (signature_len == modulus_len),
    hash = pre-computed SHA-256 digest of the data to verify (32 bytes).
    Returns 1 on valid signature, 0 on invalid signature or bad key. */
-int sdk_rsa_verify_pkcs1_sha256(const uint8_t modulus[SDK_RSA_2048_KEY_BYTES],
+int sdk_rsa_verify_pkcs1_sha256(const uint8_t *modulus,
+                                 size_t modulus_len,
                                  const uint8_t *exponent,
                                  size_t exponent_len,
-                                 const uint8_t signature[SDK_RSA_SHA256_SIG_SIZE],
+                                 const uint8_t *signature,
+                                 size_t signature_len,
                                  const uint8_t hash[SDK_SHA256_DIGEST_SIZE]);
 
 #endif /* SDK_CRYPTO_H */
