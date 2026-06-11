@@ -121,6 +121,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_compression.c \
 	$(SRC_DIR)/sdk_crypto.c \
 	$(SRC_DIR)/bearssl/ec_c25519_m31.c \
+	$(SRC_DIR)/bearssl/ec_p256_m31.c \
 	$(SRC_DIR)/bearssl/ec_curve25519.c \
 	$(SRC_DIR)/bearssl/ccopy.c \
 	$(SRC_DIR)/bearssl/i31_add.c \
@@ -143,6 +144,14 @@ C_SRCS = \
 	$(SRC_DIR)/bearssl/i31_sub.c \
 	$(SRC_DIR)/bearssl/i31_tmont.c \
 	$(SRC_DIR)/bearssl/i32_div32.c \
+	$(SRC_DIR)/bearssl/rsa_i31_pkcs1_vrfy.c \
+	$(SRC_DIR)/bearssl/rsa_i31_pub.c \
+	$(SRC_DIR)/bearssl/rsa_pkcs1_sig_unpad.c \
+	$(SRC_DIR)/bearssl/ecdsa_i31_bits.c \
+	$(SRC_DIR)/bearssl/ecdsa_i31_vrfy_raw.c \
+	$(SRC_DIR)/bearssl/ec_secp256r1.c \
+	$(SRC_DIR)/bearssl/ec_secp384r1.c \
+	$(SRC_DIR)/bearssl/ec_secp521r1.c \
 	$(SRC_DIR)/sdk_image_stream.c \
 	$(SRC_DIR)/sdk_jpeg.c \
 	$(SRC_DIR)/sdk_surface.c \
