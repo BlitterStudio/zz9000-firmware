@@ -847,10 +847,19 @@ int sdk_x25519(const uint8_t scalar[32], const uint8_t point[32],
 	const br_ec_impl *ec = &br_ec_c25519_m31;
 	uint8_t buf[32];
 	uint32_t ok;
+	uint32_t nonzero;
+	unsigned i;
 
 	memcpy(buf, point, 32);
-	/* BearSSL mul: scalar*point in place on buf; curve id 29 = Curve25519 */
+	/* BearSSL mul: scalar*point in place on buf; curve id 29 = Curve25519.
+	 * BearSSL does not reject small-order points itself (its mul returns 0
+	 * only for bad lengths), so check for the all-zero result here per
+	 * RFC 7748 section 6.1. */
 	ok = ec->mul(buf, 32, scalar, 32, BR_EC_curve25519);
 	memcpy(shared, buf, 32);
-	return (int)ok; /* ok==0 means small-order point -> all-zero shared */
+	memset(buf, 0, sizeof(buf));
+	nonzero = 0;
+	for (i = 0; i < 32; i++)
+		nonzero |= shared[i];
+	return ok != 0 && nonzero != 0;
 }

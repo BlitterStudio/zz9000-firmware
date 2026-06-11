@@ -835,7 +835,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		SDK_SERVICE_CRYPTO,
 		0x00020000U,
 		SDK_CAP_CRYPTO,
-		SDK_SERVICE_FLAG_FIRMWARE | SDK_CRYPTO_FLAG_X25519,
+		SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_CRYPTO_X25519,
 		SDK_SERVICE_CRYPTO,
 		4,
 		"crypto"
@@ -3351,6 +3351,7 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 	uint8_t *dst_data;
 	uint8_t shared[SDK_X25519_SHARED_SIZE];
 	uint32_t algorithm;
+	uint32_t flags;
 	uint32_t scalar_off;
 	uint32_t point_off;
 	uint32_t dst_off;
@@ -3361,6 +3362,9 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 	p = (volatile struct SDKCryptoKXPayload *)req->payload;
 	algorithm = get_be32(p->algorithm);
 	if (algorithm != SDK_CRYPTO_KX_X25519)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	flags = get_be32(p->flags);
+	if (flags != 0U)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 
 	scalar = find_shared_buffer(get_be32(p->scalar_handle));
@@ -3382,8 +3386,10 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 	Xil_DCacheInvalidateRange((INTPTR)scalar_data, SDK_X25519_KEY_SIZE);
 	Xil_DCacheInvalidateRange((INTPTR)point_data,  SDK_X25519_POINT_SIZE);
 
-	if (!sdk_x25519(scalar_data, point_data, shared))
+	if (!sdk_x25519(scalar_data, point_data, shared)) {
+		memset(shared, 0, sizeof(shared));
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
 
 	memcpy(dst_data, shared, SDK_X25519_SHARED_SIZE);
 	Xil_DCacheFlushRange((INTPTR)dst_data, SDK_X25519_SHARED_SIZE);

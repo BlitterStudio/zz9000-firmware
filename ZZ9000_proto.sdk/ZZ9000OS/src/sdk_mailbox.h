@@ -114,6 +114,7 @@
 #define SDK_SERVICE_FLAG_CODEC_ZLIB_FEED        (1U << 26)
 #define SDK_SERVICE_FLAG_CODEC_GZIP_FEED        (1U << 27)
 #define SDK_SERVICE_FLAG_CODEC_LZMA2            (1U << 28)
+#define SDK_SERVICE_FLAG_CRYPTO_X25519          (1U << 16)
 
 #define SDK_OP_NOP                     0x0000U
 #define SDK_OP_QUERY_CAPS              0x0001U
@@ -158,7 +159,6 @@
 #define SDK_OP_CRYPTO_AEAD             0x0802U
 #define SDK_OP_CRYPTO_KX               0x0803U
 #define SDK_CRYPTO_KX_X25519           1U
-#define SDK_CRYPTO_FLAG_X25519         (1U << 16)  /* crypto service capability bit */
 
 #define SDK_OP_DIAG_READ               0x0900U
 #define SDK_OP_DIAG_TIMING             0x0901U
