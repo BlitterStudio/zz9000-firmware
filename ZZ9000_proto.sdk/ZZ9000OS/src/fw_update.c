@@ -402,6 +402,80 @@ uint16_t fw_update_close(void) {
     return FWUP_OK;
 }
 
+uint16_t fw_update_restore(const char *name_buf) {
+    if (fwup_open_flag || fwup_path[0] != '\0') {
+        printf("[FWUP] RESTORE rejected: a push transfer is in progress\n");
+        return FWUP_ERR_STATE;
+    }
+
+    char path[FWUP_PATH_MAX];
+    if (!validate_name(name_buf, path)) {
+        printf("[FWUP] RESTORE: rejected filename\n");
+        return FWUP_ERR_BAD_NAME;
+    }
+
+    char backup_path[FWUP_PATH_MAX];
+    if (!make_backup_path(path, backup_path, sizeof(backup_path))) {
+        printf("[FWUP] RESTORE cannot derive backup path for %s\n", path);
+        return FWUP_ERR_BAD_NAME;
+    }
+
+    /* Refuse before touching the active file when there is no backup to
+     * promote — a missing backup must never leave the card without a
+     * bootable target. */
+    FILINFO info;
+    FRESULT fr = f_stat(backup_path, &info);
+    if (fr == FR_NO_FILE) {
+        printf("[FWUP] RESTORE no backup at %s\n", backup_path);
+        return FWUP_ERR_NO_BACKUP;
+    }
+    if (fr != FR_OK) {
+        printf("[FWUP] RESTORE backup check(%s) failed: %d\n",
+               backup_path, (int)fr);
+        return map_open_error(fr);
+    }
+
+    /* Move the currently-active file aside to a discard slot (reclaimed at
+     * next boot), then promote the backup onto the target name. Roll the
+     * active file back if the promotion fails, so the card is never left
+     * without a bootable target. */
+    char discard_path[FWUP_PATH_MAX];
+    int displaced = 0;
+    fr = f_stat(path, &info);
+    if (fr == FR_OK) {
+        if (!reserve_discard_path(discard_path, sizeof(discard_path))) {
+            return FWUP_ERR_RESTORE;
+        }
+        fr = f_rename(path, discard_path);
+        if (fr != FR_OK) {
+            printf("[FWUP] RESTORE discard active(%s -> %s) failed: %d\n",
+                   path, discard_path, (int)fr);
+            return FWUP_ERR_RESTORE;
+        }
+        displaced = 1;
+    } else if (fr != FR_NO_FILE) {
+        printf("[FWUP] RESTORE active check(%s) failed: %d\n", path, (int)fr);
+        return FWUP_ERR_RESTORE;
+    }
+
+    fr = f_rename(backup_path, path);
+    if (fr != FR_OK) {
+        printf("[FWUP] RESTORE promote(%s -> %s) failed: %d\n",
+               backup_path, path, (int)fr);
+        if (displaced) {
+            FRESULT fr_rb = f_rename(discard_path, path);
+            if (fr_rb != FR_OK) {
+                printf("[FWUP] RESTORE rollback(%s -> %s) failed: %d\n",
+                       discard_path, path, (int)fr_rb);
+            }
+        }
+        return FWUP_ERR_RESTORE;
+    }
+
+    printf("[FWUP] RESTORE %s <- %s\n", path, backup_path);
+    return FWUP_OK;
+}
+
 uint16_t fw_update_abort(void) {
     if (!fwup_open_flag && fwup_path[0] == '\0') {
         /* Nothing in flight — treat as a no-op success so the caller

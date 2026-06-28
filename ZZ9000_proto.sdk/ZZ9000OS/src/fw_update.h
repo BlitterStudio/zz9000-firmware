@@ -20,6 +20,9 @@
  *   3. Amiga writes REG_ZZ_FWUP_CMD = CLOSE to finalize and commit the
  *      temporary file over the requested target.
  *   4. ABORT (cmd 4) at any time discards the temporary file.
+ *   5. RESTORE (cmd 5): with a target name staged like OPEN, promote
+ *      that target's saved backup (e.g. BOOT.bak) back over it; the
+ *      replaced file is moved to a discard slot reclaimed at next boot.
  *
  * REG_ZZ_FWUP_STATUS reads 0xFFFF while a command is in flight, 0 on
  * success, or one of FWUP_ERR_* on failure.
@@ -31,10 +34,11 @@
 #include <stdint.h>
 
 enum fw_update_cmd {
-    FWUP_CMD_OPEN  = 1,
-    FWUP_CMD_WRITE = 2,
-    FWUP_CMD_CLOSE = 3,
-    FWUP_CMD_ABORT = 4,
+    FWUP_CMD_OPEN    = 1,
+    FWUP_CMD_WRITE   = 2,
+    FWUP_CMD_CLOSE   = 3,
+    FWUP_CMD_ABORT   = 4,
+    FWUP_CMD_RESTORE = 5,
 };
 
 enum fw_update_status {
@@ -47,6 +51,8 @@ enum fw_update_status {
     FWUP_ERR_STATE      = 0x07,
     FWUP_ERR_LEN        = 0x08,
     FWUP_ERR_UNKNOWN    = 0x09,
+    FWUP_ERR_NO_BACKUP  = 0x0A,
+    FWUP_ERR_RESTORE    = 0x0B,
 };
 
 /* Filename is read from `name_buf` (NUL-terminated, max 64 chars after
@@ -60,6 +66,13 @@ uint16_t fw_update_write(const void *buf, uint32_t len);
 
 /* f_sync + f_close. After CLOSE the state machine returns to IDLE. */
 uint16_t fw_update_close(void);
+
+/* Restore a previously-saved backup as the active firmware file.
+ * `name_buf` is the active target name (e.g. "BOOT.bin", NUL-terminated,
+ * same rules as fw_update_open). The matching backup (e.g. "BOOT.bak")
+ * is renamed onto the target; the replaced file is moved to a discard
+ * slot reclaimed at next boot. Must be called while idle. */
+uint16_t fw_update_restore(const char *name_buf);
 
 /* Deletes stale internal discard files left when replacing an existing
  * visible .bak backup. Intended for boot/reset-time cleanup, not during

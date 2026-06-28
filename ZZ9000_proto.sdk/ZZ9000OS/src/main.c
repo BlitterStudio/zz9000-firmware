@@ -421,6 +421,11 @@ int main() {
 			case FWUP_CMD_ABORT:
 				result = fw_update_abort();
 				break;
+			case FWUP_CMD_RESTORE:
+				/* Target name staged in the shared buffer like OPEN;
+				 * promotes its backup over it (see fw_update_restore). */
+				result = fw_update_restore((const char*)USB_BLOCK_STORAGE_ADDRESS);
+				break;
 			default:
 				result = FWUP_ERR_UNKNOWN;
 				break;
