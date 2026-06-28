@@ -17,6 +17,32 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
+  lint:
+    name: lint (actionlint + shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: actionlint (workflow files)
+        run: docker run --rm -v "$PWD":/repo:ro -w /repo rhysd/actionlint:latest -color
+      - name: shellcheck (shell scripts, errors only)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          files=$(git ls-files '*.sh')
+          if [ -n "$files" ]; then
+            echo "$files" | xargs shellcheck --severity=error
+          fi
+
+  rtg-tests:
+    name: RTG host regression
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Run RTG regression suite
+        run: make -C test/rtg test
+
   build:
     name: Build & package firmware
     runs-on: ubuntu-latest
@@ -93,6 +119,16 @@ jobs:
       - name: Export BOOTGEN
         run: echo "BOOTGEN=${{ github.workspace }}/.toolchain/bootgen/bootgen" >> "$GITHUB_ENV"
 
+      # Codec deps (zlib/libpng/libjpeg-turbo/lzma) are downloaded + built from
+      # source per run. Cache the built archives keyed on the build scripts
+      # (which pin the versions + sha256s) so unchanged runs skip the rebuild
+      # and survive an upstream mirror outage.
+      - name: Cache codec deps
+        uses: actions/cache@v5
+        with:
+          path: ZZ9000_proto.sdk/ZZ9000OS/build/deps
+          key: codec-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build_zlib.sh', 'build_libpng.sh', 'build_libjpeg_turbo.sh', 'build_lzma_sdk.sh') }}
+
       - name: Build firmware (ZZ9000OS.elf)
         run: ./build_firmware.sh
 
@@ -134,7 +170,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: build
+    needs: [build, rtg-tests]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

@@ -19,7 +19,14 @@ VERSION_DIR="$DEPS_DIR/$VERSION"
 SRC_DIR="$VERSION_DIR/src"
 BUILD_DIR="$VERSION_DIR/build-neon"
 ARCHIVE="$DEPS_DIR/libpng-$VERSION.tar.xz"
-URL="https://download.sourceforge.net/libpng/libpng-$VERSION.tar.xz"
+# SourceForge is the canonical host but is intermittently slow/unreachable from
+# CI; try a couple of mirrors. The sha256 check below guards correctness no
+# matter which mirror served the archive.
+URLS="
+https://download.sourceforge.net/libpng/libpng-$VERSION.tar.xz
+https://github.com/pnggroup/libpng/releases/download/v$VERSION/libpng-$VERSION.tar.xz
+https://downloads.sourceforge.net/project/libpng/libpng16/$VERSION/libpng-$VERSION.tar.xz
+"
 ZLIB_SRC="$OS_DIR/build/deps/zlib/$ZLIB_VERSION/src"
 ZLIB_BUILD="$OS_DIR/build/deps/zlib/$ZLIB_VERSION/build"
 ZLIB_LIB="$ZLIB_BUILD/libz.a"
@@ -43,8 +50,13 @@ fi
 mkdir -p "$DEPS_DIR" "$VERSION_DIR"
 
 if [ ! -f "$ARCHIVE" ]; then
-  echo "[libpng] downloading $URL"
-  wget -q "$URL" -O "$ARCHIVE"
+  ok=0
+  for u in $URLS; do
+    echo "[libpng] downloading $u"
+    if wget -q "$u" -O "$ARCHIVE"; then ok=1; break; fi
+    echo "[libpng] failed: $u"
+  done
+  [ "$ok" = 1 ] || { echo "ERROR: all libpng mirrors failed." >&2; exit 1; }
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then
