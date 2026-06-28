@@ -308,6 +308,14 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 int main() {
 	init_platform();
 
+	// issue #25: tell the FPGA the Zynq is up and the Z3 fast-RAM DDR window is
+	// ready, so it may advertise the fast-RAM autoconfig PIC. Until this is set
+	// (e.g. while still cold-booting from SD), the FPGA withholds that PIC so a
+	// fast accelerator's boot-time Zorro III memory test cannot mark the
+	// not-yet-ready RAM as defective. Set as early as possible to minimise the
+	// window in which the card could appear without its fast RAM.
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6, 1);
+
 	boot_rom_init();
 
 	disable_reset_out();

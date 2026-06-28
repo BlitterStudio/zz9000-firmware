@@ -304,6 +304,7 @@ module MNTZorro_v0_1_S00_AXI
   reg [`C_S_AXI_DATA_WIDTH-1:0] slv_reg3;
   reg [`C_S_AXI_DATA_WIDTH-1:0] slv_reg4;
   reg [`C_S_AXI_DATA_WIDTH-1:0] slv_reg5;
+  reg [`C_S_AXI_DATA_WIDTH-1:0] slv_reg6; // issue #25: Z3 fast-RAM readiness gate (PS-written)
   wire   slv_reg_rden;
   wire   slv_reg_wren;
   reg [`C_S_AXI_DATA_WIDTH-1:0]  reg_data_out;
@@ -427,6 +428,7 @@ module MNTZorro_v0_1_S00_AXI
           slv_reg3 <= 0;
           slv_reg4 <= 0;
           slv_reg5 <= 0;
+          slv_reg6 <= 0;
         end
       else begin
         if (slv_reg_wren)
@@ -474,6 +476,12 @@ module MNTZorro_v0_1_S00_AXI
                     // Slave register 5
                     slv_reg5[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
+              3'h6:
+                for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
+                  if ( S_AXI_WSTRB[byte_index] == 1 ) begin
+                    // Slave register 6 (issue #25: Z3 fast-RAM readiness flag)
+                    slv_reg6[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
+                  end
               default : begin
                 slv_reg0 <= slv_reg0;
                 slv_reg1 <= slv_reg1;
@@ -481,6 +489,7 @@ module MNTZorro_v0_1_S00_AXI
                 slv_reg3 <= slv_reg3;
                 slv_reg4 <= slv_reg4;
                 slv_reg5 <= slv_reg5;
+                slv_reg6 <= slv_reg6;
               end
             endcase
           end
@@ -644,6 +653,9 @@ module MNTZorro_v0_1_S00_AXI
   reg [15:0] data_z3_hi16;
   reg [15:0] data_z3_low16;
   reg z3_curpic = 0;
+  // issue #25: registered copy of slv_reg6[0]. The PS sets it once the Zynq is
+  // up and the Z3 fast-RAM DDR window is ready, gating the fast-RAM autoconfig PIC.
+  reg fastram_ready = 0;
 
   (* mark_debug = "true" *) reg [15:0] data_z3_hi16_latched;
   (* mark_debug = "true" *) reg [15:0] data_z3_low16_latched;
@@ -1768,7 +1780,15 @@ module MNTZorro_v0_1_S00_AXI
           if (z3_fast_low)
             z3_fast_high  <= z3_fast_low + `Z3_SIZE_256MB;
 
-          if (!z3_curpic) begin
+          // issue #25: advertise the second (fast-RAM) PIC only once the
+          // firmware has signalled the DDR window is ready (slv_reg6[0]). On a
+          // cold boot the Zynq may still be booting from SD when a fast
+          // accelerator (e.g. BFG9060) memory-tests Zorro III RAM; exposing the
+          // fast-RAM board before its DDR backing is up makes that test mark it
+          // "defective". Withholding the PIC until ready avoids the false
+          // failure - it appears on the next autoconfig once ready. Warm resets
+          // keep fastram_ready set, so they are unaffected.
+          if (!z3_curpic && fastram_ready) begin
             z3_curpic <= 1'b1;
             z3_confdone <= 0;
             zorro_state <= Z3_CONFIGURING;
@@ -2547,6 +2567,7 @@ module MNTZorro_v0_1_S00_AXI
     axi_reg3 <= slv_reg3; // ARM video control
     eth_rx_frame_select <= slv_reg4;
     axi_reg5 <= slv_reg5; // Amiga IRQ
+    fastram_ready <= slv_reg6[0]; // issue #25: gate Z3 fast-RAM PIC on firmware readiness
 
     if (video_control_axi) begin
       video_control_data <= video_control_data_axi;
