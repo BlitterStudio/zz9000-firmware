@@ -18,11 +18,15 @@ VERSION_DIR="$DEPS_DIR/$VERSION"
 SRC_DIR="$VERSION_DIR/src"
 BUILD_DIR="$VERSION_DIR/build"
 ARCHIVE="$DEPS_DIR/zlib-$VERSION.tar.xz"
-URL="https://zlib.net/zlib-$VERSION.tar.xz"
-# zlib.net serves only the current release at the root and moves older versions
-# to fossils/, so fall back there. The sha256 check below guards correctness
-# regardless of which mirror served the archive.
-URL_FOSSILS="https://zlib.net/fossils/zlib-$VERSION.tar.xz"
+# Prefer the immutable GitHub release asset: zlib.net serves only the current
+# release at its root, moves older ones to fossils/, and is intermittently
+# unreachable from CI. The sha256 check below guards correctness regardless of
+# which mirror served the archive.
+URLS="
+https://github.com/madler/zlib/releases/download/v$VERSION/zlib-$VERSION.tar.xz
+https://zlib.net/zlib-$VERSION.tar.xz
+https://zlib.net/fossils/zlib-$VERSION.tar.xz
+"
 
 for tool in arm-none-eabi-gcc arm-none-eabi-ar arm-none-eabi-ranlib cmake make wget; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -39,11 +43,13 @@ fi
 mkdir -p "$DEPS_DIR" "$VERSION_DIR"
 
 if [ ! -f "$ARCHIVE" ]; then
-  echo "[zlib] downloading $URL"
-  wget -q "$URL" -O "$ARCHIVE" || {
-    echo "[zlib] primary URL failed; trying $URL_FOSSILS"
-    wget -q "$URL_FOSSILS" -O "$ARCHIVE"
-  }
+  ok=0
+  for u in $URLS; do
+    echo "[zlib] downloading $u"
+    if wget -q "$u" -O "$ARCHIVE"; then ok=1; break; fi
+    echo "[zlib] failed: $u"
+  done
+  [ "$ok" = 1 ] || { echo "ERROR: all zlib mirrors failed." >&2; exit 1; }
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then
