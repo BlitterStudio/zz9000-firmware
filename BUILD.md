@@ -3,7 +3,7 @@
 Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
 SPDX-License-Identifier: GPL-3.0-or-later
 
-Three small scripts, each doing one thing, run from the repo root. All
+Small composable scripts, each doing one thing, run from the repo root. All
 outputs land in `bootimage_work/`. CI runs the same scripts.
 
 | Script | What it builds | Needs |
@@ -12,6 +12,7 @@ outputs land in `bootimage_work/`. CI runs the same scripts.
 | [`build_libjpeg_turbo.sh`](build_libjpeg_turbo.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/libjpeg-turbo/.../libjpeg.a` | Arm GNU Toolchain, `cmake`, `make`, `wget` |
 | [`build_zlib.sh`](build_zlib.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/zlib/.../libz.a` | Arm GNU Toolchain, `cmake`, `make`, `wget` |
 | [`build_libpng.sh`](build_libpng.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/libpng/.../liblibpng16_static.a` | Arm GNU Toolchain, `cmake`, `make`, `wget`; calls `build_zlib.sh` |
+| [`build_lzma_sdk.sh`](build_lzma_sdk.sh) | LZMA SDK decoder sources under `ZZ9000_proto.sdk/ZZ9000OS/build/deps/lzma-sdk/` (compiled into `ZZ9000OS.elf` by `build_firmware.sh`) | `wget`, `7z`/`7za`/`7zr` |
 | [`build_bitstream.sh`](build_bitstream.sh) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Linux |
 | [`build_bitstream.ps1`](build_bitstream.ps1) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Windows |
 | [`build_variant_bitstreams.sh`](build_variant_bitstreams.sh) | all release variant `.bit` files | Vivado 2018.3 on Linux |
@@ -24,7 +25,7 @@ The scripts are composable — nothing calls anything else implicitly.
 
 **ARM firmware change only** (most iteration loops). Uses the committed
 bitstream. `build_firmware.sh` automatically downloads, verifies, and builds
-the libjpeg-turbo, zlib, and libpng static dependencies under
+the libjpeg-turbo, zlib, libpng, and LZMA SDK dependencies under
 `ZZ9000OS/build/deps/` when needed:
 ```bash
 ./build_firmware.sh
@@ -159,7 +160,7 @@ Release-style ZIP artifacts are uploaded per run.
 
 ### Cutting a release
 
-Push a `v*` tag (e.g. `v2.1.0`, or `v2.1.0-rc1` for a pre-release) and
+Push a `v*` tag (e.g. `v2.2.0`, or `v2.2.0-rc1` for a pre-release) and
 the workflow will build the firmware and publish a GitHub Release with
 old-style `zz9000-firmware-<tag>-<variant>.zip` archives attached. Each
 ZIP contains a directory with the user-facing `BOOT.bin` file to copy to
@@ -167,8 +168,8 @@ the ZZ9000 microSD card. The workflow packages both the standard firmware
 flavor and the `ns-pal` flavor.
 
 ```bash
-git tag -a v2.1.0 -m "Firmware 2.1.0"
-git push origin v2.1.0
+git tag -a v2.2.0 -m "Firmware 2.2.0"
+git push origin v2.2.0
 ```
 
 Tags containing `-` are marked as pre-releases.

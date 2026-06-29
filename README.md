@@ -32,6 +32,10 @@ drivers and tools live in
   command proxy.
 - Gigabit Ethernet support through the Zynq GEM and ZZ9000 shared
   register/mailbox protocol.
+- Audio playback through the on-board ADAU codec, including firmware-side
+  MP3 and ADPCM decoding.
+- SDK service layer over a shared mailbox protocol, including ARM-side
+  cryptographic offload that backs the Amiga-side `amissl` TLS acceleration.
 - Reproducible firmware and release ZIP builds without Xilinx SDK; Vivado
   2018.3 is only needed when rebuilding FPGA bitstreams.
 
@@ -128,11 +132,11 @@ timing changes as proven.
 Release CI is tag-driven. Push a `v*` tag and the workflow builds the
 standard and `ns-pal` firmware flavors, packages every committed variant
 bitstream, and publishes a GitHub Release. Tags containing `-`, such as
-`v2.1.0-rc1`, are marked as pre-releases.
+`v2.2.0-rc1`, are marked as pre-releases.
 
 ```bash
-git tag -a v2.1.0 -m "Firmware 2.1.0"
-git push origin v2.1.0
+git tag -a v2.2.0 -m "Firmware 2.2.0"
+git push origin v2.2.0
 ```
 
 ## Repository Layout
