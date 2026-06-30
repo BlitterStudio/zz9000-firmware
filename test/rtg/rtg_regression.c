@@ -586,6 +586,59 @@ static void ref_template_fill_rect(uint32_t color_format, uint16_t x, uint16_t y
 	}
 }
 
+/* Independent oracle for BlitPattern (pattern_fill_rect): a 16-wide,
+ * loop_rows-tall monochrome pattern (2 bytes/row, MSB-first) tiled across the
+ * rect, phase (x_offset,y_offset) measured from the rect's top-left. JAM1 sets
+ * fg on set bits (others untouched), JAM2 sets fg/bg, COMPLEMENT XOR-inverts
+ * the dst on set bits; INVERSVID flips the pattern bits. Deliberately a naive
+ * per-pixel implementation that shares no code with the firmware's byte-wrap,
+ * 8-pixel fast path, or JAM2 block-copy "cheat" path. */
+static void ref_pattern_fill_rect(uint32_t color_format, uint16_t x, uint16_t y,
+	uint16_t w, uint16_t h, uint8_t draw_mode, uint8_t mask,
+	uint32_t fg_color, uint32_t bg_color, uint16_t x_offset, uint16_t y_offset,
+	const uint8_t *tmpl_data, uint16_t loop_rows)
+{
+	uint32_t fg = color_to_pixel(color_format, fg_color);
+	uint32_t bg = color_to_pixel(color_format, bg_color);
+	int invert = draw_mode & INVERSVID;
+	uint8_t mode = draw_mode & 0x03;
+
+	for (uint16_t yy = 0; yy < h; yy++) {
+		for (uint16_t xx = 0; xx < w; xx++) {
+			uint32_t pcol = (uint32_t)(x_offset + xx) % 16;
+			uint32_t prow = (uint32_t)(y_offset + yy) % loop_rows;
+			uint8_t byte = tmpl_data[prow * 2 + (pcol / 8)];
+			uint8_t bit = (uint8_t)(0x80 >> (pcol & 7));
+			int set = ((invert ? (byte ^ 0xff) : byte) & bit) != 0;
+
+			if (mode == COMPLEMENT) {
+				if (!set)
+					continue;
+				if (color_format == MNTVA_COLOR_8BIT)
+					row8(expected_fb, FB_PITCH_WORDS, y + yy)[x + xx] ^= mask;
+				else if (color_format == MNTVA_COLOR_32BIT)
+					row32(expected_fb, FB_PITCH_WORDS, y + yy)[x + xx] ^= 0xFFFFFFFFu;
+				else
+					row16(expected_fb, FB_PITCH_WORDS, y + yy)[x + xx] ^= 0xFFFFu;
+				continue;
+			}
+
+			if (mode == JAM1 && !set)
+				continue;
+
+			uint32_t pixel = set ? fg : bg;
+			if (color_format == MNTVA_COLOR_8BIT && mask != 0xff) {
+				uint8_t *drow = row8(expected_fb, FB_PITCH_WORDS, y + yy);
+				drow[x + xx] = (uint8_t)((drow[x + xx] & (uint8_t)~mask) |
+					((uint8_t)pixel & mask));
+			} else {
+				put_pixel(expected_fb, FB_PITCH_WORDS, x + xx, y + yy,
+					color_format, pixel);
+			}
+		}
+	}
+}
+
 static void make_planar(uint8_t *dst, uint8_t planes, uint16_t pitch, int h, uint32_t seed)
 {
 	rng_state = seed;
@@ -938,6 +991,51 @@ static void test_template(void)
 	check_frame("template_fill_rect jam1 32");
 }
 
+static void test_pattern(void)
+{
+	/* BlitPattern (OP_RECT_PATTERN) had no host coverage. A 16x8 monochrome
+	 * pattern with a varied bit layout, tiled across rects wider than 16 and
+	 * taller than loop_rows, at non-byte-aligned phases, exercises the byte
+	 * wrap, the 8-pixel fast path, the vertical wrap, and the JAM2 block-copy
+	 * "cheat" path (triggered by JAM2 + mask 0xFF + loop_rows <= 64). */
+	static const uint8_t pat[16] = {
+		0x80, 0x01,  0xC0, 0x03,  0xE0, 0x07,  0xF0, 0x0F,
+		0x12, 0x48,  0x24, 0x90,  0xA5, 0x5A,  0xFF, 0x00,
+	};
+	static const struct {
+		const char *name;
+		uint32_t fmt;
+		uint16_t x, y, w, h, xoff, yoff;
+		uint8_t mode, mask;
+		uint32_t fg, bg;
+	} cases[] = {
+		{ "pattern jam1 8 tiled",     MNTVA_COLOR_8BIT,     5, 4, 22, 19,  0, 0, JAM1,           0xFF, 0x11000000, 0x22000000 },
+		{ "pattern jam2 8 cheat",     MNTVA_COLOR_8BIT,     6, 3, 24, 23,  3, 2, JAM2,           0xFF, 0xaa000000, 0x55000000 },
+		{ "pattern jam2 8 masked",    MNTVA_COLOR_8BIT,     4, 5, 20, 14,  5, 1, JAM2,           0x0F, 0xaa000000, 0x55000000 },
+		{ "pattern jam2 16 cheat",    MNTVA_COLOR_16BIT565, 8, 6, 18, 17, 11, 5, JAM2,           0xFF, 0x00001234, 0x0000fedc },
+		{ "pattern jam1 32 tiled",    MNTVA_COLOR_32BIT,    3, 2, 21, 20,  7, 3, JAM1,           0xFF, 0xff884422, 0x11335577 },
+		{ "pattern jam2 inversvid 8", MNTVA_COLOR_8BIT,     9, 7, 19, 12,  2, 4, JAM2|INVERSVID, 0xFF, 0x77000000, 0x33000000 },
+		{ "pattern complement 16",    MNTVA_COLOR_16BIT565, 5, 8, 20, 15,  4, 6, COMPLEMENT,     0xFF, 0,          0 },
+	};
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		seed_frame(0x3600u + (uint32_t)i);
+		/* pattern_fill_rect takes its pitch in BYTES (it computes fb_pitch/4
+		 * words/row), like template_fill_rect and unlike fill_rect/draw_line
+		 * which take words. The driver feeds it BytesPerRow accordingly; seed_frame
+		 * set the word pitch, so override with the byte pitch here (then restore). */
+		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		pattern_fill_rect(cases[i].fmt, cases[i].x, cases[i].y, cases[i].w,
+			cases[i].h, cases[i].mode, cases[i].mask, cases[i].fg, cases[i].bg,
+			cases[i].xoff, cases[i].yoff, (uint8_t *)pat, 16, 8);
+		set_fb(actual_fb, FB_PITCH_WORDS);
+		ref_pattern_fill_rect(cases[i].fmt, cases[i].x, cases[i].y, cases[i].w,
+			cases[i].h, cases[i].mode, cases[i].mask, cases[i].fg, cases[i].bg,
+			cases[i].xoff, cases[i].yoff, pat, 8);
+		check_frame(cases[i].name);
+	}
+}
+
 static void test_acc_blit(void)
 {
 	const uint16_t row_bytes = FB_PITCH_WORDS * sizeof(uint32_t);
@@ -1157,6 +1255,7 @@ static void run_tests(void)
 	test_planar();
 	test_p2d();
 	test_template();
+	test_pattern();
 	test_acc_blit();
 	test_acc_clear();
 	test_fb_limit_clamp();
