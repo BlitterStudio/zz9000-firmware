@@ -327,6 +327,135 @@ static void ref_draw_line_solid(int16_t x1, int16_t y1, int16_t x2_delta, int16_
 	}
 }
 
+/* Independent oracle for the P96 line contract (no shared code with the
+ * firmware recurrence): pixel i (i = 0..L) of a line from (ox,oy) with deltas
+ * (dx,dy) sits at minor offset floor((2*i*S + L) / (2*L)) == round(i*S/L) with
+ * ties going up. DrawLineDefault uses round-half-up: verified on ZZ9000
+ * hardware (the RoundCheck test drew DrawLineDefault beside both candidate
+ * staircases; round-half-up matched pixel-for-pixel, truncation was 1px off).
+ * The wiki's sExtend formula reduces to floor(i*S/L), but that describes the
+ * minor EXTENT used for clip rectangles, not the per-pixel stepping. */
+static void ref_draw_line_oracle(int ox, int oy, int dx, int dy,
+	uint32_t color, uint32_t color_format)
+{
+	int dxa = dx < 0 ? -dx : dx;
+	int dya = dy < 0 ? -dy : dy;
+	int horiz = dxa >= dya;
+	int L = horiz ? dxa : dya;
+	int S = horiz ? dya : dxa;
+	int sx = dx < 0 ? -1 : 1;
+	int sy = dy < 0 ? -1 : 1;
+	uint32_t pixel = color_to_pixel(color_format, color);
+	int Ldiv = L > 0 ? L : 1;
+
+	for (int i = 0; i <= L; i++) {
+		int minor = (2 * i * S + L) / (2 * Ldiv);
+		int x = horiz ? ox + sx * i : ox + sx * minor;
+		int y = horiz ? oy + sy * minor : oy + sy * i;
+		put_pixel(expected_fb, FB_PITCH_WORDS, x, y, color_format, pixel);
+	}
+}
+
+/* As ref_draw_line_oracle, but skips pixels outside the framebuffer so a line
+ * whose origin is off-screen (a negative Xorigin/Yorigin from top/left clipping)
+ * marks only its on-screen part. put_pixel itself does not bounds-check, so the
+ * clipping lives here rather than in the shared helper. */
+static void ref_draw_line_oracle_clipped(int ox, int oy, int dx, int dy,
+	uint32_t color, uint32_t color_format)
+{
+	int dxa = dx < 0 ? -dx : dx;
+	int dya = dy < 0 ? -dy : dy;
+	int horiz = dxa >= dya;
+	int L = horiz ? dxa : dya;
+	int S = horiz ? dya : dxa;
+	int sx = dx < 0 ? -1 : 1;
+	int sy = dy < 0 ? -1 : 1;
+	uint32_t pixel = color_to_pixel(color_format, color);
+	int Ldiv = L > 0 ? L : 1;
+
+	for (int i = 0; i <= L; i++) {
+		int minor = (2 * i * S + L) / (2 * Ldiv);
+		int x = horiz ? ox + sx * i : ox + sx * minor;
+		int y = horiz ? oy + sy * minor : oy + sy * i;
+		if (x < 0 || x >= FB_W || y < 0 || y >= FB_H)
+			continue;
+		put_pixel(expected_fb, FB_PITCH_WORDS, x, y, color_format, pixel);
+	}
+}
+
+/* Oracle pixel at major index i (0..L) of the line from (ox,oy), deltas (dx,dy). */
+static void oracle_point(int ox, int oy, int dx, int dy, int i, int *px, int *py)
+{
+	int dxa = dx < 0 ? -dx : dx;
+	int dya = dy < 0 ? -dy : dy;
+	int horiz = dxa >= dya;
+	int L = horiz ? dxa : dya;
+	int S = horiz ? dya : dxa;
+	int sx = dx < 0 ? -1 : 1;
+	int sy = dy < 0 ? -1 : 1;
+	int Ldiv = L > 0 ? L : 1;
+	int minor = (2 * i * S + L) / (2 * Ldiv);
+
+	*px = horiz ? ox + sx * i : ox + sx * minor;
+	*py = horiz ? oy + sy * minor : oy + sy * i;
+}
+
+/* Compare actual vs expected without the per-case "ok" chatter; returns 1 on
+ * mismatch. */
+static int frames_differ(void)
+{
+	return memcmp(actual_fb, expected_fb, sizeof(actual_fb)) != 0;
+}
+
+/* Work-variable seed the driver computes for a line segment: the round-half-up
+ * Bresenham accumulator at the segment start, derived from geometry in
+ * magnitudes so it is octant-independent (the signed twoSDminusLD is not used).
+ * For a segment starting k major / m minor units from the origin, the
+ * accumulator is e = S*k - L*m + L/2 == (S*k + L/2) mod L, in [0, L); L/2 for
+ * an unclipped line. The L/2 bias is what makes the staircase round-half-up
+ * (matching DrawLineDefault). The firmware does e += S; if (e >= L) { e -= L;
+ * minor-step; }. */
+static int32_t p96_err_seed(int dx, int dy, int seg_x, int seg_y, int ox, int oy)
+{
+	int dxa = dx < 0 ? -dx : dx;
+	int dya = dy < 0 ? -dy : dy;
+	int horiz = dxa >= dya;
+	int L = horiz ? dxa : dya;
+	int S = horiz ? dya : dxa;
+	int dmajor = horiz ? seg_x - ox : seg_y - oy;
+	int dminor = horiz ? seg_y - oy : seg_x - ox;
+	int k = dmajor < 0 ? -dmajor : dmajor;
+	int m = dminor < 0 ? -dminor : dminor;
+	return S * k - L * m + L / 2;
+}
+
+/* Oracle for a patterned (JAM2) line: pixel i uses pattern bit
+ * 0x8000 >> ((pattern_shift + i) & 15); foreground where set, background where
+ * clear. The geometry is the same independent Bresenham oracle as above. */
+static void ref_draw_line_pattern_oracle(int ox, int oy, int dx, int dy,
+	uint16_t pattern, int pattern_shift, uint32_t fg, uint32_t bg,
+	uint32_t color_format)
+{
+	int dxa = dx < 0 ? -dx : dx;
+	int dya = dy < 0 ? -dy : dy;
+	int horiz = dxa >= dya;
+	int L = horiz ? dxa : dya;
+	int S = horiz ? dya : dxa;
+	int sx = dx < 0 ? -1 : 1;
+	int sy = dy < 0 ? -1 : 1;
+	int Ldiv = L > 0 ? L : 1;
+	uint32_t fgp = color_to_pixel(color_format, fg);
+	uint32_t bgp = color_to_pixel(color_format, bg);
+
+	for (int i = 0; i <= L; i++) {
+		int minor = (2 * i * S + L) / (2 * Ldiv);
+		int x = horiz ? ox + sx * i : ox + sx * minor;
+		int y = horiz ? oy + sy * minor : oy + sy * i;
+		int on = (pattern & (0x8000 >> ((pattern_shift + i) & 15))) != 0;
+		put_pixel(expected_fb, FB_PITCH_WORDS, x, y, color_format, on ? fgp : bgp);
+	}
+}
+
 static uint8_t ref_planar_pixel(const uint8_t *plane_data, uint8_t planes,
 	uint8_t layer_mask, uint16_t src_line_pitch, int h, int sx, int sy,
 	int x, int y, int invert)
@@ -536,19 +665,165 @@ static void test_copy(void)
 static void test_lines(void)
 {
 	seed_frame(0x3001);
-	draw_line_solid(4, 8, 42, 0, 0, 0xde000000, MNTVA_COLOR_8BIT);
-	ref_draw_line_solid(4, 8, 42, 0, 0, 0xde000000, MNTVA_COLOR_8BIT);
+	draw_line_solid(4, 8, 42, 0, 42, p96_err_seed(42, 0, 4, 8, 4, 8), 0xde000000, MNTVA_COLOR_8BIT);
+	ref_draw_line_solid(4, 8, 42, 0, 42, 0xde000000, MNTVA_COLOR_8BIT);
 	check_frame("draw_line_solid hline 8");
 
 	seed_frame(0x3002);
-	draw_line_solid(18, 3, 0, 31, 0, 0x00001234, MNTVA_COLOR_16BIT565);
-	ref_draw_line_solid(18, 3, 0, 31, 0, 0x00001234, MNTVA_COLOR_16BIT565);
+	draw_line_solid(18, 3, 0, 31, 31, p96_err_seed(0, 31, 18, 3, 18, 3), 0x00001234, MNTVA_COLOR_16BIT565);
+	ref_draw_line_solid(18, 3, 0, 31, 31, 0x00001234, MNTVA_COLOR_16BIT565);
 	check_frame("draw_line_solid vline 16");
 
 	seed_frame(0x3003);
-	draw_line_solid(9, 6, 25, 25, 0, 0xff884422, MNTVA_COLOR_32BIT);
-	ref_draw_line_solid(9, 6, 25, 25, 0, 0xff884422, MNTVA_COLOR_32BIT);
+	draw_line_solid(9, 6, 25, 25, 25, p96_err_seed(25, 25, 9, 6, 9, 6), 0xff884422, MNTVA_COLOR_32BIT);
+	ref_draw_line_solid(9, 6, 25, 25, 25, 0xff884422, MNTVA_COLOR_32BIT);
 	check_frame("draw_line_solid diag 32");
+
+	/* Steep (major-Y, dy_abs > dx_abs) solid lines exercise the otherwise
+	 * untested major-Y branch of draw_line_solid - the 45-degree "diag" case
+	 * above takes the major-X branch. Slope 2:1 makes the round-half-up staircase
+	 * unambiguous; both step directions are covered. */
+	seed_frame(0x3004);
+	draw_line_solid(20, 4, 14, 28, 28, p96_err_seed(14, 28, 20, 4, 20, 4), 0x000089ab, MNTVA_COLOR_16BIT565);
+	ref_draw_line_oracle(20, 4, 14, 28, 0x000089ab, MNTVA_COLOR_16BIT565);
+	check_frame("draw_line_solid steep 2:1 major-Y down");
+
+	seed_frame(0x3005);
+	draw_line_solid(60, 40, 14, -28, 28, p96_err_seed(14, -28, 60, 40, 60, 40), 0xaa113355, MNTVA_COLOR_32BIT);
+	ref_draw_line_oracle(60, 40, 14, -28, 0xaa113355, MNTVA_COLOR_32BIT);
+	check_frame("draw_line_solid steep 2:1 major-Y up");
+}
+
+static void test_lines_clipped(void)
+{
+	/* Full odd-major line must match the independent round-half-up oracle. An
+	 * odd L is where round-half-up and truncation diverge, so this pins the
+	 * firmware to DrawLineDefault's exact staircase (unclipped seed L/2) and
+	 * guards against a regression back to truncation (seed 0). */
+	{
+		int ox = 6, oy = 9, dx = 31, dy = 13;	/* L=31 (odd), S=13 */
+		seed_frame(0x3101);
+		draw_line_solid(ox, oy, dx, dy, 31,
+			p96_err_seed(dx, dy, ox, oy, ox, oy),
+			0xc4000000, MNTVA_COLOR_8BIT);
+		ref_draw_line_oracle(ox, oy, dx, dy, 0xc4000000, MNTVA_COLOR_8BIT);
+		check_frame("draw_line_solid full odd-L == oracle");
+	}
+
+	/* The P96 clipping contract: a line split into two segments at ANY interior
+	 * point must reassemble into exactly the same pixels as the whole line.
+	 * Segment B starts mid-line, so it only renders correctly if the firmware
+	 * resumes the staircase from err_seed rather than restarting at (X,Y). A
+	 * single clip point can accidentally land on an aligned phase, so sweep
+	 * every clip point of several octants. */
+	{
+		static const int dxs[] = { 31, 17, 40, -33, 25, 9, -40 };
+		static const int dys[] = { 13, 30, 9, 23, -25, -30, -7 };
+		int ox = 48, oy = 36;	/* center, so negative octants stay in-bounds */
+		unsigned bad = 0, total = 0;
+
+		for (size_t t = 0; t < sizeof(dxs) / sizeof(dxs[0]); t++) {
+			int dx = dxs[t], dy = dys[t];
+			int dxa = dx < 0 ? -dx : dx, dya = dy < 0 ? -dy : dy;
+			int L = dxa >= dya ? dxa : dya;
+
+			for (int k = 1; k < L; k++) {
+				int bx, by;
+				oracle_point(ox, oy, dx, dy, k, &bx, &by);
+				seed_frame(0x3200u + (uint32_t)(t * 64 + k));
+				draw_line_solid(ox, oy, dx, dy, k,
+					p96_err_seed(dx, dy, ox, oy, ox, oy),
+					0xc4000000, MNTVA_COLOR_8BIT);
+				draw_line_solid(bx, by, dx, dy, L - k,
+					p96_err_seed(dx, dy, bx, by, ox, oy),
+					0xc4000000, MNTVA_COLOR_8BIT);
+				ref_draw_line_oracle(ox, oy, dx, dy, 0xc4000000, MNTVA_COLOR_8BIT);
+				total++;
+				if (frames_differ())
+					bad++;
+			}
+		}
+
+		if (bad) {
+			printf("FAIL %-30s %u/%u clip points mismatch the whole line\n",
+				"draw_line split == whole", bad, total);
+			failures++;
+		} else {
+			printf("ok   draw_line split == whole (%u clip points)\n", total);
+		}
+	}
+}
+
+static void test_lines_negative_origin(void)
+{
+	/* A line clipped at the top/left has its true start above/left of the
+	 * RenderInfo, so P96 hands DrawLine a NEGATIVE Xorigin/Yorigin. err_seed is
+	 * computed from (segment_start - origin), so the origin must be treated as
+	 * signed (the driver's field is UWORD and has to be cast through WORD, or
+	 * -8 reads as 65528 and the seed is wrong). P96 clips segment A away and
+	 * only asks for the on-screen segment B, which must still match the
+	 * on-screen part of the whole line drawn from the negative origin. */
+	int ox = 20, oy = -10, dx = 14, dy = 28, L = 28;
+	int k = -oy;			/* major steps before the line reaches y = 0 */
+	int bx, by;
+
+	oracle_point(ox, oy, dx, dy, k, &bx, &by);
+
+	seed_frame(0x3500);
+	draw_line_solid(bx, by, dx, dy, L - k,
+		p96_err_seed(dx, dy, bx, by, ox, oy),
+		0xc4000000, MNTVA_COLOR_8BIT);
+	ref_draw_line_oracle_clipped(ox, oy, dx, dy, 0xc4000000, MNTVA_COLOR_8BIT);
+	check_frame("draw_line negative-origin clip resumes");
+
+	/* Guard the signedness directly: promoting the origin unsigned (the bug)
+	 * must change the seed, otherwise the WORD cast in the driver is moot. */
+	if (p96_err_seed(dx, dy, bx, by, ox, oy) ==
+	    p96_err_seed(dx, dy, bx, by, ox, (int)(uint16_t)oy)) {
+		printf("FAIL %-30s unsigned origin leaves the seed unchanged\n",
+			"negative-origin sign");
+		failures++;
+	} else {
+		printf("ok   negative-origin seed is sign-sensitive\n");
+	}
+}
+
+static void test_lines_pattern(void)
+{
+	/* A dotted (JAM2) line split at an interior point must reassemble exactly.
+	 * Beyond the staircase seed this also requires the firmware to resume the
+	 * dot pattern mid-line via cur_bit = 0x8000 >> PatternShift; segment B's
+	 * PatternShift advances by the major-step count of segment A. */
+	int ox = 20, oy = 30, dx = 37, dy = 15, L = 37, shift0 = 3;
+	uint16_t pat = 0xCCCC;
+	unsigned bad = 0, total = 0;
+
+	for (int k = 1; k < L; k++) {
+		int bx, by;
+		oracle_point(ox, oy, dx, dy, k, &bx, &by);
+		seed_frame(0x3400u + (uint32_t)k);
+		draw_line(ox, oy, dx, dy, k,
+			p96_err_seed(dx, dy, ox, oy, ox, oy),
+			pat, shift0, 0xaa000000, 0x55000000,
+			MNTVA_COLOR_8BIT, 0xFF, JAM2);
+		draw_line(bx, by, dx, dy, L - k,
+			p96_err_seed(dx, dy, bx, by, ox, oy),
+			pat, (shift0 + k) & 15, 0xaa000000, 0x55000000,
+			MNTVA_COLOR_8BIT, 0xFF, JAM2);
+		ref_draw_line_pattern_oracle(ox, oy, dx, dy, pat, shift0,
+			0xaa000000, 0x55000000, MNTVA_COLOR_8BIT);
+		total++;
+		if (frames_differ())
+			bad++;
+	}
+
+	if (bad) {
+		printf("FAIL %-30s %u/%u clip points mismatch the dotted line\n",
+			"draw_line pattern split", bad, total);
+		failures++;
+	} else {
+		printf("ok   draw_line pattern split == whole (%u clip points)\n", total);
+	}
 }
 
 static void test_planar(void)
@@ -876,6 +1151,9 @@ static void run_tests(void)
 	test_fill_and_invert();
 	test_copy();
 	test_lines();
+	test_lines_clipped();
+	test_lines_negative_origin();
+	test_lines_pattern();
 	test_planar();
 	test_p2d();
 	test_template();
