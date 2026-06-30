@@ -14,6 +14,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             SWAP16(data->x[0]);		SWAP16(data->x[1]);
             SWAP16(data->y[0]);		SWAP16(data->y[1]);
             SWAP16(data->user[0]);	SWAP16(data->user[1]);
+            SWAP16(data->user[3]);
 
             SWAP16(data->pitch[0]);
             SWAP32(data->offset[0]);
@@ -23,11 +24,11 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
 
             if (data->user[1] == 0xFFFF && data->mask == 0xFF)
                 draw_line_solid(data->x[0], data->y[0], data->x[1], data->y[1],
-                        data->user[0], data->rgb[0],
+                        data->user[0], (int16_t)data->user[3], data->rgb[0],
                         data->u8_user[GFXDATA_U8_COLORMODE]);
             else
                 draw_line(data->x[0], data->y[0], data->x[1], data->y[1],
-                        data->user[0], data->user[1], data->user[2], data->rgb[0], data->rgb[1],
+                        data->user[0], (int16_t)data->user[3], data->user[1], data->user[2], data->rgb[0], data->rgb[1],
                         data->u8_user[GFXDATA_U8_COLORMODE], data->mask, data->u8_user[GFXDATA_U8_DRAWMODE]);
 
             break;

@@ -563,6 +563,7 @@ void copy_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint1
 
 // Sneakily adapted version of the good old Bresenham algorithm
 void draw_line(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t rect_y2, uint16_t len,
+	int16_t err_seed,
 	uint16_t pattern, uint16_t pattern_offset,
 	uint32_t fg_color, uint32_t bg_color, uint32_t color_format,
 	uint8_t mask, uint8_t draw_mode)
@@ -577,10 +578,11 @@ void draw_line(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t rect_y
 	int32_t line_step = fb_pitch;
 	int8_t x_reverse = 0, inversion = 0;
 
-	uint16_t cur_bit = 0x8000;
+	/* PatternShift selects which pattern bit maps to the segment start. */
+	uint16_t cur_bit = (uint16_t)(0x8000u >> (pattern_offset & 15));
 
 	int32_t dx, dy, x = x1;
-	uint32_t dx_abs, dy_abs, ix, iy, draw_len = len;
+	uint32_t dx_abs, dy_abs, draw_len = len;
 
 	if (x2 < x1)
 		x_reverse = 1;
@@ -599,47 +601,45 @@ void draw_line(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t rect_y
 	dy = y2 - y1;
 	dx_abs = (dx < 0) ? (uint32_t)-dx : (uint32_t)dx;
 	dy_abs = (dy < 0) ? (uint32_t)-dy : (uint32_t)dy;
-	ix = dy_abs >> 1;
-	iy = dx_abs >> 1;
-
-	// This can't be used for now, as Flags from the current RastPort struct is not exposed by [ P96 2.4.2 ]
-	/*if ((pattern_offset >> 8) & 0x01) { // Is FRST_DOT set?
-		cur_bit = 0x8000;
-		fg_color = 0xFFFF0000;
-	}
-	else {
-		fg_color = 0xFF00FF00;
-		cur_bit >>= ((pattern_offset & 0xFF) % 16);
-	}
-	
-	if (cur_bit == 0)
-		cur_bit = 0x8000;*/
-
 
 	DRAW_LINE_PIXEL;
 
+	/* P96 round-half-up Bresenham, seeded with the accumulator at the segment
+	 * start (err_seed = S*k - L*m + L/2 == (S*k + L/2) mod L, in [0, L); L/2 for
+	 * an unclipped line). Each major step adds S to the accumulator; once it
+	 * reaches L it wraps (subtract L) and a minor step is taken. The L/2 seed
+	 * bias makes the staircase round-half-up (minor offset = floor((2*i*S+L) /
+	 * (2*L)), ties up), which matches DrawLineDefault pixel-for-pixel on ZZ9000
+	 * hardware (plain truncation, seed 0, was consistently 1px off). Seeding
+	 * from err_seed resumes a clipped line exactly where P96 left off. */
 	if (dx_abs >= dy_abs) {
-		if (!draw_len) draw_len = dx_abs;
+		int32_t s = (int32_t)dy_abs;
+		int32_t l = (int32_t)dx_abs;
+		int32_t e = err_seed;
 		for (uint32_t i = 0; i < draw_len; i++) {
-			iy += dy_abs;
-			if (iy >= dx_abs) {
-				iy -= dx_abs;
-				dp += line_step;
-			}
+			e += s;
+			int minor = (e >= l);
+			if (minor)
+				e -= l;
 			x += (x_reverse) ? -1 : 1;
+			if (minor)
+				dp += line_step;
 
 			DRAW_LINE_PIXEL;
 		}
 	}
 	else {
-		if (!draw_len) draw_len = dy_abs;
-		for(uint32_t i = 0; i < draw_len; i++) {
-			ix += dx_abs;
-			if (ix >= dy_abs) {
-				ix -= dy_abs;
-				x += (x_reverse) ? -1 : 1;
-			}
+		int32_t s = (int32_t)dx_abs;
+		int32_t l = (int32_t)dy_abs;
+		int32_t e = err_seed;
+		for (uint32_t i = 0; i < draw_len; i++) {
+			e += s;
+			int minor = (e >= l);
+			if (minor)
+				e -= l;
 			dp += line_step;
+			if (minor)
+				x += (x_reverse) ? -1 : 1;
 
 			DRAW_LINE_PIXEL;
 		}
@@ -647,7 +647,7 @@ void draw_line(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t rect_y
 }
 
 void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t rect_y2, uint16_t len,
-	uint32_t fg_color, uint32_t color_format)
+	int16_t err_seed, uint32_t fg_color, uint32_t color_format)
 {
 	int32_t x1 = rect_x1, y1 = rect_y1;
 	int32_t x2 = x1 + (int32_t)rect_x2, y2 = y1 + (int32_t)rect_y2;
@@ -659,7 +659,7 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 	int8_t x_reverse = 0;
 
 	int32_t dx, dy, x = x1;
-	uint32_t dx_abs, dy_abs, ix, iy, draw_len = len;
+	uint32_t dx_abs, dy_abs, draw_len = len;
 
 	if (x2 < x1)
 		x_reverse = 1;
@@ -671,8 +671,6 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 	dx_abs = (dx < 0) ? (uint32_t)-dx : (uint32_t)dx;
 	dy_abs = (dy < 0) ? (uint32_t)-dy : (uint32_t)dy;
 
-	if (!draw_len)
-		draw_len = (dx_abs >= dy_abs) ? dx_abs : dy_abs;
 	if (dx_abs == 0) {
 		draw_vertical_line_solid(dp, x, line_step, draw_len + 1,
 			fg_color, u8_fg, color_format);
@@ -684,23 +682,35 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 		return;
 	}
 
-	ix = dy_abs >> 1;
-	iy = dx_abs >> 1;
+	/* Same seeded P96 round-half-up Bresenham as draw_line (see there): each
+	 * major step adds S; when the accumulator reaches L it wraps and a minor
+	 * step is taken; seeded from err_seed (which carries the L/2 round-half-up
+	 * bias) so clipped segments resume exactly. */
+	int32_t s, l;
+	if (dx_abs >= dy_abs) {
+		s = (int32_t)dy_abs;
+		l = (int32_t)dx_abs;
+	} else {
+		s = (int32_t)dx_abs;
+		l = (int32_t)dy_abs;
+	}
 
 	switch (color_format) {
 	case MNTVA_COLOR_8BIT:
 		((uint8_t *)dp)[x] = u8_fg;
 		if (dx_abs >= dy_abs) {
+			int32_t e = err_seed;
 			for (uint32_t i = 0; i < draw_len; i++) {
-				iy += dy_abs;
-				if (iy >= dx_abs) { iy -= dx_abs; dp += line_step; }
+				e += s;
+				if (e >= l) { e -= l; dp += line_step; }
 				x += (x_reverse) ? -1 : 1;
 				((uint8_t *)dp)[x] = u8_fg;
 			}
 		} else {
+			int32_t e = err_seed;
 			for (uint32_t i = 0; i < draw_len; i++) {
-				ix += dx_abs;
-				if (ix >= dy_abs) { ix -= dy_abs; x += (x_reverse) ? -1 : 1; }
+				e += s;
+				if (e >= l) { e -= l; x += (x_reverse) ? -1 : 1; }
 				dp += line_step;
 				((uint8_t *)dp)[x] = u8_fg;
 			}
@@ -710,16 +720,18 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 	case MNTVA_COLOR_15BIT:
 		((uint16_t *)dp)[x] = fg_color;
 		if (dx_abs >= dy_abs) {
+			int32_t e = err_seed;
 			for (uint32_t i = 0; i < draw_len; i++) {
-				iy += dy_abs;
-				if (iy >= dx_abs) { iy -= dx_abs; dp += line_step; }
+				e += s;
+				if (e >= l) { e -= l; dp += line_step; }
 				x += (x_reverse) ? -1 : 1;
 				((uint16_t *)dp)[x] = fg_color;
 			}
 		} else {
+			int32_t e = err_seed;
 			for (uint32_t i = 0; i < draw_len; i++) {
-				ix += dx_abs;
-				if (ix >= dy_abs) { ix -= dy_abs; x += (x_reverse) ? -1 : 1; }
+				e += s;
+				if (e >= l) { e -= l; x += (x_reverse) ? -1 : 1; }
 				dp += line_step;
 				((uint16_t *)dp)[x] = fg_color;
 			}
@@ -728,16 +740,18 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 	case MNTVA_COLOR_32BIT:
 		dp[x] = fg_color;
 		if (dx_abs >= dy_abs) {
+			int32_t e = err_seed;
 			for (uint32_t i = 0; i < draw_len; i++) {
-				iy += dy_abs;
-				if (iy >= dx_abs) { iy -= dx_abs; dp += line_step; }
+				e += s;
+				if (e >= l) { e -= l; dp += line_step; }
 				x += (x_reverse) ? -1 : 1;
 				dp[x] = fg_color;
 			}
 		} else {
+			int32_t e = err_seed;
 			for (uint32_t i = 0; i < draw_len; i++) {
-				ix += dx_abs;
-				if (ix >= dy_abs) { ix -= dy_abs; x += (x_reverse) ? -1 : 1; }
+				e += s;
+				if (e >= l) { e -= l; x += (x_reverse) ? -1 : 1; }
 				dp += line_step;
 				dp[x] = fg_color;
 			}

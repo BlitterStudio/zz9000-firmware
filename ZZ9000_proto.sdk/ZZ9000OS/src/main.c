@@ -362,6 +362,7 @@ int main() {
 	uint16_t blitter_src_pitch = 0;
 	uint16_t blitter_user1 = 0;
 	uint16_t blitter_user2 = 0;
+	int16_t blitter_user3 = 0;	// line Bresenham work-variable seed
 
 	// custom video mode
 	int custom_video_mode = ZZVMODE_CUSTOM;
@@ -685,7 +686,7 @@ int main() {
 					blitter_user2 = zdata;
 					break;
 				case REG_ZZ_USER3:
-					// FIXME unused
+					blitter_user3 = (int16_t)zdata;
 					break;
 				case REG_ZZ_USER4:
 					// FIXME unused
@@ -914,11 +915,11 @@ int main() {
 
 					if (rect_x3 == 0xFFFF && zdata == 0xFF)
 						draw_line_solid(rect_x1, rect_y1, rect_x2, rect_y2,
-								blitter_user1, rect_rgb,
+								blitter_user1, blitter_user3, rect_rgb,
 								blitter_colormode);
 					else
 						draw_line(rect_x1, rect_y1, rect_x2, rect_y2,
-								blitter_user1, rect_x3, rect_y3, rect_rgb,
+								blitter_user1, blitter_user3, rect_x3, rect_y3, rect_rgb,
 								rect_rgb2, blitter_colormode, zdata,
 								draw_mode);
 					break;
