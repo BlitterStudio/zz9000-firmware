@@ -356,6 +356,33 @@ static void ref_draw_line_oracle(int ox, int oy, int dx, int dy,
 	}
 }
 
+/* As ref_draw_line_oracle, but skips pixels outside the framebuffer so a line
+ * whose origin is off-screen (a negative Xorigin/Yorigin from top/left clipping)
+ * marks only its on-screen part. put_pixel itself does not bounds-check, so the
+ * clipping lives here rather than in the shared helper. */
+static void ref_draw_line_oracle_clipped(int ox, int oy, int dx, int dy,
+	uint32_t color, uint32_t color_format)
+{
+	int dxa = dx < 0 ? -dx : dx;
+	int dya = dy < 0 ? -dy : dy;
+	int horiz = dxa >= dya;
+	int L = horiz ? dxa : dya;
+	int S = horiz ? dya : dxa;
+	int sx = dx < 0 ? -1 : 1;
+	int sy = dy < 0 ? -1 : 1;
+	uint32_t pixel = color_to_pixel(color_format, color);
+	int Ldiv = L > 0 ? L : 1;
+
+	for (int i = 0; i <= L; i++) {
+		int minor = (2 * i * S + L) / (2 * Ldiv);
+		int x = horiz ? ox + sx * i : ox + sx * minor;
+		int y = horiz ? oy + sy * minor : oy + sy * i;
+		if (x < 0 || x >= FB_W || y < 0 || y >= FB_H)
+			continue;
+		put_pixel(expected_fb, FB_PITCH_WORDS, x, y, color_format, pixel);
+	}
+}
+
 /* Oracle pixel at major index i (0..L) of the line from (ox,oy), deltas (dx,dy). */
 static void oracle_point(int ox, int oy, int dx, int dy, int i, int *px, int *py)
 {
@@ -727,6 +754,40 @@ static void test_lines_clipped(void)
 	}
 }
 
+static void test_lines_negative_origin(void)
+{
+	/* A line clipped at the top/left has its true start above/left of the
+	 * RenderInfo, so P96 hands DrawLine a NEGATIVE Xorigin/Yorigin. err_seed is
+	 * computed from (segment_start - origin), so the origin must be treated as
+	 * signed (the driver's field is UWORD and has to be cast through WORD, or
+	 * -8 reads as 65528 and the seed is wrong). P96 clips segment A away and
+	 * only asks for the on-screen segment B, which must still match the
+	 * on-screen part of the whole line drawn from the negative origin. */
+	int ox = 20, oy = -10, dx = 14, dy = 28, L = 28;
+	int k = -oy;			/* major steps before the line reaches y = 0 */
+	int bx, by;
+
+	oracle_point(ox, oy, dx, dy, k, &bx, &by);
+
+	seed_frame(0x3500);
+	draw_line_solid(bx, by, dx, dy, L - k,
+		p96_err_seed(dx, dy, bx, by, ox, oy),
+		0xc4000000, MNTVA_COLOR_8BIT);
+	ref_draw_line_oracle_clipped(ox, oy, dx, dy, 0xc4000000, MNTVA_COLOR_8BIT);
+	check_frame("draw_line negative-origin clip resumes");
+
+	/* Guard the signedness directly: promoting the origin unsigned (the bug)
+	 * must change the seed, otherwise the WORD cast in the driver is moot. */
+	if (p96_err_seed(dx, dy, bx, by, ox, oy) ==
+	    p96_err_seed(dx, dy, bx, by, ox, (int)(uint16_t)oy)) {
+		printf("FAIL %-30s unsigned origin leaves the seed unchanged\n",
+			"negative-origin sign");
+		failures++;
+	} else {
+		printf("ok   negative-origin seed is sign-sensitive\n");
+	}
+}
+
 static void test_lines_pattern(void)
 {
 	/* A dotted (JAM2) line split at an interior point must reassemble exactly.
@@ -1091,6 +1152,7 @@ static void run_tests(void)
 	test_copy();
 	test_lines();
 	test_lines_clipped();
+	test_lines_negative_origin();
 	test_lines_pattern();
 	test_planar();
 	test_p2d();

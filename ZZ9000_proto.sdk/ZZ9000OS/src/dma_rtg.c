@@ -27,8 +27,14 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
                         data->user[0], (int16_t)data->user[3], data->rgb[0],
                         data->u8_user[GFXDATA_U8_COLORMODE]);
             else
+                /* The line pattern offset comes from the dedicated u8_user byte
+                 * (a single byte, so no byte order to reconcile). The driver
+                 * also packs it into user[2] for firmware that reads the word
+                 * form, but that field is deliberately NOT SWAP16'd here and is
+                 * unused on this path. */
                 draw_line(data->x[0], data->y[0], data->x[1], data->y[1],
-                        data->user[0], (int16_t)data->user[3], data->user[1], data->user[2], data->rgb[0], data->rgb[1],
+                        data->user[0], (int16_t)data->user[3], data->user[1],
+                        data->u8_user[GFXDATA_U8_LINE_PATTERN_OFFSET], data->rgb[0], data->rgb[1],
                         data->u8_user[GFXDATA_U8_COLORMODE], data->mask, data->u8_user[GFXDATA_U8_DRAWMODE]);
 
             break;
