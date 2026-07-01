@@ -697,15 +697,23 @@ static void XEmacPsRecvHandler(void *Callback)
 		for (int i=0; i<num_rx_bufs; i++) {
 
 			frame_serial++;
-			/* 0 is the empty-slot / "no frame" sentinel: the driver skips an
-			 * all-zero header without acking, and the RX-accept handshake
-			 * rejects acked_serial == 0. frame_serial is a u16, so a plain
-			 * increment wraps 0xffff -> 0 once every 65536 frames; skip 0 so a
-			 * real frame is never tagged with the sentinel. Otherwise the
-			 * handshake would reject that frame forever (frames_backlog_read
-			 * never advances) and RX would stall until reset (issue #29). */
-			if (frame_serial == 0)
-				frame_serial++;
+			/* 0 and 1 are reserved values the RX-accept handshake treats
+			 * specially, so a real frame must never be tagged with either:
+			 *   0 = empty-slot / "no frame" sentinel — the driver skips an
+			 *       all-zero header without acking, and the handshake rejects
+			 *       acked_serial == 0. A frame tagged 0 would be rejected
+			 *       forever (frames_backlog_read never advances) → RX stalls.
+			 *   1 = legacy bare-advance — old drivers write a constant 1, which
+			 *       must bypass validation for backward compat. A frame tagged
+			 *       1 would be left unprotected by the handshake (a stray or
+			 *       duplicate legacy-style ack could consume it unread).
+			 * frame_serial is a u16, so a plain increment would emit 0 once per
+			 * 65536-frame wrap, and 1 on the first frame after reset and once
+			 * per wrap. frame_serial reaches 0 only by wrapping 0xffff->0 and 1
+			 * only from the post-reset 0->1, so a single jump to 2 skips both.
+			 * Real serials therefore stay in [2, 0xffff] (issue #29). */
+			if (frame_serial == 0 || frame_serial == 1)
+				frame_serial = 2;
 
 			//printf("RX ser: %d\n",frame_serial);
 
@@ -828,9 +836,10 @@ int ethernet_receive_frame(u16 acked_serial) {
 		 * Backward compatibility: legacy drivers write a constant 1 instead of
 		 * the real serial. We honour acked_serial == 1 as a bare advance so
 		 * those drivers keep working unchanged (the check is then a no-op);
-		 * reject 0 (never a valid serial — frame_serial is pre-incremented);
-		 * and for any other value require an exact match with the presented
-		 * frame's serial. */
+		 * reject 0. The serial generator skips both 0 and 1 (see frame_serial
+		 * above), so a handshake driver never emits either as a real serial —
+		 * value 1 is therefore only ever a legacy ack, and every real frame is
+		 * protected by the exact-match branch below. */
 		uint8_t* slot = ethernet_current_receive_ptr();
 		u16 presented = ((u16)slot[2] << 8) | slot[3];
 		int consume;
