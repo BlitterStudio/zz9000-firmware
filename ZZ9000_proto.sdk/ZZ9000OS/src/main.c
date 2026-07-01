@@ -135,8 +135,7 @@ static uint32_t sd_storage_write_block = 0;
 uint16_t ethernet_send_result = 0;
 int eth_backlog_nag_counter = 0;
 int interrupt_enabled_ethernet = 0;
-static u32 diag_zorro_txreq = 0;	/* issue #29 stall probe: Zorro write requests serviced */
-static u32 diag_zorro_rdreq = 0;	/* issue #29 stall probe: Zorro read requests serviced */
+static struct eth_diag_z diag_z;	/* issue #29 stall probe: Zorro requests bucketed by target */
 
 static uint32_t sdk_diag_last_reg_write_addr = 0;
 static uint32_t sdk_diag_last_reg_write_raw_addr = 0;
@@ -397,7 +396,7 @@ int main() {
 		 * heartbeat prints every iteration regardless of which branch runs
 		 * below — in particular it survives a flood of Zorro requests that
 		 * would otherwise starve the housekeeping branch. */
-		ethernet_diag_poll(diag_zorro_txreq, diag_zorro_rdreq);
+		ethernet_diag_poll(&diag_z);
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
 		if (usb_read_pending) {
 			usb_status = zz_usb_read_blocks(0, usb_storage_read_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
@@ -1360,7 +1359,15 @@ int main() {
 			// ack the write, set bit 31 in register 0
 			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG0, (1 << 31));
 			need_req_ack = 1;
-			diag_zorro_txreq++;	/* issue #29 stall probe */
+			/* issue #29 stall probe: bucket the write target */
+			if (zaddr >= MNT_FB_BASE)
+				diag_z.w_fb++;
+			else if (zaddr >= MNT_REG_BASE + 0x8000 && zaddr < MNT_REG_BASE + 0xa000)
+				diag_z.w_tx++;		/* TX frame payload window */
+			else if (zaddr >= MNT_REG_BASE + 0x2000)
+				diag_z.w_oth++;
+			else
+				diag_z.w_reg++;		/* control registers < 0x2000 */
 		} else if (readreq) {
 			uint32_t zaddr = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG0);
 
@@ -1570,7 +1577,13 @@ int main() {
 			// ack the read, set bit 30 in register 0
 			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG0, (1 << 30));
 			need_req_ack = 2;
-			diag_zorro_rdreq++;	/* issue #29 stall probe */
+			/* issue #29 stall probe: bucket the read target */
+			if (zaddr >= MNT_REG_BASE + 0x2000 && zaddr < MNT_REG_BASE + 0x6000)
+				diag_z.r_rx++;		/* RX window reads */
+			else if (zaddr >= MNT_REG_BASE && zaddr < MNT_REG_BASE + 0x2000)
+				diag_z.r_reg++;		/* control registers < 0x2000 */
+			else
+				diag_z.r_oth++;
 		} else {
 			// there are no read/write requests, we can do other housekeeping
 

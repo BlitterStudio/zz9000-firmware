@@ -31,8 +31,12 @@ void ethernet_task();
 void ethernet_reset_for_amiga();
 
 /* issue #29 stall probe (diagnostic build only) */
+struct eth_diag_z {
+	u32 w_reg, w_tx, w_fb, w_oth;	/* Zorro WRITE requests bucketed by target */
+	u32 r_reg, r_rx, r_oth;		/* Zorro READ  requests bucketed by target */
+};
 void ethernet_note_int_raised(void);
-void ethernet_diag_poll(u32 txreq, u32 rdreq);
+void ethernet_diag_poll(const struct eth_diag_z *z);
 
 #define FRAME_MAX_BACKLOG 128
 

@@ -820,29 +820,14 @@ void ethernet_note_int_raised(void) {
 /* txreq/rdreq = running counts of Zorro write/read requests the firmware has
  * serviced from the m68k (passed in from main.c). During a freeze these tell
  * us whether the m68k is still issuing ANY bus cycles. */
-void ethernet_diag_poll(u32 txreq, u32 rdreq) {
-	static u16 diag_last_read = 0;
-	static u32 diag_stuck = 0;
-	static int diag_reported = 0;
+void ethernet_diag_poll(const struct eth_diag_z *z) {
 	static XTime diag_tick = 0;
-	static u32 p_tx = 0, p_rd = 0, p_rx = 0, p_ftx = 0, p_sc = 0;
+	static u32 p_wreg=0, p_wtx=0, p_wfb=0, p_woth=0;
+	static u32 p_rreg=0, p_rrx=0, p_roth=0;
+	static u32 p_rx=0, p_ftx=0, p_sc=0;
 	static u32 last_reqs = 0xffffffffu;
 	static int quiet = 0;
 	XTime now;
-
-	/* Stuck detector: frames queued but the read pointer is not advancing.
-	 * Healthy draining advances read constantly, so this only trips when the
-	 * Amiga has stopped consuming while backlog>0. Dump once per stuck episode. */
-	if (frames_backlog > 0 && frames_backlog_read == diag_last_read) {
-		if (++diag_stuck >= 3000000u && !diag_reported) {
-			ethernet_diag_dump("STALL", txreq, rdreq);
-			diag_reported = 1;
-		}
-	} else {
-		diag_stuck = 0;
-		diag_reported = 0;
-		diag_last_read = frames_backlog_read;
-	}
 
 	/* Once-a-second internal tick (otherwise this is just a cheap timer read). */
 	XTime_GetTime(&now);
@@ -850,20 +835,25 @@ void ethernet_diag_poll(u32 txreq, u32 rdreq) {
 		return;
 	diag_tick = now;
 
-	/* Per-second rates. */
-	u32 d_tx  = txreq - p_tx;			/* Zorro WRITE requests serviced */
-	u32 d_rd  = rdreq - p_rd;			/* Zorro READ  requests serviced */
-	u32 d_rx  = frames_received - p_rx;		/* frames received from the wire */
-	u32 d_ftx = FramesTx - p_ftx;			/* frames transmitted to the wire */
-	u32 d_sc  = eth_send_calls - p_sc;		/* ethernet_send_frame() calls */
-	u32 reqs  = d_tx + d_rd;
-	p_tx = txreq; p_rd = rdreq; p_rx = frames_received; p_ftx = FramesTx; p_sc = eth_send_calls;
+	/* Per-second rates, Zorro requests bucketed by target region. */
+	u32 wreg = z->w_reg - p_wreg;	/* control-register writes  (< 0x2000) */
+	u32 wtx  = z->w_tx  - p_wtx;	/* TX payload window writes (0x8000-0x9fff) */
+	u32 wfb  = z->w_fb  - p_wfb;	/* framebuffer / video writes */
+	u32 woth = z->w_oth - p_woth;	/* other window writes */
+	u32 rreg = z->r_reg - p_rreg;	/* control-register reads   (< 0x2000) */
+	u32 rrx  = z->r_rx  - p_rrx;	/* RX window reads (0x2000-0x5fff) */
+	u32 roth = z->r_oth - p_roth;	/* other reads */
+	u32 d_rx  = frames_received - p_rx;
+	u32 d_ftx = FramesTx - p_ftx;
+	u32 d_sc  = eth_send_calls - p_sc;
+	u32 reqs  = wreg + wtx + wfb + woth + rreg + rrx + roth;
+	p_wreg=z->w_reg; p_wtx=z->w_tx; p_wfb=z->w_fb; p_woth=z->w_oth;
+	p_rreg=z->r_reg; p_rrx=z->r_rx; p_roth=z->r_oth;
+	p_rx=frames_received; p_ftx=FramesTx; p_sc=eth_send_calls;
 
-	/* Print only when the Zorro request RATE changes sharply (>=2x up or down)
-	 * — that brackets the freeze transition and any Forbid-spin flood/collapse
-	 * — or as a slow keepalive every 20 s to confirm the firmware is alive and
-	 * sample a steady freeze state. Keeps the log quiet during the minutes of
-	 * steady transfer. Rates are per second, so a stall is obvious at a glance. */
+	/* Print only when the request RATE shifts >=2x (freeze transition / flood)
+	 * or as a 20 s keepalive. The W/R breakdown shows WHICH region the m68k is
+	 * hammering during a stall. */
 	quiet++;
 	int changed = (last_reqs == 0xffffffffu) ||
 	              (reqs > (last_reqs << 1)) ||
@@ -871,20 +861,22 @@ void ethernet_diag_poll(u32 txreq, u32 rdreq) {
 	if (changed || quiet >= 20) {
 		quiet = 0;
 		last_reqs = reqs;
-		printf("EMAC[%s]: reqs/s=%lu (txw=%lu rdr=%lu) rx/s=%lu ftx/s=%lu sc/s=%lu state=%d snr=%lu sto=%lu txrec=%d backlog=%u ackrej=%d\n",
+		printf("EMAC[%s]: reqs/s=%lu rx/s=%lu ftx/s=%lu sc/s=%lu | W reg=%lu tx=%lu fb=%lu oth=%lu | R reg=%lu rx=%lu oth=%lu | state=%d snr=%lu backlog=%u\n",
 		       changed ? "CHG" : "hb",
 		       (unsigned long)reqs,
-		       (unsigned long)d_tx,
-		       (unsigned long)d_rd,
 		       (unsigned long)d_rx,
 		       (unsigned long)d_ftx,
 		       (unsigned long)d_sc,
+		       (unsigned long)wreg,
+		       (unsigned long)wtx,
+		       (unsigned long)wfb,
+		       (unsigned long)woth,
+		       (unsigned long)rreg,
+		       (unsigned long)rrx,
+		       (unsigned long)roth,
 		       ethernet_task_state,
 		       (unsigned long)eth_send_notready,
-		       (unsigned long)eth_send_timeout,
-		       tx_recoveries,
-		       (unsigned)frames_backlog,
-		       frames_ack_rejected);
+		       (unsigned)frames_backlog);
 	}
 }
 
