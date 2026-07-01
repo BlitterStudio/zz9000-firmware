@@ -393,6 +393,11 @@ int main() {
 
 	while (1) {
 		watchdog_kick();
+		/* issue #29 stall probe: run at the loop TOP so the wall-clock
+		 * heartbeat prints every iteration regardless of which branch runs
+		 * below — in particular it survives a flood of Zorro requests that
+		 * would otherwise starve the housekeeping branch. */
+		ethernet_diag_poll(diag_zorro_txreq, diag_zorro_rdreq);
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
 		if (usb_read_pending) {
 			usb_status = zz_usb_read_blocks(0, usb_storage_read_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
@@ -1671,7 +1676,6 @@ int main() {
 				eth_backlog_nag_counter = 0;
 				ethernet_note_int_raised();	/* issue #29 stall probe */
 			}
-			ethernet_diag_poll(diag_zorro_txreq, diag_zorro_rdreq);	/* issue #29 stall probe */
 		}
 
 		if (need_req_ack) {
