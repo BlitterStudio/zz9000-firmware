@@ -944,7 +944,10 @@ int main() {
 					break;
 				case REG_ZZ_ETH_RX: {
 					//printf("RECV eth frame sz: %ld\n",zdata);
-					int frfb = ethernet_receive_frame();
+					/* zdata carries the serial of the frame the Amiga consumed
+					 * (legacy drivers write a constant 1). issue #29: the RX
+					 * handshake validates it before advancing. */
+					int frfb = ethernet_receive_frame((u16)zdata);
 					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG4, frfb);
 					break;
 				}

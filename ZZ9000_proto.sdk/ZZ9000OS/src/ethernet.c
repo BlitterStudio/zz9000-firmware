@@ -72,6 +72,7 @@ static volatile int tx_recoveries = 0;
 static volatile int rx_backpressure = 0;
 static volatile int rx_pause_frames = 0;
 static volatile int rx_slot_mismatch = 0;
+static volatile int frames_ack_rejected = 0;	/* issue #29: RX-accept handshake rejects */
 
 #define ETH_PHY_TYPE_MICREL 0
 #define ETH_PHY_TYPE_MOTORCOMM 1
@@ -395,7 +396,7 @@ static void ethernet_log_status(const char *reason) {
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
 	u32 BaseAddress = EmacPsInstancePtr->Config.BaseAddress;
 
-	printf("EMAC[%s]: state=%d backlog=%u reserved=%u pending=%u read=%u write=%u reserve=%u serial=%u rx=%lu tx=%lu drops=%d full=%d bp=%d pause=%d mismatch=%d txrec=%d errors=%ld\n",
+	printf("EMAC[%s]: state=%d backlog=%u reserved=%u pending=%u read=%u write=%u reserve=%u serial=%u rx=%lu tx=%lu drops=%d full=%d bp=%d pause=%d mismatch=%d ackrej=%d txrec=%d errors=%ld\n",
 	       reason,
 	       ethernet_task_state,
 	       (unsigned int)frames_backlog,
@@ -412,6 +413,7 @@ static void ethernet_log_status(const char *reason) {
 	       rx_backpressure,
 	       rx_pause_frames,
 	       rx_slot_mismatch,
+	       frames_ack_rejected,
 	       tx_recoveries,
 	       (long)DeviceErrors);
 
@@ -695,6 +697,23 @@ static void XEmacPsRecvHandler(void *Callback)
 		for (int i=0; i<num_rx_bufs; i++) {
 
 			frame_serial++;
+			/* 0 and 1 are reserved values the RX-accept handshake treats
+			 * specially, so a real frame must never be tagged with either:
+			 *   0 = empty-slot / "no frame" sentinel — the driver skips an
+			 *       all-zero header without acking, and the handshake rejects
+			 *       acked_serial == 0. A frame tagged 0 would be rejected
+			 *       forever (frames_backlog_read never advances) → RX stalls.
+			 *   1 = legacy bare-advance — old drivers write a constant 1, which
+			 *       must bypass validation for backward compat. A frame tagged
+			 *       1 would be left unprotected by the handshake (a stray or
+			 *       duplicate legacy-style ack could consume it unread).
+			 * frame_serial is a u16, so a plain increment would emit 0 once per
+			 * 65536-frame wrap, and 1 on the first frame after reset and once
+			 * per wrap. frame_serial reaches 0 only by wrapping 0xffff->0 and 1
+			 * only from the post-reset 0->1, so a single jump to 2 skips both.
+			 * Real serials therefore stay in [2, 0xffff] (issue #29). */
+			if (frame_serial == 0 || frame_serial == 1)
+				frame_serial = 2;
 
 			//printf("RX ser: %d\n",frame_serial);
 
@@ -797,17 +816,51 @@ u16 ethernet_get_rx_stats() {
 	return (dropped << 8) | pause;
 }
 
-int ethernet_receive_frame() {
+int ethernet_receive_frame(u16 acked_serial) {
 	//printf("[eth rx] backlog %d read %d write %d\n", frames_backlog, frames_backlog_read, frames_backlog_write);
 
 	int paused = ethernet_pause_rx_irq();
 	if (frames_backlog>0) {
-		uint16_t consumed_slot = frames_backlog_read;
-		frames_backlog_read = ethernet_next_backlog_slot(frames_backlog_read);
-		frames_backlog--;
-		ethernet_clear_backlog_slot(consumed_slot);
-		if (frames_backlog == 0) {
-			ethernet_clear_backlog_slot(frames_backlog_read);
+		/* Defense-in-depth (issue #29): only consume the presented frame when
+		 * the Amiga's ack actually corresponds to it. The Amiga writes the
+		 * serial of the frame it just read into the RX-accept register; we
+		 * compare it to the serial stored in the presented backlog slot.
+		 *
+		 * Why: a driver that acks an EMPTY (firmware-cleared) slot, or that
+		 * races a frame landing in the read slot between its read and its ack,
+		 * would otherwise make us advance past a frame the Amiga never read,
+		 * silently dropping it — the original issue #29 stall. An empty slot
+		 * carries serial 0; a mismatched ack carries a different serial. In
+		 * both cases we refuse to advance and leave the frame for the Amiga.
+		 *
+		 * Backward compatibility: legacy drivers write a constant 1 instead of
+		 * the real serial. We honour acked_serial == 1 as a bare advance so
+		 * those drivers keep working unchanged (the check is then a no-op);
+		 * reject 0. The serial generator skips both 0 and 1 (see frame_serial
+		 * above), so a handshake driver never emits either as a real serial —
+		 * value 1 is therefore only ever a legacy ack, and every real frame is
+		 * protected by the exact-match branch below. */
+		uint8_t* slot = ethernet_current_receive_ptr();
+		u16 presented = ((u16)slot[2] << 8) | slot[3];
+		int consume;
+		if (acked_serial == 0) {
+			consume = 0;                            /* empty / invalid ack */
+		} else if (acked_serial == 1) {
+			consume = 1;                            /* legacy bare advance */
+		} else {
+			consume = (acked_serial == presented);  /* handshake: must match */
+		}
+
+		if (consume) {
+			uint16_t consumed_slot = frames_backlog_read;
+			frames_backlog_read = ethernet_next_backlog_slot(frames_backlog_read);
+			frames_backlog--;
+			ethernet_clear_backlog_slot(consumed_slot);
+			if (frames_backlog == 0) {
+				ethernet_clear_backlog_slot(frames_backlog_read);
+			}
+		} else {
+			frames_ack_rejected++;
 		}
 	} else {
 		// this is NOT an error, Amiga wants data and there is no data on RX buffers
