@@ -1665,7 +1665,9 @@ int main() {
 			if (interrupt_enabled_ethernet && ethernet_get_backlog()) {
 				amiga_interrupt_set(AMIGA_INTERRUPT_ETH);
 				eth_backlog_nag_counter = 0;
+				ethernet_note_int_raised();	/* issue #29 stall probe */
 			}
+			ethernet_diag_poll();	/* issue #29 stall probe */
 		}
 
 		if (need_req_ack) {

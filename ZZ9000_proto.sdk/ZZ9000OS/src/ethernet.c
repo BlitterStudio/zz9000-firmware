@@ -73,6 +73,7 @@ static volatile int rx_backpressure = 0;
 static volatile int rx_pause_frames = 0;
 static volatile int rx_slot_mismatch = 0;
 static volatile int frames_ack_rejected = 0;	/* issue #29: RX-accept handshake rejects */
+static volatile u32 eth_int_raises = 0;		/* diag (issue #29 stall probe): # times firmware raised the Amiga ETH IRQ */
 
 #define ETH_PHY_TYPE_MICREL 0
 #define ETH_PHY_TYPE_MOTORCOMM 1
@@ -782,6 +783,64 @@ static void XEmacPsRecvHandler(void *Callback)
 
 uint8_t* ethernet_current_receive_ptr() {
 	return (uint8_t*)(RX_BACKLOG_ADDRESS+frames_backlog_read*FRAME_SIZE);
+}
+
+/* ---- issue #29 stall probe (diagnostic build only; NOT for merge) ----
+ * The Amiga-freeze symptom points at main.c re-raising the ETH IRQ every main-
+ * loop pass while backlog>0 (an interrupt storm that starves the m68k). This
+ * dumps the ring/GEM state over UART — which runs on the Zynq, independent of
+ * the frozen m68k — so we can catch the wedge in-situ. */
+static void ethernet_diag_dump(const char *reason) {
+	printf("EMAC[%s]: backlog=%u read=%u write=%u reserve=%u reserved=%u pending=%u serial=%u rx=%lu tx=%lu dropped=%d full=%d mismatch=%d ackrej=%d intraises=%lu bp=%d pause=%d\n",
+	       reason,
+	       (unsigned)frames_backlog,
+	       (unsigned)frames_backlog_read,
+	       (unsigned)frames_backlog_write,
+	       (unsigned)frames_backlog_reserve,
+	       (unsigned)frames_backlog_reserved,
+	       (unsigned)ethernet_backlog_pending(),
+	       (unsigned)frame_serial,
+	       (unsigned long)frames_received,
+	       (unsigned long)FramesTx,
+	       frames_dropped,
+	       frames_backlog_full,
+	       rx_slot_mismatch,
+	       frames_ack_rejected,
+	       (unsigned long)eth_int_raises,
+	       rx_backpressure,
+	       rx_pause_frames);
+}
+
+void ethernet_note_int_raised(void) {
+	eth_int_raises++;
+}
+
+void ethernet_diag_poll(void) {
+	static u16 diag_last_read = 0;
+	static u32 diag_stuck = 0;
+	static int diag_reported = 0;
+	static u32 diag_last_hb = 0;
+
+	/* Stuck detector: frames queued but the read pointer is not advancing.
+	 * Healthy draining advances read constantly, so this only trips when the
+	 * Amiga has stopped consuming while backlog>0 — the exact state that makes
+	 * main.c re-raise the ETH IRQ every pass. Dump once per stuck episode. */
+	if (frames_backlog > 0 && frames_backlog_read == diag_last_read) {
+		if (++diag_stuck >= 3000000u && !diag_reported) {
+			ethernet_diag_dump("STALL");
+			diag_reported = 1;
+		}
+	} else {
+		diag_stuck = 0;
+		diag_reported = 0;
+		diag_last_read = frames_backlog_read;
+	}
+
+	/* Run-up context: heartbeat every 65536 received frames. */
+	if ((u32)(frames_received - diag_last_hb) >= 65536u) {
+		diag_last_hb = frames_received;
+		ethernet_diag_dump("hb");
+	}
 }
 
 int ethernet_get_backlog() {
