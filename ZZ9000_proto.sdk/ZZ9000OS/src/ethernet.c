@@ -821,7 +821,10 @@ void ethernet_diag_poll(u32 txreq, u32 rdreq) {
 	static u16 diag_last_read = 0;
 	static u32 diag_stuck = 0;
 	static int diag_reported = 0;
-	static XTime diag_last_hb = 0;
+	static XTime diag_tick = 0;
+	static u32 p_tx = 0, p_rd = 0, p_rx = 0, p_ftx = 0;
+	static u32 last_reqs = 0xffffffffu;
+	static int quiet = 0;
 	XTime now;
 
 	/* Stuck detector: frames queued but the read pointer is not advancing.
@@ -838,15 +841,45 @@ void ethernet_diag_poll(u32 txreq, u32 rdreq) {
 		diag_last_read = frames_backlog_read;
 	}
 
-	/* Wall-clock heartbeat (~1/s) — prints regardless of RX activity, so it
-	 * keeps reporting even when the m68k has frozen and RX has gone quiet.
-	 * Lines KEEP coming through the freeze => firmware main loop is alive and
-	 * the wedge is m68k-side; lines STOP => the firmware itself hung. The
-	 * txreq/rdreq deltas show whether the frozen m68k still issues bus cycles. */
+	/* Once-a-second internal tick (otherwise this is just a cheap timer read). */
 	XTime_GetTime(&now);
-	if ((now - diag_last_hb) >= (XTime)COUNTS_PER_SECOND) {
-		diag_last_hb = now;
-		ethernet_diag_dump("wall", txreq, rdreq);
+	if ((now - diag_tick) < (XTime)COUNTS_PER_SECOND)
+		return;
+	diag_tick = now;
+
+	/* Per-second rates. */
+	u32 d_tx  = txreq - p_tx;			/* Zorro WRITE requests serviced */
+	u32 d_rd  = rdreq - p_rd;			/* Zorro READ  requests serviced */
+	u32 d_rx  = frames_received - p_rx;		/* frames received from the wire */
+	u32 d_ftx = FramesTx - p_ftx;			/* frames transmitted to the wire */
+	u32 reqs  = d_tx + d_rd;
+	p_tx = txreq; p_rd = rdreq; p_rx = frames_received; p_ftx = FramesTx;
+
+	/* Print only when the Zorro request RATE changes sharply (>=2x up or down)
+	 * — that brackets the freeze transition and any Forbid-spin flood/collapse
+	 * — or as a slow keepalive every 20 s to confirm the firmware is alive and
+	 * sample a steady freeze state. Keeps the log quiet during the minutes of
+	 * steady transfer. Rates are per second, so a stall is obvious at a glance. */
+	quiet++;
+	int changed = (last_reqs == 0xffffffffu) ||
+	              (reqs > (last_reqs << 1)) ||
+	              ((reqs << 1) < last_reqs);
+	if (changed || quiet >= 20) {
+		quiet = 0;
+		last_reqs = reqs;
+		printf("EMAC[%s]: reqs/s=%lu (txw=%lu rdr=%lu) rx/s=%lu ftx/s=%lu backlog=%u read=%u dropped=%d mismatch=%d ackrej=%d intraises=%lu\n",
+		       changed ? "CHG" : "hb",
+		       (unsigned long)reqs,
+		       (unsigned long)d_tx,
+		       (unsigned long)d_rd,
+		       (unsigned long)d_rx,
+		       (unsigned long)d_ftx,
+		       (unsigned)frames_backlog,
+		       (unsigned)frames_backlog_read,
+		       frames_dropped,
+		       rx_slot_mismatch,
+		       frames_ack_rejected,
+		       (unsigned long)eth_int_raises);
 	}
 }
 
