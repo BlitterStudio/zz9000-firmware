@@ -697,6 +697,15 @@ static void XEmacPsRecvHandler(void *Callback)
 		for (int i=0; i<num_rx_bufs; i++) {
 
 			frame_serial++;
+			/* 0 is the empty-slot / "no frame" sentinel: the driver skips an
+			 * all-zero header without acking, and the RX-accept handshake
+			 * rejects acked_serial == 0. frame_serial is a u16, so a plain
+			 * increment wraps 0xffff -> 0 once every 65536 frames; skip 0 so a
+			 * real frame is never tagged with the sentinel. Otherwise the
+			 * handshake would reject that frame forever (frames_backlog_read
+			 * never advances) and RX would stall until reset (issue #29). */
+			if (frame_serial == 0)
+				frame_serial++;
 
 			//printf("RX ser: %d\n",frame_serial);
 
