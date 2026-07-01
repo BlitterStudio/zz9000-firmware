@@ -23,6 +23,7 @@
 #include <xil_cache.h>
 #include <xil_mmu.h>
 #include "sleep.h"
+#include "xtime_l.h"		/* diag (issue #29): wall-clock heartbeat */
 #include "xparameters.h"
 #include <xemacps.h>
 #include <xscugic.h>
@@ -790,44 +791,45 @@ uint8_t* ethernet_current_receive_ptr() {
  * loop pass while backlog>0 (an interrupt storm that starves the m68k). This
  * dumps the ring/GEM state over UART — which runs on the Zynq, independent of
  * the frozen m68k — so we can catch the wedge in-situ. */
-static void ethernet_diag_dump(const char *reason) {
-	printf("EMAC[%s]: backlog=%u read=%u write=%u reserve=%u reserved=%u pending=%u serial=%u rx=%lu tx=%lu dropped=%d full=%d mismatch=%d ackrej=%d intraises=%lu bp=%d pause=%d\n",
+static void ethernet_diag_dump(const char *reason, u32 txreq, u32 rdreq) {
+	printf("EMAC[%s]: backlog=%u read=%u write=%u reserved=%u pending=%u serial=%u rx=%lu tx=%lu txreq=%lu rdreq=%lu dropped=%d mismatch=%d ackrej=%d intraises=%lu\n",
 	       reason,
 	       (unsigned)frames_backlog,
 	       (unsigned)frames_backlog_read,
 	       (unsigned)frames_backlog_write,
-	       (unsigned)frames_backlog_reserve,
 	       (unsigned)frames_backlog_reserved,
 	       (unsigned)ethernet_backlog_pending(),
 	       (unsigned)frame_serial,
 	       (unsigned long)frames_received,
 	       (unsigned long)FramesTx,
+	       (unsigned long)txreq,
+	       (unsigned long)rdreq,
 	       frames_dropped,
-	       frames_backlog_full,
 	       rx_slot_mismatch,
 	       frames_ack_rejected,
-	       (unsigned long)eth_int_raises,
-	       rx_backpressure,
-	       rx_pause_frames);
+	       (unsigned long)eth_int_raises);
 }
 
 void ethernet_note_int_raised(void) {
 	eth_int_raises++;
 }
 
-void ethernet_diag_poll(void) {
+/* txreq/rdreq = running counts of Zorro write/read requests the firmware has
+ * serviced from the m68k (passed in from main.c). During a freeze these tell
+ * us whether the m68k is still issuing ANY bus cycles. */
+void ethernet_diag_poll(u32 txreq, u32 rdreq) {
 	static u16 diag_last_read = 0;
 	static u32 diag_stuck = 0;
 	static int diag_reported = 0;
-	static u32 diag_last_hb = 0;
+	static XTime diag_last_hb = 0;
+	XTime now;
 
 	/* Stuck detector: frames queued but the read pointer is not advancing.
 	 * Healthy draining advances read constantly, so this only trips when the
-	 * Amiga has stopped consuming while backlog>0 — the exact state that makes
-	 * main.c re-raise the ETH IRQ every pass. Dump once per stuck episode. */
+	 * Amiga has stopped consuming while backlog>0. Dump once per stuck episode. */
 	if (frames_backlog > 0 && frames_backlog_read == diag_last_read) {
 		if (++diag_stuck >= 3000000u && !diag_reported) {
-			ethernet_diag_dump("STALL");
+			ethernet_diag_dump("STALL", txreq, rdreq);
 			diag_reported = 1;
 		}
 	} else {
@@ -836,10 +838,15 @@ void ethernet_diag_poll(void) {
 		diag_last_read = frames_backlog_read;
 	}
 
-	/* Run-up context: heartbeat every 65536 received frames. */
-	if ((u32)(frames_received - diag_last_hb) >= 65536u) {
-		diag_last_hb = frames_received;
-		ethernet_diag_dump("hb");
+	/* Wall-clock heartbeat (~1/s) — prints regardless of RX activity, so it
+	 * keeps reporting even when the m68k has frozen and RX has gone quiet.
+	 * Lines KEEP coming through the freeze => firmware main loop is alive and
+	 * the wedge is m68k-side; lines STOP => the firmware itself hung. The
+	 * txreq/rdreq deltas show whether the frozen m68k still issues bus cycles. */
+	XTime_GetTime(&now);
+	if ((now - diag_last_hb) >= (XTime)COUNTS_PER_SECOND) {
+		diag_last_hb = now;
+		ethernet_diag_dump("wall", txreq, rdreq);
 	}
 }
 

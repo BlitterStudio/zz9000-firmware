@@ -135,6 +135,8 @@ static uint32_t sd_storage_write_block = 0;
 uint16_t ethernet_send_result = 0;
 int eth_backlog_nag_counter = 0;
 int interrupt_enabled_ethernet = 0;
+static u32 diag_zorro_txreq = 0;	/* issue #29 stall probe: Zorro write requests serviced */
+static u32 diag_zorro_rdreq = 0;	/* issue #29 stall probe: Zorro read requests serviced */
 
 static uint32_t sdk_diag_last_reg_write_addr = 0;
 static uint32_t sdk_diag_last_reg_write_raw_addr = 0;
@@ -1353,6 +1355,7 @@ int main() {
 			// ack the write, set bit 31 in register 0
 			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG0, (1 << 31));
 			need_req_ack = 1;
+			diag_zorro_txreq++;	/* issue #29 stall probe */
 		} else if (readreq) {
 			uint32_t zaddr = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG0);
 
@@ -1562,6 +1565,7 @@ int main() {
 			// ack the read, set bit 30 in register 0
 			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG0, (1 << 30));
 			need_req_ack = 2;
+			diag_zorro_rdreq++;	/* issue #29 stall probe */
 		} else {
 			// there are no read/write requests, we can do other housekeeping
 
@@ -1667,7 +1671,7 @@ int main() {
 				eth_backlog_nag_counter = 0;
 				ethernet_note_int_raised();	/* issue #29 stall probe */
 			}
-			ethernet_diag_poll();	/* issue #29 stall probe */
+			ethernet_diag_poll(diag_zorro_txreq, diag_zorro_rdreq);	/* issue #29 stall probe */
 		}
 
 		if (need_req_ack) {

@@ -32,7 +32,7 @@ void ethernet_reset_for_amiga();
 
 /* issue #29 stall probe (diagnostic build only) */
 void ethernet_note_int_raised(void);
-void ethernet_diag_poll(void);
+void ethernet_diag_poll(u32 txreq, u32 rdreq);
 
 #define FRAME_MAX_BACKLOG 128
 
