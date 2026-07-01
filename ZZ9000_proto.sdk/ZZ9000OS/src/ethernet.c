@@ -75,6 +75,9 @@ static volatile int rx_pause_frames = 0;
 static volatile int rx_slot_mismatch = 0;
 static volatile int frames_ack_rejected = 0;	/* issue #29: RX-accept handshake rejects */
 static volatile u32 eth_int_raises = 0;		/* diag (issue #29 stall probe): # times firmware raised the Amiga ETH IRQ */
+static volatile u32 eth_send_calls = 0;		/* diag: ethernet_send_frame() entries */
+static volatile u32 eth_send_notready = 0;	/* diag: sends bailed because task_state != READY */
+static volatile u32 eth_send_timeout = 0;	/* diag: sends that hit the TX-complete timeout */
 
 #define ETH_PHY_TYPE_MICREL 0
 #define ETH_PHY_TYPE_MOTORCOMM 1
@@ -822,7 +825,7 @@ void ethernet_diag_poll(u32 txreq, u32 rdreq) {
 	static u32 diag_stuck = 0;
 	static int diag_reported = 0;
 	static XTime diag_tick = 0;
-	static u32 p_tx = 0, p_rd = 0, p_rx = 0, p_ftx = 0;
+	static u32 p_tx = 0, p_rd = 0, p_rx = 0, p_ftx = 0, p_sc = 0;
 	static u32 last_reqs = 0xffffffffu;
 	static int quiet = 0;
 	XTime now;
@@ -852,8 +855,9 @@ void ethernet_diag_poll(u32 txreq, u32 rdreq) {
 	u32 d_rd  = rdreq - p_rd;			/* Zorro READ  requests serviced */
 	u32 d_rx  = frames_received - p_rx;		/* frames received from the wire */
 	u32 d_ftx = FramesTx - p_ftx;			/* frames transmitted to the wire */
+	u32 d_sc  = eth_send_calls - p_sc;		/* ethernet_send_frame() calls */
 	u32 reqs  = d_tx + d_rd;
-	p_tx = txreq; p_rd = rdreq; p_rx = frames_received; p_ftx = FramesTx;
+	p_tx = txreq; p_rd = rdreq; p_rx = frames_received; p_ftx = FramesTx; p_sc = eth_send_calls;
 
 	/* Print only when the Zorro request RATE changes sharply (>=2x up or down)
 	 * — that brackets the freeze transition and any Forbid-spin flood/collapse
@@ -867,19 +871,20 @@ void ethernet_diag_poll(u32 txreq, u32 rdreq) {
 	if (changed || quiet >= 20) {
 		quiet = 0;
 		last_reqs = reqs;
-		printf("EMAC[%s]: reqs/s=%lu (txw=%lu rdr=%lu) rx/s=%lu ftx/s=%lu backlog=%u read=%u dropped=%d mismatch=%d ackrej=%d intraises=%lu\n",
+		printf("EMAC[%s]: reqs/s=%lu (txw=%lu rdr=%lu) rx/s=%lu ftx/s=%lu sc/s=%lu state=%d snr=%lu sto=%lu txrec=%d backlog=%u ackrej=%d\n",
 		       changed ? "CHG" : "hb",
 		       (unsigned long)reqs,
 		       (unsigned long)d_tx,
 		       (unsigned long)d_rd,
 		       (unsigned long)d_rx,
 		       (unsigned long)d_ftx,
+		       (unsigned long)d_sc,
+		       ethernet_task_state,
+		       (unsigned long)eth_send_notready,
+		       (unsigned long)eth_send_timeout,
+		       tx_recoveries,
 		       (unsigned)frames_backlog,
-		       (unsigned)frames_backlog_read,
-		       frames_dropped,
-		       rx_slot_mismatch,
-		       frames_ack_rejected,
-		       (unsigned long)eth_int_raises);
+		       frames_ack_rejected);
 	}
 }
 
@@ -1371,7 +1376,10 @@ u16 ethernet_send_frame(u16 frame_size) {
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
 	XEmacPs_Bd *BdTxPtr;
 
+	eth_send_calls++;			/* issue #29 stall probe */
+
 	if (ethernet_task_state != ETH_TASK_READY) {
+		eth_send_notready++;		/* issue #29 stall probe */
 		return 1;
 	}
 
@@ -1424,6 +1432,7 @@ u16 ethernet_send_frame(u16 frame_size) {
 		if (counter>10) {
 			printf("ERROR: timeout in ethernet_send_frame waiting for tx!\n");
 			ethernet_log_status("tx-timeout");
+			eth_send_timeout++;		/* issue #29 stall probe */
 			tx_recoveries++;
 			printf("EMAC: TX recovery #%d\n", tx_recoveries);
 			ethernet_restart_dma("tx-timeout-restart");
