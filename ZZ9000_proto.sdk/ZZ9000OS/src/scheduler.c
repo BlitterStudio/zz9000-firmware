@@ -26,6 +26,11 @@ int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired)
   }
   return 0;
 }
+
+static void taskq_store_release(volatile uint32_t *p, uint32_t v)
+{
+  *p = v;
+}
 #else
 int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired)
 {
@@ -49,6 +54,12 @@ int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired)
   (void)old;
   return (int)ok;
 }
+
+static void taskq_store_release(volatile uint32_t *p, uint32_t v)
+{
+  __asm__ __volatile__("dmb ish" ::: "memory");
+  *p = v;
+}
 #endif
 
 /* ---- coherency stress model (used by the Phase 0 two-core torture harness) ---- */
@@ -64,4 +75,42 @@ uint32_t taskq_stress_fill(uint32_t seed, uint32_t index)
 int taskq_stress_check(uint32_t seed, uint32_t index, uint32_t value)
 {
   return taskq_stress_fill(seed, index) == value ? 1 : 0;
+}
+
+/* ---- queue lifecycle: init + single-producer enqueue ---- */
+void taskq_init(taskq_t *q)
+{
+  uint32_t i;
+  for (i = 0; i < TASKQ_CAPACITY; i++) {
+    q->descs[i].state = TASK_FREE;
+  }
+  q->enqueue_cursor = 0;
+}
+
+int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
+                  uint32_t in_addr, uint32_t in_len,
+                  uint32_t out_addr, uint32_t out_cap,
+                  uint32_t request_id, uint32_t user_cookie)
+{
+  uint32_t i, idx;
+  for (i = 0; i < TASKQ_CAPACITY; i++) {
+    idx = (q->enqueue_cursor + i) % TASKQ_CAPACITY;
+    if (q->descs[idx].state == TASK_FREE) {
+      taskq_desc_t *d = &q->descs[idx];
+      d->cls = (uint32_t)cls;
+      d->opcode = opcode;
+      d->in_addr = in_addr;
+      d->in_len = in_len;
+      d->out_addr = out_addr;
+      d->out_cap = out_cap;
+      d->request_id = request_id;
+      d->user_cookie = user_cookie;
+      d->result_status = 0;
+      d->result_len = 0;
+      taskq_store_release(&d->state, TASK_QUEUED);  /* publish last */
+      q->enqueue_cursor = (idx + 1) % TASKQ_CAPACITY;
+      return (int)idx;
+    }
+  }
+  return -1;
 }

@@ -39,11 +39,53 @@ static void test_stress_check_matches_fill(void)
   expect_int("check_bad", taskq_stress_check(0xABCDu, 42u, v ^ 1u), 0);
 }
 
+static void test_init_marks_all_free(void)
+{
+  taskq_t q;
+  uint32_t i;
+  taskq_init(&q);
+  for (i = 0; i < TASKQ_CAPACITY; i++) {
+    expect_u32("init_free", q.descs[i].state, TASK_FREE);
+  }
+  expect_u32("init_cursor", q.enqueue_cursor, 0u);
+}
+
+static void test_enqueue_fills_and_queues(void)
+{
+  taskq_t q;
+  int s;
+  taskq_init(&q);
+  s = taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT,
+                    0x100u, 32u, 0x200u, 64u, 0xAAu, 0xBBu);
+  expect_int("enq_slot0", s, 0);
+  expect_u32("enq_state", q.descs[0].state, TASK_QUEUED);
+  expect_u32("enq_opcode", q.descs[0].opcode, TASKQ_OP_CRYPTO_KX);
+  expect_u32("enq_in_addr", q.descs[0].in_addr, 0x100u);
+  expect_u32("enq_cookie", q.descs[0].user_cookie, 0xBBu);
+  expect_u32("enq_cursor", q.enqueue_cursor, 1u);
+}
+
+static void test_enqueue_full_returns_minus1(void)
+{
+  taskq_t q;
+  uint32_t i;
+  int s;
+  taskq_init(&q);
+  for (i = 0; i < TASKQ_CAPACITY; i++) {
+    (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, i, i);
+  }
+  s = taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 99, 99);
+  expect_int("enq_full", s, -1);
+}
+
 int main(void)
 {
   test_stress_fill_is_deterministic();
   test_stress_fill_varies_by_index();
   test_stress_check_matches_fill();
+  test_init_marks_all_free();
+  test_enqueue_fills_and_queues();
+  test_enqueue_full_returns_minus1();
 
   if (failures) {
     printf("scheduler_test: %d failure(s)\n", failures);
