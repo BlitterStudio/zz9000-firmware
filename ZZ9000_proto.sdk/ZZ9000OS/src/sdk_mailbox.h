@@ -203,6 +203,7 @@ struct SDKCryptoVerifyPayload {
 
 #define SDK_OP_DIAG_READ               0x0900U
 #define SDK_OP_DIAG_TIMING             0x0901U
+#define SDK_OP_DIAG_SCHED              0x0902U
 
 #define SDK_MAX_SHARED_BUFFERS         32U
 #define SDK_MAX_SURFACES               16U

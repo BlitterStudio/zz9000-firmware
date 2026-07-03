@@ -180,6 +180,13 @@ struct SDKDiagTimingPayload {
 	uint8_t max_us[4];
 };
 
+struct SDKDiagSchedPayload {
+	uint8_t version[4];
+	uint8_t core1_online[4];
+	uint8_t tasks_on_core1[4];
+	uint8_t tasks_on_core0[4];
+};
+
 struct SDKSurfaceInfoPayload {
 	uint8_t handle[4];
 	uint8_t arm_addr[4];
@@ -632,6 +639,9 @@ typedef char SDKDiagPayload_must_be_48_bytes[
 typedef char SDKDiagTimingPayload_must_be_48_bytes[
 	(sizeof(struct SDKDiagTimingPayload) == 48U) ? 1 : -1
 ];
+typedef char SDKDiagSchedPayload_must_be_16_bytes[
+	(sizeof(struct SDKDiagSchedPayload) == 16U) ? 1 : -1
+];
 typedef char SDKSurfaceInfoPayload_must_be_48_bytes[
 	(sizeof(struct SDKSurfaceInfoPayload) == 48U) ? 1 : -1
 ];
@@ -852,7 +862,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		SDK_CAP_DIAGNOSTICS,
 		SDK_SERVICE_FLAG_FIRMWARE,
 		SDK_SERVICE_DIAG,
-		2,
+		3,
 		"diag"
 	}
 };
@@ -3408,6 +3418,7 @@ static uint16_t crypto_dispatch(uint16_t opcode, uint32_t in_len,
 	}
 
 	status = sdk_mailbox_run_crypto_task(opcode, params, result_payload);
+	scheduler_shared()->tasks_on_core0++;   /* executed inline on core 0 */
 	if (status != SDK_STATUS_OK)
 		return complete_status(req, comp, status);
 	write_completion(comp, req, SDK_STATUS_OK,
@@ -4170,6 +4181,22 @@ static uint16_t handle_diag_timing(volatile struct SDKMailboxEntry *req,
 	return SDK_STATUS_OK;
 }
 
+static uint16_t handle_diag_sched(volatile struct SDKMailboxEntry *req,
+                                  volatile struct SDKMailboxEntry *comp)
+{
+	volatile struct SDKDiagSchedPayload *sched;
+	taskq_shared_t *sh = scheduler_shared();
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*sched));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	sched = (volatile struct SDKDiagSchedPayload *)comp->payload;
+	put_be32(sched->version, 1U);
+	put_be32(sched->core1_online, scheduler_core1_available() ? 1U : 0U);
+	put_be32(sched->tasks_on_core1, sh->tasks_on_core1);
+	put_be32(sched->tasks_on_core0, sh->tasks_on_core0);
+	return SDK_STATUS_OK;
+}
+
 static uint16_t handle_query_service(volatile struct SDKMailboxEntry *req,
                                      volatile struct SDKMailboxEntry *comp,
                                      uint16_t payload_len)
@@ -4308,6 +4335,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_diag_read(req, comp, pending_requests);
 	case SDK_OP_DIAG_TIMING:
 		return handle_diag_timing(req, comp);
+	case SDK_OP_DIAG_SCHED:
+		return handle_diag_sched(req, comp);
 	default:
 		write_completion(comp, req, SDK_STATUS_UNSUPPORTED, 0);
 		return SDK_STATUS_UNSUPPORTED;

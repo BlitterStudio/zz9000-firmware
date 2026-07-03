@@ -193,6 +193,7 @@ void scheduler_core1_worker(void)
     sh->core1_current_slot = slot;
     (void)scheduler_run_slot(&sh->queue.descs[slot]);
     sh->core1_current_slot = -1;
+    sh->tasks_on_core1++;   /* proof: this core executed a crypto task */
   }
 }
 
@@ -259,12 +260,14 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
      */
     while ((slot = taskq_claim_any(&sh->queue)) >= 0) {
       (void)scheduler_run_slot(&sh->queue.descs[slot]);
+      sh->tasks_on_core0++;
     }
   } else if (taskq_should_drain(zorro_pending, display_pending, 1)) {
     /* Opportunistic SHORT drain in idle windows while core 1 is healthy. */
     slot = taskq_claim_short(&sh->queue);
     if (slot >= 0) {
       (void)scheduler_run_slot(&sh->queue.descs[slot]);
+      sh->tasks_on_core0++;
     }
   }
 }

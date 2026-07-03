@@ -66,6 +66,8 @@ typedef struct {                /* coherent control block at the queue region */
   volatile uint32_t core1_restart_request;  /* core 1 sets on fault; core 0 clears */
   volatile uint32_t core1_fault_code;       /* last fault code */
   volatile uint32_t core1_alive;            /* worker sets 1 on entry */
+  volatile uint32_t tasks_on_core1;         /* core-1 worker: tasks it executed */
+  volatile uint32_t tasks_on_core0;         /* core-0: inline dispatch + drains  */
 } taskq_shared_t;
 
 typedef struct {

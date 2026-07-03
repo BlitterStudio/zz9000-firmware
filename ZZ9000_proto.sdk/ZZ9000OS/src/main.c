@@ -361,6 +361,11 @@ int main() {
 	// Confirm core 1's scheduler worker checked in before trusting the async
 	// offload path; if it never does, stay in single-core mode (all inline).
 	scheduler_confirm_core1_boot();
+	if (scheduler_core1_available()) {
+		print("[sched] core 1 worker online\r\n");
+	} else {
+		print("[sched] core 1 offline - single-core fallback\r\n");
+	}
 #endif
 	volatile struct ZZ9K_ENV* arm_run_env = arm_app_get_run_env();
 	uint32_t arm_run_address = 0;
