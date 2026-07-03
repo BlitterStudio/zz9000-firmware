@@ -3118,6 +3118,11 @@ struct crypto_verify_params {
 typedef char crypto_params_fit_op_params[
     (sizeof(struct crypto_aead_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
+/* The core-1 worker (scheduler_arm.c) posts TASKQ_RESULT_PAYLOAD bytes for a
+ * successful crypto completion; that must equal one full result payload. */
+typedef char crypto_result_fits_payload[
+    (sizeof(struct SDKCryptoResultPayload) == TASKQ_RESULT_PAYLOAD) ? 1 : -1];
+
 static void crypto_result(uint8_t *result_payload, uint32_t bytes_written,
                           uint32_t algorithm, uint32_t flags)
 {

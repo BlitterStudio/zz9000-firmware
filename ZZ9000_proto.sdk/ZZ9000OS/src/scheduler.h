@@ -116,6 +116,7 @@ void scheduler_coherency_init_core1(void); /* core 1: full MMU/cache/SMP bring-u
 taskq_shared_t *scheduler_shared(void);    /* the coherent control block */
 void scheduler_boot_init(void);            /* core 0: init queue + watchdog at boot */
 int  scheduler_core1_available(void);      /* core 1 started and not watchdog-disabled */
+void scheduler_core1_worker(void);         /* core 1: dedicated task worker; never returns */
 #endif
 
 #if defined(SCHED_STRESS_TEST) && !defined(TASKQ_HOST_TEST)

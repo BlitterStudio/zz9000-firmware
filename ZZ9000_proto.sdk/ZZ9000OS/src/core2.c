@@ -141,6 +141,18 @@ void core1_loop() {
 	scheduler_stress_core1();  // Phase 0 two-core coherency torture; never returns
 #endif
 
+	// Default core 1 to the dual-core task-scheduler worker (crypto offload).
+	// The legacy REG_ZZ_ARM_RUN trampoline -- the Amiga uploading a native ARM
+	// app to run on core 1 -- is preserved without a compile flag: arm_app_run()
+	// sets core2_execute *and* cold-resets core 1, so on the post-reset re-entry
+	// core2_execute is already 1 here and we fall through to the trampoline
+	// dispatch below instead of the worker. At cold boot core2_execute is 0, so
+	// core 1 becomes the worker and never returns. (Folding the trampoline into
+	// the scheduler is a later phase.)
+	if (!core2_execute) {
+		scheduler_core1_worker();  // dual-core crypto worker; never returns
+	}
+
 	while (1) {
 		while (!core2_execute) {
 			usleep(1);

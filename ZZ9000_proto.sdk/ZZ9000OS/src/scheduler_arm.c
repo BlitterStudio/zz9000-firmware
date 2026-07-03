@@ -109,4 +109,58 @@ void scheduler_coherency_init_core1(void)
   Xil_SetTlbAttributes(SDK_TASKQ_REGION_ADDRESS, NORM_WB_CACHE);
 }
 
+/*
+ * Run one claimed task's compute on the calling core and mark it DONE.
+ *
+ * The compute (sdk_mailbox_run_crypto_task) owns all data-buffer cache
+ * maintenance, so this runs correctly on whichever core executes it: core 1 in
+ * the normal async path, or core 0 on the inline/fallback and SHORT-drain paths
+ * (scheduler_core0_poll). A crypto op that ran to completion -- including a
+ * legitimate failure such as an AEAD auth mismatch -- is a DONE task carrying
+ * its exact SDK_STATUS_*; only a core-1 hardware fault (handled in core2.c)
+ * marks a slot FAILED. The completion payload is always one
+ * SDKCryptoResultPayload (== TASKQ_RESULT_PAYLOAD bytes) on success, none on
+ * error, matching the pre-scheduler handlers byte-for-byte.
+ */
+static uint16_t scheduler_run_slot(taskq_desc_t *d)
+{
+  taskq_shared_t *sh = scheduler_shared();
+  uint8_t payload[TASKQ_RESULT_PAYLOAD];
+  int slot = (int)(d - sh->queue.descs);
+  uint16_t status = sdk_mailbox_run_crypto_task((uint16_t)d->opcode,
+                                                d->op_params, payload);
+  uint16_t len = (status == SDK_STATUS_OK) ? (uint16_t)TASKQ_RESULT_PAYLOAD : 0u;
+  taskq_complete(&sh->queue, slot, status, payload, len);
+  return status;
+}
+
+/*
+ * Core-1 dedicated worker. Entered from core1_loop (core2.c) after coherency
+ * bring-up; never returns. Publishes core1_alive in the coherent shared block
+ * as the boot-start confirmation core 0 waits on (scheduler_core1_available),
+ * then claims and runs tasks. Idles on WFE; the core-0 enqueue path issues SEV
+ * after a release-store so a sleeping worker wakes promptly. core1_current_slot
+ * is set around execution so a fault on core 1 can attribute the in-flight slot
+ * (core2.c fault path). The worker touches only the task queue and the task's
+ * resolved data buffers -- never Zorro, the mailbox, the doorbell, or display.
+ */
+void scheduler_core1_worker(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  sh->core1_alive = 1;
+  dmb();  /* make the alive flag observable to core 0 before we sleep on WFE */
+
+  for (;;) {
+    int slot = taskq_claim_any(&sh->queue);
+    if (slot < 0) {
+      __asm__ __volatile__("wfe" ::: "memory");
+      continue;
+    }
+    sh->core1_current_slot = slot;
+    (void)scheduler_run_slot(&sh->queue.descs[slot]);
+    sh->core1_current_slot = -1;
+  }
+}
+
 #endif /* TASKQ_HOST_TEST */
