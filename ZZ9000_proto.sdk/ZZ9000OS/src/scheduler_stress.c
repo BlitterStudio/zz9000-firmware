@@ -24,6 +24,7 @@
 
 #include "scheduler.h"
 #include "memorymap.h"
+#include "watchdog.h"
 #include <stdio.h>
 #include <stdint.h>
 
@@ -97,6 +98,11 @@ void scheduler_stress_core0(void)
   for (;;) {
     int slot;
     int budget;
+
+    /* This harness owns core 0 and never returns to the main loop, so it must
+     * service the private watchdog itself or the board resets every ~12.9 s.
+     * If core 0 itself ever wedges, the watchdog still fires (intended). */
+    watchdog_kick();
 
     /* Fill every currently-free slot with a fresh stamped pattern. */
     for (;;) {
