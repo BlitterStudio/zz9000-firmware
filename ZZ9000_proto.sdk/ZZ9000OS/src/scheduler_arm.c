@@ -13,6 +13,7 @@
 #include "scheduler.h"
 #include "memorymap.h"
 #include "sdk_mailbox.h"
+#include "core2.h"
 #include "xil_types.h"
 #include "xil_mmu.h"
 #include "xil_cache.h"
@@ -110,17 +111,21 @@ void scheduler_coherency_init_core1(void)
 }
 
 /*
- * Run one claimed task's compute on the calling core and mark it DONE.
+ * Run one claimed task's compute on the calling core and mark it DONE. This is
+ * the scheduler's compute-dispatch seam: the queue/worker/harvest machinery is
+ * opcode-agnostic, and this function routes a task to its service handler.
+ * Phase 1 wires only the crypto service (sdk_mailbox_run_crypto_task); later
+ * phases extend the dispatch to image/compression and MP3 offload here.
  *
- * The compute (sdk_mailbox_run_crypto_task) owns all data-buffer cache
- * maintenance, so this runs correctly on whichever core executes it: core 1 in
- * the normal async path, or core 0 on the inline/fallback and SHORT-drain paths
- * (scheduler_core0_poll). A crypto op that ran to completion -- including a
- * legitimate failure such as an AEAD auth mismatch -- is a DONE task carrying
- * its exact SDK_STATUS_*; only a core-1 hardware fault (handled in core2.c)
- * marks a slot FAILED. The completion payload is always one
- * SDKCryptoResultPayload (== TASKQ_RESULT_PAYLOAD bytes) on success, none on
- * error, matching the pre-scheduler handlers byte-for-byte.
+ * The service handler owns all data-buffer cache maintenance, so this runs
+ * correctly on whichever core executes it: core 1 in the normal async path, or
+ * core 0 on the inline/fallback and SHORT-drain paths (scheduler_core0_poll). A
+ * task that ran to completion -- including a legitimate failure such as an AEAD
+ * auth mismatch -- is a DONE task carrying its exact SDK_STATUS_*; only a
+ * core-1 hardware fault (handled in core2.c) marks a slot FAILED. For crypto the
+ * completion payload is always one SDKCryptoResultPayload (== TASKQ_RESULT_PAYLOAD
+ * bytes) on success, none on error, matching the pre-scheduler handlers
+ * byte-for-byte.
  */
 static uint16_t scheduler_run_slot(taskq_desc_t *d)
 {
@@ -164,18 +169,26 @@ void scheduler_core1_worker(void)
 }
 
 /*
- * Core-0 poll, called once per main-loop iteration. Two jobs:
+ * Core-0 poll, called once per main-loop iteration. The queue, worker, harvest,
+ * and completion posting here are opcode-agnostic -- they carry whatever task
+ * the worker ran. Phase 1 wires only the crypto service to the queue (see
+ * scheduler_run_slot); later phases add image/compression and MP3 offload
+ * without changing this machinery. Three jobs:
  *   1. Harvest tasks the worker finished (DONE/FAILED) and post their deferred
  *      completions to the Amiga via sdk_mailbox_post_deferred. A DONE task
- *      carries its exact crypto status; a FAILED task (core-1 fault) posts the
+ *      carries its exact result status; a FAILED task (core-1 fault) posts the
  *      generic SDK_STATUS_INTERNAL_ERROR so the Amiga falls back to software.
  *      Each successful DONE clears the fault watchdog. If the completion ring
  *      is full the task stays harvested and is retried on the next poll.
- *   2. Opportunistically drain one SHORT task inline in idle windows -- only
+ *   2. Service a core-1 fault: if the worker faulted it marked its in-flight
+ *      slot FAILED (harvested above) and set core1_restart_request. Trip the
+ *      watchdog; while it still has core 1 enabled, cold-restart the core. Once
+ *      the watchdog trips (too many consecutive faults) leave core 1 down and
+ *      fall to single-core mode.
+ *   3. Opportunistically drain one SHORT task inline in idle windows -- only
  *      when core 1 is enabled and neither a Zorro register request nor display
  *      work is pending this iteration (taskq_should_drain). This soaks up
- *      latency-sensitive work (KX/VERIFY) without stealing cycles from
- *      Amiga-facing I/O.
+ *      latency-sensitive work without stealing cycles from Amiga-facing I/O.
  */
 void scheduler_core0_poll(int zorro_pending, int display_pending)
 {
@@ -195,6 +208,17 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
       taskq_watchdog_on_success(&g_sched_watchdog);
     }
     taskq_release(&sh->queue, slot);
+  }
+
+  if (sh->core1_restart_request) {
+    sh->core1_restart_request = 0;
+    dmb();  /* publish the clear before the reset re-enters the worker */
+    taskq_watchdog_on_fault(&g_sched_watchdog);
+    if (taskq_watchdog_core1_enabled(&g_sched_watchdog)) {
+      core1_cold_restart();
+    } else {
+      g_core1_started = 0;  /* give up on core 1 -> single-core fallback */
+    }
   }
 
   if (taskq_should_drain(zorro_pending, display_pending,

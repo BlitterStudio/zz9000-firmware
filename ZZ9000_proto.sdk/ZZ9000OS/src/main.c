@@ -1706,13 +1706,14 @@ int main() {
 		}
 
 		/*
-		 * Dual-core scheduler service. Harvest crypto tasks core 1 finished and
-		 * post their deferred completions EVERY iteration -- so results reach
-		 * the Amiga promptly even while display-load Zorro traffic keeps core 0
-		 * in the write/read branches (exactly the contention case we offload
-		 * for). The opportunistic inline SHORT-drain is gated on no Zorro
-		 * request having been serviced this iteration. Dormant (a cheap
-		 * empty-queue scan) until core 1 is enabled.
+		 * Dual-core scheduler service. Harvest tasks core 1 finished and post
+		 * their deferred completions EVERY iteration -- so results reach the
+		 * Amiga promptly even while display-load Zorro traffic keeps core 0 in
+		 * the write/read branches (exactly the contention case we offload for).
+		 * The queue is opcode-agnostic; Phase 1 feeds it the crypto service,
+		 * later phases add image/compression and MP3. The opportunistic inline
+		 * SHORT-drain is gated on no Zorro request having been serviced this
+		 * iteration. Dormant (a cheap empty-queue scan) until core 1 is enabled.
 		 */
 		scheduler_core0_poll((writereq || readreq) ? 1 : 0, 0);
 	}

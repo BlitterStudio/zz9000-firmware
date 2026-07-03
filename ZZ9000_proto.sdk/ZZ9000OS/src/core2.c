@@ -78,15 +78,77 @@ int __attribute__ ((visibility ("default"))) _putchar(char c) {
 volatile void (*core1_trampoline)(volatile struct ZZ9K_ENV* env);
 volatile int core2_execute = 0;
 
+void core1_loop();  /* forward decl: core1_cold_restart re-points 0xFFFFFFF0 at it */
+
 struct core_fault_slot core1_fault __attribute__((aligned(32))) = { CORE_FAULT_NONE, {0} };
 
 static void record_fault(uint32_t code, const char *name)
 {
+	taskq_shared_t *sh = scheduler_shared();
+	int slot = sh->core1_current_slot;
+
 	core1_fault.code = code;
 	Xil_DCacheFlushRange((INTPTR)&core1_fault, sizeof(core1_fault));
 	printf("%s: arm_exception_handler()!\n", name);
+
+	if (slot >= 0) {
+		/*
+		 * Core 1 faulted while running a dual-core scheduler task. Don't hang
+		 * the card: mark the in-flight slot FAILED so core 0 posts an error
+		 * completion (the Amiga falls back to software crypto), record the
+		 * fault code, and request a cold restart. core 0's harvest maps every
+		 * FAILED task to SDK_STATUS_INTERNAL_ERROR, so the status passed here
+		 * is unused. Then park on WFE until core 0 resets us back into
+		 * core1_loop (core1_cold_restart).
+		 */
+		taskq_fail(&sh->queue, slot, 0);
+		sh->core1_current_slot = -1;
+		sh->core1_fault_code = code;
+		sh->core1_restart_request = 1;
+		Xil_DCacheFlushRange((INTPTR)sh, sizeof(*sh));
+		__asm__ __volatile__("dsb" ::: "memory");
+		for (;;) {
+			__asm__ __volatile__("wfe" ::: "memory");
+		}
+	}
+
+	/*
+	 * Legacy surface-coprocessor path (no scheduler task in flight): hang until
+	 * core 0 notices core1_fault.code and resets the core.
+	 */
 	while (1) {
 	}
+}
+
+/*
+ * Cold-restart core 1 by re-running the CPU1 reset sequence (XAPP1079), so it
+ * re-enters core1_loop from its reset vector. Used by the dual-core scheduler
+ * (scheduler_core0_poll) to recover a worker that faulted and parked. 0xFFFFFFF0
+ * is re-pointed at core1_loop first in case the OCM word was disturbed.
+ */
+void core1_cold_restart(void)
+{
+	volatile uint32_t *core1_addr = (volatile uint32_t *) 0xFFFFFFF0;
+	uint32_t RegVal;
+
+	*core1_addr = (uint32_t) core1_loop;
+
+	Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
+	RegVal = Xil_In32(A9_CPU_RST_CTRL);
+	RegVal |= A9_RST1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
+	RegVal |= A9_CLKSTOP1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
+	RegVal &= ~A9_RST1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
+	RegVal &= ~A9_CLKSTOP1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
+	Xil_Out32(XSLCR_LOCK_ADDR, XSLCR_LOCK_CODE);
+
+	dmb();
+	dsb();
+	isb();
+	asm("sev");
 }
 
 #pragma GCC push_options
