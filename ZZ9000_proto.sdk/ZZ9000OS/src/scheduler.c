@@ -183,3 +183,27 @@ void taskq_release(taskq_t *q, int slot)
 {
   taskq_store_release(&q->descs[slot].state, TASK_FREE);
 }
+
+/* ---- dispatch policy ---- */
+taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len)
+{
+  switch (opcode) {
+  case TASKQ_OP_CRYPTO_KX:
+  case TASKQ_OP_CRYPTO_VERIFY:
+    return TASK_SHORT;              /* asymmetric ops: always small/fast */
+  case TASKQ_OP_CRYPTO_HASH:
+  case TASKQ_OP_CRYPTO_STREAM:
+  case TASKQ_OP_CRYPTO_AEAD:
+    return (in_len <= TASKQ_SHORT_MAX_BYTES) ? TASK_SHORT : TASK_LONG;
+  default:
+    return TASK_LONG;              /* unknown/heavy: never drained on core 0 */
+  }
+}
+
+int taskq_should_drain(int zorro_pending, int display_pending, int core1_enabled)
+{
+  if (!core1_enabled) {
+    return 0;                      /* fallback path drains all inline elsewhere */
+  }
+  return (!zorro_pending && !display_pending) ? 1 : 0;
+}

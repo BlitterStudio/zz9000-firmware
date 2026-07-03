@@ -180,6 +180,33 @@ static void test_harvest_finds_done_then_release(void)
   expect_int("harvest_after_release", taskq_harvest(&q), -1);
 }
 
+static void test_class_kx_verify_always_short(void)
+{
+  expect_int("kx_short", taskq_class_for_opcode(TASKQ_OP_CRYPTO_KX, 999999u), TASK_SHORT);
+  expect_int("verify_short", taskq_class_for_opcode(TASKQ_OP_CRYPTO_VERIFY, 999999u), TASK_SHORT);
+}
+
+static void test_class_data_ops_size_threshold(void)
+{
+  expect_int("aead_small", taskq_class_for_opcode(TASKQ_OP_CRYPTO_AEAD, 4096u), TASK_SHORT);
+  expect_int("aead_big",   taskq_class_for_opcode(TASKQ_OP_CRYPTO_AEAD, 4097u), TASK_LONG);
+  expect_int("hash_big",   taskq_class_for_opcode(TASKQ_OP_CRYPTO_HASH, 65536u), TASK_LONG);
+  expect_int("stream_small", taskq_class_for_opcode(TASKQ_OP_CRYPTO_STREAM, 16u), TASK_SHORT);
+}
+
+static void test_class_unknown_is_long(void)
+{
+  expect_int("unknown_long", taskq_class_for_opcode(0x9999u, 0u), TASK_LONG);
+}
+
+static void test_should_drain_gates(void)
+{
+  expect_int("drain_idle",     taskq_should_drain(0, 0, 1), 1);
+  expect_int("drain_zorro",    taskq_should_drain(1, 0, 1), 0);
+  expect_int("drain_display",  taskq_should_drain(0, 1, 1), 0);
+  expect_int("drain_no_core1", taskq_should_drain(0, 0, 0), 0);
+}
+
 int main(void)
 {
   test_stress_fill_is_deterministic();
@@ -196,6 +223,10 @@ int main(void)
   test_complete_clamps_payload();
   test_fail_sets_failed();
   test_harvest_finds_done_then_release();
+  test_class_kx_verify_always_short();
+  test_class_data_ops_size_threshold();
+  test_class_unknown_is_long();
+  test_should_drain_gates();
 
   if (failures) {
     printf("scheduler_test: %d failure(s)\n", failures);
