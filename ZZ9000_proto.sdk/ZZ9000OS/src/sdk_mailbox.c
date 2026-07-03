@@ -17,6 +17,7 @@
 #include "sdk_jpeg.h"
 #include "sdk_surface.h"
 #include "memorymap.h"
+#include "scheduler.h"
 #include "interrupt.h"
 #include "video.h"
 #include "mp3/mp3.h"
@@ -3047,15 +3048,339 @@ static uint16_t crypto_digest_length(uint32_t algorithm)
 	}
 }
 
+/*
+ * Crypto compute cores (Phase 1 dual-core scheduler).
+ *
+ * The core-0 fronts (handle_crypto_*) resolve shared-buffer handles to card DDR
+ * addresses and validate them, then pack the resolved addresses into one of the
+ * param structs below and hand the task to a consumer via crypto_dispatch(). A
+ * compute core runs on whichever core claims the task (core 1 normally, core 0
+ * inline on fallback). It owns ALL data-buffer cache maintenance: invalidate
+ * inputs before reading (pull the Amiga's DDR writes / drop stale lines) and
+ * flush outputs after writing (push to DDR for the Amiga). The generic queue
+ * region is SCU-coherent; these per-op data buffers are not, so the compute
+ * core manages them explicitly exactly as the original single-core handlers did.
+ *
+ * These structs live in the task descriptor's opaque op_params[48]; both cores
+ * are Cortex-A9 with identical ABI, so a plain struct overlay is safe.
+ */
+struct crypto_hash_params {
+	uint32_t algorithm;
+	uint32_t flags;
+	uint32_t src_addr;
+	uint32_t src_length;
+	uint32_t key_addr;      /* 0 = no key (plain hash) */
+	uint32_t key_length;
+	uint32_t dst_addr;
+	uint32_t digest_length;
+};
+
+struct crypto_stream_params {
+	uint32_t algorithm;
+	uint32_t src_addr;
+	uint32_t src_length;
+	uint32_t key_addr;
+	uint32_t nonce_addr;
+	uint32_t counter;
+	uint32_t dst_addr;
+};
+
+struct crypto_aead_params {
+	uint32_t algorithm;
+	uint32_t flags;         /* carries SDK_CRYPTO_AEAD_FLAG_DECRYPT */
+	uint32_t src_addr;
+	uint32_t src_length;
+	uint32_t src_total;
+	uint32_t dst_addr;
+	uint32_t key_addr;
+	uint32_t key_size;
+	uint32_t nonce_addr;
+	uint32_t aad_addr;      /* 0 = no AAD */
+	uint32_t aad_length;
+};
+
+struct crypto_kx_params {
+	uint32_t algorithm;
+	uint32_t scalar_addr;
+	uint32_t point_addr;
+	uint32_t dst_addr;
+};
+
+struct crypto_verify_params {
+	uint32_t algorithm;
+	uint32_t hash_addr;
+	uint32_t key_addr;
+	uint32_t key_length;
+	uint32_t sig_addr;
+	uint32_t sig_length;
+};
+
+typedef char crypto_params_fit_op_params[
+    (sizeof(struct crypto_aead_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
+static void crypto_result(uint8_t *result_payload, uint32_t bytes_written,
+                          uint32_t algorithm, uint32_t flags)
+{
+	volatile struct SDKCryptoResultPayload *r =
+	    (volatile struct SDKCryptoResultPayload *)result_payload;
+	put_be32(r->bytes_written, bytes_written);
+	put_be32(r->algorithm, algorithm);
+	put_be32(r->flags, flags);
+}
+
+static uint16_t crypto_hash_compute(const struct crypto_hash_params *p,
+                                    uint8_t *result_payload)
+{
+	const uint8_t *src_data = (const uint8_t *)(uintptr_t)p->src_addr;
+	uint8_t digest[SDK_SHA256_DIGEST_SIZE];
+
+	Xil_DCacheInvalidateRange((INTPTR)src_data, p->src_length);
+	if (p->key_addr != 0U) {
+		const uint8_t *key_data = (const uint8_t *)(uintptr_t)p->key_addr;
+		Xil_DCacheInvalidateRange((INTPTR)key_data, p->key_length);
+		if (p->algorithm == SDK_CRYPTO_HASH_POLY1305)
+			sdk_poly1305(key_data, src_data, p->src_length, digest);
+		else if (p->algorithm == SDK_CRYPTO_HASH_SHA1)
+			sdk_hmac_sha1(key_data, p->key_length, src_data,
+			              p->src_length, digest);
+		else
+			sdk_hmac_sha256(key_data, p->key_length, src_data,
+			                p->src_length, digest);
+	} else {
+		if (p->algorithm == SDK_CRYPTO_HASH_SHA1)
+			sdk_sha1(src_data, p->src_length, digest);
+		else
+			sdk_sha256(src_data, p->src_length, digest);
+	}
+
+	memcpy((void *)(uintptr_t)p->dst_addr, digest, p->digest_length);
+	Xil_DCacheFlushRange((INTPTR)(uintptr_t)p->dst_addr, p->digest_length);
+	crypto_result(result_payload, p->digest_length, p->algorithm, p->flags);
+	memset(digest, 0, sizeof(digest));
+	return SDK_STATUS_OK;
+}
+
+static uint16_t crypto_stream_compute(const struct crypto_stream_params *p,
+                                      uint8_t *result_payload)
+{
+	const uint8_t *src_data = (const uint8_t *)(uintptr_t)p->src_addr;
+	const uint8_t *key_data = (const uint8_t *)(uintptr_t)p->key_addr;
+	const uint8_t *nonce_data = (const uint8_t *)(uintptr_t)p->nonce_addr;
+	uint8_t *dst_data = (uint8_t *)(uintptr_t)p->dst_addr;
+
+	Xil_DCacheInvalidateRange((INTPTR)src_data, p->src_length);
+	Xil_DCacheInvalidateRange((INTPTR)key_data, SDK_CHACHA20_KEY_SIZE);
+	Xil_DCacheInvalidateRange((INTPTR)nonce_data, SDK_CHACHA20_NONCE_SIZE);
+	sdk_chacha20_xor(key_data, nonce_data, p->counter, src_data, dst_data,
+	                 p->src_length);
+	Xil_DCacheFlushRange((INTPTR)dst_data, p->src_length);
+	crypto_result(result_payload, p->src_length, p->algorithm, 0U);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t crypto_aead_compute(const struct crypto_aead_params *p,
+                                    uint8_t *result_payload)
+{
+	const uint8_t *src_data = (const uint8_t *)(uintptr_t)p->src_addr;
+	const uint8_t *aad_data = p->aad_length ?
+	    (const uint8_t *)(uintptr_t)p->aad_addr : 0;
+	const uint8_t *key_data = (const uint8_t *)(uintptr_t)p->key_addr;
+	const uint8_t *nonce_data = (const uint8_t *)(uintptr_t)p->nonce_addr;
+	uint8_t *dst_data = (uint8_t *)(uintptr_t)p->dst_addr;
+	uint32_t decrypt = (p->flags & SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0;
+	uint8_t tag[SDK_POLY1305_TAG_SIZE];
+
+	Xil_DCacheInvalidateRange((INTPTR)src_data, p->src_total);
+	if (p->aad_length != 0U)
+		Xil_DCacheInvalidateRange((INTPTR)aad_data, p->aad_length);
+	Xil_DCacheInvalidateRange((INTPTR)key_data, p->key_size);
+	Xil_DCacheInvalidateRange((INTPTR)nonce_data, SDK_AES_GCM_NONCE_SIZE);
+
+	if (decrypt) {
+		int ok;
+		if (p->algorithm == SDK_CRYPTO_AEAD_CHACHA20_POLY1305)
+			ok = sdk_chacha20_poly1305_decrypt(
+			    key_data, nonce_data, aad_data, p->aad_length,
+			    src_data, p->src_length,
+			    src_data + p->src_length, dst_data);
+		else
+			ok = sdk_aes_gcm_decrypt(
+			    key_data, p->key_size, nonce_data, aad_data,
+			    p->aad_length, src_data, p->src_length,
+			    src_data + p->src_length, dst_data);
+		if (!ok)
+			return SDK_STATUS_IO_ERROR;
+		Xil_DCacheFlushRange((INTPTR)dst_data, p->src_length);
+	} else {
+		if (p->algorithm == SDK_CRYPTO_AEAD_CHACHA20_POLY1305)
+			sdk_chacha20_poly1305_encrypt(key_data, nonce_data,
+			                              aad_data, p->aad_length,
+			                              src_data, p->src_length,
+			                              dst_data, tag);
+		else
+			sdk_aes_gcm_encrypt(key_data, p->key_size, nonce_data,
+			                    aad_data, p->aad_length,
+			                    src_data, p->src_length,
+			                    dst_data, tag);
+		memcpy(dst_data + p->src_length, tag, sizeof(tag));
+		Xil_DCacheFlushRange((INTPTR)dst_data,
+		                     p->src_length + SDK_AES_GCM_TAG_SIZE);
+	}
+
+	crypto_result(result_payload,
+	              decrypt ? p->src_length :
+	                        p->src_length + SDK_AES_GCM_TAG_SIZE,
+	              p->algorithm, p->flags);
+	memset(tag, 0, sizeof(tag));
+	return SDK_STATUS_OK;
+}
+
+static uint16_t crypto_kx_compute(const struct crypto_kx_params *p,
+                                  uint8_t *result_payload)
+{
+	const uint8_t *scalar_data = (const uint8_t *)(uintptr_t)p->scalar_addr;
+	const uint8_t *point_data = (const uint8_t *)(uintptr_t)p->point_addr;
+	uint8_t *dst_data = (uint8_t *)(uintptr_t)p->dst_addr;
+
+	if (p->algorithm == SDK_CRYPTO_KX_X25519) {
+		uint8_t xshared[SDK_X25519_SHARED_SIZE];
+		Xil_DCacheInvalidateRange((INTPTR)scalar_data, SDK_X25519_KEY_SIZE);
+		Xil_DCacheInvalidateRange((INTPTR)point_data, SDK_X25519_POINT_SIZE);
+		if (!sdk_x25519(scalar_data, point_data, xshared)) {
+			memset(xshared, 0, sizeof(xshared));
+			return SDK_STATUS_BAD_REQUEST;
+		}
+		memcpy(dst_data, xshared, SDK_X25519_SHARED_SIZE);
+		Xil_DCacheFlushRange((INTPTR)dst_data, SDK_X25519_SHARED_SIZE);
+		memset(xshared, 0, sizeof(xshared));
+		crypto_result(result_payload, SDK_X25519_SHARED_SIZE,
+		              SDK_CRYPTO_KX_X25519, 0U);
+	} else {  /* SDK_CRYPTO_KX_P256 -- the front validated the algorithm */
+		uint8_t shared[SDK_P256_SHARED_SIZE];
+		Xil_DCacheInvalidateRange((INTPTR)scalar_data, SDK_P256_KEY_SIZE);
+		Xil_DCacheInvalidateRange((INTPTR)point_data, SDK_P256_POINT_SIZE);
+		if (!sdk_p256_ecdh(scalar_data, point_data, shared)) {
+			memset(shared, 0, sizeof(shared));
+			return SDK_STATUS_BAD_REQUEST;
+		}
+		memcpy(dst_data, shared, SDK_P256_SHARED_SIZE);
+		Xil_DCacheFlushRange((INTPTR)dst_data, SDK_P256_SHARED_SIZE);
+		memset(shared, 0, sizeof(shared));
+		crypto_result(result_payload, SDK_P256_SHARED_SIZE,
+		              SDK_CRYPTO_KX_P256, 0U);
+	}
+	return SDK_STATUS_OK;
+}
+
+static uint16_t crypto_verify_compute(const struct crypto_verify_params *p,
+                                      uint8_t *result_payload)
+{
+	const uint8_t *hash_data = (const uint8_t *)(uintptr_t)p->hash_addr;
+	const uint8_t *key_data = (const uint8_t *)(uintptr_t)p->key_addr;
+	const uint8_t *sig_data = (const uint8_t *)(uintptr_t)p->sig_addr;
+	uint8_t hash[SDK_SHA256_DIGEST_SIZE];
+	int verified = 0;
+
+	if (p->algorithm == SDK_CRYPTO_VERIFY_ECDSA_P256_SHA256) {
+		uint8_t pubkey[SDK_P256_ECDSA_POINT_SIZE];
+		uint8_t signature[SDK_P256_ECDSA_SIG_SIZE];
+		Xil_DCacheInvalidateRange((INTPTR)hash_data, SDK_SHA256_DIGEST_SIZE);
+		Xil_DCacheInvalidateRange((INTPTR)key_data, SDK_P256_ECDSA_POINT_SIZE);
+		Xil_DCacheInvalidateRange((INTPTR)sig_data, SDK_P256_ECDSA_SIG_SIZE);
+		memcpy(hash, hash_data, SDK_SHA256_DIGEST_SIZE);
+		memcpy(pubkey, key_data, SDK_P256_ECDSA_POINT_SIZE);
+		memcpy(signature, sig_data, SDK_P256_ECDSA_SIG_SIZE);
+		verified = sdk_ecdsa_verify_p256(pubkey, signature, hash);
+		memset(pubkey, 0, sizeof(pubkey));
+		memset(signature, 0, sizeof(signature));
+	} else {  /* SDK_CRYPTO_VERIFY_RSA_PKCS1_2048_SHA256 -- front validated */
+		uint8_t modulus[SDK_RSA_MAX_KEY_BYTES];
+		uint8_t exponent[4];
+		uint8_t signature[SDK_RSA_MAX_KEY_BYTES];
+		uint32_t mod_len = p->key_length - 4U;
+		Xil_DCacheInvalidateRange((INTPTR)hash_data, SDK_SHA256_DIGEST_SIZE);
+		Xil_DCacheInvalidateRange((INTPTR)key_data, p->key_length);
+		Xil_DCacheInvalidateRange((INTPTR)sig_data, p->sig_length);
+		memcpy(hash, hash_data, SDK_SHA256_DIGEST_SIZE);
+		memcpy(modulus, key_data, mod_len);
+		memcpy(exponent, key_data + mod_len, 4);
+		memcpy(signature, sig_data, p->sig_length);
+		verified = sdk_rsa_verify_pkcs1_sha256(modulus, mod_len, exponent,
+		                                       4U, signature, p->sig_length,
+		                                       hash);
+		memset(modulus, 0, sizeof(modulus));
+		memset(exponent, 0, sizeof(exponent));
+		memset(signature, 0, sizeof(signature));
+	}
+
+	crypto_result(result_payload, verified ? 1U : 0U, p->algorithm, 0U);
+	memset(hash, 0, sizeof(hash));
+	return SDK_STATUS_OK;
+}
+
+/*
+ * Run a crypto task's compute on the calling core. Shared by the core-1 worker
+ * and the core-0 inline/fallback path. result_payload is a 48-byte
+ * SDKCryptoResultPayload buffer; it is fully zeroed here so reserved bytes are
+ * clean regardless of which op runs.
+ */
+uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
+                                     uint8_t *result_payload)
+{
+	memset(result_payload, 0, sizeof(struct SDKCryptoResultPayload));
+	switch (opcode) {
+	case SDK_OP_CRYPTO_HASH:
+		return crypto_hash_compute(
+		    (const struct crypto_hash_params *)op_params, result_payload);
+	case SDK_OP_CRYPTO_STREAM:
+		return crypto_stream_compute(
+		    (const struct crypto_stream_params *)op_params, result_payload);
+	case SDK_OP_CRYPTO_AEAD:
+		return crypto_aead_compute(
+		    (const struct crypto_aead_params *)op_params, result_payload);
+	case SDK_OP_CRYPTO_KX:
+		return crypto_kx_compute(
+		    (const struct crypto_kx_params *)op_params, result_payload);
+	case SDK_OP_CRYPTO_VERIFY:
+		return crypto_verify_compute(
+		    (const struct crypto_verify_params *)op_params, result_payload);
+	default:
+		return SDK_STATUS_UNSUPPORTED;
+	}
+}
+
+/*
+ * Front dispatch helper. Phase 1 (T11) runs the compute inline on core 0 so
+ * behaviour is identical to the pre-scheduler firmware; T13 switches this to
+ * enqueue-or-inline.
+ */
+static uint16_t crypto_dispatch(uint16_t opcode,
+                                volatile struct SDKMailboxEntry *req,
+                                volatile struct SDKMailboxEntry *comp,
+                                const void *params)
+{
+	uint8_t result_payload[sizeof(struct SDKCryptoResultPayload)];
+	uint16_t status = sdk_mailbox_run_crypto_task(opcode, params,
+	                                               result_payload);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+	write_completion(comp, req, SDK_STATUS_OK,
+	                 sizeof(struct SDKCryptoResultPayload));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	memcpy((void *)comp->payload, result_payload,
+	       sizeof(struct SDKCryptoResultPayload));
+	return SDK_STATUS_OK;
+}
+
 static uint16_t handle_crypto_hash(volatile struct SDKMailboxEntry *req,
                                    volatile struct SDKMailboxEntry *comp,
                                    uint16_t payload_len)
 {
 	volatile struct SDKCryptoHashPayload *payload;
-	volatile struct SDKCryptoResultPayload *result;
 	struct SDKSharedBuffer *src;
 	struct SDKSharedBuffer *dst;
 	struct SDKSharedBuffer *key;
+	struct crypto_hash_params hp;
 	uint32_t src_offset;
 	uint32_t src_length;
 	uint32_t dst_offset;
@@ -3065,9 +3390,6 @@ static uint16_t handle_crypto_hash(volatile struct SDKMailboxEntry *req,
 	uint32_t flags;
 	uint32_t key_required;
 	uint16_t digest_length;
-	uint8_t digest[SDK_SHA256_DIGEST_SIZE];
-	const uint8_t *src_data;
-	const uint8_t *key_data;
 
 	if (payload_len < 40U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -3118,39 +3440,15 @@ static uint16_t handle_crypto_hash(volatile struct SDKMailboxEntry *req,
 		}
 	}
 
-	src_data = (const uint8_t *)(uintptr_t)(src->address + src_offset);
-	Xil_DCacheInvalidateRange((INTPTR)src_data, src_length);
-	if (key_required) {
-		key_data = (const uint8_t *)(uintptr_t)(key->address + key_offset);
-		Xil_DCacheInvalidateRange((INTPTR)key_data, key_length);
-		if (algorithm == SDK_CRYPTO_HASH_POLY1305)
-			sdk_poly1305(key_data, src_data, src_length, digest);
-		else if (algorithm == SDK_CRYPTO_HASH_SHA1)
-			sdk_hmac_sha1(key_data, key_length, src_data, src_length,
-			              digest);
-		else
-			sdk_hmac_sha256(key_data, key_length, src_data, src_length,
-			                digest);
-	} else {
-		if (algorithm == SDK_CRYPTO_HASH_SHA1)
-			sdk_sha1(src_data, src_length, digest);
-		else
-			sdk_sha256(src_data, src_length, digest);
-	}
-
-	memcpy((void *)(uintptr_t)(dst->address + dst_offset),
-	       digest, digest_length);
-	Xil_DCacheFlushRange((INTPTR)(dst->address + dst_offset),
-	                     digest_length);
-
-	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
-	memset((void *)comp->payload, 0, sizeof(comp->payload));
-	result = (volatile struct SDKCryptoResultPayload *)comp->payload;
-	put_be32(result->bytes_written, digest_length);
-	put_be32(result->algorithm, algorithm);
-	put_be32(result->flags, flags);
-	memset(digest, 0, sizeof(digest));
-	return SDK_STATUS_OK;
+	hp.algorithm = algorithm;
+	hp.flags = flags;
+	hp.src_addr = src->address + src_offset;
+	hp.src_length = src_length;
+	hp.key_addr = key_required ? (key->address + key_offset) : 0U;
+	hp.key_length = key_length;
+	hp.dst_addr = dst->address + dst_offset;
+	hp.digest_length = digest_length;
+	return crypto_dispatch(SDK_OP_CRYPTO_HASH, req, comp, &hp);
 }
 
 static uint16_t handle_crypto_stream(volatile struct SDKMailboxEntry *req,
@@ -3158,11 +3456,11 @@ static uint16_t handle_crypto_stream(volatile struct SDKMailboxEntry *req,
                                      uint16_t payload_len)
 {
 	volatile struct SDKCryptoStreamPayload *payload;
-	volatile struct SDKCryptoResultPayload *result;
 	struct SDKSharedBuffer *src;
 	struct SDKSharedBuffer *dst;
 	struct SDKSharedBuffer *key;
 	struct SDKSharedBuffer *nonce;
+	struct crypto_stream_params sp;
 	uint32_t src_offset;
 	uint32_t src_length;
 	uint32_t dst_offset;
@@ -3171,10 +3469,6 @@ static uint16_t handle_crypto_stream(volatile struct SDKMailboxEntry *req,
 	uint32_t counter;
 	uint32_t algorithm;
 	uint32_t flags;
-	const uint8_t *src_data;
-	const uint8_t *key_data;
-	const uint8_t *nonce_data;
-	uint8_t *dst_data;
 
 	if (payload_len < sizeof(struct SDKCryptoStreamPayload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -3206,25 +3500,15 @@ static uint16_t handle_crypto_stream(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	}
 
-	src_data = (const uint8_t *)(uintptr_t)(src->address + src_offset);
-	dst_data = (uint8_t *)(uintptr_t)(dst->address + dst_offset);
-	key_data = (const uint8_t *)(uintptr_t)(key->address + key_offset);
-	nonce_data = (const uint8_t *)(uintptr_t)(nonce->address + nonce_offset);
-	Xil_DCacheInvalidateRange((INTPTR)src_data, src_length);
-	Xil_DCacheInvalidateRange((INTPTR)key_data, SDK_CHACHA20_KEY_SIZE);
-	Xil_DCacheInvalidateRange((INTPTR)nonce_data, SDK_CHACHA20_NONCE_SIZE);
-
-	sdk_chacha20_xor(key_data, nonce_data, counter,
-	                 src_data, dst_data, src_length);
-	Xil_DCacheFlushRange((INTPTR)dst_data, src_length);
-
-	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
-	memset((void *)comp->payload, 0, sizeof(comp->payload));
-	result = (volatile struct SDKCryptoResultPayload *)comp->payload;
-	put_be32(result->bytes_written, src_length);
-	put_be32(result->algorithm, algorithm);
-	put_be32(result->flags, flags);
-	return SDK_STATUS_OK;
+	(void)flags;
+	sp.algorithm = algorithm;
+	sp.src_addr = src->address + src_offset;
+	sp.src_length = src_length;
+	sp.key_addr = key->address + key_offset;
+	sp.nonce_addr = nonce->address + nonce_offset;
+	sp.counter = counter;
+	sp.dst_addr = dst->address + dst_offset;
+	return crypto_dispatch(SDK_OP_CRYPTO_STREAM, req, comp, &sp);
 }
 
 static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
@@ -3232,12 +3516,12 @@ static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
                                    uint16_t payload_len)
 {
 	volatile struct SDKCryptoAeadPayload *payload;
-	volatile struct SDKCryptoResultPayload *result;
 	struct SDKSharedBuffer *src;
 	struct SDKSharedBuffer *dst;
 	struct SDKSharedBuffer *aad;
 	struct SDKSharedBuffer *key;
 	struct SDKSharedBuffer *nonce;
+	struct crypto_aead_params ap;
 	uint32_t src_offset;
 	uint32_t src_length;
 	uint32_t src_total;
@@ -3248,12 +3532,6 @@ static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
 	uint32_t flags;
 	uint32_t algorithm;
 	uint32_t key_size;
-	const uint8_t *src_data;
-	const uint8_t *aad_data;
-	const uint8_t *key_data;
-	const uint8_t *nonce_data;
-	uint8_t *dst_data;
-	uint8_t tag[SDK_POLY1305_TAG_SIZE];
 
 	if (payload_len < sizeof(struct SDKCryptoAeadPayload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -3313,67 +3591,24 @@ static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
 	}
 
 	aad = 0;
-	aad_data = 0;
 	if (aad_length != 0U) {
 		aad = find_shared_buffer(get_be32(payload->aad_handle));
 		if (!buffer_range_valid(aad, aad_offset, aad_length))
 			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-		aad_data = (const uint8_t *)(uintptr_t)(aad->address + aad_offset);
 	}
 
-	src_data = (const uint8_t *)(uintptr_t)(src->address + src_offset);
-	dst_data = (uint8_t *)(uintptr_t)(dst->address + dst_offset);
-	key_data = (const uint8_t *)(uintptr_t)(key->address + key_offset);
-	nonce_data = (const uint8_t *)(uintptr_t)nonce->address;
-	Xil_DCacheInvalidateRange((INTPTR)src_data, src_total);
-	if (aad_length != 0U)
-		Xil_DCacheInvalidateRange((INTPTR)aad_data, aad_length);
-	Xil_DCacheInvalidateRange((INTPTR)key_data, key_size);
-	Xil_DCacheInvalidateRange((INTPTR)nonce_data, SDK_AES_GCM_NONCE_SIZE);
-
-	if ((flags & SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0) {
-		int ok;
-		if (algorithm == SDK_CRYPTO_AEAD_CHACHA20_POLY1305) {
-			ok = sdk_chacha20_poly1305_decrypt(
-			    key_data, nonce_data, aad_data, aad_length,
-			    src_data, src_length,
-			    src_data + src_length, dst_data);
-		} else {
-			ok = sdk_aes_gcm_decrypt(
-			    key_data, key_size, nonce_data, aad_data, aad_length,
-			    src_data, src_length,
-			    src_data + src_length, dst_data);
-		}
-		if (!ok)
-			return complete_status(req, comp, SDK_STATUS_IO_ERROR);
-		Xil_DCacheFlushRange((INTPTR)dst_data, src_length);
-	} else {
-		if (algorithm == SDK_CRYPTO_AEAD_CHACHA20_POLY1305) {
-			sdk_chacha20_poly1305_encrypt(key_data, nonce_data,
-			                              aad_data, aad_length,
-			                              src_data, src_length,
-			                              dst_data, tag);
-		} else {
-			sdk_aes_gcm_encrypt(key_data, key_size, nonce_data,
-			                    aad_data, aad_length,
-			                    src_data, src_length,
-			                    dst_data, tag);
-		}
-		memcpy(dst_data + src_length, tag, sizeof(tag));
-		Xil_DCacheFlushRange((INTPTR)dst_data,
-		                     src_length + SDK_AES_GCM_TAG_SIZE);
-	}
-
-	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
-	memset((void *)comp->payload, 0, sizeof(comp->payload));
-	result = (volatile struct SDKCryptoResultPayload *)comp->payload;
-	put_be32(result->bytes_written,
-	         (flags & SDK_CRYPTO_AEAD_FLAG_DECRYPT) != 0 ?
-	         src_length : src_length + SDK_AES_GCM_TAG_SIZE);
-	put_be32(result->algorithm, algorithm);
-	put_be32(result->flags, flags);
-	memset(tag, 0, sizeof(tag));
-	return SDK_STATUS_OK;
+	ap.algorithm = algorithm;
+	ap.flags = flags;
+	ap.src_addr = src->address + src_offset;
+	ap.src_length = src_length;
+	ap.src_total = src_total;
+	ap.dst_addr = dst->address + dst_offset;
+	ap.key_addr = key->address + key_offset;
+	ap.key_size = key_size;
+	ap.nonce_addr = nonce->address;
+	ap.aad_addr = (aad_length != 0U) ? (aad->address + aad_offset) : 0U;
+	ap.aad_length = aad_length;
+	return crypto_dispatch(SDK_OP_CRYPTO_AEAD, req, comp, &ap);
 }
 
 static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
@@ -3381,14 +3616,10 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
                                   uint16_t payload_len)
 {
 	volatile struct SDKCryptoKXPayload *p;
-	volatile struct SDKCryptoResultPayload *result;
 	struct SDKSharedBuffer *scalar;
 	struct SDKSharedBuffer *point;
 	struct SDKSharedBuffer *dst;
-	const uint8_t *scalar_data;
-	const uint8_t *point_data;
-	uint8_t *dst_data;
-	uint8_t shared[SDK_P256_SHARED_SIZE];  /* max shared secret size */
+	struct crypto_kx_params kp;
 	uint32_t algorithm;
 	uint32_t flags;
 	uint32_t scalar_off;
@@ -3412,70 +3643,24 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 	dst_off    = get_be32(p->dst_offset);
 
 	if (algorithm == SDK_CRYPTO_KX_X25519) {
-		uint8_t xshared[SDK_X25519_SHARED_SIZE];
-
 		if (!buffer_range_valid(scalar, scalar_off, SDK_X25519_KEY_SIZE)   ||
 		    !buffer_range_valid(point,  point_off,  SDK_X25519_POINT_SIZE) ||
 		    !buffer_range_valid(dst,    dst_off,    SDK_X25519_SHARED_SIZE))
 			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-
-		scalar_data = (const uint8_t *)(uintptr_t)(scalar->address + scalar_off);
-		point_data  = (const uint8_t *)(uintptr_t)(point->address  + point_off);
-		dst_data    = (uint8_t *)(uintptr_t)(dst->address + dst_off);
-
-		Xil_DCacheInvalidateRange((INTPTR)scalar_data, SDK_X25519_KEY_SIZE);
-		Xil_DCacheInvalidateRange((INTPTR)point_data,  SDK_X25519_POINT_SIZE);
-
-		if (!sdk_x25519(scalar_data, point_data, xshared)) {
-			memset(xshared, 0, sizeof(xshared));
-			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-		}
-
-		memcpy(dst_data, xshared, SDK_X25519_SHARED_SIZE);
-		Xil_DCacheFlushRange((INTPTR)dst_data, SDK_X25519_SHARED_SIZE);
-		memset(xshared, 0, sizeof(xshared));  /* scrub stack copy */
-
-		write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
-		memset((void *)comp->payload, 0, sizeof(comp->payload));
-		result = (volatile struct SDKCryptoResultPayload *)comp->payload;
-		put_be32(result->bytes_written, SDK_X25519_SHARED_SIZE);
-		put_be32(result->algorithm, SDK_CRYPTO_KX_X25519);
-		put_be32(result->flags, 0U);
-		return SDK_STATUS_OK;
-
 	} else if (algorithm == SDK_CRYPTO_KX_P256) {
 		if (!buffer_range_valid(scalar, scalar_off, SDK_P256_KEY_SIZE)   ||
 		    !buffer_range_valid(point,  point_off,  SDK_P256_POINT_SIZE) ||
 		    !buffer_range_valid(dst,    dst_off,    SDK_P256_SHARED_SIZE))
 			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-
-		scalar_data = (const uint8_t *)(uintptr_t)(scalar->address + scalar_off);
-		point_data  = (const uint8_t *)(uintptr_t)(point->address  + point_off);
-		dst_data    = (uint8_t *)(uintptr_t)(dst->address + dst_off);
-
-		Xil_DCacheInvalidateRange((INTPTR)scalar_data, SDK_P256_KEY_SIZE);
-		Xil_DCacheInvalidateRange((INTPTR)point_data,  SDK_P256_POINT_SIZE);
-
-		if (!sdk_p256_ecdh(scalar_data, point_data, shared)) {
-			memset(shared, 0, sizeof(shared));
-			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-		}
-
-		memcpy(dst_data, shared, SDK_P256_SHARED_SIZE);
-		Xil_DCacheFlushRange((INTPTR)dst_data, SDK_P256_SHARED_SIZE);
-		memset(shared, 0, sizeof(shared));  /* scrub stack copy */
-
-		write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
-		memset((void *)comp->payload, 0, sizeof(comp->payload));
-		result = (volatile struct SDKCryptoResultPayload *)comp->payload;
-		put_be32(result->bytes_written, SDK_P256_SHARED_SIZE);
-		put_be32(result->algorithm, SDK_CRYPTO_KX_P256);
-		put_be32(result->flags, 0U);
-		return SDK_STATUS_OK;
-
 	} else {
-        return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-    }
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	}
+
+	kp.algorithm = algorithm;
+	kp.scalar_addr = scalar->address + scalar_off;
+	kp.point_addr  = point->address + point_off;
+	kp.dst_addr    = dst->address + dst_off;
+	return crypto_dispatch(SDK_OP_CRYPTO_KX, req, comp, &kp);
 }
 
 static uint16_t handle_crypto_verify(volatile struct SDKMailboxEntry *req,
@@ -3483,19 +3668,14 @@ static uint16_t handle_crypto_verify(volatile struct SDKMailboxEntry *req,
                                      uint16_t payload_len)
 {
 	volatile struct SDKCryptoVerifyPayload *p;
-	volatile struct SDKCryptoResultPayload *result;
 	struct SDKSharedBuffer *hash_buf;
 	struct SDKSharedBuffer *sig_buf;
 	struct SDKSharedBuffer *key_buf;
-	const uint8_t *hash_data;
-	const uint8_t *sig_data;
-	const uint8_t *key_data;
-	uint8_t hash[SDK_SHA256_DIGEST_SIZE];
+	struct crypto_verify_params vp;
 	uint32_t algorithm;
 	uint32_t hash_off;
 	uint32_t sig_off;
 	uint32_t key_off;
-	int verified = 0;
 
 	if (payload_len < sizeof(struct SDKCryptoVerifyPayload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -3513,37 +3693,22 @@ static uint16_t handle_crypto_verify(volatile struct SDKMailboxEntry *req,
 	/* The caller supplies a precomputed 32-byte SHA-256 digest. */
 	if (!buffer_range_valid(hash_buf, hash_off, SDK_SHA256_DIGEST_SIZE))
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-	hash_data = (const uint8_t *)(uintptr_t)(hash_buf->address + hash_off);
+
+	vp.algorithm = algorithm;
+	vp.hash_addr = hash_buf->address + hash_off;
 
 	if (algorithm == SDK_CRYPTO_VERIFY_ECDSA_P256_SHA256) {
-		uint8_t pubkey[SDK_P256_ECDSA_POINT_SIZE];
-		uint8_t signature[SDK_P256_ECDSA_SIG_SIZE];
-
 		/* key buffer = 65-byte uncompressed point, signature = raw r||s. */
 		if (!buffer_range_valid(key_buf, key_off, SDK_P256_ECDSA_POINT_SIZE) ||
 		    !buffer_range_valid(sig_buf, sig_off, SDK_P256_ECDSA_SIG_SIZE))
 			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 
-		key_data = (const uint8_t *)(uintptr_t)(key_buf->address + key_off);
-		sig_data = (const uint8_t *)(uintptr_t)(sig_buf->address + sig_off);
-
-		Xil_DCacheInvalidateRange((INTPTR)hash_data, SDK_SHA256_DIGEST_SIZE);
-		Xil_DCacheInvalidateRange((INTPTR)key_data,  SDK_P256_ECDSA_POINT_SIZE);
-		Xil_DCacheInvalidateRange((INTPTR)sig_data,  SDK_P256_ECDSA_SIG_SIZE);
-
-		memcpy(hash, hash_data, SDK_SHA256_DIGEST_SIZE);
-		memcpy(pubkey, key_data, SDK_P256_ECDSA_POINT_SIZE);
-		memcpy(signature, sig_data, SDK_P256_ECDSA_SIG_SIZE);
-
-		verified = sdk_ecdsa_verify_p256(pubkey, signature, hash);
-
-		memset(pubkey, 0, sizeof(pubkey));
-		memset(signature, 0, sizeof(signature));
+		vp.key_addr = key_buf->address + key_off;
+		vp.key_length = SDK_P256_ECDSA_POINT_SIZE;
+		vp.sig_addr = sig_buf->address + sig_off;
+		vp.sig_length = SDK_P256_ECDSA_SIG_SIZE;
 
 	} else if (algorithm == SDK_CRYPTO_VERIFY_RSA_PKCS1_2048_SHA256) {
-		uint8_t modulus[SDK_RSA_MAX_KEY_BYTES];
-		uint8_t exponent[4];
-		uint8_t signature[SDK_RSA_MAX_KEY_BYTES];
 		uint32_t key_len = get_be32(p->key_length);
 		uint32_t sig_len = get_be32(p->sig_length);
 		uint32_t mod_len;
@@ -3560,38 +3725,16 @@ static uint16_t handle_crypto_verify(volatile struct SDKMailboxEntry *req,
 		    !buffer_range_valid(sig_buf, sig_off, sig_len))
 			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 
-		key_data = (const uint8_t *)(uintptr_t)(key_buf->address + key_off);
-		sig_data = (const uint8_t *)(uintptr_t)(sig_buf->address + sig_off);
-
-		Xil_DCacheInvalidateRange((INTPTR)hash_data, SDK_SHA256_DIGEST_SIZE);
-		Xil_DCacheInvalidateRange((INTPTR)key_data, key_len);
-		Xil_DCacheInvalidateRange((INTPTR)sig_data, sig_len);
-
-		memcpy(hash, hash_data, SDK_SHA256_DIGEST_SIZE);
-		memcpy(modulus, key_data, mod_len);
-		memcpy(exponent, key_data + mod_len, 4);
-		memcpy(signature, sig_data, sig_len);
-
-		verified = sdk_rsa_verify_pkcs1_sha256(modulus, mod_len, exponent, 4U,
-		                                       signature, sig_len, hash);
-
-		memset(modulus, 0, sizeof(modulus));
-		memset(exponent, 0, sizeof(exponent));
-		memset(signature, 0, sizeof(signature));
+		vp.key_addr = key_buf->address + key_off;
+		vp.key_length = key_len;
+		vp.sig_addr = sig_buf->address + sig_off;
+		vp.sig_length = sig_len;
 
 	} else {
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	}
 
-	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
-	memset((void *)comp->payload, 0, sizeof(comp->payload));
-	result = (volatile struct SDKCryptoResultPayload *)comp->payload;
-	put_be32(result->bytes_written, verified ? 1U : 0U);
-	put_be32(result->algorithm, algorithm);
-	put_be32(result->flags, 0U);
-
-	memset(hash, 0, sizeof(hash));
-	return SDK_STATUS_OK;
+	return crypto_dispatch(SDK_OP_CRYPTO_VERIFY, req, comp, &vp);
 }
 
 static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,

@@ -314,4 +314,15 @@ void sdk_mailbox_task(void);
 uint16_t sdk_mailbox_status(void);
 uint32_t sdk_mailbox_address(void);
 
+/*
+ * Run a crypto task's compute on the calling core. op_params points at one of
+ * the crypto_*_params structs packed by the core-0 fronts; result_payload is a
+ * 48-byte SDKCryptoResultPayload buffer written by the compute. Returns an
+ * SDK_STATUS_* code. Shared by the dual-core scheduler's core-1 worker and the
+ * core-0 inline/fallback path (see scheduler.h). Cache maintenance for the data
+ * buffers is done inside, on whichever core runs it.
+ */
+uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
+                                     uint8_t *result_payload);
+
 #endif /* SDK_MAILBOX_H */
