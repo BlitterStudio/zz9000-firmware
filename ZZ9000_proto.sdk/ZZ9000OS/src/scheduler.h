@@ -106,4 +106,10 @@ int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired);
 extern int taskq_test_force_cas_fail;  /* >0: force the next N CAS calls to fail */
 #endif
 
+#ifndef TASKQ_HOST_TEST
+/* ARM-only glue (scheduler_arm.c). Not visible to the host test build. */
+void scheduler_coherency_init_core0(void); /* core 0: mark region shareable */
+void scheduler_coherency_init_core1(void); /* core 1: full MMU/cache/SMP bring-up */
+#endif
+
 #endif /* ZZ9K_SCHEDULER_H */

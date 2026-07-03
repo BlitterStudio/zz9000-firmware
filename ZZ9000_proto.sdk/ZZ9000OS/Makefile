@@ -102,6 +102,8 @@ C_SRCS = \
 	$(SRC_DIR)/codec47.c \
 	$(SRC_DIR)/compression.c \
 	$(SRC_DIR)/core2.c \
+	$(SRC_DIR)/scheduler.c \
+	$(SRC_DIR)/scheduler_arm.c \
 	$(SRC_DIR)/dma_acc.c \
 	$(SRC_DIR)/dma_rtg.c \
 	$(SRC_DIR)/usb.c \

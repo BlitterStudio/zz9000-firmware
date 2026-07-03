@@ -51,6 +51,7 @@ void Xil_AssertNonVoid() {}
 #include "interrupt.h"
 #include "bootrom.h"
 #include "core2.h"
+#include "scheduler.h"
 #include "adc.h"
 #include "ax.h"
 #include "watchdog.h"
@@ -341,6 +342,11 @@ int main() {
 #else
 	handle_amiga_reset(AMIGA_RESET_INIT_MEDIA);
 #endif
+
+	// Mark the task-queue region shareable-cacheable in the shared MMU table
+	// before core 1 starts, so the SCU keeps it coherent once core 1 brings up
+	// its own MMU/D-cache. Must precede arm_app_init() (which launches core 1).
+	scheduler_coherency_init_core0();
 
 	// ARM app run environment
 	arm_app_init();

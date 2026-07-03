@@ -6,6 +6,7 @@
 #include "xil_misc_psreset_api.h"
 #include "core2.h"
 #include "sleep.h"
+#include "scheduler.h"
 
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
@@ -130,6 +131,11 @@ void core1_loop() {
 	volatile uint32_t* addr = 0;
 	addr[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
 	addr[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
+
+	// Bring core 1 up to MMU + D-cache + SMP so the dual-core task scheduler's
+	// cross-core LDREX/STREX and SCU coherency work (core 0 marked the
+	// task-queue region shareable at boot, before this core started).
+	scheduler_coherency_init_core1();
 
 	while (1) {
 		while (!core2_execute) {
