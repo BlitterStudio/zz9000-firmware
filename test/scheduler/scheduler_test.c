@@ -127,6 +127,59 @@ static void test_claim_short_skips_long(void)
   expect_u32("claim_short_left_long", q.descs[0].state, TASK_QUEUED);
 }
 
+static void test_complete_sets_done_and_payload(void)
+{
+  taskq_t q;
+  uint8_t pay[3] = {7, 8, 9};
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
+  (void)taskq_claim_any(&q);
+  taskq_complete(&q, 0, 0 /*OK*/, pay, 3);
+  expect_u32("done_state", q.descs[0].state, TASK_DONE);
+  expect_u32("done_len", q.descs[0].result_len, 3u);
+  expect_u32("done_pay1", q.descs[0].result_payload[1], 8u);
+}
+
+static void test_complete_clamps_payload(void)
+{
+  taskq_t q;
+  uint8_t big[64];
+  uint32_t i;
+  taskq_init(&q);
+  for (i = 0; i < 64; i++) big[i] = (uint8_t)i;
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
+  (void)taskq_claim_any(&q);
+  taskq_complete(&q, 0, 0, big, 64);
+  expect_u32("clamp_len", q.descs[0].result_len, TASKQ_RESULT_PAYLOAD);
+}
+
+static void test_fail_sets_failed(void)
+{
+  taskq_t q;
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
+  (void)taskq_claim_any(&q);
+  taskq_fail(&q, 0, 5 /*err*/);
+  expect_u32("fail_state", q.descs[0].state, TASK_FAILED);
+  expect_u32("fail_status", q.descs[0].result_status, 5u);
+}
+
+static void test_harvest_finds_done_then_release(void)
+{
+  taskq_t q;
+  int h;
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
+  expect_int("harvest_none", taskq_harvest(&q), -1);
+  (void)taskq_claim_any(&q);
+  taskq_complete(&q, 0, 0, 0, 0);
+  h = taskq_harvest(&q);
+  expect_int("harvest_slot0", h, 0);
+  taskq_release(&q, 0);
+  expect_u32("release_free", q.descs[0].state, TASK_FREE);
+  expect_int("harvest_after_release", taskq_harvest(&q), -1);
+}
+
 int main(void)
 {
   test_stress_fill_is_deterministic();
@@ -139,6 +192,10 @@ int main(void)
   test_two_claims_never_collide();
   test_claim_advances_past_lost_cas();
   test_claim_short_skips_long();
+  test_complete_sets_done_and_payload();
+  test_complete_clamps_payload();
+  test_fail_sets_failed();
+  test_harvest_finds_done_then_release();
 
   if (failures) {
     printf("scheduler_test: %d failure(s)\n", failures);

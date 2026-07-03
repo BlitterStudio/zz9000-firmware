@@ -142,3 +142,44 @@ int taskq_claim_short(taskq_t *q)
   }
   return -1;
 }
+
+/* ---- completion transitions ---- */
+void taskq_complete(taskq_t *q, int slot, uint16_t status,
+                    const uint8_t *payload, uint16_t payload_len)
+{
+  taskq_desc_t *d = &q->descs[slot];
+  uint16_t n = payload_len > TASKQ_RESULT_PAYLOAD ? TASKQ_RESULT_PAYLOAD
+                                                  : payload_len;
+  uint16_t k;
+  d->result_status = status;
+  d->result_len = n;
+  for (k = 0; k < n; k++) {
+    d->result_payload[k] = payload ? payload[k] : 0;
+  }
+  taskq_store_release(&d->state, TASK_DONE);
+}
+
+void taskq_fail(taskq_t *q, int slot, uint16_t status)
+{
+  taskq_desc_t *d = &q->descs[slot];
+  d->result_status = status;
+  d->result_len = 0;
+  taskq_store_release(&d->state, TASK_FAILED);
+}
+
+int taskq_harvest(taskq_t *q)
+{
+  uint32_t i;
+  for (i = 0; i < TASKQ_CAPACITY; i++) {
+    uint32_t st = q->descs[i].state;
+    if (st == TASK_DONE || st == TASK_FAILED) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+void taskq_release(taskq_t *q, int slot)
+{
+  taskq_store_release(&q->descs[slot].state, TASK_FREE);
+}
