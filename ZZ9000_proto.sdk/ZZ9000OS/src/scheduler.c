@@ -114,3 +114,31 @@ int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
   }
   return -1;
 }
+
+/* ---- atomic claim (consumer): CAS QUEUED -> CLAIMED ---- */
+int taskq_claim_any(taskq_t *q)
+{
+  uint32_t i;
+  for (i = 0; i < TASKQ_CAPACITY; i++) {
+    volatile uint32_t *s = &q->descs[i].state;
+    if (*s == TASK_QUEUED && taskq_cas_u32(s, TASK_QUEUED, TASK_CLAIMED)) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+int taskq_claim_short(taskq_t *q)
+{
+  uint32_t i;
+  for (i = 0; i < TASKQ_CAPACITY; i++) {
+    if (q->descs[i].state == TASK_QUEUED &&
+        q->descs[i].cls == (uint32_t)TASK_SHORT) {
+      volatile uint32_t *s = &q->descs[i].state;
+      if (taskq_cas_u32(s, TASK_QUEUED, TASK_CLAIMED)) {
+        return (int)i;
+      }
+    }
+  }
+  return -1;
+}

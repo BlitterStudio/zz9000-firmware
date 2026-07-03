@@ -78,6 +78,55 @@ static void test_enqueue_full_returns_minus1(void)
   expect_int("enq_full", s, -1);
 }
 
+static void test_claim_any_returns_queued_and_marks_claimed(void)
+{
+  taskq_t q;
+  int s;
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
+  s = taskq_claim_any(&q);
+  expect_int("claim_slot0", s, 0);
+  expect_u32("claim_state", q.descs[0].state, TASK_CLAIMED);
+  expect_int("claim_again_empty", taskq_claim_any(&q), -1);
+}
+
+static void test_two_claims_never_collide(void)
+{
+  taskq_t q;
+  int a, b;
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 2, 2);
+  a = taskq_claim_any(&q);
+  b = taskq_claim_any(&q);
+  if (a == b) { printf("claim_collision %d\n", a); failures++; }
+}
+
+static void test_claim_advances_past_lost_cas(void)
+{
+  taskq_t q;
+  int s;
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1); /* slot0 */
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 2, 2); /* slot1 */
+  taskq_test_force_cas_fail = 1;    /* lose the race on the first CAS (slot0) */
+  s = taskq_claim_any(&q);
+  expect_int("claim_after_lost", s, 1);
+  taskq_test_force_cas_fail = 0;
+}
+
+static void test_claim_short_skips_long(void)
+{
+  taskq_t q;
+  int s;
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_AEAD, TASK_LONG, 0, 8192, 0, 0, 1, 1); /* slot0 LONG */
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 2, 2);     /* slot1 SHORT */
+  s = taskq_claim_short(&q);
+  expect_int("claim_short_slot1", s, 1);
+  expect_u32("claim_short_left_long", q.descs[0].state, TASK_QUEUED);
+}
+
 int main(void)
 {
   test_stress_fill_is_deterministic();
@@ -86,6 +135,10 @@ int main(void)
   test_init_marks_all_free();
   test_enqueue_fills_and_queues();
   test_enqueue_full_returns_minus1();
+  test_claim_any_returns_queued_and_marks_claimed();
+  test_two_claims_never_collide();
+  test_claim_advances_past_lost_cas();
+  test_claim_short_skips_long();
 
   if (failures) {
     printf("scheduler_test: %d failure(s)\n", failures);
