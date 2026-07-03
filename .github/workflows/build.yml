@@ -44,6 +44,8 @@ jobs:
         run: make -C test/rtg test
       - name: Firmware-file restore suite
         run: make -C test/fwupdate test
+      - name: Scheduler host tests
+        run: make -C test/scheduler test
 
   build:
     name: Build & package firmware

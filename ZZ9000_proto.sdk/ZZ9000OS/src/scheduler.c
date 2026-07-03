@@ -1,0 +1,67 @@
+/*
+ * ZZ9000 dual-core task scheduler -- portable core.
+ * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Host-testable: contains NO xil_ or firmware includes. The ARM build gets the
+ * real LDREX/STREX compare-swap and a dmb-release store from the #else branch;
+ * the host test build (-DTASKQ_HOST_TEST) gets an injectable single-threaded
+ * model so the claim-race path is exercisable deterministically.
+ */
+#include "scheduler.h"
+
+/* ---- atomic primitive seam ---- */
+#ifdef TASKQ_HOST_TEST
+int taskq_test_force_cas_fail = 0;
+
+int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired)
+{
+  if (taskq_test_force_cas_fail > 0) {
+    taskq_test_force_cas_fail--;
+    return 0;                       /* simulate losing the exclusive access */
+  }
+  if (*p == expected) {
+    *p = desired;
+    return 1;
+  }
+  return 0;
+}
+#else
+int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired)
+{
+  uint32_t old, ok;
+  __asm__ __volatile__(
+    "1: ldrex %0, [%2]\n"
+    "   cmp   %0, %3\n"
+    "   bne   2f\n"
+    "   strex %1, %4, [%2]\n"
+    "   cmp   %1, #0\n"
+    "   bne   1b\n"
+    "   dmb   ish\n"
+    "   mov   %1, #1\n"
+    "   b     3f\n"
+    "2: clrex\n"
+    "   mov   %1, #0\n"
+    "3:\n"
+    : "=&r"(old), "=&r"(ok)
+    : "r"(p), "r"(expected), "r"(desired)
+    : "cc", "memory");
+  (void)old;
+  return (int)ok;
+}
+#endif
+
+/* ---- coherency stress model (used by the Phase 0 two-core torture harness) ---- */
+uint32_t taskq_stress_fill(uint32_t seed, uint32_t index)
+{
+  uint32_t x = seed ^ (index * 2654435761u);
+  x ^= x >> 15;
+  x *= 2246822519u;
+  x ^= x >> 13;
+  return x;
+}
+
+int taskq_stress_check(uint32_t seed, uint32_t index, uint32_t value)
+{
+  return taskq_stress_fill(seed, index) == value ? 1 : 0;
+}
