@@ -64,6 +64,28 @@
 #error "SDK ARM-local heap exceeds low DDR reservation"
 #endif
 
+// Dual-core scheduler task-queue control region. A small SCU-coherent slab in
+// the otherwise-unclaimed 0x18000000..0x30000000 hole -- above the
+// linker-managed DDR (ps7_ddr_hi ends at 0x18000000) and below the codec
+// scratch buffers at 0x30000000. Holds the taskq_shared_t control block only;
+// crypto data buffers stay in SDK_SHARED_HEAP with core-0 cache management.
+#define SDK_TASKQ_REGION_ADDRESS    0x18000000
+#define SDK_TASKQ_REGION_SIZE       0x00100000     // 1 MB (one MMU section)
+#define SDK_TASKQ_REGION_END \
+    (SDK_TASKQ_REGION_ADDRESS + SDK_TASKQ_REGION_SIZE)
+
+#if SDK_TASKQ_REGION_ADDRESS < 0x18000000
+#error "task-queue region must sit above the linker-managed DDR (ends 0x18000000)"
+#endif
+#if defined(SDK_JEDI_REGION_ADDRESS)
+#if SDK_TASKQ_REGION_ADDRESS < (SDK_JEDI_REGION_ADDRESS + SDK_JEDI_REGION_SIZE)
+#error "task-queue region overlaps the JEDI region"
+#endif
+#endif
+#if SDK_TASKQ_REGION_END > 0x30000000
+#error "task-queue region overlaps codec scratch at 0x30000000"
+#endif
+
 // SDK v2 bootstrap mailbox. The Amiga side reaches this through the existing
 // board window at 0xd000, inside the legacy 0xa000..0xffff shared I/O buffer.
 #define SDK_MAILBOX_WINDOW_OFFSET   0x0000D000
