@@ -3355,18 +3355,43 @@ uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
 }
 
 /*
- * Front dispatch helper. Phase 1 (T11) runs the compute inline on core 0 so
- * behaviour is identical to the pre-scheduler firmware; T13 switches this to
- * enqueue-or-inline.
+ * Front dispatch helper. When core 1 is available, enqueue the task and defer
+ * the completion (return SDK_STATUS_QUEUED); sdk_mailbox_task then consumes the
+ * request without posting a completion, and scheduler_core0_poll posts it when
+ * the worker finishes. Otherwise -- single-core fallback, or a full queue --
+ * compute inline on core 0 and post the completion now, byte-identically to the
+ * pre-scheduler firmware.
+ *
+ * in_len is the input data length, used only to classify the task SHORT/LONG
+ * (KX/VERIFY are always SHORT and ignore it). Crypto tasks carry their resolved
+ * card-DDR addresses inside op_params, so the descriptor's in_addr/out_addr/
+ * out_cap fields are unused for the crypto opcode class and passed as 0.
  */
-static uint16_t crypto_dispatch(uint16_t opcode,
+static uint16_t crypto_dispatch(uint16_t opcode, uint32_t in_len,
                                 volatile struct SDKMailboxEntry *req,
                                 volatile struct SDKMailboxEntry *comp,
                                 const void *params)
 {
 	uint8_t result_payload[sizeof(struct SDKCryptoResultPayload)];
-	uint16_t status = sdk_mailbox_run_crypto_task(opcode, params,
-	                                               result_payload);
+	uint16_t status;
+
+	if (scheduler_core1_available()) {
+		taskq_shared_t *sh = scheduler_shared();
+		int slot = taskq_enqueue(&sh->queue, opcode,
+		                         taskq_class_for_opcode(opcode, in_len),
+		                         0u, in_len, 0u, 0u,
+		                         get_be32(req->request_id),
+		                         get_be32(req->user_cookie), params);
+		if (slot >= 0) {
+			/* taskq_enqueue release-stored the QUEUED state; make it globally
+			 * visible and wake the worker if it is idling on WFE. */
+			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			return SDK_STATUS_QUEUED;
+		}
+		/* queue full -> fall through to synchronous inline compute */
+	}
+
+	status = sdk_mailbox_run_crypto_task(opcode, params, result_payload);
 	if (status != SDK_STATUS_OK)
 		return complete_status(req, comp, status);
 	write_completion(comp, req, SDK_STATUS_OK,
@@ -3453,7 +3478,7 @@ static uint16_t handle_crypto_hash(volatile struct SDKMailboxEntry *req,
 	hp.key_length = key_length;
 	hp.dst_addr = dst->address + dst_offset;
 	hp.digest_length = digest_length;
-	return crypto_dispatch(SDK_OP_CRYPTO_HASH, req, comp, &hp);
+	return crypto_dispatch(SDK_OP_CRYPTO_HASH, src_length, req, comp, &hp);
 }
 
 static uint16_t handle_crypto_stream(volatile struct SDKMailboxEntry *req,
@@ -3513,7 +3538,7 @@ static uint16_t handle_crypto_stream(volatile struct SDKMailboxEntry *req,
 	sp.nonce_addr = nonce->address + nonce_offset;
 	sp.counter = counter;
 	sp.dst_addr = dst->address + dst_offset;
-	return crypto_dispatch(SDK_OP_CRYPTO_STREAM, req, comp, &sp);
+	return crypto_dispatch(SDK_OP_CRYPTO_STREAM, src_length, req, comp, &sp);
 }
 
 static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
@@ -3613,7 +3638,7 @@ static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
 	ap.nonce_addr = nonce->address;
 	ap.aad_addr = (aad_length != 0U) ? (aad->address + aad_offset) : 0U;
 	ap.aad_length = aad_length;
-	return crypto_dispatch(SDK_OP_CRYPTO_AEAD, req, comp, &ap);
+	return crypto_dispatch(SDK_OP_CRYPTO_AEAD, src_length, req, comp, &ap);
 }
 
 static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
@@ -3665,7 +3690,7 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 	kp.scalar_addr = scalar->address + scalar_off;
 	kp.point_addr  = point->address + point_off;
 	kp.dst_addr    = dst->address + dst_off;
-	return crypto_dispatch(SDK_OP_CRYPTO_KX, req, comp, &kp);
+	return crypto_dispatch(SDK_OP_CRYPTO_KX, 0u, req, comp, &kp);
 }
 
 static uint16_t handle_crypto_verify(volatile struct SDKMailboxEntry *req,
@@ -3739,7 +3764,7 @@ static uint16_t handle_crypto_verify(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	}
 
-	return crypto_dispatch(SDK_OP_CRYPTO_VERIFY, req, comp, &vp);
+	return crypto_dispatch(SDK_OP_CRYPTO_VERIFY, 0u, req, comp, &vp);
 }
 
 static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
@@ -4406,6 +4431,23 @@ void sdk_mailbox_task(void)
 		record_request_timing(opcode,
 		                      timing_delta_us(timing_start,
 		                                      timing_end));
+
+		if (sdk_status == SDK_STATUS_QUEUED) {
+			/*
+			 * Deferred to the core-1 task scheduler. Consume the request but
+			 * post no completion now and do NOT advance completion_tail --
+			 * scheduler_core0_poll -> sdk_mailbox_post_deferred posts it (and
+			 * counts it) when the worker finishes. The reserved comp slot at
+			 * comp_tail stays free for that later post; the completion IRQ is
+			 * raised then, not now.
+			 */
+			req_head = next_index(req_head);
+			put_be32(desc->request_head, req_head);
+			Xil_DCacheFlushRange((INTPTR)desc, sizeof(*desc));
+			__asm__ __volatile__("dsb" ::: "memory");
+			continue;
+		}
+
 		requests_completed++;
 		completed_any = 1;
 		if (sdk_status != SDK_STATUS_OK)
