@@ -137,6 +137,10 @@ void core1_loop() {
 	// task-queue region shareable at boot, before this core started).
 	scheduler_coherency_init_core1();
 
+#ifdef SCHED_STRESS_TEST
+	scheduler_stress_core1();  // Phase 0 two-core coherency torture; never returns
+#endif
+
 	while (1) {
 		while (!core2_execute) {
 			usleep(1);

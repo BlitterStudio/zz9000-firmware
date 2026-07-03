@@ -112,4 +112,12 @@ void scheduler_coherency_init_core0(void); /* core 0: mark region shareable */
 void scheduler_coherency_init_core1(void); /* core 1: full MMU/cache/SMP bring-up */
 #endif
 
+#if defined(SCHED_STRESS_TEST) && !defined(TASKQ_HOST_TEST)
+/* Phase 0 coherency torture harness (scheduler_stress.c). Turns the whole
+ * firmware into a two-core stress test; none of these return. */
+void scheduler_stress_init(void);   /* core 0: init the shared block (pre core-1) */
+void scheduler_stress_core0(void);  /* core 0: producer + drain + verify + report */
+void scheduler_stress_core1(void);  /* core 1: dedicated consumer */
+#endif
+
 #endif /* ZZ9K_SCHEDULER_H */

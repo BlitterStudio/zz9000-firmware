@@ -347,9 +347,15 @@ int main() {
 	// before core 1 starts, so the SCU keeps it coherent once core 1 brings up
 	// its own MMU/D-cache. Must precede arm_app_init() (which launches core 1).
 	scheduler_coherency_init_core0();
+#ifdef SCHED_STRESS_TEST
+	scheduler_stress_init();   // init the shared block before core 1 starts
+#endif
 
 	// ARM app run environment
 	arm_app_init();
+#ifdef SCHED_STRESS_TEST
+	scheduler_stress_core0();  // Phase 0 two-core coherency torture; never returns
+#endif
 	volatile struct ZZ9K_ENV* arm_run_env = arm_app_get_run_env();
 	uint32_t arm_run_address = 0;
 
