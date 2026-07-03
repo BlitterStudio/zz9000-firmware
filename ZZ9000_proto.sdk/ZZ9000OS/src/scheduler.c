@@ -207,3 +207,29 @@ int taskq_should_drain(int zorro_pending, int display_pending, int core1_enabled
   }
   return (!zorro_pending && !display_pending) ? 1 : 0;
 }
+
+/* ---- fault watchdog: trips core 1 off after too many consecutive faults ---- */
+void taskq_watchdog_init(taskq_watchdog_t *w, uint32_t threshold)
+{
+  w->consecutive_faults = 0;
+  w->fault_threshold = threshold;
+  w->core1_enabled = 1;
+}
+
+void taskq_watchdog_on_fault(taskq_watchdog_t *w)
+{
+  w->consecutive_faults++;
+  if (w->fault_threshold != 0 && w->consecutive_faults >= w->fault_threshold) {
+    w->core1_enabled = 0;
+  }
+}
+
+void taskq_watchdog_on_success(taskq_watchdog_t *w)
+{
+  w->consecutive_faults = 0;
+}
+
+int taskq_watchdog_core1_enabled(const taskq_watchdog_t *w)
+{
+  return w->core1_enabled;
+}
