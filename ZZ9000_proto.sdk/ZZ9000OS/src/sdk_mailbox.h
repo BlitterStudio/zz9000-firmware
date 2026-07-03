@@ -325,4 +325,13 @@ uint32_t sdk_mailbox_address(void);
 uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
                                      uint8_t *result_payload);
 
+/*
+ * Post a deferred completion for a task the core-1 scheduler finished (see
+ * scheduler_core0_poll). Returns 1 if posted, 0 if the completion ring is full
+ * (retry) or the mailbox is inactive. Runs only on core 0's main loop.
+ */
+int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
+                              uint16_t opcode, uint16_t status,
+                              const uint8_t *payload, uint16_t payload_len);
+
 #endif /* SDK_MAILBOX_H */

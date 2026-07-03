@@ -163,4 +163,47 @@ void scheduler_core1_worker(void)
   }
 }
 
+/*
+ * Core-0 poll, called once per main-loop iteration. Two jobs:
+ *   1. Harvest tasks the worker finished (DONE/FAILED) and post their deferred
+ *      completions to the Amiga via sdk_mailbox_post_deferred. A DONE task
+ *      carries its exact crypto status; a FAILED task (core-1 fault) posts the
+ *      generic SDK_STATUS_INTERNAL_ERROR so the Amiga falls back to software.
+ *      Each successful DONE clears the fault watchdog. If the completion ring
+ *      is full the task stays harvested and is retried on the next poll.
+ *   2. Opportunistically drain one SHORT task inline in idle windows -- only
+ *      when core 1 is enabled and neither a Zorro register request nor display
+ *      work is pending this iteration (taskq_should_drain). This soaks up
+ *      latency-sensitive work (KX/VERIFY) without stealing cycles from
+ *      Amiga-facing I/O.
+ */
+void scheduler_core0_poll(int zorro_pending, int display_pending)
+{
+  taskq_shared_t *sh = scheduler_shared();
+  int slot;
+
+  while ((slot = taskq_harvest(&sh->queue)) >= 0) {
+    taskq_desc_t *d = &sh->queue.descs[slot];
+    int failed = (d->state == TASK_FAILED);
+    uint16_t status = failed ? SDK_STATUS_INTERNAL_ERROR : d->result_status;
+    if (!sdk_mailbox_post_deferred(d->request_id, d->user_cookie,
+                                   (uint16_t)d->opcode, status,
+                                   d->result_payload, d->result_len)) {
+      break;  /* completion ring full -> retry next poll */
+    }
+    if (!failed) {
+      taskq_watchdog_on_success(&g_sched_watchdog);
+    }
+    taskq_release(&sh->queue, slot);
+  }
+
+  if (taskq_should_drain(zorro_pending, display_pending,
+                         scheduler_core1_available())) {
+    slot = taskq_claim_short(&sh->queue);
+    if (slot >= 0) {
+      (void)scheduler_run_slot(&sh->queue.descs[slot]);
+    }
+  }
+}
+
 #endif /* TASKQ_HOST_TEST */

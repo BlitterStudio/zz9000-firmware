@@ -4470,6 +4470,75 @@ void sdk_mailbox_task(void)
 		amiga_interrupt_set(AMIGA_INTERRUPT_SDK);
 }
 
+/*
+ * Post a deferred completion for a task the core-1 scheduler finished. Reuses
+ * the exact completion machinery of sdk_mailbox_task -- grab the next slot,
+ * fill request_id/opcode/status/user_cookie/payload, flush the entry, advance
+ * completion_tail, flush the descriptor, and raise the completion IRQ. Both
+ * this and sdk_mailbox_task run only on core 0's main loop (never concurrently),
+ * so they share completion_tail safely. Returns 1 if posted, 0 if the
+ * completion ring is full (caller leaves the task harvested and retries) or the
+ * mailbox is inactive/invalid. Deferred completions carry entry flags = 0;
+ * crypto requests never set the entry flags word, so this matches the
+ * synchronous path (which echoes the request's zero flags) byte-for-byte.
+ */
+int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
+                              uint16_t opcode, uint16_t status,
+                              const uint8_t *payload, uint16_t payload_len)
+{
+	volatile struct SDKMailboxDescriptor *desc = descriptor();
+	volatile struct SDKMailboxEntry *comp_ring = completion_ring();
+	volatile struct SDKMailboxEntry *comp;
+	uint32_t comp_head;
+	uint32_t comp_tail;
+	uint32_t next_comp_tail;
+
+	if (!sdk_mailbox_active)
+		return 0;
+
+	/* Refresh the Amiga-owned completion_head before checking for room. */
+	Xil_DCacheInvalidateRange((INTPTR)desc, sizeof(*desc));
+	__asm__ __volatile__("dsb" ::: "memory");
+
+	if (!descriptor_valid(desc))
+		return 0;
+
+	comp_head = get_be32(desc->completion_head);
+	comp_tail = get_be32(desc->completion_tail);
+	next_comp_tail = next_index(comp_tail);
+	if (next_comp_tail == comp_head)
+		return 0;                    /* ring full -> caller retries next poll */
+
+	comp = &comp_ring[comp_tail];
+	put_be32(comp->request_id, request_id);
+	put_be16(comp->opcode, opcode);
+	put_be16(comp->status, status);
+	put_be16(comp->flags, 0);
+	put_be16(comp->payload_len, payload_len);
+	put_be32(comp->user_cookie, user_cookie);
+	if (payload_len > 0U && payload != 0) {
+		uint16_t n = payload_len > sizeof(comp->payload)
+		                 ? (uint16_t)sizeof(comp->payload) : payload_len;
+		memset((void *)comp->payload, 0, sizeof(comp->payload));
+		memcpy((void *)comp->payload, payload, n);
+	}
+	Xil_DCacheFlushRange((INTPTR)comp, sizeof(*comp));
+
+	comp_tail = next_comp_tail;
+	put_be32(desc->completion_tail, comp_tail);
+	Xil_DCacheFlushRange((INTPTR)desc, sizeof(*desc));
+	__asm__ __volatile__("dsb" ::: "memory");
+
+	requests_completed++;
+	if (status != SDK_STATUS_OK)
+		requests_failed++;
+
+	if (sdk_completion_irq_enabled)
+		amiga_interrupt_set(AMIGA_INTERRUPT_SDK);
+
+	return 1;
+}
+
 uint16_t sdk_mailbox_status(void)
 {
 	return sdk_status;

@@ -117,6 +117,7 @@ taskq_shared_t *scheduler_shared(void);    /* the coherent control block */
 void scheduler_boot_init(void);            /* core 0: init queue + watchdog at boot */
 int  scheduler_core1_available(void);      /* core 1 started and not watchdog-disabled */
 void scheduler_core1_worker(void);         /* core 1: dedicated task worker; never returns */
+void scheduler_core0_poll(int zorro_pending, int display_pending); /* core 0: harvest+post+drain */
 #endif
 
 #if defined(SCHED_STRESS_TEST) && !defined(TASKQ_HOST_TEST)
