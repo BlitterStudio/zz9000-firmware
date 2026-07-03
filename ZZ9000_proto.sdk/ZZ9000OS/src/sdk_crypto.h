@@ -123,6 +123,12 @@ int sdk_p256_ecdh(const uint8_t scalar[SDK_P256_KEY_SIZE],
                    const uint8_t peer_point[SDK_P256_POINT_SIZE],
                    uint8_t shared[SDK_P256_SHARED_SIZE]);
 
+/* P-256 keygen. scalar = private key (32 bytes BE, in [1, n-1]),
+   pub = output uncompressed public point scalar*G (65 bytes: 0x04 || X || Y).
+   Returns 1 on success, 0 if the scalar is out of range or on other error. */
+int sdk_p256_keygen(const uint8_t scalar[SDK_P256_KEY_SIZE],
+                    uint8_t pub[SDK_P256_POINT_SIZE]);
+
 /* P-256 ECDSA verification with SHA-256 (raw r||s format, 64 bytes).
    pubkey = uncompressed public key point (65 bytes: 0x04 || X || Y),
    signature = raw ECDSA signature (r||s, 64 bytes),

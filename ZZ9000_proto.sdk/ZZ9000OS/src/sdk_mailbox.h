@@ -161,6 +161,11 @@
 #define SDK_CRYPTO_KX_X25519           1U
 #define SDK_CRYPTO_KX_P256             2U
 
+/* KX flags word. KEYGEN turns a P-256 request into scalar*G: `scalar` is the
+ * private key, the peer point is ignored, and `dst` receives the full 65-byte
+ * uncompressed public point. Any other flag value is rejected (UNSUPPORTED). */
+#define SDK_CRYPTO_KX_FLAG_KEYGEN      1U
+
 #define SDK_OP_CRYPTO_VERIFY           0x0804U
 #define SDK_CRYPTO_VERIFY_ECDSA_P256_SHA256        1U
 #define SDK_CRYPTO_VERIFY_RSA_PKCS1_2048_SHA256    2U
@@ -170,6 +175,9 @@
 #define SDK_SERVICE_FLAG_CRYPTO_ECDSA_P256 (1U << 18)
 #define SDK_SERVICE_FLAG_CRYPTO_RSA_2048   (1U << 19)
 #define SDK_SERVICE_FLAG_CRYPTO_AES_GCM    (1U << 20)
+/* P-256 keygen (scalar*G -> full point) via the KX KEYGEN flag. Distinct from
+ * CRYPTO_P256 (derive only), which shipped without keygen. */
+#define SDK_SERVICE_FLAG_CRYPTO_P256_KEYGEN (1U << 21)
 
 /* Crypto verify payload: 48 bytes to match the inline mailbox entry size and
  * the SDK ZZ9KCryptoVerifyPayload byte-for-byte. All fields are big-endian

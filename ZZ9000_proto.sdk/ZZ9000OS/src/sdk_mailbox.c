@@ -838,6 +838,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		SDK_CAP_CRYPTO,
 		SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_CRYPTO_X25519 |
 			SDK_SERVICE_FLAG_CRYPTO_P256 |
+			SDK_SERVICE_FLAG_CRYPTO_P256_KEYGEN |
 			SDK_SERVICE_FLAG_CRYPTO_ECDSA_P256 |
 			SDK_SERVICE_FLAG_CRYPTO_RSA_2048 |
 			SDK_SERVICE_FLAG_CRYPTO_AES_GCM,
@@ -3101,8 +3102,9 @@ struct crypto_aead_params {
 
 struct crypto_kx_params {
 	uint32_t algorithm;
+	uint32_t flags;         /* SDK_CRYPTO_KX_FLAG_KEYGEN selects P-256 scalar*G */
 	uint32_t scalar_addr;
-	uint32_t point_addr;
+	uint32_t point_addr;    /* unused for keygen */
 	uint32_t dst_addr;
 };
 
@@ -3260,7 +3262,21 @@ static uint16_t crypto_kx_compute(const struct crypto_kx_params *p,
 		memset(xshared, 0, sizeof(xshared));
 		crypto_result(result_payload, SDK_X25519_SHARED_SIZE,
 		              SDK_CRYPTO_KX_X25519, 0U);
-	} else {  /* SDK_CRYPTO_KX_P256 -- the front validated the algorithm */
+	} else if (p->flags == SDK_CRYPTO_KX_FLAG_KEYGEN) {
+		/* P-256 keygen: scalar*G -> full 65-byte uncompressed point. No peer
+		 * point; the front validated scalar+dst and left point_addr unused. */
+		uint8_t pub[SDK_P256_POINT_SIZE];
+		Xil_DCacheInvalidateRange((INTPTR)scalar_data, SDK_P256_KEY_SIZE);
+		if (!sdk_p256_keygen(scalar_data, pub)) {
+			memset(pub, 0, sizeof(pub));
+			return SDK_STATUS_BAD_REQUEST;
+		}
+		memcpy(dst_data, pub, SDK_P256_POINT_SIZE);
+		Xil_DCacheFlushRange((INTPTR)dst_data, SDK_P256_POINT_SIZE);
+		memset(pub, 0, sizeof(pub));  /* public, but scrub the stack copy */
+		crypto_result(result_payload, SDK_P256_POINT_SIZE,
+		              SDK_CRYPTO_KX_P256, SDK_CRYPTO_KX_FLAG_KEYGEN);
+	} else {  /* SDK_CRYPTO_KX_P256 derive -- the front validated the algorithm */
 		uint8_t shared[SDK_P256_SHARED_SIZE];
 		Xil_DCacheInvalidateRange((INTPTR)scalar_data, SDK_P256_KEY_SIZE);
 		Xil_DCacheInvalidateRange((INTPTR)point_data, SDK_P256_POINT_SIZE);
@@ -3662,8 +3678,8 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 	p = (volatile struct SDKCryptoKXPayload *)req->payload;
 	algorithm = get_be32(p->algorithm);
 	flags = get_be32(p->flags);
-	if (flags != 0U)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	/* flags are validated per algorithm below: X25519 requires 0; P-256 also
+	 * accepts SDK_CRYPTO_KX_FLAG_KEYGEN (scalar*G -> full public point). */
 
 	scalar = find_shared_buffer(get_be32(p->scalar_handle));
 	point  = find_shared_buffer(get_be32(p->point_handle));
@@ -3673,11 +3689,19 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 	dst_off    = get_be32(p->dst_offset);
 
 	if (algorithm == SDK_CRYPTO_KX_X25519) {
+		if (flags != 0U)   /* X25519 keygen reuses derive with the base point */
+			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 		if (!buffer_range_valid(scalar, scalar_off, SDK_X25519_KEY_SIZE)   ||
 		    !buffer_range_valid(point,  point_off,  SDK_X25519_POINT_SIZE) ||
 		    !buffer_range_valid(dst,    dst_off,    SDK_X25519_SHARED_SIZE))
 			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-	} else if (algorithm == SDK_CRYPTO_KX_P256) {
+	} else if (algorithm == SDK_CRYPTO_KX_P256 &&
+	           flags == SDK_CRYPTO_KX_FLAG_KEYGEN) {
+		/* Keygen: scalar*G. No peer point; dst holds the full 65-byte point. */
+		if (!buffer_range_valid(scalar, scalar_off, SDK_P256_KEY_SIZE) ||
+		    !buffer_range_valid(dst,    dst_off,    SDK_P256_POINT_SIZE))
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	} else if (algorithm == SDK_CRYPTO_KX_P256 && flags == 0U) {
 		if (!buffer_range_valid(scalar, scalar_off, SDK_P256_KEY_SIZE)   ||
 		    !buffer_range_valid(point,  point_off,  SDK_P256_POINT_SIZE) ||
 		    !buffer_range_valid(dst,    dst_off,    SDK_P256_SHARED_SIZE))
@@ -3687,9 +3711,14 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 	}
 
 	kp.algorithm = algorithm;
+	kp.flags = flags;
 	kp.scalar_addr = scalar->address + scalar_off;
-	kp.point_addr  = point->address + point_off;
-	kp.dst_addr    = dst->address + dst_off;
+	/* keygen leaves the peer point unvalidated (and often unset), so don't
+	 * dereference it -- the compute ignores point_addr for keygen. */
+	kp.point_addr = (algorithm == SDK_CRYPTO_KX_P256 &&
+	                 flags == SDK_CRYPTO_KX_FLAG_KEYGEN)
+	                ? 0u : (point->address + point_off);
+	kp.dst_addr = dst->address + dst_off;
 	return crypto_dispatch(SDK_OP_CRYPTO_KX, 0u, req, comp, &kp);
 }
 

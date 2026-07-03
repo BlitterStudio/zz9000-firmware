@@ -888,6 +888,37 @@ int sdk_p256_ecdh(const uint8_t scalar[32], const uint8_t peer_point[65],
 	return ok != 0;
 }
 
+int sdk_p256_keygen(const uint8_t scalar[32], uint8_t pub[65])
+{
+	const br_ec_impl *ec = &br_ec_p256_m31;
+	const unsigned char *order;
+	size_t order_len;
+	size_t len;
+	unsigned i;
+	int nonzero = 0;
+	int lt = 0, decided = 0;
+
+	/* BearSSL mulgen requires the multiplier be non-zero and < the group
+	 * order; enforce that here (mirrors zz9k_soft_p256_keygen) so a bad
+	 * scalar is rejected instead of producing an undefined point. */
+	order = ec->order(BR_EC_secp256r1, &order_len);
+	if (order_len != SDK_P256_KEY_SIZE)
+		return 0;
+	for (i = 0; i < SDK_P256_KEY_SIZE; i++) {
+		nonzero |= scalar[i];
+		if (!decided) {
+			if (scalar[i] < order[i]) { lt = 1; decided = 1; }
+			else if (scalar[i] > order[i]) { lt = 0; decided = 1; }
+		}
+	}
+	if (!nonzero || !lt)          /* zero, or scalar >= order */
+		return 0;
+
+	/* scalar*G -> full uncompressed point (0x04 || X || Y). */
+	len = ec->mulgen(pub, scalar, SDK_P256_KEY_SIZE, BR_EC_secp256r1);
+	return len == SDK_P256_POINT_SIZE;
+}
+
 int sdk_ecdsa_verify_p256(const uint8_t pubkey[SDK_P256_ECDSA_POINT_SIZE],
                            const uint8_t signature[SDK_P256_ECDSA_SIG_SIZE],
                            const uint8_t hash[SDK_SHA256_DIGEST_SIZE])
