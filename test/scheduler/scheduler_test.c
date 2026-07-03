@@ -56,7 +56,7 @@ static void test_enqueue_fills_and_queues(void)
   int s;
   taskq_init(&q);
   s = taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT,
-                    0x100u, 32u, 0x200u, 64u, 0xAAu, 0xBBu);
+                    0x100u, 32u, 0x200u, 64u, 0xAAu, 0xBBu, NULL);
   expect_int("enq_slot0", s, 0);
   expect_u32("enq_state", q.descs[0].state, TASK_QUEUED);
   expect_u32("enq_opcode", q.descs[0].opcode, TASKQ_OP_CRYPTO_KX);
@@ -72,10 +72,38 @@ static void test_enqueue_full_returns_minus1(void)
   int s;
   taskq_init(&q);
   for (i = 0; i < TASKQ_CAPACITY; i++) {
-    (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, i, i);
+    (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, i, i, NULL);
   }
-  s = taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 99, 99);
+  s = taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 99, 99, NULL);
   expect_int("enq_full", s, -1);
+}
+
+static void test_enqueue_copies_op_params(void)
+{
+  taskq_t q;
+  uint8_t params[TASKQ_OP_PARAM_BYTES];
+  uint32_t i;
+  int s;
+  for (i = 0; i < TASKQ_OP_PARAM_BYTES; i++) params[i] = (uint8_t)(i + 1);
+  taskq_init(&q);
+  s = taskq_enqueue(&q, TASKQ_OP_CRYPTO_AEAD, TASK_LONG, 0, 0, 0, 0, 1, 1, params);
+  expect_int("enq_params_slot", s, 0);
+  for (i = 0; i < TASKQ_OP_PARAM_BYTES; i++) {
+    expect_u32("enq_params_byte", q.descs[0].op_params[i], (uint8_t)(i + 1));
+  }
+}
+
+static void test_enqueue_null_params_zeroes(void)
+{
+  taskq_t q;
+  uint32_t i;
+  taskq_init(&q);
+  /* pre-dirty the slot's params, then enqueue with NULL: must be zeroed */
+  for (i = 0; i < TASKQ_OP_PARAM_BYTES; i++) q.descs[0].op_params[i] = 0xEE;
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1, NULL);
+  for (i = 0; i < TASKQ_OP_PARAM_BYTES; i++) {
+    expect_u32("enq_null_params", q.descs[0].op_params[i], 0u);
+  }
 }
 
 static void test_claim_any_returns_queued_and_marks_claimed(void)
@@ -83,7 +111,7 @@ static void test_claim_any_returns_queued_and_marks_claimed(void)
   taskq_t q;
   int s;
   taskq_init(&q);
-  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1, NULL);
   s = taskq_claim_any(&q);
   expect_int("claim_slot0", s, 0);
   expect_u32("claim_state", q.descs[0].state, TASK_CLAIMED);
@@ -95,8 +123,8 @@ static void test_two_claims_never_collide(void)
   taskq_t q;
   int a, b;
   taskq_init(&q);
-  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
-  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 2, 2);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1, NULL);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 2, 2, NULL);
   a = taskq_claim_any(&q);
   b = taskq_claim_any(&q);
   if (a == b) { printf("claim_collision %d\n", a); failures++; }
@@ -107,8 +135,8 @@ static void test_claim_advances_past_lost_cas(void)
   taskq_t q;
   int s;
   taskq_init(&q);
-  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1); /* slot0 */
-  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 2, 2); /* slot1 */
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1, NULL); /* slot0 */
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 2, 2, NULL); /* slot1 */
   taskq_test_force_cas_fail = 1;    /* lose the race on the first CAS (slot0) */
   s = taskq_claim_any(&q);
   expect_int("claim_after_lost", s, 1);
@@ -120,8 +148,8 @@ static void test_claim_short_skips_long(void)
   taskq_t q;
   int s;
   taskq_init(&q);
-  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_AEAD, TASK_LONG, 0, 8192, 0, 0, 1, 1); /* slot0 LONG */
-  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 2, 2);     /* slot1 SHORT */
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_AEAD, TASK_LONG, 0, 8192, 0, 0, 1, 1, NULL); /* slot0 LONG */
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 2, 2, NULL);     /* slot1 SHORT */
   s = taskq_claim_short(&q);
   expect_int("claim_short_slot1", s, 1);
   expect_u32("claim_short_left_long", q.descs[0].state, TASK_QUEUED);
@@ -132,7 +160,7 @@ static void test_complete_sets_done_and_payload(void)
   taskq_t q;
   uint8_t pay[3] = {7, 8, 9};
   taskq_init(&q);
-  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1, NULL);
   (void)taskq_claim_any(&q);
   taskq_complete(&q, 0, 0 /*OK*/, pay, 3);
   expect_u32("done_state", q.descs[0].state, TASK_DONE);
@@ -147,7 +175,7 @@ static void test_complete_clamps_payload(void)
   uint32_t i;
   taskq_init(&q);
   for (i = 0; i < 64; i++) big[i] = (uint8_t)i;
-  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1, NULL);
   (void)taskq_claim_any(&q);
   taskq_complete(&q, 0, 0, big, 64);
   expect_u32("clamp_len", q.descs[0].result_len, TASKQ_RESULT_PAYLOAD);
@@ -157,7 +185,7 @@ static void test_fail_sets_failed(void)
 {
   taskq_t q;
   taskq_init(&q);
-  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1, NULL);
   (void)taskq_claim_any(&q);
   taskq_fail(&q, 0, 5 /*err*/);
   expect_u32("fail_state", q.descs[0].state, TASK_FAILED);
@@ -169,7 +197,7 @@ static void test_harvest_finds_done_then_release(void)
   taskq_t q;
   int h;
   taskq_init(&q);
-  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1, NULL);
   expect_int("harvest_none", taskq_harvest(&q), -1);
   (void)taskq_claim_any(&q);
   taskq_complete(&q, 0, 0, 0, 0);
@@ -239,6 +267,8 @@ int main(void)
   test_init_marks_all_free();
   test_enqueue_fills_and_queues();
   test_enqueue_full_returns_minus1();
+  test_enqueue_copies_op_params();
+  test_enqueue_null_params_zeroes();
   test_claim_any_returns_queued_and_marks_claimed();
   test_two_claims_never_collide();
   test_claim_advances_past_lost_cas();

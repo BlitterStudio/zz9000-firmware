@@ -16,6 +16,7 @@
 #define TASKQ_CAPACITY         16u
 #define TASKQ_SHORT_MAX_BYTES  4096u
 #define TASKQ_RESULT_PAYLOAD   48u
+#define TASKQ_OP_PARAM_BYTES   48u   /* opaque per-task input params (firmware) */
 
 /* Crypto opcodes mirrored from sdk_mailbox.h. scheduler_arm.c carries
  * _Static_assert drift guards proving these match the firmware definitions. */
@@ -51,6 +52,7 @@ typedef struct {
   uint16_t result_status;       /* SDK_STATUS_* to post on completion */
   uint16_t result_len;          /* completion payload length */
   uint8_t  result_payload[TASKQ_RESULT_PAYLOAD];
+  uint8_t  op_params[TASKQ_OP_PARAM_BYTES]; /* producer-filled input params */
 } taskq_desc_t;
 
 typedef struct {
@@ -77,7 +79,8 @@ void taskq_init(taskq_t *q);
 int  taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
                    uint32_t in_addr, uint32_t in_len,
                    uint32_t out_addr, uint32_t out_cap,
-                   uint32_t request_id, uint32_t user_cookie);
+                   uint32_t request_id, uint32_t user_cookie,
+                   const void *op_params);
 int  taskq_claim_any(taskq_t *q);
 int  taskq_claim_short(taskq_t *q);
 void taskq_complete(taskq_t *q, int slot, uint16_t status,
@@ -110,6 +113,9 @@ extern int taskq_test_force_cas_fail;  /* >0: force the next N CAS calls to fail
 /* ARM-only glue (scheduler_arm.c). Not visible to the host test build. */
 void scheduler_coherency_init_core0(void); /* core 0: mark region shareable */
 void scheduler_coherency_init_core1(void); /* core 1: full MMU/cache/SMP bring-up */
+taskq_shared_t *scheduler_shared(void);    /* the coherent control block */
+void scheduler_boot_init(void);            /* core 0: init queue + watchdog at boot */
+int  scheduler_core1_available(void);      /* core 1 started and not watchdog-disabled */
 #endif
 
 #if defined(SCHED_STRESS_TEST) && !defined(TASKQ_HOST_TEST)

@@ -107,7 +107,7 @@ void scheduler_stress_core0(void)
     /* Fill every currently-free slot with a fresh stamped pattern. */
     for (;;) {
       uint32_t p = taskq_stress_fill(round, seq);
-      int s = taskq_enqueue(&sh->queue, 0u, TASK_SHORT, p, 0u, 0u, 0u, p, p);
+      int s = taskq_enqueue(&sh->queue, 0u, TASK_SHORT, p, 0u, 0u, 0u, p, p, NULL);
       if (s < 0) {
         break;              /* queue full */
       }

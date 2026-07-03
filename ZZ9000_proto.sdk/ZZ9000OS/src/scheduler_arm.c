@@ -12,6 +12,7 @@
 
 #include "scheduler.h"
 #include "memorymap.h"
+#include "sdk_mailbox.h"
 #include "xil_types.h"
 #include "xil_mmu.h"
 #include "xil_cache.h"
@@ -20,6 +21,43 @@
 
 /* BSP flat 1 MB-section translation table (translation_table.S). */
 extern u32 MMUTable;
+
+/* Compile-time guard: the crypto opcodes the scheduler policy mirrors in
+ * scheduler.h must match the firmware's authoritative definitions. */
+typedef char sched_opcode_drift_check[
+    (TASKQ_OP_CRYPTO_HASH   == SDK_OP_CRYPTO_HASH   &&
+     TASKQ_OP_CRYPTO_STREAM == SDK_OP_CRYPTO_STREAM &&
+     TASKQ_OP_CRYPTO_AEAD   == SDK_OP_CRYPTO_AEAD   &&
+     TASKQ_OP_CRYPTO_KX     == SDK_OP_CRYPTO_KX     &&
+     TASKQ_OP_CRYPTO_VERIFY == SDK_OP_CRYPTO_VERIFY) ? 1 : -1];
+
+/* Core-0 view of scheduler run state. The taskq watchdog trips core 1 off
+ * after repeated faults; g_core1_started is set by the worker on entry. */
+static taskq_watchdog_t g_sched_watchdog;
+static volatile uint32_t g_core1_started;
+
+taskq_shared_t *scheduler_shared(void)
+{
+  return (taskq_shared_t *)SDK_TASKQ_REGION_ADDRESS;
+}
+
+void scheduler_boot_init(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+  taskq_init(&sh->queue);
+  sh->core1_current_slot = -1;
+  sh->core1_restart_request = 0;
+  sh->core1_fault_code = 0;
+  sh->core1_alive = 0;
+  taskq_watchdog_init(&g_sched_watchdog, 3u);
+  g_core1_started = 0;
+}
+
+int scheduler_core1_available(void)
+{
+  return (g_core1_started != 0 &&
+          taskq_watchdog_core1_enabled(&g_sched_watchdog)) ? 1 : 0;
+}
 
 /* TTBR0 page-table-walk attributes: outer cacheable write-back, matching the
  * value boot.S programs on core 0 (0x5B). */

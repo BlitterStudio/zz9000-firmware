@@ -90,13 +90,15 @@ void taskq_init(taskq_t *q)
 int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
                   uint32_t in_addr, uint32_t in_len,
                   uint32_t out_addr, uint32_t out_cap,
-                  uint32_t request_id, uint32_t user_cookie)
+                  uint32_t request_id, uint32_t user_cookie,
+                  const void *op_params)
 {
   uint32_t i, idx;
   for (i = 0; i < TASKQ_CAPACITY; i++) {
     idx = (q->enqueue_cursor + i) % TASKQ_CAPACITY;
     if (q->descs[idx].state == TASK_FREE) {
       taskq_desc_t *d = &q->descs[idx];
+      uint32_t k;
       d->cls = (uint32_t)cls;
       d->opcode = opcode;
       d->in_addr = in_addr;
@@ -107,6 +109,11 @@ int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
       d->user_cookie = user_cookie;
       d->result_status = 0;
       d->result_len = 0;
+      /* Copy the opaque input params before publishing, so a consumer that
+       * claims the QUEUED slot always sees complete params. */
+      for (k = 0; k < TASKQ_OP_PARAM_BYTES; k++) {
+        d->op_params[k] = op_params ? ((const uint8_t *)op_params)[k] : 0;
+      }
       taskq_store_release(&d->state, TASK_QUEUED);  /* publish last */
       q->enqueue_cursor = (idx + 1) % TASKQ_CAPACITY;
       return (int)idx;

@@ -349,6 +349,8 @@ int main() {
 	scheduler_coherency_init_core0();
 #ifdef SCHED_STRESS_TEST
 	scheduler_stress_init();   // init the shared block before core 1 starts
+#else
+	scheduler_boot_init();     // init the task queue + watchdog before core 1 starts
 #endif
 
 	// ARM app run environment
