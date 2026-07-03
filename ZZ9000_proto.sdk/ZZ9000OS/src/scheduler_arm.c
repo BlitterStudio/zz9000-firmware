@@ -14,6 +14,7 @@
 #include "memorymap.h"
 #include "sdk_mailbox.h"
 #include "core2.h"
+#include "sleep.h"
 #include "xil_types.h"
 #include "xil_mmu.h"
 #include "xil_cache.h"
@@ -58,6 +59,33 @@ int scheduler_core1_available(void)
 {
   return (g_core1_started != 0 &&
           taskq_watchdog_core1_enabled(&g_sched_watchdog)) ? 1 : 0;
+}
+
+/* Bounded wait for core 1's worker to come up, ~100 ms total. */
+#define SCHED_CORE1_BOOT_SPINS   1000u
+#define SCHED_CORE1_BOOT_US       100u
+
+void scheduler_confirm_core1_boot(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+  uint32_t spins;
+
+  /*
+   * Core 0 calls this once, after arm_app_init() has launched core 1. The
+   * worker publishes core1_alive in the coherent shared block on entry
+   * (scheduler_core1_worker); wait a bounded time for it. Only once seen do we
+   * set g_core1_started, which gates scheduler_core1_available() and hence the
+   * whole async offload path. If core 1 never checks in (absent, or wedged
+   * before the worker), we stay in single-core mode and every task runs inline.
+   */
+  for (spins = 0; spins < SCHED_CORE1_BOOT_SPINS; spins++) {
+    if (sh->core1_alive != 0) {
+      g_core1_started = 1;
+      return;
+    }
+    usleep(SCHED_CORE1_BOOT_US);
+  }
+  /* timeout: leave g_core1_started = 0 -> single-core fallback */
 }
 
 /* TTBR0 page-table-walk attributes: outer cacheable write-back, matching the
@@ -221,8 +249,19 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
     }
   }
 
-  if (taskq_should_drain(zorro_pending, display_pending,
-                         scheduler_core1_available())) {
+  if (!scheduler_core1_available()) {
+    /*
+     * Single-core fallback: core 1 is absent or the watchdog disabled it. New
+     * crypto requests already compute inline in the front (crypto_dispatch), so
+     * the queue only holds tasks stranded when core 1 died mid-flight. Drain
+     * them ALL inline (claim_any, not claim_short) so nothing is lost; they are
+     * posted on the next poll's harvest.
+     */
+    while ((slot = taskq_claim_any(&sh->queue)) >= 0) {
+      (void)scheduler_run_slot(&sh->queue.descs[slot]);
+    }
+  } else if (taskq_should_drain(zorro_pending, display_pending, 1)) {
+    /* Opportunistic SHORT drain in idle windows while core 1 is healthy. */
     slot = taskq_claim_short(&sh->queue);
     if (slot >= 0) {
       (void)scheduler_run_slot(&sh->queue.descs[slot]);

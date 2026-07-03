@@ -357,6 +357,10 @@ int main() {
 	arm_app_init();
 #ifdef SCHED_STRESS_TEST
 	scheduler_stress_core0();  // Phase 0 two-core coherency torture; never returns
+#else
+	// Confirm core 1's scheduler worker checked in before trusting the async
+	// offload path; if it never does, stay in single-core mode (all inline).
+	scheduler_confirm_core1_boot();
 #endif
 	volatile struct ZZ9K_ENV* arm_run_env = arm_app_get_run_env();
 	uint32_t arm_run_address = 0;
