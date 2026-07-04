@@ -869,13 +869,19 @@ static void XEmacPsErrorHandler(void *Callback, u8 Direction, u32 ErrorWord)
 			printf("EMAC: Receive over run\n");
 		}
 		if (ErrorWord & XEMACPS_RXSR_BUFFNA_MASK) {
-			printf("EMAC: Receive buffer not available\n");
+			// RX descriptors exhausted: frames keep arriving but nothing on the
+			// Amiga side is draining them (no TCP stack / driver up). Expected and
+			// self-healing once RX is consumed. Keep the recovery attempt on the
+			// same cadence, but rate-limit the console line so an idle board with
+			// no stack doesn't flood the UART with a per-frame message.
 			// signal to host that frames are available
 			frames_dropped++;
 			frames_received++;
 			if (frames_dropped%10 == 0) {
-				printf("ETHDROP: %d\n",frames_dropped);
 				ethernet_alloc_rx_frames();
+			}
+			if (frames_dropped%1000 == 0) {
+				printf("ETHDROP: %d\n",frames_dropped);
 			}
 		}
 		break;
