@@ -51,6 +51,8 @@ void scheduler_boot_init(void)
   sh->core1_restart_request = 0;
   sh->core1_fault_code = 0;
   sh->core1_alive = 0;
+  sh->tasks_on_core1 = 0;   /* observability counters live in uninitialised DDR */
+  sh->tasks_on_core0 = 0;   /* until zeroed here -- must not read back as garbage */
   taskq_watchdog_init(&g_sched_watchdog, 3u);
   g_core1_started = 0;
 }
