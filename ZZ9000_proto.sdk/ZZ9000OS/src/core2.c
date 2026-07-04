@@ -201,15 +201,20 @@ __attribute__((naked, used)) void core1_entry(void)
 }
 
 /*
- * Core-1 exception-mode stacks. core1_entry set only the current (Supervisor)
- * SP; it bypasses the BSP boot.S that would set up the banked IRQ/FIQ/Abort/
- * Undefined stack pointers. The BSP fault vectors (asm_vectors.S) save state
- * with `stmdb sp!` on the *faulting mode's* banked stack and run the C handler
- * (arm_exception_handler_* -> record_fault -> printf) in that mode, so without
- * these a data/prefetch/undefined fault on core 1 would push to a garbage SP
- * and die before record_fault() could fail the task and request a restart --
- * defeating the scheduler's fault recovery. 8 KiB each covers the vpushed FP
- * context plus printf.
+ * Core-1 exception state (VBAR + banked stacks). core1_entry set only the
+ * current (Supervisor) SP and bypassed the BSP boot.S, which programs VBAR to
+ * _vector_table (boot.S: mcr p15,0,rX,c12,c0,0) and sets up the banked IRQ/FIQ/
+ * Abort/Undefined stacks. Two things are therefore missing on core 1:
+ *   - VBAR: without it, a core-1 data/prefetch/undefined fault vectors through
+ *     inherited reset state instead of _vector_table, so the registered
+ *     handlers (arm_exception_handler_*) never run.
+ *   - the banked exception stacks: the BSP vectors (asm_vectors.S) save state
+ *     with `stmdb sp!` on the *faulting mode's* stack and run the C handler
+ *     (record_fault -> printf) in that mode, so a garbage banked SP crashes the
+ *     handler itself.
+ * Either gap means record_fault() never fails the task / requests a restart, so
+ * a faulting offloaded request hangs. Program both before core 1 runs any task.
+ * 8 KiB per mode covers the vpushed FP context plus printf.
  */
 #define CORE1_EXC_STACK_SZ 0x2000
 static uint8_t core1_irq_stack[CORE1_EXC_STACK_SZ]   __attribute__((aligned(8), used));
@@ -218,17 +223,18 @@ static uint8_t core1_abort_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), 
 static uint8_t core1_undef_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), used));
 
 /*
- * Point each exception mode's banked SP at its own stack, then return to the
- * entry mode. Naked with PC-relative `ldr sp, =(stack + size)` literals so no
- * value is carried across a mode switch -- FIQ banks r8-r12, which would
- * corrupt register operands. I+F are masked while switching; the original CPSR
- * is restored at the end (the SP-writes touch no memory, so this is valid even
- * before the fault stacks are ever used). Set up on core 1 before it runs any
- * scheduler task.
+ * Program VBAR = _vector_table, then point each exception mode's banked SP at
+ * its own stack and return to the entry mode. Naked with PC-relative literals
+ * (`ldr ..., =sym`) so no value is carried across a mode switch -- FIQ banks
+ * r8-r12, which would corrupt register operands. I+F are masked while switching;
+ * the original CPSR is restored at the end. SCTLR.V is left at its reset default
+ * (0 = normal vectors, same as the boot core), so VBAR is the vector base.
  */
-__attribute__((naked, used)) static void core1_init_exception_stacks(void)
+__attribute__((naked, used)) static void core1_init_exception_state(void)
 {
 	__asm__ volatile(
+		"ldr	r0, =_vector_table\n\t"            /* VBAR = BSP vector table */
+		"mcr	p15, 0, r0, c12, c0, 0\n\t"
 		"mrs	r0, cpsr\n\t"
 		"bic	r1, r0, #0x1f\n\t"
 		"orr	r1, r1, #0xc0\n\t"                 /* mask I+F during switches */
@@ -301,11 +307,12 @@ void core1_loop() {
 	scheduler_coherency_init_core1();
 	C1_TRACE("[c1] R2 coherency-ok (mmu on)\r\n");  /* survived MMU/cache/SMP bring-up */
 
-	// Give the exception modes valid banked stacks before running any task, so a
-	// data/prefetch/undefined fault reaches record_fault() (which fails the task
-	// and requests a cold restart) instead of dying on a garbage SP.
-	core1_init_exception_stacks();
-	C1_TRACE("[c1] R2b exc-stacks-ok\r\n");
+	// Program VBAR + banked exception stacks before running any task, so a
+	// data/prefetch/undefined fault vectors to the registered handlers and
+	// reaches record_fault() (which fails the task and requests a cold restart)
+	// instead of vectoring through stale state or dying on a garbage SP.
+	core1_init_exception_state();
+	C1_TRACE("[c1] R2b exc-state-ok\r\n");
 
 #ifdef SCHED_STRESS_TEST
 	scheduler_stress_core1();  // Phase 0 two-core coherency torture; never returns
