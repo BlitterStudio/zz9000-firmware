@@ -756,6 +756,22 @@ static volatile int sdk_completion_irq_enabled;
  */
 static uint32_t sdk_mailbox_generation;
 static uint32_t g_task_generation[TASKQ_CAPACITY];
+
+/*
+ * Batch-tail gate for crypto offload. The request loop processes a FIFO batch
+ * (the requests present when it started); the synchronous dispatcher completed
+ * each request -- including its shared-buffer writes -- before the next ran, so
+ * a batched dependent op (e.g. CRYPTO_HASH -> H followed by MEM_COPY from H or
+ * FREE_SHARED H) always observed finished side effects. Deferring a crypto op
+ * to core 1 breaks that: core 0 would run the next request while core 1 is
+ * still writing H. So crypto_dispatch only defers when this flag says the
+ * current request is the LAST one in the batch (nothing behind it can depend on
+ * it); any crypto op with requests queued after it runs inline, preserving
+ * in-order side effects. Cross-batch ordering remains the client's job via the
+ * completion-is-a-barrier contract. Core-0-only, set immediately before each
+ * handle_request(); no cross-core barrier needed.
+ */
+static int g_request_is_batch_tail;
 static uint16_t sdk_status;
 static struct SDKSharedBuffer shared_buffers[SDK_MAX_SHARED_BUFFERS];
 static struct SDKSurface surfaces[SDK_MAX_SURFACES];
@@ -3415,7 +3431,13 @@ static uint16_t crypto_dispatch(uint16_t opcode, uint32_t in_len,
 	uint8_t result_payload[sizeof(struct SDKCryptoResultPayload)];
 	uint16_t status;
 
-	if (scheduler_core1_available()) {
+	/*
+	 * Only defer to core 1 when this is the last request in the batch; a crypto
+	 * op with requests behind it must complete its shared-buffer writes inline
+	 * so a later batched op (MEM_COPY/FREE_SHARED of the same handle, etc.)
+	 * never races core 1. See g_request_is_batch_tail.
+	 */
+	if (scheduler_core1_available() && g_request_is_batch_tail) {
 		taskq_shared_t *sh = scheduler_shared();
 		int slot = taskq_enqueue(&sh->queue, opcode,
 		                         taskq_class_for_opcode(opcode, in_len),
@@ -4512,6 +4534,9 @@ void sdk_mailbox_task(void)
 			pending_requests = SDK_MAILBOX_RING_ENTRIES - req_head + req_tail;
 
 		opcode = get_be16(req_ring[req_head].opcode);
+		/* Gate crypto offload: defer to core 1 only when nothing in this batch
+		 * is queued behind the current request (see g_request_is_batch_tail). */
+		g_request_is_batch_tail = (pending_requests == 1u) ? 1 : 0;
 		XTime_GetTime(&timing_start);
 		sdk_status = handle_request(&req_ring[req_head],
 		                            &comp_ring[comp_tail],
