@@ -256,43 +256,15 @@ void core1_loop() {
 	scheduler_stress_core1();  // Phase 0 two-core coherency torture; never returns
 #endif
 
-	// Default core 1 to the dual-core task-scheduler worker (crypto offload).
-	// The legacy REG_ZZ_ARM_RUN trampoline -- the Amiga uploading a native ARM
-	// app to run on core 1 -- is preserved without a compile flag: arm_app_run()
-	// sets core2_execute *and* cold-resets core 1, so on the post-reset re-entry
-	// core2_execute is already 1 here and we fall through to the trampoline
-	// dispatch below instead of the worker. At cold boot core2_execute is 0, so
-	// core 1 becomes the worker and never returns. (Folding the trampoline into
-	// the scheduler is a later phase.)
-	if (!core2_execute) {
-		C1_TRACE("[c1] R3 worker-start (core2_execute=0)\r\n");
-		scheduler_core1_worker();  // dual-core crypto worker; never returns
-	} else {
-		C1_TRACE("[c1] R3 trampoline (core2_execute=1)\r\n");
-	}
-
-	while (1) {
-		while (!core2_execute) {
-			usleep(1);
-		}
-		core2_execute = 0;
-		printf("[core2] executing at %p.\n", core1_trampoline);
-		Xil_DCacheFlush();
-		Xil_ICacheInvalidate();
-
-		if (core1_trampoline) {
-			asm("push {r0-r12}");
-			// FIXME HACK save our stack pointer in 0x10000
-			asm("mov r0, #0x00010000");
-			asm("str sp, [r0]");
-
-			core1_trampoline(&arm_run_env);
-
-			asm("mov r0, #0x00010000");
-			asm("ldr sp, [r0]");
-			asm("pop {r0-r12}");
-		}
-	}
+	// Core 1 runs the dual-core task-scheduler worker and never returns. It
+	// executes work offloaded from the OS -- crypto today, with datatypes,
+	// audio decode (MP3/Ogg/FLAC) and full app modules to follow -- and, in a
+	// later phase, hosted ARM apps, all through the same scheduler. The pre-v2.x
+	// REG_ZZ_ARM_RUN trampoline (upload a raw ARM blob and run it on core 1 in
+	// an uncached environment) has been removed; the v2 ARM-hosted app platform
+	// launches apps through the scheduler instead.
+	C1_TRACE("[c1] R3 worker-start\r\n");
+	scheduler_core1_worker();  // dual-core task worker; never returns
 }
 #pragma GCC pop_options
 
@@ -337,67 +309,6 @@ void arm_app_init() {
 	dsb();
 	asm("sev");
 	printf("[core2] now idling.\n");
-}
-
-void arm_app_run(uint32_t arm_run_address) {
-	volatile uint32_t* core1_addr = (volatile uint32_t*) 0xFFFFFFF0;
-	volatile uint32_t* core1_addr2 = (volatile uint32_t*) 0x100; // catch 2
-
-	*core1_addr = (uint32_t) core1_entry;
-	core1_addr2[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
-	core1_addr2[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
-
-	printf("[ARM_RUN] %lx\n", arm_run_address);
-	if (arm_run_address > 0) {
-		core1_trampoline = (volatile void (*)(
-				volatile struct ZZ9K_ENV*)) arm_run_address;
-		printf("[ARM_RUN] signaling second core.\n");
-		// publish the trampoline (and app code/env) before the execute flag
-		// becomes visible to core1
-		Xil_DCacheFlush();
-		Xil_ICacheInvalidate();
-		dmb();
-		dsb();
-		core2_execute = 1;
-		Xil_DCacheFlush();
-		Xil_ICacheInvalidate();
-	} else {
-		core1_trampoline = 0;
-		Xil_DCacheFlush();
-		dmb();
-		dsb();
-		core2_execute = 0;
-		Xil_DCacheFlush();
-	}
-
-	// FIXME move this out of here
-	// sequence to reset cpu1 taken from https://xilinx-wiki.atlassian.net/wiki/spaces/A/pages/18842504/XAPP1079+Latest+Information
-
-	Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
-	uint32_t RegVal = Xil_In32(A9_CPU_RST_CTRL);
-	RegVal |= A9_RST1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-	RegVal |= A9_CLKSTOP1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-	RegVal &= ~A9_RST1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-	RegVal &= ~A9_CLKSTOP1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-	Xil_Out32(XSLCR_LOCK_ADDR, XSLCR_LOCK_CODE);
-
-	// Core 1 has been reset away from the scheduler worker and re-enters as the
-	// trampoline, so it will never poll the task queue again. Take the scheduler
-	// offline and reclaim any in-flight/queued crypto tasks inline on core 0 --
-	// otherwise crypto_dispatch would keep enqueueing to a dead worker and a
-	// task in flight at the reset would leak CLAIMED. Safe here: the worker died
-	// at the reset above and this runs on core 0's main loop, so core 0 now owns
-	// the task queue exclusively.
-	scheduler_core1_divert_reclaim();
-
-	dmb();
-	dsb();
-	isb();
-	asm("sev");
 }
 
 void arm_app_input_event(uint32_t evt) {

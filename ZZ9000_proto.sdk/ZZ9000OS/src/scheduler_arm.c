@@ -281,39 +281,4 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
   }
 }
 
-/*
- * Core 0 is diverting core 1 away from the scheduler worker -- e.g. the legacy
- * REG_ZZ_ARM_RUN trampoline uploads a native ARM app that takes over core 1.
- * The caller MUST have already halted/reset core 1 (so it can no longer touch
- * the queue); core 0 then owns the queue exclusively here. Mark the scheduler
- * offline so crypto_dispatch stops enqueueing to a worker that will never run
- * again (new requests compute inline on core 0), and reclaim every outstanding
- * task so nothing a caller already submitted is lost:
- *   - the slot the worker had in flight (core1_current_slot) was abandoned
- *     CLAIMED at the reset -> recompute it inline;
- *   - anything still QUEUED -> drain inline.
- * DONE/FAILED slots are left for the next scheduler_core0_poll to post.
- */
-void scheduler_core1_divert_reclaim(void)
-{
-  taskq_shared_t *sh = scheduler_shared();
-  int slot;
-
-  g_core1_started = 0;   /* scheduler_core1_available() -> 0 from now on */
-
-  if (sh->core1_current_slot >= 0) {
-    taskq_desc_t *d = &sh->queue.descs[sh->core1_current_slot];
-    if (d->state == TASK_CLAIMED) {
-      (void)scheduler_run_slot(d);
-      sh->tasks_on_core0++;
-    }
-    sh->core1_current_slot = -1;
-  }
-
-  while ((slot = taskq_claim_any(&sh->queue)) >= 0) {
-    (void)scheduler_run_slot(&sh->queue.descs[slot]);
-    sh->tasks_on_core0++;
-  }
-}
-
 #endif /* TASKQ_HOST_TEST */

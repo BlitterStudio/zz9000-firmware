@@ -121,7 +121,6 @@ int  scheduler_core1_available(void);      /* core 1 started and not watchdog-di
 void scheduler_confirm_core1_boot(void);   /* core 0: bounded wait for worker liveness at boot */
 void scheduler_core1_worker(void);         /* core 1: dedicated task worker; never returns */
 void scheduler_core0_poll(int zorro_pending, int display_pending); /* core 0: harvest+post+drain */
-void scheduler_core1_divert_reclaim(void); /* core 0: take scheduler offline + reclaim tasks when core 1 is diverted (must be called with core 1 halted) */
 #endif
 
 #if defined(SCHED_STRESS_TEST) && !defined(TASKQ_HOST_TEST)

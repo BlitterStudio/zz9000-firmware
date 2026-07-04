@@ -15,7 +15,6 @@ struct ZZ9K_ENV {
 
 void arm_app_init();
 volatile struct ZZ9K_ENV* arm_app_get_run_env();
-void arm_app_run(uint32_t arm_run_address);
 void core1_cold_restart(void);  /* re-reset core 1 into core1_loop (scheduler fault recovery) */
 void arm_app_input_event(uint32_t evt);
 uint32_t arm_app_output_event();

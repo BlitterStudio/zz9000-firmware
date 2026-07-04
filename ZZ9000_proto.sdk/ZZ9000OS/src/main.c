@@ -368,7 +368,6 @@ int main() {
 	}
 #endif
 	volatile struct ZZ9K_ENV* arm_run_env = arm_app_get_run_env();
-	uint32_t arm_run_address = 0;
 
 	// graphics temporary registers
 	uint16_t rect_x1 = 0;
@@ -1197,14 +1196,10 @@ int main() {
 					}
 					break;
 
-				// ARM core 2 execution
-				case REG_ZZ_ARM_RUN_HI:
-					arm_run_address = ((u32) zdata) << 16;
-					break;
-				case REG_ZZ_ARM_RUN_LO:
-					arm_run_address |= zdata;
-					arm_app_run(arm_run_address);
-					break;
+				// ARM core 1 execution: the pre-v2.x REG_ZZ_ARM_RUN "upload a
+				// raw ARM blob and run it on core 1" launch has been removed
+				// (core 1 is the dual-core scheduler worker). The argv/event
+				// registers below are inert with no app to launch.
 				case REG_ZZ_ARM_ARGC:
 					arm_run_env->argc = zdata;
 					break;
