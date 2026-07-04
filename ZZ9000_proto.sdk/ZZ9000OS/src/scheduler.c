@@ -205,6 +205,21 @@ void taskq_release(taskq_t *q, int slot)
   taskq_store_release(&q->descs[slot].state, TASK_FREE);
 }
 
+/* True while any slot is QUEUED or CLAIMED -- i.e. the worker may still be about
+ * to run it or is mid-execution (still writing the task's resolved data
+ * buffers). The mailbox-reset quiesce waits on this before freeing buffers. */
+int taskq_has_active(taskq_t *q)
+{
+  uint32_t i;
+  for (i = 0; i < TASKQ_CAPACITY; i++) {
+    uint32_t st = q->descs[i].state;
+    if (st == TASK_QUEUED || st == TASK_CLAIMED) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /* ---- dispatch policy ---- */
 taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len)
 {

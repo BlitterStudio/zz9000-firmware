@@ -281,4 +281,40 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
   }
 }
 
+/* Bounded quiesce wait: crypto tasks are sub-millisecond, so 5000 * 10us = 50ms
+ * is far beyond a normal drain; the cap only bounds a wedged worker (which the
+ * fault watchdog handles separately). */
+#define SCHED_QUIESCE_SPINS  5000u
+#define SCHED_QUIESCE_US       10u
+
+/*
+ * Quiesce the scheduler before a mailbox teardown (sdk_mailbox_init on Amiga
+ * reset / firmware-update). Core 1's worker writes each task's result into the
+ * task's resolved data buffers; if the mailbox frees and re-hands-out those
+ * buffers while a task is still in flight, the late write corrupts the new
+ * owner even though the stale completion is dropped by the generation tag. Wait
+ * for every queued/in-flight task to finish, then re-init the queue so no task
+ * survives into the next mailbox lifetime.
+ *
+ * Race-free without a worker handshake: this runs on core 0's main loop, the
+ * sole task producer, so once the queue reads empty no new task can appear.
+ */
+void scheduler_quiesce_for_reset(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+  uint32_t spins;
+
+  if (!scheduler_core1_available())
+    return;   /* no core-1 worker -> no in-flight writes to drain */
+
+  for (spins = 0; spins < SCHED_QUIESCE_SPINS; spins++) {
+    if (!taskq_has_active(&sh->queue))
+      break;
+    usleep(SCHED_QUIESCE_US);
+  }
+
+  taskq_init(&sh->queue);
+  sh->core1_current_slot = -1;
+}
+
 #endif /* TASKQ_HOST_TEST */

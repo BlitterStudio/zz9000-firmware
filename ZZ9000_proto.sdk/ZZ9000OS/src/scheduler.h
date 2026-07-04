@@ -90,6 +90,7 @@ void taskq_complete(taskq_t *q, int slot, uint16_t status,
 void taskq_fail(taskq_t *q, int slot, uint16_t status);
 int  taskq_harvest(taskq_t *q);
 void taskq_release(taskq_t *q, int slot);
+int  taskq_has_active(taskq_t *q);         /* any slot still QUEUED or CLAIMED */
 
 /* ---- dispatch policy (portable) ---- */
 taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len);
@@ -121,6 +122,7 @@ int  scheduler_core1_available(void);      /* core 1 started and not watchdog-di
 void scheduler_confirm_core1_boot(void);   /* core 0: bounded wait for worker liveness at boot */
 void scheduler_core1_worker(void);         /* core 1: dedicated task worker; never returns */
 void scheduler_core0_poll(int zorro_pending, int display_pending); /* core 0: harvest+post+drain */
+void scheduler_quiesce_for_reset(void);    /* core 0: drain in-flight core-1 tasks + reset queue before a mailbox teardown */
 #endif
 
 #if defined(SCHED_STRESS_TEST) && !defined(TASKQ_HOST_TEST)

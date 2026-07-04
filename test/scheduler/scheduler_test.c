@@ -208,6 +208,31 @@ static void test_harvest_finds_done_then_release(void)
   expect_int("harvest_after_release", taskq_harvest(&q), -1);
 }
 
+static void test_has_active_tracks_queued_and_claimed(void)
+{
+  taskq_t q;
+  taskq_init(&q);
+  expect_int("active_empty", taskq_has_active(&q), 0);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1, NULL);
+  expect_int("active_queued", taskq_has_active(&q), 1);   /* QUEUED counts */
+  (void)taskq_claim_any(&q);
+  expect_int("active_claimed", taskq_has_active(&q), 1);  /* CLAIMED counts */
+  taskq_complete(&q, 0, 0, 0, 0);
+  expect_int("active_done", taskq_has_active(&q), 0);     /* DONE does not */
+  taskq_release(&q, 0);
+  expect_int("active_free", taskq_has_active(&q), 0);     /* FREE does not */
+}
+
+static void test_has_active_ignores_failed(void)
+{
+  taskq_t q;
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_CRYPTO_KX, TASK_SHORT, 0, 0, 0, 0, 1, 1, NULL);
+  (void)taskq_claim_any(&q);
+  taskq_fail(&q, 0, 5);
+  expect_int("active_failed", taskq_has_active(&q), 0);   /* FAILED does not */
+}
+
 static void test_class_kx_verify_always_short(void)
 {
   expect_int("kx_short", taskq_class_for_opcode(TASKQ_OP_CRYPTO_KX, 999999u), TASK_SHORT);
@@ -277,6 +302,8 @@ int main(void)
   test_complete_clamps_payload();
   test_fail_sets_failed();
   test_harvest_finds_done_then_release();
+  test_has_active_tracks_queued_and_claimed();
+  test_has_active_ignores_failed();
   test_class_kx_verify_always_short();
   test_class_data_ops_size_threshold();
   test_class_unknown_is_long();

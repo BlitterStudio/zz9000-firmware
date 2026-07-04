@@ -4366,6 +4366,15 @@ void sdk_mailbox_init(void)
 {
 	volatile struct SDKMailboxDescriptor *desc = descriptor();
 
+	/* Drain any in-flight core-1 task before we tear the mailbox down. A task
+	 * still executing on core 1 is mid-write into its resolved data buffers;
+	 * the shared-buffer allocator reset below (next_shared_handle = 1 +
+	 * memset(shared_buffers)) re-hands those DDR ranges to the next lifetime's
+	 * requests, so a late write would corrupt a freshly allocated buffer. The
+	 * generation tag stops the stale completion from posting, but only the
+	 * quiesce stops the write itself. No-op at cold boot (core 1 not yet up). */
+	scheduler_quiesce_for_reset();
+
 	memset((void *)SDK_MAILBOX_ADDRESS, 0, SDK_MAILBOX_TOTAL_SIZE);
 	put_be32(desc->magic, SDK_MAILBOX_MAGIC);
 	put_be16(desc->abi_major, SDK_MAILBOX_ABI_MAJOR);
