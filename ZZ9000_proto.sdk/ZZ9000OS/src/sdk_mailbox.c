@@ -3424,6 +3424,7 @@ uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
  * out_cap fields are unused for the crypto opcode class and passed as 0.
  */
 static uint16_t crypto_dispatch(uint16_t opcode, uint32_t in_len,
+                                uint32_t param_len,
                                 volatile struct SDKMailboxEntry *req,
                                 volatile struct SDKMailboxEntry *comp,
                                 const void *params)
@@ -3443,7 +3444,7 @@ static uint16_t crypto_dispatch(uint16_t opcode, uint32_t in_len,
 		                         taskq_class_for_opcode(opcode, in_len),
 		                         0u, in_len, 0u, 0u,
 		                         get_be32(req->request_id),
-		                         get_be32(req->user_cookie), params);
+		                         get_be32(req->user_cookie), params, param_len);
 		if (slot >= 0) {
 			/* Stamp the current mailbox generation so this task is dropped
 			 * rather than posted if the mailbox is re-initialised before it
@@ -3546,7 +3547,8 @@ static uint16_t handle_crypto_hash(volatile struct SDKMailboxEntry *req,
 	hp.key_length = key_length;
 	hp.dst_addr = dst->address + dst_offset;
 	hp.digest_length = digest_length;
-	return crypto_dispatch(SDK_OP_CRYPTO_HASH, src_length, req, comp, &hp);
+	return crypto_dispatch(SDK_OP_CRYPTO_HASH, src_length, sizeof(hp),
+	                       req, comp, &hp);
 }
 
 static uint16_t handle_crypto_stream(volatile struct SDKMailboxEntry *req,
@@ -3606,7 +3608,8 @@ static uint16_t handle_crypto_stream(volatile struct SDKMailboxEntry *req,
 	sp.nonce_addr = nonce->address + nonce_offset;
 	sp.counter = counter;
 	sp.dst_addr = dst->address + dst_offset;
-	return crypto_dispatch(SDK_OP_CRYPTO_STREAM, src_length, req, comp, &sp);
+	return crypto_dispatch(SDK_OP_CRYPTO_STREAM, src_length, sizeof(sp),
+	                       req, comp, &sp);
 }
 
 static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
@@ -3706,7 +3709,8 @@ static uint16_t handle_crypto_aead(volatile struct SDKMailboxEntry *req,
 	ap.nonce_addr = nonce->address;
 	ap.aad_addr = (aad_length != 0U) ? (aad->address + aad_offset) : 0U;
 	ap.aad_length = aad_length;
-	return crypto_dispatch(SDK_OP_CRYPTO_AEAD, src_length, req, comp, &ap);
+	return crypto_dispatch(SDK_OP_CRYPTO_AEAD, src_length, sizeof(ap),
+	                       req, comp, &ap);
 }
 
 static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
@@ -3771,7 +3775,7 @@ static uint16_t handle_crypto_kx(volatile struct SDKMailboxEntry *req,
 	                 flags == SDK_CRYPTO_KX_FLAG_KEYGEN)
 	                ? 0u : (point->address + point_off);
 	kp.dst_addr = dst->address + dst_off;
-	return crypto_dispatch(SDK_OP_CRYPTO_KX, 0u, req, comp, &kp);
+	return crypto_dispatch(SDK_OP_CRYPTO_KX, 0u, sizeof(kp), req, comp, &kp);
 }
 
 static uint16_t handle_crypto_verify(volatile struct SDKMailboxEntry *req,
@@ -3845,7 +3849,7 @@ static uint16_t handle_crypto_verify(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	}
 
-	return crypto_dispatch(SDK_OP_CRYPTO_VERIFY, 0u, req, comp, &vp);
+	return crypto_dispatch(SDK_OP_CRYPTO_VERIFY, 0u, sizeof(vp), req, comp, &vp);
 }
 
 static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,

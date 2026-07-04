@@ -82,7 +82,7 @@ int  taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
                    uint32_t in_addr, uint32_t in_len,
                    uint32_t out_addr, uint32_t out_cap,
                    uint32_t request_id, uint32_t user_cookie,
-                   const void *op_params);
+                   const void *op_params, uint32_t param_len);
 int  taskq_claim_any(taskq_t *q);
 int  taskq_claim_short(taskq_t *q);
 void taskq_complete(taskq_t *q, int slot, uint16_t status,

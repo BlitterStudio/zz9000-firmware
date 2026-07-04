@@ -312,6 +312,7 @@ void scheduler_quiesce_for_reset(void)
 {
   taskq_shared_t *sh = scheduler_shared();
   uint32_t spins;
+  int timed_out;
 
   if (!scheduler_core1_available())
     return;   /* no core-1 worker -> no in-flight writes to drain */
@@ -322,15 +323,23 @@ void scheduler_quiesce_for_reset(void)
     usleep(SCHED_QUIESCE_US);
   }
 
-  if (taskq_has_active(&sh->queue)) {
-    /* Task still running after the cap -> halt core 1 before we free its
-     * buffers, so no in-flight write reaches the reused memory. */
+  /* Clear the queue BEFORE any restart, so a restarted worker finds no QUEUED
+   * descriptor to claim. Capture the timeout first -- taskq_init would mask it.
+   * taskq_init leaves zero QUEUED slots, and the worker only ever claims QUEUED,
+   * so it cannot pick up a stale task and write into buffers the mailbox is
+   * about to reuse. */
+  timed_out = taskq_has_active(&sh->queue);
+  taskq_init(&sh->queue);
+  sh->core1_current_slot = -1;
+
+  if (timed_out) {
+    /* A task outlived the wait and is still writing its buffers. Cold-reset
+     * core 1 to halt it before those buffers are freed. The queue is already
+     * cleared above and core1_cold_restart flushes the whole D-cache before
+     * releasing CPU1, so the restarted worker re-enters onto the empty queue. */
     core1_cold_restart();
     sh->core1_restart_request = 0;   /* consumed here; don't double-restart */
   }
-
-  taskq_init(&sh->queue);
-  sh->core1_current_slot = -1;
 }
 
 #endif /* TASKQ_HOST_TEST */

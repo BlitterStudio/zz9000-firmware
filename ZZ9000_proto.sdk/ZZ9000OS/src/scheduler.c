@@ -100,7 +100,7 @@ int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
                   uint32_t in_addr, uint32_t in_len,
                   uint32_t out_addr, uint32_t out_cap,
                   uint32_t request_id, uint32_t user_cookie,
-                  const void *op_params)
+                  const void *op_params, uint32_t param_len)
 {
   uint32_t i, idx;
   for (i = 0; i < TASKQ_CAPACITY; i++) {
@@ -108,6 +108,12 @@ int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
     if (q->descs[idx].state == TASK_FREE) {
       taskq_desc_t *d = &q->descs[idx];
       uint32_t k;
+      /* Callers pass structs smaller than the 48-byte op_params field, so copy
+       * only param_len source bytes and zero-fill the rest -- reading a full
+       * TASKQ_OP_PARAM_BYTES from the caller's struct would be an out-of-bounds
+       * read that leaks unrelated stack into the shared queue. */
+      uint32_t n = (param_len < TASKQ_OP_PARAM_BYTES) ? param_len
+                                                      : TASKQ_OP_PARAM_BYTES;
       d->cls = (uint32_t)cls;
       d->opcode = opcode;
       d->in_addr = in_addr;
@@ -121,7 +127,8 @@ int taskq_enqueue(taskq_t *q, uint32_t opcode, taskq_class_t cls,
       /* Copy the opaque input params before publishing, so a consumer that
        * claims the QUEUED slot always sees complete params. */
       for (k = 0; k < TASKQ_OP_PARAM_BYTES; k++) {
-        d->op_params[k] = op_params ? ((const uint8_t *)op_params)[k] : 0;
+        d->op_params[k] = (op_params && k < n) ? ((const uint8_t *)op_params)[k]
+                                               : 0;
       }
       taskq_store_release(&d->state, TASK_QUEUED);  /* publish last */
       q->enqueue_cursor = (idx + 1) % TASKQ_CAPACITY;
