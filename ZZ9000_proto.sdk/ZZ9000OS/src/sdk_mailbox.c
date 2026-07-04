@@ -4664,6 +4664,12 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 	if (status != SDK_STATUS_OK)
 		requests_failed++;
 
+	/* Mirror the synchronous path: reflect this completion's result in the
+	 * global mailbox status. The offload left sdk_status at the QUEUED sentinel;
+	 * without this, REG_ZZ_SDK_DOORBELL / diag last_status would report QUEUED
+	 * forever after an offloaded request instead of its real success/error. */
+	sdk_status = status;
+
 	if (sdk_completion_irq_enabled)
 		amiga_interrupt_set(AMIGA_INTERRUPT_SDK);
 
