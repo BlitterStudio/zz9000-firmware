@@ -148,8 +148,16 @@ int taskq_claim_short(taskq_t *q)
 {
   uint32_t i;
   for (i = 0; i < TASKQ_CAPACITY; i++) {
-    if (q->descs[i].state == TASK_QUEUED &&
-        q->descs[i].cls == (uint32_t)TASK_SHORT) {
+    if (q->descs[i].state != TASK_QUEUED) {
+      continue;
+    }
+    /* Acquire: order the cls load after observing TASK_QUEUED, pairing with the
+     * dmb-release store of state in taskq_enqueue. Without it the weakly-ordered
+     * A9 could pair a freshly published QUEUED state with a stale cls left over
+     * from this slot's previous task -- a SHORT->LONG reuse would then read
+     * cls == TASK_SHORT and run a LONG crypto op inline on core 0. */
+    taskq_acquire_barrier();
+    if (q->descs[i].cls == (uint32_t)TASK_SHORT) {
       volatile uint32_t *s = &q->descs[i].state;
       if (taskq_cas_u32(s, TASK_QUEUED, TASK_CLAIMED)) {
         return (int)i;

@@ -282,8 +282,9 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
 }
 
 /* Bounded quiesce wait: crypto tasks are sub-millisecond, so 5000 * 10us = 50ms
- * is far beyond a normal drain; the cap only bounds a wedged worker (which the
- * fault watchdog handles separately). */
+ * is far beyond a normal drain. If a task is still active when the cap expires
+ * it is either wedged or a legitimately long op mid-write -- either way core 1
+ * is force-reset (see below) rather than left to race the mailbox teardown. */
 #define SCHED_QUIESCE_SPINS  5000u
 #define SCHED_QUIESCE_US       10u
 
@@ -295,6 +296,14 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
  * owner even though the stale completion is dropped by the generation tag. Wait
  * for every queued/in-flight task to finish, then re-init the queue so no task
  * survives into the next mailbox lifetime.
+ *
+ * If a task outlives the bounded wait (a wedged worker, or a genuinely long
+ * hash/stream/AEAD), we must NOT just reinit and free its buffers -- the worker
+ * still owns those addresses and would write into memory the mailbox is about
+ * to reuse. Cold-reset core 1 first: that halts the worker mid-op, guaranteeing
+ * no write survives into the next lifetime. The worker re-enters core1_loop and
+ * parks on the now-empty queue; core 0's next scheduler_boot path / poll brings
+ * it back. Draining is the fast path; the reset is the safety net.
  *
  * Race-free without a worker handshake: this runs on core 0's main loop, the
  * sole task producer, so once the queue reads empty no new task can appear.
@@ -311,6 +320,13 @@ void scheduler_quiesce_for_reset(void)
     if (!taskq_has_active(&sh->queue))
       break;
     usleep(SCHED_QUIESCE_US);
+  }
+
+  if (taskq_has_active(&sh->queue)) {
+    /* Task still running after the cap -> halt core 1 before we free its
+     * buffers, so no in-flight write reaches the reused memory. */
+    core1_cold_restart();
+    sh->core1_restart_request = 0;   /* consumed here; don't double-restart */
   }
 
   taskq_init(&sh->queue);

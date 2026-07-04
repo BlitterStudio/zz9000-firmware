@@ -200,6 +200,55 @@ __attribute__((naked, used)) void core1_entry(void)
 		"b	core1_loop\n\t");
 }
 
+/*
+ * Core-1 exception-mode stacks. core1_entry set only the current (Supervisor)
+ * SP; it bypasses the BSP boot.S that would set up the banked IRQ/FIQ/Abort/
+ * Undefined stack pointers. The BSP fault vectors (asm_vectors.S) save state
+ * with `stmdb sp!` on the *faulting mode's* banked stack and run the C handler
+ * (arm_exception_handler_* -> record_fault -> printf) in that mode, so without
+ * these a data/prefetch/undefined fault on core 1 would push to a garbage SP
+ * and die before record_fault() could fail the task and request a restart --
+ * defeating the scheduler's fault recovery. 8 KiB each covers the vpushed FP
+ * context plus printf.
+ */
+#define CORE1_EXC_STACK_SZ 0x2000
+static uint8_t core1_irq_stack[CORE1_EXC_STACK_SZ]   __attribute__((aligned(8), used));
+static uint8_t core1_fiq_stack[CORE1_EXC_STACK_SZ]   __attribute__((aligned(8), used));
+static uint8_t core1_abort_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), used));
+static uint8_t core1_undef_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), used));
+
+/*
+ * Point each exception mode's banked SP at its own stack, then return to the
+ * entry mode. Naked with PC-relative `ldr sp, =(stack + size)` literals so no
+ * value is carried across a mode switch -- FIQ banks r8-r12, which would
+ * corrupt register operands. I+F are masked while switching; the original CPSR
+ * is restored at the end (the SP-writes touch no memory, so this is valid even
+ * before the fault stacks are ever used). Set up on core 1 before it runs any
+ * scheduler task.
+ */
+__attribute__((naked, used)) static void core1_init_exception_stacks(void)
+{
+	__asm__ volatile(
+		"mrs	r0, cpsr\n\t"
+		"bic	r1, r0, #0x1f\n\t"
+		"orr	r1, r1, #0xc0\n\t"                 /* mask I+F during switches */
+		"orr	r2, r1, #0x12\n\t"                 /* IRQ mode  (0x12) */
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_irq_stack + "   CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"orr	r2, r1, #0x11\n\t"                 /* FIQ mode  (0x11) */
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_fiq_stack + "   CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"orr	r2, r1, #0x17\n\t"                 /* Abort mode (0x17) */
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_abort_stack + " CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"orr	r2, r1, #0x1b\n\t"                 /* Undefined  (0x1b) */
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_undef_stack + " CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"msr	cpsr_c, r0\n\t"                    /* back to entry mode */
+		"bx	lr\n\t"
+		".ltorg\n\t");
+}
+
 #pragma GCC push_options
 #pragma GCC optimize ("O1")
 // core1_loop is executed on core1 (vs core0), entered via core1_entry
@@ -251,6 +300,12 @@ void core1_loop() {
 	// task-queue region shareable at boot, before this core started).
 	scheduler_coherency_init_core1();
 	C1_TRACE("[c1] R2 coherency-ok (mmu on)\r\n");  /* survived MMU/cache/SMP bring-up */
+
+	// Give the exception modes valid banked stacks before running any task, so a
+	// data/prefetch/undefined fault reaches record_fault() (which fails the task
+	// and requests a cold restart) instead of dying on a garbage SP.
+	core1_init_exception_stacks();
+	C1_TRACE("[c1] R2b exc-stacks-ok\r\n");
 
 #ifdef SCHED_STRESS_TEST
 	scheduler_stress_core1();  // Phase 0 two-core coherency torture; never returns
