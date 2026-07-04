@@ -31,6 +31,10 @@ static void taskq_store_release(volatile uint32_t *p, uint32_t v)
 {
   *p = v;
 }
+
+static void taskq_acquire_barrier(void)
+{
+}
 #else
 int taskq_cas_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired)
 {
@@ -59,6 +63,11 @@ static void taskq_store_release(volatile uint32_t *p, uint32_t v)
 {
   __asm__ __volatile__("dmb ish" ::: "memory");
   *p = v;
+}
+
+static void taskq_acquire_barrier(void)
+{
+  __asm__ __volatile__("dmb ish" ::: "memory");
 }
 #endif
 
@@ -180,6 +189,11 @@ int taskq_harvest(taskq_t *q)
   for (i = 0; i < TASKQ_CAPACITY; i++) {
     uint32_t st = q->descs[i].state;
     if (st == TASK_DONE || st == TASK_FAILED) {
+      /* Acquire: order the consumer's later result_status/result_payload reads
+       * after this terminal-state load. Pairs with the dmb-release store in
+       * taskq_complete()/taskq_fail(); without it the weakly-ordered A9 may
+       * observe TASK_DONE yet read stale/zero result fields. */
+      taskq_acquire_barrier();
       return (int)i;
     }
   }

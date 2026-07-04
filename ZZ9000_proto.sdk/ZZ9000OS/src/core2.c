@@ -385,6 +385,15 @@ void arm_app_run(uint32_t arm_run_address) {
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
 	Xil_Out32(XSLCR_LOCK_ADDR, XSLCR_LOCK_CODE);
 
+	// Core 1 has been reset away from the scheduler worker and re-enters as the
+	// trampoline, so it will never poll the task queue again. Take the scheduler
+	// offline and reclaim any in-flight/queued crypto tasks inline on core 0 --
+	// otherwise crypto_dispatch would keep enqueueing to a dead worker and a
+	// task in flight at the reset would leak CLAIMED. Safe here: the worker died
+	// at the reset above and this runs on core 0's main loop, so core 0 now owns
+	// the task queue exclusively.
+	scheduler_core1_divert_reclaim();
+
 	dmb();
 	dsb();
 	isb();

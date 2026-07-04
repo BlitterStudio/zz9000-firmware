@@ -742,6 +742,20 @@ typedef char SDKDecompressStreamResultPayload_must_be_48_bytes[
 static volatile int sdk_mailbox_pending;
 static volatile int sdk_mailbox_active;
 static volatile int sdk_completion_irq_enabled;
+
+/*
+ * Mailbox generation, bumped on every sdk_mailbox_init (Amiga reset / fw-update).
+ * Each offloaded task's slot is stamped with the generation live when it was
+ * enqueued; scheduler_core0_poll drops a harvested task whose stamp no longer
+ * matches, so a task that outlives the mailbox it was submitted under can never
+ * post its stale request_id/user_cookie into the next mailbox's completion ring.
+ * These are read/written only by core 0 (crypto_dispatch stamps, core0_poll
+ * checks, sdk_mailbox_init bumps), so they need no cross-core barrier. NOTE: any
+ * future non-crypto queue producer must stamp g_task_generation[slot] too, or
+ * its completions will be dropped as stale.
+ */
+static uint32_t sdk_mailbox_generation;
+static uint32_t g_task_generation[TASKQ_CAPACITY];
 static uint16_t sdk_status;
 static struct SDKSharedBuffer shared_buffers[SDK_MAX_SHARED_BUFFERS];
 static struct SDKSurface surfaces[SDK_MAX_SURFACES];
@@ -3409,6 +3423,11 @@ static uint16_t crypto_dispatch(uint16_t opcode, uint32_t in_len,
 		                         get_be32(req->request_id),
 		                         get_be32(req->user_cookie), params);
 		if (slot >= 0) {
+			/* Stamp the current mailbox generation so this task is dropped
+			 * rather than posted if the mailbox is re-initialised before it
+			 * finishes. Core-0-only field; safe to write after the QUEUED
+			 * release-store since core 1 never reads it. */
+			g_task_generation[slot] = sdk_mailbox_generation;
 			/* taskq_enqueue release-stored the QUEUED state; make it globally
 			 * visible and wake the worker if it is idling on WFE. */
 			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
@@ -4361,6 +4380,9 @@ void sdk_mailbox_init(void)
 	sdk_status = SDK_STATUS_OK;
 	sdk_mailbox_active = 0;
 	sdk_mailbox_pending = 0;
+	/* New mailbox lifetime: any task still queued from the previous one is now
+	 * stale and must not post into this mailbox's completion ring. */
+	sdk_mailbox_generation++;
 	sdk_completion_irq_enabled = 0;
 	next_shared_handle = 1;
 	next_surface_handle = 1;
@@ -4526,6 +4548,19 @@ void sdk_mailbox_task(void)
 
 	if (completed_any && sdk_completion_irq_enabled)
 		amiga_interrupt_set(AMIGA_INTERRUPT_SDK);
+}
+
+/*
+ * True while a task whose slot was stamped at enqueue still belongs to the
+ * current mailbox lifetime. scheduler_core0_poll calls this before posting a
+ * harvested task's completion and drops it if this returns 0 -- so a task that
+ * outlived its mailbox never posts a stale request_id into the new one.
+ */
+int sdk_mailbox_task_gen_ok(int slot)
+{
+	if (slot < 0 || slot >= (int)TASKQ_CAPACITY)
+		return 0;
+	return g_task_generation[slot] == sdk_mailbox_generation;
 }
 
 /*

@@ -343,4 +343,12 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
                               uint16_t opcode, uint16_t status,
                               const uint8_t *payload, uint16_t payload_len);
 
+/*
+ * True while a harvested task's slot still belongs to the current mailbox
+ * lifetime. scheduler_core0_poll drops (releases without posting) a task for
+ * which this returns 0, so a task that outlived the mailbox it was submitted
+ * under never posts a stale request_id/user_cookie into the new completion ring.
+ */
+int sdk_mailbox_task_gen_ok(int slot);
+
 #endif /* SDK_MAILBOX_H */
