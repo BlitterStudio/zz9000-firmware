@@ -7,6 +7,7 @@
 #include "core2.h"
 #include "sleep.h"
 #include "scheduler.h"
+#include "memorymap.h"
 
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
@@ -78,7 +79,8 @@ int __attribute__ ((visibility ("default"))) _putchar(char c) {
 volatile void (*core1_trampoline)(volatile struct ZZ9K_ENV* env);
 volatile int core2_execute = 0;
 
-void core1_loop();  /* forward decl: core1_cold_restart re-points 0xFFFFFFF0 at it */
+void core1_loop();  /* forward decl: core1_entry branches into this C body */
+void core1_entry(void);  /* naked reset stub: 0xFFFFFFF0 points here; sets SP then branches to core1_loop */
 
 struct core_fault_slot core1_fault __attribute__((aligned(32))) = { CORE_FAULT_NONE, {0} };
 
@@ -122,16 +124,17 @@ static void record_fault(uint32_t code, const char *name)
 
 /*
  * Cold-restart core 1 by re-running the CPU1 reset sequence (XAPP1079), so it
- * re-enters core1_loop from its reset vector. Used by the dual-core scheduler
+ * re-enters core1_entry from its reset vector. Used by the dual-core scheduler
  * (scheduler_core0_poll) to recover a worker that faulted and parked. 0xFFFFFFF0
- * is re-pointed at core1_loop first in case the OCM word was disturbed.
+ * is re-pointed at core1_entry first in case the OCM word was disturbed.
  */
 void core1_cold_restart(void)
 {
 	volatile uint32_t *core1_addr = (volatile uint32_t *) 0xFFFFFFF0;
 	uint32_t RegVal;
 
-	*core1_addr = (uint32_t) core1_loop;
+	*core1_addr = (uint32_t) core1_entry;
+	Xil_DCacheFlush();  /* the reset vector write must reach OCM before CPU1 reads it */
 
 	Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
 	RegVal = Xil_In32(A9_CPU_RST_CTRL);
@@ -151,10 +154,57 @@ void core1_cold_restart(void)
 	asm("sev");
 }
 
+/*
+ * SCHED_CORE1_TRACE (opt-in, off by default): raw UART1 (STDOUT_BASEADDRESS
+ * 0xE0001000) byte output for core-1 bring-up diagnostics. Deliberately uses NO
+ * libc, NO malloc, NO MMU and a trivial leaf-function stack frame, so it is
+ * valid on core 1 before the MMU/D-cache are up and regardless of any heap/stack
+ * corruption. SR @ 0x2C (TXFULL = 0x10), TX FIFO @ 0x30. Define SCHED_CORE1_TRACE
+ * to re-enable the staged [c1] R0..R3 markers when diagnosing bring-up; the
+ * production boot signal is the single "[sched] core 1 worker online" line.
+ */
+#ifdef SCHED_CORE1_TRACE
+static void c1_trace(const char *s)
+{
+	volatile uint32_t *sr   = (volatile uint32_t *)(0xE0001000u + 0x2Cu);
+	volatile uint32_t *fifo = (volatile uint32_t *)(0xE0001000u + 0x30u);
+	while (*s) {
+		while (*sr & 0x10u) { }          /* wait while TX FIFO full */
+		*fifo = (uint32_t)(unsigned char)*s++;
+	}
+}
+#define C1_TRACE(s) c1_trace(s)
+#else
+#define C1_TRACE(s) ((void)0)
+#endif
+
+/*
+ * Core-1 reset entry. The CPU1 reset vector (0xFFFFFFF0) points here. This must
+ * be NAKED: on Cortex-A9 reset the stack pointer is UNPREDICTABLE, so any
+ * compiler-generated prologue would push registers to a garbage SP and fault
+ * before a single instruction of C ran -- which is exactly what killed core 1
+ * (no markers at all, even the raw-UART one). We set SP to the reserved core-1
+ * stack in asm FIRST, with nothing on the stack yet, then branch into the C
+ * body. `b` (not `bl`): core1_loop never returns.
+ *
+ * Basic asm only (naked functions do not reliably support extended asm); the
+ * stack-top constant is single-sourced from memorymap.h via stringification.
+ * SDK_CORE1_STACK_TOP must be a valid ARM `mov` immediate for this one insn.
+ */
+#define CORE1_STR2(x) #x
+#define CORE1_STR(x)  CORE1_STR2(x)
+__attribute__((naked, used)) void core1_entry(void)
+{
+	__asm__ volatile(
+		"mov	sp, #" CORE1_STR(SDK_CORE1_STACK_TOP) "\n\t"
+		"b	core1_loop\n\t");
+}
+
 #pragma GCC push_options
 #pragma GCC optimize ("O1")
-// core1_loop is executed on core1 (vs core0)
+// core1_loop is executed on core1 (vs core0), entered via core1_entry
 void core1_loop() {
+	C1_TRACE("[c1] R0 entry (stub set SP)\r\n");  /* proof: CPU1 reached the C body */
 	asm("mov	r0, r0");
 	asm("mrc	p15, 0, r1, c1, c0, 2");
 	/* read cp access control register (CACR) into r1 */
@@ -187,17 +237,20 @@ void core1_loop() {
 	asm("mcr	p15,0,r0,c1,c0,1");
 	/* write Auxiliary Control Register */
 
-	// stack
-	asm("mov sp, #0x06000000");
+	// SP was established by the core1_entry reset stub (SDK_CORE1_STACK_TOP),
+	// before any C ran -- do NOT reset it here.
 
 	volatile uint32_t* addr = 0;
 	addr[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
 	addr[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
 
+	C1_TRACE("[c1] R1 loop-entry (mmu off)\r\n");  /* core 1 is executing core1_loop */
+
 	// Bring core 1 up to MMU + D-cache + SMP so the dual-core task scheduler's
 	// cross-core LDREX/STREX and SCU coherency work (core 0 marked the
 	// task-queue region shareable at boot, before this core started).
 	scheduler_coherency_init_core1();
+	C1_TRACE("[c1] R2 coherency-ok (mmu on)\r\n");  /* survived MMU/cache/SMP bring-up */
 
 #ifdef SCHED_STRESS_TEST
 	scheduler_stress_core1();  // Phase 0 two-core coherency torture; never returns
@@ -212,7 +265,10 @@ void core1_loop() {
 	// core 1 becomes the worker and never returns. (Folding the trampoline into
 	// the scheduler is a later phase.)
 	if (!core2_execute) {
+		C1_TRACE("[c1] R3 worker-start (core2_execute=0)\r\n");
 		scheduler_core1_worker();  // dual-core crypto worker; never returns
+	} else {
+		C1_TRACE("[c1] R3 trampoline (core2_execute=1)\r\n");
 	}
 
 	while (1) {
@@ -264,7 +320,7 @@ void arm_app_init() {
 
 	printf("[core2] launch...\n");
 	volatile uint32_t* core1_addr = (volatile uint32_t*) 0xFFFFFFF0;
-	*core1_addr = (uint32_t) core1_loop;
+	*core1_addr = (uint32_t) core1_entry;
 	// Place some machine code in strategic positions that will catch core1 if it crashes
 	// FIXME: clean this up and turn into a debug handler / monitor
 	volatile uint32_t* core1_addr2 = (volatile uint32_t*) 0x140; // catch 1
@@ -275,6 +331,10 @@ void arm_app_init() {
 	core1_addr2[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
 	core1_addr2[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
 
+	// The reset-vector word and catch stubs live in memory CPU1 reads with its
+	// caches off; flush core 0's D-cache so they are visible before we wake it.
+	Xil_DCacheFlush();
+	dsb();
 	asm("sev");
 	printf("[core2] now idling.\n");
 }
@@ -283,7 +343,7 @@ void arm_app_run(uint32_t arm_run_address) {
 	volatile uint32_t* core1_addr = (volatile uint32_t*) 0xFFFFFFF0;
 	volatile uint32_t* core1_addr2 = (volatile uint32_t*) 0x100; // catch 2
 
-	*core1_addr = (uint32_t) core1_loop;
+	*core1_addr = (uint32_t) core1_entry;
 	core1_addr2[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
 	core1_addr2[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
 
