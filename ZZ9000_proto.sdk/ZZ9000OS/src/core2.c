@@ -6,6 +6,8 @@
 #include "xil_misc_psreset_api.h"
 #include "core2.h"
 #include "sleep.h"
+#include "scheduler.h"
+#include "memorymap.h"
 
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
@@ -77,21 +79,187 @@ int __attribute__ ((visibility ("default"))) _putchar(char c) {
 volatile void (*core1_trampoline)(volatile struct ZZ9K_ENV* env);
 volatile int core2_execute = 0;
 
+void core1_loop();  /* forward decl: core1_entry branches into this C body */
+void core1_entry(void);  /* naked reset stub: 0xFFFFFFF0 points here; sets SP then branches to core1_loop */
+
 struct core_fault_slot core1_fault __attribute__((aligned(32))) = { CORE_FAULT_NONE, {0} };
 
 static void record_fault(uint32_t code, const char *name)
 {
+	taskq_shared_t *sh = scheduler_shared();
+	int slot = sh->core1_current_slot;
+
 	core1_fault.code = code;
 	Xil_DCacheFlushRange((INTPTR)&core1_fault, sizeof(core1_fault));
 	printf("%s: arm_exception_handler()!\n", name);
+
+	if (slot >= 0) {
+		/*
+		 * Core 1 faulted while running a dual-core scheduler task. Don't hang
+		 * the card: mark the in-flight slot FAILED so core 0 posts an error
+		 * completion (the Amiga falls back to software crypto), record the
+		 * fault code, and request a cold restart. core 0's harvest maps every
+		 * FAILED task to SDK_STATUS_INTERNAL_ERROR, so the status passed here
+		 * is unused. Then park on WFE until core 0 resets us back into
+		 * core1_loop (core1_cold_restart).
+		 */
+		taskq_fail(&sh->queue, slot, 0);
+		sh->core1_current_slot = -1;
+		sh->core1_fault_code = code;
+		sh->core1_restart_request = 1;
+		Xil_DCacheFlushRange((INTPTR)sh, sizeof(*sh));
+		__asm__ __volatile__("dsb" ::: "memory");
+		for (;;) {
+			__asm__ __volatile__("wfe" ::: "memory");
+		}
+	}
+
+	/*
+	 * Legacy surface-coprocessor path (no scheduler task in flight): hang until
+	 * core 0 notices core1_fault.code and resets the core.
+	 */
 	while (1) {
 	}
 }
 
+/*
+ * Cold-restart core 1 by re-running the CPU1 reset sequence (XAPP1079), so it
+ * re-enters core1_entry from its reset vector. Used by the dual-core scheduler
+ * (scheduler_core0_poll) to recover a worker that faulted and parked. 0xFFFFFFF0
+ * is re-pointed at core1_entry first in case the OCM word was disturbed.
+ */
+void core1_cold_restart(void)
+{
+	volatile uint32_t *core1_addr = (volatile uint32_t *) 0xFFFFFFF0;
+	uint32_t RegVal;
+
+	*core1_addr = (uint32_t) core1_entry;
+	Xil_DCacheFlush();  /* the reset vector write must reach OCM before CPU1 reads it */
+
+	Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
+	RegVal = Xil_In32(A9_CPU_RST_CTRL);
+	RegVal |= A9_RST1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
+	RegVal |= A9_CLKSTOP1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
+	RegVal &= ~A9_RST1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
+	RegVal &= ~A9_CLKSTOP1_MASK;
+	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
+	Xil_Out32(XSLCR_LOCK_ADDR, XSLCR_LOCK_CODE);
+
+	dmb();
+	dsb();
+	isb();
+	asm("sev");
+}
+
+/*
+ * SCHED_CORE1_TRACE (opt-in, off by default): raw UART1 (STDOUT_BASEADDRESS
+ * 0xE0001000) byte output for core-1 bring-up diagnostics. Deliberately uses NO
+ * libc, NO malloc, NO MMU and a trivial leaf-function stack frame, so it is
+ * valid on core 1 before the MMU/D-cache are up and regardless of any heap/stack
+ * corruption. SR @ 0x2C (TXFULL = 0x10), TX FIFO @ 0x30. Define SCHED_CORE1_TRACE
+ * to re-enable the staged [c1] R0..R3 markers when diagnosing bring-up; the
+ * production boot signal is the single "[sched] core 1 worker online" line.
+ */
+#ifdef SCHED_CORE1_TRACE
+static void c1_trace(const char *s)
+{
+	volatile uint32_t *sr   = (volatile uint32_t *)(0xE0001000u + 0x2Cu);
+	volatile uint32_t *fifo = (volatile uint32_t *)(0xE0001000u + 0x30u);
+	while (*s) {
+		while (*sr & 0x10u) { }          /* wait while TX FIFO full */
+		*fifo = (uint32_t)(unsigned char)*s++;
+	}
+}
+#define C1_TRACE(s) c1_trace(s)
+#else
+#define C1_TRACE(s) ((void)0)
+#endif
+
+/*
+ * Core-1 reset entry. The CPU1 reset vector (0xFFFFFFF0) points here. This must
+ * be NAKED: on Cortex-A9 reset the stack pointer is UNPREDICTABLE, so any
+ * compiler-generated prologue would push registers to a garbage SP and fault
+ * before a single instruction of C ran -- which is exactly what killed core 1
+ * (no markers at all, even the raw-UART one). We set SP to the reserved core-1
+ * stack in asm FIRST, with nothing on the stack yet, then branch into the C
+ * body. `b` (not `bl`): core1_loop never returns.
+ *
+ * Basic asm only (naked functions do not reliably support extended asm); the
+ * stack-top constant is single-sourced from memorymap.h via stringification.
+ * SDK_CORE1_STACK_TOP must be a valid ARM `mov` immediate for this one insn.
+ */
+#define CORE1_STR2(x) #x
+#define CORE1_STR(x)  CORE1_STR2(x)
+__attribute__((naked, used)) void core1_entry(void)
+{
+	__asm__ volatile(
+		"mov	sp, #" CORE1_STR(SDK_CORE1_STACK_TOP) "\n\t"
+		"b	core1_loop\n\t");
+}
+
+/*
+ * Core-1 exception state (VBAR + banked stacks). core1_entry set only the
+ * current (Supervisor) SP and bypassed the BSP boot.S, which programs VBAR to
+ * _vector_table (boot.S: mcr p15,0,rX,c12,c0,0) and sets up the banked IRQ/FIQ/
+ * Abort/Undefined stacks. Two things are therefore missing on core 1:
+ *   - VBAR: without it, a core-1 data/prefetch/undefined fault vectors through
+ *     inherited reset state instead of _vector_table, so the registered
+ *     handlers (arm_exception_handler_*) never run.
+ *   - the banked exception stacks: the BSP vectors (asm_vectors.S) save state
+ *     with `stmdb sp!` on the *faulting mode's* stack and run the C handler
+ *     (record_fault -> printf) in that mode, so a garbage banked SP crashes the
+ *     handler itself.
+ * Either gap means record_fault() never fails the task / requests a restart, so
+ * a faulting offloaded request hangs. Program both before core 1 runs any task.
+ * 8 KiB per mode covers the vpushed FP context plus printf.
+ */
+#define CORE1_EXC_STACK_SZ 0x2000
+static uint8_t core1_irq_stack[CORE1_EXC_STACK_SZ]   __attribute__((aligned(8), used));
+static uint8_t core1_fiq_stack[CORE1_EXC_STACK_SZ]   __attribute__((aligned(8), used));
+static uint8_t core1_abort_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), used));
+static uint8_t core1_undef_stack[CORE1_EXC_STACK_SZ] __attribute__((aligned(8), used));
+
+/*
+ * Program VBAR = _vector_table, then point each exception mode's banked SP at
+ * its own stack and return to the entry mode. Naked with PC-relative literals
+ * (`ldr ..., =sym`) so no value is carried across a mode switch -- FIQ banks
+ * r8-r12, which would corrupt register operands. I+F are masked while switching;
+ * the original CPSR is restored at the end. SCTLR.V is left at its reset default
+ * (0 = normal vectors, same as the boot core), so VBAR is the vector base.
+ */
+__attribute__((naked, used)) static void core1_init_exception_state(void)
+{
+	__asm__ volatile(
+		"ldr	r0, =_vector_table\n\t"            /* VBAR = BSP vector table */
+		"mcr	p15, 0, r0, c12, c0, 0\n\t"
+		"mrs	r0, cpsr\n\t"
+		"bic	r1, r0, #0x1f\n\t"
+		"orr	r1, r1, #0xc0\n\t"                 /* mask I+F during switches */
+		"orr	r2, r1, #0x12\n\t"                 /* IRQ mode  (0x12) */
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_irq_stack + "   CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"orr	r2, r1, #0x11\n\t"                 /* FIQ mode  (0x11) */
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_fiq_stack + "   CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"orr	r2, r1, #0x17\n\t"                 /* Abort mode (0x17) */
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_abort_stack + " CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"orr	r2, r1, #0x1b\n\t"                 /* Undefined  (0x1b) */
+		"msr	cpsr_c, r2\n\t"
+		"ldr	sp, =(core1_undef_stack + " CORE1_STR(CORE1_EXC_STACK_SZ) ")\n\t"
+		"msr	cpsr_c, r0\n\t"                    /* back to entry mode */
+		"bx	lr\n\t"
+		".ltorg\n\t");
+}
+
 #pragma GCC push_options
 #pragma GCC optimize ("O1")
-// core1_loop is executed on core1 (vs core0)
+// core1_loop is executed on core1 (vs core0), entered via core1_entry
 void core1_loop() {
+	C1_TRACE("[c1] R0 entry (stub set SP)\r\n");  /* proof: CPU1 reached the C body */
 	asm("mov	r0, r0");
 	asm("mrc	p15, 0, r1, c1, c0, 2");
 	/* read cp access control register (CACR) into r1 */
@@ -124,35 +292,41 @@ void core1_loop() {
 	asm("mcr	p15,0,r0,c1,c0,1");
 	/* write Auxiliary Control Register */
 
-	// stack
-	asm("mov sp, #0x06000000");
+	// SP was established by the core1_entry reset stub (SDK_CORE1_STACK_TOP),
+	// before any C ran -- do NOT reset it here.
 
 	volatile uint32_t* addr = 0;
 	addr[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
 	addr[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
 
-	while (1) {
-		while (!core2_execute) {
-			usleep(1);
-		}
-		core2_execute = 0;
-		printf("[core2] executing at %p.\n", core1_trampoline);
-		Xil_DCacheFlush();
-		Xil_ICacheInvalidate();
+	C1_TRACE("[c1] R1 loop-entry (mmu off)\r\n");  /* core 1 is executing core1_loop */
 
-		if (core1_trampoline) {
-			asm("push {r0-r12}");
-			// FIXME HACK save our stack pointer in 0x10000
-			asm("mov r0, #0x00010000");
-			asm("str sp, [r0]");
+	// Bring core 1 up to MMU + D-cache + SMP so the dual-core task scheduler's
+	// cross-core LDREX/STREX and SCU coherency work (core 0 marked the
+	// task-queue region shareable at boot, before this core started).
+	scheduler_coherency_init_core1();
+	C1_TRACE("[c1] R2 coherency-ok (mmu on)\r\n");  /* survived MMU/cache/SMP bring-up */
 
-			core1_trampoline(&arm_run_env);
+	// Program VBAR + banked exception stacks before running any task, so a
+	// data/prefetch/undefined fault vectors to the registered handlers and
+	// reaches record_fault() (which fails the task and requests a cold restart)
+	// instead of vectoring through stale state or dying on a garbage SP.
+	core1_init_exception_state();
+	C1_TRACE("[c1] R2b exc-state-ok\r\n");
 
-			asm("mov r0, #0x00010000");
-			asm("ldr sp, [r0]");
-			asm("pop {r0-r12}");
-		}
-	}
+#ifdef SCHED_STRESS_TEST
+	scheduler_stress_core1();  // Phase 0 two-core coherency torture; never returns
+#endif
+
+	// Core 1 runs the dual-core task-scheduler worker and never returns. It
+	// executes work offloaded from the OS -- crypto today, with datatypes,
+	// audio decode (MP3/Ogg/FLAC) and full app modules to follow -- and, in a
+	// later phase, hosted ARM apps, all through the same scheduler. The pre-v2.x
+	// REG_ZZ_ARM_RUN trampoline (upload a raw ARM blob and run it on core 1 in
+	// an uncached environment) has been removed; the v2 ARM-hosted app platform
+	// launches apps through the scheduler instead.
+	C1_TRACE("[c1] R3 worker-start\r\n");
+	scheduler_core1_worker();  // dual-core task worker; never returns
 }
 #pragma GCC pop_options
 
@@ -180,7 +354,7 @@ void arm_app_init() {
 
 	printf("[core2] launch...\n");
 	volatile uint32_t* core1_addr = (volatile uint32_t*) 0xFFFFFFF0;
-	*core1_addr = (uint32_t) core1_loop;
+	*core1_addr = (uint32_t) core1_entry;
 	// Place some machine code in strategic positions that will catch core1 if it crashes
 	// FIXME: clean this up and turn into a debug handler / monitor
 	volatile uint32_t* core1_addr2 = (volatile uint32_t*) 0x140; // catch 1
@@ -191,60 +365,12 @@ void arm_app_init() {
 	core1_addr2[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
 	core1_addr2[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
 
+	// The reset-vector word and catch stubs live in memory CPU1 reads with its
+	// caches off; flush core 0's D-cache so they are visible before we wake it.
+	Xil_DCacheFlush();
+	dsb();
 	asm("sev");
 	printf("[core2] now idling.\n");
-}
-
-void arm_app_run(uint32_t arm_run_address) {
-	volatile uint32_t* core1_addr = (volatile uint32_t*) 0xFFFFFFF0;
-	volatile uint32_t* core1_addr2 = (volatile uint32_t*) 0x100; // catch 2
-
-	*core1_addr = (uint32_t) core1_loop;
-	core1_addr2[0] = 0xe3e0000f; // mvn	r0, #15  -- loads 0xfffffff0
-	core1_addr2[1] = 0xe590f000; // ldr	pc, [r0] -- jumps to the address in that address
-
-	printf("[ARM_RUN] %lx\n", arm_run_address);
-	if (arm_run_address > 0) {
-		core1_trampoline = (volatile void (*)(
-				volatile struct ZZ9K_ENV*)) arm_run_address;
-		printf("[ARM_RUN] signaling second core.\n");
-		// publish the trampoline (and app code/env) before the execute flag
-		// becomes visible to core1
-		Xil_DCacheFlush();
-		Xil_ICacheInvalidate();
-		dmb();
-		dsb();
-		core2_execute = 1;
-		Xil_DCacheFlush();
-		Xil_ICacheInvalidate();
-	} else {
-		core1_trampoline = 0;
-		Xil_DCacheFlush();
-		dmb();
-		dsb();
-		core2_execute = 0;
-		Xil_DCacheFlush();
-	}
-
-	// FIXME move this out of here
-	// sequence to reset cpu1 taken from https://xilinx-wiki.atlassian.net/wiki/spaces/A/pages/18842504/XAPP1079+Latest+Information
-
-	Xil_Out32(XSLCR_UNLOCK_ADDR, XSLCR_UNLOCK_CODE);
-	uint32_t RegVal = Xil_In32(A9_CPU_RST_CTRL);
-	RegVal |= A9_RST1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-	RegVal |= A9_CLKSTOP1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-	RegVal &= ~A9_RST1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-	RegVal &= ~A9_CLKSTOP1_MASK;
-	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
-	Xil_Out32(XSLCR_LOCK_ADDR, XSLCR_LOCK_CODE);
-
-	dmb();
-	dsb();
-	isb();
-	asm("sev");
 }
 
 void arm_app_input_event(uint32_t evt) {

@@ -48,6 +48,7 @@ docker run --rm \
   -e CLEAN="$CLEAN" \
   -e BOOTIMAGE="$BOOTIMAGE" \
   -e OUTPUT="$OUTPUT" \
+  -e EXTRA_CFLAGS="${EXTRA_CFLAGS:-}" \
   "$IMAGE" bash -lc '
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive

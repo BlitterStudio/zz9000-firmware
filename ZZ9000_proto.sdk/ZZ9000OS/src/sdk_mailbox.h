@@ -161,6 +161,11 @@
 #define SDK_CRYPTO_KX_X25519           1U
 #define SDK_CRYPTO_KX_P256             2U
 
+/* KX flags word. KEYGEN turns a P-256 request into scalar*G: `scalar` is the
+ * private key, the peer point is ignored, and `dst` receives the full 65-byte
+ * uncompressed public point. Any other flag value is rejected (UNSUPPORTED). */
+#define SDK_CRYPTO_KX_FLAG_KEYGEN      1U
+
 #define SDK_OP_CRYPTO_VERIFY           0x0804U
 #define SDK_CRYPTO_VERIFY_ECDSA_P256_SHA256        1U
 #define SDK_CRYPTO_VERIFY_RSA_PKCS1_2048_SHA256    2U
@@ -170,6 +175,9 @@
 #define SDK_SERVICE_FLAG_CRYPTO_ECDSA_P256 (1U << 18)
 #define SDK_SERVICE_FLAG_CRYPTO_RSA_2048   (1U << 19)
 #define SDK_SERVICE_FLAG_CRYPTO_AES_GCM    (1U << 20)
+/* P-256 keygen (scalar*G -> full point) via the KX KEYGEN flag. Distinct from
+ * CRYPTO_P256 (derive only), which shipped without keygen. */
+#define SDK_SERVICE_FLAG_CRYPTO_P256_KEYGEN (1U << 21)
 
 /* Crypto verify payload: 48 bytes to match the inline mailbox entry size and
  * the SDK ZZ9KCryptoVerifyPayload byte-for-byte. All fields are big-endian
@@ -195,6 +203,7 @@ struct SDKCryptoVerifyPayload {
 
 #define SDK_OP_DIAG_READ               0x0900U
 #define SDK_OP_DIAG_TIMING             0x0901U
+#define SDK_OP_DIAG_SCHED              0x0902U
 
 #define SDK_MAX_SHARED_BUFFERS         32U
 #define SDK_MAX_SURFACES               16U
@@ -313,5 +322,33 @@ void sdk_mailbox_irq_disable(void);
 void sdk_mailbox_task(void);
 uint16_t sdk_mailbox_status(void);
 uint32_t sdk_mailbox_address(void);
+
+/*
+ * Run a crypto task's compute on the calling core. op_params points at one of
+ * the crypto_*_params structs packed by the core-0 fronts; result_payload is a
+ * 48-byte SDKCryptoResultPayload buffer written by the compute. Returns an
+ * SDK_STATUS_* code. Shared by the dual-core scheduler's core-1 worker and the
+ * core-0 inline/fallback path (see scheduler.h). Cache maintenance for the data
+ * buffers is done inside, on whichever core runs it.
+ */
+uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
+                                     uint8_t *result_payload);
+
+/*
+ * Post a deferred completion for a task the core-1 scheduler finished (see
+ * scheduler_core0_poll). Returns 1 if posted, 0 if the completion ring is full
+ * (retry) or the mailbox is inactive. Runs only on core 0's main loop.
+ */
+int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
+                              uint16_t opcode, uint16_t status,
+                              const uint8_t *payload, uint16_t payload_len);
+
+/*
+ * True while a harvested task's slot still belongs to the current mailbox
+ * lifetime. scheduler_core0_poll drops (releases without posting) a task for
+ * which this returns 0, so a task that outlived the mailbox it was submitted
+ * under never posts a stale request_id/user_cookie into the new completion ring.
+ */
+int sdk_mailbox_task_gen_ok(int slot);
 
 #endif /* SDK_MAILBOX_H */

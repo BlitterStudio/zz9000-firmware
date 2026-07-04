@@ -51,6 +51,7 @@ void Xil_AssertNonVoid() {}
 #include "interrupt.h"
 #include "bootrom.h"
 #include "core2.h"
+#include "scheduler.h"
 #include "adc.h"
 #include "ax.h"
 #include "watchdog.h"
@@ -342,10 +343,31 @@ int main() {
 	handle_amiga_reset(AMIGA_RESET_INIT_MEDIA);
 #endif
 
+	// Mark the task-queue region shareable-cacheable in the shared MMU table
+	// before core 1 starts, so the SCU keeps it coherent once core 1 brings up
+	// its own MMU/D-cache. Must precede arm_app_init() (which launches core 1).
+	scheduler_coherency_init_core0();
+#ifdef SCHED_STRESS_TEST
+	scheduler_stress_init();   // init the shared block before core 1 starts
+#else
+	scheduler_boot_init();     // init the task queue + watchdog before core 1 starts
+#endif
+
 	// ARM app run environment
 	arm_app_init();
+#ifdef SCHED_STRESS_TEST
+	scheduler_stress_core0();  // Phase 0 two-core coherency torture; never returns
+#else
+	// Confirm core 1's scheduler worker checked in before trusting the async
+	// offload path; if it never does, stay in single-core mode (all inline).
+	scheduler_confirm_core1_boot();
+	if (scheduler_core1_available()) {
+		print("[sched] core 1 worker online\r\n");
+	} else {
+		print("[sched] core 1 offline - single-core fallback\r\n");
+	}
+#endif
 	volatile struct ZZ9K_ENV* arm_run_env = arm_app_get_run_env();
-	uint32_t arm_run_address = 0;
 
 	// graphics temporary registers
 	uint16_t rect_x1 = 0;
@@ -1174,14 +1196,10 @@ int main() {
 					}
 					break;
 
-				// ARM core 2 execution
-				case REG_ZZ_ARM_RUN_HI:
-					arm_run_address = ((u32) zdata) << 16;
-					break;
-				case REG_ZZ_ARM_RUN_LO:
-					arm_run_address |= zdata;
-					arm_app_run(arm_run_address);
-					break;
+				// ARM core 1 execution: the pre-v2.x REG_ZZ_ARM_RUN "upload a
+				// raw ARM blob and run it on core 1" launch has been removed
+				// (core 1 is the dual-core scheduler worker). The argv/event
+				// registers below are inert with no app to launch.
 				case REG_ZZ_ARM_ARGC:
 					arm_run_env->argc = zdata;
 					break;
@@ -1693,6 +1711,18 @@ int main() {
 			mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG0, 0);
 			need_req_ack = 0;
 		}
+
+		/*
+		 * Dual-core scheduler service. Harvest tasks core 1 finished and post
+		 * their deferred completions EVERY iteration -- so results reach the
+		 * Amiga promptly even while display-load Zorro traffic keeps core 0 in
+		 * the write/read branches (exactly the contention case we offload for).
+		 * The queue is opcode-agnostic; Phase 1 feeds it the crypto service,
+		 * later phases add image/compression and MP3. The opportunistic inline
+		 * SHORT-drain is gated on no Zorro request having been serviced this
+		 * iteration. Dormant (a cheap empty-queue scan) until core 1 is enabled.
+		 */
+		scheduler_core0_poll((writereq || readreq) ? 1 : 0, 0);
 	}
 
 	cleanup_platform();
