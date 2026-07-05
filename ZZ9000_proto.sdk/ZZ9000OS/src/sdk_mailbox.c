@@ -186,6 +186,9 @@ struct SDKDiagSchedPayload {
 	uint8_t core1_online[4];
 	uint8_t tasks_on_core1[4];
 	uint8_t tasks_on_core0[4];
+	/* version 2: decode-only timing, see timing_decode_requests/_us. */
+	uint8_t decode_requests[4];
+	uint8_t decode_us[4];
 };
 
 struct SDKSurfaceInfoPayload {
@@ -640,8 +643,8 @@ typedef char SDKDiagPayload_must_be_48_bytes[
 typedef char SDKDiagTimingPayload_must_be_48_bytes[
 	(sizeof(struct SDKDiagTimingPayload) == 48U) ? 1 : -1
 ];
-typedef char SDKDiagSchedPayload_must_be_16_bytes[
-	(sizeof(struct SDKDiagSchedPayload) == 16U) ? 1 : -1
+typedef char SDKDiagSchedPayload_must_be_24_bytes[
+	(sizeof(struct SDKDiagSchedPayload) == 24U) ? 1 : -1
 ];
 typedef char SDKSurfaceInfoPayload_must_be_48_bytes[
 	(sizeof(struct SDKSurfaceInfoPayload) == 48U) ? 1 : -1
@@ -792,6 +795,18 @@ static uint32_t timing_last_opcode;
 static uint32_t timing_last_us;
 static uint32_t timing_max_opcode;
 static uint32_t timing_max_us;
+/*
+ * Decode-only timing (diagnostic, not functional). Brackets just the
+ * sdk_decompress_buffer() compute inside sdk_mailbox_run_offload_task, which
+ * is shared by the core-1 worker and the core-0 inline fallback. Unlike
+ * timing_total_us (whole-request time -- for a core-1-deferred decompress
+ * that is only the enqueue latency, not the decode itself), this isolates
+ * actual decode compute time so archive transfer-vs-decode can be split on
+ * hardware. Counts every attempt, success or failure, like
+ * record_request_timing does for the whole-request counters above.
+ */
+static uint32_t timing_decode_requests;
+static uint32_t timing_decode_us;
 
 static uint32_t surface_format_bytes(uint32_t format);
 
@@ -3447,12 +3462,19 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		    (const struct decompress_op_params *)d->op_params;
 		struct SDKDecompressResult result;
 		volatile struct SDKDecompressResultPayload *reply;
+		XTime decode_start;
+		XTime decode_end;
 		uint16_t s;
 
 		Xil_DCacheInvalidateRange((INTPTR)d->in_addr, d->in_len);
+		XTime_GetTime(&decode_start);
 		s = sdk_decompress_buffer(p->algorithm, p->flags,
 		        (const uint8_t *)(uintptr_t)d->in_addr, d->in_len,
 		        (uint8_t *)(uintptr_t)d->out_addr, d->out_cap, &result);
+		XTime_GetTime(&decode_end);
+		timing_decode_requests = saturated_add_u32(timing_decode_requests, 1U);
+		timing_decode_us = saturated_add_u32(timing_decode_us,
+		    timing_delta_us(decode_start, decode_end));
 		if (s != SDK_STATUS_OK) {
 			*result_len = 0;
 			return s;
@@ -4335,10 +4357,14 @@ static uint16_t handle_diag_sched(volatile struct SDKMailboxEntry *req,
 	write_completion(comp, req, SDK_STATUS_OK, sizeof(*sched));
 	memset((void *)comp->payload, 0, sizeof(comp->payload));
 	sched = (volatile struct SDKDiagSchedPayload *)comp->payload;
-	put_be32(sched->version, 1U);
+	/* version 2: appends decode_requests/decode_us (Task 7). Readers that
+	 * only know version 1 can keep reading the first 16 bytes unchanged. */
+	put_be32(sched->version, 2U);
 	put_be32(sched->core1_online, scheduler_core1_available() ? 1U : 0U);
 	put_be32(sched->tasks_on_core1, sh->tasks_on_core1);
 	put_be32(sched->tasks_on_core0, sh->tasks_on_core0);
+	put_be32(sched->decode_requests, timing_decode_requests);
+	put_be32(sched->decode_us, timing_decode_us);
 	return SDK_STATUS_OK;
 }
 
@@ -4534,6 +4560,8 @@ void sdk_mailbox_init(void)
 	timing_last_us = 0;
 	timing_max_opcode = 0;
 	timing_max_us = 0;
+	timing_decode_requests = 0;
+	timing_decode_us = 0;
 	memset(shared_buffers, 0, sizeof(shared_buffers));
 	memset(surfaces, 0, sizeof(surfaces));
 	memset(audio_streams, 0, sizeof(audio_streams));
