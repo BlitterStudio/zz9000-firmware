@@ -115,6 +115,7 @@
 #define SDK_SERVICE_FLAG_CODEC_ZLIB_FEED        (1U << 26)
 #define SDK_SERVICE_FLAG_CODEC_GZIP_FEED        (1U << 27)
 #define SDK_SERVICE_FLAG_CODEC_LZMA2            (1U << 28)
+#define SDK_SERVICE_FLAG_CODEC_LZH              (1U << 29)
 #define SDK_SERVICE_FLAG_CRYPTO_X25519          (1U << 16)
 
 #define SDK_OP_NOP                     0x0000U
@@ -304,6 +305,10 @@ struct SDKCryptoVerifyPayload {
 #define SDK_COMPRESSION_LZ4_BLOCK      4U
 #define SDK_COMPRESSION_LZMA_ALONE     5U
 #define SDK_COMPRESSION_LZMA2          6U
+#define SDK_COMPRESSION_LH1            7U
+#define SDK_COMPRESSION_LH5            8U
+#define SDK_COMPRESSION_LH6            9U
+#define SDK_COMPRESSION_LH7            10U
 
 #define SDK_DECOMPRESS_FLAG_EXPECT_END (1U << 0)
 #define SDK_DECOMPRESS_FLAG_FEED_INPUT (1U << 1)

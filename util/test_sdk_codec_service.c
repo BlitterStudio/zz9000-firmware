@@ -125,6 +125,16 @@ int main(int argc, char **argv)
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_COMPRESSION_LZMA2");
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_COMPRESSION_LH1");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_COMPRESSION_LH5");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_COMPRESSION_LH6");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_COMPRESSION_LH7");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_SERVICE_FLAG_CODEC_LZH");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_DECOMPRESS_RESULT_STREAM_END");
 
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
@@ -169,6 +179,8 @@ int main(int argc, char **argv)
 	                      "SDK_SERVICE_FLAG_CODEC_ZLIB_FEED");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "SDK_SERVICE_FLAG_CODEC_GZIP_FEED");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_CODEC_LZH");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "SDKDecompressPayload_must_be_48_bytes");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",

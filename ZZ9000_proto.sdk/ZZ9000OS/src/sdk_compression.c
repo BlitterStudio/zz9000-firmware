@@ -14,6 +14,7 @@
 #include "Lzma2Dec.h"
 #include "LzmaDec.h"
 #include "zlib.h"
+#include "lzh/zz9k_lzh.h"
 
 #define SDK_DECOMPRESS_TEST_CHUNK 32768U
 #define SDK_DECOMPRESS_STREAM_SESSIONS 4U
@@ -1073,6 +1074,10 @@ uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
 	if (algorithm == SDK_COMPRESSION_LZMA2)
 		return sdk_decompress_lzma2(src, src_length, dst,
 		                            dst_capacity, result);
+	if (algorithm == SDK_COMPRESSION_LH1 || algorithm == SDK_COMPRESSION_LH5 ||
+	    algorithm == SDK_COMPRESSION_LH6 || algorithm == SDK_COMPRESSION_LH7)
+		return sdk_decompress_lzh(algorithm, src, src_length, dst,
+		                          dst_capacity, result);
 
 	window_bits = compression_window_bits(algorithm);
 	if (window_bits == 0)
@@ -1143,6 +1148,12 @@ uint16_t sdk_decompress_test_buffer(uint32_t algorithm, uint32_t flags,
 	if (algorithm == SDK_COMPRESSION_LZMA2)
 		return sdk_decompress_lzma2_test(src, src_length,
 		                                 output_limit, result);
+	/* Decode-TEST (dry-run, no output buffer) is out of scope for the LZH
+	 * decode-offload feature -- the vendored core always writes through the
+	 * membuf shim, so there is no streaming "count bytes only" mode. */
+	if (algorithm == SDK_COMPRESSION_LH1 || algorithm == SDK_COMPRESSION_LH5 ||
+	    algorithm == SDK_COMPRESSION_LH6 || algorithm == SDK_COMPRESSION_LH7)
+		return SDK_STATUS_UNSUPPORTED;
 
 	window_bits = compression_window_bits(algorithm);
 	if (window_bits == 0)
