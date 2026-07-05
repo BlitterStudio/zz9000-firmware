@@ -126,6 +126,14 @@ C_SRCS = \
 	$(SRC_DIR)/fw_update.c \
 	$(SRC_DIR)/usb_proxy.c \
 	$(SRC_DIR)/sdk_compression.c \
+	$(SRC_DIR)/lzh/extract.c \
+	$(SRC_DIR)/lzh/huf.c \
+	$(SRC_DIR)/lzh/dhuf.c \
+	$(SRC_DIR)/lzh/shuf.c \
+	$(SRC_DIR)/lzh/slide.c \
+	$(SRC_DIR)/lzh/larc.c \
+	$(SRC_DIR)/lzh/maketbl.c \
+	$(SRC_DIR)/lzh/maketree.c \
 	$(SRC_DIR)/sdk_crypto.c \
 	$(SRC_DIR)/bearssl/ec_c25519_m31.c \
 	$(SRC_DIR)/bearssl/ec_p256_m31.c \
@@ -236,6 +244,12 @@ $(BOOTROM_IMAGE_OBJ): $(BOOTROM_IMAGE_BIN)
 $(BUILD_DIR)/usb/ulpi.o: $(SRC_DIR)/usb/ulpi.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O0 -MMD -MP -o $@ $<
+
+# sdk_compression.c: needs the vendored LZH decode core headers (src/lzh)
+# for the upcoming LZH backend (decode_lzhuf() et al).
+$(BUILD_DIR)/sdk_compression.o: $(SRC_DIR)/sdk_compression.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(SRC_DIR)/lzh -MMD -MP -o $@ $<
 
 # Default rule for all other files (-O2).
 # -MMD emits a .d file next to the .o listing every header the source
