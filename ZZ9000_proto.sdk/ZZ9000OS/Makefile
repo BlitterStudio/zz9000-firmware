@@ -105,6 +105,10 @@ C_SRCS = \
 	$(SRC_DIR)/scheduler.c \
 	$(SRC_DIR)/scheduler_arm.c \
 	$(SRC_DIR)/scheduler_stress.c \
+	$(SRC_DIR)/sdk_smp_lock.c \
+	$(SRC_DIR)/sdk_smp_lock_arm.c \
+	$(SRC_DIR)/sdk_decode_reclaim.c \
+	$(SRC_DIR)/sdk_decode_reclaim_arm.c \
 	$(SRC_DIR)/dma_acc.c \
 	$(SRC_DIR)/dma_rtg.c \
 	$(SRC_DIR)/usb.c \

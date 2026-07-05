@@ -55,4 +55,12 @@ uint16_t sdk_decompress_stream_read(
 	struct SDKDecompressStreamResult *result);
 uint16_t sdk_decompress_stream_close(uint32_t session);
 
+/*
+ * Reclaim any heap blocks a core-1 one-shot decode still held when it was
+ * cold-reset mid-decode. Call from core 0 (core1_cold_restart) while core 1 is
+ * halted and after the malloc lock has been reset. Returns blocks reclaimed
+ * (0 when the last decode completed cleanly).
+ */
+unsigned sdk_compression_reclaim_core1_decode(void);
+
 #endif /* SDK_COMPRESSION_H */
