@@ -16,7 +16,12 @@ SMP_LOCK_SOURCES := smp_lock_test.c $(SRC_DIR)/sdk_smp_lock.c
 SMP_LOCK_DEPS := $(SRC_DIR)/sdk_smp_lock.h
 SMP_LOCK_LDLIBS := -lpthread
 
-.PHONY: test clean smp_lock
+OFFLOAD_PARAMS_TARGET := $(BUILD_DIR)/offload_params_test
+OFFLOAD_PARAMS_CPPFLAGS := -DTASKQ_HOST_TEST -I$(SRC_DIR)
+OFFLOAD_PARAMS_SOURCES := offload_params_test.c $(SRC_DIR)/scheduler.c
+OFFLOAD_PARAMS_DEPS := $(SRC_DIR)/scheduler.h $(SRC_DIR)/sdk_offload_params.h
+
+.PHONY: test clean smp_lock offload_params
 
 test: $(TARGET)
 	$(TARGET)
@@ -31,6 +36,13 @@ smp_lock: $(SMP_LOCK_TARGET)
 $(SMP_LOCK_TARGET): $(SMP_LOCK_SOURCES) $(SMP_LOCK_DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(SMP_LOCK_CPPFLAGS) $(CFLAGS) -o $@ $(SMP_LOCK_SOURCES) $(SMP_LOCK_LDLIBS)
+
+offload_params: $(OFFLOAD_PARAMS_TARGET)
+	$(OFFLOAD_PARAMS_TARGET)
+
+$(OFFLOAD_PARAMS_TARGET): $(OFFLOAD_PARAMS_SOURCES) $(OFFLOAD_PARAMS_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(OFFLOAD_PARAMS_CPPFLAGS) $(CFLAGS) -o $@ $(OFFLOAD_PARAMS_SOURCES)
 
 clean:
 	rm -rf $(BUILD_DIR)

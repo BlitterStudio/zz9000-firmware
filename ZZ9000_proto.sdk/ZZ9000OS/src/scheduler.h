@@ -26,6 +26,10 @@
 #define TASKQ_OP_CRYPTO_KX     0x0803u
 #define TASKQ_OP_CRYPTO_VERIFY 0x0804u
 
+/* Decompress opcode mirrored from sdk_mailbox.h (SDK_OP_DECOMPRESS); same
+ * value, two namespaces, matching the crypto pattern above. */
+#define TASKQ_OP_DECOMPRESS    0x0600u
+
 typedef enum {
   TASK_FREE    = 0,
   TASK_QUEUED  = 1,

@@ -13,6 +13,7 @@
 #include "sdk_mailbox.h"
 #include "sdk_compression.h"
 #include "sdk_crypto.h"
+#include "sdk_offload_params.h"
 #include "sdk_image_stream.h"
 #include "sdk_jpeg.h"
 #include "sdk_surface.h"
@@ -3417,12 +3418,13 @@ uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
  * claimed taskq_desc_t to its service handler, filling result_payload and
  * *result_len for taskq_complete().
  *
- * Today only the crypto opcode class is wired up, reproducing the
- * pre-extraction behaviour exactly: on SDK_STATUS_OK the completion carries
- * one full SDKCryptoResultPayload; on any other status it carries zero
- * payload bytes, matching sdk_mailbox's own inline dispatch (crypto_dispatch,
- * above) which likewise omits the payload on failure via complete_status().
- * SDK_OP_DECOMPRESS is added in Task 5.
+ * The crypto opcode class reproduces the pre-extraction behaviour exactly:
+ * on SDK_STATUS_OK the completion carries one full SDKCryptoResultPayload;
+ * on any other status it carries zero payload bytes, matching sdk_mailbox's
+ * own inline dispatch (crypto_dispatch, above) which likewise omits the
+ * payload on failure via complete_status(). SDK_OP_DECOMPRESS mirrors the
+ * same convention against handle_decompress's SDKDecompressResultPayload
+ * (field order and cache invalidate/flush match exactly).
  */
 uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
                                       uint8_t *result_payload,
@@ -3440,7 +3442,33 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		    (uint32_t)sizeof(struct SDKCryptoResultPayload) : 0U;
 		return s;
 	}
-	/* case SDK_OP_DECOMPRESS: added in Task 5 */
+	case SDK_OP_DECOMPRESS: {
+		const struct decompress_op_params *p =
+		    (const struct decompress_op_params *)d->op_params;
+		struct SDKDecompressResult result;
+		volatile struct SDKDecompressResultPayload *reply;
+		uint16_t s;
+
+		Xil_DCacheInvalidateRange((INTPTR)d->in_addr, d->in_len);
+		s = sdk_decompress_buffer(p->algorithm, p->flags,
+		        (const uint8_t *)(uintptr_t)d->in_addr, d->in_len,
+		        (uint8_t *)(uintptr_t)d->out_addr, d->out_cap, &result);
+		if (s != SDK_STATUS_OK) {
+			*result_len = 0;
+			return s;
+		}
+		Xil_DCacheFlushRange((INTPTR)d->out_addr, result.bytes_written);
+
+		memset(result_payload, 0, sizeof(struct SDKDecompressResultPayload));
+		reply = (volatile struct SDKDecompressResultPayload *)result_payload;
+		put_be32(reply->bytes_consumed, result.bytes_consumed);
+		put_be32(reply->bytes_written, result.bytes_written);
+		put_be32(reply->checksum, result.checksum);
+		put_be32(reply->algorithm, result.algorithm);
+		put_be32(reply->flags, result.flags);
+		*result_len = sizeof(struct SDKDecompressResultPayload);
+		return SDK_STATUS_OK;
+	}
 	default:
 		*result_len = 0;
 		return SDK_STATUS_UNSUPPORTED;

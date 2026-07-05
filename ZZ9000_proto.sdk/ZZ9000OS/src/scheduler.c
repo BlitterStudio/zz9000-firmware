@@ -246,6 +246,8 @@ taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len)
   case TASKQ_OP_CRYPTO_STREAM:
   case TASKQ_OP_CRYPTO_AEAD:
     return (in_len <= TASKQ_SHORT_MAX_BYTES) ? TASK_SHORT : TASK_LONG;
+  case TASKQ_OP_DECOMPRESS:
+    return TASK_LONG;
   default:
     return TASK_LONG;              /* unknown/heavy: never drained on core 0 */
   }
