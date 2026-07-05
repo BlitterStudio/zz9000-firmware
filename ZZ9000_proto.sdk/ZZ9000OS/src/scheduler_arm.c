@@ -143,9 +143,11 @@ void scheduler_coherency_init_core1(void)
 /*
  * Run one claimed task's compute on the calling core and mark it DONE. This is
  * the scheduler's compute-dispatch seam: the queue/worker/harvest machinery is
- * opcode-agnostic, and this function routes a task to its service handler.
- * Phase 1 wires only the crypto service (sdk_mailbox_run_crypto_task); later
- * phases extend the dispatch to image/compression and MP3 offload here.
+ * opcode-agnostic, and this function hands the task to the opcode-dispatched
+ * offload executor, sdk_mailbox_run_offload_task (sdk_mailbox.c), which routes
+ * it to its service handler. Today that executor wires only the crypto
+ * service (sdk_mailbox_run_crypto_task); later phases extend its dispatch to
+ * decompression, image, and MP3 offload without changing this function.
  *
  * The service handler owns all data-buffer cache maintenance, so this runs
  * correctly on whichever core executes it: core 1 in the normal async path, or
@@ -153,19 +155,18 @@ void scheduler_coherency_init_core1(void)
  * task that ran to completion -- including a legitimate failure such as an AEAD
  * auth mismatch -- is a DONE task carrying its exact SDK_STATUS_*; only a
  * core-1 hardware fault (handled in core2.c) marks a slot FAILED. For crypto the
- * completion payload is always one SDKCryptoResultPayload (== TASKQ_RESULT_PAYLOAD
- * bytes) on success, none on error, matching the pre-scheduler handlers
- * byte-for-byte.
+ * completion payload length is decided inside sdk_mailbox_run_offload_task:
+ * one SDKCryptoResultPayload (== TASKQ_RESULT_PAYLOAD bytes) on success, none
+ * on error, matching the pre-scheduler handlers byte-for-byte.
  */
 static uint16_t scheduler_run_slot(taskq_desc_t *d)
 {
   taskq_shared_t *sh = scheduler_shared();
   uint8_t payload[TASKQ_RESULT_PAYLOAD];
+  uint32_t len = 0;
   int slot = (int)(d - sh->queue.descs);
-  uint16_t status = sdk_mailbox_run_crypto_task((uint16_t)d->opcode,
-                                                d->op_params, payload);
-  uint16_t len = (status == SDK_STATUS_OK) ? (uint16_t)TASKQ_RESULT_PAYLOAD : 0u;
-  taskq_complete(&sh->queue, slot, status, payload, len);
+  uint16_t status = sdk_mailbox_run_offload_task(d, payload, &len);
+  taskq_complete(&sh->queue, slot, status, payload, (uint16_t)len);
   return status;
 }
 

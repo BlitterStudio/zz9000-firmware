@@ -3411,6 +3411,43 @@ uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
 }
 
 /*
+ * Opcode-dispatched offload executor. This is the scheduler's single
+ * compute-dispatch seam (scheduler_run_slot in scheduler_arm.c): the queue/
+ * worker/harvest machinery is opcode-agnostic, and this function routes a
+ * claimed taskq_desc_t to its service handler, filling result_payload and
+ * *result_len for taskq_complete().
+ *
+ * Today only the crypto opcode class is wired up, reproducing the
+ * pre-extraction behaviour exactly: on SDK_STATUS_OK the completion carries
+ * one full SDKCryptoResultPayload; on any other status it carries zero
+ * payload bytes, matching sdk_mailbox's own inline dispatch (crypto_dispatch,
+ * above) which likewise omits the payload on failure via complete_status().
+ * SDK_OP_DECOMPRESS is added in Task 5.
+ */
+uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
+                                      uint8_t *result_payload,
+                                      uint32_t *result_len)
+{
+	switch (d->opcode) {
+	case SDK_OP_CRYPTO_HASH:
+	case SDK_OP_CRYPTO_STREAM:
+	case SDK_OP_CRYPTO_AEAD:
+	case SDK_OP_CRYPTO_KX:
+	case SDK_OP_CRYPTO_VERIFY: {
+		uint16_t s = sdk_mailbox_run_crypto_task((uint16_t)d->opcode,
+		                                         d->op_params, result_payload);
+		*result_len = (s == SDK_STATUS_OK) ?
+		    (uint32_t)sizeof(struct SDKCryptoResultPayload) : 0U;
+		return s;
+	}
+	/* case SDK_OP_DECOMPRESS: added in Task 5 */
+	default:
+		*result_len = 0;
+		return SDK_STATUS_UNSUPPORTED;
+	}
+}
+
+/*
  * Front dispatch helper. When core 1 is available, enqueue the task and defer
  * the completion (return SDK_STATUS_QUEUED); sdk_mailbox_task then consumes the
  * request without posting a completion, and scheduler_core0_poll posts it when

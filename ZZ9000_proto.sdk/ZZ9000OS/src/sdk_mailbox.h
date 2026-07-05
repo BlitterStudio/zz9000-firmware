@@ -10,6 +10,7 @@
 #define SDK_MAILBOX_H
 
 #include <stdint.h>
+#include "scheduler.h"
 
 #define SDK_MAILBOX_MAGIC              0x5a5a394bUL
 #define SDK_MAILBOX_REG_MAGIC_VALUE    0x5a39U
@@ -333,6 +334,20 @@ uint32_t sdk_mailbox_address(void);
  */
 uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
                                      uint8_t *result_payload);
+
+/*
+ * Opcode-dispatched offload executor: routes a claimed taskq_desc_t (see
+ * scheduler.h) to its service handler on the calling core, filling
+ * result_payload (a TASKQ_RESULT_PAYLOAD-byte buffer) and *result_len.
+ * Currently only the crypto opcode class is wired up (byte-identical to the
+ * pre-extraction scheduler_run_slot: full SDKCryptoResultPayload length on
+ * SDK_STATUS_OK, zero otherwise); SDK_OP_DECOMPRESS is added in Task 5. Used
+ * by the dual-core scheduler's core-1 worker and core-0 inline/fallback path
+ * (scheduler_arm.c: scheduler_run_slot).
+ */
+uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
+                                      uint8_t *result_payload,
+                                      uint32_t *result_len);
 
 /*
  * Post a deferred completion for a task the core-1 scheduler finished (see
