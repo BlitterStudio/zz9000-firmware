@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "sdk_compression.h"
+#include "sdk_smp_lock.h"
+#include "sdk_decode_reclaim.h"
 #include "Lzma2Dec.h"
 #include "LzmaDec.h"
 #include "zlib.h"
@@ -55,19 +57,97 @@ static struct SDKDecompressStreamSession decompress_streams[
 ];
 static uint32_t next_decompress_stream_id = 1U;
 
+/*
+ * Heap wrappers for the decode backends. On core 1 the block is recorded (and
+ * the table cleaned to DRAM via sdk_decode_flush_table) so core 0 can reclaim
+ * it if the worker is cold-reset mid-decode; on core 0 (inline fallback, and
+ * the stream/test paths, which never run on core 1) they are plain malloc/free
+ * because core 0 is never force-reset. Ordering is deliberate -- track AFTER a
+ * successful malloc, untrack-then-clean BEFORE free -- so a worker halted at any
+ * point leaks at most one block and never exposes a freed pointer to core 0's
+ * reclaim. See sdk_decode_reclaim.h.
+ */
+static void *decode_malloc(size_t size)
+{
+	void *p = malloc(size);
+
+	if (p && smp_cpu_id() == 1) {
+		sdk_decode_track(p);
+		sdk_decode_flush_table();
+	}
+	return p;
+}
+
+static void decode_free(void *ptr)
+{
+	if (ptr && smp_cpu_id() == 1) {
+		sdk_decode_untrack(ptr);
+		sdk_decode_flush_table();   /* DRAM shows slot cleared before free */
+	}
+	free(ptr);
+}
+
 static void *lzma_alloc(ISzAllocPtr alloc, size_t size)
 {
 	(void)alloc;
-	return malloc(size);
+	return decode_malloc(size);
 }
 
 static void lzma_free(ISzAllocPtr alloc, void *address)
 {
 	(void)alloc;
-	free(address);
+	decode_free(address);
 }
 
 static const ISzAlloc lzma_allocator = { lzma_alloc, lzma_free };
+
+/* zlib allocator callbacks routed through the same core-1-tracking wrappers. */
+static voidpf zlib_decode_alloc(voidpf opaque, uInt items, uInt size)
+{
+	(void)opaque;
+	return (voidpf)decode_malloc((size_t)items * (size_t)size);
+}
+
+static void zlib_decode_free(voidpf opaque, voidpf address)
+{
+	(void)opaque;
+	decode_free((void *)address);
+}
+
+/*
+ * Reclaim the blocks a killed core-1 decode still held. This closes the leak
+ * and, together with the tracking table's clean/invalidate discipline, the
+ * table-driven double-free.
+ *
+ * Residual (known, low-probability): the blocks live in the shared newlib heap,
+ * and free() trusts that heap's chunk/arena metadata. That metadata was written
+ * by core 1 under g_malloc_lock (ordering barriers, not write-back); if a line
+ * of it were still dirty-only in core 1's L1 at the force-reset it would be
+ * dropped, and freeing against the stale DRAM view could corrupt the free list.
+ * Decode working sets are large, so that metadata is almost always evicted to
+ * DRAM long before any reset -- but the only absolute guarantee is a dedicated
+ * non-shared decode arena (tracked follow-up). This is a property of core-1
+ * heap use under force-reset, not of the reclaim itself.
+ */
+unsigned sdk_compression_reclaim_core1_decode(void)
+{
+	unsigned reclaimed;
+
+	/*
+	 * Discard any stale copy of the table in core 0's cache so the read sees
+	 * core 1's last cleaned-to-DRAM state (invalidate, not flush: core 0 holds
+	 * no dirty table lines here -- the previous reclaim ended with a flush --
+	 * so nothing of core 1's fresh state is overwritten).
+	 */
+	sdk_decode_invalidate_table();
+	reclaimed = sdk_decode_reclaim(free);
+	/*
+	 * Push the cleared slots to DRAM before core 1 is released: the restarted
+	 * worker boots with an empty cache and must read the emptied table.
+	 */
+	sdk_decode_flush_table();
+	return reclaimed;
+}
 
 static void free_decompress_stream(
 	struct SDKDecompressStreamSession *stream)
@@ -999,6 +1079,11 @@ uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
 		return SDK_STATUS_UNSUPPORTED;
 
 	memset(&stream, 0, sizeof(stream));
+	/* Track this decode's heap use so a core-1 cold-reset mid-inflate does not
+	 * leak the inflate state/window (see sdk_decode_reclaim.h). */
+	stream.zalloc = zlib_decode_alloc;
+	stream.zfree = zlib_decode_free;
+	stream.opaque = Z_NULL;
 	stream.next_in = (Bytef *)src;
 	stream.avail_in = (uInt)src_length;
 	stream.next_out = dst;

@@ -21,7 +21,12 @@ OFFLOAD_PARAMS_CPPFLAGS := -DTASKQ_HOST_TEST -I$(SRC_DIR)
 OFFLOAD_PARAMS_SOURCES := offload_params_test.c $(SRC_DIR)/scheduler.c
 OFFLOAD_PARAMS_DEPS := $(SRC_DIR)/scheduler.h $(SRC_DIR)/sdk_offload_params.h
 
-.PHONY: test clean smp_lock offload_params
+DECODE_RECLAIM_TARGET := $(BUILD_DIR)/decode_reclaim_test
+DECODE_RECLAIM_CPPFLAGS := -I$(SRC_DIR)
+DECODE_RECLAIM_SOURCES := decode_reclaim_test.c $(SRC_DIR)/sdk_decode_reclaim.c
+DECODE_RECLAIM_DEPS := $(SRC_DIR)/sdk_decode_reclaim.h
+
+.PHONY: test clean smp_lock offload_params decode_reclaim
 
 test: $(TARGET)
 	$(TARGET)
@@ -43,6 +48,13 @@ offload_params: $(OFFLOAD_PARAMS_TARGET)
 $(OFFLOAD_PARAMS_TARGET): $(OFFLOAD_PARAMS_SOURCES) $(OFFLOAD_PARAMS_DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(OFFLOAD_PARAMS_CPPFLAGS) $(CFLAGS) -o $@ $(OFFLOAD_PARAMS_SOURCES)
+
+decode_reclaim: $(DECODE_RECLAIM_TARGET)
+	$(DECODE_RECLAIM_TARGET)
+
+$(DECODE_RECLAIM_TARGET): $(DECODE_RECLAIM_SOURCES) $(DECODE_RECLAIM_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(DECODE_RECLAIM_CPPFLAGS) $(CFLAGS) -o $@ $(DECODE_RECLAIM_SOURCES)
 
 clean:
 	rm -rf $(BUILD_DIR)

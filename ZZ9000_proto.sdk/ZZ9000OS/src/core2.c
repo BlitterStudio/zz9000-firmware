@@ -9,6 +9,7 @@
 #include "scheduler.h"
 #include "memorymap.h"
 #include "sdk_smp_lock.h"
+#include "sdk_compression.h"
 
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
@@ -168,6 +169,14 @@ void core1_cold_restart(void)
 	 * and the quiesce-timeout path (scheduler_quiesce_for_reset).
 	 */
 	sdk_smp_lock_reset_malloc();
+
+	/*
+	 * CPU1 is still halted and the malloc lock is now free: reclaim any heap
+	 * blocks a one-shot decode still held when it was reset. inflateEnd /
+	 * LzmaDec_Free never ran on the killed worker, so without this the
+	 * inflate state/window and LZMA probs/dict leak on every mid-decode reset.
+	 */
+	sdk_compression_reclaim_core1_decode();
 
 	RegVal &= ~A9_RST1_MASK;
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
