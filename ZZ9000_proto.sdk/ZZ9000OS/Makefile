@@ -134,6 +134,9 @@ C_SRCS = \
 	$(SRC_DIR)/lzh/larc.c \
 	$(SRC_DIR)/lzh/maketbl.c \
 	$(SRC_DIR)/lzh/maketree.c \
+	$(SRC_DIR)/lzh/zz9k_lzh_bitio.c \
+	$(SRC_DIR)/lzh/zz9k_lzh_crcio.c \
+	$(SRC_DIR)/lzh/zz9k_lzh_support.c \
 	$(SRC_DIR)/sdk_crypto.c \
 	$(SRC_DIR)/bearssl/ec_c25519_m31.c \
 	$(SRC_DIR)/bearssl/ec_p256_m31.c \
