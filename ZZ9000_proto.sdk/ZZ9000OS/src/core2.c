@@ -8,6 +8,7 @@
 #include "sleep.h"
 #include "scheduler.h"
 #include "memorymap.h"
+#include "sdk_smp_lock.h"
 
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
@@ -86,6 +87,19 @@ struct core_fault_slot core1_fault __attribute__((aligned(32))) = { CORE_FAULT_N
 
 static void record_fault(uint32_t code, const char *name)
 {
+	/*
+	 * Free the cross-core malloc lock immediately if core 1 (this core) is
+	 * its owner. Decompress (zlib/LZMA) runs on core 1 and calls malloc, so
+	 * a fault here can strike mid-critical-section, i.e. while this core
+	 * holds g_malloc_lock. Doing this as early as possible narrows the
+	 * window where core 0 could still observe (and spin forever on) an
+	 * orphaned lock before core1_cold_restart's unconditional reset runs.
+	 * Owner-checked: if core 1 faulted merely spinning to acquire, core 0
+	 * may legitimately hold the lock, and this must not free it out from
+	 * under core 0.
+	 */
+	sdk_smp_lock_reset_malloc_if_owned();
+
 	taskq_shared_t *sh = scheduler_shared();
 	int slot = sh->core1_current_slot;
 
@@ -142,6 +156,19 @@ void core1_cold_restart(void)
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
 	RegVal |= A9_CLKSTOP1_MASK;
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
+
+	/*
+	 * CPU1 is now held in reset with its clock stopped, i.e. provably
+	 * halted and not concurrently touching any lock. Unconditionally free
+	 * the cross-core malloc lock here, before CPU1 is released below, so
+	 * the restarted core always finds it free -- whether or not core 1 was
+	 * holding it (mid-malloc/free, e.g. inside zlib/LZMA decompress) when
+	 * this restart was triggered. This single choke point covers both
+	 * restart paths: the fault path (record_fault -> scheduler_core0_poll)
+	 * and the quiesce-timeout path (scheduler_quiesce_for_reset).
+	 */
+	sdk_smp_lock_reset_malloc();
+
 	RegVal &= ~A9_RST1_MASK;
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);
 	RegVal &= ~A9_CLKSTOP1_MASK;

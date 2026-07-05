@@ -36,6 +36,33 @@ static void test_recursion_balances_irq(void) {
     printf("test_recursion_balances_irq OK\n");
 }
 
+/* Fault-recovery reset: must force a HELD lock back to the free state, and
+ * the freed lock must be cleanly re-acquirable afterwards (models core-1
+ * restart finding g_malloc_lock stranded mid-malloc/free and releasing it). */
+static void test_reset_frees_held_lock(void) {
+    sdk_smp_lock_t l = SDK_SMP_LOCK_INIT;
+    t_cpu = 0; g_irq_disabled_depth = 0;
+    sdk_smp_lock_acquire(&l);            /* held: owner=0, depth=1 */
+    assert(l.owner == 0 && l.depth == 1);
+
+    sdk_smp_lock_reset(&l);
+    assert(l.owner == -1 && l.depth == 0 && l.raw == 0);
+    /* Test-mock-only bookkeeping: the raw word here is backed by a real
+     * pthread_mutex (g_raw) so test_stress_no_lost_updates gets genuine
+     * cross-thread exclusion. sdk_smp_lock_reset only touches the
+     * sdk_smp_lock_t fields (matching production, where raw is a bare
+     * spinlock word and writing 0 to it IS the unlock) -- so free the mock's
+     * backing mutex here too, or the acquire below deadlocks on it. */
+    pthread_mutex_unlock(&g_raw);
+
+    /* freshly acquirable again after reset */
+    sdk_smp_lock_acquire(&l);
+    assert(l.owner == 0 && l.depth == 1);
+    sdk_smp_lock_release(&l);
+    assert(l.owner == -1 && l.depth == 0);
+    printf("test_reset_frees_held_lock OK\n");
+}
+
 /* 2-thread stress: increments under the lock must never race. */
 static sdk_smp_lock_t g_stress = SDK_SMP_LOCK_INIT;
 static long g_counter = 0;
@@ -61,6 +88,7 @@ static void test_stress_no_lost_updates(void) {
 
 int main(void) {
     test_recursion_balances_irq();
+    test_reset_frees_held_lock();
     test_stress_no_lost_updates();
     printf("ALL smp_lock tests passed\n");
     return 0;

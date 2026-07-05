@@ -65,4 +65,29 @@ static sdk_smp_lock_t g_malloc_lock = SDK_SMP_LOCK_INIT;
 
 void __malloc_lock(struct _reent *r)   { (void)r; sdk_smp_lock_acquire(&g_malloc_lock); }
 void __malloc_unlock(struct _reent *r) { (void)r; sdk_smp_lock_release(&g_malloc_lock); }
+
+/*
+ * Fault-recovery lock reset for g_malloc_lock. Core 1 runs decompress
+ * (zlib/LZMA) and can therefore be holding this lock (mid-malloc/free) at the
+ * instant it faults or is cold-restarted. Left held, it strands core 0's next
+ * malloc forever. The dsb;sev after the reset publishes the freed lock to the
+ * other core and wakes it if it is spinning in smp_raw_spin_lock's wfe.
+ */
+void sdk_smp_lock_reset_malloc(void)
+{
+    sdk_smp_lock_reset(&g_malloc_lock);
+    __asm__ __volatile__("dsb\n\tsev" ::: "memory");
+}
+
+void sdk_smp_lock_reset_malloc_if_owned(void)
+{
+    /* Only free the lock if THIS core holds it. If core 1 faulted while
+     * merely spinning to acquire, core 0 may legitimately own it -- freeing
+     * it out from under core 0 would reintroduce the exact race this lock
+     * exists to prevent. */
+    if (g_malloc_lock.owner == smp_cpu_id()) {
+        sdk_smp_lock_reset(&g_malloc_lock);
+        __asm__ __volatile__("dsb\n\tsev" ::: "memory");
+    }
+}
 #endif /* !SMP_LOCK_HOST_TEST */

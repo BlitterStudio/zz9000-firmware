@@ -30,3 +30,14 @@ void sdk_smp_lock_release(sdk_smp_lock_t *l)
         smp_local_irq_restore(flags);
     }
 }
+
+void sdk_smp_lock_reset(sdk_smp_lock_t *l)
+{
+    /* Unconditional: force to the free state regardless of current holder.
+     * Fault-recovery only -- the caller is responsible for ensuring it is
+     * safe to do so (e.g. the owning core is provably halted). */
+    l->raw = 0u;
+    l->owner = -1;
+    l->depth = 0u;
+    l->saved_irq = 0u;
+}
