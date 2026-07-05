@@ -339,11 +339,11 @@ uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
  * Opcode-dispatched offload executor: routes a claimed taskq_desc_t (see
  * scheduler.h) to its service handler on the calling core, filling
  * result_payload (a TASKQ_RESULT_PAYLOAD-byte buffer) and *result_len.
- * Currently only the crypto opcode class is wired up (byte-identical to the
- * pre-extraction scheduler_run_slot: full SDKCryptoResultPayload length on
- * SDK_STATUS_OK, zero otherwise); SDK_OP_DECOMPRESS is added in Task 5. Used
- * by the dual-core scheduler's core-1 worker and core-0 inline/fallback path
- * (scheduler_arm.c: scheduler_run_slot).
+ * Both the crypto opcode class and SDK_OP_DECOMPRESS are wired up, each
+ * byte-identical to the pre-extraction inline dispatch: full result-payload
+ * length (SDKCryptoResultPayload or SDKDecompressResultPayload) on
+ * SDK_STATUS_OK, zero otherwise. Used by the dual-core scheduler's core-1
+ * worker and core-0 inline/fallback path (scheduler_arm.c: scheduler_run_slot).
  */
 uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
                                       uint8_t *result_payload,

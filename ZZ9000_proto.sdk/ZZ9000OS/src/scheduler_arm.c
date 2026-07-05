@@ -33,6 +33,10 @@ typedef char sched_opcode_drift_check[
      TASKQ_OP_CRYPTO_KX     == SDK_OP_CRYPTO_KX     &&
      TASKQ_OP_CRYPTO_VERIFY == SDK_OP_CRYPTO_VERIFY) ? 1 : -1];
 
+/* Same drift guard for the decompress opcode. */
+typedef char sched_decompress_opcode_drift_check[
+    (TASKQ_OP_DECOMPRESS == SDK_OP_DECOMPRESS) ? 1 : -1];
+
 /* Core-0 view of scheduler run state. The taskq watchdog trips core 1 off
  * after repeated faults; g_core1_started is set by the worker on entry. */
 static taskq_watchdog_t g_sched_watchdog;

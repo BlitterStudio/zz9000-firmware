@@ -3536,6 +3536,62 @@ static uint16_t crypto_dispatch(uint16_t opcode, uint32_t in_len,
 	return SDK_STATUS_OK;
 }
 
+/*
+ * Front dispatch helper for decompress, mirroring crypto_dispatch exactly
+ * (same batch-tail deferral gate, generation stamp, and inline-fallback
+ * completion idiom). handle_decompress computes in_addr/out_addr from its
+ * resolved shared buffers and hands off here after validation.
+ *
+ * Only defer to core 1 when this is the last request in the batch; a
+ * decompress op with requests behind it must complete its shared-buffer
+ * writes inline so a later batched op touching the same handle never races
+ * core 1. See g_request_is_batch_tail.
+ */
+static uint16_t decompress_dispatch(volatile struct SDKMailboxEntry *req,
+                                    volatile struct SDKMailboxEntry *comp,
+                                    uint32_t in_addr, uint32_t in_len,
+                                    uint32_t out_addr, uint32_t out_cap,
+                                    uint32_t algorithm, uint32_t flags)
+{
+	uint8_t result_payload[TASKQ_RESULT_PAYLOAD];
+	uint32_t result_len = 0;
+	taskq_desc_t local;
+	uint16_t status;
+
+	if (scheduler_core1_available() && g_request_is_batch_tail) {
+		taskq_shared_t *sh = scheduler_shared();
+		struct decompress_op_params p = { algorithm, flags };
+		int slot = taskq_enqueue(&sh->queue, SDK_OP_DECOMPRESS, TASK_LONG,
+		                         in_addr, in_len, out_addr, out_cap,
+		                         get_be32(req->request_id),
+		                         get_be32(req->user_cookie), &p, sizeof(p));
+		if (slot >= 0) {
+			/* Stamp the current mailbox generation so this task is dropped
+			 * rather than posted if the mailbox is re-initialised before it
+			 * finishes. Core-0-only field; safe to write after the QUEUED
+			 * release-store since core 1 never reads it. */
+			g_task_generation[slot] = sdk_mailbox_generation;
+			/* taskq_enqueue release-stored the QUEUED state; make it globally
+			 * visible and wake the worker if it is idling on WFE. */
+			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			return SDK_STATUS_QUEUED;
+		}
+		/* queue full -> fall through to synchronous inline compute */
+	}
+
+	memset(&local, 0, sizeof(local));
+	decompress_fill_desc(&local, in_addr, in_len, out_addr, out_cap,
+	                     algorithm, flags);
+	status = sdk_mailbox_run_offload_task(&local, result_payload, &result_len);
+	scheduler_shared()->tasks_on_core0++;   /* executed inline on core 0 */
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+	write_completion(comp, req, SDK_STATUS_OK, (uint16_t)result_len);
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	memcpy((void *)comp->payload, result_payload, result_len);
+	return SDK_STATUS_OK;
+}
+
 static uint16_t handle_crypto_hash(volatile struct SDKMailboxEntry *req,
                                    volatile struct SDKMailboxEntry *comp,
                                    uint16_t payload_len)
@@ -3922,17 +3978,16 @@ static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
                                   uint16_t payload_len)
 {
 	volatile struct SDKDecompressPayload *payload;
-	volatile struct SDKDecompressResultPayload *reply;
 	struct SDKSharedBuffer *src;
 	struct SDKSharedBuffer *dst;
-	struct SDKDecompressResult result;
 	uint32_t src_offset;
 	uint32_t src_length;
 	uint32_t dst_offset;
 	uint32_t dst_capacity;
 	uint32_t algorithm;
 	uint32_t flags;
-	uint16_t status;
+	uint32_t in_addr;
+	uint32_t out_addr;
 
 	if (payload_len < sizeof(*payload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -3959,30 +4014,10 @@ static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
 
-	Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
-	                          src_length);
-	status = sdk_decompress_buffer(
-		algorithm, flags,
-		(const uint8_t *)(uintptr_t)(src->address + src_offset),
-		src_length,
-		(uint8_t *)(uintptr_t)(dst->address + dst_offset),
-		dst_capacity,
-		&result);
-	if (status != SDK_STATUS_OK)
-		return complete_status(req, comp, status);
-
-	Xil_DCacheFlushRange((INTPTR)(dst->address + dst_offset),
-	                     result.bytes_written);
-
-	write_completion(comp, req, SDK_STATUS_OK, sizeof(*reply));
-	memset((void *)comp->payload, 0, sizeof(comp->payload));
-	reply = (volatile struct SDKDecompressResultPayload *)comp->payload;
-	put_be32(reply->bytes_consumed, result.bytes_consumed);
-	put_be32(reply->bytes_written, result.bytes_written);
-	put_be32(reply->checksum, result.checksum);
-	put_be32(reply->algorithm, result.algorithm);
-	put_be32(reply->flags, result.flags);
-	return SDK_STATUS_OK;
+	in_addr = src->address + src_offset;
+	out_addr = dst->address + dst_offset;
+	return decompress_dispatch(req, comp, in_addr, src_length,
+	                           out_addr, dst_capacity, algorithm, flags);
 }
 
 static uint16_t handle_decompress_test(volatile struct SDKMailboxEntry *req,
