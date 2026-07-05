@@ -124,6 +124,19 @@ sdk_decompress_lzh(uint32_t algorithm,
     /* fatal_error()/lha_exit() longjmp target. MUST be invoked directly here
      * (it is a macro expanding to setjmp()) -- see zz9k_lzh.h. */
     if (zz9k_lzh_setjmp_failed()) {
+        /* slide.c's decode() does `dtext = xmalloc(dicsiz)` and only frees
+         * it on its own normal return path (slide.c:484); a longjmp out of
+         * decode() (dst over-production via fwrite_crc()'s fatal_error(), or
+         * a malformed Huffman table via maketbl.c/maketree.c's
+         * error();exit(1) -> lha_exit()) skips that free() entirely, and the
+         * next decode call's xmalloc() overwrites the dangling pointer --
+         * leaking the old allocation. Free it here (paired with the
+         * NULL-before-decode reset below) so a hostile/malformed input never
+         * leaks firmware heap. */
+        if (dtext != NULL) {
+            free(dtext);
+            dtext = NULL;
+        }
         return SDK_STATUS_BAD_REQUEST;
     }
 
@@ -140,6 +153,16 @@ sdk_decompress_lzh(uint32_t algorithm,
     output_to_stdout = 0;
     dump_lzss = 0;
     extract_broken_archive = 0;
+
+    /* Reset dtext to NULL immediately before the decode call. decode()'s
+     * xmalloc(dtext) success path frees dtext but leaves the pointer
+     * dangling-non-NULL afterward (slide.c:484); without this reset, the
+     * setjmp recovery branch above could double-free a PRIOR call's already-
+     * freed allocation if THIS call's longjmp fires before slide.c reaches
+     * its own xmalloc(dtext). Resetting here guarantees that branch only
+     * ever frees an allocation made by this call (or nothing, if none was
+     * made yet). */
+    dtext = NULL;
 
     /* infile/outfile were just pointed at the membuf sentinels by
      * zz9k_lzh_io_begin(); decode_lzhuf() (and the decode() it calls) thread

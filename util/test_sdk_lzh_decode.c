@@ -8,7 +8,9 @@
  * (Task 5) the firmware links -- and confirm the output is byte-exact with
  * the known-good plaintext, the CRC-16 matches each archive's stored
  * value, and a truncated input fails cleanly without an out-of-bounds
- * write.
+ * write. Also covers the fatal_error()/lha_exit() longjmp recovery path
+ * (undersized dst_capacity) to confirm the `dtext` decode-scratch buffer
+ * doesn't leak when a longjmp unwinds past slide.c's decode().
  *
  * Build + run (gcc:13 Docker image, repo root mounted at /src):
  *
@@ -30,6 +32,13 @@
 
 #include "zz9k_lzh.h"
 #include "lha_real_fixtures.h"
+
+/* Not part of zz9k_lzh.h's public API -- lha.h's EXTERN globals mechanism
+ * (ZZ9000_proto.sdk/ZZ9000OS/src/lzh/lha.h:374) declares this the same way
+ * for every vendored-core translation unit; test_longjmp_recovery_frees_
+ * dtext() below needs to inspect it directly rather than pull in the whole
+ * of lha.h. Defined in zz9k_lzh_support.c. */
+extern unsigned char *dtext;
 
 static int g_failures;
 
@@ -174,6 +183,72 @@ test_truncated_input_fails_cleanly(const ZZ9KLhaFixture *fx)
     free(buf);
 }
 
+/*
+ * Longjmp recovery path: prove the `dtext` decode-scratch buffer (slide.c's
+ * `dtext = xmalloc(dicsiz)`, freed only on decode()'s NORMAL return at
+ * slide.c:484) does not leak when a fatal_error()/lha_exit() longjmp
+ * unwinds out of decode() -- see sdk_decompress_lzh.c's setjmp recovery
+ * branch.
+ *
+ * Trigger: a dst_capacity deliberately smaller than the fixture's real
+ * uncompressed_size. decode() xmalloc(dicsiz)s `dtext` unconditionally,
+ * before it ever looks at dst_capacity (dicsiz depends only on the LHA
+ * method's dictionary bits), so a small enough dst_capacity makes the
+ * decode loop's final unflushed run of bytes overflow the membuf: the
+ * shim's fwrite_crc() -> zz9k_lzh_dst_write() reports a short write ->
+ * fatal_error() -> longjmp, firing *after* `dtext` was allocated but
+ * *before* slide.c reaches its own free(dtext). This is exactly the leak
+ * window the fix closes.
+ *
+ * dst_capacity=8 against fixture 0 (off-popp.lha:.readme, real
+ * uncompressed_size=2109) was empirically pinned by driving
+ * sdk_decompress_lzh() over a range of reduced capacities and checking
+ * zz9k_lzh_error: it reproducibly lands mid-match (as opposed to some
+ * other reduced capacities, which land exactly on a token boundary and
+ * decode a clean, merely-truncated result with no longjmp at all -- see
+ * test_truncated_input_fails_cleanly() above for that other case).
+ * zz9k_lzh_error is the discriminator that PROVES the longjmp path was
+ * actually taken: a plain CRC-mismatch/short-decode failure never sets it.
+ */
+static void
+test_longjmp_recovery_frees_dtext(void)
+{
+    const ZZ9KLhaFixture *fx = &zz9k_lha_fixtures[0]; /* off-popp.lha:.readme */
+    uint32_t algorithm = method_to_algorithm(fx->method);
+    static const uint32_t undersized_capacity = 8U;
+    uint8_t dst[16];
+    struct SDKDecompressResult result;
+    uint16_t status;
+    char msg[256];
+
+    memset(dst, 0xa5, sizeof dst);
+    zz9k_lzh_error = 0;
+
+    status = sdk_decompress_lzh(algorithm, fx->compressed,
+                                (uint32_t)fx->compressed_size,
+                                dst, undersized_capacity, &result);
+
+    snprintf(msg, sizeof msg,
+             "%s: undersized dst_capacity (%u) must not report "
+             "SDK_STATUS_OK (got %u)",
+             fx->name, (unsigned)undersized_capacity, (unsigned)status);
+    CHECK(status != SDK_STATUS_OK, msg);
+
+    snprintf(msg, sizeof msg,
+             "%s: undersized dst_capacity must take the fatal_error()/"
+             "lha_exit() longjmp path (zz9k_lzh_error == 1 proves it; "
+             "got %d)",
+             fx->name, zz9k_lzh_error);
+    CHECK(zz9k_lzh_error == 1, msg);
+
+    snprintf(msg, sizeof msg,
+             "%s: dtext scratch buffer must be freed (NULL) after longjmp "
+             "recovery, not left dangling for the next decode call to leak "
+             "(got %p)",
+             fx->name, (void *)dtext);
+    CHECK(dtext == NULL, msg);
+}
+
 int
 main(void)
 {
@@ -186,6 +261,8 @@ main(void)
     for (i = 0; i < ZZ9K_LHA_FIXTURE_COUNT; i++) {
         test_truncated_input_fails_cleanly(&zz9k_lha_fixtures[i]);
     }
+
+    test_longjmp_recovery_frees_dtext();
 
     if (g_failures != 0) {
         printf("%d check(s) FAILED\n", g_failures);
