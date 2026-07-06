@@ -342,6 +342,12 @@ struct SDKCryptoVerifyPayload {
 #define SDK_BATCH_MEMBER_LIMIT         1024U
 #define SDK_BATCH_MEMBER_FLAG_HAVE_CRC (1U << 0)
 
+/* TEST-mode members decode-and-discard, so uncompressed_size is not
+ * bounded by any arena region. Cap it so a corrupt descriptor cannot pin
+ * the core-1 worker for minutes producing discarded output. Mirrors
+ * ZZ9K_BATCH_TEST_MAX_EXPECTED in the SDK's abi.h. */
+#define SDK_BATCH_TEST_MAX_EXPECTED    0x04000000UL /* 64 MB */
+
 #define SDK_BATCH_HDR_MAGIC            0U
 #define SDK_BATCH_HDR_VERSION          4U  /* u16 */
 #define SDK_BATCH_HDR_MODE             6U  /* u16 */

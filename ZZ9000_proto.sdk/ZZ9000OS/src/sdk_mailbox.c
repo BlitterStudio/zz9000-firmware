@@ -3553,6 +3553,10 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		uint32_t members_ok = 0;
 		uint32_t members_failed = 0;
 		uint32_t i;
+		uint32_t region_off[5];
+		uint32_t region_len[5];
+		uint32_t region_count;
+		uint32_t oi, oj;
 		XTime batch_start;
 		XTime batch_end;
 
@@ -3595,6 +3599,52 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 			return SDK_STATUS_BAD_REQUEST;
 		}
 
+		/* The documented arena layout is strictly ordered and disjoint:
+		 * header, then desc[], blob, output (EXTRACT only), result[].
+		 * Overlapping regions would let per-member result writes (or
+		 * the EXTRACT output region) clobber descriptors or blob bytes
+		 * before they are read, or clobber the header itself mid-batch.
+		 * The batch_range_ok calls above already proved every region
+		 * individually fits within [0, arena_length), and arena_length
+		 * is bounded by the shared heap (a few MB) -- nowhere near
+		 * 2^31 -- so none of the offset+length sums below can wrap a
+		 * uint32_t; ranges_overlap's existing uint32_t signature is
+		 * used as-is, matching its other caller (decompress_dispatch).
+		 * ranges_overlap treats any zero-length region as
+		 * non-overlapping by construction, which covers blob_length
+		 * == 0 (a degenerate but structurally valid arena with no
+		 * compressed bytes -- every member's per-member src_length
+		 * check rejects it anyway).
+		 */
+		region_count = 0;
+		region_off[region_count] = 0U;
+		region_len[region_count] = SDK_BATCH_HEADER_SIZE;
+		region_count++;
+		region_off[region_count] = desc_offset;
+		region_len[region_count] = member_count * SDK_BATCH_DESC_SIZE;
+		region_count++;
+		region_off[region_count] = blob_offset;
+		region_len[region_count] = blob_length;
+		region_count++;
+		if (mode == SDK_BATCH_MODE_EXTRACT) {
+			region_off[region_count] = output_offset;
+			region_len[region_count] = output_capacity;
+			region_count++;
+		}
+		region_off[region_count] = result_offset;
+		region_len[region_count] = member_count * SDK_BATCH_RESULT_SIZE;
+		region_count++;
+
+		for (oi = 0; oi < region_count; oi++) {
+			for (oj = oi + 1; oj < region_count; oj++) {
+				if (ranges_overlap(region_off[oi], region_len[oi],
+				                    region_off[oj], region_len[oj])) {
+					*result_len = 0;
+					return SDK_STATUS_BAD_REQUEST;
+				}
+			}
+		}
+
 		XTime_GetTime(&batch_start);
 		for (i = 0; i < member_count; i++) {
 			volatile uint8_t *desc =
@@ -3619,7 +3669,9 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 			    !batch_range_ok(blob_length, src_offset, src_length) ||
 			    (mode == SDK_BATCH_MODE_EXTRACT &&
 			     !batch_range_ok(output_capacity, dst_offset,
-			                     expected_size))) {
+			                     expected_size)) ||
+			    (mode == SDK_BATCH_MODE_TEST &&
+			     expected_size > SDK_BATCH_TEST_MAX_EXPECTED)) {
 				status = SDK_STATUS_BAD_REQUEST;
 			} else {
 				const uint8_t *src = (const uint8_t *)(uintptr_t)(
