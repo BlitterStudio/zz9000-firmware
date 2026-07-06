@@ -34,6 +34,8 @@
 #include "lha.h"
 #include "zz9k_lzh.h"
 
+#define ZZ9K_LZH_CACHELINE_BYTES 32u
+
 /* ---- EXTERN globals from lha.h (see the ownership map above) ---- */
 
 /* Mode flags the decode core and the Task-6 backend touch (mirrors
@@ -84,6 +86,90 @@ int zz9k_lzh_error;
  * this needs external linkage. */
 jmp_buf zz9k_lzh_fatal_jmp;
 static char zz9k_lzh_fatal_msg[128];
+
+/*
+ * Reset-time reclaim state for slide.c's dtext window.
+ *
+ * Core 1 explicitly cleans this single cache line after publishing or clearing
+ * the pointer. Core 0 invalidates the same line before reclaiming after a cold
+ * restart, so it never relies on a dirty-only core-1 copy of the raw dtext
+ * global. The padded line also prevents range cache maintenance from touching
+ * unrelated globals.
+ */
+struct zz9k_lzh_dtext_reclaim_state {
+    unsigned char *ptr;
+    unsigned char pad[ZZ9K_LZH_CACHELINE_BYTES - sizeof(unsigned char *)];
+};
+
+static struct zz9k_lzh_dtext_reclaim_state zz9k_lzh_dtext_reclaim
+    __attribute__((aligned(ZZ9K_LZH_CACHELINE_BYTES)));
+
+typedef char zz9k_lzh_dtext_reclaim_is_one_line[
+    (sizeof(zz9k_lzh_dtext_reclaim) == ZZ9K_LZH_CACHELINE_BYTES) ? 1 : -1];
+
+void *
+zz9k_lzh_dtext_reclaim_base(void)
+{
+    return &zz9k_lzh_dtext_reclaim;
+}
+
+unsigned
+zz9k_lzh_dtext_reclaim_bytes(void)
+{
+    return (unsigned)sizeof(zz9k_lzh_dtext_reclaim);
+}
+
+void
+zz9k_lzh_track_dtext(unsigned char *ptr)
+{
+    dtext = ptr;
+    zz9k_lzh_dtext_reclaim.ptr = ptr;
+    zz9k_lzh_flush_dtext_reclaim();
+}
+
+void
+zz9k_lzh_disarm_dtext(void)
+{
+    if (dtext == NULL && zz9k_lzh_dtext_reclaim.ptr == NULL)
+        return;
+    dtext = NULL;
+    zz9k_lzh_dtext_reclaim.ptr = NULL;
+    zz9k_lzh_flush_dtext_reclaim();
+}
+
+void
+zz9k_lzh_free_dtext(void)
+{
+    unsigned char *ptr = dtext;
+
+    if (ptr == NULL) {
+        if (zz9k_lzh_dtext_reclaim.ptr != NULL) {
+            zz9k_lzh_dtext_reclaim.ptr = NULL;
+            zz9k_lzh_flush_dtext_reclaim();
+        }
+        return;
+    }
+
+    dtext = NULL;
+    zz9k_lzh_dtext_reclaim.ptr = NULL;
+    zz9k_lzh_flush_dtext_reclaim();  /* DRAM shows non-live before free */
+    free(ptr);
+}
+
+void
+zz9k_lzh_reclaim(void)
+{
+    unsigned char *ptr;
+
+    zz9k_lzh_invalidate_dtext_reclaim();
+    ptr = zz9k_lzh_dtext_reclaim.ptr;
+    if (ptr != NULL) {
+        zz9k_lzh_dtext_reclaim.ptr = NULL;
+        zz9k_lzh_flush_dtext_reclaim();
+        free(ptr);
+    }
+    dtext = NULL;
+}
 
 /* ---- public membuf API (zz9k_lzh.h) ---- */
 

@@ -137,6 +137,7 @@ C_SRCS = \
 	$(SRC_DIR)/lzh/zz9k_lzh_bitio.c \
 	$(SRC_DIR)/lzh/zz9k_lzh_crcio.c \
 	$(SRC_DIR)/lzh/zz9k_lzh_support.c \
+	$(SRC_DIR)/lzh/zz9k_lzh_reclaim_arm.c \
 	$(SRC_DIR)/lzh/sdk_decompress_lzh.c \
 	$(SRC_DIR)/sdk_crypto.c \
 	$(SRC_DIR)/bearssl/ec_c25519_m31.c \

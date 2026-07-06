@@ -12,6 +12,7 @@
 #endif
 
 #include "lha.h"
+#include "zz9k_lzh.h"
 
 #ifdef DEBUG
 FILE *fout = NULL;
@@ -398,6 +399,7 @@ decode(struct interfacing *interface)
     INITIALIZE_CRC(crc);
     dicsiz = 1L << dicbit;
     dtext = (unsigned char *)xmalloc(dicsiz);
+    zz9k_lzh_track_dtext(dtext);
 
     if (extract_broken_archive)
 
@@ -481,7 +483,7 @@ decode(struct interfacing *interface)
         fwrite_crc(&crc, dtext, loc, outfile);
     }
 
-    free(dtext);
+    zz9k_lzh_free_dtext();
 
     /* usually read size is interface->packed */
     interface->read_size = interface->packed - compsize;

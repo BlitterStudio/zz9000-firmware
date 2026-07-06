@@ -130,19 +130,14 @@ sdk_decompress_lzh(uint32_t algorithm,
     /* fatal_error()/lha_exit() longjmp target. MUST be invoked directly here
      * (it is a macro expanding to setjmp()) -- see zz9k_lzh.h. */
     if (zz9k_lzh_setjmp_failed()) {
-        /* slide.c's decode() does `dtext = xmalloc(dicsiz)` and only frees
-         * it on its own normal return path (slide.c:484); a longjmp out of
-         * decode() (dst over-production via fwrite_crc()'s fatal_error(), or
-         * a malformed Huffman table via maketbl.c/maketree.c's
-         * error();exit(1) -> lha_exit()) skips that free() entirely, and the
-         * next decode call's xmalloc() overwrites the dangling pointer --
-         * leaking the old allocation. Free it here (paired with the
-         * NULL-before-decode reset below) so a hostile/malformed input never
-         * leaks firmware heap. */
-        if (dtext != NULL) {
-            free(dtext);
-            dtext = NULL;
-        }
+        /* slide.c's decode() publishes dtext after xmalloc(dicsiz) and frees
+         * it only on its normal return path; a longjmp out of decode() (dst
+         * over-production via fwrite_crc()'s fatal_error(), or a malformed
+         * Huffman table via maketbl.c/maketree.c's error();exit(1) ->
+         * lha_exit()) skips that free() entirely. Free through the helper so
+         * the reset-reclaim shadow is cleaned to NULL before the heap block is
+         * released. */
+        zz9k_lzh_free_dtext();
         return SDK_STATUS_BAD_REQUEST;
     }
 
@@ -160,15 +155,11 @@ sdk_decompress_lzh(uint32_t algorithm,
     dump_lzss = 0;
     extract_broken_archive = 0;
 
-    /* Reset dtext to NULL immediately before the decode call. decode()'s
-     * xmalloc(dtext) success path frees dtext but leaves the pointer
-     * dangling-non-NULL afterward (slide.c:484); without this reset, the
-     * setjmp recovery branch above could double-free a PRIOR call's already-
-     * freed allocation if THIS call's longjmp fires before slide.c reaches
-     * its own xmalloc(dtext). Resetting here guarantees that branch only
-     * ever frees an allocation made by this call (or nothing, if none was
-     * made yet). */
-    dtext = NULL;
+    /* Reset any stale raw dtext/shadow state immediately before the decode
+     * call. Normal returns clear through zz9k_lzh_free_dtext(), but this keeps
+     * the recovery branch above scoped to an allocation made by this call (or
+     * nothing, if a fatal error fires before slide.c publishes one). */
+    zz9k_lzh_disarm_dtext();
 
     /* infile/outfile were just pointed at the membuf sentinels by
      * zz9k_lzh_io_begin(); decode_lzhuf() (and the decode() it calls) thread
@@ -179,13 +170,10 @@ sdk_decompress_lzh(uint32_t algorithm,
                                      (off_t)dst_capacity, (off_t)src_length,
                                      "zz9k", method, &read_size);
 
-    /* decode()'s normal return path already freed dtext but leaves the
-     * pointer dangling non-NULL (slide.c:484). NULL it immediately so the
-     * cold-restart reclaim hook (zz9k_lzh_reclaim) can never double-free
-     * if a core-1 reset lands between two members of a batch. The longjmp
-     * path is covered by the recovery branch above; the next call's
-     * pre-decode reset covers everything else. */
-    dtext = NULL;
+    /* decode()'s normal return path clears dtext through zz9k_lzh_free_dtext().
+     * Disarm defensively here as well so any future vendored return path still
+     * leaves reset-time reclaim with a cleaned NULL shadow. */
+    zz9k_lzh_disarm_dtext();
 
     if (zz9k_lzh_io_overflowed())
         return SDK_STATUS_NO_MEMORY;
@@ -202,18 +190,4 @@ sdk_decompress_lzh(uint32_t algorithm,
     }
 
     return SDK_STATUS_OK;
-}
-
-/* Cold-restart reclaim: free the decoder window a core-1 reset abandoned.
- * dtext is the ONLY heap allocation on the LZH decode path (see the
- * longjmp-recovery branch above); runs on core 0 after core 1 is halted, so
- * touching the decoder globals is safe. Mirrors the setjmp-recovery
- * free+NULL pairing. */
-void
-zz9k_lzh_reclaim(void)
-{
-    if (dtext != NULL) {
-        free(dtext);
-        dtext = NULL;
-    }
 }

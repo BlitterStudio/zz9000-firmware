@@ -149,10 +149,10 @@ unsigned sdk_compression_reclaim_core1_decode(void)
 	sdk_decode_flush_table();
 
 	/*
-	 * The LZH decode path's dtext window is a plain malloc(), untracked by
-	 * the table above (see zz9k_lzh_support.c/sdk_decompress_lzh.c) -- it is
-	 * reclaimed separately here rather than folded into `reclaimed`, which
-	 * counts only tracked-table slots.
+	 * The LZH decode path's dtext window is tracked by its own cache-line
+	 * reclaim pointer (see zz9k_lzh_support.c) -- it is reclaimed separately
+	 * here rather than folded into `reclaimed`, which counts only tracked-table
+	 * slots.
 	 */
 	zz9k_lzh_reclaim();
 

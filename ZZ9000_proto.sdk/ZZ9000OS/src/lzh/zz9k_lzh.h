@@ -119,11 +119,28 @@ uint16_t sdk_decompress_lzh(uint32_t algorithm,
                             uint8_t *dst, uint32_t dst_capacity,
                             struct SDKDecompressResult *result);
 
+/*
+ * dtext reset-time reclaim tracking.
+ *
+ * The raw dtext global belongs to the vendored decoder and may be written by
+ * core 1. Reset-time reclaim runs on core 0 after core 1 is halted, so it reads
+ * a separate cache-line-sized shadow pointer that core 1 explicitly cleans
+ * after every live/non-live transition.
+ */
+void zz9k_lzh_track_dtext(unsigned char *ptr);
+void zz9k_lzh_disarm_dtext(void);
+void zz9k_lzh_free_dtext(void);
+
+void *zz9k_lzh_dtext_reclaim_base(void);
+unsigned zz9k_lzh_dtext_reclaim_bytes(void);
+void zz9k_lzh_flush_dtext_reclaim(void);
+void zz9k_lzh_invalidate_dtext_reclaim(void);
+
 /* Cold-restart reclaim: free the decoder window a core-1 reset abandoned.
  * dtext is the ONLY heap allocation on the LZH decode path (see the
  * longjmp-recovery branch in sdk_decompress_lzh); runs on core 0 after
- * core 1 is halted, so touching the decoder globals is safe. Mirrors the
- * setjmp-recovery free+NULL pairing. */
+ * core 1 is halted, so touching the decoder globals is safe. Uses the
+ * cache-cleaned shadow pointer above, not the raw dtext cache line. */
 void zz9k_lzh_reclaim(void);
 
 #ifdef __cplusplus
