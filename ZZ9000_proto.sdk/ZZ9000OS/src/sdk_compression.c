@@ -147,6 +147,15 @@ unsigned sdk_compression_reclaim_core1_decode(void)
 	 * worker boots with an empty cache and must read the emptied table.
 	 */
 	sdk_decode_flush_table();
+
+	/*
+	 * The LZH decode path's dtext window is a plain malloc(), untracked by
+	 * the table above (see zz9k_lzh_support.c/sdk_decompress_lzh.c) -- it is
+	 * reclaimed separately here rather than folded into `reclaimed`, which
+	 * counts only tracked-table slots.
+	 */
+	zz9k_lzh_reclaim();
+
 	return reclaimed;
 }
 
@@ -1074,6 +1083,9 @@ uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
 	if (algorithm == SDK_COMPRESSION_LZMA2)
 		return sdk_decompress_lzma2(src, src_length, dst,
 		                            dst_capacity, result);
+	/* LZH has no stream terminator: dst_capacity IS the decode length, so it
+	 * must equal the member's exact uncompressed size (see the ABI contract
+	 * note next to SDK_OP_DECOMPRESS in sdk_mailbox.h). */
 	if (algorithm == SDK_COMPRESSION_LH1 || algorithm == SDK_COMPRESSION_LH5 ||
 	    algorithm == SDK_COMPRESSION_LH6 || algorithm == SDK_COMPRESSION_LH7)
 		return sdk_decompress_lzh(algorithm, src, src_length, dst,

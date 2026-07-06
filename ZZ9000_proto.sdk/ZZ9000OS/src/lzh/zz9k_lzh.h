@@ -119,6 +119,13 @@ uint16_t sdk_decompress_lzh(uint32_t algorithm,
                             uint8_t *dst, uint32_t dst_capacity,
                             struct SDKDecompressResult *result);
 
+/* Cold-restart reclaim: free the decoder window a core-1 reset abandoned.
+ * dtext is the ONLY heap allocation on the LZH decode path (see the
+ * longjmp-recovery branch in sdk_decompress_lzh); runs on core 0 after
+ * core 1 is halted, so touching the decoder globals is safe. Mirrors the
+ * setjmp-recovery free+NULL pairing. */
+void zz9k_lzh_reclaim(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -312,6 +312,15 @@ struct SDKCryptoVerifyPayload {
 #define SDK_COMPRESSION_LH6            9U
 #define SDK_COMPRESSION_LH7            10U
 
+/* ABI contract for single-op SDK_OP_DECOMPRESS with LH1/LH5/LH6/LH7: LZH
+ * streams carry no end-of-stream marker, so dst_capacity IS the decode
+ * length -- it must equal the member's EXACT uncompressed size. A larger
+ * capacity decodes garbage past the real end and still reports OK (with a
+ * wrong CRC), because the decoder has no other way to know where the
+ * stream ends. The CRC-16 is returned in the completion's checksum field so
+ * the client can verify. This does not apply to zlib/gzip/LZMA, which are
+ * self-terminating. */
+
 /* Batched LZH decode arena (SDK_OP_DECOMPRESS_BATCH). All fields
  * big-endian; offsets relative to the arena base (arena_handle's buffer +
  * arena_offset). Layout: header / desc[N] / compressed blob / output

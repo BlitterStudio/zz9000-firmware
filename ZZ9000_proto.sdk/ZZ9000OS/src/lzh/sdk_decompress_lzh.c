@@ -195,3 +195,17 @@ sdk_decompress_lzh(uint32_t algorithm,
 
     return SDK_STATUS_OK;
 }
+
+/* Cold-restart reclaim: free the decoder window a core-1 reset abandoned.
+ * dtext is the ONLY heap allocation on the LZH decode path (see the
+ * longjmp-recovery branch above); runs on core 0 after core 1 is halted, so
+ * touching the decoder globals is safe. Mirrors the setjmp-recovery
+ * free+NULL pairing. */
+void
+zz9k_lzh_reclaim(void)
+{
+    if (dtext != NULL) {
+        free(dtext);
+        dtext = NULL;
+    }
+}

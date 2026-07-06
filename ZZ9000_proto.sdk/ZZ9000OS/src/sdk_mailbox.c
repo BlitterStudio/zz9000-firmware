@@ -3750,22 +3750,31 @@ static uint16_t decompress_dispatch(volatile struct SDKMailboxEntry *req,
 	uint32_t result_len = 0;
 	taskq_desc_t local;
 	uint16_t status;
+	int is_lzh = (algorithm == SDK_COMPRESSION_LH1 ||
+	              algorithm == SDK_COMPRESSION_LH5 ||
+	              algorithm == SDK_COMPRESSION_LH6 ||
+	              algorithm == SDK_COMPRESSION_LH7);
 
 	/* LZH single-op decodes and the batch task (SDK_OP_DECOMPRESS_BATCH) both
 	 * defer to core 1 -- neither runs inline on core 0 anymore. The vendored
 	 * LZH decoder keeps GLOBAL state (slide.c dtext, membuf cursors, Huffman
 	 * tables), so two LZH decodes running at once would corrupt each other.
-	 * Safety holds because ALL LZH work -- single ops and the batch task --
-	 * serializes on the single core-1 worker: scheduler_core1_worker's
-	 * claim/run/complete loop (scheduler_arm.c) executes one task at a time,
-	 * so core 1 itself can never run two LZH decodes concurrently. That's
-	 * paired with the sole-synchronous-client invariant: zz9k-archive is the
-	 * only LZH producer today and it blocks on QUEUED completions
-	 * (zz9k_call), so it never has two LZH requests in flight at once either.
-	 * Adding a second concurrent LZH consumer (ARM-hosted app, datatype path)
-	 * still requires excluding LZH algorithms from core-1 routing first --
-	 * the single worker serializes core-1 *execution*, not concurrent
-	 * *producers*. */
+	 * The invariant below is ENFORCED, not advisory: all LZH work -- singles
+	 * and the batch task -- runs ONLY on the single core-1 worker. When core
+	 * 1 cannot take a single-op LZH request (core 1 unavailable, this
+	 * request is not the batch tail, or the queue is full), the firmware
+	 * answers BUSY instead of computing inline on core 0; the 68k client
+	 * falls back to software decode. Safety holds because ALL LZH work --
+	 * single ops and the batch task -- serializes on the single core-1
+	 * worker: scheduler_core1_worker's claim/run/complete loop
+	 * (scheduler_arm.c) executes one task at a time, so core 1 itself can
+	 * never run two LZH decodes concurrently. That's paired with the
+	 * sole-synchronous-client invariant: zz9k-archive is the only LZH
+	 * producer today and it blocks on QUEUED completions (zz9k_call), so it
+	 * never has two LZH requests in flight at once either. Adding a second
+	 * concurrent LZH consumer (ARM-hosted app, datatype path) still requires
+	 * excluding LZH algorithms from core-1 routing first -- the single
+	 * worker serializes core-1 *execution*, not concurrent *producers*. */
 	if (scheduler_core1_available() && g_request_is_batch_tail) {
 		taskq_shared_t *sh = scheduler_shared();
 		struct decompress_op_params p = { algorithm, flags };
@@ -3786,6 +3795,11 @@ static uint16_t decompress_dispatch(volatile struct SDKMailboxEntry *req,
 		}
 		/* queue full -> fall through to synchronous inline compute */
 	}
+
+	/* LZH must not run inline on core 0 (main-loop liveness / global
+	 * decoder state); the 68k client falls back to software on BUSY. */
+	if (is_lzh)
+		return complete_status(req, comp, SDK_STATUS_BUSY);
 
 	memset(&local, 0, sizeof(local));
 	decompress_fill_desc(&local, in_addr, in_len, out_addr, out_cap,
