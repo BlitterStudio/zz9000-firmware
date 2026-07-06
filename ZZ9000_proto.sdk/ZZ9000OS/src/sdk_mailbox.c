@@ -898,7 +898,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_CODEC_LZH |
 			SDK_SERVICE_FLAG_CODEC_DECOMPRESS_BATCH,
 		SDK_SERVICE_CODEC,
-		6,
+		7,	/* 0x0600..0x0606 incl. SDK_OP_DECOMPRESS_BATCH */
 		"codec"
 	},
 	{

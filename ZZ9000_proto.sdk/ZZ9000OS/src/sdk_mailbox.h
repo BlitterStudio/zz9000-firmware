@@ -325,7 +325,13 @@ struct SDKCryptoVerifyPayload {
  * big-endian; offsets relative to the arena base (arena_handle's buffer +
  * arena_offset). Layout: header / desc[N] / compressed blob / output
  * region (EXTRACT only) / result[N]. Mirrors ZZ9K_BATCH_* in the SDK's
- * include/zz9k/abi.h. */
+ * include/zz9k/abi.h.
+ *
+ * Arena v1 CRC contract: the per-member EXPECTED_CRC / FLAG_HAVE_CRC fields
+ * are ADVISORY -- the firmware does NOT compare them. Each result row
+ * carries the computed LHA CRC-16 in its checksum word, and the CLIENT
+ * must verify it (the reply's members_ok/members_failed counts reflect
+ * decode completion only, not CRC correctness). */
 #define SDK_BATCH_ARENA_MAGIC          0x5A424154UL /* 'ZBAT' */
 #define SDK_BATCH_ARENA_VERSION        1U
 #define SDK_BATCH_MODE_TEST            0U
