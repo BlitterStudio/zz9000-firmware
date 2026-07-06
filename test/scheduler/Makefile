@@ -26,7 +26,17 @@ DECODE_RECLAIM_CPPFLAGS := -I$(SRC_DIR)
 DECODE_RECLAIM_SOURCES := decode_reclaim_test.c $(SRC_DIR)/sdk_decode_reclaim.c
 DECODE_RECLAIM_DEPS := $(SRC_DIR)/sdk_decode_reclaim.h
 
-.PHONY: test clean smp_lock offload_params decode_reclaim
+LZH_DTEXT_RECLAIM_TARGET := $(BUILD_DIR)/lzh_dtext_reclaim_test
+LZH_DTEXT_RECLAIM_CPPFLAGS := -I$(SRC_DIR)/lzh -DHAVE_CONFIG_H -I$(SRC_DIR)
+LZH_DTEXT_RECLAIM_SOURCES := lzh_dtext_reclaim_test.c $(SRC_DIR)/lzh/zz9k_lzh_support.c
+LZH_DTEXT_RECLAIM_DEPS := $(SRC_DIR)/lzh/zz9k_lzh.h
+
+LZH_DECODE_CONTRACT_TARGET := $(BUILD_DIR)/lzh_decode_contract_test
+LZH_DECODE_CONTRACT_CPPFLAGS := -I$(SRC_DIR)/lzh -DHAVE_CONFIG_H -I$(SRC_DIR)
+LZH_DECODE_CONTRACT_SOURCES := lzh_decode_contract_test.c $(SRC_DIR)/lzh/sdk_decompress_lzh.c
+LZH_DECODE_CONTRACT_DEPS := $(SRC_DIR)/lzh/zz9k_lzh.h
+
+.PHONY: test clean smp_lock offload_params decode_reclaim lzh_dtext_reclaim lzh_decode_contract
 
 test: $(TARGET)
 	$(TARGET)
@@ -55,6 +65,20 @@ decode_reclaim: $(DECODE_RECLAIM_TARGET)
 $(DECODE_RECLAIM_TARGET): $(DECODE_RECLAIM_SOURCES) $(DECODE_RECLAIM_DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(DECODE_RECLAIM_CPPFLAGS) $(CFLAGS) -o $@ $(DECODE_RECLAIM_SOURCES)
+
+lzh_dtext_reclaim: $(LZH_DTEXT_RECLAIM_TARGET)
+	$(LZH_DTEXT_RECLAIM_TARGET)
+
+$(LZH_DTEXT_RECLAIM_TARGET): $(LZH_DTEXT_RECLAIM_SOURCES) $(LZH_DTEXT_RECLAIM_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(LZH_DTEXT_RECLAIM_CPPFLAGS) $(CFLAGS) -o $@ $(LZH_DTEXT_RECLAIM_SOURCES)
+
+lzh_decode_contract: $(LZH_DECODE_CONTRACT_TARGET)
+	$(LZH_DECODE_CONTRACT_TARGET)
+
+$(LZH_DECODE_CONTRACT_TARGET): $(LZH_DECODE_CONTRACT_SOURCES) $(LZH_DECODE_CONTRACT_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(LZH_DECODE_CONTRACT_CPPFLAGS) $(CFLAGS) -o $@ $(LZH_DECODE_CONTRACT_SOURCES)
 
 clean:
 	rm -rf $(BUILD_DIR)

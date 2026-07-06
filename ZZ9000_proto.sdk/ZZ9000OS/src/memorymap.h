@@ -41,6 +41,10 @@
 
 // SDK v2 host-visible heap. Keep this below the 0x033f0000 scratch area used
 // by the firmware until the SDK owns a formally reserved allocator region.
+// SDK_OP_DECOMPRESS_BATCH decodes entirely inside a host-provided arena
+// allocated from this shared heap (plus the LZH decoder's private <=64 KB
+// window) -- it reserves NO additional DDR region, so it cannot collide
+// with the Z3 fast-RAM window or the video codec scratch at 0x30000000.
 #define SDK_SHARED_HEAP_ADDRESS     0x03000000
 #define SDK_SHARED_HEAP_SIZE        0x003F0000
 #define SDK_SHARED_HEAP_END \

@@ -126,6 +126,19 @@ C_SRCS = \
 	$(SRC_DIR)/fw_update.c \
 	$(SRC_DIR)/usb_proxy.c \
 	$(SRC_DIR)/sdk_compression.c \
+	$(SRC_DIR)/lzh/extract.c \
+	$(SRC_DIR)/lzh/huf.c \
+	$(SRC_DIR)/lzh/dhuf.c \
+	$(SRC_DIR)/lzh/shuf.c \
+	$(SRC_DIR)/lzh/slide.c \
+	$(SRC_DIR)/lzh/larc.c \
+	$(SRC_DIR)/lzh/maketbl.c \
+	$(SRC_DIR)/lzh/maketree.c \
+	$(SRC_DIR)/lzh/zz9k_lzh_bitio.c \
+	$(SRC_DIR)/lzh/zz9k_lzh_crcio.c \
+	$(SRC_DIR)/lzh/zz9k_lzh_support.c \
+	$(SRC_DIR)/lzh/zz9k_lzh_reclaim_arm.c \
+	$(SRC_DIR)/lzh/sdk_decompress_lzh.c \
 	$(SRC_DIR)/sdk_crypto.c \
 	$(SRC_DIR)/bearssl/ec_c25519_m31.c \
 	$(SRC_DIR)/bearssl/ec_p256_m31.c \
@@ -236,6 +249,27 @@ $(BOOTROM_IMAGE_OBJ): $(BOOTROM_IMAGE_BIN)
 $(BUILD_DIR)/usb/ulpi.o: $(SRC_DIR)/usb/ulpi.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O0 -MMD -MP -o $@ $<
+
+# sdk_compression.c: needs the vendored LZH decode core headers (src/lzh)
+# for the upcoming LZH backend (decode_lzhuf() et al).
+$(BUILD_DIR)/sdk_compression.o: $(SRC_DIR)/sdk_compression.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(SRC_DIR)/lzh -MMD -MP -o $@ $<
+
+# Vendored LZH decode core (LHa for UNIX) + firmware I/O shim: every TU here
+# includes lha.h, which does `#include <config.h>` (angle-bracket). Two flags
+# are mandatory and absent from the default rule:
+#   -DHAVE_CONFIG_H  : without it lha.h skips config.h entirely and falls back
+#                      to <varargs.h> (a hard #error on newlib) plus fallback
+#                      uid_t/gid_t/ssize_t typedefs that collide with newlib.
+#   -I$(SRC_DIR)/lzh : resolves <config.h> to src/lzh/config.h. It MUST precede
+#                      $(CFLAGS) because -Isrc/bearssl is already on that path
+#                      and also holds a config.h — first match wins, so lzh must
+#                      come first or bearssl's config would silently be used.
+# Mirrors the SDK's proven `-DHAVE_CONFIG_H=1 -Itools/lha-unix` for the same core.
+$(BUILD_DIR)/lzh/%.o: $(SRC_DIR)/lzh/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -I$(SRC_DIR)/lzh -DHAVE_CONFIG_H $(CFLAGS) -MMD -MP -o $@ $<
 
 # Default rule for all other files (-O2).
 # -MMD emits a .d file next to the .o listing every header the source

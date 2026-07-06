@@ -14,6 +14,7 @@
 #include "Lzma2Dec.h"
 #include "LzmaDec.h"
 #include "zlib.h"
+#include "lzh/zz9k_lzh.h"
 
 #define SDK_DECOMPRESS_TEST_CHUNK 32768U
 #define SDK_DECOMPRESS_STREAM_SESSIONS 4U
@@ -146,6 +147,15 @@ unsigned sdk_compression_reclaim_core1_decode(void)
 	 * worker boots with an empty cache and must read the emptied table.
 	 */
 	sdk_decode_flush_table();
+
+	/*
+	 * The LZH decode path's dtext window is tracked by its own cache-line
+	 * reclaim pointer (see zz9k_lzh_support.c) -- it is reclaimed separately
+	 * here rather than folded into `reclaimed`, which counts only tracked-table
+	 * slots.
+	 */
+	zz9k_lzh_reclaim();
+
 	return reclaimed;
 }
 
@@ -221,6 +231,14 @@ static int compression_uses_lzma(uint32_t algorithm)
 {
 	return algorithm == SDK_COMPRESSION_LZMA_ALONE ||
 	       algorithm == SDK_COMPRESSION_LZMA2;
+}
+
+static int compression_uses_lzh(uint32_t algorithm)
+{
+	return algorithm == SDK_COMPRESSION_LH1 ||
+	       algorithm == SDK_COMPRESSION_LH5 ||
+	       algorithm == SDK_COMPRESSION_LH6 ||
+	       algorithm == SDK_COMPRESSION_LH7;
 }
 
 static uint32_t lzma_stream_header_size(
@@ -1058,10 +1076,27 @@ uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
 	int window_bits;
 	int rc;
 
-	if (!src || !dst || !result || src_length == 0U ||
-	    dst_capacity == 0U) {
+	if (!result)
 		return SDK_STATUS_BAD_REQUEST;
+
+	/* LZH has no stream terminator: dst_capacity IS the decode length, so it
+	 * must equal the member's exact uncompressed size (see the ABI contract
+	 * note next to SDK_OP_DECOMPRESS in sdk_mailbox.h). */
+	if (compression_uses_lzh(algorithm)) {
+		if ((flags & ~SDK_DECOMPRESS_FLAG_EXPECT_END) != 0U)
+			return SDK_STATUS_UNSUPPORTED;
+		if ((src_length == 0U) != (dst_capacity == 0U))
+			return SDK_STATUS_BAD_REQUEST;
+		if (src_length != 0U && !src)
+			return SDK_STATUS_BAD_REQUEST;
+		if (dst_capacity != 0U && !dst)
+			return SDK_STATUS_BAD_REQUEST;
+		return sdk_decompress_lzh(algorithm, src, src_length, dst,
+		                          dst_capacity, result);
 	}
+
+	if (!src || !dst || src_length == 0U || dst_capacity == 0U)
+		return SDK_STATUS_BAD_REQUEST;
 	if ((flags & ~SDK_DECOMPRESS_FLAG_EXPECT_END) != 0U)
 		return SDK_STATUS_UNSUPPORTED;
 
@@ -1143,6 +1178,12 @@ uint16_t sdk_decompress_test_buffer(uint32_t algorithm, uint32_t flags,
 	if (algorithm == SDK_COMPRESSION_LZMA2)
 		return sdk_decompress_lzma2_test(src, src_length,
 		                                 output_limit, result);
+	/* Decode-TEST (dry-run, no output buffer) is out of scope for the LZH
+	 * decode-offload feature -- the vendored core always writes through the
+	 * membuf shim, so there is no streaming "count bytes only" mode. */
+	if (algorithm == SDK_COMPRESSION_LH1 || algorithm == SDK_COMPRESSION_LH5 ||
+	    algorithm == SDK_COMPRESSION_LH6 || algorithm == SDK_COMPRESSION_LH7)
+		return SDK_STATUS_UNSUPPORTED;
 
 	window_bits = compression_window_bits(algorithm);
 	if (window_bits == 0)

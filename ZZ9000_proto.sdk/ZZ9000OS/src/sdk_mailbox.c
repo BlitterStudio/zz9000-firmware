@@ -12,6 +12,7 @@
 #include "xtime_l.h"
 #include "sdk_mailbox.h"
 #include "sdk_compression.h"
+#include "lzh/zz9k_lzh.h"
 #include "sdk_crypto.h"
 #include "sdk_offload_params.h"
 #include "sdk_image_stream.h"
@@ -495,6 +496,21 @@ struct SDKDecompressPayload {
 	uint8_t reserved[16];
 };
 
+struct SDKDecompressBatchPayload {
+	uint8_t arena_handle[4];
+	uint8_t arena_offset[4];
+	uint8_t arena_length[4];
+	uint8_t reserved[36];
+};
+
+struct SDKDecompressBatchResultPayload {
+	uint8_t members_total[4];
+	uint8_t members_ok[4];
+	uint8_t members_failed[4];
+	uint8_t flags[4];
+	uint8_t reserved[32];
+};
+
 struct SDKDecompressTestPayload {
 	uint8_t src_handle[4];
 	uint8_t src_offset[4];
@@ -721,6 +737,12 @@ typedef char SDKCryptoResultPayload_must_be_48_bytes[
 typedef char SDKDecompressPayload_must_be_48_bytes[
 	(sizeof(struct SDKDecompressPayload) == 48U) ? 1 : -1
 ];
+typedef char SDKDecompressBatchPayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressBatchPayload) == 48U) ? 1 : -1
+];
+typedef char SDKDecompressBatchResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressBatchResultPayload) == 48U) ? 1 : -1
+];
 typedef char SDKDecompressTestPayload_must_be_48_bytes[
 	(sizeof(struct SDKDecompressTestPayload) == 48U) ? 1 : -1
 ];
@@ -872,9 +894,11 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_CODEC_DECOMPRESS_FEED |
 			SDK_SERVICE_FLAG_CODEC_DEFLATE_FEED |
 			SDK_SERVICE_FLAG_CODEC_ZLIB_FEED |
-			SDK_SERVICE_FLAG_CODEC_GZIP_FEED,
+			SDK_SERVICE_FLAG_CODEC_GZIP_FEED |
+			SDK_SERVICE_FLAG_CODEC_LZH |
+			SDK_SERVICE_FLAG_CODEC_DECOMPRESS_BATCH,
 		SDK_SERVICE_CODEC,
-		6,
+		7,	/* 0x0600..0x0606 incl. SDK_OP_DECOMPRESS_BATCH */
 		"codec"
 	},
 	{
@@ -1506,6 +1530,12 @@ static int ranges_overlap(uint32_t offset_a, uint32_t length_a,
 	}
 	return offset_a < (offset_b + length_b) &&
 	       offset_b < (offset_a + length_a);
+}
+
+/* offset/length window fits within total (overflow-safe). */
+static int batch_range_ok(uint32_t total, uint32_t offset, uint32_t length)
+{
+	return offset <= total && length <= total - offset;
 }
 
 static uint32_t next_handle(void)
@@ -3181,6 +3211,12 @@ typedef char crypto_params_fit_op_params[
 typedef char crypto_result_fits_payload[
     (sizeof(struct SDKCryptoResultPayload) == TASKQ_RESULT_PAYLOAD) ? 1 : -1];
 
+/* Same guard for the batched-decompress completion posted by
+ * SDK_OP_DECOMPRESS_BATCH's taskq_desc_t::result_payload. */
+typedef char decompress_batch_result_fits_payload[
+    (sizeof(struct SDKDecompressBatchResultPayload) == TASKQ_RESULT_PAYLOAD) ?
+        1 : -1];
+
 static void crypto_result(uint8_t *result_payload, uint32_t bytes_written,
                           uint32_t algorithm, uint32_t flags)
 {
@@ -3440,6 +3476,16 @@ uint16_t sdk_mailbox_run_crypto_task(uint16_t opcode, const void *op_params,
  * payload on failure via complete_status(). SDK_OP_DECOMPRESS mirrors the
  * same convention against handle_decompress's SDKDecompressResultPayload
  * (field order and cache invalidate/flush match exactly).
+ *
+ * SDK_OP_DECOMPRESS_BATCH runs the ENTIRE arena -- cache invalidate, header/
+ * member validation, the per-member decode loop, and the final cache flush --
+ * on whichever core claims the task. In production that is always core 1: the
+ * front (handle_decompress_batch, below) never computes inline, because a
+ * multi-member LZH batch can run long enough to starve the main loop, and the
+ * main loop is what answers every 68k register-window bus cycle (the FPGA
+ * withholds DTACK until the ARM responds -- no timeout) and kicks the ~12.9s
+ * whole-PS watchdog (main.c:415). Running the batch here, off the main loop,
+ * is the fix for a real Amiga hard-crash.
  */
 uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
                                       uint8_t *result_payload,
@@ -3489,6 +3535,181 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		put_be32(reply->algorithm, result.algorithm);
 		put_be32(reply->flags, result.flags);
 		*result_len = sizeof(struct SDKDecompressResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_DECOMPRESS_BATCH: {
+		volatile struct SDKDecompressBatchResultPayload *reply;
+		volatile uint8_t *base;
+		uint32_t arena_addr = d->in_addr;
+		uint32_t arena_length = d->in_len;
+		uint32_t mode;
+		uint32_t member_count;
+		uint32_t desc_offset;
+		uint32_t blob_offset;
+		uint32_t blob_length;
+		uint32_t output_offset;
+		uint32_t output_capacity;
+		uint32_t result_offset;
+		uint32_t members_ok = 0;
+		uint32_t members_failed = 0;
+		uint32_t i;
+		uint32_t region_off[5];
+		uint32_t region_len[5];
+		uint32_t region_count;
+		uint32_t oi, oj;
+		XTime batch_start;
+		XTime batch_end;
+
+		base = (volatile uint8_t *)(uintptr_t)arena_addr;
+		/* The 68k wrote the arena over Zorro (non-coherent), and core 0
+		 * only resolved/range-checked the shared-buffer handle -- it never
+		 * touched arena contents. The magic/version/mode/member fields
+		 * below must be read only after this invalidate, on the core that
+		 * is actually executing the batch. */
+		Xil_DCacheInvalidateRange((INTPTR)arena_addr, arena_length);
+
+		if (get_be32(base + SDK_BATCH_HDR_MAGIC) != SDK_BATCH_ARENA_MAGIC) {
+			*result_len = 0;
+			return SDK_STATUS_BAD_REQUEST;
+		}
+		if (get_be16(base + SDK_BATCH_HDR_VERSION) != SDK_BATCH_ARENA_VERSION) {
+			*result_len = 0;
+			return SDK_STATUS_UNSUPPORTED;
+		}
+
+		mode = get_be16(base + SDK_BATCH_HDR_MODE);
+		member_count = get_be32(base + SDK_BATCH_HDR_MEMBER_COUNT);
+		desc_offset = get_be32(base + SDK_BATCH_HDR_DESC_OFFSET);
+		blob_offset = get_be32(base + SDK_BATCH_HDR_BLOB_OFFSET);
+		blob_length = get_be32(base + SDK_BATCH_HDR_BLOB_LENGTH);
+		output_offset = get_be32(base + SDK_BATCH_HDR_OUTPUT_OFFSET);
+		output_capacity = get_be32(base + SDK_BATCH_HDR_OUTPUT_CAPACITY);
+		result_offset = get_be32(base + SDK_BATCH_HDR_RESULT_OFFSET);
+
+		if ((mode != SDK_BATCH_MODE_TEST && mode != SDK_BATCH_MODE_EXTRACT) ||
+		    member_count == 0U || member_count > SDK_BATCH_MEMBER_LIMIT ||
+		    !batch_range_ok(arena_length, desc_offset,
+		                    member_count * SDK_BATCH_DESC_SIZE) ||
+		    !batch_range_ok(arena_length, blob_offset, blob_length) ||
+		    !batch_range_ok(arena_length, result_offset,
+		                    member_count * SDK_BATCH_RESULT_SIZE) ||
+		    (mode == SDK_BATCH_MODE_EXTRACT &&
+		     !batch_range_ok(arena_length, output_offset, output_capacity))) {
+			*result_len = 0;
+			return SDK_STATUS_BAD_REQUEST;
+		}
+
+		/* The documented arena layout is strictly ordered and disjoint:
+		 * header, then desc[], blob, output (EXTRACT only), result[].
+		 * Overlapping regions would let per-member result writes (or
+		 * the EXTRACT output region) clobber descriptors or blob bytes
+		 * before they are read, or clobber the header itself mid-batch.
+		 * The batch_range_ok calls above already proved every region
+		 * individually fits within [0, arena_length), and arena_length
+		 * is bounded by the shared heap (a few MB) -- nowhere near
+		 * 2^31 -- so none of the offset+length sums below can wrap a
+		 * uint32_t; ranges_overlap's existing uint32_t signature is
+		 * used as-is, matching its other caller (decompress_dispatch).
+		 * ranges_overlap treats any zero-length region as
+		 * non-overlapping by construction, which covers blob_length
+		 * == 0 (valid for batches made entirely of empty members).
+		 */
+		region_count = 0;
+		region_off[region_count] = 0U;
+		region_len[region_count] = SDK_BATCH_HEADER_SIZE;
+		region_count++;
+		region_off[region_count] = desc_offset;
+		region_len[region_count] = member_count * SDK_BATCH_DESC_SIZE;
+		region_count++;
+		region_off[region_count] = blob_offset;
+		region_len[region_count] = blob_length;
+		region_count++;
+		if (mode == SDK_BATCH_MODE_EXTRACT) {
+			region_off[region_count] = output_offset;
+			region_len[region_count] = output_capacity;
+			region_count++;
+		}
+		region_off[region_count] = result_offset;
+		region_len[region_count] = member_count * SDK_BATCH_RESULT_SIZE;
+		region_count++;
+
+		for (oi = 0; oi < region_count; oi++) {
+			for (oj = oi + 1; oj < region_count; oj++) {
+				if (ranges_overlap(region_off[oi], region_len[oi],
+				                    region_off[oj], region_len[oj])) {
+					*result_len = 0;
+					return SDK_STATUS_BAD_REQUEST;
+				}
+			}
+		}
+
+		XTime_GetTime(&batch_start);
+		for (i = 0; i < member_count; i++) {
+			volatile uint8_t *desc =
+			    base + desc_offset + i * SDK_BATCH_DESC_SIZE;
+			volatile uint8_t *res =
+			    base + result_offset + i * SDK_BATCH_RESULT_SIZE;
+			uint32_t algorithm = get_be32(desc + SDK_BATCH_DESC_ALGORITHM);
+			uint32_t src_offset = get_be32(desc + SDK_BATCH_DESC_SRC_OFFSET);
+			uint32_t src_length = get_be32(desc + SDK_BATCH_DESC_SRC_LENGTH);
+			uint32_t dst_offset = get_be32(desc + SDK_BATCH_DESC_DST_OFFSET);
+			uint32_t expected_size =
+			    get_be32(desc + SDK_BATCH_DESC_UNCOMP_SIZE);
+			struct SDKDecompressResult result;
+			uint16_t status;
+
+			memset(&result, 0, sizeof(result));
+			if ((algorithm != SDK_COMPRESSION_LH1 &&
+			     algorithm != SDK_COMPRESSION_LH5 &&
+			     algorithm != SDK_COMPRESSION_LH6 &&
+			     algorithm != SDK_COMPRESSION_LH7) ||
+			    ((src_length == 0U) != (expected_size == 0U)) ||
+			    !batch_range_ok(blob_length, src_offset, src_length) ||
+			    (mode == SDK_BATCH_MODE_EXTRACT &&
+			     !batch_range_ok(output_capacity, dst_offset,
+			                     expected_size)) ||
+			    (mode == SDK_BATCH_MODE_TEST &&
+			     expected_size > SDK_BATCH_TEST_MAX_EXPECTED)) {
+				status = SDK_STATUS_BAD_REQUEST;
+			} else {
+				const uint8_t *src = (const uint8_t *)(uintptr_t)(
+				    arena_addr + blob_offset + src_offset);
+				uint8_t *dst = NULL;
+
+				if (mode == SDK_BATCH_MODE_EXTRACT) {
+					dst = (uint8_t *)(uintptr_t)(
+					    arena_addr + output_offset + dst_offset);
+				}
+				status = sdk_decompress_lzh(algorithm, src, src_length,
+				                            dst, expected_size, &result);
+			}
+
+			put_be32(res + SDK_BATCH_RESULT_STATUS, status);
+			put_be32(res + SDK_BATCH_RESULT_BYTES_WRITTEN,
+			         result.bytes_written);
+			put_be32(res + SDK_BATCH_RESULT_CHECKSUM, result.checksum);
+			put_be32(res + SDK_BATCH_RESULT_RESERVED, 0U);
+			if (status == SDK_STATUS_OK)
+				members_ok++;
+			else
+				members_failed++;
+		}
+		XTime_GetTime(&batch_end);
+		timing_decode_requests =
+		    saturated_add_u32(timing_decode_requests, member_count);
+		timing_decode_us = saturated_add_u32(
+		    timing_decode_us, timing_delta_us(batch_start, batch_end));
+
+		/* Results (and extract output) must be visible to the 68k. */
+		Xil_DCacheFlushRange((INTPTR)arena_addr, arena_length);
+
+		memset(result_payload, 0, sizeof(struct SDKDecompressBatchResultPayload));
+		reply = (volatile struct SDKDecompressBatchResultPayload *)result_payload;
+		put_be32(reply->members_total, member_count);
+		put_be32(reply->members_ok, members_ok);
+		put_be32(reply->members_failed, members_failed);
+		put_be32(reply->flags, 0U);
+		*result_len = sizeof(struct SDKDecompressBatchResultPayload);
 		return SDK_STATUS_OK;
 	}
 	default:
@@ -3579,7 +3800,31 @@ static uint16_t decompress_dispatch(volatile struct SDKMailboxEntry *req,
 	uint32_t result_len = 0;
 	taskq_desc_t local;
 	uint16_t status;
+	int is_lzh = (algorithm == SDK_COMPRESSION_LH1 ||
+	              algorithm == SDK_COMPRESSION_LH5 ||
+	              algorithm == SDK_COMPRESSION_LH6 ||
+	              algorithm == SDK_COMPRESSION_LH7);
 
+	/* LZH single-op decodes and the batch task (SDK_OP_DECOMPRESS_BATCH) both
+	 * defer to core 1 -- neither runs inline on core 0 anymore. The vendored
+	 * LZH decoder keeps GLOBAL state (slide.c dtext, membuf cursors, Huffman
+	 * tables), so two LZH decodes running at once would corrupt each other.
+	 * The invariant below is ENFORCED, not advisory: all LZH work -- singles
+	 * and the batch task -- runs ONLY on the single core-1 worker. When core
+	 * 1 cannot take a single-op LZH request (core 1 unavailable, this
+	 * request is not the batch tail, or the queue is full), the firmware
+	 * answers BUSY instead of computing inline on core 0; the 68k client
+	 * falls back to software decode. Safety holds because ALL LZH work --
+	 * single ops and the batch task -- serializes on the single core-1
+	 * worker: scheduler_core1_worker's claim/run/complete loop
+	 * (scheduler_arm.c) executes one task at a time, so core 1 itself can
+	 * never run two LZH decodes concurrently. That's paired with the
+	 * sole-synchronous-client invariant: zz9k-archive is the only LZH
+	 * producer today and it blocks on QUEUED completions (zz9k_call), so it
+	 * never has two LZH requests in flight at once either. Adding a second
+	 * concurrent LZH consumer (ARM-hosted app, datatype path) still requires
+	 * excluding LZH algorithms from core-1 routing first -- the single
+	 * worker serializes core-1 *execution*, not concurrent *producers*. */
 	if (scheduler_core1_available() && g_request_is_batch_tail) {
 		taskq_shared_t *sh = scheduler_shared();
 		struct decompress_op_params p = { algorithm, flags };
@@ -3600,6 +3845,11 @@ static uint16_t decompress_dispatch(volatile struct SDKMailboxEntry *req,
 		}
 		/* queue full -> fall through to synchronous inline compute */
 	}
+
+	/* LZH must not run inline on core 0 (main-loop liveness / global
+	 * decoder state); the 68k client falls back to software on BUSY. */
+	if (is_lzh)
+		return complete_status(req, comp, SDK_STATUS_BUSY);
 
 	memset(&local, 0, sizeof(local));
 	decompress_fill_desc(&local, in_addr, in_len, out_addr, out_cap,
@@ -4010,6 +4260,7 @@ static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
 	uint32_t flags;
 	uint32_t in_addr;
 	uint32_t out_addr;
+	int is_lzh;
 
 	if (payload_len < sizeof(*payload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -4023,10 +4274,15 @@ static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
 	dst_capacity = get_be32(payload->dst_capacity);
 	algorithm = get_be32(payload->algorithm);
 	flags = get_be32(payload->flags);
+	is_lzh = (algorithm == SDK_COMPRESSION_LH1 ||
+	          algorithm == SDK_COMPRESSION_LH5 ||
+	          algorithm == SDK_COMPRESSION_LH6 ||
+	          algorithm == SDK_COMPRESSION_LH7);
 
 	if (!src || !dst)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-	if (src_length == 0U || dst_capacity == 0U ||
+	if ((!is_lzh && (src_length == 0U || dst_capacity == 0U)) ||
+	    (is_lzh && ((src_length == 0U) != (dst_capacity == 0U))) ||
 	    !buffer_range_valid(src, src_offset, src_length) ||
 	    !buffer_range_valid(dst, dst_offset, dst_capacity)) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -4040,6 +4296,99 @@ static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
 	out_addr = dst->address + dst_offset;
 	return decompress_dispatch(req, comp, in_addr, src_length,
 	                           out_addr, dst_capacity, algorithm, flags);
+}
+
+/* Batched LZH decode (SDK_OP_DECOMPRESS_BATCH).
+ *
+ * Decodes N LZH members described by a self-describing arena in ONE
+ * mailbox round-trip, collapsing the per-member alloc/decode/free
+ * round-trips that dominate whole-archive test/extract runs. Per-member
+ * failures are recorded in the arena's result table and NEVER abort the
+ * batch; only a malformed arena rejects the whole request.
+ *
+ * This front runs on core 0 and does NO arena memory access: it only
+ * resolves and range-checks the arena handle (find_shared_buffer,
+ * buffer_range_valid), then hands the resolved arena address off to core 1
+ * as a single TASK_LONG task, mirroring decompress_dispatch below exactly
+ * (enqueue/generation-stamp/sev/QUEUED). The actual cache invalidate,
+ * header/member validation, and per-member decode loop live in
+ * sdk_mailbox_run_offload_task's SDK_OP_DECOMPRESS_BATCH case (above), which
+ * runs on whichever core claims the task -- core 1 in production.
+ *
+ * This MUST NOT run inline on core 0. It used to: the whole arena -- every
+ * member -- was decoded in one main-loop iteration. The main loop is what
+ * answers every 68k register-window bus cycle (the FPGA withholds DTACK
+ * until the ARM responds -- there is no timeout) and it is the only place
+ * the ~12.9s whole-PS watchdog gets kicked (main.c:415). A long enough batch
+ * decode therefore froze the Amiga mid bus-cycle -- motherboard BERR,
+ * guru/reboot -- and could trip the watchdog on top of that. This is a real
+ * hardware crash, not a theoretical one; deferring to core 1 keeps the main
+ * loop live exactly like every other decompress/crypto offload already does.
+ *
+ * Unlike decompress_dispatch, this never falls back to inline core-0 compute:
+ * when core 1 is unavailable, this request is not the tail of its mailbox
+ * submission (g_request_is_batch_tail; defense-in-depth against a pipelined
+ * successor racing the deferred batch), or the task queue is full, we return
+ * SDK_STATUS_BUSY so the 68k tool falls back to its per-member decode path,
+ * instead of re-introducing the main-loop stall this fix removes.
+ *
+ * Memory: touches ONLY the host-provided arena (inside the SDK shared
+ * heap) plus the decoder's private <=64 KB window -- no new reserved DDR
+ * region, so it cannot collide with the Z3 fast-RAM window or the video
+ * codec scratch at 0x30000000 (see memorymap.h).
+ */
+static uint16_t handle_decompress_batch(volatile struct SDKMailboxEntry *req,
+                                        volatile struct SDKMailboxEntry *comp,
+                                        uint16_t payload_len)
+{
+	volatile struct SDKDecompressBatchPayload *payload;
+	struct SDKSharedBuffer *arena;
+	uint32_t arena_offset;
+	uint32_t arena_length;
+	taskq_shared_t *sh;
+	int slot;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKDecompressBatchPayload *)req->payload;
+	arena = find_shared_buffer(get_be32(payload->arena_handle));
+	arena_offset = get_be32(payload->arena_offset);
+	arena_length = get_be32(payload->arena_length);
+
+	if (!arena)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (arena_length < SDK_BATCH_HEADER_SIZE ||
+	    !buffer_range_valid(arena, arena_offset, arena_length))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	if (!scheduler_core1_available())
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+
+	/* Pipelined successor requests in the same mailbox submission could race
+	 * the deferred batch on the same handle; the sole synchronous client
+	 * always IS the tail, so this is defense-in-depth (see
+	 * g_request_is_batch_tail). */
+	if (!g_request_is_batch_tail)
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+
+	sh = scheduler_shared();
+	slot = taskq_enqueue(&sh->queue, SDK_OP_DECOMPRESS_BATCH, TASK_LONG,
+	                     arena->address + arena_offset, arena_length,
+	                     0u, 0u, get_be32(req->request_id),
+	                     get_be32(req->user_cookie), NULL, 0u);
+	if (slot < 0)
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+
+	/* Stamp the current mailbox generation so this task is dropped rather
+	 * than posted if the mailbox is re-initialised before it finishes.
+	 * Core-0-only field; safe to write after the QUEUED release-store
+	 * since core 1 never reads it. */
+	g_task_generation[slot] = sdk_mailbox_generation;
+	/* taskq_enqueue release-stored the QUEUED state; make it globally
+	 * visible and wake the worker if it is idling on WFE. */
+	__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+	return SDK_STATUS_QUEUED;
 }
 
 static uint16_t handle_decompress_test(volatile struct SDKMailboxEntry *req,
@@ -4492,6 +4841,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_decompress_stream_feed(req, comp, payload_len);
 	case SDK_OP_DECOMPRESS_STREAM_CLOSE:
 		return handle_decompress_stream_close(req, comp, payload_len);
+	case SDK_OP_DECOMPRESS_BATCH:
+		return handle_decompress_batch(req, comp, payload_len);
 	case SDK_OP_CRYPTO_HASH:
 		return handle_crypto_hash(req, comp, payload_len);
 	case SDK_OP_CRYPTO_STREAM:
