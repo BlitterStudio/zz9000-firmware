@@ -3610,6 +3610,14 @@ static uint16_t decompress_dispatch(volatile struct SDKMailboxEntry *req,
 	taskq_desc_t local;
 	uint16_t status;
 
+	/* LZH single-op decodes may defer to core 1 while handle_decompress_batch
+	 * runs LZH inline on core 0. The vendored LZH decoder keeps GLOBAL state
+	 * (slide.c dtext, membuf cursors, Huffman tables), so this is safe ONLY
+	 * while zz9k-archive remains the sole, synchronous LZH client: it never
+	 * has a batch and a single LZH op in flight at once (zz9k_call blocks on
+	 * QUEUED completions; the batch handler never defers). Adding a second
+	 * concurrent LZH consumer (ARM-hosted app, datatype path) breaks this
+	 * invariant -- exclude LZH algorithms from core-1 routing first. */
 	if (scheduler_core1_available() && g_request_is_batch_tail) {
 		taskq_shared_t *sh = scheduler_shared();
 		struct decompress_op_params p = { algorithm, flags };
