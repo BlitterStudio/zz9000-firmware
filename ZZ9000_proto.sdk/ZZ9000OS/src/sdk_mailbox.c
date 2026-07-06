@@ -3751,14 +3751,21 @@ static uint16_t decompress_dispatch(volatile struct SDKMailboxEntry *req,
 	taskq_desc_t local;
 	uint16_t status;
 
-	/* LZH single-op decodes may defer to core 1 while handle_decompress_batch
-	 * runs LZH inline on core 0. The vendored LZH decoder keeps GLOBAL state
-	 * (slide.c dtext, membuf cursors, Huffman tables), so this is safe ONLY
-	 * while zz9k-archive remains the sole, synchronous LZH client: it never
-	 * has a batch and a single LZH op in flight at once (zz9k_call blocks on
-	 * QUEUED completions; the batch handler never defers). Adding a second
-	 * concurrent LZH consumer (ARM-hosted app, datatype path) breaks this
-	 * invariant -- exclude LZH algorithms from core-1 routing first. */
+	/* LZH single-op decodes and the batch task (SDK_OP_DECOMPRESS_BATCH) both
+	 * defer to core 1 -- neither runs inline on core 0 anymore. The vendored
+	 * LZH decoder keeps GLOBAL state (slide.c dtext, membuf cursors, Huffman
+	 * tables), so two LZH decodes running at once would corrupt each other.
+	 * Safety holds because ALL LZH work -- single ops and the batch task --
+	 * serializes on the single core-1 worker: scheduler_core1_worker's
+	 * claim/run/complete loop (scheduler_arm.c) executes one task at a time,
+	 * so core 1 itself can never run two LZH decodes concurrently. That's
+	 * paired with the sole-synchronous-client invariant: zz9k-archive is the
+	 * only LZH producer today and it blocks on QUEUED completions
+	 * (zz9k_call), so it never has two LZH requests in flight at once either.
+	 * Adding a second concurrent LZH consumer (ARM-hosted app, datatype path)
+	 * still requires excluding LZH algorithms from core-1 routing first --
+	 * the single worker serializes core-1 *execution*, not concurrent
+	 * *producers*. */
 	if (scheduler_core1_available() && g_request_is_batch_tail) {
 		taskq_shared_t *sh = scheduler_shared();
 		struct decompress_op_params p = { algorithm, flags };
@@ -4248,11 +4255,12 @@ static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
  * hardware crash, not a theoretical one; deferring to core 1 keeps the main
  * loop live exactly like every other decompress/crypto offload already does.
  *
- * Unlike decompress_dispatch, this never falls back to inline core-0 compute
- * and does not gate on g_request_is_batch_tail: when core 1 is unavailable
- * or the task queue is full we return SDK_STATUS_BUSY so the 68k tool falls
- * back to its per-member decode path, instead of re-introducing the
- * main-loop stall this fix removes.
+ * Unlike decompress_dispatch, this never falls back to inline core-0 compute:
+ * when core 1 is unavailable, this request is not the tail of its mailbox
+ * submission (g_request_is_batch_tail; defense-in-depth against a pipelined
+ * successor racing the deferred batch), or the task queue is full, we return
+ * SDK_STATUS_BUSY so the 68k tool falls back to its per-member decode path,
+ * instead of re-introducing the main-loop stall this fix removes.
  *
  * Memory: touches ONLY the host-provided arena (inside the SDK shared
  * heap) plus the decoder's private <=64 KB window -- no new reserved DDR
@@ -4285,6 +4293,13 @@ static uint16_t handle_decompress_batch(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 
 	if (!scheduler_core1_available())
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+
+	/* Pipelined successor requests in the same mailbox submission could race
+	 * the deferred batch on the same handle; the sole synchronous client
+	 * always IS the tail, so this is defense-in-depth (see
+	 * g_request_is_batch_tail). */
+	if (!g_request_is_batch_tail)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 
 	sh = scheduler_shared();

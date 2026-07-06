@@ -267,14 +267,32 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
   if (!scheduler_core1_available()) {
     /*
      * Single-core fallback: core 1 is absent or the watchdog disabled it. New
-     * crypto requests already compute inline in the front (crypto_dispatch), so
-     * the queue only holds tasks stranded when core 1 died mid-flight. Drain
-     * them ALL inline (claim_any, not claim_short) so nothing is lost; they are
-     * posted on the next poll's harvest.
+     * crypto/decompress requests already compute inline in the front
+     * (crypto_dispatch, decompress_dispatch) or return BUSY
+     * (handle_decompress_batch), so the queue only holds tasks stranded when
+     * core 1 died mid-flight. Drain them ALL (claim_any, not claim_short) so
+     * nothing is left QUEUED forever -- but TASK_LONG and TASK_SHORT are NOT
+     * handled the same way here. core 0 IS the main loop: it must keep
+     * answering every 68k register-window bus cycle (the FPGA withholds
+     * DTACK until the ARM responds -- no timeout) and kicking the ~12.9s
+     * whole-PS watchdog (main.c:415), so a stranded TASK_LONG task (a
+     * batched or whole-file LZH decode) must NEVER run inline here -- that is
+     * the exact main-loop stall/hard-crash this branch fixes. Fail it
+     * instead, the same way core2.c's fault path fails an in-flight slot on
+     * a core-1 exception (taskq_fail, core2.c:121); the harvest loop above
+     * already maps every FAILED task to SDK_STATUS_INTERNAL_ERROR, so the
+     * 68k client falls back to its per-member/software decode path.
+     * TASK_SHORT (crypto) is sub-millisecond, so it is still safe to run
+     * inline on the main loop.
      */
     while ((slot = taskq_claim_any(&sh->queue)) >= 0) {
-      (void)scheduler_run_slot(&sh->queue.descs[slot]);
-      sh->tasks_on_core0++;
+      taskq_desc_t *d = &sh->queue.descs[slot];
+      if (d->cls == (uint32_t)TASK_LONG) {
+        taskq_fail(&sh->queue, slot, 0);
+      } else {
+        (void)scheduler_run_slot(d);
+        sh->tasks_on_core0++;
+      }
     }
   } else if (taskq_should_drain(zorro_pending, display_pending, 1)) {
     /* Opportunistic SHORT drain in idle windows while core 1 is healthy. */
