@@ -179,6 +179,14 @@ sdk_decompress_lzh(uint32_t algorithm,
                                      (off_t)dst_capacity, (off_t)src_length,
                                      "zz9k", method, &read_size);
 
+    /* decode()'s normal return path already freed dtext but leaves the
+     * pointer dangling non-NULL (slide.c:484). NULL it immediately so the
+     * cold-restart reclaim hook (zz9k_lzh_reclaim) can never double-free
+     * if a core-1 reset lands between two members of a batch. The longjmp
+     * path is covered by the recovery branch above; the next call's
+     * pre-decode reset covers everything else. */
+    dtext = NULL;
+
     if (zz9k_lzh_io_overflowed())
         return SDK_STATUS_NO_MEMORY;
 
