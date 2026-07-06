@@ -33,6 +33,11 @@
 #include "zz9k_lzh.h"
 #include "lha_real_fixtures.h"
 
+/* Host utility tests have no ARM cache maintenance to perform, but
+ * zz9k_lzh_support.c still links against these reclaim visibility hooks. */
+void zz9k_lzh_flush_dtext_reclaim(void) {}
+void zz9k_lzh_invalidate_dtext_reclaim(void) {}
+
 /* Not part of zz9k_lzh.h's public API -- lha.h's EXTERN globals mechanism
  * (ZZ9000_proto.sdk/ZZ9000OS/src/lzh/lha.h:374) declares this the same way
  * for every vendored-core translation unit; test_longjmp_recovery_frees_

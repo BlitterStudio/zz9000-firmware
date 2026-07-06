@@ -27,6 +27,11 @@
 #include "lha.h"
 #include "zz9k_lzh.h"
 
+/* Host utility tests have no ARM cache maintenance to perform, but
+ * zz9k_lzh_support.c still links against these reclaim visibility hooks. */
+void zz9k_lzh_flush_dtext_reclaim(void) {}
+void zz9k_lzh_invalidate_dtext_reclaim(void) {}
+
 /* ------------------------------------------------------------------------ */
 /* Independent bitwise reference for the LHA/ARC CRC-16 (reflected,         */
 /* polynomial 0xA001, init 0x0000, no final xor). Deliberately NOT sharing  */
