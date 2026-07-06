@@ -3612,9 +3612,7 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		 * used as-is, matching its other caller (decompress_dispatch).
 		 * ranges_overlap treats any zero-length region as
 		 * non-overlapping by construction, which covers blob_length
-		 * == 0 (a degenerate but structurally valid arena with no
-		 * compressed bytes -- every member's per-member src_length
-		 * check rejects it anyway).
+		 * == 0 (valid for batches made entirely of empty members).
 		 */
 		region_count = 0;
 		region_off[region_count] = 0U;
@@ -3665,7 +3663,7 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 			     algorithm != SDK_COMPRESSION_LH5 &&
 			     algorithm != SDK_COMPRESSION_LH6 &&
 			     algorithm != SDK_COMPRESSION_LH7) ||
-			    src_length == 0U || expected_size == 0U ||
+			    ((src_length == 0U) != (expected_size == 0U)) ||
 			    !batch_range_ok(blob_length, src_offset, src_length) ||
 			    (mode == SDK_BATCH_MODE_EXTRACT &&
 			     !batch_range_ok(output_capacity, dst_offset,
@@ -4262,6 +4260,7 @@ static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
 	uint32_t flags;
 	uint32_t in_addr;
 	uint32_t out_addr;
+	int is_lzh;
 
 	if (payload_len < sizeof(*payload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -4275,10 +4274,15 @@ static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
 	dst_capacity = get_be32(payload->dst_capacity);
 	algorithm = get_be32(payload->algorithm);
 	flags = get_be32(payload->flags);
+	is_lzh = (algorithm == SDK_COMPRESSION_LH1 ||
+	          algorithm == SDK_COMPRESSION_LH5 ||
+	          algorithm == SDK_COMPRESSION_LH6 ||
+	          algorithm == SDK_COMPRESSION_LH7);
 
 	if (!src || !dst)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-	if (src_length == 0U || dst_capacity == 0U ||
+	if ((!is_lzh && (src_length == 0U || dst_capacity == 0U)) ||
+	    (is_lzh && ((src_length == 0U) != (dst_capacity == 0U))) ||
 	    !buffer_range_valid(src, src_offset, src_length) ||
 	    !buffer_range_valid(dst, dst_offset, dst_capacity)) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);

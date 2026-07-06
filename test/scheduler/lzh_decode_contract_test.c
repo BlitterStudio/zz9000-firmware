@@ -155,11 +155,34 @@ static int test_accepts_full_source_consumption(void)
 	return 0;
 }
 
+static int test_accepts_zero_length_member(void)
+{
+	struct SDKDecompressResult result;
+	uint16_t status;
+
+	reset_fake(123u, 456, 0);
+	status = sdk_decompress_lzh(SDK_COMPRESSION_LH5,
+	                            NULL, 0,
+	                            NULL, 0,
+	                            &result);
+
+	if (status != SDK_STATUS_OK) return 1;
+	if (result.bytes_consumed != 0u) return 2;
+	if (result.bytes_written != 0u) return 3;
+	if (result.checksum != 0u) return 4;
+	if (result.algorithm != SDK_COMPRESSION_LH5) return 5;
+	if (result.flags != (SDK_DECOMPRESS_RESULT_CHECKSUM_VALID |
+	                     SDK_DECOMPRESS_RESULT_STREAM_END)) return 6;
+	if (fake_method != 0) return 7;        /* no decode core call */
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	struct { const char *name; int (*fn)(void); } tests[] = {
 		{ "rejects_short_source_consumption", test_rejects_short_source_consumption },
 		{ "accepts_full_source_consumption", test_accepts_full_source_consumption },
+		{ "accepts_zero_length_member", test_accepts_zero_length_member },
 	};
 	unsigned i;
 	int failures = 0;

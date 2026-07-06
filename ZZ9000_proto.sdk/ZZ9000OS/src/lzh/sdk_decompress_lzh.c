@@ -91,9 +91,8 @@ copyfile(FILE *f1, FILE *f2, off_t size, int text_flg, unsigned int *crcp)
 /* dst == NULL selects decode-and-discard (batch TEST mode): output bytes
  * are CRC'd and counted through the membuf seam but never stored, so the
  * member's uncompressed size is not bounded by any host-visible buffer.
- * dst_capacity must still be the EXACT expected uncompressed size -- the
- * bytes_written == dst_capacity completeness check below applies to both
- * modes. */
+ * dst_capacity must still be the EXACT expected uncompressed size, including
+ * zero for an empty member. */
 uint16_t
 sdk_decompress_lzh(uint32_t algorithm,
                    const uint8_t *src, uint32_t src_length,
@@ -104,7 +103,7 @@ sdk_decompress_lzh(uint32_t algorithm,
     off_t read_size = 0;
     unsigned int crc;
 
-    if (!src || !result || src_length == 0U || dst_capacity == 0U)
+    if (!result)
         return SDK_STATUS_BAD_REQUEST;
 
     switch (algorithm) {
@@ -126,6 +125,17 @@ sdk_decompress_lzh(uint32_t algorithm,
 
     memset(result, 0, sizeof(*result));
     result->algorithm = algorithm;
+
+    if (src_length == 0U || dst_capacity == 0U) {
+        if (src_length != 0U || dst_capacity != 0U)
+            return SDK_STATUS_BAD_REQUEST;
+        result->flags = SDK_DECOMPRESS_RESULT_CHECKSUM_VALID |
+                        SDK_DECOMPRESS_RESULT_STREAM_END;
+        return SDK_STATUS_OK;
+    }
+
+    if (!src)
+        return SDK_STATUS_BAD_REQUEST;
 
     /* fatal_error()/lha_exit() longjmp target. MUST be invoked directly here
      * (it is a macro expanding to setjmp()) -- see zz9k_lzh.h. */

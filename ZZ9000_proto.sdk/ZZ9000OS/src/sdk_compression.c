@@ -233,6 +233,14 @@ static int compression_uses_lzma(uint32_t algorithm)
 	       algorithm == SDK_COMPRESSION_LZMA2;
 }
 
+static int compression_uses_lzh(uint32_t algorithm)
+{
+	return algorithm == SDK_COMPRESSION_LH1 ||
+	       algorithm == SDK_COMPRESSION_LH5 ||
+	       algorithm == SDK_COMPRESSION_LH6 ||
+	       algorithm == SDK_COMPRESSION_LH7;
+}
+
 static uint32_t lzma_stream_header_size(
 	const struct SDKDecompressStreamSession *stream)
 {
@@ -1068,10 +1076,27 @@ uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
 	int window_bits;
 	int rc;
 
-	if (!src || !dst || !result || src_length == 0U ||
-	    dst_capacity == 0U) {
+	if (!result)
 		return SDK_STATUS_BAD_REQUEST;
+
+	/* LZH has no stream terminator: dst_capacity IS the decode length, so it
+	 * must equal the member's exact uncompressed size (see the ABI contract
+	 * note next to SDK_OP_DECOMPRESS in sdk_mailbox.h). */
+	if (compression_uses_lzh(algorithm)) {
+		if ((flags & ~SDK_DECOMPRESS_FLAG_EXPECT_END) != 0U)
+			return SDK_STATUS_UNSUPPORTED;
+		if ((src_length == 0U) != (dst_capacity == 0U))
+			return SDK_STATUS_BAD_REQUEST;
+		if (src_length != 0U && !src)
+			return SDK_STATUS_BAD_REQUEST;
+		if (dst_capacity != 0U && !dst)
+			return SDK_STATUS_BAD_REQUEST;
+		return sdk_decompress_lzh(algorithm, src, src_length, dst,
+		                          dst_capacity, result);
 	}
+
+	if (!src || !dst || src_length == 0U || dst_capacity == 0U)
+		return SDK_STATUS_BAD_REQUEST;
 	if ((flags & ~SDK_DECOMPRESS_FLAG_EXPECT_END) != 0U)
 		return SDK_STATUS_UNSUPPORTED;
 
@@ -1083,13 +1108,6 @@ uint16_t sdk_decompress_buffer(uint32_t algorithm, uint32_t flags,
 	if (algorithm == SDK_COMPRESSION_LZMA2)
 		return sdk_decompress_lzma2(src, src_length, dst,
 		                            dst_capacity, result);
-	/* LZH has no stream terminator: dst_capacity IS the decode length, so it
-	 * must equal the member's exact uncompressed size (see the ABI contract
-	 * note next to SDK_OP_DECOMPRESS in sdk_mailbox.h). */
-	if (algorithm == SDK_COMPRESSION_LH1 || algorithm == SDK_COMPRESSION_LH5 ||
-	    algorithm == SDK_COMPRESSION_LH6 || algorithm == SDK_COMPRESSION_LH7)
-		return sdk_decompress_lzh(algorithm, src, src_length, dst,
-		                          dst_capacity, result);
 
 	window_bits = compression_window_bits(algorithm);
 	if (window_bits == 0)
