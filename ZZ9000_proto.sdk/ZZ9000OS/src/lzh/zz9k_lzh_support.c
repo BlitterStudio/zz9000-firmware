@@ -153,7 +153,11 @@ zz9k_lzh_dst_write(const void *p, uint32_t n)
     uint32_t to_copy = (n <= avail) ? n : avail;
 
     if (to_copy > 0) {
-        memcpy(zz9k_lzh_dst_ptr + zz9k_lzh_dst_pos, p, to_copy);
+        /* dst == NULL is decode-and-discard (batch TEST mode): fwrite_crc()
+         * has already folded these bytes into the CRC-16, so only count and
+         * bounds-check the produced output without storing it. */
+        if (zz9k_lzh_dst_ptr != NULL)
+            memcpy(zz9k_lzh_dst_ptr + zz9k_lzh_dst_pos, p, to_copy);
         zz9k_lzh_dst_pos += to_copy;
     }
     if (to_copy < n)
