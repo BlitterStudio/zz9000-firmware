@@ -116,6 +116,7 @@
 #define SDK_SERVICE_FLAG_CODEC_GZIP_FEED        (1U << 27)
 #define SDK_SERVICE_FLAG_CODEC_LZMA2            (1U << 28)
 #define SDK_SERVICE_FLAG_CODEC_LZH              (1U << 29)
+#define SDK_SERVICE_FLAG_CODEC_DECOMPRESS_BATCH (1U << 30)
 #define SDK_SERVICE_FLAG_CRYPTO_X25519          (1U << 16)
 
 #define SDK_OP_NOP                     0x0000U
@@ -155,6 +156,7 @@
 #define SDK_OP_DECOMPRESS_STREAM_READ  0x0603U
 #define SDK_OP_DECOMPRESS_STREAM_CLOSE 0x0604U
 #define SDK_OP_DECOMPRESS_STREAM_FEED  0x0605U
+#define SDK_OP_DECOMPRESS_BATCH        0x0606U
 
 #define SDK_OP_CRYPTO_HASH             0x0800U
 #define SDK_OP_CRYPTO_STREAM           0x0801U
@@ -309,6 +311,45 @@ struct SDKCryptoVerifyPayload {
 #define SDK_COMPRESSION_LH5            8U
 #define SDK_COMPRESSION_LH6            9U
 #define SDK_COMPRESSION_LH7            10U
+
+/* Batched LZH decode arena (SDK_OP_DECOMPRESS_BATCH). All fields
+ * big-endian; offsets relative to the arena base (arena_handle's buffer +
+ * arena_offset). Layout: header / desc[N] / compressed blob / output
+ * region (EXTRACT only) / result[N]. Mirrors ZZ9K_BATCH_* in the SDK's
+ * include/zz9k/abi.h. */
+#define SDK_BATCH_ARENA_MAGIC          0x5A424154UL /* 'ZBAT' */
+#define SDK_BATCH_ARENA_VERSION        1U
+#define SDK_BATCH_MODE_TEST            0U
+#define SDK_BATCH_MODE_EXTRACT         1U
+#define SDK_BATCH_HEADER_SIZE          48U
+#define SDK_BATCH_DESC_SIZE            32U
+#define SDK_BATCH_RESULT_SIZE          16U
+#define SDK_BATCH_MEMBER_LIMIT         1024U
+#define SDK_BATCH_MEMBER_FLAG_HAVE_CRC (1U << 0)
+
+#define SDK_BATCH_HDR_MAGIC            0U
+#define SDK_BATCH_HDR_VERSION          4U  /* u16 */
+#define SDK_BATCH_HDR_MODE             6U  /* u16 */
+#define SDK_BATCH_HDR_MEMBER_COUNT     8U
+#define SDK_BATCH_HDR_DESC_OFFSET      12U
+#define SDK_BATCH_HDR_BLOB_OFFSET      16U
+#define SDK_BATCH_HDR_BLOB_LENGTH      20U
+#define SDK_BATCH_HDR_OUTPUT_OFFSET    24U
+#define SDK_BATCH_HDR_OUTPUT_CAPACITY  28U
+#define SDK_BATCH_HDR_RESULT_OFFSET    32U
+
+#define SDK_BATCH_DESC_ALGORITHM       0U
+#define SDK_BATCH_DESC_SRC_OFFSET      4U
+#define SDK_BATCH_DESC_SRC_LENGTH      8U
+#define SDK_BATCH_DESC_DST_OFFSET      12U
+#define SDK_BATCH_DESC_UNCOMP_SIZE     16U
+#define SDK_BATCH_DESC_EXPECTED_CRC    20U
+#define SDK_BATCH_DESC_FLAGS           24U
+
+#define SDK_BATCH_RESULT_STATUS        0U
+#define SDK_BATCH_RESULT_BYTES_WRITTEN 4U
+#define SDK_BATCH_RESULT_CHECKSUM      8U
+#define SDK_BATCH_RESULT_RESERVED      12U
 
 #define SDK_DECOMPRESS_FLAG_EXPECT_END (1U << 0)
 #define SDK_DECOMPRESS_FLAG_FEED_INPUT (1U << 1)
