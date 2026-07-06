@@ -183,11 +183,12 @@ sdk_decompress_lzh(uint32_t algorithm,
     result->checksum = (uint16_t)crc;
     result->flags = SDK_DECOMPRESS_RESULT_CHECKSUM_VALID;
 
-    if (result->bytes_written == dst_capacity) {
-        result->flags |= SDK_DECOMPRESS_RESULT_STREAM_END;
-    } else {
+    if (result->bytes_written != dst_capacity)
         return SDK_STATUS_BAD_REQUEST;     /* short decode */
-    }
+    if (read_size != (off_t)src_length)
+        return SDK_STATUS_BAD_REQUEST;     /* trailing unread source */
+
+    result->flags |= SDK_DECOMPRESS_RESULT_STREAM_END;
 
     return SDK_STATUS_OK;
 }
