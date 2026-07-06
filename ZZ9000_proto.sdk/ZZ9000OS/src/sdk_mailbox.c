@@ -12,6 +12,7 @@
 #include "xtime_l.h"
 #include "sdk_mailbox.h"
 #include "sdk_compression.h"
+#include "lzh/zz9k_lzh.h"
 #include "sdk_crypto.h"
 #include "sdk_offload_params.h"
 #include "sdk_image_stream.h"
@@ -495,6 +496,21 @@ struct SDKDecompressPayload {
 	uint8_t reserved[16];
 };
 
+struct SDKDecompressBatchPayload {
+	uint8_t arena_handle[4];
+	uint8_t arena_offset[4];
+	uint8_t arena_length[4];
+	uint8_t reserved[36];
+};
+
+struct SDKDecompressBatchResultPayload {
+	uint8_t members_total[4];
+	uint8_t members_ok[4];
+	uint8_t members_failed[4];
+	uint8_t flags[4];
+	uint8_t reserved[32];
+};
+
 struct SDKDecompressTestPayload {
 	uint8_t src_handle[4];
 	uint8_t src_offset[4];
@@ -721,6 +737,12 @@ typedef char SDKCryptoResultPayload_must_be_48_bytes[
 typedef char SDKDecompressPayload_must_be_48_bytes[
 	(sizeof(struct SDKDecompressPayload) == 48U) ? 1 : -1
 ];
+typedef char SDKDecompressBatchPayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressBatchPayload) == 48U) ? 1 : -1
+];
+typedef char SDKDecompressBatchResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKDecompressBatchResultPayload) == 48U) ? 1 : -1
+];
 typedef char SDKDecompressTestPayload_must_be_48_bytes[
 	(sizeof(struct SDKDecompressTestPayload) == 48U) ? 1 : -1
 ];
@@ -873,7 +895,8 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_CODEC_DEFLATE_FEED |
 			SDK_SERVICE_FLAG_CODEC_ZLIB_FEED |
 			SDK_SERVICE_FLAG_CODEC_GZIP_FEED |
-			SDK_SERVICE_FLAG_CODEC_LZH,
+			SDK_SERVICE_FLAG_CODEC_LZH |
+			SDK_SERVICE_FLAG_CODEC_DECOMPRESS_BATCH,
 		SDK_SERVICE_CODEC,
 		6,
 		"codec"
@@ -1507,6 +1530,12 @@ static int ranges_overlap(uint32_t offset_a, uint32_t length_a,
 	}
 	return offset_a < (offset_b + length_b) &&
 	       offset_b < (offset_a + length_a);
+}
+
+/* offset/length window fits within total (overflow-safe). */
+static int batch_range_ok(uint32_t total, uint32_t offset, uint32_t length)
+{
+	return offset <= total && length <= total - offset;
 }
 
 static uint32_t next_handle(void)
@@ -4043,6 +4072,161 @@ static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
 	                           out_addr, dst_capacity, algorithm, flags);
 }
 
+/* Batched LZH decode (SDK_OP_DECOMPRESS_BATCH).
+ *
+ * Decodes N LZH members described by a self-describing arena in ONE
+ * mailbox round-trip, collapsing the per-member alloc/decode/free
+ * round-trips that dominate whole-archive test/extract runs. Runs inline
+ * on core 0: the vendored LZH decoder keeps global state (slide.c dtext et
+ * al.) and the only LZH client (zz9k-archive) is synchronous, so batches
+ * are naturally single-in-flight. Per-member failures are recorded in the
+ * arena's result table and NEVER abort the batch; only a malformed arena
+ * rejects the whole request.
+ *
+ * Memory: touches ONLY the host-provided arena (inside the SDK shared
+ * heap) plus the decoder's private <=64 KB window -- no new reserved DDR
+ * region, so it cannot collide with the Z3 fast-RAM window or the video
+ * codec scratch at 0x30000000 (see memorymap.h).
+ */
+static uint16_t handle_decompress_batch(volatile struct SDKMailboxEntry *req,
+                                        volatile struct SDKMailboxEntry *comp,
+                                        uint16_t payload_len)
+{
+	volatile struct SDKDecompressBatchPayload *payload;
+	volatile struct SDKDecompressBatchResultPayload *reply;
+	struct SDKSharedBuffer *arena;
+	uint32_t arena_offset;
+	uint32_t arena_length;
+	uint32_t arena_addr;
+	volatile uint8_t *base;
+	uint32_t mode;
+	uint32_t member_count;
+	uint32_t desc_offset;
+	uint32_t blob_offset;
+	uint32_t blob_length;
+	uint32_t output_offset;
+	uint32_t output_capacity;
+	uint32_t result_offset;
+	uint32_t members_ok = 0;
+	uint32_t members_failed = 0;
+	uint32_t i;
+	XTime batch_start;
+	XTime batch_end;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKDecompressBatchPayload *)req->payload;
+	arena = find_shared_buffer(get_be32(payload->arena_handle));
+	arena_offset = get_be32(payload->arena_offset);
+	arena_length = get_be32(payload->arena_length);
+
+	if (!arena)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (arena_length < SDK_BATCH_HEADER_SIZE ||
+	    !buffer_range_valid(arena, arena_offset, arena_length))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	arena_addr = arena->address + arena_offset;
+	base = (volatile uint8_t *)(uintptr_t)arena_addr;
+	/* The 68k wrote the arena over Zorro (non-coherent). */
+	Xil_DCacheInvalidateRange((INTPTR)arena_addr, arena_length);
+
+	if (get_be32(base + SDK_BATCH_HDR_MAGIC) != SDK_BATCH_ARENA_MAGIC)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (get_be16(base + SDK_BATCH_HDR_VERSION) != SDK_BATCH_ARENA_VERSION)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	mode = get_be16(base + SDK_BATCH_HDR_MODE);
+	member_count = get_be32(base + SDK_BATCH_HDR_MEMBER_COUNT);
+	desc_offset = get_be32(base + SDK_BATCH_HDR_DESC_OFFSET);
+	blob_offset = get_be32(base + SDK_BATCH_HDR_BLOB_OFFSET);
+	blob_length = get_be32(base + SDK_BATCH_HDR_BLOB_LENGTH);
+	output_offset = get_be32(base + SDK_BATCH_HDR_OUTPUT_OFFSET);
+	output_capacity = get_be32(base + SDK_BATCH_HDR_OUTPUT_CAPACITY);
+	result_offset = get_be32(base + SDK_BATCH_HDR_RESULT_OFFSET);
+
+	if ((mode != SDK_BATCH_MODE_TEST && mode != SDK_BATCH_MODE_EXTRACT) ||
+	    member_count == 0U || member_count > SDK_BATCH_MEMBER_LIMIT ||
+	    !batch_range_ok(arena_length, desc_offset,
+	                    member_count * SDK_BATCH_DESC_SIZE) ||
+	    !batch_range_ok(arena_length, blob_offset, blob_length) ||
+	    !batch_range_ok(arena_length, result_offset,
+	                    member_count * SDK_BATCH_RESULT_SIZE) ||
+	    (mode == SDK_BATCH_MODE_EXTRACT &&
+	     !batch_range_ok(arena_length, output_offset, output_capacity))) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	XTime_GetTime(&batch_start);
+	for (i = 0; i < member_count; i++) {
+		volatile uint8_t *desc =
+		    base + desc_offset + i * SDK_BATCH_DESC_SIZE;
+		volatile uint8_t *res =
+		    base + result_offset + i * SDK_BATCH_RESULT_SIZE;
+		uint32_t algorithm = get_be32(desc + SDK_BATCH_DESC_ALGORITHM);
+		uint32_t src_offset = get_be32(desc + SDK_BATCH_DESC_SRC_OFFSET);
+		uint32_t src_length = get_be32(desc + SDK_BATCH_DESC_SRC_LENGTH);
+		uint32_t dst_offset = get_be32(desc + SDK_BATCH_DESC_DST_OFFSET);
+		uint32_t expected_size =
+		    get_be32(desc + SDK_BATCH_DESC_UNCOMP_SIZE);
+		struct SDKDecompressResult result;
+		uint16_t status;
+
+		memset(&result, 0, sizeof(result));
+		if ((algorithm != SDK_COMPRESSION_LH1 &&
+		     algorithm != SDK_COMPRESSION_LH5 &&
+		     algorithm != SDK_COMPRESSION_LH6 &&
+		     algorithm != SDK_COMPRESSION_LH7) ||
+		    src_length == 0U || expected_size == 0U ||
+		    !batch_range_ok(blob_length, src_offset, src_length) ||
+		    (mode == SDK_BATCH_MODE_EXTRACT &&
+		     !batch_range_ok(output_capacity, dst_offset,
+		                     expected_size))) {
+			status = SDK_STATUS_BAD_REQUEST;
+		} else {
+			const uint8_t *src = (const uint8_t *)(uintptr_t)(
+			    arena_addr + blob_offset + src_offset);
+			uint8_t *dst = NULL;
+
+			if (mode == SDK_BATCH_MODE_EXTRACT) {
+				dst = (uint8_t *)(uintptr_t)(
+				    arena_addr + output_offset + dst_offset);
+			}
+			status = sdk_decompress_lzh(algorithm, src, src_length,
+			                            dst, expected_size, &result);
+		}
+
+		put_be32(res + SDK_BATCH_RESULT_STATUS, status);
+		put_be32(res + SDK_BATCH_RESULT_BYTES_WRITTEN,
+		         result.bytes_written);
+		put_be32(res + SDK_BATCH_RESULT_CHECKSUM, result.checksum);
+		put_be32(res + SDK_BATCH_RESULT_RESERVED, 0U);
+		if (status == SDK_STATUS_OK)
+			members_ok++;
+		else
+			members_failed++;
+	}
+	XTime_GetTime(&batch_end);
+	timing_decode_requests =
+	    saturated_add_u32(timing_decode_requests, member_count);
+	timing_decode_us = saturated_add_u32(
+	    timing_decode_us, timing_delta_us(batch_start, batch_end));
+
+	/* Results (and extract output) must be visible to the 68k. */
+	Xil_DCacheFlushRange((INTPTR)arena_addr, arena_length);
+
+	write_completion(comp, req, SDK_STATUS_OK,
+	                 sizeof(struct SDKDecompressBatchResultPayload));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	reply = (volatile struct SDKDecompressBatchResultPayload *)comp->payload;
+	put_be32(reply->members_total, member_count);
+	put_be32(reply->members_ok, members_ok);
+	put_be32(reply->members_failed, members_failed);
+	put_be32(reply->flags, 0U);
+	return SDK_STATUS_OK;
+}
+
 static uint16_t handle_decompress_test(volatile struct SDKMailboxEntry *req,
                                        volatile struct SDKMailboxEntry *comp,
                                        uint16_t payload_len)
@@ -4493,6 +4677,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_decompress_stream_feed(req, comp, payload_len);
 	case SDK_OP_DECOMPRESS_STREAM_CLOSE:
 		return handle_decompress_stream_close(req, comp, payload_len);
+	case SDK_OP_DECOMPRESS_BATCH:
+		return handle_decompress_batch(req, comp, payload_len);
 	case SDK_OP_CRYPTO_HASH:
 		return handle_crypto_hash(req, comp, payload_len);
 	case SDK_OP_CRYPTO_STREAM:
