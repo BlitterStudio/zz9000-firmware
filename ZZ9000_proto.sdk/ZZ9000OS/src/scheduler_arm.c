@@ -141,6 +141,14 @@ void scheduler_coherency_init_core1(void)
 
   Xil_EnableMMU();                                 /* enable MMU + D-cache */
 
+  /* boot.S enables the I-cache on core 0 (SCTLR = M|C|I), but core 1 enters
+   * from its reset vector and bypasses boot.S; Xil_EnableMMU() sets only
+   * M|C. Without SCTLR.I every instruction fetch goes to L2/DDR -- measured
+   * ~10-30x slowdown on tight decode loops (LZH batch chunks blew the 68k's
+   * 5 s sync wait). L1-only variant on purpose: Xil_ICacheEnable() would
+   * also re-run the shared PL310 L2 enable that core 0 already performed. */
+  Xil_L1ICacheEnable();
+
   Xil_SetTlbAttributes(SDK_TASKQ_REGION_ADDRESS, NORM_WB_CACHE);
 }
 
