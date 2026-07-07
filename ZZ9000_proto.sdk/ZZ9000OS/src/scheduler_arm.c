@@ -37,10 +37,11 @@ typedef char sched_opcode_drift_check[
 typedef char sched_decompress_opcode_drift_check[
     (TASKQ_OP_DECOMPRESS == SDK_OP_DECOMPRESS) ? 1 : -1];
 
-/* Same drift guard for the surface-scale opcodes. */
-typedef char sched_scale_opcode_drift_check[
+/* Same drift guard for the image-service opcodes. */
+typedef char sched_image_opcode_drift_check[
     (TASKQ_OP_SCALE_IMAGE == SDK_OP_SCALE_IMAGE &&
-     TASKQ_OP_SCALE_IMAGE_CLIPPED == SDK_OP_SCALE_IMAGE_CLIPPED) ? 1 : -1];
+     TASKQ_OP_SCALE_IMAGE_CLIPPED == SDK_OP_SCALE_IMAGE_CLIPPED &&
+     TASKQ_OP_DECODE_JPEG == SDK_OP_DECODE_JPEG) ? 1 : -1];
 
 /* Core-0 view of scheduler run state. The taskq watchdog trips core 1 off
  * after repeated faults; g_core1_started is set by the worker on entry. */

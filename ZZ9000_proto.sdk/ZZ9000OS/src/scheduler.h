@@ -30,10 +30,12 @@
  * value, two namespaces, matching the crypto pattern above. */
 #define TASKQ_OP_DECOMPRESS    0x0600u
 
-/* Surface-scale opcodes mirrored from sdk_mailbox.h (SDK_OP_SCALE_IMAGE /
- * SDK_OP_SCALE_IMAGE_CLIPPED); drift guards in scheduler_arm.c. */
+/* Image-service opcodes mirrored from sdk_mailbox.h (SDK_OP_SCALE_IMAGE /
+ * SDK_OP_SCALE_IMAGE_CLIPPED / SDK_OP_DECODE_JPEG); drift guards in
+ * scheduler_arm.c. */
 #define TASKQ_OP_SCALE_IMAGE         0x0400u
 #define TASKQ_OP_SCALE_IMAGE_CLIPPED 0x0407u
+#define TASKQ_OP_DECODE_JPEG         0x0401u
 
 typedef enum {
   TASK_FREE    = 0,

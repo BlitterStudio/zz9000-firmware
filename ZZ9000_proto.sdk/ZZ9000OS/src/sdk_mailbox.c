@@ -622,6 +622,31 @@ struct scale_op_params {
 typedef char scale_op_params_size_check[
     (sizeof(struct scale_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
+/*
+ * Native-endian packed parameters for a deferred DECODE_JPEG task. The
+ * source shared buffer and destination surface are resolved and
+ * range-checked on core 0 at enqueue time; lifetime is protected by the
+ * same batch-tail gate + blocking-QUEUED-client convention that covers
+ * SDK_OP_DECOMPRESS's shared buffers. Framebuffer-backed destinations
+ * are never deferred.
+ */
+struct jpeg_op_params {
+	uint32_t src_addr;      /* src buffer address + offset, resolved */
+	uint32_t src_len;
+	uint32_t dst_addr;
+	uint32_t output_format;
+	uint16_t dst_pitch;
+	uint16_t dst_x, dst_y;
+	uint16_t dst_width, dst_height;   /* decode-bounds output rect */
+	uint16_t dst_surf_w, dst_surf_h;  /* surface dims (flush bounds) */
+	uint16_t flags;                   /* JPEGOPF_* */
+};
+
+#define JPEGOPF_DST_ARM_LOCAL (1U << 0)
+
+typedef char jpeg_op_params_size_check[
+    (sizeof(struct jpeg_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
 struct SDKAudioStream {
 	uint32_t id;
 	struct SDKSharedBuffer *mp3_ring;
@@ -2038,10 +2063,10 @@ static uint16_t handle_free_surface(volatile struct SDKMailboxEntry *req,
 	return complete_status(req, comp, SDK_STATUS_OK);
 }
 
-static uint16_t scale_try_defer(uint16_t opcode,
-                                volatile struct SDKMailboxEntry *req,
-                                const struct scale_op_params *params,
-                                uint32_t dst_rect_bytes);
+static uint16_t service_try_defer(uint16_t opcode,
+                                  volatile struct SDKMailboxEntry *req,
+                                  const void *params, uint32_t param_len,
+                                  uint32_t in_len);
 
 /*
  * A scale request may be deferred to core 1 only when neither surface is
@@ -2163,9 +2188,9 @@ static uint16_t handle_scale_image(volatile struct SDKMailboxEntry *req,
 		p.dst_y = (uint16_t)dst_y;
 		p.dst_rw = (uint16_t)dst_w;
 		p.dst_rh = (uint16_t)dst_h;
-		if (scale_try_defer(SDK_OP_SCALE_IMAGE, req, &p,
-		                    scale_rect_bytes(dst_w, dst_h,
-		                                     bytes_per_pixel)) ==
+		if (service_try_defer(SDK_OP_SCALE_IMAGE, req, &p, sizeof(p),
+		                      scale_rect_bytes(dst_w, dst_h,
+		                                       bytes_per_pixel)) ==
 		    SDK_STATUS_QUEUED)
 			return SDK_STATUS_QUEUED;
 		/* defer unavailable -> compute inline below, as before */
@@ -2265,9 +2290,10 @@ static uint16_t handle_scale_image_clipped(
 		p.clip_y = (uint16_t)clip_y;
 		p.clip_rw = (uint16_t)clip_w;
 		p.clip_rh = (uint16_t)clip_h;
-		if (scale_try_defer(SDK_OP_SCALE_IMAGE_CLIPPED, req, &p,
-		                    scale_rect_bytes(clip_w, clip_h,
-		                                     bytes_per_pixel)) ==
+		if (service_try_defer(SDK_OP_SCALE_IMAGE_CLIPPED, req, &p,
+		                      sizeof(p),
+		                      scale_rect_bytes(clip_w, clip_h,
+		                                       bytes_per_pixel)) ==
 		    SDK_STATUS_QUEUED)
 			return SDK_STATUS_QUEUED;
 		/* defer unavailable -> compute inline below, as before */
@@ -2363,6 +2389,36 @@ static uint16_t handle_decode_jpeg(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
 
+	/* Defer to core 1 when eligible: never a framebuffer-backed dst
+	 * (its geometry tracks live video state) and everything must fit
+	 * the u16 op_params fields. Decoder memory is core-1-reclaimable
+	 * (jmem_zz9k.c), so a worker fault mid-decode cannot leak. */
+	if (get_be32(payload->dst_surface) != SDK_SURFACE_HANDLE_FRAMEBUFFER &&
+	    dst.width <= 0xffffU && dst.height <= 0xffffU &&
+	    dst.pitch <= 0xffffU && dst_x <= 0xffffU && dst_y <= 0xffffU &&
+	    dst_width <= 0xffffU && dst_height <= 0xffffU) {
+		struct jpeg_op_params p;
+
+		memset(&p, 0, sizeof(p));
+		p.src_addr = src->address + src_offset;
+		p.src_len = src_length;
+		p.dst_addr = dst.address;
+		p.output_format = output_format;
+		p.dst_pitch = (uint16_t)dst.pitch;
+		p.dst_x = (uint16_t)dst_x;
+		p.dst_y = (uint16_t)dst_y;
+		p.dst_width = (uint16_t)dst_width;
+		p.dst_height = (uint16_t)dst_height;
+		p.dst_surf_w = (uint16_t)dst.width;
+		p.dst_surf_h = (uint16_t)dst.height;
+		if (surface_is_arm_local(&dst))
+			p.flags |= JPEGOPF_DST_ARM_LOCAL;
+		if (service_try_defer(SDK_OP_DECODE_JPEG, req, &p, sizeof(p),
+		                      src_length) == SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		/* defer unavailable -> decode inline below, as before */
+	}
+
 	Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
 	                          src_length);
 	if (!sdk_jpeg_decode_to_surface(
@@ -2373,6 +2429,7 @@ static uint16_t handle_decode_jpeg(volatile struct SDKMailboxEntry *req,
 	            &bytes_written)) {
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
 	}
+	scheduler_shared()->tasks_on_core0++;   /* offload-class op run inline */
 
 	flush_surface_rect(&dst, dst_x, dst_y, dst_width, dst_height);
 
@@ -3697,6 +3754,52 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		                   p->dst_rw, p->dst_rh);
 		return SDK_STATUS_OK;
 	}
+	case SDK_OP_DECODE_JPEG: {
+		const struct jpeg_op_params *p =
+		    (const struct jpeg_op_params *)d->op_params;
+		volatile struct SDKImageDecodeResultPayload *reply;
+		struct SDKSurface dst;
+		uint32_t image_width = 0;
+		uint32_t image_height = 0;
+		uint32_t bytes_written = 0;
+
+		Xil_DCacheInvalidateRange((INTPTR)p->src_addr, p->src_len);
+		if (!sdk_jpeg_decode_to_surface(
+		            (const uint8_t *)(uintptr_t)p->src_addr, p->src_len,
+		            (uint8_t *)(uintptr_t)p->dst_addr,
+		            p->dst_width, p->dst_height, p->dst_pitch,
+		            p->output_format, p->dst_x, p->dst_y,
+		            &image_width, &image_height, &bytes_written)) {
+			*result_len = 0;
+			return SDK_STATUS_IO_ERROR;
+		}
+
+		/* Just enough of the dst surface for flush_surface_rect;
+		 * geometry was resolved and validated on core 0. */
+		memset(&dst, 0, sizeof(dst));
+		dst.address = p->dst_addr;
+		dst.width = p->dst_surf_w;
+		dst.height = p->dst_surf_h;
+		dst.pitch = p->dst_pitch;
+		dst.format = p->output_format;
+		dst.length = (uint32_t)p->dst_pitch * p->dst_surf_h;
+		if (p->flags & JPEGOPF_DST_ARM_LOCAL)
+			dst.flags |= SDK_SURFACE_FLAG_ARM_LOCAL;
+		flush_surface_rect(&dst, p->dst_x, p->dst_y,
+		                   p->dst_width, p->dst_height);
+
+		memset(result_payload, 0,
+		       sizeof(struct SDKImageDecodeResultPayload));
+		reply = (volatile struct SDKImageDecodeResultPayload *)
+		    result_payload;
+		put_be32(reply->width, image_width);
+		put_be32(reply->height, image_height);
+		put_be32(reply->output_format, p->output_format);
+		put_be32(reply->flags, 0U);
+		put_be32(reply->bytes_written, bytes_written);
+		*result_len = sizeof(struct SDKImageDecodeResultPayload);
+		return SDK_STATUS_OK;
+	}
 	case SDK_OP_DECOMPRESS: {
 		const struct decompress_op_params *p =
 		    (const struct decompress_op_params *)d->op_params;
@@ -3974,28 +4077,28 @@ static uint16_t crypto_dispatch(uint16_t opcode, uint32_t in_len,
 }
 
 /*
- * Front dispatch helper for the surface-scale ops, following crypto_dispatch:
- * a defer-eligible request enqueues to the scheduler and returns
- * SDK_STATUS_QUEUED; any failure to defer returns SDK_STATUS_BUSY and the
- * CALLER computes inline (scale has no cross-call state, so the inline
- * fallback is always safe -- unlike LZH). dst_rect_bytes feeds SHORT/LONG
- * classification so small blits may be drained by an idle core 0 exactly
- * like small crypto ops.
+ * Front dispatch helper for op_params-carried service ops (surface scale,
+ * JPEG decode), following crypto_dispatch: a defer-eligible request
+ * enqueues to the scheduler and returns SDK_STATUS_QUEUED; any failure to
+ * defer returns SDK_STATUS_BUSY and the CALLER computes inline (these ops
+ * have no cross-call state, so the inline fallback is always safe --
+ * unlike LZH). in_len feeds SHORT/LONG classification (for scale it is
+ * the destination-rect byte count, so small blits may be drained by an
+ * idle core 0 exactly like small crypto ops).
  */
-static uint16_t scale_try_defer(uint16_t opcode,
-                                volatile struct SDKMailboxEntry *req,
-                                const struct scale_op_params *params,
-                                uint32_t dst_rect_bytes)
+static uint16_t service_try_defer(uint16_t opcode,
+                                  volatile struct SDKMailboxEntry *req,
+                                  const void *params, uint32_t param_len,
+                                  uint32_t in_len)
 {
 	if (scheduler_core1_available() && g_request_is_batch_tail) {
 		taskq_shared_t *sh = scheduler_shared();
 		int slot = taskq_enqueue(&sh->queue, opcode,
-		                         taskq_class_for_opcode(opcode,
-		                                                dst_rect_bytes),
-		                         0u, dst_rect_bytes, 0u, 0u,
+		                         taskq_class_for_opcode(opcode, in_len),
+		                         0u, in_len, 0u, 0u,
 		                         get_be32(req->request_id),
 		                         get_be32(req->user_cookie),
-		                         params, sizeof(*params));
+		                         params, param_len);
 		if (slot >= 0) {
 			/* Stamp the current mailbox generation so this task is dropped
 			 * rather than posted if the mailbox is re-initialised before it
