@@ -3335,10 +3335,15 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	if (stream->faulted)
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
+	if (g_audio_playback.session == session) {
+		/* Already playing this session: idempotent, no re-init (the
+		 * client may use this as a cheap status probe). */
+		return complete_audio_stream_result(req, comp, SDK_STATUS_OK,
+		                                    stream);
+	}
 	if (stream->sample_rate == 0U)   /* client must prebuffer first */
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (g_audio_playback.session != 0U &&
-	    g_audio_playback.session != session)
+	if (g_audio_playback.session != 0U)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 
 	/* Deterministic output target: the standard TX ring (an earlier AHI
