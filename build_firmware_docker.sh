@@ -8,6 +8,7 @@ IMAGE="${IMAGE:-debian:bookworm-slim}"
 OUTPUT="${OUTPUT:-bootimage_work/BOOT-sdk-docker.bin}"
 CLEAN=1
 BOOTIMAGE=1
+FSBL=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -17,16 +18,22 @@ while [ "$#" -gt 0 ]; do
     --no-bootimage)
       BOOTIMAGE=0
       ;;
+    --fsbl)
+      FSBL=1
+      ;;
     --output)
       shift
       OUTPUT="$1"
       ;;
     -h|--help)
       cat <<'EOF'
-Usage: ./build_firmware_docker.sh [--no-clean] [--no-bootimage] [--output PATH]
+Usage: ./build_firmware_docker.sh [--no-clean] [--no-bootimage] [--fsbl] [--output PATH]
 
 Builds ZZ9000OS in Docker using the same official Arm GNU Toolchain and
 bootgen flow as CI. Toolchain and bootgen are cached in Docker volumes.
+
+--fsbl also rebuilds the FSBL from source (build only; never installs
+over bootimage_work/FSBL_exec.elf — see ZZ9000_proto.sdk/ZZ9000FSBL/README.md).
 EOF
       exit 0
       ;;
@@ -47,6 +54,7 @@ docker run --rm \
   -w /work \
   -e CLEAN="$CLEAN" \
   -e BOOTIMAGE="$BOOTIMAGE" \
+  -e FSBL="$FSBL" \
   -e OUTPUT="$OUTPUT" \
   -e EXTRA_CFLAGS="${EXTRA_CFLAGS:-}" \
   "$IMAGE" bash -lc '
@@ -54,7 +62,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-  wget xz-utils make cmake perl ca-certificates python3 g++ libssl-dev flex bison git p7zip-full
+  wget xz-utils make cmake perl ca-certificates python3 g++ libssl-dev flex bison git p7zip-full unzip
 
 ARM_TOOLCHAIN_VERSION=13.2.rel1
 TC_BASE="arm-gnu-toolchain-${ARM_TOOLCHAIN_VERSION}-x86_64-arm-none-eabi"
@@ -86,6 +94,11 @@ fi
 
 export PATH="$TC_DIR/bin:$PATH"
 export BOOTGEN=/opt/bootgen/bootgen
+
+if [ "$FSBL" = "1" ]; then
+  ./build_fsbl.sh clean
+  ./build_fsbl.sh
+fi
 
 if [ "$CLEAN" = "1" ]; then
   ./build_firmware.sh clean

@@ -13,6 +13,8 @@ Scripts are composable — nothing calls anything else implicitly. All run from 
 ./build_firmware.sh clean          # optional: clean first
 ./build_firmware.sh                # → ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
 BOOTGEN=/path/to/bootgen ./build_bootimage.sh   # → bootimage_work/BOOT.bin
+./build_fsbl.sh                    # FSBL from source → ZZ9000_proto.sdk/ZZ9000FSBL/build/ZZ9000FSBL.elf
+                                   # (--install only after bench validation, see ZZ9000FSBL/README.md)
 ```
 
 **On Windows or without local toolchain (Docker):**
@@ -67,7 +69,7 @@ performance/bus timing changes.
 | `ZZ9000_proto.sdk/ZZ9000OS/src/` | Bare-metal ARM firmware (C) |
 | `ZZ9000_proto.sdk/ZZ9000FSBL/src/` | First-stage bootloader |
 | `zz9000_project.tcl` | Vivado project/block design source |
-| `bootimage_work/` | Committed FSBL, bitstreams, BIF — canonical output dir |
+| `bootimage_work/` | Committed FSBL (rebuildable: `./build_fsbl.sh`, see `ZZ9000_proto.sdk/ZZ9000FSBL/README.md`), bitstreams, BIF — canonical output dir |
 
 ### Cache-coherency gotcha (read before touching cache code)
 
@@ -88,7 +90,9 @@ transactions hit L2 regardless of the ARM's MMU attributes.
   The HP0 32→64-bit widening (2026-07) corrupted half of every 64-bit VDMA beat this
   way ("every other pixel column garbage, all modes") until `video_hp0_bus_width_init()`
   in `video.c` started forcing the AFI0 width at runtime. Clock/DDR/MIO `PCW_*` changes
-  cannot be fixed like that — they need an FSBL rebuild.
+  cannot be fixed like that — they need an FSBL rebuild: `./build_fsbl.sh`, with
+  `util/refresh_ps7_init.sh` + table validation via `util/compare_ps7_tables.py`
+  (full procedure: `ZZ9000_proto.sdk/ZZ9000FSBL/README.md`).
 - **Stale Vivado projects build stale RTL:** the project imports copies of the Verilog
   sources; running synthesis against an existing `ZZ9000_proto/` silently builds the
   code from when the project was generated. Always build via `build_bitstream.sh` /
