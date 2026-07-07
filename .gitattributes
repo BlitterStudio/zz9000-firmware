@@ -41,3 +41,7 @@ Dockerfile     text eol=lf
 *.gz        binary
 *.xz        binary
 *.bz2       binary
+
+# Vendored Vivado-generated PS init code: byte-exact LF, never EOL-converted
+ZZ9000_proto.sdk/ZZ9000FSBL/src/ps7_init_gpl.c -text
+ZZ9000_proto.sdk/ZZ9000FSBL/src/ps7_init_gpl.h -text
