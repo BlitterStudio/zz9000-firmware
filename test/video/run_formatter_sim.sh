@@ -45,7 +45,7 @@ CONFIGS="
 "
 
 rm -f run_*.log
-FAIL=0
+EXPECTED=$(echo "$CONFIGS" | grep -c '[0-9]')
 echo "$CONFIGS" | while read -r CM SX SY W; do
     [ -z "$CM" ] && continue
     cmd //c "$(cygpath -w "$VIVADO_BIN/xsim.bat") tb --runall --testplusarg \"CMODE=$CM\" --testplusarg \"SCALEX=$SX\" --testplusarg \"SCALEY=$SY\" --testplusarg \"WIDTH=$W\"" \
@@ -55,8 +55,15 @@ done
 
 echo "---- summary ($VARIANT) ----"
 grep -h "RESULT" run_*.log
+RESULTS=$(grep -h "RESULT" run_*.log | wc -l)
+if [ "$RESULTS" -ne "$EXPECTED" ]; then
+    # a run that crashes before the testbench prints RESULT must not be
+    # silently dropped from the verdict
+    echo "SIM: MISSING RESULTS ($RESULTS of $EXPECTED configs reported)"
+    exit 1
+fi
 if grep -h "RESULT" run_*.log | grep -qv "MISMATCHES=0"; then
     echo "SIM: FAILURES PRESENT"
     exit 1
 fi
-echo "SIM: ALL PASS"
+echo "SIM: ALL PASS ($RESULTS/$EXPECTED configs)"
