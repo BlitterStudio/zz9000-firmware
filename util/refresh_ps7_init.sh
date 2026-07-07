@@ -17,9 +17,10 @@
 #   util/refresh_ps7_init.sh           extract from sysdef into FSBL src
 #   util/refresh_ps7_init.sh --check   verify vendored copies match sysdef
 #
-# --check exits 0 with a note when no sysdef (or no unzip) exists — a
-# fresh clone has nothing to compare against; it exits 1 when the sysdef
-# disagrees with the vendored files (PS config drift).
+# --check exits 0 with a note when no sysdef exists — a fresh clone has
+# nothing to compare against. When a sysdef IS present it fails closed:
+# exit 1 if the sysdef disagrees with the vendored files (PS config
+# drift) or if unzip is unavailable to perform the comparison.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -33,21 +34,21 @@ if [ "${1:-}" = "--check" ]; then
     MODE=check
 fi
 
-if ! command -v unzip >/dev/null 2>&1; then
-    if [ "$MODE" = check ]; then
-        echo "[ps7-init] unzip not available; skipping freshness check." >&2
-        exit 0
-    fi
-    echo "ERROR: unzip is required to extract from the sysdef." >&2
-    exit 1
-fi
-
 if [ ! -f "$SYSDEF" ]; then
     if [ "$MODE" = check ]; then
         echo "[ps7-init] no sysdef present (no local bitstream build); skipping freshness check."
         exit 0
     fi
     echo "ERROR: $SYSDEF not found — run a bitstream build first (see AGENTS.md)." >&2
+    exit 1
+fi
+
+# A sysdef exists, so there is something to verify against: fail closed
+# if we cannot extract from it (a skipped check here is exactly the
+# stale-ps7_init drift this gate exists to catch).
+if ! command -v unzip >/dev/null 2>&1; then
+    echo "ERROR: $SYSDEF is present but unzip is unavailable — cannot verify" >&2
+    echo "       the vendored ps7_init against it. Install unzip and retry." >&2
     exit 1
 fi
 

@@ -14,7 +14,7 @@ symbol table is required.
 Usage:
   compare_ps7_tables.py IMAGE                  list decoded streams
   compare_ps7_tables.py OLD NEW [--ignore ADDR]...
-                                               diff op multisets
+                                               ordered per-stream diff
 
 Exit codes: 0 identical (after --ignore filtering), 1 differences,
 2 usage error.
@@ -90,16 +90,68 @@ def decode(path):
     return streams
 
 
-def op_counts(streams):
-    counts = {}
-    for s in streams:
-        for op in s:
-            counts[op] = counts.get(op, 0) + 1
-    return counts
-
-
 def fmt(op):
     return op[0] + " " + " ".join("0x%08X" % a for a in op[1:])
+
+
+def diff_streams(old_streams, new_streams, ignored):
+    """Ordered, per-stream diff. Op order is semantically important
+    WITHIN a table (ps7_config executes a table's ops in sequence), so
+    each stream is compared as a sequence, not a multiset. The position
+    of the tables inside the binary, however, is compiler/linker
+    layout and carries no meaning — so streams are first paired by
+    content similarity, then diffed in order. Ops targeting an
+    --ignore'd address are dropped from both sides BEFORE diffing so
+    waived deltas do not break alignment. Returns the number of
+    differing ops reported."""
+    import difflib
+    olds = [[op for op in s if op[1] not in ignored] for s in old_streams]
+    news = [[op for op in s if op[1] not in ignored] for s in new_streams]
+
+    # Greedy best-similarity pairing (identical tables pair at 1.0
+    # first, then near-identical ones like a table with a waived or
+    # genuinely changed op).
+    ratios = []
+    for i, sa in enumerate(olds):
+        for j, sb in enumerate(news):
+            r = difflib.SequenceMatcher(a=sa, b=sb, autojunk=False).ratio()
+            ratios.append((r, i, j))
+    ratios.sort(key=lambda t: (-t[0], t[1], t[2]))
+    old_pair, new_pair = {}, {}
+    for r, i, j in ratios:
+        if i not in old_pair and j not in new_pair:
+            old_pair[i] = j
+            new_pair[j] = i
+
+    diffs = 0
+    if len(olds) != len(news):
+        print("stream count differs: old=%d new=%d" % (len(olds), len(news)))
+    for i, sa in enumerate(olds):
+        j = old_pair.get(i)
+        if j is None:
+            for op in sa:
+                print("unmatched OLD stream %d: %s" % (i, fmt(op)))
+                diffs += 1
+            continue
+        sb = news[j]
+        sm = difflib.SequenceMatcher(a=sa, b=sb, autojunk=False)
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == "equal":
+                continue
+            for op in sa[i1:i2]:
+                print("stream old#%d/new#%d: only in OLD: %s"
+                      % (i, j, fmt(op)))
+                diffs += 1
+            for op in sb[j1:j2]:
+                print("stream old#%d/new#%d: only in NEW: %s"
+                      % (i, j, fmt(op)))
+                diffs += 1
+    for j, sb in enumerate(news):
+        if j not in new_pair:
+            for op in sb:
+                print("unmatched NEW stream %d: %s" % (j, fmt(op)))
+                diffs += 1
+    return diffs
 
 
 def main(argv):
@@ -130,17 +182,11 @@ def main(argv):
         print(__doc__, file=sys.stderr)
         return 2
 
-    old, new = (op_counts(decode(p)) for p in paths)
-    diffs = 0
-    for op in sorted(set(old) | set(new)):
-        if op[1] in ignored:
-            continue
-        a, b = old.get(op, 0), new.get(op, 0)
-        if a != b:
-            print("%-56s old=%d new=%d" % (fmt(op), a, b))
-            diffs += 1
-    print("ops: old=%d new=%d; differing (non-ignored) op kinds: %d"
-          % (sum(old.values()), sum(new.values()), diffs))
+    old_streams, new_streams = decode(paths[0]), decode(paths[1])
+    diffs = diff_streams(old_streams, new_streams, ignored)
+    print("ops: old=%d new=%d; differing (non-ignored) ops: %d"
+          % (sum(len(s) for s in old_streams),
+             sum(len(s) for s in new_streams), diffs))
     return 1 if diffs else 0
 
 
