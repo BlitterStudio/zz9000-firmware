@@ -9,6 +9,8 @@
 #include "sdk_image_stream.h"
 #include "sdk_surface.h"
 #include "sdk_compression.h"
+#include "memorymap.h"
+#include <xil_cache.h>
 #include <setjmp.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -80,12 +82,29 @@ struct SDKImageStreamSession {
 	uint8_t input_eof;
 	uint8_t failed;
 	uint8_t in_use;
+	uint8_t core1_affine;
 	uint8_t direct_scale_row_valid[2];
 	uint32_t direct_scale_row_y[2];
 	uint8_t direct_scale_rows[2][SDK_IMAGE_STREAM_MAX_DECODE_WIDTH * 4U];
 };
 
-static struct SDKImageStreamSession image_sessions[SDK_MAX_IMAGE_SESSIONS];
+/*
+ * The session table lives INSIDE the SCU-coherent scheduler region
+ * (SDK_IMAGE_SESSIONS_ADDRESS, memorymap.h): core-1-affine sessions decode
+ * on the worker while core 0 creates/validates/destroys them, and the
+ * coherent section makes session state visible to both cores without
+ * manual cache maintenance. The libjpeg/libpng objects hang off the newlib
+ * heap but are only ever touched by the session's owning core (affinity is
+ * fixed at begin), with fault reclaim via the decode-tracking wrappers and
+ * sdk_image_stream_poison_core1_sessions().
+ */
+static struct SDKImageStreamSession *const image_sessions =
+    (struct SDKImageStreamSession *)SDK_IMAGE_SESSIONS_ADDRESS;
+
+typedef char image_sessions_fit_check[
+    (SDK_MAX_IMAGE_SESSIONS * sizeof(struct SDKImageStreamSession) <=
+     SDK_IMAGE_SESSIONS_MAX_BYTES) ? 1 : -1];
+
 static uint32_t next_image_session_id;
 
 static struct SDKImageStreamSession *find_session(uint32_t session)
@@ -1734,7 +1753,14 @@ static uint16_t process_jpeg_stream(struct SDKImageStreamSession *session,
 
 void sdk_image_stream_init(void)
 {
-	memset(image_sessions, 0, sizeof(image_sessions));
+	size_t table_bytes =
+	    SDK_MAX_IMAGE_SESSIONS * sizeof(struct SDKImageStreamSession);
+
+	memset(image_sessions, 0, table_bytes);
+	/* This can run before the scheduler stamps the coherent MMU
+	 * attributes on the region; flush so the zeroed table is in DRAM
+	 * whatever attributes the lines were filled under. */
+	Xil_DCacheFlushRange((INTPTR)(uintptr_t)image_sessions, table_bytes);
 	next_image_session_id = 1U;
 }
 
@@ -1788,6 +1814,7 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 	session->dst_length = begin->dst_length;
 	session->tile_address = begin->tile_address;
 	session->tile_length = begin->tile_length;
+	session->core1_affine = begin->core1_affine ? 1U : 0U;
 	session->in_use = 1U;
 
 	fill_result(session, SDK_IMAGE_SESSION_STATE_NEED_INPUT, 0U, result);
@@ -1844,4 +1871,40 @@ uint16_t sdk_image_stream_close(uint32_t session)
 	destroy_png(slot);
 	memset(slot, 0, sizeof(*slot));
 	return SDK_STATUS_OK;
+}
+
+int sdk_image_stream_session_core1(uint32_t session)
+{
+	struct SDKImageStreamSession *slot = find_session(session);
+
+	if (!slot)
+		return -1;
+	return slot->core1_affine ? 1 : 0;
+}
+
+/*
+ * After a core-1 fault, the decode-reclaim pass frees every heap block
+ * core-1 decodes held (libjpeg pools, libpng structs, the interlace
+ * buffer). Drop the dangling references of core-1-affine sessions WITHOUT
+ * running the codec destructors -- destroying against reclaimed memory
+ * would be a use-after-free -- and mark the sessions failed so subsequent
+ * feeds report IO_ERROR and close reduces to a plain slot reset.
+ */
+void sdk_image_stream_poison_core1_sessions(void)
+{
+	uint32_t i;
+
+	for (i = 0; i < SDK_MAX_IMAGE_SESSIONS; i++) {
+		struct SDKImageStreamSession *slot = &image_sessions[i];
+
+		if (!slot->in_use || !slot->core1_affine)
+			continue;
+		slot->jpeg_created = 0U;
+		slot->png_created = 0U;
+		slot->png_ptr = 0;
+		slot->png_info = 0;
+		slot->png_interlace_buffer = 0;
+		slot->png_interlace_buffer_length = 0U;
+		slot->failed = 1U;
+	}
 }

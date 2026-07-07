@@ -256,6 +256,11 @@ taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len)
     return TASK_LONG;               /* full image decode: always heavy */
   case TASKQ_OP_DECODE_MP3:
     return TASK_LONG;               /* full audio decode: always heavy */
+  case TASKQ_OP_IMAGE_SESSION_FEED:
+  case TASKQ_OP_IMAGE_SESSION_CLOSE:
+    /* MUST stay LONG regardless of size: the session codec state lives
+     * in core 1's cache, so a core-0 SHORT drain would corrupt it. */
+    return TASK_LONG;
   default:
     return TASK_LONG;              /* unknown/heavy: never drained on core 0 */
   }

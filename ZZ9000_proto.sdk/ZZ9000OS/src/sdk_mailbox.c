@@ -668,6 +668,25 @@ struct mp3_op_params {
 typedef char mp3_op_params_size_check[
     (sizeof(struct mp3_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
+/*
+ * Native-endian packed parameters for deferred IMAGE_SESSION_FEED/CLOSE
+ * tasks. The session lives in the SCU-coherent table (visible to both
+ * cores); the source shared buffer is resolved on core 0. A core-1-affine
+ * session's feed/close may ONLY run on core 1 -- its libjpeg/libpng
+ * objects live in core 1's cache -- which TASK_LONG classification
+ * guarantees (never drained by core 0).
+ */
+struct imgsess_op_params {
+	uint32_t session;
+	uint32_t src_handle;
+	uint32_t src_addr;      /* resolved src + offset; 0 for EOF-only/close */
+	uint32_t src_len;
+	uint32_t flags;
+};
+
+typedef char imgsess_op_params_size_check[
+    (sizeof(struct imgsess_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
 struct SDKAudioStream {
 	uint32_t id;
 	struct SDKSharedBuffer *mp3_ring;
@@ -3225,6 +3244,11 @@ static uint16_t handle_image_session_begin(
 	if (status != SDK_STATUS_OK)
 		return complete_status(req, comp, status);
 
+	/* Fix the session's core affinity for its whole life: feeds/closes
+	 * of a core-1-affine session run on the worker (the codec heap
+	 * objects then live in core 1's cache and never migrate). */
+	begin.core1_affine = scheduler_core1_available() ? 1U : 0U;
+
 	status = sdk_image_stream_begin(&begin, &result);
 	return complete_image_session_result(req, comp, status, &result);
 }
@@ -3258,6 +3282,30 @@ static uint16_t handle_image_session_feed(
 	if (!buffer_range_valid(src, feed.src_offset, feed.src_length))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 
+	if (sdk_image_stream_session_core1(feed.session) > 0 &&
+	    scheduler_core1_available()) {
+		struct imgsess_op_params p;
+
+		p.session = feed.session;
+		p.src_handle = feed.src_handle;
+		p.src_addr = (feed.src_length != 0U) ?
+		    (src->address + feed.src_offset) : 0U;
+		p.src_len = feed.src_length;
+		p.flags = feed.flags;
+		if (service_try_defer(SDK_OP_IMAGE_SESSION_FEED, req, &p,
+		                      sizeof(p), feed.src_length) ==
+		    SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		/* A core-1-affine session cannot decode on core 0 (its codec
+		 * state lives in core 1's cache). The sole synchronous client
+		 * sends session ops singly (always the batch tail, one in
+		 * flight), so a refused defer means a full queue -- transient
+		 * and unreachable today; answer BUSY rather than corrupt. */
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+	/* Core-0-affine (or poisoned-after-fault) session: inline, as the
+	 * pre-scheduler firmware did. */
+
 	if (feed.src_length != 0U) {
 		src_data = (const uint8_t *)(uintptr_t)
 			(src->address + feed.src_offset);
@@ -3286,6 +3334,23 @@ static uint16_t handle_image_session_close(
 
 	payload = (volatile struct SDKImageSessionClosePayload *)req->payload;
 	session = get_be32(payload->session);
+
+	if (sdk_image_stream_session_core1(session) > 0 &&
+	    scheduler_core1_available()) {
+		struct imgsess_op_params p;
+
+		memset(&p, 0, sizeof(p));
+		p.session = session;
+		if (service_try_defer(SDK_OP_IMAGE_SESSION_CLOSE, req, &p,
+		                      sizeof(p), 0U) == SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		/* See the feed path: never touch core-1 codec state from
+		 * core 0; refused defer = transient full queue. */
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+	/* Core-0-affine session, or a poisoned one after a core-1 fault
+	 * (codec objects already reclaimed; close reduces to a slot reset). */
+
 	status = sdk_image_stream_close(session);
 	return complete_status(req, comp, status);
 }
@@ -3872,6 +3937,58 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		    (const struct mp3_op_params *)d->op_params;
 		return mp3_decode_compute(&g_mp3_core1_ctx, p, result_payload,
 		                          result_len);
+	}
+	case SDK_OP_IMAGE_SESSION_FEED: {
+		const struct imgsess_op_params *p =
+		    (const struct imgsess_op_params *)d->op_params;
+		volatile struct SDKImageSessionResultPayload *reply;
+		struct SDKImageStreamFeed feed;
+		struct SDKImageStreamResult sres;
+		const uint8_t *src_data = 0;
+		uint16_t s;
+
+		memset(&feed, 0, sizeof(feed));
+		feed.session = p->session;
+		feed.src_handle = p->src_handle;
+		feed.src_length = p->src_len;
+		feed.flags = p->flags;
+		if (p->src_len != 0U) {
+			src_data = (const uint8_t *)(uintptr_t)p->src_addr;
+			Xil_DCacheInvalidateRange((INTPTR)p->src_addr,
+			                          p->src_len);
+		}
+
+		s = sdk_image_stream_feed(&feed, src_data, &sres);
+		*result_len = 0;
+		if (s != SDK_STATUS_OK)
+			return s;
+		flush_image_session_output(&sres);
+
+		memset(result_payload, 0,
+		       sizeof(struct SDKImageSessionResultPayload));
+		reply = (volatile struct SDKImageSessionResultPayload *)
+		    result_payload;
+		put_be32(reply->session, sres.session);
+		put_be32(reply->state, sres.state);
+		put_be32(reply->image_width, sres.image_width);
+		put_be32(reply->image_height, sres.image_height);
+		put_be32(reply->output_format, sres.output_format);
+		put_be32(reply->tile_x, sres.tile_x);
+		put_be32(reply->tile_y, sres.tile_y);
+		put_be32(reply->tile_width, sres.tile_width);
+		put_be32(reply->tile_height, sres.tile_height);
+		put_be32(reply->bytes_consumed, sres.bytes_consumed);
+		put_be32(reply->bytes_written, sres.bytes_written);
+		put_be32(reply->flags, sres.flags);
+		*result_len = sizeof(struct SDKImageSessionResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_IMAGE_SESSION_CLOSE: {
+		const struct imgsess_op_params *p =
+		    (const struct imgsess_op_params *)d->op_params;
+
+		*result_len = 0;
+		return sdk_image_stream_close(p->session);
 	}
 	case SDK_OP_DECOMPRESS: {
 		const struct decompress_op_params *p =
