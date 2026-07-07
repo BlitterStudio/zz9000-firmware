@@ -9,6 +9,7 @@
 #ifndef SDK_COMPRESSION_H
 #define SDK_COMPRESSION_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include "sdk_mailbox.h"
 
@@ -62,5 +63,16 @@ uint16_t sdk_decompress_stream_close(uint32_t session);
  * (0 when the last decode completed cleanly).
  */
 unsigned sdk_compression_reclaim_core1_decode(void);
+
+/*
+ * Heap wrappers for decode backends that may run on core 1: plain
+ * malloc/free on core 0, tracked (reclaimable after a core-1 cold reset)
+ * on core 1. Shared by the zlib/LZMA callbacks here and by the libjpeg
+ * memory backend (jmem_zz9k.c) and libpng allocator hooks
+ * (sdk_image_stream.c) so image decodes get the same fault-reclaim
+ * guarantee as the decompress services.
+ */
+void *sdk_decode_heap_alloc(size_t size);
+void sdk_decode_heap_free(void *ptr);
 
 #endif /* SDK_COMPRESSION_H */

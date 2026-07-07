@@ -8,6 +8,7 @@
 
 #include "sdk_image_stream.h"
 #include "sdk_surface.h"
+#include "sdk_compression.h"
 #include <setjmp.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -869,10 +870,27 @@ static void png_fail(struct SDKImageStreamSession *session, uint16_t status,
 	png_error(session->png_ptr, message);
 }
 
+/*
+ * libpng allocator hooks routed through the decode-reclaim wrappers so a
+ * core-1 fault mid-decode can reclaim every block (plain malloc/free on
+ * core 0) -- same guarantee as the libjpeg jmem_zz9k backend.
+ */
+static png_voidp png_decode_alloc(png_structp png_ptr, png_alloc_size_t size)
+{
+	(void)png_ptr;
+	return (png_voidp)sdk_decode_heap_alloc((size_t)size);
+}
+
+static void png_decode_free(png_structp png_ptr, png_voidp ptr)
+{
+	(void)png_ptr;
+	sdk_decode_heap_free((void *)ptr);
+}
+
 static void destroy_png(struct SDKImageStreamSession *session)
 {
 	if (session->png_interlace_buffer) {
-		free(session->png_interlace_buffer);
+		sdk_decode_heap_free(session->png_interlace_buffer);
 		session->png_interlace_buffer = 0;
 	}
 	if (session->png_created) {
@@ -920,10 +938,13 @@ static uint16_t create_png_if_needed(struct SDKImageStreamSession *session)
 		return SDK_STATUS_OK;
 
 	session->png_error_status = SDK_STATUS_OK;
-	session->png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING,
-	                                         session,
-	                                         png_error_handler,
-	                                         png_warning_handler);
+	session->png_ptr = png_create_read_struct_2(PNG_LIBPNG_VER_STRING,
+	                                            session,
+	                                            png_error_handler,
+	                                            png_warning_handler,
+	                                            0,
+	                                            png_decode_alloc,
+	                                            png_decode_free);
 	if (!session->png_ptr)
 		return SDK_STATUS_NO_MEMORY;
 	session->png_info = png_create_info_struct(session->png_ptr);
@@ -1092,7 +1113,8 @@ static int png_prepare_interlace_storage(
 	if (session->output_height > (0xffffffffU / row_bytes))
 		return 0;
 	image_bytes = session->output_height * row_bytes;
-	session->png_interlace_buffer = (uint8_t *)malloc(image_bytes);
+	session->png_interlace_buffer =
+	    (uint8_t *)sdk_decode_heap_alloc(image_bytes);
 	if (!session->png_interlace_buffer)
 		return 0;
 	memset(session->png_interlace_buffer, 0, image_bytes);
