@@ -678,7 +678,7 @@ struct audio_feed_op_params {
 
 struct audio_read_op_params {
 	uint32_t session;
-	uint32_t pcm_read;      /* validated against pcm_used on core 0 */
+	uint32_t pcm_read;      /* validated against consumer-visible used */
 };
 
 typedef char audio_op_params_size_check[
@@ -712,9 +712,22 @@ struct SDKAudioStream {
 	uint32_t pcm_capacity;
 	uint32_t input_offset;
 	uint32_t input_length;
-	uint32_t pcm_read;
-	uint32_t pcm_write;
-	uint32_t pcm_used;
+	/*
+	 * PCM ring cursors as monotonic byte totals, u32 wrap-safe, each with
+	 * exactly ONE writer so no atomics are needed (the table is in the
+	 * SCU-coherent region):
+	 *  - pcm_written_total: decode side (core 1 for affine streams),
+	 *    advanced per frame; producer-internal ring geometry.
+	 *  - pcm_ready_total: decode side, published AFTER the PCM cache
+	 *    flush (Xil_DCacheFlushRange ends in a DSB, ordering the store)
+	 *    -- consumers may only read ring bytes below this total.
+	 *  - pcm_consumed_total: the consumer -- the AUDIO_STREAM_READ path
+	 *    for unbound streams, the AX playback pump for bound ones (a
+	 *    bound stream rejects READ, so the writer is always unique).
+	 */
+	uint32_t pcm_written_total;
+	uint32_t pcm_ready_total;
+	uint32_t pcm_consumed_total;
 	uint32_t low_water_bytes;
 	uint32_t high_water_bytes;
 	uint32_t sample_rate;
@@ -2733,11 +2746,24 @@ void sdk_mailbox_poison_core1_audio_streams(void)
 	}
 }
 
+/* Consumer-visible bytes in the ring (flushed and safe to read). */
+static uint32_t audio_stream_pcm_used(const struct SDKAudioStream *stream)
+{
+	return stream->pcm_ready_total - stream->pcm_consumed_total;
+}
+
+/* Producer's free space: against written_total (conservative -- counts
+ * frames not yet published by the end-of-decode flush too). */
 static uint32_t audio_stream_pcm_free(const struct SDKAudioStream *stream)
 {
-	if (!stream || stream->pcm_used >= stream->pcm_capacity)
+	uint32_t used;
+
+	if (!stream)
 		return 0;
-	return stream->pcm_capacity - stream->pcm_used;
+	used = stream->pcm_written_total - stream->pcm_consumed_total;
+	if (used >= stream->pcm_capacity)
+		return 0;
+	return stream->pcm_capacity - used;
 }
 
 static void flush_audio_pcm_written(const struct SDKAudioStream *stream,
@@ -2762,15 +2788,15 @@ static void audio_stream_pcm_write(struct SDKAudioStream *stream,
                                    const uint8_t *src, uint32_t bytes)
 {
 	uint8_t *dst = (uint8_t *)(uintptr_t)stream->pcm_ring_addr;
-	uint32_t first = stream->pcm_capacity - stream->pcm_write;
+	uint32_t offset = stream->pcm_written_total % stream->pcm_capacity;
+	uint32_t first = stream->pcm_capacity - offset;
 
 	if (first > bytes)
 		first = bytes;
-	memcpy(dst + stream->pcm_write, src, first);
+	memcpy(dst + offset, src, first);
 	if (bytes > first)
 		memcpy(dst, src + first, bytes - first);
-	stream->pcm_write = (stream->pcm_write + bytes) % stream->pcm_capacity;
-	stream->pcm_used += bytes;
+	stream->pcm_written_total += bytes;
 	stream->bytes_produced += bytes;
 }
 
@@ -2905,7 +2931,7 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 		max_pcm_this_call = stream->pcm_capacity;
 	if (max_pcm_this_call < frame_pcm_bytes)
 		max_pcm_this_call = frame_pcm_bytes;
-	pcm_flush_start = stream->pcm_write;
+	pcm_flush_start = stream->pcm_written_total % stream->pcm_capacity;
 
 	while (stream->input_length > 0U &&
 	       audio_stream_pcm_free(stream) >= frame_pcm_bytes) {
@@ -2986,9 +3012,14 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 		}
 	}
 
-	if (produced_this_call != 0U)
+	if (produced_this_call != 0U) {
 		flush_audio_pcm_written(stream, pcm_dst, pcm_flush_start,
 		                        produced_this_call);
+		/* Publish only after the flush: Xil_DCacheFlushRange ends in
+		 * a DSB, so consumers that see the new ready total also see
+		 * the PCM bytes in DRAM. */
+		stream->pcm_ready_total = stream->pcm_written_total;
+	}
 	return progress;
 }
 
@@ -2996,12 +3027,13 @@ static uint32_t audio_stream_state(const struct SDKAudioStream *stream)
 {
 	if (!stream)
 		return SDK_AUDIO_STREAM_STATE_ERROR;
-	if (stream->eof && stream->input_length == 0U && stream->pcm_used == 0U)
+	if (stream->eof && stream->input_length == 0U &&
+	    audio_stream_pcm_used(stream) == 0U)
 		return SDK_AUDIO_STREAM_STATE_DONE;
 	if (audio_stream_needs_more_input(stream))
 		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
 	if (stream->input_length == 0U &&
-	    stream->pcm_used < stream->pcm_capacity)
+	    audio_stream_pcm_used(stream) < stream->pcm_capacity)
 		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
 	return SDK_AUDIO_STREAM_STATE_STREAMING;
 }
@@ -3012,12 +3044,12 @@ static uint32_t audio_stream_result_flags(const struct SDKAudioStream *stream)
 
 	if (!stream)
 		return 0;
-	if (stream->pcm_used != 0U)
+	if (audio_stream_pcm_used(stream) != 0U)
 		flags |= SDK_AUDIO_STREAM_RESULT_PCM_READY;
 	if (audio_stream_needs_more_input(stream))
 		flags |= SDK_AUDIO_STREAM_RESULT_NEED_INPUT;
 	if (stream->eof && stream->input_length == 0U &&
-	    stream->pcm_used == 0U)
+	    audio_stream_pcm_used(stream) == 0U)
 		flags |= SDK_AUDIO_STREAM_RESULT_DONE;
 	if (stream->backpressure)
 		flags |= SDK_AUDIO_STREAM_RESULT_BACKPRESSURE;
@@ -3039,8 +3071,10 @@ static void audio_stream_fill_result(uint8_t *dst,
 	put_be32(result->channels, stream->channels);
 	put_be32(result->sample_format, stream->sample_format);
 	put_be32(result->mp3_read, stream->bytes_consumed);
-	put_be32(result->pcm_write, stream->pcm_write);
-	put_be32(result->pcm_read, stream->pcm_read);
+	put_be32(result->pcm_write,
+	         stream->pcm_ready_total % stream->pcm_capacity);
+	put_be32(result->pcm_read,
+	         stream->pcm_consumed_total % stream->pcm_capacity);
 	put_be32(result->frames_decoded, stream->frames_decoded);
 	put_be32(result->bytes_consumed, stream->bytes_consumed);
 	put_be32(result->bytes_produced, stream->bytes_produced);
@@ -3104,8 +3138,7 @@ static void audio_stream_feed_compute(struct SDKAudioStream *stream,
 static void audio_stream_read_compute(struct SDKAudioStream *stream,
                                       uint32_t pcm_read)
 {
-	stream->pcm_read = (stream->pcm_read + pcm_read) % stream->pcm_capacity;
-	stream->pcm_used -= pcm_read;
+	stream->pcm_consumed_total += pcm_read;
 	audio_stream_decode(stream);
 }
 
@@ -3255,7 +3288,7 @@ static uint16_t handle_audio_stream_read(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	pcm_read = get_be32(payload->pcm_read);
 	flags = get_be32(payload->flags);
-	if (flags != 0U || pcm_read > stream->pcm_used)
+	if (flags != 0U || pcm_read > audio_stream_pcm_used(stream))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if (stream->faulted)
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
