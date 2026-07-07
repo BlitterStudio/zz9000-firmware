@@ -1621,6 +1621,10 @@ int main() {
 				}
 			}
 
+			// keep the AX TX ring fed from a bound audio-stream session
+			// (SDK_OP_AUDIO_STREAM_PLAY); no-op when nothing is bound
+			sdk_mailbox_audio_playback_pump();
+
 			if (sdk_mailbox_register_events) {
 				uint32_t events = sdk_mailbox_register_events;
 				sdk_mailbox_register_events = 0;

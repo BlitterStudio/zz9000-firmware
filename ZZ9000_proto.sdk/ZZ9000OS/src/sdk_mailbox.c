@@ -21,6 +21,7 @@
 #include "memorymap.h"
 #include "scheduler.h"
 #include "core2.h"
+#include "ax.h"
 #include "interrupt.h"
 #include "video.h"
 #include "mp3/mp3.h"
@@ -39,6 +40,7 @@
 	 SDK_CAP_SHARED_ALLOC | SDK_CAP_SURFACES | \
 	 SDK_CAP_FRAMEBUFFER_SURFACE | SDK_CAP_IMAGE_DECODE | \
 	 SDK_CAP_IMAGE_SCALE | SDK_CAP_AUDIO_DECODE | \
+	 SDK_CAP_AUDIO_PLAYBACK | \
 	 SDK_CAP_MEMORY_OPS | SDK_CAP_CRYPTO | \
 	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION)
 #define SDK_AUDIO_STREAM_MIN_INPUT_BYTES (16U * 1024U)
@@ -3142,6 +3144,204 @@ static void audio_stream_read_compute(struct SDKAudioStream *stream,
 	audio_stream_decode(stream);
 }
 
+/*
+ * ---- AX playback pump (MHI modernization) ----
+ * One audio-stream session at a time may be bound to the AX output
+ * (SDK_OP_AUDIO_STREAM_PLAY). The core-0 main loop calls the pump every
+ * pass; it keeps the standard AX TX ring filled ahead of the
+ * audio-formatter DMA from the session's PCM ring, one 3840-byte period
+ * (20 ms of 48 kHz stereo S16LE) at a time. Underrun, a faulted session
+ * or an unusable stream geometry produce silence. Non-48k sources go
+ * through the existing resample_s16 path with the legacy DECODE_RUN
+ * source math (rate/50 frames per period, integer truncation and its
+ * slight drift included); mono sources are duplicated to stereo. The
+ * pump is the CONSUMER of a bound session -- the single writer of
+ * pcm_consumed_total -- so AUDIO_STREAM_READ is rejected while bound.
+ */
+#define AUDIO_PUMP_PERIOD_BYTES  AUDIO_BYTES_PER_PERIOD
+#define AUDIO_PUMP_RING_BYTES    AUDIO_TX_BUFFER_SIZE
+#define AUDIO_PUMP_TARGET_AHEAD \
+	(AUDIO_PUMP_RING_BYTES - 2U * AUDIO_PUMP_PERIOD_BYTES)
+
+static struct {
+	uint32_t session;       /* 0 = unbound */
+	uint32_t fill_offset;   /* next TX-ring byte to fill, period-aligned */
+} g_audio_playback;
+
+static int16_t g_pump_src[AUDIO_PUMP_PERIOD_BYTES / 2];
+static int16_t g_pump_stereo[AUDIO_PUMP_PERIOD_BYTES / 2];
+
+static void audio_pump_fill_period(struct SDKAudioStream *stream,
+                                   uint8_t *slot)
+{
+	uint32_t rate;
+	uint32_t channels;
+	uint32_t src_frames;
+	uint32_t src_bytes;
+	uint32_t offset;
+	uint32_t first;
+	uint8_t *ring;
+	int16_t *pcm;
+	uint32_t i;
+
+	if (!stream || stream->faulted)
+		goto silence;
+	rate = stream->sample_rate;
+	channels = stream->channels;
+	if (rate == 0U || channels == 0U || channels > 2U)
+		goto silence;
+	src_frames = rate / 50U;
+	if (src_frames == 0U || src_frames > (AUDIO_PUMP_PERIOD_BYTES / 4U))
+		goto silence;
+	src_bytes = src_frames * channels * 2U;
+	if ((stream->pcm_ready_total - stream->pcm_consumed_total) < src_bytes)
+		goto silence;   /* underrun: a whole period of silence */
+
+	/* Pull one period's source from the PCM ring. The decode side
+	 * flushed these bytes before publishing pcm_ready_total, so a
+	 * reader-side invalidate makes them visible on this core. */
+	ring = (uint8_t *)(uintptr_t)stream->pcm_ring_addr;
+	offset = stream->pcm_consumed_total % stream->pcm_capacity;
+	first = stream->pcm_capacity - offset;
+	if (first > src_bytes)
+		first = src_bytes;
+	Xil_DCacheInvalidateRange((INTPTR)(ring + offset), first);
+	memcpy(g_pump_src, ring + offset, first);
+	if (src_bytes > first) {
+		Xil_DCacheInvalidateRange((INTPTR)ring, src_bytes - first);
+		memcpy((uint8_t *)g_pump_src + first, ring, src_bytes - first);
+	}
+	stream->pcm_consumed_total += src_bytes;
+
+	pcm = g_pump_src;
+	if (channels == 1U) {
+		for (i = 0; i < src_frames; i++) {
+			g_pump_stereo[2U * i] = g_pump_src[i];
+			g_pump_stereo[2U * i + 1U] = g_pump_src[i];
+		}
+		pcm = g_pump_stereo;
+	}
+	if (rate == 48000U) {
+		memcpy(slot, pcm, AUDIO_PUMP_PERIOD_BYTES);
+	} else {
+		resample_s16(pcm, (int16_t *)slot, (int)rate, 48000,
+		             AUDIO_PUMP_PERIOD_BYTES / 4);
+	}
+	return;
+silence:
+	memset(slot, 0, AUDIO_PUMP_PERIOD_BYTES);
+}
+
+void sdk_mailbox_audio_playback_pump(void)
+{
+	struct SDKAudioStream *stream;
+	uint8_t *tx = (uint8_t *)AUDIO_TX_BUFFER_ADDRESS;
+	uint32_t pos_period;
+	uint32_t ahead;
+	uint32_t guard;
+
+	if (g_audio_playback.session == 0U)
+		return;
+	stream = find_audio_stream(g_audio_playback.session);
+	if (!stream) {
+		g_audio_playback.session = 0U;   /* closed under us */
+		return;
+	}
+
+	pos_period = (audio_get_dma_transfer_count() % AUDIO_PUMP_RING_BYTES);
+	pos_period -= pos_period % AUDIO_PUMP_PERIOD_BYTES;
+
+	/* If the DMA caught up with (or passed) the fill frontier, restart
+	 * one period ahead of it. */
+	ahead = (g_audio_playback.fill_offset - pos_period) %
+	        AUDIO_PUMP_RING_BYTES;
+	if (ahead == 0U || ahead > AUDIO_PUMP_TARGET_AHEAD) {
+		g_audio_playback.fill_offset =
+		    (pos_period + AUDIO_PUMP_PERIOD_BYTES) %
+		    AUDIO_PUMP_RING_BYTES;
+	}
+
+	guard = AUDIO_PUMP_RING_BYTES / AUDIO_PUMP_PERIOD_BYTES;
+	while (guard--) {
+		ahead = (g_audio_playback.fill_offset - pos_period) %
+		        AUDIO_PUMP_RING_BYTES;
+		if (ahead > AUDIO_PUMP_TARGET_AHEAD)
+			break;   /* frontier far enough ahead */
+		audio_pump_fill_period(stream,
+		                       tx + g_audio_playback.fill_offset);
+		g_audio_playback.fill_offset =
+		    (g_audio_playback.fill_offset + AUDIO_PUMP_PERIOD_BYTES) %
+		    AUDIO_PUMP_RING_BYTES;
+	}
+}
+
+static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
+                                         volatile struct SDKMailboxEntry *comp,
+                                         uint16_t payload_len)
+{
+	volatile struct SDKAudioStreamClosePayload *payload;
+	struct SDKAudioStream *stream;
+	uint32_t session;
+	uint32_t flags;
+	uint32_t pos;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioStreamClosePayload *)req->payload;
+	session = get_be32(payload->session);
+	flags = get_be32(payload->flags);
+	if (flags != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	stream = find_audio_stream(session);
+	if (!stream)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (stream->faulted)
+		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
+	if (stream->sample_rate == 0U)   /* client must prebuffer first */
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (g_audio_playback.session != 0U &&
+	    g_audio_playback.session != session)
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+
+	/* Deterministic output target: the standard TX ring (an earlier AHI
+	 * session may have repointed it). */
+	audio_set_tx_buffer((uint8_t *)AUDIO_TX_BUFFER_ADDRESS);
+	g_audio_playback.session = session;
+	pos = audio_get_dma_transfer_count() % AUDIO_PUMP_RING_BYTES;
+	pos -= pos % AUDIO_PUMP_PERIOD_BYTES;
+	g_audio_playback.fill_offset =
+	    (pos + AUDIO_PUMP_PERIOD_BYTES) % AUDIO_PUMP_RING_BYTES;
+	sdk_mailbox_audio_playback_pump();   /* prefill */
+	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
+}
+
+static uint16_t handle_audio_stream_stop(volatile struct SDKMailboxEntry *req,
+                                         volatile struct SDKMailboxEntry *comp,
+                                         uint16_t payload_len)
+{
+	volatile struct SDKAudioStreamClosePayload *payload;
+	struct SDKAudioStream *stream;
+	uint32_t session;
+	uint32_t flags;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioStreamClosePayload *)req->payload;
+	session = get_be32(payload->session);
+	flags = get_be32(payload->flags);
+	if (flags != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	stream = find_audio_stream(session);
+	if (!stream)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (g_audio_playback.session == session) {
+		g_audio_playback.session = 0U;
+		audio_silence();
+	}
+	/* Idempotent: stopping an unbound session is OK (MHI pause/stop). */
+	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
+}
+
 static uint16_t handle_audio_stream_begin(volatile struct SDKMailboxEntry *req,
                                           volatile struct SDKMailboxEntry *comp,
                                           uint16_t payload_len)
@@ -3292,6 +3492,9 @@ static uint16_t handle_audio_stream_read(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if (stream->faulted)
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
+	/* A bound stream's consumer is the AX playback pump. */
+	if (g_audio_playback.session == session)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 
 	if (stream->core1_affine && scheduler_core1_available()) {
 		struct audio_read_op_params p;
@@ -3330,6 +3533,11 @@ static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
 	stream = find_audio_stream(session);
 	if (!stream)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (g_audio_playback.session == session) {
+		/* Closing a bound stream implies stop. */
+		g_audio_playback.session = 0U;
+		audio_silence();
+	}
 	snapshot = *stream;
 	free_audio_stream(stream);
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, &snapshot);
@@ -5564,6 +5772,10 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_audio_stream_read(req, comp, payload_len);
 	case SDK_OP_AUDIO_STREAM_CLOSE:
 		return handle_audio_stream_close(req, comp, payload_len);
+	case SDK_OP_AUDIO_STREAM_PLAY:
+		return handle_audio_stream_play(req, comp, payload_len);
+	case SDK_OP_AUDIO_STREAM_STOP:
+		return handle_audio_stream_stop(req, comp, payload_len);
 	case SDK_OP_IMAGE_SESSION_BEGIN:
 		return handle_image_session_begin(req, comp, payload_len);
 	case SDK_OP_IMAGE_SESSION_FEED:
@@ -5656,6 +5868,8 @@ void sdk_mailbox_init(void)
 	timing_decode_us = 0;
 	memset(shared_buffers, 0, sizeof(shared_buffers));
 	memset(surfaces, 0, sizeof(surfaces));
+	/* Unbind AX playback before the table goes away. */
+	g_audio_playback.session = 0U;
 	/* Pointer into the coherent region, not an array: size explicitly.
 	 * Flush so the zeroed table is in DRAM whatever MMU attributes the
 	 * lines were filled under (this can run before the scheduler stamps

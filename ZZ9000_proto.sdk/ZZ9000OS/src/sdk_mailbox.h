@@ -40,6 +40,7 @@
 #define SDK_CAP_IMAGE_SCALE            (1U << 6)
 #define SDK_CAP_AUDIO_DECODE           (1U << 7)
 #define SDK_CAP_CRYPTO                 (1U << 8)
+#define SDK_CAP_AUDIO_PLAYBACK         (1U << 9)
 #define SDK_CAP_MEMORY_OPS             (1U << 10)
 #define SDK_CAP_DIAGNOSTICS            (1U << 11)
 #define SDK_CAP_DOORBELL               (1U << 12)
@@ -149,6 +150,8 @@
 #define SDK_OP_AUDIO_STREAM_FEED       0x0504U
 #define SDK_OP_AUDIO_STREAM_READ       0x0505U
 #define SDK_OP_AUDIO_STREAM_CLOSE      0x0506U
+#define SDK_OP_AUDIO_STREAM_PLAY       0x0507U
+#define SDK_OP_AUDIO_STREAM_STOP       0x0508U
 
 #define SDK_OP_DECOMPRESS              0x0600U
 #define SDK_OP_DECOMPRESS_TEST         0x0601U
@@ -393,6 +396,10 @@ uint32_t sdk_mailbox_address(void);
 /* After a core-1 fault: mark core-1-affine audio streams faulted so their
  * feeds/reads fail cleanly (the embedded decoder may be mid-frame). */
 void sdk_mailbox_poison_core1_audio_streams(void);
+/* AX playback pump: keeps the audio TX ring filled from the bound
+ * audio-stream session (SDK_OP_AUDIO_STREAM_PLAY). Call from the core-0
+ * main loop every pass; no-op when nothing is bound. */
+void sdk_mailbox_audio_playback_pump(void);
 
 /*
  * Run a crypto task's compute on the calling core. op_params points at one of
