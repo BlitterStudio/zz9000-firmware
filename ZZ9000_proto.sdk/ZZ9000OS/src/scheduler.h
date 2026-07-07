@@ -30,6 +30,25 @@
  * value, two namespaces, matching the crypto pattern above. */
 #define TASKQ_OP_DECOMPRESS    0x0600u
 
+/* Image-service opcodes mirrored from sdk_mailbox.h (SDK_OP_SCALE_IMAGE /
+ * SDK_OP_SCALE_IMAGE_CLIPPED / SDK_OP_DECODE_JPEG); drift guards in
+ * scheduler_arm.c. */
+#define TASKQ_OP_SCALE_IMAGE         0x0400u
+#define TASKQ_OP_SCALE_IMAGE_CLIPPED 0x0407u
+#define TASKQ_OP_DECODE_JPEG         0x0401u
+
+/* Audio-service opcode mirrored from sdk_mailbox.h (SDK_OP_DECODE_MP3);
+ * drift guard in scheduler_arm.c. */
+#define TASKQ_OP_DECODE_MP3          0x0500u
+
+/* Image-session opcodes mirrored from sdk_mailbox.h. These run the
+ * session's libjpeg/libpng objects, whose heap blocks live in the owning
+ * core's cache: a core-1-affine session's feed/close must ONLY ever
+ * execute on core 1, so both classify TASK_LONG unconditionally (LONG is
+ * never drained by core 0). */
+#define TASKQ_OP_IMAGE_SESSION_FEED  0x0405u
+#define TASKQ_OP_IMAGE_SESSION_CLOSE 0x0406u
+
 typedef enum {
   TASK_FREE    = 0,
   TASK_QUEUED  = 1,

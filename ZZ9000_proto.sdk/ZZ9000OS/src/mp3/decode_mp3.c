@@ -4,35 +4,26 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 #include <xil_cache.h>
-#include "mp3.h"
-#include "mp3_backend_config.h"
 #define MINIMP3_IMPLEMENTATION 1
-#include "minimp3_ex.h"
+#include "mp3.h"
 
 #define SWAP16(a) a = __builtin_bswap16(a)
 #define SWAP32(a) a = __builtin_bswap32(a)
 
-static mp3dec_ex_t mp3d;
-static mp3dec_io_t mp3io;
-static mp3dec_frame_info_t frame_info;
-static uint8_t* FifoAddr;
-static unsigned long FifoSize = 0;
-static unsigned short OldFifoWriteIdx = 0;
-static unsigned short FifoWriteIdx = 0; // in
-static unsigned short FifoReadIdx  = 0; // out
-
 static size_t read_cb(void *buf, size_t size, void *user_data) {
+	struct mp3_decode_ctx *ctx = user_data;
 	unsigned long BytesRead = 0;
 	long BytesToRead = size;
-	unsigned char *src = user_data;
+	unsigned char *src = ctx->fifo_addr;
 	unsigned char *dst = buf;
 
 	while(BytesToRead) {
 		// If FiFo is empty then exit the loop.
-		if(FifoReadIdx == FifoWriteIdx) break;
-		dst[BytesRead++] = src[FifoReadIdx++];
-		if(FifoReadIdx >= FifoSize) FifoReadIdx = 0;
+		if(ctx->fifo_read_idx == ctx->fifo_write_idx) break;
+		dst[BytesRead++] = src[ctx->fifo_read_idx++];
+		if(ctx->fifo_read_idx >= ctx->fifo_size) ctx->fifo_read_idx = 0;
 		BytesToRead--;
 	}
 
@@ -40,42 +31,47 @@ static size_t read_cb(void *buf, size_t size, void *user_data) {
 }
 
 static int seek_cb(uint64_t position, void *user_data) {
-	FifoReadIdx = position % FifoSize;
+	struct mp3_decode_ctx *ctx = user_data;
+
+	ctx->fifo_read_idx = position % ctx->fifo_size;
 	return 0;
 }
 
-void fifo_clear(void) {
-	FifoReadIdx  = 0;
-	FifoWriteIdx = 0;
+void fifo_clear(struct mp3_decode_ctx *ctx) {
+	ctx->fifo_read_idx  = 0;
+	ctx->fifo_write_idx = 0;
 }
 
-void fifo_set_write_index(unsigned short aWriteIndex) {
-	FifoWriteIdx = aWriteIndex;
+void fifo_set_write_index(struct mp3_decode_ctx *ctx,
+                          unsigned short aWriteIndex) {
+	ctx->fifo_write_idx = aWriteIndex;
 	// New data has arrived from the 68k size.
 	// We need to invalidate the data cache where the data came in.
-	if(FifoWriteIdx > OldFifoWriteIdx) {
+	if(ctx->fifo_write_idx > ctx->old_fifo_write_idx) {
 		// Invalidate range from old til new.
-		Xil_DCacheInvalidateRange((INTPTR)&FifoAddr[OldFifoWriteIdx], FifoWriteIdx-OldFifoWriteIdx);
+		Xil_DCacheInvalidateRange((INTPTR)&ctx->fifo_addr[ctx->old_fifo_write_idx],
+		                          ctx->fifo_write_idx-ctx->old_fifo_write_idx);
 	}
 	else {
 		// 1. Invalidate range from old til end.
-		Xil_DCacheInvalidateRange((INTPTR)&FifoAddr[OldFifoWriteIdx], FifoSize-OldFifoWriteIdx);
+		Xil_DCacheInvalidateRange((INTPTR)&ctx->fifo_addr[ctx->old_fifo_write_idx],
+		                          ctx->fifo_size-ctx->old_fifo_write_idx);
 		// 2. Invalidate range from beginning til new.
-		Xil_DCacheInvalidateRange((INTPTR)&FifoAddr[0], FifoWriteIdx);
+		Xil_DCacheInvalidateRange((INTPTR)&ctx->fifo_addr[0],
+		                          ctx->fifo_write_idx);
 	}
-	OldFifoWriteIdx = FifoWriteIdx;
+	ctx->old_fifo_write_idx = ctx->fifo_write_idx;
 }
 
-unsigned short fifo_get_read_index(void) {
-	return FifoReadIdx;
+unsigned short fifo_get_read_index(const struct mp3_decode_ctx *ctx) {
+	return ctx->fifo_read_idx;
 }
 
-int decode_mp3_samples(void* output_buffer, int max_samples) {
+int decode_mp3_samples(struct mp3_decode_ctx *ctx, void* output_buffer,
+                       int max_samples) {
 	int max_bytes = max_samples * 2;
 	int out_offset = 0;
 	int total_bytes_decoded = 0;
-
-	//printf("[mp3] out_offset: %d max_bytes: %d\n", out_offset, max_bytes);
 
 	// Clear destination buffer before trying to decode.
 	memset(output_buffer, 0, max_bytes);
@@ -85,13 +81,13 @@ int decode_mp3_samples(void* output_buffer, int max_samples) {
 	mp3d_sample_t * pcm_buffer = NULL;
 
 	while (1) {
-		size_t read_samples = mp3dec_ex_read_frame(&mp3d, &pcm_buffer, &frame_info, max_samples);
+		size_t read_samples = mp3dec_ex_read_frame(&ctx->mp3d, &pcm_buffer,
+		                                           &ctx->frame_info,
+		                                           max_samples);
 		max_samples -= read_samples;
 
 		int bytes_decoded = read_samples * sizeof(mp3d_sample_t);
 		total_bytes_decoded += bytes_decoded;
-
-		//printf("[mp3] decoded: %d bytes\n", bytes_decoded);
 
 		if (bytes_decoded > 0) {
 			int bytes_to_copy = bytes_decoded;
@@ -109,16 +105,17 @@ int decode_mp3_samples(void* output_buffer, int max_samples) {
 	return total_bytes_decoded;
 }
 
-int decode_mp3_init_fifo(uint8_t* input_buffer, size_t input_buffer_size) {
-	memset(&frame_info, 0, sizeof(frame_info));
+int decode_mp3_init_fifo(struct mp3_decode_ctx *ctx, uint8_t* input_buffer,
+                         size_t input_buffer_size) {
+	memset(&ctx->frame_info, 0, sizeof(ctx->frame_info));
 
-	FifoSize   = input_buffer_size;
-	FifoAddr   = input_buffer;
-	mp3io.read = read_cb;
-	mp3io.seek = seek_cb;
-	mp3io.read_data = mp3io.seek_data = input_buffer;
+	ctx->fifo_size   = input_buffer_size;
+	ctx->fifo_addr   = input_buffer;
+	ctx->mp3io.read = read_cb;
+	ctx->mp3io.seek = seek_cb;
+	ctx->mp3io.read_data = ctx->mp3io.seek_data = ctx;
 
-	int ret = mp3dec_ex_open_cb(&mp3d, &mp3io, MP3D_DO_NOT_SCAN);
+	int ret = mp3dec_ex_open_cb(&ctx->mp3d, &ctx->mp3io, MP3D_DO_NOT_SCAN);
 	if (ret) {
 		printf("mp3dec_ex_open_cb failed: %d\n", ret);
 	}
@@ -126,25 +123,27 @@ int decode_mp3_init_fifo(uint8_t* input_buffer, size_t input_buffer_size) {
 	return ret;
 }
 
-int decode_mp3_init(uint8_t* input_buffer, size_t input_buffer_size) {
-	memset(&frame_info, 0, sizeof(frame_info));
+int decode_mp3_init(struct mp3_decode_ctx *ctx, uint8_t* input_buffer,
+                    size_t input_buffer_size) {
+	memset(&ctx->frame_info, 0, sizeof(ctx->frame_info));
 
 	// sets up input_buffer as mp3d->file.buffer
-	int ret = mp3dec_ex_open_buf(&mp3d, input_buffer, input_buffer_size, MP3D_DO_NOT_SCAN);
+	int ret = mp3dec_ex_open_buf(&ctx->mp3d, input_buffer,
+	                             input_buffer_size, MP3D_DO_NOT_SCAN);
 	if (ret) {
 		printf("mp3dec_ex_open_buf failed: %d\n", ret);
 	}
 	return ret;
 }
 
-int mp3_get_hz() {
-	return mp3d.info.hz;
+int mp3_get_hz(const struct mp3_decode_ctx *ctx) {
+	return ctx->mp3d.info.hz;
 }
 
-int mp3_get_channels() {
-	return mp3d.info.channels;
+int mp3_get_channels(const struct mp3_decode_ctx *ctx) {
+	return ctx->mp3d.info.channels;
 }
 
-unsigned long mp3_get_bytes_consumed(void) {
-	return (unsigned long)mp3d.offset;
+unsigned long mp3_get_bytes_consumed(const struct mp3_decode_ctx *ctx) {
+	return (unsigned long)ctx->mp3d.offset;
 }

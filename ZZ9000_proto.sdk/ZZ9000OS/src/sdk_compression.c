@@ -68,7 +68,7 @@ static uint32_t next_decompress_stream_id = 1U;
  * point leaks at most one block and never exposes a freed pointer to core 0's
  * reclaim. See sdk_decode_reclaim.h.
  */
-static void *decode_malloc(size_t size)
+void *sdk_decode_heap_alloc(size_t size)
 {
 	void *p = malloc(size);
 
@@ -79,7 +79,7 @@ static void *decode_malloc(size_t size)
 	return p;
 }
 
-static void decode_free(void *ptr)
+void sdk_decode_heap_free(void *ptr)
 {
 	if (ptr && smp_cpu_id() == 1) {
 		sdk_decode_untrack(ptr);
@@ -91,13 +91,13 @@ static void decode_free(void *ptr)
 static void *lzma_alloc(ISzAllocPtr alloc, size_t size)
 {
 	(void)alloc;
-	return decode_malloc(size);
+	return sdk_decode_heap_alloc(size);
 }
 
 static void lzma_free(ISzAllocPtr alloc, void *address)
 {
 	(void)alloc;
-	decode_free(address);
+	sdk_decode_heap_free(address);
 }
 
 static const ISzAlloc lzma_allocator = { lzma_alloc, lzma_free };
@@ -106,13 +106,13 @@ static const ISzAlloc lzma_allocator = { lzma_alloc, lzma_free };
 static voidpf zlib_decode_alloc(voidpf opaque, uInt items, uInt size)
 {
 	(void)opaque;
-	return (voidpf)decode_malloc((size_t)items * (size_t)size);
+	return (voidpf)sdk_decode_heap_alloc((size_t)items * (size_t)size);
 }
 
 static void zlib_decode_free(voidpf opaque, voidpf address)
 {
 	(void)opaque;
-	decode_free((void *)address);
+	sdk_decode_heap_free((void *)address);
 }
 
 /*

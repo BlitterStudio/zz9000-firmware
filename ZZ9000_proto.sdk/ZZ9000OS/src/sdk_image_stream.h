@@ -32,6 +32,12 @@ struct SDKImageStreamBegin {
 	uint32_t dst_length;
 	uintptr_t tile_address;
 	uint32_t tile_length;
+	/* Session affinity, fixed for the session's whole life: nonzero =
+	 * feeds/closes run on the core-1 worker (set at begin when the
+	 * scheduler is available), zero = fully inline on core 0. The codec
+	 * heap objects live in the owning core's cache, so affinity can
+	 * never change mid-session. */
+	uint32_t core1_affine;
 };
 
 struct SDKImageStreamFeed {
@@ -61,6 +67,12 @@ struct SDKImageStreamResult {
 
 void sdk_image_stream_init(void);
 uint32_t sdk_image_stream_active_count(void);
+/* Session affinity lookup: 1 = core-1-affine, 0 = core-0, -1 = not found. */
+int sdk_image_stream_session_core1(uint32_t session);
+/* After a core-1 fault: drop core-1-affine sessions' dangling codec
+ * references (their heap blocks were already freed by the decode-reclaim
+ * pass) WITHOUT running destructors, and mark the sessions failed. */
+void sdk_image_stream_poison_core1_sessions(void);
 uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
                                 struct SDKImageStreamResult *result);
 uint16_t sdk_image_stream_feed(const struct SDKImageStreamFeed *feed,

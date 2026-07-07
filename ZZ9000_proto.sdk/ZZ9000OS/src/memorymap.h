@@ -89,12 +89,25 @@
 // Dual-core scheduler task-queue control region. A small SCU-coherent slab in
 // the 0x18000000..0x20000000 carve -- above the linker-managed DDR
 // (ps7_ddr_hi ends at 0x18000000) and below the Z3 fast-RAM DDR window at
-// 0x20000000. Holds the taskq_shared_t control block only; crypto data
-// buffers stay in SDK_SHARED_HEAP with core-0 cache management.
+// 0x20000000. Holds the taskq_shared_t control block and, at
+// SDK_IMAGE_SESSIONS_OFFSET, the image-stream session table (both cores
+// touch session state, and the coherent section removes the need for manual
+// cache maintenance on it); crypto data buffers stay in SDK_SHARED_HEAP with
+// core-0 cache management.
 #define SDK_TASKQ_REGION_ADDRESS    0x18000000
 #define SDK_TASKQ_REGION_SIZE       0x00100000     // 1 MB (one MMU section)
 #define SDK_TASKQ_REGION_END \
     (SDK_TASKQ_REGION_ADDRESS + SDK_TASKQ_REGION_SIZE)
+
+// Image-stream session table, inside the coherent region above. The offset
+// leaves the queue control block its own space (guarded against
+// sizeof(taskq_shared_t) in scheduler_arm.c); the table size is guarded in
+// sdk_image_stream.c.
+#define SDK_IMAGE_SESSIONS_OFFSET   0x00040000
+#define SDK_IMAGE_SESSIONS_ADDRESS \
+    (SDK_TASKQ_REGION_ADDRESS + SDK_IMAGE_SESSIONS_OFFSET)
+#define SDK_IMAGE_SESSIONS_MAX_BYTES \
+    (SDK_TASKQ_REGION_SIZE - SDK_IMAGE_SESSIONS_OFFSET)
 
 #if SDK_TASKQ_REGION_ADDRESS < 0x18000000
 #error "task-queue region must sit above the linker-managed DDR (ends 0x18000000)"
