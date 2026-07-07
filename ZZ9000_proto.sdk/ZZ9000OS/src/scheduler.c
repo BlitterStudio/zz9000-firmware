@@ -261,6 +261,11 @@ taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len)
     /* MUST stay LONG regardless of size: the session codec state lives
      * in core 1's cache, so a core-0 SHORT drain would corrupt it. */
     return TASK_LONG;
+  case TASKQ_OP_AUDIO_STREAM_FEED:
+  case TASKQ_OP_AUDIO_STREAM_READ:
+    /* Same constraint: the stream's mp3 staging ring is cache-owned by
+     * core 1 for core-1-affine streams. */
+    return TASK_LONG;
   default:
     return TASK_LONG;              /* unknown/heavy: never drained on core 0 */
   }

@@ -390,6 +390,9 @@ void sdk_mailbox_irq_disable(void);
 void sdk_mailbox_task(void);
 uint16_t sdk_mailbox_status(void);
 uint32_t sdk_mailbox_address(void);
+/* After a core-1 fault: mark core-1-affine audio streams faulted so their
+ * feeds/reads fail cleanly (the embedded decoder may be mid-frame). */
+void sdk_mailbox_poison_core1_audio_streams(void);
 
 /*
  * Run a crypto task's compute on the calling core. op_params points at one of

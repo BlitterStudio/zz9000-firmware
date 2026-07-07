@@ -107,7 +107,18 @@
 #define SDK_IMAGE_SESSIONS_ADDRESS \
     (SDK_TASKQ_REGION_ADDRESS + SDK_IMAGE_SESSIONS_OFFSET)
 #define SDK_IMAGE_SESSIONS_MAX_BYTES \
-    (SDK_TASKQ_REGION_SIZE - SDK_IMAGE_SESSIONS_OFFSET)
+    (SDK_AUDIO_STREAMS_OFFSET - SDK_IMAGE_SESSIONS_OFFSET)
+
+// Audio-stream session table, also inside the coherent region: streams may
+// be core-1-affine (feed/decode on the worker) while core 0 begins/closes
+// them. No heap objects hang off these (the decoder state is embedded), so
+// unlike the image sessions they need no fault-reclaim gating. Size guarded
+// in sdk_mailbox.c.
+#define SDK_AUDIO_STREAMS_OFFSET    0x000C0000
+#define SDK_AUDIO_STREAMS_ADDRESS \
+    (SDK_TASKQ_REGION_ADDRESS + SDK_AUDIO_STREAMS_OFFSET)
+#define SDK_AUDIO_STREAMS_MAX_BYTES \
+    (SDK_TASKQ_REGION_SIZE - SDK_AUDIO_STREAMS_OFFSET)
 
 #if SDK_TASKQ_REGION_ADDRESS < 0x18000000
 #error "task-queue region must sit above the linker-managed DDR (ends 0x18000000)"
