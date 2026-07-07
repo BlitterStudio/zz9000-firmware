@@ -3164,8 +3164,9 @@ static void audio_stream_read_compute(struct SDKAudioStream *stream,
 	(AUDIO_PUMP_RING_BYTES - 2U * AUDIO_PUMP_PERIOD_BYTES)
 
 static struct {
-	uint32_t session;       /* 0 = unbound */
-	uint32_t fill_offset;   /* next TX-ring byte to fill, period-aligned */
+	uint32_t session;         /* 0 = unbound */
+	uint32_t fill_offset;     /* next TX-ring byte to fill, period-aligned */
+	uint32_t refill_pending;  /* internal core-1 refill task in flight */
 } g_audio_playback;
 
 static int16_t g_pump_src[AUDIO_PUMP_PERIOD_BYTES / 2];
@@ -3272,6 +3273,43 @@ void sdk_mailbox_audio_playback_pump(void)
 		g_audio_playback.fill_offset =
 		    (g_audio_playback.fill_offset + AUDIO_PUMP_PERIOD_BYTES) %
 		    AUDIO_PUMP_RING_BYTES;
+	}
+
+	/* Keep the decoder ahead of the pump. Session FEEDs drive decode, but
+	 * once the client has fed everything it just waits -- so when the PCM
+	 * ring is at/below the low-water mark and undecoded input remains,
+	 * kick a refill: a FEED with no new bytes. For core-1-affine streams
+	 * it goes through the queue as an INTERNAL task (request_id 0 -> no
+	 * client completion is posted); a core-0-affine stream (begun while
+	 * the scheduler was down) refills inline, matching the legacy CPU
+	 * profile of that degraded mode. */
+	if (stream->input_length != 0U && !stream->faulted &&
+	    audio_stream_pcm_used(stream) <= stream->low_water_bytes) {
+		if (stream->core1_affine && scheduler_core1_available()) {
+			if (!g_audio_playback.refill_pending) {
+				struct audio_feed_op_params p;
+				taskq_shared_t *sh = scheduler_shared();
+				int slot;
+
+				p.session = g_audio_playback.session;
+				p.src_addr = 0U;
+				p.src_len = 0U;
+				p.flags = 0U;
+				slot = taskq_enqueue(&sh->queue,
+				                     SDK_OP_AUDIO_STREAM_FEED,
+				                     TASK_LONG, 0u, 0u, 0u, 0u,
+				                     0u, 0u, &p, sizeof(p));
+				if (slot >= 0) {
+					g_task_generation[slot] =
+					    sdk_mailbox_generation;
+					__asm__ __volatile__("dsb ish\n\tsev"
+					                     ::: "memory");
+					g_audio_playback.refill_pending = 1U;
+				}
+			}
+		} else if (!stream->core1_affine) {
+			audio_stream_feed_compute(stream, 0U, 0U, 0U);
+		}
 	}
 }
 
@@ -5870,6 +5908,7 @@ void sdk_mailbox_init(void)
 	memset(surfaces, 0, sizeof(surfaces));
 	/* Unbind AX playback before the table goes away. */
 	g_audio_playback.session = 0U;
+	g_audio_playback.refill_pending = 0U;
 	/* Pointer into the coherent region, not an array: size explicitly.
 	 * Flush so the zeroed table is in DRAM whatever MMU attributes the
 	 * lines were filled under (this can run before the scheduler stamps
@@ -6076,6 +6115,13 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 	uint32_t comp_head;
 	uint32_t comp_tail;
 	uint32_t next_comp_tail;
+
+	if (request_id == 0U) {
+		/* Internal task (AX playback refill): no client completion to
+		 * post; just retire the in-flight marker. */
+		g_audio_playback.refill_pending = 0U;
+		return 1;
+	}
 
 	if (!sdk_mailbox_active)
 		return 0;
