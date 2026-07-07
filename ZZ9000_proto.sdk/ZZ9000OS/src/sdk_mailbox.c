@@ -20,6 +20,7 @@
 #include "sdk_surface.h"
 #include "memorymap.h"
 #include "scheduler.h"
+#include "core2.h"
 #include "interrupt.h"
 #include "video.h"
 #include "mp3/mp3.h"
@@ -5457,6 +5458,17 @@ void sdk_mailbox_init(void)
 	memset(surfaces, 0, sizeof(surfaces));
 	memset(audio_streams, 0, sizeof(audio_streams));
 	sdk_decompress_stream_reset_all();
+	/* A vanished client (Amiga reboot/crash) can leave core-1-affine image
+	 * sessions open with no task in flight; the quiesce above does not
+	 * restart core 1 then, and zeroing the session table would strand the
+	 * sessions' core-1 heap blocks AND their decode-tracker slots (the
+	 * tracker only empties on free or fault reclaim, so repeated resets
+	 * would exhaust it and starve future fault recovery). Cold-restart
+	 * core 1 first: its reclaim pass frees every tracked block while the
+	 * worker is held in reset. */
+	if (sdk_image_stream_has_core1_sessions() &&
+	    scheduler_core1_available())
+		core1_cold_restart();
 	sdk_image_stream_init();
 	amiga_interrupt_clear(AMIGA_INTERRUPT_SDK);
 

@@ -1882,6 +1882,19 @@ int sdk_image_stream_session_core1(uint32_t session)
 	return slot->core1_affine ? 1 : 0;
 }
 
+int sdk_image_stream_has_core1_sessions(void)
+{
+	uint32_t i;
+
+	for (i = 0; i < SDK_MAX_IMAGE_SESSIONS; i++) {
+		if (image_sessions[i].in_use &&
+		    image_sessions[i].core1_affine)
+			return 1;
+	}
+
+	return 0;
+}
+
 /*
  * After a core-1 fault, the decode-reclaim pass frees every heap block
  * core-1 decodes held (libjpeg pools, libpng structs, the interlace

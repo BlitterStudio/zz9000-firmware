@@ -69,6 +69,8 @@ void sdk_image_stream_init(void);
 uint32_t sdk_image_stream_active_count(void);
 /* Session affinity lookup: 1 = core-1-affine, 0 = core-0, -1 = not found. */
 int sdk_image_stream_session_core1(uint32_t session);
+/* Nonzero when any open session is core-1-affine (mailbox reset gating). */
+int sdk_image_stream_has_core1_sessions(void);
 /* After a core-1 fault: drop core-1-affine sessions' dangling codec
  * references (their heap blocks were already freed by the decode-reclaim
  * pass) WITHOUT running destructors, and mark the sessions failed. */
