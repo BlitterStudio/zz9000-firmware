@@ -49,16 +49,21 @@ BOOTGEN=/path/to/bootgen ./build_bootimage.sh   # → bootimage_work/BOOT.bin
 ```bash
 make -C test/rtg test              # RTG correctness regression
 make -C test/rtg bench             # Host micro-benchmarks (comparative only)
+make -C test/video test            # VDMA math + video_formatter source invariants
+test/video/run_formatter_sim.sh current   # xsim functional sim (Vivado machine)
 ```
 
-Hardware validation is still required for performance/bus timing changes.
+Any `video_formatter.v` change MUST pass the xsim sweep (pixel-exact, all
+color modes/scales, calibrated against the pre-64-bit formatter) before a
+bitstream is built from it. Hardware validation is still required for
+performance/bus timing changes.
 
 ## Architecture Overview
 
 | Path | Purpose |
 |---|---|
 | `mntzorro.v` | Zorro bus interface, register window, video capture, AXI bridge |
-| `video_formatter.v` | AXI-Stream video formatter, 24-bit RGB output |
+| `video_formatter.v` | AXI-Stream video formatter (64-bit VDMA stream in, 24-bit RGB out) |
 | `ZZ9000_proto.sdk/ZZ9000OS/src/` | Bare-metal ARM firmware (C) |
 | `ZZ9000_proto.sdk/ZZ9000FSBL/src/` | First-stage bootloader |
 | `zz9000_project.tcl` | Vivado project/block design source |
@@ -74,6 +79,27 @@ for ARM-written framebuffer data. Making it conditional broke ethernet RX (the A
 read stale L2 lines instead of fresh GEM-written frames; June 2026). The fact that a
 buffer is mapped uncached for the ARM does **not** protect it: the FPGA's ACP
 transactions hit L2 regardless of the ARM's MMU attributes.
+
+### Video pipeline / PS-config gotchas (read before touching the BD or formatter)
+
+- **Committed FSBL vs `PCW_*` config:** `bootimage_work/FSBL_exec.elf` bakes in the
+  ps7_init register writes from the design it was built against. Editing `PCW_*`
+  parameters in `zz9000_project.tcl` does NOT change what the FSBL programs at boot.
+  The HP0 32→64-bit widening (2026-07) corrupted half of every 64-bit VDMA beat this
+  way ("every other pixel column garbage, all modes") until `video_hp0_bus_width_init()`
+  in `video.c` started forcing the AFI0 width at runtime. Clock/DDR/MIO `PCW_*` changes
+  cannot be fixed like that — they need an FSBL rebuild.
+- **Stale Vivado projects build stale RTL:** the project imports copies of the Verilog
+  sources; running synthesis against an existing `ZZ9000_proto/` silently builds the
+  code from when the project was generated. Always build via `build_bitstream.sh` /
+  `build_bitstream.ps1` (they delete and regenerate the project first). To confirm what
+  actually got synthesized, check the module's OOC run log, e.g.
+  `ZZ9000_proto/ZZ9000_proto.runs/zz9000_ps_video_formatter_0_0_synth_1/runme.log`.
+- **Formatter read-latency phase lock:** in `video_formatter.v`, `pixout32` must remain
+  a direct wire from the line-buffer BRAM output (`READ_LATENCY_B(1)`). Adding a register
+  stage shifts the `counter_subpixel` byte/halfword unpack phase and swaps/duplicates
+  pixel columns in the 8/15/16 bpp modes even though 32 bpp still looks fine. The xsim
+  sweep catches this; run it.
 
 ## Firmware Variants
 

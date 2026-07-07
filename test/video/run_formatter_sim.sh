@@ -6,7 +6,15 @@
 #   current - runs against the working-tree video_formatter.v (default)
 set -e
 
-VIVADO_BIN="${VIVADO_BIN:-D:/Xilinx/Vivado/2018.3/bin}"
+# Windows Git Bash drives the .bat tools through cmd (quoting the plusargs,
+# which batch files would otherwise split on '='); Linux runs them directly.
+if command -v cygpath >/dev/null 2>&1; then
+    ON_WINDOWS=1
+    VIVADO_BIN="${VIVADO_BIN:-D:/Xilinx/Vivado/2018.3/bin}"
+else
+    ON_WINDOWS=0
+    VIVADO_BIN="${VIVADO_BIN:-/opt/Xilinx/Vivado/2018.3/bin}"
+fi
 VARIANT="${1:-current}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -23,10 +31,18 @@ else
     DEFINE=""
 fi
 
-cmd //c "$(cygpath -w "$VIVADO_BIN/xvlog.bat") $DEFINE dut.v $(cygpath -w "$HERE/video_formatter_tb.v")" > xvlog.log 2>&1 \
-    || { cat xvlog.log; exit 1; }
-cmd //c "$(cygpath -w "$VIVADO_BIN/xelab.bat") -L xpm work.video_formatter_tb -s tb" > xelab.log 2>&1 \
-    || { cat xelab.log; exit 1; }
+if [ "$ON_WINDOWS" = 1 ]; then
+    TB="$(cygpath -w "$HERE/video_formatter_tb.v")"
+    cmd //c "$(cygpath -w "$VIVADO_BIN/xvlog.bat") $DEFINE dut.v $TB" > xvlog.log 2>&1 \
+        || { cat xvlog.log; exit 1; }
+    cmd //c "$(cygpath -w "$VIVADO_BIN/xelab.bat") -L xpm work.video_formatter_tb -s tb" > xelab.log 2>&1 \
+        || { cat xelab.log; exit 1; }
+else
+    "$VIVADO_BIN/xvlog" $DEFINE dut.v "$HERE/video_formatter_tb.v" > xvlog.log 2>&1 \
+        || { cat xvlog.log; exit 1; }
+    "$VIVADO_BIN/xelab" -L xpm work.video_formatter_tb -s tb > xelab.log 2>&1 \
+        || { cat xelab.log; exit 1; }
+fi
 
 # CMODE SCALEX SCALEY WIDTH
 CONFIGS="
@@ -48,8 +64,13 @@ rm -f run_*.log
 EXPECTED=$(echo "$CONFIGS" | grep -c '[0-9]')
 echo "$CONFIGS" | while read -r CM SX SY W; do
     [ -z "$CM" ] && continue
-    cmd //c "$(cygpath -w "$VIVADO_BIN/xsim.bat") tb --runall --testplusarg \"CMODE=$CM\" --testplusarg \"SCALEX=$SX\" --testplusarg \"SCALEY=$SY\" --testplusarg \"WIDTH=$W\"" \
-        > "run_${CM}_${SX}_${SY}_${W}.log" 2>&1 || true
+    if [ "$ON_WINDOWS" = 1 ]; then
+        cmd //c "$(cygpath -w "$VIVADO_BIN/xsim.bat") tb --runall --testplusarg \"CMODE=$CM\" --testplusarg \"SCALEX=$SX\" --testplusarg \"SCALEY=$SY\" --testplusarg \"WIDTH=$W\"" \
+            > "run_${CM}_${SX}_${SY}_${W}.log" 2>&1 || true
+    else
+        "$VIVADO_BIN/xsim" tb --runall --testplusarg "CMODE=$CM" --testplusarg "SCALEX=$SX" --testplusarg "SCALEY=$SY" --testplusarg "WIDTH=$W" \
+            > "run_${CM}_${SX}_${SY}_${W}.log" 2>&1 || true
+    fi
     grep -E "RESULT|MISMATCH row=[0-9]+ x=(0|1|2|3|4|5|6|7) " "run_${CM}_${SX}_${SY}_${W}.log" | head -8
 done
 

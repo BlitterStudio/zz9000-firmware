@@ -124,6 +124,17 @@ make -C test/rtg test
 make -C test/rtg bench
 ```
 
+The video pipeline has its own harness under [`test/video/`](test/video/):
+host-side checks (`make -C test/video test`) plus a functional Vivado xsim
+testbench that drives `video_formatter.v` with a modeled VDMA stream and
+compares every displayed pixel across all color modes, scaling modes and
+line widths:
+
+```bash
+test/video/run_formatter_sim.sh current   # working-tree formatter
+test/video/run_formatter_sim.sh master    # committed baseline
+```
+
 Hardware validation is still required before treating performance or bus
 timing changes as proven.
 
@@ -151,6 +162,7 @@ git push origin v2.2.0
 | [`zz9000_project.tcl`](zz9000_project.tcl) | Exported Vivado project/block design source |
 | [`bootimage_work/`](bootimage_work/) | Committed FSBL and bitstream inputs used by local and CI boot image builds |
 | [`test/rtg/`](test/rtg/) | Host-side RTG correctness and benchmark harness |
+| [`test/video/`](test/video/) | Video pipeline tests: host checks + xsim functional testbench for `video_formatter.v` |
 
 ![ZZ9000 block design](gfx/zz9000-bd.png?raw=true)
 

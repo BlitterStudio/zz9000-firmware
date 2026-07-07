@@ -104,6 +104,27 @@ pass one or more variant names, for example:
 ./build_bootimage.sh
 ```
 
+## Tests
+
+Host-side suites (any machine with a C compiler):
+```bash
+make -C test/rtg test        # RTG correctness regression
+make -C test/video test      # VDMA math + video_formatter source invariants
+```
+
+Functional simulation of the video formatter (needs Vivado 2018.3 for
+xsim; run on the Vivado machine before committing `video_formatter.v`
+changes):
+```bash
+test/video/run_formatter_sim.sh current   # working-tree RTL
+test/video/run_formatter_sim.sh master    # committed baseline (sanity)
+```
+The testbench models the 64-bit VDMA stream (tkeep, tuser/tlast) and
+compares every displayed pixel against expected framebuffer contents
+across all color modes (8/15/16/32 bpp), scale_x/scale_y, odd-width
+tkeep tails, the native videocap shape and 1920-wide 32 bpp lines. The
+sweep fails if any configuration mismatches or fails to report.
+
 ## Flashing
 
 Copy `bootimage_work/BOOT.bin` to the ZZ9000 SD card (rename if needed
@@ -188,7 +209,14 @@ no-USB-autoboot variant is intentionally skipped.
 
 - `FSBL_exec.elf` lives there and is committed (saves having to rebuild
   the FSBL, which needs Xilinx SDK 2018.3 — an old, painful dependency
-  we've chosen to avoid).
+  we've chosen to avoid). **Warning:** the committed FSBL bakes in the
+  PS configuration (`ps7_init`) from the hardware design it was built
+  against. Changing any `PCW_*` parameter in `zz9000_project.tcl` does
+  NOT update it — the 2026-07 HP0 32→64-bit widening shipped with a
+  runtime guard in `video.c` (`video_hp0_bus_width_init()`) precisely
+  because the committed FSBL still programmed the port for 32 bits.
+  Clock, DDR or MIO `PCW_*` changes cannot be patched at runtime and
+  would require rebuilding the FSBL against a fresh hardware export.
 - `bootimage.bif` lives there, paths are repo-root-relative, same file
   used by humans and CI.
 - The bitstream lives there because that's where `bootgen` reads it
