@@ -9,6 +9,7 @@
 #include "hdmi.h"
 #include <sleep.h>
 #include "xil_cache_l.h"
+#include "xil_io.h"
 
 #define VDMA_DEVICE_ID	XPAR_AXIVDMA_0_DEVICE_ID
 
@@ -79,7 +80,24 @@ static void videocap_detection_reset() {
 	vs.videocap_mode_stable_count = 0;
 }
 
+// Zynq S_AXI_HP0 carries the video scanout DMA and was widened to 64 bit
+// together with the 64-bit RTG scanout path. FSBLs built before that change
+// still program the port's AFI into 32-bit mode (AFI_RDCHAN_CTRL and
+// AFI_WRCHAN_CTRL bit 0 "32BIT_EN", UG585 B.5), which corrupts one half of
+// every 64-bit VDMA beat: every other pixel word is garbage in all modes.
+// Force both channels back to the 64-bit reset default before any VDMA
+// traffic runs, so a stale FSBL cannot break scanout.
+#define AFI0_RDCHAN_CTRL 0xF8008000
+#define AFI0_WRCHAN_CTRL 0xF8008014
+
+static void video_hp0_bus_width_init() {
+	Xil_Out32(AFI0_RDCHAN_CTRL, Xil_In32(AFI0_RDCHAN_CTRL) & ~1u);
+	Xil_Out32(AFI0_WRCHAN_CTRL, Xil_In32(AFI0_WRCHAN_CTRL) & ~1u);
+}
+
 struct ZZ_VIDEO_STATE* video_init() {
+	video_hp0_bus_width_init();
+
 	vs.framebuffer = (u32*) FRAMEBUFFER_ADDRESS;
 
 #ifdef DEFAULT_NS_VIDEOCAP
