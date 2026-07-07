@@ -40,7 +40,7 @@
 #define SDK_CAP_IMAGE_SCALE            (1U << 6)
 #define SDK_CAP_AUDIO_DECODE           (1U << 7)
 #define SDK_CAP_CRYPTO                 (1U << 8)
-#define SDK_CAP_AUDIO_PLAYBACK         (1U << 9)
+#define SDK_CAP_AUDIO_PLAYBACK         (1U << 19)
 #define SDK_CAP_MEMORY_OPS             (1U << 10)
 #define SDK_CAP_DIAGNOSTICS            (1U << 11)
 #define SDK_CAP_DOORBELL               (1U << 12)
