@@ -8,6 +8,9 @@
 
 #include "sdk_image_stream.h"
 #include "sdk_surface.h"
+#include "sdk_compression.h"
+#include "memorymap.h"
+#include <xil_cache.h>
 #include <setjmp.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -79,12 +82,29 @@ struct SDKImageStreamSession {
 	uint8_t input_eof;
 	uint8_t failed;
 	uint8_t in_use;
+	uint8_t core1_affine;
 	uint8_t direct_scale_row_valid[2];
 	uint32_t direct_scale_row_y[2];
 	uint8_t direct_scale_rows[2][SDK_IMAGE_STREAM_MAX_DECODE_WIDTH * 4U];
 };
 
-static struct SDKImageStreamSession image_sessions[SDK_MAX_IMAGE_SESSIONS];
+/*
+ * The session table lives INSIDE the SCU-coherent scheduler region
+ * (SDK_IMAGE_SESSIONS_ADDRESS, memorymap.h): core-1-affine sessions decode
+ * on the worker while core 0 creates/validates/destroys them, and the
+ * coherent section makes session state visible to both cores without
+ * manual cache maintenance. The libjpeg/libpng objects hang off the newlib
+ * heap but are only ever touched by the session's owning core (affinity is
+ * fixed at begin), with fault reclaim via the decode-tracking wrappers and
+ * sdk_image_stream_poison_core1_sessions().
+ */
+static struct SDKImageStreamSession *const image_sessions =
+    (struct SDKImageStreamSession *)SDK_IMAGE_SESSIONS_ADDRESS;
+
+typedef char image_sessions_fit_check[
+    (SDK_MAX_IMAGE_SESSIONS * sizeof(struct SDKImageStreamSession) <=
+     SDK_IMAGE_SESSIONS_MAX_BYTES) ? 1 : -1];
+
 static uint32_t next_image_session_id;
 
 static struct SDKImageStreamSession *find_session(uint32_t session)
@@ -869,10 +889,27 @@ static void png_fail(struct SDKImageStreamSession *session, uint16_t status,
 	png_error(session->png_ptr, message);
 }
 
+/*
+ * libpng allocator hooks routed through the decode-reclaim wrappers so a
+ * core-1 fault mid-decode can reclaim every block (plain malloc/free on
+ * core 0) -- same guarantee as the libjpeg jmem_zz9k backend.
+ */
+static png_voidp png_decode_alloc(png_structp png_ptr, png_alloc_size_t size)
+{
+	(void)png_ptr;
+	return (png_voidp)sdk_decode_heap_alloc((size_t)size);
+}
+
+static void png_decode_free(png_structp png_ptr, png_voidp ptr)
+{
+	(void)png_ptr;
+	sdk_decode_heap_free((void *)ptr);
+}
+
 static void destroy_png(struct SDKImageStreamSession *session)
 {
 	if (session->png_interlace_buffer) {
-		free(session->png_interlace_buffer);
+		sdk_decode_heap_free(session->png_interlace_buffer);
 		session->png_interlace_buffer = 0;
 	}
 	if (session->png_created) {
@@ -920,10 +957,13 @@ static uint16_t create_png_if_needed(struct SDKImageStreamSession *session)
 		return SDK_STATUS_OK;
 
 	session->png_error_status = SDK_STATUS_OK;
-	session->png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING,
-	                                         session,
-	                                         png_error_handler,
-	                                         png_warning_handler);
+	session->png_ptr = png_create_read_struct_2(PNG_LIBPNG_VER_STRING,
+	                                            session,
+	                                            png_error_handler,
+	                                            png_warning_handler,
+	                                            0,
+	                                            png_decode_alloc,
+	                                            png_decode_free);
 	if (!session->png_ptr)
 		return SDK_STATUS_NO_MEMORY;
 	session->png_info = png_create_info_struct(session->png_ptr);
@@ -1092,7 +1132,8 @@ static int png_prepare_interlace_storage(
 	if (session->output_height > (0xffffffffU / row_bytes))
 		return 0;
 	image_bytes = session->output_height * row_bytes;
-	session->png_interlace_buffer = (uint8_t *)malloc(image_bytes);
+	session->png_interlace_buffer =
+	    (uint8_t *)sdk_decode_heap_alloc(image_bytes);
 	if (!session->png_interlace_buffer)
 		return 0;
 	memset(session->png_interlace_buffer, 0, image_bytes);
@@ -1712,7 +1753,14 @@ static uint16_t process_jpeg_stream(struct SDKImageStreamSession *session,
 
 void sdk_image_stream_init(void)
 {
-	memset(image_sessions, 0, sizeof(image_sessions));
+	size_t table_bytes =
+	    SDK_MAX_IMAGE_SESSIONS * sizeof(struct SDKImageStreamSession);
+
+	memset(image_sessions, 0, table_bytes);
+	/* This can run before the scheduler stamps the coherent MMU
+	 * attributes on the region; flush so the zeroed table is in DRAM
+	 * whatever attributes the lines were filled under. */
+	Xil_DCacheFlushRange((INTPTR)(uintptr_t)image_sessions, table_bytes);
 	next_image_session_id = 1U;
 }
 
@@ -1766,6 +1814,7 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 	session->dst_length = begin->dst_length;
 	session->tile_address = begin->tile_address;
 	session->tile_length = begin->tile_length;
+	session->core1_affine = begin->core1_affine ? 1U : 0U;
 	session->in_use = 1U;
 
 	fill_result(session, SDK_IMAGE_SESSION_STATE_NEED_INPUT, 0U, result);
@@ -1822,4 +1871,53 @@ uint16_t sdk_image_stream_close(uint32_t session)
 	destroy_png(slot);
 	memset(slot, 0, sizeof(*slot));
 	return SDK_STATUS_OK;
+}
+
+int sdk_image_stream_session_core1(uint32_t session)
+{
+	struct SDKImageStreamSession *slot = find_session(session);
+
+	if (!slot)
+		return -1;
+	return slot->core1_affine ? 1 : 0;
+}
+
+int sdk_image_stream_has_core1_sessions(void)
+{
+	uint32_t i;
+
+	for (i = 0; i < SDK_MAX_IMAGE_SESSIONS; i++) {
+		if (image_sessions[i].in_use &&
+		    image_sessions[i].core1_affine)
+			return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * After a core-1 fault, the decode-reclaim pass frees every heap block
+ * core-1 decodes held (libjpeg pools, libpng structs, the interlace
+ * buffer). Drop the dangling references of core-1-affine sessions WITHOUT
+ * running the codec destructors -- destroying against reclaimed memory
+ * would be a use-after-free -- and mark the sessions failed so subsequent
+ * feeds report IO_ERROR and close reduces to a plain slot reset.
+ */
+void sdk_image_stream_poison_core1_sessions(void)
+{
+	uint32_t i;
+
+	for (i = 0; i < SDK_MAX_IMAGE_SESSIONS; i++) {
+		struct SDKImageStreamSession *slot = &image_sessions[i];
+
+		if (!slot->in_use || !slot->core1_affine)
+			continue;
+		slot->jpeg_created = 0U;
+		slot->png_created = 0U;
+		slot->png_ptr = 0;
+		slot->png_info = 0;
+		slot->png_interlace_buffer = 0;
+		slot->png_interlace_buffer_length = 0U;
+		slot->failed = 1U;
+	}
 }

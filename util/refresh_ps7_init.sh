@@ -52,15 +52,18 @@ if ! command -v unzip >/dev/null 2>&1; then
     exit 1
 fi
 
+# Vivado emits ps7_init with environment-dependent line endings (a fresh
+# %APPDATA%\Xilinx flipped this box from LF to CRLF with identical content),
+# so vendored copies are normalized to LF and compared EOL-insensitively.
 status=0
 for f in "${FILES[@]}"; do
     if [ "$MODE" = check ]; then
-        if ! unzip -p "$SYSDEF" "$f" | cmp -s - "$DEST/$f"; then
+        if ! unzip -p "$SYSDEF" "$f" | tr -d '\r' | cmp -s - "$DEST/$f"; then
             echo "ERROR: $DEST/$f does not match the sysdef copy." >&2
             status=1
         fi
     else
-        unzip -p "$SYSDEF" "$f" > "$DEST/$f"
+        unzip -p "$SYSDEF" "$f" | tr -d '\r' > "$DEST/$f"
         echo "[ps7-init] refreshed $DEST/$f"
     fi
 done

@@ -20,6 +20,7 @@
 #include "sdk_surface.h"
 #include "memorymap.h"
 #include "scheduler.h"
+#include "core2.h"
 #include "interrupt.h"
 #include "video.h"
 #include "mp3/mp3.h"
@@ -593,6 +594,94 @@ struct SDKSurface {
 	uint32_t length;
 	uint8_t in_use;
 };
+
+/*
+ * Native-endian packed parameters for a deferred SCALE_IMAGE(_CLIPPED)
+ * task (op_params are core-local, like decompress_op_params). Both
+ * surfaces are resolved to raw geometry on core 0 at enqueue time --
+ * core 1 must never read the surface registry or video state.
+ * Framebuffer-backed surfaces are never deferred (their geometry tracks
+ * live video state that a pending mode switch would invalidate), and
+ * every field is checked to fit u16 before packing
+ * (scale_defer_eligible). Exactly fills TASKQ_OP_PARAM_BYTES.
+ */
+struct scale_op_params {
+	uint32_t src_addr;
+	uint32_t dst_addr;
+	uint16_t src_w, src_h, dst_w, dst_h;
+	uint16_t src_pitch, dst_pitch;
+	uint16_t format;
+	uint16_t filter_flags;   /* filter in the low byte; flags above */
+	uint16_t src_x, src_y, src_rw, src_rh;
+	uint16_t dst_x, dst_y, dst_rw, dst_rh;
+	uint16_t clip_x, clip_y, clip_rw, clip_rh;
+};
+
+typedef char scale_op_params_size_check[
+    (sizeof(struct scale_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
+/*
+ * Native-endian packed parameters for a deferred DECODE_JPEG task. The
+ * source shared buffer and destination surface are resolved and
+ * range-checked on core 0 at enqueue time; lifetime is protected by the
+ * same batch-tail gate + blocking-QUEUED-client convention that covers
+ * SDK_OP_DECOMPRESS's shared buffers. Framebuffer-backed destinations
+ * are never deferred.
+ */
+struct jpeg_op_params {
+	uint32_t src_addr;      /* src buffer address + offset, resolved */
+	uint32_t src_len;
+	uint32_t dst_addr;
+	uint32_t output_format;
+	uint16_t dst_pitch;
+	uint16_t dst_x, dst_y;
+	uint16_t dst_width, dst_height;   /* decode-bounds output rect */
+	uint16_t dst_surf_w, dst_surf_h;  /* surface dims (flush bounds) */
+	uint16_t flags;                   /* reserved, 0 */
+};
+
+typedef char jpeg_op_params_size_check[
+    (sizeof(struct jpeg_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
+/*
+ * Native-endian packed parameters for a deferred DECODE_MP3 task. Source
+ * and destination are shared buffers, resolved and range-checked on
+ * core 0; lifetime protection is the DECOMPRESS convention (batch-tail
+ * gate + blocking-QUEUED client). The op is one-shot (open_buf with
+ * MP3D_DO_NOT_SCAN allocates nothing), so the decoder context does not
+ * cross request boundaries.
+ */
+struct mp3_op_params {
+	uint32_t src_addr;         /* src buffer address + offset, resolved */
+	uint32_t src_len;
+	uint32_t dst_addr;         /* dst buffer address + offset, resolved */
+	uint32_t dst_cap;          /* even, >= 2 */
+	uint32_t output_format;
+	uint32_t output_hz;        /* 0 = accept stream rate */
+	uint32_t output_channels;  /* 0 = accept stream channels */
+};
+
+typedef char mp3_op_params_size_check[
+    (sizeof(struct mp3_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
+/*
+ * Native-endian packed parameters for deferred IMAGE_SESSION_FEED/CLOSE
+ * tasks. The session lives in the SCU-coherent table (visible to both
+ * cores); the source shared buffer is resolved on core 0. A core-1-affine
+ * session's feed/close may ONLY run on core 1 -- its libjpeg/libpng
+ * objects live in core 1's cache -- which TASK_LONG classification
+ * guarantees (never drained by core 0).
+ */
+struct imgsess_op_params {
+	uint32_t session;
+	uint32_t src_handle;
+	uint32_t src_addr;      /* resolved src + offset; 0 for EOF-only/close */
+	uint32_t src_len;
+	uint32_t flags;
+};
+
+typedef char imgsess_op_params_size_check[
+    (sizeof(struct imgsess_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
 struct SDKAudioStream {
 	uint32_t id;
@@ -2010,6 +2099,73 @@ static uint16_t handle_free_surface(volatile struct SDKMailboxEntry *req,
 	return complete_status(req, comp, SDK_STATUS_OK);
 }
 
+static uint16_t service_try_defer(uint16_t opcode,
+                                  volatile struct SDKMailboxEntry *req,
+                                  const void *params, uint32_t param_len,
+                                  uint32_t in_len);
+
+/*
+ * A scale request may be deferred to core 1 only when neither surface is
+ * the live framebuffer (its address/geometry come from video state that
+ * can change while the task waits in the queue), neither surface is
+ * ARM-local, and all geometry fits the u16 fields of scale_op_params.
+ * Anything else computes inline, byte-identically to the pre-scheduler
+ * firmware.
+ *
+ * ARM-local surfaces are excluded because their cache contract is
+ * single-core: they have no Zorro-side writer, so reads skip
+ * invalidation (prepare_surface_for_arm_read) and rely on the reading
+ * core's cache being authoritative. The local surface heap is NOT in
+ * the SCU-coherent region, so letting these ops bounce between cores
+ * would need invalidate/flush in both directions on every hop --
+ * cheaper and safer to keep ARM-local work on core 0.
+ */
+static int scale_defer_eligible(uint32_t src_handle, uint32_t dst_handle,
+                                const struct SDKSurface *src,
+                                const struct SDKSurface *dst)
+{
+	if (src_handle == SDK_SURFACE_HANDLE_FRAMEBUFFER ||
+	    dst_handle == SDK_SURFACE_HANDLE_FRAMEBUFFER)
+		return 0;
+	if (surface_is_arm_local(src) || surface_is_arm_local(dst))
+		return 0;
+	if (src->width > 0xffffU || src->height > 0xffffU ||
+	    src->pitch > 0xffffU || src->format > 0xffffU ||
+	    dst->width > 0xffffU || dst->height > 0xffffU ||
+	    dst->pitch > 0xffffU)
+		return 0;
+	return 1;
+}
+
+static void scale_pack_params(struct scale_op_params *p,
+                              const struct SDKSurface *src,
+                              const struct SDKSurface *dst,
+                              uint32_t filter)
+{
+	memset(p, 0, sizeof(*p));
+	p->src_addr = src->address;
+	p->dst_addr = dst->address;
+	p->src_w = (uint16_t)src->width;
+	p->src_h = (uint16_t)src->height;
+	p->dst_w = (uint16_t)dst->width;
+	p->dst_h = (uint16_t)dst->height;
+	p->src_pitch = (uint16_t)src->pitch;
+	p->dst_pitch = (uint16_t)dst->pitch;
+	p->format = (uint16_t)src->format;
+	p->filter_flags = (uint16_t)(filter & 0xffU);
+}
+
+/* Destination-rect byte count for SHORT/LONG classification, saturated
+ * (only the <= TASKQ_SHORT_MAX_BYTES comparison matters). */
+static uint32_t scale_rect_bytes(uint32_t w, uint32_t h, uint32_t bpp)
+{
+	uint32_t px = w * h;   /* both <= 0xffff, cannot overflow u32 */
+
+	if (px > TASKQ_SHORT_MAX_BYTES)
+		return 0xffffffffU;
+	return px * bpp;
+}
+
 static uint16_t handle_scale_image(volatile struct SDKMailboxEntry *req,
                                    volatile struct SDKMailboxEntry *comp,
                                    uint16_t payload_len)
@@ -2062,6 +2218,27 @@ static uint16_t handle_scale_image(volatile struct SDKMailboxEntry *req,
 	if (filter == SDK_SCALE_BILINEAR && bytes_per_pixel != 4U)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 
+	if (scale_defer_eligible(get_be32(payload->src_surface),
+	                         get_be32(payload->dst_surface), &src, &dst)) {
+		struct scale_op_params p;
+
+		scale_pack_params(&p, &src, &dst, filter);
+		p.src_x = (uint16_t)src_x;
+		p.src_y = (uint16_t)src_y;
+		p.src_rw = (uint16_t)src_w;
+		p.src_rh = (uint16_t)src_h;
+		p.dst_x = (uint16_t)dst_x;
+		p.dst_y = (uint16_t)dst_y;
+		p.dst_rw = (uint16_t)dst_w;
+		p.dst_rh = (uint16_t)dst_h;
+		if (service_try_defer(SDK_OP_SCALE_IMAGE, req, &p, sizeof(p),
+		                      scale_rect_bytes(dst_w, dst_h,
+		                                       bytes_per_pixel)) ==
+		    SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		/* defer unavailable -> compute inline below, as before */
+	}
+
 	prepare_surface_for_arm_read(&src);
 	if (!sdk_surface_scale_rect((uint8_t *)(uintptr_t)dst.address,
 	                            dst.width, dst.height, dst.pitch,
@@ -2071,6 +2248,7 @@ static uint16_t handle_scale_image(volatile struct SDKMailboxEntry *req,
 	                            dst_x, dst_y, dst_w, dst_h, filter)) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
+	scheduler_shared()->tasks_on_core0++;   /* offload-class op run inline */
 	flush_surface_rect(&dst, dst_x, dst_y, dst_w, dst_h);
 
 	return complete_status(req, comp, SDK_STATUS_OK);
@@ -2138,6 +2316,32 @@ static uint16_t handle_scale_image_clipped(
 	if (filter == SDK_SCALE_BILINEAR && bytes_per_pixel != 4U)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 
+	if (scale_defer_eligible(get_be32(payload->src_surface),
+	                         get_be32(payload->dst_surface), &src, &dst)) {
+		struct scale_op_params p;
+
+		scale_pack_params(&p, &src, &dst, filter);
+		p.src_x = (uint16_t)src_x;
+		p.src_y = (uint16_t)src_y;
+		p.src_rw = (uint16_t)src_w;
+		p.src_rh = (uint16_t)src_h;
+		p.dst_x = (uint16_t)dst_x;
+		p.dst_y = (uint16_t)dst_y;
+		p.dst_rw = (uint16_t)dst_w;
+		p.dst_rh = (uint16_t)dst_h;
+		p.clip_x = (uint16_t)clip_x;
+		p.clip_y = (uint16_t)clip_y;
+		p.clip_rw = (uint16_t)clip_w;
+		p.clip_rh = (uint16_t)clip_h;
+		if (service_try_defer(SDK_OP_SCALE_IMAGE_CLIPPED, req, &p,
+		                      sizeof(p),
+		                      scale_rect_bytes(clip_w, clip_h,
+		                                       bytes_per_pixel)) ==
+		    SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		/* defer unavailable -> compute inline below, as before */
+	}
+
 	prepare_surface_for_arm_read(&src);
 	if (!sdk_surface_scale_rect_clipped(
 		    (uint8_t *)(uintptr_t)dst.address,
@@ -2149,6 +2353,7 @@ static uint16_t handle_scale_image_clipped(
 		    clip_x, clip_y, clip_w, clip_h, filter)) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
+	scheduler_shared()->tasks_on_core0++;   /* offload-class op run inline */
 	flush_surface_rect(&dst, dst_x, dst_y, dst_w, dst_h);
 
 	return complete_status(req, comp, SDK_STATUS_OK);
@@ -2227,6 +2432,37 @@ static uint16_t handle_decode_jpeg(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
 
+	/* Defer to core 1 when eligible: never a framebuffer-backed dst
+	 * (its geometry tracks live video state), never an ARM-local dst
+	 * (single-core cache contract -- see scale_defer_eligible), and
+	 * everything must fit the u16 op_params fields. Decoder memory is
+	 * core-1-reclaimable (jmem_zz9k.c), so a worker fault mid-decode
+	 * cannot leak. */
+	if (get_be32(payload->dst_surface) != SDK_SURFACE_HANDLE_FRAMEBUFFER &&
+	    !surface_is_arm_local(&dst) &&
+	    dst.width <= 0xffffU && dst.height <= 0xffffU &&
+	    dst.pitch <= 0xffffU && dst_x <= 0xffffU && dst_y <= 0xffffU &&
+	    dst_width <= 0xffffU && dst_height <= 0xffffU) {
+		struct jpeg_op_params p;
+
+		memset(&p, 0, sizeof(p));
+		p.src_addr = src->address + src_offset;
+		p.src_len = src_length;
+		p.dst_addr = dst.address;
+		p.output_format = output_format;
+		p.dst_pitch = (uint16_t)dst.pitch;
+		p.dst_x = (uint16_t)dst_x;
+		p.dst_y = (uint16_t)dst_y;
+		p.dst_width = (uint16_t)dst_width;
+		p.dst_height = (uint16_t)dst_height;
+		p.dst_surf_w = (uint16_t)dst.width;
+		p.dst_surf_h = (uint16_t)dst.height;
+		if (service_try_defer(SDK_OP_DECODE_JPEG, req, &p, sizeof(p),
+		                      src_length) == SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		/* defer unavailable -> decode inline below, as before */
+	}
+
 	Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
 	                          src_length);
 	if (!sdk_jpeg_decode_to_surface(
@@ -2237,6 +2473,7 @@ static uint16_t handle_decode_jpeg(volatile struct SDKMailboxEntry *req,
 	            &bytes_written)) {
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
 	}
+	scheduler_shared()->tasks_on_core0++;   /* offload-class op run inline */
 
 	flush_surface_rect(&dst, dst_x, dst_y, dst_width, dst_height);
 
@@ -2263,14 +2500,84 @@ static void byteswap_pcm16(uint8_t *data, uint32_t bytes)
 	}
 }
 
+/*
+ * MP3 decoder contexts: one for the core-0 inline path, one for the
+ * core-1 runner. Each is touched by exactly one core (the single core-1
+ * worker serializes its own tasks), and the legacy register-driven FIFO
+ * path in main.c owns a third -- eliminating the shared-global decoder
+ * state that used to let the two paths corrupt each other.
+ */
+static struct mp3_decode_ctx g_mp3_inline_ctx;
+static struct mp3_decode_ctx g_mp3_core1_ctx;
+
+/*
+ * One-shot MP3 decode compute, shared by the core-0 inline path and the
+ * core-1 runner: cache maintenance on the data buffers lives here so it
+ * runs correctly on whichever core executes. Fills a big-endian
+ * SDKAudioDecodeResultPayload into result_payload on success.
+ */
+static uint16_t mp3_decode_compute(struct mp3_decode_ctx *ctx,
+                                   const struct mp3_op_params *p,
+                                   uint8_t *result_payload,
+                                   uint32_t *result_len)
+{
+	volatile struct SDKAudioDecodeResultPayload *reply;
+	uint32_t sample_rate;
+	uint32_t channels;
+	uint32_t bytes_written;
+	uint32_t bytes_consumed;
+	uint8_t *dst_ptr = (uint8_t *)(uintptr_t)p->dst_addr;
+
+	*result_len = 0;
+
+	Xil_DCacheInvalidateRange((INTPTR)p->src_addr, p->src_len);
+	if (decode_mp3_init(ctx, (uint8_t *)(uintptr_t)p->src_addr,
+	                    p->src_len) != 0)
+		return SDK_STATUS_BAD_REQUEST;
+
+	sample_rate = (uint32_t)mp3_get_hz(ctx);
+	channels = (uint32_t)mp3_get_channels(ctx);
+	if (sample_rate == 0U || channels == 0U)
+		return SDK_STATUS_BAD_REQUEST;
+	if ((p->output_hz != 0U && p->output_hz != sample_rate) ||
+	    (p->output_channels != 0U && p->output_channels != channels))
+		return SDK_STATUS_UNSUPPORTED;
+
+	bytes_written = (uint32_t)decode_mp3_samples(ctx, dst_ptr,
+	                                             (int)(p->dst_cap / 2U));
+	bytes_consumed = (uint32_t)mp3_get_bytes_consumed(ctx);
+	if (bytes_consumed > p->src_len)
+		bytes_consumed = p->src_len;
+	if (p->output_format == SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+		byteswap_pcm16(dst_ptr, bytes_written);
+	Xil_DCacheFlushRange((INTPTR)dst_ptr, p->dst_cap);
+
+	memset(result_payload, 0, sizeof(struct SDKAudioDecodeResultPayload));
+	reply = (volatile struct SDKAudioDecodeResultPayload *)result_payload;
+	put_be32(reply->bytes_consumed, bytes_consumed);
+	put_be32(reply->bytes_written, bytes_written);
+	put_be32(reply->sample_rate, sample_rate);
+	put_be32(reply->channels, channels);
+	put_be32(reply->sample_format, p->output_format);
+	put_be32(reply->frames_written, bytes_written / (2U * channels));
+	put_be32(reply->flags,
+	         (bytes_consumed >= p->src_len) ?
+	             SDK_AUDIO_DECODE_RESULT_END : 0U);
+	*result_len = sizeof(struct SDKAudioDecodeResultPayload);
+	return SDK_STATUS_OK;
+}
+
 static uint16_t handle_decode_mp3(volatile struct SDKMailboxEntry *req,
                                   volatile struct SDKMailboxEntry *comp,
                                   uint16_t payload_len)
 {
 	volatile struct SDKAudioDecodePayload *payload;
-	volatile struct SDKAudioDecodeResultPayload *result;
 	struct SDKSharedBuffer *src;
 	struct SDKSharedBuffer *dst;
+	struct mp3_op_params p;
+	uint8_t result_local[TASKQ_RESULT_PAYLOAD];
+	uint32_t result_local_len = 0;
+	uint16_t status;
 	uint32_t src_offset;
 	uint32_t src_length;
 	uint32_t dst_offset;
@@ -2279,12 +2586,6 @@ static uint16_t handle_decode_mp3(volatile struct SDKMailboxEntry *req,
 	uint32_t output_channels;
 	uint32_t output_format;
 	uint32_t flags;
-	uint32_t sample_rate;
-	uint32_t channels;
-	uint32_t bytes_written;
-	uint32_t bytes_consumed;
-	uint32_t frames_written;
-	uint8_t *dst_ptr;
 
 	if (payload_len < sizeof(*payload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -2316,45 +2617,27 @@ static uint16_t handle_decode_mp3(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	}
 
-	Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
-	                          src_length);
-	if (decode_mp3_init((uint8_t *)(uintptr_t)(src->address + src_offset),
-	                    src_length) != 0) {
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	}
+	p.src_addr = src->address + src_offset;
+	p.src_len = src_length;
+	p.dst_addr = dst->address + dst_offset;
+	p.dst_cap = dst_capacity & ~1UL;
+	p.output_format = output_format;
+	p.output_hz = output_hz;
+	p.output_channels = output_channels;
 
-	sample_rate = (uint32_t)mp3_get_hz();
-	channels = (uint32_t)mp3_get_channels();
-	if (sample_rate == 0U || channels == 0U)
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if ((output_hz != 0U && output_hz != sample_rate) ||
-	    (output_channels != 0U && output_channels != channels)) {
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	}
+	if (service_try_defer(SDK_OP_DECODE_MP3, req, &p, sizeof(p),
+	                      src_length) == SDK_STATUS_QUEUED)
+		return SDK_STATUS_QUEUED;
+	/* defer unavailable -> decode inline below, as before */
 
-	dst_capacity &= ~1UL;
-	dst_ptr = (uint8_t *)(uintptr_t)(dst->address + dst_offset);
-	bytes_written = (uint32_t)decode_mp3_samples(dst_ptr,
-	                                            (int)(dst_capacity / 2U));
-	bytes_consumed = (uint32_t)mp3_get_bytes_consumed();
-	if (bytes_consumed > src_length)
-		bytes_consumed = src_length;
-	if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S16BE)
-		byteswap_pcm16(dst_ptr, bytes_written);
-	Xil_DCacheFlushRange((INTPTR)dst_ptr, dst_capacity);
-
-	frames_written = bytes_written / (2U * channels);
-	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	status = mp3_decode_compute(&g_mp3_inline_ctx, &p, result_local,
+	                            &result_local_len);
+	scheduler_shared()->tasks_on_core0++;   /* offload-class op run inline */
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+	write_completion(comp, req, SDK_STATUS_OK, (uint16_t)result_local_len);
 	memset((void *)comp->payload, 0, sizeof(comp->payload));
-	result = (volatile struct SDKAudioDecodeResultPayload *)comp->payload;
-	put_be32(result->bytes_consumed, bytes_consumed);
-	put_be32(result->bytes_written, bytes_written);
-	put_be32(result->sample_rate, sample_rate);
-	put_be32(result->channels, channels);
-	put_be32(result->sample_format, output_format);
-	put_be32(result->frames_written, frames_written);
-	put_be32(result->flags,
-	         (bytes_consumed >= src_length) ? SDK_AUDIO_DECODE_RESULT_END : 0U);
+	memcpy((void *)comp->payload, result_local, result_local_len);
 	return SDK_STATUS_OK;
 }
 
@@ -2965,6 +3248,24 @@ static uint16_t handle_image_session_begin(
 	if (status != SDK_STATUS_OK)
 		return complete_status(req, comp, status);
 
+	/* Fix the session's core affinity for its whole life: feeds/closes
+	 * of a core-1-affine session run on the worker (the codec heap
+	 * objects then live in core 1's cache and never migrate). */
+	begin.core1_affine = scheduler_core1_available() ? 1U : 0U;
+	if (begin.core1_affine &&
+	    (begin.output_mode == SDK_IMAGE_OUTPUT_SURFACE ||
+	     begin.output_mode == SDK_IMAGE_OUTPUT_FRAMEBUFFER)) {
+		struct SDKSurface dst;
+
+		/* ARM-local outputs keep the single-core cache contract
+		 * (reads skip invalidation, so a core-1-written surface
+		 * would go stale for core 0) -- see scale_defer_eligible.
+		 * Keep those sessions fully inline. */
+		if (get_surface_info(begin.dst_surface, &dst) &&
+		    surface_is_arm_local(&dst))
+			begin.core1_affine = 0U;
+	}
+
 	status = sdk_image_stream_begin(&begin, &result);
 	return complete_image_session_result(req, comp, status, &result);
 }
@@ -2998,6 +3299,30 @@ static uint16_t handle_image_session_feed(
 	if (!buffer_range_valid(src, feed.src_offset, feed.src_length))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 
+	if (sdk_image_stream_session_core1(feed.session) > 0 &&
+	    scheduler_core1_available()) {
+		struct imgsess_op_params p;
+
+		p.session = feed.session;
+		p.src_handle = feed.src_handle;
+		p.src_addr = (feed.src_length != 0U) ?
+		    (src->address + feed.src_offset) : 0U;
+		p.src_len = feed.src_length;
+		p.flags = feed.flags;
+		if (service_try_defer(SDK_OP_IMAGE_SESSION_FEED, req, &p,
+		                      sizeof(p), feed.src_length) ==
+		    SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		/* A core-1-affine session cannot decode on core 0 (its codec
+		 * state lives in core 1's cache). The sole synchronous client
+		 * sends session ops singly (always the batch tail, one in
+		 * flight), so a refused defer means a full queue -- transient
+		 * and unreachable today; answer BUSY rather than corrupt. */
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+	/* Core-0-affine (or poisoned-after-fault) session: inline, as the
+	 * pre-scheduler firmware did. */
+
 	if (feed.src_length != 0U) {
 		src_data = (const uint8_t *)(uintptr_t)
 			(src->address + feed.src_offset);
@@ -3026,6 +3351,23 @@ static uint16_t handle_image_session_close(
 
 	payload = (volatile struct SDKImageSessionClosePayload *)req->payload;
 	session = get_be32(payload->session);
+
+	if (sdk_image_stream_session_core1(session) > 0 &&
+	    scheduler_core1_available()) {
+		struct imgsess_op_params p;
+
+		memset(&p, 0, sizeof(p));
+		p.session = session;
+		if (service_try_defer(SDK_OP_IMAGE_SESSION_CLOSE, req, &p,
+		                      sizeof(p), 0U) == SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		/* See the feed path: never touch core-1 codec state from
+		 * core 0; refused defer = transient full queue. */
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+	/* Core-0-affine session, or a poisoned one after a core-1 fault
+	 * (codec objects already reclaimed; close reduces to a slot reset). */
+
 	status = sdk_image_stream_close(session);
 	return complete_status(req, comp, status);
 }
@@ -3503,6 +3845,167 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		    (uint32_t)sizeof(struct SDKCryptoResultPayload) : 0U;
 		return s;
 	}
+	case SDK_OP_SCALE_IMAGE:
+	case SDK_OP_SCALE_IMAGE_CLIPPED: {
+		const struct scale_op_params *p =
+		    (const struct scale_op_params *)d->op_params;
+		struct SDKSurface src;
+		struct SDKSurface dst;
+		int ok;
+
+		/* Rebuild just enough of the two surfaces for the shared cache
+		 * helpers; geometry was resolved and validated on core 0 at
+		 * enqueue time (scale_defer_eligible/scale_pack_params).
+		 * ARM-local surfaces never arrive here (excluded from deferral:
+		 * their no-invalidate contract is single-core), so the rebuilt
+		 * surfaces carry no ARM_LOCAL flag and the invalidate/flush
+		 * below always run for real. */
+		memset(&src, 0, sizeof(src));
+		memset(&dst, 0, sizeof(dst));
+		src.address = p->src_addr;
+		src.width = p->src_w;
+		src.height = p->src_h;
+		src.pitch = p->src_pitch;
+		src.format = p->format;
+		src.length = (uint32_t)p->src_pitch * p->src_h;
+		dst.address = p->dst_addr;
+		dst.width = p->dst_w;
+		dst.height = p->dst_h;
+		dst.pitch = p->dst_pitch;
+		dst.format = p->format;
+		dst.length = (uint32_t)p->dst_pitch * p->dst_h;
+
+		prepare_surface_for_arm_read(&src);
+		if (d->opcode == SDK_OP_SCALE_IMAGE_CLIPPED) {
+			ok = sdk_surface_scale_rect_clipped(
+			    (uint8_t *)(uintptr_t)dst.address,
+			    dst.width, dst.height, dst.pitch,
+			    (const uint8_t *)(uintptr_t)src.address,
+			    src.width, src.height, src.pitch, src.format,
+			    p->src_x, p->src_y, p->src_rw, p->src_rh,
+			    p->dst_x, p->dst_y, p->dst_rw, p->dst_rh,
+			    p->clip_x, p->clip_y, p->clip_rw, p->clip_rh,
+			    (uint32_t)(p->filter_flags & 0xffU));
+		} else {
+			ok = sdk_surface_scale_rect(
+			    (uint8_t *)(uintptr_t)dst.address,
+			    dst.width, dst.height, dst.pitch,
+			    (const uint8_t *)(uintptr_t)src.address,
+			    src.width, src.height, src.pitch, src.format,
+			    p->src_x, p->src_y, p->src_rw, p->src_rh,
+			    p->dst_x, p->dst_y, p->dst_rw, p->dst_rh,
+			    (uint32_t)(p->filter_flags & 0xffU));
+		}
+		*result_len = 0;
+		if (!ok)
+			return SDK_STATUS_BAD_REQUEST;
+		flush_surface_rect(&dst, p->dst_x, p->dst_y,
+		                   p->dst_rw, p->dst_rh);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_DECODE_JPEG: {
+		const struct jpeg_op_params *p =
+		    (const struct jpeg_op_params *)d->op_params;
+		volatile struct SDKImageDecodeResultPayload *reply;
+		struct SDKSurface dst;
+		uint32_t image_width = 0;
+		uint32_t image_height = 0;
+		uint32_t bytes_written = 0;
+
+		Xil_DCacheInvalidateRange((INTPTR)p->src_addr, p->src_len);
+		if (!sdk_jpeg_decode_to_surface(
+		            (const uint8_t *)(uintptr_t)p->src_addr, p->src_len,
+		            (uint8_t *)(uintptr_t)p->dst_addr,
+		            p->dst_width, p->dst_height, p->dst_pitch,
+		            p->output_format, p->dst_x, p->dst_y,
+		            &image_width, &image_height, &bytes_written)) {
+			*result_len = 0;
+			return SDK_STATUS_IO_ERROR;
+		}
+
+		/* Just enough of the dst surface for flush_surface_rect;
+		 * geometry was resolved and validated on core 0. ARM-local
+		 * destinations never arrive here (excluded from deferral). */
+		memset(&dst, 0, sizeof(dst));
+		dst.address = p->dst_addr;
+		dst.width = p->dst_surf_w;
+		dst.height = p->dst_surf_h;
+		dst.pitch = p->dst_pitch;
+		dst.format = p->output_format;
+		dst.length = (uint32_t)p->dst_pitch * p->dst_surf_h;
+		flush_surface_rect(&dst, p->dst_x, p->dst_y,
+		                   p->dst_width, p->dst_height);
+
+		memset(result_payload, 0,
+		       sizeof(struct SDKImageDecodeResultPayload));
+		reply = (volatile struct SDKImageDecodeResultPayload *)
+		    result_payload;
+		put_be32(reply->width, image_width);
+		put_be32(reply->height, image_height);
+		put_be32(reply->output_format, p->output_format);
+		put_be32(reply->flags, 0U);
+		put_be32(reply->bytes_written, bytes_written);
+		*result_len = sizeof(struct SDKImageDecodeResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_DECODE_MP3: {
+		const struct mp3_op_params *p =
+		    (const struct mp3_op_params *)d->op_params;
+		return mp3_decode_compute(&g_mp3_core1_ctx, p, result_payload,
+		                          result_len);
+	}
+	case SDK_OP_IMAGE_SESSION_FEED: {
+		const struct imgsess_op_params *p =
+		    (const struct imgsess_op_params *)d->op_params;
+		volatile struct SDKImageSessionResultPayload *reply;
+		struct SDKImageStreamFeed feed;
+		struct SDKImageStreamResult sres;
+		const uint8_t *src_data = 0;
+		uint16_t s;
+
+		memset(&feed, 0, sizeof(feed));
+		feed.session = p->session;
+		feed.src_handle = p->src_handle;
+		feed.src_length = p->src_len;
+		feed.flags = p->flags;
+		if (p->src_len != 0U) {
+			src_data = (const uint8_t *)(uintptr_t)p->src_addr;
+			Xil_DCacheInvalidateRange((INTPTR)p->src_addr,
+			                          p->src_len);
+		}
+
+		s = sdk_image_stream_feed(&feed, src_data, &sres);
+		*result_len = 0;
+		if (s != SDK_STATUS_OK)
+			return s;
+		flush_image_session_output(&sres);
+
+		memset(result_payload, 0,
+		       sizeof(struct SDKImageSessionResultPayload));
+		reply = (volatile struct SDKImageSessionResultPayload *)
+		    result_payload;
+		put_be32(reply->session, sres.session);
+		put_be32(reply->state, sres.state);
+		put_be32(reply->image_width, sres.image_width);
+		put_be32(reply->image_height, sres.image_height);
+		put_be32(reply->output_format, sres.output_format);
+		put_be32(reply->tile_x, sres.tile_x);
+		put_be32(reply->tile_y, sres.tile_y);
+		put_be32(reply->tile_width, sres.tile_width);
+		put_be32(reply->tile_height, sres.tile_height);
+		put_be32(reply->bytes_consumed, sres.bytes_consumed);
+		put_be32(reply->bytes_written, sres.bytes_written);
+		put_be32(reply->flags, sres.flags);
+		*result_len = sizeof(struct SDKImageSessionResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_IMAGE_SESSION_CLOSE: {
+		const struct imgsess_op_params *p =
+		    (const struct imgsess_op_params *)d->op_params;
+
+		*result_len = 0;
+		return sdk_image_stream_close(p->session);
+	}
 	case SDK_OP_DECOMPRESS: {
 		const struct decompress_op_params *p =
 		    (const struct decompress_op_params *)d->op_params;
@@ -3777,6 +4280,44 @@ static uint16_t crypto_dispatch(uint16_t opcode, uint32_t in_len,
 	memcpy((void *)comp->payload, result_payload,
 	       sizeof(struct SDKCryptoResultPayload));
 	return SDK_STATUS_OK;
+}
+
+/*
+ * Front dispatch helper for op_params-carried service ops (surface scale,
+ * JPEG decode), following crypto_dispatch: a defer-eligible request
+ * enqueues to the scheduler and returns SDK_STATUS_QUEUED; any failure to
+ * defer returns SDK_STATUS_BUSY and the CALLER computes inline (these ops
+ * have no cross-call state, so the inline fallback is always safe --
+ * unlike LZH). in_len feeds SHORT/LONG classification (for scale it is
+ * the destination-rect byte count, so small blits may be drained by an
+ * idle core 0 exactly like small crypto ops).
+ */
+static uint16_t service_try_defer(uint16_t opcode,
+                                  volatile struct SDKMailboxEntry *req,
+                                  const void *params, uint32_t param_len,
+                                  uint32_t in_len)
+{
+	if (scheduler_core1_available() && g_request_is_batch_tail) {
+		taskq_shared_t *sh = scheduler_shared();
+		int slot = taskq_enqueue(&sh->queue, opcode,
+		                         taskq_class_for_opcode(opcode, in_len),
+		                         0u, in_len, 0u, 0u,
+		                         get_be32(req->request_id),
+		                         get_be32(req->user_cookie),
+		                         params, param_len);
+		if (slot >= 0) {
+			/* Stamp the current mailbox generation so this task is dropped
+			 * rather than posted if the mailbox is re-initialised before it
+			 * finishes (see g_task_generation). */
+			g_task_generation[slot] = sdk_mailbox_generation;
+			/* taskq_enqueue release-stored the QUEUED state; make it globally
+			 * visible and wake the worker if it is idling on WFE. */
+			__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+			return SDK_STATUS_QUEUED;
+		}
+		/* queue full -> caller computes inline */
+	}
+	return SDK_STATUS_BUSY;
 }
 
 /*
@@ -4917,6 +5458,17 @@ void sdk_mailbox_init(void)
 	memset(surfaces, 0, sizeof(surfaces));
 	memset(audio_streams, 0, sizeof(audio_streams));
 	sdk_decompress_stream_reset_all();
+	/* A vanished client (Amiga reboot/crash) can leave core-1-affine image
+	 * sessions open with no task in flight; the quiesce above does not
+	 * restart core 1 then, and zeroing the session table would strand the
+	 * sessions' core-1 heap blocks AND their decode-tracker slots (the
+	 * tracker only empties on free or fault reclaim, so repeated resets
+	 * would exhaust it and starve future fault recovery). Cold-restart
+	 * core 1 first: its reclaim pass frees every tracked block while the
+	 * worker is held in reset. */
+	if (sdk_image_stream_has_core1_sessions() &&
+	    scheduler_core1_available())
+		core1_cold_restart();
 	sdk_image_stream_init();
 	amiga_interrupt_clear(AMIGA_INTERRUPT_SDK);
 

@@ -68,15 +68,46 @@
 #error "SDK ARM-local heap exceeds low DDR reservation"
 #endif
 
+// Z3 fast-RAM DDR window. VARIANT_Z3_FASTRAM bitstreams map the 256 MB
+// fast-RAM PIC to this FIXED range regardless of where AmigaOS autoconfig
+// placed the board (mntzorro.v `Z3_FASTRAM_ARM_BASE`; bitstreams older than
+// 2026-07 instead reused the main-window offset, which made the landing zone
+// depend on relative board placement -- the hazard this pin removes).
+// The Amiga owns every byte of it: NOTHING on the ARM side may live here.
+#define Z3_FASTRAM_DDR_ADDRESS      0x20000000
+#define Z3_FASTRAM_DDR_SIZE         0x10000000     // Z3_SIZE_256MB
+#define Z3_FASTRAM_DDR_END \
+    (Z3_FASTRAM_DDR_ADDRESS + Z3_FASTRAM_DDR_SIZE)
+
+#if Z3_FASTRAM_DDR_ADDRESS < 0x18000000
+#error "Z3 fast-RAM window must sit above the linker-managed DDR (ends 0x18000000)"
+#endif
+#if Z3_FASTRAM_DDR_END > 0x30000000
+#error "Z3 fast-RAM window overlaps codec scratch at 0x30000000"
+#endif
+
 // Dual-core scheduler task-queue control region. A small SCU-coherent slab in
-// the otherwise-unclaimed 0x18000000..0x30000000 hole -- above the
-// linker-managed DDR (ps7_ddr_hi ends at 0x18000000) and below the codec
-// scratch buffers at 0x30000000. Holds the taskq_shared_t control block only;
-// crypto data buffers stay in SDK_SHARED_HEAP with core-0 cache management.
+// the 0x18000000..0x20000000 carve -- above the linker-managed DDR
+// (ps7_ddr_hi ends at 0x18000000) and below the Z3 fast-RAM DDR window at
+// 0x20000000. Holds the taskq_shared_t control block and, at
+// SDK_IMAGE_SESSIONS_OFFSET, the image-stream session table (both cores
+// touch session state, and the coherent section removes the need for manual
+// cache maintenance on it); crypto data buffers stay in SDK_SHARED_HEAP with
+// core-0 cache management.
 #define SDK_TASKQ_REGION_ADDRESS    0x18000000
 #define SDK_TASKQ_REGION_SIZE       0x00100000     // 1 MB (one MMU section)
 #define SDK_TASKQ_REGION_END \
     (SDK_TASKQ_REGION_ADDRESS + SDK_TASKQ_REGION_SIZE)
+
+// Image-stream session table, inside the coherent region above. The offset
+// leaves the queue control block its own space (guarded against
+// sizeof(taskq_shared_t) in scheduler_arm.c); the table size is guarded in
+// sdk_image_stream.c.
+#define SDK_IMAGE_SESSIONS_OFFSET   0x00040000
+#define SDK_IMAGE_SESSIONS_ADDRESS \
+    (SDK_TASKQ_REGION_ADDRESS + SDK_IMAGE_SESSIONS_OFFSET)
+#define SDK_IMAGE_SESSIONS_MAX_BYTES \
+    (SDK_TASKQ_REGION_SIZE - SDK_IMAGE_SESSIONS_OFFSET)
 
 #if SDK_TASKQ_REGION_ADDRESS < 0x18000000
 #error "task-queue region must sit above the linker-managed DDR (ends 0x18000000)"
@@ -86,13 +117,13 @@
 #error "task-queue region overlaps the JEDI region"
 #endif
 #endif
-#if SDK_TASKQ_REGION_END > 0x30000000
-#error "task-queue region overlaps codec scratch at 0x30000000"
+#if SDK_TASKQ_REGION_END > Z3_FASTRAM_DDR_ADDRESS
+#error "task-queue region overlaps the Z3 fast-RAM DDR window"
 #endif
 
 // Dedicated core-1 stack (dual-core scheduler). The Cortex-A9 stack is
-// full-descending, so the CPU is given the TOP. Reserved in the unclaimed
-// 0x18000000..0x30000000 hole, immediately above the task-queue region and
+// full-descending, so the CPU is given the TOP. Reserved in the
+// 0x18000000..0x20000000 carve, immediately above the task-queue region and
 // clear of every heap/framebuffer/DMA buffer below 0x08000000 -- the previous
 // hardcoded 0x06000000 core-1 SP sat on the seam of the surface heaps and
 // descended into the legacy accelerator heap. SDK_CORE1_STACK_TOP is chosen as
@@ -105,8 +136,8 @@
 #if SDK_CORE1_STACK_BASE < SDK_TASKQ_REGION_END
 #error "core-1 stack overlaps the task-queue region"
 #endif
-#if SDK_CORE1_STACK_TOP > 0x30000000
-#error "core-1 stack overlaps codec scratch at 0x30000000"
+#if SDK_CORE1_STACK_TOP > Z3_FASTRAM_DDR_ADDRESS
+#error "core-1 stack overlaps the Z3 fast-RAM DDR window"
 #endif
 
 // SDK v2 bootstrap mailbox. The Amiga side reaches this through the existing

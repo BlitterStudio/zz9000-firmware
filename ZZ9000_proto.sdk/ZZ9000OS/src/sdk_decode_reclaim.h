@@ -36,10 +36,15 @@
 
 /*
  * Maximum distinct live allocations a single core-1 decode holds at once.
- * zlib inflate uses 2 (state + window); LZMA/LZMA2 use 2-3 (probs + dict).
- * 16 is a safe ceiling with generous headroom.
+ * zlib inflate uses 2 (state + window); LZMA/LZMA2 use 2-3 (probs + dict);
+ * libjpeg (jmem_zz9k.c) allocates pool chunks and coefficient arrays --
+ * typically well under a dozen, but a progressive decode of a large image
+ * can go higher. Overflow degrades safely (the block is simply not
+ * tracked and would leak on a core-1 fault, never corrupt), but 32 keeps
+ * headroom for the image decoders. Must stay a multiple of 8 (cache-line
+ * discipline; build-guarded in sdk_decode_reclaim.c).
  */
-#define SDK_DECODE_MAX_TRACKED 16u
+#define SDK_DECODE_MAX_TRACKED 32u
 
 /* Record a live allocation. Call AFTER malloc succeeds. NULL is ignored. */
 void sdk_decode_track(void *ptr);

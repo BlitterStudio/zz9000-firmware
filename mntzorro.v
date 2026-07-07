@@ -48,6 +48,17 @@
 `define Z3_SIZE_128MB 32'h08000000
 `define Z3_SIZE_256MB 32'h10000000 // 256MB for Zorro 3
 `define ARM_MEMORY_START          32'h001f0000
+// Fixed DDR base for the Z3 fast-RAM PIC (VARIANT_Z3_FASTRAM). The fast
+// window used to reuse the main-window translation (z3addr - z3_ram_low),
+// which made its DDR placement depend on where AmigaOS autoconfig put the
+// two boards relative to each other: with the canonical A3000/A4000 layout
+// (RTG at 0x40000000, fast at 0x50000000) the 256 MB window landed on DDR
+// 0x101f0000..0x201f0000 — overlaying the firmware's upper linker DDR, the
+// SDK task queue (0x18000000) and the core-1 stack (0x1bf00000). Mapping
+// the fast window to a fixed base makes the ARM memory map independent of
+// board placement. Keep in sync with Z3_FASTRAM_DDR_* in
+// ZZ9000_proto.sdk/ZZ9000OS/src/memorymap.h.
+`define Z3_FASTRAM_ARM_BASE       32'h20000000
 `define VIDEOCAP_ADDR             32'h01000000 // ARM_MEMORY_START+0xe0_0000
 `define BOOT_ROM_ADDRESS          32'h3fcf0000 // 1Kb boot rom
 `define TX_FRAME_ADDRESS          32'h3fd10000 // ethernet tx buffer
@@ -648,6 +659,10 @@ module MNTZorro_v0_1_S00_AXI
   (* mark_debug = "true" *) reg [31:0] z3_fast_low ;
   reg [31:0] z3_ram_high ;//= 32'h50000000 + `Z3_RAM_SIZE -4;
   reg [31:0] z3_fast_high;
+  // Precomputed subtrahend so the fast-window translation stays a single
+  // subtraction: z3addr - z3_fast_ddr_delta, with the AXI side adding
+  // ARM_MEMORY_START back, yields Z3_FASTRAM_ARM_BASE + (z3addr - z3_fast_low).
+  reg [31:0] z3_fast_ddr_delta;
   (* mark_debug = "true" *) reg [31:0] z3_reg_low  ;//= 32'h50001000;
   (* mark_debug = "true" *) reg [31:0] z3_reg_high ;//= 32'h50002000;
   reg [15:0] data_z3_hi16;
@@ -909,7 +924,21 @@ module MNTZorro_v0_1_S00_AXI
 
     z3addr_autoconfig <= (z3addr[31:16]=='hff00);
 
+`ifdef VARIANT_Z3_FASTRAM
+    // Fast-window accesses translate to the fixed Z3_FASTRAM_ARM_BASE DDR
+    // range instead of reusing the main-window offset (see define above).
+    // While the fast PIC is unconfigured, z3_fast_high is 0 and the main
+    // mapping is used. The comparators mirror z3addr_in_ram above, so
+    // synthesis shares them. Fast-mapped offsets start at 0x1fe10000 and
+    // can never alias the <0x2000 register decode or the 0x2000..0x10000
+    // eth/USB/bootrom sub-windows.
+    if ((z3addr >= z3_fast_low) && (z3addr < z3_fast_high))
+      z3_mapped_addr <= (z3addr-z3_fast_ddr_delta);
+    else
+      z3_mapped_addr <= (z3addr-z3_ram_low);
+`else
     z3_mapped_addr <= (z3addr-z3_ram_low);
+`endif
 
     z3_din_high_s2 <= ZORRO_DATA_IN;       //zD[15:0];
     z3_din_low_s2  <= ZORRO_ADDR_IN[22:7]; //zA[22:7];
@@ -1587,6 +1616,7 @@ module MNTZorro_v0_1_S00_AXI
           z3_ram_high <= 0;
           z3_fast_low <= 0;
           z3_fast_high <= 0;
+          z3_fast_ddr_delta <= 0;
           z3_reg_low <= 0;
           z3_reg_high <= 0;
           reg_low <= 0;
@@ -1777,8 +1807,10 @@ module MNTZorro_v0_1_S00_AXI
           end
 
 `ifdef VARIANT_Z3_FASTRAM
-          if (z3_fast_low)
+          if (z3_fast_low) begin
             z3_fast_high  <= z3_fast_low + `Z3_SIZE_256MB;
+            z3_fast_ddr_delta <= z3_fast_low - (`Z3_FASTRAM_ARM_BASE - `ARM_MEMORY_START);
+          end
 
           // issue #25: advertise the second (fast-RAM) PIC only once the
           // firmware has signalled the DDR window is ready (slv_reg6[0]). On a
