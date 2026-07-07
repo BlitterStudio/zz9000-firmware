@@ -17,7 +17,8 @@
 */
 
 module video_formatter(
-  input [31:0] m_axis_vid_tdata,
+  input [63:0] m_axis_vid_tdata,
+  input [7:0]  m_axis_vid_tkeep,
   input m_axis_vid_tlast,
   output m_axis_vid_tready,
   input [0:0]  m_axis_vid_tuser,
@@ -84,8 +85,8 @@ reg [15:0] screen_h_sync_end;
 reg [15:0] screen_v_sync_start;
 reg [15:0] screen_v_sync_end;
 
-localparam MAXWIDTH=1280;
-reg [31:0] line_buffer[MAXWIDTH-1:0];
+localparam MAXWIDTH=2560;              // line buffer capacity in 32-bit words
+localparam LINE_BUFFER_BEATS=1280;     // 64-bit write-side depth (MAXWIDTH/2)
 
 // (input) vdma state
 reg [3:0] next_input_state;
@@ -103,10 +104,19 @@ reg [11:0] need_line_fetch_reg2;
 reg [11:0] need_line_fetch_reg3;
 reg [11:0] last_line_fetch;
 
-wire [31:0] pixin = m_axis_vid_tdata;
+wire pixin_lo_valid = |m_axis_vid_tkeep[3:0];
+wire pixin_hi_valid = |m_axis_vid_tkeep[7:4];
+wire [1:0] pixin_word_count = {1'b0, pixin_lo_valid} + {1'b0, pixin_hi_valid};
 wire pixin_valid = m_axis_vid_tvalid;
 wire pixin_end_of_line = m_axis_vid_tlast;
 wire pixin_framestart = m_axis_vid_tuser[0];
+// One 64-bit beat carries two consecutive 32-bit framebuffer words. inptr
+// counts 32-bit words and stays even mid-line (the VDMA only produces a
+// partial tkeep on the tlast beat), so a beat maps 1:1 onto the write port's
+// byte lanes and tkeep doubles as the byte write enable.
+wire pixin_in_range = inptr[11:1] < LINE_BUFFER_BEATS;
+wire [7:0] line_buffer_we = (pixin_valid && ready_for_vdma && pixin_in_range)
+                            ? m_axis_vid_tkeep : 8'h00;
 
 reg scale_y_effective;
 
@@ -157,14 +167,13 @@ always @(posedge m_axis_vid_aclk)
     scale_y_effective <= control_interlace ? 0 : scale_y;
 
     if (pixin_valid && ready_for_vdma) begin
-      line_buffer[inptr] <= pixin;
       // disabling this makes the picture go wild
       if (pixin_framestart) // we might have missed the frame start
-        inptr <= 1;
+        inptr <= pixin_word_count;
       else if (pixin_end_of_line) // next after this is the first pixel of the line (0)
         inptr <= 0;
       else
-        inptr <= inptr + 1'b1;
+        inptr <= inptr + pixin_word_count;
     end
 
     // one-hot encoded
@@ -304,7 +313,7 @@ reg vga_scale_y = 0;
 reg [31:0] pixout;
 reg [7:0]  pixout8;
 reg [15:0] pixout16;
-reg [31:0] pixout32;
+wire [31:0] pixout32;
 reg [31:0] pixout32_dly;
 reg [31:0] pixout32_dly2;
 wire [7:0] red16   = {pixout16[4:0],   pixout16[4:2]};
@@ -318,6 +327,55 @@ reg [3:0] counter_scanout_step;
 reg [3:0] counter_subpixel = 0;
 
 reg vga_sync_polarity = 0;
+
+// Line buffer: written per 64-bit VDMA beat, read per 32-bit scanout word.
+// READ_LATENCY_B(1) gives doutb the exact registered-read timing the
+// original 32-bit design's inferred line_buffer read had, so every
+// downstream pipeline phase (counter_subpixel unpacking, PIPE_DELAY)
+// is unchanged. pixout32 must stay a direct wire from doutb: adding a
+// register here shifts the sub-word phase and swaps/duplicates pixel
+// columns in the 8/16/15 bpp modes.
+xpm_memory_sdpram #(
+  .MEMORY_SIZE(MAXWIDTH * 32),
+  .MEMORY_PRIMITIVE("block"),
+  .CLOCKING_MODE("independent_clock"),
+  .ECC_MODE("no_ecc"),
+  .MEMORY_INIT_FILE("none"),
+  .MEMORY_INIT_PARAM("0"),
+  .USE_MEM_INIT(0),
+  .WAKEUP_TIME("disable_sleep"),
+  .AUTO_SLEEP_TIME(0),
+  .MESSAGE_CONTROL(0),
+  .USE_EMBEDDED_CONSTRAINT(0),
+  .MEMORY_OPTIMIZATION("true"),
+  .WRITE_DATA_WIDTH_A(64),
+  .BYTE_WRITE_WIDTH_A(8),
+  .ADDR_WIDTH_A(11),
+  .RST_MODE_A("SYNC"),
+  .READ_DATA_WIDTH_B(32),
+  .ADDR_WIDTH_B(12),
+  .READ_RESET_VALUE_B("0"),
+  .READ_LATENCY_B(1),
+  .WRITE_MODE_B("read_first"),
+  .RST_MODE_B("SYNC")
+) line_buffer (
+  .sleep(1'b0),
+  .clka(m_axis_vid_aclk),
+  .ena(1'b1),
+  .wea(line_buffer_we),
+  .addra(inptr[11:1]),
+  .dina(m_axis_vid_tdata),
+  .injectsbiterra(1'b0),
+  .injectdbiterra(1'b0),
+  .clkb(dvi_clk),
+  .rstb(1'b0),
+  .enb(1'b1),
+  .regceb(1'b1),
+  .addrb(counter_scanout),
+  .doutb(pixout32),
+  .sbiterrb(),
+  .dbiterrb()
+);
 
 always @(posedge dvi_clk) begin
   vga_h_rez <= screen_width;
@@ -406,8 +464,6 @@ always @(posedge dvi_clk) begin
     end else
       counter_subpixel <= counter_subpixel - 1'b1;
   end
-
-  pixout32 <= line_buffer[counter_scanout];
 
   if (vga_colormode==CMODE_16BIT)
     // 16 bit 5r6g5b

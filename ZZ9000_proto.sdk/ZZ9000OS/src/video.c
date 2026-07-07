@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "video.h"
+#include "video_vdma.h"
 #include "mntzorro.h"
 #include "interrupt.h"
 #include "xaxivdma.h"
@@ -8,6 +9,7 @@
 #include "hdmi.h"
 #include <sleep.h>
 #include "xil_cache_l.h"
+#include "xil_io.h"
 
 #define VDMA_DEVICE_ID	XPAR_AXIVDMA_0_DEVICE_ID
 
@@ -78,7 +80,24 @@ static void videocap_detection_reset() {
 	vs.videocap_mode_stable_count = 0;
 }
 
+// Zynq S_AXI_HP0 carries the video scanout DMA and was widened to 64 bit
+// together with the 64-bit RTG scanout path. FSBLs built before that change
+// still program the port's AFI into 32-bit mode (AFI_RDCHAN_CTRL and
+// AFI_WRCHAN_CTRL bit 0 "32BIT_EN", UG585 B.5), which corrupts one half of
+// every 64-bit VDMA beat: every other pixel word is garbage in all modes.
+// Force both channels back to the 64-bit reset default before any VDMA
+// traffic runs, so a stale FSBL cannot break scanout.
+#define AFI0_RDCHAN_CTRL 0xF8008000
+#define AFI0_WRCHAN_CTRL 0xF8008014
+
+static void video_hp0_bus_width_init() {
+	Xil_Out32(AFI0_RDCHAN_CTRL, Xil_In32(AFI0_RDCHAN_CTRL) & ~1u);
+	Xil_Out32(AFI0_WRCHAN_CTRL, Xil_In32(AFI0_WRCHAN_CTRL) & ~1u);
+}
+
 struct ZZ_VIDEO_STATE* video_init() {
+	video_hp0_bus_width_init();
+
 	vs.framebuffer = (u32*) FRAMEBUFFER_ADDRESS;
 
 #ifdef DEFAULT_NS_VIDEOCAP
@@ -149,18 +168,18 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 	//printf("VDMA MM2S DRE: %d\n", vdma.HasMm2SDRE);
 	//printf("VDMA Config MM2S DRE: %d\n", Config->HasMm2SDRE);
 
-	u32 stride = hsize * (Config->Mm2SStreamWidth >> 3);
-	if (vs.framebuffer_pan_width != 0 && vs.framebuffer_pan_width != (hsize / hdiv)) {
-		stride = (vs.framebuffer_pan_width * (Config->Mm2SStreamWidth >> 3)) * stride_div;
-	}
+	u32 line_bytes = video_vdma_line_bytes(hsize, hdiv);
+	u32 stride = video_vdma_stride_bytes(hsize, hdiv,
+	                                     vs.framebuffer_pan_width,
+	                                     stride_div);
 
 	XAxiVdma_DmaSetup ReadCfg;
 
 	//printf("VDMA HDIV: %d VDIV: %d\n", hdiv, vdiv);
 
 	ReadCfg.VertSizeInput = vsize / vdiv;
-	ReadCfg.HoriSizeInput = (hsize * (Config->Mm2SStreamWidth >> 3)) / hdiv; // note: changing this breaks the output
-	ReadCfg.Stride = stride / hdiv; // note: changing this is not a problem
+	ReadCfg.HoriSizeInput = line_bytes; // note: changing this breaks the output
+	ReadCfg.Stride = stride; // note: changing this is not a problem
 	ReadCfg.FrameDelay = 0; /* This example does not test frame delay */
 	ReadCfg.EnableCircularBuf = 1; /* Only 1 buffer, continuous loop */
 	ReadCfg.EnableSync = 0; /* Gen-Lock */

@@ -398,7 +398,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   set_property -dict [ list \
    CONFIG.c_include_mm2s_dre {1} \
    CONFIG.c_include_s2mm {0} \
-   CONFIG.c_m_axi_mm2s_data_width {32} \
+   CONFIG.c_m_axi_mm2s_data_width {64} \
+   CONFIG.c_m_axis_mm2s_tdata_width {64} \
    CONFIG.c_mm2s_genlock_mode {0} \
    CONFIG.c_mm2s_linebuffer_depth {512} \
    CONFIG.c_mm2s_max_burst_length {128} \
@@ -411,7 +412,9 @@ proc create_hier_cell_video { parentCell nameHier } {
   set_property -dict [ list \
    CONFIG.FIFO_DEPTH {32} \
    CONFIG.FIFO_MEMORY_TYPE {auto} \
- ] $axis_data_fifo_0
+   CONFIG.HAS_TKEEP {1} \
+   CONFIG.TDATA_NUM_BYTES {8} \
+  ] $axis_data_fifo_0
 
   # Create instance: video_formatter_0, and set properties
   set block_name video_formatter
@@ -1044,7 +1047,7 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.PCW_SDIO_PERIPHERAL_VALID {1} \
    CONFIG.PCW_SMC_PERIPHERAL_DIVISOR0 {1} \
    CONFIG.PCW_SPI_PERIPHERAL_DIVISOR0 {1} \
-   CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {32} \
+   CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {64} \
    CONFIG.PCW_S_AXI_HP1_DATA_WIDTH {32} \
    CONFIG.PCW_S_AXI_HP2_DATA_WIDTH {32} \
    CONFIG.PCW_S_AXI_HP3_DATA_WIDTH {32} \
