@@ -17,7 +17,8 @@
 */
 
 module video_formatter(
-  input [31:0] m_axis_vid_tdata,
+  input [63:0] m_axis_vid_tdata,
+  input [7:0]  m_axis_vid_tkeep,
   input m_axis_vid_tlast,
   output m_axis_vid_tready,
   input [0:0]  m_axis_vid_tuser,
@@ -84,8 +85,10 @@ reg [15:0] screen_h_sync_end;
 reg [15:0] screen_v_sync_start;
 reg [15:0] screen_v_sync_end;
 
-localparam MAXWIDTH=1280;
-reg [31:0] line_buffer[MAXWIDTH-1:0];
+localparam MAXWIDTH=2560;
+localparam LINE_BANK_DEPTH=1280;
+reg [31:0] line_buffer_even[LINE_BANK_DEPTH-1:0];
+reg [31:0] line_buffer_odd[LINE_BANK_DEPTH-1:0];
 
 // (input) vdma state
 reg [3:0] next_input_state;
@@ -103,10 +106,22 @@ reg [11:0] need_line_fetch_reg2;
 reg [11:0] need_line_fetch_reg3;
 reg [11:0] last_line_fetch;
 
-wire [31:0] pixin = m_axis_vid_tdata;
+wire [31:0] pixin_lo = m_axis_vid_tdata[31:0];
+wire [31:0] pixin_hi = m_axis_vid_tdata[63:32];
+wire pixin_lo_valid = |m_axis_vid_tkeep[3:0];
+wire pixin_hi_valid = |m_axis_vid_tkeep[7:4];
+wire [1:0] pixin_word_count = pixin_hi_valid ? 2'd2 : (pixin_lo_valid ? 2'd1 : 2'd0);
 wire pixin_valid = m_axis_vid_tvalid;
 wire pixin_end_of_line = m_axis_vid_tlast;
 wire pixin_framestart = m_axis_vid_tuser[0];
+wire [10:0] inptr_bank = inptr[11:1];
+wire [10:0] inptr_next_bank = (inptr + 1'b1) >> 1;
+wire pixin_lo_in_range = inptr < MAXWIDTH;
+wire pixin_hi_in_range = inptr < MAXWIDTH-1;
+wire pixin_lo_even = pixin_lo_valid && pixin_lo_in_range && !inptr[0];
+wire pixin_lo_odd = pixin_lo_valid && pixin_lo_in_range && inptr[0];
+wire pixin_hi_even = pixin_hi_valid && pixin_hi_in_range && inptr[0];
+wire pixin_hi_odd = pixin_hi_valid && pixin_hi_in_range && !inptr[0];
 
 reg scale_y_effective;
 
@@ -157,14 +172,23 @@ always @(posedge m_axis_vid_aclk)
     scale_y_effective <= control_interlace ? 0 : scale_y;
 
     if (pixin_valid && ready_for_vdma) begin
-      line_buffer[inptr] <= pixin;
+      if (pixin_lo_even)
+        line_buffer_even[inptr_bank] <= pixin_lo;
+      else if (pixin_hi_even)
+        line_buffer_even[inptr_next_bank] <= pixin_hi;
+
+      if (pixin_lo_odd)
+        line_buffer_odd[inptr_bank] <= pixin_lo;
+      else if (pixin_hi_odd)
+        line_buffer_odd[inptr_bank] <= pixin_hi;
+
       // disabling this makes the picture go wild
       if (pixin_framestart) // we might have missed the frame start
-        inptr <= 1;
+        inptr <= pixin_word_count;
       else if (pixin_end_of_line) // next after this is the first pixel of the line (0)
         inptr <= 0;
       else
-        inptr <= inptr + 1'b1;
+        inptr <= inptr + pixin_word_count;
     end
 
     // one-hot encoded
@@ -307,6 +331,7 @@ reg [15:0] pixout16;
 reg [31:0] pixout32;
 reg [31:0] pixout32_dly;
 reg [31:0] pixout32_dly2;
+wire [10:0] counter_scanout_bank = counter_scanout[11:1];
 wire [7:0] red16   = {pixout16[4:0],   pixout16[4:2]};
 wire [7:0] green16 = {pixout16[10:5],  pixout16[10:9]};
 wire [7:0] blue16  = {pixout16[15:11], pixout16[15:13]};
@@ -407,7 +432,10 @@ always @(posedge dvi_clk) begin
       counter_subpixel <= counter_subpixel - 1'b1;
   end
 
-  pixout32 <= line_buffer[counter_scanout];
+  if (counter_scanout[0])
+    pixout32 <= line_buffer_odd[counter_scanout_bank];
+  else
+    pixout32 <= line_buffer_even[counter_scanout_bank];
 
   if (vga_colormode==CMODE_16BIT)
     // 16 bit 5r6g5b

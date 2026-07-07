@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "video.h"
+#include "video_vdma.h"
 #include "mntzorro.h"
 #include "interrupt.h"
 #include "xaxivdma.h"
@@ -149,18 +150,18 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 	//printf("VDMA MM2S DRE: %d\n", vdma.HasMm2SDRE);
 	//printf("VDMA Config MM2S DRE: %d\n", Config->HasMm2SDRE);
 
-	u32 stride = hsize * (Config->Mm2SStreamWidth >> 3);
-	if (vs.framebuffer_pan_width != 0 && vs.framebuffer_pan_width != (hsize / hdiv)) {
-		stride = (vs.framebuffer_pan_width * (Config->Mm2SStreamWidth >> 3)) * stride_div;
-	}
+	u32 line_bytes = video_vdma_line_bytes(hsize, hdiv);
+	u32 stride = video_vdma_stride_bytes(hsize, hdiv,
+	                                     vs.framebuffer_pan_width,
+	                                     stride_div);
 
 	XAxiVdma_DmaSetup ReadCfg;
 
 	//printf("VDMA HDIV: %d VDIV: %d\n", hdiv, vdiv);
 
 	ReadCfg.VertSizeInput = vsize / vdiv;
-	ReadCfg.HoriSizeInput = (hsize * (Config->Mm2SStreamWidth >> 3)) / hdiv; // note: changing this breaks the output
-	ReadCfg.Stride = stride / hdiv; // note: changing this is not a problem
+	ReadCfg.HoriSizeInput = line_bytes; // note: changing this breaks the output
+	ReadCfg.Stride = stride; // note: changing this is not a problem
 	ReadCfg.FrameDelay = 0; /* This example does not test frame delay */
 	ReadCfg.EnableCircularBuf = 1; /* Only 1 buffer, continuous loop */
 	ReadCfg.EnableSync = 0; /* Gen-Lock */
