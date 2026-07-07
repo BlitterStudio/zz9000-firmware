@@ -647,6 +647,27 @@ struct jpeg_op_params {
 typedef char jpeg_op_params_size_check[
     (sizeof(struct jpeg_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
+/*
+ * Native-endian packed parameters for a deferred DECODE_MP3 task. Source
+ * and destination are shared buffers, resolved and range-checked on
+ * core 0; lifetime protection is the DECOMPRESS convention (batch-tail
+ * gate + blocking-QUEUED client). The op is one-shot (open_buf with
+ * MP3D_DO_NOT_SCAN allocates nothing), so the decoder context does not
+ * cross request boundaries.
+ */
+struct mp3_op_params {
+	uint32_t src_addr;         /* src buffer address + offset, resolved */
+	uint32_t src_len;
+	uint32_t dst_addr;         /* dst buffer address + offset, resolved */
+	uint32_t dst_cap;          /* even, >= 2 */
+	uint32_t output_format;
+	uint32_t output_hz;        /* 0 = accept stream rate */
+	uint32_t output_channels;  /* 0 = accept stream channels */
+};
+
+typedef char mp3_op_params_size_check[
+    (sizeof(struct mp3_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
 struct SDKAudioStream {
 	uint32_t id;
 	struct SDKSharedBuffer *mp3_ring;
@@ -2456,14 +2477,84 @@ static void byteswap_pcm16(uint8_t *data, uint32_t bytes)
 	}
 }
 
+/*
+ * MP3 decoder contexts: one for the core-0 inline path, one for the
+ * core-1 runner. Each is touched by exactly one core (the single core-1
+ * worker serializes its own tasks), and the legacy register-driven FIFO
+ * path in main.c owns a third -- eliminating the shared-global decoder
+ * state that used to let the two paths corrupt each other.
+ */
+static struct mp3_decode_ctx g_mp3_inline_ctx;
+static struct mp3_decode_ctx g_mp3_core1_ctx;
+
+/*
+ * One-shot MP3 decode compute, shared by the core-0 inline path and the
+ * core-1 runner: cache maintenance on the data buffers lives here so it
+ * runs correctly on whichever core executes. Fills a big-endian
+ * SDKAudioDecodeResultPayload into result_payload on success.
+ */
+static uint16_t mp3_decode_compute(struct mp3_decode_ctx *ctx,
+                                   const struct mp3_op_params *p,
+                                   uint8_t *result_payload,
+                                   uint32_t *result_len)
+{
+	volatile struct SDKAudioDecodeResultPayload *reply;
+	uint32_t sample_rate;
+	uint32_t channels;
+	uint32_t bytes_written;
+	uint32_t bytes_consumed;
+	uint8_t *dst_ptr = (uint8_t *)(uintptr_t)p->dst_addr;
+
+	*result_len = 0;
+
+	Xil_DCacheInvalidateRange((INTPTR)p->src_addr, p->src_len);
+	if (decode_mp3_init(ctx, (uint8_t *)(uintptr_t)p->src_addr,
+	                    p->src_len) != 0)
+		return SDK_STATUS_BAD_REQUEST;
+
+	sample_rate = (uint32_t)mp3_get_hz(ctx);
+	channels = (uint32_t)mp3_get_channels(ctx);
+	if (sample_rate == 0U || channels == 0U)
+		return SDK_STATUS_BAD_REQUEST;
+	if ((p->output_hz != 0U && p->output_hz != sample_rate) ||
+	    (p->output_channels != 0U && p->output_channels != channels))
+		return SDK_STATUS_UNSUPPORTED;
+
+	bytes_written = (uint32_t)decode_mp3_samples(ctx, dst_ptr,
+	                                             (int)(p->dst_cap / 2U));
+	bytes_consumed = (uint32_t)mp3_get_bytes_consumed(ctx);
+	if (bytes_consumed > p->src_len)
+		bytes_consumed = p->src_len;
+	if (p->output_format == SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+		byteswap_pcm16(dst_ptr, bytes_written);
+	Xil_DCacheFlushRange((INTPTR)dst_ptr, p->dst_cap);
+
+	memset(result_payload, 0, sizeof(struct SDKAudioDecodeResultPayload));
+	reply = (volatile struct SDKAudioDecodeResultPayload *)result_payload;
+	put_be32(reply->bytes_consumed, bytes_consumed);
+	put_be32(reply->bytes_written, bytes_written);
+	put_be32(reply->sample_rate, sample_rate);
+	put_be32(reply->channels, channels);
+	put_be32(reply->sample_format, p->output_format);
+	put_be32(reply->frames_written, bytes_written / (2U * channels));
+	put_be32(reply->flags,
+	         (bytes_consumed >= p->src_len) ?
+	             SDK_AUDIO_DECODE_RESULT_END : 0U);
+	*result_len = sizeof(struct SDKAudioDecodeResultPayload);
+	return SDK_STATUS_OK;
+}
+
 static uint16_t handle_decode_mp3(volatile struct SDKMailboxEntry *req,
                                   volatile struct SDKMailboxEntry *comp,
                                   uint16_t payload_len)
 {
 	volatile struct SDKAudioDecodePayload *payload;
-	volatile struct SDKAudioDecodeResultPayload *result;
 	struct SDKSharedBuffer *src;
 	struct SDKSharedBuffer *dst;
+	struct mp3_op_params p;
+	uint8_t result_local[TASKQ_RESULT_PAYLOAD];
+	uint32_t result_local_len = 0;
+	uint16_t status;
 	uint32_t src_offset;
 	uint32_t src_length;
 	uint32_t dst_offset;
@@ -2472,12 +2563,6 @@ static uint16_t handle_decode_mp3(volatile struct SDKMailboxEntry *req,
 	uint32_t output_channels;
 	uint32_t output_format;
 	uint32_t flags;
-	uint32_t sample_rate;
-	uint32_t channels;
-	uint32_t bytes_written;
-	uint32_t bytes_consumed;
-	uint32_t frames_written;
-	uint8_t *dst_ptr;
 
 	if (payload_len < sizeof(*payload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -2509,45 +2594,27 @@ static uint16_t handle_decode_mp3(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	}
 
-	Xil_DCacheInvalidateRange((INTPTR)(src->address + src_offset),
-	                          src_length);
-	if (decode_mp3_init((uint8_t *)(uintptr_t)(src->address + src_offset),
-	                    src_length) != 0) {
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	}
+	p.src_addr = src->address + src_offset;
+	p.src_len = src_length;
+	p.dst_addr = dst->address + dst_offset;
+	p.dst_cap = dst_capacity & ~1UL;
+	p.output_format = output_format;
+	p.output_hz = output_hz;
+	p.output_channels = output_channels;
 
-	sample_rate = (uint32_t)mp3_get_hz();
-	channels = (uint32_t)mp3_get_channels();
-	if (sample_rate == 0U || channels == 0U)
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if ((output_hz != 0U && output_hz != sample_rate) ||
-	    (output_channels != 0U && output_channels != channels)) {
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	}
+	if (service_try_defer(SDK_OP_DECODE_MP3, req, &p, sizeof(p),
+	                      src_length) == SDK_STATUS_QUEUED)
+		return SDK_STATUS_QUEUED;
+	/* defer unavailable -> decode inline below, as before */
 
-	dst_capacity &= ~1UL;
-	dst_ptr = (uint8_t *)(uintptr_t)(dst->address + dst_offset);
-	bytes_written = (uint32_t)decode_mp3_samples(dst_ptr,
-	                                            (int)(dst_capacity / 2U));
-	bytes_consumed = (uint32_t)mp3_get_bytes_consumed();
-	if (bytes_consumed > src_length)
-		bytes_consumed = src_length;
-	if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S16BE)
-		byteswap_pcm16(dst_ptr, bytes_written);
-	Xil_DCacheFlushRange((INTPTR)dst_ptr, dst_capacity);
-
-	frames_written = bytes_written / (2U * channels);
-	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	status = mp3_decode_compute(&g_mp3_inline_ctx, &p, result_local,
+	                            &result_local_len);
+	scheduler_shared()->tasks_on_core0++;   /* offload-class op run inline */
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+	write_completion(comp, req, SDK_STATUS_OK, (uint16_t)result_local_len);
 	memset((void *)comp->payload, 0, sizeof(comp->payload));
-	result = (volatile struct SDKAudioDecodeResultPayload *)comp->payload;
-	put_be32(result->bytes_consumed, bytes_consumed);
-	put_be32(result->bytes_written, bytes_written);
-	put_be32(result->sample_rate, sample_rate);
-	put_be32(result->channels, channels);
-	put_be32(result->sample_format, output_format);
-	put_be32(result->frames_written, frames_written);
-	put_be32(result->flags,
-	         (bytes_consumed >= src_length) ? SDK_AUDIO_DECODE_RESULT_END : 0U);
+	memcpy((void *)comp->payload, result_local, result_local_len);
 	return SDK_STATUS_OK;
 }
 
@@ -3799,6 +3866,12 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		put_be32(reply->bytes_written, bytes_written);
 		*result_len = sizeof(struct SDKImageDecodeResultPayload);
 		return SDK_STATUS_OK;
+	}
+	case SDK_OP_DECODE_MP3: {
+		const struct mp3_op_params *p =
+		    (const struct mp3_op_params *)d->op_params;
+		return mp3_decode_compute(&g_mp3_core1_ctx, p, result_payload,
+		                          result_len);
 	}
 	case SDK_OP_DECOMPRESS: {
 		const struct decompress_op_params *p =

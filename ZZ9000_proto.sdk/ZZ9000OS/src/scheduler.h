@@ -37,6 +37,10 @@
 #define TASKQ_OP_SCALE_IMAGE_CLIPPED 0x0407u
 #define TASKQ_OP_DECODE_JPEG         0x0401u
 
+/* Audio-service opcode mirrored from sdk_mailbox.h (SDK_OP_DECODE_MP3);
+ * drift guard in scheduler_arm.c. */
+#define TASKQ_OP_DECODE_MP3          0x0500u
+
 typedef enum {
   TASK_FREE    = 0,
   TASK_QUEUED  = 1,
