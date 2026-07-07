@@ -616,9 +616,6 @@ struct scale_op_params {
 	uint16_t clip_x, clip_y, clip_rw, clip_rh;
 };
 
-#define SCALE_OPF_SRC_ARM_LOCAL (1U << 8)
-#define SCALE_OPF_DST_ARM_LOCAL (1U << 9)
-
 typedef char scale_op_params_size_check[
     (sizeof(struct scale_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
@@ -639,10 +636,8 @@ struct jpeg_op_params {
 	uint16_t dst_x, dst_y;
 	uint16_t dst_width, dst_height;   /* decode-bounds output rect */
 	uint16_t dst_surf_w, dst_surf_h;  /* surface dims (flush bounds) */
-	uint16_t flags;                   /* JPEGOPF_* */
+	uint16_t flags;                   /* reserved, 0 */
 };
-
-#define JPEGOPF_DST_ARM_LOCAL (1U << 0)
 
 typedef char jpeg_op_params_size_check[
     (sizeof(struct jpeg_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
@@ -2111,9 +2106,18 @@ static uint16_t service_try_defer(uint16_t opcode,
 /*
  * A scale request may be deferred to core 1 only when neither surface is
  * the live framebuffer (its address/geometry come from video state that
- * can change while the task waits in the queue) and all geometry fits
- * the u16 fields of scale_op_params. Anything else computes inline,
- * byte-identically to the pre-scheduler firmware.
+ * can change while the task waits in the queue), neither surface is
+ * ARM-local, and all geometry fits the u16 fields of scale_op_params.
+ * Anything else computes inline, byte-identically to the pre-scheduler
+ * firmware.
+ *
+ * ARM-local surfaces are excluded because their cache contract is
+ * single-core: they have no Zorro-side writer, so reads skip
+ * invalidation (prepare_surface_for_arm_read) and rely on the reading
+ * core's cache being authoritative. The local surface heap is NOT in
+ * the SCU-coherent region, so letting these ops bounce between cores
+ * would need invalidate/flush in both directions on every hop --
+ * cheaper and safer to keep ARM-local work on core 0.
  */
 static int scale_defer_eligible(uint32_t src_handle, uint32_t dst_handle,
                                 const struct SDKSurface *src,
@@ -2121,6 +2125,8 @@ static int scale_defer_eligible(uint32_t src_handle, uint32_t dst_handle,
 {
 	if (src_handle == SDK_SURFACE_HANDLE_FRAMEBUFFER ||
 	    dst_handle == SDK_SURFACE_HANDLE_FRAMEBUFFER)
+		return 0;
+	if (surface_is_arm_local(src) || surface_is_arm_local(dst))
 		return 0;
 	if (src->width > 0xffffU || src->height > 0xffffU ||
 	    src->pitch > 0xffffU || src->format > 0xffffU ||
@@ -2146,10 +2152,6 @@ static void scale_pack_params(struct scale_op_params *p,
 	p->dst_pitch = (uint16_t)dst->pitch;
 	p->format = (uint16_t)src->format;
 	p->filter_flags = (uint16_t)(filter & 0xffU);
-	if (surface_is_arm_local(src))
-		p->filter_flags |= SCALE_OPF_SRC_ARM_LOCAL;
-	if (surface_is_arm_local(dst))
-		p->filter_flags |= SCALE_OPF_DST_ARM_LOCAL;
 }
 
 /* Destination-rect byte count for SHORT/LONG classification, saturated
@@ -2430,10 +2432,13 @@ static uint16_t handle_decode_jpeg(volatile struct SDKMailboxEntry *req,
 	}
 
 	/* Defer to core 1 when eligible: never a framebuffer-backed dst
-	 * (its geometry tracks live video state) and everything must fit
-	 * the u16 op_params fields. Decoder memory is core-1-reclaimable
-	 * (jmem_zz9k.c), so a worker fault mid-decode cannot leak. */
+	 * (its geometry tracks live video state), never an ARM-local dst
+	 * (single-core cache contract -- see scale_defer_eligible), and
+	 * everything must fit the u16 op_params fields. Decoder memory is
+	 * core-1-reclaimable (jmem_zz9k.c), so a worker fault mid-decode
+	 * cannot leak. */
 	if (get_be32(payload->dst_surface) != SDK_SURFACE_HANDLE_FRAMEBUFFER &&
+	    !surface_is_arm_local(&dst) &&
 	    dst.width <= 0xffffU && dst.height <= 0xffffU &&
 	    dst.pitch <= 0xffffU && dst_x <= 0xffffU && dst_y <= 0xffffU &&
 	    dst_width <= 0xffffU && dst_height <= 0xffffU) {
@@ -2451,8 +2456,6 @@ static uint16_t handle_decode_jpeg(volatile struct SDKMailboxEntry *req,
 		p.dst_height = (uint16_t)dst_height;
 		p.dst_surf_w = (uint16_t)dst.width;
 		p.dst_surf_h = (uint16_t)dst.height;
-		if (surface_is_arm_local(&dst))
-			p.flags |= JPEGOPF_DST_ARM_LOCAL;
 		if (service_try_defer(SDK_OP_DECODE_JPEG, req, &p, sizeof(p),
 		                      src_length) == SDK_STATUS_QUEUED)
 			return SDK_STATUS_QUEUED;
@@ -3248,6 +3251,19 @@ static uint16_t handle_image_session_begin(
 	 * of a core-1-affine session run on the worker (the codec heap
 	 * objects then live in core 1's cache and never migrate). */
 	begin.core1_affine = scheduler_core1_available() ? 1U : 0U;
+	if (begin.core1_affine &&
+	    (begin.output_mode == SDK_IMAGE_OUTPUT_SURFACE ||
+	     begin.output_mode == SDK_IMAGE_OUTPUT_FRAMEBUFFER)) {
+		struct SDKSurface dst;
+
+		/* ARM-local outputs keep the single-core cache contract
+		 * (reads skip invalidation, so a core-1-written surface
+		 * would go stale for core 0) -- see scale_defer_eligible.
+		 * Keep those sessions fully inline. */
+		if (get_surface_info(begin.dst_surface, &dst) &&
+		    surface_is_arm_local(&dst))
+			begin.core1_affine = 0U;
+	}
 
 	status = sdk_image_stream_begin(&begin, &result);
 	return complete_image_session_result(req, comp, status, &result);
@@ -3838,7 +3854,11 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 
 		/* Rebuild just enough of the two surfaces for the shared cache
 		 * helpers; geometry was resolved and validated on core 0 at
-		 * enqueue time (scale_defer_eligible/scale_pack_params). */
+		 * enqueue time (scale_defer_eligible/scale_pack_params).
+		 * ARM-local surfaces never arrive here (excluded from deferral:
+		 * their no-invalidate contract is single-core), so the rebuilt
+		 * surfaces carry no ARM_LOCAL flag and the invalidate/flush
+		 * below always run for real. */
 		memset(&src, 0, sizeof(src));
 		memset(&dst, 0, sizeof(dst));
 		src.address = p->src_addr;
@@ -3847,16 +3867,12 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		src.pitch = p->src_pitch;
 		src.format = p->format;
 		src.length = (uint32_t)p->src_pitch * p->src_h;
-		if (p->filter_flags & SCALE_OPF_SRC_ARM_LOCAL)
-			src.flags |= SDK_SURFACE_FLAG_ARM_LOCAL;
 		dst.address = p->dst_addr;
 		dst.width = p->dst_w;
 		dst.height = p->dst_h;
 		dst.pitch = p->dst_pitch;
 		dst.format = p->format;
 		dst.length = (uint32_t)p->dst_pitch * p->dst_h;
-		if (p->filter_flags & SCALE_OPF_DST_ARM_LOCAL)
-			dst.flags |= SDK_SURFACE_FLAG_ARM_LOCAL;
 
 		prepare_surface_for_arm_read(&src);
 		if (d->opcode == SDK_OP_SCALE_IMAGE_CLIPPED) {
@@ -3907,7 +3923,8 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		}
 
 		/* Just enough of the dst surface for flush_surface_rect;
-		 * geometry was resolved and validated on core 0. */
+		 * geometry was resolved and validated on core 0. ARM-local
+		 * destinations never arrive here (excluded from deferral). */
 		memset(&dst, 0, sizeof(dst));
 		dst.address = p->dst_addr;
 		dst.width = p->dst_surf_w;
@@ -3915,8 +3932,6 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		dst.pitch = p->dst_pitch;
 		dst.format = p->output_format;
 		dst.length = (uint32_t)p->dst_pitch * p->dst_surf_h;
-		if (p->flags & JPEGOPF_DST_ARM_LOCAL)
-			dst.flags |= SDK_SURFACE_FLAG_ARM_LOCAL;
 		flush_surface_rect(&dst, p->dst_x, p->dst_y,
 		                   p->dst_width, p->dst_height);
 
