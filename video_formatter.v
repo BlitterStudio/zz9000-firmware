@@ -108,9 +108,12 @@ reg [11:0] last_line_fetch;
 
 wire [31:0] pixin_lo = m_axis_vid_tdata[31:0];
 wire [31:0] pixin_hi = m_axis_vid_tdata[63:32];
-wire pixin_lo_valid = |m_axis_vid_tkeep[3:0];
-wire pixin_hi_valid = |m_axis_vid_tkeep[7:4];
-wire [1:0] pixin_word_count = pixin_hi_valid ? 2'd2 : (pixin_lo_valid ? 2'd1 : 2'd0);
+// RTG scanout lines are programmed as 64-bit aligned transfers. Once a beat is
+// valid, write both 32-bit formatter words; lane-gating here can leave every
+// other formatter word stale on hardware and creates vertical columns.
+wire pixin_lo_valid = 1'b1;
+wire pixin_hi_valid = 1'b1;
+wire [1:0] pixin_word_count = 2'd2;
 wire pixin_valid = m_axis_vid_tvalid;
 wire pixin_end_of_line = m_axis_vid_tlast;
 wire pixin_framestart = m_axis_vid_tuser[0];

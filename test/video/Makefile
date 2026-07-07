@@ -3,21 +3,27 @@ CFLAGS ?= -O2 -g -Wall -Wextra
 
 SRC_DIR := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 BUILD_DIR := build
-TARGET := $(BUILD_DIR)/video_vdma_test
+TARGETS := \
+	$(BUILD_DIR)/video_vdma_test \
+	$(BUILD_DIR)/video_formatter_source_test
 
 CPPFLAGS += -I$(SRC_DIR)
 
-SOURCES := video_vdma_test.c
 DEPS :=
 
 .PHONY: test clean
 
-test: $(TARGET)
-	$(TARGET)
+test: $(TARGETS)
+	$(BUILD_DIR)/video_vdma_test
+	$(BUILD_DIR)/video_formatter_source_test
 
-$(TARGET): $(SOURCES) $(DEPS)
+$(BUILD_DIR)/video_vdma_test: video_vdma_test.c $(DEPS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SOURCES)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ video_vdma_test.c
+
+$(BUILD_DIR)/video_formatter_source_test: video_formatter_source_test.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ video_formatter_source_test.c
 
 clean:
 	rm -rf $(BUILD_DIR)
