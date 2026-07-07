@@ -93,6 +93,12 @@ transactions hit L2 regardless of the ARM's MMU attributes.
   cannot be fixed like that — they need an FSBL rebuild: `./build_fsbl.sh`, with
   `util/refresh_ps7_init.sh` + table validation via `util/compare_ps7_tables.py`
   (full procedure: `ZZ9000_proto.sdk/ZZ9000FSBL/README.md`).
+- **Z3 fast-RAM owns DDR 0x20000000–0x30000000:** VARIANT_Z3_FASTRAM bitstreams map the
+  256 MB fast-RAM PIC to that fixed range (`Z3_FASTRAM_ARM_BASE` in `mntzorro.v`,
+  asserts in `memorymap.h`). Never carve ARM-side regions there. Bitstreams older than
+  2026-07 mapped fast RAM at an autoconfig-placement-dependent offset instead — with the
+  canonical A3000/A4000 layout it landed on 0x101f0000–0x201f0000, silently overlapping
+  the task queue and core-1 stack.
 - **Stale Vivado projects build stale RTL:** the project imports copies of the Verilog
   sources; running synthesis against an existing `ZZ9000_proto/` silently builds the
   code from when the project was generated. Always build via `build_bitstream.sh` /
