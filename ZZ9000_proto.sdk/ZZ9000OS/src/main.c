@@ -400,15 +400,6 @@ int main() {
 	int audio_param = 0; // selected parameter
 	int audio_request_init = 0;
 
-	// decoder parameters (mp3 etc)
-	const int ZZ_NUM_DECODER_PARAMS = 8;
-	uint16_t decoder_params[ZZ_NUM_DECODER_PARAMS];
-	int decoder_param = 0; // selected parameter
-	int decoder_bytes_decoded = 0;
-	// legacy register-driven MP3 FIFO decoder state; the SDK DECODE_MP3
-	// paths own their own contexts (sdk_mailbox.c), so the two can no
-	// longer corrupt each other's stream
-	static struct mp3_decode_ctx legacy_mp3_ctx;
 
 	// last time the ethernet state machine was serviced
 	XTime eth_task_last_run = 0;
@@ -1304,71 +1295,12 @@ int main() {
 						audio_adau_set_vol_pan(zdata&0xff, (zdata>>8)&0xff);
 					}
 					break;
-				case REG_ZZ_DECODER_PARAM:
-					if (zdata<ZZ_NUM_DECODER_PARAMS) {
-						decoder_param = zdata;
-					} else {
-						decoder_param = 0;
-					}
-					break;
-				case REG_ZZ_DECODER_VAL:
-					decoder_params[decoder_param] = zdata;
-					break;
-				case REG_ZZ_DECODER_FIFO:
-					fifo_set_write_index(&legacy_mp3_ctx, zdata);
-					break;
-				case REG_ZZ_DECODE:
-					{
-						// DECODER PARAMS:
-						// 0: input buffer offset hi
-						// 1: input buffer offset lo
-						// 2: input buffer size hi
-						// 3: input buffer size lo
-						// 4: output buffer offset hi
-						// 5: output buffer offset lo
-						// 6: output buffer size hi
-						// 7: output buffer size lo
-
-						uint8_t* input_buffer = (uint8_t*)video_state->framebuffer
-								+ ((decoder_params[0]<<16)|decoder_params[1]);
-						size_t input_buffer_size = (decoder_params[2]<<16)|decoder_params[3];
-
-						uint8_t* output_buffer = (uint8_t*)video_state->framebuffer
-								+ ((decoder_params[4]<<16)|decoder_params[5]);
-						size_t output_buffer_size = (decoder_params[6]<<16)|decoder_params[7];
-
-						switch(zdata) {
-							case DECODE_CLEAR:
-								printf("[decode:clear]\n");
-								fifo_clear(&legacy_mp3_ctx);
-							break;
-							case DECODE_INIT:
-								printf("[decode:mp3:%d] %p (%x) -> %p (%x)\n", (int)zdata, input_buffer, input_buffer_size,
-										output_buffer, output_buffer_size);
-								decode_mp3_init_fifo(&legacy_mp3_ctx, input_buffer, input_buffer_size);
-								decoder_bytes_decoded = -1;
-							break;
-							case DECODE_RUN: {
-								int max_samples = output_buffer_size;
-								int mp3_freq = mp3_get_hz(&legacy_mp3_ctx);
-								if (mp3_freq != 48000) {
-									uint8_t* temp_buffer = output_buffer + AUDIO_TX_BUFFER_SIZE; // FIXME hack
-									max_samples = mp3_get_hz(&legacy_mp3_ctx)/50 * 2;
-								
-									decoder_bytes_decoded = decode_mp3_samples(&legacy_mp3_ctx, temp_buffer, max_samples);
-								
-									// resample
-									resample_s16((int16_t*)temp_buffer, (int16_t*)output_buffer,
-											mp3_get_hz(&legacy_mp3_ctx), 48000, AUDIO_BYTES_PER_PERIOD / 4);
-								
-								} else {
-									decoder_bytes_decoded = decode_mp3_samples(&legacy_mp3_ctx, output_buffer, max_samples);
-								}
-							}
-							break;
-						}
-						break;
-					}
+				// REG_ZZ_DECODER_PARAM / _VAL / _FIFO and REG_ZZ_DECODE:
+				// the legacy register-driven MP3 decoder was removed with
+				// the MHI modernization (its only consumer). MP3 decode
+				// runs through the SDK audio-stream sessions on core 1,
+				// with SDK_OP_AUDIO_STREAM_PLAY binding a session to the
+				// AX output. Writes to those registers are ignored.
 				}
 			}
 
@@ -1518,9 +1450,9 @@ int main() {
 						break;
 					}
 					case REG_ZZ_AUDIO_SWAB: {
-						// misc status bits
-						//printf("read 0x70: %d\n", audio_buffer_collision);
-						data = (audio_buffer_collision)<<16 | fifo_get_read_index(&legacy_mp3_ctx);
+						// misc status bits (low word was the legacy MP3
+						// FIFO read index; that decoder is gone)
+						data = (audio_buffer_collision)<<16;
 						break;
 					}
 					case REG_ZZ_AUDIO_CONFIG: {
@@ -1529,8 +1461,8 @@ int main() {
 						break;
 					}
 					case REG_ZZ_DECODER_VAL: {
-						// used to determine if MP3 decoding has finished
-						data = decoder_bytes_decoded;
+						// legacy MP3 decoder removed; reads as 0
+						data = 0;
 						break;
 					}
 					case REG_ZZ_ETH_RX_STATUS: {
