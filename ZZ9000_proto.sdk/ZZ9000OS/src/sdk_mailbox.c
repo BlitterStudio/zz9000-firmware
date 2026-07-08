@@ -5971,6 +5971,51 @@ static uint16_t handle_query_service(volatile struct SDKMailboxEntry *req,
 	return SDK_STATUS_OK;
 }
 
+/*
+ * request_id 0 is the firmware-internal marker for deferred scheduler
+ * tasks that have no client completion to post: the AX playback refill
+ * enqueues with id 0, and sdk_mailbox_post_deferred swallows that
+ * completion (and retires the in-flight marker) instead of writing it to
+ * the client completion ring. A CLIENT request that carries id 0 and
+ * then takes a deferred path collides with that marker -- its completion
+ * would be swallowed (hanging the caller) and it would spuriously retire
+ * the refill marker -- so only opcodes that can defer to core 1 reserve
+ * id 0. Every opcode below routes through post_deferred via one of the
+ * deferral helpers (service_try_defer / crypto_dispatch /
+ * decompress_dispatch / handle_decompress_batch); keep this list in sync
+ * with the handlers that can return SDK_STATUS_QUEUED.
+ *
+ * Inline-only opcodes (NOP, PING, QUERY_*, ALLOC_*, MEM_*, the surface
+ * and audio/decompress control ops, ...) complete synchronously and just
+ * echo the client's request_id, so a client whose request counter starts
+ * at 0 keeps working -- request_id is an echoed token the ABI never
+ * reserved. (zz9k.library's own generator never emits 0 anyway,
+ * including on wrap.)
+ */
+static int opcode_reserves_request_id_zero(uint16_t opcode)
+{
+	switch (opcode) {
+	case SDK_OP_SCALE_IMAGE:
+	case SDK_OP_SCALE_IMAGE_CLIPPED:
+	case SDK_OP_DECODE_JPEG:
+	case SDK_OP_DECODE_MP3:
+	case SDK_OP_AUDIO_STREAM_FEED:
+	case SDK_OP_AUDIO_STREAM_READ:
+	case SDK_OP_IMAGE_SESSION_FEED:
+	case SDK_OP_IMAGE_SESSION_CLOSE:
+	case SDK_OP_DECOMPRESS:
+	case SDK_OP_DECOMPRESS_BATCH:
+	case SDK_OP_CRYPTO_HASH:
+	case SDK_OP_CRYPTO_STREAM:
+	case SDK_OP_CRYPTO_AEAD:
+	case SDK_OP_CRYPTO_KX:
+	case SDK_OP_CRYPTO_VERIFY:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
                                volatile struct SDKMailboxEntry *comp,
                                uint32_t pending_requests)
@@ -5981,15 +6026,11 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	if (payload_len > sizeof(req->payload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 
-	/* request_id 0 is reserved for firmware-internal scheduler tasks
-	 * (the AX playback refill): their deferred completion is swallowed
-	 * by sdk_mailbox_post_deferred instead of being posted to the
-	 * client ring. A client request carrying id 0 that took a deferred
-	 * path would therefore hang its caller and spuriously retire the
-	 * refill marker -- reject it up front so the reservation is
-	 * enforced, not assumed. zz9k.library never emits id 0 (its
-	 * generator skips it, including on wrap). */
-	if (get_be32(req->request_id) == 0U)
+	/* Reserve request_id 0 only for opcodes that can defer to the core-1
+	 * scheduler; inline-only ops accept it as an echoed token (see
+	 * opcode_reserves_request_id_zero). */
+	if (get_be32(req->request_id) == 0U &&
+	    opcode_reserves_request_id_zero(opcode))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 
 	switch (opcode) {
