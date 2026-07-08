@@ -115,6 +115,14 @@ int main(int argc, char **argv)
 	                      "SDK_LOCAL_SURFACE_HEAP_END > SDK_LOW_DDR_RESERVED_END");
 	ok &= expect_not_contains(memorymap, "memorymap.h",
 	                          "#define SDK_LOCAL_SURFACE_HEAP_ADDRESS 0x03400000");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_HOST_WINDOW_HEAP_ADDRESS 0x005D0000");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_HOST_WINDOW_HEAP_SIZE    0x00010000");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "(SDK_HOST_WINDOW_HEAP_END - ADDR_ADJ) > 0x00400000");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "SDK_HOST_WINDOW_HEAP_END > (0x003F0000 + ADDR_ADJ)");
 
 	ok &= expect_contains(main_source, "main.c",
 	                      "cur_mem_offset = LEGACY_SURFACE_HEAP_ADDRESS");

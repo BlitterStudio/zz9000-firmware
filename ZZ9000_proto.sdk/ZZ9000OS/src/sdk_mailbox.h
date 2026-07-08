@@ -48,6 +48,21 @@
 #define SDK_CAP_SERVICE_DISCOVERY      (1U << 14)
 #define SDK_CAP_SURFACE_OPS            (1U << 15)
 #define SDK_CAP_COMPRESSION            (1U << 16)
+// Firmware serves SDK_ALLOC_HOST_WINDOW allocations from the small
+// board-window-reachable heap (Zorro 2 support; see memorymap.h).
+#define SDK_CAP_HOST_WINDOW_HEAP       (1U << 20)
+
+// SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
+// host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
+// host-side declaration ("the 68k never touches this buffer") that the
+// firmware merely stores and echoes.
+// The firmware honors HOST_WINDOW on any bus and window size --
+// zz9k.library is the enforcement point: it strips the bit on Zorro 3
+// (where the heap region lies inside P96 VRAM) and refuses it on
+// sub-4 MB Zorro 2 windows (2 MB bitstream variants, which cannot
+// reach the heap's board offset).
+#define SDK_ALLOC_HOST_WINDOW     (1U << 0)
+#define SDK_ALLOC_CARD_ONLY       (1U << 1)
 
 #ifndef SDK_ENABLE_HDL_TRANSPORT
 #define SDK_ENABLE_HDL_TRANSPORT       0
