@@ -4658,6 +4658,18 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 			return SDK_STATUS_IO_ERROR;
 		audio_stream_feed_compute(stream, p->src_addr, p->src_len,
 		                          p->flags);
+		/* This worker runs on core 1, which owns the mp3 staging ring's
+		 * cache (see core1_affine). Only the FEED path writes that ring
+		 * (feed_compute's memcpy + audio_stream_compact_input); a READ or
+		 * the internal refill just reads it. Clean+invalidate the ring
+		 * here so core 1 leaves no dirty lines behind: CLOSE/free runs on
+		 * core 0 and cannot reach core 1's L1, so without this a later
+		 * eviction of stale compressed data could clobber whatever reuses
+		 * the freed shared buffer. */
+		if (stream->mp3_ring_addr != 0U && stream->mp3_capacity != 0U)
+			Xil_DCacheFlushRange(
+				(INTPTR)(uintptr_t)stream->mp3_ring_addr,
+				stream->mp3_capacity);
 		audio_stream_fill_result(result_payload, stream);
 		*result_len = sizeof(struct SDKAudioStreamResultPayload);
 		return SDK_STATUS_OK;
