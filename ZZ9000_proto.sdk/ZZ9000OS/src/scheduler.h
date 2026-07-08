@@ -49,6 +49,12 @@
 #define TASKQ_OP_IMAGE_SESSION_FEED  0x0405u
 #define TASKQ_OP_IMAGE_SESSION_CLOSE 0x0406u
 
+/* Audio-stream opcodes mirrored from sdk_mailbox.h. A core-1-affine
+ * stream's mp3 staging ring is cache-owned by core 1, so feed/read (both
+ * run the decoder) must ONLY execute there: TASK_LONG unconditionally. */
+#define TASKQ_OP_AUDIO_STREAM_FEED   0x0504u
+#define TASKQ_OP_AUDIO_STREAM_READ   0x0505u
+
 typedef enum {
   TASK_FREE    = 0,
   TASK_QUEUED  = 1,

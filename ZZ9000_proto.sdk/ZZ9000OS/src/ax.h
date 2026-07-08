@@ -35,12 +35,17 @@ void audio_init_i2s();
 void isr_audio(void *dummy);
 void isr_audio_rx(void *dummy);
 void audio_set_interrupt_enabled(int en);
+/* Nonzero while a legacy/AHI client drives the audio output (it keeps
+ * the per-period Amiga interrupt enabled during playback). */
+int audio_legacy_output_active(void);
 void audio_clear_interrupt();
 uint32_t audio_get_interrupt();
 uint32_t audio_get_dma_transfer_count();
 int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap);
 void audio_set_tx_buffer(uint8_t* addr);
 void audio_set_rx_buffer(uint8_t* addr);
+/* TX buffer the formatter DMA was last initialized with (see ax.c). */
+uint8_t* audio_get_inited_tx_buffer(void);
 void resample_s16(int16_t *input, int16_t *output,
 		int in_sample_rate, int out_sample_rate, int output_samples);
 void audio_silence();

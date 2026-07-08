@@ -8,6 +8,7 @@
 #include "xi2stx.h"
 #include "xi2srx.h"
 #include "xaudioformatter.h"
+#include "xil_cache.h"
 #include "mntzorro.h"
 #include "interrupt.h"
 #include "sleep.h"
@@ -29,6 +30,7 @@ XAudioFormatter audio_formatter;
 XAudioFormatter audio_formatter_rx;
 
 static uint8_t* audio_tx_buffer = (uint8_t*)AUDIO_TX_BUFFER_ADDRESS;
+static uint8_t* audio_inited_tx_buffer = NULL;
 static uint8_t* audio_rx_buffer = (uint8_t*)AUDIO_RX_BUFFER_ADDRESS;
 
 int adau_write16(u8 i2c_addr, u16 addr, u16 value) {
@@ -295,6 +297,18 @@ void audio_init_i2s() {
 	printf("[adau] XAudioFormatterDMAStart...\n");
 	XAudioFormatterDMAStart(&audio_formatter);
 	printf("[adau] XAudioFormatterDMAStart done.\n");
+
+	audio_inited_tx_buffer = audio_tx_buffer;
+}
+
+// The TX buffer address the audio formatter DMA was last INITIALIZED
+// with. audio_set_tx_buffer() only moves the CPU-side pointer; the DMA
+// keeps reading the buffer captured at the last audio_init_i2s(). An
+// AHI session repoints the DMA at its own buffer (AP_TX_BUF_OFFS +
+// re-init) and closing AHI does not restore it, so a consumer that
+// needs the default ring must compare against this and re-init.
+uint8_t* audio_get_inited_tx_buffer() {
+	return audio_inited_tx_buffer;
 }
 
 // returns 1 if adau1701 found, otherwise 0
@@ -409,6 +423,9 @@ void audio_debug_timer(int zdata) {
 
 int isra_count = 0;
 
+// TX-fill half of the SDK playback pump (sdk_mailbox.c); ISR-safe.
+extern void sdk_mailbox_audio_playback_pump_isr(void);
+
 // audio formatter interrupt, triggered whenever a period is completed
 void isr_audio(void *dummy) {
 	uint32_t val = XAudioFormatter_ReadReg(XPAR_XAUDIOFORMATTER_0_BASEADDR, XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET);
@@ -419,6 +436,12 @@ void isr_audio(void *dummy) {
 	if (isra_count++>100) {
 		isra_count = 0;
 	}
+
+	// Keep the TX ring filled from the bound audio-stream session on a
+	// guaranteed 20 ms cadence: main-loop passes stretched by RTG or
+	// network load previously let the DMA overrun the fill frontier
+	// and glitch MP3 playback. No-op when no session is bound.
+	sdk_mailbox_audio_playback_pump_isr();
 
 	if (interrupt_enabled_audio) {
 		amiga_interrupt_set(AMIGA_INTERRUPT_AUDIO);
@@ -452,6 +475,14 @@ void audio_set_interrupt_enabled(int en) {
 	}
 
 	audio_silence();
+}
+
+// Whether a legacy/AHI client currently drives the audio output: those
+// clients enable the per-period Amiga interrupt (REG_ZZ_AUDIO_CONFIG=1)
+// for the duration of playback. The SDK playback binding must not
+// steal the formatter while this is set.
+int audio_legacy_output_active() {
+	return interrupt_enabled_audio;
 }
 
 // offset = offset from audio tx buffer
@@ -565,6 +596,10 @@ void audio_set_rx_buffer(uint8_t* addr) {
 
 void audio_silence() {
 	memset(audio_tx_buffer, 0, AUDIO_TX_BUFFER_SIZE);
+	// TX buffers live in plain cacheable DDR and the formatter DMA does
+	// not snoop; push the silence to DRAM so it takes effect this
+	// period rather than on eventual eviction.
+	Xil_DCacheFlushRange((INTPTR)audio_tx_buffer, AUDIO_TX_BUFFER_SIZE);
 	reset_resampling();
 }
 
