@@ -4672,6 +4672,16 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 			return SDK_STATUS_BAD_HANDLE;
 		if (stream->faulted)
 			return SDK_STATUS_IO_ERROR;
+		/* Re-validate against the LIVE used count. p->pcm_read was
+		 * checked on core 0 against audio_stream_pcm_used() at intake,
+		 * but an earlier queued READ for this stream may have advanced
+		 * pcm_consumed_total since -- the snapshot is stale. Consuming
+		 * blindly would overshoot pcm_ready_total and underflow
+		 * audio_stream_pcm_used(), letting decode/pump work overwrite
+		 * still-unread PCM. Reject (consume nothing), matching the
+		 * inline intake path's over-read behavior. */
+		if (p->pcm_read > audio_stream_pcm_used(stream))
+			return SDK_STATUS_BAD_REQUEST;
 		audio_stream_read_compute(stream, p->pcm_read);
 		audio_stream_fill_result(result_payload, stream);
 		*result_len = sizeof(struct SDKAudioStreamResultPayload);
