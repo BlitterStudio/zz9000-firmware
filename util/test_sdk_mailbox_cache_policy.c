@@ -128,7 +128,7 @@ int main(int argc, char **argv)
 	ok &= expect_contains(source, "uint32_t input_offset;");
 	ok &= expect_contains(source, "static void audio_stream_compact_input");
 	ok &= expect_contains(
-		source, "#define SDK_AUDIO_STREAM_MIN_INPUT_BYTES (16U * 1024U)");
+		source, "#define SDK_AUDIO_STREAM_MIN_INPUT_BYTES (4U * 1024U)");
 	ok &= expect_contains(source, "static int audio_stream_needs_more_input");
 	ok &= expect_contains(
 		source, "stream->input_length < SDK_AUDIO_STREAM_MIN_INPUT_BYTES");

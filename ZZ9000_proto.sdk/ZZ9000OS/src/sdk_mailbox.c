@@ -42,7 +42,8 @@
 	 SDK_CAP_IMAGE_SCALE | SDK_CAP_AUDIO_DECODE | \
 	 SDK_CAP_AUDIO_PLAYBACK | \
 	 SDK_CAP_MEMORY_OPS | SDK_CAP_CRYPTO | \
-	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION)
+	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION | \
+	 SDK_CAP_HOST_WINDOW_HEAP)
 /* Decode proceeds only with at least this much undecoded input (unless
  * EOF): enough for the largest legal MP3 frame (~1.4K, 2.3K free-format)
  * plus sync lookahead. It must stay WELL below any client's input-ring
@@ -95,7 +96,8 @@ struct SDKCapsPayload {
 	uint8_t firmware_version[4];
 	uint8_t request_ring_entries[4];
 	uint8_t completion_ring_entries[4];
-	uint8_t reserved[12];
+	uint8_t host_window_heap_size[4];
+	uint8_t reserved[8];
 };
 
 struct SDKQueryServicePayload {
@@ -1382,12 +1384,21 @@ static int local_surface_range_valid(uint32_t address, uint32_t length)
 	                   SDK_LOCAL_SURFACE_HEAP_SIZE);
 }
 
+static int host_window_range_valid(uint32_t address, uint32_t length)
+{
+	return range_valid(address, length,
+	                   SDK_HOST_WINDOW_HEAP_ADDRESS,
+	                   SDK_HOST_WINDOW_HEAP_SIZE);
+}
+
 static int shared_buffer_live(const struct SDKSharedBuffer *buffer)
 {
 	if (!buffer || !buffer->in_use)
 		return 0;
 	if (buffer->handle == 0 || buffer->handle == SDK_INVALID_HANDLE)
 		return 0;
+	if ((buffer->flags & SDK_ALLOC_HOST_WINDOW) != 0U)
+		return host_window_range_valid(buffer->address, buffer->length);
 	return heap_range_valid(buffer->address, buffer->length);
 }
 
@@ -1794,6 +1805,16 @@ static uint32_t find_free_local_surface_region(uint32_t length,
 	                           length, alignment, 1);
 }
 
+static uint32_t find_free_host_window_region(uint32_t length,
+                                             uint32_t alignment)
+{
+	/* Shared-heap blocks can never overlap a candidate here (disjoint
+	 * regions), so the region-agnostic overlap scan is reusable. */
+	return find_free_region_in(SDK_HOST_WINDOW_HEAP_ADDRESS,
+	                           SDK_HOST_WINDOW_HEAP_SIZE,
+	                           length, alignment, 0);
+}
+
 static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
                                     volatile struct SDKMailboxEntry *comp,
                                     uint16_t payload_len)
@@ -1815,9 +1836,15 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	flags = get_be32(payload->flags);
 	if (alignment == 0)
 		alignment = 16U;
-	if (length == 0 || length > SDK_SHARED_HEAP_SIZE ||
-	    !is_power_of_two(alignment))
+	if (length == 0 || !is_power_of_two(alignment))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
+		if (length > SDK_HOST_WINDOW_HEAP_SIZE)
+			return complete_status(req, comp,
+			                       SDK_STATUS_BAD_REQUEST);
+	} else if (length > SDK_SHARED_HEAP_SIZE) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
 
 	sanitize_allocator_metadata();
 	slot = find_free_buffer_slot();
@@ -1825,7 +1852,10 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
 	memset(slot, 0, sizeof(*slot));
 
-	address = find_free_region(length, alignment);
+	if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U)
+		address = find_free_host_window_region(length, alignment);
+	else
+		address = find_free_region(length, alignment);
 	if (address == 0)
 		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
 
@@ -6129,6 +6159,7 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		put_be32(caps->firmware_version, 0);
 		put_be32(caps->request_ring_entries, SDK_MAILBOX_RING_ENTRIES);
 		put_be32(caps->completion_ring_entries, SDK_MAILBOX_RING_ENTRIES);
+		put_be32(caps->host_window_heap_size, SDK_HOST_WINDOW_HEAP_SIZE);
 		return SDK_STATUS_OK;
 	}
 	case SDK_OP_QUERY_SERVICE:

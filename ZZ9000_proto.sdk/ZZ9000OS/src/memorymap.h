@@ -39,6 +39,34 @@
 
 #define SDK_LOW_DDR_RESERVED_END     0x08000000
 
+// Host-window heap: the ONLY SDK allocation region a Zorro 2 board can
+// reach. The Z2 autoconfig window is 4 MB, so the shared heap at
+// 0x03000000 (board offset ~46 MB) is unreachable from the host there.
+// The RTG driver frees board 0x3E0000..0x3F0000 for this heap by
+// shrinking Z2 VRAM 64 KB (its template scratch, placed at MemorySize,
+// slides down with it); the AHI/MHI audio scratch starts right above at
+// board 0x3F0000. ARM address = board offset + ADDR_ADJ. Allocations
+// land here only when the client passes SDK_ALLOC_HOST_WINDOW --
+// default allocations stay in the shared heap so Z2 crypto offload
+// keeps failing fast into its software fallback instead of squeezing
+// through this tiny region.
+#define SDK_HOST_WINDOW_HEAP_ADDRESS 0x005D0000
+#define SDK_HOST_WINDOW_HEAP_SIZE    0x00010000
+#define SDK_HOST_WINDOW_HEAP_END \
+    (SDK_HOST_WINDOW_HEAP_ADDRESS + SDK_HOST_WINDOW_HEAP_SIZE)
+
+#if SDK_HOST_WINDOW_HEAP_ADDRESS < FRAMEBUFFER_ADDRESS
+#error "host-window heap must sit inside the board-window DDR region"
+#endif
+// Board offset of the heap end must fit the 4 MB Zorro 2 aperture.
+#if (SDK_HOST_WINDOW_HEAP_END - ADDR_ADJ) > 0x00400000
+#error "host-window heap exceeds the 4 MB Zorro 2 board window"
+#endif
+// Must not reach into the Z2 audio scratch (board 0x3F0000 = ARM 0x5E0000).
+#if SDK_HOST_WINDOW_HEAP_END > (0x003F0000 + ADDR_ADJ)
+#error "host-window heap overlaps the Z2 audio scratch"
+#endif
+
 // SDK v2 host-visible heap. Keep this below the 0x033f0000 scratch area used
 // by the firmware until the SDK owns a formally reserved allocator region.
 // SDK_OP_DECOMPRESS_BATCH decodes entirely inside a host-provided arena
