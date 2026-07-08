@@ -35,6 +35,9 @@ void audio_init_i2s();
 void isr_audio(void *dummy);
 void isr_audio_rx(void *dummy);
 void audio_set_interrupt_enabled(int en);
+/* Nonzero while a legacy/AHI client drives the audio output (it keeps
+ * the per-period Amiga interrupt enabled during playback). */
+int audio_legacy_output_active(void);
 void audio_clear_interrupt();
 uint32_t audio_get_interrupt();
 uint32_t audio_get_dma_transfer_count();

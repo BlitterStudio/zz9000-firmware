@@ -3469,6 +3469,14 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	if (g_audio_playback.session != 0U)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
+	/* A legacy/AHI client owning the output is just as busy as another
+	 * SDK session: binding now would repoint the formatter DMA away
+	 * from the buffer that client configured (AP_TX_BUF_OFFS) and
+	 * steal its playback. On the Amiga side MHI and AHI already
+	 * exclude each other via the interrupt-server ownership token;
+	 * this enforces the same exclusion for raw SDK clients. */
+	if (audio_legacy_output_active())
+		return complete_status(req, comp, SDK_STATUS_BUSY);
 
 	/* Deterministic output target: the standard TX ring. An AHI session
 	 * repoints the FORMATTER DMA at its own buffer (AP_TX_BUF_OFFS +

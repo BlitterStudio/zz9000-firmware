@@ -477,6 +477,14 @@ void audio_set_interrupt_enabled(int en) {
 	audio_silence();
 }
 
+// Whether a legacy/AHI client currently drives the audio output: those
+// clients enable the per-period Amiga interrupt (REG_ZZ_AUDIO_CONFIG=1)
+// for the duration of playback. The SDK playback binding must not
+// steal the formatter while this is set.
+int audio_legacy_output_active() {
+	return interrupt_enabled_audio;
+}
+
 // offset = offset from audio tx buffer
 // returns audio_buffer_collision (1 or 0)
 int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap) {
