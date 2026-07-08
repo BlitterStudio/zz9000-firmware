@@ -3454,9 +3454,18 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	if (g_audio_playback.session != 0U)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 
-	/* Deterministic output target: the standard TX ring (an earlier AHI
-	 * session may have repointed it). */
+	/* Deterministic output target: the standard TX ring. An AHI session
+	 * repoints the FORMATTER DMA at its own buffer (AP_TX_BUF_OFFS +
+	 * re-init) and closing AHI does not restore it -- and moving the
+	 * CPU-side pointer alone moves nothing, the DMA keeps reading the
+	 * buffer captured at the last audio_init_i2s(). Without the
+	 * re-init below, a bind after any AHI session plays silence: the
+	 * pump fills the default ring while the DMA reads AHI's dead one.
+	 * Safe here: PLAY runs in the main loop, and the ISR pump stays
+	 * gated off until the session publishes below. */
 	audio_set_tx_buffer((uint8_t *)AUDIO_TX_BUFFER_ADDRESS);
+	if (audio_get_inited_tx_buffer() != (uint8_t *)AUDIO_TX_BUFFER_ADDRESS)
+		audio_init_i2s();
 	pump_resample_reset();
 	pos = audio_get_dma_transfer_count() % AUDIO_PUMP_RING_BYTES;
 	pos -= pos % AUDIO_PUMP_PERIOD_BYTES;
