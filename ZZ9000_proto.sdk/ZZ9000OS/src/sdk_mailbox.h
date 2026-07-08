@@ -56,6 +56,11 @@
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
 // host-side declaration ("the 68k never touches this buffer") that the
 // firmware merely stores and echoes.
+// The firmware honors HOST_WINDOW on any bus and window size --
+// zz9k.library is the enforcement point: it strips the bit on Zorro 3
+// (where the heap region lies inside P96 VRAM) and refuses it on
+// sub-4 MB Zorro 2 windows (2 MB bitstream variants, which cannot
+// reach the heap's board offset).
 #define SDK_ALLOC_HOST_WINDOW     (1U << 0)
 #define SDK_ALLOC_CARD_ONLY       (1U << 1)
 
