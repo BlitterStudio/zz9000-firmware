@@ -3258,6 +3258,7 @@ static void audio_pump_fill_period(struct SDKAudioStream *stream,
 	uint32_t channels;
 	uint32_t src_frames;
 	uint32_t src_bytes;
+	uint32_t pull;
 	uint32_t offset;
 	uint32_t first;
 	uint8_t *ring;
@@ -3274,24 +3275,36 @@ static void audio_pump_fill_period(struct SDKAudioStream *stream,
 	if (src_frames == 0U || src_frames > (AUDIO_PUMP_PERIOD_BYTES / 4U))
 		goto silence;
 	src_bytes = src_frames * channels * 2U;
-	if ((stream->pcm_ready_total - stream->pcm_consumed_total) < src_bytes)
+	pull = stream->pcm_ready_total - stream->pcm_consumed_total;
+	if (pull >= src_bytes) {
+		pull = src_bytes;
+	} else if (!(stream->eof && stream->input_length == 0U) ||
+	           pull == 0U) {
 		goto silence;   /* underrun: a whole period of silence */
+	}
+	/* else: true end of stream (EOF fed, input fully consumed) with a
+	 * final PCM tail shorter than one 20 ms period -- MP3 frames owe
+	 * no alignment to rate/50. Drain it zero-padded; refusing partial
+	 * pulls would pin used above zero and the stream could never
+	 * report DONE. */
 
-	/* Pull one period's source from the PCM ring. The decode side
-	 * flushed these bytes before publishing pcm_ready_total, so a
-	 * reader-side invalidate makes them visible on this core. */
+	/* Pull the source from the PCM ring. The decode side flushed these
+	 * bytes before publishing pcm_ready_total, so a reader-side
+	 * invalidate makes them visible on this core. */
 	ring = (uint8_t *)(uintptr_t)stream->pcm_ring_addr;
 	offset = stream->pcm_consumed_total % stream->pcm_capacity;
 	first = stream->pcm_capacity - offset;
-	if (first > src_bytes)
-		first = src_bytes;
+	if (first > pull)
+		first = pull;
 	Xil_DCacheInvalidateRange((INTPTR)(ring + offset), first);
 	memcpy(g_pump_src, ring + offset, first);
-	if (src_bytes > first) {
-		Xil_DCacheInvalidateRange((INTPTR)ring, src_bytes - first);
-		memcpy((uint8_t *)g_pump_src + first, ring, src_bytes - first);
+	if (pull > first) {
+		Xil_DCacheInvalidateRange((INTPTR)ring, pull - first);
+		memcpy((uint8_t *)g_pump_src + first, ring, pull - first);
 	}
-	stream->pcm_consumed_total += src_bytes;
+	if (pull < src_bytes)
+		memset((uint8_t *)g_pump_src + pull, 0, src_bytes - pull);
+	stream->pcm_consumed_total += pull;
 
 	pcm = g_pump_src;
 	if (channels == 1U) {
@@ -3712,6 +3725,36 @@ static uint16_t handle_audio_stream_read(volatile struct SDKMailboxEntry *req,
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
 }
 
+/* True while a deferred FEED/READ for this session is still queued or
+ * executing on the scheduler. Both op-param structs start with the
+ * session word, and params are packed native-endian by core 0. A DONE
+ * slot is deliberately not counted: the worker has finished with the
+ * stream and its result payload already lives in the task slot, so
+ * only the (harmless) completion post remains. */
+static int audio_stream_tasks_inflight(uint32_t session)
+{
+	taskq_shared_t *sh;
+	uint32_t i;
+
+	if (!scheduler_core1_available())
+		return 0;
+	sh = scheduler_shared();
+	for (i = 0; i < TASKQ_CAPACITY; i++) {
+		volatile taskq_desc_t *d = &sh->queue.descs[i];
+		uint32_t st = d->state;
+
+		if (st != TASK_QUEUED && st != TASK_CLAIMED)
+			continue;
+		if (d->opcode != SDK_OP_AUDIO_STREAM_FEED &&
+		    d->opcode != SDK_OP_AUDIO_STREAM_READ)
+			continue;
+		if (((const struct audio_feed_op_params *)
+		         (uintptr_t)d->op_params)->session == session)
+			return 1;
+	}
+	return 0;
+}
+
 static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
                                           volatile struct SDKMailboxEntry *comp,
                                           uint16_t payload_len)
@@ -3750,6 +3793,13 @@ static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
 	 * between requests within milliseconds and the client retries. */
 	if (g_audio_playback.refill_pending &&
 	    g_audio_playback.refill_session == session)
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	/* Same hazard from the client side: an async caller can enqueue
+	 * CLOSE while its own deferred FEED/READ is still queued or
+	 * executing against this slot. (A synchronous caller cannot -- it
+	 * waits out each op -- so this only gates misuse of the async
+	 * API.) */
+	if (audio_stream_tasks_inflight(session))
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 	snapshot = *stream;
 	free_audio_stream(stream);
