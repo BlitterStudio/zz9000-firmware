@@ -43,7 +43,14 @@
 	 SDK_CAP_AUDIO_PLAYBACK | \
 	 SDK_CAP_MEMORY_OPS | SDK_CAP_CRYPTO | \
 	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION)
-#define SDK_AUDIO_STREAM_MIN_INPUT_BYTES (16U * 1024U)
+/* Decode proceeds only with at least this much undecoded input (unless
+ * EOF): enough for the largest legal MP3 frame (~1.4K, 2.3K free-format)
+ * plus sync lookahead. It must stay WELL below any client's input-ring
+ * size -- at the old 16K, a client with a 16K input ring could only
+ * decode with the ring full to the byte, and once decode freed a
+ * non-chunk-multiple of space the client's fixed-size feeds never fit
+ * again: a permanent stall. */
+#define SDK_AUDIO_STREAM_MIN_INPUT_BYTES (4U * 1024U)
 
 typedef char SDKMailbox_must_fit_legacy_io_window[
 	((SDK_MAILBOX_WINDOW_OFFSET + SDK_MAILBOX_TOTAL_SIZE) <= 0x00010000U) ?
@@ -3299,7 +3306,12 @@ void sdk_mailbox_audio_playback_pump(void)
 	 * the scheduler was down) refills inline, matching the legacy CPU
 	 * profile of that degraded mode. */
 	if (stream->input_length != 0U && !stream->faulted &&
+	    !audio_stream_needs_more_input(stream) &&
 	    audio_stream_pcm_used(stream) <= stream->low_water_bytes) {
+		/* needs_more_input guard: a refill FEED would no-op below the
+		 * decoder's minimum-input gate, and the pump runs every main
+		 * loop pass -- without the guard the sub-minimum tail of a
+		 * stream turns into a core-1 task storm. */
 		if (stream->core1_affine && scheduler_core1_available()) {
 			if (!g_audio_playback.refill_pending) {
 				struct audio_feed_op_params p;
@@ -3442,7 +3454,12 @@ static uint16_t handle_audio_stream_begin(volatile struct SDKMailboxEntry *req,
 	    (MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t)) ||
 	    mp3_capacity > mp3_ring->length ||
 	    pcm_capacity > pcm_ring->length ||
-	    low_water_bytes >= mp3_capacity ||
+	    /* Both water marks are PCM-ring thresholds: low_water is the
+	     * playback pump's refill trigger, high_water caps decode
+	     * output per pass. (Validating low_water against the mp3 ring
+	     * here rejected any BEGIN whose input ring was smaller than
+	     * the PCM refill mark.) */
+	    low_water_bytes >= pcm_capacity ||
 	    high_water_bytes >= pcm_capacity) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
