@@ -396,10 +396,15 @@ uint32_t sdk_mailbox_address(void);
 /* After a core-1 fault: mark core-1-affine audio streams faulted so their
  * feeds/reads fail cleanly (the embedded decoder may be mid-frame). */
 void sdk_mailbox_poison_core1_audio_streams(void);
-/* AX playback pump: keeps the audio TX ring filled from the bound
- * audio-stream session (SDK_OP_AUDIO_STREAM_PLAY). Call from the core-0
- * main loop every pass; no-op when nothing is bound. */
+/* AX playback pump, split in two:
+ *  - sdk_mailbox_audio_playback_pump_isr: TX-fill half, called from the
+ *    audio-formatter period interrupt (isr_audio, every 20 ms) so
+ *    main-loop load cannot starve the TX frontier. Integer-only.
+ *  - sdk_mailbox_audio_playback_pump: core-1 refill kick, call from the
+ *    core-0 main loop every pass.
+ * Both are no-ops when nothing is bound. */
 void sdk_mailbox_audio_playback_pump(void);
+void sdk_mailbox_audio_playback_pump_isr(void);
 
 /*
  * Run a crypto task's compute on the calling core. op_params points at one of

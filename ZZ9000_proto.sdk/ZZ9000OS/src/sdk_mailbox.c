@@ -3159,16 +3159,20 @@ static void audio_stream_read_compute(struct SDKAudioStream *stream,
 /*
  * ---- AX playback pump (MHI modernization) ----
  * One audio-stream session at a time may be bound to the AX output
- * (SDK_OP_AUDIO_STREAM_PLAY). The core-0 main loop calls the pump every
- * pass; it keeps the standard AX TX ring filled ahead of the
- * audio-formatter DMA from the session's PCM ring, one 3840-byte period
- * (20 ms of 48 kHz stereo S16LE) at a time. Underrun, a faulted session
- * or an unusable stream geometry produce silence. Non-48k sources go
- * through the existing resample_s16 path with the legacy DECODE_RUN
- * source math (rate/50 frames per period, integer truncation and its
- * slight drift included); mono sources are duplicated to stereo. The
- * pump is the CONSUMER of a bound session -- the single writer of
- * pcm_consumed_total -- so AUDIO_STREAM_READ is rejected while bound.
+ * (SDK_OP_AUDIO_STREAM_PLAY). The TX-fill half runs from the audio
+ * formatter's period INTERRUPT (sdk_mailbox_audio_playback_pump_isr,
+ * called by isr_audio every 20 ms) so heavy main-loop passes -- RTG
+ * blits, image-decode dispatch, network bursts -- can no longer let
+ * the DMA overrun the ~120 ms TX frontier and glitch the audio. Only
+ * the core-1 refill kick stays in the main loop (it enqueues scheduler
+ * tasks, which the ISR must not). The ISR path is integer-only: the
+ * standalone BSP does not save VFP state across interrupts, so non-48k
+ * sources go through a fixed-point mirror of the legacy resampler
+ * (same rate/50 source math, truncation drift included); mono sources
+ * are duplicated to stereo. Underrun, a faulted session or an unusable
+ * stream geometry produce silence. The ISR pump is the CONSUMER of a
+ * bound session -- the single writer of pcm_consumed_total -- so
+ * AUDIO_STREAM_READ is rejected while bound.
  */
 #define AUDIO_PUMP_PERIOD_BYTES  AUDIO_BYTES_PER_PERIOD
 #define AUDIO_PUMP_RING_BYTES    AUDIO_TX_BUFFER_SIZE
@@ -3183,6 +3187,67 @@ static struct {
 
 static int16_t g_pump_src[AUDIO_PUMP_PERIOD_BYTES / 2];
 static int16_t g_pump_stereo[AUDIO_PUMP_PERIOD_BYTES / 2];
+
+/*
+ * Fixed-point (16.16) linear resampler for the ISR pump -- a faithful
+ * integer mirror of ax.c's resample_s16 (which uses doubles and is
+ * therefore unusable in IRQ context), including its quirks: the
+ * fractional position keeps only its fraction across periods and the
+ * final source index is clamped, so pitch and boundary behavior match
+ * the long-proven main-loop path. State is reset when a session binds.
+ */
+static uint32_t g_pump_rs_cur;     /* 16.16 fractional source position */
+static int16_t g_pump_rs_prev_l;
+static int16_t g_pump_rs_prev_r;
+
+static void pump_resample_reset(void)
+{
+	g_pump_rs_cur = 0;
+	g_pump_rs_prev_l = 0;
+	g_pump_rs_prev_r = 0;
+}
+
+static void pump_resample_s16(const int16_t *input, int16_t *output,
+                              uint32_t in_rate, uint32_t in_frames,
+                              uint32_t out_frames)
+{
+	uint32_t step = (in_rate << 16) / 48000U;
+	uint32_t cur = g_pump_rs_cur;
+	int32_t inmax = (int32_t)in_frames - 1;
+	int32_t ip2 = 0;
+	uint32_t i;
+
+	for (i = 0; i < out_frames; i++) {
+		int32_t ip1;
+		uint32_t frac = cur & 0xFFFFU;
+		int32_t s1l, s1r;
+
+		ip2 = (int32_t)(cur >> 16);
+		ip1 = ip2 - 1;
+		if (ip2 > inmax) {
+			ip2 = inmax;
+			ip1 = inmax - 1;
+		}
+		if (ip1 < 0) {
+			s1l = g_pump_rs_prev_l;
+			s1r = g_pump_rs_prev_r;
+		} else {
+			s1l = input[2 * ip1];
+			s1r = input[2 * ip1 + 1];
+		}
+		output[2 * i] = (int16_t)((s1l * (int32_t)(65536U - frac) +
+		                           (int32_t)input[2 * ip2] *
+		                               (int32_t)frac) >> 16);
+		output[2 * i + 1] = (int16_t)((s1r * (int32_t)(65536U - frac) +
+		                               (int32_t)input[2 * ip2 + 1] *
+		                                   (int32_t)frac) >> 16);
+		cur += step;
+	}
+
+	g_pump_rs_prev_l = input[2 * ip2];
+	g_pump_rs_prev_r = input[2 * ip2 + 1];
+	g_pump_rs_cur = cur & 0xFFFFU;
+}
 
 static void audio_pump_fill_period(struct SDKAudioStream *stream,
                                    uint8_t *slot)
@@ -3237,15 +3302,18 @@ static void audio_pump_fill_period(struct SDKAudioStream *stream,
 	if (rate == 48000U) {
 		memcpy(slot, pcm, AUDIO_PUMP_PERIOD_BYTES);
 	} else {
-		resample_s16(pcm, (int16_t *)slot, (int)rate, 48000,
-		             AUDIO_PUMP_PERIOD_BYTES / 4);
+		pump_resample_s16(pcm, (int16_t *)slot, rate, src_frames,
+		                  AUDIO_PUMP_PERIOD_BYTES / 4);
 	}
 	return;
 silence:
 	memset(slot, 0, AUDIO_PUMP_PERIOD_BYTES);
 }
 
-void sdk_mailbox_audio_playback_pump(void)
+/* TX-fill half: called from isr_audio (audio-formatter period IRQ,
+ * every 20 ms) so main-loop load cannot starve the TX frontier.
+ * Integer-only; no scheduler/taskq/printf access from here. */
+void sdk_mailbox_audio_playback_pump_isr(void)
 {
 	struct SDKAudioStream *stream;
 	uint8_t *tx = (uint8_t *)AUDIO_TX_BUFFER_ADDRESS;
@@ -3295,6 +3363,19 @@ void sdk_mailbox_audio_playback_pump(void)
 		g_audio_playback.fill_offset =
 		    (g_audio_playback.fill_offset + AUDIO_PUMP_PERIOD_BYTES) %
 		    AUDIO_PUMP_RING_BYTES;
+	}
+}
+
+void sdk_mailbox_audio_playback_pump(void)
+{
+	struct SDKAudioStream *stream;
+
+	if (g_audio_playback.session == 0U)
+		return;
+	stream = find_audio_stream(g_audio_playback.session);
+	if (!stream) {
+		g_audio_playback.session = 0U;   /* closed under us */
+		return;
 	}
 
 	/* Keep the decoder ahead of the pump. Session FEEDs drive decode, but
@@ -3376,12 +3457,16 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	/* Deterministic output target: the standard TX ring (an earlier AHI
 	 * session may have repointed it). */
 	audio_set_tx_buffer((uint8_t *)AUDIO_TX_BUFFER_ADDRESS);
-	g_audio_playback.session = session;
+	pump_resample_reset();
 	pos = audio_get_dma_transfer_count() % AUDIO_PUMP_RING_BYTES;
 	pos -= pos % AUDIO_PUMP_PERIOD_BYTES;
 	g_audio_playback.fill_offset =
 	    (pos + AUDIO_PUMP_PERIOD_BYTES) % AUDIO_PUMP_RING_BYTES;
-	sdk_mailbox_audio_playback_pump();   /* prefill */
+	/* Publish the session LAST: the ISR pump gates on it, and the same
+	 * core observes these stores in program order. Filling starts on
+	 * the next period interrupt (<= 20 ms). */
+	__asm__ __volatile__("" ::: "memory");
+	g_audio_playback.session = session;
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
 }
 

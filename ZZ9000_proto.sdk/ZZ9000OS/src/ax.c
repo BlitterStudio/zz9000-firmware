@@ -409,6 +409,9 @@ void audio_debug_timer(int zdata) {
 
 int isra_count = 0;
 
+// TX-fill half of the SDK playback pump (sdk_mailbox.c); ISR-safe.
+extern void sdk_mailbox_audio_playback_pump_isr(void);
+
 // audio formatter interrupt, triggered whenever a period is completed
 void isr_audio(void *dummy) {
 	uint32_t val = XAudioFormatter_ReadReg(XPAR_XAUDIOFORMATTER_0_BASEADDR, XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET);
@@ -419,6 +422,12 @@ void isr_audio(void *dummy) {
 	if (isra_count++>100) {
 		isra_count = 0;
 	}
+
+	// Keep the TX ring filled from the bound audio-stream session on a
+	// guaranteed 20 ms cadence: main-loop passes stretched by RTG or
+	// network load previously let the DMA overrun the fill frontier
+	// and glitch MP3 playback. No-op when no session is bound.
+	sdk_mailbox_audio_playback_pump_isr();
 
 	if (interrupt_enabled_audio) {
 		amiga_interrupt_set(AMIGA_INTERRUPT_AUDIO);
