@@ -5913,6 +5913,17 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	if (payload_len > sizeof(req->payload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 
+	/* request_id 0 is reserved for firmware-internal scheduler tasks
+	 * (the AX playback refill): their deferred completion is swallowed
+	 * by sdk_mailbox_post_deferred instead of being posted to the
+	 * client ring. A client request carrying id 0 that took a deferred
+	 * path would therefore hang its caller and spuriously retire the
+	 * refill marker -- reject it up front so the reservation is
+	 * enforced, not assumed. zz9k.library never emits id 0 (its
+	 * generator skips it, including on wrap). */
+	if (get_be32(req->request_id) == 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
 	switch (opcode) {
 	case SDK_OP_NOP:
 		write_completion(comp, req, SDK_STATUS_OK, 0);
