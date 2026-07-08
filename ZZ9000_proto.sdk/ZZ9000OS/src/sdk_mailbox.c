@@ -767,6 +767,13 @@ struct SDKAudioStream {
 	/* Set when a core-1 fault may have left the embedded decoder state
 	 * mid-frame; feeds/reads answer IO_ERROR, close still works. */
 	uint32_t faulted;
+	/* Bound-playback tail guard: the AX pump advances pcm_consumed_total
+	 * when it STAGES PCM into the TX ring, which runs up to
+	 * AUDIO_PUMP_TARGET_AHEAD ahead of the DMA. Set while staged audio is
+	 * still queued for the DMA so end-of-stream (DONE / PCM_READY-clear)
+	 * waits for it to actually play out. Managed by the pump; always 0 for
+	 * unbound streams (the READ consumer hears bytes immediately). */
+	uint8_t pump_tail_pending;
 	mp3dec_t decoder;
 	mp3d_sample_t scratch[MINIMP3_MAX_SAMPLES_PER_FRAME];
 };
@@ -3042,8 +3049,14 @@ static uint32_t audio_stream_state(const struct SDKAudioStream *stream)
 	if (!stream)
 		return SDK_AUDIO_STREAM_STATE_ERROR;
 	if (stream->eof && stream->input_length == 0U &&
-	    audio_stream_pcm_used(stream) == 0U)
+	    audio_stream_pcm_used(stream) == 0U) {
+		/* Source exhausted, but a bound pump may still be playing the
+		 * staged tail out of the TX ring -- report STREAMING until it
+		 * drains so DONE does not race ahead of the DMA. */
+		if (stream->pump_tail_pending)
+			return SDK_AUDIO_STREAM_STATE_STREAMING;
 		return SDK_AUDIO_STREAM_STATE_DONE;
+	}
 	if (audio_stream_needs_more_input(stream))
 		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
 	if (stream->input_length == 0U &&
@@ -3058,12 +3071,12 @@ static uint32_t audio_stream_result_flags(const struct SDKAudioStream *stream)
 
 	if (!stream)
 		return 0;
-	if (audio_stream_pcm_used(stream) != 0U)
+	if (audio_stream_pcm_used(stream) != 0U || stream->pump_tail_pending)
 		flags |= SDK_AUDIO_STREAM_RESULT_PCM_READY;
 	if (audio_stream_needs_more_input(stream))
 		flags |= SDK_AUDIO_STREAM_RESULT_NEED_INPUT;
 	if (stream->eof && stream->input_length == 0U &&
-	    audio_stream_pcm_used(stream) == 0U)
+	    audio_stream_pcm_used(stream) == 0U && !stream->pump_tail_pending)
 		flags |= SDK_AUDIO_STREAM_RESULT_DONE;
 	if (stream->backpressure)
 		flags |= SDK_AUDIO_STREAM_RESULT_BACKPRESSURE;
@@ -3185,6 +3198,9 @@ static struct {
 	uint32_t refill_pending;  /* internal core-1 refill task in flight */
 	uint32_t refill_session;  /* session that refill targets (valid while
 	                             refill_pending; survives an unbind) */
+	uint32_t silence_run;     /* consecutive pump ISR periods (one DMA
+	                             period each) that staged only silence;
+	                             a full ring means the DMA played the tail */
 } g_audio_playback;
 
 static int16_t g_pump_src[AUDIO_PUMP_PERIOD_BYTES / 2];
@@ -3248,11 +3264,28 @@ static void pump_resample_s16(const int16_t *input, int16_t *output,
 
 	g_pump_rs_prev_l = input[2 * ip2];
 	g_pump_rs_prev_r = input[2 * ip2 + 1];
-	g_pump_rs_cur = cur & 0xFFFFU;
+	/* Carry phase relative to the block just consumed, not the raw low
+	 * 16 bits. Each period feeds a fresh block of in_frames source frames,
+	 * so the next period's phase is (cur - in_frames). The 16.16 step is
+	 * truncated, so for the common rates cur lands a hair BELOW
+	 * in_frames<<16 (44.1k: 881.997 not 882.0); keeping cur&0xFFFF would
+	 * restart near phase 1.0 and jump ~1 source sample every 20 ms period.
+	 * ax.c's double resampler avoids this only because in_rate/48000*960
+	 * is an exact integer for those rates -- the truncated fixed-point
+	 * step is not. Clamp a tiny undershoot to the block boundary (matching
+	 * the double's exact 0.0) and keep the cursor non-negative so the
+	 * unsigned indexing above stays valid. */
+	{
+		int32_t carry = (int32_t)cur - (int32_t)(in_frames << 16);
+		g_pump_rs_cur = (carry > 0) ? (uint32_t)carry : 0U;
+	}
 }
 
-static void audio_pump_fill_period(struct SDKAudioStream *stream,
-                                   uint8_t *slot)
+/* Returns 1 if a period of real (decoded) PCM was staged, 0 for silence
+ * (underrun, fault, or drained end-of-stream). The ISR pump uses this to
+ * track when the DMA has played the last real audio out of the TX ring. */
+static int audio_pump_fill_period(struct SDKAudioStream *stream,
+                                  uint8_t *slot)
 {
 	uint32_t rate;
 	uint32_t channels;
@@ -3320,9 +3353,10 @@ static void audio_pump_fill_period(struct SDKAudioStream *stream,
 		pump_resample_s16(pcm, (int16_t *)slot, rate, src_frames,
 		                  AUDIO_PUMP_PERIOD_BYTES / 4);
 	}
-	return;
+	return 1;
 silence:
 	memset(slot, 0, AUDIO_PUMP_PERIOD_BYTES);
+	return 0;
 }
 
 /* TX-fill half: called from isr_audio (audio-formatter period IRQ,
@@ -3335,6 +3369,8 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 	uint32_t pos_period;
 	uint32_t ahead;
 	uint32_t guard;
+	uint32_t ring_periods = AUDIO_PUMP_RING_BYTES / AUDIO_PUMP_PERIOD_BYTES;
+	int staged_real = 0;
 
 	if (g_audio_playback.session == 0U)
 		return;
@@ -3373,8 +3409,9 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 		 * backpressure entirely. */
 		if (ahead >= AUDIO_PUMP_TARGET_AHEAD)
 			break;   /* frontier far enough ahead */
-		audio_pump_fill_period(stream,
-		                       tx + g_audio_playback.fill_offset);
+		if (audio_pump_fill_period(stream,
+		                           tx + g_audio_playback.fill_offset))
+			staged_real = 1;
 		/* The TX ring is plain cacheable DDR (no TLB override) and
 		 * the audio formatter DMA does not snoop: push the period to
 		 * DRAM before the frontier advances over it. ~120 lines,
@@ -3385,6 +3422,23 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 		g_audio_playback.fill_offset =
 		    (g_audio_playback.fill_offset + AUDIO_PUMP_PERIOD_BYTES) %
 		    AUDIO_PUMP_RING_BYTES;
+	}
+
+	/* Play-out tail tracking. This ISR fires once per formatter period,
+	 * so each call is one DMA period elapsed. While real PCM is flowing,
+	 * pump_tail_pending stays armed; once the source is exhausted the loop
+	 * only stages silence, and after a whole ring of silence periods the
+	 * DMA has played the last real audio out of the TX ring. Only then may
+	 * end-of-stream drop (see audio_stream_result_flags / audio_stream_
+	 * state), so a client that stops on DONE does not truncate the tail. */
+	if (staged_real) {
+		g_audio_playback.silence_run = 0U;
+		stream->pump_tail_pending = 1U;
+	} else if (stream->pump_tail_pending) {
+		if (g_audio_playback.silence_run < ring_periods)
+			g_audio_playback.silence_run++;
+		if (g_audio_playback.silence_run >= ring_periods)
+			stream->pump_tail_pending = 0U;
 	}
 }
 
@@ -3508,6 +3562,10 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	pos -= pos % AUDIO_PUMP_PERIOD_BYTES;
 	g_audio_playback.fill_offset =
 	    (pos + AUDIO_PUMP_PERIOD_BYTES) % AUDIO_PUMP_RING_BYTES;
+	/* Fresh tail guard for this binding; the pump arms it on the first
+	 * real period it stages. */
+	g_audio_playback.silence_run = 0U;
+	stream->pump_tail_pending = 0U;
 	/* Publish the session LAST: the ISR pump gates on it, and the same
 	 * core observes these stores in program order. Filling starts on
 	 * the next period interrupt (<= 20 ms). */
@@ -3538,6 +3596,9 @@ static uint16_t handle_audio_stream_stop(volatile struct SDKMailboxEntry *req,
 	if (g_audio_playback.session == session) {
 		g_audio_playback.session = 0U;
 		audio_silence();
+		/* audio_silence() wiped the TX ring: no tail is left to play. */
+		stream->pump_tail_pending = 0U;
+		g_audio_playback.silence_run = 0U;
 	}
 	/* Idempotent: stopping an unbound session is OK (MHI pause/stop). */
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
