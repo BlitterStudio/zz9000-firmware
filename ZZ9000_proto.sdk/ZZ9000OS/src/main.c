@@ -45,6 +45,7 @@ void Xil_AssertNonVoid() {}
 #include "gfx.h"
 #include "ethernet.h"
 #include "usb.h"
+#include "sd_activity_led.h"
 #include "sd_storage.h"
 #include "sd_boot.h"
 #include "fw_update.h"
@@ -309,6 +310,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 int main() {
 	init_platform();
 
+	sd_activity_led_init();
+
 	// issue #25: tell the FPGA the Zynq is up and the Z3 fast-RAM DDR window is
 	// ready, so it may advertise the fast-RAM autoconfig PIC. Until this is set
 	// (e.g. while still cold-booting from SD), the FPGA withholds that PIC so a
@@ -408,6 +411,7 @@ int main() {
 
 	while (1) {
 		watchdog_kick();
+		sd_activity_led_poll();
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
 		if (usb_read_pending) {
 			usb_status = zz_usb_read_blocks(0, usb_storage_read_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);

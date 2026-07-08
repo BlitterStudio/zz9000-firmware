@@ -13,6 +13,7 @@
 #include <string.h>
 #include <ff.h>
 #include "xil_cache.h"
+#include "sd_activity_led.h"
 #include "sd_storage.h"
 #include "memorymap.h"
 
@@ -86,10 +87,14 @@ uint32_t sd_storage_read_blocks(uint32_t block, uint32_t num_blocks, void *buffe
     if (num_blocks == 0 || num_blocks > SD_MAX_BLOCKS_AT_ONCE) return 0xFE;
     if ((uint64_t)block + num_blocks > hdf_capacity_blocks) return 0xFC;
 
+    uint32_t status = 0;
+    sd_activity_led_begin();
+
     FRESULT fr = f_lseek(&hdf_file, (FSIZE_t)block * SD_BLOCK_SIZE);
     if (fr != FR_OK) {
         printf("[SD] lseek(%lu) failed: %d\n", (unsigned long)block, (int)fr);
-        return 0xFD;
+        status = 0xFD;
+        goto out;
     }
 
     UINT n_read = 0;
@@ -98,7 +103,8 @@ uint32_t sd_storage_read_blocks(uint32_t block, uint32_t num_blocks, void *buffe
         printf("[SD] read(block=%lu count=%lu) failed: fr=%d n=%u\n",
                (unsigned long)block, (unsigned long)num_blocks,
                (int)fr, n_read);
-        return 0xFD;
+        status = 0xFD;
+        goto out;
     }
 
     /* f_read writes to `buffer` via CPU (cacheable store); the Zorro
@@ -108,7 +114,10 @@ uint32_t sd_storage_read_blocks(uint32_t block, uint32_t num_blocks, void *buffe
      * would discard the just-written cache lines without writing them
      * back, leaving DDR with stale data. */
     Xil_DCacheFlushRange((UINTPTR)buffer, num_blocks * SD_BLOCK_SIZE);
-    return 0;
+
+out:
+    sd_activity_led_end();
+    return status;
 }
 
 uint32_t sd_storage_write_blocks(uint32_t block, uint32_t num_blocks, void *buffer) {
@@ -116,12 +125,16 @@ uint32_t sd_storage_write_blocks(uint32_t block, uint32_t num_blocks, void *buff
     if (num_blocks == 0 || num_blocks > SD_MAX_BLOCKS_AT_ONCE) return 0xFE;
     if ((uint64_t)block + num_blocks > hdf_capacity_blocks) return 0xFC;
 
+    uint32_t status = 0;
+    sd_activity_led_begin();
+
     Xil_DCacheFlushRange((UINTPTR)buffer, num_blocks * SD_BLOCK_SIZE);
 
     FRESULT fr = f_lseek(&hdf_file, (FSIZE_t)block * SD_BLOCK_SIZE);
     if (fr != FR_OK) {
         printf("[SD] lseek(%lu) failed: %d\n", (unsigned long)block, (int)fr);
-        return 0xFD;
+        status = 0xFD;
+        goto out;
     }
 
     UINT n_written = 0;
@@ -130,7 +143,8 @@ uint32_t sd_storage_write_blocks(uint32_t block, uint32_t num_blocks, void *buff
         printf("[SD] write(block=%lu count=%lu) failed: fr=%d n=%u\n",
                (unsigned long)block, (unsigned long)num_blocks,
                (int)fr, n_written);
-        return 0xFD;
+        status = 0xFD;
+        goto out;
     }
 
     /* Flush cluster/FAT updates immediately so a power loss after a
@@ -146,9 +160,13 @@ uint32_t sd_storage_write_blocks(uint32_t block, uint32_t num_blocks, void *buff
                (unsigned long)block, (unsigned long)num_blocks, (int)fr);
         f_close(&hdf_file);
         hdf_open = 0;
-        return 0xFD;
+        status = 0xFD;
+        goto out;
     }
-    return 0;
+
+out:
+    sd_activity_led_end();
+    return status;
 }
 
 uint32_t sd_storage_capacity(void) {
