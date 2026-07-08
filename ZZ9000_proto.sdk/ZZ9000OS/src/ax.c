@@ -8,6 +8,7 @@
 #include "xi2stx.h"
 #include "xi2srx.h"
 #include "xaudioformatter.h"
+#include "xil_cache.h"
 #include "mntzorro.h"
 #include "interrupt.h"
 #include "sleep.h"
@@ -587,6 +588,10 @@ void audio_set_rx_buffer(uint8_t* addr) {
 
 void audio_silence() {
 	memset(audio_tx_buffer, 0, AUDIO_TX_BUFFER_SIZE);
+	// TX buffers live in plain cacheable DDR and the formatter DMA does
+	// not snoop; push the silence to DRAM so it takes effect this
+	// period rather than on eventual eviction.
+	Xil_DCacheFlushRange((INTPTR)audio_tx_buffer, AUDIO_TX_BUFFER_SIZE);
 	reset_resampling();
 }
 

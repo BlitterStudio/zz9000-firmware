@@ -1064,13 +1064,13 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 	},
 	{
 		SDK_SERVICE_AUDIO,
-		0x00020000U,
-		SDK_CAP_AUDIO_DECODE,
+		0x00020001U,
+		SDK_CAP_AUDIO_DECODE | SDK_CAP_AUDIO_PLAYBACK,
 		SDK_SERVICE_FLAG_FIRMWARE |
 			SDK_SERVICE_FLAG_AUDIO_MP3_DECODE |
 			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM,
 		SDK_SERVICE_AUDIO,
-		7,
+		9,	/* 0x0500..0x0508 incl. AUDIO_STREAM_PLAY/STOP */
 		"audio"
 	},
 	{
@@ -3360,6 +3360,13 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 			break;   /* frontier far enough ahead */
 		audio_pump_fill_period(stream,
 		                       tx + g_audio_playback.fill_offset);
+		/* The TX ring is plain cacheable DDR (no TLB override) and
+		 * the audio formatter DMA does not snoop: push the period to
+		 * DRAM before the frontier advances over it. ~120 lines,
+		 * microseconds, once per 20 ms. */
+		Xil_DCacheFlushRange(
+		    (INTPTR)(tx + g_audio_playback.fill_offset),
+		    AUDIO_PUMP_PERIOD_BYTES);
 		g_audio_playback.fill_offset =
 		    (g_audio_playback.fill_offset + AUDIO_PUMP_PERIOD_BYTES) %
 		    AUDIO_PUMP_RING_BYTES;
@@ -3451,6 +3458,11 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	}
 	if (stream->sample_rate == 0U)   /* client must prebuffer first */
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	/* The AX DMA consumes native little-endian samples and the pump
+	 * copies the PCM ring verbatim; an S16BE session (the READ-path
+	 * byte order) would play byte-swapped noise. */
+	if (stream->sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	if (g_audio_playback.session != 0U)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 
@@ -3706,6 +3718,21 @@ static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
 		/* Closing a bound stream implies stop. */
 		g_audio_playback.session = 0U;
 		audio_silence();
+	}
+	/* An internal PCM-refill FEED (request_id 0) may still be queued or
+	 * running on core 1 against this stream's coherent slot -- it was
+	 * enqueued for the bound session, which a prior STOP may already
+	 * have unbound, so it must be drained here regardless of the
+	 * binding above. Freeing the slot under the worker would zero the
+	 * decoder state mid-decode. The flag clears when the task's
+	 * deferred completion is reaped; pump the scheduler until then
+	 * (bounded: one decode pass; the guard covers a wedged core 1,
+	 * whose fault path poisons the stream anyway). */
+	if (g_audio_playback.refill_pending) {
+		uint32_t drain_guard = 10000000U;
+
+		while (g_audio_playback.refill_pending && drain_guard--)
+			scheduler_core0_poll(0, 0);
 	}
 	snapshot = *stream;
 	free_audio_stream(stream);
