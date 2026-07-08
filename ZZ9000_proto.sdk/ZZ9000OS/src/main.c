@@ -60,6 +60,7 @@ void Xil_AssertNonVoid() {}
 
 #include "zz_regs.h"
 #include "zz_video_modes.h"
+#include "zz_config.h"
 #include "usb_proxy.h"
 #include "sdk_mailbox.h"
 
@@ -324,7 +325,32 @@ int main() {
 
 	disable_reset_out();
 
+	// Read ZZ9000.CFG from the SD card before video/ethernet bring-up so
+	// its settings apply from cold boot (issue #33). Failure of any kind
+	// leaves the built-in defaults untouched.
+	zz_config_load();
+
+	if (zz_config_get()->mac_present) {
+		// seed the MAC before ethernet_init() programs the GEM; the
+		// driver can still override it later via REG_ZZ_ETH_MAC_*
+		memcpy(ethernet_get_mac_address_ptr(), zz_config_get()->mac, 6);
+	}
+
 	video_state = video_init();
+
+	if (zz_config_get()->scanline_mode_present ||
+	    zz_config_get()->scanline_parity_present) {
+		// Push scanline settings into the FPGA video-control block via
+		// the ARM op path (snooped by mntzorro.v as MNTVF_OP_SCANLINES;
+		// older bitstreams ignore the op). Safe here: the video ISR is
+		// not connected yet, so nobody else drives the op interface.
+		const struct zz_config *cfg = zz_config_get();
+		video_formatter_write((cfg->scanline_parity & 1) << 2 |
+		                      (cfg->scanline_mode & 3),
+		                      MNTVF_OP_SCANLINES);
+		printf("[CFG] scanlines: mode %d parity %d\n",
+		       cfg->scanline_mode, cfg->scanline_parity);
+	}
 
 	// RTG rect ops may write anywhere in framebuffer + legacy surface
 	// memory, but never past it into the SDK heaps and beyond
@@ -392,6 +418,9 @@ int main() {
 	// custom video mode
 	int custom_video_mode = ZZVMODE_CUSTOM;
 	int custom_vmode_param = VMODE_PARAM_HRES;
+
+	// key selected for REG_ZZ_CONFIG_KEY queries
+	uint16_t config_query_key = ZZ_CONFIG_KEY_LOADED;
 
 	// zorro state
 	u32 zstate_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
@@ -891,6 +920,12 @@ int main() {
 						default:
 							break;
 					}
+					break;
+
+				case REG_ZZ_CONFIG_KEY:
+					// select which ZZ9000.CFG value a read of this
+					// register group returns (see zz_config.h)
+					config_query_key = zdata;
 					break;
 
 				case REG_ZZ_P2C: {
@@ -1447,6 +1482,15 @@ int main() {
 					}
 					case REG_ZZ_VOLTAGE_INT: {
 						data = ((int16_t)(xadc_get_int_voltage()*100.0)) << 16;
+						break;
+					}
+					case REG_ZZ_CONFIG_KEY: {
+						// value of the selected ZZ9000.CFG key in the
+						// upper half, present flag in the lower half
+						// (REG_ZZ_CONFIG_PRESENT on Z2)
+						uint16_t present = 0;
+						uint16_t value = zz_config_query(config_query_key, &present);
+						data = ((uint32_t)value << 16) | present;
 						break;
 					}
 					case REG_ZZ_CONFIG: {

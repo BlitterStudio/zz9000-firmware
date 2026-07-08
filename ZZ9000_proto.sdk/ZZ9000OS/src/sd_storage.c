@@ -15,6 +15,7 @@
 #include "xil_cache.h"
 #include "sd_activity_led.h"
 #include "sd_storage.h"
+#include "zz_config.h"
 #include "memorymap.h"
 
 #define SD_BLOCK_SIZE       512
@@ -23,11 +24,15 @@
  * exceed the driver's BLOCKS_AT_ONCE in zzsd_cmd.c. */
 #define SD_MAX_BLOCKS_AT_ONCE 48
 
-/* Fixed HDF path at the root of the FAT32 volume. Users can rename
- * their image to this filename or symlink it; a config file can come
- * later if we ever want selectable images. */
+/* Default HDF path at the root of the FAT32 volume; a `hdf = name`
+ * line in ZZ9000.CFG selects a different image. */
 #define HDF_VOLUME "0:"
 #define HDF_PATH   HDF_VOLUME "/zz9000.hdf"
+
+static const char* hdf_path(void) {
+    const struct zz_config *cfg = zz_config_get();
+    return cfg->hdf_present ? cfg->hdf_path : HDF_PATH;
+}
 
 static FATFS fatfs;
 static FIL   hdf_file;
@@ -50,13 +55,14 @@ int sd_storage_init(void) {
         return -1;
     }
 
-    fr = f_open(&hdf_file, HDF_PATH, FA_READ | FA_WRITE | FA_OPEN_EXISTING);
+    const char *path = hdf_path();
+    fr = f_open(&hdf_file, path, FA_READ | FA_WRITE | FA_OPEN_EXISTING);
     if (fr != FR_OK) {
         /* Retry read-only in case the HDF is on a read-only FS or the
          * user left the image locked. Booting still works. */
-        fr = f_open(&hdf_file, HDF_PATH, FA_READ | FA_OPEN_EXISTING);
+        fr = f_open(&hdf_file, path, FA_READ | FA_OPEN_EXISTING);
         if (fr != FR_OK) {
-            printf("[SD] HDF open (%s) failed: %d\n", HDF_PATH, (int)fr);
+            printf("[SD] HDF open (%s) failed: %d\n", path, (int)fr);
             printf("[SD] FAT volume remains mounted for firmware-file push\n");
             return 0;
         }
@@ -75,7 +81,7 @@ int sd_storage_init(void) {
     hdf_open = 1;
 
     printf("[SD] HDF %s mapped, %lu blocks (%lu MB)\n",
-           HDF_PATH,
+           path,
            (unsigned long)hdf_capacity_blocks,
            (unsigned long)(hdf_capacity_blocks / 2048));
 

@@ -124,6 +124,7 @@ C_SRCS = \
 	$(SRC_DIR)/sd_activity_led.c \
 	$(SRC_DIR)/sd_storage.c \
 	$(SRC_DIR)/sd_boot.c \
+	$(SRC_DIR)/zz_config.c \
 	$(SRC_DIR)/fw_update.c \
 	$(SRC_DIR)/usb_proxy.c \
 	$(SRC_DIR)/sdk_compression.c \

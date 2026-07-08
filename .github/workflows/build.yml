@@ -48,6 +48,8 @@ jobs:
         run: make -C test/sd_activity_led test
       - name: Scheduler host tests
         run: make -C test/scheduler test
+      - name: ZZ9000.CFG parser suite
+        run: make -C test/config test
 
   build:
     name: Build & package firmware
@@ -148,23 +150,11 @@ jobs:
           fi
           ./build_release_assets.sh "${ARGS[@]}"
 
-      # Alternate firmware flavor: native PAL Amiga ~49.92Hz videocap default.
-      # Same bitstream variants, different ZZ9000OS.elf build. See issue #7.
-      - name: Build firmware (ns-pal flavor)
-        run: |
-          set -euo pipefail
-          ./build_firmware.sh clean
-          EXTRA_CFLAGS=-DDEFAULT_NS_VIDEOCAP=1 ./build_firmware.sh
-
-      - name: Package release assets (ns-pal)
-        run: |
-          set -euo pipefail
-          BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
-          ARGS=(--tag "$BUILD_LABEL" --output release_assets --firmware-flavor ns-pal)
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            ARGS+=(--require-all)
-          fi
-          ./build_release_assets.sh "${ARGS[@]}"
+      # The former "ns-pal" firmware flavor (PAL Amiga ~49.92Hz videocap
+      # default, issue #7) is no longer packaged: the same behavior comes
+      # from `videocap_mode = pal` + `nonstandard_vsync = pal` in the
+      # ZZ9000.CFG shipped inside every archive (issue #33). The
+      # DEFAULT_NS_VIDEOCAP compile flag still works for manual builds.
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7

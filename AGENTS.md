@@ -44,7 +44,7 @@ BOOTGEN=/path/to/bootgen ./build_bootimage.sh   # → bootimage_work/BOOT.bin
 - GitHub Actions (`.github/workflows/build.yml`) builds firmware + packages release ZIPs on every push/PR.
 - **CI does NOT run Vivado.** HDL changes must commit updated `.bit` files under `bootimage_work/`.
 - Tag a release: `git tag -a v2.1.0 && git push origin v2.1.0`. Tags with `-` (e.g., `v2.1.0-rc1`) become pre-releases.
-- CI builds two firmware flavors: standard and `ns-pal` (PAL Amiga ~49.92 Hz videocap default).
+- CI builds one firmware flavor. The former `ns-pal` flavor is replaced by `ZZ9000.CFG` on the SD card (`videocap_mode = pal` + `nonstandard_vsync = pal`); the `DEFAULT_NS_VIDEOCAP` flag still works for manual builds.
 
 ## Testing
 
@@ -52,6 +52,7 @@ BOOTGEN=/path/to/bootgen ./build_bootimage.sh   # → bootimage_work/BOOT.bin
 make -C test/rtg test              # RTG correctness regression
 make -C test/rtg bench             # Host micro-benchmarks (comparative only)
 make -C test/video test            # VDMA math + video_formatter source invariants
+make -C test/config test           # ZZ9000.CFG parser/loader unit tests
 test/video/run_formatter_sim.sh current   # xsim functional sim (Vivado machine)
 ```
 

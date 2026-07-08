@@ -80,11 +80,42 @@ Use the ZIP whose variant matches the target machine:
 | `a500-2mb` | A500 with ZZ9500CX Denise adapter, 2 MB window |
 | `a500plus` | A500+ or Super Denise with ZZ9500CX Denise adapter |
 
-Most users should install the standard flavor. The `ns-pal` flavor is
-for PAL Amiga setups that boot without the host driver and need native
-~49.92 Hz videocap timing from cold boot. Use the standard flavor on
-NTSC machines or when the display does not accept the non-standard PAL
-timing.
+Settings that used to require a separate firmware flavor or ENV:
+variables now live in the optional [`ZZ9000.CFG`](ZZ9000.CFG) config
+file (see below). Releases before 2.2 also shipped an `ns-pal` firmware
+flavor; its behavior is now `videocap_mode = pal` plus
+`nonstandard_vsync = pal` in `ZZ9000.CFG`.
+
+## Configuration File (ZZ9000.CFG)
+
+The firmware reads an optional `ZZ9000.CFG` INI-style text file from
+the root of the FAT32 microSD card — next to `BOOT.bin` — once at cold
+boot (power-on). Options apply immediately, before the Amiga even
+starts booting, so they work without any driver, ENV: variable, or
+startup-sequence. An Amiga soft reset does not re-read the file;
+power-cycle after editing. Release ZIPs include a fully commented
+sample; the copy at the repo root documents every option:
+
+| Key | Values | Replaces |
+|---|---|---|
+| `videocap_mode` | `800x600` (default), `pal` | `ENV:ZZ9000-VCAP-800x600` |
+| `nonstandard_vsync` | `off` (default), `pal`, `ntsc` | `ENV:ZZ9000-NS-VSYNC[-NTSC]`, `ns-pal` flavor |
+| `scanline_mode` | `0` (off, default) – `3` | ZZTop/ZZScanlines (still work at runtime) |
+| `scanline_parity` | `0` (default), `1` | ZZTop/ZZScanlines |
+| `int2` | `off` (default), `on` | `ENV:ZZ9K_INT2` (drivers query it) |
+| `mac` | `aa:bb:cc:dd:ee:ff` | `ENV:ZZ9K_MAC` |
+| `hdf` | root-level image filename | fixed `zz9000.hdf` path |
+
+Unknown keys and invalid values are logged on the debug UART and
+skipped. Runtime mechanisms (driver register writes, ZZTop) still
+override config values until the next power cycle.
+
+Amiga-side software can query parsed values through the
+`REG_ZZ_CONFIG_KEY` register (`0xE8`): write a key id from
+`zz_config.h`, then read back value (`0xE8`) and present flag (`0xEA`).
+Cold-boot scanlines need a bitstream that decodes the
+`MNTVF_OP_SCANLINES` video-control op (bitstreams built from this repo
+after the 2.2 cycle); older bitstreams simply ignore the option.
 
 ## Building
 
@@ -141,9 +172,9 @@ timing changes as proven.
 ## Release Process
 
 Release CI is tag-driven. Push a `v*` tag and the workflow builds the
-standard and `ns-pal` firmware flavors, packages every committed variant
-bitstream, and publishes a GitHub Release. Tags containing `-`, such as
-`v2.2.0-rc1`, are marked as pre-releases.
+firmware, packages every committed variant bitstream (each ZIP includes
+the sample `ZZ9000.CFG`), and publishes a GitHub Release. Tags
+containing `-`, such as `v2.2.0-rc1`, are marked as pre-releases.
 
 ```bash
 git tag -a v2.2.0 -m "Firmware 2.2.0"

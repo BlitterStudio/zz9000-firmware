@@ -146,6 +146,9 @@ for def in "${variant_defs[@]}"; do
     echo "[release] building $variant${flavor_label}: $label"
     mkdir -p "$archive_root"
     ./build_bootimage.sh --bitstream "$bitstream" --output "$boot_bin"
+    # Ship the (all-commented) sample config next to BOOT.bin so users
+    # discover it; copying it to the SD card as-is changes nothing.
+    cp ZZ9000.CFG "$archive_root/ZZ9000.CFG"
 
     rm -f "$zip_path"
     (

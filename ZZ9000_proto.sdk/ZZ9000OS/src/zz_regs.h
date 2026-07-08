@@ -151,8 +151,11 @@ enum zz_reg_offsets {
   REG_ZZ_VOLTAGE_AUX    = 0xE2,
   REG_ZZ_VOLTAGE_INT    = 0xE4,
   REG_ZZ_UNUSED_REGE6   = 0xE6,
-  REG_ZZ_UNUSED_REGE8   = 0xE8,
-  REG_ZZ_UNUSED_REGEA   = 0xEA,
+  /* ZZ9000.CFG query: write a zz_config_key id, then read back the
+   * 32-bit group at 0xE8 — value in the upper half (0xE8 on Z2),
+   * present flag in the lower half (0xEA on Z2). */
+  REG_ZZ_CONFIG_KEY     = 0xE8,
+  REG_ZZ_CONFIG_PRESENT = 0xEA,
   REG_ZZ_UNUSED_REGEC   = 0xEC,
   REG_ZZ_UNUSED_REGEE   = 0xEE,
 
