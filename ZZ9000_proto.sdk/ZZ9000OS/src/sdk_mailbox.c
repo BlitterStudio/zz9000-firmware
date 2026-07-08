@@ -726,6 +726,11 @@ struct SDKAudioStream {
 	 *  - pcm_consumed_total: the consumer -- the AUDIO_STREAM_READ path
 	 *    for unbound streams, the AX playback pump for bound ones (a
 	 *    bound stream rejects READ, so the writer is always unique).
+	 * DIFFERENCES of these totals stay correct across the u32 wrap, but
+	 * `total % pcm_capacity` (ring offsets) does not once a total passes
+	 * 2^32 for a non-power-of-2 capacity: a single session degrades
+	 * after 4 GiB of PCM (~6 h of continuous 48 kHz stereo). Accepted --
+	 * sessions are per-file/per-track in every current client.
 	 */
 	uint32_t pcm_written_total;
 	uint32_t pcm_ready_total;
@@ -3253,9 +3258,11 @@ void sdk_mailbox_audio_playback_pump(void)
 	pos_period -= pos_period % AUDIO_PUMP_PERIOD_BYTES;
 
 	/* If the DMA caught up with (or passed) the fill frontier, restart
-	 * one period ahead of it. */
-	ahead = (g_audio_playback.fill_offset - pos_period) %
-	        AUDIO_PUMP_RING_BYTES;
+	 * one period ahead of it. Circular distance: bias by the ring size
+	 * BEFORE the modulo -- a plain u32 (fill - pos) % RING is wrong on
+	 * wrap because 2^32 is not a multiple of the 30720-byte ring. */
+	ahead = (g_audio_playback.fill_offset + AUDIO_PUMP_RING_BYTES -
+	         pos_period) % AUDIO_PUMP_RING_BYTES;
 	if (ahead == 0U || ahead > AUDIO_PUMP_TARGET_AHEAD) {
 		g_audio_playback.fill_offset =
 		    (pos_period + AUDIO_PUMP_PERIOD_BYTES) %
@@ -3264,9 +3271,17 @@ void sdk_mailbox_audio_playback_pump(void)
 
 	guard = AUDIO_PUMP_RING_BYTES / AUDIO_PUMP_PERIOD_BYTES;
 	while (guard--) {
-		ahead = (g_audio_playback.fill_offset - pos_period) %
-		        AUDIO_PUMP_RING_BYTES;
-		if (ahead > AUDIO_PUMP_TARGET_AHEAD)
+		ahead = (g_audio_playback.fill_offset + AUDIO_PUMP_RING_BYTES -
+		         pos_period) % AUDIO_PUMP_RING_BYTES;
+		/* Stop AT the target, never past it: the frontier must stay
+		 * inside [PERIOD, TARGET_AHEAD] so the caught-up reset above
+		 * only fires on a genuine DMA overrun. Filling one period past
+		 * the target (the '>' variant of this check) made every pump
+		 * pass look caught-up, re-basing the frontier and re-filling
+		 * the ring at main-loop speed -- consuming PCM thousands of
+		 * times faster than playback, which defeated FEED
+		 * backpressure entirely. */
+		if (ahead >= AUDIO_PUMP_TARGET_AHEAD)
 			break;   /* frontier far enough ahead */
 		audio_pump_fill_period(stream,
 		                       tx + g_audio_playback.fill_offset);
