@@ -3183,6 +3183,8 @@ static struct {
 	uint32_t session;         /* 0 = unbound */
 	uint32_t fill_offset;     /* next TX-ring byte to fill, period-aligned */
 	uint32_t refill_pending;  /* internal core-1 refill task in flight */
+	uint32_t refill_session;  /* session that refill targets (valid while
+	                             refill_pending; survives an unbind) */
 } g_audio_playback;
 
 static int16_t g_pump_src[AUDIO_PUMP_PERIOD_BYTES / 2];
@@ -3420,6 +3422,8 @@ void sdk_mailbox_audio_playback_pump(void)
 					__asm__ __volatile__("dsb ish\n\tsev"
 					                     ::: "memory");
 					g_audio_playback.refill_pending = 1U;
+					g_audio_playback.refill_session =
+					    g_audio_playback.session;
 				}
 			}
 		} else if (!stream->core1_affine) {
@@ -3728,18 +3732,17 @@ static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
 	/* An internal PCM-refill FEED (request_id 0) may still be queued or
 	 * running on core 1 against this stream's coherent slot -- it was
 	 * enqueued for the bound session, which a prior STOP may already
-	 * have unbound, so it must be drained here regardless of the
+	 * have unbound, so refill_session is checked rather than the
 	 * binding above. Freeing the slot under the worker would zero the
-	 * decoder state mid-decode. The flag clears when the task's
-	 * deferred completion is reaped; pump the scheduler until then
-	 * (bounded: one decode pass; the guard covers a wedged core 1,
-	 * whose fault path poisons the stream anyway). */
-	if (g_audio_playback.refill_pending) {
-		uint32_t drain_guard = 10000000U;
-
-		while (g_audio_playback.refill_pending && drain_guard--)
-			scheduler_core0_poll(0, 0);
-	}
+	 * decoder state mid-decode. Draining it HERE is not an option:
+	 * that would nest scheduler_core0_poll inside a handler, and a
+	 * harvested foreign task would post its deferred completion into
+	 * the ring slot the outer dispatcher already reserved for THIS
+	 * request. Answer BUSY instead -- the main loop drains the refill
+	 * between requests within milliseconds and the client retries. */
+	if (g_audio_playback.refill_pending &&
+	    g_audio_playback.refill_session == session)
+		return complete_status(req, comp, SDK_STATUS_BUSY);
 	snapshot = *stream;
 	free_audio_stream(stream);
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, &snapshot);
