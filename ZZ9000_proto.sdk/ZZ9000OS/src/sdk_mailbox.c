@@ -3639,9 +3639,15 @@ static uint16_t handle_audio_stream_feed(volatile struct SDKMailboxEntry *req,
 		    SDK_STATUS_QUEUED)
 			return SDK_STATUS_QUEUED;
 		/* A core-1-affine stream cannot decode on core 0 (its mp3
-		 * staging ring is cache-owned by core 1). The sole synchronous
-		 * client sends stream ops singly, so a refused defer means a
-		 * full queue -- transient; answer BUSY rather than corrupt. */
+		 * staging ring is cache-owned by core 1), so a refused defer
+		 * answers BUSY rather than corrupt. Two refusal causes, both
+		 * retryable by contract: a full task queue (transient), and a
+		 * FEED that is not the batch tail -- deferring mid-batch would
+		 * let a later inline op in the same batch (PLAY/STOP/CLOSE)
+		 * execute before the queued decode, so ordering demands the
+		 * client resubmit. Every current client (zz9k.library sync
+		 * calls, mpega, the MHI feeder) sends stream ops singly and
+		 * never sees the batch case. */
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 	}
 	/* Core-0-affine stream: inline, as the pre-scheduler firmware did. */
