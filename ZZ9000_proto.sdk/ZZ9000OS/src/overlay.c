@@ -349,13 +349,21 @@ uint16_t overlay_run_compose(const struct overlay_compose_params *p)
 			p->dst_x, p->dst_y, p->dst_w, p->dst_h,
 			p->key_native, p->key_enabled);
 
-	Xil_DCacheFlushRange((INTPTR)p->dst_addr,
+	/* L1-ONLY flush, deliberately: Xil_DCacheFlushRange would issue
+	 * megabytes of line operations against the shared PL310 L2
+	 * controller every frame, concurrently with the vblank ISR's full
+	 * L2 way-flush on core 0 - the BSP cache routines are not
+	 * multi-core safe against each other and the contention can stall
+	 * the ISR (and with it Zorro DTACK). CP15 L1 ops are per-core and
+	 * touch no shared hardware; the ISR's existing per-vblank full L2
+	 * flush (video.c, "do not make conditional") carries the lines the
+	 * rest of the way to DDR before the VDMA scans them. */
+	Xil_L1DCacheFlushRange((INTPTR)p->dst_addr,
 			(INTPTR)p->dst_pitch * p->scr_h);
 
 	/* No ov state is touched here: the completed frame is published by
 	 * overlay_compose_retired() on CORE 0 (via the coherent task-queue
-	 * harvest), so every overlay field stays single-core - the shadow
-	 * pixels themselves were just flushed to DDR for the VDMA. */
+	 * harvest), so every overlay field stays single-core. */
 	return 0; /* SDK_STATUS_OK */
 }
 
