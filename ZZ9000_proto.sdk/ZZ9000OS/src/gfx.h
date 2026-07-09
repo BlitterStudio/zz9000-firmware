@@ -577,7 +577,12 @@ enum gfx_minterm_modes {
 			} break; \
 	}
 
-#pragma pack(4)
+/* pack scoped to this struct only: the old bare #pragma pack(4) leaked
+ * into every header included after gfx.h - fatally so for the Xilinx
+ * VDMA structs, which then disagreed with the BSP library layout.
+ * GFXData itself is layout-identical either way (all members have
+ * <= 4-byte natural alignment). */
+#pragma pack(push, 4)
 struct GFXData {
   uint32_t offset[2];
   uint32_t rgb[2];
@@ -592,6 +597,7 @@ struct GFXData {
   uint8_t clut3[768];
   uint8_t clut4[768];
 };
+#pragma pack(pop)
 
 enum gfx_dma_op {
   OP_NONE,

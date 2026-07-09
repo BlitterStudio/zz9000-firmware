@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include "video.h"
 #include "video_vdma.h"
-#include "overlay.h"
 #include "zz_config.h"
 #include "mntzorro.h"
 #include "interrupt.h"
@@ -12,6 +11,9 @@
 #include <sleep.h>
 #include "xil_cache_l.h"
 #include "xil_io.h"
+/* kept after the Xilinx headers: overlay.h pulls in gfx.h (see the
+ * pack note on struct GFXData) */
+#include "overlay.h"
 
 #define VDMA_DEVICE_ID	XPAR_AXIVDMA_0_DEVICE_ID
 
