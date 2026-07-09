@@ -121,6 +121,7 @@ C_SRCS = \
 	$(SRC_DIR)/usb/usb_hub.c \
 	$(SRC_DIR)/usb/usb_storage.c \
 	$(SRC_DIR)/usb/usb.c \
+	$(SRC_DIR)/sd_activity_led.c \
 	$(SRC_DIR)/sd_storage.c \
 	$(SRC_DIR)/sd_boot.c \
 	$(SRC_DIR)/fw_update.c \
