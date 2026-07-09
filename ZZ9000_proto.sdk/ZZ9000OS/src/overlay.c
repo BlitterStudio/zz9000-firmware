@@ -54,6 +54,7 @@ static struct {
 	volatile uint8_t compose_in_flight; /* core-0 main-loop owned */
 	volatile uint8_t free_pending;
 	volatile uint8_t discard_stale;     /* drop the next published frame */
+	volatile uint8_t presenting;        /* ISR: scanout is on a shadow */
 	uint8_t compose_target;
 } ov;
 
@@ -92,6 +93,7 @@ void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
 	 * WAS running, drop whatever it still publishes. */
 	ov.discard_stale = ov.compose_in_flight ? 1 : 0;
 	ov.compose_in_flight = 0;
+	ov.presenting = 0; /* the reset path reprograms the scanout */
 	vs->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY] = 0;
 }
 
@@ -102,14 +104,11 @@ static void overlay_stop(void)
 	ov.compose_request = 0;
 	ov.front = -1;
 	ov.ready_idx = -1;
-	if (ov.compose_in_flight) {
-		/* core 1 may still be writing a shadow: defer the free to
-		 * the main-loop poll (freeing under a running compose would
-		 * let the allocator hand the memory to someone else) */
+	/* always deferred: core 1 may still be composing into a shadow,
+	 * and the VDMA keeps scanning the presented one until the next
+	 * vblank repoints it - the poll frees once both have moved on */
+	if (ov.shadow_size)
 		ov.free_pending = 1;
-	} else {
-		overlay_free_shadows();
-	}
 }
 
 void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
@@ -185,9 +184,10 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 			goto out;
 		}
 	} else if (need != ov.shadow_size) {
-		if (ov.compose_in_flight) {
-			/* a compose against the old shadows is still running;
-			 * refuse the resize for this frame, the driver resends */
+		if (ov.compose_in_flight || ov.presenting) {
+			/* the old shadows are still owned by a running compose or
+			 * by the scanout (until the next vblank): refuse for now,
+			 * a later SET retries once they are quiescent */
 			status = OVERLAY_STATUS_NO_MEMORY;
 			goto out;
 		}
@@ -277,8 +277,10 @@ uint32_t overlay_present_bufpos(struct ZZ_VIDEO_STATE *vs)
 {
 	uint32_t normal = (uint32_t)vs->framebuffer + vs->framebuffer_pan_offset;
 
-	if (!overlay_presentable(vs))
+	if (!overlay_presentable(vs)) {
+		ov.presenting = 0;
 		return normal;
+	}
 
 	if (ov.ready_idx >= 0) {
 		if (ov.discard_stale) {
@@ -292,14 +294,17 @@ uint32_t overlay_present_bufpos(struct ZZ_VIDEO_STATE *vs)
 	}
 	ov.compose_request = 1;
 
-	if (ov.front < 0)
+	if (ov.front < 0) {
+		ov.presenting = 0;
 		return normal;
+	}
+	ov.presenting = 1;
 	return ov.shadow[ov.front];
 }
 
 void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 {
-	if (ov.free_pending && !ov.compose_in_flight) {
+	if (ov.free_pending && !ov.compose_in_flight && !ov.presenting) {
 		ov.free_pending = 0;
 		overlay_free_shadows();
 	}
@@ -307,6 +312,11 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 	if (!ov.configured || !ov.active)
 		return;
 	if (!ov.compose_request || ov.compose_in_flight)
+		return;
+	/* a completed frame is waiting for the flip: with two buffers both
+	 * are spoken for (one scanned, one ready) - composing now would
+	 * overwrite the buffer the next vblank presents */
+	if (ov.ready_idx >= 0)
 		return;
 	if (!scheduler_core1_available())
 		return;
