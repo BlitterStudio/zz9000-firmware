@@ -111,6 +111,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_decode_reclaim_arm.c \
 	$(SRC_DIR)/dma_acc.c \
 	$(SRC_DIR)/dma_rtg.c \
+	$(SRC_DIR)/surface_allocator.c \
 	$(SRC_DIR)/usb.c \
 	$(SRC_DIR)/mp3/decode_mp3.c \
 	$(SRC_DIR)/compression/audio/adpcm.c \

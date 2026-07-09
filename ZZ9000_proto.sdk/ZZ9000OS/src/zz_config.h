@@ -36,6 +36,7 @@ enum zz_config_key {
 	ZZ_CONFIG_KEY_MAC_HI          = 6,  /* mac[0]<<8 | mac[1] */
 	ZZ_CONFIG_KEY_MAC_MID         = 7,  /* mac[2]<<8 | mac[3] */
 	ZZ_CONFIG_KEY_MAC_LO          = 8,  /* mac[4]<<8 | mac[5] */
+	ZZ_CONFIG_KEY_OFFSCREEN_BITMAPS = 9, /* 0=off 1=on, informational (drivers query it) */
 	ZZ_CONFIG_KEY_NUM
 };
 
@@ -62,6 +63,9 @@ struct zz_config {
 
 	uint8_t hdf_present;
 	char hdf_path[ZZ_CONFIG_HDF_NAME_MAX + 4]; /* "0:/" + name + NUL */
+
+	uint8_t offscreen_bitmaps_present;
+	uint16_t offscreen_bitmaps;     /* 0-1, informational (drivers query it) */
 };
 
 /* Status codes for the REG_ZZ_CONFIG_FILE raw-read command. */

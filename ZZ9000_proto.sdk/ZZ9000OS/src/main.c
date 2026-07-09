@@ -63,6 +63,7 @@ void Xil_AssertNonVoid() {}
 #include "zz_config.h"
 #include "usb_proxy.h"
 #include "sdk_mailbox.h"
+#include "surface_allocator.h"
 
 #define REVISION_MAJOR 2
 #define REVISION_MINOR 3
@@ -115,12 +116,6 @@ static u32 blitter_dst_offset = 0;
 static u32 blitter_src_offset = 0;
 
 struct ZZ_VIDEO_STATE* video_state;
-
-// FIXME
-// This is the absolute offset in ZZ9000 RAM for the "framebuffer transfer register",
-// which can be replaced by the DMA acceleration functionality entirely, but some
-// software still relies on this legacy register.
-unsigned int cur_mem_offset = LEGACY_SURFACE_HEAP_ADDRESS;
 
 static char usb_storage_available = 0;
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
@@ -267,8 +262,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	audio_set_interrupt_enabled(0);
 	interrupt_enabled_vblank = 0;
 
-	// FIXME document
-	cur_mem_offset = LEGACY_SURFACE_HEAP_ADDRESS;
+	// drop all RTG off-screen surfaces; P96 re-allocates after reboot
+	surface_allocator_init(LEGACY_SURFACE_HEAP_ADDRESS, LEGACY_SURFACE_HEAP_SIZE);
 
 	// FIXME
 	memset((u32 *)Z3_SCRATCH_ADDR, 0, sizeof(struct GFXData));
@@ -355,6 +350,8 @@ int main() {
 	// RTG rect ops may write anywhere in framebuffer + legacy surface
 	// memory, but never past it into the SDK heaps and beyond
 	set_fb_limit((uint8_t *)(uintptr_t)LEGACY_SURFACE_HEAP_END);
+
+	surface_allocator_init(LEGACY_SURFACE_HEAP_ADDRESS, LEGACY_SURFACE_HEAP_SIZE);
 
 	xadc_init();
 
