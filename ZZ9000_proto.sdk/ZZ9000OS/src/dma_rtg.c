@@ -160,6 +160,27 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             break;
         }
 
+        case OP_WRITE_YUV: {
+            SWAP16(data->x[0]);		SWAP16(data->x[1]);		SWAP16(data->x[2]);
+            SWAP16(data->y[1]);		SWAP16(data->y[2]);
+
+            SWAP16(data->pitch[0]);		SWAP16(data->pitch[1]);
+            SWAP32(data->offset[0]);	SWAP32(data->offset[1]);
+
+            uint8_t* yuv_data = (uint8_t*) ((u32)vs->framebuffer
+                    + data->offset[1]);
+
+            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
+                    data->pitch[0]);
+
+            yuv422_to_rgb_rect((int16_t)data->x[0], (int16_t)data->x[1],
+                    (int16_t)data->y[1], (int16_t)data->x[2], (int16_t)data->y[2],
+                    data->u8_user[GFXDATA_U8_YUV_VARIANT],
+                    data->u8_user[GFXDATA_U8_COLORMODE],
+                    data->pitch[1], yuv_data);
+            break;
+        }
+
         case OP_INVERTRECT:
             SWAP16(data->x[0]);		SWAP16(data->x[1]);
             SWAP16(data->y[0]);		SWAP16(data->y[1]);
