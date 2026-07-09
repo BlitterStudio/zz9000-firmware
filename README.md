@@ -108,7 +108,13 @@ sample; the copy at the repo root documents every option:
 
 Unknown keys and invalid values are logged on the debug UART and
 skipped. Runtime mechanisms (driver register writes, ZZTop) still
-override config values until the next power cycle.
+override config values until the next power cycle. For the
+driver-consumed options (`int2`, `mac`, `videocap_mode`,
+`nonstandard_vsync`), an existing `ENV:` variable takes precedence
+over the config file — remove the ENV variables when migrating.
+ZZTop 2.3+ can edit this file in place from AmigaOS (Project menu →
+Settings), writing it back over the FWUP path with a `ZZ9000.bak`
+backup of the previous version.
 
 Amiga-side software can query parsed values through the
 `REG_ZZ_CONFIG_KEY` register (`0xE8`): write a key id from
