@@ -50,6 +50,8 @@ jobs:
         run: make -C test/scheduler test
       - name: ZZ9000.CFG parser suite
         run: make -C test/config test
+      - name: Surface allocator suite
+        run: make -C test/allocator test
 
   build:
     name: Build & package firmware

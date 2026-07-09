@@ -8,10 +8,11 @@
 #include "memorymap.h"
 #include <xil_types.h>
 #include "xil_printf.h"
+#include "xil_cache.h"
 #include "compression/compression.h"
+#include "surface_allocator.h"
 #include "xtime_l.h"
 
-extern unsigned int cur_mem_offset;
 extern uint8_t imc_tables_initialized;
 int current_c37_encoder = -1;
 
@@ -155,50 +156,32 @@ void handle_acc_op(uint16_t zdata)
 
             }
 
-            unsigned int barf = sfc_size % 256;
-            if (barf)
-                sfc_size += (256 - barf);
-
-            if (data->u8_user[1] == 1) {
-                printf ("Alloc requested for %d bytes.\n", data->offset[1]);
-            }
-            else {
-                printf ("Alloc requested for %dx%d surface, %.2X bytes per pixel, %d bytes.\n", data->x[0], data->y[0], data->u8_user[0], sfc_size);
-            }
             if (!sfc_size) {
                 printf("Refusing to allocate 0 bytes for you.\n");
                 break;
             }
-            if (cur_mem_offset >= LEGACY_SURFACE_HEAP_END ||
-                sfc_size > (LEGACY_SURFACE_HEAP_END - cur_mem_offset)) {
+
+            uint32_t sfc_addr = surface_allocator_alloc(sfc_size);
+            if (!sfc_addr) {
                 printf("not enough legacy surface heap for %d bytes.\n", sfc_size);
                 break;
             }
 
-            //uint8_t *p = malloc(sfc_size);
-            //memset(p, 0x00, sfc_size);
-            //allocated_surfaces++;
-            //printf ("Surface allocated at offset %.8X, or %.8X on the Amiga side.\n", cur_mem_offset, cur_mem_offset - ADDR_ADJ);
-
-            data->offset[0] = cur_mem_offset - ADDR_ADJ;
-            memset((void *)cur_mem_offset, 0x00, sfc_size);
-            cur_mem_offset += sfc_size;
+            sfc_size = surface_allocator_block_size(sfc_addr);
+            memset((void *)sfc_addr, 0x00, sfc_size);
+            Xil_DCacheFlushRange((INTPTR)sfc_addr, sfc_size);
+            data->offset[0] = sfc_addr - ADDR_ADJ;
             SWAP32(data->offset[0]);
             break;
         }
         case ACC_OP_FREE_SURFACE: {
             SWAP32(data->offset[0]);
             data->offset[0] += ADDR_ADJ;
-            void *ape = (void*)data->offset[0];
-            if (data->u8_user[0]) {
-                printf("[%s] Freeing surface at %p... Not really.\n", data->clut2, ape);
+            if (surface_allocator_free(data->offset[0]) != 0) {
+                printf("Ignoring free of unknown surface at %p.\n",
+                       (void *)data->offset[0]);
             }
-            //else
-                //printf("Freeing surface at %p... Not really.\n", ape);
             data->offset[0] = 0;
-
-            //free(ape);
-            //printf(" freed!\n");
             break;
         }
         case ACC_OP_SET_BPP_CONVERSION_TABLE: {
