@@ -55,6 +55,10 @@ static struct {
 	volatile uint8_t free_pending;
 	volatile uint8_t discard_stale;     /* drop the next published frame */
 	volatile uint8_t presenting;        /* ISR: scanout is on a shadow */
+	volatile uint8_t mode_stale;        /* mode left the snapshot: latch
+	                                     * hidden until a fresh SET (P96
+	                                     * reallocates bitmaps across
+	                                     * mode switches) */
 	uint8_t compose_target;
 } ov;
 
@@ -94,6 +98,7 @@ void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
 	ov.discard_stale = ov.compose_in_flight ? 1 : 0;
 	ov.compose_in_flight = 0;
 	ov.presenting = 0; /* the reset path reprograms the scanout */
+	ov.mode_stale = 0;
 	vs->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY] = 0;
 }
 
@@ -237,6 +242,8 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 
 	ov.configured = 1;
 	ov.active = (flags & 2) ? 1 : 0;
+	/* a fresh SET re-validated everything against the live mode */
+	ov.mode_stale = 0;
 
 out:
 	data->u32_user[0] = status;
@@ -245,7 +252,7 @@ out:
 
 static int overlay_presentable(struct ZZ_VIDEO_STATE *vs)
 {
-	if (!ov.configured || !ov.active)
+	if (!ov.configured || !ov.active || ov.mode_stale)
 		return 0;
 	if (!vs->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY])
 		return 0;
@@ -259,17 +266,26 @@ static int overlay_presentable(struct ZZ_VIDEO_STATE *vs)
 	    vs->colormode != MNTVA_COLOR_16BIT565 &&
 	    vs->colormode != MNTVA_COLOR_15BIT)
 		return 0;
+	/* a snapshot mismatch LATCHES hidden (mode_stale) until the driver
+	 * re-SETs: P96 tears down or reallocates bitmaps across mode
+	 * switches, so a mode that later returns to the same geometry must
+	 * not resurrect the old source/shadow state. The transient hides
+	 * above (split, core 1, feature gate) resume by themselves. */
 	if ((uint32_t)vs->vmode_hsize != ov.snap_hsize ||
 	    (uint32_t)vs->vmode_vsize != ov.snap_vsize ||
 	    vs->colormode != ov.snap_colormode ||
-	    vs->scalemode != 0)
+	    vs->scalemode != 0) {
+		ov.mode_stale = 1;
 		return 0;
+	}
 	/* the scanout stride can change without a mode switch (OP_PAN with
 	 * a different pan width); the shadows were laid out and the VDMA
-	 * would scan them with mismatched strides -> hide until re-SET */
+	 * would scan them with mismatched strides */
 	if (video_vdma_stride_bytes(vs->vmode_hsize, vs->vmode_hdiv,
-			vs->framebuffer_pan_width, stride_div) != ov.snap_stride)
+			vs->framebuffer_pan_width, stride_div) != ov.snap_stride) {
+		ov.mode_stale = 1;
 		return 0;
+	}
 	return 1;
 }
 
