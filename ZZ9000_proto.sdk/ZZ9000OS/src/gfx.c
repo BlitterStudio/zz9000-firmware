@@ -1068,6 +1068,127 @@ void yuv422_to_rgb_rect(int16_t phase, int16_t dx, int16_t dy, int16_t w, int16_
 	}
 }
 
+/* Composite one full frame for the P96 video window (PIP): copy the
+ * live screen into the shadow buffer and draw the scaled YUV overlay
+ * over the destination rect, color-keyed against the screen content
+ * (the pixel just copied into the shadow IS the screen value, so the
+ * key test reads the shadow row in place). Scaling is 8.8 fixed-point
+ * nearest sampling, WinUAE overlay semantics. Pure function with
+ * explicit pointers: runs on core 1 and in the host test harness.
+ * If the overlay parameters are unusable the screen is still copied,
+ * so the shadow always presents a valid frame. */
+void overlay_composite_frame(uint8_t *dst, uint32_t dst_pitch,
+	const uint8_t *screen, uint32_t screen_pitch,
+	uint16_t scr_w, uint16_t scr_h, uint8_t color_format,
+	const uint8_t *src, uint16_t src_pitch,
+	uint16_t src_w, uint16_t src_h, uint8_t variant,
+	int16_t dst_x, int16_t dst_y, int16_t dst_w, int16_t dst_h,
+	uint32_t key_native, uint8_t key_enabled)
+{
+	uint32_t bpp;
+
+	if (!dst || !screen || !scr_w || !scr_h)
+		return;
+
+	switch (color_format) {
+	case MNTVA_COLOR_32BIT:
+		bpp = 4;
+		break;
+	case MNTVA_COLOR_16BIT565:
+	case MNTVA_COLOR_15BIT:
+		bpp = 2;
+		break;
+	default:
+		return;
+	}
+
+	uint32_t line_bytes = (uint32_t)scr_w * bpp;
+
+	/* clip the dest rect to the screen */
+	int32_t x0 = dst_x < 0 ? 0 : dst_x;
+	int32_t y0 = dst_y < 0 ? 0 : dst_y;
+	int32_t x1 = (int32_t)dst_x + dst_w;
+	int32_t y1 = (int32_t)dst_y + dst_h;
+	if (x1 > scr_w) x1 = scr_w;
+	if (y1 > scr_h) y1 = scr_h;
+
+	int overlay_ok = src && src_w && src_h && dst_w > 0 && dst_h > 0 &&
+		variant < YUV422_VARIANT_NUM && x0 < x1 && y0 < y1;
+
+	if (!overlay_ok) {
+		for (int32_t row = 0; row < scr_h; row++)
+			memcpy(dst + (uint32_t)row * dst_pitch,
+				screen + (uint32_t)row * screen_pitch, line_bytes);
+		return;
+	}
+
+	uint8_t byte_y0 = yuv422_layout[variant].y0;
+	uint8_t byte_y1 = yuv422_layout[variant].y1;
+	uint8_t byte_u = yuv422_layout[variant].u;
+	uint8_t byte_v = yuv422_layout[variant].v;
+
+	/* 8.8 fixed-point source steps over the UNCLIPPED dest rect */
+	uint32_t mx = ((uint32_t)src_w << 8) / (uint32_t)dst_w;
+	uint32_t my = ((uint32_t)src_h << 8) / (uint32_t)dst_h;
+	uint32_t sy_fix = (uint32_t)(y0 - dst_y) * my;
+	uint32_t sx0_fix = (uint32_t)(x0 - dst_x) * mx;
+	uint16_t key16 = (uint16_t)key_native;
+	uint32_t key24 = key_native & 0x00FFFFFFu;
+
+	for (int32_t row = 0; row < scr_h; row++) {
+		uint8_t *drow = dst + (uint32_t)row * dst_pitch;
+
+		memcpy(drow, screen + (uint32_t)row * screen_pitch, line_bytes);
+
+		if (row < y0 || row >= y1)
+			continue;
+
+		uint32_t sy = sy_fix >> 8;
+		if (sy >= src_h)
+			sy = src_h - 1;
+		sy_fix += my;
+
+		const uint8_t *srow = src + sy * src_pitch;
+		uint32_t *dp = (uint32_t *)drow;
+		uint32_t sx_fix = sx0_fix;
+		int32_t cached_mp = -1;
+		int32_t cy0 = 0, cy1 = 0, rc = 0, gc = 0, bc = 0;
+
+		for (int32_t x = x0; x < x1; x++) {
+			uint32_t sx = sx_fix >> 8;
+			if (sx >= src_w)
+				sx = src_w - 1;
+			sx_fix += mx;
+
+			if (key_enabled) {
+				if (bpp == 4) {
+					if ((dp[x] & 0x00FFFFFFu) != key24)
+						continue;
+				} else {
+					if (((uint16_t *)dp)[x] != key16)
+						continue;
+				}
+			}
+
+			int32_t mp = (int32_t)(sx >> 1);
+			if (mp != cached_mp) {
+				const uint8_t *s = srow + (uint32_t)mp * 4;
+				int32_t d = (int32_t)s[byte_u] - 128;
+				int32_t e = (int32_t)s[byte_v] - 128;
+				cy0 = 298 * ((int32_t)s[byte_y0] - 16);
+				cy1 = 298 * ((int32_t)s[byte_y1] - 16);
+				rc = 409 * e + 128;
+				gc = -100 * d - 208 * e + 128;
+				bc = 516 * d + 128;
+				cached_mp = mp;
+			}
+
+			yuv_store_pixel(dp, x, color_format,
+				(sx & 1) ? cy1 : cy0, rc, gc, bc);
+		}
+	}
+}
+
 #define RL_CACHE_SIZE 256
 #define RL_CACHE_MASK (RL_CACHE_SIZE - 1)
 static uint32_t rl_cache_keys[RL_CACHE_SIZE];

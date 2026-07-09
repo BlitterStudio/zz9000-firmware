@@ -1262,6 +1262,256 @@ static void test_yuv(void)
 	check_frame("yuv422 rejected inputs");
 }
 
+/* ---- overlay compositor (explicit-buffer kernel) --------------------
+ * Independent oracle written from the WinUAE copyrow_scale spec:
+ * per-dest-pixel 8.8 source coordinates computed by multiplication
+ * (the kernel accumulates steps), key test against the SCREEN buffer,
+ * pixels composed byte-by-byte in surface memory order. */
+
+enum {
+	OVL_SCR_W = 64,
+	OVL_SCR_H = 48,
+	OVL_PITCH = 320,   /* > w*bpp to exercise the stride */
+	OVL_GUARD = 64,
+};
+
+static uint8_t ovl_screen[OVL_PITCH * OVL_SCR_H];
+static uint8_t ovl_dst[OVL_PITCH * OVL_SCR_H + OVL_GUARD];
+static uint8_t ovl_ref[OVL_PITCH * OVL_SCR_H + OVL_GUARD];
+static uint8_t ovl_src[128 * 40];
+
+static uint32_t ovl_bpp(uint8_t color_format)
+{
+	return color_format == MNTVA_COLOR_32BIT ? 4 : 2;
+}
+
+static void ref_overlay_pixel(uint8_t *px, uint8_t color_format,
+	const uint8_t *mp, int odd, uint8_t variant)
+{
+	int32_t y = 0, u = 0, v = 0;
+	int want_y = odd ? RC_Y1 : RC_Y0;
+
+	for (int b = 0; b < 4; b++) {
+		uint8_t comp = ref_yuv_byte_comp[variant][b];
+		if (comp == want_y)
+			y = mp[b];
+		else if (comp == RC_U)
+			u = mp[b];
+		else if (comp == RC_V)
+			v = mp[b];
+	}
+
+	int32_t c = y - 16, d = u - 128, e = v - 128;
+	int32_t r = ref_yuv_clamp((298 * c + 409 * e + 128) >> 8);
+	int32_t g = ref_yuv_clamp((298 * c - 100 * d - 208 * e + 128) >> 8);
+	int32_t bl = ref_yuv_clamp((298 * c + 516 * d + 128) >> 8);
+
+	switch (color_format) {
+	case MNTVA_COLOR_32BIT:
+		px[0] = (uint8_t)bl;
+		px[1] = (uint8_t)g;
+		px[2] = (uint8_t)r;
+		px[3] = 0xFF;
+		break;
+	case MNTVA_COLOR_16BIT565: {
+		uint16_t val = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (bl >> 3));
+		px[0] = (uint8_t)(val >> 8);
+		px[1] = (uint8_t)val;
+		break;
+	}
+	case MNTVA_COLOR_15BIT: {
+		uint16_t val = (uint16_t)(((r >> 3) << 10) | ((g >> 3) << 5) | (bl >> 3));
+		px[0] = (uint8_t)(val >> 8);
+		px[1] = (uint8_t)val;
+		break;
+	}
+	}
+}
+
+static void ref_overlay_composite(uint8_t color_format,
+	uint16_t src_pitch, uint16_t src_w, uint16_t src_h, uint8_t variant,
+	int16_t dst_x, int16_t dst_y, int16_t dst_w, int16_t dst_h,
+	uint32_t key_native, uint8_t key_enabled, int overlay_valid)
+{
+	uint32_t bpp = ovl_bpp(color_format);
+
+	for (int row = 0; row < OVL_SCR_H; row++)
+		memcpy(ovl_ref + (size_t)row * OVL_PITCH,
+			ovl_screen + (size_t)row * OVL_PITCH,
+			(size_t)OVL_SCR_W * bpp);
+
+	if (!overlay_valid || variant >= YUV422_VARIANT_NUM ||
+	    dst_w < 1 || dst_h < 1)
+		return;
+
+	for (int32_t yy = 0; yy < dst_h; yy++) {
+		int32_t row = dst_y + yy;
+		if (row < 0 || row >= OVL_SCR_H)
+			continue;
+
+		uint32_t sy = ((uint32_t)yy * (((uint32_t)src_h << 8) / dst_h)) >> 8;
+		if (sy >= src_h)
+			sy = src_h - 1;
+		const uint8_t *srow = ovl_src + (size_t)sy * src_pitch;
+		uint8_t *drow = ovl_ref + (size_t)row * OVL_PITCH;
+		const uint8_t *scr_row = ovl_screen + (size_t)row * OVL_PITCH;
+
+		for (int32_t xx = 0; xx < dst_w; xx++) {
+			int32_t x = dst_x + xx;
+			if (x < 0 || x >= OVL_SCR_W)
+				continue;
+
+			if (key_enabled) {
+				if (bpp == 4) {
+					uint32_t scr;
+					memcpy(&scr, scr_row + (size_t)x * 4, 4);
+					if ((scr & 0x00FFFFFFu) != (key_native & 0x00FFFFFFu))
+						continue;
+				} else {
+					uint16_t scr;
+					memcpy(&scr, scr_row + (size_t)x * 2, 2);
+					if (scr != (uint16_t)key_native)
+						continue;
+				}
+			}
+
+			uint32_t sx = ((uint32_t)xx * (((uint32_t)src_w << 8) / dst_w)) >> 8;
+			if (sx >= src_w)
+				sx = src_w - 1;
+
+			ref_overlay_pixel(drow + (size_t)x * bpp, color_format,
+				srow + (sx / 2) * 4, (int)(sx & 1), variant);
+		}
+	}
+}
+
+static void ovl_seed(uint32_t seed)
+{
+	rng_state = seed;
+	for (size_t i = 0; i < sizeof(ovl_screen); i++)
+		ovl_screen[i] = (uint8_t)rng32();
+	for (size_t i = 0; i < sizeof(ovl_src); i++)
+		ovl_src[i] = (uint8_t)rng32();
+	memset(ovl_dst, 0xA5, sizeof(ovl_dst));
+	memset(ovl_ref, 0xA5, sizeof(ovl_ref));
+}
+
+static int ovl_check(const char *name)
+{
+	for (size_t i = 0; i < sizeof(ovl_dst); i++) {
+		if (ovl_dst[i] != ovl_ref[i]) {
+			printf("FAIL %-30s byte=%zu actual=%02x expected=%02x\n",
+				name, i, ovl_dst[i], ovl_ref[i]);
+			failures++;
+			return 0;
+		}
+	}
+	printf("ok   %s\n", name);
+	return 1;
+}
+
+static void ovl_case(const char *name, uint32_t seed, uint8_t color_format,
+	uint16_t src_pitch, uint16_t src_w, uint16_t src_h, uint8_t variant,
+	int16_t dst_x, int16_t dst_y, int16_t dst_w, int16_t dst_h,
+	uint32_t key, uint8_t key_enabled, int overlay_valid)
+{
+	ovl_seed(seed);
+	overlay_composite_frame(ovl_dst, OVL_PITCH, ovl_screen, OVL_PITCH,
+		OVL_SCR_W, OVL_SCR_H, color_format,
+		overlay_valid ? ovl_src : NULL, src_pitch, src_w, src_h,
+		variant, dst_x, dst_y, dst_w, dst_h, key, key_enabled);
+	ref_overlay_composite(color_format, src_pitch, src_w, src_h, variant,
+		dst_x, dst_y, dst_w, dst_h, key, key_enabled, overlay_valid);
+	ovl_check(name);
+}
+
+static void test_overlay_composite(void)
+{
+	/* 1:1, unkeyed, all three screen formats, CGX */
+	ovl_case("overlay 1:1 32", 0xD000, MNTVA_COLOR_32BIT,
+		128, 32, 20, YUV422_VARIANT_CGX, 8, 6, 32, 20, 0, 0, 1);
+	ovl_case("overlay 1:1 565", 0xD001, MNTVA_COLOR_16BIT565,
+		128, 32, 20, YUV422_VARIANT_CGX, 8, 6, 32, 20, 0, 0, 1);
+	ovl_case("overlay 1:1 15", 0xD002, MNTVA_COLOR_15BIT,
+		128, 32, 20, YUV422_VARIANT_CGX, 8, 6, 32, 20, 0, 0, 1);
+
+	/* scaling: 2x up, non-integer up, non-integer down, odd widths */
+	ovl_case("overlay 2x up", 0xD010, MNTVA_COLOR_32BIT,
+		128, 16, 10, YUV422_VARIANT_CGX, 4, 4, 32, 20, 0, 0, 1);
+	ovl_case("overlay 1.7x up odd", 0xD011, MNTVA_COLOR_16BIT565,
+		128, 19, 13, YUV422_VARIANT_STD, 3, 2, 33, 23, 0, 0, 1);
+	ovl_case("overlay 0.6x down", 0xD012, MNTVA_COLOR_32BIT,
+		128, 40, 30, YUV422_VARIANT_PC, 10, 8, 24, 18, 0, 0, 1);
+
+	/* clipping: negative origin, right/bottom overhang, fully offscreen */
+	ovl_case("overlay clip neg xy", 0xD020, MNTVA_COLOR_32BIT,
+		128, 32, 20, YUV422_VARIANT_CGX, -7, -5, 32, 20, 0, 0, 1);
+	ovl_case("overlay clip overhang", 0xD021, MNTVA_COLOR_16BIT565,
+		128, 32, 20, YUV422_VARIANT_CGX, 48, 40, 32, 20, 0, 0, 1);
+	ovl_case("overlay fully offscreen", 0xD022, MNTVA_COLOR_32BIT,
+		128, 32, 20, YUV422_VARIANT_CGX, 100, 100, 32, 20, 0, 0, 1);
+
+	/* color key: match some (key taken from a screen pixel), match none */
+	{
+		ovl_seed(0xD030);
+		uint32_t key;
+		memcpy(&key, ovl_screen + 10 * OVL_PITCH + 12 * 4, 4);
+		/* paint a patch of the key so some pixels match */
+		for (int i = 0; i < 8; i++)
+			memcpy(ovl_screen + 12 * OVL_PITCH + (10 + i) * 4, &key, 4);
+		overlay_composite_frame(ovl_dst, OVL_PITCH, ovl_screen, OVL_PITCH,
+			OVL_SCR_W, OVL_SCR_H, MNTVA_COLOR_32BIT,
+			ovl_src, 128, 32, 20, YUV422_VARIANT_CGX,
+			8, 6, 32, 20, key, 1);
+		ref_overlay_composite(MNTVA_COLOR_32BIT, 128, 32, 20,
+			YUV422_VARIANT_CGX, 8, 6, 32, 20, key, 1, 1);
+		ovl_check("overlay keyed 32");
+	}
+	{
+		ovl_seed(0xD031);
+		uint16_t key16 = 0x1234;
+		/* paint a 565 key patch */
+		for (int i = 0; i < 6; i++)
+			memcpy(ovl_screen + 9 * OVL_PITCH + (11 + i) * 2, &key16, 2);
+		overlay_composite_frame(ovl_dst, OVL_PITCH, ovl_screen, OVL_PITCH,
+			OVL_SCR_W, OVL_SCR_H, MNTVA_COLOR_16BIT565,
+			ovl_src, 128, 32, 20, YUV422_VARIANT_CGX,
+			4, 3, 40, 24, key16, 1);
+		ref_overlay_composite(MNTVA_COLOR_16BIT565, 128, 32, 20,
+			YUV422_VARIANT_CGX, 4, 3, 40, 24, key16, 1, 1);
+		ovl_check("overlay keyed 565");
+	}
+
+	/* invalid overlay (NULL src) -> pure screen copy */
+	ovl_case("overlay invalid src copy", 0xD040, MNTVA_COLOR_32BIT,
+		128, 32, 20, YUV422_VARIANT_CGX, 8, 6, 32, 20, 0, 0, 0);
+	/* invalid variant -> pure screen copy */
+	ovl_case("overlay invalid variant", 0xD041, MNTVA_COLOR_16BIT565,
+		128, 32, 20, YUV422_VARIANT_NUM, 8, 6, 32, 20, 0, 0, 1);
+
+	/* determinism: same inputs twice must produce identical output */
+	{
+		static uint8_t first[sizeof(ovl_dst)];
+		ovl_seed(0xD050);
+		overlay_composite_frame(ovl_dst, OVL_PITCH, ovl_screen, OVL_PITCH,
+			OVL_SCR_W, OVL_SCR_H, MNTVA_COLOR_32BIT,
+			ovl_src, 128, 30, 22, YUV422_VARIANT_PAPC,
+			5, 5, 45, 33, 0, 0);
+		memcpy(first, ovl_dst, sizeof(ovl_dst));
+		memset(ovl_dst, 0xA5, sizeof(ovl_dst));
+		overlay_composite_frame(ovl_dst, OVL_PITCH, ovl_screen, OVL_PITCH,
+			OVL_SCR_W, OVL_SCR_H, MNTVA_COLOR_32BIT,
+			ovl_src, 128, 30, 22, YUV422_VARIANT_PAPC,
+			5, 5, 45, 33, 0, 0);
+		if (memcmp(first, ovl_dst, sizeof(ovl_dst)) == 0) {
+			printf("ok   overlay determinism\n");
+		} else {
+			printf("FAIL overlay determinism\n");
+			failures++;
+		}
+	}
+}
+
 static void test_fb_limit_clamp(void)
 {
 	seed_frame(0xb001);
@@ -1403,10 +1653,31 @@ static void bench_yuv32(void)
 		MNTVA_COLOR_32BIT, 160, yuv_src);
 }
 
+static uint8_t *bench_ovl_dst, *bench_ovl_scr, *bench_ovl_src;
+
+static void bench_overlay_720p32(void)
+{
+	overlay_composite_frame(bench_ovl_dst, 1280 * 4, bench_ovl_scr, 1280 * 4,
+		1280, 720, MNTVA_COLOR_32BIT, bench_ovl_src, 1280,
+		640, 360, YUV422_VARIANT_CGX, 100, 80, 640, 480, 0, 0);
+}
+
+static void bench_overlay_1080p16(void)
+{
+	overlay_composite_frame(bench_ovl_dst, 1920 * 2, bench_ovl_scr, 1920 * 2,
+		1920, 1080, MNTVA_COLOR_16BIT565, bench_ovl_src, 1280,
+		640, 360, YUV422_VARIANT_CGX, 200, 150, 800, 600, 0, 0);
+}
+
 static void run_benchmarks(void)
 {
 	seed_frame(0x7000);
 	fill_yuv_src(0x7001);
+	bench_ovl_dst = malloc(1920 * 1080 * 4);
+	bench_ovl_scr = malloc(1920 * 1080 * 4);
+	bench_ovl_src = malloc(1280 * 360);
+	memset(bench_ovl_scr, 0x3c, 1920 * 1080 * 4);
+	memset(bench_ovl_src, 0x80, 1280 * 360);
 	bench_one("fill_rect_solid 8", bench_fill8, 200000);
 	bench_one("fill_rect_solid 32", bench_fill32, 120000);
 	bench_one("acc_clear_buffer 32", bench_clear32, 120000);
@@ -1415,6 +1686,8 @@ static void run_benchmarks(void)
 	bench_one("p2d_rect src 8 planes", bench_p2d, 20000);
 	bench_one("yuv422_to_rgb 565", bench_yuv565, 20000);
 	bench_one("yuv422_to_rgb 32", bench_yuv32, 20000);
+	bench_one("overlay_frame 720p32", bench_overlay_720p32, 200);
+	bench_one("overlay_frame 1080p16", bench_overlay_1080p16, 200);
 	printf("checksum %016llx\n", (unsigned long long)checksum_words(actual_fb, FB_WORDS));
 }
 
@@ -1433,6 +1706,7 @@ static void run_tests(void)
 	test_acc_blit();
 	test_acc_clear();
 	test_yuv();
+	test_overlay_composite();
 	test_fb_limit_clamp();
 }
 

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include "video.h"
 #include "video_vdma.h"
+#include "overlay.h"
 #include "zz_config.h"
 #include "mntzorro.h"
 #include "interrupt.h"
@@ -319,8 +320,11 @@ void isr_video(void *dummy) {
 			if (vs.card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE]) {
 				video_formatter_write(0, MNTVF_OP_PALETTE_SEL);
 			}
+			// P96 video overlay: present a composited shadow buffer
+			// instead of the framebuffer while the overlay is active
+			// (returns the regular pan address otherwise)
 			init_vdma(vs.vmode_hsize, vs.vmode_vsize, vs.vmode_hdiv, vs.vmode_vdiv,
-					(u32)vs.framebuffer + vs.framebuffer_pan_offset);
+					overlay_present_bufpos(&vs));
 		}
 		vs.videocap_enabled_old = 0;
 		videocap_detection_reset();

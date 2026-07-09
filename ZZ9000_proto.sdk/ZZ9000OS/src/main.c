@@ -64,14 +64,17 @@ void Xil_AssertNonVoid() {}
 #include "usb_proxy.h"
 #include "sdk_mailbox.h"
 #include "surface_allocator.h"
+#include "overlay.h"
 
 /* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
  * P96 off-screen bitmap hooks on this revision (older firmware would
  * leak legacy surface heap on every bitmap free).
  * 2.5: OP_WRITE_YUV (packed 4:2:2 YUV→RGB rects) — ZZ9000.card gates
- * the P96 WriteYUVRect hook on this revision. */
+ * the P96 WriteYUVRect hook on this revision.
+ * 2.6: OP_VIDEO_OVERLAY + shadow-scanout compositor — ZZ9000.card
+ * gates the P96 video window (PIP) Features API on this revision. */
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 5
+#define REVISION_MINOR 6
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
@@ -923,6 +926,12 @@ int main() {
 							}
 							video_state->card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = zdata;
 							break;
+						case CARD_FEATURE_VIDEO_OVERLAY:
+							printf("[feature] VIDEO_OVERLAY: %lu\n",zdata);
+							// Master gate for the P96 video window (PIP)
+							// shadow-scanout compositor.
+							video_state->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY] = zdata;
+							break;
 						default:
 							break;
 					}
@@ -1745,6 +1754,11 @@ int main() {
 		 * iteration. Dormant (a cheap empty-queue scan) until core 1 is enabled.
 		 */
 		scheduler_core0_poll((writereq || readreq) ? 1 : 0, 0);
+
+		/* P96 video overlay: enqueue the ISR-requested compose frame
+		 * (the ISR itself must not touch the single-producer queue)
+		 * and service deferred shadow frees. */
+		overlay_main_poll(video_state);
 	}
 
 	cleanup_platform();

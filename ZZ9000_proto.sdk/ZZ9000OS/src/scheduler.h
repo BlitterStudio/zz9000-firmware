@@ -55,6 +55,11 @@
 #define TASKQ_OP_AUDIO_STREAM_FEED   0x0504u
 #define TASKQ_OP_AUDIO_STREAM_READ   0x0505u
 
+/* Internal (never client-visible) opcode: composite one P96 video
+ * overlay frame into a shadow buffer. Full-frame work: classifies
+ * TASK_LONG via the default case in taskq_class_for_opcode. */
+#define TASKQ_OP_VIDEO_COMPOSE       0x0700u
+
 typedef enum {
   TASK_FREE    = 0,
   TASK_QUEUED  = 1,

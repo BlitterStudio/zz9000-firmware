@@ -4,6 +4,7 @@
 #include "zz_video_modes.h"
 #include "gfx.h"
 #include "video.h"
+#include "overlay.h"
 #include "xil_printf.h"
 
 void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
@@ -178,6 +179,19 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
                     data->u8_user[GFXDATA_U8_YUV_VARIANT],
                     data->u8_user[GFXDATA_U8_COLORMODE],
                     data->pitch[1], yuv_data);
+            break;
+        }
+
+        case OP_VIDEO_OVERLAY: {
+            SWAP16(data->x[0]);		SWAP16(data->x[1]);		SWAP16(data->x[2]);
+            SWAP16(data->y[0]);		SWAP16(data->y[1]);		SWAP16(data->y[2]);
+            SWAP16(data->pitch[1]);
+            SWAP16(data->user[0]);
+            SWAP32(data->offset[1]);
+            /* u32_user[1] (color key) deliberately NOT swapped: it uses
+             * the pen convention, see overlay_handle_op */
+
+            overlay_handle_op(vs, data);
             break;
         }
 
