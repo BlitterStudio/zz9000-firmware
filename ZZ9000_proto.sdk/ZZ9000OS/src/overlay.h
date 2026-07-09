@@ -71,4 +71,11 @@ void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs);
  * the in-flight marker whose completion was dropped with the queue. */
 void overlay_scheduler_reset(void);
 
+/* ISR helpers for the videocap takeover: while videocap owns the
+ * scanout decisions the overlay present hook does not run, so the ISR
+ * asks whether a shadow is still being scanned (to repoint VDMA away
+ * from it once) and then reports the release. */
+int overlay_scanout_active(void);
+void overlay_scanout_released(void);
+
 #endif /* ZZ_OVERLAY_H */

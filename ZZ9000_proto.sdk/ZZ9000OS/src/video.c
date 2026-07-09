@@ -331,6 +331,17 @@ void isr_video(void *dummy) {
 		vs.videocap_enabled_old = 0;
 		videocap_detection_reset();
 	} else {
+		// videocap owns the scanout decisions from here on; if an
+		// overlay shadow was still being presented, hand the scanout
+		// back to the framebuffer once so the deferred shadow frees
+		// can proceed (the overlay present hook does not run in this
+		// branch and would otherwise stay latched as presenting)
+		if (vblank && overlay_scanout_active()) {
+			init_vdma(vs.vmode_hsize, vs.vmode_vsize, vs.vmode_hdiv,
+					vs.vmode_vdiv,
+					(u32)vs.framebuffer + vs.framebuffer_pan_offset);
+			overlay_scanout_released();
+		}
 		// FIXME magic constant
 		if (vs.framebuffer_pan_offset >= 0x00dff000) {
 			// videocap is enabled and

@@ -408,6 +408,16 @@ void overlay_scheduler_reset(void)
 	ov.compose_in_flight = 0;
 }
 
+int overlay_scanout_active(void)
+{
+	return ov.presenting;
+}
+
+void overlay_scanout_released(void)
+{
+	ov.presenting = 0;
+}
+
 void overlay_compose_retired(int ok)
 {
 	/* core 0 (main-loop harvest): the compose this retires targeted
