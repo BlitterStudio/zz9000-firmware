@@ -6289,6 +6289,9 @@ void sdk_mailbox_init(void)
 	 * generation tag stops the stale completion from posting, but only the
 	 * quiesce stops the write itself. No-op at cold boot (core 1 not yet up). */
 	scheduler_quiesce_for_reset();
+	/* internal tasks (video compose) were drained/dropped with the
+	 * queue and will never post their deferred completion */
+	overlay_scheduler_reset();
 
 	memset((void *)SDK_MAILBOX_ADDRESS, 0, SDK_MAILBOX_TOTAL_SIZE);
 	put_be32(desc->magic, SDK_MAILBOX_MAGIC);

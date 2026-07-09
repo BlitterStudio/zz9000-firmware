@@ -191,6 +191,13 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 			status = OVERLAY_STATUS_NO_MEMORY;
 			goto out;
 		}
+		/* the vblank ISR preempts this handler: make the overlay
+		 * unpresentable BEFORE the old shadows are freed, or a
+		 * mid-surgery vblank can present a just-freed buffer;
+		 * configured is restored below once the state is coherent */
+		ov.configured = 0;
+		ov.front = -1;
+		ov.ready_idx = -1;
 		overlay_free_shadows();
 		ov.shadow[0] = surface_allocator_alloc(need);
 		ov.shadow[1] = surface_allocator_alloc(need);
@@ -200,8 +207,6 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 			goto out;
 		}
 		ov.shadow_size = need;
-		ov.front = -1;
-		ov.ready_idx = -1;
 	}
 
 	ov.src_addr = src_addr;
@@ -365,6 +370,16 @@ uint16_t overlay_run_compose(const struct overlay_compose_params *p)
 	 * overlay_compose_retired() on CORE 0 (via the coherent task-queue
 	 * harvest), so every overlay field stays single-core. */
 	return 0; /* SDK_STATUS_OK */
+}
+
+/* Called when the task queue is quiesced and reinitialized outside an
+ * Amiga reset (firmware-update path): any queued/running compose was
+ * drained or dropped without a deferred completion, so the in-flight
+ * marker must be cleared here or no frame would ever compose again.
+ * A dropped compose never publishes, so this is the only cleanup. */
+void overlay_scheduler_reset(void)
+{
+	ov.compose_in_flight = 0;
 }
 
 void overlay_compose_retired(int ok)

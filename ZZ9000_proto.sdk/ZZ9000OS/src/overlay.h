@@ -67,4 +67,8 @@ void overlay_compose_retired(int ok);
  * shadows - drop all overlay state and the feature gate. */
 void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs);
 
+/* Task-queue quiesce+reinit outside an Amiga reset (fw update): clear
+ * the in-flight marker whose completion was dropped with the queue. */
+void overlay_scheduler_reset(void);
+
 #endif /* ZZ_OVERLAY_H */
