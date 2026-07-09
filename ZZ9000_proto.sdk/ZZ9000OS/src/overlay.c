@@ -352,12 +352,19 @@ uint16_t overlay_run_compose(const struct overlay_compose_params *p)
 	Xil_DCacheFlushRange((INTPTR)p->dst_addr,
 			(INTPTR)p->dst_pitch * p->scr_h);
 
-	__asm__ __volatile__("dmb ish" ::: "memory");
-	ov.ready_idx = (int8_t)p->target_idx;
+	/* No ov state is touched here: the completed frame is published by
+	 * overlay_compose_retired() on CORE 0 (via the coherent task-queue
+	 * harvest), so every overlay field stays single-core - the shadow
+	 * pixels themselves were just flushed to DDR for the VDMA. */
 	return 0; /* SDK_STATUS_OK */
 }
 
-void overlay_compose_retired(void)
+void overlay_compose_retired(int ok)
 {
+	/* core 0 (main-loop harvest): the compose this retires targeted
+	 * compose_target, which only core 0 writes. Failed/stranded tasks
+	 * retire without publishing (the shadow was never composed). */
+	if (ok && ov.compose_in_flight)
+		ov.ready_idx = (int8_t)ov.compose_target;
 	ov.compose_in_flight = 0;
 }

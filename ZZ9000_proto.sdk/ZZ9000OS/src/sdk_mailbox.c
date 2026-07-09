@@ -6541,7 +6541,7 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 		/* Internal task: no client completion to post; retire the
 		 * producer's in-flight marker, dispatched by opcode. */
 		if (opcode == (uint16_t)TASKQ_OP_VIDEO_COMPOSE)
-			overlay_compose_retired();
+			overlay_compose_retired(status == SDK_STATUS_OK);
 		else
 			g_audio_playback.refill_pending = 0U; /* AX refill */
 		return 1;

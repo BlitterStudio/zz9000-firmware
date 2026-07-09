@@ -58,8 +58,10 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs);
  * publish it for the next vblank. */
 uint16_t overlay_run_compose(const struct overlay_compose_params *p);
 
-/* Retire hook for the internal compose task (request_id == 0). */
-void overlay_compose_retired(void);
+/* Retire hook for the internal compose task (request_id == 0), called
+ * on core 0 from the task-queue harvest; publishes the completed
+ * shadow when `ok` (task status was SDK_STATUS_OK). */
+void overlay_compose_retired(int ok);
 
 /* Amiga reset: the surface heap was reinitialized underneath the
  * shadows - drop all overlay state and the feature gate. */
