@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include "video.h"
 #include "video_vdma.h"
+#include "zz_config.h"
 #include "mntzorro.h"
 #include "interrupt.h"
 #include "xaxivdma.h"
@@ -115,6 +116,21 @@ struct ZZ_VIDEO_STATE* video_init() {
 	vs.videocap_video_mode = ZZVMODE_800x600;
 	vs.video_mode = ZZVMODE_800x600 | 2 << 12 | MNTVA_COLOR_32BIT << 8;
 #endif
+
+	// ZZ9000.CFG overrides the built-in defaults (issue #33); the same
+	// state can still be changed later via REG_ZZ_VCAP_MODE and
+	// REG_ZZ_SET_FEATURE, so a driver keeps the last word.
+	const struct zz_config *cfg = zz_config_get();
+	if (cfg->videocap_mode_present) {
+		vs.videocap_video_mode = cfg->videocap_mode;
+		vs.video_mode = cfg->videocap_mode | 2 << 12 | MNTVA_COLOR_32BIT << 8;
+	}
+	if (cfg->ns_vsync_present) {
+		// mirrors the REG_ZZ_SET_FEATURE(NONSTANDARD_VSYNC) handler
+		vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = cfg->ns_vsync;
+		vs.scandoubler_mode_adjust = (cfg->ns_vsync == 2) ? 2 : 0;
+	}
+
 	vs.colormode = 0;
 
 	video_reset();

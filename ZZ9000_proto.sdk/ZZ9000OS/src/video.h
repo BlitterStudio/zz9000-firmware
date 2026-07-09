@@ -18,6 +18,9 @@
 #define MNTVF_OP_REPORT_LINE 17
 #define MNTVF_OP_PALETTE_SEL 18
 #define MNTVF_OP_PALETTE_HI 19
+// decoded by mntzorro.v (snooped off the op stream, like OP_VIDEOCAP),
+// not by the video formatter: data[1:0] = scanline mode, data[2] = parity
+#define MNTVF_OP_SCANLINES 20
 
 struct ZZ_VIDEO_STATE {
 	uint32_t* framebuffer;

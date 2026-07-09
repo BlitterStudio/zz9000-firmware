@@ -2625,6 +2625,17 @@ module MNTZorro_v0_1_S00_AXI
       videocap_pitch <= video_control_data[11:0];
     end
 
+    // snoop scanline settings sent over the video-control op path
+    // (MNTVF_OP_SCANLINES). the video formatter ignores this op; it
+    // exists so the ARM can apply ZZ9000.CFG scanline options at cold
+    // boot. the Zorro-side registers at 'h08-'h0E keep working and
+    // simply overwrite these values (last write wins).
+    if (video_control_op == 20) begin
+      // OP_SCANLINES = 20
+      scanline_width  <= video_control_data[1:0];
+      scanline_parity <= video_control_data[2];
+    end
+
     out_reg0 <= ZORRO3 ? last_z3addr : last_addr;
     out_reg1 <= zorro_ram_write_data;
     out_reg2 <= last_z3addr;
