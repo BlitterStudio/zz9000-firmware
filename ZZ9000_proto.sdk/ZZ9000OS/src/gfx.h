@@ -64,6 +64,7 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 
 void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src);
 void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint32_t color_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src, uint32_t color_format);
+void yuv422_to_rgb_rect(int16_t phase, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t variant, uint8_t color_format, uint16_t src_pitch, uint8_t *src);
 void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint8_t mask, uint32_t color_format);
 
 void acc_clear_buffer(uintptr_t addr, uint16_t w, uint16_t h, uint16_t pitch_, uint32_t fg_color, uint32_t color_format);
@@ -607,6 +608,7 @@ enum gfx_dma_op {
   OP_ETH_USB_OFFSETS,
   OP_SET_SPLIT_POS,
   OP_SET_PALETTE,
+  OP_WRITE_YUV,
   OP_NUM,
 };
 
@@ -648,4 +650,17 @@ enum gfxdata_u8_types {
   GFXDATA_U8_DRAWMODE,
   GFXDATA_U8_LINE_PATTERN_OFFSET,
   GFXDATA_U8_LINE_PADDING,
+  GFXDATA_U8_YUV_VARIANT,
+};
+
+/* Packed 4:2:2 macropixel byte orders (P96 RGBFTYPE names). All are one
+ * CCIR601 macropixel (two pixels, shared chroma) with the four bytes
+ * permuted; see the layout table in gfx.c. */
+enum yuv422_variant {
+  YUV422_VARIANT_CGX,   /* RGBFB_YUV422CGX: Y0 V Y1 U */
+  YUV422_VARIANT_STD,   /* RGBFB_YUV422:    Y1 U Y0 V */
+  YUV422_VARIANT_PC,    /* RGBFB_YUV422PC:  V Y0 U Y1 */
+  YUV422_VARIANT_PA,    /* RGBFB_YUV422PA:  Y0 Y1 V U */
+  YUV422_VARIANT_PAPC,  /* RGBFB_YUV422PAPC: U V Y1 Y0 */
+  YUV422_VARIANT_NUM,
 };

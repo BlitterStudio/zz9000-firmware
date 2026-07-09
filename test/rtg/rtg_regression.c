@@ -1113,6 +1113,154 @@ static void check_guard(const char *name)
 	printf("ok   %s\n", name);
 }
 
+/* Independent YUV 4:2:2 reference: the layouts are expressed as
+ * byte-position -> component (transcribed from the Picasso96.h macropixel
+ * comments), the opposite direction from the production table, and pixels
+ * are composed byte-by-byte in surface memory order. */
+enum { RC_Y0, RC_Y1, RC_U, RC_V };
+
+static const uint8_t ref_yuv_byte_comp[YUV422_VARIANT_NUM][4] = {
+	{ RC_Y0, RC_V, RC_Y1, RC_U },  /* CGX:  Y0-V-Y1-U  */
+	{ RC_Y1, RC_U, RC_Y0, RC_V },  /* STD:  Y1-U-Y0-V  */
+	{ RC_V, RC_Y0, RC_U, RC_Y1 },  /* PC:   V-Y0-U-Y1  */
+	{ RC_Y0, RC_Y1, RC_V, RC_U },  /* PA:   Y0-Y1-V-U  */
+	{ RC_U, RC_V, RC_Y1, RC_Y0 },  /* PAPC: U-V-Y1-Y0  */
+};
+
+static int32_t ref_yuv_clamp(int32_t v)
+{
+	return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+
+static void ref_yuv422_rect(int16_t phase, int16_t dx, int16_t dy, int16_t w,
+	int16_t h, uint8_t variant, uint8_t color_format, uint16_t src_pitch,
+	const uint8_t *src)
+{
+	for (int16_t yy = 0; yy < h; yy++) {
+		const uint8_t *srow = src + (size_t)yy * src_pitch;
+		uint8_t *drow = row8(expected_fb, FB_PITCH_WORDS, dy + yy);
+
+		for (int16_t xx = 0; xx < w; xx++) {
+			int16_t sx = phase + xx;
+			const uint8_t *mp = srow + (sx / 2) * 4;
+			int want_y = (sx & 1) ? RC_Y1 : RC_Y0;
+			int32_t y = 0, u = 0, v = 0;
+
+			for (int b = 0; b < 4; b++) {
+				uint8_t comp = ref_yuv_byte_comp[variant][b];
+				if (comp == want_y)
+					y = mp[b];
+				else if (comp == RC_U)
+					u = mp[b];
+				else if (comp == RC_V)
+					v = mp[b];
+			}
+
+			int32_t c = y - 16, d = u - 128, e = v - 128;
+			int32_t r = ref_yuv_clamp((298 * c + 409 * e + 128) >> 8);
+			int32_t g = ref_yuv_clamp((298 * c - 100 * d - 208 * e + 128) >> 8);
+			int32_t bl = ref_yuv_clamp((298 * c + 516 * d + 128) >> 8);
+
+			switch (color_format) {
+			case MNTVA_COLOR_32BIT: {
+				uint8_t *px = drow + (size_t)(dx + xx) * 4;
+				px[0] = (uint8_t)bl;
+				px[1] = (uint8_t)g;
+				px[2] = (uint8_t)r;
+				px[3] = 0xFF;
+				break;
+			}
+			case MNTVA_COLOR_16BIT565: {
+				uint8_t *px = drow + (size_t)(dx + xx) * 2;
+				uint16_t val = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (bl >> 3));
+				px[0] = (uint8_t)(val >> 8);   /* pixels sit big-endian in surface memory */
+				px[1] = (uint8_t)val;
+				break;
+			}
+			case MNTVA_COLOR_15BIT: {
+				uint8_t *px = drow + (size_t)(dx + xx) * 2;
+				uint16_t val = (uint16_t)(((r >> 3) << 10) | ((g >> 3) << 5) | (bl >> 3));
+				px[0] = (uint8_t)(val >> 8);
+				px[1] = (uint8_t)val;
+				break;
+			}
+			}
+		}
+	}
+}
+
+static uint8_t yuv_src[192 * 64];
+
+static void fill_yuv_src(uint32_t seed)
+{
+	uint32_t saved = rng_state;
+
+	rng_state = seed;
+	for (size_t i = 0; i < sizeof(yuv_src); i++)
+		yuv_src[i] = (uint8_t)rng32();
+	rng_state = saved;
+}
+
+static void test_yuv(void)
+{
+	static const uint8_t colormodes[3] = {
+		MNTVA_COLOR_32BIT, MNTVA_COLOR_16BIT565, MNTVA_COLOR_15BIT,
+	};
+	static const char *cm_names[3] = { "32", "565", "15" };
+	char name[64];
+
+	for (uint8_t variant = 0; variant < YUV422_VARIANT_NUM; variant++) {
+		for (int cm = 0; cm < 3; cm++) {
+			seed_frame(0xA000 + variant * 8 + cm);
+			fill_yuv_src(0xC0DE0000u + variant * 8 + cm);
+			yuv422_to_rgb_rect(0, 5, 3, 24, 16, variant, colormodes[cm], 96, yuv_src);
+			ref_yuv422_rect(0, 5, 3, 24, 16, variant, colormodes[cm], 96, yuv_src);
+			snprintf(name, sizeof(name), "yuv422 v%u -> %s", variant, cm_names[cm]);
+			check_frame(name);
+		}
+	}
+
+	/* geometry edge cases */
+	seed_frame(0xA100);
+	fill_yuv_src(0xC0DE0100);
+	yuv422_to_rgb_rect(0, 7, 2, 33, 9, YUV422_VARIANT_CGX, MNTVA_COLOR_16BIT565, 96, yuv_src);
+	ref_yuv422_rect(0, 7, 2, 33, 9, YUV422_VARIANT_CGX, MNTVA_COLOR_16BIT565, 96, yuv_src);
+	check_frame("yuv422 odd width");
+
+	seed_frame(0xA101);
+	fill_yuv_src(0xC0DE0101);
+	yuv422_to_rgb_rect(1, 4, 1, 21, 7, YUV422_VARIANT_STD, MNTVA_COLOR_32BIT, 96, yuv_src);
+	ref_yuv422_rect(1, 4, 1, 21, 7, YUV422_VARIANT_STD, MNTVA_COLOR_32BIT, 96, yuv_src);
+	check_frame("yuv422 phase 1 odd width");
+
+	seed_frame(0xA102);
+	fill_yuv_src(0xC0DE0102);
+	yuv422_to_rgb_rect(0, 13, 5, 1, 6, YUV422_VARIANT_PC, MNTVA_COLOR_16BIT565, 96, yuv_src);
+	ref_yuv422_rect(0, 13, 5, 1, 6, YUV422_VARIANT_PC, MNTVA_COLOR_16BIT565, 96, yuv_src);
+	check_frame("yuv422 w=1 odd dx");
+
+	seed_frame(0xA103);
+	fill_yuv_src(0xC0DE0103);
+	yuv422_to_rgb_rect(1, 2, 4, 1, 3, YUV422_VARIANT_PA, MNTVA_COLOR_15BIT, 96, yuv_src);
+	ref_yuv422_rect(1, 2, 4, 1, 3, YUV422_VARIANT_PA, MNTVA_COLOR_15BIT, 96, yuv_src);
+	check_frame("yuv422 w=1 phase 1");
+
+	seed_frame(0xA104);
+	fill_yuv_src(0xC0DE0104);
+	yuv422_to_rgb_rect(0, 0, 0, 40, 1, YUV422_VARIANT_PAPC, MNTVA_COLOR_32BIT, 96, yuv_src);
+	ref_yuv422_rect(0, 0, 0, 40, 1, YUV422_VARIANT_PAPC, MNTVA_COLOR_32BIT, 96, yuv_src);
+	check_frame("yuv422 h=1 origin");
+
+	/* rejected inputs must leave the frame untouched */
+	seed_frame(0xA105);
+	yuv422_to_rgb_rect(0, 5, 3, 24, 16, YUV422_VARIANT_NUM, MNTVA_COLOR_32BIT, 96, yuv_src);
+	yuv422_to_rgb_rect(0, 5, 3, 24, 16, YUV422_VARIANT_CGX, MNTVA_COLOR_8BIT, 96, yuv_src);
+	yuv422_to_rgb_rect(0, 5, 3, 0, 16, YUV422_VARIANT_CGX, MNTVA_COLOR_32BIT, 96, yuv_src);
+	yuv422_to_rgb_rect(0, 5, 3, 24, 0, YUV422_VARIANT_CGX, MNTVA_COLOR_32BIT, 96, yuv_src);
+	yuv422_to_rgb_rect(0, -1, 3, 24, 16, YUV422_VARIANT_CGX, MNTVA_COLOR_32BIT, 96, yuv_src);
+	check_frame("yuv422 rejected inputs");
+}
+
 static void test_fb_limit_clamp(void)
 {
 	seed_frame(0xb001);
@@ -1133,6 +1281,16 @@ static void test_fb_limit_clamp(void)
 	ref_invert_rect(5, FB_H - 2, 30, 2, 0xff, MNTVA_COLOR_8BIT);
 	check_frame("invert_rect clamped");
 	check_guard("invert_rect guard");
+
+	seed_frame(0xb003);
+	memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+	fill_yuv_src(0xC0DE0200);
+	yuv422_to_rgb_rect(0, 4, FB_H - 3, 20, 8, YUV422_VARIANT_CGX,
+		MNTVA_COLOR_32BIT, 96, yuv_src);
+	ref_yuv422_rect(0, 4, FB_H - 3, 20, 3, YUV422_VARIANT_CGX,
+		MNTVA_COLOR_32BIT, 96, yuv_src);
+	check_frame("yuv422 clamped");
+	check_guard("yuv422 guard");
 
 	set_fb_limit(0);
 }
@@ -1232,15 +1390,30 @@ static void bench_p2d(void)
 		B_PLANES, 0xff, 0xff, 0x00ffffff, B_PITCH, data, MNTVA_COLOR_32BIT);
 }
 
+static void bench_yuv565(void)
+{
+	yuv422_to_rgb_rect(0, 3, 2, 80, 48, YUV422_VARIANT_CGX,
+		MNTVA_COLOR_16BIT565, 160, yuv_src);
+}
+
+static void bench_yuv32(void)
+{
+	yuv422_to_rgb_rect(0, 3, 2, 80, 48, YUV422_VARIANT_CGX,
+		MNTVA_COLOR_32BIT, 160, yuv_src);
+}
+
 static void run_benchmarks(void)
 {
 	seed_frame(0x7000);
+	fill_yuv_src(0x7001);
 	bench_one("fill_rect_solid 8", bench_fill8, 200000);
 	bench_one("fill_rect_solid 32", bench_fill32, 120000);
 	bench_one("acc_clear_buffer 32", bench_clear32, 120000);
 	bench_one("copy_rect_nomask 32", bench_copy32, 120000);
 	bench_one("p2c_rect src 8 planes", bench_p2c, 20000);
 	bench_one("p2d_rect src 8 planes", bench_p2d, 20000);
+	bench_one("yuv422_to_rgb 565", bench_yuv565, 20000);
+	bench_one("yuv422_to_rgb 32", bench_yuv32, 20000);
 	printf("checksum %016llx\n", (unsigned long long)checksum_words(actual_fb, FB_WORDS));
 }
 
@@ -1258,6 +1431,7 @@ static void run_tests(void)
 	test_pattern();
 	test_acc_blit();
 	test_acc_clear();
+	test_yuv();
 	test_fb_limit_clamp();
 }
 

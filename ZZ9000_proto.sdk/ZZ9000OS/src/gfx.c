@@ -957,6 +957,111 @@ void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 	}
 }
 
+/* Packed 4:2:2 macropixel byte positions of Y0/Y1/U/V, indexed by
+ * enum yuv422_variant. Orders are memory byte orders as documented in
+ * Picasso96.h (e.g. YUV422CGX = Y0-V-Y1-U). */
+static const struct {
+	uint8_t y0, y1, u, v;
+} yuv422_layout[YUV422_VARIANT_NUM] = {
+	{ 0, 2, 3, 1 }, /* CGX:  Y0 V  Y1 U  */
+	{ 2, 0, 1, 3 }, /* STD:  Y1 U  Y0 V  */
+	{ 1, 3, 2, 0 }, /* PC:   V  Y0 U  Y1 */
+	{ 0, 1, 3, 2 }, /* PA:   Y0 Y1 V  U  */
+	{ 3, 2, 0, 1 }, /* PAPC: U  V  Y1 Y0 */
+};
+
+static inline uint8_t yuv_clamp8(int32_t v)
+{
+	if (v < 0) return 0;
+	if (v > 255) return 255;
+	return (uint8_t)v;
+}
+
+/* Store one RGB pixel in the Amiga surface byte layout: 32-bit BGRA is
+ * byte0=B (ARM value A<<24|R<<16|G<<8|B); 16/15-bit pixels sit
+ * big-endian in memory (byte0=rrrrrggg), so the ARM uint16 store is
+ * byte-swapped relative to the natural R<<11|G<<5|B form. */
+static inline void yuv_store_pixel(uint32_t *dp, int32_t x, uint8_t color_format,
+	int32_t cy, int32_t rc, int32_t gc, int32_t bc)
+{
+	uint8_t r = yuv_clamp8((cy + rc) >> 8);
+	uint8_t g = yuv_clamp8((cy + gc) >> 8);
+	uint8_t b = yuv_clamp8((cy + bc) >> 8);
+	uint16_t v16;
+
+	switch (color_format) {
+	case MNTVA_COLOR_32BIT:
+		dp[x] = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+		break;
+	case MNTVA_COLOR_16BIT565:
+		v16 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+		((uint16_t *)dp)[x] = (uint16_t)((v16 >> 8) | (v16 << 8));
+		break;
+	case MNTVA_COLOR_15BIT:
+		v16 = (uint16_t)(((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3));
+		((uint16_t *)dp)[x] = (uint16_t)((v16 >> 8) | (v16 << 8));
+		break;
+	default:
+		break;
+	}
+}
+
+/* Convert a packed 4:2:2 YUV rect (CCIR601 studio range) to RGB at
+ * (dx,dy). `src` points at macropixel-aligned rows; `phase`=1 means the
+ * first output pixel is the second (Y1) pixel of the first macropixel
+ * (i.e. the original source x was odd). Chroma is held per macropixel
+ * (no interpolation). */
+void yuv422_to_rgb_rect(int16_t phase, int16_t dx, int16_t dy, int16_t w, int16_t h,
+	uint8_t variant, uint8_t color_format, uint16_t src_pitch, uint8_t *src)
+{
+	if (dx < 0 || dy < 0 || w <= 0 || h <= 0 || variant >= YUV422_VARIANT_NUM)
+		return;
+	if (color_format != MNTVA_COLOR_32BIT &&
+	    color_format != MNTVA_COLOR_16BIT565 &&
+	    color_format != MNTVA_COLOR_15BIT)
+		return;
+	h = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h);
+	if (!h)
+		return;
+
+	uint8_t y0_off = yuv422_layout[variant].y0;
+	uint8_t y1_off = yuv422_layout[variant].y1;
+	uint8_t u_off = yuv422_layout[variant].u;
+	uint8_t v_off = yuv422_layout[variant].v;
+
+	for (int16_t row = 0; row < h; row++) {
+		uint8_t *sp = src + (uint32_t)row * src_pitch;
+		uint32_t *dp = fb + ((uint32_t)(dy + row) * fb_pitch);
+		int32_t x = dx;
+		int32_t remaining = w;
+		int16_t skip_first = phase & 1;
+
+		while (remaining > 0) {
+			int32_t d = (int32_t)sp[u_off] - 128;
+			int32_t e = (int32_t)sp[v_off] - 128;
+			int32_t rc = 409 * e + 128;
+			int32_t gc = -100 * d - 208 * e + 128;
+			int32_t bc = 516 * d + 128;
+
+			if (!skip_first) {
+				yuv_store_pixel(dp, x, color_format,
+					298 * ((int32_t)sp[y0_off] - 16), rc, gc, bc);
+				x++;
+				remaining--;
+			}
+			skip_first = 0;
+
+			if (remaining > 0) {
+				yuv_store_pixel(dp, x, color_format,
+					298 * ((int32_t)sp[y1_off] - 16), rc, gc, bc);
+				x++;
+				remaining--;
+			}
+			sp += 4;
+		}
+	}
+}
+
 #define RL_CACHE_SIZE 256
 #define RL_CACHE_MASK (RL_CACHE_SIZE - 1)
 static uint32_t rl_cache_keys[RL_CACHE_SIZE];

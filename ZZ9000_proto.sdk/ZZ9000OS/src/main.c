@@ -67,9 +67,11 @@ void Xil_AssertNonVoid() {}
 
 /* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
  * P96 off-screen bitmap hooks on this revision (older firmware would
- * leak legacy surface heap on every bitmap free). */
+ * leak legacy surface heap on every bitmap free).
+ * 2.5: OP_WRITE_YUV (packed 4:2:2 YUV→RGB rects) — ZZ9000.card gates
+ * the P96 WriteYUVRect hook on this revision. */
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 4
+#define REVISION_MINOR 5
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
