@@ -65,8 +65,11 @@ void Xil_AssertNonVoid() {}
 #include "sdk_mailbox.h"
 #include "surface_allocator.h"
 
+/* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
+ * P96 off-screen bitmap hooks on this revision (older firmware would
+ * leak legacy surface heap on every bitmap free). */
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 3
+#define REVISION_MINOR 4
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
