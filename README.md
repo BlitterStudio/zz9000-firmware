@@ -19,6 +19,27 @@ drivers and tools live in
 >
 > Original upstream: <https://source.mnt.re/amiga/zz9000-firmware>
 
+## What This Fork Adds
+
+Compared with the older MNT-era firmware releases, this fork has grown
+into a reproducible firmware, FPGA, and SDK-service platform:
+
+- GCC/Docker/CI firmware builds, release ZIP packaging, and a buildable
+  FSBL source flow instead of relying only on Xilinx SDK-era binaries.
+- A maintained hardware bitstream matrix for Zorro III, Zorro II, A500,
+  2 MB, no-fast-RAM, and ZZ9500CX/Super Denise variants.
+- `ZZ9000.CFG` cold-boot configuration on the SD card for native-video
+  defaults, exact refresh, scanlines, INT2, MAC, and boot HDF selection,
+  replacing one-off firmware flavors such as `ns-pal`.
+- RTG acceleration work, 64-bit VDMA scanout, and Zorro III
+  high-resolution support including 1920x1080x32.
+- SDK v2 mailbox services on the ARM cores: image decode/scale,
+  audio/MP3, archive/LHA decompression, crypto/TLS primitives, and a
+  dual-core scheduler for long-running jobs.
+- SD-card HDF boot, FWUP/RESTORE firmware-file handling, USB host
+  support for the Poseidon driver, Ethernet hardening, diagnostics, and
+  board-side fixes for current driver/tooling expectations.
+
 ## Features
 
 - Zorro II and Zorro III bus interface for RTG, memory windows, registers,
@@ -27,7 +48,8 @@ drivers and tools live in
   planar conversion, palette updates, and sprite/video state.
 - Scanlines V2 with classic, soft, and gradient patterns plus parity
   control, gated to RTG modes below 350 lines and AGA scandoubled modes.
-- SD HDF boot support from the ZZ9000 microSD card.
+- SD HDF boot support from the ZZ9000 microSD card, with firmware-side
+  extent mapping for direct block I/O after boot-time discovery.
 - USB 2.0 host support through the ARM EHCI stack and Amiga-side USB
   command proxy.
 - Gigabit Ethernet support through the Zynq GEM and ZZ9000 shared
@@ -190,13 +212,13 @@ Release CI is tag-driven. Push a `v*` tag and the workflow builds the
 single standard firmware flavor, packages every committed hardware
 variant bitstream (each ZIP includes the sample `ZZ9000.CFG`), and
 publishes a GitHub Release. Tags containing `-`, such as
-`v2.2.0-rc1`, are marked as pre-releases. Do not add an extra
+`v2.3.0-rc1`, are marked as pre-releases. Do not add an extra
 `ns-pal` release flavor; use `ZZ9000.CFG` for PAL/native-video
 defaults and related boot-time settings.
 
 ```bash
-git tag -a v2.2.0 -m "Firmware 2.2.0"
-git push origin v2.2.0
+git tag -a v2.3.0 -m "Firmware 2.3.0"
+git push origin v2.3.0
 ```
 
 ## Repository Layout
@@ -255,9 +277,10 @@ The hardware manual and schematics are available from MNT:
 - Original MNT ZZ9000 firmware sources: MNT Research GmbH and upstream
   contributors.
 - Scanlines V1/V2: Xanxi, adapted for this fork by Dimitris Panokostas.
-- BlitterStudio fork features, including RTG performance work, USB host
-  stack integration, SD boot, FWUP, videocap fixes, GCC build scripts,
-  CI packaging, and release infrastructure: Dimitris Panokostas.
+- BlitterStudio fork features, including RTG performance work, 64-bit
+  scanout, USB host stack integration, SD boot/HDF work, FWUP/RESTORE,
+  `ZZ9000.CFG`, videocap fixes, SDK services, GCC build scripts, CI
+  packaging, and release infrastructure: Dimitris Panokostas.
 
 Per-file copyright notices are preserved in the source tree.
 
