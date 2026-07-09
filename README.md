@@ -41,14 +41,14 @@ drivers and tools live in
 
 ## Installing Firmware
 
-Tagged releases attach old-style ZIPs that each contain a user-facing
-`BOOT.bin`. Release notes and change history live on the
+Tagged releases attach ZIPs that each contain a user-facing `BOOT.bin`
+and sample `ZZ9000.CFG`. Release notes and change history live on the
 [GitHub Releases](https://github.com/BlitterStudio/zz9000-firmware/releases)
 page.
 
 The direct update path is:
 
-1. Download or build the correct release ZIP.
+1. Download or build the correct release ZIP for the target hardware.
 2. Extract its `BOOT.bin`.
 3. Copy `BOOT.bin` to the ZZ9000 FAT32 microSD card, using the filename
    required by the card's QSPI/SD boot setup.
@@ -66,9 +66,9 @@ FWUP accepts flat root-level filenames only: up to 64 characters, simple
 ASCII letters/digits plus `.`, `_`, and `-`, with no path separators.
 Power-cycle the Amiga after replacing `BOOT.bin`.
 
-## Firmware Variants
+## Board / Bitstream Variants
 
-Use the ZIP whose variant matches the target machine:
+Use the ZIP whose board/bitstream variant matches the target machine:
 
 | Variant | Use for |
 |---|---|
@@ -80,11 +80,12 @@ Use the ZIP whose variant matches the target machine:
 | `a500-2mb` | A500 with ZZ9500CX Denise adapter, 2 MB window |
 | `a500plus` | A500+ or Super Denise with ZZ9500CX Denise adapter |
 
-Settings that used to require a separate firmware flavor or ENV:
-variables now live in the optional [`ZZ9000.CFG`](ZZ9000.CFG) config
-file (see below). Releases before 2.2 also shipped an `ns-pal` firmware
-flavor; its behavior is now `videocap_mode = pal` plus
-`nonstandard_vsync = pal` in `ZZ9000.CFG`.
+These are hardware/autoconfig bitstream variants. Current releases use
+one firmware flavor across all of them; settings that used to require a
+separate firmware flavor or ENV: variables now live in the optional
+[`ZZ9000.CFG`](ZZ9000.CFG) config file (see below). Older releases also
+shipped an `ns-pal` firmware flavor; its behavior is now
+`videocap_mode = pal` plus `nonstandard_vsync = pal` in `ZZ9000.CFG`.
 
 ## Configuration File (ZZ9000.CFG)
 
@@ -125,9 +126,11 @@ until it leaves `0xFFFF`, then read length (`0xEE`) and the bytes from
 the shared buffer at card base + `0xA000`. Writing the file back is the
 existing FWUP path (`ZZ9000.CFG` is a flat root-level filename), which
 also leaves a `.bak` of the previous version.
+
 Cold-boot scanlines need a bitstream that decodes the
-`MNTVF_OP_SCANLINES` video-control op (bitstreams built from this repo
-after the 2.2 cycle); older bitstreams simply ignore the option.
+`MNTVF_OP_SCANLINES` video-control op. The committed default and
+non-default release variant bitstreams in this repo have been rebuilt
+for that support; older bitstreams simply ignore the option.
 
 ## Building
 
@@ -184,9 +187,12 @@ timing changes as proven.
 ## Release Process
 
 Release CI is tag-driven. Push a `v*` tag and the workflow builds the
-firmware, packages every committed variant bitstream (each ZIP includes
-the sample `ZZ9000.CFG`), and publishes a GitHub Release. Tags
-containing `-`, such as `v2.2.0-rc1`, are marked as pre-releases.
+single standard firmware flavor, packages every committed hardware
+variant bitstream (each ZIP includes the sample `ZZ9000.CFG`), and
+publishes a GitHub Release. Tags containing `-`, such as
+`v2.2.0-rc1`, are marked as pre-releases. Do not add an extra
+`ns-pal` release flavor; use `ZZ9000.CFG` for PAL/native-video
+defaults and related boot-time settings.
 
 ```bash
 git tag -a v2.2.0 -m "Firmware 2.2.0"

@@ -30,7 +30,7 @@ BOOTGEN=/path/to/bootgen ./build_bootimage.sh   # → bootimage_work/BOOT.bin
 
 **Release packaging:**
 ```bash
-./build_release_assets.sh --tag v2.1.0   # → release/*.zip (one per variant)
+./build_release_assets.sh --tag v2.3.0   # → release/*.zip (one per hardware variant, one firmware flavor)
 ```
 
 ## Toolchain Gotchas
@@ -43,8 +43,9 @@ BOOTGEN=/path/to/bootgen ./build_bootimage.sh   # → bootimage_work/BOOT.bin
 
 - GitHub Actions (`.github/workflows/build.yml`) builds firmware + packages release ZIPs on every push/PR.
 - **CI does NOT run Vivado.** HDL changes must commit updated `.bit` files under `bootimage_work/`.
-- Tag a release: `git tag -a v2.1.0 && git push origin v2.1.0`. Tags with `-` (e.g., `v2.1.0-rc1`) become pre-releases.
+- Tag a release: `git tag -a v2.3.0 && git push origin v2.3.0`. Tags with `-` (e.g., `v2.3.0-rc1`) become pre-releases.
 - CI builds one firmware flavor. The former `ns-pal` flavor is replaced by `ZZ9000.CFG` on the SD card (`videocap_mode = pal` + `nonstandard_vsync = pal`); the `DEFAULT_NS_VIDEOCAP` flag still works for manual builds.
+- Do not reintroduce firmware-flavor release variants for PAL/native video, scanlines, INT2, MAC, or HDF selection; those are `ZZ9000.CFG` settings.
 
 ## Testing
 
@@ -112,12 +113,12 @@ transactions hit L2 regardless of the ARM's MMU attributes.
   pixel columns in the 8/15/16 bpp modes even though 32 bpp still looks fine. The xsim
   sweep catches this; run it.
 
-## Firmware Variants
+## Board / Bitstream Variants
 
-7 variants controlled by Verilog `` `define `` blocks in `mntzorro.v`:
+7 hardware/autoconfig variants controlled by Verilog `` `define `` blocks in `mntzorro.v`:
 `zorro3`, `zorro3-nofast`, `zorro2`, `zorro2-2mb`, `a500`, `a500-2mb`, `a500plus`.
 
-Build with `./build_variant_bitstreams.sh` (Vivado machine only). The script rewrites the define block in `mntzorro.v`, builds, copies the `.bit`, then restores the source. Bitstream outputs live under `bootimage_work/variants/`.
+Build with `./build_variant_bitstreams.sh` (Vivado machine only). The script rewrites the define block in `mntzorro.v`, builds, copies the `.bit`, then restores the source. Bitstream outputs live under `bootimage_work/variants/`. These are still required for releases; the removed matrix is the extra firmware flavor matrix, not the board bitstream matrix.
 
 ## Build Artifacts & Ignored Paths
 

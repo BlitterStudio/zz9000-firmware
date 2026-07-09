@@ -10,6 +10,12 @@ requires Vivado 2018.3. Build these on the Vivado machine with:
 Tagged release CI requires every bitstream listed here; branch and PR CI
 package the variants that are present.
 
+These are hardware/autoconfig variants. They are still required for
+release packaging, but they are not separate firmware behavior flavors.
+PAL/native-video defaults, scanline defaults, INT2, MAC, and HDF
+selection are handled by `ZZ9000.CFG`; the former `ns-pal` firmware
+flavor is not part of the release matrix.
+
 | Variant | Bitstream |
 |---|---|
 | Zorro III / A3000 / A4000 | `bootimage_work/zz9000_ps_wrapper.bit` |

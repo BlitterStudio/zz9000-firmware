@@ -2,11 +2,14 @@
 #
 # Build release-ready firmware archives.
 #
-# Each archive mirrors the old public firmware ZIP shape:
+# Each archive mirrors the public firmware ZIP shape:
 #   zz9000-firmware-<tag>-<variant>/BOOT.bin
+#   zz9000-firmware-<tag>-<variant>/ZZ9000.CFG
 #
 # CI can only package variants that already have a committed bitstream.
-# The ARM firmware ELF is shared across all variants.
+# The ARM firmware ELF is shared across all hardware variants. Current
+# release CI packages one firmware flavor; boot-time behavior that used
+# to need flavors (for example ns-pal) is selected with ZZ9000.CFG.
 
 set -euo pipefail
 
@@ -25,13 +28,15 @@ Options:
                           (default: release)
   --require-all           Fail if any known variant bitstream is missing
   --firmware-flavor SUFFIX
-                          Append SUFFIX to each archive name, e.g. "ns-pal"
-                          produces zz9000-firmware-<tag>-<variant>-ns-pal.zip.
+                          Append SUFFIX to each archive name, e.g. "diag"
+                          produces zz9000-firmware-<tag>-<variant>-diag.zip.
                           Use this when packaging an alternate ZZ9000OS.elf
                           flavor (the script does not rebuild firmware —
                           the caller is expected to do that). Skips the
                           canonical bootimage_work/BOOT.bin overwrite so the
                           standard-flavor BOOT.bin remains the local default.
+                          CI should not use this for PAL/native-video
+                          defaults; use ZZ9000.CFG instead.
 EOF
 }
 

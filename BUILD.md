@@ -17,7 +17,7 @@ outputs land in `bootimage_work/`. CI runs the same scripts.
 | [`build_bitstream.ps1`](build_bitstream.ps1) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Windows |
 | [`build_variant_bitstreams.sh`](build_variant_bitstreams.sh) | all release variant `.bit` files | Vivado 2018.3 on Linux |
 | [`build_bootimage.sh`](build_bootimage.sh) | `bootimage_work/BOOT.bin` | `bootgen` |
-| [`build_release_assets.sh`](build_release_assets.sh) | old-style ZIPs under `release/` | `bootgen`, `zip` |
+| [`build_release_assets.sh`](build_release_assets.sh) | release ZIPs under `release/` | `bootgen`, `zip` |
 
 The scripts are composable — nothing calls anything else implicitly.
 
@@ -79,7 +79,8 @@ nonstandard_vsync = pal
 The equivalent compile-time default still exists for manual builds
 (`EXTRA_CFLAGS=-DDEFAULT_NS_VIDEOCAP=1 ./build_firmware.sh`; the config
 file overrides it when present), but CI no longer packages a separate
-`ns-pal` release flavor. **PAL Amiga only**: the genlock clock
+`ns-pal` release flavor. Do not reintroduce a PAL firmware-flavor
+release matrix just for this setting. **PAL Amiga only**: the genlock clock
 defaults assume a PAL chipset master, so on an NTSC machine you'd see
 clock-mismatch artifacts until the host driver loads and corrects it.
 Not all HDMI sinks accept the non-standard timing either, which is why
@@ -89,10 +90,13 @@ the built-in default stays at 60 Hz.
 ```bash
 ./build_variant_bitstreams.sh
 ```
-This builds the default Zorro III bitstream and the Zorro III no-RAM /
-Zorro II / A500 / 2MB variants, copies them to the release paths under
-`bootimage_work/`, and restores `mntzorro.v` afterward. You can also
-pass one or more variant names, for example:
+These are hardware/autoconfig bitstream variants, not separate firmware
+behavior flavors. Build them when an HDL/block-design change must ship
+across supported boards. The script builds the default Zorro III
+bitstream and the Zorro III no-RAM / Zorro II / A500 / 2MB variants,
+copies them to the release paths under `bootimage_work/`, and restores
+`mntzorro.v` afterward. You can also pass one or more variant names, for
+example:
 ```bash
 ./build_variant_bitstreams.sh zorro3-nofast zorro2 zorro2-2mb a500plus
 ```
@@ -183,10 +187,12 @@ Release-style ZIP artifacts are uploaded per run.
 
 Push a `v*` tag (e.g. `v2.2.0`, or `v2.2.0-rc1` for a pre-release) and
 the workflow will build the firmware and publish a GitHub Release with
-old-style `zz9000-firmware-<tag>-<variant>.zip` archives attached. Each
-ZIP contains a directory with the user-facing `BOOT.bin` file to copy to
-the ZZ9000 microSD card. The workflow packages both the standard firmware
-flavor and the `ns-pal` flavor.
+`zz9000-firmware-<tag>-<variant>.zip` archives attached. Each ZIP
+contains a directory with the user-facing `BOOT.bin` and sample
+`ZZ9000.CFG` file to copy to the ZZ9000 microSD card. The workflow
+packages one standard firmware flavor; the former `ns-pal` behavior is
+selected with `videocap_mode = pal` plus `nonstandard_vsync = pal` in
+`ZZ9000.CFG`.
 
 ```bash
 git tag -a v2.2.0 -m "Firmware 2.2.0"
