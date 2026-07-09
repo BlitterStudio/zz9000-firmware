@@ -113,6 +113,12 @@ override config values until the next power cycle.
 Amiga-side software can query parsed values through the
 `REG_ZZ_CONFIG_KEY` register (`0xE8`): write a key id from
 `zz_config.h`, then read back value (`0xE8`) and present flag (`0xEA`).
+The raw file contents can be fetched through `REG_ZZ_CONFIG_FILE`
+(`0xEC`): write `0` (reset handshake) then `1`, poll status (`0xEC`)
+until it leaves `0xFFFF`, then read length (`0xEE`) and the bytes from
+the shared buffer at card base + `0xA000`. Writing the file back is the
+existing FWUP path (`ZZ9000.CFG` is a flat root-level filename), which
+also leaves a `.bak` of the previous version.
 Cold-boot scanlines need a bitstream that decodes the
 `MNTVF_OP_SCANLINES` video-control op (bitstreams built from this repo
 after the 2.2 cycle); older bitstreams simply ignore the option.

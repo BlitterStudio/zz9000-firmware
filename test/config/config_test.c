@@ -263,6 +263,26 @@ static void test_loader_no_file(void) {
     CHECK(mock_mount_balance() == 0);
 }
 
+static void test_read_raw(void) {
+    char buf[64];
+    uint32_t len = 99;
+
+    mock_set_file("int2 = on\n");
+    CHECK(zz_config_read_raw(buf, sizeof(buf), &len) == ZZ_CONFIG_FILE_OK);
+    CHECK(len == 10);
+    CHECK(memcmp(buf, "int2 = on\n", 10) == 0);
+
+    /* oversized file: silently truncated to max_len, like the boot parse */
+    mock_set_file("0123456789abcdef");
+    CHECK(zz_config_read_raw(buf, 8, &len) == ZZ_CONFIG_FILE_OK);
+    CHECK(len == 8);
+    CHECK(memcmp(buf, "01234567", 8) == 0);
+
+    mock_set_file(NULL);
+    CHECK(zz_config_read_raw(buf, sizeof(buf), &len) == ZZ_CONFIG_FILE_NO_FILE);
+    CHECK(len == 0);
+}
+
 static void test_loader_no_card(void) {
     mock_set_file("int2 = on\n");
     mock_set_mount_result(FR_NOT_READY);
@@ -286,6 +306,7 @@ int main(void) {
     test_loader_success();
     test_loader_no_file();
     test_loader_no_card();
+    test_read_raw();
 
     if (failures) {
         printf("%d/%d checks FAILED\n", failures, checks);

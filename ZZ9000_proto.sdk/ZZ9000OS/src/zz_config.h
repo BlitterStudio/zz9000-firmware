@@ -64,9 +64,25 @@ struct zz_config {
 	char hdf_path[ZZ_CONFIG_HDF_NAME_MAX + 4]; /* "0:/" + name + NUL */
 };
 
+/* Status codes for the REG_ZZ_CONFIG_FILE raw-read command. */
+enum zz_config_file_status {
+	ZZ_CONFIG_FILE_OK       = 0,
+	ZZ_CONFIG_FILE_NO_FILE  = 1,
+	ZZ_CONFIG_FILE_IO_ERROR = 2,
+	ZZ_CONFIG_FILE_IDLE     = 0xFFFF,
+};
+
 /* Mount the FAT volume, read and parse ZZ9000.CFG, unmount. Returns 0
  * if the file was found and parsed, -1 otherwise (defaults remain). */
 int zz_config_load(void);
+
+/* Read the current raw ZZ9000.CFG contents into `buffer` (up to
+ * max_len bytes; the tail of an oversized file is ignored, matching
+ * what the boot-time parser sees). Uses the already-registered FAT
+ * volume — never call before sd_storage_init() has mounted it.
+ * Returns a zz_config_file_status; *out_len is the byte count staged
+ * (0 unless ZZ_CONFIG_FILE_OK). */
+uint16_t zz_config_read_raw(void *buffer, uint32_t max_len, uint32_t *out_len);
 
 /* Parse `len` bytes of config text into the global config. Pure —
  * exercised directly by the host unit tests. Returns the number of

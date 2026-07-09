@@ -260,6 +260,35 @@ int zz_config_load(void) {
 	return 0;
 }
 
+uint16_t zz_config_read_raw(void *buffer, uint32_t max_len, uint32_t *out_len) {
+	FIL f;
+	UINT nread = 0;
+	FRESULT fr;
+
+	*out_len = 0;
+
+	/* The FAT volume is registered by sd_storage_init() at this point;
+	 * f_open fails cleanly (FR_NOT_ENABLED) if no card is mounted. */
+	fr = f_open(&f, "0:/" ZZ_CONFIG_FILENAME, FA_READ);
+	if (fr == FR_NO_FILE || fr == FR_NO_PATH) {
+		return ZZ_CONFIG_FILE_NO_FILE;
+	}
+	if (fr != FR_OK) {
+		printf("[CFG] raw read open failed: %d\n", (int)fr);
+		return ZZ_CONFIG_FILE_IO_ERROR;
+	}
+
+	fr = f_read(&f, buffer, max_len, &nread);
+	f_close(&f);
+	if (fr != FR_OK) {
+		printf("[CFG] raw read failed: %d\n", (int)fr);
+		return ZZ_CONFIG_FILE_IO_ERROR;
+	}
+
+	*out_len = nread;
+	return ZZ_CONFIG_FILE_OK;
+}
+
 uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 	uint16_t p = 0, v = 0;
 

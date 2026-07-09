@@ -422,6 +422,10 @@ int main() {
 	// key selected for REG_ZZ_CONFIG_KEY queries
 	uint16_t config_query_key = ZZ_CONFIG_KEY_LOADED;
 
+	// REG_ZZ_CONFIG_FILE raw-read state
+	uint16_t config_file_status = ZZ_CONFIG_FILE_IDLE;
+	uint32_t config_file_len = 0;
+
 	// zorro state
 	u32 zstate_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 	int amiga_reset_seen = ((zstate_raw & 0xff) == 0);
@@ -926,6 +930,27 @@ int main() {
 					// select which ZZ9000.CFG value a read of this
 					// register group returns (see zz_config.h)
 					config_query_key = zdata;
+					break;
+
+				case REG_ZZ_CONFIG_FILE:
+					// raw ZZ9000.CFG access for ZZTop: 0 resets the
+					// status handshake, 1 stages the file contents
+					// into the shared buffer (fresh from SD each time)
+					if (zdata == 0) {
+						config_file_status = ZZ_CONFIG_FILE_IDLE;
+						config_file_len = 0;
+					} else if (zdata == 1) {
+						config_file_status = zz_config_read_raw(
+							(void*)USB_BLOCK_STORAGE_ADDRESS,
+							ZZ_CONFIG_MAX_SIZE - 1, &config_file_len);
+						// push ARM D-cache writes to DDR so the Zorro-bus
+						// read (via AXI_HP, non-coherent) sees fresh bytes
+						Xil_DCacheFlushRange((UINTPTR)USB_BLOCK_STORAGE_ADDRESS,
+						                     ZZ_CONFIG_MAX_SIZE);
+						printf("[CFG] raw read -> status %d len %lu\n",
+						       config_file_status,
+						       (unsigned long)config_file_len);
+					}
 					break;
 
 				case REG_ZZ_P2C: {
@@ -1491,6 +1516,13 @@ int main() {
 						uint16_t present = 0;
 						uint16_t value = zz_config_query(config_query_key, &present);
 						data = ((uint32_t)value << 16) | present;
+						break;
+					}
+					case REG_ZZ_CONFIG_FILE: {
+						// status in the upper half, staged byte count
+						// in the lower half (REG_ZZ_CONFIG_FILE_LEN on Z2)
+						data = ((uint32_t)config_file_status << 16)
+						     | (config_file_len & 0xffff);
 						break;
 					}
 					case REG_ZZ_CONFIG: {

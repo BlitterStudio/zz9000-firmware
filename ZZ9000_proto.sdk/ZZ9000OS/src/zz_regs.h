@@ -156,8 +156,14 @@ enum zz_reg_offsets {
    * present flag in the lower half (0xEA on Z2). */
   REG_ZZ_CONFIG_KEY     = 0xE8,
   REG_ZZ_CONFIG_PRESENT = 0xEA,
-  REG_ZZ_UNUSED_REGEC   = 0xEC,
-  REG_ZZ_UNUSED_REGEE   = 0xEE,
+  /* ZZ9000.CFG raw file access: write 0 to reset status to IDLE
+   * (0xFFFF), write 1 to stage the current file contents into the
+   * shared buffer (card base + 0xA000). Then read back the 32-bit
+   * group at 0xEC — zz_config_file_status in the upper half (0xEC on
+   * Z2), staged byte count in the lower half (0xEE on Z2). Poll for
+   * status != IDLE after issuing command 1. */
+  REG_ZZ_CONFIG_FILE     = 0xEC,
+  REG_ZZ_CONFIG_FILE_LEN = 0xEE,
 
   REG_ZZ_PRINT_CHR      = 0xF0,
   REG_ZZ_PRINT_HEX      = 0xF2,
