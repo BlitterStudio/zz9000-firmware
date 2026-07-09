@@ -52,6 +52,7 @@ static struct {
 	volatile uint8_t compose_request;   /* set in ISR, cleared by poll */
 	volatile uint8_t compose_in_flight; /* core-0 main-loop owned */
 	volatile uint8_t free_pending;
+	volatile uint8_t discard_stale;     /* drop the next published frame */
 	uint8_t compose_target;
 } ov;
 
@@ -124,7 +125,22 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	}
 
 	uint32_t need = stride * rows;
-	if (need != ov.shadow_size) {
+	if (ov.free_pending) {
+		if (need == ov.shadow_size) {
+			/* re-open while the previous overlay's deferred free is
+			 * still pending: reclaim the buffers (the free is no
+			 * longer wanted) and drop whatever the still-running
+			 * compose publishes - it used the old parameters and
+			 * possibly a freed source bitmap */
+			ov.free_pending = 0;
+			ov.discard_stale = 1;
+		} else {
+			/* wrong size and the old compose still owns the buffers;
+			 * refuse - the driver fails/retries the open cleanly */
+			status = OVERLAY_STATUS_NO_MEMORY;
+			goto out;
+		}
+	} else if (need != ov.shadow_size) {
 		if (ov.compose_in_flight) {
 			/* a compose against the old shadows is still running;
 			 * refuse the resize for this frame, the driver resends */
@@ -195,6 +211,12 @@ static int overlay_presentable(struct ZZ_VIDEO_STATE *vs)
 	    vs->colormode != ov.snap_colormode ||
 	    vs->scalemode != 0)
 		return 0;
+	/* the scanout stride can change without a mode switch (OP_PAN with
+	 * a different pan width); the shadows were laid out and the VDMA
+	 * would scan them with mismatched strides -> hide until re-SET */
+	if (video_vdma_stride_bytes(vs->vmode_hsize, vs->vmode_hdiv,
+			vs->framebuffer_pan_width, stride_div) != ov.snap_stride)
+		return 0;
 	return 1;
 }
 
@@ -206,8 +228,14 @@ uint32_t overlay_present_bufpos(struct ZZ_VIDEO_STATE *vs)
 		return normal;
 
 	if (ov.ready_idx >= 0) {
-		ov.front = ov.ready_idx;
-		ov.ready_idx = -1;
+		if (ov.discard_stale) {
+			/* frame composed with pre-re-open parameters: drop it */
+			ov.discard_stale = 0;
+			ov.ready_idx = -1;
+		} else {
+			ov.front = ov.ready_idx;
+			ov.ready_idx = -1;
+		}
 	}
 	ov.compose_request = 1;
 
