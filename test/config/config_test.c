@@ -65,9 +65,13 @@ static int checks = 0;
 
 /* ---- tests ---------------------------------------------------------- */
 
+static int parse_str(const char *text) {
+    return zz_config_parse(text, (unsigned)strlen(text));
+}
+
 static void test_full_valid_file(void) {
     zz_config_reset();
-    int n = zz_config_parse(
+    int n = parse_str(
         "# full config\n"
         "videocap_mode = pal\n"
         "nonstandard_vsync = pal\n"
@@ -75,7 +79,7 @@ static void test_full_valid_file(void) {
         "scanline_parity = 1\n"
         "int2 = on\n"
         "mac = 68:82:F2:12:34:56\n"
-        "hdf = games.hdf\n", 200);
+        "hdf = games.hdf\n");
     const struct zz_config *c = zz_config_get();
     CHECK(n == 7);
     CHECK(c->videocap_mode_present && c->videocap_mode == ZZVMODE_720x576);
@@ -110,7 +114,7 @@ static void test_case_whitespace_comments(void) {
         "\tVIDEOCAP_MODE\t=  800X600  # trailing comment\r\n"
         "NonStandard_VSync=NTSC\r\n"
         "scanline_mode=3;comment\r\n";
-    int n = zz_config_parse(text, (unsigned)strlen(text));
+    int n = parse_str(text);
     const struct zz_config *c = zz_config_get();
     CHECK(n == 3);
     CHECK(c->videocap_mode == ZZVMODE_800x600);
@@ -120,15 +124,15 @@ static void test_case_whitespace_comments(void) {
 
 static void test_videocap_aliases(void) {
     zz_config_reset();
-    zz_config_parse("videocap_mode = 720x576\n", 25);
+    parse_str("videocap_mode = 720x576\n");
     CHECK(zz_config_get()->videocap_mode == ZZVMODE_720x576);
 
     zz_config_reset();
-    zz_config_parse("nonstandard_vsync = on\n", 23);
+    parse_str("nonstandard_vsync = on\n");
     CHECK(zz_config_get()->ns_vsync == 1);
 
     zz_config_reset();
-    zz_config_parse("nonstandard_vsync = off\n", 24);
+    parse_str("nonstandard_vsync = off\n");
     CHECK(zz_config_get()->ns_vsync_present);
     CHECK(zz_config_get()->ns_vsync == 0);
 }
@@ -150,7 +154,7 @@ static void test_bad_values_skipped(void) {
         "not a key value line\n"
         "= novalue\n"
         "novalue =\n";
-    int n = zz_config_parse(text, (unsigned)strlen(text));
+    int n = parse_str(text);
     const struct zz_config *c = zz_config_get();
     CHECK(n == 0);
     CHECK(!c->videocap_mode_present);
@@ -166,14 +170,14 @@ static void test_last_value_wins(void) {
     const char *text =
         "scanline_mode = 1\n"
         "scanline_mode = 2\n";
-    zz_config_parse(text, (unsigned)strlen(text));
+    parse_str(text);
     CHECK(zz_config_get()->scanline_mode == 2);
 }
 
 static void test_no_trailing_newline(void) {
     zz_config_reset();
     const char *text = "int2 = on";
-    int n = zz_config_parse(text, (unsigned)strlen(text));
+    int n = parse_str(text);
     CHECK(n == 1);
     CHECK(zz_config_get()->int2 == 1);
 }
@@ -186,12 +190,12 @@ static void test_hdf_name_length(void) {
     memset(name, 'a', 63); name[63] = 0;
     snprintf(line, sizeof(line), "hdf = %s\n", name);
     zz_config_reset();
-    CHECK(zz_config_parse(line, (unsigned)strlen(line)) == 1);
+    CHECK(parse_str(line) == 1);
 
     memset(name, 'a', 64); name[64] = 0;
     snprintf(line, sizeof(line), "hdf = %s\n", name);
     zz_config_reset();
-    CHECK(zz_config_parse(line, (unsigned)strlen(line)) == 0);
+    CHECK(parse_str(line) == 0);
 }
 
 static void test_overlong_line(void) {
@@ -202,14 +206,14 @@ static void test_overlong_line(void) {
     text[300] = 0;
     strcat(text, "\nint2 = on\n");
     zz_config_reset();
-    int n = zz_config_parse(text, (unsigned)strlen(text));
+    int n = parse_str(text);
     CHECK(n == 1);
     CHECK(zz_config_get()->int2 == 1);
 }
 
 static void test_mac_dash_separator(void) {
     zz_config_reset();
-    zz_config_parse("mac = 00-11-22-33-44-55\n", 24);
+    parse_str("mac = 00-11-22-33-44-55\n");
     const struct zz_config *c = zz_config_get();
     CHECK(c->mac_present);
     CHECK(c->mac[0] == 0x00 && c->mac[5] == 0x55);
@@ -228,7 +232,7 @@ static void test_query_interface(void) {
         "nonstandard_vsync = ntsc\n"
         "int2 = on\n"
         "mac = 68:82:F2:12:34:56\n";
-    zz_config_parse(text, (unsigned)strlen(text));
+    parse_str(text);
 
     CHECK(zz_config_query(ZZ_CONFIG_KEY_NS_VSYNC, &present) == 2 && present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_INT2, &present) == 1 && present);
