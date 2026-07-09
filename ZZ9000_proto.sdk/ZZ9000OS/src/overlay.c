@@ -69,6 +69,26 @@ static void overlay_free_shadows(void)
 	ov.shadow_size = 0;
 }
 
+/* Amiga reset: the legacy surface heap was just reinitialized, so the
+ * shadow addresses are no longer ours - drop ALL overlay state without
+ * touching the allocator. A compose still in flight may scribble into
+ * the freshly reset heap once; the first P96 allocations happen
+ * seconds later (driver boot), long after it retires. */
+void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
+{
+	ov.active = 0;
+	ov.configured = 0;
+	ov.compose_request = 0;
+	ov.free_pending = 0;
+	ov.discard_stale = 0;
+	ov.front = -1;
+	ov.ready_idx = -1;
+	ov.shadow[0] = 0;
+	ov.shadow[1] = 0;
+	ov.shadow_size = 0;
+	vs->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY] = 0;
+}
+
 static void overlay_stop(void)
 {
 	ov.active = 0;
@@ -199,6 +219,10 @@ static int overlay_presentable(struct ZZ_VIDEO_STATE *vs)
 	if (!ov.configured || !ov.active)
 		return 0;
 	if (!vs->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY])
+		return 0;
+	/* no compositor without core 1: fall back to the live framebuffer
+	 * instead of freezing the screen on the last composited shadow */
+	if (!scheduler_core1_available())
 		return 0;
 	if (vs->split_pos != 0)
 		return 0;

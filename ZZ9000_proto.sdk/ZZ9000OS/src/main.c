@@ -272,6 +272,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 
 	// drop all RTG off-screen surfaces; P96 re-allocates after reboot
 	surface_allocator_init(LEGACY_SURFACE_HEAP_ADDRESS, LEGACY_SURFACE_HEAP_SIZE);
+	// the overlay shadows lived in that heap: drop the overlay too
+	overlay_amiga_reset(video_state);
 
 	// FIXME
 	memset((u32 *)Z3_SCRATCH_ADDR, 0, sizeof(struct GFXData));

@@ -61,4 +61,8 @@ uint16_t overlay_run_compose(const struct overlay_compose_params *p);
 /* Retire hook for the internal compose task (request_id == 0). */
 void overlay_compose_retired(void);
 
+/* Amiga reset: the surface heap was reinitialized underneath the
+ * shadows - drop all overlay state and the feature gate. */
+void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs);
+
 #endif /* ZZ_OVERLAY_H */
