@@ -80,12 +80,17 @@ void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
 	ov.configured = 0;
 	ov.compose_request = 0;
 	ov.free_pending = 0;
-	ov.discard_stale = 0;
 	ov.front = -1;
 	ov.ready_idx = -1;
 	ov.shadow[0] = 0;
 	ov.shadow[1] = 0;
 	ov.shadow_size = 0;
+	/* the mailbox reinit drops internal completions, so a compose that
+	 * was queued/running never retires: clear the marker here or every
+	 * post-reboot SET would fail on the in-flight guard forever. If it
+	 * WAS running, drop whatever it still publishes. */
+	ov.discard_stale = ov.compose_in_flight ? 1 : 0;
+	ov.compose_in_flight = 0;
 	vs->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY] = 0;
 }
 
