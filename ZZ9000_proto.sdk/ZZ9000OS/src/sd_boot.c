@@ -13,7 +13,9 @@
 
 static uint32_t be32(uint32_t v) { return __builtin_bswap32(v); }
 
-static uint8_t block_buf[512];
+/* 32-byte aligned: sd_storage's raw path DMAs directly into this
+ * buffer, and the cache maintenance works on whole cache lines. */
+static uint8_t block_buf[512] __attribute__((aligned(32)));
 static struct sd_boot_info boot_info;
 static int boot_info_valid = 0;
 #define SD_BOOT_FS_BUF_SIZE (64 * 1024)
