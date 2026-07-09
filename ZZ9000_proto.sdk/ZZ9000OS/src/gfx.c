@@ -958,16 +958,22 @@ void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 }
 
 /* Packed 4:2:2 macropixel byte positions of Y0/Y1/U/V, indexed by
- * enum yuv422_variant. Orders are memory byte orders as documented in
- * Picasso96.h (e.g. YUV422CGX = Y0-V-Y1-U). */
+ * enum yuv422_variant. The Picasso96.h comments describe these orders
+ * with U and V interchanged - a documentation defect fixed in P96
+ * V3.6.3 ("the documentation on the 422 modes was incorrect and U and
+ * V were interchanged", wiki.icomp.de/wiki/P96). The corrected orders
+ * used here are also the industry-standard ones (CGX = YUY2,
+ * 422PC = UYVY). If PIP colors ever come out red/blue-swapped against
+ * WriteYUVRectDefault on hardware, swapping the u/v columns is the
+ * knob. */
 static const struct {
 	uint8_t y0, y1, u, v;
 } yuv422_layout[YUV422_VARIANT_NUM] = {
-	{ 0, 2, 3, 1 }, /* CGX:  Y0 V  Y1 U  */
-	{ 2, 0, 1, 3 }, /* STD:  Y1 U  Y0 V  */
-	{ 1, 3, 2, 0 }, /* PC:   V  Y0 U  Y1 */
-	{ 0, 1, 3, 2 }, /* PA:   Y0 Y1 V  U  */
-	{ 3, 2, 0, 1 }, /* PAPC: U  V  Y1 Y0 */
+	{ 0, 2, 1, 3 }, /* CGX:  Y0 U  Y1 V  (YUY2) */
+	{ 2, 0, 3, 1 }, /* STD:  Y1 V  Y0 U  */
+	{ 1, 3, 0, 2 }, /* PC:   U  Y0 V  Y1 (UYVY) */
+	{ 0, 1, 2, 3 }, /* PA:   Y0 Y1 U  V  */
+	{ 3, 2, 1, 0 }, /* PAPC: V  U  Y1 Y0 */
 };
 
 static inline uint8_t yuv_clamp8(int32_t v)

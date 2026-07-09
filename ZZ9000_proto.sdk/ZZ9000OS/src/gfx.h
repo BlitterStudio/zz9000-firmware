@@ -655,12 +655,13 @@ enum gfxdata_u8_types {
 
 /* Packed 4:2:2 macropixel byte orders (P96 RGBFTYPE names). All are one
  * CCIR601 macropixel (two pixels, shared chroma) with the four bytes
- * permuted; see the layout table in gfx.c. */
+ * permuted; see the layout table in gfx.c (note the old Picasso96.h
+ * comments have U and V interchanged - fixed in P96 V3.6.3). */
 enum yuv422_variant {
-  YUV422_VARIANT_CGX,   /* RGBFB_YUV422CGX: Y0 V Y1 U */
-  YUV422_VARIANT_STD,   /* RGBFB_YUV422:    Y1 U Y0 V */
-  YUV422_VARIANT_PC,    /* RGBFB_YUV422PC:  V Y0 U Y1 */
-  YUV422_VARIANT_PA,    /* RGBFB_YUV422PA:  Y0 Y1 V U */
-  YUV422_VARIANT_PAPC,  /* RGBFB_YUV422PAPC: U V Y1 Y0 */
+  YUV422_VARIANT_CGX,   /* RGBFB_YUV422CGX: Y0 U Y1 V (YUY2) */
+  YUV422_VARIANT_STD,   /* RGBFB_YUV422:    Y1 V Y0 U */
+  YUV422_VARIANT_PC,    /* RGBFB_YUV422PC:  U Y0 V Y1 (UYVY) */
+  YUV422_VARIANT_PA,    /* RGBFB_YUV422PA:  Y0 Y1 U V */
+  YUV422_VARIANT_PAPC,  /* RGBFB_YUV422PAPC: V U Y1 Y0 */
   YUV422_VARIANT_NUM,
 };

@@ -1114,17 +1114,18 @@ static void check_guard(const char *name)
 }
 
 /* Independent YUV 4:2:2 reference: the layouts are expressed as
- * byte-position -> component (transcribed from the Picasso96.h macropixel
- * comments), the opposite direction from the production table, and pixels
- * are composed byte-by-byte in surface memory order. */
+ * byte-position -> component, the opposite direction from the production
+ * table, and pixels are composed byte-by-byte in surface memory order.
+ * Orders are the P96 V3.6.3-corrected ones (the old Picasso96.h comments
+ * have U and V interchanged): CGX = YUY2, 422PC = UYVY. */
 enum { RC_Y0, RC_Y1, RC_U, RC_V };
 
 static const uint8_t ref_yuv_byte_comp[YUV422_VARIANT_NUM][4] = {
-	{ RC_Y0, RC_V, RC_Y1, RC_U },  /* CGX:  Y0-V-Y1-U  */
-	{ RC_Y1, RC_U, RC_Y0, RC_V },  /* STD:  Y1-U-Y0-V  */
-	{ RC_V, RC_Y0, RC_U, RC_Y1 },  /* PC:   V-Y0-U-Y1  */
-	{ RC_Y0, RC_Y1, RC_V, RC_U },  /* PA:   Y0-Y1-V-U  */
-	{ RC_U, RC_V, RC_Y1, RC_Y0 },  /* PAPC: U-V-Y1-Y0  */
+	{ RC_Y0, RC_U, RC_Y1, RC_V },  /* CGX:  Y0-U-Y1-V (YUY2) */
+	{ RC_Y1, RC_V, RC_Y0, RC_U },  /* STD:  Y1-V-Y0-U */
+	{ RC_U, RC_Y0, RC_V, RC_Y1 },  /* PC:   U-Y0-V-Y1 (UYVY) */
+	{ RC_Y0, RC_Y1, RC_U, RC_V },  /* PA:   Y0-Y1-U-V */
+	{ RC_V, RC_U, RC_Y1, RC_Y0 },  /* PAPC: V-U-Y1-Y0 */
 };
 
 static int32_t ref_yuv_clamp(int32_t v)
