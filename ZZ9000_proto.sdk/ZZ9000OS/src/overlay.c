@@ -133,12 +133,19 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 			vs->vmode_hdiv, vs->framebuffer_pan_width, stride_div);
 
 	/* scalemode folds a scan-double divide into hdiv/vdiv; the
-	 * compositor only understands plain progressive RTG modes */
+	 * compositor only understands plain progressive RTG modes. The
+	 * screen depth must be convertible (no YUV->pen for 8-bit CLUT):
+	 * rejecting here fails the PIP open cleanly instead of opening an
+	 * invisible overlay. Source rows must hold whole 4-byte
+	 * macropixels - an odd width still reads the full last one. */
 	if (!src_w || !src_h || dst_w < 1 || dst_h < 1 ||
 	    variant >= YUV422_VARIANT_NUM ||
 	    vs->scalemode != 0 ||
+	    (vs->colormode != MNTVA_COLOR_32BIT &&
+	     vs->colormode != MNTVA_COLOR_16BIT565 &&
+	     vs->colormode != MNTVA_COLOR_15BIT) ||
 	    !rows || !stride ||
-	    src_pitch < src_w * 2 ||
+	    src_pitch < (((uint32_t)src_w + 1) / 2) * 4 ||
 	    src_addr + (uint32_t)src_pitch * src_h > LEGACY_SURFACE_HEAP_END) {
 		status = OVERLAY_STATUS_BAD_PARAMS;
 		goto out;
