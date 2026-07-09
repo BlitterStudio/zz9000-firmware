@@ -13,6 +13,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include <stdio.h>
 #include <string.h>
 #include "xil_cache.h"
 #include "overlay.h"
@@ -142,8 +143,14 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	 * screen depth must be convertible (no YUV->pen for 8-bit CLUT):
 	 * rejecting here fails the PIP open cleanly instead of opening an
 	 * invisible overlay. Source rows must hold whole 4-byte
-	 * macropixels - an odd width still reads the full last one. */
-	if (!src_w || !src_h || dst_w < 1 || dst_h < 1 ||
+	 * macropixels - an odd width still reads the full last one.
+	 * The dest rect is only required when ACTIVATING: P96 creates the
+	 * feature before the window geometry exists (captured logs show no
+	 * FA_Left/Top/Width/Height at CreateFeature) and sends the rect
+	 * with the activating SetFeatureAttrs. */
+	int activating = (flags & 2) != 0;
+	if (!src_w || !src_h ||
+	    (activating && (dst_w < 1 || dst_h < 1)) ||
 	    variant >= YUV422_VARIANT_NUM ||
 	    vs->scalemode != 0 ||
 	    (vs->colormode != MNTVA_COLOR_32BIT &&
@@ -152,6 +159,11 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	    !rows || !stride ||
 	    src_pitch < (((uint32_t)src_w + 1) / 2) * 4 ||
 	    src_addr + (uint32_t)src_pitch * src_h > LEGACY_SURFACE_HEAP_END) {
+		printf("[overlay] SET rejected: src %ux%u pitch %u dst %dx%d "
+		       "act %d variant %u scale %d cm %d rows %lu stride %lu\n",
+		       src_w, src_h, src_pitch, dst_w, dst_h, activating,
+		       variant, vs->scalemode, vs->colormode,
+		       (unsigned long)rows, (unsigned long)stride);
 		status = OVERLAY_STATUS_BAD_PARAMS;
 		goto out;
 	}
