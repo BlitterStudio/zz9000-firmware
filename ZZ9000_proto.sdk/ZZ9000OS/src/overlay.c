@@ -164,8 +164,12 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	    src_pitch < (((uint32_t)src_w + 1) / 2) * 4 ||
 	    /* non-wrapping bounds: the product fits (65535*65535 < 2^32)
 	     * but src_addr + span could wrap past the heap-end test, and
-	     * offset[1] can wrap src_addr itself below the heap */
-	    src_addr < LEGACY_SURFACE_HEAP_ADDRESS ||
+	     * offset[1] can wrap src_addr itself below the window. The
+	     * range spans all card VRAM the driver can hand out: the
+	     * source comes from P96's own pool (the board window, low)
+	     * when rtg.library's constructor made it, or from the legacy
+	     * surface heap (high) via the ZZ AllocBitMap hook. */
+	    src_addr < (uint32_t)FRAMEBUFFER_ADDRESS ||
 	    src_addr >= LEGACY_SURFACE_HEAP_END ||
 	    (uint32_t)src_pitch * src_h >
 	    (uint32_t)LEGACY_SURFACE_HEAP_END - src_addr) {
