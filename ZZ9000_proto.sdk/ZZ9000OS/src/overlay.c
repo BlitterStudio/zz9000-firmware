@@ -383,6 +383,19 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 
 uint16_t overlay_run_compose(const struct overlay_compose_params *p)
 {
+	/* The YUV source and the screen are written by the HOST over
+	 * Zorro: those writes land in DDR through the FPGA's AXI port and
+	 * never snoop the ARM caches. This core re-reads the SAME
+	 * addresses every frame, so whatever survives L1 thrashing between
+	 * frames is stale - rendered as corrupt chunks and blank lines on
+	 * the bench until these invalidates went in. L1-only (per-core
+	 * CP15, PL310-safe - see the flush note below); L2 staleness is
+	 * bounded by the ISR's full per-vblank L2 flush. */
+	Xil_L1DCacheInvalidateRange((INTPTR)p->src_addr,
+			(INTPTR)p->src_pitch * p->src_h);
+	Xil_L1DCacheInvalidateRange((INTPTR)p->screen_addr,
+			(INTPTR)p->screen_pitch * p->scr_h);
+
 	overlay_composite_frame((uint8_t *)p->dst_addr, p->dst_pitch,
 			(const uint8_t *)p->screen_addr, p->screen_pitch,
 			p->scr_w, p->scr_h, p->color_format,
