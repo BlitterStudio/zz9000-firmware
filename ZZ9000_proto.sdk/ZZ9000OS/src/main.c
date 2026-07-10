@@ -72,9 +72,11 @@ void Xil_AssertNonVoid() {}
  * 2.5: OP_WRITE_YUV (packed 4:2:2 YUV→RGB rects) — ZZ9000.card gates
  * the P96 WriteYUVRect hook on this revision.
  * 2.6: OP_VIDEO_OVERLAY + shadow-scanout compositor — ZZ9000.card
- * gates the P96 video window (PIP) Features API on this revision. */
+ * gates the P96 video window (PIP) Features API on this revision.
+ * 2.7: CARD_FEATURE_DPMS + formatter sync gating — ZZ9000.card gates
+ * the P96 SetDPMSLevel hook on this revision. */
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 6
+#define REVISION_MINOR 7
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
@@ -933,6 +935,12 @@ int main() {
 							// Master gate for the P96 video window (PIP)
 							// shadow-scanout compositor.
 							video_state->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY] = zdata;
+							break;
+						case CARD_FEATURE_DPMS:
+							if (zdata <= ZZ_DPMS_OFF) {
+								printf("[feature] DPMS: %lu\n", zdata);
+								video_set_dpms((uint8_t)zdata);
+							}
 							break;
 						default:
 							break;

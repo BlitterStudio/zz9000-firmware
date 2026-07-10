@@ -35,6 +35,7 @@ localparam OP_SCALE = 4;
 localparam OP_MAX = 6;
 localparam OP_HS = 7;
 localparam OP_VS = 8;
+localparam OP_DPMS = 21;
 localparam OP_SPRITEXY = 13;
 
 // config (from plusargs)
@@ -251,6 +252,43 @@ always @(posedge dvi_clk)
   if (uut.counter_y == VS_START && uut.counter_x == 0)
     frames = frames + 1;
 
+`ifndef MASTER_DUT
+integer dpms_errors = 0;
+integer dpms_start_frame;
+reg dpms_hsync_seen;
+reg dpms_vsync_seen;
+
+task check_dpms(input [1:0] level, input integer expect_hsync,
+                input integer expect_vsync);
+  begin
+    op(OP_DPMS, level);
+
+    // Discard the partial frame containing the clock-domain handoff, then
+    // observe a complete frame. A live sync differs from its inactive level.
+    dpms_start_frame = frames;
+    wait (frames > dpms_start_frame);
+    dpms_start_frame = frames;
+    dpms_hsync_seen = 0;
+    dpms_vsync_seen = 0;
+    while (frames == dpms_start_frame) begin
+      @(posedge dvi_clk);
+      if (dvi_hsync !== (1'b0 ^ uut.vga_sync_polarity))
+        dpms_hsync_seen = 1;
+      if (dvi_vsync !== (1'b0 ^ uut.vga_sync_polarity))
+        dpms_vsync_seen = 1;
+    end
+
+    if (dpms_hsync_seen !== expect_hsync ||
+        dpms_vsync_seen !== expect_vsync) begin
+      dpms_errors = dpms_errors + 1;
+      $display("DPMS MISMATCH level=%0d hsync=%0d/%0d vsync=%0d/%0d",
+               level, dpms_hsync_seen, expect_hsync,
+               dpms_vsync_seen, expect_vsync);
+    end
+  end
+endtask
+`endif
+
 // main
 integer i, x, mism, shown;
 reg [31:0] got, exp;
@@ -322,6 +360,15 @@ initial begin
         end
       end
     end
+
+`ifndef MASTER_DUT
+  check_dpms(0, 1, 1); // ON
+  check_dpms(1, 0, 1); // STANDBY: HSync off
+  check_dpms(2, 1, 0); // SUSPEND: VSync off
+  check_dpms(3, 0, 0); // OFF
+  op(OP_DPMS, 0);
+  mism = mism + dpms_errors;
+`endif
 
   $display("RESULT cmode=%0d scalex=%0d scaley=%0d width=%0d MISMATCHES=%0d",
            cfg_cmode, cfg_scalex, cfg_scaley, cfg_width, mism);

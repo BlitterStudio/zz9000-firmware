@@ -62,6 +62,12 @@ localparam OP_VIDEOCAP=16; // we ignore this here, it's snooped by MNTZorro
 localparam OP_REPORT_LINE=17;
 localparam OP_PALETTE_SEL=18; // switch display to secondary 256 color palette for screen split
 localparam OP_PALETTE_HI=19; // set values in secondary 256 color palette for screen split
+localparam OP_DPMS=21;
+
+localparam DPMS_ON=0;
+localparam DPMS_STANDBY=1; // HSync disabled, VSync enabled
+localparam DPMS_SUSPEND=2; // HSync enabled, VSync disabled
+localparam DPMS_OFF=3;
 
 localparam CMODE_8BIT=0;
 localparam CMODE_16BIT=1;
@@ -77,6 +83,7 @@ reg [2:0] colormode = CMODE_32BIT;
 reg vsync_request;
 reg sync_polarity = 1; // negative polarity
 reg selected_palette = 0;
+reg [1:0] dpms_level = DPMS_ON;
 
 reg [15:0] screen_h_max;
 reg [15:0] screen_v_max;
@@ -288,6 +295,9 @@ begin
     OP_REPORT_LINE: begin
         report_y <= control_data_in[11:0];
       end
+    OP_DPMS: begin
+        dpms_level <= control_data_in[1:0];
+      end
   endcase
 end
 
@@ -327,6 +337,7 @@ reg [3:0] counter_scanout_step;
 reg [3:0] counter_subpixel = 0;
 
 reg vga_sync_polarity = 0;
+reg [1:0] vga_dpms_level = DPMS_ON;
 
 // Line buffer: written per 64-bit VDMA beat, read per 32-bit scanout word.
 // READ_LATENCY_B(1) gives doutb the exact registered-read timing the
@@ -395,6 +406,7 @@ always @(posedge dvi_clk) begin
   vga_scale_y <= scale_y;
   vga_colormode <= colormode;
   vga_sync_polarity <= sync_polarity;
+  vga_dpms_level <= dpms_level;
   if (counter_y == 0) begin
     vga_sprite_x <= sprite_x;
     vga_sprite_y <= sprite_y;
@@ -601,12 +613,19 @@ endcase
   end
 
   // 4 clocks pipeline delay
-  if (counter_x >= vga_h_sync_start_delayed && counter_x < vga_h_sync_end_delayed)
+  // VESA DPMS disables a sync by holding it at the inactive level. Keep the
+  // raster/vblank state machines running so firmware and P96 waits continue
+  // to work while the monitor is asleep.
+  if (vga_dpms_level == DPMS_STANDBY || vga_dpms_level == DPMS_OFF)
+    dvi_hsync <= 0^vga_sync_polarity;
+  else if (counter_x >= vga_h_sync_start_delayed && counter_x < vga_h_sync_end_delayed)
     dvi_hsync <= 1^vga_sync_polarity;
   else
     dvi_hsync <= 0^vga_sync_polarity;
 
-  if (counter_x >= vga_h_sync_start_delayed)
+  if (vga_dpms_level == DPMS_SUSPEND || vga_dpms_level == DPMS_OFF)
+    dvi_vsync <= 0^vga_sync_polarity;
+  else if (counter_x >= vga_h_sync_start_delayed)
     if (counter_y >= vga_v_sync_start && counter_y < vga_v_sync_end)
       dvi_vsync <= 1^vga_sync_polarity;
     else
