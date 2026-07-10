@@ -162,7 +162,13 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	     vs->colormode != MNTVA_COLOR_15BIT) ||
 	    !rows || !stride ||
 	    src_pitch < (((uint32_t)src_w + 1) / 2) * 4 ||
-	    src_addr + (uint32_t)src_pitch * src_h > LEGACY_SURFACE_HEAP_END) {
+	    /* non-wrapping bounds: the product fits (65535*65535 < 2^32)
+	     * but src_addr + span could wrap past the heap-end test, and
+	     * offset[1] can wrap src_addr itself below the heap */
+	    src_addr < LEGACY_SURFACE_HEAP_ADDRESS ||
+	    src_addr >= LEGACY_SURFACE_HEAP_END ||
+	    (uint32_t)src_pitch * src_h >
+	    (uint32_t)LEGACY_SURFACE_HEAP_END - src_addr) {
 		printf("[overlay] SET rejected: src %ux%u pitch %u dst %dx%d "
 		       "act %d variant %u scale %d cm %d rows %lu stride %lu\n",
 		       src_w, src_h, src_pitch, dst_w, dst_h, activating,
@@ -262,15 +268,16 @@ static int overlay_presentable(struct ZZ_VIDEO_STATE *vs)
 		return 0;
 	if (vs->split_pos != 0)
 		return 0;
-	if (vs->colormode != MNTVA_COLOR_32BIT &&
-	    vs->colormode != MNTVA_COLOR_16BIT565 &&
-	    vs->colormode != MNTVA_COLOR_15BIT)
-		return 0;
 	/* a snapshot mismatch LATCHES hidden (mode_stale) until the driver
 	 * re-SETs: P96 tears down or reallocates bitmaps across mode
 	 * switches, so a mode that later returns to the same geometry must
 	 * not resurrect the old source/shadow state. The transient hides
-	 * above (split, core 1, feature gate) resume by themselves. */
+	 * above (split, core 1, feature gate) resume by themselves.
+	 * Unsupported color modes (8-bit CLUT) need no separate check: the
+	 * snapshot is always a supported mode (SET rejects the rest), so
+	 * they latch here as a colormode mismatch - an early return before
+	 * this block would skip the latch and resurrect the old overlay
+	 * when the original mode comes back. */
 	if ((uint32_t)vs->vmode_hsize != ov.snap_hsize ||
 	    (uint32_t)vs->vmode_vsize != ov.snap_vsize ||
 	    vs->colormode != ov.snap_colormode ||
