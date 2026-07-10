@@ -255,6 +255,17 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	/* a fresh SET re-validated everything against the live mode */
 	ov.mode_stale = 0;
 
+	/* UART fingerprint: proves which firmware build handled the SET
+	 * (stale-BOOT.bin bench rounds are otherwise undetectable) and
+	 * captures the geometry the compositor will run with */
+	printf("[overlay] SET ok build " __DATE__ " " __TIME__
+	       " src %lux%lu pitch %u dst %d,%d %dx%d act %d "
+	       "scr %lux%lu stride %lu cm %d\n",
+	       (unsigned long)src_w, (unsigned long)src_h, src_pitch,
+	       dst_x, dst_y, dst_w, dst_h, ov.active,
+	       (unsigned long)vs->vmode_hsize, (unsigned long)rows,
+	       (unsigned long)stride, vs->colormode);
+
 out:
 	data->u32_user[0] = status;
 	SWAP32(data->u32_user[0]);
