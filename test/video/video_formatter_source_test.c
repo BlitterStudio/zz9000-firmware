@@ -160,6 +160,26 @@ static int test_64bit_tkeep_drives_writes(const char *text)
 	return ok ? 0 : 1;
 }
 
+static int test_dpms_gates_only_external_syncs(const char *text)
+{
+	int ok = 1;
+
+	ok &= require_contains(text, "localparam OP_DPMS=21;");
+	ok &= require_contains(text, "reg [1:0] dpms_level = DPMS_ON;");
+	ok &= require_contains(text, "OP_DPMS: begin");
+	ok &= require_contains(text, "dpms_level <= control_data_in[1:0];");
+	ok &= require_contains(text,
+	    "vga_dpms_level == DPMS_STANDBY || vga_dpms_level == DPMS_OFF");
+	ok &= require_contains(text,
+	    "vga_dpms_level == DPMS_SUSPEND || vga_dpms_level == DPMS_OFF");
+	ok &= require_contains(text, "dvi_hsync <= 0^vga_sync_polarity;");
+	ok &= require_contains(text, "dvi_vsync <= 0^vga_sync_polarity;");
+	ok &= require_absent(text, "dvi_active_video <= 0; // DPMS",
+	                     "DPMS must not stop the internal raster/vblank path");
+
+	return ok ? 0 : 1;
+}
+
 int main(void)
 {
 	char *text = read_file(VIDEO_FORMATTER_PATH);
@@ -173,6 +193,8 @@ int main(void)
 		result = test_scanout_pipeline_keeps_master_alignment(text);
 	if (!result)
 		result = test_64bit_tkeep_drives_writes(text);
+	if (!result)
+		result = test_dpms_gates_only_external_syncs(text);
 	free(text);
 
 	return result;

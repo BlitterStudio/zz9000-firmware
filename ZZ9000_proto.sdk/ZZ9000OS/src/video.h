@@ -21,6 +21,14 @@
 // decoded by mntzorro.v (snooped off the op stream, like OP_VIDEOCAP),
 // not by the video formatter: data[1:0] = scanline mode, data[2] = parity
 #define MNTVF_OP_SCANLINES 20
+#define MNTVF_OP_DPMS 21
+
+enum zz_dpms_level {
+	ZZ_DPMS_ON,
+	ZZ_DPMS_STANDBY,
+	ZZ_DPMS_SUSPEND,
+	ZZ_DPMS_OFF,
+};
 
 struct ZZ_VIDEO_STATE {
 	uint32_t* framebuffer;
@@ -70,6 +78,7 @@ struct ZZ_VIDEO_STATE* video_init();
 void video_reset();
 void isr_video(void *dummy);
 void video_mode_init(int mode, int scalemode, int colormode);
+void video_set_dpms(uint8_t level);
 void hw_sprite_show(int show);
 void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite);
 void update_hw_sprite_clut(uint8_t *data_, uint8_t *colors, uint16_t w, uint16_t h, uint8_t keycolor);

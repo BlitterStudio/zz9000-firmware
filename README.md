@@ -33,6 +33,8 @@ into a reproducible firmware, FPGA, and SDK-service platform:
   replacing one-off firmware flavors such as `ns-pal`.
 - RTG acceleration work, 64-bit VDMA scanout, and Zorro III
   high-resolution support including 1920x1080x32.
+- Picasso96 DPMS monitor power management, with independent HSync/VSync
+  gating for standby, suspend, and off plus a mode-set wake fail-safe.
 - SDK v2 mailbox services on the ARM cores: image decode/scale,
   audio/MP3, archive/LHA decompression, crypto/TLS primitives, and a
   dual-core scheduler for long-running jobs.
@@ -46,6 +48,8 @@ into a reproducible firmware, FPGA, and SDK-service platform:
   interrupts, boot ROM, and DMA-style firmware services.
 - RTG acceleration paths in `ZZ9000OS` for fills, blits, pattern drawing,
   planar conversion, palette updates, and sprite/video state.
+- VESA DPMS sync control for the matching Picasso96 driver; internal raster
+  and vblank timing keep running while the monitor is asleep.
 - Scanlines V2 with classic, soft, and gradient patterns plus parity
   control, gated to RTG modes below 350 lines and AGA scandoubled modes.
 - SD HDF boot support from the ZZ9000 microSD card, with firmware-side

@@ -278,6 +278,14 @@ void video_formatter_write(uint32_t data, uint16_t op) {
 	VF_DLY;
 }
 
+void video_set_dpms(uint8_t level) {
+	if (level > ZZ_DPMS_OFF)
+		return;
+
+	vs.card_feature_enabled[CARD_FEATURE_DPMS] = level;
+	video_formatter_write(level, MNTVF_OP_DPMS);
+}
+
 static int videocap_detection_is_stable(int videocap_ntsc, int interlace) {
 	if (videocap_ntsc != vs.videocap_ntsc_candidate ||
 			interlace != vs.interlace_candidate) {
@@ -594,6 +602,9 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 	video_formatter_write(vmode->polarity, MNTVF_OP_POLARITY);
 	video_formatter_write(scalemode, MNTVF_OP_SCALE);
 	video_formatter_write(colormode, MNTVF_OP_COLORMODE);
+	/* A mode change is also the fail-safe wake path: never leave a display
+	 * stranded with one or both syncs suppressed after reprogramming timing. */
+	video_set_dpms(ZZ_DPMS_ON);
 
 	// Now safe to switch the pixel clock — VGA counters already have new geometry.
 	pixelclock_init_2(vmode);
