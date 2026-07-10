@@ -14,6 +14,9 @@
  *
 */
 
+#ifndef ZZ_GFX_H
+#define ZZ_GFX_H
+
 #include <stdint.h>
 #ifdef __ARM_NEON__
 #include <arm_neon.h>
@@ -65,6 +68,7 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src);
 void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint32_t color_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src, uint32_t color_format);
 void yuv422_to_rgb_rect(int16_t phase, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t variant, uint8_t color_format, uint16_t src_pitch, uint8_t *src);
+void overlay_composite_frame(uint8_t *dst, uint32_t dst_pitch, const uint8_t *screen, uint32_t screen_pitch, uint16_t scr_w, uint16_t scr_h, uint8_t color_format, const uint8_t *src, uint16_t src_pitch, uint16_t src_w, uint16_t src_h, uint8_t variant, int16_t dst_x, int16_t dst_y, int16_t dst_w, int16_t dst_h, uint32_t key_native, uint8_t key_enabled);
 void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint8_t mask, uint32_t color_format);
 
 void acc_clear_buffer(uintptr_t addr, uint16_t w, uint16_t h, uint16_t pitch_, uint32_t fg_color, uint32_t color_format);
@@ -573,7 +577,12 @@ enum gfx_minterm_modes {
 			} break; \
 	}
 
-#pragma pack(4)
+/* pack scoped to this struct only: the old bare #pragma pack(4) leaked
+ * into every header included after gfx.h - fatally so for the Xilinx
+ * VDMA structs, which then disagreed with the BSP library layout.
+ * GFXData itself is layout-identical either way (all members have
+ * <= 4-byte natural alignment). */
+#pragma pack(push, 4)
 struct GFXData {
   uint32_t offset[2];
   uint32_t rgb[2];
@@ -588,6 +597,7 @@ struct GFXData {
   uint8_t clut3[768];
   uint8_t clut4[768];
 };
+#pragma pack(pop)
 
 enum gfx_dma_op {
   OP_NONE,
@@ -609,6 +619,7 @@ enum gfx_dma_op {
   OP_SET_SPLIT_POS,
   OP_SET_PALETTE,
   OP_WRITE_YUV,
+  OP_VIDEO_OVERLAY,
   OP_NUM,
 };
 
@@ -651,6 +662,12 @@ enum gfxdata_u8_types {
   GFXDATA_U8_LINE_PATTERN_OFFSET,
   GFXDATA_U8_LINE_PADDING,
   GFXDATA_U8_YUV_VARIANT,
+  GFXDATA_U8_OVERLAY_SUBCMD,
+};
+
+enum overlay_subcmd {
+  OVERLAY_SUBCMD_SET,
+  OVERLAY_SUBCMD_OFF,
 };
 
 /* Packed 4:2:2 macropixel byte orders (P96 RGBFTYPE names). All are one
@@ -665,3 +682,5 @@ enum yuv422_variant {
   YUV422_VARIANT_PAPC,  /* RGBFB_YUV422PAPC: V U Y1 Y0 */
   YUV422_VARIANT_NUM,
 };
+
+#endif /* ZZ_GFX_H */

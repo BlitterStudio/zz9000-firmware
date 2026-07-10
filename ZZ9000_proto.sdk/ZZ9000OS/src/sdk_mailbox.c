@@ -24,6 +24,7 @@
 #include "ax.h"
 #include "interrupt.h"
 #include "video.h"
+#include "overlay.h"
 #include "mp3/mp3.h"
 #include "mp3/minimp3.h"
 
@@ -939,6 +940,29 @@ static volatile int sdk_completion_irq_enabled;
  */
 static uint32_t sdk_mailbox_generation;
 static uint32_t g_task_generation[TASKQ_CAPACITY];
+
+/* Enqueue an internal core-1 task (request_id 0, no client completion).
+ * Core-0 main-loop context ONLY: the task queue is single-producer.
+ * The caller owns its own in-flight marker; retirement is dispatched by
+ * opcode in sdk_mailbox_post_deferred. */
+int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
+                                 uint32_t params_len)
+{
+	taskq_shared_t *sh = scheduler_shared();
+	int slot;
+
+	if (!scheduler_core1_available())
+		return 0;
+
+	slot = taskq_enqueue(&sh->queue, opcode, TASK_LONG,
+	                     0u, 0u, 0u, 0u, 0u, 0u, params, params_len);
+	if (slot < 0)
+		return 0;
+
+	g_task_generation[slot] = sdk_mailbox_generation;
+	__asm__ __volatile__("dsb ish\n\tsev" ::: "memory");
+	return 1;
+}
 
 /*
  * Batch-tail gate for crypto offload. The request loop processes a FIFO batch
@@ -4685,6 +4709,12 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		return mp3_decode_compute(&g_mp3_core1_ctx, p, result_payload,
 		                          result_len);
 	}
+	case TASKQ_OP_VIDEO_COMPOSE: {
+		const struct overlay_compose_params *p =
+		    (const struct overlay_compose_params *)d->op_params;
+		*result_len = 0U;
+		return overlay_run_compose(p);
+	}
 	case SDK_OP_IMAGE_SESSION_FEED: {
 		const struct imgsess_op_params *p =
 		    (const struct imgsess_op_params *)d->op_params;
@@ -6259,6 +6289,9 @@ void sdk_mailbox_init(void)
 	 * generation tag stops the stale completion from posting, but only the
 	 * quiesce stops the write itself. No-op at cold boot (core 1 not yet up). */
 	scheduler_quiesce_for_reset();
+	/* internal tasks (video compose) were drained/dropped with the
+	 * queue and will never post their deferred completion */
+	overlay_scheduler_reset();
 
 	memset((void *)SDK_MAILBOX_ADDRESS, 0, SDK_MAILBOX_TOTAL_SIZE);
 	put_be32(desc->magic, SDK_MAILBOX_MAGIC);
@@ -6508,9 +6541,12 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 	uint32_t next_comp_tail;
 
 	if (request_id == 0U) {
-		/* Internal task (AX playback refill): no client completion to
-		 * post; just retire the in-flight marker. */
-		g_audio_playback.refill_pending = 0U;
+		/* Internal task: no client completion to post; retire the
+		 * producer's in-flight marker, dispatched by opcode. */
+		if (opcode == (uint16_t)TASKQ_OP_VIDEO_COMPOSE)
+			overlay_compose_retired(status == SDK_STATUS_OK);
+		else
+			g_audio_playback.refill_pending = 0U; /* AX refill */
 		return 1;
 	}
 

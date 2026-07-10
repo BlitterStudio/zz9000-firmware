@@ -411,6 +411,11 @@ uint32_t sdk_mailbox_address(void);
 /* After a core-1 fault: mark core-1-affine audio streams faulted so their
  * feeds/reads fail cleanly (the embedded decoder may be mid-frame). */
 void sdk_mailbox_poison_core1_audio_streams(void);
+/* Enqueue an internal (request_id 0, no client completion) core-1 task.
+ * Core-0 main-loop context ONLY (single-producer queue). Returns 1 if
+ * queued. */
+int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
+                                 uint32_t params_len);
 /* AX playback pump, split in two:
  *  - sdk_mailbox_audio_playback_pump_isr: TX-fill half, called from the
  *    audio-formatter period interrupt (isr_audio, every 20 ms) so

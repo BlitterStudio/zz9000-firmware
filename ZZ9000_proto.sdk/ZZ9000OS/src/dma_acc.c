@@ -170,13 +170,19 @@ void handle_acc_op(uint16_t zdata)
             sfc_size = surface_allocator_block_size(sfc_addr);
             memset((void *)sfc_addr, 0x00, sfc_size);
             Xil_DCacheFlushRange((INTPTR)sfc_addr, sfc_size);
-            data->offset[0] = sfc_addr - ADDR_ADJ;
+            // MemoryBase-relative, like every RTG blit offset (the
+            // driver computes Planes[0] = MemoryBase + offset and all
+            // consumers map offset -> ARM via framebuffer/0x200000).
+            // The previous ADDR_ADJ basis (BoardAddr-relative) sat
+            // 0x10000 low, so every consumer accessed the surface
+            // 64 KB past its block: tail overflow into the neighbor.
+            data->offset[0] = sfc_addr - (u32)FRAMEBUFFER_ADDRESS;
             SWAP32(data->offset[0]);
             break;
         }
         case ACC_OP_FREE_SURFACE: {
             SWAP32(data->offset[0]);
-            data->offset[0] += ADDR_ADJ;
+            data->offset[0] += (u32)FRAMEBUFFER_ADDRESS;
             if (surface_allocator_free(data->offset[0]) != 0) {
                 printf("Ignoring free of unknown surface at %p.\n",
                        (void *)data->offset[0]);

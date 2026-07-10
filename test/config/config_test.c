@@ -81,9 +81,10 @@ static void test_full_valid_file(void) {
         "mac = 68:82:F2:12:34:56\n"
         "hdf = games.hdf\n"
         "offscreen_bitmaps = off\n"
-        "yuv_rect = off\n");
+        "yuv_rect = off\n"
+        "video_overlay = off\n");
     const struct zz_config *c = zz_config_get();
-    CHECK(n == 9);
+    CHECK(n == 10);
     CHECK(c->videocap_mode_present && c->videocap_mode == ZZVMODE_720x576);
     CHECK(c->ns_vsync_present && c->ns_vsync == 1);
     CHECK(c->scanline_mode_present && c->scanline_mode == 2);
@@ -95,6 +96,7 @@ static void test_full_valid_file(void) {
     CHECK(c->hdf_present && strcmp(c->hdf_path, "0:/games.hdf") == 0);
     CHECK(c->offscreen_bitmaps_present && c->offscreen_bitmaps == 0);
     CHECK(c->yuv_rect_present && c->yuv_rect == 0);
+    CHECK(c->video_overlay_present && c->video_overlay == 0);
 }
 
 static void test_defaults_absent(void) {
@@ -110,6 +112,7 @@ static void test_defaults_absent(void) {
     CHECK(!c->hdf_present);
     CHECK(!c->offscreen_bitmaps_present);
     CHECK(!c->yuv_rect_present);
+    CHECK(!c->video_overlay_present);
 }
 
 static void test_case_whitespace_comments(void) {
@@ -153,6 +156,7 @@ static void test_bad_values_skipped(void) {
         "int2 = maybe\n"
         "offscreen_bitmaps = maybe\n"
         "yuv_rect = maybe\n"
+        "video_overlay = maybe\n"
         "mac = 68:82:F2:12:34\n"        /* five octets */
         "mac = gg:82:F2:12:34:56\n"     /* not hex */
         "hdf = ../etc/passwd\n"         /* path escape */
@@ -173,6 +177,7 @@ static void test_bad_values_skipped(void) {
     CHECK(!c->hdf_present);
     CHECK(!c->offscreen_bitmaps_present);
     CHECK(!c->yuv_rect_present);
+    CHECK(!c->video_overlay_present);
 }
 
 static void test_last_value_wins(void) {
@@ -243,6 +248,7 @@ static void test_query_interface(void) {
         "int2 = on\n"
         "offscreen_bitmaps = off\n"
         "yuv_rect = on\n"
+        "video_overlay = off\n"
         "mac = 68:82:F2:12:34:56\n";
     parse_str(text);
 
@@ -250,6 +256,7 @@ static void test_query_interface(void) {
     CHECK(zz_config_query(ZZ_CONFIG_KEY_INT2, &present) == 1 && present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_OFFSCREEN_BITMAPS, &present) == 0 && present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_YUV_RECT, &present) == 1 && present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEO_OVERLAY, &present) == 0 && present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_MAC_HI, &present) == 0x6882 && present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_MAC_MID, &present) == 0xF212 && present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_MAC_LO, &present) == 0x3456 && present);
