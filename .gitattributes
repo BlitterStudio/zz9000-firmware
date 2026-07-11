@@ -45,3 +45,6 @@ Dockerfile     text eol=lf
 # Vendored Vivado-generated PS init code: byte-exact LF, never EOL-converted
 ZZ9000_proto.sdk/ZZ9000FSBL/src/ps7_init_gpl.c -text
 ZZ9000_proto.sdk/ZZ9000FSBL/src/ps7_init_gpl.h -text
+
+# Preserve upstream formatting in the vendored single-header MPEG decoder.
+ZZ9000_proto.sdk/ZZ9000OS/src/third_party/pl_mpeg/pl_mpeg.h whitespace=-trailing-space

@@ -14,6 +14,7 @@
 #include "memorymap.h"
 #include "sdk_mailbox.h"
 #include "sdk_image_stream.h"
+#include "sdk_video_stream.h"
 #include "core2.h"
 #include "sleep.h"
 #include "xil_types.h"
@@ -47,7 +48,10 @@ typedef char sched_image_opcode_drift_check[
      TASKQ_OP_IMAGE_SESSION_FEED == SDK_OP_IMAGE_SESSION_FEED &&
      TASKQ_OP_IMAGE_SESSION_CLOSE == SDK_OP_IMAGE_SESSION_CLOSE &&
      TASKQ_OP_AUDIO_STREAM_FEED == SDK_OP_AUDIO_STREAM_FEED &&
-     TASKQ_OP_AUDIO_STREAM_READ == SDK_OP_AUDIO_STREAM_READ) ? 1 : -1];
+     TASKQ_OP_AUDIO_STREAM_READ == SDK_OP_AUDIO_STREAM_READ &&
+     TASKQ_OP_VIDEO_SESSION_WRITE == SDK_OP_VIDEO_SESSION_WRITE &&
+     TASKQ_OP_VIDEO_SESSION_DECODE == SDK_OP_VIDEO_SESSION_DECODE &&
+     TASKQ_OP_VIDEO_SESSION_CLOSE == SDK_OP_VIDEO_SESSION_CLOSE) ? 1 : -1];
 
 /* The image-session table shares the coherent region with the queue
  * control block; keep them from overlapping. */
@@ -289,6 +293,7 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
      * streams hold no heap objects, but their embedded decoder state may
      * be mid-frame; mark them faulted so feeds/reads fail cleanly. */
     sdk_image_stream_poison_core1_sessions();
+    sdk_video_stream_poison_core1_sessions();
     sdk_mailbox_poison_core1_audio_streams();
     if (taskq_watchdog_core1_enabled(&g_sched_watchdog)) {
       core1_cold_restart();

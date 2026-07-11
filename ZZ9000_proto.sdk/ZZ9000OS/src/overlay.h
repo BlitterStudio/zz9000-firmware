@@ -2,10 +2,11 @@
  * MNT ZZ9000 Amiga Graphics and ARM Coprocessor Card Operating System
  * (ZZ9000OS)
  *
- * P96 video window (PIP) overlay: shadow-scanout compositor state.
+ * P96 video window (PIP) overlay: native PL plane plus software fallback.
  * The ZZ9000.card driver configures the overlay through OP_VIDEO_OVERLAY;
- * while it is active the vblank ISR presents a shadow buffer that core 1
- * re-composites every frame (screen copy + color-keyed scaled YUV).
+ * Fully visible 1:1 sources use packed-YUV scanout-time composition; scaled
+ * or clipped sources retain the RGB shadow compositor. Legacy sources refresh
+ * every vblank; SDK video sources notify on decoded frames.
  *
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -45,8 +46,9 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data);
 
 /* Called from the vblank ISR: returns the buffer address to present
  * this frame (a completed shadow while the overlay is presentable, the
- * regular framebuffer + pan offset otherwise) and requests the next
- * compose. ISR context only. */
+ * regular framebuffer + pan offset otherwise). Legacy sources request the
+ * next compose here; SDK video sources request it from frame completion.
+ * ISR context only. */
 uint32_t overlay_present_bufpos(struct ZZ_VIDEO_STATE *vs);
 
 /* Called from the core-0 main loop: enqueues the compose task requested
@@ -71,11 +73,21 @@ void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs);
  * the in-flight marker whose completion was dropped with the queue. */
 void overlay_scheduler_reset(void);
 
+/* Core-0 SDK-video lifecycle hooks. A frame-ready completion switches that
+ * session's active overlay to source-frame-driven composition; close removes
+ * the binding and restores refresh-driven behavior after the final session. */
+void overlay_video_frame_ready(uint32_t session);
+void overlay_video_session_closed(uint32_t session);
+
 /* ISR helpers for the videocap takeover: while videocap owns the
  * scanout decisions the overlay present hook does not run, so the ISR
  * asks whether a shadow is still being scanned (to repoint VDMA away
  * from it once) and then reports the release. */
 int overlay_scanout_active(void);
 void overlay_scanout_released(void);
+
+/* Vblank ISR hook, called immediately after the mandatory full L1+L2 flush.
+ * Publishes a completed packed-YUV staging buffer to the non-coherent VDMA. */
+void overlay_vblank_cache_flushed(void);
 
 #endif /* ZZ_OVERLAY_H */

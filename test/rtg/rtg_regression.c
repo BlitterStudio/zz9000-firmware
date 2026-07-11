@@ -1510,6 +1510,47 @@ static void test_overlay_composite(void)
 			failures++;
 		}
 	}
+
+	/* Direct planar420 compositor must be pixel-identical to the existing
+	 * planar->YUY2->compositor path, including non-integer scaling. */
+	{
+		static uint8_t py[32 * 20];
+		static uint8_t pcb[16 * 10];
+		static uint8_t pcr[16 * 10];
+		static uint8_t packed[64 * 20];
+		int cases[2][4] = {{8, 6, 32, 20}, {3, 2, 45, 31}};
+
+		ovl_seed(0xD060);
+		for (size_t i = 0; i < sizeof(py); i++) py[i] = (uint8_t)rng32();
+		for (size_t i = 0; i < sizeof(pcb); i++) {
+			pcb[i] = (uint8_t)rng32();
+			pcr[i] = (uint8_t)rng32();
+		}
+		for (int row = 0; row < 20; row++) {
+			for (int x = 0; x < 32; x += 2) {
+				uint8_t *p = packed + row * 64 + x * 2;
+				p[0] = py[row * 32 + x];
+				p[1] = pcb[(row >> 1) * 16 + (x >> 1)];
+				p[2] = py[row * 32 + x + 1];
+				p[3] = pcr[(row >> 1) * 16 + (x >> 1)];
+			}
+		}
+		for (int c = 0; c < 2; c++) {
+			memset(ovl_dst, 0xA5, sizeof(ovl_dst));
+			memset(ovl_ref, 0xA5, sizeof(ovl_ref));
+			overlay_composite_frame(ovl_ref, OVL_PITCH,
+				ovl_screen, OVL_PITCH, OVL_SCR_W, OVL_SCR_H,
+				MNTVA_COLOR_32BIT, packed, 64, 32, 20,
+				YUV422_VARIANT_CGX, cases[c][0], cases[c][1],
+				cases[c][2], cases[c][3], 0, 0);
+			overlay_composite_planar420_frame(ovl_dst, OVL_PITCH,
+				ovl_screen, OVL_PITCH, OVL_SCR_W, OVL_SCR_H,
+				MNTVA_COLOR_32BIT, py, 32, pcb, pcr, 16, 32, 20,
+				cases[c][0], cases[c][1], cases[c][2], cases[c][3], 0, 0);
+			ovl_check(c == 0 ? "overlay planar direct 1:1" :
+			                    "overlay planar direct scaled");
+		}
+	}
 }
 
 static void test_fb_limit_clamp(void)

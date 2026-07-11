@@ -39,12 +39,14 @@
  * zlib inflate uses 2 (state + window); LZMA/LZMA2 use 2-3 (probs + dict);
  * libjpeg (jmem_zz9k.c) allocates pool chunks and coefficient arrays --
  * typically well under a dozen, but a progressive decode of a large image
- * can go higher. Overflow degrades safely (the block is simply not
- * tracked and would leak on a core-1 fault, never corrupt), but 32 keeps
- * headroom for the image decoders. Must stay a multiple of 8 (cache-line
- * discipline; build-guarded in sdk_decode_reclaim.c).
+ * can go higher. A persistent video session keeps several pl_mpeg buffers
+ * live between requests, and that session may coexist with a one-shot image
+ * decode. Overflow degrades safely (the block is simply not tracked and
+ * would leak on a core-1 fault, never corrupt), but 64 leaves headroom for
+ * that combination. Must stay a multiple of 8 (cache-line discipline;
+ * build-guarded in sdk_decode_reclaim.c).
  */
-#define SDK_DECODE_MAX_TRACKED 32u
+#define SDK_DECODE_MAX_TRACKED 64u
 
 /* Record a live allocation. Call AFTER malloc succeeds. NULL is ignored. */
 void sdk_decode_track(void *ptr);

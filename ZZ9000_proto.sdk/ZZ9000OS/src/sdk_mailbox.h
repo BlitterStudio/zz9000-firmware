@@ -51,6 +51,7 @@
 // Firmware serves SDK_ALLOC_HOST_WINDOW allocations from the small
 // board-window-reachable heap (Zorro 2 support; see memorymap.h).
 #define SDK_CAP_HOST_WINDOW_HEAP       (1U << 20)
+#define SDK_CAP_VIDEO_DECODE           (1U << 21)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
@@ -100,6 +101,7 @@
 #define SDK_SERVICE_CODEC              0x0600U
 #define SDK_SERVICE_CRYPTO             0x0800U
 #define SDK_SERVICE_DIAG               0x0900U
+#define SDK_SERVICE_VIDEO              0x0b00U
 
 #define SDK_SERVICE_FLAG_FIRMWARE      (1U << 0)
 #define SDK_SERVICE_FLAG_MODULE        (1U << 1)
@@ -134,6 +136,11 @@
 #define SDK_SERVICE_FLAG_CODEC_LZH              (1U << 29)
 #define SDK_SERVICE_FLAG_CODEC_DECOMPRESS_BATCH (1U << 30)
 #define SDK_SERVICE_FLAG_CRYPTO_X25519          (1U << 16)
+#define SDK_SERVICE_FLAG_VIDEO_MPEG1            (1U << 16)
+#define SDK_SERVICE_FLAG_VIDEO_MPEG_PS          (1U << 17)
+#define SDK_SERVICE_FLAG_VIDEO_DIRECT_OVERLAY   (1U << 18)
+#define SDK_SERVICE_FLAG_VIDEO_STREAMING_INPUT  (1U << 19)
+#define SDK_SERVICE_FLAG_VIDEO_CORE1            (1U << 20)
 
 #define SDK_OP_NOP                     0x0000U
 #define SDK_OP_QUERY_CAPS              0x0001U
@@ -227,6 +234,11 @@ struct SDKCryptoVerifyPayload {
 #define SDK_OP_DIAG_TIMING             0x0901U
 #define SDK_OP_DIAG_SCHED              0x0902U
 
+#define SDK_OP_VIDEO_SESSION_BEGIN     0x0b00U
+#define SDK_OP_VIDEO_SESSION_WRITE     0x0b01U
+#define SDK_OP_VIDEO_SESSION_DECODE    0x0b02U
+#define SDK_OP_VIDEO_SESSION_CLOSE     0x0b03U
+
 #define SDK_MAX_SHARED_BUFFERS         32U
 #define SDK_MAX_SURFACES               16U
 #define SDK_SURFACE_HANDLE_FRAMEBUFFER 0x80000000UL
@@ -296,6 +308,23 @@ struct SDKCryptoVerifyPayload {
 #define SDK_AUDIO_STREAM_RESULT_PCM_READY  (1U << 1)
 #define SDK_AUDIO_STREAM_RESULT_DONE       (1U << 2)
 #define SDK_AUDIO_STREAM_RESULT_BACKPRESSURE (1U << 3)
+
+/* Direct-overlay output has one display binding. Multiple decoder sessions
+ * would race to own that plane until the ABI grows an explicit binding. */
+#define SDK_MAX_VIDEO_SESSIONS         1U
+#define SDK_VIDEO_CODEC_MPEG1          1U
+#define SDK_VIDEO_CONTAINER_MPEG_PS    1U
+#define SDK_VIDEO_OUTPUT_DIRECT_OVERLAY 1U
+#define SDK_VIDEO_SESSION_WRITE_EOF    (1U << 0)
+#define SDK_VIDEO_SESSION_STATE_NEED_INPUT  1U
+#define SDK_VIDEO_SESSION_STATE_READY       2U
+#define SDK_VIDEO_SESSION_STATE_FRAME_READY 3U
+#define SDK_VIDEO_SESSION_STATE_DONE        4U
+#define SDK_VIDEO_SESSION_STATE_ERROR       5U
+#define SDK_VIDEO_SESSION_RESULT_HEADER_READY (1U << 0)
+#define SDK_VIDEO_SESSION_RESULT_NEED_INPUT   (1U << 1)
+#define SDK_VIDEO_SESSION_RESULT_FRAME_READY  (1U << 2)
+#define SDK_VIDEO_SESSION_RESULT_DONE         (1U << 3)
 
 #define SDK_CRYPTO_HASH_NONE           0U
 #define SDK_CRYPTO_HASH_SHA1           1U

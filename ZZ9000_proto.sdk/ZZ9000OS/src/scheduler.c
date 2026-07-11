@@ -266,6 +266,11 @@ taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len)
     /* Same constraint: the stream's mp3 staging ring is cache-owned by
      * core 1 for core-1-affine streams. */
     return TASK_LONG;
+  case TASKQ_OP_VIDEO_SESSION_WRITE:
+  case TASKQ_OP_VIDEO_SESSION_DECODE:
+  case TASKQ_OP_VIDEO_SESSION_CLOSE:
+    /* The selected codec backend and all of its heap state stay on core 1. */
+    return TASK_LONG;
   default:
     return TASK_LONG;              /* unknown/heavy: never drained on core 0 */
   }

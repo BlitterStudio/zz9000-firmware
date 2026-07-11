@@ -54,8 +54,14 @@ make -C test/rtg test              # RTG correctness regression
 make -C test/rtg bench             # Host micro-benchmarks (comparative only)
 make -C test/video test            # VDMA math + video_formatter source invariants
 make -C test/config test           # ZZ9000.CFG parser/loader unit tests
+make -C test/scheduler test        # dual-core queue, routing, and reclaim tests
+make -C test/video_codec test      # pl_mpeg streaming fixture + exact YUY2 output
 test/video/run_formatter_sim.sh current   # xsim functional sim (Vivado machine)
 ```
+
+On the Windows Vivado machine, Docker Desktop can block xsim's localhost
+`PrivateChannel` handshake. If the sweep reports that error, stop Docker
+Desktop, terminate stale `xsim.exe`/`xsimk.exe` processes, and rerun.
 
 Any `video_formatter.v` change MUST pass the xsim sweep (pixel-exact, all
 color modes/scales, calibrated against the pre-64-bit formatter) before a
@@ -69,6 +75,7 @@ performance/bus timing changes.
 | `mntzorro.v` | Zorro bus interface, register window, video capture, AXI bridge |
 | `video_formatter.v` | AXI-Stream video formatter (64-bit VDMA stream in, 24-bit RGB out) |
 | `ZZ9000_proto.sdk/ZZ9000OS/src/` | Bare-metal ARM firmware (C) |
+| `ZZ9000_proto.sdk/ZZ9000OS/src/sdk_video_*` | Generic core-1 video sessions, decoder backends, packed-YUV staging |
 | `ZZ9000_proto.sdk/ZZ9000FSBL/src/` | First-stage bootloader |
 | `zz9000_project.tcl` | Vivado project/block design source |
 | `bootimage_work/` | Committed FSBL (rebuildable: `./build_fsbl.sh`, see `ZZ9000_proto.sdk/ZZ9000FSBL/README.md`), bitstreams, BIF — canonical output dir |

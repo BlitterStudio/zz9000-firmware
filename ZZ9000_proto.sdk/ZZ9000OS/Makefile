@@ -113,6 +113,7 @@ C_SRCS = \
 	$(SRC_DIR)/dma_rtg.c \
 	$(SRC_DIR)/surface_allocator.c \
 	$(SRC_DIR)/overlay.c \
+	$(SRC_DIR)/overlay_hw.c \
 	$(SRC_DIR)/usb.c \
 	$(SRC_DIR)/mp3/decode_mp3.c \
 	$(SRC_DIR)/compression/audio/adpcm.c \
@@ -182,6 +183,9 @@ C_SRCS = \
 	$(SRC_DIR)/bearssl/ghash_ctmul.c \
 	$(SRC_DIR)/bearssl/gcm.c \
 	$(SRC_DIR)/sdk_image_stream.c \
+	$(SRC_DIR)/sdk_video_stream.c \
+	$(SRC_DIR)/sdk_video_plmpeg.c \
+	$(SRC_DIR)/sdk_video_yuy2.c \
 	$(SRC_DIR)/sdk_jpeg.c \
 	$(SRC_DIR)/jmem_zz9k.c \
 	$(SRC_DIR)/sdk_surface.c \
@@ -260,6 +264,16 @@ $(BUILD_DIR)/usb/ulpi.o: $(SRC_DIR)/usb/ulpi.c
 $(BUILD_DIR)/sdk_compression.o: $(SRC_DIR)/sdk_compression.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(SRC_DIR)/lzh -MMD -MP -o $@ $<
+
+# Video hot path: MPEG decode and per-pixel composition benefit materially
+# from the more aggressive loop/inlining passes; keep the rest at -O2.
+$(BUILD_DIR)/gfx.o: $(SRC_DIR)/gfx.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
+
+$(BUILD_DIR)/sdk_video_plmpeg.o: $(SRC_DIR)/sdk_video_plmpeg.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
 # Vendored LZH decode core (LHa for UNIX) + firmware I/O shim: every TU here
 # includes lha.h, which does `#include <config.h>` (angle-bracket). Two flags

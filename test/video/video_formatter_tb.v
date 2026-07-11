@@ -37,6 +37,12 @@ localparam OP_HS = 7;
 localparam OP_VS = 8;
 localparam OP_DPMS = 21;
 localparam OP_SPRITEXY = 13;
+localparam OP_OVERLAY_CTRL = 22;
+localparam OP_OVERLAY_POS = 23;
+localparam OP_OVERLAY_SIZE = 24;
+localparam OP_OVERLAY_KEY = 25;
+localparam OP_OVERLAY_SOURCE_SIZE = 26;
+localparam OP_OVERLAY_FRAME = 27;
 
 // config (from plusargs)
 integer cfg_cmode;
@@ -69,6 +75,12 @@ wire [31:0] dvi_rgb;
 reg [31:0] control_data = 0;
 reg [7:0] control_op = 0;
 wire [1:0] control_vblank;
+reg [31:0] overlay_tdata = 0;
+reg [3:0] overlay_tkeep = 4'hf;
+reg overlay_tlast = 0;
+reg overlay_tuser = 0;
+reg overlay_tvalid = 0;
+wire overlay_tready;
 
 `ifdef MASTER_DUT
 video_formatter uut (
@@ -77,6 +89,12 @@ video_formatter uut (
 video_formatter uut (
   .m_axis_vid_tdata(tdata),
   .m_axis_vid_tkeep(tkeep),
+  .overlay_axis_tdata(overlay_tdata),
+  .overlay_axis_tkeep(overlay_tkeep),
+  .overlay_axis_tlast(overlay_tlast),
+  .overlay_axis_tready(overlay_tready),
+  .overlay_axis_tuser(overlay_tuser),
+  .overlay_axis_tvalid(overlay_tvalid),
 `endif
   .m_axis_vid_tlast(tlast),
   .m_axis_vid_tready(tready),
@@ -123,6 +141,29 @@ initial begin
   uut.sprite_on = 0;
   uut.dvi_active_video = 0;
 end
+
+`ifndef MASTER_DUT
+/* Three-line, nine-pixel black overlay.  Five 4-byte macropixels are sent per
+ * line so the final (unused) luma exercises odd destination widths. */
+reg overlay_stream_en = 0;
+integer ol, ow;
+initial begin : overlay_vdma
+  wait (overlay_stream_en);
+  forever begin
+    for (ol = 0; ol < 3; ol = ol + 1) begin
+      for (ow = 0; ow < 5; ow = ow + 1) begin
+        @(negedge aclk);
+        overlay_tdata <= {8'd128, 8'd16, 8'd128, 8'd16};
+        overlay_tuser <= (ol == 0 && ow == 0);
+        overlay_tlast <= (ow == 4);
+        overlay_tvalid <= 1;
+        while (overlay_tready !== 1'b1) @(negedge aclk);
+        @(posedge aclk);
+      end
+    end
+  end
+end
+`endif
 
 // framebuffer content generator: word w of line l, byte lanes ascend so
 // every neighbouring byte and word differs
@@ -290,7 +331,7 @@ endtask
 `endif
 
 // main
-integer i, x, mism, shown;
+integer i, x, mism, shown, overlay_start_frame;
 reg [31:0] got, exp;
 initial begin
   cfg_cmode = 2;
@@ -362,6 +403,65 @@ initial begin
     end
 
 `ifndef MASTER_DUT
+  if (cfg_scalex == 0 && cfg_scaley == 0 && cfg_cmode != 0 &&
+      cfg_width >= 32) begin
+    op(OP_OVERLAY_POS, (2 << 16) | 8);
+    op(OP_OVERLAY_SIZE, (3 << 16) | 9);
+    op(OP_OVERLAY_SOURCE_SIZE, (3 << 16) | 9);
+    op(OP_OVERLAY_KEY, 0);
+    op(OP_OVERLAY_FRAME, 1);
+    overlay_stream_en = 1;
+    op(OP_OVERLAY_CTRL, 1); /* enable, no key, packed CGX */
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 5);
+
+    for (i = 0; i < NLINES; i = i + 1)
+      for (x = 1; x < cfg_width; x = x + 1) begin
+        got = cap[i * MAXW + x];
+        if (i >= 2 && i < 5 && (x - 1) >= 8 && (x - 1) < 17)
+          exp = 32'h00000000;
+        else
+          exp = expected_pix(i, x - 1);
+        exp = exp & 32'h00ffffff;
+        if (got !== exp) begin
+          mism = mism + 1;
+          if (shown < 48) begin
+            $display("OVERLAY MISMATCH row=%0d x=%0d got=%08x exp=%08x",
+                     i, x, got, exp);
+            shown = shown + 1;
+          end
+        end
+      end
+
+    /* Put the same overlay against the right edge. The next-line request
+     * must not switch BRAM banks until the final visible PIP pixel has been
+     * sampled, even though that is later than the undelayed screen width. */
+    op(OP_OVERLAY_POS, (2 << 16) | (cfg_width - 9));
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 5);
+    for (i = 0; i < NLINES; i = i + 1)
+      for (x = 1; x < cfg_width; x = x + 1) begin
+        got = cap[i * MAXW + x];
+        if (i >= 2 && i < 5 && (x - 1) >= cfg_width - 9)
+          exp = 32'h00000000;
+        else
+          exp = expected_pix(i, x - 1);
+        exp = exp & 32'h00ffffff;
+        if (got !== exp) begin
+          mism = mism + 1;
+          if (shown < 48) begin
+            $display("OVERLAY RIGHT MISMATCH row=%0d x=%0d got=%08x exp=%08x",
+                     i, x, got, exp);
+            shown = shown + 1;
+          end
+        end
+      end
+
+    op(OP_OVERLAY_CTRL, 0);
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 2);
+  end
+
   check_dpms(0, 1, 1); // ON
   check_dpms(1, 0, 1); // STANDBY: HSync off
   check_dpms(2, 1, 0); // SUSPEND: VSync off

@@ -26,6 +26,13 @@ module video_formatter(
   input m_axis_vid_aclk,
   input aresetn,
 
+  input [31:0] overlay_axis_tdata,
+  input [3:0]  overlay_axis_tkeep,
+  input overlay_axis_tlast,
+  output overlay_axis_tready,
+  input overlay_axis_tuser,
+  input overlay_axis_tvalid,
+
   input dvi_clk,
   output reg dvi_hsync,
   output reg dvi_vsync,
@@ -63,6 +70,12 @@ localparam OP_REPORT_LINE=17;
 localparam OP_PALETTE_SEL=18; // switch display to secondary 256 color palette for screen split
 localparam OP_PALETTE_HI=19; // set values in secondary 256 color palette for screen split
 localparam OP_DPMS=21;
+localparam OP_OVERLAY_CTRL=22;
+localparam OP_OVERLAY_POS=23;
+localparam OP_OVERLAY_SIZE=24;
+localparam OP_OVERLAY_KEY=25;
+localparam OP_OVERLAY_SOURCE_SIZE=26;
+localparam OP_OVERLAY_FRAME=27;
 
 localparam DPMS_ON=0;
 localparam DPMS_STANDBY=1; // HSync disabled, VSync enabled
@@ -84,6 +97,21 @@ reg vsync_request;
 reg sync_polarity = 1; // negative polarity
 reg selected_palette = 0;
 reg [1:0] dpms_level = DPMS_ON;
+
+/* P96 PIP pending state. Firmware writes a complete set while the plane is
+ * disabled; the pixel domain snapshots it in vblank. */
+reg overlay_enable = 0;
+reg overlay_key_enable = 0;
+reg [2:0] overlay_variant = 0;
+reg [1:0] overlay_source_mode = 0;
+reg signed [15:0] overlay_x = 0;
+reg signed [15:0] overlay_y = 0;
+reg [15:0] overlay_width = 0;
+reg [15:0] overlay_height = 0;
+reg [15:0] overlay_source_width = 0;
+reg [15:0] overlay_source_height = 0;
+reg [23:0] overlay_key_rgb = 0;
+reg [31:0] overlay_frame_generation = 0;
 
 reg [15:0] screen_h_max;
 reg [15:0] screen_v_max;
@@ -149,6 +177,8 @@ reg [11:0] sprite_px; // vga domain
 reg [11:0] sprite_py; // vga domain
 reg [23:0] sprite_pix; // vga domain
 reg sprite_on; // vga domain
+reg [23:0] sprite_pix_d1, sprite_pix_d2, sprite_pix_d3, sprite_pix_d4;
+reg sprite_on_d1, sprite_on_d2, sprite_on_d3, sprite_on_d4;
 reg [11:0] vga_report_y; // vga domain
 reg [11:0] vga_report_y_next; // vga domain
 reg vga_selected_palette; // vga domain
@@ -298,10 +328,31 @@ begin
     OP_DPMS: begin
         dpms_level <= control_data_in[1:0];
       end
+    OP_OVERLAY_CTRL: begin
+        overlay_enable <= control_data_in[0];
+        overlay_key_enable <= control_data_in[1];
+        overlay_source_mode <= control_data_in[3:2];
+        overlay_variant <= control_data_in[6:4];
+      end
+    OP_OVERLAY_POS: begin
+        overlay_y <= control_data_in[31:16];
+        overlay_x <= control_data_in[15:0];
+      end
+    OP_OVERLAY_SIZE: begin
+        overlay_height <= control_data_in[31:16];
+        overlay_width <= control_data_in[15:0];
+      end
+    OP_OVERLAY_KEY: overlay_key_rgb <= control_data_in[23:0];
+    OP_OVERLAY_SOURCE_SIZE: begin
+        overlay_source_height <= control_data_in[31:16];
+        overlay_source_width <= control_data_in[15:0];
+      end
+    OP_OVERLAY_FRAME: overlay_frame_generation <= control_data_in;
   endcase
 end
 
 localparam PIPE_DELAY = 4;
+localparam OVERLAY_PIPE_DELAY = 4;
 
 reg [31:0] palout;
 reg [11:0] vga_v_rez;
@@ -338,6 +389,74 @@ reg [3:0] counter_subpixel = 0;
 
 reg vga_sync_polarity = 0;
 reg [1:0] vga_dpms_level = DPMS_ON;
+
+reg vga_overlay_enable = 0;
+reg vga_overlay_key_enable = 0;
+reg [2:0] vga_overlay_variant = 0;
+reg [1:0] vga_overlay_source_mode = 0;
+reg signed [15:0] vga_overlay_x = 0;
+reg signed [15:0] vga_overlay_y = 0;
+reg [15:0] vga_overlay_width = 0;
+reg [15:0] vga_overlay_height = 0;
+reg [23:0] vga_overlay_key_rgb = 0;
+reg [31:0] vga_overlay_frame_generation = 0;
+reg [11:0] overlay_requested_line = 0;
+
+wire signed [16:0] overlay_screen_x =
+  $signed({1'b0, counter_x}) - $signed(PIPE_DELAY);
+wire signed [16:0] overlay_screen_y =
+  $signed({1'b0, counter_y}) - 17'sd1;
+wire signed [16:0] overlay_local_x =
+  overlay_screen_x - $signed(vga_overlay_x);
+wire signed [16:0] overlay_local_y =
+  overlay_screen_y - $signed(vga_overlay_y);
+wire overlay_in_window = vga_overlay_enable &&
+  overlay_local_x >= 0 && overlay_local_y >= 0 &&
+  overlay_local_x < $signed({1'b0, vga_overlay_width}) &&
+  overlay_local_y < $signed({1'b0, vga_overlay_height});
+wire signed [16:0] overlay_read_x = overlay_local_x + 1;
+wire [10:0] overlay_read_addr = overlay_read_x[11:1];
+wire [31:0] overlay_yuv422;
+wire overlay_line_ready;
+
+video_overlay_linebuffer overlay_linebuffer (
+  .axis_clk(m_axis_vid_aclk),
+  .axis_resetn(aresetn),
+  .s_axis_tdata(overlay_axis_tdata),
+  .s_axis_tkeep(overlay_axis_tkeep),
+  .s_axis_tlast(overlay_axis_tlast),
+  .s_axis_tuser(overlay_axis_tuser),
+  .s_axis_tvalid(overlay_axis_tvalid),
+  .s_axis_tready(overlay_axis_tready),
+  .fetch_enable(overlay_enable && overlay_source_mode == 0),
+  .fetch_generation(overlay_frame_generation),
+  .requested_line(overlay_requested_line),
+  .pixel_clk(dvi_clk),
+  .read_addr(overlay_read_addr),
+  .read_bank(overlay_requested_line[0]),
+  .read_data(overlay_yuv422),
+  .requested_line_ready(overlay_line_ready)
+);
+
+wire [23:0] overlay_rgb;
+wire overlay_pixel_active;
+video_overlay_pixel overlay_pixel (
+  .clk(dvi_clk),
+  .resetn(aresetn),
+  .base_rgb(pixout[23:0]),
+  .key_rgb(vga_overlay_key_rgb),
+  .key_enable(vga_overlay_key_enable),
+  .overlay_enable(overlay_in_window && overlay_line_ready &&
+                  vga_overlay_source_mode == 0),
+  .yuv422(overlay_yuv422),
+  .variant(vga_overlay_variant),
+  .luma_phase(overlay_local_x[0]),
+  .out_rgb(overlay_rgb),
+  .out_overlay(overlay_pixel_active)
+);
+
+wire [31:0] pixout_composited = vga_overlay_enable
+  ? {8'b0, overlay_rgb} : pixout;
 
 // Line buffer: written per 64-bit VDMA beat, read per 32-bit scanout word.
 // READ_LATENCY_B(1) gives doutb the exact registered-read timing the
@@ -396,9 +515,12 @@ always @(posedge dvi_clk) begin
   vga_h_sync_start <= screen_h_sync_start;
   vga_h_sync_end <= screen_h_sync_end;
 
-  vga_h_sync_start_delayed <= vga_h_sync_start+PIPE_DELAY;
-  vga_h_sync_end_delayed <= vga_h_sync_end+PIPE_DELAY;
-  vga_h_rez_delayed <= vga_h_rez+PIPE_DELAY;
+  vga_h_sync_start_delayed <= vga_h_sync_start + PIPE_DELAY +
+                              (vga_overlay_enable ? OVERLAY_PIPE_DELAY : 0);
+  vga_h_sync_end_delayed <= vga_h_sync_end + PIPE_DELAY +
+                            (vga_overlay_enable ? OVERLAY_PIPE_DELAY : 0);
+  vga_h_rez_delayed <= vga_h_rez + PIPE_DELAY +
+                       (vga_overlay_enable ? OVERLAY_PIPE_DELAY : 0);
 
   vga_v_sync_start <= screen_v_sync_start;
   vga_v_sync_end <= screen_v_sync_end;
@@ -407,6 +529,18 @@ always @(posedge dvi_clk) begin
   vga_colormode <= colormode;
   vga_sync_polarity <= sync_polarity;
   vga_dpms_level <= dpms_level;
+  if (counter_y == vga_v_sync_start && counter_x == 0) begin
+    vga_overlay_enable <= overlay_enable;
+    vga_overlay_key_enable <= overlay_key_enable;
+    vga_overlay_variant <= overlay_variant;
+    vga_overlay_source_mode <= overlay_source_mode;
+    vga_overlay_x <= overlay_x;
+    vga_overlay_y <= overlay_y;
+    vga_overlay_width <= overlay_width;
+    vga_overlay_height <= overlay_height;
+    vga_overlay_key_rgb <= overlay_key_rgb;
+    vga_overlay_frame_generation <= overlay_frame_generation;
+  end
   if (counter_y == 0) begin
     vga_sprite_x <= sprite_x;
     vga_sprite_y <= sprite_y;
@@ -510,29 +644,38 @@ always @(posedge dvi_clk) begin
     sprite_on <= 0;
   end
 
+  sprite_pix_d1 <= sprite_pix;
+  sprite_pix_d2 <= sprite_pix_d1;
+  sprite_pix_d3 <= sprite_pix_d2;
+  sprite_pix_d4 <= sprite_pix_d3;
+  sprite_on_d1 <= sprite_on;
+  sprite_on_d2 <= sprite_on_d1;
+  sprite_on_d3 <= sprite_on_d2;
+  sprite_on_d4 <= sprite_on_d3;
+
 counter_y_d1 <= counter_y;
 counter_y_d2 <= counter_y_d1;
 
 if (!vga_scanlines_en || vga_scanline_width == 2'b00) begin
-    pixout_sl <= pixout;
+    pixout_sl <= pixout_composited;
 end else case (vga_scanline_width)
     2'b01: begin
         // mode 1: 100/0 - one line in two black
         if (counter_y_d2[0] == vga_scanline_parity)
             pixout_sl <= 32'b0;
         else
-            pixout_sl <= pixout;
+            pixout_sl <= pixout_composited;
     end
     2'b10: begin
         // mode 2: 100/62 - alternating full / 62.5% (no black lines)
         // 62.5% = >>1 (50%) + >>3 (12.5%)
         if (counter_y_d2[0] == vga_scanline_parity)
-            pixout_sl <= pixout;
+            pixout_sl <= pixout_composited;
         else
             pixout_sl <= {8'b0,
-                ({1'b0, pixout[23:17]} + {3'b0, pixout[23:19]}),
-                ({1'b0, pixout[15:9]}  + {3'b0, pixout[15:11]}),
-                ({1'b0, pixout[7:1]}   + {3'b0, pixout[7:3]})
+                ({1'b0, pixout_composited[23:17]} + {3'b0, pixout_composited[23:19]}),
+                ({1'b0, pixout_composited[15:9]}  + {3'b0, pixout_composited[15:11]}),
+                ({1'b0, pixout_composited[7:1]}   + {3'b0, pixout_composited[7:3]})
             };
     end
     2'b11: begin
@@ -540,28 +683,32 @@ end else case (vga_scanline_width)
         // 75% = >>1 (50%) + >>2 (25%)
         // 50% = >>1
         case (counter_y_d2[1:0] ^ {1'b0, vga_scanline_parity})
-            2'b00: pixout_sl <= pixout;
+            2'b00: pixout_sl <= pixout_composited;
             2'b01: pixout_sl <= {8'b0,
-                ({1'b0, pixout[23:17]} + {2'b0, pixout[23:18]}),
-                ({1'b0, pixout[15:9]}  + {2'b0, pixout[15:10]}),
-                ({1'b0, pixout[7:1]}   + {2'b0, pixout[7:2]})
+                ({1'b0, pixout_composited[23:17]} + {2'b0, pixout_composited[23:18]}),
+                ({1'b0, pixout_composited[15:9]}  + {2'b0, pixout_composited[15:10]}),
+                ({1'b0, pixout_composited[7:1]}   + {2'b0, pixout_composited[7:2]})
             };
             2'b10: pixout_sl <= {8'b0,
-                1'b0, pixout[23:17],
-                1'b0, pixout[15:9],
-                1'b0, pixout[7:1]
+                1'b0, pixout_composited[23:17],
+                1'b0, pixout_composited[15:9],
+                1'b0, pixout_composited[7:1]
             };
             2'b11: pixout_sl <= {8'b0,
-                ({1'b0, pixout[23:17]} + {2'b0, pixout[23:18]}),
-                ({1'b0, pixout[15:9]}  + {2'b0, pixout[15:10]}),
-                ({1'b0, pixout[7:1]}   + {2'b0, pixout[7:2]})
+                ({1'b0, pixout_composited[23:17]} + {2'b0, pixout_composited[23:18]}),
+                ({1'b0, pixout_composited[15:9]}  + {2'b0, pixout_composited[15:10]}),
+                ({1'b0, pixout_composited[7:1]}   + {2'b0, pixout_composited[7:2]})
             };
         endcase
     end
-    default: pixout_sl <= pixout;
+    default: pixout_sl <= pixout_composited;
 endcase
 
-  dvi_rgb <= (sprite_on && sprite_pix!='hff00ff) ? sprite_pix : pixout_sl;
+  if (vga_overlay_enable)
+    dvi_rgb <= (sprite_on_d4 && sprite_pix_d4!='hff00ff)
+               ? sprite_pix_d4 : pixout_sl;
+  else
+    dvi_rgb <= (sprite_on && sprite_pix!='hff00ff) ? sprite_pix : pixout_sl;
 
   if (counter_x >= vga_h_max) begin
     counter_x <= 0;
@@ -582,6 +729,26 @@ endcase
     else
       need_line_fetch <= 0;
   end
+
+  /* As soon as the final PIP pixel has sampled the current BRAM bank, request
+   * the next source row into the opposite bank. Waiting until end-of-screen
+   * wastes all pixels to the right of the window and can miss the next-line
+   * deadline under shared-DDR contention. PIP rows use visible coordinates;
+   * formatter counter_y includes the historical one-line VDMA wrap. */
+  if (!vga_overlay_enable) begin
+    overlay_requested_line <= 0;
+  end else if (overlay_in_window &&
+               overlay_local_x ==
+                 ($signed({1'b0, vga_overlay_width}) - 1)) begin
+    if (overlay_local_y + 1 < $signed({1'b0, vga_overlay_height}))
+      overlay_requested_line <= overlay_local_y[11:0] + 1'b1;
+  end
+
+  /* Do not let MM2S prefetch line zero from the old surface immediately
+   * after the last visible PIP row.  Re-arm it in vblank, after firmware has
+   * had its buffer-flip interrupt and can update START_ADDR/generation. */
+  if (counter_y == vga_v_sync_start && counter_x == 0)
+    overlay_requested_line <= 0;
 
   // signal synchronization point to fetch process
   if (counter_x<8 && counter_y==vga_v_sync_start)
@@ -632,7 +799,9 @@ endcase
       dvi_vsync <= 0^vga_sync_polarity;
 
   // account for 1 line of vdma wrap-around
-  if (counter_y>vga_scale_y && counter_y<=(vga_v_rez + vga_scale_y) && counter_x==PIPE_DELAY)
+  if (counter_y>vga_scale_y && counter_y<=(vga_v_rez + vga_scale_y) &&
+      counter_x == PIPE_DELAY +
+                   (vga_overlay_enable ? OVERLAY_PIPE_DELAY : 0))
     dvi_active_video <= 1;
 
   if (counter_x==vga_h_rez_delayed)
