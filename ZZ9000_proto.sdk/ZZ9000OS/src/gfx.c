@@ -1189,6 +1189,102 @@ void overlay_composite_frame(uint8_t *dst, uint32_t dst_pitch,
 	}
 }
 
+/* Scaled/clipped decoder-frame variant of overlay_composite_frame(). It
+ * consumes planar 4:2:0 planes in place and writes the software fallback's
+ * RGB shadow. Fully visible 1:1 windows use the native PL YUV plane instead. */
+void overlay_composite_planar420_frame(uint8_t *dst, uint32_t dst_pitch,
+	const uint8_t *screen, uint32_t screen_pitch,
+	uint16_t scr_w, uint16_t scr_h, uint8_t color_format,
+	const uint8_t *y, uint32_t y_pitch, const uint8_t *cb, const uint8_t *cr,
+	uint32_t chroma_pitch, uint16_t src_w, uint16_t src_h,
+	int16_t dst_x, int16_t dst_y, int16_t dst_w, int16_t dst_h,
+	uint32_t key_native, uint8_t key_enabled)
+{
+	uint32_t bpp;
+	uint32_t line_bytes;
+	int32_t x0, y0, x1, y1;
+	uint32_t mx, my, sy_fix, sx0_fix;
+	uint16_t key16 = (uint16_t)key_native;
+	uint32_t key24 = key_native & 0x00ffffffU;
+
+	if (!dst || !screen || !scr_w || !scr_h)
+		return;
+	if (color_format == MNTVA_COLOR_32BIT)
+		bpp = 4U;
+	else if (color_format == MNTVA_COLOR_16BIT565 ||
+	         color_format == MNTVA_COLOR_15BIT)
+		bpp = 2U;
+	else
+		return;
+	line_bytes = (uint32_t)scr_w * bpp;
+	x0 = dst_x < 0 ? 0 : dst_x;
+	y0 = dst_y < 0 ? 0 : dst_y;
+	x1 = (int32_t)dst_x + dst_w;
+	y1 = (int32_t)dst_y + dst_h;
+	if (x1 > scr_w) x1 = scr_w;
+	if (y1 > scr_h) y1 = scr_h;
+
+	if (!y || !cb || !cr || !src_w || !src_h ||
+	    y_pitch < src_w || chroma_pitch < ((src_w + 1U) >> 1) ||
+	    dst_w <= 0 || dst_h <= 0 || x0 >= x1 || y0 >= y1) {
+		for (int32_t row = 0; row < scr_h; row++)
+			memcpy(dst + (uint32_t)row * dst_pitch,
+			       screen + (uint32_t)row * screen_pitch, line_bytes);
+		return;
+	}
+
+	mx = ((uint32_t)src_w << 8) / (uint32_t)dst_w;
+	my = ((uint32_t)src_h << 8) / (uint32_t)dst_h;
+	sy_fix = (uint32_t)(y0 - dst_y) * my;
+	sx0_fix = (uint32_t)(x0 - dst_x) * mx;
+
+	for (int32_t row = 0; row < scr_h; row++) {
+		uint8_t *drow = dst + (uint32_t)row * dst_pitch;
+		uint32_t *dp = (uint32_t *)drow;
+		uint32_t sx_fix;
+		uint32_t sy;
+		int32_t cached_mp = -1;
+		int32_t rc = 0, gc = 0, bc = 0;
+
+		memcpy(drow, screen + (uint32_t)row * screen_pitch, line_bytes);
+		if (row < y0 || row >= y1)
+			continue;
+		sy = sy_fix >> 8;
+		if (sy >= src_h) sy = src_h - 1U;
+		sy_fix += my;
+		sx_fix = sx0_fix;
+
+		for (int32_t x = x0; x < x1; x++) {
+			uint32_t sx = sx_fix >> 8;
+			int32_t cy;
+			int32_t mp;
+
+			if (sx >= src_w) sx = src_w - 1U;
+			sx_fix += mx;
+			if (key_enabled) {
+				if (bpp == 4U) {
+					if ((dp[x] & 0x00ffffffU) != key24) continue;
+				} else if (((uint16_t *)dp)[x] != key16) {
+					continue;
+				}
+			}
+			mp = (int32_t)(sx >> 1);
+			if (mp != cached_mp) {
+				int32_t d = (int32_t)cb[(sy >> 1) * chroma_pitch +
+				                                (uint32_t)mp] - 128;
+				int32_t e = (int32_t)cr[(sy >> 1) * chroma_pitch +
+				                                (uint32_t)mp] - 128;
+				rc = 409 * e + 128;
+				gc = -100 * d - 208 * e + 128;
+				bc = 516 * d + 128;
+				cached_mp = mp;
+			}
+			cy = 298 * ((int32_t)y[sy * y_pitch + sx] - 16);
+			yuv_store_pixel(dp, x, color_format, cy, rc, gc, bc);
+		}
+	}
+}
+
 #define RL_CACHE_SIZE 256
 #define RL_CACHE_MASK (RL_CACHE_SIZE - 1)
 static uint32_t rl_cache_keys[RL_CACHE_SIZE];

@@ -22,6 +22,12 @@
 // not by the video formatter: data[1:0] = scanline mode, data[2] = parity
 #define MNTVF_OP_SCANLINES 20
 #define MNTVF_OP_DPMS 21
+#define MNTVF_OP_OVERLAY_CTRL 22
+#define MNTVF_OP_OVERLAY_POS 23
+#define MNTVF_OP_OVERLAY_SIZE 24
+#define MNTVF_OP_OVERLAY_KEY 25
+#define MNTVF_OP_OVERLAY_SOURCE_SIZE 26
+#define MNTVF_OP_OVERLAY_FRAME 27
 
 enum zz_dpms_level {
 	ZZ_DPMS_ON,
@@ -89,5 +95,6 @@ void clear_hw_sprite();
 struct zz_video_mode* get_custom_video_mode_ptr(int custom_video_mode);
 
 struct ZZ_VIDEO_STATE* video_get_state();
+void video_formatter_write(uint32_t data, uint16_t op);
 
 #endif

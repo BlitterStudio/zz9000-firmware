@@ -182,6 +182,9 @@ C_SRCS = \
 	$(SRC_DIR)/bearssl/ghash_ctmul.c \
 	$(SRC_DIR)/bearssl/gcm.c \
 	$(SRC_DIR)/sdk_image_stream.c \
+	$(SRC_DIR)/sdk_video_stream.c \
+	$(SRC_DIR)/sdk_video_plmpeg.c \
+	$(SRC_DIR)/sdk_video_yuy2.c \
 	$(SRC_DIR)/sdk_jpeg.c \
 	$(SRC_DIR)/jmem_zz9k.c \
 	$(SRC_DIR)/sdk_surface.c \
@@ -189,25 +192,35 @@ C_SRCS = \
 	$(SRC_DIR)/watchdog.c \
 	$(SRC_DIR)/newlib_compat.c
 
-# Object files
-OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS))
-OBJS += $(LZMA_SDK_BUILD)/LzmaDec.o
-OBJS += $(LZMA_SDK_BUILD)/Lzma2Dec.o
+# Object files shared by both bitstream-capability firmware images.
+COMMON_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS))
+COMMON_OBJS += $(LZMA_SDK_BUILD)/LzmaDec.o
+COMMON_OBJS += $(LZMA_SDK_BUILD)/Lzma2Dec.o
 BOOTROM_TOOL = $(BUILD_DIR)/make_bootrom_image
 BOOTROM_IMAGE_BIN = $(BUILD_DIR)/bootrom_image.bin
 BOOTROM_IMAGE_OBJ = $(BUILD_DIR)/bootrom_image.o
-OBJS += $(BOOTROM_IMAGE_OBJ)
+COMMON_OBJS += $(BOOTROM_IMAGE_OBJ)
+OVERLAY_HW_OBJ = $(BUILD_DIR)/overlay_hw.o
+OVERLAY_HW_FALLBACK_OBJ = $(BUILD_DIR)/overlay_hw_fallback.o
+OBJS = $(COMMON_OBJS) $(OVERLAY_HW_OBJ)
+FALLBACK_OBJS = $(COMMON_OBJS) $(OVERLAY_HW_FALLBACK_OBJ)
 
 # Output
 TARGET = $(BUILD_DIR)/ZZ9000OS.elf
+FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 
 .PHONY: all clean size FORCE
 
-all: $(TARGET) size
+all: $(TARGET) $(FALLBACK_TARGET) size
 
 $(TARGET): $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+	@echo 'Done.'
+
+$(FALLBACK_TARGET): $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(FALLBACK_OBJS)
+	@echo 'Linking: $@'
+	$(CC) $(LDFLAGS) -o $@ $(FALLBACK_OBJS) $(LIBS)
 	@echo 'Done.'
 
 $(LIBJPEG_TURBO_LIB):
@@ -238,6 +251,15 @@ $(LZMA_SDK_BUILD)/Lzma2Dec.o: $(LZMA_SDK_SRC)/C/Lzma2Dec.c
 
 # --- Per-file rules ---
 
+# The committed non-default bitstreams do not yet contain the second VDMA or
+# formatter overlay logic.  Build a matched firmware image whose backend is
+# compile-time disabled, so release packaging can select software composition
+# without ever touching the unmapped AXI-Lite window.
+$(OVERLAY_HW_FALLBACK_OBJ): $(SRC_DIR)/overlay_hw.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -UZZ_OVERLAY_HW_PRESENT -DZZ_OVERLAY_HW_PRESENT=0 \
+		-MMD -MP -o $@ $<
+
 $(BOOTROM_TOOL): ../../util/make_bootrom_image.c $(SRC_DIR)/bootrom_layout.h $(SRC_DIR)/bootrom.h $(SRC_DIR)/diag-code.h $(SRC_DIR)/zzsd-device.h
 	@mkdir -p $(dir $@)
 	$(CC_FOR_BUILD) -Wall -Wextra -Werror -std=c99 -o $@ $<
@@ -260,6 +282,16 @@ $(BUILD_DIR)/usb/ulpi.o: $(SRC_DIR)/usb/ulpi.c
 $(BUILD_DIR)/sdk_compression.o: $(SRC_DIR)/sdk_compression.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(SRC_DIR)/lzh -MMD -MP -o $@ $<
+
+# Video hot path: MPEG decode and per-pixel composition benefit materially
+# from the more aggressive loop/inlining passes; keep the rest at -O2.
+$(BUILD_DIR)/gfx.o: $(SRC_DIR)/gfx.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
+
+$(BUILD_DIR)/sdk_video_plmpeg.o: $(SRC_DIR)/sdk_video_plmpeg.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
 # Vendored LZH decode core (LHa for UNIX) + firmware I/O shim: every TU here
 # includes lha.h, which does `#include <config.h>` (angle-bracket). Two flags
@@ -289,4 +321,4 @@ size: $(TARGET)
 clean:
 	rm -rf $(BUILD_DIR)
 
--include $(OBJS:.o=.d)
+-include $(OBJS:.o=.d) $(OVERLAY_HW_FALLBACK_OBJ:.o=.d)

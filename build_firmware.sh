@@ -68,3 +68,9 @@ if [ -f "$ELF" ]; then
 else
     echo "[firmware] done (no ELF produced — target was likely 'clean')."
 fi
+
+FALLBACK_ELF=ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS-legacy-bitstream.elf
+if [ -f "$FALLBACK_ELF" ]; then
+    arm-none-eabi-size "$FALLBACK_ELF"
+    echo "[firmware] legacy-bitstream fallback: $FALLBACK_ELF"
+fi

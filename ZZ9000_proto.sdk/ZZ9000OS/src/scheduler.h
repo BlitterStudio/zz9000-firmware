@@ -55,6 +55,12 @@
 #define TASKQ_OP_AUDIO_STREAM_FEED   0x0504u
 #define TASKQ_OP_AUDIO_STREAM_READ   0x0505u
 
+/* Public video-session worker opcodes. Decoder state and its tracked heap
+ * graph are core-1-owned, so WRITE/DECODE/CLOSE are always TASK_LONG. */
+#define TASKQ_OP_VIDEO_SESSION_WRITE  0x0b01u
+#define TASKQ_OP_VIDEO_SESSION_DECODE 0x0b02u
+#define TASKQ_OP_VIDEO_SESSION_CLOSE  0x0b03u
+
 /* Internal (never client-visible) opcode: composite one P96 video
  * overlay frame into a shadow buffer. Full-frame work: classifies
  * TASK_LONG via the default case in taskq_class_for_opcode. */

@@ -11,6 +11,7 @@
 #include <sleep.h>
 #include "xil_cache_l.h"
 #include "xil_io.h"
+#include "sdk_smp_lock.h"
 /* kept after the Xilinx headers: overlay.h pulls in gfx.h (see the
  * pack note on struct GFXData) */
 #include "overlay.h"
@@ -266,6 +267,10 @@ void video_formatter_valign() {
 
 // ONLY isr_video is allowed to call this!
 void video_formatter_write(uint32_t data, uint16_t op) {
+	/* REG3 data + REG2 strobe is one transaction. A vblank IRQ interleaving
+	 * another formatter write between them would pair the wrong data/op. */
+	uint32_t irq_state = smp_local_irq_save();
+
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, data);
 	VF_DLY;
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG2, 0x80000000 | op); // OP_MAX (vmax | hmax)
@@ -276,6 +281,7 @@ void video_formatter_write(uint32_t data, uint16_t op) {
 	VF_DLY;
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, 0); // unlock access, NOP
 	VF_DLY;
+	smp_local_irq_restore(irq_state);
 }
 
 void video_set_dpms(uint8_t level) {
@@ -441,6 +447,9 @@ void isr_video(void *dummy) {
 		// make it conditional (broke ethernet RX, June 2026).
 		Xil_L1DCacheFlush();
 		Xil_L2CacheFlush();
+		/* Core-1 packed-YUV staging reaches DDR at this point. Only now may
+		 * the non-coherent overlay VDMA select the completed buffer. */
+		overlay_vblank_cache_flushed();
 		isr_flush_count = 0;
 
 		if (sprite_request_show) {

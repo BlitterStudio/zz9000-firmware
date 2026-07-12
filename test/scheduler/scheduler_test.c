@@ -271,6 +271,19 @@ static void test_class_unknown_is_long(void)
   expect_int("unknown_long", taskq_class_for_opcode(0x9999u, 0u), TASK_LONG);
 }
 
+static void test_class_video_sessions_are_core1_long(void)
+{
+  expect_int("video_write_long",
+             taskq_class_for_opcode(TASKQ_OP_VIDEO_SESSION_WRITE, 1u),
+             TASK_LONG);
+  expect_int("video_decode_long",
+             taskq_class_for_opcode(TASKQ_OP_VIDEO_SESSION_DECODE, 0u),
+             TASK_LONG);
+  expect_int("video_close_long",
+             taskq_class_for_opcode(TASKQ_OP_VIDEO_SESSION_CLOSE, 0u),
+             TASK_LONG);
+}
+
 static void test_should_drain_gates(void)
 {
   expect_int("drain_idle",     taskq_should_drain(0, 0, 1), 1);
@@ -327,6 +340,7 @@ int main(void)
   test_class_kx_verify_always_short();
   test_class_data_ops_size_threshold();
   test_class_unknown_is_long();
+  test_class_video_sessions_are_core1_long();
   test_should_drain_gates();
   test_watchdog_trips_at_threshold();
   test_watchdog_success_resets_counter();

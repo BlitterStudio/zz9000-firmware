@@ -171,6 +171,8 @@ if { $no_autoboot } {
 set files [list \
  [file normalize "${origin_dir}/mntzorro.v" ]\
  [file normalize "${origin_dir}/video_formatter.v" ]\
+ [file normalize "${origin_dir}/video_overlay_pixel.v" ]\
+ [file normalize "${origin_dir}/video_overlay_linebuffer.v" ]\
  [file normalize "${origin_dir}/ZZ9000_proto.srcs/sources_1/new/audio_clock.v" ]\
  [file normalize "${origin_dir}/ZZ9000_proto.srcs/sources_1/bd/zz9000_ps/hdl/zz9000_ps_wrapper.v" ]\
 ]
@@ -242,6 +244,12 @@ if { [get_files mntzorro.v] == "" } {
 }
 if { [get_files video_formatter.v] == "" } {
   import_files -quiet -fileset sources_1 video_formatter.v
+}
+if { [get_files video_overlay_pixel.v] == "" } {
+  import_files -quiet -fileset sources_1 video_overlay_pixel.v
+}
+if { [get_files video_overlay_linebuffer.v] == "" } {
+  import_files -quiet -fileset sources_1 video_overlay_linebuffer.v
 }
 if { [get_files audio_clock.v] == "" } {
   import_files -quiet -fileset sources_1 ZZ9000_proto.srcs/sources_1/new/audio_clock.v
@@ -371,7 +379,9 @@ proc create_hier_cell_video { parentCell nameHier } {
 
   # Create interface pins
   create_bd_intf_pin -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_MM2S1
+  create_bd_intf_pin -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_MM2S2
   create_bd_intf_pin -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 S_AXI_LITE
+  create_bd_intf_pin -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 S_AXI_LITE2
 
   # Create pins
   create_bd_pin -dir O VGA_DE
@@ -407,6 +417,20 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.c_s2mm_genlock_mode {0} \
  ] $axi_vdma_0
 
+  # Create instance: axi_vdma_1 (P96 packed-YUV422 overlay)
+  set axi_vdma_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_vdma:6.3 axi_vdma_1 ]
+  set_property -dict [ list \
+   CONFIG.c_include_mm2s_dre {1} \
+   CONFIG.c_include_s2mm {0} \
+   CONFIG.c_m_axi_mm2s_data_width {64} \
+   CONFIG.c_m_axis_mm2s_tdata_width {32} \
+   CONFIG.c_mm2s_genlock_mode {0} \
+   CONFIG.c_mm2s_linebuffer_depth {512} \
+   CONFIG.c_mm2s_max_burst_length {128} \
+   CONFIG.c_num_fstores {1} \
+   CONFIG.c_s2mm_genlock_mode {0} \
+ ] $axi_vdma_1
+
   # Create instance: axis_data_fifo_0, and set properties
   set axis_data_fifo_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axis_data_fifo:2.0 axis_data_fifo_0 ]
   set_property -dict [ list \
@@ -415,6 +439,14 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.HAS_TKEEP {1} \
    CONFIG.TDATA_NUM_BYTES {8} \
   ] $axis_data_fifo_0
+
+  set axis_data_fifo_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axis_data_fifo:2.0 axis_data_fifo_1 ]
+  set_property -dict [ list \
+   CONFIG.FIFO_DEPTH {32} \
+   CONFIG.FIFO_MEMORY_TYPE {auto} \
+   CONFIG.HAS_TKEEP {1} \
+   CONFIG.TDATA_NUM_BYTES {4} \
+  ] $axis_data_fifo_1
 
   # Create instance: video_formatter_0, and set properties
   set block_name video_formatter
@@ -429,9 +461,13 @@ proc create_hier_cell_video { parentCell nameHier } {
 
   # Create interface connections
   connect_bd_intf_net -intf_net Conn1 [get_bd_intf_pins M_AXI_MM2S1] [get_bd_intf_pins axi_vdma_0/M_AXI_MM2S]
+  connect_bd_intf_net -intf_net Conn2 [get_bd_intf_pins M_AXI_MM2S2] [get_bd_intf_pins axi_vdma_1/M_AXI_MM2S]
   connect_bd_intf_net -intf_net axi_vdma_0_M_AXIS_MM2S [get_bd_intf_pins axi_vdma_0/M_AXIS_MM2S] [get_bd_intf_pins axis_data_fifo_0/S_AXIS]
+  connect_bd_intf_net -intf_net axi_vdma_1_M_AXIS_MM2S [get_bd_intf_pins axi_vdma_1/M_AXIS_MM2S] [get_bd_intf_pins axis_data_fifo_1/S_AXIS]
   connect_bd_intf_net -intf_net axis_data_fifo_0_M_AXIS [get_bd_intf_pins axis_data_fifo_0/M_AXIS] [get_bd_intf_pins video_formatter_0/m_axis_vid]
+  connect_bd_intf_net -intf_net axis_data_fifo_1_M_AXIS [get_bd_intf_pins axis_data_fifo_1/M_AXIS] [get_bd_intf_pins video_formatter_0/overlay_axis]
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M01_AXI [get_bd_intf_pins S_AXI_LITE] [get_bd_intf_pins axi_vdma_0/S_AXI_LITE]
+  connect_bd_intf_net -intf_net ps7_0_axi_periph_M07_AXI [get_bd_intf_pins S_AXI_LITE2] [get_bd_intf_pins axi_vdma_1/S_AXI_LITE]
 
   # Create port connections
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_data [get_bd_pins control_data] [get_bd_pins video_formatter_0/control_data]
@@ -443,10 +479,10 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_parity_out [get_bd_pins scanline_parity] [get_bd_pins video_formatter_0/scanline_parity]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_intensity2_out [get_bd_pins scanline_intensity2] [get_bd_pins video_formatter_0/scanline_intensity2]
   connect_bd_net -net clk_1 [get_bd_pins VGA_PCLK] [get_bd_pins video_formatter_0/dvi_clk]
-  connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins aresetn] [get_bd_pins axis_data_fifo_0/s_axis_aresetn] [get_bd_pins video_formatter_0/aresetn]
-  connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins m_axi_mm2s_aclk] [get_bd_pins axi_vdma_0/m_axi_mm2s_aclk] [get_bd_pins axi_vdma_0/m_axis_mm2s_aclk] [get_bd_pins axis_data_fifo_0/s_axis_aclk] [get_bd_pins video_formatter_0/m_axis_vid_aclk]
-  connect_bd_net -net processing_system7_0_FCLK_CLK1 [get_bd_pins s_axi_lite_aclk] [get_bd_pins axi_vdma_0/s_axi_lite_aclk]
-  connect_bd_net -net rst_ps7_0_25M_peripheral_aresetn [get_bd_pins axi_resetn] [get_bd_pins axi_vdma_0/axi_resetn]
+  connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins aresetn] [get_bd_pins axis_data_fifo_0/s_axis_aresetn] [get_bd_pins axis_data_fifo_1/s_axis_aresetn] [get_bd_pins video_formatter_0/aresetn]
+  connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins m_axi_mm2s_aclk] [get_bd_pins axi_vdma_0/m_axi_mm2s_aclk] [get_bd_pins axi_vdma_0/m_axis_mm2s_aclk] [get_bd_pins axi_vdma_1/m_axi_mm2s_aclk] [get_bd_pins axi_vdma_1/m_axis_mm2s_aclk] [get_bd_pins axis_data_fifo_0/s_axis_aclk] [get_bd_pins axis_data_fifo_1/s_axis_aclk] [get_bd_pins video_formatter_0/m_axis_vid_aclk]
+  connect_bd_net -net processing_system7_0_FCLK_CLK1 [get_bd_pins s_axi_lite_aclk] [get_bd_pins axi_vdma_0/s_axi_lite_aclk] [get_bd_pins axi_vdma_1/s_axi_lite_aclk]
+  connect_bd_net -net rst_ps7_0_25M_peripheral_aresetn [get_bd_pins axi_resetn] [get_bd_pins axi_vdma_0/axi_resetn] [get_bd_pins axi_vdma_1/axi_resetn]
   connect_bd_net -net v_axi4s_vid_out_0_vid_data [get_bd_pins dvi_rgb] [get_bd_pins video_formatter_0/dvi_rgb]
   connect_bd_net -net video_formatter_0_control_vblank [get_bd_pins control_vblank] [get_bd_pins video_formatter_0/control_vblank]
   connect_bd_net -net video_subsystem_VGA_DE [get_bd_pins VGA_DE] [get_bd_pins video_formatter_0/dvi_active_video]
@@ -611,7 +647,11 @@ proc create_hier_cell_video { parentCell nameHier } {
   set axi_interconnect_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axi_interconnect_1 ]
   set_property -dict [ list \
    CONFIG.NUM_MI {1} \
+   CONFIG.NUM_SI {2} \
+   CONFIG.S00_ARB_PRIORITY {15} \
+   CONFIG.S01_ARB_PRIORITY {0} \
    CONFIG.S00_HAS_REGSLICE {4} \
+   CONFIG.S01_HAS_REGSLICE {4} \
  ] $axi_interconnect_1
 
   # Create instance: axi_interconnect_2, and set properties
@@ -1130,7 +1170,7 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.M00_HAS_REGSLICE {3} \
    CONFIG.M01_HAS_DATA_FIFO {0} \
    CONFIG.M01_HAS_REGSLICE {3} \
-   CONFIG.NUM_MI {7} \
+   CONFIG.NUM_MI {8} \
    CONFIG.S00_HAS_DATA_FIFO {0} \
    CONFIG.S00_HAS_REGSLICE {3} \
  ] $ps7_0_axi_periph
@@ -1216,6 +1256,7 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_intf_net -intf_net S00_AXI_1 [get_bd_intf_pins axi_interconnect_0/S00_AXI] [get_bd_intf_pins processing_system7_0/M_AXI_GP0]
   connect_bd_intf_net -intf_net S00_AXI_2 [get_bd_intf_pins processing_system7_0/M_AXI_GP1] [get_bd_intf_pins ps7_0_axi_periph/S00_AXI]
   connect_bd_intf_net -intf_net S00_AXI_3 [get_bd_intf_pins axi_interconnect_1/S00_AXI] [get_bd_intf_pins video/M_AXI_MM2S1]
+  connect_bd_intf_net -intf_net S01_AXI_3 [get_bd_intf_pins axi_interconnect_1/S01_AXI] [get_bd_intf_pins video/M_AXI_MM2S2]
   connect_bd_intf_net -intf_net S00_AXI_4 [get_bd_intf_pins MNTZorro_v0_1_S00_AXI_0/m01_axi] [get_bd_intf_pins axi_interconnect_2/S00_AXI]
   connect_bd_intf_net -intf_net S00_AXI_5 [get_bd_intf_pins audio_formatter_1/m_axi_s2mm] [get_bd_intf_pins axi_interconnect_4/S00_AXI]
   connect_bd_intf_net -intf_net audio_formatter_0_m_axi_mm2s [get_bd_intf_pins audio_formatter_0/m_axi_mm2s] [get_bd_intf_pins axi_interconnect_3/S00_AXI]
@@ -1237,6 +1278,7 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M04_AXI [get_bd_intf_pins audio_formatter_0/s_axi_lite] [get_bd_intf_pins ps7_0_axi_periph/M04_AXI]
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M05_AXI [get_bd_intf_pins i2s_receiver_0/s_axi_ctrl] [get_bd_intf_pins ps7_0_axi_periph/M05_AXI]
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M06_AXI [get_bd_intf_pins audio_formatter_1/s_axi_lite] [get_bd_intf_pins ps7_0_axi_periph/M06_AXI]
+  connect_bd_intf_net -intf_net ps7_0_axi_periph_M07_AXI [get_bd_intf_pins ps7_0_axi_periph/M07_AXI] [get_bd_intf_pins video/S_AXI_LITE2]
 
   # Create port connections
   connect_bd_net -net I2SO_BCLK_1 [get_bd_ports I2SO_BCLK] [get_bd_pins audio_clock_0/bclk_in]
@@ -1262,6 +1304,7 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net Net [get_bd_ports ZORRO_ADDR] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/ZORRO_ADDR]
   connect_bd_net -net Net1 [get_bd_ports ZORRO_DATA] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/ZORRO_DATA]
   connect_bd_net -net S00_ACLK_1 [get_bd_pins audio_formatter_0/m_axis_mm2s_aclk] [get_bd_pins audio_formatter_0/s_axi_lite_aclk] [get_bd_pins audio_formatter_1/s_axi_lite_aclk] [get_bd_pins audio_formatter_1/s_axis_s2mm_aclk] [get_bd_pins axi_interconnect_3/ACLK] [get_bd_pins axi_interconnect_3/M00_ACLK] [get_bd_pins axi_interconnect_3/S00_ACLK] [get_bd_pins axi_interconnect_4/ACLK] [get_bd_pins axi_interconnect_4/M00_ACLK] [get_bd_pins axi_interconnect_4/S00_ACLK] [get_bd_pins clk_wiz_0/s_axi_aclk] [get_bd_pins i2s_receiver_0/m_axis_aud_aclk] [get_bd_pins i2s_receiver_0/s_axi_ctrl_aclk] [get_bd_pins i2s_transmitter_0/s_axi_ctrl_aclk] [get_bd_pins i2s_transmitter_0/s_axis_aud_aclk] [get_bd_pins processing_system7_0/FCLK_CLK1] [get_bd_pins processing_system7_0/M_AXI_GP1_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP2_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP3_ACLK] [get_bd_pins ps7_0_axi_periph/ACLK] [get_bd_pins ps7_0_axi_periph/M00_ACLK] [get_bd_pins ps7_0_axi_periph/M01_ACLK] [get_bd_pins ps7_0_axi_periph/M02_ACLK] [get_bd_pins ps7_0_axi_periph/M03_ACLK] [get_bd_pins ps7_0_axi_periph/M04_ACLK] [get_bd_pins ps7_0_axi_periph/M05_ACLK] [get_bd_pins ps7_0_axi_periph/M06_ACLK] [get_bd_pins ps7_0_axi_periph/S00_ACLK] [get_bd_pins rst_ps7_0_25M/slowest_sync_clk] [get_bd_pins video/s_axi_lite_aclk] [get_bd_pins xadc_wiz_0/s_axi_aclk]
+  connect_bd_net -net S00_ACLK_1 [get_bd_pins ps7_0_axi_periph/M07_ACLK]
   connect_bd_net -net VCAP_B0_0_1 [get_bd_ports VCAP_B0] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/VCAP_B0]
   connect_bd_net -net VCAP_B1_0_1 [get_bd_ports VCAP_B1] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/VCAP_B1]
   connect_bd_net -net VCAP_B2_0_1 [get_bd_ports VCAP_B2] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/VCAP_B2]
@@ -1309,10 +1352,13 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net i2s_transmitter_0_sdata_0_out [get_bd_ports I2SO_D0] [get_bd_pins i2s_transmitter_0/sdata_0_out]
   connect_bd_net -net lrclk_in_0_1 [get_bd_ports I2SO_LRCLK] [get_bd_pins i2s_receiver_0/lrclk_in] [get_bd_pins i2s_transmitter_0/lrclk_in]
   connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins MNTZorro_v0_1_S00_AXI_0/S_AXI_ARESETN] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/m00_axi_aresetn] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/m01_axi_aresetn] [get_bd_pins axi_dwidth_converter_0/s_axi_aresetn] [get_bd_pins axi_interconnect_0/ARESETN] [get_bd_pins axi_interconnect_0/M00_ARESETN] [get_bd_pins axi_interconnect_0/S00_ARESETN] [get_bd_pins axi_interconnect_1/ARESETN] [get_bd_pins axi_interconnect_1/M00_ARESETN] [get_bd_pins axi_interconnect_1/S00_ARESETN] [get_bd_pins axi_interconnect_2/ARESETN] [get_bd_pins axi_interconnect_2/M00_ARESETN] [get_bd_pins axi_interconnect_2/S00_ARESETN] [get_bd_pins axi_register_slice_1/aresetn] [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins video/aresetn]
+  connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins axi_interconnect_1/S01_ARESETN]
   connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins MNTZorro_v0_1_S00_AXI_0/S_AXI_ACLK] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/m00_axi_aclk] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/m01_axi_aclk] [get_bd_pins audio_clock_0/fclk_in] [get_bd_pins axi_dwidth_converter_0/s_axi_aclk] [get_bd_pins axi_interconnect_0/ACLK] [get_bd_pins axi_interconnect_0/M00_ACLK] [get_bd_pins axi_interconnect_0/S00_ACLK] [get_bd_pins axi_interconnect_1/ACLK] [get_bd_pins axi_interconnect_1/M00_ACLK] [get_bd_pins axi_interconnect_1/S00_ACLK] [get_bd_pins axi_interconnect_2/ACLK] [get_bd_pins axi_interconnect_2/M00_ACLK] [get_bd_pins axi_interconnect_2/S00_ACLK] [get_bd_pins axi_register_slice_1/aclk] [get_bd_pins clk_wiz_0/clk_in1] [get_bd_pins proc_sys_reset_0/slowest_sync_clk] [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins processing_system7_0/M_AXI_GP0_ACLK] [get_bd_pins processing_system7_0/S_AXI_ACP_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP0_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP1_ACLK] [get_bd_pins video/m_axi_mm2s_aclk]
+  connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins axi_interconnect_1/S01_ACLK]
   connect_bd_net -net processing_system7_0_FCLK_RESET0_N [get_bd_pins proc_sys_reset_0/ext_reset_in] [get_bd_pins processing_system7_0/FCLK_RESET0_N]
   connect_bd_net -net processing_system7_0_FCLK_RESET1_N [get_bd_pins processing_system7_0/FCLK_RESET1_N] [get_bd_pins rst_ps7_0_25M/ext_reset_in]
   connect_bd_net -net rst_ps7_0_25M_peripheral_aresetn [get_bd_pins audio_formatter_0/m_axis_mm2s_aresetn] [get_bd_pins audio_formatter_0/s_axi_lite_aresetn] [get_bd_pins audio_formatter_1/s_axi_lite_aresetn] [get_bd_pins audio_formatter_1/s_axis_s2mm_aresetn] [get_bd_pins axi_interconnect_3/ARESETN] [get_bd_pins axi_interconnect_3/M00_ARESETN] [get_bd_pins axi_interconnect_3/S00_ARESETN] [get_bd_pins axi_interconnect_4/ARESETN] [get_bd_pins axi_interconnect_4/M00_ARESETN] [get_bd_pins axi_interconnect_4/S00_ARESETN] [get_bd_pins clk_wiz_0/s_axi_aresetn] [get_bd_pins i2s_receiver_0/m_axis_aud_aresetn] [get_bd_pins i2s_receiver_0/s_axi_ctrl_aresetn] [get_bd_pins i2s_transmitter_0/s_axi_ctrl_aresetn] [get_bd_pins i2s_transmitter_0/s_axis_aud_aresetn] [get_bd_pins ps7_0_axi_periph/ARESETN] [get_bd_pins ps7_0_axi_periph/M00_ARESETN] [get_bd_pins ps7_0_axi_periph/M01_ARESETN] [get_bd_pins ps7_0_axi_periph/M02_ARESETN] [get_bd_pins ps7_0_axi_periph/M03_ARESETN] [get_bd_pins ps7_0_axi_periph/M04_ARESETN] [get_bd_pins ps7_0_axi_periph/M05_ARESETN] [get_bd_pins ps7_0_axi_periph/M06_ARESETN] [get_bd_pins ps7_0_axi_periph/S00_ARESETN] [get_bd_pins rst_ps7_0_25M/peripheral_aresetn] [get_bd_pins video/axi_resetn] [get_bd_pins xadc_wiz_0/s_axi_aresetn]
+  connect_bd_net -net rst_ps7_0_25M_peripheral_aresetn [get_bd_pins ps7_0_axi_periph/M07_ARESETN]
   connect_bd_net -net sdata_0_in_0_1 [get_bd_ports I2SI_D0] [get_bd_pins i2s_receiver_0/sdata_0_in]
   connect_bd_net -net v_axi4s_vid_out_0_vid_data [get_bd_pins video/dvi_rgb] [get_bd_pins xlslice_0/Din] [get_bd_pins xlslice_1/Din] [get_bd_pins xlslice_2/Din]
   connect_bd_net -net video_control_vblank [get_bd_pins MNTZorro_v0_1_S00_AXI_0/video_control_vblank_in] [get_bd_pins video/control_vblank]
@@ -1337,11 +1383,13 @@ proc create_hier_cell_video { parentCell nameHier } {
   create_bd_addr_seg -range 0x00010000 -offset 0x83C20000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs audio_formatter_0/s_axi_lite/reg0] SEG_audio_formatter_0_reg0
   create_bd_addr_seg -range 0x00010000 -offset 0x83C50000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs audio_formatter_1/s_axi_lite/reg0] SEG_audio_formatter_1_reg0
   create_bd_addr_seg -range 0x00010000 -offset 0x83000000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs video/axi_vdma_0/S_AXI_LITE/Reg] SEG_axi_vdma_0_Reg
+  create_bd_addr_seg -range 0x00010000 -offset 0x83010000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs video/axi_vdma_1/S_AXI_LITE/Reg] SEG_axi_vdma_1_Reg
   create_bd_addr_seg -range 0x00010000 -offset 0x83C00000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs clk_wiz_0/s_axi_lite/Reg] SEG_clk_wiz_0_Reg
   create_bd_addr_seg -range 0x00010000 -offset 0x83C40000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs i2s_receiver_0/s_axi_ctrl/Reg] SEG_i2s_receiver_0_Reg
   create_bd_addr_seg -range 0x00010000 -offset 0x83C30000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs i2s_transmitter_0/s_axi_ctrl/Reg] SEG_i2s_transmitter_0_Reg
   create_bd_addr_seg -range 0x00010000 -offset 0x83C10000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs xadc_wiz_0/s_axi_lite/Reg] SEG_xadc_wiz_0_Reg
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces video/axi_vdma_0/Data_MM2S] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] SEG_processing_system7_0_HP0_DDR_LOWOCM
+  create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces video/axi_vdma_1/Data_MM2S] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] SEG_processing_system7_0_HP0_DDR_LOWOCM_1
 
   # Perform GUI Layout
   regenerate_bd_layout -layout_string {

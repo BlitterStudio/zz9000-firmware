@@ -2,12 +2,10 @@
  * MNT ZZ9000 Amiga Graphics and ARM Coprocessor Card Operating System
  * (ZZ9000OS)
  *
- * P96 video window (PIP) overlay. The scanout VDMA cannot composite, so
- * while an overlay is active the vblank ISR presents a shadow buffer
- * instead of the framebuffer; core 1 re-composites the shadow every
- * frame (full screen copy + color-keyed, scaled YUV overlay) via the
- * scheduler. Two shadows ping-pong: a compose only ever targets the
- * buffer that is not being scanned, and flips happen at vblank.
+ * P96 video window (PIP) overlay. Fully visible 1:1 packed-YUV windows use
+ * the native PL overlay plane. Scaled or clipped windows retain the software
+ * shadow compositor. SDK planar video frames are packed into two staging
+ * buffers and handed to the same PL plane at vblank.
  *
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -17,9 +15,14 @@
 #include <string.h>
 #include "xil_cache.h"
 #include "overlay.h"
+#include "overlay_color.h"
+#include "overlay_hw.h"
+#include "overlay_schedule.h"
 #include "memorymap.h"
 #include "surface_allocator.h"
 #include "sdk_mailbox.h"
+#include "sdk_video_stream.h"
+#include "sdk_video_yuy2.h"
 #include "scheduler.h"
 #include "video_vdma.h"
 
@@ -32,6 +35,7 @@ enum overlay_status {
 static struct {
 	volatile uint8_t configured;
 	volatile uint8_t active;
+	volatile uint8_t hw_active;
 	uint8_t key_enabled;
 	uint8_t variant;
 
@@ -60,6 +64,11 @@ static struct {
 	                                     * reallocates bitmaps across
 	                                     * mode switches) */
 	uint8_t compose_target;
+	uint32_t direct_session;
+	uint32_t hw_generation;
+	volatile uint8_t hw_flip_pending;
+	volatile uint8_t hw_restore_pending;
+	struct overlay_schedule_state schedule;
 } ov;
 
 extern uint8_t stride_div;
@@ -82,7 +91,9 @@ static void overlay_free_shadows(void)
  * seconds later (driver boot), long after it retires. */
 void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
 {
+	overlay_hw_stop();
 	ov.active = 0;
+	ov.hw_active = 0;
 	ov.configured = 0;
 	ov.compose_request = 0;
 	ov.free_pending = 0;
@@ -91,24 +102,35 @@ void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
 	ov.shadow[0] = 0;
 	ov.shadow[1] = 0;
 	ov.shadow_size = 0;
-	/* the mailbox reinit drops internal completions, so a compose that
-	 * was queued/running never retires: clear the marker here or every
-	 * post-reboot SET would fail on the in-flight guard forever. If it
-	 * WAS running, drop whatever it still publishes. */
-	ov.discard_stale = ov.compose_in_flight ? 1 : 0;
+	/* The mailbox reinit drops internal completions, so a compose that was
+	 * queued/running never retires. Clear both markers or the first frame after
+	 * reboot would be discarded for a completion that can no longer publish. */
+	ov.discard_stale = 0;
 	ov.compose_in_flight = 0;
 	ov.presenting = 0; /* the reset path reprograms the scanout */
 	ov.mode_stale = 0;
+	ov.hw_flip_pending = 0;
+	ov.hw_restore_pending = 0;
+	overlay_schedule_reset(&ov.schedule);
+	ov.direct_session = 0U;
 	vs->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY] = 0;
 }
 
 static void overlay_stop(void)
 {
+	overlay_hw_stop();
+	if (ov.compose_in_flight)
+		ov.discard_stale = 1;
 	ov.active = 0;
+	ov.hw_active = 0;
 	ov.configured = 0;
 	ov.compose_request = 0;
 	ov.front = -1;
 	ov.ready_idx = -1;
+	overlay_schedule_reset(&ov.schedule);
+	ov.direct_session = 0U;
+	ov.hw_flip_pending = 0;
+	ov.hw_restore_pending = 0;
 	/* always deferred: core 1 may still be composing into a shadow,
 	 * and the VDMA keeps scanning the presented one until the next
 	 * vblank repoints it - the poll frees once both have moved on */
@@ -182,7 +204,7 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 		goto out;
 	}
 
-	uint32_t need = stride * rows;
+	uint32_t need = overlay_buffer_bytes(stride, rows, src_pitch, src_h);
 	if (ov.free_pending) {
 		if (need == ov.shadow_size) {
 			/* re-open while the previous overlay's deferred free is
@@ -191,7 +213,8 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 			 * compose publishes - it used the old parameters and
 			 * possibly a freed source bitmap */
 			ov.free_pending = 0;
-			ov.discard_stale = 1;
+			if (ov.compose_in_flight)
+				ov.discard_stale = 1;
 		} else {
 			/* wrong size and the old compose still owns the buffers;
 			 * refuse - the driver fails/retries the open cleanly */
@@ -255,6 +278,46 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	/* a fresh SET re-validated everything against the live mode */
 	ov.mode_stale = 0;
 
+	/* A fully visible 1:1 P96 bitmap can be scanned directly.  Every P96 and
+	 * cgxvideo client reaches this path through the existing driver ABI; no
+	 * player-specific interface is involved. Resized/clipped windows retain
+	 * the proven RGB software compositor. */
+	uint8_t was_hw_active = ov.hw_active;
+	uint32_t hw_src_addr = ov.src_addr;
+
+	if (ov.compose_in_flight)
+		ov.discard_stale = 1;
+	if (was_hw_active && ov.direct_session != 0U && ov.front >= 0)
+		hw_src_addr = ov.shadow[ov.front];
+	ov.hw_restore_pending = 0;
+	ov.hw_active = 0;
+	if (overlay_hw_supported() && ov.active &&
+	    dst_w == (int16_t)src_w && dst_h == (int16_t)src_h &&
+	    dst_x >= 0 && dst_y >= 0 &&
+	    (uint32_t)dst_x + src_w <= vs->vmode_hsize &&
+	    (uint32_t)dst_y + src_h <= rows) {
+		ov.hw_generation++;
+		if (ov.hw_generation == 0U)
+			ov.hw_generation = 1U;
+		ov.hw_active = overlay_hw_start(hw_src_addr, ov.src_pitch,
+			ov.src_w, ov.src_h, ov.dst_x, ov.dst_y, ov.variant,
+			overlay_key_to_rgb(ov.key_native, ov.snap_colormode),
+			ov.key_enabled, ov.hw_generation) ? 1U : 0U;
+	}
+	if (was_hw_active && !ov.hw_active)
+		overlay_hw_stop();
+	/* Geometry/source changes need a fresh staged frame when the direct PL
+	 * path is ineligible or an SDK session later supplies planar data. */
+	if (was_hw_active != ov.hw_active) {
+		/* A hardware staging shadow is packed YUV; a software shadow is a
+		 * full RGB screen. Never let either path present the other's content. */
+		ov.front = -1;
+		ov.ready_idx = -1;
+		ov.hw_flip_pending = 0;
+		ov.hw_restore_pending = 0;
+	}
+	ov.compose_request = (ov.hw_active && ov.direct_session == 0U) ? 0U : 1U;
+
 	/* UART fingerprint: proves which firmware build handled the SET
 	 * (stale-BOOT.bin bench rounds are otherwise undetectable) and
 	 * captures the geometry the compositor will run with */
@@ -279,7 +342,7 @@ static int overlay_presentable(struct ZZ_VIDEO_STATE *vs)
 		return 0;
 	/* no compositor without core 1: fall back to the live framebuffer
 	 * instead of freezing the screen on the last composited shadow */
-	if (!scheduler_core1_available())
+	if (!ov.hw_active && !scheduler_core1_available())
 		return 0;
 	if (vs->split_pos != 0)
 		return 0;
@@ -316,6 +379,19 @@ uint32_t overlay_present_bufpos(struct ZZ_VIDEO_STATE *vs)
 	uint32_t normal = (uint32_t)vs->framebuffer + vs->framebuffer_pan_offset;
 
 	if (!overlay_presentable(vs)) {
+		if (ov.hw_active) {
+			overlay_hw_stop();
+			ov.hw_active = 0;
+		}
+		ov.presenting = 0;
+		return normal;
+	}
+	if (ov.hw_active) {
+		if (ov.ready_idx >= 0) {
+			ov.front = ov.ready_idx;
+			ov.ready_idx = -1;
+			ov.hw_flip_pending = 1;
+		}
 		ov.presenting = 0;
 		return normal;
 	}
@@ -330,7 +406,11 @@ uint32_t overlay_present_bufpos(struct ZZ_VIDEO_STATE *vs)
 			ov.ready_idx = -1;
 		}
 	}
-	ov.compose_request = 1;
+	/* Legacy overlay writers cannot signal source changes, so retain their
+	 * refresh-driven behavior. SDK video decode completions explicitly mark
+	 * new frames and avoid recomposing the same frame at every vblank. */
+	if (overlay_schedule_refresh_driven(&ov.schedule))
+		ov.compose_request = 1;
 
 	if (ov.front < 0) {
 		ov.presenting = 0;
@@ -348,6 +428,8 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 	}
 
 	if (!ov.configured || !ov.active)
+		return;
+	if (ov.hw_active && ov.direct_session == 0U)
 		return;
 	if (!ov.compose_request || ov.compose_in_flight)
 		return;
@@ -384,6 +466,21 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 	p.variant = ov.variant;
 	p.key_enabled = ov.key_enabled;
 	p.target_idx = target;
+	if (ov.direct_session != 0U) {
+		p.src_addr = ov.direct_session;
+		if (ov.hw_active) {
+			/* Convert decoder-owned planar420 into the non-scanned packed
+			 * staging buffer using the pitch already programmed into the PL
+			 * VDMA. PL still performs RGB conversion/key/composition; this is
+			 * roughly half a frame write, not a full-screen shadow. */
+			p.dst_addr = ov.shadow[target];
+			p.dst_pitch = overlay_staging_pitch(ov.src_w, ov.src_pitch);
+			p.scr_h = ov.src_h;
+			p.variant = 0xfeU;
+		} else {
+			p.variant = 0xffU;
+		}
+	}
 
 	if (sdk_mailbox_enqueue_internal(TASKQ_OP_VIDEO_COMPOSE, &p, sizeof(p))) {
 		ov.compose_request = 0;
@@ -399,13 +496,46 @@ uint16_t overlay_run_compose(const struct overlay_compose_params *p)
 	 * (see the flush comment in isr_video), so host writes snoop the
 	 * ARM caches. A defensive L1 range-invalidate pass here was
 	 * benched as a no-op and cost milliseconds per frame. */
-	overlay_composite_frame((uint8_t *)p->dst_addr, p->dst_pitch,
-			(const uint8_t *)p->screen_addr, p->screen_pitch,
-			p->scr_w, p->scr_h, p->color_format,
-			(const uint8_t *)p->src_addr, p->src_pitch,
-			p->src_w, p->src_h, p->variant,
-			p->dst_x, p->dst_y, p->dst_w, p->dst_h,
-			p->key_native, p->key_enabled);
+	if (p->variant == 0xfeU) {
+		struct SDKVideoDecodedFrame frame;
+		uint32_t bytes_written;
+
+		if (!sdk_video_stream_get_direct_frame(p->src_addr, &frame) ||
+		    frame.width != p->src_w || frame.height != p->src_h ||
+		    !sdk_video_yuv420_to_yuy2((uint8_t *)p->dst_addr,
+			p->dst_pitch, frame.width, frame.height,
+			frame.y, frame.y_pitch, frame.cb, frame.cr,
+			frame.chroma_pitch, &bytes_written))
+			return SDK_STATUS_BAD_REQUEST;
+	} else if (p->variant == 0xffU) {
+		struct SDKVideoDecodedFrame frame;
+
+		if (sdk_video_stream_get_direct_frame(p->src_addr, &frame) &&
+		    frame.width == p->src_w && frame.height == p->src_h) {
+			overlay_composite_planar420_frame(
+				(uint8_t *)p->dst_addr, p->dst_pitch,
+				(const uint8_t *)p->screen_addr, p->screen_pitch,
+				p->scr_w, p->scr_h, p->color_format,
+				frame.y, frame.y_pitch, frame.cb, frame.cr,
+				frame.chroma_pitch, frame.width, frame.height,
+				p->dst_x, p->dst_y, p->dst_w, p->dst_h,
+				p->key_native, p->key_enabled);
+		} else {
+			overlay_composite_frame((uint8_t *)p->dst_addr, p->dst_pitch,
+				(const uint8_t *)p->screen_addr, p->screen_pitch,
+				p->scr_w, p->scr_h, p->color_format, 0, 0, 0, 0, 0,
+				p->dst_x, p->dst_y, p->dst_w, p->dst_h,
+				p->key_native, p->key_enabled);
+		}
+	} else {
+		overlay_composite_frame((uint8_t *)p->dst_addr, p->dst_pitch,
+				(const uint8_t *)p->screen_addr, p->screen_pitch,
+				p->scr_w, p->scr_h, p->color_format,
+				(const uint8_t *)p->src_addr, p->src_pitch,
+				p->src_w, p->src_h, p->variant,
+				p->dst_x, p->dst_y, p->dst_w, p->dst_h,
+				p->key_native, p->key_enabled);
+	}
 
 	/* L1-ONLY flush, deliberately: Xil_DCacheFlushRange would issue
 	 * megabytes of line operations against the shared PL310 L2
@@ -433,6 +563,49 @@ uint16_t overlay_run_compose(const struct overlay_compose_params *p)
 void overlay_scheduler_reset(void)
 {
 	ov.compose_in_flight = 0;
+	ov.discard_stale = 0;
+	overlay_schedule_reset(&ov.schedule);
+	ov.direct_session = 0U;
+	if (ov.configured && ov.active)
+		ov.compose_request = 1;
+}
+
+void overlay_video_frame_ready(uint32_t session)
+{
+	/* Core-0 deferred-completion retirement runs before overlay_main_poll,
+	 * so this queues the compose before the client can submit its next decode
+	 * and overwrite the YUY2 source bitmap. */
+	if (!ov.configured || !ov.active)
+		return;
+	/* Decoder-owned planar420 is packed into the non-scanned YUV staging
+	 * buffer on core 1, then flipped into the same native PL plane at vblank.
+	 * A later planar fetcher can remove this final compact conversion. */
+	overlay_schedule_frame_ready(&ov.schedule, session);
+	ov.direct_session = session;
+	ov.compose_request = 1;
+}
+
+void overlay_video_session_closed(uint32_t session)
+{
+	overlay_schedule_session_closed(&ov.schedule, session);
+	if (ov.direct_session == session) {
+		ov.direct_session = 0U;
+		if (ov.compose_in_flight)
+			ov.discard_stale = 1;
+		if (ov.hw_active) {
+			/* Return ownership to the live P96 bitmap at the next flushed
+			 * vblank; the VDMA may currently point at an SDK staging shadow. */
+			ov.front = -1;
+			ov.ready_idx = -1;
+			ov.hw_flip_pending = 0;
+			ov.hw_restore_pending = 1;
+		}
+	}
+	/* If this was the final SDK producer, immediately restore the legacy
+	 * periodic policy rather than waiting an extra vblank to request work. */
+	if (overlay_schedule_refresh_driven(&ov.schedule) &&
+	    ov.configured && ov.active)
+		ov.compose_request = 1;
 }
 
 int overlay_scanout_active(void)
@@ -445,12 +618,37 @@ void overlay_scanout_released(void)
 	ov.presenting = 0;
 }
 
+void overlay_vblank_cache_flushed(void)
+{
+	if (!ov.hw_active)
+		return;
+	if (ov.hw_restore_pending) {
+		ov.hw_restore_pending = 0;
+		ov.hw_generation++;
+		if (ov.hw_generation == 0U)
+			ov.hw_generation = 1U;
+		overlay_hw_set_buffer(ov.src_addr, ov.hw_generation);
+		return;
+	}
+	if (!ov.hw_flip_pending || ov.front < 0)
+		return;
+	ov.hw_flip_pending = 0;
+	ov.hw_generation++;
+	if (ov.hw_generation == 0U)
+		ov.hw_generation = 1U;
+	overlay_hw_set_buffer(ov.shadow[ov.front], ov.hw_generation);
+}
+
 void overlay_compose_retired(int ok)
 {
 	/* core 0 (main-loop harvest): the compose this retires targeted
 	 * compose_target, which only core 0 writes. Failed/stranded tasks
 	 * retire without publishing (the shadow was never composed). */
-	if (ok && ov.compose_in_flight)
-		ov.ready_idx = (int8_t)ov.compose_target;
+	if (ov.compose_in_flight) {
+		if (ov.discard_stale)
+			ov.discard_stale = 0;
+		else if (ok)
+			ov.ready_idx = (int8_t)ov.compose_target;
+	}
 	ov.compose_in_flight = 0;
 }

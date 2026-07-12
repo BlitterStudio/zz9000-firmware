@@ -144,7 +144,17 @@
 #define SDK_IMAGE_SESSIONS_ADDRESS \
     (SDK_TASKQ_REGION_ADDRESS + SDK_IMAGE_SESSIONS_OFFSET)
 #define SDK_IMAGE_SESSIONS_MAX_BYTES \
-    (SDK_AUDIO_STREAMS_OFFSET - SDK_IMAGE_SESSIONS_OFFSET)
+    (SDK_VIDEO_SESSIONS_OFFSET - SDK_IMAGE_SESSIONS_OFFSET)
+
+// Codec-neutral streaming video sessions. The table contains only session
+// metadata and decoder pointers; codec working memory stays on the tracked
+// newlib heap owned by core 1. Keeping this small carve immediately before
+// the audio table preserves nearly all of the image-session allowance.
+#define SDK_VIDEO_SESSIONS_OFFSET   0x000BF000
+#define SDK_VIDEO_SESSIONS_ADDRESS \
+    (SDK_TASKQ_REGION_ADDRESS + SDK_VIDEO_SESSIONS_OFFSET)
+#define SDK_VIDEO_SESSIONS_MAX_BYTES \
+    (SDK_AUDIO_STREAMS_OFFSET - SDK_VIDEO_SESSIONS_OFFSET)
 
 // Audio-stream session table, also inside the coherent region: streams may
 // be core-1-affine (feed/decode on the worker) while core 0 begins/closes
