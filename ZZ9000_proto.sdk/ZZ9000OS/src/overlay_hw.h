@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 
+int overlay_hw_supported(void);
 void overlay_hw_stop(void);
 int overlay_hw_start(uint32_t src_addr, uint32_t src_pitch,
                      uint16_t width, uint16_t height,

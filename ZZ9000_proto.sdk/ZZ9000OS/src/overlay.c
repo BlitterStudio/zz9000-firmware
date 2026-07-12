@@ -15,6 +15,7 @@
 #include <string.h>
 #include "xil_cache.h"
 #include "overlay.h"
+#include "overlay_color.h"
 #include "overlay_hw.h"
 #include "overlay_schedule.h"
 #include "memorymap.h"
@@ -81,29 +82,6 @@ static void overlay_free_shadows(void)
 		}
 	}
 	ov.shadow_size = 0;
-}
-
-static uint32_t overlay_key_rgb(uint32_t native, int colormode)
-{
-	uint16_t p = (uint16_t)native;
-	uint8_t r, g, b;
-
-	if (colormode == MNTVA_COLOR_32BIT)
-		return native & 0x00ffffffU;
-	if (colormode == MNTVA_COLOR_16BIT565) {
-		r = (uint8_t)((p & 0x1fU) << 3) | (uint8_t)((p & 0x1fU) >> 2);
-		g = (uint8_t)(((p >> 5) & 0x3fU) << 2) |
-		    (uint8_t)(((p >> 5) & 0x3fU) >> 4);
-		b = (uint8_t)(((p >> 11) & 0x1fU) << 3) |
-		    (uint8_t)(((p >> 11) & 0x1fU) >> 2);
-	} else {
-		r = (uint8_t)((p & 0x1fU) << 3) | (uint8_t)((p & 0x1fU) >> 2);
-		g = (uint8_t)(((p >> 5) & 0x1fU) << 3) |
-		    (uint8_t)(((p >> 5) & 0x1fU) >> 2);
-		b = (uint8_t)(((p >> 10) & 0x1fU) << 3) |
-		    (uint8_t)(((p >> 10) & 0x1fU) >> 2);
-	}
-	return ((uint32_t)b << 16) | ((uint32_t)g << 8) | r;
 }
 
 /* Amiga reset: the legacy surface heap was just reinitialized, so the
@@ -313,7 +291,8 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 		hw_src_addr = ov.shadow[ov.front];
 	ov.hw_restore_pending = 0;
 	ov.hw_active = 0;
-	if (ov.active && dst_w == (int16_t)src_w && dst_h == (int16_t)src_h &&
+	if (overlay_hw_supported() && ov.active &&
+	    dst_w == (int16_t)src_w && dst_h == (int16_t)src_h &&
 	    dst_x >= 0 && dst_y >= 0 &&
 	    (uint32_t)dst_x + src_w <= vs->vmode_hsize &&
 	    (uint32_t)dst_y + src_h <= rows) {
@@ -322,7 +301,7 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 			ov.hw_generation = 1U;
 		ov.hw_active = overlay_hw_start(hw_src_addr, ov.src_pitch,
 			ov.src_w, ov.src_h, ov.dst_x, ov.dst_y, ov.variant,
-			overlay_key_rgb(ov.key_native, ov.snap_colormode),
+			overlay_key_to_rgb(ov.key_native, ov.snap_colormode),
 			ov.key_enabled, ov.hw_generation) ? 1U : 0U;
 	}
 	if (was_hw_active && !ov.hw_active)

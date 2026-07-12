@@ -7,6 +7,7 @@
 #include "sdk_video_stream.h"
 
 #include "memorymap.h"
+#include "overlay.h"
 #include "sdk_video_backend.h"
 
 #include <string.h>
@@ -170,8 +171,13 @@ void sdk_video_stream_poison_core1_sessions(void)
 			continue;
 		/* The decode-reclaim pass already freed the backend graph. */
 		session->decoder = 0;
+		memset(&session->direct_frame, 0, sizeof(session->direct_frame));
+		session->direct_frame_valid = 0U;
 		session->faulted = 1U;
 		session->failed = 1U;
+		/* Poisoning runs on core 0. Detach before any pending overlay poll can
+		 * reuse decoder-owned planes that the reclaim pass just freed. */
+		overlay_video_session_closed(session->id);
 	}
 }
 
@@ -180,7 +186,8 @@ int sdk_video_stream_get_direct_frame(uint32_t id,
 {
 	struct SDKVideoStreamSession *session = find_session(id);
 
-	if (!session || !frame || !session->direct_frame_valid)
+	if (!session || !frame || session->failed || session->faulted ||
+	    !session->direct_frame_valid)
 		return 0;
 	*frame = session->direct_frame;
 	return 1;

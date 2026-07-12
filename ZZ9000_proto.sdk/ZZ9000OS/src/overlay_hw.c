@@ -10,6 +10,15 @@
 #define OVERLAY_VDMA_BASE 0x83010000U
 #define OVERLAY_RESET_TIMEOUT 100000U
 
+#ifndef ZZ_OVERLAY_HW_PRESENT
+#define ZZ_OVERLAY_HW_PRESENT 1
+#endif
+
+int overlay_hw_supported(void)
+{
+	return ZZ_OVERLAY_HW_PRESENT != 0;
+}
+
 static void overlay_vdma_write(uint32_t offset, uint32_t value)
 {
 	Xil_Out32(OVERLAY_VDMA_BASE + offset, value);
@@ -22,12 +31,16 @@ static uint32_t overlay_vdma_read(uint32_t offset)
 
 void overlay_hw_stop(void)
 {
+	if (!overlay_hw_supported())
+		return;
 	video_formatter_write(0U, MNTVF_OP_OVERLAY_CTRL);
 	overlay_vdma_write(XAXIVDMA_CR_OFFSET, XAXIVDMA_CR_RESET_MASK);
 }
 
 void overlay_hw_set_buffer(uint32_t src_addr, uint32_t generation)
 {
+	if (!overlay_hw_supported())
+		return;
 	/* With one circular frame store, changing START_ADDR while MM2S is
 	 * backpressured at the frame boundary selects the next frame.  The
 	 * generation op simultaneously invalidates prefetched PL line tags. */
@@ -46,7 +59,8 @@ int overlay_hw_start(uint32_t src_addr, uint32_t src_pitch,
 	uint32_t timeout = OVERLAY_RESET_TIMEOUT;
 	uint32_t addr = XAXIVDMA_MM2S_ADDR_OFFSET;
 
-	if (!src_addr || !width || !height || src_pitch < line_bytes ||
+	if (!overlay_hw_supported() || !src_addr || !width || !height ||
+	    src_pitch < line_bytes ||
 	    dst_x < 0 || dst_y < 0)
 		return 0;
 

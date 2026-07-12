@@ -24,11 +24,14 @@ cd "$SCRIPT_DIR"
 
 usage() {
     cat >&2 <<'EOF'
-Usage: ./build_bootimage.sh [--bitstream PATH] [--output PATH] [--preload-bootrom]
+Usage: ./build_bootimage.sh [--bitstream PATH] [--firmware PATH]
+                            [--output PATH] [--preload-bootrom]
 
 Options:
   --bitstream PATH   FPGA bitstream to package
                      (default: bootimage_work/zz9000_ps_wrapper.bit)
+  --firmware PATH    ARM firmware ELF to package
+                     (default: ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf)
   --output PATH      BOOT.bin output path
                      (default: bootimage_work/BOOT.bin)
   --preload-bootrom  Add the 8 KB autoboot ROM data partition before the
@@ -37,6 +40,7 @@ EOF
 }
 
 BITSTREAM=bootimage_work/zz9000_ps_wrapper.bit
+FIRMWARE=ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
 OUTPUT=bootimage_work/BOOT.bin
 PRELOAD_BOOTROM=0
 BOOTROM_IMAGE=bootimage_work/bootrom.bin
@@ -67,6 +71,15 @@ while [ "$#" -gt 0 ]; do
                 exit 1
             fi
             OUTPUT=$2
+            shift 2
+            ;;
+        --firmware)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --firmware needs a path." >&2
+                usage
+                exit 1
+            fi
+            FIRMWARE=$2
             shift 2
             ;;
         --preload-bootrom)
@@ -109,12 +122,12 @@ fi
 required=(
     bootimage_work/FSBL_exec.elf
     "$BITSTREAM"
-    ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+    "$FIRMWARE"
 )
 for f in "${required[@]}"; do
     if [ ! -f "$f" ]; then
         echo "ERROR: missing required input: $f" >&2
-        if [ "$f" = "ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf" ]; then
+        if [ "$f" = "$FIRMWARE" ]; then
             echo "  Run ./build_firmware.sh first." >&2
         fi
         exit 1
@@ -136,6 +149,7 @@ fi
 
 echo "[bootimage] bootgen: $BOOTGEN"
 echo "[bootimage] bitstream: $BITSTREAM"
+echo "[bootimage] firmware:  $FIRMWARE"
 echo "[bootimage] output:    $OUTPUT"
 if [ "$PRELOAD_BOOTROM" -eq 1 ]; then
     echo "[bootimage] bootrom:   $BOOTROM_IMAGE -> $BOOTROM_LOAD_ADDRESS"
@@ -158,7 +172,7 @@ EOF
 fi
 cat <<EOF
   $BITSTREAM
-  ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
+  $FIRMWARE
 }
 EOF
 } > "$TMP_BIF"

@@ -7,9 +7,11 @@
 #   zz9000-firmware-<tag>-<variant>/ZZ9000.CFG
 #
 # CI can only package variants that already have a committed bitstream.
-# The ARM firmware ELF is shared across all hardware variants. Current
-# release CI packages one firmware flavor; boot-time behavior that used
-# to need flavors (for example ns-pal) is selected with ZZ9000.CFG.
+# The default bitstream currently has the native overlay hardware. Until the
+# six non-default bitstreams are rebuilt, they are paired with the companion
+# legacy-bitstream ELF, which compile-time disables the unmapped hardware
+# backend while retaining the software compositor. This is a hardware ABI
+# pairing, not a user-selectable firmware flavor.
 
 set -euo pipefail
 
@@ -100,21 +102,26 @@ if [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf ]; then
     exit 1
 fi
 
+if [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS-legacy-bitstream.elf ]; then
+    echo "ERROR: missing ZZ9000OS-legacy-bitstream.elf; run ./build_firmware.sh first." >&2
+    exit 1
+fi
+
 variant_defs=(
-    "zorro3|bootimage_work/zz9000_ps_wrapper.bit|Zorro III, A3000/A4000"
-    "zorro3-nofast|bootimage_work/variants/zz9000_ps_wrapper-zorro3-nofast.bit|Zorro III, A3000/A4000, no Zorro RAM"
-    "zorro2|bootimage_work/variants/zz9000_ps_wrapper-zorro2.bit|Zorro II 4MB, A2000"
-    "zorro2-2mb|bootimage_work/variants/zz9000_ps_wrapper-zorro2-2mb.bit|Zorro II 2MB, A2000"
-    "a500|bootimage_work/variants/zz9000_ps_wrapper-a500.bit|A500 4MB, ZZ9500CX Denise adapter"
-    "a500-2mb|bootimage_work/variants/zz9000_ps_wrapper-a500-2mb.bit|A500 2MB, ZZ9500CX Denise adapter"
-    "a500plus|bootimage_work/variants/zz9000_ps_wrapper-a500plus.bit|A500+ or Super Denise, ZZ9500CX Denise adapter"
+    "zorro3|bootimage_work/zz9000_ps_wrapper.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|Zorro III, A3000/A4000"
+    "zorro3-nofast|bootimage_work/variants/zz9000_ps_wrapper-zorro3-nofast.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS-legacy-bitstream.elf|Zorro III, A3000/A4000, no Zorro RAM"
+    "zorro2|bootimage_work/variants/zz9000_ps_wrapper-zorro2.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS-legacy-bitstream.elf|Zorro II 4MB, A2000"
+    "zorro2-2mb|bootimage_work/variants/zz9000_ps_wrapper-zorro2-2mb.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS-legacy-bitstream.elf|Zorro II 2MB, A2000"
+    "a500|bootimage_work/variants/zz9000_ps_wrapper-a500.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS-legacy-bitstream.elf|A500 4MB, ZZ9500CX Denise adapter"
+    "a500-2mb|bootimage_work/variants/zz9000_ps_wrapper-a500-2mb.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS-legacy-bitstream.elf|A500 2MB, ZZ9500CX Denise adapter"
+    "a500plus|bootimage_work/variants/zz9000_ps_wrapper-a500plus.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS-legacy-bitstream.elf|A500+ or Super Denise, ZZ9500CX Denise adapter"
 )
 
 mkdir -p "$OUT_DIR"
 # Each pass deletes only the exact archive names it's about to (re)write,
 # so other-flavor passes in the same output dir aren't disturbed.
 for def in "${variant_defs[@]}"; do
-    IFS='|' read -r variant _ _ <<< "$def"
+    IFS='|' read -r variant _ _ _ <<< "$def"
     if [ -n "$FIRMWARE_FLAVOR" ]; then
         rm -f "$OUT_DIR/zz9000-firmware-${TAG}-${variant}-${FIRMWARE_FLAVOR}.zip"
     else
@@ -130,7 +137,7 @@ created=()
 missing=()
 
 for def in "${variant_defs[@]}"; do
-    IFS='|' read -r variant bitstream label <<< "$def"
+    IFS='|' read -r variant bitstream firmware label <<< "$def"
 
     if [ ! -f "$bitstream" ]; then
         missing+=("$variant ($bitstream)")
@@ -150,7 +157,8 @@ for def in "${variant_defs[@]}"; do
 
     echo "[release] building $variant${flavor_label}: $label"
     mkdir -p "$archive_root"
-    ./build_bootimage.sh --bitstream "$bitstream" --output "$boot_bin"
+    ./build_bootimage.sh --bitstream "$bitstream" --firmware "$firmware" \
+        --output "$boot_bin"
     # Ship the (all-commented) sample config next to BOOT.bin so users
     # discover it; copying it to the SD card as-is changes nothing.
     cp ZZ9000.CFG "$archive_root/ZZ9000.CFG"

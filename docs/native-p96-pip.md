@@ -12,10 +12,12 @@ Picasso96 remains the only public presentation API. Existing applications use
 variant, destination rectangle, activation, and color key. No application or
 driver API fork is introduced.
 
-This firmware and bitstream are a matched ABI: firmware assumes the second
-VDMA and overlay controls exist. Fully visible 1:1 packed sources select the
-native plane. Resized/clipped legacy sources retain the ARM compositor until
-packed resize staging is complete.
+Firmware and bitstream are a matched ABI. Fully visible 1:1 packed sources
+select the native plane only in the hardware-capable build. Release packaging
+pairs the rebuilt default bitstream with that build and the six older variant
+bitstreams with `ZZ9000OS-legacy-bitstream.elf`, whose hardware backend is
+compile-time inert. Resized/clipped sources, and every source on an older
+variant bitstream, retain the ARM compositor.
 
 SDK video sessions use the same P96 window/geometry. Their decoder-owned
 planar420 source is an internal firmware source mode, not a different player
@@ -74,7 +76,9 @@ firmware. Geometry/control changes latch at vblank.
    timing. Resize/move cases retain the software fallback.
 4. **PASS:** fresh default Vivado implementation, current-source fingerprint,
    WNS +1.738 ns / TNS 0, 0 errors and 0 critical warnings.
-5. **PENDING RELEASE GATE:** rebuild the six non-default committed bitstreams.
+5. **PASS (safe fallback):** release packaging pairs the six non-default
+   committed bitstreams with the hardware-disabled firmware ELF. Rebuilding
+   those bitstreams is still required to enable native acceleration on them.
 6. **PENDING HARDWARE (r5):** P96 direct and cgxvideo players, 1:1 and resized
    PIP, color key, 318-pixel odd-macroblock regression, 640x480@30 FPS, mode
    changes, close, DPMS, scanlines, and videocap takeover.
