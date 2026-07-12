@@ -58,7 +58,6 @@ static int test_streaming_decode(void)
 	uint32_t frames = 0U;
 	uint64_t hash = UINT64_C(14695981039346656037);
 	void *decoder;
-	int eof_sent = 0;
 	int result;
 
 	ops = sdk_video_backend_find(1U, 1U);
@@ -72,18 +71,15 @@ static int test_streaming_decode(void)
 	while (offset < zz9k_mpeg1_ps_fixture_len) {
 		uint32_t chunk = 137U;
 		uint32_t accepted = 0U;
-		int eof;
 
 		if (chunk > zz9k_mpeg1_ps_fixture_len - offset)
 			chunk = zz9k_mpeg1_ps_fixture_len - offset;
-		eof = chunk == zz9k_mpeg1_ps_fixture_len - offset;
 		if (!ops->write(decoder, zz9k_mpeg1_ps_fixture + offset,
-		                chunk, eof, &accepted) || accepted != chunk) {
+		                chunk, 0, &accepted) || accepted != chunk) {
 			ops->destroy(decoder);
 			return 3;
 		}
 		offset += chunk;
-		eof_sent = eof;
 
 		for (;;) {
 			uint32_t bytes_written;
@@ -122,10 +118,17 @@ static int test_streaming_decode(void)
 		}
 	}
 
-	if (!eof_sent) {
-		ops->destroy(decoder);
-		return 8;
+	/* The mailbox API permits clients to release/reuse their shared input
+	 * buffer after the final data write, then signal EOF with no source. */
+	{
+		uint32_t accepted = 1U;
+
+		if (!ops->write(decoder, NULL, 0U, 1, &accepted) || accepted != 0U) {
+			ops->destroy(decoder);
+			return 8;
+		}
 	}
+
 	while (result != SDK_VIDEO_BACKEND_DONE) {
 		result = ops->decode(decoder, &frame);
 		if (result == SDK_VIDEO_BACKEND_NEED_INPUT ||

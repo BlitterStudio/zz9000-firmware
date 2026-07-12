@@ -4288,7 +4288,6 @@ static uint16_t handle_video_session_write(
 	volatile struct SDKVideoSessionWritePayload *payload;
 	struct SDKSharedBuffer *src;
 	struct video_write_op_params p;
-	uint32_t src_handle;
 	uint32_t src_offset;
 
 	if (payload_len < sizeof(*payload))
@@ -4296,18 +4295,21 @@ static uint16_t handle_video_session_write(
 	payload = (volatile struct SDKVideoSessionWritePayload *)req->payload;
 	memset(&p, 0, sizeof(p));
 	p.session = get_be32(payload->session);
-	src_handle = get_be32(payload->src_handle);
-	src_offset = get_be32(payload->src_offset);
 	p.src_len = get_be32(payload->src_length);
 	p.flags = get_be32(payload->flags);
 	if (sdk_video_stream_session_core1(p.session) < 0)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-	src = find_shared_buffer(src_handle);
-	if (!src)
-		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-	if (!buffer_range_valid(src, src_offset, p.src_len))
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	p.src_addr = p.src_len != 0U ? src->address + src_offset : 0U;
+	/* EOF-only writes carry no source bytes and intentionally need no live
+	 * shared-buffer handle. The worker validates that the EOF flag is present. */
+	if (p.src_len != 0U) {
+		src_offset = get_be32(payload->src_offset);
+		src = find_shared_buffer(get_be32(payload->src_handle));
+		if (!src)
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+		if (!buffer_range_valid(src, src_offset, p.src_len))
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		p.src_addr = src->address + src_offset;
+	}
 	if (service_try_defer(SDK_OP_VIDEO_SESSION_WRITE, req, &p,
 	                      sizeof(p), p.src_len) == SDK_STATUS_QUEUED)
 		return SDK_STATUS_QUEUED;

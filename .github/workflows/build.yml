@@ -44,6 +44,8 @@ jobs:
         run: make -C test/rtg test
       - name: Video pipeline regression suite
         run: make -C test/video test
+      - name: Video codec regression suite
+        run: make -C test/video_codec test
       - name: Firmware-file restore suite
         run: make -C test/fwupdate test
       - name: SD activity LED suite
