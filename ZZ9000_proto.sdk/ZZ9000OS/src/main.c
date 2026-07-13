@@ -269,7 +269,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	ethernet_send_result = 0;
 	eth_backlog_nag_counter = 0;
 	interrupt_enabled_ethernet = 0;
-	audio_set_interrupt_enabled(0);
+	audio_set_interrupt_mask(0);
 	interrupt_enabled_vblank = 0;
 
 	// drop all RTG off-screen surfaces; P96 re-allocates after reboot
@@ -1253,7 +1253,7 @@ int main() {
 				}
 				case REG_ZZ_AUDIO_CONFIG: {
 					// audio config
-					audio_set_interrupt_enabled((int)(zdata & 1));
+					audio_set_interrupt_mask((uint16_t)zdata);
 					break;
 				}
 				case REG_ZZ_SDK_DOORBELL:
@@ -1321,6 +1321,7 @@ int main() {
 					}
 				case REG_ZZ_AUDIO_SCALE:
 					audio_scale = zdata;
+					audio_set_capture_frames((uint16_t)zdata);
 					break;
 				case REG_ZZ_AUDIO_PARAM:
 					printf("[REG_ZZ_AUDIO_PARAM] %lx\n", zdata);
@@ -1559,6 +1560,10 @@ int main() {
 					case REG_ZZ_AUDIO_CONFIG: {
 						// is ZZ9000AX present?
 						data = (adau_enabled)<<16;
+						break;
+					}
+					case REG_ZZ_AUDIO_RX_STATUS: {
+						data = ((uint32_t)audio_get_rx_status()) << 16;
 						break;
 					}
 					case REG_ZZ_DECODER_VAL: {

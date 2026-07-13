@@ -34,7 +34,9 @@ int audio_adau_init(int program_dsp);
 void audio_init_i2s();
 void isr_audio(void *dummy);
 void isr_audio_rx(void *dummy);
-void audio_set_interrupt_enabled(int en);
+void audio_set_interrupt_mask(uint16_t mask);
+void audio_set_capture_frames(uint16_t frames);
+uint16_t audio_get_rx_status(void);
 /* Nonzero while a legacy/AHI client drives the audio output (it keeps
  * the per-period Amiga interrupt enabled during playback). */
 int audio_legacy_output_active(void);
@@ -69,4 +71,3 @@ void audio_adau_set_prefactor(int pre);
 void audio_adau_set_vol_pan(int vol, int pan);
 
 #endif
-

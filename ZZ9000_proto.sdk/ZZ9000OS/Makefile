@@ -97,6 +97,7 @@ C_SRCS = \
 	$(SRC_DIR)/platform.c \
 	$(SRC_DIR)/adc.c \
 	$(SRC_DIR)/ax.c \
+	$(SRC_DIR)/audio_capture.c \
 	$(SRC_DIR)/bootrom.c \
 	$(SRC_DIR)/codec37.c \
 	$(SRC_DIR)/codec47.c \

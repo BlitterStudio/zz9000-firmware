@@ -14,6 +14,7 @@
 #include "sleep.h"
 #include "stdlib.h"
 #include "ax.h"
+#include "audio_capture.h"
 #include "memorymap.h"
 #include "xtime_l.h"
 #include "math.h"
@@ -31,7 +32,12 @@ XAudioFormatter audio_formatter_rx;
 
 static uint8_t* audio_tx_buffer = (uint8_t*)AUDIO_TX_BUFFER_ADDRESS;
 static uint8_t* audio_inited_tx_buffer = NULL;
-static uint8_t* audio_rx_buffer = (uint8_t*)AUDIO_RX_BUFFER_ADDRESS;
+static uint8_t* volatile audio_rx_buffer = (uint8_t*)AUDIO_RX_BUFFER_ADDRESS;
+static volatile uint16_t audio_interrupt_mask = 0;
+static volatile uint16_t audio_capture_frames = ZZ_AUDIO_CAPTURE_INPUT_FRAMES;
+static volatile uint16_t audio_rx_status = ZZ_AUDIO_RX_STATUS_CAPABLE;
+static volatile uint8_t audio_rx_last_completed_period =
+    AUDIO_NUM_PERIODS - 1U;
 
 int adau_write16(u8 i2c_addr, u16 addr, u16 value) {
 	XIicPs* iic = &Iic2;
@@ -273,8 +279,6 @@ void audio_init_i2s() {
 
 	XAudioFormatter_InterruptDisable(&audio_formatter_rx, 1<<14); // timeout
 	XAudioFormatter_InterruptDisable(&audio_formatter_rx, 1<<13); // IOC
-	/*XAudioFormatter_InterruptEnable(&audio_formatter_rx, 1<<13); // IOC
-	printf("[adau] RX XAudioFormatter_InterruptEnable\n");*/
 
 	XI2srx_Config* i2srx_config = XI2s_Rx_LookupConfig(XPAR_XI2SRX_0_DEVICE_ID);
 	status = XI2s_Rx_CfgInitialize(&i2srx, i2srx_config, i2srx_config->BaseAddress);
@@ -285,6 +289,11 @@ void audio_init_i2s() {
 	//printf("[adau] I2S_RX MaxNumChannels: %d\n", i2srx.Config.MaxNumChannels);
 
 	XI2s_Rx_Enable(&i2srx, 1);
+	audio_rx_last_completed_period = AUDIO_NUM_PERIODS - 1U;
+	audio_rx_status = ZZ_AUDIO_RX_STATUS_CAPABLE;
+	XAudioFormatter_WriteReg(audio_formatter_rx.BaseAddress,
+		XAUD_FORMATTER_STS + XAUD_FORMATTER_S2MM_OFFSET, 1U<<31);
+	XAudioFormatter_InterruptEnable(&audio_formatter_rx, 1<<13); // IOC
 	XAudioFormatterDMAStart(&audio_formatter_rx);
 
 	printf("[adau] XAudioFormatter_InterruptEnable...\n");
@@ -405,8 +414,6 @@ int audio_adau_init(int program_dsp) {
 	return 1;
 }
 
-static int interrupt_enabled_audio = 0;
-
 XTime debug_time_start = 0;
 
 void audio_debug_timer(int zdata) {
@@ -443,7 +450,7 @@ void isr_audio(void *dummy) {
 	// and glitch MP3 playback. No-op when no session is bound.
 	sdk_mailbox_audio_playback_pump_isr();
 
-	if (interrupt_enabled_audio) {
+	if (audio_interrupt_mask & ZZ_AUDIO_CONFIG_PLAY) {
 		amiga_interrupt_set(AMIGA_INTERRUPT_AUDIO);
 	}
 }
@@ -452,29 +459,95 @@ int israrx_count = 0;
 
 // audio formatter interrupt, triggered whenever a period is completed
 void isr_audio_rx(void *dummy) {
+	uint32_t transfer_count;
+	uint8_t newest_period;
+	uint8_t completed_count;
+	uint8_t index;
 	uint32_t val = XAudioFormatter_ReadReg(XPAR_XAUDIOFORMATTER_1_BASEADDR, XAUD_FORMATTER_STS + XAUD_FORMATTER_S2MM_OFFSET);
 	val |= (1<<31); // clear irq
 	XAudioFormatter_WriteReg(XPAR_XAUDIOFORMATTER_1_BASEADDR,
 		XAUD_FORMATTER_STS + XAUD_FORMATTER_S2MM_OFFSET, val);
 
+	/* The transfer counter points into the period currently being written.
+	 * Derive the newest complete period from it instead of assuming that
+	 * every edge reached the CPU separately. */
+	transfer_count = XAudioFormatterGetDMATransferCount(&audio_formatter_rx);
+	newest_period = zz_audio_capture_completed_period(transfer_count,
+	                                                 AUDIO_BYTES_PER_PERIOD);
+	completed_count = zz_audio_capture_period_distance(
+	    newest_period, audio_rx_last_completed_period);
+	/* IOC means at least one period completed. Equal cursors mean the CPU
+	 * was delayed for at least one full ring. Keep only seven periods: the
+	 * eighth slot is already the formatter's active write target. */
+	if (completed_count == 0U)
+		completed_count = ZZ_AUDIO_CAPTURE_RESIDENT_PERIODS;
+
 	if (israrx_count++>1000) {
 		israrx_count = 0;
 	}
+
+	if (audio_interrupt_mask & ZZ_AUDIO_CONFIG_RECORD) {
+		uint8_t first_period =
+		    (newest_period + AUDIO_NUM_PERIODS - completed_count + 1U) %
+		    AUDIO_NUM_PERIODS;
+
+		for (index = 0U; index < completed_count; index++) {
+			uint8_t completed_period =
+			    (first_period + index) % AUDIO_NUM_PERIODS;
+			uint8_t *period = audio_rx_buffer +
+			    completed_period * AUDIO_BYTES_PER_PERIOD;
+			uint16_t sequence =
+			    (audio_rx_status + 1U) &
+			    ZZ_AUDIO_RX_STATUS_SEQUENCE_MASK;
+			uint16_t output_frames;
+
+			/* The S2MM port is non-coherent, while Amiga Zorro accesses use
+			 * the ACP. Pull the completed DMA period into the ARM coherency
+			 * domain, then publish the converted bytes back to DDR/L2. */
+			Xil_DCacheInvalidateRange((INTPTR)period,
+			                          AUDIO_BYTES_PER_PERIOD);
+			output_frames = zz_audio_capture_convert(
+			    period, audio_capture_frames);
+			Xil_DCacheFlushRange((INTPTR)period, output_frames * 4U);
+			__asm__ __volatile__("dsb" ::: "memory");
+
+			audio_rx_status = zz_audio_rx_status_pack(
+			    completed_period, sequence);
+		}
+		amiga_interrupt_set(AMIGA_INTERRUPT_AUDIO);
+	}
+
+	audio_rx_last_completed_period = newest_period;
 }
 
 uint32_t audio_get_dma_transfer_count() {
 	return XAudioFormatterGetDMATransferCount(&audio_formatter);
 }
 
-void audio_set_interrupt_enabled(int en) {
-	printf("[audio] enable irq: %d\n", en);
-	interrupt_enabled_audio = en;
+void audio_set_interrupt_mask(uint16_t mask) {
+	uint16_t old_mask = audio_interrupt_mask;
 
-	if (!en) {
+	mask &= ZZ_AUDIO_CONFIG_MASK;
+	printf("[audio] irq mask: %u\n", mask);
+	audio_interrupt_mask = mask;
+
+	if (!mask) {
 		amiga_interrupt_clear(AMIGA_INTERRUPT_AUDIO);
 	}
 
-	audio_silence();
+	if ((old_mask ^ mask) & ZZ_AUDIO_CONFIG_PLAY)
+		audio_silence();
+}
+
+void audio_set_capture_frames(uint16_t frames) {
+	if (frames == 0U || frames > ZZ_AUDIO_CAPTURE_INPUT_FRAMES)
+		frames = ZZ_AUDIO_CAPTURE_INPUT_FRAMES;
+
+	audio_capture_frames = frames;
+}
+
+uint16_t audio_get_rx_status(void) {
+	return audio_rx_status;
 }
 
 // Whether a legacy/AHI client currently drives the audio output: those
@@ -482,7 +555,7 @@ void audio_set_interrupt_enabled(int en) {
 // for the duration of playback. The SDK playback binding must not
 // steal the formatter while this is set.
 int audio_legacy_output_active() {
-	return interrupt_enabled_audio;
+	return (audio_interrupt_mask & ZZ_AUDIO_CONFIG_PLAY) != 0;
 }
 
 // offset = offset from audio tx buffer
@@ -826,4 +899,3 @@ void audio_adau_set_eq_gain(int band, int gain) {
 	usleep(25);
 
 }
-
