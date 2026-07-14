@@ -47,6 +47,21 @@ The sequence update is the publication boundary: the driver must not consume a
 period before observing its new sequence. Values outside 1 through 960 in
 `REG_ZZ_AUDIO_SCALE` fall back to 960 frames.
 
+## Receive-ring retargeting
+
+Writes to `AP_RX_BUF_OFFS_HI/LO` select a pending receive ring; the formatter
+does not use that address until the main loop performs its deferred I2S/audio
+formatter reinitialization. Firmware disables capture publication before
+changing the CPU-side ring pointer. RX interrupts during this window are
+acknowledged but do not convert data, advance the receive sequence or interrupt
+the Amiga. Publication resumes only after the formatter DMA has restarted on
+the new ring.
+
+The receive sequence remains monotonic across reinitialization. This lets a
+driver sample the status immediately after the buffer-register writes and
+still observe a distance of exactly one when the first period from the new
+ring is published.
+
 The driver selects the ring using the existing `AP_RX_BUF_OFFS_HI/LO`
 parameters. Its stride remains 3840 bytes even when the requested rate produces
 fewer frames. At most the newest seven completed periods are recoverable after

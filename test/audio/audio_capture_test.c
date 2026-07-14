@@ -110,6 +110,21 @@ static int test_status_helpers(void)
 	return 0;
 }
 
+static int test_publication_gate(void)
+{
+	if (!zz_audio_capture_can_publish(ZZ_AUDIO_CONFIG_RECORD, 1U))
+		return 1;
+	if (!zz_audio_capture_can_publish(ZZ_AUDIO_CONFIG_PLAY |
+	                                  ZZ_AUDIO_CONFIG_RECORD, 1U))
+		return 1;
+	if (zz_audio_capture_can_publish(ZZ_AUDIO_CONFIG_RECORD, 0U))
+		return 1;
+	if (zz_audio_capture_can_publish(ZZ_AUDIO_CONFIG_PLAY, 1U))
+		return 1;
+
+	return 0;
+}
+
 static int test_transfer_cursor_helpers(void)
 {
 	if (zz_audio_capture_completed_period(0U, PERIOD_BYTES) != 7U)
@@ -136,6 +151,7 @@ int main(void)
 	failed |= test_8000_conversion();
 	failed |= test_invalid_frame_count_falls_back();
 	failed |= test_status_helpers();
+	failed |= test_publication_gate();
 	failed |= test_transfer_cursor_helpers();
 
 	if (failed) {

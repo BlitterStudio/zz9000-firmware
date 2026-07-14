@@ -30,6 +30,13 @@
  */
 uint16_t zz_audio_capture_convert(uint8_t *period, uint16_t output_frames);
 
+static inline uint8_t zz_audio_capture_can_publish(uint16_t interrupt_mask,
+                                                   uint8_t dma_ready)
+{
+	return dma_ready &&
+	    ((interrupt_mask & ZZ_AUDIO_CONFIG_RECORD) != 0U);
+}
+
 /* F4/F6 share one 32-bit read-decode group. Codec presence belongs in the
  * upper word (F4) and receive status in the lower word (F6). */
 static inline uint32_t zz_audio_config_read_pack(uint16_t codec_present,

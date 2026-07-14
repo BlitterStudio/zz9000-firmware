@@ -37,6 +37,7 @@ static volatile uint16_t audio_interrupt_mask = 0;
 static volatile uint16_t audio_capture_frames = ZZ_AUDIO_CAPTURE_INPUT_FRAMES;
 static volatile uint16_t audio_rx_status = ZZ_AUDIO_RX_STATUS_CAPABLE;
 static volatile uint16_t audio_tx_sequence = 0;
+static volatile uint8_t audio_capture_ready = 0;
 static volatile uint8_t audio_rx_last_completed_period =
     AUDIO_NUM_PERIODS - 1U;
 
@@ -223,6 +224,11 @@ void audio_program_adau(u8* program, u32 program_len) {
 }
 
 void audio_init_i2s() {
+	/* Buffer setters run before this deferred reinitialization. Do not let
+	 * either formatter's old IOC state publish through a new CPU pointer. */
+	audio_capture_ready = 0;
+	__asm__ __volatile__("dsb" ::: "memory");
+
 	XI2stx_Config* i2s_config = XI2s_Tx_LookupConfig(XPAR_XI2STX_0_DEVICE_ID);
 	int status = XI2s_Tx_CfgInitialize(&i2s, i2s_config, i2s_config->BaseAddress);
 
@@ -291,7 +297,6 @@ void audio_init_i2s() {
 
 	XI2s_Rx_Enable(&i2srx, 1);
 	audio_rx_last_completed_period = AUDIO_NUM_PERIODS - 1U;
-	audio_rx_status = ZZ_AUDIO_RX_STATUS_CAPABLE;
 	XAudioFormatter_WriteReg(audio_formatter_rx.BaseAddress,
 		XAUD_FORMATTER_STS + XAUD_FORMATTER_S2MM_OFFSET, 1U<<31);
 	XAudioFormatter_InterruptEnable(&audio_formatter_rx, 1<<13); // IOC
@@ -309,6 +314,10 @@ void audio_init_i2s() {
 	printf("[adau] XAudioFormatterDMAStart done.\n");
 
 	audio_inited_tx_buffer = audio_tx_buffer;
+	/* Preserve audio_rx_status across retargets so a driver that sampled the
+	 * sequence before this deferred reinit observes exactly the next period. */
+	__asm__ __volatile__("dsb" ::: "memory");
+	audio_capture_ready = 1;
 }
 
 // The TX buffer address the audio formatter DMA was last INITIALIZED
@@ -470,6 +479,11 @@ void isr_audio_rx(void *dummy) {
 	XAudioFormatter_WriteReg(XPAR_XAUDIOFORMATTER_1_BASEADDR,
 		XAUD_FORMATTER_STS + XAUD_FORMATTER_S2MM_OFFSET, val);
 
+	/* The CPU-side pointer may already name a pending ring while the
+	 * formatter is still being retargeted. Only acknowledge in that state. */
+	if (!audio_capture_ready)
+		return;
+
 	/* The transfer counter points into the period currently being written.
 	 * Derive the newest complete period from it instead of assuming that
 	 * every edge reached the CPU separately. */
@@ -488,7 +502,8 @@ void isr_audio_rx(void *dummy) {
 		israrx_count = 0;
 	}
 
-	if (audio_interrupt_mask & ZZ_AUDIO_CONFIG_RECORD) {
+	if (zz_audio_capture_can_publish(audio_interrupt_mask,
+	                                 audio_capture_ready)) {
 		uint8_t first_period =
 		    (newest_period + AUDIO_NUM_PERIODS - completed_count + 1U) %
 		    AUDIO_NUM_PERIODS;
@@ -670,6 +685,10 @@ void audio_set_tx_buffer(uint8_t* addr) {
 
 void audio_set_rx_buffer(uint8_t* addr) {
 	printf("[audio] set rx buffer: %p\n", addr);
+	/* The formatter keeps writing its active ring until audio_init_i2s().
+	 * Block the ISR before exposing the pending CPU-side pointer. */
+	audio_capture_ready = 0;
+	__asm__ __volatile__("dsb" ::: "memory");
 	audio_rx_buffer = addr;
 }
 
