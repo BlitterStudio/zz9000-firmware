@@ -95,10 +95,14 @@ static int test_invalid_frame_count_falls_back(void)
 static int test_status_helpers(void)
 {
 	uint16_t status = zz_audio_rx_status_pack(6U, 0x1234U);
+	uint32_t read_group = zz_audio_config_read_pack(1U, status);
 
 	if (!(status & ZZ_AUDIO_RX_STATUS_CAPABLE) ||
 	    zz_audio_rx_status_period(status) != 6U ||
 	    zz_audio_rx_status_sequence(status) != 0x234U)
+		return 1;
+	if ((uint16_t)(read_group >> 16) != 1U ||
+	    (uint16_t)read_group != status)
 		return 1;
 	if (zz_audio_rx_sequence_distance(2U, 0xffeU) != 4U)
 		return 1;

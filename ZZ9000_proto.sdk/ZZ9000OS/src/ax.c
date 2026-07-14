@@ -36,6 +36,7 @@ static uint8_t* volatile audio_rx_buffer = (uint8_t*)AUDIO_RX_BUFFER_ADDRESS;
 static volatile uint16_t audio_interrupt_mask = 0;
 static volatile uint16_t audio_capture_frames = ZZ_AUDIO_CAPTURE_INPUT_FRAMES;
 static volatile uint16_t audio_rx_status = ZZ_AUDIO_RX_STATUS_CAPABLE;
+static volatile uint16_t audio_tx_sequence = 0;
 static volatile uint8_t audio_rx_last_completed_period =
     AUDIO_NUM_PERIODS - 1U;
 
@@ -449,6 +450,7 @@ void isr_audio(void *dummy) {
 	// network load previously let the DMA overrun the fill frontier
 	// and glitch MP3 playback. No-op when no session is bound.
 	sdk_mailbox_audio_playback_pump_isr();
+	audio_tx_sequence++;
 
 	if (audio_interrupt_mask & ZZ_AUDIO_CONFIG_PLAY) {
 		amiga_interrupt_set(AMIGA_INTERRUPT_AUDIO);
@@ -522,6 +524,10 @@ void isr_audio_rx(void *dummy) {
 
 uint32_t audio_get_dma_transfer_count() {
 	return XAudioFormatterGetDMATransferCount(&audio_formatter);
+}
+
+uint16_t audio_get_tx_sequence(void) {
+	return audio_tx_sequence;
 }
 
 void audio_set_interrupt_mask(uint16_t mask) {

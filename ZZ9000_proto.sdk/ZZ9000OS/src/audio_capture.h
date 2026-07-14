@@ -30,6 +30,14 @@
  */
 uint16_t zz_audio_capture_convert(uint8_t *period, uint16_t output_frames);
 
+/* F4/F6 share one 32-bit read-decode group. Codec presence belongs in the
+ * upper word (F4) and receive status in the lower word (F6). */
+static inline uint32_t zz_audio_config_read_pack(uint16_t codec_present,
+                                                 uint16_t rx_status)
+{
+	return ((uint32_t)codec_present << 16) | rx_status;
+}
+
 static inline uint16_t zz_audio_rx_status_pack(uint8_t period,
                                                uint16_t sequence)
 {

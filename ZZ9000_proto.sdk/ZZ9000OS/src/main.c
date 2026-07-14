@@ -55,6 +55,7 @@ void Xil_AssertNonVoid() {}
 #include "scheduler.h"
 #include "adc.h"
 #include "ax.h"
+#include "audio_capture.h"
 #include "watchdog.h"
 #include "mp3/mp3.h"
 
@@ -1558,12 +1559,14 @@ int main() {
 						break;
 					}
 					case REG_ZZ_AUDIO_CONFIG: {
-						// is ZZ9000AX present?
-						data = (adau_enabled)<<16;
+						/* F4 and F6 share this 32-bit read group: codec
+						 * presence is the F4 word and RX status is F6. */
+						data = zz_audio_config_read_pack(
+						    (uint16_t)adau_enabled, audio_get_rx_status());
 						break;
 					}
-					case REG_ZZ_AUDIO_RX_STATUS: {
-						data = ((uint32_t)audio_get_rx_status()) << 16;
+					case REG_ZZ_AUDIO_TX_STATUS: {
+						data = ((uint32_t)audio_get_tx_sequence()) << 16;
 						break;
 					}
 					case REG_ZZ_DECODER_VAL: {

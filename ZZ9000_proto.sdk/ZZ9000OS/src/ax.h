@@ -43,6 +43,7 @@ int audio_legacy_output_active(void);
 void audio_clear_interrupt();
 uint32_t audio_get_interrupt();
 uint32_t audio_get_dma_transfer_count();
+uint16_t audio_get_tx_sequence(void);
 int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap);
 void audio_set_tx_buffer(uint8_t* addr);
 void audio_set_rx_buffer(uint8_t* addr);

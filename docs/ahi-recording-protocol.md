@@ -23,6 +23,13 @@ compatible.
 Old firmware returns zero at `0xF6`, allowing a new driver to retain playback
 without advertising recording.
 
+`REG_ZZ_AUDIO_TX_STATUS` (`0xF8`) is a read-only 16-bit completion sequence.
+Firmware increments it modulo 65536 after every transmit period completes,
+before asserting the shared audio interrupt. A capture-capable driver samples
+the sequence when playback starts and services playback only after observing a
+different value. This distinguishes playback completions from capture-only
+wake-ups without changing the FPGA interrupt routing.
+
 ## Publication order
 
 The receive formatter writes 960 48 kHz S16LE stereo frames into each
