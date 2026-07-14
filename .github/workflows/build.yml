@@ -46,6 +46,8 @@ jobs:
         run: make -C test/video test
       - name: Video codec regression suite
         run: make -C test/video_codec test
+      - name: Audio capture regression suite
+        run: make -C test/audio test
       - name: Firmware-file restore suite
         run: make -C test/fwupdate test
       - name: SD activity LED suite
