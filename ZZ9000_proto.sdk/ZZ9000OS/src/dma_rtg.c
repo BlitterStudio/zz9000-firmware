@@ -23,7 +23,8 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
-            if (data->user[1] == 0xFFFF && data->mask == 0xFF)
+            if (line_uses_solid_path(data->user[1], data->mask,
+                    data->u8_user[GFXDATA_U8_DRAWMODE]))
                 draw_line_solid(data->x[0], data->y[0], data->x[1], data->y[1],
                         data->user[0], (int16_t)data->user[3], data->rgb[0],
                         data->u8_user[GFXDATA_U8_COLORMODE]);
