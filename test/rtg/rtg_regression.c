@@ -747,6 +747,21 @@ static void test_lines(void)
 	check_frame("draw_line_solid steep 2:1 major-Y up");
 }
 
+static void test_line_dispatch(void)
+{
+	if (!line_uses_solid_path(0xFFFF, 0xFF, JAM1) ||
+	    line_uses_solid_path(0xFFFF, 0xFF, JAM2) ||
+	    line_uses_solid_path(0xFFFF, 0xFF, COMPLEMENT) ||
+	    line_uses_solid_path(0xFFFF, 0xFF, INVERSVID) ||
+	    line_uses_solid_path(0xAAAA, 0xFF, JAM1) ||
+	    line_uses_solid_path(0xFFFF, 0x7F, JAM1)) {
+		printf("FAIL line solid-path dispatch\n");
+		failures++;
+	} else {
+		printf("ok   line solid-path dispatch\n");
+	}
+}
+
 static void test_lines_clipped(void)
 {
 	/* Full odd-major line must match the independent round-half-up oracle. An
@@ -1737,6 +1752,7 @@ static void run_tests(void)
 	test_fill_and_invert();
 	test_copy();
 	test_lines();
+	test_line_dispatch();
 	test_lines_clipped();
 	test_lines_negative_origin();
 	test_lines_pattern();

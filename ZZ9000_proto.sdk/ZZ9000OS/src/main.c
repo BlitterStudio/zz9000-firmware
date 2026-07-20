@@ -1016,7 +1016,7 @@ int main() {
 					// rect_x3 contains the pattern. if all bits are set for both the mask and the pattern,
 					// there's no point in passing non-essential data to the pattern/mask aware function.
 
-					if (rect_x3 == 0xFFFF && zdata == 0xFF)
+					if (line_uses_solid_path(rect_x3, zdata, draw_mode))
 						draw_line_solid(rect_x1, rect_y1, rect_x2, rect_y2,
 								blitter_user1, blitter_user3, rect_rgb,
 								blitter_colormode);
