@@ -3,8 +3,11 @@
  * P96 packed-YUV422 overlay line fetcher.
  *
  * The overlay VDMA is deliberately paced one source line at a time.  Two
- * BRAM banks let scanout consume line N while MM2S fills line N+1.  The VDMA
- * frame-start marker is used whenever the requested line wraps to zero, so a
+ * BRAM banks let scanout consume line N while MM2S fills line N+1. Display
+ * and fetch line numbers are independent so the next transfer can begin as
+ * soon as the current line is ready, rather than waiting for scanout to
+ * switch banks. The VDMA frame-start marker is used whenever the fetch line
+ * wraps to zero, so a
  * stopped/restarted or overrun stream recovers at the next frame instead of
  * displaying source lines at the wrong vertical position.
  *
@@ -25,13 +28,16 @@ module video_overlay_linebuffer #(
 
   input         fetch_enable,
   input  [31:0] fetch_generation,
-  input  [11:0] requested_line,
+  input  [11:0] fetch_line,
+  input         fetch_request,
 
   input                   pixel_clk,
+  input                   display_enable,
   input  [ADDR_WIDTH-1:0] read_addr,
-  input                   read_bank,
+  input  [11:0]           displayed_line,
   output [31:0]           read_data,
-  output                  requested_line_ready
+  output                  displayed_line_ready,
+  output reg [31:0]       accepted_generation = 0
 );
 
 localparam MAX_MACROPIXELS = (MAX_PIXELS + 1) / 2;
@@ -48,71 +54,159 @@ reg [1:0] state = ST_SEEK_FRAME;
 reg [11:0] target_line = 0;
 reg [11:0] loaded_line = 12'hfff;
 reg [ADDR_WIDTH-1:0] write_addr = 0;
-reg ready_valid0 = 0;
-reg ready_valid1 = 0;
-reg [11:0] ready_line0 = 12'hfff;
-reg [11:0] ready_line1 = 12'hfff;
-
-reg [11:0] request_sync1 = 0;
-reg [11:0] request_sync2 = 0;
-reg enable_sync1 = 0;
-reg enable_sync2 = 0;
-reg [31:0] generation_sync1 = 0;
-reg [31:0] generation_sync2 = 0;
 reg [31:0] loaded_generation = 0;
+reg [11:0] requested_line_axis = 0;
+reg requested_line_pending = 0;
+reg await_zero_request = 0;
+
+/* A binary row number can change several bits on one increment. Sampling
+ * that bus with independent two-flop chains can produce a row number that
+ * never existed. Use XPM bundled-data handshakes in both directions so the
+ * payload is held stable while a single synchronized request crosses. */
+reg [11:0] fetch_request_data = 0;
+reg fetch_request_pending = 0;
+reg fetch_request_send = 0;
+wire fetch_request_received;
+wire [11:0] fetch_line_axis;
+wire fetch_line_axis_valid;
+
+xpm_cdc_handshake #(
+  .DEST_EXT_HSK(0),
+  .DEST_SYNC_FF(3),
+  .INIT_SYNC_FF(0),
+  .SIM_ASSERT_CHK(0),
+  .SRC_SYNC_FF(3),
+  .WIDTH(12)
+) fetch_line_cdc (
+  .src_clk(pixel_clk),
+  .src_in(fetch_request_data),
+  .src_send(fetch_request_send),
+  .src_rcv(fetch_request_received),
+  .dest_clk(axis_clk),
+  .dest_out(fetch_line_axis),
+  .dest_req(fetch_line_axis_valid),
+  .dest_ack(1'b0)
+);
+
+reg [11:0] completed_line_data = 0;
+reg completed_line_pending = 0;
+reg completed_line_send = 0;
+wire completed_line_received;
+wire [11:0] completed_line_pixel;
+wire completed_line_pixel_valid;
+
+xpm_cdc_handshake #(
+  .DEST_EXT_HSK(0),
+  .DEST_SYNC_FF(3),
+  .INIT_SYNC_FF(0),
+  .SIM_ASSERT_CHK(0),
+  .SRC_SYNC_FF(3),
+  .WIDTH(12)
+) completed_line_cdc (
+  .src_clk(axis_clk),
+  .src_in(completed_line_data),
+  .src_send(completed_line_send),
+  .src_rcv(completed_line_received),
+  .dest_clk(pixel_clk),
+  .dest_out(completed_line_pixel),
+  .dest_req(completed_line_pixel_valid),
+  .dest_ack(1'b0)
+);
+
+reg generation_send = 0;
+reg [31:0] generation_sent = 0;
+wire generation_received;
+wire [31:0] accepted_generation_pixel;
+wire accepted_generation_pixel_valid;
+
+xpm_cdc_handshake #(
+  .DEST_EXT_HSK(0),
+  .DEST_SYNC_FF(3),
+  .INIT_SYNC_FF(0),
+  .SIM_ASSERT_CHK(0),
+  .SRC_SYNC_FF(3),
+  .WIDTH(32)
+) generation_cdc (
+  .src_clk(axis_clk),
+  .src_in(fetch_generation),
+  .src_send(generation_send),
+  .src_rcv(generation_received),
+  .dest_clk(pixel_clk),
+  .dest_out(accepted_generation_pixel),
+  .dest_req(accepted_generation_pixel_valid),
+  .dest_ack(1'b0)
+);
 
 wire accept = s_axis_tvalid && s_axis_tready;
 wire unexpected_sof = accept && state == ST_READ_LINE && s_axis_tuser &&
                       target_line != 0;
+wire completed_line_event = accept && s_axis_tlast &&
+  ((state == ST_SEEK_FRAME && s_axis_tuser) || state == ST_READ_LINE);
+wire [11:0] completed_line_value =
+  (state == ST_SEEK_FRAME || unexpected_sof) ? 12'b0 : target_line;
 wire write_in_range = write_addr < MAX_MACROPIXELS;
 wire [3:0] write_enable = (accept && state == ST_READ_LINE && write_in_range)
                             ? s_axis_tkeep : 4'b0000;
 wire [ADDR_WIDTH:0] memory_write_addr = {target_line[0], write_addr};
-wire [ADDR_WIDTH:0] memory_read_addr = {read_bank, read_addr};
+wire [ADDR_WIDTH:0] memory_read_addr = {displayed_line[0], read_addr};
 
-assign s_axis_tready = enable_sync2 &&
+/* Do not let a newly restarted VDMA complete line zero before the pixel
+ * domain has consumed the generation acknowledgement and invalidated the
+ * prior frame's ready tags. */
+assign s_axis_tready = fetch_enable &&
+                       fetch_generation == generation_sent &&
+                       !await_zero_request &&
                        (state == ST_SEEK_FRAME || state == ST_READ_LINE);
 
 always @(posedge axis_clk) begin
-  request_sync1 <= requested_line;
-  request_sync2 <= request_sync1;
-  enable_sync1 <= fetch_enable;
-  enable_sync2 <= enable_sync1;
-  generation_sync1 <= fetch_generation;
-  generation_sync2 <= generation_sync1;
-
-  if (!axis_resetn || !enable_sync2) begin
+  if (!axis_resetn) begin
     state <= ST_SEEK_FRAME;
     target_line <= 0;
     loaded_line <= 12'hfff;
     write_addr <= 0;
-    ready_valid0 <= 0;
-    ready_valid1 <= 0;
-    loaded_generation <= generation_sync2;
-  end else if (generation_sync2 != loaded_generation) begin
+    loaded_generation <= 0;
+    requested_line_axis <= 0;
+    requested_line_pending <= 0;
+    await_zero_request <= 0;
+  end else if (!fetch_enable) begin
+    state <= ST_SEEK_FRAME;
+    target_line <= 0;
+    loaded_line <= 12'hfff;
+    write_addr <= 0;
+    requested_line_axis <= 0;
+    requested_line_pending <= 0;
+    await_zero_request <= 0;
+  end else if (fetch_generation != loaded_generation) begin
     /* A vblank buffer flip invalidates any prefetched line from the old
      * surface and re-arms the SOF search on the new VDMA frame store. */
     state <= ST_SEEK_FRAME;
     target_line <= 0;
     loaded_line <= 12'hfff;
     write_addr <= 0;
-    ready_valid0 <= 0;
-    ready_valid1 <= 0;
-    loaded_generation <= generation_sync2;
+    loaded_generation <= fetch_generation;
+    requested_line_pending <= 0;
+    await_zero_request <= 1;
   end else begin
+    if (fetch_line_axis_valid) begin
+      if (await_zero_request) begin
+        /* The zero request is also the pixel-domain proof that old ready
+         * tags were invalidated. Ignore any older nonzero request that was
+         * already in flight when the generation changed. */
+        if (fetch_line_axis == 0)
+          await_zero_request <= 0;
+      end else begin
+        requested_line_axis <= fetch_line_axis;
+        requested_line_pending <= 1;
+      end
+    end
+
     case (state)
       ST_SEEK_FRAME: begin
         /* Drain to SOF without writing.  The SOF beat is line zero. */
         if (accept && s_axis_tuser) begin
           target_line <= 0;
           write_addr <= 1;
-          if (s_axis_tkeep != 0) begin
-            /* The RAM write port uses target_line=0 in this state. */
-            ready_valid0 <= 0;
-          end
           if (s_axis_tlast) begin
-            ready_line0 <= 0;
-            ready_valid0 <= 1;
             loaded_line <= 0;
             state <= ST_WAIT_LINE;
           end else begin
@@ -128,23 +222,14 @@ always @(posedge axis_clk) begin
           if (s_axis_tuser && target_line != 0) begin
             target_line <= 0;
             write_addr <= 1;
-            ready_valid0 <= 0;
           end else begin
             write_addr <= write_addr + 1'b1;
           end
 
           if (s_axis_tlast) begin
             if (s_axis_tuser && target_line != 0) begin
-              ready_line0 <= 0;
-              ready_valid0 <= 1;
               loaded_line <= 0;
-            end else if (target_line[0]) begin
-              ready_line1 <= target_line;
-              ready_valid1 <= 1;
-              loaded_line <= target_line;
             end else begin
-              ready_line0 <= target_line;
-              ready_valid0 <= 1;
               loaded_line <= target_line;
             end
             state <= ST_WAIT_LINE;
@@ -153,21 +238,59 @@ always @(posedge axis_clk) begin
       end
 
       default: begin /* ST_WAIT_LINE */
-        if (request_sync2 != loaded_line) begin
-          target_line <= request_sync2;
-          write_addr <= 0;
-          if (request_sync2 == 0) begin
-            state <= ST_SEEK_FRAME;
-          end else begin
-            if (request_sync2[0])
-              ready_valid1 <= 0;
+        if (requested_line_pending) begin
+          requested_line_pending <= 0;
+          if (requested_line_axis != loaded_line) begin
+            target_line <= requested_line_axis;
+            write_addr <= 0;
+            if (requested_line_axis == 0)
+              state <= ST_SEEK_FRAME;
             else
-              ready_valid0 <= 0;
-            state <= ST_READ_LINE;
+              state <= ST_READ_LINE;
           end
         end
       end
     endcase
+  end
+end
+
+/* Completed-line metadata is held until the pixel domain has accepted it.
+ * The next line cannot finish before this round trip completes because its
+ * fetch request originates from that same pixel-domain completion. */
+always @(posedge axis_clk) begin
+  if (!axis_resetn) begin
+    completed_line_data <= 0;
+    completed_line_pending <= 0;
+    completed_line_send <= 0;
+  end else begin
+    if (completed_line_send) begin
+      if (completed_line_received)
+        completed_line_send <= 0;
+    end else if (!completed_line_received && completed_line_pending) begin
+      completed_line_send <= 1;
+      completed_line_pending <= 0;
+    end
+    if (completed_line_event) begin
+      completed_line_data <= completed_line_value;
+      completed_line_pending <= 1;
+    end
+  end
+end
+
+/* A generation is acknowledged only through the same atomic CDC primitive.
+ * It changes at most once per vblank, far slower than this handshake. */
+always @(posedge axis_clk) begin
+  if (!axis_resetn) begin
+    generation_send <= 0;
+    generation_sent <= 0;
+  end else if (generation_send) begin
+    if (generation_received) begin
+      generation_send <= 0;
+      generation_sent <= fetch_generation;
+    end
+  end else if (!generation_received && fetch_enable &&
+               fetch_generation != generation_sent) begin
+    generation_send <= 1;
   end
 end
 
@@ -221,28 +344,52 @@ xpm_memory_sdpram #(
   .dbiterrb()
 );
 
-/* Ready metadata is written well before scanout reaches the bank.  Two
- * sampling stages keep the tag stable in the pixel domain. */
-reg valid0_sync1 = 0, valid0_sync2 = 0;
-reg valid1_sync1 = 0, valid1_sync2 = 0;
-reg fetch_enable_sync1 = 0, fetch_enable_sync2 = 0;
-reg [11:0] line0_sync1 = 12'hfff, line0_sync2 = 12'hfff;
-reg [11:0] line1_sync1 = 12'hfff, line1_sync2 = 12'hfff;
+/* Pixel-domain ready tags are updated only from atomic completion messages.
+ * A fetch request invalidates its destination bank before the AXI domain can
+ * begin overwriting it. */
+reg pixel_ready_valid0 = 0;
+reg pixel_ready_valid1 = 0;
+reg [11:0] pixel_ready_line0 = 12'hfff;
+reg [11:0] pixel_ready_line1 = 12'hfff;
 always @(posedge pixel_clk) begin
-  fetch_enable_sync1 <= fetch_enable;
-  fetch_enable_sync2 <= fetch_enable_sync1;
-  valid0_sync1 <= ready_valid0;
-  valid0_sync2 <= valid0_sync1;
-  valid1_sync1 <= ready_valid1;
-  valid1_sync2 <= valid1_sync1;
-  line0_sync1 <= ready_line0;
-  line0_sync2 <= line0_sync1;
-  line1_sync1 <= ready_line1;
-  line1_sync2 <= line1_sync1;
+  if (fetch_request) begin
+    fetch_request_data <= fetch_line;
+    fetch_request_pending <= 1;
+    if (fetch_line[0])
+      pixel_ready_valid1 <= 0;
+    else
+      pixel_ready_valid0 <= 0;
+  end
+
+  if (fetch_request_send) begin
+    if (fetch_request_received)
+      fetch_request_send <= 0;
+  end else if (!fetch_request_received && fetch_request_pending) begin
+    fetch_request_send <= 1;
+    fetch_request_pending <= 0;
+  end
+
+  if (accepted_generation_pixel_valid) begin
+    accepted_generation <= accepted_generation_pixel;
+    pixel_ready_valid0 <= 0;
+    pixel_ready_valid1 <= 0;
+  end
+
+  /* Keep this after invalidation: if completion and a request coincide for
+   * the same bank, completed data is valid and must win. */
+  if (completed_line_pixel_valid) begin
+    if (completed_line_pixel[0]) begin
+      pixel_ready_line1 <= completed_line_pixel;
+      pixel_ready_valid1 <= 1;
+    end else begin
+      pixel_ready_line0 <= completed_line_pixel;
+      pixel_ready_valid0 <= 1;
+    end
+  end
 end
 
-assign requested_line_ready = fetch_enable_sync2 && (read_bank
-  ? (valid1_sync2 && line1_sync2 == requested_line)
-  : (valid0_sync2 && line0_sync2 == requested_line));
+assign displayed_line_ready = display_enable && (displayed_line[0]
+  ? (pixel_ready_valid1 && pixel_ready_line1 == displayed_line)
+  : (pixel_ready_valid0 && pixel_ready_line0 == displayed_line));
 
 endmodule

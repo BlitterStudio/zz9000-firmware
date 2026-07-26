@@ -66,6 +66,7 @@ static struct {
 	uint8_t compose_target;
 	uint32_t direct_session;
 	uint32_t hw_generation;
+	uint32_t hw_scan_addr;
 	volatile uint8_t hw_flip_pending;
 	volatile uint8_t hw_restore_pending;
 	struct overlay_schedule_state schedule;
@@ -113,6 +114,7 @@ void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
 	ov.hw_restore_pending = 0;
 	overlay_schedule_reset(&ov.schedule);
 	ov.direct_session = 0U;
+	ov.hw_scan_addr = 0U;
 	vs->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY] = 0;
 }
 
@@ -129,6 +131,7 @@ static void overlay_stop(void)
 	ov.ready_idx = -1;
 	overlay_schedule_reset(&ov.schedule);
 	ov.direct_session = 0U;
+	ov.hw_scan_addr = 0U;
 	ov.hw_flip_pending = 0;
 	ov.hw_restore_pending = 0;
 	/* always deferred: core 1 may still be composing into a shadow,
@@ -303,9 +306,13 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 			ov.src_w, ov.src_h, ov.dst_x, ov.dst_y, ov.variant,
 			overlay_key_to_rgb(ov.key_native, ov.snap_colormode),
 			ov.key_enabled, ov.hw_generation) ? 1U : 0U;
+		if (ov.hw_active)
+			ov.hw_scan_addr = hw_src_addr;
 	}
-	if (was_hw_active && !ov.hw_active)
+	if (was_hw_active && !ov.hw_active) {
 		overlay_hw_stop();
+		ov.hw_scan_addr = 0U;
+	}
 	/* Geometry/source changes need a fresh staged frame when the direct PL
 	 * path is ineligible or an SDK session later supplies planar data. */
 	if (was_hw_active != ov.hw_active) {
@@ -620,23 +627,30 @@ void overlay_scanout_released(void)
 
 void overlay_vblank_cache_flushed(void)
 {
+	uint32_t next_addr;
+
 	if (!ov.hw_active)
 		return;
+	next_addr = ov.hw_scan_addr;
 	if (ov.hw_restore_pending) {
 		ov.hw_restore_pending = 0;
-		ov.hw_generation++;
-		if (ov.hw_generation == 0U)
-			ov.hw_generation = 1U;
-		overlay_hw_set_buffer(ov.src_addr, ov.hw_generation);
-		return;
+		next_addr = ov.src_addr;
+	} else if (ov.hw_flip_pending && ov.front >= 0) {
+		ov.hw_flip_pending = 0;
+		next_addr = ov.shadow[ov.front];
 	}
-	if (!ov.hw_flip_pending || ov.front < 0)
+	if (!next_addr)
 		return;
-	ov.hw_flip_pending = 0;
+
+	/* Re-arm every native frame only after the mandatory cache flush.
+	 * The PL deliberately leaves MM2S stalled at the completed frame until
+	 * this generation handoff, so it cannot prefetch the old surface before
+	 * a decoded staging-buffer flip has committed. */
 	ov.hw_generation++;
 	if (ov.hw_generation == 0U)
 		ov.hw_generation = 1U;
-	overlay_hw_set_buffer(ov.shadow[ov.front], ov.hw_generation);
+	overlay_hw_set_buffer(next_addr, ov.hw_generation);
+	ov.hw_scan_addr = next_addr;
 }
 
 void overlay_compose_retired(int ok)

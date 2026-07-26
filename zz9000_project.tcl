@@ -440,14 +440,6 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.TDATA_NUM_BYTES {8} \
   ] $axis_data_fifo_0
 
-  set axis_data_fifo_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axis_data_fifo:2.0 axis_data_fifo_1 ]
-  set_property -dict [ list \
-   CONFIG.FIFO_DEPTH {32} \
-   CONFIG.FIFO_MEMORY_TYPE {auto} \
-   CONFIG.HAS_TKEEP {1} \
-   CONFIG.TDATA_NUM_BYTES {4} \
-  ] $axis_data_fifo_1
-
   # Create instance: video_formatter_0, and set properties
   set block_name video_formatter
   set block_cell_name video_formatter_0
@@ -463,9 +455,11 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_intf_net -intf_net Conn1 [get_bd_intf_pins M_AXI_MM2S1] [get_bd_intf_pins axi_vdma_0/M_AXI_MM2S]
   connect_bd_intf_net -intf_net Conn2 [get_bd_intf_pins M_AXI_MM2S2] [get_bd_intf_pins axi_vdma_1/M_AXI_MM2S]
   connect_bd_intf_net -intf_net axi_vdma_0_M_AXIS_MM2S [get_bd_intf_pins axi_vdma_0/M_AXIS_MM2S] [get_bd_intf_pins axis_data_fifo_0/S_AXIS]
-  connect_bd_intf_net -intf_net axi_vdma_1_M_AXIS_MM2S [get_bd_intf_pins axi_vdma_1/M_AXIS_MM2S] [get_bd_intf_pins axis_data_fifo_1/S_AXIS]
+  # Keep the overlay path direct: an intervening FIFO can accept the first
+  # beats of the old frame while the line fetcher is stalled at vblank,
+  # defeating the firmware's atomic reset/reprogram/generation handoff.
+  connect_bd_intf_net -intf_net axi_vdma_1_M_AXIS_MM2S [get_bd_intf_pins axi_vdma_1/M_AXIS_MM2S] [get_bd_intf_pins video_formatter_0/overlay_axis]
   connect_bd_intf_net -intf_net axis_data_fifo_0_M_AXIS [get_bd_intf_pins axis_data_fifo_0/M_AXIS] [get_bd_intf_pins video_formatter_0/m_axis_vid]
-  connect_bd_intf_net -intf_net axis_data_fifo_1_M_AXIS [get_bd_intf_pins axis_data_fifo_1/M_AXIS] [get_bd_intf_pins video_formatter_0/overlay_axis]
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M01_AXI [get_bd_intf_pins S_AXI_LITE] [get_bd_intf_pins axi_vdma_0/S_AXI_LITE]
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M07_AXI [get_bd_intf_pins S_AXI_LITE2] [get_bd_intf_pins axi_vdma_1/S_AXI_LITE]
 
@@ -479,8 +473,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_parity_out [get_bd_pins scanline_parity] [get_bd_pins video_formatter_0/scanline_parity]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_intensity2_out [get_bd_pins scanline_intensity2] [get_bd_pins video_formatter_0/scanline_intensity2]
   connect_bd_net -net clk_1 [get_bd_pins VGA_PCLK] [get_bd_pins video_formatter_0/dvi_clk]
-  connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins aresetn] [get_bd_pins axis_data_fifo_0/s_axis_aresetn] [get_bd_pins axis_data_fifo_1/s_axis_aresetn] [get_bd_pins video_formatter_0/aresetn]
-  connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins m_axi_mm2s_aclk] [get_bd_pins axi_vdma_0/m_axi_mm2s_aclk] [get_bd_pins axi_vdma_0/m_axis_mm2s_aclk] [get_bd_pins axi_vdma_1/m_axi_mm2s_aclk] [get_bd_pins axi_vdma_1/m_axis_mm2s_aclk] [get_bd_pins axis_data_fifo_0/s_axis_aclk] [get_bd_pins axis_data_fifo_1/s_axis_aclk] [get_bd_pins video_formatter_0/m_axis_vid_aclk]
+  connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins aresetn] [get_bd_pins axis_data_fifo_0/s_axis_aresetn] [get_bd_pins video_formatter_0/aresetn]
+  connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins m_axi_mm2s_aclk] [get_bd_pins axi_vdma_0/m_axi_mm2s_aclk] [get_bd_pins axi_vdma_0/m_axis_mm2s_aclk] [get_bd_pins axi_vdma_1/m_axi_mm2s_aclk] [get_bd_pins axi_vdma_1/m_axis_mm2s_aclk] [get_bd_pins axis_data_fifo_0/s_axis_aclk] [get_bd_pins video_formatter_0/m_axis_vid_aclk]
   connect_bd_net -net processing_system7_0_FCLK_CLK1 [get_bd_pins s_axi_lite_aclk] [get_bd_pins axi_vdma_0/s_axi_lite_aclk] [get_bd_pins axi_vdma_1/s_axi_lite_aclk]
   connect_bd_net -net rst_ps7_0_25M_peripheral_aresetn [get_bd_pins axi_resetn] [get_bd_pins axi_vdma_0/axi_resetn] [get_bd_pins axi_vdma_1/axi_resetn]
   connect_bd_net -net v_axi4s_vid_out_0_vid_data [get_bd_pins dvi_rgb] [get_bd_pins video_formatter_0/dvi_rgb]
