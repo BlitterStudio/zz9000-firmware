@@ -1,8 +1,8 @@
 /*
- * File:           C:\Users\mntmn\Documents\zz9000ax-mix1_IC_1.h
+ * File:           zz9000ax-mix1-lowpass-eq_IC_1.h
  *
- * Created:        Thursday, September 9, 2021 11:08:57 PM
- * Description:    zz9000ax-mix1:IC 1 program data.
+ * Created:        Tuesday, 28 July 2026
+ * Description:    Canonical normal-ADC production program data.
  *
  * This software is distributed in the hope that it will be useful,
  * but is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
@@ -14,7 +14,7 @@
  * are intended for resale to audio product end users. This software
  * may not be distributed whole or in any part to third parties.
  *
- * Copyright ©2021 Analog Devices, Inc. All rights reserved.
+ * Copyright ©2026 Analog Devices, Inc. All rights reserved.
  */
 #ifndef __ZZ9000AX_MIX1_IC_1_H__
 #define __ZZ9000AX_MIX1_IC_1_H__
@@ -25,10 +25,11 @@
 #define DEVICE_ARCHITECTURE_IC_1                  "ADAU1701"
 #define DEVICE_ADDR_IC_1                          0x0
 
-/* DSP Program Data */
-#define PROGRAM_SIZE_IC_1 5120
-#define PROGRAM_ADDR_IC_1 1024
-ADI_REG_TYPE Program_Data_IC_1[PROGRAM_SIZE_IC_1] = {
+/* DSP Program Data: production ADC left/right -> DIG0/DIG1. */
+#define PROGRAM_SIZE_NORMAL_ADC_IC_1 5120
+#define PROGRAM_ADDR_NORMAL_ADC_IC_1 1024
+ADI_REG_TYPE
+Program_Data_Normal_ADC_IC_1[PROGRAM_SIZE_NORMAL_ADC_IC_1] = {
 0x00, 0x00, 0x00, 0x00, 0x01, 
 0x00, 0x00, 0x00, 0xE8, 0x01, 
 0x00, 0x00, 0x00, 0x00, 0x01, 
@@ -63,6 +64,10 @@ ADI_REG_TYPE Program_Data_IC_1[PROGRAM_SIZE_IC_1] = {
 0x00, 0x82, 0x06, 0x20, 0x01, 
 0x02, 0xA8, 0x00, 0xE2, 0x01, 
 0x00, 0x00, 0x00, 0x00, 0x01, 
+0x00, 0x01, 0x08, 0x20, 0x01,
+0xFF, 0x28, 0x00, 0x02, 0x01,
+0x00, 0x09, 0x08, 0x20, 0x01,
+0xFF, 0x30, 0x00, 0x02, 0x01,
 0x00, 0xDA, 0x0A, 0x20, 0x01, 
 0x00, 0xD2, 0x0B, 0x22, 0x01, 
 0x00, 0xC2, 0x0A, 0x34, 0x01, 
@@ -1049,16 +1054,12 @@ ADI_REG_TYPE Program_Data_IC_1[PROGRAM_SIZE_IC_1] = {
 0x00, 0x00, 0x00, 0x00, 0x01, 
 0x00, 0x00, 0x00, 0x00, 0x01, 
 0x00, 0x00, 0x00, 0x00, 0x01, 
-0x00, 0x00, 0x00, 0x00, 0x01, 
-0x00, 0x00, 0x00, 0x00, 0x01, 
-0x00, 0x00, 0x00, 0x00, 0x01, 
-0x00, 0x00, 0x00, 0x00, 0x01, 
 };
 
-/* DSP Parameter (Coefficient) Data */
-#define PARAM_SIZE_IC_1 4096
-#define PARAM_ADDR_IC_1 0
-ADI_REG_TYPE Param_Data_IC_1[PARAM_SIZE_IC_1] = {
+/* DSP Parameter (Coefficient) Data: production restoration image. */
+#define PARAM_SIZE_NORMAL_ADC_IC_1 4096
+#define PARAM_ADDR_NORMAL_ADC_IC_1 0
+ADI_REG_TYPE Param_Data_Normal_ADC_IC_1[PARAM_SIZE_NORMAL_ADC_IC_1] = {
 0x00, 0x80, 0x00, 0x00, 
 0x01, 0x00, 0x00, 0x00, 
 0x00, 0x80, 0x00, 0x00, 
