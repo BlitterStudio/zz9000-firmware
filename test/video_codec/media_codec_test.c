@@ -246,6 +246,60 @@ static uint64_t ring_hash(const uint8_t *ring, uint32_t capacity,
 	return hash;
 }
 
+static int test_audio_reserve_for_each_video(void)
+{
+	const struct SDKVideoDecoderOps *ops =
+		sdk_video_backend_find(1U, 1U);
+	struct SDKVideoMediaConfig config;
+	struct SDKVideoMediaInfo media;
+	struct SDKVideoDecodedFrame frame;
+	uint32_t accepted = 0U;
+	uint32_t frames = 0U;
+	uint32_t guard = 0U;
+	void *decoder;
+	int result;
+
+	if (!ops)
+		return 1;
+	decoder = ops->create();
+	if (!decoder)
+		return 2;
+	memset(&config, 0, sizeof(config));
+	config.audio_codec = SDK_VIDEO_MEDIA_AUDIO_MP2;
+	config.pcm_ring = pcm_ring;
+	config.pcm_ring_capacity = sizeof(pcm_ring);
+	config.pcm_low_water_bytes = 16U * 1024U;
+	config.pcm_high_water_bytes = 96U * 1024U;
+	if (!ops->configure_media(decoder, &config)) {
+		ops->destroy(decoder);
+		return 3;
+	}
+	if (ops->write(
+	        decoder, zz9k_mpeg1_mp2_ps_fixture,
+	        zz9k_mpeg1_mp2_ps_fixture_len, 1, &accepted) !=
+	        SDK_VIDEO_BACKEND_WRITE_OK ||
+	    accepted != zz9k_mpeg1_mp2_ps_fixture_len) {
+		ops->destroy(decoder);
+		return 4;
+	}
+	while (frames < 2U && guard++ < 20U) {
+		result = ops->decode(decoder, &frame);
+		if (result == SDK_VIDEO_BACKEND_PROGRESS)
+			continue;
+		if (result != SDK_VIDEO_BACKEND_FRAME ||
+		    !ops->get_media_info(decoder, &media) ||
+		    media.pcm_produced - media.pcm_acknowledged <
+			    config.pcm_low_water_bytes ||
+		    !ops->ack_media(decoder, media.pcm_produced)) {
+			ops->destroy(decoder);
+			return 5;
+		}
+		frames++;
+	}
+	ops->destroy(decoder);
+	return frames == 2U ? 0 : 6;
+}
+
 static int test_ring_backpressure_and_wrap(void)
 {
 	const struct SDKVideoDecoderOps *ops =
@@ -1000,27 +1054,30 @@ int main(void)
 			return 51;
 	}
 	memcpy(expected_pcm, pcm_ring, (size_t)expected.pcm_produced);
-	result = test_ring_backpressure_and_wrap();
+	result = test_audio_reserve_for_each_video();
 	if (result != 0)
 		return 60 + result;
+	result = test_ring_backpressure_and_wrap();
+	if (result != 0)
+		return 70 + result;
 	result = test_terminal_policies();
 	if (result != 0)
-		return 80 + result;
+		return 90 + result;
 	result = test_video_only_media_timing();
 	if (result != 0)
-		return 90 + result;
+		return 100 + result;
 	result = test_supported_audio_variants();
 	if (result != 0)
-		return 100 + result;
+		return 110 + result;
 	result = test_compressed_input_backpressure_is_recoverable();
 	if (result != 0)
-		return 110 + result;
+		return 120 + result;
 	result = test_fixture_timeline_mutations(&expected);
 	if (result != 0)
-		return 120 + result;
+		return 130 + result;
 	result = test_corrupt_selected_streams_fail();
 	if (result != 0)
-		return 130 + result;
+		return 140 + result;
 	printf("media fixture: frames=%lu rate=%lu pcm=%llu "
 	       "video=%016llx pcm=%016llx vpts=%llu..%llu "
 	       "apts=%llu..%llu tail=%llu\n",

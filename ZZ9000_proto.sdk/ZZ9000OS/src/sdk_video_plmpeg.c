@@ -777,11 +777,12 @@ static int plmpeg_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 		if (audio_result == SDK_VIDEO_BACKEND_ERROR)
 			return audio_result;
 		/* Build the client-requested audio startup reserve before
-		 * publishing the first video frame, then service both elementary
-		 * streams on each call. Video must remain decodable during PCM
-		 * backpressure so an initial video lead cannot deadlock. */
+		 * publishing a video frame, then service both elementary streams
+		 * on each call. Maintaining that reserve prevents a held frame
+		 * from starving the audio master. Video must remain decodable
+		 * during PCM backpressure so an initial video lead cannot
+		 * deadlock. */
 		if (audio_result == SDK_VIDEO_BACKEND_PROGRESS &&
-		    decoder->video_frames == 0U &&
 		    decoder->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2 &&
 		    decoder->pcm_produced - decoder->pcm_acknowledged <
 			    decoder->media.pcm_low_water_bytes)
