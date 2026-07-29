@@ -255,7 +255,6 @@ static int test_audio_reserve_for_each_video(void)
 	struct SDKVideoDecodedFrame frame;
 	uint32_t accepted = 0U;
 	uint32_t frames = 0U;
-	uint32_t guard = 0U;
 	void *decoder;
 	int result;
 
@@ -282,10 +281,8 @@ static int test_audio_reserve_for_each_video(void)
 		ops->destroy(decoder);
 		return 4;
 	}
-	while (frames < 2U && guard++ < 20U) {
+	while (frames < 2U) {
 		result = ops->decode(decoder, &frame);
-		if (result == SDK_VIDEO_BACKEND_PROGRESS)
-			continue;
 		if (result != SDK_VIDEO_BACKEND_FRAME ||
 		    !ops->get_media_info(decoder, &media) ||
 		    media.pcm_produced - media.pcm_acknowledged <
@@ -297,7 +294,7 @@ static int test_audio_reserve_for_each_video(void)
 		frames++;
 	}
 	ops->destroy(decoder);
-	return frames == 2U ? 0 : 6;
+	return 0;
 }
 
 static int test_ring_backpressure_and_wrap(void)

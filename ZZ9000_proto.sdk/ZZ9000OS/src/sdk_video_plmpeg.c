@@ -758,6 +758,20 @@ static int decode_audio(struct sdk_video_plmpeg *decoder)
 	return SDK_VIDEO_BACKEND_PROGRESS;
 }
 
+static int replenish_audio(struct sdk_video_plmpeg *decoder)
+{
+	int result;
+
+	do {
+		result = decode_audio(decoder);
+		if (result != SDK_VIDEO_BACKEND_PROGRESS)
+			return result;
+	} while (decoder->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2 &&
+	         decoder->pcm_produced - decoder->pcm_acknowledged <
+		         decoder->media.pcm_low_water_bytes);
+	return result;
+}
+
 static int plmpeg_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 {
 	struct sdk_video_plmpeg *decoder = (struct sdk_video_plmpeg *)opaque;
@@ -773,20 +787,14 @@ static int plmpeg_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 		return SDK_VIDEO_BACKEND_ERROR;
 	audio_result = SDK_VIDEO_BACKEND_NEED_INPUT;
 	if (decoder->media_configured) {
-		audio_result = decode_audio(decoder);
+		audio_result = replenish_audio(decoder);
 		if (audio_result == SDK_VIDEO_BACKEND_ERROR)
 			return audio_result;
 		/* Build the client-requested audio startup reserve before
-		 * publishing a video frame, then service both elementary streams
-		 * on each call. Maintaining that reserve prevents a held frame
-		 * from starving the audio master. Video must remain decodable
-		 * during PCM backpressure so an initial video lead cannot
-		 * deadlock. */
-		if (audio_result == SDK_VIDEO_BACKEND_PROGRESS &&
-		    decoder->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2 &&
-		    decoder->pcm_produced - decoder->pcm_acknowledged <
-			    decoder->media.pcm_low_water_bytes)
-			return audio_result;
+		 * publishing a video frame, then replenish it before every frame.
+		 * Doing the refill in one backend call avoids a mailbox round trip
+		 * for every decoded audio block. Video must remain decodable during
+		 * PCM backpressure so an initial video lead cannot deadlock. */
 	}
 	if (decoder->video_eof &&
 	    plm_buffer_get_remaining(decoder->video->buffer) == 0U)
