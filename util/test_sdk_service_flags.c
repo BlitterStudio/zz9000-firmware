@@ -56,6 +56,15 @@ static int expect_contains(const char *source, const char *label,
 	return 0;
 }
 
+static int expect_absent(const char *source, const char *label,
+                         const char *needle)
+{
+	if (!strstr(source, needle))
+		return 1;
+	printf("%s: unexpectedly advertises %s\n", label, needle);
+	return 0;
+}
+
 static unsigned count_occurrences(const char *source, const char *needle)
 {
 	unsigned count = 0U;
@@ -108,6 +117,12 @@ int main(int argc, char **argv)
 	                      "#define SDK_OP_AUDIO_STREAM_READ");
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_OP_AUDIO_STREAM_CLOSE");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_SERVICE_FLAG_VIDEO_MEDIA_SESSION");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_SERVICE_FLAG_VIDEO_EXPLICIT_PRESENT");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "SDK_CAP_AUDIO_DECODE");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
@@ -136,6 +151,18 @@ int main(int argc, char **argv)
 	                      "put_be32(info->flags, service_flags(service));");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_VIDEO_MEDIA_SESSION");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_VIDEO_EXPLICIT_PRESENT");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ");
+	ok &= expect_absent(mailbox_source, "sdk_mailbox.c",
+	                    "SDK_SERVICE_FLAG_VIDEO_MEDIA_MP2");
+	ok &= expect_absent(mailbox_source, "sdk_mailbox.c",
+	                    "SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS");
+	ok &= expect_absent(mailbox_source, "sdk_mailbox.c",
+	                    "SDK_SERVICE_FLAG_VIDEO_AUDIO_BIND");
 
 	png_flag_refs = count_occurrences(
 		mailbox_source, "SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA");

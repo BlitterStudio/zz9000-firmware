@@ -45,9 +45,13 @@ struct SDKVideoStreamResult {
 	uint32_t flags;
 };
 
+#define SDK_VIDEO_STREAM_OWNER_LEGACY 0U
+#define SDK_VIDEO_STREAM_OWNER_MEDIA  1U
+
 void sdk_video_stream_init(void);
 uint32_t sdk_video_stream_active_count(void);
 int sdk_video_stream_session_core1(uint32_t session);
+int sdk_video_stream_session_owner(uint32_t session);
 uint32_t sdk_video_stream_session_height(uint32_t session);
 int sdk_video_stream_has_core1_sessions(void);
 void sdk_video_stream_poison_core1_sessions(void);
@@ -56,6 +60,9 @@ int sdk_video_stream_get_direct_frame(uint32_t session,
 
 uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
 	                            struct SDKVideoStreamResult *result);
+uint16_t sdk_video_stream_begin_owned(
+	const struct SDKVideoStreamBegin *begin, uint32_t owner,
+	struct SDKVideoStreamResult *result);
 uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
 	                            struct SDKVideoStreamResult *result);
 uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,

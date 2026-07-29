@@ -37,6 +37,7 @@ struct SDKVideoStreamSession {
 	uint8_t faulted;
 	uint8_t in_use;
 	uint8_t direct_frame_valid;
+	uint8_t owner;
 };
 
 static struct SDKVideoStreamSession *const video_sessions =
@@ -148,6 +149,13 @@ int sdk_video_stream_session_core1(uint32_t session)
 	return find_session(session) ? 1 : -1;
 }
 
+int sdk_video_stream_session_owner(uint32_t session)
+{
+	struct SDKVideoStreamSession *found = find_session(session);
+
+	return found ? (int)found->owner : -1;
+}
+
 uint32_t sdk_video_stream_session_height(uint32_t session)
 {
 	struct SDKVideoStreamSession *found = find_session(session);
@@ -196,9 +204,20 @@ int sdk_video_stream_get_direct_frame(uint32_t id,
 uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
 	                            struct SDKVideoStreamResult *result)
 {
+	return sdk_video_stream_begin_owned(
+		begin, SDK_VIDEO_STREAM_OWNER_LEGACY, result);
+}
+
+uint16_t sdk_video_stream_begin_owned(
+	const struct SDKVideoStreamBegin *begin, uint32_t owner,
+	struct SDKVideoStreamResult *result)
+{
 	const struct SDKVideoDecoderOps *ops;
 	struct SDKVideoStreamSession *session;
-	if (!begin || !result || begin->flags != 0U ||
+	if (!begin || !result ||
+	    (owner != SDK_VIDEO_STREAM_OWNER_LEGACY &&
+	     owner != SDK_VIDEO_STREAM_OWNER_MEDIA) ||
+	    begin->flags != 0U ||
 	    begin->output_format != SDK_VIDEO_OUTPUT_DIRECT_OVERLAY ||
 	    begin->width == 0U || begin->height == 0U ||
 	    begin->width > SDK_VIDEO_MAX_WIDTH ||
@@ -220,6 +239,7 @@ uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
 	session->height = begin->height;
 	session->output_format = begin->output_format;
 	session->ops = ops;
+	session->owner = (uint8_t)owner;
 	session->in_use = 1U;
 	fill_result(session, SDK_VIDEO_SESSION_STATE_NEED_INPUT, 0U,
 	            SDK_VIDEO_SESSION_RESULT_NEED_INPUT, result);

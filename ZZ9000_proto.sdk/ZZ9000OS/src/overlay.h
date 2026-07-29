@@ -76,7 +76,7 @@ void overlay_scheduler_reset(void);
 /* Core-0 SDK-video lifecycle hooks. A frame-ready completion switches that
  * session's active overlay to source-frame-driven composition; close removes
  * the binding and restores refresh-driven behavior after the final session. */
-void overlay_video_frame_ready(uint32_t session);
+int overlay_video_frame_ready(uint32_t session);
 void overlay_video_session_closed(uint32_t session);
 
 /* ISR helpers for the videocap takeover: while videocap owns the

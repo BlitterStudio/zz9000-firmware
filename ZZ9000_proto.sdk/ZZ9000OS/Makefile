@@ -184,6 +184,7 @@ C_SRCS = \
 	$(SRC_DIR)/bearssl/gcm.c \
 	$(SRC_DIR)/sdk_image_stream.c \
 	$(SRC_DIR)/sdk_video_stream.c \
+	$(SRC_DIR)/sdk_media_session.c \
 	$(SRC_DIR)/sdk_video_plmpeg.c \
 	$(SRC_DIR)/sdk_video_yuy2.c \
 	$(SRC_DIR)/sdk_jpeg.c \

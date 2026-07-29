@@ -21,6 +21,7 @@
 #include "memorymap.h"
 #include "surface_allocator.h"
 #include "sdk_mailbox.h"
+#include "sdk_media_session.h"
 #include "sdk_video_stream.h"
 #include "sdk_video_yuy2.h"
 #include "scheduler.h"
@@ -493,6 +494,8 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 		ov.compose_request = 0;
 		ov.compose_in_flight = 1;
 		ov.compose_target = target;
+		if (ov.direct_session != 0U)
+			sdk_media_session_present_queued(ov.direct_session);
 	}
 }
 
@@ -577,19 +580,20 @@ void overlay_scheduler_reset(void)
 		ov.compose_request = 1;
 }
 
-void overlay_video_frame_ready(uint32_t session)
+int overlay_video_frame_ready(uint32_t session)
 {
-	/* Core-0 deferred-completion retirement runs before overlay_main_poll,
-	 * so this queues the compose before the client can submit its next decode
-	 * and overwrite the YUY2 source bitmap. */
+	/* Legacy decode retirement runs before overlay_main_poll. Media sessions
+	 * additionally keep their decoder frame held until that poll confirms the
+	 * compose was enqueued ahead of any later decode. */
 	if (!ov.configured || !ov.active)
-		return;
+		return 0;
 	/* Decoder-owned planar420 is packed into the non-scanned YUV staging
 	 * buffer on core 1, then flipped into the same native PL plane at vblank.
 	 * A later planar fetcher can remove this final compact conversion. */
 	overlay_schedule_frame_ready(&ov.schedule, session);
 	ov.direct_session = session;
 	ov.compose_request = 1;
+	return 1;
 }
 
 void overlay_video_session_closed(uint32_t session)

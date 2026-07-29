@@ -269,6 +269,9 @@ taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len)
   case TASKQ_OP_VIDEO_SESSION_WRITE:
   case TASKQ_OP_VIDEO_SESSION_DECODE:
   case TASKQ_OP_VIDEO_SESSION_CLOSE:
+  case TASKQ_OP_MEDIA_SESSION_WRITE:
+  case TASKQ_OP_MEDIA_SESSION_DECODE:
+  case TASKQ_OP_MEDIA_SESSION_CLOSE:
     /* The selected codec backend and all of its heap state stay on core 1. */
     return TASK_LONG;
   default:

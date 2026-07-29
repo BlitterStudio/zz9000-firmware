@@ -282,6 +282,15 @@ static void test_class_video_sessions_are_core1_long(void)
   expect_int("video_close_long",
              taskq_class_for_opcode(TASKQ_OP_VIDEO_SESSION_CLOSE, 0u),
              TASK_LONG);
+  expect_int("media_write_long",
+             taskq_class_for_opcode(TASKQ_OP_MEDIA_SESSION_WRITE, 1u),
+             TASK_LONG);
+  expect_int("media_decode_long",
+             taskq_class_for_opcode(TASKQ_OP_MEDIA_SESSION_DECODE, 0u),
+             TASK_LONG);
+  expect_int("media_close_long",
+             taskq_class_for_opcode(TASKQ_OP_MEDIA_SESSION_CLOSE, 0u),
+             TASK_LONG);
 }
 
 static void test_should_drain_gates(void)
