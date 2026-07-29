@@ -29,6 +29,7 @@ struct SDKVideoStreamSession {
 	uint32_t frame_number;
 	uint32_t frame_time_millis;
 	uint32_t bytes_accepted;
+	struct SDKVideoMediaConfig media;
 	const struct SDKVideoDecoderOps *ops;
 	void *decoder;
 	struct SDKVideoDecodedFrame direct_frame;
@@ -97,6 +98,8 @@ static void fill_result(const struct SDKVideoStreamSession *session,
 	result->bytes_accepted = session->bytes_accepted;
 	result->bytes_written = bytes_written;
 	result->flags = flags;
+	result->media_pts = SDK_VIDEO_MEDIA_NO_PTS;
+	result->raw_pts = SDK_VIDEO_MEDIA_NO_PTS;
 }
 
 static void update_info(struct SDKVideoStreamSession *session)
@@ -119,6 +122,15 @@ static uint16_t ensure_decoder(struct SDKVideoStreamSession *session)
 	session->decoder = session->ops->create();
 	if (!session->decoder)
 		return SDK_STATUS_NO_MEMORY;
+	if (session->owner == SDK_VIDEO_STREAM_OWNER_MEDIA) {
+		if (!session->ops->configure_media ||
+		    !session->ops->configure_media(
+			    session->decoder, &session->media)) {
+			session->ops->destroy(session->decoder);
+			session->decoder = 0;
+			return SDK_STATUS_UNSUPPORTED;
+		}
+	}
 	return SDK_STATUS_OK;
 }
 
@@ -201,6 +213,27 @@ int sdk_video_stream_get_direct_frame(uint32_t id,
 	return 1;
 }
 
+int sdk_video_stream_get_media_info(
+	uint32_t id, struct SDKVideoMediaInfo *info)
+{
+	struct SDKVideoStreamSession *session = find_session(id);
+
+	if (!session || !info || session->owner != SDK_VIDEO_STREAM_OWNER_MEDIA ||
+	    !session->decoder || !session->ops->get_media_info)
+		return 0;
+	return session->ops->get_media_info(session->decoder, info);
+}
+
+int sdk_video_stream_ack_media(uint32_t id, uint64_t acknowledged)
+{
+	struct SDKVideoStreamSession *session = find_session(id);
+
+	if (!session || session->owner != SDK_VIDEO_STREAM_OWNER_MEDIA ||
+	    !session->decoder || !session->ops->ack_media)
+		return 0;
+	return session->ops->ack_media(session->decoder, acknowledged);
+}
+
 uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
 	                            struct SDKVideoStreamResult *result)
 {
@@ -224,6 +257,16 @@ uint16_t sdk_video_stream_begin_owned(
 	    begin->height > SDK_VIDEO_MAX_HEIGHT ||
 	    begin->width > SDK_VIDEO_MAX_PIXELS / begin->height)
 		return SDK_STATUS_BAD_REQUEST;
+	if (owner == SDK_VIDEO_STREAM_OWNER_LEGACY &&
+	    (begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE ||
+	     begin->pcm_ring || begin->pcm_ring_capacity != 0U ||
+	     begin->pcm_low_water_bytes != 0U ||
+	     begin->pcm_high_water_bytes != 0U))
+		return SDK_STATUS_BAD_REQUEST;
+	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA &&
+	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE &&
+	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_MP2)
+		return SDK_STATUS_UNSUPPORTED;
 	ops = sdk_video_backend_find(begin->codec, begin->container);
 	if (!ops)
 		return SDK_STATUS_UNSUPPORTED;
@@ -239,6 +282,13 @@ uint16_t sdk_video_stream_begin_owned(
 	session->height = begin->height;
 	session->output_format = begin->output_format;
 	session->ops = ops;
+	session->media.audio_codec = begin->audio_codec;
+	session->media.pcm_ring = begin->pcm_ring;
+	session->media.pcm_ring_capacity = begin->pcm_ring_capacity;
+	session->media.pcm_low_water_bytes =
+		begin->pcm_low_water_bytes;
+	session->media.pcm_high_water_bytes =
+		begin->pcm_high_water_bytes;
 	session->owner = (uint8_t)owner;
 	session->in_use = 1U;
 	fill_result(session, SDK_VIDEO_SESSION_STATE_NEED_INPUT, 0U,
@@ -268,12 +318,18 @@ uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
 	status = ensure_decoder(session);
 	if (status != SDK_STATUS_OK)
 		return status;
-	if (!session->ops->write(session->decoder, write->src,
-	                         write->src_length,
-	                         (write->flags & SDK_VIDEO_SESSION_WRITE_EOF) != 0U,
-	                         &accepted)) {
+	{
+		int write_result = session->ops->write(
+			session->decoder, write->src, write->src_length,
+			(write->flags & SDK_VIDEO_SESSION_WRITE_EOF) != 0U,
+			&accepted);
+
+		if (write_result == SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE)
+			return SDK_STATUS_BUSY;
+		if (write_result != SDK_VIDEO_BACKEND_WRITE_OK) {
 		session->failed = 1U;
 		return SDK_STATUS_IO_ERROR;
+		}
 	}
 	if (session->bytes_accepted > 0xffffffffU - accepted)
 		session->bytes_accepted = 0xffffffffU;
@@ -311,7 +367,9 @@ uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 	if (status != SDK_STATUS_OK)
 		return status;
 	decoded = session->ops->decode(session->decoder, &frame);
-	update_info(session);
+	if (decoded != SDK_VIDEO_BACKEND_PROGRESS ||
+	    session->frame_rate_milli == 0U)
+		update_info(session);
 	flags = session->frame_rate_milli != 0U
 		? SDK_VIDEO_SESSION_RESULT_HEADER_READY : 0U;
 
@@ -325,6 +383,15 @@ uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 		            flags | SDK_VIDEO_SESSION_RESULT_DONE, result);
 		return SDK_STATUS_OK;
 	}
+	if (decoded == SDK_VIDEO_BACKEND_PROGRESS) {
+		fill_result(session, SDK_VIDEO_SESSION_STATE_READY, 0U,
+		            flags, result);
+		return SDK_STATUS_OK;
+	}
+	if (decoded == SDK_VIDEO_BACKEND_BACKPRESSURE)
+		return SDK_STATUS_BUSY;
+	if (decoded == SDK_VIDEO_BACKEND_UNSUPPORTED)
+		return SDK_STATUS_UNSUPPORTED;
 	if (decoded != SDK_VIDEO_BACKEND_FRAME) {
 		session->failed = 1U;
 		return SDK_STATUS_IO_ERROR;
@@ -341,6 +408,9 @@ uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 	session->frame_time_millis = frame.time_millis;
 	fill_result(session, SDK_VIDEO_SESSION_STATE_FRAME_READY, 0U,
 	            flags | SDK_VIDEO_SESSION_RESULT_FRAME_READY, result);
+	result->media_pts = frame.media_pts;
+	result->raw_pts = frame.raw_pts;
+	result->media_flags = frame.media_flags;
 	return SDK_STATUS_OK;
 }
 

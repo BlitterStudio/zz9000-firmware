@@ -157,10 +157,10 @@ int main(int argc, char **argv)
 	                      "SDK_SERVICE_FLAG_VIDEO_EXPLICIT_PRESENT");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "SDK_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ");
-	ok &= expect_absent(mailbox_source, "sdk_mailbox.c",
-	                    "SDK_SERVICE_FLAG_VIDEO_MEDIA_MP2");
-	ok &= expect_absent(mailbox_source, "sdk_mailbox.c",
-	                    "SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_VIDEO_MEDIA_MP2");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS");
 	ok &= expect_absent(mailbox_source, "sdk_mailbox.c",
 	                    "SDK_SERVICE_FLAG_VIDEO_AUDIO_BIND");
 

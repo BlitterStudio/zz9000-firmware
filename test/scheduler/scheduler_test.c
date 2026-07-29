@@ -288,6 +288,10 @@ static void test_class_video_sessions_are_core1_long(void)
   expect_int("media_decode_long",
              taskq_class_for_opcode(TASKQ_OP_MEDIA_SESSION_DECODE, 0u),
              TASK_LONG);
+  expect_int("media_audio_read_long",
+             taskq_class_for_opcode(
+                 TASKQ_OP_MEDIA_SESSION_AUDIO_READ, 0u),
+             TASK_LONG);
   expect_int("media_close_long",
              taskq_class_for_opcode(TASKQ_OP_MEDIA_SESSION_CLOSE, 0u),
              TASK_LONG);

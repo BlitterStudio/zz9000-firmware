@@ -222,11 +222,27 @@ int main(int argc, char **argv)
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "handle_media_session_status");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "handle_media_session_audio_read");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "handle_media_session_audio_unsupported");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "bytes_are_zero(payload->reserved");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
-	                      "opcode != SDK_OP_MEDIA_SESSION_AUDIO_READ");
+	                      "sdk_media_session_audio_read");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "find_shared_buffer(begin.pcm_ring_handle)");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "uint32_t pin_count;");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "if (buffer->pin_count != 0U)");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "shared_buffer_pin(pcm_ring)");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "release_media_pcm_ring(session)");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_VIDEO_MEDIA_MP2");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "case SDK_OP_MEDIA_SESSION_WRITE:");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
@@ -249,6 +265,8 @@ int main(int argc, char **argv)
 	                      "$(SRC_DIR)/sdk_compression.c");
 	ok &= expect_contains(makefile_source, "Makefile",
 	                      "$(SRC_DIR)/sdk_media_session.c");
+	ok &= expect_contains(makefile_source, "Makefile",
+	                      "$(SRC_DIR)/sdk_media_timeline.c");
 	ok &= expect_contains(makefile_source, "Makefile",
 	                      "$(LZMA_SDK_BUILD)/LzmaDec.o");
 	ok &= expect_contains(makefile_source, "Makefile",

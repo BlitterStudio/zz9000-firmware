@@ -23,6 +23,7 @@ struct SDKMediaSessionBegin {
 	uint32_t pcm_low_water_bytes;
 	uint32_t pcm_high_water_bytes;
 	uint32_t flags;
+	uint8_t *pcm_ring;
 };
 
 struct SDKMediaSessionWrite {
@@ -54,6 +55,18 @@ struct SDKMediaSessionStatusResult {
 	uint64_t value[4];
 };
 
+struct SDKMediaSessionAudioResult {
+	uint32_t session;
+	uint32_t state;
+	uint32_t sample_rate;
+	uint32_t channels;
+	uint32_t sample_format;
+	uint64_t pcm_produced;
+	uint64_t pcm_acknowledged;
+	uint64_t audio_pts;
+	uint32_t flags;
+};
+
 void sdk_media_session_init(void);
 int sdk_media_session_core1(uint32_t session);
 int sdk_media_session_close_known(uint32_t session);
@@ -79,6 +92,9 @@ uint16_t sdk_media_session_discard(
 uint16_t sdk_media_session_status(
 	uint32_t session, uint32_t page, uint32_t flags,
 	struct SDKMediaSessionStatusResult *result);
+uint16_t sdk_media_session_audio_read(
+	uint32_t session, uint64_t acknowledged, uint32_t flags,
+	struct SDKMediaSessionAudioResult *result);
 uint16_t sdk_media_session_close(
 	uint32_t session, uint32_t flags,
 	struct SDKMediaSessionMainResult *result);

@@ -56,6 +56,8 @@ int main(int argc, char **argv)
 	char *overlay;
 	const char *enqueue;
 	const char *release;
+	const char *status;
+	const char *audio_read;
 	int ok;
 
 	if (argc != 3)
@@ -80,6 +82,16 @@ int main(int argc, char **argv)
 		fprintf(stderr,
 		        "%s: media planes must be released only after compose enqueue\n",
 		        argv[2]);
+		ok = 0;
+	}
+	status = strstr(media, "sdk_media_session_status(");
+	audio_read = strstr(media, "sdk_media_session_audio_read(");
+	if (!status || !audio_read || audio_read < status ||
+	    (strstr(status, "update_audio();") != 0 &&
+	     strstr(status, "update_audio();") < audio_read)) {
+		fprintf(stderr,
+		        "%s: STATUS must read the core-1 snapshot, not backend state\n",
+		        argv[1]);
 		ok = 0;
 	}
 
