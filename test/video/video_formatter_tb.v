@@ -146,23 +146,62 @@ end
 /* Three-line, nine-pixel black overlay.  Five 4-byte macropixels are sent per
  * line so the final (unused) luma exercises odd destination widths. */
 reg overlay_stream_en = 0;
+reg early_overlay_prefetch_seen = 0;
+integer overlay_stream_width = 9;
+integer overlay_frame_width;
 integer ol, ow;
+integer overlay_stream_generation = 1;
+
+function [7:0] overlay_luma(input integer line);
+  overlay_luma = 8'd16 + line * 8'd64;
+endfunction
+
+function [31:0] expected_overlay(input integer line);
+  reg [7:0] gray;
+  begin
+    gray = (298 * (overlay_luma(line) - 16) + 128) >> 8;
+    expected_overlay = {8'h00, gray, gray, gray};
+  end
+endfunction
+
 initial begin : overlay_vdma
   wait (overlay_stream_en);
   forever begin
+    overlay_frame_width = overlay_stream_width;
     for (ol = 0; ol < 3; ol = ol + 1) begin
-      for (ow = 0; ow < 5; ow = ow + 1) begin
+      for (ow = 0; ow < (overlay_frame_width + 1) / 2; ow = ow + 1) begin
         @(negedge aclk);
-        overlay_tdata <= {8'd128, 8'd16, 8'd128, 8'd16};
+        overlay_tdata <= {8'd128, overlay_luma(ol),
+                          8'd128, overlay_luma(ol)};
         overlay_tuser <= (ol == 0 && ow == 0);
-        overlay_tlast <= (ow == 4);
+        overlay_tlast <= (ow == (overlay_frame_width + 1) / 2 - 1);
         overlay_tvalid <= 1;
         while (overlay_tready !== 1'b1) @(negedge aclk);
         @(posedge aclk);
       end
     end
+    /* Model the real ISR ordering: MM2S remains stalled after the final row,
+     * then firmware commits/re-arms only after the vblank interrupt. */
+    @(negedge aclk);
+    overlay_tvalid <= 0;
+    overlay_tuser <= 0;
+    overlay_tlast <= 0;
+    wait (control_vblank[1] === 1'b1);
+    overlay_stream_generation = overlay_stream_generation + 1;
+    op(OP_OVERLAY_FRAME, overlay_stream_generation);
   end
 end
+
+/* The old design could not advance the fetch request until the final PIP
+ * pixel because that same register selected the read bank. Require line one
+ * to be requested earlier while line zero remains selected for display. */
+always @(posedge dvi_clk)
+  if (overlay_stream_en && uut.vga_overlay_enable &&
+      uut.overlay_displayed_line == 0 && uut.overlay_fetch_line == 1 &&
+      uut.overlay_screen_x <
+        ($signed(uut.vga_overlay_x) +
+         $signed({1'b0, uut.vga_overlay_width}) - 1))
+    early_overlay_prefetch_seen <= 1;
 `endif
 
 // framebuffer content generator: word w of line l, byte lanes ascend so
@@ -414,12 +453,16 @@ initial begin
     op(OP_OVERLAY_CTRL, 1); /* enable, no key, packed CGX */
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 5);
+    if (!early_overlay_prefetch_seen) begin
+      mism = mism + 1;
+      $display("OVERLAY PREFETCH MISMATCH line 1 was not requested early");
+    end
 
     for (i = 0; i < NLINES; i = i + 1)
       for (x = 1; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 2 && i < 5 && (x - 1) >= 8 && (x - 1) < 17)
-          exp = 32'h00000000;
+          exp = expected_overlay(i - 2);
         else
           exp = expected_pix(i, x - 1);
         exp = exp & 32'h00ffffff;
@@ -433,9 +476,8 @@ initial begin
         end
       end
 
-    /* Put the same overlay against the right edge. The next-line request
-     * must not switch BRAM banks until the final visible PIP pixel has been
-     * sampled, even though that is later than the undelayed screen width. */
+    /* Put the same overlay against the right edge. Fetching the next line
+     * must not change the current row's independently selected display bank. */
     op(OP_OVERLAY_POS, (2 << 16) | (cfg_width - 9));
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 5);
@@ -443,7 +485,7 @@ initial begin
       for (x = 1; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 2 && i < 5 && (x - 1) >= cfg_width - 9)
-          exp = 32'h00000000;
+          exp = expected_overlay(i - 2);
         else
           exp = expected_pix(i, x - 1);
         exp = exp & 32'h00ffffff;
@@ -451,6 +493,33 @@ initial begin
           mism = mism + 1;
           if (shown < 48) begin
             $display("OVERLAY RIGHT MISMATCH row=%0d x=%0d got=%08x exp=%08x",
+                     i, x, got, exp);
+            shown = shown + 1;
+          end
+        end
+      end
+
+    /* A full-width YUY2 line cannot be delivered during this test mode's
+     * short horizontal blank. It remains pixel-exact only if N+1 is fetched
+     * concurrently while N is displayed. */
+    overlay_stream_width = cfg_width;
+    op(OP_OVERLAY_POS, (2 << 16));
+    op(OP_OVERLAY_SIZE, (3 << 16) | cfg_width);
+    op(OP_OVERLAY_SOURCE_SIZE, (3 << 16) | cfg_width);
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 5);
+    for (i = 0; i < NLINES; i = i + 1)
+      for (x = 1; x < cfg_width; x = x + 1) begin
+        got = cap[i * MAXW + x];
+        if (i >= 2 && i < 5)
+          exp = expected_overlay(i - 2);
+        else
+          exp = expected_pix(i, x - 1);
+        exp = exp & 32'h00ffffff;
+        if (got !== exp) begin
+          mism = mism + 1;
+          if (shown < 72) begin
+            $display("OVERLAY FULL MISMATCH row=%0d x=%0d got=%08x exp=%08x",
                      i, x, got, exp);
             shown = shown + 1;
           end

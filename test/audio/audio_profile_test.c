@@ -1,0 +1,139 @@
+#include <ctype.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "adau.h"
+#include "adau_PARAM.h"
+#include "ax.h"
+#include "sdk_crypto.h"
+
+#define CHECK(condition)                                                     \
+	do {                                                                  \
+		if (!(condition)) {                                             \
+			fprintf(stderr, "%s:%d: check failed: %s\n",            \
+					__FILE__, __LINE__, #condition);             \
+			exit(1);                                              \
+		}                                                             \
+	} while (0)
+
+static const char normal_project_sha256[] =
+	"7aab83f544e8721554dd290ab5562a216"
+	"ac28d7a9d8af353ca115a8a1cec7fac";
+static const char normal_program_sha256[] =
+	"9b58c07ab19d13665cb4610bf498059dc"
+	"993ca3499b96d62349dd8e84c31adb0";
+static const char normal_parameter_sha256[] =
+	"0fb714aa995d9223f007328b9b98074d"
+	"bcd92b48c0e4fcebbd2738aae15f6ef0";
+
+static int digest_matches_hex(const uint8_t *data, size_t length,
+		const char expected[65])
+{
+	static const char hex[] = "0123456789abcdef";
+	uint8_t digest[SDK_SHA256_DIGEST_SIZE];
+	char actual[SDK_SHA256_DIGEST_SIZE * 2U + 1U];
+	size_t i;
+
+	CHECK(length <= UINT32_MAX);
+	sdk_sha256(data, (uint32_t)length, digest);
+	for (i = 0; i < SDK_SHA256_DIGEST_SIZE; ++i) {
+		actual[i * 2U] = hex[digest[i] >> 4];
+		actual[i * 2U + 1U] = hex[digest[i] & 0x0fU];
+	}
+	actual[sizeof(actual) - 1U] = '\0';
+	return strcmp(actual, expected) == 0;
+}
+
+static int file_digest_matches(const char *repository_path,
+		const char expected[65])
+{
+	char test_path[512];
+	uint8_t *data;
+	long length;
+	FILE *file;
+	int matches;
+
+	CHECK(snprintf(test_path, sizeof(test_path), "../../%s",
+			repository_path) > 0);
+	file = fopen(test_path, "rb");
+	CHECK(file != NULL);
+	CHECK(fseek(file, 0, SEEK_END) == 0);
+	length = ftell(file);
+	CHECK(length >= 0);
+	CHECK(fseek(file, 0, SEEK_SET) == 0);
+	data = malloc((size_t)length);
+	CHECK(data != NULL);
+	CHECK(fread(data, 1U, (size_t)length, file) == (size_t)length);
+	CHECK(fclose(file) == 0);
+	matches = digest_matches_hex(data, (size_t)length, expected);
+	free(data);
+	return matches;
+}
+
+static void test_normal_image_identity(void)
+{
+	CHECK(PROGRAM_SIZE_NORMAL_ADC_IC_1 == 5120U);
+	CHECK(PARAM_SIZE_NORMAL_ADC_IC_1 == 4096U);
+	CHECK(sizeof(Program_Data_Normal_ADC_IC_1) ==
+			PROGRAM_SIZE_NORMAL_ADC_IC_1);
+	CHECK(sizeof(Param_Data_Normal_ADC_IC_1) ==
+			PARAM_SIZE_NORMAL_ADC_IC_1);
+	CHECK(digest_matches_hex(Program_Data_Normal_ADC_IC_1,
+			sizeof(Program_Data_Normal_ADC_IC_1),
+			normal_program_sha256));
+	CHECK(digest_matches_hex(Param_Data_Normal_ADC_IC_1,
+			sizeof(Param_Data_Normal_ADC_IC_1),
+			normal_parameter_sha256));
+	CHECK(file_digest_matches(
+			"zz9000ax/zz9000ax-mix1-lowpass-eq.dspproj",
+			normal_project_sha256));
+}
+
+static void test_production_transport_contract(void)
+{
+	CHECK(ZZ_AUDIO_CAPTURE_CANDIDATE_BUILD_ID == 0xa204U);
+	CHECK(ZZ_AUDIO_CODEC_SERIAL_TDM8_SLOT01 == 0x0c22U);
+	CHECK(ZZ_AUDIO_CODEC_MP_CONTROL == 0x444444U);
+	CHECK(ZZ_AUDIO_CODEC_CORE_LOADING == 0x0018U);
+	CHECK(ZZ_AUDIO_CODEC_CORE_RUNNING == 0x001cU);
+	CHECK(ZZ_NUM_AUDIO_PARAMS == 23U);
+}
+
+static void test_parameter_map(void)
+{
+	CHECK(MOD_GENFILTER1_ALG0_STAGE0_B0_ADDR == 0U);
+	CHECK(MOD_GENFILTER1_ALG0_STAGE0_A2_ADDR == 4U);
+	CHECK(MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_ADDR == 5U);
+	CHECK(MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR == 6U);
+	CHECK(MOD_EQUALIZER_ALG0_STAGE0_B0_ADDR == 7U);
+	CHECK(MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR == 57U);
+	CHECK(MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR == 58U);
+	CHECK(MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR == 59U);
+	CHECK(MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR == 60U);
+}
+
+static void test_readback_comparison(void)
+{
+	static const uint8_t expected[] = { 0x00, 0x12, 0x34, 0x56 };
+	uint8_t actual[] = { 0x00, 0x12, 0x34, 0x56 };
+
+	CHECK(audio_adau_readback_matches(expected, actual,
+			sizeof(expected)));
+	actual[3] ^= 1U;
+	CHECK(!audio_adau_readback_matches(expected, actual,
+			sizeof(expected)));
+	CHECK(!audio_adau_readback_matches(NULL, actual,
+			sizeof(expected)));
+}
+
+int main(void)
+{
+	test_normal_image_identity();
+	test_production_transport_contract();
+	test_parameter_map();
+	test_readback_comparison();
+	puts("audio production profile tests passed");
+	return 0;
+}

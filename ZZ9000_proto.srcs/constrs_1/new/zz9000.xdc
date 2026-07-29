@@ -271,6 +271,13 @@ set_property IOSTANDARD LVCMOS33 [get_ports {I2SO_RESETn[0]}]
 
 create_clock -period 80.000 -name i2s_mclk -add [get_ports I2SO_BCLK]
 
+# ADAU1701 TDM8 serial output data and LRCLK change after OUTPUT_BCLK falls.
+# Register them on the following rising edge. The 40 ns maximum is the
+# datasheet tSODM limit; zero is the conservative minimum because no minimum
+# clock-to-output delay is specified.
+set_input_delay -clock i2s_mclk -clock_fall -max 40.000 [get_ports {I2SI_D0 I2SO_LRCLK}]
+set_input_delay -clock i2s_mclk -clock_fall -min 0.000 [get_ports {I2SI_D0 I2SO_LRCLK}]
+
 set_property PACKAGE_PIN U18 [get_ports I2SO_BCLK]
 set_property PACKAGE_PIN W16 [get_ports I2SO_LRCLK]
 set_property PACKAGE_PIN V16 [get_ports I2SO_D0]

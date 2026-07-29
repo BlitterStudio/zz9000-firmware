@@ -400,7 +400,8 @@ reg [15:0] vga_overlay_width = 0;
 reg [15:0] vga_overlay_height = 0;
 reg [23:0] vga_overlay_key_rgb = 0;
 reg [31:0] vga_overlay_frame_generation = 0;
-reg [11:0] overlay_requested_line = 0;
+reg [11:0] overlay_fetch_line = 0;
+reg overlay_fetch_request = 0;
 
 wire signed [16:0] overlay_screen_x =
   $signed({1'b0, counter_x}) - $signed(PIPE_DELAY);
@@ -414,10 +415,13 @@ wire overlay_in_window = vga_overlay_enable &&
   overlay_local_x >= 0 && overlay_local_y >= 0 &&
   overlay_local_x < $signed({1'b0, vga_overlay_width}) &&
   overlay_local_y < $signed({1'b0, vga_overlay_height});
+wire [11:0] overlay_displayed_line = overlay_local_y >= 0
+  ? overlay_local_y[11:0] : 12'b0;
 wire signed [16:0] overlay_read_x = overlay_local_x + 1;
 wire [10:0] overlay_read_addr = overlay_read_x[11:1];
 wire [31:0] overlay_yuv422;
 wire overlay_line_ready;
+wire [31:0] overlay_accepted_generation;
 
 video_overlay_linebuffer overlay_linebuffer (
   .axis_clk(m_axis_vid_aclk),
@@ -430,12 +434,15 @@ video_overlay_linebuffer overlay_linebuffer (
   .s_axis_tready(overlay_axis_tready),
   .fetch_enable(overlay_enable && overlay_source_mode == 0),
   .fetch_generation(overlay_frame_generation),
-  .requested_line(overlay_requested_line),
+  .fetch_line(overlay_fetch_line),
+  .fetch_request(overlay_fetch_request),
   .pixel_clk(dvi_clk),
+  .display_enable(vga_overlay_enable && vga_overlay_source_mode == 0),
   .read_addr(overlay_read_addr),
-  .read_bank(overlay_requested_line[0]),
+  .displayed_line(overlay_displayed_line),
   .read_data(overlay_yuv422),
-  .requested_line_ready(overlay_line_ready)
+  .displayed_line_ready(overlay_line_ready),
+  .accepted_generation(overlay_accepted_generation)
 );
 
 wire [23:0] overlay_rgb;
@@ -508,6 +515,8 @@ xpm_memory_sdpram #(
 );
 
 always @(posedge dvi_clk) begin
+  overlay_fetch_request <= 0;
+
   vga_h_rez <= screen_width;
   vga_v_rez <= screen_height;
   vga_h_max <= screen_h_max - 1'b1;
@@ -539,7 +548,6 @@ always @(posedge dvi_clk) begin
     vga_overlay_width <= overlay_width;
     vga_overlay_height <= overlay_height;
     vga_overlay_key_rgb <= overlay_key_rgb;
-    vga_overlay_frame_generation <= overlay_frame_generation;
   end
   if (counter_y == 0) begin
     vga_sprite_x <= sprite_x;
@@ -730,25 +738,32 @@ endcase
       need_line_fetch <= 0;
   end
 
-  /* As soon as the final PIP pixel has sampled the current BRAM bank, request
-   * the next source row into the opposite bank. Waiting until end-of-screen
-   * wastes all pixels to the right of the window and can miss the next-line
-   * deadline under shared-DDR contention. PIP rows use visible coordinates;
-   * formatter counter_y includes the historical one-line VDMA wrap. */
+  /* Display selection follows the current PIP row while this independent
+   * fetch selector advances as soon as that row is known ready. MM2S can then
+   * fill the opposite BRAM bank throughout the current raster row instead of
+   * having only horizontal blanking after the final PIP pixel. Requiring the
+   * displayed line to be ready prevents a missed deadline from skipping an
+   * unfetched source row. */
   if (!vga_overlay_enable) begin
-    overlay_requested_line <= 0;
-  end else if (overlay_in_window &&
-               overlay_local_x ==
-                 ($signed({1'b0, vga_overlay_width}) - 1)) begin
-    if (overlay_local_y + 1 < $signed({1'b0, vga_overlay_height}))
-      overlay_requested_line <= overlay_local_y[11:0] + 1'b1;
+    overlay_fetch_line <= 0;
+  end else if (overlay_accepted_generation !=
+               vga_overlay_frame_generation) begin
+    /* Firmware advances the generation only after committing the VDMA
+     * address/VSIZE at vblank. The line-buffer's atomic acknowledgement
+     * proves its AXI domain has stopped treating the old frame as active;
+     * only then may the pixel domain request line zero. */
+    vga_overlay_frame_generation <= overlay_accepted_generation;
+    overlay_fetch_line <= 0;
+    overlay_fetch_request <= 1;
+  end else if (overlay_local_y >= 0 &&
+               overlay_local_y < $signed({1'b0, vga_overlay_height}) &&
+               overlay_line_ready &&
+               overlay_fetch_line == overlay_displayed_line) begin
+    if ({4'b0, overlay_displayed_line} + 16'd1 < vga_overlay_height) begin
+      overlay_fetch_line <= overlay_displayed_line + 1'b1;
+      overlay_fetch_request <= 1;
+    end
   end
-
-  /* Do not let MM2S prefetch line zero from the old surface immediately
-   * after the last visible PIP row.  Re-arm it in vblank, after firmware has
-   * had its buffer-flip interrupt and can update START_ADDR/generation. */
-  if (counter_y == vga_v_sync_start && counter_x == 0)
-    overlay_requested_line <= 0;
 
   // signal synchronization point to fetch process
   if (counter_x<8 && counter_y==vga_v_sync_start)

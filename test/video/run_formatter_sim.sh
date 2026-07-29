@@ -1,8 +1,8 @@
 #!/bin/bash
 # Functional simulation of video_formatter.v with Vivado xsim.
-# Usage: ./run_formatter_sim.sh [master|current]
-#   master  - runs the testbench against the pre-branch 32-bit formatter
-#             (validates the testbench reference model)
+# Usage: ./run_formatter_sim.sh [reference|master|current]
+#   reference/master - runs against the pinned pre-64-bit formatter
+#                      (validates the testbench reference model)
 #   current - runs against the working-tree video_formatter.v (default)
 set -e
 
@@ -19,12 +19,14 @@ VARIANT="${1:-current}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 SIMDIR="$HERE/build/sim_$VARIANT"
+GLBL="$VIVADO_BIN/../data/verilog/src/glbl.v"
+REFERENCE_COMMIT="${FORMATTER_REFERENCE_COMMIT:-6e0cfc53b0135a271dc71d31b29dc864fc36dddb}"
 
 mkdir -p "$SIMDIR"
 cd "$SIMDIR"
 
-if [ "$VARIANT" = "master" ]; then
-    git -C "$ROOT" show master:video_formatter.v > dut.v
+if [ "$VARIANT" = "master" ] || [ "$VARIANT" = "reference" ]; then
+    git -C "$ROOT" show "$REFERENCE_COMMIT:video_formatter.v" > dut.v
     DEFINE="-d MASTER_DUT"
     EXTRA=""
 else
@@ -37,14 +39,14 @@ fi
 
 if [ "$ON_WINDOWS" = 1 ]; then
     TB="$(cygpath -w "$HERE/video_formatter_tb.v")"
-    cmd //c "$(cygpath -w "$VIVADO_BIN/xvlog.bat") $DEFINE dut.v $EXTRA $TB" > xvlog.log 2>&1 \
+    cmd //c "$(cygpath -w "$VIVADO_BIN/xvlog.bat") $DEFINE dut.v $EXTRA $TB $(cygpath -w "$GLBL")" > xvlog.log 2>&1 \
         || { cat xvlog.log; exit 1; }
-    cmd //c "$(cygpath -w "$VIVADO_BIN/xelab.bat") -L xpm work.video_formatter_tb -s tb" > xelab.log 2>&1 \
+    cmd //c "$(cygpath -w "$VIVADO_BIN/xelab.bat") -L xpm work.video_formatter_tb work.glbl -s tb" > xelab.log 2>&1 \
         || { cat xelab.log; exit 1; }
 else
-    "$VIVADO_BIN/xvlog" $DEFINE dut.v $EXTRA "$HERE/video_formatter_tb.v" > xvlog.log 2>&1 \
+    "$VIVADO_BIN/xvlog" $DEFINE dut.v $EXTRA "$HERE/video_formatter_tb.v" "$GLBL" > xvlog.log 2>&1 \
         || { cat xvlog.log; exit 1; }
-    "$VIVADO_BIN/xelab" -L xpm work.video_formatter_tb -s tb > xelab.log 2>&1 \
+    "$VIVADO_BIN/xelab" -L xpm work.video_formatter_tb work.glbl -s tb > xelab.log 2>&1 \
         || { cat xelab.log; exit 1; }
 fi
 
@@ -60,9 +62,16 @@ CONFIGS="
 1 0 0 62
 2 0 1 64
 1 0 1 64
+"
+
+# The wide-line cases exercise capacity added with the 64-bit formatter.
+# They are not valid expectations for the pinned 32-bit reference design.
+if [ "$VARIANT" != "master" ] && [ "$VARIANT" != "reference" ]; then
+    CONFIGS="$CONFIGS
 2 0 1 720
 2 0 0 1920
 "
+fi
 
 rm -f run_*.log
 EXPECTED=$(echo "$CONFIGS" | grep -c '[0-9]')

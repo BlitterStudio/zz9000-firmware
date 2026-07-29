@@ -445,6 +445,7 @@ int main() {
 	uint16_t audio_params[ZZ_NUM_AUDIO_PARAMS];
 	int audio_param = 0; // selected parameter
 	int audio_request_init = 0;
+	memset(audio_params, 0, sizeof(audio_params));
 
 
 	// last time the ethernet state machine was serviced
@@ -1360,26 +1361,40 @@ int main() {
 								((audio_params[AP_DSP_PROG_OFFS_HI]<<16)|audio_params[AP_DSP_PROG_OFFS_LO]);
 						uint8_t* params_ptr = (uint8_t*)video_state->framebuffer +
 								((audio_params[AP_DSP_PARAM_OFFS_HI]<<16)|audio_params[AP_DSP_PARAM_OFFS_LO]);
+						int dsp_status;
 
 						if (zdata == 0) {
 							printf("[audio] reprogramming from 0x%p and 0x%p\n", program_ptr, params_ptr);
-							audio_program_adau(program_ptr, 5120);
-							audio_program_adau_params(params_ptr, 4096);
+							dsp_status = audio_program_adau(program_ptr, 5120);
+							if (dsp_status == 0) {
+								dsp_status = audio_program_adau_params(
+										params_ptr, 4096);
+							}
 						} else {
 							printf("[audio] programming %ld params from 0x%p\n", zdata, params_ptr);
-							audio_program_adau_params(params_ptr, zdata);
+							dsp_status = audio_program_adau_params(params_ptr, zdata);
 						}
+						if (dsp_status != 0)
+							printf("[audio] verified DSP upload failed.\n");
 					} else if (audio_param == AP_DSP_SET_LOWPASS) {
 						// set lowpass filter params by cutoff freq (works only if default program is loaded!)
-						audio_adau_set_lpf_params(zdata);
+						if (audio_adau_set_lpf_params(zdata) != 0)
+							printf("[audio] low-pass update failed.\n");
 					} else if (audio_param == AP_DSP_SET_VOLUMES) {
-						audio_adau_set_mixer_vol(zdata&0xff, (zdata>>8)&0xff);
+						if (audio_adau_set_mixer_vol(
+								zdata&0xff, (zdata>>8)&0xff) != 0)
+							printf("[audio] mixer update failed.\n");
 					} else if (audio_param == AP_DSP_SET_PREFACTOR) {
-						audio_adau_set_prefactor(zdata);
+						if (audio_adau_set_prefactor(zdata) != 0)
+							printf("[audio] prefactor update failed.\n");
 					} else if ((audio_param >= AP_DSP_SET_EQ_BAND1) && (audio_param <= AP_DSP_SET_EQ_BAND10)) {
-						audio_adau_set_eq_gain(audio_param-AP_DSP_SET_EQ_BAND1, zdata);
+						if (audio_adau_set_eq_gain(
+								audio_param-AP_DSP_SET_EQ_BAND1, zdata) != 0)
+							printf("[audio] equalizer update failed.\n");
 					} else if (audio_param == AP_DSP_SET_STEREO_VOLUME) {
-						audio_adau_set_vol_pan(zdata&0xff, (zdata>>8)&0xff);
+						if (audio_adau_set_vol_pan(
+								zdata&0xff, (zdata>>8)&0xff) != 0)
+							printf("[audio] stereo-volume update failed.\n");
 					}
 					break;
 				// REG_ZZ_DECODER_PARAM / _VAL / _FIFO and REG_ZZ_DECODE:

@@ -14,6 +14,8 @@
 #include <string.h>
 
 #define VIDEO_FORMATTER_PATH "../../video_formatter.v"
+#define OVERLAY_LINEBUFFER_PATH "../../video_overlay_linebuffer.v"
+#define PROJECT_TCL_PATH "../../zz9000_project.tcl"
 
 static char *read_file(const char *path)
 {
@@ -180,9 +182,75 @@ static int test_dpms_gates_only_external_syncs(const char *text)
 	return ok ? 0 : 1;
 }
 
+static int test_overlay_rearms_only_after_generation_ack(const char *text)
+{
+	int ok = 1;
+
+	ok &= require_contains(text, ".accepted_generation(overlay_accepted_generation)");
+	ok &= require_contains(text, "reg [11:0] overlay_fetch_line = 0;");
+	ok &= require_contains(text,
+	    "wire [11:0] overlay_displayed_line = overlay_local_y >= 0");
+	ok &= require_contains(text, ".fetch_line(overlay_fetch_line)");
+	ok &= require_contains(text, ".fetch_request(overlay_fetch_request)");
+	ok &= require_contains(text, ".displayed_line(overlay_displayed_line)");
+	ok &= require_contains(text,
+	    "overlay_fetch_line == overlay_displayed_line");
+	ok &= require_contains(text,
+	    "if ({4'b0, overlay_displayed_line} + 16'd1 < vga_overlay_height)");
+	ok &= require_contains(text,
+	    "overlay_fetch_line <= overlay_displayed_line + 1'b1;");
+	ok &= require_contains(text,
+	    "overlay_accepted_generation !=\n               vga_overlay_frame_generation");
+	ok &= require_contains(text,
+	    "vga_overlay_frame_generation <= overlay_accepted_generation;");
+	ok &= require_contains(text, "overlay_fetch_request <= 1;");
+	ok &= require_absent(text,
+	    "if (counter_y == vga_v_sync_start && counter_x == 0)\n    overlay_requested_line <= 0;",
+	    "overlay still prefetches line zero before the firmware vblank commit");
+	ok &= require_absent(text, ".read_bank(overlay_fetch_line[0])",
+	    "fetch selection still changes the displayed BRAM bank");
+
+	return ok ? 0 : 1;
+}
+
+static int test_overlay_line_metadata_uses_atomic_cdc(const char *text)
+{
+	int ok = 1;
+
+	ok &= require_contains(text, ") fetch_line_cdc (");
+	ok &= require_contains(text, ") completed_line_cdc (");
+	ok &= require_contains(text, ") generation_cdc (");
+	ok &= require_contains(text, ".DEST_EXT_HSK(0)");
+	ok &= require_contains(text, "if (fetch_line_axis_valid)");
+	ok &= require_contains(text, "if (completed_line_pixel_valid)");
+	ok &= require_contains(text, "if (accepted_generation_pixel_valid)");
+	ok &= require_absent(text, "fetch_line_sync1",
+	    "binary fetch-line bus still uses independent bit synchronizers");
+	ok &= require_absent(text, "line0_sync1",
+	    "ready-line tag still crosses independently from its valid flag");
+	ok &= require_absent(text, "valid0_sync1",
+	    "ready-valid flag still crosses independently from its line tag");
+
+	return ok ? 0 : 1;
+}
+
+static int test_overlay_stream_has_no_prefetch_fifo(const char *text)
+{
+	int ok = 1;
+
+	ok &= require_absent(text, "axis_data_fifo_1",
+	    "overlay FIFO can prefetch the old surface across a frame handoff");
+	ok &= require_contains(text,
+	    "[get_bd_intf_pins axi_vdma_1/M_AXIS_MM2S] [get_bd_intf_pins video_formatter_0/overlay_axis]");
+
+	return ok ? 0 : 1;
+}
+
 int main(void)
 {
 	char *text = read_file(VIDEO_FORMATTER_PATH);
+	char *linebuffer;
+	char *project;
 	int result;
 
 	if (!text)
@@ -195,7 +263,23 @@ int main(void)
 		result = test_64bit_tkeep_drives_writes(text);
 	if (!result)
 		result = test_dpms_gates_only_external_syncs(text);
+	if (!result)
+		result = test_overlay_rearms_only_after_generation_ack(text);
 	free(text);
+
+	linebuffer = read_file(OVERLAY_LINEBUFFER_PATH);
+	if (!linebuffer)
+		return 1;
+	if (!result)
+		result = test_overlay_line_metadata_uses_atomic_cdc(linebuffer);
+	free(linebuffer);
+
+	project = read_file(PROJECT_TCL_PATH);
+	if (!project)
+		return 1;
+	if (!result)
+		result = test_overlay_stream_has_no_prefetch_fifo(project);
+	free(project);
 
 	return result;
 }

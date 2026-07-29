@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 
 #include "platform.h"
 #include "xparameters.h"
@@ -23,6 +24,17 @@
 #define IIC2_DEVICE_ID	XPAR_XIICPS_1_DEVICE_ID
 #define IIC2_SCLK_RATE	100000
 #define ADAU_I2C_ADDR	0x68
+#define ADAU_PROGRAM_RAM_BASE	1024
+#define ADAU_PROGRAM_WORD_BYTES	5
+#define ADAU_PROGRAM_WRITE_RETRIES	3
+#define ADAU_PARAMETER_RAM_BASE	0
+#define ADAU_PARAMETER_WORD_BYTES	4
+#define ADAU_PARAMETER_WRITE_RETRIES	3
+#define ADAU_CONTROL_WRITE_RETRIES	3
+
+void adau_to_5_23(double param_dec, uint8_t *param_hex);
+double flt_omega(double fs, double f0);
+double flt_alpha(double fs, double f0);
 
 XIicPs Iic2;
 XI2s_Tx i2s;
@@ -208,19 +220,217 @@ int adau_read24(u8 i2c_addr, u16 addr, u8* buffer) {
 	return status1;
 }
 
+// for verifying 32 bit parameter words
+static int adau_read32(u8 i2c_addr, u16 addr, u8 *buffer) {
+	XIicPs* iic = &Iic2;
+	int status;
+	u8 abuffer[2];
+	abuffer[0] = addr>>8;
+	abuffer[1] = addr&0xff;
 
-void audio_program_adau_params(u8* params, u32 param_len) {
-	for (u32 i = 0; i < param_len; i+=4) {
-		int res = adau_write32(0x34, 0+i/4, &params[i]);
-		if (res != 0) printf("[adau_write32] %lx: %d\n", i, res);
+	XIicPs_SetOptions(iic, XIICPS_REP_START_OPTION);
+
+	int timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
+			printf("ADAU I2C read32a timeout.\n");
+			return -1;
+		}
 	}
+
+	status = XIicPs_MasterSendPolled(iic, abuffer, 2, i2c_addr);
+	if (status != 0) {
+		XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
+		return status;
+	}
+
+	XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
+	status = XIicPs_MasterRecvPolled(iic, buffer,
+			ADAU_PARAMETER_WORD_BYTES, i2c_addr);
+	if (status != 0) {
+		return status;
+	}
+
+	timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			printf("ADAU I2C read32b timeout.\n");
+			return -1;
+		}
+	}
+
+	return 0;
 }
 
-void audio_program_adau(u8* program, u32 program_len) {
-	for (u32 i = 0; i < program_len; i+=5) {
-		int res = adau_write40(0x34, 1024+i/5, &program[i]);
-		if (res != 0) printf("[adau_write40] %lx: %d\n", i, res);
+// for verifying 40 bit program words
+static int adau_read40(u8 i2c_addr, u16 addr, u8* buffer) {
+	XIicPs* iic = &Iic2;
+	int status;
+	u8 abuffer[2];
+	abuffer[0] = addr>>8;
+	abuffer[1] = addr&0xff;
+
+	XIicPs_SetOptions(iic, XIICPS_REP_START_OPTION);
+
+	int timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
+			printf("ADAU I2C read40a timeout.\n");
+			return -1;
+		}
 	}
+
+	status = XIicPs_MasterSendPolled(iic, abuffer, 2, i2c_addr);
+	if (status != 0) {
+		XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
+		return status;
+	}
+
+	XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
+	status = XIicPs_MasterRecvPolled(iic, buffer,
+			ADAU_PROGRAM_WORD_BYTES, i2c_addr);
+	if (status != 0) {
+		return status;
+	}
+
+	timeout = 0;
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		timeout++;
+		if (timeout>10000) {
+			printf("ADAU I2C read40b timeout.\n");
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+
+int audio_adau_write_parameter(uint16_t address,
+		const uint8_t value[ADAU_PARAMETER_WORD_BYTES])
+{
+	uint8_t wire_value[ADAU_PARAMETER_WORD_BYTES];
+	uint8_t readback[ADAU_PARAMETER_WORD_BYTES] = { 0 };
+	int attempt;
+	int res = -1;
+
+	if (value == NULL) {
+		return -1;
+	}
+	memcpy(wire_value, value, sizeof(wire_value));
+	/*
+	 * Parameter RAM is 28 bits. SigmaStudio's C exports sign-extend
+	 * negative values into the unused high nibble, while the ADAU1701
+	 * control-port format requires that nibble to be zero padded.
+	 */
+	wire_value[0] &= 0x0fU;
+	for (attempt = 0;
+			attempt < ADAU_PARAMETER_WRITE_RETRIES; ++attempt) {
+		res = adau_write32(0x34, address, wire_value);
+		if (res == 0) {
+			res = adau_read32(0x34, address, readback);
+		}
+		if (res == 0 &&
+				audio_adau_readback_matches(wire_value, readback,
+						ADAU_PARAMETER_WORD_BYTES)) {
+			return 0;
+		}
+		res = -1;
+	}
+
+	printf("[adau] parameter verify failed at 0x%03x: "
+			"%02x%02x%02x%02x != %02x%02x%02x%02x\n",
+			address,
+			wire_value[0], wire_value[1],
+			wire_value[2], wire_value[3],
+			readback[0], readback[1], readback[2], readback[3]);
+	return -1;
+}
+
+int audio_program_adau_params(uint8_t *params, uint32_t param_len) {
+	if ((param_len % ADAU_PARAMETER_WORD_BYTES) != 0) {
+		printf("[adau] invalid parameter length: %lu\n",
+				(unsigned long)param_len);
+		return -1;
+	}
+
+	for (uint32_t i = 0; i < param_len;
+			i += ADAU_PARAMETER_WORD_BYTES) {
+		uint16_t addr = ADAU_PARAMETER_RAM_BASE +
+				i/ADAU_PARAMETER_WORD_BYTES;
+
+		if (audio_adau_write_parameter(addr, &params[i]) != 0) {
+			return -1;
+		}
+	}
+
+	printf("[adau] verified %lu parameter words\n",
+			(unsigned long)(param_len/ADAU_PARAMETER_WORD_BYTES));
+	return 0;
+}
+
+static int audio_program_adau_word(const uint8_t *program,
+		uint32_t offset)
+{
+	uint8_t readback[ADAU_PROGRAM_WORD_BYTES] = { 0 };
+	uint16_t addr = ADAU_PROGRAM_RAM_BASE +
+			offset / ADAU_PROGRAM_WORD_BYTES;
+	int attempt;
+	int res = -1;
+
+	for (attempt = 0; attempt < ADAU_PROGRAM_WRITE_RETRIES; ++attempt) {
+		res = adau_write40(0x34, addr, (uint8_t *)&program[offset]);
+		if (res == 0) {
+			res = adau_read40(0x34, addr, readback);
+		}
+		if (res == 0 &&
+				audio_adau_readback_matches(&program[offset],
+						readback,
+						ADAU_PROGRAM_WORD_BYTES)) {
+			return 0;
+		}
+		res = -1;
+	}
+
+	printf("[adau] program verify failed at 0x%03x: "
+			"%02x%02x%02x%02x%02x != "
+			"%02x%02x%02x%02x%02x\n",
+			addr,
+			program[offset], program[offset + 1U],
+			program[offset + 2U], program[offset + 3U],
+			program[offset + 4U],
+			readback[0], readback[1], readback[2],
+			readback[3], readback[4]);
+	return -1;
+}
+
+int audio_program_adau(uint8_t *program, uint32_t program_len) {
+	uint32_t offset;
+
+	if ((program_len % ADAU_PROGRAM_WORD_BYTES) != 0) {
+		printf("[adau] invalid program length: %lu\n",
+				(unsigned long)program_len);
+		return -1;
+	}
+
+	for (offset = 0U; offset < program_len;
+			offset += ADAU_PROGRAM_WORD_BYTES) {
+		if (audio_program_adau_word(program, offset) != 0) {
+			return -1;
+		}
+	}
+	printf("[adau] verified %lu program words\n",
+			(unsigned long)(program_len/ADAU_PROGRAM_WORD_BYTES));
+	return 0;
 }
 
 void audio_init_i2s() {
@@ -320,6 +530,74 @@ void audio_init_i2s() {
 	audio_capture_ready = 1;
 }
 
+static int audio_adau_write16_verified(uint16_t address, uint16_t value,
+		uint16_t *readback)
+{
+	uint8_t bytes[2] = { 0U, 0U };
+	int status;
+
+	status = adau_write16(0x34, address, value);
+	if (status == 0)
+		status = adau_read16(0x34, address, bytes);
+	if (readback != NULL)
+		*readback = (uint16_t)(((uint16_t)bytes[0] << 8) | bytes[1]);
+	if (status != 0 || bytes[0] != (uint8_t)(value >> 8) ||
+			bytes[1] != (uint8_t)value)
+		return -1;
+	return 0;
+}
+
+static int audio_adau_write24_verified(uint16_t address, uint32_t value,
+		uint32_t *readback)
+{
+	uint8_t bytes[3] = { 0U, 0U, 0U };
+	uint32_t actual = 0U;
+	int attempt;
+	int status = -1;
+
+	for (attempt = 0; attempt < ADAU_CONTROL_WRITE_RETRIES; ++attempt) {
+		status = adau_write24(0x34, address, value);
+		if (status == 0)
+			status = adau_read24(0x34, address, bytes);
+		actual = ((uint32_t)bytes[0] << 16) |
+				((uint32_t)bytes[1] << 8) | bytes[2];
+		if (status == 0 && actual == (value & 0x00ffffffU)) {
+			if (readback != NULL)
+				*readback = actual;
+			return 0;
+		}
+	}
+
+	if (readback != NULL)
+		*readback = actual;
+	return -1;
+}
+
+static void audio_adau_lpf_coefficients(int f0, double coefficients[5])
+{
+	const double fs = 48000.0;
+	double omega = flt_omega(fs, (double)f0);
+	double alpha = flt_alpha(fs, (double)f0);
+	double a0 = 1.0 + alpha;
+	double a1 = -2.0 * cos(omega);
+	double a2 = 1.0 - alpha;
+	double b0 = (1.0 - cos(omega)) / 2.0;
+	double b1 = 1.0 - cos(omega);
+	double b2 = b0;
+
+	a1 /= a0;
+	a2 /= a0;
+	b0 /= a0;
+	b1 /= a0;
+	b2 /= a0;
+
+	coefficients[0] = b0;
+	coefficients[1] = b1;
+	coefficients[2] = b2;
+	coefficients[3] = -a1;
+	coefficients[4] = -a2;
+}
+
 // The TX buffer address the audio formatter DMA was last INITIALIZED
 // with. audio_set_tx_buffer() only moves the CPU-side pointer; the DMA
 // keeps reading the buffer captured at the last audio_init_i2s(). An
@@ -337,7 +615,15 @@ int audio_adau_init(int program_dsp) {
 	i2c_config = XIicPs_LookupConfig(IIC2_DEVICE_ID);
 	int status = XIicPs_CfgInitialize(&Iic2, i2c_config, i2c_config->BaseAddress);
 	printf("[adau] XIicPs_CfgInitialize 2: %d\n", status);
-	usleep(10000);
+
+	/*
+	 * main() releases the ADAU1701 reset immediately before calling us.
+	 * At a 12.288 MHz MCLK the datasheet gives approximately 21 ms for
+	 * PLL startup plus the internal boot-ROM copy, and forbids control-port
+	 * accesses during that interval.  The former 10 ms delay could let the
+	 * first program-RAM words race the device's own initialization.
+	 */
+	usleep(25000);
 	printf("[adau] XIicPs 2 is ready: %lx\n", Iic2.IsReady);
 	status = XIicPs_SelfTest(&Iic2);
 	printf("[adau] XIicPs_SelfTest: %x\n", status);
@@ -354,10 +640,15 @@ int audio_adau_init(int program_dsp) {
 	u8 i = 0x34;
 
 	//usleep(10000);
-	// DSP core control: set ADM, DAM, CR
-	status = adau_write16(i, 2076, (1<<4)|(1<<3)|(1<<2));
+	/*
+	 * Hold the DSP data path clear while its program and parameters are
+	 * replaced.  This matches SigmaStudio's generated download sequence:
+	 * ADM|DAM stay enabled, CR remains low until loading is complete.
+	 */
+	status = adau_write16(i, 2076,
+			ZZ_AUDIO_CODEC_CORE_LOADING);
 	if (status == 0) {
-		printf("[adau] write DSP core control: %d\n", i);
+		printf("[adau] hold DSP core for loading: %d\n", i);
 		printf("\n[adau] ~~~~ ZZ9000AX detected. ~~~~\n\n");
 	} else {
 		printf("[adau] ZZ9000AX not detected.\n");
@@ -365,9 +656,19 @@ int audio_adau_init(int program_dsp) {
 	}
 
 	status = adau_read16(i, 2076, rbuf);
-	if (status == 0) {
-		printf("[adau] read: %d %x %x\n", i, rbuf[0], rbuf[1]);
+	if (status != 0 ||
+			rbuf[0] !=
+				(uint8_t)(ZZ_AUDIO_CODEC_CORE_LOADING >> 8) ||
+			rbuf[1] !=
+				(uint8_t)ZZ_AUDIO_CODEC_CORE_LOADING) {
+		printf("[adau] DSP core loading-state verify failed: "
+				"%02x%02x != %04x (status: %d)\n",
+				rbuf[0], rbuf[1],
+				ZZ_AUDIO_CODEC_CORE_LOADING, status);
+		return 0;
 	}
+	printf("[adau] verified DSP core loading state: %02x%02x\n",
+			rbuf[0], rbuf[1]);
 
 	// DAC setup: DS = 01
 	status = adau_write16(i, 2087, 1);
@@ -379,48 +680,92 @@ int audio_adau_init(int program_dsp) {
 	status = adau_read16(i, 2087, rbuf);
 	printf("[adau] read from 2087: %02x%02x (status: %d)\n", rbuf[0], rbuf[1], status);
 
-	// TODO: OBP/OLRP
-	u16 MS  = 1<<11; // clock master output
-	//u16 OBF = (0<<10)|(0<<9);    // bclock = 49.152/16 = mclk/4 = 3.072mhz
-	u16 OBF = (1<<10)|(0<<9);    // bclock = 49.152/4 = mclk = 12.288mhz
-	u16 OLF = (0<<8)|(0<<7);    // lrclock = 49.152/1024 = word clock = 48khz?!
-	u16 MSB = 0;    // msb 1
-	u16 OWL = 1<<1; // 16 bit
-	status = adau_write16(i, 0x081e, MS|OBF|OLF|MSB|OWL);
+	/*
+	 * Production capture uses TDM8 with ADC left/right in slots 0/1.
+	 * The master-mode divider remains at 256*Fs, so the existing playback
+	 * formatter continues to receive its codec-synchronous 12.288 MHz
+	 * master clock while the FPGA normalizes those two TDM slots to I2S.
+	 */
+	u16 serial_output_control =
+			ZZ_AUDIO_CODEC_SERIAL_TDM8_SLOT01;
+	status = adau_write16(i, 0x081e, serial_output_control);
 	printf("[adau] write serial output control: %d\n", status);
-
-	u32 MP0 = 1<<2; // MP02 digital input 0
-	u32 MP1 = 1<<6; //
-	u32 MP2 = 1<<10; //
-	u32 MP3 = 1<<14; //
-	u32 MP4 = 1<<18; // MP42 serial clock in
-	u32 MP5 = 1<<22; // MP52 serial clock in
-
-	u32 MP6 = 1<<2; //
-	u32 MP7 = 1<<6; //
-	u32 MP8 = 1<<10; //
-	u32 MP9 = 1<<14; //
-	u32 MP10 = 1<<18; // MP102 set (serial clock out)
-	u32 MP11 = 1<<22; // MP112 set (serial clock out)
-	status = adau_write24(i, 0x0820, MP0|MP1|MP2|MP3|MP4|MP5);
-	printf("[adau] write MP control 0x820: %d\n", status);
-	status = adau_write24(i, 0x0821, MP6|MP7|MP8|MP9|MP10|MP11);
-	printf("[adau] write MP control 0x821: %d\n", status);
-
-	status = adau_read24(i, 0x0820, rbuf);
-	printf("[adau] read from 0x820: %02x%02x%02x (status: %d)\n", rbuf[0], rbuf[1], rbuf[2], status);
-	status = adau_read24(i, 0x0821, rbuf);
-	printf("[adau] read from 0x821: %02x%02x%02x (status: %d)\n", rbuf[0], rbuf[1], rbuf[2], status);
-
-	audio_init_i2s();
-
-	if (program_dsp) {
-		audio_program_adau(Program_Data_IC_1, sizeof(Program_Data_IC_1));
-		audio_program_adau_params(Param_Data_IC_1, sizeof(Param_Data_IC_1));
-		audio_adau_set_lpf_params(23900);
-		audio_adau_set_mixer_vol(128, 64);
+	if (status != 0) {
+		return 0;
 	}
 
+	rbuf[0] = 0;
+	rbuf[1] = 0;
+	status = adau_read16(i, 0x081e, rbuf);
+	if (status != 0 ||
+			rbuf[0] != (u8)(serial_output_control >> 8) ||
+			rbuf[1] != (u8)serial_output_control) {
+		printf("[adau] serial output control verify failed: "
+				"%02x%02x != %04x (status: %d)\n",
+				rbuf[0], rbuf[1], serial_output_control, status);
+		return 0;
+	}
+	printf("[adau] verified serial output control: %02x%02x\n",
+			rbuf[0], rbuf[1]);
+
+	uint32_t mp_readback = 0U;
+	status = audio_adau_write24_verified(
+			0x0820, ZZ_AUDIO_CODEC_MP_CONTROL, &mp_readback);
+	if (status != 0) {
+		printf("[adau] MP control 0x820 verify failed: "
+				"%06lx != %06x\n",
+				(unsigned long)mp_readback,
+				ZZ_AUDIO_CODEC_MP_CONTROL);
+		return 0;
+	}
+	printf("[adau] verified MP control 0x820: %06lx\n",
+			(unsigned long)mp_readback);
+
+	mp_readback = 0U;
+	status = audio_adau_write24_verified(
+			0x0821, ZZ_AUDIO_CODEC_MP_CONTROL, &mp_readback);
+	if (status != 0) {
+		printf("[adau] MP control 0x821 verify failed: "
+				"%06lx != %06x\n",
+				(unsigned long)mp_readback,
+				ZZ_AUDIO_CODEC_MP_CONTROL);
+		return 0;
+	}
+	printf("[adau] verified MP control 0x821: %06lx\n",
+			(unsigned long)mp_readback);
+
+	if (program_dsp) {
+		status = audio_program_adau(
+				Program_Data_Normal_ADC_IC_1,
+				sizeof(Program_Data_Normal_ADC_IC_1));
+		if (status == 0) {
+			status = audio_program_adau_params(
+					Param_Data_Normal_ADC_IC_1,
+					sizeof(Param_Data_Normal_ADC_IC_1));
+		}
+		if (status == 0)
+			status = audio_adau_set_lpf_params(23900);
+		if (status == 0)
+			status = audio_adau_set_mixer_vol(128, 64);
+		if (status != 0) {
+			printf("[adau] verified normal DSP load failed; "
+					"capture remains unavailable.\n");
+			return 0;
+		}
+	}
+
+	uint16_t core_readback = 0U;
+	status = audio_adau_write16_verified(2076,
+			ZZ_AUDIO_CODEC_CORE_RUNNING, &core_readback);
+	if (status != 0) {
+		printf("[adau] DSP core release failed: %04x != %04x\n",
+				core_readback, ZZ_AUDIO_CODEC_CORE_RUNNING);
+		return 0;
+	}
+
+	printf("[adau] capture build %04x: TDM8 slots 0/1 active\n",
+			ZZ_AUDIO_CAPTURE_CANDIDATE_BUILD_ID);
+	audio_init_i2s();
 	return 1;
 }
 
@@ -737,54 +1082,60 @@ double flt_alpha(double fs, double f0) {
 	return sin(omega) / (2.0 * Q);
 }
 
-void audio_adau_set_lpf_params(int f0) {
-	double gain = 1; // FIXME unused
-	int fs = 48000;
-
-	printf("[lpf] f0: %d\n", f0);
-
-	double omega = flt_omega(fs, f0);
-	double alpha = flt_alpha(fs, f0);
-
-	double a0 = 1.0 + alpha;
-	double a1 = -2.0 * cos(omega);
-	double a2 = 1.0 - alpha;
-	double b0 = (1.0 - cos(omega)) / 2.0;
-	double b1 = 1.0 - cos(omega);
-	double b2 = b0;
-
-	a1 /= a0;
-	a2 /= a0;
-	b0 /= a0;
-	b1 /= a0;
-	b2 /= a0;
-
-	a1 = -a1;
-	a2 = -a2;
-
+int audio_adau_set_lpf_params(int f0) {
+	double coefficients[5];
+	double b0;
+	double b1;
+	double b2;
+	double a1;
+	double a2;
 	uint8_t buf[4];
 
+	printf("[lpf] f0: %d\n", f0);
+	audio_adau_lpf_coefficients(f0, coefficients);
+	b0 = coefficients[0];
+	b1 = coefficients[1];
+	b2 = coefficients[2];
+	a1 = coefficients[3];
+	a2 = coefficients[4];
+
 	adau_to_5_23(b0, buf);
-	adau_write32(0x34, MOD_GENFILTER1_ALG0_STAGE0_B0_ADDR, buf);
+	if (audio_adau_write_parameter(
+			MOD_GENFILTER1_ALG0_STAGE0_B0_ADDR, buf) != 0) {
+		return -1;
+	}
 	printf("[lpf] b0: %f\t%02x %02x %02x %02x\n", b0, buf[0], buf[1], buf[2], buf[3]);
 	adau_to_5_23(b1, buf);
-	adau_write32(0x34, MOD_GENFILTER1_ALG0_STAGE0_B1_ADDR, buf);
+	if (audio_adau_write_parameter(
+			MOD_GENFILTER1_ALG0_STAGE0_B1_ADDR, buf) != 0) {
+		return -1;
+	}
 	printf("[lpf] b1: %f\t%02x %02x %02x %02x\n", b1, buf[0], buf[1], buf[2], buf[3]);
 	adau_to_5_23(b2, buf);
-	adau_write32(0x34, MOD_GENFILTER1_ALG0_STAGE0_B2_ADDR, buf);
+	if (audio_adau_write_parameter(
+			MOD_GENFILTER1_ALG0_STAGE0_B2_ADDR, buf) != 0) {
+		return -1;
+	}
 	printf("[lpf] b2: %f\t%02x %02x %02x %02x\n", b2, buf[0], buf[1], buf[2], buf[3]);
 	adau_to_5_23(a1, buf);
-	adau_write32(0x34, MOD_GENFILTER1_ALG0_STAGE0_A1_ADDR, buf);
+	if (audio_adau_write_parameter(
+			MOD_GENFILTER1_ALG0_STAGE0_A1_ADDR, buf) != 0) {
+		return -1;
+	}
 	printf("[lpf] a1: %f\t%02x %02x %02x %02x\n", a1, buf[0], buf[1], buf[2], buf[3]);
 	adau_to_5_23(a2, buf);
-	adau_write32(0x34, MOD_GENFILTER1_ALG0_STAGE0_A2_ADDR, buf);
+	if (audio_adau_write_parameter(
+			MOD_GENFILTER1_ALG0_STAGE0_A2_ADDR, buf) != 0) {
+		return -1;
+	}
 	printf("[lpf] a2: %f\t%02x %02x %02x %02x\n\n", a2, buf[0], buf[1], buf[2], buf[3]);
+	return 0;
 }
 
 // vol range: 0-255. 127 = 0db
 // vol1: paula
 // vol2: i2s
-void audio_adau_set_mixer_vol(int vol1, int vol2) {
+int audio_adau_set_mixer_vol(int vol1, int vol2) {
 	double v1 = ((double)vol1)/127.0;
 	double v2 = ((double)vol2)/127.0;
 
@@ -792,12 +1143,19 @@ void audio_adau_set_mixer_vol(int vol1, int vol2) {
 
 	uint8_t buf[4];
 	adau_to_5_23(v1, buf);
-	adau_write32(0x34, MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR, buf);
+	if (audio_adau_write_parameter(
+			MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR, buf) != 0) {
+		return -1;
+	}
 	adau_to_5_23(v2, buf);
-	adau_write32(0x34, MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR, buf);
+	if (audio_adau_write_parameter(
+			MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR, buf) != 0) {
+		return -1;
+	}
+	return 0;
 }
 
-void audio_adau_set_prefactor(int pre) {
+int audio_adau_set_prefactor(int pre) {
 	double p;
 
 	if(pre > 100) pre = 100;
@@ -807,11 +1165,16 @@ void audio_adau_set_prefactor(int pre) {
 
 	uint8_t buf[4];
 	adau_to_5_23(p, buf);
-	adau_write32(0x34, MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_ADDR, buf);
-	adau_write32(0x34, MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR, buf);
+	if (audio_adau_write_parameter(
+			MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_ADDR, buf) != 0 ||
+			audio_adau_write_parameter(
+			MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR, buf) != 0) {
+		return -1;
+	}
+	return 0;
 }
 
-void audio_adau_set_vol_pan(int vol, int pan) {
+int audio_adau_set_vol_pan(int vol, int pan) {
 	LONG VolL, VolR;
 	double vl, vr;
 
@@ -830,9 +1193,16 @@ void audio_adau_set_vol_pan(int vol, int pan) {
 
 	uint8_t buf[4];
 	adau_to_5_23(vl, buf);
-	adau_write32(0x34, MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR, buf);
+	if (audio_adau_write_parameter(
+			MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR, buf) != 0) {
+		return -1;
+	}
 	adau_to_5_23(vr, buf);
-	adau_write32(0x34, MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR, buf);
+	if (audio_adau_write_parameter(
+			MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR, buf) != 0) {
+		return -1;
+	}
+	return 0;
 }
 
 double eq_omega(double fs, double f0) {
@@ -846,8 +1216,10 @@ double eq_alpha(double fs, double f0) {
 }
 
 // gain range: 0 = -12dB .. 50 = 0dB .. 100 = 12 dB
-void audio_adau_set_eq_gain(int band, int gain) {
-	if(band > 9) return;
+int audio_adau_set_eq_gain(int band, int gain) {
+	if(band < 0 || band > 9) {
+		return -1;
+	}
 	// These are the classic 
 	static const double BandFreqs[10] = {
 		31.25, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0
@@ -881,46 +1253,49 @@ void audio_adau_set_eq_gain(int band, int gain) {
 
 	// https://ez.analog.com/dsp/sigmadsp/w/documents/5182/implementing-safeload-writes-on-the-adau1701
 	uint8_t buf[5];
+	uint8_t expected[5][ADAU_PARAMETER_WORD_BYTES];
+	uint8_t readback[ADAU_PARAMETER_WORD_BYTES];
+	const uint16_t addresses[5] = {
+		MOD_EQUALIZER_ALG0_STAGE0_B0_ADDR + band*5,
+		MOD_EQUALIZER_ALG0_STAGE0_B1_ADDR + band*5,
+		MOD_EQUALIZER_ALG0_STAGE0_B2_ADDR + band*5,
+		MOD_EQUALIZER_ALG0_STAGE0_A0_ADDR + band*5,
+		MOD_EQUALIZER_ALG0_STAGE0_A1_ADDR + band*5
+	};
+	const double coefficients[5] = { b0, b1, b2, a1, a2 };
+	int index;
+
 	buf[0] = 0;
 
-	// Safeload Data 0, address 0x0810
-	adau_to_5_23(b0, &buf[1]);
-	adau_write40(0x34, 0x0810, buf);
-
-	// Safeload Address 0, address 0x0815
-	adau_write16(0x34, 0x0815, MOD_EQUALIZER_ALG0_STAGE0_B0_ADDR + band*5);
-
-	// Safeload Data 1, address 0x0811
-	adau_to_5_23(b1, &buf[1]);
-	adau_write40(0x34, 0x0811, buf);
-
-	// Safeload Address 1, address 0x0816
-	adau_write16(0x34, 0x0816, MOD_EQUALIZER_ALG0_STAGE0_B1_ADDR + band*5);
-
-	// Safeload Data 2, address 0x0812
-	adau_to_5_23(b2, &buf[1]);
-	adau_write40(0x34, 0x0812, buf);
-
-	// Safeload Address 2, address 0x0817
-	adau_write16(0x34, 0x0817, MOD_EQUALIZER_ALG0_STAGE0_B2_ADDR + band*5);
-
-	// Safeload Data 3, address 0x0813
-	adau_to_5_23(a1, &buf[1]);
-	adau_write40(0x34, 0x0813, buf);
-
-	// Safeload Address 3, address 0x0818
-	adau_write16(0x34, 0x0818, MOD_EQUALIZER_ALG0_STAGE0_A0_ADDR + band*5);
-
-	// Safeload Data 4, address 0x0814
-	adau_to_5_23(a2, &buf[1]);
-	adau_write40(0x34, 0x0814, buf);
-
-	// Safeload Address 4, address 0x0819
-	adau_write16(0x34, 0x0819, MOD_EQUALIZER_ALG0_STAGE0_A1_ADDR + band*5);
+	for (index = 0; index < 5; ++index) {
+		adau_to_5_23(coefficients[index], expected[index]);
+		memcpy(&buf[1], expected[index], ADAU_PARAMETER_WORD_BYTES);
+		if (adau_write40(0x34, 0x0810 + index, buf) != 0 ||
+				adau_write16(0x34, 0x0815 + index,
+						addresses[index]) != 0) {
+			printf("[equ] safeload staging failed at index %d\n",
+					index);
+			return -1;
+		}
+	}
 
 	// Initiate safeload transfer bit, address 0x081C
-	adau_write16(0x34, 0x081C, 0x003C);
+	if (adau_write16(0x34, 0x081C, 0x003C) != 0) {
+		printf("[equ] safeload transfer trigger failed\n");
+		return -1;
+	}
 
 	usleep(25);
 
+	for (index = 0; index < 5; ++index) {
+		if (adau_read32(0x34, addresses[index], readback) != 0 ||
+				!audio_adau_readback_matches(expected[index],
+						readback,
+						ADAU_PARAMETER_WORD_BYTES)) {
+			printf("[equ] safeload verify failed at parameter "
+					"0x%03x\n", addresses[index]);
+			return -1;
+		}
+	}
+	return 0;
 }
