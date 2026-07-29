@@ -11,7 +11,9 @@ unsupported; after a full power cycle core 1 came online and untouched native
 playback was clean at 27–28 fps. R9b passes 16/32-bit display-depth,
 scanline-control stability, and native-video/videocap takeover/return gates,
 completing the default-`zorro3` physical acceptance sequence. Non-default
-variants remain pre-native.
+variants were rebuilt from the same current RTL on 2026-07-29. All six pass
+fresh-project synthesis, implementation, DRC, bus-skew, and timing gates, but
+remain hardware-unqualified until tested on their respective board variants.
 
 ## Contract
 
@@ -23,10 +25,11 @@ driver API fork is introduced.
 
 Firmware and bitstream are a matched ABI. Fully visible 1:1 packed sources
 select the native plane only in the hardware-capable build. Release packaging
-pairs the rebuilt default bitstream with that build and the six older variant
-bitstreams with `ZZ9000OS-legacy-bitstream.elf`, whose hardware backend is
-compile-time inert. Resized/clipped sources, and every source on an older
-variant bitstream, retain the ARM compositor.
+pairs the current firmware with the rebuilt default and six non-default
+bitstreams. `ZZ9000OS-legacy-bitstream.elf`, whose hardware backend is
+compile-time inert, remains the compatibility fallback for installations that
+retain an older bitstream. Resized/clipped sources, and every source used with
+an older bitstream, retain the ARM compositor.
 
 SDK video sessions use the same P96 window/geometry. Their decoder-owned
 planar420 source is an internal firmware source mode, not a different player
@@ -74,7 +77,7 @@ Reserve video-control operations 22-27:
 VDMA address, pitch, HSIZE, and VSIZE remain AXI-Lite registers programmed by
 firmware. Geometry/control changes latch at vblank.
 
-## Gate status (2026-07-27)
+## Gate status (2026-07-29)
 
 1. **PASS:** `video_overlay_pixel` layout/luma/clamp/key simulation for all
    five packed layouts.
@@ -88,9 +91,11 @@ firmware. Geometry/control changes latch at vblank.
 4. **PASS:** fresh default Vivado implementation, current-source fingerprint,
    WNS +1.631 ns / TNS 0, 0 errors and 0 critical warnings in the formatter
    synthesis and implementation logs.
-5. **PASS (safe fallback):** release packaging pairs the six non-default
-   committed bitstreams with the hardware-disabled firmware ELF. Rebuilding
-   those bitstreams is still required to enable native acceleration on them.
+5. **PASS (complete build matrix):** all six non-default bitstreams were
+   regenerated from fresh Vivado projects using the current RTL. Each passes
+   synthesis, implementation, DRC, bus-skew, and timing gates. This enables
+   the native plane in the complete current bitstream set; the compatibility
+   ELF remains available only for genuinely older bitstreams.
 6. **FAIL HARDWARE (visual):** the resumed 640x480@30 `zzplay` run opened the
    expected 1:1 window and processed frames, but the PIP contents stayed solid
    cyan with slight flicker. No outside-window corruption was seen and the
@@ -127,11 +132,12 @@ firmware. Geometry/control changes latch at vblank.
     `bench-zzplay-native-p96-r8-line-prefetch`. Exact-size playback flickered
     slightly worse than r7 and showed black horizontal rows at random
     positions. A one-pixel resize remained stable through the ARM fallback.
-11. **PASS, DEFAULT `zorro3`:** 318-pixel odd-macroblock playback,
+11. **PASS HARDWARE, DEFAULT `zorro3`:** 318-pixel odd-macroblock playback,
     cgxvideo/RiVA, mode/depth changes, close/reopen, DPMS, all live scanline
     control values, and native-video/videocap takeover and return. Color-key
-    occlusion remains opportunistic, and non-default bitstream variants remain
-    pre-native.
+    occlusion remains opportunistic. **PASS BUILD/REPORT, NON-DEFAULT:** all
+    six current variants contain the native plane and meet their implementation
+    gates, but still require variant-specific physical acceptance.
 
 The geometry diagnostic in item 7 is now **PASS/DECISIVE**: correct video
 appeared only after resizing selected the ARM compositor, and close was clean.
