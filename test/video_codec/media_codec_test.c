@@ -254,8 +254,10 @@ static int test_ring_backpressure_and_wrap(void)
 	struct SDKVideoMediaInfo media;
 	struct SDKVideoDecodedFrame frame;
 	uint64_t protected_hash;
+	uint64_t first_video_pcm = UINT64_MAX;
 	uint32_t accepted;
 	uint32_t guard = 0U;
+	uint32_t video_frames = 0U;
 	void *decoder;
 	int result;
 
@@ -268,7 +270,7 @@ static int test_ring_backpressure_and_wrap(void)
 	config.audio_codec = SDK_VIDEO_MEDIA_AUDIO_MP2;
 	config.pcm_ring = small_pcm_ring;
 	config.pcm_ring_capacity = sizeof(small_pcm_ring);
-	config.pcm_low_water_bytes = 4608U;
+	config.pcm_low_water_bytes = 8192U;
 	config.pcm_high_water_bytes = sizeof(small_pcm_ring);
 	if (!ops->configure_media(decoder, &config)) {
 		ops->destroy(decoder);
@@ -285,8 +287,22 @@ static int test_ring_backpressure_and_wrap(void)
 	}
 	do {
 		result = ops->decode(decoder, &frame);
-	} while (result == SDK_VIDEO_BACKEND_PROGRESS && guard++ < 20U);
+		if (result == SDK_VIDEO_BACKEND_FRAME) {
+			if (first_video_pcm == UINT64_MAX) {
+				if (!ops->get_media_info(decoder, &media)) {
+					ops->destroy(decoder);
+					return 5;
+				}
+				first_video_pcm = media.pcm_produced;
+			}
+			video_frames++;
+		}
+	} while ((result == SDK_VIDEO_BACKEND_PROGRESS ||
+	          result == SDK_VIDEO_BACKEND_FRAME) &&
+	         guard++ < 20U);
 	if (result != SDK_VIDEO_BACKEND_BACKPRESSURE ||
+	    video_frames == 0U ||
+	    first_video_pcm < config.pcm_low_water_bytes ||
 	    !ops->get_media_info(decoder, &media) ||
 	    media.pcm_produced != 9216U ||
 	    media.pcm_acknowledged != 0U ||
@@ -319,7 +335,9 @@ static int test_ring_backpressure_and_wrap(void)
 		ops->destroy(decoder);
 		return 8;
 	}
-	if (ops->decode(decoder, &frame) != SDK_VIDEO_BACKEND_PROGRESS ||
+	result = ops->decode(decoder, &frame);
+	if ((result != SDK_VIDEO_BACKEND_PROGRESS &&
+	     result != SDK_VIDEO_BACKEND_FRAME) ||
 	    !ops->get_media_info(decoder, &media) ||
 	    media.pcm_produced != 13824U ||
 	    ring_hash(small_pcm_ring, sizeof(small_pcm_ring), 4608U, 4608U) !=
@@ -340,7 +358,8 @@ static int test_ring_backpressure_and_wrap(void)
 	}
 	while (result != SDK_VIDEO_BACKEND_DONE && guard++ < 1000U) {
 		result = ops->decode(decoder, &frame);
-		if (result == SDK_VIDEO_BACKEND_PROGRESS) {
+		if (result == SDK_VIDEO_BACKEND_PROGRESS ||
+		    result == SDK_VIDEO_BACKEND_FRAME) {
 			if (!ops->get_media_info(decoder, &media) ||
 			    !ops->ack_media(decoder, media.pcm_produced)) {
 				ops->destroy(decoder);
@@ -425,7 +444,8 @@ static int decode_to_terminal(const uint8_t *bytes, uint32_t length,
 				ops->destroy(decoder);
 				return 0;
 			}
-		} else if (result == SDK_VIDEO_BACKEND_PROGRESS &&
+		} else if ((result == SDK_VIDEO_BACKEND_PROGRESS ||
+		            result == SDK_VIDEO_BACKEND_FRAME) &&
 		           audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2 &&
 		           ops->get_media_info(decoder, &media)) {
 			if (!ops->ack_media(decoder, media.pcm_produced)) {
