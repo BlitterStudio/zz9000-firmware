@@ -41,8 +41,15 @@ struct SDKVideoStreamSession {
 	uint8_t owner;
 };
 
+#ifdef SDK_VIDEO_HOST_TEST
+static struct SDKVideoStreamSession host_video_sessions[
+	SDK_MAX_VIDEO_SESSIONS];
+static struct SDKVideoStreamSession *const video_sessions =
+	host_video_sessions;
+#else
 static struct SDKVideoStreamSession *const video_sessions =
 	(struct SDKVideoStreamSession *)SDK_VIDEO_SESSIONS_ADDRESS;
+#endif
 static uint32_t next_video_session_id;
 
 typedef char video_sessions_fit_check[
@@ -229,8 +236,13 @@ int sdk_video_stream_ack_media(uint32_t id, uint64_t acknowledged)
 	struct SDKVideoStreamSession *session = find_session(id);
 
 	if (!session || session->owner != SDK_VIDEO_STREAM_OWNER_MEDIA ||
-	    !session->decoder || !session->ops->ack_media)
+	    !session->ops->ack_media)
 		return 0;
+	/* MEDIA_SESSION_AUDIO_READ doubles as the audio-status poll. Before the
+	 * first input write, decoder creation is intentionally lazy, so an empty
+	 * acknowledgement is already complete without backend state. */
+	if (!session->decoder)
+		return acknowledged == 0U;
 	return session->ops->ack_media(session->decoder, acknowledged);
 }
 

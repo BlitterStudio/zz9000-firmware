@@ -24,6 +24,7 @@ static uint32_t mock_bytes_accepted;
 static uint8_t mock_video_active;
 static int mock_present_accepted;
 static uint8_t mock_media_enabled;
+static uint8_t mock_decoder_ready;
 static uint64_t mock_pcm_produced;
 static uint64_t mock_pcm_acknowledged;
 static uint8_t pcm_ring[32768];
@@ -70,6 +71,7 @@ uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
 	write_calls++;
 	if (mock_write_status != SDK_STATUS_OK)
 		return mock_write_status;
+	mock_decoder_ready = 1U;
 	mock_bytes_accepted += write->src_length;
 	fill_video_result(result, SDK_VIDEO_SESSION_STATE_READY,
 	                  SDK_VIDEO_SESSION_RESULT_HEADER_READY);
@@ -81,6 +83,7 @@ uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 {
 	(void)decode;
 	decode_calls++;
+	mock_decoder_ready = 1U;
 	mock_frame_number++;
 	fill_video_result(result, SDK_VIDEO_SESSION_STATE_FRAME_READY,
 	                  SDK_VIDEO_SESSION_RESULT_HEADER_READY |
@@ -110,7 +113,7 @@ int sdk_video_stream_get_media_info(
 	uint32_t session, struct SDKVideoMediaInfo *info)
 {
 	if (!mock_video_active || session != mock_session ||
-	    !mock_media_enabled || !info)
+	    !mock_media_enabled || !mock_decoder_ready || !info)
 		return 0;
 	memset(info, 0, sizeof(*info));
 	info->sample_rate = 44100U;
@@ -134,8 +137,11 @@ int sdk_video_stream_get_media_info(
 int sdk_video_stream_ack_media(uint32_t session, uint64_t acknowledged)
 {
 	if (!mock_video_active || session != mock_session ||
-	    !mock_media_enabled ||
-	    acknowledged < mock_pcm_acknowledged ||
+	    !mock_media_enabled)
+		return 0;
+	if (!mock_decoder_ready)
+		return acknowledged == 0U;
+	if (acknowledged < mock_pcm_acknowledged ||
 	    acknowledged > mock_pcm_produced ||
 	    (acknowledged & 3U) != 0U)
 		return 0;
@@ -170,6 +176,7 @@ static void reset_mocks(void)
 	mock_video_active = 0U;
 	mock_present_accepted = 1;
 	mock_media_enabled = 0U;
+	mock_decoder_ready = 0U;
 	mock_pcm_produced = 0U;
 	mock_pcm_acknowledged = 0U;
 }
@@ -407,28 +414,34 @@ static int test_mp2_audio_snapshot_and_ack(void)
 	if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK ||
 	    !mock_media_enabled)
 		return 1;
+	if (sdk_media_session_audio_read(mock_session, 0U, 0U, &audio) !=
+	        SDK_STATUS_OK ||
+	    audio.sample_rate != 0U || audio.channels != 0U ||
+	    audio.sample_format != 0U || audio.pcm_produced != 0U ||
+	    audio.pcm_acknowledged != 0U || audio.audio_pts != SDK_MEDIA_NO_PTS)
+		return 2;
 	mock_pcm_produced = 9216U;
 	if (sdk_media_session_decode(mock_session, 0U, &result) !=
 	        SDK_STATUS_OK ||
 	    (result.flags & SDK_MEDIA_SESSION_RESULT_AUDIO_READY) == 0U)
-		return 2;
+		return 3;
 	if (sdk_media_session_status(mock_session, SDK_MEDIA_STATUS_AUDIO,
 	                             0U, &status) != SDK_STATUS_OK ||
 	    status.value[0] != 9216U || status.value[1] != 0U ||
 	    status.value[2] != 54000U || status.value[3] != 54000U)
-		return 3;
+		return 4;
 	if (sdk_media_session_audio_read(mock_session, 4U, 0U, &audio) !=
 	        SDK_STATUS_OK ||
 	    audio.sample_rate != 44100U || audio.channels != 2U ||
 	    audio.sample_format != SDK_VIDEO_MEDIA_SAMPLE_S16BE ||
 	    audio.pcm_acknowledged != 4U ||
 	    audio.audio_pts != 54002U)
-		return 4;
+		return 5;
 	if (sdk_media_session_audio_read(mock_session, 2U, 0U, &audio) !=
 	        SDK_STATUS_BAD_REQUEST ||
 	    sdk_media_session_audio_read(mock_session, 9217U, 0U, &audio) !=
 	        SDK_STATUS_BAD_REQUEST)
-		return 5;
+		return 6;
 	return 0;
 }
 
