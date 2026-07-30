@@ -37,8 +37,8 @@ struct SDKMediaSessionState {
 	/* Absolute PCM-byte cursors. The AX pump stages ahead of playback, but
 	 * decoder backpressure is released only through retired_bytes so pause
 	 * can discard and restage the DMA queue without losing media samples. */
-	uint32_t audio_staged_bytes;
-	uint32_t audio_retired_bytes;
+	uint64_t audio_staged_bytes;
+	uint64_t audio_retired_bytes;
 	uint32_t audio_underruns;
 	uint32_t oneshot_flags;
 	uint32_t just_closed_session;
@@ -176,8 +176,7 @@ static void update_audio(void)
 	if (!media.active)
 		return;
 	if (media.audio_bound &&
-	    (uint64_t)media.audio_retired_bytes >
-	        media.audio.pcm_acknowledged) {
+	    media.audio_retired_bytes > media.audio.pcm_acknowledged) {
 		/* Only DMA retirement releases decoder ring space. Staged samples
 		 * remain owned by the decoder ring, so pause can rewind the staging
 		 * cursor and replay them instead of skipping queued audio. */
@@ -203,6 +202,12 @@ static uint32_t audio_frame_bytes(void)
 	return media.audio.channels * 2U;
 }
 
+static uint64_t audio_acknowledged(void)
+{
+	return media.audio_retired_bytes > media.audio.pcm_acknowledged
+		? media.audio_retired_bytes : media.audio.pcm_acknowledged;
+}
+
 static uint64_t audio_output_pts(void)
 {
 	uint32_t frame_bytes = audio_frame_bytes();
@@ -222,7 +227,7 @@ static int audio_output_drained(void)
 {
 	return media.audio_bound &&
 	       (media.audio.flags & SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE) != 0U &&
-	       (uint64_t)media.audio_retired_bytes >= media.audio.pcm_produced;
+	       media.audio_retired_bytes >= media.audio.pcm_produced;
 }
 
 static uint32_t audio_output_flags(void)
@@ -250,10 +255,11 @@ static void fill_audio_result(struct SDKMediaSessionAudioResult *result)
 	result->channels = media.audio.channels;
 	result->sample_format = media.audio.sample_format;
 	result->pcm_produced = media.audio.pcm_produced;
-	result->pcm_acknowledged = media.audio_bound
-		? media.audio_retired_bytes : media.audio.pcm_acknowledged;
-	result->audio_pts = media.audio_bound
-		? audio_output_pts() : media.audio.audio_pts;
+	result->pcm_acknowledged = audio_acknowledged();
+	result->audio_pts =
+		media.audio_bound ||
+		media.audio_retired_bytes > media.audio.pcm_acknowledged
+			? audio_output_pts() : media.audio.audio_pts;
 	result->flags = audio_output_flags();
 }
 
@@ -606,9 +612,7 @@ uint16_t sdk_media_session_status(
 	} else if (page == SDK_MEDIA_STATUS_AUDIO) {
 		result->flags = audio_output_flags();
 		result->value[0] = media.audio.pcm_produced;
-		result->value[1] = media.audio_bound
-			? media.audio_retired_bytes
-			: media.audio.pcm_acknowledged;
+		result->value[1] = audio_acknowledged();
 		result->value[2] = media.audio.current_audio_pts;
 		result->value[3] = media.audio.first_audio_pts;
 	} else if (page == SDK_MEDIA_STATUS_COUNTERS) {
@@ -678,14 +682,10 @@ uint16_t sdk_media_session_audio_bind(
 		    (media.audio.channels != 1U &&
 		     media.audio.channels != 2U) ||
 		    media.audio.sample_format !=
-		        SDK_VIDEO_MEDIA_SAMPLE_S16BE ||
-		    media.audio.pcm_produced > UINT32_MAX ||
-		    media.audio.pcm_acknowledged > UINT32_MAX)
+		        SDK_VIDEO_MEDIA_SAMPLE_S16BE)
 			return SDK_STATUS_BAD_REQUEST;
-		media.audio_staged_bytes =
-			(uint32_t)media.audio.pcm_acknowledged;
-		media.audio_retired_bytes =
-			(uint32_t)media.audio.pcm_acknowledged;
+		media.audio_staged_bytes = audio_acknowledged();
+		media.audio_retired_bytes = media.audio_staged_bytes;
 		media.audio_underruns = 0U;
 		media.audio_bound = 1U;
 	}
@@ -728,7 +728,7 @@ int sdk_media_session_audio_source(
 	memset(source, 0, sizeof(*source));
 	source->ring = media.pcm_ring;
 	source->capacity = media.pcm_ring_capacity;
-	source->produced_bytes = (uint32_t)media.audio.pcm_produced;
+	source->produced_bytes = media.audio.pcm_produced;
 	source->staged_bytes = media.audio_staged_bytes;
 	source->sample_rate = media.audio.sample_rate;
 	source->channels = media.audio.channels;
@@ -740,17 +740,15 @@ int sdk_media_session_audio_source(
 
 int sdk_media_session_audio_stage(uint32_t session, uint32_t bytes)
 {
-	uint32_t available;
+	uint64_t available;
 	uint32_t frame_bytes = audio_frame_bytes();
 
 	if (!active_session(session) || !media.audio_bound ||
 	    media.audio_paused || frame_bytes == 0U ||
 	    (bytes % frame_bytes) != 0U ||
-	    media.audio_staged_bytes >
-	        (uint32_t)media.audio.pcm_produced)
+	    media.audio_staged_bytes > media.audio.pcm_produced)
 		return 0;
-	available = (uint32_t)media.audio.pcm_produced -
-	            media.audio_staged_bytes;
+	available = media.audio.pcm_produced - media.audio_staged_bytes;
 	if (bytes > available)
 		return 0;
 	media.audio_staged_bytes += bytes;

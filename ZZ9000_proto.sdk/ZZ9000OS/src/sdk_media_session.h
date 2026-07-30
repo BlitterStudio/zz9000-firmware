@@ -70,8 +70,8 @@ struct SDKMediaSessionAudioResult {
 struct SDKMediaAudioSource {
 	uint8_t *ring;
 	uint32_t capacity;
-	uint32_t produced_bytes;
-	uint32_t staged_bytes;
+	uint64_t produced_bytes;
+	uint64_t staged_bytes;
 	uint32_t sample_rate;
 	uint32_t channels;
 	uint32_t sample_format;

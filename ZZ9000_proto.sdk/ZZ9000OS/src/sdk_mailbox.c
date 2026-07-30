@@ -3546,8 +3546,8 @@ static void audio_stream_read_compute(struct SDKAudioStream *stream,
 struct SDKAudioPumpSource {
 	uint8_t *ring;
 	uint32_t capacity;
-	uint32_t produced_bytes;
-	uint32_t staged_bytes;
+	uint64_t produced_bytes;
+	uint64_t staged_bytes;
 	uint32_t sample_rate;
 	uint32_t channels;
 	uint32_t sample_format;
@@ -3738,6 +3738,7 @@ static uint32_t audio_pump_fill_period(
 	uint32_t pull;
 	uint32_t offset;
 	uint32_t first;
+	uint64_t available;
 	uint8_t *ring;
 	int16_t *pcm;
 	uint32_t i;
@@ -3757,11 +3758,13 @@ static uint32_t audio_pump_fill_period(
 	if (src_frames == 0U || src_frames > (AUDIO_PUMP_PERIOD_BYTES / 4U))
 		goto silence;
 	src_bytes = src_frames * channels * 2U;
-	pull = source->produced_bytes - source->staged_bytes;
-	if (pull >= src_bytes) {
+	available = source->produced_bytes - source->staged_bytes;
+	if (available >= src_bytes) {
 		pull = src_bytes;
-	} else if (!source->done || pull == 0U) {
+	} else if (!source->done || available == 0U) {
 		goto silence;
+	} else {
+		pull = (uint32_t)available;
 	}
 	/* else: true end of stream (EOF fed, input fully consumed) with a
 	 * final PCM tail shorter than one 20 ms period -- MP3 frames owe
@@ -3773,7 +3776,8 @@ static uint32_t audio_pump_fill_period(
 	 * bytes before publishing pcm_ready_total, so a reader-side
 	 * invalidate makes them visible on this core. */
 	ring = source->ring;
-	offset = source->staged_bytes % source->capacity;
+	offset = audio_playback_source_offset(
+		source->staged_bytes, source->capacity);
 	first = source->capacity - offset;
 	if (first > pull)
 		first = pull;
@@ -3829,6 +3833,7 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 	uint32_t pos_period;
 	uint32_t ahead;
 	uint32_t guard;
+	uint32_t retired;
 	uint32_t ring_periods = AUDIO_PUMP_RING_BYTES / AUDIO_PUMP_PERIOD_BYTES;
 	int staged_real = 0;
 
@@ -3843,22 +3848,11 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 	 * Each slot records exactly how many source bytes were staged into it;
 	 * silence contributes zero. This is the playback clock -- not the
 	 * decoder acknowledgement or the TX-fill frontier. */
-	guard = ring_periods;
-	while (g_audio_playback.last_dma_offset != pos_period && guard--) {
-		uint32_t index =
-			g_audio_playback.last_dma_offset /
-			AUDIO_PUMP_PERIOD_BYTES;
-		uint32_t retired =
-			g_audio_playback.period_source_bytes[index];
-
-		g_audio_playback.period_source_bytes[index] = 0U;
-		audio_pump_source_retire(retired);
-		g_audio_playback.last_dma_offset =
-			(g_audio_playback.last_dma_offset +
-			 AUDIO_PUMP_PERIOD_BYTES) % AUDIO_PUMP_RING_BYTES;
-	}
-	if (g_audio_playback.last_dma_offset != pos_period)
-		g_audio_playback.last_dma_offset = pos_period;
+	retired = audio_playback_retire_to(
+		&g_audio_playback.last_dma_offset, pos_period,
+		AUDIO_PUMP_PERIOD_BYTES, AUDIO_PUMP_RING_BYTES,
+		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
+	audio_pump_source_retire(retired);
 
 	if (!audio_pump_source_snapshot(&source)) {
 		g_audio_playback.session = 0U;
@@ -3872,9 +3866,9 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 	 * restart one period ahead. Circular distance: bias by the ring size
 	 * BEFORE the modulo -- a plain u32 (fill - pos) % RING is wrong on
 	 * wrap because 2^32 is not a multiple of the 30720-byte ring. */
-	ahead = (g_audio_playback.fill_offset + AUDIO_PUMP_RING_BYTES -
-	         pos_period) % AUDIO_PUMP_RING_BYTES;
-	if (ahead == 0U || ahead > AUDIO_PUMP_TARGET_AHEAD) {
+	if (audio_playback_frontier_needs_rebase(
+	        g_audio_playback.fill_offset, pos_period,
+	        AUDIO_PUMP_TARGET_AHEAD, AUDIO_PUMP_RING_BYTES)) {
 		if (!source.done && !source.faulted)
 			audio_pump_source_underrun();
 		g_audio_playback.fill_offset =
@@ -3888,8 +3882,9 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 		uint32_t staged;
 		uint32_t next_fill;
 
-		ahead = (g_audio_playback.fill_offset + AUDIO_PUMP_RING_BYTES -
-		         pos_period) % AUDIO_PUMP_RING_BYTES;
+		ahead = audio_playback_ring_distance(
+			g_audio_playback.fill_offset, pos_period,
+			AUDIO_PUMP_RING_BYTES);
 		/* Stop AT the target, never past it: the frontier must stay
 		 * inside [PERIOD, TARGET_AHEAD] so the caught-up reset above
 		 * only fires on a genuine DMA overrun. Filling one period past
@@ -4026,8 +4021,8 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session)
 	g_audio_playback.fill_offset =
 		(pos + AUDIO_PUMP_PERIOD_BYTES) % AUDIO_PUMP_RING_BYTES;
 	g_audio_playback.last_dma_offset = pos;
-	memset(g_audio_playback.period_source_bytes, 0,
-	       sizeof(g_audio_playback.period_source_bytes));
+	audio_playback_clear_periods(
+		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
 	g_audio_playback.silence_run = 0U;
 	g_audio_playback.source_kind = source_kind;
 	g_audio_playback.paused = 0U;
@@ -4041,8 +4036,8 @@ static void audio_playback_stop(void)
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
-	memset(g_audio_playback.period_source_bytes, 0,
-	       sizeof(g_audio_playback.period_source_bytes));
+	audio_playback_clear_periods(
+		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
 	g_audio_playback.silence_run = 0U;
 	audio_silence();
 }
@@ -4963,8 +4958,9 @@ static uint16_t handle_media_session_audio_bind(
 			g_audio_playback.paused = 0U;
 			return complete_status(req, comp, status);
 		}
-		memset(g_audio_playback.period_source_bytes, 0,
-		       sizeof(g_audio_playback.period_source_bytes));
+		audio_playback_clear_periods(
+			g_audio_playback.period_source_bytes,
+			AUDIO_NUM_PERIODS);
 		audio_silence();
 		return complete_media_session_audio_result(
 			req, comp, SDK_STATUS_OK, &result);
@@ -7378,8 +7374,8 @@ void sdk_mailbox_init(void)
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
-	memset(g_audio_playback.period_source_bytes, 0,
-	       sizeof(g_audio_playback.period_source_bytes));
+	audio_playback_clear_periods(
+		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
 	g_audio_playback.refill_pending = 0U;
 	/* Pointer into the coherent region, not an array: size explicitly.
 	 * Flush so the zeroed table is in DRAM whatever MMU attributes the
