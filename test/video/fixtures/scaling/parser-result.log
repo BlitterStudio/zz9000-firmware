@@ -1,0 +1,5 @@
+zzplay: MPEG-1/PS 640x480, 30.000 fps, program audio MP2
+zzplay: 4405 decoded, 1821 presented, 2584 discarded frames, 6476544 audio frames played, 77 underruns
+zzplay: A/V drift current 39 ms, max 113 ms, 2445 hold polls, 2584 late frames
+zzplay: average 29.636 fps playback, 72.146 fps decode-call
+zzplay: profile wall 148696 ms, accounted 137911 ms, other 10785 ms

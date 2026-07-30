@@ -151,6 +151,7 @@ integer overlay_stream_width = 9;
 integer overlay_frame_width;
 integer ol, ow;
 integer overlay_stream_generation = 1;
+integer overlay_pattern_mode = 0;
 
 function [7:0] overlay_luma(input integer line);
   overlay_luma = 8'd16 + line * 8'd64;
@@ -164,6 +165,20 @@ function [31:0] expected_overlay(input integer line);
   end
 endfunction
 
+function [7:0] overlay_pattern_luma(input integer line,
+                                    input integer pixel);
+  overlay_pattern_luma = 8'd24 + line * 8'd48 + pixel * 8'd4;
+endfunction
+
+function [31:0] expected_overlay_pixel(input integer line,
+                                       input integer pixel);
+  integer gray;
+  begin
+    gray = (298 * (overlay_pattern_luma(line, pixel) - 16) + 128) >> 8;
+    expected_overlay_pixel = {8'h00, gray[7:0], gray[7:0], gray[7:0]};
+  end
+endfunction
+
 initial begin : overlay_vdma
   wait (overlay_stream_en);
   forever begin
@@ -171,8 +186,13 @@ initial begin : overlay_vdma
     for (ol = 0; ol < 3; ol = ol + 1) begin
       for (ow = 0; ow < (overlay_frame_width + 1) / 2; ow = ow + 1) begin
         @(negedge aclk);
-        overlay_tdata <= {8'd128, overlay_luma(ol),
-                          8'd128, overlay_luma(ol)};
+        if (overlay_pattern_mode)
+          overlay_tdata <= {
+            8'd128, overlay_pattern_luma(ol, 2 * ow + 1),
+            8'd128, overlay_pattern_luma(ol, 2 * ow)};
+        else
+          overlay_tdata <= {8'd128, overlay_luma(ol),
+                            8'd128, overlay_luma(ol)};
         overlay_tuser <= (ol == 0 && ow == 0);
         overlay_tlast <= (ow == (overlay_frame_width + 1) / 2 - 1);
         overlay_tvalid <= 1;
@@ -371,6 +391,7 @@ endtask
 
 // main
 integer i, x, mism, shown, overlay_start_frame;
+integer overlay_src_x, overlay_src_y;
 reg [31:0] got, exp;
 initial begin
   cfg_cmode = 2;
@@ -520,6 +541,91 @@ initial begin
           mism = mism + 1;
           if (shown < 72) begin
             $display("OVERLAY FULL MISMATCH row=%0d x=%0d got=%08x exp=%08x",
+                     i, x, got, exp);
+            shown = shown + 1;
+          end
+        end
+      end
+
+    /* Resized overlays must remain on the packed-YUY2 hardware plane.
+     * Exercise nearest-neighbour upscaling in both axes with distinct luma
+     * at every source pixel, so byte/macropixel phase errors are visible. */
+    overlay_stream_width = 9;
+    overlay_pattern_mode = 1;
+    op(OP_OVERLAY_POS, (1 << 16) | 4);
+    op(OP_OVERLAY_SIZE, (6 << 16) | 18);
+    op(OP_OVERLAY_SOURCE_SIZE, (3 << 16) | 9);
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 6);
+    for (i = 0; i < NLINES; i = i + 1)
+      for (x = 1; x < cfg_width; x = x + 1) begin
+        got = cap[i * MAXW + x];
+        if (i >= 1 && i < 7 && (x - 1) >= 4 && (x - 1) < 22) begin
+          overlay_src_x = ((x - 1 - 4) * 9) / 18;
+          overlay_src_y = ((i - 1) * 3) / 6;
+          exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
+        end else begin
+          exp = expected_pix(i, x - 1);
+        end
+        exp = exp & 32'h00ffffff;
+        if (got !== exp) begin
+          mism = mism + 1;
+          if (shown < 96) begin
+            $display("OVERLAY UPSCALE MISMATCH row=%0d x=%0d got=%08x exp=%08x",
+                     i, x, got, exp);
+            shown = shown + 1;
+          end
+        end
+      end
+
+    /* Downscaling must select source coordinates deterministically and may
+     * skip source pixels/rows without relabelling the next AXI line. */
+    op(OP_OVERLAY_POS, (2 << 16) | 8);
+    op(OP_OVERLAY_SIZE, (2 << 16) | 5);
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 6);
+    for (i = 0; i < NLINES; i = i + 1)
+      for (x = 1; x < cfg_width; x = x + 1) begin
+        got = cap[i * MAXW + x];
+        if (i >= 2 && i < 4 && (x - 1) >= 8 && (x - 1) < 13) begin
+          overlay_src_x = ((x - 1 - 8) * 9) / 5;
+          overlay_src_y = ((i - 2) * 3) / 2;
+          exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
+        end else begin
+          exp = expected_pix(i, x - 1);
+        end
+        exp = exp & 32'h00ffffff;
+        if (got !== exp) begin
+          mism = mism + 1;
+          if (shown < 120) begin
+            $display("OVERLAY DOWNSCALE MISMATCH row=%0d x=%0d got=%08x exp=%08x",
+                     i, x, got, exp);
+            shown = shown + 1;
+          end
+        end
+      end
+
+    /* Screen-edge clipping must not force the ARM compositor. Negative
+     * destination coordinates still map from the original unclipped rect. */
+    op(OP_OVERLAY_POS, (16'hffff << 16) | 16'hfffc); /* -4,-1 */
+    op(OP_OVERLAY_SIZE, (6 << 16) | 18);
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 6);
+    for (i = 0; i < NLINES; i = i + 1)
+      for (x = 1; x < cfg_width; x = x + 1) begin
+        got = cap[i * MAXW + x];
+        if (i < 5 && (x - 1) < 14) begin
+          overlay_src_x = ((x - 1 + 4) * 9) / 18;
+          overlay_src_y = ((i + 1) * 3) / 6;
+          exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
+        end else begin
+          exp = expected_pix(i, x - 1);
+        end
+        exp = exp & 32'h00ffffff;
+        if (got !== exp) begin
+          mism = mism + 1;
+          if (shown < 144) begin
+            $display("OVERLAY CLIP MISMATCH row=%0d x=%0d got=%08x exp=%08x",
                      i, x, got, exp);
             shown = shown + 1;
           end
