@@ -1,19 +1,19 @@
 # Native FPGA P96 PIP design
 
-Status: merged on `master`, with a local r9 native RTL/firmware candidate.
-Hardware r7 fixed the cyan surface and vertically superimposed frame phase,
-but still flickered. R8 separated displayed and prefetched rows; despite
-passing simulation and implementation, hardware flickered slightly worse and
-showed random black horizontal rows. R9 replaces the unsafe row/readiness
-clock-domain crossings exposed by that result with atomic XPM handshakes. Its
-first launch found core 1 offline and video session begin therefore returned
-unsupported; after a full power cycle core 1 came online and untouched native
-playback was clean at 27–28 fps. R9b passes 16/32-bit display-depth,
-scanline-control stability, and native-video/videocap takeover/return gates,
-completing the default-`zorro3` physical acceptance sequence. Non-default
-variants were rebuilt from the same current RTL on 2026-07-29. All six pass
-fresh-project synthesis, implementation, DRC, bus-skew, and timing gates, but
-remain hardware-unqualified until tested on their respective board variants.
+Status: the native 1:1 foundation is merged on `master`. Local
+`feat/zzplay-media` commit `c6341f8` extends it with exact nearest-neighbour
+FPGA scaling, sparse source-row fetching, and screen-edge clipping. A
+640x480@30 hardware run presented 4,374/4,405 frames after resize versus
+4,379/4,405 at exact size; the user reported identical correct playback.
+
+The earlier r7-r9 chronology below records how the 1:1 foundation was
+qualified. R9 replaced unsafe row/readiness clock-domain crossings with atomic
+XPM handshakes. R9b passed 16/32-bit display depth, scanline-control stability,
+and native-video/videocap takeover/return, completing the default-`zorro3`
+physical acceptance sequence. Non-default variants were rebuilt from the same
+then-current RTL on 2026-07-29. All six passed fresh-project synthesis,
+implementation, DRC, bus-skew, and timing gates, but remain
+hardware-unqualified until tested on their respective board variants.
 
 ## Contract
 
@@ -23,13 +23,14 @@ Picasso96 remains the only public presentation API. Existing applications use
 variant, destination rectangle, activation, and color key. No application or
 driver API fork is introduced.
 
-Firmware and bitstream are a matched ABI. Fully visible 1:1 packed sources
-select the native plane only in the hardware-capable build. Release packaging
-pairs the current firmware with the rebuilt default and six non-default
-bitstreams. `ZZ9000OS-legacy-bitstream.elf`, whose hardware backend is
-compile-time inert, remains the compatibility fallback for installations that
-retain an older bitstream. Resized/clipped sources, and every source used with
-an older bitstream, retain the ARM compositor.
+Firmware and bitstream are a matched ABI. Packed sources with a positive
+destination size and a non-empty screen intersection select the native plane
+in the hardware-capable build, including up/down scaling and clipping.
+Release packaging must pair that firmware with bitstreams built from the
+matching formatter RTL. `ZZ9000OS-legacy-bitstream.elf`, whose hardware
+backend is compile-time inert, remains the compatibility fallback for
+installations that retain an older bitstream. Unsupported source bounds and
+legacy-bitstream operation retain the ARM compositor.
 
 SDK video sessions use the same P96 window/geometry. Their decoder-owned
 planar420 source is an internal firmware source mode, not a different player
@@ -40,12 +41,13 @@ API.
 Add a second MM2S VDMA sharing HP0 through a two-input AXI interconnect. It
 feeds ping-pong YUV422 line buffers in `video_formatter`.
 
-- 1:1, fully visible PIP: VDMA reads the P96 source bitmap directly.
+- 1:1 or scaled/clipped PIP: VDMA reads the P96 packed-YUV source while the
+  formatter maps destination pixels and rows to exact source coordinates.
 - SDK planar420 at 1:1: core 1 writes the non-scanned ping-pong packed-YUV422
   staging surface; vblank publishes it only after the mandatory full L1+L2
   flush, then VDMA reads it.
-- resized or clipped legacy PIP: planned destination-sized packed-YUV422
-  staging; the current hardware gate uses the proven ARM fallback.
+- sparse vertical downscaling drains skipped sequential VDMA rows and writes
+  only requested rows into explicitly owned ping-pong banks.
 - FPGA performs CCIR601 YUV-to-RGB, RGB color-key comparison, scanout-time
   composition, and normal sprite/scanline post-processing.
 - ARM no longer copies or flushes full-screen RGB shadows.
@@ -373,6 +375,39 @@ PIP. Final `Z:\results.txt` diagnostics reported core 1 online, 4,554
 completed requests, zero failures, no live buffers/surfaces, and all
 4,128,768 shared-heap bytes free. `ZZDiag` showed the final live scanline state
 as classic/even-dark rather than off.
+
+### FPGA scaling extension
+
+Local `feat/zzplay-media` commit `c6341f8` replaces the resized/clipped ARM
+shadow path with scanout-time nearest-neighbour scaling for supported
+packed-YUV sources. It keeps the public P96/cgxvideo ABI unchanged, preserves
+the 1:1 pixel path, computes exact quotient/remainder scale steps outside the
+pixel critical path, and assigns line-buffer banks independently of source-row
+parity so vertical downscaling can drain skipped rows safely.
+
+The full calibrated formatter sweep passes 12/12 configurations, including
+non-integer up/down scaling and negative-edge clipping. A fresh Vivado 2018.3
+implementation meets timing: the formatter pixel clock has +0.917 ns setup WNS
+and +0.017 ns hold WHS. The default bitstream was rebuilt from the regenerated
+project and packaged with the matched firmware.
+
+Default-Z3 hardware validation used the same 640x480@30 MPEG-1 Program Stream
+with direct AX audio in separate exact-size and enlarged-window runs:
+
+| Metric | Exact size | Resized |
+| --- | ---: | ---: |
+| Decoded frames | 4,405 | 4,405 |
+| Presented frames | 4,379 | 4,374 |
+| Discarded/late frames | 26 | 31 |
+| Average playback | 29.916 fps | 29.925 fps |
+| Audio frames | 6,476,544 | 6,476,544 |
+| Audio underruns | 13 | 10 |
+
+The presented-ratio difference is 0.001135, below the locked 0.002 noise
+threshold. The user reported that playback looked exactly the same in both
+scenarios, with no resize slowdown or visual regression. Wider clipping,
+downscale-ratio, and non-default-variant qualification remains part of the
+release matrix; the software compositor remains the compatibility fallback.
 
 ### Z3660 cross-check
 
