@@ -1021,11 +1021,24 @@ int main(void)
 	};
 	struct media_summary expected;
 	struct media_summary actual;
+	uint64_t rate_units;
+	uint32_t rate_per_second;
 	uint32_t i;
 	int result;
 
 	if (!sdk_video_plmpeg_test_boundary_mp2_probe())
 		return 1;
+	if (!sdk_video_plmpeg_test_reserved_mp2_bitrate())
+		return 2;
+	if (!sdk_video_plmpeg_test_rate(
+	        23976U, &rate_units, &rate_per_second) ||
+	    rate_units != 1001U || rate_per_second != 24000U)
+		return 3;
+	if (!sdk_video_plmpeg_test_rate(
+	        24000U, &rate_units, &rate_per_second) ||
+	    rate_units != 1U || rate_per_second != 24U ||
+	    (UINT64_C(90000) * rate_units) / rate_per_second != 3750U)
+		return 4;
 	result = decode_fixture(chunks[0], &expected);
 	if (result != 0)
 		return 10 + result;

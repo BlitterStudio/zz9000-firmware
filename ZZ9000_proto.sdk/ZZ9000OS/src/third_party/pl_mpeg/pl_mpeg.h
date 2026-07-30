@@ -1659,14 +1659,18 @@ int plm_buffer_has_ended(plm_buffer_t *self) {
 }
 
 int plm_buffer_has(plm_buffer_t *self, size_t count) {
-	if (((self->length << 3) - self->bit_index) >= count) {
+	size_t length_bits = self->length << 3;
+	if (self->bit_index <= length_bits &&
+		(length_bits - self->bit_index) >= count) {
 		return TRUE;
 	}
 
 	if (self->load_callback) {
 		self->load_callback(self, self->load_callback_user_data);
-		
-		if (((self->length << 3) - self->bit_index) >= count) {
+
+		length_bits = self->length << 3;
+		if (self->bit_index <= length_bits &&
+			(length_bits - self->bit_index) >= count) {
 			return TRUE;
 		}
 	}	
@@ -4031,7 +4035,7 @@ int plm_audio_decode_header(plm_audio_t *self) {
 	}
 
 	int bitrate_index = plm_buffer_read(self->buffer, 4) - 1;
-	if (bitrate_index > 13) {
+	if (bitrate_index < 0 || bitrate_index > 13) {
 		return 0;
 	}
 

@@ -208,6 +208,29 @@ int sdk_video_plmpeg_test_boundary_mp2_probe(void)
 		return 0;
 	return 1;
 }
+
+int sdk_video_plmpeg_test_reserved_mp2_bitrate(void)
+{
+	static uint8_t reserved_header[] = {
+		0xffU, 0xfcU, 0x00U, 0x00U, 0x00U, 0x00U
+	};
+	plm_buffer_t *buffer;
+	plm_audio_t *audio;
+	int valid;
+
+	buffer = plm_buffer_create_with_memory(
+		reserved_header, sizeof(reserved_header), FALSE);
+	if (!buffer)
+		return 0;
+	audio = plm_audio_create_with_buffer(buffer, TRUE);
+	if (!audio) {
+		plm_buffer_destroy(buffer);
+		return 0;
+	}
+	valid = !plm_audio_has_header(audio);
+	plm_audio_destroy(audio);
+	return valid;
+}
 #endif
 
 static uint64_t buffer_consumed(uint64_t written, plm_buffer_t *buffer)
@@ -525,32 +548,65 @@ static int plmpeg_get_info(void *opaque, struct SDKVideoDecoderInfo *info)
 	return info->width != 0U && info->height != 0U;
 }
 
+static void video_rate_milli(uint32_t milli,
+	                         uint64_t *units, uint32_t *per_second)
+{
+	*units = 1U;
+	*per_second = 25U;
+	switch (milli) {
+	case 23976U:
+		*units = 1001U;
+		*per_second = 24000U;
+		break;
+	case 24000U:
+		*per_second = 24U;
+		break;
+	case 25000U:
+		*per_second = 25U;
+		break;
+	case 29970U:
+		*units = 1001U;
+		*per_second = 30000U;
+		break;
+	case 30000U:
+		*per_second = 30U;
+		break;
+	case 50000U:
+		*per_second = 50U;
+		break;
+	case 59940U:
+		*units = 1001U;
+		*per_second = 60000U;
+		break;
+	case 60000U:
+		*per_second = 60U;
+		break;
+	default:
+		break;
+	}
+}
+
 static void video_rate(const struct sdk_video_plmpeg *decoder,
 	                   uint64_t *units, uint32_t *per_second)
 {
 	double rate = plm_video_get_framerate(decoder->video);
+	uint32_t milli = 0U;
 
-	*units = 1U;
-	*per_second = 25U;
-	if (rate > 23.9 && rate < 24.0) {
-		*units = 1001U;
-		*per_second = 24000U;
-	} else if (rate > 24.9 && rate < 25.1) {
-		*per_second = 25U;
-	} else if (rate > 29.9 && rate < 30.0) {
-		*units = 1001U;
-		*per_second = 30000U;
-	} else if (rate > 29.9 && rate < 30.1) {
-		*per_second = 30U;
-	} else if (rate > 49.9 && rate < 50.1) {
-		*per_second = 50U;
-	} else if (rate > 59.8 && rate < 60.0) {
-		*units = 1001U;
-		*per_second = 60000U;
-	} else if (rate > 59.9 && rate < 60.1) {
-		*per_second = 60U;
-	}
+	if (rate > 0.0 && rate < 4294967.0)
+		milli = (uint32_t)(rate * 1000.0 + 0.5);
+	video_rate_milli(milli, units, per_second);
 }
+
+#ifdef SDK_VIDEO_HOST_TEST
+int sdk_video_plmpeg_test_rate(
+	uint32_t frame_rate_milli, uint64_t *units, uint32_t *per_second)
+{
+	if (!units || !per_second)
+		return 0;
+	video_rate_milli(frame_rate_milli, units, per_second);
+	return 1;
+}
+#endif
 
 static uint32_t timeline_media_flags(uint32_t timeline_flags)
 {
