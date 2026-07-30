@@ -1591,11 +1591,13 @@ int main() {
 						/* F4 and F6 share this 32-bit read group: codec
 						 * presence is the F4 word and RX status is F6. */
 						data = zz_audio_config_read_pack(
-						    (uint16_t)adau_enabled, audio_get_rx_status());
+						    (uint16_t)adau_enabled |
+						        ZZ_AUDIO_CONFIG_TX_STATUS_CAPABLE,
+						    audio_get_rx_status());
 						break;
 					}
 					case REG_ZZ_AUDIO_TX_STATUS: {
-						data = ((uint32_t)audio_get_tx_sequence()) << 16;
+						data = ((uint32_t)audio_get_tx_status()) << 16;
 						break;
 					}
 					case REG_ZZ_DECODER_VAL: {
