@@ -9,6 +9,8 @@
 
 #define OVERLAY_VDMA_BASE 0x83010000U
 #define OVERLAY_RESET_TIMEOUT 100000U
+#define OVERLAY_MAX_SOURCE_WIDTH 2560U
+#define OVERLAY_MAX_SOURCE_HEIGHT 4095U
 
 #ifndef ZZ_OVERLAY_HW_PRESENT
 #define ZZ_OVERLAY_HW_PRESENT 1
@@ -101,16 +103,19 @@ void overlay_hw_set_buffer(uint32_t src_addr, uint32_t generation)
 	video_formatter_write(generation, MNTVF_OP_OVERLAY_FRAME);
 }
 
-int overlay_hw_start(uint32_t src_addr, uint32_t src_pitch,
-	                 uint16_t width, uint16_t height,
-	                 int16_t dst_x, int16_t dst_y,
-	                 uint8_t variant, uint32_t key_rgb,
-	                 uint8_t key_enabled, uint32_t generation)
+int overlay_hw_start_scaled(uint32_t src_addr, uint32_t src_pitch,
+                            uint16_t src_width, uint16_t src_height,
+                            int16_t dst_x, int16_t dst_y,
+                            uint16_t dst_width, uint16_t dst_height,
+                            uint8_t variant, uint32_t key_rgb,
+                            uint8_t key_enabled, uint32_t generation)
 {
-	uint32_t line_bytes = (((uint32_t)width + 1U) >> 1) * 4U;
-	if (!overlay_hw_supported() || !src_addr || !width || !height ||
-	    src_pitch < line_bytes ||
-	    dst_x < 0 || dst_y < 0)
+	uint32_t line_bytes = (((uint32_t)src_width + 1U) >> 1) * 4U;
+	if (!overlay_hw_supported() || !src_addr ||
+	    !src_width || !src_height || !dst_width || !dst_height ||
+	    src_width > OVERLAY_MAX_SOURCE_WIDTH ||
+	    src_height > OVERLAY_MAX_SOURCE_HEIGHT ||
+	    src_pitch < line_bytes)
 		return 0;
 
 	overlay_vdma_pitch = 0U;
@@ -120,23 +125,34 @@ int overlay_hw_start(uint32_t src_addr, uint32_t src_pitch,
 	/* Hide first: the pixel-domain copy latches this at vblank while the
 	 * replacement channel is reset and programmed. */
 	video_formatter_write(0U, MNTVF_OP_OVERLAY_CTRL);
-	if (!overlay_vdma_program(src_addr, src_pitch, line_bytes, height))
+	if (!overlay_vdma_program(src_addr, src_pitch, line_bytes, src_height))
 		return 0;
 	overlay_vdma_pitch = src_pitch;
 	overlay_vdma_line_bytes = line_bytes;
-	overlay_vdma_height = height;
+	overlay_vdma_height = src_height;
 
 	video_formatter_write(((uint32_t)(uint16_t)dst_y << 16) |
 	                      (uint16_t)dst_x, MNTVF_OP_OVERLAY_POS);
-	video_formatter_write(((uint32_t)height << 16) | width,
+	video_formatter_write(((uint32_t)dst_height << 16) | dst_width,
 	                      MNTVF_OP_OVERLAY_SIZE);
 	video_formatter_write(key_rgb & 0x00ffffffU,
 	                      MNTVF_OP_OVERLAY_KEY);
-	video_formatter_write(((uint32_t)height << 16) | width,
+	video_formatter_write(((uint32_t)src_height << 16) | src_width,
 	                      MNTVF_OP_OVERLAY_SOURCE_SIZE);
 	video_formatter_write(generation, MNTVF_OP_OVERLAY_FRAME);
 	video_formatter_write(1U | ((uint32_t)(key_enabled != 0U) << 1) |
 	                      ((uint32_t)variant << 4),
 	                      MNTVF_OP_OVERLAY_CTRL);
 	return 1;
+}
+
+int overlay_hw_start(uint32_t src_addr, uint32_t src_pitch,
+                     uint16_t width, uint16_t height,
+                     int16_t dst_x, int16_t dst_y,
+                     uint8_t variant, uint32_t key_rgb,
+                     uint8_t key_enabled, uint32_t generation)
+{
+	return overlay_hw_start_scaled(src_addr, src_pitch, width, height,
+	                               dst_x, dst_y, width, height, variant,
+	                               key_rgb, key_enabled, generation);
 }

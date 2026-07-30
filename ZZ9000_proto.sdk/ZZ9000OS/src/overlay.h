@@ -4,9 +4,10 @@
  *
  * P96 video window (PIP) overlay: native PL plane plus software fallback.
  * The ZZ9000.card driver configures the overlay through OP_VIDEO_OVERLAY;
- * Fully visible 1:1 sources use packed-YUV scanout-time composition; scaled
- * or clipped sources retain the RGB shadow compositor. Legacy sources refresh
- * every vblank; SDK video sources notify on decoded frames.
+ * Visible packed-YUV sources use scanout-time composition with exact
+ * nearest-neighbour scaling and clipping; unsupported geometry retains the
+ * RGB shadow compositor. Legacy sources refresh every vblank; SDK video
+ * sources notify on decoded frames.
  *
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
