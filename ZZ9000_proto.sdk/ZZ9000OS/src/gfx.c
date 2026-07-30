@@ -927,7 +927,10 @@ void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 		else {
 			for (; x < rect_x2; x++) {
 				u8_fg = 0;
-				if (draw_mode & 0x01) // If bit 1 is set, the inverted planar data is always used.
+				/* Odd minterms use the inverted planar source in the
+				 * legacy handlers, except NEOR: its handler performs
+				 * the source inversion itself. */
+				if ((draw_mode & 0x01) && draw_mode != MINTERM_NEOR)
 					DECODE_INVERTED_PLANAR_PIXEL(u8_fg)
 				else
 					DECODE_PLANAR_PIXEL(u8_fg)
@@ -1289,22 +1292,24 @@ void overlay_composite_planar420_frame(uint8_t *dst, uint32_t dst_pitch,
 #define RL_CACHE_MASK (RL_CACHE_SIZE - 1)
 static uint32_t rl_cache_keys[RL_CACHE_SIZE];
 static uint8_t rl_cache_vals[RL_CACHE_SIZE];
+static uint8_t rl_cache_valid[RL_CACHE_SIZE];
 
 static inline void rl_cache_invalidate(void) {
-	memset(rl_cache_keys, 0xFF, sizeof(rl_cache_keys));
+	memset(rl_cache_valid, 0, sizeof(rl_cache_valid));
 }
 
 static inline uint8_t reverse_lookup(uint32_t *bmp_pal, uint8_t planes, uint32_t fg_color) {
 	uint8_t slot = (fg_color ^ (fg_color >> 8)) & RL_CACHE_MASK;
-	if (rl_cache_keys[slot] == fg_color)
+	if (rl_cache_valid[slot] && rl_cache_keys[slot] == fg_color)
 		return rl_cache_vals[slot];
 
-	uint8_t num_colors = (1 << planes);
-	for (uint8_t i = 0; i < num_colors; i++) {
+	uint16_t num_colors = planes >= 8 ? 256 : (uint16_t)(1u << planes);
+	for (uint16_t i = 0; i < num_colors; i++) {
 		if (bmp_pal[i] == fg_color) {
 			rl_cache_keys[slot] = fg_color;
-			rl_cache_vals[slot] = i;
-			return i;
+			rl_cache_vals[slot] = (uint8_t)i;
+			rl_cache_valid[slot] = 1;
+			return (uint8_t)i;
 		}
 	}
 	return 0;
@@ -1320,6 +1325,29 @@ void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 		return;
 
 	uint32_t *dp = fb + (dy * fb_pitch);
+
+	/* Picasso96 defines direct-color INVERT on the native destination
+	 * value, and DST as leaving it untouched. Neither operation needs
+	 * planar decoding or an inverse color-map lookup. */
+	if (draw_mode == MINTERM_DST)
+		return;
+	if (draw_mode == MINTERM_INVERT) {
+		for (int16_t line_y = 0; line_y < h_draw; line_y++) {
+			switch (color_format) {
+				case MNTVA_COLOR_16BIT565:
+				case MNTVA_COLOR_15BIT:
+					for (int16_t x = dx; x < dx + w; x++)
+						((uint16_t *)dp)[x] ^= (uint16_t)color_mask;
+					break;
+				case MNTVA_COLOR_32BIT:
+					for (int16_t x = dx; x < dx + w; x++)
+						dp[x] ^= color_mask;
+					break;
+			}
+			dp += fb_pitch;
+		}
+		return;
+	}
 
 	uint8_t cur_bit, base_bit, base_byte;
 	uint16_t cur_byte = 0;

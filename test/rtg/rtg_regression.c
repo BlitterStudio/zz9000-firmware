@@ -494,13 +494,29 @@ static void ref_p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy,
 	}
 }
 
+static void ref_p2c_neor_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy,
+	int16_t w, int16_t h, uint8_t planes, uint8_t mask,
+	uint8_t layer_mask, uint16_t src_line_pitch, const uint8_t *bmp_data)
+{
+	for (int16_t yy = 0; yy < h; yy++) {
+		uint8_t *drow = row8(expected_fb, FB_PITCH_WORDS, dy + yy);
+		for (int16_t xx = 0; xx < w; xx++) {
+			uint8_t src = ref_planar_pixel(bmp_data, planes, layer_mask,
+				src_line_pitch, h, sx, sy, xx, yy, 0);
+			uint8_t dst = drow[dx + xx];
+			uint8_t result = (uint8_t)~(src ^ dst);
+			drow[dx + xx] = (uint8_t)((dst & (uint8_t)~mask) | (result & mask));
+		}
+	}
+}
+
 static uint8_t ref_reverse_lookup(const uint32_t *pal, uint8_t planes, uint32_t color)
 {
-	uint8_t colors = (uint8_t)(1u << planes);
+	uint16_t colors = planes >= 8 ? 256 : (uint16_t)(1u << planes);
 
-	for (uint8_t i = 0; i < colors; i++) {
+	for (uint16_t i = 0; i < colors; i++) {
 		if (pal[i] == color)
-			return i;
+			return (uint8_t)i;
 	}
 
 	return 0;
@@ -919,6 +935,22 @@ static void test_planar(void)
 	ref_p2c_rect(5, 0, 12, 9, P2C_W, P2C_H, MINTERM_NOTSRC,
 		P2C_PLANES, 0x1f, P2C_PITCH, planar);
 	check_frame("p2c_rect notsrc");
+
+	make_planar(planar, P2C_PLANES, P2C_PITCH, P2C_H, 0x4005);
+	seed_frame(0x4006);
+	p2c_rect(1, 0, 8, 6, P2C_W, P2C_H, MINTERM_NEOR,
+		P2C_PLANES, 0xff, 0x1f, P2C_PITCH, planar);
+	ref_p2c_neor_rect(1, 0, 8, 6, P2C_W, P2C_H,
+		P2C_PLANES, 0xff, 0x1f, P2C_PITCH, planar);
+	check_frame("p2c_rect neor");
+
+	make_planar(planar, P2C_PLANES, P2C_PITCH, P2C_H, 0x4007);
+	seed_frame(0x4008);
+	p2c_rect(7, 0, 13, 4, P2C_W, P2C_H, MINTERM_NEOR,
+		P2C_PLANES, 0x5a, 0x1f, P2C_PITCH, planar);
+	ref_p2c_neor_rect(7, 0, 13, 4, P2C_W, P2C_H,
+		P2C_PLANES, 0x5a, 0x1f, P2C_PITCH, planar);
+	check_frame("p2c_rect neor masked");
 }
 
 static void test_p2d(void)
@@ -927,7 +959,7 @@ static void test_p2d(void)
 		P2D_W = 37,
 		P2D_H = 12,
 		P2D_PITCH = 8,
-		P2D_PLANES = 3,
+		P2D_PLANES = 8,
 		P2D_COLORS = 1 << P2D_PLANES,
 		P2D_BYTES = 256 * 4 + P2D_PLANES * P2D_PITCH * P2D_H,
 	};
@@ -948,19 +980,19 @@ static void test_p2d(void)
 		}
 	}
 	p2d_rect(2, 0, 11, 6, P2D_W, P2D_H, MINTERM_EOR,
-		P2D_PLANES, 0xff, 0x07, 0x00ffffff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
+		P2D_PLANES, 0xff, 0xff, 0x00ffffff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
 	ref_p2d_rect(2, 0, 11, 6, P2D_W, P2D_H, MINTERM_EOR,
-		P2D_PLANES, 0x07, P2D_PITCH, data, MNTVA_COLOR_32BIT);
-	check_frame("p2d_rect eor 32");
+		P2D_PLANES, 0xff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
+	check_frame("p2d_rect eor 32 depth8");
 
 	for (int i = 0; i < 256; i++)
 		pal[i] = (uint32_t)(0x1000 + i);
 	make_planar(planes, P2D_PLANES, P2D_PITCH, P2D_H, 0x5003);
 	seed_frame(0x5004);
 	p2d_rect(1, 0, 9, 8, P2D_W, P2D_H, MINTERM_SRC,
-		P2D_PLANES, 0xff, 0x07, 0xffff, P2D_PITCH, data, MNTVA_COLOR_16BIT565);
+		P2D_PLANES, 0xff, 0xff, 0xffff, P2D_PITCH, data, MNTVA_COLOR_16BIT565);
 	ref_p2d_rect(1, 0, 9, 8, P2D_W, P2D_H, MINTERM_SRC,
-		P2D_PLANES, 0x07, P2D_PITCH, data, MNTVA_COLOR_16BIT565);
+		P2D_PLANES, 0xff, P2D_PITCH, data, MNTVA_COLOR_16BIT565);
 	check_frame("p2d_rect src 16");
 
 	for (int i = 0; i < 256; i++)
@@ -968,10 +1000,19 @@ static void test_p2d(void)
 	make_planar(planes, P2D_PLANES, P2D_PITCH, P2D_H, 0x5005);
 	seed_frame(0x5006);
 	p2d_rect(4, 0, 7, 5, P2D_W, P2D_H, MINTERM_NOTSRC,
-		P2D_PLANES, 0xff, 0x07, 0x00ffffff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
+		P2D_PLANES, 0xff, 0xff, 0x00ffffff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
 	ref_p2d_rect(4, 0, 7, 5, P2D_W, P2D_H, MINTERM_NOTSRC,
-		P2D_PLANES, 0x07, P2D_PITCH, data, MNTVA_COLOR_32BIT);
+		P2D_PLANES, 0xff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
 	check_frame("p2d_rect notsrc 32");
+
+	seed_frame(0x5007);
+	p2d_rect(0, 0, 6, 4, P2D_W, P2D_H, MINTERM_INVERT,
+		P2D_PLANES, 0xff, 0xff, 0x00ffffff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
+	for (int y = 4; y < 4 + P2D_H; y++) {
+		for (int x = 6; x < 6 + P2D_W; x++)
+			row32(expected_fb, FB_PITCH_WORDS, y)[x] ^= 0x00ffffff;
+	}
+	check_frame("p2d_rect invert native");
 }
 
 static void test_template(void)
