@@ -76,6 +76,9 @@ module video_overlay_linebuffer_tb;
     begin
       check_seq = check_seq + 1;
       displayed_line = n;
+      /* The bank/tag selector is combinational but has multiple levels.
+       * Advance one pixel clock before sampling the ready contract. */
+      @(posedge pixel_clk); #1;
       timeout = 0;
       while (!ready && timeout < 30) begin
         @(posedge pixel_clk);
@@ -158,6 +161,10 @@ module video_overlay_linebuffer_tb;
 
     /* Wrap requests a fresh SOF.  Drain a stale tail first. */
     request_line(3);
+    /* VDMA produces rows sequentially; sparse fetching drains intervening
+     * rows rather than presenting the next beat as the requested row. */
+    line(1, 0);
+    line(2, 0);
     line(3, 0); check_line(3);
     request_line(0);
     beat(32'hbad0bad0, 0, 1);
