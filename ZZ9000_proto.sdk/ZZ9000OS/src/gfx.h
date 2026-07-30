@@ -463,7 +463,7 @@ enum gfx_minterm_modes {
 			s &= d; \
 			SET_FG_PIXEL8_MASK(0); break; \
 		case MINTERM_NEOR: \
-			d ^= ~(s & mask); break; \
+			d ^= (~s & mask); break; \
 		case MINTERM_DST: /* This one does nothing. */ \
 			return; break; \
 		case MINTERM_NOTONLYSRC: \
@@ -547,9 +547,9 @@ enum gfx_minterm_modes {
 			switch (color_format) { \
 				case MNTVA_COLOR_16BIT565: \
 				case MNTVA_COLOR_15BIT: \
-					((uint16_t *)d)[x] ^= ~(s & color_mask); break; \
+					((uint16_t *)d)[x] ^= (~s & color_mask); break; \
 				case MNTVA_COLOR_32BIT: \
-					((uint32_t *)d)[x] ^= ~(s & color_mask); break; \
+					((uint32_t *)d)[x] ^= (~s & color_mask); break; \
 			} break; \
 		case MINTERM_DST: /* This one does nothing. */ \
 			return; break; \
