@@ -224,11 +224,15 @@ int main(int argc, char **argv)
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "handle_media_session_audio_read");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
-	                      "handle_media_session_audio_unsupported");
+	                      "handle_media_session_audio_bind");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "bytes_are_zero(payload->reserved");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "sdk_media_session_audio_read");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "sdk_media_session_audio_source");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "sdk_media_session_audio_retire");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "find_shared_buffer(begin.pcm_ring_handle)");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",

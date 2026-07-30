@@ -446,6 +446,7 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 #define SDK_MEDIA_AUDIO_NONE 0U
 #define SDK_MEDIA_AUDIO_MP2 1U
 #define SDK_MEDIA_SESSION_WRITE_EOF (1U << 0)
+#define SDK_MEDIA_AUDIO_BIND_PAUSE (1U << 0)
 #define SDK_MEDIA_SESSION_STATE_NEED_INPUT 1U
 #define SDK_MEDIA_SESSION_STATE_READY 2U
 #define SDK_MEDIA_SESSION_STATE_FRAME_HELD 3U
@@ -462,9 +463,14 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 #define SDK_MEDIA_SESSION_RESULT_BACKPRESSURE (1U << 8)
 #define SDK_MEDIA_SESSION_RESULT_PRESENTED (1U << 9)
 #define SDK_MEDIA_SESSION_RESULT_DISCARDED (1U << 10)
+#define SDK_MEDIA_SESSION_RESULT_AUDIO_BOUND (1U << 11)
+#define SDK_MEDIA_SESSION_RESULT_AUDIO_PLAYING (1U << 12)
+#define SDK_MEDIA_SESSION_RESULT_AUDIO_DRAINED (1U << 13)
+#define SDK_MEDIA_SESSION_RESULT_AUDIO_UNDERRUN (1U << 14)
 #define SDK_MEDIA_STATUS_TIMING 0U
 #define SDK_MEDIA_STATUS_AUDIO 1U
 #define SDK_MEDIA_STATUS_COUNTERS 2U
+#define SDK_MEDIA_STATUS_AUDIO_OUTPUT 3U
 
 #define SDK_CRYPTO_HASH_NONE           0U
 #define SDK_CRYPTO_HASH_SHA1           1U
@@ -594,6 +600,7 @@ int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
  * Both are no-ops when nothing is bound. */
 void sdk_mailbox_audio_playback_pump(void);
 void sdk_mailbox_audio_playback_pump_isr(void);
+int sdk_mailbox_audio_playback_active(void);
 
 /*
  * Run a crypto task's compute on the calling core. op_params points at one of

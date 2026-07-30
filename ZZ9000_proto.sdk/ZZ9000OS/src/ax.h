@@ -72,6 +72,8 @@ void audio_clear_interrupt(void);
 uint32_t audio_get_interrupt(void);
 uint32_t audio_get_dma_transfer_count(void);
 uint16_t audio_get_tx_sequence(void);
+void audio_set_codec_present(int present);
+int audio_codec_present(void);
 int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap);
 void audio_set_tx_buffer(uint8_t *addr);
 void audio_set_rx_buffer(uint8_t *addr);

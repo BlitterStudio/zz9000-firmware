@@ -298,6 +298,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 0);
 
 	adau_enabled = audio_adau_init(1);
+	audio_set_codec_present(adau_enabled);
 
 	// clear interrupt holding amiga
 	amiga_interrupt_clear(0xffffffff);
@@ -1255,7 +1256,16 @@ int main() {
 				}
 				case REG_ZZ_AUDIO_CONFIG: {
 					// audio config
-					audio_set_interrupt_mask((uint16_t)zdata);
+					uint16_t mask = (uint16_t)zdata;
+
+					/* A bound SDK/media session owns the formatter TX
+					 * target. Legacy/AHI register writes have no reply
+					 * channel for BUSY, so reject their PLAY bit here
+					 * rather than silently retargeting live direct audio.
+					 * Capture remains independently usable. */
+					if (sdk_mailbox_audio_playback_active())
+						mask &= ~ZZ_AUDIO_CONFIG_PLAY;
+					audio_set_interrupt_mask(mask);
 					break;
 				}
 				case REG_ZZ_SDK_DOORBELL:
@@ -1317,7 +1327,9 @@ int main() {
 						int byteswap = 1;
 						if (zdata&(1<<15)) byteswap = 0;
 						audio_offset = (zdata&0x7fff)<<8; // *256
-						audio_buffer_collision = audio_swab(audio_scale, audio_offset, byteswap);
+						if (!sdk_mailbox_audio_playback_active())
+							audio_buffer_collision = audio_swab(
+								audio_scale, audio_offset, byteswap);
 
 						break;
 					}
@@ -1341,7 +1353,9 @@ int main() {
 					if (audio_param == AP_TX_BUF_OFFS_LO) {
 						uint8_t* addr = (uint8_t*)video_state->framebuffer +
 								((audio_params[AP_TX_BUF_OFFS_HI]<<16)|audio_params[AP_TX_BUF_OFFS_LO]);
-						if (((uint32_t)addr-(uint32_t)video_state->framebuffer)<0x100000*128) {
+						if (sdk_mailbox_audio_playback_active()) {
+							printf("[audio] TX owner busy\n");
+						} else if (((uint32_t)addr-(uint32_t)video_state->framebuffer)<0x100000*128) {
 							audio_set_tx_buffer(addr);
 							audio_request_init = 1;
 						} else {

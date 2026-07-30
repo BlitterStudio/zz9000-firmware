@@ -25,6 +25,7 @@ static uint8_t mock_video_active;
 static int mock_present_accepted;
 static uint8_t mock_media_enabled;
 static uint8_t mock_decoder_ready;
+static uint8_t mock_audio_done;
 static uint64_t mock_pcm_produced;
 static uint64_t mock_pcm_acknowledged;
 static uint8_t pcm_ring[32768];
@@ -130,7 +131,9 @@ int sdk_video_stream_get_media_info(
 	info->raw_pts = 54000U;
 	info->audio_frames = (uint32_t)(mock_pcm_produced / 4608U);
 	if (mock_pcm_produced != mock_pcm_acknowledged)
-		info->flags = SDK_VIDEO_MEDIA_FLAG_AUDIO_READY;
+		info->flags |= SDK_VIDEO_MEDIA_FLAG_AUDIO_READY;
+	if (mock_audio_done)
+		info->flags |= SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE;
 	return 1;
 }
 
@@ -177,6 +180,7 @@ static void reset_mocks(void)
 	mock_present_accepted = 1;
 	mock_media_enabled = 0U;
 	mock_decoder_ready = 0U;
+	mock_audio_done = 0U;
 	mock_pcm_produced = 0U;
 	mock_pcm_acknowledged = 0U;
 }
@@ -202,6 +206,12 @@ static int test_exact_abi_mirror(void)
 	if (sizeof(struct SDKMediaSessionAudioResultPayload) != 48U) return 17;
 	if (sizeof(struct SDKMediaSessionStatusResultPayload) != 48U) return 18;
 	if (SDK_MEDIA_NO_PTS != UINT64_MAX) return 19;
+	if (SDK_MEDIA_AUDIO_BIND_PAUSE != (1U << 0)) return 20;
+	if (SDK_MEDIA_SESSION_RESULT_AUDIO_BOUND != (1U << 11)) return 21;
+	if (SDK_MEDIA_SESSION_RESULT_AUDIO_PLAYING != (1U << 12)) return 22;
+	if (SDK_MEDIA_SESSION_RESULT_AUDIO_DRAINED != (1U << 13)) return 23;
+	if (SDK_MEDIA_SESSION_RESULT_AUDIO_UNDERRUN != (1U << 14)) return 24;
+	if (SDK_MEDIA_STATUS_AUDIO_OUTPUT != 3U) return 25;
 	return 0;
 }
 
@@ -333,7 +343,8 @@ static int test_errors_and_reclaim(void)
 	fill_begin(&begin);
 	if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK)
 		return 2;
-	if (sdk_media_session_status(mock_session, SDK_MEDIA_STATUS_COUNTERS + 1U,
+	if (sdk_media_session_status(mock_session,
+	                             SDK_MEDIA_STATUS_AUDIO_OUTPUT + 1U,
 	                             0U, &status) != SDK_STATUS_BAD_REQUEST ||
 	    sdk_media_session_status(mock_session, SDK_MEDIA_STATUS_TIMING,
 	                             1U, &status) != SDK_STATUS_BAD_REQUEST)
@@ -445,6 +456,126 @@ static int test_mp2_audio_snapshot_and_ack(void)
 	return 0;
 }
 
+static int test_mp2_direct_audio_output(void)
+{
+	struct SDKMediaSessionBegin begin;
+	struct SDKMediaSessionMainResult result;
+	struct SDKMediaSessionAudioResult audio;
+	struct SDKMediaSessionStatusResult status;
+	struct SDKMediaAudioSource source;
+	uint64_t expected_pts;
+
+	reset_mocks();
+	sdk_media_session_init();
+	fill_begin(&begin);
+	begin.audio_codec = SDK_MEDIA_AUDIO_MP2;
+	begin.pcm_ring_handle = 0x40000001U;
+	begin.pcm_ring = pcm_ring;
+	begin.pcm_ring_capacity = sizeof(pcm_ring);
+	begin.pcm_low_water_bytes = 4608U;
+	begin.pcm_high_water_bytes = 24576U;
+	if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK)
+		return 1;
+	/* Format discovery is a precondition: BIND does not cross from core 0
+	 * into the decoder objects owned by core 1. */
+	if (sdk_media_session_audio_bind(mock_session, 0U, &audio) !=
+	        SDK_STATUS_BAD_REQUEST)
+		return 2;
+
+	mock_pcm_produced = 9216U;
+	if (sdk_media_session_decode(mock_session, 0U, &result) !=
+	        SDK_STATUS_OK ||
+	    sdk_media_session_discard(mock_session, 0U, &result) !=
+	        SDK_STATUS_OK)
+		return 3;
+	if (sdk_media_session_audio_bind(mock_session, 0U, &audio) !=
+	        SDK_STATUS_OK ||
+	    (audio.flags & (SDK_MEDIA_SESSION_RESULT_AUDIO_BOUND |
+	                    SDK_MEDIA_SESSION_RESULT_AUDIO_PLAYING)) !=
+	        (SDK_MEDIA_SESSION_RESULT_AUDIO_BOUND |
+	         SDK_MEDIA_SESSION_RESULT_AUDIO_PLAYING) ||
+	    audio.pcm_acknowledged != 0U ||
+	    audio.audio_pts != 54000U)
+		return 4;
+	if (sdk_media_session_audio_read(mock_session, 0U, 0U, &audio) !=
+	        SDK_STATUS_BUSY ||
+	    sdk_media_session_close(mock_session, 0U, &result) !=
+	        SDK_STATUS_BUSY)
+		return 5;
+
+	if (!sdk_media_session_audio_source(mock_session, &source) ||
+	    source.ring != pcm_ring || source.capacity != sizeof(pcm_ring) ||
+	    source.produced_bytes != 9216U || source.staged_bytes != 0U ||
+	    source.sample_rate != 44100U || source.channels != 2U ||
+	    source.sample_format != SDK_VIDEO_MEDIA_SAMPLE_S16BE)
+		return 6;
+	if (sdk_media_session_audio_stage(mock_session, 2U) ||
+	    !sdk_media_session_audio_stage(mock_session, 4608U) ||
+	    sdk_media_session_audio_stage(mock_session, 4609U))
+		return 7;
+	if (!sdk_media_session_audio_source(mock_session, &source) ||
+	    source.staged_bytes != 4608U)
+		return 8;
+	if (sdk_media_session_audio_retire(mock_session, 2U) ||
+	    !sdk_media_session_audio_retire(mock_session, 2304U) ||
+	    sdk_media_session_audio_retire(mock_session, 2308U))
+		return 9;
+	expected_pts = 54000U + (576U * UINT64_C(90000)) / 44100U;
+	if (sdk_media_session_audio_bind(mock_session, 0U, &audio) !=
+	        SDK_STATUS_OK ||
+	    audio.pcm_acknowledged != 2304U ||
+	    audio.audio_pts != expected_pts)
+		return 10;
+	if (sdk_media_session_status(mock_session,
+	                             SDK_MEDIA_STATUS_AUDIO_OUTPUT,
+	                             0U, &status) != SDK_STATUS_OK ||
+	    status.value[0] != 576U || status.value[1] != 576U ||
+	    status.value[2] != 1152U || status.value[3] != 0U)
+		return 11;
+
+	sdk_media_session_audio_underrun(mock_session);
+	memset(&source, 0, sizeof(source));
+	if (sdk_media_session_audio_bind(mock_session,
+	                                 SDK_MEDIA_AUDIO_BIND_PAUSE,
+	                                 &audio) != SDK_STATUS_OK ||
+	    (audio.flags & SDK_MEDIA_SESSION_RESULT_AUDIO_PLAYING) != 0U ||
+	    sdk_media_session_audio_source(mock_session, &source))
+		return 12;
+	/* A paused source is intentionally unavailable to the ISR. */
+	if (sdk_media_session_audio_stage(mock_session, 4U))
+		return 13;
+	if (sdk_media_session_audio_bind(mock_session, 0U, &audio) !=
+	        SDK_STATUS_OK ||
+	    (audio.flags & SDK_MEDIA_SESSION_RESULT_AUDIO_PLAYING) == 0U ||
+	    !sdk_media_session_audio_source(mock_session, &source) ||
+	    source.staged_bytes != 2304U ||
+	    (audio.flags & SDK_MEDIA_SESSION_RESULT_AUDIO_UNDERRUN) == 0U)
+		return 14;
+
+	if (!sdk_media_session_audio_stage(mock_session, 6912U) ||
+	    !sdk_media_session_audio_retire(mock_session, 6912U))
+		return 15;
+	mock_audio_done = 1U;
+	/* A core-1 operation publishes AUDIO_DONE and acknowledges retirement. */
+	if (sdk_media_session_decode(mock_session, 0U, &result) !=
+	        SDK_STATUS_OK ||
+	    sdk_media_session_discard(mock_session, 0U, &result) !=
+	        SDK_STATUS_OK ||
+	    mock_pcm_acknowledged != 9216U ||
+	    sdk_media_session_audio_bind(mock_session, 0U, &audio) !=
+	        SDK_STATUS_OK ||
+	    (audio.flags & SDK_MEDIA_SESSION_RESULT_AUDIO_DRAINED) == 0U)
+		return 16;
+	if (sdk_media_session_audio_unbind(mock_session, 0U, &audio) !=
+	        SDK_STATUS_OK ||
+	    (audio.flags & SDK_MEDIA_SESSION_RESULT_AUDIO_BOUND) != 0U)
+		return 17;
+	if (sdk_media_session_audio_read(mock_session, 9216U, 0U, &audio) !=
+	        SDK_STATUS_OK)
+		return 18;
+	return 0;
+}
+
 int main(void)
 {
 	int rc;
@@ -457,5 +588,7 @@ int main(void)
 	if (rc != 0) return 90 + rc;
 	rc = test_mp2_audio_snapshot_and_ack();
 	if (rc != 0) return 130 + rc;
+	rc = test_mp2_direct_audio_output();
+	if (rc != 0) return 170 + rc;
 	return 0;
 }

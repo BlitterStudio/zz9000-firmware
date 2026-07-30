@@ -17,7 +17,7 @@ build/media_session_test: media_session_test.c \
 	$(FIRMWARE_SRC)/sdk_mailbox.h \
 	$(FIRMWARE_SRC)/sdk_video_stream.h
 	mkdir -p build
-	$(CC) $(CFLAGS) -I$(FIRMWARE_SRC) -o $@ \
+	$(CC) $(CFLAGS) -DSDK_MEDIA_HOST_TEST=1 -I$(FIRMWARE_SRC) -o $@ \
 		media_session_test.c $(FIRMWARE_SRC)/sdk_media_session.c
 
 build/video_stream_test: video_stream_test.c mock/xil_cache.h \

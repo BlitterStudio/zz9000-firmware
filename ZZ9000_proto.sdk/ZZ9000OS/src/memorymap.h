@@ -154,7 +154,18 @@
 #define SDK_VIDEO_SESSIONS_ADDRESS \
     (SDK_TASKQ_REGION_ADDRESS + SDK_VIDEO_SESSIONS_OFFSET)
 #define SDK_VIDEO_SESSIONS_MAX_BYTES \
-    (SDK_AUDIO_STREAMS_OFFSET - SDK_VIDEO_SESSIONS_OFFSET)
+    (SDK_MEDIA_SESSION_OFFSET - SDK_VIDEO_SESSIONS_OFFSET)
+
+// Singleton MPEG media-session state. Unlike the decoder graph (which remains
+// core-1-owned), this small control block is read by core 0 for explicit
+// presentation/status and by the AX audio ISR for card-local PCM playback.
+// Keep it in the SCU-coherent slab so its published cursors are visible without
+// trying to invalidate another core's dirty L1 lines.
+#define SDK_MEDIA_SESSION_OFFSET    0x000BFC00
+#define SDK_MEDIA_SESSION_ADDRESS \
+    (SDK_TASKQ_REGION_ADDRESS + SDK_MEDIA_SESSION_OFFSET)
+#define SDK_MEDIA_SESSION_MAX_BYTES \
+    (SDK_AUDIO_STREAMS_OFFSET - SDK_MEDIA_SESSION_OFFSET)
 
 // Audio-stream session table, also inside the coherent region: streams may
 // be core-1-affine (feed/decode on the worker) while core 0 begins/closes

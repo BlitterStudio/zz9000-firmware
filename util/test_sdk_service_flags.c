@@ -56,15 +56,6 @@ static int expect_contains(const char *source, const char *label,
 	return 0;
 }
 
-static int expect_absent(const char *source, const char *label,
-                         const char *needle)
-{
-	if (!strstr(source, needle))
-		return 1;
-	printf("%s: unexpectedly advertises %s\n", label, needle);
-	return 0;
-}
-
 static unsigned count_occurrences(const char *source, const char *needle)
 {
 	unsigned count = 0U;
@@ -161,8 +152,10 @@ int main(int argc, char **argv)
 	                      "SDK_SERVICE_FLAG_VIDEO_MEDIA_MP2");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS");
-	ok &= expect_absent(mailbox_source, "sdk_mailbox.c",
-	                    "SDK_SERVICE_FLAG_VIDEO_AUDIO_BIND");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "audio_codec_present()");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_VIDEO_AUDIO_BIND");
 
 	png_flag_refs = count_occurrences(
 		mailbox_source, "SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA");

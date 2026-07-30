@@ -49,6 +49,7 @@ static volatile uint16_t audio_interrupt_mask = 0;
 static volatile uint16_t audio_capture_frames = ZZ_AUDIO_CAPTURE_INPUT_FRAMES;
 static volatile uint16_t audio_rx_status = ZZ_AUDIO_RX_STATUS_CAPABLE;
 static volatile uint16_t audio_tx_sequence = 0;
+static volatile uint8_t audio_codec_is_present = 0;
 static volatile uint8_t audio_capture_ready = 0;
 static volatile uint8_t audio_rx_last_completed_period =
     AUDIO_NUM_PERIODS - 1U;
@@ -888,6 +889,14 @@ uint32_t audio_get_dma_transfer_count() {
 
 uint16_t audio_get_tx_sequence(void) {
 	return audio_tx_sequence;
+}
+
+void audio_set_codec_present(int present) {
+	audio_codec_is_present = present ? 1U : 0U;
+}
+
+int audio_codec_present(void) {
+	return audio_codec_is_present != 0U;
 }
 
 void audio_set_interrupt_mask(uint16_t mask) {

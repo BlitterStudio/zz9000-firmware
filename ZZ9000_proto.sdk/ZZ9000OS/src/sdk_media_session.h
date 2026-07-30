@@ -67,6 +67,17 @@ struct SDKMediaSessionAudioResult {
 	uint32_t flags;
 };
 
+struct SDKMediaAudioSource {
+	uint8_t *ring;
+	uint32_t capacity;
+	uint32_t produced_bytes;
+	uint32_t staged_bytes;
+	uint32_t sample_rate;
+	uint32_t channels;
+	uint32_t sample_format;
+	uint8_t done;
+};
+
 void sdk_media_session_init(void);
 int sdk_media_session_core1(uint32_t session);
 int sdk_media_session_close_known(uint32_t session);
@@ -95,6 +106,17 @@ uint16_t sdk_media_session_status(
 uint16_t sdk_media_session_audio_read(
 	uint32_t session, uint64_t acknowledged, uint32_t flags,
 	struct SDKMediaSessionAudioResult *result);
+uint16_t sdk_media_session_audio_bind(
+	uint32_t session, uint32_t flags,
+	struct SDKMediaSessionAudioResult *result);
+uint16_t sdk_media_session_audio_unbind(
+	uint32_t session, uint32_t flags,
+	struct SDKMediaSessionAudioResult *result);
+int sdk_media_session_audio_source(
+	uint32_t session, struct SDKMediaAudioSource *source);
+int sdk_media_session_audio_stage(uint32_t session, uint32_t bytes);
+int sdk_media_session_audio_retire(uint32_t session, uint32_t bytes);
+void sdk_media_session_audio_underrun(uint32_t session);
 uint16_t sdk_media_session_close(
 	uint32_t session, uint32_t flags,
 	struct SDKMediaSessionMainResult *result);

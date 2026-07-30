@@ -6,6 +6,10 @@
 
 #include "sdk_media_session.h"
 
+#ifndef SDK_MEDIA_HOST_TEST
+#include "memorymap.h"
+#include <xil_cache.h>
+#endif
 #include "overlay.h"
 #include "sdk_video_stream.h"
 
@@ -27,6 +31,15 @@ struct SDKMediaSessionState {
 	uint32_t presented_frames;
 	uint32_t discarded_frames;
 	struct SDKVideoMediaInfo audio;
+	uint8_t *pcm_ring;
+	uint32_t pcm_ring_capacity;
+	uint32_t audio_codec;
+	/* Absolute PCM-byte cursors. The AX pump stages ahead of playback, but
+	 * decoder backpressure is released only through retired_bytes so pause
+	 * can discard and restage the DMA queue without losing media samples. */
+	uint32_t audio_staged_bytes;
+	uint32_t audio_retired_bytes;
+	uint32_t audio_underruns;
 	uint32_t oneshot_flags;
 	uint32_t just_closed_session;
 	uint8_t active;
@@ -34,10 +47,22 @@ struct SDKMediaSessionState {
 	uint8_t header_ready;
 	uint8_t close_retired;
 	uint8_t present_pending;
+	uint8_t audio_bound;
+	uint8_t audio_paused;
 	struct SDKMediaSessionMainResult last_close;
 };
 
-static struct SDKMediaSessionState media;
+#ifdef SDK_MEDIA_HOST_TEST
+static struct SDKMediaSessionState host_media;
+static struct SDKMediaSessionState *const media_state = &host_media;
+#else
+static struct SDKMediaSessionState *const media_state =
+	(struct SDKMediaSessionState *)SDK_MEDIA_SESSION_ADDRESS;
+typedef char media_session_state_fit_check[
+	(sizeof(struct SDKMediaSessionState) <= SDK_MEDIA_SESSION_MAX_BYTES)
+		? 1 : -1];
+#endif
+#define media (*media_state)
 
 static uint32_t gcd_u32(uint32_t a, uint32_t b)
 {
@@ -148,8 +173,18 @@ static void update_audio(void)
 {
 	struct SDKVideoMediaInfo info;
 
-	if (!media.active ||
-	    !sdk_video_stream_get_media_info(media.session, &info))
+	if (!media.active)
+		return;
+	if (media.audio_bound &&
+	    (uint64_t)media.audio_retired_bytes >
+	        media.audio.pcm_acknowledged) {
+		/* Only DMA retirement releases decoder ring space. Staged samples
+		 * remain owned by the decoder ring, so pause can rewind the staging
+		 * cursor and replay them instead of skipping queued audio. */
+		(void)sdk_video_stream_ack_media(
+			media.session, media.audio_retired_bytes);
+	}
+	if (!sdk_video_stream_get_media_info(media.session, &info))
 		return;
 	media.audio = info;
 	media.audio.flags &=
@@ -161,6 +196,65 @@ static void update_audio(void)
 		(SDK_VIDEO_MEDIA_FLAG_DERIVED_TIME |
 		 SDK_VIDEO_MEDIA_FLAG_DISCONTINUITY |
 		 SDK_VIDEO_MEDIA_FLAG_REBASED);
+}
+
+static uint32_t audio_frame_bytes(void)
+{
+	return media.audio.channels * 2U;
+}
+
+static uint64_t audio_output_pts(void)
+{
+	uint32_t frame_bytes = audio_frame_bytes();
+	uint64_t frames;
+
+	if (media.audio.first_audio_pts == SDK_MEDIA_NO_PTS ||
+	    media.audio.sample_rate == 0U || frame_bytes == 0U)
+		return SDK_MEDIA_NO_PTS;
+	frames = media.audio_retired_bytes / frame_bytes;
+	return media.audio.first_audio_pts +
+	       (frames / media.audio.sample_rate) * UINT64_C(90000) +
+	       ((frames % media.audio.sample_rate) * UINT64_C(90000)) /
+	           media.audio.sample_rate;
+}
+
+static int audio_output_drained(void)
+{
+	return media.audio_bound &&
+	       (media.audio.flags & SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE) != 0U &&
+	       (uint64_t)media.audio_retired_bytes >= media.audio.pcm_produced;
+}
+
+static uint32_t audio_output_flags(void)
+{
+	uint32_t flags = mapped_media_flags(media.audio.flags);
+
+	if (media.audio_bound) {
+		flags |= SDK_MEDIA_SESSION_RESULT_AUDIO_BOUND;
+		if (!media.audio_paused)
+			flags |= SDK_MEDIA_SESSION_RESULT_AUDIO_PLAYING;
+		if (audio_output_drained())
+			flags |= SDK_MEDIA_SESSION_RESULT_AUDIO_DRAINED;
+		if (media.audio_underruns != 0U)
+			flags |= SDK_MEDIA_SESSION_RESULT_AUDIO_UNDERRUN;
+	}
+	return flags;
+}
+
+static void fill_audio_result(struct SDKMediaSessionAudioResult *result)
+{
+	memset(result, 0, sizeof(*result));
+	result->session = media.session;
+	result->state = media.state;
+	result->sample_rate = media.audio.sample_rate;
+	result->channels = media.audio.channels;
+	result->sample_format = media.audio.sample_format;
+	result->pcm_produced = media.audio.pcm_produced;
+	result->pcm_acknowledged = media.audio_bound
+		? media.audio_retired_bytes : media.audio.pcm_acknowledged;
+	result->audio_pts = media.audio_bound
+		? audio_output_pts() : media.audio.audio_pts;
+	result->flags = audio_output_flags();
 }
 
 static uint32_t state_flags(void)
@@ -235,6 +329,9 @@ void sdk_media_session_init(void)
 	memset(&media, 0, sizeof(media));
 	media.video_pts = SDK_MEDIA_NO_PTS;
 	media.pts_origin = SDK_MEDIA_NO_PTS;
+#ifndef SDK_MEDIA_HOST_TEST
+	Xil_DCacheFlushRange((INTPTR)(uintptr_t)&media, sizeof(media));
+#endif
 }
 
 int sdk_media_session_core1(uint32_t session)
@@ -338,6 +435,9 @@ uint16_t sdk_media_session_begin(
 	memset(&media, 0, sizeof(media));
 	media.session = video_result.session;
 	media.state = mapped_state(video_result.state);
+	media.audio_codec = begin->audio_codec;
+	media.pcm_ring = begin->pcm_ring;
+	media.pcm_ring_capacity = begin->pcm_ring_capacity;
 	media.video_pts = SDK_MEDIA_NO_PTS;
 	media.pts_origin = SDK_MEDIA_NO_PTS;
 	media.audio.audio_pts = SDK_MEDIA_NO_PTS;
@@ -367,6 +467,8 @@ uint16_t sdk_media_session_write(
 		return SDK_STATUS_BAD_HANDLE;
 	if (media.state == SDK_MEDIA_SESSION_STATE_ERROR)
 		return SDK_STATUS_IO_ERROR;
+	if (media.audio_bound)
+		update_audio();
 	memset(&video_write, 0, sizeof(video_write));
 	video_write.session = write->session;
 	video_write.src = write->src;
@@ -405,6 +507,8 @@ uint16_t sdk_media_session_decode(
 		return SDK_STATUS_BAD_HANDLE;
 	if (media.state == SDK_MEDIA_SESSION_STATE_ERROR)
 		return SDK_STATUS_IO_ERROR;
+	if (media.audio_bound)
+		update_audio();
 	if (media.held) {
 		fill_main(0U, SDK_MEDIA_SESSION_RESULT_BACKPRESSURE, result);
 		return SDK_STATUS_BUSY;
@@ -485,7 +589,7 @@ uint16_t sdk_media_session_status(
 	struct SDKMediaSessionStatusResult *result)
 {
 	if (!result || session == 0U || flags != 0U ||
-	    page > SDK_MEDIA_STATUS_COUNTERS)
+	    page > SDK_MEDIA_STATUS_AUDIO_OUTPUT)
 		return SDK_STATUS_BAD_REQUEST;
 	if (!active_session(session))
 		return SDK_STATUS_BAD_HANDLE;
@@ -500,9 +604,11 @@ uint16_t sdk_media_session_status(
 		result->value[2] = media.audio.audio_pts;
 		result->value[3] = media.audio.raw_pts;
 	} else if (page == SDK_MEDIA_STATUS_AUDIO) {
-		result->flags = mapped_media_flags(media.audio.flags);
+		result->flags = audio_output_flags();
 		result->value[0] = media.audio.pcm_produced;
-		result->value[1] = media.audio.pcm_acknowledged;
+		result->value[1] = media.audio_bound
+			? media.audio_retired_bytes
+			: media.audio.pcm_acknowledged;
 		result->value[2] = media.audio.current_audio_pts;
 		result->value[3] = media.audio.first_audio_pts;
 	} else if (page == SDK_MEDIA_STATUS_COUNTERS) {
@@ -510,6 +616,20 @@ uint16_t sdk_media_session_status(
 		result->value[1] = media.decoded_frames;
 		result->value[2] = media.presented_frames;
 		result->value[3] = media.discarded_frames;
+	} else {
+		uint32_t frame_bytes = audio_frame_bytes();
+
+		result->flags = audio_output_flags();
+		if (frame_bytes != 0U) {
+			result->value[0] =
+				media.audio_retired_bytes / frame_bytes;
+			result->value[1] =
+				(media.audio_staged_bytes -
+				 media.audio_retired_bytes) / frame_bytes;
+			result->value[2] =
+				media.audio_staged_bytes / frame_bytes;
+		}
+		result->value[3] = media.audio_underruns;
 	}
 	return SDK_STATUS_OK;
 }
@@ -524,20 +644,137 @@ uint16_t sdk_media_session_audio_read(
 		return SDK_STATUS_BAD_HANDLE;
 	if (media.state == SDK_MEDIA_SESSION_STATE_ERROR)
 		return SDK_STATUS_IO_ERROR;
+	if (media.audio_bound)
+		return SDK_STATUS_BUSY;
 	if (!sdk_video_stream_ack_media(session, acknowledged))
 		return SDK_STATUS_BAD_REQUEST;
 	update_audio();
-	memset(result, 0, sizeof(*result));
-	result->session = session;
-	result->state = media.state;
-	result->sample_rate = media.audio.sample_rate;
-	result->channels = media.audio.channels;
-	result->sample_format = media.audio.sample_format;
-	result->pcm_produced = media.audio.pcm_produced;
-	result->pcm_acknowledged = media.audio.pcm_acknowledged;
-	result->audio_pts = media.audio.audio_pts;
-	result->flags = mapped_media_flags(media.audio.flags);
+	fill_audio_result(result);
 	return SDK_STATUS_OK;
+}
+
+uint16_t sdk_media_session_audio_bind(
+	uint32_t session, uint32_t flags,
+	struct SDKMediaSessionAudioResult *result)
+{
+	if (!result || session == 0U ||
+	    (flags & ~SDK_MEDIA_AUDIO_BIND_PAUSE) != 0U)
+		return SDK_STATUS_BAD_REQUEST;
+	if (!active_session(session))
+		return SDK_STATUS_BAD_HANDLE;
+	if (media.state == SDK_MEDIA_SESSION_STATE_ERROR)
+		return SDK_STATUS_IO_ERROR;
+	if (media.audio_codec != SDK_MEDIA_AUDIO_MP2)
+		return SDK_STATUS_UNSUPPORTED;
+	if (!media.audio_bound) {
+		if (flags != 0U)
+			return SDK_STATUS_BAD_REQUEST;
+		/* MEDIA_SESSION decode/write publish this snapshot from core 1.
+		 * BIND runs inline on core 0 because it also owns the AX pump;
+		 * never reach through the wrapper into core-1-owned decoder
+		 * objects here. Clients prebuffer until format discovery before
+		 * binding, so the coherent snapshot is already authoritative. */
+		if (media.audio.sample_rate == 0U ||
+		    (media.audio.channels != 1U &&
+		     media.audio.channels != 2U) ||
+		    media.audio.sample_format !=
+		        SDK_VIDEO_MEDIA_SAMPLE_S16BE ||
+		    media.audio.pcm_produced > UINT32_MAX ||
+		    media.audio.pcm_acknowledged > UINT32_MAX)
+			return SDK_STATUS_BAD_REQUEST;
+		media.audio_staged_bytes =
+			(uint32_t)media.audio.pcm_acknowledged;
+		media.audio_retired_bytes =
+			(uint32_t)media.audio.pcm_acknowledged;
+		media.audio_underruns = 0U;
+		media.audio_bound = 1U;
+	}
+	if ((flags & SDK_MEDIA_AUDIO_BIND_PAUSE) != 0U) {
+		/* The pump will wipe its TX queue after this store. Rewind staging
+		 * to actual retirement; decoder acknowledgement also follows
+		 * retirement, so every unplayed sample remains available. */
+		media.audio_paused = 1U;
+		media.audio_staged_bytes = media.audio_retired_bytes;
+	} else {
+		media.audio_paused = 0U;
+	}
+	fill_audio_result(result);
+	return SDK_STATUS_OK;
+}
+
+uint16_t sdk_media_session_audio_unbind(
+	uint32_t session, uint32_t flags,
+	struct SDKMediaSessionAudioResult *result)
+{
+	if (!result || session == 0U || flags != 0U)
+		return SDK_STATUS_BAD_REQUEST;
+	if (!active_session(session))
+		return SDK_STATUS_BAD_HANDLE;
+	if (media.audio_bound)
+		media.audio_staged_bytes = media.audio_retired_bytes;
+	media.audio_bound = 0U;
+	media.audio_paused = 0U;
+	fill_audio_result(result);
+	return SDK_STATUS_OK;
+}
+
+int sdk_media_session_audio_source(
+	uint32_t session, struct SDKMediaAudioSource *source)
+{
+	if (!source || !active_session(session) ||
+	    !media.audio_bound || media.audio_paused ||
+	    !media.pcm_ring || media.pcm_ring_capacity == 0U)
+		return 0;
+	memset(source, 0, sizeof(*source));
+	source->ring = media.pcm_ring;
+	source->capacity = media.pcm_ring_capacity;
+	source->produced_bytes = (uint32_t)media.audio.pcm_produced;
+	source->staged_bytes = media.audio_staged_bytes;
+	source->sample_rate = media.audio.sample_rate;
+	source->channels = media.audio.channels;
+	source->sample_format = media.audio.sample_format;
+	source->done =
+		(media.audio.flags & SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE) != 0U;
+	return 1;
+}
+
+int sdk_media_session_audio_stage(uint32_t session, uint32_t bytes)
+{
+	uint32_t available;
+	uint32_t frame_bytes = audio_frame_bytes();
+
+	if (!active_session(session) || !media.audio_bound ||
+	    media.audio_paused || frame_bytes == 0U ||
+	    (bytes % frame_bytes) != 0U ||
+	    media.audio_staged_bytes >
+	        (uint32_t)media.audio.pcm_produced)
+		return 0;
+	available = (uint32_t)media.audio.pcm_produced -
+	            media.audio_staged_bytes;
+	if (bytes > available)
+		return 0;
+	media.audio_staged_bytes += bytes;
+	return 1;
+}
+
+int sdk_media_session_audio_retire(uint32_t session, uint32_t bytes)
+{
+	uint32_t frame_bytes = audio_frame_bytes();
+
+	if (!active_session(session) || !media.audio_bound ||
+	    frame_bytes == 0U || (bytes % frame_bytes) != 0U ||
+	    media.audio_retired_bytes > media.audio_staged_bytes ||
+	    bytes > media.audio_staged_bytes - media.audio_retired_bytes)
+		return 0;
+	media.audio_retired_bytes += bytes;
+	return 1;
+}
+
+void sdk_media_session_audio_underrun(uint32_t session)
+{
+	if (active_session(session) && media.audio_bound &&
+	    !media.audio_paused && media.audio_underruns != 0xffffffffU)
+		media.audio_underruns++;
 }
 
 uint16_t sdk_media_session_close(
@@ -557,6 +794,8 @@ uint16_t sdk_media_session_close(
 	}
 	if (!active_session(session))
 		return SDK_STATUS_BAD_HANDLE;
+	if (media.audio_bound)
+		return SDK_STATUS_BUSY;
 	if (media.present_pending)
 		return SDK_STATUS_BUSY;
 	status = sdk_video_stream_close(session, &video_result);
