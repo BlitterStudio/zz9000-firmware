@@ -607,16 +607,16 @@ initial begin
 
     /* Screen-edge clipping must not force the ARM compositor. Negative
      * destination coordinates still map from the original unclipped rect. */
-    op(OP_OVERLAY_POS, (16'hffff << 16) | 16'hfffc); /* -4,-1 */
+    op(OP_OVERLAY_POS, (16'hfffd << 16) | 16'hfffc); /* -4,-3 */
     op(OP_OVERLAY_SIZE, (6 << 16) | 18);
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 6);
     for (i = 0; i < NLINES; i = i + 1)
       for (x = 1; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
-        if (i < 5 && (x - 1) < 14) begin
+        if (i < 3 && (x - 1) < 14) begin
           overlay_src_x = ((x - 1 + 4) * 9) / 18;
-          overlay_src_y = ((i + 1) * 3) / 6;
+          overlay_src_y = ((i + 3) * 3) / 6;
           exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
         end else begin
           exp = expected_pix(i, x - 1);

@@ -192,6 +192,16 @@ module video_overlay_linebuffer_tb;
     request_line(0);
     line(0, 1); check_line(0);
 
+    /* A vertically clipped overlay can request a nonzero first source row
+     * immediately after a generation handoff. Seek from SOF and publish only
+     * the requested row, without transiently presenting line zero. */
+    generation = 4;
+    while (accepted_generation != 4) @(posedge pixel_clk);
+    request_line(2);
+    line(0, 1);
+    line(1, 0);
+    line(2, 0); check_line(2);
+
     if (failures == 0) $display("video_overlay_linebuffer_tb: PASS");
     else $display("video_overlay_linebuffer_tb: %0d failure(s)", failures);
     $finish(failures != 0);
