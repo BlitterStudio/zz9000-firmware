@@ -202,6 +202,31 @@ static uint32_t audio_frame_bytes(void)
 	return media.audio.channels * 2U;
 }
 
+static void audio_cursor_snapshot(uint64_t *retired_bytes,
+	                              uint64_t *staged_bytes)
+{
+	volatile const struct SDKMediaSessionState *state = media_state;
+	uint64_t retired_before;
+	uint64_t retired_after;
+	uint64_t staged_before;
+	uint64_t staged_after;
+
+	/* The audio ISR advances both 64-bit cursors on this 32-bit core. Read
+	 * each twice until the pair is stable: otherwise a mailbox STATUS can
+	 * combine an old retired value with a new queued calculation (or observe
+	 * a torn 64-bit load), producing counters that cannot describe any real
+	 * playback state. */
+	do {
+		retired_before = state->audio_retired_bytes;
+		staged_before = state->audio_staged_bytes;
+		retired_after = state->audio_retired_bytes;
+		staged_after = state->audio_staged_bytes;
+	} while (retired_before != retired_after ||
+	         staged_before != staged_after);
+	*retired_bytes = retired_after;
+	*staged_bytes = staged_after;
+}
+
 static uint64_t audio_acknowledged(void)
 {
 	return media.audio_retired_bytes > media.audio.pcm_acknowledged
@@ -622,16 +647,18 @@ uint16_t sdk_media_session_status(
 		result->value[3] = media.discarded_frames;
 	} else {
 		uint32_t frame_bytes = audio_frame_bytes();
+		uint64_t retired_bytes;
+		uint64_t staged_bytes;
 
 		result->flags = audio_output_flags();
+		audio_cursor_snapshot(&retired_bytes, &staged_bytes);
 		if (frame_bytes != 0U) {
 			result->value[0] =
-				media.audio_retired_bytes / frame_bytes;
+				retired_bytes / frame_bytes;
 			result->value[1] =
-				(media.audio_staged_bytes -
-				 media.audio_retired_bytes) / frame_bytes;
+				(staged_bytes - retired_bytes) / frame_bytes;
 			result->value[2] =
-				media.audio_staged_bytes / frame_bytes;
+				staged_bytes / frame_bytes;
 		}
 		result->value[3] = media.audio_underruns;
 	}
