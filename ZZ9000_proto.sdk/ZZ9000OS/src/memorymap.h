@@ -93,6 +93,24 @@
 #define SDK_LOCAL_SURFACE_HEAP_END \
     (SDK_LOCAL_SURFACE_HEAP_ADDRESS + SDK_LOCAL_SURFACE_HEAP_SIZE)
 
+// The legacy AHI/MHI drivers place their Zorro 3 TX/RX rings at the top of
+// the 128 MB main board aperture. The buffer offset written to firmware is
+// BoardSize - 0x20000, relative to FRAMEBUFFER_ADDRESS; TX occupies the first
+// 30 KB and RX starts 32 KB later. The formatter RX DMA keeps writing its ring
+// even when only playback is active, so this entire host-visible window must
+// stay outside the linker-managed firmware image and newlib heap.
+//
+// lscript.ld deliberately starts ps7_ddr_hi at the next 1 MB boundary,
+// FIRMWARE_HIGH_DDR_ADDRESS. Keep these values synchronized with its
+// __z3_audio_scratch_* symbols and ASSERT.
+#define Z3_MAIN_BOARD_WINDOW_SIZE       0x08000000
+#define Z3_AUDIO_SCRATCH_ADDRESS \
+    (FRAMEBUFFER_ADDRESS + Z3_MAIN_BOARD_WINDOW_SIZE - 0x00020000)
+#define Z3_AUDIO_SCRATCH_SIZE           0x00010000
+#define Z3_AUDIO_SCRATCH_END \
+    (Z3_AUDIO_SCRATCH_ADDRESS + Z3_AUDIO_SCRATCH_SIZE)
+#define FIRMWARE_HIGH_DDR_ADDRESS       0x08200000
+
 #if SDK_LOCAL_SURFACE_HEAP_ADDRESS < LEGACY_SURFACE_HEAP_END
 #error "SDK ARM-local heap overlaps legacy accelerator surface heap"
 #endif
@@ -103,6 +121,14 @@
 
 #if SDK_LOCAL_SURFACE_HEAP_END > SDK_LOW_DDR_RESERVED_END
 #error "SDK ARM-local heap exceeds low DDR reservation"
+#endif
+
+#if Z3_AUDIO_SCRATCH_ADDRESS < SDK_LOW_DDR_RESERVED_END
+#error "Z3 audio scratch overlaps low DDR allocators"
+#endif
+
+#if Z3_AUDIO_SCRATCH_END > FIRMWARE_HIGH_DDR_ADDRESS
+#error "Z3 audio scratch overlaps linker-managed firmware DDR"
 #endif
 
 // Z3 fast-RAM DDR window. VARIANT_Z3_FASTRAM bitstreams map the 256 MB

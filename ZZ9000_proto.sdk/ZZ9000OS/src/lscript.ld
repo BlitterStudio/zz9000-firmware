@@ -24,7 +24,10 @@ _UNDEF_STACK_SIZE = DEFINED(_UNDEF_STACK_SIZE) ? _UNDEF_STACK_SIZE : 1024;
 MEMORY
 {
    ps7_ddr_0 : ORIGIN = 0x100000, LENGTH = 0x07F00000
-   ps7_ddr_hi : ORIGIN = 0x08000000, LENGTH = 0x10000000
+   /* 0x081e0000..0x081f0000 is the host-visible Z3 AHI/MHI audio
+    * scratch window (see memorymap.h). Keep the firmware image, BSS and
+    * newlib heap above it; 0x08200000 preserves 1 MB MMU alignment. */
+   ps7_ddr_hi : ORIGIN = 0x08200000, LENGTH = 0x0FE00000
    bootrom_ddr : ORIGIN = 0x3FCF0000, LENGTH = 0x2000
    ps7_ram_0 : ORIGIN = 0x0, LENGTH = 0x30000
    ps7_ram_1 : ORIGIN = 0xFFFF0000, LENGTH = 0xFE00
@@ -232,6 +235,14 @@ SECTIONS
 __firmware_low_end = .;
 __framebuffer_start = 0x00200000;
 ASSERT(__firmware_low_end <= __framebuffer_start, "firmware low sections overlap framebuffer memory")
+
+/* Keep synchronized with Z3_AUDIO_SCRATCH_{ADDRESS,END} in memorymap.h.
+ * The legacy audio RX formatter writes this window continuously after AHI
+ * first opens, so an overlap corrupts persistent firmware heap state. */
+__z3_audio_scratch_start = 0x081E0000;
+__z3_audio_scratch_end = 0x081F0000;
+ASSERT(ORIGIN(ps7_ddr_hi) >= __z3_audio_scratch_end,
+       "firmware high DDR overlaps Z3 AHI/MHI audio scratch")
 
 .sdk_codec_text : {
    . = ALIGN(16);
