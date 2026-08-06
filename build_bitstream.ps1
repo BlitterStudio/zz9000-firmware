@@ -143,24 +143,51 @@ if ($NoAutoboot) {
 }
 
 $projectDir = Join-Path $repoRoot 'ZZ9000_proto'
-if (Test-Path -LiteralPath $projectDir) {
-    $resolvedProject = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $projectDir).Path)
-    $rootPrefix = $repoRoot.TrimEnd('\') + '\'
-    if (-not $resolvedProject.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to delete generated project outside repo: $resolvedProject"
+$rootPrefix = $repoRoot.TrimEnd('\') + '\'
+
+function Clear-GeneratedProjectIfPresent {
+    if (-not (Test-Path -LiteralPath $projectDir)) {
+        return
+    }
+
+    $resolved = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $projectDir).Path)
+    if (-not $resolved.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to delete generated project outside repo: $resolved"
     }
 
     Write-Host '[bitstream] removing old generated project'
-    Remove-GeneratedProject -Path $resolvedProject
+    Remove-GeneratedProject -Path $resolved
 }
 
-Write-Host '[bitstream] regenerating project from zz9000_project.tcl'
 $vivadoProjectArgs = @(
     '-mode', 'batch',
     '-source', 'zz9000_project.tcl',
     '-tclargs'
 ) + $projectArgs
-Invoke-Checked -FilePath $vivado -Arguments $vivadoProjectArgs
+
+# Project generation is itself flaky across a long batch. Observed on
+# 2026-08-07 partway through the variant rebuild:
+#   ERROR: [Common 17-232] Could not create slave interpreter
+#          '::ipgui_xilinx_com_signal_param_clock_1_0'.
+# thrown from create_bd_port inside cr_bd_zz9000_ps. It is transient - the
+# same variant generates cleanly on a retry - so do not make an operator
+# restart an hours-long batch over it. Each attempt starts from a removed
+# project, because retrying on top of a half-written one is what produces
+# the missing-ZORRO_*-port corruption described above.
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+    Clear-GeneratedProjectIfPresent
+
+    Write-Host '[bitstream] regenerating project from zz9000_project.tcl'
+    & $vivado @vivadoProjectArgs
+    if ($LASTEXITCODE -eq 0) {
+        break
+    }
+    if ($attempt -eq 3) {
+        throw "Project generation failed after 3 attempts (exit ${LASTEXITCODE})."
+    }
+    Write-Host "[bitstream] project generation failed, retrying ($attempt/2)"
+    Start-Sleep -Seconds 10
+}
 
 Write-Host '[bitstream] running synthesis + implementation + write_bitstream'
 Invoke-Checked -FilePath $vivado -Arguments @(
