@@ -34,4 +34,12 @@ int mp3_get_hz(const struct mp3_decode_ctx *ctx);
 int mp3_get_channels(const struct mp3_decode_ctx *ctx);
 unsigned long mp3_get_bytes_consumed(const struct mp3_decode_ctx *ctx);
 
+/* Check whether the current input contains a complete decodable frame without
+ * mutating the live decoder state. Used by resumable stream drains, which must
+ * retain a frame split across later client buffers. */
+int mp3_probe_complete_frame(const mp3dec_t *decoder,
+                             const uint8_t *input_buffer,
+                             int input_buffer_size,
+                             int *decode_input_size);
+
 #endif /* ZZ9K_MP3_H */

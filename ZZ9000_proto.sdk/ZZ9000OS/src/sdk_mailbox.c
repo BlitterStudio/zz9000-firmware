@@ -19,6 +19,7 @@
 #include "sdk_video_stream.h"
 #include "sdk_media_session.h"
 #include "audio_playback_frontier.h"
+#include "audio_stream_drain.h"
 #include "sdk_jpeg.h"
 #include "sdk_surface.h"
 #include "sdk_smp_lock.h"
@@ -49,7 +50,7 @@
 	 SDK_CAP_MEMORY_OPS | SDK_CAP_CRYPTO | \
 	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION | \
 	 SDK_CAP_HOST_WINDOW_HEAP | SDK_CAP_VIDEO_DECODE | \
-	 SDK_CAP_MEDIA_SESSION)
+	 SDK_CAP_MEDIA_SESSION | SDK_CAP_AUDIO_STREAM_DRAIN)
 /* Decode proceeds only with at least this much undecoded input (unless
  * EOF): enough for the largest legal MP3 frame (~1.4K, 2.3K free-format)
  * plus sync lookahead. It must stay WELL below any client's input-ring
@@ -831,6 +832,8 @@ struct SDKAudioStream {
 	uint32_t bytes_produced;
 	uint32_t output_frame_limit;
 	int eof;
+	int drain_requested;
+	int drain_input_complete;
 	int initialized;
 	int backpressure;
 	int vbr_checked;
@@ -3248,7 +3251,7 @@ static int audio_stream_needs_more_input(const struct SDKAudioStream *stream)
 {
 	return stream &&
 	       stream->input_length < SDK_AUDIO_STREAM_MIN_INPUT_BYTES &&
-	       !stream->eof;
+	       !stream->eof && !stream->drain_requested;
 }
 
 static int audio_stream_process_vbr_tag(struct SDKAudioStream *stream,
@@ -3279,6 +3282,7 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 	uint32_t max_pcm_this_call;
 	uint32_t pcm_flush_start;
 	uint32_t progress = 0U;
+	int drain_blocked_on_input = 0;
 	uint8_t *input;
 	uint8_t *pcm_dst;
 
@@ -3290,9 +3294,13 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 	if (stream->decode_complete) {
 		if (stream->input_length != 0U) {
 			audio_stream_discard_input(stream);
-			return 1U;
+			progress = 1U;
 		}
-		return 0;
+		if (audio_stream_drain_input_done(
+			    stream->drain_requested, stream->decode_complete,
+			    stream->input_length, 0))
+			stream->drain_input_complete = 1;
+		return progress;
 	}
 	max_pcm_this_call = stream->high_water_bytes;
 	if (max_pcm_this_call == 0U ||
@@ -3305,26 +3313,39 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 	while (stream->input_length > 0U &&
 	       audio_stream_pcm_free(stream) >= frame_pcm_bytes) {
 		mp3dec_frame_info_t info;
+		int decode_input_size = (int)stream->input_length;
 		int samples;
 		uint32_t consumed;
 		uint32_t bytes;
 
-		if (audio_stream_needs_more_input(stream))
+		if (!audio_stream_decode_may_run(
+			    stream->input_length,
+			    SDK_AUDIO_STREAM_MIN_INPUT_BYTES,
+			    stream->eof, stream->drain_requested))
 			break;
 		if (produced_this_call != 0U &&
 		    (max_pcm_this_call - produced_this_call) <
 		        frame_pcm_bytes) {
 			break;
 		}
+		if (stream->drain_requested && !stream->eof &&
+		    !mp3_probe_complete_frame(
+			    &stream->decoder, input + stream->input_offset,
+			    (int)stream->input_length, &decode_input_size)) {
+			drain_blocked_on_input = 1;
+			break;
+		}
 		memset(&info, 0, sizeof(info));
 		samples = mp3dec_decode_frame(
 			&stream->decoder,
 			input + stream->input_offset,
-			(int)stream->input_length,
+			decode_input_size,
 			stream->scratch, &info);
 		consumed = (uint32_t)info.frame_bytes;
-		if (consumed == 0U)
+		if (consumed == 0U) {
+			drain_blocked_on_input = 1;
 			break;
+		}
 		if (stream->eof && stream->frames_decoded != 0U &&
 		    info.frame_offset != 0) {
 			audio_stream_discard_input(stream);
@@ -3389,6 +3410,10 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 		 * the PCM bytes in DRAM. */
 		stream->pcm_ready_total = stream->pcm_written_total;
 	}
+	if (audio_stream_drain_input_done(
+		    stream->drain_requested, stream->decode_complete,
+		    stream->input_length, drain_blocked_on_input))
+		stream->drain_input_complete = 1;
 	return progress;
 }
 
@@ -3405,6 +3430,10 @@ static uint32_t audio_stream_state(const struct SDKAudioStream *stream)
 			return SDK_AUDIO_STREAM_STATE_STREAMING;
 		return SDK_AUDIO_STREAM_STATE_DONE;
 	}
+	if (audio_stream_transient_drained(
+	        stream->drain_requested, stream->drain_input_complete,
+	        audio_stream_pcm_used(stream), stream->pump_tail_pending))
+		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
 	if (audio_stream_needs_more_input(stream))
 		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
 	if (stream->input_length == 0U &&
@@ -3428,6 +3457,10 @@ static uint32_t audio_stream_result_flags(const struct SDKAudioStream *stream)
 		flags |= SDK_AUDIO_STREAM_RESULT_DONE;
 	if (stream->backpressure)
 		flags |= SDK_AUDIO_STREAM_RESULT_BACKPRESSURE;
+	if (audio_stream_transient_drained(
+	        stream->drain_requested, stream->drain_input_complete,
+	        audio_stream_pcm_used(stream), stream->pump_tail_pending))
+		flags |= SDK_AUDIO_STREAM_RESULT_DRAINED;
 	return flags;
 }
 
@@ -3504,9 +3537,17 @@ static void audio_stream_feed_compute(struct SDKAudioStream *stream,
 		       (const void *)(uintptr_t)src_addr, src_length);
 		stream->input_length += src_length;
 		stream->backpressure = 0;
+		stream->drain_requested = 0;
+		stream->drain_input_complete = 0;
 	}
-	if ((flags & SDK_AUDIO_STREAM_FEED_EOF) != 0U)
+	if ((flags & SDK_AUDIO_STREAM_FEED_EOF) != 0U) {
 		stream->eof = 1;
+		stream->drain_requested = 0;
+		stream->drain_input_complete = 0;
+	} else if ((flags & SDK_AUDIO_STREAM_FEED_DRAIN) != 0U) {
+		stream->drain_requested = 1;
+		stream->drain_input_complete = 0;
+	}
 	audio_stream_decode(stream);
 }
 
@@ -3665,8 +3706,10 @@ static int audio_pump_source_snapshot(struct SDKAudioPumpSource *source)
 		source->sample_rate = stream->sample_rate;
 		source->channels = stream->channels;
 		source->sample_format = stream->sample_format;
-		source->done =
-			stream->eof && stream->input_length == 0U;
+		source->done = audio_stream_source_tail_ready(
+			stream->eof, stream->input_length,
+			stream->drain_requested,
+			stream->drain_input_complete);
 		source->faulted = stream->faulted != 0U;
 		return 1;
 	}
@@ -3967,9 +4010,11 @@ void sdk_mailbox_audio_playback_pump(void)
 	 * client completion is posted); a core-0-affine stream (begun while
 	 * the scheduler was down) refills inline, matching the legacy CPU
 	 * profile of that degraded mode. */
-	if (stream->input_length != 0U && !stream->faulted &&
-	    !audio_stream_needs_more_input(stream) &&
-	    audio_stream_pcm_used(stream) <= stream->low_water_bytes) {
+	if (audio_stream_refill_may_run(
+	        stream->input_length, stream->faulted,
+	        audio_stream_needs_more_input(stream),
+	        stream->drain_input_complete, audio_stream_pcm_used(stream),
+	        stream->low_water_bytes)) {
 		/* needs_more_input guard: a refill FEED would no-op below the
 		 * decoder's minimum-input gate, and the pump runs every main
 		 * loop pass -- without the guard the sub-minimum tail of a
@@ -4233,7 +4278,14 @@ static uint16_t handle_audio_stream_feed(volatile struct SDKMailboxEntry *req,
 
 	src_length = get_be32(payload->src_length);
 	flags = get_be32(payload->flags);
-	if ((flags & ~SDK_AUDIO_STREAM_FEED_EOF) != 0U)
+	if ((flags & ~(SDK_AUDIO_STREAM_FEED_EOF |
+	               SDK_AUDIO_STREAM_FEED_DRAIN)) != 0U ||
+	    (flags & (SDK_AUDIO_STREAM_FEED_EOF |
+	              SDK_AUDIO_STREAM_FEED_DRAIN)) ==
+	        (SDK_AUDIO_STREAM_FEED_EOF |
+	         SDK_AUDIO_STREAM_FEED_DRAIN) ||
+	    ((flags & SDK_AUDIO_STREAM_FEED_DRAIN) != 0U &&
+	     src_length != 0U))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if (stream->faulted)
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);

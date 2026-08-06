@@ -53,6 +53,7 @@
 #define SDK_CAP_HOST_WINDOW_HEAP       (1U << 20)
 #define SDK_CAP_VIDEO_DECODE           (1U << 21)
 #define SDK_CAP_MEDIA_SESSION          (1U << 22)
+#define SDK_CAP_AUDIO_STREAM_DRAIN     (1U << 23)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
@@ -416,6 +417,7 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 #define SDK_AUDIO_DECODE_RESULT_END    (1U << 0)
 #define SDK_MAX_AUDIO_STREAMS          4U
 #define SDK_AUDIO_STREAM_FEED_EOF      (1U << 0)
+#define SDK_AUDIO_STREAM_FEED_DRAIN    (1U << 1)
 #define SDK_AUDIO_STREAM_STATE_NEED_INPUT 1U
 #define SDK_AUDIO_STREAM_STATE_STREAMING  2U
 #define SDK_AUDIO_STREAM_STATE_DONE       3U
@@ -424,6 +426,7 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 #define SDK_AUDIO_STREAM_RESULT_PCM_READY  (1U << 1)
 #define SDK_AUDIO_STREAM_RESULT_DONE       (1U << 2)
 #define SDK_AUDIO_STREAM_RESULT_BACKPRESSURE (1U << 3)
+#define SDK_AUDIO_STREAM_RESULT_DRAINED    (1U << 4)
 
 /* Direct-overlay output has one display binding. Multiple decoder sessions
  * would race to own that plane until the ABI grows an explicit binding. */
