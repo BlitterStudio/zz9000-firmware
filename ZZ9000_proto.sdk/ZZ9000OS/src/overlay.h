@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include "video.h"
 #include "gfx.h"
+#include "overlay_path.h"
 
 /* Core-1 compose job parameters (fits TASKQ_OP_PARAM_BYTES = 48). */
 struct overlay_compose_params {

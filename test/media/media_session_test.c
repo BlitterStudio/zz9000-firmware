@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "overlay_path.h"
 #include "sdk_mailbox.h"
 #include "sdk_media_session.h"
 #include "sdk_video_stream.h"
@@ -165,6 +166,17 @@ void overlay_video_session_closed(uint32_t session)
 		overlay_close_calls++;
 }
 
+static struct overlay_path_info mock_path;
+static uint32_t mock_path_query_session;
+
+void overlay_path_snapshot(uint32_t session, struct overlay_path_info *out)
+{
+	mock_path_query_session = session;
+	*out = mock_path;
+	out->owns_session =
+		(session != 0U && session == mock_session) ? 1U : 0U;
+}
+
 static void reset_mocks(void)
 {
 	begin_calls = 0U;
@@ -173,6 +185,8 @@ static void reset_mocks(void)
 	close_calls = 0U;
 	present_calls = 0U;
 	overlay_close_calls = 0U;
+	memset(&mock_path, 0, sizeof(mock_path));
+	mock_path_query_session = 0U;
 	mock_write_status = SDK_STATUS_OK;
 	mock_bytes_accepted = 0U;
 	mock_frame_number = 0U;
@@ -212,6 +226,16 @@ static int test_exact_abi_mirror(void)
 	if (SDK_MEDIA_SESSION_RESULT_AUDIO_DRAINED != (1U << 13)) return 23;
 	if (SDK_MEDIA_SESSION_RESULT_AUDIO_UNDERRUN != (1U << 14)) return 24;
 	if (SDK_MEDIA_STATUS_AUDIO_OUTPUT != 3U) return 25;
+	if (SDK_MEDIA_STATUS_PRESENTATION != 4U) return 26;
+	if (SDK_MEDIA_PRESENT_CONFIGURED != (1U << 0)) return 27;
+	if (SDK_MEDIA_PRESENT_ACTIVE != (1U << 1)) return 28;
+	if (SDK_MEDIA_PRESENT_NATIVE != (1U << 2)) return 29;
+	if (SDK_MEDIA_PRESENT_OWNED != (1U << 3)) return 30;
+	if (SDK_MEDIA_PACK_PAIR(320U, 240U) != ((320ULL << 16) | 240ULL))
+		return 31;
+	/* negative coordinates must survive as sign-extendable 16-bit halves */
+	if (SDK_MEDIA_PACK_PAIR(-8, -1) != ((0xfff8ULL << 16) | 0xffffULL))
+		return 32;
 	return 0;
 }
 
@@ -344,7 +368,7 @@ static int test_errors_and_reclaim(void)
 	if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK)
 		return 2;
 	if (sdk_media_session_status(mock_session,
-	                             SDK_MEDIA_STATUS_AUDIO_OUTPUT + 1U,
+	                             SDK_MEDIA_STATUS_PRESENTATION + 1U,
 	                             0U, &status) != SDK_STATUS_BAD_REQUEST ||
 	    sdk_media_session_status(mock_session, SDK_MEDIA_STATUS_TIMING,
 	                             1U, &status) != SDK_STATUS_BAD_REQUEST)
@@ -403,6 +427,101 @@ static int test_errors_and_reclaim(void)
 	if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK ||
 	    begin_calls != 3U)
 		return 15;
+	return 0;
+}
+
+/* R10 presentation-path honesty: the overlay chooses native scanout versus
+ * the shadow compositor internally, so page 4 is the player's only truthful
+ * source. Geometry travels as raw 16-bit halves; classification is host-side. */
+static int test_presentation_status_page(void)
+{
+	struct SDKMediaSessionBegin begin;
+	struct SDKMediaSessionMainResult result;
+	struct SDKMediaSessionStatusResult status;
+
+	reset_mocks();
+	sdk_media_session_init();
+	fill_begin(&begin);
+	if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK)
+		return 1;
+
+	/* An unconfigured overlay reports no path at all rather than failing. */
+	if (sdk_media_session_status(mock_session,
+	                             SDK_MEDIA_STATUS_PRESENTATION, 0U,
+	                             &status) != SDK_STATUS_OK)
+		return 2;
+	if (status.page != SDK_MEDIA_STATUS_PRESENTATION ||
+	    (status.flags & SDK_MEDIA_PRESENT_CONFIGURED) != 0U ||
+	    (status.flags & SDK_MEDIA_PRESENT_ACTIVE) != 0U ||
+	    (status.flags & SDK_MEDIA_PRESENT_NATIVE) != 0U)
+		return 3;
+	if (mock_path_query_session != mock_session)
+		return 4;
+
+	/* Native 1:1: destination equals source, nothing clipped. */
+	mock_path.configured = 1U;
+	mock_path.active = 1U;
+	mock_path.hw_active = 1U;
+	mock_path.src_w = 320U;
+	mock_path.src_h = 240U;
+	mock_path.dst_x = 40;
+	mock_path.dst_y = 20;
+	mock_path.dst_w = 320;
+	mock_path.dst_h = 240;
+	mock_path.screen_w = 640U;
+	mock_path.screen_h = 480U;
+	if (sdk_media_session_status(mock_session,
+	                             SDK_MEDIA_STATUS_PRESENTATION, 0U,
+	                             &status) != SDK_STATUS_OK)
+		return 5;
+	if (status.flags != (SDK_MEDIA_PRESENT_CONFIGURED |
+	                     SDK_MEDIA_PRESENT_ACTIVE |
+	                     SDK_MEDIA_PRESENT_NATIVE |
+	                     SDK_MEDIA_PRESENT_OWNED))
+		return 6;
+	if (status.value[0] != SDK_MEDIA_PACK_PAIR(320U, 240U) ||
+	    status.value[1] != SDK_MEDIA_PACK_PAIR(320U, 240U) ||
+	    status.value[2] != SDK_MEDIA_PACK_PAIR(40U, 20U) ||
+	    status.value[3] != SDK_MEDIA_PACK_PAIR(640U, 480U))
+		return 7;
+
+	/* Native scaled and clipped off the left/top edge: negative origins
+	 * must survive the packing as recoverable two's-complement halves. */
+	mock_path.dst_x = -16;
+	mock_path.dst_y = -9;
+	mock_path.dst_w = 640;
+	mock_path.dst_h = 480;
+	if (sdk_media_session_status(mock_session,
+	                             SDK_MEDIA_STATUS_PRESENTATION, 0U,
+	                             &status) != SDK_STATUS_OK)
+		return 8;
+	if (status.value[1] != SDK_MEDIA_PACK_PAIR(640U, 480U) ||
+	    status.value[2] != ((0xfff0ULL << 16) | 0xfff7ULL))
+		return 9;
+
+	/* Software fallback: still active, but not natively scanned. */
+	mock_path.hw_active = 0U;
+	if (sdk_media_session_status(mock_session,
+	                             SDK_MEDIA_STATUS_PRESENTATION, 0U,
+	                             &status) != SDK_STATUS_OK)
+		return 10;
+	if ((status.flags & SDK_MEDIA_PRESENT_NATIVE) != 0U ||
+	    (status.flags & SDK_MEDIA_PRESENT_ACTIVE) == 0U)
+		return 11;
+
+	/* The page bound moved by exactly one: 5 is still rejected, and a
+	 * non-zero flags word remains rejected on the new page. */
+	if (sdk_media_session_status(mock_session, 5U, 0U, &status) !=
+	        SDK_STATUS_BAD_REQUEST)
+		return 12;
+	if (sdk_media_session_status(mock_session,
+	                             SDK_MEDIA_STATUS_PRESENTATION, 1U,
+	                             &status) != SDK_STATUS_BAD_REQUEST)
+		return 13;
+	if (sdk_media_session_status(mock_session + 1U,
+	                             SDK_MEDIA_STATUS_PRESENTATION, 0U,
+	                             &status) != SDK_STATUS_BAD_HANDLE)
+		return 14;
 	return 0;
 }
 
@@ -646,6 +765,8 @@ int main(void)
 	if (rc != 0) return 50 + rc;
 	rc = test_errors_and_reclaim();
 	if (rc != 0) return 90 + rc;
+	rc = test_presentation_status_page();
+	if (rc != 0) return 230 + rc;
 	rc = test_mp2_audio_snapshot_and_ack();
 	if (rc != 0) return 130 + rc;
 	rc = test_mp2_direct_audio_output();

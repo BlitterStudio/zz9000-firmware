@@ -474,6 +474,22 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 #define SDK_MEDIA_STATUS_AUDIO 1U
 #define SDK_MEDIA_STATUS_COUNTERS 2U
 #define SDK_MEDIA_STATUS_AUDIO_OUTPUT 3U
+/* Overlay presentation path and geometry. Firmware older than this page
+ * rejects it with BAD_REQUEST, which is the intended capability gate: a
+ * client that gets BAD_REQUEST reports the path as unavailable. */
+#define SDK_MEDIA_STATUS_PRESENTATION 4U
+
+/* SDK_MEDIA_STATUS_PRESENTATION flag bits (status result `flags`). */
+#define SDK_MEDIA_PRESENT_CONFIGURED (1U << 0)
+#define SDK_MEDIA_PRESENT_ACTIVE (1U << 1)
+#define SDK_MEDIA_PRESENT_NATIVE (1U << 2)
+#define SDK_MEDIA_PRESENT_OWNED (1U << 3)
+
+/* Each presentation value carries two 16-bit halves: width/height, or x/y.
+ * Signed coordinates travel as their two's-complement 16-bit pattern and are
+ * sign-extended by the reader. Mirrored as ZZ9K_MEDIA_PACK_PAIR in the SDK. */
+#define SDK_MEDIA_PACK_PAIR(hi, lo) \
+	(((uint64_t)(uint16_t)(hi) << 16) | (uint64_t)(uint16_t)(lo))
 
 #define SDK_CRYPTO_HASH_NONE           0U
 #define SDK_CRYPTO_HASH_SHA1           1U
