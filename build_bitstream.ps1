@@ -69,6 +69,29 @@ function Invoke-Checked {
     }
 }
 
+function Remove-GeneratedProject {
+    param([string]$Path)
+
+    # Vivado can still hold handles under the run directories for a moment
+    # after it exits, and on-access virus scanning of the freshly written
+    # bitstream extends that window. Back-to-back variant builds delete the
+    # project the instant the previous run returns, which loses that race and
+    # fails the whole batch several variants in. Retry before giving up.
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        } catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+            if ($attempt -eq 10) {
+                throw
+            }
+            Write-Host "[bitstream] project still locked, retrying ($attempt/9)"
+            [System.GC]::Collect()
+            Start-Sleep -Seconds 3
+        }
+    }
+}
+
 $scriptDir = Split-Path -Parent $PSCommandPath
 $repoRoot = [System.IO.Path]::GetFullPath($scriptDir)
 Set-Location -LiteralPath $repoRoot
@@ -93,7 +116,7 @@ if (Test-Path -LiteralPath $projectDir) {
     }
 
     Write-Host '[bitstream] removing old generated project'
-    Remove-Item -LiteralPath $resolvedProject -Recurse -Force
+    Remove-GeneratedProject -Path $resolvedProject
 }
 
 Write-Host '[bitstream] regenerating project from zz9000_project.tcl'

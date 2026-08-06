@@ -3,13 +3,25 @@
 # Build FPGA bitstreams for release variants.
 #
 # This is meant for the Vivado machine. It rewrites only the small variant
-# define block in mntzorro.v, runs build_bitstream.sh, copies the resulting
-# .bit file to the release path, then restores mntzorro.v.
+# define block in mntzorro.v, runs the per-variant bitstream build, copies the
+# resulting .bit file to the release path, then restores mntzorro.v.
+#
+# The build step defaults to ./build_bitstream.sh (Linux Vivado). On a Windows
+# Vivado machine, drive the PowerShell builder from Git Bash instead:
+#
+#   BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass \
+#       -File ./build_bitstream.ps1" ./build_variant_bitstreams.sh zorro2
+#
+# Everything else — the mntzorro.v define rewriting, the canonical-bitstream
+# save/restore, and the cleanup trap — is shared by both hosts.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# Word-split deliberately: the Windows builder is a multi-word command.
+read -r -a BITSTREAM_BUILDER_CMD <<<"${BITSTREAM_BUILDER:-./build_bitstream.sh}"
 
 MNTZORRO=mntzorro.v
 CANONICAL_BIT=bootimage_work/zz9000_ps_wrapper.bit
@@ -290,7 +302,7 @@ for variant in "${selected[@]}"; do
     variant_block "$variant" > "$block_tmp"
     replace_define_block "$block_tmp"
 
-    ./build_bitstream.sh
+    "${BITSTREAM_BUILDER_CMD[@]}"
 
     mkdir -p "$(dirname "$output")"
     if [ "$output" != "$CANONICAL_BIT" ]; then
