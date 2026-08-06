@@ -11,6 +11,7 @@
 #include <xil_cache.h>
 #endif
 #include "overlay.h"
+#include "overlay_path.h"
 #include "sdk_video_stream.h"
 
 #include <string.h>
@@ -620,7 +621,7 @@ uint16_t sdk_media_session_status(
 	struct SDKMediaSessionStatusResult *result)
 {
 	if (!result || session == 0U || flags != 0U ||
-	    page > SDK_MEDIA_STATUS_AUDIO_OUTPUT)
+	    page > SDK_MEDIA_STATUS_PRESENTATION)
 		return SDK_STATUS_BAD_REQUEST;
 	if (!active_session(session))
 		return SDK_STATUS_BAD_HANDLE;
@@ -645,6 +646,26 @@ uint16_t sdk_media_session_status(
 		result->value[1] = media.decoded_frames;
 		result->value[2] = media.presented_frames;
 		result->value[3] = media.discarded_frames;
+	} else if (page == SDK_MEDIA_STATUS_PRESENTATION) {
+		struct overlay_path_info path;
+
+		overlay_path_snapshot(session, &path);
+		result->flags =
+			(path.configured ? SDK_MEDIA_PRESENT_CONFIGURED : 0U) |
+			(path.active ? SDK_MEDIA_PRESENT_ACTIVE : 0U) |
+			(path.hw_active ? SDK_MEDIA_PRESENT_NATIVE : 0U) |
+			(path.owns_session ? SDK_MEDIA_PRESENT_OWNED : 0U);
+		/* Geometry is reported as raw facts in fixed 16-bit halves. The
+		 * 1:1 / scaled / clipped classification is arithmetic on these
+		 * and is done host-side so it stays testable off-hardware. */
+		result->value[0] =
+			SDK_MEDIA_PACK_PAIR(path.src_w, path.src_h);
+		result->value[1] =
+			SDK_MEDIA_PACK_PAIR(path.dst_w, path.dst_h);
+		result->value[2] =
+			SDK_MEDIA_PACK_PAIR(path.dst_x, path.dst_y);
+		result->value[3] =
+			SDK_MEDIA_PACK_PAIR(path.screen_w, path.screen_h);
 	} else {
 		uint32_t frame_bytes = audio_frame_bytes();
 		uint64_t retired_bytes;

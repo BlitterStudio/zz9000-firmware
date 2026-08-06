@@ -347,6 +347,29 @@ out:
 	SWAP32(data->u32_user[0]);
 }
 
+void overlay_path_snapshot(uint32_t session, struct overlay_path_info *out)
+{
+	if (!out)
+		return;
+	memset(out, 0, sizeof(*out));
+	out->configured = ov.configured ? 1U : 0U;
+	/* mode_stale latches the overlay hidden until a fresh SET, so an
+	 * overlay that is "enabled" but stale is not presenting anything and
+	 * must not be reported as an active path. */
+	out->active = (ov.configured && ov.active && !ov.mode_stale) ? 1U : 0U;
+	out->hw_active = ov.hw_active ? 1U : 0U;
+	out->owns_session =
+		(session != 0U && ov.direct_session == session) ? 1U : 0U;
+	out->src_w = ov.src_w;
+	out->src_h = ov.src_h;
+	out->dst_x = ov.dst_x;
+	out->dst_y = ov.dst_y;
+	out->dst_w = ov.dst_w;
+	out->dst_h = ov.dst_h;
+	out->screen_w = (uint16_t)ov.snap_hsize;
+	out->screen_h = (uint16_t)ov.snap_rows;
+}
+
 static int overlay_presentable(struct ZZ_VIDEO_STATE *vs)
 {
 	if (!ov.configured || !ov.active || ov.mode_stale)
