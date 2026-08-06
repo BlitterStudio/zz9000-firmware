@@ -191,7 +191,17 @@
 #define SDK_MEDIA_SESSION_ADDRESS \
     (SDK_TASKQ_REGION_ADDRESS + SDK_MEDIA_SESSION_OFFSET)
 #define SDK_MEDIA_SESSION_MAX_BYTES \
-    (SDK_AUDIO_STREAMS_OFFSET - SDK_MEDIA_SESSION_OFFSET)
+    (SDK_MEDIA_PROFILE_OFFSET - SDK_MEDIA_SESSION_OFFSET)
+
+// Per-stage media pipeline timing (U7). Carved from the tail of the media
+// session's 1 KB allowance rather than given its own region: it is tiny, and
+// it must sit in this same SCU-coherent slab because core 1 accumulates the
+// decode and pack stages while core 0 reads them for MEDIA_SESSION_STATUS.
+#define SDK_MEDIA_PROFILE_OFFSET    0x000BFF00
+#define SDK_MEDIA_PROFILE_ADDRESS \
+    (SDK_TASKQ_REGION_ADDRESS + SDK_MEDIA_PROFILE_OFFSET)
+#define SDK_MEDIA_PROFILE_MAX_BYTES \
+    (SDK_AUDIO_STREAMS_OFFSET - SDK_MEDIA_PROFILE_OFFSET)
 
 // Audio-stream session table, also inside the coherent region: streams may
 // be core-1-affine (feed/decode on the worker) while core 0 begins/closes

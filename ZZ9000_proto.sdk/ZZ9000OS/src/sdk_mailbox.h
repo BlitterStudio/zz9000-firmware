@@ -478,6 +478,11 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
  * rejects it with BAD_REQUEST, which is the intended capability gate: a
  * client that gets BAD_REQUEST reports the path as unavailable. */
 #define SDK_MEDIA_STATUS_PRESENTATION 4U
+/* Per-stage pipeline timing (U7). Each value packs one stage as
+ * (microseconds << 32) | calls, in SDK_MEDIA_PROFILE_* order. Firmware
+ * older than this page rejects it with BAD_REQUEST, so a client reports
+ * profiling as unavailable rather than failing. */
+#define SDK_MEDIA_STATUS_PROFILE 5U
 
 /* SDK_MEDIA_STATUS_PRESENTATION flag bits (status result `flags`). */
 #define SDK_MEDIA_PRESENT_CONFIGURED (1U << 0)

@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "overlay_path.h"
+#include "sdk_media_profile.h"
 #include "sdk_mailbox.h"
 #include "sdk_media_session.h"
 #include "sdk_video_stream.h"
@@ -227,6 +228,7 @@ static int test_exact_abi_mirror(void)
 	if (SDK_MEDIA_SESSION_RESULT_AUDIO_UNDERRUN != (1U << 14)) return 24;
 	if (SDK_MEDIA_STATUS_AUDIO_OUTPUT != 3U) return 25;
 	if (SDK_MEDIA_STATUS_PRESENTATION != 4U) return 26;
+	if (SDK_MEDIA_STATUS_PROFILE != 5U) return 33;
 	if (SDK_MEDIA_PRESENT_CONFIGURED != (1U << 0)) return 27;
 	if (SDK_MEDIA_PRESENT_ACTIVE != (1U << 1)) return 28;
 	if (SDK_MEDIA_PRESENT_NATIVE != (1U << 2)) return 29;
@@ -368,7 +370,7 @@ static int test_errors_and_reclaim(void)
 	if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK)
 		return 2;
 	if (sdk_media_session_status(mock_session,
-	                             SDK_MEDIA_STATUS_PRESENTATION + 1U,
+	                             SDK_MEDIA_STATUS_PROFILE + 1U,
 	                             0U, &status) != SDK_STATUS_BAD_REQUEST ||
 	    sdk_media_session_status(mock_session, SDK_MEDIA_STATUS_TIMING,
 	                             1U, &status) != SDK_STATUS_BAD_REQUEST)
@@ -511,7 +513,7 @@ static int test_presentation_status_page(void)
 
 	/* The page bound moved by exactly one: 5 is still rejected, and a
 	 * non-zero flags word remains rejected on the new page. */
-	if (sdk_media_session_status(mock_session, 5U, 0U, &status) !=
+	if (sdk_media_session_status(mock_session, 6U, 0U, &status) !=
 	        SDK_STATUS_BAD_REQUEST)
 		return 12;
 	if (sdk_media_session_status(mock_session,
@@ -522,6 +524,82 @@ static int test_presentation_status_page(void)
 	                             SDK_MEDIA_STATUS_PRESENTATION, 0U,
 	                             &status) != SDK_STATUS_BAD_HANDLE)
 		return 14;
+	return 0;
+}
+
+void sdk_media_profile_host_set_now(uint32_t now_us);
+
+/* U7: per-stage timing must accumulate per stage, survive a 32-bit timer
+ * wrap, and reach the host packed as (microseconds << 32) | calls. */
+static int test_profile_status_page(void)
+{
+	struct SDKMediaSessionBegin begin;
+	struct SDKMediaSessionMainResult result;
+	struct SDKMediaSessionStatusResult status;
+	uint32_t start;
+
+	reset_mocks();
+	sdk_media_session_init();
+	fill_begin(&begin);
+	if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK)
+		return 1;
+
+	/* sdk_media_session_init() must have zeroed the accumulators, so a
+	 * second run in the same boot is not read as a continuation. */
+	if (sdk_media_session_status(mock_session, SDK_MEDIA_STATUS_PROFILE,
+	                             0U, &status) != SDK_STATUS_OK)
+		return 2;
+	if (status.value[SDK_MEDIA_PROFILE_YUY2_PACK] != 0U)
+		return 3;
+
+	/* One 1500 us pack. */
+	sdk_media_profile_host_set_now(1000U);
+	start = sdk_media_profile_now_us();
+	sdk_media_profile_host_set_now(2500U);
+	sdk_media_profile_record(SDK_MEDIA_PROFILE_YUY2_PACK, start);
+
+	/* A second, 500 us, so the accumulation is visible. */
+	sdk_media_profile_host_set_now(3000U);
+	start = sdk_media_profile_now_us();
+	sdk_media_profile_host_set_now(3500U);
+	sdk_media_profile_record(SDK_MEDIA_PROFILE_YUY2_PACK, start);
+
+	if (sdk_media_session_status(mock_session, SDK_MEDIA_STATUS_PROFILE,
+	                             0U, &status) != SDK_STATUS_OK)
+		return 4;
+	if ((status.value[SDK_MEDIA_PROFILE_YUY2_PACK] >> 32) != 2000U)
+		return 5;
+	if ((status.value[SDK_MEDIA_PROFILE_YUY2_PACK] & 0xffffffffU) != 2U)
+		return 6;
+	/* Stages must not bleed into one another. */
+	if (status.value[SDK_MEDIA_PROFILE_VIDEO_DECODE] != 0U)
+		return 7;
+
+	/* A start straddling the 32-bit timer wrap still yields the true
+	 * elapsed time, because the subtraction is unsigned. */
+	sdk_media_profile_host_set_now(0xfffffe00U);
+	start = sdk_media_profile_now_us();
+	sdk_media_profile_host_set_now(0x00000200U);
+	sdk_media_profile_record(SDK_MEDIA_PROFILE_VIDEO_DECODE, start);
+	if (sdk_media_session_status(mock_session, SDK_MEDIA_STATUS_PROFILE,
+	                             0U, &status) != SDK_STATUS_OK)
+		return 8;
+	if ((status.value[SDK_MEDIA_PROFILE_VIDEO_DECODE] >> 32) != 1024U)
+		return 9;
+
+	/* An unmeasured build reports nothing rather than nonsense. */
+	sdk_media_profile_record(SDK_MEDIA_PROFILE_PRESENT, 0U);
+	if (sdk_media_session_status(mock_session, SDK_MEDIA_STATUS_PROFILE,
+	                             0U, &status) != SDK_STATUS_OK)
+		return 10;
+	if (status.value[SDK_MEDIA_PROFILE_PRESENT] != 0U)
+		return 11;
+
+	/* Out-of-range stages are ignored, not written past the array. */
+	sdk_media_profile_record(SDK_MEDIA_PROFILE_STAGES, 1U);
+	sdk_media_profile_record(99U, 1U);
+	if (sdk_media_profile_read(SDK_MEDIA_PROFILE_STAGES, 0, 0) != 0)
+		return 12;
 	return 0;
 }
 
@@ -767,6 +845,8 @@ int main(void)
 	if (rc != 0) return 90 + rc;
 	rc = test_presentation_status_page();
 	if (rc != 0) return 230 + rc;
+	rc = test_profile_status_page();
+	if (rc != 0) return 245 + rc;
 	rc = test_mp2_audio_snapshot_and_ack();
 	if (rc != 0) return 130 + rc;
 	rc = test_mp2_direct_audio_output();
