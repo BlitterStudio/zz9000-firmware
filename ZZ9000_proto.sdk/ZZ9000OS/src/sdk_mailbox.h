@@ -483,6 +483,9 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
  * older than this page rejects it with BAD_REQUEST, so a client reports
  * profiling as unavailable rather than failing. */
 #define SDK_MEDIA_STATUS_PROFILE 5U
+/* Set in the profile page's flags when the NEON YUY2 pack is the live
+ * kernel, so a before/after comparison names what it measured. */
+#define SDK_MEDIA_PROFILE_FLAG_NEON_PACK (1U << 0)
 
 /* SDK_MEDIA_STATUS_PRESENTATION flag bits (status result `flags`). */
 #define SDK_MEDIA_PRESENT_CONFIGURED (1U << 0)

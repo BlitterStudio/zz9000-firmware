@@ -47,6 +47,133 @@ static int test_yuy2_conversion(void)
 	return 0;
 }
 
+/* An independent reference, written straight from the format definition
+ * rather than sharing code with the kernel, so this checks the kernel rather
+ * than checking it against itself. */
+static void yuy2_reference(uint8_t *dst, uint32_t dst_pitch, uint32_t width,
+	                       uint32_t height, const uint8_t *y,
+	                       uint32_t y_pitch, const uint8_t *cb,
+	                       const uint8_t *cr, uint32_t chroma_pitch)
+{
+	uint32_t row;
+	uint32_t x;
+
+	for (row = 0U; row < height; row++) {
+		uint8_t *d = dst + row * dst_pitch;
+		const uint8_t *luma = y + row * y_pitch;
+		const uint8_t *blue = cb + (row >> 1) * chroma_pitch;
+		const uint8_t *red = cr + (row >> 1) * chroma_pitch;
+
+		for (x = 0U; x < width; x += 2U) {
+			uint32_t pair = x >> 1;
+
+			d[0] = luma[x];
+			d[1] = blue[pair];
+			d[2] = luma[x + 1U < width ? x + 1U : x];
+			d[3] = red[pair];
+			d += 4;
+		}
+	}
+}
+
+/* U7: the pack was rewritten for speed (branch hoisted out of the inner
+ * loop, NEON added on ARM). Exactness is the ship condition, so sweep the
+ * geometries that break naive vectorisation: odd widths, odd heights, and
+ * the widths either side of the eight-macropixel vector step. */
+static int test_yuy2_exactness_sweep(void)
+{
+	static const uint32_t widths[] = {
+		1U, 2U, 3U, 4U, 5U, 15U, 16U, 17U, 31U, 32U, 33U,
+		37U, 64U, 65U, 176U, 320U, 352U, 639U, 640U
+	};
+	static const uint32_t heights[] = { 1U, 2U, 3U, 5U, 16U };
+	static uint8_t luma[640 * 16];
+	static uint8_t blue[320 * 16];
+	static uint8_t red[320 * 16];
+	static uint8_t want[640 * 2 * 16];
+	static uint8_t got[sizeof(want)];
+	unsigned wi;
+	unsigned hi;
+	uint32_t i;
+
+	for (i = 0U; i < sizeof(luma); i++)
+		luma[i] = (uint8_t)(i * 7U + 1U);
+	for (i = 0U; i < sizeof(blue); i++) {
+		blue[i] = (uint8_t)(i * 13U + 5U);
+		red[i] = (uint8_t)(i * 29U + 200U);
+	}
+
+	for (wi = 0U; wi < sizeof(widths) / sizeof(widths[0]); wi++) {
+		for (hi = 0U; hi < sizeof(heights) / sizeof(heights[0]); hi++) {
+			uint32_t width = widths[wi];
+			uint32_t height = heights[hi];
+			uint32_t chroma_pitch = (width + 1U) / 2U;
+			uint32_t row_bytes = sdk_video_yuy2_row_bytes(width);
+			/* A pitch wider than the row proves the kernel honours
+			 * it instead of assuming a packed destination. */
+			uint32_t pitch = row_bytes + 8U;
+			uint32_t written = 0U;
+
+			if (pitch * height > sizeof(want))
+				continue;
+			memset(want, 0xa5U, sizeof(want));
+			memset(got, 0xa5U, sizeof(got));
+			yuy2_reference(want, pitch, width, height, luma, width,
+			               blue, red, chroma_pitch);
+			if (!sdk_video_yuv420_to_yuy2_scalar(
+			        got, pitch, width, height, luma, width, blue,
+			        red, chroma_pitch, &written))
+				return 1;
+			if (written != row_bytes * height)
+				return 2;
+			if (memcmp(want, got, pitch * height) != 0)
+				return 3;
+
+			/* The dispatcher must agree too - on ARM that is the
+			 * NEON kernel, on the host it re-checks the scalar. */
+			memset(got, 0xa5U, sizeof(got));
+			if (!sdk_video_yuv420_to_yuy2(
+			        got, pitch, width, height, luma, width, blue,
+			        red, chroma_pitch, &written))
+				return 4;
+			if (memcmp(want, got, pitch * height) != 0)
+				return 5;
+		}
+	}
+	return 0;
+}
+
+/* Bad geometry must still be refused after the rewrite. */
+static int test_yuy2_rejects_bad_params(void)
+{
+	static uint8_t plane[64];
+	uint8_t dst[64];
+	uint32_t written = 1U;
+
+	/* Destination pitch narrower than one row. */
+	if (sdk_video_yuv420_to_yuy2(dst, 3U, 4U, 1U, plane, 4U, plane,
+	                             plane, 2U, &written))
+		return 1;
+	if (written != 0U)
+		return 2;
+	/* Luma pitch narrower than the width. */
+	if (sdk_video_yuv420_to_yuy2(dst, 8U, 4U, 1U, plane, 3U, plane,
+	                             plane, 2U, &written))
+		return 3;
+	/* Chroma pitch narrower than ceil(width/2). */
+	if (sdk_video_yuv420_to_yuy2(dst, 8U, 4U, 1U, plane, 4U, plane,
+	                             plane, 1U, &written))
+		return 4;
+	/* Zero height, and a null plane. */
+	if (sdk_video_yuv420_to_yuy2(dst, 8U, 4U, 0U, plane, 4U, plane,
+	                             plane, 2U, &written))
+		return 5;
+	if (sdk_video_yuv420_to_yuy2(dst, 8U, 4U, 1U, 0, 4U, plane,
+	                             plane, 2U, &written))
+		return 6;
+	return 0;
+}
+
 static int test_streaming_decode(void)
 {
 	const struct SDKVideoDecoderOps *ops;
@@ -179,6 +306,12 @@ int main(void)
 
 	if (result != 0)
 		return 10 + result;
+	result = test_yuy2_exactness_sweep();
+	if (result != 0)
+		return 50 + result;
+	result = test_yuy2_rejects_bad_params();
+	if (result != 0)
+		return 70 + result;
 	result = test_streaming_decode();
 	if (result != 0)
 		return 30 + result;

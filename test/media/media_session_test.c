@@ -595,6 +595,21 @@ static int test_profile_status_page(void)
 	if (status.value[SDK_MEDIA_PROFILE_PRESENT] != 0U)
 		return 11;
 
+	/* A second session must start from zero. The r1 profiling round had
+	 * every run after the first accumulating on top of it, because the
+	 * reset lived in init() which only runs on an Amiga reset. */
+	if (sdk_media_session_close(mock_session, 0U, &result) != SDK_STATUS_OK)
+		return 13;
+	fill_begin(&begin);
+	if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK)
+		return 14;
+	if (sdk_media_session_status(mock_session, SDK_MEDIA_STATUS_PROFILE,
+	                             0U, &status) != SDK_STATUS_OK)
+		return 15;
+	if (status.value[SDK_MEDIA_PROFILE_YUY2_PACK] != 0U ||
+	    status.value[SDK_MEDIA_PROFILE_VIDEO_DECODE] != 0U)
+		return 16;
+
 	/* Out-of-range stages are ignored, not written past the array. */
 	sdk_media_profile_record(SDK_MEDIA_PROFILE_STAGES, 1U);
 	sdk_media_profile_record(99U, 1U);

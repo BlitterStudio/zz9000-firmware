@@ -13,6 +13,7 @@
 #include "overlay.h"
 #include "overlay_path.h"
 #include "sdk_media_profile.h"
+#include "sdk_video_yuy2.h"
 #include "sdk_video_stream.h"
 
 #include <string.h>
@@ -362,9 +363,7 @@ void sdk_media_session_init(void)
 	memset(&media, 0, sizeof(media));
 	media.video_pts = SDK_MEDIA_NO_PTS;
 	media.pts_origin = SDK_MEDIA_NO_PTS;
-	/* Each session measures only itself, so a second run in the same boot
-	 * is not read as a continuation of the first. */
-	sdk_media_profile_reset();
+
 #ifndef SDK_MEDIA_HOST_TEST
 	Xil_DCacheFlushRange((INTPTR)(uintptr_t)&media, sizeof(media));
 #endif
@@ -469,6 +468,13 @@ uint16_t sdk_media_session_begin(
 		return status;
 
 	memset(&media, 0, sizeof(media));
+	/* Reset here, not in sdk_media_session_init(): that only runs on an
+	 * Amiga reset, so the r1 profiling round had every later run
+	 * accumulating on top of the first one's totals. */
+	sdk_media_profile_reset();
+	/* Re-verify the NEON pack against the scalar oracle each run, so a
+	 * profiling comparison always states which kernel it measured. */
+	sdk_video_yuy2_reset_dispatch();
 	media.session = video_result.session;
 	media.state = mapped_state(video_result.state);
 	media.audio_codec = begin->audio_codec;
@@ -662,6 +668,9 @@ uint16_t sdk_media_session_status(
 		result->value[3] = media.discarded_frames;
 	} else if (page == SDK_MEDIA_STATUS_PROFILE) {
 		uint32_t stage;
+
+		result->flags = sdk_video_yuy2_neon_active()
+			? SDK_MEDIA_PROFILE_FLAG_NEON_PACK : 0U;
 
 		/* Per-stage microseconds and call counts, packed one stage per
 		 * value as (microseconds << 32) | calls. The host divides to get

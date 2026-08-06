@@ -770,7 +770,13 @@ static int decode_audio(struct sdk_video_plmpeg *decoder)
 		decoder->audio->buffer->has_ended = TRUE;
 	if (!pcm_has_space(decoder, block_bytes))
 		return SDK_VIDEO_BACKEND_BACKPRESSURE;
-	samples = plm_audio_decode(decoder->audio);
+	{
+		uint32_t profile_start = sdk_media_profile_now_us();
+
+		samples = plm_audio_decode(decoder->audio);
+		sdk_media_profile_record(
+			SDK_MEDIA_PROFILE_AUDIO_DECODE, profile_start);
+	}
 	if (!samples) {
 		if (decoder->failed)
 			return SDK_VIDEO_BACKEND_ERROR;
