@@ -165,25 +165,50 @@ $vivadoProjectArgs = @(
     '-tclargs'
 ) + $projectArgs
 
-# Project generation is itself flaky across a long batch. Observed on
-# 2026-08-07 partway through the variant rebuild:
-#   ERROR: [Common 17-232] Could not create slave interpreter
-#          '::ipgui_xilinx_com_signal_param_clock_1_0'.
-# thrown from create_bd_port inside cr_bd_zz9000_ps. It is transient - the
-# same variant generates cleanly on a retry - so do not make an operator
-# restart an hours-long batch over it. Each attempt starts from a removed
-# project, because retrying on top of a half-written one is what produces
-# the missing-ZORRO_*-port corruption described above.
+# zz9000_project.tcl exits 0 even when the block design failed to build, so
+# its exit code alone cannot decide success. When Vivado cannot spin up the
+# Tcl slave interpreter for an IP GUI:
+#   ERROR: [IP_Flow 19-2234] Failed to initialize IP Tcl interpreter ...
+#          invalid command name "::tcl::tm::UnknownHandler"
+#   ERROR: [BD_TCL-105] Unable to add referenced block <MNTZorro_...>
+# the MNTZorro cell is never added, generation still reports success, and the
+# wrapper emitted later at synthesis time collapses to a stub:
+#   module zz9000_ps_wrapper (); zz9000_ps zz9000_ps_i (); endmodule
+# Synthesis then reports ~86 "named port connection ... does not exist"
+# errors against every port, which reads like an RTL bug in the variant and
+# costs an hour to chase.
+#
+# The errors are printed, just not reflected in the status, so scan the
+# output. Do not try to check the generated wrapper instead: it does not
+# exist yet at this point - Vivado emits it when the synthesis run starts.
+# Echoed TCL source lines are prefixed with '#', so anchoring on '^ERROR:'
+# does not match the script's own catch/send_msg_id boilerplate.
+$generationFatal = '^ERROR: \[(BD|IP_Flow|Common 17-232\])'
+$genLog = Join-Path ([System.IO.Path]::GetTempPath()) 'zz9000-project-gen.log'
+
+# Project generation is flaky across a long batch: two distinct Tcl
+# slave-interpreter failures were seen during the 2026-08-07 variant rebuild,
+# one aborting generation outright and one letting it report success with a
+# stub block design. Both clear on a retry, so do not make an operator
+# restart an hours-long batch over either. Each attempt starts from a removed
+# project, because regenerating on top of half-written project state is its
+# own source of the same stub-block-design corruption.
 for ($attempt = 1; $attempt -le 3; $attempt++) {
     Clear-GeneratedProjectIfPresent
 
     Write-Host '[bitstream] regenerating project from zz9000_project.tcl'
-    & $vivado @vivadoProjectArgs
-    if ($LASTEXITCODE -eq 0) {
+    & $vivado @vivadoProjectArgs 2>&1 | Tee-Object -FilePath $genLog
+    $genExit = $LASTEXITCODE
+    $genErrors = @(Select-String -LiteralPath $genLog -Pattern $generationFatal)
+
+    if ($genExit -eq 0 -and $genErrors.Count -eq 0) {
         break
     }
+    if ($genErrors.Count -gt 0) {
+        Write-Host "[bitstream] block design failed: $($genErrors[0].Line.Trim())"
+    }
     if ($attempt -eq 3) {
-        throw "Project generation failed after 3 attempts (exit ${LASTEXITCODE})."
+        throw 'Project generation failed after 3 attempts (see the Tcl interpreter errors above).'
     }
     Write-Host "[bitstream] project generation failed, retrying ($attempt/2)"
     Start-Sleep -Seconds 10
