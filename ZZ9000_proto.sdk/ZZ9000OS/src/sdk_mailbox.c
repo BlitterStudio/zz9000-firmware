@@ -10,6 +10,7 @@
 #include <string.h>
 #include "xil_cache.h"
 #include "xtime_l.h"
+#include "sdk_palette.h"
 #include "sdk_mailbox.h"
 #include "sdk_compression.h"
 #include "lzh/zz9k_lzh.h"
@@ -1147,9 +1148,10 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		0x00020000U,
 		SDK_CAP_SURFACES | SDK_CAP_FRAMEBUFFER_SURFACE |
 			SDK_CAP_SURFACE_OPS,
-		SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_ZERO_COPY,
+		SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_ZERO_COPY |
+			SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY,
 		SDK_SERVICE_SURFACE,
-		5,
+		6,
 		"surface"
 	},
 	{
@@ -5079,6 +5081,69 @@ static uint16_t handle_fill_surface(volatile struct SDKMailboxEntry *req,
 	return complete_status(req, comp, SDK_STATUS_OK);
 }
 
+struct SDKQueryPalettePayload {
+	uint8_t surface[4];
+	uint8_t start[4];
+	uint8_t count[4];
+	uint8_t dst_handle[4];
+	uint8_t dst_offset[4];
+	uint8_t flags[4];
+	uint8_t reserved[24];
+};
+
+/* The 256-entry CLUT cannot fit the fixed 48-byte reply, so - as the crypto
+ * hash op does - the result goes to a caller shared buffer as `count`
+ * consecutive 0x00RRGGBB words from index `start`. The palette is
+ * display-global; `surface` is accepted for future per-surface tables but
+ * does not select one today. */
+static uint16_t handle_query_palette(volatile struct SDKMailboxEntry *req,
+                                     volatile struct SDKMailboxEntry *comp,
+                                     uint16_t payload_len)
+{
+	volatile struct SDKQueryPalettePayload *payload;
+	struct SDKSharedBuffer *dst;
+	uint32_t start;
+	uint32_t count;
+	uint32_t dst_offset;
+	uint32_t flags;
+	uint32_t written;
+
+	if (payload_len < 24U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKQueryPalettePayload *)req->payload;
+	start = get_be32(payload->start);
+	count = get_be32(payload->count);
+	dst_offset = get_be32(payload->dst_offset);
+	flags = get_be32(payload->flags);
+
+	/* Only the primary CLUT is shadowed; the secondary query is reserved. */
+	if ((flags & ~(uint32_t)SDK_PALETTE_QUERY_FLAG_SECONDARY) != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if ((flags & SDK_PALETTE_QUERY_FLAG_SECONDARY) != 0U)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	/* Bound the window to the 256-entry table. This also keeps count * 4,
+	 * the byte count below, from overflowing. */
+	if (count == 0U || count > 256U || start > 256U ||
+	    (start + count) > 256U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	dst = find_shared_buffer(get_be32(payload->dst_handle));
+	if (!buffer_range_valid(dst, dst_offset, count * 4U))
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	written = sdk_palette_pack_be(
+		(void *)(uintptr_t)(dst->address + dst_offset), start, count);
+	if (written == 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	Xil_DCacheFlushRange((INTPTR)(uintptr_t)(dst->address + dst_offset),
+	                     written);
+
+	return complete_status(req, comp, SDK_STATUS_OK);
+}
+
 static uint16_t handle_copy_surface(volatile struct SDKMailboxEntry *req,
                                     volatile struct SDKMailboxEntry *comp,
                                     uint16_t payload_len)
@@ -7272,6 +7337,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_map_framebuffer_surface(req, comp);
 	case SDK_OP_FILL_SURFACE:
 		return handle_fill_surface(req, comp, payload_len);
+	case SDK_OP_QUERY_PALETTE:
+		return handle_query_palette(req, comp, payload_len);
 	case SDK_OP_COPY_SURFACE:
 		return handle_copy_surface(req, comp, payload_len);
 	case SDK_OP_SCALE_IMAGE:

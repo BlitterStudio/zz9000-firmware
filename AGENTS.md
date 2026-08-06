@@ -56,6 +56,7 @@ make -C test/video test            # VDMA math + video_formatter source invarian
 make -C test/config test           # ZZ9000.CFG parser/loader unit tests
 make -C test/scheduler test        # dual-core queue, routing, and reclaim tests
 make -C test/video_codec test      # pl_mpeg streaming fixture + exact YUY2 output
+make -C test/palette test          # primary-CLUT shadow + big-endian query packing
 test/video/run_formatter_sim.sh current   # xsim functional sim (Vivado machine)
 ```
 

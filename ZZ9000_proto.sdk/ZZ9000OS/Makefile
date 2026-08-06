@@ -113,6 +113,7 @@ C_SRCS = \
 	$(SRC_DIR)/dma_acc.c \
 	$(SRC_DIR)/dma_rtg.c \
 	$(SRC_DIR)/surface_allocator.c \
+	$(SRC_DIR)/sdk_palette.c \
 	$(SRC_DIR)/overlay.c \
 	$(SRC_DIR)/usb.c \
 	$(SRC_DIR)/mp3/decode_mp3.c \
