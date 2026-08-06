@@ -69,18 +69,40 @@ function Invoke-Checked {
     }
 }
 
+function Wait-ForVivadoExit {
+    # A previous batch iteration's Vivado can outlive the process we waited
+    # on. Deleting the project while it is still alive is worse than losing
+    # the delete: it can recreate files underneath us, and the next
+    # regeneration then merges fresh output with stale block-design state.
+    # That produces a project whose wrapper is missing every ZORRO_* port and
+    # fails elaboration with ~86 errors, which looks like an RTL bug and is
+    # not one. Wait for the field to be clear first.
+    for ($i = 0; $i -lt 60; $i++) {
+        $running = @(Get-Process -Name 'vivado' -ErrorAction SilentlyContinue)
+        if ($running.Count -eq 0) {
+            return
+        }
+        if ($i -eq 0) {
+            Write-Host '[bitstream] waiting for a previous Vivado to exit'
+        }
+        Start-Sleep -Seconds 2
+    }
+    throw 'A Vivado process is still running after 120s; refusing to delete the project underneath it.'
+}
+
 function Remove-GeneratedProject {
     param([string]$Path)
 
-    # Vivado can still hold handles under the run directories for a moment
-    # after it exits, and on-access virus scanning of the freshly written
-    # bitstream extends that window. Back-to-back variant builds delete the
-    # project the instant the previous run returns, which loses that race and
-    # fails the whole batch several variants in. Retry before giving up.
+    Wait-ForVivadoExit
+
+    # Even after Vivado exits, handles under the run directories linger for a
+    # moment, and on-access virus scanning of the freshly written bitstream
+    # extends that window. Back-to-back variant builds delete the project the
+    # instant the previous run returns, which loses that race and fails the
+    # whole batch several variants in. Retry before giving up.
     for ($attempt = 1; $attempt -le 10; $attempt++) {
         try {
             Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
-            return
         } catch [System.IO.IOException], [System.UnauthorizedAccessException] {
             if ($attempt -eq 10) {
                 throw
@@ -88,7 +110,20 @@ function Remove-GeneratedProject {
             Write-Host "[bitstream] project still locked, retrying ($attempt/9)"
             [System.GC]::Collect()
             Start-Sleep -Seconds 3
+            continue
         }
+
+        # Remove-Item can report success having left entries behind. A
+        # partially deleted project is exactly the state that corrupts the
+        # next regeneration, so confirm rather than assume.
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return
+        }
+        if ($attempt -eq 10) {
+            throw "Generated project still present after removal: $Path"
+        }
+        Write-Host "[bitstream] project partially removed, retrying ($attempt/9)"
+        Start-Sleep -Seconds 3
     }
 }
 
