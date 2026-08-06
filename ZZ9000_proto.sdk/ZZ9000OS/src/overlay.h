@@ -4,9 +4,10 @@
  *
  * P96 video window (PIP) overlay: native PL plane plus software fallback.
  * The ZZ9000.card driver configures the overlay through OP_VIDEO_OVERLAY;
- * Fully visible 1:1 sources use packed-YUV scanout-time composition; scaled
- * or clipped sources retain the RGB shadow compositor. Legacy sources refresh
- * every vblank; SDK video sources notify on decoded frames.
+ * Visible packed-YUV sources use scanout-time composition with exact
+ * nearest-neighbour scaling and clipping; unsupported geometry retains the
+ * RGB shadow compositor. Legacy sources refresh every vblank; SDK video
+ * sources notify on decoded frames.
  *
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -76,7 +77,7 @@ void overlay_scheduler_reset(void);
 /* Core-0 SDK-video lifecycle hooks. A frame-ready completion switches that
  * session's active overlay to source-frame-driven composition; close removes
  * the binding and restores refresh-driven behavior after the final session. */
-void overlay_video_frame_ready(uint32_t session);
+int overlay_video_frame_ready(uint32_t session);
 void overlay_video_session_closed(uint32_t session);
 
 /* ISR helpers for the videocap takeover: while videocap owns the

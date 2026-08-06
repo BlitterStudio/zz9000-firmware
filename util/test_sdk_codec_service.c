@@ -56,11 +56,25 @@ static int expect_contains(const char *source, const char *label,
 	return 0;
 }
 
+static unsigned count_occurrences(const char *source, const char *needle)
+{
+	unsigned count = 0U;
+	const char *cursor = source;
+	size_t length = strlen(needle);
+
+	while ((cursor = strstr(cursor, needle)) != 0) {
+		count++;
+		cursor += length;
+	}
+	return count;
+}
+
 int main(int argc, char **argv)
 {
 	char *mailbox_source;
 	char *mailbox_header;
 	char *makefile_source;
+	unsigned legacy_owner_checks;
 	int ok = 1;
 
 	if (argc != 4) {
@@ -136,6 +150,12 @@ int main(int argc, char **argv)
 	                      "#define SDK_SERVICE_FLAG_CODEC_LZH");
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_DECOMPRESS_RESULT_STREAM_END");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_CAP_MEDIA_SESSION");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_OP_MEDIA_SESSION_BEGIN");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "SDKMediaSessionMainResultPayload");
 
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "#include \"sdk_compression.h\"");
@@ -187,9 +207,70 @@ int main(int argc, char **argv)
 	                      "SDKDecompressResultPayload_must_be_48_bytes");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "SDKDecompressStreamResultPayload_must_be_48_bytes");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "#include \"sdk_media_session.h\"");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "handle_media_session_begin");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_OP_MEDIA_SESSION_PRESENT");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "handle_media_session_write");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "handle_media_session_deferred_simple");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "handle_media_session_present_or_discard");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "handle_media_session_status");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "handle_media_session_audio_read");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "handle_media_session_audio_bind");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "bytes_are_zero(payload->reserved");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "sdk_media_session_audio_read");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "sdk_media_session_audio_source");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "sdk_media_session_audio_retire");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "find_shared_buffer(begin.pcm_ring_handle)");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "uint32_t pin_count;");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "if (buffer->pin_count != 0U)");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "shared_buffer_pin(pcm_ring)");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "release_media_pcm_ring(session)");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_VIDEO_MEDIA_MP2");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "case SDK_OP_MEDIA_SESSION_WRITE:");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "case SDK_OP_MEDIA_SESSION_DECODE:");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "case SDK_OP_MEDIA_SESSION_CLOSE:");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "sdk_media_session_close_retired");
+
+	legacy_owner_checks = count_occurrences(
+		mailbox_source, "SDK_VIDEO_STREAM_OWNER_LEGACY");
+	if (legacy_owner_checks < 3U) {
+		printf("sdk_mailbox.c: legacy VIDEO_SESSION write/decode/close "
+		       "must reject media-owned sessions (found %u owner checks)\n",
+		       legacy_owner_checks);
+		ok = 0;
+	}
 
 	ok &= expect_contains(makefile_source, "Makefile",
 	                      "$(SRC_DIR)/sdk_compression.c");
+	ok &= expect_contains(makefile_source, "Makefile",
+	                      "$(SRC_DIR)/sdk_media_session.c");
+	ok &= expect_contains(makefile_source, "Makefile",
+	                      "$(SRC_DIR)/sdk_media_timeline.c");
 	ok &= expect_contains(makefile_source, "Makefile",
 	                      "$(LZMA_SDK_BUILD)/LzmaDec.o");
 	ok &= expect_contains(makefile_source, "Makefile",

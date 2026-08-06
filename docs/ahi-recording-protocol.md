@@ -10,7 +10,9 @@ the Verilog, Vivado project and committed bitstreams are unchanged.
 `REG_ZZ_AUDIO_CONFIG` (`0xF4`) retains codec presence in read bit 0. Writes are
 a control mask: bit 0 enables playback-period interrupts and bit 1 enables
 capture-ready interrupts. Older drivers write only zero or one and remain
-compatible.
+compatible. On reads, bit 1 advertises the packed transmit-period status at
+`0xF8`; the distinct read/write meaning makes this a stable capability marker
+that cannot be confused with an older firmware's raw 16-bit TX sequence.
 
 `REG_ZZ_AUDIO_RX_STATUS` (`0xF6`) is read-only:
 
@@ -23,12 +25,26 @@ compatible.
 Old firmware returns zero at `0xF6`, allowing a new driver to retain playback
 without advertising recording.
 
-`REG_ZZ_AUDIO_TX_STATUS` (`0xF8`) is a read-only 16-bit completion sequence.
-Firmware increments it modulo 65536 after every transmit period completes,
-before asserting the shared audio interrupt. A capture-capable driver samples
-the sequence when playback starts and services playback only after observing a
-different value. This distinguishes playback completions from capture-only
-wake-ups without changing the FPGA interrupt routing.
+`REG_ZZ_AUDIO_TX_STATUS` (`0xF8`) is read-only:
+
+| Bits | Meaning |
+| --- | --- |
+| 15 | Transmit-period publication implemented. |
+| 14:12 | Most recently completed transmit-period index (0 through 7). |
+| 11:0 | Completion sequence, incremented modulo 4096. |
+
+Firmware publishes the status after every transmit period completes, before
+asserting the shared audio interrupt. A capable driver samples the sequence
+when playback starts and services playback only after observing a different
+value. It refills the published completed period rather than assuming that the
+continuously running formatter began at ring offset zero. This both
+distinguishes playback completions from capture-only wake-ups and prevents a
+startup write from touching the period MM2S is actively reading.
+
+A new driver uses this layout only when both read bit 1 at `0xF4` and status
+bit 15 are set, otherwise it falls back to the legacy sequential cursor. An
+old driver still observes a changing 16-bit status when used with new
+firmware.
 
 ## Publication order
 

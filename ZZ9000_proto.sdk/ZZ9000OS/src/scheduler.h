@@ -60,6 +60,10 @@
 #define TASKQ_OP_VIDEO_SESSION_WRITE  0x0b01u
 #define TASKQ_OP_VIDEO_SESSION_DECODE 0x0b02u
 #define TASKQ_OP_VIDEO_SESSION_CLOSE  0x0b03u
+#define TASKQ_OP_MEDIA_SESSION_WRITE  0x0b05u
+#define TASKQ_OP_MEDIA_SESSION_DECODE 0x0b06u
+#define TASKQ_OP_MEDIA_SESSION_AUDIO_READ 0x0b07u
+#define TASKQ_OP_MEDIA_SESSION_CLOSE  0x0b0du
 
 /* Internal (never client-visible) opcode: composite one P96 video
  * overlay frame into a shadow buffer. Full-frame work: classifies

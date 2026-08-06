@@ -62,6 +62,21 @@ static char *read_file(const char *path)
 
 	buffer[size] = '\0';
 	fclose(fp);
+
+	/* Keep multiline source invariants independent of the checkout's native
+	 * line endings. Git may materialize Verilog as CRLF on Windows even when
+	 * this host test runs under WSL. */
+	{
+		size_t read_pos;
+		size_t write_pos = 0U;
+
+		for (read_pos = 0U; read_pos < (size_t)size; read_pos++) {
+			if (buffer[read_pos] != '\r')
+				buffer[write_pos++] = buffer[read_pos];
+		}
+		buffer[write_pos] = '\0';
+	}
+
 	return buffer;
 }
 

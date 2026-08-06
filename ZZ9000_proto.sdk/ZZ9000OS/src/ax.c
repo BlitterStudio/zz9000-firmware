@@ -48,7 +48,10 @@ static uint8_t* volatile audio_rx_buffer = (uint8_t*)AUDIO_RX_BUFFER_ADDRESS;
 static volatile uint16_t audio_interrupt_mask = 0;
 static volatile uint16_t audio_capture_frames = ZZ_AUDIO_CAPTURE_INPUT_FRAMES;
 static volatile uint16_t audio_rx_status = ZZ_AUDIO_RX_STATUS_CAPABLE;
-static volatile uint16_t audio_tx_sequence = 0;
+static volatile uint16_t audio_tx_status =
+	ZZ_AUDIO_TX_STATUS_CAPABLE |
+	((AUDIO_NUM_PERIODS - 1U) << ZZ_AUDIO_TX_STATUS_PERIOD_SHIFT);
+static volatile uint8_t audio_codec_is_present = 0;
 static volatile uint8_t audio_capture_ready = 0;
 static volatile uint8_t audio_rx_last_completed_period =
     AUDIO_NUM_PERIODS - 1U;
@@ -790,10 +793,25 @@ extern void sdk_mailbox_audio_playback_pump_isr(void);
 
 // audio formatter interrupt, triggered whenever a period is completed
 void isr_audio(void *dummy) {
+	uint32_t transfer_count;
+	uint8_t completed_period;
+	uint16_t sequence;
 	uint32_t val = XAudioFormatter_ReadReg(XPAR_XAUDIOFORMATTER_0_BASEADDR, XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET);
 	val |= (1<<31); // clear irq
 	XAudioFormatter_WriteReg(XPAR_XAUDIOFORMATTER_0_BASEADDR,
 		XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET, val);
+
+	/*
+	 * XFER_COUNT points into the period currently being read. Publish the
+	 * period immediately behind it so an Amiga-side producer never has to
+	 * guess which ring slot is safe to refill at startup or after latency.
+	 */
+	transfer_count = XAudioFormatterGetDMATransferCount(&audio_formatter);
+	completed_period = zz_audio_capture_completed_period(
+	    transfer_count, AUDIO_BYTES_PER_PERIOD);
+	sequence = (audio_tx_status + 1U) &
+	    ZZ_AUDIO_TX_STATUS_SEQUENCE_MASK;
+	audio_tx_status = zz_audio_tx_status_pack(completed_period, sequence);
 
 	if (isra_count++>100) {
 		isra_count = 0;
@@ -804,7 +822,6 @@ void isr_audio(void *dummy) {
 	// network load previously let the DMA overrun the fill frontier
 	// and glitch MP3 playback. No-op when no session is bound.
 	sdk_mailbox_audio_playback_pump_isr();
-	audio_tx_sequence++;
 
 	if (audio_interrupt_mask & ZZ_AUDIO_CONFIG_PLAY) {
 		amiga_interrupt_set(AMIGA_INTERRUPT_AUDIO);
@@ -886,8 +903,16 @@ uint32_t audio_get_dma_transfer_count() {
 	return XAudioFormatterGetDMATransferCount(&audio_formatter);
 }
 
-uint16_t audio_get_tx_sequence(void) {
-	return audio_tx_sequence;
+uint16_t audio_get_tx_status(void) {
+	return audio_tx_status;
+}
+
+void audio_set_codec_present(int present) {
+	audio_codec_is_present = present ? 1U : 0U;
+}
+
+int audio_codec_present(void) {
+	return audio_codec_is_present != 0U;
 }
 
 void audio_set_interrupt_mask(uint16_t mask) {

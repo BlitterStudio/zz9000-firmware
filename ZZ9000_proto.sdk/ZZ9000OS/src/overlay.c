@@ -2,10 +2,11 @@
  * MNT ZZ9000 Amiga Graphics and ARM Coprocessor Card Operating System
  * (ZZ9000OS)
  *
- * P96 video window (PIP) overlay. Fully visible 1:1 packed-YUV windows use
- * the native PL overlay plane. Scaled or clipped windows retain the software
- * shadow compositor. SDK planar video frames are packed into two staging
- * buffers and handed to the same PL plane at vblank.
+ * P96 video window (PIP) overlay. Packed-YUV windows with a visible screen
+ * intersection use the native PL overlay plane, including nearest-neighbour
+ * scaling and clipping. Unsupported geometries retain the software shadow
+ * compositor. SDK planar video frames are packed into two staging buffers
+ * and handed to the same PL plane at vblank.
  *
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -21,6 +22,7 @@
 #include "memorymap.h"
 #include "surface_allocator.h"
 #include "sdk_mailbox.h"
+#include "sdk_media_session.h"
 #include "sdk_video_stream.h"
 #include "sdk_video_yuy2.h"
 #include "scheduler.h"
@@ -281,12 +283,14 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	/* a fresh SET re-validated everything against the live mode */
 	ov.mode_stale = 0;
 
-	/* A fully visible 1:1 P96 bitmap can be scanned directly.  Every P96 and
-	 * cgxvideo client reaches this path through the existing driver ABI; no
-	 * player-specific interface is involved. Resized/clipped windows retain
-	 * the proven RGB software compositor. */
+	/* Every P96 and cgxvideo client reaches the PL scaler through the existing
+	 * driver ABI; no player-specific interface is involved. Keep the software
+	 * compositor for rectangles that do not intersect the screen or exceed
+	 * the native line fetcher's source bounds. */
 	uint8_t was_hw_active = ov.hw_active;
 	uint32_t hw_src_addr = ov.src_addr;
+	int32_t dst_right = (int32_t)dst_x + dst_w;
+	int32_t dst_bottom = (int32_t)dst_y + dst_h;
 
 	if (ov.compose_in_flight)
 		ov.discard_stale = 1;
@@ -295,15 +299,17 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	ov.hw_restore_pending = 0;
 	ov.hw_active = 0;
 	if (overlay_hw_supported() && ov.active &&
-	    dst_w == (int16_t)src_w && dst_h == (int16_t)src_h &&
-	    dst_x >= 0 && dst_y >= 0 &&
-	    (uint32_t)dst_x + src_w <= vs->vmode_hsize &&
-	    (uint32_t)dst_y + src_h <= rows) {
+	    dst_w > 0 && dst_h > 0 &&
+	    dst_right > 0 && dst_bottom > 0 &&
+	    dst_x < (int32_t)vs->vmode_hsize &&
+	    dst_y < (int32_t)rows) {
 		ov.hw_generation++;
 		if (ov.hw_generation == 0U)
 			ov.hw_generation = 1U;
-		ov.hw_active = overlay_hw_start(hw_src_addr, ov.src_pitch,
-			ov.src_w, ov.src_h, ov.dst_x, ov.dst_y, ov.variant,
+		ov.hw_active = overlay_hw_start_scaled(
+			hw_src_addr, ov.src_pitch, ov.src_w, ov.src_h,
+			ov.dst_x, ov.dst_y, (uint16_t)ov.dst_w,
+			(uint16_t)ov.dst_h, ov.variant,
 			overlay_key_to_rgb(ov.key_native, ov.snap_colormode),
 			ov.key_enabled, ov.hw_generation) ? 1U : 0U;
 		if (ov.hw_active)
@@ -493,6 +499,8 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 		ov.compose_request = 0;
 		ov.compose_in_flight = 1;
 		ov.compose_target = target;
+		if (ov.direct_session != 0U)
+			sdk_media_session_present_queued(ov.direct_session);
 	}
 }
 
@@ -577,19 +585,20 @@ void overlay_scheduler_reset(void)
 		ov.compose_request = 1;
 }
 
-void overlay_video_frame_ready(uint32_t session)
+int overlay_video_frame_ready(uint32_t session)
 {
-	/* Core-0 deferred-completion retirement runs before overlay_main_poll,
-	 * so this queues the compose before the client can submit its next decode
-	 * and overwrite the YUY2 source bitmap. */
+	/* Legacy decode retirement runs before overlay_main_poll. Media sessions
+	 * additionally keep their decoder frame held until that poll confirms the
+	 * compose was enqueued ahead of any later decode. */
 	if (!ov.configured || !ov.active)
-		return;
+		return 0;
 	/* Decoder-owned planar420 is packed into the non-scanned YUV staging
 	 * buffer on core 1, then flipped into the same native PL plane at vblank.
 	 * A later planar fetcher can remove this final compact conversion. */
 	overlay_schedule_frame_ready(&ov.schedule, session);
 	ov.direct_session = session;
 	ov.compose_request = 1;
+	return 1;
 }
 
 void overlay_video_session_closed(uint32_t session)

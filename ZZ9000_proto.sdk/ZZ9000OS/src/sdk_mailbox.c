@@ -17,6 +17,9 @@
 #include "sdk_offload_params.h"
 #include "sdk_image_stream.h"
 #include "sdk_video_stream.h"
+#include "sdk_media_session.h"
+#include "audio_playback_frontier.h"
+#include "audio_stream_drain.h"
 #include "sdk_jpeg.h"
 #include "sdk_surface.h"
 #include "sdk_smp_lock.h"
@@ -46,7 +49,8 @@
 	 SDK_CAP_AUDIO_PLAYBACK | \
 	 SDK_CAP_MEMORY_OPS | SDK_CAP_CRYPTO | \
 	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION | \
-	 SDK_CAP_HOST_WINDOW_HEAP | SDK_CAP_VIDEO_DECODE)
+	 SDK_CAP_HOST_WINDOW_HEAP | SDK_CAP_VIDEO_DECODE | \
+	 SDK_CAP_MEDIA_SESSION | SDK_CAP_AUDIO_STREAM_DRAIN)
 /* Decode proceeds only with at least this much undecoded input (unless
  * EOF): enough for the largest legal MP3 frame (~1.4K, 2.3K free-format)
  * plus sync lookahead. It must stay WELL below any client's input-ring
@@ -639,6 +643,7 @@ struct SDKSharedBuffer {
 	uint32_t address;
 	uint32_t length;
 	uint32_t flags;
+	uint32_t pin_count;
 	uint8_t in_use;
 };
 
@@ -776,9 +781,17 @@ struct video_session_op_params {
 	uint32_t session;
 };
 
+struct media_audio_op_params {
+	uint32_t session;
+	uint32_t acknowledged_hi;
+	uint32_t acknowledged_lo;
+	uint32_t flags;
+};
+
 typedef char video_op_params_size_check[
     (sizeof(struct video_write_op_params) <= TASKQ_OP_PARAM_BYTES &&
-     sizeof(struct video_session_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+     sizeof(struct video_session_op_params) <= TASKQ_OP_PARAM_BYTES &&
+     sizeof(struct media_audio_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
 struct SDKAudioStream {
 	uint32_t id;
@@ -819,6 +832,8 @@ struct SDKAudioStream {
 	uint32_t bytes_produced;
 	uint32_t output_frame_limit;
 	int eof;
+	int drain_requested;
+	int drain_input_complete;
 	int initialized;
 	int backpressure;
 	int vbr_checked;
@@ -1061,6 +1076,8 @@ static int g_request_is_batch_tail;
 static uint16_t sdk_status;
 static struct SDKSharedBuffer shared_buffers[SDK_MAX_SHARED_BUFFERS];
 static struct SDKSurface surfaces[SDK_MAX_SURFACES];
+static struct SDKSharedBuffer *media_pcm_ring;
+static uint32_t media_pcm_ring_session;
 
 /*
  * The audio-stream table lives in the SCU-coherent scheduler region
@@ -1210,17 +1227,22 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 	},
 	{
 		SDK_SERVICE_VIDEO,
-		0x00010000U,
-		SDK_CAP_VIDEO_DECODE,
+		0x00020000U,
+		SDK_CAP_VIDEO_DECODE | SDK_CAP_MEDIA_SESSION,
 		SDK_SERVICE_FLAG_FIRMWARE |
 			SDK_SERVICE_FLAG_ASYNC |
 			SDK_SERVICE_FLAG_VIDEO_MPEG1 |
 			SDK_SERVICE_FLAG_VIDEO_MPEG_PS |
 			SDK_SERVICE_FLAG_VIDEO_DIRECT_OVERLAY |
 			SDK_SERVICE_FLAG_VIDEO_STREAMING_INPUT |
-			SDK_SERVICE_FLAG_VIDEO_CORE1,
+			SDK_SERVICE_FLAG_VIDEO_CORE1 |
+			SDK_SERVICE_FLAG_VIDEO_MEDIA_SESSION |
+			SDK_SERVICE_FLAG_VIDEO_MEDIA_MP2 |
+			SDK_SERVICE_FLAG_VIDEO_EXPLICIT_PRESENT |
+			SDK_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ |
+			SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS,
 		SDK_SERVICE_VIDEO,
-		4,
+		14,
 		"video"
 	}
 };
@@ -1236,6 +1258,17 @@ static inline uint32_t get_be32(const volatile void *p)
 	const volatile uint8_t *b = (const volatile uint8_t *)p;
 	return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
 	       ((uint32_t)b[2] << 8) | b[3];
+}
+
+static int bytes_are_zero(const volatile uint8_t *bytes, uint32_t length)
+{
+	uint32_t i;
+
+	for (i = 0U; i < length; i++) {
+		if (bytes[i] != 0U)
+			return 0;
+	}
+	return 1;
 }
 
 static inline void put_be16(volatile void *p, uint16_t value)
@@ -1406,6 +1439,9 @@ static uint32_t service_flags(const struct SDKServiceDescriptor *service)
 		flags |= sdk_jpeg_service_flags();
 		flags |= SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA;
 	}
+	if (service->service_id == SDK_SERVICE_VIDEO &&
+	    audio_codec_present())
+		flags |= SDK_SERVICE_FLAG_VIDEO_AUDIO_BIND;
 
 	return flags;
 }
@@ -1489,6 +1525,115 @@ static uint16_t complete_video_session_result(
 	memset((void *)comp->payload, 0, sizeof(comp->payload));
 	payload = (volatile struct SDKVideoSessionResultPayload *)comp->payload;
 	encode_video_session_result(payload, result);
+	return SDK_STATUS_OK;
+}
+
+static void put_be64_parts(volatile uint8_t hi[4],
+	                       volatile uint8_t lo[4], uint64_t value)
+{
+	put_be32(hi, (uint32_t)(value >> 32));
+	put_be32(lo, (uint32_t)value);
+}
+
+static void encode_media_session_main_result(
+	volatile struct SDKMediaSessionMainResultPayload *payload,
+	const struct SDKMediaSessionMainResult *result)
+{
+	put_be32(payload->session, result->session);
+	put_be32(payload->state, result->state);
+	put_be32(payload->width, result->width);
+	put_be32(payload->height, result->height);
+	put_be32(payload->frame_rate_num, result->frame_rate_num);
+	put_be32(payload->frame_rate_den, result->frame_rate_den);
+	put_be32(payload->frame_number, result->frame_number);
+	put_be64_parts(payload->video_pts_hi, payload->video_pts_lo,
+	               result->video_pts);
+	put_be32(payload->bytes_accepted, result->bytes_accepted);
+	put_be32(payload->bytes_written, result->bytes_written);
+	put_be32(payload->flags, result->flags);
+}
+
+static uint16_t complete_media_session_main_result(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t status,
+	const struct SDKMediaSessionMainResult *result)
+{
+	volatile struct SDKMediaSessionMainResultPayload *payload;
+
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*payload));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	payload =
+		(volatile struct SDKMediaSessionMainResultPayload *)comp->payload;
+	encode_media_session_main_result(payload, result);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t complete_media_session_status_result(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t status,
+	const struct SDKMediaSessionStatusResult *result)
+{
+	volatile struct SDKMediaSessionStatusResultPayload *payload;
+
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*payload));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	payload =
+		(volatile struct SDKMediaSessionStatusResultPayload *)comp->payload;
+	put_be32(payload->session, result->session);
+	put_be32(payload->state, result->state);
+	put_be32(payload->page, result->page);
+	put_be32(payload->flags, result->flags);
+	put_be64_parts(payload->value0_hi, payload->value0_lo,
+	               result->value[0]);
+	put_be64_parts(payload->value1_hi, payload->value1_lo,
+	               result->value[1]);
+	put_be64_parts(payload->value2_hi, payload->value2_lo,
+	               result->value[2]);
+	put_be64_parts(payload->value3_hi, payload->value3_lo,
+	               result->value[3]);
+	return SDK_STATUS_OK;
+}
+
+static void encode_media_session_audio_result(
+	volatile struct SDKMediaSessionAudioResultPayload *payload,
+	const struct SDKMediaSessionAudioResult *result)
+{
+	put_be32(payload->session, result->session);
+	put_be32(payload->state, result->state);
+	put_be32(payload->sample_rate, result->sample_rate);
+	put_be32(payload->channels, result->channels);
+	put_be32(payload->sample_format, result->sample_format);
+	put_be64_parts(payload->pcm_produced_hi, payload->pcm_produced_lo,
+	               result->pcm_produced);
+	put_be64_parts(payload->pcm_acknowledged_hi,
+	               payload->pcm_acknowledged_lo,
+	               result->pcm_acknowledged);
+	put_be64_parts(payload->audio_pts_hi, payload->audio_pts_lo,
+	               result->audio_pts);
+	put_be32(payload->flags, result->flags);
+}
+
+static uint16_t complete_media_session_audio_result(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t status,
+	const struct SDKMediaSessionAudioResult *result)
+{
+	volatile struct SDKMediaSessionAudioResultPayload *payload;
+
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*payload));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	payload =
+		(volatile struct SDKMediaSessionAudioResultPayload *)comp->payload;
+	encode_media_session_audio_result(payload, result);
 	return SDK_STATUS_OK;
 }
 
@@ -1690,6 +1835,29 @@ static struct SDKSharedBuffer *find_free_buffer_slot(void)
 	}
 
 	return 0;
+}
+
+static int shared_buffer_pin(struct SDKSharedBuffer *buffer)
+{
+	if (!shared_buffer_live(buffer) || buffer->pin_count == 0xffffffffU)
+		return 0;
+	buffer->pin_count++;
+	return 1;
+}
+
+static void shared_buffer_unpin(struct SDKSharedBuffer *buffer)
+{
+	if (buffer && buffer->pin_count != 0U)
+		buffer->pin_count--;
+}
+
+static void release_media_pcm_ring(uint32_t session)
+{
+	if (media_pcm_ring && media_pcm_ring_session == session) {
+		shared_buffer_unpin(media_pcm_ring);
+		media_pcm_ring = 0;
+		media_pcm_ring_session = 0U;
+	}
 }
 
 static struct SDKSurface *find_surface(uint32_t handle)
@@ -2042,6 +2210,8 @@ static uint16_t handle_free_shared(volatile struct SDKMailboxEntry *req,
 	buffer = find_shared_buffer(handle);
 	if (!buffer)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (buffer->pin_count != 0U)
+		return complete_status(req, comp, SDK_STATUS_BUSY);
 
 	memset(buffer, 0, sizeof(*buffer));
 	return complete_status(req, comp, SDK_STATUS_OK);
@@ -3081,7 +3251,7 @@ static int audio_stream_needs_more_input(const struct SDKAudioStream *stream)
 {
 	return stream &&
 	       stream->input_length < SDK_AUDIO_STREAM_MIN_INPUT_BYTES &&
-	       !stream->eof;
+	       !stream->eof && !stream->drain_requested;
 }
 
 static int audio_stream_process_vbr_tag(struct SDKAudioStream *stream,
@@ -3112,6 +3282,7 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 	uint32_t max_pcm_this_call;
 	uint32_t pcm_flush_start;
 	uint32_t progress = 0U;
+	int drain_blocked_on_input = 0;
 	uint8_t *input;
 	uint8_t *pcm_dst;
 
@@ -3123,9 +3294,13 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 	if (stream->decode_complete) {
 		if (stream->input_length != 0U) {
 			audio_stream_discard_input(stream);
-			return 1U;
+			progress = 1U;
 		}
-		return 0;
+		if (audio_stream_drain_input_done(
+			    stream->drain_requested, stream->decode_complete,
+			    stream->input_length, 0))
+			stream->drain_input_complete = 1;
+		return progress;
 	}
 	max_pcm_this_call = stream->high_water_bytes;
 	if (max_pcm_this_call == 0U ||
@@ -3138,26 +3313,39 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 	while (stream->input_length > 0U &&
 	       audio_stream_pcm_free(stream) >= frame_pcm_bytes) {
 		mp3dec_frame_info_t info;
+		int decode_input_size = (int)stream->input_length;
 		int samples;
 		uint32_t consumed;
 		uint32_t bytes;
 
-		if (audio_stream_needs_more_input(stream))
+		if (!audio_stream_decode_may_run(
+			    stream->input_length,
+			    SDK_AUDIO_STREAM_MIN_INPUT_BYTES,
+			    stream->eof, stream->drain_requested))
 			break;
 		if (produced_this_call != 0U &&
 		    (max_pcm_this_call - produced_this_call) <
 		        frame_pcm_bytes) {
 			break;
 		}
+		if (stream->drain_requested && !stream->eof &&
+		    !mp3_probe_complete_frame(
+			    &stream->decoder, input + stream->input_offset,
+			    (int)stream->input_length, &decode_input_size)) {
+			drain_blocked_on_input = 1;
+			break;
+		}
 		memset(&info, 0, sizeof(info));
 		samples = mp3dec_decode_frame(
 			&stream->decoder,
 			input + stream->input_offset,
-			(int)stream->input_length,
+			decode_input_size,
 			stream->scratch, &info);
 		consumed = (uint32_t)info.frame_bytes;
-		if (consumed == 0U)
+		if (consumed == 0U) {
+			drain_blocked_on_input = 1;
 			break;
+		}
 		if (stream->eof && stream->frames_decoded != 0U &&
 		    info.frame_offset != 0) {
 			audio_stream_discard_input(stream);
@@ -3222,6 +3410,10 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 		 * the PCM bytes in DRAM. */
 		stream->pcm_ready_total = stream->pcm_written_total;
 	}
+	if (audio_stream_drain_input_done(
+		    stream->drain_requested, stream->decode_complete,
+		    stream->input_length, drain_blocked_on_input))
+		stream->drain_input_complete = 1;
 	return progress;
 }
 
@@ -3238,6 +3430,10 @@ static uint32_t audio_stream_state(const struct SDKAudioStream *stream)
 			return SDK_AUDIO_STREAM_STATE_STREAMING;
 		return SDK_AUDIO_STREAM_STATE_DONE;
 	}
+	if (audio_stream_transient_drained(
+	        stream->drain_requested, stream->drain_input_complete,
+	        audio_stream_pcm_used(stream), stream->pump_tail_pending))
+		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
 	if (audio_stream_needs_more_input(stream))
 		return SDK_AUDIO_STREAM_STATE_NEED_INPUT;
 	if (stream->input_length == 0U &&
@@ -3261,6 +3457,10 @@ static uint32_t audio_stream_result_flags(const struct SDKAudioStream *stream)
 		flags |= SDK_AUDIO_STREAM_RESULT_DONE;
 	if (stream->backpressure)
 		flags |= SDK_AUDIO_STREAM_RESULT_BACKPRESSURE;
+	if (audio_stream_transient_drained(
+	        stream->drain_requested, stream->drain_input_complete,
+	        audio_stream_pcm_used(stream), stream->pump_tail_pending))
+		flags |= SDK_AUDIO_STREAM_RESULT_DRAINED;
 	return flags;
 }
 
@@ -3337,9 +3537,17 @@ static void audio_stream_feed_compute(struct SDKAudioStream *stream,
 		       (const void *)(uintptr_t)src_addr, src_length);
 		stream->input_length += src_length;
 		stream->backpressure = 0;
+		stream->drain_requested = 0;
+		stream->drain_input_complete = 0;
 	}
-	if ((flags & SDK_AUDIO_STREAM_FEED_EOF) != 0U)
+	if ((flags & SDK_AUDIO_STREAM_FEED_EOF) != 0U) {
 		stream->eof = 1;
+		stream->drain_requested = 0;
+		stream->drain_input_complete = 0;
+	} else if ((flags & SDK_AUDIO_STREAM_FEED_DRAIN) != 0U) {
+		stream->drain_requested = 1;
+		stream->drain_input_complete = 0;
+	}
 	audio_stream_decode(stream);
 }
 
@@ -3372,10 +3580,29 @@ static void audio_stream_read_compute(struct SDKAudioStream *stream,
 #define AUDIO_PUMP_RING_BYTES    AUDIO_TX_BUFFER_SIZE
 #define AUDIO_PUMP_TARGET_AHEAD \
 	(AUDIO_PUMP_RING_BYTES - 2U * AUDIO_PUMP_PERIOD_BYTES)
+#define AUDIO_PUMP_SOURCE_NONE   0U
+#define AUDIO_PUMP_SOURCE_STREAM 1U
+#define AUDIO_PUMP_SOURCE_MEDIA  2U
+
+struct SDKAudioPumpSource {
+	uint8_t *ring;
+	uint32_t capacity;
+	uint64_t produced_bytes;
+	uint64_t staged_bytes;
+	uint32_t sample_rate;
+	uint32_t channels;
+	uint32_t sample_format;
+	uint8_t done;
+	uint8_t faulted;
+};
 
 static struct {
 	uint32_t session;         /* 0 = unbound */
+	uint32_t source_kind;
+	uint32_t paused;
 	uint32_t fill_offset;     /* next TX-ring byte to fill, period-aligned */
+	uint32_t last_dma_offset; /* active DMA period at the last ISR */
+	uint32_t period_source_bytes[AUDIO_NUM_PERIODS];
 	uint32_t refill_pending;  /* internal core-1 refill task in flight */
 	uint32_t refill_session;  /* session that refill targets (valid while
 	                             refill_pending; survives an unbind) */
@@ -3462,11 +3689,90 @@ static void pump_resample_s16(const int16_t *input, int16_t *output,
 	}
 }
 
-/* Returns 1 if a period of real (decoded) PCM was staged, 0 for silence
- * (underrun, fault, or drained end-of-stream). The ISR pump uses this to
- * track when the DMA has played the last real audio out of the TX ring. */
-static int audio_pump_fill_period(struct SDKAudioStream *stream,
-                                  uint8_t *slot)
+static int audio_pump_source_snapshot(struct SDKAudioPumpSource *source)
+{
+	memset(source, 0, sizeof(*source));
+	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM) {
+		struct SDKAudioStream *stream =
+			find_audio_stream(g_audio_playback.session);
+
+		if (!stream)
+			return 0;
+		source->ring =
+			(uint8_t *)(uintptr_t)stream->pcm_ring_addr;
+		source->capacity = stream->pcm_capacity;
+		source->produced_bytes = stream->pcm_ready_total;
+		source->staged_bytes = stream->pcm_consumed_total;
+		source->sample_rate = stream->sample_rate;
+		source->channels = stream->channels;
+		source->sample_format = stream->sample_format;
+		source->done = audio_stream_source_tail_ready(
+			stream->eof, stream->input_length,
+			stream->drain_requested,
+			stream->drain_input_complete);
+		source->faulted = stream->faulted != 0U;
+		return 1;
+	}
+	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA) {
+		struct SDKMediaAudioSource media_source;
+
+		if (!sdk_media_session_audio_source(
+			    g_audio_playback.session, &media_source))
+			return 0;
+		source->ring = media_source.ring;
+		source->capacity = media_source.capacity;
+		source->produced_bytes = media_source.produced_bytes;
+		source->staged_bytes = media_source.staged_bytes;
+		source->sample_rate = media_source.sample_rate;
+		source->channels = media_source.channels;
+		source->sample_format = media_source.sample_format;
+		source->done = media_source.done;
+		return 1;
+	}
+	return 0;
+}
+
+static int audio_pump_source_stage(uint32_t bytes)
+{
+	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM) {
+		struct SDKAudioStream *stream =
+			find_audio_stream(g_audio_playback.session);
+
+		if (!stream ||
+		    bytes > stream->pcm_ready_total -
+		            stream->pcm_consumed_total)
+			return 0;
+		stream->pcm_consumed_total += bytes;
+		return 1;
+	}
+	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
+		return sdk_media_session_audio_stage(
+			g_audio_playback.session, bytes);
+	return 0;
+}
+
+static void audio_pump_source_retire(uint32_t bytes)
+{
+	if (bytes != 0U &&
+	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
+		(void)sdk_media_session_audio_retire(
+			g_audio_playback.session, bytes);
+}
+
+static void audio_pump_source_underrun(void)
+{
+	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
+		sdk_media_session_audio_underrun(
+			g_audio_playback.session);
+}
+
+/* Returns the number of source PCM bytes staged into this DMA period, or zero
+ * when the slot contains silence (temporary shortage, fault, pause, or drained
+ * end-of-stream). A zero-byte slot stays at the retryable fill frontier; it is
+ * not committed as future silence. Per-period metadata converts the staging
+ * cursor into an actual DMA-retirement clock. */
+static uint32_t audio_pump_fill_period(
+	const struct SDKAudioPumpSource *source, uint8_t *slot)
 {
 	uint32_t rate;
 	uint32_t channels;
@@ -3475,26 +3781,33 @@ static int audio_pump_fill_period(struct SDKAudioStream *stream,
 	uint32_t pull;
 	uint32_t offset;
 	uint32_t first;
+	uint64_t available;
 	uint8_t *ring;
 	int16_t *pcm;
 	uint32_t i;
 
-	if (!stream || stream->faulted)
+	if (!source || source->faulted || !source->ring ||
+	    source->capacity == 0U ||
+	    source->produced_bytes < source->staged_bytes)
 		goto silence;
-	rate = stream->sample_rate;
-	channels = stream->channels;
+	rate = source->sample_rate;
+	channels = source->channels;
 	if (rate == 0U || channels == 0U || channels > 2U)
+		goto silence;
+	if (source->sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
+	    source->sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
 		goto silence;
 	src_frames = rate / 50U;
 	if (src_frames == 0U || src_frames > (AUDIO_PUMP_PERIOD_BYTES / 4U))
 		goto silence;
 	src_bytes = src_frames * channels * 2U;
-	pull = stream->pcm_ready_total - stream->pcm_consumed_total;
-	if (pull >= src_bytes) {
+	available = source->produced_bytes - source->staged_bytes;
+	if (available >= src_bytes) {
 		pull = src_bytes;
-	} else if (!(stream->eof && stream->input_length == 0U) ||
-	           pull == 0U) {
-		goto silence;   /* underrun: a whole period of silence */
+	} else if (!source->done || available == 0U) {
+		goto silence;
+	} else {
+		pull = (uint32_t)available;
 	}
 	/* else: true end of stream (EOF fed, input fully consumed) with a
 	 * final PCM tail shorter than one 20 ms period -- MP3 frames owe
@@ -3505,9 +3818,10 @@ static int audio_pump_fill_period(struct SDKAudioStream *stream,
 	/* Pull the source from the PCM ring. The decode side flushed these
 	 * bytes before publishing pcm_ready_total, so a reader-side
 	 * invalidate makes them visible on this core. */
-	ring = (uint8_t *)(uintptr_t)stream->pcm_ring_addr;
-	offset = stream->pcm_consumed_total % stream->pcm_capacity;
-	first = stream->pcm_capacity - offset;
+	ring = source->ring;
+	offset = audio_playback_source_offset(
+		source->staged_bytes, source->capacity);
+	first = source->capacity - offset;
 	if (first > pull)
 		first = pull;
 	Xil_DCacheInvalidateRange((INTPTR)(ring + offset), first);
@@ -3518,7 +3832,19 @@ static int audio_pump_fill_period(struct SDKAudioStream *stream,
 	}
 	if (pull < src_bytes)
 		memset((uint8_t *)g_pump_src + pull, 0, src_bytes - pull);
-	stream->pcm_consumed_total += pull;
+	if (!audio_pump_source_stage(pull))
+		goto silence;
+
+	if (source->sample_format == SDK_AUDIO_SAMPLE_FORMAT_S16BE) {
+		uint8_t *bytes = (uint8_t *)g_pump_src;
+
+		for (i = 0U; i < src_bytes; i += 2U) {
+			uint8_t high = bytes[i];
+
+			bytes[i] = bytes[i + 1U];
+			bytes[i + 1U] = high;
+		}
+	}
 
 	pcm = g_pump_src;
 	if (channels == 1U) {
@@ -3534,7 +3860,7 @@ static int audio_pump_fill_period(struct SDKAudioStream *stream,
 		pump_resample_s16(pcm, (int16_t *)slot, rate, src_frames,
 		                  AUDIO_PUMP_PERIOD_BYTES / 4);
 	}
-	return 1;
+	return pull;
 silence:
 	memset(slot, 0, AUDIO_PUMP_PERIOD_BYTES);
 	return 0;
@@ -3545,32 +3871,49 @@ silence:
  * Integer-only; no scheduler/taskq/printf access from here. */
 void sdk_mailbox_audio_playback_pump_isr(void)
 {
-	struct SDKAudioStream *stream;
+	struct SDKAudioPumpSource source;
 	uint8_t *tx = (uint8_t *)AUDIO_TX_BUFFER_ADDRESS;
 	uint32_t pos_period;
 	uint32_t ahead;
 	uint32_t guard;
+	uint32_t retired;
 	uint32_t ring_periods = AUDIO_PUMP_RING_BYTES / AUDIO_PUMP_PERIOD_BYTES;
 	int staged_real = 0;
 
-	if (g_audio_playback.session == 0U)
+	if (g_audio_playback.session == 0U ||
+	    g_audio_playback.paused)
 		return;
-	stream = find_audio_stream(g_audio_playback.session);
-	if (!stream) {
-		g_audio_playback.session = 0U;   /* closed under us */
-		return;
-	}
 
 	pos_period = (audio_get_dma_transfer_count() % AUDIO_PUMP_RING_BYTES);
 	pos_period -= pos_period % AUDIO_PUMP_PERIOD_BYTES;
 
-	/* If the DMA caught up with (or passed) the fill frontier, restart
-	 * one period ahead of it. Circular distance: bias by the ring size
+	/* Retire every period the DMA advanced through since the preceding IRQ.
+	 * Each slot records exactly how many source bytes were staged into it;
+	 * silence contributes zero. This is the playback clock -- not the
+	 * decoder acknowledgement or the TX-fill frontier. */
+	retired = audio_playback_retire_to(
+		&g_audio_playback.last_dma_offset, pos_period,
+		AUDIO_PUMP_PERIOD_BYTES, AUDIO_PUMP_RING_BYTES,
+		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
+	audio_pump_source_retire(retired);
+
+	if (!audio_pump_source_snapshot(&source)) {
+		g_audio_playback.session = 0U;
+		g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
+		return;
+	}
+
+	/* If the DMA caught up with (or passed) the fill frontier, it has
+	 * actually reached an unfilled silence slot. Count that played
+	 * underrun (not speculative attempts to fill future periods), then
+	 * restart one period ahead. Circular distance: bias by the ring size
 	 * BEFORE the modulo -- a plain u32 (fill - pos) % RING is wrong on
 	 * wrap because 2^32 is not a multiple of the 30720-byte ring. */
-	ahead = (g_audio_playback.fill_offset + AUDIO_PUMP_RING_BYTES -
-	         pos_period) % AUDIO_PUMP_RING_BYTES;
-	if (ahead == 0U || ahead > AUDIO_PUMP_TARGET_AHEAD) {
+	if (audio_playback_frontier_needs_rebase(
+	        g_audio_playback.fill_offset, pos_period,
+	        AUDIO_PUMP_TARGET_AHEAD, AUDIO_PUMP_RING_BYTES)) {
+		if (!source.done && !source.faulted)
+			audio_pump_source_underrun();
 		g_audio_playback.fill_offset =
 		    (pos_period + AUDIO_PUMP_PERIOD_BYTES) %
 		    AUDIO_PUMP_RING_BYTES;
@@ -3578,8 +3921,13 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 
 	guard = AUDIO_PUMP_RING_BYTES / AUDIO_PUMP_PERIOD_BYTES;
 	while (guard--) {
-		ahead = (g_audio_playback.fill_offset + AUDIO_PUMP_RING_BYTES -
-		         pos_period) % AUDIO_PUMP_RING_BYTES;
+		uint32_t index;
+		uint32_t staged;
+		uint32_t next_fill;
+
+		ahead = audio_playback_ring_distance(
+			g_audio_playback.fill_offset, pos_period,
+			AUDIO_PUMP_RING_BYTES);
 		/* Stop AT the target, never past it: the frontier must stay
 		 * inside [PERIOD, TARGET_AHEAD] so the caught-up reset above
 		 * only fires on a genuine DMA overrun. Filling one period past
@@ -3590,8 +3938,11 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 		 * backpressure entirely. */
 		if (ahead >= AUDIO_PUMP_TARGET_AHEAD)
 			break;   /* frontier far enough ahead */
-		if (audio_pump_fill_period(stream,
-		                           tx + g_audio_playback.fill_offset))
+		index = g_audio_playback.fill_offset / AUDIO_PUMP_PERIOD_BYTES;
+		staged = audio_pump_fill_period(
+			&source, tx + g_audio_playback.fill_offset);
+		g_audio_playback.period_source_bytes[index] = staged;
+		if (staged != 0U)
 			staged_real = 1;
 		/* The TX ring is plain cacheable DDR (no TLB override) and
 		 * the audio formatter DMA does not snoop: push the period to
@@ -3600,9 +3951,16 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 		Xil_DCacheFlushRange(
 		    (INTPTR)(tx + g_audio_playback.fill_offset),
 		    AUDIO_PUMP_PERIOD_BYTES);
-		g_audio_playback.fill_offset =
-		    (g_audio_playback.fill_offset + AUDIO_PUMP_PERIOD_BYTES) %
-		    AUDIO_PUMP_RING_BYTES;
+		next_fill = audio_playback_frontier_after_fill(
+			g_audio_playback.fill_offset, staged,
+			AUDIO_PUMP_PERIOD_BYTES, AUDIO_PUMP_RING_BYTES);
+		if (next_fill == g_audio_playback.fill_offset)
+			break;
+		g_audio_playback.fill_offset = next_fill;
+		/* Refresh the published source cursor before filling another
+		 * period in this same IRQ. */
+		if (!audio_pump_source_snapshot(&source))
+			memset(&source, 0, sizeof(source));
 	}
 
 	/* Play-out tail tracking. This ISR fires once per formatter period,
@@ -3612,14 +3970,21 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 	 * DMA has played the last real audio out of the TX ring. Only then may
 	 * end-of-stream drop (see audio_stream_result_flags / audio_stream_
 	 * state), so a client that stops on DONE does not truncate the tail. */
-	if (staged_real) {
-		g_audio_playback.silence_run = 0U;
-		stream->pump_tail_pending = 1U;
-	} else if (stream->pump_tail_pending) {
-		if (g_audio_playback.silence_run < ring_periods)
-			g_audio_playback.silence_run++;
-		if (g_audio_playback.silence_run >= ring_periods)
-			stream->pump_tail_pending = 0U;
+	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM) {
+		struct SDKAudioStream *stream =
+			find_audio_stream(g_audio_playback.session);
+
+		if (!stream)
+			return;
+		if (staged_real) {
+			g_audio_playback.silence_run = 0U;
+			stream->pump_tail_pending = 1U;
+		} else if (stream->pump_tail_pending) {
+			if (g_audio_playback.silence_run < ring_periods)
+				g_audio_playback.silence_run++;
+			if (g_audio_playback.silence_run >= ring_periods)
+				stream->pump_tail_pending = 0U;
+		}
 	}
 }
 
@@ -3627,7 +3992,9 @@ void sdk_mailbox_audio_playback_pump(void)
 {
 	struct SDKAudioStream *stream;
 
-	if (g_audio_playback.session == 0U)
+	if (g_audio_playback.session == 0U ||
+	    g_audio_playback.source_kind != AUDIO_PUMP_SOURCE_STREAM ||
+	    g_audio_playback.paused)
 		return;
 	stream = find_audio_stream(g_audio_playback.session);
 	if (!stream) {
@@ -3643,9 +4010,11 @@ void sdk_mailbox_audio_playback_pump(void)
 	 * client completion is posted); a core-0-affine stream (begun while
 	 * the scheduler was down) refills inline, matching the legacy CPU
 	 * profile of that degraded mode. */
-	if (stream->input_length != 0U && !stream->faulted &&
-	    !audio_stream_needs_more_input(stream) &&
-	    audio_stream_pcm_used(stream) <= stream->low_water_bytes) {
+	if (audio_stream_refill_may_run(
+	        stream->input_length, stream->faulted,
+	        audio_stream_needs_more_input(stream),
+	        stream->drain_input_complete, audio_stream_pcm_used(stream),
+	        stream->low_water_bytes)) {
 		/* needs_more_input guard: a refill FEED would no-op below the
 		 * decoder's minimum-input gate, and the pump runs every main
 		 * loop pass -- without the guard the sub-minimum tail of a
@@ -3680,6 +4049,49 @@ void sdk_mailbox_audio_playback_pump(void)
 	}
 }
 
+static void audio_playback_start(uint32_t source_kind, uint32_t session)
+{
+	uint32_t pos;
+
+	/* Gate the ISR while every cursor and period tag is rebuilt. */
+	g_audio_playback.session = 0U;
+	__asm__ __volatile__("" ::: "memory");
+	audio_set_tx_buffer((uint8_t *)AUDIO_TX_BUFFER_ADDRESS);
+	if (audio_get_inited_tx_buffer() !=
+	    (uint8_t *)AUDIO_TX_BUFFER_ADDRESS)
+		audio_init_i2s();
+	pump_resample_reset();
+	pos = audio_get_dma_transfer_count() % AUDIO_PUMP_RING_BYTES;
+	pos -= pos % AUDIO_PUMP_PERIOD_BYTES;
+	g_audio_playback.fill_offset =
+		(pos + AUDIO_PUMP_PERIOD_BYTES) % AUDIO_PUMP_RING_BYTES;
+	g_audio_playback.last_dma_offset = pos;
+	audio_playback_clear_periods(
+		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
+	g_audio_playback.silence_run = 0U;
+	g_audio_playback.source_kind = source_kind;
+	g_audio_playback.paused = 0U;
+	/* Publish the session LAST: the next audio IRQ may now stage PCM. */
+	__asm__ __volatile__("" ::: "memory");
+	g_audio_playback.session = session;
+}
+
+static void audio_playback_stop(void)
+{
+	g_audio_playback.session = 0U;
+	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
+	g_audio_playback.paused = 0U;
+	audio_playback_clear_periods(
+		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
+	g_audio_playback.silence_run = 0U;
+	audio_silence();
+}
+
+int sdk_mailbox_audio_playback_active(void)
+{
+	return g_audio_playback.session != 0U;
+}
+
 static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
                                          volatile struct SDKMailboxEntry *comp,
                                          uint16_t payload_len)
@@ -3688,7 +4100,6 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	struct SDKAudioStream *stream;
 	uint32_t session;
 	uint32_t flags;
-	uint32_t pos;
 
 	if (payload_len < sizeof(*payload))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -3702,7 +4113,8 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	if (stream->faulted)
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
-	if (g_audio_playback.session == session) {
+	if (g_audio_playback.session == session &&
+	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM) {
 		/* Already playing this session: idempotent, no re-init (the
 		 * client may use this as a cheap status probe). */
 		return complete_audio_stream_result(req, comp, SDK_STATUS_OK,
@@ -3735,23 +4147,8 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	 * pump fills the default ring while the DMA reads AHI's dead one.
 	 * Safe here: PLAY runs in the main loop, and the ISR pump stays
 	 * gated off until the session publishes below. */
-	audio_set_tx_buffer((uint8_t *)AUDIO_TX_BUFFER_ADDRESS);
-	if (audio_get_inited_tx_buffer() != (uint8_t *)AUDIO_TX_BUFFER_ADDRESS)
-		audio_init_i2s();
-	pump_resample_reset();
-	pos = audio_get_dma_transfer_count() % AUDIO_PUMP_RING_BYTES;
-	pos -= pos % AUDIO_PUMP_PERIOD_BYTES;
-	g_audio_playback.fill_offset =
-	    (pos + AUDIO_PUMP_PERIOD_BYTES) % AUDIO_PUMP_RING_BYTES;
-	/* Fresh tail guard for this binding; the pump arms it on the first
-	 * real period it stages. */
-	g_audio_playback.silence_run = 0U;
 	stream->pump_tail_pending = 0U;
-	/* Publish the session LAST: the ISR pump gates on it, and the same
-	 * core observes these stores in program order. Filling starts on
-	 * the next period interrupt (<= 20 ms). */
-	__asm__ __volatile__("" ::: "memory");
-	g_audio_playback.session = session;
+	audio_playback_start(AUDIO_PUMP_SOURCE_STREAM, session);
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
 }
 
@@ -3774,9 +4171,9 @@ static uint16_t handle_audio_stream_stop(volatile struct SDKMailboxEntry *req,
 	stream = find_audio_stream(session);
 	if (!stream)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-	if (g_audio_playback.session == session) {
-		g_audio_playback.session = 0U;
-		audio_silence();
+	if (g_audio_playback.session == session &&
+	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM) {
+		audio_playback_stop();
 		/* audio_silence() wiped the TX ring: no tail is left to play. */
 		stream->pump_tail_pending = 0U;
 		g_audio_playback.silence_run = 0U;
@@ -3881,7 +4278,14 @@ static uint16_t handle_audio_stream_feed(volatile struct SDKMailboxEntry *req,
 
 	src_length = get_be32(payload->src_length);
 	flags = get_be32(payload->flags);
-	if ((flags & ~SDK_AUDIO_STREAM_FEED_EOF) != 0U)
+	if ((flags & ~(SDK_AUDIO_STREAM_FEED_EOF |
+	               SDK_AUDIO_STREAM_FEED_DRAIN)) != 0U ||
+	    (flags & (SDK_AUDIO_STREAM_FEED_EOF |
+	              SDK_AUDIO_STREAM_FEED_DRAIN)) ==
+	        (SDK_AUDIO_STREAM_FEED_EOF |
+	         SDK_AUDIO_STREAM_FEED_DRAIN) ||
+	    ((flags & SDK_AUDIO_STREAM_FEED_DRAIN) != 0U &&
+	     src_length != 0U))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if (stream->faulted)
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
@@ -3947,7 +4351,8 @@ static uint16_t handle_audio_stream_read(volatile struct SDKMailboxEntry *req,
 	if (stream->faulted)
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
 	/* A bound stream's consumer is the AX playback pump. */
-	if (g_audio_playback.session == session)
+	if (g_audio_playback.session == session &&
+	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 
 	if (stream->core1_affine && scheduler_core1_available()) {
@@ -4017,10 +4422,10 @@ static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
 	stream = find_audio_stream(session);
 	if (!stream)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-	if (g_audio_playback.session == session) {
+	if (g_audio_playback.session == session &&
+	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM) {
 		/* Closing a bound stream implies stop. */
-		g_audio_playback.session = 0U;
-		audio_silence();
+		audio_playback_stop();
 	}
 	/* An internal PCM-refill FEED (request_id 0) may still be queued or
 	 * running on core 1 against this stream's coherent slot -- it was
@@ -4297,7 +4702,9 @@ static uint16_t handle_video_session_write(
 	p.session = get_be32(payload->session);
 	p.src_len = get_be32(payload->src_length);
 	p.flags = get_be32(payload->flags);
-	if (sdk_video_stream_session_core1(p.session) < 0)
+	if (sdk_video_stream_session_core1(p.session) < 0 ||
+	    sdk_video_stream_session_owner(p.session) !=
+	        SDK_VIDEO_STREAM_OWNER_LEGACY)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	/* EOF-only writes carry no source bytes and intentionally need no live
 	 * shared-buffer handle. The worker validates that the EOF flag is present. */
@@ -4333,7 +4740,9 @@ static uint16_t handle_video_session_simple(
 		payload = (volatile struct SDKVideoSessionDecodePayload *)req->payload;
 		p.session = get_be32(payload->session);
 		flags = get_be32(payload->flags);
-		if (sdk_video_stream_session_core1(p.session) < 0)
+		if (sdk_video_stream_session_core1(p.session) < 0 ||
+		    sdk_video_stream_session_owner(p.session) !=
+		        SDK_VIDEO_STREAM_OWNER_LEGACY)
 			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	} else {
 		volatile struct SDKVideoSessionClosePayload *payload;
@@ -4346,12 +4755,288 @@ static uint16_t handle_video_session_simple(
 	}
 	if (flags != 0U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (sdk_video_stream_session_core1(p.session) < 0)
+	if (sdk_video_stream_session_core1(p.session) < 0 ||
+	    sdk_video_stream_session_owner(p.session) !=
+	        SDK_VIDEO_STREAM_OWNER_LEGACY)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	if (service_try_defer(opcode, req, &p, sizeof(p), 0U) ==
 	    SDK_STATUS_QUEUED)
 		return SDK_STATUS_QUEUED;
 	return complete_status(req, comp, SDK_STATUS_BUSY);
+}
+
+static uint16_t handle_media_session_begin(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKMediaSessionBeginPayload *payload;
+	struct SDKMediaSessionBegin begin;
+	struct SDKMediaSessionMainResult result;
+	struct SDKSharedBuffer *pcm_ring = 0;
+	uint16_t status;
+
+	if (payload_len != sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (!scheduler_core1_available())
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	payload = (volatile struct SDKMediaSessionBeginPayload *)req->payload;
+	memset(&begin, 0, sizeof(begin));
+	begin.video_codec = get_be32(payload->video_codec);
+	begin.container = get_be32(payload->container);
+	begin.width = get_be32(payload->width);
+	begin.height = get_be32(payload->height);
+	begin.output_format = get_be32(payload->output_format);
+	begin.audio_codec = get_be32(payload->audio_codec);
+	begin.pcm_ring_handle = get_be32(payload->pcm_ring_handle);
+	begin.pcm_ring_capacity = get_be32(payload->pcm_ring_capacity);
+	begin.pcm_low_water_bytes = get_be32(payload->pcm_low_water_bytes);
+	begin.pcm_high_water_bytes = get_be32(payload->pcm_high_water_bytes);
+	begin.flags = get_be32(payload->flags);
+	if (!bytes_are_zero(payload->reserved, sizeof(payload->reserved)))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2) {
+		if (media_pcm_ring)
+			return complete_status(req, comp, SDK_STATUS_BUSY);
+		pcm_ring = find_shared_buffer(begin.pcm_ring_handle);
+		if (!pcm_ring)
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+		if (begin.pcm_ring_capacity > pcm_ring->length)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		if (!shared_buffer_pin(pcm_ring))
+			return complete_status(req, comp, SDK_STATUS_BUSY);
+		begin.pcm_ring = (uint8_t *)(uintptr_t)pcm_ring->address;
+	}
+	status = sdk_media_session_begin(&begin, &result);
+	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2) {
+		if (status == SDK_STATUS_OK) {
+			media_pcm_ring = pcm_ring;
+			media_pcm_ring_session = result.session;
+		} else {
+			shared_buffer_unpin(pcm_ring);
+		}
+	}
+	return complete_media_session_main_result(req, comp, status, &result);
+}
+
+static uint16_t handle_media_session_write(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKMediaSessionWritePayload *payload;
+	struct SDKSharedBuffer *src;
+	struct video_write_op_params p;
+	uint32_t src_offset;
+
+	if (payload_len != sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKMediaSessionWritePayload *)req->payload;
+	memset(&p, 0, sizeof(p));
+	p.session = get_be32(payload->session);
+	p.src_len = get_be32(payload->src_length);
+	p.flags = get_be32(payload->flags);
+	if ((p.flags & ~SDK_MEDIA_SESSION_WRITE_EOF) != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (sdk_media_session_core1(p.session) < 0)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (p.src_len != 0U) {
+		src_offset = get_be32(payload->src_offset);
+		src = find_shared_buffer(get_be32(payload->src_handle));
+		if (!src)
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+		if (!buffer_range_valid(src, src_offset, p.src_len))
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		p.src_addr = src->address + src_offset;
+	}
+	if (service_try_defer(SDK_OP_MEDIA_SESSION_WRITE, req, &p,
+	                      sizeof(p), p.src_len) == SDK_STATUS_QUEUED)
+		return SDK_STATUS_QUEUED;
+	return complete_status(req, comp, SDK_STATUS_BUSY);
+}
+
+static uint16_t handle_media_session_deferred_simple(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len, uint16_t opcode)
+{
+	volatile struct SDKMediaSessionCommandPayload *payload;
+	struct video_session_op_params p;
+	uint32_t flags;
+
+	if (payload_len != sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKMediaSessionCommandPayload *)req->payload;
+	memset(&p, 0, sizeof(p));
+	p.session = get_be32(payload->session);
+	flags = get_be32(payload->flags);
+	if (p.session == 0U || flags != 0U ||
+	    get_be32(payload->value_hi) != 0U ||
+	    get_be32(payload->value_lo) != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (opcode == SDK_OP_MEDIA_SESSION_CLOSE) {
+		if (!sdk_media_session_close_known(p.session))
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	} else if (sdk_media_session_core1(p.session) < 0) {
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	}
+	if (service_try_defer(opcode, req, &p, sizeof(p), 0U) ==
+	    SDK_STATUS_QUEUED)
+		return SDK_STATUS_QUEUED;
+	return complete_status(req, comp, SDK_STATUS_BUSY);
+}
+
+static uint16_t handle_media_session_present_or_discard(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len, uint16_t opcode)
+{
+	volatile struct SDKMediaSessionCommandPayload *payload;
+	struct SDKMediaSessionMainResult result;
+	uint32_t session;
+	uint32_t flags;
+	uint16_t status;
+
+	if (payload_len != sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKMediaSessionCommandPayload *)req->payload;
+	session = get_be32(payload->session);
+	flags = get_be32(payload->flags);
+	if (get_be32(payload->value_hi) != 0U ||
+	    get_be32(payload->value_lo) != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (opcode == SDK_OP_MEDIA_SESSION_PRESENT)
+		status = sdk_media_session_present(session, flags, &result);
+	else
+		status = sdk_media_session_discard(session, flags, &result);
+	return complete_media_session_main_result(req, comp, status, &result);
+}
+
+static uint16_t handle_media_session_status(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKMediaSessionStatusPayload *payload;
+	struct SDKMediaSessionStatusResult result;
+	uint16_t status;
+
+	if (payload_len != sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKMediaSessionStatusPayload *)req->payload;
+	status = sdk_media_session_status(
+		get_be32(payload->session), get_be32(payload->page),
+		get_be32(payload->flags), &result);
+	return complete_media_session_status_result(
+		req, comp, status, &result);
+}
+
+static uint16_t handle_media_session_audio_read(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKMediaSessionCommandPayload *payload;
+	struct media_audio_op_params p;
+
+	if (payload_len != sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKMediaSessionCommandPayload *)req->payload;
+	memset(&p, 0, sizeof(p));
+	p.session = get_be32(payload->session);
+	p.acknowledged_hi = get_be32(payload->value_hi);
+	p.acknowledged_lo = get_be32(payload->value_lo);
+	p.flags = get_be32(payload->flags);
+	if (p.session == 0U || p.flags != 0U ||
+	    !bytes_are_zero(payload->reserved, sizeof(payload->reserved)))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (sdk_media_session_core1(p.session) < 0)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (service_try_defer(SDK_OP_MEDIA_SESSION_AUDIO_READ, req, &p,
+	                      sizeof(p), 0U) == SDK_STATUS_QUEUED)
+		return SDK_STATUS_QUEUED;
+	return complete_status(req, comp, SDK_STATUS_BUSY);
+}
+
+static uint16_t handle_media_session_audio_bind(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len, uint16_t opcode)
+{
+	volatile struct SDKMediaSessionCommandPayload *payload;
+	struct SDKMediaSessionAudioResult result;
+	uint32_t session;
+	uint32_t flags;
+	uint16_t status;
+
+	if (payload_len != sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKMediaSessionCommandPayload *)req->payload;
+	session = get_be32(payload->session);
+	flags = get_be32(payload->flags);
+	if (session == 0U ||
+	    !bytes_are_zero(payload->reserved, sizeof(payload->reserved)) ||
+	    get_be32(payload->value_hi) != 0U ||
+	    get_be32(payload->value_lo) != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (opcode == SDK_OP_MEDIA_SESSION_AUDIO_UNBIND) {
+		if (flags != 0U)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		if (g_audio_playback.session == session &&
+		    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
+			audio_playback_stop();
+		status = sdk_media_session_audio_unbind(
+			session, flags, &result);
+		return complete_media_session_audio_result(
+			req, comp, status, &result);
+	}
+
+	if ((flags & ~SDK_MEDIA_AUDIO_BIND_PAUSE) != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (g_audio_playback.session != 0U &&
+	    (g_audio_playback.session != session ||
+	     g_audio_playback.source_kind != AUDIO_PUMP_SOURCE_MEDIA))
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+
+	if ((flags & SDK_MEDIA_AUDIO_BIND_PAUSE) != 0U) {
+		if (g_audio_playback.session != session ||
+		    g_audio_playback.source_kind != AUDIO_PUMP_SOURCE_MEDIA)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		g_audio_playback.paused = 1U;
+		__asm__ __volatile__("" ::: "memory");
+		status = sdk_media_session_audio_bind(
+			session, flags, &result);
+		if (status != SDK_STATUS_OK) {
+			g_audio_playback.paused = 0U;
+			return complete_status(req, comp, status);
+		}
+		audio_playback_clear_periods(
+			g_audio_playback.period_source_bytes,
+			AUDIO_NUM_PERIODS);
+		audio_silence();
+		return complete_media_session_audio_result(
+			req, comp, SDK_STATUS_OK, &result);
+	}
+
+	if (g_audio_playback.session == session &&
+	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA) {
+		status = sdk_media_session_audio_bind(
+			session, 0U, &result);
+		if (status == SDK_STATUS_OK && g_audio_playback.paused)
+			audio_playback_start(
+				AUDIO_PUMP_SOURCE_MEDIA, session);
+		return complete_media_session_audio_result(
+			req, comp, status, &result);
+	}
+	if (!audio_codec_present())
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (audio_legacy_output_active())
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	status = sdk_media_session_audio_bind(session, 0U, &result);
+	if (status == SDK_STATUS_OK)
+		audio_playback_start(AUDIO_PUMP_SOURCE_MEDIA, session);
+	return complete_media_session_audio_result(
+		req, comp, status, &result);
 }
 
 static uint16_t handle_fill_surface(volatile struct SDKMailboxEntry *req,
@@ -5050,6 +5735,91 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 			(volatile struct SDKVideoSessionResultPayload *)result_payload,
 			&video_result);
 		*result_len = sizeof(struct SDKVideoSessionResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_MEDIA_SESSION_WRITE: {
+		const struct video_write_op_params *p =
+		    (const struct video_write_op_params *)d->op_params;
+		struct SDKMediaSessionWrite write;
+		struct SDKMediaSessionMainResult media_result;
+		uint16_t s;
+
+		if (smp_cpu_id() != 1)
+			return SDK_STATUS_IO_ERROR;
+		memset(&write, 0, sizeof(write));
+		write.session = p->session;
+		write.src = p->src_len != 0U
+			? (const uint8_t *)(uintptr_t)p->src_addr : 0;
+		write.src_length = p->src_len;
+		write.flags = p->flags;
+		if (p->src_len != 0U)
+			Xil_DCacheInvalidateRange((INTPTR)p->src_addr, p->src_len);
+		s = sdk_media_session_write(&write, &media_result);
+		*result_len = 0U;
+		if (s != SDK_STATUS_OK)
+			return s;
+		memset(result_payload, 0,
+		       sizeof(struct SDKMediaSessionMainResultPayload));
+		encode_media_session_main_result(
+			(volatile struct SDKMediaSessionMainResultPayload *)
+			    result_payload,
+			&media_result);
+		*result_len =
+			sizeof(struct SDKMediaSessionMainResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_MEDIA_SESSION_DECODE:
+	case SDK_OP_MEDIA_SESSION_CLOSE: {
+		const struct video_session_op_params *p =
+		    (const struct video_session_op_params *)d->op_params;
+		struct SDKMediaSessionMainResult media_result;
+		uint16_t s;
+
+		if (smp_cpu_id() != 1)
+			return SDK_STATUS_IO_ERROR;
+		if (d->opcode == SDK_OP_MEDIA_SESSION_DECODE)
+			s = sdk_media_session_decode(
+				p->session, 0U, &media_result);
+		else
+			s = sdk_media_session_close(
+				p->session, 0U, &media_result);
+		*result_len = 0U;
+		if (s != SDK_STATUS_OK)
+			return s;
+		memset(result_payload, 0,
+		       sizeof(struct SDKMediaSessionMainResultPayload));
+		encode_media_session_main_result(
+			(volatile struct SDKMediaSessionMainResultPayload *)
+			    result_payload,
+			&media_result);
+		*result_len =
+			sizeof(struct SDKMediaSessionMainResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_MEDIA_SESSION_AUDIO_READ: {
+		const struct media_audio_op_params *p =
+		    (const struct media_audio_op_params *)d->op_params;
+		struct SDKMediaSessionAudioResult audio_result;
+		uint64_t acknowledged =
+			((uint64_t)p->acknowledged_hi << 32) |
+			p->acknowledged_lo;
+		uint16_t s;
+
+		if (smp_cpu_id() != 1)
+			return SDK_STATUS_IO_ERROR;
+		s = sdk_media_session_audio_read(
+			p->session, acknowledged, p->flags, &audio_result);
+		*result_len = 0U;
+		if (s != SDK_STATUS_OK)
+			return s;
+		memset(result_payload, 0,
+		       sizeof(struct SDKMediaSessionAudioResultPayload));
+		encode_media_session_audio_result(
+			(volatile struct SDKMediaSessionAudioResultPayload *)
+			    result_payload,
+			&audio_result);
+		*result_len =
+			sizeof(struct SDKMediaSessionAudioResultPayload);
 		return SDK_STATUS_OK;
 	}
 	case SDK_OP_AUDIO_STREAM_FEED: {
@@ -6424,6 +7194,10 @@ static int opcode_reserves_request_id_zero(uint16_t opcode)
 	case SDK_OP_VIDEO_SESSION_WRITE:
 	case SDK_OP_VIDEO_SESSION_DECODE:
 	case SDK_OP_VIDEO_SESSION_CLOSE:
+	case SDK_OP_MEDIA_SESSION_WRITE:
+	case SDK_OP_MEDIA_SESSION_DECODE:
+	case SDK_OP_MEDIA_SESSION_AUDIO_READ:
+	case SDK_OP_MEDIA_SESSION_CLOSE:
 	case SDK_OP_DECOMPRESS:
 	case SDK_OP_DECOMPRESS_BATCH:
 	case SDK_OP_CRYPTO_HASH:
@@ -6536,6 +7310,27 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	case SDK_OP_VIDEO_SESSION_DECODE:
 	case SDK_OP_VIDEO_SESSION_CLOSE:
 		return handle_video_session_simple(req, comp, payload_len, opcode);
+	case SDK_OP_MEDIA_SESSION_BEGIN:
+		return handle_media_session_begin(req, comp, payload_len);
+	case SDK_OP_MEDIA_SESSION_WRITE:
+		return handle_media_session_write(req, comp, payload_len);
+	case SDK_OP_MEDIA_SESSION_DECODE:
+	case SDK_OP_MEDIA_SESSION_CLOSE:
+		return handle_media_session_deferred_simple(
+			req, comp, payload_len, opcode);
+	case SDK_OP_MEDIA_SESSION_PRESENT:
+	case SDK_OP_MEDIA_SESSION_DISCARD:
+		return handle_media_session_present_or_discard(
+			req, comp, payload_len, opcode);
+	case SDK_OP_MEDIA_SESSION_STATUS:
+		return handle_media_session_status(req, comp, payload_len);
+	case SDK_OP_MEDIA_SESSION_AUDIO_READ:
+		return handle_media_session_audio_read(
+			req, comp, payload_len);
+	case SDK_OP_MEDIA_SESSION_AUDIO_BIND:
+	case SDK_OP_MEDIA_SESSION_AUDIO_UNBIND:
+		return handle_media_session_audio_bind(
+			req, comp, payload_len, opcode);
 	case SDK_OP_DECOMPRESS:
 		return handle_decompress(req, comp, payload_len);
 	case SDK_OP_DECOMPRESS_TEST:
@@ -6623,10 +7418,16 @@ void sdk_mailbox_init(void)
 	timing_max_us = 0;
 	timing_decode_requests = 0;
 	timing_decode_us = 0;
+	media_pcm_ring = 0;
+	media_pcm_ring_session = 0U;
 	memset(shared_buffers, 0, sizeof(shared_buffers));
 	memset(surfaces, 0, sizeof(surfaces));
 	/* Unbind AX playback before the table goes away. */
 	g_audio_playback.session = 0U;
+	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
+	g_audio_playback.paused = 0U;
+	audio_playback_clear_periods(
+		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
 	g_audio_playback.refill_pending = 0U;
 	/* Pointer into the coherent region, not an array: size explicitly.
 	 * Flush so the zeroed table is in DRAM whatever MMU attributes the
@@ -6652,6 +7453,7 @@ void sdk_mailbox_init(void)
 		core1_cold_restart();
 	sdk_image_stream_init();
 	sdk_video_stream_init();
+	sdk_media_session_init();
 	amiga_interrupt_clear(AMIGA_INTERRUPT_SDK);
 
 	Xil_DCacheFlushRange(SDK_MAILBOX_ADDRESS, SDK_MAILBOX_TOTAL_SIZE);
@@ -6898,6 +7700,13 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 			overlay_video_frame_ready(get_be32(video->session));
 		else if (opcode == SDK_OP_VIDEO_SESSION_CLOSE)
 			overlay_video_session_closed(get_be32(video->session));
+		else if (opcode == SDK_OP_MEDIA_SESSION_CLOSE)
+		{
+			uint32_t session = get_be32(video->session);
+
+			sdk_media_session_close_retired(session);
+			release_media_pcm_ring(session);
+		}
 	}
 
 	requests_completed++;

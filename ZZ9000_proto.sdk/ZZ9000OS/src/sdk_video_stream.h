@@ -19,6 +19,11 @@ struct SDKVideoStreamBegin {
 	uint32_t height;
 	uint32_t output_format;
 	uint32_t flags;
+	uint32_t audio_codec;
+	uint8_t *pcm_ring;
+	uint32_t pcm_ring_capacity;
+	uint32_t pcm_low_water_bytes;
+	uint32_t pcm_high_water_bytes;
 };
 
 struct SDKVideoStreamWrite {
@@ -43,19 +48,32 @@ struct SDKVideoStreamResult {
 	uint32_t bytes_accepted;
 	uint32_t bytes_written;
 	uint32_t flags;
+	uint64_t media_pts;
+	uint64_t raw_pts;
+	uint32_t media_flags;
 };
+
+#define SDK_VIDEO_STREAM_OWNER_LEGACY 0U
+#define SDK_VIDEO_STREAM_OWNER_MEDIA  1U
 
 void sdk_video_stream_init(void);
 uint32_t sdk_video_stream_active_count(void);
 int sdk_video_stream_session_core1(uint32_t session);
+int sdk_video_stream_session_owner(uint32_t session);
 uint32_t sdk_video_stream_session_height(uint32_t session);
 int sdk_video_stream_has_core1_sessions(void);
 void sdk_video_stream_poison_core1_sessions(void);
 int sdk_video_stream_get_direct_frame(uint32_t session,
 	                                  struct SDKVideoDecodedFrame *frame);
+int sdk_video_stream_get_media_info(
+	uint32_t session, struct SDKVideoMediaInfo *info);
+int sdk_video_stream_ack_media(uint32_t session, uint64_t acknowledged);
 
 uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
 	                            struct SDKVideoStreamResult *result);
+uint16_t sdk_video_stream_begin_owned(
+	const struct SDKVideoStreamBegin *begin, uint32_t owner,
+	struct SDKVideoStreamResult *result);
 uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
 	                            struct SDKVideoStreamResult *result);
 uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,

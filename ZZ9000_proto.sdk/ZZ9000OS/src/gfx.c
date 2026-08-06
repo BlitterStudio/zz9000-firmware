@@ -1192,9 +1192,9 @@ void overlay_composite_frame(uint8_t *dst, uint32_t dst_pitch,
 	}
 }
 
-/* Scaled/clipped decoder-frame variant of overlay_composite_frame(). It
- * consumes planar 4:2:0 planes in place and writes the software fallback's
- * RGB shadow. Fully visible 1:1 windows use the native PL YUV plane instead. */
+/* Decoder-frame variant of overlay_composite_frame() for the compatibility
+ * fallback. It consumes planar 4:2:0 planes in place and writes an RGB
+ * shadow when the native packed-YUV overlay cannot accept the geometry. */
 void overlay_composite_planar420_frame(uint8_t *dst, uint32_t dst_pitch,
 	const uint8_t *screen, uint32_t screen_pitch,
 	uint16_t scr_w, uint16_t scr_h, uint8_t color_format,

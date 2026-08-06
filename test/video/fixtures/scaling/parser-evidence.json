@@ -1,0 +1,8 @@
+{
+  "formatter_tests_pass": 0,
+  "timing_met": 1,
+  "exact_size_regression_pass": 1,
+  "visual_correctness_pass": 1,
+  "formatter_setup_wns_ns": 1.515,
+  "formatter_hold_whs_ns": 0.106
+}

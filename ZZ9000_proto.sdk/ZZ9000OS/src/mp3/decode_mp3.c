@@ -70,3 +70,43 @@ int mp3_get_channels(const struct mp3_decode_ctx *ctx) {
 unsigned long mp3_get_bytes_consumed(const struct mp3_decode_ctx *ctx) {
 	return (unsigned long)ctx->mp3d.offset;
 }
+
+int mp3_probe_complete_frame(const mp3dec_t *decoder,
+                             const uint8_t *input_buffer,
+                             int input_buffer_size,
+                             int *decode_input_size) {
+	mp3dec_t probe;
+	mp3dec_frame_info_t info;
+	int frame_size;
+	int samples;
+
+	if (!decoder || !input_buffer || input_buffer_size <= 0 ||
+	    !decode_input_size)
+		return 0;
+	*decode_input_size = 0;
+	probe = *decoder;
+	memset(&info, 0, sizeof(info));
+	samples = mp3dec_decode_frame(&probe, input_buffer, input_buffer_size,
+	                              NULL, &info);
+	if (samples > 0 && info.frame_bytes > 0 &&
+	    info.frame_bytes <= input_buffer_size) {
+		*decode_input_size = info.frame_bytes;
+		return 1;
+	}
+
+	/* minimp3 normally confirms a frame against the next four-byte header.
+	 * A resumable drain can end with one complete frame followed by only the
+	 * first one to three bytes of the next header. In that narrow case, parse
+	 * the leading non-free-format frame length and let the live decoder see
+	 * exactly that frame; the trailing prefix remains buffered for refill. */
+	if (input_buffer_size <= HDR_SIZE || !hdr_valid(input_buffer) ||
+	    HDR_IS_FREE_FORMAT(input_buffer))
+		return 0;
+	frame_size = hdr_frame_bytes(input_buffer, decoder->free_format_bytes) +
+	             hdr_padding(input_buffer);
+	if (frame_size <= 0 || frame_size > input_buffer_size ||
+	    input_buffer_size - frame_size >= HDR_SIZE)
+		return 0;
+	*decode_input_size = frame_size;
+	return 1;
+}

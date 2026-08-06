@@ -52,6 +52,8 @@
 // board-window-reachable heap (Zorro 2 support; see memorymap.h).
 #define SDK_CAP_HOST_WINDOW_HEAP       (1U << 20)
 #define SDK_CAP_VIDEO_DECODE           (1U << 21)
+#define SDK_CAP_MEDIA_SESSION          (1U << 22)
+#define SDK_CAP_AUDIO_STREAM_DRAIN     (1U << 23)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
@@ -141,6 +143,12 @@
 #define SDK_SERVICE_FLAG_VIDEO_DIRECT_OVERLAY   (1U << 18)
 #define SDK_SERVICE_FLAG_VIDEO_STREAMING_INPUT  (1U << 19)
 #define SDK_SERVICE_FLAG_VIDEO_CORE1            (1U << 20)
+#define SDK_SERVICE_FLAG_VIDEO_MEDIA_SESSION    (1U << 21)
+#define SDK_SERVICE_FLAG_VIDEO_MEDIA_MP2        (1U << 22)
+#define SDK_SERVICE_FLAG_VIDEO_EXPLICIT_PRESENT (1U << 23)
+#define SDK_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ   (1U << 24)
+#define SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS  (1U << 25)
+#define SDK_SERVICE_FLAG_VIDEO_AUDIO_BIND       (1U << 26)
 
 #define SDK_OP_NOP                     0x0000U
 #define SDK_OP_QUERY_CAPS              0x0001U
@@ -238,6 +246,115 @@ struct SDKCryptoVerifyPayload {
 #define SDK_OP_VIDEO_SESSION_WRITE     0x0b01U
 #define SDK_OP_VIDEO_SESSION_DECODE    0x0b02U
 #define SDK_OP_VIDEO_SESSION_CLOSE     0x0b03U
+#define SDK_OP_MEDIA_SESSION_BEGIN     0x0b04U
+#define SDK_OP_MEDIA_SESSION_WRITE     0x0b05U
+#define SDK_OP_MEDIA_SESSION_DECODE    0x0b06U
+#define SDK_OP_MEDIA_SESSION_AUDIO_READ 0x0b07U
+#define SDK_OP_MEDIA_SESSION_PRESENT   0x0b08U
+#define SDK_OP_MEDIA_SESSION_DISCARD   0x0b09U
+#define SDK_OP_MEDIA_SESSION_STATUS    0x0b0aU
+#define SDK_OP_MEDIA_SESSION_AUDIO_BIND 0x0b0bU
+#define SDK_OP_MEDIA_SESSION_AUDIO_UNBIND 0x0b0cU
+#define SDK_OP_MEDIA_SESSION_CLOSE     0x0b0dU
+
+struct SDKMediaSessionBeginPayload {
+	uint8_t video_codec[4];
+	uint8_t container[4];
+	uint8_t width[4];
+	uint8_t height[4];
+	uint8_t output_format[4];
+	uint8_t audio_codec[4];
+	uint8_t pcm_ring_handle[4];
+	uint8_t pcm_ring_capacity[4];
+	uint8_t pcm_low_water_bytes[4];
+	uint8_t pcm_high_water_bytes[4];
+	uint8_t flags[4];
+	uint8_t reserved[4];
+};
+
+struct SDKMediaSessionWritePayload {
+	uint8_t session[4];
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t flags[4];
+	uint8_t reserved[28];
+};
+
+struct SDKMediaSessionCommandPayload {
+	uint8_t session[4];
+	uint8_t value_hi[4];
+	uint8_t value_lo[4];
+	uint8_t flags[4];
+	uint8_t reserved[32];
+};
+
+struct SDKMediaSessionStatusPayload {
+	uint8_t session[4];
+	uint8_t page[4];
+	uint8_t flags[4];
+	uint8_t reserved[36];
+};
+
+struct SDKMediaSessionMainResultPayload {
+	uint8_t session[4];
+	uint8_t state[4];
+	uint8_t width[4];
+	uint8_t height[4];
+	uint8_t frame_rate_num[4];
+	uint8_t frame_rate_den[4];
+	uint8_t frame_number[4];
+	uint8_t video_pts_hi[4];
+	uint8_t video_pts_lo[4];
+	uint8_t bytes_accepted[4];
+	uint8_t bytes_written[4];
+	uint8_t flags[4];
+};
+
+struct SDKMediaSessionAudioResultPayload {
+	uint8_t session[4];
+	uint8_t state[4];
+	uint8_t sample_rate[4];
+	uint8_t channels[4];
+	uint8_t sample_format[4];
+	uint8_t pcm_produced_hi[4];
+	uint8_t pcm_produced_lo[4];
+	uint8_t pcm_acknowledged_hi[4];
+	uint8_t pcm_acknowledged_lo[4];
+	uint8_t audio_pts_hi[4];
+	uint8_t audio_pts_lo[4];
+	uint8_t flags[4];
+};
+
+struct SDKMediaSessionStatusResultPayload {
+	uint8_t session[4];
+	uint8_t state[4];
+	uint8_t page[4];
+	uint8_t flags[4];
+	uint8_t value0_hi[4];
+	uint8_t value0_lo[4];
+	uint8_t value1_hi[4];
+	uint8_t value1_lo[4];
+	uint8_t value2_hi[4];
+	uint8_t value2_lo[4];
+	uint8_t value3_hi[4];
+	uint8_t value3_lo[4];
+};
+
+typedef char SDKMediaSessionBeginPayload_must_be_48_bytes[
+	(sizeof(struct SDKMediaSessionBeginPayload) == 48U) ? 1 : -1];
+typedef char SDKMediaSessionWritePayload_must_be_48_bytes[
+	(sizeof(struct SDKMediaSessionWritePayload) == 48U) ? 1 : -1];
+typedef char SDKMediaSessionCommandPayload_must_be_48_bytes[
+	(sizeof(struct SDKMediaSessionCommandPayload) == 48U) ? 1 : -1];
+typedef char SDKMediaSessionStatusPayload_must_be_48_bytes[
+	(sizeof(struct SDKMediaSessionStatusPayload) == 48U) ? 1 : -1];
+typedef char SDKMediaSessionMainResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKMediaSessionMainResultPayload) == 48U) ? 1 : -1];
+typedef char SDKMediaSessionAudioResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKMediaSessionAudioResultPayload) == 48U) ? 1 : -1];
+typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKMediaSessionStatusResultPayload) == 48U) ? 1 : -1];
 
 #define SDK_MAX_SHARED_BUFFERS         32U
 #define SDK_MAX_SURFACES               16U
@@ -300,6 +417,7 @@ struct SDKCryptoVerifyPayload {
 #define SDK_AUDIO_DECODE_RESULT_END    (1U << 0)
 #define SDK_MAX_AUDIO_STREAMS          4U
 #define SDK_AUDIO_STREAM_FEED_EOF      (1U << 0)
+#define SDK_AUDIO_STREAM_FEED_DRAIN    (1U << 1)
 #define SDK_AUDIO_STREAM_STATE_NEED_INPUT 1U
 #define SDK_AUDIO_STREAM_STATE_STREAMING  2U
 #define SDK_AUDIO_STREAM_STATE_DONE       3U
@@ -308,6 +426,7 @@ struct SDKCryptoVerifyPayload {
 #define SDK_AUDIO_STREAM_RESULT_PCM_READY  (1U << 1)
 #define SDK_AUDIO_STREAM_RESULT_DONE       (1U << 2)
 #define SDK_AUDIO_STREAM_RESULT_BACKPRESSURE (1U << 3)
+#define SDK_AUDIO_STREAM_RESULT_DRAINED    (1U << 4)
 
 /* Direct-overlay output has one display binding. Multiple decoder sessions
  * would race to own that plane until the ABI grows an explicit binding. */
@@ -325,6 +444,36 @@ struct SDKCryptoVerifyPayload {
 #define SDK_VIDEO_SESSION_RESULT_NEED_INPUT   (1U << 1)
 #define SDK_VIDEO_SESSION_RESULT_FRAME_READY  (1U << 2)
 #define SDK_VIDEO_SESSION_RESULT_DONE         (1U << 3)
+
+#define SDK_MEDIA_NO_PTS UINT64_C(0xffffffffffffffff)
+#define SDK_MEDIA_AUDIO_NONE 0U
+#define SDK_MEDIA_AUDIO_MP2 1U
+#define SDK_MEDIA_SESSION_WRITE_EOF (1U << 0)
+#define SDK_MEDIA_AUDIO_BIND_PAUSE (1U << 0)
+#define SDK_MEDIA_SESSION_STATE_NEED_INPUT 1U
+#define SDK_MEDIA_SESSION_STATE_READY 2U
+#define SDK_MEDIA_SESSION_STATE_FRAME_HELD 3U
+#define SDK_MEDIA_SESSION_STATE_DONE 4U
+#define SDK_MEDIA_SESSION_STATE_ERROR 5U
+#define SDK_MEDIA_SESSION_RESULT_HEADER_READY (1U << 0)
+#define SDK_MEDIA_SESSION_RESULT_NEED_INPUT (1U << 1)
+#define SDK_MEDIA_SESSION_RESULT_FRAME_HELD (1U << 2)
+#define SDK_MEDIA_SESSION_RESULT_DONE (1U << 3)
+#define SDK_MEDIA_SESSION_RESULT_DERIVED_TIME (1U << 4)
+#define SDK_MEDIA_SESSION_RESULT_DISCONTINUITY (1U << 5)
+#define SDK_MEDIA_SESSION_RESULT_REBASED (1U << 6)
+#define SDK_MEDIA_SESSION_RESULT_AUDIO_READY (1U << 7)
+#define SDK_MEDIA_SESSION_RESULT_BACKPRESSURE (1U << 8)
+#define SDK_MEDIA_SESSION_RESULT_PRESENTED (1U << 9)
+#define SDK_MEDIA_SESSION_RESULT_DISCARDED (1U << 10)
+#define SDK_MEDIA_SESSION_RESULT_AUDIO_BOUND (1U << 11)
+#define SDK_MEDIA_SESSION_RESULT_AUDIO_PLAYING (1U << 12)
+#define SDK_MEDIA_SESSION_RESULT_AUDIO_DRAINED (1U << 13)
+#define SDK_MEDIA_SESSION_RESULT_AUDIO_UNDERRUN (1U << 14)
+#define SDK_MEDIA_STATUS_TIMING 0U
+#define SDK_MEDIA_STATUS_AUDIO 1U
+#define SDK_MEDIA_STATUS_COUNTERS 2U
+#define SDK_MEDIA_STATUS_AUDIO_OUTPUT 3U
 
 #define SDK_CRYPTO_HASH_NONE           0U
 #define SDK_CRYPTO_HASH_SHA1           1U
@@ -454,6 +603,7 @@ int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
  * Both are no-ops when nothing is bound. */
 void sdk_mailbox_audio_playback_pump(void);
 void sdk_mailbox_audio_playback_pump_isr(void);
+int sdk_mailbox_audio_playback_active(void);
 
 /*
  * Run a crypto task's compute on the calling core. op_params points at one of
