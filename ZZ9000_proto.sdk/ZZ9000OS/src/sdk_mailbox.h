@@ -109,6 +109,7 @@
 #define SDK_SERVICE_FLAG_MODULE        (1U << 1)
 #define SDK_SERVICE_FLAG_ASYNC         (1U << 2)
 #define SDK_SERVICE_FLAG_ZERO_COPY     (1U << 3)
+#define SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY  (1U << 16)
 #define SDK_SERVICE_FLAG_IMAGE_JPEG_BASELINE    (1U << 16)
 #define SDK_SERVICE_FLAG_IMAGE_JPEG_PROGRESSIVE (1U << 17)
 #define SDK_SERVICE_FLAG_IMAGE_JPEG_DIRECT_BGRA (1U << 18)
@@ -165,6 +166,7 @@
 #define SDK_OP_MAP_FRAMEBUFFER_SURFACE 0x0202U
 #define SDK_OP_FILL_SURFACE            0x0203U
 #define SDK_OP_COPY_SURFACE            0x0204U
+#define SDK_OP_QUERY_PALETTE           0x0205U
 
 #define SDK_OP_SCALE_IMAGE             0x0400U
 #define SDK_OP_DECODE_JPEG             0x0401U
@@ -498,6 +500,10 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
  * sign-extended by the reader. Mirrored as ZZ9K_MEDIA_PACK_PAIR in the SDK. */
 #define SDK_MEDIA_PACK_PAIR(hi, lo) \
 	(((uint64_t)(uint16_t)(hi) << 16) | (uint64_t)(uint16_t)(lo))
+
+/* SDK_OP_QUERY_PALETTE flags. Bit 0 is reserved for the secondary (HI) CLUT,
+ * which is not shadowed; queries setting it get UNSUPPORTED. */
+#define SDK_PALETTE_QUERY_FLAG_SECONDARY  (1U << 0)
 
 #define SDK_CRYPTO_HASH_NONE           0U
 #define SDK_CRYPTO_HASH_SHA1           1U

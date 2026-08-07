@@ -109,6 +109,19 @@ int main(int argc, char **argv)
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_OP_AUDIO_STREAM_CLOSE");
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_OP_QUERY_PALETTE");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY");
+	/* The behaviour lives in test/palette; what only the descriptor can go
+	 * wrong on is advertising the op without dispatching it, or bumping the
+	 * flag without the opcode count. */
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "case SDK_OP_QUERY_PALETTE:");
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "sdk_palette_pack_be");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_SERVICE_FLAG_VIDEO_MEDIA_SESSION");
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_SERVICE_FLAG_VIDEO_EXPLICIT_PRESENT");

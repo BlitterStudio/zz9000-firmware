@@ -5,6 +5,7 @@
 #include "gfx.h"
 #include "video.h"
 #include "overlay.h"
+#include "sdk_palette.h"
 #include "xil_printf.h"
 
 void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
@@ -295,7 +296,8 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             SWAP16(data->user[1]);
             uint16_t start = data->user[0];
             uint16_t count = data->user[1];
-            uint16_t op = data->u8_user[0] ? 19 : 3;
+            uint8_t secondary = data->u8_user[0];
+            uint16_t op = secondary ? 19 : 3;
 
             if (count > 256) count = 256;
 
@@ -306,6 +308,10 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
                 uint32_t b = data->clut1[i * 3 + 2];
                 uint32_t xrgb = (idx << 24) | (r << 16) | (g << 8) | b;
                 video_formatter_write(xrgb, op);
+                /* Shadow the primary CLUT so SDK_OP_QUERY_PALETTE has
+                 * something to read: the hardware registers are write-only. */
+                if (!secondary)
+                    sdk_palette_set(idx, xrgb);
             }
             break;
         }
