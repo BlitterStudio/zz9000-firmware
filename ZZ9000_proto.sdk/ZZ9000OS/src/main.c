@@ -75,9 +75,16 @@ void Xil_AssertNonVoid() {}
  * 2.6: OP_VIDEO_OVERLAY + shadow-scanout compositor — ZZ9000.card
  * gates the P96 video window (PIP) Features API on this revision.
  * 2.7: CARD_FEATURE_DPMS + formatter sync gating — ZZ9000.card gates
- * the P96 SetDPMSLevel hook on this revision. */
+ * the P96 SetDPMSLevel hook on this revision.
+ * 2.8: v2.8 release identity — MPEG-1 media sessions, hardware overlay
+ * scaling, per-stage pipeline profiling (MEDIA_STATUS page 5), and the
+ * primary-CLUT query. ZZ9000.card gates nothing new on this revision:
+ * its existing minimums (0x0204, 0x0206, 0x0207) all still pass, and the
+ * overlay scaling is programmed card-side without driver involvement.
+ * New SDK capability is discovered through service flags and status
+ * pages, which self-gate, rather than through this number. */
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 7
+#define REVISION_MINOR 8
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
