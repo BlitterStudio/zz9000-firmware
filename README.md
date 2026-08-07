@@ -22,48 +22,48 @@ drivers and tools live in
 ## What This Fork Adds
 
 Compared with the older MNT-era firmware releases, this fork has grown
-into a reproducible firmware, FPGA, and SDK-service platform:
+into a reproducible firmware, FPGA, and SDK-service platform.
+
+**Build and release**
 
 - GCC/Docker/CI firmware builds, release ZIP packaging, and a buildable
   FSBL source flow instead of relying only on Xilinx SDK-era binaries.
-- A maintained hardware bitstream matrix for Zorro III, Zorro II, A500,
-  2 MB, no-fast-RAM, and ZZ9500CX/Super Denise variants.
-- `ZZ9000.CFG` cold-boot configuration on the SD card for native-video
-  defaults, exact refresh, scanlines, INT2, MAC, and boot HDF selection,
-  replacing one-off firmware flavors such as `ns-pal`.
-- RTG acceleration work, 64-bit VDMA scanout, and Zorro III
-  high-resolution support including 1920x1080x32.
-- Picasso96 DPMS monitor power management, with independent HSync/VSync
-  gating for standby, suspend, and off plus a mode-set wake fail-safe.
-- SDK v2 mailbox services on the ARM cores: image decode/scale,
-  audio/MP3, archive/LHA decompression, crypto/TLS primitives, and a
-  dual-core scheduler for long-running jobs.
-- SD-card HDF boot, FWUP/RESTORE firmware-file handling, USB host
-  support for the Poseidon driver, Ethernet hardening, diagnostics, and
-  board-side fixes for current driver/tooling expectations.
+  Vivado 2018.3 is needed only to rebuild FPGA bitstreams.
+- A maintained bitstream matrix for Zorro III, Zorro II, A500, 2 MB,
+  no-fast-RAM, and ZZ9500CX/Super Denise variants.
 
-## Features
+**Display**
 
-- Zorro II and Zorro III bus interface for RTG, memory windows, registers,
-  interrupts, boot ROM, and DMA-style firmware services.
-- RTG acceleration paths in `ZZ9000OS` for fills, blits, pattern drawing,
-  planar conversion, palette updates, and sprite/video state.
-- VESA DPMS sync control for the matching Picasso96 driver; internal raster
-  and vblank timing keep running while the monitor is asleep.
-- Scanlines V2 with classic, soft, and gradient patterns plus parity
-  control, gated to RTG modes below 350 lines and AGA scandoubled modes.
-- SD HDF boot support from the ZZ9000 microSD card, with firmware-side
-  extent mapping for direct block I/O after boot-time discovery.
-- USB 2.0 host support through the ARM EHCI stack and Amiga-side USB
-  command proxy.
-- Gigabit Ethernet support through the Zynq GEM and ZZ9000 shared
-  register/mailbox protocol.
+- RTG acceleration for fills, blits, pattern drawing, planar conversion,
+  palette updates, and sprite/video state; 64-bit VDMA scanout and Zorro
+  III high-resolution modes including 1920x1080x32.
+- Picasso96 DPMS power management with independent HSync/VSync gating for
+  standby, suspend, and off, plus a mode-set wake fail-safe. Internal
+  raster and vblank timing keep running while the monitor sleeps.
+- Scanlines V2 (classic, soft, gradient) with parity control, gated to RTG
+  modes below 350 lines and AGA scandoubled modes.
+- A P96 video window (picture-in-picture) composited on the card, with
+  hardware overlay scaling in the video formatter.
+
+**Media and services**
+
+- MPEG-1 media sessions: video and MPEG audio decoded on the ARM cores and
+  presented through the video window or a dedicated screen, with A/V sync
+  and per-stage profiling. This is what the SDK's ZZPlay player drives.
+- SDK v2 mailbox services on the ARM cores: image decode/scale, audio/MP3,
+  archive/LHA decompression, crypto/TLS primitives backing the Amiga-side
+  `amissl` acceleration, and a dual-core scheduler for long-running jobs.
 - Audio playback through the on-board ADAU codec, including firmware-side
   MP3 and ADPCM decoding.
-- SDK service layer over a shared mailbox protocol, including ARM-side
-  cryptographic offload that backs the Amiga-side `amissl` TLS acceleration.
-- Reproducible firmware and release ZIP builds without Xilinx SDK; Vivado
-  2018.3 is only needed when rebuilding FPGA bitstreams.
+
+**System**
+
+- `ZZ9000.CFG` cold-boot configuration on the SD card, replacing one-off
+  firmware flavors such as `ns-pal` (see below).
+- SD-card HDF boot with firmware-side extent mapping, and FWUP/RESTORE
+  firmware-file handling so updates need no card removal.
+- USB 2.0 host support through the ARM EHCI stack for the Poseidon driver,
+  and gigabit Ethernet through the Zynq GEM.
 
 ## Installing Firmware
 
@@ -202,12 +202,23 @@ Vivado, so HDL changes must commit the rebuilt bitstream files under
 ## Testing
 
 Firmware builds are covered by the GitHub Actions workflow in
-[`.github/workflows/build.yml`](.github/workflows/build.yml). The host
-RTG regression harness can be run locally:
+[`.github/workflows/build.yml`](.github/workflows/build.yml), which also
+runs every host suite below and checks the mailbox ABI against the SDK.
+All of them run locally without hardware:
 
 ```bash
-make -C test/rtg test
-make -C test/rtg bench
+make -C test/rtg test          # RTG correctness
+make -C test/rtg bench         # host micro-benchmarks (comparative only)
+make -C test/video test        # VDMA math + video_formatter invariants
+make -C test/video_codec test  # pl_mpeg fixture + exact YUY2 output
+make -C test/media test        # media session state and timing
+make -C test/palette test      # primary-CLUT shadow + query packing
+make -C test/audio test        # audio capture
+make -C test/config test       # ZZ9000.CFG parser/loader
+make -C test/scheduler test    # dual-core queue, routing, reclaim
+make -C test/allocator test    # surface allocator
+make -C test/fwupdate test     # firmware-file restore
+make -C test/sd_activity_led test
 ```
 
 The video pipeline has its own harness under [`test/video/`](test/video/):
