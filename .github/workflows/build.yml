@@ -34,6 +34,34 @@ jobs:
             echo "$files" | xargs shellcheck --severity=error
           fi
 
+  abi-mirror:
+    name: mailbox ABI mirror
+    runs-on: ubuntu-latest
+    steps:
+      # The mailbox ABI is mirrored by hand across two repos: the SDK's
+      # include/zz9k/abi.h and this repo's ZZ9000OS/src/sdk_mailbox.h. Same
+      # name, different opcode or flag bit, and firmware misdispatches or
+      # mis-advertises capabilities on hardware -- invisible to either repo's
+      # own test suite.
+      #
+      # The SDK already runs this check against firmware master. That only
+      # catches SDK-side drift: a change made here was validated by nothing
+      # until someone happened to run SDK CI. Run it from this side too, so
+      # whichever repo moves first is the one that fails.
+      - name: Checkout firmware
+        uses: actions/checkout@v6
+      - name: Checkout SDK (for abi.h and the comparison script)
+        uses: actions/checkout@v6
+        with:
+          repository: BlitterStudio/zz9000-sdk
+          path: zz9000-sdk
+          fetch-depth: 1
+      - name: Compare mailbox ABI constants
+        run: |
+          sh zz9000-sdk/scripts/check-abi-mirror.sh \
+            zz9000-sdk/include/zz9k/abi.h \
+            ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.h
+
   host-tests:
     name: Host regression tests
     runs-on: ubuntu-latest
@@ -58,6 +86,10 @@ jobs:
         run: make -C test/config test
       - name: Surface allocator suite
         run: make -C test/allocator test
+      - name: Media session suite
+        run: make -C test/media test
+      - name: Palette shadow suite
+        run: make -C test/palette test
 
   build:
     name: Build & package firmware

@@ -130,6 +130,8 @@ sample; the copy at the repo root documents every option:
 | `scanline_mode` | `0` (off, default) – `3` | ZZTop/ZZScanlines (still work at runtime) |
 | `scanline_parity` | `0` (default), `1` | ZZTop/ZZScanlines |
 | `int2` | `off` (default), `on` | `ENV:ZZ9K_INT2` (drivers query it) |
+| `offscreen_bitmaps` | `on` (default), `off` | `ENV:ZZ9000-NO-OFFSCREEN`, `OFFSCREENBITMAPS` tooltype |
+| `video_overlay` | `on` (default), `off` | `ENV:ZZ9000-NO-PIP`, `VIDEOPIP` tooltype |
 | `mac` | `aa:bb:cc:dd:ee:ff` | `ENV:ZZ9K_MAC` |
 | `hdf` | root-level image filename | fixed `zz9000.hdf` path |
 
@@ -137,11 +139,23 @@ Unknown keys and invalid values are logged on the debug UART and
 skipped. Runtime mechanisms (driver register writes, ZZTop) still
 override config values until the next power cycle. For the
 driver-consumed options (`int2`, `mac`, `videocap_mode`,
-`nonstandard_vsync`), an existing `ENV:` variable takes precedence
-over the config file — remove the ENV variables when migrating.
-ZZTop 2.3+ can edit this file in place from AmigaOS (Project menu →
+`nonstandard_vsync`, `offscreen_bitmaps`, `video_overlay`), an existing
+`ENV:` variable or RTG tooltype takes precedence over the config file —
+remove those when migrating.
+
+ZZTop can edit this file in place from AmigaOS (Project menu →
 Settings), writing it back over the FWUP path with a `ZZ9000.bak`
-backup of the previous version.
+backup. It rewrites the whole file from the keys it knows, so use
+**ZZTop 2.4 or newer**: 2.3 predates `offscreen_bitmaps` and
+`video_overlay` and would drop those lines. The drivers repo's
+`tools/check-cfg-keys.sh` fails if the parser, this table, the sample
+`ZZ9000.CFG` and ZZTop's editor ever disagree.
+
+`yuv_rect` was accepted by firmware 2.4–2.7 but never consumed by
+anything, and was removed in 2.8. Its key slot stays reserved so the
+numeric ids the drivers query do not shift. A config file that still
+contains the line is harmless — it is logged as an unknown key and
+skipped.
 
 Amiga-side software can query parsed values through the
 `REG_ZZ_CONFIG_KEY` register (`0xE8`): write a key id from

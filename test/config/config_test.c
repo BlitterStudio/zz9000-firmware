@@ -84,7 +84,7 @@ static void test_full_valid_file(void) {
         "yuv_rect = off\n"
         "video_overlay = off\n");
     const struct zz_config *c = zz_config_get();
-    CHECK(n == 10);
+    CHECK(n == 9);
     CHECK(c->videocap_mode_present && c->videocap_mode == ZZVMODE_720x576);
     CHECK(c->ns_vsync_present && c->ns_vsync == 1);
     CHECK(c->scanline_mode_present && c->scanline_mode == 2);
@@ -95,7 +95,6 @@ static void test_full_valid_file(void) {
     CHECK(c->mac[3] == 0x12 && c->mac[4] == 0x34 && c->mac[5] == 0x56);
     CHECK(c->hdf_present && strcmp(c->hdf_path, "0:/games.hdf") == 0);
     CHECK(c->offscreen_bitmaps_present && c->offscreen_bitmaps == 0);
-    CHECK(c->yuv_rect_present && c->yuv_rect == 0);
     CHECK(c->video_overlay_present && c->video_overlay == 0);
 }
 
@@ -111,7 +110,6 @@ static void test_defaults_absent(void) {
     CHECK(!c->mac_present);
     CHECK(!c->hdf_present);
     CHECK(!c->offscreen_bitmaps_present);
-    CHECK(!c->yuv_rect_present);
     CHECK(!c->video_overlay_present);
 }
 
@@ -176,7 +174,6 @@ static void test_bad_values_skipped(void) {
     CHECK(!c->mac_present);
     CHECK(!c->hdf_present);
     CHECK(!c->offscreen_bitmaps_present);
-    CHECK(!c->yuv_rect_present);
     CHECK(!c->video_overlay_present);
 }
 
@@ -255,7 +252,9 @@ static void test_query_interface(void) {
     CHECK(zz_config_query(ZZ_CONFIG_KEY_NS_VSYNC, &present) == 2 && present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_INT2, &present) == 1 && present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_OFFSCREEN_BITMAPS, &present) == 0 && present);
-    CHECK(zz_config_query(ZZ_CONFIG_KEY_YUV_RECT, &present) == 1 && present);
+    /* Slot 10 (was yuv_rect) is reserved: the key is no longer parsed, so
+     * a file that still sets it must read back absent rather than on. */
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_RESERVED_10, &present) == 0 && !present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEO_OVERLAY, &present) == 0 && present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_MAC_HI, &present) == 0x6882 && present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_MAC_MID, &present) == 0xF212 && present);

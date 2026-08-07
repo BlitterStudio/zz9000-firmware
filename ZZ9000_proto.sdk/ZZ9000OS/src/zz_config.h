@@ -37,7 +37,13 @@ enum zz_config_key {
 	ZZ_CONFIG_KEY_MAC_MID         = 7,  /* mac[2]<<8 | mac[3] */
 	ZZ_CONFIG_KEY_MAC_LO          = 8,  /* mac[4]<<8 | mac[5] */
 	ZZ_CONFIG_KEY_OFFSCREEN_BITMAPS = 9, /* 0=off 1=on, informational (drivers query it) */
-	ZZ_CONFIG_KEY_YUV_RECT        = 10, /* 0=off 1=on, informational (drivers query it) */
+	/* Slot 10 was yuv_rect, removed in v2.8: nothing ever consumed it -
+	 * ZZ_WriteYUVRect is an unconditional pass-through. The number stays
+	 * reserved because these ids are a numeric ABI shared with drivers in
+	 * the field; renumbering VIDEO_OVERLAY would silently misdirect an
+	 * older ZZ9000.card. Querying it now reports absent, which is what an
+	 * unset key has always meant. */
+	ZZ_CONFIG_KEY_RESERVED_10     = 10,
 	ZZ_CONFIG_KEY_VIDEO_OVERLAY   = 11, /* 0=off 1=on, informational (drivers query it) */
 	ZZ_CONFIG_KEY_NUM
 };
@@ -69,8 +75,6 @@ struct zz_config {
 	uint8_t offscreen_bitmaps_present;
 	uint16_t offscreen_bitmaps;     /* 0-1, informational (drivers query it) */
 
-	uint8_t yuv_rect_present;
-	uint16_t yuv_rect;              /* 0-1, informational (drivers query it) */
 
 	uint8_t video_overlay_present;
 	uint16_t video_overlay;         /* 0-1, informational (drivers query it) */

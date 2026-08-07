@@ -153,13 +153,6 @@ static int apply_key(const char *key, const char *value) {
 		cfg.offscreen_bitmaps_present = 1;
 		return 0;
 	}
-	if (token_eq(key, "yuv_rect")) {
-		int v = parse_onoff(value);
-		if (v < 0) return -1;
-		cfg.yuv_rect = (uint16_t)v;
-		cfg.yuv_rect_present = 1;
-		return 0;
-	}
 	if (token_eq(key, "video_overlay")) {
 		int v = parse_onoff(value);
 		if (v < 0) return -1;
@@ -353,10 +346,6 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 	case ZZ_CONFIG_KEY_OFFSCREEN_BITMAPS:
 		p = cfg.offscreen_bitmaps_present;
 		v = cfg.offscreen_bitmaps;
-		break;
-	case ZZ_CONFIG_KEY_YUV_RECT:
-		p = cfg.yuv_rect_present;
-		v = cfg.yuv_rect;
 		break;
 	case ZZ_CONFIG_KEY_VIDEO_OVERLAY:
 		p = cfg.video_overlay_present;
