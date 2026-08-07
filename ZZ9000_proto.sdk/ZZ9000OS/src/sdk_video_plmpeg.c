@@ -6,6 +6,7 @@
  */
 
 #include "sdk_video_backend.h"
+#include "sdk_media_profile.h"
 #include "sdk_media_timeline.h"
 
 #include <stdlib.h>
@@ -769,7 +770,13 @@ static int decode_audio(struct sdk_video_plmpeg *decoder)
 		decoder->audio->buffer->has_ended = TRUE;
 	if (!pcm_has_space(decoder, block_bytes))
 		return SDK_VIDEO_BACKEND_BACKPRESSURE;
-	samples = plm_audio_decode(decoder->audio);
+	{
+		uint32_t profile_start = sdk_media_profile_now_us();
+
+		samples = plm_audio_decode(decoder->audio);
+		sdk_media_profile_record(
+			SDK_MEDIA_PROFILE_AUDIO_DECODE, profile_start);
+	}
 	if (!samples) {
 		if (decoder->failed)
 			return SDK_VIDEO_BACKEND_ERROR;
@@ -855,7 +862,13 @@ static int plmpeg_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 	if (decoder->video_eof &&
 	    plm_buffer_get_remaining(decoder->video->buffer) == 0U)
 		decoder->video->buffer->has_ended = TRUE;
-	frame = plm_video_decode(decoder->video);
+	{
+		uint32_t profile_start = sdk_media_profile_now_us();
+
+		frame = plm_video_decode(decoder->video);
+		sdk_media_profile_record(
+			SDK_MEDIA_PROFILE_VIDEO_DECODE, profile_start);
+	}
 	if (!frame) {
 		if (decoder->failed)
 			return SDK_VIDEO_BACKEND_ERROR;

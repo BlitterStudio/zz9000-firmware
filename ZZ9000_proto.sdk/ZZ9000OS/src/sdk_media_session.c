@@ -12,6 +12,8 @@
 #endif
 #include "overlay.h"
 #include "overlay_path.h"
+#include "sdk_media_profile.h"
+#include "sdk_video_yuy2.h"
 #include "sdk_video_stream.h"
 
 #include <string.h>
@@ -361,6 +363,7 @@ void sdk_media_session_init(void)
 	memset(&media, 0, sizeof(media));
 	media.video_pts = SDK_MEDIA_NO_PTS;
 	media.pts_origin = SDK_MEDIA_NO_PTS;
+
 #ifndef SDK_MEDIA_HOST_TEST
 	Xil_DCacheFlushRange((INTPTR)(uintptr_t)&media, sizeof(media));
 #endif
@@ -465,6 +468,13 @@ uint16_t sdk_media_session_begin(
 		return status;
 
 	memset(&media, 0, sizeof(media));
+	/* Reset here, not in sdk_media_session_init(): that only runs on an
+	 * Amiga reset, so the r1 profiling round had every later run
+	 * accumulating on top of the first one's totals. */
+	sdk_media_profile_reset();
+	/* Re-verify the NEON pack against the scalar oracle each run, so a
+	 * profiling comparison always states which kernel it measured. */
+	sdk_video_yuy2_reset_dispatch();
 	media.session = video_result.session;
 	media.state = mapped_state(video_result.state);
 	media.audio_codec = begin->audio_codec;
@@ -584,8 +594,18 @@ uint16_t sdk_media_session_present(
 		return SDK_STATUS_BAD_REQUEST;
 	if (media.present_pending)
 		return SDK_STATUS_BUSY;
-	if (!overlay_video_frame_ready(session))
-		return SDK_STATUS_BUSY;
+	{
+		/* Core-0 cost of handing a decoded frame to the overlay. This
+		 * excludes the compose itself, which core 1 times separately as
+		 * the pack stage. */
+		uint32_t profile_start = sdk_media_profile_now_us();
+		int ready = overlay_video_frame_ready(session);
+
+		sdk_media_profile_record(
+			SDK_MEDIA_PROFILE_PRESENT, profile_start);
+		if (!ready)
+			return SDK_STATUS_BUSY;
+	}
 	/* Keep the frame held until overlay_main_poll has actually enqueued its
 	 * compose. sdk_mailbox_task may drain PRESENT and DECODE/CLOSE from one
 	 * host batch before that poll runs. */
@@ -621,7 +641,7 @@ uint16_t sdk_media_session_status(
 	struct SDKMediaSessionStatusResult *result)
 {
 	if (!result || session == 0U || flags != 0U ||
-	    page > SDK_MEDIA_STATUS_PRESENTATION)
+	    page > SDK_MEDIA_STATUS_PROFILE)
 		return SDK_STATUS_BAD_REQUEST;
 	if (!active_session(session))
 		return SDK_STATUS_BAD_HANDLE;
@@ -646,6 +666,25 @@ uint16_t sdk_media_session_status(
 		result->value[1] = media.decoded_frames;
 		result->value[2] = media.presented_frames;
 		result->value[3] = media.discarded_frames;
+	} else if (page == SDK_MEDIA_STATUS_PROFILE) {
+		uint32_t stage;
+
+		result->flags = sdk_video_yuy2_neon_active()
+			? SDK_MEDIA_PROFILE_FLAG_NEON_PACK : 0U;
+
+		/* Per-stage microseconds and call counts, packed one stage per
+		 * value as (microseconds << 32) | calls. The host divides to get
+		 * per-frame averages. */
+		for (stage = 0U; stage < SDK_MEDIA_PROFILE_STAGES &&
+		                 stage < 4U; stage++) {
+			uint32_t microseconds = 0U;
+			uint32_t calls = 0U;
+
+			(void)sdk_media_profile_read(stage, &microseconds,
+			                             &calls);
+			result->value[stage] =
+				((uint64_t)microseconds << 32) | calls;
+		}
 	} else if (page == SDK_MEDIA_STATUS_PRESENTATION) {
 		struct overlay_path_info path;
 

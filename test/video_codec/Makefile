@@ -17,18 +17,23 @@ test: build/video_codec_test build/media_timeline_test build/media_codec_test \
 build/video_codec_test: video_codec_test.c mpeg1_ps_fixture.inc \
 	$(FIRMWARE_SRC)/sdk_video_plmpeg.c \
 	$(FIRMWARE_SRC)/sdk_media_timeline.c \
+	$(FIRMWARE_SRC)/sdk_media_profile.c \
 	$(FIRMWARE_SRC)/sdk_video_yuy2.c \
 	$(FIRMWARE_SRC)/sdk_video_backend.h \
+	$(FIRMWARE_SRC)/sdk_media_profile.h \
 	$(FIRMWARE_SRC)/sdk_video_yuy2.h \
 	$(FIRMWARE_SRC)/third_party/pl_mpeg/pl_mpeg.h
 	mkdir -p build
-	$(CC) $(CFLAGS) -DSDK_VIDEO_HOST_TEST=1 -I$(FIRMWARE_SRC) \
+	$(CC) $(CFLAGS) -DSDK_VIDEO_HOST_TEST=1 -DSDK_MEDIA_HOST_TEST=1 \
+		-I$(FIRMWARE_SRC) \
 		-o $@ video_codec_test.c $(FIRMWARE_SRC)/sdk_video_plmpeg.c \
 		$(FIRMWARE_SRC)/sdk_media_timeline.c \
+		$(FIRMWARE_SRC)/sdk_media_profile.c \
 		$(FIRMWARE_SRC)/sdk_video_yuy2.c
 
 build/media_timeline_test: media_timeline_test.c \
 	$(FIRMWARE_SRC)/sdk_media_timeline.c \
+	$(FIRMWARE_SRC)/sdk_media_profile.c \
 	$(FIRMWARE_SRC)/sdk_media_timeline.h
 	mkdir -p build
 	$(CC) $(CFLAGS) -I$(FIRMWARE_SRC) -o $@ \
@@ -40,13 +45,15 @@ build/media_codec_test: media_codec_test.c mpeg1_mp2_ps_fixture.inc \
 	mpeg1_ps_fixture.inc \
 	$(FIRMWARE_SRC)/sdk_video_plmpeg.c \
 	$(FIRMWARE_SRC)/sdk_media_timeline.c \
+	$(FIRMWARE_SRC)/sdk_media_profile.c \
 	$(FIRMWARE_SRC)/sdk_video_yuy2.c \
 	$(FIRMWARE_SRC)/sdk_video_backend.h \
 	$(FIRMWARE_SRC)/third_party/pl_mpeg/pl_mpeg.h
 	mkdir -p build
-	$(CC) $(CFLAGS) -DSDK_VIDEO_HOST_TEST=1 -I$(FIRMWARE_SRC) \
+	$(CC) $(CFLAGS) -DSDK_VIDEO_HOST_TEST=1 -DSDK_MEDIA_HOST_TEST=1 -I$(FIRMWARE_SRC) \
 		-o $@ media_codec_test.c $(FIRMWARE_SRC)/sdk_video_plmpeg.c \
 		$(FIRMWARE_SRC)/sdk_media_timeline.c \
+		$(FIRMWARE_SRC)/sdk_media_profile.c \
 		$(FIRMWARE_SRC)/sdk_video_yuy2.c
 
 build/media_codec_test_sanitize: media_codec_test.c \
@@ -54,13 +61,15 @@ build/media_codec_test_sanitize: media_codec_test.c \
 	mpeg1_mp2_stereo48_ps_fixture.inc mpeg1_ps_fixture.inc \
 	$(FIRMWARE_SRC)/sdk_video_plmpeg.c \
 	$(FIRMWARE_SRC)/sdk_media_timeline.c \
+	$(FIRMWARE_SRC)/sdk_media_profile.c \
 	$(FIRMWARE_SRC)/sdk_video_yuy2.c \
 	$(FIRMWARE_SRC)/sdk_video_backend.h \
 	$(FIRMWARE_SRC)/third_party/pl_mpeg/pl_mpeg.h
 	mkdir -p build
-	$(CC) $(SANITIZE_CFLAGS) -DSDK_VIDEO_HOST_TEST=1 -I$(FIRMWARE_SRC) \
+	$(CC) $(SANITIZE_CFLAGS) -DSDK_VIDEO_HOST_TEST=1 -DSDK_MEDIA_HOST_TEST=1 -I$(FIRMWARE_SRC) \
 		-o $@ media_codec_test.c $(FIRMWARE_SRC)/sdk_video_plmpeg.c \
 		$(FIRMWARE_SRC)/sdk_media_timeline.c \
+		$(FIRMWARE_SRC)/sdk_media_profile.c \
 		$(FIRMWARE_SRC)/sdk_video_yuy2.c
 
 clean:

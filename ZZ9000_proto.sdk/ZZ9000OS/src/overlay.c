@@ -22,6 +22,7 @@
 #include "memorymap.h"
 #include "surface_allocator.h"
 #include "sdk_mailbox.h"
+#include "sdk_media_profile.h"
 #include "sdk_media_session.h"
 #include "sdk_video_stream.h"
 #include "sdk_video_yuy2.h"
@@ -537,13 +538,22 @@ uint16_t overlay_run_compose(const struct overlay_compose_params *p)
 	if (p->variant == 0xfeU) {
 		struct SDKVideoDecodedFrame frame;
 		uint32_t bytes_written;
+		uint32_t profile_start;
+		int packed;
 
 		if (!sdk_video_stream_get_direct_frame(p->src_addr, &frame) ||
-		    frame.width != p->src_w || frame.height != p->src_h ||
-		    !sdk_video_yuv420_to_yuy2((uint8_t *)p->dst_addr,
+		    frame.width != p->src_w || frame.height != p->src_h)
+			return SDK_STATUS_BAD_REQUEST;
+		/* Timed on its own: whether this pack is material against decode
+		 * is what gates the planar FPGA subproject (R13, U7). */
+		profile_start = sdk_media_profile_now_us();
+		packed = sdk_video_yuv420_to_yuy2((uint8_t *)p->dst_addr,
 			p->dst_pitch, frame.width, frame.height,
 			frame.y, frame.y_pitch, frame.cb, frame.cr,
-			frame.chroma_pitch, &bytes_written))
+			frame.chroma_pitch, &bytes_written);
+		sdk_media_profile_record(
+			SDK_MEDIA_PROFILE_YUY2_PACK, profile_start);
+		if (!packed)
 			return SDK_STATUS_BAD_REQUEST;
 	} else if (p->variant == 0xffU) {
 		struct SDKVideoDecodedFrame frame;
