@@ -34,9 +34,15 @@
 `define VARIANT_AUTOBOOT        // enable autoboot ROM
 `endif
 
-// Videocap sampler variant selection. Keep this order aligned with the
-// capture-clock phase chain: the committed default defines both ZORRO3 and
-// VARIANT_SUPERDENISE, and must select the video-slot path.
+`define C_S_AXI_DATA_WIDTH 32
+`define C_S_AXI_ADDR_WIDTH 5
+
+// Videocap sampler variant selection. This block must stay below the AXI
+// width definitions: build_variant_bitstreams.sh replaces everything from
+// the variant switch through C_S_AXI_DATA_WIDTH for each board target.
+// Keep this order aligned with the capture-clock phase chain: the committed
+// default defines both ZORRO3 and VARIANT_SUPERDENISE, and must select the
+// video-slot path.
 `ifdef ZORRO3
   `define VCAP_RGB_MODE     0
   `define VCAP_CSYNC_VSYNC  0
@@ -60,8 +66,6 @@
   `define VCAP_FULLRATE_INT 1
 `endif
 
-`define C_S_AXI_DATA_WIDTH 32
-`define C_S_AXI_ADDR_WIDTH 5
 `ifdef VARIANT_2MB
 `define RAM_SIZE 32'h200000 // 2MB for Zorro 2
 `else
