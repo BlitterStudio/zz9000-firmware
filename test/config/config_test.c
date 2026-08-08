@@ -144,6 +144,27 @@ static void test_videocap_aliases(void) {
     CHECK(zz_config_get()->ns_vsync == 0);
 }
 
+static void test_videocap_sample(void) {
+    zz_config_reset();
+    CHECK(parse_str("videocap_sample = even\n") == 1);
+    CHECK(zz_config_get()->videocap_sample_present);
+    CHECK(zz_config_get()->videocap_sample == 1);
+    uint16_t present = 0;
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_SAMPLE, &present) == 1 && present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_sample = odd\n") == 1);
+    CHECK(zz_config_get()->videocap_sample == 2);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_sample = average\n") == 1);
+    CHECK(zz_config_get()->videocap_sample == 0);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_sample = sideways\n") == 0);
+    CHECK(!zz_config_get()->videocap_sample_present);
+}
+
 static void test_bad_values_skipped(void) {
     zz_config_reset();
     const char *text =
@@ -316,6 +337,7 @@ int main(void) {
     test_defaults_absent();
     test_case_whitespace_comments();
     test_videocap_aliases();
+    test_videocap_sample();
     test_bad_values_skipped();
     test_last_value_wins();
     test_no_trailing_newline();

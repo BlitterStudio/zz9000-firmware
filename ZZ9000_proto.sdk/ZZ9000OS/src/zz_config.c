@@ -110,6 +110,14 @@ static int apply_key(const char *key, const char *value) {
 		cfg.videocap_mode_present = 1;
 		return 0;
 	}
+	if (token_eq(key, "videocap_sample")) {
+		if (token_eq(value, "average")) cfg.videocap_sample = 0;
+		else if (token_eq(value, "even")) cfg.videocap_sample = 1;
+		else if (token_eq(value, "odd")) cfg.videocap_sample = 2;
+		else return -1;
+		cfg.videocap_sample_present = 1;
+		return 0;
+	}
 	if (token_eq(key, "nonstandard_vsync")) {
 		if (token_eq(value, "off")) cfg.ns_vsync = 0;
 		else if (token_eq(value, "pal") || token_eq(value, "on")) cfg.ns_vsync = 1;
@@ -314,6 +322,10 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 	case ZZ_CONFIG_KEY_VIDEOCAP_MODE:
 		p = cfg.videocap_mode_present;
 		v = cfg.videocap_mode;
+		break;
+	case ZZ_CONFIG_KEY_VIDEOCAP_SAMPLE:
+		p = cfg.videocap_sample_present;
+		v = cfg.videocap_sample;
 		break;
 	case ZZ_CONFIG_KEY_NS_VSYNC:
 		p = cfg.ns_vsync_present;

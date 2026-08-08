@@ -26,6 +26,8 @@
  *   [27:16] vertical crop origin, in captured lines
  */
 #define MNTVF_OP_VIDEOCAP 16
+#define VIDEOCAP_CROP_H_DEFAULT 188
+#define VIDEOCAP_CROP_V_DEFAULT 26
 // decoded by mntzorro.v (snooped off the op stream, like OP_VIDEOCAP),
 // not by the video formatter: data[1:0] = scanline mode, data[2] = parity
 #define MNTVF_OP_SCANLINES 20
