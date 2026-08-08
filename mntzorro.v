@@ -1141,6 +1141,10 @@ module MNTZorro_v0_1_S00_AXI
   reg videocap_mode;
   reg videocap_mode_in;
   reg [31:0] videocap_address = `VIDEOCAP_ADDR;
+  reg [1:0] videocap_sample_mode = 2'd0;
+  reg videocap_full_width = 1'b0;
+  reg [11:0] videocap_crop_h = 12'd188;
+  reg [11:0] videocap_crop_v = 12'd26;
   reg [9:0] videocap_y_sync;
   reg [9:0] videocap_ymax_sync;
   reg [11:0] videocap_save_x;
@@ -1265,10 +1269,10 @@ module MNTZorro_v0_1_S00_AXI
                VCAP_G3, VCAP_G2, VCAP_G1, VCAP_G0}),
       .vcap_b({VCAP_B7, VCAP_B6, VCAP_B5, VCAP_B4,
                VCAP_B3, VCAP_B2, VCAP_B1, VCAP_B0}),
-      .ctl_sample_mode(2'd0),
-      .ctl_full_width(1'b0),
-      .ctl_crop_h(12'd94),
-      .ctl_crop_v(12'd26),
+      .ctl_sample_mode(videocap_sample_mode),
+      .ctl_full_width(videocap_full_width),
+      .ctl_crop_h(videocap_crop_h),
+      .ctl_crop_v(videocap_crop_v),
       .cap_x(vcap_x),
       .cap_y(vcap_y),
       .cap_ymax(vcap_ymax),
@@ -2519,6 +2523,17 @@ module MNTZorro_v0_1_S00_AXI
       // OP_SCANLINES = 20
       scanline_width  <= video_control_data[1:0];
       scanline_parity <= video_control_data[2];
+    end
+
+    // Snoop videocap sampler control (MNTVF_OP_VIDEOCAP). The video
+    // formatter declares op 16 as ignored; it exists so the ARM can apply
+    // ZZ9000.CFG videocap options at cold boot.
+    if (video_control_op == 16) begin
+      // OP_VIDEOCAP = 16
+      videocap_sample_mode <= video_control_data[1:0];
+      videocap_full_width  <= video_control_data[2];
+      videocap_crop_h      <= video_control_data[15:4];
+      videocap_crop_v      <= video_control_data[27:16];
     end
 
     out_reg0 <= ZORRO3 ? last_z3addr : last_addr;

@@ -18,6 +18,14 @@
 #define MNTVF_OP_REPORT_LINE 17
 #define MNTVF_OP_PALETTE_SEL 18
 #define MNTVF_OP_PALETTE_HI 19
+/* Videocap sampler control, snooped by mntzorro.v (the video formatter
+ * declares op 16 as ignored). Older bitstreams ignore this op.
+ *   [1:0]   sample mode: 0=average pair, 1=even sample, 2=odd sample
+ *   [2]     full-width (28 MHz) capture
+ *   [15:4]  horizontal crop origin, in 28 MHz samples
+ *   [27:16] vertical crop origin, in captured lines
+ */
+#define MNTVF_OP_VIDEOCAP 16
 // decoded by mntzorro.v (snooped off the op stream, like OP_VIDEOCAP),
 // not by the video formatter: data[1:0] = scanline mode, data[2] = parity
 #define MNTVF_OP_SCANLINES 20

@@ -73,6 +73,15 @@ wire frame_sync = (CSYNC_VSYNC != 0) ?
     (vs[6:1] == 6'b111000);
 wire line_sync = (hs[6:1] == 6'b000111);
 
+/*
+ * The control interface always expresses crop_h in 28 MHz samples. Denise
+ * adapters retain the 14 MHz front end, so one local capture clock consumes
+ * two control units there. This keeps the universal default (188) equivalent
+ * to the historical 94-clock crop without requiring a firmware variant.
+ */
+wire [11:0] crop_h_local = (FULLRATE != 0) ?
+    ctl_crop_h : {1'b0, ctl_crop_h[11:1]};
+
 reg half = 0;
 reg [23:0] rgb_prev = 0;
 wire filter_pairs = (FULLRATE != 0) && !ctl_full_width;
@@ -171,7 +180,7 @@ always @(posedge cap_clk) begin
     end else begin
         sample_x <= sample_x + 1'b1;
 
-        if (sample_x < ctl_crop_h[10:0]) begin
+        if ({1'b0, sample_x} < crop_h_local) begin
             half <= 0;
         end else if (filter_pairs) begin
             if (!half) begin

@@ -38,6 +38,7 @@ reg [7:0] b = 0;
 
 reg [11:0] buf_raddr = 0;
 wire [31:0] buf_rdata;
+wire [31:0] legacy_buf_rdata;
 wire [10:0] cap_x;
 wire [10:0] cap_y;
 wire [10:0] cap_ymax;
@@ -74,6 +75,36 @@ videocap_sampler #(
     .buf_rdata(buf_rdata)
 );
 
+/* Denise-adapter reference: crop_h remains expressed in 28 MHz units even
+ * though this instance preserves the historical 14 MHz capture front end. */
+videocap_sampler #(
+    .BUF_DEPTH(2048),
+    .RGB_MODE(0),
+    .CSYNC_VSYNC(0),
+    .FULLRATE(0)
+) legacy_dut (
+    .cap_clk(cap_clk),
+    .vcap_vsync(vsync),
+    .vcap_hsync(hsync),
+    .vcap_r(r),
+    .vcap_g(g),
+    .vcap_b(b),
+    .ctl_sample_mode(SAMPLEMODE[1:0]),
+    .ctl_full_width(FULLWIDTH[0]),
+    .ctl_crop_h(CROPH[11:0]),
+    .ctl_crop_v(CROPV[11:0]),
+    .cap_x(),
+    .cap_y(),
+    .cap_ymax(),
+    .cap_interlace(),
+    .cap_ntsc(),
+    .cap_x_done(),
+    .cap_shres(),
+    .axi_clk(axi_clk),
+    .buf_raddr(buf_raddr),
+    .buf_rdata(legacy_buf_rdata)
+);
+
 always #17.6 cap_clk = ~cap_clk; /* 28.37 MHz */
 always #5.0 axi_clk = ~axi_clk; /* 100 MHz */
 
@@ -102,6 +133,18 @@ task buf_read;
         @(posedge axi_clk);
         @(posedge axi_clk);
         data = buf_rdata;
+    end
+endtask
+
+task legacy_buf_read;
+    input [11:0] addr;
+    output [31:0] data;
+    begin
+        @(posedge axi_clk);
+        buf_raddr <= addr;
+        @(posedge axi_clk);
+        @(posedge axi_clk);
+        data = legacy_buf_rdata;
     end
 endtask
 
@@ -202,6 +245,16 @@ initial begin
         end
         check_eq("entry", got[23:0], {want_r, want_g, want_b});
     end
+
+    /* FULLRATE=0 converts the universal 188-sample default to 94 local
+     * capture clocks, preserving the Denise-adapter framing. */
+    legacy_buf_read(12'd4, got);
+    sample_idx = (CROPH / 2) + 4 + CAPTURE_INPUT_OFFSET;
+    pix_even = sample_idx / PIXSPAN + line_seed;
+    want_r = pix_even[7:0];
+    want_g = ~pix_even[7:0];
+    want_b = {pix_even[3:0], pix_even[7:4]};
+    check_eq("legacy_crop", got[23:0], {want_r, want_g, want_b});
 
     if (errors == 0)
         $display("RESULT PASS checks=%0d", checks);
