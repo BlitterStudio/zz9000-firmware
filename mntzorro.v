@@ -34,6 +34,24 @@
 `define VARIANT_AUTOBOOT        // enable autoboot ROM
 `endif
 
+// Videocap sampler variant selection. Keep this order aligned with the
+// capture-clock phase chain: the committed default defines both ZORRO3 and
+// VARIANT_SUPERDENISE, and must select the video-slot path.
+`ifdef ZORRO3
+  `define VCAP_RGB_MODE     0
+  `define VCAP_CSYNC_VSYNC  0
+`elsif VARIANT_SUPERDENISE
+  `define VCAP_RGB_MODE     0
+  `define VCAP_CSYNC_VSYNC  1
+`elsif VARIANT_ZZ9500
+  `define VCAP_RGB_MODE     1
+  `define VCAP_CSYNC_VSYNC  1
+`else
+  `define VCAP_RGB_MODE     2
+  `define VCAP_CSYNC_VSYNC  0
+`endif
+`define VCAP_FULLRATE_INT 0
+
 `define C_S_AXI_DATA_WIDTH 32
 `define C_S_AXI_ADDR_WIDTH 5
 `ifdef VARIANT_2MB
@@ -1115,40 +1133,19 @@ module MNTZorro_v0_1_S00_AXI
   reg videocap_mode;
   reg videocap_mode_in;
   reg [31:0] videocap_address = `VIDEOCAP_ADDR;
-  reg [6:0] videocap_hs;
-  reg [6:0] videocap_vs;
-  reg [23:0] videocap_rgbin = 0;
-
-  reg [9:0] videocap_x;
-  reg [9:0] videocap_y;
-  reg [9:0] videocap_x2;
-  reg videocap_x_done;
-  reg [9:0] videocap_y2;
   reg [9:0] videocap_y_sync;
-  reg [9:0] videocap_ymax;
-  reg [9:0] videocap_ymax2;
   reg [9:0] videocap_ymax_sync;
-  reg [9:0] videocap_y3;
-  reg vc_next_lace_field = 0;
-  reg [3:0] vc_shortlines = 0;
+  reg [11:0] videocap_save_x;
 
-  parameter VCAPW = 799;
-  reg [31:0] videocap_buf  [0:VCAPW];
-  reg videocap_lace_field;
-  reg videocap_interlace;
-  reg videocap_ntsc;
-  reg [7:0] videocap_hs_pulse_width;
-  reg [9:0] videocap_vsync_x = 0;
-
-  localparam [9:0] VIDEOCAP_INTERLACE_PHASE_DELTA = 10'h80;
-  wire [9:0] videocap_vsync_phase_abs_delta =
-      (videocap_x > videocap_vsync_x) ?
-      (videocap_x - videocap_vsync_x) :
-      (videocap_vsync_x - videocap_x);
-  wire [9:0] videocap_vsync_phase_delta =
-      (videocap_vsync_phase_abs_delta > 10'h200) ?
-      (10'h3ff - videocap_vsync_phase_abs_delta + 1'b1) :
-      videocap_vsync_phase_abs_delta;
+  wire [10:0] vcap_x;
+  wire [10:0] vcap_y;
+  wire [10:0] vcap_ymax;
+  wire vcap_interlace;
+  wire vcap_ntsc;
+  wire vcap_x_done;
+  wire vcap_shres;
+  wire [31:0] vcap_rdata;
+  wire [11:0] vcap_raddr = videocap_save_x;
 
   reg E7M_PSEN = 0;
   reg E7M_PSINCDEC = 0;
@@ -1237,164 +1234,36 @@ module MNTZorro_v0_1_S00_AXI
      .PWRDWN(E7M_PWRDWN),
      .RST(E7M_RESET));
 
-  always @(posedge e7m_shifted) begin
-    videocap_vs <= {videocap_vs[5:0], VCAP_VSYNC};
-    videocap_hs <= {videocap_hs[5:0], VCAP_HSYNC};
-
-    `ifdef VARIANT_ZZ9500
-    videocap_rgbin <=  {VCAP_R3,VCAP_R2,VCAP_R1,VCAP_R0,VCAP_R3,VCAP_R2,VCAP_R1,VCAP_R0,
-                        VCAP_G3,VCAP_G2,VCAP_G1,VCAP_G0,VCAP_G3,VCAP_G2,VCAP_G1,VCAP_G0,
-                        VCAP_B3,VCAP_B2,VCAP_B1,VCAP_B0,VCAP_B3,VCAP_B2,VCAP_B1,VCAP_B0};
-    `elsif ZORRO2
-    videocap_rgbin <=  {VCAP_R7,VCAP_R6,VCAP_R5,VCAP_R4,VCAP_R7,VCAP_R6,VCAP_R5,VCAP_R4,
-                        VCAP_G7,VCAP_G6,VCAP_G5,VCAP_G4,VCAP_G7,VCAP_G6,VCAP_G5,VCAP_G4,
-                        VCAP_B7,VCAP_B6,VCAP_B5,VCAP_B4,VCAP_B7,VCAP_B6,VCAP_B5,VCAP_B4};
-    `else
-    videocap_rgbin <=  {VCAP_R7,VCAP_R6,VCAP_R5,VCAP_R4,VCAP_R3,VCAP_R2,VCAP_R1,VCAP_R0,
-                        VCAP_G7,VCAP_G6,VCAP_G5,VCAP_G4,VCAP_G3,VCAP_G2,VCAP_G1,VCAP_G0,
-                        VCAP_B7,VCAP_B6,VCAP_B5,VCAP_B4,VCAP_B3,VCAP_B2,VCAP_B1,VCAP_B0};
-    `endif
-
-    if (videocap_hs==0) begin
-      if (videocap_hs_pulse_width<'hff)
-        videocap_hs_pulse_width<=videocap_hs_pulse_width+1;
-    end else if (videocap_hs=='b111111)
-      videocap_hs_pulse_width<=0;
-
-`ifdef VARIANT_ZZ9500
-    // on A500, HSYNC is really CSYNC and we can recognize vertical sync
-    // by looking at the pulse width of it
-    // direct sampling from denise
-    if(videocap_hs[6:1]=='b000111 && videocap_hs_pulse_width>=128) begin
-      // 31kHz progressive: full frame >= 400 lines, never interlaced.
-      // 15kHz interlace is identified by field phase, not by total line
-      // count parity. NTSC nonlace can jitter by one counted line when
-      // switching from RTG, which made it look interlaced and caused the
-      // formatter to read 480 lines from a 240-line capture.
-      if (videocap_ymax>='h190) begin
-        videocap_interlace <= 0;
-      end else if (vc_next_lace_field != videocap_lace_field) begin
-        videocap_interlace <= 1;
-      end else begin
-        videocap_interlace <= 0;
-      end
-      videocap_lace_field <= vc_next_lace_field;
-
-      if (videocap_ymax>='h190) begin
-        // progressive frame: PAL ~625, NTSC ~525
-        if (videocap_ymax>='h23a)
-          videocap_ntsc <= 0;
-        else
-          videocap_ntsc <= 1;
-      end else begin
-        // interlaced field: PAL ~304, NTSC ~262
-        if (videocap_ymax>='h130)
-          videocap_ntsc <= 0;
-        else
-          videocap_ntsc <= 1;
-      end
-
-      if (videocap_interlace) begin
-        videocap_y2 <= 0;
-        videocap_y3 <= vc_next_lace_field;
-      end else begin
-        videocap_y2 <= 0;
-        videocap_y3 <= 0;
-      end
-`else
-    // with videoslot machines, we have a real VSYNC to work with
-    if (videocap_vs[6:1]=='b111000) begin
-      // 31kHz progressive: full frame >= 400 lines, never interlaced.
-      // 15kHz interlace has alternating VSYNC phase; nonlace does not.
-      // Line-count parity alone is not reliable on NTSC after RTG->native
-      // switches because the count can jitter by one line. Compare the
-      // circular phase distance so a stable edge near counter wrap does
-      // not look like a half-line jump.
-      if (videocap_ymax>='h190)
-        videocap_interlace <= 0;
-      else if (videocap_vsync_phase_delta >= VIDEOCAP_INTERLACE_PHASE_DELTA)
-        videocap_interlace <= 1;
-      else
-        videocap_interlace <= 0;
-
-      videocap_vsync_x <= videocap_x;
-      videocap_lace_field <= videocap_ymax[0];
-
-      if (videocap_ymax>='h190) begin
-        // progressive frame: PAL ~625, NTSC ~525
-        if (videocap_ymax>='h23a)
-          videocap_ntsc <= 0;
-        else
-          videocap_ntsc <= 1;
-      end else begin
-        // interlaced field: PAL ~312, NTSC ~262
-        if (videocap_ymax>='h138)
-          videocap_ntsc <= 0;
-        else
-          videocap_ntsc <= 1;
-      end
-
-      if (videocap_interlace) begin
-        videocap_y2 <= 0;
-        videocap_y3 <= videocap_lace_field;
-      end else begin
-        videocap_y2 <= 0;
-        videocap_y3 <= 0;
-      end
-`endif
-
-      if (videocap_y2!=0) begin
-        videocap_ymax <= videocap_y2;
-        videocap_ymax2 <= videocap_ymax;
-      end
-    end else if (videocap_hs[6:1]=='b000111) begin
-      videocap_x  <= 0;
-      videocap_x2 <= 0;
-
-`ifdef VARIANT_ZZ9500
-      if (videocap_hs_pulse_width < 'h20) begin
-        // count short pulses terminating lines
-        vc_shortlines <= vc_shortlines+1;
-        if (vc_shortlines==0) begin
-          // first time
-          if (videocap_x>='h200)
-            // last line was long?
-            vc_next_lace_field <= 1;
-          else
-            vc_next_lace_field <= 0;
-        end
-      end else
-        vc_shortlines <= 0;
-`endif
-
-      if (videocap_y2>'h1a) begin
-        if (videocap_interlace)
-          videocap_y3 <= videocap_y3 + 2'b10;
-        else
-          videocap_y3 <= videocap_y3 + 1'b1;
-      end
-
-      videocap_y2 <= videocap_y2 + 1'b1;
-    end else if (videocap_x2<'h5e) begin  // 5a worked
-      // left crop
-      videocap_x2 <= videocap_x2 + 1'b1;
-    end else begin
-      videocap_x <= videocap_x + 1'b1;
-    end
-
-    if (videocap_x>2)
-      videocap_buf[videocap_x] <= videocap_rgbin;
-    else
-      videocap_buf[videocap_x] <= 0;
-
-    if (videocap_x>'h200)
-      videocap_x_done <= 1;
-    else
-      videocap_x_done <= 0;
-
-  end
-
-  reg [11:0] videocap_save_x;
+  videocap_sampler #(
+      .BUF_DEPTH(2048),
+      .RGB_MODE(`VCAP_RGB_MODE),
+      .CSYNC_VSYNC(`VCAP_CSYNC_VSYNC),
+      .FULLRATE(`VCAP_FULLRATE_INT)
+  ) videocap_sampler_inst (
+      .cap_clk(e7m_shifted),
+      .vcap_vsync(VCAP_VSYNC),
+      .vcap_hsync(VCAP_HSYNC),
+      .vcap_r({VCAP_R7, VCAP_R6, VCAP_R5, VCAP_R4,
+               VCAP_R3, VCAP_R2, VCAP_R1, VCAP_R0}),
+      .vcap_g({VCAP_G7, VCAP_G6, VCAP_G5, VCAP_G4,
+               VCAP_G3, VCAP_G2, VCAP_G1, VCAP_G0}),
+      .vcap_b({VCAP_B7, VCAP_B6, VCAP_B5, VCAP_B4,
+               VCAP_B3, VCAP_B2, VCAP_B1, VCAP_B0}),
+      .ctl_sample_mode(2'd0),
+      .ctl_full_width(1'b0),
+      .ctl_crop_h(12'd94),
+      .ctl_crop_v(12'd26),
+      .cap_x(vcap_x),
+      .cap_y(vcap_y),
+      .cap_ymax(vcap_ymax),
+      .cap_interlace(vcap_interlace),
+      .cap_ntsc(vcap_ntsc),
+      .cap_x_done(vcap_x_done),
+      .cap_shres(vcap_shres),
+      .axi_clk(S_AXI_ACLK),
+      .buf_raddr(vcap_raddr),
+      .buf_rdata(vcap_rdata)
+  );
   reg [11:0] videocap_pitch;
   reg [11:0] videocap_pitch_sync;
   reg [9:0]  videocap_save_line_done;
@@ -1472,31 +1341,31 @@ module MNTZorro_v0_1_S00_AXI
     // VIDEOCAP
 
     // pass interlace mode to video control block
-    video_control_interlace <= videocap_interlace;
+    video_control_interlace <= vcap_interlace;
 
     videocap_pitch_sync <= videocap_pitch;
 
-    //videocap_x_sync <= videocap_x;
-    videocap_y_sync2 <= videocap_y3;
+    //videocap_x_sync <= vcap_x;
+    videocap_y_sync2 <= vcap_y[9:0];
     videocap_mode_sync <= videocap_mode;
 
 `ifdef VARIANT_ZZ9500
-    if (videocap_interlace)
-      videocap_ymax_sync <= (videocap_ymax<<1)-(2*40);
+    if (vcap_interlace)
+      videocap_ymax_sync <= (vcap_ymax<<1)-(2*40);
     else
-      videocap_ymax_sync <= videocap_ymax-36;
+      videocap_ymax_sync <= vcap_ymax-36;
 
     // letterbox top and bottom to box out noisy lines
-    if (videocap_y_sync2<videocap_ymax_sync && videocap_x_done) begin
+    if (videocap_y_sync2<videocap_ymax_sync && vcap_x_done) begin
       videocap_y_sync <= videocap_y_sync2;
     end
 `else
-    if (videocap_interlace)
-      videocap_ymax_sync <= (videocap_ymax<<1);
+    if (vcap_interlace)
+      videocap_ymax_sync <= (vcap_ymax<<1);
     else
-      videocap_ymax_sync <= videocap_ymax;
+      videocap_ymax_sync <= vcap_ymax;
 
-    if (videocap_x_done) begin
+    if (vcap_x_done) begin
       videocap_y_sync <= videocap_y_sync2;
     end
 `endif
@@ -1537,7 +1406,7 @@ module MNTZorro_v0_1_S00_AXI
         4'h2: begin
           // we shift left by 2 bits to scale from 1 pixel to 4 bytes
           m01_axi_awaddr_out  <= videocap_address + ((vc_saveaddr1 + videocap_save_x)<<2);
-          m01_axi_wdata_out   <= videocap_buf[videocap_save_x];
+          m01_axi_wdata_out   <= vcap_rdata;
 
   `ifdef VARIANT_ZZ9500
           if (videocap_save_x >= videocap_pitch_sync-2) begin
@@ -2644,7 +2513,7 @@ module MNTZorro_v0_1_S00_AXI
     //          `-- 24                   `-- 23         `-- 22 `-- 7:0
 
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
-                video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank,
+                video_control_interlace, videocap_mode, vcap_ntsc, video_control_vblank, video_control_hblank,
                 sdk_doorbell_pending, sdk_irq_ack_pending, 10'b0, zorro_state};
   end
 

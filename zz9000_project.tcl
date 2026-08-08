@@ -170,6 +170,7 @@ if { $no_autoboot } {
 # Import local files from the original project
 set files [list \
  [file normalize "${origin_dir}/mntzorro.v" ]\
+ [file normalize "${origin_dir}/videocap_sampler.v" ]\
  [file normalize "${origin_dir}/video_formatter.v" ]\
  [file normalize "${origin_dir}/video_overlay_pixel.v" ]\
  [file normalize "${origin_dir}/video_overlay_linebuffer.v" ]\
@@ -241,6 +242,9 @@ set obj [get_filesets utils_1]
 # Adding sources referenced in BDs, if not already added
 if { [get_files mntzorro.v] == "" } {
   import_files -quiet -fileset sources_1 mntzorro.v
+}
+if { [get_files videocap_sampler.v] == "" } {
+  import_files -quiet -fileset sources_1 videocap_sampler.v
 }
 if { [get_files video_formatter.v] == "" } {
   import_files -quiet -fileset sources_1 video_formatter.v
