@@ -141,6 +141,7 @@ integer sample_idx;
 integer pix_even;
 integer pix_odd;
 integer line_seed;
+integer k;
 reg [31:0] got;
 reg [7:0] want_r;
 reg [7:0] want_g;
@@ -173,32 +174,34 @@ initial begin
     drive_field(0);
 
     /* The final active raster line remains in the line buffer. */
-    buf_read(12'd4, got);
-    sample_idx = CROPH + 4 * (FULLWIDTH ? 1 : 2)
-                 + CAPTURE_INPUT_OFFSET;
     line_seed = LINES - 1;
-    pix_even = sample_idx / PIXSPAN + line_seed;
-    pix_odd = (sample_idx + 1) / PIXSPAN + line_seed;
-    even_r = pix_even[7:0];
-    even_g = ~pix_even[7:0];
-    even_b = {pix_even[3:0], pix_even[7:4]};
-    odd_r = pix_odd[7:0];
-    odd_g = ~pix_odd[7:0];
-    odd_b = {pix_odd[3:0], pix_odd[7:4]};
-    if (FULLWIDTH || SAMPLEMODE == 1) begin
-        want_r = even_r;
-        want_g = even_g;
-        want_b = even_b;
-    end else if (SAMPLEMODE == 2) begin
-        want_r = odd_r;
-        want_g = odd_g;
-        want_b = odd_b;
-    end else begin
-        want_r = ({1'b0, even_r} + {1'b0, odd_r} + 9'd1) >> 1;
-        want_g = ({1'b0, even_g} + {1'b0, odd_g} + 9'd1) >> 1;
-        want_b = ({1'b0, even_b} + {1'b0, odd_b} + 9'd1) >> 1;
+    for (k = 4; k < 32; k = k + 1) begin
+        buf_read(k[11:0], got);
+        sample_idx = CROPH + k * (FULLWIDTH ? 1 : 2)
+                     + CAPTURE_INPUT_OFFSET;
+        pix_even = sample_idx / PIXSPAN + line_seed;
+        pix_odd = (sample_idx + 1) / PIXSPAN + line_seed;
+        even_r = pix_even[7:0];
+        even_g = ~pix_even[7:0];
+        even_b = {pix_even[3:0], pix_even[7:4]};
+        odd_r = pix_odd[7:0];
+        odd_g = ~pix_odd[7:0];
+        odd_b = {pix_odd[3:0], pix_odd[7:4]};
+        if (FULLWIDTH || SAMPLEMODE == 1) begin
+            want_r = even_r;
+            want_g = even_g;
+            want_b = even_b;
+        end else if (SAMPLEMODE == 2) begin
+            want_r = odd_r;
+            want_g = odd_g;
+            want_b = odd_b;
+        end else begin
+            want_r = ({1'b0, even_r} + {1'b0, odd_r} + 9'd1) >> 1;
+            want_g = ({1'b0, even_g} + {1'b0, odd_g} + 9'd1) >> 1;
+            want_b = ({1'b0, even_b} + {1'b0, odd_b} + 9'd1) >> 1;
+        end
+        check_eq("entry", got[23:0], {want_r, want_g, want_b});
     end
-    check_eq("pixel4", got[23:0], {want_r, want_g, want_b});
 
     if (errors == 0)
         $display("RESULT PASS checks=%0d", checks);
