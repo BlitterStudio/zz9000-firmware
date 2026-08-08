@@ -50,7 +50,15 @@
   `define VCAP_RGB_MODE     2
   `define VCAP_CSYNC_VSYNC  0
 `endif
-`define VCAP_FULLRATE_INT 0
+`ifdef ZORRO3
+  `define VCAP_FULLRATE_INT 1
+`elsif VARIANT_SUPERDENISE
+  `define VCAP_FULLRATE_INT 0
+`elsif VARIANT_ZZ9500
+  `define VCAP_FULLRATE_INT 0
+`else
+  `define VCAP_FULLRATE_INT 1
+`endif
 
 `define C_S_AXI_DATA_WIDTH 32
 `define C_S_AXI_ADDR_WIDTH 5
@@ -1164,7 +1172,15 @@ module MNTZorro_v0_1_S00_AXI
                .CLKFBOUT_USE_FINE_PS("TRUE"),
                .CLKIN1_PERIOD(35.000000),
                .CLKIN2_PERIOD(0.000000),
+`ifdef ZORRO3
+               .CLKOUT0_DIVIDE_F(8.000000),
+`elsif VARIANT_SUPERDENISE
                .CLKOUT0_DIVIDE_F(16.000000),
+`elsif VARIANT_ZZ9500
+               .CLKOUT0_DIVIDE_F(16.000000),
+`else
+               .CLKOUT0_DIVIDE_F(8.000000),
+`endif
                .CLKOUT0_DUTY_CYCLE(0.500000),
 
 `ifdef ZORRO3
@@ -1174,7 +1190,7 @@ module MNTZorro_v0_1_S00_AXI
 `elsif VARIANT_ZZ9500
                .CLKOUT0_PHASE(90.000000),
 `else
-               .CLKOUT0_PHASE(315.000000),
+               .CLKOUT0_PHASE(270.000000),
 `endif
 
                .CLKOUT0_USE_FINE_PS("TRUE"),
