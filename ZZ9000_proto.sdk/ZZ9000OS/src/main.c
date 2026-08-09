@@ -368,17 +368,24 @@ int main() {
 		       cfg->scanline_mode, cfg->scanline_parity);
 	}
 
-	if (zz_config_get()->videocap_sample_present) {
+	{
 		// Push videocap sampler options into the FPGA via the ARM op
 		// path (snooped by mntzorro.v as MNTVF_OP_VIDEOCAP; older
 		// bitstreams ignore the op). Safe here: the video ISR is not
 		// connected yet, so nobody else drives the op interface.
 		const struct zz_config *cfg = zz_config_get();
-		video_formatter_write((VIDEOCAP_CROP_V_DEFAULT << 16) |
-		                      (VIDEOCAP_CROP_H_DEFAULT << 4) |
-		                      (cfg->videocap_sample & 3),
+		uint32_t sample = cfg->videocap_sample_present ? cfg->videocap_sample : 0;
+		uint32_t full = cfg->videocap_shres_present ? cfg->videocap_shres :
+		                VIDEOCAP_FULL_WIDTH_DEFAULT;
+		uint32_t crop_h = cfg->videocap_crop_h_present ? cfg->videocap_crop_h :
+		                  VIDEOCAP_CROP_H_DEFAULT;
+		uint32_t crop_v = cfg->videocap_crop_v_present ? cfg->videocap_crop_v :
+		                  VIDEOCAP_CROP_V_DEFAULT;
+		video_formatter_write((crop_v << 16) | (crop_h << 4) |
+		                      ((full & 1) << 2) | (sample & 3),
 		                      MNTVF_OP_VIDEOCAP);
-		printf("[CFG] videocap sample mode %d\n", cfg->videocap_sample);
+		printf("[CFG] videocap: sample %lu shres %lu crop %lu,%lu\n",
+		       sample, full, crop_h, crop_v);
 	}
 
 	// RTG rect ops may write anywhere in framebuffer + legacy surface

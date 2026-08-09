@@ -125,8 +125,11 @@ sample; the copy at the repo root documents every option:
 
 | Key | Values | Replaces |
 |---|---|---|
-| `videocap_mode` | `800x600` (default), `pal` | `ENV:ZZ9000-VCAP-800x600` |
+| `videocap_mode` | `800x600` (default), `pal`; filtered-output mode only | `ENV:ZZ9000-VCAP-800x600` |
 | `videocap_sample` | `average` (default), `even`, `odd` | native-video capture sample selection |
+| `videocap_shres` | `full` (default, 1280x1024 1:1), `filter` | native-video capture/output width |
+| `videocap_crop_h` | `0`–`4095` (default `188`) | horizontal capture origin in 28 MHz samples |
+| `videocap_crop_v` | `0`–`4095` (default `26`) | vertical capture origin in lines |
 | `nonstandard_vsync` | `off` (default), `pal`, `ntsc` | `ENV:ZZ9000-NS-VSYNC[-NTSC]`, `ns-pal` flavor |
 | `scanline_mode` | `0` (off, default) – `3` | ZZTop/ZZScanlines (still work at runtime) |
 | `scanline_parity` | `0` (default), `1` | ZZTop/ZZScanlines |
@@ -147,9 +150,10 @@ remove those when migrating.
 ZZTop can edit this file in place from AmigaOS (Project menu →
 Settings), writing it back over the FWUP path with a `ZZ9000.bak`
 backup. It rewrites the whole file from the keys it knows, so use
-**ZZTop 2.5 or newer**: 2.4 predates `videocap_sample`, while 2.3 also
-predates `offscreen_bitmaps` and `video_overlay`; those older versions
-would drop the newer lines. The drivers repo's
+**ZZTop 2.6 or newer**: 2.5 predates the full-width and crop controls,
+2.4 predates `videocap_sample`, and 2.3 also predates
+`offscreen_bitmaps` and `video_overlay`; those older versions would drop
+the newer lines. The drivers repo's
 `tools/check-cfg-keys.sh` fails if the parser, this table, the sample
 `ZZ9000.CFG` and ZZTop's editor ever disagree.
 

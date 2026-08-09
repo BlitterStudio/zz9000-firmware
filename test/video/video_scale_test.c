@@ -34,6 +34,18 @@ int main(void)
 	if (!expect_u32("x4 leaves sprite doubling independent",
 	                video_formatter_scale_control(4U), 4U))
 		return 5;
+	if (!expect_u32("filtered progressive capture uses x2",
+	                video_videocap_scalemode(0U, 0U), 2U))
+		return 6;
+	if (!expect_u32("filtered interlaced capture uses x1",
+	                video_videocap_scalemode(0U, 1U), 0U))
+		return 7;
+	if (!expect_u32("full progressive capture uses x4",
+	                video_videocap_scalemode(1U, 0U), 4U))
+		return 8;
+	if (!expect_u32("full interlaced capture uses x2",
+	                video_videocap_scalemode(1U, 1U), 2U))
+		return 9;
 
 	return 0;
 }

@@ -118,6 +118,27 @@ static int apply_key(const char *key, const char *value) {
 		cfg.videocap_sample_present = 1;
 		return 0;
 	}
+	if (token_eq(key, "videocap_shres")) {
+		if (token_eq(value, "filter")) cfg.videocap_shres = 0;
+		else if (token_eq(value, "full")) cfg.videocap_shres = 1;
+		else return -1;
+		cfg.videocap_shres_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "videocap_crop_h")) {
+		long v = parse_uint(value);
+		if (v < 0 || v > 4095) return -1;
+		cfg.videocap_crop_h = (uint16_t)v;
+		cfg.videocap_crop_h_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "videocap_crop_v")) {
+		long v = parse_uint(value);
+		if (v < 0 || v > 4095) return -1;
+		cfg.videocap_crop_v = (uint16_t)v;
+		cfg.videocap_crop_v_present = 1;
+		return 0;
+	}
 	if (token_eq(key, "nonstandard_vsync")) {
 		if (token_eq(value, "off")) cfg.ns_vsync = 0;
 		else if (token_eq(value, "pal") || token_eq(value, "on")) cfg.ns_vsync = 1;
@@ -326,6 +347,18 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 	case ZZ_CONFIG_KEY_VIDEOCAP_SAMPLE:
 		p = cfg.videocap_sample_present;
 		v = cfg.videocap_sample;
+		break;
+	case ZZ_CONFIG_KEY_VIDEOCAP_SHRES:
+		p = cfg.videocap_shres_present;
+		v = cfg.videocap_shres;
+		break;
+	case ZZ_CONFIG_KEY_VIDEOCAP_CROP_H:
+		p = cfg.videocap_crop_h_present;
+		v = cfg.videocap_crop_h;
+		break;
+	case ZZ_CONFIG_KEY_VIDEOCAP_CROP_V:
+		p = cfg.videocap_crop_v_present;
+		v = cfg.videocap_crop_v;
 		break;
 	case ZZ_CONFIG_KEY_NS_VSYNC:
 		p = cfg.ns_vsync_present;

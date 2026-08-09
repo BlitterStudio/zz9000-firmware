@@ -236,9 +236,38 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 	return XST_SUCCESS;
 }
 
+static int videocap_full_width_enabled(void) {
+	const struct zz_config *cfg = zz_config_get();
+	return cfg->videocap_shres_present ? cfg->videocap_shres :
+	       VIDEOCAP_FULL_WIDTH_DEFAULT;
+}
+
+static void init_filtered_videocap_video_mode(int ntsc) {
+	int mode;
+
+	if (ntsc) {
+		mode = ZZVMODE_720x480;
+		if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
+			mode = ZZVMODE_720x480_NS_PAL + vs.scandoubler_mode_adjust;
+		}
+	} else {
+		mode = vs.videocap_video_mode;
+		if (mode == ZZVMODE_720x576 &&
+				vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
+			mode = ZZVMODE_720x576_NS_PAL + vs.scandoubler_mode_adjust;
+		}
+	}
+
+	video_mode_init_internal(mode, 2, MNTVA_COLOR_32BIT, 1);
+}
+
 static void init_videocap_video_mode(int ntsc) {
 	int mode = ZZVMODE_1280x1024;
 
+	if (!videocap_full_width_enabled()) {
+		init_filtered_videocap_video_mode(ntsc);
+		return;
+	}
 	if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
 		mode = ntsc ? ZZVMODE_1280x1024_NS_NTSC :
 		              ZZVMODE_1280x1024_NS_PAL;
@@ -418,7 +447,9 @@ void isr_video(void *dummy) {
 				if (videocap_detection_stable &&
 						(interlace != vs.interlace_old || videocap_reset)) {
 					// interlace has changed, we need to reconfigure vdma for the new screen height
-					uint32_t videocap_scalemode = interlace ? 2U : 4U;
+					uint32_t videocap_scalemode = video_videocap_scalemode(
+							(uint32_t)videocap_full_width_enabled(),
+							(uint32_t)interlace);
 					vs.scalemode = (int)videocap_scalemode;
 					vs.vmode_vdiv = (int)video_vertical_scale_factor(videocap_scalemode);
 					videocap_area_clear();

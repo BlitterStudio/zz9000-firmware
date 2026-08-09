@@ -16,4 +16,14 @@ static inline uint32_t video_formatter_scale_control(uint32_t scalemode)
 	return (scalemode & 7U) | ((scalemode & 2U) << 2);
 }
 
+static inline uint32_t video_videocap_scalemode(uint32_t full_width,
+		uint32_t interlace)
+{
+	/* Full-width progressive capture needs x4 to fill 1024 lines;
+	 * filtered capture retains the legacy x2 path. Interlaced input
+	 * already supplies twice as many source lines. */
+	return full_width ? (interlace ? 2U : 4U)
+	                  : (interlace ? 0U : 2U);
+}
+
 #endif

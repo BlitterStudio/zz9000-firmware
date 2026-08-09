@@ -165,6 +165,36 @@ static void test_videocap_sample(void) {
     CHECK(!zz_config_get()->videocap_sample_present);
 }
 
+static void test_videocap_shres_and_crop(void) {
+    uint16_t present = 0;
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_shres = filter\n") == 1);
+    CHECK(zz_config_get()->videocap_shres_present);
+    CHECK(zz_config_get()->videocap_shres == 0);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_SHRES, &present) == 0 && present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_shres = full\n") == 1);
+    CHECK(zz_config_get()->videocap_shres == 1);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_shres = maybe\n") == 0);
+    CHECK(!zz_config_get()->videocap_shres_present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_crop_h = 200\nvideocap_crop_v = 30\n") == 2);
+    CHECK(zz_config_get()->videocap_crop_h == 200);
+    CHECK(zz_config_get()->videocap_crop_v == 30);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_H, &present) == 200 && present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_V, &present) == 30 && present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_crop_h = 4096\nvideocap_crop_v = 65536\n") == 0);
+    CHECK(!zz_config_get()->videocap_crop_h_present);
+    CHECK(!zz_config_get()->videocap_crop_v_present);
+}
+
 static void test_bad_values_skipped(void) {
     zz_config_reset();
     const char *text =
@@ -338,6 +368,7 @@ int main(void) {
     test_case_whitespace_comments();
     test_videocap_aliases();
     test_videocap_sample();
+    test_videocap_shres_and_crop();
     test_bad_values_skipped();
     test_last_value_wins();
     test_no_trailing_newline();
