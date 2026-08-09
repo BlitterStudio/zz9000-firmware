@@ -4,6 +4,10 @@
 #include <stdint.h>
 
 #define VIDEO_VDMA_WORD_BYTES 4U
+/* Full-width native rows cross the capture-buffer boundary on the A4000.
+ * Hardware calibration brackets the required scanout rotation between the
+ * unshifted and 256-pixel positions; use the 128-pixel midpoint candidate. */
+#define VIDEO_VDMA_FULL_WIDTH_PAN_PIXELS 128U
 
 static inline uint32_t video_vdma_line_bytes(uint32_t hsize, uint32_t hdiv)
 {

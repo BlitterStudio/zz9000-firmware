@@ -92,9 +92,10 @@ static int test_default_stride_matches_line_bytes(void)
 
 static int test_native_pan_moves_start_before_capture_buffer(void)
 {
-	if (!expect_u32("1280 native 256-pixel right pan",
-	                video_vdma_pan_right_start(0x00e00000U, 256U),
-	                0x00dffc00U)) {
+	if (!expect_u32("1280 native 128-pixel right pan",
+	                video_vdma_pan_right_start(0x00e00000U,
+	                                           VIDEO_VDMA_FULL_WIDTH_PAN_PIXELS),
+	                0x00dffe00U)) {
 		return 1;
 	}
 	if (!expect_u32("right pan clamps before offset zero",

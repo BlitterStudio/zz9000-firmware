@@ -54,11 +54,6 @@ static int default_pan_offset_pal = 0x00e00000;
 static int default_pan_offset_ntsc = 0x00e00000;
 static int default_pan_offset_pal_800x600 = 0x00dff2f8;
 
-/* Diagnostic full-width row rotation. The legacy 800x600 path already starts
- * before the capture buffer to join a row across the Amiga raster boundary;
- * full-width scanout initially lost that adjustment. */
-#define VIDEOCAP_FULL_PAN_RIGHT_PIXELS 256U
-
 static int isr_flush_count = 0;
 int vblank_count = 0;
 
@@ -418,7 +413,7 @@ void isr_video(void *dummy) {
 						vs.framebuffer_pan_width = 0;
 						vs.framebuffer_pan_offset = videocap_full_width_enabled() ?
 							video_vdma_pan_right_start(default_pan_offset_ntsc,
-								VIDEOCAP_FULL_PAN_RIGHT_PIXELS) :
+								VIDEO_VDMA_FULL_WIDTH_PAN_PIXELS) :
 							default_pan_offset_ntsc;
 						init_videocap_video_mode(1);
 					} else {
@@ -428,7 +423,7 @@ void isr_video(void *dummy) {
 						if (videocap_full_width_enabled()) {
 							vs.framebuffer_pan_offset =
 								video_vdma_pan_right_start(default_pan_offset_pal,
-									VIDEOCAP_FULL_PAN_RIGHT_PIXELS);
+									VIDEO_VDMA_FULL_WIDTH_PAN_PIXELS);
 						} else if (vs.videocap_video_mode == ZZVMODE_800x600) {
 							vs.framebuffer_pan_offset = default_pan_offset_pal_800x600;
 						} else {
