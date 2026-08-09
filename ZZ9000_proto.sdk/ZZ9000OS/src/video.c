@@ -79,8 +79,10 @@ struct ZZ_VIDEO_STATE* video_get_state() {
 
 static void videocap_detection_reset() {
 	vs.videocap_ntsc_old = -1;
+	vs.videocap_shres_old = -1;
 	vs.interlace_old = -1;
 	vs.videocap_ntsc_candidate = -1;
+	vs.videocap_shres_candidate = -1;
 	vs.interlace_candidate = -1;
 	vs.videocap_mode_stable_count = 0;
 }
@@ -292,11 +294,14 @@ void video_set_dpms(uint8_t level) {
 	video_formatter_write(level, MNTVF_OP_DPMS);
 }
 
-static int videocap_detection_is_stable(int videocap_ntsc, int interlace) {
+static int videocap_detection_is_stable(int videocap_ntsc, int interlace,
+		int videocap_shres) {
 	if (videocap_ntsc != vs.videocap_ntsc_candidate ||
-			interlace != vs.interlace_candidate) {
+			interlace != vs.interlace_candidate ||
+			videocap_shres != vs.videocap_shres_candidate) {
 		vs.videocap_ntsc_candidate = videocap_ntsc;
 		vs.interlace_candidate = interlace;
+		vs.videocap_shres_candidate = videocap_shres;
 		vs.videocap_mode_stable_count = 1;
 		return 0;
 	}
@@ -317,6 +322,7 @@ void isr_video(void *dummy) {
 	int videocap_enabled = !!(zstate & (1 << 23));
 	int videocap_ntsc = !!(zstate & (1 << 22));
 	int interlace = !!(zstate & (1 << 24));
+	int videocap_shres = !!(zstate & (1 << 17));
 
 	if (!videocap_enabled) {
 		if (!vblank) {
@@ -370,9 +376,11 @@ void isr_video(void *dummy) {
 					vs.videocap_enabled_old = videocap_enabled;
 				}
 
-				videocap_reset = (vs.videocap_ntsc_old < 0 || vs.interlace_old < 0);
+				videocap_reset = (vs.videocap_ntsc_old < 0 ||
+						vs.interlace_old < 0 || vs.videocap_shres_old < 0);
 				int videocap_detection_stable =
-						videocap_detection_is_stable(videocap_ntsc, interlace);
+						videocap_detection_is_stable(videocap_ntsc, interlace,
+								videocap_shres);
 
 				if (videocap_detection_stable &&
 						(videocap_ntsc != vs.videocap_ntsc_old || videocap_reset)) {
@@ -427,6 +435,7 @@ void isr_video(void *dummy) {
 				if (videocap_detection_stable) {
 					vs.interlace_old = interlace;
 					vs.videocap_ntsc_old = videocap_ntsc;
+					vs.videocap_shres_old = videocap_shres;
 				}
 			}
 		} else {

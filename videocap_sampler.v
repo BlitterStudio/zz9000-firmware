@@ -117,6 +117,12 @@ reg half = 0;
 reg [23:0] rgb_prev = 0;
 wire filter_pairs = (FULLRATE != 0) && !ctl_full_width_cap;
 
+/* SuperHires changes within a 28 MHz sample pair; hires and lores do not.
+ * Keep classification independent of whether that pair is stored separately
+ * or filtered into one output pixel. */
+reg shres_half = 0;
+reg [23:0] shres_prev = 0;
+
 wire [8:0] avg_r_sum = {1'b0, rgb_prev[23:16]} +
                        {1'b0, rgbin[23:16]} + 9'd1;
 wire [8:0] avg_g_sum = {1'b0, rgb_prev[15:8]} +
@@ -190,6 +196,7 @@ always @(posedge cap_clk) begin
         cap_x <= 0;
         sample_x <= 0;
         half <= 0;
+        shres_half <= 0;
 
         if (CSYNC_VSYNC != 0) begin
             if (hs_pulse_width < 8'h20) begin
@@ -211,28 +218,46 @@ always @(posedge cap_clk) begin
     end else begin
         sample_x <= sample_x + 1'b1;
 
+        /* Keep the SHR pair phase tied to line sync, not to the runtime crop
+         * origin.  An odd crop value must not re-pair adjacent hires pixels
+         * and falsely classify them as SuperHires.  The first pair crossing
+         * the crop boundary is ignored because one sample lies outside the
+         * captured window. */
+        if (FULLRATE != 0) begin
+            if (!shres_half) begin
+                shres_prev <= rgbin;
+                shres_half <= 1;
+            end else begin
+                shres_half <= 0;
+                if ({1'b0, sample_x} > crop_h_local &&
+                        cap_x < (ctl_full_width_cap ? 11'h400 : 11'h200) &&
+                        (rgbin !== shres_prev) && diff_count != 16'hffff)
+                    diff_count <= diff_count + 1'b1;
+            end
+        end
+
         if ({1'b0, sample_x} < crop_h_local) begin
             half <= 0;
-        end else if (filter_pairs) begin
-            if (!half) begin
-                rgb_prev <= rgbin;
-                half <= 1;
+        end else begin
+            if (filter_pairs) begin
+                if (!half) begin
+                    rgb_prev <= rgbin;
+                    half <= 1;
+                end else begin
+                    half <= 0;
+                    if (cap_x > 2)
+                        linebuf[cap_x] <= {8'b0, filtered_sample};
+                    else
+                        linebuf[cap_x] <= 32'b0;
+                    cap_x <= cap_x + 1'b1;
+                end
             end else begin
-                half <= 0;
                 if (cap_x > 2)
-                    linebuf[cap_x] <= {8'b0, filtered_sample};
+                    linebuf[cap_x] <= {8'b0, rgbin};
                 else
                     linebuf[cap_x] <= 32'b0;
                 cap_x <= cap_x + 1'b1;
-                if ((rgbin !== rgb_prev) && diff_count != 16'hffff)
-                    diff_count <= diff_count + 1'b1;
             end
-        end else begin
-            if (cap_x > 2)
-                linebuf[cap_x] <= {8'b0, rgbin};
-            else
-                linebuf[cap_x] <= 32'b0;
-            cap_x <= cap_x + 1'b1;
         end
     end
 

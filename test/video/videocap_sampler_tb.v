@@ -46,6 +46,7 @@ wire cap_interlace;
 wire cap_ntsc;
 wire cap_x_done;
 wire cap_shres;
+wire legacy_cap_shres;
 
 videocap_sampler #(
     .BUF_DEPTH(2048),
@@ -99,7 +100,7 @@ videocap_sampler #(
     .cap_interlace(),
     .cap_ntsc(),
     .cap_x_done(),
-    .cap_shres(),
+    .cap_shres(legacy_cap_shres),
     .axi_clk(axi_clk),
     .buf_raddr(buf_raddr),
     .buf_rdata(legacy_buf_rdata)
@@ -158,7 +159,13 @@ task drive_line;
             @(posedge cap_clk);
         hsync = 1;
         for (i = 0; i < LINECLKS - 67; i = i + 1) begin
-            px = (i / PIXSPAN) + pattern_seed;
+            /* Toggle aggressively after the 1024-sample capture window.
+             * Blanking activity must not make hires or lores look like
+             * SuperHires content. */
+            if (i >= CROPH + 1100)
+                px = (i[0] != 0) ? 8'hff : 8'h00;
+            else
+                px = (i / PIXSPAN) + pattern_seed;
             r = px[7:0];
             g = ~px[7:0];
             b = {px[3:0], px[7:4]};
@@ -233,6 +240,9 @@ initial begin
     repeat (10) @(posedge cap_clk);
     drive_field(0, 0);
     drive_field(0, 1);
+
+    check_eq("cap_shres", cap_shres, (PIXSPAN == 1));
+    check_eq("legacy_cap_shres", legacy_cap_shres, 0);
 
     /* The final active raster line remains in the line buffer. */
     line_seed = LINES - 1;
