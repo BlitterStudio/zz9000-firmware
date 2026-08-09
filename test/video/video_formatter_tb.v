@@ -10,7 +10,7 @@
  * Plusargs:
  *   +CMODE=<0|1|2|3>   colormode (8/16/32/15 bit), default 2
  *   +SCALEX=<0|1>      horizontal doubling, default 0
- *   +SCALEY=<0|1>      vertical doubling (native videocap uses 1), default 0
+ *   +SCALEY=<0|1|2>    vertical scale shift (x1/x2/x4), default 0
  *   +WIDTH=<pixels>    displayed width, default 64
  *
  * Compile with -d MASTER_DUT to run against the pre-branch 32-bit formatter
@@ -54,6 +54,7 @@ integer beats_per_line;
 integer src_pixels;
 integer src_lines;
 integer h_max;
+integer scale_y_factor;
 
 // clocks
 reg aclk = 0;
@@ -330,16 +331,15 @@ initial begin : vdma
   end
 end
 
-// capture displayed pixels; without scale_y the active rows are
-// counter_y = 1..NLINES showing streamed lines 0..NLINES-1 in order, with
-// scale_y they are counter_y = 2..NLINES+1 showing each source line twice
-reg [31:0] cap [0:(NLINES+1)*MAXW-1];
+// Normalize the formatter's vertical active-window offset while capturing.
+// Each source line is then repeated by the configured scale factor.
+reg [31:0] cap [0:NLINES*MAXW-1];
 reg [11:0] xcnt = 0;
 integer row;
 always @(posedge dvi_clk) begin
   if (dvi_active_video === 1'b1) begin
-    row = uut.counter_y - 1;
-    if (row >= 0 && row <= NLINES && xcnt < MAXW)
+    row = uut.counter_y - scale_y_factor;
+    if (row >= 0 && row < NLINES && xcnt < MAXW)
       cap[row * MAXW + xcnt] <= dvi_rgb;
     xcnt <= xcnt + 1;
   end else
@@ -403,6 +403,7 @@ initial begin
   if ($value$plusargs("SCALEY=%d", cfg_scaley)) ;
   if ($value$plusargs("WIDTH=%d", cfg_width)) ;
 
+  scale_y_factor = 1 << cfg_scaley;
   src_pixels = cfg_width >> cfg_scalex;
   src_lines = NLINES >> cfg_scaley;
   case (cfg_cmode)
@@ -430,7 +431,7 @@ initial begin
   op(OP_HS, ((cfg_width + 16) << 16) | (cfg_width + 32));
   op(OP_VS, (VS_START << 16) | VS_END);
   op(OP_COLORMODE, cfg_cmode);
-  op(OP_SCALE, ((cfg_scaley & 1) << 1) | (cfg_scalex & 1));
+  op(OP_SCALE, ((cfg_scaley & 3) << 1) | (cfg_scalex & 1));
   op(OP_SPRITEXY, (2000 << 16) | 2000);
   if (cfg_cmode == 0)
     for (i = 0; i < 256; i = i + 1)
@@ -445,14 +446,13 @@ initial begin
   // The formatter's active-video window opens one dvi_clk before the pixel
   // pipeline delivers word 0 (left edge shows pixel 0 twice on master
   // hardware too), so displayed column x carries source pixel x-1.
-  // Without scale_y, capture row r = 0..NLINES-1 shows source line r; with
-  // scale_y, capture row r = 1..NLINES shows source line (r-1)>>1.
+  // Captured rows are normalized to zero at the first active line.
   mism = 0;
   shown = 0;
-  for (i = cfg_scaley; i < NLINES + cfg_scaley; i = i + 1)
+  for (i = 0; i < NLINES; i = i + 1)
     for (x = 1; x < cfg_width; x = x + 1) begin
       got = cap[i * MAXW + x];
-      exp = expected_pix(cfg_scaley ? ((i - 1) >> 1) : i, x - 1);
+      exp = expected_pix(i >> cfg_scaley, x - 1);
       if (got !== exp) begin
         mism = mism + 1;
         if (shown < 24) begin

@@ -69,6 +69,8 @@ CONFIGS="
 if [ "$VARIANT" != "master" ] && [ "$VARIANT" != "reference" ]; then
     CONFIGS="$CONFIGS
 2 0 1 720
+2 0 2 720
+1 0 2 62
 2 0 0 1920
 "
 fi

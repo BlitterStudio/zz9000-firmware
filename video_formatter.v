@@ -90,7 +90,7 @@ localparam CMODE_15BIT=3;
 reg [11:0] screen_width;
 reg [11:0] screen_height;
 reg scale_x = 0;
-reg scale_y = 1; // amiga boots in 640x256, so double the resolution vertically
+reg [1:0] scale_y = 2'd1; // amiga boots in 640x256, so double the resolution vertically
 reg [23:0] palette[511:0];
 reg [2:0] colormode = CMODE_32BIT;
 reg vsync_request;
@@ -206,7 +206,7 @@ wire pixin_in_range = inptr[11:1] < LINE_BUFFER_BEATS;
 wire [7:0] line_buffer_we = (pixin_valid && ready_for_vdma && pixin_in_range)
                             ? m_axis_vid_tkeep : 8'h00;
 
-reg scale_y_effective;
+reg [1:0] scale_y_effective;
 
 reg need_frame_sync; // vga domain
 reg need_frame_sync_reg; // fetch domain
@@ -254,7 +254,7 @@ always @(posedge m_axis_vid_aclk)
     need_line_fetch_reg  <= need_line_fetch; // sync to clock domain
     need_line_fetch_reg2 <= need_line_fetch_reg>>scale_y_effective; // line duplication
 
-    scale_y_effective <= control_interlace ? 0 : scale_y;
+    scale_y_effective <= control_interlace ? 2'd0 : scale_y;
 
     if (pixin_valid && ready_for_vdma) begin
       // disabling this makes the picture go wild
@@ -340,8 +340,8 @@ begin
       end
     OP_SCALE: begin
         scale_x  <= control_data_in[0];
-        scale_y  <= control_data_in[1];
-        sprite_dbl <= control_data_in[1];
+        scale_y  <= control_data_in[2:1];
+        sprite_dbl <= control_data_in[3];
       end
     OP_COLORMODE: colormode  <= control_data_in[1:0]; // FIXME
     OP_VSYNC: vsync_request <= 1; //control_data[0];
@@ -521,7 +521,8 @@ reg [11:0] counter_scanout;
 reg [2:0] vga_colormode;
 
 reg vga_scale_x = 0;
-reg vga_scale_y = 0;
+reg [1:0] vga_scale_y = 2'd0;
+wire [11:0] vga_scale_y_factor = 12'd1 << vga_scale_y;
 reg [31:0] pixout;
 reg [7:0]  pixout8;
 reg [15:0] pixout16;
@@ -801,7 +802,7 @@ always @(posedge dvi_clk) begin
   vga_scanline_width      <= scanline_width;
   vga_scanline_parity     <= scanline_parity;
   vga_scanlines_en <= !control_interlace &&
-                    (scale_y || (vga_v_rez < 350));
+                    ((|scale_y) || (vga_v_rez < 350));
 
   /*
     pipelines (4 clocks):
@@ -1075,7 +1076,8 @@ endcase
       dvi_vsync <= 0^vga_sync_polarity;
 
   // account for 1 line of vdma wrap-around
-  if (counter_y>vga_scale_y && counter_y<=(vga_v_rez + vga_scale_y) &&
+  if (counter_y >= vga_scale_y_factor &&
+      counter_y < (vga_v_rez + vga_scale_y_factor) &&
       counter_x == PIPE_DELAY +
                    (vga_overlay_enable ? OVERLAY_PIPE_DELAY : 0))
     dvi_active_video <= 1;

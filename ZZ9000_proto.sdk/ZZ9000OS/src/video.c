@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "video.h"
+#include "video_scale.h"
 #include "video_vdma.h"
 #include "zz_config.h"
 #include "mntzorro.h"
@@ -487,8 +488,7 @@ void isr_video(void *dummy) {
 
 		// handle screen dragging
 		if (vs.split_request_pos != vs.split_pos) {
-			int scale = 1;
-			if (vs.scalemode & 2) scale = 2;
+			int scale = (int)video_vertical_scale_factor(vs.scalemode);
 			vs.split_pos = vs.split_request_pos * scale;
 			video_formatter_write(vs.split_pos, MNTVF_OP_REPORT_LINE);
 		}
@@ -587,16 +587,14 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 	vs.scalemode = scalemode;
 	vs.colormode = colormode;
 
-	int hdiv = 1, vdiv = 1;
+	int hdiv = 1;
+	int vdiv = (int)video_vertical_scale_factor((uint32_t)scalemode);
 	stride_div = 1;
 
 	if (scalemode & 1) {
 		hdiv = 2;
 		stride_div = 2;
 	}
-	if (scalemode & 2)
-		vdiv = 2;
-
 	// 8 bit
 	if (colormode == MNTVA_COLOR_8BIT)
 		hdiv *= 4;
@@ -618,7 +616,8 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 	video_formatter_write((vmode->hstart << 16) | vmode->hend, MNTVF_OP_HS);
 	video_formatter_write((vmode->vstart << 16) | vmode->vend, MNTVF_OP_VS);
 	video_formatter_write(vmode->polarity, MNTVF_OP_POLARITY);
-	video_formatter_write(scalemode, MNTVF_OP_SCALE);
+	video_formatter_write(video_formatter_scale_control((uint32_t)scalemode),
+	                      MNTVF_OP_SCALE);
 	video_formatter_write(colormode, MNTVF_OP_COLORMODE);
 	/* A mode change is also the fail-safe wake path: never leave a display
 	 * stranded with one or both syncs suppressed after reprogramming timing. */
@@ -808,11 +807,8 @@ void _update_hw_sprite_pos(int16_t x, int16_t y) {
 
 	vs.sprite_y = y - vs.sprite_y_offset + 1;
 
-	// vertically doubled mode
-	if (vs.scalemode & 2)
-		vs.sprite_y_adj = vs.sprite_y * 2;
-	else
-		vs.sprite_y_adj = vs.sprite_y;
+	vs.sprite_y_adj = vs.sprite_y *
+	                  (int)video_vertical_scale_factor(vs.scalemode);
 
 	if (vs.sprite_x < 0 || vs.sprite_y < 0) {
 		if (sprite_clip_x != vs.sprite_x || sprite_clip_y != vs.sprite_y) {

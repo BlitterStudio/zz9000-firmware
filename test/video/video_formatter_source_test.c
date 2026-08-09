@@ -154,6 +154,22 @@ static int test_scanout_pipeline_keeps_master_alignment(const char *text)
 	return ok ? 0 : 1;
 }
 
+static int test_vertical_scale_shift_and_sprite_control_are_independent(
+	const char *text)
+{
+	int ok = 1;
+
+	ok &= require_contains(text, "reg [1:0] scale_y = 2'd1;");
+	ok &= require_contains(text, "reg [1:0] scale_y_effective;");
+	ok &= require_contains(text, "reg [1:0] vga_scale_y = 2'd0;");
+	ok &= require_contains(text, "scale_y  <= control_data_in[2:1];");
+	ok &= require_contains(text, "sprite_dbl <= control_data_in[3];");
+	ok &= require_absent(text, "sprite_dbl <= control_data_in[1];",
+	                     "sprite doubling still aliases vertical scaling");
+
+	return ok ? 0 : 1;
+}
+
 /*
  * tkeep must gate the write byte lanes and the inptr word advance so the
  * partial tlast beat of an odd-word line lands correctly.
@@ -274,6 +290,8 @@ int main(void)
 	result = test_line_buffer_is_asymmetric_bram(text);
 	if (!result)
 		result = test_scanout_pipeline_keeps_master_alignment(text);
+	if (!result)
+		result = test_vertical_scale_shift_and_sprite_control_are_independent(text);
 	if (!result)
 		result = test_64bit_tkeep_drives_writes(text);
 	if (!result)
