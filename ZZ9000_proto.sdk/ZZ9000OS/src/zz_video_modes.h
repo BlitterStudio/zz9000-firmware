@@ -20,8 +20,8 @@ enum zz_video_modes {
 	ZZVMODE_720x480_NS_NTSC,	// Non-standard "60Hz" (NTSC Amiga)
 	ZZVMODE_640x400,
 	ZZVMODE_1920x800,
-	ZZVMODE_1280x1024_NS_PAL,	// Non-standard ~49.92Hz (PAL Amiga)
-	ZZVMODE_1280x1024_NS_NTSC,	// Non-standard ~59.93Hz (NTSC Amiga)
+	ZZVMODE_1280x1024_NS_PAL,	// Non-standard ~49.93Hz (PAL Amiga)
+	ZZVMODE_1280x1024_NS_NTSC,	// Non-standard ~59.95Hz (NTSC Amiga)
 	ZZVMODE_CUSTOM,
 	ZZVMODE_NUM,
 };
@@ -35,6 +35,8 @@ struct zz_video_mode {
 	int hdmi;
 	int mul, div, div2;
 };
+
+extern struct zz_video_mode preset_video_modes[ZZVMODE_NUM];
 
 enum custom_vmode_params {
 	VMODE_PARAM_HRES,
