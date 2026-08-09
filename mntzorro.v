@@ -1295,6 +1295,19 @@ module MNTZorro_v0_1_S00_AXI
   reg [3:0]  videocap_save_state = 0;
   reg [4:0]  vc_beat = 0;
 
+  wire videocap_writeback_full_width =
+      (`VCAP_FULLRATE_INT != 0) && videocap_full_width;
+  wire [11:0] videocap_write_x;
+
+  videocap_writeback_layout #(
+      .LINE_WIDTH(1280),
+      .ROTATE_PIXELS(64)
+  ) videocap_writeback_layout_inst (
+      .full_width(videocap_writeback_full_width),
+      .source_x(videocap_save_x),
+      .dest_x(videocap_write_x)
+  );
+
   reg videocap_mode_sync;
 
   reg [31:0] m01_axi_awaddr_out;
@@ -1438,7 +1451,7 @@ module MNTZorro_v0_1_S00_AXI
         end
         4'h2: begin
           // we shift left by 2 bits to scale from 1 pixel to 4 bytes
-          m01_axi_awaddr_out  <= videocap_address + ((vc_saveaddr1 + videocap_save_x)<<2);
+          m01_axi_awaddr_out  <= videocap_address + ((vc_saveaddr1 + videocap_write_x)<<2);
           vc_beat <= 0;
           m01_axi_wlast <= 0;
 

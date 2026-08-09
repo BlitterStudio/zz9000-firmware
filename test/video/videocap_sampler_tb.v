@@ -47,6 +47,20 @@ wire cap_ntsc;
 wire cap_x_done;
 wire cap_shres;
 wire legacy_cap_shres;
+reg layout_full_width = 0;
+reg [11:0] layout_source_x = 0;
+wire [11:0] layout_dest_x;
+reg [1279:0] layout_seen;
+integer layout_k;
+
+videocap_writeback_layout #(
+    .LINE_WIDTH(1280),
+    .ROTATE_PIXELS(64)
+) writeback_layout (
+    .full_width(layout_full_width),
+    .source_x(layout_source_x),
+    .dest_x(layout_dest_x)
+);
 
 videocap_sampler #(
     .BUF_DEPTH(2048),
@@ -238,6 +252,38 @@ initial begin
     if ($value$plusargs("LINECLKS=%d", LINECLKS)) ;
 
     repeat (10) @(posedge cap_clk);
+
+    /* Full-width placement must rotate within one 1280-pixel destination
+     * row. The previous firmware-level look-behind crossed DDR rows and
+     * therefore prepended pixels from a different captured scanline. */
+    layout_full_width = 0;
+    layout_source_x = 12'd1216;
+    #1 check_eq("filtered_writeback_identity", layout_dest_x, 12'd1216);
+
+    layout_full_width = 1;
+    layout_source_x = 12'd0;
+    #1 check_eq("rotation_head", layout_dest_x, 12'd64);
+    layout_source_x = 12'd1215;
+    #1 check_eq("rotation_before_wrap", layout_dest_x, 12'd1279);
+    layout_source_x = 12'd1216;
+    #1 check_eq("rotation_wrap", layout_dest_x, 12'd0);
+    layout_source_x = 12'd1279;
+    #1 check_eq("rotation_tail", layout_dest_x, 12'd63);
+
+    layout_seen = 1280'b0;
+    for (layout_k = 0; layout_k < 1280; layout_k = layout_k + 1) begin
+        layout_source_x = layout_k[11:0];
+        #1;
+        checks = checks + 1;
+        if (layout_dest_x >= 1280 || layout_seen[layout_dest_x]) begin
+            errors = errors + 1;
+            $display("MISMATCH rotation_bijection source=%0d dest=%0d",
+                     layout_k, layout_dest_x);
+        end else begin
+            layout_seen[layout_dest_x] = 1'b1;
+        end
+    end
+
     drive_field(0, 0);
     drive_field(0, 1);
 

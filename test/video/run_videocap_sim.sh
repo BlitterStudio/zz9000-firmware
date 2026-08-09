@@ -21,15 +21,16 @@ GLBL="$VIVADO_BIN/../data/verilog/src/glbl.v"
 mkdir -p "$SIMDIR"
 cd "$SIMDIR"
 cp "$ROOT/videocap_sampler.v" .
+cp "$ROOT/videocap_writeback_layout.v" .
 
 if [ "$ON_WINDOWS" = 1 ]; then
     TB="$(cygpath -w "$HERE/videocap_sampler_tb.v")"
-    cmd //c "$(cygpath -w "$VIVADO_BIN/xvlog.bat") videocap_sampler.v $TB $(cygpath -w "$GLBL")" > xvlog.log 2>&1 \
+    cmd //c "$(cygpath -w "$VIVADO_BIN/xvlog.bat") videocap_sampler.v videocap_writeback_layout.v $TB $(cygpath -w "$GLBL")" > xvlog.log 2>&1 \
         || { cat xvlog.log; exit 1; }
     cmd //c "$(cygpath -w "$VIVADO_BIN/xelab.bat") -L xpm work.videocap_sampler_tb work.glbl -s tb" > xelab.log 2>&1 \
         || { cat xelab.log; exit 1; }
 else
-    "$VIVADO_BIN/xvlog" videocap_sampler.v "$HERE/videocap_sampler_tb.v" "$GLBL" > xvlog.log 2>&1 \
+    "$VIVADO_BIN/xvlog" videocap_sampler.v videocap_writeback_layout.v "$HERE/videocap_sampler_tb.v" "$GLBL" > xvlog.log 2>&1 \
         || { cat xvlog.log; exit 1; }
     "$VIVADO_BIN/xelab" -L xpm work.videocap_sampler_tb work.glbl -s tb > xelab.log 2>&1 \
         || { cat xelab.log; exit 1; }

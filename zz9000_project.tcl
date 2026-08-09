@@ -171,6 +171,7 @@ if { $no_autoboot } {
 set files [list \
  [file normalize "${origin_dir}/mntzorro.v" ]\
  [file normalize "${origin_dir}/videocap_sampler.v" ]\
+ [file normalize "${origin_dir}/videocap_writeback_layout.v" ]\
  [file normalize "${origin_dir}/video_formatter.v" ]\
  [file normalize "${origin_dir}/video_overlay_pixel.v" ]\
  [file normalize "${origin_dir}/video_overlay_linebuffer.v" ]\
@@ -245,6 +246,9 @@ if { [get_files mntzorro.v] == "" } {
 }
 if { [get_files videocap_sampler.v] == "" } {
   import_files -quiet -fileset sources_1 videocap_sampler.v
+}
+if { [get_files videocap_writeback_layout.v] == "" } {
+  import_files -quiet -fileset sources_1 videocap_writeback_layout.v
 }
 if { [get_files video_formatter.v] == "" } {
   import_files -quiet -fileset sources_1 video_formatter.v
