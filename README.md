@@ -115,8 +115,8 @@ These are hardware/autoconfig bitstream variants. Current releases use
 one firmware flavor across all of them; settings that used to require a
 separate firmware flavor or ENV: variables now live in the optional
 [`ZZ9000.CFG`](ZZ9000.CFG) config file (see below). Older releases also
-shipped an `ns-pal` firmware flavor; its behavior is now
-`videocap_mode = pal` plus `nonstandard_vsync = pal` in `ZZ9000.CFG`.
+shipped an `ns-pal` firmware flavor; its behavior is now the
+`filtered_pal_exact` native-video profile in `ZZ9000.CFG`.
 
 ## Configuration File (ZZ9000.CFG)
 
@@ -130,12 +130,10 @@ sample; the copy at the repo root documents every option:
 
 | Key | Values | Replaces |
 |---|---|---|
-| `videocap_mode` | `800x600` (default), `pal`; filtered-output mode only | `ENV:ZZ9000-VCAP-800x600` |
+| `videocap_profile` | `full_60` (default), `full_exact`, `filtered_60`, `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact` | atomic native-video output policy |
 | `videocap_sample` | `average` (default), `even`, `odd` | native-video capture sample selection |
-| `videocap_shres` | `full` (default, 1280x1024 1:1), `filter` | native-video capture/output width |
 | `videocap_crop_h` | `0`–`4095` (default `188`) | horizontal capture origin in 28 MHz samples |
 | `videocap_crop_v` | `0`–`4095` (default `26`) | vertical capture origin in lines |
-| `nonstandard_vsync` | `off` (default), `pal`, `ntsc` | `ENV:ZZ9000-NS-VSYNC[-NTSC]`, `ns-pal` flavor |
 | `scanline_mode` | `0` (off, default) – `3` | ZZTop/ZZScanlines (still work at runtime) |
 | `scanline_parity` | `0` (default), `1` | ZZTop/ZZScanlines |
 | `int2` | `off` (default), `on` | `ENV:ZZ9K_INT2` (drivers query it) |
@@ -155,12 +153,18 @@ remove those when migrating.
 ZZTop can edit this file in place from AmigaOS (Project menu →
 Settings), writing it back over the FWUP path with a `ZZ9000.bak`
 backup. It rewrites the whole file from the keys it knows, so use
-**ZZTop 2.6 or newer**: 2.5 predates the full-width and crop controls,
+**ZZTop 2.7 or newer**. Version 2.6 exposes the older independent full-width and
+refresh controls, 2.5 predates the full-width and crop controls,
 2.4 predates `videocap_sample`, and 2.3 also predates
 `offscreen_bitmaps` and `video_overlay`; those older versions would drop
 the newer lines. The drivers repo's
 `tools/check-cfg-keys.sh` fails if the parser, this table, the sample
 `ZZ9000.CFG` and ZZTop's editor ever disagree.
+
+The older `videocap_mode`, `videocap_shres`, and `nonstandard_vsync` keys
+remain accepted for existing cards and hand-written files, but new files should
+use one `videocap_profile` so that width, resolution, and refresh cannot
+contradict one another.
 
 `yuv_rect` was accepted by firmware 2.4–2.7 but never consumed by
 anything, and was removed in 2.8. Its key slot stays reserved so the

@@ -82,9 +82,11 @@ void Xil_AssertNonVoid() {}
  * its existing minimums (0x0204, 0x0206, 0x0207) all still pass, and the
  * overlay scaling is programmed card-side without driver involvement.
  * New SDK capability is discovered through service flags and status
- * pages, which self-gate, rather than through this number. */
+ * pages, which self-gate, rather than through this number.
+ * 2.9: atomic videocap_profile configuration and reliable display
+ * transmitter retraining during output-mode changes. */
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 8
+#define REVISION_MINOR 9
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0

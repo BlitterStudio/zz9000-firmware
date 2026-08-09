@@ -99,6 +99,44 @@ static int hdf_name_valid(const char *s) {
 }
 
 static int apply_key(const char *key, const char *value) {
+	/* Preferred user-facing native-video setting.  It replaces three
+	 * independently editable legacy keys with one coherent profile, while
+	 * still filling the same internal fields so older driver/runtime paths
+	 * keep their established behaviour.  Legacy keys remain accepted below;
+	 * normal last-value-wins parsing therefore also works for mixed files. */
+	if (token_eq(key, "videocap_profile")) {
+		if (token_eq(value, "full_60")) {
+			cfg.videocap_mode = ZZVMODE_800x600;
+			cfg.videocap_shres = 1;
+			cfg.ns_vsync = 0;
+		} else if (token_eq(value, "full_exact")) {
+			cfg.videocap_mode = ZZVMODE_800x600;
+			cfg.videocap_shres = 1;
+			cfg.ns_vsync = 1;
+		} else if (token_eq(value, "filtered_60")) {
+			cfg.videocap_mode = ZZVMODE_800x600;
+			cfg.videocap_shres = 0;
+			cfg.ns_vsync = 0;
+		} else if (token_eq(value, "filtered_pal")) {
+			cfg.videocap_mode = ZZVMODE_720x576;
+			cfg.videocap_shres = 0;
+			cfg.ns_vsync = 0;
+		} else if (token_eq(value, "filtered_pal_exact")) {
+			cfg.videocap_mode = ZZVMODE_720x576;
+			cfg.videocap_shres = 0;
+			cfg.ns_vsync = 1;
+		} else if (token_eq(value, "filtered_ntsc_exact")) {
+			cfg.videocap_mode = ZZVMODE_720x576;
+			cfg.videocap_shres = 0;
+			cfg.ns_vsync = 2;
+		} else {
+			return -1;
+		}
+		cfg.videocap_mode_present = 1;
+		cfg.videocap_shres_present = 1;
+		cfg.ns_vsync_present = 1;
+		return 0;
+	}
 	if (token_eq(key, "videocap_mode")) {
 		if (token_eq(value, "800x600")) {
 			cfg.videocap_mode = ZZVMODE_800x600;

@@ -17,6 +17,8 @@
 #define OVERLAY_LINEBUFFER_PATH "../../video_overlay_linebuffer.v"
 #define PROJECT_TCL_PATH "../../zz9000_project.tcl"
 #define MNTZORRO_PATH "../../mntzorro.v"
+#define VIDEO_C_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/video.c"
+#define HDMI_C_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/hdmi.c"
 
 static char *read_file(const char *path)
 {
@@ -321,12 +323,46 @@ static int test_videocap_writeback_uses_axi_bursts(const char *text)
 	return ok ? 0 : 1;
 }
 
+static int test_mode_switch_retrains_display(const char *video,
+	const char *hdmi)
+{
+	int ok = 1;
+	const char *prepare;
+	const char *clock;
+	const char *enable;
+
+	ok &= require_source_contains("video.c", video,
+	    "hdmi_ctrl_prepare_mode(vmode);");
+	ok &= require_source_contains("video.c", video,
+	    "CLK_WIZ_STATUS_LOCKED");
+	ok &= require_source_contains("video.c", video,
+	    "CLK_WIZ_RECONFIG_LOAD");
+	ok &= require_source_contains("video.c", video,
+	    "hdmi_ctrl_enable_output();");
+	ok &= require_source_contains("hdmi.c", hdmi,
+	    "SII9022_SYS_CTRL_PWR_DWN");
+	ok &= require_source_contains("hdmi.c", hdmi,
+	    "hdmi_set_video_mode(mode->hmax, mode->vmax, mode->phz, mode->vhz");
+
+	prepare = strstr(video, "hdmi_ctrl_prepare_mode(vmode);");
+	clock = prepare ? strstr(prepare, "pixelclock_init_2(vmode);") : NULL;
+	enable = clock ? strstr(clock, "hdmi_ctrl_enable_output();") : NULL;
+	if (!prepare || !clock || !enable) {
+		printf("video.c: display transition is not prepare -> clock -> enable\n");
+		ok = 0;
+	}
+
+	return ok ? 0 : 1;
+}
+
 int main(void)
 {
 	char *text = read_file(VIDEO_FORMATTER_PATH);
 	char *linebuffer;
 	char *project;
 	char *mntzorro;
+	char *video;
+	char *hdmi;
 	int result;
 
 	if (!text)
@@ -365,6 +401,18 @@ int main(void)
 	if (!result)
 		result = test_videocap_writeback_uses_axi_bursts(mntzorro);
 	free(mntzorro);
+
+	video = read_file(VIDEO_C_PATH);
+	hdmi = read_file(HDMI_C_PATH);
+	if (!video || !hdmi) {
+		free(video);
+		free(hdmi);
+		return 1;
+	}
+	if (!result)
+		result = test_mode_switch_retrains_display(video, hdmi);
+	free(video);
+	free(hdmi);
 
 	return result;
 }

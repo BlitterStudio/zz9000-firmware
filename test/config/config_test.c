@@ -144,6 +144,46 @@ static void test_videocap_aliases(void) {
     CHECK(zz_config_get()->ns_vsync == 0);
 }
 
+static void check_videocap_profile(const char *name, uint16_t mode,
+        uint16_t full, uint16_t vsync) {
+    char line[96];
+    const struct zz_config *c;
+
+    zz_config_reset();
+    snprintf(line, sizeof(line), "videocap_profile = %s\n", name);
+    CHECK(parse_str(line) == 1);
+    c = zz_config_get();
+    CHECK(c->videocap_mode_present && c->videocap_mode == mode);
+    CHECK(c->videocap_shres_present && c->videocap_shres == full);
+    CHECK(c->ns_vsync_present && c->ns_vsync == vsync);
+}
+
+static void test_videocap_profiles(void) {
+    check_videocap_profile("full_60", ZZVMODE_800x600, 1, 0);
+    check_videocap_profile("full_exact", ZZVMODE_800x600, 1, 1);
+    check_videocap_profile("filtered_60", ZZVMODE_800x600, 0, 0);
+    check_videocap_profile("filtered_pal", ZZVMODE_720x576, 0, 0);
+    check_videocap_profile("filtered_pal_exact", ZZVMODE_720x576, 0, 1);
+    check_videocap_profile("filtered_ntsc_exact", ZZVMODE_720x576, 0, 2);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = unclear\n") == 0);
+    CHECK(!zz_config_get()->videocap_mode_present);
+    CHECK(!zz_config_get()->videocap_shres_present);
+    CHECK(!zz_config_get()->ns_vsync_present);
+
+    /* The atomic profile can coexist with old hand-edited files and obeys
+     * the parser's documented last-value-wins rule. */
+    zz_config_reset();
+    CHECK(parse_str("videocap_mode = pal\n"
+                    "videocap_shres = filter\n"
+                    "nonstandard_vsync = pal\n"
+                    "videocap_profile = full_60\n") == 4);
+    CHECK(zz_config_get()->videocap_mode == ZZVMODE_800x600);
+    CHECK(zz_config_get()->videocap_shres == 1);
+    CHECK(zz_config_get()->ns_vsync == 0);
+}
+
 static void test_videocap_sample(void) {
     zz_config_reset();
     CHECK(parse_str("videocap_sample = even\n") == 1);
@@ -367,6 +407,7 @@ int main(void) {
     test_defaults_absent();
     test_case_whitespace_comments();
     test_videocap_aliases();
+    test_videocap_profiles();
     test_videocap_sample();
     test_videocap_shres_and_crop();
     test_bad_values_skipped();

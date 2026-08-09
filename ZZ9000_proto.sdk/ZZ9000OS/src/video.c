@@ -19,6 +19,15 @@
 
 #define VDMA_DEVICE_ID	XPAR_AXIVDMA_0_DEVICE_ID
 
+/* Clocking Wizard dynamic-reconfiguration registers (PG065).  LOAD stays
+ * asserted during the transaction; STATUS bit 0 is the MMCM/PLL lock. */
+#define CLK_WIZ_STATUS_OFFSET       0x004
+#define CLK_WIZ_STATUS_LOCKED       0x001
+#define CLK_WIZ_RECONFIG_OFFSET     0x25c
+#define CLK_WIZ_RECONFIG_LOAD       0x001
+#define CLK_WIZ_LOCK_POLL_US        10
+#define CLK_WIZ_LOCK_TIMEOUT_US     10000
+
 static struct ZZ_VIDEO_STATE vs;
 static XAxiVdma vdma;
 static XClk_Wiz clkwiz;
@@ -575,8 +584,30 @@ void pixelclock_init_2(struct zz_video_mode *mode) {
 	XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR, 0x208, otherdiv);
 
 	// load configuration
-	XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR, 0x25C, 0x00000003);
-	//XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR,  0x25C, 0x00000001);
+	XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR, CLK_WIZ_RECONFIG_OFFSET,
+		0x00000003);
+
+	/* Do not expose the new signal based on a guessed delay.  A short first
+	 * pause ensures the AXI reconfiguration request has reached the MMCM,
+	 * then the bounded poll accepts it only after LOAD clears and LOCKED is
+	 * asserted.  The timeout preserves the old fail-open behaviour so a
+	 * status-register fault cannot leave the monitor permanently dark. */
+	usleep(CLK_WIZ_LOCK_POLL_US);
+	for (int waited = CLK_WIZ_LOCK_POLL_US;
+			waited < CLK_WIZ_LOCK_TIMEOUT_US;
+			waited += CLK_WIZ_LOCK_POLL_US) {
+		u32 status = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR,
+			CLK_WIZ_STATUS_OFFSET);
+		if (status & CLK_WIZ_STATUS_LOCKED) {
+			u32 reconfig = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR,
+				CLK_WIZ_RECONFIG_OFFSET);
+			if (!(reconfig & CLK_WIZ_RECONFIG_LOAD))
+				return;
+		}
+		usleep(CLK_WIZ_LOCK_POLL_US);
+	}
+
+	printf("pixel clock lock timeout for %ux%u\n", mode->hres, mode->vres);
 }
 
 static void video_mode_init_internal(int mode, int scalemode, int colormode, int skip_vdma) {
@@ -621,17 +652,13 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 	video_formatter_write(video_formatter_scale_control((uint32_t)scalemode),
 	                      MNTVF_OP_SCALE);
 	video_formatter_write(colormode, MNTVF_OP_COLORMODE);
-	/* A mode change is also the fail-safe wake path: never leave a display
-	 * stranded with one or both syncs suppressed after reprogramming timing. */
-	video_set_dpms(ZZ_DPMS_ON);
+	/* Power down TMDS and publish the new timing metadata before changing
+	 * the live pixel clock.  This is a lightweight mode update, not the old
+	 * 16ms transmitter reset that broke native-video switching in the ISR. */
+	hdmi_ctrl_prepare_mode(vmode);
 
 	// Now safe to switch the pixel clock — VGA counters already have new geometry.
 	pixelclock_init_2(vmode);
-	hdmi_ctrl_init(vmode);
-
-	// Xilinx MMCM re-lock after reconfiguration: ~10-100 µs.
-	// Safe in ISR context: usleep is a busy-wait spin on the ARM Global Timer.
-	usleep(100);
 
 	if (!skip_vdma) {
 		init_vdma(vmode->hres, vmode->vres, hdiv, vdiv,
@@ -640,6 +667,11 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 
 	// Re-sync input state machine with the now-stable output timing.
 	video_formatter_valign();
+
+	/* A mode change is also the fail-safe wake path: never leave a display
+	 * stranded with one or both syncs suppressed after reprogramming timing. */
+	video_set_dpms(ZZ_DPMS_ON);
+	hdmi_ctrl_enable_output();
 
 	vs.vmode_hsize = vmode->hres;
 	vs.vmode_vsize = vmode->vres;
