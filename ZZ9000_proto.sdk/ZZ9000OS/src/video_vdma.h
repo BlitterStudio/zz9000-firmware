@@ -13,6 +13,15 @@ static inline uint32_t video_vdma_line_bytes(uint32_t hsize, uint32_t hdiv)
 	return (hsize * VIDEO_VDMA_WORD_BYTES) / hdiv;
 }
 
+static inline uint32_t video_vdma_pan_right_start(uint32_t start_offset,
+						  uint32_t pixels)
+{
+	if (pixels > (start_offset / VIDEO_VDMA_WORD_BYTES))
+		return 0U;
+
+	return start_offset - (pixels * VIDEO_VDMA_WORD_BYTES);
+}
+
 static inline uint32_t video_vdma_stride_bytes(uint32_t hsize, uint32_t hdiv,
                                                uint32_t framebuffer_pan_width,
                                                uint32_t stride_div)
