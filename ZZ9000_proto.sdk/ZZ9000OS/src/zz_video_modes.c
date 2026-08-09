@@ -26,8 +26,9 @@ struct zz_video_mode preset_video_modes[ZZVMODE_NUM] = {
 	{    720,       480,    736,    768,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      37, 3, 49 }, // 720x480 non-standard VSync (NTSC Amiga)
     {    640,       400,    656,    752,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      15, 1, 60 },
     {    1920,      800,    2024,   2224,   2528,   801,    804,    828,    0,          125,    125000000,      60,             0,      15, 1, 12 },
-	{    1280,      1024,   1328,   1440,   1691,   1025,   1028,   1066,   0,          90,     90000000,       50,             0,      54, 5, 12 }, // 1280x1024 non-standard VSync (PAL Amiga)
-	{    1280,      1024,   1328,   1440,   1690,   1025,   1028,   1066,   0,          108,    108000000,      60,             0,      54, 5, 10 }, // 1280x1024 non-standard VSync (NTSC Amiga)
-    // The final entry here is the custom video mode, accessible through registers for debug purposes.
+	{    1280,      1024,   1328,   1440,   1691,   1028,   1031,   1066,   0,          90,     90000000,       50,             0,      54, 5, 12 }, // 1280x1024 native x4, exact PAL refresh
+	{    1280,      1024,   1328,   1440,   1690,   1028,   1031,   1066,   0,          108,    108000000,      60,             0,      54, 5, 10 }, // 1280x1024 native x4, exact NTSC refresh
+    // Custom video mode, accessible through registers for debug purposes. Keep its index stable.
     {    1280,      720,    1390,   1430,   1650,   725,    730,    750,    0,          75,     75000000,       60,             0,      15, 1, 20 },
+	{    1280,      1024,   1328,   1440,   1688,   1028,   1031,   1066,   0,          108,    108000000,      60,             0,      54, 5, 10 }, // 1280x1024 native x4, standard 60Hz totals
 };

@@ -23,6 +23,7 @@ enum zz_video_modes {
 	ZZVMODE_1280x1024_NS_PAL,	// Non-standard ~49.93Hz (PAL Amiga)
 	ZZVMODE_1280x1024_NS_NTSC,	// Non-standard ~59.95Hz (NTSC Amiga)
 	ZZVMODE_CUSTOM,
+	ZZVMODE_1280x1024_NATIVE_60,	// Native x4 output with safe vertical blanking
 	ZZVMODE_NUM,
 };
 

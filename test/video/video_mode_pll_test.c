@@ -16,6 +16,7 @@
 #define PLL_PFD_MAX_MHZ 450.0
 #define PLL_VCO_MIN_MHZ 800.0
 #define PLL_VCO_MAX_MHZ 1600.0
+#define FULL_NATIVE_SCALE_FACTOR 4
 
 static int check_mode(const char *name, enum zz_video_modes index,
 			      double expected_refresh_hz)
@@ -70,6 +71,22 @@ static int check_mode(const char *name, enum zz_video_modes index,
 	return ok;
 }
 
+static int check_full_native_vsync(const char *name,
+				   enum zz_video_modes index)
+{
+	const struct zz_video_mode *mode = &preset_video_modes[index];
+	int active_video_end = mode->vres + FULL_NATIVE_SCALE_FACTOR;
+
+	if (mode->vstart < active_video_end) {
+		fprintf(stderr,
+			"%s VSync starts at line %d while x4 active video ends at line %d\n",
+			name, mode->vstart, active_video_end);
+		return 0;
+	}
+
+	return 1;
+}
+
 int main(void)
 {
 	int ok = 1;
@@ -78,6 +95,14 @@ int main(void)
 		ZZVMODE_1280x1024_NS_PAL, 49.92226);
 	ok &= check_mode("1280x1024 NTSC exact-refresh",
 		ZZVMODE_1280x1024_NS_NTSC, 59.93257);
+	ok &= check_mode("1280x1024 native standard-refresh",
+		ZZVMODE_1280x1024_NATIVE_60, 60.01995);
+	ok &= check_full_native_vsync("1280x1024 PAL exact-refresh",
+		ZZVMODE_1280x1024_NS_PAL);
+	ok &= check_full_native_vsync("1280x1024 NTSC exact-refresh",
+		ZZVMODE_1280x1024_NS_NTSC);
+	ok &= check_full_native_vsync("1280x1024 native standard-refresh",
+		ZZVMODE_1280x1024_NATIVE_60);
 
 	if (!ok)
 		return 1;

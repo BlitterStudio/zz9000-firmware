@@ -245,7 +245,7 @@ static void init_filtered_videocap_video_mode(int ntsc) {
 }
 
 static void init_videocap_video_mode(int ntsc) {
-	int mode = ZZVMODE_1280x1024;
+	int mode = ZZVMODE_1280x1024_NATIVE_60;
 
 	if (!videocap_full_width_enabled()) {
 		init_filtered_videocap_video_mode(ntsc);
