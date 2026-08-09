@@ -42,6 +42,37 @@ module videocap_sampler #(
     output wire [31:0] buf_rdata
 );
 
+/*
+ * Sampler controls are written by the 100 MHz AXI domain and remain stable
+ * until the next cold-boot configuration write.  Synchronize every bit into
+ * the capture domain before it can affect counters or BRAM enables.  The
+ * array synchronizer is appropriate for this quasi-static control bundle:
+ * changes may settle over a few capture clocks, but are held for the rest of
+ * the boot and never represent streaming data.
+ */
+wire [26:0] ctl_src = {
+    ctl_crop_v, ctl_crop_h, ctl_full_width, ctl_sample_mode
+};
+wire [26:0] ctl_cap;
+
+xpm_cdc_array_single #(
+    .DEST_SYNC_FF(3),
+    .INIT_SYNC_FF(1),
+    .SIM_ASSERT_CHK(0),
+    .SRC_INPUT_REG(0),
+    .WIDTH(27)
+) videocap_control_cdc (
+    .src_clk(axi_clk),
+    .src_in(ctl_src),
+    .dest_clk(cap_clk),
+    .dest_out(ctl_cap)
+);
+
+wire [1:0] ctl_sample_mode_cap = ctl_cap[1:0];
+wire ctl_full_width_cap = ctl_cap[2];
+wire [11:0] ctl_crop_h_cap = ctl_cap[14:3];
+wire [11:0] ctl_crop_v_cap = ctl_cap[26:15];
+
 reg [6:0] hs = 0;
 reg [6:0] vs = 0;
 reg [23:0] rgbin = 0;
@@ -80,11 +111,11 @@ wire line_sync = (hs[6:1] == 6'b000111);
  * to the historical 94-clock crop without requiring a firmware variant.
  */
 wire [11:0] crop_h_local = (FULLRATE != 0) ?
-    ctl_crop_h : {1'b0, ctl_crop_h[11:1]};
+    ctl_crop_h_cap : {1'b0, ctl_crop_h_cap[11:1]};
 
 reg half = 0;
 reg [23:0] rgb_prev = 0;
-wire filter_pairs = (FULLRATE != 0) && !ctl_full_width;
+wire filter_pairs = (FULLRATE != 0) && !ctl_full_width_cap;
 
 wire [8:0] avg_r_sum = {1'b0, rgb_prev[23:16]} +
                        {1'b0, rgbin[23:16]} + 9'd1;
@@ -95,8 +126,8 @@ wire [8:0] avg_b_sum = {1'b0, rgb_prev[7:0]} +
 wire [23:0] rgb_average = {avg_r_sum[8:1], avg_g_sum[8:1],
                            avg_b_sum[8:1]};
 wire [23:0] filtered_sample =
-    (ctl_sample_mode == 2'd1) ? rgb_prev :
-    (ctl_sample_mode == 2'd2) ? rgbin : rgb_average;
+    (ctl_sample_mode_cap == 2'd1) ? rgb_prev :
+    (ctl_sample_mode_cap == 2'd2) ? rgbin : rgb_average;
 
 reg [15:0] diff_count = 0;
 
@@ -170,7 +201,7 @@ always @(posedge cap_clk) begin
             end
         end
 
-        if (raw_y > ctl_crop_v[10:0]) begin
+        if (raw_y > ctl_crop_v_cap[10:0]) begin
             if (cap_interlace)
                 cap_y <= cap_y + 2'b10;
             else
@@ -206,7 +237,7 @@ always @(posedge cap_clk) begin
     end
 
     cap_x_done <=
-        (cap_x > (ctl_full_width ? 11'h400 : 11'h200));
+        (cap_x > (ctl_full_width_cap ? 11'h400 : 11'h200));
 end
 
 endmodule
