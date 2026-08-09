@@ -169,14 +169,32 @@ endtask
 
 task drive_field;
     input integer seed;
+    input integer check_vertical;
     integer ln;
     begin
         vsync = 0;
         drive_line(seed);
         drive_line(seed);
         vsync = 1;
-        for (ln = 0; ln < LINES; ln = ln + 1)
+        for (ln = 0; ln < LINES; ln = ln + 1) begin
             drive_line(seed + ln);
+
+            /* The two VSYNC lines have already advanced raw_y before the
+             * active raster starts.  Observe cap_y only in the second field,
+             * after each complete driven line, so the line-sync update has
+             * crossed the synchronous sampler boundary.  This two-field
+             * stimulus is classified as interlaced, so use the sampler's
+             * reported field stride rather than assuming one output row. */
+            if (check_vertical && ln == CROPV - 2)
+                check_eq("crop_v_before", cap_y, 0);
+            if (check_vertical && ln == CROPV - 1)
+                check_eq("crop_v_origin", cap_y,
+                         cap_interlace ? 2 : 1);
+        end
+
+        if (check_vertical && LINES >= CROPV)
+            check_eq("crop_v_extent", cap_y,
+                     (LINES - CROPV + 1) * (cap_interlace ? 2 : 1));
     end
 endtask
 
@@ -213,8 +231,8 @@ initial begin
     if ($value$plusargs("LINECLKS=%d", LINECLKS)) ;
 
     repeat (10) @(posedge cap_clk);
-    drive_field(0);
-    drive_field(0);
+    drive_field(0, 0);
+    drive_field(0, 1);
 
     /* The final active raster line remains in the line buffer. */
     line_seed = LINES - 1;
