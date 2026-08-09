@@ -412,8 +412,7 @@ void isr_video(void *dummy) {
 						printf("videocap: ntsc\n");
 						vs.framebuffer_pan_width = 0;
 						vs.framebuffer_pan_offset = videocap_full_width_enabled() ?
-							video_vdma_pan_right_start(default_pan_offset_ntsc,
-								VIDEO_VDMA_FULL_WIDTH_PAN_PIXELS) :
+							video_vdma_native_row_start(default_pan_offset_ntsc) :
 							default_pan_offset_ntsc;
 						init_videocap_video_mode(1);
 					} else {
@@ -422,8 +421,7 @@ void isr_video(void *dummy) {
 						vs.framebuffer_pan_width = 0;
 						if (videocap_full_width_enabled()) {
 							vs.framebuffer_pan_offset =
-								video_vdma_pan_right_start(default_pan_offset_pal,
-									VIDEO_VDMA_FULL_WIDTH_PAN_PIXELS);
+								video_vdma_native_row_start(default_pan_offset_pal);
 						} else if (vs.videocap_video_mode == ZZVMODE_800x600) {
 							vs.framebuffer_pan_offset = default_pan_offset_pal_800x600;
 						} else {

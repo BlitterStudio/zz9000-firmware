@@ -90,18 +90,12 @@ static int test_default_stride_matches_line_bytes(void)
 	return 0;
 }
 
-static int test_native_pan_moves_start_before_capture_buffer(void)
+static int test_native_scanout_starts_at_capture_row(void)
 {
-	if (!expect_u32("1280 native 64-pixel right pan",
-	                video_vdma_pan_right_start(0x00e00000U,
-	                                           VIDEO_VDMA_FULL_WIDTH_PAN_PIXELS),
-	                0x00dfff00U)) {
+	if (!expect_u32("1280 native row-aligned start",
+	                video_vdma_native_row_start(0x00e00000U),
+	                0x00e00000U)) {
 		return 1;
-	}
-	if (!expect_u32("right pan clamps before offset zero",
-	                video_vdma_pan_right_start(0x00000100U, 128U),
-	                0U)) {
-		return 2;
 	}
 
 	return 0;
@@ -123,7 +117,7 @@ int main(void)
 	if (result)
 		return 50 + result;
 
-	result = test_native_pan_moves_start_before_capture_buffer();
+	result = test_native_scanout_starts_at_capture_row();
 	if (result)
 		return 70 + result;
 

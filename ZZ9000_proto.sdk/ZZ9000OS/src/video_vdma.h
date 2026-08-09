@@ -4,10 +4,6 @@
 #include <stdint.h>
 
 #define VIDEO_VDMA_WORD_BYTES 4U
-/* Full-width native rows cross the capture-buffer boundary on the A4000.
- * Hardware calibration brackets the required scanout rotation between the
- * unshifted and 128-pixel positions; use the 64-pixel midpoint candidate. */
-#define VIDEO_VDMA_FULL_WIDTH_PAN_PIXELS 64U
 
 static inline uint32_t video_vdma_line_bytes(uint32_t hsize, uint32_t hdiv)
 {
@@ -17,13 +13,13 @@ static inline uint32_t video_vdma_line_bytes(uint32_t hsize, uint32_t hdiv)
 	return (hsize * VIDEO_VDMA_WORD_BYTES) / hdiv;
 }
 
-static inline uint32_t video_vdma_pan_right_start(uint32_t start_offset,
-						  uint32_t pixels)
+/* Keep each native scanout line within its corresponding capture row.
+ * Starting before the row prepends pixels from the preceding row and drops
+ * the same number from the current row; horizontal origin belongs in the
+ * capture sampler instead. */
+static inline uint32_t video_vdma_native_row_start(uint32_t capture_offset)
 {
-	if (pixels > (start_offset / VIDEO_VDMA_WORD_BYTES))
-		return 0U;
-
-	return start_offset - (pixels * VIDEO_VDMA_WORD_BYTES);
+	return capture_offset;
 }
 
 static inline uint32_t video_vdma_stride_bytes(uint32_t hsize, uint32_t hdiv,
