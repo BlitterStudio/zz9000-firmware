@@ -45,6 +45,8 @@ struct zz_video_mode preset_video_modes[ZZVMODE_NUM] = {
 	{    720,       480,    736,    768,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      37, 3, 49 }, // 720x480 non-standard VSync (NTSC Amiga)
     {    640,       400,    656,    752,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      15, 1, 60 },
     {    1920,      800,    2024,   2224,   2528,   801,    804,    828,    0,          125,    125000000,      60,             0,      15, 1, 12 },
+	{    1280,      1024,   1328,   1440,   1688,   1025,   1028,   1066,   0,          90,     89830508,       50,             0,      53, 1, 59 }, // 1280x1024 non-standard VSync (PAL Amiga)
+	{    1280,      1024,   1328,   1440,   1688,   1025,   1028,   1066,   0,          108,    107843137,      60,             0,      55, 1, 51 }, // 1280x1024 non-standard VSync (NTSC Amiga)
     // The final entry here is the custom video mode, accessible through registers for debug purposes.
     {    1280,      720,    1390,   1430,   1650,   725,    730,    750,    0,          75,     75000000,       60,             0,      15, 1, 20 },
 };
@@ -234,13 +236,15 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 	return XST_SUCCESS;
 }
 
-void init_ns_video_mode(uint32_t mode_num) {
-	printf("init_ns_video_mode(%lu)\n", mode_num);
-	if (mode_num == ZZVMODE_720x576) {
-		video_mode_init_internal(ZZVMODE_720x576_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT, 1);
-	} else {
-		video_mode_init_internal(ZZVMODE_720x480_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT, 1);
+static void init_videocap_video_mode(int ntsc) {
+	int mode = ZZVMODE_1280x1024;
+
+	if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
+		mode = ntsc ? ZZVMODE_1280x1024_NS_NTSC :
+		              ZZVMODE_1280x1024_NS_PAL;
 	}
+
+	video_mode_init_internal(mode, 4, MNTVA_COLOR_32BIT, 1);
 }
 
 void fb_fill(uint32_t offset) {
@@ -396,11 +400,7 @@ void isr_video(void *dummy) {
 						printf("videocap: ntsc\n");
 						vs.framebuffer_pan_width = 0;
 						vs.framebuffer_pan_offset = default_pan_offset_ntsc;
-						if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
-							init_ns_video_mode(ZZVMODE_720x480);
-						} else {
-							video_mode_init_internal(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT, 1);
-						}
+						init_videocap_video_mode(1);
 					} else {
 						// PAL
 						printf("videocap: pal\n");
@@ -410,11 +410,7 @@ void isr_video(void *dummy) {
 						} else {
 							vs.framebuffer_pan_offset = default_pan_offset_pal;
 						}
-						if (vs.videocap_video_mode == ZZVMODE_720x576 && vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
-							init_ns_video_mode(ZZVMODE_720x576);
-						} else {
-							video_mode_init_internal(vs.videocap_video_mode, 2, MNTVA_COLOR_32BIT, 1);
-						}
+						init_videocap_video_mode(0);
 					}
 					videocap_reset = 1;
 				}
@@ -422,11 +418,12 @@ void isr_video(void *dummy) {
 				if (videocap_detection_stable &&
 						(interlace != vs.interlace_old || videocap_reset)) {
 					// interlace has changed, we need to reconfigure vdma for the new screen height
-					vs.vmode_vdiv = 2;
-					if (interlace) {
-						vs.vmode_vdiv = 1;
-					}
+					uint32_t videocap_scalemode = interlace ? 2U : 4U;
+					vs.scalemode = (int)videocap_scalemode;
+					vs.vmode_vdiv = (int)video_vertical_scale_factor(videocap_scalemode);
 					videocap_area_clear();
+					video_formatter_write(video_formatter_scale_control(videocap_scalemode),
+					                      MNTVF_OP_SCALE);
 					init_vdma(vs.vmode_hsize, vs.vmode_vsize, 1, vs.vmode_vdiv,
 							(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 					video_formatter_valign();
