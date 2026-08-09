@@ -1192,7 +1192,7 @@ module MNTZorro_v0_1_S00_AXI
                .CLKOUT0_DUTY_CYCLE(0.500000),
 
 `ifdef ZORRO3
-               .CLKOUT0_PHASE(0.000000),
+               .CLKOUT0_PHASE(90.000000),
 `elsif VARIANT_SUPERDENISE
                .CLKOUT0_PHASE(0.000000),
 `elsif VARIANT_ZZ9500
