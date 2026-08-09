@@ -1293,11 +1293,11 @@ module MNTZorro_v0_1_S00_AXI
   reg [9:0]  videocap_save_line_done;
   reg [31:0] videocap_save_addr;
   reg [3:0]  videocap_save_state = 0;
+  reg [4:0]  vc_beat = 0;
 
   reg videocap_mode_sync;
 
   reg [31:0] m01_axi_awaddr_out;
-  reg [31:0] m01_axi_wdata_out;
   reg m01_axi_awvalid_out = 0;
   reg m01_axi_wvalid_out = 0;
 
@@ -1315,7 +1315,7 @@ module MNTZorro_v0_1_S00_AXI
 
   assign m01_axi_awaddr  = m01_axi_awaddr_out;
   assign m01_axi_awvalid = m01_axi_awvalid_out;
-  assign m01_axi_wdata   = m01_axi_wdata_out;
+  assign m01_axi_wdata   = vcap_rdata;
   assign m01_axi_wstrb   = 4'b1111;
   assign m01_axi_wvalid  = m01_axi_wvalid_out;
 
@@ -1340,15 +1340,13 @@ module MNTZorro_v0_1_S00_AXI
     //m00_axi_arqos <= 'h0;
     m00_axi_rready <= 1;
 
-    // FIXME this could use bursts
-    m01_axi_awlen <= 'h0; // 1 burst (1 write)
-    m01_axi_awsize <= 'h2; //'h2; // 2^2 == 4 bytes
-    m01_axi_awburst <= 'h0; // FIXED (non incrementing)
+    m01_axi_awlen <= 'hf; // 16 beats
+    m01_axi_awsize <= 'h2; // 2^2 == 4 bytes
+    m01_axi_awburst <= 'h1; // INCR
     m01_axi_awcache <= 'h0;
     m01_axi_awlock <= 'h0;
     m01_axi_awprot <= 'h0;
     //m01_axi_awqos <= 'h0;
-    m01_axi_wlast <= 'h1;
     m01_axi_bready <= 'h1;
   end
 
@@ -1405,8 +1403,11 @@ module MNTZorro_v0_1_S00_AXI
 
     if (m01_axi_aresetn == 0) begin
       videocap_save_state <= 4;
+      videocap_save_x <= 0;
+      vc_beat <= 0;
       m01_axi_wvalid_out  <= 0;
       m01_axi_awvalid_out <= 0;
+      m01_axi_wlast <= 0;
     end else begin
 
       // one-hot encoded
@@ -1414,41 +1415,49 @@ module MNTZorro_v0_1_S00_AXI
         4'h0: begin
           // initial state
           videocap_save_state <= 2;
+          vc_beat <= 0;
           m01_axi_wvalid_out  <= 0;
           m01_axi_awvalid_out <= 0;
+          m01_axi_wlast <= 0;
         end
         4'h1: begin
           if (m01_axi_wready) begin
-            m01_axi_wvalid_out  <= 0;
-            m01_axi_awvalid_out <= 0;
-            if (videocap_mode_sync)
-              videocap_save_state <= 2;
-            else
-              videocap_save_state <= 4;
+            if (vc_beat == 5'd15) begin
+              m01_axi_wvalid_out <= 0;
+              m01_axi_wlast <= 0;
+              if (videocap_mode_sync)
+                videocap_save_state <= 2;
+              else
+                videocap_save_state <= 4;
+            end else begin
+              videocap_save_x <= videocap_save_x + 1'b1;
+              vc_beat <= vc_beat + 1'b1;
+              m01_axi_wlast <= (vc_beat == 5'd14);
+            end
           end
         end
         4'h2: begin
           // we shift left by 2 bits to scale from 1 pixel to 4 bytes
           m01_axi_awaddr_out  <= videocap_address + ((vc_saveaddr1 + videocap_save_x)<<2);
-          m01_axi_wdata_out   <= vcap_rdata;
+          vc_beat <= 0;
+          m01_axi_wlast <= 0;
 
-  `ifdef VARIANT_ZZ9500
-          if (videocap_save_x >= videocap_pitch_sync-2) begin
-  `else
-          if (videocap_save_x >= videocap_pitch_sync) begin // 728 FIXME
-  `endif
+          if (videocap_save_x >= videocap_pitch_sync) begin
             videocap_save_line_done <= vc_saving_line;
             videocap_save_x <= 0;
           end else if (videocap_save_line_done != vc_saving_line) begin
-            videocap_save_x <= videocap_save_x + 1'b1;
-
             m01_axi_awvalid_out <= 1;
             videocap_save_state <= 3;
           end
         end
         4'h3: begin
           if (m01_axi_awready) begin
+            m01_axi_awvalid_out <= 0;
             m01_axi_wvalid_out  <= 1;
+            // The synchronous line-buffer read is one cycle behind its
+            // address. Advance the address here so beat zero still sees
+            // the current word and beat one is ready on the next cycle.
+            videocap_save_x <= videocap_save_x + 1'b1;
             videocap_save_state <= 1;
           end
         end
@@ -1459,6 +1468,7 @@ module MNTZorro_v0_1_S00_AXI
 
           m01_axi_wvalid_out  <= 0;
           m01_axi_awvalid_out <= 0;
+          m01_axi_wlast <= 0;
         end
       endcase
     end

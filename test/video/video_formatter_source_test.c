@@ -1,10 +1,10 @@
 /*
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  *
- * Source-level regression checks for video_formatter.v invariants that are
+ * Source-level regression checks for video-pipeline RTL invariants that are
  * difficult to exercise without a Verilog simulator in the host test setup.
- * Functional pixel-level verification lives in video_formatter_tb.v
- * (run with test/video/run_formatter_sim.sh, requires Vivado xsim).
+ * Functional pixel-level verification lives in video_formatter_tb.v and
+ * videocap_sampler_tb.v (their runners require Vivado xsim).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -16,6 +16,7 @@
 #define VIDEO_FORMATTER_PATH "../../video_formatter.v"
 #define OVERLAY_LINEBUFFER_PATH "../../video_overlay_linebuffer.v"
 #define PROJECT_TCL_PATH "../../zz9000_project.tcl"
+#define MNTZORRO_PATH "../../mntzorro.v"
 
 static char *read_file(const char *path)
 {
@@ -95,6 +96,28 @@ static int require_absent(const char *text, const char *needle,
 {
 	if (strstr(text, needle)) {
 		printf("video_formatter.v: %s: %s\n", message, needle);
+		return 0;
+	}
+
+	return 1;
+}
+
+static int require_source_contains(const char *source, const char *text,
+		const char *needle)
+{
+	if (!strstr(text, needle)) {
+		printf("%s: missing expected source pattern: %s\n", source, needle);
+		return 0;
+	}
+
+	return 1;
+}
+
+static int require_source_absent(const char *source, const char *text,
+		const char *needle, const char *message)
+{
+	if (strstr(text, needle)) {
+		printf("%s: %s: %s\n", source, message, needle);
 		return 0;
 	}
 
@@ -277,11 +300,33 @@ static int test_overlay_stream_has_no_prefetch_fifo(const char *text)
 	return ok ? 0 : 1;
 }
 
+static int test_videocap_writeback_uses_axi_bursts(const char *text)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("mntzorro.v", text, "m01_axi_awlen <= 'hf;");
+	ok &= require_source_contains("mntzorro.v", text, "m01_axi_awburst <= 'h1;");
+	ok &= require_source_contains("mntzorro.v", text, "vc_beat = 0;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "assign m01_axi_wdata   = vcap_rdata;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "m01_axi_wlast <= (vc_beat == 5'd14);");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "if (vc_beat == 5'd15) begin");
+	ok &= require_source_absent("mntzorro.v", text, "m01_axi_wdata_out",
+	    "registered write data breaks consecutive BRAM-fed beats");
+	ok &= require_source_absent("mntzorro.v", text, "m01_axi_awburst <= 'h0;",
+	    "capture writeback still uses fixed-address transactions");
+
+	return ok ? 0 : 1;
+}
+
 int main(void)
 {
 	char *text = read_file(VIDEO_FORMATTER_PATH);
 	char *linebuffer;
 	char *project;
+	char *mntzorro;
 	int result;
 
 	if (!text)
@@ -313,6 +358,13 @@ int main(void)
 	if (!result)
 		result = test_overlay_stream_has_no_prefetch_fifo(project);
 	free(project);
+
+	mntzorro = read_file(MNTZORRO_PATH);
+	if (!mntzorro)
+		return 1;
+	if (!result)
+		result = test_videocap_writeback_uses_axi_bursts(mntzorro);
+	free(mntzorro);
 
 	return result;
 }
