@@ -37,6 +37,11 @@ into a reproducible firmware, FPGA, and SDK-service platform.
 - RTG acceleration for fills, blits, pattern drawing, planar conversion,
   palette updates, and sprite/video state; 64-bit VDMA scanout and Zorro
   III high-resolution modes including 1920x1080x32.
+- Amiga native video captured at the full 28 MHz AGA dot clock and scanned
+  out at 1280x1024: one lores pixel is 4x4 output pixels, one hires pixel
+  is 2x4, and SuperHires maps 1x4 with no horizontal scaling. The
+  capture origin is calibratable through `videocap_crop_h` and
+  `videocap_crop_v` in `ZZ9000.CFG`.
 - Picasso96 DPMS power management with independent HSync/VSync gating for
   standby, suspend, and off, plus a mode-set wake fail-safe. Internal
   raster and vblank timing keep running while the monitor sleeps.
