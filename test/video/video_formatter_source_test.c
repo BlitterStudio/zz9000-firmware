@@ -127,10 +127,12 @@ static int require_source_absent(const char *source, const char *text,
 }
 
 /*
- * The line buffer must be one asymmetric-port block RAM: 64-bit writes
- * (one VDMA beat per write, tkeep as byte enables), 32-bit reads addressed
- * by counter_scanout. Splitting it into even/odd word banks caused the
- * 2026-07 vertical-column regression.
+ * The line buffer must be one asymmetric-port block RAM with two complete
+ * scanline banks: 64-bit writes (one VDMA beat per write, tkeep as byte
+ * enables), 32-bit reads addressed by source-line bank and counter_scanout.
+ * Splitting adjacent words into even/odd memories caused the 2026-07
+ * vertical-column regression; selecting whole-line banks does not change the
+ * established 64-to-32-bit unpack phase.
  */
 static int test_line_buffer_is_asymmetric_bram(const char *text)
 {
@@ -143,8 +145,16 @@ static int test_line_buffer_is_asymmetric_bram(const char *text)
 	ok &= require_contains(text, ".BYTE_WRITE_WIDTH_A(8)");
 	ok &= require_contains(text, ".READ_DATA_WIDTH_B(32)");
 	ok &= require_contains(text, ".READ_LATENCY_B(1)");
-	ok &= require_contains(text, ".addra(inptr[11:1])");
-	ok &= require_contains(text, ".addrb(counter_scanout)");
+	ok &= require_contains(text,
+	    ".addra({line_buffer_write_bank, inptr[11:1]})");
+	ok &= require_contains(text,
+	    ".addrb({scanout_source_line[0], counter_scanout})");
+	ok &= require_contains(text,
+	    ".MEMORY_SIZE(LINE_BUFFER_MEMORY_BITS)");
+	ok &= require_contains(text,
+	    "wire line_buffer_write_bank = pixin_framestart ? 1'b0 : input_line_bank;");
+	ok &= require_contains(text,
+	    "ready_for_vdma <= 1;\n            last_line_fetch <= 0;\n            next_input_state <= 4'h1;");
 	ok &= require_contains(text, ".dina(m_axis_vid_tdata)");
 	ok &= require_absent(text, "line_buffer_even",
 	                     "split even/odd line buffer banks remain");

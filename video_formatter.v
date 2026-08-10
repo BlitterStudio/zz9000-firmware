@@ -174,12 +174,16 @@ reg [15:0] screen_v_sync_start;
 reg [15:0] screen_v_sync_end;
 
 localparam MAXWIDTH=2560;              // line buffer capacity in 32-bit words
-localparam LINE_BUFFER_BEATS=1280;     // 64-bit write-side depth (MAXWIDTH/2)
+localparam LINE_BUFFER_BEATS=1280;     // 64-bit words used in each bank
+localparam LINE_BUFFER_BANK_ADDR_WIDTH=11;
+localparam LINE_BUFFER_READ_ADDR_WIDTH=13;
+localparam LINE_BUFFER_MEMORY_BITS=(1 << LINE_BUFFER_READ_ADDR_WIDTH) * 32;
 
 // (input) vdma state
 reg [3:0] next_input_state;
 reg [11:0] inptr;
 reg ready_for_vdma;
+reg input_line_bank = 0;
 
 assign m_axis_vid_tready = ready_for_vdma;
 
@@ -205,6 +209,7 @@ wire pixin_framestart = m_axis_vid_tuser[0];
 wire pixin_in_range = inptr[11:1] < LINE_BUFFER_BEATS;
 wire [7:0] line_buffer_we = (pixin_valid && ready_for_vdma && pixin_in_range)
                             ? m_axis_vid_tkeep : 8'h00;
+wire line_buffer_write_bank = pixin_framestart ? 1'b0 : input_line_bank;
 
 reg [1:0] scale_y_effective;
 
@@ -248,6 +253,7 @@ always @(posedge m_axis_vid_aclk)
       ready_for_vdma <= 0;
       next_input_state <= 0;
       inptr <= 0;
+      input_line_bank <= 0;
     end
 
     need_frame_sync_reg <= need_frame_sync;
@@ -264,6 +270,11 @@ always @(posedge m_axis_vid_aclk)
         inptr <= 0;
       else
         inptr <= inptr + pixin_word_count;
+
+      if (pixin_framestart)
+        input_line_bank <= pixin_end_of_line ? 1'b1 : 1'b0;
+      else if (pixin_end_of_line)
+        input_line_bank <= ~input_line_bank;
     end
 
     // one-hot encoded
@@ -300,9 +311,13 @@ always @(posedge m_axis_vid_aclk)
           // we are at frame start, wait for the first line of video output
           ready_for_vdma <= 0;
 
-          // line_fetch_reg2 == 0
+          // Resume line zero during vertical blank. Moving only to the wait
+          // state leaves the held SOF burst stalled until the first active
+          // output row requests another line.
           if (need_frame_sync_reg==1) begin
-            next_input_state <= 4'h2;
+            ready_for_vdma <= 1;
+            last_line_fetch <= 0;
+            next_input_state <= 4'h1;
           end
         end
     endcase
@@ -661,7 +676,17 @@ video_overlay_pixel overlay_pixel (
 wire [31:0] pixout_composited = vga_overlay_enable
   ? {8'b0, overlay_rgb} : pixout;
 
-// Line buffer: written per 64-bit VDMA beat, read per 32-bit scanout word.
+wire [11:0] scanout_source_line =
+  (counter_y >= vga_scale_y_factor)
+    ? ((counter_y - vga_scale_y_factor) >>
+       (control_interlace ? 2'd0 : vga_scale_y))
+    : 12'b0;
+
+// Ping-pong line buffer: VDMA fills the next source line in one bank while
+// scanout reads the current source line from the other. A full power-of-two
+// address space is allocated because bank selection is the address MSB.
+// The write side receives 64-bit VDMA beats and the read side emits 32-bit
+// scanout words.
 // READ_LATENCY_B(1) gives doutb the exact registered-read timing the
 // original 32-bit design's inferred line_buffer read had, so every
 // downstream pipeline phase (counter_subpixel unpacking, PIPE_DELAY)
@@ -669,7 +694,7 @@ wire [31:0] pixout_composited = vga_overlay_enable
 // register here shifts the sub-word phase and swaps/duplicates pixel
 // columns in the 8/16/15 bpp modes.
 xpm_memory_sdpram #(
-  .MEMORY_SIZE(MAXWIDTH * 32),
+  .MEMORY_SIZE(LINE_BUFFER_MEMORY_BITS),
   .MEMORY_PRIMITIVE("block"),
   .CLOCKING_MODE("independent_clock"),
   .ECC_MODE("no_ecc"),
@@ -683,10 +708,10 @@ xpm_memory_sdpram #(
   .MEMORY_OPTIMIZATION("true"),
   .WRITE_DATA_WIDTH_A(64),
   .BYTE_WRITE_WIDTH_A(8),
-  .ADDR_WIDTH_A(11),
+  .ADDR_WIDTH_A(LINE_BUFFER_BANK_ADDR_WIDTH + 1),
   .RST_MODE_A("SYNC"),
   .READ_DATA_WIDTH_B(32),
-  .ADDR_WIDTH_B(12),
+  .ADDR_WIDTH_B(LINE_BUFFER_READ_ADDR_WIDTH),
   .READ_RESET_VALUE_B("0"),
   .READ_LATENCY_B(1),
   .WRITE_MODE_B("read_first"),
@@ -696,7 +721,7 @@ xpm_memory_sdpram #(
   .clka(m_axis_vid_aclk),
   .ena(1'b1),
   .wea(line_buffer_we),
-  .addra(inptr[11:1]),
+  .addra({line_buffer_write_bank, inptr[11:1]}),
   .dina(m_axis_vid_tdata),
   .injectsbiterra(1'b0),
   .injectdbiterra(1'b0),
@@ -704,7 +729,7 @@ xpm_memory_sdpram #(
   .rstb(1'b0),
   .enb(1'b1),
   .regceb(1'b1),
-  .addrb(counter_scanout),
+  .addrb({scanout_source_line[0], counter_scanout}),
   .doutb(pixout32),
   .sbiterrb(),
   .dbiterrb()

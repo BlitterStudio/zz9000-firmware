@@ -11,7 +11,10 @@
  *   +CMODE=<0|1|2|3>   colormode (8/16/32/15 bit), default 2
  *   +SCALEX=<0|1>      horizontal doubling, default 0
  *   +SCALEY=<0|1|2>    vertical scale shift (x1/x2/x4), default 0
+ *   +INTERLACE=<0|1>   fetch a new source line on every output row
  *   +WIDTH=<pixels>    displayed width, default 64
+ *   +STREAM_GAP_EVERY=<beats>  insert a VDMA delivery pause at this cadence
+ *   +STREAM_GAP_CYCLES=<clocks> length of each delivery pause
  *
  * Compile with -d MASTER_DUT to run against the pre-branch 32-bit formatter
  * (reference model validation).
@@ -48,7 +51,10 @@ localparam OP_OVERLAY_FRAME = 27;
 integer cfg_cmode;
 integer cfg_scalex;
 integer cfg_scaley;
+integer cfg_interlace;
 integer cfg_width;
+integer cfg_stream_gap_every;
+integer cfg_stream_gap_cycles;
 integer words_per_line;
 integer beats_per_line;
 integer src_pixels;
@@ -110,7 +116,7 @@ video_formatter uut (
   .dvi_rgb(dvi_rgb),
   .control_data(control_data),
   .control_op(control_op),
-  .control_interlace(1'b0),
+  .control_interlace(cfg_interlace[0]),
   .control_vblank(control_vblank),
   .scanline_intensity(8'd0),
   .scanline_width(2'b00),
@@ -296,6 +302,8 @@ endtask
 // vdma stream model
 reg stream_en = 0;
 integer sl, sb, sw0, sw1;
+integer stream_beats_sent;
+integer stream_gap_cycle;
 reg s_last;
 reg hs_done;
 initial begin : vdma
@@ -326,13 +334,26 @@ initial begin : vdma
           if (tready === 1'b1)
             hs_done = 1;
         end
+
+        stream_beats_sent = stream_beats_sent + 1;
+        if (cfg_stream_gap_every > 0 && cfg_stream_gap_cycles > 0 &&
+            (stream_beats_sent % cfg_stream_gap_every) == 0) begin
+          tvalid <= 0;
+          for (stream_gap_cycle = 0;
+               stream_gap_cycle < cfg_stream_gap_cycles;
+               stream_gap_cycle = stream_gap_cycle + 1)
+            @(posedge aclk);
+        end
       end
     end
   end
 end
 
 // Normalize the formatter's vertical active-window offset while capturing.
-// Each source line is then repeated by the configured scale factor.
+// Progressive source lines repeat by the configured scale factor. Interlaced
+// input fetches every row and retains the formatter's established two-line
+// prefetch lead; its final active row holds the last source row while the
+// stream state machine enters frame synchronization.
 reg [31:0] cap [0:NLINES*MAXW-1];
 reg [11:0] xcnt = 0;
 integer row;
@@ -397,15 +418,22 @@ initial begin
   cfg_cmode = 2;
   cfg_scalex = 0;
   cfg_scaley = 0;
+  cfg_interlace = 0;
   cfg_width = 64;
+  cfg_stream_gap_every = 0;
+  cfg_stream_gap_cycles = 0;
+  stream_beats_sent = 0;
   if ($value$plusargs("CMODE=%d", cfg_cmode)) ;
   if ($value$plusargs("SCALEX=%d", cfg_scalex)) ;
   if ($value$plusargs("SCALEY=%d", cfg_scaley)) ;
+  if ($value$plusargs("INTERLACE=%d", cfg_interlace)) ;
   if ($value$plusargs("WIDTH=%d", cfg_width)) ;
+  if ($value$plusargs("STREAM_GAP_EVERY=%d", cfg_stream_gap_every)) ;
+  if ($value$plusargs("STREAM_GAP_CYCLES=%d", cfg_stream_gap_cycles)) ;
 
   scale_y_factor = 1 << cfg_scaley;
   src_pixels = cfg_width >> cfg_scalex;
-  src_lines = NLINES >> cfg_scaley;
+  src_lines = NLINES >> (cfg_interlace ? 0 : cfg_scaley);
   case (cfg_cmode)
     0: words_per_line = src_pixels / 4;
     2: words_per_line = src_pixels;
@@ -418,9 +446,10 @@ initial begin
 `endif
   h_max = cfg_width + 56;
 
-  $display("CONFIG cmode=%0d scalex=%0d scaley=%0d width=%0d words=%0d beats=%0d",
-           cfg_cmode, cfg_scalex, cfg_scaley, cfg_width, words_per_line,
-           beats_per_line);
+  $display("CONFIG cmode=%0d scalex=%0d scaley=%0d interlace=%0d width=%0d words=%0d beats=%0d gap=%0d/%0d",
+           cfg_cmode, cfg_scalex, cfg_scaley, cfg_interlace, cfg_width,
+           words_per_line, beats_per_line, cfg_stream_gap_every,
+           cfg_stream_gap_cycles);
 
   repeat (10) @(negedge aclk);
   aresetn <= 1;
@@ -452,7 +481,11 @@ initial begin
   for (i = 0; i < NLINES; i = i + 1)
     for (x = 1; x < cfg_width; x = x + 1) begin
       got = cap[i * MAXW + x];
-      exp = expected_pix(i >> cfg_scaley, x - 1);
+      exp = expected_pix(
+        cfg_interlace ? ((i == NLINES - 1) ? (src_lines - 1)
+                                             : ((i + scale_y_factor) % src_lines))
+                      : (i >> cfg_scaley),
+        x - 1);
       if (got !== exp) begin
         mism = mism + 1;
         if (shown < 24) begin
