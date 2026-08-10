@@ -17,8 +17,7 @@ module videocap_sampler #(
     parameter integer CSYNC_VSYNC = 0,
     parameter integer FULLRATE    = 0,
     parameter integer PROBE_LINE = 120,
-    parameter integer PROBE_SOURCE_X = 864,
-    parameter integer TAIL_PROBE_SOURCE_X = 1280
+    parameter integer PROBE_SOURCE_X = 864
 ) (
     input  wire        cap_clk,
     input  wire        vcap_vsync,
@@ -50,9 +49,10 @@ module videocap_sampler #(
     output reg  [11:0] probe_source_x = 0,
     output reg  [31:0] probe_context = 0,
     output reg  [31:0] probe_config = 0,
-    output reg         probe_tail_valid = 0,
-    input  wire [5:0]  probe_tail_raddr,
-    output wire [31:0] probe_tail_rdata,
+    output reg         probe_precrop_valid = 0,
+    output reg  [31:0] probe_precrop_context = 0,
+    input  wire [5:0]  probe_precrop_raddr,
+    output wire [31:0] probe_precrop_rdata,
 
     input  wire        axi_clk,
     input  wire        buf_rbank,
@@ -142,6 +142,7 @@ wire line_sync = (hs[6:1] == 6'b000111);
  */
 wire [11:0] crop_h_local = (FULLRATE != 0) ?
     ctl_crop_h_cap : {1'b0, ctl_crop_h_cap[11:1]};
+wire [11:0] probe_precrop_start = crop_h_local - 12'd64;
 
 reg half = 0;
 reg [23:0] rgb_prev = 0;
@@ -171,10 +172,10 @@ wire probe_arm_toggle_cap;
 reg probe_waiting = 0;
 reg probe_publish_pending = 0;
 reg [15:0] probe_seen_mask = 0;
-reg probe_tail_waiting = 0;
-reg probe_tail_publish_pending = 0;
-reg [31:0] probe_tail_mem [0:63];
-assign probe_tail_rdata = probe_tail_mem[probe_tail_raddr];
+reg probe_precrop_waiting = 0;
+reg probe_precrop_publish_pending = 0;
+reg [31:0] probe_precrop_mem [0:63];
+assign probe_precrop_rdata = probe_precrop_mem[probe_precrop_raddr];
 
 xpm_cdc_single #(
     .DEST_SYNC_FF(3),
@@ -197,9 +198,9 @@ always @(posedge cap_clk) begin
         probe_waiting <= 1;
         probe_publish_pending <= 0;
         probe_seen_mask <= 0;
-        probe_tail_valid <= 0;
-        probe_tail_waiting <= 1;
-        probe_tail_publish_pending <= 0;
+        probe_precrop_valid <= 0;
+        probe_precrop_waiting <= 1;
+        probe_precrop_publish_pending <= 0;
     end else if (probe_publish_pending) begin
         /* The complete 512-bit snapshot has been stable for one capture
          * clock before valid crosses back to AXI. */
@@ -209,12 +210,12 @@ always @(posedge cap_clk) begin
     end
 
     if (probe_arm_seen == probe_arm_toggle_cap &&
-            probe_tail_publish_pending) begin
-        /* As with the primary sampler snapshot, hold all tail words stable
+            probe_precrop_publish_pending) begin
+        /* As with the primary sampler snapshot, hold all pre-crop words stable
          * for one capture clock before valid crosses into the AXI domain. */
-        probe_tail_valid <= 1;
-        probe_tail_waiting <= 0;
-        probe_tail_publish_pending <= 0;
+        probe_precrop_valid <= 1;
+        probe_precrop_waiting <= 0;
+        probe_precrop_publish_pending <= 0;
     end
 
     vs <= {vs[5:0], vcap_vsync};
@@ -300,6 +301,25 @@ always @(posedge cap_clk) begin
         raw_y <= raw_y + 1'b1;
     end else begin
         sample_x <= sample_x + 1'b1;
+
+        /* Snapshot the 64 raw RGB samples immediately before the configured
+         * crop origin.  The preceding post-window probe found only blanking,
+         * so this isolates the other side of the selected 1280-sample window
+         * without changing the capture or display path. */
+        if (capture_banking_cap && crop_h_local >= 12'd64 &&
+                probe_precrop_waiting &&
+                !probe_precrop_publish_pending && cap_y == PROBE_LINE &&
+                {1'b0, sample_x} >= probe_precrop_start &&
+                {1'b0, sample_x} < crop_h_local) begin
+            probe_precrop_mem[{1'b0, sample_x} - probe_precrop_start]
+                <= {8'b0, rgbin};
+
+            if ({1'b0, sample_x} == probe_precrop_start)
+                probe_precrop_context <= {9'h000, capture_bank,
+                                           raw_y, sample_x};
+            if ({1'b0, sample_x} == crop_h_local - 1'b1)
+                probe_precrop_publish_pending <= 1;
+        end
 
         /* Keep the SHR pair phase tied to line sync, not to the runtime crop
          * origin.  An odd crop value must not re-pair adjacent hires pixels
@@ -401,20 +421,6 @@ always @(posedge cap_clk) begin
                     probe_publish_pending <= 1;
             end
 
-            /* The normal line-complete token publishes cap_x=0..1279, but
-             * capture continues until the next HSync. Snapshot the following
-             * 64 raw words to determine whether the missing visible
-             * continuation exists just outside the published window. */
-            if (capture_banking_cap && probe_tail_waiting &&
-                    !probe_tail_publish_pending && cap_y == PROBE_LINE &&
-                    cap_x >= TAIL_PROBE_SOURCE_X &&
-                    cap_x < TAIL_PROBE_SOURCE_X + 64) begin
-                probe_tail_mem[cap_x - TAIL_PROBE_SOURCE_X]
-                    <= capture_store_word;
-
-                if (cap_x == TAIL_PROBE_SOURCE_X + 63)
-                    probe_tail_publish_pending <= 1;
-            end
         end
 
         if (capture_banking_cap) begin

@@ -1028,17 +1028,17 @@ module MNTZorro_v0_1_S00_AXI
   localparam [15:0] VCAP_PROBE_SAMPLER_CONFIG = 16'h01b8;
   localparam [15:0] VCAP_PROBE_SAMPLER_CONFIG_LO = 16'h01ba;
   localparam [15:0] VCAP_PROBE_OWNER_BASE = 16'h01c0;
-  // Raw sampler words immediately after the published 1280-word window.
+  // Raw sampler words immediately before the configured horizontal crop.
   // Host-visible direct-register offsets are 0x12e0 and 0x1300..0x13ff.
-  localparam [15:0] VCAP_TAIL_PROBE_META = 16'h02e0;
-  localparam [15:0] VCAP_TAIL_PROBE_META_LO = 16'h02e2;
-  localparam [15:0] VCAP_TAIL_PROBE_TARGET = 16'h02e4;
-  localparam [15:0] VCAP_TAIL_PROBE_TARGET_LO = 16'h02e6;
-  localparam [15:0] VCAP_TAIL_PROBE_CONTEXT = 16'h02e8;
-  localparam [15:0] VCAP_TAIL_PROBE_CONTEXT_LO = 16'h02ea;
-  localparam [15:0] VCAP_TAIL_PROBE_CONFIG = 16'h02ec;
-  localparam [15:0] VCAP_TAIL_PROBE_CONFIG_LO = 16'h02ee;
-  localparam [15:0] VCAP_TAIL_PROBE_DATA_BASE = 16'h0300;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_META = 16'h02e0;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_META_LO = 16'h02e2;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_TARGET = 16'h02e4;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_TARGET_LO = 16'h02e6;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_CONTEXT = 16'h02e8;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_CONTEXT_LO = 16'h02ea;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_CONFIG = 16'h02ec;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_CONFIG_LO = 16'h02ee;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_DATA_BASE = 16'h0300;
   localparam [15:0] SDK_REG_OFFSET_MASK = 16'h0fff;
   localparam [31:0] SDK_CTRL_DOORBELL_CLEAR = 32'h20000000;
   localparam [31:0] SDK_CTRL_IRQ_ACK_CLEAR = 32'h10000000;
@@ -1209,14 +1209,15 @@ module MNTZorro_v0_1_S00_AXI
   wire [11:0] vcap_sampler_probe_source_x;
   wire [31:0] vcap_sampler_probe_context;
   wire [31:0] vcap_sampler_probe_config;
-  wire vcap_sampler_probe_tail_valid;
-  wire [5:0] vcap_sampler_probe_tail_raddr =
+  wire vcap_sampler_probe_precrop_valid;
+  wire [31:0] vcap_sampler_probe_precrop_context;
+  wire [5:0] vcap_sampler_probe_precrop_raddr =
       ((regread_addr & SDK_REG_OFFSET_MASK) -
-       VCAP_TAIL_PROBE_DATA_BASE) >> 2;
-  wire [31:0] vcap_sampler_probe_tail_rdata;
+       VCAP_PRE_CROP_PROBE_DATA_BASE) >> 2;
+  wire [31:0] vcap_sampler_probe_precrop_rdata;
   wire vcap_sampler_probe_arm_seen_axi;
   wire vcap_sampler_probe_valid_axi;
-  wire vcap_sampler_probe_tail_valid_axi;
+  wire vcap_sampler_probe_precrop_valid_axi;
   reg vcap_probe_arm_toggle = 0;
   wire [11:0] vcap_raddr = videocap_save_x;
   wire clkfbout_zz9000_ps_clk_wiz_1_0;
@@ -1342,8 +1343,7 @@ module MNTZorro_v0_1_S00_AXI
       .CSYNC_VSYNC(`VCAP_CSYNC_VSYNC),
       .FULLRATE(`VCAP_FULLRATE_INT),
       .PROBE_LINE(VCAP_PROBE_LINE),
-      .PROBE_SOURCE_X(VCAP_PROBE_SOURCE_X),
-      .TAIL_PROBE_SOURCE_X(12'd1280)
+      .PROBE_SOURCE_X(VCAP_PROBE_SOURCE_X)
   ) videocap_sampler_inst (
       .cap_clk(e7m_shifted),
       .vcap_vsync(VCAP_VSYNC),
@@ -1375,9 +1375,10 @@ module MNTZorro_v0_1_S00_AXI
       .probe_source_x(vcap_sampler_probe_source_x),
       .probe_context(vcap_sampler_probe_context),
       .probe_config(vcap_sampler_probe_config),
-      .probe_tail_valid(vcap_sampler_probe_tail_valid),
-      .probe_tail_raddr(vcap_sampler_probe_tail_raddr),
-      .probe_tail_rdata(vcap_sampler_probe_tail_rdata),
+      .probe_precrop_valid(vcap_sampler_probe_precrop_valid),
+      .probe_precrop_context(vcap_sampler_probe_precrop_context),
+      .probe_precrop_raddr(vcap_sampler_probe_precrop_raddr),
+      .probe_precrop_rdata(vcap_sampler_probe_precrop_rdata),
       .axi_clk(S_AXI_ACLK),
       .buf_rbank(vc_saving_bank),
       .buf_raddr(vcap_raddr),
@@ -1413,11 +1414,11 @@ module MNTZorro_v0_1_S00_AXI
       .INIT_SYNC_FF(1),
       .SIM_ASSERT_CHK(0),
       .SRC_INPUT_REG(0)
-  ) videocap_probe_tail_valid_cdc (
+  ) videocap_probe_precrop_valid_cdc (
       .src_clk(e7m_shifted),
-      .src_in(vcap_sampler_probe_tail_valid),
+      .src_in(vcap_sampler_probe_precrop_valid),
       .dest_clk(S_AXI_ACLK),
-      .dest_out(vcap_sampler_probe_tail_valid_axi)
+      .dest_out(vcap_sampler_probe_precrop_valid_axi)
   );
   reg [11:0] videocap_pitch;
   reg [11:0] videocap_pitch_sync;
@@ -2677,26 +2678,25 @@ module MNTZorro_v0_1_S00_AXI
             VCAP_PROBE_SAMPLER_CONFIG_LO: begin
               rr_data <= vcap_sampler_probe_config;
             end
-            VCAP_TAIL_PROBE_META,
-            VCAP_TAIL_PROBE_META_LO: begin
-              rr_data[31:16] <= 16'h5654;
-              rr_data[15:0] <= {vcap_sampler_probe_tail_valid_axi,
+            VCAP_PRE_CROP_PROBE_META,
+            VCAP_PRE_CROP_PROBE_META_LO: begin
+              rr_data[31:16] <= 16'h5652;
+              rr_data[15:0] <= {vcap_sampler_probe_precrop_valid_axi,
                                 vcap_sampler_probe_arm_seen_axi ==
                                     vcap_probe_arm_toggle,
                                 6'h00, 8'h01};
             end
-            VCAP_TAIL_PROBE_TARGET,
-            VCAP_TAIL_PROBE_TARGET_LO: begin
+            VCAP_PRE_CROP_PROBE_TARGET,
+            VCAP_PRE_CROP_PROBE_TARGET_LO: begin
               rr_data <= {6'h00, vcap_sampler_probe_line,
-                          4'h0, 12'd1280};
+                          5'h00, vcap_sampler_probe_precrop_context[10:0]};
             end
-            VCAP_TAIL_PROBE_CONTEXT,
-            VCAP_TAIL_PROBE_CONTEXT_LO: begin
-              rr_data <= {vcap_sampler_probe_context[31:11],
-                          vcap_sampler_probe_context[10:0] + 11'd416};
+            VCAP_PRE_CROP_PROBE_CONTEXT,
+            VCAP_PRE_CROP_PROBE_CONTEXT_LO: begin
+              rr_data <= vcap_sampler_probe_precrop_context;
             end
-            VCAP_TAIL_PROBE_CONFIG,
-            VCAP_TAIL_PROBE_CONFIG_LO: begin
+            VCAP_PRE_CROP_PROBE_CONFIG,
+            VCAP_PRE_CROP_PROBE_CONFIG_LO: begin
               rr_data <= vcap_sampler_probe_config;
             end
             default: begin
@@ -2722,10 +2722,10 @@ module MNTZorro_v0_1_S00_AXI
                     ((regread_addr & SDK_REG_OFFSET_MASK) -
                      VCAP_PROBE_OWNER_BASE) >> 2];
               end else if ((regread_addr & SDK_REG_OFFSET_MASK) >=
-                      VCAP_TAIL_PROBE_DATA_BASE &&
+                      VCAP_PRE_CROP_PROBE_DATA_BASE &&
                   (regread_addr & SDK_REG_OFFSET_MASK) <
-                      VCAP_TAIL_PROBE_DATA_BASE + 16'h0100) begin
-                rr_data <= vcap_sampler_probe_tail_rdata;
+                      VCAP_PRE_CROP_PROBE_DATA_BASE + 16'h0100) begin
+                rr_data <= vcap_sampler_probe_precrop_rdata;
               end else case (regread_addr&'hff)
                 /*'h00: begin
                  rr_data <= video_control_data;

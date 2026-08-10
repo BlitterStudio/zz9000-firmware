@@ -405,29 +405,25 @@ static int test_videocap_probe_compares_sampler_and_line_owner(
 	return ok ? 0 : 1;
 }
 
-static int test_videocap_probe_captures_post_window_tail(
+static int test_videocap_probe_captures_pre_crop_samples(
 	const char *mntzorro, const char *sampler)
 {
 	int ok = 1;
 
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "parameter integer TAIL_PROBE_SOURCE_X = 1280");
+	    "wire [11:0] probe_precrop_start = crop_h_local - 12'd64;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "reg [31:0] probe_tail_mem [0:63];");
+	    "reg [31:0] probe_precrop_mem [0:63];");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "assign probe_tail_rdata = probe_tail_mem[probe_tail_raddr];");
+	    "{1'b0, sample_x} >= probe_precrop_start");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "cap_x < TAIL_PROBE_SOURCE_X + 64");
-	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "probe_tail_mem[cap_x - TAIL_PROBE_SOURCE_X]");
+	    "{1'b0, sample_x} < crop_h_local");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "localparam [15:0] VCAP_TAIL_PROBE_DATA_BASE = 16'h0300;");
+	    "localparam [15:0] VCAP_PRE_CROP_PROBE_DATA_BASE = 16'h0300;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "localparam [15:0] VCAP_TAIL_PROBE_META = 16'h02e0;");
+	    "localparam [15:0] VCAP_PRE_CROP_PROBE_META = 16'h02e0;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    ".TAIL_PROBE_SOURCE_X(12'd1280)");
-	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "VCAP_TAIL_PROBE_DATA_BASE + 16'h0100");
+	    "VCAP_PRE_CROP_PROBE_DATA_BASE + 16'h0100");
 
 	return ok ? 0 : 1;
 }
@@ -560,7 +556,7 @@ int main(void)
 		result = test_videocap_probe_compares_sampler_and_line_owner(
 			mntzorro, sampler);
 	if (!result)
-		result = test_videocap_probe_captures_post_window_tail(
+		result = test_videocap_probe_captures_pre_crop_samples(
 			mntzorro, sampler);
 	free(sampler);
 	free(mntzorro);
