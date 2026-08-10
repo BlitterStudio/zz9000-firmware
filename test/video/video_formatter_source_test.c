@@ -334,6 +334,26 @@ static int test_videocap_writeback_uses_axi_bursts(const char *text)
 	return ok ? 0 : 1;
 }
 
+static int test_videocap_write_probe_samples_accepted_axi_data(const char *text)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("mntzorro.v", text,
+	    "localparam [15:0] VCAP_PROBE_DATA_BASE = 16'h0120;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "vc_saving_line == 10'd120 && videocap_write_x == 12'd1248");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "m01_axi_wvalid_out && m01_axi_wready && vcap_probe_burst_active");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "vcap_probe_data[vc_beat[3:0]] <= m01_axi_wdata;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "VCAP_PROBE_CONTROL,");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "vcap_probe_arm_toggle <= ~vcap_probe_arm_toggle;");
+
+	return ok ? 0 : 1;
+}
+
 static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	const char *sampler)
 {
@@ -448,6 +468,8 @@ int main(void)
 		return 1;
 	if (!result)
 		result = test_videocap_writeback_uses_axi_bursts(mntzorro);
+	if (!result)
+		result = test_videocap_write_probe_samples_accepted_axi_data(mntzorro);
 	sampler = read_file(VIDEOCAP_SAMPLER_PATH);
 	if (!sampler) {
 		free(mntzorro);

@@ -1008,6 +1008,18 @@ module MNTZorro_v0_1_S00_AXI
   localparam [15:0] SDK_REG_DIAG_DATA_LO = 16'h0116;
   localparam [15:0] SDK_REG_DIAG_Z3ADDR = 16'h0118;
   localparam [15:0] SDK_REG_DIAG_Z3ADDR_LO = 16'h011a;
+  // Diagnostic snapshot of one accepted 16-beat native-capture write burst.
+  // The host-visible offsets are 0x1120..0x116e because the direct-register
+  // PIC starts 0x1000 bytes into the board window.
+  localparam [15:0] VCAP_PROBE_DATA_BASE = 16'h0120;
+  localparam [15:0] VCAP_PROBE_META = 16'h0160;
+  localparam [15:0] VCAP_PROBE_META_LO = 16'h0162;
+  localparam [15:0] VCAP_PROBE_TARGET = 16'h0164;
+  localparam [15:0] VCAP_PROBE_TARGET_LO = 16'h0166;
+  localparam [15:0] VCAP_PROBE_AWADDR = 16'h0168;
+  localparam [15:0] VCAP_PROBE_AWADDR_LO = 16'h016a;
+  localparam [15:0] VCAP_PROBE_CONTROL = 16'h016c;
+  localparam [15:0] VCAP_PROBE_CONTROL_LO = 16'h016e;
   localparam [15:0] SDK_REG_OFFSET_MASK = 16'h0fff;
   localparam [31:0] SDK_CTRL_DOORBELL_CLEAR = 32'h20000000;
   localparam [31:0] SDK_CTRL_IRQ_ACK_CLEAR = 32'h10000000;
@@ -1341,6 +1353,15 @@ module MNTZorro_v0_1_S00_AXI
   reg m01_axi_awvalid_out = 0;
   reg m01_axi_wvalid_out = 0;
 
+  reg [31:0] vcap_probe_data [0:15];
+  reg [31:0] vcap_probe_awaddr = 0;
+  reg [9:0] vcap_probe_line = 0;
+  reg [11:0] vcap_probe_dest_x = 0;
+  reg vcap_probe_arm_toggle = 0;
+  reg vcap_probe_arm_seen = 0;
+  reg vcap_probe_burst_active = 0;
+  reg vcap_probe_valid = 0;
+
   reg [31:0] m00_axi_awaddr_z3;
   reg [31:0] m00_axi_wdata_z3;
   reg m00_axi_awvalid_z3 = 0;
@@ -1525,6 +1546,42 @@ module MNTZorro_v0_1_S00_AXI
     end
   end
 
+  // Snapshot the exact WDATA values accepted for a burst in the middle of
+  // the observed 16x65 seam. This is downstream of the sampler line buffer
+  // and upstream of DDR, so comparing it with DDR row 120 cleanly separates
+  // capture/handoff corruption from AXI/DDR writeback corruption.
+  always @(posedge S_AXI_ACLK) begin
+    if (!m01_axi_aresetn) begin
+      vcap_probe_arm_seen <= vcap_probe_arm_toggle;
+      vcap_probe_burst_active <= 0;
+      vcap_probe_valid <= 0;
+    end else if (vcap_probe_arm_seen != vcap_probe_arm_toggle) begin
+      vcap_probe_arm_seen <= vcap_probe_arm_toggle;
+      vcap_probe_burst_active <= 0;
+      vcap_probe_valid <= 0;
+    end else begin
+      if (videocap_save_state == 4'h3 && m01_axi_awready) begin
+        vcap_probe_burst_active <= !vcap_probe_valid &&
+            videocap_writeback_full_width &&
+            vc_saving_line == 10'd120 && videocap_write_x == 12'd1248;
+        if (!vcap_probe_valid && videocap_writeback_full_width &&
+            vc_saving_line == 10'd120 && videocap_write_x == 12'd1248) begin
+          vcap_probe_line <= vc_saving_line;
+          vcap_probe_dest_x <= videocap_write_x;
+          vcap_probe_awaddr <= m01_axi_awaddr_out;
+        end
+      end
+
+      if (m01_axi_wvalid_out && m01_axi_wready && vcap_probe_burst_active) begin
+        vcap_probe_data[vc_beat[3:0]] <= m01_axi_wdata;
+        if (vc_beat == 5'd15) begin
+          vcap_probe_burst_active <= 0;
+          vcap_probe_valid <= 1;
+        end
+      end
+    end
+  end
+
   // -- main zorro fsm ---------------------------------------------
   always @(posedge S_AXI_ACLK) begin
     videocap_mode <= videocap_mode_in;
@@ -1566,6 +1623,7 @@ module MNTZorro_v0_1_S00_AXI
           sdk_last_z3addr <= 0;
           sdk_doorbell_early_count <= 0;
           sdk_irq_ack_early_count <= 0;
+          vcap_probe_arm_toggle <= 0;
           z3_ram_low <= 0;
           z3_ram_high <= 0;
           z3_fast_low <= 0;
@@ -2445,8 +2503,35 @@ module MNTZorro_v0_1_S00_AXI
             SDK_REG_DIAG_Z3ADDR_LO: begin
               rr_data <= sdk_last_z3addr;
             end
+            VCAP_PROBE_META,
+            VCAP_PROBE_META_LO: begin
+              rr_data[31:16] <= 16'h5650;
+              rr_data[15:0] <= {vcap_probe_valid,
+                                vcap_probe_burst_active, 6'h00, 8'h01};
+            end
+            VCAP_PROBE_TARGET,
+            VCAP_PROBE_TARGET_LO: begin
+              rr_data <= {6'h00, vcap_probe_line,
+                          4'h0, vcap_probe_dest_x};
+            end
+            VCAP_PROBE_AWADDR,
+            VCAP_PROBE_AWADDR_LO: begin
+              rr_data <= vcap_probe_awaddr;
+            end
+            VCAP_PROBE_CONTROL,
+            VCAP_PROBE_CONTROL_LO: begin
+              rr_data <= {30'h00000000, vcap_probe_arm_seen,
+                          vcap_probe_arm_toggle};
+            end
             default: begin
-              case (regread_addr&'hff)
+              if ((regread_addr & SDK_REG_OFFSET_MASK) >=
+                      VCAP_PROBE_DATA_BASE &&
+                  (regread_addr & SDK_REG_OFFSET_MASK) <
+                      VCAP_PROBE_DATA_BASE + 16'h0040) begin
+                rr_data <= vcap_probe_data[
+                    ((regread_addr & SDK_REG_OFFSET_MASK) -
+                     VCAP_PROBE_DATA_BASE) >> 2];
+              end else case (regread_addr&'hff)
                 /*'h00: begin
                  rr_data <= video_control_data;
                 end
@@ -2481,6 +2566,9 @@ module MNTZorro_v0_1_S00_AXI
             SDK_REG_DOORBELL_Z3_LO: sdk_doorbell_pending <= 1;
             SDK_REG_IRQ_ACK,
             SDK_REG_IRQ_ACK_Z3_LO: sdk_irq_ack_pending <= 1;
+            VCAP_PROBE_CONTROL,
+            VCAP_PROBE_CONTROL_LO:
+              vcap_probe_arm_toggle <= ~vcap_probe_arm_toggle;
             default: begin
               case (regwrite_addr&'hff)
                 'h00: video_control_data_zorro[31:16] <= regdata_in[15:0];
