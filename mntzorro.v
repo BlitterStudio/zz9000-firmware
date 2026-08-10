@@ -1421,7 +1421,7 @@ module MNTZorro_v0_1_S00_AXI
   reg vcap_probe_burst_active = 0;
   reg vcap_probe_valid = 0;
   wire [10:0] vcap_wdata_source_x =
-      videocap_save_x[10:0] - 1'b1;
+      videocap_save_x[10:0];
 
   function [31:0] vcap_sampler_probe_word;
     input [3:0] index;
@@ -1579,17 +1579,21 @@ module MNTZorro_v0_1_S00_AXI
         end
         4'h1: begin
           if (m01_axi_wready) begin
+            m01_axi_wvalid_out <= 0;
+            videocap_save_x <= videocap_save_x + 1'b1;
             if (vc_beat == 5'd15) begin
-              m01_axi_wvalid_out <= 0;
               m01_axi_wlast <= 0;
               if (videocap_mode_sync)
                 videocap_save_state <= 2;
               else
                 videocap_save_state <= 4;
             end else begin
-              videocap_save_x <= videocap_save_x + 1'b1;
               vc_beat <= vc_beat + 1'b1;
               m01_axi_wlast <= (vc_beat == 5'd14);
+              // Hold each BRAM address until its W beat is accepted.
+              // One idle cycle lets the synchronous read output advance
+              // before WVALID exposes the next word to AXI.
+              videocap_save_state <= 5;
             end
           end
         end
@@ -1610,12 +1614,8 @@ module MNTZorro_v0_1_S00_AXI
         4'h3: begin
           if (m01_axi_awready) begin
             m01_axi_awvalid_out <= 0;
-            m01_axi_wvalid_out  <= 1;
-            // The synchronous line-buffer read is one cycle behind its
-            // address. Advance the address here so beat zero still sees
-            // the current word and beat one is ready on the next cycle.
-            videocap_save_x <= videocap_save_x + 1'b1;
-            videocap_save_state <= 1;
+            m01_axi_wvalid_out  <= 0;
+            videocap_save_state <= 5;
           end
         end
         4'h4: begin
@@ -1626,6 +1626,15 @@ module MNTZorro_v0_1_S00_AXI
           m01_axi_wvalid_out  <= 0;
           m01_axi_awvalid_out <= 0;
           m01_axi_wlast <= 0;
+        end
+        4'h5: begin
+          // The BRAM address has remained stable for a complete AXI clock.
+          // WDATA now stays fixed even if WREADY stalls this beat.
+          // Without interconnect stalls, the resulting one-cycle bubble per
+          // beat writes a 1280-word line in about 27 us at 100 MHz, leaving
+          // ample margin inside a PAL/NTSC line.
+          m01_axi_wvalid_out <= 1;
+          videocap_save_state <= 1;
         end
       endcase
     end

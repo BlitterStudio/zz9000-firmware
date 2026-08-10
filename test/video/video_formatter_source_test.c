@@ -326,6 +326,20 @@ static int test_videocap_writeback_uses_axi_bursts(const char *text)
 	    "m01_axi_wlast <= (vc_beat == 5'd14);");
 	ok &= require_source_contains("mntzorro.v", text,
 	    "if (vc_beat == 5'd15) begin");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "// Hold each BRAM address until its W beat is accepted.");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "videocap_save_state <= 5;");
+	ok &= require_source_contains("mntzorro.v", text, "4'h5: begin");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "wire [10:0] vcap_wdata_source_x =\n"
+	    "      videocap_save_x[10:0];");
+	ok &= require_source_absent("mntzorro.v", text,
+	    "videocap_save_x[10:0] - 1'b1",
+	    "accepted-beat owner still assumes speculative BRAM prefetch");
+	ok &= require_source_absent("mntzorro.v", text,
+	    "Advance the address here so beat zero still sees",
+	    "burst still advances the BRAM address before WREADY");
 	ok &= require_source_absent("mntzorro.v", text, "m01_axi_wdata_out",
 	    "registered write data breaks consecutive BRAM-fed beats");
 	ok &= require_source_absent("mntzorro.v", text, "m01_axi_awburst <= 'h0;",
