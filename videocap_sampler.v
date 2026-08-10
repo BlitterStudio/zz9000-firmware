@@ -15,7 +15,9 @@ module videocap_sampler #(
     parameter integer BUF_DEPTH   = 2048,
     parameter integer RGB_MODE    = 0,
     parameter integer CSYNC_VSYNC = 0,
-    parameter integer FULLRATE    = 0
+    parameter integer FULLRATE    = 0,
+    parameter integer PROBE_LINE = 120,
+    parameter integer PROBE_SOURCE_X = 1184
 ) (
     input  wire        cap_clk,
     input  wire        vcap_vsync,
@@ -38,6 +40,15 @@ module videocap_sampler #(
     output reg         cap_shres,
     output reg         cap_line_toggle = 0,
     output wire        cap_write_bank,
+
+    input  wire        probe_arm_toggle,
+    output reg         probe_arm_seen = 0,
+    output reg         probe_valid = 0,
+    output reg  [511:0] probe_data = 0,
+    output reg  [9:0]  probe_line = 0,
+    output reg  [11:0] probe_source_x = 0,
+    output reg  [31:0] probe_context = 0,
+    output reg  [31:0] probe_config = 0,
 
     input  wire        axi_clk,
     input  wire        buf_rbank,
@@ -149,10 +160,43 @@ wire [23:0] rgb_average = {avg_r_sum[8:1], avg_g_sum[8:1],
 wire [23:0] filtered_sample =
     (ctl_sample_mode_cap == 2'd1) ? rgb_prev :
     (ctl_sample_mode_cap == 2'd2) ? rgbin : rgb_average;
+wire [31:0] capture_store_word = {8'b0,
+    filter_pairs ? filtered_sample : rgbin};
+
+wire probe_arm_toggle_cap;
+reg probe_waiting = 0;
+reg probe_publish_pending = 0;
+reg [15:0] probe_seen_mask = 0;
+
+xpm_cdc_single #(
+    .DEST_SYNC_FF(3),
+    .INIT_SYNC_FF(1),
+    .SIM_ASSERT_CHK(0),
+    .SRC_INPUT_REG(0)
+) videocap_probe_arm_cdc (
+    .src_clk(axi_clk),
+    .src_in(probe_arm_toggle),
+    .dest_clk(cap_clk),
+    .dest_out(probe_arm_toggle_cap)
+);
 
 reg [15:0] diff_count = 0;
 
 always @(posedge cap_clk) begin
+    if (probe_arm_seen != probe_arm_toggle_cap) begin
+        probe_arm_seen <= probe_arm_toggle_cap;
+        probe_valid <= 0;
+        probe_waiting <= 1;
+        probe_publish_pending <= 0;
+        probe_seen_mask <= 0;
+    end else if (probe_publish_pending) begin
+        /* The complete 512-bit snapshot has been stable for one capture
+         * clock before valid crosses back to AXI. */
+        probe_valid <= 1;
+        probe_waiting <= 0;
+        probe_publish_pending <= 0;
+    end
+
     vs <= {vs[5:0], vcap_vsync};
     hs <= {hs[5:0], vcap_hsync};
 
@@ -276,6 +320,65 @@ always @(posedge cap_clk) begin
                 else
                     linebuf[capture_buf_addr] <= 32'b0;
                 cap_x <= cap_x + 1'b1;
+            end
+
+            /* Snapshot the exact word presented to the sampler line-buffer
+             * write port. AXI probing is held off until this source burst is
+             * complete, so both snapshots describe the same captured row. */
+            if (capture_banking_cap && probe_waiting &&
+                    !probe_publish_pending && cap_y == PROBE_LINE &&
+                    cap_x >= PROBE_SOURCE_X &&
+                    cap_x < PROBE_SOURCE_X + 16) begin
+                if (cap_x == PROBE_SOURCE_X) begin
+                    probe_seen_mask <= 16'h0001;
+                    probe_line <= cap_y[9:0];
+                    probe_source_x <= cap_x;
+                    probe_context <= {9'h000, capture_bank,
+                                      raw_y, sample_x};
+                    probe_config <= {7'h00, ctl_full_width_cap,
+                                     ctl_crop_v_cap, ctl_crop_h_cap};
+                end else begin
+                    probe_seen_mask[cap_x - PROBE_SOURCE_X] <= 1'b1;
+                end
+
+                case (cap_x)
+                    PROBE_SOURCE_X + 0:
+                        probe_data[31:0] <= capture_store_word;
+                    PROBE_SOURCE_X + 1:
+                        probe_data[63:32] <= capture_store_word;
+                    PROBE_SOURCE_X + 2:
+                        probe_data[95:64] <= capture_store_word;
+                    PROBE_SOURCE_X + 3:
+                        probe_data[127:96] <= capture_store_word;
+                    PROBE_SOURCE_X + 4:
+                        probe_data[159:128] <= capture_store_word;
+                    PROBE_SOURCE_X + 5:
+                        probe_data[191:160] <= capture_store_word;
+                    PROBE_SOURCE_X + 6:
+                        probe_data[223:192] <= capture_store_word;
+                    PROBE_SOURCE_X + 7:
+                        probe_data[255:224] <= capture_store_word;
+                    PROBE_SOURCE_X + 8:
+                        probe_data[287:256] <= capture_store_word;
+                    PROBE_SOURCE_X + 9:
+                        probe_data[319:288] <= capture_store_word;
+                    PROBE_SOURCE_X + 10:
+                        probe_data[351:320] <= capture_store_word;
+                    PROBE_SOURCE_X + 11:
+                        probe_data[383:352] <= capture_store_word;
+                    PROBE_SOURCE_X + 12:
+                        probe_data[415:384] <= capture_store_word;
+                    PROBE_SOURCE_X + 13:
+                        probe_data[447:416] <= capture_store_word;
+                    PROBE_SOURCE_X + 14:
+                        probe_data[479:448] <= capture_store_word;
+                    PROBE_SOURCE_X + 15:
+                        probe_data[511:480] <= capture_store_word;
+                endcase
+
+                if (cap_x == PROBE_SOURCE_X + 15 &&
+                        probe_seen_mask[14:0] == 15'h7fff)
+                    probe_publish_pending <= 1;
             end
         end
 

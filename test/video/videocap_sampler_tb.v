@@ -38,6 +38,7 @@ reg [7:0] b = 0;
 
 reg [11:0] buf_raddr = 0;
 reg buf_rbank = 0;
+reg probe_arm_toggle = 0;
 wire [31:0] buf_rdata;
 wire [31:0] legacy_buf_rdata;
 wire [10:0] cap_x;
@@ -49,6 +50,13 @@ wire cap_x_done;
 wire cap_shres;
 wire cap_line_toggle;
 wire cap_write_bank;
+wire probe_arm_seen;
+wire probe_valid;
+wire [511:0] probe_data;
+wire [9:0] probe_line;
+wire [11:0] probe_source_x;
+wire [31:0] probe_context;
+wire [31:0] probe_config;
 wire legacy_cap_shres;
 reg layout_full_width = 0;
 reg [11:0] layout_source_x = 0;
@@ -69,7 +77,9 @@ videocap_sampler #(
     .BUF_DEPTH(2048),
     .RGB_MODE(0),
     .CSYNC_VSYNC(0),
-    .FULLRATE(1)
+    .FULLRATE(1),
+    .PROBE_LINE(0),
+    .PROBE_SOURCE_X(32)
 ) dut (
     .cap_clk(cap_clk),
     .vcap_vsync(vsync),
@@ -90,6 +100,14 @@ videocap_sampler #(
     .cap_shres(cap_shres),
     .cap_line_toggle(cap_line_toggle),
     .cap_write_bank(cap_write_bank),
+    .probe_arm_toggle(probe_arm_toggle),
+    .probe_arm_seen(probe_arm_seen),
+    .probe_valid(probe_valid),
+    .probe_data(probe_data),
+    .probe_line(probe_line),
+    .probe_source_x(probe_source_x),
+    .probe_context(probe_context),
+    .probe_config(probe_config),
     .axi_clk(axi_clk),
     .buf_rbank(buf_rbank),
     .buf_raddr(buf_raddr),
@@ -123,6 +141,14 @@ videocap_sampler #(
     .cap_shres(legacy_cap_shres),
     .cap_line_toggle(),
     .cap_write_bank(),
+    .probe_arm_toggle(1'b0),
+    .probe_arm_seen(),
+    .probe_valid(),
+    .probe_data(),
+    .probe_line(),
+    .probe_source_x(),
+    .probe_context(),
+    .probe_config(),
     .axi_clk(axi_clk),
     .buf_rbank(1'b0),
     .buf_raddr(buf_raddr),
@@ -359,6 +385,7 @@ initial begin
     if ($value$plusargs("LINECLKS=%d", LINECLKS)) ;
 
     repeat (10) @(posedge cap_clk);
+    probe_arm_toggle = 1;
 
     /* Full-width placement must rotate within one 1280-pixel destination
      * row. The previous firmware-level look-behind crossed DDR rows and
@@ -396,6 +423,24 @@ initial begin
 
     check_eq("cap_shres", cap_shres, (PIXSPAN == 1));
     check_eq("legacy_cap_shres", legacy_cap_shres, 0);
+
+    if (FULLWIDTH) begin
+        check_eq("probe_arm_seen", probe_arm_seen, probe_arm_toggle);
+        check_eq("probe_valid", probe_valid, 1);
+        check_eq("probe_line", probe_line, 0);
+        check_eq("probe_source_x", probe_source_x, 32);
+        check_eq("probe_full_width", probe_config[24], 1);
+        for (k = 0; k < 16; k = k + 1) begin
+            got = probe_data[k * 32 +: 32];
+            sample_idx = CROPH + 32 + k + CAPTURE_INPUT_OFFSET;
+            pix_even = sample_idx / PIXSPAN;
+            want_r = pix_even[7:0];
+            want_g = ~pix_even[7:0];
+            want_b = {pix_even[3:0], pix_even[7:4]};
+            check_eq("probe_word", got[23:0],
+                     {want_r, want_g, want_b});
+        end
+    end
 
     /* FULLRATE=0 converts the universal 188-sample default to 94 local
      * capture clocks, preserving the Denise-adapter framing.  Check the

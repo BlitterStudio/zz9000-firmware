@@ -1020,6 +1020,14 @@ module MNTZorro_v0_1_S00_AXI
   localparam [15:0] VCAP_PROBE_AWADDR_LO = 16'h016a;
   localparam [15:0] VCAP_PROBE_CONTROL = 16'h016c;
   localparam [15:0] VCAP_PROBE_CONTROL_LO = 16'h016e;
+  localparam [15:0] VCAP_PROBE_SAMPLER_DATA_BASE = 16'h0170;
+  localparam [15:0] VCAP_PROBE_SAMPLER_TARGET = 16'h01b0;
+  localparam [15:0] VCAP_PROBE_SAMPLER_TARGET_LO = 16'h01b2;
+  localparam [15:0] VCAP_PROBE_SAMPLER_CONTEXT = 16'h01b4;
+  localparam [15:0] VCAP_PROBE_SAMPLER_CONTEXT_LO = 16'h01b6;
+  localparam [15:0] VCAP_PROBE_SAMPLER_CONFIG = 16'h01b8;
+  localparam [15:0] VCAP_PROBE_SAMPLER_CONFIG_LO = 16'h01ba;
+  localparam [15:0] VCAP_PROBE_OWNER_BASE = 16'h01c0;
   localparam [15:0] SDK_REG_OFFSET_MASK = 16'h0fff;
   localparam [31:0] SDK_CTRL_DOORBELL_CLEAR = 32'h20000000;
   localparam [31:0] SDK_CTRL_IRQ_ACK_CLEAR = 32'h10000000;
@@ -1176,6 +1184,16 @@ module MNTZorro_v0_1_S00_AXI
   wire vcap_line_toggle;
   wire vcap_write_bank;
   wire [31:0] vcap_rdata;
+  wire vcap_sampler_probe_arm_seen;
+  wire vcap_sampler_probe_valid;
+  wire [511:0] vcap_sampler_probe_data;
+  wire [9:0] vcap_sampler_probe_line;
+  wire [11:0] vcap_sampler_probe_source_x;
+  wire [31:0] vcap_sampler_probe_context;
+  wire [31:0] vcap_sampler_probe_config;
+  wire vcap_sampler_probe_arm_seen_axi;
+  wire vcap_sampler_probe_valid_axi;
+  reg vcap_probe_arm_toggle = 0;
   wire [11:0] vcap_raddr = videocap_save_x;
   wire clkfbout_zz9000_ps_clk_wiz_1_0;
   wire e7m_shifted;
@@ -1322,10 +1340,42 @@ module MNTZorro_v0_1_S00_AXI
       .cap_shres(vcap_shres),
       .cap_line_toggle(vcap_line_toggle),
       .cap_write_bank(vcap_write_bank),
+      .probe_arm_toggle(vcap_probe_arm_toggle),
+      .probe_arm_seen(vcap_sampler_probe_arm_seen),
+      .probe_valid(vcap_sampler_probe_valid),
+      .probe_data(vcap_sampler_probe_data),
+      .probe_line(vcap_sampler_probe_line),
+      .probe_source_x(vcap_sampler_probe_source_x),
+      .probe_context(vcap_sampler_probe_context),
+      .probe_config(vcap_sampler_probe_config),
       .axi_clk(S_AXI_ACLK),
       .buf_rbank(vc_saving_bank),
       .buf_raddr(vcap_raddr),
       .buf_rdata(vcap_rdata)
+  );
+
+  xpm_cdc_single #(
+      .DEST_SYNC_FF(3),
+      .INIT_SYNC_FF(1),
+      .SIM_ASSERT_CHK(0),
+      .SRC_INPUT_REG(0)
+  ) videocap_probe_seen_cdc (
+      .src_clk(e7m_shifted),
+      .src_in(vcap_sampler_probe_arm_seen),
+      .dest_clk(S_AXI_ACLK),
+      .dest_out(vcap_sampler_probe_arm_seen_axi)
+  );
+
+  xpm_cdc_single #(
+      .DEST_SYNC_FF(3),
+      .INIT_SYNC_FF(1),
+      .SIM_ASSERT_CHK(0),
+      .SRC_INPUT_REG(0)
+  ) videocap_probe_valid_cdc (
+      .src_clk(e7m_shifted),
+      .src_in(vcap_sampler_probe_valid),
+      .dest_clk(S_AXI_ACLK),
+      .dest_out(vcap_sampler_probe_valid_axi)
   );
   reg [11:0] videocap_pitch;
   reg [11:0] videocap_pitch_sync;
@@ -1354,13 +1404,39 @@ module MNTZorro_v0_1_S00_AXI
   reg m01_axi_wvalid_out = 0;
 
   reg [31:0] vcap_probe_data [0:15];
+  reg [31:0] vcap_probe_owner [0:15];
   reg [31:0] vcap_probe_awaddr = 0;
   reg [9:0] vcap_probe_line = 0;
   reg [11:0] vcap_probe_dest_x = 0;
-  reg vcap_probe_arm_toggle = 0;
   reg vcap_probe_arm_seen = 0;
   reg vcap_probe_burst_active = 0;
   reg vcap_probe_valid = 0;
+  wire [10:0] vcap_wdata_source_x =
+      videocap_save_x[10:0] - 1'b1;
+
+  function [31:0] vcap_sampler_probe_word;
+    input [3:0] index;
+    begin
+      case (index)
+        4'd0: vcap_sampler_probe_word = vcap_sampler_probe_data[31:0];
+        4'd1: vcap_sampler_probe_word = vcap_sampler_probe_data[63:32];
+        4'd2: vcap_sampler_probe_word = vcap_sampler_probe_data[95:64];
+        4'd3: vcap_sampler_probe_word = vcap_sampler_probe_data[127:96];
+        4'd4: vcap_sampler_probe_word = vcap_sampler_probe_data[159:128];
+        4'd5: vcap_sampler_probe_word = vcap_sampler_probe_data[191:160];
+        4'd6: vcap_sampler_probe_word = vcap_sampler_probe_data[223:192];
+        4'd7: vcap_sampler_probe_word = vcap_sampler_probe_data[255:224];
+        4'd8: vcap_sampler_probe_word = vcap_sampler_probe_data[287:256];
+        4'd9: vcap_sampler_probe_word = vcap_sampler_probe_data[319:288];
+        4'd10: vcap_sampler_probe_word = vcap_sampler_probe_data[351:320];
+        4'd11: vcap_sampler_probe_word = vcap_sampler_probe_data[383:352];
+        4'd12: vcap_sampler_probe_word = vcap_sampler_probe_data[415:384];
+        4'd13: vcap_sampler_probe_word = vcap_sampler_probe_data[447:416];
+        4'd14: vcap_sampler_probe_word = vcap_sampler_probe_data[479:448];
+        default: vcap_sampler_probe_word = vcap_sampler_probe_data[511:480];
+      endcase
+    end
+  endfunction
 
   reg [31:0] m00_axi_awaddr_z3;
   reg [31:0] m00_axi_wdata_z3;
@@ -1562,9 +1638,13 @@ module MNTZorro_v0_1_S00_AXI
     end else begin
       if (videocap_save_state == 4'h3 && m01_axi_awready) begin
         vcap_probe_burst_active <= !vcap_probe_valid &&
+            vcap_sampler_probe_valid_axi &&
+            vcap_sampler_probe_arm_seen_axi == vcap_probe_arm_toggle &&
             videocap_writeback_full_width &&
             vc_saving_line == 10'd120 && videocap_write_x == 12'd1248;
-        if (!vcap_probe_valid && videocap_writeback_full_width &&
+        if (!vcap_probe_valid && vcap_sampler_probe_valid_axi &&
+            vcap_sampler_probe_arm_seen_axi == vcap_probe_arm_toggle &&
+            videocap_writeback_full_width &&
             vc_saving_line == 10'd120 && videocap_write_x == 12'd1248) begin
           vcap_probe_line <= vc_saving_line;
           vcap_probe_dest_x <= videocap_write_x;
@@ -1574,6 +1654,9 @@ module MNTZorro_v0_1_S00_AXI
 
       if (m01_axi_wvalid_out && m01_axi_wready && vcap_probe_burst_active) begin
         vcap_probe_data[vc_beat[3:0]] <= m01_axi_wdata;
+        vcap_probe_owner[vc_beat[3:0]] <= {
+            vc_saving_line, videocap_y_sync[8:0], vc_saving_bank,
+            videocap_bank_sync, vcap_wdata_source_x};
         if (vc_beat == 5'd15) begin
           vcap_probe_burst_active <= 0;
           vcap_probe_valid <= 1;
@@ -2507,7 +2590,11 @@ module MNTZorro_v0_1_S00_AXI
             VCAP_PROBE_META_LO: begin
               rr_data[31:16] <= 16'h5650;
               rr_data[15:0] <= {vcap_probe_valid,
-                                vcap_probe_burst_active, 6'h00, 8'h01};
+                                vcap_probe_burst_active,
+                                vcap_sampler_probe_valid_axi,
+                                vcap_sampler_probe_arm_seen_axi ==
+                                    vcap_probe_arm_toggle,
+                                4'h0, 8'h02};
             end
             VCAP_PROBE_TARGET,
             VCAP_PROBE_TARGET_LO: begin
@@ -2520,8 +2607,22 @@ module MNTZorro_v0_1_S00_AXI
             end
             VCAP_PROBE_CONTROL,
             VCAP_PROBE_CONTROL_LO: begin
-              rr_data <= {30'h00000000, vcap_probe_arm_seen,
-                          vcap_probe_arm_toggle};
+              rr_data <= {28'h0000000, vcap_sampler_probe_valid_axi,
+                          vcap_sampler_probe_arm_seen_axi,
+                          vcap_probe_arm_seen, vcap_probe_arm_toggle};
+            end
+            VCAP_PROBE_SAMPLER_TARGET,
+            VCAP_PROBE_SAMPLER_TARGET_LO: begin
+              rr_data <= {6'h00, vcap_sampler_probe_line,
+                          4'h0, vcap_sampler_probe_source_x};
+            end
+            VCAP_PROBE_SAMPLER_CONTEXT,
+            VCAP_PROBE_SAMPLER_CONTEXT_LO: begin
+              rr_data <= vcap_sampler_probe_context;
+            end
+            VCAP_PROBE_SAMPLER_CONFIG,
+            VCAP_PROBE_SAMPLER_CONFIG_LO: begin
+              rr_data <= vcap_sampler_probe_config;
             end
             default: begin
               if ((regread_addr & SDK_REG_OFFSET_MASK) >=
@@ -2531,6 +2632,20 @@ module MNTZorro_v0_1_S00_AXI
                 rr_data <= vcap_probe_data[
                     ((regread_addr & SDK_REG_OFFSET_MASK) -
                      VCAP_PROBE_DATA_BASE) >> 2];
+              end else if ((regread_addr & SDK_REG_OFFSET_MASK) >=
+                      VCAP_PROBE_SAMPLER_DATA_BASE &&
+                  (regread_addr & SDK_REG_OFFSET_MASK) <
+                      VCAP_PROBE_SAMPLER_DATA_BASE + 16'h0040) begin
+                rr_data <= vcap_sampler_probe_word(
+                    ((regread_addr & SDK_REG_OFFSET_MASK) -
+                     VCAP_PROBE_SAMPLER_DATA_BASE) >> 2);
+              end else if ((regread_addr & SDK_REG_OFFSET_MASK) >=
+                      VCAP_PROBE_OWNER_BASE &&
+                  (regread_addr & SDK_REG_OFFSET_MASK) <
+                      VCAP_PROBE_OWNER_BASE + 16'h0040) begin
+                rr_data <= vcap_probe_owner[
+                    ((regread_addr & SDK_REG_OFFSET_MASK) -
+                     VCAP_PROBE_OWNER_BASE) >> 2];
               end else case (regread_addr&'hff)
                 /*'h00: begin
                  rr_data <= video_control_data;
