@@ -248,7 +248,7 @@ task check_completed_bank_during_next_line;
                      completed_bank);
         end
 
-        check_full_width_bank_entry(completed_bank, 12'd4, pattern_seed);
+        check_full_width_bank_entry(completed_bank, 12'd15, pattern_seed);
         check_full_width_bank_entry(completed_bank, 12'd640, pattern_seed);
         check_full_width_bank_entry(completed_bank, 12'd900, pattern_seed);
     end
@@ -484,7 +484,14 @@ initial begin
 
     /* The final active raster line remains in its completed bank. */
     buf_rbank = FULLWIDTH ? cap_write_bank : 1'b0;
-    for (k = 4; k < (FULLWIDTH ? 1280 : 32); k = k + 1) begin
+    if (FULLWIDTH) begin
+        for (k = 0; k < 15; k = k + 1) begin
+            buf_read(k[11:0], got);
+            check_eq("full_width_head_guard", got[23:0], 24'b0);
+        end
+    end
+    for (k = (FULLWIDTH ? 15 : 4);
+            k < (FULLWIDTH ? 1280 : 32); k = k + 1) begin
         buf_read(k[11:0], got);
         sample_idx = CROPH + k * (FULLWIDTH ? 1 : 2)
                      + CAPTURE_INPUT_OFFSET;

@@ -394,6 +394,10 @@ static int test_videocap_probe_compares_sampler_and_line_owner(
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "probe_data[31:0] <= capture_store_word;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire capture_head_valid = capture_banking_cap ?");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "(cap_x >= 11'd15) : (cap_x > 11'd2);");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "probe_seen_mask[14:0] == 15'h7fff");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "vcap_sampler_probe_valid_axi &&");
