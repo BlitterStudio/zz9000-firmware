@@ -405,6 +405,33 @@ static int test_videocap_probe_compares_sampler_and_line_owner(
 	return ok ? 0 : 1;
 }
 
+static int test_videocap_probe_captures_post_window_tail(
+	const char *mntzorro, const char *sampler)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "parameter integer TAIL_PROBE_SOURCE_X = 1280");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "reg [31:0] probe_tail_mem [0:63];");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "assign probe_tail_rdata = probe_tail_mem[probe_tail_raddr];");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "cap_x < TAIL_PROBE_SOURCE_X + 64");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "probe_tail_mem[cap_x - TAIL_PROBE_SOURCE_X]");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [15:0] VCAP_TAIL_PROBE_DATA_BASE = 16'h0300;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [15:0] VCAP_TAIL_PROBE_META = 16'h02e0;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    ".TAIL_PROBE_SOURCE_X(12'd1280)");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_TAIL_PROBE_DATA_BASE + 16'h0100");
+
+	return ok ? 0 : 1;
+}
+
 static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	const char *sampler)
 {
@@ -531,6 +558,9 @@ int main(void)
 			sampler);
 	if (!result)
 		result = test_videocap_probe_compares_sampler_and_line_owner(
+			mntzorro, sampler);
+	if (!result)
+		result = test_videocap_probe_captures_post_window_tail(
 			mntzorro, sampler);
 	free(sampler);
 	free(mntzorro);

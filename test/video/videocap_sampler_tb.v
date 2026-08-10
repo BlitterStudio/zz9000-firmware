@@ -57,6 +57,9 @@ wire [9:0] probe_line;
 wire [11:0] probe_source_x;
 wire [31:0] probe_context;
 wire [31:0] probe_config;
+wire probe_tail_valid;
+reg [5:0] probe_tail_raddr = 0;
+wire [31:0] probe_tail_rdata;
 wire legacy_cap_shres;
 reg layout_full_width = 0;
 reg [11:0] layout_source_x = 0;
@@ -79,7 +82,8 @@ videocap_sampler #(
     .CSYNC_VSYNC(0),
     .FULLRATE(1),
     .PROBE_LINE(0),
-    .PROBE_SOURCE_X(32)
+    .PROBE_SOURCE_X(32),
+    .TAIL_PROBE_SOURCE_X(1280)
 ) dut (
     .cap_clk(cap_clk),
     .vcap_vsync(vsync),
@@ -108,6 +112,9 @@ videocap_sampler #(
     .probe_source_x(probe_source_x),
     .probe_context(probe_context),
     .probe_config(probe_config),
+    .probe_tail_valid(probe_tail_valid),
+    .probe_tail_raddr(probe_tail_raddr),
+    .probe_tail_rdata(probe_tail_rdata),
     .axi_clk(axi_clk),
     .buf_rbank(buf_rbank),
     .buf_raddr(buf_raddr),
@@ -149,6 +156,9 @@ videocap_sampler #(
     .probe_source_x(),
     .probe_context(),
     .probe_config(),
+    .probe_tail_valid(),
+    .probe_tail_raddr(6'd0),
+    .probe_tail_rdata(),
     .axi_clk(axi_clk),
     .buf_rbank(1'b0),
     .buf_raddr(buf_raddr),
@@ -438,6 +448,22 @@ initial begin
             want_g = ~pix_even[7:0];
             want_b = {pix_even[3:0], pix_even[7:4]};
             check_eq("probe_word", got[23:0],
+                     {want_r, want_g, want_b});
+        end
+
+        check_eq("probe_tail_valid", probe_tail_valid, 1);
+        for (k = 0; k < 64; k = k + 1) begin
+            probe_tail_raddr = k[5:0];
+            #1 got = probe_tail_rdata;
+            sample_idx = CROPH + 1280 + k + CAPTURE_INPUT_OFFSET;
+            if (sample_idx >= CROPH + 1300)
+                pix_even = ((sample_idx & 1) != 0) ? 255 : 0;
+            else
+                pix_even = sample_idx / PIXSPAN;
+            want_r = pix_even[7:0];
+            want_g = ~pix_even[7:0];
+            want_b = {pix_even[3:0], pix_even[7:4]};
+            check_eq("probe_tail_word", got[23:0],
                      {want_r, want_g, want_b});
         end
     end

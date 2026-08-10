@@ -17,7 +17,8 @@ module videocap_sampler #(
     parameter integer CSYNC_VSYNC = 0,
     parameter integer FULLRATE    = 0,
     parameter integer PROBE_LINE = 120,
-    parameter integer PROBE_SOURCE_X = 864
+    parameter integer PROBE_SOURCE_X = 864,
+    parameter integer TAIL_PROBE_SOURCE_X = 1280
 ) (
     input  wire        cap_clk,
     input  wire        vcap_vsync,
@@ -49,6 +50,9 @@ module videocap_sampler #(
     output reg  [11:0] probe_source_x = 0,
     output reg  [31:0] probe_context = 0,
     output reg  [31:0] probe_config = 0,
+    output reg         probe_tail_valid = 0,
+    input  wire [5:0]  probe_tail_raddr,
+    output wire [31:0] probe_tail_rdata,
 
     input  wire        axi_clk,
     input  wire        buf_rbank,
@@ -167,6 +171,10 @@ wire probe_arm_toggle_cap;
 reg probe_waiting = 0;
 reg probe_publish_pending = 0;
 reg [15:0] probe_seen_mask = 0;
+reg probe_tail_waiting = 0;
+reg probe_tail_publish_pending = 0;
+reg [31:0] probe_tail_mem [0:63];
+assign probe_tail_rdata = probe_tail_mem[probe_tail_raddr];
 
 xpm_cdc_single #(
     .DEST_SYNC_FF(3),
@@ -189,12 +197,24 @@ always @(posedge cap_clk) begin
         probe_waiting <= 1;
         probe_publish_pending <= 0;
         probe_seen_mask <= 0;
+        probe_tail_valid <= 0;
+        probe_tail_waiting <= 1;
+        probe_tail_publish_pending <= 0;
     end else if (probe_publish_pending) begin
         /* The complete 512-bit snapshot has been stable for one capture
          * clock before valid crosses back to AXI. */
         probe_valid <= 1;
         probe_waiting <= 0;
         probe_publish_pending <= 0;
+    end
+
+    if (probe_arm_seen == probe_arm_toggle_cap &&
+            probe_tail_publish_pending) begin
+        /* As with the primary sampler snapshot, hold all tail words stable
+         * for one capture clock before valid crosses into the AXI domain. */
+        probe_tail_valid <= 1;
+        probe_tail_waiting <= 0;
+        probe_tail_publish_pending <= 0;
     end
 
     vs <= {vs[5:0], vcap_vsync};
@@ -379,6 +399,21 @@ always @(posedge cap_clk) begin
                 if (cap_x == PROBE_SOURCE_X + 15 &&
                         probe_seen_mask[14:0] == 15'h7fff)
                     probe_publish_pending <= 1;
+            end
+
+            /* The normal line-complete token publishes cap_x=0..1279, but
+             * capture continues until the next HSync. Snapshot the following
+             * 64 raw words to determine whether the missing visible
+             * continuation exists just outside the published window. */
+            if (capture_banking_cap && probe_tail_waiting &&
+                    !probe_tail_publish_pending && cap_y == PROBE_LINE &&
+                    cap_x >= TAIL_PROBE_SOURCE_X &&
+                    cap_x < TAIL_PROBE_SOURCE_X + 64) begin
+                probe_tail_mem[cap_x - TAIL_PROBE_SOURCE_X]
+                    <= capture_store_word;
+
+                if (cap_x == TAIL_PROBE_SOURCE_X + 63)
+                    probe_tail_publish_pending <= 1;
             end
         end
 
