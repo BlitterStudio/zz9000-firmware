@@ -1174,6 +1174,13 @@ module MNTZorro_v0_1_S00_AXI
   reg [11:0] videocap_save_x;
   reg vc_saving_bank = 0;
 
+  // Diagnostic target selected from the paused PAL test pattern.  This
+  // aligned burst contains frequent colour transitions, allowing ZZDiag to
+  // distinguish an exact match from a one-word line-buffer read shift.
+  localparam [9:0] VCAP_PROBE_LINE = 10'd120;
+  localparam [11:0] VCAP_PROBE_SOURCE_X = 12'd864;
+  localparam [11:0] VCAP_PROBE_DEST_X = 12'd928;
+
   wire [10:0] vcap_x;
   wire [10:0] vcap_y;
   wire [10:0] vcap_ymax;
@@ -1316,7 +1323,9 @@ module MNTZorro_v0_1_S00_AXI
       .BUF_DEPTH(2048),
       .RGB_MODE(`VCAP_RGB_MODE),
       .CSYNC_VSYNC(`VCAP_CSYNC_VSYNC),
-      .FULLRATE(`VCAP_FULLRATE_INT)
+      .FULLRATE(`VCAP_FULLRATE_INT),
+      .PROBE_LINE(VCAP_PROBE_LINE),
+      .PROBE_SOURCE_X(VCAP_PROBE_SOURCE_X)
   ) videocap_sampler_inst (
       .cap_clk(e7m_shifted),
       .vcap_vsync(VCAP_VSYNC),
@@ -1641,11 +1650,13 @@ module MNTZorro_v0_1_S00_AXI
             vcap_sampler_probe_valid_axi &&
             vcap_sampler_probe_arm_seen_axi == vcap_probe_arm_toggle &&
             videocap_writeback_full_width &&
-            vc_saving_line == 10'd120 && videocap_write_x == 12'd1248;
+            vc_saving_line == VCAP_PROBE_LINE &&
+            videocap_write_x == VCAP_PROBE_DEST_X;
         if (!vcap_probe_valid && vcap_sampler_probe_valid_axi &&
             vcap_sampler_probe_arm_seen_axi == vcap_probe_arm_toggle &&
             videocap_writeback_full_width &&
-            vc_saving_line == 10'd120 && videocap_write_x == 12'd1248) begin
+            vc_saving_line == VCAP_PROBE_LINE &&
+            videocap_write_x == VCAP_PROBE_DEST_X) begin
           vcap_probe_line <= vc_saving_line;
           vcap_probe_dest_x <= videocap_write_x;
           vcap_probe_awaddr <= m01_axi_awaddr_out;

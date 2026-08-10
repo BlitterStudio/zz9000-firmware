@@ -341,7 +341,15 @@ static int test_videocap_write_probe_samples_accepted_axi_data(const char *text)
 	ok &= require_source_contains("mntzorro.v", text,
 	    "localparam [15:0] VCAP_PROBE_DATA_BASE = 16'h0120;");
 	ok &= require_source_contains("mntzorro.v", text,
-	    "vc_saving_line == 10'd120 && videocap_write_x == 12'd1248");
+	    "localparam [9:0] VCAP_PROBE_LINE = 10'd120;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "localparam [11:0] VCAP_PROBE_SOURCE_X = 12'd864;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "localparam [11:0] VCAP_PROBE_DEST_X = 12'd928;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "vc_saving_line == VCAP_PROBE_LINE &&");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "videocap_write_x == VCAP_PROBE_DEST_X");
 	ok &= require_source_contains("mntzorro.v", text,
 	    "m01_axi_wvalid_out && m01_axi_wready && vcap_probe_burst_active");
 	ok &= require_source_contains("mntzorro.v", text,
@@ -362,7 +370,11 @@ static int test_videocap_probe_compares_sampler_and_line_owner(
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "parameter integer PROBE_LINE = 120");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "parameter integer PROBE_SOURCE_X = 1184");
+	    "parameter integer PROBE_SOURCE_X = 864");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    ".PROBE_LINE(VCAP_PROBE_LINE)");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    ".PROBE_SOURCE_X(VCAP_PROBE_SOURCE_X)");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "probe_data[31:0] <= capture_store_word;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
