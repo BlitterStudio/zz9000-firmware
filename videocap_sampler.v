@@ -17,7 +17,7 @@ module videocap_sampler #(
     parameter integer CSYNC_VSYNC = 0,
     parameter integer FULLRATE    = 0,
     parameter integer PROBE_LINE = 120,
-    parameter integer PROBE_SOURCE_X = 864
+    parameter integer PROBE_SOURCE_X = 928
 ) (
     input  wire        cap_clk,
     input  wire        vcap_vsync,

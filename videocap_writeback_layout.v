@@ -1,6 +1,6 @@
 `timescale 1 ns / 1 ps
 /*
- * Map sequential capture words into one rotated framebuffer row.
+ * Map sequential capture words into one optionally rotated framebuffer row.
  *
  * The destination rotation must happen before the row stride is applied.
  * Moving the VDMA frame start instead crosses DDR row boundaries and mixes
@@ -14,7 +14,7 @@ module videocap_writeback_layout #(
     /* Both values must stay aligned to the writeback burst length (16
      * pixels), because dest_x supplies one address for the complete burst. */
     parameter integer LINE_WIDTH = 1280,
-    parameter integer ROTATE_PIXELS = 64
+    parameter integer ROTATE_PIXELS = 0
 ) (
     input  wire        full_width,
     input  wire [11:0] source_x,

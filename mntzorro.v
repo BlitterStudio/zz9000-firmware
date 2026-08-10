@@ -1189,7 +1189,7 @@ module MNTZorro_v0_1_S00_AXI
   // aligned burst contains frequent colour transitions, allowing ZZDiag to
   // distinguish an exact match from a one-word line-buffer read shift.
   localparam [9:0] VCAP_PROBE_LINE = 10'd120;
-  localparam [11:0] VCAP_PROBE_SOURCE_X = 12'd864;
+  localparam [11:0] VCAP_PROBE_SOURCE_X = 12'd928;
   localparam [11:0] VCAP_PROBE_DEST_X = 12'd928;
 
   wire [10:0] vcap_x;
@@ -1433,7 +1433,7 @@ module MNTZorro_v0_1_S00_AXI
 
   videocap_writeback_layout #(
       .LINE_WIDTH(1280),
-      .ROTATE_PIXELS(64)
+      .ROTATE_PIXELS(0)
   ) videocap_writeback_layout_inst (
       .full_width(videocap_writeback_full_width),
       .source_x(videocap_save_x),

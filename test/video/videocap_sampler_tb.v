@@ -70,7 +70,7 @@ integer layout_k;
 
 videocap_writeback_layout #(
     .LINE_WIDTH(1280),
-    .ROTATE_PIXELS(64)
+    .ROTATE_PIXELS(0)
 ) writeback_layout (
     .full_width(layout_full_width),
     .source_x(layout_source_x),
@@ -399,22 +399,22 @@ initial begin
     repeat (10) @(posedge cap_clk);
     probe_arm_toggle = 1;
 
-    /* Full-width placement must rotate within one 1280-pixel destination
-     * row. The previous firmware-level look-behind crossed DDR rows and
-     * therefore prepended pixels from a different captured scanline. */
+    /* Crop 292 supplies the formerly discarded 64-sample prefix directly,
+     * so full-width placement no longer rotates late-line blanking into the
+     * start of the destination row. */
     layout_full_width = 0;
     layout_source_x = 12'd1216;
     #1 check_eq("filtered_writeback_identity", layout_dest_x, 12'd1216);
 
     layout_full_width = 1;
     layout_source_x = 12'd0;
-    #1 check_eq("rotation_head", layout_dest_x, 12'd64);
+    #1 check_eq("full_width_head", layout_dest_x, 12'd0);
     layout_source_x = 12'd1215;
-    #1 check_eq("rotation_before_wrap", layout_dest_x, 12'd1279);
+    #1 check_eq("full_width_mid", layout_dest_x, 12'd1215);
     layout_source_x = 12'd1216;
-    #1 check_eq("rotation_wrap", layout_dest_x, 12'd0);
+    #1 check_eq("full_width_after_mid", layout_dest_x, 12'd1216);
     layout_source_x = 12'd1279;
-    #1 check_eq("rotation_tail", layout_dest_x, 12'd63);
+    #1 check_eq("full_width_tail", layout_dest_x, 12'd1279);
 
     layout_seen = 1280'b0;
     for (layout_k = 0; layout_k < 1280; layout_k = layout_k + 1) begin
@@ -423,7 +423,7 @@ initial begin
         checks = checks + 1;
         if (layout_dest_x >= 1280 || layout_seen[layout_dest_x]) begin
             errors = errors + 1;
-            $display("MISMATCH rotation_bijection source=%0d dest=%0d",
+            $display("MISMATCH layout_bijection source=%0d dest=%0d",
                      layout_k, layout_dest_x);
         end else begin
             layout_seen[layout_dest_x] = 1'b1;
