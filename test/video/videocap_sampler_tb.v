@@ -37,6 +37,7 @@ reg [7:0] g = 0;
 reg [7:0] b = 0;
 
 reg [11:0] buf_raddr = 0;
+reg buf_rbank = 0;
 wire [31:0] buf_rdata;
 wire [31:0] legacy_buf_rdata;
 wire [10:0] cap_x;
@@ -46,6 +47,8 @@ wire cap_interlace;
 wire cap_ntsc;
 wire cap_x_done;
 wire cap_shres;
+wire cap_line_toggle;
+wire cap_write_bank;
 wire legacy_cap_shres;
 reg layout_full_width = 0;
 reg [11:0] layout_source_x = 0;
@@ -85,7 +88,10 @@ videocap_sampler #(
     .cap_ntsc(cap_ntsc),
     .cap_x_done(cap_x_done),
     .cap_shres(cap_shres),
+    .cap_line_toggle(cap_line_toggle),
+    .cap_write_bank(cap_write_bank),
     .axi_clk(axi_clk),
+    .buf_rbank(buf_rbank),
     .buf_raddr(buf_raddr),
     .buf_rdata(buf_rdata)
 );
@@ -115,7 +121,10 @@ videocap_sampler #(
     .cap_ntsc(),
     .cap_x_done(),
     .cap_shres(legacy_cap_shres),
+    .cap_line_toggle(),
+    .cap_write_bank(),
     .axi_clk(axi_clk),
+    .buf_rbank(1'b0),
     .buf_raddr(buf_raddr),
     .buf_rdata(legacy_buf_rdata)
 );
@@ -163,20 +172,71 @@ task legacy_buf_read;
     end
 endtask
 
+task check_full_width_bank_entry;
+    input completed_bank;
+    input [11:0] addr;
+    input integer pattern_seed;
+    reg [31:0] data;
+    integer input_sample;
+    integer pixel;
+    reg [7:0] expected_r;
+    reg [7:0] expected_g;
+    reg [7:0] expected_b;
+    begin
+        buf_rbank = completed_bank;
+        buf_read(addr, data);
+        input_sample = CROPH + addr + CAPTURE_INPUT_OFFSET;
+        pixel = input_sample / PIXSPAN + pattern_seed;
+        expected_r = pixel[7:0];
+        expected_g = ~pixel[7:0];
+        expected_b = {pixel[3:0], pixel[7:4]};
+        check_eq("completed_bank_entry", data[23:0],
+                 {expected_r, expected_g, expected_b});
+    end
+endtask
+
+task check_completed_bank_during_next_line;
+    input completed_bank;
+    input integer pattern_seed;
+    begin
+        wait (hsync == 0);
+        wait (cap_x < 16);
+        wait (cap_x >= 900);
+
+        checks = checks + 1;
+        if (cap_write_bank === completed_bank) begin
+            errors = errors + 1;
+            $display("MISMATCH capture overwrites completed bank=%0d",
+                     completed_bank);
+        end
+
+        check_full_width_bank_entry(completed_bank, 12'd4, pattern_seed);
+        check_full_width_bank_entry(completed_bank, 12'd640, pattern_seed);
+        check_full_width_bank_entry(completed_bank, 12'd900, pattern_seed);
+    end
+endtask
+
+integer first_full_width_ready_x;
+integer full_width_ready_checked;
+integer full_width_completed_lines;
+reg last_completed_bank;
+
 task drive_line;
     input integer pattern_seed;
     integer i;
     integer px;
+    reg line_toggle_before;
     begin
+        line_toggle_before = cap_line_toggle;
         hsync = 0;
         for (i = 0; i < 67; i = i + 1)
             @(posedge cap_clk);
         hsync = 1;
         for (i = 0; i < LINECLKS - 67; i = i + 1) begin
-            /* Toggle aggressively after the 1024-sample capture window.
+            /* Toggle aggressively after the 1280-sample capture window.
              * Blanking activity must not make hires or lores look like
              * SuperHires content. */
-            if (i >= CROPH + 1100)
+            if (i >= CROPH + 1300)
                 px = (i[0] != 0) ? 8'hff : 8'h00;
             else
                 px = (i / PIXSPAN) + pattern_seed;
@@ -184,6 +244,39 @@ task drive_line;
             g = ~px[7:0];
             b = {px[3:0], px[7:4]};
             @(posedge cap_clk);
+
+            if (FULLWIDTH && !full_width_ready_checked &&
+                    first_full_width_ready_x < 0 && cap_x_done)
+                first_full_width_ready_x = cap_x;
+        end
+
+        if (FULLWIDTH && !full_width_ready_checked) begin
+            checks = checks + 1;
+            if (first_full_width_ready_x < 1280) begin
+                errors = errors + 1;
+                $display("MISMATCH full_width_ready_x got=%0d expected>=1280",
+                         first_full_width_ready_x);
+            end
+            full_width_ready_checked = 1;
+        end
+
+        if (FULLWIDTH && vsync) begin
+            checks = checks + 1;
+            if (cap_line_toggle === line_toggle_before) begin
+                errors = errors + 1;
+                $display("MISMATCH full_width_completion_token did not toggle");
+            end
+
+            if (full_width_completed_lines > 0) begin
+                checks = checks + 1;
+                if (cap_write_bank === last_completed_bank) begin
+                    errors = errors + 1;
+                    $display("MISMATCH full_width_bank did not alternate bank=%0d",
+                             cap_write_bank);
+                end
+            end
+            last_completed_bank = cap_write_bank;
+            full_width_completed_lines = full_width_completed_lines + 1;
         end
     end
 endtask
@@ -192,13 +285,23 @@ task drive_field;
     input integer seed;
     input integer check_vertical;
     integer ln;
+    reg completed_bank_before_line;
     begin
         vsync = 0;
         drive_line(seed);
         drive_line(seed);
         vsync = 1;
         for (ln = 0; ln < LINES; ln = ln + 1) begin
-            drive_line(seed + ln);
+            if (FULLWIDTH && check_vertical && ln == 2) begin
+                completed_bank_before_line = cap_write_bank;
+                fork
+                    drive_line(seed + ln);
+                    check_completed_bank_during_next_line(
+                        completed_bank_before_line, seed + ln - 1);
+                join
+            end else begin
+                drive_line(seed + ln);
+            end
 
             /* The two VSYNC lines have already advanced raw_y before the
              * active raster starts.  Observe cap_y only in the second field,
@@ -243,6 +346,10 @@ initial begin
     CROPV = 26;
     LINES = 40;
     LINECLKS = 1816;
+    first_full_width_ready_x = -1;
+    full_width_ready_checked = 0;
+    full_width_completed_lines = 0;
+    last_completed_bank = 0;
     if ($value$plusargs("PIXSPAN=%d", PIXSPAN)) ;
     if ($value$plusargs("SAMPLEMODE=%d", SAMPLEMODE)) ;
     if ($value$plusargs("FULLWIDTH=%d", FULLWIDTH)) ;
@@ -290,9 +397,22 @@ initial begin
     check_eq("cap_shres", cap_shres, (PIXSPAN == 1));
     check_eq("legacy_cap_shres", legacy_cap_shres, 0);
 
-    /* The final active raster line remains in the line buffer. */
+    /* FULLRATE=0 converts the universal 188-sample default to 94 local
+     * capture clocks, preserving the Denise-adapter framing.  Check the
+     * reference before the full-width bank sweep advances the free-running
+     * capture clock for thousands of AXI cycles. */
     line_seed = LINES - 1;
-    for (k = 4; k < 32; k = k + 1) begin
+    legacy_buf_read(12'd4, got);
+    sample_idx = (CROPH / 2) + 4 + CAPTURE_INPUT_OFFSET;
+    pix_even = sample_idx / PIXSPAN + line_seed;
+    want_r = pix_even[7:0];
+    want_g = ~pix_even[7:0];
+    want_b = {pix_even[3:0], pix_even[7:4]};
+    check_eq("legacy_crop", got[23:0], {want_r, want_g, want_b});
+
+    /* The final active raster line remains in its completed bank. */
+    buf_rbank = FULLWIDTH ? cap_write_bank : 1'b0;
+    for (k = 4; k < (FULLWIDTH ? 1280 : 32); k = k + 1) begin
         buf_read(k[11:0], got);
         sample_idx = CROPH + k * (FULLWIDTH ? 1 : 2)
                      + CAPTURE_INPUT_OFFSET;
@@ -319,16 +439,6 @@ initial begin
         end
         check_eq("entry", got[23:0], {want_r, want_g, want_b});
     end
-
-    /* FULLRATE=0 converts the universal 188-sample default to 94 local
-     * capture clocks, preserving the Denise-adapter framing. */
-    legacy_buf_read(12'd4, got);
-    sample_idx = (CROPH / 2) + 4 + CAPTURE_INPUT_OFFSET;
-    pix_even = sample_idx / PIXSPAN + line_seed;
-    want_r = pix_even[7:0];
-    want_g = ~pix_even[7:0];
-    want_b = {pix_even[3:0], pix_even[7:4]};
-    check_eq("legacy_crop", got[23:0], {want_r, want_g, want_b});
 
     if (errors == 0)
         $display("RESULT PASS checks=%0d", checks);

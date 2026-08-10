@@ -17,6 +17,7 @@
 #define OVERLAY_LINEBUFFER_PATH "../../video_overlay_linebuffer.v"
 #define PROJECT_TCL_PATH "../../zz9000_project.tcl"
 #define MNTZORRO_PATH "../../mntzorro.v"
+#define VIDEOCAP_SAMPLER_PATH "../../videocap_sampler.v"
 #define VIDEO_C_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/video.c"
 #define HDMI_C_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/hdmi.c"
 
@@ -333,6 +334,42 @@ static int test_videocap_writeback_uses_axi_bursts(const char *text)
 	return ok ? 0 : 1;
 }
 
+static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
+	const char *sampler)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "localparam integer LINEBUF_BANKS = (FULLRATE != 0) ? 2 : 1;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire capture_banking_cap = (FULLRATE != 0) && ctl_full_width_cap;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire read_banking_axi = (FULLRATE != 0) && ctl_full_width;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "capture_banking_cap ? capture_bank : 1'b0, cap_x");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "read_banking_axi ? buf_rbank : 1'b0, buf_raddr[10:0]");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "if (!cap_x_done && cap_x >= 11'd1279) begin");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "cap_line_toggle <= ~cap_line_toggle;");
+	ok &= require_source_absent("videocap_sampler.v", sampler, "11'h400",
+	    "full-width completion still stops at 1024 of 1280 samples");
+
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    ") videocap_line_cdc (");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vcap_line_toggle, vcap_write_bank, vcap_y[9:0]");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    ".buf_rbank(vc_saving_bank)");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vc_saving_bank <= videocap_bank_sync;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vcap_line_payload_axi[11] != vcap_line_toggle_seen");
+
+	return ok ? 0 : 1;
+}
+
 static int test_mode_switch_retrains_display(const char *video,
 	const char *hdmi)
 {
@@ -371,6 +408,7 @@ int main(void)
 	char *linebuffer;
 	char *project;
 	char *mntzorro;
+	char *sampler;
 	char *video;
 	char *hdmi;
 	int result;
@@ -410,6 +448,15 @@ int main(void)
 		return 1;
 	if (!result)
 		result = test_videocap_writeback_uses_axi_bursts(mntzorro);
+	sampler = read_file(VIDEOCAP_SAMPLER_PATH);
+	if (!sampler) {
+		free(mntzorro);
+		return 1;
+	}
+	if (!result)
+		result = test_videocap_full_width_owns_completed_bank(mntzorro,
+			sampler);
+	free(sampler);
 	free(mntzorro);
 
 	video = read_file(VIDEO_C_PATH);

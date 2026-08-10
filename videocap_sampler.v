@@ -36,8 +36,11 @@ module videocap_sampler #(
     output reg         cap_ntsc,
     output reg         cap_x_done,
     output reg         cap_shres,
+    output reg         cap_line_toggle = 0,
+    output wire        cap_write_bank,
 
     input  wire        axi_clk,
+    input  wire        buf_rbank,
     input  wire [11:0] buf_raddr,
     output wire [31:0] buf_rdata
 );
@@ -84,12 +87,24 @@ reg [3:0] shortlines = 0;
 reg [7:0] hs_pulse_width = 0;
 reg [10:0] vsync_x = 0;
 
-reg [31:0] linebuf [0:BUF_DEPTH-1];
+localparam integer LINEBUF_BANKS = (FULLRATE != 0) ? 2 : 1;
+reg [31:0] linebuf [0:(BUF_DEPTH * LINEBUF_BANKS)-1];
 reg [31:0] buf_rdata_r;
 assign buf_rdata = buf_rdata_r;
 
+reg capture_bank = 0;
+wire capture_banking_cap = (FULLRATE != 0) && ctl_full_width_cap;
+wire read_banking_axi = (FULLRATE != 0) && ctl_full_width;
+wire [11:0] capture_buf_addr = {
+    capture_banking_cap ? capture_bank : 1'b0, cap_x
+};
+wire [11:0] read_buf_addr = {
+    read_banking_axi ? buf_rbank : 1'b0, buf_raddr[10:0]
+};
+assign cap_write_bank = capture_banking_cap ? capture_bank : 1'b0;
+
 always @(posedge axi_clk)
-    buf_rdata_r <= linebuf[buf_raddr];
+    buf_rdata_r <= linebuf[read_buf_addr];
 
 localparam [10:0] INTERLACE_PHASE_DELTA = 11'h080;
 wire [10:0] vsync_phase_abs_delta =
@@ -161,6 +176,7 @@ always @(posedge cap_clk) begin
     end
 
     if (frame_sync) begin
+        cap_x_done <= 0;
         if (cap_ymax >= 11'h190)
             cap_interlace <= 0;
         else if (CSYNC_VSYNC != 0)
@@ -197,6 +213,9 @@ always @(posedge cap_clk) begin
         sample_x <= 0;
         half <= 0;
         shres_half <= 0;
+        cap_x_done <= 0;
+        if (capture_banking_cap)
+            capture_bank <= ~capture_bank;
 
         if (CSYNC_VSYNC != 0) begin
             if (hs_pulse_width < 8'h20) begin
@@ -230,7 +249,7 @@ always @(posedge cap_clk) begin
             end else begin
                 shres_half <= 0;
                 if ({1'b0, sample_x} > crop_h_local &&
-                        cap_x < (ctl_full_width_cap ? 11'h400 : 11'h200) &&
+                        cap_x < (ctl_full_width_cap ? 11'h500 : 11'h200) &&
                         (rgbin !== shres_prev) && diff_count != 16'hffff)
                     diff_count <= diff_count + 1'b1;
             end
@@ -246,23 +265,29 @@ always @(posedge cap_clk) begin
                 end else begin
                     half <= 0;
                     if (cap_x > 2)
-                        linebuf[cap_x] <= {8'b0, filtered_sample};
+                        linebuf[capture_buf_addr] <= {8'b0, filtered_sample};
                     else
-                        linebuf[cap_x] <= 32'b0;
+                        linebuf[capture_buf_addr] <= 32'b0;
                     cap_x <= cap_x + 1'b1;
                 end
             end else begin
                 if (cap_x > 2)
-                    linebuf[cap_x] <= {8'b0, rgbin};
+                    linebuf[capture_buf_addr] <= {8'b0, rgbin};
                 else
-                    linebuf[cap_x] <= 32'b0;
+                    linebuf[capture_buf_addr] <= 32'b0;
                 cap_x <= cap_x + 1'b1;
             end
         end
-    end
 
-    cap_x_done <=
-        (cap_x > (ctl_full_width_cap ? 11'h400 : 11'h200));
+        if (capture_banking_cap) begin
+            if (!cap_x_done && cap_x >= 11'd1279) begin
+                cap_x_done <= 1;
+                cap_line_toggle <= ~cap_line_toggle;
+            end
+        end else begin
+            cap_x_done <= (cap_x > 11'h200);
+        end
+    end
 end
 
 endmodule

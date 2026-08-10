@@ -1152,6 +1152,7 @@ module MNTZorro_v0_1_S00_AXI
   reg [9:0] videocap_y_sync;
   reg [9:0] videocap_ymax_sync;
   reg [11:0] videocap_save_x;
+  reg vc_saving_bank = 0;
 
   wire [10:0] vcap_x;
   wire [10:0] vcap_y;
@@ -1160,17 +1161,40 @@ module MNTZorro_v0_1_S00_AXI
   wire vcap_ntsc;
   wire vcap_x_done;
   wire vcap_shres;
+  wire vcap_line_toggle;
+  wire vcap_write_bank;
   wire [31:0] vcap_rdata;
   wire [11:0] vcap_raddr = videocap_save_x;
+  wire clkfbout_zz9000_ps_clk_wiz_1_0;
+  wire e7m_shifted;
+  wire e7m_shifted180;
+
+  /* In full-width mode the sampler finishes late enough in the raster that
+   * AXI writeback overlaps capture of the following line.  Transfer a token,
+   * completed bank, and line number together; the bank and line are stable
+   * for the whole capture line before the token changes. */
+  wire [11:0] vcap_line_payload_cap = {
+      vcap_line_toggle, vcap_write_bank, vcap_y[9:0]
+  };
+  wire [11:0] vcap_line_payload_axi;
+
+  xpm_cdc_array_single #(
+      .DEST_SYNC_FF(3),
+      .INIT_SYNC_FF(1),
+      .SIM_ASSERT_CHK(0),
+      .SRC_INPUT_REG(0),
+      .WIDTH(12)
+  ) videocap_line_cdc (
+      .src_clk(e7m_shifted),
+      .src_in(vcap_line_payload_cap),
+      .dest_clk(S_AXI_ACLK),
+      .dest_out(vcap_line_payload_axi)
+  );
 
   reg E7M_PSEN = 0;
   reg E7M_PSINCDEC = 0;
   reg E7M_RESET = 0;
   reg E7M_PWRDWN = 0;
-
-  wire clkfbout_zz9000_ps_clk_wiz_1_0;
-  wire e7m_shifted;
-  wire e7m_shifted180;
 
   // video capture clock adjustment
   MMCME2_ADV #(
@@ -1284,7 +1308,10 @@ module MNTZorro_v0_1_S00_AXI
       .cap_ntsc(vcap_ntsc),
       .cap_x_done(vcap_x_done),
       .cap_shres(vcap_shres),
+      .cap_line_toggle(vcap_line_toggle),
+      .cap_write_bank(vcap_write_bank),
       .axi_clk(S_AXI_ACLK),
+      .buf_rbank(vc_saving_bank),
       .buf_raddr(vcap_raddr),
       .buf_rdata(vcap_rdata)
   );
@@ -1366,6 +1393,8 @@ module MNTZorro_v0_1_S00_AXI
   reg [9:0] videocap_x_sync;
   reg [9:0] vc_saving_line;
   reg [9:0] videocap_y_sync2;
+  reg vcap_line_toggle_seen = 0;
+  reg videocap_bank_sync = 0;
 
   // pipeline stages for videocap save addr calculation
   reg [23:0] vc_saveaddr1;
@@ -1400,7 +1429,12 @@ module MNTZorro_v0_1_S00_AXI
     else
       videocap_ymax_sync <= vcap_ymax;
 
-    if (vcap_x_done) begin
+    if (videocap_writeback_full_width &&
+        vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
+      vcap_line_toggle_seen <= vcap_line_payload_axi[11];
+      videocap_bank_sync <= vcap_line_payload_axi[10];
+      videocap_y_sync <= vcap_line_payload_axi[9:0];
+    end else if (!videocap_writeback_full_width && vcap_x_done) begin
       videocap_y_sync <= videocap_y_sync2;
     end
 `endif
@@ -1412,11 +1446,15 @@ module MNTZorro_v0_1_S00_AXI
     // FIXME
     if (videocap_save_line_done!=videocap_y_sync) begin
       vc_saving_line <= videocap_y_sync;
+      vc_saving_bank <= videocap_bank_sync;
     end
 
     if (m01_axi_aresetn == 0) begin
       videocap_save_state <= 4;
       videocap_save_x <= 0;
+      vcap_line_toggle_seen <= vcap_line_payload_axi[11];
+      videocap_bank_sync <= vcap_line_payload_axi[10];
+      vc_saving_bank <= 0;
       vc_beat <= 0;
       m01_axi_wvalid_out  <= 0;
       m01_axi_awvalid_out <= 0;
