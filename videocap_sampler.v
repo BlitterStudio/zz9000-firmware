@@ -43,7 +43,7 @@ localparam [1:0] CONTROL_RETURN = 2'd3;
 
 localparam [11:0] CROP_H_COMPAT = 12'd188;
 localparam [11:0] CROP_V_COMPAT = 12'd26;
-localparam [11:0] CROP_H_FULLRATE = 12'd279;
+localparam [11:0] CROP_H_FULLRATE = 12'd280;
 localparam [11:0] CROP_V_FULLRATE = 12'd40;
 
 reg [1:0] control_state = CONTROL_IDLE;

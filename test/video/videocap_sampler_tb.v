@@ -797,7 +797,7 @@ initial begin
     check_eq("control_ack_returned_low", dut.ctl_dest_ack, 0);
     check_eq("mixed_auto_raw", control_applied_raw, focused_raw);
     check_eq("mixed_auto_fullrate_effective", control_applied_effective,
-             (4095 << 16) | 279);
+             (4095 << 16) | 280);
     check_eq("mixed_auto_compat_effective", legacy_control_applied_effective,
              (4095 << 16) | 188);
     check_eq("writeback_owner_full_width", control_applied_raw[2], 1);

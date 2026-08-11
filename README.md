@@ -152,7 +152,7 @@ remove those when migrating.
 
 Automatic framing is resolved independently for each crop axis by the FPGA
 capture path. A full-rate bitstream using a full-width native-video profile
-uses `279/40`; filtered profiles and Denise-adapter/Super Denise bitstreams use
+uses `280/40`; filtered profiles and Denise-adapter/Super Denise bitstreams use
 the historical `188/26`. An explicit numeric key is always a literal Custom
 override, including `188`, `26`, `0`, and `4095`.
 

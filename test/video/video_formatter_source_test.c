@@ -519,7 +519,7 @@ static int test_videocap_automatic_crop_is_path_aware(const char *mntzorro,
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "localparam [11:0] VCAP_CROP_V_COMPAT = 12'd26;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "localparam [11:0] CROP_H_FULLRATE = 12'd279;");
+	    "localparam [11:0] CROP_H_FULLRATE = 12'd280;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "localparam [11:0] CROP_V_FULLRATE = 12'd40;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
