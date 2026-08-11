@@ -156,10 +156,32 @@ uses `279/40`; filtered profiles and Denise-adapter/Super Denise bitstreams use
 the historical `188/26`. An explicit numeric key is always a literal Custom
 override, including `188`, `26`, `0`, and `4095`.
 
+Firmware 2.10 and the matching protocol-1 bitstream also expose acknowledged
+live framing control for ZZTop 2.8. The FPGA publishes the exact applied raw
+Automatic/Custom state, resolved effective H/V values, capture-path signature,
+and detected PAL/NTSC standard. A valid live change crosses clock domains as
+one coherent word and becomes active only at a capture-frame boundary; the
+host does not treat it as applied until the matching sequence is acknowledged.
+Both the firmware revision and exact bitstream capability are required, so an
+old/new mixed installation fails closed and retains ordinary Automatic/manual
+Custom editing without offering live calibration.
+
+In ZZTop, **Calibrate** opens a native chipset PAL/NTSC test screen. Arrows move
+the visible picture by one unit, Shift+Arrows by 16, Enter returns an explicit
+Custom pair to Advanced Video, and Escape restores the exact entry state.
+Enter does not write the card: Advanced **Done** stages the pair and the main
+Settings **Save** action persists `videocap_crop_h` and `videocap_crop_v`.
+Changing to a different applied capture path requires Automatic + Save + cold
+boot before calibrating that path. If live acknowledgement stops because
+capture frames disappear, ZZTop keeps the calibration/rollback UI open rather
+than claiming success; cold boot remains the authoritative recovery to the
+last persisted CFG.
+
 ZZTop can edit this file in place from AmigaOS (Project menu →
 Settings), writing it back over the FWUP path with a `ZZ9000.bak`
 backup. It rewrites the whole file from the keys it knows, so use
-**ZZTop 2.7 or newer**. Version 2.6 exposes the older independent full-width and
+**ZZTop 2.7 or newer** for schema-safe editing, and ZZTop 2.8 for live
+calibration. Version 2.6 exposes the older independent full-width and
 refresh controls, 2.5 predates the full-width and crop controls,
 2.4 predates `videocap_sample`, and 2.3 also predates
 `offscreen_bitmaps` and `video_overlay`; those older versions would drop
