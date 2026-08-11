@@ -1538,6 +1538,7 @@ module MNTZorro_v0_1_S00_AXI
 
   // pipeline stages for videocap save addr calculation
   reg [23:0] vc_saveaddr1;
+  reg [9:0] vc_saveaddr_line;
   reg [31:0] vc_saveaddr2;
   reg [31:0] vc_saveaddr3;
 
@@ -1579,7 +1580,11 @@ module MNTZorro_v0_1_S00_AXI
     end
 `endif
 
+    /* Track which row produced the pipelined base.  vc_saving_line changes
+     * through a nonblocking assignment, so the product still belongs to the
+     * preceding row for one AXI clock after a completed-line handoff. */
     vc_saveaddr1 <= vc_saving_line*videocap_pitch_sync;
+    vc_saveaddr_line <= vc_saving_line;
     //vc_saveaddr2 <= (vc_saveaddr1+videocap_save_x)<<2;
     //vc_saveaddr3 <= videocap_address+vc_saveaddr2;
 
@@ -1640,7 +1645,8 @@ module MNTZorro_v0_1_S00_AXI
           if (videocap_save_x >= videocap_pitch_sync) begin
             videocap_save_line_done <= vc_saving_line;
             videocap_save_x <= 0;
-          end else if (videocap_save_line_done != vc_saving_line) begin
+          end else if (videocap_save_line_done != vc_saving_line &&
+              vc_saveaddr_line == vc_saving_line) begin
             m01_axi_awvalid_out <= 1;
             videocap_save_state <= 3;
           end

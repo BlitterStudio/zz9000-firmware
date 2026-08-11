@@ -341,6 +341,16 @@ static int test_videocap_writeback_uses_axi_bursts(const char *text)
 	ok &= require_source_contains("mntzorro.v", text,
 	    "wire [10:0] vcap_wdata_source_x =\n"
 	    "      videocap_save_x[10:0];");
+	/* vc_saving_line changes one AXI clock before vc_saveaddr1 contains that
+	 * line's product.  The first burst must wait for matching provenance or
+	 * it is addressed into the preceding framebuffer row. */
+	ok &= require_source_contains("mntzorro.v", text,
+	    "reg [9:0] vc_saveaddr_line;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "vc_saveaddr_line <= vc_saving_line;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "videocap_save_line_done != vc_saving_line &&\n"
+	    "              vc_saveaddr_line == vc_saving_line");
 	ok &= require_source_absent("mntzorro.v", text,
 	    "videocap_save_x[10:0] - 1'b1",
 	    "accepted-beat owner still assumes speculative BRAM prefetch");
