@@ -132,8 +132,8 @@ sample; the copy at the repo root documents every option:
 |---|---|---|
 | `videocap_profile` | `full_60` (default), `full_exact`, `filtered_60`, `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact` | atomic native-video output policy |
 | `videocap_sample` | `average` (default), `even`, `odd` | native-video capture sample selection |
-| `videocap_crop_h` | `0`–`4095` (default `188`) | horizontal capture origin in 28 MHz samples |
-| `videocap_crop_v` | `0`–`4095` (default `26`) | vertical capture origin in lines |
+| `videocap_crop_h` | `0`–`4095` (missing = Automatic) | horizontal capture origin in 28 MHz samples |
+| `videocap_crop_v` | `0`–`4095` (missing = Automatic) | vertical capture origin in lines |
 | `scanline_mode` | `0` (off, default) – `3` | ZZTop/ZZScanlines (still work at runtime) |
 | `scanline_parity` | `0` (default), `1` | ZZTop/ZZScanlines |
 | `int2` | `off` (default), `on` | `ENV:ZZ9K_INT2` (drivers query it) |
@@ -149,6 +149,12 @@ driver-consumed options (`int2`, `mac`, `videocap_mode`,
 `nonstandard_vsync`, `offscreen_bitmaps`, `video_overlay`), an existing
 `ENV:` variable or RTG tooltype takes precedence over the config file —
 remove those when migrating.
+
+Automatic framing is resolved independently for each crop axis by the FPGA
+capture path. A full-rate bitstream using a full-width native-video profile
+uses `279/40`; filtered profiles and Denise-adapter/Super Denise bitstreams use
+the historical `188/26`. An explicit numeric key is always a literal Custom
+override, including `188`, `26`, `0`, and `4095`.
 
 ZZTop can edit this file in place from AmigaOS (Project menu →
 Settings), writing it back over the FWUP path with a `ZZ9000.bak`

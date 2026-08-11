@@ -1176,10 +1176,24 @@ module MNTZorro_v0_1_S00_AXI
   reg videocap_mode;
   reg videocap_mode_in;
   reg [31:0] videocap_address = `VIDEOCAP_ADDR;
+  localparam [11:0] VCAP_CROP_H_COMPAT = 12'd188;
+  localparam [11:0] VCAP_CROP_V_COMPAT = 12'd26;
+  localparam [11:0] VCAP_CROP_H_FULLRATE = 12'd279;
+  localparam [11:0] VCAP_CROP_V_FULLRATE = 12'd40;
   reg [1:0] videocap_sample_mode = 2'd0;
   reg videocap_full_width = 1'b0;
-  reg [11:0] videocap_crop_h = 12'd188;
-  reg [11:0] videocap_crop_v = 12'd26;
+  reg [11:0] videocap_crop_h = VCAP_CROP_H_COMPAT;
+  reg [11:0] videocap_crop_v = VCAP_CROP_V_COMPAT;
+  reg videocap_crop_h_auto = 1'b0;
+  reg videocap_crop_v_auto = 1'b0;
+  wire videocap_fullrate_path =
+      (`VCAP_FULLRATE_INT != 0) && videocap_full_width;
+  wire [11:0] videocap_crop_h_effective = videocap_crop_h_auto ?
+      (videocap_fullrate_path ? VCAP_CROP_H_FULLRATE :
+       VCAP_CROP_H_COMPAT) : videocap_crop_h;
+  wire [11:0] videocap_crop_v_effective = videocap_crop_v_auto ?
+      (videocap_fullrate_path ? VCAP_CROP_V_FULLRATE :
+       VCAP_CROP_V_COMPAT) : videocap_crop_v;
   reg [9:0] videocap_y_sync;
   reg [9:0] videocap_ymax_sync;
   reg [11:0] videocap_save_x;
@@ -1356,8 +1370,8 @@ module MNTZorro_v0_1_S00_AXI
                VCAP_B3, VCAP_B2, VCAP_B1, VCAP_B0}),
       .ctl_sample_mode(videocap_sample_mode),
       .ctl_full_width(videocap_full_width),
-      .ctl_crop_h(videocap_crop_h),
-      .ctl_crop_v(videocap_crop_v),
+      .ctl_crop_h(videocap_crop_h_effective),
+      .ctl_crop_v(videocap_crop_v_effective),
       .cap_x(vcap_x),
       .cap_y(vcap_y),
       .cap_ymax(vcap_ymax),
@@ -2881,13 +2895,16 @@ module MNTZorro_v0_1_S00_AXI
 
     // Snoop videocap sampler control (MNTVF_OP_VIDEOCAP). The video
     // formatter declares op 16 as ignored; it exists so the ARM can apply
-    // ZZ9000.CFG videocap options at cold boot.
+    // ZZ9000.CFG videocap options at cold boot. Automatic axes are resolved
+    // here because the bitstream owns the capture-path distinction.
     if (video_control_op == 16) begin
       // OP_VIDEOCAP = 16
       videocap_sample_mode <= video_control_data[1:0];
       videocap_full_width  <= video_control_data[2];
       videocap_crop_h      <= video_control_data[15:4];
       videocap_crop_v      <= video_control_data[27:16];
+      videocap_crop_h_auto <= video_control_data[28];
+      videocap_crop_v_auto <= video_control_data[29];
     end
 
     out_reg0 <= ZORRO3 ? last_z3addr : last_addr;

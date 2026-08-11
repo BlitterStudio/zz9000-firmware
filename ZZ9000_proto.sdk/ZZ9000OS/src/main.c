@@ -380,14 +380,19 @@ int main() {
 		uint32_t full = cfg->videocap_shres_present ? cfg->videocap_shres :
 		                VIDEOCAP_FULL_WIDTH_DEFAULT;
 		uint32_t crop_h = cfg->videocap_crop_h_present ? cfg->videocap_crop_h :
-		                  VIDEOCAP_CROP_H_DEFAULT;
+		                  VIDEOCAP_CROP_H_COMPAT;
 		uint32_t crop_v = cfg->videocap_crop_v_present ? cfg->videocap_crop_v :
-		                  VIDEOCAP_CROP_V_DEFAULT;
-		video_formatter_write((crop_v << 16) | (crop_h << 4) |
-		                      ((full & 1) << 2) | (sample & 3),
+		                  VIDEOCAP_CROP_V_COMPAT;
+		video_formatter_write(videocap_control_pack(
+		                      sample, full,
+		                      cfg->videocap_crop_h, cfg->videocap_crop_v,
+		                      cfg->videocap_crop_h_present,
+		                      cfg->videocap_crop_v_present),
 		                      MNTVF_OP_VIDEOCAP);
-		printf("[CFG] videocap: sample %lu shres %lu crop %lu,%lu\n",
-		       sample, full, crop_h, crop_v);
+		printf("[CFG] videocap: sample %lu shres %lu crop %lu,%lu auto %lu,%lu\n",
+		       sample, full, crop_h, crop_v,
+		       (uint32_t)!cfg->videocap_crop_h_present,
+		       (uint32_t)!cfg->videocap_crop_v_present);
 	}
 
 	// RTG rect ops may write anywhere in framebuffer + legacy surface

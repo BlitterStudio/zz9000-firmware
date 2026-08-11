@@ -103,6 +103,8 @@ static void test_defaults_absent(void) {
     const struct zz_config *c = zz_config_get();
     CHECK(!c->loaded);
     CHECK(!c->videocap_mode_present);
+    CHECK(!c->videocap_crop_h_present);
+    CHECK(!c->videocap_crop_v_present);
     CHECK(!c->ns_vsync_present);
     CHECK(!c->scanline_mode_present);
     CHECK(!c->scanline_parity_present);
@@ -228,6 +230,20 @@ static void test_videocap_shres_and_crop(void) {
     CHECK(zz_config_get()->videocap_crop_v == 30);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_H, &present) == 200 && present);
     CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_V, &present) == 30 && present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_crop_h = 279\n") == 1);
+    CHECK(zz_config_get()->videocap_crop_h_present);
+    CHECK(!zz_config_get()->videocap_crop_v_present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_H, &present) == 279 && present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_V, &present) == 0 && !present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_crop_v = 40\n") == 1);
+    CHECK(!zz_config_get()->videocap_crop_h_present);
+    CHECK(zz_config_get()->videocap_crop_v_present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_H, &present) == 0 && !present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_V, &present) == 40 && present);
 
     zz_config_reset();
     CHECK(parse_str("videocap_crop_h = 4096\nvideocap_crop_v = 65536\n") == 0);

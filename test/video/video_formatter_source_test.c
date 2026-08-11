@@ -507,6 +507,41 @@ static int test_videocap_interlace_uses_raw_horizontal_phase(
 	return ok ? 0 : 1;
 }
 
+static int test_videocap_automatic_crop_is_path_aware(const char *mntzorro)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [11:0] VCAP_CROP_H_COMPAT = 12'd188;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [11:0] VCAP_CROP_V_COMPAT = 12'd26;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [11:0] VCAP_CROP_H_FULLRATE = 12'd279;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [11:0] VCAP_CROP_V_FULLRATE = 12'd40;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "wire videocap_fullrate_path =\n"
+	    "      (`VCAP_FULLRATE_INT != 0) && videocap_full_width;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "wire [11:0] videocap_crop_h_effective = videocap_crop_h_auto ?\n"
+	    "      (videocap_fullrate_path ? VCAP_CROP_H_FULLRATE :\n"
+	    "       VCAP_CROP_H_COMPAT) : videocap_crop_h;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "wire [11:0] videocap_crop_v_effective = videocap_crop_v_auto ?\n"
+	    "      (videocap_fullrate_path ? VCAP_CROP_V_FULLRATE :\n"
+	    "       VCAP_CROP_V_COMPAT) : videocap_crop_v;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    ".ctl_crop_h(videocap_crop_h_effective)");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    ".ctl_crop_v(videocap_crop_v_effective)");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "videocap_crop_h_auto <= video_control_data[28];");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "videocap_crop_v_auto <= video_control_data[29];");
+
+	return ok ? 0 : 1;
+}
+
 static int test_mode_switch_retrains_display(const char *video,
 	const char *hdmi)
 {
@@ -603,6 +638,8 @@ int main(void)
 			mntzorro, sampler);
 	if (!result)
 		result = test_videocap_interlace_uses_raw_horizontal_phase(sampler);
+	if (!result)
+		result = test_videocap_automatic_crop_is_path_aware(mntzorro);
 	free(sampler);
 	free(mntzorro);
 
