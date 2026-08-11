@@ -168,14 +168,11 @@ wire [23:0] filtered_sample =
 wire [31:0] capture_store_word = {8'b0,
     filter_pairs ? filtered_sample : rgbin};
 
-/* The full-rate AGA capture starts close enough to the horizontal raster
- * boundary that the first samples can still contain an adjacent row's
- * post-window tail.  Hardware captures show that samples 3-14 mirror that
- * tail while sample 15 is the first stable pixel of the selected row.  Keep
- * the established three-pixel guard for filtered/legacy capture and extend
- * it to one 16-pixel writeback burst for full-width capture. */
+/* Full-width crop_h names the first displayed 28 MHz sample, so preserve its
+ * complete 1280-sample window.  The filtered/legacy path retains its
+ * historical three-pixel settling guard. */
 wire capture_head_valid = capture_banking_cap ?
-    (cap_x >= 11'd15) : (cap_x > 11'd2);
+    1'b1 : (cap_x > 11'd2);
 
 wire probe_arm_toggle_cap;
 reg probe_waiting = 0;

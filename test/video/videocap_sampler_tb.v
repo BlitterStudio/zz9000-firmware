@@ -10,7 +10,13 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-module videocap_sampler_tb;
+module videocap_sampler_tb #(
+    parameter integer DEFAULT_PIXSPAN = 2,
+    parameter integer DEFAULT_SAMPLEMODE = 0,
+    parameter integer DEFAULT_FULLWIDTH = 0,
+    parameter integer DEFAULT_CROPH = 188,
+    parameter integer DEFAULT_CROPV = 26
+);
 
 integer PIXSPAN;
 integer SAMPLEMODE;
@@ -248,7 +254,7 @@ task check_completed_bank_during_next_line;
                      completed_bank);
         end
 
-        check_full_width_bank_entry(completed_bank, 12'd15, pattern_seed);
+        check_full_width_bank_entry(completed_bank, 12'd0, pattern_seed);
         check_full_width_bank_entry(completed_bank, 12'd640, pattern_seed);
         check_full_width_bank_entry(completed_bank, 12'd900, pattern_seed);
     end
@@ -377,11 +383,11 @@ reg [7:0] odd_g;
 reg [7:0] odd_b;
 
 initial begin
-    PIXSPAN = 2;
-    SAMPLEMODE = 0;
-    FULLWIDTH = 0;
-    CROPH = 188;
-    CROPV = 26;
+    PIXSPAN = DEFAULT_PIXSPAN;
+    SAMPLEMODE = DEFAULT_SAMPLEMODE;
+    FULLWIDTH = DEFAULT_FULLWIDTH;
+    CROPH = DEFAULT_CROPH;
+    CROPV = DEFAULT_CROPV;
     LINES = 40;
     LINECLKS = 1816;
     first_full_width_ready_x = -1;
@@ -484,13 +490,7 @@ initial begin
 
     /* The final active raster line remains in its completed bank. */
     buf_rbank = FULLWIDTH ? cap_write_bank : 1'b0;
-    if (FULLWIDTH) begin
-        for (k = 0; k < 15; k = k + 1) begin
-            buf_read(k[11:0], got);
-            check_eq("full_width_head_guard", got[23:0], 24'b0);
-        end
-    end
-    for (k = (FULLWIDTH ? 15 : 4);
+    for (k = (FULLWIDTH ? 0 : 4);
             k < (FULLWIDTH ? 1280 : 32); k = k + 1) begin
         buf_read(k[11:0], got);
         sample_idx = CROPH + k * (FULLWIDTH ? 1 : 2)
