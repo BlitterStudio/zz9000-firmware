@@ -68,6 +68,34 @@ wire [31:0] probe_precrop_context;
 reg [5:0] probe_precrop_raddr = 0;
 wire [31:0] probe_precrop_rdata;
 wire legacy_cap_shres;
+reg control_request_event = 0;
+reg [31:0] control_request_raw = 0;
+reg control_request_token_valid = 1;
+wire control_send;
+wire [26:0] control_payload;
+wire control_received;
+wire control_busy;
+wire [7:0] control_request_sequence;
+wire [7:0] control_applied_sequence;
+wire control_rejected;
+wire control_applied_valid;
+wire [31:0] control_applied_raw;
+wire [31:0] control_applied_effective;
+wire legacy_control_send;
+wire [26:0] legacy_control_payload;
+wire legacy_control_received;
+wire legacy_control_busy;
+wire [7:0] legacy_control_request_sequence;
+wire [7:0] legacy_control_applied_sequence;
+wire legacy_control_rejected;
+wire legacy_control_applied_valid;
+wire [31:0] legacy_control_applied_raw;
+wire [31:0] legacy_control_applied_effective;
+wire [1:0] detected_standard;
+wire [1:0] legacy_detected_standard;
+reg standard_frame_complete = 0;
+reg standard_frame_ntsc = 0;
+wire [1:0] tracked_standard;
 reg layout_full_width = 0;
 reg [11:0] layout_source_x = 0;
 wire [11:0] layout_dest_x;
@@ -81,6 +109,52 @@ videocap_writeback_layout #(
     .full_width(layout_full_width),
     .source_x(layout_source_x),
     .dest_x(layout_dest_x)
+);
+
+videocap_control_source #(
+    .FULLRATE(1)
+) control_source (
+    .source_clk(axi_clk),
+    .request_event(control_request_event),
+    .request_raw(control_request_raw),
+    .request_token_valid(control_request_token_valid),
+    .control_received(control_received),
+    .control_send(control_send),
+    .control_payload(control_payload),
+    .busy(control_busy),
+    .request_sequence(control_request_sequence),
+    .applied_sequence(control_applied_sequence),
+    .last_commit_rejected(control_rejected),
+    .applied_valid(control_applied_valid),
+    .applied_raw(control_applied_raw),
+    .applied_effective_crop(control_applied_effective)
+);
+
+videocap_control_source #(
+    .FULLRATE(0)
+) legacy_control_source (
+    .source_clk(axi_clk),
+    .request_event(control_request_event),
+    .request_raw(control_request_raw),
+    .request_token_valid(control_request_token_valid),
+    .control_received(legacy_control_received),
+    .control_send(legacy_control_send),
+    .control_payload(legacy_control_payload),
+    .busy(legacy_control_busy),
+    .request_sequence(legacy_control_request_sequence),
+    .applied_sequence(legacy_control_applied_sequence),
+    .last_commit_rejected(legacy_control_rejected),
+    .applied_valid(legacy_control_applied_valid),
+    .applied_raw(legacy_control_applied_raw),
+    .applied_effective_crop(legacy_control_applied_effective)
+);
+
+videocap_standard_cdc standard_tracker (
+    .cap_clk(cap_clk),
+    .axi_clk(axi_clk),
+    .frame_complete(standard_frame_complete),
+    .frame_ntsc(standard_frame_ntsc),
+    .standard_axi(tracked_standard)
 );
 
 videocap_sampler #(
@@ -97,10 +171,11 @@ videocap_sampler #(
     .vcap_r(r),
     .vcap_g(g),
     .vcap_b(b),
-    .ctl_sample_mode(SAMPLEMODE[1:0]),
-    .ctl_full_width(FULLWIDTH[0]),
-    .ctl_crop_h(CROPH[11:0]),
-    .ctl_crop_v(CROPV[11:0]),
+    .ctl_send(control_send),
+    .ctl_payload(control_payload),
+    .ctl_received(control_received),
+    .ctl_read_full_width(control_applied_raw[2]),
+    .detected_standard(detected_standard),
     .cap_x(cap_x),
     .cap_y(cap_y),
     .cap_ymax(cap_ymax),
@@ -142,10 +217,11 @@ videocap_sampler #(
     .vcap_r(r),
     .vcap_g(g),
     .vcap_b(b),
-    .ctl_sample_mode(SAMPLEMODE[1:0]),
-    .ctl_full_width(FULLWIDTH[0]),
-    .ctl_crop_h(CROPH[11:0]),
-    .ctl_crop_v(CROPV[11:0]),
+    .ctl_send(legacy_control_send),
+    .ctl_payload(legacy_control_payload),
+    .ctl_received(legacy_control_received),
+    .ctl_read_full_width(legacy_control_applied_raw[2]),
+    .detected_standard(legacy_detected_standard),
     .cap_x(),
     .cap_y(),
     .cap_ymax(),
@@ -189,6 +265,72 @@ task check_eq;
             errors = errors + 1;
             $display("MISMATCH %0s got=%08x want=%08x", name, got, want);
         end
+    end
+endtask
+
+task pulse_control_request;
+    input [31:0] raw;
+    input token_valid;
+    begin
+        @(negedge axi_clk);
+        control_request_raw = raw;
+        control_request_token_valid = token_valid;
+        control_request_event = 1;
+        @(negedge axi_clk);
+        control_request_event = 0;
+        control_request_token_valid = 1;
+    end
+endtask
+
+task wait_control_complete;
+    integer timeout;
+    begin
+        timeout = 0;
+        while ((control_busy || legacy_control_busy) && timeout < 200) begin
+            @(posedge axi_clk);
+            timeout = timeout + 1;
+        end
+        checks = checks + 1;
+        if (control_busy || legacy_control_busy) begin
+            errors = errors + 1;
+            $display("MISMATCH control handshake did not return to zero");
+        end
+    end
+endtask
+
+task force_control_frame_boundary;
+    begin
+        @(negedge cap_clk);
+        force dut.frame_sync = 1'b1;
+        force legacy_dut.frame_sync = 1'b1;
+        @(posedge cap_clk);
+        #1;
+        release dut.frame_sync;
+        release legacy_dut.frame_sync;
+    end
+endtask
+
+task pulse_standard_frame;
+    input ntsc;
+    begin
+        @(negedge cap_clk);
+        standard_frame_ntsc = ntsc;
+        standard_frame_complete = 1;
+        @(negedge cap_clk);
+        standard_frame_complete = 0;
+    end
+endtask
+
+task wait_standard_value;
+    input [1:0] want;
+    integer timeout;
+    begin
+        timeout = 0;
+        while (tracked_standard !== want && timeout < 200) begin
+            @(posedge axi_clk);
+            timeout = timeout + 1;
+        end
+        check_eq("tracked_standard", tracked_standard, want);
     end
 endtask
 
@@ -427,6 +569,10 @@ reg [7:0] odd_r;
 reg [7:0] odd_g;
 reg [7:0] odd_b;
 reg interlace_field_parity;
+reg [31:0] raw_before;
+reg [26:0] payload_before;
+reg [7:0] sequence_before;
+reg [31:0] focused_raw;
 
 initial begin
     PIXSPAN = DEFAULT_PIXSPAN;
@@ -450,6 +596,10 @@ initial begin
 
     repeat (10) @(posedge cap_clk);
     probe_arm_toggle = 1;
+
+    control_request_raw = (CROPV << 16) | (CROPH << 4) |
+                          (FULLWIDTH << 2) | SAMPLEMODE;
+    pulse_control_request(control_request_raw, 1'b1);
 
     /* Crop 292 supplies the formerly discarded 64-sample prefix directly,
      * so full-width placement no longer rotates late-line blanking into the
@@ -483,6 +633,11 @@ initial begin
     end
 
     drive_field(0, 0);
+    wait_control_complete;
+    check_eq("initial_applied_valid", control_applied_valid, 1);
+    check_eq("initial_applied_sequence", control_applied_sequence, 1);
+    check_eq("initial_applied_raw", control_applied_raw,
+             control_request_raw);
     drive_field(0, 1);
 
     check_eq("cap_shres", cap_shres, (PIXSPAN == 1));
@@ -583,6 +738,114 @@ initial begin
     drive_field_with_vsync_phase(400, 400 + LINECLKS / 2);
     check_eq("fullrate_field_parity_a", cap_y[0],
              !interlace_field_parity);
+
+    /* The standalone tracker makes the two-frame validity rule explicit
+     * without lengthening every pixel-format raster configuration. */
+    check_eq("standard_startup_invalid", tracked_standard, 0);
+    pulse_standard_frame(1'b0);
+    repeat (20) @(posedge axi_clk);
+    check_eq("standard_first_pal_invalid", tracked_standard, 0);
+    pulse_standard_frame(1'b0);
+    wait_standard_value(2'd1);
+    pulse_standard_frame(1'b1);
+    wait_standard_value(2'd0);
+    pulse_standard_frame(1'b1);
+    wait_standard_value(2'd2);
+    pulse_standard_frame(1'b0);
+    wait_standard_value(2'd0);
+    pulse_standard_frame(1'b0);
+    wait_standard_value(2'd1);
+
+    /* Establish a known acknowledged writeback owner first. */
+    focused_raw = (26 << 16) | (188 << 4);
+    pulse_control_request(focused_raw, 1'b1);
+    wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
+    force_control_frame_boundary;
+    check_eq("control_ack_held_at_boundary", dut.ctl_dest_ack, 1);
+    wait_control_complete;
+    check_eq("writeback_owner_filtered", control_applied_raw[2], 0);
+
+    /* A boundary just before the synchronized request arrives must not
+     * apply it. With no following frame, busy and the old applied snapshot
+     * remain visible. A second request while busy is rejected and cannot
+     * replace the held XPM payload. */
+    force_control_frame_boundary;
+    raw_before = control_applied_raw;
+    sequence_before = control_request_sequence;
+    focused_raw = (1 << 28) | (4095 << 16) | (1 << 2) | 2;
+    pulse_control_request(focused_raw, 1'b1);
+    wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
+    payload_before = control_payload;
+    repeat (20) @(posedge cap_clk);
+    check_eq("missing_frame_busy", control_busy, 1);
+    check_eq("missing_frame_applied_raw", control_applied_raw, raw_before);
+    check_eq("missing_frame_applied_sequence", control_applied_sequence,
+             sequence_before);
+    check_eq("pending_not_writeback_truth", control_applied_raw[2], 0);
+
+    pulse_control_request((40 << 16) | (279 << 4) | 1, 1'b1);
+    repeat (4) @(posedge axi_clk);
+    check_eq("busy_commit_sequence_unchanged", control_request_sequence,
+             sequence_before + 1'b1);
+    check_eq("busy_commit_payload_unchanged", control_payload,
+             payload_before);
+    check_eq("busy_commit_rejected", control_rejected, 1);
+
+    force_control_frame_boundary;
+    check_eq("control_ack_stays_high", dut.ctl_dest_ack, 1);
+    wait_control_complete;
+    check_eq("control_ack_returned_low", dut.ctl_dest_ack, 0);
+    check_eq("mixed_auto_raw", control_applied_raw, focused_raw);
+    check_eq("mixed_auto_fullrate_effective", control_applied_effective,
+             (4095 << 16) | 279);
+    check_eq("mixed_auto_compat_effective", legacy_control_applied_effective,
+             (4095 << 16) | 188);
+    check_eq("writeback_owner_full_width", control_applied_raw[2], 1);
+    check_eq("rejection_sticky_after_inflight_apply", control_rejected, 1);
+
+    /* Reserved bits and sample mode 3 are invalid while idle. */
+    sequence_before = control_request_sequence;
+    pulse_control_request((1 << 30) | 3, 1'b1);
+    repeat (4) @(posedge axi_clk);
+    check_eq("invalid_commit_idle", control_busy, 0);
+    check_eq("invalid_commit_sequence", control_request_sequence,
+             sequence_before);
+    check_eq("invalid_commit_rejected", control_rejected, 1);
+    pulse_control_request((26 << 16) | (188 << 4), 1'b0);
+    repeat (4) @(posedge axi_clk);
+    check_eq("wrong_token_idle", control_busy, 0);
+    check_eq("wrong_token_sequence", control_request_sequence,
+             sequence_before);
+    check_eq("wrong_token_rejected", control_rejected, 1);
+
+    /* Literal 0 and 4095 stay Custom, and the next accepted request clears
+     * the sticky rejection. */
+    focused_raw = (0 << 16) | (4095 << 4);
+    pulse_control_request(focused_raw, 1'b1);
+    wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
+    force_control_frame_boundary;
+    wait_control_complete;
+    check_eq("literal_boundary_raw", control_applied_raw, focused_raw);
+    check_eq("literal_boundary_effective", control_applied_effective,
+             (0 << 16) | 4095);
+    check_eq("accepted_clears_rejected", control_rejected, 0);
+
+    /* Sequence zero is a normal modulo-256 successor, never a completion
+     * sentinel. Applied stays at ff while the no-frame request is busy. */
+    control_source.request_sequence = 8'hff;
+    control_source.applied_sequence = 8'hff;
+    legacy_control_source.request_sequence = 8'hff;
+    legacy_control_source.applied_sequence = 8'hff;
+    focused_raw = (26 << 16) | (188 << 4);
+    pulse_control_request(focused_raw, 1'b1);
+    wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
+    check_eq("sequence_wrap_requested", control_request_sequence, 0);
+    check_eq("sequence_wrap_not_applied", control_applied_sequence, 8'hff);
+    check_eq("sequence_wrap_busy", control_busy, 1);
+    force_control_frame_boundary;
+    wait_control_complete;
+    check_eq("sequence_wrap_applied", control_applied_sequence, 0);
+    check_eq("sequence_wrap_idle", control_busy, 0);
 
     if (errors == 0)
         $display("RESULT PASS checks=%0d", checks);

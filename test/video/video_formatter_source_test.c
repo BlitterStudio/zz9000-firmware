@@ -461,7 +461,7 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "wire capture_banking_cap = (FULLRATE != 0) && ctl_full_width_cap;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "wire read_banking_axi = (FULLRATE != 0) && ctl_full_width;");
+	    "wire read_banking_axi = (FULLRATE != 0) && ctl_read_full_width;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "capture_banking_cap ? capture_bank : 1'b0, cap_x");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
@@ -475,6 +475,8 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    ") videocap_line_cdc (");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "(`VCAP_FULLRATE_INT != 0) && videocap_control_applied_full_width;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "vcap_line_toggle, vcap_write_bank, vcap_y[9:0]");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
@@ -507,7 +509,8 @@ static int test_videocap_interlace_uses_raw_horizontal_phase(
 	return ok ? 0 : 1;
 }
 
-static int test_videocap_automatic_crop_is_path_aware(const char *mntzorro)
+static int test_videocap_automatic_crop_is_path_aware(const char *mntzorro,
+	const char *sampler)
 {
 	int ok = 1;
 
@@ -519,25 +522,99 @@ static int test_videocap_automatic_crop_is_path_aware(const char *mntzorro)
 	    "localparam [11:0] VCAP_CROP_H_FULLRATE = 12'd279;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "localparam [11:0] VCAP_CROP_V_FULLRATE = 12'd40;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire request_fullrate_path = (FULLRATE != 0) && request_raw[2];");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire [11:0] request_crop_h_effective = request_raw[28] ?\n"
+	    "    (request_fullrate_path ? CROP_H_FULLRATE : CROP_H_COMPAT) :\n"
+	    "    request_raw[15:4];");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire [11:0] request_crop_v_effective = request_raw[29] ?\n"
+	    "    (request_fullrate_path ? CROP_V_FULLRATE : CROP_V_COMPAT) :\n"
+	    "    request_raw[27:16];");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "control_payload <= {request_crop_v_effective,\n"
+	    "                                        request_crop_h_effective,");
+
+	return ok ? 0 : 1;
+}
+
+static int test_videocap_live_control_contract(const char *mntzorro,
+	const char *sampler)
+{
+	int ok = 1;
+
+	/* The host sees these at 0x1400..0x1414; direct-register decoding
+	 * subtracts the aperture's 0x1000-byte base before reaching this case. */
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "wire videocap_fullrate_path =\n"
-	    "      (`VCAP_FULLRATE_INT != 0) && videocap_full_width;");
+	    "localparam [15:0] VCAP_LIVE_CAPABILITY = 16'h0400;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "wire [11:0] videocap_crop_h_effective = videocap_crop_h_auto ?\n"
-	    "      (videocap_fullrate_path ? VCAP_CROP_H_FULLRATE :\n"
-	    "       VCAP_CROP_H_COMPAT) : videocap_crop_h;");
+	    "localparam [31:0] VCAP_LIVE_CAPABILITY_VALUE = 32'h564c010f;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "wire [11:0] videocap_crop_v_effective = videocap_crop_v_auto ?\n"
-	    "      (videocap_fullrate_path ? VCAP_CROP_V_FULLRATE :\n"
-	    "       VCAP_CROP_V_COMPAT) : videocap_crop_v;");
+	    "localparam [15:0] VCAP_LIVE_COMMIT_TOKEN = 16'hca1b;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    ".ctl_crop_h(videocap_crop_h_effective)");
+	    "VCAP_LIVE_CAPABILITY,\n            VCAP_LIVE_CAPABILITY_LO:");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    ".ctl_crop_v(videocap_crop_v_effective)");
+	    "VCAP_LIVE_STATUS,\n            VCAP_LIVE_STATUS_LO:");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "videocap_crop_h_auto <= video_control_data[28];");
+	    "VCAP_LIVE_APPLIED_RAW,\n            VCAP_LIVE_APPLIED_RAW_LO:");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "videocap_crop_v_auto <= video_control_data[29];");
+	    "VCAP_LIVE_EFFECTIVE_CROP,\n            VCAP_LIVE_EFFECTIVE_CROP_LO:");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_LIVE_STAGED_RAW_HI:");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_LIVE_STAGED_RAW_LO:");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_LIVE_COMMIT:");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "(regread_addr & SDK_REG_OFFSET_MASK) >=\n"
+	    "                      VCAP_LIVE_CAPABILITY");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "(regwrite_addr & SDK_REG_OFFSET_MASK) <\n"
+	    "                      VCAP_LIVE_CAPABILITY ||");
+
+	/* The request engine and sampler handshake are intentionally separate:
+	 * pending data is never sampler or writeback truth. */
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "module videocap_control_source #(");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    ".DEST_EXT_HSK(1)");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    ".DEST_SYNC_FF(4)");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    ".SRC_SYNC_FF(4)");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    ".WIDTH(27)");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "if (!ctl_dest_ack && frame_sync) begin");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "ctl_dest_ack <= 1'b1;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "if (!ctl_dest_req)\n        ctl_dest_ack <= 1'b0;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "request_raw[31:30] == 2'b00 && request_raw[1:0] <= 2'd2");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "applied_raw <= pending_raw;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "applied_sequence <= request_sequence;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "module videocap_standard_cdc (");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "localparam [1:0] STANDARD_INVALID = 2'd0;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "localparam [1:0] STANDARD_NTSC = 2'd2;");
+
+	/* Operation 16 is event-driven. The stale Zorro OP register and a held
+	 * ARM command level must not continuously retrigger the arbiter. */
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "wire video_control_axi_op16_event =");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "axi_reg2[31] && !video_control_axi_strobe_d");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "videocap_control_zorro_event <= 1'b1;");
+	ok &= require_source_absent("mntzorro.v", mntzorro,
+	    "if (video_control_op == 16) begin",
+	    "persistent operation register still directly controls capture");
 
 	return ok ? 0 : 1;
 }
@@ -639,7 +716,10 @@ int main(void)
 	if (!result)
 		result = test_videocap_interlace_uses_raw_horizontal_phase(sampler);
 	if (!result)
-		result = test_videocap_automatic_crop_is_path_aware(mntzorro);
+		result = test_videocap_automatic_crop_is_path_aware(mntzorro,
+			sampler);
+	if (!result)
+		result = test_videocap_live_control_contract(mntzorro, sampler);
 	free(sampler);
 	free(mntzorro);
 

@@ -11,6 +11,203 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+/* Source-clock request engine.  The staged register bank and the three
+ * operation-16 event sources live in mntzorro.v; this module owns the
+ * pending and acknowledged state so it can also be exercised by xsim. */
+module videocap_control_source #(
+    parameter integer FULLRATE = 0
+) (
+    input  wire        source_clk,
+    input  wire        request_event,
+    input  wire [31:0] request_raw,
+    input  wire        request_token_valid,
+    input  wire        control_received,
+    output reg         control_send = 0,
+    output reg  [26:0] control_payload =
+        {12'd26, 12'd188, 1'b0, 2'd0},
+    output wire        busy,
+    output reg  [7:0]  request_sequence = 0,
+    output reg  [7:0]  applied_sequence = 0,
+    output reg         last_commit_rejected = 0,
+    output reg         applied_valid = 0,
+    output reg  [31:0] applied_raw =
+        {2'b00, 1'b0, 1'b0, 12'd26, 12'd188, 1'b0, 1'b0, 2'd0},
+    output reg  [31:0] applied_effective_crop =
+        {4'b0000, 12'd26, 4'b0000, 12'd188}
+);
+
+localparam [1:0] CONTROL_IDLE   = 2'd0;
+localparam [1:0] CONTROL_LOAD   = 2'd1;
+localparam [1:0] CONTROL_SEND   = 2'd2;
+localparam [1:0] CONTROL_RETURN = 2'd3;
+
+localparam [11:0] CROP_H_COMPAT = 12'd188;
+localparam [11:0] CROP_V_COMPAT = 12'd26;
+localparam [11:0] CROP_H_FULLRATE = 12'd279;
+localparam [11:0] CROP_V_FULLRATE = 12'd40;
+
+reg [1:0] control_state = CONTROL_IDLE;
+reg [31:0] pending_raw =
+    {2'b00, 1'b0, 1'b0, 12'd26, 12'd188, 1'b0, 1'b0, 2'd0};
+
+wire request_fullrate_path = (FULLRATE != 0) && request_raw[2];
+wire [11:0] request_crop_h_effective = request_raw[28] ?
+    (request_fullrate_path ? CROP_H_FULLRATE : CROP_H_COMPAT) :
+    request_raw[15:4];
+wire [11:0] request_crop_v_effective = request_raw[29] ?
+    (request_fullrate_path ? CROP_V_FULLRATE : CROP_V_COMPAT) :
+    request_raw[27:16];
+wire request_raw_valid =
+    request_raw[31:30] == 2'b00 && request_raw[1:0] <= 2'd2;
+
+assign busy = (control_state != CONTROL_IDLE);
+
+always @(posedge source_clk) begin
+    /* An event observed anywhere in the four-phase busy interval is rejected
+     * without replacing the XPM-held payload or changing either sequence. */
+    if (request_event && control_state != CONTROL_IDLE)
+        last_commit_rejected <= 1'b1;
+
+    case (control_state)
+        CONTROL_IDLE: begin
+            if (request_event) begin
+                if (request_token_valid && request_raw_valid) begin
+                    pending_raw <= request_raw;
+                    control_payload <= {request_crop_v_effective,
+                                        request_crop_h_effective,
+                                        request_raw[2], request_raw[1:0]};
+                    request_sequence <= request_sequence + 1'b1;
+                    last_commit_rejected <= 1'b0;
+                    control_state <= CONTROL_LOAD;
+                end else begin
+                    last_commit_rejected <= 1'b1;
+                end
+            end
+        end
+
+        /* LOAD gives the stable payload a complete source clock before SEND. */
+        CONTROL_LOAD: begin
+            control_send <= 1'b1;
+            control_state <= CONTROL_SEND;
+        end
+
+        CONTROL_SEND: begin
+            if (control_received) begin
+                applied_raw <= pending_raw;
+                applied_effective_crop <= {
+                    4'b0000, control_payload[26:15],
+                    4'b0000, control_payload[14:3]
+                };
+                applied_sequence <= request_sequence;
+                applied_valid <= 1'b1;
+                control_send <= 1'b0;
+                control_state <= CONTROL_RETURN;
+            end
+        end
+
+        CONTROL_RETURN: begin
+            if (!control_received)
+                control_state <= CONTROL_IDLE;
+        end
+    endcase
+end
+
+endmodule
+
+/* Publish invalid/PAL/NTSC as one encoded value.  The candidate must agree
+ * for two complete frames, and every validity change crosses coherently. */
+module videocap_standard_cdc (
+    input  wire       cap_clk,
+    input  wire       axi_clk,
+    input  wire       frame_complete,
+    input  wire       frame_ntsc,
+    output reg  [1:0] standard_axi = 0
+);
+
+localparam [1:0] STANDARD_INVALID = 2'd0;
+localparam [1:0] STANDARD_PAL = 2'd1;
+localparam [1:0] STANDARD_NTSC = 2'd2;
+
+localparam [1:0] STANDARD_IDLE = 2'd0;
+localparam [1:0] STANDARD_LOAD = 2'd1;
+localparam [1:0] STANDARD_SEND = 2'd2;
+localparam [1:0] STANDARD_RETURN = 2'd3;
+
+reg candidate_valid = 0;
+reg candidate_ntsc = 0;
+reg [1:0] standard_cap = STANDARD_INVALID;
+reg [1:0] standard_sent = STANDARD_INVALID;
+reg [1:0] standard_payload = STANDARD_INVALID;
+reg [1:0] standard_state = STANDARD_IDLE;
+reg standard_send = 0;
+wire standard_received;
+wire [1:0] standard_dest_payload;
+wire standard_dest_req;
+
+xpm_cdc_handshake #(
+    .DEST_EXT_HSK(0),
+    .DEST_SYNC_FF(4),
+    .INIT_SYNC_FF(1),
+    .SIM_ASSERT_CHK(0),
+    .SRC_SYNC_FF(4),
+    .WIDTH(2)
+) videocap_standard_handshake (
+    .src_clk(cap_clk),
+    .src_in(standard_payload),
+    .src_send(standard_send),
+    .src_rcv(standard_received),
+    .dest_clk(axi_clk),
+    .dest_out(standard_dest_payload),
+    .dest_req(standard_dest_req),
+    .dest_ack(1'b0)
+);
+
+always @(posedge cap_clk) begin
+    if (frame_complete) begin
+        if (!candidate_valid) begin
+            candidate_valid <= 1'b1;
+            candidate_ntsc <= frame_ntsc;
+            standard_cap <= STANDARD_INVALID;
+        end else if (candidate_ntsc != frame_ntsc) begin
+            candidate_ntsc <= frame_ntsc;
+            standard_cap <= STANDARD_INVALID;
+        end else begin
+            standard_cap <= frame_ntsc ? STANDARD_NTSC : STANDARD_PAL;
+        end
+    end
+
+    case (standard_state)
+        STANDARD_IDLE: begin
+            if (standard_cap != standard_sent) begin
+                standard_payload <= standard_cap;
+                standard_state <= STANDARD_LOAD;
+            end
+        end
+        STANDARD_LOAD: begin
+            standard_send <= 1'b1;
+            standard_state <= STANDARD_SEND;
+        end
+        STANDARD_SEND: begin
+            if (standard_received) begin
+                standard_send <= 1'b0;
+                standard_sent <= standard_payload;
+                standard_state <= STANDARD_RETURN;
+            end
+        end
+        STANDARD_RETURN: begin
+            if (!standard_received)
+                standard_state <= STANDARD_IDLE;
+        end
+    endcase
+end
+
+always @(posedge axi_clk) begin
+    if (standard_dest_req)
+        standard_axi <= standard_dest_payload;
+end
+
+endmodule
+
 module videocap_sampler #(
     parameter integer BUF_DEPTH   = 2048,
     parameter integer RGB_MODE    = 0,
@@ -26,10 +223,11 @@ module videocap_sampler #(
     input  wire [7:0]  vcap_g,
     input  wire [7:0]  vcap_b,
 
-    input  wire [1:0]  ctl_sample_mode,
-    input  wire        ctl_full_width,
-    input  wire [11:0] ctl_crop_h,
-    input  wire [11:0] ctl_crop_v,
+    input  wire        ctl_send,
+    input  wire [26:0] ctl_payload,
+    output wire        ctl_received,
+    input  wire        ctl_read_full_width,
+    output wire [1:0]  detected_standard,
 
     output reg  [10:0] cap_x,
     output reg  [10:0] cap_y,
@@ -60,36 +258,35 @@ module videocap_sampler #(
     output wire [31:0] buf_rdata
 );
 
-/*
- * Sampler controls are written by the 100 MHz AXI domain and remain stable
- * until the next cold-boot configuration write.  Synchronize every bit into
- * the capture domain before it can affect counters or BRAM enables.  The
- * array synchronizer is appropriate for this quasi-static control bundle:
- * changes may settle over a few capture clocks, but are held for the rest of
- * the boot and never represent streaming data.
- */
-wire [26:0] ctl_src = {
-    ctl_crop_v, ctl_crop_h, ctl_full_width, ctl_sample_mode
-};
-wire [26:0] ctl_cap;
+/* The source holds this bundled payload for the complete four-phase XPM
+ * transaction.  External destination acknowledgement delays completion
+ * until the next capture frame boundary. */
+wire [26:0] ctl_dest_payload;
+wire ctl_dest_req;
+reg ctl_dest_ack = 0;
 
-xpm_cdc_array_single #(
-    .DEST_SYNC_FF(3),
+xpm_cdc_handshake #(
+    .DEST_EXT_HSK(1),
+    .DEST_SYNC_FF(4),
     .INIT_SYNC_FF(1),
     .SIM_ASSERT_CHK(0),
-    .SRC_INPUT_REG(0),
+    .SRC_SYNC_FF(4),
     .WIDTH(27)
-) videocap_control_cdc (
+) videocap_control_handshake (
     .src_clk(axi_clk),
-    .src_in(ctl_src),
+    .src_in(ctl_payload),
+    .src_send(ctl_send),
+    .src_rcv(ctl_received),
     .dest_clk(cap_clk),
-    .dest_out(ctl_cap)
+    .dest_out(ctl_dest_payload),
+    .dest_req(ctl_dest_req),
+    .dest_ack(ctl_dest_ack)
 );
 
-wire [1:0] ctl_sample_mode_cap = ctl_cap[1:0];
-wire ctl_full_width_cap = ctl_cap[2];
-wire [11:0] ctl_crop_h_cap = ctl_cap[14:3];
-wire [11:0] ctl_crop_v_cap = ctl_cap[26:15];
+reg [1:0] ctl_sample_mode_cap = 2'd0;
+reg ctl_full_width_cap = 1'b0;
+reg [11:0] ctl_crop_h_cap = 12'd188;
+reg [11:0] ctl_crop_v_cap = 12'd26;
 
 reg [6:0] hs = 0;
 reg [6:0] vs = 0;
@@ -111,7 +308,7 @@ assign buf_rdata = buf_rdata_r;
 
 reg capture_bank = 0;
 wire capture_banking_cap = (FULLRATE != 0) && ctl_full_width_cap;
-wire read_banking_axi = (FULLRATE != 0) && ctl_full_width;
+wire read_banking_axi = (FULLRATE != 0) && ctl_read_full_width;
 wire [11:0] capture_buf_addr = {
     capture_banking_cap ? capture_bank : 1'b0, cap_x
 };
@@ -147,6 +344,18 @@ wire frame_sync = (CSYNC_VSYNC != 0) ?
     (hs[6:1] == 6'b000111 && hs_pulse_width >= 8'd128) :
     (vs[6:1] == 6'b111000);
 wire line_sync = (hs[6:1] == 6'b000111);
+wire completed_frame_ntsc = (raw_y >= 11'h190) ?
+    ((raw_y >= 11'h23a) ? 1'b0 : 1'b1) :
+    ((raw_y >= ((CSYNC_VSYNC != 0) ? 11'h130 : 11'h138)) ?
+        1'b0 : 1'b1);
+
+videocap_standard_cdc videocap_standard_publish (
+    .cap_clk(cap_clk),
+    .axi_clk(axi_clk),
+    .frame_complete(frame_sync && raw_y != 0),
+    .frame_ntsc(completed_frame_ntsc),
+    .standard_axi(detected_standard)
+);
 
 /*
  * The control interface always expresses crop_h in 28 MHz samples. Denise
@@ -212,6 +421,16 @@ xpm_cdc_single #(
 reg [15:0] diff_count = 0;
 
 always @(posedge cap_clk) begin
+    if (!ctl_dest_req)
+        ctl_dest_ack <= 1'b0;
+    else if (!ctl_dest_ack && frame_sync) begin
+        ctl_sample_mode_cap <= ctl_dest_payload[1:0];
+        ctl_full_width_cap <= ctl_dest_payload[2];
+        ctl_crop_h_cap <= ctl_dest_payload[14:3];
+        ctl_crop_v_cap <= ctl_dest_payload[26:15];
+        ctl_dest_ack <= 1'b1;
+    end
+
     if (line_sync) begin
         if (phase_x != 0)
             phase_line_period <= phase_x;
