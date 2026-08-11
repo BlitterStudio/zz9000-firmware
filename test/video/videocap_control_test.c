@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "video.h"
 
@@ -86,6 +87,60 @@ static int expect_u32(const char *label, uint32_t actual, uint32_t expected)
 	return 1;
 }
 
+static FILE *open_main_source(void)
+{
+	FILE *source = fopen("../../ZZ9000_proto.sdk/ZZ9000OS/src/main.c", "r");
+
+	if (source == NULL)
+		source = fopen("ZZ9000_proto.sdk/ZZ9000OS/src/main.c", "r");
+
+	return source;
+}
+
+static int main_source_contract(void)
+{
+	FILE *source = open_main_source();
+	char line[512];
+	unsigned int revision_major = 0;
+	unsigned int revision_minor = 0;
+	unsigned int revision_major_defines = 0;
+	unsigned int revision_minor_defines = 0;
+	unsigned int videocap_pack_writes = 0;
+	unsigned int videocap_ops = 0;
+
+	if (source == NULL) {
+		printf("cannot open firmware main.c for source contract\n");
+		return 0;
+	}
+
+	while (fgets(line, sizeof(line), source) != NULL) {
+		if (sscanf(line, "#define REVISION_MAJOR %u", &revision_major) == 1)
+			revision_major_defines++;
+		if (sscanf(line, "#define REVISION_MINOR %u", &revision_minor) == 1)
+			revision_minor_defines++;
+		if (strstr(line, "video_formatter_write(videocap_control_pack(") != NULL)
+			videocap_pack_writes++;
+		if (strstr(line, "MNTVF_OP_VIDEOCAP);") != NULL)
+			videocap_ops++;
+	}
+	fclose(source);
+
+	if (revision_major_defines != 1U || revision_minor_defines != 1U ||
+	    ((revision_major << 8) | revision_minor) != 0x020aU) {
+		printf("firmware revision contract mismatch: defines=%u/%u revision=0x%04x\n",
+		       revision_major_defines, revision_minor_defines,
+		       (revision_major << 8) | revision_minor);
+		return 0;
+	}
+	if (videocap_pack_writes != 1U || videocap_ops != 1U) {
+		printf("startup videocap op contract mismatch: writes=%u ops=%u\n",
+		       videocap_pack_writes, videocap_ops);
+		return 0;
+	}
+
+	return 1;
+}
+
 int main(void)
 {
 	uint32_t data;
@@ -122,10 +177,25 @@ int main(void)
 	                (4095U << 16) | (1U << 2) | 1U))
 		return 4;
 
+	data = videocap_control_pack(2U, 1U, 0U, 4095U, 0U, 1U);
+	if (!expect_u32("horizontal automatic with vertical maximum", data,
+	                VIDEOCAP_CROP_H_AUTO_FLAG | (4095U << 16) |
+	                (VIDEOCAP_CROP_H_COMPAT << 4) | (1U << 2) | 2U))
+		return 5;
+
+	data = videocap_control_pack(1U, 0U, 0U, 4095U, 1U, 0U);
+	if (!expect_u32("horizontal zero with vertical automatic", data,
+	                VIDEOCAP_CROP_V_AUTO_FLAG |
+	                (VIDEOCAP_CROP_V_COMPAT << 16) | 1U))
+		return 6;
+
 	data = videocap_control_pack(3U, 3U, 8191U, 8191U, 1U, 1U);
 	if (!expect_u32("fields remain bounded", data,
 	                (4095U << 16) | (4095U << 4) | (1U << 2) | 3U))
-		return 5;
+		return 7;
+
+	if (!main_source_contract())
+		return 8;
 
 	if (!expect_u32("capability offset", VCAP_LIVE_CAPABILITY, 0x1400U) ||
 	    !expect_u32("status offset", VCAP_LIVE_STATUS, 0x1404U) ||
@@ -137,12 +207,12 @@ int main(void)
 	    !expect_u32("capability value", VCAP_LIVE_CAPABILITY_VALUE,
 	                0x564c010fUL) ||
 	    !expect_u32("commit token", VCAP_LIVE_COMMIT_TOKEN, 0xca1bU))
-		return 6;
+		return 9;
 
 	if (!raw_is_valid(0U) || !raw_is_valid(2U) || raw_is_valid(3U) ||
 	    raw_is_valid(1UL << 30)) {
 		printf("raw validity contract mismatch\n");
-		return 7;
+		return 10;
 	}
 
 	data = VIDEOCAP_CROP_H_AUTO_FLAG | VIDEOCAP_CROP_V_AUTO_FLAG |
@@ -154,17 +224,17 @@ int main(void)
 	                (26U << 16) | 188U) ||
 	    !expect_u32("compat automatic effective",
 	                effective_crop(data, 0), (26U << 16) | 188U))
-		return 8;
+		return 11;
 
 	data = VIDEOCAP_CROP_H_AUTO_FLAG | (4095U << 16) | (1U << 2) | 2U;
 	if (!expect_u32("mixed automatic/custom effective",
 	                effective_crop(data, 1), (4095U << 16) | 279U))
-		return 9;
+		return 12;
 
 	data = (0U << 16) | (4095U << 4);
 	if (!expect_u32("literal custom effective", effective_crop(data, 1),
 	                (0U << 16) | 4095U))
-		return 10;
+		return 13;
 
 	status_old = make_status(0xffU, 0xffU, 1, 0, 0);
 	status_new = make_status(0U, 0U, 1, 0, 0);
@@ -174,7 +244,7 @@ int main(void)
 	    snapshot_status_stable(status_old, status_new) ||
 	    !snapshot_status_stable(status_new, status_new)) {
 		printf("sequence completion/snapshot guard mismatch\n");
-		return 11;
+		return 14;
 	}
 
 	/* Capability/status reserve bits are intentionally not available for
@@ -184,7 +254,7 @@ int main(void)
 	     VCAP_STATUS_REJECTED | VCAP_STATUS_APPLIED_VALID |
 	     VCAP_STATUS_BUSY) != 0x0000e003UL) {
 		printf("capability/status bit layout mismatch\n");
-		return 12;
+		return 15;
 	}
 
 	return 0;

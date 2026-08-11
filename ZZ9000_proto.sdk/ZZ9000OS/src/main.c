@@ -84,9 +84,12 @@ void Xil_AssertNonVoid() {}
  * New SDK capability is discovered through service flags and status
  * pages, which self-gate, rather than through this number.
  * 2.9: atomic videocap_profile configuration and reliable display
- * transmitter retraining during output-mode changes. */
+ * transmitter retraining during output-mode changes.
+ * 2.10: host-visible firmware half of the matched live-videocap contract.
+ * Startup operation 16 enters the shared acknowledged RTL control engine;
+ * live calibration still requires the bitstream's exact capability. */
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 9
+#define REVISION_MINOR 10
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
@@ -371,10 +374,12 @@ int main() {
 	}
 
 	{
-		// Push videocap sampler options into the FPGA via the ARM op
-		// path (snooped by mntzorro.v as MNTVF_OP_VIDEOCAP; older
-		// bitstreams ignore the op). Safe here: the video ISR is not
-		// connected yet, so nobody else drives the op interface.
+		// Push videocap sampler options through the existing ARM
+		// video_formatter_write path. MNTVF_OP_VIDEOCAP enters the shared
+		// acknowledged RTL control engine on live-capable bitstreams;
+		// older bitstreams ignore it and advertise no live capability.
+		// Safe here: the video ISR is not connected yet, so nobody else
+		// drives the op interface.
 		const struct zz_config *cfg = zz_config_get();
 		uint32_t sample = cfg->videocap_sample_present ? cfg->videocap_sample : 0;
 		uint32_t full = cfg->videocap_shres_present ? cfg->videocap_shres :
