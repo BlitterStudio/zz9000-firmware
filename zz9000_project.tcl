@@ -1645,9 +1645,9 @@ current_run -synthesis [get_runs synth_1]
 
 # Create 'impl_1' run (if not found)
 if {[string equal [get_runs -quiet impl_1] ""]} {
-    create_run -name impl_1 -part xc7z020clg400-1 -flow {Vivado Implementation 2018} -strategy "Flow_RunPostRoutePhysOpt" -report_strategy {No Reports} -constrset constrs_1 -parent_run synth_1
+    create_run -name impl_1 -part xc7z020clg400-1 -flow {Vivado Implementation 2018} -strategy "Performance_ExplorePostRoutePhysOpt" -report_strategy {No Reports} -constrset constrs_1 -parent_run synth_1
 } else {
-  set_property strategy "Flow_RunPostRoutePhysOpt" [get_runs impl_1]
+  set_property strategy "Performance_ExplorePostRoutePhysOpt" [get_runs impl_1]
   set_property flow "Vivado Implementation 2018" [get_runs impl_1]
 }
 set obj [get_runs impl_1]
@@ -1845,7 +1845,7 @@ set_property -name "display_name" -value "impl_1_post_route_phys_opt_report_bus_
 }
 set obj [get_runs impl_1]
 set_property -name "part" -value "xc7z020clg400-1" -objects $obj
-set_property -name "strategy" -value "Flow_RunPostRoutePhysOpt" -objects $obj
+set_property -name "strategy" -value "Performance_ExplorePostRoutePhysOpt" -objects $obj
 set_property -name "steps.phys_opt_design.is_enabled" -value "1" -objects $obj
 set_property -name "steps.phys_opt_design.args.directive" -value "Explore" -objects $obj
 set_property -name "steps.route_design.args.more options" -value "-tns_cleanup" -objects $obj

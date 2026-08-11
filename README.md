@@ -162,6 +162,9 @@ Automatic/Custom state, resolved effective H/V values, capture-path signature,
 and detected PAL/NTSC standard. A valid live change crosses clock domains as
 one coherent word and becomes active only at a capture-frame boundary; the
 host does not treat it as applied until the matching sequence is acknowledged.
+The rejected status flag is sticky arbitration history, not request identity:
+ZZTop also verifies that the coherently read applied raw word exactly matches
+its request, and reports a competing-writer conflict instead of false success.
 Both the firmware revision and exact bitstream capability are required, so an
 old/new mixed installation fails closed and retains ordinary Automatic/manual
 Custom editing without offering live calibration.

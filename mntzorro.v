@@ -1193,8 +1193,6 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] videocap_address = `VIDEOCAP_ADDR;
   localparam [11:0] VCAP_CROP_H_COMPAT = 12'd188;
   localparam [11:0] VCAP_CROP_V_COMPAT = 12'd26;
-  localparam [11:0] VCAP_CROP_H_FULLRATE = 12'd279;
-  localparam [11:0] VCAP_CROP_V_FULLRATE = 12'd40;
   reg [31:0] videocap_control_staged_raw =
       {2'b00, 1'b0, 1'b0, VCAP_CROP_V_COMPAT, VCAP_CROP_H_COMPAT,
        1'b0, 1'b0, 2'd0};
