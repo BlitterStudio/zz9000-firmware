@@ -100,7 +100,9 @@ reg lace_field = 0;
 reg next_lace_field = 0;
 reg [3:0] shortlines = 0;
 reg [7:0] hs_pulse_width = 0;
-reg [10:0] vsync_x = 0;
+reg [11:0] phase_x = 0;
+reg [11:0] phase_line_period = 0;
+reg [11:0] vsync_phase_x = 0;
 
 localparam integer LINEBUF_BANKS = (FULLRATE != 0) ? 2 : 1;
 reg [31:0] linebuf [0:(BUF_DEPTH * LINEBUF_BANKS)-1];
@@ -121,13 +123,25 @@ assign cap_write_bank = capture_banking_cap ? capture_bank : 1'b0;
 always @(posedge axi_clk)
     buf_rdata_r <= linebuf[read_buf_addr];
 
-localparam [10:0] INTERLACE_PHASE_DELTA = 11'h080;
-wire [10:0] vsync_phase_abs_delta =
-    (cap_x > vsync_x) ? (cap_x - vsync_x) : (vsync_x - cap_x);
-wire [10:0] vsync_phase_delta =
-    (vsync_phase_abs_delta > 11'h200) ?
-    (11'h3ff - vsync_phase_abs_delta + 1'b1) :
-    vsync_phase_abs_delta;
+/* Detect the half-line phase change in capture-clock units, independently
+ * of crop/filter/full-width pixel storage.  cap_x is not a horizontal phase
+ * counter: it begins at the crop origin and advances at either one or one
+ * half of the capture clock.  Folding its 11-bit full-width value through
+ * the old 1024-count modulus reduced a real 908-clock PAL half-line to 116,
+ * below the interlace threshold.  Measure the raw line period so a stable
+ * VSYNC edge straddling HSYNC still has a small circular distance. */
+localparam [11:0] INTERLACE_PHASE_DELTA = 12'h080;
+wire [11:0] vsync_phase_abs_delta =
+    (phase_x > vsync_phase_x) ?
+    (phase_x - vsync_phase_x) : (vsync_phase_x - phase_x);
+/* Both directions around the measured line must exceed the threshold.
+ * This is equivalent to min(abs_delta, period - abs_delta) >= threshold,
+ * without putting a second subtract-and-min chain on cap_interlace. */
+wire [12:0] vsync_phase_abs_plus_threshold =
+    {1'b0, vsync_phase_abs_delta} + {1'b0, INTERLACE_PHASE_DELTA};
+wire vsync_phase_changed =
+    (vsync_phase_abs_delta >= INTERLACE_PHASE_DELTA) &&
+    (vsync_phase_abs_plus_threshold <= {1'b0, phase_line_period});
 
 wire frame_sync = (CSYNC_VSYNC != 0) ?
     (hs[6:1] == 6'b000111 && hs_pulse_width >= 8'd128) :
@@ -198,6 +212,14 @@ xpm_cdc_single #(
 reg [15:0] diff_count = 0;
 
 always @(posedge cap_clk) begin
+    if (line_sync) begin
+        if (phase_x != 0)
+            phase_line_period <= phase_x;
+        phase_x <= 0;
+    end else if (phase_x != 12'hfff) begin
+        phase_x <= phase_x + 1'b1;
+    end
+
     if (probe_arm_seen != probe_arm_toggle_cap) begin
         probe_arm_seen <= probe_arm_toggle_cap;
         probe_valid <= 0;
@@ -254,12 +276,12 @@ always @(posedge cap_clk) begin
             cap_interlace <= (next_lace_field != lace_field);
         else
             cap_interlace <=
-                (vsync_phase_delta >= INTERLACE_PHASE_DELTA);
+                vsync_phase_changed;
 
         if (CSYNC_VSYNC != 0)
             lace_field <= next_lace_field;
         else begin
-            vsync_x <= cap_x;
+            vsync_phase_x <= phase_x;
             lace_field <= cap_ymax[0];
         end
 

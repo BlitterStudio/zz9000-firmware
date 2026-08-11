@@ -264,6 +264,17 @@ integer first_full_width_ready_x;
 integer full_width_ready_checked;
 integer full_width_completed_lines;
 reg last_completed_bank;
+integer last_frame_sync_x;
+integer last_frame_phase_abs_delta;
+integer last_frame_phase_changed;
+
+always @(posedge cap_clk) begin
+    if (dut.frame_sync) begin
+        last_frame_sync_x = dut.phase_x;
+        last_frame_phase_abs_delta = dut.vsync_phase_abs_delta;
+        last_frame_phase_changed = dut.vsync_phase_changed;
+    end
+end
 
 task drive_line;
     input integer pattern_seed;
@@ -366,6 +377,40 @@ task drive_field;
     end
 endtask
 
+/* Drive a field whose VSYNC falling edge starts at a chosen horizontal
+ * phase after HSYNC.  Video-slot machines sample at 28.37 MHz, so the two
+ * PAL interlace phases are separated by roughly half of LINECLKS (~908
+ * clocks), not by the 14 MHz half-line used by Denise adapters. */
+task drive_field_with_vsync_phase;
+    input integer seed;
+    input integer vsync_phase;
+    integer i;
+    integer px;
+    integer ln;
+    begin
+        vsync = 1;
+        hsync = 0;
+        for (i = 0; i < 67; i = i + 1)
+            @(posedge cap_clk);
+        hsync = 1;
+        for (i = 0; i < LINECLKS - 67; i = i + 1) begin
+            if (i == vsync_phase)
+                vsync = 0;
+            px = (i / PIXSPAN) + seed;
+            r = px[7:0];
+            g = ~px[7:0];
+            b = {px[3:0], px[7:4]};
+            @(posedge cap_clk);
+        end
+
+        /* Keep VSYNC asserted for a second line, matching drive_field. */
+        drive_line(seed);
+        vsync = 1;
+        for (ln = 0; ln < LINES; ln = ln + 1)
+            drive_line(seed + ln);
+    end
+endtask
+
 integer sample_idx;
 integer pix_even;
 integer pix_odd;
@@ -381,6 +426,7 @@ reg [7:0] even_b;
 reg [7:0] odd_r;
 reg [7:0] odd_g;
 reg [7:0] odd_b;
+reg interlace_field_parity;
 
 initial begin
     PIXSPAN = DEFAULT_PIXSPAN;
@@ -518,6 +564,25 @@ initial begin
         end
         check_eq("entry", got[23:0], {want_r, want_g, want_b});
     end
+
+    /* A4000/A3000 video-slot capture runs at the full 28.37 MHz rate. Put
+     * both PAL VSYNC phases after the crop origin so the legacy full-width
+     * cap_x detector sees the true 908-clock half-line, then incorrectly
+     * folds it through a 1024-count period to only 116. */
+    drive_field_with_vsync_phase(100, 400);
+    drive_field_with_vsync_phase(200, 400 + LINECLKS / 2);
+    $display("A4000 phase probe x=%0d abs_delta=%0d changed=%0d",
+             last_frame_sync_x, last_frame_phase_abs_delta,
+             last_frame_phase_changed);
+    check_eq("fullrate_halfline_interlace", cap_interlace, 1);
+    interlace_field_parity = cap_y[0];
+    drive_field_with_vsync_phase(300, 400);
+    check_eq("fullrate_field_parity_b", cap_y[0],
+             !interlace_field_parity);
+    interlace_field_parity = cap_y[0];
+    drive_field_with_vsync_phase(400, 400 + LINECLKS / 2);
+    check_eq("fullrate_field_parity_a", cap_y[0],
+             !interlace_field_parity);
 
     if (errors == 0)
         $display("RESULT PASS checks=%0d", checks);

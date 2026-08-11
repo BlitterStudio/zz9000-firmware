@@ -477,6 +477,26 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	return ok ? 0 : 1;
 }
 
+static int test_videocap_interlace_uses_raw_horizontal_phase(
+	const char *sampler)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "reg [11:0] phase_x = 0;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "reg [11:0] phase_line_period = 0;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "(phase_x > vsync_phase_x) ?");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "vsync_phase_abs_plus_threshold <= {1'b0, phase_line_period}");
+	ok &= require_source_absent("videocap_sampler.v", sampler,
+	    "(cap_x > vsync_x)",
+	    "interlace phase still depends on cropped/scaled cap_x");
+
+	return ok ? 0 : 1;
+}
+
 static int test_mode_switch_retrains_display(const char *video,
 	const char *hdmi)
 {
@@ -571,6 +591,8 @@ int main(void)
 	if (!result)
 		result = test_videocap_probe_captures_pre_crop_samples(
 			mntzorro, sampler);
+	if (!result)
+		result = test_videocap_interlace_uses_raw_horizontal_phase(sampler);
 	free(sampler);
 	free(mntzorro);
 
