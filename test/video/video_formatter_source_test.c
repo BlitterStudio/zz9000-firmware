@@ -197,6 +197,13 @@ static int test_vertical_scale_shift_and_sprite_control_are_independent(
 
 	ok &= require_contains(text, "reg [1:0] scale_y = 2'd1;");
 	ok &= require_contains(text, "reg [1:0] scale_y_effective;");
+	ok &= require_contains(text, "scale_y_effective <= scale_y;");
+	ok &= require_contains(text,
+	    "? ((counter_y - vga_scale_y_factor) >> vga_scale_y)");
+	ok &= require_absent(text, "control_interlace ? 2'd0 : scale_y",
+	                     "interlace still bypasses configured vertical scaling");
+	ok &= require_absent(text, "control_interlace ? 2'd0 : vga_scale_y",
+	                     "interlace still bypasses scanout row duplication");
 	ok &= require_contains(text, "reg [1:0] vga_scale_y = 2'd0;");
 	ok &= require_contains(text, "scale_y  <= control_data_in[2:1];");
 	ok &= require_contains(text, "sprite_dbl <= control_data_in[3];");

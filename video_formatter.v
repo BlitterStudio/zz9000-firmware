@@ -260,7 +260,7 @@ always @(posedge m_axis_vid_aclk)
     need_line_fetch_reg  <= need_line_fetch; // sync to clock domain
     need_line_fetch_reg2 <= need_line_fetch_reg>>scale_y_effective; // line duplication
 
-    scale_y_effective <= control_interlace ? 2'd0 : scale_y;
+    scale_y_effective <= scale_y;
 
     if (pixin_valid && ready_for_vdma) begin
       // disabling this makes the picture go wild
@@ -678,8 +678,7 @@ wire [31:0] pixout_composited = vga_overlay_enable
 
 wire [11:0] scanout_source_line =
   (counter_y >= vga_scale_y_factor)
-    ? ((counter_y - vga_scale_y_factor) >>
-       (control_interlace ? 2'd0 : vga_scale_y))
+    ? ((counter_y - vga_scale_y_factor) >> vga_scale_y)
     : 12'b0;
 
 // Ping-pong line buffer: VDMA fills the next source line in one bank while

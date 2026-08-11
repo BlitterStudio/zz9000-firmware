@@ -73,6 +73,7 @@ if [ "$VARIANT" != "master" ] && [ "$VARIANT" != "reference" ]; then
 1 0 2 62 0 0 0
 2 0 0 1920 0 0 0
 2 0 2 1280 16 32 0
+2 0 0 64 0 0 1
 2 0 1 64 0 0 1
 "
 fi

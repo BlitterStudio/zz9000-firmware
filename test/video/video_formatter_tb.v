@@ -11,7 +11,7 @@
  *   +CMODE=<0|1|2|3>   colormode (8/16/32/15 bit), default 2
  *   +SCALEX=<0|1>      horizontal doubling, default 0
  *   +SCALEY=<0|1|2>    vertical scale shift (x1/x2/x4), default 0
- *   +INTERLACE=<0|1>   fetch a new source line on every output row
+ *   +INTERLACE=<0|1>   mark woven interlaced input; scaling still applies
  *   +WIDTH=<pixels>    displayed width, default 64
  *   +STREAM_GAP_EVERY=<beats>  insert a VDMA delivery pause at this cadence
  *   +STREAM_GAP_CYCLES=<clocks> length of each delivery pause
@@ -350,10 +350,9 @@ initial begin : vdma
 end
 
 // Normalize the formatter's vertical active-window offset while capturing.
-// Progressive source lines repeat by the configured scale factor. Interlaced
-// input fetches every row and retains the formatter's established two-line
-// prefetch lead; its final active row holds the last source row while the
-// stream state machine enters frame synchronization.
+// Source lines repeat by the configured scale factor for both progressive and
+// woven-interlaced input. Full-width interlace supplies 512 woven rows, then
+// uses x2 so the flickerfixer presents a stable 1024-line progressive frame.
 reg [31:0] cap [0:NLINES*MAXW-1];
 reg [11:0] xcnt = 0;
 integer row;
@@ -433,7 +432,7 @@ initial begin
 
   scale_y_factor = 1 << cfg_scaley;
   src_pixels = cfg_width >> cfg_scalex;
-  src_lines = NLINES >> (cfg_interlace ? 0 : cfg_scaley);
+  src_lines = NLINES >> cfg_scaley;
   case (cfg_cmode)
     0: words_per_line = src_pixels / 4;
     2: words_per_line = src_pixels;
@@ -481,11 +480,7 @@ initial begin
   for (i = 0; i < NLINES; i = i + 1)
     for (x = 1; x < cfg_width; x = x + 1) begin
       got = cap[i * MAXW + x];
-      exp = expected_pix(
-        cfg_interlace ? ((i == NLINES - 1) ? (src_lines - 1)
-                                             : ((i + scale_y_factor) % src_lines))
-                      : (i >> cfg_scaley),
-        x - 1);
+      exp = expected_pix(i >> cfg_scaley, x - 1);
       if (got !== exp) begin
         mism = mism + 1;
         if (shown < 24) begin
