@@ -19,6 +19,7 @@
 #define MNTZORRO_PATH "../../mntzorro.v"
 #define VIDEOCAP_SAMPLER_PATH "../../videocap_sampler.v"
 #define VIDEO_C_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/video.c"
+#define MNTZORRO_H_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/mntzorro.h"
 #define HDMI_C_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/hdmi.c"
 
 static char *read_file(const char *path)
@@ -619,6 +620,21 @@ static int test_videocap_live_control_contract(const char *mntzorro,
 	return ok ? 0 : 1;
 }
 
+static int test_videocap_full_width_requires_hardware_capability(
+	const char *mntzorro, const char *mntzorro_h, const char *video)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "(`VCAP_FULLRATE_INT != 0), 8'b0, zorro_state");
+	ok &= require_source_contains("mntzorro.h", mntzorro_h,
+	    "MNTZORRO_STATUS_VCAP_FULLRATE");
+	ok &= require_source_contains("video.c", video,
+	    "zstate & MNTZORRO_STATUS_VCAP_FULLRATE");
+
+	return ok ? 0 : 1;
+}
+
 static int test_mode_switch_retrains_display(const char *video,
 	const char *hdmi)
 {
@@ -659,6 +675,7 @@ int main(void)
 	char *mntzorro;
 	char *sampler;
 	char *video;
+	char *mntzorro_h;
 	char *hdmi;
 	int result;
 
@@ -721,18 +738,25 @@ int main(void)
 	if (!result)
 		result = test_videocap_live_control_contract(mntzorro, sampler);
 	free(sampler);
-	free(mntzorro);
 
 	video = read_file(VIDEO_C_PATH);
+	mntzorro_h = read_file(MNTZORRO_H_PATH);
 	hdmi = read_file(HDMI_C_PATH);
-	if (!video || !hdmi) {
+	if (!video || !mntzorro_h || !hdmi) {
+		free(mntzorro);
 		free(video);
+		free(mntzorro_h);
 		free(hdmi);
 		return 1;
 	}
 	if (!result)
+		result = test_videocap_full_width_requires_hardware_capability(
+			mntzorro, mntzorro_h, video);
+	if (!result)
 		result = test_mode_switch_retrains_display(video, hdmi);
+	free(mntzorro);
 	free(video);
+	free(mntzorro_h);
 	free(hdmi);
 
 	return result;

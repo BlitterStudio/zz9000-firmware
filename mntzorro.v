@@ -3003,10 +3003,12 @@ module MNTZorro_v0_1_S00_AXI
     out_reg1 <= zorro_ram_write_data;
     out_reg2 <= last_z3addr;
     // Status: [24] interlace, [23] videocap, [22] NTSC, [21] vblank,
-    // [20] hblank, [19] SDK doorbell, [18] SDK IRQ ack, [17] SuperHires.
+    // [20] hblank, [19] SDK doorbell, [18] SDK IRQ ack, [17] SuperHires,
+    // [16] full-rate capture path.
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
                 video_control_interlace, videocap_mode, vcap_ntsc, video_control_vblank, video_control_hblank,
-                sdk_doorbell_pending, sdk_irq_ack_pending, vcap_shres, 9'b0, zorro_state};
+                sdk_doorbell_pending, sdk_irq_ack_pending, vcap_shres,
+                (`VCAP_FULLRATE_INT != 0), 8'b0, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;

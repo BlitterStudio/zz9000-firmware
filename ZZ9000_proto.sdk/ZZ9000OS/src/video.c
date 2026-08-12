@@ -219,10 +219,14 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 	return XST_SUCCESS;
 }
 
-static int videocap_full_width_enabled(void) {
+static int videocap_full_width_enabled(u32 zstate) {
 	const struct zz_config *cfg = zz_config_get();
-	return cfg->videocap_shres_present ? cfg->videocap_shres :
-	       VIDEOCAP_FULL_WIDTH_DEFAULT;
+	uint32_t requested = cfg->videocap_shres_present ?
+		cfg->videocap_shres : VIDEOCAP_FULL_WIDTH_DEFAULT;
+	uint32_t fullrate_capable =
+		!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE);
+
+	return (int)video_videocap_full_width(requested, fullrate_capable);
 }
 
 static void init_filtered_videocap_video_mode(int ntsc) {
@@ -244,10 +248,10 @@ static void init_filtered_videocap_video_mode(int ntsc) {
 	video_mode_init_internal(mode, 2, MNTVA_COLOR_32BIT, 1);
 }
 
-static void init_videocap_video_mode(int ntsc) {
+static void init_videocap_video_mode(int ntsc, int full_width) {
 	int mode = ZZVMODE_1280x1024_NATIVE_60;
 
-	if (!videocap_full_width_enabled()) {
+	if (!full_width) {
 		init_filtered_videocap_video_mode(ntsc);
 		return;
 	}
@@ -340,6 +344,7 @@ void isr_video(void *dummy) {
 	int videocap_ntsc = !!(zstate & (1 << 22));
 	int interlace = !!(zstate & (1 << 24));
 	int videocap_shres = !!(zstate & (1 << 17));
+	int videocap_full_width = videocap_full_width_enabled(zstate);
 
 	if (!videocap_enabled) {
 		if (!vblank) {
@@ -411,15 +416,15 @@ void isr_video(void *dummy) {
 						// NTSC
 						printf("videocap: ntsc\n");
 						vs.framebuffer_pan_width = 0;
-						vs.framebuffer_pan_offset = videocap_full_width_enabled() ?
+						vs.framebuffer_pan_offset = videocap_full_width ?
 							video_vdma_native_row_start(default_pan_offset_ntsc) :
 							default_pan_offset_ntsc;
-						init_videocap_video_mode(1);
+						init_videocap_video_mode(1, videocap_full_width);
 					} else {
 						// PAL
 						printf("videocap: pal\n");
 						vs.framebuffer_pan_width = 0;
-						if (videocap_full_width_enabled()) {
+						if (videocap_full_width) {
 							vs.framebuffer_pan_offset =
 								video_vdma_native_row_start(default_pan_offset_pal);
 						} else if (vs.videocap_video_mode == ZZVMODE_800x600) {
@@ -427,7 +432,7 @@ void isr_video(void *dummy) {
 						} else {
 							vs.framebuffer_pan_offset = default_pan_offset_pal;
 						}
-						init_videocap_video_mode(0);
+						init_videocap_video_mode(0, videocap_full_width);
 					}
 					videocap_reset = 1;
 				}
@@ -436,7 +441,7 @@ void isr_video(void *dummy) {
 						(interlace != vs.interlace_old || videocap_reset)) {
 					// interlace has changed, we need to reconfigure vdma for the new screen height
 					uint32_t videocap_scalemode = video_videocap_scalemode(
-							(uint32_t)videocap_full_width_enabled(),
+							(uint32_t)videocap_full_width,
 							(uint32_t)interlace);
 					vs.scalemode = (int)videocap_scalemode;
 					vs.vmode_vdiv = (int)video_vertical_scale_factor(videocap_scalemode);

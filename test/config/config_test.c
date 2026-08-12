@@ -135,6 +135,23 @@ static void test_videocap_aliases(void) {
     zz_config_reset();
     parse_str("videocap_mode = 720x576\n");
     CHECK(zz_config_get()->videocap_mode == ZZVMODE_720x576);
+    CHECK(zz_config_get()->videocap_shres_present);
+    CHECK(zz_config_get()->videocap_shres == 0);
+
+    zz_config_reset();
+    parse_str("videocap_mode = 800x600\n");
+    CHECK(zz_config_get()->videocap_shres_present);
+    CHECK(zz_config_get()->videocap_shres == 0);
+
+    zz_config_reset();
+    parse_str("videocap_mode = pal\n"
+              "videocap_shres = full\n");
+    CHECK(zz_config_get()->videocap_shres == 1);
+
+    zz_config_reset();
+    parse_str("videocap_shres = full\n"
+              "videocap_mode = pal\n");
+    CHECK(zz_config_get()->videocap_shres == 0);
 
     zz_config_reset();
     parse_str("nonstandard_vsync = on\n");

@@ -16,6 +16,15 @@ static inline uint32_t video_formatter_scale_control(uint32_t scalemode)
 	return (scalemode & 7U) | ((scalemode & 2U) << 2);
 }
 
+static inline uint32_t video_videocap_full_width(uint32_t requested,
+		uint32_t fullrate_capable)
+{
+	/* A full-width request is only safe when the loaded bitstream has the
+	 * full-rate sampler/writeback path. Filtered-only variants otherwise
+	 * leave the unused tail of each 1280-pixel row stale. */
+	return (requested != 0U) && (fullrate_capable != 0U);
+}
+
 static inline uint32_t video_videocap_scalemode(uint32_t full_width,
 		uint32_t interlace)
 {

@@ -146,6 +146,11 @@ static int apply_key(const char *key, const char *value) {
 			return -1;
 		}
 		cfg.videocap_mode_present = 1;
+		/* Before videocap_shres existed, both legacy output modes described
+		 * the filtered capture path. Preserve that meaning while retaining
+		 * normal last-value-wins behavior for mixed old/new files. */
+		cfg.videocap_shres = 0;
+		cfg.videocap_shres_present = 1;
 		return 0;
 	}
 	if (token_eq(key, "videocap_sample")) {

@@ -46,6 +46,15 @@ int main(void)
 	if (!expect_u32("full interlaced capture uses x2",
 	                video_videocap_scalemode(1U, 1U), 2U))
 		return 9;
+	if (!expect_u32("filtered request stays filtered",
+	                video_videocap_full_width(0U, 1U), 0U))
+		return 10;
+	if (!expect_u32("full request needs full-rate hardware",
+	                video_videocap_full_width(1U, 0U), 0U))
+		return 11;
+	if (!expect_u32("full request uses full-rate hardware",
+	                video_videocap_full_width(1U, 1U), 1U))
+		return 12;
 
 	return 0;
 }
