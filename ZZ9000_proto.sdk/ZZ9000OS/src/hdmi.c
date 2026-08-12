@@ -1,4 +1,5 @@
 #include "xiicps.h"
+#include "hdmi.h"
 #include <stdio.h>
 #include <sleep.h>
 
@@ -6,6 +7,8 @@
 #define HDMI_I2C_ADDR 	0x3b
 #define IIC_SCLK_RATE	400000
 #define I2C_PAUSE 10
+#define SII9022_SYS_CTRL 0x1a
+#define SII9022_SYS_CTRL_PWR_DWN 0x10
 
 // I2C controller instances
 XIicPs Iic;
@@ -55,28 +58,59 @@ int hdmi_ctrl_read_byte(u8 addr, u8* buffer) {
 	return i2c_read_byte(&Iic, HDMI_I2C_ADDR, addr, buffer);
 }
 
-static u8 sii9022_init[] = {
-	0x1e, 0x00,// TPI Device Power State Control Data (R/W)
-	0x09, 0x00, //
-	0x0a, 0x00,
-
-	0x60, 0x04, 0x3c, 0x01,	// TPI Interrupt Enable (R/W)
-
-	0x1a, 0x10,	// TPI System Control (R/W)
-
-	0x00, 0x4c,	// PixelClock/10000 - LSB          u16:6
-	0x01, 0x1d,	// PixelClock/10000 - MSB
-	0x02, 0x70,	// Frequency in HZ - LSB
-	0x03, 0x17,	// Vertical Frequency in HZ - MSB
-	0x04, 0x70,	// Total Pixels per line - LSB
-	0x05, 0x06,	// Total Pixels per line - MSB
-	0x06, 0xEE,	// Total Lines - LSB
-	0x07, 0x02,	// Total Lines - MSB
-	0x08, 0x70, // pixel repeat rate?
-	0x1a, 0x00, // CTRL_DATA - bit 1 causes 2 purple extra columns on DVI monitors (probably HDMI mode)
+struct sii9022_reg {
+	u8 addr;
+	u8 value;
 };
 
-void hdmi_set_video_mode(u16 htotal, u16 vtotal, u32 pixelclock_hz, u16 vhz, u8 hdmi) {
+static const struct sii9022_reg sii9022_setup[] = {
+	{ 0x1e, 0x00 }, /* TPI Device Power State Control Data */
+	{ 0x09, 0x00 },
+	{ 0x0a, 0x00 },
+	{ 0x60, 0x04 }, /* TPI Interrupt Enable */
+	{ 0x3c, 0x01 }
+};
+
+enum sii9022_mode_index {
+	SII_MODE_PIXEL_CLOCK_LSB,
+	SII_MODE_PIXEL_CLOCK_MSB,
+	SII_MODE_REFRESH_LSB,
+	SII_MODE_REFRESH_MSB,
+	SII_MODE_HTOTAL_LSB,
+	SII_MODE_HTOTAL_MSB,
+	SII_MODE_VTOTAL_LSB,
+	SII_MODE_VTOTAL_MSB,
+	SII_MODE_PIXEL_REPEAT,
+	SII_MODE_REG_COUNT
+};
+
+static struct sii9022_reg sii9022_mode[SII_MODE_REG_COUNT] = {
+	{ 0x00, 0x4c },
+	{ 0x01, 0x1d },
+	{ 0x02, 0x70 },
+	{ 0x03, 0x17 },
+	{ 0x04, 0x70 },
+	{ 0x05, 0x06 },
+	{ 0x06, 0xee },
+	{ 0x07, 0x02 },
+	{ 0x08, 0x70 }
+};
+
+/* Bit 1 causes two purple columns on DVI monitors, so keep DVI/HDMI
+ * selection explicit instead of hiding it in a packed register table. */
+static u8 sii9022_output_ctrl;
+
+static void hdmi_ctrl_write_regs(const struct sii9022_reg *regs, int count) {
+	int i;
+
+	for (i = 0; i < count; i++) {
+		hdmi_ctrl_write_byte(regs[i].addr, regs[i].value);
+		usleep(1);
+	}
+}
+
+static void hdmi_set_video_mode(u16 htotal, u16 vtotal, u32 pixelclock_hz,
+		u16 vhz, u8 hdmi) {
 	/*
 	 * SII9022 registers
 	 *
@@ -93,31 +127,20 @@ void hdmi_set_video_mode(u16 htotal, u16 vtotal, u32 pixelclock_hz, u16 vhz, u8 
 	 */
 
 	// see also https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/bridge/sii902x.c#L358
-	u8* sii_mode = sii9022_init + 12;
-
-	sii_mode[2 * 0 + 1] = pixelclock_hz / 10000;
-	sii_mode[2 * 1 + 1] = (pixelclock_hz / 10000) >> 8;
-	sii_mode[2 * 2 + 1] = vhz * 100;
-	sii_mode[2 * 3 + 1] = (vhz * 100) >> 8;
-	sii_mode[2 * 4 + 1] = htotal;
-	sii_mode[2 * 5 + 1] = htotal >> 8;
-	sii_mode[2 * 6 + 1] = vtotal;
-	sii_mode[2 * 7 + 1] = vtotal >> 8;
-	sii_mode[2 * 9 + 1] = hdmi;
+	sii9022_mode[SII_MODE_PIXEL_CLOCK_LSB].value = pixelclock_hz / 10000;
+	sii9022_mode[SII_MODE_PIXEL_CLOCK_MSB].value = (pixelclock_hz / 10000) >> 8;
+	sii9022_mode[SII_MODE_REFRESH_LSB].value = vhz * 100;
+	sii9022_mode[SII_MODE_REFRESH_MSB].value = (vhz * 100) >> 8;
+	sii9022_mode[SII_MODE_HTOTAL_LSB].value = htotal;
+	sii9022_mode[SII_MODE_HTOTAL_MSB].value = htotal >> 8;
+	sii9022_mode[SII_MODE_VTOTAL_LSB].value = vtotal;
+	sii9022_mode[SII_MODE_VTOTAL_MSB].value = vtotal >> 8;
+	sii9022_output_ctrl = hdmi;
 }
 
 static int hdmi_initialized = 0;
 
-void hdmi_ctrl_init(struct zz_video_mode *mode) {
-	// The SiI9022 DVI encoder is configured once at boot. Subsequent mode
-	// switches only change the pixel clock (via clock wizard) and FPGA
-	// video formatter — the SiI9022 auto-adapts to the input in DVI mode.
-	// Skipping the full I2C reinit avoids a 16ms+ blocking delay and chip
-	// reset inside the ISR that caused NTSC videocap black screens.
-	if (hdmi_initialized) {
-		return;
-	}
-
+static void hdmi_ctrl_initialize(void) {
 	XIicPs_Config *config;
 	config = XIicPs_LookupConfig(IIC_DEVICE_ID);
 	int status = XIicPs_CfgInitialize(&Iic, config, config->BaseAddress);
@@ -142,11 +165,32 @@ void hdmi_ctrl_init(struct zz_video_mode *mode) {
 	status = hdmi_ctrl_read_byte(0x1c, buffer);
 	//printf("[%d] TPI revision 1: 0x%x\n",status,buffer[1]);
 
-	for (int i = 0; i < sizeof(sii9022_init); i += 2) {
-		status = hdmi_ctrl_write_byte(sii9022_init[i], sii9022_init[i + 1]);
-		usleep(1);
+	(void)status;
+	hdmi_initialized = 1;
+}
+
+void hdmi_ctrl_prepare_mode(struct zz_video_mode *mode) {
+	if (!hdmi_initialized) {
+		hdmi_ctrl_initialize();
+		hdmi_ctrl_write_regs(sii9022_setup,
+			sizeof(sii9022_setup) / sizeof(sii9022_setup[0]));
 	}
 
-	hdmi_initialized = 1;
+	/* A real TMDS clock loss gives displays an unambiguous retraining
+	 * event. Merely changing the live input clock can leave some receivers
+	 * latched in "out of range" until their input is toggled. */
+	hdmi_ctrl_write_byte(SII9022_SYS_CTRL, SII9022_SYS_CTRL_PWR_DWN);
+	hdmi_set_video_mode(mode->hmax, mode->vmax, mode->phz, mode->vhz,
+		mode->hdmi);
+	hdmi_ctrl_write_regs(sii9022_mode, SII_MODE_REG_COUNT);
+}
+
+void hdmi_ctrl_enable_output(void) {
+	if (!hdmi_initialized)
+		return;
+
+	/* hdmi_set_video_mode() prepared the DVI/HDMI selection while leaving
+	 * the power-down bit clear. */
+	hdmi_ctrl_write_byte(SII9022_SYS_CTRL, sii9022_output_ctrl);
 }
 

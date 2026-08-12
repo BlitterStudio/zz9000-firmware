@@ -1,10 +1,10 @@
 /*
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  *
- * Source-level regression checks for video_formatter.v invariants that are
+ * Source-level regression checks for video-pipeline RTL invariants that are
  * difficult to exercise without a Verilog simulator in the host test setup.
- * Functional pixel-level verification lives in video_formatter_tb.v
- * (run with test/video/run_formatter_sim.sh, requires Vivado xsim).
+ * Functional pixel-level verification lives in video_formatter_tb.v and
+ * videocap_sampler_tb.v (their runners require Vivado xsim).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -16,6 +16,11 @@
 #define VIDEO_FORMATTER_PATH "../../video_formatter.v"
 #define OVERLAY_LINEBUFFER_PATH "../../video_overlay_linebuffer.v"
 #define PROJECT_TCL_PATH "../../zz9000_project.tcl"
+#define MNTZORRO_PATH "../../mntzorro.v"
+#define VIDEOCAP_SAMPLER_PATH "../../videocap_sampler.v"
+#define VIDEO_C_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/video.c"
+#define MNTZORRO_H_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/mntzorro.h"
+#define HDMI_C_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/hdmi.c"
 
 static char *read_file(const char *path)
 {
@@ -101,11 +106,35 @@ static int require_absent(const char *text, const char *needle,
 	return 1;
 }
 
+static int require_source_contains(const char *source, const char *text,
+		const char *needle)
+{
+	if (!strstr(text, needle)) {
+		printf("%s: missing expected source pattern: %s\n", source, needle);
+		return 0;
+	}
+
+	return 1;
+}
+
+static int require_source_absent(const char *source, const char *text,
+		const char *needle, const char *message)
+{
+	if (strstr(text, needle)) {
+		printf("%s: %s: %s\n", source, message, needle);
+		return 0;
+	}
+
+	return 1;
+}
+
 /*
- * The line buffer must be one asymmetric-port block RAM: 64-bit writes
- * (one VDMA beat per write, tkeep as byte enables), 32-bit reads addressed
- * by counter_scanout. Splitting it into even/odd word banks caused the
- * 2026-07 vertical-column regression.
+ * The line buffer must be one asymmetric-port block RAM with two complete
+ * scanline banks: 64-bit writes (one VDMA beat per write, tkeep as byte
+ * enables), 32-bit reads addressed by source-line bank and counter_scanout.
+ * Splitting adjacent words into even/odd memories caused the 2026-07
+ * vertical-column regression; selecting whole-line banks does not change the
+ * established 64-to-32-bit unpack phase.
  */
 static int test_line_buffer_is_asymmetric_bram(const char *text)
 {
@@ -118,8 +147,16 @@ static int test_line_buffer_is_asymmetric_bram(const char *text)
 	ok &= require_contains(text, ".BYTE_WRITE_WIDTH_A(8)");
 	ok &= require_contains(text, ".READ_DATA_WIDTH_B(32)");
 	ok &= require_contains(text, ".READ_LATENCY_B(1)");
-	ok &= require_contains(text, ".addra(inptr[11:1])");
-	ok &= require_contains(text, ".addrb(counter_scanout)");
+	ok &= require_contains(text,
+	    ".addra({line_buffer_write_bank, inptr[11:1]})");
+	ok &= require_contains(text,
+	    ".addrb({scanout_source_line[0], counter_scanout})");
+	ok &= require_contains(text,
+	    ".MEMORY_SIZE(LINE_BUFFER_MEMORY_BITS)");
+	ok &= require_contains(text,
+	    "wire line_buffer_write_bank = pixin_framestart ? 1'b0 : input_line_bank;");
+	ok &= require_contains(text,
+	    "ready_for_vdma <= 1;\n            last_line_fetch <= 0;\n            next_input_state <= 4'h1;");
 	ok &= require_contains(text, ".dina(m_axis_vid_tdata)");
 	ok &= require_absent(text, "line_buffer_even",
 	                     "split even/odd line buffer banks remain");
@@ -150,6 +187,29 @@ static int test_scanout_pipeline_keeps_master_alignment(const char *text)
 	                     "extra scanline parity delay remains");
 	ok &= require_absent(text, "pixout32 <=",
 	                     "pixout32 must come straight from the BRAM output");
+
+	return ok ? 0 : 1;
+}
+
+static int test_vertical_scale_shift_and_sprite_control_are_independent(
+	const char *text)
+{
+	int ok = 1;
+
+	ok &= require_contains(text, "reg [1:0] scale_y = 2'd1;");
+	ok &= require_contains(text, "reg [1:0] scale_y_effective;");
+	ok &= require_contains(text, "scale_y_effective <= scale_y;");
+	ok &= require_contains(text,
+	    "? ((counter_y - vga_scale_y_factor) >> vga_scale_y)");
+	ok &= require_absent(text, "control_interlace ? 2'd0 : scale_y",
+	                     "interlace still bypasses configured vertical scaling");
+	ok &= require_absent(text, "control_interlace ? 2'd0 : vga_scale_y",
+	                     "interlace still bypasses scanout row duplication");
+	ok &= require_contains(text, "reg [1:0] vga_scale_y = 2'd0;");
+	ok &= require_contains(text, "scale_y  <= control_data_in[2:1];");
+	ok &= require_contains(text, "sprite_dbl <= control_data_in[3];");
+	ok &= require_absent(text, "sprite_dbl <= control_data_in[1];",
+	                     "sprite doubling still aliases vertical scaling");
 
 	return ok ? 0 : 1;
 }
@@ -261,11 +321,362 @@ static int test_overlay_stream_has_no_prefetch_fifo(const char *text)
 	return ok ? 0 : 1;
 }
 
+static int test_videocap_writeback_uses_axi_bursts(const char *text)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("mntzorro.v", text, "m01_axi_awlen <= 'hf;");
+	ok &= require_source_contains("mntzorro.v", text, "m01_axi_awburst <= 'h1;");
+	ok &= require_source_contains("mntzorro.v", text, "vc_beat = 0;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "assign m01_axi_wdata   = vcap_rdata;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "m01_axi_wlast <= (vc_beat == 5'd14);");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "if (vc_beat == 5'd15) begin");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "// Hold each BRAM address until its W beat is accepted.");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "videocap_save_state <= 5;");
+	ok &= require_source_contains("mntzorro.v", text, "4'h5: begin");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "wire [10:0] vcap_wdata_source_x =\n"
+	    "      videocap_save_x[10:0];");
+	/* vc_saving_line changes one AXI clock before vc_saveaddr1 contains that
+	 * line's product.  The first burst must wait for matching provenance or
+	 * it is addressed into the preceding framebuffer row. */
+	ok &= require_source_contains("mntzorro.v", text,
+	    "reg [9:0] vc_saveaddr_line;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "vc_saveaddr_line <= vc_saving_line;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "videocap_save_line_done != vc_saving_line &&\n"
+	    "              vc_saveaddr_line == vc_saving_line");
+	ok &= require_source_absent("mntzorro.v", text,
+	    "videocap_save_x[10:0] - 1'b1",
+	    "accepted-beat owner still assumes speculative BRAM prefetch");
+	ok &= require_source_absent("mntzorro.v", text,
+	    "Advance the address here so beat zero still sees",
+	    "burst still advances the BRAM address before WREADY");
+	ok &= require_source_absent("mntzorro.v", text, "m01_axi_wdata_out",
+	    "registered write data breaks consecutive BRAM-fed beats");
+	ok &= require_source_absent("mntzorro.v", text, "m01_axi_awburst <= 'h0;",
+	    "capture writeback still uses fixed-address transactions");
+
+	return ok ? 0 : 1;
+}
+
+static int test_videocap_write_probe_samples_accepted_axi_data(const char *text)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("mntzorro.v", text,
+	    "localparam [15:0] VCAP_PROBE_DATA_BASE = 16'h0120;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "localparam [9:0] VCAP_PROBE_LINE = 10'd120;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "localparam [11:0] VCAP_PROBE_SOURCE_X = 12'd928;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "localparam [11:0] VCAP_PROBE_DEST_X = 12'd928;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    ".ROTATE_PIXELS(0)");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "vc_saving_line == VCAP_PROBE_LINE &&");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "videocap_write_x == VCAP_PROBE_DEST_X");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "m01_axi_wvalid_out && m01_axi_wready && vcap_probe_burst_active");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "vcap_probe_data[vc_beat[3:0]] <= m01_axi_wdata;");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "VCAP_PROBE_CONTROL,");
+	ok &= require_source_contains("mntzorro.v", text,
+	    "vcap_probe_arm_toggle <= ~vcap_probe_arm_toggle;");
+
+	return ok ? 0 : 1;
+}
+
+static int test_videocap_probe_compares_sampler_and_line_owner(
+	const char *mntzorro, const char *sampler)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "parameter integer PROBE_LINE = 120");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "parameter integer PROBE_SOURCE_X = 928");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    ".PROBE_LINE(VCAP_PROBE_LINE)");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    ".PROBE_SOURCE_X(VCAP_PROBE_SOURCE_X)");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "probe_data[31:0] <= capture_store_word;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire capture_head_valid = capture_banking_cap ?");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "1'b1 : (cap_x > 11'd2);");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "probe_seen_mask[14:0] == 15'h7fff");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vcap_sampler_probe_valid_axi &&");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vcap_probe_owner[vc_beat[3:0]] <= {");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [15:0] VCAP_PROBE_SAMPLER_DATA_BASE = 16'h0170;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [15:0] VCAP_PROBE_OWNER_BASE = 16'h01c0;");
+
+	return ok ? 0 : 1;
+}
+
+static int test_videocap_probe_captures_pre_crop_samples(
+	const char *mntzorro, const char *sampler)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire [11:0] probe_precrop_start = crop_h_local - 12'd64;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "reg [31:0] probe_precrop_mem [0:63];");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "{1'b0, sample_x} >= probe_precrop_start");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "{1'b0, sample_x} < crop_h_local");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [15:0] VCAP_PRE_CROP_PROBE_DATA_BASE = 16'h0300;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [15:0] VCAP_PRE_CROP_PROBE_META = 16'h02e0;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_PRE_CROP_PROBE_DATA_BASE + 16'h0100");
+
+	return ok ? 0 : 1;
+}
+
+static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
+	const char *sampler)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "localparam integer LINEBUF_BANKS = (FULLRATE != 0) ? 2 : 1;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire capture_banking_cap = (FULLRATE != 0) && ctl_full_width_cap;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire read_banking_axi = (FULLRATE != 0) && ctl_read_full_width;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "capture_banking_cap ? capture_bank : 1'b0, cap_x");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "read_banking_axi ? buf_rbank : 1'b0, buf_raddr[10:0]");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "if (!cap_x_done && cap_x >= 11'd1279) begin");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "cap_line_toggle <= ~cap_line_toggle;");
+	ok &= require_source_absent("videocap_sampler.v", sampler, "11'h400",
+	    "full-width completion still stops at 1024 of 1280 samples");
+
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    ") videocap_line_cdc (");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "(`VCAP_FULLRATE_INT != 0) && videocap_control_applied_full_width;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vcap_line_toggle, vcap_write_bank, vcap_y[9:0]");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    ".buf_rbank(vc_saving_bank)");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vc_saving_bank <= videocap_bank_sync;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vcap_line_payload_axi[11] != vcap_line_toggle_seen");
+
+	return ok ? 0 : 1;
+}
+
+static int test_videocap_interlace_uses_raw_horizontal_phase(
+	const char *sampler)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "reg [11:0] phase_x = 0;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "reg [11:0] phase_line_period = 0;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "(phase_x > vsync_phase_x) ?");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "vsync_phase_abs_plus_threshold <= {1'b0, phase_line_period}");
+	ok &= require_source_absent("videocap_sampler.v", sampler,
+	    "(cap_x > vsync_x)",
+	    "interlace phase still depends on cropped/scaled cap_x");
+
+	return ok ? 0 : 1;
+}
+
+static int test_videocap_automatic_crop_is_path_aware(const char *mntzorro,
+	const char *sampler)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [11:0] VCAP_CROP_H_COMPAT = 12'd188;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [11:0] VCAP_CROP_V_COMPAT = 12'd26;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "localparam [11:0] CROP_H_FULLRATE = 12'd280;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "localparam [11:0] CROP_V_FULLRATE = 12'd40;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire request_fullrate_path = (FULLRATE != 0) && request_raw[2];");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire [11:0] request_crop_h_effective = request_raw[28] ?\n"
+	    "    (request_fullrate_path ? CROP_H_FULLRATE : CROP_H_COMPAT) :\n"
+	    "    request_raw[15:4];");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire [11:0] request_crop_v_effective = request_raw[29] ?\n"
+	    "    (request_fullrate_path ? CROP_V_FULLRATE : CROP_V_COMPAT) :\n"
+	    "    request_raw[27:16];");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "control_payload <= {request_crop_v_effective,\n"
+	    "                                        request_crop_h_effective,");
+
+	return ok ? 0 : 1;
+}
+
+static int test_videocap_live_control_contract(const char *mntzorro,
+	const char *sampler)
+{
+	int ok = 1;
+
+	/* The host sees these at 0x1400..0x1414; direct-register decoding
+	 * subtracts the aperture's 0x1000-byte base before reaching this case. */
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [15:0] VCAP_LIVE_CAPABILITY = 16'h0400;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [31:0] VCAP_LIVE_CAPABILITY_VALUE = 32'h564c010f;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "localparam [15:0] VCAP_LIVE_COMMIT_TOKEN = 16'hca1b;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_LIVE_CAPABILITY,\n            VCAP_LIVE_CAPABILITY_LO:");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_LIVE_STATUS,\n            VCAP_LIVE_STATUS_LO:");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_LIVE_APPLIED_RAW,\n            VCAP_LIVE_APPLIED_RAW_LO:");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_LIVE_EFFECTIVE_CROP,\n            VCAP_LIVE_EFFECTIVE_CROP_LO:");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_LIVE_STAGED_RAW_HI:");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_LIVE_STAGED_RAW_LO:");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "VCAP_LIVE_COMMIT:");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "(regread_addr & SDK_REG_OFFSET_MASK) >=\n"
+	    "                      VCAP_LIVE_CAPABILITY");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "(regwrite_addr & SDK_REG_OFFSET_MASK) <\n"
+	    "                      VCAP_LIVE_CAPABILITY ||");
+
+	/* The request engine and sampler handshake are intentionally separate:
+	 * pending data is never sampler or writeback truth. */
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "module videocap_control_source #(");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    ".DEST_EXT_HSK(1)");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    ".DEST_SYNC_FF(4)");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    ".SRC_SYNC_FF(4)");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    ".WIDTH(27)");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "if (!ctl_dest_ack && frame_sync) begin");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "ctl_dest_ack <= 1'b1;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "if (!ctl_dest_req)\n        ctl_dest_ack <= 1'b0;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "request_raw[31:30] == 2'b00 && request_raw[1:0] <= 2'd2");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "applied_raw <= pending_raw;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "applied_sequence <= request_sequence;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "module videocap_standard_cdc (");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "localparam [1:0] STANDARD_INVALID = 2'd0;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "localparam [1:0] STANDARD_NTSC = 2'd2;");
+
+	/* Operation 16 is event-driven. The stale Zorro OP register and a held
+	 * ARM command level must not continuously retrigger the arbiter. */
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "wire video_control_axi_op16_event =");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "axi_reg2[31] && !video_control_axi_strobe_d");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "videocap_control_zorro_event <= 1'b1;");
+	ok &= require_source_absent("mntzorro.v", mntzorro,
+	    "if (video_control_op == 16) begin",
+	    "persistent operation register still directly controls capture");
+
+	return ok ? 0 : 1;
+}
+
+static int test_videocap_full_width_requires_hardware_capability(
+	const char *mntzorro, const char *mntzorro_h, const char *video)
+{
+	int ok = 1;
+
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "(`VCAP_FULLRATE_INT != 0), 8'b0, zorro_state");
+	ok &= require_source_contains("mntzorro.h", mntzorro_h,
+	    "MNTZORRO_STATUS_VCAP_FULLRATE");
+	ok &= require_source_contains("video.c", video,
+	    "zstate & MNTZORRO_STATUS_VCAP_FULLRATE");
+
+	return ok ? 0 : 1;
+}
+
+static int test_mode_switch_retrains_display(const char *video,
+	const char *hdmi)
+{
+	int ok = 1;
+	const char *prepare;
+	const char *clock;
+	const char *enable;
+
+	ok &= require_source_contains("video.c", video,
+	    "hdmi_ctrl_prepare_mode(vmode);");
+	ok &= require_source_contains("video.c", video,
+	    "CLK_WIZ_STATUS_LOCKED");
+	ok &= require_source_contains("video.c", video,
+	    "CLK_WIZ_RECONFIG_LOAD");
+	ok &= require_source_contains("video.c", video,
+	    "hdmi_ctrl_enable_output();");
+	ok &= require_source_contains("hdmi.c", hdmi,
+	    "SII9022_SYS_CTRL_PWR_DWN");
+	ok &= require_source_contains("hdmi.c", hdmi,
+	    "hdmi_set_video_mode(mode->hmax, mode->vmax, mode->phz, mode->vhz");
+
+	prepare = strstr(video, "hdmi_ctrl_prepare_mode(vmode);");
+	clock = prepare ? strstr(prepare, "pixelclock_init_2(vmode);") : NULL;
+	enable = clock ? strstr(clock, "hdmi_ctrl_enable_output();") : NULL;
+	if (!prepare || !clock || !enable) {
+		printf("video.c: display transition is not prepare -> clock -> enable\n");
+		ok = 0;
+	}
+
+	return ok ? 0 : 1;
+}
+
 int main(void)
 {
 	char *text = read_file(VIDEO_FORMATTER_PATH);
 	char *linebuffer;
 	char *project;
+	char *mntzorro;
+	char *sampler;
+	char *video;
+	char *mntzorro_h;
+	char *hdmi;
 	int result;
 
 	if (!text)
@@ -274,6 +685,8 @@ int main(void)
 	result = test_line_buffer_is_asymmetric_bram(text);
 	if (!result)
 		result = test_scanout_pipeline_keeps_master_alignment(text);
+	if (!result)
+		result = test_vertical_scale_shift_and_sprite_control_are_independent(text);
 	if (!result)
 		result = test_64bit_tkeep_drives_writes(text);
 	if (!result)
@@ -295,6 +708,56 @@ int main(void)
 	if (!result)
 		result = test_overlay_stream_has_no_prefetch_fifo(project);
 	free(project);
+
+	mntzorro = read_file(MNTZORRO_PATH);
+	if (!mntzorro)
+		return 1;
+	if (!result)
+		result = test_videocap_writeback_uses_axi_bursts(mntzorro);
+	if (!result)
+		result = test_videocap_write_probe_samples_accepted_axi_data(mntzorro);
+	sampler = read_file(VIDEOCAP_SAMPLER_PATH);
+	if (!sampler) {
+		free(mntzorro);
+		return 1;
+	}
+	if (!result)
+		result = test_videocap_full_width_owns_completed_bank(mntzorro,
+			sampler);
+	if (!result)
+		result = test_videocap_probe_compares_sampler_and_line_owner(
+			mntzorro, sampler);
+	if (!result)
+		result = test_videocap_probe_captures_pre_crop_samples(
+			mntzorro, sampler);
+	if (!result)
+		result = test_videocap_interlace_uses_raw_horizontal_phase(sampler);
+	if (!result)
+		result = test_videocap_automatic_crop_is_path_aware(mntzorro,
+			sampler);
+	if (!result)
+		result = test_videocap_live_control_contract(mntzorro, sampler);
+	free(sampler);
+
+	video = read_file(VIDEO_C_PATH);
+	mntzorro_h = read_file(MNTZORRO_H_PATH);
+	hdmi = read_file(HDMI_C_PATH);
+	if (!video || !mntzorro_h || !hdmi) {
+		free(mntzorro);
+		free(video);
+		free(mntzorro_h);
+		free(hdmi);
+		return 1;
+	}
+	if (!result)
+		result = test_videocap_full_width_requires_hardware_capability(
+			mntzorro, mntzorro_h, video);
+	if (!result)
+		result = test_mode_switch_retrains_display(video, hdmi);
+	free(mntzorro);
+	free(video);
+	free(mntzorro_h);
+	free(hdmi);
 
 	return result;
 }

@@ -45,6 +45,10 @@ enum zz_config_key {
 	 * unset key has always meant. */
 	ZZ_CONFIG_KEY_RESERVED_10     = 10,
 	ZZ_CONFIG_KEY_VIDEO_OVERLAY   = 11, /* 0=off 1=on, informational (drivers query it) */
+	ZZ_CONFIG_KEY_VIDEOCAP_SAMPLE = 12, /* 0=average 1=even 2=odd */
+	ZZ_CONFIG_KEY_VIDEOCAP_SHRES  = 13, /* 0=filter 1=full */
+	ZZ_CONFIG_KEY_VIDEOCAP_CROP_H = 14, /* 28 MHz samples */
+	ZZ_CONFIG_KEY_VIDEOCAP_CROP_V = 15, /* captured lines */
 	ZZ_CONFIG_KEY_NUM
 };
 
@@ -53,6 +57,14 @@ struct zz_config {
 
 	uint8_t videocap_mode_present;
 	uint16_t videocap_mode;         /* enum zz_video_modes */
+	uint8_t videocap_sample_present;
+	uint16_t videocap_sample;       /* 0=average 1=even 2=odd */
+	uint8_t videocap_shres_present;
+	uint16_t videocap_shres;        /* 0=filter 1=full */
+	uint8_t videocap_crop_h_present;
+	uint16_t videocap_crop_h;       /* 0-4095, 28 MHz samples */
+	uint8_t videocap_crop_v_present;
+	uint16_t videocap_crop_v;       /* 0-4095, captured lines */
 
 	uint8_t ns_vsync_present;
 	uint16_t ns_vsync;              /* 0=off 1=pal 2=ntsc */

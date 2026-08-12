@@ -10,8 +10,11 @@
  * Plusargs:
  *   +CMODE=<0|1|2|3>   colormode (8/16/32/15 bit), default 2
  *   +SCALEX=<0|1>      horizontal doubling, default 0
- *   +SCALEY=<0|1>      vertical doubling (native videocap uses 1), default 0
+ *   +SCALEY=<0|1|2>    vertical scale shift (x1/x2/x4), default 0
+ *   +INTERLACE=<0|1>   mark woven interlaced input; scaling still applies
  *   +WIDTH=<pixels>    displayed width, default 64
+ *   +STREAM_GAP_EVERY=<beats>  insert a VDMA delivery pause at this cadence
+ *   +STREAM_GAP_CYCLES=<clocks> length of each delivery pause
  *
  * Compile with -d MASTER_DUT to run against the pre-branch 32-bit formatter
  * (reference model validation).
@@ -48,12 +51,16 @@ localparam OP_OVERLAY_FRAME = 27;
 integer cfg_cmode;
 integer cfg_scalex;
 integer cfg_scaley;
+integer cfg_interlace;
 integer cfg_width;
+integer cfg_stream_gap_every;
+integer cfg_stream_gap_cycles;
 integer words_per_line;
 integer beats_per_line;
 integer src_pixels;
 integer src_lines;
 integer h_max;
+integer scale_y_factor;
 
 // clocks
 reg aclk = 0;
@@ -109,7 +116,7 @@ video_formatter uut (
   .dvi_rgb(dvi_rgb),
   .control_data(control_data),
   .control_op(control_op),
-  .control_interlace(1'b0),
+  .control_interlace(cfg_interlace[0]),
   .control_vblank(control_vblank),
   .scanline_intensity(8'd0),
   .scanline_width(2'b00),
@@ -295,6 +302,8 @@ endtask
 // vdma stream model
 reg stream_en = 0;
 integer sl, sb, sw0, sw1;
+integer stream_beats_sent;
+integer stream_gap_cycle;
 reg s_last;
 reg hs_done;
 initial begin : vdma
@@ -325,21 +334,32 @@ initial begin : vdma
           if (tready === 1'b1)
             hs_done = 1;
         end
+
+        stream_beats_sent = stream_beats_sent + 1;
+        if (cfg_stream_gap_every > 0 && cfg_stream_gap_cycles > 0 &&
+            (stream_beats_sent % cfg_stream_gap_every) == 0) begin
+          tvalid <= 0;
+          for (stream_gap_cycle = 0;
+               stream_gap_cycle < cfg_stream_gap_cycles;
+               stream_gap_cycle = stream_gap_cycle + 1)
+            @(posedge aclk);
+        end
       end
     end
   end
 end
 
-// capture displayed pixels; without scale_y the active rows are
-// counter_y = 1..NLINES showing streamed lines 0..NLINES-1 in order, with
-// scale_y they are counter_y = 2..NLINES+1 showing each source line twice
-reg [31:0] cap [0:(NLINES+1)*MAXW-1];
+// Normalize the formatter's vertical active-window offset while capturing.
+// Source lines repeat by the configured scale factor for both progressive and
+// woven-interlaced input. Full-width interlace supplies 512 woven rows, then
+// uses x2 so the flickerfixer presents a stable 1024-line progressive frame.
+reg [31:0] cap [0:NLINES*MAXW-1];
 reg [11:0] xcnt = 0;
 integer row;
 always @(posedge dvi_clk) begin
   if (dvi_active_video === 1'b1) begin
-    row = uut.counter_y - 1;
-    if (row >= 0 && row <= NLINES && xcnt < MAXW)
+    row = uut.counter_y - scale_y_factor;
+    if (row >= 0 && row < NLINES && xcnt < MAXW)
       cap[row * MAXW + xcnt] <= dvi_rgb;
     xcnt <= xcnt + 1;
   end else
@@ -397,12 +417,20 @@ initial begin
   cfg_cmode = 2;
   cfg_scalex = 0;
   cfg_scaley = 0;
+  cfg_interlace = 0;
   cfg_width = 64;
+  cfg_stream_gap_every = 0;
+  cfg_stream_gap_cycles = 0;
+  stream_beats_sent = 0;
   if ($value$plusargs("CMODE=%d", cfg_cmode)) ;
   if ($value$plusargs("SCALEX=%d", cfg_scalex)) ;
   if ($value$plusargs("SCALEY=%d", cfg_scaley)) ;
+  if ($value$plusargs("INTERLACE=%d", cfg_interlace)) ;
   if ($value$plusargs("WIDTH=%d", cfg_width)) ;
+  if ($value$plusargs("STREAM_GAP_EVERY=%d", cfg_stream_gap_every)) ;
+  if ($value$plusargs("STREAM_GAP_CYCLES=%d", cfg_stream_gap_cycles)) ;
 
+  scale_y_factor = 1 << cfg_scaley;
   src_pixels = cfg_width >> cfg_scalex;
   src_lines = NLINES >> cfg_scaley;
   case (cfg_cmode)
@@ -417,9 +445,10 @@ initial begin
 `endif
   h_max = cfg_width + 56;
 
-  $display("CONFIG cmode=%0d scalex=%0d scaley=%0d width=%0d words=%0d beats=%0d",
-           cfg_cmode, cfg_scalex, cfg_scaley, cfg_width, words_per_line,
-           beats_per_line);
+  $display("CONFIG cmode=%0d scalex=%0d scaley=%0d interlace=%0d width=%0d words=%0d beats=%0d gap=%0d/%0d",
+           cfg_cmode, cfg_scalex, cfg_scaley, cfg_interlace, cfg_width,
+           words_per_line, beats_per_line, cfg_stream_gap_every,
+           cfg_stream_gap_cycles);
 
   repeat (10) @(negedge aclk);
   aresetn <= 1;
@@ -430,7 +459,7 @@ initial begin
   op(OP_HS, ((cfg_width + 16) << 16) | (cfg_width + 32));
   op(OP_VS, (VS_START << 16) | VS_END);
   op(OP_COLORMODE, cfg_cmode);
-  op(OP_SCALE, ((cfg_scaley & 1) << 1) | (cfg_scalex & 1));
+  op(OP_SCALE, ((cfg_scaley & 3) << 1) | (cfg_scalex & 1));
   op(OP_SPRITEXY, (2000 << 16) | 2000);
   if (cfg_cmode == 0)
     for (i = 0; i < 256; i = i + 1)
@@ -445,14 +474,13 @@ initial begin
   // The formatter's active-video window opens one dvi_clk before the pixel
   // pipeline delivers word 0 (left edge shows pixel 0 twice on master
   // hardware too), so displayed column x carries source pixel x-1.
-  // Without scale_y, capture row r = 0..NLINES-1 shows source line r; with
-  // scale_y, capture row r = 1..NLINES shows source line (r-1)>>1.
+  // Captured rows are normalized to zero at the first active line.
   mism = 0;
   shown = 0;
-  for (i = cfg_scaley; i < NLINES + cfg_scaley; i = i + 1)
+  for (i = 0; i < NLINES; i = i + 1)
     for (x = 1; x < cfg_width; x = x + 1) begin
       got = cap[i * MAXW + x];
-      exp = expected_pix(cfg_scaley ? ((i - 1) >> 1) : i, x - 1);
+      exp = expected_pix(i >> cfg_scaley, x - 1);
       if (got !== exp) begin
         mism = mism + 1;
         if (shown < 24) begin

@@ -38,6 +38,10 @@ static int test_line_bytes_do_not_grow_with_stream_width(void)
 	                video_vdma_line_bytes(2560U, 1U), 10240U)) {
 		return 4;
 	}
+	if (!expect_u32("1280x1024x32 line bytes",
+	                video_vdma_line_bytes(1280U, 1U), 5120U)) {
+		return 5;
+	}
 
 	return 0;
 }
@@ -58,6 +62,11 @@ static int test_pan_stride_uses_framebuffer_width(void)
 	                video_vdma_stride_bytes(1920U, 2U, 2048U, 1U),
 	                4096U)) {
 		return 3;
+	}
+	if (!expect_u32("1280x1024x32 pan stride",
+	                video_vdma_stride_bytes(1280U, 1U, 0U, 1U),
+	                5120U)) {
+		return 4;
 	}
 
 	return 0;
@@ -81,6 +90,17 @@ static int test_default_stride_matches_line_bytes(void)
 	return 0;
 }
 
+static int test_native_scanout_starts_at_capture_row(void)
+{
+	if (!expect_u32("1280 native row-aligned start",
+	                video_vdma_native_row_start(0x00e00000U),
+	                0x00e00000U)) {
+		return 1;
+	}
+
+	return 0;
+}
+
 int main(void)
 {
 	int result;
@@ -96,6 +116,10 @@ int main(void)
 	result = test_default_stride_matches_line_bytes();
 	if (result)
 		return 50 + result;
+
+	result = test_native_scanout_starts_at_capture_row();
+	if (result)
+		return 70 + result;
 
 	return 0;
 }

@@ -99,6 +99,44 @@ static int hdf_name_valid(const char *s) {
 }
 
 static int apply_key(const char *key, const char *value) {
+	/* Preferred user-facing native-video setting.  It replaces three
+	 * independently editable legacy keys with one coherent profile, while
+	 * still filling the same internal fields so older driver/runtime paths
+	 * keep their established behaviour.  Legacy keys remain accepted below;
+	 * normal last-value-wins parsing therefore also works for mixed files. */
+	if (token_eq(key, "videocap_profile")) {
+		if (token_eq(value, "full_60")) {
+			cfg.videocap_mode = ZZVMODE_800x600;
+			cfg.videocap_shres = 1;
+			cfg.ns_vsync = 0;
+		} else if (token_eq(value, "full_exact")) {
+			cfg.videocap_mode = ZZVMODE_800x600;
+			cfg.videocap_shres = 1;
+			cfg.ns_vsync = 1;
+		} else if (token_eq(value, "filtered_60")) {
+			cfg.videocap_mode = ZZVMODE_800x600;
+			cfg.videocap_shres = 0;
+			cfg.ns_vsync = 0;
+		} else if (token_eq(value, "filtered_pal")) {
+			cfg.videocap_mode = ZZVMODE_720x576;
+			cfg.videocap_shres = 0;
+			cfg.ns_vsync = 0;
+		} else if (token_eq(value, "filtered_pal_exact")) {
+			cfg.videocap_mode = ZZVMODE_720x576;
+			cfg.videocap_shres = 0;
+			cfg.ns_vsync = 1;
+		} else if (token_eq(value, "filtered_ntsc_exact")) {
+			cfg.videocap_mode = ZZVMODE_720x576;
+			cfg.videocap_shres = 0;
+			cfg.ns_vsync = 2;
+		} else {
+			return -1;
+		}
+		cfg.videocap_mode_present = 1;
+		cfg.videocap_shres_present = 1;
+		cfg.ns_vsync_present = 1;
+		return 0;
+	}
 	if (token_eq(key, "videocap_mode")) {
 		if (token_eq(value, "800x600")) {
 			cfg.videocap_mode = ZZVMODE_800x600;
@@ -108,6 +146,40 @@ static int apply_key(const char *key, const char *value) {
 			return -1;
 		}
 		cfg.videocap_mode_present = 1;
+		/* Before videocap_shres existed, both legacy output modes described
+		 * the filtered capture path. Preserve that meaning while retaining
+		 * normal last-value-wins behavior for mixed old/new files. */
+		cfg.videocap_shres = 0;
+		cfg.videocap_shres_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "videocap_sample")) {
+		if (token_eq(value, "average")) cfg.videocap_sample = 0;
+		else if (token_eq(value, "even")) cfg.videocap_sample = 1;
+		else if (token_eq(value, "odd")) cfg.videocap_sample = 2;
+		else return -1;
+		cfg.videocap_sample_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "videocap_shres")) {
+		if (token_eq(value, "filter")) cfg.videocap_shres = 0;
+		else if (token_eq(value, "full")) cfg.videocap_shres = 1;
+		else return -1;
+		cfg.videocap_shres_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "videocap_crop_h")) {
+		long v = parse_uint(value);
+		if (v < 0 || v > 4095) return -1;
+		cfg.videocap_crop_h = (uint16_t)v;
+		cfg.videocap_crop_h_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "videocap_crop_v")) {
+		long v = parse_uint(value);
+		if (v < 0 || v > 4095) return -1;
+		cfg.videocap_crop_v = (uint16_t)v;
+		cfg.videocap_crop_v_present = 1;
 		return 0;
 	}
 	if (token_eq(key, "nonstandard_vsync")) {
@@ -314,6 +386,22 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 	case ZZ_CONFIG_KEY_VIDEOCAP_MODE:
 		p = cfg.videocap_mode_present;
 		v = cfg.videocap_mode;
+		break;
+	case ZZ_CONFIG_KEY_VIDEOCAP_SAMPLE:
+		p = cfg.videocap_sample_present;
+		v = cfg.videocap_sample;
+		break;
+	case ZZ_CONFIG_KEY_VIDEOCAP_SHRES:
+		p = cfg.videocap_shres_present;
+		v = cfg.videocap_shres;
+		break;
+	case ZZ_CONFIG_KEY_VIDEOCAP_CROP_H:
+		p = cfg.videocap_crop_h_present;
+		v = cfg.videocap_crop_h;
+		break;
+	case ZZ_CONFIG_KEY_VIDEOCAP_CROP_V:
+		p = cfg.videocap_crop_v_present;
+		v = cfg.videocap_crop_v;
 		break;
 	case ZZ_CONFIG_KEY_NS_VSYNC:
 		p = cfg.ns_vsync_present;

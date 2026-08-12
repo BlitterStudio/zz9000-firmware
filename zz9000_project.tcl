@@ -170,6 +170,8 @@ if { $no_autoboot } {
 # Import local files from the original project
 set files [list \
  [file normalize "${origin_dir}/mntzorro.v" ]\
+ [file normalize "${origin_dir}/videocap_sampler.v" ]\
+ [file normalize "${origin_dir}/videocap_writeback_layout.v" ]\
  [file normalize "${origin_dir}/video_formatter.v" ]\
  [file normalize "${origin_dir}/video_overlay_pixel.v" ]\
  [file normalize "${origin_dir}/video_overlay_linebuffer.v" ]\
@@ -241,6 +243,12 @@ set obj [get_filesets utils_1]
 # Adding sources referenced in BDs, if not already added
 if { [get_files mntzorro.v] == "" } {
   import_files -quiet -fileset sources_1 mntzorro.v
+}
+if { [get_files videocap_sampler.v] == "" } {
+  import_files -quiet -fileset sources_1 videocap_sampler.v
+}
+if { [get_files videocap_writeback_layout.v] == "" } {
+  import_files -quiet -fileset sources_1 videocap_writeback_layout.v
 }
 if { [get_files video_formatter.v] == "" } {
   import_files -quiet -fileset sources_1 video_formatter.v
@@ -1637,9 +1645,9 @@ current_run -synthesis [get_runs synth_1]
 
 # Create 'impl_1' run (if not found)
 if {[string equal [get_runs -quiet impl_1] ""]} {
-    create_run -name impl_1 -part xc7z020clg400-1 -flow {Vivado Implementation 2018} -strategy "Flow_RunPostRoutePhysOpt" -report_strategy {No Reports} -constrset constrs_1 -parent_run synth_1
+    create_run -name impl_1 -part xc7z020clg400-1 -flow {Vivado Implementation 2018} -strategy "Performance_NetDelay_high" -report_strategy {No Reports} -constrset constrs_1 -parent_run synth_1
 } else {
-  set_property strategy "Flow_RunPostRoutePhysOpt" [get_runs impl_1]
+  set_property strategy "Performance_NetDelay_high" [get_runs impl_1]
   set_property flow "Vivado Implementation 2018" [get_runs impl_1]
 }
 set obj [get_runs impl_1]
@@ -1837,11 +1845,11 @@ set_property -name "display_name" -value "impl_1_post_route_phys_opt_report_bus_
 }
 set obj [get_runs impl_1]
 set_property -name "part" -value "xc7z020clg400-1" -objects $obj
-set_property -name "strategy" -value "Flow_RunPostRoutePhysOpt" -objects $obj
+set_property -name "strategy" -value "Performance_NetDelay_high" -objects $obj
 set_property -name "steps.phys_opt_design.is_enabled" -value "1" -objects $obj
-set_property -name "steps.phys_opt_design.args.directive" -value "Explore" -objects $obj
-set_property -name "steps.route_design.args.more options" -value "-tns_cleanup" -objects $obj
+set_property -name "steps.phys_opt_design.args.directive" -value "AggressiveExplore" -objects $obj
 set_property -name "steps.post_route_phys_opt_design.is_enabled" -value "1" -objects $obj
+set_property -name "steps.post_route_phys_opt_design.args.directive" -value "AggressiveExplore" -objects $obj
 set_property -name "steps.write_bitstream.args.readback_file" -value "0" -objects $obj
 set_property -name "steps.write_bitstream.args.verbose" -value "0" -objects $obj
 

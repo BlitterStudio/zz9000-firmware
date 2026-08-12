@@ -37,6 +37,11 @@ into a reproducible firmware, FPGA, and SDK-service platform.
 - RTG acceleration for fills, blits, pattern drawing, planar conversion,
   palette updates, and sprite/video state; 64-bit VDMA scanout and Zorro
   III high-resolution modes including 1920x1080x32.
+- Amiga native video captured at the full 28 MHz AGA dot clock and scanned
+  out at 1280x1024: one lores pixel is 4x4 output pixels, one hires pixel
+  is 2x4, and SuperHires maps 1x4 with no horizontal scaling. The
+  capture origin is calibratable through `videocap_crop_h` and
+  `videocap_crop_v` in `ZZ9000.CFG`.
 - Picasso96 DPMS power management with independent HSync/VSync gating for
   standby, suspend, and off, plus a mode-set wake fail-safe. Internal
   raster and vblank timing keep running while the monitor sleeps.
@@ -110,8 +115,8 @@ These are hardware/autoconfig bitstream variants. Current releases use
 one firmware flavor across all of them; settings that used to require a
 separate firmware flavor or ENV: variables now live in the optional
 [`ZZ9000.CFG`](ZZ9000.CFG) config file (see below). Older releases also
-shipped an `ns-pal` firmware flavor; its behavior is now
-`videocap_mode = pal` plus `nonstandard_vsync = pal` in `ZZ9000.CFG`.
+shipped an `ns-pal` firmware flavor; its behavior is now the
+`filtered_pal_exact` native-video profile in `ZZ9000.CFG`.
 
 ## Configuration File (ZZ9000.CFG)
 
@@ -125,8 +130,10 @@ sample; the copy at the repo root documents every option:
 
 | Key | Values | Replaces |
 |---|---|---|
-| `videocap_mode` | `800x600` (default), `pal` | `ENV:ZZ9000-VCAP-800x600` |
-| `nonstandard_vsync` | `off` (default), `pal`, `ntsc` | `ENV:ZZ9000-NS-VSYNC[-NTSC]`, `ns-pal` flavor |
+| `videocap_profile` | `full_60` (default), `full_exact`, `filtered_60`, `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact` | atomic native-video output policy |
+| `videocap_sample` | `average` (default), `even`, `odd` | native-video capture sample selection |
+| `videocap_crop_h` | `0`–`4095` (missing = Automatic) | horizontal capture origin in 28 MHz samples |
+| `videocap_crop_v` | `0`–`4095` (missing = Automatic) | vertical capture origin in lines |
 | `scanline_mode` | `0` (off, default) – `3` | ZZTop/ZZScanlines (still work at runtime) |
 | `scanline_parity` | `0` (default), `1` | ZZTop/ZZScanlines |
 | `int2` | `off` (default), `on` | `ENV:ZZ9K_INT2` (drivers query it) |
@@ -143,13 +150,52 @@ driver-consumed options (`int2`, `mac`, `videocap_mode`,
 `ENV:` variable or RTG tooltype takes precedence over the config file —
 remove those when migrating.
 
+Automatic framing is resolved independently for each crop axis by the FPGA
+capture path. A full-rate bitstream using a full-width native-video profile
+uses `280/40`; filtered profiles and Denise-adapter/Super Denise bitstreams use
+the historical `188/26`. An explicit numeric key is always a literal Custom
+override, including `188`, `26`, `0`, and `4095`.
+
+Firmware 2.10 and the matching protocol-1 bitstream also expose acknowledged
+live framing control for ZZTop 2.8. The FPGA publishes the exact applied raw
+Automatic/Custom state, resolved effective H/V values, capture-path signature,
+and detected PAL/NTSC standard. A valid live change crosses clock domains as
+one coherent word and becomes active only at a capture-frame boundary; the
+host does not treat it as applied until the matching sequence is acknowledged.
+The rejected status flag is sticky arbitration history, not request identity:
+ZZTop also verifies that the coherently read applied raw word exactly matches
+its request, and reports a competing-writer conflict instead of false success.
+Both the firmware revision and exact bitstream capability are required, so an
+old/new mixed installation fails closed and retains ordinary Automatic/manual
+Custom editing without offering live calibration.
+
+In ZZTop, **Calibrate** opens a native chipset PAL/NTSC test screen. Arrows move
+the visible picture by one unit, Shift+Arrows by 16, Enter returns an explicit
+Custom pair to Advanced Video, and Escape restores the exact entry state.
+Enter does not write the card: Advanced **Done** stages the pair and the main
+Settings **Save** action persists `videocap_crop_h` and `videocap_crop_v`.
+Changing to a different applied capture path requires Automatic + Save + cold
+boot before calibrating that path. If live acknowledgement stops because
+capture frames disappear, ZZTop keeps the calibration/rollback UI open rather
+than claiming success; cold boot remains the authoritative recovery to the
+last persisted CFG.
+
 ZZTop can edit this file in place from AmigaOS (Project menu →
 Settings), writing it back over the FWUP path with a `ZZ9000.bak`
 backup. It rewrites the whole file from the keys it knows, so use
-**ZZTop 2.4 or newer**: 2.3 predates `offscreen_bitmaps` and
-`video_overlay` and would drop those lines. The drivers repo's
+**ZZTop 2.7 or newer** for schema-safe editing, and ZZTop 2.8 for live
+calibration. Version 2.6 exposes the older independent full-width and
+refresh controls, 2.5 predates the full-width and crop controls,
+2.4 predates `videocap_sample`, and 2.3 also predates
+`offscreen_bitmaps` and `video_overlay`; those older versions would drop
+the newer lines. The drivers repo's
 `tools/check-cfg-keys.sh` fails if the parser, this table, the sample
 `ZZ9000.CFG` and ZZTop's editor ever disagree.
+
+The older `videocap_mode`, `videocap_shres`, and `nonstandard_vsync` keys
+remain accepted for existing cards and hand-written files, but new files should
+use one `videocap_profile` so that width, resolution, and refresh cannot
+contradict one another.
 
 `yuv_rect` was accepted by firmware 2.4–2.7 but never consumed by
 anything, and was removed in 2.8. Its key slot stays reserved so the

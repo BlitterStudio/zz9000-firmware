@@ -30,6 +30,7 @@
 #include "ax.h"
 #include "interrupt.h"
 #include "video.h"
+#include "video_scale.h"
 #include "overlay.h"
 #include "mp3/mp3.h"
 #include "mp3/minimp3.h"
@@ -2367,8 +2368,7 @@ static int fill_framebuffer_surface(struct SDKSurface *surface_info)
 	                       state->vmode_vsize : (uint32_t)mode->vres;
 	if (state->scalemode & 1)
 		surface_info->width /= 2U;
-	if (state->scalemode & 2)
-		surface_info->height /= 2U;
+	surface_info->height /= video_vertical_scale_factor(state->scalemode);
 	if (surface_info->width == 0 || surface_info->height == 0)
 		return 0;
 

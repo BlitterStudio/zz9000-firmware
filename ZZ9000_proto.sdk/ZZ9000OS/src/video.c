@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "video.h"
+#include "video_scale.h"
 #include "video_vdma.h"
 #include "zz_config.h"
 #include "mntzorro.h"
@@ -18,35 +19,20 @@
 
 #define VDMA_DEVICE_ID	XPAR_AXIVDMA_0_DEVICE_ID
 
+/* Clocking Wizard dynamic-reconfiguration registers (PG065).  LOAD stays
+ * asserted during the transaction; STATUS bit 0 is the MMCM/PLL lock. */
+#define CLK_WIZ_STATUS_OFFSET       0x004
+#define CLK_WIZ_STATUS_LOCKED       0x001
+#define CLK_WIZ_RECONFIG_OFFSET     0x25c
+#define CLK_WIZ_RECONFIG_LOAD       0x001
+#define CLK_WIZ_LOCK_POLL_US        10
+#define CLK_WIZ_LOCK_TIMEOUT_US     10000
+
 static struct ZZ_VIDEO_STATE vs;
 static XAxiVdma vdma;
 static XClk_Wiz clkwiz;
 
 extern int interrupt_enabled_vblank;
-
-struct zz_video_mode preset_video_modes[ZZVMODE_NUM] = {
-    //   HRES       VRES    HSTART  HEND    HMAX    VSTART  VEND    VMAX    POLARITY    MHZ     PIXELCLOCK HZ   VERTICAL HZ     HDMI    MUL/DIV/DIV2
-    {    1280,      720,    1390,   1430,   1650,   725,    730,    750,    0,          75,     75000000,       60,             0,      15, 1, 20 },
-    {    800,       600,    840,    968,    1056,   601,    605,    628,    0,          40,     40000000,       60,             0,      14, 1, 35 },
-    {    640,       480,    656,    752,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      15, 1, 60 },
-    {    1024,      768,    1048,   1184,   1344,   771,    777,    806,    0,          65,     65000000,       60,             0,      13, 1, 20 },
-    {    1280,      1024,   1328,   1440,   1688,   1025,   1028,   1066,   0,          108,    108000000,      60,             0,      54, 5, 10 },
-    {    1920,      1080,   2008,   2052,   2200,   1084,   1089,   1125,   0,          150,    150000000,      60,             0,      15, 1, 10 },
-    {    720,       576,    732,    796,    864,    581,    586,    625,    1,          27,     27000000,       50,             0,      45, 2, 83 },
-    {    1920,      1080,   2448,   2492,   2640,   1084,   1089,   1125,   0,          150,    150000000,      50,             0,      15, 1, 10 },
-    {    720,       480,    736,    768,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      19, 1, 75 },
-    {    640,       512,    840,    968,    1056,   601,    605,    628,    0,          40,     40000000,       60,             0,      14, 1, 35 },
-	{	 1600,		1200,	1704,	1880,	2160,	1201,	1204,	1242,	0,			161,	16089999,		60,				0,		21, 1, 13 },
-	{	 2560,		1440,	2680,	2944,	3328,	1441,	1444,	1465,	0,			146,	15846000,		30,				0,		41, 2, 14 },
-	{    720,       576,    732,    796,    864,    581,    586,    625,    1,          27,     27000000,       50,             0,      31, 1,115 }, // 720x576 non-standard VSync (PAL Amiga)
-	{    720,       480,    736,    768,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      61, 5, 49 }, // 720x480 non-standard VSync (PAL Amiga)
-	{    720,       576,    732,    796,    864,    581,    586,    625,    1,          27,     27000000,       50,             0,      59, 7, 31 }, // 720x576 non-standard VSync (NTSC Amiga)
-	{    720,       480,    736,    768,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      37, 3, 49 }, // 720x480 non-standard VSync (NTSC Amiga)
-    {    640,       400,    656,    752,    800,    490,    492,    525,    0,          25,     25175000,       60,             0,      15, 1, 60 },
-    {    1920,      800,    2024,   2224,   2528,   801,    804,    828,    0,          125,    125000000,      60,             0,      15, 1, 12 },
-    // The final entry here is the custom video mode, accessible through registers for debug purposes.
-    {    1280,      720,    1390,   1430,   1650,   725,    730,    750,    0,          75,     75000000,       60,             0,      15, 1, 20 },
-};
 
 uint32_t sprite_buf[32 * 48];
 uint8_t sprite_clipped = 0;
@@ -79,8 +65,10 @@ struct ZZ_VIDEO_STATE* video_get_state() {
 
 static void videocap_detection_reset() {
 	vs.videocap_ntsc_old = -1;
+	vs.videocap_shres_old = -1;
 	vs.interlace_old = -1;
 	vs.videocap_ntsc_candidate = -1;
+	vs.videocap_shres_candidate = -1;
 	vs.interlace_candidate = -1;
 	vs.videocap_mode_stable_count = 0;
 }
@@ -231,13 +219,48 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 	return XST_SUCCESS;
 }
 
-void init_ns_video_mode(uint32_t mode_num) {
-	printf("init_ns_video_mode(%lu)\n", mode_num);
-	if (mode_num == ZZVMODE_720x576) {
-		video_mode_init_internal(ZZVMODE_720x576_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT, 1);
+static int videocap_full_width_enabled(u32 zstate) {
+	const struct zz_config *cfg = zz_config_get();
+	uint32_t requested = cfg->videocap_shres_present ?
+		cfg->videocap_shres : VIDEOCAP_FULL_WIDTH_DEFAULT;
+	uint32_t fullrate_capable =
+		!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE);
+
+	return (int)video_videocap_full_width(requested, fullrate_capable);
+}
+
+static void init_filtered_videocap_video_mode(int ntsc) {
+	int mode;
+
+	if (ntsc) {
+		mode = ZZVMODE_720x480;
+		if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
+			mode = ZZVMODE_720x480_NS_PAL + vs.scandoubler_mode_adjust;
+		}
 	} else {
-		video_mode_init_internal(ZZVMODE_720x480_NS_PAL + vs.scandoubler_mode_adjust, 2, MNTVA_COLOR_32BIT, 1);
+		mode = vs.videocap_video_mode;
+		if (mode == ZZVMODE_720x576 &&
+				vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
+			mode = ZZVMODE_720x576_NS_PAL + vs.scandoubler_mode_adjust;
+		}
 	}
+
+	video_mode_init_internal(mode, 2, MNTVA_COLOR_32BIT, 1);
+}
+
+static void init_videocap_video_mode(int ntsc, int full_width) {
+	int mode = ZZVMODE_1280x1024_NATIVE_60;
+
+	if (!full_width) {
+		init_filtered_videocap_video_mode(ntsc);
+		return;
+	}
+	if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
+		mode = ntsc ? ZZVMODE_1280x1024_NS_NTSC :
+		              ZZVMODE_1280x1024_NS_PAL;
+	}
+
+	video_mode_init_internal(mode, 4, MNTVA_COLOR_32BIT, 1);
 }
 
 void fb_fill(uint32_t offset) {
@@ -292,11 +315,14 @@ void video_set_dpms(uint8_t level) {
 	video_formatter_write(level, MNTVF_OP_DPMS);
 }
 
-static int videocap_detection_is_stable(int videocap_ntsc, int interlace) {
+static int videocap_detection_is_stable(int videocap_ntsc, int interlace,
+		int videocap_shres) {
 	if (videocap_ntsc != vs.videocap_ntsc_candidate ||
-			interlace != vs.interlace_candidate) {
+			interlace != vs.interlace_candidate ||
+			videocap_shres != vs.videocap_shres_candidate) {
 		vs.videocap_ntsc_candidate = videocap_ntsc;
 		vs.interlace_candidate = interlace;
+		vs.videocap_shres_candidate = videocap_shres;
 		vs.videocap_mode_stable_count = 1;
 		return 0;
 	}
@@ -317,6 +343,8 @@ void isr_video(void *dummy) {
 	int videocap_enabled = !!(zstate & (1 << 23));
 	int videocap_ntsc = !!(zstate & (1 << 22));
 	int interlace = !!(zstate & (1 << 24));
+	int videocap_shres = !!(zstate & (1 << 17));
+	int videocap_full_width = videocap_full_width_enabled(zstate);
 
 	if (!videocap_enabled) {
 		if (!vblank) {
@@ -370,9 +398,11 @@ void isr_video(void *dummy) {
 					vs.videocap_enabled_old = videocap_enabled;
 				}
 
-				videocap_reset = (vs.videocap_ntsc_old < 0 || vs.interlace_old < 0);
+				videocap_reset = (vs.videocap_ntsc_old < 0 ||
+						vs.interlace_old < 0 || vs.videocap_shres_old < 0);
 				int videocap_detection_stable =
-						videocap_detection_is_stable(videocap_ntsc, interlace);
+						videocap_detection_is_stable(videocap_ntsc, interlace,
+								videocap_shres);
 
 				if (videocap_detection_stable &&
 						(videocap_ntsc != vs.videocap_ntsc_old || videocap_reset)) {
@@ -386,26 +416,23 @@ void isr_video(void *dummy) {
 						// NTSC
 						printf("videocap: ntsc\n");
 						vs.framebuffer_pan_width = 0;
-						vs.framebuffer_pan_offset = default_pan_offset_ntsc;
-						if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
-							init_ns_video_mode(ZZVMODE_720x480);
-						} else {
-							video_mode_init_internal(ZZVMODE_720x480, 2, MNTVA_COLOR_32BIT, 1);
-						}
+						vs.framebuffer_pan_offset = videocap_full_width ?
+							video_vdma_native_row_start(default_pan_offset_ntsc) :
+							default_pan_offset_ntsc;
+						init_videocap_video_mode(1, videocap_full_width);
 					} else {
 						// PAL
 						printf("videocap: pal\n");
 						vs.framebuffer_pan_width = 0;
-						if (vs.videocap_video_mode == ZZVMODE_800x600) {
+						if (videocap_full_width) {
+							vs.framebuffer_pan_offset =
+								video_vdma_native_row_start(default_pan_offset_pal);
+						} else if (vs.videocap_video_mode == ZZVMODE_800x600) {
 							vs.framebuffer_pan_offset = default_pan_offset_pal_800x600;
 						} else {
 							vs.framebuffer_pan_offset = default_pan_offset_pal;
 						}
-						if (vs.videocap_video_mode == ZZVMODE_720x576 && vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
-							init_ns_video_mode(ZZVMODE_720x576);
-						} else {
-							video_mode_init_internal(vs.videocap_video_mode, 2, MNTVA_COLOR_32BIT, 1);
-						}
+						init_videocap_video_mode(0, videocap_full_width);
 					}
 					videocap_reset = 1;
 				}
@@ -413,11 +440,14 @@ void isr_video(void *dummy) {
 				if (videocap_detection_stable &&
 						(interlace != vs.interlace_old || videocap_reset)) {
 					// interlace has changed, we need to reconfigure vdma for the new screen height
-					vs.vmode_vdiv = 2;
-					if (interlace) {
-						vs.vmode_vdiv = 1;
-					}
+					uint32_t videocap_scalemode = video_videocap_scalemode(
+							(uint32_t)videocap_full_width,
+							(uint32_t)interlace);
+					vs.scalemode = (int)videocap_scalemode;
+					vs.vmode_vdiv = (int)video_vertical_scale_factor(videocap_scalemode);
 					videocap_area_clear();
+					video_formatter_write(video_formatter_scale_control(videocap_scalemode),
+					                      MNTVF_OP_SCALE);
 					init_vdma(vs.vmode_hsize, vs.vmode_vsize, 1, vs.vmode_vdiv,
 							(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 					video_formatter_valign();
@@ -427,6 +457,7 @@ void isr_video(void *dummy) {
 				if (videocap_detection_stable) {
 					vs.interlace_old = interlace;
 					vs.videocap_ntsc_old = videocap_ntsc;
+					vs.videocap_shres_old = videocap_shres;
 				}
 			}
 		} else {
@@ -478,8 +509,7 @@ void isr_video(void *dummy) {
 
 		// handle screen dragging
 		if (vs.split_request_pos != vs.split_pos) {
-			int scale = 1;
-			if (vs.scalemode & 2) scale = 2;
+			int scale = (int)video_vertical_scale_factor(vs.scalemode);
 			vs.split_pos = vs.split_request_pos * scale;
 			video_formatter_write(vs.split_pos, MNTVF_OP_REPORT_LINE);
 		}
@@ -564,8 +594,30 @@ void pixelclock_init_2(struct zz_video_mode *mode) {
 	XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR, 0x208, otherdiv);
 
 	// load configuration
-	XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR, 0x25C, 0x00000003);
-	//XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR,  0x25C, 0x00000001);
+	XClk_Wiz_WriteReg(XPAR_CLK_WIZ_0_BASEADDR, CLK_WIZ_RECONFIG_OFFSET,
+		0x00000003);
+
+	/* Do not expose the new signal based on a guessed delay.  A short first
+	 * pause ensures the AXI reconfiguration request has reached the MMCM,
+	 * then the bounded poll accepts it only after LOAD clears and LOCKED is
+	 * asserted.  The timeout preserves the old fail-open behaviour so a
+	 * status-register fault cannot leave the monitor permanently dark. */
+	usleep(CLK_WIZ_LOCK_POLL_US);
+	for (int waited = CLK_WIZ_LOCK_POLL_US;
+			waited < CLK_WIZ_LOCK_TIMEOUT_US;
+			waited += CLK_WIZ_LOCK_POLL_US) {
+		u32 status = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR,
+			CLK_WIZ_STATUS_OFFSET);
+		if (status & CLK_WIZ_STATUS_LOCKED) {
+			u32 reconfig = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR,
+				CLK_WIZ_RECONFIG_OFFSET);
+			if (!(reconfig & CLK_WIZ_RECONFIG_LOAD))
+				return;
+		}
+		usleep(CLK_WIZ_LOCK_POLL_US);
+	}
+
+	printf("pixel clock lock timeout for %ux%u\n", mode->hres, mode->vres);
 }
 
 static void video_mode_init_internal(int mode, int scalemode, int colormode, int skip_vdma) {
@@ -578,16 +630,14 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 	vs.scalemode = scalemode;
 	vs.colormode = colormode;
 
-	int hdiv = 1, vdiv = 1;
+	int hdiv = 1;
+	int vdiv = (int)video_vertical_scale_factor((uint32_t)scalemode);
 	stride_div = 1;
 
 	if (scalemode & 1) {
 		hdiv = 2;
 		stride_div = 2;
 	}
-	if (scalemode & 2)
-		vdiv = 2;
-
 	// 8 bit
 	if (colormode == MNTVA_COLOR_8BIT)
 		hdiv *= 4;
@@ -609,19 +659,16 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 	video_formatter_write((vmode->hstart << 16) | vmode->hend, MNTVF_OP_HS);
 	video_formatter_write((vmode->vstart << 16) | vmode->vend, MNTVF_OP_VS);
 	video_formatter_write(vmode->polarity, MNTVF_OP_POLARITY);
-	video_formatter_write(scalemode, MNTVF_OP_SCALE);
+	video_formatter_write(video_formatter_scale_control((uint32_t)scalemode),
+	                      MNTVF_OP_SCALE);
 	video_formatter_write(colormode, MNTVF_OP_COLORMODE);
-	/* A mode change is also the fail-safe wake path: never leave a display
-	 * stranded with one or both syncs suppressed after reprogramming timing. */
-	video_set_dpms(ZZ_DPMS_ON);
+	/* Power down TMDS and publish the new timing metadata before changing
+	 * the live pixel clock.  This is a lightweight mode update, not the old
+	 * 16ms transmitter reset that broke native-video switching in the ISR. */
+	hdmi_ctrl_prepare_mode(vmode);
 
 	// Now safe to switch the pixel clock — VGA counters already have new geometry.
 	pixelclock_init_2(vmode);
-	hdmi_ctrl_init(vmode);
-
-	// Xilinx MMCM re-lock after reconfiguration: ~10-100 µs.
-	// Safe in ISR context: usleep is a busy-wait spin on the ARM Global Timer.
-	usleep(100);
 
 	if (!skip_vdma) {
 		init_vdma(vmode->hres, vmode->vres, hdiv, vdiv,
@@ -630,6 +677,11 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 
 	// Re-sync input state machine with the now-stable output timing.
 	video_formatter_valign();
+
+	/* A mode change is also the fail-safe wake path: never leave a display
+	 * stranded with one or both syncs suppressed after reprogramming timing. */
+	video_set_dpms(ZZ_DPMS_ON);
+	hdmi_ctrl_enable_output();
 
 	vs.vmode_hsize = vmode->hres;
 	vs.vmode_vsize = vmode->vres;
@@ -799,11 +851,8 @@ void _update_hw_sprite_pos(int16_t x, int16_t y) {
 
 	vs.sprite_y = y - vs.sprite_y_offset + 1;
 
-	// vertically doubled mode
-	if (vs.scalemode & 2)
-		vs.sprite_y_adj = vs.sprite_y * 2;
-	else
-		vs.sprite_y_adj = vs.sprite_y;
+	vs.sprite_y_adj = vs.sprite_y *
+	                  (int)video_vertical_scale_factor(vs.scalemode);
 
 	if (vs.sprite_x < 0 || vs.sprite_y < 0) {
 		if (sprite_clip_x != vs.sprite_x || sprite_clip_y != vs.sprite_y) {

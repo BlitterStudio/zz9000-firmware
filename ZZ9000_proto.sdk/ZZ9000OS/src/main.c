@@ -82,9 +82,14 @@ void Xil_AssertNonVoid() {}
  * its existing minimums (0x0204, 0x0206, 0x0207) all still pass, and the
  * overlay scaling is programmed card-side without driver involvement.
  * New SDK capability is discovered through service flags and status
- * pages, which self-gate, rather than through this number. */
+ * pages, which self-gate, rather than through this number.
+ * 2.9: atomic videocap_profile configuration and reliable display
+ * transmitter retraining during output-mode changes.
+ * 2.10: host-visible firmware half of the matched live-videocap contract.
+ * Startup operation 16 enters the shared acknowledged RTL control engine;
+ * live calibration still requires the bitstream's exact capability. */
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 8
+#define REVISION_MINOR 10
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
@@ -366,6 +371,33 @@ int main() {
 		                      MNTVF_OP_SCANLINES);
 		printf("[CFG] scanlines: mode %d parity %d\n",
 		       cfg->scanline_mode, cfg->scanline_parity);
+	}
+
+	{
+		// Push videocap sampler options through the existing ARM
+		// video_formatter_write path. MNTVF_OP_VIDEOCAP enters the shared
+		// acknowledged RTL control engine on live-capable bitstreams;
+		// older bitstreams ignore it and advertise no live capability.
+		// Safe here: the video ISR is not connected yet, so nobody else
+		// drives the op interface.
+		const struct zz_config *cfg = zz_config_get();
+		uint32_t sample = cfg->videocap_sample_present ? cfg->videocap_sample : 0;
+		uint32_t full = cfg->videocap_shres_present ? cfg->videocap_shres :
+		                VIDEOCAP_FULL_WIDTH_DEFAULT;
+		uint32_t crop_h = cfg->videocap_crop_h_present ? cfg->videocap_crop_h :
+		                  VIDEOCAP_CROP_H_COMPAT;
+		uint32_t crop_v = cfg->videocap_crop_v_present ? cfg->videocap_crop_v :
+		                  VIDEOCAP_CROP_V_COMPAT;
+		video_formatter_write(videocap_control_pack(
+		                      sample, full,
+		                      cfg->videocap_crop_h, cfg->videocap_crop_v,
+		                      cfg->videocap_crop_h_present,
+		                      cfg->videocap_crop_v_present),
+		                      MNTVF_OP_VIDEOCAP);
+		printf("[CFG] videocap: sample %lu shres %lu crop %lu,%lu auto %lu,%lu\n",
+		       sample, full, crop_h, crop_v,
+		       (uint32_t)!cfg->videocap_crop_h_present,
+		       (uint32_t)!cfg->videocap_crop_v_present);
 	}
 
 	// RTG rect ops may write anywhere in framebuffer + legacy surface

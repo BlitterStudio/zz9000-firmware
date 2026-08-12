@@ -50,41 +50,46 @@ else
         || { cat xelab.log; exit 1; }
 fi
 
-# CMODE SCALEX SCALEY WIDTH
+# CMODE SCALEX SCALEY WIDTH STREAM_GAP_EVERY STREAM_GAP_CYCLES INTERLACE
 CONFIGS="
-2 0 0 64
-1 0 0 64
-0 0 0 64
-3 0 0 64
-2 1 0 64
-1 1 0 64
-0 1 0 64
-1 0 0 62
-2 0 1 64
-1 0 1 64
+2 0 0 64 0 0 0
+1 0 0 64 0 0 0
+0 0 0 64 0 0 0
+3 0 0 64 0 0 0
+2 1 0 64 0 0 0
+1 1 0 64 0 0 0
+0 1 0 64 0 0 0
+1 0 0 62 0 0 0
+2 0 1 64 0 0 0
+1 0 1 64 0 0 0
 "
 
 # The wide-line cases exercise capacity added with the 64-bit formatter.
 # They are not valid expectations for the pinned 32-bit reference design.
 if [ "$VARIANT" != "master" ] && [ "$VARIANT" != "reference" ]; then
     CONFIGS="$CONFIGS
-2 0 1 720
-2 0 0 1920
+2 0 1 720 0 0 0
+2 0 2 720 0 0 0
+1 0 2 62 0 0 0
+2 0 0 1920 0 0 0
+2 0 2 1280 16 32 0
+2 0 0 64 0 0 1
+2 0 1 64 0 0 1
 "
 fi
 
 rm -f run_*.log
 EXPECTED=$(echo "$CONFIGS" | grep -c '[0-9]')
-echo "$CONFIGS" | while read -r CM SX SY W; do
+echo "$CONFIGS" | while read -r CM SX SY W GE GC IL; do
     [ -z "$CM" ] && continue
     if [ "$ON_WINDOWS" = 1 ]; then
-        cmd //c "$(cygpath -w "$VIVADO_BIN/xsim.bat") tb --runall --testplusarg \"CMODE=$CM\" --testplusarg \"SCALEX=$SX\" --testplusarg \"SCALEY=$SY\" --testplusarg \"WIDTH=$W\"" \
-            < /dev/null > "run_${CM}_${SX}_${SY}_${W}.log" 2>&1 || true
+        cmd //c "$(cygpath -w "$VIVADO_BIN/xsim.bat") tb --runall --testplusarg \"CMODE=$CM\" --testplusarg \"SCALEX=$SX\" --testplusarg \"SCALEY=$SY\" --testplusarg \"WIDTH=$W\" --testplusarg \"STREAM_GAP_EVERY=$GE\" --testplusarg \"STREAM_GAP_CYCLES=$GC\" --testplusarg \"INTERLACE=$IL\"" \
+            < /dev/null > "run_${CM}_${SX}_${SY}_${W}_${GE}_${GC}_${IL}.log" 2>&1 || true
     else
-        "$VIVADO_BIN/xsim" tb --runall --testplusarg "CMODE=$CM" --testplusarg "SCALEX=$SX" --testplusarg "SCALEY=$SY" --testplusarg "WIDTH=$W" \
-            < /dev/null > "run_${CM}_${SX}_${SY}_${W}.log" 2>&1 || true
+        "$VIVADO_BIN/xsim" tb --runall --testplusarg "CMODE=$CM" --testplusarg "SCALEX=$SX" --testplusarg "SCALEY=$SY" --testplusarg "WIDTH=$W" --testplusarg "STREAM_GAP_EVERY=$GE" --testplusarg "STREAM_GAP_CYCLES=$GC" --testplusarg "INTERLACE=$IL" \
+            < /dev/null > "run_${CM}_${SX}_${SY}_${W}_${GE}_${GC}_${IL}.log" 2>&1 || true
     fi
-    grep -E "RESULT|MISMATCH row=[0-9]+ x=(0|1|2|3|4|5|6|7) " "run_${CM}_${SX}_${SY}_${W}.log" | head -8
+    grep -E "RESULT|MISMATCH row=[0-9]+ x=(0|1|2|3|4|5|6|7) " "run_${CM}_${SX}_${SY}_${W}_${GE}_${GC}_${IL}.log" | head -8
 done
 
 echo "---- summary ($VARIANT) ----"

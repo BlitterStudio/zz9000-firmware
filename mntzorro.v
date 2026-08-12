@@ -36,6 +36,36 @@
 
 `define C_S_AXI_DATA_WIDTH 32
 `define C_S_AXI_ADDR_WIDTH 5
+
+// Videocap sampler variant selection. This block must stay below the AXI
+// width definitions: build_variant_bitstreams.sh replaces everything from
+// the variant switch through C_S_AXI_DATA_WIDTH for each board target.
+// Keep this order aligned with the capture-clock phase chain: the committed
+// default defines both ZORRO3 and VARIANT_SUPERDENISE, and must select the
+// video-slot path.
+`ifdef ZORRO3
+  `define VCAP_RGB_MODE     0
+  `define VCAP_CSYNC_VSYNC  0
+`elsif VARIANT_SUPERDENISE
+  `define VCAP_RGB_MODE     0
+  `define VCAP_CSYNC_VSYNC  1
+`elsif VARIANT_ZZ9500
+  `define VCAP_RGB_MODE     1
+  `define VCAP_CSYNC_VSYNC  1
+`else
+  `define VCAP_RGB_MODE     2
+  `define VCAP_CSYNC_VSYNC  0
+`endif
+`ifdef ZORRO3
+  `define VCAP_FULLRATE_INT 1
+`elsif VARIANT_SUPERDENISE
+  `define VCAP_FULLRATE_INT 0
+`elsif VARIANT_ZZ9500
+  `define VCAP_FULLRATE_INT 0
+`else
+  `define VCAP_FULLRATE_INT 1
+`endif
+
 `ifdef VARIANT_2MB
 `define RAM_SIZE 32'h200000 // 2MB for Zorro 2
 `else
@@ -978,6 +1008,52 @@ module MNTZorro_v0_1_S00_AXI
   localparam [15:0] SDK_REG_DIAG_DATA_LO = 16'h0116;
   localparam [15:0] SDK_REG_DIAG_Z3ADDR = 16'h0118;
   localparam [15:0] SDK_REG_DIAG_Z3ADDR_LO = 16'h011a;
+  // Diagnostic snapshot of one accepted 16-beat native-capture write burst.
+  // The host-visible offsets are 0x1120..0x116e because the direct-register
+  // PIC starts 0x1000 bytes into the board window.
+  localparam [15:0] VCAP_PROBE_DATA_BASE = 16'h0120;
+  localparam [15:0] VCAP_PROBE_META = 16'h0160;
+  localparam [15:0] VCAP_PROBE_META_LO = 16'h0162;
+  localparam [15:0] VCAP_PROBE_TARGET = 16'h0164;
+  localparam [15:0] VCAP_PROBE_TARGET_LO = 16'h0166;
+  localparam [15:0] VCAP_PROBE_AWADDR = 16'h0168;
+  localparam [15:0] VCAP_PROBE_AWADDR_LO = 16'h016a;
+  localparam [15:0] VCAP_PROBE_CONTROL = 16'h016c;
+  localparam [15:0] VCAP_PROBE_CONTROL_LO = 16'h016e;
+  localparam [15:0] VCAP_PROBE_SAMPLER_DATA_BASE = 16'h0170;
+  localparam [15:0] VCAP_PROBE_SAMPLER_TARGET = 16'h01b0;
+  localparam [15:0] VCAP_PROBE_SAMPLER_TARGET_LO = 16'h01b2;
+  localparam [15:0] VCAP_PROBE_SAMPLER_CONTEXT = 16'h01b4;
+  localparam [15:0] VCAP_PROBE_SAMPLER_CONTEXT_LO = 16'h01b6;
+  localparam [15:0] VCAP_PROBE_SAMPLER_CONFIG = 16'h01b8;
+  localparam [15:0] VCAP_PROBE_SAMPLER_CONFIG_LO = 16'h01ba;
+  localparam [15:0] VCAP_PROBE_OWNER_BASE = 16'h01c0;
+  // Raw sampler words immediately before the configured horizontal crop.
+  // Host-visible direct-register offsets are 0x12e0 and 0x1300..0x13ff.
+  localparam [15:0] VCAP_PRE_CROP_PROBE_META = 16'h02e0;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_META_LO = 16'h02e2;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_TARGET = 16'h02e4;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_TARGET_LO = 16'h02e6;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_CONTEXT = 16'h02e8;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_CONTEXT_LO = 16'h02ea;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_CONFIG = 16'h02ec;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_CONFIG_LO = 16'h02ee;
+  localparam [15:0] VCAP_PRE_CROP_PROBE_DATA_BASE = 16'h0300;
+  // Host-visible offsets are 0x1400..0x1414 after the direct-register
+  // aperture's 0x1000-byte base is added.
+  localparam [15:0] VCAP_LIVE_CAPABILITY = 16'h0400;
+  localparam [15:0] VCAP_LIVE_CAPABILITY_LO = 16'h0402;
+  localparam [15:0] VCAP_LIVE_STATUS = 16'h0404;
+  localparam [15:0] VCAP_LIVE_STATUS_LO = 16'h0406;
+  localparam [15:0] VCAP_LIVE_APPLIED_RAW = 16'h0408;
+  localparam [15:0] VCAP_LIVE_APPLIED_RAW_LO = 16'h040a;
+  localparam [15:0] VCAP_LIVE_EFFECTIVE_CROP = 16'h040c;
+  localparam [15:0] VCAP_LIVE_EFFECTIVE_CROP_LO = 16'h040e;
+  localparam [15:0] VCAP_LIVE_STAGED_RAW_HI = 16'h0410;
+  localparam [15:0] VCAP_LIVE_STAGED_RAW_LO = 16'h0412;
+  localparam [15:0] VCAP_LIVE_COMMIT = 16'h0414;
+  localparam [31:0] VCAP_LIVE_CAPABILITY_VALUE = 32'h564c010f;
+  localparam [15:0] VCAP_LIVE_COMMIT_TOKEN = 16'hca1b;
   localparam [15:0] SDK_REG_OFFSET_MASK = 16'h0fff;
   localparam [31:0] SDK_CTRL_DOORBELL_CLEAR = 32'h20000000;
   localparam [31:0] SDK_CTRL_IRQ_ACK_CLEAR = 32'h10000000;
@@ -1115,49 +1191,108 @@ module MNTZorro_v0_1_S00_AXI
   reg videocap_mode;
   reg videocap_mode_in;
   reg [31:0] videocap_address = `VIDEOCAP_ADDR;
-  reg [6:0] videocap_hs;
-  reg [6:0] videocap_vs;
-  reg [23:0] videocap_rgbin = 0;
-
-  reg [9:0] videocap_x;
-  reg [9:0] videocap_y;
-  reg [9:0] videocap_x2;
-  reg videocap_x_done;
-  reg [9:0] videocap_y2;
+  localparam [11:0] VCAP_CROP_H_COMPAT = 12'd188;
+  localparam [11:0] VCAP_CROP_V_COMPAT = 12'd26;
+  reg [31:0] videocap_control_staged_raw =
+      {2'b00, 1'b0, 1'b0, VCAP_CROP_V_COMPAT, VCAP_CROP_H_COMPAT,
+       1'b0, 1'b0, 2'd0};
+  reg videocap_control_live_event = 0;
+  reg videocap_control_live_token_valid = 0;
+  reg videocap_control_zorro_event = 0;
+  reg [31:0] videocap_control_zorro_raw = 0;
+  reg video_control_axi_strobe_d = 0;
+  wire video_control_axi_op16_event =
+      axi_reg2[31] && !video_control_axi_strobe_d && axi_reg2[7:0] == 8'd16;
+  wire videocap_control_request_event = videocap_control_live_event ||
+      video_control_axi_op16_event || videocap_control_zorro_event;
+  wire [31:0] videocap_control_request_raw = videocap_control_live_event ?
+      videocap_control_staged_raw :
+      (video_control_axi_op16_event ? axi_reg3 : videocap_control_zorro_raw);
+  wire videocap_control_request_token_valid =
+      !videocap_control_live_event || videocap_control_live_token_valid;
+  wire [26:0] videocap_control_payload;
+  wire videocap_control_send;
+  wire videocap_control_received;
+  wire videocap_control_busy;
+  wire [7:0] videocap_control_request_sequence;
+  wire [7:0] videocap_control_applied_sequence;
+  wire videocap_control_last_commit_rejected;
+  wire videocap_control_applied_valid;
+  wire [31:0] videocap_control_applied_raw;
+  wire [31:0] videocap_control_applied_effective_crop;
+  wire videocap_control_applied_full_width =
+      videocap_control_applied_raw[2];
   reg [9:0] videocap_y_sync;
-  reg [9:0] videocap_ymax;
-  reg [9:0] videocap_ymax2;
   reg [9:0] videocap_ymax_sync;
-  reg [9:0] videocap_y3;
-  reg vc_next_lace_field = 0;
-  reg [3:0] vc_shortlines = 0;
+  reg [11:0] videocap_save_x;
+  reg vc_saving_bank = 0;
 
-  parameter VCAPW = 799;
-  reg [31:0] videocap_buf  [0:VCAPW];
-  reg videocap_lace_field;
-  reg videocap_interlace;
-  reg videocap_ntsc;
-  reg [7:0] videocap_hs_pulse_width;
-  reg [9:0] videocap_vsync_x = 0;
+  // Diagnostic target selected from the paused PAL test pattern.  This
+  // aligned burst contains frequent colour transitions, allowing ZZDiag to
+  // distinguish an exact match from a one-word line-buffer read shift.
+  localparam [9:0] VCAP_PROBE_LINE = 10'd120;
+  localparam [11:0] VCAP_PROBE_SOURCE_X = 12'd928;
+  localparam [11:0] VCAP_PROBE_DEST_X = 12'd928;
 
-  localparam [9:0] VIDEOCAP_INTERLACE_PHASE_DELTA = 10'h80;
-  wire [9:0] videocap_vsync_phase_abs_delta =
-      (videocap_x > videocap_vsync_x) ?
-      (videocap_x - videocap_vsync_x) :
-      (videocap_vsync_x - videocap_x);
-  wire [9:0] videocap_vsync_phase_delta =
-      (videocap_vsync_phase_abs_delta > 10'h200) ?
-      (10'h3ff - videocap_vsync_phase_abs_delta + 1'b1) :
-      videocap_vsync_phase_abs_delta;
+  wire [10:0] vcap_x;
+  wire [10:0] vcap_y;
+  wire [10:0] vcap_ymax;
+  wire vcap_interlace;
+  wire vcap_ntsc;
+  wire [1:0] vcap_detected_standard;
+  wire vcap_x_done;
+  wire vcap_shres;
+  wire vcap_line_toggle;
+  wire vcap_write_bank;
+  wire [31:0] vcap_rdata;
+  wire vcap_sampler_probe_arm_seen;
+  wire vcap_sampler_probe_valid;
+  wire [511:0] vcap_sampler_probe_data;
+  wire [9:0] vcap_sampler_probe_line;
+  wire [11:0] vcap_sampler_probe_source_x;
+  wire [31:0] vcap_sampler_probe_context;
+  wire [31:0] vcap_sampler_probe_config;
+  wire vcap_sampler_probe_precrop_valid;
+  wire [31:0] vcap_sampler_probe_precrop_context;
+  wire [5:0] vcap_sampler_probe_precrop_raddr =
+      ((regread_addr & SDK_REG_OFFSET_MASK) -
+       VCAP_PRE_CROP_PROBE_DATA_BASE) >> 2;
+  wire [31:0] vcap_sampler_probe_precrop_rdata;
+  wire vcap_sampler_probe_arm_seen_axi;
+  wire vcap_sampler_probe_valid_axi;
+  wire vcap_sampler_probe_precrop_valid_axi;
+  reg vcap_probe_arm_toggle = 0;
+  wire [11:0] vcap_raddr = videocap_save_x;
+  wire clkfbout_zz9000_ps_clk_wiz_1_0;
+  wire e7m_shifted;
+  wire e7m_shifted180;
+
+  /* In full-width mode the sampler finishes late enough in the raster that
+   * AXI writeback overlaps capture of the following line.  Transfer a token,
+   * completed bank, and line number together; the bank and line are stable
+   * for the whole capture line before the token changes. */
+  wire [11:0] vcap_line_payload_cap = {
+      vcap_line_toggle, vcap_write_bank, vcap_y[9:0]
+  };
+  wire [11:0] vcap_line_payload_axi;
+
+  xpm_cdc_array_single #(
+      .DEST_SYNC_FF(3),
+      .INIT_SYNC_FF(1),
+      .SIM_ASSERT_CHK(0),
+      .SRC_INPUT_REG(0),
+      .WIDTH(12)
+  ) videocap_line_cdc (
+      .src_clk(e7m_shifted),
+      .src_in(vcap_line_payload_cap),
+      .dest_clk(S_AXI_ACLK),
+      .dest_out(vcap_line_payload_axi)
+  );
 
   reg E7M_PSEN = 0;
   reg E7M_PSINCDEC = 0;
   reg E7M_RESET = 0;
   reg E7M_PWRDWN = 0;
-
-  wire clkfbout_zz9000_ps_clk_wiz_1_0;
-  wire e7m_shifted;
-  wire e7m_shifted180;
 
   // video capture clock adjustment
   MMCME2_ADV #(
@@ -1167,17 +1302,25 @@ module MNTZorro_v0_1_S00_AXI
                .CLKFBOUT_USE_FINE_PS("TRUE"),
                .CLKIN1_PERIOD(35.000000),
                .CLKIN2_PERIOD(0.000000),
+`ifdef ZORRO3
+               .CLKOUT0_DIVIDE_F(8.000000),
+`elsif VARIANT_SUPERDENISE
                .CLKOUT0_DIVIDE_F(16.000000),
+`elsif VARIANT_ZZ9500
+               .CLKOUT0_DIVIDE_F(16.000000),
+`else
+               .CLKOUT0_DIVIDE_F(8.000000),
+`endif
                .CLKOUT0_DUTY_CYCLE(0.500000),
 
 `ifdef ZORRO3
-               .CLKOUT0_PHASE(0.000000),
+               .CLKOUT0_PHASE(90.000000),
 `elsif VARIANT_SUPERDENISE
                .CLKOUT0_PHASE(0.000000),
 `elsif VARIANT_ZZ9500
                .CLKOUT0_PHASE(90.000000),
 `else
-               .CLKOUT0_PHASE(315.000000),
+               .CLKOUT0_PHASE(270.000000),
 `endif
 
                .CLKOUT0_USE_FINE_PS("TRUE"),
@@ -1237,176 +1380,169 @@ module MNTZorro_v0_1_S00_AXI
      .PWRDWN(E7M_PWRDWN),
      .RST(E7M_RESET));
 
-  always @(posedge e7m_shifted) begin
-    videocap_vs <= {videocap_vs[5:0], VCAP_VSYNC};
-    videocap_hs <= {videocap_hs[5:0], VCAP_HSYNC};
+  videocap_control_source #(
+      .FULLRATE(`VCAP_FULLRATE_INT)
+  ) videocap_control_source_inst (
+      .source_clk(S_AXI_ACLK),
+      .request_event(videocap_control_request_event),
+      .request_raw(videocap_control_request_raw),
+      .request_token_valid(videocap_control_request_token_valid),
+      .control_received(videocap_control_received),
+      .control_send(videocap_control_send),
+      .control_payload(videocap_control_payload),
+      .busy(videocap_control_busy),
+      .request_sequence(videocap_control_request_sequence),
+      .applied_sequence(videocap_control_applied_sequence),
+      .last_commit_rejected(videocap_control_last_commit_rejected),
+      .applied_valid(videocap_control_applied_valid),
+      .applied_raw(videocap_control_applied_raw),
+      .applied_effective_crop(videocap_control_applied_effective_crop)
+  );
 
-    `ifdef VARIANT_ZZ9500
-    videocap_rgbin <=  {VCAP_R3,VCAP_R2,VCAP_R1,VCAP_R0,VCAP_R3,VCAP_R2,VCAP_R1,VCAP_R0,
-                        VCAP_G3,VCAP_G2,VCAP_G1,VCAP_G0,VCAP_G3,VCAP_G2,VCAP_G1,VCAP_G0,
-                        VCAP_B3,VCAP_B2,VCAP_B1,VCAP_B0,VCAP_B3,VCAP_B2,VCAP_B1,VCAP_B0};
-    `elsif ZORRO2
-    videocap_rgbin <=  {VCAP_R7,VCAP_R6,VCAP_R5,VCAP_R4,VCAP_R7,VCAP_R6,VCAP_R5,VCAP_R4,
-                        VCAP_G7,VCAP_G6,VCAP_G5,VCAP_G4,VCAP_G7,VCAP_G6,VCAP_G5,VCAP_G4,
-                        VCAP_B7,VCAP_B6,VCAP_B5,VCAP_B4,VCAP_B7,VCAP_B6,VCAP_B5,VCAP_B4};
-    `else
-    videocap_rgbin <=  {VCAP_R7,VCAP_R6,VCAP_R5,VCAP_R4,VCAP_R3,VCAP_R2,VCAP_R1,VCAP_R0,
-                        VCAP_G7,VCAP_G6,VCAP_G5,VCAP_G4,VCAP_G3,VCAP_G2,VCAP_G1,VCAP_G0,
-                        VCAP_B7,VCAP_B6,VCAP_B5,VCAP_B4,VCAP_B3,VCAP_B2,VCAP_B1,VCAP_B0};
-    `endif
+  videocap_sampler #(
+      .BUF_DEPTH(2048),
+      .RGB_MODE(`VCAP_RGB_MODE),
+      .CSYNC_VSYNC(`VCAP_CSYNC_VSYNC),
+      .FULLRATE(`VCAP_FULLRATE_INT),
+      .PROBE_LINE(VCAP_PROBE_LINE),
+      .PROBE_SOURCE_X(VCAP_PROBE_SOURCE_X)
+  ) videocap_sampler_inst (
+      .cap_clk(e7m_shifted),
+      .vcap_vsync(VCAP_VSYNC),
+      .vcap_hsync(VCAP_HSYNC),
+      .vcap_r({VCAP_R7, VCAP_R6, VCAP_R5, VCAP_R4,
+               VCAP_R3, VCAP_R2, VCAP_R1, VCAP_R0}),
+      .vcap_g({VCAP_G7, VCAP_G6, VCAP_G5, VCAP_G4,
+               VCAP_G3, VCAP_G2, VCAP_G1, VCAP_G0}),
+      .vcap_b({VCAP_B7, VCAP_B6, VCAP_B5, VCAP_B4,
+               VCAP_B3, VCAP_B2, VCAP_B1, VCAP_B0}),
+      .ctl_send(videocap_control_send),
+      .ctl_payload(videocap_control_payload),
+      .ctl_received(videocap_control_received),
+      .ctl_read_full_width(videocap_control_applied_full_width),
+      .detected_standard(vcap_detected_standard),
+      .cap_x(vcap_x),
+      .cap_y(vcap_y),
+      .cap_ymax(vcap_ymax),
+      .cap_interlace(vcap_interlace),
+      .cap_ntsc(vcap_ntsc),
+      .cap_x_done(vcap_x_done),
+      .cap_shres(vcap_shres),
+      .cap_line_toggle(vcap_line_toggle),
+      .cap_write_bank(vcap_write_bank),
+      .probe_arm_toggle(vcap_probe_arm_toggle),
+      .probe_arm_seen(vcap_sampler_probe_arm_seen),
+      .probe_valid(vcap_sampler_probe_valid),
+      .probe_data(vcap_sampler_probe_data),
+      .probe_line(vcap_sampler_probe_line),
+      .probe_source_x(vcap_sampler_probe_source_x),
+      .probe_context(vcap_sampler_probe_context),
+      .probe_config(vcap_sampler_probe_config),
+      .probe_precrop_valid(vcap_sampler_probe_precrop_valid),
+      .probe_precrop_context(vcap_sampler_probe_precrop_context),
+      .probe_precrop_raddr(vcap_sampler_probe_precrop_raddr),
+      .probe_precrop_rdata(vcap_sampler_probe_precrop_rdata),
+      .axi_clk(S_AXI_ACLK),
+      .buf_rbank(vc_saving_bank),
+      .buf_raddr(vcap_raddr),
+      .buf_rdata(vcap_rdata)
+  );
 
-    if (videocap_hs==0) begin
-      if (videocap_hs_pulse_width<'hff)
-        videocap_hs_pulse_width<=videocap_hs_pulse_width+1;
-    end else if (videocap_hs=='b111111)
-      videocap_hs_pulse_width<=0;
+  xpm_cdc_single #(
+      .DEST_SYNC_FF(3),
+      .INIT_SYNC_FF(1),
+      .SIM_ASSERT_CHK(0),
+      .SRC_INPUT_REG(0)
+  ) videocap_probe_seen_cdc (
+      .src_clk(e7m_shifted),
+      .src_in(vcap_sampler_probe_arm_seen),
+      .dest_clk(S_AXI_ACLK),
+      .dest_out(vcap_sampler_probe_arm_seen_axi)
+  );
 
-`ifdef VARIANT_ZZ9500
-    // on A500, HSYNC is really CSYNC and we can recognize vertical sync
-    // by looking at the pulse width of it
-    // direct sampling from denise
-    if(videocap_hs[6:1]=='b000111 && videocap_hs_pulse_width>=128) begin
-      // 31kHz progressive: full frame >= 400 lines, never interlaced.
-      // 15kHz interlace is identified by field phase, not by total line
-      // count parity. NTSC nonlace can jitter by one counted line when
-      // switching from RTG, which made it look interlaced and caused the
-      // formatter to read 480 lines from a 240-line capture.
-      if (videocap_ymax>='h190) begin
-        videocap_interlace <= 0;
-      end else if (vc_next_lace_field != videocap_lace_field) begin
-        videocap_interlace <= 1;
-      end else begin
-        videocap_interlace <= 0;
-      end
-      videocap_lace_field <= vc_next_lace_field;
+  xpm_cdc_single #(
+      .DEST_SYNC_FF(3),
+      .INIT_SYNC_FF(1),
+      .SIM_ASSERT_CHK(0),
+      .SRC_INPUT_REG(0)
+  ) videocap_probe_valid_cdc (
+      .src_clk(e7m_shifted),
+      .src_in(vcap_sampler_probe_valid),
+      .dest_clk(S_AXI_ACLK),
+      .dest_out(vcap_sampler_probe_valid_axi)
+  );
 
-      if (videocap_ymax>='h190) begin
-        // progressive frame: PAL ~625, NTSC ~525
-        if (videocap_ymax>='h23a)
-          videocap_ntsc <= 0;
-        else
-          videocap_ntsc <= 1;
-      end else begin
-        // interlaced field: PAL ~304, NTSC ~262
-        if (videocap_ymax>='h130)
-          videocap_ntsc <= 0;
-        else
-          videocap_ntsc <= 1;
-      end
-
-      if (videocap_interlace) begin
-        videocap_y2 <= 0;
-        videocap_y3 <= vc_next_lace_field;
-      end else begin
-        videocap_y2 <= 0;
-        videocap_y3 <= 0;
-      end
-`else
-    // with videoslot machines, we have a real VSYNC to work with
-    if (videocap_vs[6:1]=='b111000) begin
-      // 31kHz progressive: full frame >= 400 lines, never interlaced.
-      // 15kHz interlace has alternating VSYNC phase; nonlace does not.
-      // Line-count parity alone is not reliable on NTSC after RTG->native
-      // switches because the count can jitter by one line. Compare the
-      // circular phase distance so a stable edge near counter wrap does
-      // not look like a half-line jump.
-      if (videocap_ymax>='h190)
-        videocap_interlace <= 0;
-      else if (videocap_vsync_phase_delta >= VIDEOCAP_INTERLACE_PHASE_DELTA)
-        videocap_interlace <= 1;
-      else
-        videocap_interlace <= 0;
-
-      videocap_vsync_x <= videocap_x;
-      videocap_lace_field <= videocap_ymax[0];
-
-      if (videocap_ymax>='h190) begin
-        // progressive frame: PAL ~625, NTSC ~525
-        if (videocap_ymax>='h23a)
-          videocap_ntsc <= 0;
-        else
-          videocap_ntsc <= 1;
-      end else begin
-        // interlaced field: PAL ~312, NTSC ~262
-        if (videocap_ymax>='h138)
-          videocap_ntsc <= 0;
-        else
-          videocap_ntsc <= 1;
-      end
-
-      if (videocap_interlace) begin
-        videocap_y2 <= 0;
-        videocap_y3 <= videocap_lace_field;
-      end else begin
-        videocap_y2 <= 0;
-        videocap_y3 <= 0;
-      end
-`endif
-
-      if (videocap_y2!=0) begin
-        videocap_ymax <= videocap_y2;
-        videocap_ymax2 <= videocap_ymax;
-      end
-    end else if (videocap_hs[6:1]=='b000111) begin
-      videocap_x  <= 0;
-      videocap_x2 <= 0;
-
-`ifdef VARIANT_ZZ9500
-      if (videocap_hs_pulse_width < 'h20) begin
-        // count short pulses terminating lines
-        vc_shortlines <= vc_shortlines+1;
-        if (vc_shortlines==0) begin
-          // first time
-          if (videocap_x>='h200)
-            // last line was long?
-            vc_next_lace_field <= 1;
-          else
-            vc_next_lace_field <= 0;
-        end
-      end else
-        vc_shortlines <= 0;
-`endif
-
-      if (videocap_y2>'h1a) begin
-        if (videocap_interlace)
-          videocap_y3 <= videocap_y3 + 2'b10;
-        else
-          videocap_y3 <= videocap_y3 + 1'b1;
-      end
-
-      videocap_y2 <= videocap_y2 + 1'b1;
-    end else if (videocap_x2<'h5e) begin  // 5a worked
-      // left crop
-      videocap_x2 <= videocap_x2 + 1'b1;
-    end else begin
-      videocap_x <= videocap_x + 1'b1;
-    end
-
-    if (videocap_x>2)
-      videocap_buf[videocap_x] <= videocap_rgbin;
-    else
-      videocap_buf[videocap_x] <= 0;
-
-    if (videocap_x>'h200)
-      videocap_x_done <= 1;
-    else
-      videocap_x_done <= 0;
-
-  end
-
-  reg [11:0] videocap_save_x;
+  xpm_cdc_single #(
+      .DEST_SYNC_FF(3),
+      .INIT_SYNC_FF(1),
+      .SIM_ASSERT_CHK(0),
+      .SRC_INPUT_REG(0)
+  ) videocap_probe_precrop_valid_cdc (
+      .src_clk(e7m_shifted),
+      .src_in(vcap_sampler_probe_precrop_valid),
+      .dest_clk(S_AXI_ACLK),
+      .dest_out(vcap_sampler_probe_precrop_valid_axi)
+  );
   reg [11:0] videocap_pitch;
   reg [11:0] videocap_pitch_sync;
   reg [9:0]  videocap_save_line_done;
   reg [31:0] videocap_save_addr;
   reg [3:0]  videocap_save_state = 0;
+  reg [4:0]  vc_beat = 0;
+
+  wire videocap_writeback_full_width =
+      (`VCAP_FULLRATE_INT != 0) && videocap_control_applied_full_width;
+  wire [11:0] videocap_write_x;
+
+  videocap_writeback_layout #(
+      .LINE_WIDTH(1280),
+      .ROTATE_PIXELS(0)
+  ) videocap_writeback_layout_inst (
+      .full_width(videocap_writeback_full_width),
+      .source_x(videocap_save_x),
+      .dest_x(videocap_write_x)
+  );
 
   reg videocap_mode_sync;
 
   reg [31:0] m01_axi_awaddr_out;
-  reg [31:0] m01_axi_wdata_out;
   reg m01_axi_awvalid_out = 0;
   reg m01_axi_wvalid_out = 0;
+
+  reg [31:0] vcap_probe_data [0:15];
+  reg [31:0] vcap_probe_owner [0:15];
+  reg [31:0] vcap_probe_awaddr = 0;
+  reg [9:0] vcap_probe_line = 0;
+  reg [11:0] vcap_probe_dest_x = 0;
+  reg vcap_probe_arm_seen = 0;
+  reg vcap_probe_burst_active = 0;
+  reg vcap_probe_valid = 0;
+  wire [10:0] vcap_wdata_source_x =
+      videocap_save_x[10:0];
+
+  function [31:0] vcap_sampler_probe_word;
+    input [3:0] index;
+    begin
+      case (index)
+        4'd0: vcap_sampler_probe_word = vcap_sampler_probe_data[31:0];
+        4'd1: vcap_sampler_probe_word = vcap_sampler_probe_data[63:32];
+        4'd2: vcap_sampler_probe_word = vcap_sampler_probe_data[95:64];
+        4'd3: vcap_sampler_probe_word = vcap_sampler_probe_data[127:96];
+        4'd4: vcap_sampler_probe_word = vcap_sampler_probe_data[159:128];
+        4'd5: vcap_sampler_probe_word = vcap_sampler_probe_data[191:160];
+        4'd6: vcap_sampler_probe_word = vcap_sampler_probe_data[223:192];
+        4'd7: vcap_sampler_probe_word = vcap_sampler_probe_data[255:224];
+        4'd8: vcap_sampler_probe_word = vcap_sampler_probe_data[287:256];
+        4'd9: vcap_sampler_probe_word = vcap_sampler_probe_data[319:288];
+        4'd10: vcap_sampler_probe_word = vcap_sampler_probe_data[351:320];
+        4'd11: vcap_sampler_probe_word = vcap_sampler_probe_data[383:352];
+        4'd12: vcap_sampler_probe_word = vcap_sampler_probe_data[415:384];
+        4'd13: vcap_sampler_probe_word = vcap_sampler_probe_data[447:416];
+        4'd14: vcap_sampler_probe_word = vcap_sampler_probe_data[479:448];
+        default: vcap_sampler_probe_word = vcap_sampler_probe_data[511:480];
+      endcase
+    end
+  endfunction
 
   reg [31:0] m00_axi_awaddr_z3;
   reg [31:0] m00_axi_wdata_z3;
@@ -1422,7 +1558,7 @@ module MNTZorro_v0_1_S00_AXI
 
   assign m01_axi_awaddr  = m01_axi_awaddr_out;
   assign m01_axi_awvalid = m01_axi_awvalid_out;
-  assign m01_axi_wdata   = m01_axi_wdata_out;
+  assign m01_axi_wdata   = vcap_rdata;
   assign m01_axi_wstrb   = 4'b1111;
   assign m01_axi_wvalid  = m01_axi_wvalid_out;
 
@@ -1447,24 +1583,25 @@ module MNTZorro_v0_1_S00_AXI
     //m00_axi_arqos <= 'h0;
     m00_axi_rready <= 1;
 
-    // FIXME this could use bursts
-    m01_axi_awlen <= 'h0; // 1 burst (1 write)
-    m01_axi_awsize <= 'h2; //'h2; // 2^2 == 4 bytes
-    m01_axi_awburst <= 'h0; // FIXED (non incrementing)
+    m01_axi_awlen <= 'hf; // 16 beats
+    m01_axi_awsize <= 'h2; // 2^2 == 4 bytes
+    m01_axi_awburst <= 'h1; // INCR
     m01_axi_awcache <= 'h0;
     m01_axi_awlock <= 'h0;
     m01_axi_awprot <= 'h0;
     //m01_axi_awqos <= 'h0;
-    m01_axi_wlast <= 'h1;
     m01_axi_bready <= 'h1;
   end
 
   reg [9:0] videocap_x_sync;
   reg [9:0] vc_saving_line;
   reg [9:0] videocap_y_sync2;
+  reg vcap_line_toggle_seen = 0;
+  reg videocap_bank_sync = 0;
 
   // pipeline stages for videocap save addr calculation
   reg [23:0] vc_saveaddr1;
+  reg [9:0] vc_saveaddr_line;
   reg [31:0] vc_saveaddr2;
   reg [31:0] vc_saveaddr3;
 
@@ -1472,48 +1609,64 @@ module MNTZorro_v0_1_S00_AXI
     // VIDEOCAP
 
     // pass interlace mode to video control block
-    video_control_interlace <= videocap_interlace;
+    video_control_interlace <= vcap_interlace;
 
     videocap_pitch_sync <= videocap_pitch;
 
-    //videocap_x_sync <= videocap_x;
-    videocap_y_sync2 <= videocap_y3;
+    //videocap_x_sync <= vcap_x;
+    videocap_y_sync2 <= vcap_y[9:0];
     videocap_mode_sync <= videocap_mode;
 
 `ifdef VARIANT_ZZ9500
-    if (videocap_interlace)
-      videocap_ymax_sync <= (videocap_ymax<<1)-(2*40);
+    if (vcap_interlace)
+      videocap_ymax_sync <= (vcap_ymax<<1)-(2*40);
     else
-      videocap_ymax_sync <= videocap_ymax-36;
+      videocap_ymax_sync <= vcap_ymax-36;
 
     // letterbox top and bottom to box out noisy lines
-    if (videocap_y_sync2<videocap_ymax_sync && videocap_x_done) begin
+    if (videocap_y_sync2<videocap_ymax_sync && vcap_x_done) begin
       videocap_y_sync <= videocap_y_sync2;
     end
 `else
-    if (videocap_interlace)
-      videocap_ymax_sync <= (videocap_ymax<<1);
+    if (vcap_interlace)
+      videocap_ymax_sync <= (vcap_ymax<<1);
     else
-      videocap_ymax_sync <= videocap_ymax;
+      videocap_ymax_sync <= vcap_ymax;
 
-    if (videocap_x_done) begin
+    if (videocap_writeback_full_width &&
+        vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
+      vcap_line_toggle_seen <= vcap_line_payload_axi[11];
+      videocap_bank_sync <= vcap_line_payload_axi[10];
+      videocap_y_sync <= vcap_line_payload_axi[9:0];
+    end else if (!videocap_writeback_full_width && vcap_x_done) begin
       videocap_y_sync <= videocap_y_sync2;
     end
 `endif
 
+    /* Track which row produced the pipelined base.  vc_saving_line changes
+     * through a nonblocking assignment, so the product still belongs to the
+     * preceding row for one AXI clock after a completed-line handoff. */
     vc_saveaddr1 <= vc_saving_line*videocap_pitch_sync;
+    vc_saveaddr_line <= vc_saving_line;
     //vc_saveaddr2 <= (vc_saveaddr1+videocap_save_x)<<2;
     //vc_saveaddr3 <= videocap_address+vc_saveaddr2;
 
     // FIXME
     if (videocap_save_line_done!=videocap_y_sync) begin
       vc_saving_line <= videocap_y_sync;
+      vc_saving_bank <= videocap_bank_sync;
     end
 
     if (m01_axi_aresetn == 0) begin
       videocap_save_state <= 4;
+      videocap_save_x <= 0;
+      vcap_line_toggle_seen <= vcap_line_payload_axi[11];
+      videocap_bank_sync <= vcap_line_payload_axi[10];
+      vc_saving_bank <= 0;
+      vc_beat <= 0;
       m01_axi_wvalid_out  <= 0;
       m01_axi_awvalid_out <= 0;
+      m01_axi_wlast <= 0;
     end else begin
 
       // one-hot encoded
@@ -1521,42 +1674,51 @@ module MNTZorro_v0_1_S00_AXI
         4'h0: begin
           // initial state
           videocap_save_state <= 2;
+          vc_beat <= 0;
           m01_axi_wvalid_out  <= 0;
           m01_axi_awvalid_out <= 0;
+          m01_axi_wlast <= 0;
         end
         4'h1: begin
           if (m01_axi_wready) begin
-            m01_axi_wvalid_out  <= 0;
-            m01_axi_awvalid_out <= 0;
-            if (videocap_mode_sync)
-              videocap_save_state <= 2;
-            else
-              videocap_save_state <= 4;
+            m01_axi_wvalid_out <= 0;
+            videocap_save_x <= videocap_save_x + 1'b1;
+            if (vc_beat == 5'd15) begin
+              m01_axi_wlast <= 0;
+              if (videocap_mode_sync)
+                videocap_save_state <= 2;
+              else
+                videocap_save_state <= 4;
+            end else begin
+              vc_beat <= vc_beat + 1'b1;
+              m01_axi_wlast <= (vc_beat == 5'd14);
+              // Hold each BRAM address until its W beat is accepted.
+              // One idle cycle lets the synchronous read output advance
+              // before WVALID exposes the next word to AXI.
+              videocap_save_state <= 5;
+            end
           end
         end
         4'h2: begin
           // we shift left by 2 bits to scale from 1 pixel to 4 bytes
-          m01_axi_awaddr_out  <= videocap_address + ((vc_saveaddr1 + videocap_save_x)<<2);
-          m01_axi_wdata_out   <= videocap_buf[videocap_save_x];
+          m01_axi_awaddr_out  <= videocap_address + ((vc_saveaddr1 + videocap_write_x)<<2);
+          vc_beat <= 0;
+          m01_axi_wlast <= 0;
 
-  `ifdef VARIANT_ZZ9500
-          if (videocap_save_x >= videocap_pitch_sync-2) begin
-  `else
-          if (videocap_save_x >= videocap_pitch_sync) begin // 728 FIXME
-  `endif
+          if (videocap_save_x >= videocap_pitch_sync) begin
             videocap_save_line_done <= vc_saving_line;
             videocap_save_x <= 0;
-          end else if (videocap_save_line_done != vc_saving_line) begin
-            videocap_save_x <= videocap_save_x + 1'b1;
-
+          end else if (videocap_save_line_done != vc_saving_line &&
+              vc_saveaddr_line == vc_saving_line) begin
             m01_axi_awvalid_out <= 1;
             videocap_save_state <= 3;
           end
         end
         4'h3: begin
           if (m01_axi_awready) begin
-            m01_axi_wvalid_out  <= 1;
-            videocap_save_state <= 1;
+            m01_axi_awvalid_out <= 0;
+            m01_axi_wvalid_out  <= 0;
+            videocap_save_state <= 5;
           end
         end
         4'h4: begin
@@ -1566,14 +1728,72 @@ module MNTZorro_v0_1_S00_AXI
 
           m01_axi_wvalid_out  <= 0;
           m01_axi_awvalid_out <= 0;
+          m01_axi_wlast <= 0;
+        end
+        4'h5: begin
+          // The BRAM address has remained stable for a complete AXI clock.
+          // WDATA now stays fixed even if WREADY stalls this beat.
+          // Without interconnect stalls, the resulting one-cycle bubble per
+          // beat writes a 1280-word line in about 27 us at 100 MHz, leaving
+          // ample margin inside a PAL/NTSC line.
+          m01_axi_wvalid_out <= 1;
+          videocap_save_state <= 1;
         end
       endcase
+    end
+  end
+
+  // Snapshot the exact WDATA values accepted for a burst in the middle of
+  // the observed 16x65 seam. This is downstream of the sampler line buffer
+  // and upstream of DDR, so comparing it with DDR row 120 cleanly separates
+  // capture/handoff corruption from AXI/DDR writeback corruption.
+  always @(posedge S_AXI_ACLK) begin
+    if (!m01_axi_aresetn) begin
+      vcap_probe_arm_seen <= vcap_probe_arm_toggle;
+      vcap_probe_burst_active <= 0;
+      vcap_probe_valid <= 0;
+    end else if (vcap_probe_arm_seen != vcap_probe_arm_toggle) begin
+      vcap_probe_arm_seen <= vcap_probe_arm_toggle;
+      vcap_probe_burst_active <= 0;
+      vcap_probe_valid <= 0;
+    end else begin
+      if (videocap_save_state == 4'h3 && m01_axi_awready) begin
+        vcap_probe_burst_active <= !vcap_probe_valid &&
+            vcap_sampler_probe_valid_axi &&
+            vcap_sampler_probe_arm_seen_axi == vcap_probe_arm_toggle &&
+            videocap_writeback_full_width &&
+            vc_saving_line == VCAP_PROBE_LINE &&
+            videocap_write_x == VCAP_PROBE_DEST_X;
+        if (!vcap_probe_valid && vcap_sampler_probe_valid_axi &&
+            vcap_sampler_probe_arm_seen_axi == vcap_probe_arm_toggle &&
+            videocap_writeback_full_width &&
+            vc_saving_line == VCAP_PROBE_LINE &&
+            videocap_write_x == VCAP_PROBE_DEST_X) begin
+          vcap_probe_line <= vc_saving_line;
+          vcap_probe_dest_x <= videocap_write_x;
+          vcap_probe_awaddr <= m01_axi_awaddr_out;
+        end
+      end
+
+      if (m01_axi_wvalid_out && m01_axi_wready && vcap_probe_burst_active) begin
+        vcap_probe_data[vc_beat[3:0]] <= m01_axi_wdata;
+        vcap_probe_owner[vc_beat[3:0]] <= {
+            vc_saving_line, videocap_y_sync[8:0], vc_saving_bank,
+            videocap_bank_sync, vcap_wdata_source_x};
+        if (vc_beat == 5'd15) begin
+          vcap_probe_burst_active <= 0;
+          vcap_probe_valid <= 1;
+        end
+      end
     end
   end
 
   // -- main zorro fsm ---------------------------------------------
   always @(posedge S_AXI_ACLK) begin
     videocap_mode <= videocap_mode_in;
+    videocap_control_live_event <= 1'b0;
+    videocap_control_zorro_event <= 1'b0;
+    video_control_axi_strobe_d <= axi_reg2[31];
 
     if (/*z_cfgin_lo ||*/ z_reset) begin
       zorro_state <= RESET;
@@ -1612,6 +1832,7 @@ module MNTZorro_v0_1_S00_AXI
           sdk_last_z3addr <= 0;
           sdk_doorbell_early_count <= 0;
           sdk_irq_ack_early_count <= 0;
+          vcap_probe_arm_toggle <= 0;
           z3_ram_low <= 0;
           z3_ram_high <= 0;
           z3_fast_low <= 0;
@@ -2491,8 +2712,123 @@ module MNTZorro_v0_1_S00_AXI
             SDK_REG_DIAG_Z3ADDR_LO: begin
               rr_data <= sdk_last_z3addr;
             end
+            VCAP_LIVE_CAPABILITY,
+            VCAP_LIVE_CAPABILITY_LO: begin
+              rr_data <= VCAP_LIVE_CAPABILITY_VALUE;
+            end
+            VCAP_LIVE_STATUS,
+            VCAP_LIVE_STATUS_LO: begin
+              rr_data <= {videocap_control_request_sequence,
+                          videocap_control_applied_sequence,
+                          vcap_detected_standard != 2'd0,
+                          vcap_detected_standard == 2'd2,
+                          videocap_control_last_commit_rejected,
+                          11'b00000000000,
+                          videocap_control_applied_valid,
+                          videocap_control_busy};
+            end
+            VCAP_LIVE_APPLIED_RAW,
+            VCAP_LIVE_APPLIED_RAW_LO: begin
+              rr_data <= videocap_control_applied_raw;
+            end
+            VCAP_LIVE_EFFECTIVE_CROP,
+            VCAP_LIVE_EFFECTIVE_CROP_LO: begin
+              rr_data <= videocap_control_applied_effective_crop;
+            end
+            VCAP_PROBE_META,
+            VCAP_PROBE_META_LO: begin
+              rr_data[31:16] <= 16'h5650;
+              rr_data[15:0] <= {vcap_probe_valid,
+                                vcap_probe_burst_active,
+                                vcap_sampler_probe_valid_axi,
+                                vcap_sampler_probe_arm_seen_axi ==
+                                    vcap_probe_arm_toggle,
+                                4'h0, 8'h02};
+            end
+            VCAP_PROBE_TARGET,
+            VCAP_PROBE_TARGET_LO: begin
+              rr_data <= {6'h00, vcap_probe_line,
+                          4'h0, vcap_probe_dest_x};
+            end
+            VCAP_PROBE_AWADDR,
+            VCAP_PROBE_AWADDR_LO: begin
+              rr_data <= vcap_probe_awaddr;
+            end
+            VCAP_PROBE_CONTROL,
+            VCAP_PROBE_CONTROL_LO: begin
+              rr_data <= {28'h0000000, vcap_sampler_probe_valid_axi,
+                          vcap_sampler_probe_arm_seen_axi,
+                          vcap_probe_arm_seen, vcap_probe_arm_toggle};
+            end
+            VCAP_PROBE_SAMPLER_TARGET,
+            VCAP_PROBE_SAMPLER_TARGET_LO: begin
+              rr_data <= {6'h00, vcap_sampler_probe_line,
+                          4'h0, vcap_sampler_probe_source_x};
+            end
+            VCAP_PROBE_SAMPLER_CONTEXT,
+            VCAP_PROBE_SAMPLER_CONTEXT_LO: begin
+              rr_data <= vcap_sampler_probe_context;
+            end
+            VCAP_PROBE_SAMPLER_CONFIG,
+            VCAP_PROBE_SAMPLER_CONFIG_LO: begin
+              rr_data <= vcap_sampler_probe_config;
+            end
+            VCAP_PRE_CROP_PROBE_META,
+            VCAP_PRE_CROP_PROBE_META_LO: begin
+              rr_data[31:16] <= 16'h5652;
+              rr_data[15:0] <= {vcap_sampler_probe_precrop_valid_axi,
+                                vcap_sampler_probe_arm_seen_axi ==
+                                    vcap_probe_arm_toggle,
+                                6'h00, 8'h01};
+            end
+            VCAP_PRE_CROP_PROBE_TARGET,
+            VCAP_PRE_CROP_PROBE_TARGET_LO: begin
+              rr_data <= {6'h00, vcap_sampler_probe_line,
+                          5'h00, vcap_sampler_probe_precrop_context[10:0]};
+            end
+            VCAP_PRE_CROP_PROBE_CONTEXT,
+            VCAP_PRE_CROP_PROBE_CONTEXT_LO: begin
+              rr_data <= vcap_sampler_probe_precrop_context;
+            end
+            VCAP_PRE_CROP_PROBE_CONFIG,
+            VCAP_PRE_CROP_PROBE_CONFIG_LO: begin
+              rr_data <= vcap_sampler_probe_config;
+            end
             default: begin
-              case (regread_addr&'hff)
+              if ((regread_addr & SDK_REG_OFFSET_MASK) >=
+                      VCAP_PROBE_DATA_BASE &&
+                  (regread_addr & SDK_REG_OFFSET_MASK) <
+                      VCAP_PROBE_DATA_BASE + 16'h0040) begin
+                rr_data <= vcap_probe_data[
+                    ((regread_addr & SDK_REG_OFFSET_MASK) -
+                     VCAP_PROBE_DATA_BASE) >> 2];
+              end else if ((regread_addr & SDK_REG_OFFSET_MASK) >=
+                      VCAP_PROBE_SAMPLER_DATA_BASE &&
+                  (regread_addr & SDK_REG_OFFSET_MASK) <
+                      VCAP_PROBE_SAMPLER_DATA_BASE + 16'h0040) begin
+                rr_data <= vcap_sampler_probe_word(
+                    ((regread_addr & SDK_REG_OFFSET_MASK) -
+                     VCAP_PROBE_SAMPLER_DATA_BASE) >> 2);
+              end else if ((regread_addr & SDK_REG_OFFSET_MASK) >=
+                      VCAP_PROBE_OWNER_BASE &&
+                  (regread_addr & SDK_REG_OFFSET_MASK) <
+                      VCAP_PROBE_OWNER_BASE + 16'h0040) begin
+                rr_data <= vcap_probe_owner[
+                    ((regread_addr & SDK_REG_OFFSET_MASK) -
+                     VCAP_PROBE_OWNER_BASE) >> 2];
+              end else if ((regread_addr & SDK_REG_OFFSET_MASK) >=
+                      VCAP_PRE_CROP_PROBE_DATA_BASE &&
+                  (regread_addr & SDK_REG_OFFSET_MASK) <
+                      VCAP_PRE_CROP_PROBE_DATA_BASE + 16'h0100) begin
+                rr_data <= vcap_sampler_probe_precrop_rdata;
+              end else if ((regread_addr & SDK_REG_OFFSET_MASK) >=
+                      VCAP_LIVE_CAPABILITY &&
+                  (regread_addr & SDK_REG_OFFSET_MASK) <=
+                      VCAP_LIVE_COMMIT) begin
+                // Defined live-control write registers are read-as-zero;
+                // never alias their low byte into the legacy register map.
+                rr_data <= 32'h00000000;
+              end else case (regread_addr&'hff)
                 /*'h00: begin
                  rr_data <= video_control_data;
                 end
@@ -2527,11 +2863,34 @@ module MNTZorro_v0_1_S00_AXI
             SDK_REG_DOORBELL_Z3_LO: sdk_doorbell_pending <= 1;
             SDK_REG_IRQ_ACK,
             SDK_REG_IRQ_ACK_Z3_LO: sdk_irq_ack_pending <= 1;
+            VCAP_LIVE_STAGED_RAW_HI:
+              videocap_control_staged_raw[31:16] <= regdata_in;
+            VCAP_LIVE_STAGED_RAW_LO:
+              videocap_control_staged_raw[15:0] <= regdata_in;
+            VCAP_LIVE_COMMIT: begin
+              videocap_control_live_event <= 1'b1;
+              videocap_control_live_token_valid <=
+                  (regdata_in == VCAP_LIVE_COMMIT_TOKEN);
+            end
+            VCAP_PROBE_CONTROL,
+            VCAP_PROBE_CONTROL_LO:
+              vcap_probe_arm_toggle <= ~vcap_probe_arm_toggle;
             default: begin
-              case (regwrite_addr&'hff)
+              // Wrong-direction or reserved live-control accesses are no-ops
+              // and must not fall through to the legacy low-byte aliases.
+              if ((regwrite_addr & SDK_REG_OFFSET_MASK) <
+                      VCAP_LIVE_CAPABILITY ||
+                  (regwrite_addr & SDK_REG_OFFSET_MASK) >
+                      VCAP_LIVE_COMMIT) case (regwrite_addr&'hff)
                 'h00: video_control_data_zorro[31:16] <= regdata_in[15:0];
                 'h02: video_control_data_zorro[15:0]  <= regdata_in[15:0];
-                'h04: video_control_op_zorro[7:0]     <= regdata_in[7:0]; // FIXME
+                'h04: begin
+                  video_control_op_zorro[7:0] <= regdata_in[7:0];
+                  if (regdata_in[7:0] == 8'd16) begin
+                    videocap_control_zorro_raw <= video_control_data_zorro;
+                    videocap_control_zorro_event <= 1'b1;
+                  end
+                end
                 'h06: videocap_mode_in <= regdata_in[0];
                 'h08: scanline_intensity  <= regdata_in[7:0];
                 'h0A: scanline_intensity2 <= regdata_in[7:0];
@@ -2636,16 +2995,20 @@ module MNTZorro_v0_1_S00_AXI
       scanline_parity <= video_control_data[2];
     end
 
+    // Operation 16 is captured only by the ARM-strobe and Zorro-write event
+    // paths above.  The persistent output register remains available to the
+    // formatter, which intentionally ignores this operation.
+
     out_reg0 <= ZORRO3 ? last_z3addr : last_addr;
     out_reg1 <= zorro_ram_write_data;
     out_reg2 <= last_z3addr;
-    //out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
-    //            video_control_interlace, videocap_mode, 15'b0, zorro_state};
-    //          `-- 24                   `-- 23         `-- 22 `-- 7:0
-
+    // Status: [24] interlace, [23] videocap, [22] NTSC, [21] vblank,
+    // [20] hblank, [19] SDK doorbell, [18] SDK IRQ ack, [17] SuperHires,
+    // [16] full-rate capture path.
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
-                video_control_interlace, videocap_mode, videocap_ntsc, video_control_vblank, video_control_hblank,
-                sdk_doorbell_pending, sdk_irq_ack_pending, 10'b0, zorro_state};
+                video_control_interlace, videocap_mode, vcap_ntsc, video_control_vblank, video_control_hblank,
+                sdk_doorbell_pending, sdk_irq_ack_pending, vcap_shres,
+                (`VCAP_FULLRATE_INT != 0), 8'b0, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;

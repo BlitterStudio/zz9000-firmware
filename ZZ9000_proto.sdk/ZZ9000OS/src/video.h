@@ -1,6 +1,8 @@
 #ifndef ZZ_VIDEO_H
 #define ZZ_VIDEO_H
 
+#include <stdint.h>
+
 #include "zz_regs.h"
 #include "zz_video_modes.h"
 
@@ -18,6 +20,43 @@
 #define MNTVF_OP_REPORT_LINE 17
 #define MNTVF_OP_PALETTE_SEL 18
 #define MNTVF_OP_PALETTE_HI 19
+/* Videocap sampler control, snooped by mntzorro.v (the video formatter
+ * declares op 16 as ignored). Live-capable bitstreams route this packed
+ * command through the shared acknowledged, frame-boundary RTL engine;
+ * older bitstreams ignore it and expose no live-control capability.
+ *   [1:0]   sample mode: 0=average pair, 1=even sample, 2=odd sample
+ *   [2]     full-width (28 MHz) capture
+ *   [15:4]  horizontal crop origin, in 28 MHz samples
+ *   [27:16] vertical crop origin, in captured lines
+ *   [28]    horizontal crop is automatic
+ *   [29]    vertical crop is automatic
+ *   [31:30] reserved, zero
+ */
+#define MNTVF_OP_VIDEOCAP 16
+#define VIDEOCAP_FULL_WIDTH_DEFAULT 1
+#define VIDEOCAP_CROP_H_COMPAT 188U
+#define VIDEOCAP_CROP_V_COMPAT 26U
+#define VIDEOCAP_CROP_H_AUTO_FLAG (1U << 28)
+#define VIDEOCAP_CROP_V_AUTO_FLAG (1U << 29)
+
+static inline uint32_t videocap_control_pack(uint32_t sample,
+		uint32_t full_width, uint32_t crop_h, uint32_t crop_v,
+		uint32_t crop_h_present, uint32_t crop_v_present)
+{
+	uint32_t packed_crop_h = crop_h_present ?
+		(crop_h & 0x0fffU) : VIDEOCAP_CROP_H_COMPAT;
+	uint32_t packed_crop_v = crop_v_present ?
+		(crop_v & 0x0fffU) : VIDEOCAP_CROP_V_COMPAT;
+	uint32_t data = (packed_crop_v << 16) | (packed_crop_h << 4) |
+		((full_width & 1U) << 2) | (sample & 3U);
+
+	if (!crop_h_present)
+		data |= VIDEOCAP_CROP_H_AUTO_FLAG;
+	if (!crop_v_present)
+		data |= VIDEOCAP_CROP_V_AUTO_FLAG;
+
+	return data;
+}
 // decoded by mntzorro.v (snooped off the op stream, like OP_VIDEOCAP),
 // not by the video formatter: data[1:0] = scanline mode, data[2] = parity
 #define MNTVF_OP_SCANLINES 20
@@ -52,9 +91,11 @@ struct ZZ_VIDEO_STATE {
 
 	int interlace_old;
 	int videocap_ntsc_old;
+	int videocap_shres_old;
 	int videocap_enabled_old;
 	int interlace_candidate;
 	int videocap_ntsc_candidate;
+	int videocap_shres_candidate;
 	uint8_t videocap_mode_stable_count;
 	uint16_t split_request_pos;
 	uint16_t split_pos;

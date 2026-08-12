@@ -103,6 +103,8 @@ static void test_defaults_absent(void) {
     const struct zz_config *c = zz_config_get();
     CHECK(!c->loaded);
     CHECK(!c->videocap_mode_present);
+    CHECK(!c->videocap_crop_h_present);
+    CHECK(!c->videocap_crop_v_present);
     CHECK(!c->ns_vsync_present);
     CHECK(!c->scanline_mode_present);
     CHECK(!c->scanline_parity_present);
@@ -133,6 +135,23 @@ static void test_videocap_aliases(void) {
     zz_config_reset();
     parse_str("videocap_mode = 720x576\n");
     CHECK(zz_config_get()->videocap_mode == ZZVMODE_720x576);
+    CHECK(zz_config_get()->videocap_shres_present);
+    CHECK(zz_config_get()->videocap_shres == 0);
+
+    zz_config_reset();
+    parse_str("videocap_mode = 800x600\n");
+    CHECK(zz_config_get()->videocap_shres_present);
+    CHECK(zz_config_get()->videocap_shres == 0);
+
+    zz_config_reset();
+    parse_str("videocap_mode = pal\n"
+              "videocap_shres = full\n");
+    CHECK(zz_config_get()->videocap_shres == 1);
+
+    zz_config_reset();
+    parse_str("videocap_shres = full\n"
+              "videocap_mode = pal\n");
+    CHECK(zz_config_get()->videocap_shres == 0);
 
     zz_config_reset();
     parse_str("nonstandard_vsync = on\n");
@@ -142,6 +161,111 @@ static void test_videocap_aliases(void) {
     parse_str("nonstandard_vsync = off\n");
     CHECK(zz_config_get()->ns_vsync_present);
     CHECK(zz_config_get()->ns_vsync == 0);
+}
+
+static void check_videocap_profile(const char *name, uint16_t mode,
+        uint16_t full, uint16_t vsync) {
+    char line[96];
+    const struct zz_config *c;
+
+    zz_config_reset();
+    snprintf(line, sizeof(line), "videocap_profile = %s\n", name);
+    CHECK(parse_str(line) == 1);
+    c = zz_config_get();
+    CHECK(c->videocap_mode_present && c->videocap_mode == mode);
+    CHECK(c->videocap_shres_present && c->videocap_shres == full);
+    CHECK(c->ns_vsync_present && c->ns_vsync == vsync);
+}
+
+static void test_videocap_profiles(void) {
+    check_videocap_profile("full_60", ZZVMODE_800x600, 1, 0);
+    check_videocap_profile("full_exact", ZZVMODE_800x600, 1, 1);
+    check_videocap_profile("filtered_60", ZZVMODE_800x600, 0, 0);
+    check_videocap_profile("filtered_pal", ZZVMODE_720x576, 0, 0);
+    check_videocap_profile("filtered_pal_exact", ZZVMODE_720x576, 0, 1);
+    check_videocap_profile("filtered_ntsc_exact", ZZVMODE_720x576, 0, 2);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = unclear\n") == 0);
+    CHECK(!zz_config_get()->videocap_mode_present);
+    CHECK(!zz_config_get()->videocap_shres_present);
+    CHECK(!zz_config_get()->ns_vsync_present);
+
+    /* The atomic profile can coexist with old hand-edited files and obeys
+     * the parser's documented last-value-wins rule. */
+    zz_config_reset();
+    CHECK(parse_str("videocap_mode = pal\n"
+                    "videocap_shres = filter\n"
+                    "nonstandard_vsync = pal\n"
+                    "videocap_profile = full_60\n") == 4);
+    CHECK(zz_config_get()->videocap_mode == ZZVMODE_800x600);
+    CHECK(zz_config_get()->videocap_shres == 1);
+    CHECK(zz_config_get()->ns_vsync == 0);
+}
+
+static void test_videocap_sample(void) {
+    zz_config_reset();
+    CHECK(parse_str("videocap_sample = even\n") == 1);
+    CHECK(zz_config_get()->videocap_sample_present);
+    CHECK(zz_config_get()->videocap_sample == 1);
+    uint16_t present = 0;
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_SAMPLE, &present) == 1 && present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_sample = odd\n") == 1);
+    CHECK(zz_config_get()->videocap_sample == 2);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_sample = average\n") == 1);
+    CHECK(zz_config_get()->videocap_sample == 0);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_sample = sideways\n") == 0);
+    CHECK(!zz_config_get()->videocap_sample_present);
+}
+
+static void test_videocap_shres_and_crop(void) {
+    uint16_t present = 0;
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_shres = filter\n") == 1);
+    CHECK(zz_config_get()->videocap_shres_present);
+    CHECK(zz_config_get()->videocap_shres == 0);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_SHRES, &present) == 0 && present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_shres = full\n") == 1);
+    CHECK(zz_config_get()->videocap_shres == 1);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_shres = maybe\n") == 0);
+    CHECK(!zz_config_get()->videocap_shres_present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_crop_h = 200\nvideocap_crop_v = 30\n") == 2);
+    CHECK(zz_config_get()->videocap_crop_h == 200);
+    CHECK(zz_config_get()->videocap_crop_v == 30);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_H, &present) == 200 && present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_V, &present) == 30 && present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_crop_h = 279\n") == 1);
+    CHECK(zz_config_get()->videocap_crop_h_present);
+    CHECK(!zz_config_get()->videocap_crop_v_present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_H, &present) == 279 && present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_V, &present) == 0 && !present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_crop_v = 40\n") == 1);
+    CHECK(!zz_config_get()->videocap_crop_h_present);
+    CHECK(zz_config_get()->videocap_crop_v_present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_H, &present) == 0 && !present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_CROP_V, &present) == 40 && present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_crop_h = 4096\nvideocap_crop_v = 65536\n") == 0);
+    CHECK(!zz_config_get()->videocap_crop_h_present);
+    CHECK(!zz_config_get()->videocap_crop_v_present);
 }
 
 static void test_bad_values_skipped(void) {
@@ -316,6 +440,9 @@ int main(void) {
     test_defaults_absent();
     test_case_whitespace_comments();
     test_videocap_aliases();
+    test_videocap_profiles();
+    test_videocap_sample();
+    test_videocap_shres_and_crop();
     test_bad_values_skipped();
     test_last_value_wins();
     test_no_trailing_newline();
