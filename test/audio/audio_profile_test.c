@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,6 +7,7 @@
 
 #include "adau.h"
 #include "adau_PARAM.h"
+#include "audio_dsp_gain.h"
 #include "ax.h"
 #include "sdk_crypto.h"
 
@@ -114,6 +116,25 @@ static void test_parameter_map(void)
 	CHECK(MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR == 60U);
 }
 
+static int gain_matches(double actual, double expected)
+{
+	return fabs(actual - expected) < 1.0e-12;
+}
+
+static void test_prefactor_gain_contract(void)
+{
+	const double minus_12_db = 0.2511886431509580;
+	const double plus_12_db = 3.9810717055349722;
+
+	CHECK(audio_adau_prefactor_gain(50) == 1.0);
+	CHECK(gain_matches(audio_adau_prefactor_gain(0), minus_12_db));
+	CHECK(gain_matches(audio_adau_prefactor_gain(100), plus_12_db));
+	CHECK(gain_matches(audio_adau_prefactor_gain(-1), minus_12_db));
+	CHECK(gain_matches(audio_adau_prefactor_gain(101), plus_12_db));
+	CHECK(MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_FIXPT == 0x00800000U);
+	CHECK(MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_FIXPT == 0x00800000U);
+}
+
 static void test_readback_comparison(void)
 {
 	static const uint8_t expected[] = { 0x00, 0x12, 0x34, 0x56 };
@@ -133,6 +154,7 @@ int main(void)
 	test_normal_image_identity();
 	test_production_transport_contract();
 	test_parameter_map();
+	test_prefactor_gain_contract();
 	test_readback_comparison();
 	puts("audio production profile tests passed");
 	return 0;
