@@ -16,6 +16,7 @@
 #include "stdlib.h"
 #include "ax.h"
 #include "audio_capture.h"
+#include "audio_dsp_gain.h"
 #include "memorymap.h"
 #include "xtime_l.h"
 #include "math.h"
@@ -1181,12 +1182,7 @@ int audio_adau_set_mixer_vol(int vol1, int vol2) {
 }
 
 int audio_adau_set_prefactor(int pre) {
-	double p;
-
-	if(pre > 100) pre = 100;
-	if(pre <   0) pre =   0;
-
-	p = .01f * (double)pre;
+	double p = audio_adau_prefactor_gain(pre);
 
 	uint8_t buf[4];
 	adau_to_5_23(p, buf);

@@ -31,11 +31,12 @@ $(CAPTURE_TARGET): audio_capture_test.c $(SRC_DIR)/audio_capture.c \
 		$(SRC_DIR)/audio_capture.c
 
 $(PROFILE_TARGET): audio_profile_test.c $(SRC_DIR)/adau.h \
+	$(SRC_DIR)/audio_dsp_gain.h \
 	$(SRC_DIR)/ax.h $(SRC_DIR)/sdk_crypto.c $(SRC_DIR)/sdk_crypto.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -ffunction-sections \
 		-Wl,--gc-sections -o $@ audio_profile_test.c \
-		$(SRC_DIR)/sdk_crypto.c
+		$(SRC_DIR)/sdk_crypto.c -lm
 
 $(PLAYBACK_TARGET): audio_playback_frontier_test.c \
 	$(SRC_DIR)/audio_playback_frontier.h
