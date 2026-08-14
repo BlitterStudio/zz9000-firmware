@@ -16,8 +16,8 @@ int main(void) {
 	printf("missing ZZ9K_MP3_BACKEND_MINIMP3\n");
 	return 1;
 #endif
-#ifndef MINIMP3_ONLY_MP3
-	printf("missing MINIMP3_ONLY_MP3\n");
+#ifdef MINIMP3_ONLY_MP3
+	printf("unexpected MINIMP3_ONLY_MP3\n");
 	return 2;
 #endif
 #ifndef MINIMP3_NO_STDIO

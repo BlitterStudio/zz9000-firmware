@@ -77,19 +77,15 @@ void Xil_AssertNonVoid() {}
  * 2.7: CARD_FEATURE_DPMS + formatter sync gating — ZZ9000.card gates
  * the P96 SetDPMSLevel hook on this revision.
  * 2.8: v2.8 release identity — MPEG-1 media sessions, hardware overlay
- * scaling, per-stage pipeline profiling (MEDIA_STATUS page 5), and the
- * primary-CLUT query. ZZ9000.card gates nothing new on this revision:
- * its existing minimums (0x0204, 0x0206, 0x0207) all still pass, and the
- * overlay scaling is programmed card-side without driver involvement.
- * New SDK capability is discovered through service flags and status
- * pages, which self-gate, rather than through this number.
- * 2.9: atomic videocap_profile configuration and reliable display
- * transmitter retraining during output-mode changes.
- * 2.10: host-visible firmware half of the matched live-videocap contract.
+ * scaling, per-stage pipeline profiling (MEDIA_STATUS page 5), the
+ * primary-CLUT query, atomic videocap_profile configuration, reliable
+ * display-transmitter retraining during output-mode changes, and the
+ * host-visible firmware half of the matched live-videocap contract.
  * Startup operation 16 enters the shared acknowledged RTL control engine;
- * live calibration still requires the bitstream's exact capability. */
+ * live calibration also requires the bitstream's exact capability. Other
+ * SDK additions use service flags and status pages that self-gate. */
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 10
+#define REVISION_MINOR 8
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
@@ -1598,6 +1594,7 @@ int main() {
 					}
 					case REG_ZZ_VOLTAGE_INT: {
 						data = ((int16_t)(xadc_get_int_voltage()*100.0)) << 16;
+						data |= ZZ_FW_CAPABILITIES;
 						break;
 					}
 					case REG_ZZ_CONFIG_KEY: {

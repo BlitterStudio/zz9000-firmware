@@ -8,8 +8,9 @@ PROFILE_TARGET := $(BUILD_DIR)/audio_profile_test
 PLAYBACK_TARGET := $(BUILD_DIR)/audio_playback_frontier_test
 DRAIN_TARGET := $(BUILD_DIR)/audio_stream_drain_test
 MP3_PROBE_TARGET := $(BUILD_DIR)/mp3_frame_probe_test
+MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
 TARGETS := $(CAPTURE_TARGET) $(PROFILE_TARGET) $(PLAYBACK_TARGET) \
-	$(DRAIN_TARGET) $(MP3_PROBE_TARGET)
+	$(DRAIN_TARGET) $(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET)
 
 CPPFLAGS += -I$(SRC_DIR)
 
@@ -21,6 +22,7 @@ test: $(TARGETS)
 	$(PLAYBACK_TARGET)
 	$(DRAIN_TARGET)
 	$(MP3_PROBE_TARGET)
+	$(MPEG_LAYER2_TARGET)
 
 $(CAPTURE_TARGET): audio_capture_test.c $(SRC_DIR)/audio_capture.c \
 	$(SRC_DIR)/audio_capture.h
@@ -51,6 +53,11 @@ $(MP3_PROBE_TARGET): mp3_frame_probe_test.c \
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ mp3_frame_probe_test.c \
 		$(SRC_DIR)/mp3/decode_mp3.c
+
+$(MPEG_LAYER2_TARGET): mpeg_layer2_decode_test.c \
+	$(SRC_DIR)/mp3/mp3_backend_config.h $(SRC_DIR)/mp3/minimp3.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ mpeg_layer2_decode_test.c
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -8,11 +8,10 @@
 
 #define ZZ9K_MP3_BACKEND_MINIMP3 1
 
-/*
- * The SDK audio service only promises MP3 decode. Keep the firmware build small
- * and avoid pulling in stdio-based helpers; streaming uses explicit callbacks.
- */
-#define MINIMP3_ONLY_MP3 1
+/* The audio stream service backs both the MHI MP3 path and mpega.library.
+ * mpega.library clients such as RiVA pass MPEG Layer II elementary audio, so
+ * keep minimp3's Layer I/II decoder enabled as part of the compatibility
+ * contract.  Streaming still uses explicit callbacks and needs no stdio. */
 #define MINIMP3_NO_STDIO 1
 
 #endif

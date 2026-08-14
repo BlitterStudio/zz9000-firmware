@@ -150,7 +150,9 @@ enum zz_reg_offsets {
   REG_ZZ_TEMPERATURE    = 0xE0,
   REG_ZZ_VOLTAGE_AUX    = 0xE2,
   REG_ZZ_VOLTAGE_INT    = 0xE4,
-  REG_ZZ_UNUSED_REGE6   = 0xE6,
+  /* The lower half of the voltage-int read group is a firmware-owned
+   * capability bitmap. Old firmware returned zero here. */
+  REG_ZZ_FW_CAPABILITIES = 0xE6,
   /* ZZ9000.CFG query: write a zz_config_key id, then read back the
    * 32-bit group at 0xE8 — value in the upper half (0xE8 on Z2),
    * present flag in the lower half (0xEA on Z2). */
@@ -185,6 +187,11 @@ enum zz_reg_offsets {
   REG_ZZ_SDK_DIAG_DATA  = 0x114,
   REG_ZZ_SDK_DIAG_ZADDR = 0x118,
 };
+
+#define ZZ_FW_CAP_VIDEOCAP_PROFILE (1U << 0)
+#define ZZ_FW_CAP_VIDEOCAP_LIVE    (1U << 1)
+#define ZZ_FW_CAPABILITIES \
+  (ZZ_FW_CAP_VIDEOCAP_PROFILE | ZZ_FW_CAP_VIDEOCAP_LIVE)
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,

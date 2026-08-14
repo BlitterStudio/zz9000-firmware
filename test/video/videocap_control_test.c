@@ -105,6 +105,7 @@ static int main_source_contract(void)
 	unsigned int revision_minor = 0;
 	unsigned int revision_major_defines = 0;
 	unsigned int revision_minor_defines = 0;
+	unsigned int firmware_capability_reads = 0;
 	unsigned int videocap_pack_writes = 0;
 	unsigned int videocap_ops = 0;
 
@@ -118,6 +119,8 @@ static int main_source_contract(void)
 			revision_major_defines++;
 		if (sscanf(line, "#define REVISION_MINOR %u", &revision_minor) == 1)
 			revision_minor_defines++;
+		if (strstr(line, "data |= ZZ_FW_CAPABILITIES;") != NULL)
+			firmware_capability_reads++;
 		if (strstr(line, "video_formatter_write(videocap_control_pack(") != NULL)
 			videocap_pack_writes++;
 		if (strstr(line, "MNTVF_OP_VIDEOCAP);") != NULL)
@@ -126,10 +129,15 @@ static int main_source_contract(void)
 	fclose(source);
 
 	if (revision_major_defines != 1U || revision_minor_defines != 1U ||
-	    ((revision_major << 8) | revision_minor) != 0x020aU) {
+	    ((revision_major << 8) | revision_minor) != 0x0208U) {
 		printf("firmware revision contract mismatch: defines=%u/%u revision=0x%04x\n",
 		       revision_major_defines, revision_minor_defines,
 		       (revision_major << 8) | revision_minor);
+		return 0;
+	}
+	if (firmware_capability_reads != 1U) {
+		printf("firmware capability contract mismatch: reads=%u\n",
+		       firmware_capability_reads);
 		return 0;
 	}
 	if (videocap_pack_writes != 1U || videocap_ops != 1U) {
