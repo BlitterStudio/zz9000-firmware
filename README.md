@@ -156,8 +156,11 @@ uses `280/40`; filtered profiles and Denise-adapter/Super Denise bitstreams use
 the historical `188/26`. An explicit numeric key is always a literal Custom
 override, including `188`, `26`, `0`, and `4095`.
 
-Firmware 2.10 and the matching protocol-1 bitstream also expose acknowledged
-live framing control for ZZTop 2.8. The FPGA publishes the exact applied raw
+Firmware 2.8 with the live-control capability and the matching protocol-1
+bitstream also expose acknowledged live framing control for ZZTop 2.8. The
+firmware capability bitmap is returned at register `0xE6`; older 2.8 firmware
+returns zero, keeping mixed RC1/current installations safely disabled. The
+FPGA publishes the exact applied raw
 Automatic/Custom state, resolved effective H/V values, capture-path signature,
 and detected PAL/NTSC standard. A valid live change crosses clock domains as
 one coherent word and becomes active only at a capture-frame boundary; the
