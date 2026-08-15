@@ -50,15 +50,12 @@
 // default allocations stay in the shared heap so Z2 crypto offload
 // keeps failing fast into its software fallback instead of squeezing
 // through this tiny region.
-// The placement assumes the STANDARD 4 MB Zorro 2 window. The 2 MB
-// bitstream variants (VARIANT_2MB in mntzorro.v: zorro2-2mb, a500-2mb)
-// cannot reach board offset 0x3E0000, and this ELF cannot tell which
-// bitstream is loaded (RAM_SIZE is an FPGA compile-time constant), so
-// zz9k.library refuses HOST_WINDOW requests when the autoconfig window
-// is smaller than 4 MB (ZZ9K_HOST_WINDOW_MIN_BOARD_SIZE) -- those
-// boards keep the plain software paths. Serving 2 MB variants would
-// need the heap placed window-relative with the host reporting its
-// window size.
+// These constants are now the compatibility fallback for Z3 and bitstreams
+// without the generation-tagged aperture register. Generation-1 Z2
+// bitstreams expose RAM_SIZE through AXI slot 7 and use the window-relative
+// regions computed in sdk_aperture_layout.c; firmware publishes that dynamic
+// heap only after the host acknowledges the matching contract. The existing
+// SDK guard still prevents a legacy 2 MB host from using this 4 MB address.
 #define SDK_HOST_WINDOW_HEAP_ADDRESS 0x005D0000
 #define SDK_HOST_WINDOW_HEAP_SIZE    0x00010000
 #define SDK_HOST_WINDOW_HEAP_END \

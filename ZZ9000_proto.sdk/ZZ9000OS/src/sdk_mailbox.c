@@ -23,6 +23,7 @@
 #include "audio_stream_drain.h"
 #include "sdk_jpeg.h"
 #include "sdk_surface.h"
+#include "sdk_aperture_layout.h"
 #include "sdk_smp_lock.h"
 #include "memorymap.h"
 #include "scheduler.h"
@@ -42,7 +43,7 @@
 #define SDK_MAILBOX_TOTAL_SIZE         \
 	(SDK_MAILBOX_COMPLETION_OFFSET + \
 	 (SDK_MAILBOX_RING_ENTRIES * SDK_MAILBOX_ENTRY_SIZE))
-#define SDK_MAILBOX_CAPABILITY_BITS    \
+#define SDK_MAILBOX_BASE_CAPABILITY_BITS \
 	(SDK_CAP_MAILBOX | SDK_TRANSPORT_CAPABILITY_BITS | \
 	 SDK_CAP_SERVICE_DISCOVERY | \
 	 SDK_CAP_SHARED_ALLOC | SDK_CAP_SURFACES | \
@@ -51,7 +52,7 @@
 	 SDK_CAP_AUDIO_PLAYBACK | \
 	 SDK_CAP_MEMORY_OPS | SDK_CAP_CRYPTO | \
 	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION | \
-	 SDK_CAP_HOST_WINDOW_HEAP | SDK_CAP_VIDEO_DECODE | \
+	 SDK_CAP_VIDEO_DECODE | \
 	 SDK_CAP_MEDIA_SESSION | SDK_CAP_AUDIO_STREAM_DRAIN)
 /* Decode proceeds only with at least this much undecoded input (unless
  * EOF): enough for the largest legal MP3 frame (~1.4K, 2.3K free-format)
@@ -112,6 +113,21 @@ struct SDKCapsPayload {
 struct SDKQueryServicePayload {
 	uint8_t service_id[4];
 	uint8_t reserved[44];
+};
+
+struct SDKQueryApertureLayoutPayload {
+	uint8_t profile[4];
+	uint8_t aperture_size[4];
+	uint8_t framebuffer_base[4];
+	uint8_t framebuffer_size[4];
+	uint8_t pip_base[4];
+	uint8_t pip_size[4];
+	uint8_t template_base[4];
+	uint8_t template_size[4];
+	uint8_t host_window_base[4];
+	uint8_t host_window_size[4];
+	uint8_t audio_base[4];
+	uint8_t audio_size[4];
 };
 
 struct SDKServiceInfoPayload {
@@ -211,6 +227,21 @@ struct SDKDiagSchedPayload {
 	/* version 2: decode-only timing, see timing_decode_requests/_us. */
 	uint8_t decode_requests[4];
 	uint8_t decode_us[4];
+};
+
+struct SDKDiagMemoryPayload {
+	uint8_t version[4];
+	uint8_t layout_state[4];
+	uint8_t aperture_size[4];
+	uint8_t aperture_info[4];
+	uint8_t host_window_board_base[4];
+	uint8_t host_window_arm_base[4];
+	uint8_t host_window_total[4];
+	uint8_t host_window_free[4];
+	uint8_t host_window_largest_free[4];
+	uint8_t host_window_allocations[4];
+	uint8_t allocator_invalid_slots[4];
+	uint8_t reserved[4];
 };
 
 struct SDKSurfaceInfoPayload {
@@ -874,6 +905,9 @@ typedef char SDKCapsPayload_must_fit_inline[
 typedef char SDKQueryServicePayload_must_be_48_bytes[
 	(sizeof(struct SDKQueryServicePayload) == 48U) ? 1 : -1
 ];
+typedef char SDKQueryApertureLayoutPayload_must_be_48_bytes[
+	(sizeof(struct SDKQueryApertureLayoutPayload) == 48U) ? 1 : -1
+];
 typedef char SDKServiceInfoPayload_must_be_48_bytes[
 	(sizeof(struct SDKServiceInfoPayload) == 48U) ? 1 : -1
 ];
@@ -900,6 +934,9 @@ typedef char SDKDiagTimingPayload_must_be_48_bytes[
 ];
 typedef char SDKDiagSchedPayload_must_be_24_bytes[
 	(sizeof(struct SDKDiagSchedPayload) == 24U) ? 1 : -1
+];
+typedef char SDKDiagMemoryPayload_must_be_48_bytes[
+	(sizeof(struct SDKDiagMemoryPayload) == 48U) ? 1 : -1
 ];
 typedef char SDKSurfaceInfoPayload_must_be_48_bytes[
 	(sizeof(struct SDKSurfaceInfoPayload) == 48U) ? 1 : -1
@@ -1124,6 +1161,48 @@ static uint32_t timing_decode_us;
 
 static uint32_t surface_format_bytes(uint32_t format);
 
+static int aperture_contract_present(void)
+{
+	return (sdk_aperture_runtime_flags() & SDK_APERTURE_FLAG_VALID) != 0U;
+}
+
+static uint32_t effective_host_window_address(void)
+{
+	if (aperture_contract_present())
+		return sdk_aperture_host_window_address();
+	/* Compatibility for Z3 and old 4 MB Z2 bitstreams which expose no
+	 * generation-tagged aperture register. The existing host library rejects
+	 * this legacy address on sub-4 MB boards. New 2 MB bitstreams expose the
+	 * exact size and therefore take the acknowledged dynamic path instead. */
+	if (sdk_aperture_runtime_is_zorro3() ||
+	    sdk_aperture_runtime_is_legacy())
+		return SDK_HOST_WINDOW_HEAP_ADDRESS;
+	/* A nonzero but unsupported FPGA-reported size is not a legacy image.
+	 * Keep the host heap disabled instead of guessing at a 4 MB address. */
+	return 0U;
+}
+
+static uint32_t effective_host_window_size(void)
+{
+	if (aperture_contract_present())
+		return sdk_aperture_host_window_size();
+	if (sdk_aperture_runtime_is_zorro3() ||
+	    sdk_aperture_runtime_is_legacy())
+		return SDK_HOST_WINDOW_HEAP_SIZE;
+	return 0U;
+}
+
+static uint32_t mailbox_capability_bits(void)
+{
+	uint32_t capabilities = SDK_MAILBOX_BASE_CAPABILITY_BITS;
+
+	if (aperture_contract_present())
+		capabilities |= SDK_CAP_APERTURE_LAYOUT;
+	if (effective_host_window_size() != 0U)
+		capabilities |= SDK_CAP_HOST_WINDOW_HEAP;
+	return capabilities;
+}
+
 static const struct SDKServiceDescriptor sdk_services[] = {
 	{
 		SDK_SERVICE_CORE,
@@ -1132,7 +1211,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_CAP_SERVICE_DISCOVERY,
 		SDK_SERVICE_FLAG_FIRMWARE,
 		SDK_SERVICE_CORE,
-		5,
+		6,
 		"core"
 	},
 	{
@@ -1225,7 +1304,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		SDK_CAP_DIAGNOSTICS,
 		SDK_SERVICE_FLAG_FIRMWARE,
 		SDK_SERVICE_DIAG,
-		3,
+		4,
 		"diag"
 	},
 	{
@@ -1338,6 +1417,15 @@ static void record_request_timing(uint32_t opcode, uint32_t elapsed_us)
 static inline volatile struct SDKMailboxDescriptor *descriptor(void)
 {
 	return (volatile struct SDKMailboxDescriptor *)SDK_MAILBOX_ADDRESS;
+}
+
+void sdk_mailbox_refresh_capabilities(void)
+{
+	volatile struct SDKMailboxDescriptor *desc = descriptor();
+
+	put_be32(desc->capability_bits, mailbox_capability_bits());
+	Xil_DCacheFlushRange((INTPTR)desc, sizeof(*desc));
+	__asm__ __volatile__("dsb" ::: "memory");
 }
 
 static inline volatile struct SDKMailboxEntry *request_ring(void)
@@ -1685,9 +1773,13 @@ static int local_surface_range_valid(uint32_t address, uint32_t length)
 
 static int host_window_range_valid(uint32_t address, uint32_t length)
 {
+	uint32_t base = effective_host_window_address();
+	uint32_t size = effective_host_window_size();
+
+	if (base == 0U || size == 0U)
+		return 0;
 	return range_valid(address, length,
-	                   SDK_HOST_WINDOW_HEAP_ADDRESS,
-	                   SDK_HOST_WINDOW_HEAP_SIZE);
+	                   base, size);
 }
 
 static int shared_buffer_live(const struct SDKSharedBuffer *buffer)
@@ -1979,12 +2071,20 @@ static uint32_t find_next_allocation_start(uint32_t address, uint32_t heap_end,
 	return next;
 }
 
-static void heap_free_stats(uint32_t *free_total, uint32_t *largest_free)
+static void heap_free_stats_in(uint32_t base, uint32_t size,
+			       uint32_t *free_total, uint32_t *largest_free)
 {
-	uint32_t cursor = SDK_SHARED_HEAP_ADDRESS;
-	uint32_t heap_end = SDK_SHARED_HEAP_ADDRESS + SDK_SHARED_HEAP_SIZE;
+	uint32_t cursor = base;
+	uint32_t heap_end;
 	uint32_t total = 0;
 	uint32_t largest = 0;
+
+	if (base > UINT32_MAX - size) {
+		*free_total = 0U;
+		*largest_free = 0U;
+		return;
+	}
+	heap_end = base + size;
 
 	while (cursor < heap_end) {
 		uint32_t alloc_end = find_allocation_end_containing(cursor, 0);
@@ -2006,6 +2106,25 @@ static void heap_free_stats(uint32_t *free_total, uint32_t *largest_free)
 
 	*free_total = total;
 	*largest_free = largest;
+}
+
+static void heap_free_stats(uint32_t *free_total, uint32_t *largest_free)
+{
+	heap_free_stats_in(SDK_SHARED_HEAP_ADDRESS, SDK_SHARED_HEAP_SIZE,
+			   free_total, largest_free);
+}
+
+static uint32_t count_host_window_allocations(void)
+{
+	uint32_t i;
+	uint32_t used = 0U;
+
+	for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
+		if (shared_buffer_live(&shared_buffers[i]) &&
+		    (shared_buffers[i].flags & SDK_ALLOC_HOST_WINDOW) != 0U)
+			used++;
+	}
+	return used;
 }
 
 static int buffer_range_valid(const struct SDKSharedBuffer *buffer,
@@ -2130,10 +2249,14 @@ static uint32_t find_free_local_surface_region(uint32_t length,
 static uint32_t find_free_host_window_region(uint32_t length,
                                              uint32_t alignment)
 {
+	uint32_t base = effective_host_window_address();
+	uint32_t size = effective_host_window_size();
+
+	if (base == 0U || size == 0U)
+		return 0U;
 	/* Shared-heap blocks can never overlap a candidate here (disjoint
 	 * regions), so the region-agnostic overlap scan is reusable. */
-	return find_free_region_in(SDK_HOST_WINDOW_HEAP_ADDRESS,
-	                           SDK_HOST_WINDOW_HEAP_SIZE,
+	return find_free_region_in(base, size,
 	                           length, alignment, 0);
 }
 
@@ -2161,7 +2284,11 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	if (length == 0 || !is_power_of_two(alignment))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
-		if (length > SDK_HOST_WINDOW_HEAP_SIZE)
+		uint32_t host_window_size = effective_host_window_size();
+
+		if (host_window_size == 0U)
+			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+		if (length > host_window_size)
 			return complete_status(req, comp,
 			                       SDK_STATUS_BAD_REQUEST);
 	} else if (length > SDK_SHARED_HEAP_SIZE) {
@@ -7192,6 +7319,81 @@ static uint16_t handle_diag_sched(volatile struct SDKMailboxEntry *req,
 	return SDK_STATUS_OK;
 }
 
+static uint16_t handle_query_aperture_layout(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp)
+{
+	const struct sdk_aperture_layout *layout;
+	volatile struct SDKQueryApertureLayoutPayload *reply;
+
+	if (!aperture_contract_present())
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	layout = sdk_aperture_runtime_layout();
+	if (!sdk_aperture_layout_validate(layout))
+		return complete_status(req, comp, SDK_STATUS_INTERNAL_ERROR);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*reply));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	reply = (volatile struct SDKQueryApertureLayoutPayload *)comp->payload;
+	put_be32(reply->profile, layout->profile);
+	put_be32(reply->aperture_size, layout->aperture_size);
+	put_be32(reply->framebuffer_base, layout->framebuffer.base);
+	put_be32(reply->framebuffer_size, layout->framebuffer.size);
+	put_be32(reply->pip_base, layout->pip.base);
+	put_be32(reply->pip_size, layout->pip.size);
+	put_be32(reply->template_base, layout->template_scratch.base);
+	put_be32(reply->template_size, layout->template_scratch.size);
+	put_be32(reply->host_window_base, layout->host_window.base);
+	put_be32(reply->host_window_size, layout->host_window.size);
+	put_be32(reply->audio_base, layout->audio.base);
+	put_be32(reply->audio_size, layout->audio.size);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_diag_memory(volatile struct SDKMailboxEntry *req,
+				   volatile struct SDKMailboxEntry *comp)
+{
+	const struct sdk_aperture_layout *layout =
+		sdk_aperture_runtime_layout();
+	volatile struct SDKDiagMemoryPayload *diag;
+	uint32_t flags = sdk_aperture_runtime_flags();
+	uint32_t host_arm = effective_host_window_address();
+	uint32_t host_total = effective_host_window_size();
+	uint32_t host_board = 0U;
+	uint32_t free_total = 0U;
+	uint32_t largest_free = 0U;
+	uint32_t invalid_slots;
+
+	invalid_slots = sanitize_allocator_metadata();
+	if (host_arm != 0U && host_total != 0U) {
+		heap_free_stats_in(host_arm, host_total,
+				   &free_total, &largest_free);
+		host_board = host_arm - SDK_APERTURE_ARM_ADDRESS_ADJUSTMENT;
+	} else if ((flags & SDK_APERTURE_FLAG_VALID) != 0U) {
+		host_board = layout->host_window.base;
+	}
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*diag));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	diag = (volatile struct SDKDiagMemoryPayload *)comp->payload;
+	put_be32(diag->version, 1U);
+	put_be32(diag->layout_state, sdk_aperture_runtime_diag_state());
+	put_be32(diag->aperture_size,
+		 sdk_aperture_runtime_reported_size());
+	put_be32(diag->aperture_info,
+		 (flags & SDK_APERTURE_FLAG_VALID) != 0U ?
+		 sdk_aperture_layout_info_word(layout) : 0U);
+	put_be32(diag->host_window_board_base, host_board);
+	put_be32(diag->host_window_arm_base, host_arm);
+	put_be32(diag->host_window_total, host_total);
+	put_be32(diag->host_window_free, free_total);
+	put_be32(diag->host_window_largest_free, largest_free);
+	put_be32(diag->host_window_allocations,
+		 count_host_window_allocations());
+	put_be32(diag->allocator_invalid_slots, invalid_slots);
+	return SDK_STATUS_OK;
+}
+
 static uint16_t handle_query_service(volatile struct SDKMailboxEntry *req,
                                      volatile struct SDKMailboxEntry *comp,
                                      uint16_t payload_len)
@@ -7215,7 +7417,16 @@ static uint16_t handle_query_service(volatile struct SDKMailboxEntry *req,
 	info = (volatile struct SDKServiceInfoPayload *)comp->payload;
 	put_be32(info->service_id, service->service_id);
 	put_be32(info->version, service->version);
-	put_be32(info->capability_bits, service->capability_bits);
+	{
+		uint32_t capabilities = service->capability_bits;
+		if (service->service_id == SDK_SERVICE_CORE)
+			capabilities |= mailbox_capability_bits() &
+				SDK_CAP_APERTURE_LAYOUT;
+		if (service->service_id == SDK_SERVICE_MEMORY)
+			capabilities |= mailbox_capability_bits() &
+				SDK_CAP_HOST_WINDOW_HEAP;
+		put_be32(info->capability_bits, capabilities);
+	}
 	put_be32(info->flags, service_flags(service));
 	put_be32(info->opcode_base, service->opcode_base);
 	put_be32(info->opcode_count, service->opcode_count);
@@ -7309,16 +7520,19 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		put_be32(caps->magic, SDK_MAILBOX_MAGIC);
 		put_be16(caps->abi_major, SDK_MAILBOX_ABI_MAJOR);
 		put_be16(caps->abi_minor, SDK_MAILBOX_ABI_MINOR);
-		put_be32(caps->capability_bits, SDK_MAILBOX_CAPABILITY_BITS);
+		put_be32(caps->capability_bits, mailbox_capability_bits());
 		put_be32(caps->max_inline_payload, sizeof(req->payload));
 		put_be32(caps->max_shared_buffers, SDK_MAX_SHARED_BUFFERS);
 		put_be32(caps->max_surfaces, SDK_MAX_SURFACES + 1U);
 		put_be32(caps->firmware_version, 0);
 		put_be32(caps->request_ring_entries, SDK_MAILBOX_RING_ENTRIES);
 		put_be32(caps->completion_ring_entries, SDK_MAILBOX_RING_ENTRIES);
-		put_be32(caps->host_window_heap_size, SDK_HOST_WINDOW_HEAP_SIZE);
+		put_be32(caps->host_window_heap_size,
+		         effective_host_window_size());
 		return SDK_STATUS_OK;
 	}
+	case SDK_OP_QUERY_APERTURE_LAYOUT:
+		return handle_query_aperture_layout(req, comp);
 	case SDK_OP_QUERY_SERVICE:
 		return handle_query_service(req, comp, payload_len);
 	case SDK_OP_ALLOC_SHARED:
@@ -7428,6 +7642,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_diag_timing(req, comp);
 	case SDK_OP_DIAG_SCHED:
 		return handle_diag_sched(req, comp);
+	case SDK_OP_DIAG_MEMORY:
+		return handle_diag_memory(req, comp);
 	default:
 		write_completion(comp, req, SDK_STATUS_UNSUPPORTED, 0);
 		return SDK_STATUS_UNSUPPORTED;
@@ -7459,7 +7675,7 @@ void sdk_mailbox_init(void)
 	put_be32(desc->request_ring_entries, SDK_MAILBOX_RING_ENTRIES);
 	put_be32(desc->completion_ring_offset, SDK_MAILBOX_COMPLETION_OFFSET);
 	put_be32(desc->completion_ring_entries, SDK_MAILBOX_RING_ENTRIES);
-	put_be32(desc->capability_bits, SDK_MAILBOX_CAPABILITY_BITS);
+	put_be32(desc->capability_bits, mailbox_capability_bits());
 
 	sdk_status = SDK_STATUS_OK;
 	sdk_mailbox_active = 0;

@@ -194,6 +194,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_jpeg.c \
 	$(SRC_DIR)/jmem_zz9k.c \
 	$(SRC_DIR)/sdk_surface.c \
+	$(SRC_DIR)/sdk_aperture_layout.c \
 	$(SRC_DIR)/sdk_mailbox.c \
 	$(SRC_DIR)/watchdog.c \
 	$(SRC_DIR)/newlib_compat.c

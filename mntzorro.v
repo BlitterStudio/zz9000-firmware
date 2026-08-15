@@ -1008,6 +1008,24 @@ module MNTZorro_v0_1_S00_AXI
   localparam [15:0] SDK_REG_DIAG_DATA_LO = 16'h0116;
   localparam [15:0] SDK_REG_DIAG_Z3ADDR = 16'h0118;
   localparam [15:0] SDK_REG_DIAG_Z3ADDR_LO = 16'h011a;
+  // Generation-1 aperture contract. Host offsets are 0x111c/0x111e because
+  // the direct-register PIC starts 0x1000 bytes into the board window.
+  // The ARM separately reads the exact aperture byte count through AXI slot 7.
+  localparam [15:0] SDK_REG_APERTURE_INFO = 16'h011c;
+  localparam [15:0] SDK_REG_APERTURE_INFO_LO = 16'h011e;
+  localparam [15:0] SDK_APERTURE_ACK_TOKEN = 16'ha501;
+`ifdef ZORRO3
+  localparam [31:0] SDK_APERTURE_INFO_VALUE = 32'h00000000;
+  localparam [31:0] SDK_APERTURE_SIZE_VALUE = 32'h00000000;
+`elsif VARIANT_2MB
+  // 0x5a magic, generation 1, VALID|HOST_WINDOW, 2 MiB.
+  localparam [31:0] SDK_APERTURE_INFO_VALUE = 32'h5a010502;
+  localparam [31:0] SDK_APERTURE_SIZE_VALUE = 32'h00200000;
+`else
+  // 0x5a magic, generation 1, VALID|PIP_POOL|HOST_WINDOW, 4 MiB.
+  localparam [31:0] SDK_APERTURE_INFO_VALUE = 32'h5a010704;
+  localparam [31:0] SDK_APERTURE_SIZE_VALUE = 32'h00400000;
+`endif
   // Diagnostic snapshot of one accepted 16-beat native-capture write burst.
   // The host-visible offsets are 0x1120..0x116e because the direct-register
   // PIC starts 0x1000 bytes into the board window.
@@ -1162,6 +1180,7 @@ module MNTZorro_v0_1_S00_AXI
   reg [20:0] eth_rx_frame_select;
   reg sdk_doorbell_pending;
   reg sdk_irq_ack_pending;
+  reg sdk_aperture_layout_ack;
   reg [15:0] sdk_last_regwrite_addr;
   reg [15:0] sdk_last_regwrite_data;
   reg [3:0] sdk_last_regwrite_strobes;
@@ -1826,6 +1845,7 @@ module MNTZorro_v0_1_S00_AXI
           zorro_ram_write_flag <= 0;
           sdk_doorbell_pending <= 0;
           sdk_irq_ack_pending <= 0;
+          sdk_aperture_layout_ack <= 0;
           sdk_last_regwrite_addr <= 0;
           sdk_last_regwrite_data <= 0;
           sdk_last_regwrite_strobes <= 0;
@@ -2712,6 +2732,10 @@ module MNTZorro_v0_1_S00_AXI
             SDK_REG_DIAG_Z3ADDR_LO: begin
               rr_data <= sdk_last_z3addr;
             end
+            SDK_REG_APERTURE_INFO,
+            SDK_REG_APERTURE_INFO_LO: begin
+              rr_data <= SDK_APERTURE_INFO_VALUE;
+            end
             VCAP_LIVE_CAPABILITY,
             VCAP_LIVE_CAPABILITY_LO: begin
               rr_data <= VCAP_LIVE_CAPABILITY_VALUE;
@@ -2863,6 +2887,11 @@ module MNTZorro_v0_1_S00_AXI
             SDK_REG_DOORBELL_Z3_LO: sdk_doorbell_pending <= 1;
             SDK_REG_IRQ_ACK,
             SDK_REG_IRQ_ACK_Z3_LO: sdk_irq_ack_pending <= 1;
+            SDK_REG_APERTURE_INFO,
+            SDK_REG_APERTURE_INFO_LO:
+              if (SDK_APERTURE_INFO_VALUE != 0 &&
+                  regdata_in == SDK_APERTURE_ACK_TOKEN)
+                sdk_aperture_layout_ack <= 1;
             VCAP_LIVE_STAGED_RAW_HI:
               videocap_control_staged_raw[31:16] <= regdata_in;
             VCAP_LIVE_STAGED_RAW_LO:
@@ -3020,6 +3049,13 @@ module MNTZorro_v0_1_S00_AXI
         3'h1   : reg_data_out <= out_reg1;
         3'h2   : reg_data_out <= out_reg2;
         3'h3   : reg_data_out <= out_reg3;
+        // Slot 6 is PS-written for the Z3 fast-RAM ready gate, but had no
+        // readable value. Reuse its read direction for the host layout ack.
+        3'h6   : reg_data_out <= sdk_aperture_layout_ack ?
+                    32'ha5010001 : 32'h00000000;
+        // Exact compile-time aperture bytes. Z3 reports zero: its established
+        // 128 MB layout is deliberately outside this Z2 contract.
+        3'h7   : reg_data_out <= SDK_APERTURE_SIZE_VALUE;
         default : reg_data_out <= 'h0;
       endcase
     end
