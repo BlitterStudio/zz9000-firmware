@@ -92,6 +92,22 @@ jobs:
         run: make -C test/media test
       - name: Palette shadow suite
         run: make -C test/palette test
+      - name: SDK surface helper suite
+        run: |
+          cc -std=c99 -Wall -Wextra -Werror \
+            -IZZ9000_proto.sdk/ZZ9000OS/src \
+            util/test_sdk_surface.c \
+            ZZ9000_proto.sdk/ZZ9000OS/src/sdk_surface.c \
+            -o /tmp/test_sdk_surface
+          /tmp/test_sdk_surface
+      - name: SDK service capability guard
+        run: |
+          cc -std=c99 -Wall -Wextra -Werror \
+            util/test_sdk_service_flags.c \
+            -o /tmp/test_sdk_service_flags
+          /tmp/test_sdk_service_flags \
+            ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.c \
+            ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.h
 
   build:
     name: Build & package firmware

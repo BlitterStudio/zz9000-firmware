@@ -156,6 +156,7 @@ static int test_scale_rect_bilinear_bgra8888_interpolates(void)
 		0x64, 0x64, 0x00, 0xff
 	};
 	uint8_t dst[3U * 3U * 4U];
+	uint8_t formats_dst[3U * 3U * 4U];
 	static const uint8_t expected[] = {
 		0x00, 0x00, 0x00, 0xff,
 		0x32, 0x00, 0x00, 0xff,
@@ -181,6 +182,19 @@ static int test_scale_rect_bilinear_bgra8888_interpolates(void)
 		return 2;
 	}
 
+	memset(formats_dst, 0, sizeof(formats_dst));
+	if (!sdk_surface_scale_rect_formats(
+		    formats_dst, 3U, 3U, 12U, SDK_SURFACE_FORMAT_BGRA8888,
+		    src, 2U, 2U, 8U, SDK_SURFACE_FORMAT_BGRA8888,
+		    0U, 0U, 2U, 2U, 0U, 0U, 3U, 3U,
+		    SDK_SCALE_BILINEAR)) {
+		return 3;
+	}
+	if (!expect_bytes("same-format bilinear-scale", formats_dst, expected,
+	                  sizeof(formats_dst))) {
+		return 4;
+	}
+
 	return 0;
 }
 
@@ -194,11 +208,13 @@ static int test_scale_rect_clipped_preserves_full_mapping(void)
 	};
 	uint8_t full[4U * 4U * 4U];
 	uint8_t clipped[4U * 4U * 4U];
+	uint8_t formats_clipped[4U * 4U * 4U];
 	uint32_t x;
 	uint32_t y;
 
 	memset(full, 0, sizeof(full));
 	memset(clipped, 0xee, sizeof(clipped));
+	memset(formats_clipped, 0xee, sizeof(formats_clipped));
 	if (!sdk_surface_scale_rect(full, 4U, 4U, 16U,
 	                            src, 2U, 2U, 8U,
 	                            SDK_SURFACE_FORMAT_BGRA8888,
@@ -215,6 +231,18 @@ static int test_scale_rect_clipped_preserves_full_mapping(void)
 	                                    1U, 1U, 2U, 2U,
 	                                    SDK_SCALE_BILINEAR)) {
 		return 2;
+	}
+	if (!sdk_surface_scale_rect_formats_clipped(
+		    formats_clipped, 4U, 4U, 16U,
+		    SDK_SURFACE_FORMAT_BGRA8888,
+		    src, 2U, 2U, 8U, SDK_SURFACE_FORMAT_BGRA8888,
+		    0U, 0U, 2U, 2U, 0U, 0U, 4U, 4U,
+		    1U, 1U, 2U, 2U, SDK_SCALE_BILINEAR)) {
+		return 7;
+	}
+	if (!expect_bytes("same-format clipped-scale", formats_clipped, clipped,
+	                  sizeof(clipped))) {
+		return 8;
 	}
 
 	for (y = 0; y < 4U; y++) {
@@ -258,6 +286,120 @@ static int test_scale_rect_clipped_preserves_full_mapping(void)
 	return 0;
 }
 
+static int test_scale_bgra8888_to_rgb15_rgb16(void)
+{
+	uint8_t src[2U * 2U * 4U] = {
+		0x00, 0x00, 0x00, 0xff,
+		0x00, 0x00, 0xff, 0xff,
+		0x00, 0xff, 0x00, 0xff,
+		0xff, 0x00, 0x00, 0xff
+	};
+	uint8_t rgb565[3U * 3U * 2U];
+	uint8_t rgb555[3U * 3U * 2U];
+	uint8_t nearest[2U * 2U * 2U];
+	uint8_t clipped[3U * 3U * 2U];
+	static const uint8_t expected_rgb565[] = {
+		0x00, 0x00, 0x80, 0x00, 0xf8, 0x00,
+		0x04, 0x00, 0x42, 0x08, 0x80, 0x10,
+		0x07, 0xe0, 0x04, 0x10, 0x00, 0x1f
+	};
+	static const uint8_t expected_rgb555[] = {
+		0x00, 0x00, 0x40, 0x00, 0x7c, 0x00,
+		0x02, 0x00, 0x21, 0x08, 0x40, 0x10,
+		0x03, 0xe0, 0x02, 0x10, 0x00, 0x1f
+	};
+	static const uint8_t expected_nearest[] = {
+		0x00, 0x00, 0xf8, 0x00,
+		0x07, 0xe0, 0x00, 0x1f
+	};
+	uint32_t i;
+
+	memset(rgb565, 0, sizeof(rgb565));
+	if (!sdk_surface_scale_rect_formats(
+		    rgb565, 3U, 3U, 6U, SDK_SURFACE_FORMAT_RGB565,
+		    src, 2U, 2U, 8U, SDK_SURFACE_FORMAT_BGRA8888,
+		    0U, 0U, 2U, 2U, 0U, 0U, 3U, 3U,
+		    SDK_SCALE_BILINEAR)) {
+		return 1;
+	}
+	if (!expect_bytes("bgra-to-rgb565", rgb565, expected_rgb565,
+	                  sizeof(rgb565))) {
+		return 2;
+	}
+
+	memset(rgb555, 0, sizeof(rgb555));
+	if (!sdk_surface_scale_rect_formats(
+		    rgb555, 3U, 3U, 6U, SDK_SURFACE_FORMAT_RGB555,
+		    src, 2U, 2U, 8U, SDK_SURFACE_FORMAT_BGRA8888,
+		    0U, 0U, 2U, 2U, 0U, 0U, 3U, 3U,
+		    SDK_SCALE_BILINEAR)) {
+		return 3;
+	}
+	if (!expect_bytes("bgra-to-rgb555", rgb555, expected_rgb555,
+	                  sizeof(rgb555))) {
+		return 4;
+	}
+
+	memset(nearest, 0, sizeof(nearest));
+	if (!sdk_surface_scale_rect_formats(
+		    nearest, 2U, 2U, 4U, SDK_SURFACE_FORMAT_RGB565,
+		    src, 2U, 2U, 8U, SDK_SURFACE_FORMAT_BGRA8888,
+		    0U, 0U, 2U, 2U, 0U, 0U, 2U, 2U,
+		    SDK_SCALE_NEAREST)) {
+		return 5;
+	}
+	if (!expect_bytes("bgra-to-rgb565-nearest", nearest,
+	                  expected_nearest, sizeof(nearest))) {
+		return 6;
+	}
+
+	memset(clipped, 0xee, sizeof(clipped));
+	if (!sdk_surface_scale_rect_formats_clipped(
+		    clipped, 3U, 3U, 6U, SDK_SURFACE_FORMAT_RGB565,
+		    src, 2U, 2U, 8U, SDK_SURFACE_FORMAT_BGRA8888,
+		    0U, 0U, 2U, 2U, 0U, 0U, 3U, 3U,
+		    1U, 1U, 1U, 1U, SDK_SCALE_BILINEAR)) {
+		return 7;
+	}
+	for (i = 0U; i < sizeof(clipped); i++) {
+		uint8_t expected = (i == 8U) ? 0x42U :
+		                   (i == 9U) ? 0x08U : 0xeeU;
+
+		if (clipped[i] != expected) {
+			printf("converted clipped-scale: mismatch at byte %u "
+			       "got %02x expected %02x\n",
+			       i, clipped[i], expected);
+			return 8;
+		}
+	}
+
+	memset(clipped, 0xdd, sizeof(clipped));
+	if (!sdk_surface_scale_rect_formats_clipped(
+		    clipped, 3U, 3U, 6U, SDK_SURFACE_FORMAT_RGB565,
+		    src, 2U, 2U, 8U, SDK_SURFACE_FORMAT_BGRA8888,
+		    0U, 0U, 2U, 2U, 0U, 0U, 3U, 3U,
+		    4U, 4U, 1U, 1U, SDK_SCALE_BILINEAR)) {
+		return 9;
+	}
+	for (i = 0U; i < sizeof(clipped); i++) {
+		if (clipped[i] != 0xddU) {
+			printf("converted clipped-scale: no-intersection changed "
+			       "byte %u\n", i);
+			return 10;
+		}
+	}
+
+	if (sdk_surface_scale_rect_formats(
+		    rgb565, 3U, 3U, 6U, SDK_SURFACE_FORMAT_RGB565,
+		    src, 2U, 2U, 8U, SDK_SURFACE_FORMAT_ARGB8888,
+		    0U, 0U, 2U, 2U, 0U, 0U, 3U, 3U,
+		    SDK_SCALE_BILINEAR)) {
+		return 11;
+	}
+
+	return 0;
+}
+
 int main(void)
 {
 	int result;
@@ -277,6 +419,10 @@ int main(void)
 	result = test_scale_rect_clipped_preserves_full_mapping();
 	if (result)
 		return 70 + result;
+
+	result = test_scale_bgra8888_to_rgb15_rgb16();
+	if (result)
+		return 90 + result;
 
 	return 0;
 }
