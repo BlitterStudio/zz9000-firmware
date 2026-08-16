@@ -58,8 +58,28 @@ into a reproducible firmware, FPGA, and SDK-service platform.
 - SDK v2 mailbox services on the ARM cores: image decode/scale, audio/MP3,
   archive/LHA decompression, crypto/TLS primitives backing the Amiga-side
   `amissl` acceleration, and a dual-core scheduler for long-running jobs.
+- A fail-closed Zorro II aperture contract shared with the current driver and
+  SDK. Matched 2 MB and 4 MB bitstreams publish their exact framebuffer,
+  staging, host-window, audio, and optional PIP regions; firmware exposes the
+  host-window services only after the RTG driver has reserved and acknowledged
+  that layout. This brings compact image/DataType, archive, AmiSSL, and audio
+  clients to Zorro II, plus one bounded MPEG-1 PIP source on 4 MB cards. An
+  invalid or unacknowledged generation-1 descriptor fails closed. For
+  descriptor-absent legacy cards, only the 4 MB compatibility case retains the
+  historical fixed 64 KiB host window, without a negotiated layout or PIP;
+  legacy 2 MB and unknown sizes reject it.
 - Audio playback through the on-board ADAU codec, including firmware-side
   MP3 and ADPCM decoding.
+
+On Zorro II, use firmware, SDK payloads, and drivers from the same release.
+Both shipped 2 MB and 4 MB profiles provide a shared 64 KiB CPU-visible host
+window; only the 4 MB profile provides a 224 KiB PIP pool. The 2 MB profile
+therefore supports compact ARM services but not ZZPlay video. Arbitrary P96
+offscreen allocation and Zorro III Fast RAM are not enabled on Zorro II. The
+software contract contains an 8 MB profile for future use, but no 8 MB
+AutoConfig bitstream variant is currently shipped. See the SDK's
+[Zorro II service matrix](https://github.com/BlitterStudio/zz9000-sdk/blob/master/docs/zz9k-zorro2-services.md)
+for client-specific limits and fallback behavior.
 
 **System**
 
