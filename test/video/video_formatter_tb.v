@@ -387,6 +387,63 @@ integer dpms_errors = 0;
 integer dpms_start_frame;
 reg dpms_hsync_seen;
 reg dpms_vsync_seen;
+reg viewport_transition_check = 0;
+reg viewport_transition_boundary;
+reg viewport_transition_frame_ready;
+reg [11:0] viewport_transition_frame_x;
+reg [11:0] viewport_transition_frame_y;
+reg [11:0] viewport_transition_frame_width;
+reg [11:0] viewport_transition_frame_height;
+integer viewport_transition_errors = 0;
+
+/* During a live queued geometry replacement, every complete frame must keep
+ * one ready rectangle or be entirely black. Geometry/readiness may change
+ * only at the pixel-domain frame boundary. */
+always @(posedge dvi_clk) begin
+  viewport_transition_boundary =
+    (uut.counter_x == 0 && uut.counter_y == 0);
+  #1;
+  if (viewport_transition_check) begin
+    if (viewport_transition_boundary) begin
+      viewport_transition_frame_ready = uut.viewport_geometry_ready;
+      viewport_transition_frame_x = uut.vga_viewport_x;
+      viewport_transition_frame_y = uut.vga_viewport_y;
+      viewport_transition_frame_width = uut.vga_viewport_width;
+      viewport_transition_frame_height = uut.vga_viewport_height;
+      if (viewport_transition_frame_ready &&
+          !((viewport_transition_frame_x == 7 &&
+             viewport_transition_frame_y == 3 &&
+             viewport_transition_frame_width == cfg_width &&
+             viewport_transition_frame_height == content_height) ||
+            (viewport_transition_frame_x == 5 &&
+             viewport_transition_frame_y == 2 &&
+             viewport_transition_frame_width == cfg_width - 4 &&
+             viewport_transition_frame_height == content_height - 2))) begin
+        viewport_transition_errors = viewport_transition_errors + 1;
+        $display("VIEWPORT TRANSITION INVALID READY RECT x=%0d y=%0d w=%0d h=%0d",
+                 viewport_transition_frame_x, viewport_transition_frame_y,
+                 viewport_transition_frame_width,
+                 viewport_transition_frame_height);
+      end
+    end else begin
+      if (uut.viewport_geometry_ready !== viewport_transition_frame_ready ||
+          uut.vga_viewport_x !== viewport_transition_frame_x ||
+          uut.vga_viewport_y !== viewport_transition_frame_y ||
+          uut.vga_viewport_width !== viewport_transition_frame_width ||
+          uut.vga_viewport_height !== viewport_transition_frame_height) begin
+        viewport_transition_errors = viewport_transition_errors + 1;
+        if (viewport_transition_errors < 8)
+          $display("VIEWPORT TRANSITION CHANGED MID-FRAME");
+      end
+      if (!viewport_transition_frame_ready && dvi_rgb !== 32'b0) begin
+        viewport_transition_errors = viewport_transition_errors + 1;
+        if (viewport_transition_errors < 8)
+          $display("VIEWPORT TRANSITION UNSETTLED FRAME NOT BLACK rgb=%08x",
+                   dvi_rgb);
+      end
+    end
+  end
+end
 
 task check_dpms(input [1:0] level, input integer expect_hsync,
                 input integer expect_vsync);
@@ -804,6 +861,42 @@ initial begin
   end
 
   if (cfg_viewport == 1) begin
+    if (cfg_scalex == 0 && cfg_scaley == 0 && cfg_cmode == 2) begin
+      wait (uut.counter_y == viewport_y + 1 &&
+            uut.counter_x == viewport_x + 10);
+      viewport_transition_errors = 0;
+      viewport_transition_frame_ready = uut.viewport_geometry_ready;
+      viewport_transition_frame_x = uut.vga_viewport_x;
+      viewport_transition_frame_y = uut.vga_viewport_y;
+      viewport_transition_frame_width = uut.vga_viewport_width;
+      viewport_transition_frame_height = uut.vga_viewport_height;
+      viewport_transition_check = 1;
+
+      /* Queue an implicit canvas, then replace it twice before its first
+       * destination acknowledgement. Only the latest complete commit wins. */
+      op(OP_DIMENSIONS, (canvas_height << 16) | canvas_width);
+      op(OP_VIEWPORT_POS, (1 << 16) | 2);
+      op(OP_VIEWPORT_SIZE_COMMIT,
+         ((content_height - 4) << 16) | (cfg_width - 8));
+      op(OP_VIEWPORT_POS, (2 << 16) | 5);
+      op(OP_VIEWPORT_SIZE_COMMIT,
+         ((content_height - 2) << 16) | (cfg_width - 4));
+      overlay_start_frame = frames;
+      wait (frames >= overlay_start_frame + 6);
+      viewport_transition_check = 0;
+      if (uut.vga_viewport_x !== 5 || uut.vga_viewport_y !== 2 ||
+          uut.vga_viewport_width !== cfg_width - 4 ||
+          uut.vga_viewport_height !== content_height - 2 ||
+          !uut.viewport_geometry_ready) begin
+        viewport_transition_errors = viewport_transition_errors + 1;
+        $display("VIEWPORT TRANSITION FINAL MISMATCH ready=%0d x=%0d y=%0d w=%0d h=%0d",
+                 uut.viewport_geometry_ready, uut.vga_viewport_x,
+                 uut.vga_viewport_y, uut.vga_viewport_width,
+                 uut.vga_viewport_height);
+      end
+      mism = mism + viewport_transition_errors;
+    end
+
     op(OP_DIMENSIONS, (content_height << 16) | cfg_width);
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 3);

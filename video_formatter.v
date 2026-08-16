@@ -192,6 +192,10 @@ assign m_axis_vid_tready = ready_for_vdma;
 reg [11:0] counter_x; // vga domain
 reg [11:0] counter_y; // vga domain
 reg [11:0] need_line_fetch; // vga domain
+reg [11:0] need_line_fetch_candidate = 0;
+reg [11:0] need_line_fetch_upper_bound = 0;
+reg need_line_fetch_lower_valid = 0;
+reg need_line_fetch_row_valid = 0;
 
 reg [11:0] need_line_fetch_reg;
 reg [11:0] need_line_fetch_reg2;
@@ -343,13 +347,13 @@ localparam [1:0] VIEWPORT_SEND   = 2'd2;
 localparam [1:0] VIEWPORT_RETURN = 2'd3;
 reg [11:0] viewport_staged_x = 0;
 reg [11:0] viewport_staged_y = 0;
-reg [71:0] viewport_queued_payload = 0;
+reg [47:0] viewport_queued_payload = 0;
 reg viewport_queue_valid = 0;
-reg [71:0] viewport_cdc_payload = 0;
+reg [47:0] viewport_cdc_payload = 0;
 reg viewport_cdc_send = 0;
 reg [1:0] viewport_cdc_state = VIEWPORT_IDLE;
 wire viewport_cdc_received;
-wire [71:0] viewport_dest_payload;
+wire [47:0] viewport_dest_payload;
 wire viewport_dest_req;
 reg viewport_dest_ack = 0;
 wire viewport_control_event =
@@ -369,7 +373,7 @@ xpm_cdc_handshake #(
   .INIT_SYNC_FF(1),
   .SIM_ASSERT_CHK(0),
   .SRC_SYNC_FF(3),
-  .WIDTH(72)
+  .WIDTH(48)
 ) viewport_control_cdc (
   .src_clk(m_axis_vid_aclk),
   .src_in(viewport_cdc_payload),
@@ -385,7 +389,7 @@ xpm_cdc_single #(
   .DEST_SYNC_FF(3),
   .INIT_SYNC_FF(1),
   .SIM_ASSERT_CHK(0),
-  .SRC_INPUT_REG(0)
+  .SRC_INPUT_REG(1)
 ) viewport_unsettled_cdc (
   .src_clk(m_axis_vid_aclk),
   .src_in(viewport_geometry_unsettled),
@@ -436,13 +440,12 @@ always @(posedge m_axis_vid_aclk) begin
       viewport_staged_x <= 0;
       viewport_staged_y <= 0;
       viewport_queued_payload <= {
-        control_data_in[27:16], control_data_in[11:0],
         12'b0, 12'b0, control_data_in[27:16], control_data_in[11:0]
       };
       viewport_queue_valid <= 1;
     end else if (viewport_commit_event) begin
       viewport_queued_payload <= {
-        screen_height, screen_width, viewport_staged_x, viewport_staged_y,
+        viewport_staged_x, viewport_staged_y,
         control_data_in[27:16], control_data_in[11:0]
       };
       viewport_queue_valid <= 1;
@@ -480,7 +483,7 @@ begin
     OP_PALETTE_SEL: selected_palette <= control_data_in[0];
     OP_DIMENSIONS: begin
         screen_height <= control_data_in[31:16];
-        screen_width  <= control_data_in[15:0];
+        screen_width  <= control_data_in[11:0];
       end
     OP_SCALE: begin
         scale_x  <= control_data_in[0];
@@ -663,8 +666,6 @@ reg [11:0] vga_v_sync_start;
 reg [11:0] vga_v_sync_end;
 reg [11:0] counter_scanout;
 reg [2:0] vga_colormode;
-reg [11:0] vga_canvas_width = 0;
-reg [11:0] vga_canvas_height = 0;
 reg [11:0] vga_viewport_x = 0;
 reg [11:0] vga_viewport_y = 0;
 reg [11:0] vga_viewport_width = 0;
@@ -723,56 +724,79 @@ reg [15:0] overlay_scale_read_x_d1 = 0;
 reg [15:0] overlay_scale_x_error = 0;
 reg [15:0] overlay_scale_source_y = 0;
 reg [15:0] overlay_scale_y_error = 0;
+reg [15:0] vga_overlay_x_step_threshold = 1;
+reg [15:0] vga_overlay_y_step_threshold = 1;
 
-wire signed [16:0] overlay_screen_x =
-  $signed({1'b0, counter_x}) - $signed(PIPE_DELAY) +
-  (vga_viewport_x != 0 ? 17'sd1 : 17'sd0) -
-  $signed({1'b0, vga_viewport_x});
-wire signed [16:0] overlay_screen_y =
-  $signed({1'b0, counter_y}) - 17'sd1 -
-  $signed({1'b0, vga_viewport_y});
-wire signed [16:0] overlay_local_x =
-  overlay_screen_x - $signed(vga_overlay_x);
-wire signed [16:0] overlay_local_y =
-  overlay_screen_y - $signed(vga_overlay_y);
-wire vga_overlay_scaling =
-  vga_overlay_source_width != vga_overlay_width ||
-  vga_overlay_source_height != vga_overlay_height ||
-  vga_overlay_x < 0 || vga_overlay_y < 0;
+/* Coordinate state advances with the raster counters, but is registered
+ * separately so overlay window/tag arithmetic never sits on the same
+ * 150 MHz path as the fetch scheduler or BRAM bank selection. */
+reg signed [16:0] overlay_screen_x_position = 0;
+reg signed [16:0] overlay_local_x_position = 0;
+reg signed [16:0] overlay_read_x_position = 1;
+reg signed [16:0] overlay_screen_x_origin = 0;
+reg signed [16:0] overlay_local_x_origin = 0;
+reg signed [16:0] overlay_screen_y_origin = 0;
+reg signed [16:0] overlay_local_y_origin = 0;
+reg signed [16:0] overlay_screen_y_row = 0;
+reg signed [16:0] overlay_local_y_row = 0;
+reg [11:0] overlay_displayed_line_row = 0;
+reg signed [16:0] overlay_visible_x1_unclipped_pre = 0;
+reg signed [16:0] overlay_visible_x0_minus_one = -1;
+reg signed [16:0] overlay_visible_x1_minus_one = -1;
+reg signed [16:0] viewport_output_x_position = 0;
+reg [11:0] viewport_output_y_row = 0;
+reg [11:0] scanout_source_line_row = 0;
+reg [12:0] viewport_output_x_end = 0;
+reg overlay_scheduler_scaling = 0;
+reg overlay_scheduler_y_in_window = 0;
+reg overlay_scheduler_screen_y_nonnegative = 0;
+reg [11:0] overlay_scheduler_next_source_y = 0;
+
+wire signed [16:0] overlay_screen_x = overlay_screen_x_position;
+wire signed [16:0] overlay_screen_y = overlay_screen_y_row;
+wire signed [16:0] overlay_local_x = overlay_local_x_position;
+wire signed [16:0] overlay_local_y = overlay_local_y_row;
+reg vga_overlay_scaling = 0;
 wire overlay_in_window = vga_overlay_enable &&
   overlay_local_x >= 0 && overlay_local_y >= 0 &&
   overlay_local_x < $signed({1'b0, vga_overlay_width}) &&
   overlay_local_y < $signed({1'b0, vga_overlay_height});
-wire [11:0] overlay_displayed_line = overlay_local_y >= 0
-  ? (vga_overlay_scaling ? overlay_scale_source_y[11:0]
-                         : overlay_local_y[11:0])
-  : 12'b0;
-wire signed [16:0] overlay_read_x = overlay_local_x + 1;
+wire [11:0] overlay_displayed_line = overlay_displayed_line_row;
+wire signed [16:0] overlay_read_x = overlay_read_x_position;
 wire [15:0] overlay_selected_read_x =
   vga_overlay_scaling ? overlay_scale_read_x : overlay_read_x[15:0];
 wire overlay_selected_luma_phase =
   vga_overlay_scaling ? overlay_scale_read_x_d1[0] : overlay_local_x[0];
 wire [10:0] overlay_read_addr = overlay_selected_read_x[11:1];
-wire [16:0] overlay_scale_x_sum =
-  {1'b0, overlay_scale_x_error} +
-  {1'b0, vga_overlay_x_step_remainder};
-wire [16:0] overlay_scale_y_sum =
-  {1'b0, overlay_scale_y_error} +
-  {1'b0, vga_overlay_y_step_remainder};
+wire overlay_scale_x_carry =
+  overlay_scale_x_error >= vga_overlay_x_step_threshold;
+wire overlay_scale_y_carry =
+  overlay_scale_y_error >= vga_overlay_y_step_threshold;
+wire [15:0] overlay_scale_x_error_added =
+  overlay_scale_x_error + vga_overlay_x_step_remainder;
+wire [15:0] overlay_scale_x_error_wrapped =
+  overlay_scale_x_error - vga_overlay_x_step_threshold;
+wire [15:0] overlay_scale_y_error_added =
+  overlay_scale_y_error + vga_overlay_y_step_remainder;
+wire [15:0] overlay_scale_y_error_wrapped =
+  overlay_scale_y_error - vga_overlay_y_step_threshold;
 wire [16:0] overlay_scale_next_source_y =
   {1'b0, overlay_scale_source_y} +
   {1'b0, vga_overlay_y_step_integer} +
-  (overlay_scale_y_sum >= {1'b0, vga_overlay_height});
-wire signed [16:0] overlay_visible_x0 =
-  vga_overlay_x < 0 ? 17'sd0 : $signed(vga_overlay_x);
-wire signed [16:0] overlay_visible_x1_unclipped =
-  $signed(vga_overlay_x) + $signed({1'b0, vga_overlay_width});
-wire signed [16:0] overlay_visible_x1 =
-  overlay_visible_x1_unclipped > $signed({1'b0, vga_viewport_width})
-    ? $signed({1'b0, vga_viewport_width}) : overlay_visible_x1_unclipped;
+  overlay_scale_y_carry;
 wire [31:0] overlay_yuv422;
 wire overlay_line_ready;
 wire [31:0] overlay_accepted_generation;
+wire [11:0] overlay_scheduler_line;
+wire overlay_scheduler_line_ready;
+
+wire [11:0] next_raster_y = counter_y >= vga_v_max
+  ? 12'b0 : counter_y + 1'b1;
+wire [11:0] next_scanout_content_y = next_raster_y - vga_viewport_y;
+wire [11:0] next_scanout_source_line =
+  (next_raster_y >= vga_viewport_y + vga_scale_y_factor)
+    ? ((next_scanout_content_y - vga_scale_y_factor) >> vga_scale_y)
+    : 12'b0;
 
 video_overlay_linebuffer overlay_linebuffer (
   .axis_clk(m_axis_vid_aclk),
@@ -793,6 +817,8 @@ video_overlay_linebuffer overlay_linebuffer (
   .displayed_line(overlay_displayed_line),
   .read_data(overlay_yuv422),
   .displayed_line_ready(overlay_line_ready),
+  .scheduler_line(overlay_scheduler_line),
+  .scheduler_line_ready(overlay_scheduler_line_ready),
   .accepted_generation(overlay_accepted_generation)
 );
 
@@ -819,23 +845,17 @@ wire [31:0] composed_rgb = vga_overlay_enable
   ? ((sprite_on_d4 && sprite_pix_d4 != 'hff00ff)
       ? sprite_pix_d4 : pixout_sl)
   : ((sprite_on && sprite_pix != 'hff00ff) ? sprite_pix : pixout_sl);
-wire signed [16:0] viewport_output_x =
-  $signed({1'b0, counter_x}) - $signed(PIPE_DELAY) -
-  (vga_overlay_enable ? $signed(OVERLAY_PIPE_DELAY) : 17'sd0);
-wire [11:0] viewport_output_y = counter_y - vga_scale_y_factor;
+wire signed [16:0] viewport_output_x = viewport_output_x_position;
+wire [11:0] viewport_output_y = viewport_output_y_row;
 wire viewport_output_active = viewport_geometry_ready &&
   counter_y >= vga_scale_y_factor &&
   viewport_output_x >= $signed({1'b0, vga_viewport_x}) &&
-  viewport_output_x < $signed({1'b0, vga_viewport_x + vga_viewport_width}) &&
+  viewport_output_x < $signed({1'b0, viewport_output_x_end}) &&
   viewport_output_y >= vga_viewport_y &&
   viewport_output_y < vga_viewport_y + vga_viewport_height;
 wire [11:0] scanline_content_y = counter_y_d2 - vga_viewport_y;
 
-wire [11:0] scanout_content_y = counter_y - vga_viewport_y;
-wire [11:0] scanout_source_line =
-  (counter_y >= vga_viewport_y + vga_scale_y_factor)
-    ? ((scanout_content_y - vga_scale_y_factor) >> vga_scale_y)
-    : 12'b0;
+wire [11:0] scanout_source_line = scanout_source_line_row;
 
 // Ping-pong line buffer: VDMA fills the next source line in one bank while
 // scanout reads the current source line from the other. A full power-of-two
@@ -897,8 +917,6 @@ wire viewport_frame_boundary = counter_x == 0 && counter_y == 0;
 always @(posedge dvi_clk) begin
   if (!aresetn) begin
     viewport_dest_ack <= 0;
-    vga_canvas_width <= 0;
-    vga_canvas_height <= 0;
     vga_viewport_x <= 0;
     vga_viewport_y <= 0;
     vga_viewport_width <= 0;
@@ -916,8 +934,6 @@ always @(posedge dvi_clk) begin
     if (!viewport_dest_req) begin
       viewport_dest_ack <= 0;
     end else if (!viewport_dest_ack && viewport_frame_boundary) begin
-      vga_canvas_height <= viewport_dest_payload[71:60];
-      vga_canvas_width <= viewport_dest_payload[59:48];
       vga_viewport_x <= viewport_dest_payload[47:36];
       vga_viewport_y <= viewport_dest_payload[35:24];
       vga_viewport_height <= viewport_dest_payload[23:12];
@@ -984,23 +1000,60 @@ always @(posedge dvi_clk) begin
     vga_overlay_y_start_remainder <= overlay_y_start_remainder;
     vga_overlay_scale_epoch <= overlay_scale_epoch;
     vga_overlay_key_rgb <= overlay_key_rgb;
+    vga_overlay_scaling <=
+      overlay_source_width != overlay_width ||
+      overlay_source_height != overlay_height ||
+      overlay_x < 0 || overlay_y < 0;
+    vga_overlay_x_step_threshold <=
+      overlay_width - overlay_x_step_remainder;
+    vga_overlay_y_step_threshold <=
+      overlay_height - overlay_y_step_remainder;
   end
+
+  /* Geometry is stable for a frame. Split clipped-bound and origin
+   * arithmetic across registers so per-pixel comparisons start at a
+   * registered coordinate rather than at vga_overlay_x/viewport_x. */
+  overlay_screen_x_origin <= -$signed(PIPE_DELAY) +
+    (vga_viewport_x != 0 ? 17'sd1 : 17'sd0) -
+    $signed({1'b0, vga_viewport_x});
+  overlay_local_x_origin <=
+    overlay_screen_x_origin - $signed(vga_overlay_x);
+  overlay_screen_y_origin <= -17'sd1 -
+    $signed({1'b0, vga_viewport_y});
+  overlay_local_y_origin <=
+    overlay_screen_y_origin - $signed(vga_overlay_y);
+  overlay_visible_x1_unclipped_pre <=
+    $signed(vga_overlay_x) + $signed({1'b0, vga_overlay_width});
+  overlay_visible_x0_minus_one <=
+    (vga_overlay_x < 0 ? 17'sd0 : $signed(vga_overlay_x)) - 17'sd1;
+  overlay_visible_x1_minus_one <=
+    (overlay_visible_x1_unclipped_pre >
+       $signed({1'b0, vga_viewport_width})
+      ? $signed({1'b0, vga_viewport_width})
+      : overlay_visible_x1_unclipped_pre) - 17'sd1;
+  viewport_output_x_end <= {1'b0, vga_viewport_x} +
+                           {1'b0, vga_viewport_width};
+  overlay_scheduler_scaling <= vga_overlay_scaling;
+  overlay_scheduler_y_in_window <=
+    overlay_local_y >= 0 &&
+    overlay_local_y < $signed({1'b0, vga_overlay_height});
+  overlay_scheduler_screen_y_nonnegative <= overlay_screen_y >= 0;
+  overlay_scheduler_next_source_y <= overlay_scale_next_source_y[11:0];
   overlay_scale_read_x_d1 <= overlay_scale_read_x;
   if (counter_x == 0) begin
     overlay_scale_read_x <= vga_overlay_x_start_source;
     overlay_scale_read_x_d1 <= vga_overlay_x_start_source;
     overlay_scale_x_error <= vga_overlay_x_start_remainder;
   end else if (vga_overlay_scaling &&
-               overlay_screen_x >= overlay_visible_x0 - 17'sd1 &&
-               overlay_screen_x < overlay_visible_x1 - 17'sd1) begin
+               overlay_screen_x >= overlay_visible_x0_minus_one &&
+               overlay_screen_x < overlay_visible_x1_minus_one) begin
     overlay_scale_read_x <= overlay_scale_read_x +
       vga_overlay_x_step_integer +
-      (overlay_scale_x_sum >= {1'b0, vga_overlay_width});
-    if (overlay_scale_x_sum >= {1'b0, vga_overlay_width})
-      overlay_scale_x_error <= overlay_scale_x_sum -
-                               {1'b0, vga_overlay_width};
+      overlay_scale_x_carry;
+    if (overlay_scale_x_carry)
+      overlay_scale_x_error <= overlay_scale_x_error_wrapped;
     else
-      overlay_scale_x_error <= overlay_scale_x_sum[15:0];
+      overlay_scale_x_error <= overlay_scale_x_error_added;
   end
 
   if (counter_x == 0 && counter_y == 0) begin
@@ -1013,11 +1066,10 @@ always @(posedge dvi_clk) begin
                overlay_local_y + 17'sd1 <
                  $signed({1'b0, vga_overlay_height})) begin
     overlay_scale_source_y <= overlay_scale_next_source_y[15:0];
-    if (overlay_scale_y_sum >= {1'b0, vga_overlay_height})
-      overlay_scale_y_error <= overlay_scale_y_sum -
-                               {1'b0, vga_overlay_height};
+    if (overlay_scale_y_carry)
+      overlay_scale_y_error <= overlay_scale_y_error_wrapped;
     else
-      overlay_scale_y_error <= overlay_scale_y_sum[15:0];
+      overlay_scale_y_error <= overlay_scale_y_error_added;
   end
   if (counter_y == 0) begin
     vga_sprite_x <= sprite_x;
@@ -1187,6 +1239,40 @@ endcase
 
   dvi_rgb <= viewport_output_active ? composed_rgb : 32'b0;
 
+  /* These registered coordinates advance on the same edge as counter_x/y.
+   * Their values therefore retain the existing pixel/row phase while
+   * breaking counter arithmetic away from overlay BRAM/tag/control logic. */
+  if (counter_x >= vga_h_max) begin
+    overlay_screen_x_position <= overlay_screen_x_origin;
+    overlay_local_x_position <= overlay_local_x_origin;
+    overlay_read_x_position <= overlay_local_x_origin + 17'sd1;
+    viewport_output_x_position <= -$signed(PIPE_DELAY) -
+      (vga_overlay_enable ? $signed(OVERLAY_PIPE_DELAY) : 17'sd0);
+    viewport_output_y_row <= next_raster_y - vga_scale_y_factor;
+    scanout_source_line_row <= next_scanout_source_line;
+
+    if (counter_y >= vga_v_max) begin
+      overlay_screen_y_row <= overlay_screen_y_origin;
+      overlay_local_y_row <= overlay_local_y_origin;
+      overlay_displayed_line_row <= overlay_local_y_origin >= 0
+        ? (vga_overlay_scaling ? vga_overlay_y_start_source[11:0]
+                               : overlay_local_y_origin[11:0])
+        : 12'b0;
+    end else begin
+      overlay_screen_y_row <= overlay_screen_y_row + 17'sd1;
+      overlay_local_y_row <= overlay_local_y_row + 17'sd1;
+      overlay_displayed_line_row <= overlay_local_y_row + 17'sd1 >= 0
+        ? (vga_overlay_scaling ? overlay_scale_source_y[11:0]
+                               : overlay_local_y_row[11:0] + 1'b1)
+        : 12'b0;
+    end
+  end else begin
+    overlay_screen_x_position <= overlay_screen_x_position + 17'sd1;
+    overlay_local_x_position <= overlay_local_x_position + 17'sd1;
+    overlay_read_x_position <= overlay_read_x_position + 17'sd1;
+    viewport_output_x_position <= viewport_output_x_position + 17'sd1;
+  end
+
   if (counter_x >= vga_h_max) begin
     counter_x <= 0;
     if (counter_y >= vga_v_max) begin
@@ -1200,13 +1286,21 @@ endcase
     counter_x <= counter_x + 1'b1;
   end
 
-  if (counter_x==vga_h_rez) begin
-    if (counter_y >= vga_viewport_y &&
-        counter_y < vga_viewport_y + vga_viewport_height - 1'b1)
-      need_line_fetch <= counter_y - vga_viewport_y + 1'b1;
-    else
-      need_line_fetch <= 0;
-  end
+  /* The viewport is stable for a frame, and these stages have an entire
+   * raster row to settle before h_rez publishes the next VDMA line request.
+   * Keeping the subtraction, upper-bound addition/comparison, and final mux
+   * in separate cycles avoids one long counter_y -> need_line_fetch path
+   * without moving the established request edge. */
+  need_line_fetch_candidate <= counter_y - vga_viewport_y + 1'b1;
+  need_line_fetch_upper_bound <=
+    vga_viewport_y + vga_viewport_height - 1'b1;
+  need_line_fetch_lower_valid <= counter_y >= vga_viewport_y;
+  need_line_fetch_row_valid <= need_line_fetch_lower_valid &&
+    counter_y < need_line_fetch_upper_bound;
+
+  if (counter_x==vga_h_rez)
+    need_line_fetch <= need_line_fetch_row_valid
+      ? need_line_fetch_candidate : 12'b0;
 
   /* Display selection follows the current PIP row while this independent
    * fetch selector advances as soon as that row is known ready. MM2S can then
@@ -1235,24 +1329,21 @@ endcase
     overlay_fetch_line <= vga_overlay_scaling
       ? vga_overlay_y_start_source[11:0] : 12'b0;
     overlay_fetch_request <= 1;
-  end else if (!vga_overlay_scaling &&
-               overlay_local_y >= 0 &&
-               overlay_local_y < $signed({1'b0, vga_overlay_height}) &&
-               overlay_line_ready &&
-               overlay_fetch_line == overlay_displayed_line) begin
-    if ({4'b0, overlay_displayed_line} + 16'd1 < vga_overlay_height) begin
-      overlay_fetch_line <= overlay_displayed_line + 1'b1;
+  end else if (!overlay_scheduler_scaling &&
+               overlay_scheduler_y_in_window &&
+               overlay_scheduler_line_ready &&
+               overlay_fetch_line == overlay_scheduler_line) begin
+    if ({4'b0, overlay_scheduler_line} + 16'd1 < vga_overlay_height) begin
+      overlay_fetch_line <= overlay_scheduler_line + 1'b1;
       overlay_fetch_request <= 1;
     end
-  end else if (vga_overlay_scaling &&
-               overlay_screen_y >= 0 &&
-               overlay_local_y >= 0 &&
-               overlay_local_y < $signed({1'b0, vga_overlay_height}) &&
-               overlay_line_ready &&
-               overlay_fetch_line == overlay_displayed_line &&
-               overlay_scale_next_source_y[11:0] !=
-                 overlay_displayed_line) begin
-    overlay_fetch_line <= overlay_scale_next_source_y[11:0];
+  end else if (overlay_scheduler_scaling &&
+               overlay_scheduler_screen_y_nonnegative &&
+               overlay_scheduler_y_in_window &&
+               overlay_scheduler_line_ready &&
+               overlay_fetch_line == overlay_scheduler_line &&
+               overlay_scheduler_next_source_y != overlay_scheduler_line) begin
+    overlay_fetch_line <= overlay_scheduler_next_source_y;
     overlay_fetch_request <= 1;
   end
 

@@ -208,6 +208,18 @@ set file "new/zz9000.xdc"
 set file_obj [get_files -of_objects [get_filesets constrs_1] [list "*$file"]]
 set_property -name "file_type" -value "XDC" -objects $file_obj
 
+# The runtime pixel-clock constraint must be evaluated after the clock-wizard
+# IP creates its ordinary generated clock, so physical exclusivity covers both
+# the power-on 75 MHz and runtime 150 MHz definitions.
+set file "[file normalize "$origin_dir/ZZ9000_proto.srcs/constrs_1/new/runtime_pixel_timing.xdc"]"
+set file_imported [import_files -fileset constrs_1 [list $file]]
+set file "new/runtime_pixel_timing.xdc"
+set file_obj [get_files -of_objects [get_filesets constrs_1] [list "*$file"]]
+set_property -name "file_type" -value "XDC" -objects $file_obj
+set_property -name "processing_order" -value "LATE" -objects $file_obj
+set_property -name "used_in_synthesis" -value "false" -objects $file_obj
+set_property -name "used_in_implementation" -value "true" -objects $file_obj
+
 # Set 'constrs_1' fileset properties
 set obj [get_filesets constrs_1]
 set_property -name "target_constrs_file" -value "[get_files *new/zz9000.xdc]" -objects $obj

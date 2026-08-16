@@ -179,6 +179,8 @@ static void check_videocap_profile(const char *name, uint16_t mode,
 }
 
 static void test_videocap_profiles(void) {
+    uint16_t present;
+
     check_videocap_profile("full_60", ZZVMODE_800x600, 1, 0);
     check_videocap_profile("full_exact", ZZVMODE_800x600, 1, 1);
     check_videocap_profile("filtered_60", ZZVMODE_800x600, 0, 0);
@@ -193,6 +195,10 @@ static void test_videocap_profiles(void) {
     CHECK(zz_config_get()->videocap_mode == ZZVMODE_800x600);
     CHECK(zz_config_get()->videocap_shres == 1);
     CHECK(zz_config_get()->ns_vsync == 0);
+    present = 0;
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_1920x1080_60);
+    CHECK(present);
 
     zz_config_reset();
     CHECK(parse_str("videocap_profile = unclear\n") == 0);
@@ -214,6 +220,10 @@ static void test_videocap_profiles(void) {
     CHECK(zz_config_get()->ns_vsync == 0);
     CHECK(zz_config_get()->videocap_output_profile ==
           ZZ_VIDEOCAP_OUTPUT_FULL_60);
+    present = 0;
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_800x600);
+    CHECK(present);
 
     /* A bad later assignment is atomic: it cannot partially overwrite the
      * last valid profile tuple or its distinct output identity. */

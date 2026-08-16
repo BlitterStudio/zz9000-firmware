@@ -3007,8 +3007,9 @@ module MNTZorro_v0_1_S00_AXI
     scanline_width_out      <= scanline_width;
     scanline_parity_out     <= scanline_parity;
 
-    // snoop the screen width for correct capture pitch
-    if (video_control_op == 2) begin
+    // Snoop the content width for capture pitch. Bit 15 marks a larger output
+    // canvas; OP_VIEWPORT_SIZE_COMMIT publishes its content width atomically.
+    if (video_control_op == 2 && !video_control_data[15]) begin
       // OP_DIMENSIONS = 2
       videocap_pitch <= video_control_data[11:0];
     end

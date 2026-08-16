@@ -707,12 +707,15 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode,
 	struct zz_video_mode *vmode = &preset_video_modes[mode];
 	uint32_t content_hres = (uint32_t)vmode->hres;
 	uint32_t content_vres = (uint32_t)vmode->vres;
+	uint32_t dimensions_control = ((uint32_t)vmode->vres << 16) |
+	                              (uint32_t)vmode->hres;
 	struct video_videocap_geometry geometry;
 
 	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
 		geometry = video_videocap_output_geometry((uint32_t)output_profile);
 		content_hres = geometry.content_width;
 		content_vres = geometry.content_height;
+		dimensions_control |= MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG;
 	}
 
 	// Reset input state machine before reconfiguring to prevent stale line fetches.
@@ -723,7 +726,7 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode,
 	// geometry before dvi_clk changes, otherwise a mid-line counter wrap
 	// causes a visible horizontal split (the "split picture" NTSC bug).
 	video_formatter_write((vmode->vmax << 16) | vmode->hmax, MNTVF_OP_MAX);
-	video_formatter_write((vmode->vres << 16) | vmode->hres, MNTVF_OP_DIMENSIONS);
+	video_formatter_write(dimensions_control, MNTVF_OP_DIMENSIONS);
 	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
 		video_formatter_write((geometry.viewport_y << 16) |
 		                      geometry.viewport_x,

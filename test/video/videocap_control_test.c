@@ -316,6 +316,7 @@ static int video_source_contract(void)
 	char line[512];
 	unsigned int lineno = 0;
 	unsigned int dimensions_line = 0;
+	unsigned int dimensions_container_flag_line = 0;
 	unsigned int viewport_pos_line = 0;
 	unsigned int viewport_commit_line = 0;
 	unsigned int content_vdma_line = 0;
@@ -335,6 +336,8 @@ static int video_source_contract(void)
 		lineno++;
 		if (strstr(line, "MNTVF_OP_DIMENSIONS);") != NULL)
 			dimensions_line = lineno;
+		if (strstr(line, "MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG") != NULL)
+			dimensions_container_flag_line = lineno;
 		if (strstr(line, "MNTVF_OP_VIEWPORT_POS);") != NULL) {
 			viewport_pos_line = lineno;
 			viewport_pos_ops++;
@@ -361,13 +364,16 @@ static int video_source_contract(void)
 	fclose(source);
 
 	if (viewport_pos_ops != 1U || viewport_commit_ops != 1U ||
-	    dimensions_line == 0U || content_vdma_line == 0U ||
-	    !(dimensions_line < viewport_pos_line &&
+	    dimensions_line == 0U || dimensions_container_flag_line == 0U ||
+	    content_vdma_line == 0U ||
+	    !(dimensions_container_flag_line < dimensions_line &&
+	      dimensions_line < viewport_pos_line &&
 	      viewport_pos_line < viewport_commit_line &&
 	      viewport_commit_line < content_vdma_line)) {
-		printf("centered formatter/VDMA order mismatch: dim=%u pos=%u "
-		       "commit=%u vdma=%u ops=%u/%u\n",
-		       dimensions_line, viewport_pos_line, viewport_commit_line,
+		printf("centered formatter/VDMA order mismatch: flag=%u dim=%u "
+		       "pos=%u commit=%u vdma=%u ops=%u/%u\n",
+		       dimensions_container_flag_line, dimensions_line,
+		       viewport_pos_line, viewport_commit_line,
 		       content_vdma_line, viewport_pos_ops, viewport_commit_ops);
 		return 0;
 	}
@@ -506,7 +512,9 @@ int main(void)
 
 	if (!expect_u32("viewport position op", MNTVF_OP_VIEWPORT_POS, 28U) ||
 	    !expect_u32("viewport size/commit op",
-	                MNTVF_OP_VIEWPORT_SIZE_COMMIT, 29U))
+	                MNTVF_OP_VIEWPORT_SIZE_COMMIT, 29U) ||
+	    !expect_u32("viewport container dimensions flag",
+	                MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG, 1U << 15))
 		return 18;
 
 	if ((ZZ_FW_CAPABILITIES & ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) != 0U ||

@@ -17,6 +17,9 @@
 #define MNTVF_OP_POLARITY 10
 #define MNTVF_OP_SCALE 4
 #define MNTVF_OP_DIMENSIONS 2
+/* OP_DIMENSIONS bit 15 marks a larger output canvas whose capture pitch is
+ * published later by OP_VIEWPORT_SIZE_COMMIT. Width itself occupies [11:0]. */
+#define MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG (1U << 15)
 #define MNTVF_OP_COLORMODE 1
 #define MNTVF_OP_REPORT_LINE 17
 #define MNTVF_OP_PALETTE_SEL 18

@@ -397,6 +397,9 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 	case ZZ_CONFIG_KEY_VIDEOCAP_MODE:
 		p = cfg.videocap_mode_present;
 		v = cfg.videocap_mode;
+		if (cfg.videocap_output_profile ==
+		    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60)
+			v = ZZVMODE_1920x1080_60;
 		break;
 	case ZZ_CONFIG_KEY_VIDEOCAP_SAMPLE:
 		p = cfg.videocap_sample_present;

@@ -21,6 +21,12 @@
 #define VIDEO_C_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/video.c"
 #define MNTZORRO_H_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/mntzorro.h"
 #define HDMI_C_PATH "../../ZZ9000_proto.sdk/ZZ9000OS/src/hdmi.c"
+#define RUNTIME_CONSTRAINTS_PATH \
+	"../../ZZ9000_proto.srcs/constrs_1/new/runtime_pixel_timing.xdc"
+#define FORMATTER_OOC_CONSTRAINTS_PATH \
+	"../../ZZ9000_proto.srcs/constrs_1/new/video_formatter_ooc_timing.xdc"
+#define BUILD_RUN_TCL_PATH "../../build_run_synthesis.tcl"
+#define TIMING_GATE_TCL_PATH "../../verify_runtime_pixel_timing.tcl"
 
 static char *read_file(const char *path)
 {
@@ -200,21 +206,29 @@ static int test_viewport_control_is_atomic(const char *text,
 	ok &= require_contains(text, "localparam OP_VIEWPORT_SIZE_COMMIT=29;");
 	ok &= require_contains(text, "xpm_cdc_handshake #(");
 	ok &= require_contains(text, ".DEST_EXT_HSK(1)");
-	ok &= require_contains(text, ".WIDTH(72)");
-	ok &= require_contains(text, "reg [71:0] viewport_queued_payload");
+	ok &= require_contains(text, ".WIDTH(48)");
+	ok &= require_contains(text, ".SRC_INPUT_REG(1)");
+	ok &= require_contains(text, "reg [47:0] viewport_queued_payload");
 	ok &= require_contains(text, "reg viewport_queue_valid");
-	ok &= require_contains(text, "reg [71:0] viewport_cdc_payload");
+	ok &= require_contains(text, "reg [47:0] viewport_cdc_payload");
 	ok &= require_contains(text, "if (!viewport_dest_ack && viewport_frame_boundary)");
 	ok &= require_contains(text, "vga_viewport_x <= viewport_dest_payload[47:36]");
 	ok &= require_contains(text, "vga_viewport_width <= viewport_dest_payload[11:0]");
+	ok &= require_contains(text, "screen_width  <= control_data_in[11:0]");
 	ok &= require_contains(text, "wire viewport_output_active");
 	ok &= require_contains(text,
 	    "dvi_rgb <= viewport_output_active ? composed_rgb : 32'b0;");
-	ok &= require_contains(text,
-	    "wire [11:0] scanout_content_y = counter_y - vga_viewport_y;");
+	ok &= require_absent(text, "vga_canvas_width",
+	                    "unused viewport canvas-width state remains");
+	ok &= require_absent(text, "vga_canvas_height",
+	                    "unused viewport canvas-height state remains");
+	ok &= require_absent(text, "wire [11:0] scanout_content_y =",
+	                    "unused scanout content-y wire remains");
 	ok &= require_contains(text, "counter_y_d2 - vga_viewport_y");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "if (video_control_op == 29) begin");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "if (video_control_op == 2 && !video_control_data[15]) begin");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "videocap_pitch <= video_control_data[11:0];");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
@@ -234,7 +248,7 @@ static int test_vertical_scale_shift_and_sprite_control_are_independent(
 	ok &= require_contains(text, "reg [1:0] scale_y_effective;");
 	ok &= require_contains(text, "scale_y_effective <= scale_y;");
 	ok &= require_contains(text,
-	    "? ((scanout_content_y - vga_scale_y_factor) >> vga_scale_y)");
+	    "? ((next_scanout_content_y - vga_scale_y_factor) >> vga_scale_y)");
 	ok &= require_absent(text, "control_interlace ? 2'd0 : scale_y",
 	                     "interlace still bypasses configured vertical scaling");
 	ok &= require_absent(text, "control_interlace ? 2'd0 : vga_scale_y",
@@ -298,16 +312,24 @@ static int test_overlay_rearms_only_after_generation_ack(const char *text)
 	ok &= require_contains(text, ".accepted_generation(overlay_accepted_generation)");
 	ok &= require_contains(text, "reg [11:0] overlay_fetch_line = 0;");
 	ok &= require_contains(text,
-	    "wire [11:0] overlay_displayed_line = overlay_local_y >= 0");
+	    "wire [11:0] overlay_displayed_line = overlay_displayed_line_row;");
 	ok &= require_contains(text, ".fetch_line(overlay_fetch_line)");
 	ok &= require_contains(text, ".fetch_request(overlay_fetch_request)");
 	ok &= require_contains(text, ".displayed_line(overlay_displayed_line)");
 	ok &= require_contains(text,
-	    "overlay_fetch_line == overlay_displayed_line");
+	    "overlay_fetch_line == overlay_scheduler_line");
 	ok &= require_contains(text,
-	    "if ({4'b0, overlay_displayed_line} + 16'd1 < vga_overlay_height)");
+	    "if ({4'b0, overlay_scheduler_line} + 16'd1 < vga_overlay_height)");
 	ok &= require_contains(text,
-	    "overlay_fetch_line <= overlay_displayed_line + 1'b1;");
+	    "overlay_fetch_line <= overlay_scheduler_line + 1'b1;");
+	ok &= require_contains(text,
+	    ".scheduler_line_ready(overlay_scheduler_line_ready)");
+	ok &= require_contains(text,
+	    "overlay_screen_x_position <= overlay_screen_x_position + 17'sd1;");
+	ok &= require_contains(text,
+	    "overlay_displayed_line_row <= overlay_local_y_row + 17'sd1 >= 0");
+	ok &= require_contains(text,
+	    "overlay_scale_x_error >= vga_overlay_x_step_threshold");
 	ok &= require_contains(text,
 	    "overlay_accepted_generation !=\n               vga_overlay_frame_generation");
 	ok &= require_contains(text,
@@ -701,6 +723,72 @@ static int test_mode_switch_retrains_display(const char *video,
 	return ok ? 0 : 1;
 }
 
+static int test_runtime_pixel_clock_has_enforced_150mhz_timing_gate(
+	const char *project, const char *constraints, const char *ooc_constraints,
+	const char *build_run, const char *timing_gate)
+{
+	int ok = 1;
+	const char *gate;
+	const char *bitstream;
+
+	ok &= require_source_contains("zz9000_project.tcl", project,
+	    "runtime_pixel_timing.xdc");
+	ok &= require_source_contains("zz9000_project.tcl", project,
+	    "set_property -name \"processing_order\" -value \"LATE\"");
+	ok &= require_source_contains("zz9000_project.tcl", project,
+	    "set_property -name \"used_in_synthesis\" -value \"false\"");
+	ok &= require_source_contains("zz9000_project.tcl", project,
+	    "set_property -name \"used_in_implementation\" -value \"true\"");
+	ok &= require_source_contains("build_run_synthesis.tcl", build_run,
+	    "STEPS.SYNTH_DESIGN.TCL.PRE");
+	ok &= require_source_contains("build_run_synthesis.tcl", build_run,
+	    "apply_formatter_ooc_timing.tcl");
+	ok &= require_source_contains("build_run_synthesis.tcl", build_run,
+	    "verify_formatter_ooc_timing.tcl");
+	ok &= require_source_contains("build_run_synthesis.tcl", build_run,
+	    "launch_runs impl_1 -to_step {phys_opt_design (Post-Route)}");
+	ok &= require_source_contains("video_formatter_ooc_timing.xdc",
+	    ooc_constraints,
+	    "create_clock -period 10.000 -name formatter_axis_ooc");
+	ok &= require_source_contains("video_formatter_ooc_timing.xdc",
+	    ooc_constraints,
+	    "create_clock -period 6.667 -name formatter_pixel_ooc");
+	ok &= require_source_contains("video_formatter_ooc_timing.xdc",
+	    ooc_constraints,
+	    "set_false_path -from [get_clocks formatter_axis_ooc] -to [get_clocks formatter_pixel_ooc]");
+	ok &= require_source_contains("video_formatter_ooc_timing.xdc",
+	    ooc_constraints,
+	    "set_false_path -from [get_clocks formatter_pixel_ooc] -to [get_clocks formatter_axis_ooc]");
+	ok &= require_source_contains("runtime_pixel_timing.xdc", constraints,
+	    "create_clock -period 6.667 -name dvi_pixel_runtime_150 -add");
+	ok &= require_source_contains("runtime_pixel_timing.xdc", constraints,
+	    "set_false_path -from [get_clocks clk_fpga_0] -to [get_clocks dvi_pixel_runtime_150]");
+	ok &= require_source_contains("runtime_pixel_timing.xdc", constraints,
+	    "set_false_path -from [get_clocks dvi_pixel_runtime_150] -to [get_clocks clk_fpga_0]");
+	ok &= require_source_absent("runtime_pixel_timing.xdc", constraints,
+	    "\nif {", "Vivado 2018.3 XDC rejects Tcl control flow");
+	ok &= require_source_contains("verify_runtime_pixel_timing.tcl", timing_gate,
+	    "get_timing_paths -quiet -from $runtime_clock -to $runtime_clock");
+	ok &= require_source_contains("verify_runtime_pixel_timing.tcl", timing_gate,
+	    "if {$setup_slack < 0.0 || $hold_slack < 0.0 ||\n"
+	    "    $overall_setup_slack < 0.0 || $overall_hold_slack < 0.0}");
+	ok &= require_source_contains("verify_runtime_pixel_timing.tcl", timing_gate,
+	    "report_cdc -details");
+	ok &= require_source_contains("verify_runtime_pixel_timing.tcl", timing_gate,
+	    "-report_unconstrained");
+
+	gate = strstr(build_run, "verify_runtime_pixel_timing.tcl]");
+	bitstream = strstr(build_run,
+	    "launch_runs impl_1 -to_step write_bitstream");
+	if (!gate || !bitstream || gate > bitstream) {
+		printf("build_run_synthesis.tcl: 150 MHz timing gate must run "
+		       "before write_bitstream\n");
+		ok = 0;
+	}
+
+	return ok ? 0 : 1;
+}
+
 int main(void)
 {
 	char *text = read_file(VIDEO_FORMATTER_PATH);
@@ -711,6 +799,10 @@ int main(void)
 	char *video;
 	char *mntzorro_h;
 	char *hdmi;
+	char *constraints;
+	char *ooc_constraints;
+	char *build_run;
+	char *timing_gate;
 	int result;
 
 	if (!text)
@@ -740,11 +832,12 @@ int main(void)
 		return 1;
 	if (!result)
 		result = test_overlay_stream_has_no_prefetch_fifo(project);
-	free(project);
 
 	mntzorro = read_file(MNTZORRO_PATH);
-	if (!mntzorro)
+	if (!mntzorro) {
+		free(project);
 		return 1;
+	}
 	if (!result)
 		result = test_viewport_control_is_atomic(text, mntzorro);
 	free(text);
@@ -754,6 +847,7 @@ int main(void)
 		result = test_videocap_write_probe_samples_accepted_axi_data(mntzorro);
 	sampler = read_file(VIDEOCAP_SAMPLER_PATH);
 	if (!sampler) {
+		free(project);
 		free(mntzorro);
 		return 1;
 	}
@@ -779,6 +873,7 @@ int main(void)
 	mntzorro_h = read_file(MNTZORRO_H_PATH);
 	hdmi = read_file(HDMI_C_PATH);
 	if (!video || !mntzorro_h || !hdmi) {
+		free(project);
 		free(mntzorro);
 		free(video);
 		free(mntzorro_h);
@@ -794,6 +889,28 @@ int main(void)
 	free(video);
 	free(mntzorro_h);
 	free(hdmi);
+
+	constraints = read_file(RUNTIME_CONSTRAINTS_PATH);
+	ooc_constraints = read_file(FORMATTER_OOC_CONSTRAINTS_PATH);
+	build_run = read_file(BUILD_RUN_TCL_PATH);
+	timing_gate = read_file(TIMING_GATE_TCL_PATH);
+	if (!constraints || !ooc_constraints || !build_run || !timing_gate) {
+		free(project);
+		free(constraints);
+		free(ooc_constraints);
+		free(build_run);
+		free(timing_gate);
+		return 1;
+	}
+	if (!result)
+		result = test_runtime_pixel_clock_has_enforced_150mhz_timing_gate(
+			project, constraints, ooc_constraints, build_run,
+			timing_gate);
+	free(project);
+	free(constraints);
+	free(ooc_constraints);
+	free(build_run);
+	free(timing_gate);
 
 	return result;
 }
