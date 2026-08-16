@@ -56,6 +56,31 @@ static int expect_contains(const char *source, const char *label,
 	return 0;
 }
 
+static int expect_contains_between(const char *source, const char *label,
+                                   const char *begin, const char *end,
+                                   const char *needle)
+{
+	const char *range_begin = strstr(source, begin);
+	const char *range_end;
+	const char *found;
+
+	if (!range_begin) {
+		printf("%s: missing range start %s\n", label, begin);
+		return 0;
+	}
+	range_end = strstr(range_begin, end);
+	if (!range_end) {
+		printf("%s: missing range end %s\n", label, end);
+		return 0;
+	}
+	found = strstr(range_begin, needle);
+	if (found && found < range_end)
+		return 1;
+	printf("%s: missing %s between %s and %s\n",
+	       label, needle, begin, end);
+	return 0;
+}
+
 static unsigned count_occurrences(const char *source, const char *needle)
 {
 	unsigned count = 0U;
@@ -94,6 +119,9 @@ int main(int argc, char **argv)
 	                      "#define SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA");
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT");
+	ok &= expect_contains(
+		mailbox_header, "sdk_mailbox.h",
+		"#define SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565");
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_SURFACE_FORMAT_RGB888");
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
@@ -155,6 +183,11 @@ int main(int argc, char **argv)
 	                      "put_be32(info->flags, service_flags(service));");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT");
+	ok &= expect_contains_between(
+		mailbox_source, "sdk_mailbox.c image descriptor",
+		"\n\t{\n\t\tSDK_SERVICE_IMAGE,\n",
+		"\n\t\t\"image\"",
+		"SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "SDK_SERVICE_FLAG_VIDEO_MEDIA_SESSION");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",

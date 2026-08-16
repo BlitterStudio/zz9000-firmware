@@ -1245,7 +1245,8 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_IMAGE_SCALE_BILINEAR |
 			SDK_SERVICE_FLAG_IMAGE_SCALE_CLIPPED |
 			SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA |
-			SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT,
+			SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT |
+			SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565,
 		SDK_SERVICE_IMAGE,
 		8,
 		"image"
@@ -2688,6 +2689,8 @@ static int scale_defer_eligible(uint32_t src_handle, uint32_t dst_handle,
 		return 0;
 	if (surface_is_arm_local(src) || surface_is_arm_local(dst))
 		return 0;
+	if (src->format != dst->format)
+		return 0;
 	if (src->width > 0xffffU || src->height > 0xffffU ||
 	    src->pitch > 0xffffU || src->format > 0xffffU ||
 	    dst->width > 0xffffU || dst->height > 0xffffU ||
@@ -2764,18 +2767,17 @@ static uint16_t handle_scale_image(volatile struct SDKMailboxEntry *req,
 
 	if (filter != SDK_SCALE_NEAREST && filter != SDK_SCALE_BILINEAR)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	if (src.format != dst.format)
+	if (!sdk_surface_scale_formats_supported(src.format, dst.format,
+	                                         filter))
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	if (!surface_range_valid(&src, src_x, src_y, src_w, src_h) ||
 	    !surface_range_valid(&dst, dst_x, dst_y, dst_w, dst_h)) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
 
-	bytes_per_pixel = surface_format_bytes(src.format);
+	bytes_per_pixel = surface_format_bytes(dst.format);
 	if (bytes_per_pixel == 0)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (filter == SDK_SCALE_BILINEAR && bytes_per_pixel != 4U)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 
 	if (scale_defer_eligible(get_be32(payload->src_surface),
 	                         get_be32(payload->dst_surface), &src, &dst)) {
@@ -2799,12 +2801,13 @@ static uint16_t handle_scale_image(volatile struct SDKMailboxEntry *req,
 	}
 
 	prepare_surface_for_arm_read(&src);
-	if (!sdk_surface_scale_rect((uint8_t *)(uintptr_t)dst.address,
-	                            dst.width, dst.height, dst.pitch,
-	                            (const uint8_t *)(uintptr_t)src.address,
-	                            src.width, src.height, src.pitch,
-	                            src.format, src_x, src_y, src_w, src_h,
-	                            dst_x, dst_y, dst_w, dst_h, filter)) {
+	if (!sdk_surface_scale_rect_formats(
+		    (uint8_t *)(uintptr_t)dst.address,
+		    dst.width, dst.height, dst.pitch, dst.format,
+		    (const uint8_t *)(uintptr_t)src.address,
+		    src.width, src.height, src.pitch, src.format,
+		    src_x, src_y, src_w, src_h,
+		    dst_x, dst_y, dst_w, dst_h, filter)) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
 	scheduler_shared()->tasks_on_core0++;   /* offload-class op run inline */
@@ -2861,7 +2864,8 @@ static uint16_t handle_scale_image_clipped(
 
 	if (filter != SDK_SCALE_NEAREST && filter != SDK_SCALE_BILINEAR)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	if (src.format != dst.format)
+	if (!sdk_surface_scale_formats_supported(src.format, dst.format,
+	                                         filter))
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	if (!surface_range_valid(&src, src_x, src_y, src_w, src_h) ||
 	    !surface_range_valid(&dst, dst_x, dst_y, dst_w, dst_h) ||
@@ -2869,11 +2873,9 @@ static uint16_t handle_scale_image_clipped(
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
 
-	bytes_per_pixel = surface_format_bytes(src.format);
+	bytes_per_pixel = surface_format_bytes(dst.format);
 	if (bytes_per_pixel == 0)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (filter == SDK_SCALE_BILINEAR && bytes_per_pixel != 4U)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 
 	if (scale_defer_eligible(get_be32(payload->src_surface),
 	                         get_be32(payload->dst_surface), &src, &dst)) {
@@ -2902,9 +2904,9 @@ static uint16_t handle_scale_image_clipped(
 	}
 
 	prepare_surface_for_arm_read(&src);
-	if (!sdk_surface_scale_rect_clipped(
+	if (!sdk_surface_scale_rect_formats_clipped(
 		    (uint8_t *)(uintptr_t)dst.address,
-		    dst.width, dst.height, dst.pitch,
+		    dst.width, dst.height, dst.pitch, dst.format,
 		    (const uint8_t *)(uintptr_t)src.address,
 		    src.width, src.height, src.pitch, src.format,
 		    src_x, src_y, src_w, src_h,
