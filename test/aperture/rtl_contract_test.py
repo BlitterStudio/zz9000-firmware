@@ -46,8 +46,17 @@ require(REGS_HEADER, "#define ZZ_FW_CAP_Z2_APERTURE_LAYOUT (1U << 2)")
 
 require(MAIN, "uint8_t aperture_ack_poll_divider = 0")
 require(MAIN, "aperture_ack_poll_divider++ == 0U")
-ack_start = MAIN.index("if (sdk_aperture_runtime_ack())")
-ack_end = MAIN.index("if (debug_lowlevel", ack_start)
+require(MAIN, "static void activate_aperture_layout_if_acknowledged(void)")
+for command, handler in (
+    ("case REG_ZZ_ACC_OP:", "handle_acc_op(zdata);"),
+    ("case REG_ZZ_BLITTER_DMA_OP:", "handle_blitter_dma_op(video_state, zdata);"),
+):
+    command_start = MAIN.index(command)
+    handler_start = MAIN.index(handler, command_start)
+    command_block = MAIN[command_start:handler_start]
+    require(command_block, "activate_aperture_layout_if_acknowledged();")
+ack_start = MAIN.index("static void activate_aperture_layout_if_acknowledged(void)")
+ack_end = MAIN.index("void handle_amiga_reset", ack_start)
 if "clear_runtime_gfxdata();" in MAIN[ack_start:ack_end]:
     raise SystemExit("aperture ACK transition clears host-owned GFXData")
 

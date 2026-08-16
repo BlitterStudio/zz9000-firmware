@@ -272,6 +272,20 @@ static void clear_runtime_gfxdata(void)
 		memset((void *)(uintptr_t)gfxdata, 0, sizeof(struct GFXData));
 }
 
+static void activate_aperture_layout_if_acknowledged(void)
+{
+	u32 aperture_flags = sdk_aperture_runtime_flags();
+
+	if ((aperture_flags & SDK_APERTURE_FLAG_VALID) != 0U &&
+	    (aperture_flags & SDK_APERTURE_FLAG_ACKED) == 0U &&
+	    mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG6) ==
+		MNTZORRO_APERTURE_ACK_STATUS &&
+	    sdk_aperture_runtime_ack()) {
+		apply_aperture_framebuffer_limit();
+		sdk_mailbox_refresh_capabilities();
+	}
+}
+
 void handle_amiga_reset(enum amiga_reset_mode mode) {
 	printf("    _______________   ___   ___   ___  \n");
 	printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
@@ -582,17 +596,12 @@ int main() {
 		u32 aperture_flags = sdk_aperture_runtime_flags();
 		/* Acknowledge late: firmware normally boots before the RTG driver.
 		 * Poll at a bounded cadence so an older driver on a new FPGA does not
-		 * add an AXI read to every service-loop pass indefinitely. */
+		 * add an AXI read to every service-loop pass indefinitely. Aperture-
+		 * backed commands also sample the ACK synchronously before dispatch. */
 		if ((aperture_flags & SDK_APERTURE_FLAG_VALID) != 0U &&
 		    (aperture_flags & SDK_APERTURE_FLAG_ACKED) == 0U &&
-		    aperture_ack_poll_divider++ == 0U &&
-		    mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG6) ==
-			MNTZORRO_APERTURE_ACK_STATUS) {
-			if (sdk_aperture_runtime_ack()) {
-				apply_aperture_framebuffer_limit();
-				sdk_mailbox_refresh_capabilities();
-			}
-		}
+		    aperture_ack_poll_divider++ == 0U)
+			activate_aperture_layout_if_acknowledged();
 		if (debug_lowlevel && (zstate_raw&0xff)!=(zstate&0xff)) {
 			printf("ZSTATE: %lx\n", zstate);
 		}
@@ -855,12 +864,14 @@ int main() {
 
 				// Generic acceleration ops
 				case REG_ZZ_ACC_OP: {
+					activate_aperture_layout_if_acknowledged();
 					handle_acc_op(zdata);
 					break;
 				}
 
 				// DMA RTG rendering
 				case REG_ZZ_BLITTER_DMA_OP: {
+					activate_aperture_layout_if_acknowledged();
 					handle_blitter_dma_op(video_state, zdata);
 					break;
 				}
