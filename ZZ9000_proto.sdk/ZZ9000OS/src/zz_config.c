@@ -105,7 +105,14 @@ static int apply_key(const char *key, const char *value) {
 	 * keep their established behaviour.  Legacy keys remain accepted below;
 	 * normal last-value-wins parsing therefore also works for mixed files. */
 	if (token_eq(key, "videocap_profile")) {
-		if (token_eq(value, "full_60")) {
+		int output_profile = ZZ_VIDEOCAP_OUTPUT_FULL_60;
+
+		if (token_eq(value, "centered_1080p_60")) {
+			cfg.videocap_mode = ZZVMODE_800x600;
+			cfg.videocap_shres = 1;
+			cfg.ns_vsync = 0;
+			output_profile = ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60;
+		} else if (token_eq(value, "full_60")) {
 			cfg.videocap_mode = ZZVMODE_800x600;
 			cfg.videocap_shres = 1;
 			cfg.ns_vsync = 0;
@@ -135,6 +142,7 @@ static int apply_key(const char *key, const char *value) {
 		cfg.videocap_mode_present = 1;
 		cfg.videocap_shres_present = 1;
 		cfg.ns_vsync_present = 1;
+		cfg.videocap_output_profile = (uint8_t)output_profile;
 		return 0;
 	}
 	if (token_eq(key, "videocap_mode")) {
@@ -151,6 +159,7 @@ static int apply_key(const char *key, const char *value) {
 		 * normal last-value-wins behavior for mixed old/new files. */
 		cfg.videocap_shres = 0;
 		cfg.videocap_shres_present = 1;
+		cfg.videocap_output_profile = ZZ_VIDEOCAP_OUTPUT_FULL_60;
 		return 0;
 	}
 	if (token_eq(key, "videocap_sample")) {
@@ -166,6 +175,7 @@ static int apply_key(const char *key, const char *value) {
 		else if (token_eq(value, "full")) cfg.videocap_shres = 1;
 		else return -1;
 		cfg.videocap_shres_present = 1;
+		cfg.videocap_output_profile = ZZ_VIDEOCAP_OUTPUT_FULL_60;
 		return 0;
 	}
 	if (token_eq(key, "videocap_crop_h")) {
@@ -188,6 +198,7 @@ static int apply_key(const char *key, const char *value) {
 		else if (token_eq(value, "ntsc")) cfg.ns_vsync = 2;
 		else return -1;
 		cfg.ns_vsync_present = 1;
+		cfg.videocap_output_profile = ZZ_VIDEOCAP_OUTPUT_FULL_60;
 		return 0;
 	}
 	if (token_eq(key, "scanline_mode")) {

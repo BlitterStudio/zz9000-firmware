@@ -52,8 +52,17 @@ enum zz_config_key {
 	ZZ_CONFIG_KEY_NUM
 };
 
+/* Output identity is deliberately separate from the legacy mode/width/vsync
+ * tuple. CENTERED projects to the full_60 tuple for compatibility, but must
+ * still cause a distinct output-mode application in the video ISR. */
+enum zz_videocap_output_profile {
+	ZZ_VIDEOCAP_OUTPUT_FULL_60 = 0,
+	ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 = 1,
+};
+
 struct zz_config {
 	uint8_t loaded;                 /* file found and parsed */
+	uint8_t videocap_output_profile; /* enum zz_videocap_output_profile */
 
 	uint8_t videocap_mode_present;
 	uint16_t videocap_mode;         /* enum zz_video_modes */

@@ -87,6 +87,23 @@ static int check_full_native_vsync(const char *name,
 	return 1;
 }
 
+static int check_centered_1080p_timing(void)
+{
+	const struct zz_video_mode *mode =
+		&preset_video_modes[ZZVMODE_1920x1080_60];
+
+	if (mode->hres != 1920 || mode->vres != 1080 ||
+	    mode->hmax != 2200 || mode->vmax != 1125 ||
+	    mode->phz != 150000000 || mode->mul != 15 ||
+	    mode->div != 1 || mode->div2 != 10) {
+		fprintf(stderr,
+			"centered 1080p must reuse mode 5's 150 MHz 2200x1125 timing\n");
+		return 0;
+	}
+
+	return 1;
+}
+
 int main(void)
 {
 	int ok = 1;
@@ -97,6 +114,9 @@ int main(void)
 		ZZVMODE_1280x1024_NS_NTSC, 59.93257);
 	ok &= check_mode("1280x1024 native standard-refresh",
 		ZZVMODE_1280x1024_NATIVE_60, 60.01995);
+	ok &= check_mode("centered 1920x1080 standard-refresh",
+		ZZVMODE_1920x1080_60, 60.60606);
+	ok &= check_centered_1080p_timing();
 	ok &= check_full_native_vsync("1280x1024 PAL exact-refresh",
 		ZZVMODE_1280x1024_NS_PAL);
 	ok &= check_full_native_vsync("1280x1024 NTSC exact-refresh",

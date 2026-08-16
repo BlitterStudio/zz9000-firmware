@@ -7,6 +7,7 @@
  */
 
 #include "video_vdma.h"
+#include "video_scale.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -101,6 +102,47 @@ static int test_native_scanout_starts_at_capture_row(void)
 	return 0;
 }
 
+static int test_centered_output_keeps_native_content_geometry(void)
+{
+	struct video_videocap_geometry full =
+		video_videocap_output_geometry(ZZ_VIDEOCAP_OUTPUT_FULL_60);
+	struct video_videocap_geometry centered =
+		video_videocap_output_geometry(
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
+
+	if (!expect_u32("full canvas width", full.canvas_width, 1280U) ||
+	    !expect_u32("full canvas height", full.canvas_height, 1024U) ||
+	    !expect_u32("full content width", full.content_width, 1280U) ||
+	    !expect_u32("full content height", full.content_height, 1024U) ||
+	    !expect_u32("centered canvas width", centered.canvas_width, 1920U) ||
+	    !expect_u32("centered canvas height", centered.canvas_height, 1080U) ||
+	    !expect_u32("centered content width", centered.content_width, 1280U) ||
+	    !expect_u32("centered content height", centered.content_height, 1024U) ||
+	    !expect_u32("centered viewport x", centered.viewport_x, 320U) ||
+	    !expect_u32("centered viewport y", centered.viewport_y, 28U)) {
+		return 1;
+	}
+
+	if (!expect_u32("centered VDMA line bytes",
+	                video_vdma_line_bytes(centered.content_width, 1U),
+	                5120U) ||
+	    !expect_u32("centered VDMA pitch",
+	                video_vdma_stride_bytes(centered.content_width, 1U,
+	                                        0U, 1U), 5120U) ||
+	    !expect_u32("centered progressive capture rows",
+	                centered.content_height /
+	                video_vertical_scale_factor(
+	                    video_videocap_scalemode(1U, 0U)), 256U) ||
+	    !expect_u32("centered interlaced capture rows",
+	                centered.content_height /
+	                video_vertical_scale_factor(
+	                    video_videocap_scalemode(1U, 1U)), 512U)) {
+		return 2;
+	}
+
+	return 0;
+}
+
 int main(void)
 {
 	int result;
@@ -120,6 +162,10 @@ int main(void)
 	result = test_native_scanout_starts_at_capture_row();
 	if (result)
 		return 70 + result;
+
+	result = test_centered_output_keeps_native_content_geometry();
+	if (result)
+		return 90 + result;
 
 	return 0;
 }

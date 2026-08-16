@@ -47,7 +47,8 @@ int sprite_request_pos_y = 0;
 
 void _update_hw_sprite_pos(int16_t x, int16_t y);
 void _clip_hw_sprite(int16_t offset_x, int16_t offset_y);
-static void video_mode_init_internal(int mode, int scalemode, int colormode, int skip_vdma);
+static void video_mode_init_internal(int mode, int scalemode, int colormode,
+		int skip_vdma, int output_profile);
 
 // FIXME integrate with memory map
 static int default_pan_offset_pal = 0x00e00000;
@@ -57,8 +58,6 @@ static int default_pan_offset_pal_800x600 = 0x00dff2f8;
 static int isr_flush_count = 0;
 int vblank_count = 0;
 
-#define VIDEOCAP_MODE_STABLE_VBLANKS 2
-
 struct ZZ_VIDEO_STATE* video_get_state() {
 	return &vs;
 }
@@ -67,10 +66,9 @@ static void videocap_detection_reset() {
 	vs.videocap_ntsc_old = -1;
 	vs.videocap_shres_old = -1;
 	vs.interlace_old = -1;
-	vs.videocap_ntsc_candidate = -1;
-	vs.videocap_shres_candidate = -1;
-	vs.interlace_candidate = -1;
-	vs.videocap_mode_stable_count = 0;
+	vs.videocap_video_mode_applied = -1;
+	vs.videocap_output_profile_applied = -1;
+	video_videocap_detection_reset(&vs.videocap_detection);
 }
 
 // Zynq S_AXI_HP0 carries the video scanout DMA and was widened to 64 bit
@@ -113,6 +111,7 @@ struct ZZ_VIDEO_STATE* video_init() {
 	// state can still be changed later via REG_ZZ_VCAP_MODE and
 	// REG_ZZ_SET_FEATURE, so a driver keeps the last word.
 	const struct zz_config *cfg = zz_config_get();
+	vs.videocap_output_profile_requested = cfg->videocap_output_profile;
 	if (cfg->videocap_mode_present) {
 		vs.videocap_video_mode = cfg->videocap_mode;
 		vs.video_mode = cfg->videocap_mode | 2 << 12 | MNTVA_COLOR_32BIT << 8;
@@ -221,12 +220,65 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 
 static int videocap_full_width_enabled(u32 zstate) {
 	const struct zz_config *cfg = zz_config_get();
-	uint32_t requested = cfg->videocap_shres_present ?
+	uint32_t requested =
+		vs.videocap_output_profile_requested ==
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 ? 1U :
+		cfg->videocap_shres_present ?
 		cfg->videocap_shres : VIDEOCAP_FULL_WIDTH_DEFAULT;
 	uint32_t fullrate_capable =
 		!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE);
 
 	return (int)video_videocap_full_width(requested, fullrate_capable);
+}
+
+static int videocap_effective_output_profile(u32 zstate)
+{
+	return (int)video_videocap_effective_output_profile(
+		(uint32_t)vs.videocap_output_profile_requested,
+		!!(zstate & MNTZORRO_STATUS_VCAP_VIEWPORT),
+		!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE));
+}
+
+int video_set_videocap_video_mode(uint32_t mode)
+{
+	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
+	struct video_videocap_runtime_request request =
+		video_videocap_sanitize_runtime_mode(
+			mode,
+			!!(zstate & MNTZORRO_STATUS_VCAP_VIEWPORT),
+			!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE));
+
+	if (!request.valid)
+		return 0;
+
+	vs.videocap_video_mode = request.base_mode;
+	vs.videocap_output_profile_requested = request.output_profile;
+	return 1;
+}
+
+int video_set_videocap_vsync(uint32_t setting)
+{
+	if (setting > 2U)
+		return 0;
+
+	vs.scandoubler_mode_adjust = setting == 2U ? 2 : 0;
+	vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = setting;
+	vs.videocap_output_profile_requested = ZZ_VIDEOCAP_OUTPUT_FULL_60;
+	return 1;
+}
+
+uint32_t video_firmware_capabilities(void)
+{
+	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
+	uint32_t capabilities = ZZ_FW_CAPABILITIES;
+
+	if (video_videocap_centered_eligible(
+			!!(zstate & MNTZORRO_STATUS_VCAP_VIEWPORT),
+			!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE))) {
+		capabilities |= ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P;
+	}
+
+	return capabilities;
 }
 
 static void init_filtered_videocap_video_mode(int ntsc) {
@@ -245,11 +297,19 @@ static void init_filtered_videocap_video_mode(int ntsc) {
 		}
 	}
 
-	video_mode_init_internal(mode, 2, MNTVA_COLOR_32BIT, 1);
+	video_mode_init_internal(mode, 2, MNTVA_COLOR_32BIT, 1,
+		ZZ_VIDEOCAP_OUTPUT_FULL_60);
 }
 
-static void init_videocap_video_mode(int ntsc, int full_width) {
+static void init_videocap_video_mode(int ntsc, int full_width,
+		int output_profile) {
 	int mode = ZZVMODE_1280x1024_NATIVE_60;
+
+	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
+		video_mode_init_internal(ZZVMODE_1920x1080_60, 4,
+			MNTVA_COLOR_32BIT, 1, output_profile);
+		return;
+	}
 
 	if (!full_width) {
 		init_filtered_videocap_video_mode(ntsc);
@@ -260,7 +320,8 @@ static void init_videocap_video_mode(int ntsc, int full_width) {
 		              ZZVMODE_1280x1024_NS_PAL;
 	}
 
-	video_mode_init_internal(mode, 4, MNTVA_COLOR_32BIT, 1);
+	video_mode_init_internal(mode, 4, MNTVA_COLOR_32BIT, 1,
+		ZZ_VIDEOCAP_OUTPUT_FULL_60);
 }
 
 void fb_fill(uint32_t offset) {
@@ -315,25 +376,6 @@ void video_set_dpms(uint8_t level) {
 	video_formatter_write(level, MNTVF_OP_DPMS);
 }
 
-static int videocap_detection_is_stable(int videocap_ntsc, int interlace,
-		int videocap_shres) {
-	if (videocap_ntsc != vs.videocap_ntsc_candidate ||
-			interlace != vs.interlace_candidate ||
-			videocap_shres != vs.videocap_shres_candidate) {
-		vs.videocap_ntsc_candidate = videocap_ntsc;
-		vs.interlace_candidate = interlace;
-		vs.videocap_shres_candidate = videocap_shres;
-		vs.videocap_mode_stable_count = 1;
-		return 0;
-	}
-
-	if (vs.videocap_mode_stable_count < VIDEOCAP_MODE_STABLE_VBLANKS) {
-		vs.videocap_mode_stable_count++;
-	}
-
-	return vs.videocap_mode_stable_count >= VIDEOCAP_MODE_STABLE_VBLANKS;
-}
-
 // interrupt service routine for IRQ_F2P[0:0]
 // vblank + raster position interrupt
 void isr_video(void *dummy) {
@@ -345,6 +387,7 @@ void isr_video(void *dummy) {
 	int interlace = !!(zstate & (1 << 24));
 	int videocap_shres = !!(zstate & (1 << 17));
 	int videocap_full_width = videocap_full_width_enabled(zstate);
+	int videocap_output_profile = videocap_effective_output_profile(zstate);
 
 	if (!videocap_enabled) {
 		if (!vblank) {
@@ -399,13 +442,22 @@ void isr_video(void *dummy) {
 				}
 
 				videocap_reset = (vs.videocap_ntsc_old < 0 ||
-						vs.interlace_old < 0 || vs.videocap_shres_old < 0);
+						vs.interlace_old < 0 || vs.videocap_shres_old < 0 ||
+						vs.videocap_video_mode_applied < 0 ||
+						vs.videocap_output_profile_applied < 0);
 				int videocap_detection_stable =
-						videocap_detection_is_stable(videocap_ntsc, interlace,
-								videocap_shres);
+						video_videocap_detection_stable(
+								&vs.videocap_detection, videocap_ntsc, interlace,
+								videocap_shres, vs.videocap_video_mode,
+								videocap_output_profile);
 
 				if (videocap_detection_stable &&
-						(videocap_ntsc != vs.videocap_ntsc_old || videocap_reset)) {
+						(videocap_ntsc != vs.videocap_ntsc_old ||
+						 vs.videocap_video_mode !=
+							 vs.videocap_video_mode_applied ||
+						 videocap_output_profile !=
+							 vs.videocap_output_profile_applied ||
+						 videocap_reset)) {
 					// change between ntsc+pal
 					videocap_area_clear();
 
@@ -419,7 +471,8 @@ void isr_video(void *dummy) {
 						vs.framebuffer_pan_offset = videocap_full_width ?
 							video_vdma_native_row_start(default_pan_offset_ntsc) :
 							default_pan_offset_ntsc;
-						init_videocap_video_mode(1, videocap_full_width);
+						init_videocap_video_mode(1, videocap_full_width,
+							videocap_output_profile);
 					} else {
 						// PAL
 						printf("videocap: pal\n");
@@ -432,8 +485,13 @@ void isr_video(void *dummy) {
 						} else {
 							vs.framebuffer_pan_offset = default_pan_offset_pal;
 						}
-						init_videocap_video_mode(0, videocap_full_width);
+						init_videocap_video_mode(0, videocap_full_width,
+							videocap_output_profile);
 					}
+					vs.videocap_video_mode_applied =
+						vs.videocap_video_mode;
+					vs.videocap_output_profile_applied =
+						videocap_output_profile;
 					videocap_reset = 1;
 				}
 
@@ -620,7 +678,8 @@ void pixelclock_init_2(struct zz_video_mode *mode) {
 	printf("pixel clock lock timeout for %ux%u\n", mode->hres, mode->vres);
 }
 
-static void video_mode_init_internal(int mode, int scalemode, int colormode, int skip_vdma) {
+static void video_mode_init_internal(int mode, int scalemode, int colormode,
+		int skip_vdma, int output_profile) {
 	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
 	// reset interlace tracking
@@ -646,6 +705,15 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 		hdiv *= 2;
 
 	struct zz_video_mode *vmode = &preset_video_modes[mode];
+	uint32_t content_hres = (uint32_t)vmode->hres;
+	uint32_t content_vres = (uint32_t)vmode->vres;
+	struct video_videocap_geometry geometry;
+
+	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
+		geometry = video_videocap_output_geometry((uint32_t)output_profile);
+		content_hres = geometry.content_width;
+		content_vres = geometry.content_height;
+	}
 
 	// Reset input state machine before reconfiguring to prevent stale line fetches.
 	video_formatter_valign();
@@ -656,6 +724,14 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 	// causes a visible horizontal split (the "split picture" NTSC bug).
 	video_formatter_write((vmode->vmax << 16) | vmode->hmax, MNTVF_OP_MAX);
 	video_formatter_write((vmode->vres << 16) | vmode->hres, MNTVF_OP_DIMENSIONS);
+	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
+		video_formatter_write((geometry.viewport_y << 16) |
+		                      geometry.viewport_x,
+		                      MNTVF_OP_VIEWPORT_POS);
+		video_formatter_write((geometry.content_height << 16) |
+		                      geometry.content_width,
+		                      MNTVF_OP_VIEWPORT_SIZE_COMMIT);
+	}
 	video_formatter_write((vmode->hstart << 16) | vmode->hend, MNTVF_OP_HS);
 	video_formatter_write((vmode->vstart << 16) | vmode->vend, MNTVF_OP_VS);
 	video_formatter_write(vmode->polarity, MNTVF_OP_POLARITY);
@@ -671,7 +747,7 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 	pixelclock_init_2(vmode);
 
 	if (!skip_vdma) {
-		init_vdma(vmode->hres, vmode->vres, hdiv, vdiv,
+		init_vdma(content_hres, content_vres, hdiv, vdiv,
 				(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 	}
 
@@ -683,14 +759,16 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode, int
 	video_set_dpms(ZZ_DPMS_ON);
 	hdmi_ctrl_enable_output();
 
-	vs.vmode_hsize = vmode->hres;
-	vs.vmode_vsize = vmode->vres;
+	vs.vmode_hsize = content_hres;
+	vs.vmode_vsize = content_vres;
 	vs.vmode_vdiv = vdiv;
 	vs.vmode_hdiv = hdiv;
 }
 
 void video_mode_init(int mode, int scalemode, int colormode) {
-	video_mode_init_internal(mode, scalemode, colormode, 0);
+	videocap_detection_reset();
+	video_mode_init_internal(mode, scalemode, colormode, 0,
+		ZZ_VIDEOCAP_OUTPUT_FULL_60);
 }
 
 void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite)
