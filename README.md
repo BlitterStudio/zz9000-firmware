@@ -41,7 +41,9 @@ into a reproducible firmware, FPGA, and SDK-service platform.
   out at 1280x1024: one lores pixel is 4x4 output pixels, one hires pixel
   is 2x4, and SuperHires maps 1x4 with no horizontal scaling. The
   capture origin is calibratable through `videocap_crop_h` and
-  `videocap_crop_v` in `ZZ9000.CFG`.
+  `videocap_crop_v` in `ZZ9000.CFG`. A capability-gated profile can place
+  that same 1280x1024 content one-to-one inside a 1920x1080 native-video
+  canvas with black borders.
 - Picasso96 DPMS power management with independent HSync/VSync gating for
   standby, suspend, and off, plus a mode-set wake fail-safe. Internal
   raster and vblank timing keep running while the monitor sleeps.
@@ -150,7 +152,7 @@ sample; the copy at the repo root documents every option:
 
 | Key | Values | Replaces |
 |---|---|---|
-| `videocap_profile` | `full_60` (default), `full_exact`, `filtered_60`, `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact` | atomic native-video output policy |
+| `videocap_profile` | `full_60` (default), `full_exact`, `filtered_60`, `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60` | atomic native-video output policy |
 | `videocap_sample` | `average` (default), `even`, `odd` | native-video capture sample selection |
 | `videocap_crop_h` | `0`–`4095` (missing = Automatic) | horizontal capture origin in 28 MHz samples |
 | `videocap_crop_v` | `0`–`4095` (missing = Automatic) | vertical capture origin in lines |
@@ -175,6 +177,29 @@ capture path. A full-rate bitstream using a full-width native-video profile
 uses `280/40`; filtered profiles and Denise-adapter/Super Denise bitstreams use
 the historical `188/26`. An explicit numeric key is always a literal Custom
 override, including `188`, `26`, `0`, and `4095`.
+
+`centered_1080p_60` preserves the existing 1280x1024 captured content and
+places it one-to-one at physical coordinate `(320,28)` in a 1920x1080 active
+raster. The content occupies `[320,1600) x [28,1052)`; every pixel outside
+that rectangle remains black, including after PIP, sprite, and scanline
+composition. This is native Amiga chipset video and is separate from the
+Picasso96 1920x1080x32 RTG screen mode.
+
+The centered profile keeps the existing 2200x1125 timing at a 150 MHz pixel
+clock. Its `60` name is nominal: the resulting refresh is approximately
+60.60606 Hz. It requires a matching viewport-capable, full-rate bitstream,
+firmware advertising capability bit 3, and current `ZZ9000.card`/ZZTop. The
+full-rate `zorro3`, `zorro3-nofast`, `zorro2`, and `zorro2-2mb` variants are
+eligible; filtered Denise/Super Denise variants are not. An old or mixed
+firmware/bitstream/driver/tool stack safely resolves the request to
+`full_60`/native mode 1 and does not preserve the centered identity.
+`full_60` remains the built-in default.
+
+The normal configuration lifecycle is unchanged: the SD-card file is read at
+cold boot, ZZTop writes staged settings only when **Save** is selected, and a
+power cycle applies that file. Valid runtime native-mode changes are applied
+at the next stable vblank. The centered profile does not add a monitor
+hot-plug or HDMI mode-switch guarantee.
 
 Firmware 2.8 with the live-control capability and the matching protocol-1
 bitstream also expose acknowledged live framing control for ZZTop 2.8. The
@@ -213,7 +238,8 @@ refresh controls, 2.5 predates the full-width and crop controls,
 `offscreen_bitmaps` and `video_overlay`; those older versions would drop
 the newer lines. The drivers repo's
 `tools/check-cfg-keys.sh` fails if the parser, this table, the sample
-`ZZ9000.CFG` and ZZTop's editor ever disagree.
+`ZZ9000.CFG` and ZZTop's editor ever disagree on either keys or the ordered
+`videocap_profile` values.
 
 The older `videocap_mode`, `videocap_shres`, and `nonstandard_vsync` keys
 remain accepted for existing cards and hand-written files, but new files should

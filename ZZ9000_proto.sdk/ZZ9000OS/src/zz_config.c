@@ -107,12 +107,7 @@ static int apply_key(const char *key, const char *value) {
 	if (token_eq(key, "videocap_profile")) {
 		int output_profile = ZZ_VIDEOCAP_OUTPUT_FULL_60;
 
-		if (token_eq(value, "centered_1080p_60")) {
-			cfg.videocap_mode = ZZVMODE_800x600;
-			cfg.videocap_shres = 1;
-			cfg.ns_vsync = 0;
-			output_profile = ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60;
-		} else if (token_eq(value, "full_60")) {
+		if (token_eq(value, "full_60")) {
 			cfg.videocap_mode = ZZVMODE_800x600;
 			cfg.videocap_shres = 1;
 			cfg.ns_vsync = 0;
@@ -136,6 +131,11 @@ static int apply_key(const char *key, const char *value) {
 			cfg.videocap_mode = ZZVMODE_720x576;
 			cfg.videocap_shres = 0;
 			cfg.ns_vsync = 2;
+		} else if (token_eq(value, "centered_1080p_60")) {
+			cfg.videocap_mode = ZZVMODE_800x600;
+			cfg.videocap_shres = 1;
+			cfg.ns_vsync = 0;
+			output_profile = ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60;
 		} else {
 			return -1;
 		}
