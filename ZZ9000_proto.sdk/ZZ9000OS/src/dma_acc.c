@@ -11,6 +11,7 @@
 #include "xil_cache.h"
 #include "compression/compression.h"
 #include "surface_allocator.h"
+#include "sdk_aperture_layout.h"
 #include "xtime_l.h"
 
 extern uint8_t imc_tables_initialized;
@@ -18,7 +19,12 @@ int current_c37_encoder = -1;
 
 void handle_acc_op(uint16_t zdata)
 {
-    struct GFXData *data = (struct GFXData*)((u32)Z3_SCRATCH_ADDR);
+    u32 gfxdata = sdk_aperture_gfxdata_address(Z3_SCRATCH_ADDR);
+    struct GFXData *data;
+
+    if (gfxdata == 0U)
+        return;
+    data = (struct GFXData *)gfxdata;
     //int cf_bpp[MNTVA_COLOR_NUM] = { 1, 2, 4, -8, 2, };
 
     switch (zdata) {

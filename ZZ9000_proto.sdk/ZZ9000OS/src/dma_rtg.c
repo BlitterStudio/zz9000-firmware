@@ -6,11 +6,17 @@
 #include "video.h"
 #include "overlay.h"
 #include "sdk_palette.h"
+#include "sdk_aperture_layout.h"
 #include "xil_printf.h"
 
 void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
 {
-    struct GFXData *data = (struct GFXData*)((u32)Z3_SCRATCH_ADDR);
+    u32 gfxdata = sdk_aperture_gfxdata_address(Z3_SCRATCH_ADDR);
+    struct GFXData *data;
+
+    if (gfxdata == 0U)
+        return;
+    data = (struct GFXData *)gfxdata;
     switch(zdata) {
         case OP_DRAWLINE:
             SWAP16(data->x[0]);		SWAP16(data->x[1]);

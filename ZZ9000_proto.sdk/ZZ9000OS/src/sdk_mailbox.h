@@ -54,16 +54,19 @@
 #define SDK_CAP_VIDEO_DECODE           (1U << 21)
 #define SDK_CAP_MEDIA_SESSION          (1U << 22)
 #define SDK_CAP_AUDIO_STREAM_DRAIN     (1U << 23)
+/* QUERY_APERTURE_LAYOUT is available. HOST_WINDOW_HEAP is advertised on
+ * generation-1 Z2 only after the driver acknowledges the exact contract. */
+#define SDK_CAP_APERTURE_LAYOUT        (1U << 24)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
 // host-side declaration ("the 68k never touches this buffer") that the
 // firmware merely stores and echoes.
-// The firmware honors HOST_WINDOW on any bus and window size --
-// zz9k.library is the enforcement point: it strips the bit on Zorro 3
-// (where the heap region lies inside P96 VRAM) and refuses it on
-// sub-4 MB Zorro 2 windows (2 MB bitstream variants, which cannot
-// reach the heap's board offset).
+// Generation-1 Zorro 2 bitstreams require an exact layout acknowledgement
+// before firmware advertises or honors HOST_WINDOW. Zorro 3 and bitstreams
+// without the generation-tagged aperture register retain the legacy fixed
+// heap; zz9k.library strips HOST_WINDOW on Z3 and rejects that legacy address
+// on sub-4 MB Z2 boards.
 #define SDK_ALLOC_HOST_WINDOW     (1U << 0)
 #define SDK_ALLOC_CARD_ONLY       (1U << 1)
 
@@ -155,6 +158,7 @@
 #define SDK_OP_QUERY_CAPS              0x0001U
 #define SDK_OP_PING                    0x0002U
 #define SDK_OP_QUERY_SERVICE           0x0004U
+#define SDK_OP_QUERY_APERTURE_LAYOUT   0x0005U
 
 #define SDK_OP_ALLOC_SHARED            0x0100U
 #define SDK_OP_FREE_SHARED             0x0101U
@@ -243,6 +247,7 @@ struct SDKCryptoVerifyPayload {
 #define SDK_OP_DIAG_READ               0x0900U
 #define SDK_OP_DIAG_TIMING             0x0901U
 #define SDK_OP_DIAG_SCHED              0x0902U
+#define SDK_OP_DIAG_MEMORY             0x0903U
 
 #define SDK_OP_VIDEO_SESSION_BEGIN     0x0b00U
 #define SDK_OP_VIDEO_SESSION_WRITE     0x0b01U
@@ -608,6 +613,8 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 #define SDK_DECOMPRESS_RESULT_NEED_INPUT      (1U << 2)
 
 void sdk_mailbox_init(void);
+/* Refresh descriptor capability bits after a late driver layout ack. */
+void sdk_mailbox_refresh_capabilities(void);
 void sdk_mailbox_activate(void);
 void sdk_mailbox_doorbell(void);
 void sdk_mailbox_ack_irq(void);

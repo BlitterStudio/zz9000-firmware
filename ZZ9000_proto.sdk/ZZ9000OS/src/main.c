@@ -64,6 +64,7 @@ void Xil_AssertNonVoid() {}
 #include "zz_config.h"
 #include "usb_proxy.h"
 #include "sdk_mailbox.h"
+#include "sdk_aperture_layout.h"
 #include "surface_allocator.h"
 #include "overlay.h"
 
@@ -251,6 +252,40 @@ static void init_storage_services() {
 	}
 }
 
+typedef char z2_gfxdata_must_fit_template_scratch[
+	(sizeof(struct GFXData) <= 0x00010000U) ? 1 : -1];
+
+static void apply_aperture_framebuffer_limit(void)
+{
+	if ((sdk_aperture_runtime_flags() & SDK_APERTURE_FLAG_VALID) != 0U)
+		set_fb_limit((uint8_t *)(uintptr_t)
+			(FRAMEBUFFER_ADDRESS + sdk_aperture_framebuffer_size()));
+	else
+		set_fb_limit((uint8_t *)(uintptr_t)LEGACY_SURFACE_HEAP_END);
+}
+
+static void clear_runtime_gfxdata(void)
+{
+	u32 gfxdata = sdk_aperture_gfxdata_address(Z3_SCRATCH_ADDR);
+
+	if (gfxdata != 0U)
+		memset((void *)(uintptr_t)gfxdata, 0, sizeof(struct GFXData));
+}
+
+static void activate_aperture_layout_if_acknowledged(void)
+{
+	u32 aperture_flags = sdk_aperture_runtime_flags();
+
+	if ((aperture_flags & SDK_APERTURE_FLAG_VALID) != 0U &&
+	    (aperture_flags & SDK_APERTURE_FLAG_ACKED) == 0U &&
+	    mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG6) ==
+		MNTZORRO_APERTURE_ACK_STATUS &&
+	    sdk_aperture_runtime_ack()) {
+		apply_aperture_framebuffer_limit();
+		sdk_mailbox_refresh_capabilities();
+	}
+}
+
 void handle_amiga_reset(enum amiga_reset_mode mode) {
 	printf("    _______________   ___   ___   ___  \n");
 	printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
@@ -286,8 +321,13 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	// the overlay shadows lived in that heap: drop the overlay too
 	overlay_amiga_reset(video_state);
 
-	// FIXME
-	memset((u32 *)Z3_SCRATCH_ADDR, 0, sizeof(struct GFXData));
+	/* The generation-1 Z2 command block is host-visible template scratch and
+	 * must be acknowledged again after every Amiga reset. Z3 keeps its fixed
+	 * command block. */
+	sdk_aperture_runtime_init(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7),
+		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
+	apply_aperture_framebuffer_limit();
+	clear_runtime_gfxdata();
 
 	// clear audio buffer on reset
 	memset((void*)AUDIO_TX_BUFFER_ADDRESS, 0, AUDIO_TX_BUFFER_SIZE);
@@ -337,6 +377,8 @@ int main() {
 	// not-yet-ready RAM as defective. Set as early as possible to minimise the
 	// window in which the card could appear without its fast RAM.
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6, 1);
+	sdk_aperture_runtime_init(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7),
+		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
 
 	boot_rom_init();
 
@@ -398,7 +440,7 @@ int main() {
 
 	// RTG rect ops may write anywhere in framebuffer + legacy surface
 	// memory, but never past it into the SDK heaps and beyond
-	set_fb_limit((uint8_t *)(uintptr_t)LEGACY_SURFACE_HEAP_END);
+	apply_aperture_framebuffer_limit();
 
 	surface_allocator_init(LEGACY_SURFACE_HEAP_ADDRESS, LEGACY_SURFACE_HEAP_SIZE);
 
@@ -487,6 +529,7 @@ int main() {
 	// last time the ethernet state machine was serviced
 	XTime eth_task_last_run = 0;
 	uint32_t sdk_mailbox_poll_divider = 0;
+	uint8_t aperture_ack_poll_divider = 0;
 	uint32_t core1_fault_reported = CORE_FAULT_NONE;
 
 	while (1) {
@@ -550,6 +593,15 @@ int main() {
 		}
 
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
+		u32 aperture_flags = sdk_aperture_runtime_flags();
+		/* Acknowledge late: firmware normally boots before the RTG driver.
+		 * Poll at a bounded cadence so an older driver on a new FPGA does not
+		 * add an AXI read to every service-loop pass indefinitely. Aperture-
+		 * backed commands also sample the ACK synchronously before dispatch. */
+		if ((aperture_flags & SDK_APERTURE_FLAG_VALID) != 0U &&
+		    (aperture_flags & SDK_APERTURE_FLAG_ACKED) == 0U &&
+		    aperture_ack_poll_divider++ == 0U)
+			activate_aperture_layout_if_acknowledged();
 		if (debug_lowlevel && (zstate_raw&0xff)!=(zstate&0xff)) {
 			printf("ZSTATE: %lx\n", zstate);
 		}
@@ -812,12 +864,14 @@ int main() {
 
 				// Generic acceleration ops
 				case REG_ZZ_ACC_OP: {
+					activate_aperture_layout_if_acknowledged();
 					handle_acc_op(zdata);
 					break;
 				}
 
 				// DMA RTG rendering
 				case REG_ZZ_BLITTER_DMA_OP: {
+					activate_aperture_layout_if_acknowledged();
 					handle_blitter_dma_op(video_state, zdata);
 					break;
 				}

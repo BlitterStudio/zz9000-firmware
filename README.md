@@ -266,6 +266,7 @@ make -C test/audio test        # audio capture
 make -C test/config test       # ZZ9000.CFG parser/loader
 make -C test/scheduler test    # dual-core queue, routing, reclaim
 make -C test/allocator test    # surface allocator
+make -C test/aperture test     # Z2 aperture layout/ack contract
 make -C test/fwupdate test     # firmware-file restore
 make -C test/sd_activity_led test
 ```
