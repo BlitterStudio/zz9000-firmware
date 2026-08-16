@@ -121,6 +121,31 @@ transactions hit L2 regardless of the ARM's MMU attributes.
   pixel columns in the 8/15/16 bpp modes even though 32 bpp still looks fine. The xsim
   sweep catches this; run it.
 
+### Zorro II aperture contract (read before touching shared memory)
+
+- Current Zorro II firmware, bitstreams, drivers, and SDK negotiate a
+  generation-1 aperture-relative layout. The FPGA publishes the exact 2 MB or
+  4 MB aperture, the RTG driver validates it against AutoConfig and reserves
+  every region, and only then writes the ACK token. Firmware must keep the
+  framebuffer limit, host heap, relocated `GFXData`, and PIP capability gated
+  until that ACK. Invalid or unacknowledged generation-1 descriptors fail
+  closed. Descriptor-absent legacy 4 MiB cards intentionally retain the
+  historical fixed 64 KiB `HOST_WINDOW` compatibility path, but have no
+  negotiated layout or PIP; legacy 2 MiB and unknown aperture sizes reject it.
+- Do not restore fixed `board + size - ...` service addresses for
+  generation-1 layouts or expose their historical shared heap through Zorro II.
+  CPU-visible SDK clients use the negotiated host window; card-only rings stay
+  outside the aperture. The 64 KiB template scratch is deliberately time-shared
+  with Z2 `GFXData`, relying on the synchronous Zorro register command/ACK path.
+- The shipped 2 MB profile has no PIP pool. The shipped 4 MB profile has one
+  224 KiB fixed PIP pool and does not enable arbitrary P96 offscreen
+  allocations. An 8 MB software profile exists, but there is no verified 8 MB
+  AutoConfig define/build target or release bitstream; do not advertise it as
+  a hardware variant.
+- For the production-client matrix, shared-window limits, fallbacks, and
+  hardware-qualification status, also read
+  `zz9000-sdk/docs/zz9k-zorro2-services.md` in the matching SDK checkout.
+
 ## Board / Bitstream Variants
 
 7 hardware/autoconfig variants controlled by Verilog `` `define `` blocks in `mntzorro.v`:
