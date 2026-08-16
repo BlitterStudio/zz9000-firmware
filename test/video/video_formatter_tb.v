@@ -25,10 +25,8 @@
 
 module video_formatter_tb;
 
-localparam NLINES = 8;      // active lines (v_rez)
-localparam V_MAX = 16;
-localparam VS_START = 10;
-localparam VS_END = 12;
+localparam DEFAULT_LINES = 8;
+localparam MAXH = 1080;
 localparam MAXW = 1920;
 
 localparam OP_COLORMODE = 1;
@@ -46,6 +44,8 @@ localparam OP_OVERLAY_SIZE = 24;
 localparam OP_OVERLAY_KEY = 25;
 localparam OP_OVERLAY_SOURCE_SIZE = 26;
 localparam OP_OVERLAY_FRAME = 27;
+localparam OP_VIEWPORT_POS = 28;
+localparam OP_VIEWPORT_SIZE_COMMIT = 29;
 
 // config (from plusargs)
 integer cfg_cmode;
@@ -55,6 +55,16 @@ integer cfg_interlace;
 integer cfg_width;
 integer cfg_stream_gap_every;
 integer cfg_stream_gap_cycles;
+integer cfg_viewport;
+integer cfg_scanline;
+integer canvas_width;
+integer canvas_height;
+integer content_height;
+integer viewport_x;
+integer viewport_y;
+integer v_max;
+integer vs_start;
+integer vs_end;
 integer words_per_line;
 integer beats_per_line;
 integer src_pixels;
@@ -119,7 +129,7 @@ video_formatter uut (
   .control_interlace(cfg_interlace[0]),
   .control_vblank(control_vblank),
   .scanline_intensity(8'd0),
-  .scanline_width(2'b00),
+  .scanline_width(cfg_scanline ? 2'b01 : 2'b00),
   .scanline_parity(1'b0),
   .scanline_intensity2(8'd0)
 );
@@ -353,13 +363,13 @@ end
 // Source lines repeat by the configured scale factor for both progressive and
 // woven-interlaced input. Full-width interlace supplies 512 woven rows, then
 // uses x2 so the flickerfixer presents a stable 1024-line progressive frame.
-reg [31:0] cap [0:NLINES*MAXW-1];
+reg [31:0] cap [0:MAXH*MAXW-1];
 reg [11:0] xcnt = 0;
 integer row;
 always @(posedge dvi_clk) begin
   if (dvi_active_video === 1'b1) begin
     row = uut.counter_y - scale_y_factor;
-    if (row >= 0 && row < NLINES && xcnt < MAXW)
+    if (row >= 0 && row < canvas_height && xcnt < MAXW)
       cap[row * MAXW + xcnt] <= dvi_rgb;
     xcnt <= xcnt + 1;
   end else
@@ -369,7 +379,7 @@ end
 // frame counter (ticks once per frame at vsync start)
 integer frames = 0;
 always @(posedge dvi_clk)
-  if (uut.counter_y == VS_START && uut.counter_x == 0)
+  if (uut.counter_y == vs_start && uut.counter_x == 0)
     frames = frames + 1;
 
 `ifndef MASTER_DUT
@@ -421,6 +431,8 @@ initial begin
   cfg_width = 64;
   cfg_stream_gap_every = 0;
   cfg_stream_gap_cycles = 0;
+  cfg_viewport = 0;
+  cfg_scanline = 0;
   stream_beats_sent = 0;
   if ($value$plusargs("CMODE=%d", cfg_cmode)) ;
   if ($value$plusargs("SCALEX=%d", cfg_scalex)) ;
@@ -429,10 +441,34 @@ initial begin
   if ($value$plusargs("WIDTH=%d", cfg_width)) ;
   if ($value$plusargs("STREAM_GAP_EVERY=%d", cfg_stream_gap_every)) ;
   if ($value$plusargs("STREAM_GAP_CYCLES=%d", cfg_stream_gap_cycles)) ;
+  if ($value$plusargs("VIEWPORT=%d", cfg_viewport)) ;
+  if ($value$plusargs("SCANLINE=%d", cfg_scanline)) ;
+
+  canvas_width = cfg_width;
+  canvas_height = DEFAULT_LINES;
+  content_height = DEFAULT_LINES;
+  viewport_x = 0;
+  viewport_y = 0;
+  if (cfg_viewport == 1) begin
+    canvas_width = cfg_width + 16;
+    canvas_height = 12;
+    content_height = 8;
+    viewport_x = 7;
+    viewport_y = 3;
+  end else if (cfg_viewport == 2) begin
+    canvas_width = 1920;
+    canvas_height = 1080;
+    content_height = 1024;
+    viewport_x = 320;
+    viewport_y = 28;
+  end
+  v_max = canvas_height + 8;
+  vs_start = canvas_height + 2;
+  vs_end = canvas_height + 4;
 
   scale_y_factor = 1 << cfg_scaley;
   src_pixels = cfg_width >> cfg_scalex;
-  src_lines = NLINES >> cfg_scaley;
+  src_lines = content_height >> cfg_scaley;
   case (cfg_cmode)
     0: words_per_line = src_pixels / 4;
     2: words_per_line = src_pixels;
@@ -443,7 +479,7 @@ initial begin
 `else
   beats_per_line = (words_per_line + 1) / 2;
 `endif
-  h_max = cfg_width + 56;
+  h_max = canvas_width + 56;
 
   $display("CONFIG cmode=%0d scalex=%0d scaley=%0d interlace=%0d width=%0d words=%0d beats=%0d gap=%0d/%0d",
            cfg_cmode, cfg_scalex, cfg_scaley, cfg_interlace, cfg_width,
@@ -454,10 +490,14 @@ initial begin
   aresetn <= 1;
   repeat (4) @(negedge aclk);
 
-  op(OP_DIMENSIONS, (NLINES << 16) | cfg_width);
-  op(OP_MAX, (V_MAX << 16) | h_max);
-  op(OP_HS, ((cfg_width + 16) << 16) | (cfg_width + 32));
-  op(OP_VS, (VS_START << 16) | VS_END);
+  op(OP_DIMENSIONS, (canvas_height << 16) | canvas_width);
+  if (cfg_viewport != 0) begin
+    op(OP_VIEWPORT_POS, (viewport_y << 16) | viewport_x);
+    op(OP_VIEWPORT_SIZE_COMMIT, (content_height << 16) | cfg_width);
+  end
+  op(OP_MAX, (v_max << 16) | h_max);
+  op(OP_HS, ((canvas_width + 16) << 16) | (canvas_width + 32));
+  op(OP_VS, (vs_start << 16) | vs_end);
   op(OP_COLORMODE, cfg_cmode);
   op(OP_SCALE, ((cfg_scaley & 3) << 1) | (cfg_scalex & 1));
   op(OP_SPRITEXY, (2000 << 16) | 2000);
@@ -477,10 +517,21 @@ initial begin
   // Captured rows are normalized to zero at the first active line.
   mism = 0;
   shown = 0;
-  for (i = 0; i < NLINES; i = i + 1)
-    for (x = 1; x < cfg_width; x = x + 1) begin
+  for (i = 0; i < canvas_height; i = i + 1)
+    for (x = (cfg_viewport == 0 ? 1 : 0); x < canvas_width; x = x + 1) begin
       got = cap[i * MAXW + x];
-      exp = expected_pix(i >> cfg_scaley, x - 1);
+      if (cfg_viewport != 0 &&
+          (x < viewport_x || x >= viewport_x + cfg_width ||
+           i < viewport_y || i >= viewport_y + content_height))
+        exp = 0;
+      else if (cfg_viewport != 0)
+        exp = expected_pix((i - viewport_y) >> cfg_scaley,
+                           x - viewport_x);
+      else
+        exp = expected_pix(i >> cfg_scaley, x - 1);
+      if (cfg_scanline != 0 && cfg_viewport != 0 &&
+          ((i - viewport_y) & 1) == 0)
+        exp = 0;
       if (got !== exp) begin
         mism = mism + 1;
         if (shown < 24) begin
@@ -491,7 +542,85 @@ initial begin
     end
 
 `ifndef MASTER_DUT
-  if (cfg_scalex == 0 && cfg_scaley == 0 && cfg_cmode != 0 &&
+  if (cfg_viewport == 1 && cfg_scalex == 0 && cfg_scaley == 0 &&
+      cfg_cmode == 2) begin
+    op(OP_OVERLAY_POS, 0);
+    op(OP_OVERLAY_SIZE, (3 << 16) | 9);
+    op(OP_OVERLAY_SOURCE_SIZE, (3 << 16) | 9);
+    op(OP_OVERLAY_KEY, 0);
+    op(OP_OVERLAY_FRAME, 1);
+    overlay_stream_en = 1;
+    op(OP_OVERLAY_CTRL, 1);
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 5);
+    for (i = 0; i < canvas_height; i = i + 1)
+      for (x = 0; x < canvas_width; x = x + 1) begin
+        got = cap[i * MAXW + x];
+        if (i >= viewport_y && i < viewport_y + 3 &&
+            x >= viewport_x && x < viewport_x + 9)
+          exp = expected_overlay(i - viewport_y);
+        else if (i >= viewport_y && i < viewport_y + content_height &&
+                 x >= viewport_x && x < viewport_x + cfg_width)
+          exp = expected_pix(i - viewport_y, x - viewport_x);
+        else
+          exp = 0;
+        exp = exp & 32'h00ffffff;
+        if (got !== exp) begin
+          mism = mism + 1;
+          if (shown < 48) begin
+            $display("VIEWPORT PIP MISMATCH row=%0d x=%0d got=%08x exp=%08x",
+                     i, x, got, exp);
+            shown = shown + 1;
+          end
+        end
+      end
+
+    op(OP_OVERLAY_POS, (16'hffff << 16) | 16'hfffc); /* -4,-1 */
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 5);
+    for (i = 0; i < canvas_height; i = i + 1)
+      for (x = 0; x < canvas_width; x = x + 1) begin
+        got = cap[i * MAXW + x];
+        if (i >= viewport_y && i < viewport_y + 2 &&
+            x >= viewport_x && x < viewport_x + 5)
+          exp = expected_overlay(i - viewport_y + 1);
+        else if (i >= viewport_y && i < viewport_y + content_height &&
+                 x >= viewport_x && x < viewport_x + cfg_width)
+          exp = expected_pix(i - viewport_y, x - viewport_x);
+        else
+          exp = 0;
+        exp = exp & 32'h00ffffff;
+        if (got !== exp)
+          mism = mism + 1;
+      end
+
+    op(OP_OVERLAY_POS,
+       ((content_height - 2) << 16) | (cfg_width - 4));
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 5);
+    for (i = 0; i < canvas_height; i = i + 1)
+      for (x = 0; x < canvas_width; x = x + 1) begin
+        got = cap[i * MAXW + x];
+        if (i >= viewport_y + content_height - 2 &&
+            i < viewport_y + content_height &&
+            x >= viewport_x + cfg_width - 4 &&
+            x < viewport_x + cfg_width)
+          exp = expected_overlay(i - (viewport_y + content_height - 2));
+        else if (i >= viewport_y && i < viewport_y + content_height &&
+                 x >= viewport_x && x < viewport_x + cfg_width)
+          exp = expected_pix(i - viewport_y, x - viewport_x);
+        else
+          exp = 0;
+        exp = exp & 32'h00ffffff;
+        if (got !== exp)
+          mism = mism + 1;
+      end
+    op(OP_OVERLAY_CTRL, 0);
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 2);
+  end
+
+  if (cfg_viewport == 0 && cfg_scalex == 0 && cfg_scaley == 0 && cfg_cmode != 0 &&
       cfg_width >= 32) begin
     op(OP_OVERLAY_POS, (2 << 16) | 8);
     op(OP_OVERLAY_SIZE, (3 << 16) | 9);
@@ -507,7 +636,7 @@ initial begin
       $display("OVERLAY PREFETCH MISMATCH line 1 was not requested early");
     end
 
-    for (i = 0; i < NLINES; i = i + 1)
+    for (i = 0; i < DEFAULT_LINES; i = i + 1)
       for (x = 1; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 2 && i < 5 && (x - 1) >= 8 && (x - 1) < 17)
@@ -530,7 +659,7 @@ initial begin
     op(OP_OVERLAY_POS, (2 << 16) | (cfg_width - 9));
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 5);
-    for (i = 0; i < NLINES; i = i + 1)
+    for (i = 0; i < DEFAULT_LINES; i = i + 1)
       for (x = 1; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 2 && i < 5 && (x - 1) >= cfg_width - 9)
@@ -557,7 +686,7 @@ initial begin
     op(OP_OVERLAY_SOURCE_SIZE, (3 << 16) | cfg_width);
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 5);
-    for (i = 0; i < NLINES; i = i + 1)
+    for (i = 0; i < DEFAULT_LINES; i = i + 1)
       for (x = 1; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 2 && i < 5)
@@ -585,7 +714,7 @@ initial begin
     op(OP_OVERLAY_SOURCE_SIZE, (3 << 16) | 9);
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 6);
-    for (i = 0; i < NLINES; i = i + 1)
+    for (i = 0; i < DEFAULT_LINES; i = i + 1)
       for (x = 1; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 1 && i < 7 && (x - 1) >= 4 && (x - 1) < 22) begin
@@ -612,7 +741,7 @@ initial begin
     op(OP_OVERLAY_SIZE, (2 << 16) | 5);
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 6);
-    for (i = 0; i < NLINES; i = i + 1)
+    for (i = 0; i < DEFAULT_LINES; i = i + 1)
       for (x = 1; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 2 && i < 4 && (x - 1) >= 8 && (x - 1) < 13) begin
@@ -639,7 +768,7 @@ initial begin
     op(OP_OVERLAY_SIZE, (6 << 16) | 18);
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 6);
-    for (i = 0; i < NLINES; i = i + 1)
+    for (i = 0; i < DEFAULT_LINES; i = i + 1)
       for (x = 1; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i < 3 && (x - 1) < 14) begin
@@ -665,12 +794,28 @@ initial begin
     wait (frames >= overlay_start_frame + 2);
   end
 
-  check_dpms(0, 1, 1); // ON
-  check_dpms(1, 0, 1); // STANDBY: HSync off
-  check_dpms(2, 1, 0); // SUSPEND: VSync off
-  check_dpms(3, 0, 0); // OFF
-  op(OP_DPMS, 0);
-  mism = mism + dpms_errors;
+  if (cfg_viewport != 2) begin
+    check_dpms(0, 1, 1); // ON
+    check_dpms(1, 0, 1); // STANDBY: HSync off
+    check_dpms(2, 1, 0); // SUSPEND: VSync off
+    check_dpms(3, 0, 0); // OFF
+    op(OP_DPMS, 0);
+    mism = mism + dpms_errors;
+  end
+
+  if (cfg_viewport == 1) begin
+    op(OP_DIMENSIONS, (content_height << 16) | cfg_width);
+    overlay_start_frame = frames;
+    wait (frames >= overlay_start_frame + 3);
+    if (uut.vga_viewport_x !== 0 || uut.vga_viewport_y !== 0 ||
+        uut.vga_viewport_width !== cfg_width ||
+        uut.vga_viewport_height !== content_height) begin
+      mism = mism + 1;
+      $display("VIEWPORT RESET MISMATCH x=%0d y=%0d w=%0d h=%0d",
+               uut.vga_viewport_x, uut.vga_viewport_y,
+               uut.vga_viewport_width, uut.vga_viewport_height);
+    end
+  end
 `endif
 
   $display("RESULT cmode=%0d scalex=%0d scaley=%0d width=%0d MISMATCHES=%0d",
@@ -680,7 +825,7 @@ end
 
 // watchdog
 initial begin
-  #20_000_000;
+  #500_000_000;
   $display("RESULT TIMEOUT (frames=%0d)", frames);
   $finish;
 end

@@ -191,6 +191,40 @@ static int test_scanout_pipeline_keeps_master_alignment(const char *text)
 	return ok ? 0 : 1;
 }
 
+static int test_viewport_control_is_atomic(const char *text,
+	const char *mntzorro)
+{
+	int ok = 1;
+
+	ok &= require_contains(text, "localparam OP_VIEWPORT_POS=28;");
+	ok &= require_contains(text, "localparam OP_VIEWPORT_SIZE_COMMIT=29;");
+	ok &= require_contains(text, "xpm_cdc_handshake #(");
+	ok &= require_contains(text, ".DEST_EXT_HSK(1)");
+	ok &= require_contains(text, ".WIDTH(72)");
+	ok &= require_contains(text, "reg [71:0] viewport_queued_payload");
+	ok &= require_contains(text, "reg viewport_queue_valid");
+	ok &= require_contains(text, "reg [71:0] viewport_cdc_payload");
+	ok &= require_contains(text, "if (!viewport_dest_ack && viewport_frame_boundary)");
+	ok &= require_contains(text, "vga_viewport_x <= viewport_dest_payload[47:36]");
+	ok &= require_contains(text, "vga_viewport_width <= viewport_dest_payload[11:0]");
+	ok &= require_contains(text, "wire viewport_output_active");
+	ok &= require_contains(text,
+	    "dvi_rgb <= viewport_output_active ? composed_rgb : 32'b0;");
+	ok &= require_contains(text,
+	    "wire [11:0] scanout_content_y = counter_y - vga_viewport_y;");
+	ok &= require_contains(text, "counter_y_d2 - vga_viewport_y");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "if (video_control_op == 29) begin");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "videocap_pitch <= video_control_data[11:0];");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "[15] formatter viewport layout");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "(`VCAP_FULLRATE_INT != 0), 1'b1, 7'b0, zorro_state");
+
+	return ok ? 0 : 1;
+}
+
 static int test_vertical_scale_shift_and_sprite_control_are_independent(
 	const char *text)
 {
@@ -200,7 +234,7 @@ static int test_vertical_scale_shift_and_sprite_control_are_independent(
 	ok &= require_contains(text, "reg [1:0] scale_y_effective;");
 	ok &= require_contains(text, "scale_y_effective <= scale_y;");
 	ok &= require_contains(text,
-	    "? ((counter_y - vga_scale_y_factor) >> vga_scale_y)");
+	    "? ((scanout_content_y - vga_scale_y_factor) >> vga_scale_y)");
 	ok &= require_absent(text, "control_interlace ? 2'd0 : scale_y",
 	                     "interlace still bypasses configured vertical scaling");
 	ok &= require_absent(text, "control_interlace ? 2'd0 : vga_scale_y",
@@ -626,7 +660,7 @@ static int test_videocap_full_width_requires_hardware_capability(
 	int ok = 1;
 
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "(`VCAP_FULLRATE_INT != 0), 8'b0, zorro_state");
+	    "(`VCAP_FULLRATE_INT != 0), 1'b1, 7'b0, zorro_state");
 	ok &= require_source_contains("mntzorro.h", mntzorro_h,
 	    "MNTZORRO_STATUS_VCAP_FULLRATE");
 	ok &= require_source_contains("video.c", video,
@@ -693,7 +727,6 @@ int main(void)
 		result = test_dpms_gates_only_external_syncs(text);
 	if (!result)
 		result = test_overlay_rearms_only_after_generation_ack(text);
-	free(text);
 
 	linebuffer = read_file(OVERLAY_LINEBUFFER_PATH);
 	if (!linebuffer)
@@ -712,6 +745,9 @@ int main(void)
 	mntzorro = read_file(MNTZORRO_PATH);
 	if (!mntzorro)
 		return 1;
+	if (!result)
+		result = test_viewport_control_is_atomic(text, mntzorro);
+	free(text);
 	if (!result)
 		result = test_videocap_writeback_uses_axi_bursts(mntzorro);
 	if (!result)

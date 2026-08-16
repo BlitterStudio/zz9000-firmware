@@ -3013,6 +3013,13 @@ module MNTZorro_v0_1_S00_AXI
       videocap_pitch <= video_control_data[11:0];
     end
 
+    // The committed content width is authoritative after a larger output
+    // canvas has been installed by OP_DIMENSIONS.
+    if (video_control_op == 29) begin
+      // OP_VIEWPORT_SIZE_COMMIT = 29
+      videocap_pitch <= video_control_data[11:0];
+    end
+
     // snoop scanline settings sent over the video-control op path
     // (MNTVF_OP_SCANLINES). the video formatter ignores this op; it
     // exists so the ARM can apply ZZ9000.CFG scanline options at cold
@@ -3033,11 +3040,11 @@ module MNTZorro_v0_1_S00_AXI
     out_reg2 <= last_z3addr;
     // Status: [24] interlace, [23] videocap, [22] NTSC, [21] vblank,
     // [20] hblank, [19] SDK doorbell, [18] SDK IRQ ack, [17] SuperHires,
-    // [16] full-rate capture path.
+    // [16] full-rate capture path, [15] formatter viewport layout.
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
                 video_control_interlace, videocap_mode, vcap_ntsc, video_control_vblank, video_control_hblank,
                 sdk_doorbell_pending, sdk_irq_ack_pending, vcap_shres,
-                (`VCAP_FULLRATE_INT != 0), 8'b0, zorro_state};
+                (`VCAP_FULLRATE_INT != 0), 1'b1, 7'b0, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;

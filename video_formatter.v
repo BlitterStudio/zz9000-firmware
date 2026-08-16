@@ -76,6 +76,8 @@ localparam OP_OVERLAY_SIZE=24;
 localparam OP_OVERLAY_KEY=25;
 localparam OP_OVERLAY_SOURCE_SIZE=26;
 localparam OP_OVERLAY_FRAME=27;
+localparam OP_VIEWPORT_POS=28;
+localparam OP_VIEWPORT_SIZE_COMMIT=29;
 
 localparam DPMS_ON=0;
 localparam DPMS_STANDBY=1; // HSync disabled, VSync enabled
@@ -323,12 +325,130 @@ always @(posedge m_axis_vid_aclk)
     endcase
   end
 
-reg [31:0] control_data_in;
-reg [7:0] control_op_in;
-reg control_interlace_in;
-reg [31:0] control_data_in2;
-reg [7:0] control_op_in2;
-reg control_interlace_in2;
+reg [31:0] control_data_in = 0;
+reg [7:0] control_op_in = 0;
+reg control_interlace_in = 0;
+reg [31:0] control_data_in2 = 0;
+reg [7:0] control_op_in2 = 0;
+reg control_interlace_in2 = 0;
+
+/* Viewport position and size form one mode transaction.  The source-side
+ * bundle is held unchanged for the complete XPM handshake.  A second slot
+ * retains the latest complete mode while one bundle is in flight; therefore
+ * OP29 can replace an implicit full-canvas request queued by OP_DIMENSIONS
+ * without ever tearing the payload already crossing to the pixel clock. */
+localparam [1:0] VIEWPORT_IDLE   = 2'd0;
+localparam [1:0] VIEWPORT_LOAD   = 2'd1;
+localparam [1:0] VIEWPORT_SEND   = 2'd2;
+localparam [1:0] VIEWPORT_RETURN = 2'd3;
+reg [11:0] viewport_staged_x = 0;
+reg [11:0] viewport_staged_y = 0;
+reg [71:0] viewport_queued_payload = 0;
+reg viewport_queue_valid = 0;
+reg [71:0] viewport_cdc_payload = 0;
+reg viewport_cdc_send = 0;
+reg [1:0] viewport_cdc_state = VIEWPORT_IDLE;
+wire viewport_cdc_received;
+wire [71:0] viewport_dest_payload;
+wire viewport_dest_req;
+reg viewport_dest_ack = 0;
+wire viewport_control_event =
+  control_op_in != control_op_in2 || control_data_in != control_data_in2;
+wire viewport_dimensions_event =
+  viewport_control_event && control_op_in == OP_DIMENSIONS;
+wire viewport_commit_event =
+  viewport_control_event && control_op_in == OP_VIEWPORT_SIZE_COMMIT;
+wire viewport_geometry_unsettled =
+  viewport_cdc_state != VIEWPORT_IDLE || viewport_queue_valid ||
+  viewport_dimensions_event || viewport_commit_event;
+wire viewport_unsettled_pixel;
+
+xpm_cdc_handshake #(
+  .DEST_EXT_HSK(1),
+  .DEST_SYNC_FF(3),
+  .INIT_SYNC_FF(1),
+  .SIM_ASSERT_CHK(0),
+  .SRC_SYNC_FF(3),
+  .WIDTH(72)
+) viewport_control_cdc (
+  .src_clk(m_axis_vid_aclk),
+  .src_in(viewport_cdc_payload),
+  .src_send(viewport_cdc_send),
+  .src_rcv(viewport_cdc_received),
+  .dest_clk(dvi_clk),
+  .dest_out(viewport_dest_payload),
+  .dest_req(viewport_dest_req),
+  .dest_ack(viewport_dest_ack)
+);
+
+xpm_cdc_single #(
+  .DEST_SYNC_FF(3),
+  .INIT_SYNC_FF(1),
+  .SIM_ASSERT_CHK(0),
+  .SRC_INPUT_REG(0)
+) viewport_unsettled_cdc (
+  .src_clk(m_axis_vid_aclk),
+  .src_in(viewport_geometry_unsettled),
+  .dest_clk(dvi_clk),
+  .dest_out(viewport_unsettled_pixel)
+);
+
+always @(posedge m_axis_vid_aclk) begin
+  if (!aresetn) begin
+    viewport_staged_x <= 0;
+    viewport_staged_y <= 0;
+    viewport_queued_payload <= 0;
+    viewport_queue_valid <= 0;
+    viewport_cdc_payload <= 0;
+    viewport_cdc_send <= 0;
+    viewport_cdc_state <= VIEWPORT_IDLE;
+  end else begin
+    case (viewport_cdc_state)
+      VIEWPORT_IDLE: begin
+        if (viewport_queue_valid) begin
+          viewport_cdc_payload <= viewport_queued_payload;
+          viewport_queue_valid <= 0;
+          viewport_cdc_state <= VIEWPORT_LOAD;
+        end
+      end
+      VIEWPORT_LOAD: begin
+        viewport_cdc_send <= 1;
+        viewport_cdc_state <= VIEWPORT_SEND;
+      end
+      VIEWPORT_SEND: begin
+        if (viewport_cdc_received) begin
+          viewport_cdc_send <= 0;
+          viewport_cdc_state <= VIEWPORT_RETURN;
+        end
+      end
+      VIEWPORT_RETURN: begin
+        if (!viewport_cdc_received)
+          viewport_cdc_state <= VIEWPORT_IDLE;
+      end
+    endcase
+
+    if (viewport_control_event && control_op_in == OP_VIEWPORT_POS) begin
+      viewport_staged_y <= control_data_in[27:16];
+      viewport_staged_x <= control_data_in[11:0];
+    end
+
+    if (viewport_dimensions_event) begin
+      viewport_staged_x <= 0;
+      viewport_staged_y <= 0;
+      viewport_queued_payload <= {
+        control_data_in[27:16], control_data_in[11:0],
+        12'b0, 12'b0, control_data_in[27:16], control_data_in[11:0]
+      };
+      viewport_queue_valid <= 1;
+    end else if (viewport_commit_event) begin
+      viewport_queued_payload <= {
+        screen_height, screen_width, viewport_staged_x, viewport_staged_y,
+        control_data_in[27:16], control_data_in[11:0]
+      };
+      viewport_queue_valid <= 1;
+    end
+  end
+end
 
 // control input
 always @(posedge m_axis_vid_aclk)
@@ -336,10 +456,19 @@ begin
   control_op_in        <= control_op;
   control_data_in      <= control_data;
   control_interlace_in <= control_interlace;
+  control_op_in2        <= control_op_in;
+  control_data_in2      <= control_data_in;
+  control_interlace_in2 <= control_interlace_in;
 
   if (next_input_state==0) begin
     vsync_request <= 0;
   end
+
+  /* Re-arm the MM2S line phase after the pixel domain has installed a
+   * rectangle.  This is essential when a queued explicit viewport follows
+   * the implicit full-canvas dimensions request before scanout starts. */
+  if (viewport_cdc_received)
+    vsync_request <= 1;
 
   if (control_interlace_in != control_interlace) begin
     vsync_request <= 1;
@@ -534,6 +663,14 @@ reg [11:0] vga_v_sync_start;
 reg [11:0] vga_v_sync_end;
 reg [11:0] counter_scanout;
 reg [2:0] vga_colormode;
+reg [11:0] vga_canvas_width = 0;
+reg [11:0] vga_canvas_height = 0;
+reg [11:0] vga_viewport_x = 0;
+reg [11:0] vga_viewport_y = 0;
+reg [11:0] vga_viewport_width = 0;
+reg [11:0] vga_viewport_height = 0;
+reg viewport_initialized = 0;
+reg viewport_geometry_ready = 0;
 
 reg vga_scale_x = 0;
 reg [1:0] vga_scale_y = 2'd0;
@@ -588,9 +725,12 @@ reg [15:0] overlay_scale_source_y = 0;
 reg [15:0] overlay_scale_y_error = 0;
 
 wire signed [16:0] overlay_screen_x =
-  $signed({1'b0, counter_x}) - $signed(PIPE_DELAY);
+  $signed({1'b0, counter_x}) - $signed(PIPE_DELAY) +
+  (vga_viewport_x != 0 ? 17'sd1 : 17'sd0) -
+  $signed({1'b0, vga_viewport_x});
 wire signed [16:0] overlay_screen_y =
-  $signed({1'b0, counter_y}) - 17'sd1;
+  $signed({1'b0, counter_y}) - 17'sd1 -
+  $signed({1'b0, vga_viewport_y});
 wire signed [16:0] overlay_local_x =
   overlay_screen_x - $signed(vga_overlay_x);
 wire signed [16:0] overlay_local_y =
@@ -628,8 +768,8 @@ wire signed [16:0] overlay_visible_x0 =
 wire signed [16:0] overlay_visible_x1_unclipped =
   $signed(vga_overlay_x) + $signed({1'b0, vga_overlay_width});
 wire signed [16:0] overlay_visible_x1 =
-  overlay_visible_x1_unclipped > $signed({1'b0, vga_h_rez})
-    ? $signed({1'b0, vga_h_rez}) : overlay_visible_x1_unclipped;
+  overlay_visible_x1_unclipped > $signed({1'b0, vga_viewport_width})
+    ? $signed({1'b0, vga_viewport_width}) : overlay_visible_x1_unclipped;
 wire [31:0] overlay_yuv422;
 wire overlay_line_ready;
 wire [31:0] overlay_accepted_generation;
@@ -675,10 +815,26 @@ video_overlay_pixel overlay_pixel (
 
 wire [31:0] pixout_composited = vga_overlay_enable
   ? {8'b0, overlay_rgb} : pixout;
+wire [31:0] composed_rgb = vga_overlay_enable
+  ? ((sprite_on_d4 && sprite_pix_d4 != 'hff00ff)
+      ? sprite_pix_d4 : pixout_sl)
+  : ((sprite_on && sprite_pix != 'hff00ff) ? sprite_pix : pixout_sl);
+wire signed [16:0] viewport_output_x =
+  $signed({1'b0, counter_x}) - $signed(PIPE_DELAY) -
+  (vga_overlay_enable ? $signed(OVERLAY_PIPE_DELAY) : 17'sd0);
+wire [11:0] viewport_output_y = counter_y - vga_scale_y_factor;
+wire viewport_output_active = viewport_geometry_ready &&
+  counter_y >= vga_scale_y_factor &&
+  viewport_output_x >= $signed({1'b0, vga_viewport_x}) &&
+  viewport_output_x < $signed({1'b0, vga_viewport_x + vga_viewport_width}) &&
+  viewport_output_y >= vga_viewport_y &&
+  viewport_output_y < vga_viewport_y + vga_viewport_height;
+wire [11:0] scanline_content_y = counter_y_d2 - vga_viewport_y;
 
+wire [11:0] scanout_content_y = counter_y - vga_viewport_y;
 wire [11:0] scanout_source_line =
-  (counter_y >= vga_scale_y_factor)
-    ? ((counter_y - vga_scale_y_factor) >> vga_scale_y)
+  (counter_y >= vga_viewport_y + vga_scale_y_factor)
+    ? ((scanout_content_y - vga_scale_y_factor) >> vga_scale_y)
     : 12'b0;
 
 // Ping-pong line buffer: VDMA fills the next source line in one bank while
@@ -734,9 +890,58 @@ xpm_memory_sdpram #(
   .dbiterrb()
 );
 
+wire viewport_frame_boundary = counter_x == 0 && counter_y == 0;
+
+/* The destination owns the visible rectangle and acknowledges only after a
+ * complete bundle has been installed at a frame boundary. */
+always @(posedge dvi_clk) begin
+  if (!aresetn) begin
+    viewport_dest_ack <= 0;
+    vga_canvas_width <= 0;
+    vga_canvas_height <= 0;
+    vga_viewport_x <= 0;
+    vga_viewport_y <= 0;
+    vga_viewport_width <= 0;
+    vga_viewport_height <= 0;
+    viewport_initialized <= 0;
+  end else begin
+    /* Before the first request reaches a newly started pixel clock, preserve
+     * the legacy full-canvas counter/fetch phase. */
+    if (!viewport_initialized) begin
+      vga_viewport_x <= 0;
+      vga_viewport_y <= 0;
+      vga_viewport_width <= screen_width;
+      vga_viewport_height <= screen_height;
+    end
+    if (!viewport_dest_req) begin
+      viewport_dest_ack <= 0;
+    end else if (!viewport_dest_ack && viewport_frame_boundary) begin
+      vga_canvas_height <= viewport_dest_payload[71:60];
+      vga_canvas_width <= viewport_dest_payload[59:48];
+      vga_viewport_x <= viewport_dest_payload[47:36];
+      vga_viewport_y <= viewport_dest_payload[35:24];
+      vga_viewport_height <= viewport_dest_payload[23:12];
+      vga_viewport_width <= viewport_dest_payload[11:0];
+      viewport_initialized <= 1;
+      viewport_dest_ack <= 1;
+    end
+  end
+end
+
 always @(posedge dvi_clk) begin
   overlay_fetch_request <= 0;
 
+  if (!aresetn)
+    viewport_geometry_ready <= 0;
+  else if (viewport_frame_boundary) begin
+    if (viewport_unsettled_pixel || viewport_dest_req)
+      viewport_geometry_ready <= 0;
+    else if (viewport_initialized)
+      viewport_geometry_ready <= 1;
+  end
+
+  /* Preserve the established canvas timing path.  The rectangle itself is
+   * atomic; geometry is blacked out while a mode transaction is unsettled. */
   vga_h_rez <= screen_width;
   vga_v_rez <= screen_height;
   vga_h_max <= screen_h_max - 1'b1;
@@ -873,7 +1078,8 @@ always @(posedge dvi_clk) begin
     4'b1011: counter_scanout_step <= 3;
   endcase
 
-  if (counter_x>vga_h_rez) begin
+  if (counter_x + 1'b1 < vga_viewport_x ||
+      counter_x > vga_viewport_x + vga_viewport_width) begin
     counter_scanout  <= 0;
     counter_subpixel <= counter_scanout_step;
   end else begin
@@ -904,8 +1110,10 @@ always @(posedge dvi_clk) begin
   endcase
 
   sprite_pix <= sprite_buffer[((sprite_py>>sprite_dbl)<<5)+(sprite_px>>sprite_dbl)];
-  if (counter_y >= vga_sprite_y && counter_y < vga_sprite_y2
-      && counter_x >= vga_sprite_x && counter_x < vga_sprite_x2) begin
+  if (counter_y >= vga_viewport_y + vga_sprite_y &&
+      counter_y < vga_viewport_y + vga_sprite_y2 &&
+      counter_x >= vga_viewport_x + vga_sprite_x &&
+      counter_x < vga_viewport_x + vga_sprite_x2) begin
     sprite_on <= 1;
     if (sprite_px < (SPRITE_W<<sprite_dbl)-1'b1)
       sprite_px <= sprite_px + 1'b1;
@@ -934,7 +1142,7 @@ if (!vga_scanlines_en || vga_scanline_width == 2'b00) begin
 end else case (vga_scanline_width)
     2'b01: begin
         // mode 1: 100/0 - one line in two black
-        if (counter_y_d2[0] == vga_scanline_parity)
+        if (scanline_content_y[0] == vga_scanline_parity)
             pixout_sl <= 32'b0;
         else
             pixout_sl <= pixout_composited;
@@ -942,7 +1150,7 @@ end else case (vga_scanline_width)
     2'b10: begin
         // mode 2: 100/62 - alternating full / 62.5% (no black lines)
         // 62.5% = >>1 (50%) + >>3 (12.5%)
-        if (counter_y_d2[0] == vga_scanline_parity)
+        if (scanline_content_y[0] == vga_scanline_parity)
             pixout_sl <= pixout_composited;
         else
             pixout_sl <= {8'b0,
@@ -955,7 +1163,7 @@ end else case (vga_scanline_width)
         // mode 3: 100/75/50/75 - soft gradient over 4 lines
         // 75% = >>1 (50%) + >>2 (25%)
         // 50% = >>1
-        case (counter_y_d2[1:0] ^ {1'b0, vga_scanline_parity})
+        case (scanline_content_y[1:0] ^ {1'b0, vga_scanline_parity})
             2'b00: pixout_sl <= pixout_composited;
             2'b01: pixout_sl <= {8'b0,
                 ({1'b0, pixout_composited[23:17]} + {2'b0, pixout_composited[23:18]}),
@@ -977,11 +1185,7 @@ end else case (vga_scanline_width)
     default: pixout_sl <= pixout_composited;
 endcase
 
-  if (vga_overlay_enable)
-    dvi_rgb <= (sprite_on_d4 && sprite_pix_d4!='hff00ff)
-               ? sprite_pix_d4 : pixout_sl;
-  else
-    dvi_rgb <= (sprite_on && sprite_pix!='hff00ff) ? sprite_pix : pixout_sl;
+  dvi_rgb <= viewport_output_active ? composed_rgb : 32'b0;
 
   if (counter_x >= vga_h_max) begin
     counter_x <= 0;
@@ -997,8 +1201,9 @@ endcase
   end
 
   if (counter_x==vga_h_rez) begin
-    if (counter_y<vga_v_rez-1'b1)
-      need_line_fetch <= counter_y + 1'b1;
+    if (counter_y >= vga_viewport_y &&
+        counter_y < vga_viewport_y + vga_viewport_height - 1'b1)
+      need_line_fetch <= counter_y - vga_viewport_y + 1'b1;
     else
       need_line_fetch <= 0;
   end
