@@ -101,130 +101,59 @@ shipped an `ns-pal` firmware flavor; its behavior is now the
 
 ## Configuration File (ZZ9000.CFG)
 
-The firmware reads an optional `ZZ9000.CFG` INI-style text file from
-the root of the FAT32 microSD card — next to `BOOT.bin` — once at cold
-boot (power-on). Options apply immediately, before the Amiga even
-starts booting, so they work without any driver, ENV: variable, or
-startup-sequence. An Amiga soft reset does not re-read the file;
-power-cycle after editing. Release ZIPs include a fully commented
-sample; the copy at the repo root documents every option:
+`ZZ9000.CFG` is an optional text file stored beside `BOOT.bin` in the root of
+the FAT32 microSD card. Firmware reads it once at power-on; a soft reset does
+not reload it. The easiest way to manage it is **ZZTop → Project → Settings**.
+Release ZIPs also include a fully commented [sample file](ZZ9000.CFG) for
+manual editing.
 
-| Key | Values | Replaces |
-|---|---|---|
-| `videocap_profile` | `full_60` (default), `full_exact`, `filtered_60`, `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60` | atomic native-video output policy |
-| `videocap_sample` | `average` (default), `even`, `odd` | native-video capture sample selection |
-| `videocap_crop_h` | `0`–`4095` (missing = Automatic) | horizontal capture origin in 28 MHz samples |
-| `videocap_crop_v` | `0`–`4095` (missing = Automatic) | vertical capture origin in lines |
-| `scanline_mode` | `0` (off, default) – `3` | ZZTop/ZZScanlines (still work at runtime) |
-| `scanline_parity` | `0` (default), `1` | ZZTop/ZZScanlines |
-| `int2` | `off` (default), `on` | `ENV:ZZ9K_INT2` (drivers query it) |
-| `offscreen_bitmaps` | `on` (default), `off` | `ENV:ZZ9000-NO-OFFSCREEN`, `OFFSCREENBITMAPS` tooltype |
-| `video_overlay` | `on` (default), `off` | `ENV:ZZ9000-NO-PIP`, `VIDEOPIP` tooltype |
-| `mac` | `aa:bb:cc:dd:ee:ff` | `ENV:ZZ9K_MAC` |
-| `hdf` | root-level image filename | fixed `zz9000.hdf` path |
+The file controls these boot-time defaults:
 
-Unknown keys and invalid values are logged on the debug UART and
-skipped. Runtime mechanisms (driver register writes, ZZTop) still
-override config values until the next power cycle. For the
-driver-consumed options (`int2`, `mac`, `videocap_mode`,
-`nonstandard_vsync`, `offscreen_bitmaps`, `video_overlay`), an existing
-`ENV:` variable or RTG tooltype takes precedence over the config file —
-remove those when migrating.
+| Key | Purpose |
+|---|---|
+| `videocap_profile` | Native output: `full_60` (default), `full_exact`, `filtered_60`, `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60` |
+| `videocap_sample` | Native-video capture sampling |
+| `videocap_crop_h` | Horizontal picture position; omit for Automatic |
+| `videocap_crop_v` | Vertical picture position; omit for Automatic |
+| `scanline_mode` | Scanline style, or off |
+| `scanline_parity` | Which line is darkened |
+| `int2` | Use INT2 instead of INT6 |
+| `offscreen_bitmaps` | Enable or disable Picasso96 off-screen bitmaps |
+| `video_overlay` | Enable or disable the Picasso96 video window |
+| `mac` | Ethernet MAC-address override |
+| `hdf` | Root-level HDF image used for SD-card boot |
 
-Automatic framing is resolved independently for each crop axis by the FPGA
-capture path. A full-rate bitstream using a full-width native-video profile
-uses `280/40`; filtered profiles and Denise-adapter/Super Denise bitstreams use
-the historical `188/26`. An explicit numeric key is always a literal Custom
-override, including `188`, `26`, `0`, and `4095`.
+For most systems, leave missing options at their defaults. A minimal custom
+file might look like this:
 
-`centered_1080p_60` preserves the existing 1280x1024 captured content and
-places it one-to-one at physical coordinate `(320,28)` in a 1920x1080 active
-raster. The content occupies `[320,1600) x [28,1052)`; every pixel outside
-that rectangle remains black, including after PIP, sprite, and scanline
-composition. This is native Amiga chipset video and is separate from the
-Picasso96 1920x1080x32 RTG screen mode.
+```ini
+videocap_profile = full_60
+scanline_mode = 2
+scanline_parity = 0
+```
 
-The centered profile keeps the existing 2200x1125 timing at a 150 MHz pixel
-clock. Its `60` name is nominal: the resulting refresh is approximately
-60.60606 Hz. It requires a matching viewport-capable, full-rate bitstream,
-firmware advertising capability bit 3, and current `ZZ9000.card`/ZZTop. The
-full-rate `zorro3`, `zorro3-nofast`, `zorro2`, and `zorro2-2mb` variants are
-eligible; filtered Denise/Super Denise variants are not. An old or mixed
-firmware/bitstream/driver/tool stack safely resolves the request to
-`full_60`/native mode 1 and does not preserve the centered identity.
-`full_60` remains the built-in default.
+`full_60` is the normal full-detail native-video mode. `full_exact` keeps the
+same detail while matching the detected PAL or NTSC refresh. On supported
+full-rate variants, `centered_1080p_60` places the unchanged 1280x1024 native
+picture in a 1920x1080 signal with black borders at approximately 60.61 Hz.
+It is separate from the Picasso96 1920x1080 RTG mode. Older or unsupported
+stacks safely fall back to `full_60`.
 
-The normal configuration lifecycle is unchanged: the SD-card file is read at
-cold boot, ZZTop writes staged settings only when **Save** is selected, and a
-power cycle applies that file. Valid runtime native-mode changes are applied
-at the next stable vblank. The centered profile does not add a monitor
-hot-plug or HDMI mode-switch guarantee.
+ZZTop 2.8 can also preview and calibrate native-picture positioning. Its
+**Save** action writes the file and keeps the previous copy as `ZZ9000.bak`;
+power-cycle afterwards to apply the saved settings at boot.
 
-Firmware 2.8 with the live-control capability and the matching protocol-1
-bitstream also expose acknowledged live framing control for ZZTop 2.8. The
-firmware capability bitmap is returned at register `0xE6`; older 2.8 firmware
-returns zero, keeping mixed RC1/current installations safely disabled. The
-FPGA publishes the exact applied raw
-Automatic/Custom state, resolved effective H/V values, capture-path signature,
-and detected PAL/NTSC standard. A valid live change crosses clock domains as
-one coherent word and becomes active only at a capture-frame boundary; the
-host does not treat it as applied until the matching sequence is acknowledged.
-The rejected status flag is sticky arbitration history, not request identity:
-ZZTop also verifies that the coherently read applied raw word exactly matches
-its request, and reports a competing-writer conflict instead of false success.
-Both the firmware revision and exact bitstream capability are required, so an
-old/new mixed installation fails closed and retains ordinary Automatic/manual
-Custom editing without offering live calibration.
+Keep these rules in mind:
 
-In ZZTop, **Calibrate** opens a native chipset PAL/NTSC test screen. Arrows move
-the visible picture by one unit, Shift+Arrows by 16, Enter returns an explicit
-Custom pair to Advanced Video, and Escape restores the exact entry state.
-Enter does not write the card: Advanced **Done** stages the pair and the main
-Settings **Save** action persists `videocap_crop_h` and `videocap_crop_v`.
-Changing to a different applied capture path requires Automatic + Save + cold
-boot before calibrating that path. If live acknowledgement stops because
-capture frames disappear, ZZTop keeps the calibration/rollback UI open rather
-than claiming success; cold boot remains the authoritative recovery to the
-last persisted CFG.
+- Existing `ENV:` variables and ZZ9000.card tooltypes take precedence over
+  equivalent file settings. Remove old overrides when migrating.
+- Use `videocap_profile` for new files. The older independent video keys remain
+  accepted only for compatibility.
+- Invalid or unknown entries are skipped rather than preventing boot.
+- Some options require matching current firmware, bitstream, and drivers.
 
-ZZTop can edit this file in place from AmigaOS (Project menu →
-Settings), writing it back over the FWUP path with a `ZZ9000.bak`
-backup. It rewrites the whole file from the keys it knows, so use
-**ZZTop 2.7 or newer** for schema-safe editing, and ZZTop 2.8 for live
-calibration. Version 2.6 exposes the older independent full-width and
-refresh controls, 2.5 predates the full-width and crop controls,
-2.4 predates `videocap_sample`, and 2.3 also predates
-`offscreen_bitmaps` and `video_overlay`; those older versions would drop
-the newer lines. The drivers repo's
-`tools/check-cfg-keys.sh` fails if the parser, this table, the sample
-`ZZ9000.CFG` and ZZTop's editor ever disagree on either keys or the ordered
-`videocap_profile` values.
-
-The older `videocap_mode`, `videocap_shres`, and `nonstandard_vsync` keys
-remain accepted for existing cards and hand-written files, but new files should
-use one `videocap_profile` so that width, resolution, and refresh cannot
-contradict one another.
-
-`yuv_rect` was accepted by firmware 2.4–2.7 but never consumed by
-anything, and was removed in 2.8. Its key slot stays reserved so the
-numeric ids the drivers query do not shift. A config file that still
-contains the line is harmless — it is logged as an unknown key and
-skipped.
-
-Amiga-side software can query parsed values through the
-`REG_ZZ_CONFIG_KEY` register (`0xE8`): write a key id from
-`zz_config.h`, then read back value (`0xE8`) and present flag (`0xEA`).
-The raw file contents can be fetched through `REG_ZZ_CONFIG_FILE`
-(`0xEC`): write `0` (reset handshake) then `1`, poll status (`0xEC`)
-until it leaves `0xFFFF`, then read length (`0xEE`) and the bytes from
-the shared buffer at card base + `0xA000`. Writing the file back is the
-existing FWUP path (`ZZ9000.CFG` is a flat root-level filename), which
-also leaves a `.bak` of the previous version.
-
-Cold-boot scanlines need a bitstream that decodes the
-`MNTVF_OP_SCANLINES` video-control op. The committed default and
-non-default release variant bitstreams in this repo have been rebuilt
-for that support; older bitstreams simply ignore the option.
+See the commented [ZZ9000.CFG sample](ZZ9000.CFG) for every accepted value and
+additional notes.
 
 ## Amiga MMU and Cache Notes
 
