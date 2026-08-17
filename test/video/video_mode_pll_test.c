@@ -7,6 +7,7 @@
  */
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "zz_video_modes.h"
@@ -17,6 +18,35 @@
 #define PLL_VCO_MIN_MHZ 800.0
 #define PLL_VCO_MAX_MHZ 1600.0
 #define FULL_NATIVE_SCALE_FACTOR 4
+
+static uint32_t rounded_pll_clock_hz(const struct zz_video_mode *mode)
+{
+	uint64_t numerator = UINT64_C(100000000) * (uint32_t)mode->mul;
+	uint32_t denominator = (uint32_t)mode->div * (uint32_t)mode->div2;
+
+	return (uint32_t)((numerator + denominator / 2U) / denominator);
+}
+
+static int check_all_mode_clock_metadata(void)
+{
+	int i;
+	int ok = 1;
+
+	for (i = 0; i < ZZVMODE_NUM; i++) {
+		const struct zz_video_mode *mode = &preset_video_modes[i];
+		uint32_t actual = rounded_pll_clock_hz(mode);
+
+		if ((uint32_t)mode->phz != actual) {
+			fprintf(stderr,
+				"mode %d %dx%d metadata clock %d does not match PLL %lu\n",
+				i, mode->hres, mode->vres, mode->phz,
+				(unsigned long)actual);
+			ok = 0;
+		}
+	}
+
+	return ok;
+}
 
 static int check_mode(const char *name, enum zz_video_modes index,
 			      double expected_refresh_hz)
@@ -108,6 +138,7 @@ int main(void)
 {
 	int ok = 1;
 
+	ok &= check_all_mode_clock_metadata();
 	ok &= check_mode("1280x1024 PAL exact-refresh",
 		ZZVMODE_1280x1024_NS_PAL, 49.92226);
 	ok &= check_mode("1280x1024 NTSC exact-refresh",
