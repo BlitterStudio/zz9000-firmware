@@ -19,78 +19,37 @@ drivers and tools live in
 >
 > Original upstream: <https://source.mnt.re/amiga/zz9000-firmware>
 
-## What This Fork Adds
+## What Changed Since the Original MNT Firmware
 
-Compared with the older MNT-era firmware releases, this fork has grown
-into a reproducible firmware, FPGA, and SDK-service platform.
+The original MNT project established the ZZ9000 hardware and its core Amiga
+support. This independent BlitterStudio fork continues from those pre-fork
+sources and turns the card into a broader, easier-to-use graphics and
+coprocessor platform. These are the highest-value differences for an owner:
 
-**Build and release**
+| Improvement | What it means in everyday use |
+|---|---|
+| **Sharper and more compatible native Amiga video** | Full-rate variants preserve the complete 28 MHz Amiga pixel stream, including SuperHires detail. Native video can be shown pixel-exact at 1280x1024 or centered unchanged inside a monitor-friendly 1920x1080 picture with clean black borders. |
+| **Live picture positioning** | Current ZZTop and matched firmware can open a calibration screen and move the captured Amiga picture with the cursor keys. You no longer need a long edit, reboot, inspect, and repeat cycle just to center the image. |
+| **Faster, more capable RTG output** | The fork adds substantial Picasso96 acceleration and fixes, a 64-bit display path, high-resolution Zorro III modes including 1920x1080x32, monitor power management, improved scanlines, and a hardware-scaled video window. |
+| **Video and audio playback on the card** | The two ARM cores can decode MPEG-1 video and MPEG audio for the SDK's **ZZPlay** application, keeping the classic Amiga CPU free for the interface and other work. Playback can use a window on Workbench or a dedicated screen. |
+| **Hardware-assisted images, archives, audio and secure networking** | Firmware services accelerate JPEG/PNG work, MP3/audio streaming, LHA/LZH decompression, and selected cryptography used by the accelerated AmiSSL build. Applications fall back safely when a service is unavailable. |
+| **Settings without special firmware builds** | One readable `ZZ9000.CFG` file on the microSD card now controls native-video profiles, framing, scanlines, INT2, MAC address, PIP/off-screen features, and the boot HDF. The old separate `ns-pal` firmware flavor is no longer needed. |
+| **Updates and recovery from AmigaOS** | `ZZFwUpdate` can install firmware files without removing the microSD card, keeps a `.bak` copy when replacing a file, and can restore that backup if an update boots but misbehaves. |
+| **More supported machines and card configurations** | Releases maintain seven FPGA images covering Zorro III, Zorro II, A500/ZZ9500CX, 2 MB, no-Fast-RAM, and Super Denise configurations. |
 
-- GCC/Docker/CI firmware builds, release ZIP packaging, and a buildable
-  FSBL source flow instead of relying only on Xilinx SDK-era binaries.
-  Vivado 2018.3 is needed only to rebuild FPGA bitstreams.
-- A maintained bitstream matrix for Zorro III, Zorro II, A500, 2 MB,
-  no-fast-RAM, and ZZ9500CX/Super Denise variants.
+The less visible work matters too: USB 2.0/Poseidon support, gigabit Ethernet,
+SD-card HDF boot, on-board audio improvements, safer Zorro II memory sharing,
+and a reproducible GCC/Docker/CI build and release process. FPGA releases are
+built and timing-checked for every supported hardware variant.
 
-**Display**
-
-- RTG acceleration for fills, blits, pattern drawing, planar conversion,
-  palette updates, and sprite/video state; 64-bit VDMA scanout and Zorro
-  III high-resolution modes including 1920x1080x32.
-- Amiga native video captured at the full 28 MHz AGA dot clock and scanned
-  out at 1280x1024: one lores pixel is 4x4 output pixels, one hires pixel
-  is 2x4, and SuperHires maps 1x4 with no horizontal scaling. The
-  capture origin is calibratable through `videocap_crop_h` and
-  `videocap_crop_v` in `ZZ9000.CFG`. A capability-gated profile can place
-  that same 1280x1024 content one-to-one inside a 1920x1080 native-video
-  canvas with black borders.
-- Picasso96 DPMS power management with independent HSync/VSync gating for
-  standby, suspend, and off, plus a mode-set wake fail-safe. Internal
-  raster and vblank timing keep running while the monitor sleeps.
-- Scanlines V2 (classic, soft, gradient) with parity control, gated to RTG
-  modes below 350 lines and AGA scandoubled modes.
-- A P96 video window (picture-in-picture) composited on the card, with
-  hardware overlay scaling in the video formatter.
-
-**Media and services**
-
-- MPEG-1 media sessions: video and MPEG audio decoded on the ARM cores and
-  presented through the video window or a dedicated screen, with A/V sync
-  and per-stage profiling. This is what the SDK's ZZPlay player drives.
-- SDK v2 mailbox services on the ARM cores: image decode/scale, audio/MP3,
-  archive/LHA decompression, crypto/TLS primitives backing the Amiga-side
-  `amissl` acceleration, and a dual-core scheduler for long-running jobs.
-- A fail-closed Zorro II aperture contract shared with the current driver and
-  SDK. Matched 2 MB and 4 MB bitstreams publish their exact framebuffer,
-  staging, host-window, audio, and optional PIP regions; firmware exposes the
-  host-window services only after the RTG driver has reserved and acknowledged
-  that layout. This brings compact image/DataType, archive, AmiSSL, and audio
-  clients to Zorro II, plus one bounded MPEG-1 PIP source on 4 MB cards. An
-  invalid or unacknowledged generation-1 descriptor fails closed. For
-  descriptor-absent legacy cards, only the 4 MB compatibility case retains the
-  historical fixed 64 KiB host window, without a negotiated layout or PIP;
-  legacy 2 MB and unknown sizes reject it.
-- Audio playback through the on-board ADAU codec, including firmware-side
-  MP3 and ADPCM decoding.
-
-On Zorro II, use firmware, SDK payloads, and drivers from the same release.
-Both shipped 2 MB and 4 MB profiles provide a shared 64 KiB CPU-visible host
-window; only the 4 MB profile provides a 224 KiB PIP pool. The 2 MB profile
-therefore supports compact ARM services but not ZZPlay video. Arbitrary P96
-offscreen allocation and Zorro III Fast RAM are not enabled on Zorro II. The
-software contract contains an 8 MB profile for future use, but no 8 MB
-AutoConfig bitstream variant is currently shipped. See the SDK's
-[Zorro II service matrix](https://github.com/BlitterStudio/zz9000-sdk/blob/master/docs/zz9k-zorro2-services.md)
-for client-specific limits and fallback behavior.
-
-**System**
-
-- `ZZ9000.CFG` cold-boot configuration on the SD card, replacing one-off
-  firmware flavors such as `ns-pal` (see below).
-- SD-card HDF boot with firmware-side extent mapping, and FWUP/RESTORE
-  firmware-file handling so updates need no card removal.
-- USB 2.0 host support through the ARM EHCI stack for the Poseidon driver,
-  and gigabit Ethernet through the Zynq GEM.
+The firmware, AmigaOS drivers, and SDK applications are designed as one
+matched release. This is especially important on Zorro II, where the current
+stack safely agrees which parts of the smaller 2 MB or 4 MB address window may
+be used. Both shipped Zorro II profiles support compact image, archive, audio,
+and secure-network services; the 4 MB profile also has room for one bounded
+ZZPlay picture-in-picture source. See the SDK's
+[plain-language Zorro II service matrix](https://github.com/BlitterStudio/zz9000-sdk/blob/master/docs/zz9k-zorro2-services.md)
+for the exact limits.
 
 ## Installing Firmware
 
