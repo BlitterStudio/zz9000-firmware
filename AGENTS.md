@@ -4,6 +4,15 @@
 
 FPGA logic (Verilog) + bare-metal ARM firmware for the MNT ZZ9000 Zorro II/III graphics and coprocessor card. Xilinx Zynq-7020 SoC (dual Cortex-A9 + FPGA fabric). GPL-3.0-or-later.
 
+## Matched Release Contract
+
+Firmware, committed bitstreams, `zz9000-drivers`, and the SDK payload pinned by
+the drivers form one release set. Coordinate changes to registers, capability
+bits, mailbox services, Zorro II layout descriptors, or video-mode identities
+across those repositories. Preserve capability-gated fallbacks for mixed
+versions, but do not advertise a feature until the matched stack and applicable
+hardware variants have been built and tested.
+
 ## Build Commands (Most Important)
 
 Scripts are composable — nothing calls anything else implicitly. All run from repo root.
@@ -25,12 +34,18 @@ BOOTGEN=/path/to/bootgen ./build_bootimage.sh   # → bootimage_work/BOOT.bin
 **HDL change (requires Vivado 2018.3 on Linux, or PS1 on Windows):**
 ```bash
 ./build_bitstream.sh              # → bootimage_work/zz9000_ps_wrapper.bit
-# Then commit the .bit file — CI cannot run Vivado!
 ```
+
+```powershell
+.\build_bitstream.ps1             # clean-regenerates the Vivado project first
+```
+
+Then commit the resulting `.bit` file — CI cannot run Vivado. Never synthesize
+from an old generated `ZZ9000_proto/` project.
 
 **Release packaging:**
 ```bash
-./build_release_assets.sh --tag v2.3.0   # → release/*.zip (one per hardware variant, one firmware flavor)
+./build_release_assets.sh --tag vX.Y.Z   # → release/*.zip (one per hardware variant, one firmware flavor)
 ```
 
 ## Toolchain Gotchas
@@ -43,9 +58,21 @@ BOOTGEN=/path/to/bootgen ./build_bootimage.sh   # → bootimage_work/BOOT.bin
 
 - GitHub Actions (`.github/workflows/build.yml`) builds firmware + packages release ZIPs on every push/PR.
 - **CI does NOT run Vivado.** HDL changes must commit updated `.bit` files under `bootimage_work/`.
-- Tag a release: `git tag -a v2.3.0 && git push origin v2.3.0`. Tags with `-` (e.g., `v2.3.0-rc1`) become pre-releases.
-- CI builds one firmware flavor. The former `ns-pal` flavor is replaced by `ZZ9000.CFG` on the SD card (`videocap_mode = pal` + `nonstandard_vsync = pal`); the `DEFAULT_NS_VIDEOCAP` flag still works for manual builds.
+- Tag a release: `git tag -a vX.Y.Z && git push origin vX.Y.Z`. Tags with `-` (for example `vX.Y.Z-rc1`) become pre-releases.
+- CI builds one firmware flavor. The former `ns-pal` flavor is replaced by the atomic `videocap_profile = filtered_pal_exact` setting in `ZZ9000.CFG`; the legacy `videocap_mode`, `videocap_shres`, and `nonstandard_vsync` keys remain parser compatibility only. The `DEFAULT_NS_VIDEOCAP` flag still works for manual builds.
 - Do not reintroduce firmware-flavor release variants for PAL/native video, scanlines, INT2, MAC, or HDF selection; those are `ZZ9000.CFG` settings.
+
+### `ZZ9000.CFG` contract
+
+- Configuration is loaded from the SD card at cold boot; it is not a live
+  settings channel. A changed file requires a full power cycle to take effect.
+- `zz_config.c` is the source of truth for accepted keys. Keep its canonical
+  key set and ordered `videocap_profile` values aligned with `ZZ9000.CFG`, this
+  repo's README, and `zz9000-drivers/common/zzcfg_amiga.c`. Run the drivers
+  repo's `tools/check-cfg-keys.sh` after changing any of them.
+- Profile identities are append-only. Invalid values must leave the previous
+  complete setting untouched; do not recreate independently mutable video-mode,
+  resolution, and refresh controls.
 
 ## Testing
 
@@ -60,14 +87,20 @@ make -C test/palette test          # primary-CLUT shadow + big-endian query pack
 test/video/run_formatter_sim.sh current   # xsim functional sim (Vivado machine)
 ```
 
+Also run the affected suites under `test/allocator`, `test/aperture`,
+`test/audio`, `test/fwupdate`, `test/media`, and `test/sd_activity_led` when
+their contracts are touched. Every one of those directories has a `make test`
+target.
+
 On the Windows Vivado machine, Docker Desktop can block xsim's localhost
 `PrivateChannel` handshake. If the sweep reports that error, stop Docker
 Desktop, terminate stale `xsim.exe`/`xsimk.exe` processes, and rerun.
 
-Any `video_formatter.v` change MUST pass the xsim sweep (pixel-exact, all
-color modes/scales, calibrated against the pre-64-bit formatter) before a
-bitstream is built from it. Hardware validation is still required for
-performance/bus timing changes.
+Any `video_formatter.v` or `video_overlay_linebuffer.v` change MUST pass the
+full xsim sweep (currently 25 pixel-exact configurations, including centered
+viewport transitions, all color modes/scales, and the pre-64-bit calibration)
+before a bitstream is built from it. Hardware validation is still required for
+performance, bus-timing, or HDMI-output changes.
 
 ## Architecture Overview
 
@@ -120,6 +153,20 @@ transactions hit L2 regardless of the ARM's MMU attributes.
   stage shifts the `counter_subpixel` byte/halfword unpack phase and swaps/duplicates
   pixel columns in the 8/15/16 bpp modes even though 32 bpp still looks fine. The xsim
   sweep catches this; run it.
+- **Centered viewport is an atomic cross-domain contract:** control-plane Ops 28/29
+  stage the origin and commit the complete rectangle; `OP_DIMENSIONS` bit 15 means
+  canvas-only. Do not publish partially updated geometry, repurpose that bit, or bypass
+  the frame-boundary handshake. Borders must remain black until a complete rectangle
+  is installed in the pixel domain.
+- **150 MHz is a release gate, not an estimate:** centered 1080p runs the formatter at
+  150 MHz (6.667 ns). Keep the OOC constraint/hooks and the routed
+  `verify_runtime_pixel_timing.tcl` gate intact; do not mask failing intra-clock paths
+  with timing exceptions. A formatter build is acceptable only when both setup and
+  hold pass before `write_bitstream`.
+- **Centered output is capability-gated:** the exact 1280×1024-in-1080p profile is
+  supported by the full-rate `zorro3`, `zorro3-nofast`, `zorro2`, and `zorro2-2mb`
+  variants. Mixed or older components must fall back to the established full-frame
+  60 Hz mode rather than leaving a centered request partially applied.
 
 ### Zorro II aperture contract (read before touching shared memory)
 
@@ -146,12 +193,36 @@ transactions hit L2 regardless of the ARM's MMU attributes.
   hardware-qualification status, also read
   `zz9000-sdk/docs/zz9k-zorro2-services.md` in the matching SDK checkout.
 
+### SD HDF storage contract
+
+- `sd_storage.c` uses FatFs to open the configured HDF and resolve its cluster
+  chain once, then serves normal Amiga block I/O as direct multi-sector reads
+  and writes to the recorded physical extents. Do not replace that hot path with
+  per-request `f_lseek`/`f_read`/`f_write`; fragmented multi-gigabyte images make
+  it pathologically slow.
+- The HDF must not be moved, resized, or reallocated while its extent map is in
+  use. Corrupt/unsupported chains and maps exceeding the fixed extent table
+  deliberately fall back to the legacy FatFs path.
+- FatFs work triggered by register/interrupt paths must be deferred to the main
+  loop. Firmware update and HDF access share the mounted filesystem; do not add
+  concurrent filesystem calls from an ISR.
+
 ## Board / Bitstream Variants
 
 7 hardware/autoconfig variants controlled by Verilog `` `define `` blocks in `mntzorro.v`:
 `zorro3`, `zorro3-nofast`, `zorro2`, `zorro2-2mb`, `a500`, `a500-2mb`, `a500plus`.
 
-Build with `./build_variant_bitstreams.sh` (Vivado machine only). The script rewrites the define block in `mntzorro.v`, builds, copies the `.bit`, then restores the source. Bitstream outputs live under `bootimage_work/variants/`. These are still required for releases; the removed matrix is the extra firmware flavor matrix, not the board bitstream matrix.
+Build with `./build_variant_bitstreams.sh` (Vivado machine only). On Windows,
+run it from Git Bash with:
+
+```bash
+BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1" ./build_variant_bitstreams.sh
+```
+
+The script rewrites the define block in `mntzorro.v`, builds, copies the `.bit`,
+then restores the source. Bitstream outputs live under
+`bootimage_work/variants/`. All seven remain required for releases; the removed
+matrix is the extra firmware-flavor matrix, not the board-bitstream matrix.
 
 ## Build Artifacts & Ignored Paths
 
