@@ -73,8 +73,7 @@ sessions), the standard 60 Hz videocap default produces visible
 stutter on PAL chipset output. The supported way to change this is the
 `ZZ9000.CFG` file on the SD card (issue #33):
 ```ini
-videocap_mode = pal
-nonstandard_vsync = pal
+videocap_profile = filtered_pal_exact
 ```
 The equivalent compile-time default still exists for manual builds
 (`EXTRA_CFLAGS=-DDEFAULT_NS_VIDEOCAP=1 ./build_firmware.sh`; the config
@@ -191,8 +190,7 @@ the workflow will build the firmware and publish a GitHub Release with
 contains a directory with the user-facing `BOOT.bin` and sample
 `ZZ9000.CFG` file to copy to the ZZ9000 microSD card. The workflow
 packages one standard firmware flavor; the former `ns-pal` behavior is
-selected with `videocap_mode = pal` plus `nonstandard_vsync = pal` in
-`ZZ9000.CFG`.
+selected with `videocap_profile = filtered_pal_exact` in `ZZ9000.CFG`.
 
 ```bash
 git tag -a v2.2.0 -m "Firmware 2.2.0"

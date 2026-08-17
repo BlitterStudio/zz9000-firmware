@@ -5,6 +5,7 @@
 
 #include "zz_regs.h"
 #include "zz_video_modes.h"
+#include "video_scale.h"
 
 #define MNTVF_OP_UNUSED 12
 #define MNTVF_OP_SPRITE_XY 13
@@ -16,6 +17,9 @@
 #define MNTVF_OP_POLARITY 10
 #define MNTVF_OP_SCALE 4
 #define MNTVF_OP_DIMENSIONS 2
+/* OP_DIMENSIONS bit 15 marks a larger output canvas whose capture pitch is
+ * published later by OP_VIEWPORT_SIZE_COMMIT. Width itself occupies [11:0]. */
+#define MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG (1U << 15)
 #define MNTVF_OP_COLORMODE 1
 #define MNTVF_OP_REPORT_LINE 17
 #define MNTVF_OP_PALETTE_SEL 18
@@ -67,6 +71,8 @@ static inline uint32_t videocap_control_pack(uint32_t sample,
 #define MNTVF_OP_OVERLAY_KEY 25
 #define MNTVF_OP_OVERLAY_SOURCE_SIZE 26
 #define MNTVF_OP_OVERLAY_FRAME 27
+#define MNTVF_OP_VIEWPORT_POS 28
+#define MNTVF_OP_VIEWPORT_SIZE_COMMIT 29
 
 enum zz_dpms_level {
 	ZZ_DPMS_ON,
@@ -88,15 +94,15 @@ struct ZZ_VIDEO_STATE {
 	uint32_t vmode_vdiv;
 
 	int videocap_video_mode;
+	int videocap_video_mode_applied;
+	int videocap_output_profile_requested;
+	int videocap_output_profile_applied;
 
 	int interlace_old;
 	int videocap_ntsc_old;
 	int videocap_shres_old;
 	int videocap_enabled_old;
-	int interlace_candidate;
-	int videocap_ntsc_candidate;
-	int videocap_shres_candidate;
-	uint8_t videocap_mode_stable_count;
+	struct video_videocap_detection_state videocap_detection;
 	uint16_t split_request_pos;
 	uint16_t split_pos;
 	uint32_t bgbuf_offset;
@@ -126,6 +132,9 @@ void video_reset();
 void isr_video(void *dummy);
 void video_mode_init(int mode, int scalemode, int colormode);
 void video_set_dpms(uint8_t level);
+int video_set_videocap_video_mode(uint32_t mode);
+int video_set_videocap_vsync(uint32_t setting);
+uint32_t video_firmware_capabilities(void);
 void hw_sprite_show(int show);
 void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite);
 void update_hw_sprite_clut(uint8_t *data_, uint8_t *colors, uint16_t w, uint16_t h, uint8_t keycolor);

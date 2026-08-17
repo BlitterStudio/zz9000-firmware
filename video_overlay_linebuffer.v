@@ -37,6 +37,8 @@ module video_overlay_linebuffer #(
   input  [11:0]           displayed_line,
   output [31:0]           read_data,
   output                  displayed_line_ready,
+  output reg [11:0]       scheduler_line = 0,
+  output reg              scheduler_line_ready = 0,
   output reg [31:0]       accepted_generation = 0
 );
 
@@ -397,8 +399,18 @@ wire displayed_in_bank1 = pixel_ready_valid1 &&
 wire displayed_bank = displayed_in_bank1 && !displayed_in_bank0;
 wire fetch_request_bank = displayed_in_bank0 ? 1'b1 :
                           displayed_in_bank1 ? 1'b0 : 1'b0;
+wire displayed_line_matches_tags = displayed_line[0]
+  ? ((pixel_ready_valid1 && pixel_ready_line1 == displayed_line) ||
+     (pixel_ready_valid0 && pixel_ready_line0 == displayed_line))
+  : ((pixel_ready_valid0 && pixel_ready_line0 == displayed_line) ||
+     (pixel_ready_valid1 && pixel_ready_line1 == displayed_line));
 assign memory_read_addr = {displayed_bank, read_addr};
 always @(posedge pixel_clk) begin
+  /* The visual BRAM address remains combinational and phase-locked.  Only
+   * the next-line scheduler consumes this registered query snapshot. */
+  scheduler_line <= displayed_line;
+  scheduler_line_ready <= display_enable && displayed_line_matches_tags;
+
   if (fetch_request) begin
     fetch_request_data <= {fetch_request_bank, fetch_line};
     fetch_request_pending <= 1;
@@ -435,11 +447,6 @@ always @(posedge pixel_clk) begin
   end
 end
 
-assign displayed_line_ready = display_enable &&
-  (displayed_line[0]
-    ? ((pixel_ready_valid1 && pixel_ready_line1 == displayed_line) ||
-       (pixel_ready_valid0 && pixel_ready_line0 == displayed_line))
-    : ((pixel_ready_valid0 && pixel_ready_line0 == displayed_line) ||
-       (pixel_ready_valid1 && pixel_ready_line1 == displayed_line)));
+assign displayed_line_ready = display_enable && displayed_line_matches_tags;
 
 endmodule

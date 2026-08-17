@@ -102,6 +102,7 @@ static void test_defaults_absent(void) {
     zz_config_reset();
     const struct zz_config *c = zz_config_get();
     CHECK(!c->loaded);
+    CHECK(c->videocap_output_profile == ZZ_VIDEOCAP_OUTPUT_FULL_60);
     CHECK(!c->videocap_mode_present);
     CHECK(!c->videocap_crop_h_present);
     CHECK(!c->videocap_crop_v_present);
@@ -178,6 +179,8 @@ static void check_videocap_profile(const char *name, uint16_t mode,
 }
 
 static void test_videocap_profiles(void) {
+    uint16_t present;
+
     check_videocap_profile("full_60", ZZVMODE_800x600, 1, 0);
     check_videocap_profile("full_exact", ZZVMODE_800x600, 1, 1);
     check_videocap_profile("filtered_60", ZZVMODE_800x600, 0, 0);
@@ -186,7 +189,21 @@ static void test_videocap_profiles(void) {
     check_videocap_profile("filtered_ntsc_exact", ZZVMODE_720x576, 0, 2);
 
     zz_config_reset();
+    CHECK(parse_str("ViDeOcAp_PrOfIlE = CeNtErEd_1080P_60\n") == 1);
+    CHECK(zz_config_get()->videocap_output_profile ==
+          ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
+    CHECK(zz_config_get()->videocap_mode == ZZVMODE_800x600);
+    CHECK(zz_config_get()->videocap_shres == 1);
+    CHECK(zz_config_get()->ns_vsync == 0);
+    present = 0;
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_1920x1080_60);
+    CHECK(present);
+
+    zz_config_reset();
     CHECK(parse_str("videocap_profile = unclear\n") == 0);
+    CHECK(zz_config_get()->videocap_output_profile ==
+          ZZ_VIDEOCAP_OUTPUT_FULL_60);
     CHECK(!zz_config_get()->videocap_mode_present);
     CHECK(!zz_config_get()->videocap_shres_present);
     CHECK(!zz_config_get()->ns_vsync_present);
@@ -201,6 +218,52 @@ static void test_videocap_profiles(void) {
     CHECK(zz_config_get()->videocap_mode == ZZVMODE_800x600);
     CHECK(zz_config_get()->videocap_shres == 1);
     CHECK(zz_config_get()->ns_vsync == 0);
+    CHECK(zz_config_get()->videocap_output_profile ==
+          ZZ_VIDEOCAP_OUTPUT_FULL_60);
+    present = 0;
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_800x600);
+    CHECK(present);
+
+    /* A bad later assignment is atomic: it cannot partially overwrite the
+     * last valid profile tuple or its distinct output identity. */
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = centered_1080p_60\n"
+                    "videocap_profile = unclear\n") == 1);
+    CHECK(zz_config_get()->videocap_output_profile ==
+          ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
+    CHECK(zz_config_get()->videocap_mode == ZZVMODE_800x600);
+    CHECK(zz_config_get()->videocap_shres == 1);
+    CHECK(zz_config_get()->ns_vsync == 0);
+
+    /* Valid legacy native-video keys intentionally clear centered identity,
+     * even when the projected legacy value itself does not change. */
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = centered_1080p_60\n"
+                    "videocap_mode = 800x600\n") == 2);
+    CHECK(zz_config_get()->videocap_output_profile ==
+          ZZ_VIDEOCAP_OUTPUT_FULL_60);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = centered_1080p_60\n"
+                    "videocap_shres = full\n") == 2);
+    CHECK(zz_config_get()->videocap_output_profile ==
+          ZZ_VIDEOCAP_OUTPUT_FULL_60);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = centered_1080p_60\n"
+                    "nonstandard_vsync = off\n") == 2);
+    CHECK(zz_config_get()->videocap_output_profile ==
+          ZZ_VIDEOCAP_OUTPUT_FULL_60);
+
+    /* Unrelated settings preserve the centered request. */
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = centered_1080p_60\n"
+                    "videocap_sample = odd\n"
+                    "videocap_crop_h = 280\n"
+                    "scanline_mode = 2\n") == 4);
+    CHECK(zz_config_get()->videocap_output_profile ==
+          ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
 }
 
 static void test_videocap_sample(void) {

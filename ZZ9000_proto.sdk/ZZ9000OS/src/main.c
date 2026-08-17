@@ -761,7 +761,7 @@ int main() {
 				}
 				case REG_ZZ_VCAP_MODE:
 					printf("videocap default mode select: %lx\n", zdata);
-					video_state->videocap_video_mode = zdata & 0xff;
+					video_set_videocap_video_mode(zdata & 0xff);
 					break;
 				//case REG_ZZ_SPRITE_X:
 				case REG_ZZ_SPRITE_Y:
@@ -1015,12 +1015,7 @@ int main() {
 						case CARD_FEATURE_NONSTANDARD_VSYNC:
 							printf("[feature] NONSTANDARD_VSYNC: %lu\n",zdata);
 							// Enables/disables the nonstandard refresh rates for scandoubled PAL/NTSC HDMI output modes.
-							if (zdata == 2) {
-								video_state->scandoubler_mode_adjust = 2;
-							} else {
-								video_state->scandoubler_mode_adjust = 0;
-							}
-							video_state->card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = zdata;
+							video_set_videocap_vsync(zdata);
 							break;
 						case CARD_FEATURE_VIDEO_OVERLAY:
 							printf("[feature] VIDEO_OVERLAY: %lu\n",zdata);
@@ -1648,7 +1643,7 @@ int main() {
 					}
 					case REG_ZZ_VOLTAGE_INT: {
 						data = ((int16_t)(xadc_get_int_voltage()*100.0)) << 16;
-						data |= ZZ_FW_CAPABILITIES;
+						data |= video_firmware_capabilities();
 						break;
 					}
 					case REG_ZZ_CONFIG_KEY: {
