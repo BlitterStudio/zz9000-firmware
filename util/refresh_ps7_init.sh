@@ -39,7 +39,7 @@ if [ ! -f "$SYSDEF" ]; then
         echo "[ps7-init] no sysdef present (no local bitstream build); skipping freshness check."
         exit 0
     fi
-    echo "ERROR: $SYSDEF not found — run a bitstream build first (see AGENTS.md)." >&2
+    echo "ERROR: $SYSDEF not found — run a bitstream build first (see BUILD.md)." >&2
     exit 1
 fi
 
