@@ -43,13 +43,29 @@
 // Keep this order aligned with the capture-clock phase chain: the committed
 // default defines both ZORRO3 and VARIANT_SUPERDENISE, and must select the
 // video-slot path.
+
+// Denise-adapter capture family. The ZZ9500CX ribbon presents the same
+// signals whether the host Denise is OCS (VARIANT_ZZ9500) or ECS/Super
+// Denise (VARIANT_SUPERDENISE): 4-bit RGB on R3..R0/G3..R0/B3..B0 and
+// CSYNC-only sync. Super Denise changes nothing the sampler can see, so
+// both variants must share one capture configuration. Issue #76: a
+// SUPERDENISE-only 8-bit sampling mode read unconnected RGB pins and
+// produced a washed-out picture. ZORRO3 video-slot boards never carry a
+// Denise adapter, and the committed default keeps VARIANT_SUPERDENISE
+// defined alongside ZORRO3, so gate the whole family on !ZORRO3.
+`ifndef ZORRO3
+`ifdef VARIANT_ZZ9500
+`define VCAP_DENISE_ADAPTER
+`endif
+`ifdef VARIANT_SUPERDENISE
+`define VCAP_DENISE_ADAPTER
+`endif
+`endif
+
 `ifdef ZORRO3
   `define VCAP_RGB_MODE     0
   `define VCAP_CSYNC_VSYNC  0
-`elsif VARIANT_SUPERDENISE
-  `define VCAP_RGB_MODE     0
-  `define VCAP_CSYNC_VSYNC  1
-`elsif VARIANT_ZZ9500
+`elsif VCAP_DENISE_ADAPTER
   `define VCAP_RGB_MODE     1
   `define VCAP_CSYNC_VSYNC  1
 `else
@@ -58,9 +74,7 @@
 `endif
 `ifdef ZORRO3
   `define VCAP_FULLRATE_INT 1
-`elsif VARIANT_SUPERDENISE
-  `define VCAP_FULLRATE_INT 0
-`elsif VARIANT_ZZ9500
+`elsif VCAP_DENISE_ADAPTER
   `define VCAP_FULLRATE_INT 0
 `else
   `define VCAP_FULLRATE_INT 1
@@ -1323,9 +1337,7 @@ module MNTZorro_v0_1_S00_AXI
                .CLKIN2_PERIOD(0.000000),
 `ifdef ZORRO3
                .CLKOUT0_DIVIDE_F(8.000000),
-`elsif VARIANT_SUPERDENISE
-               .CLKOUT0_DIVIDE_F(16.000000),
-`elsif VARIANT_ZZ9500
+`elsif VCAP_DENISE_ADAPTER
                .CLKOUT0_DIVIDE_F(16.000000),
 `else
                .CLKOUT0_DIVIDE_F(8.000000),
@@ -1334,9 +1346,7 @@ module MNTZorro_v0_1_S00_AXI
 
 `ifdef ZORRO3
                .CLKOUT0_PHASE(90.000000),
-`elsif VARIANT_SUPERDENISE
-               .CLKOUT0_PHASE(0.000000),
-`elsif VARIANT_ZZ9500
+`elsif VCAP_DENISE_ADAPTER
                .CLKOUT0_PHASE(90.000000),
 `else
                .CLKOUT0_PHASE(270.000000),
@@ -1348,9 +1358,7 @@ module MNTZorro_v0_1_S00_AXI
 
 `ifdef ZORRO3
                .CLKOUT1_PHASE(0.000000),
-`elsif VARIANT_SUPERDENISE
-               .CLKOUT1_PHASE(0.000000),
-`elsif VARIANT_ZZ9500
+`elsif VCAP_DENISE_ADAPTER
                .CLKOUT1_PHASE(270.000000),
 `else
                .CLKOUT1_PHASE(135.000000),
@@ -1636,7 +1644,7 @@ module MNTZorro_v0_1_S00_AXI
     videocap_y_sync2 <= vcap_y[9:0];
     videocap_mode_sync <= videocap_mode;
 
-`ifdef VARIANT_ZZ9500
+`ifdef VCAP_DENISE_ADAPTER
     if (vcap_interlace)
       videocap_ymax_sync <= (vcap_ymax<<1)-(2*40);
     else

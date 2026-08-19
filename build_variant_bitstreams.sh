@@ -21,7 +21,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Word-split deliberately: the Windows builder is a multi-word command.
-read -r -a BITSTREAM_BUILDER_CMD <<<"${BITSTREAM_BUILDER:-./build_bitstream.sh}"
+# Build the array without `read` so the script does not depend on a
+# working stdin handle.
+if [ -n "${BITSTREAM_BUILDER:-}" ]; then
+    # shellcheck disable=SC2206  # deliberate word split of $BITSTREAM_BUILDER
+    BITSTREAM_BUILDER_CMD=(${BITSTREAM_BUILDER})
+else
+    BITSTREAM_BUILDER_CMD=(./build_bitstream.sh)
+fi
 
 MNTZORRO=mntzorro.v
 CANONICAL_BIT=bootimage_work/zz9000_ps_wrapper.bit
@@ -202,6 +209,9 @@ replace_define_block() {
     tmp_file=$(mktemp "${TMPDIR:-/tmp}/mntzorro.XXXXXX")
 
     if ! awk '
+        # Windows checkouts keep CRLF endings; strip the CR so the
+        # LF-anchored markers below match either line-ending style.
+        /\r$/ { sub(/\r$/, "") }
         NR == FNR {
             block = block $0 ORS
             next
