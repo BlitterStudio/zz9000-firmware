@@ -482,7 +482,15 @@ static uint8_t ref_planar_pixel(const uint8_t *plane_data, uint8_t planes,
 /* h is the number of destination rows to draw; src_h sizes the source
  * plane stride and wrap, mirroring p2c_rect where only the draw loop is
  * fb_limit-clamped while the source geometry keeps the caller's full
- * height. Existing callers pass the same value for both. */
+ * height. Existing callers pass the same value for both.
+ *
+ * Both production dispatch sites (dma_rtg.c OP_P2C/OP_P2D and the
+ * register path) hardcode sy = 0: the driver stages an already-seeked
+ * source in the template scratch, so firmware never seeks to sy and its
+ * (line_y + sy + 1) % h modulo is a wrap phase, not an absolute source
+ * row. Keep every test case at sy = 0 -- with sy != 0 this oracle's
+ * absolute (sy + y) % src_h model and the firmware disagree by design,
+ * and no production caller can reach that corner. */
 static void ref_p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy,
 	int16_t w, int16_t h, int16_t src_h, uint8_t draw_mode, uint8_t planes,
 	uint8_t layer_mask, uint16_t src_line_pitch, const uint8_t *bmp_data)
