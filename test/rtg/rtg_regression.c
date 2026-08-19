@@ -479,8 +479,20 @@ static uint8_t ref_planar_pixel(const uint8_t *plane_data, uint8_t planes,
 	return pixel;
 }
 
+/* h is the number of destination rows to draw; src_h sizes the source
+ * plane stride and wrap, mirroring p2c_rect where only the draw loop is
+ * fb_limit-clamped while the source geometry keeps the caller's full
+ * height. Existing callers pass the same value for both.
+ *
+ * Both production dispatch sites (dma_rtg.c OP_P2C/OP_P2D and the
+ * register path) hardcode sy = 0: the driver stages an already-seeked
+ * source in the template scratch, so firmware never seeks to sy and its
+ * (line_y + sy + 1) % h modulo is a wrap phase, not an absolute source
+ * row. Keep every test case at sy = 0 -- with sy != 0 this oracle's
+ * absolute (sy + y) % src_h model and the firmware disagree by design,
+ * and no production caller can reach that corner. */
 static void ref_p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy,
-	int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes,
+	int16_t w, int16_t h, int16_t src_h, uint8_t draw_mode, uint8_t planes,
 	uint8_t layer_mask, uint16_t src_line_pitch, const uint8_t *bmp_data)
 {
 	int invert = draw_mode & 1;
@@ -489,20 +501,20 @@ static void ref_p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy,
 		uint8_t *drow = row8(expected_fb, FB_PITCH_WORDS, dy + yy);
 		for (int16_t xx = 0; xx < w; xx++) {
 			drow[dx + xx] = ref_planar_pixel(bmp_data, planes, layer_mask,
-				src_line_pitch, h, sx, sy, xx, yy, invert);
+				src_line_pitch, src_h, sx, sy, xx, yy, invert);
 		}
 	}
 }
 
 static void ref_p2c_neor_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy,
-	int16_t w, int16_t h, uint8_t planes, uint8_t mask,
+	int16_t w, int16_t h, int16_t src_h, uint8_t planes, uint8_t mask,
 	uint8_t layer_mask, uint16_t src_line_pitch, const uint8_t *bmp_data)
 {
 	for (int16_t yy = 0; yy < h; yy++) {
 		uint8_t *drow = row8(expected_fb, FB_PITCH_WORDS, dy + yy);
 		for (int16_t xx = 0; xx < w; xx++) {
 			uint8_t src = ref_planar_pixel(bmp_data, planes, layer_mask,
-				src_line_pitch, h, sx, sy, xx, yy, 0);
+				src_line_pitch, src_h, sx, sy, xx, yy, 0);
 			uint8_t dst = drow[dx + xx];
 			uint8_t result = (uint8_t)~(src ^ dst);
 			drow[dx + xx] = (uint8_t)((dst & (uint8_t)~mask) | (result & mask));
@@ -543,7 +555,7 @@ static uint8_t ref_minterm_index(uint8_t src, uint8_t dst, uint8_t mode)
 }
 
 static void ref_p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy,
-	int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes,
+	int16_t w, int16_t h, int16_t src_h, uint8_t draw_mode, uint8_t planes,
 	uint8_t layer_mask, uint16_t src_line_pitch, const uint8_t *bmp_data_src,
 	uint32_t color_format)
 {
@@ -554,7 +566,7 @@ static void ref_p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy,
 	for (int16_t yy = 0; yy < h; yy++) {
 		for (int16_t xx = 0; xx < w; xx++) {
 			uint8_t src = ref_planar_pixel(plane_data, planes, layer_mask,
-				src_line_pitch, h, sx, sy, xx, yy, invert);
+				src_line_pitch, src_h, sx, sy, xx, yy, invert);
 			uint8_t dst = 0;
 
 			if (draw_mode != MINTERM_SRC)
@@ -924,7 +936,7 @@ static void test_planar(void)
 	seed_frame(0x4002);
 	p2c_rect(3, 0, 10, 7, P2C_W, P2C_H, MINTERM_SRC,
 		P2C_PLANES, 0xff, 0x1f, P2C_PITCH, planar);
-	ref_p2c_rect(3, 0, 10, 7, P2C_W, P2C_H, MINTERM_SRC,
+	ref_p2c_rect(3, 0, 10, 7, P2C_W, P2C_H, P2C_H, MINTERM_SRC,
 		P2C_PLANES, 0x1f, P2C_PITCH, planar);
 	check_frame("p2c_rect src");
 
@@ -932,7 +944,7 @@ static void test_planar(void)
 	seed_frame(0x4004);
 	p2c_rect(5, 0, 12, 9, P2C_W, P2C_H, MINTERM_NOTSRC,
 		P2C_PLANES, 0xff, 0x1f, P2C_PITCH, planar);
-	ref_p2c_rect(5, 0, 12, 9, P2C_W, P2C_H, MINTERM_NOTSRC,
+	ref_p2c_rect(5, 0, 12, 9, P2C_W, P2C_H, P2C_H, MINTERM_NOTSRC,
 		P2C_PLANES, 0x1f, P2C_PITCH, planar);
 	check_frame("p2c_rect notsrc");
 
@@ -940,7 +952,7 @@ static void test_planar(void)
 	seed_frame(0x4006);
 	p2c_rect(1, 0, 8, 6, P2C_W, P2C_H, MINTERM_NEOR,
 		P2C_PLANES, 0xff, 0x1f, P2C_PITCH, planar);
-	ref_p2c_neor_rect(1, 0, 8, 6, P2C_W, P2C_H,
+	ref_p2c_neor_rect(1, 0, 8, 6, P2C_W, P2C_H, P2C_H,
 		P2C_PLANES, 0xff, 0x1f, P2C_PITCH, planar);
 	check_frame("p2c_rect neor");
 
@@ -948,7 +960,7 @@ static void test_planar(void)
 	seed_frame(0x4008);
 	p2c_rect(7, 0, 13, 4, P2C_W, P2C_H, MINTERM_NEOR,
 		P2C_PLANES, 0x5a, 0x1f, P2C_PITCH, planar);
-	ref_p2c_neor_rect(7, 0, 13, 4, P2C_W, P2C_H,
+	ref_p2c_neor_rect(7, 0, 13, 4, P2C_W, P2C_H, P2C_H,
 		P2C_PLANES, 0x5a, 0x1f, P2C_PITCH, planar);
 	check_frame("p2c_rect neor masked");
 }
@@ -981,7 +993,7 @@ static void test_p2d(void)
 	}
 	p2d_rect(2, 0, 11, 6, P2D_W, P2D_H, MINTERM_EOR,
 		P2D_PLANES, 0xff, 0xff, 0x00ffffff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
-	ref_p2d_rect(2, 0, 11, 6, P2D_W, P2D_H, MINTERM_EOR,
+	ref_p2d_rect(2, 0, 11, 6, P2D_W, P2D_H, P2D_H, MINTERM_EOR,
 		P2D_PLANES, 0xff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
 	check_frame("p2d_rect eor 32 depth8");
 
@@ -991,7 +1003,7 @@ static void test_p2d(void)
 	seed_frame(0x5004);
 	p2d_rect(1, 0, 9, 8, P2D_W, P2D_H, MINTERM_SRC,
 		P2D_PLANES, 0xff, 0xff, 0xffff, P2D_PITCH, data, MNTVA_COLOR_16BIT565);
-	ref_p2d_rect(1, 0, 9, 8, P2D_W, P2D_H, MINTERM_SRC,
+	ref_p2d_rect(1, 0, 9, 8, P2D_W, P2D_H, P2D_H, MINTERM_SRC,
 		P2D_PLANES, 0xff, P2D_PITCH, data, MNTVA_COLOR_16BIT565);
 	check_frame("p2d_rect src 16");
 
@@ -1001,7 +1013,7 @@ static void test_p2d(void)
 	seed_frame(0x5006);
 	p2d_rect(4, 0, 7, 5, P2D_W, P2D_H, MINTERM_NOTSRC,
 		P2D_PLANES, 0xff, 0xff, 0x00ffffff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
-	ref_p2d_rect(4, 0, 7, 5, P2D_W, P2D_H, MINTERM_NOTSRC,
+	ref_p2d_rect(4, 0, 7, 5, P2D_W, P2D_H, P2D_H, MINTERM_NOTSRC,
 		P2D_PLANES, 0xff, P2D_PITCH, data, MNTVA_COLOR_32BIT);
 	check_frame("p2d_rect notsrc 32");
 
@@ -1639,6 +1651,179 @@ static void test_fb_limit_clamp(void)
 		MNTVA_COLOR_32BIT, 96, yuv_src);
 	check_frame("yuv422 clamped");
 	check_guard("yuv422 guard");
+
+	/* The remaining word-pitch call sites must clamp identically: rect
+	 * crossing the limit draws only the rows that fit, guard untouched. */
+	{
+		uint8_t planar[2 * 8 * 12];
+		uint8_t p2d_data[256 * 4 + 2 * 8 * 12];
+		uint32_t *pal = (uint32_t *)p2d_data;
+		uint8_t *planes = p2d_data + 256 * 4;
+
+		for (int i = 0; i < 256; i++)
+			pal[i] = 0xff000000u | (uint32_t)(i * 0x00010101u);
+		make_planar(planar, 2, 8, 12, 0xb004);
+		make_planar(planes, 2, 8, 12, 0xb005);
+
+		seed_frame(0xb006);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		fill_rect(10, FB_H - 4, 20, 12, 0x5a001122,
+			MNTVA_COLOR_8BIT, 0x3c);
+		ref_fill_rect_masked_8(10, FB_H - 4, 20, 4, 0x5a001122, 0x3c);
+		check_frame("fill_rect clamped");
+		check_guard("fill_rect guard");
+
+		seed_frame(0xb007);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		copy_rect_nomask(14, FB_H - 4, 25, 12, 3, 4, MNTVA_COLOR_8BIT,
+			actual_fb, FB_PITCH_WORDS, MINTERM_SRC);
+		ref_copy_rect_src(14, FB_H - 4, 25, 4, 3, 4, MNTVA_COLOR_8BIT,
+			expected_fb, FB_PITCH_WORDS);
+		check_frame("copy_rect_nomask clamped");
+		check_guard("copy_rect_nomask guard");
+
+		seed_frame(0xb008);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		copy_rect(18, FB_H - 4, 22, 12, 7, 3, MNTVA_COLOR_8BIT,
+			actual_fb, FB_PITCH_WORDS, 0x5a);
+		ref_copy_rect_masked_8(18, FB_H - 4, 22, 4, 7, 3,
+			expected_fb, FB_PITCH_WORDS, 0x5a);
+		check_frame("copy_rect clamped");
+		check_guard("copy_rect guard");
+
+		seed_frame(0xb009);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		p2c_rect(3, 0, 10, FB_H - 4, 22, 12, MINTERM_SRC,
+			2, 0xff, 0x3, 8, planar);
+		ref_p2c_rect(3, 0, 10, FB_H - 4, 22, 4, 12, MINTERM_SRC,
+			2, 0x3, 8, planar);
+		check_frame("p2c_rect clamped");
+		check_guard("p2c_rect guard");
+
+		seed_frame(0xb00a);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		p2d_rect(3, 0, 8, FB_H - 4, 20, 12, MINTERM_SRC,
+			2, 0xff, 0xff, 0x00ffffff, 8, p2d_data,
+			MNTVA_COLOR_32BIT);
+		ref_p2d_rect(3, 0, 8, FB_H - 4, 20, 4, 12, MINTERM_SRC,
+			2, 0xff, 8, p2d_data, MNTVA_COLOR_32BIT);
+		check_frame("p2d_rect clamped");
+		check_guard("p2d_rect guard");
+
+		/* Destination row entirely past the limit: fail closed, draw
+		 * nothing (y1 >= rows_fit branch). */
+		seed_frame(0xb00b);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		fill_rect_solid(10, FB_H + 4, 20, 8, 0x77000000,
+			MNTVA_COLOR_8BIT);
+		check_frame("fill_rect_solid dropped past limit");
+		check_guard("fill_rect_solid past-limit guard");
+	}
+
+	/* BlitTemplate/BlitPattern pitch arrives in BYTES while the rect ops
+	 * above send words. A P96 visible screen abuts MemorySize, i.e. the
+	 * clamp limit, so text below the top quarter of a screen was silently
+	 * dropped when the clamp multiplied the byte pitch by four (firmware
+	 * issue #75). These cases hold fb_limit at the fb end, like a screen
+	 * ending exactly at the framebuffer window top. */
+	{
+		static const uint8_t pat[16] = {
+			0x80, 0x01, 0xC0, 0x03, 0xE0, 0x07, 0xF0, 0x0F,
+			0x12, 0x48, 0x24, 0x90, 0xA5, 0x5A, 0xFF, 0x00,
+		};
+		uint8_t tmpl[8 * 24];
+
+		rng_state = 0x7501;
+		for (size_t i = 0; i < sizeof(tmpl); i++)
+			tmpl[i] = (uint8_t)rng32();
+
+		/* Fully in-bounds band in the lower half: rows_fit was H/4 - y
+		 * under the word assumption, so everything below y = 18 drew
+		 * nothing even though the rows were inside the limit. */
+		seed_frame(0x7502);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		template_fill_rect(MNTVA_COLOR_8BIT, 12, 40, 40, 16, JAM2, 0x3c,
+			0xa5000000, 0x5a000000, 3, 0, tmpl, 8);
+		set_fb(actual_fb, FB_PITCH_WORDS);
+		ref_template_fill_rect(MNTVA_COLOR_8BIT, 12, 40, 40, 16, JAM2, 0x3c,
+			0xa5000000, 0x5a000000, 3, tmpl, 8);
+		check_frame("template_fill_rect lower half kept under limit");
+		check_guard("template lower half guard");
+
+		/* Band straddling the quarter line drew a truncated band. */
+		seed_frame(0x7503);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		template_fill_rect(MNTVA_COLOR_8BIT, 8, 10, 30, 24, JAM1, 0xff,
+			0xa5000000, 0x5a000000, 5, 0, tmpl, 8);
+		set_fb(actual_fb, FB_PITCH_WORDS);
+		ref_template_fill_rect(MNTVA_COLOR_8BIT, 8, 10, 30, 24, JAM1, 0xff,
+			0xa5000000, 0x5a000000, 5, tmpl, 8);
+		check_frame("template_fill_rect straddle kept under limit");
+		check_guard("template straddle guard");
+
+		/* Rect crossing the limit must clamp to the rows that fit. */
+		seed_frame(0x7504);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		template_fill_rect(MNTVA_COLOR_8BIT, 6, FB_H - 4, 26, 8, JAM2, 0xff,
+			0x77000000, 0x33000000, 1, 0, tmpl, 8);
+		set_fb(actual_fb, FB_PITCH_WORDS);
+		ref_template_fill_rect(MNTVA_COLOR_8BIT, 6, FB_H - 4, 26, 4, JAM2, 0xff,
+			0x77000000, 0x33000000, 1, tmpl, 8);
+		check_frame("template_fill_rect clamped at limit");
+		check_guard("template clamp guard");
+
+		/* BlitPattern shares the byte-pitch destination contract. */
+		seed_frame(0x7505);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		pattern_fill_rect(MNTVA_COLOR_8BIT, 5, 44, 22, 18, JAM2, 0xFF,
+			0xaa000000, 0x55000000, 3, 2, (uint8_t *)pat, 16, 8);
+		set_fb(actual_fb, FB_PITCH_WORDS);
+		ref_pattern_fill_rect(MNTVA_COLOR_8BIT, 5, 44, 22, 18, JAM2, 0xFF,
+			0xaa000000, 0x55000000, 3, 2, pat, 8);
+		check_frame("pattern_fill_rect lower half kept under limit");
+		check_guard("pattern lower half guard");
+
+		seed_frame(0x7506);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		pattern_fill_rect(MNTVA_COLOR_8BIT, 9, FB_H - 3, 20, 10, JAM1, 0xFF,
+			0x11000000, 0x22000000, 7, 1, (uint8_t *)pat, 16, 8);
+		set_fb(actual_fb, FB_PITCH_WORDS);
+		ref_pattern_fill_rect(MNTVA_COLOR_8BIT, 9, FB_H - 3, 20, 3, JAM1, 0xFF,
+			0x11000000, 0x22000000, 7, 1, pat, 8);
+		check_frame("pattern_fill_rect clamped at limit");
+		check_guard("pattern clamp guard");
+
+		/* Destination base at or past the limit must fail closed: nothing
+		 * drawn at all, not an unclamped write past the limit. */
+		seed_frame(0x7507);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		set_fb_limit((uint8_t *)actual_fb - 64);
+		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		template_fill_rect(MNTVA_COLOR_8BIT, 4, 4, 20, 9, JAM2, 0xff,
+			0xa5000000, 0x5a000000, 2, 0, tmpl, 8);
+		pattern_fill_rect(MNTVA_COLOR_8BIT, 6, 6, 18, 7, JAM2, 0xFF,
+			0xaa000000, 0x55000000, 1, 0, (uint8_t *)pat, 16, 8);
+		set_fb(actual_fb, FB_PITCH_WORDS);
+		check_frame("ops dropped when fb at limit");
+		check_guard("ops at-limit guard");
+
+		/* Byte-pitch family fails closed past the limit too (the
+		 * y1 >= rows_fit branch, not the fb-beyond-limit one). */
+		seed_frame(0x7508);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		set_fb_limit((uint8_t *)actual_fb + sizeof(actual_fb));
+		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		template_fill_rect(MNTVA_COLOR_8BIT, 6, FB_H + 4, 20, 8,
+			JAM2, 0xff, 0xa5000000, 0x5a000000, 1, 0, tmpl, 8);
+		set_fb(actual_fb, FB_PITCH_WORDS);
+		check_frame("template dropped past limit");
+		check_guard("template past-limit guard");
+	}
 
 	set_fb_limit(0);
 }
