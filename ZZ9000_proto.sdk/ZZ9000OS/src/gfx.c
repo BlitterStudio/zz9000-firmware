@@ -73,23 +73,25 @@ void set_fb_limit(void* limit) {
 }
 
 /* Returns how many of the requested h rows starting at row y1 fit entirely
- * below fb_limit. Returns h unchanged when no limit is configured. Row size
- * is fb_pitch words; for the template/pattern ops fb_pitch is bytes, which
- * makes this strictly more conservative there (never less safe). */
-static uint16_t clamp_rows_to_fb_limit(uint32_t y1, uint16_t h)
+ * below fb_limit. Returns h unchanged when no limit is configured. row_bytes
+ * is the destination row stride in bytes: the rect ops receive fb_pitch in
+ * 32-bit words, while template/pattern ops receive fb_pitch in bytes and the
+ * driver sends it that way (BlitTemplate/BlitPattern pass BytesPerRow). The
+ * clamp must use each op's own stride — a byte pitch scaled by four computes
+ * a phantom geometry and silently drops rows below the top quarter of the
+ * window (firmware issue #75). */
+static uint16_t clamp_rows_to_fb_limit(uint32_t y1, uint16_t h, uint32_t row_bytes)
 {
-	uint8_t *row0;
-	size_t row_bytes, rows_fit;
+	size_t rows_fit;
 
-	if (!fb_limit || !fb)
+	if (!fb_limit || !fb || row_bytes == 0)
 		return h;
-	row_bytes = (size_t)fb_pitch * sizeof(uint32_t);
-	if (row_bytes == 0)
-		return h;
-	row0 = (uint8_t *)fb + (size_t)y1 * row_bytes;
-	if (row0 >= fb_limit)
+	if (fb_limit <= (uint8_t *)fb)
 		return 0;
-	rows_fit = (size_t)(fb_limit - row0) / row_bytes;
+	rows_fit = (size_t)(fb_limit - (uint8_t *)fb) / row_bytes;
+	if (y1 >= rows_fit)
+		return 0;
+	rows_fit -= y1;
 	if (h > rows_fit)
 		h = (uint16_t)rows_fit;
 	return h;
@@ -190,7 +192,7 @@ void *get_color_conversion_table(int index)
 
 void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t fg_color, uint32_t color_format, uint8_t mask)
 {
-	h = clamp_rows_to_fb_limit(rect_y1, h);
+	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch * sizeof(uint32_t));
 	if (!h)
 		return;
 
@@ -237,7 +239,7 @@ void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint3
 
 void fill_rect_solid(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t rect_rgb, uint32_t color_format)
 {
-	h = clamp_rows_to_fb_limit(rect_y1, h);
+	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch * sizeof(uint32_t));
 	if (!h)
 		return;
 
@@ -276,7 +278,7 @@ void fill_rect_solid(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h,
 
 void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint8_t mask, uint32_t color_format)
 {
-	h = clamp_rows_to_fb_limit(rect_y1, h);
+	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch * sizeof(uint32_t));
 	if (!h)
 		return;
 
@@ -377,7 +379,7 @@ void copy_rect_nomask(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h
 	if (w == 0 || h == 0)
 		return;
 
-	h = clamp_rows_to_fb_limit(rect_y1, h);
+	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch * sizeof(uint32_t));
 	if (!h)
 		return;
 
@@ -480,7 +482,7 @@ void copy_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint1
 	if (w == 0 || h == 0)
 		return;
 
-	h = clamp_rows_to_fb_limit(rect_y1, h);
+	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch * sizeof(uint32_t));
 	if (!h)
 		return;
 
@@ -868,7 +870,7 @@ void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 	 * loop bound is clamped (h_draw), never h itself. */
 	if (dy < 0 || h <= 0)
 		return;
-	int16_t h_draw = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h);
+	int16_t h_draw = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h, fb_pitch * sizeof(uint32_t));
 	if (!h_draw)
 		return;
 
@@ -1029,7 +1031,7 @@ void yuv422_to_rgb_rect(int16_t phase, int16_t dx, int16_t dy, int16_t w, int16_
 	    color_format != MNTVA_COLOR_16BIT565 &&
 	    color_format != MNTVA_COLOR_15BIT)
 		return;
-	h = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h);
+	h = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h, fb_pitch * sizeof(uint32_t));
 	if (!h)
 		return;
 
@@ -1320,7 +1322,7 @@ void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 	 * loop bound is clamped (h_draw), never h itself. */
 	if (dy < 0 || h <= 0)
 		return;
-	int16_t h_draw = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h);
+	int16_t h_draw = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h, fb_pitch * sizeof(uint32_t));
 	if (!h_draw)
 		return;
 
@@ -1596,7 +1598,7 @@ void pattern_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y1
 	uint16_t x_offset, uint16_t y_offset,
 	uint8_t *tmpl_data, uint16_t tmpl_pitch, uint16_t loop_rows)
 {
-	h = clamp_rows_to_fb_limit(rect_y1, h);
+	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch);
 	if (!h)
 		return;
 
@@ -1763,7 +1765,7 @@ void template_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y
 	uint16_t x_offset, uint16_t y_offset,
 	uint8_t *tmpl_data, uint16_t tmpl_pitch)
 {
-	h = clamp_rows_to_fb_limit(rect_y1, h);
+	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch);
 	if (!h)
 		return;
 
