@@ -537,7 +537,9 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "vcap_line_toggle, vcap_write_bank, vcap_y[9:0]");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    ".buf_rbank(vc_saving_bank)");
+	    ".buf_rbank(vc_row_bank)");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vc_row_bank <= vc_saving_bank;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "vc_saving_bank <= videocap_bank_sync;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
