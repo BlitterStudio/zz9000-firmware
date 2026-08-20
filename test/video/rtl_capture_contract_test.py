@@ -217,6 +217,11 @@ def check_writeback_provenance(rtl: str) -> None:
         # A disable mid-row must not resume into the previous session's
         # frozen row: the re-enable path restarts at the row origin.
         "videocap_save_x <= 0;",
+        # Filtered writeback writes a row only while its line is still in
+        # the single line buffer; a scrolled-out row is skipped, not
+        # written with another line's content.
+        "wire vc_row_line_stale = !videocap_writeback_full_width &&",
+        "videocap_save_x == 0 && vc_row_line_stale) begin",
     )
     for fragment in fragments:
         if fragment not in rtl:

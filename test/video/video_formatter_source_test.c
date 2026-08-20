@@ -543,7 +543,9 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "vc_saving_bank <= videocap_bank_sync;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "vcap_line_payload_axi[11] != vcap_line_toggle_seen");
+	    "wire vc_row_line_stale = !videocap_writeback_full_width &&");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "videocap_save_x == 0 && vc_row_line_stale) begin");
 
 	return ok ? 0 : 1;
 }
