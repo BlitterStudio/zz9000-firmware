@@ -1277,6 +1277,8 @@ module MNTZorro_v0_1_S00_AXI
   wire vcap_shres;
   wire vcap_line_toggle;
   wire vcap_write_bank;
+  wire [9:0] vcap_token_y;
+  wire vcap_token_bank;
   wire [31:0] vcap_rdata;
   wire vcap_sampler_probe_arm_seen;
   wire vcap_sampler_probe_valid;
@@ -1303,9 +1305,14 @@ module MNTZorro_v0_1_S00_AXI
   /* In full-width mode the sampler finishes late enough in the raster that
    * AXI writeback overlaps capture of the following line.  Transfer a token,
    * completed bank, and line number together; the bank and line are stable
-   * for the whole capture line before the token changes. */
-  wire [11:0] vcap_line_payload_cap = {
+   * for the whole capture line before the token changes.  The filtered
+   * banked path carries the same guarantee by latching the completed
+   * line's number and bank at line_sync and toggling one capture clock
+   * later. */
+  wire [11:0] vcap_line_payload_cap = (`VCAP_FULLRATE_INT != 0) ? {
       vcap_line_toggle, vcap_write_bank, vcap_y[9:0]
+  } : {
+      vcap_line_toggle, vcap_token_bank, vcap_token_y
   };
   wire [11:0] vcap_line_payload_axi;
 
@@ -1450,13 +1457,15 @@ module MNTZorro_v0_1_S00_AXI
       .detected_standard(vcap_detected_standard),
       .cap_x(vcap_x),
       .cap_y(vcap_y),
+      .cap_line_toggle(vcap_line_toggle),
+      .cap_write_bank(vcap_write_bank),
+      .cap_token_y(vcap_token_y),
+      .cap_token_bank(vcap_token_bank),
       .cap_ymax(vcap_ymax),
       .cap_interlace(vcap_interlace),
       .cap_ntsc(vcap_ntsc),
       .cap_x_done(vcap_x_done),
       .cap_shres(vcap_shres),
-      .cap_line_toggle(vcap_line_toggle),
-      .cap_write_bank(vcap_write_bank),
       .probe_arm_toggle(vcap_probe_arm_toggle),
       .probe_arm_seen(vcap_sampler_probe_arm_seen),
       .probe_valid(vcap_sampler_probe_valid),
@@ -1675,9 +1684,19 @@ module MNTZorro_v0_1_S00_AXI
     else
       videocap_ymax_sync <= vcap_ymax-36;
 
-    // letterbox top and bottom to box out noisy lines
-    if (videocap_y_sync2<videocap_ymax_sync && vcap_x_done) begin
-      videocap_y_sync <= videocap_y_sync2;
+    /* Completed-line tokens own the row handoff: each token's bank holds
+     * one full completed capture line, so the writeback has a whole line
+     * of slack and can never read a line that is being recaptured.  This
+     * replaces the live vcap_y sampling, whose writeback could compound
+     * lateness within a line and displace rows (the vertical shear from
+     * the issue #76 follow-up video).  Tokens past the letterbox bound
+     * are consumed without updating the row, preserving the top/bottom
+     * boxing of noisy lines. */
+    if (vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
+      vcap_line_toggle_seen <= vcap_line_payload_axi[11];
+      videocap_bank_sync <= vcap_line_payload_axi[10];
+      if (vcap_line_payload_axi[9:0] < videocap_ymax_sync)
+        videocap_y_sync <= vcap_line_payload_axi[9:0];
     end
 `else
     if (vcap_interlace)

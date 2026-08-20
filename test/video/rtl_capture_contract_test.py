@@ -222,6 +222,11 @@ def check_writeback_provenance(rtl: str) -> None:
         # written with another line's content.
         "wire vc_row_line_stale = !videocap_writeback_full_width &&",
         "videocap_save_x == 0 && vc_row_line_stale) begin",
+        # Filtered capture banks its line buffer and hands rows over by
+        # completed-line token: the writeback gets a full line of slack.
+        "wire [11:0] vcap_line_payload_cap = (`VCAP_FULLRATE_INT != 0) ? {",
+        "vcap_line_toggle, vcap_token_bank, vcap_token_y",
+        "if (vcap_line_payload_axi[9:0] < videocap_ymax_sync)",
     )
     for fragment in fragments:
         if fragment not in rtl:
