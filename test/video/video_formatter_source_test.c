@@ -514,11 +514,17 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	int ok = 1;
 
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "localparam integer LINEBUF_BANKS = (FULLRATE != 0) ? 2 : 1;");
+	    "localparam integer LINEBUF_BANKS = 2;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "wire capture_banking_cap = (FULLRATE != 0) && ctl_full_width_cap;");
+	    "wire capture_banking_cap = (FULLRATE != 0) ? ctl_full_width_cap : 1'b1;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "wire read_banking_axi = (FULLRATE != 0) && ctl_read_full_width;");
+	    "wire read_banking_axi = (FULLRATE != 0) ? ctl_read_full_width : 1'b1;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "cap_token_y <= cap_y[9:0];");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "cap_token_bank <= capture_bank;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "if (cap_token_pending) begin");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "capture_banking_cap ? capture_bank : 1'b0, cap_x");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
@@ -537,11 +543,19 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "vcap_line_toggle, vcap_write_bank, vcap_y[9:0]");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    ".buf_rbank(vc_saving_bank)");
+	    ".buf_rbank(vc_row_bank)");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vc_row_bank <= vc_saving_bank;");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vcap_line_toggle, vcap_token_bank, vcap_token_y");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "if (vcap_line_payload_axi[9:0] < videocap_ymax_sync)");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "vc_saving_bank <= videocap_bank_sync;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "vcap_line_payload_axi[11] != vcap_line_toggle_seen");
+	    "wire vc_row_line_stale = !videocap_writeback_full_width &&");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "videocap_save_x == 0 && vc_row_line_stale) begin");
 
 	return ok ? 0 : 1;
 }

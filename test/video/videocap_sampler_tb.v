@@ -47,6 +47,11 @@ reg buf_rbank = 0;
 reg probe_arm_toggle = 0;
 wire [31:0] buf_rdata;
 wire [31:0] legacy_buf_rdata;
+wire legacy_cap_line_toggle;
+wire legacy_cap_write_bank;
+wire [9:0] legacy_cap_token_y;
+wire legacy_cap_token_bank;
+reg legacy_buf_rbank = 0;
 wire [10:0] cap_x;
 wire [10:0] cap_y;
 wire [10:0] cap_ymax;
@@ -229,8 +234,10 @@ videocap_sampler #(
     .cap_ntsc(),
     .cap_x_done(),
     .cap_shres(legacy_cap_shres),
-    .cap_line_toggle(),
-    .cap_write_bank(),
+    .cap_line_toggle(legacy_cap_line_toggle),
+    .cap_write_bank(legacy_cap_write_bank),
+    .cap_token_y(legacy_cap_token_y),
+    .cap_token_bank(legacy_cap_token_bank),
     .probe_arm_toggle(1'b0),
     .probe_arm_seen(),
     .probe_valid(),
@@ -244,7 +251,7 @@ videocap_sampler #(
     .probe_precrop_raddr(6'd0),
     .probe_precrop_rdata(),
     .axi_clk(axi_clk),
-    .buf_rbank(1'b0),
+    .buf_rbank(legacy_buf_rbank),
     .buf_raddr(buf_raddr),
     .buf_rdata(legacy_buf_rdata)
 );
@@ -557,6 +564,8 @@ integer sample_idx;
 integer pix_even;
 integer pix_odd;
 integer line_seed;
+integer legacy_line_seed;
+reg [31:0] legacy_got0;
 integer k;
 reg [31:0] got;
 reg [7:0] want_r;
@@ -679,15 +688,37 @@ initial begin
     /* FULLRATE=0 converts the universal 188-sample default to 94 local
      * capture clocks, preserving the Denise-adapter framing.  Check the
      * reference before the full-width bank sweep advances the free-running
-     * capture clock for thousands of AXI cycles. */
+     * capture clock for thousands of AXI cycles.  The filtered DUT banks
+     * its line buffer and publishes a completed-line token one line of
+     * pipeline after each line completes, so the newest readable
+     * completed line is LINES-2: its data sits in the token's bank while
+     * the capture bank has flipped past it. */
+    legacy_line_seed = LINES - 2;
     line_seed = LINES - 1;
-    legacy_buf_read(12'd4, got);
+    check_eq("legacy_token_bank_completed",
+             {31'b0, legacy_cap_token_bank},
+             {31'b0, ~legacy_cap_write_bank});
+    /* The banked line buffer holds the two most recent lines, one per
+     * bank; the final driven line lives in whichever bank its parity
+     * selected.  Its cropped data must be readable through one of them. */
     sample_idx = (CROPH / 2) + 4 + CAPTURE_INPUT_OFFSET;
     pix_even = sample_idx / PIXSPAN + line_seed;
     want_r = pix_even[7:0];
     want_g = ~pix_even[7:0];
     want_b = {pix_even[3:0], pix_even[7:4]};
-    check_eq("legacy_crop", got[23:0], {want_r, want_g, want_b});
+    legacy_buf_rbank = 1'b0;
+    legacy_buf_read(12'd4, got);
+    legacy_got0 = got;
+    legacy_buf_rbank = 1'b1;
+    legacy_buf_read(12'd4, got);
+    checks = checks + 1;
+    if (legacy_got0[23:0] !== {want_r, want_g, want_b} &&
+            got[23:0] !== {want_r, want_g, want_b}) begin
+        errors = errors + 1;
+        $display("MISMATCH legacy_crop b0=%06x b1=%06x want=%06x",
+                 legacy_got0[23:0], got[23:0], {want_r, want_g, want_b});
+    end
+    legacy_buf_rbank = 1'b0;
 
     /* The final active raster line remains in its completed bank. */
     buf_rbank = FULLWIDTH ? cap_write_bank : 1'b0;

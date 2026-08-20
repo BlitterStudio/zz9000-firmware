@@ -1277,6 +1277,8 @@ module MNTZorro_v0_1_S00_AXI
   wire vcap_shres;
   wire vcap_line_toggle;
   wire vcap_write_bank;
+  wire [9:0] vcap_token_y;
+  wire vcap_token_bank;
   wire [31:0] vcap_rdata;
   wire vcap_sampler_probe_arm_seen;
   wire vcap_sampler_probe_valid;
@@ -1303,9 +1305,14 @@ module MNTZorro_v0_1_S00_AXI
   /* In full-width mode the sampler finishes late enough in the raster that
    * AXI writeback overlaps capture of the following line.  Transfer a token,
    * completed bank, and line number together; the bank and line are stable
-   * for the whole capture line before the token changes. */
-  wire [11:0] vcap_line_payload_cap = {
+   * for the whole capture line before the token changes.  The filtered
+   * banked path carries the same guarantee by latching the completed
+   * line's number and bank at line_sync and toggling one capture clock
+   * later. */
+  wire [11:0] vcap_line_payload_cap = (`VCAP_FULLRATE_INT != 0) ? {
       vcap_line_toggle, vcap_write_bank, vcap_y[9:0]
+  } : {
+      vcap_line_toggle, vcap_token_bank, vcap_token_y
   };
   wire [11:0] vcap_line_payload_axi;
 
@@ -1450,13 +1457,15 @@ module MNTZorro_v0_1_S00_AXI
       .detected_standard(vcap_detected_standard),
       .cap_x(vcap_x),
       .cap_y(vcap_y),
+      .cap_line_toggle(vcap_line_toggle),
+      .cap_write_bank(vcap_write_bank),
+      .cap_token_y(vcap_token_y),
+      .cap_token_bank(vcap_token_bank),
       .cap_ymax(vcap_ymax),
       .cap_interlace(vcap_interlace),
       .cap_ntsc(vcap_ntsc),
       .cap_x_done(vcap_x_done),
       .cap_shres(vcap_shres),
-      .cap_line_toggle(vcap_line_toggle),
-      .cap_write_bank(vcap_write_bank),
       .probe_arm_toggle(vcap_probe_arm_toggle),
       .probe_arm_seen(vcap_sampler_probe_arm_seen),
       .probe_valid(vcap_sampler_probe_valid),
@@ -1470,7 +1479,7 @@ module MNTZorro_v0_1_S00_AXI
       .probe_precrop_raddr(vcap_sampler_probe_precrop_raddr),
       .probe_precrop_rdata(vcap_sampler_probe_precrop_rdata),
       .axi_clk(S_AXI_ACLK),
-      .buf_rbank(vc_saving_bank),
+      .buf_rbank(vc_row_bank),
       .buf_raddr(vcap_raddr),
       .buf_rdata(vcap_rdata)
   );
@@ -1632,6 +1641,31 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] vc_saveaddr2;
   reg [31:0] vc_saveaddr3;
 
+  /* Row base frozen at the first burst of each writeback row.  While a
+   * row's 16-beat bursts are in flight, vc_saving_line can already have
+   * advanced (AXI stalls from RTG/VDMA traffic routinely push a row's
+   * writeback across the next capture line boundary, and the Denise
+   * y-sync path updates videocap_y_sync continuously while vcap_x_done
+   * is high).  Without the freeze, every remaining burst of the row is
+   * re-based onto the new row's address with the old row's x offset:
+   * 16-pixel blocks of wrong-row data at wrong DDR addresses, visible
+   * as a periodic white/black box when the 60 Hz scanout catches them
+   * (issue #76 follow-up).  The frozen vc_row_line also keeps the
+   * line-completion bookkeeping truthful for the row actually written. */
+  reg [23:0] vc_row_base = 0;
+  reg [9:0] vc_row_line = 0;
+  reg vc_row_bank = 0;
+  wire [23:0] vc_burst_base = (videocap_save_x == 0) ?
+      vc_saveaddr1 : vc_row_base;
+
+  /* Filtered (single-buffered) capture may only write a row while that
+   * row's line is still the one being captured: videocap_y_sync tracks
+   * the live line whenever vcap_x_done is high. The full-width path
+   * banks its line buffer and orders rows by completion token, so a
+   * one-line lag is legitimate there and must not trip this gate. */
+  wire vc_row_line_stale = !videocap_writeback_full_width &&
+      (vc_saving_line != videocap_y_sync);
+
   always @(posedge S_AXI_ACLK) begin
     // VIDEOCAP
 
@@ -1650,9 +1684,19 @@ module MNTZorro_v0_1_S00_AXI
     else
       videocap_ymax_sync <= vcap_ymax-36;
 
-    // letterbox top and bottom to box out noisy lines
-    if (videocap_y_sync2<videocap_ymax_sync && vcap_x_done) begin
-      videocap_y_sync <= videocap_y_sync2;
+    /* Completed-line tokens own the row handoff: each token's bank holds
+     * one full completed capture line, so the writeback has a whole line
+     * of slack and can never read a line that is being recaptured.  This
+     * replaces the live vcap_y sampling, whose writeback could compound
+     * lateness within a line and displace rows (the vertical shear from
+     * the issue #76 follow-up video).  Tokens past the letterbox bound
+     * are consumed without updating the row, preserving the top/bottom
+     * boxing of noisy lines. */
+    if (vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
+      vcap_line_toggle_seen <= vcap_line_payload_axi[11];
+      videocap_bank_sync <= vcap_line_payload_axi[10];
+      if (vcap_line_payload_axi[9:0] < videocap_ymax_sync)
+        videocap_y_sync <= vcap_line_payload_axi[9:0];
     end
 `else
     if (vcap_interlace)
@@ -1678,7 +1722,9 @@ module MNTZorro_v0_1_S00_AXI
     //vc_saveaddr2 <= (vc_saveaddr1+videocap_save_x)<<2;
     //vc_saveaddr3 <= videocap_address+vc_saveaddr2;
 
-    // FIXME
+    // A new capture row appears; the in-flight row keeps its frozen
+    // vc_row_base/vc_row_line until it completes, so this handoff is
+    // safe even while the previous row's bursts are still draining.
     if (videocap_save_line_done!=videocap_y_sync) begin
       vc_saving_line <= videocap_y_sync;
       vc_saving_bank <= videocap_bank_sync;
@@ -1727,18 +1773,40 @@ module MNTZorro_v0_1_S00_AXI
           end
         end
         4'h2: begin
-          // we shift left by 2 bits to scale from 1 pixel to 4 bytes
-          m01_axi_awaddr_out  <= videocap_address + ((vc_saveaddr1 + videocap_write_x)<<2);
+          // we shift left by 2 bits to scale from 1 pixel to 4 bytes.
+          // The burst base is the row-frozen vc_burst_base so a
+          // mid-writeback advance of vc_saving_line cannot re-base the
+          // remaining bursts of the row in flight.
+          m01_axi_awaddr_out  <= videocap_address + ((vc_burst_base + videocap_write_x)<<2);
           vc_beat <= 0;
           m01_axi_wlast <= 0;
 
           if (videocap_save_x >= videocap_pitch_sync) begin
-            videocap_save_line_done <= vc_saving_line;
+            // Completed the row that was actually written, not whatever
+            // vc_saving_line points at now.
+            videocap_save_line_done <= vc_row_line;
             videocap_save_x <= 0;
+          end else if (videocap_save_x == 0 && vc_row_line_stale) begin
+            // The line this row would read has already scrolled out of
+            // the single (non-banked) line buffer: writing it would stamp
+            // the current line's content one or more rows off - the
+            // sustained whole-picture vertical jiggle from the issue #76
+            // follow-up video. Skip the row without issuing a burst: the
+            // DDR row keeps the previous frame's vertically-correct data
+            // and the writeback re-synchronizes to the live line at once.
+            videocap_save_line_done <= vc_saving_line;
           end else if (videocap_save_line_done != vc_saving_line &&
               vc_saveaddr_line == vc_saving_line) begin
             m01_axi_awvalid_out <= 1;
             videocap_save_state <= 3;
+            if (videocap_save_x == 0) begin
+              // First burst of a row: freeze base, row number, and the
+              // line-buffer read bank together, so a mid-writeback row
+              // advance cannot mix banks between address and data.
+              vc_row_base <= vc_saveaddr1;
+              vc_row_line <= vc_saving_line;
+              vc_row_bank <= vc_saving_bank;
+            end
           end
         end
         4'h3: begin
@@ -1750,8 +1818,13 @@ module MNTZorro_v0_1_S00_AXI
         end
         4'h4: begin
           // videocap is disabled, lets wait here
-          if (videocap_mode_sync)
+          if (videocap_mode_sync) begin
             videocap_save_state <= 0;
+            // Restart at the next row origin so the freeze regs relatch
+            // from the current mode instead of resuming a stale x into
+            // the previous session's frozen row base.
+            videocap_save_x <= 0;
+          end
 
           m01_axi_wvalid_out  <= 0;
           m01_axi_awvalid_out <= 0;

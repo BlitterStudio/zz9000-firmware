@@ -238,6 +238,10 @@ module videocap_sampler #(
     output reg         cap_shres,
     output reg         cap_line_toggle = 0,
     output wire        cap_write_bank,
+    /* Completed-line token payload for the filtered banked path; valid
+     * when cap_line_toggle changes outside full-width mode. */
+    output reg  [9:0] cap_token_y = 0,
+    output reg         cap_token_bank = 0,
 
     input  wire        probe_arm_toggle,
     output reg         probe_arm_seen = 0,
@@ -301,14 +305,23 @@ reg [11:0] phase_x = 0;
 reg [11:0] phase_line_period = 0;
 reg [11:0] vsync_phase_x = 0;
 
-localparam integer LINEBUF_BANKS = (FULLRATE != 0) ? 2 : 1;
+/* Both capture paths use a two-bank line buffer.  Full-rate variants bank
+ * only in full-width mode as before; filtered (Denise-adapter) variants
+ * bank unconditionally.  With a single buffer the writeback of an 800-word
+ * row can never finish more than ~1 us before the line boundary (the last
+ * needed sample is captured at 63 us of a 64 us line), so any AXI stall
+ * displaces tail samples with the next line's data and the lateness
+ * compounds through the frame - the vertical shear measured in the
+ * issue #76 follow-up video.  Banking gives each completed line a full
+ * line of writeback slack instead. */
+localparam integer LINEBUF_BANKS = 2;
 reg [31:0] linebuf [0:(BUF_DEPTH * LINEBUF_BANKS)-1];
 reg [31:0] buf_rdata_r;
 assign buf_rdata = buf_rdata_r;
 
 reg capture_bank = 0;
-wire capture_banking_cap = (FULLRATE != 0) && ctl_full_width_cap;
-wire read_banking_axi = (FULLRATE != 0) && ctl_read_full_width;
+wire capture_banking_cap = (FULLRATE != 0) ? ctl_full_width_cap : 1'b1;
+wire read_banking_axi = (FULLRATE != 0) ? ctl_read_full_width : 1'b1;
 wire [11:0] capture_buf_addr = {
     capture_banking_cap ? capture_bank : 1'b0, cap_x
 };
@@ -316,6 +329,12 @@ wire [11:0] read_buf_addr = {
     read_banking_axi ? buf_rbank : 1'b0, buf_raddr[10:0]
 };
 assign cap_write_bank = capture_banking_cap ? capture_bank : 1'b0;
+/* Completed-line token for the filtered banked path.  The payload is
+ * latched at line_sync from the pre-edge values (the line number still
+ * holds the completed line and capture_bank has not flipped yet) and the
+ * toggle changes one capture clock later, so the whole payload is stable
+ * on both sides of the toggle edge as the line CDC requires. */
+reg cap_token_pending = 0;
 
 always @(posedge axi_clk)
     buf_rdata_r <= linebuf[read_buf_addr];
@@ -431,6 +450,14 @@ always @(posedge cap_clk) begin
         ctl_dest_ack <= 1'b1;
     end
 
+    /* Publish the completed-line token one capture clock after its
+     * payload was latched, so the payload is stable across the toggle
+     * edge seen by the line CDC. */
+    if (cap_token_pending) begin
+        cap_token_pending <= 0;
+        cap_line_toggle <= ~cap_line_toggle;
+    end
+
     if (line_sync) begin
         if (phase_x != 0)
             phase_line_period <= phase_x;
@@ -528,6 +555,14 @@ always @(posedge cap_clk) begin
         cap_x_done <= 0;
         if (capture_banking_cap)
             capture_bank <= ~capture_bank;
+        if (capture_banking_cap && FULLRATE == 0) begin
+            /* Completed line: publish its number and bank as a token one
+             * capture clock later.  cap_y and capture_bank still hold the
+             * completed line's values at this edge. */
+            cap_token_y <= cap_y[9:0];
+            cap_token_bank <= capture_bank;
+            cap_token_pending <= 1;
+        end
 
         if (CSYNC_VSYNC != 0) begin
             if (hs_pulse_width < 8'h20) begin
@@ -670,7 +705,10 @@ always @(posedge cap_clk) begin
 
         end
 
-        if (capture_banking_cap) begin
+        if (capture_banking_cap && FULLRATE != 0) begin
+            /* Full-width completion token: the 1280-sample row is stored
+             * and the writeback may start.  The filtered banked path
+             * publishes its completed-line token at line_sync instead. */
             if (!cap_x_done && cap_x >= 11'd1279) begin
                 cap_x_done <= 1;
                 cap_line_toggle <= ~cap_line_toggle;
