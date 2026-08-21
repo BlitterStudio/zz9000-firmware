@@ -1,0 +1,842 @@
+/*
+ * Host tests for the audio control-plane mailbox dispatch (plan U4):
+ * the six SDK_OP_AUDIO_* opcodes (0x0509..0x050e) against the scene
+ * module, including the KTD7 fade-commit-restore sequence.
+ *
+ * The dispatch layer (sdk_audio_control.c) is the exact function the
+ * core-0 mailbox handler in sdk_mailbox.c routes these opcodes to, so
+ * every assertion here exercises firmware behavior, not a copy: each
+ * opcode round-trips (select then CONTROL_STATE_GET reflects it),
+ * staged SCENE_WRITE accumulates firmware-side and only COMMIT
+ * applies, trim submit reports applied/bound/bounded per the ABI,
+ * commit ordering is asserted through the recording setter stub (fade
+ * writes precede param writes precede restore; the EQ bands commit as
+ * one contiguous safeload group), two rapid scene switches serialize
+ * with no interleaved partial commits (including a nested commit
+ * attempt from inside the commit itself), meter reads return framed
+ * snapshots, SCENE_SAVE reaches the validation + writer seam, and
+ * unknown opcodes still complete SDK_STATUS_UNSUPPORTED.
+ *
+ * Linked like audio_scene_test: the ax.h DSP setters are recording
+ * stubs (link-time seam), so every master-chain write is observable
+ * in order.
+ */
+
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "audio_scene.h"
+#include "ax.h"
+#include "sdk_audio_control.h"
+#include "sdk_mailbox.h"
+
+/* ---- recording stubs for the ax.h DSP setters ---- */
+
+enum {
+	WRITE_LPF,   /* audio_adau_set_lpf_params(f0) */
+	WRITE_MIXER, /* audio_adau_set_mixer_vol(vol1, vol2) */
+	WRITE_PREF,  /* audio_adau_set_prefactor(pre) */
+	WRITE_EQ,    /* audio_adau_set_eq_gain(band, gain) */
+	WRITE_VOLPAN /* audio_adau_set_vol_pan(vol, pan) */
+};
+
+#define WRITE_LOG_MAX 512
+
+/* Big-endian word accessors: pack requests and read results exactly
+ * like an SDK client (abi.h accessors) would, proving the firmware
+ * byte order on both sides of the dispatch. */
+static void put32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)(v >> 24);
+	p[1] = (uint8_t)(v >> 16);
+	p[2] = (uint8_t)(v >> 8);
+	p[3] = (uint8_t)v;
+}
+
+static uint32_t w32(const uint8_t *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+/* Nested dispatch helper used by the EQ stub below. */
+static uint16_t run_local_select(
+	const struct SDKAudioSceneSelectPayload *payload);
+
+/* ---- recording stubs for the ax.h DSP setters ---- */
+
+struct dsp_write {
+	int kind;
+	int a;
+	int b;
+};
+
+static struct dsp_write write_log[WRITE_LOG_MAX];
+static int write_count;
+
+static void record_write(int kind, int a, int b)
+{
+	if (write_count < WRITE_LOG_MAX) {
+		write_log[write_count].kind = kind;
+		write_log[write_count].a = a;
+		write_log[write_count].b = b;
+	}
+	write_count++;
+}
+
+static void clear_writes(void)
+{
+	write_count = 0;
+}
+
+static int log_at(int index, int *kind, int *a, int *b)
+{
+	if (index < 0 || index >= write_count || index >= WRITE_LOG_MAX)
+		return 0;
+	*kind = write_log[index].kind;
+	*a = write_log[index].a;
+	*b = write_log[index].b;
+	return 1;
+}
+
+static int last_write(int kind, int *a, int *b)
+{
+	int i;
+
+	for (i = write_count - 1; i >= 0 && i < WRITE_LOG_MAX; i--) {
+		if (write_log[i].kind == kind) {
+			*a = write_log[i].a;
+			*b = write_log[i].b;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Reentrancy hook: re-enter the dispatch from inside the commit's EQ
+ * group. A second commit attempt while one is in flight must return
+ * SDK_STATUS_BUSY and issue no writes of its own (serialization).
+ */
+static int reenter_armed;
+static uint16_t nested_status = 0xffffU;
+static int nested_write_count = -1;
+
+int audio_adau_set_lpf_params(int f0)
+{
+	record_write(WRITE_LPF, f0, 0);
+	return 0;
+}
+
+int audio_adau_set_mixer_vol(int vol1, int vol2)
+{
+	record_write(WRITE_MIXER, vol1, vol2);
+	return 0;
+}
+
+int audio_adau_set_prefactor(int pre)
+{
+	record_write(WRITE_PREF, pre, 0);
+	return 0;
+}
+
+int audio_adau_set_eq_gain(int band, int gain)
+{
+	record_write(WRITE_EQ, band, gain);
+	if (reenter_armed && band == 5) {
+		struct SDKAudioSceneSelectPayload nested;
+
+		memset(&nested, 0, sizeof(nested));
+		put32(nested.scene, 4);
+		reenter_armed = 0;
+		nested_write_count = write_count;
+		nested_status = run_local_select(&nested);
+	}
+	return 0;
+}
+
+int audio_adau_set_vol_pan(int vol, int pan)
+{
+	record_write(WRITE_VOLPAN, vol, pan);
+	return 0;
+}
+
+/* ---- assertions (suite convention) ---- */
+
+static int failures;
+
+static void check(int ok, const char *name, const char *detail)
+{
+	if (!ok) {
+		failures++;
+		printf("FAILED: %s (%s)\n", name, detail ? detail : "");
+	}
+}
+
+static const char *fmt(const char *format, ...)
+{
+	static char buffer[160];
+	va_list args;
+
+	va_start(args, format);
+	vsnprintf(buffer, sizeof(buffer), format, args);
+	va_end(args);
+	return buffer;
+}
+
+static uint8_t result_buf[48];
+static uint16_t result_len;
+
+static uint16_t run_op(uint16_t opcode, const void *payload,
+	uint16_t payload_len)
+{
+	memset(result_buf, 0, sizeof(result_buf));
+	result_len = 0;
+	return sdk_audio_control_run(opcode, payload, payload_len,
+		result_buf, &result_len);
+}
+
+static uint16_t run_local_select(
+	const struct SDKAudioSceneSelectPayload *payload)
+{
+	return run_op(SDK_OP_AUDIO_SCENE_SELECT, payload, sizeof(*payload));
+}
+
+/* ---- one full KTD7 commit sequence, asserted entry by entry ---- */
+
+/*
+ * Expected log layout for one commit (fade -> ordered params ->
+ * restore), starting at log index base:
+ *   base+0     VOLPAN(0, pan)        fade down (verified write)
+ *   base+1     LPF(lpf)
+ *   base+2..11 EQ(band 0..9, gain)   one contiguous safeload group
+ *   base+12    PREF(pref)
+ *   base+13    MIXER(m1, m2)         staged mixer legs
+ *   base+14    VOLPAN(vol, pan)      restore
+ */
+static void check_commit_sequence(const char *name, int base, int lpf,
+	const uint8_t *eq, int pref, int vol, int pan, int m1, int m2)
+{
+	int i;
+	int kind = 0, a = 0, b = 0;
+	int ok;
+
+	ok = log_at(base, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+		a == 0 && b == pan;
+	check(ok, "commit fades output down first",
+		fmt("%s[%d]: kind=%d vol=%d pan=%d", name, base, kind, a, b));
+	ok = log_at(base + 1, &kind, &a, &b) && kind == WRITE_LPF &&
+		a == lpf;
+	check(ok, "commit writes LPF",
+		fmt("%s[%d]: kind=%d f0=%d", name, base + 1, kind, a));
+	for (i = 0; i < AUDIO_SCENE_EQ_BANDS; i++) {
+		ok = log_at(base + 2 + i, &kind, &a, &b) &&
+			kind == WRITE_EQ && a == i && b == eq[i];
+		check(ok, "commit writes EQ bands as one contiguous group",
+			fmt("%s[%d]: kind=%d band=%d gain=%d want=%u",
+				name, base + 2 + i, kind, a, b, eq[i]));
+	}
+	ok = log_at(base + 12, &kind, &a, &b) && kind == WRITE_PREF &&
+		a == pref;
+	check(ok, "commit writes prefactor",
+		fmt("%s[%d]: kind=%d pre=%d", name, base + 12, kind, a));
+	ok = log_at(base + 13, &kind, &a, &b) && kind == WRITE_MIXER &&
+		a == m1 && b == m2;
+	check(ok, "commit stages mixer legs",
+		fmt("%s[%d]: kind=%d v1=%d v2=%d", name, base + 13, kind,
+			a, b));
+	ok = log_at(base + 14, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+		a == vol && b == pan;
+	check(ok, "commit restores output volume last",
+		fmt("%s[%d]: kind=%d vol=%d pan=%d", name, base + 14, kind,
+			a, b));
+}
+
+static const uint8_t eq_unity[AUDIO_SCENE_EQ_BANDS] = {
+	50, 50, 50, 50, 50, 50, 50, 50, 50, 50
+};
+
+/* ---- SCENE_SELECT / CONTROL_STATE_GET round-trip ---- */
+
+static void test_select_state_roundtrip(void)
+{
+	struct SDKAudioSceneSelectPayload sel;
+	struct SDKAudioControlStateGetPayload get;
+	uint16_t status;
+	int a = -1, b = -1;
+
+	audio_scene_init();
+	memset(&sel, 0, sizeof(sel));
+	memset(&get, 0, sizeof(get));
+
+	put32(sel.scene, 3);
+	status = run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel));
+	check(status == SDK_STATUS_OK && result_len == 0,
+		"scene select completes OK",
+		fmt("status=%u len=%u", status, result_len));
+
+	status = run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get));
+	check(status == SDK_STATUS_OK && result_len == sizeof(
+			struct SDKAudioControlStateResultPayload),
+		"control state get completes with result payload",
+		fmt("status=%u len=%u", status, result_len));
+	check(w32(&result_buf[0]) == 3 && w32(&result_buf[4]) ==
+		SDK_AUDIO_SCENE_COUNT,
+		"state get reflects the selected scene",
+		fmt("active=%lu count=%lu",
+			(unsigned long)w32(&result_buf[0]),
+			(unsigned long)w32(&result_buf[4])));
+	check(audio_scene_active_index() == 3,
+		"module active index agrees", NULL);
+	check(last_write(WRITE_VOLPAN, &a, &b) && a == 75 && b == 50,
+		"default scene 3 volume restored",
+		fmt("vol=%d pan=%d", a, b));
+}
+
+/* ---- staged SCENE_WRITE: accumulates, only COMMIT applies ---- */
+
+static void test_staged_write_accumulates(void)
+{
+	struct SDKAudioSceneWritePayload wr;
+	uint16_t status;
+
+	audio_scene_init();
+	clear_writes();
+	memset(&wr, 0, sizeof(wr));
+
+	/* Stage two parameters without COMMIT: nothing reaches the DSP
+	 * and the stored scene definition is untouched. */
+	put32(wr.scene, 0);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_EQ_BAND_4);
+	put32(wr.value, 30);
+	status = run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr));
+	check(status == SDK_STATUS_OK,
+		"staged EQ write accepted without commit",
+		fmt("status=%u", status));
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_VOLUME);
+	put32(wr.value, 60);
+	status = run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr));
+	check(status == SDK_STATUS_OK,
+		"staged volume write accepted without commit",
+		fmt("status=%u", status));
+	check(write_count == 0,
+		"staging alone issues no DSP writes",
+		fmt("writes=%d", write_count));
+	check(audio_scene_get(0) != NULL &&
+		audio_scene_get(0)->eq[3] == 50 &&
+		audio_scene_get(0)->volume == 100,
+		"staged values not applied to the scene definition", NULL);
+
+	/* An invalid stage value is refused and leaves staging intact. */
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_EQ_BAND_4);
+	put32(wr.value, 101);
+	status = run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr));
+	check(status == SDK_STATUS_BAD_REQUEST,
+		"out-of-range EQ gain rejected at stage time",
+		fmt("status=%u", status));
+	put32(wr.param, 0);
+	put32(wr.value, 1);
+	status = run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr));
+	check(status == SDK_STATUS_BAD_REQUEST,
+		"unknown param id rejected",
+		fmt("status=%u", status));
+	check(write_count == 0,
+		"rejected staging issues no DSP writes",
+		fmt("writes=%d", write_count));
+
+	/* COMMIT applies everything staged so far through one
+	 * fade-commit-restore sequence. */
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_VOLUME);
+	put32(wr.value, 60);
+	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	status = run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr));
+	check(status == SDK_STATUS_OK,
+		"commit applies the staged group",
+		fmt("status=%u", status));
+	check(write_count == 15,
+		"commit is exactly one 15-write fade/params/restore sequence",
+		fmt("writes=%d", write_count));
+	check_commit_sequence("staged commit", 0, 23900,
+		(const uint8_t[]){ 50, 50, 50, 30, 50, 50, 50, 50, 50, 50 },
+		50, 60, 50, 128, 64);
+	check(audio_scene_get(0) != NULL &&
+		audio_scene_get(0)->eq[3] == 30 &&
+		audio_scene_get(0)->volume == 60,
+		"committed values stored in the scene definition", NULL);
+	check(audio_scene_gain_reduction_events() == 0,
+		"within-boundary staged commit emits no event", NULL);
+}
+
+/* ---- KTD7 commit ordering via the default scenes ---- */
+
+static void test_commit_ordering(void)
+{
+	struct SDKAudioSceneSelectPayload sel;
+	static const uint8_t eq3[AUDIO_SCENE_EQ_BANDS] = {
+		50, 50, 50, 50, 50, 50, 55, 55, 50, 50
+	};
+
+	audio_scene_init();
+	clear_writes();
+	memset(&sel, 0, sizeof(sel));
+
+	put32(sel.scene, 3);
+	check(run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel)) ==
+		SDK_STATUS_OK, "select scene 3", NULL);
+	check(write_count == 15,
+		"one commit sequence per select",
+		fmt("writes=%d", write_count));
+	check_commit_sequence("scene 3", 0, 18000, eq3, 50, 75, 50, 128,
+		64);
+}
+
+/* ---- two rapid switches serialize ---- */
+
+static void test_rapid_switches_serialize(void)
+{
+	struct SDKAudioSceneSelectPayload sel;
+	static const uint8_t eq2[AUDIO_SCENE_EQ_BANDS] = {
+		55, 55, 50, 50, 50, 50, 50, 50, 50, 50
+	};
+	static const uint8_t eq5[AUDIO_SCENE_EQ_BANDS] = {
+		45, 45, 50, 50, 50, 50, 50, 50, 45, 45
+	};
+
+	audio_scene_init();
+	clear_writes();
+	memset(&sel, 0, sizeof(sel));
+
+	put32(sel.scene, 2);
+	check(run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel)) ==
+		SDK_STATUS_OK, "rapid switch A", NULL);
+	put32(sel.scene, 5);
+	check(run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel)) ==
+		SDK_STATUS_OK, "rapid switch B", NULL);
+
+	check(write_count == 30,
+		"two rapid switches produce two complete sequences",
+		fmt("writes=%d", write_count));
+	check_commit_sequence("switch A", 0, 16000, eq2, 50, 75, 50, 128,
+		64);
+	check_commit_sequence("switch B", 15, 12000, eq5, 50, 90, 50, 128,
+		64);
+}
+
+/* ---- nested commit during a commit is BUSY, never interleaved ---- */
+
+static void test_nested_commit_rejected(void)
+{
+	struct SDKAudioSceneSelectPayload sel;
+
+	audio_scene_init();
+	clear_writes();
+	memset(&sel, 0, sizeof(sel));
+
+	nested_status = 0xffffU;
+	nested_write_count = -1;
+	reenter_armed = 1;
+	put32(sel.scene, 3);
+	check(run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel)) ==
+		SDK_STATUS_OK, "outer commit succeeds", NULL);
+	check(nested_status == SDK_STATUS_BUSY,
+		"commit re-entered mid-flight completes BUSY",
+		fmt("status=%u", nested_status));
+	check(nested_write_count == 8,
+		"nested attempt happened inside the EQ group",
+		fmt("writes at nested call=%d", nested_write_count));
+	check(write_count == 15,
+		"nested attempt issued no writes of its own",
+		fmt("writes=%d", write_count));
+	check_commit_sequence("outer", 0, 18000,
+		(const uint8_t[]){ 50, 50, 50, 50, 50, 50, 55, 55, 50, 50 },
+		50, 75, 50, 128, 64);
+	check(audio_scene_active_index() == 3,
+		"nested BUSY left the outer selection active", NULL);
+}
+
+/* ---- trim submit: applied / bound / bounded flag ---- */
+
+static void test_trim_submit_result(void)
+{
+	struct SDKAudioTrimSubmitPayload tr;
+	struct SDKAudioControlStateGetPayload get;
+	uint32_t flags, applied, bound, baseline, trim;
+	uint16_t status;
+
+	audio_scene_init();
+	memset(&tr, 0, sizeof(tr));
+	memset(&get, 0, sizeof(get));
+
+	/* Scene 0 (unity) with the default baseline (128+64 = 192, at
+	 * the boundary): an absolute balance below the composed limit is
+	 * applied verbatim, unbounded. */
+	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(108, 44));
+	status = run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr));
+	check(status == SDK_STATUS_OK && result_len == sizeof(
+			struct SDKAudioTrimResultPayload),
+		"trim submit completes with result payload",
+		fmt("status=%u len=%u", status, result_len));
+	applied = w32(&result_buf[0]);
+	bound = w32(&result_buf[4]);
+	flags = w32(&result_buf[8]);
+	check(applied == SDK_AUDIO_BALANCE_PACK(108, 44) &&
+		flags == 0 && bound == 0,
+		"within-boundary trim applied verbatim, unbounded",
+		fmt("applied=0x%lx bound=0x%lx flags=%lu",
+			(unsigned long)applied, (unsigned long)bound,
+			(unsigned long)flags));
+
+	/* One step over the composed boundary: reduced legs, BOUNDED
+	 * flag, and the applied bound reported back (138+64 = 202 scaled
+	 * by 192/202 -> 131+60 = 191). */
+	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(138, 64));
+	status = run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr));
+	check(status == SDK_STATUS_OK, "bounded trim submit accepted",
+		fmt("status=%u", status));
+	applied = w32(&result_buf[0]);
+	bound = w32(&result_buf[4]);
+	flags = w32(&result_buf[8]);
+	check(applied == SDK_AUDIO_BALANCE_PACK(131, 60) &&
+		flags == SDK_AUDIO_TRIM_RESULT_BOUNDED &&
+		bound == SDK_AUDIO_BALANCE_PACK(131, 60),
+		"over-boundary trim bounded and reported",
+		fmt("applied=0x%lx bound=0x%lx flags=%lu",
+			(unsigned long)applied, (unsigned long)bound,
+			(unsigned long)flags));
+	check(audio_scene_gain_reduction_events() == 1,
+		"bounded trim emitted one gain-reduction event", NULL);
+
+	/* CONTROL_STATE_GET mirrors the applied trim and the bounded
+	 * flag, and reports the baseline and ceiling. */
+	status = run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get));
+	check(status == SDK_STATUS_OK, "state get after trim", NULL);
+	flags = w32(&result_buf[20]);
+	baseline = w32(&result_buf[8]);
+	trim = w32(&result_buf[12]);
+	check(flags == SDK_AUDIO_CONTROL_FLAG_TRIM_BOUNDED &&
+		trim == SDK_AUDIO_BALANCE_PACK(131, 60),
+		"state get reports bounded applied trim",
+		fmt("flags=0x%lx trim=0x%lx", (unsigned long)flags,
+			(unsigned long)trim));
+	check(baseline == SDK_AUDIO_BALANCE_PACK(128, 64) &&
+		w32(&result_buf[16]) == 192,
+		"state get reports baseline pair and enforced ceiling",
+		fmt("baseline=0x%lx ceiling=%lu",
+			(unsigned long)baseline,
+			(unsigned long)w32(&result_buf[16])));
+}
+
+/* ---- meter read: framed snapshot through the dispatch ---- */
+
+#define TEST_FRAMES 8
+
+static int16_t out_period[TEST_FRAMES * 2];
+static uint8_t cap_period[TEST_FRAMES * 2 * 2];
+
+static void out_fill(int16_t left, int16_t right)
+{
+	int i;
+
+	for (i = 0; i < TEST_FRAMES; i++) {
+		out_period[i * 2] = left;
+		out_period[i * 2 + 1] = right;
+	}
+}
+
+static void cap_fill(int16_t left, int16_t right)
+{
+	int i;
+
+	for (i = 0; i < TEST_FRAMES; i++) {
+		cap_period[i * 4] = (uint8_t)(((uint16_t)left) >> 8);
+		cap_period[i * 4 + 1] = (uint8_t)left;
+		cap_period[i * 4 + 2] = (uint8_t)(((uint16_t)right) >> 8);
+		cap_period[i * 4 + 3] = (uint8_t)right;
+	}
+}
+
+static void test_meter_read(void)
+{
+	struct SDKAudioMeterReadPayload mr;
+	uint16_t status;
+
+	audio_scene_init();
+	memset(&mr, 0, sizeof(mr));
+
+	/* 0.5 / 0.375 FS -> 16.16 0x8000 / 0x6000 on the output. */
+	out_fill(0x4000, 0x3000);
+	audio_scene_meter_output_period(out_period, TEST_FRAMES);
+
+	put32(mr.direction, SDK_AUDIO_METER_DIRECTION_OUTPUT);
+	status = run_op(SDK_OP_AUDIO_METER_READ, &mr, sizeof(mr));
+	check(status == SDK_STATUS_OK && result_len == sizeof(
+			struct SDKAudioMeterResultPayload),
+		"output meter read completes with result payload",
+		fmt("status=%u len=%u", status, result_len));
+	check(w32(&result_buf[0]) == SDK_AUDIO_METER_DIRECTION_OUTPUT,
+		"meter read echoes direction", NULL);
+	check(w32(&result_buf[8]) == 1 && w32(&result_buf[12]) == 1,
+		"whole snapshot fits one frame",
+		fmt("frame=%lu count=%lu",
+			(unsigned long)w32(&result_buf[8]),
+			(unsigned long)w32(&result_buf[12])));
+	check((w32(&result_buf[4]) & 1U) == 0,
+		"snapshot generation is stable (non-tearing)",
+		fmt("generation=%lu", (unsigned long)w32(&result_buf[4])));
+	check(w32(&result_buf[40]) == 0x8000U &&
+		w32(&result_buf[44]) == 0x6000U,
+		"peaks reported in 16.16",
+		fmt("ch1=0x%lx ch2=0x%lx",
+			(unsigned long)w32(&result_buf[40]),
+			(unsigned long)w32(&result_buf[44])));
+	check(w32(&result_buf[20]) == SDK_AUDIO_METER_IDENTITY_UNKNOWN,
+		"legacy output reports unknown identity", NULL);
+	check(w32(&result_buf[24]) == 0,
+		"no clips on the seeded period", NULL);
+
+	/* Read-and-clear: the flags echo back and the next period opens
+	 * a fresh hold window. */
+	put32(mr.flags, SDK_AUDIO_METER_RESULT_HOLD_RESET);
+	status = run_op(SDK_OP_AUDIO_METER_READ, &mr, sizeof(mr));
+	check(status == SDK_STATUS_OK &&
+		w32(&result_buf[16]) == SDK_AUDIO_METER_RESULT_HOLD_RESET,
+		"hold-reset read reports the consumed window", NULL);
+	out_fill(0x1000, 0x1000);
+	audio_scene_meter_output_period(out_period, TEST_FRAMES);
+	put32(mr.flags, 0);
+	status = run_op(SDK_OP_AUDIO_METER_READ, &mr, sizeof(mr));
+	check(status == SDK_STATUS_OK && w32(&result_buf[40]) == 0x2000U,
+		"hold window restarted after consume",
+		fmt("ch1=0x%lx", (unsigned long)w32(&result_buf[40])));
+
+	/* Capture direction frames the same way. */
+	cap_fill(0x2000, -0x2000);
+	audio_scene_meter_capture_period(cap_period, TEST_FRAMES);
+	put32(mr.direction, SDK_AUDIO_METER_DIRECTION_CAPTURE);
+	status = run_op(SDK_OP_AUDIO_METER_READ, &mr, sizeof(mr));
+	check(status == SDK_STATUS_OK &&
+		w32(&result_buf[0]) == SDK_AUDIO_METER_DIRECTION_CAPTURE &&
+		w32(&result_buf[40]) == 0x4000U &&
+		w32(&result_buf[44]) == 0x4000U,
+		"capture direction snapshot framed",
+		fmt("dir=%lu ch1=0x%lx",
+			(unsigned long)w32(&result_buf[0]),
+			(unsigned long)w32(&result_buf[40])));
+}
+
+/* ---- scene save: validation now, writer through the U5 seam ---- */
+
+static void test_scene_save(void)
+{
+	struct SDKAudioSceneWritePayload wr;
+	struct SDKAudioSceneSavePayload save;
+	uint16_t status;
+
+	audio_scene_init();
+	memset(&wr, 0, sizeof(wr));
+	memset(&save, 0, sizeof(save));
+
+	/* Store an over-boundary scene in an inactive slot (staging +
+	 * commit never touches the DSP for an inactive scene). */
+	put32(wr.scene, 1);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_PREFACTOR);
+	put32(wr.value, 100);
+	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	status = run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr));
+	check(status == SDK_STATUS_OK, "stage over-boundary scene", NULL);
+	check(audio_scene_get(1) != NULL &&
+		audio_scene_get(1)->prefactor == 100,
+		"over-boundary scene stored in inactive slot", NULL);
+
+	put32(save.scene, 1);
+	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
+	check(status == SDK_STATUS_OK && result_len == sizeof(
+			struct SDKAudioSceneSaveResultPayload),
+		"scene save completes with result payload",
+		fmt("status=%u len=%u", status, result_len));
+	check(w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_REJECTED &&
+		w32(&result_buf[4]) == 1,
+		"save rejects a scene above the enforced boundary",
+		fmt("status=%lu scene=%lu",
+			(unsigned long)w32(&result_buf[0]),
+			(unsigned long)w32(&result_buf[4])));
+
+	/* A within-boundary scene passes validation and reaches the
+	 * persistence seam; until U5 installs the CFG writer the seam
+	 * reports unavailability rather than pretending success. */
+	put32(save.scene, 0);
+	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
+	check(status == SDK_STATUS_OK &&
+		w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_IO_ERROR &&
+		w32(&result_buf[4]) == 0,
+		"save reaches the writer seam (not yet available)",
+		fmt("status=%lu scene=%lu",
+			(unsigned long)w32(&result_buf[0]),
+			(unsigned long)w32(&result_buf[4])));
+}
+
+/* ---- staged baseline commit rides the same commit path ---- */
+
+static void test_baseline_write_path(void)
+{
+	struct SDKAudioSceneWritePayload wr;
+	struct SDKAudioControlStateGetPayload get;
+
+	audio_scene_init();
+	clear_writes();
+	memset(&wr, 0, sizeof(wr));
+	memset(&get, 0, sizeof(get));
+
+	put32(wr.scene, 5); /* ignored for BASELINE */
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_BASELINE);
+	put32(wr.value, SDK_AUDIO_BALANCE_PACK(150, 40));
+	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK, "baseline stage+commit", NULL);
+	check(audio_scene_baseline_paula() == 150 &&
+		audio_scene_baseline_ax() == 40,
+		"baseline stored", NULL);
+	check(write_count == 15,
+		"baseline change commits through the single commit path",
+		fmt("writes=%d", write_count));
+	check_commit_sequence("baseline", 0, 23900, eq_unity, 50, 100, 50,
+		150, 40);
+	check(audio_scene_gain_reduction_events() == 0,
+		"within-boundary baseline emits no event", NULL);
+
+	check(run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get)) ==
+		SDK_STATUS_OK, "state get after baseline", NULL);
+	check(w32(&result_buf[8]) == SDK_AUDIO_BALANCE_PACK(150, 40),
+		"state get reports the committed baseline",
+		fmt("baseline=0x%lx",
+			(unsigned long)w32(&result_buf[8])));
+
+	/* BASELINE ignores the scene index at stage time; the COMMIT
+	 * still needs a valid scene slot. */
+	audio_scene_init();
+	memset(&wr, 0, sizeof(wr));
+	put32(wr.scene, 8);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_BASELINE);
+	put32(wr.value, SDK_AUDIO_BALANCE_PACK(150, 40));
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK,
+		"baseline stage ignores the scene index", NULL);
+	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"commit requires a valid scene slot", NULL);
+}
+
+/* ---- unknown opcodes and request validation ---- */
+
+static void test_unsupported_and_validation(void)
+{
+	struct SDKAudioSceneSelectPayload sel;
+	struct SDKAudioSceneWritePayload wr;
+	struct SDKAudioMeterReadPayload mr;
+	uint8_t short_buf[48];
+
+	audio_scene_init();
+	memset(&sel, 0, sizeof(sel));
+	memset(&wr, 0, sizeof(wr));
+	memset(&mr, 0, sizeof(mr));
+	memset(short_buf, 0, sizeof(short_buf));
+
+	/* Unassigned audio-service opcodes still complete UNSUPPORTED,
+	 * exactly as the mailbox default does for them today. */
+	check(run_op(0x050f, short_buf, 48) == SDK_STATUS_UNSUPPORTED,
+		"unassigned audio opcode 0x050f unsupported", NULL);
+	check(run_op(0x05ff, short_buf, 48) == SDK_STATUS_UNSUPPORTED,
+		"unassigned audio opcode 0x05ff unsupported", NULL);
+
+	/* Short payloads are BAD_REQUEST for every opcode. */
+	check(run_op(SDK_OP_AUDIO_SCENE_SELECT, short_buf, 3) ==
+		SDK_STATUS_BAD_REQUEST,
+		"short scene select payload rejected", NULL);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, short_buf, 47) ==
+		SDK_STATUS_BAD_REQUEST,
+		"short scene write payload rejected", NULL);
+	check(run_op(SDK_OP_AUDIO_TRIM_SUBMIT, short_buf, 16) ==
+		SDK_STATUS_BAD_REQUEST,
+		"short trim submit payload rejected", NULL);
+	check(run_op(SDK_OP_AUDIO_METER_READ, short_buf, 0) ==
+		SDK_STATUS_BAD_REQUEST,
+		"short meter read payload rejected", NULL);
+	check(run_op(SDK_OP_AUDIO_SCENE_SAVE, short_buf, 7) ==
+		SDK_STATUS_BAD_REQUEST,
+		"short scene save payload rejected", NULL);
+	check(run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, short_buf, 4) ==
+		SDK_STATUS_BAD_REQUEST,
+		"short control state payload rejected", NULL);
+
+	/* Range and flag validation. */
+	put32(sel.scene, 8);
+	check(run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"select rejects out-of-range scene", NULL);
+	put32(sel.scene, 0);
+	put32(sel.flags, 1);
+	check(run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"select rejects unknown flags", NULL);
+
+	put32(wr.scene, 8);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_VOLUME);
+	put32(wr.value, 50);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"scene write rejects out-of-range scene slot", NULL);
+	put32(wr.scene, 0);
+	put32(wr.flags, 1U << 1);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"scene write rejects unknown flags", NULL);
+	put32(wr.flags, 0);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_LPF);
+	put32(wr.value, 0);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"scene write rejects LPF below the DSP range", NULL);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_PAN);
+	put32(wr.value, 101);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"scene write rejects pan above 100", NULL);
+
+	put32(mr.direction, 3);
+	check(run_op(SDK_OP_AUDIO_METER_READ, &mr, sizeof(mr)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"meter read rejects unknown direction", NULL);
+	put32(mr.direction, 0);
+	check(run_op(SDK_OP_AUDIO_METER_READ, &mr, sizeof(mr)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"meter read rejects direction 0", NULL);
+	put32(mr.direction, SDK_AUDIO_METER_DIRECTION_OUTPUT);
+	put32(mr.flags, 1U << 1);
+	check(run_op(SDK_OP_AUDIO_METER_READ, &mr, sizeof(mr)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"meter read rejects unknown flags", NULL);
+}
+
+int main(void)
+{
+	test_select_state_roundtrip();
+	test_staged_write_accumulates();
+	test_commit_ordering();
+	test_rapid_switches_serialize();
+	test_nested_commit_rejected();
+	test_trim_submit_result();
+	test_meter_read();
+	test_scene_save();
+	test_baseline_write_path();
+	test_unsupported_and_validation();
+
+	if (failures == 0) {
+		printf("audio_control_test: all tests passed\n");
+		return 0;
+	}
+	printf("audio_control_test: %d failure(s)\n", failures);
+	return 1;
+}

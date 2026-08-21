@@ -88,18 +88,33 @@ void audio_scene_init(void);
  * DSP instance that no longer exists) and drops all owner trims (the
  * reset tore their sessions down), then writes the scene and the
  * staged mixer legs before any owner can be serviced (R10).
- * Returns 0 on success, -1 if a verified DSP write failed. */
+ * Returns 0 on success, -1 if a verified DSP write failed, or
+ * AUDIO_SCENE_COMMIT_BUSY when re-entered mid-commit. */
 int audio_scene_apply_after_dsp_init(void);
 
-/* Scene operations (the only accepted path to master-chain writes). */
+/*
+ * A commit is already in flight (serialization, KTD7): the caller
+ * must retry. Returned by every entry point that would trigger a
+ * master-chain commit when re-entered from inside one.
+ */
+#define AUDIO_SCENE_COMMIT_BUSY (-2)
+
+/* Scene operations (the only accepted path to master-chain writes).
+ * Those that change the applied master chain join the single
+ * glitch-free commit path. */
 int audio_scene_select(uint8_t index);
 int audio_scene_write(uint8_t index, const struct audio_scene_def *def);
 const struct audio_scene_def *audio_scene_get(uint8_t index);
 uint8_t audio_scene_active_index(void);
 
-/* Operator baseline Paula/AX balance (R17): applied under every
- * owner's playback, on top of the active scene. Re-stages the mixer. */
-void audio_scene_set_baseline(uint8_t paula, uint8_t ax);
+/*
+ * Set the operator baseline (R17): applied under every owner's
+ * playback, on top of the active scene. The immediate variant joins
+ * the single glitch-free commit path; the mailbox path stages it
+ * through audio_scene_stage_param and commits. Returns 0, or
+ * AUDIO_SCENE_COMMIT_BUSY when re-entered mid-commit.
+ */
+int audio_scene_set_baseline(uint8_t paula, uint8_t ax);
 uint8_t audio_scene_baseline_paula(void);
 uint8_t audio_scene_baseline_ax(void);
 
@@ -110,6 +125,71 @@ uint8_t audio_scene_baseline_ax(void);
 int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 	struct audio_scene_trim_result *result);
 void audio_scene_trim_release(uint8_t owner);
+
+/* ---- staged scene edits and the single commit path (U4, KTD7) ---- */
+
+/*
+ * Stage one parameter of one scene into a firmware-side draft
+ * (KTD1: no client draft buffer -- SCENE_WRITE accumulates here and
+ * nothing touches the DSP until the matching commit). The draft is
+ * seeded from the scene's current definition, so partial edits
+ * compose. param is one of the SDK_AUDIO_SCENE_PARAM_* ids (the ABI
+ * vocabulary); value range checks match the scene definition. The
+ * BASELINE param stages the operator balance instead (R17) and
+ * ignores the scene index. Returns 0 on success, -1 on an invalid
+ * request (unknown param id, out-of-range value or scene slot).
+ */
+int audio_scene_stage_param(uint8_t index, uint32_t param,
+	uint32_t value);
+
+/*
+ * Commit everything staged for this scene (plus a staged baseline)
+ * as one atomic glitch-free master-chain assignment: fade down
+ * through verified writes, commit params in fixed order (the EQ
+ * bands as one contiguous safeload group), restore volume (KTD7).
+ * One implementation serves scene select, live edit commit, and
+ * baseline changes. A commit of an inactive scene stores the staged
+ * definition without touching the DSP. Returns 0, -1 if a verified
+ * write failed, AUDIO_SCENE_COMMIT_BUSY when re-entered mid-commit.
+ */
+int audio_scene_commit_staged(uint8_t index);
+
+/* ---- control-plane state report (SDK_OP_AUDIO_CONTROL_STATE_GET) ---- */
+
+struct audio_scene_control_state {
+	uint8_t active_scene;
+	uint8_t scene_count;
+	uint8_t baseline_paula; /* operator baseline legs (R17) */
+	uint8_t baseline_ax;
+	uint8_t trim_paula;     /* last applied composed mixer legs */
+	uint8_t trim_ax;
+	uint8_t trim_bounded;   /* last composition was reduced (R3) */
+	uint32_t ceiling;       /* enforced boundary, mixer-value units */
+};
+
+void audio_scene_control_state(struct audio_scene_control_state *out);
+
+/* ---- scene save (F5; the writer itself is U5, KTD5) ---- */
+
+/* Status words; mirror SDK_AUDIO_SCENE_SAVE_* one-to-one. */
+#define AUDIO_SCENE_SAVE_OK       0
+#define AUDIO_SCENE_SAVE_REJECTED 1 /* failed boundary validation */
+#define AUDIO_SCENE_SAVE_IO_ERROR 2 /* temp-then-replace failed */
+
+/*
+ * Validate the scene against the enforced boundary, then hand all
+ * scene state to the persistence seam. Returns an
+ * AUDIO_SCENE_SAVE_* status, or -1 on an invalid request.
+ */
+int audio_scene_save(uint8_t index);
+
+/*
+ * U5 (KTD5) seam: serialize the scene state and rewrite ZZ9000.CFG
+ * atomically (chunked temp write, sync, replace). U4 ships a
+ * transitional body that reports the writer as not yet available;
+ * U5 replaces it wholesale.
+ */
+int audio_scene_cfg_write(void);
 
 /* Authority gate for the legacy register path (R2): nonzero when a
  * REG_ZZ_AUDIO_VAL write to this AP_* parameter index must be

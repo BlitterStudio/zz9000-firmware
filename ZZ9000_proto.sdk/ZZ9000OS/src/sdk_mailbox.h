@@ -409,7 +409,11 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 #define SDK_AUDIO_SCENE_PARAM_EQ_BAND_9  10U
 #define SDK_AUDIO_SCENE_PARAM_EQ_BAND_10 11U
 #define SDK_AUDIO_SCENE_PARAM_PREFACTOR  12U
-#define SDK_AUDIO_SCENE_PARAM_VOLUME     13U /* 0..255, 127 = 0 dB */
+#define SDK_AUDIO_SCENE_PARAM_VOLUME     13U /* 0..100, 100 = 0 dB
+                                               * (audio_adau_set_vol_pan
+                                               * range; the pair params
+                                               * BASELINE/trim use the
+                                               * 0..255 mixer scale) */
 #define SDK_AUDIO_SCENE_PARAM_PAN        14U
 #define SDK_AUDIO_SCENE_PARAM_BASELINE   15U /* operator Paula/AX pair;
                                                * scene index is ignored */

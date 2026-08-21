@@ -11,11 +11,13 @@ RATE_TARGET := $(BUILD_DIR)/audio_playback_rate_test
 DRAIN_TARGET := $(BUILD_DIR)/audio_stream_drain_test
 SCENE_TARGET := $(BUILD_DIR)/audio_scene_test
 METER_TARGET := $(BUILD_DIR)/audio_meter_test
+CONTROL_TARGET := $(BUILD_DIR)/audio_control_test
 MP3_PROBE_TARGET := $(BUILD_DIR)/mp3_frame_probe_test
 MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
 TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(DRAIN_TARGET) $(SCENE_TARGET) \
-	$(METER_TARGET) $(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET)
+	$(METER_TARGET) $(CONTROL_TARGET) $(MP3_PROBE_TARGET) \
+	$(MPEG_LAYER2_TARGET)
 
 CPPFLAGS += -I$(SRC_DIR)
 
@@ -30,8 +32,8 @@ test: $(TARGETS)
 	$(DRAIN_TARGET)
 	$(SCENE_TARGET)
 	$(METER_TARGET)
+	$(CONTROL_TARGET)
 	$(MPEG_LAYER2_TARGET)
-
 $(CONVERT_TARGET): audio_convert_test.c $(SRC_DIR)/audio_convert.c \
 	$(SRC_DIR)/audio_convert.h $(SRC_DIR)/audio_convert_tables.c \
 	$(SRC_DIR)/audio_convert_tables.h
@@ -89,6 +91,17 @@ $(METER_TARGET): audio_meter_test.c $(SRC_DIR)/audio_scene.c \
 	$(SRC_DIR)/memorymap.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_meter_test.c -pthread -lm
+
+# The control-plane dispatch links the scene module (arbiter state)
+# with recording stubs for the five ax.h DSP setters supplied by the
+# test, so every master-chain write is observable in order.
+$(CONTROL_TARGET): audio_control_test.c $(SRC_DIR)/sdk_audio_control.c \
+	$(SRC_DIR)/sdk_audio_control.h $(SRC_DIR)/audio_scene.c \
+	$(SRC_DIR)/audio_scene.h $(SRC_DIR)/sdk_mailbox.h \
+	$(SRC_DIR)/ax.h $(SRC_DIR)/audio_dsp_gain.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_control_test.c \
+		$(SRC_DIR)/sdk_audio_control.c $(SRC_DIR)/audio_scene.c -lm
 
 $(MP3_PROBE_TARGET): mp3_frame_probe_test.c \
 	$(SRC_DIR)/mp3/decode_mp3.c $(SRC_DIR)/mp3/mp3.h \

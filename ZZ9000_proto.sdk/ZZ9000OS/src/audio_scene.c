@@ -1,7 +1,11 @@
 /*
  * Firmware-authoritative audio control plane arbiter (plan U2, KTD2):
- * scene state, split authority, gain staging, and -- since U3 -- the
- * per-direction metering accumulators with coherent snapshots (KTD3).
+ * scene state, split authority, gain staging against the enforced
+ * saturation boundary, and -- since U3 -- the per-direction metering
+ * accumulators with coherent snapshots (KTD3). Since U4 it also owns
+ * the staged-edit drafts and the single KTD7 glitch-free commit path
+ * (fade -> ordered verified writes -> restore) that every
+ * master-chain change funnels through.
  *
  * Holds the scene state, the operator baseline balance, per-owner
  * source trims, the enforced saturation boundary, and the
@@ -79,6 +83,24 @@ struct trim_state {
 
 static struct trim_state trims[AUDIO_SCENE_OWNER_SLOTS];
 static uint8_t owner_participating[AUDIO_SCENE_OWNER_SLOTS];
+
+/* ---- staged edits, commit serialization (U4, KTD7) ---- */
+
+struct scene_staging {
+	struct audio_scene_def draft;
+	int has_draft; /* params staged for this scene, uncommitted */
+};
+
+static struct scene_staging staging[AUDIO_SCENE_COUNT];
+static uint8_t staged_baseline_paula;
+static uint8_t staged_baseline_ax;
+static int baseline_staged;
+
+/* Set while a glitch-free commit's write sequence is in flight, so a
+ * re-entered commit (nested dispatch, rapid switches racing a
+ * mid-commit call) fails fast instead of interleaving two partial
+ * master-chain writes. */
+static int commit_in_progress;
 
 static int module_initialized;
 static int authority_claimed;
@@ -165,8 +187,11 @@ struct mixer_stage {
 	uint8_t ax;
 	double trim_bound;  /* summed-trim headroom for this scene+baseline */
 	double requested;   /* composed level when bounded */
-	double applied;     /* composed level when bounded */
+	double applied;     /* composed level after reduction */
 };
+
+/* Last applied mixer composition (trim reporting, R3). */
+static struct mixer_stage last_mixer_stage;
 
 static int clamp_u8(int value)
 {
@@ -247,14 +272,22 @@ static int restage_mixer(struct mixer_stage *stage)
 		stage);
 	if (stage->bounded)
 		emit_gain_reduction(stage->requested, stage->applied);
+	last_mixer_stage = *stage;
 	return audio_adau_set_mixer_vol(stage->paula, stage->ax);
 }
 
 /*
- * The single apply path (select, edit commit, baseline change, DSP
- * re-init): ordered verified writes -- LPF, EQ bands 0..9, prefactor,
- * output volume/pan, staged mixer. The fade-commit-restore wrapper
- * for live switching joins this in the dispatch unit (KTD7).
+ * The single commit path (KTD7): fade the output down through a
+ * verified write, commit the master-chain assignment in fixed order
+ * -- LPF, the ten EQ bands as one contiguous safeload group,
+ * prefactor, the staged mixer legs -- then restore the resolved
+ * output volume. One implementation serves scene select, live edit
+ * commit, baseline change, and the boot/warm-reset apply (F3).
+ *
+ * The in-flight flag serializes: a commit re-entered while the write
+ * sequence runs completes AUDIO_SCENE_COMMIT_BUSY instead of
+ * interleaving two partial master-chain assignments, so two rapid
+ * scene switches can never tear each other.
  */
 static int apply_active_scene(void)
 {
@@ -262,28 +295,40 @@ static int apply_active_scene(void)
 	struct volume_resolution vol;
 	struct mixer_stage stage;
 	int i;
+	int rc = 0;
+
+	if (commit_in_progress)
+		return AUDIO_SCENE_COMMIT_BUSY;
 
 	resolve_output_volume(scene, &vol);
 	if (vol.reduced)
 		emit_gain_reduction(vol.requested_level, vol.applied_level);
 
-	if (audio_adau_set_lpf_params(scene->lpf_hz) != 0)
-		return -1;
-	for (i = 0; i < AUDIO_SCENE_EQ_BANDS; i++) {
+	commit_in_progress = 1;
+	if (audio_adau_set_vol_pan(0, scene->pan) != 0)
+		rc = -1;
+	if (rc == 0 && audio_adau_set_lpf_params(scene->lpf_hz) != 0)
+		rc = -1;
+	for (i = 0; rc == 0 && i < AUDIO_SCENE_EQ_BANDS; i++) {
 		if (audio_adau_set_eq_gain(i, scene->eq[i]) != 0)
-			return -1;
+			rc = -1;
 	}
-	if (audio_adau_set_prefactor(scene->prefactor) != 0)
-		return -1;
-	if (audio_adau_set_vol_pan(vol.applied_volume, scene->pan) != 0)
-		return -1;
-
-	compute_mixer_stage(master_chain_linear(scene, vol.linear), &stage);
-	if (stage.bounded)
-		emit_gain_reduction(stage.requested, stage.applied);
-	if (audio_adau_set_mixer_vol(stage.paula, stage.ax) != 0)
-		return -1;
-	return 0;
+	if (rc == 0 && audio_adau_set_prefactor(scene->prefactor) != 0)
+		rc = -1;
+	if (rc == 0) {
+		compute_mixer_stage(
+			master_chain_linear(scene, vol.linear), &stage);
+		if (stage.bounded)
+			emit_gain_reduction(stage.requested, stage.applied);
+		last_mixer_stage = stage;
+		if (audio_adau_set_mixer_vol(stage.paula, stage.ax) != 0)
+			rc = -1;
+	}
+	if (rc == 0 && audio_adau_set_vol_pan(vol.applied_volume,
+			scene->pan) != 0)
+		rc = -1;
+	commit_in_progress = 0;
+	return rc;
 }
 
 /* ---- metering accumulation and coherent snapshots (U3, KTD3) ---- */
@@ -565,6 +610,12 @@ void audio_scene_init(void)
 	baseline_ax = BASELINE_DEFAULT_AX;
 	memset(trims, 0, sizeof(trims));
 	memset(owner_participating, 0, sizeof(owner_participating));
+	memset(staging, 0, sizeof(staging));
+	baseline_staged = 0;
+	commit_in_progress = 0;
+	memset(&last_mixer_stage, 0, sizeof(last_mixer_stage));
+	last_mixer_stage.paula = baseline_paula;
+	last_mixer_stage.ax = baseline_ax;
 	gain_reduction_count = 0;
 	have_last_gain_reduction = 0;
 	meter_reset_all();
@@ -574,14 +625,17 @@ void audio_scene_init(void)
 
 int audio_scene_apply_after_dsp_init(void)
 {
-	if (!module_initialized)
-		return -1;
+	if (!module_initialized || commit_in_progress)
+		return !module_initialized ? -1 : AUDIO_SCENE_COMMIT_BUSY;
 	/* The DSP instance the counters described was just replaced, and
-	 * the reset tore every owner session down (R10). */
+	 * the reset tore every owner session -- and every uncommitted
+	 * staged edit's client -- down (R10). */
 	gain_reduction_count = 0;
 	have_last_gain_reduction = 0;
 	memset(trims, 0, sizeof(trims));
 	memset(owner_participating, 0, sizeof(owner_participating));
+	memset(staging, 0, sizeof(staging));
+	baseline_staged = 0;
 	meter_reset_all();
 	return apply_active_scene();
 }
@@ -604,6 +658,8 @@ int audio_scene_select(uint8_t index)
 {
 	if (index >= AUDIO_SCENE_COUNT || !module_initialized)
 		return -1;
+	if (commit_in_progress)
+		return AUDIO_SCENE_COMMIT_BUSY;
 	active_scene_index = index;
 	return apply_active_scene();
 }
@@ -615,6 +671,8 @@ int audio_scene_write(uint8_t index, const struct audio_scene_def *def)
 		return -1;
 	if (!scene_def_valid(def))
 		return -1;
+	if (commit_in_progress)
+		return AUDIO_SCENE_COMMIT_BUSY;
 	scenes[index] = *def;
 	if (index == active_scene_index)
 		return apply_active_scene();
@@ -633,15 +691,17 @@ uint8_t audio_scene_active_index(void)
 	return active_scene_index;
 }
 
-void audio_scene_set_baseline(uint8_t paula, uint8_t ax)
+int audio_scene_set_baseline(uint8_t paula, uint8_t ax)
 {
 	if (!module_initialized)
-		return;
+		return -1;
+	if (commit_in_progress)
+		return AUDIO_SCENE_COMMIT_BUSY;
 	baseline_paula = paula;
 	baseline_ax = ax;
 	/* The baseline participates in the scene-alone level, so the
-	 * change re-runs the one apply path. */
-	apply_active_scene();
+	 * change re-runs the one commit path. */
+	return apply_active_scene();
 }
 
 uint8_t audio_scene_baseline_paula(void)
@@ -652,6 +712,128 @@ uint8_t audio_scene_baseline_paula(void)
 uint8_t audio_scene_baseline_ax(void)
 {
 	return baseline_ax;
+}
+
+/* ---- staged edits and the commit surface (U4) ---- */
+
+int audio_scene_stage_param(uint8_t index, uint32_t param,
+	uint32_t value)
+{
+	struct scene_staging *st;
+
+	if (!module_initialized)
+		return -1;
+	if (param == SDK_AUDIO_SCENE_PARAM_BASELINE) {
+		/* Operator balance (R17): a global, so the scene index is
+		 * ignored; it joins the next commit. */
+		staged_baseline_paula =
+			(uint8_t)SDK_AUDIO_BALANCE_CH1(value);
+		staged_baseline_ax = (uint8_t)SDK_AUDIO_BALANCE_CH2(value);
+		baseline_staged = 1;
+		return 0;
+	}
+	if (index >= AUDIO_SCENE_COUNT)
+		return -1;
+
+	st = &staging[index];
+	if (!st->has_draft) {
+		/* Seed the draft from the live definition so partial edits
+		 * compose; nothing is applied until the commit. */
+		st->draft = scenes[index];
+		st->has_draft = 1;
+	}
+	if (param == SDK_AUDIO_SCENE_PARAM_LPF) {
+		if (value < LPF_HZ_MIN || value > LPF_HZ_MAX)
+			return -1;
+		st->draft.lpf_hz = (uint16_t)value;
+		return 0;
+	}
+	if (param >= SDK_AUDIO_SCENE_PARAM_EQ_BAND_1 &&
+			param <= SDK_AUDIO_SCENE_PARAM_EQ_BAND_10) {
+		if (value > 100)
+			return -1;
+		st->draft.eq[param - SDK_AUDIO_SCENE_PARAM_EQ_BAND_1] =
+			(uint8_t)value;
+		return 0;
+	}
+	if (param == SDK_AUDIO_SCENE_PARAM_PREFACTOR ||
+			param == SDK_AUDIO_SCENE_PARAM_VOLUME ||
+			param == SDK_AUDIO_SCENE_PARAM_PAN) {
+		if (value > 100)
+			return -1;
+		if (param == SDK_AUDIO_SCENE_PARAM_PREFACTOR)
+			st->draft.prefactor = (uint8_t)value;
+		else if (param == SDK_AUDIO_SCENE_PARAM_VOLUME)
+			st->draft.volume = (uint8_t)value;
+		else
+			st->draft.pan = (uint8_t)value;
+		return 0;
+	}
+	return -1;
+}
+
+int audio_scene_commit_staged(uint8_t index)
+{
+	int apply = 0;
+
+	if (!module_initialized || index >= AUDIO_SCENE_COUNT)
+		return -1;
+	if (commit_in_progress)
+		return AUDIO_SCENE_COMMIT_BUSY;
+
+	/* A staged operator baseline joins the same commit (R17). */
+	if (baseline_staged) {
+		baseline_paula = staged_baseline_paula;
+		baseline_ax = staged_baseline_ax;
+		baseline_staged = 0;
+		apply = 1;
+	}
+	if (staging[index].has_draft) {
+		/* Stage-time validation keeps every draft a valid scene. */
+		scenes[index] = staging[index].draft;
+		staging[index].has_draft = 0;
+		if (index == active_scene_index)
+			apply = 1;
+	}
+	return apply ? apply_active_scene() : 0;
+}
+
+void audio_scene_control_state(struct audio_scene_control_state *out)
+{
+	if (out == NULL)
+		return;
+	out->active_scene = active_scene_index;
+	out->scene_count = AUDIO_SCENE_COUNT;
+	out->baseline_paula = baseline_paula;
+	out->baseline_ax = baseline_ax;
+	out->trim_paula = last_mixer_stage.paula;
+	out->trim_ax = last_mixer_stage.ax;
+	out->trim_bounded = last_mixer_stage.bounded;
+	out->ceiling = (uint32_t)AUDIO_SCENE_ENFORCED_BOUNDARY;
+}
+
+int audio_scene_save(uint8_t index)
+{
+	struct volume_resolution vol;
+
+	if (index >= AUDIO_SCENE_COUNT || !module_initialized)
+		return -1;
+	/* R15: validate against the enforced boundary first -- a scene
+	 * whose own master-chain level exceeds it never reaches the
+	 * writer. Same evaluation the apply path stages with. */
+	resolve_output_volume(&scenes[index], &vol);
+	if (vol.reduced)
+		return AUDIO_SCENE_SAVE_REJECTED;
+	return audio_scene_cfg_write();
+}
+
+int audio_scene_cfg_write(void)
+{
+	/* U5 (KTD5) replaces this body with the chunked temp-then-replace
+	 * ZZ9000.CFG writer. Until then, report the writer as not yet
+	 * available rather than pretending a write happened. */
+	printf("[scene] cfg writer not yet available (plan U5)\n");
+	return AUDIO_SCENE_SAVE_IO_ERROR;
 }
 
 int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,

@@ -217,7 +217,8 @@ static void test_gate_after_init(void)
 /*
  * The accepted path: for every rejected register index, the scene
  * module produces the corresponding verified DSP write. Apply order
- * is LPF, EQ bands 0..9, prefactor, output volume/pan, staged mixer.
+ * is the KTD7 commit sequence (U4): fade vol/pan to zero, LPF, EQ
+ * bands 0..9, prefactor, staged mixer legs, volume restore.
  */
 static void test_accepted_paths_route_through_scene(void)
 {
@@ -242,32 +243,39 @@ static void test_accepted_paths_route_through_scene(void)
 
 	/* AP_DSP_SET_LOWPASS (9) */
 	check(audio_scene_select(6) == 0, "scene select applies", NULL);
-	check(log_at(0, &kind, &a, &b) && kind == WRITE_LPF && a == 20000,
-		"apply writes LPF first (AP_DSP_SET_LOWPASS)",
+	ok = log_at(0, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+		a == 0 && b == 30;
+	check(ok, "commit fades output to zero first",
+		fmt("kind=%d vol=%d pan=%d", kind, a, b));
+	ok = log_at(1, &kind, &a, &b) && kind == WRITE_LPF && a == 20000;
+	check(ok, "commit writes LPF (AP_DSP_SET_LOWPASS)",
 		fmt("kind=%d f0=%d", kind, a));
 	/* AP_DSP_SET_EQ_BAND1..10 (12..21) */
 	for (i = 0; i < AUDIO_SCENE_EQ_BANDS; i++) {
-		ok = log_at(1 + i, &kind, &a, &b) && kind == WRITE_EQ &&
+		ok = log_at(2 + i, &kind, &a, &b) && kind == WRITE_EQ &&
 			a == i && b == 30 + 2 * i;
-		check(ok, "apply writes EQ bands in order",
-			fmt("entry %d kind=%d band=%d gain=%d", 1 + i, kind,
+		check(ok, "commit writes EQ bands in order",
+			fmt("entry %d kind=%d band=%d gain=%d", 2 + i, kind,
 				a, b));
 	}
 	/* AP_DSP_SET_PREFACTOR (11) */
-	ok = log_at(11, &kind, &a, &b) && kind == WRITE_PREF && a == 50;
-	check(ok, "apply writes prefactor (AP_DSP_SET_PREFACTOR)",
+	ok = log_at(12, &kind, &a, &b) && kind == WRITE_PREF && a == 50;
+	check(ok, "commit writes prefactor (AP_DSP_SET_PREFACTOR)",
 		fmt("kind=%d pre=%d", kind, a));
-	/* AP_DSP_SET_STEREO_VOLUME (22) */
-	ok = log_at(12, &kind, &a, &b) && kind == WRITE_VOLPAN &&
-		a == 90 && b == 30;
-	check(ok, "apply writes output volume/pan (AP_DSP_SET_STEREO_VOLUME)",
-		fmt("kind=%d vol=%d pan=%d", kind, a, b));
 	/* AP_DSP_SET_VOLUMES (10): staged baseline mixer legs */
 	ok = log_at(13, &kind, &a, &b) && kind == WRITE_MIXER &&
 		a == 128 && b == 64;
-	check(ok, "apply stages mixer legs (AP_DSP_SET_VOLUMES)",
+	check(ok, "commit stages mixer legs (AP_DSP_SET_VOLUMES)",
 		fmt("kind=%d v1=%d v2=%d", kind, a, b));
-	check(write_count == 14, "apply is exactly 14 ordered writes",
+	/* AP_DSP_SET_STEREO_VOLUME (22): the fade's restore */
+	ok = log_at(14, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+		a == 90 && b == 30;
+	check(ok, "commit restores output volume/pan last "
+		"(AP_DSP_SET_STEREO_VOLUME)",
+		fmt("kind=%d vol=%d pan=%d", kind, a, b));
+	check(write_count == 15,
+		"commit is exactly 15 ordered writes "
+		"(fade, params, restore)",
 		fmt("writes=%d", write_count));
 	check(audio_scene_gain_reduction_events() == 0,
 		"within-boundary apply emits no event", NULL);
@@ -294,13 +302,13 @@ static void test_accepted_paths_route_through_scene(void)
 	check(write_count == 0, "rejected writes touch no DSP state",
 		fmt("writes=%d", write_count));
 
-	/* A verified-write failure aborts the apply and reports it. */
+	/* A verified-write failure aborts the commit and reports it. */
 	unity_scene(&def);
 	fail_next_write = 1;
 	check(audio_scene_write(4, &def) == 0,
 		"write to inactive slot needs no DSP", NULL);
 	check(audio_scene_select(4) == -1,
-		"apply reports verified-write failure", NULL);
+		"commit reports verified-write failure", NULL);
 	fail_next_write = 0;
 	check(audio_scene_active_index() == 4,
 		"failed select keeps the slot active for retry", NULL);
@@ -522,26 +530,28 @@ static void test_boot_apply_order(void)
 	check(audio_scene_apply_after_dsp_init() == 0,
 		"apply after DSP init succeeds", NULL);
 
-	check(write_count == 16, "init defaults plus one scene apply",
+	check(write_count == 17, "init defaults plus one scene commit",
 		fmt("writes=%d", write_count));
 	ok = log_at(0, &kind, &a, &b) && kind == WRITE_LPF && a == 23900 &&
 		log_at(1, &kind, &a, &b) && kind == WRITE_MIXER &&
 		a == 128 && b == 64;
 	check(ok, "ADAU init defaults precede scene writes", NULL);
 	base = 2;
-	ok = log_at(base, &kind, &a, &b) && kind == WRITE_LPF &&
-		a == 23900;
+	ok = log_at(base, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+		a == 0 && b == 50;
+	ok = ok && log_at(base + 1, &kind, &a, &b) &&
+		kind == WRITE_LPF && a == 23900;
 	for (i = 0; ok && i < AUDIO_SCENE_EQ_BANDS; i++)
-		ok = log_at(base + 1 + i, &kind, &a, &b) &&
+		ok = log_at(base + 2 + i, &kind, &a, &b) &&
 			kind == WRITE_EQ && a == i && b == 50;
-	ok = ok && log_at(base + 11, &kind, &a, &b) &&
-		kind == WRITE_PREF && a == 50;
 	ok = ok && log_at(base + 12, &kind, &a, &b) &&
-		kind == WRITE_VOLPAN && a == 100 && b == 50;
+		kind == WRITE_PREF && a == 50;
 	ok = ok && log_at(base + 13, &kind, &a, &b) &&
 		kind == WRITE_MIXER && a == 128 && b == 64;
-	check(ok, "scene apply: LPF, EQ 0..9, prefactor, vol/pan, mixer",
-		NULL);
+	ok = ok && log_at(base + 14, &kind, &a, &b) &&
+		kind == WRITE_VOLPAN && a == 100 && b == 50;
+	check(ok, "scene commit: fade, LPF, EQ 0..9, prefactor, mixer, "
+		"restore", NULL);
 	check(audio_scene_gain_reduction_events() == 0,
 		"telemetry counters reset with DSP re-init", NULL);
 	check(audio_scene_authority_active() == 1 &&
@@ -564,18 +574,20 @@ static void test_boot_apply_order(void)
 	audio_adau_set_mixer_vol(128, 64);
 	check(audio_scene_apply_after_dsp_init() == 0,
 		"warm-reset re-apply succeeds", NULL);
-	base = write_count - 14;
-	ok = log_at(base, &kind, &a, &b) && kind == WRITE_LPF &&
-		a == 23900;
+	base = write_count - 15;
+	ok = log_at(base, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+		a == 0 && b == 50;
+	ok = ok && log_at(base + 1, &kind, &a, &b) &&
+		kind == WRITE_LPF && a == 23900;
 	for (i = 0; ok && i < AUDIO_SCENE_EQ_BANDS; i++)
-		ok = log_at(base + 1 + i, &kind, &a, &b) &&
+		ok = log_at(base + 2 + i, &kind, &a, &b) &&
 			kind == WRITE_EQ && a == i && b == 50;
-	ok = ok && log_at(base + 11, &kind, &a, &b) &&
-		kind == WRITE_PREF && a == 50;
 	ok = ok && log_at(base + 12, &kind, &a, &b) &&
-		kind == WRITE_VOLPAN && a == 80 && b == 50;
+		kind == WRITE_PREF && a == 50;
 	ok = ok && log_at(base + 13, &kind, &a, &b) &&
 		kind == WRITE_MIXER && a == 128 && b == 64;
+	ok = ok && log_at(base + 14, &kind, &a, &b) &&
+		kind == WRITE_VOLPAN && a == 80 && b == 50;
 	check(ok, "warm reset re-applies active scene with neutral trim",
 		fmt("base=%d writes=%d", base, write_count));
 	check(audio_scene_gain_reduction_events() == 0,
