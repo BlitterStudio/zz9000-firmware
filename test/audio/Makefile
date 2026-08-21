@@ -8,8 +8,8 @@ PROFILE_TARGET := $(BUILD_DIR)/audio_profile_test
 PLAYBACK_TARGET := $(BUILD_DIR)/audio_playback_frontier_test
 DRAIN_TARGET := $(BUILD_DIR)/audio_stream_drain_test
 MP3_PROBE_TARGET := $(BUILD_DIR)/mp3_frame_probe_test
-MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
-TARGETS := $(CAPTURE_TARGET) $(PROFILE_TARGET) $(PLAYBACK_TARGET) \
+CONVERT_TARGET := $(BUILD_DIR)/audio_convert_test
+TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) $(PLAYBACK_TARGET) \
 	$(DRAIN_TARGET) $(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET)
 
 CPPFLAGS += -I$(SRC_DIR)
@@ -17,12 +17,20 @@ CPPFLAGS += -I$(SRC_DIR)
 .PHONY: test clean
 
 test: $(TARGETS)
+	$(CONVERT_TARGET)
 	$(CAPTURE_TARGET)
 	$(PROFILE_TARGET)
 	$(PLAYBACK_TARGET)
 	$(DRAIN_TARGET)
 	$(MP3_PROBE_TARGET)
 	$(MPEG_LAYER2_TARGET)
+
+$(CONVERT_TARGET): audio_convert_test.c $(SRC_DIR)/audio_convert.c \
+	$(SRC_DIR)/audio_convert.h $(SRC_DIR)/audio_convert_tables.c \
+	$(SRC_DIR)/audio_convert_tables.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_convert_test.c \
+		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 
 $(CAPTURE_TARGET): audio_capture_test.c $(SRC_DIR)/audio_capture.c \
 	$(SRC_DIR)/audio_capture.h
