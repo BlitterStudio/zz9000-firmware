@@ -532,7 +532,13 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "if (!cap_x_done && cap_x >= 11'd1279) begin");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "cap_line_toggle <= ~cap_line_toggle;");
+	    "wire capture_output_line_valid = cap_y >= capture_field_stride;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "wire [10:0] capture_output_y = cap_y - capture_field_stride;");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "if (capture_output_line_valid) begin");
+	ok &= require_source_contains("videocap_sampler.v", sampler,
+	    "cap_token_y <= capture_output_y[9:0];");
 	ok &= require_source_absent("videocap_sampler.v", sampler, "11'h400",
 	    "full-width completion still stops at 1024 of 1280 samples");
 
@@ -541,13 +547,11 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "(`VCAP_FULLRATE_INT != 0) && videocap_control_applied_full_width;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "vcap_line_toggle, vcap_write_bank, vcap_y[9:0]");
+	    "vcap_line_toggle, vcap_token_bank, vcap_token_y");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    ".buf_rbank(vc_row_bank)");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "vc_row_bank <= vc_saving_bank;");
-	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "vcap_line_toggle, vcap_token_bank, vcap_token_y");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "if (vcap_line_payload_axi[9:0] < videocap_ymax_sync)");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
@@ -590,7 +594,7 @@ static int test_videocap_automatic_crop_is_path_aware(const char *mntzorro,
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "localparam [11:0] VCAP_CROP_V_COMPAT = 12'd26;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "localparam [11:0] CROP_H_FULLRATE = 12'd280;");
+	    "localparam [11:0] CROP_H_FULLRATE = 12'd279;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "localparam [11:0] CROP_V_FULLRATE = 12'd40;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,

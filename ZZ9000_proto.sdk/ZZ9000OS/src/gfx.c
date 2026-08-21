@@ -27,6 +27,7 @@
 #include "zz_video_modes.h"
 
 uint32_t* fb=0;
+/* Canonical destination stride in uint32_t words for every renderer. */
 uint32_t fb_pitch=0;
 
 static inline void memset16(uint16_t *dst, uint16_t val, uint32_t count) {
@@ -61,32 +62,64 @@ static inline void memset32(uint32_t *dst, uint32_t val, uint32_t count) {
 	while (count--) *dst++ = val;
 }
 
-void set_fb(uint32_t* fb_, uint32_t pitch) {
-	fb=fb_;
-	fb_pitch=pitch;
+void set_fb_words(uint32_t* fb_, uint32_t pitch_words) {
+	fb = fb_;
+	if (pitch_words > UINT32_MAX / sizeof(uint32_t)) {
+		fb_pitch = 0;
+		return;
+	}
+	fb_pitch = pitch_words;
+}
+
+void set_fb_bytes(uint32_t* fb_, uint32_t pitch_bytes) {
+	/* Every renderer keeps uint32_t row pointers, so a byte pitch must
+	 * describe an integral number of words. */
+	if (pitch_bytes == 0 || (pitch_bytes % sizeof(uint32_t)) != 0) {
+		fb = fb_;
+		fb_pitch = 0;
+		return;
+	}
+	set_fb_words(fb_, pitch_bytes / sizeof(uint32_t));
 }
 
 static uint8_t* fb_limit = 0;
+
+static inline uint32_t framebuffer_row_bytes(void)
+{
+	return fb_pitch * sizeof(uint32_t);
+}
 
 void set_fb_limit(void* limit) {
 	fb_limit = (uint8_t*)limit;
 }
 
-/* Returns how many of the requested h rows starting at row y1 fit entirely
- * below fb_limit. Returns h unchanged when no limit is configured. row_bytes
- * is the destination row stride in bytes: the rect ops receive fb_pitch in
- * 32-bit words, while template/pattern ops receive fb_pitch in bytes and the
- * driver sends it that way (BlitTemplate/BlitPattern pass BytesPerRow). The
- * clamp must use each op's own stride — a byte pitch scaled by four computes
- * a phantom geometry and silently drops rows below the top quarter of the
- * window (firmware issue #75). */
-static uint16_t clamp_rows_to_fb_limit(uint32_t y1, uint16_t h, uint32_t row_bytes)
+static uint32_t bytes_per_pixel(uint32_t color_format)
 {
+	switch (color_format) {
+	case MNTVA_COLOR_8BIT:
+		return 1;
+	case MNTVA_COLOR_16BIT565:
+	case MNTVA_COLOR_15BIT:
+		return 2;
+	case MNTVA_COLOR_32BIT:
+		return 4;
+	default:
+		return 0;
+	}
+}
+
+/* Returns how many of the requested h rows starting at row y1 fit entirely
+ * below fb_limit. Returns h unchanged when no limit is configured. The two
+ * typed setters normalize the caller's word/byte pitch into a word stride so
+ * the pointer step and containment geometry cannot disagree. */
+static uint16_t clamp_rows_to_fb_limit(uint32_t y1, uint16_t h)
+{
+	uint32_t row_bytes = framebuffer_row_bytes();
 	size_t rows_fit;
 
-	if (!fb_limit || !fb || row_bytes == 0)
+	if (!fb_limit)
 		return h;
-	if (fb_limit <= (uint8_t *)fb)
+	if (!fb || row_bytes == 0 || fb_limit <= (uint8_t *)fb)
 		return 0;
 	rows_fit = (size_t)(fb_limit - (uint8_t *)fb) / row_bytes;
 	if (y1 >= rows_fit)
@@ -95,6 +128,109 @@ static uint16_t clamp_rows_to_fb_limit(uint32_t y1, uint16_t h, uint32_t row_byt
 	if (h > rows_fit)
 		h = (uint16_t)rows_fit;
 	return h;
+}
+
+/* Clamp a destination rectangle to complete legal rows and to the row pitch.
+ * Width is clipped rather than rejected, matching the established vertical
+ * clamp semantics. Invalid formats/pitches fail closed before pointer math. */
+static int clamp_rect_to_fb_bounds(uint32_t x1, uint16_t *w,
+	uint32_t y1, uint16_t *h, uint32_t color_format)
+{
+	uint32_t bpp = bytes_per_pixel(color_format);
+	uint32_t row_bytes = framebuffer_row_bytes();
+	uint32_t row_pixels;
+	uint32_t width_fit;
+
+	if (!fb || !row_bytes || !bpp || !w || !h) {
+		if (w) *w = 0;
+		if (h) *h = 0;
+		return 0;
+	}
+
+	row_pixels = row_bytes / bpp;
+	if (x1 >= row_pixels) {
+		*w = 0;
+		return 0;
+	}
+	width_fit = row_pixels - x1;
+	if (*w > width_fit)
+		*w = (uint16_t)width_fit;
+	*h = clamp_rows_to_fb_limit(y1, *h);
+	return *w != 0 && *h != 0;
+}
+
+/* P96 supplies a pre-clipped segment start, full-line slope, Bresenham seed,
+ * and the number of major-axis steps to draw. Compute that segment's actual
+ * endpoint in O(1); its monotonic endpoints bound every emitted pixel. Drop
+ * malformed/out-of-bounds commands rather than running a second clipper that
+ * could disturb the established staircase and pattern phase. */
+struct line_geometry {
+	int32_t x1;
+	int32_t y1;
+	uint32_t dx_abs;
+	uint32_t dy_abs;
+	uint32_t draw_len;
+	int32_t error;
+	uint8_t x_reverse;
+	uint8_t y_reverse;
+};
+
+static int prepare_line_geometry(struct line_geometry *line,
+	int32_t x1, int32_t y1,
+	int32_t dx, int32_t dy, uint32_t draw_len, int32_t err_seed,
+	uint32_t color_format)
+{
+	uint32_t dx_abs = dx < 0 ? (uint32_t)-dx : (uint32_t)dx;
+	uint32_t dy_abs = dy < 0 ? (uint32_t)-dy : (uint32_t)dy;
+	uint32_t l = dx_abs >= dy_abs ? dx_abs : dy_abs;
+	uint32_t s = dx_abs >= dy_abs ? dy_abs : dx_abs;
+	uint32_t minor_steps = 0;
+	int32_t x2 = x1;
+	int32_t y2 = y1;
+	int32_t min_x, max_x, min_y, max_y;
+	uint16_t box_w, box_h, bounded_w, bounded_h;
+
+	if (!line || draw_len > l)
+		return 0;
+	if (l != 0) {
+		if (err_seed < 0 || (uint32_t)err_seed >= l)
+			return 0;
+		minor_steps = ((uint32_t)err_seed + draw_len * s) / l;
+	}
+
+	if (dx_abs >= dy_abs) {
+		x2 += dx < 0 ? -(int32_t)draw_len : (int32_t)draw_len;
+		y2 += dy < 0 ? -(int32_t)minor_steps : (int32_t)minor_steps;
+	} else {
+		y2 += dy < 0 ? -(int32_t)draw_len : (int32_t)draw_len;
+		x2 += dx < 0 ? -(int32_t)minor_steps : (int32_t)minor_steps;
+	}
+
+	min_x = x1 < x2 ? x1 : x2;
+	max_x = x1 > x2 ? x1 : x2;
+	min_y = y1 < y2 ? y1 : y2;
+	max_y = y1 > y2 ? y1 : y2;
+	if (min_x < 0 || min_y < 0)
+		return 0;
+
+	box_w = (uint16_t)((uint32_t)(max_x - min_x) + 1U);
+	box_h = (uint16_t)((uint32_t)(max_y - min_y) + 1U);
+	bounded_w = box_w;
+	bounded_h = box_h;
+	if (!clamp_rect_to_fb_bounds((uint32_t)min_x, &bounded_w,
+		(uint32_t)min_y, &bounded_h, color_format) ||
+	    bounded_w != box_w || bounded_h != box_h)
+		return 0;
+
+	line->x1 = x1;
+	line->y1 = y1;
+	line->dx_abs = dx_abs;
+	line->dy_abs = dy_abs;
+	line->draw_len = draw_len;
+	line->error = err_seed;
+	line->x_reverse = dx < 0;
+	line->y_reverse = dy < 0;
+	return 1;
 }
 
 static inline void draw_vertical_line_solid(uint32_t *dp, int32_t x, int32_t line_step,
@@ -192,14 +328,14 @@ void *get_color_conversion_table(int index)
 
 void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t fg_color, uint32_t color_format, uint8_t mask)
 {
-	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch * sizeof(uint32_t));
-	if (!h)
+	if (!clamp_rect_to_fb_bounds(rect_x1, &w, rect_y1, &h, color_format))
 		return;
 
 	uint32_t* dp = fb + (rect_y1 * fb_pitch);
 	uint8_t u8_fg = fg_color >> 24;
-	uint16_t rect_y2 = rect_y1 + h, rect_x2 = rect_x1 + w;
-	uint16_t x;
+	uint16_t rect_y2 = rect_y1 + h;
+	uint32_t rect_x2 = (uint32_t)rect_x1 + w;
+	uint32_t x;
 
 	for (uint16_t cur_y = rect_y1; cur_y < rect_y2; cur_y++) {
 		x = rect_x1;
@@ -239,8 +375,7 @@ void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint3
 
 void fill_rect_solid(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t rect_rgb, uint32_t color_format)
 {
-	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch * sizeof(uint32_t));
-	if (!h)
+	if (!clamp_rect_to_fb_bounds(rect_x1, &w, rect_y1, &h, color_format))
 		return;
 
 	uint32_t* p = fb + (rect_y1 * fb_pitch);
@@ -278,14 +413,14 @@ void fill_rect_solid(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h,
 
 void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint8_t mask, uint32_t color_format)
 {
-	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch * sizeof(uint32_t));
-	if (!h)
+	if (!clamp_rect_to_fb_bounds(rect_x1, &w, rect_y1, &h, color_format))
 		return;
 
 	uint32_t* dp = fb + (rect_y1 * fb_pitch);
-	uint16_t x;
+	uint32_t x;
 
-	uint16_t rect_y2 = rect_y1 + h, rect_x2 = rect_x1 + w;
+	uint16_t rect_y2 = rect_y1 + h;
+	uint32_t rect_x2 = (uint32_t)rect_x1 + w;
 
 	for (uint16_t cur_y = rect_y1; cur_y < rect_y2; cur_y++) {
 		x = rect_x1;
@@ -294,7 +429,7 @@ void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uin
 #ifdef __ARM_NEON__
 			{
 				uint8_t *p8 = (uint8_t *)dp + x;
-				uint16_t remaining = rect_x2 - x;
+				uint32_t remaining = rect_x2 - x;
 				uint8x16_t vmask = vdupq_n_u8(mask);
 				while (remaining >= 16) {
 					vst1q_u8(p8, veorq_u8(vld1q_u8(p8), vmask));
@@ -321,7 +456,7 @@ void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uin
 #ifdef __ARM_NEON__
 			{
 				uint16_t *p16 = (uint16_t *)dp + x;
-				uint16_t remaining = rect_x2 - x;
+				uint32_t remaining = rect_x2 - x;
 				uint16x8_t ones = vdupq_n_u16(0xFFFF);
 				while (remaining >= 8) {
 					vst1q_u16(p16, veorq_u16(vld1q_u16(p16), ones));
@@ -347,7 +482,7 @@ void invert_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uin
 #ifdef __ARM_NEON__
 			{
 				uint32_t *p32 = dp + x;
-				uint16_t remaining = rect_x2 - x;
+				uint32_t remaining = rect_x2 - x;
 				uint32x4_t ones = vdupq_n_u32(0xFFFFFFFF);
 				while (remaining >= 4) {
 					vst1q_u32(p32, veorq_u32(vld1q_u32(p32), ones));
@@ -379,8 +514,7 @@ void copy_rect_nomask(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h
 	if (w == 0 || h == 0)
 		return;
 
-	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch * sizeof(uint32_t));
-	if (!h)
+	if (!clamp_rect_to_fb_bounds(rect_x1, &w, rect_y1, &h, color_format))
 		return;
 
 	uint32_t* dp = fb + (rect_y1 * fb_pitch);
@@ -482,8 +616,7 @@ void copy_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint1
 	if (w == 0 || h == 0)
 		return;
 
-	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch * sizeof(uint32_t));
-	if (!h)
+	if (!clamp_rect_to_fb_bounds(rect_x1, &w, rect_y1, &h, color_format))
 		return;
 
 	uint32_t* dp = fb + (rect_y1 * fb_pitch);
@@ -570,25 +703,25 @@ void draw_line(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t rect_y
 	uint32_t fg_color, uint32_t bg_color, uint32_t color_format,
 	uint8_t mask, uint8_t draw_mode)
 {
-	int32_t x1 = rect_x1, y1 = rect_y1;
-	int32_t x2 = x1 + (int32_t)rect_x2, y2 = y1 + (int32_t)rect_y2;
+	struct line_geometry line;
+	if (!prepare_line_geometry(&line, rect_x1, rect_y1,
+		rect_x2, rect_y2, len,
+		err_seed, color_format))
+		return;
 
 	uint8_t u8_fg = fg_color >> 24;
 	uint8_t u8_bg = bg_color >> 24;
 
-	uint32_t* dp = fb + (y1 * fb_pitch);
+	uint32_t* dp = fb + (line.y1 * fb_pitch);
 	int32_t line_step = fb_pitch;
-	int8_t x_reverse = 0, inversion = 0;
+	int8_t inversion = 0;
 
 	/* PatternShift selects which pattern bit maps to the segment start. */
 	uint16_t cur_bit = (uint16_t)(0x8000u >> (pattern_offset & 15));
 
-	int32_t dx, dy, x = x1;
-	uint32_t dx_abs, dy_abs, draw_len = len;
+	int32_t x = line.x1;
 
-	if (x2 < x1)
-		x_reverse = 1;
-	if (y2 < y1)
+	if (line.y_reverse)
 		line_step = -fb_pitch;
 
 	if (draw_mode & INVERSVID)
@@ -598,11 +731,6 @@ void draw_line(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t rect_y
 		fg_color = 0xFFFF0000;
 	}
 	draw_mode &= 0x01;
-
-	dx = x2 - x1;
-	dy = y2 - y1;
-	dx_abs = (dx < 0) ? (uint32_t)-dx : (uint32_t)dx;
-	dy_abs = (dy < 0) ? (uint32_t)-dy : (uint32_t)dy;
 
 	DRAW_LINE_PIXEL;
 
@@ -614,16 +742,16 @@ void draw_line(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t rect_y
 	 * (2*L)), ties up), which matches DrawLineDefault pixel-for-pixel on ZZ9000
 	 * hardware (plain truncation, seed 0, was consistently 1px off). Seeding
 	 * from err_seed resumes a clipped line exactly where P96 left off. */
-	if (dx_abs >= dy_abs) {
-		int32_t s = (int32_t)dy_abs;
-		int32_t l = (int32_t)dx_abs;
-		int32_t e = err_seed;
-		for (uint32_t i = 0; i < draw_len; i++) {
+	if (line.dx_abs >= line.dy_abs) {
+		int32_t s = (int32_t)line.dy_abs;
+		int32_t l = (int32_t)line.dx_abs;
+		int32_t e = line.error;
+		for (uint32_t i = 0; i < line.draw_len; i++) {
 			e += s;
 			int minor = (e >= l);
 			if (minor)
 				e -= l;
-			x += (x_reverse) ? -1 : 1;
+			x += line.x_reverse ? -1 : 1;
 			if (minor)
 				dp += line_step;
 
@@ -631,17 +759,17 @@ void draw_line(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t rect_y
 		}
 	}
 	else {
-		int32_t s = (int32_t)dx_abs;
-		int32_t l = (int32_t)dy_abs;
-		int32_t e = err_seed;
-		for (uint32_t i = 0; i < draw_len; i++) {
+		int32_t s = (int32_t)line.dx_abs;
+		int32_t l = (int32_t)line.dy_abs;
+		int32_t e = line.error;
+		for (uint32_t i = 0; i < line.draw_len; i++) {
 			e += s;
 			int minor = (e >= l);
 			if (minor)
 				e -= l;
 			dp += line_step;
 			if (minor)
-				x += (x_reverse) ? -1 : 1;
+				x += line.x_reverse ? -1 : 1;
 
 			DRAW_LINE_PIXEL;
 		}
@@ -651,36 +779,30 @@ void draw_line(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t rect_y
 void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t rect_y2, uint16_t len,
 	int16_t err_seed, uint32_t fg_color, uint32_t color_format)
 {
-	int32_t x1 = rect_x1, y1 = rect_y1;
-	int32_t x2 = x1 + (int32_t)rect_x2, y2 = y1 + (int32_t)rect_y2;
+	struct line_geometry line;
+	if (!prepare_line_geometry(&line, rect_x1, rect_y1,
+		rect_x2, rect_y2, len,
+		err_seed, color_format))
+		return;
 
 	uint8_t u8_fg = fg_color >> 24;
 
-	uint32_t* dp = fb + (y1 * fb_pitch);
+	uint32_t* dp = fb + (line.y1 * fb_pitch);
 	int32_t line_step = fb_pitch;
-	int8_t x_reverse = 0;
+	int32_t x = line.x1;
 
-	int32_t dx, dy, x = x1;
-	uint32_t dx_abs, dy_abs, draw_len = len;
-
-	if (x2 < x1)
-		x_reverse = 1;
-	if (y2 < y1)
+	if (line.y_reverse)
 		line_step = -fb_pitch;
 
-	dx = x2 - x1;
-	dy = y2 - y1;
-	dx_abs = (dx < 0) ? (uint32_t)-dx : (uint32_t)dx;
-	dy_abs = (dy < 0) ? (uint32_t)-dy : (uint32_t)dy;
-
-	if (dx_abs == 0) {
-		draw_vertical_line_solid(dp, x, line_step, draw_len + 1,
+	if (line.dx_abs == 0) {
+		draw_vertical_line_solid(dp, x, line_step, line.draw_len + 1,
 			fg_color, u8_fg, color_format);
 		return;
 	}
-	if (dy_abs == 0) {
-		draw_horizontal_line_solid(dp, x_reverse ? x - (int32_t)draw_len : x,
-			draw_len + 1, fg_color, u8_fg, color_format);
+	if (line.dy_abs == 0) {
+		draw_horizontal_line_solid(dp,
+			line.x_reverse ? x - (int32_t)line.draw_len : x,
+			line.draw_len + 1, fg_color, u8_fg, color_format);
 		return;
 	}
 
@@ -689,30 +811,30 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 	 * step is taken; seeded from err_seed (which carries the L/2 round-half-up
 	 * bias) so clipped segments resume exactly. */
 	int32_t s, l;
-	if (dx_abs >= dy_abs) {
-		s = (int32_t)dy_abs;
-		l = (int32_t)dx_abs;
+	if (line.dx_abs >= line.dy_abs) {
+		s = (int32_t)line.dy_abs;
+		l = (int32_t)line.dx_abs;
 	} else {
-		s = (int32_t)dx_abs;
-		l = (int32_t)dy_abs;
+		s = (int32_t)line.dx_abs;
+		l = (int32_t)line.dy_abs;
 	}
 
 	switch (color_format) {
 	case MNTVA_COLOR_8BIT:
 		((uint8_t *)dp)[x] = u8_fg;
-		if (dx_abs >= dy_abs) {
-			int32_t e = err_seed;
-			for (uint32_t i = 0; i < draw_len; i++) {
+		if (line.dx_abs >= line.dy_abs) {
+			int32_t e = line.error;
+			for (uint32_t i = 0; i < line.draw_len; i++) {
 				e += s;
 				if (e >= l) { e -= l; dp += line_step; }
-				x += (x_reverse) ? -1 : 1;
+				x += line.x_reverse ? -1 : 1;
 				((uint8_t *)dp)[x] = u8_fg;
 			}
 		} else {
-			int32_t e = err_seed;
-			for (uint32_t i = 0; i < draw_len; i++) {
+			int32_t e = line.error;
+			for (uint32_t i = 0; i < line.draw_len; i++) {
 				e += s;
-				if (e >= l) { e -= l; x += (x_reverse) ? -1 : 1; }
+				if (e >= l) { e -= l; x += line.x_reverse ? -1 : 1; }
 				dp += line_step;
 				((uint8_t *)dp)[x] = u8_fg;
 			}
@@ -721,19 +843,19 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 	case MNTVA_COLOR_16BIT565:
 	case MNTVA_COLOR_15BIT:
 		((uint16_t *)dp)[x] = fg_color;
-		if (dx_abs >= dy_abs) {
-			int32_t e = err_seed;
-			for (uint32_t i = 0; i < draw_len; i++) {
+		if (line.dx_abs >= line.dy_abs) {
+			int32_t e = line.error;
+			for (uint32_t i = 0; i < line.draw_len; i++) {
 				e += s;
 				if (e >= l) { e -= l; dp += line_step; }
-				x += (x_reverse) ? -1 : 1;
+				x += line.x_reverse ? -1 : 1;
 				((uint16_t *)dp)[x] = fg_color;
 			}
 		} else {
-			int32_t e = err_seed;
-			for (uint32_t i = 0; i < draw_len; i++) {
+			int32_t e = line.error;
+			for (uint32_t i = 0; i < line.draw_len; i++) {
 				e += s;
-				if (e >= l) { e -= l; x += (x_reverse) ? -1 : 1; }
+				if (e >= l) { e -= l; x += line.x_reverse ? -1 : 1; }
 				dp += line_step;
 				((uint16_t *)dp)[x] = fg_color;
 			}
@@ -741,19 +863,19 @@ void draw_line_solid(int16_t rect_x1, int16_t rect_y1, int16_t rect_x2, int16_t 
 		break;
 	case MNTVA_COLOR_32BIT:
 		dp[x] = fg_color;
-		if (dx_abs >= dy_abs) {
-			int32_t e = err_seed;
-			for (uint32_t i = 0; i < draw_len; i++) {
+		if (line.dx_abs >= line.dy_abs) {
+			int32_t e = line.error;
+			for (uint32_t i = 0; i < line.draw_len; i++) {
 				e += s;
 				if (e >= l) { e -= l; dp += line_step; }
-				x += (x_reverse) ? -1 : 1;
+				x += line.x_reverse ? -1 : 1;
 				dp[x] = fg_color;
 			}
 		} else {
-			int32_t e = err_seed;
-			for (uint32_t i = 0; i < draw_len; i++) {
+			int32_t e = line.error;
+			for (uint32_t i = 0; i < line.draw_len; i++) {
 				e += s;
-				if (e >= l) { e -= l; x += (x_reverse) ? -1 : 1; }
+				if (e >= l) { e -= l; x += line.x_reverse ? -1 : 1; }
 				dp += line_step;
 				dp[x] = fg_color;
 			}
@@ -868,11 +990,14 @@ void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 {
 	/* h also sets the source plane stride and wrap below, so only the row
 	 * loop bound is clamped (h_draw), never h itself. */
-	if (dy < 0 || h <= 0)
+	if (dx < 0 || dy < 0 || w <= 0 || h <= 0)
 		return;
-	int16_t h_draw = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h, fb_pitch * sizeof(uint32_t));
-	if (!h_draw)
+	uint16_t w_draw = (uint16_t)w;
+	uint16_t h_draw_u16 = (uint16_t)h;
+	if (!clamp_rect_to_fb_bounds((uint16_t)dx, &w_draw,
+		(uint16_t)dy, &h_draw_u16, MNTVA_COLOR_8BIT))
 		return;
+	int16_t h_draw = (int16_t)h_draw_u16;
 
 	uint32_t *dp = fb + (dy * fb_pitch);
 
@@ -895,8 +1020,8 @@ void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 		p2c_byte_lut_init();
 
 	for (int16_t line_y = 0; line_y < h_draw; line_y++) {
-		int16_t x = dx;
-		int16_t rect_x2 = dx + w;
+		int32_t x = dx;
+		int32_t rect_x2 = (int32_t)dx + w_draw;
 
 		if (direct_copy) {
 			uint8_t *dst = (uint8_t *)dp;
@@ -1031,9 +1156,13 @@ void yuv422_to_rgb_rect(int16_t phase, int16_t dx, int16_t dy, int16_t w, int16_
 	    color_format != MNTVA_COLOR_16BIT565 &&
 	    color_format != MNTVA_COLOR_15BIT)
 		return;
-	h = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h, fb_pitch * sizeof(uint32_t));
-	if (!h)
+	uint16_t w_draw = (uint16_t)w;
+	uint16_t h_draw = (uint16_t)h;
+	if (!clamp_rect_to_fb_bounds((uint16_t)dx, &w_draw,
+		(uint16_t)dy, &h_draw, color_format))
 		return;
+	w = (int16_t)w_draw;
+	h = (int16_t)h_draw;
 
 	uint8_t y0_off = yuv422_layout[variant].y0;
 	uint8_t y1_off = yuv422_layout[variant].y1;
@@ -1320,29 +1449,32 @@ static inline uint8_t reverse_lookup(uint32_t *bmp_pal, uint8_t planes, uint32_t
 void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t h, uint8_t draw_mode, uint8_t planes, uint8_t mask, uint8_t layer_mask, uint32_t color_mask, uint16_t src_line_pitch, uint8_t *bmp_data_src, uint32_t color_format) {
 	/* h also sets the source plane stride and wrap below, so only the row
 	 * loop bound is clamped (h_draw), never h itself. */
-	if (dy < 0 || h <= 0)
+	if (dx < 0 || dy < 0 || w <= 0 || h <= 0)
 		return;
-	int16_t h_draw = (int16_t)clamp_rows_to_fb_limit((uint16_t)dy, (uint16_t)h, fb_pitch * sizeof(uint32_t));
-	if (!h_draw)
+	/* Picasso96 defines direct-color DST as leaving the destination untouched. */
+	if (draw_mode == MINTERM_DST)
 		return;
+	uint16_t w_draw = (uint16_t)w;
+	uint16_t h_draw_u16 = (uint16_t)h;
+	if (!clamp_rect_to_fb_bounds((uint16_t)dx, &w_draw,
+		(uint16_t)dy, &h_draw_u16, color_format))
+		return;
+	int16_t h_draw = (int16_t)h_draw_u16;
 
 	uint32_t *dp = fb + (dy * fb_pitch);
 
-	/* Picasso96 defines direct-color INVERT on the native destination
-	 * value, and DST as leaving it untouched. Neither operation needs
-	 * planar decoding or an inverse color-map lookup. */
-	if (draw_mode == MINTERM_DST)
-		return;
+	/* Picasso96 defines direct-color INVERT on the native destination value;
+	 * it needs neither planar decoding nor an inverse color-map lookup. */
 	if (draw_mode == MINTERM_INVERT) {
 		for (int16_t line_y = 0; line_y < h_draw; line_y++) {
 			switch (color_format) {
 				case MNTVA_COLOR_16BIT565:
 				case MNTVA_COLOR_15BIT:
-					for (int16_t x = dx; x < dx + w; x++)
+					for (int32_t x = dx; x < (int32_t)dx + w_draw; x++)
 						((uint16_t *)dp)[x] ^= (uint16_t)color_mask;
 					break;
 				case MNTVA_COLOR_32BIT:
-					for (int16_t x = dx; x < dx + w; x++)
+					for (int32_t x = dx; x < (int32_t)dx + w_draw; x++)
 						dp[x] ^= color_mask;
 					break;
 			}
@@ -1373,8 +1505,8 @@ void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 		rl_cache_invalidate();
 
 	for (int16_t line_y = 0; line_y < h_draw; line_y++) {
-		int16_t x = dx;
-		int16_t rect_x2 = dx + w;
+		int32_t x = dx;
+		int32_t rect_x2 = (int32_t)dx + w_draw;
 
 		if (direct_copy) {
 			while (x < rect_x2) {
@@ -1591,19 +1723,18 @@ void orig_p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, in
 		tmpl_data = tmpl_base; \
 	tmpl_x = tmpl_x_base; \
 	cur_bit = base_bit; \
-	dp += fb_pitch / 4;
+	dp += fb_pitch;
 
 void pattern_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h,
 	uint8_t draw_mode, uint8_t mask, uint32_t fg_color, uint32_t bg_color,
 	uint16_t x_offset, uint16_t y_offset,
 	uint8_t *tmpl_data, uint16_t tmpl_pitch, uint16_t loop_rows)
 {
-	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch);
-	if (!h)
+	if (!clamp_rect_to_fb_bounds(rect_x1, &w, rect_y1, &h, color_format))
 		return;
 
 	uint32_t rect_x2 = rect_x1 + w;
-	uint32_t *dp = fb + (rect_y1 * (fb_pitch / 4));
+	uint32_t *dp = fb + (rect_y1 * fb_pitch);
 	uint8_t* tmpl_base = tmpl_data;
 
 	uint16_t tmpl_x, tmpl_x_base;
@@ -1627,7 +1758,7 @@ void pattern_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y1
 
 	if (draw_mode == JAM1) {
 		for (uint16_t y_line = 0; y_line < h; y_line++) {
-			uint16_t x = rect_x1;
+			uint32_t x = rect_x1;
 
 			cur_byte = (inversion) ? tmpl_data[tmpl_x] ^ 0xFF : tmpl_data[tmpl_x];
 
@@ -1660,7 +1791,7 @@ void pattern_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y1
 	}
 	else if (draw_mode == JAM2) {
 		for (uint16_t y_line = 0; y_line < h; y_line++) {
-			uint16_t x = rect_x1;
+			uint32_t x = rect_x1;
 
 			cur_byte = (inversion) ? tmpl_data[tmpl_x] ^ 0xFF : tmpl_data[tmpl_x];
 
@@ -1702,8 +1833,8 @@ void pattern_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y1
 		return;
 
 engage_cheat_codes:;
-		dp += (fb_pitch / 4);
-		uint32_t *sp = dp - (cur_line * (fb_pitch / 4));
+		dp += fb_pitch;
+		uint32_t *sp = dp - (cur_line * fb_pitch);
 		for (uint16_t y_line = cheat_y; y_line < h; y_line++) {
 			switch (color_format) {
 				case MNTVA_COLOR_8BIT:
@@ -1717,14 +1848,14 @@ engage_cheat_codes:;
 					memcpy(&dp[rect_x1], &sp[rect_x1], w * 4);
 					break;
 			}
-			dp += fb_pitch / 4;
-			sp += fb_pitch / 4;
+			dp += fb_pitch;
+			sp += fb_pitch;
 		}
 		return;
 	}
 	else { // COMPLEMENT
 		for (uint16_t y_line = 0; y_line < h; y_line++) {
-			uint16_t x = rect_x1;
+			uint32_t x = rect_x1;
 
 			cur_byte = (inversion) ? tmpl_data[tmpl_x] ^ 0xFF : tmpl_data[tmpl_x];
 
@@ -1758,19 +1889,18 @@ engage_cheat_codes:;
 	tmpl_data += tmpl_pitch; \
 	tmpl_x = tmpl_x_base; \
 	cur_bit = base_bit; \
-	dp += fb_pitch / 4;
+	dp += fb_pitch;
 
 void template_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h,
 	uint8_t draw_mode, uint8_t mask, uint32_t fg_color, uint32_t bg_color,
 	uint16_t x_offset, uint16_t y_offset,
 	uint8_t *tmpl_data, uint16_t tmpl_pitch)
 {
-	h = clamp_rows_to_fb_limit(rect_y1, h, fb_pitch);
-	if (!h)
+	if (!clamp_rect_to_fb_bounds(rect_x1, &w, rect_y1, &h, color_format))
 		return;
 
 	uint32_t rect_x2 = rect_x1 + w;
-	uint32_t *dp = fb + (rect_y1 * (fb_pitch / 4));
+	uint32_t *dp = fb + (rect_y1 * fb_pitch);
 
 	uint16_t tmpl_x, tmpl_x_base;
 
@@ -1789,7 +1919,7 @@ void template_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y
 
 	if (draw_mode == JAM1) {
 		for (uint16_t y_line = 0; y_line < h; y_line++) {
-			uint16_t x = rect_x1;
+			uint32_t x = rect_x1;
 
 			cur_byte = (inversion) ? tmpl_data[tmpl_x] ^ 0xFF : tmpl_data[tmpl_x];
 
@@ -1822,7 +1952,7 @@ void template_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y
 	}
 	else if (draw_mode == JAM2) {
 		for (uint16_t y_line = 0; y_line < h; y_line++) {
-			uint16_t x = rect_x1;
+			uint32_t x = rect_x1;
 
 			cur_byte = (inversion) ? tmpl_data[tmpl_x] ^ 0xFF : tmpl_data[tmpl_x];
 
@@ -1858,7 +1988,7 @@ void template_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y
 	}
 	else { // COMPLEMENT
 		for (uint16_t y_line = 0; y_line < h; y_line++) {
-			uint16_t x = rect_x1;
+			uint32_t x = rect_x1;
 
 			cur_byte = (inversion) ? tmpl_data[tmpl_x] ^ 0xFF : tmpl_data[tmpl_x];
 

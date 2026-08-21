@@ -395,6 +395,10 @@ int main(void)
 	uint32_t status_old;
 	uint32_t status_new;
 
+	if (!expect_u32("missing CFG uses safe filtered width",
+	                VIDEOCAP_FULL_WIDTH_DEFAULT, 0U))
+		return 20;
+
 	data = videocap_control_pack(0U, 1U,
 	                             VIDEOCAP_CROP_H_COMPAT,
 	                             VIDEOCAP_CROP_V_COMPAT,

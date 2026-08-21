@@ -878,7 +878,7 @@ int main() {
 
 				// RTG rendering
 				case REG_ZZ_FILLRECT:
-					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
+					set_fb_words((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 					uint8_t mask = zdata;
 
@@ -892,7 +892,7 @@ int main() {
 
 				case REG_ZZ_COPYRECT: {
 					mask = blitter_colormode_hibyte;
-					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
+					set_fb_words((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
 					switch (zdata) {
@@ -926,7 +926,7 @@ int main() {
 					uint8_t draw_mode = blitter_colormode_hibyte;
 					uint8_t* tmpl_data = (uint8_t*) ((u32)video_state->framebuffer
 							+ blitter_src_offset);
-					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
+					set_fb_bytes((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
 					uint8_t bpp = 2 * blitter_colormode;
@@ -1069,7 +1069,7 @@ int main() {
 					uint8_t* bmp_data = (uint8_t*) ((u32)video_state->framebuffer
 							+ blitter_src_offset);
 
-					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
+					set_fb_words((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
 					p2c_rect(rect_x1, 0, rect_x2, rect_y2, rect_x3,
@@ -1086,7 +1086,7 @@ int main() {
 					uint8_t* bmp_data = (uint8_t*) ((u32)video_state->framebuffer
 							+ blitter_src_offset);
 
-					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
+					set_fb_words((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 					p2d_rect(rect_x1, 0, rect_x2, rect_y2, rect_x3,
 							rect_y3, draw_mode, planes, mask, layer_mask, rect_rgb,
@@ -1096,7 +1096,7 @@ int main() {
 
 				case REG_ZZ_DRAWLINE: {
 					uint8_t draw_mode = blitter_colormode_hibyte;
-					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
+					set_fb_words((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 
 					// rect_x3 contains the pattern. if all bits are set for both the mask and the pattern,
@@ -1115,7 +1115,7 @@ int main() {
 				}
 
 				case REG_ZZ_INVERTRECT:
-					set_fb((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
+					set_fb_words((uint32_t*) ((u32)video_state->framebuffer + blitter_dst_offset),
 							blitter_dst_pitch);
 					invert_rect(rect_x1, rect_y1, rect_x2, rect_y2,
 							zdata & 0xFF, blitter_colormode);

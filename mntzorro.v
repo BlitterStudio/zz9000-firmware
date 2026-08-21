@@ -1302,16 +1302,11 @@ module MNTZorro_v0_1_S00_AXI
   wire e7m_shifted;
   wire e7m_shifted180;
 
-  /* In full-width mode the sampler finishes late enough in the raster that
-   * AXI writeback overlaps capture of the following line.  Transfer a token,
-   * completed bank, and line number together; the bank and line are stable
-   * for the whole capture line before the token changes.  The filtered
-   * banked path carries the same guarantee by latching the completed
-   * line's number and bank at line_sync and toggling one capture clock
-   * later. */
-  wire [11:0] vcap_line_payload_cap = (`VCAP_FULLRATE_INT != 0) ? {
-      vcap_line_toggle, vcap_write_bank, vcap_y[9:0]
-  } : {
+  /* AXI writeback can overlap capture of the following line. Transfer the
+   * completion toggle, bank, and path-specific line number together; the
+   * full-width path normalizes that row before the sampler latches this
+   * payload and changes the toggle one capture clock later. */
+  wire [11:0] vcap_line_payload_cap = {
       vcap_line_toggle, vcap_token_bank, vcap_token_y
   };
   wire [11:0] vcap_line_payload_axi;
@@ -1352,7 +1347,7 @@ module MNTZorro_v0_1_S00_AXI
                .CLKOUT0_DUTY_CYCLE(0.500000),
 
 `ifdef ZORRO3
-               .CLKOUT0_PHASE(90.000000),
+               .CLKOUT0_PHASE(45.000000),
 `elsif VCAP_DENISE_ADAPTER
                .CLKOUT0_PHASE(90.000000),
 `else

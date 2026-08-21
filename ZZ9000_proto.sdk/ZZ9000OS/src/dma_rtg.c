@@ -27,7 +27,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             SWAP16(data->pitch[0]);
             SWAP32(data->offset[0]);
 
-            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
+            set_fb_words((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
             if (line_uses_solid_path(data->user[1], data->mask,
@@ -55,7 +55,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             SWAP16(data->pitch[0]);
             SWAP32(data->offset[0]);
 
-            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
+            set_fb_words((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
             if (data->mask == 0xFF)
@@ -74,7 +74,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             SWAP16(data->pitch[0]);		SWAP16(data->pitch[1]);
             SWAP32(data->offset[0]);	SWAP32(data->offset[1]);
 
-            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
+            set_fb_words((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
             switch (zdata) {
@@ -109,7 +109,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
 
             uint8_t* tmpl_data = (uint8_t*) ((u32)vs->framebuffer
                     + data->offset[1]);
-            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
+            set_fb_bytes((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
 
@@ -153,7 +153,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             uint8_t* bmp_data = (uint8_t*) ((u32)vs->framebuffer
                     + data->offset[1]);
 
-            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
+            set_fb_words((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
             if (zdata == OP_P2C) {
@@ -179,7 +179,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             uint8_t* yuv_data = (uint8_t*) ((u32)vs->framebuffer
                     + data->offset[1]);
 
-            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
+            set_fb_words((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
 
             yuv422_to_rgb_rect((int16_t)data->x[0], (int16_t)data->x[1],
@@ -210,7 +210,7 @@ void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata)
             SWAP16(data->pitch[0]);
             SWAP32(data->offset[0]);
 
-            set_fb((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
+            set_fb_words((uint32_t*) ((u32)vs->framebuffer + data->offset[0]),
                     data->pitch[0]);
             invert_rect(data->x[0], data->y[0], data->x[1], data->y[1],
                     data->mask, data->u8_user[GFXDATA_U8_COLORMODE]);

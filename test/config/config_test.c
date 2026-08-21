@@ -104,6 +104,7 @@ static void test_defaults_absent(void) {
     CHECK(!c->loaded);
     CHECK(c->videocap_output_profile == ZZ_VIDEOCAP_OUTPUT_FULL_60);
     CHECK(!c->videocap_mode_present);
+    CHECK(!c->videocap_shres_present);
     CHECK(!c->videocap_crop_h_present);
     CHECK(!c->videocap_crop_v_present);
     CHECK(!c->ns_vsync_present);

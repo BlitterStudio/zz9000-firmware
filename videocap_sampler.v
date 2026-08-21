@@ -43,7 +43,7 @@ localparam [1:0] CONTROL_RETURN = 2'd3;
 
 localparam [11:0] CROP_H_COMPAT = 12'd188;
 localparam [11:0] CROP_V_COMPAT = 12'd26;
-localparam [11:0] CROP_H_FULLRATE = 12'd280;
+localparam [11:0] CROP_H_FULLRATE = 12'd279;
 localparam [11:0] CROP_V_FULLRATE = 12'd40;
 
 reg [1:0] control_state = CONTROL_IDLE;
@@ -238,8 +238,8 @@ module videocap_sampler #(
     output reg         cap_shres,
     output reg         cap_line_toggle = 0,
     output wire        cap_write_bank,
-    /* Completed-line token payload for the filtered banked path; valid
-     * when cap_line_toggle changes outside full-width mode. */
+    /* Completed-line token payload for every banked path; valid when
+     * cap_line_toggle changes. */
     output reg  [9:0] cap_token_y = 0,
     output reg         cap_token_bank = 0,
 
@@ -294,7 +294,25 @@ reg [11:0] ctl_crop_v_cap = 12'd26;
 
 reg [6:0] hs = 0;
 reg [6:0] vs = 0;
-reg [23:0] rgbin = 0;
+/*
+ * Capture RGB in the input logic before any fabric routing.  Zorro 3 runs
+ * this interface at the full 28 MHz pixel rate, where route-dependent delay
+ * to an ordinary SLICE register can put the sampling edge on a pixel
+ * transition and produce frame-to-frame colour shimmer.  These registers
+ * have direct pin inputs so Vivado can pack every used bit into ILOGIC.
+ */
+(* IOB = "TRUE" *) reg [7:0] vcap_r_iob = 0;
+(* IOB = "TRUE" *) reg [7:0] vcap_g_iob = 0;
+(* IOB = "TRUE" *) reg [7:0] vcap_b_iob = 0;
+
+wire [23:0] rgbin =
+    (RGB_MODE == 1) ? {vcap_r_iob[3:0], vcap_r_iob[3:0],
+                       vcap_g_iob[3:0], vcap_g_iob[3:0],
+                       vcap_b_iob[3:0], vcap_b_iob[3:0]} :
+    (RGB_MODE == 2) ? {vcap_r_iob[7:4], vcap_r_iob[7:4],
+                       vcap_g_iob[7:4], vcap_g_iob[7:4],
+                       vcap_b_iob[7:4], vcap_b_iob[7:4]} :
+                      {vcap_r_iob, vcap_g_iob, vcap_b_iob};
 reg [10:0] sample_x = 0;
 reg [10:0] raw_y = 0;
 reg lace_field = 0;
@@ -329,11 +347,10 @@ wire [11:0] read_buf_addr = {
     read_banking_axi ? buf_rbank : 1'b0, buf_raddr[10:0]
 };
 assign cap_write_bank = capture_banking_cap ? capture_bank : 1'b0;
-/* Completed-line token for the filtered banked path.  The payload is
- * latched at line_sync from the pre-edge values (the line number still
- * holds the completed line and capture_bank has not flipped yet) and the
- * toggle changes one capture clock later, so the whole payload is stable
- * on both sides of the toggle edge as the line CDC requires. */
+/* Completed-line token for banked capture.  The payload is latched either at
+ * line_sync (filtered path) or after the 1280th sample (full-width path), and
+ * the toggle changes one capture clock later so the whole payload is stable
+ * on both sides of the line-CDC event. */
 reg cap_token_pending = 0;
 
 always @(posedge axi_clk)
@@ -416,6 +433,15 @@ wire [31:0] capture_store_word = {8'b0,
 wire capture_head_valid = capture_banking_cap ?
     1'b1 : (cap_x > 11'd2);
 
+/* cap_y retains row zero (or the interlaced field parity) while the vertical
+ * crop is being skipped.  Those sentinel rows must not be published to
+ * writeback: doing so consumes destination row zero before the real picture
+ * starts, so a 256-row scanout loses its bottom source row.  Normalize the
+ * first completed post-crop row back to row zero/field parity. */
+wire [10:0] capture_field_stride = cap_interlace ? 11'd2 : 11'd1;
+wire capture_output_line_valid = cap_y >= capture_field_stride;
+wire [10:0] capture_output_y = cap_y - capture_field_stride;
+
 wire probe_arm_toggle_cap;
 reg probe_waiting = 0;
 reg probe_publish_pending = 0;
@@ -450,9 +476,8 @@ always @(posedge cap_clk) begin
         ctl_dest_ack <= 1'b1;
     end
 
-    /* Publish the completed-line token one capture clock after its
-     * payload was latched, so the payload is stable across the toggle
-     * edge seen by the line CDC. */
+    /* Publish the completed-line token one capture clock after its payload
+     * was latched, so it is stable across the line-CDC toggle edge. */
     if (cap_token_pending) begin
         cap_token_pending <= 0;
         cap_line_toggle <= ~cap_line_toggle;
@@ -495,16 +520,9 @@ always @(posedge cap_clk) begin
     vs <= {vs[5:0], vcap_vsync};
     hs <= {hs[5:0], vcap_hsync};
 
-    if (RGB_MODE == 1)
-        rgbin <= {vcap_r[3:0], vcap_r[3:0],
-                  vcap_g[3:0], vcap_g[3:0],
-                  vcap_b[3:0], vcap_b[3:0]};
-    else if (RGB_MODE == 2)
-        rgbin <= {vcap_r[7:4], vcap_r[7:4],
-                  vcap_g[7:4], vcap_g[7:4],
-                  vcap_b[7:4], vcap_b[7:4]};
-    else
-        rgbin <= {vcap_r, vcap_g, vcap_b};
+    vcap_r_iob <= vcap_r;
+    vcap_g_iob <= vcap_g;
+    vcap_b_iob <= vcap_b;
 
     if (hs == 0) begin
         if (hs_pulse_width < 8'hff)
@@ -647,13 +665,14 @@ always @(posedge cap_clk) begin
             /* Snapshot the exact word presented to the sampler line-buffer
              * write port. AXI probing is held off until this source burst is
              * complete, so both snapshots describe the same captured row. */
-            if (capture_banking_cap && probe_waiting &&
-                    !probe_publish_pending && cap_y == PROBE_LINE &&
+            if (capture_banking_cap && capture_output_line_valid &&
+                    probe_waiting && !probe_publish_pending &&
+                    capture_output_y == PROBE_LINE &&
                     cap_x >= PROBE_SOURCE_X &&
                     cap_x < PROBE_SOURCE_X + 16) begin
                 if (cap_x == PROBE_SOURCE_X) begin
                     probe_seen_mask <= 16'h0001;
-                    probe_line <= cap_y[9:0];
+                    probe_line <= capture_output_y[9:0];
                     probe_source_x <= cap_x;
                     probe_context <= {9'h000, capture_bank,
                                       raw_y, sample_x};
@@ -711,7 +730,11 @@ always @(posedge cap_clk) begin
              * publishes its completed-line token at line_sync instead. */
             if (!cap_x_done && cap_x >= 11'd1279) begin
                 cap_x_done <= 1;
-                cap_line_toggle <= ~cap_line_toggle;
+                if (capture_output_line_valid) begin
+                    cap_token_y <= capture_output_y[9:0];
+                    cap_token_bank <= capture_bank;
+                    cap_token_pending <= 1;
+                end
             end
         end else begin
             cap_x_done <= (cap_x > 11'h200);

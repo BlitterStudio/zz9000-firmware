@@ -1013,8 +1013,7 @@ always @(posedge dvi_clk) begin
   /* Geometry is stable for a frame. Split clipped-bound and origin
    * arithmetic across registers so per-pixel comparisons start at a
    * registered coordinate rather than at vga_overlay_x/viewport_x. */
-  overlay_screen_x_origin <= -$signed(PIPE_DELAY) +
-    (vga_viewport_x != 0 ? 17'sd1 : 17'sd0) -
+  overlay_screen_x_origin <= -$signed(PIPE_DELAY) + 17'sd1 -
     $signed({1'b0, vga_viewport_x});
   overlay_local_x_origin <=
     overlay_screen_x_origin - $signed(vga_overlay_x);
@@ -1130,8 +1129,12 @@ always @(posedge dvi_clk) begin
     4'b1011: counter_scanout_step <= 3;
   endcase
 
-  if (counter_x + 1'b1 < vga_viewport_x ||
-      counter_x > vga_viewport_x + vga_viewport_width) begin
+  /* A viewport with a left border primes scanout at viewport_x - 1. Full-
+   * frame content has no such counter value, so use raster wrap as its
+   * logical x = -1 cycle and avoid duplicating source column zero. */
+  if ((counter_x + 1'b1 < vga_viewport_x ||
+       counter_x > vga_viewport_x + vga_viewport_width) &&
+      !(counter_x >= vga_h_max && vga_viewport_x == 0)) begin
     counter_scanout  <= 0;
     counter_subpixel <= counter_scanout_step;
   end else begin
@@ -1239,6 +1242,13 @@ endcase
 
   dvi_rgb <= viewport_output_active ? composed_rgb : 32'b0;
 
+  /* The refill side can overwrite the bank from the completed row during
+   * horizontal blanking. Select the upcoming row one clock before raster
+   * wrap so that stale-bank data has cleared the registered pixel pipeline
+   * before active column zero. */
+  if (counter_x + 1'b1 == vga_h_max)
+    scanout_source_line_row <= next_scanout_source_line;
+
   /* These registered coordinates advance on the same edge as counter_x/y.
    * Their values therefore retain the existing pixel/row phase while
    * breaking counter arithmetic away from overlay BRAM/tag/control logic. */
@@ -1249,7 +1259,6 @@ endcase
     viewport_output_x_position <= -$signed(PIPE_DELAY) -
       (vga_overlay_enable ? $signed(OVERLAY_PIPE_DELAY) : 17'sd0);
     viewport_output_y_row <= next_raster_y - vga_scale_y_factor;
-    scanout_source_line_row <= next_scanout_source_line;
 
     if (counter_y >= vga_v_max) begin
       overlay_screen_y_row <= overlay_screen_y_origin;

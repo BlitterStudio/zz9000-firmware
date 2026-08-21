@@ -568,14 +568,14 @@ initial begin
 
   wait (frames == 5);
 
-  // The formatter's active-video window opens one dvi_clk before the pixel
-  // pipeline delivers word 0 (left edge shows pixel 0 twice on master
-  // hardware too), so displayed column x carries source pixel x-1.
+  // Every displayed column must carry the same source column. This checks
+  // both edges: column 0 must come from the current row, and the final source
+  // column must not be lost to a duplicated first pixel.
   // Captured rows are normalized to zero at the first active line.
   mism = 0;
   shown = 0;
   for (i = 0; i < canvas_height; i = i + 1)
-    for (x = (cfg_viewport == 0 ? 1 : 0); x < canvas_width; x = x + 1) begin
+    for (x = 0; x < canvas_width; x = x + 1) begin
       got = cap[i * MAXW + x];
       if (cfg_viewport != 0 &&
           (x < viewport_x || x >= viewport_x + cfg_width ||
@@ -585,7 +585,7 @@ initial begin
         exp = expected_pix((i - viewport_y) >> cfg_scaley,
                            x - viewport_x);
       else
-        exp = expected_pix(i >> cfg_scaley, x - 1);
+        exp = expected_pix(i >> cfg_scaley, x);
       if (cfg_scanline != 0 && cfg_viewport != 0 &&
           ((i - viewport_y) & 1) == 0)
         exp = 0;
@@ -694,12 +694,12 @@ initial begin
     end
 
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
-      for (x = 1; x < cfg_width; x = x + 1) begin
+      for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
-        if (i >= 2 && i < 5 && (x - 1) >= 8 && (x - 1) < 17)
+        if (i >= 2 && i < 5 && x >= 8 && x < 17)
           exp = expected_overlay(i - 2);
         else
-          exp = expected_pix(i, x - 1);
+          exp = expected_pix(i, x);
         exp = exp & 32'h00ffffff;
         if (got !== exp) begin
           mism = mism + 1;
@@ -717,12 +717,12 @@ initial begin
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 5);
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
-      for (x = 1; x < cfg_width; x = x + 1) begin
+      for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
-        if (i >= 2 && i < 5 && (x - 1) >= cfg_width - 9)
+        if (i >= 2 && i < 5 && x >= cfg_width - 9)
           exp = expected_overlay(i - 2);
         else
-          exp = expected_pix(i, x - 1);
+          exp = expected_pix(i, x);
         exp = exp & 32'h00ffffff;
         if (got !== exp) begin
           mism = mism + 1;
@@ -744,12 +744,12 @@ initial begin
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 5);
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
-      for (x = 1; x < cfg_width; x = x + 1) begin
+      for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 2 && i < 5)
           exp = expected_overlay(i - 2);
         else
-          exp = expected_pix(i, x - 1);
+          exp = expected_pix(i, x);
         exp = exp & 32'h00ffffff;
         if (got !== exp) begin
           mism = mism + 1;
@@ -772,14 +772,14 @@ initial begin
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 6);
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
-      for (x = 1; x < cfg_width; x = x + 1) begin
+      for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
-        if (i >= 1 && i < 7 && (x - 1) >= 4 && (x - 1) < 22) begin
-          overlay_src_x = ((x - 1 - 4) * 9) / 18;
+        if (i >= 1 && i < 7 && x >= 4 && x < 22) begin
+          overlay_src_x = ((x - 4) * 9) / 18;
           overlay_src_y = ((i - 1) * 3) / 6;
           exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
         end else begin
-          exp = expected_pix(i, x - 1);
+          exp = expected_pix(i, x);
         end
         exp = exp & 32'h00ffffff;
         if (got !== exp) begin
@@ -799,14 +799,14 @@ initial begin
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 6);
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
-      for (x = 1; x < cfg_width; x = x + 1) begin
+      for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
-        if (i >= 2 && i < 4 && (x - 1) >= 8 && (x - 1) < 13) begin
-          overlay_src_x = ((x - 1 - 8) * 9) / 5;
+        if (i >= 2 && i < 4 && x >= 8 && x < 13) begin
+          overlay_src_x = ((x - 8) * 9) / 5;
           overlay_src_y = ((i - 2) * 3) / 2;
           exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
         end else begin
-          exp = expected_pix(i, x - 1);
+          exp = expected_pix(i, x);
         end
         exp = exp & 32'h00ffffff;
         if (got !== exp) begin
@@ -826,14 +826,14 @@ initial begin
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 6);
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
-      for (x = 1; x < cfg_width; x = x + 1) begin
+      for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
-        if (i < 3 && (x - 1) < 14) begin
-          overlay_src_x = ((x - 1 + 4) * 9) / 18;
+        if (i < 3 && x < 14) begin
+          overlay_src_x = ((x + 4) * 9) / 18;
           overlay_src_y = ((i + 3) * 3) / 6;
           exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
         end else begin
-          exp = expected_pix(i, x - 1);
+          exp = expected_pix(i, x);
         end
         exp = exp & 32'h00ffffff;
         if (got !== exp) begin

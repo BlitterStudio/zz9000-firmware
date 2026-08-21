@@ -56,6 +56,7 @@ if { [string match "*ERROR*" $impl_status] || [string match "*FAILED*" $impl_sta
 }
 
 open_run impl_1
+source [file join $script_dir verify_vcap_iob_placement.tcl]
 source [file join $script_dir verify_runtime_pixel_timing.tcl]
 close_design
 
