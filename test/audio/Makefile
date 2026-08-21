@@ -3,32 +3,47 @@ CFLAGS ?= -O2 -g -Wall -Wextra -Werror
 
 SRC_DIR := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 BUILD_DIR := build
+CONVERT_TARGET := $(BUILD_DIR)/audio_convert_test
 CAPTURE_TARGET := $(BUILD_DIR)/audio_capture_test
 PROFILE_TARGET := $(BUILD_DIR)/audio_profile_test
 PLAYBACK_TARGET := $(BUILD_DIR)/audio_playback_frontier_test
+RATE_TARGET := $(BUILD_DIR)/audio_playback_rate_test
 DRAIN_TARGET := $(BUILD_DIR)/audio_stream_drain_test
 MP3_PROBE_TARGET := $(BUILD_DIR)/mp3_frame_probe_test
 MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
-TARGETS := $(CAPTURE_TARGET) $(PROFILE_TARGET) $(PLAYBACK_TARGET) \
-	$(DRAIN_TARGET) $(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET)
+TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
+	$(PLAYBACK_TARGET) $(RATE_TARGET) $(DRAIN_TARGET) \
+	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET)
 
 CPPFLAGS += -I$(SRC_DIR)
 
-.PHONY: test clean
+.PHONY: test clean check-tables
 
 test: $(TARGETS)
+	$(CONVERT_TARGET)
 	$(CAPTURE_TARGET)
+	$(RATE_TARGET)
 	$(PROFILE_TARGET)
 	$(PLAYBACK_TARGET)
 	$(DRAIN_TARGET)
 	$(MP3_PROBE_TARGET)
 	$(MPEG_LAYER2_TARGET)
 
+$(CONVERT_TARGET): audio_convert_test.c $(SRC_DIR)/audio_convert.c \
+	$(SRC_DIR)/audio_convert.h $(SRC_DIR)/audio_convert_tables.c \
+	$(SRC_DIR)/audio_convert_tables.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_convert_test.c \
+		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
+
 $(CAPTURE_TARGET): audio_capture_test.c $(SRC_DIR)/audio_capture.c \
-	$(SRC_DIR)/audio_capture.h
+	$(SRC_DIR)/audio_capture.h $(SRC_DIR)/audio_convert.c \
+	$(SRC_DIR)/audio_convert.h $(SRC_DIR)/audio_convert_tables.c \
+	$(SRC_DIR)/audio_convert_tables.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_capture_test.c \
-		$(SRC_DIR)/audio_capture.c
+		$(SRC_DIR)/audio_capture.c $(SRC_DIR)/audio_convert.c \
+		$(SRC_DIR)/audio_convert_tables.c -lm
 
 $(PROFILE_TARGET): audio_profile_test.c $(SRC_DIR)/adau.h \
 	$(SRC_DIR)/audio_dsp_gain.h \
@@ -42,6 +57,13 @@ $(PLAYBACK_TARGET): audio_playback_frontier_test.c \
 	$(SRC_DIR)/audio_playback_frontier.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_playback_frontier_test.c
+
+$(RATE_TARGET): audio_playback_rate_test.c $(SRC_DIR)/audio_playback_rate.h \
+	$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert.h \
+	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_playback_rate_test.c \
+		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 
 $(DRAIN_TARGET): audio_stream_drain_test.c \
 	$(SRC_DIR)/audio_stream_drain.h
@@ -59,6 +81,11 @@ $(MPEG_LAYER2_TARGET): mpeg_layer2_decode_test.c \
 	$(SRC_DIR)/mp3/mp3_backend_config.h $(SRC_DIR)/mp3/minimp3.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ mpeg_layer2_decode_test.c
+
+check-tables:
+	python3 ../../util/gen_audio_convert_tables.py
+	git diff --exit-code -- ../../ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.c \
+		../../ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.h
 
 clean:
 	rm -rf $(BUILD_DIR)

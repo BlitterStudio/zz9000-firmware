@@ -21,6 +21,7 @@
 #include "sdk_media_session.h"
 #include "audio_playback_frontier.h"
 #include "audio_stream_drain.h"
+#include "audio_convert.h"
 #include "sdk_jpeg.h"
 #include "sdk_surface.h"
 #include "sdk_aperture_layout.h"
@@ -3700,8 +3701,8 @@ static void audio_stream_read_compute(struct SDKAudioStream *stream,
  * the core-1 refill kick stays in the main loop (it enqueues scheduler
  * tasks, which the ISR must not). The ISR path is integer-only: the
  * standalone BSP does not save VFP state across interrupts, so non-48k
- * sources go through a fixed-point mirror of the legacy resampler
- * (same rate/50 source math, truncation drift included); mono sources
+ * sources go through the shared qualified converter kernel
+ * (audio_convert.c) with exact-rational, drift-free phase; mono sources
  * are duplicated to stereo. Underrun, a faulted session or an unusable
  * stream geometry produce silence. The ISR pump is the CONSUMER of a
  * bound session -- the single writer of pcm_consumed_total -- so
@@ -3746,78 +3747,40 @@ static int16_t g_pump_src[AUDIO_PUMP_PERIOD_BYTES / 2];
 static int16_t g_pump_stereo[AUDIO_PUMP_PERIOD_BYTES / 2];
 
 /*
- * Fixed-point (16.16) linear resampler for the ISR pump -- a faithful
- * integer mirror of ax.c's resample_s16 (which uses doubles and is
- * therefore unusable in IRQ context), including its quirks: the
- * fractional position keeps only its fraction across periods and the
- * final source index is clamped, so pitch and boundary behavior match
- * the long-proven main-loop path. State is reset when a session binds.
+ * Private converter instance for the pump (stream and media bindings).
+ * The qualified kernel is integer-only and ISR-safe, so the pump runs
+ * the same code the host suite gates; binding start resets it, and
+ * silence periods skip the kernel entirely so the rational phase
+ * freezes during underrun and recovery continues phase-continuously.
  */
-static uint32_t g_pump_rs_cur;     /* 16.16 fractional source position */
-static int16_t g_pump_rs_prev_l;
-static int16_t g_pump_rs_prev_r;
+static struct zz_audio_convert g_pump_convert;
+static uint32_t g_pump_convert_rate;
 
-static void pump_resample_reset(void)
+static void pump_convert_reset(void)
 {
-	g_pump_rs_cur = 0;
-	g_pump_rs_prev_l = 0;
-	g_pump_rs_prev_r = 0;
+	g_pump_convert_rate = 0U;
+	zz_audio_convert_reset(&g_pump_convert);
 }
 
-static void pump_resample_s16(const int16_t *input, int16_t *output,
-                              uint32_t in_rate, uint32_t in_frames,
-                              uint32_t out_frames)
+static void pump_convert(const int16_t *pcm, int16_t *slot,
+                         uint32_t rate, uint32_t src_frames)
 {
-	uint32_t step = (in_rate << 16) / 48000U;
-	uint32_t cur = g_pump_rs_cur;
-	int32_t inmax = (int32_t)in_frames - 1;
-	int32_t ip2 = 0;
-	uint32_t i;
-
-	for (i = 0; i < out_frames; i++) {
-		int32_t ip1;
-		uint32_t frac = cur & 0xFFFFU;
-		int32_t s1l, s1r;
-
-		ip2 = (int32_t)(cur >> 16);
-		ip1 = ip2 - 1;
-		if (ip2 > inmax) {
-			ip2 = inmax;
-			ip1 = inmax - 1;
-		}
-		if (ip1 < 0) {
-			s1l = g_pump_rs_prev_l;
-			s1r = g_pump_rs_prev_r;
-		} else {
-			s1l = input[2 * ip1];
-			s1r = input[2 * ip1 + 1];
-		}
-		output[2 * i] = (int16_t)((s1l * (int32_t)(65536U - frac) +
-		                           (int32_t)input[2 * ip2] *
-		                               (int32_t)frac) >> 16);
-		output[2 * i + 1] = (int16_t)((s1r * (int32_t)(65536U - frac) +
-		                               (int32_t)input[2 * ip2 + 1] *
-		                                   (int32_t)frac) >> 16);
-		cur += step;
+	if (rate != g_pump_convert_rate) {
+		g_pump_convert_rate = rate;
+		zz_audio_convert_init(&g_pump_convert, rate, 48000U);
 	}
-
-	g_pump_rs_prev_l = input[2 * ip2];
-	g_pump_rs_prev_r = input[2 * ip2 + 1];
-	/* Carry phase relative to the block just consumed, not the raw low
-	 * 16 bits. Each period feeds a fresh block of in_frames source frames,
-	 * so the next period's phase is (cur - in_frames). The 16.16 step is
-	 * truncated, so for the common rates cur lands a hair BELOW
-	 * in_frames<<16 (44.1k: 881.997 not 882.0); keeping cur&0xFFFF would
-	 * restart near phase 1.0 and jump ~1 source sample every 20 ms period.
-	 * ax.c's double resampler avoids this only because in_rate/48000*960
-	 * is an exact integer for those rates -- the truncated fixed-point
-	 * step is not. Clamp a tiny undershoot to the block boundary (matching
-	 * the double's exact 0.0) and keep the cursor non-negative so the
-	 * unsigned indexing above stays valid. */
-	{
-		int32_t carry = (int32_t)cur - (int32_t)(in_frames << 16);
-		g_pump_rs_cur = (carry > 0) ? (uint32_t)carry : 0U;
+	if (g_pump_convert.ratio == NULL) {
+		/* Off-table decode rate (11.025/16/22.05 kHz and anything
+		 * else outside the six advertised): no honest conversion
+		 * exists, so this is an unusable geometry -- emit a
+		 * silent period rather than wrong-speed audio with a
+		 * stale tail. The stream still advances. */
+		memset(slot, 0, AUDIO_PUMP_PERIOD_BYTES);
+		return;
 	}
+	zz_audio_convert_stream(&g_pump_convert, pcm, slot,
+	                        (uint16_t)src_frames,
+	                        AUDIO_PUMP_PERIOD_BYTES / 4);
 }
 
 static int audio_pump_source_snapshot(struct SDKAudioPumpSource *source)
@@ -3988,8 +3951,7 @@ static uint32_t audio_pump_fill_period(
 	if (rate == 48000U) {
 		memcpy(slot, pcm, AUDIO_PUMP_PERIOD_BYTES);
 	} else {
-		pump_resample_s16(pcm, (int16_t *)slot, rate, src_frames,
-		                  AUDIO_PUMP_PERIOD_BYTES / 4);
+		pump_convert(pcm, (int16_t *)slot, rate, src_frames);
 	}
 	return pull;
 silence:
@@ -4191,7 +4153,7 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session)
 	if (audio_get_inited_tx_buffer() !=
 	    (uint8_t *)AUDIO_TX_BUFFER_ADDRESS)
 		audio_init_i2s();
-	pump_resample_reset();
+	pump_convert_reset();
 	pos = audio_get_dma_transfer_count() % AUDIO_PUMP_RING_BYTES;
 	pos -= pos % AUDIO_PUMP_PERIOD_BYTES;
 	g_audio_playback.fill_offset =

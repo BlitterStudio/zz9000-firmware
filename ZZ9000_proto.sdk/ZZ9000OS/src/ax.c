@@ -16,6 +16,8 @@
 #include "stdlib.h"
 #include "ax.h"
 #include "audio_capture.h"
+#include "audio_convert.h"
+#include "audio_playback_rate.h"
 #include "audio_dsp_gain.h"
 #include "memorymap.h"
 #include "xtime_l.h"
@@ -921,6 +923,15 @@ void audio_set_interrupt_mask(uint16_t mask) {
 
 	mask &= ZZ_AUDIO_CONFIG_MASK;
 	printf("[audio] irq mask: %u\n", mask);
+
+	/* Reset BEFORE publishing the RECORD bit: isr_audio_rx can fire
+	 * between these statements, and a period converted in that window
+	 * would filter through the previous session's history and publish
+	 * it as the new recording's first period (KTD5). */
+	if ((mask & ZZ_AUDIO_CONFIG_RECORD) &&
+	    !(old_mask & ZZ_AUDIO_CONFIG_RECORD))
+		zz_audio_capture_reset();
+
 	audio_interrupt_mask = mask;
 
 	if (!mask) {
@@ -935,7 +946,16 @@ void audio_set_capture_frames(uint16_t frames) {
 	if (frames == 0U || frames > ZZ_AUDIO_CAPTURE_INPUT_FRAMES)
 		frames = ZZ_AUDIO_CAPTURE_INPUT_FRAMES;
 
-	audio_capture_frames = frames;
+	/* The AHI driver writes this register on every playback period;
+	 * same-value writes must not reset the capture converter or a
+	 * full-duplex recording never reaches steady state (KTD5). */
+	if (frames != audio_capture_frames) {
+		/* Reset first, then publish the new count, so the RX ISR
+		 * cannot convert one period at the new count against the
+		 * old ratio and phase. */
+		zz_audio_capture_reset();
+		audio_capture_frames = frames;
+	}
 }
 
 uint16_t audio_get_rx_status(void) {
@@ -950,12 +970,20 @@ int audio_legacy_output_active() {
 	return (audio_interrupt_mask & ZZ_AUDIO_CONFIG_PLAY) != 0;
 }
 
+
+/* Private converter instance for the legacy/AHI per-period path. The
+ * rate is re-derived on every audio_swab call; a change re-initializes
+ * the instance exactly once (KTD5), and reset_resampling() clears both
+ * on silence/buffer reassignment. */
+static struct zz_audio_convert audio_playback_convert;
+static uint32_t audio_playback_last_rate;
+static int16_t audio_playback_scratch[AUDIO_BYTES_PER_PERIOD / 2];
 // offset = offset from audio tx buffer
 // returns audio_buffer_collision (1 or 0)
 int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap) {
 	int audio_buffer_collision = 0;
 	uint16_t* data = (uint16_t*)(audio_tx_buffer + offset);
-	int audio_freq = audio_buf_samples * 50;
+	uint32_t audio_freq = zz_audio_playback_rate(audio_buf_samples);
 
 	//printf("[audio:%d] play: %d +%lu\n", byteswap, audio_freq, offset);
 
@@ -966,15 +994,50 @@ int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap) {
 		}
 	}
 
-	// FIXME missing filter, wonky address calculation
-	// resample if other freq
-	if (audio_freq != 48000) {
-		resample_s16((int16_t*)(audio_tx_buffer + offset),
-				(int16_t*)((uint8_t*)audio_tx_buffer+AUDIO_TX_BUFFER_SIZE*2),
-				audio_freq,
-				48000,
-				AUDIO_BYTES_PER_PERIOD/4);
-		memcpy(audio_tx_buffer + offset, (uint8_t*)audio_tx_buffer+AUDIO_TX_BUFFER_SIZE*2, AUDIO_BYTES_PER_PERIOD);
+	// Qualified conversion through the shared fixed-point kernel.
+	// 48 kHz stays a byte-identical bypass.
+	if (audio_freq != 48000U && audio_buf_samples != 0U) {
+		if (audio_freq != audio_playback_last_rate) {
+			audio_playback_last_rate = audio_freq;
+			zz_audio_convert_init(&audio_playback_convert,
+			                      audio_freq, 48000U);
+		}
+		if (audio_playback_convert.ratio == NULL) {
+			/* Off-table rate (not one of the six advertised):
+			 * no honest conversion exists, so emit a silent
+			 * period rather than wrong-speed audio with a
+			 * stale tail. */
+			memset(audio_tx_buffer + offset, 0,
+			       AUDIO_BYTES_PER_PERIOD);
+		} else {
+			/* The FIR is backward-looking (output m reads
+			 * inputs at or below its base), so it must not
+			 * convert in place: stage the source frames in a
+			 * scratch copy first. */
+			memcpy(audio_playback_scratch,
+			       audio_tx_buffer + offset,
+			       (size_t)audio_buf_samples * 4U);
+			zz_audio_convert_stream(&audio_playback_convert,
+				audio_playback_scratch,
+				(int16_t *)(audio_tx_buffer + offset),
+				audio_buf_samples,
+				AUDIO_BYTES_PER_PERIOD / 4);
+		}
+	} else if (audio_freq == 48000U) {
+		/* 48 kHz is a byte-identical bypass, but a converted-rate
+		 * session that passes through it must not resume with
+		 * history from before the detour: record the transition
+		 * and retire the converter so returning to a converted
+		 * rate re-initializes it (44.1 -> 48 -> 44.1 kHz). */
+		if (audio_playback_last_rate != 48000U) {
+			audio_playback_last_rate = 48000U;
+			zz_audio_convert_reset(&audio_playback_convert);
+		}
+	} else {
+		/* A zero frame count is a client error path; silence the
+		 * period instead of converting stale bytes. */
+		memset(audio_tx_buffer + offset, 0,
+		       AUDIO_BYTES_PER_PERIOD);
 	}
 
 	u32 txcount = audio_get_dma_transfer_count();
@@ -995,57 +1058,9 @@ int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap) {
 	return audio_buffer_collision;
 }
 
-double resample_cur = 0;
-double resample_psampl = 0;
-double resample_psampr = 0;
-
-void resample_s16(int16_t *input, int16_t *output, int in_sample_rate,
-		int out_sample_rate, int output_samples) {
-	double step_dist = ((double) in_sample_rate / (double) out_sample_rate);
-	double cur = resample_cur;
-	int in_pos1 = 0, in_pos2 = 0;
-	double sample1l = 0, sample2l = 0, sample1r = 0, sample2r = 0;
-
-	int inmax = (int) (step_dist * 960.0) - 1;
-
-	for (uint32_t i = 0; i < output_samples; i++) {
-		in_pos1 = ((int) cur) - 1;
-		in_pos2 = (int) cur;
-
-		// FIXME hack
-		if (in_pos2 > inmax) {
-			in_pos2 = inmax;
-			in_pos1 = inmax - 1;
-		}
-
-		double frac2 = cur - (1 + in_pos1);
-		double frac1 = (double) 1.0 - frac2;
-
-		if (in_pos1 == -1) {
-			sample1l = frac1 * resample_psampl;
-			sample1r = frac1 * resample_psampr;
-		} else {
-			sample1l = frac1 * (double) input[in_pos1 * 2 + 0];
-			sample1r = frac1 * (double) input[in_pos1 * 2 + 1];
-		}
-		sample2l = frac2 * (double) input[in_pos2 * 2 + 0];
-		sample2r = frac2 * (double) input[in_pos2 * 2 + 1];
-
-		output[i * 2 + 0] = (int16_t) (sample1l + sample2l);
-		output[i * 2 + 1] = (int16_t) (sample1r + sample2r);
-
-		cur += step_dist;
-	}
-
-	resample_cur = cur - (int) cur;
-	resample_psampl = (double) input[in_pos2 * 2 + 0];
-	resample_psampr = (double) input[in_pos2 * 2 + 1];
-}
-
 void reset_resampling() {
-	resample_cur = 0;
-	resample_psampl = 0;
-	resample_psampr = 0;
+	audio_playback_last_rate = 0U;
+	zz_audio_convert_reset(&audio_playback_convert);
 }
 
 void audio_set_tx_buffer(uint8_t* addr) {
@@ -1061,8 +1076,8 @@ void audio_set_rx_buffer(uint8_t* addr) {
 	audio_capture_ready = 0;
 	__asm__ __volatile__("dsb" ::: "memory");
 	audio_rx_buffer = addr;
+	zz_audio_capture_reset();
 }
-
 void audio_silence() {
 	memset(audio_tx_buffer, 0, AUDIO_TX_BUFFER_SIZE);
 	// TX buffers live in plain cacheable DDR and the formatter DMA does
