@@ -931,13 +931,24 @@ void audio_set_interrupt_mask(uint16_t mask) {
 
 	if ((old_mask ^ mask) & ZZ_AUDIO_CONFIG_PLAY)
 		audio_silence();
+
+	/* Record start re-warms the capture converter (KTD5). */
+	if ((mask & ZZ_AUDIO_CONFIG_RECORD) &&
+	    !(old_mask & ZZ_AUDIO_CONFIG_RECORD))
+		zz_audio_capture_reset();
 }
 
 void audio_set_capture_frames(uint16_t frames) {
 	if (frames == 0U || frames > ZZ_AUDIO_CAPTURE_INPUT_FRAMES)
 		frames = ZZ_AUDIO_CAPTURE_INPUT_FRAMES;
 
-	audio_capture_frames = frames;
+	/* The AHI driver writes this register on every playback period;
+	 * same-value writes must not reset the capture converter or a
+	 * full-duplex recording never reaches steady state (KTD5). */
+	if (frames != audio_capture_frames) {
+		audio_capture_frames = frames;
+		zz_audio_capture_reset();
+	}
 }
 
 uint16_t audio_get_rx_status(void) {
@@ -1031,8 +1042,8 @@ void audio_set_rx_buffer(uint8_t* addr) {
 	audio_capture_ready = 0;
 	__asm__ __volatile__("dsb" ::: "memory");
 	audio_rx_buffer = addr;
+	zz_audio_capture_reset();
 }
-
 void audio_silence() {
 	memset(audio_tx_buffer, 0, AUDIO_TX_BUFFER_SIZE);
 	// TX buffers live in plain cacheable DDR and the formatter DMA does

@@ -33,10 +33,16 @@
 
 /*
  * Convert one 48 kHz S16LE stereo DMA period in place to output_frames
- * S16BE stereo frames. Invalid frame counts fall back to the native 960.
- * Returns the number of output frames written.
+ * S16BE stereo frames through the qualified converter kernel.
+ * Supported counts: 160/240/480/640/882/960 at 8/12/24/32/44.1/48 kHz;
+ * other values fall back to native 960 identity. Returns the number of
+ * output frames written.
  */
 uint16_t zz_audio_capture_convert(uint8_t *period, uint16_t output_frames);
+
+/* Reset the capture converter instance (record start, frame-count value
+ * change, or RX buffer reassignment -- never routine same-value writes). */
+void zz_audio_capture_reset(void);
 
 static inline uint8_t zz_audio_capture_can_publish(uint16_t interrupt_mask,
                                                    uint8_t dma_ready)

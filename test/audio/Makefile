@@ -37,10 +37,13 @@ $(CONVERT_TARGET): audio_convert_test.c $(SRC_DIR)/audio_convert.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 
 $(CAPTURE_TARGET): audio_capture_test.c $(SRC_DIR)/audio_capture.c \
-	$(SRC_DIR)/audio_capture.h
+	$(SRC_DIR)/audio_capture.h $(SRC_DIR)/audio_convert.c \
+	$(SRC_DIR)/audio_convert.h $(SRC_DIR)/audio_convert_tables.c \
+	$(SRC_DIR)/audio_convert_tables.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_capture_test.c \
-		$(SRC_DIR)/audio_capture.c
+		$(SRC_DIR)/audio_capture.c $(SRC_DIR)/audio_convert.c \
+		$(SRC_DIR)/audio_convert_tables.c -lm
 
 $(PROFILE_TARGET): audio_profile_test.c $(SRC_DIR)/adau.h \
 	$(SRC_DIR)/audio_dsp_gain.h \
