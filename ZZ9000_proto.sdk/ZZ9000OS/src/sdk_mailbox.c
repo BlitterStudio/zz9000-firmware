@@ -19,6 +19,7 @@
 #include "sdk_image_stream.h"
 #include "sdk_video_stream.h"
 #include "sdk_media_session.h"
+#include "audio_scene.h"
 #include "audio_playback_frontier.h"
 #include "audio_stream_drain.h"
 #include "audio_convert.h"
@@ -3855,9 +3856,23 @@ static void audio_pump_source_retire(uint32_t bytes)
 
 static void audio_pump_source_underrun(void)
 {
+	/* The played underrun feeds both the session-scoped status
+	 * counter and the output-direction meter accumulator (U3):
+	 * the register-fed stagnation detector feeds the same meter. */
+	audio_scene_meter_output_underrun();
 	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
 		sdk_media_session_audio_underrun(
 			g_audio_playback.session);
+}
+
+/* Map a pump source kind onto the ABI meter identity (U3, R8). */
+static uint32_t audio_pump_meter_identity(uint32_t source_kind)
+{
+	if (source_kind == AUDIO_PUMP_SOURCE_STREAM)
+		return SDK_AUDIO_METER_IDENTITY_SDK_STREAM;
+	if (source_kind == AUDIO_PUMP_SOURCE_MEDIA)
+		return SDK_AUDIO_METER_IDENTITY_MEDIA;
+	return SDK_AUDIO_METER_IDENTITY_UNKNOWN;
 }
 
 /* Returns the number of source PCM bytes staged into this DMA period, or zero
@@ -3993,6 +4008,8 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 	if (!audio_pump_source_snapshot(&source)) {
 		g_audio_playback.session = 0U;
 		g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
+		audio_scene_meter_output_identity(
+			SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 		return;
 	}
 
@@ -4092,6 +4109,8 @@ void sdk_mailbox_audio_playback_pump(void)
 	stream = find_audio_stream(g_audio_playback.session);
 	if (!stream) {
 		g_audio_playback.session = 0U;   /* closed under us */
+		audio_scene_meter_output_identity(
+			SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 		return;
 	}
 
@@ -4164,6 +4183,10 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session)
 	g_audio_playback.silence_run = 0U;
 	g_audio_playback.source_kind = source_kind;
 	g_audio_playback.paused = 0U;
+	/* Name the output source for metering (R8) before the session
+	 * goes live. */
+	audio_scene_meter_output_identity(
+		audio_pump_meter_identity(source_kind));
 	/* Publish the session LAST: the next audio IRQ may now stage PCM. */
 	__asm__ __volatile__("" ::: "memory");
 	g_audio_playback.session = session;
@@ -4174,6 +4197,8 @@ static void audio_playback_stop(void)
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
+	audio_scene_meter_output_identity(
+		SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 	audio_playback_clear_periods(
 		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
 	g_audio_playback.silence_run = 0U;
@@ -7673,6 +7698,8 @@ void sdk_mailbox_init(void)
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
+	audio_scene_meter_output_identity(
+		SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 	audio_playback_clear_periods(
 		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
 	g_audio_playback.refill_pending = 0U;

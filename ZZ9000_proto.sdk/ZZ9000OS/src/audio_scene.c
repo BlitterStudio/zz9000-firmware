@@ -1,12 +1,19 @@
 /*
- * Firmware-authoritative audio control plane arbiter (plan U2, KTD2).
+ * Firmware-authoritative audio control plane arbiter (plan U2, KTD2):
+ * scene state, split authority, gain staging, and -- since U3 -- the
+ * per-direction metering accumulators with coherent snapshots (KTD3).
  *
  * Holds the scene state, the operator baseline balance, per-owner
- * source trims, the enforced saturation boundary, and the gain-
- * reduction telemetry accumulator. Every master-chain write reaches
- * the ADAU1701 through this module's calls into the ax.h setters --
- * the legacy register path is gated by audio_scene_register_write_
- * blocked() in main.c (R2).
+ * source trims, the enforced saturation boundary, and the
+ * gain-reduction telemetry accumulator. Every master-chain write
+ * reaches the ADAU1701 through this module's calls into the ax.h
+ * setters -- the legacy register path is gated by
+ * audio_scene_register_write_blocked() in main.c (R2).
+ *
+ * Metering (U3, KTD3): per-direction single-writer volatile
+ * accumulators fed by the audio formatter ISRs through bounded
+ * per-period scans, and seqlock-framed coherent snapshots consumed by
+ * the meter-read dispatch. See the metering section below.
  *
  * Gain staging (R7) composes conservatively: the summed applied mixer
  * legs (operator baseline plus owner trims) multiplied by the scene's
@@ -29,6 +36,7 @@
 
 #include "audio_dsp_gain.h"
 #include "audio_scene.h"
+#include "sdk_mailbox.h"
 #include "ax.h"
 
 /* Operator baseline default: today's power-on mixer state written by
@@ -70,6 +78,7 @@ struct trim_state {
 };
 
 static struct trim_state trims[AUDIO_SCENE_OWNER_SLOTS];
+static uint8_t owner_participating[AUDIO_SCENE_OWNER_SLOTS];
 
 static int module_initialized;
 static int authority_claimed;
@@ -277,6 +286,275 @@ static int apply_active_scene(void)
 	return 0;
 }
 
+/* ---- metering accumulation and coherent snapshots (U3, KTD3) ---- */
+
+enum { METER_OUTPUT = 0, METER_CAPTURE = 1, METER_DIRECTIONS = 2 };
+
+struct audio_meter_dir {
+	/* Seqlock generation (R9): the direction's single ISR writer
+	 * bumps it around every update; the main-loop reader retries
+	 * while it changes. Writers and reader share core 0 (the audio
+	 * formatter IRQs never run concurrently with the mailbox
+	 * dispatch), so compiler barriers are sufficient. */
+	volatile uint32_t generation;
+	volatile uint32_t peak_hold_ch1; /* unsigned 16.16 (R8) */
+	volatile uint32_t peak_hold_ch2;
+	volatile uint32_t clip_count;    /* at-rail regions; saturates */
+	volatile uint32_t underrun_count;
+	volatile uint32_t overrun_count;
+	volatile uint32_t read_seq;      /* consume-on-read window mark */
+	/* Writer-private (ISR context only). */
+	uint32_t seen_read_seq;
+	uint32_t clip_open;
+	/* Main-loop context (pump bind/unbind) plus the pump ISR's
+	 * abrupt-unbind path: plain aligned stores, read only by the
+	 * snapshot. */
+	uint32_t identity;
+};
+
+static struct audio_meter_dir meters[METER_DIRECTIONS];
+
+/* Producer-stagnation state for register-fed playback: arm() writes
+ * come from the main loop (playback enable), tick() from the TX ISR. */
+static volatile uint32_t producer_armed;
+static volatile uint32_t producer_arm_seq;
+static volatile uint32_t producer_last_seq;
+
+static void meter_writer_begin(struct audio_meter_dir *m)
+{
+	m->generation++;
+	__asm__ __volatile__("" ::: "memory");
+}
+
+static void meter_writer_end(struct audio_meter_dir *m)
+{
+	__asm__ __volatile__("" ::: "memory");
+	m->generation++;
+}
+
+/* Saturating bump (sdk_media_session.c discipline): never wraps. */
+static void meter_saturating_add(volatile uint32_t *counter, uint32_t n)
+{
+	if (*counter > UINT32_MAX - n)
+		*counter = UINT32_MAX;
+	else
+		*counter += n;
+}
+
+static int meter_at_rail(int32_t sample)
+{
+	return sample == INT16_MAX || sample == INT16_MIN;
+}
+
+static void meter_fold_frame(int32_t left, int32_t right,
+	uint32_t *peak1, uint32_t *peak2, uint32_t *regions, int *open)
+{
+	uint32_t al = left < 0 ? (uint32_t)(-left) : (uint32_t)left;
+	uint32_t ar = right < 0 ? (uint32_t)(-right) : (uint32_t)right;
+
+	if (al > *peak1)
+		*peak1 = al;
+	if (ar > *peak2)
+		*peak2 = ar;
+	if (meter_at_rail(left) || meter_at_rail(right)) {
+		if (!*open) {
+			*open = 1;
+			(*regions)++;
+		}
+	} else {
+		*open = 0;
+	}
+}
+
+static void meter_feed_period(struct audio_meter_dir *m,
+	uint32_t peak1, uint32_t peak2, uint32_t regions, int clip_open)
+{
+	meter_writer_begin(m);
+	if (m->seen_read_seq != m->read_seq) {
+		/* A read marked the window boundary (R8): this period
+		 * opens a fresh peak-hold window. */
+		m->seen_read_seq = m->read_seq;
+		m->peak_hold_ch1 = peak1 << 1;
+		m->peak_hold_ch2 = peak2 << 1;
+	} else {
+		if ((peak1 << 1) > m->peak_hold_ch1)
+			m->peak_hold_ch1 = peak1 << 1;
+		if ((peak2 << 1) > m->peak_hold_ch2)
+			m->peak_hold_ch2 = peak2 << 1;
+	}
+	m->clip_open = clip_open ? 1U : 0U;
+	meter_saturating_add(&m->clip_count, regions);
+	meter_writer_end(m);
+}
+
+void audio_scene_meter_output_period(const int16_t *frames,
+	uint32_t frame_count)
+{
+	struct audio_meter_dir *m = &meters[METER_OUTPUT];
+	uint32_t peak1 = 0, peak2 = 0, regions = 0;
+	uint32_t i;
+	int open = m->clip_open != 0;
+
+	for (i = 0; i < frame_count; i++) {
+		meter_fold_frame(frames[i * 2U], frames[i * 2U + 1U],
+			&peak1, &peak2, &regions, &open);
+	}
+	meter_feed_period(m, peak1, peak2, regions, open);
+}
+
+void audio_scene_meter_capture_period(const uint8_t *period_be,
+	uint32_t frame_count)
+{
+	struct audio_meter_dir *m = &meters[METER_CAPTURE];
+	uint32_t peak1 = 0, peak2 = 0, regions = 0;
+	uint32_t i;
+	int open = m->clip_open != 0;
+
+	for (i = 0; i < frame_count; i++) {
+		const uint8_t *frame = &period_be[i * 4U];
+		int32_t left = (int16_t)(((uint16_t)frame[0] << 8) |
+		                         (uint16_t)frame[1]);
+		int32_t right = (int16_t)(((uint16_t)frame[2] << 8) |
+		                          (uint16_t)frame[3]);
+
+		meter_fold_frame(left, right, &peak1, &peak2, &regions,
+			&open);
+	}
+	meter_feed_period(m, peak1, peak2, regions, open);
+}
+
+void audio_scene_meter_output_underrun(void)
+{
+	struct audio_meter_dir *m = &meters[METER_OUTPUT];
+
+	meter_writer_begin(m);
+	meter_saturating_add(&m->underrun_count, 1U);
+	meter_writer_end(m);
+}
+
+void audio_scene_meter_capture_overrun(void)
+{
+	struct audio_meter_dir *m = &meters[METER_CAPTURE];
+
+	meter_writer_begin(m);
+	meter_saturating_add(&m->overrun_count, 1U);
+	meter_writer_end(m);
+}
+
+void audio_scene_meter_output_producer_arm(uint32_t producer_seq)
+{
+	producer_armed = 0;
+	producer_arm_seq = producer_seq;
+	producer_last_seq = producer_seq;
+}
+
+void audio_scene_meter_output_producer_tick(uint32_t producer_seq)
+{
+	if (!producer_armed) {
+		/* The pre-filled startup ring is not an underrun: wait
+		 * for the producer's first refill after playback was
+		 * enabled. */
+		if (producer_seq != producer_arm_seq) {
+			producer_armed = 1;
+			producer_last_seq = producer_seq;
+		}
+		return;
+	}
+	if (producer_seq == producer_last_seq)
+		audio_scene_meter_output_underrun();
+	producer_last_seq = producer_seq;
+}
+
+void audio_scene_meter_output_identity(uint32_t identity)
+{
+	meters[METER_OUTPUT].identity = identity;
+}
+
+static uint32_t meter_output_identity(void)
+{
+	uint32_t identity = meters[METER_OUTPUT].identity;
+
+	/* A participating AHI owner (it holds a submitted source trim)
+	 * is named while it drives the output; a control-plane session
+	 * binding outranks it, and register-fed legacy playback stays
+	 * legacy/unknown (R8). */
+	if (identity == SDK_AUDIO_METER_IDENTITY_UNKNOWN &&
+	    owner_participating[AUDIO_SCENE_OWNER_AHI])
+		return SDK_AUDIO_METER_IDENTITY_AHI;
+	return identity;
+}
+
+int audio_scene_meter_read(uint32_t direction, uint32_t flags,
+	struct audio_meter_snapshot *snapshot)
+{
+	struct audio_meter_dir *m;
+
+	if (snapshot == NULL)
+		return -1;
+	if (direction == SDK_AUDIO_METER_DIRECTION_OUTPUT)
+		m = &meters[METER_OUTPUT];
+	else if (direction == SDK_AUDIO_METER_DIRECTION_CAPTURE)
+		m = &meters[METER_CAPTURE];
+	else
+		return -1;
+
+	for (;;) {
+		uint32_t g1 = m->generation;
+
+		if ((g1 & 1U) == 0U) {
+			snapshot->direction = direction;
+			snapshot->generation = g1;
+			snapshot->peak_hold_ch1 = m->peak_hold_ch1;
+			snapshot->peak_hold_ch2 = m->peak_hold_ch2;
+			snapshot->clip_count = m->clip_count;
+			snapshot->underrun_count = m->underrun_count;
+			snapshot->overrun_count = m->overrun_count;
+			__asm__ __volatile__("" ::: "memory");
+			if (m->generation == g1)
+				break;
+		}
+	}
+	snapshot->identity =
+		(direction == SDK_AUDIO_METER_DIRECTION_OUTPUT)
+		? meter_output_identity()
+		: SDK_AUDIO_METER_IDENTITY_UNKNOWN;
+	snapshot->gain_reduction_events =
+		(direction == SDK_AUDIO_METER_DIRECTION_OUTPUT)
+		? gain_reduction_count : 0U;
+	if ((flags & SDK_AUDIO_METER_RESULT_HOLD_RESET) != 0U) {
+		/* Consume-on-read (R8): the ISR writer restarts the
+		 * peak-hold window at the next completed period -- the
+		 * read itself stays a pure observer of the hold. */
+		m->read_seq++;
+	}
+	return 0;
+}
+
+/* Reset the measured instance. Called from boot/warm-reset context
+ * with playback torn down: the ISRs are not feeding meters there. */
+static void meter_reset_all(void)
+{
+	int d;
+
+	for (d = 0; d < METER_DIRECTIONS; d++) {
+		struct audio_meter_dir *m = &meters[d];
+
+		m->generation = 0;
+		m->peak_hold_ch1 = 0;
+		m->peak_hold_ch2 = 0;
+		m->clip_count = 0;
+		m->underrun_count = 0;
+		m->overrun_count = 0;
+		m->read_seq = 0;
+		m->seen_read_seq = 0;
+		m->clip_open = 0;
+		m->identity = SDK_AUDIO_METER_IDENTITY_UNKNOWN;
+	}
+	producer_armed = 0;
+	producer_arm_seq = 0;
+	producer_last_seq = 0;
+}
+
 /* ---- public surface ---- */
 
 void audio_scene_init(void)
@@ -286,8 +564,10 @@ void audio_scene_init(void)
 	baseline_paula = BASELINE_DEFAULT_PAULA;
 	baseline_ax = BASELINE_DEFAULT_AX;
 	memset(trims, 0, sizeof(trims));
+	memset(owner_participating, 0, sizeof(owner_participating));
 	gain_reduction_count = 0;
 	have_last_gain_reduction = 0;
+	meter_reset_all();
 	module_initialized = 1;
 	authority_claimed = 1;
 }
@@ -301,6 +581,8 @@ int audio_scene_apply_after_dsp_init(void)
 	gain_reduction_count = 0;
 	have_last_gain_reduction = 0;
 	memset(trims, 0, sizeof(trims));
+	memset(owner_participating, 0, sizeof(owner_participating));
+	meter_reset_all();
 	return apply_active_scene();
 }
 
@@ -385,6 +667,7 @@ int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 
 	trims[owner].paula = paula;
 	trims[owner].ax = ax;
+	owner_participating[owner] = 1;
 	if (restage_mixer(&stage) != 0)
 		return -1;
 
@@ -407,6 +690,7 @@ void audio_scene_trim_release(uint8_t owner)
 		return;
 	trims[owner].paula = 0;
 	trims[owner].ax = 0;
+	owner_participating[owner] = 0;
 	restage_mixer(&stage);
 }
 

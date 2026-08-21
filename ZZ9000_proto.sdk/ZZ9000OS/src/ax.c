@@ -17,6 +17,7 @@
 #include "ax.h"
 #include "audio_capture.h"
 #include "audio_convert.h"
+#include "audio_scene.h"
 #include "audio_playback_rate.h"
 #include "audio_dsp_gain.h"
 #include "memorymap.h"
@@ -58,6 +59,13 @@ static volatile uint8_t audio_codec_is_present = 0;
 static volatile uint8_t audio_capture_ready = 0;
 static volatile uint8_t audio_rx_last_completed_period =
     AUDIO_NUM_PERIODS - 1U;
+
+/* U3 metering: register-fed (legacy AHI) producer heartbeat -- one
+ * audio_swab() call per refilled TX period -- and the last TX period
+ * whose peak was scanned (-1: not tracking, e.g. before the first
+ * init or after a buffer reassignment). */
+static volatile uint32_t audio_tx_producer_seq = 0;
+static int8_t audio_tx_meter_last_period = -1;
 
 int adau_write16(u8 i2c_addr, u16 addr, u16 value) {
 	XIicPs* iic = &Iic2;
@@ -793,6 +801,8 @@ int isra_count = 0;
 
 // TX-fill half of the SDK playback pump (sdk_mailbox.c); ISR-safe.
 extern void sdk_mailbox_audio_playback_pump_isr(void);
+// Nonzero while a pump session owns the formatter TX (sdk_mailbox.c).
+extern int sdk_mailbox_audio_playback_active(void);
 
 // audio formatter interrupt, triggered whenever a period is completed
 void isr_audio(void *dummy) {
@@ -825,6 +835,50 @@ void isr_audio(void *dummy) {
 	// network load previously let the DMA overrun the fill frontier
 	// and glitch MP3 playback. No-op when no session is bound.
 	sdk_mailbox_audio_playback_pump_isr();
+
+	/* U3 metering: bounded per-period peak scan (960 frames) of
+	 * every TX period completed since the previous IRQ -- normally
+	 * exactly one, bounded by the ring when IRQs were delayed. The
+	 * scan runs over the buffer the formatter DMA was initialized
+	 * with, so it measures what actually played regardless of
+	 * producer (legacy window writes or pump fills). Skipped while
+	 * no producer owns the output. The ISR cost of this loop must
+	 * be measured on hardware before the design is final (plan
+	 * risk; fallback is producer-side peak accumulation). */
+	if (audio_inited_tx_buffer != NULL &&
+	    (audio_legacy_output_active() ||
+	     sdk_mailbox_audio_playback_active())) {
+		if (audio_tx_meter_last_period < 0) {
+			audio_tx_meter_last_period = (int8_t)completed_period;
+		} else {
+			uint32_t distance = zz_audio_capture_period_distance(
+			    completed_period,
+			    (uint8_t)audio_tx_meter_last_period);
+
+			while (distance-- > 0U) {
+				audio_tx_meter_last_period = (int8_t)(
+				    (audio_tx_meter_last_period + 1) %
+				    AUDIO_NUM_PERIODS);
+				audio_scene_meter_output_period(
+				    (const int16_t *)
+				    (audio_inited_tx_buffer +
+				     (uint32_t)audio_tx_meter_last_period *
+				     AUDIO_BYTES_PER_PERIOD),
+				    AUDIO_BYTES_PER_PERIOD / 4U);
+			}
+		}
+	} else {
+		audio_tx_meter_last_period = -1;
+	}
+
+	/* Register-fed (legacy AHI) playback underruns: the producer
+	 * advances audio_tx_producer_seq once per refilled period
+	 * (audio_swab); a completed period with an unchanged sequence
+	 * played unfilled audio. */
+	if (audio_legacy_output_active() &&
+	    !sdk_mailbox_audio_playback_active())
+		audio_scene_meter_output_producer_tick(
+			audio_tx_producer_seq);
 
 	if (audio_interrupt_mask & ZZ_AUDIO_CONFIG_PLAY) {
 		amiga_interrupt_set(AMIGA_INTERRUPT_AUDIO);
@@ -860,8 +914,13 @@ void isr_audio_rx(void *dummy) {
 	/* IOC means at least one period completed. Equal cursors mean the CPU
 	 * was delayed for at least one full ring. Keep only seven periods: the
 	 * eighth slot is already the formatter's active write target. */
-	if (completed_count == 0U)
+	if (completed_count == 0U) {
 		completed_count = ZZ_AUDIO_CAPTURE_RESIDENT_PERIODS;
+		/* A full ring elapsed before the CPU acknowledged: the
+		 * oldest periods were overwritten before publication --
+		 * one capture overrun (U3 metering). */
+		audio_scene_meter_capture_overrun();
+	}
 
 	if (israrx_count++>1000) {
 		israrx_count = 0;
@@ -890,6 +949,11 @@ void isr_audio_rx(void *dummy) {
 			                          AUDIO_BYTES_PER_PERIOD);
 			output_frames = zz_audio_capture_convert(
 			    period, audio_capture_frames);
+			/* U3 metering: bounded peak/clip scan of the
+			 * published (converted S16BE) period, cache-warm
+			 * before the write-back flush. */
+			audio_scene_meter_capture_period(
+			    period, output_frames);
 			Xil_DCacheFlushRange((INTPTR)period, output_frames * 4U);
 			__asm__ __volatile__("dsb" ::: "memory");
 
@@ -938,8 +1002,14 @@ void audio_set_interrupt_mask(uint16_t mask) {
 		amiga_interrupt_clear(AMIGA_INTERRUPT_AUDIO);
 	}
 
-	if ((old_mask ^ mask) & ZZ_AUDIO_CONFIG_PLAY)
+	if ((old_mask ^ mask) & ZZ_AUDIO_CONFIG_PLAY) {
 		audio_silence();
+		/* Re-arm the producer-stagnation underrun detector for
+		 * the playback transition (U3 metering): the producer's
+		 * first refill after this enables stagnation counting. */
+		audio_scene_meter_output_producer_arm(
+			audio_tx_producer_seq);
+	}
 }
 
 void audio_set_capture_frames(uint16_t frames) {
@@ -984,6 +1054,10 @@ int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap) {
 	int audio_buffer_collision = 0;
 	uint16_t* data = (uint16_t*)(audio_tx_buffer + offset);
 	uint32_t audio_freq = zz_audio_playback_rate(audio_buf_samples);
+
+	/* U3 metering: the register-fed producer's heartbeat -- one
+	 * call per refilled TX period. */
+	audio_tx_producer_seq++;
 
 	//printf("[audio:%d] play: %d +%lu\n", byteswap, audio_freq, offset);
 
@@ -1067,6 +1141,10 @@ void audio_set_tx_buffer(uint8_t* addr) {
 	printf("[audio] set tx buffer: %p\n", addr);
 	audio_tx_buffer = addr;
 	reset_resampling();
+	/* U3 metering: a buffer reassignment breaks TX period
+	 * continuity; resume peak scanning at the next completed
+	 * period instead of scanning stale ring contents. */
+	audio_tx_meter_last_period = -1;
 }
 
 void audio_set_rx_buffer(uint8_t* addr) {

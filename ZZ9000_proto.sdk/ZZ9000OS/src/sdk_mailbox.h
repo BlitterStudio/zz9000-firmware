@@ -10,6 +10,7 @@
 #define SDK_MAILBOX_H
 
 #include <stdint.h>
+#include "audio_scene.h"
 #include "scheduler.h"
 
 #define SDK_MAILBOX_MAGIC              0x5a5a394bUL
@@ -562,6 +563,42 @@ typedef char SDKAudioControlStateGetPayload_must_be_48_bytes[
 	(sizeof(struct SDKAudioControlStateGetPayload) == 48U) ? 1 : -1];
 typedef char SDKAudioControlStateResultPayload_must_be_48_bytes[
 	(sizeof(struct SDKAudioControlStateResultPayload) == 48U) ? 1 : -1];
+
+/*
+ * Pack one framed meter snapshot (U3, KTD3). The whole state fits a
+ * single frame, so frame is 1 and frame_count is 1; all frames of a
+ * logical read carry the snapshot's generation so a client can detect
+ * a torn multi-frame read. flags are the RESULT flags: pass
+ * SDK_AUDIO_METER_RESULT_HOLD_RESET when the serving read consumed
+ * the peak-hold window. Fields are big-endian words, mirroring the
+ * SDK ZZ9KAudioMeterResultPayload layout byte-for-byte.
+ */
+static inline void sdk_meter_put_word(volatile uint8_t *dst, uint32_t v)
+{
+	dst[0] = (uint8_t)(v >> 24);
+	dst[1] = (uint8_t)(v >> 16);
+	dst[2] = (uint8_t)(v >> 8);
+	dst[3] = (uint8_t)v;
+}
+
+static inline void sdk_audio_meter_result_pack(
+	volatile struct SDKAudioMeterResultPayload *out,
+	const struct audio_meter_snapshot *snapshot, uint32_t flags)
+{
+	sdk_meter_put_word(out->direction, snapshot->direction);
+	sdk_meter_put_word(out->generation, snapshot->generation);
+	sdk_meter_put_word(out->frame, 1U);
+	sdk_meter_put_word(out->frame_count, 1U);
+	sdk_meter_put_word(out->flags, flags);
+	sdk_meter_put_word(out->identity, snapshot->identity);
+	sdk_meter_put_word(out->clip_count, snapshot->clip_count);
+	sdk_meter_put_word(out->underrun_count, snapshot->underrun_count);
+	sdk_meter_put_word(out->overrun_count, snapshot->overrun_count);
+	sdk_meter_put_word(out->gain_reduction_events,
+		snapshot->gain_reduction_events);
+	sdk_meter_put_word(out->peak_hold_ch1, snapshot->peak_hold_ch1);
+	sdk_meter_put_word(out->peak_hold_ch2, snapshot->peak_hold_ch2);
+}
 
 #define SDK_MAX_SHARED_BUFFERS         32U
 #define SDK_MAX_SURFACES               16U

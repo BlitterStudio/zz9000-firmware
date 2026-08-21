@@ -126,4 +126,84 @@ int audio_scene_authority_active(void);
 uint32_t audio_scene_gain_reduction_events(void);
 const struct audio_scene_gain_event *audio_scene_last_gain_reduction(void);
 
+/* ---- metering accumulation and coherent snapshots (U3, KTD3) ---- */
+
+/*
+ * One coherent per-direction meter reading (R8/R9). Peaks are unsigned
+ * 16.16 (0x00010000 = digital full scale); counters saturate, never
+ * wrap. generation comes from the firmware-side seqlock: all frames of
+ * one logical read carry the same generation.
+ */
+struct audio_meter_snapshot {
+	uint32_t direction;
+	uint32_t generation;
+	uint32_t identity;
+	uint32_t clip_count;
+	uint32_t underrun_count;
+	uint32_t overrun_count;
+	uint32_t gain_reduction_events;
+	uint32_t peak_hold_ch1;
+	uint32_t peak_hold_ch2;
+};
+
+/*
+ * Bounded per-period peak/clip scans, called from the audio formatter
+ * ISRs (single-writer context per direction; R9 reads never block
+ * these). frame_count is exactly the completed period's frame count
+ * (AUDIO_BYTES_PER_PERIOD / 4): the scan is bounded by construction,
+ * never a per-sample conversion. Clips are at-rail runs: the counter
+ * increments once per saturating region, not per sample, which also
+ * surfaces the qualified converter's zz_audio_convert_clips events
+ * (saturating writes are exactly the at-rail samples in the scanned
+ * bytes) for every reachable instance -- pump, legacy playback, and
+ * capture -- without double counting. Capture periods are the
+ * published S16BE bytes (what zz_audio_capture_convert wrote back).
+ */
+void audio_scene_meter_output_period(const int16_t *frames,
+	uint32_t frame_count);
+void audio_scene_meter_capture_period(const uint8_t *period_be,
+	uint32_t frame_count);
+
+/* Event counters (saturating): output underruns feed from both the
+ * session pump path (sdk_mailbox audio_pump_source_underrun) and the
+ * register-fed producer-stagnation detector below; capture overruns
+ * feed from the RX ISR's full-ring-wrap case. */
+void audio_scene_meter_output_underrun(void);
+void audio_scene_meter_capture_overrun(void);
+
+/*
+ * Register-fed (legacy AHI) playback underrun detection: the producer
+ * advances a sequence once per refilled period (audio_swab); arm() is
+ * called when playback is enabled, tick() from every TX DMA-complete
+ * path with the current producer sequence. A completed period whose
+ * producer sequence is unchanged since the previous completed period
+ * played unfilled audio: one underrun. Startup pre-fills never count
+ * (the producer must advance once after arming before stagnation
+ * counts).
+ */
+void audio_scene_meter_output_producer_arm(uint32_t producer_seq);
+void audio_scene_meter_output_producer_tick(uint32_t producer_seq);
+
+/*
+ * Active output source identity (R8), written by the control-plane
+ * session owner (sdk_mailbox pump bind/unbind): one of
+ * SDK_AUDIO_METER_IDENTITY_*. Register-fed legacy playback stays
+ * METER_IDENTITY_UNKNOWN; a participating AHI owner (one holding a
+ * submitted trim) is named while no session owns the output.
+ */
+void audio_scene_meter_output_identity(uint32_t identity);
+
+/*
+ * Coherent snapshot read (R9): retries the copy while the direction's
+ * single ISR writer updates underneath it, so a returned snapshot
+ * never tears. flags follows the ABI request: passing
+ * SDK_AUDIO_METER_RESULT_HOLD_RESET consumes the peak-hold window
+ * (the next completed period opens a fresh hold -- R8
+ * peak-hold-since-last-read); without it the read peeks. Returns 0 on
+ * success, -1 for an unknown direction or NULL snapshot. The read
+ * never mutates audio-path state.
+ */
+int audio_scene_meter_read(uint32_t direction, uint32_t flags,
+	struct audio_meter_snapshot *snapshot);
+
 #endif /* AUDIO_SCENE_H */
