@@ -3,14 +3,17 @@ CFLAGS ?= -O2 -g -Wall -Wextra -Werror
 
 SRC_DIR := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 BUILD_DIR := build
+CONVERT_TARGET := $(BUILD_DIR)/audio_convert_test
 CAPTURE_TARGET := $(BUILD_DIR)/audio_capture_test
 PROFILE_TARGET := $(BUILD_DIR)/audio_profile_test
 PLAYBACK_TARGET := $(BUILD_DIR)/audio_playback_frontier_test
+RATE_TARGET := $(BUILD_DIR)/audio_playback_rate_test
 DRAIN_TARGET := $(BUILD_DIR)/audio_stream_drain_test
 MP3_PROBE_TARGET := $(BUILD_DIR)/mp3_frame_probe_test
-CONVERT_TARGET := $(BUILD_DIR)/audio_convert_test
-TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) $(PLAYBACK_TARGET) \
-	$(DRAIN_TARGET) $(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET)
+MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
+TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
+	$(PLAYBACK_TARGET) $(RATE_TARGET) $(DRAIN_TARGET) \
+	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET)
 
 CPPFLAGS += -I$(SRC_DIR)
 
@@ -19,6 +22,7 @@ CPPFLAGS += -I$(SRC_DIR)
 test: $(TARGETS)
 	$(CONVERT_TARGET)
 	$(CAPTURE_TARGET)
+	$(RATE_TARGET)
 	$(PROFILE_TARGET)
 	$(PLAYBACK_TARGET)
 	$(DRAIN_TARGET)
@@ -50,6 +54,13 @@ $(PLAYBACK_TARGET): audio_playback_frontier_test.c \
 	$(SRC_DIR)/audio_playback_frontier.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_playback_frontier_test.c
+
+$(RATE_TARGET): audio_playback_rate_test.c $(SRC_DIR)/audio_playback_rate.h \
+	$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert.h \
+	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_playback_rate_test.c \
+		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 
 $(DRAIN_TARGET): audio_stream_drain_test.c \
 	$(SRC_DIR)/audio_stream_drain.h
