@@ -1023,7 +1023,17 @@ int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap) {
 				audio_buf_samples,
 				AUDIO_BYTES_PER_PERIOD / 4);
 		}
-	} else if (audio_buf_samples == 0U) {
+	} else if (audio_freq == 48000U) {
+		/* 48 kHz is a byte-identical bypass, but a converted-rate
+		 * session that passes through it must not resume with
+		 * history from before the detour: record the transition
+		 * and retire the converter so returning to a converted
+		 * rate re-initializes it (44.1 -> 48 -> 44.1 kHz). */
+		if (audio_playback_last_rate != 48000U) {
+			audio_playback_last_rate = 48000U;
+			zz_audio_convert_reset(&audio_playback_convert);
+		}
+	} else {
 		/* A zero frame count is a client error path; silence the
 		 * period instead of converting stale bytes. */
 		memset(audio_tx_buffer + offset, 0,

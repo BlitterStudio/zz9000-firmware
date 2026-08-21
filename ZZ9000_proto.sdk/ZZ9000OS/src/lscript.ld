@@ -44,8 +44,8 @@ SECTIONS
 .text : {
    KEEP (*(.vectors))
    KEEP (*(.boot))
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o) .text)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o) .text.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o) .text)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o) .text.*)
    *(.gnu.linkonce.t.*)
    *(.plt)
    *(.gnu_warning)
@@ -67,8 +67,8 @@ SECTIONS
 
 .rodata : {
    __rodata_start = .;
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o) .rodata)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o) .rodata.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o) .rodata)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o) .rodata.*)
    *(.gnu.linkonce.r.*)
    __rodata_end = .;
 } > ps7_ddr_0
@@ -277,6 +277,21 @@ ASSERT(ORIGIN(ps7_ddr_hi) >= __z3_audio_scratch_end,
    *sdk_video_yuy2.o(.rodata.*)
    . = ALIGN(16);
    __sdk_codec_text_end = .;
+} > ps7_ddr_hi
+
+/* Qualified audio conversion coefficient tables (~73 KB): relocated to
+ * high DDR so the low firmware sections stay clear of the framebuffer
+ * window. Read-only, cacheable reads from both audio ISRs -- same
+ * treatment as the codec objects above. */
+.audio_tables : {
+   . = ALIGN(16);
+   __audio_tables_start = .;
+   *audio_convert_tables.o(.text)
+   *audio_convert_tables.o(.text.*)
+   *audio_convert_tables.o(.rodata)
+   *audio_convert_tables.o(.rodata.*)
+   . = ALIGN(16);
+   __audio_tables_end = .;
 } > ps7_ddr_hi
 
 .bss (NOLOAD) : {

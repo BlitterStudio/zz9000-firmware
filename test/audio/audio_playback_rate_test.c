@@ -76,10 +76,43 @@ static int test_per_period_geometry_is_exact(void)
 	return failures == 0;
 }
 
+static int test_bypass_transition_rearms(void)
+{
+	/* 44.1 -> 48 (bypass) -> 44.1: the site resets the converter on
+	 * the 48-kHz transition, so the return must convert identically
+	 * to a fresh instance (no stale history from before the bypass).
+	 * The site rule: entering the bypass retires the converter. */
+	struct zz_audio_convert a, fresh;
+	int16_t in1[882U * 2];
+	int16_t out_return[960U * 2];
+	int16_t out_fresh[960U * 2];
+	uint32_t i;
+
+	for (i = 0U; i < 882U * 2U; i++)
+		in1[i] = (int16_t)(i * 29U % 9000U - 4500);
+
+	/* Session at 44.1 kHz converts a few periods... */
+	zz_audio_convert_init(&a, 44100U, 48000U);
+	for (i = 0U; i < 5U; i++)
+		zz_audio_convert_stream(&a, in1, out_return, 882U, 960U);
+	/* ...then the bypass: the site resets and re-inits on return. */
+	zz_audio_convert_reset(&a);
+	zz_audio_convert_init(&a, 44100U, 48000U);
+	zz_audio_convert_stream(&a, in1, out_return, 882U, 960U);
+
+	zz_audio_convert_init(&fresh, 44100U, 48000U);
+	zz_audio_convert_stream(&fresh, in1, out_fresh, 882U, 960U);
+
+	check(memcmp(out_return, out_fresh, 960U * 4U) == 0,
+	      "bypass transition re-arms converter");
+	return failures == 0;
+}
+
 int main(void)
 {
 	test_rate_derivation();
 	test_per_period_geometry_is_exact();
+	test_bypass_transition_rearms();
 
 	if (failures == 0) {
 		printf("audio_playback_rate_test: all tests passed\n");
