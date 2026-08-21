@@ -576,13 +576,8 @@ static int test_reset_semantics(void)
 		struct zz_audio_convert fresh;
 		int16_t out2[960U * 2U];
 
-		zz_audio_convert_reset(&fresh);
 		zz_audio_convert_stream(&ctx, in_buf, out2, 480U, 960U);
-		/* fresh was never init'd with a ratio: init it properly. */
 		zz_audio_convert_init(&fresh, 24000U, 48000U);
-		zz_audio_convert_stream(&fresh, in_buf, ref_buf, 480U, 960U);
-		zz_audio_convert_reset(&fresh);
-		memset(ref_buf, 0, sizeof(ref_buf));
 		zz_audio_convert_stream(&fresh, in_buf, ref_buf, 480U, 960U);
 		check(memcmp(out2, ref_buf, 960U * 4U) == 0,
 		      "reset equals fresh", NULL);

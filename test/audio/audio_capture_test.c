@@ -202,7 +202,6 @@ static int test_reset_semantics(void)
 	 * must produce identical bytes (reset is one atomic event). */
 	uint8_t a[PERIOD_BYTES];
 	uint8_t b[PERIOD_BYTES];
-	uint32_t frame;
 
 	fill_ramp();
 	memcpy(a, period, PERIOD_BYTES);
@@ -221,7 +220,6 @@ static int test_reset_semantics(void)
 	zz_audio_capture_convert(b, 882U);
 	if (memcmp(a, b, 882U * 4U) == 0)
 		return 1;
-	(void)frame;
 	return 0;
 }
 
