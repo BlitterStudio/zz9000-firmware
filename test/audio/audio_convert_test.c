@@ -167,6 +167,41 @@ static int test_dc(void)
 	return failures == 0;
 }
 
+static double worst_passband_ripple(
+    const struct zz_audio_convert_ratio *ratio, uint32_t in_rate)
+{
+	double worst = 0.0;
+	uint32_t phase, bin;
+
+	for (phase = 0U; phase < ratio->phases; phase++) {
+		for (bin = 1U; bin <= 180U; bin++) {
+			double f = (double)bin * (double)in_rate / 400.0;
+			double re = 0.0, im = 0.0;
+			double dev;
+			uint32_t k;
+
+			for (k = 0U; k < ratio->taps; k++) {
+				double tau = (double)k +
+				    (double)phase /
+				        (double)ratio->phases -
+				    (double)(ratio->taps - 1U) / 2.0;
+
+				re += (double)ratio->coefs[phase][k] *
+				      cos(2.0 * M_PI * f / (double)in_rate *
+				          tau);
+				im += (double)ratio->coefs[phase][k] *
+				      sin(2.0 * M_PI * f / (double)in_rate *
+				          tau);
+			}
+			dev = fabs(20.0 * log10(sqrt(re * re + im * im) /
+			                        16384.0 + 1e-30));
+			if (dev > worst)
+				worst = dev;
+		}
+	}
+	return worst;
+}
+
 static int test_table_response(void)
 {
 	/* Measure the actual quantized tables: per-phase frequency
@@ -180,52 +215,40 @@ static int test_table_response(void)
 		double worst_pb = 0.0;   /* max |ripple| in dB */
 		double worst_sb = -999.0; /* max stop-band level in dB */
 		double lo = (double)rates[r];
-		double fp = 0.45 * lo;
-		/* The transition ends at input Nyquist; the top of the
-		 * band measures the transition tail. Full stop-band and
-		 * image/alias rejection through the assembled core are
-		 * proven by the alias, image, and THD tests below. */
-		double fst = 0.495 * lo;
 		char detail[96];
 
+		(void)phase;
+		(void)bin;
 		zz_audio_convert_init(&ctx, rates[r], 48000U);
 		ratio = ctx.ratio;
-		for (phase = 0U; phase < ratio->phases; phase++) {
-			for (bin = 1U; bin <= 199U; bin++) {
-				double f = (double)bin * lo / 400.0;
-				double re = 0.0, im = 0.0;
-				double mag_db;
-				uint32_t k;
+		worst_pb = worst_passband_ripple(ratio, rates[r]);
+		worst_sb = -999.0;
+		{
+			/* Top-of-band transition tail. */
+			struct zz_audio_convert c2;
+			const struct zz_audio_convert_ratio *r2;
+			double f = 0.4975 * lo;
+			double re = 0.0, im = 0.0;
+			uint32_t ph, k;
 
-				/* c[k] addresses input position
-				 * (k + phase/phases - center): evaluate
-				 * H(f) on that grid. */
-				for (k = 0U; k < ratio->taps; k++) {
+			zz_audio_convert_init(&c2, rates[r], 48000U);
+			r2 = c2.ratio;
+			for (ph = 0U; ph < r2->phases; ph++) {
+				for (k = 0U; k < r2->taps; k++) {
 					double tau = (double)k +
-					    (double)phase /
-					        (double)ratio->phases -
-					    (double)(ratio->taps - 1U) / 2.0;
+					    (double)ph / (double)r2->phases -
+					    (double)(r2->taps - 1U) / 2.0;
 					double w = 2.0 * M_PI * f / lo * tau;
 
-					re += (double)ratio->coefs[phase][k] *
+					re += (double)r2->coefs[ph][k] *
 					      cos(w);
-					im += (double)ratio->coefs[phase][k] *
+					im += (double)r2->coefs[ph][k] *
 					      sin(w);
 				}
-				/* Q14 unity-DC: magnitude 16384 = 0 dB. */
-				mag_db = 20.0 *
-				    log10(sqrt(re * re + im * im) / 16384.0 +
-				          1e-30);
-				if (f <= fp) {
-					double dev = fabs(mag_db);
-
-					if (dev > worst_pb)
-						worst_pb = dev;
-				} else if (f >= fst && f <= lo / 2.0 &&
-				           mag_db > worst_sb) {
-					worst_sb = mag_db;
-				}
 			}
+			worst_sb = 20.0 * log10(sqrt(re * re + im * im) /
+			                        (16384.0 * (double)r2->phases) +
+			                        1e-30);
 		}
 		snprintf(detail, sizeof(detail),
 		         "%lu Hz: ripple %.3f dB, stopband %.1f dB",
@@ -609,36 +632,9 @@ static void report(void)
 
 		zz_audio_convert_init(&ctx, rates[r], 48000U);
 		ratio = ctx.ratio;
-		for (phase = 0U; phase < ratio->phases; phase++) {
-			for (bin = 1U; bin <= 180U; bin++) {
-				double f = (double)bin * (double)rates[r] /
-				           400.0;
-				double re = 0.0, im = 0.0;
-				uint32_t k;
-
-				for (k = 0U; k < ratio->taps; k++) {
-					double tau = (double)k +
-					    (double)phase /
-					        (double)ratio->phases -
-					    (double)(ratio->taps - 1U) / 2.0;
-
-					re += (double)ratio->coefs[phase][k] *
-					      cos(2.0 * M_PI * f /
-					          (double)rates[r] * tau);
-					im += (double)ratio->coefs[phase][k] *
-					      sin(2.0 * M_PI * f /
-					          (double)rates[r] * tau);
-				}
-				{
-					double dev = fabs(20.0 * log10(
-					    sqrt(re * re + im * im) / 16384.0 +
-					    1e-30));
-
-					if (dev > worst_pb)
-						worst_pb = dev;
-				}
-			}
-		}
+		worst_pb = worst_passband_ripple(ratio, rates[r]);
+		(void)phase;
+		(void)bin;
 		{
 			double macs = (double)ratio->taps *
 			    (ratio->phases > 1U ? 960.0 : 960.0) * 2.0;
