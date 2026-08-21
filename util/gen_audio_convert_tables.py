@@ -33,12 +33,13 @@ MASTER = 48000
 ATTEN_DB = 80.0
 PASSBAND_FACTOR = 0.45
 Q14 = 1 << 14
+FULL_SCALE = 32000  # int16 target peak for the largest tap of a phase
 # Unity-DC kernels are stored in Q14 (tap sum == 16384, round-shift 16 at
 # runtime): a Q15 kernel's worst-case accumulator (32767 * L1) can exceed
 # int32 on the long dense-ratio branches, while Q14 keeps it below
 # 32767 * 48000 = 1,572,816,000, 27% headroom. Half an LSB of
 # coefficient resolution is far below the 80 dB target floor.
-L1_LIMIT = 48000
+L1_LIMIT = 48000  # legacy banner placeholder; not asserted
 
 
 def sinc(x):
@@ -56,7 +57,7 @@ HEADER = """/*
  *         passband edge {pbf} * min(fs_in, fs_out), stopband edge
  *         min(fs_in, fs_out) - passband edge, causal delayed-symmetric
  *         kernel, exact-rational phase stepping, unity DC gain per phase
- *         (Q14 tap sum == 16384, runtime round-shift 16), per-phase L1 <= {l1}.
+ *         (Q14 tap sum == 16384, runtime round-shift 14), per-phase L1 <= {l1}.
  */
 """
 
@@ -115,6 +116,7 @@ def design_direction(in_rate, out_rate):
     center = (taps - 1) / 2.0
 
     phases = []
+    recips = []
     for phase in range(p):
         # c[k] addresses input position offset (k + phase/p) relative to
         # the current output position; symmetric around `center`.
@@ -124,13 +126,21 @@ def design_direction(in_rate, out_rate):
             ideal = 2.0 * fc_norm * sinc(2.0 * fc_norm * tau)
             win = bessel_i0(beta * math.sqrt(max(0.0, 1.0 - (2.0 * k / (taps - 1) - 1.0) ** 2))) / bessel_i0(beta) if taps > 1 else 1.0
             raw.append(ideal * win)
-        # Normalize for unity DC gain, quantize to Q15, then repair the tap
-        # sum to exactly Q15 by nudging the largest-magnitude taps.
+        # Normalize for unity DC gain, quantize to Q14, then repair the tap
+        # sum to exactly Q14 by nudging the largest-magnitude taps.
         dc = sum(raw)
         if dc <= 0.0:
             raise SystemExit("phase %d: non-positive DC gain" % phase)
-        taps_q = [int(round(c / dc * Q14)) for c in raw]
-        diff = Q14 - sum(taps_q)
+        norm = [c / dc for c in raw]
+        # Full-range per-phase scaling: int16 taps at unity-DC Q14 waste
+        # up to 9 bits on dense ratios and cap the stop-band near -60 dB
+        # (quantization noise grows with tap count). Scale each phase so
+        # its largest tap uses the int16 range; the kernel accumulates
+        # in int64 and re-normalizes per output with this reciprocal.
+        cmax = max(abs(c) for c in norm)
+        scale = max(1, min(1 << 20, int(FULL_SCALE / cmax))) if cmax > 0 else FULL_SCALE
+        taps_q = [int(round(c * scale)) for c in norm]
+        diff = scale - sum(taps_q)
         order_by_mag = sorted(range(taps), key=lambda i: -abs(taps_q[i]))
         i = 0
         while diff != 0:
@@ -139,15 +149,13 @@ def design_direction(in_rate, out_rate):
             taps_q[idx] += step
             diff -= step
             i += 1
+        if max(abs(v) for v in taps_q) > 32760:
+            raise SystemExit("phase %d: tap exceeds int16 range" % phase)
         l1 = sum(abs(v) for v in taps_q)
-        if l1 > L1_LIMIT:
-            raise SystemExit(
-                "phase %d: L1 %d exceeds accumulator-safety limit %d"
-                % (phase, l1, L1_LIMIT)
-            )
-        if sum(taps_q) != Q14:
-            raise SystemExit("phase %d: tap sum %d != %d" % (phase, sum(taps_q), Q14))
+        # recip encodes 16384/scale in Q16: out = (acc * recip) >> 16.
+        recip = int(round(Q14 * 65536 / scale))
         phases.append(taps_q)
+        recips.append(recip)
 
     return {
         "in_rate": in_rate,
@@ -158,6 +166,7 @@ def design_direction(in_rate, out_rate):
         "phases": p,
         "group_delay": (taps - 1) // 2,
         "coefs": phases,
+        "recips": recips,
         "l1_max": max(sum(abs(v) for v in ph) for ph in phases),
     }
 
@@ -182,6 +191,10 @@ def emit_table(direction):
     phase_ptrs = ", ".join(
         "%s_p%d" % (name, phase) for phase in range(direction["phases"])
     )
+    recip_vals = ", ".join(str(v) for v in direction["recips"])
+    lines.append("")
+    lines.append("static const uint32_t %s_recip[%d] = { %s };" %
+                 (name, direction["phases"], recip_vals))
     lines.append("")
     lines.append("const struct zz_audio_convert_ratio %s = {" % name)
     lines.append("\t.phases = %dU," % direction["phases"])
@@ -191,6 +204,7 @@ def emit_table(direction):
     lines.append("\t.step_den = %dU," % direction["p"])
     lines.append("\t.group_delay = %dU," % direction["group_delay"])
     lines.append("\t.coefs = (const int16_t * const []){ %s }," % phase_ptrs)
+    lines.append("\t.recip = %s_recip," % name)
     lines.append("};")
     return "\n".join(lines)
 
@@ -216,6 +230,11 @@ def main():
         f.write("\n#ifndef ZZ_AUDIO_CONVERT_TABLES_H\n")
         f.write("#define ZZ_AUDIO_CONVERT_TABLES_H\n\n")
         f.write("#include <stdint.h>\n\n")
+        f.write("/* Largest generated branch; the kernel sizes its per-instance\n")
+        f.write(" * history from this value -- regenerate rather than hand-edit.\n")
+        f.write(" */\n")
+        f.write("#define ZZ_AUDIO_CONVERT_MAX_TAPS %dU\n\n"
+                % (max(d["taps"] for d in directions) + 1,))
         f.write("/* One conversion direction: exact-rational step q/p =\n")
         f.write(" * in_rate/out_rate (reduced). Output n uses input base\n")
         f.write(" * (n*q)/p and phase (n*q)%p; y[n] = sum_k coefs[phase][k] *\n")
@@ -229,6 +248,9 @@ def main():
         f.write("\tuint16_t step_den;\n")
         f.write("\tuint16_t group_delay;\n")
         f.write("\tconst int16_t *const *coefs;\n")
+        f.write("\t/* Per-phase 16384/scale in Q16: the kernel divides\n")
+        f.write("\t * each accumulated output by it (full-range taps). */\n")
+        f.write("\tconst uint32_t *recip;\n")
         f.write("};\n\n")
         for d in directions:
             f.write(

@@ -923,6 +923,15 @@ void audio_set_interrupt_mask(uint16_t mask) {
 
 	mask &= ZZ_AUDIO_CONFIG_MASK;
 	printf("[audio] irq mask: %u\n", mask);
+
+	/* Reset BEFORE publishing the RECORD bit: isr_audio_rx can fire
+	 * between these statements, and a period converted in that window
+	 * would filter through the previous session's history and publish
+	 * it as the new recording's first period (KTD5). */
+	if ((mask & ZZ_AUDIO_CONFIG_RECORD) &&
+	    !(old_mask & ZZ_AUDIO_CONFIG_RECORD))
+		zz_audio_capture_reset();
+
 	audio_interrupt_mask = mask;
 
 	if (!mask) {
@@ -931,11 +940,6 @@ void audio_set_interrupt_mask(uint16_t mask) {
 
 	if ((old_mask ^ mask) & ZZ_AUDIO_CONFIG_PLAY)
 		audio_silence();
-
-	/* Record start re-warms the capture converter (KTD5). */
-	if ((mask & ZZ_AUDIO_CONFIG_RECORD) &&
-	    !(old_mask & ZZ_AUDIO_CONFIG_RECORD))
-		zz_audio_capture_reset();
 }
 
 void audio_set_capture_frames(uint16_t frames) {
@@ -946,8 +950,11 @@ void audio_set_capture_frames(uint16_t frames) {
 	 * same-value writes must not reset the capture converter or a
 	 * full-duplex recording never reaches steady state (KTD5). */
 	if (frames != audio_capture_frames) {
-		audio_capture_frames = frames;
+		/* Reset first, then publish the new count, so the RX ISR
+		 * cannot convert one period at the new count against the
+		 * old ratio and phase. */
 		zz_audio_capture_reset();
+		audio_capture_frames = frames;
 	}
 }
 
@@ -970,12 +977,13 @@ int audio_legacy_output_active() {
  * on silence/buffer reassignment. */
 static struct zz_audio_convert audio_playback_convert;
 static uint32_t audio_playback_last_rate;
+static int16_t audio_playback_scratch[AUDIO_BYTES_PER_PERIOD / 2];
 // offset = offset from audio tx buffer
 // returns audio_buffer_collision (1 or 0)
 int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap) {
 	int audio_buffer_collision = 0;
 	uint16_t* data = (uint16_t*)(audio_tx_buffer + offset);
-	int audio_freq = audio_buf_samples * 50;
+	uint32_t audio_freq = zz_audio_playback_rate(audio_buf_samples);
 
 	//printf("[audio:%d] play: %d +%lu\n", byteswap, audio_freq, offset);
 
@@ -988,22 +996,38 @@ int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap) {
 
 	// Qualified conversion through the shared fixed-point kernel.
 	// 48 kHz stays a byte-identical bypass.
-	if (audio_freq != 48000) {
-		if (zz_audio_playback_rate_changed((uint32_t)audio_freq,
-		                                   audio_playback_last_rate)) {
-			audio_playback_last_rate = (uint32_t)audio_freq;
+	if (audio_freq != 48000U && audio_buf_samples != 0U) {
+		if (audio_freq != audio_playback_last_rate) {
+			audio_playback_last_rate = audio_freq;
 			zz_audio_convert_init(&audio_playback_convert,
-			                      (uint32_t)audio_freq, 48000U);
+			                      audio_freq, 48000U);
 		}
-		/* Upsampling writes output m at or above every input
-		 * index it can still read (output index >= input index
-		 * pointwise), so converting in place inside the TX
-		 * period is safe. */
-		zz_audio_convert_stream(&audio_playback_convert,
-			(const int16_t *)(audio_tx_buffer + offset),
-			(int16_t *)(audio_tx_buffer + offset),
-			audio_buf_samples,
-			AUDIO_BYTES_PER_PERIOD / 4);
+		if (audio_playback_convert.ratio == NULL) {
+			/* Off-table rate (not one of the six advertised):
+			 * no honest conversion exists, so emit a silent
+			 * period rather than wrong-speed audio with a
+			 * stale tail. */
+			memset(audio_tx_buffer + offset, 0,
+			       AUDIO_BYTES_PER_PERIOD);
+		} else {
+			/* The FIR is backward-looking (output m reads
+			 * inputs at or below its base), so it must not
+			 * convert in place: stage the source frames in a
+			 * scratch copy first. */
+			memcpy(audio_playback_scratch,
+			       audio_tx_buffer + offset,
+			       (size_t)audio_buf_samples * 4U);
+			zz_audio_convert_stream(&audio_playback_convert,
+				audio_playback_scratch,
+				(int16_t *)(audio_tx_buffer + offset),
+				audio_buf_samples,
+				AUDIO_BYTES_PER_PERIOD / 4);
+		}
+	} else if (audio_buf_samples == 0U) {
+		/* A zero frame count is a client error path; silence the
+		 * period instead of converting stale bytes. */
+		memset(audio_tx_buffer + offset, 0,
+		       AUDIO_BYTES_PER_PERIOD);
 	}
 
 	u32 txcount = audio_get_dma_transfer_count();

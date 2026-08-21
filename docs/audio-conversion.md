@@ -12,19 +12,27 @@ The host test suite in `test/audio` is the acceptance gate.
 Kernel: Kaiser windowed-sinc polyphase FIR, 80 dB design stop-band,
 passband edge 0.45 x min(fs_in, fs_out), stop-band from min(fs)/2, causal
 delayed-symmetric (backward history only), exact-rational integer phase
-(no drift), per-phase unity DC in Q14, no dither (matches legacy
-requantization behavior; TPDF is a documented follow-up if low-level
-THD+N testing ever misses target).
+(no drift), full-range int16 coefficients with a per-phase Q16 reciprocal
+(64-bit accumulation, SMLAL), no dither (matches legacy requantization
+behavior; TPDF is a documented follow-up if low-level THD+N testing ever
+misses target).
+
+Measured behavioral stop-band floor is at least 70 dB below a full-scale
+passband reference in every one of the ten directions (host-gated alias
+and image tests, coherent 1-second windows). The 80 dB design target is
+reached where the kernel's tap count permits it; on the dense ratios
+(44.1/32/24 kHz) the int16 coefficient width is the limiting factor.
+Passband ripple stays at 0.003-0.006 dB everywhere.
 
 Regenerate this table: `make -C test/audio && ./build/audio_convert_test --report`
 
 | rate | direction | taps | phases | group delay (input samples) | passband ripple (dB) | MAC/period | table bytes |
 |---|---|---|---|---|---|---|---|
-| 8000 | playback->48k | 101 | 6 | 50 | 0.005 | 193920 | 1212 |
-| 12000 | playback->48k | 101 | 4 | 50 | 0.005 | 193920 | 808 |
-| 24000 | playback->48k | 101 | 2 | 50 | 0.005 | 193920 | 404 |
-| 32000 | playback->48k | 101 | 3 | 50 | 0.005 | 193920 | 606 |
-| 44100 | playback->48k | 101 | 160 | 50 | 0.006 | 193920 | 32320 |
+| 8000 | playback->48k | 101 | 6 | 50 | 0.003 | 193920 | 1212 |
+| 12000 | playback->48k | 101 | 4 | 50 | 0.003 | 193920 | 808 |
+| 24000 | playback->48k | 101 | 2 | 50 | 0.003 | 193920 | 404 |
+| 32000 | playback->48k | 101 | 3 | 50 | 0.003 | 193920 | 606 |
+| 44100 | playback->48k | 101 | 160 | 50 | 0.003 | 193920 | 32320 |
 | 8000 | capture->rate | 603 | 1 | 301 | (see playback row) | 192960 | 1206 |
 | 12000 | capture->rate | 402 | 1 | 200 | (see playback row) | 192960 | 804 |
 | 24000 | capture->rate | 201 | 1 | 100 | (see playback row) | 192960 | 402 |
@@ -41,12 +49,23 @@ within 1.5 output samples of the table, mono bit-identity, saturation
 with a clip counter, and atomic reset semantics.
 
 Worst-case full-duplex burst (6 pump + 7 capture periods in one 20-ms
-window): 2,521,800 MAC. At the card's 666.67 MHz, one SMLAD (2 MAC per
-cycle) plus coefficient loads bounds this near 2.5-5M cycles, roughly
+window): 2,521,800 MAC. At the card's 666.67 MHz, one SMLAL per tap
+(1-2 cycles per MAC with loads) bounds this near 2.5-5M cycles, roughly
 19-38% of the 13.33M-cycle window. Card-side cycle cost is a
 host-derived analytic estimate until an on-hardware measurement run
 exists; per-ISR conversion capping is the documented fallback if that
 estimate ever fails to argue margin.
+
+## Playback rate support
+
+Playback conversion supports the six advertised rates (8/12/24/32/44.1
+and 48 kHz). A decoded stream or raw AHI period at any other rate
+(11.025, 16 and 22.05 kHz occur in the wild) has no qualified conversion
+path: the pump and the AHI per-period path emit a silent period and the
+stream keeps advancing. This is a deliberate change from the legacy
+linear resamplers, which accepted any rate at unqualified quality;
+extending the table set for those three rates is a documented follow-up
+if such content matters.
 
 ## Capture register contract
 

@@ -70,18 +70,31 @@ void zz_audio_convert_reset(struct zz_audio_convert *ctx)
 int zz_audio_convert_init(struct zz_audio_convert *ctx, uint32_t in_rate,
                           uint32_t out_rate)
 {
-	if (in_rate == 0U || out_rate == 0U)
+	if (in_rate == 0U || out_rate == 0U) {
+		/* The documented contract says init always resets; a failed
+		 * init must also disarm any previously armed ratio so a
+		 * zero-rate caller cannot keep converting at a stale ratio. */
+		ctx->ratio = NULL;
+		zz_audio_convert_reset(ctx);
 		return -1;
+	}
 
 	ctx->ratio = ratio_for(in_rate, out_rate);
 	zz_audio_convert_reset(ctx);
 	return ctx->ratio ? 0 : 1;
 }
 
-static int16_t saturate_round(int32_t acc, uint32_t *clips)
+/* Full-range taps need a 64-bit accumulator (sum|taps|*32767 exceeds
+ * int32); each output is re-normalized by the phase's Q16 reciprocal
+ * (16384/scale) before the final round-shift. SMLAL makes the 64-bit
+ * accumulate native on the Cortex-A9. */
+static int16_t saturate_round(int64_t acc, uint32_t recip,
+                              uint32_t *clips)
 {
-	const int32_t half = 1 << (ZZ_AUDIO_CONVERT_SHIFT - 1);
-	int32_t value = (acc + half) >> ZZ_AUDIO_CONVERT_SHIFT;
+	int64_t normalized = (acc * (int64_t)recip + (1 << 15)) >> 16;
+	int64_t value =
+	    (normalized + (1 << (ZZ_AUDIO_CONVERT_SHIFT - 1))) >>
+	    ZZ_AUDIO_CONVERT_SHIFT;
 
 	if (value > 32767) {
 		value = 32767;
@@ -113,22 +126,28 @@ void zz_audio_convert_stream(struct zz_audio_convert *ctx,
 	uint32_t n;
 
 	if (ratio == NULL || ratio->phases == 0U) {
-		/* Identity / off-table passthrough: exact copy. */
+		/* Identity / off-table passthrough: copy what exists and
+		 * zero the remainder so no stale bytes survive a short
+		 * source (e.g. an off-table-rate period). */
 		uint32_t frames = in_frames < out_frames ? in_frames
 		                                         : out_frames;
 		memcpy(out, in, (size_t)frames * 4U);
+		if (out_frames > frames)
+			memset(out + frames * 2U, 0,
+			       (size_t)(out_frames - frames) * 4U);
 		return;
 	}
 
 	for (n = 0U; n < out_frames; n++) {
-		const int16_t *coef =
-		    ratio->coefs[ctx->pos_frac % ratio->phases];
+		const uint32_t phase = ctx->pos_frac % ratio->phases;
+		const int16_t *coef = ratio->coefs[phase];
+		const uint32_t recip = ratio->recip[phase];
 		const uint16_t taps = ratio->taps;
 		int32_t base = (int32_t)ctx->pos_int;
 		uint16_t ch;
 
 		for (ch = 0U; ch < 2U; ch++) {
-			int32_t acc = 0;
+			int64_t acc = 0;
 			int32_t k;
 
 			for (k = 0; k < (int32_t)taps; k++) {
@@ -140,10 +159,10 @@ void zz_audio_convert_stream(struct zz_audio_convert *ctx,
 				else
 					sample = history_sample(ctx, ch,
 					                        idx);
-				acc += (int32_t)coef[k] * (int32_t)sample;
+				acc += (int64_t)coef[k] * (int64_t)sample;
 			}
 			out[n * 2U + ch] =
-			    saturate_round(acc, &ctx->clips);
+			    saturate_round(acc, recip, &ctx->clips);
 		}
 
 		ctx->pos_int += ratio->step_int;
@@ -155,15 +174,13 @@ void zz_audio_convert_stream(struct zz_audio_convert *ctx,
 	}
 
 	/* Rebase the rational position onto the next call's window. The
-	 * exact per-period counts make this land on zero by construction;
-	 * the guard keeps a contract violation from wrapping into wild
-	 * indices instead (defensive only -- sites pass exact pairs). */
-	if (ctx->pos_int >= in_frames)
-		ctx->pos_int -= in_frames;
-	else {
-		ctx->pos_int = 0U;
-		ctx->pos_frac = 0U;
-	}
+	 * exact per-period counts land the position on (in_frames, 0) by
+	 * construction, so arming the next window at (0, 0) is the normal
+	 * path. Any other landing is a contract violation (wrong frame
+	 * counts, or in_frames == 0); re-arm at the window start rather
+	 * than wrap into indices outside the caller's buffer. */
+	ctx->pos_int = 0U;
+	ctx->pos_frac = 0U;
 
 	/* Carry the newest (taps-1) input frames into history. Frames older
 	 * than the previous history drop off; frames before the stream

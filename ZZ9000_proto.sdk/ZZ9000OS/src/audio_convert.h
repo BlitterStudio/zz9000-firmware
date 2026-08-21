@@ -19,12 +19,12 @@
 
 #include "audio_convert_tables.h"
 
-/* Coefficients are Q14 unity-DC (tap sum 16384): accumulate in int32,
- * add half an output LSB, arithmetic shift right by 14, saturate to int16. */
+/* Coefficients are full-range int16 per phase with a per-phase Q16
+ * reciprocal (16384/scale) in the ratio descriptor: accumulate in int64,
+ * multiply by the reciprocal, round-shift right by 14, saturate to
+ * int16. */
 #define ZZ_AUDIO_CONVERT_SHIFT 14
 
-/* Largest generated branch (48 kHz -> 8 kHz capture: 603 taps). */
-#define ZZ_AUDIO_CONVERT_MAX_TAPS 604
 
 /* Frames of input history a private instance carries across calls. */
 #define ZZ_AUDIO_CONVERT_HISTORY (ZZ_AUDIO_CONVERT_MAX_TAPS - 1)
@@ -64,6 +64,11 @@ void zz_audio_convert_reset(struct zz_audio_convert *ctx);
  * In identity mode frames are copied verbatim. Sites own mono
  * duplication (duplicate-before-convert, one phase clock per frame) and
  * byte-order handling around this call.
+ *
+ * The converting FIR is backward-looking: output m reads inputs at or
+ * below its own base, so in and out MUST NOT alias -- converting in
+ * place feeds earlier outputs back as inputs. Sites stage through a
+ * scratch buffer (the AHI path copies in, the capture path copies out).
  */
 void zz_audio_convert_stream(struct zz_audio_convert *ctx,
                              const int16_t *in, int16_t *out,

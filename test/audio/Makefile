@@ -17,7 +17,7 @@ TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 
 CPPFLAGS += -I$(SRC_DIR)
 
-.PHONY: test clean
+.PHONY: test clean check-tables
 
 test: $(TARGETS)
 	$(CONVERT_TARGET)
@@ -81,6 +81,11 @@ $(MPEG_LAYER2_TARGET): mpeg_layer2_decode_test.c \
 	$(SRC_DIR)/mp3/mp3_backend_config.h $(SRC_DIR)/mp3/minimp3.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ mpeg_layer2_decode_test.c
+
+check-tables:
+	python3 ../../util/gen_audio_convert_tables.py
+	git diff --exit-code -- ../../ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.c \
+		../../ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.h
 
 clean:
 	rm -rf $(BUILD_DIR)

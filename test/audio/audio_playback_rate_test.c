@@ -38,22 +38,6 @@ static int test_rate_derivation(void)
 	return failures == 0;
 }
 
-static int test_rate_changed_decision(void)
-{
-	/* First call after a full reset (last rate 0) initializes once. */
-	check(zz_audio_playback_rate_changed(44100U, 0U) == 1,
-	      "first use resets");
-	/* Same rate continues the instance without touching it. */
-	check(zz_audio_playback_rate_changed(44100U, 44100U) == 0,
-	      "same rate continues");
-	/* AHI SetAudioMode mid-stream resets exactly once. */
-	check(zz_audio_playback_rate_changed(32000U, 44100U) == 1,
-	      "rate change resets");
-	check(zz_audio_playback_rate_changed(32000U, 32000U) == 0,
-	      "reset fires once");
-	return failures == 0;
-}
-
 static int test_per_period_geometry_is_exact(void)
 {
 	/* The AHI path converts rate/50 input frames to 960 output frames
@@ -95,7 +79,6 @@ static int test_per_period_geometry_is_exact(void)
 int main(void)
 {
 	test_rate_derivation();
-	test_rate_changed_decision();
 	test_per_period_geometry_is_exact();
 
 	if (failures == 0) {

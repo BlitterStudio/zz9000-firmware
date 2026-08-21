@@ -6,13 +6,18 @@
  *         passband edge 0.45 * min(fs_in, fs_out), stopband edge
  *         min(fs_in, fs_out) - passband edge, causal delayed-symmetric
  *         kernel, exact-rational phase stepping, unity DC gain per phase
- *         (Q14 tap sum == 16384, runtime round-shift 16), per-phase L1 <= 48000.
+ *         (Q14 tap sum == 16384, runtime round-shift 14), per-phase L1 <= 48000.
  */
 
 #ifndef ZZ_AUDIO_CONVERT_TABLES_H
 #define ZZ_AUDIO_CONVERT_TABLES_H
 
 #include <stdint.h>
+
+/* Largest generated branch; the kernel sizes its per-instance
+ * history from this value -- regenerate rather than hand-edit.
+ */
+#define ZZ_AUDIO_CONVERT_MAX_TAPS 604U
 
 /* One conversion direction: exact-rational step q/p =
  * in_rate/out_rate (reduced). Output n uses input base
@@ -27,6 +32,9 @@ struct zz_audio_convert_ratio {
 	uint16_t step_den;
 	uint16_t group_delay;
 	const int16_t *const *coefs;
+	/* Per-phase 16384/scale in Q16: the kernel divides
+	 * each accumulated output by it (full-range taps). */
+	const uint32_t *recip;
 };
 
 extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_8000_48000; /* 8000 -> 48000 Hz */

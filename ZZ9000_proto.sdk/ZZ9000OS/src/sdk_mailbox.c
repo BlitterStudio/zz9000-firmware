@@ -3756,7 +3756,7 @@ static int16_t g_pump_stereo[AUDIO_PUMP_PERIOD_BYTES / 2];
 static struct zz_audio_convert g_pump_convert;
 static uint32_t g_pump_convert_rate;
 
-static void pump_resample_reset(void)
+static void pump_convert_reset(void)
 {
 	g_pump_convert_rate = 0U;
 	zz_audio_convert_reset(&g_pump_convert);
@@ -3768,6 +3768,15 @@ static void pump_convert(const int16_t *pcm, int16_t *slot,
 	if (rate != g_pump_convert_rate) {
 		g_pump_convert_rate = rate;
 		zz_audio_convert_init(&g_pump_convert, rate, 48000U);
+	}
+	if (g_pump_convert.ratio == NULL) {
+		/* Off-table decode rate (11.025/16/22.05 kHz and anything
+		 * else outside the six advertised): no honest conversion
+		 * exists, so this is an unusable geometry -- emit a
+		 * silent period rather than wrong-speed audio with a
+		 * stale tail. The stream still advances. */
+		memset(slot, 0, AUDIO_PUMP_PERIOD_BYTES);
+		return;
 	}
 	zz_audio_convert_stream(&g_pump_convert, pcm, slot,
 	                        (uint16_t)src_frames,
@@ -4144,7 +4153,7 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session)
 	if (audio_get_inited_tx_buffer() !=
 	    (uint8_t *)AUDIO_TX_BUFFER_ADDRESS)
 		audio_init_i2s();
-	pump_resample_reset();
+	pump_convert_reset();
 	pos = audio_get_dma_transfer_count() % AUDIO_PUMP_RING_BYTES;
 	pos -= pos % AUDIO_PUMP_PERIOD_BYTES;
 	g_audio_playback.fill_offset =
