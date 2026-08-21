@@ -177,17 +177,29 @@ void audio_scene_control_state(struct audio_scene_control_state *out);
 #define AUDIO_SCENE_SAVE_IO_ERROR 2 /* temp-then-replace failed */
 
 /*
- * Validate the scene against the enforced boundary, then hand all
- * scene state to the persistence seam. Returns an
+ * Validate the scene against the enforced boundary, then persist all
+ * scene state through the CFG writer below. Returns an
  * AUDIO_SCENE_SAVE_* status, or -1 on an invalid request.
  */
 int audio_scene_save(uint8_t index);
 
 /*
- * U5 (KTD5) seam: serialize the scene state and rewrite ZZ9000.CFG
- * atomically (chunked temp write, sync, replace). U4 ships a
- * transitional body that reports the writer as not yet available;
- * U5 replaces it wholesale.
+ * U5 (KTD4/KTD5): fold the parsed ZZ9000.CFG audio keys into scene
+ * state (R10) -- absent keys keep the built-in defaults, a scene that
+ * no longer validates degrades to its default, and the active scene
+ * and operator baseline are restored. Call after audio_scene_init()
+ * and before the first apply (boot reads the file before the scene
+ * module exists, so state connects here, ahead of the shared
+ * boot/warm-reset apply).
+ */
+void audio_scene_load_config(void);
+
+/*
+ * U5 (KTD5): regenerate ZZ9000.CFG from parsed state plus the live
+ * audio state and replace it atomically (temp file, sync, keep the
+ * previous file as ZZ9000.BAK, rename into place). Content policy:
+ * present known keys plus the audio block; comments are not
+ * preserved. Returns an AUDIO_SCENE_SAVE_* status.
  */
 int audio_scene_cfg_write(void);
 

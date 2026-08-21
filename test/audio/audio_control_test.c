@@ -14,8 +14,9 @@
  * one contiguous safeload group), two rapid scene switches serialize
  * with no interleaved partial commits (including a nested commit
  * attempt from inside the commit itself), meter reads return framed
- * snapshots, SCENE_SAVE reaches the validation + writer seam, and
- * unknown opcodes still complete SDK_STATUS_UNSUPPORTED.
+ * snapshots, SCENE_SAVE validates then persists through the real CFG
+ * writer (zz_config.c against the linked FatFs mock), and unknown
+ * opcodes still complete SDK_STATUS_UNSUPPORTED.
  *
  * Linked like audio_scene_test: the ax.h DSP setters are recording
  * stubs (link-time seam), so every master-chain write is observable
@@ -663,15 +664,14 @@ static void test_scene_save(void)
 			(unsigned long)w32(&result_buf[0]),
 			(unsigned long)w32(&result_buf[4])));
 
-	/* A within-boundary scene passes validation and reaches the
-	 * persistence seam; until U5 installs the CFG writer the seam
-	 * reports unavailability rather than pretending success. */
+	/* A within-boundary scene passes validation and reaches the U5
+	 * writer, which persists through the linked FatFs mock. */
 	put32(save.scene, 0);
 	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
 	check(status == SDK_STATUS_OK &&
-		w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_IO_ERROR &&
+		w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_OK &&
 		w32(&result_buf[4]) == 0,
-		"save reaches the writer seam (not yet available)",
+		"save persists through the CFG writer",
 		fmt("status=%lu scene=%lu",
 			(unsigned long)w32(&result_buf[0]),
 			(unsigned long)w32(&result_buf[4])));

@@ -10,9 +10,11 @@
  * is exercised by the host tests in test/config.
  */
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <ff.h>
+#include "xil_cache.h"
 #include "zz_config.h"
 #include "zz_video_modes.h"
 
@@ -96,6 +98,42 @@ static int hdf_name_valid(const char *s) {
 			return 0;
 	}
 	return len <= ZZ_CONFIG_HDF_NAME_MAX;
+}
+
+/* One audio_scene<N>_<field> assignment (plan U5, KTD4). Fields:
+ * 0 = lpf, 1..5 = eq01..eq89 band pairs, 6 = out (prefactor+volume),
+ * 7 = pan. The value is range-checked against the scene definition so
+ * a corrupt file degrades to the built-in defaults; the bit for the
+ * field is set in the scene's mask only after it passes. */
+static int audio_scene_key(int scene, int field, const char *value) {
+	long v = parse_uint(value);
+	long hi, lo;
+
+	if (v < 0 || scene < 0 || scene >= ZZ_CFG_AUDIO_SCENES) return -1;
+	switch (field) {
+	case 0:
+		if (v < 1 || v > 23900) return -1;
+		cfg.audio_scene_lpf[scene] = (uint16_t)v;
+		break;
+	case 1: case 2: case 3: case 4: case 5:
+		hi = v / 128; lo = v % 128;
+		if (hi > 100 || lo > 100) return -1;
+		cfg.audio_scene_eq[scene][field - 1] = (uint16_t)v;
+		break;
+	case 6:
+		hi = v / 128; lo = v % 128;
+		if (hi > 100 || lo > 100) return -1;
+		cfg.audio_scene_out[scene] = (uint16_t)v;
+		break;
+	case 7:
+		if (v > 100) return -1;
+		cfg.audio_scene_pan[scene] = (uint16_t)v;
+		break;
+	default:
+		return -1;
+	}
+	cfg.audio_scene_mask[scene] |= (uint16_t)(1u << field);
+	return 0;
 }
 
 static int apply_key(const char *key, const char *value) {
@@ -243,6 +281,93 @@ static int apply_key(const char *key, const char *value) {
 		cfg.video_overlay_present = 1;
 		return 0;
 	}
+
+	/* ---- audio control-plane keys (plan U5, KTD4) ----
+	 *
+	 * Decimal-only grammar, each value <= 0xffff, so every scene
+	 * serializes as a small group of keys: audio_scene<N>_lpf,
+	 * _eq01/_eq23/_eq45/_eq67/_eq89 (band pairs packed hi*128+lo),
+	 * _out (prefactor*128+volume) and _pan. Values are range-checked
+	 * here so a corrupt file degrades to the scene module's built-in
+	 * defaults. */
+	if (token_eq(key, "audio_active")) {
+		long v = parse_uint(value);
+		if (v < 0 || v >= ZZ_CFG_AUDIO_SCENES) return -1;
+		cfg.audio_active = (uint16_t)v;
+		cfg.audio_active_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "audio_baseline")) {
+		long v = parse_uint(value);
+		if (v < 0) return -1;
+		cfg.audio_baseline = (uint16_t)v;
+		cfg.audio_baseline_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "audio_scene0_lpf"))  return audio_scene_key(0, 0, value);
+	if (token_eq(key, "audio_scene0_eq01")) return audio_scene_key(0, 1, value);
+	if (token_eq(key, "audio_scene0_eq23")) return audio_scene_key(0, 2, value);
+	if (token_eq(key, "audio_scene0_eq45")) return audio_scene_key(0, 3, value);
+	if (token_eq(key, "audio_scene0_eq67")) return audio_scene_key(0, 4, value);
+	if (token_eq(key, "audio_scene0_eq89")) return audio_scene_key(0, 5, value);
+	if (token_eq(key, "audio_scene0_out"))  return audio_scene_key(0, 6, value);
+	if (token_eq(key, "audio_scene0_pan"))  return audio_scene_key(0, 7, value);
+	if (token_eq(key, "audio_scene1_lpf"))  return audio_scene_key(1, 0, value);
+	if (token_eq(key, "audio_scene1_eq01")) return audio_scene_key(1, 1, value);
+	if (token_eq(key, "audio_scene1_eq23")) return audio_scene_key(1, 2, value);
+	if (token_eq(key, "audio_scene1_eq45")) return audio_scene_key(1, 3, value);
+	if (token_eq(key, "audio_scene1_eq67")) return audio_scene_key(1, 4, value);
+	if (token_eq(key, "audio_scene1_eq89")) return audio_scene_key(1, 5, value);
+	if (token_eq(key, "audio_scene1_out"))  return audio_scene_key(1, 6, value);
+	if (token_eq(key, "audio_scene1_pan"))  return audio_scene_key(1, 7, value);
+	if (token_eq(key, "audio_scene2_lpf"))  return audio_scene_key(2, 0, value);
+	if (token_eq(key, "audio_scene2_eq01")) return audio_scene_key(2, 1, value);
+	if (token_eq(key, "audio_scene2_eq23")) return audio_scene_key(2, 2, value);
+	if (token_eq(key, "audio_scene2_eq45")) return audio_scene_key(2, 3, value);
+	if (token_eq(key, "audio_scene2_eq67")) return audio_scene_key(2, 4, value);
+	if (token_eq(key, "audio_scene2_eq89")) return audio_scene_key(2, 5, value);
+	if (token_eq(key, "audio_scene2_out"))  return audio_scene_key(2, 6, value);
+	if (token_eq(key, "audio_scene2_pan"))  return audio_scene_key(2, 7, value);
+	if (token_eq(key, "audio_scene3_lpf"))  return audio_scene_key(3, 0, value);
+	if (token_eq(key, "audio_scene3_eq01")) return audio_scene_key(3, 1, value);
+	if (token_eq(key, "audio_scene3_eq23")) return audio_scene_key(3, 2, value);
+	if (token_eq(key, "audio_scene3_eq45")) return audio_scene_key(3, 3, value);
+	if (token_eq(key, "audio_scene3_eq67")) return audio_scene_key(3, 4, value);
+	if (token_eq(key, "audio_scene3_eq89")) return audio_scene_key(3, 5, value);
+	if (token_eq(key, "audio_scene3_out"))  return audio_scene_key(3, 6, value);
+	if (token_eq(key, "audio_scene3_pan"))  return audio_scene_key(3, 7, value);
+	if (token_eq(key, "audio_scene4_lpf"))  return audio_scene_key(4, 0, value);
+	if (token_eq(key, "audio_scene4_eq01")) return audio_scene_key(4, 1, value);
+	if (token_eq(key, "audio_scene4_eq23")) return audio_scene_key(4, 2, value);
+	if (token_eq(key, "audio_scene4_eq45")) return audio_scene_key(4, 3, value);
+	if (token_eq(key, "audio_scene4_eq67")) return audio_scene_key(4, 4, value);
+	if (token_eq(key, "audio_scene4_eq89")) return audio_scene_key(4, 5, value);
+	if (token_eq(key, "audio_scene4_out"))  return audio_scene_key(4, 6, value);
+	if (token_eq(key, "audio_scene4_pan"))  return audio_scene_key(4, 7, value);
+	if (token_eq(key, "audio_scene5_lpf"))  return audio_scene_key(5, 0, value);
+	if (token_eq(key, "audio_scene5_eq01")) return audio_scene_key(5, 1, value);
+	if (token_eq(key, "audio_scene5_eq23")) return audio_scene_key(5, 2, value);
+	if (token_eq(key, "audio_scene5_eq45")) return audio_scene_key(5, 3, value);
+	if (token_eq(key, "audio_scene5_eq67")) return audio_scene_key(5, 4, value);
+	if (token_eq(key, "audio_scene5_eq89")) return audio_scene_key(5, 5, value);
+	if (token_eq(key, "audio_scene5_out"))  return audio_scene_key(5, 6, value);
+	if (token_eq(key, "audio_scene5_pan"))  return audio_scene_key(5, 7, value);
+	if (token_eq(key, "audio_scene6_lpf"))  return audio_scene_key(6, 0, value);
+	if (token_eq(key, "audio_scene6_eq01")) return audio_scene_key(6, 1, value);
+	if (token_eq(key, "audio_scene6_eq23")) return audio_scene_key(6, 2, value);
+	if (token_eq(key, "audio_scene6_eq45")) return audio_scene_key(6, 3, value);
+	if (token_eq(key, "audio_scene6_eq67")) return audio_scene_key(6, 4, value);
+	if (token_eq(key, "audio_scene6_eq89")) return audio_scene_key(6, 5, value);
+	if (token_eq(key, "audio_scene6_out"))  return audio_scene_key(6, 6, value);
+	if (token_eq(key, "audio_scene6_pan"))  return audio_scene_key(6, 7, value);
+	if (token_eq(key, "audio_scene7_lpf"))  return audio_scene_key(7, 0, value);
+	if (token_eq(key, "audio_scene7_eq01")) return audio_scene_key(7, 1, value);
+	if (token_eq(key, "audio_scene7_eq23")) return audio_scene_key(7, 2, value);
+	if (token_eq(key, "audio_scene7_eq45")) return audio_scene_key(7, 3, value);
+	if (token_eq(key, "audio_scene7_eq67")) return audio_scene_key(7, 4, value);
+	if (token_eq(key, "audio_scene7_eq89")) return audio_scene_key(7, 5, value);
+	if (token_eq(key, "audio_scene7_out"))  return audio_scene_key(7, 6, value);
+	if (token_eq(key, "audio_scene7_pan"))  return audio_scene_key(7, 7, value);
 	if (token_eq(key, "hdf")) {
 		if (!hdf_name_valid(value)) return -1;
 		cfg.hdf_path[0] = '0';
@@ -348,6 +473,9 @@ int zz_config_load(void) {
 	if (nread == sizeof(buf) - 1) {
 		printf("[CFG] warning: " ZZ_CONFIG_FILENAME " larger than %u bytes, tail ignored\n",
 		       (unsigned)(sizeof(buf) - 1));
+		/* The audio keys serialize last, so an oversized file drops
+		 * them first. Make the truncation queryable (U5). */
+		cfg.truncated = 1;
 	}
 	buf[nread] = 0;
 
@@ -453,10 +581,168 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 		p = cfg.video_overlay_present;
 		v = cfg.video_overlay;
 		break;
+	case ZZ_CONFIG_KEY_AUDIO_TRUNCATED:
+		p = cfg.loaded;
+		v = cfg.truncated;
+		break;
 	default:
 		break;
 	}
 
 	if (present) *present = p;
 	return p ? v : 0;
+}
+
+/* ---- persistence writer (plan U5, KTD5) ---- */
+
+#define ZZ_CONFIG_FILE_PATH "0:/" ZZ_CONFIG_FILENAME
+#define ZZ_CONFIG_TEMP_PATH "0:/ZZCFG.TMP"
+#define ZZ_CONFIG_BAK_PATH  "0:/ZZ9000.BAK"
+
+static int cfg_save_temp_pending; /* ZZCFG.TMP exists from this boot */
+
+/* The canonical profile name for the parsed legacy tuple, mirroring
+ * the driver editor's zzcfg_profile_from_legacy recovery table. */
+static const char *videocap_profile_name(void) {
+	int pal = cfg.videocap_mode == ZZVMODE_720x576;
+	int full = cfg.videocap_shres != 0;
+	int vsync = cfg.ns_vsync;
+
+	if (cfg.videocap_output_profile ==
+	    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60)
+		return "centered_1080p_60";
+	if (full) return vsync ? "full_exact" : "full_60";
+	if (pal && vsync == 1) return "filtered_pal_exact";
+	if (pal && vsync == 2) return "filtered_ntsc_exact";
+	if (pal) return "filtered_pal";
+	return "filtered_60";
+}
+
+static int emit_line(char *buf, unsigned size, int off, const char *fmt,
+		...) {
+	va_list ap;
+	int n;
+
+	if (off < 0 || (unsigned)off >= size) return -1;
+	va_start(ap, fmt);
+	n = vsnprintf(buf + off, size - off, fmt, ap);
+	va_end(ap);
+	if (n < 0 || (unsigned)n >= size - off) return -1;
+	return off + n;
+}
+
+int zz_config_emit_present_keys(char *buf, unsigned size, int off) {
+	static const char *sample_names[] = { "average", "even", "odd" };
+
+	if (size == 0 || off < 0 || (unsigned)off >= size) return -1;
+	buf[off] = 0;
+
+#define EMIT(...) do { \
+		off = emit_line(buf, size, off, __VA_ARGS__); \
+		if (off < 0) return -1; \
+	} while (0)
+
+	if (cfg.videocap_mode_present || cfg.videocap_shres_present ||
+	    cfg.ns_vsync_present)
+		EMIT("videocap_profile = %s\n", videocap_profile_name());
+	if (cfg.videocap_sample_present)
+		EMIT("videocap_sample = %s\n",
+			sample_names[cfg.videocap_sample <= 2
+				? cfg.videocap_sample : 0]);
+	if (cfg.videocap_crop_h_present)
+		EMIT("videocap_crop_h = %u\n", (unsigned)cfg.videocap_crop_h);
+	if (cfg.videocap_crop_v_present)
+		EMIT("videocap_crop_v = %u\n", (unsigned)cfg.videocap_crop_v);
+	if (cfg.scanline_mode_present)
+		EMIT("scanline_mode = %u\n", (unsigned)cfg.scanline_mode);
+	if (cfg.scanline_parity_present)
+		EMIT("scanline_parity = %u\n", (unsigned)cfg.scanline_parity);
+	if (cfg.int2_present)
+		EMIT("int2 = %s\n", cfg.int2 ? "on" : "off");
+	if (cfg.offscreen_bitmaps_present)
+		EMIT("offscreen_bitmaps = %s\n",
+			cfg.offscreen_bitmaps ? "on" : "off");
+	if (cfg.video_overlay_present)
+		EMIT("video_overlay = %s\n", cfg.video_overlay ? "on" : "off");
+	if (cfg.mac_present)
+		EMIT("mac = %02x:%02x:%02x:%02x:%02x:%02x\n",
+			cfg.mac[0], cfg.mac[1], cfg.mac[2], cfg.mac[3],
+			cfg.mac[4], cfg.mac[5]);
+	if (cfg.hdf_present)
+		EMIT("hdf = %s\n", cfg.hdf_path + 3);
+
+#undef EMIT
+	return off;
+}
+
+int zz_config_save_file(const char *text, unsigned len) {
+	FIL f;
+	UINT nwritten = 0;
+	FRESULT fr;
+
+	if (len == 0 || len >= ZZ_CONFIG_MAX_SIZE) return -1;
+
+	/* A partial temp from an interrupted save is junk; drop it so the
+	 * create-always open starts clean (fw_update OPEN's discipline). */
+	fr = f_unlink(ZZ_CONFIG_TEMP_PATH);
+	if (fr != FR_OK && fr != FR_NO_FILE) {
+		printf("[CFG] save: unlink stale %s failed: %d\n",
+			ZZ_CONFIG_TEMP_PATH, (int)fr);
+		return -1;
+	}
+
+	fr = f_open(&f, ZZ_CONFIG_TEMP_PATH, FA_CREATE_ALWAYS | FA_WRITE);
+	if (fr != FR_OK) {
+		printf("[CFG] save: open %s failed: %d\n",
+			ZZ_CONFIG_TEMP_PATH, (int)fr);
+		return -1;
+	}
+	cfg_save_temp_pending = 1;
+
+	/* The text is CPU-written cacheable DDR; clean it before f_write
+	 * so any direct SD DMA path inside FatFs sees the fresh bytes. */
+	Xil_DCacheFlushRange((UINTPTR)text, len);
+	fr = f_write(&f, text, len, &nwritten);
+	if (fr == FR_OK && nwritten == len)
+		fr = f_sync(&f);
+	if (f_close(&f) != FR_OK && fr == FR_OK)
+		fr = FR_DISK_ERR;
+	if (fr != FR_OK || nwritten != len) {
+		/* The partial temp stays for the reset hook / next save;
+		 * the original was never touched. */
+		printf("[CFG] save: write %s failed: %d (%u/%u)\n",
+			ZZ_CONFIG_TEMP_PATH, (int)fr, nwritten, len);
+		return -1;
+	}
+
+	/* Commit (fw_update's commit_temp_file discipline): keep the
+	 * previous file as ZZ9000.BAK, then rename the temp into place,
+	 * restoring the backup if the final rename fails. */
+	fr = f_unlink(ZZ_CONFIG_BAK_PATH);
+	if (fr != FR_OK && fr != FR_NO_FILE) {
+		printf("[CFG] save: unlink stale %s failed: %d\n",
+			ZZ_CONFIG_BAK_PATH, (int)fr);
+		return -1;
+	}
+	fr = f_rename(ZZ_CONFIG_FILE_PATH, ZZ_CONFIG_BAK_PATH);
+	if (fr != FR_OK && fr != FR_NO_FILE) {
+		printf("[CFG] save: backup rename failed: %d\n", (int)fr);
+		return -1;
+	}
+	fr = f_rename(ZZ_CONFIG_TEMP_PATH, ZZ_CONFIG_FILE_PATH);
+	if (fr != FR_OK) {
+		printf("[CFG] save: commit rename failed: %d\n", (int)fr);
+		f_rename(ZZ_CONFIG_BAK_PATH, ZZ_CONFIG_FILE_PATH);
+		return -1;
+	}
+	cfg_save_temp_pending = 0;
+	return 0;
+}
+
+void zz_config_save_reset(void) {
+	if (!cfg_save_temp_pending) return;
+	/* The original was never touched (the final rename never ran);
+	 * drop the junk temp like fw_update_reset drops ZZFWUP.TMP. */
+	cfg_save_temp_pending = 0;
+	f_unlink(ZZ_CONFIG_TEMP_PATH);
 }

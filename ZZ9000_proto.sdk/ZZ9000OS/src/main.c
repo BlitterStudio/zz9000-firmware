@@ -227,6 +227,7 @@ static void reset_storage_request_state() {
 	sd_boot_status = 0;
 
 	fw_update_reset();
+	zz_config_save_reset();
 	fwup_status = 0;
 	fwup_pending = 0;
 	fwup_pending_cmd = 0;
@@ -464,8 +465,11 @@ int main() {
 
 	// The audio control plane owns the master DSP chain from boot on;
 	// its defaults are applied after the ADAU init below, and the
-	// register path into params 9-22/AP_DSP_UPLOAD closes here.
 	audio_scene_init();
+	// Connect the parsed ZZ9000.CFG audio keys (R10) into scene state
+	// before the first apply inside handle_amiga_reset below: boot and
+	// warm reset then share one apply of the persisted scene.
+	audio_scene_load_config();
 
 #if ZZ9000_SKIP_INITIAL_MEDIA_INIT
 	handle_amiga_reset(AMIGA_RESET_FAST);

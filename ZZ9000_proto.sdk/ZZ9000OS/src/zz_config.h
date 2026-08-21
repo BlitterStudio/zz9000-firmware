@@ -49,6 +49,12 @@ enum zz_config_key {
 	ZZ_CONFIG_KEY_VIDEOCAP_SHRES  = 13, /* 0=filter 1=full */
 	ZZ_CONFIG_KEY_VIDEOCAP_CROP_H = 14, /* 28 MHz samples */
 	ZZ_CONFIG_KEY_VIDEOCAP_CROP_V = 15, /* captured lines */
+	/* 1 when the loaded file exceeded the 4 KiB parse budget, so keys
+	 * past the first ZZ_CONFIG_MAX_SIZE-1 bytes were ignored (the
+	 * audio block is written last, so it is the first casualty).
+	 * Slots from 16 up are the audio control plane (plan U5, KTD4);
+	 * slot 10 above stays permanently reserved. */
+	ZZ_CONFIG_KEY_AUDIO_TRUNCATED = 16,
 	ZZ_CONFIG_KEY_NUM
 };
 
@@ -89,19 +95,36 @@ struct zz_config {
 
 	uint8_t mac_present;
 	uint8_t mac[6];
-
 	uint8_t hdf_present;
 	char hdf_path[ZZ_CONFIG_HDF_NAME_MAX + 4]; /* "0:/" + name + NUL */
 
 	uint8_t offscreen_bitmaps_present;
 	uint16_t offscreen_bitmaps;     /* 0-1, informational (drivers query it) */
 
-
 	uint8_t video_overlay_present;
 	uint16_t video_overlay;         /* 0-1, informational (drivers query it) */
+
+	/* Audio control-plane keys (plan U5, KTD4), parsed here and folded
+	 * into the scene module at boot by audio_scene_load_config().
+	 * Absent or out-of-range keys leave the module's built-in
+	 * defaults. The decimal-only grammar caps each value at 0xffff, so
+	 * scenes serialize as grouped keys: EQ band pairs pack as
+	 * hi*128+lo (each band 0..100), audio_scene_out packs
+	 * prefactor*128+volume, and audio_baseline packs paula<<8|ax. */
+#define ZZ_CFG_AUDIO_SCENES 8
+
+	uint8_t audio_active_present;
+	uint16_t audio_active;          /* 0..7 */
+	uint8_t audio_baseline_present;
+	uint16_t audio_baseline;        /* paula<<8 | ax, legs 0..255 */
+	uint16_t audio_scene_mask[ZZ_CFG_AUDIO_SCENES];  /* bit per key */
+	uint16_t audio_scene_lpf[ZZ_CFG_AUDIO_SCENES];   /* 1..23900 Hz */
+	uint16_t audio_scene_eq[ZZ_CFG_AUDIO_SCENES][5]; /* band pairs */
+	uint16_t audio_scene_out[ZZ_CFG_AUDIO_SCENES];   /* pref*128+vol */
+	uint16_t audio_scene_pan[ZZ_CFG_AUDIO_SCENES];   /* 0..100 */
+	uint8_t truncated;              /* file exceeded the parse budget */
 };
 
-/* Status codes for the REG_ZZ_CONFIG_FILE raw-read command. */
 enum zz_config_file_status {
 	ZZ_CONFIG_FILE_OK       = 0,
 	ZZ_CONFIG_FILE_NO_FILE  = 1,
@@ -135,5 +158,24 @@ const struct zz_config* zz_config_get(void);
  * the key was given in the config file (for ZZ_CONFIG_KEY_LOADED,
  * whether the file was loaded). Unknown keys read as 0/absent. */
 uint16_t zz_config_query(uint16_t key, uint16_t *present);
+
+/* Regenerate the non-audio keys of ZZ9000.CFG from parsed state (the
+ * U5 writer content policy: present keys only, the atomic
+ * videocap_profile form, comments not preserved). Appends a
+ * NUL-terminated text at buf[off] and returns the new length, or -1
+ * when it does not fit. */
+int zz_config_emit_present_keys(char *buf, unsigned size, int off);
+
+/* Atomically replace ZZ9000.CFG with `len` bytes of text (U5, KTD5):
+ * write 0:/ZZCFG.TMP, sync and close, keep the previous file as
+ * 0:/ZZ9000.BAK, then rename onto ZZ9000.CFG — fw_update's commit
+ * discipline. Any failure leaves the original intact and reports -1;
+ * a partial temp file stays behind for the reset hook / next save. */
+int zz_config_save_file(const char *text, unsigned len);
+
+/* Amiga-reset hook, the CFG counterpart of fw_update_reset(): a save
+ * interrupted between open and commit never touched the original —
+ * drop its junk temp file. */
+void zz_config_save_reset(void);
 
 #endif

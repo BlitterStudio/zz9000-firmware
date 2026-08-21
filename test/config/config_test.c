@@ -48,6 +48,25 @@ FRESULT f_read(FIL *fp, void *buff, UINT btr, UINT *br) {
     return FR_OK;
 }
 
+
+/* Write-side FatFs stubs: zz_config.c's save path references them;
+ * these tests never exercise it. */
+FRESULT f_write(FIL *fp, const void *buff, UINT btw, UINT *bw)
+{
+    (void)fp; (void)buff; (void)btw;
+    *bw = 0;
+    return FR_DENIED;
+}
+
+FRESULT f_sync(FIL *fp) { (void)fp; return FR_OK; }
+
+FRESULT f_unlink(const char *path) { (void)path; return FR_NO_FILE; }
+
+FRESULT f_rename(const char *path_old, const char *path_new)
+{
+    (void)path_old; (void)path_new;
+    return FR_OK;
+}
 FRESULT f_close(FIL *fp) { (void)fp; return FR_OK; }
 
 /* ---- tiny test harness --------------------------------------------- */

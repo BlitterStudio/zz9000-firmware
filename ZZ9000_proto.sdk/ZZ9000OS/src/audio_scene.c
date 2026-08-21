@@ -35,12 +35,13 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-
 #include "audio_dsp_gain.h"
 #include "audio_scene.h"
 #include "sdk_mailbox.h"
+#include "zz_config.h"
 #include "ax.h"
 
 /* Operator baseline default: today's power-on mixer state written by
@@ -812,6 +813,59 @@ void audio_scene_control_state(struct audio_scene_control_state *out)
 	out->ceiling = (uint32_t)AUDIO_SCENE_ENFORCED_BOUNDARY;
 }
 
+static int appendf(char *buf, unsigned size, int off, const char *fmt, ...)
+{
+	va_list ap;
+	int n;
+
+	if (off < 0 || (unsigned)off >= size) return -1;
+	va_start(ap, fmt);
+	n = vsnprintf(buf + off, size - off, fmt, ap);
+	va_end(ap);
+	if (n < 0 || (unsigned)n >= size - off) return -1;
+	return off + n;
+}
+
+/* Serialize the live audio state as the CFG audio block (KTD4 key
+ * grammar; zz_config.c parses the same names). Appends at off and
+ * returns the new length, or -1 when it does not fit. */
+static int audio_scene_emit_keys(char *buf, unsigned size, int off)
+{
+	int i, k;
+
+	off = appendf(buf, size, off, "audio_active = %u\n",
+		(unsigned)active_scene_index);
+	if (off < 0) return -1;
+	off = appendf(buf, size, off, "audio_baseline = %u\n",
+		((unsigned)baseline_paula << 8) | (unsigned)baseline_ax);
+	if (off < 0) return -1;
+
+	for (i = 0; i < AUDIO_SCENE_COUNT; i++) {
+		const struct audio_scene_def *s = &scenes[i];
+
+		off = appendf(buf, size, off, "audio_scene%d_lpf = %u\n",
+			i, (unsigned)s->lpf_hz);
+		if (off < 0) return -1;
+		for (k = 0; k < 5; k++) {
+			off = appendf(buf, size, off,
+				"audio_scene%d_eq%d%d = %u\n",
+				i, 2 * k, 2 * k + 1,
+				(unsigned)s->eq[2 * k] * 128u +
+				(unsigned)s->eq[2 * k + 1]);
+			if (off < 0) return -1;
+		}
+		off = appendf(buf, size, off, "audio_scene%d_out = %u\n",
+			i, (unsigned)s->prefactor * 128u +
+			(unsigned)s->volume);
+		if (off < 0) return -1;
+		off = appendf(buf, size, off, "audio_scene%d_pan = %u\n",
+			i, (unsigned)s->pan);
+		if (off < 0) return -1;
+	}
+	return off;
+}
+
+
 int audio_scene_save(uint8_t index)
 {
 	struct volume_resolution vol;
@@ -829,12 +883,73 @@ int audio_scene_save(uint8_t index)
 
 int audio_scene_cfg_write(void)
 {
-	/* U5 (KTD5) replaces this body with the chunked temp-then-replace
-	 * ZZ9000.CFG writer. Until then, report the writer as not yet
-	 * available rather than pretending a write happened. */
-	printf("[scene] cfg writer not yet available (plan U5)\n");
-	return AUDIO_SCENE_SAVE_IO_ERROR;
+	static char buf[ZZ_CONFIG_MAX_SIZE];
+	int n;
+
+	if (!module_initialized)
+		return AUDIO_SCENE_SAVE_IO_ERROR;
+
+	/* U5 content policy: regenerate ZZ9000.CFG from parsed state
+	 * (every present known key, comments not preserved) plus the live
+	 * audio state -- the parsed audio keys are never echoed back
+	 * stale. */
+	n = snprintf(buf, sizeof(buf),
+		"# " ZZ_CONFIG_FILENAME " written by the firmware audio "
+		"Save; comments are not preserved\n");
+	if (n < 0 || (unsigned)n >= sizeof(buf))
+		return AUDIO_SCENE_SAVE_IO_ERROR;
+	n = zz_config_emit_present_keys(buf, sizeof(buf), n);
+	if (n < 0)
+		return AUDIO_SCENE_SAVE_IO_ERROR;
+	n = audio_scene_emit_keys(buf, sizeof(buf), n);
+	if (n < 0)
+		return AUDIO_SCENE_SAVE_IO_ERROR;
+	if (zz_config_save_file(buf, (unsigned)n) != 0)
+		return AUDIO_SCENE_SAVE_IO_ERROR;
+	return AUDIO_SCENE_SAVE_OK;
 }
+
+void audio_scene_load_config(void)
+{
+	const struct zz_config *c = zz_config_get();
+	int i, k;
+
+	/* Fold the parsed audio keys into scene state (R10). Absent keys
+	 * keep the built-in defaults; a stored scene that no longer
+	 * validates degrades to its default as a unit. */
+	for (i = 0; i < AUDIO_SCENE_COUNT; i++) {
+		struct audio_scene_def def = default_scenes[i];
+		uint16_t mask = c->audio_scene_mask[i];
+		uint16_t packed;
+
+		if (mask & (1u << 0))
+			def.lpf_hz = c->audio_scene_lpf[i];
+		for (k = 0; k < 5; k++) {
+			if (!(mask & (1u << (1 + k))))
+				continue;
+			packed = c->audio_scene_eq[i][k];
+			def.eq[2 * k] = (uint8_t)(packed / 128);
+			def.eq[2 * k + 1] = (uint8_t)(packed % 128);
+		}
+		if (mask & (1u << 6)) {
+			packed = c->audio_scene_out[i];
+			def.prefactor = (uint8_t)(packed / 128);
+			def.volume = (uint8_t)(packed % 128);
+		}
+		if (mask & (1u << 7))
+			def.pan = (uint8_t)c->audio_scene_pan[i];
+		if (mask && scene_def_valid(&def))
+			scenes[i] = def;
+	}
+	if (c->audio_active_present &&
+	    c->audio_active < AUDIO_SCENE_COUNT)
+		active_scene_index = (uint8_t)c->audio_active;
+	if (c->audio_baseline_present) {
+		baseline_paula = (uint8_t)(c->audio_baseline >> 8);
+		baseline_ax = (uint8_t)(c->audio_baseline & 0xff);
+	}
+}
+
 
 int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 	struct audio_scene_trim_result *result)

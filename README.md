@@ -123,6 +123,93 @@ The file controls these boot-time defaults:
 | `mac` | Ethernet MAC-address override |
 | `hdf` | Root-level HDF image used for SD-card boot |
 
+The audio control plane (ZZ9000AX) adds one group of keys per scene
+slot, plus the active selection and the operator baseline. Values are
+plain decimals; band pairs and the prefactor/volume pair pack two
+0-100 fields into one decimal `hi*128+lo`, and the baseline packs the
+two mixer legs as `paula*256+ax` (each leg 0-255, 127 = 0 dB):
+
+| Key | Purpose |
+|---|---|
+| `audio_active` | Audio scene slot (0-7) applied at boot and after every warm reset |
+| `audio_baseline` | Operator Paula/AX balance packed paula*256+ax, replacing the old `ZZ9K_MIX_LEVELS` env var |
+| `audio_scene0_lpf` | Scene 1 low-pass cutoff in Hz (1-23900; 23900 = DSP default) |
+| `audio_scene0_eq01` | Scene 1 EQ bands 0+1 packed b0*128+b1 (each 0-100, 50 = 0 dB) |
+| `audio_scene0_eq23` | Scene 1 EQ bands 2+3 packed b2*128+b3 |
+| `audio_scene0_eq45` | Scene 1 EQ bands 4+5 packed b4*128+b5 |
+| `audio_scene0_eq67` | Scene 1 EQ bands 6+7 packed b6*128+b7 |
+| `audio_scene0_eq89` | Scene 1 EQ bands 8+9 packed b8*128+b9 |
+| `audio_scene0_out` | Scene 1 prefactor and volume packed pref*128+vol |
+| `audio_scene0_pan` | Scene 1 stereo pan (0 = left, 50 = center, 100 = right) |
+| `audio_scene1_lpf` | Scene 2 low-pass cutoff in Hz (1-23900) |
+| `audio_scene1_eq01` | Scene 2 EQ bands 0+1 packed b0*128+b1 |
+| `audio_scene1_eq23` | Scene 2 EQ bands 2+3 packed b2*128+b3 |
+| `audio_scene1_eq45` | Scene 2 EQ bands 4+5 packed b4*128+b5 |
+| `audio_scene1_eq67` | Scene 2 EQ bands 6+7 packed b6*128+b7 |
+| `audio_scene1_eq89` | Scene 2 EQ bands 8+9 packed b8*128+b9 |
+| `audio_scene1_out` | Scene 2 prefactor and volume packed pref*128+vol |
+| `audio_scene1_pan` | Scene 2 stereo pan |
+| `audio_scene2_lpf` | Scene 3 low-pass cutoff in Hz (1-23900) |
+| `audio_scene2_eq01` | Scene 3 EQ bands 0+1 packed b0*128+b1 |
+| `audio_scene2_eq23` | Scene 3 EQ bands 2+3 packed b2*128+b3 |
+| `audio_scene2_eq45` | Scene 3 EQ bands 4+5 packed b4*128+b5 |
+| `audio_scene2_eq67` | Scene 3 EQ bands 6+7 packed b6*128+b7 |
+| `audio_scene2_eq89` | Scene 3 EQ bands 8+9 packed b8*128+b9 |
+| `audio_scene2_out` | Scene 3 prefactor and volume packed pref*128+vol |
+| `audio_scene2_pan` | Scene 3 stereo pan |
+| `audio_scene3_lpf` | Scene 4 low-pass cutoff in Hz (1-23900) |
+| `audio_scene3_eq01` | Scene 4 EQ bands 0+1 packed b0*128+b1 |
+| `audio_scene3_eq23` | Scene 4 EQ bands 2+3 packed b2*128+b3 |
+| `audio_scene3_eq45` | Scene 4 EQ bands 4+5 packed b4*128+b5 |
+| `audio_scene3_eq67` | Scene 4 EQ bands 6+7 packed b6*128+b7 |
+| `audio_scene3_eq89` | Scene 4 EQ bands 8+9 packed b8*128+b9 |
+| `audio_scene3_out` | Scene 4 prefactor and volume packed pref*128+vol |
+| `audio_scene3_pan` | Scene 4 stereo pan |
+| `audio_scene4_lpf` | Scene 5 low-pass cutoff in Hz (1-23900) |
+| `audio_scene4_eq01` | Scene 5 EQ bands 0+1 packed b0*128+b1 |
+| `audio_scene4_eq23` | Scene 5 EQ bands 2+3 packed b2*128+b3 |
+| `audio_scene4_eq45` | Scene 5 EQ bands 4+5 packed b4*128+b5 |
+| `audio_scene4_eq67` | Scene 5 EQ bands 6+7 packed b6*128+b7 |
+| `audio_scene4_eq89` | Scene 5 EQ bands 8+9 packed b8*128+b9 |
+| `audio_scene4_out` | Scene 5 prefactor and volume packed pref*128+vol |
+| `audio_scene4_pan` | Scene 5 stereo pan |
+| `audio_scene5_lpf` | Scene 6 low-pass cutoff in Hz (1-23900) |
+| `audio_scene5_eq01` | Scene 6 EQ bands 0+1 packed b0*128+b1 |
+| `audio_scene5_eq23` | Scene 6 EQ bands 2+3 packed b2*128+b3 |
+| `audio_scene5_eq45` | Scene 6 EQ bands 4+5 packed b4*128+b5 |
+| `audio_scene5_eq67` | Scene 6 EQ bands 6+7 packed b6*128+b7 |
+| `audio_scene5_eq89` | Scene 6 EQ bands 8+9 packed b8*128+b9 |
+| `audio_scene5_out` | Scene 6 prefactor and volume packed pref*128+vol |
+| `audio_scene5_pan` | Scene 6 stereo pan |
+| `audio_scene6_lpf` | Scene 7 low-pass cutoff in Hz (1-23900) |
+| `audio_scene6_eq01` | Scene 7 EQ bands 0+1 packed b0*128+b1 |
+| `audio_scene6_eq23` | Scene 7 EQ bands 2+3 packed b2*128+b3 |
+| `audio_scene6_eq45` | Scene 7 EQ bands 4+5 packed b4*128+b5 |
+| `audio_scene6_eq67` | Scene 7 EQ bands 6+7 packed b6*128+b7 |
+| `audio_scene6_eq89` | Scene 7 EQ bands 8+9 packed b8*128+b9 |
+| `audio_scene6_out` | Scene 7 prefactor and volume packed pref*128+vol |
+| `audio_scene6_pan` | Scene 7 stereo pan |
+| `audio_scene7_lpf` | Scene 8 low-pass cutoff in Hz (1-23900) |
+| `audio_scene7_eq01` | Scene 8 EQ bands 0+1 packed b0*128+b1 |
+| `audio_scene7_eq23` | Scene 8 EQ bands 2+3 packed b2*128+b3 |
+| `audio_scene7_eq45` | Scene 8 EQ bands 4+5 packed b4*128+b5 |
+| `audio_scene7_eq67` | Scene 8 EQ bands 6+7 packed b6*128+b7 |
+| `audio_scene7_eq89` | Scene 8 EQ bands 8+9 packed b8*128+b9 |
+| `audio_scene7_out` | Scene 8 prefactor and volume packed pref*128+vol |
+| `audio_scene7_pan` | Scene 8 stereo pan |
+
+Absent audio keys keep the firmware defaults. The firmware applies the
+saved active scene at cold boot and again after every Amiga warm
+reset, before any application can allocate the audio device.
+
+Note that both save paths — ZZTop's Settings **Save** and the
+firmware's audio **Save** — regenerate the file from the settings they
+know and keep the previous copy as `ZZ9000.bak`: hand-written comments
+are not preserved. The file parser reads at most 4 KiB; a larger file
+has its tail ignored, which the drivers can observe through the
+config-query key `ZZ_CONFIG_KEY_AUDIO_TRUNCATED` (the audio keys
+serialize last, so they are the first casualty of an oversized file).
+
 For most systems, leave missing options at their defaults. A minimal custom
 file might look like this:
 
