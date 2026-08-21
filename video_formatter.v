@@ -1013,8 +1013,7 @@ always @(posedge dvi_clk) begin
   /* Geometry is stable for a frame. Split clipped-bound and origin
    * arithmetic across registers so per-pixel comparisons start at a
    * registered coordinate rather than at vga_overlay_x/viewport_x. */
-  overlay_screen_x_origin <= -$signed(PIPE_DELAY) +
-    (vga_viewport_x != 0 ? 17'sd1 : 17'sd0) -
+  overlay_screen_x_origin <= -$signed(PIPE_DELAY) + 17'sd1 -
     $signed({1'b0, vga_viewport_x});
   overlay_local_x_origin <=
     overlay_screen_x_origin - $signed(vga_overlay_x);

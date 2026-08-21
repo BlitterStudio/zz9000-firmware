@@ -694,9 +694,9 @@ initial begin
     end
 
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
-      for (x = 1; x < cfg_width; x = x + 1) begin
+      for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
-        if (i >= 2 && i < 5 && (x - 1) >= 8 && (x - 1) < 17)
+        if (i >= 2 && i < 5 && x >= 8 && x < 17)
           exp = expected_overlay(i - 2);
         else
           exp = expected_pix(i, x);
@@ -719,7 +719,7 @@ initial begin
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
       for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
-        if (i >= 2 && i < 5 && (x - 1) >= cfg_width - 9)
+        if (i >= 2 && i < 5 && x >= cfg_width - 9)
           exp = expected_overlay(i - 2);
         else
           exp = expected_pix(i, x);
@@ -744,7 +744,7 @@ initial begin
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 5);
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
-      for (x = 1; x < cfg_width; x = x + 1) begin
+      for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 2 && i < 5)
           exp = expected_overlay(i - 2);
@@ -772,10 +772,10 @@ initial begin
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 6);
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
-      for (x = 1; x < cfg_width; x = x + 1) begin
+      for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
-        if (i >= 1 && i < 7 && (x - 1) >= 4 && (x - 1) < 22) begin
-          overlay_src_x = ((x - 1 - 4) * 9) / 18;
+        if (i >= 1 && i < 7 && x >= 4 && x < 22) begin
+          overlay_src_x = ((x - 4) * 9) / 18;
           overlay_src_y = ((i - 1) * 3) / 6;
           exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
         end else begin
@@ -799,10 +799,10 @@ initial begin
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 6);
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
-      for (x = 1; x < cfg_width; x = x + 1) begin
+      for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
-        if (i >= 2 && i < 4 && (x - 1) >= 8 && (x - 1) < 13) begin
-          overlay_src_x = ((x - 1 - 8) * 9) / 5;
+        if (i >= 2 && i < 4 && x >= 8 && x < 13) begin
+          overlay_src_x = ((x - 8) * 9) / 5;
           overlay_src_y = ((i - 2) * 3) / 2;
           exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
         end else begin
@@ -826,10 +826,10 @@ initial begin
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 6);
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
-      for (x = 1; x < cfg_width; x = x + 1) begin
+      for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
-        if (i < 3 && (x - 1) < 14) begin
-          overlay_src_x = ((x - 1 + 4) * 9) / 18;
+        if (i < 3 && x < 14) begin
+          overlay_src_x = ((x + 4) * 9) / 18;
           overlay_src_y = ((i + 3) * 3) / 6;
           exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
         end else begin
