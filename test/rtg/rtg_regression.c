@@ -52,7 +52,7 @@ static void seed_frame(uint32_t seed)
 		p[i] = (uint8_t)rng32();
 
 	memcpy(expected_fb, actual_fb, sizeof(actual_fb));
-	set_fb(actual_fb, FB_PITCH_WORDS);
+	set_fb_words(actual_fb, FB_PITCH_WORDS);
 }
 
 static int check_frame(const char *name)
@@ -1041,19 +1041,19 @@ static void test_template(void)
 		tmpl[i] = (uint8_t)rng32();
 
 	seed_frame(0x6002);
-	set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+	set_fb_bytes(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
 	template_fill_rect(MNTVA_COLOR_8BIT, 9, 5, T_W, T_H, JAM2, 0x3c,
 		0xa5000000, 0x5a000000, 3, 0, tmpl, T_PITCH);
-	set_fb(actual_fb, FB_PITCH_WORDS);
+	set_fb_words(actual_fb, FB_PITCH_WORDS);
 	ref_template_fill_rect(MNTVA_COLOR_8BIT, 9, 5, T_W, T_H, JAM2, 0x3c,
 		0xa5000000, 0x5a000000, 3, tmpl, T_PITCH);
 	check_frame("template_fill_rect jam2 8");
 
 	seed_frame(0x6003);
-	set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+	set_fb_bytes(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
 	template_fill_rect(MNTVA_COLOR_32BIT, 4, 7, T_W, T_H, JAM1, 0xff,
 		0xff112233, 0xff556677, 5, 0, tmpl, T_PITCH);
-	set_fb(actual_fb, FB_PITCH_WORDS);
+	set_fb_words(actual_fb, FB_PITCH_WORDS);
 	ref_template_fill_rect(MNTVA_COLOR_32BIT, 4, 7, T_W, T_H, JAM1, 0xff,
 		0xff112233, 0xff556677, 5, tmpl, T_PITCH);
 	check_frame("template_fill_rect jam1 32");
@@ -1088,15 +1088,13 @@ static void test_pattern(void)
 
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 		seed_frame(0x3600u + (uint32_t)i);
-		/* pattern_fill_rect takes its pitch in BYTES (it computes fb_pitch/4
-		 * words/row), like template_fill_rect and unlike fill_rect/draw_line
-		 * which take words. The driver feeds it BytesPerRow accordingly; seed_frame
-		 * set the word pitch, so override with the byte pitch here (then restore). */
-		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		/* The pattern/template ABI carries pitch in bytes, unlike the other
+		 * renderers. The typed setter normalizes it to the internal word stride. */
+		set_fb_bytes(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
 		pattern_fill_rect(cases[i].fmt, cases[i].x, cases[i].y, cases[i].w,
 			cases[i].h, cases[i].mode, cases[i].mask, cases[i].fg, cases[i].bg,
 			cases[i].xoff, cases[i].yoff, (uint8_t *)pat, 16, 8);
-		set_fb(actual_fb, FB_PITCH_WORDS);
+		set_fb_words(actual_fb, FB_PITCH_WORDS);
 		ref_pattern_fill_rect(cases[i].fmt, cases[i].x, cases[i].y, cases[i].w,
 			cases[i].h, cases[i].mode, cases[i].mask, cases[i].fg, cases[i].bg,
 			cases[i].xoff, cases[i].yoff, pat, 8);
@@ -1627,6 +1625,72 @@ static void test_fb_limit_clamp(void)
 	memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
 	set_fb_limit((uint8_t *)actual_fb + sizeof(actual_fb));
 
+	/* Horizontal containment is part of the same framebuffer bound: a write
+	 * on the final legal row must stop at the row pitch, not spill into the
+	 * guard while the row-only clamp still considers that row valid. */
+	fill_rect_solid(FB_PITCH_WORDS - 8, FB_H - 1, 20, 1,
+		0x11223344, MNTVA_COLOR_32BIT);
+	ref_fill_rect_solid(FB_PITCH_WORDS - 8, FB_H - 1, 8, 1,
+		0x11223344, MNTVA_COLOR_32BIT);
+	check_frame("fill_rect_solid right edge clipped");
+	check_guard("fill_rect_solid right-edge guard");
+
+	seed_frame(0xb010);
+	memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+	fill_rect_solid(FB_PITCH_WORDS * 2 - 6, FB_H - 1, 12, 1,
+		0x00005678, MNTVA_COLOR_16BIT565);
+	ref_fill_rect_solid(FB_PITCH_WORDS * 2 - 6, FB_H - 1, 6, 1,
+		0x00005678, MNTVA_COLOR_16BIT565);
+	check_frame("fill_rect_solid 16-bit right edge clipped");
+	check_guard("fill_rect_solid 16-bit right-edge guard");
+
+	/* Both line implementations must fail closed when the actual segment
+	 * reaches beyond the final legal row. */
+	seed_frame(0xb011);
+	memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+	draw_line_solid(10, FB_H - 1, 0, 4, 4,
+		p96_err_seed(0, 4, 10, FB_H - 1, 10, FB_H - 1),
+		0xaa000000, MNTVA_COLOR_8BIT);
+	check_frame("draw_line_solid dropped past limit");
+	check_guard("draw_line_solid limit guard");
+
+	seed_frame(0xb012);
+	memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+	draw_line(12, FB_H - 1, 0, 4, 4,
+		p96_err_seed(0, 4, 12, FB_H - 1, 12, FB_H - 1),
+		0xffff, 0, 0xbb000000, 0, MNTVA_COLOR_8BIT, 0xff, JAM1);
+	check_frame("draw_line dropped past limit");
+	check_guard("draw_line limit guard");
+
+	/* Template/pattern destinations carry byte pitch. Exercise the same
+	 * right-edge bound through that independent unit contract. */
+	{
+		uint8_t tmpl[2] = {0xff, 0xff};
+
+		seed_frame(0xb013);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		set_fb_bytes(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		template_fill_rect(MNTVA_COLOR_8BIT,
+			FB_PITCH_WORDS * sizeof(uint32_t) - 5, FB_H - 1, 12, 1,
+			JAM1, 0xff, 0xcc000000, 0, 0, 0, tmpl, 2);
+		set_fb_words(actual_fb, FB_PITCH_WORDS);
+		ref_template_fill_rect(MNTVA_COLOR_8BIT,
+			FB_PITCH_WORDS * sizeof(uint32_t) - 5, FB_H - 1, 5, 1,
+			JAM1, 0xff, 0xcc000000, 0, 0, tmpl, 2);
+		check_frame("template right edge clipped");
+		check_guard("template right-edge guard");
+
+		seed_frame(0xb014);
+		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
+		set_fb_bytes(actual_fb,
+			FB_PITCH_WORDS * sizeof(uint32_t) - 2);
+		template_fill_rect(MNTVA_COLOR_8BIT, 2, 2, 8, 1,
+			JAM1, 0xff, 0xdd000000, 0, 0, 0, tmpl, 2);
+		set_fb_words(actual_fb, FB_PITCH_WORDS);
+		check_frame("template malformed byte pitch dropped");
+		check_guard("template malformed-pitch guard");
+	}
+
 	/* Rect of 12 rows starting 4 rows above the buffer end: only the 4 rows
 	 * that fully fit below the limit may be written; the rest would land in
 	 * the guard zone. */
@@ -1637,17 +1701,21 @@ static void test_fb_limit_clamp(void)
 
 	seed_frame(0xb002);
 	memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
-	invert_rect(5, FB_H - 2, 30, 10, 0xff, MNTVA_COLOR_8BIT);
-	ref_invert_rect(5, FB_H - 2, 30, 2, 0xff, MNTVA_COLOR_8BIT);
+	invert_rect(FB_PITCH_WORDS * 4 - 12, FB_H - 2, 20, 10,
+		0xff, MNTVA_COLOR_8BIT);
+	ref_invert_rect(FB_PITCH_WORDS * 4 - 12, FB_H - 2, 12, 2,
+		0xff, MNTVA_COLOR_8BIT);
 	check_frame("invert_rect clamped");
 	check_guard("invert_rect guard");
 
 	seed_frame(0xb003);
 	memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
 	fill_yuv_src(0xC0DE0200);
-	yuv422_to_rgb_rect(0, 4, FB_H - 3, 20, 8, YUV422_VARIANT_CGX,
+	yuv422_to_rgb_rect(0, FB_PITCH_WORDS - 8, FB_H - 3, 20, 8,
+		YUV422_VARIANT_CGX,
 		MNTVA_COLOR_32BIT, 96, yuv_src);
-	ref_yuv422_rect(0, 4, FB_H - 3, 20, 3, YUV422_VARIANT_CGX,
+	ref_yuv422_rect(0, FB_PITCH_WORDS - 8, FB_H - 3, 8, 3,
+		YUV422_VARIANT_CGX,
 		MNTVA_COLOR_32BIT, 96, yuv_src);
 	check_frame("yuv422 clamped");
 	check_guard("yuv422 guard");
@@ -1667,45 +1735,54 @@ static void test_fb_limit_clamp(void)
 
 		seed_frame(0xb006);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
-		fill_rect(10, FB_H - 4, 20, 12, 0x5a001122,
+		fill_rect(FB_PITCH_WORDS * 4 - 12, FB_H - 4, 20, 12, 0x5a001122,
 			MNTVA_COLOR_8BIT, 0x3c);
-		ref_fill_rect_masked_8(10, FB_H - 4, 20, 4, 0x5a001122, 0x3c);
+		ref_fill_rect_masked_8(FB_PITCH_WORDS * 4 - 12, FB_H - 4,
+			12, 4, 0x5a001122, 0x3c);
 		check_frame("fill_rect clamped");
 		check_guard("fill_rect guard");
 
 		seed_frame(0xb007);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
-		copy_rect_nomask(14, FB_H - 4, 25, 12, 3, 4, MNTVA_COLOR_8BIT,
+		copy_rect_nomask(FB_PITCH_WORDS * 4 - 12, FB_H - 4, 20, 12,
+			3, 4, MNTVA_COLOR_8BIT,
 			actual_fb, FB_PITCH_WORDS, MINTERM_SRC);
-		ref_copy_rect_src(14, FB_H - 4, 25, 4, 3, 4, MNTVA_COLOR_8BIT,
+		ref_copy_rect_src(FB_PITCH_WORDS * 4 - 12, FB_H - 4, 12, 4,
+			3, 4, MNTVA_COLOR_8BIT,
 			expected_fb, FB_PITCH_WORDS);
 		check_frame("copy_rect_nomask clamped");
 		check_guard("copy_rect_nomask guard");
 
 		seed_frame(0xb008);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
-		copy_rect(18, FB_H - 4, 22, 12, 7, 3, MNTVA_COLOR_8BIT,
+		copy_rect(FB_PITCH_WORDS * 4 - 12, FB_H - 4, 20, 12,
+			7, 3, MNTVA_COLOR_8BIT,
 			actual_fb, FB_PITCH_WORDS, 0x5a);
-		ref_copy_rect_masked_8(18, FB_H - 4, 22, 4, 7, 3,
+		ref_copy_rect_masked_8(FB_PITCH_WORDS * 4 - 12, FB_H - 4,
+			12, 4, 7, 3,
 			expected_fb, FB_PITCH_WORDS, 0x5a);
 		check_frame("copy_rect clamped");
 		check_guard("copy_rect guard");
 
 		seed_frame(0xb009);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
-		p2c_rect(3, 0, 10, FB_H - 4, 22, 12, MINTERM_SRC,
+		p2c_rect(3, 0, FB_PITCH_WORDS * 4 - 12, FB_H - 4,
+			20, 12, MINTERM_SRC,
 			2, 0xff, 0x3, 8, planar);
-		ref_p2c_rect(3, 0, 10, FB_H - 4, 22, 4, 12, MINTERM_SRC,
+		ref_p2c_rect(3, 0, FB_PITCH_WORDS * 4 - 12, FB_H - 4,
+			12, 4, 12, MINTERM_SRC,
 			2, 0x3, 8, planar);
 		check_frame("p2c_rect clamped");
 		check_guard("p2c_rect guard");
 
 		seed_frame(0xb00a);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
-		p2d_rect(3, 0, 8, FB_H - 4, 20, 12, MINTERM_SRC,
+		p2d_rect(3, 0, FB_PITCH_WORDS - 8, FB_H - 4, 20, 12,
+			MINTERM_SRC,
 			2, 0xff, 0xff, 0x00ffffff, 8, p2d_data,
 			MNTVA_COLOR_32BIT);
-		ref_p2d_rect(3, 0, 8, FB_H - 4, 20, 4, 12, MINTERM_SRC,
+		ref_p2d_rect(3, 0, FB_PITCH_WORDS - 8, FB_H - 4, 8, 4, 12,
+			MINTERM_SRC,
 			2, 0xff, 8, p2d_data, MNTVA_COLOR_32BIT);
 		check_frame("p2d_rect clamped");
 		check_guard("p2d_rect guard");
@@ -1742,10 +1819,10 @@ static void test_fb_limit_clamp(void)
 		 * nothing even though the rows were inside the limit. */
 		seed_frame(0x7502);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
-		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		set_fb_bytes(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
 		template_fill_rect(MNTVA_COLOR_8BIT, 12, 40, 40, 16, JAM2, 0x3c,
 			0xa5000000, 0x5a000000, 3, 0, tmpl, 8);
-		set_fb(actual_fb, FB_PITCH_WORDS);
+		set_fb_words(actual_fb, FB_PITCH_WORDS);
 		ref_template_fill_rect(MNTVA_COLOR_8BIT, 12, 40, 40, 16, JAM2, 0x3c,
 			0xa5000000, 0x5a000000, 3, tmpl, 8);
 		check_frame("template_fill_rect lower half kept under limit");
@@ -1754,10 +1831,10 @@ static void test_fb_limit_clamp(void)
 		/* Band straddling the quarter line drew a truncated band. */
 		seed_frame(0x7503);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
-		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		set_fb_bytes(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
 		template_fill_rect(MNTVA_COLOR_8BIT, 8, 10, 30, 24, JAM1, 0xff,
 			0xa5000000, 0x5a000000, 5, 0, tmpl, 8);
-		set_fb(actual_fb, FB_PITCH_WORDS);
+		set_fb_words(actual_fb, FB_PITCH_WORDS);
 		ref_template_fill_rect(MNTVA_COLOR_8BIT, 8, 10, 30, 24, JAM1, 0xff,
 			0xa5000000, 0x5a000000, 5, tmpl, 8);
 		check_frame("template_fill_rect straddle kept under limit");
@@ -1766,11 +1843,13 @@ static void test_fb_limit_clamp(void)
 		/* Rect crossing the limit must clamp to the rows that fit. */
 		seed_frame(0x7504);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
-		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
-		template_fill_rect(MNTVA_COLOR_8BIT, 6, FB_H - 4, 26, 8, JAM2, 0xff,
+		set_fb_bytes(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		template_fill_rect(MNTVA_COLOR_8BIT, FB_PITCH_WORDS * 4 - 12,
+			FB_H - 4, 20, 8, JAM2, 0xff,
 			0x77000000, 0x33000000, 1, 0, tmpl, 8);
-		set_fb(actual_fb, FB_PITCH_WORDS);
-		ref_template_fill_rect(MNTVA_COLOR_8BIT, 6, FB_H - 4, 26, 4, JAM2, 0xff,
+		set_fb_words(actual_fb, FB_PITCH_WORDS);
+		ref_template_fill_rect(MNTVA_COLOR_8BIT, FB_PITCH_WORDS * 4 - 12,
+			FB_H - 4, 12, 4, JAM2, 0xff,
 			0x77000000, 0x33000000, 1, tmpl, 8);
 		check_frame("template_fill_rect clamped at limit");
 		check_guard("template clamp guard");
@@ -1778,10 +1857,10 @@ static void test_fb_limit_clamp(void)
 		/* BlitPattern shares the byte-pitch destination contract. */
 		seed_frame(0x7505);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
-		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		set_fb_bytes(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
 		pattern_fill_rect(MNTVA_COLOR_8BIT, 5, 44, 22, 18, JAM2, 0xFF,
 			0xaa000000, 0x55000000, 3, 2, (uint8_t *)pat, 16, 8);
-		set_fb(actual_fb, FB_PITCH_WORDS);
+		set_fb_words(actual_fb, FB_PITCH_WORDS);
 		ref_pattern_fill_rect(MNTVA_COLOR_8BIT, 5, 44, 22, 18, JAM2, 0xFF,
 			0xaa000000, 0x55000000, 3, 2, pat, 8);
 		check_frame("pattern_fill_rect lower half kept under limit");
@@ -1789,11 +1868,13 @@ static void test_fb_limit_clamp(void)
 
 		seed_frame(0x7506);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
-		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
-		pattern_fill_rect(MNTVA_COLOR_8BIT, 9, FB_H - 3, 20, 10, JAM1, 0xFF,
+		set_fb_bytes(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		pattern_fill_rect(MNTVA_COLOR_8BIT, FB_PITCH_WORDS * 4 - 12,
+			FB_H - 3, 20, 10, JAM1, 0xFF,
 			0x11000000, 0x22000000, 7, 1, (uint8_t *)pat, 16, 8);
-		set_fb(actual_fb, FB_PITCH_WORDS);
-		ref_pattern_fill_rect(MNTVA_COLOR_8BIT, 9, FB_H - 3, 20, 3, JAM1, 0xFF,
+		set_fb_words(actual_fb, FB_PITCH_WORDS);
+		ref_pattern_fill_rect(MNTVA_COLOR_8BIT, FB_PITCH_WORDS * 4 - 12,
+			FB_H - 3, 12, 3, JAM1, 0xFF,
 			0x11000000, 0x22000000, 7, 1, pat, 8);
 		check_frame("pattern_fill_rect clamped at limit");
 		check_guard("pattern clamp guard");
@@ -1803,12 +1884,12 @@ static void test_fb_limit_clamp(void)
 		seed_frame(0x7507);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
 		set_fb_limit((uint8_t *)actual_fb - 64);
-		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		set_fb_bytes(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
 		template_fill_rect(MNTVA_COLOR_8BIT, 4, 4, 20, 9, JAM2, 0xff,
 			0xa5000000, 0x5a000000, 2, 0, tmpl, 8);
 		pattern_fill_rect(MNTVA_COLOR_8BIT, 6, 6, 18, 7, JAM2, 0xFF,
 			0xaa000000, 0x55000000, 1, 0, (uint8_t *)pat, 16, 8);
-		set_fb(actual_fb, FB_PITCH_WORDS);
+		set_fb_words(actual_fb, FB_PITCH_WORDS);
 		check_frame("ops dropped when fb at limit");
 		check_guard("ops at-limit guard");
 
@@ -1817,10 +1898,10 @@ static void test_fb_limit_clamp(void)
 		seed_frame(0x7508);
 		memset(actual_buf.guard, 0x5c, sizeof(actual_buf.guard));
 		set_fb_limit((uint8_t *)actual_fb + sizeof(actual_fb));
-		set_fb(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
+		set_fb_bytes(actual_fb, FB_PITCH_WORDS * sizeof(uint32_t));
 		template_fill_rect(MNTVA_COLOR_8BIT, 6, FB_H + 4, 20, 8,
 			JAM2, 0xff, 0xa5000000, 0x5a000000, 1, 0, tmpl, 8);
-		set_fb(actual_fb, FB_PITCH_WORDS);
+		set_fb_words(actual_fb, FB_PITCH_WORDS);
 		check_frame("template dropped past limit");
 		check_guard("template past-limit guard");
 	}

@@ -37,7 +37,10 @@
  *   [31:30] reserved, zero
  */
 #define MNTVF_OP_VIDEOCAP 16
-#define VIDEOCAP_FULL_WIDTH_DEFAULT 1
+/* A missing or invalid CFG profile must keep the monitor-safe legacy output:
+ * filtered capture scaled to 800x600 at 60 Hz. Full-width profiles set this
+ * bit explicitly through videocap_shres. */
+#define VIDEOCAP_FULL_WIDTH_DEFAULT 0
 #define VIDEOCAP_CROP_H_COMPAT 188U
 #define VIDEOCAP_CROP_V_COMPAT 26U
 #define VIDEOCAP_CROP_H_AUTO_FLAG (1U << 28)

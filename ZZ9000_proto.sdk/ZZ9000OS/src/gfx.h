@@ -42,9 +42,14 @@ void video_formatter_write(uint32_t data, uint16_t op);
 void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata);
 void handle_acc_op(uint16_t zdata);
 
-void set_fb(uint32_t* fb_, uint32_t pitch);
-// Upper bound for fb-relative rect writes (end of legal video/surface
-// memory). 0 disables clamping.
+/* Destination pitch units are part of the RTG command ABI: rect/line/planar
+ * ops use 32-bit words, while template/pattern ops use bytes. Keep the unit
+ * explicit at every dispatcher call; both setters normalize the internal
+ * stride to 32-bit words before any renderer or containment check uses it. */
+void set_fb_words(uint32_t* fb_, uint32_t pitch_words);
+void set_fb_bytes(uint32_t* fb_, uint32_t pitch_bytes);
+// Upper bound for fb-relative accelerated writes (end of legal video/surface
+// memory). 0 disables vertical limit clamping; row-pitch bounds still apply.
 void set_fb_limit(void* limit);
 
 void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t rect_rgb, uint32_t color_format, uint8_t mask);

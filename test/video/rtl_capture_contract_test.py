@@ -23,6 +23,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RTL_PATH = ROOT / "mntzorro.v"
 BUILD_SCRIPT = ROOT / "build_variant_bitstreams.sh"
+SAMPLER_PATH = ROOT / "videocap_sampler.v"
+BUILD_RUN_PATH = ROOT / "build_run_synthesis.tcl"
+IOB_VERIFY_PATH = ROOT / "verify_vcap_iob_placement.tcl"
 
 BLOCK_START = "// ZORRO2/3 switch"
 BLOCK_END = "`define C_S_AXI_DATA_WIDTH 32"
@@ -169,7 +172,7 @@ VIDEO_SLOT = {
     "VCAP_CSYNC_VSYNC": "0",
     "VCAP_FULLRATE_INT": "1",
     "CLKOUT0_DIVIDE_F": "8",
-    "CLKOUT0_PHASE": "90",
+    "CLKOUT0_PHASE": "45",
     "CLKOUT1_PHASE": "0",
     "letterbox": False,
 }
@@ -222,9 +225,9 @@ def check_writeback_provenance(rtl: str) -> None:
         # written with another line's content.
         "wire vc_row_line_stale = !videocap_writeback_full_width &&",
         "videocap_save_x == 0 && vc_row_line_stale) begin",
-        # Filtered capture banks its line buffer and hands rows over by
-        # completed-line token: the writeback gets a full line of slack.
-        "wire [11:0] vcap_line_payload_cap = (`VCAP_FULLRATE_INT != 0) ? {",
+        # Every banked capture path hands rows over by one latched token; the
+        # full-width path must normalize rather than leak pre-crop row zero.
+        "wire [11:0] vcap_line_payload_cap = {",
         "vcap_line_toggle, vcap_token_bank, vcap_token_y",
         "if (vcap_line_payload_axi[9:0] < videocap_ymax_sync)",
     )
@@ -236,9 +239,61 @@ def check_writeback_provenance(rtl: str) -> None:
             )
 
 
+def check_vcap_iob_capture_contract(sampler: str, build_run: str) -> None:
+    """RGB sampling must start in ILOGIC, not a routed fabric register.
+
+    At the full 28 MHz Zorro 3 capture rate, placement-dependent routing from
+    the package pins to SLICE registers can move the sampling aperture onto an
+    Amiga pixel transition.  The IOB attributes make that delay deterministic;
+    the post-route check proves Vivado honored them instead of silently moving
+    the registers back into fabric.
+    """
+    for channel in "rgb":
+        declaration = re.compile(
+            rf'\(\*\s*IOB\s*=\s*"TRUE"\s*\*\)\s*'
+            rf'reg\s+\[7:0\]\s+vcap_{channel}_iob\b'
+        )
+        if not declaration.search(sampler):
+            raise SystemExit(
+                "VCAP IOB capture contract violated: missing IOB register "
+                f"for VCAP_{channel.upper()}"
+            )
+        assignment = f"vcap_{channel}_iob <= vcap_{channel};"
+        if assignment not in sampler:
+            raise SystemExit(
+                "VCAP IOB capture contract violated: missing direct pin "
+                f"capture: {assignment}"
+            )
+
+    for fragment in (
+        "wire [23:0] rgbin =",
+        "vcap_r_iob[3:0]",
+        "vcap_g_iob[3:0]",
+        "vcap_b_iob[3:0]",
+        "vcap_r_iob[7:4]",
+        "vcap_g_iob[7:4]",
+        "vcap_b_iob[7:4]",
+        "{vcap_r_iob, vcap_g_iob, vcap_b_iob}",
+    ):
+        if fragment not in sampler:
+            raise SystemExit(
+                "VCAP IOB capture contract violated: missing sampler "
+                f"fragment: {fragment}"
+            )
+
+    verify_hook = "source [file join $script_dir verify_vcap_iob_placement.tcl]"
+    if verify_hook not in build_run or not IOB_VERIFY_PATH.is_file():
+        raise SystemExit(
+            "VCAP IOB capture contract violated: post-route placement "
+            "verification is not wired into the bitstream build"
+        )
+
+
 def main():
     rtl = RTL_PATH.read_text(encoding="utf-8")
     script = BUILD_SCRIPT.read_text(encoding="utf-8")
+    sampler = SAMPLER_PATH.read_text(encoding="utf-8")
+    build_run = BUILD_RUN_PATH.read_text(encoding="utf-8")
 
     # The committed default keeps ZORRO3 first in every ladder, so the
     # simultaneously-defined VARIANT_SUPERDENISE must not leak into the
@@ -271,6 +326,7 @@ def main():
         check_variant(VariantConfig(variant, spliced), expect)
 
     check_writeback_provenance(rtl)
+    check_vcap_iob_capture_contract(sampler, build_run)
 
     print("RTL capture contract checks passed")
 

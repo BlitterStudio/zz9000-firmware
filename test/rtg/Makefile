@@ -1,5 +1,6 @@
 CC ?= cc
 CFLAGS ?= -O2 -g
+PYTHON ?= python3
 
 SRC_DIR := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 BUILD_DIR := build
@@ -14,6 +15,7 @@ LDLIBS := -lm
 
 test: $(TARGET)
 	$(TARGET)
+	$(PYTHON) pitch_contract_test.py
 
 bench: $(TARGET)
 	$(TARGET) --bench

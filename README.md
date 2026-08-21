@@ -111,7 +111,7 @@ The file controls these boot-time defaults:
 
 | Key | Purpose |
 |---|---|
-| `videocap_profile` | Native output: `full_60` (default), `full_exact`, `filtered_60`, `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60` |
+| `videocap_profile` | Native output: `full_60`, `full_exact`, `filtered_60` (default), `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60` |
 | `videocap_sample` | Native-video capture sampling |
 | `videocap_crop_h` | Horizontal picture position; omit for Automatic |
 | `videocap_crop_v` | Vertical picture position; omit for Automatic |
@@ -127,17 +127,18 @@ For most systems, leave missing options at their defaults. A minimal custom
 file might look like this:
 
 ```ini
-videocap_profile = full_60
+videocap_profile = filtered_60
 scanline_mode = 2
 scanline_parity = 0
 ```
 
-`full_60` is the normal full-detail native-video mode. `full_exact` keeps the
-same detail while matching the detected PAL or NTSC refresh. On supported
-full-rate variants, `centered_1080p_60` places the unchanged 1280x1024 native
-picture in a 1920x1080 signal with black borders at approximately 60.61 Hz.
-It is separate from the Picasso96 1920x1080 RTG mode. Older or unsupported
-stacks safely fall back to `full_60`.
+With no valid profile, `filtered_60` provides the monitor-safe 800x600 60 Hz
+output. Explicit `full_60` and `full_exact` selections preserve full SuperHires
+detail in a 1280x1024 output. On supported full-rate variants,
+`centered_1080p_60` places the unchanged 1280x1024 native picture in a
+1920x1080 signal with black borders at approximately 60.61 Hz. It is separate
+from the Picasso96 1920x1080 RTG mode. An explicitly selected centered profile
+falls back to `full_60` on older or unsupported stacks.
 
 ZZTop 2.8 can also preview and calibrate native-picture positioning. Its
 **Save** action writes the file and keeps the previous copy as `ZZ9000.bak`;

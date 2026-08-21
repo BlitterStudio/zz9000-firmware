@@ -61,6 +61,8 @@ wire cap_x_done;
 wire cap_shres;
 wire cap_line_toggle;
 wire cap_write_bank;
+wire [9:0] cap_token_y;
+wire cap_token_bank;
 wire probe_arm_seen;
 wire probe_valid;
 wire [511:0] probe_data;
@@ -190,6 +192,8 @@ videocap_sampler #(
     .cap_shres(cap_shres),
     .cap_line_toggle(cap_line_toggle),
     .cap_write_bank(cap_write_bank),
+    .cap_token_y(cap_token_y),
+    .cap_token_bank(cap_token_bank),
     .probe_arm_toggle(probe_arm_toggle),
     .probe_arm_seen(probe_arm_seen),
     .probe_valid(probe_valid),
@@ -413,6 +417,8 @@ integer first_full_width_ready_x;
 integer full_width_ready_checked;
 integer full_width_completed_lines;
 reg last_completed_bank;
+reg [9:0] last_completed_y;
+wire [10:0] full_width_field_stride = cap_interlace ? 11'd2 : 11'd1;
 integer last_frame_sync_x;
 integer last_frame_phase_abs_delta;
 integer last_frame_phase_changed;
@@ -465,22 +471,41 @@ task drive_line;
         end
 
         if (FULLWIDTH && vsync) begin
+            /* cap_y holds a field-parity sentinel until vertical crop has
+             * completed.  Those pre-crop rows must never reach DDR.  The
+             * first completed visible row is normalized back to row 0/1 so
+             * a 256-row progressive scanout retains both boundary lines. */
             checks = checks + 1;
-            if (cap_line_toggle === line_toggle_before) begin
-                errors = errors + 1;
-                $display("MISMATCH full_width_completion_token did not toggle");
-            end
-
-            if (full_width_completed_lines > 0) begin
-                checks = checks + 1;
-                if (cap_write_bank === last_completed_bank) begin
+            if (cap_y < full_width_field_stride) begin
+                if (cap_line_toggle !== line_toggle_before) begin
                     errors = errors + 1;
-                    $display("MISMATCH full_width_bank did not alternate bank=%0d",
-                             cap_write_bank);
+                    $display("MISMATCH full_width_precrop_token y=%0d", cap_y);
                 end
+            end else begin
+                if (cap_line_toggle === line_toggle_before) begin
+                    errors = errors + 1;
+                    $display("MISMATCH full_width_completion_token did not toggle y=%0d",
+                             cap_y);
+                end
+                check_eq("full_width_token_y", cap_token_y,
+                         cap_y - full_width_field_stride);
+                check_eq("full_width_token_bank", cap_token_bank,
+                         cap_write_bank);
+
+                if (full_width_completed_lines > 0 &&
+                        cap_token_y == last_completed_y +
+                                       full_width_field_stride) begin
+                    checks = checks + 1;
+                    if (cap_token_bank === last_completed_bank) begin
+                        errors = errors + 1;
+                        $display("MISMATCH full_width_bank did not alternate bank=%0d",
+                                 cap_token_bank);
+                    end
+                end
+                last_completed_bank = cap_token_bank;
+                last_completed_y = cap_token_y;
+                full_width_completed_lines = full_width_completed_lines + 1;
             end
-            last_completed_bank = cap_write_bank;
-            full_width_completed_lines = full_width_completed_lines + 1;
         end
     end
 endtask
@@ -595,6 +620,7 @@ initial begin
     full_width_ready_checked = 0;
     full_width_completed_lines = 0;
     last_completed_bank = 0;
+    last_completed_y = 0;
     if ($value$plusargs("PIXSPAN=%d", PIXSPAN)) ;
     if ($value$plusargs("SAMPLEMODE=%d", SAMPLEMODE)) ;
     if ($value$plusargs("FULLWIDTH=%d", FULLWIDTH)) ;
@@ -661,7 +687,7 @@ initial begin
         for (k = 0; k < 16; k = k + 1) begin
             got = probe_data[k * 32 +: 32];
             sample_idx = CROPH + 32 + k + CAPTURE_INPUT_OFFSET;
-            pix_even = sample_idx / PIXSPAN;
+            pix_even = sample_idx / PIXSPAN + CROPV - 1;
             want_r = pix_even[7:0];
             want_g = ~pix_even[7:0];
             want_b = {pix_even[3:0], pix_even[7:4]};
@@ -828,7 +854,7 @@ initial begin
     check_eq("control_ack_returned_low", dut.ctl_dest_ack, 0);
     check_eq("mixed_auto_raw", control_applied_raw, focused_raw);
     check_eq("mixed_auto_fullrate_effective", control_applied_effective,
-             (4095 << 16) | 280);
+             (4095 << 16) | 279);
     check_eq("mixed_auto_compat_effective", legacy_control_applied_effective,
              (4095 << 16) | 188);
     check_eq("writeback_owner_full_width", control_applied_raw[2], 1);
