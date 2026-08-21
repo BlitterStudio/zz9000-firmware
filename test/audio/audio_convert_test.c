@@ -590,8 +590,113 @@ static int test_reset_semantics(void)
 	return failures == 0;
 }
 
-int main(void)
+static void report(void)
 {
+	static const uint16_t counts[5] = { 160U, 240U, 480U, 640U, 882U };
+	uint32_t r;
+	double pump_worst = 0.0;
+	double capture_worst = 0.0;
+
+	printf("# audio-conversion measured table\n");
+	printf("# regenerate: make -C test/audio && "
+	       "./build/audio_convert_test --report\n");
+	printf("# kernel: Kaiser windowed-sinc polyphase, A=80 dB, "
+	       "passband 0.45*min(fs), stopband from min(fs)/2, "
+	       "Q14 unity-DC, no dither\n");
+	printf("| rate | direction | taps | phases | group delay (in) | "
+	       "passband ripple (dB) | MAC/period | table bytes |\n");
+	printf("|---|---|---|---|---|---|---|---|\n");
+	for (r = 0U; r < 5U; r++) {
+		struct zz_audio_convert ctx;
+		const struct zz_audio_convert_ratio *ratio;
+		double worst_pb = 0.0;
+		uint32_t phase, bin;
+
+		zz_audio_convert_init(&ctx, rates[r], 48000U);
+		ratio = ctx.ratio;
+		for (phase = 0U; phase < ratio->phases; phase++) {
+			for (bin = 1U; bin <= 180U; bin++) {
+				double f = (double)bin * (double)rates[r] /
+				           400.0;
+				double re = 0.0, im = 0.0;
+				uint32_t k;
+
+				for (k = 0U; k < ratio->taps; k++) {
+					double tau = (double)k +
+					    (double)phase /
+					        (double)ratio->phases -
+					    (double)(ratio->taps - 1U) / 2.0;
+
+					re += (double)ratio->coefs[phase][k] *
+					      cos(2.0 * M_PI * f /
+					          (double)rates[r] * tau);
+					im += (double)ratio->coefs[phase][k] *
+					      sin(2.0 * M_PI * f /
+					          (double)rates[r] * tau);
+				}
+				{
+					double dev = fabs(20.0 * log10(
+					    sqrt(re * re + im * im) / 16384.0 +
+					    1e-30));
+
+					if (dev > worst_pb)
+						worst_pb = dev;
+				}
+			}
+		}
+		{
+			double macs = (double)ratio->taps *
+			    (ratio->phases > 1U ? 960.0 : 960.0) * 2.0;
+			double bytes = (double)ratio->phases *
+			    (double)ratio->taps * 2.0;
+
+			printf("| %lu | playback->48k | %u | %u | %u | "
+			       "%.3f | %.0f | %.0f |\n",
+			       (unsigned long)rates[r], ratio->taps,
+			       ratio->phases, ratio->group_delay, worst_pb,
+			       macs, bytes);
+			if (macs > pump_worst)
+				pump_worst = macs;
+		}
+	}
+	for (r = 0U; r < 5U; r++) {
+		struct zz_audio_convert ctx;
+		const struct zz_audio_convert_ratio *ratio;
+		double macs;
+		double bytes;
+
+		zz_audio_convert_init(&ctx, 48000U, rates[r]);
+		ratio = ctx.ratio;
+		macs = (double)ratio->taps * (double)counts[r] * 2.0;
+		bytes = (double)ratio->phases * (double)ratio->taps * 2.0;
+		printf("| %lu | capture->rate | %u | %u | %u | (see "
+		       "playback row) | %.0f | %.0f |\n",
+		       (unsigned long)rates[r], ratio->taps, ratio->phases,
+		       ratio->group_delay, macs, bytes);
+		if (macs > capture_worst)
+			capture_worst = macs;
+	}
+	{
+		double burst = 6.0 * pump_worst + 7.0 * capture_worst;
+		double window_cycles = 666666687.0 / 50.0;
+
+		printf("\nWorst-case full-duplex burst (6 pump + 7 capture "
+		       "periods): %.0f MAC/window\n", burst);
+		printf("At 666.67 MHz with one SMLAD (2 MAC/cycle) plus "
+		       "loads: ~%.0f cycles = %.0f%% of the 13.33M-cycle "
+		       "20 ms window\n",
+		       burst, 100.0 * burst / window_cycles);
+		printf("Card-side cycle cost is a host-derived analytic "
+		       "estimate until an on-hardware run exists.\n");
+	}
+}
+
+int main(int argc, char **argv)
+{
+	if (argc == 2 && strcmp(argv[1], "--report") == 0) {
+		report();
+		return 0;
+	}
 	test_init_and_identity();
 	test_dc();
 	test_table_response();

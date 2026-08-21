@@ -3,6 +3,11 @@
 `zz9000ax-mix1-lowpass-eq.dspproj` is the source-authoritative SigmaStudio
 4.7 project for the ADAU1701 program embedded in the firmware.
 
+Rate conversion in and out of this fixed 48-kHz domain is handled by the
+ARM-side qualified converter kernel; see `docs/audio-conversion.md` for
+the measured passband/stop-band/group-delay/cycle-cost table and the
+capture register contract.
+
 ## Production capture contract
 
 The normal graph routes:
