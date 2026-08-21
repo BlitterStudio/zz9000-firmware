@@ -52,16 +52,22 @@ The receive formatter writes 960 48 kHz S16LE stereo frames into each
 3840-byte period. While capture interrupts are enabled, the receive ISR:
 
 1. invalidates the completed DMA period;
-2. converts it in place to the `REG_ZZ_AUDIO_SCALE` frame count using integer
-   linear resampling;
-3. stores the result as Amiga-native S16BE stereo;
-4. flushes the valid `frame_count * 4` bytes and completes a memory barrier;
-5. publishes the period index and incremented sequence;
-6. asserts the existing shared Amiga audio interrupt.
+2. converts it to the `REG_ZZ_AUDIO_SCALE` frame count through the shared
+   qualified band-limited kernel (`audio_convert.c`): the period is first
+   copied to CPU-side scratch (a long kernel reads inputs that early
+   outputs would overwrite in place), and the result is written back as
+   Amiga-native S16BE stereo. Filter history carries across periods
+   inside the converter instance while the exact per-period counts keep
+   the rational phase landing on every period boundary;
+3. flushes the valid `frame_count * 4` bytes and completes a memory barrier;
+4. publishes the period index and incremented sequence;
+5. asserts the existing shared Amiga audio interrupt;
 
 The sequence update is the publication boundary: the driver must not consume a
-period before observing its new sequence. Values outside 1 through 960 in
-`REG_ZZ_AUDIO_SCALE` fall back to 960 frames.
+period before observing its new sequence. Supported conversion counts are
+160/240/480/640/882/960 frames (8/12/24/32/44.1/48 kHz); any other value in
+the register's 1-960 range, including invalid values, converts as native
+48 kHz identity (960 frames, endian swap only).
 
 ## Receive-ring retargeting
 
