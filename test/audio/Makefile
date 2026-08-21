@@ -9,10 +9,11 @@ PROFILE_TARGET := $(BUILD_DIR)/audio_profile_test
 PLAYBACK_TARGET := $(BUILD_DIR)/audio_playback_frontier_test
 RATE_TARGET := $(BUILD_DIR)/audio_playback_rate_test
 DRAIN_TARGET := $(BUILD_DIR)/audio_stream_drain_test
+SCENE_TARGET := $(BUILD_DIR)/audio_scene_test
 MP3_PROBE_TARGET := $(BUILD_DIR)/mp3_frame_probe_test
 MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
 TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
-	$(PLAYBACK_TARGET) $(RATE_TARGET) $(DRAIN_TARGET) \
+	$(PLAYBACK_TARGET) $(RATE_TARGET) $(DRAIN_TARGET) $(SCENE_TARGET) \
 	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET)
 
 CPPFLAGS += -I$(SRC_DIR)
@@ -26,6 +27,7 @@ test: $(TARGETS)
 	$(PROFILE_TARGET)
 	$(PLAYBACK_TARGET)
 	$(DRAIN_TARGET)
+	$(SCENE_TARGET)
 	$(MP3_PROBE_TARGET)
 	$(MPEG_LAYER2_TARGET)
 
@@ -69,6 +71,13 @@ $(DRAIN_TARGET): audio_stream_drain_test.c \
 	$(SRC_DIR)/audio_stream_drain.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_stream_drain_test.c
+
+$(SCENE_TARGET): audio_scene_test.c $(SRC_DIR)/audio_scene.c \
+	$(SRC_DIR)/audio_scene.h $(SRC_DIR)/ax.h \
+	$(SRC_DIR)/audio_dsp_gain.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_scene_test.c \
+		$(SRC_DIR)/audio_scene.c -lm
 
 $(MP3_PROBE_TARGET): mp3_frame_probe_test.c \
 	$(SRC_DIR)/mp3/decode_mp3.c $(SRC_DIR)/mp3/mp3.h \

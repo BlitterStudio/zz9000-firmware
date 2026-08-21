@@ -56,6 +56,7 @@ void Xil_AssertNonVoid() {}
 #include "adc.h"
 #include "ax.h"
 #include "audio_capture.h"
+#include "audio_scene.h"
 #include "watchdog.h"
 #include "mp3/mp3.h"
 
@@ -348,6 +349,13 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	adau_enabled = audio_adau_init(1);
 	audio_set_codec_present(adau_enabled);
 
+	/* The DSP now holds power-on defaults; the control plane re-applies
+	 * the active scene (R10) before the request loop below can service
+	 * any owner. Cold boot reaches this through main() -> this handler,
+	 * so boot and warm reset share the apply. */
+	if (adau_enabled)
+		audio_scene_apply_after_dsp_init();
+
 	// clear interrupt holding amiga
 	amiga_interrupt_clear(0xffffffff);
 
@@ -453,6 +461,11 @@ int main() {
 	ethernet_init();
 
 	fpga_interrupt_connect(isr_video, isr_audio, isr_audio_rx);
+
+	// The audio control plane owns the master DSP chain from boot on;
+	// its defaults are applied after the ADAU init below, and the
+	// register path into params 9-22/AP_DSP_UPLOAD closes here.
+	audio_scene_init();
 
 #if ZZ9000_SKIP_INITIAL_MEDIA_INIT
 	handle_amiga_reset(AMIGA_RESET_FAST);
@@ -1454,6 +1467,15 @@ int main() {
 						} else {
 							printf("[audio] illegal tx address: 0x%p\n", addr);
 						}
+					} else if (audio_scene_register_write_blocked(
+							(uint32_t)audio_param)) {
+						/* R2: master-chain params 9-22
+						 * are only writable through
+						 * scene operations, and the raw
+						 * DSP upload stays closed
+						 * behind the same authority. */
+						printf("[audio] param %d rejected: scene module owns the master chain\n",
+							audio_param);
 					} else if (audio_param == AP_DSP_UPLOAD) {
 						uint8_t* program_ptr = (uint8_t*)video_state->framebuffer +
 								((audio_params[AP_DSP_PROG_OFFS_HI]<<16)|audio_params[AP_DSP_PROG_OFFS_LO]);
@@ -1474,26 +1496,14 @@ int main() {
 						}
 						if (dsp_status != 0)
 							printf("[audio] verified DSP upload failed.\n");
-					} else if (audio_param == AP_DSP_SET_LOWPASS) {
-						// set lowpass filter params by cutoff freq (works only if default program is loaded!)
-						if (audio_adau_set_lpf_params(zdata) != 0)
-							printf("[audio] low-pass update failed.\n");
-					} else if (audio_param == AP_DSP_SET_VOLUMES) {
-						if (audio_adau_set_mixer_vol(
-								zdata&0xff, (zdata>>8)&0xff) != 0)
-							printf("[audio] mixer update failed.\n");
-					} else if (audio_param == AP_DSP_SET_PREFACTOR) {
-						if (audio_adau_set_prefactor(zdata) != 0)
-							printf("[audio] prefactor update failed.\n");
-					} else if ((audio_param >= AP_DSP_SET_EQ_BAND1) && (audio_param <= AP_DSP_SET_EQ_BAND10)) {
-						if (audio_adau_set_eq_gain(
-								audio_param-AP_DSP_SET_EQ_BAND1, zdata) != 0)
-							printf("[audio] equalizer update failed.\n");
-					} else if (audio_param == AP_DSP_SET_STEREO_VOLUME) {
-						if (audio_adau_set_vol_pan(
-								zdata&0xff, (zdata>>8)&0xff) != 0)
-							printf("[audio] stereo-volume update failed.\n");
 					}
+					/* Master-chain setters (AP_DSP_SET_LOWPASS ..
+					 * AP_DSP_SET_STEREO_VOLUME, params 9-22) had
+					 * their register branches removed: the authority
+					 * gate above rejects those indices
+					 * unconditionally, so no live path could reach
+					 * them. The scene module is the only writer
+					 * (audio_scene.c). */
 					break;
 				// REG_ZZ_DECODER_PARAM / _VAL / _FIFO and REG_ZZ_DECODE:
 				// the legacy register-driven MP3 decoder was removed with

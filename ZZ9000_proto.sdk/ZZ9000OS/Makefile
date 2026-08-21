@@ -101,6 +101,7 @@ C_SRCS = \
 	$(SRC_DIR)/audio_capture.c \
 	$(SRC_DIR)/audio_convert.c \
 	$(SRC_DIR)/audio_convert_tables.c \
+	$(SRC_DIR)/audio_scene.c \
 	$(SRC_DIR)/bootrom.c \
 	$(SRC_DIR)/codec37.c \
 	$(SRC_DIR)/codec47.c \
