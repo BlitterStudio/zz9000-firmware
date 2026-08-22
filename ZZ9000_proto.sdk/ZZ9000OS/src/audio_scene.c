@@ -8,7 +8,10 @@
  * master-chain change funnels through; that commit runs as an
  * incremental state machine driven by audio_scene_poll(), one DSP
  * setter call per call, so the dispatch path never blocks on the
- * ~170-transaction I2C sequence.
+ * ~170-transaction I2C sequence. Live edits (staged SCENE_WRITE
+ * commits, baseline changes) run that machine differentially: only
+ * the parameters that differ from the last applied state, with no
+ * fade, so a parameter drag costs one setter call per change.
  *
  * Holds the scene state, the operator baseline balance, per-owner
  * source trims, the enforced saturation boundary, and the
@@ -118,9 +121,20 @@ static int baseline_staged;
  * mid-flight can never tear the running sequence: they coalesce into
  * a pending target that a fresh machine applies when this one
  * reaches its terminal state.
+ *
+ * Differential mode (the fast path): a live single-parameter edit --
+ * a staged SCENE_WRITE commit or a direct baseline change -- runs
+ * the same machine with a todo list of only the parameters that
+ * differ from the last successfully applied state: no fade, no
+ * restore, one setter per changed parameter. Scene selects and DSP
+ * re-inits keep the full fade-commit-restore sequence above (they
+ * replace the whole chain at once), so a slider drag no longer
+ * multiplies into fifteen-write machines that starve the Zorro
+ * service loop.
  */
 enum commit_phase {
 	COMMIT_FADE,         /* verified fade of the output to zero */
+	COMMIT_FAST,         /* differential: the changed parameters only */
 	COMMIT_LPF,
 	COMMIT_EQ,           /* eq_band in flight, 0..9 */
 	COMMIT_PREF,
@@ -146,11 +160,42 @@ static int commit_stepping;
  * while a machine was running. When the machine reaches its terminal
  * state, a fresh machine starts toward pending_target unless it
  * equals the index just applied AND no table changed since that
- * machine started (a redundant re-select coalesces to nothing).
+ * machine started (a redundant re-select coalesces to nothing). The
+ * follow-up runs the mode its origin asked for.
  */
 static int pending_valid;
 static uint8_t pending_target;
 static int pending_dirty; /* live tables changed mid-machine */
+static int pending_fast;  /* the coalesced follow-up is differential */
+
+/*
+ * The last state a machine left on the DSP: the scene definition, the
+ * resolved output volume/pan it ended at, and (last_mixer_stage
+ * below) the mixer legs -- the baseline the differential commit
+ * diffs against. Updated ONLY when a machine completes successfully;
+ * a failed machine leaves it at the pre-failure state on purpose, so
+ * the retry rewrites the full diff. Invalid until the first success
+ * (a differential commit then writes everything).
+ */
+static struct audio_scene_def last_applied_scene;
+static int last_applied_vol;  /* resolved (possibly reduced) volume */
+static int last_applied_pan;
+static int last_applied_valid;
+
+/* One differential todo entry: a DSP setter call with its arguments. */
+enum fast_op {
+	FAST_LPF,    /* audio_adau_set_lpf_params(a) */
+	FAST_EQ,     /* audio_adau_set_eq_gain(a, b) */
+	FAST_PREF,   /* audio_adau_set_prefactor(a) */
+	FAST_MIXER,  /* audio_adau_set_mixer_vol(a, b) */
+	FAST_VOLPAN  /* audio_adau_set_vol_pan(a, b) */
+};
+
+struct fast_step {
+	int op;
+	int a;
+	int b;
+};
 
 /*
  * Staged-commit rollback (U4 review fix): commit_staged takes the
@@ -360,7 +405,8 @@ static int restage_mixer(struct mixer_stage *stage)
 	return audio_adau_set_mixer_vol(stage->paula, stage->ax);
 }
 /* The running machine, snapshotting the volume_resolution and
- * mixer_stage types defined above. */
+ * mixer_stage types defined above. In differential mode it carries a
+ * precomputed todo list instead of the fade/restore envelope. */
 struct commit_machine {
 	enum commit_phase phase;
 	int eq_band;
@@ -370,9 +416,83 @@ struct commit_machine {
 	struct mixer_stage stage;      /* composed at machine start */
 	int failed;
 	int owns_rollback; /* this machine applies a staged commit's tables */
+	int fast;          /* differential mode: todo list, no fade */
+	struct fast_step todo[1 + AUDIO_SCENE_EQ_BANDS + 3];
+	int todo_count;
+	int todo_next;     /* next todo entry to issue */
 };
 
 static struct commit_machine commit;
+
+/* Record the state a successful machine leaves on the DSP: the scene
+ * definition, its resolved output volume/pan, and the mixer legs --
+ * the baseline the next differential commit diffs against. */
+static void fast_record_applied(const struct audio_scene_def *scene,
+	const struct volume_resolution *vol,
+	const struct mixer_stage *stage)
+{
+	last_applied_scene = *scene;
+	last_applied_vol = vol->applied_volume;
+	last_applied_pan = scene->pan;
+	last_mixer_stage = *stage;
+	last_applied_valid = 1;
+}
+
+/*
+ * Build the differential todo list at machine start: one setter per
+ * parameter that differs from the last applied state, in the commit
+ * order -- LPF, the changed EQ bands ascending, prefactor, the mixer
+ * legs, the output volume/pan. With no recorded state (before any
+ * success) everything is written. An empty diff is legitimate: the
+ * machine then completes on its first poll with zero DSP writes and
+ * the staging it consumed stays consumed (a no-op commit is still a
+ * commit).
+ */
+static void fast_todo_build(void)
+{
+	struct fast_step *todo = commit.todo;
+	const struct audio_scene_def *scene = &commit.scene;
+	int all = !last_applied_valid;
+	int n = 0;
+	int i;
+
+	if (all || scene->lpf_hz != last_applied_scene.lpf_hz) {
+		todo[n].op = FAST_LPF;
+		todo[n].a = scene->lpf_hz;
+		todo[n].b = 0;
+		n++;
+	}
+	for (i = 0; i < AUDIO_SCENE_EQ_BANDS; i++) {
+		if (all || scene->eq[i] != last_applied_scene.eq[i]) {
+			todo[n].op = FAST_EQ;
+			todo[n].a = i;
+			todo[n].b = scene->eq[i];
+			n++;
+		}
+	}
+	if (all || scene->prefactor != last_applied_scene.prefactor) {
+		todo[n].op = FAST_PREF;
+		todo[n].a = scene->prefactor;
+		todo[n].b = 0;
+		n++;
+	}
+	if (all || commit.stage.paula != last_mixer_stage.paula ||
+			commit.stage.ax != last_mixer_stage.ax) {
+		todo[n].op = FAST_MIXER;
+		todo[n].a = commit.stage.paula;
+		todo[n].b = commit.stage.ax;
+		n++;
+	}
+	if (all || commit.vol.applied_volume != last_applied_vol ||
+			scene->pan != last_applied_pan) {
+		todo[n].op = FAST_VOLPAN;
+		todo[n].a = commit.vol.applied_volume;
+		todo[n].b = scene->pan;
+		n++;
+	}
+	commit.todo_count = n;
+	commit.todo_next = 0;
+}
 
 /*
  * The single commit path (KTD7), as an incremental machine: fade the
@@ -385,14 +505,18 @@ static struct commit_machine commit;
  * I2C, audio_scene_poll() drives the steps (one setter call per
  * call), and a coalesced pending target chains a fresh machine at
  * completion so two rapid scene switches can never tear each other.
+ * A live edit (staged commit, direct baseline change) runs the same
+ * machine differentially: the changed parameters only, no fade and
+ * no restore, so a parameter drag costs one setter call per change
+ * instead of the whole fifteen-write sequence.
  */
-static void commit_begin(uint8_t index)
+static void commit_begin(uint8_t index, int fast)
 {
 	commit.scene_index = index;
 	commit.scene = scenes[index];
 	commit.eq_band = 0;
 	commit.failed = 0;
-	commit.phase = COMMIT_FADE;
+	commit.fast = fast;
 	/* The machine applies a consistent snapshot: mid-flight table
 	 * edits belong to the next machine. Both possible reduction
 	 * events are emitted here, once per machine, exactly as the
@@ -406,11 +530,18 @@ static void commit_begin(uint8_t index)
 	if (commit.stage.bounded)
 		emit_gain_reduction(commit.stage.requested,
 			commit.stage.applied);
-	last_mixer_stage = commit.stage;
 	commit.owns_rollback = rollback.valid;
 	pending_valid = 0;
 	pending_target = 0;
 	pending_dirty = 0;
+	pending_fast = 0;
+	if (fast) {
+		fast_todo_build();
+		commit.phase = commit.todo_count ? COMMIT_FAST :
+			COMMIT_DONE;
+	} else {
+		commit.phase = COMMIT_FADE;
+	}
 	commit_in_progress = 1;
 }
 
@@ -443,15 +574,22 @@ static void commit_finish(void)
 		pending_dirty = 0;
 		return;
 	}
+	/* Success: the DSP now holds this machine's snapshot. Record it
+	 * as the state the next differential commit diffs against -- a
+	 * failed machine records nothing, so its retry rewrites the full
+	 * diff against the state before the failure. */
+	fast_record_applied(&commit.scene, &commit.vol, &commit.stage);
 	if (rollback.valid && commit.owns_rollback)
 		rollback.valid = 0; /* the staged edits are now applied */
 	if (pending_valid &&
 		(pending_target != commit.scene_index || pending_dirty)) {
 		uint8_t target = pending_target;
+		int fast = pending_fast;
 
 		pending_valid = 0;
 		pending_dirty = 0;
-		commit_begin(target);
+		pending_fast = 0;
+		commit_begin(target, fast);
 	}
 }
 
@@ -465,6 +603,33 @@ static void commit_step(void)
 		rc = audio_adau_set_vol_pan(0, scene->pan);
 		commit.phase = COMMIT_LPF;
 		break;
+	case COMMIT_FAST: {
+		const struct fast_step *step = &commit.todo[commit.todo_next];
+
+		/* One changed parameter per poll, same as the full
+		 * sequence's cadence; the output was never faded, so
+		 * there is nothing to restore afterwards. */
+		switch (step->op) {
+		case FAST_LPF:
+			rc = audio_adau_set_lpf_params(step->a);
+			break;
+		case FAST_EQ:
+			rc = audio_adau_set_eq_gain(step->a, step->b);
+			break;
+		case FAST_PREF:
+			rc = audio_adau_set_prefactor(step->a);
+			break;
+		case FAST_MIXER:
+			rc = audio_adau_set_mixer_vol(step->a, step->b);
+			break;
+		default:
+			rc = audio_adau_set_vol_pan(step->a, step->b);
+			break;
+		}
+		if (rc == 0 && ++commit.todo_next >= commit.todo_count)
+			commit.phase = COMMIT_DONE;
+		break;
+	}
 	case COMMIT_LPF:
 		rc = audio_adau_set_lpf_params(scene->lpf_hz);
 		commit.eq_band = 0;
@@ -819,10 +984,23 @@ void audio_scene_init(void)
 	pending_valid = 0;
 	pending_target = 0;
 	pending_dirty = 0;
+	pending_fast = 0;
 	memset(&rollback, 0, sizeof(rollback));
 	memset(&last_mixer_stage, 0, sizeof(last_mixer_stage));
-	last_mixer_stage.paula = baseline_paula;
-	last_mixer_stage.ax = baseline_ax;
+	/* audio_adau_init leaves the DSP holding the power-on state the
+	 * module defaults describe (scene 0 at the default baseline
+	 * legs); record it as the applied state so the first
+	 * differential commit diffs against the truth. Boot's
+	 * apply_after_dsp_init re-establishes it through real writes. */
+	{
+		struct volume_resolution vol;
+		struct mixer_stage stage;
+
+		resolve_output_volume(&scenes[active_scene_index], &vol);
+		compute_mixer_stage(vol.chain_linear * vol.linear, &stage);
+		fast_record_applied(&scenes[active_scene_index], &vol,
+			&stage);
+	}
 	gain_reduction_count = 0;
 	have_last_gain_reduction = 0;
 	meter_reset_all();
@@ -842,7 +1020,12 @@ int audio_scene_apply_after_dsp_init(void)
 	commit_in_progress = 0;
 	pending_valid = 0;
 	pending_dirty = 0;
+	pending_fast = 0;
 	rollback.valid = 0;
+	/* The DSP was replaced: whatever this module recorded as applied
+	 * describes hardware that no longer exists. The full machine
+	 * below rewrites everything and re-records on success. */
+	last_applied_valid = 0;
 	gain_reduction_count = 0;
 	have_last_gain_reduction = 0;
 	memset(trims, 0, sizeof(trims));
@@ -852,7 +1035,7 @@ int audio_scene_apply_after_dsp_init(void)
 	meter_reset_all();
 	/* The reset path has no client waiting on the reply, so the
 	 * machine runs synchronously to its terminal state here. */
-	commit_begin(active_scene_index);
+	commit_begin(active_scene_index, 0);
 	commit_flush();
 	return commit.failed ? -1 : 0;
 }
@@ -881,9 +1064,11 @@ int audio_scene_select(uint8_t index)
 		 * snapshot), then a fresh machine applies this target. */
 		pending_valid = 1;
 		pending_target = index;
+		pending_fast = 0;
 		return 0;
 	}
-	commit_begin(index);
+	/* A scene select replaces the whole chain: full fade path. */
+	commit_begin(index, 0);
 	return 0;
 }
 
@@ -901,9 +1086,11 @@ int audio_scene_write(uint8_t index, const struct audio_scene_def *def)
 		pending_valid = 1;
 		pending_target = index;
 		pending_dirty = 1;
+		pending_fast = 0;
 		return 0;
 	}
-	commit_begin(index);
+	/* A whole-definition edit replaces the chain: full fade path. */
+	commit_begin(index, 0);
 	return 0;
 }
 
@@ -926,14 +1113,17 @@ int audio_scene_set_baseline(uint8_t paula, uint8_t ax)
 	baseline_paula = paula;
 	baseline_ax = ax;
 	/* The baseline participates in the scene-alone level, so the
-	 * change re-runs the one commit path. */
+	 * change re-runs the one commit path -- differentially: a live
+	 * balance change costs only the mixer (and, if the resolution
+	 * moved, the output volume) write. */
 	if (commit_in_progress) {
 		pending_valid = 1;
 		pending_target = active_scene_index;
 		pending_dirty = 1;
+		pending_fast = 1;
 		return 0;
 	}
-	commit_begin(active_scene_index);
+	commit_begin(active_scene_index, 1);
 	return 0;
 }
 
@@ -1015,9 +1205,9 @@ int audio_scene_commit_staged(uint8_t index)
 	/* The applying machine reads the live tables, so the staged
 	 * edits are taken optimistically first; if that machine
 	 * ultimately fails, the pre-commit state saved in rollback is
-	 * restored so the staging survives and a retry re-issues the
-	 * whole sequence instead of returning OK with zero writes (the
-	 * edit set would be lost). */
+	 * restored and the failed machine does NOT record its state as
+	 * applied, so a retry re-writes the diff instead of returning OK
+	 * with zero writes (the edit set would be lost). */
 	memset(&rollback, 0, sizeof(rollback));
 	rollback.scene_index = index;
 
@@ -1052,9 +1242,12 @@ int audio_scene_commit_staged(uint8_t index)
 		pending_valid = 1;
 		pending_target = active_scene_index;
 		pending_dirty = 1;
+		pending_fast = 1;
 		return 0;
 	}
-	commit_begin(active_scene_index);
+	/* A live edit commit runs differentially: only the parameters
+	 * the staging changed, no fade envelope. */
+	commit_begin(active_scene_index, 1);
 	return 0;
 }
 

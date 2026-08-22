@@ -626,8 +626,8 @@ static void test_trim_lifecycle(void)
 /*
  * Staged-edit commit failure: the staging is consumed only on
  * success, so a failed write sequence leaves the draft pending (and
- * the live tables untouched) and a retry re-issues the full commit
- * instead of returning OK with zero writes.
+ * the live tables untouched) and a retry re-writes the diff instead
+ * of returning OK with zero writes.
  */
 static void test_commit_failure_keeps_staging(void)
 {
@@ -651,8 +651,8 @@ static void test_commit_failure_keeps_staging(void)
 	check(audio_scene_commit_staged(0) == 0,
 		"retry after failure accepted", NULL);
 	pump_scene();
-	check(write_count == 15,
-		"retry re-issues the full write sequence",
+	check(write_count == 1,
+		"retry re-writes the changed parameter only",
 		fmt("writes=%d", write_count));
 	check(audio_scene_get(0)->volume == 70,
 		"retried commit lands the staged edit", NULL);
@@ -676,6 +676,9 @@ static void test_commit_failure_keeps_staging(void)
 	check(audio_scene_commit_staged(0) == 0,
 		"baseline retry accepted", NULL);
 	pump_scene();
+	check(write_count == 1,
+		"baseline retry re-writes the mixer diff alone",
+		fmt("writes=%d", write_count));
 	check(audio_scene_baseline_paula() == 150 &&
 		audio_scene_baseline_ax() == 40,
 		"retried baseline commit lands", NULL);
@@ -721,6 +724,7 @@ static void test_apply_failure_restores_volume(void)
 static void test_dispatch_does_not_block(void)
 {
 	struct audio_scene_def def;
+	int a = -1, b = -1;
 
 	audio_scene_init();
 	clear_writes();
@@ -755,15 +759,21 @@ static void test_dispatch_does_not_block(void)
 		"baseline change issued zero DSP writes before any poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 15,
-		"poll drains the baseline commit",
+	/* A baseline change is a live edit: the differential commit
+	 * rewrites only the mixer legs it moved (the resolved output
+	 * volume is unchanged), with no fade envelope. */
+	check(write_count == 1,
+		"poll drains the baseline diff: one mixer write",
 		fmt("writes=%d", write_count));
+	check(last_write(WRITE_MIXER, &a, &b) && a == 140 && b == 70,
+		"baseline diff writes the new mixer legs",
+		fmt("v1=%d v2=%d", a, b));
 }
-
 /*
- * Restore-write failure: the sequence's last write fails; the machine
- * retries it once best-effort and finishes as a FAILED commit, so the
- * staged rollback still applies and the staging survives for a retry.
+ * Restore-write failure: the differential commit's only write (the
+ * changed volume) fails; the machine retries it once best-effort and
+ * finishes as a FAILED commit, so the staged rollback still applies
+ * and the staging survives for a retry.
  */
 static void test_restore_failure_keeps_staging(void)
 {
@@ -779,8 +789,8 @@ static void test_restore_failure_keeps_staging(void)
 	check(audio_scene_get(0)->volume == 100,
 		"restore-write failure rolls the staging back",
 		fmt("volume=%u", audio_scene_get(0)->volume));
-	check(count_writes(WRITE_VOLPAN) == 3,
-		"fade + failed restore + one best-effort retry",
+	check(count_writes(WRITE_VOLPAN) == 2,
+		"failed diff write + one best-effort retry",
 		fmt("volpan=%d", count_writes(WRITE_VOLPAN)));
 
 	fail_volpan_restore = 0;
@@ -789,6 +799,149 @@ static void test_restore_failure_keeps_staging(void)
 	check(audio_scene_get(0)->volume == 70,
 		"retried commit lands the staged edit",
 		fmt("volume=%u", audio_scene_get(0)->volume));
+}
+
+/*
+ * Differential commits: a staged live edit writes only the changed
+ * parameters -- no fade, no full sequence, no restore -- in the
+ * commit order (LPF, EQ bands ascending, prefactor, mixer, vol/pan),
+ * and a repeat of the applied state commits with zero DSP writes.
+ */
+static void test_fast_commit_diff(void)
+{
+	int kind = 0, a = 0, b = 0;
+	int ok;
+
+	audio_scene_init();
+	clear_writes();
+
+	/* One changed parameter: exactly that setter, nothing else. */
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_VOLUME, 70)
+		== 0, "stage a volume edit", NULL);
+	check(audio_scene_commit_staged(0) == 0, "commit dispatch", NULL);
+	check(write_count == 0,
+		"fast commit issues no DSP writes before poll",
+		fmt("writes=%d", write_count));
+	pump_scene();
+	check(write_count == 1,
+		"single-parameter commit writes exactly one setter",
+		fmt("writes=%d", write_count));
+	ok = log_at(0, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+		a == 70 && b == 50;
+	check(ok, "volume edit is one VOLPAN write, no fade or restore",
+		fmt("kind=%d vol=%d pan=%d", kind, a, b));
+	check(audio_scene_gain_reduction_events() == 0,
+		"within-boundary fast commit emits no event", NULL);
+
+	clear_writes();
+
+	/* Several parameters plus a staged baseline: only the changed
+	 * set, in the fixed order. The EQ edits are cuts so the master
+	 * chain stays at unity boost and the baseline legs fit. */
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_LPF,
+		12000) == 0, "stage an LPF edit", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_EQ_BAND_3,
+		40) == 0, "stage an EQ edit", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_EQ_BAND_9,
+		40) == 0, "stage another EQ edit", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_PREFACTOR,
+		55) == 0, "stage a prefactor edit", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_BASELINE,
+		SDK_AUDIO_BALANCE_PACK(140, 60)) == 0,
+		"stage a baseline edit", NULL);
+	check(audio_scene_commit_staged(0) == 0, "commit dispatch", NULL);
+	check(write_count == 0,
+		"fast commit issues no DSP writes before poll",
+		fmt("writes=%d", write_count));
+	pump_scene();
+	check(write_count == 5,
+		"multi-parameter commit writes only the changed set",
+		fmt("writes=%d", write_count));
+	ok = log_at(0, &kind, &a, &b) && kind == WRITE_LPF &&
+		a == 12000;
+	check(ok, "diff order: LPF first",
+		fmt("kind=%d f0=%d", kind, a));
+	ok = log_at(1, &kind, &a, &b) && kind == WRITE_EQ &&
+		a == 2 && b == 40;
+	check(ok, "diff order: first changed EQ band (ascending)",
+		fmt("kind=%d band=%d gain=%d", kind, a, b));
+	ok = log_at(2, &kind, &a, &b) && kind == WRITE_EQ &&
+		a == 8 && b == 40;
+	check(ok, "diff order: second changed EQ band",
+		fmt("kind=%d band=%d gain=%d", kind, a, b));
+	ok = log_at(3, &kind, &a, &b) && kind == WRITE_PREF && a == 55;
+	check(ok, "diff order: prefactor after the EQ bands",
+		fmt("kind=%d pre=%d", kind, a));
+	ok = log_at(4, &kind, &a, &b) && kind == WRITE_MIXER &&
+		a == 140 && b == 60;
+	check(ok, "diff order: staged mixer legs after prefactor",
+		fmt("kind=%d v1=%d v2=%d", kind, a, b));
+
+	clear_writes();
+
+	/* Re-staging the applied state: nothing differs, so the commit
+	 * completes with zero DSP writes -- and still consumes the
+	 * staging (a no-op commit is a valid commit). */
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_VOLUME, 70)
+		== 0, "stage the applied volume again", NULL);
+	check(audio_scene_commit_staged(0) == 0,
+		"identical re-commit accepted", NULL);
+	check(write_count == 0,
+		"identical staged write issues no writes before poll",
+		fmt("writes=%d", write_count));
+	pump_scene();
+	check(write_count == 0,
+		"identical staged write commits with zero DSP writes",
+		fmt("writes=%d", write_count));
+	check(audio_scene_get(0) != NULL &&
+		audio_scene_get(0)->volume == 70,
+		"no-op commit still consumes the staging", NULL);
+}
+
+/*
+ * A failed fast commit does not record its state as applied: the
+ * retry re-derives the diff against the pre-failure state and
+ * re-writes every changed parameter, including the one the failed
+ * machine never reached.
+ */
+static void test_fast_commit_failure_keeps_diff(void)
+{
+	int kind = 0, a = 0, b = 0;
+	int ok;
+
+	audio_scene_init();
+	clear_writes();
+
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_EQ_BAND_5,
+		40) == 0, "stage an EQ edit", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_VOLUME, 70)
+		== 0, "stage a volume edit", NULL);
+	fail_eq_band = 4; /* fail the diff's first write */
+	check(audio_scene_commit_staged(0) == 0, "commit dispatch", NULL);
+	pump_scene();
+	check(audio_scene_get(0)->volume == 100 &&
+		audio_scene_get(0)->eq[4] == 50,
+		"failed fast commit rolls the staging back",
+		fmt("volume=%u eq4=%u", audio_scene_get(0)->volume,
+			audio_scene_get(0)->eq[4]));
+
+	clear_writes();
+	check(audio_scene_commit_staged(0) == 0, "retry accepted", NULL);
+	pump_scene();
+	check(write_count == 2,
+		"retry after failure re-writes the full diff",
+		fmt("writes=%d", write_count));
+	ok = log_at(0, &kind, &a, &b) && kind == WRITE_EQ &&
+		a == 4 && b == 40;
+	check(ok, "retry rewrites the parameter the failure hit",
+		fmt("kind=%d band=%d gain=%d", kind, a, b));
+	ok = log_at(1, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+		a == 70 && b == 50;
+	check(ok, "retry rewrites the parameter the failure never reached",
+		fmt("kind=%d vol=%d pan=%d", kind, a, b));
+	check(audio_scene_get(0)->volume == 70 &&
+		audio_scene_get(0)->eq[4] == 40,
+		"retried diff lands the staged edits", NULL);
 }
 
 int main(void)
@@ -808,6 +961,9 @@ int main(void)
 	test_apply_failure_restores_volume();
 	test_dispatch_does_not_block();
 	test_restore_failure_keeps_staging();
+
+	test_fast_commit_diff();
+	test_fast_commit_failure_keeps_diff();
 
 	if (failures == 0) {
 		printf("audio_scene_test: all tests passed\n");

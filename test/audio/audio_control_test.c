@@ -268,6 +268,8 @@ static void test_staged_write_accumulates(void)
 {
 	struct SDKAudioSceneWritePayload wr;
 	uint16_t status;
+	int kind = 0, a = 0, b = 0;
+	int ok;
 
 	audio_scene_init();
 	clear_writes();
@@ -313,8 +315,9 @@ static void test_staged_write_accumulates(void)
 		"rejected staging issues no DSP writes",
 		fmt("writes=%d", write_count));
 
-	/* COMMIT applies everything staged so far through one
-	 * fade-commit-restore sequence. */
+	/* COMMIT applies everything staged so far through the
+	 * differential path: only the changed parameters, in commit
+	 * order, with no fade and no restore. */
 	put32(wr.param, SDK_AUDIO_SCENE_PARAM_VOLUME);
 	put32(wr.value, 60);
 	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
@@ -326,12 +329,17 @@ static void test_staged_write_accumulates(void)
 		"commit dispatch issued no DSP writes before poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 15,
-		"commit is exactly one 15-write fade/params/restore sequence",
+	check(write_count == 2,
+		"staged commit writes only the two changed parameters",
 		fmt("writes=%d", write_count));
-	check_commit_sequence("staged commit", 0, 23900,
-		(const uint8_t[]){ 50, 50, 50, 30, 50, 50, 50, 50, 50, 50 },
-		50, 60, 50, 128, 64);
+	ok = log_at(0, &kind, &a, &b) && kind == WRITE_EQ &&
+		a == 3 && b == 30;
+	check(ok, "staged commit writes the changed EQ band",
+		fmt("kind=%d band=%d gain=%d", kind, a, b));
+	ok = log_at(1, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+		a == 60 && b == 50;
+	check(ok, "staged commit follows with the changed volume",
+		fmt("kind=%d vol=%d pan=%d", kind, a, b));
 	check(audio_scene_get(0) != NULL &&
 		audio_scene_get(0)->eq[3] == 30 &&
 		audio_scene_get(0)->volume == 60,
@@ -747,6 +755,8 @@ static void test_baseline_write_path(void)
 {
 	struct SDKAudioSceneWritePayload wr;
 	struct SDKAudioControlStateGetPayload get;
+	int kind = 0, a = 0, b = 0;
+	int ok;
 
 	audio_scene_init();
 	clear_writes();
@@ -763,11 +773,16 @@ static void test_baseline_write_path(void)
 		audio_scene_baseline_ax() == 40,
 		"baseline stored", NULL);
 	pump_scene();
-	check(write_count == 15,
-		"baseline change commits through the single commit path",
+	/* The staged baseline is a live edit: the differential commit
+	 * moves only the mixer legs (the scene's parameters and its
+	 * resolved output volume are unchanged). */
+	check(write_count == 1,
+		"baseline change commits as a one-write mixer diff",
 		fmt("writes=%d", write_count));
-	check_commit_sequence("baseline", 0, 23900, eq_unity, 50, 100, 50,
-		150, 40);
+	ok = log_at(0, &kind, &a, &b) && kind == WRITE_MIXER &&
+		a == 150 && b == 40;
+	check(ok, "baseline diff writes the new mixer legs",
+		fmt("kind=%d v1=%d v2=%d", kind, a, b));
 	check(audio_scene_gain_reduction_events() == 0,
 		"within-boundary baseline emits no event", NULL);
 
