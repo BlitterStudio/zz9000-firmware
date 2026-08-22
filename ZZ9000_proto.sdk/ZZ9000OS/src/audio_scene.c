@@ -187,8 +187,10 @@ enum fast_op {
 	FAST_LPF,    /* audio_adau_set_lpf_params(a) */
 	FAST_EQ,     /* audio_adau_set_eq_gain(a, b) */
 	FAST_PREF,   /* audio_adau_set_prefactor(a) */
-	FAST_MIXER,  /* audio_adau_set_mixer_vol(a, b) */
-	FAST_VOLPAN  /* audio_adau_set_vol_pan(a, b) */
+	FAST_MIXER_P, /* audio_adau_set_mixer_leg(0, a) - Paula */
+	FAST_MIXER_A, /* audio_adau_set_mixer_leg(1, a) - AX */
+	FAST_VOLPAN_L, /* audio_adau_set_vol_pan_side(0, a, b) */
+	FAST_VOLPAN_R  /* audio_adau_set_vol_pan_side(1, a, b) */
 };
 
 struct fast_step {
@@ -417,7 +419,7 @@ struct commit_machine {
 	int failed;
 	int owns_rollback; /* this machine applies a staged commit's tables */
 	int fast;          /* differential mode: todo list, no fade */
-	struct fast_step todo[1 + AUDIO_SCENE_EQ_BANDS + 3];
+	struct fast_step todo[1 + AUDIO_SCENE_EQ_BANDS + 5];
 	int todo_count;
 	int todo_next;     /* next todo entry to issue */
 };
@@ -476,16 +478,23 @@ static void fast_todo_build(void)
 		todo[n].b = 0;
 		n++;
 	}
-	if (all || commit.stage.paula != last_mixer_stage.paula ||
-			commit.stage.ax != last_mixer_stage.ax) {
-		todo[n].op = FAST_MIXER;
+	if (all || commit.stage.paula != last_mixer_stage.paula) {
+		todo[n].op = FAST_MIXER_P;
 		todo[n].a = commit.stage.paula;
-		todo[n].b = commit.stage.ax;
+		n++;
+	}
+	if (all || commit.stage.ax != last_mixer_stage.ax) {
+		todo[n].op = FAST_MIXER_A;
+		todo[n].a = commit.stage.ax;
 		n++;
 	}
 	if (all || commit.vol.applied_volume != last_applied_vol ||
 			scene->pan != last_applied_pan) {
-		todo[n].op = FAST_VOLPAN;
+		todo[n].op = FAST_VOLPAN_L;
+		todo[n].a = commit.vol.applied_volume;
+		todo[n].b = scene->pan;
+		n++;
+		todo[n].op = FAST_VOLPAN_R;
 		todo[n].a = commit.vol.applied_volume;
 		todo[n].b = scene->pan;
 		n++;
@@ -619,11 +628,17 @@ static void commit_step(void)
 		case FAST_PREF:
 			rc = audio_adau_set_prefactor(step->a);
 			break;
-		case FAST_MIXER:
-			rc = audio_adau_set_mixer_vol(step->a, step->b);
+		case FAST_MIXER_P:
+			rc = audio_adau_set_mixer_leg(0, step->a);
+			break;
+		case FAST_MIXER_A:
+			rc = audio_adau_set_mixer_leg(1, step->a);
+			break;
+		case FAST_VOLPAN_L:
+			rc = audio_adau_set_vol_pan_side(0, step->a, step->b);
 			break;
 		default:
-			rc = audio_adau_set_vol_pan(step->a, step->b);
+			rc = audio_adau_set_vol_pan_side(1, step->a, step->b);
 			break;
 		}
 		if (rc == 0 && ++commit.todo_next >= commit.todo_count)

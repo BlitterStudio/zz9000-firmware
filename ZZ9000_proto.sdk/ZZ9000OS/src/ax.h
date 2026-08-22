@@ -101,5 +101,7 @@ int audio_adau_set_prefactor(int pre);
 /* vol range: 0 = muted .. 50 = -6 dB .. 100 = 0 dB
  * pan range: 0 = left .. 50 = center .. 100 = right */
 int audio_adau_set_vol_pan(int vol, int pan);
+int audio_adau_set_vol_pan_side(int side, int vol, int pan);
+int audio_adau_set_mixer_leg(int leg, int value);
 
 #endif

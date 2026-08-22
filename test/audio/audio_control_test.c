@@ -129,6 +129,18 @@ int audio_adau_set_vol_pan(int vol, int pan)
 	return 0;
 }
 
+int audio_adau_set_vol_pan_side(int side, int vol, int pan)
+{
+	record_write(WRITE_VOLPAN_SIDE0 + side, vol, pan);
+	return 0;
+}
+
+int audio_adau_set_mixer_leg(int leg, int value)
+{
+	record_write(WRITE_MIXER_P + leg, value, 0);
+	return 0;
+}
+
 /* ---- assertions (suite convention) ---- */
 
 static int failures;
@@ -329,16 +341,20 @@ static void test_staged_write_accumulates(void)
 		"commit dispatch issued no DSP writes before poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 2,
-		"staged commit writes only the two changed parameters",
+	check(write_count == 3,
+		"staged commit writes only the changed set (vol per-side)",
 		fmt("writes=%d", write_count));
 	ok = log_at(0, &kind, &a, &b) && kind == WRITE_EQ &&
 		a == 3 && b == 30;
 	check(ok, "staged commit writes the changed EQ band",
 		fmt("kind=%d band=%d gain=%d", kind, a, b));
-	ok = log_at(1, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+	ok = log_at(1, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
 		a == 60 && b == 50;
-	check(ok, "staged commit follows with the changed volume",
+	check(ok, "staged commit follows with the changed volume (L)",
+		fmt("kind=%d vol=%d pan=%d", kind, a, b));
+	ok = log_at(2, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE1 &&
+		a == 60 && b == 50;
+	check(ok, "staged commit follows with the changed volume (R)",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
 	check(audio_scene_get(0) != NULL &&
 		audio_scene_get(0)->eq[3] == 30 &&
@@ -776,13 +792,17 @@ static void test_baseline_write_path(void)
 	/* The staged baseline is a live edit: the differential commit
 	 * moves only the mixer legs (the scene's parameters and its
 	 * resolved output volume are unchanged). */
-	check(write_count == 1,
-		"baseline change commits as a one-write mixer diff",
+	check(write_count == 2,
+		"baseline change commits as a per-leg mixer diff",
 		fmt("writes=%d", write_count));
-	ok = log_at(0, &kind, &a, &b) && kind == WRITE_MIXER &&
-		a == 150 && b == 40;
-	check(ok, "baseline diff writes the new mixer legs",
-		fmt("kind=%d v1=%d v2=%d", kind, a, b));
+	ok = log_at(0, &kind, &a, &b) && kind == WRITE_MIXER_P &&
+		a == 150;
+	check(ok, "baseline diff writes the Paula mixer leg",
+		fmt("kind=%d leg=%d", kind, a));
+	ok = log_at(1, &kind, &a, &b) && kind == WRITE_MIXER_A &&
+		a == 40;
+	check(ok, "baseline diff writes the AX mixer leg",
+		fmt("kind=%d leg=%d", kind, a));
 	check(audio_scene_gain_reduction_events() == 0,
 		"within-boundary baseline emits no event", NULL);
 
@@ -885,7 +905,7 @@ static void test_unsupported_and_validation(void)
 	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
 		SDK_STATUS_OK, "pan-only edit commits", NULL);
 	pump_scene();
-	check(last_write(WRITE_VOLPAN, &a, &b) && a == 100 && b == 60,
+	check(last_write(WRITE_VOLPAN_SIDE1, &a, &b) && a == 100 && b == 60,
 		"rejected stage left no draft behind",
 		fmt("vol=%d pan=%d", a, b));
 	put32(wr.flags, 1U << 1);

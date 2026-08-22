@@ -15,7 +15,11 @@ enum {
 	WRITE_MIXER, /* audio_adau_set_mixer_vol(vol1, vol2) */
 	WRITE_PREF,  /* audio_adau_set_prefactor(pre) */
 	WRITE_EQ,    /* audio_adau_set_eq_gain(band, gain) */
-	WRITE_VOLPAN /* audio_adau_set_vol_pan(vol, pan) */
+	WRITE_VOLPAN, /* audio_adau_set_vol_pan(vol, pan) */
+	WRITE_VOLPAN_SIDE0, /* per-side split (differential path) */
+	WRITE_VOLPAN_SIDE1,
+	WRITE_MIXER_P, /* per-leg mixer split (differential path) */
+	WRITE_MIXER_A
 };
 
 #define WRITE_LOG_MAX 512

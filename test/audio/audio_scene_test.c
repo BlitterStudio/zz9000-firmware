@@ -86,6 +86,20 @@ int audio_adau_set_vol_pan(int vol, int pan)
 	return fail_next_write ? -1 : 0;
 }
 
+int audio_adau_set_vol_pan_side(int side, int vol, int pan)
+{
+	record_write(WRITE_VOLPAN_SIDE0 + side, vol, pan);
+	if (fail_volpan_restore && vol != 0)
+		return -1;
+	return fail_next_write ? -1 : 0;
+}
+
+int audio_adau_set_mixer_leg(int leg, int value)
+{
+	record_write(WRITE_MIXER_P + leg, value, 0);
+	return fail_next_write ? -1 : 0;
+}
+
 /* ---- assertions (audio_convert_test convention) ---- */
 
 static int failures;
@@ -464,9 +478,11 @@ static void test_baseline_trim_composition(void)
 	pump_scene();
 	check(audio_scene_baseline_paula() == 200 &&
 		audio_scene_baseline_ax() == 100, "baseline stored", NULL);
-	check(last_write(WRITE_MIXER, &a, &b) && a == 200 && b == 100,
-		"baseline restaged without clamp",
-		fmt("v1=%d v2=%d", a, b));
+	check(last_write(WRITE_MIXER_P, &a, &b) && a == 200 &&
+		last_write(WRITE_MIXER_A, &a, &b) && a == 100,
+		"baseline restaged without clamp (per-leg)",
+		fmt("p=%d a=%d", last_write(WRITE_MIXER_P, &a, &b) ? a : -1,
+			last_write(WRITE_MIXER_A, &a, &b) ? a : -1));
 	check(audio_scene_gain_reduction_events() == 0,
 		"baseline within boundary emits no event", NULL);
 
@@ -651,13 +667,13 @@ static void test_commit_failure_keeps_staging(void)
 	check(audio_scene_commit_staged(0) == 0,
 		"retry after failure accepted", NULL);
 	pump_scene();
-	check(write_count == 1,
-		"retry re-writes the changed parameter only",
+	check(write_count == 2,
+		"retry re-writes the changed parameter (both sides)",
 		fmt("writes=%d", write_count));
 	check(audio_scene_get(0)->volume == 70,
 		"retried commit lands the staged edit", NULL);
-	check(last_write(WRITE_VOLPAN, &a, &b) && a == 70 && b == 50,
-		"retry restores the staged output volume",
+	check(last_write(WRITE_VOLPAN_SIDE0, &a, &b) && a == 70 && b == 50,
+		"retry restores the staged output volume (L)",
 		fmt("vol=%d pan=%d", a, b));
 
 	/* A staged baseline joins the same rule: failure restores it. */
@@ -676,8 +692,8 @@ static void test_commit_failure_keeps_staging(void)
 	check(audio_scene_commit_staged(0) == 0,
 		"baseline retry accepted", NULL);
 	pump_scene();
-	check(write_count == 1,
-		"baseline retry re-writes the mixer diff alone",
+	check(write_count == 2,
+		"baseline retry re-writes the mixer diff (both legs)",
 		fmt("writes=%d", write_count));
 	check(audio_scene_baseline_paula() == 150 &&
 		audio_scene_baseline_ax() == 40,
@@ -762,12 +778,15 @@ static void test_dispatch_does_not_block(void)
 	/* A baseline change is a live edit: the differential commit
 	 * rewrites only the mixer legs it moved (the resolved output
 	 * volume is unchanged), with no fade envelope. */
-	check(write_count == 1,
-		"poll drains the baseline diff: one mixer write",
+	check(write_count == 2,
+		"poll drains the baseline diff: per-leg mixer writes",
 		fmt("writes=%d", write_count));
-	check(last_write(WRITE_MIXER, &a, &b) && a == 140 && b == 70,
-		"baseline diff writes the new mixer legs",
-		fmt("v1=%d v2=%d", a, b));
+	check(last_write(WRITE_MIXER_P, &a, &b) && a == 140 &&
+		last_write(WRITE_MIXER_A, &a, &b) && a == 70,
+		"baseline diff writes the new mixer legs (per-leg)",
+		fmt("p=%d a=%d",
+			last_write(WRITE_MIXER_P, &a, &b) ? a : -1,
+			last_write(WRITE_MIXER_A, &a, &b) ? a : -1));
 }
 /*
  * Restore-write failure: the differential commit's only write (the
@@ -789,9 +808,11 @@ static void test_restore_failure_keeps_staging(void)
 	check(audio_scene_get(0)->volume == 100,
 		"restore-write failure rolls the staging back",
 		fmt("volume=%u", audio_scene_get(0)->volume));
-	check(count_writes(WRITE_VOLPAN) == 2,
-		"failed diff write + one best-effort retry",
-		fmt("volpan=%d", count_writes(WRITE_VOLPAN)));
+	check(count_writes(WRITE_VOLPAN_SIDE0) == 1 &&
+		count_writes(WRITE_VOLPAN) == 1,
+		"failed diff side + one abort-restore attempt",
+		fmt("side0=%d volpan=%d", count_writes(WRITE_VOLPAN_SIDE0),
+			count_writes(WRITE_VOLPAN)));
 
 	fail_volpan_restore = 0;
 	check(audio_scene_commit_staged(0) == 0, "retry accepted", NULL);
@@ -823,12 +844,14 @@ static void test_fast_commit_diff(void)
 		"fast commit issues no DSP writes before poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 1,
-		"single-parameter commit writes exactly one setter",
+	check(write_count == 2,
+		"single-parameter commit writes per-side setters",
 		fmt("writes=%d", write_count));
-	ok = log_at(0, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+	ok = log_at(0, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
+		a == 70 && b == 50 &&
+		log_at(1, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE1 &&
 		a == 70 && b == 50;
-	check(ok, "volume edit is one VOLPAN write, no fade or restore",
+	check(ok, "volume edit is two per-side writes, no fade or restore",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
 	check(audio_scene_gain_reduction_events() == 0,
 		"within-boundary fast commit emits no event", NULL);
@@ -854,7 +877,7 @@ static void test_fast_commit_diff(void)
 		"fast commit issues no DSP writes before poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 5,
+	check(write_count == 6,
 		"multi-parameter commit writes only the changed set",
 		fmt("writes=%d", write_count));
 	ok = log_at(0, &kind, &a, &b) && kind == WRITE_LPF &&
@@ -872,10 +895,14 @@ static void test_fast_commit_diff(void)
 	ok = log_at(3, &kind, &a, &b) && kind == WRITE_PREF && a == 55;
 	check(ok, "diff order: prefactor after the EQ bands",
 		fmt("kind=%d pre=%d", kind, a));
-	ok = log_at(4, &kind, &a, &b) && kind == WRITE_MIXER &&
-		a == 140 && b == 60;
-	check(ok, "diff order: staged mixer legs after prefactor",
-		fmt("kind=%d v1=%d v2=%d", kind, a, b));
+	ok = log_at(4, &kind, &a, &b) && kind == WRITE_MIXER_P &&
+		a == 140;
+	check(ok, "diff order: Paula mixer leg after prefactor",
+		fmt("kind=%d leg=%d", kind, a));
+	ok = log_at(5, &kind, &a, &b) && kind == WRITE_MIXER_A &&
+		a == 60;
+	check(ok, "diff order: AX mixer leg last",
+		fmt("kind=%d leg=%d", kind, a));
 
 	clear_writes();
 
@@ -928,16 +955,20 @@ static void test_fast_commit_failure_keeps_diff(void)
 	clear_writes();
 	check(audio_scene_commit_staged(0) == 0, "retry accepted", NULL);
 	pump_scene();
-	check(write_count == 2,
+	check(write_count == 3,
 		"retry after failure re-writes the full diff",
 		fmt("writes=%d", write_count));
 	ok = log_at(0, &kind, &a, &b) && kind == WRITE_EQ &&
 		a == 4 && b == 40;
 	check(ok, "retry rewrites the parameter the failure hit",
 		fmt("kind=%d band=%d gain=%d", kind, a, b));
-	ok = log_at(1, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+	ok = log_at(1, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
 		a == 70 && b == 50;
 	check(ok, "retry rewrites the parameter the failure never reached",
+		fmt("kind=%d vol=%d pan=%d", kind, a, b));
+	ok = log_at(2, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE1 &&
+		a == 70 && b == 50;
+	check(ok, "retry writes both sides of the changed volume",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
 	check(audio_scene_get(0)->volume == 70 &&
 		audio_scene_get(0)->eq[4] == 40,

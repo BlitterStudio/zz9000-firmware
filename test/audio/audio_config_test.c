@@ -47,6 +47,16 @@ int audio_adau_set_vol_pan(int vol, int pan)
 	return 0;
 }
 
+int audio_adau_set_vol_pan_side(int side, int vol, int pan)
+{
+	(void)side; (void)vol; (void)pan; return 0;
+}
+
+int audio_adau_set_mixer_leg(int leg, int value)
+{
+	(void)leg; (void)value; return 0;
+}
+
 /* ---- assertions (suite convention) ---- */
 
 static int failures;

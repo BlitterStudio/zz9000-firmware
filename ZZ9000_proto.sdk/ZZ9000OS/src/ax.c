@@ -1274,6 +1274,17 @@ int audio_adau_set_mixer_vol(int vol1, int vol2) {
 	return 0;
 }
 
+int audio_adau_set_mixer_leg(int leg, int value) {
+	double g = ((double)value)/127.0;
+	uint8_t buf[4];
+
+	adau_to_5_23(g, buf);
+	return audio_adau_write_parameter(
+		(leg == 0) ? MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR
+			   : MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR,
+		buf);
+}
+
 int audio_adau_set_prefactor(int pre) {
 	double p = audio_adau_prefactor_gain(pre);
 
@@ -1317,6 +1328,30 @@ int audio_adau_set_vol_pan(int vol, int pan) {
 		return -1;
 	}
 	return 0;
+}
+
+/* Per-side variants for the differential commit path: one verified
+ * parameter write each, so a live edit step blocks the service loop
+ * for half the time of the paired setter. */
+int audio_adau_set_vol_pan_side(int side, int vol, int pan) {
+	LONG v;
+	double g;
+	uint8_t buf[4];
+
+	v = vol;
+	if (side == 0) {
+		if (pan > 50) v -= 2 * (pan - 50);
+	} else {
+		if (pan < 50) v -= 2 * (50 - pan);
+	}
+	if (v > 100) v = 100;
+	if (v < 0) v = 0;
+	g = .01f * (double)v;
+	adau_to_5_23(g, buf);
+	return audio_adau_write_parameter(
+		(side == 0) ? MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR
+			    : MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR,
+		buf);
 }
 
 double eq_omega(double fs, double f0) {
