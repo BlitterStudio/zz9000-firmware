@@ -327,6 +327,14 @@ static int apply_active_scene(void)
 	if (rc == 0 && audio_adau_set_vol_pan(vol.applied_volume,
 			scene->pan) != 0)
 		rc = -1;
+	if (rc != 0) {
+		/* A mid-sequence failure leaves the chain faded down and
+		 * half-written; best-effort restore of the resolved output
+		 * volume so the DAC is not left silent (a full retry goes
+		 * through the commit surface). */
+		printf("[scene] apply failed; restoring output volume\n");
+		(void)audio_adau_set_vol_pan(vol.applied_volume, scene->pan);
+	}
 	commit_in_progress = 0;
 	return rc;
 }
@@ -774,12 +782,29 @@ int audio_scene_stage_param(uint8_t index, uint32_t param,
 
 int audio_scene_commit_staged(uint8_t index)
 {
+	struct scene_staging saved_staging;
+	struct audio_scene_def saved_scene;
+	uint8_t saved_baseline_paula;
+	uint8_t saved_baseline_ax;
+	int saved_baseline_staged;
 	int apply = 0;
+	int rc;
 
 	if (!module_initialized || index >= AUDIO_SCENE_COUNT)
 		return -1;
 	if (commit_in_progress)
 		return AUDIO_SCENE_COMMIT_BUSY;
+
+	/* The apply below reads the live tables, so the staged edits are
+	 * taken optimistically first; if the write sequence fails, the
+	 * pre-commit state is restored so the staging survives and a
+	 * retry re-issues the whole sequence instead of returning OK
+	 * with zero writes (the edit set would be lost). */
+	saved_staging = staging[index];
+	saved_scene = scenes[index];
+	saved_baseline_paula = baseline_paula;
+	saved_baseline_ax = baseline_ax;
+	saved_baseline_staged = baseline_staged;
 
 	/* A staged operator baseline joins the same commit (R17). */
 	if (baseline_staged) {
@@ -795,7 +820,15 @@ int audio_scene_commit_staged(uint8_t index)
 		if (index == active_scene_index)
 			apply = 1;
 	}
-	return apply ? apply_active_scene() : 0;
+	rc = apply ? apply_active_scene() : 0;
+	if (rc != 0) {
+		scenes[index] = saved_scene;
+		staging[index] = saved_staging;
+		baseline_paula = saved_baseline_paula;
+		baseline_ax = saved_baseline_ax;
+		baseline_staged = saved_baseline_staged;
+	}
+	return rc;
 }
 
 void audio_scene_control_state(struct audio_scene_control_state *out)
@@ -868,15 +901,21 @@ static int audio_scene_emit_keys(char *buf, unsigned size, int off)
 int audio_scene_save(uint8_t index)
 {
 	struct volume_resolution vol;
+	int i;
 
 	if (index >= AUDIO_SCENE_COUNT || !module_initialized)
 		return -1;
 	/* R15: validate against the enforced boundary first -- a scene
 	 * whose own master-chain level exceeds it never reaches the
-	 * writer. Same evaluation the apply path stages with. */
-	resolve_output_volume(&scenes[index], &vol);
-	if (vol.reduced)
-		return AUDIO_SCENE_SAVE_REJECTED;
+	 * writer. Same evaluation the apply path stages with. The writer
+	 * below persists every slot, so every slot is validated with the
+	 * current baseline: one over-boundary scene anywhere rejects the
+	 * whole save. */
+	for (i = 0; i < AUDIO_SCENE_COUNT; i++) {
+		resolve_output_volume(&scenes[i], &vol);
+		if (vol.reduced)
+			return AUDIO_SCENE_SAVE_REJECTED;
+	}
 	return audio_scene_cfg_write();
 }
 

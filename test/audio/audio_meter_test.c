@@ -540,8 +540,8 @@ static void test_frame_packing(void)
 		fmt("packed=%08lx snap=%08lx",
 		    (unsigned long)w32(payload.generation),
 		    (unsigned long)snap.generation));
-	check(w32(payload.frame) == 1U && w32(payload.frame_count) == 1U,
-		"full state fits one frame", NULL);
+	check(w32(payload.frame) == 0U && w32(payload.frame_count) == 1U,
+		"full state fits one 0-based frame", NULL);
 	check(w32(payload.flags) == SDK_AUDIO_METER_RESULT_HOLD_RESET,
 		"frame echoes the consumed-hold flag", NULL);
 	check(w32(payload.identity) == snap.identity &&

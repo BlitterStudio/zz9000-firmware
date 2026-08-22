@@ -69,6 +69,13 @@ static uint16_t ctrl_scene_write(const uint8_t *params,
 	flags = sdk_get_be32(p->flags);
 	if ((flags & ~SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT) != 0U)
 		return SDK_STATUS_BAD_REQUEST;
+	/* The stage call takes a slot index, so the full 32-bit scene
+	 * must be range-checked here for every scene-scoped param: a
+	 * truncating value (256 wraps to slot 0) would silently stage
+	 * into the wrong draft. BASELINE ignores the scene entirely. */
+	if (param != SDK_AUDIO_SCENE_PARAM_BASELINE &&
+			scene >= SDK_AUDIO_SCENE_COUNT)
+		return SDK_STATUS_BAD_REQUEST;
 	if ((flags & SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT) != 0U &&
 			scene >= SDK_AUDIO_SCENE_COUNT)
 		return SDK_STATUS_BAD_REQUEST; /* commit needs a slot */

@@ -19,6 +19,7 @@
 
 #include "audio_scene.h"
 #include "ax.h"
+#include "sdk_mailbox.h"
 
 /* ---- recording stubs for the ax.h DSP setters ---- */
 
@@ -43,9 +44,17 @@ int audio_adau_set_prefactor(int pre)
 	return fail_next_write ? -1 : 0;
 }
 
+/* Mid-sequence failure seam: fail the EQ write for this band (the
+ * commit-failure tests), on top of the shared first-write seam. */
+static int fail_eq_band = -1;
+
 int audio_adau_set_eq_gain(int band, int gain)
 {
 	record_write(WRITE_EQ, band, gain);
+	if (band == fail_eq_band) {
+		fail_eq_band = -1;
+		return -1;
+	}
 	return fail_next_write ? -1 : 0;
 }
 
@@ -571,6 +580,85 @@ static void test_trim_lifecycle(void)
 		"release resets trim to neutral baseline", NULL);
 }
 
+/*
+ * Staged-edit commit failure: the staging is consumed only on
+ * success, so a failed write sequence leaves the draft pending (and
+ * the live tables untouched) and a retry re-issues the full commit
+ * instead of returning OK with zero writes.
+ */
+static void test_commit_failure_keeps_staging(void)
+{
+	int a = -1, b = -1;
+
+	audio_scene_init();
+	clear_writes();
+
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_VOLUME, 70)
+		== 0, "stage a volume edit", NULL);
+	fail_next_write = 1;
+	check(audio_scene_commit_staged(0) == -1,
+		"staged commit fails on a failed verified write", NULL);
+	check(audio_scene_get(0)->volume == 100,
+		"live scene untouched by the failed commit",
+		fmt("volume=%u", audio_scene_get(0)->volume));
+
+	clear_writes();
+	check(audio_scene_commit_staged(0) == 0,
+		"retry after failure succeeds", NULL);
+	check(write_count == 15,
+		"retry re-issues the full write sequence",
+		fmt("writes=%d", write_count));
+	check(audio_scene_get(0)->volume == 70,
+		"retried commit lands the staged edit", NULL);
+	check(last_write(WRITE_VOLPAN, &a, &b) && a == 70 && b == 50,
+		"retry restores the staged output volume",
+		fmt("vol=%d pan=%d", a, b));
+
+	/* A staged baseline joins the same rule: failure restores it. */
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_BASELINE,
+		SDK_AUDIO_BALANCE_PACK(150, 40)) == 0,
+		"stage a baseline edit", NULL);
+	fail_next_write = 1;
+	check(audio_scene_commit_staged(0) == -1,
+		"baseline commit fails on a failed verified write", NULL);
+	check(audio_scene_baseline_paula() == 128 &&
+		audio_scene_baseline_ax() == 64,
+		"baseline untouched by the failed commit", NULL);
+	clear_writes();
+	check(audio_scene_commit_staged(0) == 0,
+		"baseline retry succeeds", NULL);
+	check(audio_scene_baseline_paula() == 150 &&
+		audio_scene_baseline_ax() == 40,
+		"retried baseline commit lands", NULL);
+}
+
+/*
+ * Mid-commit verified-write failure: by the time the EQ safeload
+ * group runs, the chain is already faded down; the failure path must
+ * best-effort restore the resolved output volume so the DAC is not
+ * left silent.
+ */
+static void test_apply_failure_restores_volume(void)
+{
+	int kind = 0, a = 0, b = 0;
+
+	audio_scene_init();
+	clear_writes();
+
+	fail_eq_band = 3; /* fail inside the EQ safeload group */
+	check(audio_scene_select(1) == -1,
+		"select fails when a verified write fails", NULL);
+	check(write_count == 7,
+		"failure path stops at the failed write plus one restore",
+		fmt("writes=%d", write_count));
+	check(log_at(5, &kind, &a, &b) && kind == WRITE_EQ && a == 3,
+		"EQ band 3 write failed mid-sequence", NULL);
+	check(log_at(6, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+		a == 80 && b == 50,
+		"restore write follows the failure immediately",
+		fmt("kind=%d vol=%d pan=%d", kind, a, b));
+}
+
 int main(void)
 {
 	/* Order matters: the gate test observes the pre-init state. */
@@ -584,6 +672,8 @@ int main(void)
 	test_baseline_trim_composition();
 	test_boot_apply_order();
 	test_trim_lifecycle();
+	test_commit_failure_keeps_staging();
+	test_apply_failure_restores_volume();
 
 	if (failures == 0) {
 		printf("audio_scene_test: all tests passed\n");

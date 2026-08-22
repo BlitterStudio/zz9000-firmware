@@ -87,14 +87,17 @@ static int parse_mac(const char *s, uint8_t out[6]) {
 	return *s == 0 ? 0 : -1;
 }
 
-/* Flat filename in the FAT volume root: no path separators or drive
- * prefixes, printable ASCII only. Mirrors fw_update's rules. */
+/* Flat filename in the FAT volume root: no path separators, drive
+ * prefixes, or comment introducers ('#' / ';') -- the parser's line
+ * splitter drops them mid-value, so a name carrying one could never
+ * survive an emit + reparse round trip. Mirrors fw_update's rules. */
 static int hdf_name_valid(const char *s) {
 	unsigned len = 0;
 	if (!*s || *s == '.') return 0;
 	for (; *s; s++, len++) {
 		char c = *s;
-		if (c == '/' || c == '\\' || c == ':' || c < 0x21 || c > 0x7e)
+		if (c == '/' || c == '\\' || c == ':' || c == '#' ||
+				c == ';' || c < 0x21 || c > 0x7e)
 			return 0;
 	}
 	return len <= ZZ_CONFIG_HDF_NAME_MAX;
@@ -439,6 +442,14 @@ int zz_config_parse(const char *text, unsigned len) {
 	return accepted;
 }
 
+/* Persistence paths on the SD volume: the loader reads the file (and,
+ * when it is missing, the backup the save path keeps); the writer
+ * stages ZZCFG.TMP and renames it over ZZ9000.CFG. */
+#define ZZ_CONFIG_FILE_PATH   "0:/" ZZ_CONFIG_FILENAME
+#define ZZ_CONFIG_TEMP_PATH   "0:/ZZCFG.TMP"
+#define ZZ_CONFIG_BAK_FILENAME "ZZ9000.BAK"
+#define ZZ_CONFIG_BAK_PATH    "0:/" ZZ_CONFIG_BAK_FILENAME
+
 int zz_config_load(void) {
 	static FATFS cfg_fs;
 	static char buf[ZZ_CONFIG_MAX_SIZE];
@@ -455,7 +466,16 @@ int zz_config_load(void) {
 		return -1;
 	}
 
-	fr = f_open(&f, "0:/" ZZ_CONFIG_FILENAME, FA_READ);
+	fr = f_open(&f, ZZ_CONFIG_FILE_PATH, FA_READ);
+	if (fr == FR_NO_FILE || fr == FR_NO_PATH) {
+		/* The save path keeps the previous file as ZZ9000.BAK, so a
+		 * missing CFG with a BAK present means the last save died
+		 * between the backup and commit renames -- recover from the
+		 * backup instead of silently booting defaults. */
+		printf("[CFG] *** no " ZZ_CONFIG_FILENAME " (%d); recovering "
+			"from " ZZ_CONFIG_BAK_FILENAME " ***\n", (int)fr);
+		fr = f_open(&f, ZZ_CONFIG_BAK_PATH, FA_READ);
+	}
 	if (fr != FR_OK) {
 		printf("[CFG] no " ZZ_CONFIG_FILENAME " (%d), using defaults\n", (int)fr);
 		f_mount(0, "0:/", 0);
@@ -592,12 +612,7 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 	if (present) *present = p;
 	return p ? v : 0;
 }
-
 /* ---- persistence writer (plan U5, KTD5) ---- */
-
-#define ZZ_CONFIG_FILE_PATH "0:/" ZZ_CONFIG_FILENAME
-#define ZZ_CONFIG_TEMP_PATH "0:/ZZCFG.TMP"
-#define ZZ_CONFIG_BAK_PATH  "0:/ZZ9000.BAK"
 
 static int cfg_save_temp_pending; /* ZZCFG.TMP exists from this boot */
 
@@ -731,8 +746,15 @@ int zz_config_save_file(const char *text, unsigned len) {
 	}
 	fr = f_rename(ZZ_CONFIG_TEMP_PATH, ZZ_CONFIG_FILE_PATH);
 	if (fr != FR_OK) {
+		FRESULT restore_fr;
+
 		printf("[CFG] save: commit rename failed: %d\n", (int)fr);
-		f_rename(ZZ_CONFIG_BAK_PATH, ZZ_CONFIG_FILE_PATH);
+		restore_fr = f_rename(ZZ_CONFIG_BAK_PATH, ZZ_CONFIG_FILE_PATH);
+		if (restore_fr != FR_OK && restore_fr != FR_NO_FILE)
+			printf("[CFG] save: restore from " ZZ_CONFIG_BAK_FILENAME
+				" failed: %d (" ZZ_CONFIG_FILENAME
+				" unavailable until the next save)\n",
+				(int)restore_fr);
 		return -1;
 	}
 	cfg_save_temp_pending = 0;

@@ -15,10 +15,13 @@
 /* ---- FatFs mock backend ------------------------------------------- */
 
 static const char *mock_file = NULL;
+static const char *mock_bak_file = NULL;
+static const char *mock_open_file = NULL;
 static FRESULT mock_mount_fr = FR_OK;
 static int mounts = 0;
 
 void mock_set_file(const char *contents) { mock_file = contents; }
+void mock_set_bak_file(const char *contents) { mock_bak_file = contents; }
 void mock_set_mount_result(FRESULT fr) { mock_mount_fr = fr; }
 int mock_mount_balance(void) { return mounts; }
 
@@ -32,17 +35,21 @@ FRESULT f_mount(FATFS *fs, const char *path, unsigned char opt) {
 
 FRESULT f_open(FIL *fp, const char *path, unsigned char mode) {
     (void)mode;
-    if (strcmp(path, "0:/" ZZ_CONFIG_FILENAME) != 0) return FR_NO_FILE;
-    if (!mock_file) return FR_NO_FILE;
+    mock_open_file = NULL;
+    if (strcmp(path, "0:/" ZZ_CONFIG_FILENAME) == 0)
+        mock_open_file = mock_file;
+    else if (strcmp(path, "0:/ZZ9000.BAK") == 0)
+        mock_open_file = mock_bak_file;
+    if (!mock_open_file) return FR_NO_FILE;
     fp->pos = 0;
     return FR_OK;
 }
 
 FRESULT f_read(FIL *fp, void *buff, UINT btr, UINT *br) {
-    size_t len = strlen(mock_file);
+    size_t len = strlen(mock_open_file);
     size_t left = len - fp->pos;
     UINT n = (left < btr) ? (UINT)left : btr;
-    memcpy(buff, mock_file + fp->pos, n);
+    memcpy(buff, mock_open_file + fp->pos, n);
     fp->pos += n;
     *br = n;
     return FR_OK;
@@ -482,8 +489,51 @@ static void test_loader_success(void) {
     CHECK(mock_mount_balance() == 0); /* volume unregistered again */
 }
 
+
+static void test_loader_bak_fallback(void) {
+    /* CFG missing but BAK present: the last save died between the
+     * backup and commit renames, and the loader recovers the backup
+     * instead of silently booting defaults. */
+    mock_set_file(NULL);
+    mock_set_bak_file("videocap_mode = pal\nint2 = on\n");
+    mock_set_mount_result(FR_OK);
+    CHECK(zz_config_load() == 0);
+    const struct zz_config *c = zz_config_get();
+    CHECK(c->loaded);
+    CHECK(c->int2 == 1);
+    CHECK(c->videocap_mode == ZZVMODE_720x576);
+    CHECK(mock_mount_balance() == 0);
+
+    /* A present CFG wins over the backup. */
+    mock_set_file("int2 = off\n");
+    CHECK(zz_config_load() == 0);
+    CHECK(zz_config_get()->int2 == 0);
+
+    /* Neither file: defaults, as before. */
+    mock_set_file(NULL);
+    mock_set_bak_file(NULL);
+    CHECK(zz_config_load() == -1);
+    CHECK(!zz_config_get()->loaded);
+    CHECK(mock_mount_balance() == 0);
+}
+
+static void test_hdf_comment_markers(void) {
+    /* '#' / ';' start a comment anywhere in a line, so they truncate
+     * an hdf value at the marker; hdf_name_valid refuses them too, so
+     * no accepted name can ever make the emitter's `hdf = <name>`
+     * line truncate on reparse. */
+    zz_config_reset();
+    CHECK(parse_str("hdf = disk#1.hdf\n") == 1);
+    CHECK(strcmp(zz_config_get()->hdf_path, "0:/disk") == 0);
+
+    zz_config_reset();
+    CHECK(parse_str("hdf = disk;1.hdf\n") == 1);
+    CHECK(strcmp(zz_config_get()->hdf_path, "0:/disk") == 0);
+}
+
 static void test_loader_no_file(void) {
     mock_set_file(NULL);
+    mock_set_bak_file(NULL);
     mock_set_mount_result(FR_OK);
     CHECK(zz_config_load() == -1);
     CHECK(!zz_config_get()->loaded);
@@ -535,6 +585,8 @@ int main(void) {
     test_query_interface();
     test_loader_success();
     test_loader_no_file();
+    test_loader_bak_fallback();
+    test_hdf_comment_markers();
     test_loader_no_card();
     test_read_raw();
 

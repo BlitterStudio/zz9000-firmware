@@ -353,9 +353,13 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* The DSP now holds power-on defaults; the control plane re-applies
 	 * the active scene (R10) before the request loop below can service
 	 * any owner. Cold boot reaches this through main() -> this handler,
-	 * so boot and warm reset share the apply. */
-	if (adau_enabled)
+	 * so boot and warm reset share the apply. A failed apply leaves the
+	 * DSP at those defaults; one retry covers a transient write failure
+	 * before owners can be serviced. */
+	if (adau_enabled && audio_scene_apply_after_dsp_init() == -1) {
+		printf("[scene] post-reset apply failed; DSP holds defaults\n");
 		audio_scene_apply_after_dsp_init();
+	}
 
 	// clear interrupt holding amiga
 	amiga_interrupt_clear(0xffffffff);
@@ -462,9 +466,10 @@ int main() {
 	ethernet_init();
 
 	fpga_interrupt_connect(isr_video, isr_audio, isr_audio_rx);
-
 	// The audio control plane owns the master DSP chain from boot on;
 	// its defaults are applied after the ADAU init below, and the
+	// legacy register path into those parameters stays closed from
+	// that point (audio_scene_register_write_blocked, R2).
 	audio_scene_init();
 	// Connect the parsed ZZ9000.CFG audio keys (R10) into scene state
 	// before the first apply inside handle_amiga_reset below: boot and

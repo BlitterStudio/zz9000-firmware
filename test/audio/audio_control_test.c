@@ -524,8 +524,8 @@ static void test_meter_read(void)
 		fmt("status=%u len=%u", status, result_len));
 	check(w32(&result_buf[0]) == SDK_AUDIO_METER_DIRECTION_OUTPUT,
 		"meter read echoes direction", NULL);
-	check(w32(&result_buf[8]) == 1 && w32(&result_buf[12]) == 1,
-		"whole snapshot fits one frame",
+	check(w32(&result_buf[8]) == 0 && w32(&result_buf[12]) == 1,
+		"single-frame snapshot carries frame 0 of 1",
 		fmt("frame=%lu count=%lu",
 			(unsigned long)w32(&result_buf[8]),
 			(unsigned long)w32(&result_buf[12])));
@@ -610,9 +610,21 @@ static void test_scene_save(void)
 			(unsigned long)w32(&result_buf[0]),
 			(unsigned long)w32(&result_buf[4])));
 
-	/* A within-boundary scene passes validation and reaches the U5
-	 * writer, which persists through the linked FatFs mock. */
+	/* The writer persists every slot, so the over-boundary scene in
+	 * slot 1 rejects a save of slot 0 too (cross-slot rule). */
 	put32(save.scene, 0);
+	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
+	check(status == SDK_STATUS_OK &&
+		w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_REJECTED &&
+		w32(&result_buf[4]) == 0,
+		"save rejects any slot while one scene is over-boundary",
+		fmt("status=%lu scene=%lu",
+			(unsigned long)w32(&result_buf[0]),
+			(unsigned long)w32(&result_buf[4])));
+
+	/* Back within bounds everywhere: the save reaches the U5 writer
+	 * and persists through the linked FatFs mock. */
+	audio_scene_init();
 	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
 	check(status == SDK_STATUS_OK &&
 		w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_OK &&
@@ -683,6 +695,7 @@ static void test_unsupported_and_validation(void)
 	struct SDKAudioSceneWritePayload wr;
 	struct SDKAudioMeterReadPayload mr;
 	uint8_t short_buf[48];
+	int a = -1, b = -1;
 
 	audio_scene_init();
 	memset(&sel, 0, sizeof(sel));
@@ -734,12 +747,28 @@ static void test_unsupported_and_validation(void)
 	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
 		SDK_STATUS_BAD_REQUEST,
 		"scene write rejects out-of-range scene slot", NULL);
+	/* 256 truncates to slot 0 as a uint8_t index: it must be
+	 * rejected on the full 32-bit value and stage nothing -- a
+	 * later pan-only edit must commit with the untouched default
+	 * volume, not a smuggled volume 50. */
+	clear_writes();
+	put32(wr.scene, 256);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"stage rejects a truncating 32-bit scene index", NULL);
 	put32(wr.scene, 0);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_PAN);
+	put32(wr.value, 60);
+	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK, "pan-only edit commits", NULL);
+	check(last_write(WRITE_VOLPAN, &a, &b) && a == 100 && b == 60,
+		"rejected stage left no draft behind",
+		fmt("vol=%d pan=%d", a, b));
 	put32(wr.flags, 1U << 1);
 	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
 		SDK_STATUS_BAD_REQUEST,
 		"scene write rejects unknown flags", NULL);
-	put32(wr.flags, 0);
 	put32(wr.param, SDK_AUDIO_SCENE_PARAM_LPF);
 	put32(wr.value, 0);
 	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==

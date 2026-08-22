@@ -284,11 +284,12 @@ static void test_save_roundtrip(void)
 	audio_scene_init();
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++) {
 		/* Scene 0 composes below the boundary even with the raised
-		 * baseline below, so the save passes validation. */
+		 * baseline below, and since the save validates every slot
+		 * (R15 all-slot rule), scenes 1..7 are kept within it too. */
 		if (i == 0)
 			scene_of(&written[0], 23900, 50, 50, 90, 50);
 		else
-			scene_of(&written[i], 9000 + 1000 * i, 55, 60, 80,
+			scene_of(&written[i], 9000 + 1000 * i, 55, 60, 50,
 				30 + i);
 		check(audio_scene_write(i, &written[i]) == 0,
 			fmt("scene %d written", i), NULL);
@@ -400,12 +401,13 @@ static void test_save_budget(void)
 		"video_overlay = off\n"
 		"mac = 68:82:F2:12:34:56\n"
 		"hdf = maximum-length.hdf\n");
-
 	audio_scene_init();
-	/* Scenes 1..7 serialize at the widest legal values (23900 /
-	 * 12900 / 100 digits); scene 0 stays boundary-safe for the save
-	 * validation. */
-	scene_of(&wide, 23900, 100, 100, 100, 100);
+	/* Scenes 1..7 serialize at wide boundary-safe values (five-digit
+	 * lpf, four-digit packed pairs, three-digit pan). The all-slot
+	 * save validation (R15) rejects any over-boundary scene, so the
+	 * range-widest eq/prefactor/volume 100 shape can never reach the
+	 * writer anymore. */
+	scene_of(&wide, 23900, 60, 50, 50, 100);
 	for (int i = 1; i < AUDIO_SCENE_COUNT; i++)
 		check(audio_scene_write(i, &wide) == 0,
 			fmt("wide scene %d written", i), NULL);
@@ -518,6 +520,19 @@ static void test_save_rejects_over_boundary(void)
 		"rejected save writes nothing", NULL);
 	check(audio_scene_save(200) == -1, "invalid scene index rejected",
 		NULL);
+	check(audio_scene_save(0) == AUDIO_SCENE_SAVE_REJECTED,
+		"cross-slot: an over-boundary scene rejects every save",
+		NULL);
+	check(mock_fs_file("0:/ZZ9000.CFG") == NULL &&
+		mock_fs_file("0:/ZZCFG.TMP") == NULL,
+		"cross-slot rejection still writes nothing", NULL);
+
+	/* Back within bounds everywhere: the save goes through. */
+	audio_scene_init();
+	check(audio_scene_save(0) == AUDIO_SCENE_SAVE_OK,
+		"save proceeds once every slot is within bounds", NULL);
+	check(mock_fs_file("0:/ZZ9000.CFG") != NULL,
+		"recovered save persists the CFG", NULL);
 }
 
 /* ---- truncation: the 4 KiB overflow is queryable ---- */
@@ -573,6 +588,53 @@ static void test_truncation_query_key(void)
 	check(present == 0, "no file: truncation key absent", NULL);
 }
 
+/* The shipped sample's commented audio block must carry exactly the
+ * packed firmware defaults, so uncommenting any line reproduces the
+ * power-on state (sample numbers parse AND match). */
+static void check_sample_audio_defaults(const char *sample)
+{
+	static const char *eq_pair_names[5] = { "01", "23", "45", "67",
+		"89" };
+	char line[48];
+	int i, k;
+
+	audio_scene_init();
+	snprintf(line, sizeof(line), "audio_active = %u",
+		(unsigned)audio_scene_active_index());
+	check(strstr(sample, line) != NULL, "sample pins audio_active",
+		line);
+	snprintf(line, sizeof(line), "audio_baseline = %u",
+		(unsigned)audio_scene_baseline_paula() * 256u +
+		(unsigned)audio_scene_baseline_ax());
+	check(strstr(sample, line) != NULL, "sample pins audio_baseline",
+		line);
+	for (i = 0; i < AUDIO_SCENE_COUNT; i++) {
+		const struct audio_scene_def *s = audio_scene_get(i);
+
+		snprintf(line, sizeof(line), "audio_scene%d_lpf = %u",
+			i, (unsigned)s->lpf_hz);
+		check(strstr(sample, line) != NULL,
+			"sample pins scene lpf default", line);
+		for (k = 0; k < 5; k++) {
+			snprintf(line, sizeof(line),
+				"audio_scene%d_eq%s = %u", i,
+				eq_pair_names[k],
+				(unsigned)s->eq[2 * k] * 128u +
+				(unsigned)s->eq[2 * k + 1]);
+			check(strstr(sample, line) != NULL,
+				"sample pins scene eq pair default", line);
+		}
+		snprintf(line, sizeof(line), "audio_scene%d_out = %u",
+			i, (unsigned)s->prefactor * 128u +
+			(unsigned)s->volume);
+		check(strstr(sample, line) != NULL,
+			"sample pins scene out pair default", line);
+		snprintf(line, sizeof(line), "audio_scene%d_pan = %u",
+			i, (unsigned)s->pan);
+		check(strstr(sample, line) != NULL,
+			"sample pins scene pan default", line);
+	}
+}
 
 /* The shipped sample must fit the parse budget so every documented
  * key stays loadable (the restructure under the 4 KiB cap). */
@@ -600,6 +662,11 @@ static void test_sample_file_parses_fully(void)
 	check(zz_config_query(ZZ_CONFIG_KEY_AUDIO_TRUNCATED, &present) == 0 &&
 		present == 1,
 		"sample loads without truncation", NULL);
+
+	/* Every documented audio default in the sample must equal the
+	 * packed firmware default: the numbers must not only parse but
+	 * match what a fresh audio_scene_init() would emit. */
+	check_sample_audio_defaults(sample);
 }
 
 int main(void)

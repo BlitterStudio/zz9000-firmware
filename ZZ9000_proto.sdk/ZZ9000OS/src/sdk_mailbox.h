@@ -594,9 +594,10 @@ static inline void sdk_meter_put_word(volatile uint8_t *dst, uint32_t v)
 
 /*
  * Pack one framed meter snapshot (U3, KTD3). The whole state fits a
- * single frame, so frame is 1 and frame_count is 1; all frames of a
- * logical read carry the snapshot's generation so a client can detect
- * a torn multi-frame read. flags are the RESULT flags: pass
+ * single frame, so frame is 0 (the 0-based index of this frame; the
+ * SDK client counts frames from 0) and frame_count is 1; all frames
+ * of a logical read carry the snapshot's generation so a client can
+ * detect a torn multi-frame read. flags are the RESULT flags: pass
  * SDK_AUDIO_METER_RESULT_HOLD_RESET when the serving read consumed
  * the peak-hold window. Fields are big-endian words, mirroring the
  * SDK ZZ9KAudioMeterResultPayload layout byte-for-byte.
@@ -608,7 +609,7 @@ static inline void sdk_audio_meter_result_pack(
 {
 	sdk_meter_put_word(out->direction, snapshot->direction);
 	sdk_meter_put_word(out->generation, snapshot->generation);
-	sdk_meter_put_word(out->frame, 1U);
+	sdk_meter_put_word(out->frame, 0U);
 	sdk_meter_put_word(out->frame_count, 1U);
 	sdk_meter_put_word(out->flags, flags);
 	sdk_meter_put_word(out->identity, snapshot->identity);
