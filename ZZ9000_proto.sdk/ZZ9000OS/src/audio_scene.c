@@ -204,6 +204,7 @@ struct fast_step {
 	int op;
 	int a;
 	int b;
+	int sub; /* EQ substep fan-out index */
 };
 
 /*
@@ -534,6 +535,12 @@ static void fast_todo_build(void)
 		todo[n].b = scene->pan;
 		n++;
 	}
+	{
+		int i;
+
+		for (i = 0; i < n; ++i)
+			commit.todo[i].sub = 0;
+	}
 	commit.todo_count = n;
 	commit.todo_next = 0;
 }
@@ -657,9 +664,19 @@ static void commit_step(void)
 		case FAST_LPF:
 			rc = audio_adau_set_lpf_params(step->a);
 			break;
-		case FAST_EQ:
-			rc = audio_adau_set_eq_gain(step->a, step->b);
+		case FAST_EQ: {
+			int r = audio_adau_eq_substep(step->a, step->b,
+				commit.todo[commit.todo_next].sub++);
+			if (r == 0)
+				return; /* more substeps: stay on this todo */
+			if (r == 1) {
+				/* sequence complete: fall to the shared advance */
+				rc = 0;
+				break;
+			}
+			rc = -1;
 			break;
+		}
 		case FAST_PREF:
 			rc = audio_adau_set_prefactor(step->a);
 			break;

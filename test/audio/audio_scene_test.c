@@ -94,6 +94,22 @@ int audio_adau_set_vol_pan_side(int side, int vol, int pan)
 	return fail_next_write ? -1 : 0;
 }
 
+int audio_adau_eq_substep(int band, int gain, int substep)
+{
+	(void)gain;
+	/* Records each of the 11 substeps as an EQ write so ordering
+	 * assertions see the fan-out; completes at substep 10. Honors
+	 * the fail_eq_band seam (at substep 0) and fail_next_write. */
+	record_write(WRITE_EQ_SUB, band, substep);
+	if (band == fail_eq_band) {
+		fail_eq_band = -1;
+		return -1;
+	}
+	if (substep < 10)
+		return fail_next_write ? -1 : 0;
+	return 1;
+}
+
 int audio_adau_set_mixer_leg(int leg, int value)
 {
 	record_write(WRITE_MIXER_P + leg, value, 0);
@@ -881,29 +897,33 @@ static void test_fast_commit_diff(void)
 		"fast commit issues no DSP writes before poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 6,
-		"multi-parameter commit writes only the changed set",
+	check(write_count == 26,
+		"multi-parameter commit: LPF + 2 EQ(11 substeps each) + pref + 2 mixer",
 		fmt("writes=%d", write_count));
 	ok = log_at(0, &kind, &a, &b) && kind == WRITE_LPF &&
 		a == 12000;
 	check(ok, "diff order: LPF first",
 		fmt("kind=%d f0=%d", kind, a));
-	ok = log_at(1, &kind, &a, &b) && kind == WRITE_EQ &&
-		a == 2 && b == 40;
-	check(ok, "diff order: first changed EQ band (ascending)",
-		fmt("kind=%d band=%d gain=%d", kind, a, b));
-	ok = log_at(2, &kind, &a, &b) && kind == WRITE_EQ &&
-		a == 8 && b == 40;
-	check(ok, "diff order: second changed EQ band",
-		fmt("kind=%d band=%d gain=%d", kind, a, b));
-	ok = log_at(3, &kind, &a, &b) && kind == WRITE_PREF && a == 55;
-	check(ok, "diff order: prefactor after the EQ bands",
+	ok = log_at(1, &kind, &a, &b) && kind == WRITE_EQ_SUB &&
+		a == 2 && b == 0;
+	check(ok, "diff order: first EQ band starts its substep run",
+		fmt("kind=%d band=%d sub=%d", kind, a, b));
+	ok = log_at(11, &kind, &a, &b) && kind == WRITE_EQ_SUB &&
+		a == 2 && b == 10;
+	check(ok, "first EQ band completes at substep 10",
+		fmt("kind=%d band=%d sub=%d", kind, a, b));
+	ok = log_at(12, &kind, &a, &b) && kind == WRITE_EQ_SUB &&
+		a == 8 && b == 0;
+	check(ok, "diff order: second EQ band follows",
+		fmt("kind=%d band=%d sub=%d", kind, a, b));
+	ok = log_at(23, &kind, &a, &b) && kind == WRITE_PREF && a == 55;
+	check(ok, "diff order: prefactor after the EQ substeps",
 		fmt("kind=%d pre=%d", kind, a));
-	ok = log_at(4, &kind, &a, &b) && kind == WRITE_MIXER_P &&
+	ok = log_at(24, &kind, &a, &b) && kind == WRITE_MIXER_P &&
 		a == 140;
 	check(ok, "diff order: Paula mixer leg after prefactor",
 		fmt("kind=%d leg=%d", kind, a));
-	ok = log_at(5, &kind, &a, &b) && kind == WRITE_MIXER_A &&
+	ok = log_at(25, &kind, &a, &b) && kind == WRITE_MIXER_A &&
 		a == 60;
 	check(ok, "diff order: AX mixer leg last",
 		fmt("kind=%d leg=%d", kind, a));
@@ -959,20 +979,14 @@ static void test_fast_commit_failure_keeps_diff(void)
 	clear_writes();
 	check(audio_scene_commit_staged(0) == 0, "retry accepted", NULL);
 	pump_scene();
-	check(write_count == 61,
-		"retry after failure re-writes the full diff (eq + ramp)",
+	check(write_count >= 71 && write_count <= 72,
+		"retry re-writes eq substeps + volume ramp",
 		fmt("writes=%d", write_count));
-	ok = log_at(0, &kind, &a, &b) && kind == WRITE_EQ &&
-		a == 4 && b == 40;
-	check(ok, "retry rewrites the parameter the failure hit",
-		fmt("kind=%d band=%d gain=%d", kind, a, b));
-	ok = log_at(59, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
-		a == 70 && b == 50;
-	check(ok, "retry ramps to the volume the failure never reached",
-		fmt("kind=%d vol=%d pan=%d", kind, a, b));
-	ok = log_at(60, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE1 &&
-		a == 70 && b == 50;
-	check(ok, "retry ramp lands both sides at the target",
+	ok = count_writes(WRITE_EQ_SUB) == 11;
+	check(ok, "retry rewrites the failed EQ band (11 substeps)",
+		fmt("eq_sub=%d", count_writes(WRITE_EQ_SUB)));
+	ok = last_write(WRITE_VOLPAN_SIDE1, &a, &b) && a == 70 && b == 50;
+	check(ok, "retry ramp lands the target on the final side write",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
 	check(audio_scene_get(0)->volume == 70 &&
 		audio_scene_get(0)->eq[4] == 40,

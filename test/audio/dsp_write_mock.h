@@ -19,7 +19,8 @@ enum {
 	WRITE_VOLPAN_SIDE0, /* per-side split (differential path) */
 	WRITE_VOLPAN_SIDE1,
 	WRITE_MIXER_P, /* per-leg mixer split (differential path) */
-	WRITE_MIXER_A
+	WRITE_MIXER_A,
+	WRITE_EQ_SUB /* resumable safeload substep */
 };
 
 #define WRITE_LOG_MAX 512

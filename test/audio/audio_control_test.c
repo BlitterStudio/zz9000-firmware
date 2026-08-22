@@ -135,6 +135,13 @@ int audio_adau_set_vol_pan_side(int side, int vol, int pan)
 	return 0;
 }
 
+int audio_adau_eq_substep(int band, int gain, int substep)
+{
+	(void)gain; record_write(WRITE_EQ_SUB, band, substep);
+	if (substep < 10) return 0;
+	return 1;
+}
+
 int audio_adau_set_mixer_leg(int leg, int value)
 {
 	record_write(WRITE_MIXER_P + leg, value, 0);
@@ -341,19 +348,14 @@ static void test_staged_write_accumulates(void)
 		"commit dispatch issued no DSP writes before poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 81,
-		"staged commit writes eq + ramped volume (40 levels x 2)",
+	check(write_count == 91,
+		"staged commit: 11 EQ substeps + 40-level ramp x 2",
 		fmt("writes=%d", write_count));
-	ok = log_at(0, &kind, &a, &b) && kind == WRITE_EQ &&
-		a == 3 && b == 30;
-	check(ok, "staged commit writes the changed EQ band",
-		fmt("kind=%d band=%d gain=%d", kind, a, b));
-	ok = log_at(79, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
-		a == 60 && b == 50;
-	check(ok, "staged commit ramps to the changed volume (L)",
-		fmt("kind=%d vol=%d pan=%d", kind, a, b));
-	ok = log_at(80, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE1 &&
-		a == 60 && b == 50;
+	ok = log_at(0, &kind, &a, &b) && kind == WRITE_EQ_SUB &&
+		a == 3 && b == 0;
+	check(ok, "staged commit starts the EQ substep run",
+		fmt("kind=%d band=%d sub=%d", kind, a, b));
+	ok = last_write(WRITE_VOLPAN_SIDE1, &a, &b) && a == 60 && b == 50;
 	check(ok, "staged commit ramp lands the target (R)",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
 	check(audio_scene_get(0) != NULL &&

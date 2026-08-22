@@ -103,5 +103,6 @@ int audio_adau_set_prefactor(int pre);
 int audio_adau_set_vol_pan(int vol, int pan);
 int audio_adau_set_vol_pan_side(int side, int vol, int pan);
 int audio_adau_set_mixer_leg(int leg, int value);
+int audio_adau_eq_substep(int band, int gain, int substep);
 
 #endif

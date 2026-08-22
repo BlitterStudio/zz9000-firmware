@@ -1274,6 +1274,108 @@ int audio_adau_set_mixer_vol(int vol1, int vol2) {
 	return 0;
 }
 
+double eq_omega(double fs, double f0);
+double eq_alpha(double fs, double f0);
+
+/* Resumable EQ safeload: the commit machine drives one sub-step per
+ * service-loop pass (~1ms I2C) instead of the ~11ms monolithic
+ * sequence, so Zorro per-period service never starves during an EQ
+ * drag. Safeload atomicity is preserved: coefficients live in the
+ * safeload registers until the latch, so the DSP never applies a
+ * partial biquad. The caller sequences: EQ_SUB_COEF_0..4 (stage each
+ * coefficient + its target address), EQ_SUB_LATCH, EQ_SUB_VERIFY_0..4.
+ * Returns 0 to continue, 1 = sequence complete, -1 = hard failure. */
+int audio_adau_eq_substep(int band, int gain, int substep)
+{
+	static const double BandFreqs[10] = {
+		31.25, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0,
+		4000.0, 8000.0, 16000.0
+	};
+	static struct {
+		int band;
+		int gain;
+		uint8_t expected[5][ADAU_PARAMETER_WORD_BYTES];
+		uint16_t addresses[5];
+		int valid;
+	} eq_ctx;
+
+	double dBBoost, A, fs, f0, omega, alpha, a0, a1, a2, b0, b1, b2;
+	double coefficients[5];
+	uint8_t buf[5];
+	uint8_t readback[ADAU_PARAMETER_WORD_BYTES];
+	int index;
+
+	if (band < 0 || band > 9)
+		return -1;
+	if (!eq_ctx.valid || eq_ctx.band != band || eq_ctx.gain != gain) {
+		/* (Re)compute the biquad for this band/gain. */
+		dBBoost = ((float)gain - 50.0f) * 12.0 / 50.0;
+		A = pow(10.0, dBBoost / 40.0);
+		fs = 48000.0f;
+		f0 = BandFreqs[band];
+		omega = eq_omega(fs, f0);
+		alpha = eq_alpha(fs, f0);
+		a0 = 1.0 + alpha / A;
+		a1 = -2.0 * cos(omega);
+		a2 = 1.0 - alpha / A;
+		b0 = (1 + alpha * A);
+		b1 = -(2.0 * cos(omega));
+		b2 = (1 - alpha * A);
+		a1 /= a0; a2 /= a0; b0 /= a0; b1 /= a0; b2 /= a0;
+		a1 = -a1; a2 = -a2;
+		coefficients[0] = b0; coefficients[1] = b1;
+		coefficients[2] = b2; coefficients[3] = a1;
+		coefficients[4] = a2;
+		eq_ctx.addresses[0] =
+			MOD_EQUALIZER_ALG0_STAGE0_B0_ADDR + band * 5;
+		eq_ctx.addresses[1] =
+			MOD_EQUALIZER_ALG0_STAGE0_B1_ADDR + band * 5;
+		eq_ctx.addresses[2] =
+			MOD_EQUALIZER_ALG0_STAGE0_B2_ADDR + band * 5;
+		eq_ctx.addresses[3] =
+			MOD_EQUALIZER_ALG0_STAGE0_A0_ADDR + band * 5;
+		eq_ctx.addresses[4] =
+			MOD_EQUALIZER_ALG0_STAGE0_A1_ADDR + band * 5;
+		for (index = 0; index < 5; ++index)
+			adau_to_5_23(coefficients[index],
+				eq_ctx.expected[index]);
+		eq_ctx.band = band;
+		eq_ctx.gain = gain;
+		eq_ctx.valid = 1;
+	}
+
+	if (substep >= 0 && substep < 5) {
+		/* Stage coefficient substep + its target address. */
+		buf[0] = 0;
+		memcpy(&buf[1], eq_ctx.expected[substep],
+			ADAU_PARAMETER_WORD_BYTES);
+		if (adau_write40(0x34, 0x0810 + substep, buf) != 0 ||
+				adau_write16(0x34, 0x0815 + substep,
+						eq_ctx.addresses[substep]) != 0)
+			return -1;
+		return 0;
+	}
+	if (substep == 5) {
+		/* Latch. */
+		if (adau_write16(0x34, 0x081C, 0x003C) != 0)
+			return -1;
+		return 0;
+	}
+	if (substep >= 6 && substep < 11) {
+		/* Verify (with the post-latch settle already elapsed). */
+		index = substep - 6;
+		if (adau_read32(0x34, eq_ctx.addresses[index],
+				readback) != 0 ||
+				!audio_adau_readback_matches(
+					eq_ctx.expected[index], readback,
+					ADAU_PARAMETER_WORD_BYTES))
+			return -1;
+		return (substep == 10) ? 1 : 0;
+	}
+	eq_ctx.valid = 0;
+	return -1;
+}
+
 int audio_adau_set_mixer_leg(int leg, int value) {
 	double g = ((double)value)/127.0;
 	uint8_t buf[4];
