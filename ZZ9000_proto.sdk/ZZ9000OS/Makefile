@@ -28,6 +28,9 @@ SRC_DIR = src
 BSP_DIR = ../zz9000_bsp_new/ps7_cortexa9_0
 BSP_INC = $(BSP_DIR)/include
 BSP_LIB = $(BSP_DIR)/lib
+BSP_SDPS_DIR = $(BSP_DIR)/libsrc/sdps_v3_6/src
+BSP_SDPS_SRC = $(BSP_SDPS_DIR)/xsdps.c
+BSP_SDPS_OBJ = $(BUILD_DIR)/bsp/xsdps.o
 BUILD_DIR = build
 LIBJPEG_TURBO_VERSION ?= 3.1.4.1
 LIBJPEG_TURBO_DIR ?= $(BUILD_DIR)/deps/libjpeg-turbo/$(LIBJPEG_TURBO_VERSION)
@@ -211,6 +214,7 @@ BOOTROM_TOOL = $(BUILD_DIR)/make_bootrom_image
 BOOTROM_IMAGE_BIN = $(BUILD_DIR)/bootrom_image.bin
 BOOTROM_IMAGE_OBJ = $(BUILD_DIR)/bootrom_image.o
 COMMON_OBJS += $(BOOTROM_IMAGE_OBJ)
+COMMON_OBJS += $(BSP_SDPS_OBJ)
 OVERLAY_HW_OBJ = $(BUILD_DIR)/overlay_hw.o
 OVERLAY_HW_FALLBACK_OBJ = $(BUILD_DIR)/overlay_hw_fallback.o
 OBJS = $(COMMON_OBJS) $(OVERLAY_HW_OBJ)
@@ -270,6 +274,13 @@ $(OVERLAY_HW_FALLBACK_OBJ): $(SRC_DIR)/overlay_hw.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -UZZ_OVERLAY_HW_PRESENT -DZZ_OVERLAY_HW_PRESENT=0 \
 		-MMD -MP -o $@ $<
+
+# Compile the patched SDPS driver into the firmware instead of taking the
+# unbounded vendor object from libxil.a. Because this object defines the
+# complete driver translation unit, the archive member is not extracted.
+$(BSP_SDPS_OBJ): $(BSP_SDPS_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(BSP_SDPS_DIR) -MMD -MP -o $@ $<
 
 $(BOOTROM_TOOL): ../../util/make_bootrom_image.c $(SRC_DIR)/bootrom_layout.h $(SRC_DIR)/bootrom.h $(SRC_DIR)/diag-code.h $(SRC_DIR)/zzsd-device.h
 	@mkdir -p $(dir $@)

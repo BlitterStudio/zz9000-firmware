@@ -15,8 +15,10 @@
  * with no interleaved partial commits (including a nested select from
  * inside the commit itself, which coalesces rather than interleaving),
  * meter reads return framed
- * snapshots, SCENE_SAVE validates then persists through the real CFG
- * writer (zz_config.c against the linked FatFs mock), and unknown
+ * snapshots, SCENE_SAVE validates synchronously then starts the
+ * non-blocking save machine (QUEUED; BUSY while one runs; the
+ * settled outcome rides the control-state report's save_status
+ * against the linked FatFs mock), and unknown
  * opcodes still complete SDK_STATUS_UNSUPPORTED. Scene commits apply
  * through the incremental machine (P1): dispatch opcodes return
  * before any I2C and the tests drain the machine with
@@ -31,9 +33,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-
 #include "audio_scene.h"
 #include "ax.h"
+#include "ff.h"
 #include "sdk_audio_control.h"
 #include "sdk_mailbox.h"
 
@@ -727,17 +729,20 @@ static void test_meter_read(void)
 			(unsigned long)w32(&result_buf[40])));
 }
 
-/* ---- scene save: validation now, writer through the U5 seam ---- */
+/* ---- scene save: validation synchronous, SD sequence QUEUED ---- */
 
 static void test_scene_save(void)
 {
 	struct SDKAudioSceneWritePayload wr;
 	struct SDKAudioSceneSavePayload save;
+	struct SDKAudioControlStateGetPayload get;
 	uint16_t status;
 
 	audio_scene_init();
+	mock_fs_reset();
 	memset(&wr, 0, sizeof(wr));
 	memset(&save, 0, sizeof(save));
+	memset(&get, 0, sizeof(get));
 
 	/* Store an over-boundary scene in an inactive slot (staging +
 	 * commit never touches the DSP for an inactive scene). */
@@ -751,6 +756,8 @@ static void test_scene_save(void)
 		audio_scene_get(1)->prefactor == 100,
 		"over-boundary scene stored in inactive slot", NULL);
 
+	/* Validation stays synchronous: the rejection answers the save
+	 * call itself, before any SD traffic. */
 	put32(save.scene, 1);
 	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
 	check(status == SDK_STATUS_OK && result_len == sizeof(
@@ -776,17 +783,83 @@ static void test_scene_save(void)
 			(unsigned long)w32(&result_buf[0]),
 			(unsigned long)w32(&result_buf[4])));
 
-	/* Back within bounds everywhere: the save reaches the U5 writer
-	 * and persists through the linked FatFs mock. */
+	/* Back within bounds everywhere. Start a real active-scene DSP
+	 * commit first: SCENE_SAVE must queue behind it without draining
+	 * any I2C work inside the mailbox request. */
 	audio_scene_init();
+	clear_writes();
+	memset(&wr, 0, sizeof(wr));
+	put32(wr.scene, 0);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_VOLUME);
+	put32(wr.value, 70);
+	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK, "active edit starts before save", NULL);
 	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
+	check(write_count == 0,
+		"save dispatch does not synchronously drain the DSP commit",
+		fmt("writes=%d", write_count));
 	check(status == SDK_STATUS_OK &&
-		w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_OK &&
+		w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_QUEUED &&
 		w32(&result_buf[4]) == 0,
-		"save persists through the CFG writer",
+		"save starts the machine and replies QUEUED",
 		fmt("status=%lu scene=%lu",
 			(unsigned long)w32(&result_buf[0]),
 			(unsigned long)w32(&result_buf[4])));
+
+	/* A second save while the machine runs is refused BUSY. */
+	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
+	check(status == SDK_STATUS_OK &&
+		w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_BUSY,
+		"second save while running replies BUSY",
+		fmt("status=%lu", (unsigned long)w32(&result_buf[0])));
+
+	/* The control-state report carries the running save status at
+	 * its append-only offset (44) while the machine is mid-flight. */
+	status = run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get));
+	check(status == SDK_STATUS_OK &&
+		w32(&result_buf[44]) == SDK_AUDIO_SCENE_SAVE_QUEUED,
+		"control state reports the save in progress",
+		fmt("save_status=%lu", (unsigned long)w32(&result_buf[44])));
+
+	/* Driving the poll to idle (the main service loop) completes the
+	 * save; the settled status and the persisted file prove it. */
+	pump_scene();
+	status = run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get));
+	check(status == SDK_STATUS_OK &&
+		w32(&result_buf[44]) == SDK_AUDIO_SCENE_SAVE_OK,
+		"control state reports the settled save",
+		fmt("save_status=%lu", (unsigned long)w32(&result_buf[44])));
+	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
+			strstr(mock_fs_file("0:/ZZ9000.CFG"),
+				"audio_scene0_out = 6470\n") != NULL,
+		"save snapshots the scene only after its DSP commit settles",
+		NULL);
+	check(mock_fs_file("0:/ZZCFG.TMP") == NULL,
+		"settled save leaves no temp", NULL);
+
+	/* An injected mid-write failure settles IO_ERROR through the same
+	 * report, with the original intact and the temp left behind. */
+	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", "int2 = on\n");
+	mock_fail_write(1);
+	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
+	check(status == SDK_STATUS_OK &&
+		w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_QUEUED,
+		"failing save still starts and replies QUEUED",
+		fmt("status=%lu", (unsigned long)w32(&result_buf[0])));
+	pump_scene();
+	status = run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get));
+	check(status == SDK_STATUS_OK &&
+		w32(&result_buf[44]) == SDK_AUDIO_SCENE_SAVE_IO_ERROR,
+		"control state reports the IO failure",
+		fmt("save_status=%lu", (unsigned long)w32(&result_buf[44])));
+	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
+		strcmp(mock_fs_file("0:/ZZ9000.CFG"), "int2 = on\n") == 0,
+		"original intact after mid-write failure", NULL);
+	check(mock_fs_file("0:/ZZCFG.TMP") != NULL,
+		"partial temp left for the reset hook", NULL);
+	mock_fail_write(0);
 }
 
 /* ---- staged baseline commit rides the same commit path ---- */

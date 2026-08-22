@@ -11,7 +11,11 @@
  * ~170-transaction I2C sequence. Live edits (staged SCENE_WRITE
  * commits, baseline changes) run that machine differentially: only
  * the parameters that differ from the last applied state, with no
- * fade, so a parameter drag costs one setter call per change.
+ * fade, so a parameter drag costs one setter call per change. The
+ * scene save runs the same way: audio_scene_poll() drives the
+ * temp-then-replace SD sequence one FatFs call per step (the
+ * non-blocking save machine below), so a stalled card can no longer
+ * freeze the service loop.
  *
  * Holds the scene state, the operator baseline balance, per-owner
  * source trims, the enforced saturation boundary, and the
@@ -779,16 +783,182 @@ static void commit_step(void)
 		commit_finish();
 }
 
+/* ---- non-blocking save machine (the SD writer as a resumable
+ * sequence, mirroring the commit machine above) ----
+ *
+ * The synchronous save held the mailbox dispatch across the whole
+ * temp-then-replace chain. The machine below performs AT MOST ONE
+ * FatFs call per audio_scene_poll() step, so normal SD traffic
+ * interleaves with the Zorro register service. The patched SDPS
+ * command/read/write polls also have a hard deadline: a controller
+ * that never signals completion returns an IO error instead of
+ * spinning core 0 forever (the hardware-reproduced system freeze).
+ *
+ * Validation and serialization run at start when the DSP commit
+ * machine is idle. If a commit is active, SAVE_WAIT_COMMIT defers
+ * that snapshot until the commit settles instead of draining I2C in
+ * the mailbox request. The writer sequence is RECOVER_BAK ->
+ * UNLINK_TEMP -> OPEN -> WRITE (chunked, ~one sector per step) ->
+ * SYNC -> CLOSE -> UNLINK_BAK -> RENAME_TO_BAK ->
+ * RENAME_TO_LIVE -> DONE, with RESTORE_BAK as the final-rename
+ * failure path. The original is never touched until the committing
+ * rename; a partial temp stays for the reset hook. */
+
+/* Whole-save logic budget. A full 4 KiB save needs ~15 one-call steps
+ * (8 chunked writes); this catches a malformed state transition. The
+ * lower SDPS layer independently bounds each hardware poll. */
+#define SAVE_STEP_BUDGET 1000
+
+enum scene_save_phase {
+	SAVE_IDLE = 0,
+	SAVE_WAIT_COMMIT,
+	SAVE_RECOVER_BAK,
+	SAVE_UNLINK_TEMP,
+	SAVE_OPEN,
+	SAVE_WRITE,
+	SAVE_SYNC,
+	SAVE_CLOSE,
+	SAVE_UNLINK_BAK,
+	SAVE_RENAME_BAK,
+	SAVE_RENAME_LIVE,
+	SAVE_RESTORE_BAK
+};
+
+static struct {
+	enum scene_save_phase phase;
+	unsigned steps;
+	int failed;  /* an IO step failed: close, then settle IO_ERROR */
+	int status;  /* last settled outcome (SAVE_OK after boot) */
+} save;
+
+static char save_buf[ZZ_CONFIG_MAX_SIZE];
+static int save_prepare(void);
+
+static void save_settle(int status)
+{
+	save.phase = SAVE_IDLE;
+	save.status = status;
+	zz_config_save_end();
+}
+
+static void save_step(void)
+{
+	int rc;
+
+	/* Waiting for the DSP is not writer progress and has no finite
+	 * budget: live edits may legally coalesce more commit work. */
+	if (save.phase == SAVE_WAIT_COMMIT) {
+		if (commit_in_progress)
+			return;
+		rc = save_prepare();
+		if (rc != AUDIO_SCENE_SAVE_QUEUED)
+			save_settle(rc);
+		return;
+	}
+	if (++save.steps > SAVE_STEP_BUDGET) {
+		printf("[scene] save stalled: aborting after %u steps "
+			"(temp left for the reset hook)\n", save.steps);
+		save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		return;
+	}
+	switch (save.phase) {
+	case SAVE_RECOVER_BAK:
+		rc = zz_config_save_op(ZZ_CFG_SAVE_RECOVER_BAK);
+		if (rc < 0)
+			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		else
+			save.phase = SAVE_UNLINK_TEMP;
+		break;
+	case SAVE_UNLINK_TEMP:
+		rc = zz_config_save_op(ZZ_CFG_SAVE_UNLINK_TEMP);
+		if (rc < 0)
+			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		else
+			save.phase = SAVE_OPEN;
+		break;
+	case SAVE_OPEN:
+		rc = zz_config_save_op(ZZ_CFG_SAVE_OPEN);
+		if (rc < 0)
+			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		else
+			save.phase = SAVE_WRITE;
+		break;
+	case SAVE_WRITE:
+		rc = zz_config_save_op(ZZ_CFG_SAVE_WRITE);
+		if (rc < 0) {
+			/* Partial temp; release the handle, then settle. */
+			save.failed = 1;
+			save.phase = SAVE_CLOSE;
+		} else if (rc > 0) {
+			save.phase = SAVE_SYNC;
+		}
+		break;
+	case SAVE_SYNC:
+		rc = zz_config_save_op(ZZ_CFG_SAVE_SYNC);
+		if (rc < 0) {
+			save.failed = 1;
+			save.phase = SAVE_CLOSE;
+		} else {
+			save.phase = SAVE_CLOSE;
+		}
+		break;
+	case SAVE_CLOSE:
+		rc = zz_config_save_op(ZZ_CFG_SAVE_CLOSE);
+		if (save.failed || rc < 0)
+			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		else
+			save.phase = SAVE_UNLINK_BAK;
+		break;
+	case SAVE_UNLINK_BAK:
+		rc = zz_config_save_op(ZZ_CFG_SAVE_UNLINK_BAK);
+		if (rc < 0)
+			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		else
+			save.phase = SAVE_RENAME_BAK;
+		break;
+	case SAVE_RENAME_BAK:
+		rc = zz_config_save_op(ZZ_CFG_SAVE_RENAME_BAK);
+		if (rc < 0) {
+			/* Nothing was touched: the original never moved. */
+			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		} else {
+			save.phase = SAVE_RENAME_LIVE;
+		}
+		break;
+	case SAVE_RENAME_LIVE:
+		rc = zz_config_save_op(ZZ_CFG_SAVE_RENAME_LIVE);
+		if (rc < 0)
+			save.phase = SAVE_RESTORE_BAK;
+		else
+			save_settle(AUDIO_SCENE_SAVE_OK);
+		break;
+	case SAVE_RESTORE_BAK:
+		(void)zz_config_save_op(ZZ_CFG_SAVE_RESTORE_BAK);
+		save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		break;
+	default:
+		save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		break;
+	}
+}
+
+
 int audio_scene_poll(void)
 {
-	if (!commit_in_progress)
+	if (!commit_in_progress && save.phase == SAVE_IDLE)
 		return 0;
 	if (commit_stepping)
 		return 1; /* nested poll from inside a setter: defer */
 	commit_stepping = 1;
-	commit_step();
+	/* Commit steps first. A queued save waiting on that commit takes
+	 * its snapshot only after commit_step reaches the terminal state;
+	 * then at most one save step runs in this pass. */
+	if (commit_in_progress)
+		commit_step();
+	if (save.phase != SAVE_IDLE)
+		save_step();
 	commit_stepping = 0;
-	return commit_in_progress;
+	return commit_in_progress || save.phase != SAVE_IDLE;
 }
 
 /* ---- metering accumulation and coherent snapshots (U3, KTD3) ---- */
@@ -1075,6 +1245,8 @@ void audio_scene_init(void)
 	commit_in_progress = 0;
 	commit_stepping = 0;
 	memset(&commit, 0, sizeof(commit));
+	memset(&save, 0, sizeof(save));
+	zz_config_save_end();
 	pending_valid = 0;
 	pending_target = 0;
 	pending_dirty = 0;
@@ -1116,9 +1288,12 @@ int audio_scene_apply_after_dsp_init(void)
 	pending_dirty = 0;
 	pending_fast = 0;
 	rollback.valid = 0;
-	/* The DSP was replaced: whatever this module recorded as applied
-	 * describes hardware that no longer exists. The full machine
-	 * below rewrites everything and re-records on success. */
+	/* An in-flight CFG save describes an SD transaction the reset
+	 * hook abandons (zz_config_save_reset drops its junk temp); drop
+	 * the machine the same way so a post-reset save is not refused
+	 * BUSY and the reported status settles. */
+	if (save.phase != SAVE_IDLE)
+		save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
 	last_applied_valid = 0;
 	gain_reduction_count = 0;
 	have_last_gain_reduction = 0;
@@ -1435,6 +1610,7 @@ void audio_scene_control_state(struct audio_scene_control_state *out)
 	out->trim_ax = last_mixer_stage.ax;
 	out->trim_bounded = last_mixer_stage.bounded;
 	out->ceiling = (uint32_t)AUDIO_SCENE_ENFORCED_BOUNDARY;
+	out->save_status = (uint32_t)audio_scene_save_status();
 }
 
 static int appendf(char *buf, unsigned size, int off, const char *fmt, ...)
@@ -1501,59 +1677,70 @@ static int audio_scene_emit_keys(char *buf, unsigned size, int off)
 }
 
 
-int audio_scene_save(uint8_t index)
+static int save_prepare(void)
 {
 	struct volume_resolution vol;
-	int i;
+	int n, i;
 
-	if (index >= AUDIO_SCENE_COUNT || !module_initialized)
-		return -1;
-	/* Flush any running incremental commit first (bounded drain): a
-	 * staged commit that will fail restores the pre-commit tables at
-	 * its abort, and validation must see that settled state rather
-	 * than the optimistic mid-flight one. */
-	commit_flush();
-	/* R15: validate against the enforced boundary first -- a scene
-	 * whose own master-chain level exceeds it never reaches the
-	 * writer. Same evaluation the apply path stages with. The writer
-	 * below persists every slot, so every slot is validated with the
-	 * current baseline: one over-boundary scene anywhere rejects the
-	 * whole save. */
+	/* R15: validate every slot because the writer persists all slots.
+	 * This runs only after the prior DSP commit has settled, so a
+	 * failed staged commit has already restored the pre-commit tables. */
 	for (i = 0; i < AUDIO_SCENE_COUNT; i++) {
 		resolve_output_volume(&scenes[i], &vol);
-		if (vol.reduced)
+		if (vol.reduced) {
+			save.status = AUDIO_SCENE_SAVE_REJECTED;
 			return AUDIO_SCENE_SAVE_REJECTED;
+		}
 	}
-	return audio_scene_cfg_write();
-}
 
-int audio_scene_cfg_write(void)
-{
-	static char buf[ZZ_CONFIG_MAX_SIZE];
-	int n;
-
-	if (!module_initialized)
-		return AUDIO_SCENE_SAVE_IO_ERROR;
-
-	/* U5 content policy: regenerate ZZ9000.CFG from parsed state
-	 * (every present known key, comments not preserved) plus the live
-	 * audio state -- the parsed audio keys are never echoed back
-	 * stale. */
-	n = snprintf(buf, sizeof(buf),
+	/* Serialize the exact snapshot this queued save will persist.
+	 * Known non-audio keys come from parsed state; live audio keys are
+	 * regenerated so stale parsed values are never echoed. */
+	n = snprintf(save_buf, sizeof(save_buf),
 		"# " ZZ_CONFIG_FILENAME " written by the firmware audio "
 		"Save; comments are not preserved\n");
-	if (n < 0 || (unsigned)n >= sizeof(buf))
+	if (n < 0 || (unsigned)n >= sizeof(save_buf)) {
+		save.status = AUDIO_SCENE_SAVE_IO_ERROR;
 		return AUDIO_SCENE_SAVE_IO_ERROR;
-	n = zz_config_emit_present_keys(buf, sizeof(buf), n);
-	if (n < 0)
+	}
+	n = zz_config_emit_present_keys(save_buf, sizeof(save_buf), n);
+	if (n < 0) {
+		save.status = AUDIO_SCENE_SAVE_IO_ERROR;
 		return AUDIO_SCENE_SAVE_IO_ERROR;
-	n = audio_scene_emit_keys(buf, sizeof(buf), n);
-	if (n < 0)
+	}
+	n = audio_scene_emit_keys(save_buf, sizeof(save_buf), n);
+	if (n < 0 || zz_config_save_begin(save_buf, (unsigned)n) != 0) {
+		save.status = AUDIO_SCENE_SAVE_IO_ERROR;
 		return AUDIO_SCENE_SAVE_IO_ERROR;
-	if (zz_config_save_file(buf, (unsigned)n) != 0)
-		return AUDIO_SCENE_SAVE_IO_ERROR;
-	return AUDIO_SCENE_SAVE_OK;
+	}
+	save.steps = 0;
+	save.phase = SAVE_RECOVER_BAK;
+	return AUDIO_SCENE_SAVE_QUEUED;
 }
+
+int audio_scene_save_start(uint8_t index)
+{
+	if (index >= AUDIO_SCENE_COUNT || !module_initialized)
+		return -1;
+	if (save.phase != SAVE_IDLE)
+		return AUDIO_SCENE_SAVE_BUSY;
+
+	save.steps = 0;
+	save.failed = 0;
+	if (commit_in_progress) {
+		save.phase = SAVE_WAIT_COMMIT;
+		return AUDIO_SCENE_SAVE_QUEUED;
+	}
+	return save_prepare();
+}
+
+int audio_scene_save_status(void)
+{
+	if (save.phase != SAVE_IDLE)
+		return AUDIO_SCENE_SAVE_QUEUED;
+	return save.status;
+}
+
 
 void audio_scene_load_config(void)
 {

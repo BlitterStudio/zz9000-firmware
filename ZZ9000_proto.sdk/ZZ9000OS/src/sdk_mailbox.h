@@ -9,6 +9,7 @@
 #ifndef SDK_MAILBOX_H
 #define SDK_MAILBOX_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include "audio_scene.h"
 #include "scheduler.h"
@@ -475,10 +476,16 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 /* This meter read reset the per-direction peak-hold (read-and-clear). */
 #define SDK_AUDIO_METER_RESULT_HOLD_RESET (1U << 0)
 
-/* SDK_OP_AUDIO_SCENE_SAVE result status word. */
+/* SDK_OP_AUDIO_SCENE_SAVE result status word. The save runs as a
+ * non-blocking machine: QUEUED means it started (possibly waiting for
+ * a DSP commit to settle) -- poll SDK_OP_AUDIO_CONTROL_STATE_GET's
+ * save_status for the final outcome. BUSY means a previous save is
+ * still running and this one was not started. */
 #define SDK_AUDIO_SCENE_SAVE_OK       0U
 #define SDK_AUDIO_SCENE_SAVE_REJECTED 1U /* failed boundary validation */
 #define SDK_AUDIO_SCENE_SAVE_IO_ERROR 2U /* temp-then-replace failed */
+#define SDK_AUDIO_SCENE_SAVE_QUEUED   3U /* started; watch state save_status */
+#define SDK_AUDIO_SCENE_SAVE_BUSY     4U /* refused: a save is running */
 
 /* SDK_OP_AUDIO_CONTROL_STATE_GET result flag: the current trim was
  * bounded by scene policy. */
@@ -562,7 +569,9 @@ struct SDKAudioControlStateGetPayload {
 /* active_scene is the current index; baseline and trim are packed
  * balance words; ceiling is the enforced combined-level boundary in
  * mixer-value units (combined levels above it clamp with a
- * gain-reduction event). */
+ * gain-reduction event). save_status (append-only) is the save
+ * machine's report: SDK_AUDIO_SCENE_SAVE_QUEUED while a save runs,
+ * else the most recent settled SDK_AUDIO_SCENE_SAVE_* outcome. */
 struct SDKAudioControlStateResultPayload {
 	uint8_t active_scene[4];
 	uint8_t scene_count[4];
@@ -570,7 +579,8 @@ struct SDKAudioControlStateResultPayload {
 	uint8_t trim[4];
 	uint8_t ceiling[4];
 	uint8_t flags[4];
-	uint8_t reserved[24];
+	uint8_t reserved[20];
+	uint8_t save_status[4];
 };
 
 typedef char SDKAudioSceneSelectPayload_must_be_48_bytes[
@@ -593,6 +603,9 @@ typedef char SDKAudioControlStateGetPayload_must_be_48_bytes[
 	(sizeof(struct SDKAudioControlStateGetPayload) == 48U) ? 1 : -1];
 typedef char SDKAudioControlStateResultPayload_must_be_48_bytes[
 	(sizeof(struct SDKAudioControlStateResultPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioControlStateSaveStatus_must_be_at_offset_44[
+	(offsetof(struct SDKAudioControlStateResultPayload, save_status) == 44U) ?
+		1 : -1];
 
 /* Non-volatile big-endian word accessors shared by the control-plane
  * dispatch and any payload pack/unpack that reads plain buffers. */

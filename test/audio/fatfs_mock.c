@@ -92,6 +92,7 @@ int mock_fs_file_len(const char *path)
 
 void mock_fail_write(int nth)   { fail_write_at = nth; }
 void mock_fail_rename(int nth)  { fail_rename_at = nth; }
+int mock_write_calls(void)      { return write_calls; }
 
 /* ---- FatFs API surface used by zz_config.c ---- */
 

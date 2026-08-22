@@ -173,16 +173,46 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present);
  * when it does not fit. */
 int zz_config_emit_present_keys(char *buf, unsigned size, int off);
 
-/* Atomically replace ZZ9000.CFG with `len` bytes of text (U5, KTD5):
- * write 0:/ZZCFG.TMP, sync and close, keep the previous file as
- * 0:/ZZ9000.BAK, then rename onto ZZ9000.CFG — fw_update's commit
- * discipline. Any failure leaves the original intact and reports -1;
- * a partial temp file stays behind for the reset hook / next save. */
-int zz_config_save_file(const char *text, unsigned len);
 
-/* Amiga-reset hook, the CFG counterpart of fw_update_reset(): a save
- * interrupted between open and commit never touched the original —
- * drop its junk temp file. */
+/* ---- resumable writer steps (the non-blocking save machine) ---- */
+
+/* The individual operations of the save above. Each zz_config_save_op()
+ * call performs AT MOST ONE FatFs call, so a caller-owned state machine
+ * (audio_scene.c's save machine) can interleave SD traffic with its
+ * service loop; the FIL handle and the write cursor live here. */
+enum zz_config_save_op {
+	ZZ_CFG_SAVE_RECOVER_BAK = 0, /* restore an interrupted prior save */
+	ZZ_CFG_SAVE_UNLINK_TEMP,     /* drop a stale ZZCFG.TMP */
+	ZZ_CFG_SAVE_OPEN,            /* create ZZCFG.TMP */
+	ZZ_CFG_SAVE_WRITE,           /* one <=512-byte chunk of the text */
+	ZZ_CFG_SAVE_SYNC,
+	ZZ_CFG_SAVE_CLOSE,
+	ZZ_CFG_SAVE_UNLINK_BAK,      /* drop a stale ZZ9000.BAK */
+	ZZ_CFG_SAVE_RENAME_BAK,      /* keep the original as ZZ9000.BAK */
+	ZZ_CFG_SAVE_RENAME_LIVE,     /* commit: temp -> ZZ9000.CFG */
+	ZZ_CFG_SAVE_RESTORE_BAK      /* failure path: ZZ9000.BAK back */
+};
+
+/* Stage `text` for a resumable save; the buffer must stay valid until
+ * the sequence ends (zz_config_save_end). Returns 0, or -1 when a
+ * sequence is already staged or the length is out of range. */
+int zz_config_save_begin(const char *text, unsigned len);
+
+/* Perform one operation of a begun sequence. Returns 1 when the
+ * operation completed (for ZZ_CFG_SAVE_WRITE: the whole text is
+ * written), 0 when WRITE has more chunks queued, and -1 on a FatFs
+ * failure (same diagnostics as zz_config_save_file; the original is
+ * never touched, the partial temp stays for the reset hook). */
+int zz_config_save_op(enum zz_config_save_op op);
+
+/* End a resumable sequence, settled or abandoned. Closes an open temp
+ * handle before releasing the staged text. Safe to call when none is
+ * active. */
+void zz_config_save_end(void);
+
+/* Amiga-reset hook, the CFG counterpart of fw_update_reset(): close an
+ * interrupted writer, restore ZZ9000.BAK when live was already moved
+ * aside, then drop the abandoned temp snapshot. */
 void zz_config_save_reset(void);
 
 #endif

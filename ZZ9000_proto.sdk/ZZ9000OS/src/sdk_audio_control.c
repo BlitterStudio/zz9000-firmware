@@ -189,7 +189,10 @@ static uint16_t ctrl_meter_read(const uint8_t *params,
 	return SDK_STATUS_OK;
 }
 
-/* Scene save (F5): validation here; the CFG writer is the U5 seam. */
+/* Scene save (F5): the SD sequence never runs in dispatch. Validation
+ * is immediate when no DSP commit is active, otherwise the save queues
+ * behind that commit and reports its eventual outcome through the
+ * control-state save_status word. */
 static uint16_t ctrl_scene_save(const uint8_t *params,
 	uint16_t payload_len, uint8_t *result_payload,
 	uint16_t *result_len)
@@ -211,7 +214,7 @@ static uint16_t ctrl_scene_save(const uint8_t *params,
 	if (scene >= SDK_AUDIO_SCENE_COUNT)
 		return SDK_STATUS_BAD_REQUEST;
 
-	status = audio_scene_save((uint8_t)scene);
+	status = audio_scene_save_start((uint8_t)scene);
 	if (status < 0)
 		return SDK_STATUS_BAD_REQUEST;
 	sdk_put_be32(out->status, (uint32_t)status);
@@ -250,6 +253,7 @@ static uint16_t ctrl_state_get(const uint8_t *params,
 	sdk_put_be32(out->ceiling, state.ceiling);
 	sdk_put_be32(out->flags, state.trim_bounded ?
 		SDK_AUDIO_CONTROL_FLAG_TRIM_BOUNDED : 0U);
+	sdk_put_be32(out->save_status, state.save_status);
 	*result_len = (uint16_t)sizeof(*out);
 	return SDK_STATUS_OK;
 }

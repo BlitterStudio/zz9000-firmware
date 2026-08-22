@@ -125,6 +125,17 @@ static void scene_of(struct audio_scene_def *def, int lpf, int eq,
 	def->pan = (uint8_t)pan;
 }
 
+static int save_scene_sync(uint8_t index)
+{
+	int status = audio_scene_save_start(index);
+
+	if (status != AUDIO_SCENE_SAVE_QUEUED)
+		return status;
+	while (audio_scene_poll())
+		;
+	return audio_scene_save_status();
+}
+
 static void check_scene(int index, const struct audio_scene_def *want,
 	const char *name)
 {
@@ -368,7 +379,7 @@ static void test_save_roundtrip(void)
 	check(audio_scene_select(4) == 0, "active scene selected", NULL);
 	check(audio_scene_set_baseline(140, 70) == 0, "baseline set", NULL);
 
-	check(audio_scene_save(0) == AUDIO_SCENE_SAVE_OK, "save succeeds",
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK, "save succeeds",
 		NULL);
 
 	saved = mock_fs_file("0:/ZZ9000.CFG");
@@ -440,7 +451,7 @@ static void test_save_regenerates_every_profile_name(void)
 		parse_str(line);
 		audio_scene_init();
 		mock_fs_reset();
-		check(audio_scene_save(0) == AUDIO_SCENE_SAVE_OK,
+		check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK,
 			fmt("save with profile %s", names[i]), NULL);
 		saved = mock_fs_file("0:/ZZ9000.CFG");
 		snprintf(line, sizeof(line), "videocap_profile = %s\n",
@@ -487,7 +498,7 @@ static void test_save_budget(void)
 			fmt("wide scene %d written", i), NULL);
 	check(audio_scene_select(0) == 0, "scene 0 active", NULL);
 
-	check(audio_scene_save(0) == AUDIO_SCENE_SAVE_OK,
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK,
 		"widest legal state saves", NULL);
 	len = mock_fs_file_len("0:/ZZ9000.CFG");
 	saved = mock_fs_file("0:/ZZ9000.CFG");
@@ -513,7 +524,7 @@ static void test_save_midwrite_failure(void)
 	audio_scene_init();
 
 	mock_fail_write(1);
-	check(audio_scene_save(0) == AUDIO_SCENE_SAVE_IO_ERROR,
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_IO_ERROR,
 		"mid-write failure surfaces IO error", NULL);
 	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
 		strcmp(mock_fs_file("0:/ZZ9000.CFG"), "scanline_mode = 2\n")
@@ -534,7 +545,7 @@ static void test_save_midwrite_failure(void)
 
 	/* The next save cleans its own stale temp and succeeds. */
 	mock_fail_write(0);
-	check(audio_scene_save(0) == AUDIO_SCENE_SAVE_OK,
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK,
 		"next save recovers", NULL);
 	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
 		strstr(mock_fs_file("0:/ZZ9000.CFG"),
@@ -557,7 +568,7 @@ static void test_save_rename_failure_restores_original(void)
 	parse_str("int2 = on\n");
 	audio_scene_init();
 	mock_fail_rename(2);
-	check(audio_scene_save(0) == AUDIO_SCENE_SAVE_IO_ERROR,
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_IO_ERROR,
 		"commit rename failure surfaces IO error", NULL);
 	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
 		strcmp(mock_fs_file("0:/ZZ9000.CFG"), "int2 = on\n") == 0,
@@ -569,11 +580,230 @@ static void test_save_rename_failure_restores_original(void)
 	parse_str("int2 = on\n");
 	audio_scene_init();
 	mock_fail_rename(1);
-	check(audio_scene_save(0) == AUDIO_SCENE_SAVE_IO_ERROR,
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_IO_ERROR,
 		"backup rename failure surfaces IO error", NULL);
 	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
 		strcmp(mock_fs_file("0:/ZZ9000.CFG"), "int2 = on\n") == 0,
 		"original untouched after backup rename failure", NULL);
+}
+
+/* ---- non-blocking machine: QUEUED start, one-call steps, BUSY guard ---- */
+
+static void test_save_nonblocking_machine(void)
+{
+	int writes_before;
+	int guard = 0;
+	char raw[64];
+	uint32_t raw_len = 0;
+	int saw_rename_gap = 0;
+
+	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", "int2 = on\n");
+	parse_str("int2 = on\n");
+	audio_scene_init();
+
+	check(audio_scene_save_status() == AUDIO_SCENE_SAVE_OK,
+		"boot save status is idle", NULL);
+	check(audio_scene_save_start(0) == AUDIO_SCENE_SAVE_QUEUED,
+		"save start queues the machine", NULL);
+	check(audio_scene_save_status() == AUDIO_SCENE_SAVE_QUEUED,
+		"status reports queued while running", NULL);
+	check(audio_scene_save_start(0) == AUDIO_SCENE_SAVE_BUSY,
+		"second start while running is refused BUSY", NULL);
+	check(audio_scene_save_start(200) == -1,
+		"invalid index still rejected while running", NULL);
+
+	/* At most one FatFs call per poll: recover is a no-op without an
+	 * orphan backup, followed by stale-temp unlink and create-open;
+	 * the fourth poll writes exactly one sector-sized chunk. */
+	(void)audio_scene_poll();
+	(void)audio_scene_poll();
+	(void)audio_scene_poll();
+	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
+		strcmp(mock_fs_file("0:/ZZ9000.CFG"), "int2 = on\n") == 0,
+		"pre-write steps leave the original untouched", NULL);
+	writes_before = mock_write_calls();
+	(void)audio_scene_poll();
+	check(mock_write_calls() - writes_before == 1,
+		"one poll performs one write call",
+		fmt("writes=%d", mock_write_calls() - writes_before));
+	check(mock_fs_file_len("0:/ZZCFG.TMP") <= 512,
+		"first chunk is at most one sector",
+		fmt("len=%d", mock_fs_file_len("0:/ZZCFG.TMP")));
+
+	/* Driving the poll to idle completes the sequence; the audio
+	 * block lands in more than one chunk (the 4 KiB budget shape). */
+	writes_before = mock_write_calls();
+	while (audio_scene_poll() && ++guard < 2000)
+		;
+	check(guard < 2000, "machine settles within the guard", NULL);
+	check(mock_write_calls() - writes_before >= 2,
+		"the text is written in multiple chunks",
+		fmt("writes=%d", mock_write_calls() - writes_before));
+	check(audio_scene_save_status() == AUDIO_SCENE_SAVE_OK,
+		"settled status is OK", NULL);
+	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
+		strstr(mock_fs_file("0:/ZZ9000.CFG"),
+			"audio_scene0_lpf") != NULL,
+		"poll-driven save persists the audio block", NULL);
+	check(mock_fs_file("0:/ZZCFG.TMP") == NULL,
+		"successful machine leaves no temp", NULL);
+
+	/* A mid-write failure through the machine: IO_ERROR settles, the
+	 * original is intact, the partial temp stays for the reset hook,
+	 * and the next save cleans its own stale temp. */
+	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", "int2 = on\n");
+	parse_str("int2 = on\n");
+	audio_scene_init();
+	mock_fail_write(1);
+	check(audio_scene_save_start(0) == AUDIO_SCENE_SAVE_QUEUED,
+		"failing save still queues", NULL);
+	guard = 0;
+	while (audio_scene_poll() && ++guard < 2000)
+		;
+	check(audio_scene_save_status() == AUDIO_SCENE_SAVE_IO_ERROR,
+		"injected write failure settles IO_ERROR", NULL);
+	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
+		strcmp(mock_fs_file("0:/ZZ9000.CFG"), "int2 = on\n") == 0,
+		"original intact after machine write failure", NULL);
+	check(mock_fs_file("0:/ZZCFG.TMP") != NULL,
+		"partial temp left for the reset hook", NULL);
+	mock_fail_write(0);
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK,
+		"next save recovers after the failed machine", NULL);
+	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
+		strstr(mock_fs_file("0:/ZZ9000.CFG"), "audio_active") != NULL,
+		"recovered save persists the audio block", NULL);
+
+	/* A warm reset may land between poll steps. The storage reset hook
+	 * must close/abandon the staged writer before dropping the temp;
+	 * the scene machine then settles instead of leaving every future
+	 * save BUSY. */
+	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", "int2 = on\n");
+	parse_str("int2 = on\n");
+	audio_scene_init();
+	check(audio_scene_save_start(0) == AUDIO_SCENE_SAVE_QUEUED,
+		"reset-interrupted save queues", NULL);
+	(void)audio_scene_poll(); /* unlink stale temp */
+	(void)audio_scene_poll(); /* open temp */
+	zz_config_save_reset();
+	guard = 0;
+	while (audio_scene_poll() && ++guard < 10)
+		;
+	check(audio_scene_save_status() == AUDIO_SCENE_SAVE_IO_ERROR,
+		"reset interruption settles IO_ERROR", NULL);
+	check(mock_fs_file("0:/ZZCFG.TMP") == NULL,
+		"reset hook removes the interrupted temp", NULL);
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK,
+		"save restarts after reset cleanup", NULL);
+
+	/* Reset and raw-read coverage for the atomic rename gap: after
+	 * live -> BAK but before TMP -> live, readers must see the old
+	 * snapshot and reset must restore it. */
+	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", "int2 = on\n");
+	parse_str("int2 = on\n");
+	audio_scene_init();
+	check(audio_scene_save_start(0) == AUDIO_SCENE_SAVE_QUEUED,
+		"rename-gap save queues", NULL);
+	guard = 0;
+	while (audio_scene_poll() && ++guard < 100) {
+		if (mock_fs_file("0:/ZZ9000.CFG") == NULL &&
+				mock_fs_file("0:/ZZ9000.BAK") != NULL) {
+			saw_rename_gap = 1;
+			break;
+		}
+	}
+	check(saw_rename_gap, "save reaches the backup-only rename gap",
+		NULL);
+	memset(raw, 0, sizeof(raw));
+	check(zz_config_read_raw(raw, sizeof(raw), &raw_len) ==
+			ZZ_CONFIG_FILE_OK &&
+			raw_len == strlen("int2 = on\n") &&
+			memcmp(raw, "int2 = on\n", raw_len) == 0,
+		"raw read falls back to the coherent backup in the gap", NULL);
+	zz_config_save_reset();
+	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
+			strcmp(mock_fs_file("0:/ZZ9000.CFG"),
+				"int2 = on\n") == 0,
+		"reset restores live CFG from the moved backup", NULL);
+	guard = 0;
+	while (audio_scene_poll() && ++guard < 10)
+		;
+	check(audio_scene_save_status() == AUDIO_SCENE_SAVE_IO_ERROR,
+		"rename-gap reset settles the save IO_ERROR", NULL);
+	check(mock_fs_file("0:/ZZCFG.TMP") == NULL,
+		"rename-gap reset drops the abandoned temp", NULL);
+
+	/* If reset's best-effort BAK restore itself fails, the next save
+	 * retries that recovery as its first polled operation -- never in
+	 * audio_scene_save_start's mailbox context. */
+	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", "int2 = on\n");
+	parse_str("int2 = on\n");
+	audio_scene_init();
+	check(audio_scene_save_start(0) == AUDIO_SCENE_SAVE_QUEUED,
+		"orphan-backup save queues", NULL);
+	guard = 0;
+	saw_rename_gap = 0;
+	while (audio_scene_poll() && ++guard < 100) {
+		if (mock_fs_file("0:/ZZ9000.CFG") == NULL &&
+				mock_fs_file("0:/ZZ9000.BAK") != NULL) {
+			saw_rename_gap = 1;
+			break;
+		}
+	}
+	check(saw_rename_gap, "orphan-backup case reaches rename gap",
+		NULL);
+	mock_fail_rename(2); /* rename #1 moved live; reset restore is #2 */
+	zz_config_save_reset();
+	check(mock_fs_file("0:/ZZ9000.CFG") == NULL &&
+			mock_fs_file("0:/ZZ9000.BAK") != NULL,
+		"failed reset restore leaves the coherent backup available",
+		NULL);
+	mock_fail_rename(0);
+	guard = 0;
+	while (audio_scene_poll() && ++guard < 10)
+		;
+	check(audio_scene_save_start(0) == AUDIO_SCENE_SAVE_QUEUED,
+		"next save queues orphan-backup recovery", NULL);
+	check(mock_fs_file("0:/ZZ9000.CFG") == NULL,
+		"save start performs no synchronous backup rename", NULL);
+	(void)audio_scene_poll();
+	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
+			strcmp(mock_fs_file("0:/ZZ9000.CFG"),
+				"int2 = on\n") == 0,
+		"first polled step restores the orphaned backup", NULL);
+	guard = 0;
+	while (audio_scene_poll() && ++guard < 100)
+		;
+	check(audio_scene_save_status() == AUDIO_SCENE_SAVE_OK,
+		"save completes after polled backup recovery", NULL);
+
+	/* SAVE_WAIT_COMMIT is not writer work and must not consume the
+	 * writer budget. Continuous legal edits can keep coalescing DSP
+	 * commits for longer than that budget without failing the save. */
+	mock_fs_reset();
+	audio_scene_init();
+	check(audio_scene_set_baseline(127, 63) == 0,
+		"long-wait baseline commit starts", NULL);
+	check(audio_scene_save_start(0) == AUDIO_SCENE_SAVE_QUEUED,
+		"save waits behind the baseline commit", NULL);
+	for (int i = 0; i < 1100; i++) {
+		check(audio_scene_set_baseline(127,
+				(uint8_t)(63 + (i & 1))) == 0,
+			"coalesced baseline edit", NULL);
+		(void)audio_scene_poll();
+	}
+	check(audio_scene_save_status() == AUDIO_SCENE_SAVE_QUEUED,
+		"long commit wait does not exhaust the writer budget", NULL);
+	guard = 0;
+	while (audio_scene_poll() && ++guard < 2000)
+		;
+	check(audio_scene_save_status() == AUDIO_SCENE_SAVE_OK,
+		"save completes after the coalesced commits settle", NULL);
 }
 
 /* ---- validation: over-boundary scene never reaches the writer ---- */
@@ -587,14 +817,14 @@ static void test_save_rejects_over_boundary(void)
 	scene_of(&loud, 23900, 50, 100, 100, 50); /* +12 dB master boost */
 	check(audio_scene_write(1, &loud) == 0, "loud scene stored", NULL);
 
-	check(audio_scene_save(1) == AUDIO_SCENE_SAVE_REJECTED,
+	check(save_scene_sync(1) == AUDIO_SCENE_SAVE_REJECTED,
 		"over-boundary scene rejected at save", NULL);
 	check(mock_fs_file("0:/ZZ9000.CFG") == NULL &&
 		mock_fs_file("0:/ZZCFG.TMP") == NULL,
 		"rejected save writes nothing", NULL);
-	check(audio_scene_save(200) == -1, "invalid scene index rejected",
+	check(save_scene_sync(200) == -1, "invalid scene index rejected",
 		NULL);
-	check(audio_scene_save(0) == AUDIO_SCENE_SAVE_REJECTED,
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_REJECTED,
 		"cross-slot: an over-boundary scene rejects every save",
 		NULL);
 	check(mock_fs_file("0:/ZZ9000.CFG") == NULL &&
@@ -603,7 +833,7 @@ static void test_save_rejects_over_boundary(void)
 
 	/* Back within bounds everywhere: the save goes through. */
 	audio_scene_init();
-	check(audio_scene_save(0) == AUDIO_SCENE_SAVE_OK,
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK,
 		"save proceeds once every slot is within bounds", NULL);
 	check(mock_fs_file("0:/ZZ9000.CFG") != NULL,
 		"recovered save persists the CFG", NULL);
@@ -768,6 +998,7 @@ int main(void)
 	test_save_budget();
 	test_save_midwrite_failure();
 	test_save_rename_failure_restores_original();
+	test_save_nonblocking_machine();
 	test_save_rejects_over_boundary();
 	test_truncation_query_key();
 	test_sample_file_parses_fully();

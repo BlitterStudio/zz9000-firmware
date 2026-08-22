@@ -56,5 +56,6 @@ const char *mock_fs_file(const char *path); /* NULL when absent */
 int mock_fs_file_len(const char *path);     /* -1 when absent */
 void mock_fail_write(int nth);              /* f_write fails on nth call */
 void mock_fail_rename(int nth);             /* f_rename fails on nth call */
+int mock_write_calls(void);                 /* f_write calls since reset */
 
 #endif /* FF_H */

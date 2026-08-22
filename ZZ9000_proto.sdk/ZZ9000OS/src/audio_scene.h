@@ -110,12 +110,12 @@ int audio_scene_apply_after_dsp_init(void);
 #define AUDIO_SCENE_COMMIT_BUSY (-2)
 
 /*
- * Advance the incremental commit machine by at most ONE DSP setter
- * call (one verified-I2C unit), then return. Returns nonzero while a
- * commit is active (more steps remain, or a coalesced follow-up
- * machine just started), 0 when idle. Cheap when idle. Call once per
- * main-loop iteration so scene commits interleave with the per-period
- * AHI traffic instead of blocking the dispatch.
+ * Advance each active incremental machine by at most one hardware unit:
+ * one verified DSP/I2C substep and one FatFs call. Returns nonzero while
+ * either is active (more steps remain, or a coalesced follow-up machine
+ * just started), 0 when both are idle. Cheap when idle. Call once per
+ * main-loop iteration so scene commits and CFG saves interleave with
+ * per-period AHI traffic and Zorro register service.
  */
 int audio_scene_poll(void);
 
@@ -196,6 +196,8 @@ struct audio_scene_control_state {
 	uint8_t trim_ax;
 	uint8_t trim_bounded;   /* last composition was reduced (R3) */
 	uint32_t ceiling;       /* enforced boundary, mixer-value units */
+	uint32_t save_status;   /* AUDIO_SCENE_SAVE_QUEUED while a save
+	                         * runs, else the last settled outcome */
 };
 
 void audio_scene_control_state(struct audio_scene_control_state *out);
@@ -206,13 +208,30 @@ void audio_scene_control_state(struct audio_scene_control_state *out);
 #define AUDIO_SCENE_SAVE_OK       0
 #define AUDIO_SCENE_SAVE_REJECTED 1 /* failed boundary validation */
 #define AUDIO_SCENE_SAVE_IO_ERROR 2 /* temp-then-replace failed */
+#define AUDIO_SCENE_SAVE_QUEUED   3 /* started; the machine is running */
+#define AUDIO_SCENE_SAVE_BUSY     4 /* refused: a save is already running */
 
 /*
- * Validate the scene against the enforced boundary, then persist all
- * scene state through the CFG writer below. Returns an
- * AUDIO_SCENE_SAVE_* status, or -1 on an invalid request.
+ * Start the non-blocking save. With an idle DSP commit machine,
+ * validation and serialization run immediately; with a live commit,
+ * the save queues and takes its snapshot only after that commit
+ * settles, so the mailbox request never drains I2C synchronously.
+ * The temp-then-replace sequence runs as one FatFs call per
+ * audio_scene_poll() step; the SDPS layer independently deadlines
+ * each hardware poll. Returns QUEUED on start, BUSY while a previous
+ * save runs, an immediate REJECTED / IO_ERROR when preparation can run
+ * synchronously, or -1 for an invalid request. A deferred preparation
+ * reports REJECTED / IO_ERROR through audio_scene_save_status().
  */
-int audio_scene_save(uint8_t index);
+int audio_scene_save_start(uint8_t index);
+
+/*
+ * AUDIO_SCENE_SAVE_QUEUED while the machine is running, otherwise the
+ * outcome of the most recent save (OK after boot -- nothing has
+ * failed). This is what the control-state report carries.
+ */
+int audio_scene_save_status(void);
+
 
 /*
  * U5 (KTD4/KTD5): fold the parsed ZZ9000.CFG audio keys into scene
@@ -225,14 +244,6 @@ int audio_scene_save(uint8_t index);
  */
 void audio_scene_load_config(void);
 
-/*
- * U5 (KTD5): regenerate ZZ9000.CFG from parsed state plus the live
- * audio state and replace it atomically (temp file, sync, keep the
- * previous file as ZZ9000.BAK, rename into place). Content policy:
- * present known keys plus the audio block; comments are not
- * preserved. Returns an AUDIO_SCENE_SAVE_* status.
- */
-int audio_scene_cfg_write(void);
 
 /* Authority gate for the legacy register path (R2): nonzero when a
  * REG_ZZ_AUDIO_VAL write to this AP_* parameter index must be

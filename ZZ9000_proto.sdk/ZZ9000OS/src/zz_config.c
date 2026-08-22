@@ -591,12 +591,15 @@ uint16_t zz_config_read_raw(void *buffer, uint32_t max_len, uint32_t *out_len) {
 
 	*out_len = 0;
 
-	/* The FAT volume is registered by sd_storage_init() at this point;
-	 * f_open fails cleanly (FR_NOT_ENABLED) if no card is mounted. */
-	fr = f_open(&f, "0:/" ZZ_CONFIG_FILENAME, FA_READ);
-	if (fr == FR_NO_FILE || fr == FR_NO_PATH) {
+	/* The FAT volume is registered by sd_storage_init() at this point.
+	 * During the save machine's one-loop rename gap, the previous live
+	 * file is already ZZ9000.BAK; read it as the coherent old snapshot
+	 * rather than reporting a transient NO_FILE. */
+	fr = f_open(&f, ZZ_CONFIG_FILE_PATH, FA_READ);
+	if (fr == FR_NO_FILE || fr == FR_NO_PATH)
+		fr = f_open(&f, ZZ_CONFIG_BAK_PATH, FA_READ);
+	if (fr == FR_NO_FILE || fr == FR_NO_PATH)
 		return ZZ_CONFIG_FILE_NO_FILE;
-	}
 	if (fr != FR_OK) {
 		printf("[CFG] raw read open failed: %d\n", (int)fr);
 		return ZZ_CONFIG_FILE_IO_ERROR;
@@ -769,81 +772,184 @@ int zz_config_emit_present_keys(char *buf, unsigned size, int off) {
 	return off;
 }
 
-int zz_config_save_file(const char *text, unsigned len) {
-	FIL f;
-	UINT nwritten = 0;
-	FRESULT fr;
 
+/* ---- resumable writer (the non-blocking save machine's steps) ----
+ *
+ * The atomic temp-then-replace sequence is split into one-FatFs-call
+ * steps the caller drives from its service loop. Normal SD traffic
+ * therefore interleaves with Zorro service instead of holding the
+ * mailbox dispatch across the whole save. */
+
+#define ZZ_CFG_SAVE_CHUNK 512u /* ~one sector of text per WRITE step */
+
+static FIL cfg_step_file;
+static const char *cfg_step_text;
+static unsigned cfg_step_len;
+static unsigned cfg_step_pos;
+static int cfg_step_file_open;
+static int cfg_step_active;
+static int cfg_step_backup_moved;
+
+int zz_config_save_begin(const char *text, unsigned len) {
+	if (cfg_step_active) return -1;
 	if (len == 0 || len >= ZZ_CONFIG_MAX_SIZE) return -1;
-
-	/* A partial temp from an interrupted save is junk; drop it so the
-	 * create-always open starts clean (fw_update OPEN's discipline). */
-	fr = f_unlink(ZZ_CONFIG_TEMP_PATH);
-	if (fr != FR_OK && fr != FR_NO_FILE) {
-		printf("[CFG] save: unlink stale %s failed: %d\n",
-			ZZ_CONFIG_TEMP_PATH, (int)fr);
-		return -1;
-	}
-
-	fr = f_open(&f, ZZ_CONFIG_TEMP_PATH, FA_CREATE_ALWAYS | FA_WRITE);
-	if (fr != FR_OK) {
-		printf("[CFG] save: open %s failed: %d\n",
-			ZZ_CONFIG_TEMP_PATH, (int)fr);
-		return -1;
-	}
-	cfg_save_temp_pending = 1;
-
-	/* The text is CPU-written cacheable DDR; clean it before f_write
-	 * so any direct SD DMA path inside FatFs sees the fresh bytes. */
-	Xil_DCacheFlushRange((UINTPTR)text, len);
-	fr = f_write(&f, text, len, &nwritten);
-	if (fr == FR_OK && nwritten == len)
-		fr = f_sync(&f);
-	if (f_close(&f) != FR_OK && fr == FR_OK)
-		fr = FR_DISK_ERR;
-	if (fr != FR_OK || nwritten != len) {
-		/* The partial temp stays for the reset hook / next save;
-		 * the original was never touched. */
-		printf("[CFG] save: write %s failed: %d (%u/%u)\n",
-			ZZ_CONFIG_TEMP_PATH, (int)fr, nwritten, len);
-		return -1;
-	}
-
-	/* Commit (fw_update's commit_temp_file discipline): keep the
-	 * previous file as ZZ9000.BAK, then rename the temp into place,
-	 * restoring the backup if the final rename fails. */
-	fr = f_unlink(ZZ_CONFIG_BAK_PATH);
-	if (fr != FR_OK && fr != FR_NO_FILE) {
-		printf("[CFG] save: unlink stale %s failed: %d\n",
-			ZZ_CONFIG_BAK_PATH, (int)fr);
-		return -1;
-	}
-	fr = f_rename(ZZ_CONFIG_FILE_PATH, ZZ_CONFIG_BAK_PATH);
-	if (fr != FR_OK && fr != FR_NO_FILE) {
-		printf("[CFG] save: backup rename failed: %d\n", (int)fr);
-		return -1;
-	}
-	fr = f_rename(ZZ_CONFIG_TEMP_PATH, ZZ_CONFIG_FILE_PATH);
-	if (fr != FR_OK) {
-		FRESULT restore_fr;
-
-		printf("[CFG] save: commit rename failed: %d\n", (int)fr);
-		restore_fr = f_rename(ZZ_CONFIG_BAK_PATH, ZZ_CONFIG_FILE_PATH);
-		if (restore_fr != FR_OK && restore_fr != FR_NO_FILE)
-			printf("[CFG] save: restore from " ZZ_CONFIG_BAK_FILENAME
-				" failed: %d (" ZZ_CONFIG_FILENAME
-				" unavailable until the next save)\n",
-				(int)restore_fr);
-		return -1;
-	}
-	cfg_save_temp_pending = 0;
+	memset(&cfg_step_file, 0, sizeof(cfg_step_file));
+	cfg_step_text = text;
+	cfg_step_len = len;
+	cfg_step_pos = 0;
+	cfg_step_file_open = 0;
+	cfg_step_active = 1;
 	return 0;
 }
 
+int zz_config_save_op(enum zz_config_save_op op) {
+	FRESULT fr;
+	UINT nwritten = 0;
+
+	if (!cfg_step_active) return -1;
+	switch (op) {
+	case ZZ_CFG_SAVE_RECOVER_BAK:
+		if (!cfg_step_backup_moved)
+			return 1;
+		fr = f_rename(ZZ_CONFIG_BAK_PATH, ZZ_CONFIG_FILE_PATH);
+		if (fr != FR_OK && fr != FR_NO_FILE)
+			return -1;
+		cfg_step_backup_moved = 0;
+		return 1;
+	case ZZ_CFG_SAVE_UNLINK_TEMP:
+		/* A partial temp from an interrupted save is junk; drop it
+		 * so the create-always open starts clean. */
+		fr = f_unlink(ZZ_CONFIG_TEMP_PATH);
+		if (fr != FR_OK && fr != FR_NO_FILE) {
+			printf("[CFG] save: unlink stale %s failed: %d\n",
+				ZZ_CONFIG_TEMP_PATH, (int)fr);
+			return -1;
+		}
+		return 1;
+	case ZZ_CFG_SAVE_OPEN:
+		fr = f_open(&cfg_step_file, ZZ_CONFIG_TEMP_PATH,
+			FA_CREATE_ALWAYS | FA_WRITE);
+		if (fr != FR_OK) {
+			printf("[CFG] save: open %s failed: %d\n",
+				ZZ_CONFIG_TEMP_PATH, (int)fr);
+			return -1;
+		}
+		cfg_save_temp_pending = 1;
+		cfg_step_file_open = 1;
+		/* The text is CPU-written cacheable DDR; clean it before
+		 * f_write so any direct-SD DMA path inside FatFs sees the
+		 * fresh bytes. */
+		Xil_DCacheFlushRange((UINTPTR)cfg_step_text, cfg_step_len);
+		return 1;
+	case ZZ_CFG_SAVE_WRITE: {
+		unsigned chunk = cfg_step_len - cfg_step_pos;
+
+		if (chunk > ZZ_CFG_SAVE_CHUNK) chunk = ZZ_CFG_SAVE_CHUNK;
+		if (chunk == 0) return 1;
+		fr = f_write(&cfg_step_file, cfg_step_text + cfg_step_pos,
+			chunk, &nwritten);
+		cfg_step_pos += nwritten;
+		if (fr != FR_OK || nwritten != chunk) {
+			printf("[CFG] save: write %s failed: %d (%u/%u)\n",
+				ZZ_CONFIG_TEMP_PATH, (int)fr,
+				cfg_step_pos, cfg_step_len);
+			return -1;
+		}
+		return cfg_step_pos >= cfg_step_len;
+	}
+	case ZZ_CFG_SAVE_SYNC:
+		if (f_sync(&cfg_step_file) != FR_OK) {
+			printf("[CFG] save: sync %s failed\n",
+				ZZ_CONFIG_TEMP_PATH);
+			return -1;
+		}
+		return 1;
+	case ZZ_CFG_SAVE_CLOSE:
+		fr = f_close(&cfg_step_file);
+		cfg_step_file_open = 0;
+		if (fr != FR_OK) {
+			printf("[CFG] save: close %s failed\n",
+				ZZ_CONFIG_TEMP_PATH);
+			return -1;
+		}
+		return 1;
+	case ZZ_CFG_SAVE_UNLINK_BAK:
+		fr = f_unlink(ZZ_CONFIG_BAK_PATH);
+		if (fr != FR_OK && fr != FR_NO_FILE) {
+			printf("[CFG] save: unlink stale %s failed: %d\n",
+				ZZ_CONFIG_BAK_PATH, (int)fr);
+			return -1;
+		}
+		return 1;
+	case ZZ_CFG_SAVE_RENAME_BAK:
+		fr = f_rename(ZZ_CONFIG_FILE_PATH, ZZ_CONFIG_BAK_PATH);
+		if (fr != FR_OK && fr != FR_NO_FILE) {
+			printf("[CFG] save: backup rename failed: %d\n",
+				(int)fr);
+			return -1;
+		}
+		if (fr == FR_OK)
+			cfg_step_backup_moved = 1;
+		return 1;
+	case ZZ_CFG_SAVE_RENAME_LIVE:
+		fr = f_rename(ZZ_CONFIG_TEMP_PATH, ZZ_CONFIG_FILE_PATH);
+		if (fr != FR_OK) {
+			printf("[CFG] save: commit rename failed: %d\n",
+				(int)fr);
+			return -1;
+		}
+		cfg_save_temp_pending = 0;
+		cfg_step_backup_moved = 0;
+		return 1;
+	case ZZ_CFG_SAVE_RESTORE_BAK:
+		/* Best-effort single attempt (the sync path's rule): a
+		 * failure leaves ZZ9000.CFG absent until the next save. */
+		fr = f_rename(ZZ_CONFIG_BAK_PATH, ZZ_CONFIG_FILE_PATH);
+		if (fr != FR_OK && fr != FR_NO_FILE) {
+			printf("[CFG] save: restore from " ZZ_CONFIG_BAK_FILENAME
+				" failed: %d (" ZZ_CONFIG_FILENAME
+				" unavailable until the next save)\n",
+				(int)fr);
+			return -1;
+		}
+		cfg_step_backup_moved = 0;
+		return 1;
+	default:
+		return -1;
+	}
+}
+
+void zz_config_save_end(void) {
+	if (cfg_step_active && cfg_step_file_open) {
+		(void)f_close(&cfg_step_file);
+		cfg_step_file_open = 0;
+	}
+	cfg_step_active = 0;
+	cfg_step_text = NULL;
+	cfg_step_len = 0;
+	cfg_step_pos = 0;
+}
+
 void zz_config_save_reset(void) {
+	FRESULT fr;
+
+	if (!cfg_step_active && !cfg_save_temp_pending &&
+			!cfg_step_backup_moved)
+		return;
+	/* Release an interrupted writer first. If the atomic replace had
+	 * already moved the live file aside, restore it before dropping
+	 * the new temp snapshot. */
+	zz_config_save_end();
+	if (cfg_step_backup_moved) {
+		fr = f_rename(ZZ_CONFIG_BAK_PATH, ZZ_CONFIG_FILE_PATH);
+		if (fr == FR_OK || fr == FR_NO_FILE) {
+			cfg_step_backup_moved = 0;
+		} else {
+			printf("[CFG] reset: restore from "
+				ZZ_CONFIG_BAK_FILENAME " failed: %d\n", (int)fr);
+		}
+	}
 	if (!cfg_save_temp_pending) return;
-	/* The original was never touched (the final rename never ran);
-	 * drop the junk temp like fw_update_reset drops ZZFWUP.TMP. */
 	cfg_save_temp_pending = 0;
 	f_unlink(ZZ_CONFIG_TEMP_PATH);
 }
