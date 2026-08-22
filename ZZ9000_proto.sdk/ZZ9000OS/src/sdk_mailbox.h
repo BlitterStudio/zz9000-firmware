@@ -568,6 +568,30 @@ typedef char SDKAudioControlStateGetPayload_must_be_48_bytes[
 typedef char SDKAudioControlStateResultPayload_must_be_48_bytes[
 	(sizeof(struct SDKAudioControlStateResultPayload) == 48U) ? 1 : -1];
 
+/* Non-volatile big-endian word accessors shared by the control-plane
+ * dispatch and any payload pack/unpack that reads plain buffers. */
+static inline uint32_t sdk_get_be32(const uint8_t *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static inline void sdk_put_be32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)(v >> 24);
+	p[1] = (uint8_t)(v >> 16);
+	p[2] = (uint8_t)(v >> 8);
+	p[3] = (uint8_t)v;
+}
+
+static inline void sdk_meter_put_word(volatile uint8_t *dst, uint32_t v)
+{
+	dst[0] = (uint8_t)(v >> 24);
+	dst[1] = (uint8_t)(v >> 16);
+	dst[2] = (uint8_t)(v >> 8);
+	dst[3] = (uint8_t)v;
+}
+
 /*
  * Pack one framed meter snapshot (U3, KTD3). The whole state fits a
  * single frame, so frame is 1 and frame_count is 1; all frames of a
@@ -577,13 +601,6 @@ typedef char SDKAudioControlStateResultPayload_must_be_48_bytes[
  * the peak-hold window. Fields are big-endian words, mirroring the
  * SDK ZZ9KAudioMeterResultPayload layout byte-for-byte.
  */
-static inline void sdk_meter_put_word(volatile uint8_t *dst, uint32_t v)
-{
-	dst[0] = (uint8_t)(v >> 24);
-	dst[1] = (uint8_t)(v >> 16);
-	dst[2] = (uint8_t)(v >> 8);
-	dst[3] = (uint8_t)v;
-}
 
 static inline void sdk_audio_meter_result_pack(
 	volatile struct SDKAudioMeterResultPayload *out,

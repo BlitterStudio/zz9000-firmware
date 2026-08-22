@@ -23,20 +23,6 @@
 #include "sdk_audio_control.h"
 #include "sdk_mailbox.h"
 
-static uint32_t ctrl_get_be32(const uint8_t *p)
-{
-	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-}
-
-static void ctrl_put_be32(uint8_t *p, uint32_t v)
-{
-	p[0] = (uint8_t)(v >> 24);
-	p[1] = (uint8_t)(v >> 16);
-	p[2] = (uint8_t)(v >> 8);
-	p[3] = (uint8_t)v;
-}
-
 /* Scene select: switch the active scene through the single
  * glitch-free commit path (F3). */
 static uint16_t ctrl_scene_select(const uint8_t *params,
@@ -50,9 +36,9 @@ static uint16_t ctrl_scene_select(const uint8_t *params,
 
 	if (payload_len < sizeof(*p))
 		return SDK_STATUS_BAD_REQUEST;
-	if (ctrl_get_be32(p->flags) != 0U)
+	if (sdk_get_be32(p->flags) != 0U)
 		return SDK_STATUS_BAD_REQUEST;
-	scene = ctrl_get_be32(p->scene);
+	scene = sdk_get_be32(p->scene);
 	if (scene >= SDK_AUDIO_SCENE_COUNT)
 		return SDK_STATUS_BAD_REQUEST;
 
@@ -78,9 +64,9 @@ static uint16_t ctrl_scene_write(const uint8_t *params,
 
 	if (payload_len < sizeof(*p))
 		return SDK_STATUS_BAD_REQUEST;
-	scene = ctrl_get_be32(p->scene);
-	param = ctrl_get_be32(p->param);
-	flags = ctrl_get_be32(p->flags);
+	scene = sdk_get_be32(p->scene);
+	param = sdk_get_be32(p->param);
+	flags = sdk_get_be32(p->flags);
 	if ((flags & ~SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT) != 0U)
 		return SDK_STATUS_BAD_REQUEST;
 	if ((flags & SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT) != 0U &&
@@ -88,7 +74,7 @@ static uint16_t ctrl_scene_write(const uint8_t *params,
 		return SDK_STATUS_BAD_REQUEST; /* commit needs a slot */
 
 	rc = audio_scene_stage_param((uint8_t)scene, param,
-		ctrl_get_be32(p->value));
+		sdk_get_be32(p->value));
 	if (rc != 0)
 		return SDK_STATUS_BAD_REQUEST;
 	if ((flags & SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT) == 0U)
@@ -123,10 +109,10 @@ static uint16_t ctrl_trim_submit(const uint8_t *params,
 
 	if (payload_len < sizeof(*p))
 		return SDK_STATUS_BAD_REQUEST;
-	if (ctrl_get_be32(p->flags) != 0U)
+	if (sdk_get_be32(p->flags) != 0U)
 		return SDK_STATUS_BAD_REQUEST;
 
-	balance = ctrl_get_be32(p->balance);
+	balance = sdk_get_be32(p->balance);
 	paula = (int16_t)((int32_t)SDK_AUDIO_BALANCE_CH1(balance) -
 		(int32_t)audio_scene_baseline_paula());
 	ax = (int16_t)((int32_t)SDK_AUDIO_BALANCE_CH2(balance) -
@@ -135,14 +121,14 @@ static uint16_t ctrl_trim_submit(const uint8_t *params,
 			&result) != 0)
 		return SDK_STATUS_IO_ERROR;
 
-	ctrl_put_be32(out->balance_applied,
+	sdk_put_be32(out->balance_applied,
 		SDK_AUDIO_BALANCE_PACK(result.mixer_paula, result.mixer_ax));
 	/* Bounded requests report the bound that was applied (R3): a
 	 * bounded request is never silently clamped. */
-	ctrl_put_be32(out->balance_bound, result.bounded ?
+	sdk_put_be32(out->balance_bound, result.bounded ?
 		SDK_AUDIO_BALANCE_PACK(result.mixer_paula, result.mixer_ax)
 		: 0U);
-	ctrl_put_be32(out->flags, result.bounded ?
+	sdk_put_be32(out->flags, result.bounded ?
 		SDK_AUDIO_TRIM_RESULT_BOUNDED : 0U);
 	*result_len = (uint16_t)sizeof(*out);
 	return SDK_STATUS_OK;
@@ -164,8 +150,8 @@ static uint16_t ctrl_meter_read(const uint8_t *params,
 
 	if (payload_len < sizeof(*p))
 		return SDK_STATUS_BAD_REQUEST;
-	direction = ctrl_get_be32(p->direction);
-	flags = ctrl_get_be32(p->flags);
+	direction = sdk_get_be32(p->direction);
+	flags = sdk_get_be32(p->flags);
 	if ((flags & ~SDK_AUDIO_METER_RESULT_HOLD_RESET) != 0U)
 		return SDK_STATUS_BAD_REQUEST;
 	if (audio_scene_meter_read(direction, flags, &snapshot) != 0)
@@ -195,18 +181,18 @@ static uint16_t ctrl_scene_save(const uint8_t *params,
 
 	if (payload_len < sizeof(*p))
 		return SDK_STATUS_BAD_REQUEST;
-	if (ctrl_get_be32(p->flags) != 0U)
+	if (sdk_get_be32(p->flags) != 0U)
 		return SDK_STATUS_BAD_REQUEST;
-	scene = ctrl_get_be32(p->scene);
+	scene = sdk_get_be32(p->scene);
 	if (scene >= SDK_AUDIO_SCENE_COUNT)
 		return SDK_STATUS_BAD_REQUEST;
 
 	status = audio_scene_save((uint8_t)scene);
 	if (status < 0)
 		return SDK_STATUS_BAD_REQUEST;
-	ctrl_put_be32(out->status, (uint32_t)status);
-	ctrl_put_be32(out->scene, scene);
-	ctrl_put_be32(out->flags, 0U);
+	sdk_put_be32(out->status, (uint32_t)status);
+	sdk_put_be32(out->scene, scene);
+	sdk_put_be32(out->flags, 0U);
 	*result_len = (uint16_t)sizeof(*out);
 	return SDK_STATUS_OK;
 }
@@ -227,18 +213,18 @@ static uint16_t ctrl_state_get(const uint8_t *params,
 
 	if (payload_len < sizeof(*p))
 		return SDK_STATUS_BAD_REQUEST;
-	if (ctrl_get_be32(p->flags) != 0U)
+	if (sdk_get_be32(p->flags) != 0U)
 		return SDK_STATUS_BAD_REQUEST;
 
 	audio_scene_control_state(&state);
-	ctrl_put_be32(out->active_scene, state.active_scene);
-	ctrl_put_be32(out->scene_count, state.scene_count);
-	ctrl_put_be32(out->baseline, SDK_AUDIO_BALANCE_PACK(
+	sdk_put_be32(out->active_scene, state.active_scene);
+	sdk_put_be32(out->scene_count, state.scene_count);
+	sdk_put_be32(out->baseline, SDK_AUDIO_BALANCE_PACK(
 		state.baseline_paula, state.baseline_ax));
-	ctrl_put_be32(out->trim, SDK_AUDIO_BALANCE_PACK(state.trim_paula,
+	sdk_put_be32(out->trim, SDK_AUDIO_BALANCE_PACK(state.trim_paula,
 		state.trim_ax));
-	ctrl_put_be32(out->ceiling, state.ceiling);
-	ctrl_put_be32(out->flags, state.trim_bounded ?
+	sdk_put_be32(out->ceiling, state.ceiling);
+	sdk_put_be32(out->flags, state.trim_bounded ?
 		SDK_AUDIO_CONTROL_FLAG_TRIM_BOUNDED : 0U);
 	*result_len = (uint16_t)sizeof(*out);
 	return SDK_STATUS_OK;

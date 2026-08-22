@@ -1480,34 +1480,13 @@ int main() {
 						 * behind the same authority. */
 						printf("[audio] param %d rejected: scene module owns the master chain\n",
 							audio_param);
-					} else if (audio_param == AP_DSP_UPLOAD) {
-						uint8_t* program_ptr = (uint8_t*)video_state->framebuffer +
-								((audio_params[AP_DSP_PROG_OFFS_HI]<<16)|audio_params[AP_DSP_PROG_OFFS_LO]);
-						uint8_t* params_ptr = (uint8_t*)video_state->framebuffer +
-								((audio_params[AP_DSP_PARAM_OFFS_HI]<<16)|audio_params[AP_DSP_PARAM_OFFS_LO]);
-						int dsp_status;
-
-						if (zdata == 0) {
-							printf("[audio] reprogramming from 0x%p and 0x%p\n", program_ptr, params_ptr);
-							dsp_status = audio_program_adau(program_ptr, 5120);
-							if (dsp_status == 0) {
-								dsp_status = audio_program_adau_params(
-										params_ptr, 4096);
-							}
-						} else {
-							printf("[audio] programming %ld params from 0x%p\n", zdata, params_ptr);
-							dsp_status = audio_program_adau_params(params_ptr, zdata);
-						}
-						if (dsp_status != 0)
-							printf("[audio] verified DSP upload failed.\n");
 					}
-					/* Master-chain setters (AP_DSP_SET_LOWPASS ..
-					 * AP_DSP_SET_STEREO_VOLUME, params 9-22) had
-					 * their register branches removed: the authority
-					 * gate above rejects those indices
-					 * unconditionally, so no live path could reach
-					 * them. The scene module is the only writer
-					 * (audio_scene.c). */
+					/* AP_DSP_UPLOAD and the master-chain setters
+					 * (params 8-22) never reach a live branch
+					 * here: audio_scene_init() claims authority
+					 * before the request loop starts, so the
+					 * gate above rejects them unconditionally.
+					 * The scene module is the only DSP writer. */
 					break;
 				// REG_ZZ_DECODER_PARAM / _VAL / _FIFO and REG_ZZ_DECODE:
 				// the legacy register-driven MP3 decoder was removed with

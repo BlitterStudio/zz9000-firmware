@@ -122,7 +122,7 @@ static double eq_worst_boost_linear(const struct audio_scene_def *scene)
 		if (scene->eq[i] > 50) {
 			double db = ((double)scene->eq[i] - 50.0) * 12.0 /
 				50.0;
-			double linear = pow(10.0, db / 20.0);
+			double linear = audio_db_to_linear(db);
 			if (linear > worst)
 				worst = linear;
 		}
@@ -145,6 +145,7 @@ static double baseline_sum_linear(void)
 struct volume_resolution {
 	int applied_volume; /* written to audio_adau_set_vol_pan */
 	double linear;      /* applied_volume / 100 */
+	double chain_linear; /* master chain at unity volume */
 	int reduced;        /* scene-alone level exceeded the boundary */
 	double requested_level;
 	double applied_level;
@@ -162,23 +163,24 @@ static void resolve_output_volume(const struct audio_scene_def *scene,
 {
 	double volume_linear = ((double)scene->volume) / 100.0;
 	double chain = master_chain_linear(scene, 1.0);
-	double level = baseline_sum_linear() * chain * volume_linear;
+	double baseline = baseline_sum_linear();
+	double level = baseline * chain * volume_linear;
 
 	out->applied_volume = scene->volume;
 	out->linear = volume_linear;
+	out->chain_linear = chain;
 	out->reduced = 0;
 	out->requested_level = level;
 	out->applied_level = level;
 	if (level > AUDIO_SCENE_ENFORCED_BOUNDARY) {
 		double allowed = AUDIO_SCENE_ENFORCED_BOUNDARY /
-			(baseline_sum_linear() * chain);
+			(baseline * chain);
 		if (allowed > 1.0)
 			allowed = 1.0;
 		out->applied_volume = (int)(allowed * 100.0);
 		out->linear = ((double)out->applied_volume) / 100.0;
 		out->reduced = 1;
-		out->applied_level = baseline_sum_linear() * chain *
-			out->linear;
+		out->applied_level = baseline * chain * out->linear;
 	}
 }
 
@@ -268,9 +270,7 @@ static int restage_mixer(struct mixer_stage *stage)
 	struct volume_resolution vol;
 
 	resolve_output_volume(&scenes[active_scene_index], &vol);
-	compute_mixer_stage(
-		master_chain_linear(&scenes[active_scene_index], vol.linear),
-		stage);
+	compute_mixer_stage(vol.chain_linear * vol.linear, stage);
 	if (stage->bounded)
 		emit_gain_reduction(stage->requested, stage->applied);
 	last_mixer_stage = *stage;
@@ -317,8 +317,7 @@ static int apply_active_scene(void)
 	if (rc == 0 && audio_adau_set_prefactor(scene->prefactor) != 0)
 		rc = -1;
 	if (rc == 0) {
-		compute_mixer_stage(
-			master_chain_linear(scene, vol.linear), &stage);
+		compute_mixer_stage(vol.chain_linear * vol.linear, &stage);
 		if (stage.bounded)
 			emit_gain_reduction(stage.requested, stage.applied);
 		last_mixer_stage = stage;
