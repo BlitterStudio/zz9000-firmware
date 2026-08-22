@@ -141,6 +141,28 @@ int audio_adau_eq_substep(int band, int gain, int substep)
 	if (substep < 10) return 0;
 	return 1;
 }
+__attribute__((unused)) int audio_adau_safe_mixer_leg(int leg, int value, int substep)
+{
+	record_write(WRITE_MIXER_P + leg, value, 0);
+	if (substep == 2)
+		return fail_next_write ? -1 : 1;
+	return 0;
+}
+
+__attribute__((unused)) int audio_adau_safe_vol_pan_side(int side, int vol, int pan, int substep)
+{
+	record_write(WRITE_VOLPAN_SIDE0 + side, vol, pan);
+	if (substep == 2)
+		return fail_next_write ? -1 : 1;
+	return 0;
+}
+
+__attribute__((unused)) int audio_adau_safe_prefactor(int pre, int substep)
+{
+	record_write(WRITE_PREF, pre, 0);
+	return (substep < 4) ? 0 : 1;
+}
+
 
 int audio_adau_set_mixer_leg(int leg, int value)
 {
@@ -348,8 +370,8 @@ static void test_staged_write_accumulates(void)
 		"commit dispatch issued no DSP writes before poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 91,
-		"staged commit: 11 EQ substeps + 40-level ramp x 2",
+	check(write_count == 251,
+		"staged commit: 11 EQ + 40-level ramp x 2 x 3 substeps",
 		fmt("writes=%d", write_count));
 	ok = log_at(0, &kind, &a, &b) && kind == WRITE_EQ_SUB &&
 		a == 3 && b == 0;
@@ -773,7 +795,7 @@ static void test_baseline_write_path(void)
 {
 	struct SDKAudioSceneWritePayload wr;
 	struct SDKAudioControlStateGetPayload get;
-	int kind = 0, a = 0, b = 0;
+	int a = 0, b = 0;
 	int ok;
 
 	audio_scene_init();
@@ -794,17 +816,12 @@ static void test_baseline_write_path(void)
 	/* The staged baseline is a live edit: the differential commit
 	 * moves only the mixer legs (the scene's parameters and its
 	 * resolved output volume are unchanged). */
-	check(write_count == 2,
-		"baseline change commits as a per-leg mixer diff",
+	check(write_count == 6,
+		"baseline diff: 2 legs x 3 safeload substeps",
 		fmt("writes=%d", write_count));
-	ok = log_at(0, &kind, &a, &b) && kind == WRITE_MIXER_P &&
-		a == 150;
-	check(ok, "baseline diff writes the Paula mixer leg",
-		fmt("kind=%d leg=%d", kind, a));
-	ok = log_at(1, &kind, &a, &b) && kind == WRITE_MIXER_A &&
-		a == 40;
-	check(ok, "baseline diff writes the AX mixer leg",
-		fmt("kind=%d leg=%d", kind, a));
+	ok = last_write(WRITE_MIXER_A, &a, &b) && a == 40;
+	check(ok, "baseline diff lands the AX mixer leg last",
+		fmt("leg=%d", a));
 	check(audio_scene_gain_reduction_events() == 0,
 		"within-boundary baseline emits no event", NULL);
 

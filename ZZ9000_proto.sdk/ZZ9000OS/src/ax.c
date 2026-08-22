@@ -1275,6 +1275,115 @@ int audio_adau_set_mixer_vol(int vol1, int vol2) {
 }
 
 double eq_omega(double fs, double f0);
+
+/* Resumable single-parameter safeload (click-free runtime writes):
+ * the ADAU1701 appnote requires safeload for parameter changes while
+ * the core is streaming; a direct param-RAM write can collide with a
+ * sample boundary and pop even when the parameter is outside the
+ * audible path. Substeps: 0 = stage value, 1 = stage target address,
+ * 2 = latch. Returns 0 to continue, 1 complete, -1 failure. */
+static struct {
+	uint8_t value[ADAU_PARAMETER_WORD_BYTES];
+	uint16_t address;
+	int valid;
+} safe1_ctx;
+
+int audio_adau_safe_param_substep(uint16_t address,
+	const uint8_t value[ADAU_PARAMETER_WORD_BYTES], int substep)
+{
+	uint8_t buf[5];
+
+	if (substep < 0 || substep > 2)
+		return -1;
+	if (substep == 0) {
+		safe1_ctx.address = address;
+		memcpy(safe1_ctx.value, value, ADAU_PARAMETER_WORD_BYTES);
+		safe1_ctx.valid = 1;
+		buf[0] = 0;
+		memcpy(&buf[1], safe1_ctx.value,
+			ADAU_PARAMETER_WORD_BYTES);
+		return (adau_write40(0x34, 0x0810, buf) != 0) ? -1 : 0;
+	}
+	if (!safe1_ctx.valid)
+		return -1;
+	if (substep == 1)
+		return (adau_write16(0x34, 0x0815,
+				safe1_ctx.address) != 0) ? -1 : 0;
+	/* substep 2: latch */
+	return (adau_write16(0x34, 0x081C, 0x003C) != 0) ? 1 : -1;
+}
+
+/* Safeload equivalents of the single-param setters used by the
+ * differential commit path; each computes then drives the same
+ * value the direct setter would write, via safe_param_substep. */
+int audio_adau_safe_mixer_leg(int leg, int value, int substep)
+{
+	double g = ((double)value) / 127.0;
+	uint8_t buf[ADAU_PARAMETER_WORD_BYTES];
+
+	adau_to_5_23(g, buf);
+	return audio_adau_safe_param_substep(
+		(leg == 0) ? MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR
+			   : MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR,
+		buf, substep);
+}
+
+int audio_adau_safe_vol_pan_side(int side, int vol, int pan, int substep)
+{
+	LONG v = vol;
+	double g;
+	uint8_t buf[ADAU_PARAMETER_WORD_BYTES];
+
+	if (side == 0) {
+		if (pan > 50) v -= 2 * (pan - 50);
+	} else {
+		if (pan < 50) v -= 2 * (50 - pan);
+	}
+	if (v > 100) v = 100;
+	if (v < 0) v = 0;
+	g = .01f * (double)v;
+	adau_to_5_23(g, buf);
+	return audio_adau_safe_param_substep(
+		(side == 0) ? MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR
+			    : MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR,
+		buf, substep);
+}
+
+int audio_adau_safe_prefactor(int pre, int substep)
+{
+	/* The prefactor writes two parameter words (ALG0/ALG1); the
+	 * safeload path stages both in slots 0 and 1 then latches:
+	 * substeps 0..2 = slot0 value/address + shared-latch marker,
+	 * 3..5 = slot1; 6 = latch. */
+	static struct {
+		uint8_t buf[ADAU_PARAMETER_WORD_BYTES];
+	} ctx;
+	uint8_t buf5[5];
+
+	if (substep == 0) {
+		adau_to_5_23(audio_adau_prefactor_gain(pre), ctx.buf);
+		buf5[0] = 0;
+		memcpy(&buf5[1], ctx.buf, ADAU_PARAMETER_WORD_BYTES);
+		return (adau_write40(0x34, 0x0810, buf5) != 0) ? -1 : 0;
+	}
+	if (substep == 1)
+		return (adau_write16(0x34, 0x0815,
+			MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_ADDR) != 0)
+			? -1 : 0;
+	if (substep == 2) {
+		buf5[0] = 0;
+		memcpy(&buf5[1], ctx.buf, ADAU_PARAMETER_WORD_BYTES);
+		return (adau_write40(0x34, 0x0811, buf5) != 0) ? -1 : 0;
+	}
+	if (substep == 3)
+		return (adau_write16(0x34, 0x0816,
+			MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR) != 0)
+			? -1 : 0;
+	if (substep == 4)
+		return (adau_write16(0x34, 0x081C, 0x003C) != 0) ? 1 : -1;
+	return -1;
+}
+
 double eq_alpha(double fs, double f0);
 
 /* Resumable EQ safeload: the commit machine drives one sub-step per

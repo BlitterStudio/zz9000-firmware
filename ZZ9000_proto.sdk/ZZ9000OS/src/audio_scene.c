@@ -677,21 +677,48 @@ static void commit_step(void)
 			rc = -1;
 			break;
 		}
-		case FAST_PREF:
-			rc = audio_adau_set_prefactor(step->a);
+		case FAST_PREF: {
+			int r = audio_adau_safe_prefactor(step->a,
+				commit.todo[commit.todo_next].sub++);
+			if (r == 0)
+				return;
+			rc = (r == 1) ? 0 : -1;
 			break;
-		case FAST_MIXER_P:
-			rc = audio_adau_set_mixer_leg(0, step->a);
+		}
+		case FAST_MIXER_P: {
+			int r = audio_adau_safe_mixer_leg(0, step->a,
+				commit.todo[commit.todo_next].sub++);
+			if (r == 0)
+				return;
+			rc = (r == 1) ? 0 : -1;
 			break;
-		case FAST_MIXER_A:
-			rc = audio_adau_set_mixer_leg(1, step->a);
+		}
+		case FAST_MIXER_A: {
+			int r = audio_adau_safe_mixer_leg(1, step->a,
+				commit.todo[commit.todo_next].sub++);
+			if (r == 0)
+				return;
+			rc = (r == 1) ? 0 : -1;
 			break;
-		case FAST_VOLPAN_L:
-			rc = audio_adau_set_vol_pan_side(0, step->a, step->b);
+		}
+		case FAST_VOLPAN_L: {
+			int r = audio_adau_safe_vol_pan_side(0, step->a,
+				step->b,
+				commit.todo[commit.todo_next].sub++);
+			if (r == 0)
+				return;
+			rc = (r == 1) ? 0 : -1;
 			break;
-		default:
-			rc = audio_adau_set_vol_pan_side(1, step->a, step->b);
+		}
+		default: {
+			int r = audio_adau_safe_vol_pan_side(1, step->a,
+				step->b,
+				commit.todo[commit.todo_next].sub++);
+			if (r == 0)
+				return;
+			rc = (r == 1) ? 0 : -1;
 			break;
+		}
 		}
 		if (rc == 0 && ++commit.todo_next >= commit.todo_count)
 			commit.phase = COMMIT_DONE;

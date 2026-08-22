@@ -58,6 +58,24 @@ int audio_adau_eq_substep(int band, int gain, int substep)
 	if (substep < 10) return 0;
 	return 1;
 }
+__attribute__((unused)) int audio_adau_safe_mixer_leg(int leg, int value, int substep)
+{
+	(void)leg; (void)value;
+	return (substep < 2) ? 0 : 1;
+}
+
+__attribute__((unused)) int audio_adau_safe_vol_pan_side(int side, int vol, int pan, int substep)
+{
+	(void)side; (void)vol; (void)pan;
+	return (substep < 2) ? 0 : 1;
+}
+
+__attribute__((unused)) int audio_adau_safe_prefactor(int pre, int substep)
+{
+	(void)pre;
+	return (substep < 4) ? 0 : 1;
+}
+
 
 int audio_adau_set_mixer_leg(int leg, int value)
 {
