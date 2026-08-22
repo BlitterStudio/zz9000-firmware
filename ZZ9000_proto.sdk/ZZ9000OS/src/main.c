@@ -614,6 +614,12 @@ int main() {
 			sdk_mailbox_init();
 		}
 
+		/* Scene commit machine (P1): one verified-I2C setter step per
+		 * service-loop pass, here where the Zorro register service
+		 * runs, so a scene/equalizer commit's ~170-transaction
+		 * sequence interleaves with the per-period AHI traffic and
+		 * never blocks the mailbox dispatch below. */
+		audio_scene_poll();
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 		u32 aperture_flags = sdk_aperture_runtime_flags();
 		/* Acknowledge late: firmware normally boots before the RTG driver.

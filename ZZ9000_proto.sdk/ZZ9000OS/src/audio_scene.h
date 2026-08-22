@@ -87,21 +87,39 @@ void audio_scene_init(void);
  * every Amiga warm reset). Resets telemetry counters (they describe a
  * DSP instance that no longer exists) and drops all owner trims (the
  * reset tore their sessions down), then writes the scene and the
- * staged mixer legs before any owner can be serviced (R10).
- * Returns 0 on success, -1 if a verified DSP write failed, or
- * AUDIO_SCENE_COMMIT_BUSY when re-entered mid-commit. */
+ * staged mixer legs before any owner can be serviced (R10). The
+ * reset path has no client waiting, so the commit machine runs here
+ * synchronously to completion. Returns 0 on success, -1 if a
+ * verified DSP write failed or the module is not initialized. */
 int audio_scene_apply_after_dsp_init(void);
 
 /*
- * A commit is already in flight (serialization, KTD7): the caller
- * must retry. Returned by every entry point that would trigger a
- * master-chain commit when re-entered from inside one.
+ * Compatibility status from the synchronous-commit era (KTD7
+ * serialization): entry points re-entered mid-commit used to fail
+ * fast with this. Since the commit became an incremental machine
+ * driven by audio_scene_poll(), a request that arrives mid-commit is
+ * coalesced instead and the entry points return 0; the define stays
+ * for ABI stability.
  */
 #define AUDIO_SCENE_COMMIT_BUSY (-2)
 
+/*
+ * Advance the incremental commit machine by at most ONE DSP setter
+ * call (one verified-I2C unit), then return. Returns nonzero while a
+ * commit is active (more steps remain, or a coalesced follow-up
+ * machine just started), 0 when idle. Cheap when idle. Call once per
+ * main-loop iteration so scene commits interleave with the per-period
+ * AHI traffic instead of blocking the dispatch.
+ */
+int audio_scene_poll(void);
+
 /* Scene operations (the only accepted path to master-chain writes).
  * Those that change the applied master chain join the single
- * glitch-free commit path. */
+ * glitch-free commit path. Validation is synchronous; the commit
+ * itself starts the machine and returns 0 immediately -- a request
+ * arriving while a machine is mid-flight is coalesced (applied by a
+ * fresh machine at its completion), never rejected as busy. Returns
+ * -1 only for an invalid request. */
 int audio_scene_select(uint8_t index);
 int audio_scene_write(uint8_t index, const struct audio_scene_def *def);
 const struct audio_scene_def *audio_scene_get(uint8_t index);
@@ -110,9 +128,9 @@ uint8_t audio_scene_active_index(void);
 /*
  * Set the operator baseline (R17): applied under every owner's
  * playback, on top of the active scene. The immediate variant joins
- * the single glitch-free commit path; the mailbox path stages it
- * through audio_scene_stage_param and commits. Returns 0, or
- * AUDIO_SCENE_COMMIT_BUSY when re-entered mid-commit.
+ * the single glitch-free commit path (started, not completed --
+ * audio_scene_poll drives it); the mailbox path stages it
+ * through audio_scene_stage_param and commits.
  */
 int audio_scene_set_baseline(uint8_t paula, uint8_t ax);
 uint8_t audio_scene_baseline_paula(void);
@@ -147,10 +165,14 @@ int audio_scene_stage_param(uint8_t index, uint32_t param,
  * as one atomic glitch-free master-chain assignment: fade down
  * through verified writes, commit params in fixed order (the EQ
  * bands as one contiguous safeload group), restore volume (KTD7).
- * One implementation serves scene select, live edit commit, and
- * baseline changes. A commit of an inactive scene stores the staged
- * definition without touching the DSP. Returns 0, -1 if a verified
- * write failed, AUDIO_SCENE_COMMIT_BUSY when re-entered mid-commit.
+ * One machine serves scene select, live edit commit, and baseline
+ * changes. A commit of an inactive scene stores the staged
+ * definition without touching the DSP. Returns 0 once the staged
+ * edits are taken into the live tables and the machine is started
+ * (or, for a mid-flight machine, the re-apply is coalesced); the
+ * staging is consumed only when the applying machine ultimately
+ * succeeds -- a failing machine restores the pre-commit tables so a
+ * retry re-issues the whole sequence.
  */
 int audio_scene_commit_staged(uint8_t index);
 

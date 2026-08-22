@@ -5,7 +5,10 @@
  * accumulators with coherent snapshots (KTD3). Since U4 it also owns
  * the staged-edit drafts and the single KTD7 glitch-free commit path
  * (fade -> ordered verified writes -> restore) that every
- * master-chain change funnels through.
+ * master-chain change funnels through; that commit runs as an
+ * incremental state machine driven by audio_scene_poll(), one DSP
+ * setter call per call, so the dispatch path never blocks on the
+ * ~170-transaction I2C sequence.
  *
  * Holds the scene state, the operator baseline balance, per-owner
  * source trims, the enforced saturation boundary, and the
@@ -97,11 +100,91 @@ static uint8_t staged_baseline_paula;
 static uint8_t staged_baseline_ax;
 static int baseline_staged;
 
-/* Set while a glitch-free commit's write sequence is in flight, so a
- * re-entered commit (nested dispatch, rapid switches racing a
- * mid-commit call) fails fast instead of interleaving two partial
- * master-chain writes. */
+/* ---- incremental commit machine (P1: the dispatch path never
+ * blocks on I2C) ---- */
+
+/*
+ * The KTD7 write sequence (fade -> LPF -> ten EQ bands -> prefactor
+ * -> mixer legs -> restore) is ~170 verified I2C transactions at
+ * 100 kHz. Running it inline in the mailbox dispatch stalled core 0
+ * long enough for ZZ9KCall clients to time out. The commit is
+ * therefore an incremental state machine: the dispatch entry
+ * points validate, update the live tables, start the machine and
+ * return immediately; audio_scene_poll() -- called once per main
+ * loop iteration -- advances it by at most ONE setter call, so the
+ * steps interleave with the per-period AHI traffic.
+ * The machine works on a snapshot taken at start (scene definition,
+ * resolved volume, composed mixer stage), so table edits that arrive
+ * mid-flight can never tear the running sequence: they coalesce into
+ * a pending target that a fresh machine applies when this one
+ * reaches its terminal state.
+ */
+enum commit_phase {
+	COMMIT_FADE,         /* verified fade of the output to zero */
+	COMMIT_LPF,
+	COMMIT_EQ,           /* eq_band in flight, 0..9 */
+	COMMIT_PREF,
+	COMMIT_MIXER,        /* snapshot mixer legs */
+	COMMIT_RESTORE,      /* resolved output volume back up */
+	COMMIT_ABORT_RESTORE, /* best-effort restore after a failed step */
+	COMMIT_DONE           /* terminal: finish (and chain a pending) */
+};
+
+/* Set while a machine's write sequence is between its first fade and
+ * its terminal state (DONE or abort), including the finish jump into
+ * a coalesced follow-up machine. */
 static int commit_in_progress;
+
+/* Guard against a poll() re-entered from inside a setter (the same
+ * nested-dispatch seam the tests exercise): the outer step owns the
+ * phase transitions. */
+static int commit_stepping;
+
+
+/*
+ * Coalesced request: a scene switch (or a table edit) that arrived
+ * while a machine was running. When the machine reaches its terminal
+ * state, a fresh machine starts toward pending_target unless it
+ * equals the index just applied AND no table changed since that
+ * machine started (a redundant re-select coalesces to nothing).
+ */
+static int pending_valid;
+static uint8_t pending_target;
+static int pending_dirty; /* live tables changed mid-machine */
+
+/*
+ * Staged-commit rollback (U4 review fix): commit_staged takes the
+ * staged edits optimistically because the machine reads the live
+ * tables; if the applying machine ultimately fails, these pre-commit
+ * copies are restored so the staging survives and a retry re-issues
+ * the whole sequence. Cleared when the machine that began after the
+ * consumption completes successfully.
+ */
+struct staged_rollback {
+	int valid;
+	uint8_t scene_index;       /* slot whose scene/staging was consumed */
+	int scene_saved;
+	struct audio_scene_def scene;
+	struct scene_staging staging;
+	int baseline_saved;
+	uint8_t baseline_paula;
+	uint8_t baseline_ax;
+	int baseline_staged;
+};
+
+static struct staged_rollback rollback;
+
+/* Synchronously drain the machine to its terminal state (bounded by
+ * the fixed per-machine step count; nothing can enqueue new work
+ * while the caller holds the thread). Boot/reset apply and scene
+ * save use this. */
+static void commit_flush(void)
+{
+	int guard = 0;
+
+	while (audio_scene_poll() && ++guard < 1000)
+		;
+}
 
 static int module_initialized;
 static int authority_claimed;
@@ -276,67 +359,177 @@ static int restage_mixer(struct mixer_stage *stage)
 	last_mixer_stage = *stage;
 	return audio_adau_set_mixer_vol(stage->paula, stage->ax);
 }
+/* The running machine, snapshotting the volume_resolution and
+ * mixer_stage types defined above. */
+struct commit_machine {
+	enum commit_phase phase;
+	int eq_band;
+	uint8_t scene_index;           /* slot this machine applies */
+	struct audio_scene_def scene;  /* snapshot: tables may change */
+	struct volume_resolution vol;  /* resolved at machine start */
+	struct mixer_stage stage;      /* composed at machine start */
+	int failed;
+	int owns_rollback; /* this machine applies a staged commit's tables */
+};
+
+static struct commit_machine commit;
 
 /*
- * The single commit path (KTD7): fade the output down through a
- * verified write, commit the master-chain assignment in fixed order
- * -- LPF, the ten EQ bands as one contiguous safeload group,
- * prefactor, the staged mixer legs -- then restore the resolved
- * output volume. One implementation serves scene select, live edit
- * commit, baseline change, and the boot/warm-reset apply (F3).
- *
- * The in-flight flag serializes: a commit re-entered while the write
- * sequence runs completes AUDIO_SCENE_COMMIT_BUSY instead of
- * interleaving two partial master-chain assignments, so two rapid
- * scene switches can never tear each other.
+ * The single commit path (KTD7), as an incremental machine: fade the
+ * output down through a verified write, commit the master-chain
+ * assignment in fixed order -- LPF, the ten EQ bands as one
+ * contiguous safeload group, prefactor, the staged mixer legs -- then
+ * restore the resolved output volume. One machine serves scene
+ * select, live edit commit, baseline change, and the boot/warm-reset
+ * apply (F3); the entry points start it and return without touching
+ * I2C, audio_scene_poll() drives the steps (one setter call per
+ * call), and a coalesced pending target chains a fresh machine at
+ * completion so two rapid scene switches can never tear each other.
  */
-static int apply_active_scene(void)
+static void commit_begin(uint8_t index)
 {
-	const struct audio_scene_def *scene = &scenes[active_scene_index];
-	struct volume_resolution vol;
-	struct mixer_stage stage;
-	int i;
+	commit.scene_index = index;
+	commit.scene = scenes[index];
+	commit.eq_band = 0;
+	commit.failed = 0;
+	commit.phase = COMMIT_FADE;
+	/* The machine applies a consistent snapshot: mid-flight table
+	 * edits belong to the next machine. Both possible reduction
+	 * events are emitted here, once per machine, exactly as the
+	 * synchronous path emitted them across its run. */
+	resolve_output_volume(&commit.scene, &commit.vol);
+	if (commit.vol.reduced)
+		emit_gain_reduction(commit.vol.requested_level,
+			commit.vol.applied_level);
+	compute_mixer_stage(commit.vol.chain_linear * commit.vol.linear,
+		&commit.stage);
+	if (commit.stage.bounded)
+		emit_gain_reduction(commit.stage.requested,
+			commit.stage.applied);
+	last_mixer_stage = commit.stage;
+	commit.owns_rollback = rollback.valid;
+	pending_valid = 0;
+	pending_target = 0;
+	pending_dirty = 0;
+	commit_in_progress = 1;
+}
+
+static void commit_finish(void)
+{
+	commit_in_progress = 0;
+	if (commit.failed) {
+		/* A mid-sequence failure leaves the chain faded down and
+		 * half-written; the abort step has best-effort restored the
+		 * resolved output volume so the DAC is not left silent (a
+		 * full retry goes through the commit surface). A staged
+		 * commit that was optimistically taken from the tables goes
+		 * back: the staging survives for the retry. */
+		if (rollback.valid) {
+			if (rollback.scene_saved) {
+				scenes[rollback.scene_index] = rollback.scene;
+				staging[rollback.scene_index] = rollback.staging;
+			}
+			if (rollback.baseline_saved) {
+				baseline_paula = rollback.baseline_paula;
+				baseline_ax = rollback.baseline_ax;
+				baseline_staged = rollback.baseline_staged;
+			}
+			rollback.valid = 0;
+		}
+		/* A failed machine drops any coalesced follow-up: the
+		 * failure is the terminal outcome and the retry re-enters
+		 * through the commit surface. */
+		pending_valid = 0;
+		pending_dirty = 0;
+		return;
+	}
+	if (rollback.valid && commit.owns_rollback)
+		rollback.valid = 0; /* the staged edits are now applied */
+	if (pending_valid &&
+		(pending_target != commit.scene_index || pending_dirty)) {
+		uint8_t target = pending_target;
+
+		pending_valid = 0;
+		pending_dirty = 0;
+		commit_begin(target);
+	}
+}
+
+static void commit_step(void)
+{
+	const struct audio_scene_def *scene = &commit.scene;
 	int rc = 0;
 
-	if (commit_in_progress)
-		return AUDIO_SCENE_COMMIT_BUSY;
-
-	resolve_output_volume(scene, &vol);
-	if (vol.reduced)
-		emit_gain_reduction(vol.requested_level, vol.applied_level);
-
-	commit_in_progress = 1;
-	if (audio_adau_set_vol_pan(0, scene->pan) != 0)
-		rc = -1;
-	if (rc == 0 && audio_adau_set_lpf_params(scene->lpf_hz) != 0)
-		rc = -1;
-	for (i = 0; rc == 0 && i < AUDIO_SCENE_EQ_BANDS; i++) {
-		if (audio_adau_set_eq_gain(i, scene->eq[i]) != 0)
-			rc = -1;
+	switch (commit.phase) {
+	case COMMIT_FADE:
+		rc = audio_adau_set_vol_pan(0, scene->pan);
+		commit.phase = COMMIT_LPF;
+		break;
+	case COMMIT_LPF:
+		rc = audio_adau_set_lpf_params(scene->lpf_hz);
+		commit.eq_band = 0;
+		commit.phase = COMMIT_EQ;
+		break;
+	case COMMIT_EQ:
+		rc = audio_adau_set_eq_gain(commit.eq_band,
+			scene->eq[commit.eq_band]);
+		if (++commit.eq_band >= AUDIO_SCENE_EQ_BANDS)
+			commit.phase = COMMIT_PREF;
+		break;
+	case COMMIT_PREF:
+		rc = audio_adau_set_prefactor(scene->prefactor);
+		commit.phase = COMMIT_MIXER;
+		break;
+	case COMMIT_MIXER:
+		rc = audio_adau_set_mixer_vol(commit.stage.paula,
+			commit.stage.ax);
+		commit.phase = COMMIT_RESTORE;
+		break;
+	case COMMIT_RESTORE:
+	case COMMIT_ABORT_RESTORE:
+		rc = audio_adau_set_vol_pan(commit.vol.applied_volume,
+			scene->pan);
+		if (rc != 0) {
+			printf("[scene] apply failed; restoring output "
+				"volume\n");
+			commit.failed = 1;
+			if (commit.phase == COMMIT_RESTORE) {
+				/* The restore itself failed: retry it once,
+				 * best-effort (the sync path did the same),
+				 * then finish as a failed commit so a staged
+				 * rollback still applies. */
+				commit.phase = COMMIT_ABORT_RESTORE;
+				return;
+			}
+			/* The retry failed too: give up, finish failed. */
+		}
+		commit.phase = COMMIT_DONE;
+		commit_finish();
+		return;
+	default:
+		commit.phase = COMMIT_DONE;
+		break;
 	}
-	if (rc == 0 && audio_adau_set_prefactor(scene->prefactor) != 0)
-		rc = -1;
-	if (rc == 0) {
-		compute_mixer_stage(vol.chain_linear * vol.linear, &stage);
-		if (stage.bounded)
-			emit_gain_reduction(stage.requested, stage.applied);
-		last_mixer_stage = stage;
-		if (audio_adau_set_mixer_vol(stage.paula, stage.ax) != 0)
-			rc = -1;
-	}
-	if (rc == 0 && audio_adau_set_vol_pan(vol.applied_volume,
-			scene->pan) != 0)
-		rc = -1;
-	if (rc != 0) {
-		/* A mid-sequence failure leaves the chain faded down and
-		 * half-written; best-effort restore of the resolved output
-		 * volume so the DAC is not left silent (a full retry goes
-		 * through the commit surface). */
+	if (rc != 0 && commit.phase != COMMIT_DONE) {
 		printf("[scene] apply failed; restoring output volume\n");
-		(void)audio_adau_set_vol_pan(vol.applied_volume, scene->pan);
+		commit.failed = 1;
+		commit.phase = COMMIT_ABORT_RESTORE;
+		return;
 	}
-	commit_in_progress = 0;
-	return rc;
+	if (commit.phase == COMMIT_DONE)
+		commit_finish();
+}
+
+int audio_scene_poll(void)
+{
+	if (!commit_in_progress)
+		return 0;
+	if (commit_stepping)
+		return 1; /* nested poll from inside a setter: defer */
+	commit_stepping = 1;
+	commit_step();
+	commit_stepping = 0;
+	return commit_in_progress;
 }
 
 /* ---- metering accumulation and coherent snapshots (U3, KTD3) ---- */
@@ -621,6 +814,12 @@ void audio_scene_init(void)
 	memset(staging, 0, sizeof(staging));
 	baseline_staged = 0;
 	commit_in_progress = 0;
+	commit_stepping = 0;
+	memset(&commit, 0, sizeof(commit));
+	pending_valid = 0;
+	pending_target = 0;
+	pending_dirty = 0;
+	memset(&rollback, 0, sizeof(rollback));
 	memset(&last_mixer_stage, 0, sizeof(last_mixer_stage));
 	last_mixer_stage.paula = baseline_paula;
 	last_mixer_stage.ax = baseline_ax;
@@ -633,11 +832,17 @@ void audio_scene_init(void)
 
 int audio_scene_apply_after_dsp_init(void)
 {
-	if (!module_initialized || commit_in_progress)
-		return !module_initialized ? -1 : AUDIO_SCENE_COMMIT_BUSY;
+	if (!module_initialized)
+		return -1;
 	/* The DSP instance the counters described was just replaced, and
 	 * the reset tore every owner session -- and every uncommitted
-	 * staged edit's client -- down (R10). */
+	 * staged edit's client -- down (R10). Any incremental commit in
+	 * flight describes the replaced DSP: drop it, along with its
+	 * coalesced follow-up and any optimistic staged state. */
+	commit_in_progress = 0;
+	pending_valid = 0;
+	pending_dirty = 0;
+	rollback.valid = 0;
 	gain_reduction_count = 0;
 	have_last_gain_reduction = 0;
 	memset(trims, 0, sizeof(trims));
@@ -645,7 +850,11 @@ int audio_scene_apply_after_dsp_init(void)
 	memset(staging, 0, sizeof(staging));
 	baseline_staged = 0;
 	meter_reset_all();
-	return apply_active_scene();
+	/* The reset path has no client waiting on the reply, so the
+	 * machine runs synchronously to its terminal state here. */
+	commit_begin(active_scene_index);
+	commit_flush();
+	return commit.failed ? -1 : 0;
 }
 
 static int scene_def_valid(const struct audio_scene_def *def)
@@ -666,10 +875,16 @@ int audio_scene_select(uint8_t index)
 {
 	if (index >= AUDIO_SCENE_COUNT || !module_initialized)
 		return -1;
-	if (commit_in_progress)
-		return AUDIO_SCENE_COMMIT_BUSY;
 	active_scene_index = index;
-	return apply_active_scene();
+	if (commit_in_progress) {
+		/* Coalesce: the running machine completes first (its
+		 * snapshot), then a fresh machine applies this target. */
+		pending_valid = 1;
+		pending_target = index;
+		return 0;
+	}
+	commit_begin(index);
+	return 0;
 }
 
 int audio_scene_write(uint8_t index, const struct audio_scene_def *def)
@@ -679,11 +894,16 @@ int audio_scene_write(uint8_t index, const struct audio_scene_def *def)
 		return -1;
 	if (!scene_def_valid(def))
 		return -1;
-	if (commit_in_progress)
-		return AUDIO_SCENE_COMMIT_BUSY;
 	scenes[index] = *def;
-	if (index == active_scene_index)
-		return apply_active_scene();
+	if (index != active_scene_index)
+		return 0;
+	if (commit_in_progress) {
+		pending_valid = 1;
+		pending_target = index;
+		pending_dirty = 1;
+		return 0;
+	}
+	commit_begin(index);
 	return 0;
 }
 
@@ -703,13 +923,18 @@ int audio_scene_set_baseline(uint8_t paula, uint8_t ax)
 {
 	if (!module_initialized)
 		return -1;
-	if (commit_in_progress)
-		return AUDIO_SCENE_COMMIT_BUSY;
 	baseline_paula = paula;
 	baseline_ax = ax;
 	/* The baseline participates in the scene-alone level, so the
 	 * change re-runs the one commit path. */
-	return apply_active_scene();
+	if (commit_in_progress) {
+		pending_valid = 1;
+		pending_target = active_scene_index;
+		pending_dirty = 1;
+		return 0;
+	}
+	commit_begin(active_scene_index);
+	return 0;
 }
 
 uint8_t audio_scene_baseline_paula(void)
@@ -782,32 +1007,26 @@ int audio_scene_stage_param(uint8_t index, uint32_t param,
 
 int audio_scene_commit_staged(uint8_t index)
 {
-	struct scene_staging saved_staging;
-	struct audio_scene_def saved_scene;
-	uint8_t saved_baseline_paula;
-	uint8_t saved_baseline_ax;
-	int saved_baseline_staged;
 	int apply = 0;
-	int rc;
 
 	if (!module_initialized || index >= AUDIO_SCENE_COUNT)
 		return -1;
-	if (commit_in_progress)
-		return AUDIO_SCENE_COMMIT_BUSY;
 
-	/* The apply below reads the live tables, so the staged edits are
-	 * taken optimistically first; if the write sequence fails, the
-	 * pre-commit state is restored so the staging survives and a
-	 * retry re-issues the whole sequence instead of returning OK
-	 * with zero writes (the edit set would be lost). */
-	saved_staging = staging[index];
-	saved_scene = scenes[index];
-	saved_baseline_paula = baseline_paula;
-	saved_baseline_ax = baseline_ax;
-	saved_baseline_staged = baseline_staged;
+	/* The applying machine reads the live tables, so the staged
+	 * edits are taken optimistically first; if that machine
+	 * ultimately fails, the pre-commit state saved in rollback is
+	 * restored so the staging survives and a retry re-issues the
+	 * whole sequence instead of returning OK with zero writes (the
+	 * edit set would be lost). */
+	memset(&rollback, 0, sizeof(rollback));
+	rollback.scene_index = index;
 
 	/* A staged operator baseline joins the same commit (R17). */
 	if (baseline_staged) {
+		rollback.baseline_saved = 1;
+		rollback.baseline_paula = baseline_paula;
+		rollback.baseline_ax = baseline_ax;
+		rollback.baseline_staged = baseline_staged;
 		baseline_paula = staged_baseline_paula;
 		baseline_ax = staged_baseline_ax;
 		baseline_staged = 0;
@@ -815,20 +1034,28 @@ int audio_scene_commit_staged(uint8_t index)
 	}
 	if (staging[index].has_draft) {
 		/* Stage-time validation keeps every draft a valid scene. */
+		rollback.scene_saved = 1;
+		rollback.scene = scenes[index];
+		rollback.staging = staging[index];
 		scenes[index] = staging[index].draft;
 		staging[index].has_draft = 0;
 		if (index == active_scene_index)
 			apply = 1;
 	}
-	rc = apply ? apply_active_scene() : 0;
-	if (rc != 0) {
-		scenes[index] = saved_scene;
-		staging[index] = saved_staging;
-		baseline_paula = saved_baseline_paula;
-		baseline_ax = saved_baseline_ax;
-		baseline_staged = saved_baseline_staged;
+	if (!apply)
+		return 0; /* inactive slot, nothing can fail: consumed */
+
+	rollback.valid = 1;
+	if (commit_in_progress) {
+		/* A machine is mid-flight on its own snapshot; the staged
+		 * state is applied by the coalesced follow-up machine. */
+		pending_valid = 1;
+		pending_target = active_scene_index;
+		pending_dirty = 1;
+		return 0;
 	}
-	return rc;
+	commit_begin(active_scene_index);
+	return 0;
 }
 
 void audio_scene_control_state(struct audio_scene_control_state *out)
@@ -905,6 +1132,11 @@ int audio_scene_save(uint8_t index)
 
 	if (index >= AUDIO_SCENE_COUNT || !module_initialized)
 		return -1;
+	/* Flush any running incremental commit first (bounded drain): a
+	 * staged commit that will fail restores the pre-commit tables at
+	 * its abort, and validation must see that settled state rather
+	 * than the optimistic mid-flight one. */
+	commit_flush();
 	/* R15: validate against the enforced boundary first -- a scene
 	 * whose own master-chain level exceeds it never reaches the
 	 * writer. Same evaluation the apply path stages with. The writer
@@ -1005,6 +1237,15 @@ int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 	owner_participating[owner] = 1;
 	if (restage_mixer(&stage) != 0)
 		return -1;
+	/* A machine mid-flight would overwrite these legs with its
+	 * start-time snapshot at its mixer step; coalesce a re-apply so
+	 * the trim lands for good. The submit's own write above still
+	 * satisfies the immediate applied-legs report. */
+	if (commit_in_progress) {
+		pending_valid = 1;
+		pending_target = active_scene_index;
+		pending_dirty = 1;
+	}
 
 	if (result != NULL) {
 		result->bounded = stage.bounded;
@@ -1027,6 +1268,11 @@ void audio_scene_trim_release(uint8_t owner)
 	trims[owner].ax = 0;
 	owner_participating[owner] = 0;
 	restage_mixer(&stage);
+	if (commit_in_progress) {
+		pending_valid = 1;
+		pending_target = active_scene_index;
+		pending_dirty = 1;
+	}
 }
 
 int audio_scene_authority_active(void)

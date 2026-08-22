@@ -12,11 +12,15 @@
  * commit ordering is asserted through the recording setter stub (fade
  * writes precede param writes precede restore; the EQ bands commit as
  * one contiguous safeload group), two rapid scene switches serialize
- * with no interleaved partial commits (including a nested commit
- * attempt from inside the commit itself), meter reads return framed
+ * with no interleaved partial commits (including a nested select from
+ * inside the commit itself, which coalesces rather than interleaving),
+ * meter reads return framed
  * snapshots, SCENE_SAVE validates then persists through the real CFG
  * writer (zz_config.c against the linked FatFs mock), and unknown
- * opcodes still complete SDK_STATUS_UNSUPPORTED.
+ * opcodes still complete SDK_STATUS_UNSUPPORTED. Scene commits apply
+ * through the incremental machine (P1): dispatch opcodes return
+ * before any I2C and the tests drain the machine with
+ * audio_scene_poll before asserting on the write log.
  *
  * Linked like audio_scene_test: the ax.h DSP setters are recording
  * stubs (link-time seam), so every master-chain write is observable
@@ -59,13 +63,28 @@ static uint32_t w32(const uint8_t *p)
 static uint16_t run_local_select(
 	const struct SDKAudioSceneSelectPayload *payload);
 
+/* ---- commit-machine drain (the firmware main loop polls) ---- */
+
+/* The scene module applies commits through the incremental machine:
+ * dispatch opcodes start it and return before any I2C, the main loop
+ * advances it one setter call per pass. Tests drain it synchronously
+ * to its terminal state before asserting on the write log. */
+static void pump_scene(void)
+{
+	int guard = 0;
+
+	while (audio_scene_poll() && ++guard < 1000)
+		;
+}
+
 /* ---- recording stubs for the ax.h DSP setters ---- */
 
 
 /*
  * Reentrancy hook: re-enter the dispatch from inside the commit's EQ
- * group. A second commit attempt while one is in flight must return
- * SDK_STATUS_BUSY and issue no writes of its own (serialization).
+ * group. The second select arrives while a machine is mid-flight: it
+ * must be coalesced (SDK_STATUS_OK, no writes of its own) and applied
+ * by a fresh machine once the outer one completes.
  */
 static int reenter_armed;
 static uint16_t nested_status = 0xffffU;
@@ -221,8 +240,9 @@ static void test_select_state_roundtrip(void)
 	put32(sel.scene, 3);
 	status = run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel));
 	check(status == SDK_STATUS_OK && result_len == 0,
-		"scene select completes OK",
+		"scene select dispatch completes OK",
 		fmt("status=%u len=%u", status, result_len));
+	pump_scene();
 
 	status = run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get));
 	check(status == SDK_STATUS_OK && result_len == sizeof(
@@ -302,6 +322,10 @@ static void test_staged_write_accumulates(void)
 	check(status == SDK_STATUS_OK,
 		"commit applies the staged group",
 		fmt("status=%u", status));
+	check(write_count == 0,
+		"commit dispatch issued no DSP writes before poll",
+		fmt("writes=%d", write_count));
+	pump_scene();
 	check(write_count == 15,
 		"commit is exactly one 15-write fade/params/restore sequence",
 		fmt("writes=%d", write_count));
@@ -332,6 +356,7 @@ static void test_commit_ordering(void)
 	put32(sel.scene, 3);
 	check(run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel)) ==
 		SDK_STATUS_OK, "select scene 3", NULL);
+	pump_scene();
 	check(write_count == 15,
 		"one commit sequence per select",
 		fmt("writes=%d", write_count));
@@ -361,6 +386,11 @@ static void test_rapid_switches_serialize(void)
 	put32(sel.scene, 5);
 	check(run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel)) ==
 		SDK_STATUS_OK, "rapid switch B", NULL);
+	/* Both dispatches returned without I2C; draining the machine
+	 * applies A completely first, then B (coalesced onto A's
+	 * completion): two full sequences, A's restore (index 14)
+	 * before B's fade (index 15). */
+	pump_scene();
 
 	check(write_count == 30,
 		"two rapid switches produce two complete sequences",
@@ -371,36 +401,43 @@ static void test_rapid_switches_serialize(void)
 		64);
 }
 
-/* ---- nested commit during a commit is BUSY, never interleaved ---- */
+/* ---- nested select during a commit coalesces, never interleaves ---- */
 
-static void test_nested_commit_rejected(void)
+static void test_nested_commit_coalesces(void)
 {
 	struct SDKAudioSceneSelectPayload sel;
 
 	audio_scene_init();
 	clear_writes();
 	memset(&sel, 0, sizeof(sel));
-
 	nested_status = 0xffffU;
 	nested_write_count = -1;
 	reenter_armed = 1;
 	put32(sel.scene, 3);
 	check(run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel)) ==
-		SDK_STATUS_OK, "outer commit succeeds", NULL);
-	check(nested_status == SDK_STATUS_BUSY,
-		"commit re-entered mid-flight completes BUSY",
+		SDK_STATUS_OK, "outer dispatch accepted", NULL);
+	check(write_count == 0,
+		"outer dispatch issued no DSP writes before poll",
+		fmt("writes=%d", write_count));
+	/* The reentry hook fires inside the machine's EQ group (only
+	 * poll issues writes now): the nested select must coalesce. */
+	pump_scene();
+	check(nested_status == SDK_STATUS_OK,
+		"select re-entered mid-machine is coalesced, not BUSY",
 		fmt("status=%u", nested_status));
 	check(nested_write_count == 8,
 		"nested attempt happened inside the EQ group",
 		fmt("writes at nested call=%d", nested_write_count));
-	check(write_count == 15,
-		"nested attempt issued no writes of its own",
+	check(write_count == 30,
+		"outer machine completes, then the coalesced machine applies",
 		fmt("writes=%d", write_count));
 	check_commit_sequence("outer", 0, 18000,
 		(const uint8_t[]){ 50, 50, 50, 50, 50, 50, 55, 55, 50, 50 },
 		50, 75, 50, 128, 64);
-	check(audio_scene_active_index() == 3,
-		"nested BUSY left the outer selection active", NULL);
+	check_commit_sequence("coalesced", 15, 23900, eq_unity, 60, 70,
+		50, 128, 64);
+	check(audio_scene_active_index() == 4,
+		"coalesced selection becomes the active scene", NULL);
 }
 
 /* ---- trim submit: applied / bound / bounded flag ---- */
@@ -497,6 +534,7 @@ static void test_trim_neutral_keep_baseline(void)
 	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
 	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
 		SDK_STATUS_OK, "non-default baseline committed", NULL);
+	pump_scene();
 
 	/* The reserved 0x7f7f word is keep-baseline: "no trim from this
 	 * owner". The reply reports the baseline pair as applied,
@@ -724,6 +762,7 @@ static void test_baseline_write_path(void)
 	check(audio_scene_baseline_paula() == 150 &&
 		audio_scene_baseline_ax() == 40,
 		"baseline stored", NULL);
+	pump_scene();
 	check(write_count == 15,
 		"baseline change commits through the single commit path",
 		fmt("writes=%d", write_count));
@@ -830,6 +869,7 @@ static void test_unsupported_and_validation(void)
 	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
 	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
 		SDK_STATUS_OK, "pan-only edit commits", NULL);
+	pump_scene();
 	check(last_write(WRITE_VOLPAN, &a, &b) && a == 100 && b == 60,
 		"rejected stage left no draft behind",
 		fmt("vol=%d pan=%d", a, b));
@@ -869,7 +909,7 @@ int main(void)
 	test_staged_write_accumulates();
 	test_commit_ordering();
 	test_rapid_switches_serialize();
-	test_nested_commit_rejected();
+	test_nested_commit_coalesces();
 	test_trim_submit_result();
 	test_trim_neutral_keep_baseline();
 	test_meter_read();

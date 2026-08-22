@@ -25,6 +25,22 @@
 
 #include "dsp_write_mock.h"
 
+/* ---- commit-machine drain (the firmware main loop polls) ---- */
+
+/* audio_scene.c runs its commit as an incremental machine: the
+ * dispatch entry points start it and return before any I2C, and the
+ * main loop advances it one setter call per pass. Tests drain it
+ * synchronously to its terminal state before asserting on the write
+ * log. */
+static void pump_scene(void)
+{
+	int guard = 0;
+
+	while (audio_scene_poll() && ++guard < 1000)
+		;
+}
+
+
 
 int audio_adau_set_lpf_params(int f0)
 {
@@ -58,9 +74,15 @@ int audio_adau_set_eq_gain(int band, int gain)
 	return fail_next_write ? -1 : 0;
 }
 
+/* Restore-write failure seam: fails the vol_pan writes that bring
+ * the output back up (vol != 0) while letting the fade through. */
+static int fail_volpan_restore;
+
 int audio_adau_set_vol_pan(int vol, int pan)
 {
 	record_write(WRITE_VOLPAN, vol, pan);
+	if (fail_volpan_restore && vol != 0)
+		return -1;
 	return fail_next_write ? -1 : 0;
 }
 
@@ -185,6 +207,7 @@ static void test_accepted_paths_route_through_scene(void)
 
 	/* AP_DSP_SET_LOWPASS (9) */
 	check(audio_scene_select(6) == 0, "scene select applies", NULL);
+	pump_scene();
 	ok = log_at(0, &kind, &a, &b) && kind == WRITE_VOLPAN &&
 		a == 0 && b == 30;
 	check(ok, "commit fades output to zero first",
@@ -244,17 +267,30 @@ static void test_accepted_paths_route_through_scene(void)
 	check(write_count == 0, "rejected writes touch no DSP state",
 		fmt("writes=%d", write_count));
 
-	/* A verified-write failure aborts the commit and reports it. */
+	/* A verified-write failure aborts the machine asynchronously: the
+	 * dispatch still returns immediately and issues no I2C itself. */
 	unity_scene(&def);
 	fail_next_write = 1;
 	check(audio_scene_write(4, &def) == 0,
 		"write to inactive slot needs no DSP", NULL);
-	check(audio_scene_select(4) == -1,
-		"commit reports verified-write failure", NULL);
+	check(audio_scene_select(4) == 0,
+		"select dispatch returns immediately", NULL);
+	check(write_count == 0,
+		"failing commit issues no writes before poll",
+		fmt("writes=%d", write_count));
+	pump_scene();
 	fail_next_write = 0;
 	check(audio_scene_active_index() == 4,
-		"failed select keeps the slot active for retry", NULL);
-	check(audio_scene_select(4) == 0, "retry applies", NULL);
+		"failed commit keeps the slot active for retry", NULL);
+	check(last_write(WRITE_VOLPAN, &a, &b) && a == 100 && b == 50,
+		"aborted machine best-effort restores the output volume",
+		fmt("vol=%d pan=%d", a, b));
+	clear_writes();
+	check(audio_scene_select(4) == 0, "retry accepted", NULL);
+	pump_scene();
+	check(write_count == 15,
+		"retry applies the full 15-write sequence",
+		fmt("writes=%d", write_count));
 }
 
 /*
@@ -269,6 +305,7 @@ static void test_staging_at_boundary(void)
 	audio_scene_init();
 	clear_writes();
 	check(audio_scene_select(0) == 0, "apply default scene", NULL);
+	pump_scene();
 	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 64,
 		"at-boundary composition passes at full legs",
 		fmt("v1=%d v2=%d", a, b));
@@ -284,6 +321,7 @@ static void test_staging_one_step_over(void)
 
 	audio_scene_init();
 	audio_scene_select(0);
+	pump_scene();
 	clear_writes();
 	memset(&result, 0, sizeof(result));
 	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 1, 0,
@@ -338,6 +376,7 @@ static void test_scene_alone_clamps(void)
 	clear_writes();
 	check(audio_scene_write(2, &def) == 0 &&
 		audio_scene_select(2) == 0, "apply boosting scene", NULL);
+	pump_scene();
 	check(audio_scene_gain_reduction_events() == 1,
 		"scene-alone clamp emits exactly one event",
 		fmt("events=%lu",
@@ -371,13 +410,13 @@ static void test_eq_boost_clamps(void)
 {
 	struct audio_scene_def def;
 	int a = -1, b = -1;
-
 	unity_scene(&def);
 	def.eq[0] = 100; /* +12 dB on band 1, prefactor/volume unity */
 	audio_scene_init();
 	clear_writes();
 	check(audio_scene_write(3, &def) == 0 &&
 		audio_scene_select(3) == 0, "apply EQ-boosted scene", NULL);
+	pump_scene();
 	check(audio_scene_gain_reduction_events() == 1,
 		"EQ-boosted scene clamps with one event",
 		fmt("events=%lu",
@@ -407,6 +446,7 @@ static void test_baseline_trim_composition(void)
 	audio_scene_init();
 	audio_scene_write(5, &def);
 	audio_scene_select(5);
+	pump_scene();
 
 	memset(&result, 0, sizeof(result));
 	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, 50, 50,
@@ -421,6 +461,7 @@ static void test_baseline_trim_composition(void)
 	audio_scene_trim_release(AUDIO_SCENE_OWNER_MHI);
 
 	audio_scene_set_baseline(200, 100);
+	pump_scene();
 	check(audio_scene_baseline_paula() == 200 &&
 		audio_scene_baseline_ax() == 100, "baseline stored", NULL);
 	check(last_write(WRITE_MIXER, &a, &b) && a == 200 && b == 100,
@@ -543,7 +584,9 @@ static void test_trim_lifecycle(void)
 
 	audio_scene_init();
 	audio_scene_select(0);
+	pump_scene();
 	clear_writes();
+
 
 	/* Negative trim always fits: it lowers the composed level. */
 	memset(&result, 0, sizeof(result));
@@ -596,15 +639,18 @@ static void test_commit_failure_keeps_staging(void)
 	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_VOLUME, 70)
 		== 0, "stage a volume edit", NULL);
 	fail_next_write = 1;
-	check(audio_scene_commit_staged(0) == -1,
-		"staged commit fails on a failed verified write", NULL);
+	check(audio_scene_commit_staged(0) == 0,
+		"staged commit accepted (applies asynchronously)", NULL);
+	pump_scene();
 	check(audio_scene_get(0)->volume == 100,
 		"live scene untouched by the failed commit",
 		fmt("volume=%u", audio_scene_get(0)->volume));
 
+	fail_next_write = 0;
 	clear_writes();
 	check(audio_scene_commit_staged(0) == 0,
-		"retry after failure succeeds", NULL);
+		"retry after failure accepted", NULL);
+	pump_scene();
 	check(write_count == 15,
 		"retry re-issues the full write sequence",
 		fmt("writes=%d", write_count));
@@ -619,14 +665,17 @@ static void test_commit_failure_keeps_staging(void)
 		SDK_AUDIO_BALANCE_PACK(150, 40)) == 0,
 		"stage a baseline edit", NULL);
 	fail_next_write = 1;
-	check(audio_scene_commit_staged(0) == -1,
-		"baseline commit fails on a failed verified write", NULL);
+	check(audio_scene_commit_staged(0) == 0,
+		"baseline commit accepted (applies asynchronously)", NULL);
+	pump_scene();
 	check(audio_scene_baseline_paula() == 128 &&
 		audio_scene_baseline_ax() == 64,
 		"baseline untouched by the failed commit", NULL);
+	fail_next_write = 0;
 	clear_writes();
 	check(audio_scene_commit_staged(0) == 0,
-		"baseline retry succeeds", NULL);
+		"baseline retry accepted", NULL);
+	pump_scene();
 	check(audio_scene_baseline_paula() == 150 &&
 		audio_scene_baseline_ax() == 40,
 		"retried baseline commit lands", NULL);
@@ -646,8 +695,13 @@ static void test_apply_failure_restores_volume(void)
 	clear_writes();
 
 	fail_eq_band = 3; /* fail inside the EQ safeload group */
-	check(audio_scene_select(1) == -1,
-		"select fails when a verified write fails", NULL);
+	check(audio_scene_select(1) == 0,
+		"select dispatch accepted despite the upcoming failure",
+		NULL);
+	check(write_count == 0,
+		"failing commit issues no writes before poll",
+		fmt("writes=%d", write_count));
+	pump_scene();
 	check(write_count == 7,
 		"failure path stops at the failed write plus one restore",
 		fmt("writes=%d", write_count));
@@ -657,6 +711,84 @@ static void test_apply_failure_restores_volume(void)
 		a == 80 && b == 50,
 		"restore write follows the failure immediately",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
+}
+
+/*
+ * P1 immediate-return contract: the dispatch entry points start the
+ * commit machine and return before any I2C; only audio_scene_poll
+ * issues DSP writes, one setter call per call.
+ */
+static void test_dispatch_does_not_block(void)
+{
+	struct audio_scene_def def;
+
+	audio_scene_init();
+	clear_writes();
+
+	check(audio_scene_select(3) == 0,
+		"select dispatch returns immediately", NULL);
+	check(write_count == 0,
+		"select issued zero DSP writes before any poll",
+		fmt("writes=%d", write_count));
+	pump_scene();
+	check(write_count == 15,
+		"poll drains the machine into one full commit sequence",
+		fmt("writes=%d", write_count));
+
+	unity_scene(&def);
+	def.volume = 77;
+	clear_writes();
+	check(audio_scene_write(3, &def) == 0,
+		"active-scene write dispatch returns immediately", NULL);
+	check(write_count == 0,
+		"scene write issued zero DSP writes before any poll",
+		fmt("writes=%d", write_count));
+	pump_scene();
+	check(write_count == 15,
+		"poll drains the write commit",
+		fmt("writes=%d", write_count));
+
+	clear_writes();
+	check(audio_scene_set_baseline(140, 70) == 0,
+		"baseline dispatch returns immediately", NULL);
+	check(write_count == 0,
+		"baseline change issued zero DSP writes before any poll",
+		fmt("writes=%d", write_count));
+	pump_scene();
+	check(write_count == 15,
+		"poll drains the baseline commit",
+		fmt("writes=%d", write_count));
+}
+
+/*
+ * Restore-write failure: the sequence's last write fails; the machine
+ * retries it once best-effort and finishes as a FAILED commit, so the
+ * staged rollback still applies and the staging survives for a retry.
+ */
+static void test_restore_failure_keeps_staging(void)
+{
+	audio_scene_init();
+	clear_writes();
+
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_VOLUME, 70)
+		== 0, "stage a volume edit", NULL);
+	fail_volpan_restore = 1;
+	check(audio_scene_commit_staged(0) == 0,
+		"staged commit accepted (applies asynchronously)", NULL);
+	pump_scene();
+	check(audio_scene_get(0)->volume == 100,
+		"restore-write failure rolls the staging back",
+		fmt("volume=%u", audio_scene_get(0)->volume));
+	check(count_writes(WRITE_VOLPAN) == 3,
+		"fade + failed restore + one best-effort retry",
+		fmt("volpan=%d", count_writes(WRITE_VOLPAN)));
+
+	fail_volpan_restore = 0;
+	check(audio_scene_commit_staged(0) == 0, "retry accepted", NULL);
+	pump_scene();
+	check(audio_scene_get(0)->volume == 70,
+		"retried commit lands the staged edit",
+		fmt("volume=%u", audio_scene_get(0)->volume));
 }
 
 int main(void)
@@ -674,6 +806,8 @@ int main(void)
 	test_trim_lifecycle();
 	test_commit_failure_keeps_staging();
 	test_apply_failure_restores_volume();
+	test_dispatch_does_not_block();
+	test_restore_failure_keeps_staging();
 
 	if (failures == 0) {
 		printf("audio_scene_test: all tests passed\n");
