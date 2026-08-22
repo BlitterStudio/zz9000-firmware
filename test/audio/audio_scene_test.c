@@ -667,8 +667,8 @@ static void test_commit_failure_keeps_staging(void)
 	check(audio_scene_commit_staged(0) == 0,
 		"retry after failure accepted", NULL);
 	pump_scene();
-	check(write_count == 2,
-		"retry re-writes the changed parameter (both sides)",
+	check(write_count == 60,
+		"retry re-writes the changed volume as a ramp (30 levels x 2)",
 		fmt("writes=%d", write_count));
 	check(audio_scene_get(0)->volume == 70,
 		"retried commit lands the staged edit", NULL);
@@ -844,15 +844,19 @@ static void test_fast_commit_diff(void)
 		"fast commit issues no DSP writes before poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 2,
-		"single-parameter commit writes per-side setters",
+	check(write_count == 60,
+		"single-parameter volume commit ramps (30 levels x 2 sides)",
 		fmt("writes=%d", write_count));
-	ok = log_at(0, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
+	ok = log_at(58, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
 		a == 70 && b == 50 &&
-		log_at(1, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE1 &&
+		log_at(59, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE1 &&
 		a == 70 && b == 50;
-	check(ok, "volume edit is two per-side writes, no fade or restore",
+	check(ok, "ramped volume edit lands the target per-side",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
+	ok = log_at(0, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
+		a == 99 && b == 50;
+	check(ok, "ramp starts one step from the previous volume",
+		fmt("kind=%d vol=%d", kind, a));
 	check(audio_scene_gain_reduction_events() == 0,
 		"within-boundary fast commit emits no event", NULL);
 
@@ -955,20 +959,20 @@ static void test_fast_commit_failure_keeps_diff(void)
 	clear_writes();
 	check(audio_scene_commit_staged(0) == 0, "retry accepted", NULL);
 	pump_scene();
-	check(write_count == 3,
-		"retry after failure re-writes the full diff",
+	check(write_count == 61,
+		"retry after failure re-writes the full diff (eq + ramp)",
 		fmt("writes=%d", write_count));
 	ok = log_at(0, &kind, &a, &b) && kind == WRITE_EQ &&
 		a == 4 && b == 40;
 	check(ok, "retry rewrites the parameter the failure hit",
 		fmt("kind=%d band=%d gain=%d", kind, a, b));
-	ok = log_at(1, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
+	ok = log_at(59, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
 		a == 70 && b == 50;
-	check(ok, "retry rewrites the parameter the failure never reached",
+	check(ok, "retry ramps to the volume the failure never reached",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
-	ok = log_at(2, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE1 &&
+	ok = log_at(60, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE1 &&
 		a == 70 && b == 50;
-	check(ok, "retry writes both sides of the changed volume",
+	check(ok, "retry ramp lands both sides at the target",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
 	check(audio_scene_get(0)->volume == 70 &&
 		audio_scene_get(0)->eq[4] == 40,
@@ -1084,8 +1088,8 @@ static void test_name_staging(void)
 		0x4142) == 0, "stage name beside volume", NULL);
 	check(audio_scene_commit_staged(0) == 0, "mixed commit", NULL);
 	pump_scene();
-	check(write_count == 2,
-		"mixed commit writes only the volume",
+	check(write_count == 60,
+		"mixed commit writes only the volume ramp (name is free)",
 		fmt("writes=%d", write_count));
 	check(audio_scene_get(0)->volume == 70 &&
 		strcmp(audio_scene_get(0)->name, "AB") == 0,

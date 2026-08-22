@@ -426,7 +426,7 @@ struct commit_machine {
 	int failed;
 	int owns_rollback; /* this machine applies a staged commit's tables */
 	int fast;          /* differential mode: todo list, no fade */
-	struct fast_step todo[1 + AUDIO_SCENE_EQ_BANDS + 5];
+	struct fast_step todo[224]; /* worst: full diff + 99-step ramp */
 	int todo_count;
 	int todo_next;     /* next todo entry to issue */
 };
@@ -497,6 +497,34 @@ static void fast_todo_build(void)
 	}
 	if (all || commit.vol.applied_volume != last_applied_vol ||
 			scene->pan != last_applied_pan) {
+		/* Ramped volume: one intermediate level per service-loop
+		 * pass (~0.1 dB per step over Zorro service intervals)
+		 * instead of a single step change, so a drag glides. Both
+		 * channels move together per level; the target lands last.
+		 * A pan-only change or an over-tight todo array falls
+		 * back to the direct write. */
+		int from = (int)last_applied_vol;
+		int to = (int)commit.vol.applied_volume;
+		int span = (to > from) ? to - from : from - to;
+		int room = (int)(sizeof(commit.todo) / sizeof(commit.todo[0]))
+			- n;
+		int step;
+
+		if (span > 1 && scene->pan == last_applied_pan &&
+				room >= (span - 1) * 2) {
+			int dir = (to > from) ? 1 : -1;
+
+			for (step = from + dir; step != to; step += dir) {
+				todo[n].op = FAST_VOLPAN_L;
+				todo[n].a = (uint8_t)step;
+				todo[n].b = scene->pan;
+				n++;
+				todo[n].op = FAST_VOLPAN_R;
+				todo[n].a = (uint8_t)step;
+				todo[n].b = scene->pan;
+				n++;
+			}
+		}
 		todo[n].op = FAST_VOLPAN_L;
 		todo[n].a = commit.vol.applied_volume;
 		todo[n].b = scene->pan;

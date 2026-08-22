@@ -341,20 +341,20 @@ static void test_staged_write_accumulates(void)
 		"commit dispatch issued no DSP writes before poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 3,
-		"staged commit writes only the changed set (vol per-side)",
+	check(write_count == 81,
+		"staged commit writes eq + ramped volume (40 levels x 2)",
 		fmt("writes=%d", write_count));
 	ok = log_at(0, &kind, &a, &b) && kind == WRITE_EQ &&
 		a == 3 && b == 30;
 	check(ok, "staged commit writes the changed EQ band",
 		fmt("kind=%d band=%d gain=%d", kind, a, b));
-	ok = log_at(1, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
+	ok = log_at(79, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE0 &&
 		a == 60 && b == 50;
-	check(ok, "staged commit follows with the changed volume (L)",
+	check(ok, "staged commit ramps to the changed volume (L)",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
-	ok = log_at(2, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE1 &&
+	ok = log_at(80, &kind, &a, &b) && kind == WRITE_VOLPAN_SIDE1 &&
 		a == 60 && b == 50;
-	check(ok, "staged commit follows with the changed volume (R)",
+	check(ok, "staged commit ramp lands the target (R)",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
 	check(audio_scene_get(0) != NULL &&
 		audio_scene_get(0)->eq[3] == 30 &&
