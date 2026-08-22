@@ -975,6 +975,137 @@ static void test_fast_commit_failure_keeps_diff(void)
 		"retried diff lands the staged edits", NULL);
 }
 
+/*
+ * Scene names (SCENE_WRITE param NAME): the label stages as two-char
+ * chunks, never joins the DSP write set, and its accumulator restarts
+ * per rename.
+ */
+static void test_name_staging(void)
+{
+	audio_scene_init();
+	clear_writes();
+
+	/* "My Scene" as four chunks plus the terminator. */
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x4d79) == 0, "stage name chunk 1", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x2053) == 0, "stage name chunk 2", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x6365) == 0, "stage name chunk 3", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x6e65) == 0, "stage name chunk 4", NULL);
+
+	/* Corrupt chunks are rejected whole: control characters, a NUL
+	 * first char outside the pure terminator, and values past the
+	 * 16-bit chunk word. */
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x0a41) == -1, "control character rejected", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x0041) == -1, "NUL first char outside terminator rejected",
+		NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x10000) == -1, "oversized chunk word rejected", NULL);
+
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0) == 0, "stage terminator chunk", NULL);
+
+	/* A name-only commit of the ACTIVE scene: zero DSP writes. */
+	check(audio_scene_commit_staged(0) == 0, "name commit dispatch",
+		NULL);
+	check(write_count == 0,
+		"name commit issues no DSP writes before poll",
+		fmt("writes=%d", write_count));
+	pump_scene();
+	check(write_count == 0,
+		"name commit completes with zero DSP writes",
+		fmt("writes=%d", write_count));
+	check(audio_scene_get(0) != NULL &&
+		strcmp(audio_scene_get(0)->name, "My Scene") == 0,
+		"staged name lands in the scene definition",
+		audio_scene_get(0)->name);
+
+	/* The next rename starts from a fresh accumulator: one chunk
+	 * replaces the whole name. */
+	clear_writes();
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x5859) == 0, "stage rename chunk", NULL);
+	check(audio_scene_commit_staged(0) == 0, "rename commit", NULL);
+	pump_scene();
+	check(write_count == 0, "rename still writes no DSP", NULL);
+	check(strcmp(audio_scene_get(0)->name, "XY") == 0,
+		"rename replaces the complete name",
+		audio_scene_get(0)->name);
+
+	/* A guard terminator then a chunk restarts at 0 (the retry
+	 * self-heal); extra terminators are padding no-ops. */
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0) == 0, "guard terminator", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x4142) == 0, "chunk after guard restarts", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0) == 0, "terminator", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0) == 0, "padding terminator ignored", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0) == 0, "second padding terminator ignored", NULL);
+	check(audio_scene_commit_staged(0) == 0, "guarded rename commit",
+		NULL);
+	pump_scene();
+	check(strcmp(audio_scene_get(0)->name, "AB") == 0,
+		"guard + chunks land the guarded name",
+		audio_scene_get(0)->name);
+
+	/* A full 16-character name needs no terminator chunk; a 17th
+	 * character has no room and is rejected. */
+	clear_writes();
+	for (int i = 0; i < 8; i++)
+		check(audio_scene_stage_param(0,
+			SDK_AUDIO_SCENE_PARAM_NAME,
+			0x4142u + (uint32_t)i * 0x0202u) == 0,
+			fmt("stage full-name chunk %d", i), NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x5152) == -1, "17th character rejected", NULL);
+	check(audio_scene_commit_staged(0) == 0, "full-name commit", NULL);
+	pump_scene();
+	check(strcmp(audio_scene_get(0)->name,
+		"ABCDEFGHIJKLMNOP") == 0,
+		"16-character name lands NUL-terminated",
+		audio_scene_get(0)->name);
+	check(write_count == 0,
+		"full-name commit still issues zero DSP writes",
+		fmt("writes=%d", write_count));
+
+	/* A name riding with a real parameter edit: the diff writes the
+	 * parameter, the name rides along. */
+	clear_writes();
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_VOLUME,
+		70) == 0, "stage volume edit beside a name", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x4142) == 0, "stage name beside volume", NULL);
+	check(audio_scene_commit_staged(0) == 0, "mixed commit", NULL);
+	pump_scene();
+	check(write_count == 2,
+		"mixed commit writes only the volume",
+		fmt("writes=%d", write_count));
+	check(audio_scene_get(0)->volume == 70 &&
+		strcmp(audio_scene_get(0)->name, "AB") == 0,
+		"mixed commit lands parameter and name", NULL);
+
+	/* A name-only rename of an INACTIVE slot: consumed without a
+	 * machine. */
+	clear_writes();
+	check(audio_scene_stage_param(3, SDK_AUDIO_SCENE_PARAM_NAME,
+		0x4142) == 0, "stage name into inactive slot", NULL);
+	check(audio_scene_commit_staged(3) == 0,
+		"inactive rename consumed", NULL);
+	pump_scene();
+	check(write_count == 0,
+		"inactive rename never touches the DSP", NULL);
+	check(strcmp(audio_scene_get(3)->name, "AB") == 0,
+		"inactive slot keeps the staged name",
+		audio_scene_get(3)->name);
+}
+
 int main(void)
 {
 	/* Order matters: the gate test observes the pre-init state. */
@@ -995,6 +1126,7 @@ int main(void)
 
 	test_fast_commit_diff();
 	test_fast_commit_failure_keeps_diff();
+	test_name_staging();
 
 	if (failures == 0) {
 		printf("audio_scene_test: all tests passed\n");

@@ -31,9 +31,12 @@
  */
 #define AUDIO_SCENE_ENFORCED_BOUNDARY 192.0
 
-/* Fixed scene slots; labels are the slot numbers themselves. */
+/* Fixed scene slots; the name is a user label carried alongside the
+ * master-chain assignment (it never reaches the DSP). */
 #define AUDIO_SCENE_COUNT 8
 #define AUDIO_SCENE_EQ_BANDS 10
+#define AUDIO_SCENE_NAME_MAX 16
+#define AUDIO_SCENE_NAME_CHUNKS (AUDIO_SCENE_NAME_MAX / 2)
 
 /* Stream-owner identities for the per-owner source trim (R3). */
 enum {
@@ -48,7 +51,9 @@ enum {
  * A complete master-chain assignment (R1). Field ranges match the
  * ax.h setters: EQ/prefactor 0 = -12 dB .. 50 = 0 dB .. 100 = +12 dB,
  * volume 0 = muted .. 100 = 0 dB, pan 0 = left .. 50 = center ..
- * 100 = right, LPF cutoff in Hz (1 .. 23900).
+ * 100 = right, LPF cutoff in Hz (1 .. 23900). name is a printable
+ * ASCII label (NUL-terminated, at most AUDIO_SCENE_NAME_MAX chars)
+ * that never joins the DSP write set.
  */
 struct audio_scene_def {
 	uint16_t lpf_hz;
@@ -56,6 +61,7 @@ struct audio_scene_def {
 	uint8_t prefactor;
 	uint8_t volume;
 	uint8_t pan;
+	char name[AUDIO_SCENE_NAME_MAX + 1];
 };
 
 /*
@@ -154,7 +160,10 @@ void audio_scene_trim_release(uint8_t owner);
  * compose. param is one of the SDK_AUDIO_SCENE_PARAM_* ids (the ABI
  * vocabulary); value range checks match the scene definition. The
  * BASELINE param stages the operator balance instead (R17) and
- * ignores the scene index. Returns 0 on success, -1 on an invalid
+ * ignores the scene index. The NAME param stages one two-char chunk
+ * of the scene label (SDK_AUDIO_SCENE_PARAM_NAME grammar in
+ * sdk_mailbox.h): a rename stages the complete name, then commits.
+ * Returns 0 on success, -1 on an invalid
  * request (unknown param id, out-of-range value or scene slot).
  */
 int audio_scene_stage_param(uint8_t index, uint32_t param,

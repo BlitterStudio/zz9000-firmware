@@ -105,9 +105,10 @@ static int hdf_name_valid(const char *s) {
 
 /* One audio_scene<N>_<field> assignment (plan U5, KTD4). Fields:
  * 0 = lpf, 1..5 = eq01..eq89 band pairs, 6 = out (prefactor+volume),
- * 7 = pan. The value is range-checked against the scene definition so
- * a corrupt file degrades to the built-in defaults; the bit for the
- * field is set in the scene's mask only after it passes. */
+ * 7 = pan, 8..15 = nm1..nm8 name chunks. The value is range-checked
+ * against the scene definition so a corrupt file degrades to the
+ * built-in defaults; the bit for the field is set in the scene's
+ * mask only after it passes. */
 static int audio_scene_key(int scene, int field, const char *value) {
 	long v = parse_uint(value);
 	long hi, lo;
@@ -131,6 +132,19 @@ static int audio_scene_key(int scene, int field, const char *value) {
 	case 7:
 		if (v > 100) return -1;
 		cfg.audio_scene_pan[scene] = (uint16_t)v;
+		break;
+	case 8: case 9: case 10: case 11:
+	case 12: case 13: case 14: case 15:
+		/* Name chunk, same packing as the SCENE_WRITE NAME param:
+		 * c1*256+c2, both printable ASCII or 0 (a 0x0000 chunk is
+		 * the terminator); a NUL first char only exists in the
+		 * pure terminator. */
+		if (v > 0xffff) return -1;
+		hi = v / 256; lo = v % 256;
+		if (hi != 0 && (hi < 0x20 || hi > 0x7e)) return -1;
+		if (lo != 0 && (lo < 0x20 || lo > 0x7e)) return -1;
+		if (hi == 0 && lo != 0) return -1;
+		cfg.audio_scene_nm[scene][field - 8] = (uint16_t)v;
 		break;
 	default:
 		return -1;
@@ -290,9 +304,10 @@ static int apply_key(const char *key, const char *value) {
 	 * Decimal-only grammar, each value <= 0xffff, so every scene
 	 * serializes as a small group of keys: audio_scene<N>_lpf,
 	 * _eq01/_eq23/_eq45/_eq67/_eq89 (band pairs packed hi*128+lo),
-	 * _out (prefactor*128+volume) and _pan. Values are range-checked
-	 * here so a corrupt file degrades to the scene module's built-in
-	 * defaults. */
+	 * _out (prefactor*128+volume), _pan and _nm1.._nm8 (the label,
+	 * two ASCII chars per key packed c1*256+c2). Values are
+	 * range-checked here so a corrupt file degrades to the scene
+	 * module's built-in defaults. */
 	if (token_eq(key, "audio_active")) {
 		long v = parse_uint(value);
 		if (v < 0 || v >= ZZ_CFG_AUDIO_SCENES) return -1;
@@ -315,6 +330,14 @@ static int apply_key(const char *key, const char *value) {
 	if (token_eq(key, "audio_scene0_eq89")) return audio_scene_key(0, 5, value);
 	if (token_eq(key, "audio_scene0_out"))  return audio_scene_key(0, 6, value);
 	if (token_eq(key, "audio_scene0_pan"))  return audio_scene_key(0, 7, value);
+	if (token_eq(key, "audio_scene0_nm1"))  return audio_scene_key(0, 8, value);
+	if (token_eq(key, "audio_scene0_nm2"))  return audio_scene_key(0, 9, value);
+	if (token_eq(key, "audio_scene0_nm3"))  return audio_scene_key(0, 10, value);
+	if (token_eq(key, "audio_scene0_nm4"))  return audio_scene_key(0, 11, value);
+	if (token_eq(key, "audio_scene0_nm5"))  return audio_scene_key(0, 12, value);
+	if (token_eq(key, "audio_scene0_nm6"))  return audio_scene_key(0, 13, value);
+	if (token_eq(key, "audio_scene0_nm7"))  return audio_scene_key(0, 14, value);
+	if (token_eq(key, "audio_scene0_nm8"))  return audio_scene_key(0, 15, value);
 	if (token_eq(key, "audio_scene1_lpf"))  return audio_scene_key(1, 0, value);
 	if (token_eq(key, "audio_scene1_eq01")) return audio_scene_key(1, 1, value);
 	if (token_eq(key, "audio_scene1_eq23")) return audio_scene_key(1, 2, value);
@@ -323,6 +346,14 @@ static int apply_key(const char *key, const char *value) {
 	if (token_eq(key, "audio_scene1_eq89")) return audio_scene_key(1, 5, value);
 	if (token_eq(key, "audio_scene1_out"))  return audio_scene_key(1, 6, value);
 	if (token_eq(key, "audio_scene1_pan"))  return audio_scene_key(1, 7, value);
+	if (token_eq(key, "audio_scene1_nm1"))  return audio_scene_key(1, 8, value);
+	if (token_eq(key, "audio_scene1_nm2"))  return audio_scene_key(1, 9, value);
+	if (token_eq(key, "audio_scene1_nm3"))  return audio_scene_key(1, 10, value);
+	if (token_eq(key, "audio_scene1_nm4"))  return audio_scene_key(1, 11, value);
+	if (token_eq(key, "audio_scene1_nm5"))  return audio_scene_key(1, 12, value);
+	if (token_eq(key, "audio_scene1_nm6"))  return audio_scene_key(1, 13, value);
+	if (token_eq(key, "audio_scene1_nm7"))  return audio_scene_key(1, 14, value);
+	if (token_eq(key, "audio_scene1_nm8"))  return audio_scene_key(1, 15, value);
 	if (token_eq(key, "audio_scene2_lpf"))  return audio_scene_key(2, 0, value);
 	if (token_eq(key, "audio_scene2_eq01")) return audio_scene_key(2, 1, value);
 	if (token_eq(key, "audio_scene2_eq23")) return audio_scene_key(2, 2, value);
@@ -331,6 +362,14 @@ static int apply_key(const char *key, const char *value) {
 	if (token_eq(key, "audio_scene2_eq89")) return audio_scene_key(2, 5, value);
 	if (token_eq(key, "audio_scene2_out"))  return audio_scene_key(2, 6, value);
 	if (token_eq(key, "audio_scene2_pan"))  return audio_scene_key(2, 7, value);
+	if (token_eq(key, "audio_scene2_nm1"))  return audio_scene_key(2, 8, value);
+	if (token_eq(key, "audio_scene2_nm2"))  return audio_scene_key(2, 9, value);
+	if (token_eq(key, "audio_scene2_nm3"))  return audio_scene_key(2, 10, value);
+	if (token_eq(key, "audio_scene2_nm4"))  return audio_scene_key(2, 11, value);
+	if (token_eq(key, "audio_scene2_nm5"))  return audio_scene_key(2, 12, value);
+	if (token_eq(key, "audio_scene2_nm6"))  return audio_scene_key(2, 13, value);
+	if (token_eq(key, "audio_scene2_nm7"))  return audio_scene_key(2, 14, value);
+	if (token_eq(key, "audio_scene2_nm8"))  return audio_scene_key(2, 15, value);
 	if (token_eq(key, "audio_scene3_lpf"))  return audio_scene_key(3, 0, value);
 	if (token_eq(key, "audio_scene3_eq01")) return audio_scene_key(3, 1, value);
 	if (token_eq(key, "audio_scene3_eq23")) return audio_scene_key(3, 2, value);
@@ -339,6 +378,14 @@ static int apply_key(const char *key, const char *value) {
 	if (token_eq(key, "audio_scene3_eq89")) return audio_scene_key(3, 5, value);
 	if (token_eq(key, "audio_scene3_out"))  return audio_scene_key(3, 6, value);
 	if (token_eq(key, "audio_scene3_pan"))  return audio_scene_key(3, 7, value);
+	if (token_eq(key, "audio_scene3_nm1"))  return audio_scene_key(3, 8, value);
+	if (token_eq(key, "audio_scene3_nm2"))  return audio_scene_key(3, 9, value);
+	if (token_eq(key, "audio_scene3_nm3"))  return audio_scene_key(3, 10, value);
+	if (token_eq(key, "audio_scene3_nm4"))  return audio_scene_key(3, 11, value);
+	if (token_eq(key, "audio_scene3_nm5"))  return audio_scene_key(3, 12, value);
+	if (token_eq(key, "audio_scene3_nm6"))  return audio_scene_key(3, 13, value);
+	if (token_eq(key, "audio_scene3_nm7"))  return audio_scene_key(3, 14, value);
+	if (token_eq(key, "audio_scene3_nm8"))  return audio_scene_key(3, 15, value);
 	if (token_eq(key, "audio_scene4_lpf"))  return audio_scene_key(4, 0, value);
 	if (token_eq(key, "audio_scene4_eq01")) return audio_scene_key(4, 1, value);
 	if (token_eq(key, "audio_scene4_eq23")) return audio_scene_key(4, 2, value);
@@ -347,6 +394,14 @@ static int apply_key(const char *key, const char *value) {
 	if (token_eq(key, "audio_scene4_eq89")) return audio_scene_key(4, 5, value);
 	if (token_eq(key, "audio_scene4_out"))  return audio_scene_key(4, 6, value);
 	if (token_eq(key, "audio_scene4_pan"))  return audio_scene_key(4, 7, value);
+	if (token_eq(key, "audio_scene4_nm1"))  return audio_scene_key(4, 8, value);
+	if (token_eq(key, "audio_scene4_nm2"))  return audio_scene_key(4, 9, value);
+	if (token_eq(key, "audio_scene4_nm3"))  return audio_scene_key(4, 10, value);
+	if (token_eq(key, "audio_scene4_nm4"))  return audio_scene_key(4, 11, value);
+	if (token_eq(key, "audio_scene4_nm5"))  return audio_scene_key(4, 12, value);
+	if (token_eq(key, "audio_scene4_nm6"))  return audio_scene_key(4, 13, value);
+	if (token_eq(key, "audio_scene4_nm7"))  return audio_scene_key(4, 14, value);
+	if (token_eq(key, "audio_scene4_nm8"))  return audio_scene_key(4, 15, value);
 	if (token_eq(key, "audio_scene5_lpf"))  return audio_scene_key(5, 0, value);
 	if (token_eq(key, "audio_scene5_eq01")) return audio_scene_key(5, 1, value);
 	if (token_eq(key, "audio_scene5_eq23")) return audio_scene_key(5, 2, value);
@@ -355,6 +410,14 @@ static int apply_key(const char *key, const char *value) {
 	if (token_eq(key, "audio_scene5_eq89")) return audio_scene_key(5, 5, value);
 	if (token_eq(key, "audio_scene5_out"))  return audio_scene_key(5, 6, value);
 	if (token_eq(key, "audio_scene5_pan"))  return audio_scene_key(5, 7, value);
+	if (token_eq(key, "audio_scene5_nm1"))  return audio_scene_key(5, 8, value);
+	if (token_eq(key, "audio_scene5_nm2"))  return audio_scene_key(5, 9, value);
+	if (token_eq(key, "audio_scene5_nm3"))  return audio_scene_key(5, 10, value);
+	if (token_eq(key, "audio_scene5_nm4"))  return audio_scene_key(5, 11, value);
+	if (token_eq(key, "audio_scene5_nm5"))  return audio_scene_key(5, 12, value);
+	if (token_eq(key, "audio_scene5_nm6"))  return audio_scene_key(5, 13, value);
+	if (token_eq(key, "audio_scene5_nm7"))  return audio_scene_key(5, 14, value);
+	if (token_eq(key, "audio_scene5_nm8"))  return audio_scene_key(5, 15, value);
 	if (token_eq(key, "audio_scene6_lpf"))  return audio_scene_key(6, 0, value);
 	if (token_eq(key, "audio_scene6_eq01")) return audio_scene_key(6, 1, value);
 	if (token_eq(key, "audio_scene6_eq23")) return audio_scene_key(6, 2, value);
@@ -363,6 +426,14 @@ static int apply_key(const char *key, const char *value) {
 	if (token_eq(key, "audio_scene6_eq89")) return audio_scene_key(6, 5, value);
 	if (token_eq(key, "audio_scene6_out"))  return audio_scene_key(6, 6, value);
 	if (token_eq(key, "audio_scene6_pan"))  return audio_scene_key(6, 7, value);
+	if (token_eq(key, "audio_scene6_nm1"))  return audio_scene_key(6, 8, value);
+	if (token_eq(key, "audio_scene6_nm2"))  return audio_scene_key(6, 9, value);
+	if (token_eq(key, "audio_scene6_nm3"))  return audio_scene_key(6, 10, value);
+	if (token_eq(key, "audio_scene6_nm4"))  return audio_scene_key(6, 11, value);
+	if (token_eq(key, "audio_scene6_nm5"))  return audio_scene_key(6, 12, value);
+	if (token_eq(key, "audio_scene6_nm6"))  return audio_scene_key(6, 13, value);
+	if (token_eq(key, "audio_scene6_nm7"))  return audio_scene_key(6, 14, value);
+	if (token_eq(key, "audio_scene6_nm8"))  return audio_scene_key(6, 15, value);
 	if (token_eq(key, "audio_scene7_lpf"))  return audio_scene_key(7, 0, value);
 	if (token_eq(key, "audio_scene7_eq01")) return audio_scene_key(7, 1, value);
 	if (token_eq(key, "audio_scene7_eq23")) return audio_scene_key(7, 2, value);
@@ -371,6 +442,14 @@ static int apply_key(const char *key, const char *value) {
 	if (token_eq(key, "audio_scene7_eq89")) return audio_scene_key(7, 5, value);
 	if (token_eq(key, "audio_scene7_out"))  return audio_scene_key(7, 6, value);
 	if (token_eq(key, "audio_scene7_pan"))  return audio_scene_key(7, 7, value);
+	if (token_eq(key, "audio_scene7_nm1"))  return audio_scene_key(7, 8, value);
+	if (token_eq(key, "audio_scene7_nm2"))  return audio_scene_key(7, 9, value);
+	if (token_eq(key, "audio_scene7_nm3"))  return audio_scene_key(7, 10, value);
+	if (token_eq(key, "audio_scene7_nm4"))  return audio_scene_key(7, 11, value);
+	if (token_eq(key, "audio_scene7_nm5"))  return audio_scene_key(7, 12, value);
+	if (token_eq(key, "audio_scene7_nm6"))  return audio_scene_key(7, 13, value);
+	if (token_eq(key, "audio_scene7_nm7"))  return audio_scene_key(7, 14, value);
+	if (token_eq(key, "audio_scene7_nm8"))  return audio_scene_key(7, 15, value);
 	if (token_eq(key, "hdf")) {
 		if (!hdf_name_valid(value)) return -1;
 		cfg.hdf_path[0] = '0';

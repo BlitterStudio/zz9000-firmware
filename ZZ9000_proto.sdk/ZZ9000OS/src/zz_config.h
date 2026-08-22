@@ -110,8 +110,13 @@ struct zz_config {
 	 * defaults. The decimal-only grammar caps each value at 0xffff, so
 	 * scenes serialize as grouped keys: EQ band pairs pack as
 	 * hi*128+lo (each band 0..100), audio_scene_out packs
-	 * prefactor*128+volume, and audio_baseline packs paula<<8|ax. */
+	 * prefactor*128+volume, and audio_baseline packs paula<<8|ax.
+	 * audio_scene_mask bit N is the presence of key field N: bits
+	 * 0..7 are lpf/eq01..eq89/out/pan and bits 8..15 the name chunks
+	 * nm1..nm8 (each packs two ASCII label chars as c1*256+c2, 0 =
+	 * terminator). */
 #define ZZ_CFG_AUDIO_SCENES 8
+#define ZZ_CFG_AUDIO_NAME_CHUNKS 8
 
 	uint8_t audio_active_present;
 	uint16_t audio_active;          /* 0..7 */
@@ -122,6 +127,8 @@ struct zz_config {
 	uint16_t audio_scene_eq[ZZ_CFG_AUDIO_SCENES][5]; /* band pairs */
 	uint16_t audio_scene_out[ZZ_CFG_AUDIO_SCENES];   /* pref*128+vol */
 	uint16_t audio_scene_pan[ZZ_CFG_AUDIO_SCENES];   /* 0..100 */
+	uint16_t audio_scene_nm[ZZ_CFG_AUDIO_SCENES][ZZ_CFG_AUDIO_NAME_CHUNKS];
+	                                /* label chunks c1*256+c2 */
 	uint8_t truncated;              /* file exceeded the parse budget */
 };
 

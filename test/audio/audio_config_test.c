@@ -124,13 +124,19 @@ static void check_scene(int index, const struct audio_scene_def *want,
 	check(got != NULL && got->pan == want->pan,
 		fmt("%s pan", name),
 		fmt("got=%u want=%u", got ? got->pan : 0, want->pan));
+	check(got != NULL &&
+		strcmp(got->name, want->name) == 0,
+		fmt("%s name", name),
+		fmt("got='%s' want='%s'", got ? got->name : "?",
+			want->name));
 }
 
-/* One complete audio block: every one of the 66 audio keys, each with
- * a value distinct from the built-in defaults. */
+/* One complete audio block: every one of the 130 audio keys (66
+ * parameter keys plus the 64 name-chunk keys), each with a value
+ * distinct from the built-in defaults. */
 static void parse_full_audio_block(void)
 {
-	char text[2048];
+	char text[4096];
 	int off = 0;
 
 	off += snprintf(text + off, sizeof(text) - off,
@@ -138,7 +144,9 @@ static void parse_full_audio_block(void)
 		"audio_baseline = %u\n", 170u * 256u + 130u);
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++) {
 		/* Scene 0 carries hand-picked packed values; the others a
-		 * uniform (100, 0) pair shape. */
+		 * uniform (100, 0) pair shape. Every scene is named
+		 * "CfgTest<N>" as four character chunks plus terminator
+		 * and zero padding. */
 		unsigned lpf = i == 0 ? 12000u : 8000u + 2000u * (unsigned)i;
 		unsigned eq0 = i == 0 ? 12800u : 12800u;
 		unsigned eq1 = i == 0 ? 6450u : 12800u;
@@ -156,9 +164,19 @@ static void parse_full_audio_block(void)
 			"audio_scene%d_eq67 = %u\n"
 			"audio_scene%d_eq89 = %u\n"
 			"audio_scene%d_out = %u\n"
-			"audio_scene%d_pan = %u\n",
+			"audio_scene%d_pan = %u\n"
+			"audio_scene%d_nm1 = %u\n"
+			"audio_scene%d_nm2 = %u\n"
+			"audio_scene%d_nm3 = %u\n"
+			"audio_scene%d_nm4 = %u\n"
+			"audio_scene%d_nm5 = 0\n"
+			"audio_scene%d_nm6 = 0\n"
+			"audio_scene%d_nm7 = 0\n"
+			"audio_scene%d_nm8 = 0\n",
 			i, lpf, i, eq0, i, eq1, i, eq2, i, eq3, i, eq4,
-			i, out, i, pan);
+			i, out, i, pan,
+			i, 17254u, i, 26452u, i, 25971u, i, 29744u + (unsigned)i,
+			i, i, i, i);
 	}
 	parse_str(text);
 }
@@ -181,7 +199,7 @@ static void test_parse_all_audio_keys(void)
 		c->audio_baseline_present,
 		"audio_baseline parsed", fmt("v=%u", c->audio_baseline));
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++)
-		check(c->audio_scene_mask[i] == 0xffu,
+		check(c->audio_scene_mask[i] == 0xffffu,
 			fmt("scene %d key mask complete", i),
 			fmt("mask=0x%x", c->audio_scene_mask[i]));
 
@@ -205,6 +223,7 @@ static void test_parse_all_audio_keys(void)
 	want.prefactor = 100;                /* out = 12900 */
 	want.volume = 100;
 	want.pan = 75;
+	strcpy(want.name, "CfgTest0");
 	check_scene(0, &want, "scene 0");
 
 	/* Scenes 1..7 use one uniform shape with per-scene values. */
@@ -215,11 +234,10 @@ static void test_parse_all_audio_keys(void)
 			want.eq[k] = 100;
 			want.eq[k + 1] = 0;
 		}
+		snprintf(want.name, sizeof(want.name), "CfgTest%d", i);
 		check_scene(i, &want, fmt("scene %d", i));
 	}
 }
-
-/* ---- absent and corrupt keys degrade to the built-in defaults ---- */
 
 static void test_absent_and_corrupt_degrade(void)
 {
@@ -250,7 +268,14 @@ static void test_absent_and_corrupt_degrade(void)
 		"audio_scene2_out = 101\n"      /* lo 101 > 100 */
 		"audio_scene2_pan = 101\n"
 		"audio_scene4_eq23 = -3\n"
-		"audio_scene6_lpf\n");
+		"audio_scene6_lpf\n"
+		"audio_scene5_nm1 = 1\n"       /* NUL first char, not a
+					       * pure terminator */
+		"audio_scene5_nm2 = 2625\n"    /* 0x0a41: control char */
+		"audio_scene5_nm3 = 70000\n"
+		"audio_scene3_nm1 = 0\n"       /* valid terminator only: an
+					       * explicitly emptied name */
+		"audio_scene1_nm2 = 8256\n");  /* valid: ' '@0x20,'@' */
 	audio_scene_init();
 	audio_scene_load_config();
 	check(audio_scene_active_index() == 0,
@@ -264,8 +289,15 @@ static void test_absent_and_corrupt_degrade(void)
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++)
 		check_scene(i, &defaults[i], fmt("degraded scene %d", i));
 	check(zz_config_get()->audio_scene_mask[2] == 0 &&
-		zz_config_get()->audio_scene_mask[4] == 0,
+		zz_config_get()->audio_scene_mask[4] == 0 &&
+		zz_config_get()->audio_scene_mask[5] == 0,
 		"corrupt scene keys leave no mask bits", NULL);
+	check(strcmp(audio_scene_get(3)->name, "Scene 4") == 0,
+		"an explicitly emptied name falls back to the default label",
+		audio_scene_get(3)->name);
+	check(strcmp(audio_scene_get(1)->name, "Scene 2") == 0,
+		"a name group without a leading chunk falls back too",
+		audio_scene_get(1)->name);
 }
 
 /* ---- save round-trip: the saved file reparses identically ---- */
@@ -301,6 +333,10 @@ static void test_save_roundtrip(void)
 		else
 			scene_of(&written[i], 9000 + 1000 * i, 55, 60, 50,
 				30 + i);
+		/* Every scene carries a saved name: "Slot N" as three
+		 * chunks plus a terminator character. */
+		snprintf(written[i].name, sizeof(written[i].name),
+			"Slot %d", i);
 		check(audio_scene_write(i, &written[i]) == 0,
 			fmt("scene %d written", i), NULL);
 	}
@@ -315,13 +351,13 @@ static void test_save_roundtrip(void)
 	check(saved != NULL && len > 0, "file written", fmt("len=%d", len));
 	if (!saved)
 		return;
-	check(strstr(saved, "audio_scene4_out = ") != NULL &&
-		strstr(saved, "audio_baseline = 35910") != NULL,
-		"audio block serialized", NULL);
-
+	/* The name keys ride along in the emitted file. */
+	check(strstr(saved, "audio_scene0_nm1 = ") != NULL &&
+		strstr(saved, "audio_scene0_nm4 = ") != NULL,
+		"save includes the name keys", NULL);
 	/* The saved text must reparse into the same state. */
 	zz_config_reset();
-	check(zz_config_parse(saved, (unsigned)len) == 77,
+	check(zz_config_parse(saved, (unsigned)len) == 141,
 		"every key line accepted on reparse", NULL);
 	audio_scene_init();
 	audio_scene_load_config();
@@ -413,11 +449,14 @@ static void test_save_budget(void)
 		"hdf = maximum-length.hdf\n");
 	audio_scene_init();
 	/* Scenes 1..7 serialize at wide boundary-safe values (five-digit
-	 * lpf, four-digit packed pairs, three-digit pan). The all-slot
-	 * save validation (R15) rejects any over-boundary scene, so the
-	 * range-widest eq/prefactor/volume 100 shape can never reach the
-	 * writer anymore. */
+	 * lpf, four-digit packed pairs, three-digit pan) and a full
+	 * 16-character name (five-digit name chunks), so the budget sees
+	 * the largest possible audio block. The all-slot save validation
+	 * (R15) rejects any over-boundary scene, so the range-widest
+	 * eq/prefactor/volume 100 shape can never reach the writer
+	 * anymore. */
 	scene_of(&wide, 23900, 60, 50, 50, 100);
+	strcpy(wide.name, "WidestLegalScene");
 	for (int i = 1; i < AUDIO_SCENE_COUNT; i++)
 		check(audio_scene_write(i, &wide) == 0,
 			fmt("wide scene %d written", i), NULL);
@@ -435,7 +474,7 @@ static void test_save_budget(void)
 
 	zz_config_reset();
 	check(saved != NULL &&
-		zz_config_parse(saved, (unsigned)len) == 77,
+		zz_config_parse(saved, (unsigned)len) == 141,
 		"widest file reparses with every key accepted", NULL);
 }
 
@@ -643,6 +682,21 @@ static void check_sample_audio_defaults(const char *sample)
 			i, (unsigned)s->pan);
 		check(strstr(sample, line) != NULL,
 			"sample pins scene pan default", line);
+		/* The sample documents the name grammar once (scene 0's
+		 * group, leading chunks); pin those to the default label
+		 * "Scene 1". */
+		if (i == 0) {
+			for (k = 0; k < 4; k++) {
+				snprintf(line, sizeof(line),
+					"audio_scene%d_nm%d = %u", i, k + 1,
+					(unsigned)(uint8_t)s->name[2 * k] *
+					256u +
+					(unsigned)(uint8_t)s->name[2 * k + 1]);
+				check(strstr(sample, line) != NULL,
+					"sample pins scene name chunk default",
+					line);
+			}
+		}
 	}
 }
 

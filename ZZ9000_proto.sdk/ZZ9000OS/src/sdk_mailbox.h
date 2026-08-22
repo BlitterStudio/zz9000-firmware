@@ -417,6 +417,32 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 #define SDK_AUDIO_SCENE_PARAM_PAN        14U
 #define SDK_AUDIO_SCENE_PARAM_BASELINE   15U /* operator Paula/AX pair;
                                                * scene index is ignored */
+#define SDK_AUDIO_SCENE_PARAM_NAME       16U /* scene name chunk: bits
+                                               * 15..8 = first char,
+                                               * 7..0 = second char,
+                                               * both printable ASCII
+                                               * (0x20-0x7E) or 0x00;
+                                               * a 0x0000 chunk is the
+                                               * terminator. A rename
+                                               * stages the complete
+                                               * name as up to 8
+                                               * chunks (16 chars
+                                               * incl. the NUL), then
+                                               * commits ONCE: the
+                                               * first NAME chunk of
+                                               * a draft clears the
+                                               * name and lands at
+                                               * chunk 0, extra
+                                               * terminator chunks
+                                               * after the first are
+                                               * ignored (zero-padding
+                                               * is safe), and a
+                                               * non-terminator chunk
+                                               * after the terminator
+                                               * restarts at chunk 0.
+                                               * A NAME-only commit
+                                               * issues zero DSP
+                                               * writes. */
 
 /* Staged edits accumulate firmware-side; COMMIT asks for one atomic
  * glitch-free commit (fade -> ordered verified writes -> restore) of

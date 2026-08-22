@@ -61,21 +61,23 @@
 #define LPF_HZ_MAX 23900
 
 /*
- * Fixed scene slots (label = slot number). Every default composes to
+ * Fixed scene slots. Every default composes to
  * at or below the enforced boundary with the default baseline summed
  * (192): the worst defaults apply 192 * prefactor * volume * EQ-boost
  * <= 192. Slot 0 is today's power-on default (LPF 23900, unity EQ,
  * unity prefactor, full volume) and composes exactly at the boundary.
+ * Names are user labels ("Scene N" is the built-in default) and never
+ * join the DSP write set.
  */
 static const struct audio_scene_def default_scenes[AUDIO_SCENE_COUNT] = {
-	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 100, 50 },
-	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 80, 50 },
-	{ 16000, { 55, 55, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 75, 50 },
-	{ 18000, { 50, 50, 50, 50, 50, 50, 55, 55, 50, 50 }, 50, 75, 50 },
-	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 60, 70, 50 },
-	{ 12000, { 45, 45, 50, 50, 50, 50, 50, 50, 45, 45 }, 50, 90, 50 },
-	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 55, 75, 50 },
-	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 60, 50 },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 100, 50, "Scene 1" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 80, 50, "Scene 2" },
+	{ 16000, { 55, 55, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 75, 50, "Scene 3" },
+	{ 18000, { 50, 50, 50, 50, 50, 50, 55, 55, 50, 50 }, 50, 75, 50, "Scene 4" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 60, 70, 50, "Scene 5" },
+	{ 12000, { 45, 45, 50, 50, 50, 50, 50, 50, 45, 45 }, 50, 90, 50, "Scene 6" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 55, 75, 50, "Scene 7" },
+	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 60, 50, "Scene 8" },
 };
 
 static struct audio_scene_def scenes[AUDIO_SCENE_COUNT];
@@ -91,11 +93,16 @@ struct trim_state {
 static struct trim_state trims[AUDIO_SCENE_OWNER_SLOTS];
 static uint8_t owner_participating[AUDIO_SCENE_OWNER_SLOTS];
 
-/* ---- staged edits, commit serialization (U4, KTD7) ---- */
-
 struct scene_staging {
 	struct audio_scene_def draft;
 	int has_draft; /* params staged for this scene, uncommitted */
+	/* NAME accumulator state (the label is staged chunk by chunk):
+	 * chunks counts two-char chunks already written into draft.name,
+	 * open is set once the first chunk cleared the name, and closed
+	 * is set by the terminator chunk. */
+	uint8_t name_chunks;
+	uint8_t name_open;
+	uint8_t name_closed;
 };
 
 static struct scene_staging staging[AUDIO_SCENE_COUNT];
@@ -1058,6 +1065,7 @@ int audio_scene_apply_after_dsp_init(void)
 static int scene_def_valid(const struct audio_scene_def *def)
 {
 	int i;
+	int nul = 0;
 
 	if (def->lpf_hz < LPF_HZ_MIN || def->lpf_hz > LPF_HZ_MAX)
 		return 0;
@@ -1066,6 +1074,22 @@ static int scene_def_valid(const struct audio_scene_def *def)
 	for (i = 0; i < AUDIO_SCENE_EQ_BANDS; i++)
 		if (def->eq[i] > 100)
 			return 0;
+	/* The label: printable ASCII up to the first NUL, then a zero
+	 * tail (an all-zero name is valid: it means "default label" and
+	 * is what a whole-definition write of a freshly zeroed struct
+	 * carries). */
+	for (i = 0; i <= AUDIO_SCENE_NAME_MAX; i++) {
+		char ch = def->name[i];
+
+		if (nul) {
+			if (ch != 0)
+				return 0;
+		} else if (ch == 0) {
+			nul = 1;
+		} else if (ch < 0x20 || ch > 0x7e) {
+			return 0;
+		}
+	}
 	return 1;
 }
 
@@ -1176,9 +1200,70 @@ int audio_scene_stage_param(uint8_t index, uint32_t param,
 	st = &staging[index];
 	if (!st->has_draft) {
 		/* Seed the draft from the live definition so partial edits
-		 * compose; nothing is applied until the commit. */
+		 * compose; nothing is applied until the commit. A consumed
+		 * draft also resets the NAME accumulator: the first NAME
+		 * chunk of the next rename opens a fresh name. */
 		st->draft = scenes[index];
 		st->has_draft = 1;
+		st->name_chunks = 0;
+		st->name_open = 0;
+		st->name_closed = 0;
+	}
+	if (param == SDK_AUDIO_SCENE_PARAM_NAME) {
+		/* Scene label chunk (two printable ASCII chars, or the
+		 * 0x0000 terminator). A rename stages the COMPLETE name,
+		 * then commits once: the first chunk of a fresh accumulator
+		 * clears the old name and lands at chunk 0, terminator
+		 * chunks after the first are ignored (zero-padding is
+		 * idempotent), and a non-terminator chunk after the
+		 * terminator restarts the name -- so a client prepending a
+		 * guard terminator self-heals a partial earlier attempt.
+		 * Names never join the DSP write set; this only shapes the
+		 * label that rides along with the next commit. */
+		uint8_t c1 = (uint8_t)((value >> 8) & 0xffU);
+		uint8_t c2 = (uint8_t)(value & 0xffU);
+
+		if (value > 0xffffU)
+			return -1;
+		if (c1 == 0 && c2 == 0) {
+			/* Terminator: close the accumulator. On a fresh
+			 * draft it opens an empty name (a guard terminator
+			 * wipes any residue of an earlier attempt);
+			 * terminators after the first are padding no-ops. */
+			if (!st->name_open) {
+				memset(st->draft.name, 0,
+					sizeof(st->draft.name));
+				st->name_chunks = 0;
+				st->name_open = 1;
+			}
+			if (!st->name_closed &&
+					st->name_chunks <
+					AUDIO_SCENE_NAME_CHUNKS) {
+				st->draft.name[2 * st->name_chunks] = 0;
+				st->draft.name[2 * st->name_chunks + 1] = 0;
+			}
+			st->name_closed = 1;
+			return 0;
+		}
+		/* Non-terminator: the first char carries the position, so
+		 * it must be printable (a NUL first char only exists in
+		 * the pure terminator above). */
+		if (c1 < 0x20 || c1 > 0x7e)
+			return -1;
+		if (c2 != 0 && (c2 < 0x20 || c2 > 0x7e))
+			return -1;
+		if (st->name_closed || !st->name_open) {
+			memset(st->draft.name, 0, sizeof(st->draft.name));
+			st->name_chunks = 0;
+			st->name_open = 1;
+			st->name_closed = 0;
+		}
+		if (st->name_chunks >= AUDIO_SCENE_NAME_CHUNKS)
+			return -1; /* 16 chars staged, no room for more */
+		st->draft.name[2 * st->name_chunks] = (char)c1;
+		st->draft.name[2 * st->name_chunks + 1] = (char)c2;
+		st->name_chunks++;
+		return 0;
 	}
 	if (param == SDK_AUDIO_SCENE_PARAM_LPF) {
 		if (value < LPF_HZ_MIN || value > LPF_HZ_MAX)
@@ -1328,6 +1413,17 @@ static int audio_scene_emit_keys(char *buf, unsigned size, int off)
 		off = appendf(buf, size, off, "audio_scene%d_pan = %u\n",
 			i, (unsigned)s->pan);
 		if (off < 0) return -1;
+		/* The label, two chars per key, zero-padded with
+		 * terminator chunks (nm1..nm8 share the CFG grammar with
+		 * the SCENE_WRITE NAME param). */
+		for (k = 0; k < AUDIO_SCENE_NAME_CHUNKS; k++) {
+			off = appendf(buf, size, off,
+				"audio_scene%d_nm%d = %u\n",
+				i, k + 1,
+				(unsigned)(uint8_t)s->name[2 * k] * 256u +
+				(unsigned)(uint8_t)s->name[2 * k + 1]);
+			if (off < 0) return -1;
+		}
 	}
 	return off;
 }
@@ -1416,6 +1512,23 @@ void audio_scene_load_config(void)
 		}
 		if (mask & (1u << 7))
 			def.pan = (uint8_t)c->audio_scene_pan[i];
+		/* The label chunks rebuild the name as a unit: absent
+		 * chunks are the zero padding the writer emits, and an
+		 * all-NUL result (an explicitly emptied name) falls back
+		 * to the built-in default label. */
+		if (mask & 0xff00u) {
+			memset(def.name, 0, sizeof(def.name));
+			for (k = 0; k < AUDIO_SCENE_NAME_CHUNKS; k++) {
+				if (!(mask & (1u << (8 + k))))
+					continue;
+				packed = c->audio_scene_nm[i][k];
+				def.name[2 * k] = (char)(uint8_t)(packed >> 8);
+				def.name[2 * k + 1] =
+					(char)(uint8_t)(packed & 0xff);
+			}
+			if (def.name[0] == 0)
+				strcpy(def.name, default_scenes[i].name);
+		}
 		if (mask && scene_def_valid(&def))
 			scenes[i] = def;
 	}
