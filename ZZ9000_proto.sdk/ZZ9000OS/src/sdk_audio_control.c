@@ -95,11 +95,15 @@ static uint16_t ctrl_scene_write(const uint8_t *params,
 
 /* Owner source trim (R3). The ABI balance word is the requested
  * absolute mixer pair (two 0..255 volumes, 127 = 0 dB each,
- * AP_DSP_SET_VOLUMES packing); the arbiter composes trims on top of
- * the baseline, so the request is converted to legs-relative deltas.
- * The payload carries no owner identity -- the single-owner model
- * holds until I1 -- so every mailbox trim targets the SDK slot and a
- * driver releases by submitting the neutral balance. */
+ * AP_DSP_SET_VOLUMES packing) -- except the reserved neutral word
+ * 0x7f7f, which means "no trim from this owner": the reply reports
+ * the operator baseline pair as applied, unbounded, and the mixer is
+ * not restaged (an absolute 127/127 request is therefore not
+ * expressible). Any other word is converted to legs-relative deltas
+ * against the baseline. The payload carries no owner identity -- the
+ * single-owner model holds until I1 -- so every mailbox trim targets
+ * the SDK slot and a driver releases by submitting the neutral
+ * balance. */
 static uint16_t ctrl_trim_submit(const uint8_t *params,
 	uint16_t payload_len, uint8_t *result_payload,
 	uint16_t *result_len)
@@ -120,6 +124,19 @@ static uint16_t ctrl_trim_submit(const uint8_t *params,
 		return SDK_STATUS_BAD_REQUEST;
 
 	balance = sdk_get_be32(p->balance);
+	if (balance == SDK_AUDIO_BALANCE_NEUTRAL) {
+		/* Keep-baseline: no trim from this owner, so no
+		 * composition and no mixer restage -- the operator
+		 * baseline pair stands and is reported verbatim,
+		 * unbounded. */
+		sdk_put_be32(out->balance_applied,
+			SDK_AUDIO_BALANCE_PACK(audio_scene_baseline_paula(),
+				audio_scene_baseline_ax()));
+		sdk_put_be32(out->balance_bound, 0U);
+		sdk_put_be32(out->flags, 0U);
+		*result_len = (uint16_t)sizeof(*out);
+		return SDK_STATUS_OK;
+	}
 	paula = (int16_t)((int32_t)SDK_AUDIO_BALANCE_CH1(balance) -
 		(int32_t)audio_scene_baseline_paula());
 	ax = (int16_t)((int32_t)SDK_AUDIO_BALANCE_CH2(balance) -

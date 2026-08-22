@@ -475,6 +475,74 @@ static void test_trim_submit_result(void)
 			(unsigned long)w32(&result_buf[16])));
 }
 
+/* ---- trim submit: the reserved neutral word keeps the baseline ---- */
+
+static void test_trim_neutral_keep_baseline(void)
+{
+	struct SDKAudioTrimSubmitPayload tr;
+	struct SDKAudioSceneWritePayload wr;
+	uint32_t flags, applied, bound;
+	uint16_t status;
+
+	audio_scene_init();
+	memset(&tr, 0, sizeof(tr));
+	memset(&wr, 0, sizeof(wr));
+
+	/* A non-default operator baseline (150/40) through the staged
+	 * commit path, so the default 128/64 pair cannot mask the
+	 * distinction between "baseline" and "neutral word". */
+	put32(wr.scene, 0);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_BASELINE);
+	put32(wr.value, SDK_AUDIO_BALANCE_PACK(150, 40));
+	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK, "non-default baseline committed", NULL);
+
+	/* The reserved 0x7f7f word is keep-baseline: "no trim from this
+	 * owner". The reply reports the baseline pair as applied,
+	 * unbounded, and the mixer is not restaged -- no DSP write and no
+	 * gain-reduction event. */
+	clear_writes();
+	put32(tr.balance, SDK_AUDIO_BALANCE_NEUTRAL);
+	status = run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr));
+	check(status == SDK_STATUS_OK && result_len == sizeof(
+			struct SDKAudioTrimResultPayload),
+		"neutral trim submit completes with result payload",
+		fmt("status=%u len=%u", status, result_len));
+	applied = w32(&result_buf[0]);
+	bound = w32(&result_buf[4]);
+	flags = w32(&result_buf[8]);
+	check(applied == SDK_AUDIO_BALANCE_PACK(150, 40) &&
+		flags == 0 && bound == 0,
+		"neutral submit reports the baseline pair, unbounded",
+		fmt("applied=0x%lx bound=0x%lx flags=%lu",
+			(unsigned long)applied, (unsigned long)bound,
+			(unsigned long)flags));
+	check(write_count == 0,
+		"neutral submit does not restage the mixer",
+		fmt("writes=%d", write_count));
+	check(audio_scene_gain_reduction_events() == 0,
+		"neutral submit emits no gain-reduction event", NULL);
+
+	/* Absolute requests still convert against the baseline: asking
+	 * for 140/30 lands exactly that pair (baseline-relative deltas,
+	 * composed within the boundary), proving the reserved word did
+	 * not redefine the ordinary path. */
+	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(140, 30));
+	status = run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr));
+	check(status == SDK_STATUS_OK, "absolute trim submit accepted",
+		fmt("status=%u", status));
+	applied = w32(&result_buf[0]);
+	bound = w32(&result_buf[4]);
+	flags = w32(&result_buf[8]);
+	check(applied == SDK_AUDIO_BALANCE_PACK(140, 30) &&
+		flags == 0 && bound == 0,
+		"absolute submit still converts against the baseline",
+		fmt("applied=0x%lx bound=0x%lx flags=%lu",
+			(unsigned long)applied, (unsigned long)bound,
+			(unsigned long)flags));
+}
+
 /* ---- meter read: framed snapshot through the dispatch ---- */
 
 #define TEST_FRAMES 8
@@ -803,6 +871,7 @@ int main(void)
 	test_rapid_switches_serialize();
 	test_nested_commit_rejected();
 	test_trim_submit_result();
+	test_trim_neutral_keep_baseline();
 	test_meter_read();
 	test_scene_save();
 	test_baseline_write_path();
