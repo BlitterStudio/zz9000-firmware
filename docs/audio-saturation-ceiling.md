@@ -29,10 +29,9 @@ The boundary applies to the composed level the staging code evaluates
 - EQ: 0..100, ±12 dB per band, 50 = 0 dB; the model uses the single
   worst positive band (`eq_worst_boost_linear`).
 
-An owner trim is stored as the delta between the owner's requested
-absolute balance and the baseline at submit time, so with one owner
-the applied legs equal the requested balance. The AHI and MHI drivers
-request the neutral 127/127 pair.
+`ZZ9K_AUDIO_BALANCE_NEUTRAL` is the keep-baseline request: AHI and
+MHI add no owner trim, so their allocation leaves the operator's
+baseline pair applied verbatim.
 
 ## Provisional enforced boundary (current state)
 
@@ -78,37 +77,48 @@ Stimulus and routing:
    level, ~0.99 FS to stay off the source rails) through any AHI
    player. Both legs carry the same frequency so the summed signal is
    the worst case the boundary models.
-4. **Applied legs.** Fresh boot (or `ZZ9000.CFG` without audio keys) so
-   the baseline is the 128/64 default, then start the AHI player: its
-   neutral trim resolves to applied legs 127/127. Leave the baseline
-   untouched afterwards; the sweep uses only master-chain gain so the
-   legs stay fixed. Combined level at unity chain is then 254.
-5. **Sweep.** With scene 0 (unity EQ, volume 100, LPF 23900), step the
-   scene prefactor upward from 33 (combined ~160) through 67 (combined
-   ~400) so the combined levels walk 160 -> 400 in steps of ~16
-   (prefactor dB = 20*log10(combined / 254); prefactor = 50 +
-   dB * 50 / 12). Each step is one staged scene-write commit in
-   ZZTop's Audio window (glitch-free; playback keeps running). At each
-   step, record at least 2 seconds to a raw capture file named by its
-   combined level (e.g. `cap_0208.raw`), and watch the Audio window
-   meters as a live cross-check (see note below).
-6. **Model cross-check.** Reach the same combined value a second way —
-   through the mixer legs at unity chain instead of prefactor gain.
-   With the neutral AHI trim frozen at allocation, a later baseline
-   edit shifts the applied pair by its own delta: applied = baseline +
-   (127 - 128, 127 - 64) = baseline + (-1, +63). So for equal applied
-   legs v (combined 2v at unity chain), set the baseline sliders to
-   (v + 1, v - 63); v must be at least 63 for the AX slider to stay in
-   range. If the onset-relevant metrics agree at the same combined
-   value reached both ways, saturation is level-dependent at the DAC
-   and the combined-level model is the right currency; a disagreement
-   means the saturation sits at the mixer summing node and the model
-   needs revisiting before any constant update. Record both
-   observations. A cheaper secondary probe: Paula tone alone (no AHI
-   owner, baseline (127, 127) so the applied legs match) versus both
-   tones — if the single-leg path tolerates roughly the same combined
-   level, the leg values themselves (not just the active signal) are
-   saturating, which is exactly what the summed-legs model assumes.
+4. **Applied legs.** Before starting playback, set ZZTop's external
+   baseline sliders to Paula 127 / AX 127. AHI's keep-baseline trim
+   leaves that pair unchanged, so the applied mixer sum stays fixed at
+   254 for the primary sweep. Do not Save this temporary bench baseline
+   and do not move either baseline slider during the primary sweep.
+5. **Scene setup.** Use scene 0 with LPF 23900, all EQ bands 50,
+   volume 100, and pan 50. Sweep only the prefactor. Integer slider
+   settings map to the model as follows:
+
+   | Prefactor | Combined level |
+   |---:|---:|
+   | 33 | 158.8 |
+   | 37 | 177.4 |
+   | 40 | 192.7 |
+   | 43 | 209.3 |
+   | 46 | 227.4 |
+   | 48 | 240.3 |
+   | 50 | 254.0 |
+   | 52 | 268.4 |
+   | 54 | 283.7 |
+   | 56 | 299.8 |
+   | 58 | 316.8 |
+   | 60 | 334.8 |
+   | 62 | 353.9 |
+   | 64 | 374.0 |
+   | 66 | 395.2 |
+
+   Each step is one staged scene-write commit in ZZTop's Audio window
+   (glitch-free; playback keeps running). Record at least 2 seconds per
+   step to a raw capture file named by its rounded combined level, and
+   watch the Audio-window meters as a live cross-check.
+6. **Model cross-check.** Reach onset-relevant combined values a
+   second way through the mixer legs at unity chain: restore prefactor
+   50 and volume 100, then set equal baseline pairs. Examples are
+   80/80 = 160, 96/96 = 192, 112/112 = 224, 128/128 = 256, and
+   160/160 = 320. Because the current AHI trim is keep-baseline, no
+   historical owner-delta adjustment is required. If onset metrics
+   agree at the same combined value reached both ways, saturation is
+   level-dependent at the DAC and the combined-level model is the
+   right currency. A disagreement places the limit at the mixer
+   summing node and blocks any constant update. Record both
+   observations.
 7. **Detection.** Analyze the captures on the host with
    `util/analyze_audio_saturation.py` (below) in sweep order with the
    combined levels. The measured ceiling is the highest combined level
