@@ -31,6 +31,15 @@ static inline int audio_adau_readback_matches(const uint8_t *expected,
 	return 1;
 }
 
+/* Incremental setters use 0 while more substeps remain, 1 when the
+ * latch write completed, and -1 on I2C failure. Keep the transport
+ * status conversion shared with host stubs so tests cannot model the
+ * opposite completion semantics. */
+static inline int audio_adau_safeload_latch_result(int write_status)
+{
+	return (write_status == 0) ? 1 : -1;
+}
+
 enum {
 	AP_TX_BUF_OFFS_HI,
 	AP_TX_BUF_OFFS_LO,

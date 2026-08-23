@@ -1310,7 +1310,8 @@ int audio_adau_safe_param_substep(uint16_t address,
 		return (adau_write16(0x34, 0x0815,
 				safe1_ctx.address) != 0) ? -1 : 0;
 	/* substep 2: latch */
-	return (adau_write16(0x34, 0x081C, 0x003C) != 0) ? 1 : -1;
+	return audio_adau_safeload_latch_result(
+		adau_write16(0x34, 0x081C, 0x003C));
 }
 
 /* Safeload equivalents of the single-param setters used by the
@@ -1351,10 +1352,9 @@ int audio_adau_safe_vol_pan_side(int side, int vol, int pan, int substep)
 
 int audio_adau_safe_prefactor(int pre, int substep)
 {
-	/* The prefactor writes two parameter words (ALG0/ALG1); the
-	 * safeload path stages both in slots 0 and 1 then latches:
-	 * substeps 0..2 = slot0 value/address + shared-latch marker,
-	 * 3..5 = slot1; 6 = latch. */
+	/* The prefactor writes two parameter words (ALG0/ALG1):
+	 * substeps 0/1 stage slot 0 value/address, 2/3 stage slot 1,
+	 * and substep 4 latches both. */
 	static struct {
 		uint8_t buf[ADAU_PARAMETER_WORD_BYTES];
 	} ctx;
@@ -1380,7 +1380,8 @@ int audio_adau_safe_prefactor(int pre, int substep)
 			MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR) != 0)
 			? -1 : 0;
 	if (substep == 4)
-		return (adau_write16(0x34, 0x081C, 0x003C) != 0) ? 1 : -1;
+		return audio_adau_safeload_latch_result(
+			adau_write16(0x34, 0x081C, 0x003C));
 	return -1;
 }
 

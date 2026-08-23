@@ -110,21 +110,28 @@ int audio_adau_eq_substep(int band, int gain, int substep)
 	return 1;
 }
 
-__attribute__((unused)) int audio_adau_safe_mixer_leg(int leg, int value, int substep)
+__attribute__((unused)) int audio_adau_safe_mixer_leg(int leg, int value,
+	int substep)
 {
 	record_write(WRITE_MIXER_P + leg, value, 0);
 	if (substep == 2)
-		return fail_next_write ? -1 : 1;
+		return audio_adau_safeload_latch_result(
+			fail_next_write ? -1 : 0);
 	return 0;
 }
 
-__attribute__((unused)) int audio_adau_safe_vol_pan_side(int side, int vol, int pan, int substep)
+__attribute__((unused)) int audio_adau_safe_vol_pan_side(int side, int vol,
+	int pan, int substep)
 {
+	int write_status = 0;
+
 	record_write(WRITE_VOLPAN_SIDE0 + side, vol, pan);
 	if (substep == 2) {
 		if (fail_volpan_restore && vol != 0)
-			return -1;
-		return fail_next_write ? -1 : 1;
+			write_status = -1;
+		else if (fail_next_write)
+			write_status = -1;
+		return audio_adau_safeload_latch_result(write_status);
 	}
 	return 0;
 }
@@ -133,7 +140,8 @@ __attribute__((unused)) int audio_adau_safe_prefactor(int pre, int substep)
 {
 	record_write(WRITE_PREF, pre, 0);
 	if (substep == 4)
-		return fail_next_write ? -1 : 1;
+		return audio_adau_safeload_latch_result(
+			fail_next_write ? -1 : 0);
 	return 0;
 }
 

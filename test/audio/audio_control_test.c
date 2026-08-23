@@ -143,26 +143,31 @@ int audio_adau_eq_substep(int band, int gain, int substep)
 	if (substep < 10) return 0;
 	return 1;
 }
-__attribute__((unused)) int audio_adau_safe_mixer_leg(int leg, int value, int substep)
+__attribute__((unused)) int audio_adau_safe_mixer_leg(int leg, int value,
+	int substep)
 {
 	record_write(WRITE_MIXER_P + leg, value, 0);
 	if (substep == 2)
-		return fail_next_write ? -1 : 1;
+		return audio_adau_safeload_latch_result(
+			fail_next_write ? -1 : 0);
 	return 0;
 }
 
-__attribute__((unused)) int audio_adau_safe_vol_pan_side(int side, int vol, int pan, int substep)
+__attribute__((unused)) int audio_adau_safe_vol_pan_side(int side, int vol,
+	int pan, int substep)
 {
 	record_write(WRITE_VOLPAN_SIDE0 + side, vol, pan);
 	if (substep == 2)
-		return fail_next_write ? -1 : 1;
+		return audio_adau_safeload_latch_result(
+			fail_next_write ? -1 : 0);
 	return 0;
 }
 
 __attribute__((unused)) int audio_adau_safe_prefactor(int pre, int substep)
 {
 	record_write(WRITE_PREF, pre, 0);
-	return (substep < 4) ? 0 : 1;
+	return (substep < 4) ? 0 :
+		audio_adau_safeload_latch_result(0);
 }
 
 
@@ -862,6 +867,97 @@ static void test_scene_save(void)
 	mock_fail_write(0);
 }
 
+
+static void test_baseline_write_persists_through_queued_save(void)
+{
+	struct SDKAudioSceneWritePayload wr;
+	struct SDKAudioSceneSavePayload save;
+	struct SDKAudioControlStateGetPayload get;
+	uint16_t status;
+
+	audio_scene_init();
+	mock_fs_reset();
+	memset(&wr, 0, sizeof(wr));
+	memset(&save, 0, sizeof(save));
+	memset(&get, 0, sizeof(get));
+
+	put32(wr.scene, 0);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_BASELINE);
+	put32(wr.value, SDK_AUDIO_BALANCE_PACK(128, 63));
+	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK, "UI baseline write accepted", NULL);
+	check(run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get)) ==
+			SDK_STATUS_OK &&
+			w32(&result_buf[8]) == SDK_AUDIO_BALANCE_PACK(128, 63),
+		"control state owns the edited baseline before Save", NULL);
+
+	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
+	check(status == SDK_STATUS_OK &&
+			w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_QUEUED,
+		"immediate Save queues behind the baseline commit", NULL);
+	pump_scene();
+	check(audio_scene_save_status() == SDK_AUDIO_SCENE_SAVE_OK,
+		"baseline Save settles OK", NULL);
+	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
+			strstr(mock_fs_file("0:/ZZ9000.CFG"),
+				"audio_baseline = 32831\n") != NULL,
+		"queued Save persists the edited baseline", NULL);
+	check(run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get)) ==
+			SDK_STATUS_OK &&
+			w32(&result_buf[8]) == SDK_AUDIO_BALANCE_PACK(128, 63),
+		"control state retains the baseline after Save", NULL);
+}
+
+static void test_scene_rename_persists_through_queued_save(void)
+{
+	static const uint32_t chunks[8] = {
+		0x4265, 0x6e63, 0x6800, 0, 0, 0, 0, 0 /* "Bench" */
+	};
+	struct SDKAudioSceneWritePayload wr;
+	struct SDKAudioSceneSavePayload save;
+	uint16_t status;
+	int i;
+
+	audio_scene_init();
+	mock_fs_reset();
+	memset(&wr, 0, sizeof(wr));
+	memset(&save, 0, sizeof(save));
+	put32(wr.scene, 0);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_NAME);
+
+	/* ZZTop's retry-safe rename shape: terminator guard, then all
+	 * eight chunks with COMMIT on the final call only. */
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK, "rename guard accepted", NULL);
+	for (i = 0; i < 8; i++) {
+		put32(wr.value, chunks[i]);
+		put32(wr.flags, (i == 7) ?
+			SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT : 0);
+		check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+			SDK_STATUS_OK, "rename chunk accepted", NULL);
+	}
+	check(audio_scene_get(0) != NULL &&
+			strcmp(audio_scene_get(0)->name, "Bench") == 0,
+		"firmware scene table owns the renamed label", NULL);
+
+	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
+	check(status == SDK_STATUS_OK &&
+			w32(&result_buf[0]) == SDK_AUDIO_SCENE_SAVE_QUEUED,
+		"immediate Save queues behind the name commit", NULL);
+	pump_scene();
+	check(audio_scene_save_status() == SDK_AUDIO_SCENE_SAVE_OK,
+		"rename Save settles OK", NULL);
+	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
+			strstr(mock_fs_file("0:/ZZ9000.CFG"),
+				"audio_scene0_nm1 = 16997\n") != NULL &&
+			strstr(mock_fs_file("0:/ZZ9000.CFG"),
+				"audio_scene0_nm2 = 28259\n") != NULL &&
+			strstr(mock_fs_file("0:/ZZ9000.CFG"),
+				"audio_scene0_nm3 = 26624\n") != NULL,
+		"queued Save persists the renamed label", NULL);
+}
+
 /* ---- staged baseline commit rides the same commit path ---- */
 
 static void test_baseline_write_path(void)
@@ -1041,6 +1137,8 @@ int main(void)
 	test_trim_neutral_keep_baseline();
 	test_meter_read();
 	test_scene_save();
+	test_baseline_write_persists_through_queued_save();
+	test_scene_rename_persists_through_queued_save();
 	test_baseline_write_path();
 	test_unsupported_and_validation();
 
