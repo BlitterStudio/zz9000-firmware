@@ -56,11 +56,16 @@ exactly one gain-reduction telemetry event.
 ## Measurement method (bench session)
 
 Single session on target hardware, on the operator's own card. The
-measurement calibrates the model above in its own units, so the
-stimulus must exercise the mixer sum the way the model assumes: both
-legs carrying the same tone at the same applied leg value.
+primary sweep calibrates the model in combined-level units with one
+phase-coherent active leg whose coefficient equals the model sum
+(0/254). A separate 254/0 Paula-only sweep checks that both leg paths
+reach the same onset without combining unsynchronized source clocks.
 
 Stimulus and routing:
+
+Generate the deterministic AHI and Paula source files with:
+
+    python3 util/generate_audio_ceiling_stimuli.py <output-directory>
 
 1. **Loopback.** Cable the ZZ9000AX line-out RCA pair to the line-in
    RCA pair. Set both auxiliary jumpers to **IN**; the capture input is
@@ -71,17 +76,20 @@ Stimulus and routing:
    the analyzer reports no at-rail samples. At-rail samples in a
    capture mean the ADC clipped, which is a setup fault, not DAC
    saturation — attenuate and restart if this appears at any step.
-3. **Tones.** Drive both mixer legs with the same 1 kHz sine at equal
-   level: Paula plays a looped 1 kHz sine sample through any Amiga-side
-   player; AHI plays a 48 kHz 16-bit stereo 1 kHz sine (full digital
-   level, ~0.99 FS to stay off the source rails) through any AHI
-   player. Both legs carry the same frequency so the summed signal is
-   the worst case the boundary models.
-4. **Applied legs.** Before starting playback, set ZZTop's external
-   baseline sliders to Paula 127 / AX 127. AHI's keep-baseline trim
-   leaves that pair unchanged, so the applied mixer sum stays fixed at
-   254 for the primary sweep. Do not Save this temporary bench baseline
-   and do not move either baseline slider during the primary sweep.
+3. **Applied leg.** Set ZZTop's external baseline sliders to Paula 0 /
+   AX 254. AHI's keep-baseline trim leaves that pair unchanged, so the
+   model sum stays fixed at 254 while one phase-coherent AX signal
+   carries the full combined level. Do not Save this temporary bench
+   baseline and do not move either slider during the primary sweep.
+4. **Tone and capture.** AHI's low-level allocation is exclusive, so
+   `AHIRecord` plus a separate AHI player cannot use ZZ9000AX at the
+   same time. Run `ZZAXDuplexTest <capture.raw> 5 ceiling` once per
+   prefactor step. Ceiling mode uses one `AHIAudioCtrl` to play a
+   coherent 48 kHz stereo 1 kHz sine at 0.99 FS and record AHI capture
+   simultaneously; it writes raw S16BE stereo. Do not run a Paula
+   player during this primary sweep: independent Paula and AHI clocks
+   are not phase-locked, so their changing relative phase would make
+   the physical peak unrelated to the labeled combined level.
 5. **Scene setup.** Use scene 0 with LPF 23900, all EQ bands 50,
    volume 100, and pan 50. Sweep only the prefactor. Integer slider
    settings map to the model as follows:
@@ -105,20 +113,21 @@ Stimulus and routing:
    | 66 | 395.2 |
 
    Each step is one staged scene-write commit in ZZTop's Audio window
-   (glitch-free; playback keeps running). Record at least 2 seconds per
-   step to a raw capture file named by its rounded combined level, and
-   watch the Audio-window meters as a live cross-check.
-6. **Model cross-check.** Reach onset-relevant combined values a
-   second way through the mixer legs at unity chain: restore prefactor
-   50 and volume 100, then set equal baseline pairs. Examples are
-   80/80 = 160, 96/96 = 192, 112/112 = 224, 128/128 = 256, and
-   160/160 = 320. Because the current AHI trim is keep-baseline, no
-   historical owner-delta adjustment is required. If onset metrics
-   agree at the same combined value reached both ways, saturation is
-   level-dependent at the DAC and the combined-level model is the
-   right currency. A disagreement places the limit at the mixer
-   summing node and blocks any constant update. Record both
-   observations.
+   (glitch-free; playback keeps running). Wait one second after moving
+   the prefactor so the incremental commit has settled, then run
+   `ZZAXDuplexTest <capture.raw> 5 ceiling`. Record at least 2 seconds
+   per step to a raw capture file named by its rounded combined level,
+   and watch the Audio-window meters as a live cross-check.
+6. **Leg cross-check.** Repeat the onset-relevant prefactor steps with
+   the other leg alone: set baseline Paula 254 / AX 0, loop the
+   deterministic full-scale Paula 1 kHz sample, and run
+   `ZZAXDuplexTest <capture.raw> 5 capture`. Capture mode starts AHI
+   recording without playback and writes raw S16BE, so the Paula
+   player creates no allocation conflict. Analyze these files with
+   `--auto-tone`: Paula's integer DMA period makes the realized tone
+   slightly machine-standard dependent. Matching AX-only and
+   Paula-only onset metrics at the same model sum support the linear
+   mixer assumption; disagreement blocks any constant update.
 7. **Detection.** Analyze the captures on the host with
    `util/analyze_audio_saturation.py` (below) in sweep order with the
    combined levels. The measured ceiling is the highest combined level
@@ -141,11 +150,16 @@ ceiling.
 
     python3 util/analyze_audio_saturation.py --levels 160,176,192,... \
         cap_0160.raw cap_0176.raw cap_0192.raw ...
+    python3 util/analyze_audio_saturation.py --auto-tone --levels ... \
+        cap_paula_....raw
     python3 util/test_analyze_audio_saturation.py   # self-check prints PASS
 
 Reads raw signed-16-bit PCM (`--endian be` for Amiga-side AHI dumps,
 `--endian le` for host-side captures; `--channels`, `--rate`,
-`--tone`, `--rail`, `--thd-pct` adjustable). Per channel it reports:
+`--tone`, `--auto-tone`, `--rail`, `--thd-pct` adjustable).
+`--auto-tone` estimates each capture's realized fundamental before
+the coherent THD projection; use it for Paula-period captures. Per
+channel it reports:
 
 | Metric | Meaning |
 |---|---|

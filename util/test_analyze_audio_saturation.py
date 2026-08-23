@@ -63,6 +63,28 @@ def main():
         assert m["thd_pct"] < 0.05, m["thd_pct"]
         assert abs(m["dc"]) < 1.0, m["dc"]
 
+    # --- Paula-clock tone: auto detection preserves coherent THD ---
+    paula_tone = path("paula-tone.raw")
+    actual_paula_tone = 998.75
+    synth(paula_tone, 2, 1.0, True,
+          lambda i, c: sine(i, 0.5 * 32767.0, actual_paula_tone))
+    r = ana.analyze_file(paula_tone, RATE, 2, True, TONE, 32760, 0.5,
+                         auto_tone=True)
+    assert abs(r["tone_hz"] - actual_paula_tone) < 0.05, r["tone_hz"]
+    assert r["verdict"] == "CLEAN", r["verdict"]
+    for m in r["channels"]:
+        assert m["thd_pct"] < 0.05, m["thd_pct"]
+
+    # Auto detection follows the strongest capture channel; a Paula
+    # player may place its mono sample on either side.
+    paula_right = path("paula-right.raw")
+    synth(paula_right, 2, 1.0, True,
+          lambda i, c: 0 if c == 0 else
+          sine(i, 0.5 * 32767.0, actual_paula_tone))
+    r = ana.analyze_file(paula_right, RATE, 2, True, TONE, 32760, 0.5,
+                         auto_tone=True)
+    assert abs(r["tone_hz"] - actual_paula_tone) < 0.05, r["tone_hz"]
+
     # --- DAC saturation as seen through loopback attenuation: crest
     # flattened at an interior level (not the capture rail) ---
     saturated = path("saturated.raw")
@@ -145,6 +167,13 @@ def main():
     assert len(doc["captures"]) == 2, doc
     assert doc["captures"][1]["verdict"] == "SATURATED", doc
     assert doc["onset"]["suggested_boundary"] == 168.0, doc
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = ana.main(["--json", "--auto-tone", paula_tone])
+    assert rc == 0
+    doc = json.loads(buf.getvalue())
+    assert doc["tone"] == "auto", doc
+    assert abs(doc["captures"][0]["tone_hz"] - actual_paula_tone) < 0.05
 
     for f in os.listdir(tmp):
         os.unlink(os.path.join(tmp, f))

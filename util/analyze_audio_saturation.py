@@ -61,6 +61,26 @@ def load_channels(path, channels, big_endian):
         a.byteswap()
     return [list(a[c::channels]) for c in range(channels)]
 
+def estimate_tone(samples, rate):
+    """Estimate a strong sine's frequency from positive-going crossings."""
+    segment = samples[:min(len(samples), 2 * rate)]
+    if len(segment) < 3:
+        raise ValueError("too few samples for automatic tone detection")
+    mean = sum(segment) / float(len(segment))
+    crossings = []
+    previous = segment[0] - mean
+    for index in range(1, len(segment)):
+        current = segment[index] - mean
+        if previous <= 0.0 < current:
+            span = current - previous
+            fraction = (-previous / span) if span else 0.0
+            crossings.append((index - 1) + fraction)
+        previous = current
+    if len(crossings) < 3:
+        raise ValueError("tone detection found fewer than two periods")
+    return ((len(crossings) - 1) * rate /
+            float(crossings[-1] - crossings[0]))
+
 
 def coherent_window(rate, tone, available):
     """Largest window of <= ~1 s holding an integer number of tone periods."""
@@ -192,13 +212,20 @@ def run_metrics(samples, rail):
     }
 
 
-def analyze_file(path, rate, channels, big_endian, tone, rail, thd_pct):
+def analyze_file(path, rate, channels, big_endian, tone, rail, thd_pct,
+                 auto_tone=False):
     chans = load_channels(path, channels, big_endian)
+    if auto_tone:
+        tone_source = max(
+            chans, key=lambda samples: max(abs(x) for x in samples))
+        measured_tone = estimate_tone(tone_source, rate)
+    else:
+        measured_tone = tone
     reports = []
     for samples in chans:
         m = run_metrics(samples, rail)
         m["thd_pct"], m["residual_dbfs"] = distortion_metrics(
-            samples, rate, tone)
+            samples, rate, measured_tone)
         reports.append(m)
 
     if any(m["rail_regions"] for m in reports):
@@ -213,6 +240,7 @@ def analyze_file(path, rate, channels, big_endian, tone, rail, thd_pct):
         "file": path,
         "frames": len(chans[0]),
         "seconds": len(chans[0]) / float(rate),
+        "tone_hz": measured_tone,
         "channels": reports,
         "verdict": verdict,
     }
@@ -265,6 +293,8 @@ def main(argv=None):
                    help="capture byte order (default be: Amiga AHI dump)")
     p.add_argument("--tone", type=float, default=1000.0,
                    help="stimulus tone in Hz (default 1000)")
+    p.add_argument("--auto-tone", action="store_true",
+                   help="estimate each capture's tone from zero crossings")
     p.add_argument("--rail", type=int, default=32760,
                    help="at-rail threshold, |sample| >= rail (default 32760)")
     p.add_argument("--thd-pct", type=float, default=0.5,
@@ -289,10 +319,11 @@ def main(argv=None):
 
     reports = [analyze_file(f, args.rate, args.channels,
                             args.endian == "be", args.tone,
-                            args.rail, args.thd_pct)
+                            args.rail, args.thd_pct, args.auto_tone)
                for f in args.files]
 
-    out = {"rate": args.rate, "tone": args.tone,
+    out = {"rate": args.rate,
+           "tone": "auto" if args.auto_tone else args.tone,
            "thd_threshold_pct": args.thd_pct, "captures": reports}
     if levels is not None:
         out["onset"] = find_onset(reports, levels)
@@ -303,6 +334,8 @@ def main(argv=None):
 
     for i, r in enumerate(reports):
         print("%s  %.2f s" % (r["file"], r["seconds"]))
+        if args.auto_tone:
+            print("  detected tone: %.3f Hz" % r["tone_hz"])
         for c, m in enumerate(r["channels"]):
             print("  ch%d: %s" % (c + 1, channel_summary(m)))
         print("  verdict: %s" % r["verdict"])
