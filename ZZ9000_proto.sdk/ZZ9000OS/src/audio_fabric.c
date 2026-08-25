@@ -31,6 +31,24 @@
 #include "sdk_mailbox.h"
 #include "xil_cache.h"
 
+/* Instrument-build flags (plan U5, docs/audio-fabric.md): compile the
+ * firmware with -DAUDIO_FABRIC_BENCH to add ISR cost measurement, and
+ * additionally -DAUDIO_FABRIC_BENCH_3SLOT to let the bench session
+ * lease the firmware-reserved slot 2 (three-producer measurement).
+ * Both are firmware-only; every hook below is a compile-time guard,
+ * so production and host-test builds carry none of this code. */
+#if defined(AUDIO_FABRIC_BENCH) && defined(AUDIO_FABRIC_HOST_TEST)
+#error "AUDIO_FABRIC_BENCH is a firmware-only instrument-build flag"
+#endif
+#if defined(AUDIO_FABRIC_BENCH_3SLOT) && !defined(AUDIO_FABRIC_BENCH)
+#error "AUDIO_FABRIC_BENCH_3SLOT extends AUDIO_FABRIC_BENCH; define both"
+#endif
+
+#ifdef AUDIO_FABRIC_BENCH
+#include "xil_printf.h"
+#include "xtime_l.h"
+#endif
+
 #define AUDIO_FABRIC_PERIOD_BYTES  AUDIO_BYTES_PER_PERIOD
 #define AUDIO_FABRIC_RING_BYTES    AUDIO_TX_BUFFER_SIZE
 #define AUDIO_FABRIC_TARGET_AHEAD \
@@ -188,6 +206,109 @@ static uint64_t fabric_lease_read_cursor(const volatile uint64_t *cursor)
 	} while (high_before != high_after);
 	return ((uint64_t)high_before << 32) | (uint64_t)low;
 }
+
+#ifdef AUDIO_FABRIC_BENCH
+/*
+ * Instrument-build cost accounting (plan U5, docs/audio-fabric.md).
+ * The clock is the ARM global timer through the same BSP helper the
+ * media profiler uses (XTime_GetTime); COUNTS_PER_SECOND is half the
+ * CPU core clock, so 2 ticks = 1 CPU cycle at the card's 666.67 MHz.
+ * All values are timer ticks, not cycles.
+ *
+ * Concurrency: the compositor ISR on core 0 is the single writer and
+ * the main-loop report is the only reader, same discipline as the
+ * lease cursors -- the report reads each 64-bit total with the same
+ * high-low-high retry so an audio IRQ landing mid-read cannot tear
+ * it. The calls/peak words are plain aligned 32-bit reads.
+ *
+ * Each measured region includes its own two timer reads (~tens of
+ * ns); sub-microsecond regions are dominated by that overhead, which
+ * is why the report distinguishes whole-tick from per-stage numbers.
+ */
+struct audio_fabric_bench_stage {
+	volatile uint64_t ticks;   /* cumulative timer ticks */
+	volatile uint32_t calls;   /* passes accumulated */
+	uint32_t peak;             /* worst single pass, ticks */
+};
+
+static struct {
+	/* Whole active compositor tick (frontier through tail tracking). */
+	struct audio_fabric_bench_stage tick;
+	/* Mix + cache: mix zero/add/commit and the per-period TX flush. */
+	struct audio_fabric_bench_stage mix;
+	/* Whole per-slot fill (pull, byte-swap, meter, expand, gain). */
+	struct audio_fabric_bench_stage fill[AUDIO_FABRIC_SLOT_COUNT];
+	/* Rate-conversion pass inside a slot's fill (resample only). */
+	struct audio_fabric_bench_stage conv[AUDIO_FABRIC_SLOT_COUNT];
+} g_fabric_bench;
+
+static uint64_t fabric_bench_now(void)
+{
+	XTime now;
+
+	XTime_GetTime(&now);
+	return (uint64_t)now;
+}
+
+static void fabric_bench_add(struct audio_fabric_bench_stage *stage,
+	uint64_t start)
+{
+	uint64_t delta = fabric_bench_now() - start;
+
+	stage->ticks += delta;
+	stage->calls++;
+	if ((uint32_t)delta > stage->peak)
+		stage->peak = (uint32_t)delta;
+}
+
+/* One numbers-only line tail; the caller prints the label so per-slot
+ * rows stay a single xil_printf each. Monotonic counters: the avg is
+ * approximate to one in-flight pass. */
+static void fabric_bench_numbers(const struct audio_fabric_bench_stage *stage)
+{
+	uint64_t ticks = fabric_lease_read_cursor(&stage->ticks);
+	uint32_t calls = stage->calls;
+	uint32_t avg = calls != 0U ? (uint32_t)(ticks / calls) : 0U;
+
+	xil_printf("avg=%u peak=%u n=%u\r\n", avg, stage->peak, calls);
+}
+
+/*
+ * Low-rate aggregate report: call from the main loop every pass; it
+ * prints one block per second on the firmware console (the ISR never
+ * prints). Integer-only.
+ */
+void audio_fabric_bench_poll(void)
+{
+	static int armed;
+	static XTime last_report;
+	XTime now;
+	uint32_t i;
+
+	XTime_GetTime(&now);
+	if (!armed) {
+		armed = 1;
+		last_report = now;
+		return;
+	}
+	if ((uint64_t)(now - last_report) < (uint64_t)COUNTS_PER_SECOND)
+		return;
+	last_report = now;
+
+	xil_printf("FABRIC-BENCH hz=%u ticks (2 ticks = 1 CPU cycle)\r\n",
+		(unsigned int)COUNTS_PER_SECOND);
+	xil_printf("FABRIC-BENCH isr ");
+	fabric_bench_numbers(&g_fabric_bench.tick);
+	xil_printf("FABRIC-BENCH mix ");
+	fabric_bench_numbers(&g_fabric_bench.mix);
+	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
+		xil_printf("FABRIC-BENCH slot%u fill ", (unsigned int)i);
+		fabric_bench_numbers(&g_fabric_bench.fill[i]);
+		xil_printf("FABRIC-BENCH slot%u conv ", (unsigned int)i);
+		fabric_bench_numbers(&g_fabric_bench.conv[i]);
+	}
+}
+#endif /* AUDIO_FABRIC_BENCH */
 
 /* Zero a card-side ring and push it to DRAM: the compositor reads it
  * with reader-side invalidates, so the zeroing must survive them. */
@@ -386,6 +507,10 @@ static uint32_t fabric_slot_fill(struct audio_fabric_slot *s)
 	if (rate == 48000U) {
 		memcpy(slot, pcm, AUDIO_FABRIC_PERIOD_BYTES);
 	} else {
+#ifdef AUDIO_FABRIC_BENCH
+		uint64_t bench_conv = fabric_bench_now();
+		uint32_t bench_slot = (uint32_t)(s - g_audio_fabric.slot);
+#endif
 		/* Per-slot converter instance (the pump's pump_convert):
 		 * re-arm on rate change; an off-table rate is an unusable
 		 * geometry -- a committed but silent period, the staging
@@ -401,6 +526,9 @@ static uint32_t fabric_slot_fill(struct audio_fabric_slot *s)
 		zz_audio_convert_stream(&s->convert, pcm, (int16_t *)slot,
 		                        (uint16_t)src_frames,
 		                        AUDIO_FABRIC_PERIOD_BYTES / 4);
+#ifdef AUDIO_FABRIC_BENCH
+		fabric_bench_add(&g_fabric_bench.conv[bench_slot], bench_conv);
+#endif
 	}
 	/* Lease gain (0..255 mixer scale; unity skips the pass so the
 	 * pump's bit-identical parity is untouched): one saturating
@@ -469,6 +597,12 @@ void audio_fabric_isr(void)
 	uint32_t ahead;
 	uint32_t guard;
 	uint32_t i;
+#ifdef AUDIO_FABRIC_BENCH
+	uint64_t bench_isr;
+	uint64_t bench_fill;
+	uint64_t bench_mix;
+#endif
+
 
 	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE ||
 	    !fabric_any_live())
@@ -524,6 +658,13 @@ void audio_fabric_isr(void)
 	if (!fabric_any_live())
 		return;
 
+#ifdef AUDIO_FABRIC_BENCH
+	/* Instrument build (U5): the tick accumulator spans one active
+	 * compositor pass -- frontier through tail tracking; the idle
+	 * early-outs above are not counted. */
+	bench_isr = fabric_bench_now();
+#endif
+
 
 	/* If the DMA caught up with (or passed) the fill frontier, it has
 	 * actually reached an unfilled silence slot. Count that played
@@ -571,7 +712,13 @@ void audio_fabric_isr(void)
 		if (ahead >= AUDIO_FABRIC_TARGET_AHEAD)
 			break;   /* frontier far enough ahead */
 		index = g_audio_fabric.fill_offset / AUDIO_FABRIC_PERIOD_BYTES;
+#ifdef AUDIO_FABRIC_BENCH
+		bench_mix = fabric_bench_now();
+#endif
 		fabric_mix_zero();
+#ifdef AUDIO_FABRIC_BENCH
+		fabric_bench_add(&g_fabric_bench.mix, bench_mix);
+#endif
 		for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
 			struct audio_fabric_slot *s =
 				&g_audio_fabric.slot[i];
@@ -579,10 +726,22 @@ void audio_fabric_isr(void)
 
 			if (!s->live)
 				continue;
+#ifdef AUDIO_FABRIC_BENCH
+			bench_fill = fabric_bench_now();
+#endif
 			staged = fabric_slot_fill(s);
+#ifdef AUDIO_FABRIC_BENCH
+			fabric_bench_add(&g_fabric_bench.fill[i], bench_fill);
+#endif
 			s->period_staged[index] = staged;
 			if (staged != 0U) {
+#ifdef AUDIO_FABRIC_BENCH
+				bench_mix = fabric_bench_now();
+#endif
 				fabric_mix_add(g_fabric_stereo);
+#ifdef AUDIO_FABRIC_BENCH
+				fabric_bench_add(&g_fabric_bench.mix, bench_mix);
+#endif
 				committed = 1U;
 				s->staged_real = 1U;
 			} else if (!s->source.done &&
@@ -594,6 +753,9 @@ void audio_fabric_isr(void)
 					fabric_underrun_bump(s->underruns);
 			}
 		}
+#ifdef AUDIO_FABRIC_BENCH
+		bench_mix = fabric_bench_now();
+#endif
 		if (committed)
 			fabric_mix_commit(tx + g_audio_fabric.fill_offset);
 		else
@@ -606,6 +768,9 @@ void audio_fabric_isr(void)
 		Xil_DCacheFlushRange(
 			(INTPTR)(tx + g_audio_fabric.fill_offset),
 			AUDIO_FABRIC_PERIOD_BYTES);
+#ifdef AUDIO_FABRIC_BENCH
+		fabric_bench_add(&g_fabric_bench.mix, bench_mix);
+#endif
 		next_fill = audio_playback_frontier_after_fill(
 			g_audio_fabric.fill_offset, committed,
 			AUDIO_FABRIC_PERIOD_BYTES, AUDIO_FABRIC_RING_BYTES);
@@ -655,6 +820,9 @@ void audio_fabric_isr(void)
 			}
 		}
 	}
+#ifdef AUDIO_FABRIC_BENCH
+	fabric_bench_add(&g_fabric_bench.tick, bench_isr);
+#endif
 }
 
 int audio_fabric_producer_attach(uint32_t slot,
@@ -793,11 +961,17 @@ int audio_fabric_lease_begin(uint32_t slot, uint32_t identity,
 	/* Admission policy (R4/R5): slot 0 is the pump -- live exactly
 	 * while an SDK playback bind exists and never leaseable -- and
 	 * slot 2 stays firmware-reserved until the AHI/synthesis
-	 * follow-on claims it. Both are client errors, not exhaustion. */
+	 * follow-on claims it. Both are client errors, not exhaustion.
+	 * AUDIO_FABRIC_BENCH_3SLOT lifts only the slot 2 reservation so
+	 * the bench session can measure three producers (U5); the
+	 * compositor itself already walks all three slots. */
 	if (slot == AUDIO_FABRIC_SLOT_PUMP ||
-	    slot == AUDIO_FABRIC_SLOT_RESERVED ||
 	    slot >= AUDIO_FABRIC_SLOT_COUNT)
 		return AUDIO_FABRIC_LEASE_EBAD_SLOT;
+#ifndef AUDIO_FABRIC_BENCH_3SLOT
+	if (slot == AUDIO_FABRIC_SLOT_RESERVED)
+		return AUDIO_FABRIC_LEASE_EBAD_SLOT;
+#endif
 	/* R11: the lease gain is not a free-floating mixer scale -- it
 	 * composes against the enforced ceiling under the active scene
 	 * (audio_scene.c), exactly like an owner trim: a request above
@@ -914,9 +1088,12 @@ int audio_fabric_lease_release(uint32_t handle)
 	struct audio_fabric_lease *l;
 
 	if (s == NULL || slot == AUDIO_FABRIC_SLOT_PUMP ||
-	    slot == AUDIO_FABRIC_SLOT_RESERVED ||
 	    slot >= AUDIO_FABRIC_SLOT_COUNT)
 		return AUDIO_FABRIC_LEASE_EHANDLE;
+#ifndef AUDIO_FABRIC_BENCH_3SLOT
+	if (slot == AUDIO_FABRIC_SLOT_RESERVED)
+		return AUDIO_FABRIC_LEASE_EHANDLE;
+#endif
 	l = &s->lease;
 	if (l->ring == NULL) {
 		/* Idempotent surrender: BEGIN and RELEASE each bump the

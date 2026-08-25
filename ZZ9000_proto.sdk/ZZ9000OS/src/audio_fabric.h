@@ -274,4 +274,14 @@ void audio_fabric_host_set_lease_rings(uint8_t *slot1, uint8_t *slot2);
 void audio_fabric_host_set_tx_base(uint8_t *base);
 #endif
 
+#ifdef AUDIO_FABRIC_BENCH
+/*
+ * Instrument-build report (plan U5, docs/audio-fabric.md): call from
+ * the main loop every pass; it prints one aggregate block per second
+ * on the firmware console. Firmware-only -- defining this together
+ * with AUDIO_FABRIC_HOST_TEST is a compile error in audio_fabric.c.
+ */
+void audio_fabric_bench_poll(void);
+#endif
+
 #endif /* AUDIO_FABRIC_H */
