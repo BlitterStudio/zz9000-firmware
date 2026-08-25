@@ -64,6 +64,11 @@
  * session qualifies them (R12). */
 #define SDK_CAP_AUDIO_CONTROL          (1U << 25)
 #define SDK_CAP_AUDIO_METERING         (1U << 26)
+/* Audio fabric compositor (concurrent producer leases, opcodes
+ * 0x050f+). Append-only but deliberately NOT advertised in any
+ * capability word until the on-hardware verification session
+ * qualifies them, per the SDK_CAP_AUDIO_CONTROL (R12) discipline. */
+#define SDK_CAP_AUDIO_FABRIC           (1U << 27)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
@@ -138,6 +143,11 @@
  * SDK_CAP_AUDIO_CONTROL gated-advertising discipline: not reported in
  * the audio service flags until qualified. */
 #define SDK_SERVICE_FLAG_AUDIO_CONTROL (1U << 21)
+/* Fabric lease opcodes (0x050f+) are reserved; dispatch completes
+ * UNSUPPORTED. Follows the SDK_CAP_AUDIO_FABRIC gated-advertising
+ * discipline: not reported in the audio service flags until
+ * qualified. */
+#define SDK_SERVICE_FLAG_AUDIO_FABRIC (1U << 22)
 #define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
 #define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)
 #define SDK_SERVICE_FLAG_CODEC_GZIP             (1U << 18)
@@ -211,6 +221,16 @@
 #define SDK_OP_AUDIO_METER_READ        0x050cU
 #define SDK_OP_AUDIO_SCENE_SAVE        0x050dU
 #define SDK_OP_AUDIO_CONTROL_STATE_GET 0x050eU
+/* Audio fabric compositor lease plane (ABI reservation only): the
+ * payloads mirror the SDK ZZ9KAudio*Payload structs below
+ * byte-for-byte. Dispatch completes SDK_STATUS_UNSUPPORTED and
+ * nothing is advertised in any capability word or service flag until
+ * the compositor lands and the on-hardware verification session
+ * passes. */
+#define SDK_OP_AUDIO_LEASE_BEGIN       0x050fU
+#define SDK_OP_AUDIO_LEASE_SUBMIT      0x0510U
+#define SDK_OP_AUDIO_LEASE_RELEASE     0x0511U
+#define SDK_OP_AUDIO_FABRIC_STATE_GET  0x0512U
 
 #define SDK_OP_DECOMPRESS              0x0600U
 #define SDK_OP_DECOMPRESS_TEST         0x0601U
@@ -617,6 +637,121 @@ typedef char SDKAudioControlStateResultPayload_must_be_48_bytes[
 typedef char SDKAudioControlStateSaveStatus_must_be_at_offset_44[
 	(offsetof(struct SDKAudioControlStateResultPayload, save_status) == 44U) ?
 		1 : -1];
+
+/* Firmware-authoritative audio fabric lease plane vocabulary and
+ * payloads (opcodes 0x050f+). All payload fields big-endian, 48 bytes
+ * to match the inline mailbox entry size and the SDK ZZ9KAudio*
+ * Payload structs byte-for-byte. ABI RESERVATION ONLY: nothing here
+ * is advertised in any capability word or service flag until the
+ * compositor lands and passes the on-hardware verification session. */
+
+/* Per-slot status reported by SDK_OP_AUDIO_FABRIC_STATE_GET. */
+#define SDK_AUDIO_FABRIC_SLOT_FREE    0U
+#define SDK_AUDIO_FABRIC_SLOT_LEASED  1U
+#define SDK_AUDIO_FABRIC_SLOT_ACTIVE  2U
+
+/* Producer intent for one compositor slot. identity reuses the meter
+ * vocabulary (SDK_AUDIO_METER_IDENTITY_*); gain is a packed balance
+ * word in the 0..255 mixer scale (SDK_AUDIO_BALANCE_*). */
+struct SDKAudioLeaseBeginPayload {
+	uint8_t slot[4];
+	uint8_t identity[4];
+	uint8_t gain[4];
+	uint8_t flags[4];
+	uint8_t reserved[32];
+};
+
+/* lease is the opaque generation-tagged lease handle; generation
+ * echoes the tag embedded in it. Later LEASE_SUBMIT / LEASE_RELEASE
+ * calls present the handle exactly as granted. */
+struct SDKAudioLeaseBeginResultPayload {
+	uint8_t lease[4];
+	uint8_t slot[4];
+	uint8_t generation[4];
+	uint8_t flags[4];
+	uint8_t reserved[32];
+};
+
+/* Producer PCM delivery: one shared-buffer reference into the
+ * producer's staging buffer, mirroring how SDK_OP_AUDIO_STREAM_FEED
+ * references its compressed input. The compositor is the only writer
+ * to the TX ring; submitted bytes are mixed into the slot at the
+ * lease's gain. */
+struct SDKAudioLeaseSubmitPayload {
+	uint8_t lease[4];
+	uint8_t src_handle[4];
+	uint8_t src_offset[4];
+	uint8_t src_length[4];
+	uint8_t flags[4];
+	uint8_t reserved[28];
+};
+
+/* bytes_consumed is the staging length the compositor accepted; a
+ * bounded lease may accept less than requested and the producer
+ * resubmits the remainder. */
+struct SDKAudioLeaseSubmitResultPayload {
+	uint8_t lease[4];
+	uint8_t bytes_consumed[4];
+	uint8_t flags[4];
+	uint8_t reserved[36];
+};
+
+/* Surrender a lease; the compositor fades the slot out and returns it
+ * to SDK_AUDIO_FABRIC_SLOT_FREE. Idempotent for an already-released
+ * lease handle. */
+struct SDKAudioLeaseReleasePayload {
+	uint8_t lease[4];
+	uint8_t flags[4];
+	uint8_t reserved[40];
+};
+
+/* Request one slot's fabric state; slot selects the compositor slot
+ * to report. */
+struct SDKAudioFabricStateGetPayload {
+	uint8_t slot[4];
+	uint8_t flags[4];
+	uint8_t reserved[40];
+};
+
+/* One framed, non-tearing snapshot of one slot: all words of a read
+ * carry the same generation; a differing generation across reads
+ * means the snapshot tore and must be retried. state is a
+ * SDK_AUDIO_FABRIC_SLOT_* value; identity is the current producer
+ * (SDK_AUDIO_METER_IDENTITY_UNKNOWN while free); lease is the active
+ * handle or ZZ9K_INVALID_HANDLE-equivalent 0xffffffffU. cursor_write
+ * is the producer staging fill cursor and cursor_read the compositor
+ * consume cursor, both in staging bytes; underrun_count saturates,
+ * never wraps. Peak/clip telemetry is deliberately not reserved
+ * here; it joins as append-only words consuming the tail when the
+ * metering integration lands. */
+struct SDKAudioFabricStateResultPayload {
+	uint8_t slot[4];
+	uint8_t generation[4];
+	uint8_t slot_count[4];
+	uint8_t state[4];
+	uint8_t identity[4];
+	uint8_t lease[4];
+	uint8_t cursor_write[4];
+	uint8_t cursor_read[4];
+	uint8_t underrun_count[4];
+	uint8_t flags[4];
+	uint8_t reserved[8];
+};
+
+typedef char SDKAudioLeaseBeginPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioLeaseBeginPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioLeaseBeginResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioLeaseBeginResultPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioLeaseSubmitPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioLeaseSubmitPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioLeaseSubmitResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioLeaseSubmitResultPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioLeaseReleasePayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioLeaseReleasePayload) == 48U) ? 1 : -1];
+typedef char SDKAudioFabricStateGetPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioFabricStateGetPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioFabricStateResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioFabricStateResultPayload) == 48U) ? 1 : -1];
 
 /* Non-volatile big-endian word accessors shared by the control-plane
  * dispatch and any payload pack/unpack that reads plain buffers. */

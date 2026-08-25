@@ -4336,6 +4336,21 @@ static uint16_t handle_audio_control(
 	return SDK_STATUS_OK;
 }
 
+/*
+ * Audio fabric compositor lease opcodes (0x050f..0x0512, plan U1):
+ * reserved ABI surface only. The opcodes and payloads are frozen so
+ * host tooling can compile against them, but the compositor does not
+ * exist yet; every request completes SDK_STATUS_UNSUPPORTED exactly
+ * like an unknown opcode, and no capability word or service flag
+ * advertises the surface until it lands.
+ */
+static uint16_t handle_audio_fabric_reserved(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp)
+{
+	return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+}
+
 static uint16_t handle_audio_stream_begin(volatile struct SDKMailboxEntry *req,
                                           volatile struct SDKMailboxEntry *comp,
                                           uint16_t payload_len)
@@ -7610,6 +7625,11 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	case SDK_OP_AUDIO_SCENE_SAVE:
 	case SDK_OP_AUDIO_CONTROL_STATE_GET:
 		return handle_audio_control(req, comp, payload_len, opcode);
+	case SDK_OP_AUDIO_LEASE_BEGIN:
+	case SDK_OP_AUDIO_LEASE_SUBMIT:
+	case SDK_OP_AUDIO_LEASE_RELEASE:
+	case SDK_OP_AUDIO_FABRIC_STATE_GET:
+		return handle_audio_fabric_reserved(req, comp);
 	case SDK_OP_IMAGE_SESSION_BEGIN:
 		return handle_image_session_begin(req, comp, payload_len);
 	case SDK_OP_IMAGE_SESSION_FEED:
