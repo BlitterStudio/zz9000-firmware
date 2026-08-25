@@ -143,7 +143,6 @@ enum audio_fabric_ownership audio_fabric_ownership(void);
 /* Saturating per-slot underrun counter and the slot's attach epoch
  * (STATE_GET generation vocabulary; the epoch survives a detach). */
 uint32_t audio_fabric_slot_underruns(uint32_t slot);
-uint32_t audio_fabric_slot_epoch(uint32_t slot);
 
 /*
  * Lease plane (plan U3): generation-tagged producer leases over the

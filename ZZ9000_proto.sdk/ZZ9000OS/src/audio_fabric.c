@@ -148,6 +148,25 @@ static struct audio_fabric_slot *fabric_slot(uint32_t slot)
 	return &g_audio_fabric.slot[slot];
 }
 
+/* Admission policy (R4/R5): slot 0 is the pump -- live exactly while
+ * an SDK playback bind exists and never leaseable -- and slot 2 stays
+ * firmware-reserved until the AHI/synthesis follow-on claims it; both
+ * are client errors, not exhaustion. AUDIO_FABRIC_BENCH_3SLOT lifts
+ * only the slot 2 reservation so the bench session can measure three
+ * producers (U5); the compositor itself already walks all three
+ * slots. */
+static int fabric_slot_leaseable(uint32_t slot)
+{
+	if (slot == AUDIO_FABRIC_SLOT_PUMP ||
+	    slot >= AUDIO_FABRIC_SLOT_COUNT)
+		return 0;
+#ifndef AUDIO_FABRIC_BENCH_3SLOT
+	if (slot == AUDIO_FABRIC_SLOT_RESERVED)
+		return 0;
+#endif
+	return 1;
+}
+
 static int fabric_any_attached(void)
 {
 	uint32_t i;
@@ -368,7 +387,9 @@ static int fabric_lease_fill_source(uint32_t slot_index,
 	source->ring = l->ring;
 	source->capacity = l->capacity;
 	source->produced_bytes = l->produced;
-	source->staged_bytes = fabric_lease_read_cursor(&l->staged);
+	source->staged_bytes = l->staged; /* ISR-only writer; tearing
+	 * is impossible against this reader (see fabric_lease_read_cursor
+	 * for the cross-context reads that still need the retry). */
 	source->sample_rate = 48000U;
 	source->channels = 2U;
 	source->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
@@ -958,20 +979,9 @@ int audio_fabric_lease_begin(uint32_t slot, uint32_t identity,
 		grant->gain = 0U;
 		grant->bounded = 0U;
 	}
-	/* Admission policy (R4/R5): slot 0 is the pump -- live exactly
-	 * while an SDK playback bind exists and never leaseable -- and
-	 * slot 2 stays firmware-reserved until the AHI/synthesis
-	 * follow-on claims it. Both are client errors, not exhaustion.
-	 * AUDIO_FABRIC_BENCH_3SLOT lifts only the slot 2 reservation so
-	 * the bench session can measure three producers (U5); the
-	 * compositor itself already walks all three slots. */
-	if (slot == AUDIO_FABRIC_SLOT_PUMP ||
-	    slot >= AUDIO_FABRIC_SLOT_COUNT)
+	/* Admission policy: fabric_slot_leaseable above. */
+	if (!fabric_slot_leaseable(slot))
 		return AUDIO_FABRIC_LEASE_EBAD_SLOT;
-#ifndef AUDIO_FABRIC_BENCH_3SLOT
-	if (slot == AUDIO_FABRIC_SLOT_RESERVED)
-		return AUDIO_FABRIC_LEASE_EBAD_SLOT;
-#endif
 	/* R11: the lease gain is not a free-floating mixer scale -- it
 	 * composes against the enforced ceiling under the active scene
 	 * (audio_scene.c), exactly like an owner trim: a request above
@@ -1087,13 +1097,8 @@ int audio_fabric_lease_release(uint32_t handle)
 	uint32_t epoch = AUDIO_FABRIC_LEASE_HANDLE_EPOCH(handle);
 	struct audio_fabric_lease *l;
 
-	if (s == NULL || slot == AUDIO_FABRIC_SLOT_PUMP ||
-	    slot >= AUDIO_FABRIC_SLOT_COUNT)
+	if (s == NULL || !fabric_slot_leaseable(slot))
 		return AUDIO_FABRIC_LEASE_EHANDLE;
-#ifndef AUDIO_FABRIC_BENCH_3SLOT
-	if (slot == AUDIO_FABRIC_SLOT_RESERVED)
-		return AUDIO_FABRIC_LEASE_EHANDLE;
-#endif
 	l = &s->lease;
 	if (l->ring == NULL) {
 		/* Idempotent surrender: BEGIN and RELEASE each bump the
@@ -1217,9 +1222,3 @@ uint32_t audio_fabric_slot_underruns(uint32_t slot)
 	return s != NULL ? s->underruns : 0U;
 }
 
-uint32_t audio_fabric_slot_epoch(uint32_t slot)
-{
-	struct audio_fabric_slot *s = fabric_slot(slot);
-
-	return s != NULL ? s->epoch : 0U;
-}
