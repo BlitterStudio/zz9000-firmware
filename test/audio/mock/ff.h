@@ -1,11 +1,12 @@
 /*
- * Minimal host-side FatFs mock for the zz_config unit tests.
+ * Minimal host-side FatFs mock for the audio config tests.
  * Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Declares just the slice of the FatFs API that zz_config.c uses,
- * backed by a single injectable in-memory file (see config_test.c).
- * FRESULT order matches upstream FatFs.
+ * Declares the slice of the FatFs API that zz_config.c uses for both
+ * the loader (read) and the U5 atomic save (write + rename), backed by
+ * an in-memory single-volume filesystem with per-call failure
+ * injection (see fatfs_mock.c). FRESULT order matches upstream FatFs.
  */
 #ifndef FF_H
 #define FF_H
@@ -33,27 +34,28 @@ typedef enum {
 } FRESULT;
 
 typedef struct { int dummy; } FATFS;
-typedef struct { size_t pos; } FIL;
+typedef struct { int file; size_t pos; } FIL;
 
-#define FA_READ 0x01u
-#define FA_WRITE 0x02u
+#define FA_READ         0x01u
+#define FA_WRITE        0x02u
 #define FA_CREATE_ALWAYS 0x08u
 
 FRESULT f_mount(FATFS *fs, const char *path, unsigned char opt);
 FRESULT f_open(FIL *fp, const char *path, unsigned char mode);
 FRESULT f_read(FIL *fp, void *buff, UINT btr, UINT *br);
-FRESULT f_close(FIL *fp);
-
-/* Write side (zz_config.c's save path); these tests never call it,
- * but the definitions in config_test.c keep the link complete. */
 FRESULT f_write(FIL *fp, const void *buff, UINT btw, UINT *bw);
 FRESULT f_sync(FIL *fp);
+FRESULT f_close(FIL *fp);
 FRESULT f_unlink(const char *path);
 FRESULT f_rename(const char *path_old, const char *path_new);
 
 /* test hooks */
-void mock_set_file(const char *contents);   /* NULL = no ZZ9000.CFG */
-void mock_set_mount_result(FRESULT fr);
-int  mock_mount_balance(void);              /* mounts minus unmounts */
+void mock_fs_reset(void);
+void mock_fs_set_file(const char *path, const char *contents);
+const char *mock_fs_file(const char *path); /* NULL when absent */
+int mock_fs_file_len(const char *path);     /* -1 when absent */
+void mock_fail_write(int nth);              /* f_write fails on nth call */
+void mock_fail_rename(int nth);             /* f_rename fails on nth call */
+int mock_write_calls(void);                 /* f_write calls since reset */
 
 #endif /* FF_H */

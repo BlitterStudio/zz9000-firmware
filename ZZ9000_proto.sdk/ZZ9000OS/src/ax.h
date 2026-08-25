@@ -5,11 +5,12 @@
 #include <stdint.h>
 
 /*
- * Immutable identity for the first production candidate built from the
- * hardware-selected TDM8 slot-0/1 transport. This is a bench identity,
- * not the firmware or coordinated release version.
+ * Immutable identity for the production DSP image using the
+ * hardware-selected TDM8 slot-0/1 transport. Increment whenever the
+ * compiled signal graph changes; this is a bench identity, not the
+ * firmware or coordinated release version.
  */
-#define ZZ_AUDIO_CAPTURE_CANDIDATE_BUILD_ID 0xa204U
+#define ZZ_AUDIO_CAPTURE_CANDIDATE_BUILD_ID 0xa205U
 #define ZZ_AUDIO_CODEC_SERIAL_TDM8_SLOT01   0x0c22U
 #define ZZ_AUDIO_CODEC_MP_CONTROL           0x444444U
 #define ZZ_AUDIO_CODEC_CORE_LOADING         0x0018U
@@ -29,6 +30,15 @@ static inline int audio_adau_readback_matches(const uint8_t *expected,
 		}
 	}
 	return 1;
+}
+
+/* Incremental setters use 0 while more substeps remain, 1 when the
+ * latch write completed, and -1 on I2C failure. Keep the transport
+ * status conversion shared with host stubs so tests cannot model the
+ * opposite completion semantics. */
+static inline int audio_adau_safeload_latch_result(int write_status)
+{
+	return (write_status == 0) ? 1 : -1;
 }
 
 enum {
@@ -101,5 +111,13 @@ int audio_adau_set_prefactor(int pre);
 /* vol range: 0 = muted .. 50 = -6 dB .. 100 = 0 dB
  * pan range: 0 = left .. 50 = center .. 100 = right */
 int audio_adau_set_vol_pan(int vol, int pan);
+int audio_adau_set_vol_pan_side(int side, int vol, int pan);
+int audio_adau_set_mixer_leg(int leg, int value);
+int audio_adau_eq_substep(int band, int gain, int substep);
+int audio_adau_safe_param_substep(uint16_t address,
+	const uint8_t value[4], int substep);
+int audio_adau_safe_mixer_leg(int leg, int value, int substep);
+int audio_adau_safe_vol_pan_side(int side, int vol, int pan, int substep);
+int audio_adau_safe_prefactor(int pre, int substep);
 
 #endif

@@ -21,14 +21,14 @@
 	} while (0)
 
 static const char normal_project_sha256[] =
-	"7aab83f544e8721554dd290ab5562a216"
-	"ac28d7a9d8af353ca115a8a1cec7fac";
+	"df62c9f36c1675bc959c94b0cbfb546d"
+	"f71921a482df201d361889d517ba2952";
 static const char normal_program_sha256[] =
-	"9b58c07ab19d13665cb4610bf498059dc"
-	"993ca3499b96d62349dd8e84c31adb0";
+	"bda1406175755779e630fec41863a1897"
+	"509199c9bd42e2ae51620dc75e1a80c";
 static const char normal_parameter_sha256[] =
-	"0fb714aa995d9223f007328b9b98074d"
-	"bcd92b48c0e4fcebbd2738aae15f6ef0";
+	"979c11315dfc59b85d86fa82cd88f34"
+	"597f1df49f39ee14ff18b9acb4769d4f0";
 
 static int digest_matches_hex(const uint8_t *data, size_t length,
 		const char expected[65])
@@ -95,7 +95,7 @@ static void test_normal_image_identity(void)
 
 static void test_production_transport_contract(void)
 {
-	CHECK(ZZ_AUDIO_CAPTURE_CANDIDATE_BUILD_ID == 0xa204U);
+	CHECK(ZZ_AUDIO_CAPTURE_CANDIDATE_BUILD_ID == 0xa205U);
 	CHECK(ZZ_AUDIO_CODEC_SERIAL_TDM8_SLOT01 == 0x0c22U);
 	CHECK(ZZ_AUDIO_CODEC_MP_CONTROL == 0x444444U);
 	CHECK(ZZ_AUDIO_CODEC_CORE_LOADING == 0x0018U);
@@ -105,15 +105,33 @@ static void test_production_transport_contract(void)
 
 static void test_parameter_map(void)
 {
-	CHECK(MOD_GENFILTER1_ALG0_STAGE0_B0_ADDR == 0U);
-	CHECK(MOD_GENFILTER1_ALG0_STAGE0_A2_ADDR == 4U);
-	CHECK(MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_ADDR == 5U);
-	CHECK(MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR == 6U);
-	CHECK(MOD_EQUALIZER_ALG0_STAGE0_B0_ADDR == 7U);
-	CHECK(MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR == 57U);
-	CHECK(MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR == 58U);
-	CHECK(MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR == 59U);
-	CHECK(MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR == 60U);
+	CHECK(MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR == 0U);
+	CHECK(MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR == 1U);
+	CHECK(MOD_GENFILTER1_ALG0_STAGE0_B0_ADDR == 2U);
+	CHECK(MOD_GENFILTER1_ALG0_STAGE0_A2_ADDR == 6U);
+	CHECK(MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_ADDR == 7U);
+	CHECK(MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR == 8U);
+	CHECK(MOD_EQUALIZER_ALG0_STAGE0_B0_ADDR == 9U);
+	CHECK(MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR == 59U);
+	CHECK(MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR == 60U);
+}
+
+/*
+ * SigmaStudio assigns parameters in compiled signal-flow order. Pinning
+ * the mixer before every scene block prevents the source graph from
+ * regressing to the old AX-only chain where Paula joined after volume.
+ * The image hashes above pin the complete compiled topology.
+ */
+static void test_master_chain_parameter_order(void)
+{
+	CHECK(MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR <
+			MOD_GENFILTER1_ALG0_STAGE0_B0_ADDR);
+	CHECK(MOD_GENFILTER1_ALG0_STAGE0_A2_ADDR <
+			MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_ADDR);
+	CHECK(MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR <
+			MOD_EQUALIZER_ALG0_STAGE0_B0_ADDR);
+	CHECK(MOD_EQUALIZER_ALG0_STAGE9_A1_ADDR <
+			MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR);
 }
 
 static int gain_matches(double actual, double expected)
@@ -155,6 +173,7 @@ int main(void)
 	test_production_transport_contract();
 	test_parameter_map();
 	test_prefactor_gain_contract();
+	test_master_chain_parameter_order();
 	test_readback_comparison();
 	puts("audio production profile tests passed");
 	return 0;

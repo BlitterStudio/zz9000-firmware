@@ -17,6 +17,7 @@
 #include "ax.h"
 #include "audio_capture.h"
 #include "audio_convert.h"
+#include "audio_scene.h"
 #include "audio_playback_rate.h"
 #include "audio_dsp_gain.h"
 #include "memorymap.h"
@@ -58,6 +59,13 @@ static volatile uint8_t audio_codec_is_present = 0;
 static volatile uint8_t audio_capture_ready = 0;
 static volatile uint8_t audio_rx_last_completed_period =
     AUDIO_NUM_PERIODS - 1U;
+
+/* U3 metering: register-fed (legacy AHI) producer heartbeat -- one
+ * audio_swab() call per refilled TX period -- and the last TX period
+ * whose peak was scanned (-1: not tracking, e.g. before the first
+ * init or after a buffer reassignment). */
+static volatile uint32_t audio_tx_producer_seq = 0;
+static int8_t audio_tx_meter_last_period = -1;
 
 int adau_write16(u8 i2c_addr, u16 addr, u16 value) {
 	XIicPs* iic = &Iic2;
@@ -793,6 +801,8 @@ int isra_count = 0;
 
 // TX-fill half of the SDK playback pump (sdk_mailbox.c); ISR-safe.
 extern void sdk_mailbox_audio_playback_pump_isr(void);
+// Nonzero while a pump session owns the formatter TX (sdk_mailbox.c).
+extern int sdk_mailbox_audio_playback_active(void);
 
 // audio formatter interrupt, triggered whenever a period is completed
 void isr_audio(void *dummy) {
@@ -825,6 +835,50 @@ void isr_audio(void *dummy) {
 	// network load previously let the DMA overrun the fill frontier
 	// and glitch MP3 playback. No-op when no session is bound.
 	sdk_mailbox_audio_playback_pump_isr();
+
+	/* U3 metering: bounded per-period peak scan (960 frames) of
+	 * every TX period completed since the previous IRQ -- normally
+	 * exactly one, bounded by the ring when IRQs were delayed. The
+	 * scan runs over the buffer the formatter DMA was initialized
+	 * with, so it measures what actually played regardless of
+	 * producer (legacy window writes or pump fills). Skipped while
+	 * no producer owns the output. The ISR cost of this loop must
+	 * be measured on hardware before the design is final (plan
+	 * risk; fallback is producer-side peak accumulation). */
+	if (audio_inited_tx_buffer != NULL &&
+	    (audio_legacy_output_active() ||
+	     sdk_mailbox_audio_playback_active())) {
+		if (audio_tx_meter_last_period < 0) {
+			audio_tx_meter_last_period = (int8_t)completed_period;
+		} else {
+			uint32_t distance = zz_audio_capture_period_distance(
+			    completed_period,
+			    (uint8_t)audio_tx_meter_last_period);
+
+			while (distance-- > 0U) {
+				audio_tx_meter_last_period = (int8_t)(
+				    (audio_tx_meter_last_period + 1) %
+				    AUDIO_NUM_PERIODS);
+				audio_scene_meter_output_period(
+				    (const int16_t *)
+				    (audio_inited_tx_buffer +
+				     (uint32_t)audio_tx_meter_last_period *
+				     AUDIO_BYTES_PER_PERIOD),
+				    AUDIO_BYTES_PER_PERIOD / 4U);
+			}
+		}
+	} else {
+		audio_tx_meter_last_period = -1;
+	}
+
+	/* Register-fed (legacy AHI) playback underruns: the producer
+	 * advances audio_tx_producer_seq once per refilled period
+	 * (audio_swab); a completed period with an unchanged sequence
+	 * played unfilled audio. */
+	if (audio_legacy_output_active() &&
+	    !sdk_mailbox_audio_playback_active())
+		audio_scene_meter_output_producer_tick(
+			audio_tx_producer_seq);
 
 	if (audio_interrupt_mask & ZZ_AUDIO_CONFIG_PLAY) {
 		amiga_interrupt_set(AMIGA_INTERRUPT_AUDIO);
@@ -860,8 +914,13 @@ void isr_audio_rx(void *dummy) {
 	/* IOC means at least one period completed. Equal cursors mean the CPU
 	 * was delayed for at least one full ring. Keep only seven periods: the
 	 * eighth slot is already the formatter's active write target. */
-	if (completed_count == 0U)
+	if (completed_count == 0U) {
 		completed_count = ZZ_AUDIO_CAPTURE_RESIDENT_PERIODS;
+		/* A full ring elapsed before the CPU acknowledged: the
+		 * oldest periods were overwritten before publication --
+		 * one capture overrun (U3 metering). */
+		audio_scene_meter_capture_overrun();
+	}
 
 	if (israrx_count++>1000) {
 		israrx_count = 0;
@@ -890,6 +949,11 @@ void isr_audio_rx(void *dummy) {
 			                          AUDIO_BYTES_PER_PERIOD);
 			output_frames = zz_audio_capture_convert(
 			    period, audio_capture_frames);
+			/* U3 metering: bounded peak/clip scan of the
+			 * published (converted S16BE) period, cache-warm
+			 * before the write-back flush. */
+			audio_scene_meter_capture_period(
+			    period, output_frames);
 			Xil_DCacheFlushRange((INTPTR)period, output_frames * 4U);
 			__asm__ __volatile__("dsb" ::: "memory");
 
@@ -938,8 +1002,14 @@ void audio_set_interrupt_mask(uint16_t mask) {
 		amiga_interrupt_clear(AMIGA_INTERRUPT_AUDIO);
 	}
 
-	if ((old_mask ^ mask) & ZZ_AUDIO_CONFIG_PLAY)
+	if ((old_mask ^ mask) & ZZ_AUDIO_CONFIG_PLAY) {
 		audio_silence();
+		/* Re-arm the producer-stagnation underrun detector for
+		 * the playback transition (U3 metering): the producer's
+		 * first refill after this enables stagnation counting. */
+		audio_scene_meter_output_producer_arm(
+			audio_tx_producer_seq);
+	}
 }
 
 void audio_set_capture_frames(uint16_t frames) {
@@ -984,6 +1054,10 @@ int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap) {
 	int audio_buffer_collision = 0;
 	uint16_t* data = (uint16_t*)(audio_tx_buffer + offset);
 	uint32_t audio_freq = zz_audio_playback_rate(audio_buf_samples);
+
+	/* U3 metering: the register-fed producer's heartbeat -- one
+	 * call per refilled TX period. */
+	audio_tx_producer_seq++;
 
 	//printf("[audio:%d] play: %d +%lu\n", byteswap, audio_freq, offset);
 
@@ -1067,6 +1141,10 @@ void audio_set_tx_buffer(uint8_t* addr) {
 	printf("[audio] set tx buffer: %p\n", addr);
 	audio_tx_buffer = addr;
 	reset_resampling();
+	/* U3 metering: a buffer reassignment breaks TX period
+	 * continuity; resume peak scanning at the next completed
+	 * period instead of scanning stale ring contents. */
+	audio_tx_meter_last_period = -1;
 }
 
 void audio_set_rx_buffer(uint8_t* addr) {
@@ -1196,6 +1274,229 @@ int audio_adau_set_mixer_vol(int vol1, int vol2) {
 	return 0;
 }
 
+double eq_omega(double fs, double f0);
+
+/* Resumable single-parameter safeload (click-free runtime writes):
+ * the ADAU1701 appnote requires safeload for parameter changes while
+ * the core is streaming; a direct param-RAM write can collide with a
+ * sample boundary and pop even when the parameter is outside the
+ * audible path. Substeps: 0 = stage value, 1 = stage target address,
+ * 2 = latch. Returns 0 to continue, 1 complete, -1 failure. */
+static struct {
+	uint8_t value[ADAU_PARAMETER_WORD_BYTES];
+	uint16_t address;
+	int valid;
+} safe1_ctx;
+
+int audio_adau_safe_param_substep(uint16_t address,
+	const uint8_t value[ADAU_PARAMETER_WORD_BYTES], int substep)
+{
+	uint8_t buf[5];
+
+	if (substep < 0 || substep > 2)
+		return -1;
+	if (substep == 0) {
+		safe1_ctx.address = address;
+		memcpy(safe1_ctx.value, value, ADAU_PARAMETER_WORD_BYTES);
+		safe1_ctx.valid = 1;
+		buf[0] = 0;
+		memcpy(&buf[1], safe1_ctx.value,
+			ADAU_PARAMETER_WORD_BYTES);
+		return (adau_write40(0x34, 0x0810, buf) != 0) ? -1 : 0;
+	}
+	if (!safe1_ctx.valid)
+		return -1;
+	if (substep == 1)
+		return (adau_write16(0x34, 0x0815,
+				safe1_ctx.address) != 0) ? -1 : 0;
+	/* substep 2: latch */
+	return audio_adau_safeload_latch_result(
+		adau_write16(0x34, 0x081C, 0x003C));
+}
+
+/* Safeload equivalents of the single-param setters used by the
+ * differential commit path; each computes then drives the same
+ * value the direct setter would write, via safe_param_substep. */
+int audio_adau_safe_mixer_leg(int leg, int value, int substep)
+{
+	double g = ((double)value) / 127.0;
+	uint8_t buf[ADAU_PARAMETER_WORD_BYTES];
+
+	adau_to_5_23(g, buf);
+	return audio_adau_safe_param_substep(
+		(leg == 0) ? MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR
+			   : MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR,
+		buf, substep);
+}
+
+int audio_adau_safe_vol_pan_side(int side, int vol, int pan, int substep)
+{
+	LONG v = vol;
+	double g;
+	uint8_t buf[ADAU_PARAMETER_WORD_BYTES];
+
+	if (side == 0) {
+		if (pan > 50) v -= 2 * (pan - 50);
+	} else {
+		if (pan < 50) v -= 2 * (50 - pan);
+	}
+	if (v > 100) v = 100;
+	if (v < 0) v = 0;
+	g = .01f * (double)v;
+	adau_to_5_23(g, buf);
+	return audio_adau_safe_param_substep(
+		(side == 0) ? MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR
+			    : MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR,
+		buf, substep);
+}
+
+int audio_adau_safe_prefactor(int pre, int substep)
+{
+	/* The prefactor writes two parameter words (ALG0/ALG1):
+	 * substeps 0/1 stage slot 0 value/address, 2/3 stage slot 1,
+	 * and substep 4 latches both. */
+	static struct {
+		uint8_t buf[ADAU_PARAMETER_WORD_BYTES];
+	} ctx;
+	uint8_t buf5[5];
+
+	if (substep == 0) {
+		adau_to_5_23(audio_adau_prefactor_gain(pre), ctx.buf);
+		buf5[0] = 0;
+		memcpy(&buf5[1], ctx.buf, ADAU_PARAMETER_WORD_BYTES);
+		return (adau_write40(0x34, 0x0810, buf5) != 0) ? -1 : 0;
+	}
+	if (substep == 1)
+		return (adau_write16(0x34, 0x0815,
+			MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_ADDR) != 0)
+			? -1 : 0;
+	if (substep == 2) {
+		buf5[0] = 0;
+		memcpy(&buf5[1], ctx.buf, ADAU_PARAMETER_WORD_BYTES);
+		return (adau_write40(0x34, 0x0811, buf5) != 0) ? -1 : 0;
+	}
+	if (substep == 3)
+		return (adau_write16(0x34, 0x0816,
+			MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR) != 0)
+			? -1 : 0;
+	if (substep == 4)
+		return audio_adau_safeload_latch_result(
+			adau_write16(0x34, 0x081C, 0x003C));
+	return -1;
+}
+
+double eq_alpha(double fs, double f0);
+
+/* Resumable EQ safeload: the commit machine drives one sub-step per
+ * service-loop pass (~1ms I2C) instead of the ~11ms monolithic
+ * sequence, so Zorro per-period service never starves during an EQ
+ * drag. Safeload atomicity is preserved: coefficients live in the
+ * safeload registers until the latch, so the DSP never applies a
+ * partial biquad. The caller sequences: EQ_SUB_COEF_0..4 (stage each
+ * coefficient + its target address), EQ_SUB_LATCH, EQ_SUB_VERIFY_0..4.
+ * Returns 0 to continue, 1 = sequence complete, -1 = hard failure. */
+int audio_adau_eq_substep(int band, int gain, int substep)
+{
+	static const double BandFreqs[10] = {
+		31.25, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0,
+		4000.0, 8000.0, 16000.0
+	};
+	static struct {
+		int band;
+		int gain;
+		uint8_t expected[5][ADAU_PARAMETER_WORD_BYTES];
+		uint16_t addresses[5];
+		int valid;
+	} eq_ctx;
+
+	double dBBoost, A, fs, f0, omega, alpha, a0, a1, a2, b0, b1, b2;
+	double coefficients[5];
+	uint8_t buf[5];
+	uint8_t readback[ADAU_PARAMETER_WORD_BYTES];
+	int index;
+
+	if (band < 0 || band > 9)
+		return -1;
+	if (!eq_ctx.valid || eq_ctx.band != band || eq_ctx.gain != gain) {
+		/* (Re)compute the biquad for this band/gain. */
+		dBBoost = ((float)gain - 50.0f) * 12.0 / 50.0;
+		A = pow(10.0, dBBoost / 40.0);
+		fs = 48000.0f;
+		f0 = BandFreqs[band];
+		omega = eq_omega(fs, f0);
+		alpha = eq_alpha(fs, f0);
+		a0 = 1.0 + alpha / A;
+		a1 = -2.0 * cos(omega);
+		a2 = 1.0 - alpha / A;
+		b0 = (1 + alpha * A);
+		b1 = -(2.0 * cos(omega));
+		b2 = (1 - alpha * A);
+		a1 /= a0; a2 /= a0; b0 /= a0; b1 /= a0; b2 /= a0;
+		a1 = -a1; a2 = -a2;
+		coefficients[0] = b0; coefficients[1] = b1;
+		coefficients[2] = b2; coefficients[3] = a1;
+		coefficients[4] = a2;
+		eq_ctx.addresses[0] =
+			MOD_EQUALIZER_ALG0_STAGE0_B0_ADDR + band * 5;
+		eq_ctx.addresses[1] =
+			MOD_EQUALIZER_ALG0_STAGE0_B1_ADDR + band * 5;
+		eq_ctx.addresses[2] =
+			MOD_EQUALIZER_ALG0_STAGE0_B2_ADDR + band * 5;
+		eq_ctx.addresses[3] =
+			MOD_EQUALIZER_ALG0_STAGE0_A0_ADDR + band * 5;
+		eq_ctx.addresses[4] =
+			MOD_EQUALIZER_ALG0_STAGE0_A1_ADDR + band * 5;
+		for (index = 0; index < 5; ++index)
+			adau_to_5_23(coefficients[index],
+				eq_ctx.expected[index]);
+		eq_ctx.band = band;
+		eq_ctx.gain = gain;
+		eq_ctx.valid = 1;
+	}
+
+	if (substep >= 0 && substep < 5) {
+		/* Stage coefficient substep + its target address. */
+		buf[0] = 0;
+		memcpy(&buf[1], eq_ctx.expected[substep],
+			ADAU_PARAMETER_WORD_BYTES);
+		if (adau_write40(0x34, 0x0810 + substep, buf) != 0 ||
+				adau_write16(0x34, 0x0815 + substep,
+						eq_ctx.addresses[substep]) != 0)
+			return -1;
+		return 0;
+	}
+	if (substep == 5) {
+		/* Latch. */
+		if (adau_write16(0x34, 0x081C, 0x003C) != 0)
+			return -1;
+		return 0;
+	}
+	if (substep >= 6 && substep < 11) {
+		/* Verify (with the post-latch settle already elapsed). */
+		index = substep - 6;
+		if (adau_read32(0x34, eq_ctx.addresses[index],
+				readback) != 0 ||
+				!audio_adau_readback_matches(
+					eq_ctx.expected[index], readback,
+					ADAU_PARAMETER_WORD_BYTES))
+			return -1;
+		return (substep == 10) ? 1 : 0;
+	}
+	eq_ctx.valid = 0;
+	return -1;
+}
+
+int audio_adau_set_mixer_leg(int leg, int value) {
+	double g = ((double)value)/127.0;
+	uint8_t buf[4];
+
+	adau_to_5_23(g, buf);
+	return audio_adau_write_parameter(
+		(leg == 0) ? MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR
+			   : MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR,
+		buf);
+}
+
 int audio_adau_set_prefactor(int pre) {
 	double p = audio_adau_prefactor_gain(pre);
 
@@ -1239,6 +1540,30 @@ int audio_adau_set_vol_pan(int vol, int pan) {
 		return -1;
 	}
 	return 0;
+}
+
+/* Per-side variants for the differential commit path: one verified
+ * parameter write each, so a live edit step blocks the service loop
+ * for half the time of the paired setter. */
+int audio_adau_set_vol_pan_side(int side, int vol, int pan) {
+	LONG v;
+	double g;
+	uint8_t buf[4];
+
+	v = vol;
+	if (side == 0) {
+		if (pan > 50) v -= 2 * (pan - 50);
+	} else {
+		if (pan < 50) v -= 2 * (50 - pan);
+	}
+	if (v > 100) v = 100;
+	if (v < 0) v = 0;
+	g = .01f * (double)v;
+	adau_to_5_23(g, buf);
+	return audio_adau_write_parameter(
+		(side == 0) ? MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR
+			    : MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR,
+		buf);
 }
 
 double eq_omega(double fs, double f0) {

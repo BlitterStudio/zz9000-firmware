@@ -49,6 +49,12 @@ enum zz_config_key {
 	ZZ_CONFIG_KEY_VIDEOCAP_SHRES  = 13, /* 0=filter 1=full */
 	ZZ_CONFIG_KEY_VIDEOCAP_CROP_H = 14, /* 28 MHz samples */
 	ZZ_CONFIG_KEY_VIDEOCAP_CROP_V = 15, /* captured lines */
+	/* 1 when the loaded file exceeded the 4 KiB parse budget, so keys
+	 * past the first ZZ_CONFIG_MAX_SIZE-1 bytes were ignored (the
+	 * audio block is written last, so it is the first casualty).
+	 * Slots from 16 up are the audio control plane (plan U5, KTD4);
+	 * slot 10 above stays permanently reserved. */
+	ZZ_CONFIG_KEY_AUDIO_TRUNCATED = 16,
 	ZZ_CONFIG_KEY_NUM
 };
 
@@ -89,19 +95,47 @@ struct zz_config {
 
 	uint8_t mac_present;
 	uint8_t mac[6];
-
 	uint8_t hdf_present;
 	char hdf_path[ZZ_CONFIG_HDF_NAME_MAX + 4]; /* "0:/" + name + NUL */
 
 	uint8_t offscreen_bitmaps_present;
 	uint16_t offscreen_bitmaps;     /* 0-1, informational (drivers query it) */
 
-
 	uint8_t video_overlay_present;
 	uint16_t video_overlay;         /* 0-1, informational (drivers query it) */
+
+	/* Audio control-plane keys, parsed here and folded into the scene
+	 * module at boot. Absent/out-of-range keys keep built-in defaults.
+	 * audio_ceiling_paula/audio_ceiling_ax are per-card measured clean
+	 * ceilings (1..4095). EQ pairs pack hi*128+lo, scene out packs
+	 * prefactor*128+volume, and baseline packs paula<<8|ax.
+	 * audio_scene_mask bit N is the presence of key field N: bits
+	 * 0..7 are lpf/eq01..eq89/out/pan and bits 8..15 the name chunks
+	 * nm1..nm8 (each packs two ASCII label chars as c1*256+c2, 0 =
+	 * terminator). */
+#define ZZ_CFG_AUDIO_SCENES 8
+#define ZZ_CFG_AUDIO_NAME_CHUNKS 8
+
+	uint8_t audio_active_present;
+#define ZZ_CFG_AUDIO_CEILING_MIN 1
+#define ZZ_CFG_AUDIO_CEILING_MAX 4095
+	uint16_t audio_active;          /* 0..7 */
+	uint8_t audio_baseline_present;
+	uint16_t audio_baseline;        /* paula<<8 | ax, legs 0..255 */
+	uint8_t audio_ceiling_paula_present;
+	uint16_t audio_ceiling_paula;   /* measured clean ceiling, 1..4095 */
+	uint8_t audio_ceiling_ax_present;
+	uint16_t audio_ceiling_ax;      /* measured clean ceiling, 1..4095 */
+	uint16_t audio_scene_mask[ZZ_CFG_AUDIO_SCENES];  /* bit per key */
+	uint16_t audio_scene_lpf[ZZ_CFG_AUDIO_SCENES];   /* 1..23900 Hz */
+	uint16_t audio_scene_eq[ZZ_CFG_AUDIO_SCENES][5]; /* band pairs */
+	uint16_t audio_scene_out[ZZ_CFG_AUDIO_SCENES];   /* pref*128+vol */
+	uint16_t audio_scene_pan[ZZ_CFG_AUDIO_SCENES];   /* 0..100 */
+	uint16_t audio_scene_nm[ZZ_CFG_AUDIO_SCENES][ZZ_CFG_AUDIO_NAME_CHUNKS];
+	                                /* label chunks c1*256+c2 */
+	uint8_t truncated;              /* file exceeded the parse budget */
 };
 
-/* Status codes for the REG_ZZ_CONFIG_FILE raw-read command. */
 enum zz_config_file_status {
 	ZZ_CONFIG_FILE_OK       = 0,
 	ZZ_CONFIG_FILE_NO_FILE  = 1,
@@ -135,5 +169,54 @@ const struct zz_config* zz_config_get(void);
  * the key was given in the config file (for ZZ_CONFIG_KEY_LOADED,
  * whether the file was loaded). Unknown keys read as 0/absent. */
 uint16_t zz_config_query(uint16_t key, uint16_t *present);
+
+/* Regenerate the non-audio keys of ZZ9000.CFG from parsed state (the
+ * U5 writer content policy: present keys only, the atomic
+ * videocap_profile form, comments not preserved). Appends a
+ * NUL-terminated text at buf[off] and returns the new length, or -1
+ * when it does not fit. */
+int zz_config_emit_present_keys(char *buf, unsigned size, int off);
+
+
+/* ---- resumable writer steps (the non-blocking save machine) ---- */
+
+/* The individual operations of the save above. Each zz_config_save_op()
+ * call performs AT MOST ONE FatFs call, so a caller-owned state machine
+ * (audio_scene.c's save machine) can interleave SD traffic with its
+ * service loop; the FIL handle and the write cursor live here. */
+enum zz_config_save_op {
+	ZZ_CFG_SAVE_RECOVER_BAK = 0, /* restore an interrupted prior save */
+	ZZ_CFG_SAVE_UNLINK_TEMP,     /* drop a stale ZZCFG.TMP */
+	ZZ_CFG_SAVE_OPEN,            /* create ZZCFG.TMP */
+	ZZ_CFG_SAVE_WRITE,           /* one <=512-byte chunk of the text */
+	ZZ_CFG_SAVE_SYNC,
+	ZZ_CFG_SAVE_CLOSE,
+	ZZ_CFG_SAVE_UNLINK_BAK,      /* drop a stale ZZ9000.BAK */
+	ZZ_CFG_SAVE_RENAME_BAK,      /* keep the original as ZZ9000.BAK */
+	ZZ_CFG_SAVE_RENAME_LIVE,     /* commit: temp -> ZZ9000.CFG */
+	ZZ_CFG_SAVE_RESTORE_BAK      /* failure path: ZZ9000.BAK back */
+};
+
+/* Stage `text` for a resumable save; the buffer must stay valid until
+ * the sequence ends (zz_config_save_end). Returns 0, or -1 when a
+ * sequence is already staged or the length is out of range. */
+int zz_config_save_begin(const char *text, unsigned len);
+
+/* Perform one operation of a begun sequence. Returns 1 when the
+ * operation completed (for ZZ_CFG_SAVE_WRITE: the whole text is
+ * written), 0 when WRITE has more chunks queued, and -1 on a FatFs
+ * failure (same diagnostics as zz_config_save_file; the original is
+ * never touched, the partial temp stays for the reset hook). */
+int zz_config_save_op(enum zz_config_save_op op);
+
+/* End a resumable sequence, settled or abandoned. Closes an open temp
+ * handle before releasing the staged text. Safe to call when none is
+ * active. */
+void zz_config_save_end(void);
+
+/* Amiga-reset hook, the CFG counterpart of fw_update_reset(): close an
+ * interrupted writer, restore ZZ9000.BAK when live was already moved
+ * aside, then drop the abandoned temp snapshot. */
+void zz_config_save_reset(void);
 
 #endif

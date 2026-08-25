@@ -9,7 +9,7 @@ TARGET := $(BUILD_DIR)/config_test
 CPPFLAGS += -I$(MOCK_DIR) -I$(SRC_DIR)
 
 SOURCES := config_test.c $(SRC_DIR)/zz_config.c
-DEPS := $(MOCK_DIR)/ff.h $(SRC_DIR)/zz_config.h $(SRC_DIR)/zz_video_modes.h
+DEPS := $(MOCK_DIR)/ff.h $(MOCK_DIR)/xil_cache.h $(SRC_DIR)/zz_config.h $(SRC_DIR)/zz_video_modes.h
 
 .PHONY: test clean
 

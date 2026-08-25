@@ -9,7 +9,9 @@
 #ifndef SDK_MAILBOX_H
 #define SDK_MAILBOX_H
 
+#include <stddef.h>
 #include <stdint.h>
+#include "audio_scene.h"
 #include "scheduler.h"
 
 #define SDK_MAILBOX_MAGIC              0x5a5a394bUL
@@ -57,6 +59,11 @@
 /* QUERY_APERTURE_LAYOUT is available. HOST_WINDOW_HEAP is advertised on
  * generation-1 Z2 only after the driver acknowledges the exact contract. */
 #define SDK_CAP_APERTURE_LAYOUT        (1U << 24)
+/* Audio control plane / metering. Append-only but deliberately NOT
+ * advertised in any capability word until the on-hardware verification
+ * session qualifies them (R12). */
+#define SDK_CAP_AUDIO_CONTROL          (1U << 25)
+#define SDK_CAP_AUDIO_METERING         (1U << 26)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
@@ -127,6 +134,10 @@
 #define SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565 (1U << 27)
 #define SDK_SERVICE_FLAG_AUDIO_MP3_DECODE       (1U << 16)
 #define SDK_SERVICE_FLAG_AUDIO_MP3_STREAM       (1U << 20)
+/* Control-plane audio opcodes (0x0509+) are dispatchable. Follows the
+ * SDK_CAP_AUDIO_CONTROL gated-advertising discipline: not reported in
+ * the audio service flags until qualified. */
+#define SDK_SERVICE_FLAG_AUDIO_CONTROL (1U << 21)
 #define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
 #define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)
 #define SDK_SERVICE_FLAG_CODEC_GZIP             (1U << 18)
@@ -189,6 +200,17 @@
 #define SDK_OP_AUDIO_STREAM_CLOSE      0x0506U
 #define SDK_OP_AUDIO_STREAM_PLAY       0x0507U
 #define SDK_OP_AUDIO_STREAM_STOP       0x0508U
+/* Firmware-authoritative audio control plane (scenes, trims, metering).
+ * SHORT-task dispatch with 48-byte inline payloads; the payloads mirror
+ * the SDK ZZ9KAudio*Payload structs below byte-for-byte. Not advertised
+ * in any capability word or service flag until the on-hardware
+ * verification session passes. */
+#define SDK_OP_AUDIO_SCENE_SELECT      0x0509U
+#define SDK_OP_AUDIO_SCENE_WRITE       0x050aU
+#define SDK_OP_AUDIO_TRIM_SUBMIT       0x050bU
+#define SDK_OP_AUDIO_METER_READ        0x050cU
+#define SDK_OP_AUDIO_SCENE_SAVE        0x050dU
+#define SDK_OP_AUDIO_CONTROL_STATE_GET 0x050eU
 
 #define SDK_OP_DECOMPRESS              0x0600U
 #define SDK_OP_DECOMPRESS_TEST         0x0601U
@@ -363,6 +385,292 @@ typedef char SDKMediaSessionAudioResultPayload_must_be_48_bytes[
 	(sizeof(struct SDKMediaSessionAudioResultPayload) == 48U) ? 1 : -1];
 typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 	(sizeof(struct SDKMediaSessionStatusResultPayload) == 48U) ? 1 : -1];
+
+/* Firmware-authoritative audio control plane vocabulary and payloads
+ * (opcodes 0x0509+). All payload fields big-endian, 48 bytes to match
+ * the inline mailbox entry size and the SDK ZZ9KAudio*Payload structs
+ * byte-for-byte. Nothing here is advertised in any capability word or
+ * service flag until the on-hardware verification session passes. */
+
+#define SDK_AUDIO_SCENE_COUNT        8U
+
+/* SDK_OP_AUDIO_SCENE_WRITE stages one parameter per call; the param id
+ * fixes the value word's semantics. Pair values pack like the historical
+ * AP_DSP_SET_VOLUMES register convention: low byte = channel 1,
+ * high byte = channel 2. */
+#define SDK_AUDIO_SCENE_PARAM_LPF        1U  /* cutoff, Hz */
+#define SDK_AUDIO_SCENE_PARAM_EQ_BAND_1  2U  /* gain 0..100, 50 = 0 dB */
+#define SDK_AUDIO_SCENE_PARAM_EQ_BAND_2  3U
+#define SDK_AUDIO_SCENE_PARAM_EQ_BAND_3  4U
+#define SDK_AUDIO_SCENE_PARAM_EQ_BAND_4  5U
+#define SDK_AUDIO_SCENE_PARAM_EQ_BAND_5  6U
+#define SDK_AUDIO_SCENE_PARAM_EQ_BAND_6  7U
+#define SDK_AUDIO_SCENE_PARAM_EQ_BAND_7  8U
+#define SDK_AUDIO_SCENE_PARAM_EQ_BAND_8  9U
+#define SDK_AUDIO_SCENE_PARAM_EQ_BAND_9  10U
+#define SDK_AUDIO_SCENE_PARAM_EQ_BAND_10 11U
+#define SDK_AUDIO_SCENE_PARAM_PREFACTOR  12U
+#define SDK_AUDIO_SCENE_PARAM_VOLUME     13U /* 0..100, 100 = 0 dB
+                                               * (audio_adau_set_vol_pan
+                                               * range; the pair params
+                                               * BASELINE/trim use the
+                                               * 0..255 mixer scale) */
+#define SDK_AUDIO_SCENE_PARAM_PAN        14U
+#define SDK_AUDIO_SCENE_PARAM_BASELINE   15U /* operator Paula/AX pair;
+                                               * scene index is ignored */
+#define SDK_AUDIO_SCENE_PARAM_NAME       16U /* scene name chunk: bits
+                                               * 15..8 = first char,
+                                               * 7..0 = second char,
+                                               * both printable ASCII
+                                               * (0x20-0x7E) or 0x00;
+                                               * a 0x0000 chunk is the
+                                               * terminator. A rename
+                                               * stages the complete
+                                               * name as up to 8
+                                               * chunks (16 chars
+                                               * incl. the NUL), then
+                                               * commits ONCE: the
+                                               * first NAME chunk of
+                                               * a draft clears the
+                                               * name and lands at
+                                               * chunk 0, extra
+                                               * terminator chunks
+                                               * after the first are
+                                               * ignored (zero-padding
+                                               * is safe), and a
+                                               * non-terminator chunk
+                                               * after the terminator
+                                               * restarts at chunk 0.
+                                               * A NAME-only commit
+                                               * issues zero DSP
+                                               * writes. */
+#define SDK_AUDIO_SCENE_PARAM_CALIBRATION 17U /* per-card measured clean
+                                               * ceilings: Paula low 16,
+                                               * AX high 16; scene ignored */
+
+#define SDK_AUDIO_CEILING_MIN 1U
+#define SDK_AUDIO_CEILING_MAX 4095U
+#define SDK_AUDIO_CALIBRATION_PAULA(w) ((uint32_t)(w) & 0xffffU)
+#define SDK_AUDIO_CALIBRATION_AX(w) (((uint32_t)(w) >> 16) & 0xffffU)
+#define SDK_AUDIO_CALIBRATION_PACK(paula, ax) \
+	((uint32_t)((uint32_t)(uint16_t)(paula) | \
+	 ((uint32_t)(uint16_t)(ax) << 16)))
+
+/* Staged edits accumulate firmware-side; COMMIT asks for one atomic
+ * glitch-free commit (fade -> ordered verified writes -> restore) of
+ * everything staged for that scene. */
+#define SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT (1U << 0)
+
+/* Balance words: two 0..255 volumes (127 = 0 dB each) in one word,
+ * AP_DSP_SET_VOLUMES packing (low byte = Paula/ch1, high = AX/ch2). */
+#define SDK_AUDIO_BALANCE_NEUTRAL    0x7f7fU
+#define SDK_AUDIO_BALANCE_CH1(w)     ((uint32_t)(w) & 0xffU)
+#define SDK_AUDIO_BALANCE_CH2(w)     (((uint32_t)(w) >> 8) & 0xffU)
+#define SDK_AUDIO_BALANCE_PACK(ch1, ch2) \
+	((uint32_t)((uint32_t)(uint8_t)(ch1) | \
+	 ((uint32_t)(uint8_t)(ch2) << 8)))
+
+/* SDK_OP_AUDIO_TRIM_SUBMIT result flag: the requested balance was
+ * bounded by scene policy; balance_bound carries the bound applied. */
+#define SDK_AUDIO_TRIM_RESULT_BOUNDED (1U << 0)
+
+#define SDK_AUDIO_METER_DIRECTION_OUTPUT  1U
+#define SDK_AUDIO_METER_DIRECTION_CAPTURE 2U
+
+/* Active source identity per direction; 0 is the legacy/unknown default
+ * for owners that predate the control plane. */
+#define SDK_AUDIO_METER_IDENTITY_UNKNOWN    0U
+#define SDK_AUDIO_METER_IDENTITY_AHI        1U
+#define SDK_AUDIO_METER_IDENTITY_MEDIA      2U
+#define SDK_AUDIO_METER_IDENTITY_SDK_STREAM 3U
+
+/* This meter read reset the per-direction peak-hold (read-and-clear). */
+#define SDK_AUDIO_METER_RESULT_HOLD_RESET (1U << 0)
+
+/* SDK_OP_AUDIO_SCENE_SAVE result status word. The save runs as a
+ * non-blocking machine: QUEUED means it started (possibly waiting for
+ * a DSP commit to settle) -- poll SDK_OP_AUDIO_CONTROL_STATE_GET's
+ * save_status for the final outcome. BUSY means a previous save is
+ * still running and this one was not started. */
+#define SDK_AUDIO_SCENE_SAVE_OK       0U
+#define SDK_AUDIO_SCENE_SAVE_REJECTED 1U /* failed boundary validation */
+#define SDK_AUDIO_SCENE_SAVE_IO_ERROR 2U /* temp-then-replace failed */
+#define SDK_AUDIO_SCENE_SAVE_QUEUED   3U /* started; watch state save_status */
+#define SDK_AUDIO_SCENE_SAVE_BUSY     4U /* refused: a save is running */
+
+/* SDK_OP_AUDIO_CONTROL_STATE_GET result flag: the current trim was
+ * bounded by scene policy. */
+#define SDK_AUDIO_CONTROL_FLAG_TRIM_BOUNDED (1U << 0)
+
+struct SDKAudioSceneSelectPayload {
+	uint8_t scene[4];
+	uint8_t flags[4];
+	uint8_t reserved[40];
+};
+
+/* Stage one parameter of one scene; firmware accumulates. COMMIT asks
+ * for one atomic glitch-free commit of the staged group. */
+struct SDKAudioSceneWritePayload {
+	uint8_t scene[4];
+	uint8_t param[4];
+	uint8_t value[4];
+	uint8_t flags[4];
+	uint8_t reserved[32];
+};
+
+/* Owner source trim on top of the operator baseline. */
+struct SDKAudioTrimSubmitPayload {
+	uint8_t balance[4];
+	uint8_t flags[4];
+	uint8_t reserved[40];
+};
+
+struct SDKAudioTrimResultPayload {
+	uint8_t balance_applied[4];
+	uint8_t balance_bound[4];
+	uint8_t flags[4];
+	uint8_t reserved[36];
+};
+
+struct SDKAudioMeterReadPayload {
+	uint8_t direction[4];
+	uint8_t flags[4];
+	uint8_t reserved[40];
+};
+
+/* One framed, non-tearing snapshot of one direction. All frames of a
+ * snapshot carry the same generation; differing generations across
+ * frames mean the read tore and must be retried. Peaks are unsigned
+ * 16.16 (0x00010000 = digital full scale); counters saturate, never
+ * wrap. frame_count is 1 while the whole state fits here; future
+ * extensions raise it and append frames. */
+struct SDKAudioMeterResultPayload {
+	uint8_t direction[4];
+	uint8_t generation[4];
+	uint8_t frame[4];
+	uint8_t frame_count[4];
+	uint8_t flags[4];
+	uint8_t identity[4];
+	uint8_t clip_count[4];
+	uint8_t underrun_count[4];
+	uint8_t overrun_count[4];
+	uint8_t gain_reduction_events[4];
+	uint8_t peak_hold_ch1[4];
+	uint8_t peak_hold_ch2[4];
+};
+
+struct SDKAudioSceneSavePayload {
+	uint8_t scene[4];
+	uint8_t flags[4];
+	uint8_t reserved[40];
+};
+
+struct SDKAudioSceneSaveResultPayload {
+	uint8_t status[4];
+	uint8_t scene[4];
+	uint8_t flags[4];
+	uint8_t reserved[36];
+};
+
+struct SDKAudioControlStateGetPayload {
+	uint8_t flags[4];
+	uint8_t reserved[44];
+};
+
+/* active_scene is the current index; baseline and trim are packed
+ * balance words. ceiling is the enforced boundary in AX-equivalent
+ * mixer units. ceiling_paula and ceiling_ax are persisted measured
+ * clean ceilings; save_status remains the append-only tail word. */
+struct SDKAudioControlStateResultPayload {
+	uint8_t active_scene[4];
+	uint8_t scene_count[4];
+	uint8_t baseline[4];
+	uint8_t trim[4];
+	uint8_t ceiling[4];
+	uint8_t flags[4];
+	uint8_t ceiling_paula[4];
+	uint8_t ceiling_ax[4];
+	uint8_t reserved[12];
+	uint8_t save_status[4];
+};
+
+typedef char SDKAudioSceneSelectPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioSceneSelectPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioSceneWritePayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioSceneWritePayload) == 48U) ? 1 : -1];
+typedef char SDKAudioTrimSubmitPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioTrimSubmitPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioTrimResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioTrimResultPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioMeterReadPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioMeterReadPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioMeterResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioMeterResultPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioSceneSavePayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioSceneSavePayload) == 48U) ? 1 : -1];
+typedef char SDKAudioSceneSaveResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioSceneSaveResultPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioControlStateGetPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioControlStateGetPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioControlStateResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioControlStateResultPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioControlStateSaveStatus_must_be_at_offset_44[
+	(offsetof(struct SDKAudioControlStateResultPayload, save_status) == 44U) ?
+		1 : -1];
+
+/* Non-volatile big-endian word accessors shared by the control-plane
+ * dispatch and any payload pack/unpack that reads plain buffers. */
+static inline uint32_t sdk_get_be32(const uint8_t *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static inline void sdk_put_be32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)(v >> 24);
+	p[1] = (uint8_t)(v >> 16);
+	p[2] = (uint8_t)(v >> 8);
+	p[3] = (uint8_t)v;
+}
+
+static inline void sdk_meter_put_word(volatile uint8_t *dst, uint32_t v)
+{
+	dst[0] = (uint8_t)(v >> 24);
+	dst[1] = (uint8_t)(v >> 16);
+	dst[2] = (uint8_t)(v >> 8);
+	dst[3] = (uint8_t)v;
+}
+
+/*
+ * Pack one framed meter snapshot (U3, KTD3). The whole state fits a
+ * single frame, so frame is 0 (the 0-based index of this frame; the
+ * SDK client counts frames from 0) and frame_count is 1; all frames
+ * of a logical read carry the snapshot's generation so a client can
+ * detect a torn multi-frame read. flags are the RESULT flags: pass
+ * SDK_AUDIO_METER_RESULT_HOLD_RESET when the serving read consumed
+ * the peak-hold window. Fields are big-endian words, mirroring the
+ * SDK ZZ9KAudioMeterResultPayload layout byte-for-byte.
+ */
+
+static inline void sdk_audio_meter_result_pack(
+	volatile struct SDKAudioMeterResultPayload *out,
+	const struct audio_meter_snapshot *snapshot, uint32_t flags)
+{
+	sdk_meter_put_word(out->direction, snapshot->direction);
+	sdk_meter_put_word(out->generation, snapshot->generation);
+	sdk_meter_put_word(out->frame, 0U);
+	sdk_meter_put_word(out->frame_count, 1U);
+	sdk_meter_put_word(out->flags, flags);
+	sdk_meter_put_word(out->identity, snapshot->identity);
+	sdk_meter_put_word(out->clip_count, snapshot->clip_count);
+	sdk_meter_put_word(out->underrun_count, snapshot->underrun_count);
+	sdk_meter_put_word(out->overrun_count, snapshot->overrun_count);
+	sdk_meter_put_word(out->gain_reduction_events,
+		snapshot->gain_reduction_events);
+	sdk_meter_put_word(out->peak_hold_ch1, snapshot->peak_hold_ch1);
+	sdk_meter_put_word(out->peak_hold_ch2, snapshot->peak_hold_ch2);
+}
 
 #define SDK_MAX_SHARED_BUFFERS         32U
 #define SDK_MAX_SURFACES               16U

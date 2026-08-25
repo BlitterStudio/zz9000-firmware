@@ -19,6 +19,8 @@
 #include "sdk_image_stream.h"
 #include "sdk_video_stream.h"
 #include "sdk_media_session.h"
+#include "audio_scene.h"
+#include "sdk_audio_control.h"
 #include "audio_playback_frontier.h"
 #include "audio_stream_drain.h"
 #include "audio_convert.h"
@@ -54,7 +56,8 @@
 	 SDK_CAP_MEMORY_OPS | SDK_CAP_CRYPTO | \
 	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION | \
 	 SDK_CAP_VIDEO_DECODE | \
-	 SDK_CAP_MEDIA_SESSION | SDK_CAP_AUDIO_STREAM_DRAIN)
+	 SDK_CAP_MEDIA_SESSION | SDK_CAP_AUDIO_STREAM_DRAIN | \
+	 SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING)
 /* Decode proceeds only with at least this much undecoded input (unless
  * EOF): enough for the largest legal MP3 frame (~1.4K, 2.3K free-format)
  * plus sync lookahead. It must stay WELL below any client's input-ring
@@ -1278,12 +1281,14 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 	{
 		SDK_SERVICE_AUDIO,
 		0x00020001U,
-		SDK_CAP_AUDIO_DECODE | SDK_CAP_AUDIO_PLAYBACK,
+		SDK_CAP_AUDIO_DECODE | SDK_CAP_AUDIO_PLAYBACK |
+			SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING,
 		SDK_SERVICE_FLAG_FIRMWARE |
 			SDK_SERVICE_FLAG_AUDIO_MP3_DECODE |
-			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM,
+			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM |
+			SDK_SERVICE_FLAG_AUDIO_CONTROL,
 		SDK_SERVICE_AUDIO,
-		9,	/* 0x0500..0x0508 incl. AUDIO_STREAM_PLAY/STOP */
+		15,	/* 0x0500..0x050e incl. audio control plane */
 		"audio"
 	},
 	{
@@ -3855,9 +3860,23 @@ static void audio_pump_source_retire(uint32_t bytes)
 
 static void audio_pump_source_underrun(void)
 {
+	/* The played underrun feeds both the session-scoped status
+	 * counter and the output-direction meter accumulator (U3):
+	 * the register-fed stagnation detector feeds the same meter. */
+	audio_scene_meter_output_underrun();
 	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
 		sdk_media_session_audio_underrun(
 			g_audio_playback.session);
+}
+
+/* Map a pump source kind onto the ABI meter identity (U3, R8). */
+static uint32_t audio_pump_meter_identity(uint32_t source_kind)
+{
+	if (source_kind == AUDIO_PUMP_SOURCE_STREAM)
+		return SDK_AUDIO_METER_IDENTITY_SDK_STREAM;
+	if (source_kind == AUDIO_PUMP_SOURCE_MEDIA)
+		return SDK_AUDIO_METER_IDENTITY_MEDIA;
+	return SDK_AUDIO_METER_IDENTITY_UNKNOWN;
 }
 
 /* Returns the number of source PCM bytes staged into this DMA period, or zero
@@ -3993,6 +4012,8 @@ void sdk_mailbox_audio_playback_pump_isr(void)
 	if (!audio_pump_source_snapshot(&source)) {
 		g_audio_playback.session = 0U;
 		g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
+		audio_scene_meter_output_identity(
+			SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 		return;
 	}
 
@@ -4092,6 +4113,8 @@ void sdk_mailbox_audio_playback_pump(void)
 	stream = find_audio_stream(g_audio_playback.session);
 	if (!stream) {
 		g_audio_playback.session = 0U;   /* closed under us */
+		audio_scene_meter_output_identity(
+			SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 		return;
 	}
 
@@ -4164,6 +4187,10 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session)
 	g_audio_playback.silence_run = 0U;
 	g_audio_playback.source_kind = source_kind;
 	g_audio_playback.paused = 0U;
+	/* Name the output source for metering (R8) before the session
+	 * goes live. */
+	audio_scene_meter_output_identity(
+		audio_pump_meter_identity(source_kind));
 	/* Publish the session LAST: the next audio IRQ may now stage PCM. */
 	__asm__ __volatile__("" ::: "memory");
 	g_audio_playback.session = session;
@@ -4174,6 +4201,8 @@ static void audio_playback_stop(void)
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
+	audio_scene_meter_output_identity(
+		SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 	audio_playback_clear_periods(
 		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
 	g_audio_playback.silence_run = 0U;
@@ -4273,6 +4302,38 @@ static uint16_t handle_audio_stream_stop(volatile struct SDKMailboxEntry *req,
 	}
 	/* Idempotent: stopping an unbound session is OK (MHI pause/stop). */
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
+}
+
+/*
+ * Control-plane audio opcodes (0x0509..0x050e, plan U4): scene
+ * select, staged scene write, trim submit, meter read, scene save,
+ * control state get. All of them run inline as SHORT tasks on core 0
+ * (KTD1) -- the scene module's commit path issues verified DSP writes
+ * synchronously -- so they never defer to core 1 and do not reserve
+ * request_id 0. Payload and result byte order belong to
+ * sdk_audio_control.c; this wrapper just bridges the mailbox entry.
+ */
+static uint16_t handle_audio_control(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len, uint16_t opcode)
+{
+	uint8_t params[sizeof(req->payload)];
+	uint8_t result[sizeof(req->payload)];
+	uint16_t result_len = 0;
+	uint16_t status;
+
+	memset(params, 0, sizeof(params));
+	copy_payload(params, req->payload, payload_len);
+	memset(result, 0, sizeof(result));
+	status = sdk_audio_control_run(opcode, params, payload_len, result,
+		&result_len);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+	write_completion(comp, req, SDK_STATUS_OK, result_len);
+	if (result_len != 0U)
+		copy_payload(comp->payload, result, result_len);
+	return SDK_STATUS_OK;
 }
 
 static uint16_t handle_audio_stream_begin(volatile struct SDKMailboxEntry *req,
@@ -7542,6 +7603,13 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_audio_stream_play(req, comp, payload_len);
 	case SDK_OP_AUDIO_STREAM_STOP:
 		return handle_audio_stream_stop(req, comp, payload_len);
+	case SDK_OP_AUDIO_SCENE_SELECT:
+	case SDK_OP_AUDIO_SCENE_WRITE:
+	case SDK_OP_AUDIO_TRIM_SUBMIT:
+	case SDK_OP_AUDIO_METER_READ:
+	case SDK_OP_AUDIO_SCENE_SAVE:
+	case SDK_OP_AUDIO_CONTROL_STATE_GET:
+		return handle_audio_control(req, comp, payload_len, opcode);
 	case SDK_OP_IMAGE_SESSION_BEGIN:
 		return handle_image_session_begin(req, comp, payload_len);
 	case SDK_OP_IMAGE_SESSION_FEED:
@@ -7673,6 +7741,8 @@ void sdk_mailbox_init(void)
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
+	audio_scene_meter_output_identity(
+		SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 	audio_playback_clear_periods(
 		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
 	g_audio_playback.refill_pending = 0U;

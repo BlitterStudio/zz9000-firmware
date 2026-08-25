@@ -101,6 +101,7 @@
 /***************************** Include Files *********************************/
 #include "xsdps.h"
 #include "sleep.h"
+#include "xtime_l.h"
 
 /************************** Constant Definitions *****************************/
 #define XSDPS_CMD8_VOL_PATTERN	0x1AAU
@@ -129,6 +130,15 @@
 #define SCR_SPEC_VER_3		0x80U
 #define ADDRESS_BEYOND_32BIT	0x100000000U
 
+/*
+ * The vendor polled paths wait forever when the controller never raises
+ * command/transfer-complete or an error interrupt. Core 0 also services
+ * Zorro, so an unbounded wait freezes the Amiga-facing card. Two seconds
+ * is well beyond normal SD command/data latency while still recovering a
+ * wedged controller without requiring a card power-cycle.
+ */
+#define XSDPS_POLL_TIMEOUT_COUNTS ((XTime)COUNTS_PER_SECOND * 2U)
+
 /**************************** Type Definitions *******************************/
 
 /***************** Macros (Inline Functions) Definitions *********************/
@@ -143,6 +153,49 @@ static s32 XSdPs_IdentifyCard(XSdPs *InstancePtr);
 static s32 XSdPs_Switch_Voltage(XSdPs *InstancePtr);
 
 u16 TransferMode;
+
+static int XSdPs_PollTimedOut(XTime start)
+{
+	XTime now;
+
+	XTime_GetTime(&now);
+	return (now - start) >= XSDPS_POLL_TIMEOUT_COUNTS;
+}
+
+static void XSdPs_AbortTimedOutTransfer(XSdPs *InstancePtr)
+{
+	XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
+			XSDPS_NORM_INTR_STS_OFFSET, XSDPS_NORM_INTR_ALL_MASK);
+	XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
+			XSDPS_ERR_INTR_STS_OFFSET, XSDPS_ERROR_INTR_ALL_MASK);
+	XSdPs_WriteReg8(InstancePtr->Config.BaseAddress, XSDPS_SW_RST_OFFSET,
+			XSDPS_SWRST_CMD_LINE_MASK | XSDPS_SWRST_DAT_LINE_MASK);
+}
+
+static s32 XSdPs_WaitForTransferComplete(XSdPs *InstancePtr,
+		XTime poll_start)
+{
+	u32 StatusReg;
+
+	do {
+		StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
+					XSDPS_NORM_INTR_STS_OFFSET);
+		if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
+			XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
+					XSDPS_ERR_INTR_STS_OFFSET,
+					XSDPS_ERROR_INTR_ALL_MASK);
+			return XST_FAILURE;
+		}
+		if (XSdPs_PollTimedOut(poll_start)) {
+			XSdPs_AbortTimedOutTransfer(InstancePtr);
+			return XST_FAILURE;
+		}
+	} while ((StatusReg & XSDPS_INTR_TC_MASK) == 0U);
+
+	XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
+			XSDPS_NORM_INTR_STS_OFFSET, XSDPS_INTR_TC_MASK);
+	return XST_SUCCESS;
+}
 /*****************************************************************************/
 /**
 *
@@ -1101,6 +1154,7 @@ s32 XSdPs_CmdTransfer(XSdPs *InstancePtr, u32 Cmd, u32 Arg, u32 BlkCnt)
 	u32 CommandReg;
 	u32 StatusReg;
 	s32 Status;
+	XTime poll_start;
 
 	Xil_AssertNonvoid(InstancePtr != NULL);
 	Xil_AssertNonvoid(InstancePtr->IsReady == XIL_COMPONENT_IS_READY);
@@ -1158,6 +1212,7 @@ s32 XSdPs_CmdTransfer(XSdPs *InstancePtr, u32 Cmd, u32 Arg, u32 BlkCnt)
 
 	XSdPs_WriteReg(InstancePtr->Config.BaseAddress, XSDPS_XFER_MODE_OFFSET,
 			(CommandReg << 16) | TransferMode);
+	XTime_GetTime(&poll_start);
 
 	/* Polling for response for now */
 	do {
@@ -1182,6 +1237,11 @@ s32 XSdPs_CmdTransfer(XSdPs *InstancePtr, u32 Cmd, u32 Arg, u32 BlkCnt)
 			XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
 					XSDPS_ERR_INTR_STS_OFFSET,
 					XSDPS_ERROR_INTR_ALL_MASK);
+			goto RETURN_PATH;
+		}
+		if (XSdPs_PollTimedOut(poll_start)) {
+			XSdPs_AbortTimedOutTransfer(InstancePtr);
+			Status = XST_FAILURE;
 			goto RETURN_PATH;
 		}
 	} while((StatusReg & XSDPS_INTR_CC_MASK) == 0U);
@@ -1326,7 +1386,7 @@ s32 XSdPs_ReadPolled(XSdPs *InstancePtr, u32 Arg, u32 BlkCnt, u8 *Buff)
 {
 	s32 Status;
 	u32 PresentStateReg;
-	u32 StatusReg;
+	XTime poll_start;
 
 	if ((InstancePtr->HC_Version != XSDPS_HC_SPEC_V3) ||
 				((InstancePtr->Host_Caps & XSDPS_CAPS_SLOT_TYPE_MASK)
@@ -1385,24 +1445,11 @@ s32 XSdPs_ReadPolled(XSdPs *InstancePtr, u32 Arg, u32 BlkCnt, u8 *Buff)
 			goto RETURN_PATH;
 		}
 	}
+	XTime_GetTime(&poll_start);
 
-	/* Check for transfer complete */
-	do {
-		StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
-					XSDPS_NORM_INTR_STS_OFFSET);
-		if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
-			/* Write to clear error bits */
-			XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
-					XSDPS_ERR_INTR_STS_OFFSET,
-					XSDPS_ERROR_INTR_ALL_MASK);
-			Status = XST_FAILURE;
-			goto RETURN_PATH;
-		}
-	} while((StatusReg & XSDPS_INTR_TC_MASK) == 0U);
-
-	/* Write to clear bit */
-	XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
-			XSDPS_NORM_INTR_STS_OFFSET, XSDPS_INTR_TC_MASK);
+	Status = XSdPs_WaitForTransferComplete(InstancePtr, poll_start);
+	if (Status != XST_SUCCESS)
+		goto RETURN_PATH;
 
 	if (InstancePtr->Config.IsCacheCoherent == 0) {
 		Xil_DCacheInvalidateRange((INTPTR)Buff,
@@ -1435,7 +1482,7 @@ s32 XSdPs_WritePolled(XSdPs *InstancePtr, u32 Arg, u32 BlkCnt, const u8 *Buff)
 {
 	s32 Status;
 	u32 PresentStateReg;
-	u32 StatusReg;
+	XTime poll_start;
 
 	if ((InstancePtr->HC_Version != XSDPS_HC_SPEC_V3) ||
 				((InstancePtr->Host_Caps & XSDPS_CAPS_SLOT_TYPE_MASK)
@@ -1494,27 +1541,11 @@ s32 XSdPs_WritePolled(XSdPs *InstancePtr, u32 Arg, u32 BlkCnt, const u8 *Buff)
 			goto RETURN_PATH;
 		}
 	}
+	XTime_GetTime(&poll_start);
 
-	/*
-	 * Check for transfer complete
-	 * Polling for response for now
-	 */
-	do {
-		StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
-					XSDPS_NORM_INTR_STS_OFFSET);
-		if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
-			/* Write to clear error bits */
-			XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
-					XSDPS_ERR_INTR_STS_OFFSET,
-					XSDPS_ERROR_INTR_ALL_MASK);
-			Status = XST_FAILURE;
-			goto RETURN_PATH;
-		}
-	} while((StatusReg & XSDPS_INTR_TC_MASK) == 0U);
-
-	/* Write to clear bit */
-	XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
-			XSDPS_NORM_INTR_STS_OFFSET, XSDPS_INTR_TC_MASK);
+	Status = XSdPs_WaitForTransferComplete(InstancePtr, poll_start);
+	if (Status != XST_SUCCESS)
+		goto RETURN_PATH;
 
 	Status = XST_SUCCESS;
 
