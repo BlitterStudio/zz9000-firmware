@@ -56,10 +56,12 @@ exactly one gain-reduction telemetry event.
 ## Measurement method (bench session)
 
 Single session on target hardware, on the operator's own card. The
-primary sweep calibrates the model in combined-level units with one
-phase-coherent active leg whose coefficient equals the model sum
-(0/254). A separate 254/0 Paula-only sweep checks that both leg paths
-reach the same onset without combining unsynchronized source clocks.
+primary self-capture sweep calibrates the AX-only path in combined-level
+units with one phase-coherent active leg whose coefficient equals the
+model sum (0/254). A separate recorder then captures onset-relevant
+AX-only reference steps and matching 254/0 Paula-only steps through the
+same independent ADC. This checks both leg paths without combining
+unsynchronized source clocks or observing a pre-output Paula feed.
 
 Stimulus and routing:
 
@@ -90,44 +92,43 @@ Generate the deterministic AHI and Paula source files with:
    player during this primary sweep: independent Paula and AHI clocks
    are not phase-locked, so their changing relative phase would make
    the physical peak unrelated to the labeled combined level.
-5. **Scene setup.** Use scene 0 with LPF 23900, all EQ bands 50,
-   volume 100, and pan 50. Sweep only the prefactor. Integer slider
-   settings map to the model as follows:
+5. **Scene setup.** Use scene 0 with LPF 23900, all EQ bands 50 and
+   pan 50. Establish a low-level distortion floor, then refine the
+   previously observed transition region with these integer settings:
 
-   | Prefactor | Combined level |
-   |---:|---:|
-   | 33 | 158.8 |
-   | 37 | 177.4 |
-   | 40 | 192.7 |
-   | 43 | 209.3 |
-   | 46 | 227.4 |
-   | 48 | 240.3 |
-   | 50 | 254.0 |
-   | 52 | 268.4 |
-   | 54 | 283.7 |
-   | 56 | 299.8 |
-   | 58 | 316.8 |
-   | 60 | 334.8 |
-   | 62 | 353.9 |
-   | 64 | 374.0 |
-   | 66 | 395.2 |
+   | Capture label | Prefactor | Volume | Model level |
+   |---:|---:|---:|---:|
+   | 32 | 0 | 50 | 31.9 |
+   | 48 | 0 | 75 | 47.9 |
+   | 64 | 0 | 100 | 63.8 |
+   | 73 | 5 | 100 | 73.3 |
+   | 80 | 8 | 100 | 79.6 |
+   | 89 | 12 | 100 | 88.9 |
+   | 97 | 15 | 100 | 96.6 |
+   | 111 | 20 | 100 | 110.9 |
+   | 127 | 25 | 100 | 127.3 |
 
    Each step is one staged scene-write commit in ZZTop's Audio window
-   (glitch-free; playback keeps running). Wait one second after moving
-   the prefactor so the incremental commit has settled, then run
+   (glitch-free; playback keeps running). Wait one second after the
+   final slider change so the incremental commit has settled, then run
    `ZZAXDuplexTest <capture.raw> 5 ceiling`. Record at least 2 seconds
    per step to a raw capture file named by its rounded combined level,
-   and watch the Audio-window meters as a live cross-check.
-6. **Leg cross-check.** Repeat the onset-relevant prefactor steps with
-   the other leg alone: set baseline Paula 254 / AX 0, loop the
-   deterministic full-scale Paula 1 kHz sample, and run
-   `ZZAXDuplexTest <capture.raw> 5 capture`. Capture mode starts AHI
-   recording without playback and writes raw S16BE, so the Paula
-   player creates no allocation conflict. Analyze these files with
-   `--auto-tone`: Paula's integer DMA period makes the realized tone
-   slightly machine-standard dependent. Matching AX-only and
-   Paula-only onset metrics at the same model sum support the linear
-   mixer assumption; disagreement blocks any constant update.
+   and watch the Audio-window meters as a live cross-check. Extend the
+   sweep upward only if level 127 remains clean; extend downward only
+   if level 32 is already non-clean.
+6. **Leg cross-check.** Do not use ZZ9000AX AHI recording for this
+   step. Bench diagnostics established that it observes the Paula feed
+   even with baseline `0/0` and with scene volume `0`, so it cannot
+   isolate the controlled line output. Disconnect the self-loopback and
+   connect the line-output RCA pair to an independent external
+   ADC/recorder at fixed gain. Capture onset-relevant AX-only reference
+   steps with baseline Paula 0 / AX 254 and the coherent AHI stimulus,
+   then capture the same combined levels with baseline Paula 254 / AX 0
+   and the deterministic full-scale Paula stimulus. Export stereo
+   signed-16 raw PCM at the recorder's native endian/rate and analyze
+   Paula with `--auto-tone`. Matching AX-only and Paula-only onset
+   curves from the same external ADC support the linear mixer
+   assumption; disagreement blocks any constant update.
 7. **Detection.** Analyze the captures on the host with
    `util/analyze_audio_saturation.py` (below) in sweep order with the
    combined levels. The measured ceiling is the highest combined level
@@ -157,21 +158,23 @@ ceiling.
 Reads raw signed-16-bit PCM (`--endian be` for Amiga-side AHI dumps,
 `--endian le` for host-side captures; `--channels`, `--rate`,
 `--tone`, `--auto-tone`, `--rail`, `--thd-pct` adjustable).
-`--auto-tone` estimates each capture's realized fundamental before
-the coherent THD projection; use it for Paula-period captures. Per
-channel it reports:
+`--auto-tone` estimates each capture's realized fundamental from robust
+local periods in the centered analysis window before the coherent THD
+projection; use it for Paula-period captures. Per channel it reports:
 
 | Metric | Meaning |
 |---|---|
 | peak dBFS | captured peak (attenuation makes absolute level meaningless; trend only) |
+| fundamental dBFS | fitted fundamental amplitude in the centered analysis window — compare this across gain steps |
 | dc | mean offset |
 | at-rail samples/regions | capture-path clipping — a setup fault (add loopback attenuation) |
-| flat-top regions (longest run) | consecutive samples parked within ~0.4% of the file's own peak — the clipped/hard-saturated crest signature, scale-invariant |
+| flat-top regions (longest run) | consecutive samples parked within ~0.4% of the file's own peak — at least three regions are required for the clipped/hard-saturated crest verdict; one-off low-level plateaus remain diagnostic only |
 | THD proxy | coherent H2..H5 against the fundamental over an integer-period window — catches soft saturation before hard clipping |
 | notch residual dBFS | floor after removing DC, fundamental and harmonics |
 
-Verdicts: `FAULT` (at-rail: fix the setup), `SATURATED` (flat-top or
-THD above `--thd-pct`, default 0.5%), `CLEAN`. With `--levels` the
+Verdicts: `FAULT` (at-rail: fix the setup), `SATURATED` (at least
+three flat-top regions or THD above `--thd-pct`, default 0.5%),
+`CLEAN`. With `--levels` the
 tool reports the onset step, the measured ceiling (last clean level),
 the onset interval, and the suggested `AUDIO_SCENE_ENFORCED_BOUNDARY`
 at the 3/4 headroom policy. `--json` emits the same report
@@ -187,6 +190,53 @@ single-unit scope and the variance rationale are adopted as-is for
 this release; if field reports ever show cards whose clean ceiling
 sits inside another card's headroom band, re-measure on a second unit
 and widen the policy deliberately rather than silently.
+
+## Measurement record — 2026-08-23 (superseded)
+
+Instrument firmware SHA-256:
+`fe7a61a19d86d338dc411c7ea0e69150a5a7a8e804f5d76c8319ba4262a4f78e`.
+The primary Paula 0 / AX 254 self-capture sweep used the internal
+0.99-FS 1 kHz ceiling stimulus and raw 48 kHz S16BE stereo:
+
+    python3 util/analyze_audio_saturation.py \
+        --levels 32,48,64,80,97,111,127,142,159 \
+        cap_0032.raw cap_0048.raw cap_0064.raw cap_0080.raw \
+        cap_0097.raw cap_0111.raw cap_0127.raw cap_0142.raw \
+        cap_0159.raw
+
+Levels 32, 48, 64 and 80 were CLEAN. Level 97 was the first
+SATURATED step at approximately 1.11% THD; THD then rose monotonically
+through approximately 5.19% at 159. No capture hit rail. The measured
+AX-only ceiling is 80, the observed onset interval is `(80, 97]`, and
+the 3/4 policy would suggest boundary 60.
+
+Four self-captures labeled 64, 80, 97 and 111 all retained an
+approximately -3.2 dBFS Paula fundamental with no gain trend.
+Diagnostic captures then retained the same Paula tone with baseline
+`0/0` and with scene volume `0`. An audible line-output test isolated
+the real defect: the Paula baseline leg muted correctly, but scene
+volume `0` did not mute Paula. The source-authoritative SigmaDSP graph
+placed the Paula/ADC monitor branch into `St Mixer1` after the scene
+blocks, while FPGA playback alone traversed LPF, prefactor, EQ and
+volume.
+
+The graph was corrected so Paula/ADC and FPGA playback enter `St
+Mixer1` first and its combined output traverses the complete scene
+chain; the raw ADC capture taps remain before that mixer. Because the
+recorded sweep predates this topology correction, its `(80, 97]`
+AX-only interval and candidate boundary 60 are informational only and
+must be remeasured on the corrected instrument build. Boundary 60 is
+not accepted; `AUDIO_SCENE_ENFORCED_BOUNDARY` remains the provisional
+192 and capability advertising remains blocked.
+
+Corrected instrument image
+`5cc8265d81421d6c132c594b68d1dd68ae95d53a8181c18311f66f78f474a046`
+(DSP profile `a205`) passed the source-leg portion of S9 on the same
+card: scene volume `100 -> 0 -> 100` sounded, muted and restored Paula
+and AX independently; prefactor `50 -> 0 -> 50` reduced and restored
+both sources. This confirms both stereo prefactor algorithms and the
+post-mixer scene volume on hardware. EQ and raw-capture isolation remain
+covered by the subsequent release-candidate session.
 
 ## Hardware smoke checklist (verification session)
 
@@ -204,6 +254,7 @@ expected observation traces to the plan's acceptance examples.
 | S6 | Save round-trip through reboot (AE6) | Set operator baseline balance (e.g. 100/90), Save, cold boot | Baseline and scenes persist and apply to every owner's playback with no env var anywhere |
 | S7 | Leftover `ZZ9K_MIX_LEVELS` no effect (AE2) | Set `ENV:ZZ9K_MIX_LEVELS` to an extreme pair, keep CFG audio keys present, boot | Scene applies; the env var changes nothing in either driver or firmware |
 | S8 | Non-AX entry disabled (R18) | On a ZZ9000 without the AX daughterboard, open ZZTop | The Audio button is present but disabled (greyed), not hidden; all other ZZTop features unaffected |
+| S9 | Master scene covers both legs | Play Paula only, then AX only; for each source move scene volume 100 -> 0 -> 100 and exercise prefactor/EQ | Volume 0 silences each source independently, restoring volume restores it, and prefactor/EQ audibly affect both; RCA capture remains the pre-mix physical ADC feed |
 
 S8 needs non-AX hardware (or the AX-absent probe path); if the session
 only has an AX card, record it as not exercised rather than passed.

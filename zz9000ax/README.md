@@ -14,9 +14,14 @@ The normal graph routes:
 
 - physical left RCA / ADC0 to `Output5` / `DIG0`;
 - physical right RCA / ADC1 to `Output6` / `DIG1`;
-- ADC left/right through the existing analogue monitor mixer; and
-- FPGA playback through the low-pass, prefactor, equalizer, volume, and DAC
-  path.
+- physical ADC/Paula stereo and FPGA playback into `St Mixer1`; and
+- the combined mixer output through low-pass, prefactor, equalizer,
+  volume/pan, and `DAC0` / `DAC1`.
+
+The ADC capture taps remain before the mixer and master scene chain, so
+recording observes the physical inputs without internally feeding back
+FPGA playback. Every line-output source joins before the scene blocks;
+volume zero therefore mutes both Paula and AX.
 
 Firmware configures serial-output register `0x081e` to `0x0c22`: 48 kHz,
 16-bit TDM8 master mode with a 256*Fs (12.288 MHz) BCLK. `DIG0` and `DIG1`
@@ -34,9 +39,9 @@ characterization control portal are not part of the production image.
 
 | Input | SHA-256 |
 |---|---|
-| `zz9000ax-mix1-lowpass-eq.dspproj` | `7aab83f544e8721554dd290ab5562a216ac28d7a9d8af353ca115a8a1cec7fac` |
-| `Program_Data_Normal_ADC_IC_1` (5120 bytes) | `9b58c07ab19d13665cb4610bf498059dc993ca3499b96d62349dd8e84c31adb0` |
-| `Param_Data_Normal_ADC_IC_1` (4096 bytes) | `0fb714aa995d9223f007328b9b98074dbcd92b48c0e4fcebbd2738aae15f6ef0` |
+| `zz9000ax-mix1-lowpass-eq.dspproj` | `df62c9f36c1675bc959c94b0cbfb546df71921a482df201d361889d517ba2952` |
+| `Program_Data_Normal_ADC_IC_1` (5120 bytes) | `bda1406175755779e630fec41863a1897509199c9bd42e2ae51620dc75e1a80c` |
+| `Param_Data_Normal_ADC_IC_1` (4096 bytes) | `979c11315dfc59b85d86fa82cd88f34597f1df49f39ee14ff18b9acb4769d4f0` |
 
 The graph source and its program/parameter arrays are independent of the
 serial framing register, which firmware writes and verifies after every cold

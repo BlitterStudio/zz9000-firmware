@@ -185,6 +185,7 @@ static int near(double actual, double expected)
 static void unity_scene(struct audio_scene_def *def)
 {
 	int i;
+	memset(def, 0, sizeof(*def));
 	def->lpf_hz = 23900;
 	for (i = 0; i < AUDIO_SCENE_EQ_BANDS; i++)
 		def->eq[i] = 50;

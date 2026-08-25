@@ -5,11 +5,12 @@
 #include <stdint.h>
 
 /*
- * Immutable identity for the first production candidate built from the
- * hardware-selected TDM8 slot-0/1 transport. This is a bench identity,
- * not the firmware or coordinated release version.
+ * Immutable identity for the production DSP image using the
+ * hardware-selected TDM8 slot-0/1 transport. Increment whenever the
+ * compiled signal graph changes; this is a bench identity, not the
+ * firmware or coordinated release version.
  */
-#define ZZ_AUDIO_CAPTURE_CANDIDATE_BUILD_ID 0xa204U
+#define ZZ_AUDIO_CAPTURE_CANDIDATE_BUILD_ID 0xa205U
 #define ZZ_AUDIO_CODEC_SERIAL_TDM8_SLOT01   0x0c22U
 #define ZZ_AUDIO_CODEC_MP_CONTROL           0x444444U
 #define ZZ_AUDIO_CODEC_CORE_LOADING         0x0018U
