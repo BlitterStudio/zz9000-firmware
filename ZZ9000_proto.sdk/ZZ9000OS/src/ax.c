@@ -19,7 +19,7 @@
 #include "audio_convert.h"
 #include "audio_scene.h"
 #include "audio_playback_rate.h"
-#include "audio_dsp_gain.h"
+#include "audio_fabric.h"
 #include "memorymap.h"
 #include "xtime_l.h"
 #include "math.h"
@@ -799,10 +799,7 @@ void audio_debug_timer(int zdata) {
 
 int isra_count = 0;
 
-// TX-fill half of the SDK playback pump (sdk_mailbox.c); ISR-safe.
-extern void sdk_mailbox_audio_playback_pump_isr(void);
-// Nonzero while a pump session owns the formatter TX (sdk_mailbox.c).
-extern int sdk_mailbox_audio_playback_active(void);
+// Audio fabric compositor TX tick (audio_fabric.c); ISR-safe.
 
 // audio formatter interrupt, triggered whenever a period is completed
 void isr_audio(void *dummy) {
@@ -830,11 +827,12 @@ void isr_audio(void *dummy) {
 		isra_count = 0;
 	}
 
-	// Keep the TX ring filled from the bound audio-stream session on a
-	// guaranteed 20 ms cadence: main-loop passes stretched by RTG or
-	// network load previously let the DMA overrun the fill frontier
-	// and glitch MP3 playback. No-op when no session is bound.
-	sdk_mailbox_audio_playback_pump_isr();
+	// Keep the TX ring filled on a guaranteed 20 ms cadence: the
+	// fabric compositor is the sole TX-ring writer while any SDK
+	// producer is bound (main-loop passes stretched by RTG or network
+	// load previously let the DMA overrun the fill frontier and
+	// glitch MP3 playback). No-op when no producer is live.
+	audio_fabric_isr();
 
 	/* U3 metering: bounded per-period peak scan (960 frames) of
 	 * every TX period completed since the previous IRQ -- normally
@@ -847,7 +845,7 @@ void isr_audio(void *dummy) {
 	 * risk; fallback is producer-side peak accumulation). */
 	if (audio_inited_tx_buffer != NULL &&
 	    (audio_legacy_output_active() ||
-	     sdk_mailbox_audio_playback_active())) {
+	     audio_fabric_output_busy())) {
 		if (audio_tx_meter_last_period < 0) {
 			audio_tx_meter_last_period = (int8_t)completed_period;
 		} else {
@@ -876,7 +874,7 @@ void isr_audio(void *dummy) {
 	 * (audio_swab); a completed period with an unchanged sequence
 	 * played unfilled audio. */
 	if (audio_legacy_output_active() &&
-	    !sdk_mailbox_audio_playback_active())
+	    !audio_fabric_output_busy())
 		audio_scene_meter_output_producer_tick(
 			audio_tx_producer_seq);
 

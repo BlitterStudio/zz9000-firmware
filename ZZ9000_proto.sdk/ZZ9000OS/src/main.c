@@ -57,6 +57,7 @@ void Xil_AssertNonVoid() {}
 #include "ax.h"
 #include "audio_capture.h"
 #include "audio_scene.h"
+#include "audio_fabric.h"
 #include "watchdog.h"
 #include "mp3/mp3.h"
 
@@ -1370,12 +1371,17 @@ int main() {
 					// audio config
 					uint16_t mask = (uint16_t)zdata;
 
-					/* A bound SDK/media session owns the formatter TX
-					 * target. Legacy/AHI register writes have no reply
-					 * channel for BUSY, so reject their PLAY bit here
-					 * rather than silently retargeting live direct audio.
-					 * Capture remains independently usable. */
-					if (sdk_mailbox_audio_playback_active())
+					/* The audio fabric owns the formatter
+					 * TX target from the first SDK
+					 * producer bind (stream or media
+					 * session, U2). Legacy/AHI register
+					 * writes have no reply channel for
+					 * BUSY, so reject their PLAY bit
+					 * here rather than silently
+					 * retargeting live fabric audio.
+					 * Capture remains independently
+					 * usable. */
+					if (audio_fabric_output_busy())
 						mask &= ~ZZ_AUDIO_CONFIG_PLAY;
 					audio_set_interrupt_mask(mask);
 					break;
@@ -1439,7 +1445,11 @@ int main() {
 						int byteswap = 1;
 						if (zdata&(1<<15)) byteswap = 0;
 						audio_offset = (zdata&0x7fff)<<8; // *256
-						if (!sdk_mailbox_audio_playback_active())
+						/* Fabric-owned output: the
+						 * compositor is the sole TX
+						 * writer; the legacy window
+						 * write is dropped. */
+						if (!audio_fabric_output_busy())
 							audio_buffer_collision = audio_swab(
 								audio_scale, audio_offset, byteswap);
 
@@ -1465,7 +1475,7 @@ int main() {
 					if (audio_param == AP_TX_BUF_OFFS_LO) {
 						uint8_t* addr = (uint8_t*)video_state->framebuffer +
 								((audio_params[AP_TX_BUF_OFFS_HI]<<16)|audio_params[AP_TX_BUF_OFFS_LO]);
-						if (sdk_mailbox_audio_playback_active()) {
+						if (audio_fabric_output_busy()) {
 							printf("[audio] TX owner busy\n");
 						} else if (((uint32_t)addr-(uint32_t)video_state->framebuffer)<0x100000*128) {
 							audio_set_tx_buffer(addr);

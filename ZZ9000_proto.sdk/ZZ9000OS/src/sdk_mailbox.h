@@ -1075,16 +1075,11 @@ void sdk_mailbox_poison_core1_audio_streams(void);
  * queued. */
 int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
                                  uint32_t params_len);
-/* AX playback pump, split in two:
- *  - sdk_mailbox_audio_playback_pump_isr: TX-fill half, called from the
- *    audio-formatter period interrupt (isr_audio, every 20 ms) so
- *    main-loop load cannot starve the TX frontier. Integer-only.
- *  - sdk_mailbox_audio_playback_pump: core-1 refill kick, call from the
- *    core-0 main loop every pass.
- * Both are no-ops when nothing is bound. */
+/* AX playback pump, core-1 refill kick: call from the core-0 main
+ * loop every pass. No-op when nothing is bound. The TX-fill half is
+ * the audio fabric compositor (audio_fabric_isr, audio_fabric.h)
+ * since U2. */
 void sdk_mailbox_audio_playback_pump(void);
-void sdk_mailbox_audio_playback_pump_isr(void);
-int sdk_mailbox_audio_playback_active(void);
 
 /*
  * Run a crypto task's compute on the calling core. op_params points at one of
