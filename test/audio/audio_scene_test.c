@@ -750,6 +750,142 @@ static void test_trim_lifecycle(void)
 }
 
 /*
+ * Review 3855833169: trim submit/release are transactional. A failed
+ * mixer restage cannot leave software describing legs the DSP never
+ * accepted -- the previous trim, participation and the authoritative
+ * reported mixer state survive, no telemetry is emitted, no re-apply
+ * is queued, and a retry re-issues the DSP write.
+ */
+static void test_trim_write_failure_is_transactional(void)
+{
+	struct audio_scene_trim_result result;
+	struct audio_scene_control_state state;
+	int a = -1, b = -1;
+
+	audio_scene_init();
+	audio_scene_select(0);
+	pump_scene();
+	clear_writes();
+
+	/* Held trim: both legs off the baseline, unbounded. */
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, -20, -10,
+			&result) == 0 && !result.bounded &&
+		result.mixer_paula == 108 && result.mixer_ax == 54,
+		"held trim accepted",
+		fmt("bounded=%u v1=%u v2=%u", result.bounded,
+			result.mixer_paula, result.mixer_ax));
+
+	/* A failed re-submit over a held trim rolls back to the held
+	 * values: the next composition (another owner's submit) proves
+	 * the held trim is still in the sum, not the refused one. */
+	fail_next_write = 1;
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, -30, 0,
+			NULL) == -1,
+		"failed re-submit over a held trim reports failure", NULL);
+	fail_next_write = 0;
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, -5, 0,
+			&result) == 0 && !result.bounded &&
+		result.mixer_paula == 103 && result.mixer_ax == 54,
+		"held trim survives a failed re-submit in composition",
+		fmt("v1=%u v2=%u", result.mixer_paula, result.mixer_ax));
+	audio_scene_trim_release(AUDIO_SCENE_OWNER_MHI);
+
+	/* Forced neutral-release write failure: the release is
+	 * refused, its DSP write was attempted exactly once, and the
+	 * reported state keeps describing the held trim. */
+	clear_writes();
+	fail_next_write = 1;
+	check(audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI) == -1,
+		"failed neutral release reports failure", NULL);
+	fail_next_write = 0;
+	check(count_writes(WRITE_MIXER) == 1,
+		"failed release attempted exactly one mixer write",
+		fmt("writes=%d", count_writes(WRITE_MIXER)));
+	audio_scene_control_state(&state);
+	check(state.trim_paula == 108 && state.trim_ax == 54 &&
+		state.trim_bounded == 0,
+		"failed release keeps the reported held trim",
+		fmt("p=%u ax=%u bounded=%u", state.trim_paula,
+			state.trim_ax, state.trim_bounded));
+
+	/* Retry: participation survived, so the full release path
+	 * re-runs and the neutral write lands. */
+	clear_writes();
+	check(audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI) == 0,
+		"release retry succeeds", NULL);
+	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 64,
+		"release retry re-issues the neutral mixer write",
+		fmt("v1=%d v2=%d", a, b));
+	audio_scene_control_state(&state);
+	check(state.trim_paula == 128 && state.trim_ax == 64 &&
+		state.trim_bounded == 0,
+		"retry reports the baseline legs",
+		fmt("p=%u ax=%u", state.trim_paula, state.trim_ax));
+
+	/* Direct submit failure: a fresh owner's trim is not
+	 * installed -- no applied legs are claimed and the reported
+	 * state stays at the last written pair. */
+	fail_next_write = 1;
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, -20, 0,
+			&result) == -1,
+		"failed trim submit reports failure", NULL);
+	fail_next_write = 0;
+	check(result.bounded == 0 && result.mixer_paula == 0 &&
+		result.mixer_ax == 0,
+		"failed submit claims no applied legs",
+		fmt("bounded=%u v1=%u v2=%u", result.bounded,
+			result.mixer_paula, result.mixer_ax));
+	audio_scene_control_state(&state);
+	check(state.trim_paula == 128 && state.trim_ax == 64 &&
+		state.trim_bounded == 0,
+		"failed submit leaves the reported state unchanged",
+		fmt("p=%u ax=%u", state.trim_paula, state.trim_ax));
+
+	/* A bounded submit that fails writes nothing: no telemetry, no
+	 * bounded flag, previous (non-participating) state retained. */
+	fail_next_write = 1;
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, 100, 0,
+			&result) == -1,
+		"failed bounded submit reports failure", NULL);
+	fail_next_write = 0;
+	check(audio_scene_gain_reduction_events() == 0,
+		"failed bounded submit emits no gain-reduction event",
+		fmt("events=%lu",
+			(unsigned long)audio_scene_gain_reduction_events()));
+	audio_scene_control_state(&state);
+	check(state.trim_paula == 128 && state.trim_ax == 64 &&
+		state.trim_bounded == 0,
+		"failed bounded submit keeps the reported state neutral",
+		fmt("p=%u ax=%u bounded=%u", state.trim_paula,
+			state.trim_ax, state.trim_bounded));
+
+	/* The failed submits installed no participation: releasing
+	 * that owner is a write-free no-op, and the retried submit
+	 * then lands. */
+	clear_writes();
+	check(audio_scene_trim_release(AUDIO_SCENE_OWNER_MHI) == 0,
+		"never-installed owner releases as a no-op", NULL);
+	check(write_count == 0,
+		"failed submit installed no participation",
+		fmt("writes=%d", write_count));
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, -20, 0,
+			&result) == 0 && !result.bounded &&
+		result.mixer_paula == 108 && result.mixer_ax == 64,
+		"submit retry succeeds",
+		fmt("bounded=%u v1=%u v2=%u", result.bounded,
+			result.mixer_paula, result.mixer_ax));
+	audio_scene_trim_release(AUDIO_SCENE_OWNER_MHI);
+
+	check(audio_scene_gain_reduction_events() == 0,
+		"no telemetry across every failed write", NULL);
+}
+
+/*
  * Staged-edit commit failure: the staging is consumed only on
  * success, so a failed write sequence leaves the draft pending (and
  * the live tables untouched) and a retry re-writes the diff instead
@@ -1409,6 +1545,7 @@ int main(void)
 	test_baseline_trim_composition();
 	test_boot_apply_order();
 	test_trim_lifecycle();
+	test_trim_write_failure_is_transactional();
 	test_commit_failure_keeps_staging();
 	test_apply_failure_restores_volume();
 	test_dispatch_does_not_block();

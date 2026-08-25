@@ -101,7 +101,7 @@ int audio_adau_set_lpf_params(int f0)
 int audio_adau_set_mixer_vol(int vol1, int vol2)
 {
 	record_write(WRITE_MIXER, vol1, vol2);
-	return 0;
+	return fail_next_write ? -1 : 0;
 }
 
 int audio_adau_set_prefactor(int pre)
@@ -716,6 +716,105 @@ static void test_trim_neutral_releases_held_trim(void)
 		fmt("writes=%d", write_count));
 }
 
+/* ---- trim submit: a failed neutral release reports IO error ---- */
+
+/*
+ * Review 3855833169: the neutral word releases a held SDK trim
+ * through a DSP write, and that write can fail. The failure must
+ * surface as SDK_STATUS_IO_ERROR with no result payload claiming the
+ * baseline (the scene layer kept the held trim and the DSP still
+ * applies it), the control state must still report the held trim,
+ * and a retry re-issues the write and then reports the baseline.
+ */
+static void test_trim_neutral_release_write_failure(void)
+{
+	struct SDKAudioTrimSubmitPayload tr;
+	struct SDKAudioControlStateGetPayload get;
+	uint32_t flags, applied, bound, trim, baseline;
+	uint16_t status;
+	int a = -1, b = -1;
+
+	audio_scene_init();
+	memset(&tr, 0, sizeof(tr));
+	memset(&get, 0, sizeof(get));
+
+	/* Hold a non-neutral SDK trim. */
+	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(108, 44));
+	check(run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr)) ==
+		SDK_STATUS_OK, "non-neutral trim accepted", NULL);
+	check(w32(&result_buf[0]) == SDK_AUDIO_BALANCE_PACK(108, 44),
+		"held trim reports its applied pair",
+		fmt("applied=0x%lx",
+			(unsigned long)w32(&result_buf[0])));
+
+	/* Force the neutral-release mixer write to fail: an error
+	 * response, no claimed result payload, and the write was
+	 * still attempted. */
+	clear_writes();
+	fail_next_write = 1;
+	put32(tr.balance, SDK_AUDIO_BALANCE_NEUTRAL);
+	status = run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr));
+	fail_next_write = 0;
+	check(status == SDK_STATUS_IO_ERROR,
+		"neutral release reports IO error on write failure",
+		fmt("status=%u", status));
+	check(result_len == 0,
+		"failed neutral release claims no result payload",
+		fmt("len=%u", result_len));
+	check(count_writes(WRITE_MIXER) == 1,
+		"the failed neutral release attempted its DSP write",
+		fmt("writes=%d", count_writes(WRITE_MIXER)));
+
+	/* The control state still reports the held trim against the
+	 * unchanged baseline: software and DSP agree, and the failure
+	 * is retryable. */
+	status = run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get,
+		sizeof(get));
+	check(status == SDK_STATUS_OK,
+		"state get after failed release", NULL);
+	flags = w32(&result_buf[20]);
+	trim = w32(&result_buf[12]);
+	baseline = w32(&result_buf[8]);
+	check(trim == SDK_AUDIO_BALANCE_PACK(108, 44) && flags == 0,
+		"control state keeps the held trim, unbounded",
+		fmt("trim=0x%lx flags=0x%lx", (unsigned long)trim,
+			(unsigned long)flags));
+	check(baseline == SDK_AUDIO_BALANCE_PACK(128, 64),
+		"baseline unchanged by the failed release",
+		fmt("baseline=0x%lx", (unsigned long)baseline));
+
+	/* Retry: the write lands, the baseline pair is finally
+	 * reported as applied, and the control state follows. */
+	clear_writes();
+	put32(tr.balance, SDK_AUDIO_BALANCE_NEUTRAL);
+	status = run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr));
+	check(status == SDK_STATUS_OK,
+		"neutral release retry succeeds",
+		fmt("status=%u", status));
+	applied = w32(&result_buf[0]);
+	bound = w32(&result_buf[4]);
+	flags = w32(&result_buf[8]);
+	check(result_len == sizeof(struct SDKAudioTrimResultPayload) &&
+		applied == SDK_AUDIO_BALANCE_PACK(128, 64) &&
+		flags == 0 && bound == 0,
+		"retry reports the baseline pair, unbounded",
+		fmt("applied=0x%lx bound=0x%lx flags=0x%lx",
+			(unsigned long)applied, (unsigned long)bound,
+			(unsigned long)flags));
+	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 64,
+		"retry re-issues the neutral mixer write",
+		fmt("v1=%d v2=%d", a, b));
+	status = run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get,
+		sizeof(get));
+	check(status == SDK_STATUS_OK, "state get after retry", NULL);
+	check(w32(&result_buf[12]) == SDK_AUDIO_BALANCE_PACK(128, 64) &&
+		w32(&result_buf[20]) == 0,
+		"control state reports the baseline after the retry",
+		fmt("trim=0x%lx flags=0x%lx",
+			(unsigned long)w32(&result_buf[12]),
+			(unsigned long)w32(&result_buf[20])));
+}
+
 /* ---- meter read: framed snapshot through the dispatch ---- */
 
 #define TEST_FRAMES 8
@@ -1253,6 +1352,7 @@ int main(void)
 	test_trim_submit_result();
 	test_trim_neutral_keep_baseline();
 	test_trim_neutral_releases_held_trim();
+	test_trim_neutral_release_write_failure();
 	test_meter_read();
 	test_scene_save();
 	test_baseline_write_persists_through_queued_save();

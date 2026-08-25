@@ -133,8 +133,13 @@ static uint16_t ctrl_trim_submit(const uint8_t *params,
 		 * truth about the applied legs. Release is idempotent
 		 * at the scene layer: an owner that never trimmed (or
 		 * already released) stays write-free and the baseline
-		 * pair stands verbatim, unbounded. */
-		audio_scene_trim_release(AUDIO_SCENE_OWNER_SDK);
+		 * pair stands verbatim, unbounded. A failed release
+		 * write (review 3855833169) reports IO error with no
+		 * result payload: the scene layer kept the held trim,
+		 * the DSP still applies it, and claiming the baseline
+		 * here would lie about both. */
+		if (audio_scene_trim_release(AUDIO_SCENE_OWNER_SDK) != 0)
+			return SDK_STATUS_IO_ERROR;
 		sdk_put_be32(out->balance_applied,
 			SDK_AUDIO_BALANCE_PACK(audio_scene_baseline_paula(),
 				audio_scene_baseline_ax()));

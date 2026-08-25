@@ -509,17 +509,24 @@ static void emit_gain_reduction(double requested, double applied)
 }
 
 /* Re-stage only the mixer (trim submit/release): the applied master
- * chain stays as the last apply resolved it. */
+ * chain stays as the last apply resolved it. Transactional (review
+ * 3855833169): the DSP write decides first -- last_mixer_stage (the
+ * authoritative reported mixer state) and the gain-reduction
+ * telemetry move only after the write succeeded, so a failed
+ * restage leaves software exactly at the pre-failure state, exactly
+ * like a failed commit machine leaves its last-applied record. */
 static int restage_mixer(struct mixer_stage *stage)
 {
 	struct volume_resolution vol;
 
 	resolve_output_volume(&scenes[active_scene_index], &vol);
 	compute_mixer_stage(vol.chain_linear * vol.linear, stage);
+	if (audio_adau_set_mixer_vol(stage->paula, stage->ax) != 0)
+		return -1;
 	if (stage->bounded)
 		emit_gain_reduction(stage->requested, stage->applied);
 	last_mixer_stage = *stage;
-	return audio_adau_set_mixer_vol(stage->paula, stage->ax);
+	return 0;
 }
 /* The running machine, snapshotting the volume_resolution and
  * mixer_stage types defined above. In differential mode it carries a
@@ -1989,6 +1996,8 @@ int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 	struct audio_scene_trim_result *result)
 {
 	struct mixer_stage stage;
+	struct trim_state prev_trim;
+	uint8_t prev_participating;
 
 	if (result != NULL)
 		memset(result, 0, sizeof(*result));
@@ -1996,11 +2005,21 @@ int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 			AUDIO_SCENE_OWNER_SLOTS || !module_initialized)
 		return -1;
 
+	/* Install the requested trim, then let the DSP write decide: a
+	 * failed restage rolls the owner back to its previous trim and
+	 * participation (review 3855833169), so software keeps
+	 * describing the legs the DSP still holds and a retry
+	 * re-issues the write instead of silently diverging. */
+	prev_trim = trims[owner];
+	prev_participating = owner_participating[owner];
 	trims[owner].paula = paula;
 	trims[owner].ax = ax;
 	owner_participating[owner] = 1;
-	if (restage_mixer(&stage) != 0)
+	if (restage_mixer(&stage) != 0) {
+		trims[owner] = prev_trim;
+		owner_participating[owner] = prev_participating;
 		return -1;
+	}
 	/* A machine mid-flight would overwrite these legs with its
 	 * start-time snapshot at its mixer step; coalesce a re-apply so
 	 * the trim lands for good. The submit's own write above still
@@ -2020,29 +2039,43 @@ int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 	return 0;
 }
 
-void audio_scene_trim_release(uint8_t owner)
+int audio_scene_trim_release(uint8_t owner)
 {
 	struct mixer_stage stage;
+	struct trim_state prev_trim;
 
 	if (owner < AUDIO_SCENE_OWNER_AHI ||
 			owner >= AUDIO_SCENE_OWNER_SLOTS ||
 			!module_initialized)
-		return;
+		return -1;
 	/* Idempotent (review 3854408614): an owner with no participating
 	 * trim is already released -- no composition, no mixer restage,
 	 * no coalesced re-apply. A neutral submit from an owner that
 	 * never trimmed therefore stays write-free. */
 	if (!owner_participating[owner])
-		return;
+		return 0;
+	/* Transactional (review 3855833169): drop the trim, then let
+	 * the DSP write decide. On failure the owner still holds its
+	 * trim in software exactly as the DSP still holds it in
+	 * hardware -- the reported mixer state stays at the legs that
+	 * were last written, no re-apply is queued, and a retry
+	 * re-enters the full release path and re-issues the neutral
+	 * write. */
+	prev_trim = trims[owner];
 	trims[owner].paula = 0;
 	trims[owner].ax = 0;
 	owner_participating[owner] = 0;
-	restage_mixer(&stage);
+	if (restage_mixer(&stage) != 0) {
+		trims[owner] = prev_trim;
+		owner_participating[owner] = 1;
+		return -1;
+	}
 	if (commit_in_progress) {
 		pending_valid = 1;
 		pending_target = active_scene_index;
 		pending_dirty = 1;
 	}
+	return 0;
 }
 
 int audio_scene_authority_active(void)
