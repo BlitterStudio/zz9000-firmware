@@ -351,8 +351,8 @@ cross-builds and `git diff --check`.
 
 ## Matched-set release coordination
 
-- The drivers' `sdk/SDK_REF` pins public SDK commit `f0dfc80`
-  (`feat(audio): require calibrated control-plane service`). Fresh
+- The drivers' `sdk/SDK_REF` pins public SDK commit `eb0ddaa`
+  (`fix(caps): register calibrated audio helpers`). Fresh
   runners clone that exact ABI/service contract; ZZTop/AHI/MHI builds
   fail clearly if staged headers lack the audio control surface.
 - Tag order is the drivers' `RELEASING.md` dependency order: SDK first
