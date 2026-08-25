@@ -750,6 +750,142 @@ static void test_trim_lifecycle(void)
 }
 
 /*
+ * Review 3855833169: trim submit/release are transactional. A failed
+ * mixer restage cannot leave software describing legs the DSP never
+ * accepted -- the previous trim, participation and the authoritative
+ * reported mixer state survive, no telemetry is emitted, no re-apply
+ * is queued, and a retry re-issues the DSP write.
+ */
+static void test_trim_write_failure_is_transactional(void)
+{
+	struct audio_scene_trim_result result;
+	struct audio_scene_control_state state;
+	int a = -1, b = -1;
+
+	audio_scene_init();
+	audio_scene_select(0);
+	pump_scene();
+	clear_writes();
+
+	/* Held trim: both legs off the baseline, unbounded. */
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, -20, -10,
+			&result) == 0 && !result.bounded &&
+		result.mixer_paula == 108 && result.mixer_ax == 54,
+		"held trim accepted",
+		fmt("bounded=%u v1=%u v2=%u", result.bounded,
+			result.mixer_paula, result.mixer_ax));
+
+	/* A failed re-submit over a held trim rolls back to the held
+	 * values: the next composition (another owner's submit) proves
+	 * the held trim is still in the sum, not the refused one. */
+	fail_next_write = 1;
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, -30, 0,
+			NULL) == -1,
+		"failed re-submit over a held trim reports failure", NULL);
+	fail_next_write = 0;
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, -5, 0,
+			&result) == 0 && !result.bounded &&
+		result.mixer_paula == 103 && result.mixer_ax == 54,
+		"held trim survives a failed re-submit in composition",
+		fmt("v1=%u v2=%u", result.mixer_paula, result.mixer_ax));
+	audio_scene_trim_release(AUDIO_SCENE_OWNER_MHI);
+
+	/* Forced neutral-release write failure: the release is
+	 * refused, its DSP write was attempted exactly once, and the
+	 * reported state keeps describing the held trim. */
+	clear_writes();
+	fail_next_write = 1;
+	check(audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI) == -1,
+		"failed neutral release reports failure", NULL);
+	fail_next_write = 0;
+	check(count_writes(WRITE_MIXER) == 1,
+		"failed release attempted exactly one mixer write",
+		fmt("writes=%d", count_writes(WRITE_MIXER)));
+	audio_scene_control_state(&state);
+	check(state.trim_paula == 108 && state.trim_ax == 54 &&
+		state.trim_bounded == 0,
+		"failed release keeps the reported held trim",
+		fmt("p=%u ax=%u bounded=%u", state.trim_paula,
+			state.trim_ax, state.trim_bounded));
+
+	/* Retry: participation survived, so the full release path
+	 * re-runs and the neutral write lands. */
+	clear_writes();
+	check(audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI) == 0,
+		"release retry succeeds", NULL);
+	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 64,
+		"release retry re-issues the neutral mixer write",
+		fmt("v1=%d v2=%d", a, b));
+	audio_scene_control_state(&state);
+	check(state.trim_paula == 128 && state.trim_ax == 64 &&
+		state.trim_bounded == 0,
+		"retry reports the baseline legs",
+		fmt("p=%u ax=%u", state.trim_paula, state.trim_ax));
+
+	/* Direct submit failure: a fresh owner's trim is not
+	 * installed -- no applied legs are claimed and the reported
+	 * state stays at the last written pair. */
+	fail_next_write = 1;
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, -20, 0,
+			&result) == -1,
+		"failed trim submit reports failure", NULL);
+	fail_next_write = 0;
+	check(result.bounded == 0 && result.mixer_paula == 0 &&
+		result.mixer_ax == 0,
+		"failed submit claims no applied legs",
+		fmt("bounded=%u v1=%u v2=%u", result.bounded,
+			result.mixer_paula, result.mixer_ax));
+	audio_scene_control_state(&state);
+	check(state.trim_paula == 128 && state.trim_ax == 64 &&
+		state.trim_bounded == 0,
+		"failed submit leaves the reported state unchanged",
+		fmt("p=%u ax=%u", state.trim_paula, state.trim_ax));
+
+	/* A bounded submit that fails writes nothing: no telemetry, no
+	 * bounded flag, previous (non-participating) state retained. */
+	fail_next_write = 1;
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, 100, 0,
+			&result) == -1,
+		"failed bounded submit reports failure", NULL);
+	fail_next_write = 0;
+	check(audio_scene_gain_reduction_events() == 0,
+		"failed bounded submit emits no gain-reduction event",
+		fmt("events=%lu",
+			(unsigned long)audio_scene_gain_reduction_events()));
+	audio_scene_control_state(&state);
+	check(state.trim_paula == 128 && state.trim_ax == 64 &&
+		state.trim_bounded == 0,
+		"failed bounded submit keeps the reported state neutral",
+		fmt("p=%u ax=%u bounded=%u", state.trim_paula,
+			state.trim_ax, state.trim_bounded));
+
+	/* The failed submits installed no participation: releasing
+	 * that owner is a write-free no-op, and the retried submit
+	 * then lands. */
+	clear_writes();
+	check(audio_scene_trim_release(AUDIO_SCENE_OWNER_MHI) == 0,
+		"never-installed owner releases as a no-op", NULL);
+	check(write_count == 0,
+		"failed submit installed no participation",
+		fmt("writes=%d", write_count));
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, -20, 0,
+			&result) == 0 && !result.bounded &&
+		result.mixer_paula == 108 && result.mixer_ax == 64,
+		"submit retry succeeds",
+		fmt("bounded=%u v1=%u v2=%u", result.bounded,
+			result.mixer_paula, result.mixer_ax));
+	audio_scene_trim_release(AUDIO_SCENE_OWNER_MHI);
+
+	check(audio_scene_gain_reduction_events() == 0,
+		"no telemetry across every failed write", NULL);
+}
+
+/*
  * Staged-edit commit failure: the staging is consumed only on
  * success, so a failed write sequence leaves the draft pending (and
  * the live tables untouched) and a retry re-writes the diff instead
@@ -930,6 +1066,192 @@ static void test_restore_failure_keeps_staging(void)
 	check(audio_scene_get(0)->volume == 70,
 		"retried commit lands the staged edit",
 		fmt("volume=%u", audio_scene_get(0)->volume));
+}
+
+/*
+ * Review 3854408627, overwrite mode 1: a staged commit queued behind
+ * a running machine must not overwrite the running machine's
+ * rollback snapshot. The running machine's failure restores ITS OWN
+ * pre-commit tables while every queued edit -- the newest draft
+ * composes them all -- returns as staging for the retry.
+ */
+static void test_running_failure_keeps_queued_window(void)
+{
+	int i;
+
+	audio_scene_init();
+	clear_writes();
+
+	/* The running machine: a volume edit on the active scene. */
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_VOLUME, 70)
+		== 0, "stage the running volume edit", NULL);
+	check(audio_scene_commit_staged(0) == 0,
+		"running staged commit dispatches", NULL);
+
+	/* Land mid-machine (one setter call per poll). */
+	for (i = 0; i < 10; i++)
+		(void)audio_scene_poll();
+
+	/* The queued window: two more staged commits coalesce behind
+	 * the running machine. */
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_EQ_BAND_3,
+		40) == 0, "stage the first queued edit", NULL);
+	check(audio_scene_commit_staged(0) == 0,
+		"first queued commit coalesces", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_EQ_BAND_9,
+		60) == 0, "stage the second queued edit", NULL);
+	check(audio_scene_commit_staged(0) == 0,
+		"second queued commit coalesces", NULL);
+
+	/* The running machine now fails mid-sequence. */
+	fail_next_write = 1;
+	pump_scene();
+	check(audio_scene_get(0)->volume == 100,
+		"failed running machine restores its own pre-commit state",
+		fmt("volume=%u", audio_scene_get(0)->volume));
+	check(audio_scene_get(0)->eq[2] == 50 &&
+		audio_scene_get(0)->eq[8] == 50,
+		"queued edits are rolled out of the live tables",
+		fmt("eq3=%u eq9=%u", audio_scene_get(0)->eq[2],
+			audio_scene_get(0)->eq[8]));
+
+	/* The whole window survives as staging: the retry re-issues
+	 * every edit, the earlier and the latest alike. */
+	fail_next_write = 0;
+	clear_writes();
+	check(audio_scene_commit_staged(0) == 0,
+		"retry after the failed window accepted", NULL);
+	pump_scene();
+	check(write_count == 202,
+		"retry re-writes volume ramp (180) + two EQ diffs (2x11)",
+		fmt("writes=%d", write_count));
+	check(audio_scene_get(0)->volume == 70 &&
+		audio_scene_get(0)->eq[2] == 40 &&
+		audio_scene_get(0)->eq[8] == 60,
+		"retried window lands every edit",
+		fmt("volume=%u eq3=%u eq9=%u", audio_scene_get(0)->volume,
+			audio_scene_get(0)->eq[2],
+			audio_scene_get(0)->eq[8]));
+}
+
+/*
+ * Review 3854408627, overwrite mode 2: the running machine succeeds
+ * and must not clear the queued commit's rollback record when it
+ * jumps into the coalesced follow-up. The follow-up's failure
+ * restores its own pre-commit live state (the running machine's
+ * success stays applied) and its staging survives for the retry.
+ */
+static void test_queued_failure_restores_own_window(void)
+{
+	int i;
+
+	audio_scene_init();
+
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_VOLUME, 70)
+		== 0, "stage the running volume edit", NULL);
+	check(audio_scene_commit_staged(0) == 0,
+		"running staged commit dispatches", NULL);
+	for (i = 0; i < 10; i++)
+		(void)audio_scene_poll();
+	clear_writes();
+
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_EQ_BAND_3,
+		40) == 0, "stage the queued edit", NULL);
+	check(audio_scene_commit_staged(0) == 0,
+		"queued commit coalesces", NULL);
+
+	/* The running machine completes and hands the queued record to
+	 * the follow-up machine, whose EQ write for band index 2 (the
+	 * staged EQ_BAND_3 edit) then fails. */
+	fail_eq_band = 2;
+	pump_scene();
+	check(audio_scene_get(0)->volume == 70,
+		"running machine's success stays applied",
+		fmt("volume=%u", audio_scene_get(0)->volume));
+	check(audio_scene_get(0)->eq[2] == 50,
+		"failed follow-up restores its own pre-commit state",
+		fmt("eq3=%u", audio_scene_get(0)->eq[2]));
+
+	fail_eq_band = -1;
+	clear_writes();
+	check(audio_scene_commit_staged(0) == 0,
+		"retry after the failed follow-up accepted", NULL);
+	pump_scene();
+	check(write_count == 11,
+		"retry re-writes the EQ diff (11 substeps)",
+		fmt("writes=%d", write_count));
+	check(audio_scene_get(0)->eq[2] == 40,
+		"retried queued edit lands",
+		fmt("eq3=%u", audio_scene_get(0)->eq[2]));
+}
+
+/*
+ * Coalesced rollback classes: a queued window may introduce a staged
+ * baseline (or calibration) behind an earlier scene-only capture.
+ * Merging the captures must carry the baseline class along, so a
+ * failure of the running machine restores the live baseline and the
+ * staged baseline returns for the retry -- both merge sites: into
+ * the queued record, and the queued record folded into the running
+ * one.
+ */
+static void test_running_failure_keeps_queued_baseline(void)
+{
+	int i;
+
+	audio_scene_init();
+	clear_writes();
+
+	/* The running machine: a volume edit on the active scene. */
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_VOLUME, 70)
+		== 0, "stage the running volume edit", NULL);
+	check(audio_scene_commit_staged(0) == 0,
+		"running staged commit dispatches", NULL);
+	for (i = 0; i < 10; i++)
+		(void)audio_scene_poll();
+
+	/* The queued window: a scene-only edit first, then a staged
+	 * baseline joining behind it. */
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_EQ_BAND_9,
+		60) == 0, "stage the scene-only queued edit", NULL);
+	check(audio_scene_commit_staged(0) == 0,
+		"scene-only queued commit coalesces", NULL);
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_BASELINE,
+		SDK_AUDIO_BALANCE_PACK(150, 40)) == 0,
+		"stage the queued baseline edit", NULL);
+	check(audio_scene_commit_staged(0) == 0,
+		"baseline queued commit coalesces", NULL);
+
+	/* The running machine fails mid-sequence. */
+	fail_next_write = 1;
+	pump_scene();
+	check(audio_scene_baseline_paula() == 128 &&
+		audio_scene_baseline_ax() == 64,
+		"failed running machine restores the live baseline",
+		fmt("paula=%u ax=%u", audio_scene_baseline_paula(),
+			audio_scene_baseline_ax()));
+	check(audio_scene_get(0)->volume == 100 &&
+		audio_scene_get(0)->eq[8] == 50,
+		"failed running machine restores the live scene tables",
+		fmt("volume=%u eq9=%u", audio_scene_get(0)->volume,
+			audio_scene_get(0)->eq[8]));
+
+	/* The staged baseline returns with the rest of the window: the
+	 * retry re-issues every edit. */
+	fail_next_write = 0;
+	clear_writes();
+	check(audio_scene_commit_staged(0) == 0,
+		"retry after the failed window accepted", NULL);
+	pump_scene();
+	check(audio_scene_get(0)->volume == 70 &&
+		audio_scene_get(0)->eq[8] == 60,
+		"retried window lands the scene edits",
+		fmt("volume=%u eq9=%u", audio_scene_get(0)->volume,
+			audio_scene_get(0)->eq[8]));
+	check(audio_scene_baseline_paula() == 150 &&
+		audio_scene_baseline_ax() == 40,
+		"retried window lands the staged baseline",
+		fmt("paula=%u ax=%u", audio_scene_baseline_paula(),
+			audio_scene_baseline_ax()));
 }
 
 /*
@@ -1223,10 +1545,14 @@ int main(void)
 	test_baseline_trim_composition();
 	test_boot_apply_order();
 	test_trim_lifecycle();
+	test_trim_write_failure_is_transactional();
 	test_commit_failure_keeps_staging();
 	test_apply_failure_restores_volume();
 	test_dispatch_does_not_block();
 	test_restore_failure_keeps_staging();
+	test_running_failure_keeps_queued_window();
+	test_queued_failure_restores_own_window();
+	test_running_failure_keeps_queued_baseline();
 
 	test_fast_commit_diff();
 	test_fast_commit_failure_keeps_diff();

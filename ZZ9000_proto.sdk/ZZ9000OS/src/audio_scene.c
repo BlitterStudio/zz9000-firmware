@@ -221,26 +221,100 @@ struct fast_step {
  * staged edits optimistically because the machine reads the live
  * tables; if the applying machine ultimately fails, these pre-commit
  * copies are restored so the staging survives and a retry re-issues
- * the whole sequence. Cleared when the machine that began after the
- * consumption completes successfully.
+ * the whole sequence. Each record is per-slot: a window may consume
+ * drafts from several slots (and drafts seed from the live tables,
+ * so a later draft composes the earlier edits).
  */
 struct staged_rollback {
 	int valid;
-	uint8_t scene_index;       /* slot whose scene/staging was consumed */
-	int scene_saved;
-	struct audio_scene_def scene;
-	struct scene_staging staging;
+	uint8_t scene_saved[AUDIO_SCENE_COUNT]; /* slots consumed here */
+	struct audio_scene_def scene[AUDIO_SCENE_COUNT];
+	struct scene_staging staging[AUDIO_SCENE_COUNT];
 	int baseline_saved;
 	uint8_t baseline_paula;
 	uint8_t baseline_ax;
-	int baseline_staged;
 	int calibration_saved;
 	uint16_t ceiling_paula;
 	uint16_t ceiling_ax;
-	int calibration_staged;
 };
 
-static struct staged_rollback rollback;
+/*
+ * Two explicit ownership slots (review 3854408627): RB_RUNNING
+ * belongs to the machine currently between commit_begin() and its
+ * terminal state; RB_QUEUED accumulates every staged commit coalesced
+ * behind it and is adopted by the follow-up machine the running one
+ * jumps into on success. A record therefore survives until its OWN
+ * machine settles, so a coalesced commit can never overwrite the
+ * running machine's snapshot nor be cleared by its success.
+ */
+#define RB_RUNNING 0
+#define RB_QUEUED  1
+static struct staged_rollback rollbacks[2];
+
+/* Fold a newer capture into an older record: a failure restores the
+ * live tables to the OLDEST capture (the state before the window
+ * opened), while the NEWEST staging carries every edit consumed in
+ * the window (drafts compose because each seeds from the live
+ * tables) -- neither the earlier nor the latest edit is lost. */
+static void rollback_merge(struct staged_rollback *old,
+	const struct staged_rollback *newer)
+{
+	int i;
+
+	for (i = 0; i < AUDIO_SCENE_COUNT; i++) {
+		if (!newer->scene_saved[i])
+			continue;
+		if (!old->scene_saved[i]) {
+			old->scene_saved[i] = 1;
+			old->scene[i] = newer->scene[i];
+		}
+		old->staging[i] = newer->staging[i];
+	}
+	/* Baseline/calibration: the oldest saved pair wins -- a class
+	 * the older record has not captured is taken from the newer
+	 * one, so a window that introduces a staged baseline (or
+	 * calibration) behind an earlier scene-only capture keeps its
+	 * rollback/staging record. The staged values live in the
+	 * module statics and are re-exposed by the restored staged
+	 * flags on rollback_restore. */
+	if (!old->baseline_saved && newer->baseline_saved) {
+		old->baseline_saved = 1;
+		old->baseline_paula = newer->baseline_paula;
+		old->baseline_ax = newer->baseline_ax;
+	}
+	if (!old->calibration_saved && newer->calibration_saved) {
+		old->calibration_saved = 1;
+		old->ceiling_paula = newer->ceiling_paula;
+		old->ceiling_ax = newer->ceiling_ax;
+	}
+}
+
+
+/* Restore a record's pre-commit state: the live tables go back and
+ * the saved staging returns as the pending draft, so a retry
+ * re-issues the whole window. Consumes the record. */
+static void rollback_restore(struct staged_rollback *rb)
+{
+	int i;
+
+	for (i = 0; i < AUDIO_SCENE_COUNT; i++) {
+		if (!rb->scene_saved[i])
+			continue;
+		scenes[i] = rb->scene[i];
+		staging[i] = rb->staging[i];
+	}
+	if (rb->baseline_saved) {
+		baseline_paula = rb->baseline_paula;
+		baseline_ax = rb->baseline_ax;
+		baseline_staged = 1; /* staged pair returns for the retry */
+	}
+	if (rb->calibration_saved) {
+		ceiling_paula = rb->ceiling_paula;
+		ceiling_ax = rb->ceiling_ax;
+		calibration_staged = 1;
+	}
+	rb->valid = 0;
+}
 
 /* Synchronously drain the machine to its terminal state (bounded by
  * the fixed per-machine step count; nothing can enqueue new work
@@ -435,17 +509,24 @@ static void emit_gain_reduction(double requested, double applied)
 }
 
 /* Re-stage only the mixer (trim submit/release): the applied master
- * chain stays as the last apply resolved it. */
+ * chain stays as the last apply resolved it. Transactional (review
+ * 3855833169): the DSP write decides first -- last_mixer_stage (the
+ * authoritative reported mixer state) and the gain-reduction
+ * telemetry move only after the write succeeded, so a failed
+ * restage leaves software exactly at the pre-failure state, exactly
+ * like a failed commit machine leaves its last-applied record. */
 static int restage_mixer(struct mixer_stage *stage)
 {
 	struct volume_resolution vol;
 
 	resolve_output_volume(&scenes[active_scene_index], &vol);
 	compute_mixer_stage(vol.chain_linear * vol.linear, stage);
+	if (audio_adau_set_mixer_vol(stage->paula, stage->ax) != 0)
+		return -1;
 	if (stage->bounded)
 		emit_gain_reduction(stage->requested, stage->applied);
 	last_mixer_stage = *stage;
-	return audio_adau_set_mixer_vol(stage->paula, stage->ax);
+	return 0;
 }
 /* The running machine, snapshotting the volume_resolution and
  * mixer_stage types defined above. In differential mode it carries a
@@ -458,7 +539,6 @@ struct commit_machine {
 	struct volume_resolution vol;  /* resolved at machine start */
 	struct mixer_stage stage;      /* composed at machine start */
 	int failed;
-	int owns_rollback; /* this machine applies a staged commit's tables */
 	int fast;          /* differential mode: todo list, no fade */
 	struct fast_step todo[224]; /* worst: full diff + 99-step ramp */
 	int todo_count;
@@ -614,7 +694,6 @@ static void commit_begin(uint8_t index, int fast)
 	if (commit.stage.bounded)
 		emit_gain_reduction(commit.stage.requested,
 			commit.stage.applied);
-	commit.owns_rollback = rollback.valid;
 	pending_valid = 0;
 	pending_target = 0;
 	pending_dirty = 0;
@@ -636,27 +715,22 @@ static void commit_finish(void)
 		/* A mid-sequence failure leaves the chain faded down and
 		 * half-written; the abort step has best-effort restored the
 		 * resolved output volume so the DAC is not left silent (a
-		 * full retry goes through the commit surface). A staged
-		 * commit that was optimistically taken from the tables goes
-		 * back: the staging survives for the retry. */
-		if (rollback.valid) {
-			if (rollback.scene_saved) {
-				scenes[rollback.scene_index] = rollback.scene;
-				staging[rollback.scene_index] = rollback.staging;
-			}
-			if (rollback.baseline_saved) {
-				baseline_paula = rollback.baseline_paula;
-				baseline_ax = rollback.baseline_ax;
-				baseline_staged = rollback.baseline_staged;
-			}
-			if (rollback.calibration_saved) {
-				ceiling_paula = rollback.ceiling_paula;
-				ceiling_ax = rollback.ceiling_ax;
-				calibration_staged =
-					rollback.calibration_staged;
-			}
-			rollback.valid = 0;
+		 * full retry goes through the commit surface). The staged
+		 * commits optimistically taken from the tables go back:
+		 * the queued window folds into the running record, so one
+		 * restore returns the live tables to the running machine's
+		 * pre-commit state while the composed draft (every edit
+		 * consumed this window) returns as staging for the retry. */
+		if (rollbacks[RB_QUEUED].valid) {
+			if (rollbacks[RB_RUNNING].valid)
+				rollback_merge(&rollbacks[RB_RUNNING],
+					&rollbacks[RB_QUEUED]);
+			else
+				rollbacks[RB_RUNNING] = rollbacks[RB_QUEUED];
+			rollbacks[RB_QUEUED].valid = 0;
 		}
+		if (rollbacks[RB_RUNNING].valid)
+			rollback_restore(&rollbacks[RB_RUNNING]);
 		/* A failed machine drops any coalesced follow-up: the
 		 * failure is the terminal outcome and the retry re-enters
 		 * through the commit surface. */
@@ -667,10 +741,11 @@ static void commit_finish(void)
 	/* Success: the DSP now holds this machine's snapshot. Record it
 	 * as the state the next differential commit diffs against -- a
 	 * failed machine records nothing, so its retry rewrites the full
-	 * diff against the state before the failure. */
+	 * diff against the state before the failure. The machine's own
+	 * rollback record settles with it; a queued record belongs to
+	 * the follow-up machine alone. */
 	fast_record_applied(&commit.scene, &commit.vol, &commit.stage);
-	if (rollback.valid && commit.owns_rollback)
-		rollback.valid = 0; /* the staged edits are now applied */
+	rollbacks[RB_RUNNING].valid = 0; /* its staged edits are applied */
 	if (pending_valid &&
 		(pending_target != commit.scene_index || pending_dirty)) {
 		uint8_t target = pending_target;
@@ -679,6 +754,10 @@ static void commit_finish(void)
 		pending_valid = 0;
 		pending_dirty = 0;
 		pending_fast = 0;
+		/* The coalesced follow-up adopts the queued window's
+		 * rollback record as its own before it starts. */
+		rollbacks[RB_RUNNING] = rollbacks[RB_QUEUED];
+		rollbacks[RB_QUEUED].valid = 0;
 		commit_begin(target, fast);
 	}
 }
@@ -1289,7 +1368,7 @@ void audio_scene_init(void)
 	pending_target = 0;
 	pending_dirty = 0;
 	pending_fast = 0;
-	memset(&rollback, 0, sizeof(rollback));
+	memset(rollbacks, 0, sizeof(rollbacks));
 	memset(&last_mixer_stage, 0, sizeof(last_mixer_stage));
 	/* audio_adau_init leaves the DSP holding the power-on state the
 	 * module defaults describe (scene 0 at the default baseline
@@ -1325,7 +1404,8 @@ int audio_scene_apply_after_dsp_init(void)
 	pending_valid = 0;
 	pending_dirty = 0;
 	pending_fast = 0;
-	rollback.valid = 0;
+	rollbacks[RB_RUNNING].valid = 0;
+	rollbacks[RB_QUEUED].valid = 0;
 	/* An in-flight CFG save describes an SD transaction the reset
 	 * hook abandons (zz_config_save_reset drops its junk temp); drop
 	 * the machine the same way so a post-reset save is not refused
@@ -1626,6 +1706,7 @@ int audio_scene_stage_param(uint8_t index, uint32_t param,
 
 int audio_scene_commit_staged(uint8_t index)
 {
+	struct staged_rollback capture;
 	int apply = 0;
 
 	if (!module_initialized || index >= AUDIO_SCENE_COUNT)
@@ -1633,29 +1714,26 @@ int audio_scene_commit_staged(uint8_t index)
 
 	/* The applying machine reads the live tables, so the staged
 	 * edits are taken optimistically first; if that machine
-	 * ultimately fails, the pre-commit state saved in rollback is
-	 * restored and the failed machine does NOT record its state as
-	 * applied, so a retry re-writes the diff instead of returning OK
-	 * with zero writes (the edit set would be lost). */
-	memset(&rollback, 0, sizeof(rollback));
-	rollback.scene_index = index;
+	 * ultimately fails, this pre-commit capture is restored and the
+	 * failed machine does NOT record its state as applied, so a
+	 * retry re-writes the diff instead of returning OK with zero
+	 * writes (the edit set would be lost). */
+	memset(&capture, 0, sizeof(capture));
 
 	/* A staged operator baseline joins the same commit (R17). */
 	if (baseline_staged) {
-		rollback.baseline_saved = 1;
-		rollback.baseline_paula = baseline_paula;
-		rollback.baseline_ax = baseline_ax;
-		rollback.baseline_staged = baseline_staged;
+		capture.baseline_saved = 1;
+		capture.baseline_paula = baseline_paula;
+		capture.baseline_ax = baseline_ax;
 		baseline_paula = staged_baseline_paula;
 		baseline_ax = staged_baseline_ax;
 		baseline_staged = 0;
 		apply = 1;
 	}
 	if (calibration_staged) {
-		rollback.calibration_saved = 1;
-		rollback.ceiling_paula = ceiling_paula;
-		rollback.ceiling_ax = ceiling_ax;
-		rollback.calibration_staged = calibration_staged;
+		capture.calibration_saved = 1;
+		capture.ceiling_paula = ceiling_paula;
+		capture.ceiling_ax = ceiling_ax;
 		ceiling_paula = staged_ceiling_paula;
 		ceiling_ax = staged_ceiling_ax;
 		calibration_staged = 0;
@@ -1663,9 +1741,9 @@ int audio_scene_commit_staged(uint8_t index)
 	}
 	if (staging[index].has_draft) {
 		/* Stage-time validation keeps every draft a valid scene. */
-		rollback.scene_saved = 1;
-		rollback.scene = scenes[index];
-		rollback.staging = staging[index];
+		capture.scene_saved[index] = 1;
+		capture.scene[index] = scenes[index];
+		capture.staging[index] = staging[index];
 		scenes[index] = staging[index].draft;
 		staging[index].has_draft = 0;
 		if (index == active_scene_index)
@@ -1673,10 +1751,18 @@ int audio_scene_commit_staged(uint8_t index)
 	}
 	if (!apply)
 		return 0; /* inactive slot, nothing can fail: consumed */
-	rollback.valid = 1;
+	capture.valid = 1;
 	if (commit_in_progress) {
 		/* A machine is mid-flight on its own snapshot; the staged
-		 * state is applied by the coalesced follow-up machine. */
+		 * state is applied by the coalesced follow-up machine,
+		 * which adopts this capture -- composed with any earlier
+		 * queued one -- as its own rollback record, so it can
+		 * survive neither overwritten by the running machine's
+		 * failure nor cleared by its success. */
+		if (rollbacks[RB_QUEUED].valid)
+			rollback_merge(&rollbacks[RB_QUEUED], &capture);
+		else
+			rollbacks[RB_QUEUED] = capture;
 		pending_valid = 1;
 		pending_target = active_scene_index;
 		pending_dirty = 1;
@@ -1685,6 +1771,7 @@ int audio_scene_commit_staged(uint8_t index)
 	}
 	/* A live edit commit runs differentially: only the parameters
 	 * the staging changed, no fade envelope. */
+	rollbacks[RB_RUNNING] = capture;
 	commit_begin(active_scene_index, 1);
 	return 0;
 }
@@ -1909,6 +1996,8 @@ int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 	struct audio_scene_trim_result *result)
 {
 	struct mixer_stage stage;
+	struct trim_state prev_trim;
+	uint8_t prev_participating;
 
 	if (result != NULL)
 		memset(result, 0, sizeof(*result));
@@ -1916,11 +2005,21 @@ int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 			AUDIO_SCENE_OWNER_SLOTS || !module_initialized)
 		return -1;
 
+	/* Install the requested trim, then let the DSP write decide: a
+	 * failed restage rolls the owner back to its previous trim and
+	 * participation (review 3855833169), so software keeps
+	 * describing the legs the DSP still holds and a retry
+	 * re-issues the write instead of silently diverging. */
+	prev_trim = trims[owner];
+	prev_participating = owner_participating[owner];
 	trims[owner].paula = paula;
 	trims[owner].ax = ax;
 	owner_participating[owner] = 1;
-	if (restage_mixer(&stage) != 0)
+	if (restage_mixer(&stage) != 0) {
+		trims[owner] = prev_trim;
+		owner_participating[owner] = prev_participating;
 		return -1;
+	}
 	/* A machine mid-flight would overwrite these legs with its
 	 * start-time snapshot at its mixer step; coalesce a re-apply so
 	 * the trim lands for good. The submit's own write above still
@@ -1940,23 +2039,43 @@ int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 	return 0;
 }
 
-void audio_scene_trim_release(uint8_t owner)
+int audio_scene_trim_release(uint8_t owner)
 {
 	struct mixer_stage stage;
+	struct trim_state prev_trim;
 
 	if (owner < AUDIO_SCENE_OWNER_AHI ||
 			owner >= AUDIO_SCENE_OWNER_SLOTS ||
 			!module_initialized)
-		return;
+		return -1;
+	/* Idempotent (review 3854408614): an owner with no participating
+	 * trim is already released -- no composition, no mixer restage,
+	 * no coalesced re-apply. A neutral submit from an owner that
+	 * never trimmed therefore stays write-free. */
+	if (!owner_participating[owner])
+		return 0;
+	/* Transactional (review 3855833169): drop the trim, then let
+	 * the DSP write decide. On failure the owner still holds its
+	 * trim in software exactly as the DSP still holds it in
+	 * hardware -- the reported mixer state stays at the legs that
+	 * were last written, no re-apply is queued, and a retry
+	 * re-enters the full release path and re-issues the neutral
+	 * write. */
+	prev_trim = trims[owner];
 	trims[owner].paula = 0;
 	trims[owner].ax = 0;
 	owner_participating[owner] = 0;
-	restage_mixer(&stage);
+	if (restage_mixer(&stage) != 0) {
+		trims[owner] = prev_trim;
+		owner_participating[owner] = 1;
+		return -1;
+	}
 	if (commit_in_progress) {
 		pending_valid = 1;
 		pending_target = active_scene_index;
 		pending_dirty = 1;
 	}
+	return 0;
 }
 
 int audio_scene_authority_active(void)

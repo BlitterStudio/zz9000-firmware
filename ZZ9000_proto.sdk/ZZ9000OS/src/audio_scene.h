@@ -150,11 +150,16 @@ double audio_scene_enforced_boundary(void);
 
 /* Source-trim lifecycle (R3, R4): submit composes with the baseline
  * under the enforced boundary; release resets that owner's trim to
- * neutral. submit returns 0 and fills *result (when non-NULL); owner
- * must be one of AUDIO_SCENE_OWNER_AHI/MHI/SDK. */
+ * neutral -- idempotently: an owner with no participating trim is
+ * already released, so release performs no composition and no mixer
+ * restage. Both are transactional (review 3855833169): a failed
+ * mixer restage restores the previous trim, participation and
+ * reported mixer state, queues no re-apply, and a retry re-issues
+ * the DSP write. submit returns 0 and fills *result (when non-NULL);
+ * owner must be one of AUDIO_SCENE_OWNER_AHI/MHI/SDK. */
 int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 	struct audio_scene_trim_result *result);
-void audio_scene_trim_release(uint8_t owner);
+int audio_scene_trim_release(uint8_t owner);
 
 /* ---- staged scene edits and the single commit path (U4, KTD7) ---- */
 
@@ -184,10 +189,14 @@ int audio_scene_stage_param(uint8_t index, uint32_t param,
  * changes. A commit of an inactive scene stores the staged
  * definition without touching the DSP. Returns 0 once the staged
  * edits are taken into the live tables and the machine is started
- * (or, for a mid-flight machine, the re-apply is coalesced); the
- * staging is consumed only when the applying machine ultimately
+ * (or, for a mid-flight machine, the re-apply is coalesced);
+ * the staging is consumed only when the applying machine ultimately
  * succeeds -- a failing machine restores the pre-commit tables so a
- * retry re-issues the whole sequence.
+ * retry re-issues the whole sequence. A commit coalesced behind a
+ * running machine owns its rollback record until its own follow-up
+ * machine settles: the running machine's failure also folds the
+ * queued record in (its edits return as staging for the retry),
+ * while its success hands the record to the follow-up alone.
  */
 int audio_scene_commit_staged(uint8_t index);
 

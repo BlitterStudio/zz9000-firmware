@@ -96,11 +96,12 @@ static uint16_t ctrl_scene_write(const uint8_t *params,
 /* Owner source trim (R3). The ABI balance word is the requested
  * absolute mixer pair (two 0..255 volumes, 127 = 0 dB each,
  * AP_DSP_SET_VOLUMES packing) -- except the reserved neutral word
- * 0x7f7f, which means "no trim from this owner": the reply reports
- * the operator baseline pair as applied, unbounded, and the mixer is
- * not restaged (an absolute 127/127 request is therefore not
- * expressible). Any other word is converted to legs-relative deltas
- * against the baseline. The payload carries no owner identity -- the
+ * 0x7f7f, which means "no trim from this owner": it releases the SDK
+ * trim slot, then the reply reports the operator baseline pair as
+ * applied, unbounded (an absolute 127/127 request is therefore not
+ * expressible); with no trim held the release is a write-free no-op.
+ * Any other word is converted to legs-relative deltas against the
+ * baseline. The payload carries no owner identity -- the
  * single-owner model holds until I1 -- so every mailbox trim targets
  * the SDK slot and a driver releases by submitting the neutral
  * balance. */
@@ -125,10 +126,20 @@ static uint16_t ctrl_trim_submit(const uint8_t *params,
 
 	balance = sdk_get_be32(p->balance);
 	if (balance == SDK_AUDIO_BALANCE_NEUTRAL) {
-		/* Keep-baseline: no trim from this owner, so no
-		 * composition and no mixer restage -- the operator
-		 * baseline pair stands and is reported verbatim,
-		 * unbounded. */
+		/* Keep-baseline release: the reserved word is this
+		 * owner's documented release path, so a trim it
+		 * previously submitted is dropped before the operator
+		 * baseline is reported -- the reply then tells the
+		 * truth about the applied legs. Release is idempotent
+		 * at the scene layer: an owner that never trimmed (or
+		 * already released) stays write-free and the baseline
+		 * pair stands verbatim, unbounded. A failed release
+		 * write (review 3855833169) reports IO error with no
+		 * result payload: the scene layer kept the held trim,
+		 * the DSP still applies it, and claiming the baseline
+		 * here would lie about both. */
+		if (audio_scene_trim_release(AUDIO_SCENE_OWNER_SDK) != 0)
+			return SDK_STATUS_IO_ERROR;
 		sdk_put_be32(out->balance_applied,
 			SDK_AUDIO_BALANCE_PACK(audio_scene_baseline_paula(),
 				audio_scene_baseline_ax()));
