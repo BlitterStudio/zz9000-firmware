@@ -106,6 +106,39 @@ def main():
     r = ana.analyze_file(paula_right, RATE, 2, True, TONE, 32760, 0.5,
                          auto_tone=True)
     assert abs(r["tone_hz"] - actual_paula_tone) < 0.05, r["tone_hz"]
+    r = ana.analyze_file(paula_right, RATE, 2, True, TONE, 32760, 0.5,
+                         auto_tone=True, selected_channel=2)
+    assert len(r["channels"]) == 1, r
+    assert r["channels"][0]["channel"] == 2, r
+    assert r["verdict"] == "CLEAN", r
+
+    # A simultaneous reference channel establishes a non-zero source
+    # distortion floor; only THD growth above that floor drives onset.
+    referenced_clean = path("referenced-clean.raw")
+    referenced_dirty = path("referenced-dirty.raw")
+    reference_h3 = 0.005 * 32767.0  # 1.0% against the 0.5-FS reference
+    synth(referenced_clean, 2, 1.0, True,
+          lambda i, c: sine(i, (0.3 if c == 0 else 0.5) * 32767.0)
+          + (0.0042 * 32767.0 if c == 0 else reference_h3)
+          * math.sin(2.0 * math.pi * 3 * TONE * i / RATE))
+    synth(referenced_dirty, 2, 1.0, True,
+          lambda i, c: sine(i, (0.3 if c == 0 else 0.5) * 32767.0)
+          + (0.0048 * 32767.0 if c == 0 else reference_h3)
+          * math.sin(2.0 * math.pi * 3 * TONE * i / RATE))
+    r_clean = ana.analyze_file(
+        referenced_clean, RATE, 2, True, TONE, 32760, 0.5,
+        selected_channel=1, reference_channel=2)
+    r_dirty = ana.analyze_file(
+        referenced_dirty, RATE, 2, True, TONE, 32760, 0.5,
+        selected_channel=1, reference_channel=2)
+    assert r_clean["verdict"] == "CLEAN", r_clean
+    assert r_dirty["verdict"] == "SATURATED", r_dirty
+    assert r_dirty["reference"]["channel"] == 2, r_dirty
+    assert abs(r_dirty["reference"]["thd_pct"] - 1.0) < 0.05, r_dirty
+    assert abs(r_dirty["channels"][0]["thd_rise_pct"] - 0.6) < 0.05, \
+        r_dirty
+    o = ana.find_onset([r_clean, r_dirty], [48.0, 56.0])
+    assert o["interval"] == "(48.0, 56.0]", o
 
     # --- DAC saturation as seen through loopback attenuation: crest
     # flattened at an interior level (not the capture rail) ---
@@ -197,6 +230,22 @@ def main():
     doc = json.loads(buf.getvalue())
     assert doc["tone"] == "auto", doc
     assert abs(doc["captures"][0]["tone_hz"] - actual_paula_tone) < 0.05
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = ana.main(["--json", "--auto-tone", "--channel", "2",
+                       paula_right])
+    assert rc == 0
+    doc = json.loads(buf.getvalue())
+    assert doc["selected_channel"] == 2, doc
+    assert doc["captures"][0]["channels"][0]["channel"] == 2, doc
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = ana.main(["--json", "--channel", "1",
+                       "--reference-channel", "2", referenced_dirty])
+    assert rc == 0
+    doc = json.loads(buf.getvalue())
+    assert doc["reference_channel"] == 2, doc
+    assert doc["captures"][0]["reference"]["channel"] == 2, doc
 
     for f in os.listdir(tmp):
         os.unlink(os.path.join(tmp, f))

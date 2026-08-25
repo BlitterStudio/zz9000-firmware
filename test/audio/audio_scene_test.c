@@ -411,7 +411,7 @@ static void test_staging_one_step_over(void)
 	event = audio_scene_last_gain_reduction();
 	check(event != NULL && near(event->requested, 193.0) &&
 		near(event->applied, 191.0) &&
-		near(event->boundary, AUDIO_SCENE_ENFORCED_BOUNDARY),
+		near(event->boundary, audio_scene_enforced_boundary()),
 		"event reports requested/applied/boundary",
 		event ? fmt("req=%.3f applied=%.3f boundary=%.3f",
 			event->requested, event->applied, event->boundary)
@@ -423,6 +423,63 @@ static void test_staging_one_step_over(void)
 		fmt("v1=%d v2=%d", a, b));
 	check(audio_scene_gain_reduction_events() == 1,
 		"release adds no event", NULL);
+}
+
+static void test_leg_calibration_weighting(void)
+{
+	struct audio_scene_trim_result result;
+	struct audio_scene_control_state state;
+
+	audio_scene_init();
+	audio_scene_set_baseline(0, 0);
+	pump_scene();
+	check(audio_scene_set_calibration(48, 80) == 0,
+		"measured calibration accepted", NULL);
+	pump_scene();
+	audio_scene_control_state(&state);
+	check(state.ceiling_paula == 48 && state.ceiling_ax == 80 &&
+		state.ceiling == 60,
+		"calibration state derives AX-equivalent boundary",
+		fmt("p=%lu ax=%lu boundary=%lu",
+			(unsigned long)state.ceiling_paula,
+			(unsigned long)state.ceiling_ax,
+			(unsigned long)state.ceiling));
+
+	memset(&result, 0, sizeof(result));
+	audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 36, 0, &result);
+	check(!result.bounded && result.mixer_paula == 36,
+		"pure Paula policy boundary is 36", NULL);
+	audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI);
+
+	audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 0, 60, &result);
+	check(!result.bounded && result.mixer_ax == 60,
+		"pure AX policy boundary is 60", NULL);
+	audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI);
+
+	audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 18, 30, &result);
+	check(!result.bounded,
+		"half Paula plus half AX ceiling reaches policy boundary", NULL);
+	audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI);
+
+	audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 19, 30, &result);
+	check(result.bounded && result.mixer_paula == 18 &&
+		result.mixer_ax == 29,
+		"weighted step over boundary clamps proportionally",
+		fmt("bounded=%u p=%u ax=%u", result.bounded,
+			result.mixer_paula, result.mixer_ax));
+	audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI);
+
+	check(audio_scene_set_calibration(0, 80) == -1 &&
+		audio_scene_set_calibration(48, 4096) == -1,
+		"invalid calibration rejected", NULL);
+	check(audio_scene_stage_param(0,
+		SDK_AUDIO_SCENE_PARAM_CALIBRATION,
+		SDK_AUDIO_CALIBRATION_PACK(48, 80)) == 0,
+		"calibration stages through scene-write grammar", NULL);
+	check(audio_scene_stage_param(0,
+		SDK_AUDIO_SCENE_PARAM_CALIBRATION,
+		SDK_AUDIO_CALIBRATION_PACK(0, 80)) == -1,
+		"invalid staged calibration rejected", NULL);
 }
 
 /*
@@ -451,8 +508,8 @@ static void test_scene_alone_clamps(void)
 	event = audio_scene_last_gain_reduction();
 	check(event != NULL &&
 		near(event->requested, 192.0 * boost) &&
-		event->applied <= AUDIO_SCENE_ENFORCED_BOUNDARY &&
-		near(event->boundary, AUDIO_SCENE_ENFORCED_BOUNDARY),
+		event->applied <= audio_scene_enforced_boundary() &&
+		near(event->boundary, audio_scene_enforced_boundary()),
 		"scene-alone event within boundary",
 		event ? fmt("req=%.3f applied=%.3f", event->requested,
 			event->applied) : "no event");
@@ -1160,6 +1217,7 @@ int main(void)
 	test_accepted_paths_route_through_scene();
 	test_staging_at_boundary();
 	test_staging_one_step_over();
+	test_leg_calibration_weighting();
 	test_scene_alone_clamps();
 	test_eq_boost_clamps();
 	test_baseline_trim_composition();

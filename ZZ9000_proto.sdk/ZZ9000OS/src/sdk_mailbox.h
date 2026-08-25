@@ -444,6 +444,17 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
                                                * A NAME-only commit
                                                * issues zero DSP
                                                * writes. */
+#define SDK_AUDIO_SCENE_PARAM_CALIBRATION 17U /* per-card measured clean
+                                               * ceilings: Paula low 16,
+                                               * AX high 16; scene ignored */
+
+#define SDK_AUDIO_CEILING_MIN 1U
+#define SDK_AUDIO_CEILING_MAX 4095U
+#define SDK_AUDIO_CALIBRATION_PAULA(w) ((uint32_t)(w) & 0xffffU)
+#define SDK_AUDIO_CALIBRATION_AX(w) (((uint32_t)(w) >> 16) & 0xffffU)
+#define SDK_AUDIO_CALIBRATION_PACK(paula, ax) \
+	((uint32_t)((uint32_t)(uint16_t)(paula) | \
+	 ((uint32_t)(uint16_t)(ax) << 16)))
 
 /* Staged edits accumulate firmware-side; COMMIT asks for one atomic
  * glitch-free commit (fade -> ordered verified writes -> restore) of
@@ -567,11 +578,9 @@ struct SDKAudioControlStateGetPayload {
 };
 
 /* active_scene is the current index; baseline and trim are packed
- * balance words; ceiling is the enforced combined-level boundary in
- * mixer-value units (combined levels above it clamp with a
- * gain-reduction event). save_status (append-only) is the save
- * machine's report: SDK_AUDIO_SCENE_SAVE_QUEUED while a save runs,
- * else the most recent settled SDK_AUDIO_SCENE_SAVE_* outcome. */
+ * balance words. ceiling is the enforced boundary in AX-equivalent
+ * mixer units. ceiling_paula and ceiling_ax are persisted measured
+ * clean ceilings; save_status remains the append-only tail word. */
 struct SDKAudioControlStateResultPayload {
 	uint8_t active_scene[4];
 	uint8_t scene_count[4];
@@ -579,7 +588,9 @@ struct SDKAudioControlStateResultPayload {
 	uint8_t trim[4];
 	uint8_t ceiling[4];
 	uint8_t flags[4];
-	uint8_t reserved[20];
+	uint8_t ceiling_paula[4];
+	uint8_t ceiling_ax[4];
+	uint8_t reserved[12];
 	uint8_t save_status[4];
 };
 

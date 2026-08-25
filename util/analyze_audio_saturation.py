@@ -227,39 +227,74 @@ def run_metrics(samples, rail):
 
 
 def analyze_file(path, rate, channels, big_endian, tone, rail, thd_pct,
-                 auto_tone=False):
-    chans = load_channels(path, channels, big_endian)
+                 auto_tone=False, selected_channel=None,
+                 reference_channel=None):
+    loaded = load_channels(path, channels, big_endian)
+    if selected_channel is not None:
+        if selected_channel < 1 or selected_channel > channels:
+            raise ValueError("selected channel outside capture")
+        selected = [(selected_channel, loaded[selected_channel - 1])]
+    else:
+        selected = list(enumerate(loaded, 1))
+    if reference_channel is not None:
+        if selected_channel is None:
+            raise ValueError("reference channel requires selected channel")
+        if reference_channel < 1 or reference_channel > channels:
+            raise ValueError("reference channel outside capture")
+        if reference_channel == selected_channel:
+            raise ValueError("reference channel must differ from selected channel")
+        reference_samples = loaded[reference_channel - 1]
+    else:
+        reference_samples = None
     if auto_tone:
-        tone_source = max(
-            chans, key=lambda samples: max(abs(x) for x in samples))
+        if reference_samples is not None:
+            tone_source = reference_samples
+        else:
+            tone_source = max(
+                (samples for _, samples in selected),
+                key=lambda samples: max(abs(x) for x in samples))
         measured_tone = estimate_tone(tone_source, rate)
     else:
         measured_tone = tone
     reports = []
-    for samples in chans:
+    for channel_number, samples in selected:
         m = run_metrics(samples, rail)
+        m["channel"] = channel_number
         (m["thd_pct"], m["residual_dbfs"],
          m["fundamental_dbfs"]) = distortion_metrics(
              samples, rate, measured_tone)
         reports.append(m)
 
-    if any(m["rail_regions"] for m in reports):
+    reference = None
+    if reference_samples is not None:
+        reference = run_metrics(reference_samples, rail)
+        reference["channel"] = reference_channel
+        (reference["thd_pct"], reference["residual_dbfs"],
+         reference["fundamental_dbfs"]) = distortion_metrics(
+             reference_samples, rate, measured_tone)
+        for m in reports:
+            m["thd_rise_pct"] = m["thd_pct"] - reference["thd_pct"]
+    fault_reports = reports + ([reference] if reference is not None else [])
+    if any(m["rail_regions"] for m in fault_reports):
         verdict = "FAULT"
     elif any(m["flattop_regions"] >= FLATTOP_REGION_MIN
              for m in reports) or \
-            any(m["thd_pct"] > thd_pct for m in reports):
+            any((m["thd_rise_pct"] if reference is not None
+                 else m["thd_pct"]) > thd_pct for m in reports):
         verdict = "SATURATED"
     else:
         verdict = "CLEAN"
 
     return {
         "file": path,
-        "frames": len(chans[0]),
-        "seconds": len(chans[0]) / float(rate),
+        "frames": len(selected[0][1]),
+        "seconds": len(selected[0][1]) / float(rate),
         "tone_hz": measured_tone,
         "channels": reports,
+        "reference": reference,
         "verdict": verdict,
     }
+
 
 
 HEADROOM = 0.75  # enforced boundary = ceiling * 3/4 (~2.5 dB), see the doc
@@ -290,13 +325,16 @@ def find_onset(reports, levels):
 
 
 def channel_summary(m):
-    return ("peak %.6s dBFS  fundamental %.6s dBFS  dc %+.1f  "
-            "thd %.3f%%  flattop %d (max %d)  rail %d/%d" % (
-                "%.2f" % m["peak_dbfs"],
-                "%.2f" % m["fundamental_dbfs"],
-                m["dc"], m["thd_pct"],
-                m["flattop_regions"], m["flattop_longest"],
-                m["rail_samples"], m["rail_regions"]))
+    result = ("peak %.6s dBFS  fundamental %.6s dBFS  dc %+.1f  "
+              "thd %.3f%%  flattop %d (max %d)  rail %d/%d" % (
+                  "%.2f" % m["peak_dbfs"],
+                  "%.2f" % m["fundamental_dbfs"],
+                  m["dc"], m["thd_pct"],
+                  m["flattop_regions"], m["flattop_longest"],
+                  m["rail_samples"], m["rail_regions"]))
+    if "thd_rise_pct" in m:
+        result += "  thd-rise %+.3f%%" % m["thd_rise_pct"]
+    return result
 
 
 def main(argv=None):
@@ -307,6 +345,11 @@ def main(argv=None):
                    help="raw S16 capture files, ascending sweep order")
     p.add_argument("--rate", type=int, default=48000)
     p.add_argument("--channels", type=int, default=2)
+    p.add_argument("--channel", type=int,
+                   help="analyze one 1-based capture channel (default all)")
+    p.add_argument("--reference-channel", type=int,
+                   help="subtract this simultaneous channel's THD floor; "
+                        "requires --channel")
     p.add_argument("--endian", choices=("be", "le"), default="be",
                    help="capture byte order (default be: Amiga AHI dump)")
     p.add_argument("--tone", type=float, default=1000.0,
@@ -324,6 +367,15 @@ def main(argv=None):
     p.add_argument("--json", action="store_true",
                    help="machine-readable output")
     args = p.parse_args(argv)
+    if args.channel is not None and not 1 <= args.channel <= args.channels:
+        p.error("--channel must be between 1 and --channels")
+    if args.reference_channel is not None:
+        if args.channel is None:
+            p.error("--reference-channel requires --channel")
+        if not 1 <= args.reference_channel <= args.channels:
+            p.error("--reference-channel must be between 1 and --channels")
+        if args.reference_channel == args.channel:
+            p.error("--reference-channel must differ from --channel")
 
     levels = None
     if args.levels is not None:
@@ -337,11 +389,14 @@ def main(argv=None):
 
     reports = [analyze_file(f, args.rate, args.channels,
                             args.endian == "be", args.tone,
-                            args.rail, args.thd_pct, args.auto_tone)
+                            args.rail, args.thd_pct, args.auto_tone,
+                            args.channel, args.reference_channel)
                for f in args.files]
 
     out = {"rate": args.rate,
            "tone": "auto" if args.auto_tone else args.tone,
+           "selected_channel": args.channel,
+           "reference_channel": args.reference_channel,
            "thd_threshold_pct": args.thd_pct,
            "flattop_region_min": FLATTOP_REGION_MIN,
            "captures": reports}
@@ -356,8 +411,12 @@ def main(argv=None):
         print("%s  %.2f s" % (r["file"], r["seconds"]))
         if args.auto_tone:
             print("  detected tone: %.3f Hz" % r["tone_hz"])
-        for c, m in enumerate(r["channels"]):
-            print("  ch%d: %s" % (c + 1, channel_summary(m)))
+        for m in r["channels"]:
+            print("  ch%d: %s" % (m["channel"], channel_summary(m)))
+        if r["reference"] is not None:
+            m = r["reference"]
+            print("  reference ch%d: %s" %
+                  (m["channel"], channel_summary(m)))
         print("  verdict: %s" % r["verdict"])
     if levels is not None:
         o = out["onset"]

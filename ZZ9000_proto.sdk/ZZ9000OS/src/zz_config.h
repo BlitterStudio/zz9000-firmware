@@ -104,13 +104,11 @@ struct zz_config {
 	uint8_t video_overlay_present;
 	uint16_t video_overlay;         /* 0-1, informational (drivers query it) */
 
-	/* Audio control-plane keys (plan U5, KTD4), parsed here and folded
-	 * into the scene module at boot by audio_scene_load_config().
-	 * Absent or out-of-range keys leave the module's built-in
-	 * defaults. The decimal-only grammar caps each value at 0xffff, so
-	 * scenes serialize as grouped keys: EQ band pairs pack as
-	 * hi*128+lo (each band 0..100), audio_scene_out packs
-	 * prefactor*128+volume, and audio_baseline packs paula<<8|ax.
+	/* Audio control-plane keys, parsed here and folded into the scene
+	 * module at boot. Absent/out-of-range keys keep built-in defaults.
+	 * audio_ceiling_paula/audio_ceiling_ax are per-card measured clean
+	 * ceilings (1..4095). EQ pairs pack hi*128+lo, scene out packs
+	 * prefactor*128+volume, and baseline packs paula<<8|ax.
 	 * audio_scene_mask bit N is the presence of key field N: bits
 	 * 0..7 are lpf/eq01..eq89/out/pan and bits 8..15 the name chunks
 	 * nm1..nm8 (each packs two ASCII label chars as c1*256+c2, 0 =
@@ -119,9 +117,15 @@ struct zz_config {
 #define ZZ_CFG_AUDIO_NAME_CHUNKS 8
 
 	uint8_t audio_active_present;
+#define ZZ_CFG_AUDIO_CEILING_MIN 1
+#define ZZ_CFG_AUDIO_CEILING_MAX 4095
 	uint16_t audio_active;          /* 0..7 */
 	uint8_t audio_baseline_present;
 	uint16_t audio_baseline;        /* paula<<8 | ax, legs 0..255 */
+	uint8_t audio_ceiling_paula_present;
+	uint16_t audio_ceiling_paula;   /* measured clean ceiling, 1..4095 */
+	uint8_t audio_ceiling_ax_present;
+	uint16_t audio_ceiling_ax;      /* measured clean ceiling, 1..4095 */
 	uint16_t audio_scene_mask[ZZ_CFG_AUDIO_SCENES];  /* bit per key */
 	uint16_t audio_scene_lpf[ZZ_CFG_AUDIO_SCENES];   /* 1..23900 Hz */
 	uint16_t audio_scene_eq[ZZ_CFG_AUDIO_SCENES][5]; /* band pairs */

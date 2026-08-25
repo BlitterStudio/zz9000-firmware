@@ -224,8 +224,8 @@ static uint16_t ctrl_scene_save(const uint8_t *params,
 	return SDK_STATUS_OK;
 }
 
-/* Control state get: active scene, scene count, baseline and applied
- * trim pairs, the enforced ceiling, and the bounded-trim flag. */
+/* Control state get: active scene, baseline/applied pairs, calibrated
+ * ceilings, derived AX-equivalent boundary and bounded-trim flag. */
 static uint16_t ctrl_state_get(const uint8_t *params,
 	uint16_t payload_len, uint8_t *result_payload,
 	uint16_t *result_len)
@@ -253,6 +253,8 @@ static uint16_t ctrl_state_get(const uint8_t *params,
 	sdk_put_be32(out->ceiling, state.ceiling);
 	sdk_put_be32(out->flags, state.trim_bounded ?
 		SDK_AUDIO_CONTROL_FLAG_TRIM_BOUNDED : 0U);
+	sdk_put_be32(out->ceiling_paula, state.ceiling_paula);
+	sdk_put_be32(out->ceiling_ax, state.ceiling_ax);
 	sdk_put_be32(out->save_status, state.save_status);
 	*result_len = (uint16_t)sizeof(*out);
 	return SDK_STATUS_OK;

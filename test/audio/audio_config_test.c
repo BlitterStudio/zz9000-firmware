@@ -172,7 +172,7 @@ static void check_scene(int index, const struct audio_scene_def *want,
 			want->name));
 }
 
-/* One complete audio block: every one of the 130 audio keys (66
+/* One complete audio block: every one of the 132 audio keys (68
  * parameter keys plus the 64 name-chunk keys), each with a value
  * distinct from the built-in defaults. */
 static void parse_full_audio_block(void)
@@ -182,7 +182,9 @@ static void parse_full_audio_block(void)
 
 	off += snprintf(text + off, sizeof(text) - off,
 		"audio_active = 5\n"
-		"audio_baseline = %u\n", 170u * 256u + 130u);
+		"audio_baseline = %u\n"
+		"audio_ceiling_paula = 48\n"
+		"audio_ceiling_ax = 80\n", 170u * 256u + 130u);
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++) {
 		/* Scene 0 carries hand-picked packed values; the others a
 		 * uniform (100, 0) pair shape. Every scene is named
@@ -239,6 +241,10 @@ static void test_parse_all_audio_keys(void)
 	check(c->audio_baseline == 170u * 256u + 130u &&
 		c->audio_baseline_present,
 		"audio_baseline parsed", fmt("v=%u", c->audio_baseline));
+	check(c->audio_ceiling_paula == 48 &&
+		c->audio_ceiling_paula_present &&
+		c->audio_ceiling_ax == 80 && c->audio_ceiling_ax_present,
+		"audio calibration parsed", NULL);
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++)
 		check(c->audio_scene_mask[i] == 0xffffu,
 			fmt("scene %d key mask complete", i),
@@ -251,6 +257,9 @@ static void test_parse_all_audio_keys(void)
 		"baseline applied",
 		fmt("paula=%u ax=%u", audio_scene_baseline_paula(),
 			audio_scene_baseline_ax()));
+	check(audio_scene_ceiling_paula() == 48 &&
+		audio_scene_ceiling_ax() == 80,
+		"audio calibration applied", NULL);
 
 	/* Scene 0 carries hand-picked packed values; the packed decode is
 	 * the point of the check. */
@@ -302,6 +311,8 @@ static void test_absent_and_corrupt_degrade(void)
 		"audio_active = 8\n"
 		"audio_active = xyz\n"
 		"audio_baseline = 70000\n"
+		"audio_ceiling_paula = 0\n"
+		"audio_ceiling_ax = 4096\n"
 		"audio_scene2_lpf = 0\n"
 		"audio_scene2_lpf = 23901\n"
 		"audio_scene2_eq01 = 13056\n"   /* hi band 102 > 100 */
@@ -327,6 +338,10 @@ static void test_absent_and_corrupt_degrade(void)
 		"corrupt audio_baseline rejected",
 		fmt("paula=%u ax=%u", audio_scene_baseline_paula(),
 			audio_scene_baseline_ax()));
+	check(audio_scene_ceiling_paula() ==
+			AUDIO_SCENE_DEFAULT_CEILING_PAULA &&
+		audio_scene_ceiling_ax() == AUDIO_SCENE_DEFAULT_CEILING_AX,
+		"corrupt calibration pair keeps defaults", NULL);
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++)
 		check_scene(i, &defaults[i], fmt("degraded scene %d", i));
 	check(zz_config_get()->audio_scene_mask[2] == 0 &&
@@ -383,6 +398,8 @@ static void test_save_roundtrip(void)
 	}
 	check(audio_scene_select(4) == 0, "active scene selected", NULL);
 	check(audio_scene_set_baseline(140, 70) == 0, "baseline set", NULL);
+	check(audio_scene_set_calibration(512, 1024) == 0,
+		"calibration set", NULL);
 
 	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK, "save succeeds",
 		NULL);
@@ -396,9 +413,12 @@ static void test_save_roundtrip(void)
 	check(strstr(saved, "audio_scene0_nm1 = ") != NULL &&
 		strstr(saved, "audio_scene0_nm4 = ") != NULL,
 		"save includes the name keys", NULL);
+	check(strstr(saved, "audio_ceiling_paula = 512") != NULL &&
+		strstr(saved, "audio_ceiling_ax = 1024") != NULL,
+		"save includes calibration keys", NULL);
 	/* The saved text must reparse into the same state. */
 	zz_config_reset();
-	check(zz_config_parse(saved, (unsigned)len) == 141,
+	check(zz_config_parse(saved, (unsigned)len) == 143,
 		"every key line accepted on reparse", NULL);
 	audio_scene_init();
 	audio_scene_load_config();
@@ -432,6 +452,9 @@ static void test_save_roundtrip(void)
 	check(audio_scene_baseline_paula() == 140 &&
 		audio_scene_baseline_ax() == 70,
 		"baseline round-trips", NULL);
+	check(audio_scene_ceiling_paula() == 512 &&
+		audio_scene_ceiling_ax() == 1024,
+		"calibration round-trips", NULL);
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++)
 		check_scene(i, &written[i], fmt("round-trip scene %d", i));
 
@@ -515,7 +538,7 @@ static void test_save_budget(void)
 
 	zz_config_reset();
 	check(saved != NULL &&
-		zz_config_parse(saved, (unsigned)len) == 141,
+		zz_config_parse(saved, (unsigned)len) == 143,
 		"widest file reparses with every key accepted", NULL);
 }
 

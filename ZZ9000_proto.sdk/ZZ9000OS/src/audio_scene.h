@@ -19,17 +19,15 @@
 #include <stdint.h>
 
 /*
- * Enforced DAC saturation boundary, in summed-mixer units (each mixer
- * leg 0..255 where 127 = 0 dB, matching audio_adau_set_mixer_vol).
- *
- * This is the SINGLE named definition of the enforced boundary; U8's
- * bench measurement (R6) replaces this value in one place and the
- * staging host tests re-run against it. Provisional derivation: both
- * drivers document that summed mixer values above ~0x100 (256)
- * saturate the DAC (zz9000ax-ahi.c, mhizz9000.c); the conservative
- * figure scaled by 3/4 gives ~2.5 dB of stated headroom below it.
+ * Per-card clean-ceiling defaults in raw mixer units. Equal 256/256
+ * preserves the legacy uncalibrated model and its 192-unit boundary.
+ * A measured card persists both values through ZZ9000.CFG; firmware
+ * derives Paula weight as AX/Paula and enforces 3/4 of AX ceiling.
  */
-#define AUDIO_SCENE_ENFORCED_BOUNDARY 192.0
+#define AUDIO_SCENE_DEFAULT_CEILING_PAULA 256U
+#define AUDIO_SCENE_DEFAULT_CEILING_AX    256U
+#define AUDIO_SCENE_HEADROOM_NUMERATOR    3U
+#define AUDIO_SCENE_HEADROOM_DENOMINATOR  4U
 
 /* Fixed scene slots; the name is a user label carried alongside the
  * master-chain assignment (it never reaches the DSP). */
@@ -72,8 +70,8 @@ struct audio_scene_trim_result {
 	uint8_t bounded;    /* nonzero when the request was reduced */
 	uint8_t mixer_paula; /* applied mixer legs (absolute values) */
 	uint8_t mixer_ax;
-	double trim_bound;  /* remaining summed-trim headroom for the
-	                     * current scene and baseline */
+	double trim_bound;  /* remaining weighted-trim headroom for the
+	                     * current scene, calibration and baseline */
 };
 
 /* One gain-reduction telemetry event (R7). */
@@ -142,6 +140,14 @@ int audio_scene_set_baseline(uint8_t paula, uint8_t ax);
 uint8_t audio_scene_baseline_paula(void);
 uint8_t audio_scene_baseline_ax(void);
 
+/* Per-card measured clean ceilings. Values 1..4095 apply immediately
+ * through the same differential commit path as the baseline. */
+int audio_scene_set_calibration(uint16_t ceiling_paula,
+	uint16_t ceiling_ax);
+uint16_t audio_scene_ceiling_paula(void);
+uint16_t audio_scene_ceiling_ax(void);
+double audio_scene_enforced_boundary(void);
+
 /* Source-trim lifecycle (R3, R4): submit composes with the baseline
  * under the enforced boundary; release resets that owner's trim to
  * neutral. submit returns 0 and fills *result (when non-NULL); owner
@@ -195,7 +201,9 @@ struct audio_scene_control_state {
 	uint8_t trim_paula;     /* last applied composed mixer legs */
 	uint8_t trim_ax;
 	uint8_t trim_bounded;   /* last composition was reduced (R3) */
-	uint32_t ceiling;       /* enforced boundary, mixer-value units */
+	uint32_t ceiling;       /* enforced boundary, AX-equivalent units */
+	uint32_t ceiling_paula; /* persisted measured clean ceiling */
+	uint32_t ceiling_ax;    /* persisted measured clean ceiling */
 	uint32_t save_status;   /* AUDIO_SCENE_SAVE_QUEUED while a save
 	                         * runs, else the last settled outcome */
 };

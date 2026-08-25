@@ -88,6 +88,8 @@ static struct audio_scene_def scenes[AUDIO_SCENE_COUNT];
 static uint8_t active_scene_index;
 static uint8_t baseline_paula = BASELINE_DEFAULT_PAULA;
 static uint8_t baseline_ax = BASELINE_DEFAULT_AX;
+static uint16_t ceiling_paula = AUDIO_SCENE_DEFAULT_CEILING_PAULA;
+static uint16_t ceiling_ax = AUDIO_SCENE_DEFAULT_CEILING_AX;
 
 struct trim_state {
 	int16_t paula;
@@ -113,6 +115,9 @@ static struct scene_staging staging[AUDIO_SCENE_COUNT];
 static uint8_t staged_baseline_paula;
 static uint8_t staged_baseline_ax;
 static int baseline_staged;
+static uint16_t staged_ceiling_paula;
+static uint16_t staged_ceiling_ax;
+static int calibration_staged;
 
 /* ---- incremental commit machine (P1: the dispatch path never
  * blocks on I2C) ---- */
@@ -229,6 +234,10 @@ struct staged_rollback {
 	uint8_t baseline_paula;
 	uint8_t baseline_ax;
 	int baseline_staged;
+	int calibration_saved;
+	uint16_t ceiling_paula;
+	uint16_t ceiling_ax;
+	int calibration_staged;
 };
 
 static struct staged_rollback rollback;
@@ -279,9 +288,26 @@ static double master_chain_linear(const struct audio_scene_def *scene,
 		eq_worst_boost_linear(scene);
 }
 
+static double paula_weight(void)
+{
+	return (double)ceiling_ax / (double)ceiling_paula;
+}
+
+static double weighted_pair(double paula, double ax)
+{
+	return paula * paula_weight() + ax;
+}
+
 static double baseline_sum_linear(void)
 {
-	return (double)baseline_paula + (double)baseline_ax;
+	return weighted_pair((double)baseline_paula, (double)baseline_ax);
+}
+
+double audio_scene_enforced_boundary(void)
+{
+	return (double)ceiling_ax *
+		(double)AUDIO_SCENE_HEADROOM_NUMERATOR /
+		(double)AUDIO_SCENE_HEADROOM_DENOMINATOR;
 }
 
 struct volume_resolution {
@@ -314,8 +340,8 @@ static void resolve_output_volume(const struct audio_scene_def *scene,
 	out->reduced = 0;
 	out->requested_level = level;
 	out->applied_level = level;
-	if (level > AUDIO_SCENE_ENFORCED_BOUNDARY) {
-		double allowed = AUDIO_SCENE_ENFORCED_BOUNDARY /
+	if (level > audio_scene_enforced_boundary()) {
+		double allowed = audio_scene_enforced_boundary() /
 			(baseline * chain);
 		if (allowed > 1.0)
 			allowed = 1.0;
@@ -348,14 +374,15 @@ static int clamp_u8(int value)
 }
 
 /*
- * Baseline + trim composition against the boundary: the summed mixer
- * legs are proportionally reduced so the composed level fits. Pure
- * computation; the caller emits the event and writes the legs.
+ * Baseline + trim composition against the calibrated boundary. Mixer
+ * legs are proportionally reduced, preserving the requested balance;
+ * Paula contributes ceiling_ax/ceiling_paula AX-equivalent units.
  */
 static void compute_mixer_stage(double master_linear,
 	struct mixer_stage *out)
 {
-	double max_sum;
+	double max_weighted;
+	double requested_weighted;
 	int paula = baseline_paula;
 	int ax = baseline_ax;
 	int owner;
@@ -375,21 +402,23 @@ static void compute_mixer_stage(double master_linear,
 	if (master_linear <= 0.0)
 		return; /* chain is silent: nothing can exceed */
 
-	max_sum = AUDIO_SCENE_ENFORCED_BOUNDARY / master_linear;
-	out->trim_bound = max_sum - baseline_sum_linear();
+	max_weighted = audio_scene_enforced_boundary() / master_linear;
+	out->trim_bound = max_weighted - baseline_sum_linear();
 	if (out->trim_bound < 0.0)
 		out->trim_bound = 0.0;
 
-	if ((double)(paula + ax) > max_sum) {
-		double scale = max_sum / (double)(paula + ax);
+	requested_weighted = weighted_pair((double)paula, (double)ax);
+	if (requested_weighted > max_weighted) {
+		double scale = max_weighted / requested_weighted;
 		int c_paula = (int)((double)paula * scale);
 		int c_ax = (int)((double)ax * scale);
 
 		out->bounded = 1;
 		out->paula = (uint8_t)clamp_u8(c_paula);
 		out->ax = (uint8_t)clamp_u8(c_ax);
-		out->requested = (double)(paula + ax) * master_linear;
-		out->applied = (double)(c_paula + c_ax) * master_linear;
+		out->requested = requested_weighted * master_linear;
+		out->applied = weighted_pair((double)c_paula,
+			(double)c_ax) * master_linear;
 	}
 }
 
@@ -397,12 +426,12 @@ static void emit_gain_reduction(double requested, double applied)
 {
 	last_gain_reduction.requested = requested;
 	last_gain_reduction.applied = applied;
-	last_gain_reduction.boundary = AUDIO_SCENE_ENFORCED_BOUNDARY;
+	last_gain_reduction.boundary = audio_scene_enforced_boundary();
 	have_last_gain_reduction = 1;
 	if (gain_reduction_count != UINT32_MAX)
 		gain_reduction_count++;
 	printf("[scene] gain reduction: %.1f -> %.1f (boundary %.1f)\n",
-		requested, applied, AUDIO_SCENE_ENFORCED_BOUNDARY);
+		requested, applied, audio_scene_enforced_boundary());
 }
 
 /* Re-stage only the mixer (trim submit/release): the applied master
@@ -619,6 +648,12 @@ static void commit_finish(void)
 				baseline_paula = rollback.baseline_paula;
 				baseline_ax = rollback.baseline_ax;
 				baseline_staged = rollback.baseline_staged;
+			}
+			if (rollback.calibration_saved) {
+				ceiling_paula = rollback.ceiling_paula;
+				ceiling_ax = rollback.ceiling_ax;
+				calibration_staged =
+					rollback.calibration_staged;
 			}
 			rollback.valid = 0;
 		}
@@ -1238,10 +1273,13 @@ void audio_scene_init(void)
 	active_scene_index = 0;
 	baseline_paula = BASELINE_DEFAULT_PAULA;
 	baseline_ax = BASELINE_DEFAULT_AX;
+	ceiling_paula = AUDIO_SCENE_DEFAULT_CEILING_PAULA;
+	ceiling_ax = AUDIO_SCENE_DEFAULT_CEILING_AX;
 	memset(trims, 0, sizeof(trims));
 	memset(owner_participating, 0, sizeof(owner_participating));
 	memset(staging, 0, sizeof(staging));
 	baseline_staged = 0;
+	calibration_staged = 0;
 	commit_in_progress = 0;
 	commit_stepping = 0;
 	memset(&commit, 0, sizeof(commit));
@@ -1301,6 +1339,7 @@ int audio_scene_apply_after_dsp_init(void)
 	memset(owner_participating, 0, sizeof(owner_participating));
 	memset(staging, 0, sizeof(staging));
 	baseline_staged = 0;
+	calibration_staged = 0;
 	meter_reset_all();
 	/* The reset path has no client waiting on the reply, so the
 	 * machine runs synchronously to its terminal state here. */
@@ -1398,10 +1437,8 @@ int audio_scene_set_baseline(uint8_t paula, uint8_t ax)
 		return -1;
 	baseline_paula = paula;
 	baseline_ax = ax;
-	/* The baseline participates in the scene-alone level, so the
-	 * change re-runs the one commit path -- differentially: a live
-	 * balance change costs only the mixer (and, if the resolution
-	 * moved, the output volume) write. */
+	/* The baseline participates in scene resolution, so re-run the
+	 * differential commit for mixer and possibly output volume. */
 	if (commit_in_progress) {
 		pending_valid = 1;
 		pending_target = active_scene_index;
@@ -1423,6 +1460,38 @@ uint8_t audio_scene_baseline_ax(void)
 	return baseline_ax;
 }
 
+int audio_scene_set_calibration(uint16_t new_ceiling_paula,
+	uint16_t new_ceiling_ax)
+{
+	if (!module_initialized ||
+			new_ceiling_paula < SDK_AUDIO_CEILING_MIN ||
+			new_ceiling_paula > SDK_AUDIO_CEILING_MAX ||
+			new_ceiling_ax < SDK_AUDIO_CEILING_MIN ||
+			new_ceiling_ax > SDK_AUDIO_CEILING_MAX)
+		return -1;
+	ceiling_paula = new_ceiling_paula;
+	ceiling_ax = new_ceiling_ax;
+	if (commit_in_progress) {
+		pending_valid = 1;
+		pending_target = active_scene_index;
+		pending_dirty = 1;
+		pending_fast = 1;
+		return 0;
+	}
+	commit_begin(active_scene_index, 1);
+	return 0;
+}
+
+uint16_t audio_scene_ceiling_paula(void)
+{
+	return ceiling_paula;
+}
+
+uint16_t audio_scene_ceiling_ax(void)
+{
+	return ceiling_ax;
+}
+
 /* ---- staged edits and the commit surface (U4) ---- */
 
 int audio_scene_stage_param(uint8_t index, uint32_t param,
@@ -1439,6 +1508,19 @@ int audio_scene_stage_param(uint8_t index, uint32_t param,
 			(uint8_t)SDK_AUDIO_BALANCE_CH1(value);
 		staged_baseline_ax = (uint8_t)SDK_AUDIO_BALANCE_CH2(value);
 		baseline_staged = 1;
+		return 0;
+	}
+	if (param == SDK_AUDIO_SCENE_PARAM_CALIBRATION) {
+		uint32_t paula = SDK_AUDIO_CALIBRATION_PAULA(value);
+		uint32_t ax = SDK_AUDIO_CALIBRATION_AX(value);
+		if (paula < SDK_AUDIO_CEILING_MIN ||
+				paula > SDK_AUDIO_CEILING_MAX ||
+				ax < SDK_AUDIO_CEILING_MIN ||
+				ax > SDK_AUDIO_CEILING_MAX)
+			return -1;
+		staged_ceiling_paula = (uint16_t)paula;
+		staged_ceiling_ax = (uint16_t)ax;
+		calibration_staged = 1;
 		return 0;
 	}
 	if (index >= AUDIO_SCENE_COUNT)
@@ -1569,6 +1651,16 @@ int audio_scene_commit_staged(uint8_t index)
 		baseline_staged = 0;
 		apply = 1;
 	}
+	if (calibration_staged) {
+		rollback.calibration_saved = 1;
+		rollback.ceiling_paula = ceiling_paula;
+		rollback.ceiling_ax = ceiling_ax;
+		rollback.calibration_staged = calibration_staged;
+		ceiling_paula = staged_ceiling_paula;
+		ceiling_ax = staged_ceiling_ax;
+		calibration_staged = 0;
+		apply = 1;
+	}
 	if (staging[index].has_draft) {
 		/* Stage-time validation keeps every draft a valid scene. */
 		rollback.scene_saved = 1;
@@ -1581,7 +1673,6 @@ int audio_scene_commit_staged(uint8_t index)
 	}
 	if (!apply)
 		return 0; /* inactive slot, nothing can fail: consumed */
-
 	rollback.valid = 1;
 	if (commit_in_progress) {
 		/* A machine is mid-flight on its own snapshot; the staged
@@ -1609,7 +1700,9 @@ void audio_scene_control_state(struct audio_scene_control_state *out)
 	out->trim_paula = last_mixer_stage.paula;
 	out->trim_ax = last_mixer_stage.ax;
 	out->trim_bounded = last_mixer_stage.bounded;
-	out->ceiling = (uint32_t)AUDIO_SCENE_ENFORCED_BOUNDARY;
+	out->ceiling = (uint32_t)audio_scene_enforced_boundary();
+	out->ceiling_paula = ceiling_paula;
+	out->ceiling_ax = ceiling_ax;
 	out->save_status = (uint32_t)audio_scene_save_status();
 }
 
@@ -1638,6 +1731,12 @@ static int audio_scene_emit_keys(char *buf, unsigned size, int off)
 	if (off < 0) return -1;
 	off = appendf(buf, size, off, "audio_baseline = %u\n",
 		((unsigned)baseline_paula << 8) | (unsigned)baseline_ax);
+	if (off < 0) return -1;
+	off = appendf(buf, size, off, "audio_ceiling_paula = %u\n",
+		(unsigned)ceiling_paula);
+	if (off < 0) return -1;
+	off = appendf(buf, size, off, "audio_ceiling_ax = %u\n",
+		(unsigned)ceiling_ax);
 	if (off < 0) return -1;
 
 	for (i = 0; i < AUDIO_SCENE_COUNT; i++) {
@@ -1790,6 +1889,11 @@ void audio_scene_load_config(void)
 		}
 		if (mask && scene_def_valid(&def))
 			scenes[i] = def;
+	}
+	if (c->audio_ceiling_paula_present &&
+			c->audio_ceiling_ax_present) {
+		ceiling_paula = c->audio_ceiling_paula;
+		ceiling_ax = c->audio_ceiling_ax;
 	}
 	if (c->audio_active_present &&
 	    c->audio_active < AUDIO_SCENE_COUNT)

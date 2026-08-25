@@ -322,6 +322,24 @@ static int apply_key(const char *key, const char *value) {
 		cfg.audio_baseline_present = 1;
 		return 0;
 	}
+	if (token_eq(key, "audio_ceiling_paula")) {
+		long v = parse_uint(value);
+		if (v < ZZ_CFG_AUDIO_CEILING_MIN ||
+				v > ZZ_CFG_AUDIO_CEILING_MAX)
+			return -1;
+		cfg.audio_ceiling_paula = (uint16_t)v;
+		cfg.audio_ceiling_paula_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "audio_ceiling_ax")) {
+		long v = parse_uint(value);
+		if (v < ZZ_CFG_AUDIO_CEILING_MIN ||
+				v > ZZ_CFG_AUDIO_CEILING_MAX)
+			return -1;
+		cfg.audio_ceiling_ax = (uint16_t)v;
+		cfg.audio_ceiling_ax_present = 1;
+		return 0;
+	}
 	if (token_eq(key, "audio_scene0_lpf"))  return audio_scene_key(0, 0, value);
 	if (token_eq(key, "audio_scene0_eq01")) return audio_scene_key(0, 1, value);
 	if (token_eq(key, "audio_scene0_eq23")) return audio_scene_key(0, 2, value);

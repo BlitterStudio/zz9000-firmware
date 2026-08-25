@@ -303,6 +303,10 @@ static void test_select_state_roundtrip(void)
 		fmt("active=%lu count=%lu",
 			(unsigned long)w32(&result_buf[0]),
 			(unsigned long)w32(&result_buf[4])));
+	check(w32(&result_buf[24]) ==
+			AUDIO_SCENE_DEFAULT_CEILING_PAULA &&
+		w32(&result_buf[28]) == AUDIO_SCENE_DEFAULT_CEILING_AX,
+		"state get reports default per-leg ceilings", NULL);
 	check(audio_scene_active_index() == 3,
 		"module active index agrees", NULL);
 	check(last_write(WRITE_VOLPAN, &a, &b) && a == 75 && b == 50,
@@ -1017,6 +1021,43 @@ static void test_baseline_write_path(void)
 		"commit requires a valid scene slot", NULL);
 }
 
+static void test_calibration_write_path(void)
+{
+	struct SDKAudioSceneWritePayload wr;
+	struct SDKAudioControlStateGetPayload get;
+
+	audio_scene_init();
+	memset(&wr, 0, sizeof(wr));
+	memset(&get, 0, sizeof(get));
+	put32(wr.scene, 6); /* ignored for CALIBRATION */
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_CALIBRATION);
+	put32(wr.value, SDK_AUDIO_CALIBRATION_PACK(48, 80));
+	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK, "calibration stage+commit", NULL);
+	pump_scene();
+	check(audio_scene_ceiling_paula() == 48 &&
+		audio_scene_ceiling_ax() == 80,
+		"calibration stored", NULL);
+	check(run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get)) ==
+		SDK_STATUS_OK, "state get after calibration", NULL);
+	check(w32(&result_buf[16]) == 60 &&
+		w32(&result_buf[24]) == 48 &&
+		w32(&result_buf[28]) == 80,
+		"state reports measured ceilings and derived boundary",
+		fmt("boundary=%lu p=%lu ax=%lu",
+			(unsigned long)w32(&result_buf[16]),
+			(unsigned long)w32(&result_buf[24]),
+			(unsigned long)w32(&result_buf[28])));
+
+	memset(&wr, 0, sizeof(wr));
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_CALIBRATION);
+	put32(wr.value, SDK_AUDIO_CALIBRATION_PACK(0, 80));
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_BAD_REQUEST,
+		"zero calibration ceiling rejected", NULL);
+}
+
 /* ---- unknown opcodes and request validation ---- */
 
 static void test_unsupported_and_validation(void)
@@ -1140,6 +1181,7 @@ int main(void)
 	test_baseline_write_persists_through_queued_save();
 	test_scene_rename_persists_through_queued_save();
 	test_baseline_write_path();
+	test_calibration_write_path();
 	test_unsupported_and_validation();
 
 	if (failures == 0) {

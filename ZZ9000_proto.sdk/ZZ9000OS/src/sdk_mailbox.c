@@ -56,7 +56,8 @@
 	 SDK_CAP_MEMORY_OPS | SDK_CAP_CRYPTO | \
 	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION | \
 	 SDK_CAP_VIDEO_DECODE | \
-	 SDK_CAP_MEDIA_SESSION | SDK_CAP_AUDIO_STREAM_DRAIN)
+	 SDK_CAP_MEDIA_SESSION | SDK_CAP_AUDIO_STREAM_DRAIN | \
+	 SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING)
 /* Decode proceeds only with at least this much undecoded input (unless
  * EOF): enough for the largest legal MP3 frame (~1.4K, 2.3K free-format)
  * plus sync lookahead. It must stay WELL below any client's input-ring
@@ -1280,12 +1281,14 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 	{
 		SDK_SERVICE_AUDIO,
 		0x00020001U,
-		SDK_CAP_AUDIO_DECODE | SDK_CAP_AUDIO_PLAYBACK,
+		SDK_CAP_AUDIO_DECODE | SDK_CAP_AUDIO_PLAYBACK |
+			SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING,
 		SDK_SERVICE_FLAG_FIRMWARE |
 			SDK_SERVICE_FLAG_AUDIO_MP3_DECODE |
-			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM,
+			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM |
+			SDK_SERVICE_FLAG_AUDIO_CONTROL,
 		SDK_SERVICE_AUDIO,
-		9,	/* 0x0500..0x0508 incl. AUDIO_STREAM_PLAY/STOP */
+		15,	/* 0x0500..0x050e incl. audio control plane */
 		"audio"
 	},
 	{

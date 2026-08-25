@@ -116,19 +116,24 @@ Generate the deterministic AHI and Paula source files with:
    and watch the Audio-window meters as a live cross-check. Extend the
    sweep upward only if level 127 remains clean; extend downward only
    if level 32 is already non-clean.
-6. **Leg cross-check.** Do not use ZZ9000AX AHI recording for this
-   step. Bench diagnostics established that it observes the Paula feed
-   even with baseline `0/0` and with scene volume `0`, so it cannot
-   isolate the controlled line output. Disconnect the self-loopback and
-   connect the line-output RCA pair to an independent external
-   ADC/recorder at fixed gain. Capture onset-relevant AX-only reference
-   steps with baseline Paula 0 / AX 254 and the coherent AHI stimulus,
-   then capture the same combined levels with baseline Paula 254 / AX 0
-   and the deterministic full-scale Paula stimulus. Export stereo
-   signed-16 raw PCM at the recorder's native endian/rate and analyze
-   Paula with `--auto-tone`. Matching AX-only and Paula-only onset
-   curves from the same external ADC support the linear mixer
-   assumption; disagreement blocks any constant update.
+6. **Leg cross-check.** A normal same-channel Paula loopback is invalid
+   because AHI recording taps the physical ADC before `St Mixer1`.
+   Use `ZZAXDuplexTest <capture.raw> 5 paula-cross`: it generates a
+   deterministic left-only Paula tone and starts AHI record without AHI
+   playback. First disconnect every line-output-to-auxiliary cable and
+   capture `cap_a205_paula_isolation.raw`. The qualified R1 card placed
+   the direct left Paula reference on capture channel 2 and isolated
+   channel 1 by approximately 101 dB. Identify the active line-output
+   RCA with an amplifier, then connect only that output to
+   auxiliary-input **left**; leave the other line output and auxiliary
+   input right disconnected. The internal Paula ordering makes this
+   cross-channel in the capture domain. Set baseline Paula 254 / AX 0
+   and capture the onset-relevant scene levels. Analyze only the
+   returned output with `--auto-tone --channel 1 --reference-channel 2`;
+   the 0.5% threshold then applies to THD growth above the simultaneous
+   direct-source floor. Matching AX-only and cross-channel Paula
+   onset curves support the mixer-unit assumption; disagreement blocks
+   any constant update.
 7. **Detection.** Analyze the captures on the host with
    `util/analyze_audio_saturation.py` (below) in sweep order with the
    combined levels. The measured ceiling is the highest combined level
@@ -151,13 +156,14 @@ ceiling.
 
     python3 util/analyze_audio_saturation.py --levels 160,176,192,... \
         cap_0160.raw cap_0176.raw cap_0192.raw ...
-    python3 util/analyze_audio_saturation.py --auto-tone --levels ... \
-        cap_paula_....raw
+    python3 util/analyze_audio_saturation.py --auto-tone --channel 1 \
+        --reference-channel 2 --levels ... cap_a205_paula_....raw
     python3 util/test_analyze_audio_saturation.py   # self-check prints PASS
 
 Reads raw signed-16-bit PCM (`--endian be` for Amiga-side AHI dumps,
-`--endian le` for host-side captures; `--channels`, `--rate`,
-`--tone`, `--auto-tone`, `--rail`, `--thd-pct` adjustable).
+`--endian le` for host-side captures; `--channels`, 1-based `--channel`
+and `--reference-channel`, `--rate`, `--tone`, `--auto-tone`, `--rail`,
+`--thd-pct` adjustable).
 `--auto-tone` estimates each capture's realized fundamental from robust
 local periods in the centered analysis window before the coherent THD
 projection; use it for Paula-period captures. Per channel it reports:
@@ -168,30 +174,35 @@ projection; use it for Paula-period captures. Per channel it reports:
 | fundamental dBFS | fitted fundamental amplitude in the centered analysis window — compare this across gain steps |
 | dc | mean offset |
 | at-rail samples/regions | capture-path clipping — a setup fault (add loopback attenuation) |
+| THD rise | selected-channel THD minus the simultaneous reference-channel THD floor; when a reference is selected, this replaces absolute THD for the verdict |
 | flat-top regions (longest run) | consecutive samples parked within ~0.4% of the file's own peak — at least three regions are required for the clipped/hard-saturated crest verdict; one-off low-level plateaus remain diagnostic only |
 | THD proxy | coherent H2..H5 against the fundamental over an integer-period window — catches soft saturation before hard clipping |
 | notch residual dBFS | floor after removing DC, fundamental and harmonics |
 
 Verdicts: `FAULT` (at-rail: fix the setup), `SATURATED` (at least
 three flat-top regions or THD above `--thd-pct`, default 0.5%),
-`CLEAN`. With `--levels` the
-tool reports the onset step, the measured ceiling (last clean level),
-the onset interval, and the suggested `AUDIO_SCENE_ENFORCED_BOUNDARY`
-at the 3/4 headroom policy. `--json` emits the same report
-machine-readably.
+`CLEAN`. With `--reference-channel`, the threshold applies to THD rise
+above that simultaneous source floor instead of absolute THD.
+`--levels` reports onset, last clean level and the 3/4 suggestion;
+`--json` emits the same report machine-readably.
 
 ## Headroom policy and unit-to-unit variance
 
-The bench measures one card. The enforced boundary carries 3/4
-headroom (~2.5 dB) below the measured ceiling, the same policy the
-provisional value used, chosen to cover expected component variance
-across boards (mixer summing-stage and codec gain tolerances). This
-single-unit scope and the variance rationale are adopted as-is for
-this release; if field reports ever show cards whose clean ceiling
-sits inside another card's headroom band, re-measure on a second unit
-and widen the policy deliberately rather than silently.
+The bench persists two per-card clean ceilings. For Paula ceiling
+$C_P$, AX ceiling $C_A$, mixer legs $P/A$ and scene gain $G$, firmware
+enforces:
 
-## Measurement record — 2026-08-23 (superseded)
+$$G\left(P\frac{C_A}{C_P}+A\right) \le \frac{3}{4}C_A$$
+
+The 3/4 factor is approximately 2.5 dB of component/unit headroom.
+Defaults 256/256 preserve the legacy uncalibrated 192-unit policy;
+measured cards save different pairs. This avoids discarding AX
+headroom on an R1 card whose Paula path is hotter, and avoids assuming
+the same ratio across repaired cards.
+
+## Measurement records — 2026-08-23
+
+### Superseded pre-`a205` sweep
 
 Instrument firmware SHA-256:
 `fe7a61a19d86d338dc411c7ea0e69150a5a7a8e804f5d76c8319ba4262a4f78e`.
@@ -238,6 +249,63 @@ both sources. This confirms both stereo prefactor algorithms and the
 post-mixer scene volume on hardware. EQ and raw-capture isolation remain
 covered by the subsequent release-candidate session.
 
+### Corrected `a205` AX-only sweep
+
+The corrected instrument image used baseline Paula 0 / AX 254 and the
+one-control coherent AHI stimulus:
+
+    python3 util/analyze_audio_saturation.py \
+        --levels 32,48,64,73,80,89,97,111,127 \
+        cap_a205_ax_0032.raw cap_a205_ax_0048.raw \
+        cap_a205_ax_0064.raw cap_a205_ax_0073.raw \
+        cap_a205_ax_0080.raw cap_a205_ax_0089.raw \
+        cap_a205_ax_0097.raw cap_a205_ax_0111.raw \
+        cap_a205_ax_0127.raw
+
+Levels 32, 48, 64, 73 and 80 were CLEAN. Level 89 was the first
+SATURATED step: THD rose from approximately 0.42% at 80 to 0.73% at 89,
+then monotonically to approximately 3.08% at 127. No capture hit rail
+or contained a persistent flat-top. The corrected AX-only ceiling is
+80 and the onset interval is `(80, 89]`; the 3/4 policy suggests
+boundary 60.
+
+The no-cable `paula-cross` isolation capture detected the direct
+left-only Paula fundamental at 998.567 Hz on capture channel 2:
+-1.63 dBFS versus -102.5 dBFS on channel 1, approximately 101 dB of
+isolation, with no rail samples. This qualifies channel 1 for the
+returned-output sweep through the active line output -> auxiliary-input left.
+
+### Corrected `a205` Paula cross-channel sweep
+
+The active line-output right RCA was cross-connected to auxiliary-input
+left. Capture channel 1 held the returned output; channel 2 remained the
+simultaneous direct-source reference:
+
+    python3 util/analyze_audio_saturation.py --auto-tone \
+        --channel 1 --reference-channel 2 \
+        --levels 16,24,32,40,48,56,64,73,80,89,97 \
+        cap_a205_paula_probe_0016.raw cap_a205_paula_probe_0024.raw \
+        cap_a205_paula_probe_0032.raw cap_a205_paula_probe_0040.raw \
+        cap_a205_paula_probe_0048.raw cap_a205_paula_probe_0056.raw \
+        cap_a205_paula_probe_0064.raw cap_a205_paula_probe_0073.raw \
+        cap_a205_paula_probe_0080.raw cap_a205_paula_probe_0089.raw \
+        cap_a205_paula_probe_0097.raw
+
+The direct reference stayed at -1.61 dBFS and 0.975-0.980% THD across
+all scene levels. Returned-output THD stayed within 0.18 percentage
+points of that floor through level 48, rose 0.564 points above it at
+56, then increased monotonically to a 4.509-point rise at 97. No
+capture hit rail or developed a persistent flat-top. With the standard
+0.5% criterion applied to THD rise above the simultaneous source floor,
+the Paula ceiling is 48 and onset lies in `(48, 56]`; the 3/4 policy
+would suggest boundary 36.
+
+The intervals do not match, disproving an unweighted mixer sum on this
+R1 card. The adopted persisted calibration is Paula ceiling 48 / AX
+ceiling 80: Paula weight $80/48=1.667$ and derived AX-equivalent
+boundary 60. ZZTop exposes both measured ceilings; scene Save persists
+them as `audio_ceiling_paula` / `audio_ceiling_ax`.
+
 ## Hardware smoke checklist (verification session)
 
 Run on the release-candidate bench build from the runbook below. No
@@ -251,73 +319,42 @@ expected observation traces to the plan's acceptance examples.
 | S3 | Live switch glitch-free (R5/F3) | Switch scenes and commit scene edits during active playback | No interruption, click, or partial assignment; rapid double-switches serialize (no torn state) |
 | S4 | Clamp event visible (AE1) | Request a trim that, with baseline and scene level, exceeds the enforced boundary | Applied trim is bounded and the requester can observe it; ZZTop's gain-reduction indicator lights and the event (requested/applied/boundary) is readable from telemetry |
 | S5 | Meters update (AE4) | Play a deliberately hot signal; read meters between periods from the Audio window | Peak-hold and clip count reflect the signal; repeated reads are self-consistent; no audible or timing disturbance from reading |
-| S6 | Save round-trip through reboot (AE6) | Set operator baseline balance (e.g. 100/90), Save, cold boot | Baseline and scenes persist and apply to every owner's playback with no env var anywhere |
+| S6 | Save round-trip through reboot (AE6) | Set operator baseline and measured ceilings (e.g. 48/80), Save, cold boot | Baseline, calibration and scenes persist; state reports both ceilings and the derived boundary |
 | S7 | Leftover `ZZ9K_MIX_LEVELS` no effect (AE2) | Set `ENV:ZZ9K_MIX_LEVELS` to an extreme pair, keep CFG audio keys present, boot | Scene applies; the env var changes nothing in either driver or firmware |
 | S8 | Non-AX entry disabled (R18) | On a ZZ9000 without the AX daughterboard, open ZZTop | The Audio button is present but disabled (greyed), not hidden; all other ZZTop features unaffected |
-| S9 | Master scene covers both legs | Play Paula only, then AX only; for each source move scene volume 100 -> 0 -> 100 and exercise prefactor/EQ | Volume 0 silences each source independently, restoring volume restores it, and prefactor/EQ audibly affect both; RCA capture remains the pre-mix physical ADC feed |
+| S9 | Master scene and calibration cover both legs | Play Paula only, then AX only; exercise volume/prefactor and request a weighted over-boundary pair | Both sources follow scene controls; gain reduction uses the persisted per-leg ceilings; RCA capture stays pre-mix |
 
 S8 needs non-AX hardware (or the AX-absent probe path); if the session
 only has an AX card, record it as not exercised rather than passed.
 
-## Flip-after-pass runbook
+## Post-pass capability state
 
-The capability flip lands only in the commit following a recorded
-hardware pass (plan R12/KTD6). Until then nothing advertises
-`ZZ9K_CAP_AUDIO_CONTROL` or `ZZ9K_CAP_AUDIO_METERING`, and ZZTop's
-Audio button stays disabled on every matched set — discoverable, not
-hidden.
+The calibrated hardware gate passed on the qualified R1 card:
 
-Bench builds (local working-tree edits, never committed as-is):
+- Paula 36 safe / 37 reduced;
+- AX 60 safe / 61 reduced;
+- mixed 18/30 safe / 19/30 reduced;
+- measured ceilings 48/80 and derived boundary 60 survived Save and
+  power-cycle.
 
-- **Instrument build** (ceiling measurement): set
-  `AUDIO_SCENE_ENFORCED_BOUNDARY` to `4096.0` (above any reachable
-  composition, so staging never reduces during the sweep) **and** apply
-  the advertising flip below, so ZZTop's Audio window and meters are
-  live for the sweep. Build with `./build_firmware.sh` and flash.
-- **Release-candidate build** (smoke checklist): restore the working
-  tree, then set `AUDIO_SCENE_ENFORCED_BOUNDARY` to the measured
-  ceiling x 3/4 **and** apply the advertising flip. Re-flash and run
-  S1-S8.
+The matched release therefore advertises
+`SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING` globally and on the
+audio service. `SDK_SERVICE_FLAG_AUDIO_CONTROL` is set and the service
+reports 15 opcodes through `0x050e`. ZZTop, AHI and MHI continue to
+gate on those bits, so older firmware retains its documented fallback.
 
-After a recorded pass, in this order:
-
-1. **Constant commit.** Restore the working tree completely. Update the
-   single site `ZZ9000_proto.sdk/ZZ9000OS/src/audio_scene.h`
-   (`#define AUDIO_SCENE_ENFORCED_BOUNDARY`) to the measured boundary,
-   re-derive the boundary-dependent fixtures that pin `192` literals
-   (`test/audio/audio_scene_test.c` staging/event/headroom checks,
-   `test/audio/audio_control_test.c` ceiling report), re-run
-   `make -C test/audio test` and `make -C test/config test`, and append
-   the measurement record to this document.
-2. **Advertising commit.** In `ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.c`
-   only:
-   - `SDK_MAILBOX_BASE_CAPABILITY_BITS` gains
-     `| SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING` — this word is
-     what `SDK_OP_QUERY_CAPS` returns via `mailbox_capability_bits()`,
-     and what ZZTop, AHI and MHI gate on.
-   - The `SDK_SERVICE_AUDIO` entry in `sdk_services[]` gains the same
-     two caps in its capability field, gains
-     `| SDK_SERVICE_FLAG_AUDIO_CONTROL` (bit 21) in its flags field,
-     and its opcode count rises from `9` to `15` so `QUERY_SERVICE`
-     reports the full `0x0500..0x050e` range including the control
-     plane.
-   Optional same-commit polish: add `"audio-control"` /
-   `"audio-metering"` names for the two bits to
-   `zz9k_capability_name()` in the SDK's `include/zz9k/caps.h` so
-   `zz9k-services` prints them.
-3. Both commits run `git diff --check` clean; firmware CI green.
+The release candidate uses the persisted 48/80 pair on this card.
+Uncalibrated cards retain defaults 256/256 and boundary 192 until their
+measured pair is saved. Final gates are the full audio/config suites,
+SDK ABI/release-service tests, driver CFG/UI contracts, matched
+cross-builds and `git diff --check`.
 
 ## Matched-set release coordination
 
-- The drivers' `sdk/SDK_REF` pins SDK commit `2873f1d`
-  (`feat(abi): define audio control-plane and metering opcodes and
-  caps`), which currently exists **only on the SDK's local branch**
-  `feat/audio-control-plane-scenes-metering`. That branch must be
-  pushed and merged before drivers CI runs on fresh runners — the `sdk`
-  and `amissl` jobs clone the pinned commit, and the ZZTop/AHI build
-  scripts hard-fail when the staged headers lack
-  `ZZ9K_OP_AUDIO_SCENE_SELECT` / `ZZ9K_OP_AUDIO_TRIM_SUBMIT`
-  (`ZZTop/build-gcc.sh`, `ahi/driver/build.sh`).
+- The drivers' `sdk/SDK_REF` pins public SDK commit `f0dfc80`
+  (`feat(audio): require calibrated control-plane service`). Fresh
+  runners clone that exact ABI/service contract; ZZTop/AHI/MHI builds
+  fail clearly if staged headers lack the audio control surface.
 - Tag order is the drivers' `RELEASING.md` dependency order: SDK first
   (merge + tag + push), then drivers `SDK_REF` bump to the SDK release
   commit (CI green on the pin), then firmware, then drivers. Firmware
