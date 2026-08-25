@@ -44,6 +44,7 @@ from array import array
 FULL_SCALE = 32768.0
 INT16_MAX = 32767
 INT16_MIN = -32768
+FLATTOP_REGION_MIN = 3  # reject one-off low-level quantization/noise plateaus
 
 
 def load_channels(path, channels, big_endian):
@@ -62,8 +63,10 @@ def load_channels(path, channels, big_endian):
     return [list(a[c::channels]) for c in range(channels)]
 
 def estimate_tone(samples, rate):
-    """Estimate a strong sine's frequency from positive-going crossings."""
-    segment = samples[:min(len(samples), 2 * rate)]
+    """Estimate a strong sine from robust local positive-going periods."""
+    target = min(len(samples), rate)
+    start = (len(samples) - target) // 2
+    segment = samples[start:start + target]
     if len(segment) < 3:
         raise ValueError("too few samples for automatic tone detection")
     mean = sum(segment) / float(len(segment))
@@ -78,8 +81,17 @@ def estimate_tone(samples, rate):
         previous = current
     if len(crossings) < 3:
         raise ValueError("tone detection found fewer than two periods")
-    return ((len(crossings) - 1) * rate /
-            float(crossings[-1] - crossings[0]))
+
+    periods = [b - a for a, b in zip(crossings, crossings[1:])]
+    ordered = sorted(periods)
+    middle = len(ordered) // 2
+    median = (ordered[middle] if len(ordered) & 1 else
+              (ordered[middle - 1] + ordered[middle]) / 2.0)
+    inliers = [period for period in periods
+               if median * 0.98 <= period <= median * 1.02]
+    if len(inliers) < 2:
+        raise ValueError("tone detection found fewer than two stable periods")
+    return rate * len(inliers) / float(sum(inliers))
 
 
 def coherent_window(rate, tone, available):
@@ -111,15 +123,16 @@ def tone_projection(samples, rate, freq):
 
 
 def distortion_metrics(samples, rate, tone):
-    """THD proxy (H2..H5 vs fundamental) and notch residual, in dBFS."""
+    """THD proxy, notch residual and fundamental level."""
     n = coherent_window(rate, tone, len(samples))
-    seg = samples[:n]
+    start = (len(samples) - n) // 2
+    seg = samples[start:start + n]
     mean = sum(seg) / float(n)
     seg = [x - mean for x in seg]
 
     amp, phase, w = tone_projection(seg, rate, tone)
     if amp <= 0.0:
-        return 0.0, -99.9
+        return 0.0, -99.9, -99.9
 
     harmonics = []
     for h in range(2, 6):
@@ -143,7 +156,8 @@ def distortion_metrics(samples, rate, tone):
         acc += d * d
     residual_dbfs = 20.0 * math.log10(
         max(math.sqrt(acc / n) / FULL_SCALE, 1e-9))
-    return thd_pct, residual_dbfs
+    fundamental_dbfs = 20.0 * math.log10(max(amp / FULL_SCALE, 1e-9))
+    return thd_pct, residual_dbfs, fundamental_dbfs
 
 
 def run_metrics(samples, rail):
@@ -224,13 +238,15 @@ def analyze_file(path, rate, channels, big_endian, tone, rail, thd_pct,
     reports = []
     for samples in chans:
         m = run_metrics(samples, rail)
-        m["thd_pct"], m["residual_dbfs"] = distortion_metrics(
-            samples, rate, measured_tone)
+        (m["thd_pct"], m["residual_dbfs"],
+         m["fundamental_dbfs"]) = distortion_metrics(
+             samples, rate, measured_tone)
         reports.append(m)
 
     if any(m["rail_regions"] for m in reports):
-        verdict = "FAULT"      # capture path clipped: setup problem
-    elif any(m["flattop_regions"] for m in reports) or \
+        verdict = "FAULT"
+    elif any(m["flattop_regions"] >= FLATTOP_REGION_MIN
+             for m in reports) or \
             any(m["thd_pct"] > thd_pct for m in reports):
         verdict = "SATURATED"
     else:
@@ -274,9 +290,11 @@ def find_onset(reports, levels):
 
 
 def channel_summary(m):
-    return ("peak %.6s dBFS  dc %+.1f  thd %.3f%%  flattop %d (max %d)  "
-            "rail %d/%d" % (
-                "%.2f" % m["peak_dbfs"], m["dc"], m["thd_pct"],
+    return ("peak %.6s dBFS  fundamental %.6s dBFS  dc %+.1f  "
+            "thd %.3f%%  flattop %d (max %d)  rail %d/%d" % (
+                "%.2f" % m["peak_dbfs"],
+                "%.2f" % m["fundamental_dbfs"],
+                m["dc"], m["thd_pct"],
                 m["flattop_regions"], m["flattop_longest"],
                 m["rail_samples"], m["rail_regions"]))
 
@@ -324,7 +342,9 @@ def main(argv=None):
 
     out = {"rate": args.rate,
            "tone": "auto" if args.auto_tone else args.tone,
-           "thd_threshold_pct": args.thd_pct, "captures": reports}
+           "thd_threshold_pct": args.thd_pct,
+           "flattop_region_min": FLATTOP_REGION_MIN,
+           "captures": reports}
     if levels is not None:
         out["onset"] = find_onset(reports, levels)
 

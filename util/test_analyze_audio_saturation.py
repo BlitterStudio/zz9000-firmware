@@ -58,10 +58,23 @@ def main():
     assert r["verdict"] == "CLEAN", r["verdict"]
     for m in r["channels"]:
         assert abs(m["peak_dbfs"] - (-6.02)) < 0.05, m["peak_dbfs"]
+        assert abs(m["fundamental_dbfs"] - (-6.02)) < 0.05, \
+            m["fundamental_dbfs"]
         assert m["rail_samples"] == 0 and m["rail_regions"] == 0
         assert m["flattop_regions"] == 0 and m["flattop_longest"] <= 1, m
         assert m["thd_pct"] < 0.05, m["thd_pct"]
         assert abs(m["dc"]) < 1.0, m["dc"]
+
+    # One isolated three-sample plateau can come from low-level
+    # quantization/noise; it is diagnostic, not a saturation verdict.
+    isolated = path("isolated-flattop.raw")
+    crest = 0.5 * 32767.0
+    synth(isolated, 2, 1.0, True,
+          lambda i, c: crest if i in (11, 12, 13)
+          else sine(i, crest))
+    r = ana.analyze_file(isolated, RATE, 2, True, TONE, 32760, 0.5)
+    assert r["verdict"] == "CLEAN", r
+    assert all(m["flattop_regions"] == 1 for m in r["channels"]), r
 
     # --- Paula-clock tone: auto detection preserves coherent THD ---
     paula_tone = path("paula-tone.raw")
@@ -74,6 +87,15 @@ def main():
     assert r["verdict"] == "CLEAN", r["verdict"]
     for m in r["channels"]:
         assert m["thd_pct"] < 0.05, m["thd_pct"]
+
+    # Local period filtering rejects isolated spurious crossings rather
+    # than biasing the estimate across the complete capture.
+    crossed = [round(0.5 * 32767.0 * math.sin(
+        2.0 * math.pi * actual_paula_tone * i / RATE))
+        for i in range(RATE)]
+    for start in (12000, 24000, 36000):
+        crossed[start:start + 4] = [-1000, 1000, -1000, 1000]
+    assert abs(ana.estimate_tone(crossed, RATE) - actual_paula_tone) < 0.05
 
     # Auto detection follows the strongest capture channel; a Paula
     # player may place its mono sample on either side.
@@ -167,6 +189,7 @@ def main():
     assert len(doc["captures"]) == 2, doc
     assert doc["captures"][1]["verdict"] == "SATURATED", doc
     assert doc["onset"]["suggested_boundary"] == 168.0, doc
+    assert doc["flattop_region_min"] == 3, doc
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = ana.main(["--json", "--auto-tone", paula_tone])
