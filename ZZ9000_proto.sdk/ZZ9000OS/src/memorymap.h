@@ -27,6 +27,32 @@
 #define USB_BLOCK_STORAGE_ADDRESS   0x3FE40000 // legacy name; shared SD boot / USB proxy buffer
 #define BOOT_ROM_ADDRESS            0x3FCF0000
 
+// Audio fabric lease-plane card-side source rings (plan U3): one ring
+// per leaseable compositor slot (mailbox slot 1, firmware-reserved slot 2),
+// MHI pcm_ring geometry (16 periods x 3840 bytes). Claimed from the free
+// gap between the audio RX formatter ring and the boot ROM window: the RX
+// ring ends at 0x3FC27800 (AUDIO_NUM_PERIODS * AUDIO_BYTES_PER_PERIOD at
+// 0x3FC20000), the linker image never rises above 0x18000000 (ps7_ddr_0 +
+// ps7_ddr_hi + heap), and no other firmware or driver constant names this
+// sub-range. BEGIN zeroes its ring, so a fresh lease can never read a
+// previous lease's (or a previous firmware lifetime's) samples.
+#define AUDIO_FABRIC_LEASE_RING_PERIODS 16U
+#define AUDIO_FABRIC_LEASE_RING_BYTES \
+    (AUDIO_FABRIC_LEASE_RING_PERIODS * AUDIO_BYTES_PER_PERIOD)
+#define AUDIO_FABRIC_LEASE_RING1_ADDRESS 0x3FC28000
+#define AUDIO_FABRIC_LEASE_RING2_ADDRESS \
+    (AUDIO_FABRIC_LEASE_RING1_ADDRESS + AUDIO_FABRIC_LEASE_RING_BYTES)
+#define AUDIO_FABRIC_LEASE_RINGS_END \
+    (AUDIO_FABRIC_LEASE_RING2_ADDRESS + AUDIO_FABRIC_LEASE_RING_BYTES)
+
+#if AUDIO_FABRIC_LEASE_RING1_ADDRESS < \
+    (AUDIO_RX_BUFFER_ADDRESS + AUDIO_NUM_PERIODS * AUDIO_BYTES_PER_PERIOD)
+#error "fabric lease ring 1 overlaps the audio RX formatter ring"
+#endif
+#if AUDIO_FABRIC_LEASE_RINGS_END > BOOT_ROM_ADDRESS
+#error "fabric lease rings overlap the boot ROM DDR window"
+#endif
+
 #define RTG_TEMPLATE_SCRATCH_ADDRESS 0x03400000
 #define RTG_TEMPLATE_SCRATCH_SIZE    0x00100000
 #define RTG_TEMPLATE_SCRATCH_END \

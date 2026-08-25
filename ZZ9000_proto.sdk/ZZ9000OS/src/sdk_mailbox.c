@@ -4098,18 +4098,195 @@ static uint16_t handle_audio_control(
 }
 
 /*
- * Audio fabric compositor lease opcodes (0x050f..0x0512, plan U1):
- * reserved ABI surface only. The opcodes and payloads are frozen so
- * host tooling can compile against them, but the compositor does not
- * exist yet; every request completes SDK_STATUS_UNSUPPORTED exactly
- * like an unknown opcode, and no capability word or service flag
- * advertises the surface until it lands.
+ * Audio fabric compositor lease opcodes (0x050f..0x0512, plan U3).
+ * All four run inline as SHORT tasks on core 0 (KTD1): the lease
+ * plane's ring copies are bounded by the slot ring, and the
+ * compositor itself only ever runs from the audio formatter IRQ.
+ * This layer is protocol only -- big-endian unpack/pack, admission
+ * vocabulary, shared-buffer resolution exactly like
+ * handle_audio_stream_feed's src handling -- with every state
+ * decision in audio_fabric.c. Nothing is advertised in any
+ * capability word or service flag until the on-hardware
+ * verification session passes (R12).
  */
-static uint16_t handle_audio_fabric_reserved(
+static uint16_t handle_audio_lease_begin(
 	volatile struct SDKMailboxEntry *req,
-	volatile struct SDKMailboxEntry *comp)
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
 {
-	return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	volatile struct SDKAudioLeaseBeginPayload *payload;
+	volatile struct SDKAudioLeaseBeginResultPayload *result;
+	uint32_t slot;
+	uint32_t identity;
+	uint32_t gain;
+	uint32_t flags;
+	uint32_t lease;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload =
+		(volatile struct SDKAudioLeaseBeginPayload *)req->payload;
+	slot = get_be32(payload->slot);
+	identity = get_be32(payload->identity);
+	gain = get_be32(payload->gain);
+	flags = get_be32(payload->flags);
+	/* Rate intent is reserved for the conversion-bearing leases:
+	 * the bypass path (48 kHz stereo S16LE, KTD4) is the only
+	 * geometry this firmware consumes. */
+	if (flags != 0U || gain > 255U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	switch (audio_fabric_lease_begin(slot, identity, gain, &lease)) {
+	case AUDIO_FABRIC_LEASE_OK:
+		status = SDK_STATUS_OK;
+		break;
+	case AUDIO_FABRIC_LEASE_EBUSY:
+	case AUDIO_FABRIC_LEASE_ELEGACY:
+		/* Exhaustion and a legacy-exclusive output are both
+		 * retryable occupancy, matching the PLAY gate's BUSY. */
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	default:
+		/* Slot 0 (the pump), the firmware-reserved slot 2, and
+		 * out-of-range slots: admission policy, not occupancy. */
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+	write_completion(comp, req, status, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKAudioLeaseBeginResultPayload *)
+		comp->payload;
+	put_be32(result->lease, lease);
+	put_be32(result->slot, AUDIO_FABRIC_LEASE_HANDLE_SLOT(lease));
+	put_be32(result->generation,
+	         AUDIO_FABRIC_LEASE_HANDLE_EPOCH(lease));
+	put_be32(result->flags, 0U);
+	return status;
+}
+
+static uint16_t handle_audio_lease_submit(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
+{
+	volatile struct SDKAudioLeaseSubmitPayload *payload;
+	volatile struct SDKAudioLeaseSubmitResultPayload *result;
+	struct SDKSharedBuffer *src;
+	uint32_t lease;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t flags;
+	uint32_t consumed = 0U;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload =
+		(volatile struct SDKAudioLeaseSubmitPayload *)req->payload;
+	lease = get_be32(payload->lease);
+	src_offset = get_be32(payload->src_offset);
+	src_length = get_be32(payload->src_length);
+	flags = get_be32(payload->flags);
+	/* No submit flags exist yet; S16LE stereo frames are 4 bytes. */
+	if (flags != 0U || (src_length & 3U) != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	/* Stale handles die before any work, like the session lookup in
+	 * the stream ops: the zero-length probe validates the handle
+	 * without touching the ring. */
+	if (audio_fabric_lease_submit(lease, NULL, 0U, &consumed) ==
+	    AUDIO_FABRIC_LEASE_EHANDLE)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (src_length != 0U) {
+		src = find_shared_buffer(get_be32(payload->src_handle));
+		if (!src || !buffer_range_valid(src, src_offset, src_length))
+			return complete_status(req, comp,
+			                       SDK_STATUS_BAD_HANDLE);
+		if (audio_fabric_lease_submit(lease,
+		        src->address + src_offset, src_length,
+		        &consumed) == AUDIO_FABRIC_LEASE_EHANDLE)
+			return complete_status(req, comp,
+			                       SDK_STATUS_BAD_HANDLE);
+	}
+	if (consumed == 0U && src_length != 0U) {
+		/* Ring full: retryable backpressure, not an error. */
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+	status = SDK_STATUS_OK;
+	write_completion(comp, req, status, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKAudioLeaseSubmitResultPayload *)
+		comp->payload;
+	put_be32(result->lease, lease);
+	put_be32(result->bytes_consumed, consumed);
+	put_be32(result->flags, 0U);
+	return status;
+}
+
+static uint16_t handle_audio_lease_release(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
+{
+	volatile struct SDKAudioLeaseReleasePayload *payload;
+	uint32_t lease;
+	uint32_t flags;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload =
+		(volatile struct SDKAudioLeaseReleasePayload *)req->payload;
+	lease = get_be32(payload->lease);
+	flags = get_be32(payload->flags);
+	if (flags != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (audio_fabric_lease_release(lease) == AUDIO_FABRIC_LEASE_EHANDLE)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	/* Idempotent for the immediately-previous lease: OK either way.
+	 * No result payload is reserved for RELEASE; it may join
+	 * append-only later. */
+	return complete_status(req, comp, SDK_STATUS_OK);
+}
+
+static uint16_t handle_audio_fabric_state_get(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
+{
+	volatile struct SDKAudioFabricStateGetPayload *payload;
+	volatile struct SDKAudioFabricStateResultPayload *result;
+	struct audio_fabric_slot_state state;
+	uint32_t slot;
+	uint32_t flags;
+	int hold_reset;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload =
+		(volatile struct SDKAudioFabricStateGetPayload *)req->payload;
+	slot = get_be32(payload->slot);
+	flags = get_be32(payload->flags);
+	if ((flags & ~SDK_AUDIO_FABRIC_STATE_HOLD_RESET) != 0U ||
+	    slot >= AUDIO_FABRIC_SLOT_COUNT)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	hold_reset = (flags & SDK_AUDIO_FABRIC_STATE_HOLD_RESET) != 0U;
+	if (!audio_fabric_slot_state(
+		    slot, audio_pump_meter_identity(
+			      g_audio_playback.source_kind),
+		    hold_reset, &state))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKAudioFabricStateResultPayload *)
+		comp->payload;
+	put_be32(result->slot, slot);
+	put_be32(result->generation, state.generation);
+	put_be32(result->slot_count, AUDIO_FABRIC_SLOT_COUNT);
+	put_be32(result->state, state.state);
+	put_be32(result->identity, state.identity);
+	put_be32(result->lease, state.lease);
+	put_be32(result->cursor_write,
+	         (uint32_t)state.written_bytes);
+	put_be32(result->cursor_read, (uint32_t)state.consumed_bytes);
+	put_be32(result->underrun_count, state.underruns);
+	put_be32(result->flags,
+	         hold_reset ? SDK_AUDIO_FABRIC_STATE_HOLD_RESET : 0U);
+	put_be32(result->peak, state.peak);
+	put_be32(result->clip, state.clips);
+	return SDK_STATUS_OK;
 }
 
 static uint16_t handle_audio_stream_begin(volatile struct SDKMailboxEntry *req,
@@ -7398,10 +7575,13 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	case SDK_OP_AUDIO_CONTROL_STATE_GET:
 		return handle_audio_control(req, comp, payload_len, opcode);
 	case SDK_OP_AUDIO_LEASE_BEGIN:
+		return handle_audio_lease_begin(req, comp, payload_len);
 	case SDK_OP_AUDIO_LEASE_SUBMIT:
+		return handle_audio_lease_submit(req, comp, payload_len);
 	case SDK_OP_AUDIO_LEASE_RELEASE:
+		return handle_audio_lease_release(req, comp, payload_len);
 	case SDK_OP_AUDIO_FABRIC_STATE_GET:
-		return handle_audio_fabric_reserved(req, comp);
+		return handle_audio_fabric_state_get(req, comp, payload_len);
 	case SDK_OP_IMAGE_SESSION_BEGIN:
 		return handle_image_session_begin(req, comp, payload_len);
 	case SDK_OP_IMAGE_SESSION_FEED:
@@ -7504,6 +7684,12 @@ void sdk_mailbox_init(void)
 	sdk_status = SDK_STATUS_OK;
 	sdk_mailbox_active = 0;
 	sdk_mailbox_pending = 0;
+	/* R7 fail-closed fabric teardown BEFORE the generation advances:
+	 * the fabric silences the ring it owns, bumps every lease epoch
+	 * (a stale pre-reset handle must never validate again) and zeroes
+	 * the card-side lease rings. Ordering matters: a task completing
+	 * into the next lifetime must observe a fabric with no leases. */
+	audio_fabric_reset();
 	/* New mailbox lifetime: any task still queued from the previous one is now
 	 * stale and must not post into this mailbox's completion ring. */
 	sdk_mailbox_generation++;
@@ -7529,10 +7715,9 @@ void sdk_mailbox_init(void)
 	media_pcm_ring_session = 0U;
 	memset(shared_buffers, 0, sizeof(shared_buffers));
 	memset(surfaces, 0, sizeof(surfaces));
-	/* Unbind AX playback before the table goes away: drop every
-	 * fabric producer with no formatter transactions and no ring
-	 * silence (mailbox teardown semantics, matching the pump). */
-	audio_fabric_reset();
+	/* Unbind AX playback before the table goes away: the fabric
+	 * reset above already dropped every producer, silenced the ring
+	 * it owned and retired the lease epochs (R7). */
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
