@@ -665,13 +665,20 @@ struct SDKAudioLeaseBeginPayload {
 
 /* lease is the opaque generation-tagged lease handle; generation
  * echoes the tag embedded in it. Later LEASE_SUBMIT / LEASE_RELEASE
- * calls present the handle exactly as granted. */
+ * calls present the handle exactly as granted. gain_applied is the
+ * scene-composed producer gain the lease actually runs at (R11): the
+ * requested 0..255 gain is composed against the enforced ceiling
+ * under the active scene and a reduced request is REPORTED here --
+ * with SDK_AUDIO_LEASE_RESULT_GAIN_BOUNDED in flags -- never
+ * silently clamped (the trim-bound pattern). Append-only word
+ * consuming the former reserved tail; earlier fields never move. */
 struct SDKAudioLeaseBeginResultPayload {
 	uint8_t lease[4];
 	uint8_t slot[4];
 	uint8_t generation[4];
 	uint8_t flags[4];
-	uint8_t reserved[32];
+	uint8_t gain_applied[4];
+	uint8_t reserved[28];
 };
 /* Producer PCM delivery: one shared-buffer reference into the
  * producer's staging buffer, mirroring how SDK_OP_AUDIO_STREAM_FEED
@@ -754,6 +761,10 @@ struct SDKAudioFabricStateResultPayload {
  * conversion-bearing leases and currently required zero. */
 #define SDK_AUDIO_LEASE_FLAG_RATE_INTENT (1U << 0)
 
+/* LEASE_BEGIN result flags: the scene composition reduced the
+ * requested gain (see gain_applied). */
+#define SDK_AUDIO_LEASE_RESULT_GAIN_BOUNDED (1U << 0)
+
 /* FABRIC_STATE_GET request flag: consume the slot's peak-hold
  * window on this read (mirrors SDK_AUDIO_METER_RESULT_HOLD_RESET);
  * the result's flags word echoes it when the read consumed it. */
@@ -780,6 +791,9 @@ typedef char SDKAudioFabricStatePeakConsumesFormerTail[
 	(offsetof(struct SDKAudioFabricStateResultPayload, peak) == 40U &&
 	 offsetof(struct SDKAudioFabricStateResultPayload, clip) == 44U) ?
 		1 : -1];
+typedef char SDKAudioLeaseBeginGainIsAppendOnly[
+	(offsetof(struct SDKAudioLeaseBeginResultPayload,
+	          gain_applied) == 16U) ? 1 : -1];
 
 /* Non-volatile big-endian word accessors shared by the control-plane
  * dispatch and any payload pack/unpack that reads plain buffers. */

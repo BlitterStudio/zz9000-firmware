@@ -4115,6 +4115,7 @@ static uint16_t handle_audio_lease_begin(
 {
 	volatile struct SDKAudioLeaseBeginPayload *payload;
 	volatile struct SDKAudioLeaseBeginResultPayload *result;
+	struct audio_fabric_lease_grant grant;
 	uint32_t slot;
 	uint32_t identity;
 	uint32_t gain;
@@ -4135,7 +4136,8 @@ static uint16_t handle_audio_lease_begin(
 	 * geometry this firmware consumes. */
 	if (flags != 0U || gain > 255U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	switch (audio_fabric_lease_begin(slot, identity, gain, &lease)) {
+	switch (audio_fabric_lease_begin(slot, identity, gain, &lease,
+	                                 &grant)) {
 	case AUDIO_FABRIC_LEASE_OK:
 		status = SDK_STATUS_OK;
 		break;
@@ -4157,7 +4159,13 @@ static uint16_t handle_audio_lease_begin(
 	put_be32(result->slot, AUDIO_FABRIC_LEASE_HANDLE_SLOT(lease));
 	put_be32(result->generation,
 	         AUDIO_FABRIC_LEASE_HANDLE_EPOCH(lease));
-	put_be32(result->flags, 0U);
+	/* R11: the applied-vs-requested distinction is contract, not
+	 * telemetry -- a ceiling-bounded gain request must be visible
+	 * as such to the requester. */
+	put_be32(result->gain_applied, grant.gain);
+	put_be32(result->flags,
+	         grant.bounded ? SDK_AUDIO_LEASE_RESULT_GAIN_BOUNDED
+	                       : 0U);
 	return status;
 }
 

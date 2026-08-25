@@ -25,6 +25,7 @@
 
 #include "audio_fabric.h"
 #include "audio_playback_frontier.h"
+#include "audio_scene.h"
 #include "ax.h"
 #include "memorymap.h"
 #include "sdk_mailbox.h"
@@ -774,15 +775,21 @@ void audio_fabric_ring_silence(uint32_t slot)
  */
 
 int audio_fabric_lease_begin(uint32_t slot, uint32_t identity,
-	uint32_t gain, uint32_t *lease)
+	uint32_t gain, uint32_t *lease,
+	struct audio_fabric_lease_grant *grant)
 {
 	struct audio_fabric_slot *s = fabric_slot(slot);
 	struct audio_fabric_lease *l;
+	struct audio_scene_lease_gain_result composed;
 	uint8_t *ring;
 
 	if (lease == NULL)
 		return AUDIO_FABRIC_LEASE_EBAD_SLOT;
 	*lease = 0U;
+	if (grant != NULL) {
+		grant->gain = 0U;
+		grant->bounded = 0U;
+	}
 	/* Admission policy (R4/R5): slot 0 is the pump -- live exactly
 	 * while an SDK playback bind exists and never leaseable -- and
 	 * slot 2 stays firmware-reserved until the AHI/synthesis
@@ -790,6 +797,14 @@ int audio_fabric_lease_begin(uint32_t slot, uint32_t identity,
 	if (slot == AUDIO_FABRIC_SLOT_PUMP ||
 	    slot == AUDIO_FABRIC_SLOT_RESERVED ||
 	    slot >= AUDIO_FABRIC_SLOT_COUNT)
+		return AUDIO_FABRIC_LEASE_EBAD_SLOT;
+	/* R11: the lease gain is not a free-floating mixer scale -- it
+	 * composes against the enforced ceiling under the active scene
+	 * (audio_scene.c), exactly like an owner trim: a request above
+	 * the composition is bounded and REPORTED through the grant,
+	 * never silently clamped. The mailbox layer rejects gain > 255
+	 * before this; the fabric re-arms the same admission policy. */
+	if (audio_scene_lease_gain_compose(gain, &composed) != 0)
 		return AUDIO_FABRIC_LEASE_EBAD_SLOT;
 	if (s->lease.ring != NULL || s->attached)
 		return AUDIO_FABRIC_LEASE_EBUSY;
@@ -809,7 +824,11 @@ int audio_fabric_lease_begin(uint32_t slot, uint32_t identity,
 	l->identity = identity;
 	l->generation = s->epoch;   /* attach bumped it onto this lease */
 	l->state = (uint8_t)AUDIO_FABRIC_SLOT_STATE_LEASED;
-	s->gain = (uint16_t)gain;
+	s->gain = (uint16_t)composed.applied;
+	if (grant != NULL) {
+		grant->gain = composed.applied;
+		grant->bounded = composed.bounded;
+	}
 	*lease = AUDIO_FABRIC_LEASE_HANDLE(slot, l->generation);
 	return AUDIO_FABRIC_LEASE_OK;
 }

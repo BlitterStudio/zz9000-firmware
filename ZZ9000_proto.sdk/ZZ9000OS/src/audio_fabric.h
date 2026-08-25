@@ -196,20 +196,34 @@ struct audio_fabric_slot_state {
 };
 
 /*
+ * Applied-vs-requested gain report (R11): LEASE_BEGIN composes the
+ * requested gain through the scene arbiter's ceiling-bounded
+ * composition and reports what actually applied, so a bounded
+ * request is never silently clamped (the I3 trim-bound pattern).
+ */
+struct audio_fabric_lease_grant {
+	uint8_t bounded; /* nonzero when the requested gain was reduced */
+	uint8_t gain;    /* applied 0..255 mixer scale */
+};
+
+/*
  * Grant a producer lease. slot 0 (the pump) is never leaseable and
  * slot 2 stays firmware-reserved for the AHI/synthesis follow-on;
  * both complete AUDIO_FABRIC_LEASE_EBAD_SLOT (the mailbox layer
  * answers SDK_STATUS_BAD_REQUEST -- an admission-policy rejection,
  * not exhaustion). A leased slot completes AUDIO_FABRIC_LEASE_EBUSY
  * (mailbox: SDK_STATUS_BUSY), as does a legacy-exclusive output.
- * gain is the single 0..255 mixer scale (AUDIO_FABRIC_GAIN_UNITY is
- * unity; the packed two-channel balance form joins with the
- * conversion-bearing leases). On success the ring is zeroed (the
+ * gain is the single requested 0..255 mixer scale
+ * (AUDIO_FABRIC_GAIN_UNITY is unity); the scene arbiter composes it
+ * against the enforced ceiling under the active scene (R11) and the
+ * applied value -- possibly bounded, never silently -- is reported
+ * through *grant when non-NULL. On success the ring is zeroed (the
  * ghost-period bound of R5 depends on this) and *lease carries the
  * generation-tagged handle.
  */
 int audio_fabric_lease_begin(uint32_t slot, uint32_t identity,
-	uint32_t gain, uint32_t *lease);
+	uint32_t gain, uint32_t *lease,
+	struct audio_fabric_lease_grant *grant);
 
 /*
  * Copy length bytes from the client's resolved staging address into
