@@ -18,6 +18,7 @@
 #include "audio_capture.h"
 #include "audio_convert.h"
 #include "audio_scene.h"
+#include "audio_dsp_gain.h"
 #include "audio_playback_rate.h"
 #include "audio_fabric.h"
 #include "memorymap.h"

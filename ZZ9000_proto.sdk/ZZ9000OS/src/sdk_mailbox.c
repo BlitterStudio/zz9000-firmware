@@ -4214,8 +4214,8 @@ static uint16_t handle_audio_lease_submit(
 			return complete_status(req, comp,
 			                       SDK_STATUS_BAD_HANDLE);
 		if (audio_fabric_lease_submit(lease,
-		        src->address + src_offset, src_length,
-		        &consumed) == AUDIO_FABRIC_LEASE_EHANDLE)
+		        (const uint8_t *)(uintptr_t)(src->address + src_offset),
+		        src_length, &consumed) == AUDIO_FABRIC_LEASE_EHANDLE)
 			return complete_status(req, comp,
 			                       SDK_STATUS_BAD_HANDLE);
 	}
