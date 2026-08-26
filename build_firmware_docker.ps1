@@ -4,6 +4,7 @@
 param(
   [string]$Image = "debian:bookworm-slim",
   [string]$Output = "bootimage_work/BOOT-sdk-docker.bin",
+  [string]$ExtraCFlags = "",
   [switch]$NoClean,
   [switch]$NoBootimage
 )
@@ -80,6 +81,7 @@ try {
     -e "CLEAN=$CleanValue" `
     -e "BOOTIMAGE=$BootimageValue" `
     -e "OUTPUT=$Output" `
+    -e "EXTRA_CFLAGS=$ExtraCFlags" `
     $Image bash /tmp/build-firmware-docker.sh
   if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
