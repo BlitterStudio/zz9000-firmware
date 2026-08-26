@@ -3420,6 +3420,7 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 	const uint32_t frame_pcm_bytes =
 		MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t);
 	uint32_t produced_this_call = 0U;
+	uint32_t frames_this_call = 0U;
 	uint32_t max_pcm_this_call;
 	uint32_t pcm_flush_start;
 	uint32_t progress = 0U;
@@ -3459,6 +3460,8 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 		uint32_t consumed;
 		uint32_t bytes;
 
+		if (!audio_stream_decode_quantum_available(frames_this_call))
+			break;
 		if (!audio_stream_decode_may_run(
 			    stream->input_length,
 			    SDK_AUDIO_STREAM_MIN_INPUT_BYTES,
@@ -3482,6 +3485,7 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 			input + stream->input_offset,
 			decode_input_size,
 			stream->scratch, &info);
+		frames_this_call++;
 		consumed = (uint32_t)info.frame_bytes;
 		if (consumed == 0U) {
 			drain_blocked_on_input = 1;

@@ -149,6 +149,24 @@ static void test_two_claims_never_collide(void)
   if (a == b) { printf("claim_collision %d\n", a); failures++; }
 }
 
+static void test_long_codec_tasks_interleave_after_completion(void)
+{
+  taskq_t q;
+  int audio_slot;
+  int video_slot;
+
+  taskq_init(&q);
+  (void)taskq_enqueue(&q, TASKQ_OP_AUDIO_STREAM_FEED, TASK_LONG,
+                      0, 0, 0, 0, 1, 1, NULL, 0u);
+  (void)taskq_enqueue(&q, TASKQ_OP_MEDIA_SESSION_DECODE, TASK_LONG,
+                      0, 0, 0, 0, 2, 2, NULL, 0u);
+  audio_slot = taskq_claim_any(&q);
+  expect_int("codec_interleave_audio_first", audio_slot, 0);
+  taskq_complete(&q, audio_slot, 0, NULL, 0u);
+  video_slot = taskq_claim_any(&q);
+  expect_int("codec_interleave_video_next", video_slot, 1);
+}
+
 static void test_claim_advances_past_lost_cas(void)
 {
   taskq_t q;
@@ -342,6 +360,7 @@ int main(void)
   test_enqueue_param_len_bounds_copy();
   test_claim_any_returns_queued_and_marks_claimed();
   test_two_claims_never_collide();
+  test_long_codec_tasks_interleave_after_completion();
   test_claim_advances_past_lost_cas();
   test_claim_short_skips_long();
   test_complete_sets_done_and_payload();

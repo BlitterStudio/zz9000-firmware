@@ -22,6 +22,15 @@ static int check_decode_gate(void)
 		MIN_INPUT_BYTES, MIN_INPUT_BYTES, 0, 0);
 }
 
+static int check_decode_quantum(void)
+{
+	if (!audio_stream_decode_quantum_available(0U))
+		return 0;
+	if (!audio_stream_decode_quantum_available(1U))
+		return 0;
+	return !audio_stream_decode_quantum_available(2U);
+}
+
 static int check_source_tail_state(void)
 {
 	if (audio_stream_source_tail_ready(0, 17U, 0, 0))
@@ -74,13 +83,15 @@ int main(void)
 {
 	if (!check_decode_gate())
 		return 1;
-	if (!check_source_tail_state())
+	if (!check_decode_quantum())
 		return 2;
-	if (!check_drain_input_state())
+	if (!check_source_tail_state())
 		return 3;
-	if (!check_transient_drain_completion())
+	if (!check_drain_input_state())
 		return 4;
-	if (!check_refill_gate())
+	if (!check_transient_drain_completion())
 		return 5;
+	if (!check_refill_gate())
+		return 6;
 	return 0;
 }

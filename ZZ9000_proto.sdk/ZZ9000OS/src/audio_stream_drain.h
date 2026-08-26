@@ -3,6 +3,16 @@
 
 #include <stdint.h>
 
+/* Core 1 also decodes video. Bound each non-preemptive audio task so a
+ * sustained MP3 stream cannot hold the worker across an entire PCM refill. */
+#define AUDIO_STREAM_DECODE_FRAMES_PER_TASK 2U
+
+static inline int audio_stream_decode_quantum_available(
+		uint32_t attempted_frames)
+{
+	return attempted_frames < AUDIO_STREAM_DECODE_FRAMES_PER_TASK;
+}
+
 /* A normal streaming decode keeps a lookahead reserve. EOF and a resumable
  * drain both relax that gate so every currently complete frame is decoded. */
 static inline int audio_stream_decode_may_run(uint32_t input_length,
