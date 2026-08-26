@@ -142,6 +142,7 @@
 /* Control-plane audio opcodes (0x0509+) are dispatchable. Follows the
  * SDK_CAP_AUDIO_CONTROL gated-advertising discipline: not reported in
  * the audio service flags until qualified. */
+#define SDK_SERVICE_FLAG_AUDIO_CONTROL (1U << 21)
 /* Fabric lease opcodes (0x050f+) are dispatchable (firmware U3).
  * Follows the SDK_CAP_AUDIO_FABRIC gated-advertising discipline:
  * still not reported in the audio service flags until qualified. */
