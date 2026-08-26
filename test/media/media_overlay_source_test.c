@@ -54,19 +54,22 @@ int main(int argc, char **argv)
 {
 	char *media;
 	char *overlay;
+	char *video;
 	const char *enqueue;
 	const char *release;
 	const char *status;
 	const char *audio_read;
 	int ok;
 
-	if (argc != 3)
+	if (argc != 4)
 		return 2;
+	video = read_file(argv[3]);
 	media = read_file(argv[1]);
 	overlay = read_file(argv[2]);
-	if (!media || !overlay) {
+	if (!media || !overlay || !video) {
 		free(media);
 		free(overlay);
+		free(video);
 		return 3;
 	}
 
@@ -94,8 +97,23 @@ int main(int argc, char **argv)
 		        argv[1]);
 		ok = 0;
 	}
+	{
+		const char *rearm = strstr(video, "overlay_vblank_rearm();");
+		const char *flush = strstr(video, "Xil_L2CacheFlush();");
+		const char *publish =
+			strstr(video, "overlay_vblank_cache_flushed();");
+
+		if (!rearm || !flush || !publish ||
+		    !(rearm < flush && flush < publish)) {
+			fprintf(stderr,
+			        "%s: overlay scanout must rearm before cache flush\n",
+			        argv[3]);
+			ok = 0;
+		}
+	}
 
 	free(media);
 	free(overlay);
+	free(video);
 	return ok ? 0 : 1;
 }

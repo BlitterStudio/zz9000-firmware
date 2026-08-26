@@ -88,8 +88,10 @@ void overlay_video_session_closed(uint32_t session);
 int overlay_scanout_active(void);
 void overlay_scanout_released(void);
 
-/* Vblank ISR hook, called immediately after the mandatory full L1+L2 flush.
- * Publishes a completed packed-YUV staging buffer to the non-coherent VDMA. */
+/* Vblank ISR hooks. Rearm the last clean scan buffer before the mandatory
+ * global cache flush can delay scanout. After that flush, queue a newly
+ * composed packed-YUV buffer for the following vblank's early rearm. */
+void overlay_vblank_rearm(void);
 void overlay_vblank_cache_flushed(void);
 
 #endif /* ZZ_OVERLAY_H */

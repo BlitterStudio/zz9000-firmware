@@ -72,6 +72,7 @@ static struct {
 	uint32_t hw_scan_addr;
 	volatile uint8_t hw_flip_pending;
 	volatile uint8_t hw_restore_pending;
+	uint32_t hw_handoff_addr;
 	struct overlay_schedule_state schedule;
 } ov;
 
@@ -115,6 +116,7 @@ void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
 	ov.mode_stale = 0;
 	ov.hw_flip_pending = 0;
 	ov.hw_restore_pending = 0;
+	ov.hw_handoff_addr = 0U;
 	overlay_schedule_reset(&ov.schedule);
 	ov.direct_session = 0U;
 	ov.hw_scan_addr = 0U;
@@ -137,6 +139,7 @@ static void overlay_stop(void)
 	ov.hw_scan_addr = 0U;
 	ov.hw_flip_pending = 0;
 	ov.hw_restore_pending = 0;
+	ov.hw_handoff_addr = 0U;
 	/* always deferred: core 1 may still be composing into a shadow,
 	 * and the VDMA keeps scanning the presented one until the next
 	 * vblank repoints it - the poll frees once both have moved on */
@@ -298,6 +301,7 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	if (was_hw_active && ov.direct_session != 0U && ov.front >= 0)
 		hw_src_addr = ov.shadow[ov.front];
 	ov.hw_restore_pending = 0;
+	ov.hw_handoff_addr = 0U;
 	ov.hw_active = 0;
 	if (overlay_hw_supported() && ov.active &&
 	    dst_w > 0 && dst_h > 0 &&
@@ -329,6 +333,7 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 		ov.ready_idx = -1;
 		ov.hw_flip_pending = 0;
 		ov.hw_restore_pending = 0;
+		ov.hw_handoff_addr = 0U;
 	}
 	ov.compose_request = (ov.hw_active && ov.direct_session == 0U) ? 0U : 1U;
 
@@ -474,6 +479,9 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 	 * are spoken for (one scanned, one ready) - composing now would
 	 * overwrite the buffer the next vblank presents */
 	if (ov.ready_idx >= 0)
+		return;
+	if (ov.hw_active &&
+	    (ov.hw_flip_pending || ov.hw_handoff_addr != 0U))
 		return;
 	if (!scheduler_core1_available())
 		return;
@@ -647,6 +655,7 @@ void overlay_video_session_closed(uint32_t session)
 			ov.front = -1;
 			ov.ready_idx = -1;
 			ov.hw_flip_pending = 0;
+			ov.hw_handoff_addr = 0U;
 			ov.hw_restore_pending = 1;
 		}
 	}
@@ -667,32 +676,47 @@ void overlay_scanout_released(void)
 	ov.presenting = 0;
 }
 
-void overlay_vblank_cache_flushed(void)
+static void overlay_hw_rearm(uint32_t address)
 {
-	uint32_t next_addr;
-
-	if (!ov.hw_active)
+	if (!address)
 		return;
-	next_addr = ov.hw_scan_addr;
-	if (ov.hw_restore_pending) {
-		ov.hw_restore_pending = 0;
-		next_addr = ov.src_addr;
-	} else if (ov.hw_flip_pending && ov.front >= 0) {
-		ov.hw_flip_pending = 0;
-		next_addr = ov.shadow[ov.front];
-	}
-	if (!next_addr)
-		return;
-
-	/* Re-arm every native frame only after the mandatory cache flush.
-	 * The PL deliberately leaves MM2S stalled at the completed frame until
-	 * this generation handoff, so it cannot prefetch the old surface before
-	 * a decoded staging-buffer flip has committed. */
 	ov.hw_generation++;
 	if (ov.hw_generation == 0U)
 		ov.hw_generation = 1U;
-	overlay_hw_set_buffer(next_addr, ov.hw_generation);
-	ov.hw_scan_addr = next_addr;
+	overlay_hw_set_buffer(address, ov.hw_generation);
+	ov.hw_scan_addr = address;
+}
+
+void overlay_vblank_rearm(void)
+{
+	uint32_t address;
+
+	if (!ov.hw_active)
+		return;
+	/* The currently scanned staging buffer was flushed before it was first
+	 * published and is immutable while scanned. Restart it at vblank entry,
+	 * before unrelated dirty cache lines can delay the mandatory global
+	 * flush and leave the native-overlay VDMA stalled on a black frame. A
+	 * newly composed buffer becomes eligible one vblank after that flush. */
+	address = overlay_vblank_take_rearm(
+		ov.hw_scan_addr, &ov.hw_handoff_addr);
+	overlay_hw_rearm(address);
+}
+
+void overlay_vblank_cache_flushed(void)
+{
+	if (!ov.hw_active)
+		return;
+	/* Do not reset the VDMA a second time in the same vblank. Remember the
+	 * freshly flushed handoff for the next vblank's early rearm; main-poll
+	 * composition stays blocked until that handoff has been consumed. */
+	if (ov.hw_restore_pending) {
+		ov.hw_restore_pending = 0;
+		ov.hw_handoff_addr = ov.src_addr;
+	} else if (ov.hw_flip_pending && ov.front >= 0) {
+		ov.hw_flip_pending = 0;
+		ov.hw_handoff_addr = ov.shadow[ov.front];
+	}
 }
 
 void overlay_compose_retired(int ok)

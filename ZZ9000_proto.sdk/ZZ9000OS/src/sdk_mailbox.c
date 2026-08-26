@@ -6027,26 +6027,30 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		const struct audio_feed_op_params *p =
 		    (const struct audio_feed_op_params *)d->op_params;
 		struct SDKAudioStream *stream = find_audio_stream(p->session);
+		uint32_t dirty_offset = 0U;
+		uint32_t dirty_length = 0U;
 
 		*result_len = 0;
 		if (!stream)
 			return SDK_STATUS_BAD_HANDLE;
 		if (stream->faulted)
 			return SDK_STATUS_IO_ERROR;
+		(void)audio_stream_feed_dirty_span(
+			stream->input_offset, stream->input_length, p->src_len,
+			stream->mp3_capacity, &dirty_offset, &dirty_length);
 		audio_stream_feed_compute(stream, p->src_addr, p->src_len,
 		                          p->flags);
-		/* This worker runs on core 1, which owns the mp3 staging ring's
-		 * cache (see core1_affine). Only the FEED path writes that ring
-		 * (feed_compute's memcpy + audio_stream_compact_input); a READ or
-		 * the internal refill just reads it. Clean+invalidate the ring
-		 * here so core 1 leaves no dirty lines behind: CLOSE/free runs on
-		 * core 0 and cannot reach core 1's L1, so without this a later
-		 * eviction of stale compressed data could clobber whatever reuses
-		 * the freed shared buffer. */
-		if (stream->mp3_ring_addr != 0U && stream->mp3_capacity != 0U)
+		/* Only feed_compute's append/compaction writes the compressed
+		 * ring. Flush that exact dirty span once; zero-byte internal
+		 * refills only read clean lines and must not race the core-0
+		 * vblank's global L2 flush/overlay-VDMA rearm. Keeping every
+		 * write clean also prevents a later core-1 eviction from
+		 * clobbering memory after CLOSE frees the shared buffer. */
+		if (dirty_length != 0U)
 			Xil_DCacheFlushRange(
-				(INTPTR)(uintptr_t)stream->mp3_ring_addr,
-				stream->mp3_capacity);
+				(INTPTR)(uintptr_t)(
+					stream->mp3_ring_addr + dirty_offset),
+				dirty_length);
 		audio_stream_fill_result(result_payload, stream);
 		*result_len = sizeof(struct SDKAudioStreamResultPayload);
 		return SDK_STATUS_OK;

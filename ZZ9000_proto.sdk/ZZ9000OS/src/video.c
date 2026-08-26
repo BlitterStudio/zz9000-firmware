@@ -525,6 +525,9 @@ void isr_video(void *dummy) {
 		}
 	}
 
+	if (vblank)
+		overlay_vblank_rearm();
+
 	// on vblanks, handle arm cache flush, amiga interrupts and sprites
 	if (!vblank || (vs.split_pos == 0)) {
 		// flush the data caches synchronized to full frames. this is NOT

@@ -13,6 +13,29 @@ static inline int audio_stream_decode_quantum_available(
 	return attempted_frames < AUDIO_STREAM_DECODE_FRAMES_PER_TASK;
 }
 
+/* A zero-byte refill only reads the compressed ring and must not issue cache
+ * maintenance. A real feed dirties either its append span or, when append
+ * would cross the end, the compacted live input plus the appended bytes. */
+static inline int audio_stream_feed_dirty_span(
+		uint32_t input_offset, uint32_t input_length,
+		uint32_t source_length, uint32_t capacity,
+		uint32_t *dirty_offset, uint32_t *dirty_length)
+{
+	if (!dirty_offset || !dirty_length || source_length == 0U ||
+	    input_length > capacity ||
+	    input_offset > capacity - input_length ||
+	    source_length > capacity - input_length)
+		return 0;
+	if (input_offset > capacity - input_length - source_length) {
+		*dirty_offset = 0U;
+		*dirty_length = input_length + source_length;
+	} else {
+		*dirty_offset = input_offset + input_length;
+		*dirty_length = source_length;
+	}
+	return 1;
+}
+
 /* A normal streaming decode keeps a lookahead reserve. EOF and a resumable
  * drain both relax that gate so every currently complete frame is decoded. */
 static inline int audio_stream_decode_may_run(uint32_t input_length,

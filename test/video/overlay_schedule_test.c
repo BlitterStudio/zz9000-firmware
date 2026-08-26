@@ -15,6 +15,17 @@ int main(void)
 	assert(overlay_buffer_bytes(5120U, 720U, 1280U, 480U) ==
 	       5120U * 720U);
 
+	{
+		uint32_t handoff = 0U;
+
+		assert(overlay_vblank_take_rearm(0x1000U, &handoff) ==
+		       0x1000U);
+		assert(handoff == 0U);
+		handoff = 0x2000U;
+		assert(overlay_vblank_take_rearm(0x1000U, &handoff) ==
+		       0x2000U);
+		assert(handoff == 0U);
+	}
 	overlay_schedule_reset(&state);
 	assert(overlay_schedule_refresh_driven(&state));
 
