@@ -676,19 +676,25 @@ void overlay_scanout_released(void)
 	ov.presenting = 0;
 }
 
-static void overlay_hw_rearm(uint32_t address)
+static int overlay_hw_rearm(uint32_t address)
 {
+	uint32_t generation;
+
 	if (!address)
-		return;
-	ov.hw_generation++;
-	if (ov.hw_generation == 0U)
-		ov.hw_generation = 1U;
-	overlay_hw_set_buffer(address, ov.hw_generation);
+		return 0;
+	generation = ov.hw_generation + 1U;
+	if (generation == 0U)
+		generation = 1U;
+	if (!overlay_hw_set_buffer(address, generation))
+		return 0;
+	ov.hw_generation = generation;
 	ov.hw_scan_addr = address;
+	return 1;
 }
 
 void overlay_vblank_rearm(void)
 {
+	uint32_t pending;
 	uint32_t address;
 
 	if (!ov.hw_active)
@@ -698,9 +704,11 @@ void overlay_vblank_rearm(void)
 	 * before unrelated dirty cache lines can delay the mandatory global
 	 * flush and leave the native-overlay VDMA stalled on a black frame. A
 	 * newly composed buffer becomes eligible one vblank after that flush. */
+	pending = ov.hw_handoff_addr;
 	address = overlay_vblank_take_rearm(
 		ov.hw_scan_addr, &ov.hw_handoff_addr);
-	overlay_hw_rearm(address);
+	if (!overlay_hw_rearm(address))
+		ov.hw_handoff_addr = pending;
 }
 
 void overlay_vblank_cache_flushed(void)

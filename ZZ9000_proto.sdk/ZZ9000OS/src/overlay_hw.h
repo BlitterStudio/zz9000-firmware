@@ -18,6 +18,6 @@ int overlay_hw_start_scaled(uint32_t src_addr, uint32_t src_pitch,
                             uint16_t dst_width, uint16_t dst_height,
                             uint8_t variant, uint32_t key_rgb,
                             uint8_t key_enabled, uint32_t generation);
-void overlay_hw_set_buffer(uint32_t src_addr, uint32_t generation);
+int overlay_hw_set_buffer(uint32_t src_addr, uint32_t generation);
 
 #endif
