@@ -101,6 +101,8 @@ C_SRCS = \
 	$(SRC_DIR)/platform.c \
 	$(SRC_DIR)/adc.c \
 	$(SRC_DIR)/ax.c \
+	$(SRC_DIR)/audio_fabric.c \
+	$(SRC_DIR)/audio_fabric_lease.c \
 	$(SRC_DIR)/audio_capture.c \
 	$(SRC_DIR)/audio_convert.c \
 	$(SRC_DIR)/audio_convert_tables.c \

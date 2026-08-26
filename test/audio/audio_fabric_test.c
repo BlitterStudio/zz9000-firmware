@@ -1,5 +1,5 @@
 /*
- * Host tests for the audio fabric compositor (plan U2).
+ * Host tests for the audio fabric compositor core (plan U2).
  *
  * The suite is built characterization-first: pump_golden.c is a verbatim
  * capture of the pre-fabric sdk_mailbox.c pump at 9b3654f, and the
@@ -8,54 +8,34 @@
  * producer-side accounting (staging cursor, retirement totals, played
  * underrun callbacks, stream play-out tail) after every 20 ms tick.
  *
- * Coverage (the seven U2 scenarios):
+ * The mailbox lease plane (plan U3) is covered by the companion binary
+ * audio_fabric_lease_test.c; both share their harness in
+ * fabric_test_common.{h,c}.
+ *
+ * Coverage:
  *   1. single-producer parity across fill offsets, conversion rates,
  *      mono/byte-swapped sources, underrun rebases and drain tails,
- *      media pause/resume and stop (KTD6),
+ *      media pause/resume and stop (KTD6), including off-table decode
+ *      rates that commit silent periods,
  *   2. two-source saturating int32 mix -> S16 (KTD4),
  *   3. three-way ownership gate, both directions, clean idle returns,
  *   4. ring silence only when the last producer releases (KTD8),
- *   5. per-slot underrun isolation (R8),
+ *   5. per-slot underrun isolation (R8), plus the exclusion for
+ *      faulted/done producers (U5),
  *   6. formatter ownership: no re-init across producer bind/unbind
- *      inside fabric-active; conditional re-init at fabric re-entry
+ *      inside fabric-active; conditional re-init at fabric re-entry,
  *   7. dispatcher coverage: with the TX ring MMU write-protected, ring
  *      writes happen only inside compositor windows, plus a source
  *      contract scan proving no other firmware module writes the ring
- *      while the fabric is active (R1),
- *   8. lease lifecycle: BEGIN -> LEASED -> first SUBMIT -> ACTIVE ->
- *      audible period -> RELEASE -> FREE with last-release silence,
- *   9. release zero-contribution: a mixed lease's ring contribution
- *      disappears after release, returning bit-exact to pump-only,
- *   10. ghost bound (R5): <= 1 residual period after a mid-stream
- *      release, and a fresh lease never reads retired ring bytes,
- *   11. stale writes: released/garbage handles rejected with no ring
- *      or cursor effect; generations advance per lease (R5),
- *   12. warm reset (R7): slots FREE, rings zeroed, TX silenced,
- *      pre-reset handles stale, fresh generations above old ones,
- *      first post-reset period free of pre-reset samples,
- *   13. exhaustion/admission: BUSY on a leased slot, BAD_SLOT on the
- *      pump/firmware-reserved/out-of-range slots, legacy rejection,
- *      partial accept and zero-accept backpressure,
- *   14. state read vs driven state: cursors, per-slot underruns,
- *      16.16 peak with the scene-meter hold-reset convention and
- *      at-rail clip-region counting,
- *   15. coexistence (R9/AE1 host side): pump slot and lease slot both
- *      active -> every committed period is the saturating arithmetic
- *      sum, the lease side at its applied gain,
- *   16. ceiling-bounded lease gain (R11): an over-ceiling gain
- *      request is bounded and REPORTED (applied-vs-requested, the I3
- *      trim-bound pattern), the mix runs at the applied gain, an
- *      under-bound request passes through untouched.
- *   17. U5 hardening: off-table-rate parity (silent committed periods),
- *      lease backpressure and straddling ring-end copies, underrun
- *      exclusion for faulted/done producers, mid-loop snapshot failure
- *      vs top-of-ISR unbind, warm reset at IDLE, begin-BUSY on an
- *      attached slot, and media resume without a shared-frontier rewind.
+ *      while the fabric is active (R1). The scan reads the firmware
+ *      sources from --srcdir (the Makefile recipe passes it explicitly;
+ *      standalone runs derive it from argv[0] and SKIP when the tree is
+ *      absent),
+ *   8. mid-loop snapshot failure vs top-of-ISR unbind (U5).
  */
 
 #include <setjmp.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,7 +44,7 @@
 #include <unistd.h>
 
 #include "audio_fabric.h"
-#include "audio_scene.h"
+#include "fabric_test_common.h"
 #include "memorymap.h"
 #include "pump_golden.h"
 #include "sdk_mailbox.h"
@@ -75,174 +55,10 @@ _Static_assert(sizeof(struct pump_golden_source) ==
                sizeof(struct audio_fabric_source),
                "golden/fabric source snapshot layout drift");
 
-/* ---- assertions (suite convention) ---- */
-
-static int failures;
-
-static void check(int ok, const char *name, const char *detail)
-{
-	if (!ok) {
-		failures++;
-		printf("FAILED: %s (%s)\n", name, detail ? detail : "");
-	}
-}
-
-static const char *fmt(const char *format, ...)
-{
-	static char buffer[160];
-	va_list args;
-
-	va_start(args, format);
-	vsnprintf(buffer, sizeof(buffer), format, args);
-	va_end(args);
-	return buffer;
-}
-
-/* ---- deterministic PCM generator (shared by every model) ---- */
-
-static int16_t pcm_sample(uint64_t absolute_index)
-{
-	/* Bounded, nonzero, sign-varying; identical for every model that
-	 * stages the same absolute byte range. */
-	uint32_t x = (uint32_t)(absolute_index * 2654435761U);
-	uint32_t v = (x >> 13) ^ (x << 7);
-
-	return (int16_t)(v % 40001) - 20000;
-}
-
-/* One byte of the deterministic stream at absolute byte index: samples
- * are 2 bytes, little- or big-endian per the source format, exactly
- * like the producer PCM rings wrap byte-wise. */
-static void pcm_byte(uint8_t *dst, uint64_t byte_index, int big_endian)
-{
-	int16_t s = pcm_sample(byte_index / 2U);
-	uint8_t lo = (uint8_t)s;
-	uint8_t hi = (uint8_t)(((uint16_t)s) >> 8);
-
-	if ((byte_index & 1U) == 0U)
-		*dst = big_endian ? hi : lo;
-	else
-		*dst = big_endian ? lo : hi;
-}
-
-/* ---- producer-side source model (KTD2 producer ring) ---- */
-
-#define MODEL_RING_BYTES 16384U
-
-struct src_model {
-	uint8_t ring[MODEL_RING_BYTES];
-	uint32_t capacity;
-	uint64_t produced;
-	uint64_t staged;
-	uint32_t sample_rate;
-	uint32_t channels;
-	uint32_t sample_format;
-	int done;
-	int faulted;
-	int snapshot_ok;
-	/* Failure injection for the mid-loop snapshot test: snapshots
-	 * fail from this (1-based) call number on. 0 disables it. */
-	int snapshot_fail_from;
-	uint32_t snapshot_calls;
-	int big_endian_src;
-	int gone;
-	int is_stream;
-	/* accounting */
-	uint64_t retired_total;
-	uint32_t underrun_calls;
-	int tail_pending;
-};
-
-static void model_init(struct src_model *m, uint32_t rate, uint32_t channels,
-                       uint32_t format)
-{
-	memset(m, 0, sizeof(*m));
-	m->capacity = MODEL_RING_BYTES;
-	m->sample_rate = rate;
-	m->channels = channels;
-	m->sample_format = format;
-	m->snapshot_ok = 1;
-	m->is_stream = 1;
-	m->big_endian_src =
-		(format == SDK_AUDIO_SAMPLE_FORMAT_S16BE) ? 1 : 0;
-}
-
-/* Publish count PCM bytes: mirrors the decode side flushing bytes and
- * then advancing pcm_ready_total. */
-static void model_publish(struct src_model *m, uint32_t bytes)
-{
-	uint32_t i;
-	for (i = 0; i < bytes; i++) {
-		uint32_t offset =
-			(uint32_t)((m->produced + i) % m->capacity);
-
-		pcm_byte(&m->ring[offset], m->produced + i,
-		         m->big_endian_src);
-	}
-	m->produced += bytes;
-}
-
-/* Fill the source snapshot exactly the way the pump's
- * audio_pump_source_snapshot() stream branch does. */
-static int model_snapshot(struct src_model *m, void *source)
-{
-	struct pump_golden_source *s = source;
-
-	if (!m->snapshot_ok)
-		return 0;
-	m->snapshot_calls++;
-	if (m->snapshot_fail_from != 0 &&
-	    m->snapshot_calls >= (uint32_t)m->snapshot_fail_from)
-		return 0;
-	memset(s, 0, sizeof(*s));
-	s->ring = m->ring;
-	s->capacity = m->capacity;
-	s->produced_bytes = m->produced;
-	s->staged_bytes = m->staged;
-	s->sample_rate = m->sample_rate;
-	s->channels = m->channels;
-	s->sample_format = m->sample_format;
-	s->done = (uint8_t)(m->done ? 1 : 0);
-	s->faulted = (uint8_t)(m->faulted ? 1 : 0);
-	return 1;
-}
-
-/* Stream-branch staging discipline: bytes must be available. */
-static int model_stage(struct src_model *m, uint32_t bytes)
-{
-	if (bytes > m->produced - m->staged)
-		return 0;
-	m->staged += bytes;
-	return 1;
-}
-
-static void model_retire(struct src_model *m, uint32_t bytes)
-{
-	m->retired_total += bytes;
-}
-
-static void model_underrun(struct src_model *m)
-{
-	m->underrun_calls++;
-}
-
-/* Stream play-out tail: pump_tail_pending semantics. */
-static void model_tail_real(struct src_model *m)
-{
-	if (m->is_stream)
-		m->tail_pending = 1;
-}
-
-static void model_tail_drained(struct src_model *m)
-{
-	if (m->is_stream)
-		m->tail_pending = 0;
-}
 
 /* ---- golden-side wiring ---- */
 
 static uint8_t g_golden_tx[AUDIO_TX_BUFFER_SIZE];
-static uint32_t g_dma_count;
 
 static uint32_t test_dma_count(void)
 {
@@ -308,29 +124,6 @@ static void golden_reset(struct src_model *m)
 	g_golden.ops = &g_golden_ops;
 }
 
-/* FNV-1a over the whole TX ring: the characterization fingerprint. */
-static uint64_t ring_hash(const uint8_t *ring)
-{
-	uint64_t h = 1469598103934665603ULL;
-	size_t i;
-
-	for (i = 0; i < AUDIO_TX_BUFFER_SIZE; i++) {
-		h ^= ring[i];
-		h *= 1099511628211ULL;
-	}
-	return h;
-}
-
-/* ---- scenario 1 driver (golden half): the pre-refactor
- * characterization run. The same script later replays against the
- * compositor for the parity assertion. ---- */
-
-#define TICK_BYTES AUDIO_BYTES_PER_PERIOD
-
-static void dma_tick(unsigned periods)
-{
-	g_dma_count += periods * TICK_BYTES;
-}
 /* Post-run invariants of the captured pump: these are not the parity
 
  * contract (the golden run above is), just sanity that the capture
@@ -404,185 +197,6 @@ static void characterization_invariants(void)
 	}
 }
 
-/* ---- fabric-side wiring (compositor under test) ---- */
-
-static uint8_t g_fabric_tx[AUDIO_TX_BUFFER_SIZE];
-static uint8_t *g_fabric_ring = g_fabric_tx;
-static int g_legacy_active;
-static uint32_t g_set_tx_calls, g_init_i2s_calls, g_silence_calls;
-static uint8_t *g_tx_ptr;
-static uint8_t *g_inited_tx;
-
-/* ax.h seam: the transport the compositor drives. audio_silence()
- * wipes whatever ring the fabric currently owns. */
-uint32_t audio_get_dma_transfer_count(void)
-{
-	return g_dma_count;
-}
-
-void audio_set_tx_buffer(uint8_t *addr)
-{
-	g_set_tx_calls++;
-	g_tx_ptr = addr;
-}
-
-uint8_t *audio_get_inited_tx_buffer(void)
-{
-	return g_inited_tx;
-}
-
-void audio_init_i2s(void)
-{
-	g_init_i2s_calls++;
-	g_inited_tx = g_tx_ptr;
-}
-
-void audio_silence(void)
-{
-	g_silence_calls++;
-	memset(g_fabric_ring, 0, AUDIO_TX_BUFFER_SIZE);
-}
-
-int audio_legacy_output_active(void)
-{
-	return g_legacy_active;
-}
-
-/* R11 seam: audio_fabric.c composes the lease gain through the scene
- * arbiter, which is not linked here -- the test provides the
- * link-time definition (the ax.h-setter discipline of the scene
- * suite) with an overridable ceiling bound. The default mirrors the
- * policy at its most permissive so every pre-existing scenario runs
- * unbounded, exactly as it did before the composition existed. */
-static uint32_t g_lease_gain_bound = 255U;
-
-int audio_scene_lease_gain_compose(uint32_t requested,
-	struct audio_scene_lease_gain_result *result)
-{
-	uint32_t bound = g_lease_gain_bound;
-
-	if (result != NULL)
-		memset(result, 0, sizeof(*result));
-	if (requested > 255U)
-		return -1;
-	if (result != NULL) {
-		result->gain_bound = (double)bound;
-		result->applied = (uint8_t)(requested < bound ? requested
-		                                             : bound);
-		result->bounded = (uint32_t)result->applied < requested;
-	}
-	return 0;
-}
-
-static struct src_model g_model_b;
-static struct src_model g_model_c;
-
-/* Producer ops thunks: one set per model instance. */
-#define DEFINE_FABRIC_OPS(fn, MP)                                    \
-static int fn##_snapshot(struct audio_fabric_source *s)              \
-{                                                                    \
-	return model_snapshot(MP, s);                                \
-}                                                                    \
-static int fn##_stage(uint32_t bytes)                               \
-{                                                                    \
-	return model_stage(MP, bytes);                               \
-}                                                                    \
-static void fn##_retire(uint32_t bytes)                             \
-{                                                                    \
-	model_retire(MP, bytes);                                     \
-}                                                                    \
-static void fn##_underrun(void)                                     \
-{                                                                    \
-	model_underrun(MP);                                          \
-}                                                                    \
-static void fn##_gone(void)                                         \
-{                                                                    \
-	(MP)->gone++;                                                \
-}                                                                    \
-static void fn##_tail_real(void)                                    \
-{                                                                    \
-	model_tail_real(MP);                                         \
-}                                                                    \
-static void fn##_tail_drained(void)                                 \
-{                                                                    \
-	model_tail_drained(MP);                                      \
-}                                                                    \
-static const struct audio_fabric_producer_ops fn = {                \
-	.snapshot = fn##_snapshot,                                   \
-	.stage = fn##_stage,                                         \
-	.retire = fn##_retire,                                       \
-	.underrun = fn##_underrun,                                   \
-	.gone = fn##_gone,                                           \
-	.tail_real = fn##_tail_real,                                 \
-	.tail_drained = fn##_tail_drained,                           \
-};
-
-DEFINE_FABRIC_OPS(g_ops_b, &g_model_b)
-DEFINE_FABRIC_OPS(g_ops_c, &g_model_c)
-
-/* Prefill a model's whole ring with one constant sample: the exact
- * rail-arithmetic source for the saturating-mix scenario. */
-static void model_prefill_constant(struct src_model *m, int16_t value)
-{
-	size_t i;
-
-	for (i = 0; i < MODEL_RING_BYTES; i += 2) {
-		if (m->big_endian_src) {
-			m->ring[i] = (uint8_t)(((uint16_t)value) >> 8);
-			m->ring[i + 1] = (uint8_t)value;
-		} else {
-			m->ring[i] = (uint8_t)value;
-			m->ring[i + 1] = (uint8_t)(((uint16_t)value) >> 8);
-		}
-	}
-	/* Plenty of runway; the pump pulls at staged % capacity. */
-	m->produced = 4ULL * MODEL_RING_BYTES;
-	m->staged = 0U;
-}
-
-static uint8_t g_lease_ring_a[AUDIO_FABRIC_LEASE_RING_BYTES];
-static uint8_t g_lease_ring_b[AUDIO_FABRIC_LEASE_RING_BYTES];
-
-static void fabric_reset_state(void)
-{
-	audio_fabric_host_set_lease_rings(g_lease_ring_a, g_lease_ring_b);
-	audio_fabric_reset();
-	audio_fabric_host_set_tx_base(g_fabric_tx);
-	g_fabric_ring = g_fabric_tx;
-	g_legacy_active = 0;
-	g_set_tx_calls = 0U;
-	g_init_i2s_calls = 0U;
-	g_silence_calls = 0U;
-	g_lease_gain_bound = 255U;
-	/* Firmware boot state: audio_adau_init() ran audio_init_i2s() with
-	 * the default TX ring before any mailbox request. */
-	g_tx_ptr = (uint8_t *)AUDIO_TX_BUFFER_ADDRESS;
-	g_inited_tx = (uint8_t *)AUDIO_TX_BUFFER_ADDRESS;
-	memset(g_fabric_tx, 0xAA, sizeof(g_fabric_tx));
-	memset(&g_model_b, 0, sizeof(g_model_b));
-	memset(&g_model_c, 0, sizeof(g_model_c));
-}
-
-/* Mirror of sdk_mailbox.c's audio_playback_start() sequencing. */
-static void fabric_pump_start(void)
-{
-	(void)audio_fabric_producer_attach(
-		AUDIO_FABRIC_SLOT_PUMP, &g_ops_b);
-	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
-	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
-}
-
-/* Mirror of sdk_mailbox.c's audio_playback_start() sequencing after the
- * shared-frontier guard: the re-arm is skipped while another slot is
- * live (joining a live mix must never rewind the frontier). */
-static void fabric_pump_resume(void)
-{
-	(void)audio_fabric_producer_attach(
-		AUDIO_FABRIC_SLOT_PUMP, &g_ops_b);
-	if (!audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP))
-		audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
-	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
-}
 
 /* ---- scenario 1: single-producer parity against the golden ---- */
 
@@ -987,711 +601,6 @@ static void scenario_formatter(void)
 	      (uint8_t *)AUDIO_TX_BUFFER_ADDRESS,
 	      "formatter: DMA captured the standard ring", "");
 }
-
-/* ---- U3 lease plane: card-side rings, staging buffer, drivers ---- */
-
-/* Client staging buffer: the mailbox handler resolves src_handle +
- * offset to an address and hands it to the fabric API exactly like
- * the stream feed path; the tests drive the resolved address. */
-static uint8_t g_lease_stage[AUDIO_FABRIC_LEASE_RING_BYTES];
-
-static void stage_fill_constant(uint8_t *buf, uint32_t bytes, int16_t value)
-{
-	uint32_t i;
-
-	for (i = 0U; i + 1U < bytes; i += 2U) {
-		buf[i] = (uint8_t)(uint16_t)value;
-		buf[i + 1U] = (uint8_t)((uint16_t)value >> 8);
-	}
-}
-
-/* 8 samples at +FULL_SCALE then 8 at 1000: 120 at-rail regions per
- * 3840-byte period, and the period boundary always lands mid-group
- * so regions never merge across periods. */
-static void stage_fill_clip_pattern(uint8_t *buf, uint32_t bytes)
-{
-	uint32_t i;
-
-	for (i = 0U; i + 1U < bytes; i += 2U) {
-		int16_t v = ((i / 2U) & 8U) ? 1000 : 32767;
-
-		buf[i] = (uint8_t)(uint16_t)v;
-		buf[i + 1U] = (uint8_t)((uint16_t)v >> 8);
-	}
-}
-
-static struct audio_fabric_slot_state lease_state(uint32_t slot)
-{
-	struct audio_fabric_slot_state st;
-
-	(void)audio_fabric_slot_state(
-		slot, SDK_AUDIO_METER_IDENTITY_SDK_STREAM, 0, &st);
-	return st;
-}
-
-static void lease_feed(uint32_t handle, uint32_t bytes,
-	uint32_t expect_consumed, const char *name)
-{
-	uint32_t consumed = 0xdeadbeefU;
-	int rc = audio_fabric_lease_submit(
-		handle, g_lease_stage, bytes, &consumed);
-
-	check(rc == AUDIO_FABRIC_LEASE_OK && consumed == expect_consumed,
-	      name, fmt("rc=%d consumed=%u want=%u", rc, consumed,
-	                expect_consumed));
-}
-
-static int period_is_constant(const uint8_t *ring, uint32_t index,
-	int16_t value)
-{
-	const int16_t *p = (const int16_t *)(ring + index * TICK_BYTES);
-	uint32_t i;
-
-	for (i = 0U; i < TICK_BYTES / 2U; i++) {
-		if (p[i] != value)
-			return 0;
-	}
-	return 1;
-}
-
-static uint32_t count_nonzero_periods(const uint8_t *ring)
-{
-	uint32_t count = 0U;
-	uint32_t i;
-
-	for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
-		const uint8_t *p = ring + i * TICK_BYTES;
-		uint32_t j;
-
-		for (j = 0U; j < TICK_BYTES; j++) {
-			if (p[j] != 0U) {
-				count++;
-				break;
-			}
-		}
-	}
-	return count;
-}
-
-/* ---- U3 scenario 8: full lease lifecycle, one slot ---- */
-
-static void scenario_lease_lifecycle(void)
-{
-	struct audio_fabric_slot_state st;
-	uint32_t lease = 0U;
-	uint32_t i;
-	int audible = 0;
-
-	fabric_reset_state();
-	g_dma_count = 0;
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK &&
-	      lease != 0U &&
-	      AUDIO_FABRIC_LEASE_HANDLE_SLOT(lease) ==
-	      AUDIO_FABRIC_SLOT_MAILBOX,
-	      "lease: begin grants a slot-1 handle",
-	      fmt("handle=%08x", lease));
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.state == AUDIO_FABRIC_SLOT_STATE_LEASED &&
-	      st.identity == SDK_AUDIO_METER_IDENTITY_MEDIA &&
-	      st.lease == lease &&
-	      st.generation == AUDIO_FABRIC_LEASE_HANDLE_EPOCH(lease) &&
-	      st.written_bytes == 0U && st.consumed_bytes == 0U &&
-	      st.underruns == 0U,
-	      "lease: LEASED snapshot before first audio",
-	      fmt("state=%u gen=%u w=%llu", st.state, st.generation,
-	          (unsigned long long)st.written_bytes));
-
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), 15000);
-	lease_feed(lease, TICK_BYTES, TICK_BYTES,
-	           "lease: first submit fully accepted");
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE,
-	      "lease: ACTIVE after first accepted bytes",
-	      fmt("state=%u", st.state));
-	check(lease_state(AUDIO_FABRIC_SLOT_PUMP).state ==
-	      AUDIO_FABRIC_SLOT_STATE_FREE,
-	      "lease: pump slot stays FREE (never leaseable)", "");
-
-	dma_tick(1);
-	audio_fabric_isr();
-	lease_feed(lease, 3U * TICK_BYTES, 3U * TICK_BYTES,
-	           "lease: steady-state submit accepted");
-	dma_tick(1);
-	audio_fabric_isr();
-	for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
-		if (period_is_constant(g_fabric_tx, i, 15000))
-			audible = 1;
-	}
-	check(audible, "lease: committed period carries lease PCM",
-	      "no period equals the submitted constant");
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.written_bytes == 4ULL * TICK_BYTES &&
-	      st.consumed_bytes > 0U,
-	      "lease: published/consumed cursors move",
-	      fmt("w=%llu r=%llu",
-	          (unsigned long long)st.written_bytes,
-	          (unsigned long long)st.consumed_bytes));
-
-	check(audio_fabric_lease_release(lease) == AUDIO_FABRIC_LEASE_OK,
-	      "lease: release completes", "");
-	/* Idempotent for the immediately-previous lease (SDK contract). */
-	check(audio_fabric_lease_release(lease) == AUDIO_FABRIC_LEASE_OK,
-	      "lease: release idempotent", "");
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.state == AUDIO_FABRIC_SLOT_STATE_FREE &&
-	      st.lease == 0xffffffffU &&
-	      st.identity == SDK_AUDIO_METER_IDENTITY_UNKNOWN,
-	      "lease: FREE after release",
-	      fmt("state=%u lease=%08x", st.state, st.lease));
-	{
-		static const uint8_t zero[AUDIO_TX_BUFFER_SIZE];
-
-		check(memcmp(g_fabric_tx, zero, sizeof(zero)) == 0,
-		      "lease: last release silenced the ring (KTD8)", "");
-	}
-	check(audio_fabric_ownership() == AUDIO_FABRIC_IDLE,
-	      "lease: idle after last release", "");
-}
-
-/* ---- U3 scenario 9: release zero-contribution in a live mix ---- */
-
-static void scenario_lease_zero_contribution(void)
-{
-	/* Per-tick pump-solo snapshots: the frontier cadence is identical
-	 * across the two runs (the pump never runs dry), so ring position
-	 * p is filled at the same ISR index in both and the snapshots are
-	 * directly comparable. */
-	static uint8_t solo_snaps[20][AUDIO_TX_BUFFER_SIZE];
-	static uint8_t during[AUDIO_TX_BUFFER_SIZE];
-	uint32_t lease = 0U;
-	int tick;
-
-	/* Pump-solo reference on the never-dry script. */
-	fabric_reset_state();
-	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
-	g_dma_count = 0;
-	fabric_pump_start();
-	model_publish(&g_model_b, 6U * TICK_BYTES);
-	for (tick = 0; tick < 20; tick++) {
-		dma_tick(1);
-		audio_fabric_isr();
-		model_publish(&g_model_b, TICK_BYTES);
-		memcpy(solo_snaps[tick], g_fabric_tx, AUDIO_TX_BUFFER_SIZE);
-	}
-
-	/* Same script with a mixed lease, released at tick 6: with 14
-	 * post-release ISRs every ring position's last fill is
-	 * post-release, so the end state must return to the pump-only
-	 * ring exactly. */
-	fabric_reset_state();
-	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
-	g_dma_count = 0;
-	fabric_pump_start();
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK,
-	      "zero-contribution: begin", "");
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), 4000);
-	model_publish(&g_model_b, 6U * TICK_BYTES);
-	for (tick = 0; tick < 20; tick++) {
-		if (tick < 6)
-			lease_feed(lease, TICK_BYTES, TICK_BYTES,
-			           "zero-contribution: lease fed");
-		if (tick == 5)
-			memcpy(during, g_fabric_tx, sizeof(during));
-		if (tick == 6)
-			check(audio_fabric_lease_release(lease) ==
-			      AUDIO_FABRIC_LEASE_OK,
-			      "zero-contribution: release mid-mix", "");
-		dma_tick(1);
-		audio_fabric_isr();
-		model_publish(&g_model_b, TICK_BYTES);
-	}
-	check(memcmp(during, solo_snaps[5], AUDIO_TX_BUFFER_SIZE) != 0,
-	      "zero-contribution: lease audible in the mix",
-	      "mixed ring equals the pump-only reference");
-	check(memcmp(g_fabric_tx, solo_snaps[19],
-	             AUDIO_TX_BUFFER_SIZE) == 0,
-	      "zero-contribution: ring returns to pump-only after release",
-	      "residual lease audio in the ring");
-	check(lease_state(AUDIO_FABRIC_SLOT_MAILBOX).state ==
-	      AUDIO_FABRIC_SLOT_STATE_FREE,
-	      "zero-contribution: slot FREE", "");
-}
-
-/* ---- U3 scenario 10: ghost bound (R5) ---- */
-
-static void scenario_lease_ghost_bound(void)
-{
-	uint32_t lease = 0U;
-	int tick;
-
-	fabric_reset_state();
-	g_dma_count = 0;
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK, "ghost: begin", "");
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), -20000);
-	lease_feed(lease, 4U * TICK_BYTES, 4U * TICK_BYTES, "ghost: fed");
-	dma_tick(1);
-	audio_fabric_isr();
-	dma_tick(1);
-	audio_fabric_isr();
-	check(count_nonzero_periods(g_fabric_tx) > 0U,
-	      "ghost: lease audible before release", "");
-	/* Mid-stream release with un-consumed PCM still in the source
-	 * ring: after release, at most ONE period of retired audio may
-	 * differ from a silence reference; the last-producer silence
-	 * policy holds it to zero. */
-	check(audio_fabric_lease_release(lease) == AUDIO_FABRIC_LEASE_OK,
-	      "ghost: release mid-stream", "");
-	for (tick = 0; tick < 4; tick++) {
-		dma_tick(1);
-		audio_fabric_isr();
-		check(count_nonzero_periods(g_fabric_tx) <= 1U,
-		      "ghost: at most one residual period after release",
-		      fmt("tick %d: %u nonzero periods", tick,
-		          count_nonzero_periods(g_fabric_tx)));
-	}
-	/* A fresh lease on the same slot must not read the retired
-	 * lease's residual ring bytes (BEGIN re-zeroes the ring). */
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK, "ghost: re-begin", "");
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), 7777);
-	lease_feed(lease, TICK_BYTES, TICK_BYTES, "ghost: re-fed");
-	dma_tick(1);
-	audio_fabric_isr();
-	dma_tick(1);
-	audio_fabric_isr();
-	{
-		uint32_t i;
-		int clean = 1;
-
-		for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
-			if (!period_is_constant(g_fabric_tx, i, 0) &&
-			    !period_is_constant(g_fabric_tx, i, 7777))
-				clean = 0;
-		}
-		check(clean,
-		      "ghost: fresh lease reads only fresh samples",
-		      "period holds neither silence nor the new constant");
-	}
-}
-
-/* ---- U3 scenario 11: stale writes rejected, no ring effect ---- */
-
-static void scenario_lease_stale_write(void)
-{
-	struct audio_fabric_slot_state st;
-	uint64_t hash_before;
-	uint32_t lease = 0U;
-	uint32_t lease2 = 0U;
-	uint32_t consumed = 0xdeadbeefU;
-
-	fabric_reset_state();
-	g_dma_count = 0;
-	(void)audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL);
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), 11111);
-	lease_feed(lease, 2U * TICK_BYTES, 2U * TICK_BYTES,
-	           "stale: lease fed");
-	hash_before = ring_hash(g_lease_ring_a);
-	check(audio_fabric_lease_release(lease) == AUDIO_FABRIC_LEASE_OK,
-	      "stale: release", "");
-
-	consumed = 0xdeadbeefU;
-	check(audio_fabric_lease_submit(
-		      lease, g_lease_stage, TICK_BYTES,
-		      &consumed) == AUDIO_FABRIC_LEASE_EHANDLE &&
-	      consumed == 0U,
-	      "stale: submit after release rejected",
-	      fmt("consumed=%u", consumed));
-	check(audio_fabric_lease_submit(
-		      0xffffffffU, g_lease_stage, TICK_BYTES,
-		      &consumed) == AUDIO_FABRIC_LEASE_EHANDLE,
-	      "stale: invalid-handle constant rejected", "");
-	check(ring_hash(g_lease_ring_a) == hash_before,
-	      "stale: rejected submit left the source ring untouched", "");
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.state == AUDIO_FABRIC_SLOT_STATE_FREE &&
-	      st.written_bytes == 0U,
-	      "stale: cursors were zeroed at release",
-	      fmt("w=%llu", (unsigned long long)st.written_bytes));
-
-	/* A stale handle must not target the NEXT lease on the slot. */
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease2, NULL) == AUDIO_FABRIC_LEASE_OK &&
-	      AUDIO_FABRIC_LEASE_HANDLE_EPOCH(lease2) >
-	      AUDIO_FABRIC_LEASE_HANDLE_EPOCH(lease),
-	      "stale: generations advance per lease", "");
-	check(audio_fabric_lease_submit(
-		      lease, g_lease_stage, TICK_BYTES,
-		      &consumed) == AUDIO_FABRIC_LEASE_EHANDLE,
-	      "stale: previous-generation handle rejected on live slot",
-	      "");
-	check(audio_fabric_lease_release(lease) ==
-	      AUDIO_FABRIC_LEASE_EHANDLE,
-	      "stale: previous-generation release rejected", "");
-	(void)audio_fabric_lease_release(lease2);
-}
-
-/* ---- U3 scenario 12: warm reset (R7) ---- */
-
-static void scenario_lease_warm_reset(void)
-{
-	struct audio_fabric_slot_state st;
-	uint32_t lease = 0U;
-	uint32_t fresh = 0U;
-	uint32_t old_generation;
-	uint32_t probe = 0U;
-	uint32_t i;
-	int tick;
-
-	fabric_reset_state();
-	g_dma_count = 0;
-	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
-	fabric_pump_start();
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK, "reset: begin", "");
-	old_generation = AUDIO_FABRIC_LEASE_HANDLE_EPOCH(lease);
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), 15000);
-	lease_feed(lease, 3U * TICK_BYTES, 3U * TICK_BYTES, "reset: fed");
-	model_publish(&g_model_b, 6U * TICK_BYTES);
-	dma_tick(1);
-	audio_fabric_isr();
-	dma_tick(1);
-	audio_fabric_isr();
-	check(count_nonzero_periods(g_fabric_tx) > 0U,
-	      "reset: mix audible pre-reset", "");
-
-	/* The sdk_mailbox_init seam (called BEFORE the mailbox generation
-	 * advances there): fail-closed teardown. */
-	audio_fabric_reset();
-	check(lease_state(AUDIO_FABRIC_SLOT_PUMP).state ==
-	      AUDIO_FABRIC_SLOT_STATE_FREE &&
-	      lease_state(AUDIO_FABRIC_SLOT_MAILBOX).state ==
-	      AUDIO_FABRIC_SLOT_STATE_FREE &&
-	      lease_state(AUDIO_FABRIC_SLOT_RESERVED).state ==
-	      AUDIO_FABRIC_SLOT_STATE_FREE,
-	      "reset: every slot FREE", "");
-	{
-		static const uint8_t zero[AUDIO_TX_BUFFER_SIZE];
-		static const uint8_t zero_ring[AUDIO_FABRIC_LEASE_RING_BYTES];
-
-		check(memcmp(g_fabric_tx, zero, sizeof(zero)) == 0,
-		      "reset: owned TX ring silenced", "");
-		check(memcmp(g_lease_ring_a, zero_ring,
-		             sizeof(zero_ring)) == 0,
-		      "reset: card-side lease ring zeroed", "");
-	}
-	check(audio_fabric_lease_submit(
-		      lease, g_lease_stage, TICK_BYTES,
-		      &probe) == AUDIO_FABRIC_LEASE_EHANDLE,
-	      "reset: pre-reset handle stale", "");
-	g_dma_count = 0;
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&fresh, NULL) == AUDIO_FABRIC_LEASE_OK &&
-	      AUDIO_FABRIC_LEASE_HANDLE_EPOCH(fresh) > old_generation,
-	      "reset: fresh lease generation above pre-reset ones",
-	      fmt("fresh=%u old=%u",
-	          AUDIO_FABRIC_LEASE_HANDLE_EPOCH(fresh), old_generation));
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), -22222);
-	lease_feed(fresh, 3U * TICK_BYTES, 3U * TICK_BYTES,
-	           "reset: fresh lease fed");
-	for (tick = 0; tick < 3; tick++) {
-		dma_tick(1);
-		audio_fabric_isr();
-	}
-	for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
-		if (!period_is_constant(g_fabric_tx, i, 0) &&
-		    !period_is_constant(g_fabric_tx, i, -22222)) {
-			check(0, "reset: post-reset periods free of "
-			      "pre-reset samples",
-			      fmt("period %u holds neither silence nor "
-			          "the fresh constant", i));
-			return;
-		}
-	}
-	check(1, "reset: post-reset periods free of pre-reset samples",
-	      "");
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
-	      st.lease == fresh,
-	      "reset: fresh lease ACTIVE", "");
-	(void)audio_fabric_lease_release(fresh);
-}
-
-/* ---- U3 scenario 13: exhaustion, admission policy, backpressure ---- */
-
-static void scenario_lease_exhaustion(void)
-{
-	uint32_t lease = 0U;
-	uint32_t again = 0U;
-	uint32_t consumed = 0U;
-
-	fabric_reset_state();
-	g_dma_count = 0;
-	g_legacy_active = 1;
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&again, NULL) == AUDIO_FABRIC_LEASE_ELEGACY,
-	      "exhaustion: legacy-exclusive output rejected", "");
-	g_legacy_active = 0;
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK,
-	      "exhaustion: first begin", "");
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&again, NULL) == AUDIO_FABRIC_LEASE_EBUSY,
-	      "exhaustion: leased slot completes BUSY", "");
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_RESERVED,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&again, NULL) == AUDIO_FABRIC_LEASE_EBAD_SLOT,
-	      "exhaustion: firmware-reserved slot rejected", "");
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_PUMP,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&again, NULL) == AUDIO_FABRIC_LEASE_EBAD_SLOT,
-	      "exhaustion: pump slot rejected", "");
-	check(audio_fabric_lease_begin(5U,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&again, NULL) == AUDIO_FABRIC_LEASE_EBAD_SLOT,
-	      "exhaustion: out-of-range slot rejected", "");
-
-	/* Partial accept: the ring bounds the lease. */
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), 3333);
-	lease_feed(lease, AUDIO_FABRIC_LEASE_RING_BYTES - 2U * TICK_BYTES,
-	           AUDIO_FABRIC_LEASE_RING_BYTES - 2U * TICK_BYTES,
-	           "exhaustion: ring-fill submit accepted");
-	lease_feed(lease, 2U * TICK_BYTES, 2U * TICK_BYTES,
-	           "exhaustion: remaining space accepted");
-	consumed = 0xdeadbeefU;
-	check(audio_fabric_lease_submit(
-		      lease, g_lease_stage, TICK_BYTES,
-		      &consumed) == AUDIO_FABRIC_LEASE_OK && consumed == 0U,
-	      "exhaustion: full ring accepts zero (mailbox BUSY)",
-	      fmt("consumed=%u", consumed));
-	dma_tick(1);
-	audio_fabric_isr();
-	lease_feed(lease, TICK_BYTES, TICK_BYTES,
-	           "exhaustion: consumption reopens space");
-
-	check(audio_fabric_lease_release(lease) == AUDIO_FABRIC_LEASE_OK,
-	      "exhaustion: release", "");
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&again, NULL) == AUDIO_FABRIC_LEASE_OK,
-	      "exhaustion: begin succeeds after release", "");
-	(void)audio_fabric_lease_release(again);
-}
-
-/* ---- U3 scenario 14: state read vs driven state ---- */
-
-static void scenario_lease_state_read(void)
-{
-	struct audio_fabric_slot_state st;
-	uint32_t lease = 0U;
-	uint32_t consumed;
-	uint32_t underruns_fed;
-	int tick;
-
-	fabric_reset_state();
-	g_dma_count = 0;
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK, "state: begin", "");
-
-	/* Peak: 20000 amplitude reads back as 16.16 (20000 << 1). */
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), 20000);
-	lease_feed(lease, 2U * TICK_BYTES, 2U * TICK_BYTES, "state: fed");
-	dma_tick(1);
-	audio_fabric_isr();
-	lease_feed(lease, 2U * TICK_BYTES, 2U * TICK_BYTES, "state: fed");
-	dma_tick(1);
-	audio_fabric_isr();
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.peak == 40000U && st.clips == 0U,
-	      "state: peak in 16.16, no clips",
-	      fmt("peak=%u clips=%u", st.peak, st.clips));
-	underruns_fed = st.underruns;
-	check(underruns_fed >= 1U, "state: start-rebase underrun counted",
-	      fmt("u=%u", underruns_fed));
-
-	/* Starving an ACTIVE lease moves only its underrun counter. */
-	for (tick = 0; tick < 3; tick++) {
-		dma_tick(1);
-		audio_fabric_isr();
-	}
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.underruns > underruns_fed,
-	      "state: starvation grows underrun_count",
-	      fmt("fed=%u starved=%u", underruns_fed, st.underruns));
-
-	/* Clip regions: 120 at-rail regions per clip-pattern period
-	 * consumed (earlier non-rail periods contribute none). */
-	{
-		uint64_t consumed_pre = lease_state(
-			AUDIO_FABRIC_SLOT_MAILBOX).consumed_bytes;
-
-		stage_fill_clip_pattern(g_lease_stage,
-		                        sizeof(g_lease_stage));
-		lease_feed(lease, 2U * TICK_BYTES, 2U * TICK_BYTES,
-		           "state: clip pattern fed");
-		dma_tick(1);
-		audio_fabric_isr();
-		dma_tick(1);
-		audio_fabric_isr();
-		st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-		consumed = (uint32_t)(st.consumed_bytes - consumed_pre);
-		check(consumed >= TICK_BYTES &&
-		      st.clips == 120U * (consumed / TICK_BYTES),
-		      "state: clip counts at-rail regions",
-		      fmt("clip-consumed=%u clips=%u", consumed,
-		          st.clips));
-	}
-	check(st.peak == 65534U, "state: rail sample updates peak",
-	      fmt("peak=%u", st.peak));
-
-	/* Drain, then hold-reset: the next source read opens a fresh
-	 * peak window (the scene-meter read-and-clear convention). */
-	for (tick = 0; tick < 24; tick++) {
-		st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-		if (st.consumed_bytes == st.written_bytes)
-			break;
-		dma_tick(1);
-		audio_fabric_isr();
-	}
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.consumed_bytes == st.written_bytes,
-	      "state: drained before hold-reset", "");
-	check(audio_fabric_slot_state(AUDIO_FABRIC_SLOT_MAILBOX,
-		      SDK_AUDIO_METER_IDENTITY_SDK_STREAM, 1, &st) == 1,
-	      "state: hold-reset read completes", "");
-	check(st.peak == 65534U,
-	      "state: hold-reset read peeks the old window", "");
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), 10000);
-	lease_feed(lease, TICK_BYTES, TICK_BYTES, "state: soft signal fed");
-	dma_tick(1);
-	audio_fabric_isr();
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.peak == 20000U,
-	      "state: fresh peak window after hold-reset",
-	      fmt("peak=%u", st.peak));
-	/* Without the flag the read only peeks. */
-	lease_feed(lease, TICK_BYTES, TICK_BYTES, "state: softer signal");
-	dma_tick(1);
-	audio_fabric_isr();
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.peak == 20000U,
-	      "state: plain read holds the window",
-	      fmt("peak=%u", st.peak));
-
-	/* Reserved slot and the pump slot's bind state. */
-	st = lease_state(AUDIO_FABRIC_SLOT_RESERVED);
-	check(st.state == AUDIO_FABRIC_SLOT_STATE_FREE &&
-	      st.lease == 0xffffffffU && st.peak == 0U && st.clips == 0U,
-	      "state: reserved slot reports FREE with no lease", "");
-	st = lease_state(AUDIO_FABRIC_SLOT_PUMP);
-	check(st.state == AUDIO_FABRIC_SLOT_STATE_FREE &&
-	      st.identity == SDK_AUDIO_METER_IDENTITY_UNKNOWN,
-	      "state: pump slot FREE while unbound", "");
-	(void)audio_fabric_lease_release(lease);
-}
-
-/* ---- U5: lease submission backpressure and cursor accounting ---- */
-
-static void scenario_lease_backpressure(void)
-{
-	struct audio_fabric_slot_state st;
-	uint32_t lease = 0U;
-	int tick;
-
-	fabric_reset_state();
-	g_dma_count = 0;
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK,
-	      "backpressure: begin", "");
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), 2500);
-	/* Fill the ring to one period short of capacity. */
-	lease_feed(lease, AUDIO_FABRIC_LEASE_RING_BYTES - TICK_BYTES,
-	           AUDIO_FABRIC_LEASE_RING_BYTES - TICK_BYTES,
-	           "backpressure: near-full feed");
-	/* Only one period fits: partial accept at the tail. */
-	lease_feed(lease, 2U * TICK_BYTES, TICK_BYTES,
-	           "backpressure: partial accept");
-	/* Full ring: zero accept (mailbox BUSY). */
-	lease_feed(lease, TICK_BYTES, 0U, "backpressure: full ring busy");
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.written_bytes ==
-	      (uint64_t)AUDIO_FABRIC_LEASE_RING_BYTES,
-	      "backpressure: published cursor counts the partial",
-	      fmt("w=%llu", (unsigned long long)st.written_bytes));
-	/* The compositor consumes periods; space reopens. */
-	for (tick = 0; tick < 2; tick++) {
-		dma_tick(1);
-		audio_fabric_isr();
-	}
-	lease_feed(lease, TICK_BYTES, TICK_BYTES,
-	           "backpressure: resubmit fully accepted");
-	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(st.written_bytes ==
-	      (uint64_t)AUDIO_FABRIC_LEASE_RING_BYTES + TICK_BYTES &&
-	      st.consumed_bytes > 0U,
-	      "backpressure: cursors after consumption",
-	      fmt("w=%llu r=%llu",
-	          (unsigned long long)st.written_bytes,
-	          (unsigned long long)st.consumed_bytes));
-	(void)audio_fabric_lease_release(lease);
-}
-
-/* A straddling submit must split its copy across the ring end
- * byte-for-byte; a position-dependent pattern makes any mis-copy
- * visible. */
-static void scenario_lease_wrap_copy(void)
-{
-	uint32_t lease = 0U;
-	uint32_t tail = TICK_BYTES / 2U;
-	uint32_t i;
-	int ok;
-
-	fabric_reset_state();
-	g_dma_count = 0;
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK, "wrap: begin", "");
-	for (i = 0U; i < sizeof(g_lease_stage); i++)
-		g_lease_stage[i] = (uint8_t)(i & 0xffU);
-	lease_feed(lease, AUDIO_FABRIC_LEASE_RING_BYTES - TICK_BYTES,
-	           AUDIO_FABRIC_LEASE_RING_BYTES - TICK_BYTES, "wrap: near-end feed");
-	/* The compositor consumes five periods, reopening ring space while
-	 * the write cursor stays near the end. */
-	dma_tick(1);
-	audio_fabric_isr();
-	lease_feed(lease, tail, tail,
-	           "wrap: cursor half a period from the end");
-	lease_feed(lease, TICK_BYTES, TICK_BYTES, "wrap: straddling submit");
-	ok = 1;
-	for (i = 0U; i < tail; i++) {
-		if (g_lease_ring_a[AUDIO_FABRIC_LEASE_RING_BYTES - tail + i] !=
-		    g_lease_stage[i] ||
-		    g_lease_ring_a[i] != g_lease_stage[tail + i]) {
-			ok = 0;
-			break;
-		}
-	}
-	check(ok, "wrap: straddling submit split across the ring end",
-	      fmt("first bad byte %u", i));
-	(void)audio_fabric_lease_release(lease);
-}
-
 /* Faulted and done producers contribute silence WITHOUT moving the
  * per-slot underrun counter (the R8 exclusion), in both the per-period
  * path and the start-rebase path. */
@@ -1833,300 +742,6 @@ static void scenario_snapshot_midloop(void)
 	      fmt("wipes=%u", g_silence_calls));
 }
 
-/* A warm reset with nothing attached must not touch the ring and must
- * keep generations moving. */
-static void scenario_reset_idle(void)
-{
-	uint32_t lease = 0U;
-	uint32_t fresh = 0U;
-	uint32_t old_generation;
-	uint32_t wipes_before;
-
-	fabric_reset_state();
-	g_dma_count = 0;
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK, "reset-idle: begin", "");
-	old_generation = AUDIO_FABRIC_LEASE_HANDLE_EPOCH(lease);
-	check(audio_fabric_lease_release(lease) == AUDIO_FABRIC_LEASE_OK,
-	      "reset-idle: release", "");
-	check(audio_fabric_ownership() == AUDIO_FABRIC_IDLE,
-	      "reset-idle: idle before the warm reset", "");
-	wipes_before = g_silence_calls;
-	audio_fabric_reset();
-	check(g_silence_calls == wipes_before,
-	      "reset-idle: no ring wipe when not ACTIVE",
-	      fmt("wipes=%u", g_silence_calls));
-	check(audio_fabric_ownership() == AUDIO_FABRIC_IDLE,
-	      "reset-idle: still idle after reset", "");
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&fresh, NULL) == AUDIO_FABRIC_LEASE_OK &&
-	      AUDIO_FABRIC_LEASE_HANDLE_EPOCH(fresh) > old_generation,
-	      "reset-idle: fresh lease generation above the previous",
-	      fmt("fresh=%u old=%u",
-	          AUDIO_FABRIC_LEASE_HANDLE_EPOCH(fresh), old_generation));
-	(void)audio_fabric_lease_release(fresh);
-}
-
-/* A non-lease producer attached to a slot blocks the lease plane on it. */
-static void scenario_lease_begin_busy(void)
-{
-	uint32_t lease = 0U;
-
-	fabric_reset_state();
-	g_dma_count = 0;
-	model_init(&g_model_c, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
-	check(audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_MAILBOX,
-	                                   &g_ops_c) == 1,
-	      "begin-busy: producer attach", "");
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_EBUSY,
-	      "begin-busy: lease begin BUSY on an attached slot", "");
-	audio_fabric_producer_detach(AUDIO_FABRIC_SLOT_MAILBOX);
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK && lease != 0U,
-	      "begin-busy: begin succeeds after detach", "");
-	(void)audio_fabric_lease_release(lease);
-}
-
-/* Media resume while a lease is live must not rewind the shared fill
- * frontier (the guarded audio_playback_start): the already-committed
- * periods of the mix stand, and the lease cursor advances by exactly
- * one period on the resume tick. */
-static void scenario_resume_guard(void)
-{
-	static uint8_t pre_resume[AUDIO_TX_BUFFER_SIZE];
-	uint32_t lease = 0U;
-	uint64_t consumed_before, consumed_after;
-	uint32_t diff_periods = 0U;
-	uint32_t lease_periods = 0U;
-	uint32_t i;
-	int tick;
-
-	fabric_reset_state();
-	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
-	g_dma_count = 0;
-	fabric_pump_start();
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, AUDIO_FABRIC_GAIN_UNITY,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK,
-	      "resume-guard: begin", "");
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), 4000);
-	model_publish(&g_model_b, 6U * TICK_BYTES);
-
-	/* Steady mixed state: the frontier sits six periods ahead. */
-	for (tick = 0; tick < 8; tick++) {
-		lease_feed(lease, TICK_BYTES, TICK_BYTES,
-		           "resume-guard: lease fed");
-		dma_tick(1);
-		audio_fabric_isr();
-		model_publish(&g_model_b, TICK_BYTES);
-	}
-
-	/* Media pause: freeze the pump and rewind its staging to
-	 * retirement (the session's pause semantics), then wipe. */
-	g_model_b.staged = g_model_b.retired_total;
-	audio_fabric_producer_freeze(AUDIO_FABRIC_SLOT_PUMP);
-	audio_fabric_ring_silence(AUDIO_FABRIC_SLOT_PUMP);
-
-	/* Lease-only playback while the pump is paused: each tick
-	 * commits exactly one frontier period of lease PCM. */
-	for (tick = 0; tick < 4; tick++) {
-		lease_feed(lease, TICK_BYTES, TICK_BYTES,
-		           "resume-guard: lease fed during pause");
-		dma_tick(1);
-		audio_fabric_isr();
-	}
-	for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
-		if (period_is_constant(g_fabric_tx, i, 4000))
-			lease_periods++;
-	}
-	check(lease_periods == 4U,
-	      "resume-guard: pause left four lease-only periods",
-	      fmt("periods=%u", lease_periods));
-	memcpy(pre_resume, g_fabric_tx, sizeof(pre_resume));
-	consumed_before =
-		lease_state(AUDIO_FABRIC_SLOT_MAILBOX).consumed_bytes;
-
-	/* Media resume: the guarded audio_playback_start sequencing. The
-	 * lease keeps being fed as in steady state, with enough runway for
-	 * an (incorrect) burst re-fill to show up in the cursor delta. */
-	fabric_pump_resume();
-	lease_feed(lease, 5U * TICK_BYTES, 5U * TICK_BYTES,
-	           "resume-guard: lease fed for resume");
-	dma_tick(1);
-	audio_fabric_isr();
-	model_publish(&g_model_b, TICK_BYTES);
-	consumed_after =
-		lease_state(AUDIO_FABRIC_SLOT_MAILBOX).consumed_bytes;
-
-	/* Only the frontier period advanced naturally: exactly one ring
-	 * period differs from pre-resume. An unguarded re-arm would
-	 * burst-refill ~five periods and jump the lease cursor with them. */
-	for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
-		if (memcmp(pre_resume + i * TICK_BYTES,
-		             g_fabric_tx + i * TICK_BYTES,
-		             TICK_BYTES) != 0)
-			diff_periods++;
-	}
-	check(diff_periods == 1U,
-	      "resume-guard: committed periods not overwritten",
-	      fmt("diff periods=%u", diff_periods));
-	check(consumed_after - consumed_before == TICK_BYTES,
-	      "resume-guard: lease cursor advanced one period only",
-	      fmt("delta=%llu",
-	          (unsigned long long)(consumed_after - consumed_before)));
-	(void)audio_fabric_lease_release(lease);
-}
-
-/* ---- U4 scenario 15: steady-state two-source arithmetic sum ---- */
-
-/* Pump slot (a bound stream producer) plus a real lease, both fed
- * known constants through their actual submission paths: every
- * committed steady-state period must be the saturating sum, with the
- * lease side scaled by its applied gain (U3 scenario 9 proved the
- * release dynamics; this pins the both-active arithmetic). */
-static void coexistence_case(const char *label, int16_t pump,
-	int16_t lease_pcm, uint32_t gain)
-{
-	int32_t lease_scaled = ((int32_t)lease_pcm * (int32_t)gain) >> 7;
-	int32_t expected_raw = (int32_t)pump + lease_scaled;
-	int16_t expected;
-	const int16_t *period;
-	uint32_t lease = 0U;
-	uint32_t j;
-
-	if (expected_raw > 32767)
-		expected = 32767;
-	else if (expected_raw < -32768)
-		expected = -32768;
-	else
-		expected = (int16_t)expected_raw;
-
-	fabric_reset_state();
-	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
-	model_prefill_constant(&g_model_b, pump);
-	g_dma_count = 0;
-	fabric_pump_start();
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, gain,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_OK,
-	      "coexistence: begin", label);
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), lease_pcm);
-	lease_feed(lease, AUDIO_FABRIC_LEASE_RING_BYTES,
-	           AUDIO_FABRIC_LEASE_RING_BYTES,
-	           "coexistence: ring pre-filled");
-	dma_tick(1);
-	audio_fabric_isr();
-	dma_tick(1);
-	audio_fabric_isr();
-
-	/* The frontier sits past period 1 after the start rebase; every
-	 * period the burst fill committed carried both sources. */
-	period = (const int16_t *)&g_fabric_tx[2 * TICK_BYTES];
-	for (j = 0U; j < (TICK_BYTES / 2U); j++) {
-		if (period[j] != expected) {
-			check(0, "coexistence: saturating sum",
-			      fmt("%s: word %u = %d, expected %d",
-			          label, j, period[j], expected));
-			(void)audio_fabric_lease_release(lease);
-			return;
-		}
-	}
-	check(1, "coexistence: saturating sum", label);
-	check(lease_state(AUDIO_FABRIC_SLOT_MAILBOX).state ==
-	      AUDIO_FABRIC_SLOT_STATE_ACTIVE,
-	      "coexistence: lease ACTIVE mid-mix", label);
-	check(lease_state(AUDIO_FABRIC_SLOT_PUMP).state ==
-	      AUDIO_FABRIC_SLOT_STATE_ACTIVE,
-	      "coexistence: pump ACTIVE mid-mix", label);
-	(void)audio_fabric_lease_release(lease);
-}
-
-static void scenario_coexistence_sum(void)
-{
-	coexistence_case("unity-sum", 12000, 9000,
-	                 AUDIO_FABRIC_GAIN_UNITY);      /* 21000 */
-	coexistence_case("clip+", 20000, 20000,
-	                 AUDIO_FABRIC_GAIN_UNITY);      /* 40000 -> 32767 */
-	coexistence_case("attenuated", 12000, 9000, 64U); /* +4500 = 16500 */
-}
-
-/* ---- U4 scenario 16: ceiling-bounded lease gain (R11) ---- */
-
-static void scenario_lease_gain_bound(void)
-{
-	struct audio_fabric_lease_grant grant;
-	int16_t expected;
-	const int16_t *period;
-	uint32_t lease = 0U;
-	uint32_t j;
-
-	fabric_reset_state();
-	g_dma_count = 0;
-
-	/* Out-of-range requests are admission errors (the mailbox layer
-	 * rejects them before the fabric; the fabric re-arms the same
-	 * policy). */
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, 256U,
-		&lease, NULL) == AUDIO_FABRIC_LEASE_EBAD_SLOT,
-	      "gain: out-of-range gain rejected", "");
-
-	/* A request beyond the ceiling-enforced composition is bounded,
-	 * with the applied-vs-requested distinction REPORTED through the
-	 * grant (the I3 trim-bound semantics: never a silent clamp). */
-	g_lease_gain_bound = 100U;
-	grant.gain = 0U;
-	grant.bounded = 1U;
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, 200U,
-		&lease, &grant) == AUDIO_FABRIC_LEASE_OK &&
-	      grant.gain == 100U && grant.bounded != 0U,
-	      "gain: over-ceiling request bounded and reported",
-	      fmt("applied=%u bounded=%u", (unsigned)grant.gain,
-	          (unsigned)grant.bounded));
-
-	/* The slot mixes at the APPLIED gain, not the request: pump
-	 * 12000 plus 9000 scaled by 100/128 = 7031 -> 19031. */
-	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
-	model_prefill_constant(&g_model_b, 12000);
-	fabric_pump_start();
-	stage_fill_constant(g_lease_stage, sizeof(g_lease_stage), 9000);
-	lease_feed(lease, AUDIO_FABRIC_LEASE_RING_BYTES,
-	           AUDIO_FABRIC_LEASE_RING_BYTES, "gain: fed");
-	dma_tick(1);
-	audio_fabric_isr();
-	dma_tick(1);
-	audio_fabric_isr();
-	expected = (int16_t)(12000 + ((9000 * 100) >> 7));
-	period = (const int16_t *)&g_fabric_tx[2 * TICK_BYTES];
-	for (j = 0U; j < (TICK_BYTES / 2U); j++) {
-		if (period[j] != expected) {
-			check(0, "gain: mix uses the applied gain",
-			      fmt("word %u = %d, expected %d",
-			          j, period[j], expected));
-			(void)audio_fabric_lease_release(lease);
-			return;
-		}
-	}
-	check(1, "gain: mix uses the applied gain", "");
-	(void)audio_fabric_lease_release(lease);
-
-	/* A request under the bound passes through untouched. */
-	g_lease_gain_bound = 100U;
-	check(audio_fabric_lease_begin(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, 90U,
-		&lease, &grant) == AUDIO_FABRIC_LEASE_OK &&
-	      grant.gain == 90U && grant.bounded == 0U,
-	      "gain: under-bound request applied unmodified",
-	      fmt("applied=%u bounded=%u", (unsigned)grant.gain,
-	          (unsigned)grant.bounded));
-	(void)audio_fabric_lease_release(lease);
-}
 
 /* ---- scenario 7: dispatcher coverage / ring authority ---- */
 
@@ -2264,74 +879,113 @@ static int count_occurrences(const char *hay, const char *needle)
 	return n;
 }
 
+/* Source-contract scan root: --srcdir on the command line (the Makefile
+ * recipe passes it explicitly) or derived from argv[0] for standalone
+ * runs, where a missing tree is a SKIP rather than a failure. */
+static char g_srcdir[512];
+static int g_srcdir_explicit;
+
 static void scenario_source_contract(void)
 {
-	const char *prefix = "../../ZZ9000_proto.sdk/ZZ9000OS/src/";
-	char path[160];
-	char *src;
+	const char *names[4] = { "sdk_mailbox.c", "ax.c", "main.c",
+	                         "audio_fabric.c" };
+	char paths[4][560];
+	char *srcs[4] = { NULL, NULL, NULL, NULL };
+	int i;
 
-	snprintf(path, sizeof(path), "%s%s", prefix, "sdk_mailbox.c");
-	src = slurp(path);
-	check(src != NULL, "contract: sdk_mailbox.c readable", path);
-	if (src) {
-		check(count_occurrences(src, "AUDIO_TX_BUFFER_ADDRESS") == 0,
-		      "contract: pump never names the TX ring", path);
-		check(count_occurrences(src, "audio_silence") == 0,
-		      "contract: pump never silences the ring", path);
-		check(count_occurrences(src, "audio_init_i2s") == 0,
-		      "contract: pump never re-inits the formatter", path);
-		check(count_occurrences(src, "audio_set_tx_buffer") == 0,
-		      "contract: pump never repoints the TX buffer", path);
-		check(count_occurrences(
-			      src, "audio_playback_retire_to") == 0,
-		      "contract: pump no longer retires periods", path);
-		check(count_occurrences(
-			      src, "Xil_DCacheFlushRange") >= 1,
-		      "contract: decode-side flushes remain", path);
-		free(src);
+	for (i = 0; i < 4; i++) {
+		snprintf(paths[i], sizeof(paths[i]), "%s/%s", g_srcdir,
+		         names[i]);
+		srcs[i] = slurp(paths[i]);
+	}
+	if (!g_srcdir_explicit &&
+	    (srcs[0] == NULL || srcs[1] == NULL || srcs[2] == NULL ||
+	     srcs[3] == NULL)) {
+		printf("SKIP: source contract (sources not readable at %s)\n",
+		       g_srcdir);
+		for (i = 0; i < 4; i++)
+			free(srcs[i]);
+		return;
 	}
 
-	snprintf(path, sizeof(path), "%s%s", prefix, "ax.c");
-	src = slurp(path);
-	check(src != NULL, "contract: ax.c readable", path);
-	if (src) {
-		check(count_occurrences(src, "audio_fabric_isr();") == 1,
-		      "contract: isr_audio routes the compositor", path);
+	check(srcs[0] != NULL, "contract: sdk_mailbox.c readable", paths[0]);
+	if (srcs[0]) {
+		check(count_occurrences(srcs[0], "AUDIO_TX_BUFFER_ADDRESS") == 0,
+		      "contract: pump never names the TX ring", paths[0]);
+		check(count_occurrences(srcs[0], "audio_silence") == 0,
+		      "contract: pump never silences the ring", paths[0]);
+		check(count_occurrences(srcs[0], "audio_init_i2s") == 0,
+		      "contract: pump never re-inits the formatter", paths[0]);
+		check(count_occurrences(srcs[0], "audio_set_tx_buffer") == 0,
+		      "contract: pump never repoints the TX buffer", paths[0]);
 		check(count_occurrences(
-			      src, "sdk_mailbox_audio_playback") == 0,
-		      "contract: isr_audio has no pump symbols", path);
-		free(src);
+			      srcs[0], "audio_playback_retire_to") == 0,
+		      "contract: pump no longer retires periods", paths[0]);
+		check(count_occurrences(
+			      srcs[0], "Xil_DCacheFlushRange") >= 1,
+		      "contract: decode-side flushes remain", paths[0]);
 	}
 
-	snprintf(path, sizeof(path), "%s%s", prefix, "main.c");
-	src = slurp(path);
-	check(src != NULL, "contract: main.c readable", path);
-	if (src) {
+	check(srcs[1] != NULL, "contract: ax.c readable", paths[1]);
+	if (srcs[1]) {
+		check(count_occurrences(srcs[1], "audio_fabric_isr();") == 1,
+		      "contract: isr_audio routes the compositor", paths[1]);
 		check(count_occurrences(
-			      src, "sdk_mailbox_audio_playback_active") == 0,
-		      "contract: legacy gates widened off the pump", path);
-		check(count_occurrences(src, "audio_fabric_output_busy") >= 3,
+			      srcs[1], "sdk_mailbox_audio_playback") == 0,
+		      "contract: isr_audio has no pump symbols", paths[1]);
+	}
+
+	check(srcs[2] != NULL, "contract: main.c readable", paths[2]);
+	if (srcs[2]) {
+		check(count_occurrences(
+			      srcs[2], "sdk_mailbox_audio_playback_active") == 0,
+		      "contract: legacy gates widened off the pump", paths[2]);
+		check(count_occurrences(srcs[2], "audio_fabric_output_busy") >= 3,
 		      "contract: all three legacy gates use the fabric",
-		      path);
-		check(count_occurrences(src, "sdk_mailbox_audio_playback_pump")
-		      == 1, "contract: main-loop refill kick kept", path);
-		free(src);
+		      paths[2]);
+		check(count_occurrences(
+			      srcs[2], "sdk_mailbox_audio_playback_pump")
+		      == 1, "contract: main-loop refill kick kept", paths[2]);
 	}
 
-	snprintf(path, sizeof(path), "%s%s", prefix, "audio_fabric.c");
-	src = slurp(path);
-	check(src != NULL, "contract: audio_fabric.c readable", path);
-	if (src) {
-		check(count_occurrences(src, "Xil_DCacheFlushRange") >= 1,
-		      "contract: compositor owns the TX flush", path);
-		check(count_occurrences(src, "audio_fabric_isr") >= 1,
-		      "contract: compositor ISR present", path);
-		free(src);
+	check(srcs[3] != NULL, "contract: audio_fabric.c readable", paths[3]);
+	if (srcs[3]) {
+		check(count_occurrences(srcs[3], "Xil_DCacheFlushRange") >= 1,
+		      "contract: compositor owns the TX flush", paths[3]);
+		check(count_occurrences(srcs[3], "audio_fabric_isr") >= 1,
+		      "contract: compositor ISR present", paths[3]);
 	}
+
+	for (i = 0; i < 4; i++)
+		free(srcs[i]);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+	int i;
+
+	for (i = 1; i < argc; i++) {
+		if (strncmp(argv[i], "--srcdir=", 9) == 0) {
+			snprintf(g_srcdir, sizeof(g_srcdir), "%s",
+			         argv[i] + 9);
+			g_srcdir_explicit = 1;
+		} else if (strcmp(argv[i], "--srcdir") == 0 && i + 1 < argc) {
+			i++;
+			snprintf(g_srcdir, sizeof(g_srcdir), "%s", argv[i]);
+			g_srcdir_explicit = 1;
+		}
+	}
+	if (!g_srcdir_explicit) {
+		const char *slash = strrchr(argv[0], '/');
+		size_t dir_len = (size_t)((slash != NULL ? slash :
+		                             argv[0] + strlen(argv[0])) -
+		                             argv[0]);
+
+		snprintf(g_srcdir, sizeof(g_srcdir),
+		         "%.*s/../../ZZ9000_proto.sdk/ZZ9000OS/src",
+		         (int)dir_len, argv[0]);
+	}
+
 	printf("audio_fabric_test: parity + compositor scenarios\n");
 
 	/* scenario 1: parity vs the captured golden (KTD6) */
@@ -2356,22 +1010,8 @@ int main(void)
 	scenario_silence_policy();
 	scenario_underrun_isolation();
 	scenario_formatter();
-	scenario_lease_lifecycle();
-	scenario_lease_zero_contribution();
-	scenario_lease_ghost_bound();
-	scenario_lease_stale_write();
-	scenario_lease_warm_reset();
-	scenario_lease_exhaustion();
-	scenario_lease_state_read();
-	scenario_coexistence_sum();
-	scenario_lease_gain_bound();
-	scenario_lease_backpressure();
-	scenario_lease_wrap_copy();
 	scenario_excluded_underrun();
 	scenario_snapshot_midloop();
-	scenario_reset_idle();
-	scenario_lease_begin_busy();
-	scenario_resume_guard();
 	scenario_ring_authority();
 	scenario_source_contract();
 
