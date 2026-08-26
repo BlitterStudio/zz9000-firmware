@@ -1289,7 +1289,10 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM |
 			SDK_SERVICE_FLAG_AUDIO_CONTROL,
 		SDK_SERVICE_AUDIO,
-		15,	/* 0x0500..0x050e incl. audio control plane */
+		15,	/* 0x0500..0x050e incl. audio control plane; the
+			 * dispatchable lease opcodes 0x050f..0x0512 are NOT
+			 * counted until the R12 on-hardware qualification
+			 * flips the advertisement */
 		"audio"
 	},
 	{
@@ -3955,7 +3958,12 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session)
 		/* Unreachable: every caller gates on ownership first. */
 		return;
 	}
-	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
+	/* Re-arm the shared fill frontier only when no other slot is
+	 * live: joining a live mix must never rewind it (the other
+	 * producers' staged periods would be re-filled and their staging
+	 * double-counted) -- the same guard the lease-submit path applies. */
+	if (!audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP))
+		audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
 	g_audio_playback.source_kind = source_kind;
 	g_audio_playback.paused = 0U;
 	/* Name the output source for metering (R8) before the session

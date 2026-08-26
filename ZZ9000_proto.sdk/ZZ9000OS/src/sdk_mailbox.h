@@ -712,7 +712,9 @@ struct SDKAudioLeaseSubmitResultPayload {
 
 /* Surrender a lease; the compositor fades the slot out and returns it
  * to SDK_AUDIO_FABRIC_SLOT_FREE. Idempotent for an already-released
- * lease handle. */
+ * lease handle. No result payload is reserved for RELEASE -- the
+ * completion carries status only (a result struct may join the
+ * append-only surface later). */
 struct SDKAudioLeaseReleasePayload {
 	uint8_t lease[4];
 	uint8_t flags[4];

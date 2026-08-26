@@ -189,6 +189,22 @@ static int fabric_any_live(void)
 	return 0;
 }
 
+/* Shared-frontier guard for restart callers: nonzero when any slot
+ * other than `slot` is live. Re-arming the shared fill frontier under
+ * a live mix would re-fill the other producers' staged periods and
+ * double-count their staging, so media resume skips the re-arm while
+ * this is set (the same guard the lease-submit path applies). */
+int audio_fabric_others_live(uint32_t slot)
+{
+	uint32_t i;
+
+	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
+		if (i != slot && g_audio_fabric.slot[i].live)
+			return 1;
+	}
+	return 0;
+}
+
 static uint32_t fabric_underrun_bump(uint32_t count)
 {
 	if (count != UINT32_MAX)
@@ -355,7 +371,8 @@ static void fabric_lease_meter(struct audio_fabric_slot *s,
 	}
 	for (i = 0U; i < samples; i++) {
 		int32_t v = pcm[i];
-		uint32_t magnitude = v < 0 ? (uint32_t)(-v) : (uint32_t)v;
+		int32_t neg = v >> 31;
+		uint32_t magnitude = (uint32_t)((v + neg) ^ neg);
 
 		if ((magnitude << 1) > l->peak)
 			l->peak = magnitude << 1;
@@ -386,7 +403,7 @@ static int fabric_lease_fill_source(uint32_t slot_index,
 		return 1;
 	source->ring = l->ring;
 	source->capacity = l->capacity;
-	source->produced_bytes = l->produced;
+	source->produced_bytes = fabric_lease_read_cursor(&l->produced);
 	source->staged_bytes = l->staged; /* ISR-only writer; tearing
 	 * is impossible against this reader (see fabric_lease_read_cursor
 	 * for the cross-context reads that still need the retry). */
@@ -400,7 +417,9 @@ static int fabric_lease_advance(uint32_t slot_index, uint32_t bytes)
 {
 	struct audio_fabric_slot *s = &g_audio_fabric.slot[slot_index];
 	struct audio_fabric_lease *l = &s->lease;
-	uint64_t produced = l->produced;
+	/* produced is main-loop-written (SUBMIT): tearing-safe read.
+	 * staged is this ISR's own cursor: plain. */
+	uint64_t produced = fabric_lease_read_cursor(&l->produced);
 	uint64_t staged = l->staged;
 
 	if (l->ring == NULL || l->tearing)
@@ -721,7 +740,7 @@ void audio_fabric_isr(void)
 	guard = AUDIO_FABRIC_RING_PERIODS;
 	while (guard--) {
 		uint32_t index;
-		uint32_t committed = 0U;
+		uint32_t committed = 0U;   /* slots that staged this period */
 		uint32_t next_fill;
 
 		ahead = audio_playback_ring_distance(
@@ -733,13 +752,6 @@ void audio_fabric_isr(void)
 		if (ahead >= AUDIO_FABRIC_TARGET_AHEAD)
 			break;   /* frontier far enough ahead */
 		index = g_audio_fabric.fill_offset / AUDIO_FABRIC_PERIOD_BYTES;
-#ifdef AUDIO_FABRIC_BENCH
-		bench_mix = fabric_bench_now();
-#endif
-		fabric_mix_zero();
-#ifdef AUDIO_FABRIC_BENCH
-		fabric_bench_add(&g_fabric_bench.mix, bench_mix);
-#endif
 		for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
 			struct audio_fabric_slot *s =
 				&g_audio_fabric.slot[i];
@@ -759,11 +771,15 @@ void audio_fabric_isr(void)
 #ifdef AUDIO_FABRIC_BENCH
 				bench_mix = fabric_bench_now();
 #endif
+				/* Deferred mix zero: the first committed
+				 * slot pays it. */
+				if (committed == 0U)
+					fabric_mix_zero();
 				fabric_mix_add(g_fabric_stereo);
 #ifdef AUDIO_FABRIC_BENCH
 				fabric_bench_add(&g_fabric_bench.mix, bench_mix);
 #endif
-				committed = 1U;
+				committed++;
 				s->staged_real = 1U;
 			} else if (!s->source.done &&
 			           !s->source.faulted) {
@@ -777,11 +793,19 @@ void audio_fabric_isr(void)
 #ifdef AUDIO_FABRIC_BENCH
 		bench_mix = fabric_bench_now();
 #endif
-		if (committed)
+		if (committed == 1U) {
+			/* Single producer: the staged period is already
+			 * the final mix -- copy it straight, skipping the
+			 * int32 zero/add/clamp pass (byte-identical to a
+			 * commit of one added source). */
+			memcpy(tx + g_audio_fabric.fill_offset,
+			       g_fabric_stereo, AUDIO_FABRIC_PERIOD_BYTES);
+		} else if (committed != 0U) {
 			fabric_mix_commit(tx + g_audio_fabric.fill_offset);
-		else
+		} else {
 			memset(tx + g_audio_fabric.fill_offset, 0,
 			       AUDIO_FABRIC_PERIOD_BYTES);
+		}
 		/* The TX ring is plain cacheable DDR (no TLB override) and
 		 * the audio formatter DMA does not snoop: push the period
 		 * to DRAM before the frontier advances over it. ~120
@@ -1048,6 +1072,10 @@ int audio_fabric_lease_submit(uint32_t handle, const uint8_t *src,
 		return AUDIO_FABRIC_LEASE_EHANDLE;
 	staged = fabric_lease_read_cursor(&l->staged);
 	produced = l->produced;   /* this thread is the sole writer */
+	/* A torn staged read can land ahead of produced: clamp it back so
+	 * the tear degrades to zero-accept instead of an oversized accept. */
+	if (staged > produced)
+		staged = produced;
 	space = l->capacity - (uint32_t)(produced - staged);
 	accept = length < space ? length : space;
 	if (accept == 0U)
@@ -1191,6 +1219,10 @@ void audio_fabric_reset(void)
 		epoch[i] = g_audio_fabric.slot[i].epoch;
 	if (g_audio_fabric.ownership == AUDIO_FABRIC_ACTIVE)
 		audio_silence();
+	/* Publish IDLE before the teardown: an audio IRQ landing mid-reset
+	 * checks this single store first and stays inert, instead of
+	 * walking a half-zeroed slot table. */
+	g_audio_fabric.ownership = (uint8_t)AUDIO_FABRIC_IDLE;
 	memset(&g_audio_fabric, 0, sizeof(g_audio_fabric));
 	for (i = AUDIO_FABRIC_SLOT_MAILBOX; i < AUDIO_FABRIC_SLOT_COUNT;
 	     i++) {

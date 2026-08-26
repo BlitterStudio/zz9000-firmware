@@ -40,7 +40,7 @@ enum audio_fabric_ownership {
 	AUDIO_FABRIC_ACTIVE = 2,
 };
 
-/* Bounded slot table (R4). Only the pump slot is live in U2. */
+/* Bounded slot table (R4): the pump slot plus the lease plane (U3). */
 #define AUDIO_FABRIC_SLOT_PUMP     0U
 #define AUDIO_FABRIC_SLOT_MAILBOX  1U
 #define AUDIO_FABRIC_SLOT_RESERVED 2U
@@ -119,6 +119,12 @@ int audio_fabric_producer_attach(uint32_t slot,
 void audio_fabric_producer_detach(uint32_t slot);
 void audio_fabric_producer_freeze(uint32_t slot);
 void audio_fabric_producer_go_live(uint32_t slot);
+/* Shared-frontier guard for restart callers: nonzero when any slot
+ * other than `slot` is live. Re-arming the shared fill frontier under
+ * a live mix would re-fill the other producers' staged periods and
+ * double-count their staging, so media resume skips the re-arm while
+ * this is set (the same guard the lease-submit path applies). */
+int audio_fabric_others_live(uint32_t slot);
 /* Re-arm the fill frontier at the current DMA position and drop the
  * slot's pending retirement tags, conversion state and silence run
  * (bind and media resume; no formatter reprogramming). */
@@ -258,8 +264,10 @@ int audio_fabric_lease_release(uint32_t handle);
  * vocabulary; other slots take the lease identity). hold_reset
  * consumes the lease peak-hold window on the next compositor read
  * (the scene-meter read-and-clear convention). Returns 0 for a bad
- * slot. The pump slot reports 0 peak/clip: its telemetry lives with
- * the scene meter, which already scans the mixed output.
+ * slot. The pump slot never holds a lease handle: it reports
+ * lease == 0xffffffffU (the free sentinel) in every bind state, and
+ * 0 peak/clip -- its telemetry lives with the scene meter, which
+ * already scans the mixed output.
  */
 int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
 	int hold_reset, struct audio_fabric_slot_state *out);
