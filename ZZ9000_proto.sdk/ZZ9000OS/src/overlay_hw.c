@@ -16,10 +16,10 @@
 #define ZZ_OVERLAY_HW_PRESENT 1
 #endif
 
-/* Retain the active transfer shape so each acknowledged vblank can restart
- * the one-frame direct-register transfer without resetting a healthy VDMA.
- * Reset is recovery-only: aborting an active channel under DDR contention
- * creates the black frame the native overlay is meant to avoid. */
+/* Retain the active transfer shape so each vblank handoff can reset and
+ * rebuild MM2S. A live START_ADDR update needs VSIZE to commit, but it can
+ * still arrive after the VDMA has prefetched the old frame internally.
+ * Resetting at the acknowledged frame boundary discards that stale work. */
 static volatile uint32_t overlay_vdma_pitch;
 static volatile uint32_t overlay_vdma_line_bytes;
 static volatile uint16_t overlay_vdma_height;
@@ -74,29 +74,6 @@ static int overlay_vdma_program(uint32_t src_addr, uint32_t src_pitch,
 	return 1;
 }
 
-static int overlay_vdma_rearm(uint32_t src_addr, uint32_t src_pitch,
-                              uint32_t line_bytes, uint16_t height)
-{
-	uint32_t addr = XAXIVDMA_MM2S_ADDR_OFFSET;
-	uint32_t status = overlay_vdma_read(XAXIVDMA_SR_OFFSET);
-
-	if ((status & (XAXIVDMA_SR_ERR_ALL_MASK |
-	               XAXIVDMA_SR_HALTED_MASK)) != 0U)
-		return overlay_vdma_program(
-			src_addr, src_pitch, line_bytes, height);
-	/* The prior finite frame has not retired yet. Leave it running instead
-	 * of resetting it mid-frame; the next vblank retries the handoff. */
-	if ((status & XAXIVDMA_SR_IDLE_MASK) == 0U)
-		return 0;
-	overlay_vdma_write(addr + XAXIVDMA_START_ADDR_OFFSET, src_addr);
-	overlay_vdma_write(addr + XAXIVDMA_STRD_FRMDLY_OFFSET, src_pitch);
-	overlay_vdma_write(addr + XAXIVDMA_HSIZE_OFFSET, line_bytes);
-	/* VSIZE commits the retained direct-register shape and starts exactly
-	 * one new frame. RUNSTOP remains asserted from the initial program. */
-	overlay_vdma_write(addr + XAXIVDMA_VSIZE_OFFSET, height);
-	return 1;
-}
-
 void overlay_hw_stop(void)
 {
 	/* Invalidate live flips before touching MMIO: a vblank can preempt the
@@ -111,17 +88,19 @@ void overlay_hw_stop(void)
 	(void)overlay_vdma_reset();
 }
 
-int overlay_hw_set_buffer(uint32_t src_addr, uint32_t generation)
+void overlay_hw_set_buffer(uint32_t src_addr, uint32_t generation)
 {
 	if (!overlay_hw_supported() || !src_addr || !overlay_vdma_pitch ||
 	    !overlay_vdma_line_bytes || !overlay_vdma_height)
-		return 0;
-	if (!overlay_vdma_rearm(src_addr, overlay_vdma_pitch,
-	                        overlay_vdma_line_bytes,
-	                        overlay_vdma_height))
-		return 0;
+		return;
+	/* The overlay stream is wired directly to the line fetcher. Resetting
+	 * here therefore clears every place that could retain an old staging
+	 * frame before the generation acknowledgement re-arms line zero. */
+	if (!overlay_vdma_program(src_addr, overlay_vdma_pitch,
+	                          overlay_vdma_line_bytes,
+	                          overlay_vdma_height))
+		return;
 	video_formatter_write(generation, MNTVF_OP_OVERLAY_FRAME);
-	return 1;
 }
 
 int overlay_hw_start_scaled(uint32_t src_addr, uint32_t src_pitch,

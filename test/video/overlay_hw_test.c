@@ -26,7 +26,6 @@ static uint16_t formatter_op;
 static unsigned formatter_count;
 static int probe_flip_on_reset;
 static int reset_stuck;
-static uint32_t status_value;
 
 void test_xil_out32(uintptr_t address, uint32_t value)
 {
@@ -46,11 +45,9 @@ void test_xil_out32(uintptr_t address, uint32_t value)
 
 uint32_t test_xil_in32(uintptr_t address)
 {
-	if (address == OVERLAY_VDMA_BASE + XAXIVDMA_SR_OFFSET)
-		return status_value;
-	if (address == OVERLAY_VDMA_BASE + XAXIVDMA_CR_OFFSET)
-		return reset_stuck ? XAXIVDMA_CR_RESET_MASK : 0U;
-	return 0U;
+	(void)address;
+	/* Model reset completing before the first status poll. */
+	return reset_stuck ? XAXIVDMA_CR_RESET_MASK : 0U;
 }
 
 void video_formatter_write(uint32_t data, uint16_t op)
@@ -94,46 +91,40 @@ int main(void)
 	}
 
 	clear_log();
-	status_value = XAXIVDMA_SR_IDLE_MASK;
-	if (!overlay_hw_set_buffer(0x11000000U, 2U))
-		return 2;
-	if (write_count != 4U ||
-	    !expect_write(0U, channel + XAXIVDMA_START_ADDR_OFFSET,
+	overlay_hw_set_buffer(0x11000000U, 2U);
+	if (write_count != 7U ||
+	    !expect_write(0U, OVERLAY_VDMA_BASE + XAXIVDMA_CR_OFFSET,
+	                  XAXIVDMA_CR_RESET_MASK) ||
+	    !expect_write(1U, OVERLAY_VDMA_BASE + XAXIVDMA_SR_OFFSET,
+	                  XAXIVDMA_SR_ERR_ALL_MASK) ||
+	    !expect_write(2U, channel + XAXIVDMA_START_ADDR_OFFSET,
 	                  0x11000000U) ||
-	    !expect_write(1U, channel + XAXIVDMA_STRD_FRMDLY_OFFSET, 1280U) ||
-	    !expect_write(2U, channel + XAXIVDMA_HSIZE_OFFSET, 1280U) ||
-	    !expect_write(3U, channel + XAXIVDMA_VSIZE_OFFSET, 480U)) {
-		return 3;
+	    !expect_write(3U, channel + XAXIVDMA_STRD_FRMDLY_OFFSET, 1280U) ||
+	    !expect_write(4U, channel + XAXIVDMA_HSIZE_OFFSET, 1280U) ||
+	    !expect_write(5U, OVERLAY_VDMA_BASE + XAXIVDMA_CR_OFFSET,
+	                  XAXIVDMA_CR_TAIL_EN_MASK |
+	                  XAXIVDMA_CR_RUNSTOP_MASK) ||
+	    !expect_write(6U, channel + XAXIVDMA_VSIZE_OFFSET, 480U)) {
+		return 2;
 	}
 	if (formatter_count != 1U || formatter_op != MNTVF_OP_OVERLAY_FRAME ||
 	    formatter_data != 2U) {
 		printf("generation commit: got count=%u op=%u data=%lu\n",
 		       formatter_count, formatter_op,
 		       (unsigned long)formatter_data);
-		return 4;
+		return 3;
 	}
 
 	clear_log();
-	status_value = 0U; /* RUNSTOP is still active: prior frame is late. */
-	if (overlay_hw_set_buffer(0x11400000U, 3U) ||
-	    write_count != 0U || formatter_count != 0U) {
-		printf("busy channel was reset or advanced\n");
-		return 5;
-	}
-
-	clear_log();
-	status_value = XAXIVDMA_SR_ERR_INTERNAL_MASK;
 	reset_stuck = 1;
-	if (overlay_hw_set_buffer(0x11800000U, 3U))
-		return 6;
+	overlay_hw_set_buffer(0x11800000U, 3U);
 	reset_stuck = 0;
-	status_value = 0U;
 	if (write_count != 1U ||
 	    !expect_write(0U, OVERLAY_VDMA_BASE + XAXIVDMA_CR_OFFSET,
 	                  XAXIVDMA_CR_RESET_MASK) ||
 	    formatter_count != 0U) {
 		printf("timed-out reset advanced the generation\n");
-		return 7;
+		return 4;
 	}
 
 	clear_log();
@@ -147,14 +138,14 @@ int main(void)
 	    formatter_count != 1U || formatter_op != MNTVF_OP_OVERLAY_CTRL ||
 	    formatter_data != 0U) {
 		printf("stop allowed a re-entrant buffer commit\n");
-		return 8;
+		return 5;
 	}
 
 	clear_log();
 	overlay_hw_set_buffer(0x12000000U, 3U);
 	if (write_count != 0U || formatter_count != 0U) {
 		printf("stopped channel accepted a buffer flip\n");
-		return 9;
+		return 6;
 	}
 
 	printf("overlay_hw_test: PASS\n");
