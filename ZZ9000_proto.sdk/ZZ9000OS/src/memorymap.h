@@ -36,7 +36,7 @@
 // ps7_ddr_hi + heap), and no other firmware or driver constant names this
 // sub-range. BEGIN zeroes its ring, so a fresh lease can never read a
 // previous lease's (or a previous firmware lifetime's) samples.
-#define AUDIO_FABRIC_LEASE_RING_PERIODS 16U
+#define AUDIO_FABRIC_LEASE_RING_PERIODS 32U
 #define AUDIO_FABRIC_LEASE_RING_BYTES \
     (AUDIO_FABRIC_LEASE_RING_PERIODS * AUDIO_BYTES_PER_PERIOD)
 #define AUDIO_FABRIC_LEASE_RING1_ADDRESS 0x3FC28000

@@ -1129,9 +1129,20 @@ static void scenario_cache_fidelity(void)
 	(void)audio_fabric_lease_release(lease);
 }
 
+static void scenario_stress_geometry(void)
+{
+	check(AUDIO_FABRIC_LEASE_RING_PERIODS == 32U,
+	      "geometry: lease ring has 32 periods",
+	      fmt("periods=%u", AUDIO_FABRIC_LEASE_RING_PERIODS));
+	check(AUDIO_FABRIC_LEASE_RING_BYTES == 122880U,
+	      "geometry: lease ring provides 640 ms",
+	      fmt("bytes=%u", AUDIO_FABRIC_LEASE_RING_BYTES));
+}
+
 int main(void)
 {
 	printf("audio_fabric_lease_test: lease plane scenarios\n");
+	scenario_stress_geometry();
 
 	scenario_lease_lifecycle();
 	scenario_lease_zero_contribution();
