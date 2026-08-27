@@ -118,7 +118,9 @@ int main(int argc, char **argv)
 	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "#define SDK_HOST_WINDOW_HEAP_ADDRESS 0x005D0000");
 	ok &= expect_contains(memorymap, "memorymap.h",
-	                      "#define SDK_HOST_WINDOW_HEAP_SIZE    0x00004000");
+	                      "#define SDK_HOST_WINDOW_HEAP_SIZE    0x00010000");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_HOST_WINDOW_HEAP_GEN2_SIZE 0x00004000");
 	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "(SDK_HOST_WINDOW_HEAP_END - ADDR_ADJ) > 0x00400000");
 	ok &= expect_contains(memorymap, "memorymap.h",

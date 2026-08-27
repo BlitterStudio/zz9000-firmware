@@ -82,11 +82,11 @@
 // regions computed in sdk_aperture_layout.c; firmware publishes that dynamic
 // heap only after the host acknowledges the matching contract. The existing
 // SDK guard still prevents a legacy 2 MB host from using this 4 MB address.
-// Generation 2 carves the top 48 KiB of the old 64 KiB heap away for the
-// direct-ring reservation (below), leaving this 16 KiB allocator at the
-// unchanged low end so legacy fallback addressing does not move.
+// Generation 2 carves the top 48 KiB of the 64 KiB fallback heap for
+// direct rings. Keep the fallback size intact for Z3 and legacy Z2.
 #define SDK_HOST_WINDOW_HEAP_ADDRESS 0x005D0000
-#define SDK_HOST_WINDOW_HEAP_SIZE    0x00004000
+#define SDK_HOST_WINDOW_HEAP_SIZE    0x00010000
+#define SDK_HOST_WINDOW_HEAP_GEN2_SIZE 0x00004000
 #define SDK_HOST_WINDOW_HEAP_END \
     (SDK_HOST_WINDOW_HEAP_ADDRESS + SDK_HOST_WINDOW_HEAP_SIZE)
 
@@ -229,7 +229,8 @@
 // Z2 grants exist only while the generation-2 contract is acknowledged.
 #define SDK_AUDIO_DIRECT_RING_Z2_SLOTS              1U
 #define SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE       0x0000C000
-#define SDK_AUDIO_DIRECT_RING_Z2_RESERVE_ADDRESS    SDK_HOST_WINDOW_HEAP_END
+#define SDK_AUDIO_DIRECT_RING_Z2_RESERVE_ADDRESS \
+    (SDK_HOST_WINDOW_HEAP_ADDRESS + SDK_HOST_WINDOW_HEAP_GEN2_SIZE)
 #define SDK_AUDIO_DIRECT_RING_Z2_RESERVE_END \
     (SDK_AUDIO_DIRECT_RING_Z2_RESERVE_ADDRESS + \
      SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE)

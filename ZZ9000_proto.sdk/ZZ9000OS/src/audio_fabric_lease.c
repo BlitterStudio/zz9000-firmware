@@ -30,7 +30,7 @@
  * revokes the lease. One ISR tick is SDK_AUDIO_RING_PERIOD_US (20 ms),
  * so the default tolerates a mailbox poll round-trip plus scheduler
  * latency without ever approaching the TX frontier horizon. */
-#define FABRIC_RING_HEARTBEAT_TIMEOUT_MS 1000U
+#define FABRIC_RING_HEARTBEAT_TIMEOUT_MS 2000U
 #define FABRIC_RING_TICK_MS \
 	(SDK_AUDIO_RING_PERIOD_US / 1000U)
 
@@ -427,7 +427,8 @@ void fabric_lease_isr_tick(void)
 		 * backward is a fault. Staged-but-uncredited bytes stay
 		 * readable for the queued-period rebuild, so the credit
 		 * cursor (not staging) bounds the producer. */
-		if (view.write < l->credited ||
+		if (view.write < l->write_cursor ||
+		    view.write < l->credited ||
 		    view.write - l->credited > l->capacity) {
 			fabric_ring_revoke(slot,
 				SDK_AUDIO_RING_STATUS_FAULT_CURSOR);
@@ -684,9 +685,13 @@ int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
 {
 	struct audio_fabric_slot *s = fabric_slot(slot);
 	const struct audio_fabric_lease *l;
+	uint8_t *ring_before;
+	uint32_t epoch_before;
+	uint32_t attempts = 0U;
 
 	if (s == NULL || out == NULL)
 		return 0;
+retry:
 	memset(out, 0, sizeof(*out));
 	out->heartbeat_ms = SDK_AUDIO_RING_HEARTBEAT_UNKNOWN;
 	if (slot == AUDIO_FABRIC_SLOT_PUMP) {
@@ -706,8 +711,10 @@ int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
 		out->generation = s->epoch;
 		return 1;
 	}
+	epoch_before = s->epoch;
 	l = &s->lease;
-	if (l->ring != NULL) {
+	ring_before = l->ring;
+	if (ring_before != NULL) {
 		out->state = l->state ==
 			(uint8_t)AUDIO_FABRIC_SLOT_STATE_ACTIVE
 			? AUDIO_FABRIC_SLOT_STATE_ACTIVE
@@ -722,8 +729,6 @@ int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
 		out->heartbeat_ms = l->heartbeat_ms;
 		out->peak = l->peak;
 		out->clips = l->clips;
-		if (hold_reset)
-			s->lease.peak_reset = 1U;
 	} else if (g_ring_record[slot].revoked &&
 		   g_ring_record[slot].generation == s->epoch) {
 		/* The last lease of this slot was revoked and nothing new
@@ -742,5 +747,12 @@ int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
 	 * grant is dead). */
 	out->generation = s->epoch;
 	out->underruns = s->underruns;
+	if (epoch_before != s->epoch || ring_before != s->lease.ring) {
+		if (++attempts < FABRIC_RING_SEQLOCK_ATTEMPTS)
+			goto retry;
+		return 0;
+	}
+	if (hold_reset && ring_before != NULL)
+		s->lease.peak_reset = 1U;
 	return 1;
 }

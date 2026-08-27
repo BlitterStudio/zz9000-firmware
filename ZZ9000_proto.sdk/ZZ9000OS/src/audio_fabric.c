@@ -548,11 +548,11 @@ static uint32_t fabric_rebuild_pull(struct audio_fabric_slot *s,
 	if (rate == 48000U) {
 		memcpy(slot, pcm, AUDIO_FABRIC_PERIOD_BYTES);
 	} else {
-		/* Replay restarts the converter (its phase advanced past
-		 * this window with the original fills; see the fidelity
-		 * note above). */
-		s->convert_rate = rate;
-		zz_audio_convert_init(&s->convert, rate, 48000U);
+		/* fabric_rebuild_queued initializes this converter once at
+		 * the start of the replay window and carries history across
+		 * every rebuilt period. */
+		if (s->convert_rate != rate)
+			return 0U;
 		if (s->convert.ratio == NULL) {
 			memset(slot, 0, AUDIO_FABRIC_PERIOD_BYTES);
 			return want;
@@ -602,8 +602,13 @@ static void fabric_rebuild_queued(uint32_t pos_period)
 		uint32_t p = walk;
 
 		cursor[i] = 0U;
-		if (!s->live)
+		if (!s->live || s->lease.tearing)
 			continue;
+		if (s->source.sample_rate != 48000U) {
+			s->convert_rate = s->source.sample_rate;
+			zz_audio_convert_init(&s->convert,
+				s->source.sample_rate, 48000U);
+		}
 		while (p != g_audio_fabric.fill_offset) {
 			sum += s->period_staged[
 				p / AUDIO_FABRIC_PERIOD_BYTES];
@@ -626,7 +631,8 @@ static void fabric_rebuild_queued(uint32_t pos_period)
 				&g_audio_fabric.slot[i];
 			uint32_t got;
 
-			if (!s->live || s->period_staged[index] == 0U)
+			if (!s->live || s->lease.tearing ||
+			    s->period_staged[index] == 0U)
 				continue;
 			got = fabric_rebuild_pull(s, &cursor[i],
 				s->period_staged[index]);
