@@ -284,6 +284,23 @@ void audio_fabric_bench_poll(void)
 			   (unsigned int)g_fabric_bench.starve_count[i],
 			   (unsigned int)
 			   g_fabric_bench.starve_available_last[i]);
+		if (g_audio_fabric.slot[i].lease.ring != NULL) {
+			const struct audio_fabric_lease *l =
+				&g_audio_fabric.slot[i].lease;
+			uint64_t write =
+				fabric_lease_read_cursor(&l->write_cursor);
+			uint64_t staged = g_audio_fabric.slot[i]
+				.source.staged_bytes;
+			uint64_t credited =
+				fabric_lease_read_cursor(&l->credited);
+
+			xil_printf("FABRIC-BENCH slot%u ring w=%u s=%u c=%u "
+				   "hb=%u\r\n", (unsigned int)i,
+				   (unsigned int)write,
+				   (unsigned int)staged,
+				   (unsigned int)credited,
+				   (unsigned int)l->heartbeat_ms);
+		}
 	}
 }
 #endif /* AUDIO_FABRIC_BENCH */
