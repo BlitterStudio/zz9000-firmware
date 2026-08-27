@@ -373,6 +373,12 @@ static void mix_case(const char *label, int16_t a, int16_t b)
 	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_MAILBOX);
 	dma_tick(1);
 	audio_fabric_isr();
+	check(g_model_b.staged == 2U * TICK_BYTES &&
+	      g_model_c.staged == 2U * TICK_BYTES,
+	      "multi-slot recovery bounded to two periods",
+	      fmt("%s: staged a=%llu b=%llu", label,
+	          (unsigned long long)g_model_b.staged,
+	          (unsigned long long)g_model_c.staged));
 	dma_tick(1);
 	audio_fabric_isr();
 

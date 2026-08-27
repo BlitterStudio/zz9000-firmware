@@ -58,6 +58,7 @@
 	(AUDIO_FABRIC_RING_BYTES - 2U * AUDIO_FABRIC_PERIOD_BYTES)
 #define AUDIO_FABRIC_RING_PERIODS \
 	(AUDIO_FABRIC_RING_BYTES / AUDIO_FABRIC_PERIOD_BYTES)
+#define AUDIO_FABRIC_MULTISLOT_MAX_FILLS 2U
 
 static struct {
 	/* Stored ownership is IDLE or ACTIVE; LEGACY_EXCLUSIVE is
@@ -114,6 +115,21 @@ static int fabric_any_live(void)
 			return 1;
 	}
 	return 0;
+}
+
+static uint32_t fabric_ready_source_count(void)
+{
+	uint32_t count = 0U;
+	uint32_t i;
+
+	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
+		const struct audio_fabric_slot *s = &g_audio_fabric.slot[i];
+
+		if (s->live && !s->source.faulted && s->source.ring &&
+		    s->source.produced_bytes > s->source.staged_bytes)
+			count++;
+	}
+	return count;
 }
 
 /* Shared-frontier guard for restart callers: nonzero when any slot
@@ -536,7 +552,14 @@ void audio_fabric_isr(void)
 	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++)
 		g_audio_fabric.slot[i].staged_real = 0U;
 
-	guard = AUDIO_FABRIC_RING_PERIODS;
+	/* One ready producer preserves the captured pre-fabric burst behavior.
+	 * With multiple ready sources, rebuilding the full reserve in one
+	 * interrupt multiplies fill/meter/mix work and can miss the next 20-ms
+	 * deadline, forcing every slot into a symmetric rebase loop. Empty or
+	 * faulted slots are cheap and do not lower the recovery bound. */
+	guard = fabric_ready_source_count() > 1U
+		? AUDIO_FABRIC_MULTISLOT_MAX_FILLS
+		: AUDIO_FABRIC_RING_PERIODS;
 	while (guard--) {
 		uint32_t index;
 		uint32_t committed = 0U;   /* slots that staged this period */
