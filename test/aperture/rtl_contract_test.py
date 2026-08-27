@@ -25,12 +25,13 @@ def require(source: str, fragment: str) -> None:
 for fragment in (
     "SDK_REG_APERTURE_INFO = 16'h011c",
     "SDK_REG_APERTURE_INFO_LO = 16'h011e",
-    "SDK_APERTURE_ACK_TOKEN = 16'ha501",
-    "SDK_APERTURE_INFO_VALUE = 32'h5a010502",
+    "SDK_APERTURE_ACK_TOKEN = 16'ha502",
+    "SDK_APERTURE_INFO_VALUE = 32'h5a020502",
     "SDK_APERTURE_SIZE_VALUE = 32'h00200000",
-    "SDK_APERTURE_INFO_VALUE = 32'h5a010704",
+    "SDK_APERTURE_INFO_VALUE = 32'h5a020704",
     "SDK_APERTURE_SIZE_VALUE = 32'h00400000",
     "3'h6   : reg_data_out <= sdk_aperture_layout_ack ?",
+    "32'ha5020001 : 32'h00000000",
     "3'h7   : reg_data_out <= SDK_APERTURE_SIZE_VALUE",
 ):
     require(RTL, fragment)
@@ -38,7 +39,7 @@ for fragment in (
 for fragment in (
     "#define MNTZORRO_REG6 24",
     "#define MNTZORRO_REG7 28",
-    "#define MNTZORRO_APERTURE_ACK_STATUS 0xa5010001UL",
+    "#define MNTZORRO_APERTURE_ACK_STATUS 0xa5020001UL",
 ):
     require(HEADER, fragment)
 

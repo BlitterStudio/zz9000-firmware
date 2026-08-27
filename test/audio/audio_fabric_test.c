@@ -9,7 +9,7 @@
  * underrun callbacks, stream play-out tail) after every 20 ms tick.
  *
  * The mailbox lease plane (plan U3) is covered by the companion binary
- * audio_fabric_lease_test.c; both share their harness in
+ * audio_fabric_ring_test.c; both share their harness in
  * fabric_test_common.{h,c}.
  *
  * Coverage:

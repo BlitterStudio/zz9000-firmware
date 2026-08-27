@@ -324,7 +324,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	// the overlay shadows lived in that heap: drop the overlay too
 	overlay_amiga_reset(video_state);
 
-	/* The generation-1 Z2 command block is host-visible template scratch and
+	/* The generation-2 Z2 command block is host-visible template scratch and
 	 * must be acknowledged again after every Amiga reset. Z3 keeps its fixed
 	 * command block. */
 	sdk_aperture_runtime_init(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7),

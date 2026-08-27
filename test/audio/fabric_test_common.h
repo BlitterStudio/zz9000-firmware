@@ -1,7 +1,7 @@
 /*
  * Shared harness for the audio fabric host-test binaries:
  * audio_fabric_test.c (compositor/parity plane) and
- * audio_fabric_lease_test.c (mailbox lease plane).
+ * audio_fabric_ring_test.c (direct-ring lease plane).
  *
  * Only stable infrastructure lives here: the assertion primitives, the
  * deterministic PCM generator, the producer-side source model with its
@@ -150,9 +150,14 @@ int audio_scene_lease_gain_compose(uint32_t requested,
 /* ---- DMA / ring helpers ---- */
 extern uint8_t g_fabric_tx[AUDIO_TX_BUFFER_SIZE];
 extern uint8_t *g_fabric_ring;   /* target of the audio_silence() stub */
-extern uint8_t g_lease_ring_a[AUDIO_FABRIC_LEASE_RING_BYTES];
-extern uint8_t g_lease_ring_b[AUDIO_FABRIC_LEASE_RING_BYTES];
 
+/* ---- direct-ring grants (host seam, Z3-shaped: two slots) ---- */
+#define RING_TEST_PERIODS 16U
+#define RING_TEST_CAPACITY (RING_TEST_PERIODS * TICK_BYTES)
+extern uint8_t g_ring_pcm_a[RING_TEST_CAPACITY];
+extern uint8_t g_ring_pcm_b[RING_TEST_CAPACITY];
+extern uint8_t g_ring_control_a[SDK_AUDIO_RING_CONTROL_SIZE];
+extern uint8_t g_ring_control_b[SDK_AUDIO_RING_CONTROL_SIZE];
 static inline void dma_tick(unsigned periods)
 {
 	g_dma_count += periods * TICK_BYTES;

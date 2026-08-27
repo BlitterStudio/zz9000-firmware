@@ -5,7 +5,7 @@
 #include "audio_pump_preconvert.h"
 #include "sdk_mailbox.h"
 
-#define RING_BYTES (AUDIO_PUMP_PRECONVERT_PERIOD_BYTES * 4U)
+#define RING_BYTES (AUDIO_PUMP_PRECONVERT_PERIOD_BYTES * 8U)
 
 static int failures;
 

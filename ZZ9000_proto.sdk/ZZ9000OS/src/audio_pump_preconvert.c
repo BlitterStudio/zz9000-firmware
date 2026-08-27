@@ -109,8 +109,13 @@ int audio_pump_preconvert_fill(struct audio_pump_preconvert *state,
 	    (source->sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
 	     source->sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE))
 		return -1;
+	/* Space check keeps the rebuild reserve below the staged cursor
+	 * (see AUDIO_PUMP_PRECONVERT_REPLAY_KEEP): the decode side may
+	 * only refill space the queued-period rebuild can no longer
+	 * replay. */
 	if (state->capacity - audio_pump_preconvert_used(state) <
-	    AUDIO_PUMP_PRECONVERT_PERIOD_BYTES)
+	    AUDIO_PUMP_PRECONVERT_PERIOD_BYTES +
+	    AUDIO_PUMP_PRECONVERT_REPLAY_KEEP)
 		return 0;
 	source_frames = source->sample_rate / 50U;
 	if (source_frames == 0U ||

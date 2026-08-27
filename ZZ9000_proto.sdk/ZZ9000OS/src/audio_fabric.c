@@ -35,16 +35,13 @@
 #include "xil_cache.h"
 
 /* Instrument-build flags (plan U5, docs/audio-fabric.md): compile the
- * firmware with -DAUDIO_FABRIC_BENCH to add ISR cost measurement, and
- * additionally -DAUDIO_FABRIC_BENCH_3SLOT to let the bench session
- * lease the firmware-reserved slot 2 (three-producer measurement).
- * Both are firmware-only; every hook below is a compile-time guard,
- * so production and host-test builds carry none of this code. */
+ * firmware with -DAUDIO_FABRIC_BENCH to add ISR cost measurement.
+ * (The former AUDIO_FABRIC_BENCH_3SLOT extension is gone: both Z3
+ * lease slots are natively grantable since the direct-ring plane.)
+ * Firmware-only; every hook below is a compile-time guard, so
+ * production and host-test builds carry none of this code. */
 #if defined(AUDIO_FABRIC_BENCH) && defined(AUDIO_FABRIC_HOST_TEST)
 #error "AUDIO_FABRIC_BENCH is a firmware-only instrument-build flag"
-#endif
-#if defined(AUDIO_FABRIC_BENCH_3SLOT) && !defined(AUDIO_FABRIC_BENCH)
-#error "AUDIO_FABRIC_BENCH_3SLOT extends AUDIO_FABRIC_BENCH; define both"
 #endif
 
 #ifdef AUDIO_FABRIC_BENCH
@@ -65,6 +62,8 @@ static struct {
 	 * derived from the register-fed playback state on read. */
 	uint8_t ownership;
 	uint32_t fill_offset;     /* next TX-ring byte, period-aligned */
+	uint8_t rebuild_pending;  /* queued-period rebuild armed by a
+	                           * direct-ring lease detach */
 	struct audio_fabric_slot slot[AUDIO_FABRIC_SLOT_COUNT];
 } g_audio_fabric;
 
@@ -198,6 +197,16 @@ static struct {
 	struct audio_fabric_bench_stage fill[AUDIO_FABRIC_SLOT_COUNT];
 	/* Rate-conversion pass inside a slot's fill (resample only). */
 	struct audio_fabric_bench_stage conv[AUDIO_FABRIC_SLOT_COUNT];
+	/* Frontier discriminator: DMA movement observed at ISR entry and
+	 * the circular ahead distance that triggered each rebase. */
+	uint32_t dma_last;
+	uint32_t dma_step_max;
+	uint32_t dma_step_gt1;
+	uint32_t rebase_count;
+	uint32_t rebase_ahead_last;
+	uint32_t starve_count[AUDIO_FABRIC_SLOT_COUNT];
+	uint32_t starve_available_last[AUDIO_FABRIC_SLOT_COUNT];
+	uint8_t dma_armed;
 } g_fabric_bench;
 
 static uint64_t fabric_bench_now(void)
@@ -259,11 +268,22 @@ void audio_fabric_bench_poll(void)
 	fabric_bench_numbers(&g_fabric_bench.tick);
 	xil_printf("FABRIC-BENCH mix ");
 	fabric_bench_numbers(&g_fabric_bench.mix);
+	xil_printf("FABRIC-BENCH frontier stepmax=%u gt1=%u rebases=%u "
+		   "ahead=%u\r\n",
+		   (unsigned int)g_fabric_bench.dma_step_max,
+		   (unsigned int)g_fabric_bench.dma_step_gt1,
+		   (unsigned int)g_fabric_bench.rebase_count,
+		   (unsigned int)g_fabric_bench.rebase_ahead_last);
 	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
 		xil_printf("FABRIC-BENCH slot%u fill ", (unsigned int)i);
 		fabric_bench_numbers(&g_fabric_bench.fill[i]);
 		xil_printf("FABRIC-BENCH slot%u conv ", (unsigned int)i);
 		fabric_bench_numbers(&g_fabric_bench.conv[i]);
+		xil_printf("FABRIC-BENCH slot%u starve n=%u avail=%u\r\n",
+			   (unsigned int)i,
+			   (unsigned int)g_fabric_bench.starve_count[i],
+			   (unsigned int)
+			   g_fabric_bench.starve_available_last[i]);
 	}
 }
 #endif /* AUDIO_FABRIC_BENCH */
@@ -440,10 +460,235 @@ static void fabric_mix_commit(uint8_t *dst)
 }
 
 /*
+ * Queued-contribution rebuild (plan U3): a direct-ring lease that
+ * detached (release or revocation) may still have contributions
+ * sitting in TX periods the DMA has not reached -- up to the fill
+ * target ahead. The per-slot period_staged tags are the retained
+ * queued-contribution accounting: the rebuild replays every period
+ * strictly ahead of the DMA position from the remaining LIVE slots,
+ * re-reading each peer's own bytes between its credited and staged
+ * cursors (staged-but-uncredited bytes are contractually intact:
+ * direct-ring leases credit only on DMA retirement, media sessions
+ * release ring space only on retirement, and the stream pump keeps
+ * the replay reserve below its staged cursor --
+ * audio_pump_preconvert.c). The detached slot is no longer live, so
+ * its contribution simply drops out; only the period the DMA is
+ * inside may still carry it.
+ *
+ * Fidelity: 48-kHz producers (both lease slots, preconverted pump
+ * streams) replay byte-identically through the memcpy path. A
+ * rate-converted producer replays from a re-armed converter, so its
+ * rebuilt window carries a one-shot filter transient -- bounded to
+ * the rebuilt periods and to lease detaches. Tags, staging cursors
+ * and underrun counters are untouched: only TX bytes change.
+ */
+static uint32_t fabric_rebuild_pull(struct audio_fabric_slot *s,
+	uint64_t *cursor, uint32_t want)
+{
+	const struct audio_fabric_source *source = &s->source;
+	uint8_t *slot = (uint8_t *)g_fabric_stereo;
+	uint32_t rate = source->sample_rate;
+	uint32_t channels = source->channels;
+	uint32_t src_frames;
+	uint32_t src_bytes;
+	uint32_t offset;
+	uint32_t first;
+	uint8_t *ring;
+	int16_t *pcm;
+	uint32_t i;
+
+	if (want == 0U || !source->ring || source->capacity == 0U)
+		return 0U;
+	src_frames = rate / 50U;
+	if (src_frames == 0U ||
+	    src_frames > (AUDIO_FABRIC_PERIOD_BYTES / 4U))
+		return 0U;
+	src_bytes = src_frames * channels * 2U;
+	if (want > src_bytes)
+		return 0U;
+
+	/* Pull the replayed bytes from the producer's ring, exactly as
+	 * the fill loop pulled them the first time: reader-side
+	 * invalidate (the producer wrote them through the aperture),
+	 * wrap-safe copy, zero-pad a drain-tail period. */
+	ring = source->ring;
+	offset = audio_playback_source_offset(*cursor, source->capacity);
+	first = source->capacity - offset;
+	if (first > want)
+		first = want;
+	Xil_DCacheInvalidateRange((INTPTR)(ring + offset), first);
+	memcpy(g_fabric_src, ring + offset, first);
+	if (want > first) {
+		Xil_DCacheInvalidateRange((INTPTR)ring, want - first);
+		memcpy((uint8_t *)g_fabric_src + first, ring, want - first);
+	}
+	if (want < src_bytes)
+		memset((uint8_t *)g_fabric_src + want, 0, src_bytes - want);
+	*cursor += want;
+
+	if (source->sample_format == SDK_AUDIO_SAMPLE_FORMAT_S16BE) {
+		uint8_t *bytes = (uint8_t *)g_fabric_src;
+
+		for (i = 0U; i < src_bytes; i += 2U) {
+			uint8_t high = bytes[i];
+
+			bytes[i] = bytes[i + 1U];
+			bytes[i + 1U] = high;
+		}
+	}
+
+	pcm = g_fabric_src;
+	if (channels == 1U) {
+		for (i = 0U; i < src_frames; i++) {
+			g_fabric_stereo[2U * i] = g_fabric_src[i];
+			g_fabric_stereo[2U * i + 1U] = g_fabric_src[i];
+		}
+		pcm = g_fabric_stereo;
+	}
+	if (rate == 48000U) {
+		memcpy(slot, pcm, AUDIO_FABRIC_PERIOD_BYTES);
+	} else {
+		/* Replay restarts the converter (its phase advanced past
+		 * this window with the original fills; see the fidelity
+		 * note above). */
+		s->convert_rate = rate;
+		zz_audio_convert_init(&s->convert, rate, 48000U);
+		if (s->convert.ratio == NULL) {
+			memset(slot, 0, AUDIO_FABRIC_PERIOD_BYTES);
+			return want;
+		}
+		zz_audio_convert_stream(&s->convert, pcm, (int16_t *)slot,
+		                        (uint16_t)src_frames,
+		                        AUDIO_FABRIC_PERIOD_BYTES / 4);
+	}
+	if (s->gain != AUDIO_FABRIC_GAIN_UNITY) {
+		int16_t *out = (int16_t *)slot;
+		uint32_t g = s->gain;
+
+		for (i = 0U; i < AUDIO_FABRIC_PERIOD_BYTES / 2U; i++) {
+			int32_t v = ((int32_t)out[i] * (int32_t)g) >> 7;
+
+			if (v > 32767)
+				v = 32767;
+			else if (v < -32768)
+				v = -32768;
+			out[i] = (int16_t)v;
+		}
+	}
+	return want;
+}
+
+static void fabric_rebuild_queued(uint32_t pos_period)
+{
+	uint64_t cursor[AUDIO_FABRIC_SLOT_COUNT];
+	uint32_t walk;
+	uint32_t window = 0U;
+	uint32_t i;
+	uint8_t *tx = g_fabric_tx;
+
+	walk = (pos_period + AUDIO_FABRIC_PERIOD_BYTES) %
+		AUDIO_FABRIC_RING_BYTES;
+	if (walk == g_audio_fabric.fill_offset)
+		return;   /* nothing queued ahead of the DMA position */
+
+	/* Re-arm the replay cursors: each live slot replays exactly the
+	 * bytes its tags credit to the rebuilt window, ending at its
+	 * staged cursor. (The period at fill_offset is unfilled; its
+	 * tag is zero by frontier construction.) */
+	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
+		struct audio_fabric_slot *s = &g_audio_fabric.slot[i];
+		uint64_t staged;
+		uint32_t sum = 0U;
+		uint32_t p = walk;
+
+		cursor[i] = 0U;
+		if (!s->live)
+			continue;
+		while (p != g_audio_fabric.fill_offset) {
+			sum += s->period_staged[
+				p / AUDIO_FABRIC_PERIOD_BYTES];
+			p = (p + AUDIO_FABRIC_PERIOD_BYTES) %
+				AUDIO_FABRIC_RING_BYTES;
+		}
+		staged = s->source.staged_bytes;
+		if (staged < (uint64_t)sum)
+			continue;   /* defensive: replay window unbacked */
+		cursor[i] = staged - sum;
+	}
+
+	while (walk != g_audio_fabric.fill_offset &&
+	       window < AUDIO_FABRIC_RING_PERIODS) {
+		uint32_t index = walk / AUDIO_FABRIC_PERIOD_BYTES;
+		uint32_t committed = 0U;
+
+		for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
+			struct audio_fabric_slot *s =
+				&g_audio_fabric.slot[i];
+			uint32_t got;
+
+			if (!s->live || s->period_staged[index] == 0U)
+				continue;
+			got = fabric_rebuild_pull(s, &cursor[i],
+				s->period_staged[index]);
+			if (got == 0U)
+				continue;   /* defensive: absent peer */
+			if (committed == 0U)
+				fabric_mix_zero();
+			fabric_mix_add(g_fabric_stereo);
+			committed++;
+		}
+		if (committed == 1U) {
+			memcpy(tx + walk, g_fabric_stereo,
+			       AUDIO_FABRIC_PERIOD_BYTES);
+		} else if (committed != 0U) {
+			fabric_mix_commit(tx + walk);
+		} else {
+			memset(tx + walk, 0, AUDIO_FABRIC_PERIOD_BYTES);
+		}
+		Xil_DCacheFlushRange((INTPTR)(tx + walk),
+			AUDIO_FABRIC_PERIOD_BYTES);
+		walk = (walk + AUDIO_FABRIC_PERIOD_BYTES) %
+			AUDIO_FABRIC_RING_BYTES;
+		window++;
+	}
+}
+
+void audio_fabric_request_rebuild(uint32_t slot)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+	uint32_t pos;
+	uint32_t walk;
+
+	if (s == NULL || !s->attached)
+		return;
+	/* Arm only when this slot actually has queued future
+	 * contributions: the rebuild re-mixes the peers' window too, and
+	 * a rate-converted peer pays a one-shot converter transient --
+	 * not worth it for a lease that never staged anything. Tearing
+	 * is already set, so no new tags can appear for this slot (the
+	 * fill loop's stage op refuses a tearing lease); a tag landing
+	 * inside the sub-microsecond stage/tag window at worst leaves
+	 * one residual period. Plain store; the ISR consumes it. */
+	pos = audio_get_dma_transfer_count() % AUDIO_FABRIC_RING_BYTES;
+	pos -= pos % AUDIO_FABRIC_PERIOD_BYTES;
+	walk = (pos + AUDIO_FABRIC_PERIOD_BYTES) %
+		AUDIO_FABRIC_RING_BYTES;
+	while (walk != g_audio_fabric.fill_offset) {
+		if (s->period_staged[walk / AUDIO_FABRIC_PERIOD_BYTES] !=
+		    0U) {
+			g_audio_fabric.rebuild_pending = 1U;
+			return;
+		}
+		walk = (walk + AUDIO_FABRIC_PERIOD_BYTES) %
+			AUDIO_FABRIC_RING_BYTES;
+	}
+}
+/*
  * TX-fill compositor tick, called from the audio formatter period
- * interrupt every 20 ms. No-op unless the fabric owns the output with
- * at least one live producer. Integer-only; no scheduler/taskq/printf
- * access from here.
+ * interrupt every 20 ms. No-op unless the fabric owns the output
+ * (with only frozen producers it still runs the direct-ring scan,
+ * which may bring a first-published lease live). Integer-only; no
+ * scheduler/taskq/printf access from here.
  */
 void audio_fabric_isr(void)
 {
@@ -459,13 +704,39 @@ void audio_fabric_isr(void)
 #endif
 
 
-	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE ||
-	    !fabric_any_live())
+	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
+		return;
+
+	/* Direct-ring leases first (plan U3): one scan per ISR over the
+	 * wired producer lines -- seqlock/generation/write-distance
+	 * validation, heartbeat aging, the LEASED -> ACTIVE transition
+	 * on the first publication, REVOKED teardown -- before any
+	 * frontier work. May bring a frozen lease live (the retire and
+	 * fill passes below then see it) or drop a revoked one (with
+	 * the last-producer silence when it was the only attachment). */
+	fabric_lease_isr_tick();
+	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
 		return;
 
 	pos_period =
 		audio_get_dma_transfer_count() % AUDIO_FABRIC_RING_BYTES;
 	pos_period -= pos_period % AUDIO_FABRIC_PERIOD_BYTES;
+#ifdef AUDIO_FABRIC_BENCH
+	if (!g_fabric_bench.dma_armed) {
+		g_fabric_bench.dma_armed = 1U;
+		g_fabric_bench.dma_last = pos_period;
+	} else {
+		uint32_t step = audio_playback_ring_distance(
+			pos_period, g_fabric_bench.dma_last,
+			AUDIO_FABRIC_RING_BYTES) / AUDIO_FABRIC_PERIOD_BYTES;
+
+		if (step > g_fabric_bench.dma_step_max)
+			g_fabric_bench.dma_step_max = step;
+		if (step > 1U)
+			g_fabric_bench.dma_step_gt1++;
+		g_fabric_bench.dma_last = pos_period;
+	}
+#endif
 
 	/* Retire every period the DMA advanced through since the
 	 * preceding IRQ, per slot: each slot's tags record exactly how
@@ -487,6 +758,19 @@ void audio_fabric_isr(void)
 			s->period_staged, AUDIO_NUM_PERIODS);
 		if (retired != 0U && s->ops->retire)
 			s->ops->retire(retired);
+	}
+
+	/* Queued-contribution rebuild (plan U3): when a direct-ring
+	 * lease detached since the last pass, rebuild every queued
+	 * future period from the remaining live producers so only the
+	 * current 20-ms period may still carry its audio. Runs after
+	 * retirement (the rebuilt window starts strictly ahead of the
+	 * DMA position) and before the snapshot refresh and fill loop
+	 * (the DMA has not reached the first rebuilt period yet).
+	 * Unmeasured by the bench accumulator, like the retire pass. */
+	if (g_audio_fabric.rebuild_pending) {
+		g_audio_fabric.rebuild_pending = 0U;
+		fabric_rebuild_queued(pos_period);
 	}
 
 	/* Refresh every live slot's source snapshot. A vanished producer
@@ -528,9 +812,16 @@ void audio_fabric_isr(void)
 	 * distance: bias by the ring size BEFORE the modulo -- a plain
 	 * u32 (fill - pos) % RING is wrong on wrap because 2^32 is not a
 	 * multiple of the 30720-byte ring. */
+	ahead = audio_playback_ring_distance(
+		g_audio_fabric.fill_offset, pos_period,
+		AUDIO_FABRIC_RING_BYTES);
 	if (audio_playback_frontier_needs_rebase(
 		    g_audio_fabric.fill_offset, pos_period,
 		    AUDIO_FABRIC_TARGET_AHEAD, AUDIO_FABRIC_RING_BYTES)) {
+#ifdef AUDIO_FABRIC_BENCH
+		g_fabric_bench.rebase_count++;
+		g_fabric_bench.rebase_ahead_last = ahead;
+#endif
 		for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
 			struct audio_fabric_slot *s =
 				&g_audio_fabric.slot[i];
@@ -608,6 +899,19 @@ void audio_fabric_isr(void)
 				/* Owed but silent: this slot's underrun
 				 * alone moves; the other slots and the
 				 * frontier are unaffected (R8). */
+#ifdef AUDIO_FABRIC_BENCH
+				uint64_t available =
+					s->source.produced_bytes >=
+						s->source.staged_bytes
+					? s->source.produced_bytes -
+						s->source.staged_bytes
+					: 0U;
+
+				g_fabric_bench.starve_count[i]++;
+				g_fabric_bench.starve_available_last[i] =
+					available > UINT32_MAX
+					? UINT32_MAX : (uint32_t)available;
+#endif
 				s->underruns =
 					fabric_underrun_bump(s->underruns);
 			}
@@ -750,7 +1054,10 @@ void audio_fabric_producer_detach(uint32_t slot)
 	if (!fabric_any_attached()) {
 		g_audio_fabric.ownership = (uint8_t)AUDIO_FABRIC_IDLE;
 		/* Ring-level silence only now, when the last producer
-		 * released (KTD8). */
+		 * released (KTD8); the whole-ring wipe also retires any
+		 * pending queued-period rebuild (nothing queued can
+		 * remain). */
+		g_audio_fabric.rebuild_pending = 0U;
 		audio_silence();
 	}
 }

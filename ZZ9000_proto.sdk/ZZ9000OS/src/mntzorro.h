@@ -19,8 +19,8 @@
 #define MNTZORRO_REG6 24
 #define MNTZORRO_REG7 28
 
-/* Read direction of REG6: generation-1 host aperture acknowledgement. */
-#define MNTZORRO_APERTURE_ACK_STATUS 0xa5010001UL
+/* Read direction of REG6: generation-2 host aperture acknowledgement. */
+#define MNTZORRO_APERTURE_ACK_STATUS 0xa5020001UL
 
 #define MNTZORRO_STATUS_SDK_IRQ_ACK     (1UL << 18)
 #define MNTZORRO_STATUS_SDK_DOORBELL    (1UL << 19)

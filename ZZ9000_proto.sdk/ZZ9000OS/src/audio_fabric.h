@@ -17,14 +17,13 @@
  *
  * Producer #1 is the SDK pump slot (audio streams and media sessions,
  * routed implicitly from their first bind); slots 2 and 3 are the
- * lease plane (opcodes 0x050f+, implemented in U3: slot 1 leases
- * from the mailbox, slot 2 stays firmware-reserved). The
- * per-slot mix discipline is saturating int32 accumulate then one S16
- * clamp per frame (KTD4); a late or absent producer contributes
- * silence without stalling the others and only its own underrun
- * counter moves (R8).
- *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * direct-ring lease plane (opcodes 0x0512+: the SDK producer writes
+ * PCM and a seqlock control line straight into its board-visible
+ * grant; mailbox copy-submit is never on the data path). The per-slot
+ * mix discipline is saturating int32 accumulate then one S16 clamp
+ * per frame (KTD4); a late, absent, paused or malformed producer
+ * contributes silence without stalling the others and only its own
+ * underrun counter moves (R8).
  */
 
 #ifndef AUDIO_FABRIC_H
@@ -151,112 +150,104 @@ enum audio_fabric_ownership audio_fabric_ownership(void);
 uint32_t audio_fabric_slot_underruns(uint32_t slot);
 
 /*
- * Lease plane (plan U3): generation-tagged producer leases over the
- * reserved opcodes 0x050f..0x0512. The mailbox handlers are a thin
- * protocol bridge; everything below runs in main-loop context on
- * core 0 (SHORT dispatch).
+ * Lease plane (plan U3, direct rings): generation-tagged producer
+ * leases over the board-visible direct-ring grants of memorymap.h.
+ * The SDK producer writes PCM and a seqlock producer line directly
+ * into its granted ring; the firmware consumes complete periods and
+ * publishes credits on its own line.
  */
 
 /* Per-slot status (SDK_AUDIO_FABRIC_SLOT_* vocabulary). The pump slot
  * is FREE/LEASED/ACTIVE by playback bind state (never leased); a
- * lease is LEASED from BEGIN until its first accepted SUBMIT and
- * ACTIVE while the compositor consumes its ring. */
+ * lease is LEASED from acquire until its first valid line publication
+ * and ACTIVE while the compositor consumes its ring. REVOKED reports
+ * an invalidated generation (heartbeat expiry or cursor fault); the
+ * slot may be re-acquired without a card reset. */
 #define AUDIO_FABRIC_SLOT_STATE_FREE    0U
 #define AUDIO_FABRIC_SLOT_STATE_LEASED  1U
 #define AUDIO_FABRIC_SLOT_STATE_ACTIVE  2U
+#define AUDIO_FABRIC_SLOT_STATE_REVOKED 3U
 
 /* Lease admission results; the mailbox layer maps these onto the
  * SDK_STATUS_* vocabulary. */
 #define AUDIO_FABRIC_LEASE_OK        0
-#define AUDIO_FABRIC_LEASE_EBAD_SLOT (-1)  /* slot 0 / reserved 2 / range */
+#define AUDIO_FABRIC_LEASE_EBAD_SLOT (-1)  /* slot 0 / out of range */
 #define AUDIO_FABRIC_LEASE_EBUSY     (-2)  /* slot already leased */
 #define AUDIO_FABRIC_LEASE_ELEGACY   (-3)  /* legacy-exclusive output */
-#define AUDIO_FABRIC_LEASE_EHANDLE   (-4)  /* stale/unknown handle */
-
-/* Opaque generation-tagged lease handle: low 4 bits carry the slot,
- * the upper 28 bits the slot's lease epoch, so a handle is never 0
- * and never collides across lease generations of the same slot. */
-#define AUDIO_FABRIC_LEASE_HANDLE(slot, epoch) \
-	((((uint32_t)(epoch)) << 4) | ((uint32_t)(slot) & 0x0FU))
-#define AUDIO_FABRIC_LEASE_HANDLE_SLOT(handle) ((handle) & 0x0FU)
-#define AUDIO_FABRIC_LEASE_HANDLE_EPOCH(handle) ((handle) >> 4)
+#define AUDIO_FABRIC_LEASE_ENO_MAP   (-4)  /* no grant map on this bus
+                                            * configuration (legacy
+                                            * Zorro II) */
 
 /* One framed per-slot state snapshot (SDK_OP_AUDIO_FABRIC_STATE_GET).
  * Peak follows the scene-meter convention: unsigned 16.16 of the
  * loudest source sample read since the hold window opened, consumed
  * by a HOLD_RESET read; clips counts at-rail source regions and is
  * monotonic within a lease. written/consumed are the monotonic byte
- * cursors of the slot's source ring (truncated to 32 bits by the ABI
- * payload words). */
+ * cursors of the slot's ring: the lease's producer-line write cursor
+ * and its credited (played-out) cursor. heartbeat_ms is the
+ * ISR-measured age of the producer's liveness token
+ * (SDK_AUDIO_RING_HEARTBEAT_UNKNOWN while free or unmeasured). */
 struct audio_fabric_slot_state {
 	uint32_t state;            /* AUDIO_FABRIC_SLOT_STATE_* */
 	uint32_t identity;         /* SDK_AUDIO_METER_IDENTITY_* */
-	uint32_t lease;            /* handle, or 0xffffffffU while free */
 	uint32_t generation;       /* lease epoch of (the last) lease */
-	uint64_t written_bytes;    /* published by SUBMIT */
-	uint64_t consumed_bytes;   /* staged by the compositor */
+	uint64_t written_bytes;    /* producer-line write cursor */
+	uint64_t consumed_bytes;   /* credited (played) cursor */
+	uint32_t heartbeat_ms;     /* token age, or UNKNOWN */
 	uint32_t underruns;        /* saturating, this slot only */
 	uint32_t peak;             /* 16.16, hold-window semantics */
 	uint32_t clips;            /* at-rail regions, saturating */
 };
 
 /*
- * Applied-vs-requested gain report (R11): LEASE_BEGIN composes the
+ * Applied-vs-requested gain report (R11): acquire composes the
  * requested gain through the scene arbiter's ceiling-bounded
  * composition and reports what actually applied, so a bounded
  * request is never silently clamped (the I3 trim-bound pattern).
  */
-struct audio_fabric_lease_grant {
-	uint8_t bounded; /* nonzero when the requested gain was reduced */
-	uint8_t gain;    /* applied 0..255 mixer scale */
+struct audio_fabric_ring_grant {
+	uint32_t generation;     /* revocation token: release carries it */
+	uint32_t ring_offset;    /* board-visible PCM ring offset */
+	uint32_t ring_capacity;  /* whole periods of 3840 bytes */
+	uint32_t control_offset; /* board-visible control-block offset */
+	uint32_t gain_applied;   /* composed 0..255 mixer scale */
+	uint8_t bounded;         /* nonzero when the request was reduced */
+	uint8_t slot_count;      /* leaseable slots on this bus mode */
+	uint8_t bus_zorro2;      /* compact single-slot geometry */
 };
 
 /*
- * Grant a producer lease. slot 0 (the pump) is never leaseable and
- * slot 2 stays firmware-reserved for the AHI/synthesis follow-on;
- * both complete AUDIO_FABRIC_LEASE_EBAD_SLOT (the mailbox layer
- * answers SDK_STATUS_BAD_REQUEST -- an admission-policy rejection,
- * not exhaustion). A leased slot completes AUDIO_FABRIC_LEASE_EBUSY
- * (mailbox: SDK_STATUS_BUSY), as does a legacy-exclusive output.
- * gain is the single requested 0..255 mixer scale
+ * Acquire a direct-ring lease. slot 0 (the pump) is never leaseable;
+ * a slot beyond the active bus mode's grant map (two leaseable slots
+ * on Zorro III, one on Zorro II under an acknowledged generation-2
+ * aperture layout) completes AUDIO_FABRIC_LEASE_EBAD_SLOT, and a bus
+ * configuration with no grant map at all (legacy Zorro II) completes
+ * AUDIO_FABRIC_LEASE_ENO_MAP -- the mailbox layer answers BAD_REQUEST
+ * and UNSUPPORTED respectively. A leased slot completes EBUSY
+ * (mailbox: SDK_STATUS_BUSY), as does a legacy-exclusive output. gain
+ * is the single requested 0..255 mixer scale
  * (AUDIO_FABRIC_GAIN_UNITY is unity); the scene arbiter composes it
  * against the enforced ceiling under the active scene (R11) and the
  * applied value -- possibly bounded, never silently -- is reported
- * through *grant when non-NULL. On success the ring is zeroed (the
- * ghost-period bound of R5 depends on this) and *lease carries the
- * generation-tagged handle.
+ * through *grant. On success the PCM ring and both control lines are
+ * zeroed (the ghost-period bound of R5 depends on this), the firmware
+ * line publishes the generation with zero credits, and the lease runs
+ * LEASED until the producer's first valid line publication.
  */
-int audio_fabric_lease_begin(uint32_t slot, uint32_t identity,
-	uint32_t gain, uint32_t *lease,
-	struct audio_fabric_lease_grant *grant);
+int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
+	uint32_t gain, struct audio_fabric_ring_grant *grant);
 
 /*
- * Copy length bytes from the client's resolved staging address into
- * the slot's source ring at the write cursor (wrap-safe), flush, and
- * publish. Backpressure matches the lease result contract: a partial
- * accept returns the space actually taken in *bytes_consumed and the
- * producer resubmits the remainder; zero accepted space with a
- * nonzero request returns AUDIO_FABRIC_LEASE_OK with
- * *bytes_consumed == 0 (the mailbox layer answers SDK_STATUS_BUSY).
- * A stale handle (epoch mismatch, released or reset lease) returns
- * AUDIO_FABRIC_LEASE_EHANDLE and writes nothing. src must reference
- * S16LE stereo frames at 48 kHz (4-byte aligned lengths); the
- * byte-order/rate-intent lease flags are required zero and rejected
- * by the mailbox layer.
+ * Surrender a direct-ring lease, quiesce-then-rebuild (KTD3): the
+ * slot stops contributing after at most the current 20-ms period (the
+ * next compositor ISR rebuilds every queued future TX period from the
+ * remaining producers), the epoch bumps so the dying generation never
+ * validates again, and the final credits are published before the
+ * slot frees. Releasing a generation other than the live lease's is
+ * idempotent (the SDK contract makes release retry-safe); a free
+ * slot accepts any generation the same way.
  */
-int audio_fabric_lease_submit(uint32_t handle, const uint8_t *src,
-	uint32_t length, uint32_t *bytes_consumed);
-
-/*
- * Surrender a lease, quiesce-then-bump (KTD3): the slot is marked
- * tearing-down so the compositor zero-contributes after at most one
- * residual period (the ghost bound), the epoch bumps so stale
- * handles die immediately, the ring cursors zero and the slot frees.
- * Releasing the handle of the slot's immediately-previous lease is
- * idempotent (SDK contract) and returns AUDIO_FABRIC_LEASE_OK;
- * anything else stale returns AUDIO_FABRIC_LEASE_EHANDLE.
- */
-int audio_fabric_lease_release(uint32_t handle);
+int audio_fabric_ring_release(uint32_t slot, uint32_t generation);
 
 /*
  * One per-slot state snapshot. pump_identity names the pump slot's
@@ -264,10 +255,9 @@ int audio_fabric_lease_release(uint32_t handle);
  * vocabulary; other slots take the lease identity). hold_reset
  * consumes the lease peak-hold window on the next compositor read
  * (the scene-meter read-and-clear convention). Returns 0 for a bad
- * slot. The pump slot never holds a lease handle: it reports
- * lease == 0xffffffffU (the free sentinel) in every bind state, and
- * 0 peak/clip -- its telemetry lives with the scene meter, which
- * already scans the mixed output.
+ * slot. The pump slot is never leased: it reports 0 peak/clip and
+ * UNKNOWN heartbeat -- its telemetry lives with the scene meter,
+ * which already scans the mixed output.
  */
 int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
 	int hold_reset, struct audio_fabric_slot_state *out);
@@ -276,8 +266,12 @@ int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
  * the TX ring the compositor fills. Firmware builds keep the standard
  * AUDIO_TX_BUFFER_ADDRESS. */
 #ifdef AUDIO_FABRIC_HOST_TEST
-/* Lease-plane host-test seam: redirect the card-side slot rings. */
-void audio_fabric_host_set_lease_rings(uint8_t *slot1, uint8_t *slot2);
+/* Lease-plane host-test seam: redirect the card-side grants (PCM
+ * ring, 128-byte control block, capacity in bytes) and shorten the
+ * heartbeat timeout so revocation scenarios run in ISR ticks. */
+void audio_fabric_host_set_ring_grant(uint32_t slot, uint8_t *ring,
+	uint8_t *control, uint32_t capacity);
+void audio_fabric_host_set_heartbeat_timeout(uint32_t ms);
 void audio_fabric_host_set_tx_base(uint8_t *base);
 #endif
 

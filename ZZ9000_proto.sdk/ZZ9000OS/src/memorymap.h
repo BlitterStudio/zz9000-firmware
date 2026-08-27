@@ -77,13 +77,16 @@
 // keeps failing fast into its software fallback instead of squeezing
 // through this tiny region.
 // These constants are now the compatibility fallback for Z3 and bitstreams
-// without the generation-tagged aperture register. Generation-1 Z2
+// without the generation-tagged aperture register. Generation-2 Z2
 // bitstreams expose RAM_SIZE through AXI slot 7 and use the window-relative
 // regions computed in sdk_aperture_layout.c; firmware publishes that dynamic
 // heap only after the host acknowledges the matching contract. The existing
 // SDK guard still prevents a legacy 2 MB host from using this 4 MB address.
+// Generation 2 carves the top 48 KiB of the old 64 KiB heap away for the
+// direct-ring reservation (below), leaving this 16 KiB allocator at the
+// unchanged low end so legacy fallback addressing does not move.
 #define SDK_HOST_WINDOW_HEAP_ADDRESS 0x005D0000
-#define SDK_HOST_WINDOW_HEAP_SIZE    0x00010000
+#define SDK_HOST_WINDOW_HEAP_SIZE    0x00004000
 #define SDK_HOST_WINDOW_HEAP_END \
     (SDK_HOST_WINDOW_HEAP_ADDRESS + SDK_HOST_WINDOW_HEAP_SIZE)
 
@@ -152,6 +155,115 @@
 
 #if Z3_AUDIO_SCRATCH_END > FIRMWARE_HIGH_DDR_ADDRESS
 #error "Z3 audio scratch overlaps linker-managed firmware DDR"
+#endif
+
+// Audio fabric direct-ring plane (U2): host-visible PCM rings the Amiga
+// writes directly -- direct data never travels the sync copy-submit path.
+// One 128-byte seqlock control block (SDK_AUDIO_RING_CONTROL_SIZE, two
+// 64-byte lines at SDK_AUDIO_RING_CONTROL_ALIGN in sdk_mailbox.h) sits at
+// each slot block's base, the ring at +0x80. Slot 0 is the firmware pump
+// and keeps the card-side lease rings above; only slots 1..N are granted.
+//
+// Zorro III: a 128 KiB reservation butted against the legacy AHI/MHI
+// audio scratch, split into two 64 KiB slot blocks. The window's top belt
+// is the only Z3 range that is simultaneously host-visible and outside
+// every allocator: the driver's hand-out ceiling is LEGACY_SURFACE_HEAP_END
+// (also the Z3 framebuffer limit set in main.c), linker-managed low DDR
+// ends at SDK_LOW_DDR_RESERVED_END, and the legacy TX/RX rings start at
+// Z3_AUDIO_SCRATCH_ADDRESS. 16 periods matches the MHI pcm_ring geometry.
+#define SDK_AUDIO_DIRECT_RING_Z3_SLOTS              2U
+#define SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS    0x081C0000
+#define SDK_AUDIO_DIRECT_RING_Z3_RESERVE_SIZE       0x00020000
+#define SDK_AUDIO_DIRECT_RING_Z3_RESERVE_END \
+    (SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS + \
+     SDK_AUDIO_DIRECT_RING_Z3_RESERVE_SIZE)
+#define SDK_AUDIO_DIRECT_RING_Z3_SLOT_STRIDE        0x00010000
+#define SDK_AUDIO_DIRECT_RING_Z3_PERIODS            16U
+#define SDK_AUDIO_DIRECT_RING_Z3_CAPACITY_BYTES \
+    (SDK_AUDIO_DIRECT_RING_Z3_PERIODS * AUDIO_BYTES_PER_PERIOD)
+#define SDK_AUDIO_DIRECT_RING_Z3_CONTROL1_ADDRESS   0x081C0000
+#define SDK_AUDIO_DIRECT_RING_Z3_RING1_ADDRESS      0x081C0080
+#define SDK_AUDIO_DIRECT_RING_Z3_CONTROL2_ADDRESS   0x081D0000
+#define SDK_AUDIO_DIRECT_RING_Z3_RING2_ADDRESS      0x081D0080
+
+#if SDK_AUDIO_DIRECT_RING_Z3_RESERVE_END != Z3_AUDIO_SCRATCH_ADDRESS
+#error "Z3 direct-ring reservation must end at the audio scratch base"
+#endif
+#if SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS < SDK_LOCAL_SURFACE_HEAP_END
+#error "Z3 direct-ring reservation overlaps the SDK ARM-local surface heap"
+#endif
+#if SDK_AUDIO_DIRECT_RING_Z3_CONTROL2_ADDRESS != \
+    (SDK_AUDIO_DIRECT_RING_Z3_CONTROL1_ADDRESS + \
+     SDK_AUDIO_DIRECT_RING_Z3_SLOT_STRIDE)
+#error "Z3 direct-ring slot blocks must be one stride apart"
+#endif
+// Capacities are whole 3840-byte periods (firmware consumes complete
+// periods only).
+#if (SDK_AUDIO_DIRECT_RING_Z3_CAPACITY_BYTES % AUDIO_BYTES_PER_PERIOD) != 0
+#error "Z3 direct-ring capacity must be a whole number of periods"
+#endif
+// Each control line owns exactly one 64-byte cache line.
+#if (SDK_AUDIO_DIRECT_RING_Z3_CONTROL1_ADDRESS % 64) != 0 || \
+    (SDK_AUDIO_DIRECT_RING_Z3_CONTROL2_ADDRESS % 64) != 0 || \
+    (SDK_AUDIO_DIRECT_RING_Z3_RING1_ADDRESS % 64) != 0 || \
+    (SDK_AUDIO_DIRECT_RING_Z3_RING2_ADDRESS % 64) != 0
+#error "Z3 direct-ring control/ring bases must be 64-byte aligned"
+#endif
+#if (SDK_AUDIO_DIRECT_RING_Z3_RING1_ADDRESS + \
+     SDK_AUDIO_DIRECT_RING_Z3_CAPACITY_BYTES) > \
+    SDK_AUDIO_DIRECT_RING_Z3_CONTROL2_ADDRESS
+#error "Z3 direct-ring slot 1 overlaps slot 2"
+#endif
+#if (SDK_AUDIO_DIRECT_RING_Z3_RING2_ADDRESS + \
+     SDK_AUDIO_DIRECT_RING_Z3_CAPACITY_BYTES) > \
+    SDK_AUDIO_DIRECT_RING_Z3_RESERVE_END
+#error "Z3 direct-ring slot 2 exceeds the reservation"
+#endif
+
+// Zorro II: exactly one compact grant. The generation-2 aperture layout
+// (sdk_aperture_layout.c) carves this 48 KiB reservation from the top of
+// the old 64 KiB host-window heap, leaving 16 KiB of allocator below it.
+// Window-relative base for any Z2 aperture is layout->audio.base minus
+// this size (ARM = board + ADDR_ADJ); the constants below pin the 4 MB
+// legacy-fallback addresses firmware would use without a runtime layout.
+// Z2 grants exist only while the generation-2 contract is acknowledged.
+#define SDK_AUDIO_DIRECT_RING_Z2_SLOTS              1U
+#define SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE       0x0000C000
+#define SDK_AUDIO_DIRECT_RING_Z2_RESERVE_ADDRESS    SDK_HOST_WINDOW_HEAP_END
+#define SDK_AUDIO_DIRECT_RING_Z2_RESERVE_END \
+    (SDK_AUDIO_DIRECT_RING_Z2_RESERVE_ADDRESS + \
+     SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE)
+#define SDK_AUDIO_DIRECT_RING_Z2_PERIODS            12U
+#define SDK_AUDIO_DIRECT_RING_Z2_CAPACITY_BYTES \
+    (SDK_AUDIO_DIRECT_RING_Z2_PERIODS * AUDIO_BYTES_PER_PERIOD)
+#define SDK_AUDIO_DIRECT_RING_Z2_CONTROL_ADDRESS \
+    SDK_AUDIO_DIRECT_RING_Z2_RESERVE_ADDRESS
+#define SDK_AUDIO_DIRECT_RING_Z2_RING_ADDRESS \
+    (SDK_AUDIO_DIRECT_RING_Z2_CONTROL_ADDRESS + 0x80)
+
+#if SDK_AUDIO_DIRECT_RING_Z2_RESERVE_END != (0x003F0000 + ADDR_ADJ)
+#error "Z2 direct-ring reservation must end at the audio scratch base"
+#endif
+#if (SDK_AUDIO_DIRECT_RING_Z2_CAPACITY_BYTES % AUDIO_BYTES_PER_PERIOD) != 0
+#error "Z2 direct-ring capacity must be a whole number of periods"
+#endif
+#if (SDK_AUDIO_DIRECT_RING_Z2_CONTROL_ADDRESS % 64) != 0 || \
+    (SDK_AUDIO_DIRECT_RING_Z2_RING_ADDRESS % 64) != 0
+#error "Z2 direct-ring control/ring bases must be 64-byte aligned"
+#endif
+#if (SDK_AUDIO_DIRECT_RING_Z2_RING_ADDRESS + \
+     SDK_AUDIO_DIRECT_RING_Z2_CAPACITY_BYTES) > \
+    SDK_AUDIO_DIRECT_RING_Z2_RESERVE_END
+#error "Z2 direct-ring slot exceeds the reservation"
+#endif
+// Deterministic second-slot impossibility: after the single grant, the
+// leftover cannot hold even one more control block plus one period. If a
+// future layout change grows this reservation past that bound, the Z2
+// slot count must be revisited explicitly, never silently granted twice.
+#if (SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE - 0x80 - \
+     SDK_AUDIO_DIRECT_RING_Z2_CAPACITY_BYTES) >= \
+    (0x80 + AUDIO_BYTES_PER_PERIOD)
+#error "Z2 direct-ring reservation can admit a second slot; revisit the Z2 slot count"
 #endif
 
 // Z3 fast-RAM DDR window. VARIANT_Z3_FASTRAM bitstreams map the 256 MB

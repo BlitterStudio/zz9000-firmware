@@ -18,12 +18,12 @@ CONFIG_TARGET := $(BUILD_DIR)/audio_config_test
 MP3_PROBE_TARGET := $(BUILD_DIR)/mp3_frame_probe_test
 MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
 FABRIC_TARGET := $(BUILD_DIR)/audio_fabric_test
-LEASE_TARGET := $(BUILD_DIR)/audio_fabric_lease_test
+RING_TARGET := $(BUILD_DIR)/audio_fabric_ring_test
 TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) $(DRAIN_TARGET) \
 	$(SCENE_TARGET) $(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
 	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(FABRIC_TARGET) \
-	$(LEASE_TARGET)
+	$(RING_TARGET)
 
 # mock/ shadows ff.h and xil_cache.h for the TUs (zz_config.c) whose
 # real firmware dependencies are FatFs and the Zynq cache API. The
@@ -49,7 +49,7 @@ test: $(TARGETS)
 	$(CONTROL_TARGET)
 	$(MPEG_LAYER2_TARGET)
 	$(FABRIC_TARGET) --srcdir $(SRC_DIR)
-	$(LEASE_TARGET)
+	$(RING_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -71,10 +71,11 @@ $(FABRIC_TARGET): audio_fabric_test.c pump_golden.c pump_golden.h \
 		$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 
-# U3 mailbox lease plane: the SDK-facing lease API against the same two
-# firmware TUs, with xil_cache.h compiled in recording mode so the
-# cache-fidelity scenario asserts the exact invalidate/flush ranges.
-$(LEASE_TARGET): audio_fabric_lease_test.c \
+# U3 direct-ring lease plane: the SDK-facing acquire/release/state API
+# against the same two firmware TUs, with xil_cache.h compiled in
+# recording mode so the cache-fidelity scenario asserts the exact
+# invalidate/flush ranges.
+$(RING_TARGET): audio_fabric_ring_test.c \
 	fabric_test_common.c fabric_test_common.h \
 	$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
 	$(SRC_DIR)/audio_fabric.h $(SRC_DIR)/audio_fabric_internal.h \
@@ -82,11 +83,12 @@ $(LEASE_TARGET): audio_fabric_lease_test.c \
 	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h \
 	$(SRC_DIR)/audio_playback_frontier.h $(SRC_DIR)/ax.h \
 	$(SRC_DIR)/memorymap.h $(SRC_DIR)/sdk_mailbox.h \
+	$(SRC_DIR)/sdk_aperture_layout.h \
 	$(MOCK_DIR)/xil_cache.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DAUDIO_FABRIC_HOST_TEST \
 		-DXIL_CACHE_MOCK_RECORD \
-		-o $@ audio_fabric_lease_test.c fabric_test_common.c \
+		-o $@ audio_fabric_ring_test.c fabric_test_common.c \
 		$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 

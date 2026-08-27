@@ -252,8 +252,13 @@ int audio_scene_lease_gain_compose(uint32_t requested,
 
 uint8_t g_fabric_tx[AUDIO_TX_BUFFER_SIZE];
 uint8_t *g_fabric_ring = g_fabric_tx;
-uint8_t g_lease_ring_a[AUDIO_FABRIC_LEASE_RING_BYTES];
-uint8_t g_lease_ring_b[AUDIO_FABRIC_LEASE_RING_BYTES];
+
+/* ---- direct-ring grants (host seam) ---- */
+
+uint8_t g_ring_pcm_a[RING_TEST_CAPACITY];
+uint8_t g_ring_pcm_b[RING_TEST_CAPACITY];
+uint8_t g_ring_control_a[SDK_AUDIO_RING_CONTROL_SIZE];
+uint8_t g_ring_control_b[SDK_AUDIO_RING_CONTROL_SIZE];
 
 /* FNV-1a over the whole TX ring: the characterization fingerprint. */
 uint64_t ring_hash(const uint8_t *ring)
@@ -291,7 +296,16 @@ uint32_t count_nonzero_periods(const uint8_t *ring)
 
 void fabric_reset_state(void)
 {
-	audio_fabric_host_set_lease_rings(g_lease_ring_a, g_lease_ring_b);
+	memset(g_ring_pcm_a, 0, sizeof(g_ring_pcm_a));
+	memset(g_ring_pcm_b, 0, sizeof(g_ring_pcm_b));
+	memset(g_ring_control_a, 0, sizeof(g_ring_control_a));
+	memset(g_ring_control_b, 0, sizeof(g_ring_control_b));
+	audio_fabric_host_set_ring_grant(AUDIO_FABRIC_SLOT_MAILBOX,
+		g_ring_pcm_a, g_ring_control_a, RING_TEST_CAPACITY);
+	audio_fabric_host_set_ring_grant(AUDIO_FABRIC_SLOT_RESERVED,
+		g_ring_pcm_b, g_ring_control_b, RING_TEST_CAPACITY);
+	audio_fabric_host_set_heartbeat_timeout(
+		3U * (SDK_AUDIO_RING_PERIOD_US / 1000U));
 	audio_fabric_reset();
 	audio_fabric_host_set_tx_base(g_fabric_tx);
 	g_fabric_ring = g_fabric_tx;

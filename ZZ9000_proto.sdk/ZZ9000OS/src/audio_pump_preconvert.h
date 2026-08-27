@@ -6,6 +6,16 @@
 #include "audio_convert.h"
 
 #define AUDIO_PUMP_PRECONVERT_PERIOD_BYTES 3840U
+/* Rebuild reserve (plan U3): fill stops this many periods short of the
+ * staged cursor so the bytes a queued-period rebuild replays (a
+ * direct-ring lease detach rebuilds future TX periods from peers'
+ * staged-not-yet-credited windows, at most the TX fill target of six
+ * periods below staged) can never be overwritten by the decode side.
+ * Matches AUDIO_FABRIC_TARGET_AHEAD / AUDIO_FABRIC_PERIOD_BYTES. */
+#define AUDIO_PUMP_PRECONVERT_REPLAY_PERIODS 6U
+#define AUDIO_PUMP_PRECONVERT_REPLAY_KEEP \
+	(AUDIO_PUMP_PRECONVERT_REPLAY_PERIODS * \
+	 AUDIO_PUMP_PRECONVERT_PERIOD_BYTES)
 #define AUDIO_PUMP_PRECONVERT_MAX_SOURCE_FRAMES 960U
 
 struct audio_pump_preconvert_source {

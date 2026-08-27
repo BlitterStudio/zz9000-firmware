@@ -244,6 +244,30 @@ __z3_audio_scratch_end = 0x081F0000;
 ASSERT(ORIGIN(ps7_ddr_hi) >= __z3_audio_scratch_end,
        "firmware high DDR overlaps Z3 AHI/MHI audio scratch")
 
+/* Keep synchronized with SDK_AUDIO_DIRECT_RING_Z3_* in memorymap.h.
+ * The Z3 direct rings are host-written PCM living in the top belt of the
+ * Z3 board window: above every allocator the driver can hand out and
+ * below the legacy AHI/MHI audio scratch, so no linker-managed region
+ * may ever reach them. */
+__z3_direct_ring_start = 0x081C0000;
+__z3_direct_ring_end = 0x081E0000;
+ASSERT(__z3_direct_ring_start >= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
+       "firmware low DDR overlaps the Z3 direct-ring window")
+ASSERT(__z3_direct_ring_end <= __z3_audio_scratch_start,
+       "Z3 direct-ring window overlaps the AHI/MHI audio scratch")
+
+/* Keep synchronized with SDK_AUDIO_DIRECT_RING_Z2_* in memorymap.h.
+ * Static 4 MB fallback addresses; the acknowledged runtime layout
+ * derives the same 48 KiB window-relative. The Z2 belt rides inside
+ * ps7_ddr_0's span, well above the low sections and below the board
+ * window's DDR end. */
+__z2_direct_ring_start = 0x005D4000;
+__z2_direct_ring_end = 0x005E0000;
+ASSERT(__z2_direct_ring_start >= __framebuffer_start,
+       "Z2 direct-ring reservation must sit above the framebuffer")
+ASSERT(__z2_direct_ring_end <= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
+       "Z2 direct-ring reservation exceeds the board-window DDR")
+
 .sdk_codec_text : {
    . = ALIGN(16);
    __sdk_codec_text_start = .;
