@@ -924,6 +924,18 @@ static void scenario_source_contract(void)
 		check(count_occurrences(
 			      srcs[0], "Xil_DCacheFlushRange") >= 1,
 		      "contract: decode-side flushes remain", paths[0]);
+		check(count_occurrences(
+			      srcs[0], "audio_playback_preconvert(") >= 3,
+		      "contract: bound stream conversion runs in main loop",
+		      paths[0]);
+		check(count_occurrences(
+			      srcs[0], "source->sample_rate = 48000U;") == 1,
+		      "contract: stream ISR source is preconverted bypass",
+		      paths[0]);
+		check(count_occurrences(
+			      srcs[0], "audio_pump_preconvert_stage(") == 1,
+		      "contract: ISR stages converted ring, not native PCM",
+		      paths[0]);
 	}
 
 	check(srcs[1] != NULL, "contract: ax.c readable", paths[1]);

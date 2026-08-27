@@ -10,6 +10,7 @@ PROFILE_TARGET := $(BUILD_DIR)/audio_profile_test
 PLAYBACK_TARGET := $(BUILD_DIR)/audio_playback_frontier_test
 RATE_TARGET := $(BUILD_DIR)/audio_playback_rate_test
 DRAIN_TARGET := $(BUILD_DIR)/audio_stream_drain_test
+PRECONVERT_TARGET := $(BUILD_DIR)/audio_pump_preconvert_test
 SCENE_TARGET := $(BUILD_DIR)/audio_scene_test
 METER_TARGET := $(BUILD_DIR)/audio_meter_test
 CONTROL_TARGET := $(BUILD_DIR)/audio_control_test
@@ -19,8 +20,8 @@ MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
 FABRIC_TARGET := $(BUILD_DIR)/audio_fabric_test
 LEASE_TARGET := $(BUILD_DIR)/audio_fabric_lease_test
 TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
-	$(PLAYBACK_TARGET) $(RATE_TARGET) $(DRAIN_TARGET) $(SCENE_TARGET) \
-	$(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
+	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) $(DRAIN_TARGET) \
+	$(SCENE_TARGET) $(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
 	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(FABRIC_TARGET) \
 	$(LEASE_TARGET)
 
@@ -38,6 +39,7 @@ test: $(TARGETS)
 	$(CONVERT_TARGET)
 	$(CAPTURE_TARGET)
 	$(RATE_TARGET)
+	$(PRECONVERT_TARGET)
 	$(PROFILE_TARGET)
 	$(PLAYBACK_TARGET)
 	$(DRAIN_TARGET)
@@ -122,6 +124,16 @@ $(RATE_TARGET): audio_playback_rate_test.c $(SRC_DIR)/audio_playback_rate.h \
 	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_playback_rate_test.c \
+		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
+
+$(PRECONVERT_TARGET): audio_pump_preconvert_test.c \
+	$(SRC_DIR)/audio_pump_preconvert.c \
+	$(SRC_DIR)/audio_pump_preconvert.h \
+	$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert.h \
+	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_pump_preconvert_test.c \
+		$(SRC_DIR)/audio_pump_preconvert.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 
 $(DRAIN_TARGET): audio_stream_drain_test.c \

@@ -24,6 +24,7 @@
 #include "audio_fabric.h"
 #include "audio_stream_drain.h"
 #include "audio_convert.h"
+#include "audio_pump_preconvert.h"
 #include "sdk_jpeg.h"
 #include "sdk_surface.h"
 #include "sdk_aperture_layout.h"
@@ -3730,6 +3731,13 @@ static void audio_stream_read_compute(struct SDKAudioStream *stream,
 #define AUDIO_PUMP_SOURCE_NONE   0U
 #define AUDIO_PUMP_SOURCE_STREAM 1U
 #define AUDIO_PUMP_SOURCE_MEDIA  2U
+#define AUDIO_PUMP_PRECONVERT_PERIODS 32U
+#define AUDIO_PUMP_PRECONVERT_CAPACITY \
+	(AUDIO_PUMP_PRECONVERT_PERIOD_BYTES * AUDIO_PUMP_PRECONVERT_PERIODS)
+#define AUDIO_PUMP_PRECONVERT_FILL_BUDGET 8U
+
+static uint8_t g_audio_pump_preconvert_ring[
+	AUDIO_PUMP_PRECONVERT_CAPACITY] __attribute__((aligned(64)));
 
 static struct {
 	uint32_t session;         /* 0 = unbound */
@@ -3738,6 +3746,8 @@ static struct {
 	uint32_t refill_pending;  /* internal core-1 refill task in flight */
 	uint32_t refill_session;  /* session that refill targets (valid while
 	                             refill_pending; survives an unbind) */
+	uint32_t preconvert_session; /* retained across Pause/Play rebind */
+	struct audio_pump_preconvert preconvert;
 } g_audio_playback;
 
 
@@ -3755,18 +3765,18 @@ static int audio_pump_source_snapshot(struct audio_fabric_source *source)
 
 		if (!stream)
 			return 0;
-		source->ring =
-			(uint8_t *)(uintptr_t)stream->pcm_ring_addr;
-		source->capacity = stream->pcm_capacity;
-		source->produced_bytes = stream->pcm_ready_total;
-		source->staged_bytes = stream->pcm_consumed_total;
-		source->sample_rate = stream->sample_rate;
-		source->channels = stream->channels;
-		source->sample_format = stream->sample_format;
+		source->ring = g_audio_playback.preconvert.ring;
+		source->capacity = g_audio_playback.preconvert.capacity;
+		source->produced_bytes = g_audio_playback.preconvert.produced;
+		source->staged_bytes = g_audio_playback.preconvert.staged;
+		source->sample_rate = 48000U;
+		source->channels = 2U;
+		source->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
 		source->done = audio_stream_source_tail_ready(
 			stream->eof, stream->input_length,
 			stream->drain_requested,
-			stream->drain_input_complete);
+			stream->drain_input_complete) &&
+			audio_stream_pcm_used(stream) == 0U;
 		source->faulted = stream->faulted != 0U;
 		return 1;
 	}
@@ -3795,12 +3805,10 @@ static int audio_pump_source_stage(uint32_t bytes)
 		struct SDKAudioStream *stream =
 			find_audio_stream(g_audio_playback.session);
 
-		if (!stream ||
-		    bytes > stream->pcm_ready_total -
-		            stream->pcm_consumed_total)
+		if (!stream)
 			return 0;
-		stream->pcm_consumed_total += bytes;
-		return 1;
+		return audio_pump_preconvert_stage(
+			&g_audio_playback.preconvert, bytes);
 	}
 	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
 		return sdk_media_session_audio_stage(
@@ -3883,6 +3891,41 @@ static const struct audio_fabric_producer_ops audio_pump_producer_ops = {
 	.tail_drained = audio_pump_tail_drained,
 };
 
+/* Main-loop conversion reserve for bound streams. The decoder publishes
+ * native-rate PCM; this stage consumes exact 20-ms source periods and fills a
+ * 48-kHz stereo ring ahead of the audio IRQ. The ISR therefore performs only
+ * the proven bypass copy/mix path, never the 44.1-kHz FIR that delayed vblank. */
+static void audio_playback_preconvert(
+	struct SDKAudioStream *stream, uint32_t budget)
+{
+	uint32_t i;
+
+	for (i = 0U; stream && i < budget; i++) {
+		struct audio_pump_preconvert_source source;
+		uint32_t consumed = stream->pcm_consumed_total;
+		int result;
+
+		memset(&source, 0, sizeof(source));
+		source.ring = (uint8_t *)(uintptr_t)stream->pcm_ring_addr;
+		source.capacity = stream->pcm_capacity;
+		source.produced = stream->pcm_ready_total;
+		source.consumed = consumed;
+		source.sample_rate = stream->sample_rate;
+		source.channels = stream->channels;
+		source.sample_format = stream->sample_format;
+		source.done = audio_stream_source_tail_ready(
+			stream->eof, stream->input_length,
+			stream->drain_requested,
+			stream->drain_input_complete);
+		result = audio_pump_preconvert_fill(
+			&g_audio_playback.preconvert, &source, &consumed);
+		if (result <= 0)
+			break;
+		stream->pump_tail_pending = 1U;
+		stream->pcm_consumed_total = consumed;
+	}
+}
+
 
 void sdk_mailbox_audio_playback_pump(void)
 {
@@ -3899,6 +3942,8 @@ void sdk_mailbox_audio_playback_pump(void)
 			SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 		return;
 	}
+	audio_playback_preconvert(
+		stream, AUDIO_PUMP_PRECONVERT_FILL_BUDGET);
 
 	/* Keep the decoder ahead of the pump. Session FEEDs drive decode, but
 	 * once the client has fed everything it just waits -- so when the PCM
@@ -3961,6 +4006,19 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session)
 		    AUDIO_FABRIC_SLOT_PUMP, &audio_pump_producer_ops)) {
 		/* Unreachable: every caller gates on ownership first. */
 		return;
+	}
+	if (source_kind == AUDIO_PUMP_SOURCE_STREAM) {
+		struct SDKAudioStream *stream = find_audio_stream(session);
+
+		if (g_audio_playback.preconvert_session != session) {
+			audio_pump_preconvert_reset(
+				&g_audio_playback.preconvert,
+				g_audio_pump_preconvert_ring,
+				sizeof(g_audio_pump_preconvert_ring));
+			g_audio_playback.preconvert_session = session;
+		}
+		audio_playback_preconvert(
+			stream, AUDIO_PUMP_PRECONVERT_FILL_BUDGET);
 	}
 	/* Re-arm the shared fill frontier only when no other slot is
 	 * live: joining a live mix must never rewind it (the other
@@ -7745,6 +7803,11 @@ void sdk_mailbox_init(void)
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
+	g_audio_playback.preconvert_session = 0U;
+	audio_pump_preconvert_reset(
+		&g_audio_playback.preconvert,
+		g_audio_pump_preconvert_ring,
+		sizeof(g_audio_pump_preconvert_ring));
 	audio_scene_meter_output_identity(
 		SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 	g_audio_playback.refill_pending = 0U;
