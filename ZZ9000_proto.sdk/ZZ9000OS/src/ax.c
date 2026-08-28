@@ -10,6 +10,7 @@
 #include "xi2srx.h"
 #include "xaudioformatter.h"
 #include "xil_cache.h"
+#include "xil_mmu.h"
 #include "mntzorro.h"
 #include "interrupt.h"
 #include "sleep.h"
@@ -1139,6 +1140,30 @@ void reset_resampling() {
 void audio_set_tx_buffer(uint8_t* addr) {
 	printf("[audio] set tx buffer: %p\n", addr);
 	audio_tx_buffer = addr;
+	/*
+	 * Permanent coherency fix (two-client drop diagnosis, 2026-08): the
+	 * audio/fabric 1-MiB section at 0x3FC00000 holds the formatter TX
+	 * and RX rings, both direct-lease PCM rings, and their control
+	 * lines. Cached CPU access there is provably incoherent with the
+	 * Zorro producer writes: post-invalidate reads served stale L1/L2
+	 * lines (hex-dump proof: freshly invalidated reads returning
+	 * phase-shifted stale audio into the mix -- audible cancellation
+	 * dips with two identical tones. Mapping the section non-cacheable
+	 * removes the entire stale-line class; the flush/invalidate calls
+	 * on this section elsewhere become harmless no-ops on clean lines.
+	 */
+	{
+		static uint8_t audio_section_remapped;
+
+		if (!audio_section_remapped) {
+			audio_section_remapped = 1U;
+			Xil_DCacheFlushRange((INTPTR)addr,
+				AUDIO_TX_BUFFER_SIZE);
+			Xil_SetTlbAttributes((UINTPTR)addr, NORM_NONCACHE);
+			printf("[audio] audio section mapped "
+			       "non-cacheable\r\n");
+		}
+	}
 	reset_resampling();
 	/* U3 metering: a buffer reassignment breaks TX period
 	 * continuity; resume peak scanning at the next completed
