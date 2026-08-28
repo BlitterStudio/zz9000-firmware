@@ -33,6 +33,13 @@
 #define FABRIC_RING_HEARTBEAT_TIMEOUT_MS 2000U
 #define FABRIC_RING_TICK_MS \
 	(SDK_AUDIO_RING_PERIOD_US / 1000U)
+/* Do not expose a newly acquired lease to the compositor until it can fill
+ * the complete six-period TX target. session_begin publishes a valid zero
+ * cursor for heartbeat/lifecycle purposes; treating that as ACTIVE makes the
+ * formatter play several silence periods while the host primes its ring. */
+#define FABRIC_RING_PREROLL_BYTES \
+	(6U * SDK_AUDIO_RING_PERIOD_BYTES)
+
 
 /* Seqlock read attempts per tick. A producer mid-update (odd sequence)
  * or writing faster than firmware reads (torn twice in a row) simply
@@ -405,23 +412,40 @@ void fabric_lease_isr_tick(void)
 
 		if (l->ring == NULL || l->tearing)
 			continue;
-		l->line_valid = 0U;
-		if (!fabric_ring_read_producer(l, &view)) {
-			fabric_ring_heartbeat_age(l);
-			continue;
-		}
-		if (view.generation != l->generation) {
-			/* Not this lease's line (R4): a fresh lease before
-			 * the first publication, or a ghost line after a
-			 * revoke the producer has not observed yet. */
-			fabric_ring_heartbeat_age(l);
-			continue;
-		}
-		if ((view.flags &
-		     ~SDK_AUDIO_RING_PRODUCER_FLAG_KNOWN) != 0U) {
-			/* Rejected line: unknown flag bits. */
-			fabric_ring_heartbeat_age(l);
-			continue;
+		{
+			/* Transient seqlock miss grace (two-client drop fix,
+			 * 2026-08): a producer publishing its control line
+			 * over Zorro while this tick reads it fails the
+			 * seqlock check, and the old behavior silenced the
+			 * slot for a full 20-ms period -- the audible dip
+			 * with two direct-ring clients (LINEMISS telemetry:
+			 * ~0.45 seq-misses/s/slot matching the drop rate).
+			 * Hold the previous tick's valid view for one pass
+			 * instead: the stale write cursor only understates
+			 * availability (bytes below a previously published
+			 * cursor are certainly written), staging is bounded
+			 * by the firmware-side staged cursor, and heartbeat
+			 * aging still revokes a genuinely dead lease within
+			 * the two-second timeout. Generation/flag mismatches
+			 * are a different lease's line and stay silent. */
+			uint8_t prev_valid = l->line_valid;
+
+			l->line_valid = 0U;
+			if (!fabric_ring_read_producer(l, &view)) {
+				if (prev_valid)
+					l->line_valid = 1U;
+				fabric_ring_heartbeat_age(l);
+				continue;
+			}
+			if (view.generation != l->generation) {
+				fabric_ring_heartbeat_age(l);
+				continue;
+			}
+			if ((view.flags &
+			     ~SDK_AUDIO_RING_PRODUCER_FLAG_KNOWN) != 0U) {
+				fabric_ring_heartbeat_age(l);
+				continue;
+			}
 		}
 		/* Write-distance rule: write - credited within capacity,
 		 * backward is a fault. Staged-but-uncredited bytes stay
@@ -449,8 +473,10 @@ void fabric_lease_isr_tick(void)
 			     SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED) != 0U;
 		l->write_cursor = view.write;
 		l->line_valid = 1U;
-		if (l->state == (uint8_t)AUDIO_FABRIC_SLOT_STATE_LEASED) {
-			/* First valid publication: LEASED -> ACTIVE.
+		if (l->state == (uint8_t)AUDIO_FABRIC_SLOT_STATE_LEASED &&
+		    (l->paused ||
+		     view.write - l->credited >= FABRIC_RING_PREROLL_BYTES)) {
+			/* A primed first publication: LEASED -> ACTIVE.
 			 * Re-arm the fill frontier only when this slot
 			 * revives an otherwise idle fabric -- joining a
 			 * live mix must never rewind the shared frontier
