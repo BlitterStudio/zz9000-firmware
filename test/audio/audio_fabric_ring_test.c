@@ -19,8 +19,12 @@
  *      published on the firmware line (seqlock-stable read), state
  *      cursors (write from the producer line, read = credited);
  *   C. malformed-line isolation (R4/R8): stuck-odd seqlock, foreign
- *      generation, unknown flags -- each silences the slot for the
- *      pass without underruns and without touching a live peer;
+ *      generation, unknown flags -- each faults without underruns and
+ *      without touching a live peer;
+ *   C2. transient seqlock-miss grace (two-client drop fix): one tick
+ *      landing mid-publication holds the previous valid line view and
+ *      stages PCM instead of silencing; a fresh publication
+ *      revalidates;
  *   D. cursor fault (R13): backward write and over-capacity write
  *      revoke with FAULT_CURSOR, publish the reason under the dying
  *      generation, free the slot for re-acquire, leave the peer
@@ -365,9 +369,10 @@ static void scenario_malformed(void)
 	      "isolation: lease active in the mix",
 	      fmt("state=%u underruns=%u", st.state, st.underruns));
 
-	/* Stuck-odd seqlock: the slot silences for the pass (a fault,
-	 * not a starvation) and the lease survives; a subsequent valid
-	 * publication revalidates it. */
+	/* Stuck-odd seqlock: a transient publication miss. Since the
+	 * grace fix the tick holds the previous valid line view and the
+	 * slot keeps staging; only a persistently dead line ages out via
+	 * the heartbeat. Asserted precisely in scenario_grace. */
 	producer_publish_stuck_odd(AUDIO_FABRIC_SLOT_MAILBOX);
 	fabric_pass();
 	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
@@ -423,6 +428,60 @@ static void scenario_malformed(void)
 	          pump_baseline));
 	(void)audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
 		generation);
+}
+
+
+/* ---- C2. transient seqlock-miss grace (two-client drop fix) ---- */
+
+static void scenario_grace(void)
+{
+	struct audio_fabric_ring_grant grant;
+	struct audio_fabric_slot_state st;
+	uint32_t generation;
+
+	fabric_reset_state();
+	g_dma_count = 0;
+	check(acquire_lease(AUDIO_FABRIC_SLOT_MAILBOX, 128U, &grant) ==
+	      AUDIO_FABRIC_LEASE_OK, "grace: acquire", "");
+	generation = grant.generation;
+	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation = generation;
+	producer_fill(AUDIO_FABRIC_SLOT_MAILBOX, LEASE_PCM);
+	fabric_pass();
+	fabric_pass();
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
+	      st.underruns == 0U,
+	      "grace: lease active",
+	      fmt("state=%u underruns=%u", st.state, st.underruns));
+	/* One tick lands mid-publication (odd sequence): the grace path
+	 * must hold the previous valid line view and stage real PCM --
+	 * the exact condition behind the audible two-client dips. */
+	producer_publish_stuck_odd(AUDIO_FABRIC_SLOT_MAILBOX);
+	fabric_pass();
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
+	      st.underruns == 0U,
+	      "grace: transient miss keeps lease ACTIVE, no starvation",
+	      fmt("state=%u underruns=%u", st.state, st.underruns));
+	check(period_is_constant(0U, LEASE_PCM) ||
+	      period_is_constant(1U, LEASE_PCM),
+	      "grace: transient miss stages PCM, not silence", "");
+	/* A fresh valid publication revalidates the line and playback
+	 * continues uninterrupted. */
+	producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
+		RING_TEST_CAPACITY, 0U);
+	fabric_pass();
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
+	      st.underruns == 0U,
+	      "grace: valid publication revalidates",
+	      fmt("state=%u underruns=%u", st.state, st.underruns));
+	check(period_is_constant(0U, LEASE_PCM) ||
+	      period_is_constant(1U, LEASE_PCM),
+	      "grace: playback continues after recovery", "");
+	check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
+		generation) == AUDIO_FABRIC_LEASE_OK,
+	      "grace: release", "");
 }
 
 /* ---- D. cursor-fault revocation ---- */
@@ -768,6 +827,7 @@ int main(void)
 	scenario_admission();
 	scenario_lifecycle();
 	scenario_malformed();
+	scenario_grace();
 	scenario_cursor_fault();
 	scenario_heartbeat();
 	scenario_rebuild();
