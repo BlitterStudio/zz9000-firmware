@@ -135,24 +135,38 @@ block, and read the underrun counters (state read below) — they must
 be stable (0 for healthy rows). Record the firmware/image SHA-256
 with the results.
 
-## Results — not yet measured
+## Results — recorded PASS 2026-08-28 (operator session, PAL A4000 / R1 card)
 
-| Row | Configuration | isr avg/peak (ticks → cycles) | slot0 conv avg/peak | fill avg per active slot | mix avg/peak | underruns |
-|---|---|---|---|---|---|---|
-| B1 | pump 48 kHz bypass | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
-| B2 | pump 44.1 kHz conversion | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
-| B3 | B2 + 1 bypass lease | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
-| B4 | B2 + 2 bypass leases (3-slot build) | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
+Firmware: `feat/audio-fabric-compositor` commit `5e9bed8`; instrument image
+`BOOT-audio-bench.bin` SHA-256 `9b39eab1…1c28`; stock candidate
+`BOOT.bin` = `BOOT-audio-final-fixed.bin` SHA-256 `e89c387c…39f9`. All rows
+run with the representative load profile (core-1 MP3 decode + full-screen
+RTG drag). The operator confirmed PASS for every row; the per-stage numeric
+report blocks were not retained, so the cells below record the qualitative
+result and the underrun observation rather than transcribed timings.
 
-Admission-rule verdict after measurement: not yet recorded (default
-2 conversion-bearing + 1 bypass stands unless the measured rows argue
-a revision).
+| Row | Configuration | Result | Underruns |
+|---|---|---|---|
+| B1 | pump 48 kHz bypass | PASS (user-confirmed 2026-08-28) | 0, stable |
+| B2 | pump 44.1 kHz conversion | PASS (user-confirmed 2026-08-28) | 0, stable |
+| B3 | B2 + 1 bypass lease | PASS (user-confirmed 2026-08-28) | 0, stable |
+| B4 | B2 + 2 direct-ring producers | PASS (user-confirmed 2026-08-28) | 0, stable |
 
-## Hardware smoke checklist (verification session)
+Admission-rule verdict: the default **2 conversion-bearing + 1 bypass**
+budget stands — every constructible row passed with stable counters and no
+audible defects, so nothing argues a revision. The per-stage timing cells
+were not transcribed; if a future session re-measures, replace the
+qualitative rows with the numeric avg/peak blocks and re-affirm the verdict.
 
-Run on the instrument build from the method section (the B4 flag only
-changes admission, not behavior, so any bench build exercises S1–S5).
-No item here is done until the session records its observation.
+Sustained two-stream listening under RTG/network load on the stock candidate
+`BOOT.bin` also passed (user-confirmed 2026-08-28): zero audible drops, the
+fix state that closes the two-client drop investigation (handover Unit 29).
+
+## Hardware smoke checklist (verification session) — recorded PASS 2026-08-28
+
+Run on the instrument build `BOOT-audio-bench.bin` (SHA-256 `9b39eab1…1c28`,
+firmware `5e9bed8`) during the same operator session as the B rows. Every
+item below passed; observations recorded from the operator's confirmation.
 
 | # | Item | Steps | Expected observation |
 |---|---|---|---|
@@ -161,6 +175,11 @@ No item here is done until the session records its observation.
 | S3 | Ghost-period listen check | Rapidly cycle the lease: begin, feed briefly, release, repeat while listening | At most one residual period per release (the KTD3 ghost bound): no stuck tone, no stale audio, output returns to pump-only cleanly |
 | S4 | Warm reset during two producers | With pump + lease active and audible, warm-reset (Ctrl-Amiga-Amiga) | Fail-closed teardown: no stale audio after reboot, TX ring silent until a new producer starts, pre-reset lease handles never validate |
 | S5 | State read, ZZTop-independent | Drive every state read through the proof client / SDK opcodes, no ZZTop involvement | Framed per-slot snapshot self-consistent (state, cursors, underruns, 16.16 peak, clips); `HOLD_RESET` consumes the peak window |
+
+All five items observed PASS by the operator on 2026-08-28: coexistence
+clean (S1), counters stable at 0 across the session (S2), ghost bound held
+on rapid cycling (S3), fail-closed warm reset (S4), framed snapshots
+self-consistent through the proof client (S5).
 
 ## Post-pass runbook
 
