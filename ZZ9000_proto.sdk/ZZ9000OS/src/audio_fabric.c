@@ -56,6 +56,9 @@
 #define AUDIO_FABRIC_RING_PERIODS \
 	(AUDIO_FABRIC_RING_BYTES / AUDIO_FABRIC_PERIOD_BYTES)
 #define AUDIO_FABRIC_MULTISLOT_MAX_FILLS 2U
+#ifdef AUDIO_FABRIC_STATIC_TX_DIAG
+static uint8_t g_fabric_static_tx_armed;
+#endif
 
 static struct {
 	/* Stored ownership is IDLE or ACTIVE; LEGACY_EXCLUSIVE is
@@ -206,6 +209,10 @@ static struct {
 	uint32_t rebase_ahead_last;
 	uint32_t starve_count[AUDIO_FABRIC_SLOT_COUNT];
 	uint32_t starve_available_last[AUDIO_FABRIC_SLOT_COUNT];
+	uint32_t zero_periods[AUDIO_FABRIC_SLOT_COUNT];
+	uint32_t zero_samples[AUDIO_FABRIC_SLOT_COUNT];
+	uint32_t tx_zero_periods;
+	uint32_t tx_zero_samples;
 	uint8_t dma_armed;
 } g_fabric_bench;
 
@@ -274,6 +281,9 @@ void audio_fabric_bench_poll(void)
 		   (unsigned int)g_fabric_bench.dma_step_gt1,
 		   (unsigned int)g_fabric_bench.rebase_count,
 		   (unsigned int)g_fabric_bench.rebase_ahead_last);
+	xil_printf("FABRIC-BENCH txzero periods=%u samples=%u\r\n",
+		   (unsigned int)g_fabric_bench.tx_zero_periods,
+		   (unsigned int)g_fabric_bench.tx_zero_samples);
 	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
 		xil_printf("FABRIC-BENCH slot%u fill ", (unsigned int)i);
 		fabric_bench_numbers(&g_fabric_bench.fill[i]);
@@ -284,6 +294,10 @@ void audio_fabric_bench_poll(void)
 			   (unsigned int)g_fabric_bench.starve_count[i],
 			   (unsigned int)
 			   g_fabric_bench.starve_available_last[i]);
+		xil_printf("FABRIC-BENCH slot%u zero periods=%u samples=%u\r\n",
+			   (unsigned int)i,
+			   (unsigned int)g_fabric_bench.zero_periods[i],
+			   (unsigned int)g_fabric_bench.zero_samples[i]);
 		if (g_audio_fabric.slot[i].lease.ring != NULL) {
 			const struct audio_fabric_lease *l =
 				&g_audio_fabric.slot[i].lease;
@@ -371,6 +385,24 @@ static uint32_t fabric_slot_fill(struct audio_fabric_slot *s)
 	}
 	if (pull < src_bytes)
 		memset((uint8_t *)g_fabric_src + pull, 0, src_bytes - pull);
+#ifdef AUDIO_FABRIC_BENCH
+	if (s->lease.ring != NULL) {
+		uint32_t zeroes = 0U;
+		uint32_t sample;
+
+		for (sample = 0U; sample < pull / 2U; sample++) {
+			if (g_fabric_src[sample] == 0)
+				zeroes++;
+		}
+		if (zeroes != 0U) {
+			uint32_t bench_slot =
+				(uint32_t)(s - g_audio_fabric.slot);
+
+			g_fabric_bench.zero_periods[bench_slot]++;
+			g_fabric_bench.zero_samples[bench_slot] += zeroes;
+		}
+	}
+#endif
 	if (!s->ops->stage(pull))
 		goto silence;
 
@@ -740,6 +772,10 @@ void audio_fabric_isr(void)
 	fabric_lease_isr_tick();
 	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
 		return;
+#ifdef AUDIO_FABRIC_STATIC_TX_DIAG
+	if (g_fabric_static_tx_armed)
+		return;
+#endif
 
 	pos_period =
 		audio_get_dma_transfer_count() % AUDIO_FABRIC_RING_BYTES;
@@ -959,9 +995,9 @@ void audio_fabric_isr(void)
 		 * the audio formatter DMA does not snoop: push the period
 		 * to DRAM before the frontier advances over it. ~120
 		 * lines, microseconds, once per 20 ms. */
-	Xil_DCacheFlushRange(
-		(INTPTR)(tx + g_audio_fabric.fill_offset),
-		AUDIO_FABRIC_PERIOD_BYTES);
+		Xil_DCacheFlushRange(
+			(INTPTR)(tx + g_audio_fabric.fill_offset),
+			AUDIO_FABRIC_PERIOD_BYTES);
 #ifdef AUDIO_FABRIC_BENCH
 		fabric_bench_add(&g_fabric_bench.mix, bench_mix);
 #endif
@@ -986,6 +1022,33 @@ void audio_fabric_isr(void)
 				memset(&s->source, 0, sizeof(s->source));
 		}
 	}
+#ifdef AUDIO_FABRIC_STATIC_TX_DIAG
+	/*
+	 * Hardware-boundary diagnostic: the proof tone repeats exactly every
+	 * 20-ms period. After the compositor builds its initial reserve, clone
+	 * one valid mixed period across the complete formatter ring, flush it
+	 * once, then stop touching TX memory. Audible gaps after arming are
+	 * necessarily formatter/I2S/codec-side; clean playback isolates the
+	 * fault to concurrent TX-ring updates.
+	 */
+	{
+		uint32_t source =
+			(pos_period + AUDIO_FABRIC_PERIOD_BYTES) %
+			AUDIO_FABRIC_RING_BYTES;
+		uint32_t period;
+
+		for (period = 0U; period < AUDIO_FABRIC_RING_PERIODS; period++) {
+			uint32_t offset = period * AUDIO_FABRIC_PERIOD_BYTES;
+
+			if (offset != source)
+				memcpy(tx + offset, tx + source,
+				       AUDIO_FABRIC_PERIOD_BYTES);
+		}
+		Xil_DCacheFlushRange((INTPTR)tx, AUDIO_FABRIC_RING_BYTES);
+		g_fabric_static_tx_armed = 1U;
+		xil_printf("FABRIC-BENCH static TX ring armed\r\n");
+	}
+#endif
 
 	/* Play-out tail tracking per slot: this ISR fires once per
 	 * formatter period, so each call is one DMA period elapsed. While
@@ -1183,4 +1246,3 @@ uint32_t audio_fabric_slot_underruns(uint32_t slot)
 
 	return s != NULL ? s->underruns : 0U;
 }
-

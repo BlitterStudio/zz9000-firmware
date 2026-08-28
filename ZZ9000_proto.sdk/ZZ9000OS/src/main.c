@@ -379,6 +379,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
 }
 
+
 int main() {
 	init_platform();
 
