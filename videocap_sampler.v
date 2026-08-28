@@ -338,8 +338,14 @@ reg [31:0] buf_rdata_r;
 assign buf_rdata = buf_rdata_r;
 
 reg capture_bank = 0;
-wire capture_banking_cap = (FULLRATE != 0) ? ctl_full_width_cap : 1'b1;
-wire read_banking_axi = (FULLRATE != 0) ? ctl_read_full_width : 1'b1;
+/* Bank unconditionally (800x600 filtered fix, issue #76 family): the
+ * filtered Z3 path previously ran single-banked with live vcap_y
+ * sampling, so writeback raced the next line's capture and displaced
+ * rows - the whole-chunk vertical jitter.  Banking gives every path a
+ * full line of writeback slack, exactly as the Denise-adapter filtered
+ * and full-width paths already had. */
+wire capture_banking_cap = 1'b1;
+wire read_banking_axi = 1'b1;
 wire [11:0] capture_buf_addr = {
     capture_banking_cap ? capture_bank : 1'b0, cap_x
 };
@@ -573,10 +579,12 @@ always @(posedge cap_clk) begin
         cap_x_done <= 0;
         if (capture_banking_cap)
             capture_bank <= ~capture_bank;
-        if (capture_banking_cap && FULLRATE == 0) begin
-            /* Completed line: publish its number and bank as a token one
-             * capture clock later.  cap_y and capture_bank still hold the
-             * completed line's values at this edge. */
+        if (!ctl_full_width_cap) begin
+            /* Completed line (filtered, any FULLRATE): publish its number
+             * and bank as a token one capture clock later.  cap_y and
+             * capture_bank still hold the completed line's values at this
+             * edge.  This now also covers FULLRATE boards, whose filtered
+             * capture previously published no token at all. */
             cap_token_y <= cap_y[9:0];
             cap_token_bank <= capture_bank;
             cap_token_pending <= 1;
@@ -724,7 +732,7 @@ always @(posedge cap_clk) begin
 
         end
 
-        if (capture_banking_cap && FULLRATE != 0) begin
+        if (ctl_full_width_cap && FULLRATE != 0) begin
             /* Full-width completion token: the 1280-sample row is stored
              * and the writeback may start.  The filtered banked path
              * publishes its completed-line token at line_sync instead. */

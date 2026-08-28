@@ -419,6 +419,28 @@ integer full_width_completed_lines;
 reg last_completed_bank;
 reg [9:0] last_completed_y;
 wire [10:0] full_width_field_stride = cap_interlace ? 11'd2 : 11'd1;
+
+/* 800x600 filtered fix: every completed-line token must carry the bank
+ * opposite to the previous token's.  Filtered capture emits one token
+ * per line_sync with no validity gate, so strict alternation holds per
+ * toggle edge - even on vsync serration lines that emit two tokens.
+ * Armed at the first driven line to skip power-up initialization edges;
+ * full-width tokens are allowed to skip invalid lines and stay checked
+ * by the per-line full-width assertions instead. */
+reg monitor_prev_bank_valid = 0;
+reg monitor_prev_bank = 0;
+reg monitor_armed = 0;
+always @(cap_line_toggle) begin
+    if (monitor_armed && !FULLWIDTH &&
+            monitor_prev_bank_valid &&
+            cap_token_bank === monitor_prev_bank) begin
+        errors = errors + 1;
+        $display("MISMATCH filtered_token_bank did not alternate bank=%0d t=%0d",
+                 cap_token_bank, $time);
+    end
+    monitor_prev_bank = cap_token_bank;
+    monitor_prev_bank_valid = 1;
+end
 integer last_frame_sync_x;
 integer last_frame_phase_abs_delta;
 integer last_frame_phase_changed;
@@ -438,6 +460,7 @@ task drive_line;
     reg line_toggle_before;
     begin
         line_toggle_before = cap_line_toggle;
+        monitor_armed = 1;
         hsync = 0;
         for (i = 0; i < 67; i = i + 1)
             @(posedge cap_clk);
@@ -469,6 +492,10 @@ task drive_line;
             end
             full_width_ready_checked = 1;
         end
+
+        /* Filtered token correctness is asserted by the toggle-edge
+         * monitor below (a vsync serration line emits two tokens, so
+         * end-of-line sampling cannot check alternation). */
 
         if (FULLWIDTH && vsync) begin
             /* cap_y holds a field-parity sentinel until vertical crop has
@@ -746,8 +773,10 @@ initial begin
     end
     legacy_buf_rbank = 1'b0;
 
-    /* The final active raster line remains in its completed bank. */
-    buf_rbank = FULLWIDTH ? cap_write_bank : 1'b0;
+    /* The final active raster line remains in its completed bank.  Since
+     * the 800x600 filtered fix every capture path banks, so the filtered
+     * read also selects cap_write_bank. */
+    buf_rbank = cap_write_bank;
     for (k = (FULLWIDTH ? 0 : 4);
             k < (FULLWIDTH ? 1280 : 32); k = k + 1) begin
         buf_read(k[11:0], got);

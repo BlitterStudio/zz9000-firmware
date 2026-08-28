@@ -1653,13 +1653,9 @@ module MNTZorro_v0_1_S00_AXI
   wire [23:0] vc_burst_base = (videocap_save_x == 0) ?
       vc_saveaddr1 : vc_row_base;
 
-  /* Filtered (single-buffered) capture may only write a row while that
-   * row's line is still the one being captured: videocap_y_sync tracks
-   * the live line whenever vcap_x_done is high. The full-width path
-   * banks its line buffer and orders rows by completion token, so a
-   * one-line lag is legitimate there and must not trip this gate. */
-  wire vc_row_line_stale = !videocap_writeback_full_width &&
-      (vc_saving_line != videocap_y_sync);
+  /* Every capture path is banked with completed-line token handoff
+   * (800x600 filtered fix): a one-line writeback lag is legitimate in
+   * all modes, so the old filtered-only stale-skip gate is retired. */
 
   always @(posedge S_AXI_ACLK) begin
     // VIDEOCAP
@@ -1699,13 +1695,18 @@ module MNTZorro_v0_1_S00_AXI
     else
       videocap_ymax_sync <= vcap_ymax;
 
-    if (videocap_writeback_full_width &&
-        vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
+    if (vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
       vcap_line_toggle_seen <= vcap_line_payload_axi[11];
       videocap_bank_sync <= vcap_line_payload_axi[10];
-      videocap_y_sync <= vcap_line_payload_axi[9:0];
-    end else if (!videocap_writeback_full_width && vcap_x_done) begin
-      videocap_y_sync <= videocap_y_sync2;
+      /* Full-width tokens are pre-normalized; filtered tokens follow the
+       * Denise letterbox rule (rows past ymax consumed without a y
+       * update).  Token handoff for every mode (800x600 filtered fix,
+       * issue #76 family): the filtered path previously sampled live
+       * vcap_y on cap_x_done, racing the writeback against the next
+       * line's single-banked capture and displacing rows. */
+      if (videocap_writeback_full_width ||
+          vcap_line_payload_axi[9:0] < videocap_ymax_sync)
+        videocap_y_sync <= vcap_line_payload_axi[9:0];
     end
 `endif
 
@@ -1781,15 +1782,6 @@ module MNTZorro_v0_1_S00_AXI
             // vc_saving_line points at now.
             videocap_save_line_done <= vc_row_line;
             videocap_save_x <= 0;
-          end else if (videocap_save_x == 0 && vc_row_line_stale) begin
-            // The line this row would read has already scrolled out of
-            // the single (non-banked) line buffer: writing it would stamp
-            // the current line's content one or more rows off - the
-            // sustained whole-picture vertical jiggle from the issue #76
-            // follow-up video. Skip the row without issuing a burst: the
-            // DDR row keeps the previous frame's vertically-correct data
-            // and the writeback re-synchronizes to the live line at once.
-            videocap_save_line_done <= vc_saving_line;
           end else if (videocap_save_line_done != vc_saving_line &&
               vc_saveaddr_line == vc_saving_line) begin
             m01_axi_awvalid_out <= 1;
