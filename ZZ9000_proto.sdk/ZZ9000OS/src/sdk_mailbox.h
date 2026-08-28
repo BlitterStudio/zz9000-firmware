@@ -64,10 +64,10 @@
  * session qualifies them (R12). */
 #define SDK_CAP_AUDIO_CONTROL          (1U << 25)
 #define SDK_CAP_AUDIO_METERING         (1U << 26)
-/* Audio fabric direct-ring producer plane (opcodes 0x0512+).
- * Append-only but deliberately NOT advertised by any capability word
- * until the on-hardware verification session qualifies them, per the
- * SDK_CAP_AUDIO_CONTROL (R12) discipline. */
+/* Audio fabric direct-ring producer plane (opcodes 0x0512-0x0514). The
+ * on-hardware qualification gate passed 2026-08-28
+ * (docs/audio-fabric.md); now advertised in the audio service word and
+ * the global capability set. */
 #define SDK_CAP_AUDIO_FABRIC           (1U << 27)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
@@ -144,8 +144,8 @@
  * the audio service flags until qualified. */
 #define SDK_SERVICE_FLAG_AUDIO_CONTROL (1U << 21)
 /* Fabric lease opcodes (0x050f+) are dispatchable (firmware U3).
- * Follows the SDK_CAP_AUDIO_FABRIC gated-advertising discipline:
- * still not reported in the audio service flags until qualified. */
+ * The qualification gate passed 2026-08-28; now reported in the audio
+ * service flags. */
 #define SDK_SERVICE_FLAG_AUDIO_FABRIC (1U << 22)
 #define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
 #define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)
@@ -226,10 +226,10 @@
  * rings and publish cursors through shared control lines, so the
  * steady data path needs no synchronous mailbox work. Values
  * 0x050f..0x0511 belonged to the retired copy-submit lease
- * transport and are never reused. Dispatch is live but still
- * deliberately NOT advertised in any capability word or service
- * flag until it passes the on-hardware verification session (R12
- * discipline). */
+ * transport and are never reused. The on-hardware qualification gate
+ * passed 2026-08-28 (docs/audio-fabric.md): the plane is now
+ * advertised via SDK_CAP_AUDIO_FABRIC and
+ * SDK_SERVICE_FLAG_AUDIO_FABRIC. */
 #define SDK_OP_AUDIO_FABRIC_STATE_GET  0x0512U
 #define SDK_OP_AUDIO_RING_ACQUIRE      0x0513U
 #define SDK_OP_AUDIO_RING_RELEASE      0x0514U

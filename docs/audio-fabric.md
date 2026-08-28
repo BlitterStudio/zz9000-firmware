@@ -181,27 +181,30 @@ clean (S1), counters stable at 0 across the session (S2), ghost bound held
 on rapid cycling (S3), fail-closed warm reset (S4), framed snapshots
 self-consistent through the proof client (S5).
 
-## Post-pass runbook
+## Post-pass runbook — flip applied 2026-08-28 (local commits, unpushed)
 
-On a recorded pass — results transcribed into the table above, the
-S-list observations recorded, the admission-rule verdict written —
-the advertising flip lands as the matched-set sequence from the
-saturation-ceiling doc's coordination section:
+On a recorded pass — the 2026-08-28 session above — the advertising flip
+lands as the matched-set sequence from the saturation-ceiling doc's
+coordination section:
 
-1. **Firmware flip commit:** add `SDK_CAP_AUDIO_FABRIC` (bit 27) to
-   the audio service word and the global capability set in the
-   `sdk_mailbox.c` service table, set
-   `SDK_SERVICE_FLAG_AUDIO_FABRIC` (bit 22), and extend the audio
-   service's opcode count from 15 to 19 (`0x0500..0x0512`).
-2. **SDK flip:** register the fabric entries in the `zz9k-services`
-   release tables (`tools/zz9k-services.c`, the `--check-release`
-   expectations) and replace the gated-advertising wording in
-   `docs/zz9k-library.md`.
+1. **Firmware flip commit (applied):** `SDK_CAP_AUDIO_FABRIC` (bit 27)
+   added to the audio service word and the global capability set in the
+   `sdk_mailbox.c` service table, `SDK_SERVICE_FLAG_AUDIO_FABRIC` (bit 22)
+   reported, and the audio service's opcode count raised 15 -> **21**
+   (`0x0500..0x0514`: the fabric opcodes are `0x0512`-`0x0514`, with
+   `0x050f..0x0511` reserved gaps — this corrects the earlier draft's
+   "19" which stopped at `0x0512` and did not cover RING_ACQUIRE /
+   RING_RELEASE).
+2. **SDK flip (applied):** audio release requirement in
+   `tools/zz9k-services.c` bumped to caps/flags/opcode-count 21, and the
+   gated-advertising wording in `docs/zz9k-library.md` replaced.
 3. **Tag order** (drivers' `RELEASING.md` dependency order): SDK
    first (merge + tag + push), then the drivers' `SDK_REF` bump to
    that release commit, then firmware, then drivers; firmware and
-   drivers carry the same `vX.Y.Z`.
-4. Update this file's results table with the measured rows and the
-   firmware/image SHAs, and re-read the honesty section above: the
+   drivers carry the same `vX.Y.Z`. **Not started — requires explicit
+   user approval, and the variant-bitstream rebuild with the widened
+   FIFO should land in the firmware release first.**
+4. This file's results table carries the recorded session and the
+   firmware/image SHAs. Re-read the honesty section above: the
    advertised capability still waits on the AHI migration follow-on
    for its first shipping consumer.
