@@ -289,4 +289,13 @@ void audio_fabric_host_set_tx_base(uint8_t *base);
 void audio_fabric_bench_poll(void);
 #endif
 
+#ifndef AUDIO_FABRIC_HOST_TEST
+/*
+ * Lease open-loop diagnostics (silence-after-start session): call from
+ * the main loop every pass; one line per ~50 compositor ISRs while a
+ * lease is wired. Firmware-only.
+ */
+void audio_fabric_lease_diag_poll(void);
+#endif
+
 #endif /* AUDIO_FABRIC_H */

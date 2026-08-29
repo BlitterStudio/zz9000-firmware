@@ -48,6 +48,11 @@
 #include "xil_printf.h"
 #include "xtime_l.h"
 #endif
+/* The lease-lifecycle diagnostics poll (below) is firmware-only too;
+ * host builds compile it out with the same rule. */
+#ifndef AUDIO_FABRIC_HOST_TEST
+#include "xil_printf.h"
+#endif
 
 #define AUDIO_FABRIC_PERIOD_BYTES  AUDIO_BYTES_PER_PERIOD
 #define AUDIO_FABRIC_RING_BYTES    AUDIO_TX_BUFFER_SIZE
@@ -82,6 +87,15 @@ static int16_t g_fabric_stereo[AUDIO_FABRIC_PERIOD_BYTES / 2];
  * expanded mono frames need their own buffer. */
 static int16_t g_fabric_mono[AUDIO_FABRIC_PERIOD_BYTES / 2];
 static int32_t g_fabric_mix[AUDIO_FABRIC_PERIOD_BYTES / 2];
+
+/* Lease open-loop diagnostics (silence-after-start session): the ISR
+ * accumulates counts, the main-loop poll prints. Volatile: written in
+ * IRQ context, read from the main loop. */
+static volatile struct {
+	uint32_t isr_calls;
+	uint32_t last_pos;
+	uint32_t printed_isr_calls;
+} g_fabric_diag;
 
 #ifdef AUDIO_FABRIC_HOST_TEST
 static uint8_t *g_fabric_tx;
@@ -322,6 +336,40 @@ void audio_fabric_bench_poll(void)
 	}
 }
 #endif /* AUDIO_FABRIC_BENCH */
+
+/*
+ * Lease open-loop diagnostics (silence-after-start session): one line
+ * per ~50 compositor ISRs (nominally one per second) while any lease
+ * is wired -- the ISR call rate against the DMA position and each
+ * lease's consumed/credited cursors. Main-loop context only. Host
+ * builds compile it out (no console, same rule as FABRIC_LEASE_DIAG).
+ */
+#ifndef AUDIO_FABRIC_HOST_TEST
+void audio_fabric_lease_diag_poll(void)
+{
+	uint32_t calls = g_fabric_diag.isr_calls;
+	uint32_t i;
+
+	if (calls - g_fabric_diag.printed_isr_calls < 50U)
+		return;
+	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
+		if (g_audio_fabric.slot[i].lease.ring != NULL)
+			break;
+	}
+	if (i == AUDIO_FABRIC_SLOT_COUNT)
+		return;
+	g_fabric_diag.printed_isr_calls = calls;
+	xil_printf("FABRIC-DIAG isr=%u pos=%u fill=%u slot%u "
+		   "consumed=%u credited=%u staged=%u\r\n",
+		(unsigned int)calls,
+		(unsigned int)g_fabric_diag.last_pos,
+		(unsigned int)g_audio_fabric.fill_offset,
+		(unsigned int)i,
+		(unsigned int)g_audio_fabric.slot[i].lease.consumed,
+		(unsigned int)g_audio_fabric.slot[i].lease.credited,
+		(unsigned int)g_audio_fabric.slot[i].source.staged_bytes);
+}
+#endif /* !AUDIO_FABRIC_HOST_TEST */
 
 /*
  * Per-slot fill: the pre-fabric pump's audio_pump_fill_period, ported
@@ -788,6 +836,12 @@ void audio_fabric_isr(void)
 	pos_period =
 		audio_get_dma_transfer_count() % AUDIO_FABRIC_RING_BYTES;
 	pos_period -= pos_period % AUDIO_FABRIC_PERIOD_BYTES;
+
+	/* Lease open-loop diagnostics (silence-after-start session): the
+	 * ISR only accumulates; audio_fabric_lease_diag_poll() prints
+	 * from the main loop, never here. */
+	g_fabric_diag.isr_calls++;
+	g_fabric_diag.last_pos = pos_period;
 #ifdef AUDIO_FABRIC_BENCH
 	if (!g_fabric_bench.dma_armed) {
 		g_fabric_bench.dma_armed = 1U;
