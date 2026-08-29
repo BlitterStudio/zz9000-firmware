@@ -622,6 +622,43 @@ static void scenario_heartbeat(void)
 		grant.generation);
 }
 
+/* ---- E2. dead producer: unreadable line still revokes (PR #88) ---- */
+
+static void scenario_dead_line(void)
+{
+	struct audio_fabric_ring_grant grant;
+	struct audio_fabric_slot_state st;
+	struct SDKAudioRingFirmwareLine fw;
+	uint32_t generation;
+	uint32_t tick;
+
+	fabric_reset_state();
+	g_dma_count = 0;
+	check(acquire_lease(AUDIO_FABRIC_SLOT_MAILBOX, 128U, &grant) ==
+	      AUDIO_FABRIC_LEASE_OK, "dead: acquire", "");
+	generation = grant.generation;
+	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation = generation;
+	producer_fill(AUDIO_FABRIC_SLOT_MAILBOX, LEASE_PCM);
+	fabric_pass();
+	/* The producer dies mid-publication: the seqlock stays odd
+	 * forever. The grace path must still age the heartbeat and revoke
+	 * at the timeout -- a permanently unreadable line may not pin the
+	 * slot until reset. */
+	producer_publish_stuck_odd(AUDIO_FABRIC_SLOT_MAILBOX);
+	for (tick = 0U; tick < 4U; tick++)
+		fabric_pass();
+	firmware_snapshot(AUDIO_FABRIC_SLOT_MAILBOX, &fw);
+	check(be32(fw.status) ==
+		      SDK_AUDIO_RING_STATUS_REVOKED_HEARTBEAT,
+	      "dead: stuck-odd line still publishes REVOKED_HEARTBEAT", "");
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(st.state == AUDIO_FABRIC_SLOT_STATE_REVOKED,
+	      "dead: slot REVOKED on the unreadable line",
+	      fmt("state=%u", st.state));
+	(void)audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
+		generation);
+}
+
 /* ---- F. release and the queued-period rebuild ---- */
 
 static void run_rebuild_pass(uint8_t *pre_release, uint8_t *post_rebuild,
@@ -835,6 +872,7 @@ int main(void)
 	scenario_grace();
 	scenario_cursor_fault();
 	scenario_heartbeat();
+	scenario_dead_line();
 	scenario_rebuild();
 	scenario_warm_reset();
 	scenario_cache_fidelity();

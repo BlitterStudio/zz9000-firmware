@@ -592,11 +592,15 @@ static uint32_t fabric_rebuild_pull(struct audio_fabric_slot *s,
 
 	pcm = g_fabric_src;
 	if (channels == 1U) {
+		/* Expand into the dedicated mono scratch, not g_fabric_stereo:
+		 * slot IS g_fabric_stereo and the resampler cannot run in
+		 * place (PR #88 review -- same aliasing the fill path
+		 * fixed). */
 		for (i = 0U; i < src_frames; i++) {
-			g_fabric_stereo[2U * i] = g_fabric_src[i];
-			g_fabric_stereo[2U * i + 1U] = g_fabric_src[i];
+			g_fabric_mono[2U * i] = g_fabric_src[i];
+			g_fabric_mono[2U * i + 1U] = g_fabric_src[i];
 		}
-		pcm = g_fabric_stereo;
+		pcm = g_fabric_mono;
 	}
 	if (rate == 48000U) {
 		memcpy(slot, pcm, AUDIO_FABRIC_PERIOD_BYTES);

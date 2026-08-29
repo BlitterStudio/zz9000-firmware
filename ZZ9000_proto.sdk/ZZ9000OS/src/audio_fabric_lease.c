@@ -362,6 +362,7 @@ static void fabric_ring_heartbeat_age(struct audio_fabric_lease *l)
 		l->heartbeat_ms += FABRIC_RING_TICK_MS;
 }
 
+
 /*
  * Revocation (R13/KTD4): heartbeat expiry or a cursor fault
  * invalidates the generation. Consumption stops, the reason is
@@ -390,6 +391,20 @@ static void fabric_ring_revoke(uint32_t slot, uint32_t status)
 	fabric_ring_record(slot, s->epoch, identity, heartbeat_ms, 1U,
 		(uint8_t)status);
 	audio_fabric_producer_detach(slot);
+}
+
+/* Age and enforce the dead-client timeout on the malformed-line paths
+ * that `continue` past the normal expiry check: a producer that died
+ * mid-publication (seqlock stuck odd, or a ghost/foreign line after
+ * revoke) must still lose its lease after the two-second timeout, or
+ * the slot stays blocked until reset (PR #88 review). */
+static void fabric_ring_age_or_revoke(uint32_t slot,
+	struct audio_fabric_lease *l)
+{
+	fabric_ring_heartbeat_age(l);
+	if (l->heartbeat_ms >= FABRIC_RING_HEARTBEAT_TIMEOUT_NOW)
+		fabric_ring_revoke(slot,
+			SDK_AUDIO_RING_STATUS_REVOKED_HEARTBEAT);
 }
 
 /*
@@ -434,16 +449,16 @@ void fabric_lease_isr_tick(void)
 			if (!fabric_ring_read_producer(l, &view)) {
 				if (prev_valid)
 					l->line_valid = 1U;
-				fabric_ring_heartbeat_age(l);
+				fabric_ring_age_or_revoke(slot, l);
 				continue;
 			}
 			if (view.generation != l->generation) {
-				fabric_ring_heartbeat_age(l);
+				fabric_ring_age_or_revoke(slot, l);
 				continue;
 			}
 			if ((view.flags &
 			     ~SDK_AUDIO_RING_PRODUCER_FLAG_KNOWN) != 0U) {
-				fabric_ring_heartbeat_age(l);
+				fabric_ring_age_or_revoke(slot, l);
 				continue;
 			}
 		}
