@@ -341,13 +341,17 @@ void audio_fabric_bench_poll(void)
  * Lease open-loop diagnostics (silence-after-start session): one line
  * per ~50 compositor ISRs (nominally one per second) while any lease
  * is wired -- the ISR call rate against the DMA position and each
- * lease's consumed/credited cursors. Main-loop context only. Host
- * builds compile it out (no console, same rule as FABRIC_LEASE_DIAG).
+ * lease's consumed/credited cursors, plus the source and TX peaks.
+ * Main-loop context only. Host builds compile it out (same rule as
+ * FABRIC_LEASE_DIAG).
  */
 #ifndef AUDIO_FABRIC_HOST_TEST
 void audio_fabric_lease_diag_poll(void)
 {
 	uint32_t calls = g_fabric_diag.isr_calls;
+	uint32_t src_peak = 0U;
+	uint32_t tx_peak = 0U;
+	const volatile uint8_t *scan;
 	uint32_t i;
 
 	if (calls - g_fabric_diag.printed_isr_calls < 50U)
@@ -359,15 +363,50 @@ void audio_fabric_lease_diag_poll(void)
 	if (i == AUDIO_FABRIC_SLOT_COUNT)
 		return;
 	g_fabric_diag.printed_isr_calls = calls;
+
+	/* Source side: the most recently staged lease period -- the
+	 * 3840 bytes ending at the slot's staged cursor (the runway
+	 * bound keeps this region intact behind the producer's write
+	 * cursor). */
+	{
+		const struct audio_fabric_slot *s =
+			&g_audio_fabric.slot[i];
+		uint64_t staged = s->source.staged_bytes;
+
+		if (staged >= AUDIO_FABRIC_PERIOD_BYTES) {
+			uint32_t off = (uint32_t)(
+				(staged - AUDIO_FABRIC_PERIOD_BYTES) %
+				s->lease.capacity);
+
+			scan = s->lease.ring + off;
+			for (uint32_t b = 0U;
+			     b < AUDIO_FABRIC_PERIOD_BYTES; b += 2U) {
+				uint32_t v = scan[b] | scan[b + 1U];
+
+				if (v > src_peak)
+					src_peak = v;
+			}
+		}
+	}
+	/* Output side: the last TX period the DMA completed. */
+	scan = g_fabric_tx +
+	    ((g_fabric_diag.last_pos + AUDIO_FABRIC_RING_BYTES -
+	      AUDIO_FABRIC_PERIOD_BYTES) % AUDIO_FABRIC_RING_BYTES);
+	for (uint32_t b = 0U; b < AUDIO_FABRIC_PERIOD_BYTES; b += 2U) {
+		uint32_t v = scan[b] | scan[b + 1U];
+
+		if (v > tx_peak)
+			tx_peak = v;
+	}
 	xil_printf("FABRIC-DIAG isr=%u pos=%u fill=%u slot%u "
-		   "consumed=%u credited=%u staged=%u\r\n",
+		   "consumed=%u credited=%u srcpk=%04x txpk=%04x\r\n",
 		(unsigned int)calls,
 		(unsigned int)g_fabric_diag.last_pos,
 		(unsigned int)g_audio_fabric.fill_offset,
 		(unsigned int)i,
 		(unsigned int)g_audio_fabric.slot[i].lease.consumed,
 		(unsigned int)g_audio_fabric.slot[i].lease.credited,
-		(unsigned int)g_audio_fabric.slot[i].source.staged_bytes);
+		(unsigned int)src_peak, (unsigned int)tx_peak);
 }
 #endif /* !AUDIO_FABRIC_HOST_TEST */
 
