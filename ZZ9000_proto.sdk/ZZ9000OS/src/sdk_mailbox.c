@@ -3465,7 +3465,9 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 		uint32_t consumed;
 		uint32_t bytes;
 
-		if (!audio_stream_decode_quantum_available(frames_this_call))
+		if (!audio_stream_decode_quantum_available(
+			    frames_this_call, audio_stream_pcm_used(stream),
+			    stream->low_water_bytes))
 			break;
 		if (!audio_stream_decode_may_run(
 			    stream->input_length,

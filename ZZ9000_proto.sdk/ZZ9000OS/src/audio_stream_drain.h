@@ -3,14 +3,17 @@
 
 #include <stdint.h>
 
-/* Core 1 also decodes video. Bound each non-preemptive audio task so a
- * sustained MP3 stream cannot hold the worker across an entire PCM refill. */
+/* Core 1 also decodes video. Yield after two MP3 frames once playback has
+ * crossed its configured low-water reserve. Below that reserve, completing
+ * the refill is more urgent than sharing the worker. */
 #define AUDIO_STREAM_DECODE_FRAMES_PER_TASK 2U
 
 static inline int audio_stream_decode_quantum_available(
-		uint32_t attempted_frames)
+		uint32_t attempted_frames, uint32_t pcm_used,
+		uint32_t low_water_bytes)
 {
-	return attempted_frames < AUDIO_STREAM_DECODE_FRAMES_PER_TASK;
+	return attempted_frames < AUDIO_STREAM_DECODE_FRAMES_PER_TASK ||
+		pcm_used <= low_water_bytes;
 }
 
 /* A zero-byte refill only reads the compressed ring and must not issue cache

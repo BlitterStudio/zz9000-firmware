@@ -24,11 +24,15 @@ static int check_decode_gate(void)
 
 static int check_decode_quantum(void)
 {
-	if (!audio_stream_decode_quantum_available(0U))
+	if (!audio_stream_decode_quantum_available(0U, 8192U, 4096U))
 		return 0;
-	if (!audio_stream_decode_quantum_available(1U))
+	if (!audio_stream_decode_quantum_available(1U, 8192U, 4096U))
 		return 0;
-	return !audio_stream_decode_quantum_available(2U);
+	if (audio_stream_decode_quantum_available(2U, 8192U, 4096U))
+		return 0;
+	if (!audio_stream_decode_quantum_available(2U, 4096U, 4096U))
+		return 0;
+	return audio_stream_decode_quantum_available(3U, 2048U, 4096U);
 }
 
 static int check_feed_dirty_span(void)
