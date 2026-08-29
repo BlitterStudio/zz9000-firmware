@@ -617,6 +617,90 @@ static void test_baseline_trim_composition(void)
 }
 
 /*
+ * Fabric lease-gain composition (U4, R11): the requested 0..255
+ * producer gain composes against the enforced ceiling under the
+ * active scene, bounded and REPORTED -- never silently clamped.
+ */
+static void test_lease_gain_composition(void)
+{
+	struct audio_scene_def def;
+	struct audio_scene_trim_result trim;
+	struct audio_scene_lease_gain_result result;
+
+	/* Default scene: the mixer composition sits exactly at the
+	 * enforced boundary, so unity rides exactly at it and every
+	 * boost is bounded back to unity. Attenuation is always the
+	 * producer's own choice. */
+	audio_scene_init();
+	memset(&result, 0xFF, sizeof(result));
+	check(audio_scene_lease_gain_compose(128U, &result) == 0 &&
+		result.applied == 128U && result.bounded == 0U &&
+		near(result.gain_bound, 128.0),
+		"lease gain: unity rides exactly at the boundary",
+		fmt("applied=%u bounded=%u bound=%.3f", result.applied,
+			result.bounded, result.gain_bound));
+	check(audio_scene_lease_gain_compose(255U, &result) == 0 &&
+		result.applied == 128U && result.bounded == 1U,
+		"lease gain: boost bounded to unity at default scene",
+		fmt("applied=%u bounded=%u", result.applied,
+			result.bounded));
+	check(audio_scene_lease_gain_compose(0U, &result) == 0 &&
+		result.applied == 0U && result.bounded == 0U,
+		"lease gain: attenuation never bounded", NULL);
+	check(audio_scene_lease_gain_compose(256U, &result) == -1,
+		"lease gain: out-of-range request rejected", NULL);
+	check(audio_scene_lease_gain_compose(128U, NULL) == 0,
+		"lease gain: NULL result tolerated", NULL);
+
+	/* A quieter scene leaves digital boost headroom: volume 75 is
+	 * 0.75 linear (exact in binary), the boundary budget doubles
+	 * and the full 0..255 range fits below the composition. */
+	unity_scene(&def);
+	def.volume = 75;
+	audio_scene_init();
+	audio_scene_write(5, &def);
+	audio_scene_select(5);
+	pump_scene();
+	check(audio_scene_lease_gain_compose(255U, &result) == 0 &&
+		result.applied == 255U && result.bounded == 0U &&
+		near(result.gain_bound, 256.0),
+		"lease gain: quiet scene grants full boost headroom",
+		fmt("applied=%u bounded=%u bound=%.3f", result.applied,
+			result.bounded, result.gain_bound));
+
+	/* A trim loading the mixer consumes the headroom: the bounded
+	 * pair sits at the boundary again, the AX remainder (55 of the
+	 * 96-unit leg after the 137 Paula units) allows exactly
+	 * floor(128*55/54) = 130. */
+	audio_scene_init();
+	memset(&trim, 0, sizeof(trim));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 32, 0,
+			&trim) == 0 && trim.bounded == 1,
+		"lease gain: loading trim bounded at the boundary",
+		fmt("bounded=%u p=%u a=%u", trim.bounded, trim.mixer_paula,
+			trim.mixer_ax));
+	check(audio_scene_lease_gain_compose(128U, &result) == 0 &&
+		result.applied == 128U && result.bounded == 0U,
+		"lease gain: unity still never bounded on loaded mixer",
+		fmt("applied=%u bounded=%u", result.applied,
+			result.bounded));
+	check(near(result.gain_bound, 128.0 * 55.0 / 54.0),
+		"lease gain: loaded-mixer bound is the AX remainder",
+		fmt("bound=%.3f", result.gain_bound));
+	check(audio_scene_lease_gain_compose(255U, &result) == 0 &&
+		result.applied == 130U && result.bounded == 1U,
+		"lease gain: boost bounded to the loaded-mixer remainder",
+		fmt("applied=%u bounded=%u", result.applied,
+			result.bounded));
+	audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI);
+	check(audio_scene_lease_gain_compose(255U, &result) == 0 &&
+		result.applied == 128U,
+		"lease gain: trim release restores the unity bound",
+		fmt("applied=%u bounded=%u", result.applied,
+			result.bounded));
+}
+
+/*
  * Boot and warm-reset apply: scene writes follow the ADAU init
  * defaults and land before the request loop could service an owner
  * (the gate stays closed throughout), and the order repeats after a
@@ -1543,6 +1627,7 @@ int main(void)
 	test_scene_alone_clamps();
 	test_eq_boost_clamps();
 	test_baseline_trim_composition();
+	test_lease_gain_composition();
 	test_boot_apply_order();
 	test_trim_lifecycle();
 	test_trim_write_failure_is_transactional();

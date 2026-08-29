@@ -21,9 +21,10 @@
 #include "sdk_media_session.h"
 #include "audio_scene.h"
 #include "sdk_audio_control.h"
-#include "audio_playback_frontier.h"
+#include "audio_fabric.h"
 #include "audio_stream_drain.h"
 #include "audio_convert.h"
+#include "audio_pump_preconvert.h"
 #include "sdk_jpeg.h"
 #include "sdk_surface.h"
 #include "sdk_aperture_layout.h"
@@ -57,7 +58,8 @@
 	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION | \
 	 SDK_CAP_VIDEO_DECODE | \
 	 SDK_CAP_MEDIA_SESSION | SDK_CAP_AUDIO_STREAM_DRAIN | \
-	 SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING)
+	 SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING | \
+	 SDK_CAP_AUDIO_FABRIC)
 /* Decode proceeds only with at least this much undecoded input (unless
  * EOF): enough for the largest legal MP3 frame (~1.4K, 2.3K free-format)
  * plus sync lookahead. It must stay WELL below any client's input-ring
@@ -886,12 +888,13 @@ struct SDKAudioStream {
 	/* Set when a core-1 fault may have left the embedded decoder state
 	 * mid-frame; feeds/reads answer IO_ERROR, close still works. */
 	uint32_t faulted;
-	/* Bound-playback tail guard: the AX pump advances pcm_consumed_total
-	 * when it STAGES PCM into the TX ring, which runs up to
-	 * AUDIO_PUMP_TARGET_AHEAD ahead of the DMA. Set while staged audio is
-	 * still queued for the DMA so end-of-stream (DONE / PCM_READY-clear)
-	 * waits for it to actually play out. Managed by the pump; always 0 for
-	 * unbound streams (the READ consumer hears bytes immediately). */
+	/* Bound-playback tail guard: the fabric compositor advances
+	 * pcm_consumed_total when it STAGES PCM into the TX ring, which
+	 * runs up to the fill target ahead of the DMA. Set while staged
+	 * audio is still queued for the DMA so end-of-stream (DONE /
+	 * PCM_READY-clear) waits for it to actually play out. Managed by
+	 * the pump slot; always 0 for unbound streams (the READ consumer
+	 * hears bytes immediately). */
 	uint8_t pump_tail_pending;
 	mp3dec_t decoder;
 	mp3d_sample_t scratch[MINIMP3_MAX_SAMPLES_PER_FRAME];
@@ -1282,13 +1285,18 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		SDK_SERVICE_AUDIO,
 		0x00020001U,
 		SDK_CAP_AUDIO_DECODE | SDK_CAP_AUDIO_PLAYBACK |
-			SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING,
+			SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING |
+			SDK_CAP_AUDIO_FABRIC,
 		SDK_SERVICE_FLAG_FIRMWARE |
 			SDK_SERVICE_FLAG_AUDIO_MP3_DECODE |
 			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM |
-			SDK_SERVICE_FLAG_AUDIO_CONTROL,
-		SDK_SERVICE_AUDIO,
-		15,	/* 0x0500..0x050e incl. audio control plane */
+			SDK_SERVICE_FLAG_AUDIO_CONTROL |
+			SDK_SERVICE_FLAG_AUDIO_FABRIC,
+		21,	/* 0x0500..0x0514 incl. audio control plane and the
+			 * fabric lease plane (0x0512-0x0514; 0x050f..0x0511
+			 * reserved gaps); the on-hardware qualification gate
+			 * passed 2026-08-28 (docs/audio-fabric.md), so the
+			 * lease opcodes are counted and advertised */
 		"audio"
 	},
 	{
@@ -3416,6 +3424,7 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 	const uint32_t frame_pcm_bytes =
 		MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t);
 	uint32_t produced_this_call = 0U;
+	uint32_t frames_this_call = 0U;
 	uint32_t max_pcm_this_call;
 	uint32_t pcm_flush_start;
 	uint32_t progress = 0U;
@@ -3455,6 +3464,8 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 		uint32_t consumed;
 		uint32_t bytes;
 
+		if (!audio_stream_decode_quantum_available(frames_this_call))
+			break;
 		if (!audio_stream_decode_may_run(
 			    stream->input_length,
 			    SDK_AUDIO_STREAM_MIN_INPUT_BYTES,
@@ -3478,6 +3489,7 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 			input + stream->input_offset,
 			decode_input_size,
 			stream->scratch, &info);
+		frames_this_call++;
 		consumed = (uint32_t)info.frame_bytes;
 		if (consumed == 0U) {
 			drain_blocked_on_input = 1;
@@ -3698,97 +3710,56 @@ static void audio_stream_read_compute(struct SDKAudioStream *stream,
 /*
  * ---- AX playback pump (MHI modernization) ----
  * One audio-stream session at a time may be bound to the AX output
- * (SDK_OP_AUDIO_STREAM_PLAY). The TX-fill half runs from the audio
- * formatter's period INTERRUPT (sdk_mailbox_audio_playback_pump_isr,
- * called by isr_audio every 20 ms) so heavy main-loop passes -- RTG
- * blits, image-decode dispatch, network bursts -- can no longer let
- * the DMA overrun the ~120 ms TX frontier and glitch the audio. Only
- * the core-1 refill kick stays in the main loop (it enqueues scheduler
- * tasks, which the ISR must not). The ISR path is integer-only: the
+ * (SDK_OP_AUDIO_STREAM_PLAY), or a media session's audio track may be
+ * bound (SDK_OP_MEDIA_SESSION_AUDIO_BIND). Since U2 the pump is
+ * PRODUCER #1 of the audio fabric: every SDK playback path routes
+ * through the compositor implicitly from its first bind, and the TX
+ * fill loop (frontier scheduling, retirement, cache discipline,
+ * silence policy) lives in audio_fabric.c, driven from the audio
+ * formatter's period INTERRUPT (audio_fabric_isr, called by isr_audio
+ * every 20 ms) so heavy main-loop passes -- RTG blits, image-decode
+ * dispatch, network bursts -- cannot let the DMA overrun the ~120 ms
+ * TX frontier and glitch the audio. The ISR path is integer-only: the
  * standalone BSP does not save VFP state across interrupts, so non-48k
  * sources go through the shared qualified converter kernel
- * (audio_convert.c) with exact-rational, drift-free phase; mono sources
- * are duplicated to stereo. Underrun, a faulted session or an unusable
- * stream geometry produce silence. The ISR pump is the CONSUMER of a
+ * (audio_convert.c) with exact-rational, drift-free phase inside the
+ * compositor; mono sources are duplicated to stereo there. What stays
+ * here is the decode side: the core-1 refill kick (main loop, since it
+ * enqueues scheduler tasks), source snapshots, staging/retirement
+ * accounting and the drain bookkeeping the compositor consumes through
+ * audio_fabric_producer_ops. The compositor is the CONSUMER of a
  * bound session -- the single writer of pcm_consumed_total -- so
  * AUDIO_STREAM_READ is rejected while bound.
  */
-#define AUDIO_PUMP_PERIOD_BYTES  AUDIO_BYTES_PER_PERIOD
-#define AUDIO_PUMP_RING_BYTES    AUDIO_TX_BUFFER_SIZE
-#define AUDIO_PUMP_TARGET_AHEAD \
-	(AUDIO_PUMP_RING_BYTES - 2U * AUDIO_PUMP_PERIOD_BYTES)
 #define AUDIO_PUMP_SOURCE_NONE   0U
 #define AUDIO_PUMP_SOURCE_STREAM 1U
 #define AUDIO_PUMP_SOURCE_MEDIA  2U
+#define AUDIO_PUMP_PRECONVERT_PERIODS 32U
+#define AUDIO_PUMP_PRECONVERT_CAPACITY \
+	(AUDIO_PUMP_PRECONVERT_PERIOD_BYTES * AUDIO_PUMP_PRECONVERT_PERIODS)
+#define AUDIO_PUMP_PRECONVERT_FILL_BUDGET 8U
 
-struct SDKAudioPumpSource {
-	uint8_t *ring;
-	uint32_t capacity;
-	uint64_t produced_bytes;
-	uint64_t staged_bytes;
-	uint32_t sample_rate;
-	uint32_t channels;
-	uint32_t sample_format;
-	uint8_t done;
-	uint8_t faulted;
-};
+static uint8_t g_audio_pump_preconvert_ring[
+	AUDIO_PUMP_PRECONVERT_CAPACITY] __attribute__((aligned(64)));
 
 static struct {
 	uint32_t session;         /* 0 = unbound */
 	uint32_t source_kind;
 	uint32_t paused;
-	uint32_t fill_offset;     /* next TX-ring byte to fill, period-aligned */
-	uint32_t last_dma_offset; /* active DMA period at the last ISR */
-	uint32_t period_source_bytes[AUDIO_NUM_PERIODS];
 	uint32_t refill_pending;  /* internal core-1 refill task in flight */
 	uint32_t refill_session;  /* session that refill targets (valid while
 	                             refill_pending; survives an unbind) */
-	uint32_t silence_run;     /* consecutive pump ISR periods (one DMA
-	                             period each) that staged only silence;
-	                             a full ring means the DMA played the tail */
+	uint32_t preconvert_session; /* retained across Pause/Play rebind */
+	struct audio_pump_preconvert preconvert;
 } g_audio_playback;
 
-static int16_t g_pump_src[AUDIO_PUMP_PERIOD_BYTES / 2];
-static int16_t g_pump_stereo[AUDIO_PUMP_PERIOD_BYTES / 2];
 
 /*
- * Private converter instance for the pump (stream and media bindings).
- * The qualified kernel is integer-only and ISR-safe, so the pump runs
- * the same code the host suite gates; binding start resets it, and
- * silence periods skip the kernel entirely so the rational phase
- * freezes during underrun and recovery continues phase-continuously.
+ * Producer #1 source snapshot for the fabric compositor: one coherent
+ * view of the bound session's published PCM ring cursors. Runs in ISR
+ * context (audio_fabric_isr); plain loads only.
  */
-static struct zz_audio_convert g_pump_convert;
-static uint32_t g_pump_convert_rate;
-
-static void pump_convert_reset(void)
-{
-	g_pump_convert_rate = 0U;
-	zz_audio_convert_reset(&g_pump_convert);
-}
-
-static void pump_convert(const int16_t *pcm, int16_t *slot,
-                         uint32_t rate, uint32_t src_frames)
-{
-	if (rate != g_pump_convert_rate) {
-		g_pump_convert_rate = rate;
-		zz_audio_convert_init(&g_pump_convert, rate, 48000U);
-	}
-	if (g_pump_convert.ratio == NULL) {
-		/* Off-table decode rate (11.025/16/22.05 kHz and anything
-		 * else outside the six advertised): no honest conversion
-		 * exists, so this is an unusable geometry -- emit a
-		 * silent period rather than wrong-speed audio with a
-		 * stale tail. The stream still advances. */
-		memset(slot, 0, AUDIO_PUMP_PERIOD_BYTES);
-		return;
-	}
-	zz_audio_convert_stream(&g_pump_convert, pcm, slot,
-	                        (uint16_t)src_frames,
-	                        AUDIO_PUMP_PERIOD_BYTES / 4);
-}
-
-static int audio_pump_source_snapshot(struct SDKAudioPumpSource *source)
+static int audio_pump_source_snapshot(struct audio_fabric_source *source)
 {
 	memset(source, 0, sizeof(*source));
 	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM) {
@@ -3797,18 +3768,18 @@ static int audio_pump_source_snapshot(struct SDKAudioPumpSource *source)
 
 		if (!stream)
 			return 0;
-		source->ring =
-			(uint8_t *)(uintptr_t)stream->pcm_ring_addr;
-		source->capacity = stream->pcm_capacity;
-		source->produced_bytes = stream->pcm_ready_total;
-		source->staged_bytes = stream->pcm_consumed_total;
-		source->sample_rate = stream->sample_rate;
-		source->channels = stream->channels;
-		source->sample_format = stream->sample_format;
+		source->ring = g_audio_playback.preconvert.ring;
+		source->capacity = g_audio_playback.preconvert.capacity;
+		source->produced_bytes = g_audio_playback.preconvert.produced;
+		source->staged_bytes = g_audio_playback.preconvert.staged;
+		source->sample_rate = 48000U;
+		source->channels = 2U;
+		source->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
 		source->done = audio_stream_source_tail_ready(
 			stream->eof, stream->input_length,
 			stream->drain_requested,
-			stream->drain_input_complete);
+			stream->drain_input_complete) &&
+			audio_stream_pcm_used(stream) == 0U;
 		source->faulted = stream->faulted != 0U;
 		return 1;
 	}
@@ -3837,12 +3808,10 @@ static int audio_pump_source_stage(uint32_t bytes)
 		struct SDKAudioStream *stream =
 			find_audio_stream(g_audio_playback.session);
 
-		if (!stream ||
-		    bytes > stream->pcm_ready_total -
-		            stream->pcm_consumed_total)
+		if (!stream)
 			return 0;
-		stream->pcm_consumed_total += bytes;
-		return 1;
+		return audio_pump_preconvert_stage(
+			&g_audio_playback.preconvert, bytes);
 	}
 	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
 		return sdk_media_session_audio_stage(
@@ -3879,228 +3848,87 @@ static uint32_t audio_pump_meter_identity(uint32_t source_kind)
 	return SDK_AUDIO_METER_IDENTITY_UNKNOWN;
 }
 
-/* Returns the number of source PCM bytes staged into this DMA period, or zero
- * when the slot contains silence (temporary shortage, fault, pause, or drained
- * end-of-stream). A zero-byte slot stays at the retryable fill frontier; it is
- * not committed as future silence. Per-period metadata converts the staging
- * cursor into an actual DMA-retirement clock. */
-static uint32_t audio_pump_fill_period(
-	const struct SDKAudioPumpSource *source, uint8_t *slot)
+/* ISR-context unbind: the compositor dropped our slot because the
+ * source vanished (session closed under us). Plain stores only. */
+static void audio_pump_source_gone(void)
 {
-	uint32_t rate;
-	uint32_t channels;
-	uint32_t src_frames;
-	uint32_t src_bytes;
-	uint32_t pull;
-	uint32_t offset;
-	uint32_t first;
-	uint64_t available;
-	uint8_t *ring;
-	int16_t *pcm;
+	g_audio_playback.session = 0U;
+	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
+	audio_scene_meter_output_identity(
+		SDK_AUDIO_METER_IDENTITY_UNKNOWN);
+}
+
+/* Stream play-out tail: pump_tail_pending semantics for bound
+ * audio-stream sessions (media sessions never tail-track). */
+static void audio_pump_tail_real(void)
+{
+	struct SDKAudioStream *stream;
+
+	if (g_audio_playback.source_kind != AUDIO_PUMP_SOURCE_STREAM)
+		return;
+	stream = find_audio_stream(g_audio_playback.session);
+	if (stream)
+		stream->pump_tail_pending = 1U;
+}
+
+static void audio_pump_tail_drained(void)
+{
+	struct SDKAudioStream *stream;
+
+	if (g_audio_playback.source_kind != AUDIO_PUMP_SOURCE_STREAM)
+		return;
+	stream = find_audio_stream(g_audio_playback.session);
+	if (stream)
+		stream->pump_tail_pending = 0U;
+}
+
+/* Producer #1 registration: everything the compositor may call in ISR
+ * context. The TX fill loop itself is audio_fabric_isr (audio_fabric.c). */
+static const struct audio_fabric_producer_ops audio_pump_producer_ops = {
+	.snapshot = audio_pump_source_snapshot,
+	.stage = audio_pump_source_stage,
+	.retire = audio_pump_source_retire,
+	.underrun = audio_pump_source_underrun,
+	.gone = audio_pump_source_gone,
+	.tail_real = audio_pump_tail_real,
+	.tail_drained = audio_pump_tail_drained,
+};
+
+/* Main-loop conversion reserve for bound streams. The decoder publishes
+ * native-rate PCM; this stage consumes exact 20-ms source periods and fills a
+ * 48-kHz stereo ring ahead of the audio IRQ. The ISR therefore performs only
+ * the proven bypass copy/mix path, never the 44.1-kHz FIR that delayed vblank. */
+static void audio_playback_preconvert(
+	struct SDKAudioStream *stream, uint32_t budget)
+{
 	uint32_t i;
 
-	if (!source || source->faulted || !source->ring ||
-	    source->capacity == 0U ||
-	    source->produced_bytes < source->staged_bytes)
-		goto silence;
-	rate = source->sample_rate;
-	channels = source->channels;
-	if (rate == 0U || channels == 0U || channels > 2U)
-		goto silence;
-	if (source->sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
-	    source->sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
-		goto silence;
-	src_frames = rate / 50U;
-	if (src_frames == 0U || src_frames > (AUDIO_PUMP_PERIOD_BYTES / 4U))
-		goto silence;
-	src_bytes = src_frames * channels * 2U;
-	available = source->produced_bytes - source->staged_bytes;
-	if (available >= src_bytes) {
-		pull = src_bytes;
-	} else if (!source->done || available == 0U) {
-		goto silence;
-	} else {
-		pull = (uint32_t)available;
-	}
-	/* else: true end of stream (EOF fed, input fully consumed) with a
-	 * final PCM tail shorter than one 20 ms period -- MP3 frames owe
-	 * no alignment to rate/50. Drain it zero-padded; refusing partial
-	 * pulls would pin used above zero and the stream could never
-	 * report DONE. */
+	for (i = 0U; stream && i < budget; i++) {
+		struct audio_pump_preconvert_source source;
+		uint32_t consumed = stream->pcm_consumed_total;
+		int result;
 
-	/* Pull the source from the PCM ring. The decode side flushed these
-	 * bytes before publishing pcm_ready_total, so a reader-side
-	 * invalidate makes them visible on this core. */
-	ring = source->ring;
-	offset = audio_playback_source_offset(
-		source->staged_bytes, source->capacity);
-	first = source->capacity - offset;
-	if (first > pull)
-		first = pull;
-	Xil_DCacheInvalidateRange((INTPTR)(ring + offset), first);
-	memcpy(g_pump_src, ring + offset, first);
-	if (pull > first) {
-		Xil_DCacheInvalidateRange((INTPTR)ring, pull - first);
-		memcpy((uint8_t *)g_pump_src + first, ring, pull - first);
-	}
-	if (pull < src_bytes)
-		memset((uint8_t *)g_pump_src + pull, 0, src_bytes - pull);
-	if (!audio_pump_source_stage(pull))
-		goto silence;
-
-	if (source->sample_format == SDK_AUDIO_SAMPLE_FORMAT_S16BE) {
-		uint8_t *bytes = (uint8_t *)g_pump_src;
-
-		for (i = 0U; i < src_bytes; i += 2U) {
-			uint8_t high = bytes[i];
-
-			bytes[i] = bytes[i + 1U];
-			bytes[i + 1U] = high;
-		}
-	}
-
-	pcm = g_pump_src;
-	if (channels == 1U) {
-		for (i = 0; i < src_frames; i++) {
-			g_pump_stereo[2U * i] = g_pump_src[i];
-			g_pump_stereo[2U * i + 1U] = g_pump_src[i];
-		}
-		pcm = g_pump_stereo;
-	}
-	if (rate == 48000U) {
-		memcpy(slot, pcm, AUDIO_PUMP_PERIOD_BYTES);
-	} else {
-		pump_convert(pcm, (int16_t *)slot, rate, src_frames);
-	}
-	return pull;
-silence:
-	memset(slot, 0, AUDIO_PUMP_PERIOD_BYTES);
-	return 0;
-}
-
-/* TX-fill half: called from isr_audio (audio-formatter period IRQ,
- * every 20 ms) so main-loop load cannot starve the TX frontier.
- * Integer-only; no scheduler/taskq/printf access from here. */
-void sdk_mailbox_audio_playback_pump_isr(void)
-{
-	struct SDKAudioPumpSource source;
-	uint8_t *tx = (uint8_t *)AUDIO_TX_BUFFER_ADDRESS;
-	uint32_t pos_period;
-	uint32_t ahead;
-	uint32_t guard;
-	uint32_t retired;
-	uint32_t ring_periods = AUDIO_PUMP_RING_BYTES / AUDIO_PUMP_PERIOD_BYTES;
-	int staged_real = 0;
-
-	if (g_audio_playback.session == 0U ||
-	    g_audio_playback.paused)
-		return;
-
-	pos_period = (audio_get_dma_transfer_count() % AUDIO_PUMP_RING_BYTES);
-	pos_period -= pos_period % AUDIO_PUMP_PERIOD_BYTES;
-
-	/* Retire every period the DMA advanced through since the preceding IRQ.
-	 * Each slot records exactly how many source bytes were staged into it;
-	 * silence contributes zero. This is the playback clock -- not the
-	 * decoder acknowledgement or the TX-fill frontier. */
-	retired = audio_playback_retire_to(
-		&g_audio_playback.last_dma_offset, pos_period,
-		AUDIO_PUMP_PERIOD_BYTES, AUDIO_PUMP_RING_BYTES,
-		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
-	audio_pump_source_retire(retired);
-
-	if (!audio_pump_source_snapshot(&source)) {
-		g_audio_playback.session = 0U;
-		g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
-		audio_scene_meter_output_identity(
-			SDK_AUDIO_METER_IDENTITY_UNKNOWN);
-		return;
-	}
-
-	/* If the DMA caught up with (or passed) the fill frontier, it has
-	 * actually reached an unfilled silence slot. Count that played
-	 * underrun (not speculative attempts to fill future periods), then
-	 * restart one period ahead. Circular distance: bias by the ring size
-	 * BEFORE the modulo -- a plain u32 (fill - pos) % RING is wrong on
-	 * wrap because 2^32 is not a multiple of the 30720-byte ring. */
-	if (audio_playback_frontier_needs_rebase(
-	        g_audio_playback.fill_offset, pos_period,
-	        AUDIO_PUMP_TARGET_AHEAD, AUDIO_PUMP_RING_BYTES)) {
-		if (!source.done && !source.faulted)
-			audio_pump_source_underrun();
-		g_audio_playback.fill_offset =
-		    (pos_period + AUDIO_PUMP_PERIOD_BYTES) %
-		    AUDIO_PUMP_RING_BYTES;
-	}
-
-	guard = AUDIO_PUMP_RING_BYTES / AUDIO_PUMP_PERIOD_BYTES;
-	while (guard--) {
-		uint32_t index;
-		uint32_t staged;
-		uint32_t next_fill;
-
-		ahead = audio_playback_ring_distance(
-			g_audio_playback.fill_offset, pos_period,
-			AUDIO_PUMP_RING_BYTES);
-		/* Stop AT the target, never past it: the frontier must stay
-		 * inside [PERIOD, TARGET_AHEAD] so the caught-up reset above
-		 * only fires on a genuine DMA overrun. Filling one period past
-		 * the target (the '>' variant of this check) made every pump
-		 * pass look caught-up, re-basing the frontier and re-filling
-		 * the ring at main-loop speed -- consuming PCM thousands of
-		 * times faster than playback, which defeated FEED
-		 * backpressure entirely. */
-		if (ahead >= AUDIO_PUMP_TARGET_AHEAD)
-			break;   /* frontier far enough ahead */
-		index = g_audio_playback.fill_offset / AUDIO_PUMP_PERIOD_BYTES;
-		staged = audio_pump_fill_period(
-			&source, tx + g_audio_playback.fill_offset);
-		g_audio_playback.period_source_bytes[index] = staged;
-		if (staged != 0U)
-			staged_real = 1;
-		/* The TX ring is plain cacheable DDR (no TLB override) and
-		 * the audio formatter DMA does not snoop: push the period to
-		 * DRAM before the frontier advances over it. ~120 lines,
-		 * microseconds, once per 20 ms. */
-		Xil_DCacheFlushRange(
-		    (INTPTR)(tx + g_audio_playback.fill_offset),
-		    AUDIO_PUMP_PERIOD_BYTES);
-		next_fill = audio_playback_frontier_after_fill(
-			g_audio_playback.fill_offset, staged,
-			AUDIO_PUMP_PERIOD_BYTES, AUDIO_PUMP_RING_BYTES);
-		if (next_fill == g_audio_playback.fill_offset)
+		memset(&source, 0, sizeof(source));
+		source.ring = (uint8_t *)(uintptr_t)stream->pcm_ring_addr;
+		source.capacity = stream->pcm_capacity;
+		source.produced = stream->pcm_ready_total;
+		source.consumed = consumed;
+		source.sample_rate = stream->sample_rate;
+		source.channels = stream->channels;
+		source.sample_format = stream->sample_format;
+		source.done = audio_stream_source_tail_ready(
+			stream->eof, stream->input_length,
+			stream->drain_requested,
+			stream->drain_input_complete);
+		result = audio_pump_preconvert_fill(
+			&g_audio_playback.preconvert, &source, &consumed);
+		if (result <= 0)
 			break;
-		g_audio_playback.fill_offset = next_fill;
-		/* Refresh the published source cursor before filling another
-		 * period in this same IRQ. */
-		if (!audio_pump_source_snapshot(&source))
-			memset(&source, 0, sizeof(source));
-	}
-
-	/* Play-out tail tracking. This ISR fires once per formatter period,
-	 * so each call is one DMA period elapsed. While real PCM is flowing,
-	 * pump_tail_pending stays armed; once the source is exhausted the loop
-	 * only stages silence, and after a whole ring of silence periods the
-	 * DMA has played the last real audio out of the TX ring. Only then may
-	 * end-of-stream drop (see audio_stream_result_flags / audio_stream_
-	 * state), so a client that stops on DONE does not truncate the tail. */
-	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM) {
-		struct SDKAudioStream *stream =
-			find_audio_stream(g_audio_playback.session);
-
-		if (!stream)
-			return;
-		if (staged_real) {
-			g_audio_playback.silence_run = 0U;
-			stream->pump_tail_pending = 1U;
-		} else if (stream->pump_tail_pending) {
-			if (g_audio_playback.silence_run < ring_periods)
-				g_audio_playback.silence_run++;
-			if (g_audio_playback.silence_run >= ring_periods)
-				stream->pump_tail_pending = 0U;
-		}
+		stream->pump_tail_pending = 1U;
+		stream->pcm_consumed_total = consumed;
 	}
 }
+
 
 void sdk_mailbox_audio_playback_pump(void)
 {
@@ -4117,6 +3945,8 @@ void sdk_mailbox_audio_playback_pump(void)
 			SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 		return;
 	}
+	audio_playback_preconvert(
+		stream, AUDIO_PUMP_PRECONVERT_FILL_BUDGET);
 
 	/* Keep the decoder ahead of the pump. Session FEEDs drive decode, but
 	 * once the client has fed everything it just waits -- so when the PCM
@@ -4165,53 +3995,71 @@ void sdk_mailbox_audio_playback_pump(void)
 	}
 }
 
+/*
+ * Bind producer #1. attach() registers the slot FROZEN (and, on
+ * IDLE -> ACTIVE entry, performs the formatter recovery: TX re-point
+ * plus conditional re-init after a legacy session moved the DMA);
+ * restart() rebuilds the compositor cursors at the current DMA
+ * position; go_live publishes LAST so an audio IRQ never sees a live
+ * slot with a half-published session.
+ */
 static void audio_playback_start(uint32_t source_kind, uint32_t session)
 {
-	uint32_t pos;
+	if (!audio_fabric_producer_attach(
+		    AUDIO_FABRIC_SLOT_PUMP, &audio_pump_producer_ops)) {
+		/* Unreachable: every caller gates on ownership first. */
+		return;
+	}
+	if (source_kind == AUDIO_PUMP_SOURCE_STREAM) {
+		struct SDKAudioStream *stream = find_audio_stream(session);
 
-	/* Gate the ISR while every cursor and period tag is rebuilt. */
-	g_audio_playback.session = 0U;
-	__asm__ __volatile__("" ::: "memory");
-	audio_set_tx_buffer((uint8_t *)AUDIO_TX_BUFFER_ADDRESS);
-	if (audio_get_inited_tx_buffer() !=
-	    (uint8_t *)AUDIO_TX_BUFFER_ADDRESS)
-		audio_init_i2s();
-	pump_convert_reset();
-	pos = audio_get_dma_transfer_count() % AUDIO_PUMP_RING_BYTES;
-	pos -= pos % AUDIO_PUMP_PERIOD_BYTES;
-	g_audio_playback.fill_offset =
-		(pos + AUDIO_PUMP_PERIOD_BYTES) % AUDIO_PUMP_RING_BYTES;
-	g_audio_playback.last_dma_offset = pos;
-	audio_playback_clear_periods(
-		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
-	g_audio_playback.silence_run = 0U;
+		if (g_audio_playback.preconvert_session != session) {
+			audio_pump_preconvert_reset(
+				&g_audio_playback.preconvert,
+				g_audio_pump_preconvert_ring,
+				sizeof(g_audio_pump_preconvert_ring));
+			g_audio_playback.preconvert_session = session;
+		}
+		audio_playback_preconvert(
+			stream, AUDIO_PUMP_PRECONVERT_FILL_BUDGET);
+	}
+	/* Re-arm the shared fill frontier only when no other slot is
+	 * live: joining a live mix must never rewind it (the other
+	 * producers' staged periods would be re-filled and their staging
+	 * double-counted) -- the same guard the lease-submit path applies. */
+	if (!audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP))
+		audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
 	g_audio_playback.source_kind = source_kind;
 	g_audio_playback.paused = 0U;
 	/* Name the output source for metering (R8) before the session
 	 * goes live. */
 	audio_scene_meter_output_identity(
 		audio_pump_meter_identity(source_kind));
-	/* Publish the session LAST: the next audio IRQ may now stage PCM. */
+	/* Publish the session, then the slot: the next audio IRQ may now
+	 * stage PCM. */
 	__asm__ __volatile__("" ::: "memory");
 	g_audio_playback.session = session;
+	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
 }
 
 static void audio_playback_stop(void)
 {
+	/* A stopped pump that shares the fabric with a live direct-ring
+	 * producer must have its already-mixed future periods rebuilt out
+	 * of the queue: detach() alone neither silences nor rebuilds when
+	 * another producer keeps the fabric active (PR #88 review). Arm
+	 * the queued-contribution rebuild while the pump is still attached
+	 * and its tags still credit the window; the rebuild replays only
+	 * the remaining live producers. */
+	audio_fabric_request_rebuild(AUDIO_FABRIC_SLOT_PUMP);
+	audio_fabric_producer_detach(AUDIO_FABRIC_SLOT_PUMP);
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
 	audio_scene_meter_output_identity(
 		SDK_AUDIO_METER_IDENTITY_UNKNOWN);
-	audio_playback_clear_periods(
-		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
-	g_audio_playback.silence_run = 0U;
-	audio_silence();
-}
-
-int sdk_mailbox_audio_playback_active(void)
-{
-	return g_audio_playback.session != 0U;
+	/* Last-release ring silence is the compositor's policy (KTD8):
+	 * detach() already silenced the TX ring. */
 }
 
 static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
@@ -4249,26 +4097,20 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	 * byte order) would play byte-swapped noise. */
 	if (stream->sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	if (g_audio_playback.session != 0U)
-		return complete_status(req, comp, SDK_STATUS_BUSY);
-	/* A legacy/AHI client owning the output is just as busy as another
-	 * SDK session: binding now would repoint the formatter DMA away
-	 * from the buffer that client configured (AP_TX_BUF_OFFS) and
-	 * steal its playback. On the Amiga side MHI and AHI already
-	 * exclude each other via the interrupt-server ownership token;
-	 * this enforces the same exclusion for raw SDK clients. */
-	if (audio_legacy_output_active())
+	/* The fabric owns the output from the first bind (review
+	 * decision 1): any other producer session is just as busy as a
+	 * legacy/AHI client that repointed the formatter DMA away from
+	 * the standard ring (AP_TX_BUF_OFFS). On the Amiga side MHI and
+	 * AHI already exclude each other via the interrupt-server
+	 * ownership token; this enforces the same exclusion for raw SDK
+	 * clients through the three-way ownership state. */
+	if (audio_fabric_ownership() != AUDIO_FABRIC_IDLE)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 
-	/* Deterministic output target: the standard TX ring. An AHI session
-	 * repoints the FORMATTER DMA at its own buffer (AP_TX_BUF_OFFS +
-	 * re-init) and closing AHI does not restore it -- and moving the
-	 * CPU-side pointer alone moves nothing, the DMA keeps reading the
-	 * buffer captured at the last audio_init_i2s(). Without the
-	 * re-init below, a bind after any AHI session plays silence: the
-	 * pump fills the default ring while the DMA reads AHI's dead one.
-	 * Safe here: PLAY runs in the main loop, and the ISR pump stays
-	 * gated off until the session publishes below. */
+	/* Formatter recovery after a legacy session moved the DMA is the
+	 * compositor's job now (IDLE -> ACTIVE entry re-points the TX
+	 * buffer and conditionally re-inits, audio_fabric.c); SAFE here:
+	 * PLAY runs in the main loop with the slot still frozen. */
 	stream->pump_tail_pending = 0U;
 	audio_playback_start(AUDIO_PUMP_SOURCE_STREAM, session);
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
@@ -4296,9 +4138,9 @@ static uint16_t handle_audio_stream_stop(volatile struct SDKMailboxEntry *req,
 	if (g_audio_playback.session == session &&
 	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM) {
 		audio_playback_stop();
-		/* audio_silence() wiped the TX ring: no tail is left to play. */
+		/* The last-release silence wiped the TX ring: no tail is
+		 * left to play. */
 		stream->pump_tail_pending = 0U;
-		g_audio_playback.silence_run = 0U;
 	}
 	/* Idempotent: stopping an unbound session is OK (MHI pause/stop). */
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
@@ -4334,6 +4176,155 @@ static uint16_t handle_audio_control(
 	if (result_len != 0U)
 		copy_payload(comp->payload, result, result_len);
 	return SDK_STATUS_OK;
+}
+
+/*
+ * Audio fabric direct-ring plane opcodes (0x0512+, plan U1 ABI, U3
+ * firmware): the framed state read and the generation-bound
+ * acquire/release lifecycle over the board-visible grants. The
+ * handlers are protocol only -- big-endian pack against the
+ * vocabulary in audio_fabric.h / sdk_mailbox.h -- with every state
+ * decision in audio_fabric.c and audio_fabric_lease.c. PCM never
+ * travels the mailbox: the producer writes its granted ring and the
+ * seqlock producer line directly. Nothing is advertised in any
+ * capability word or service flag until the on-hardware verification
+ * session passes (R12).
+ */
+
+static uint16_t handle_audio_fabric_state_get(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
+{
+	volatile struct SDKAudioFabricStateGetPayload *payload;
+	volatile struct SDKAudioFabricStateResultPayload *result;
+	struct audio_fabric_slot_state state;
+	uint32_t slot;
+	uint32_t flags;
+	int hold_reset;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload =
+		(volatile struct SDKAudioFabricStateGetPayload *)req->payload;
+	slot = get_be32(payload->slot);
+	flags = get_be32(payload->flags);
+	if ((flags & ~SDK_AUDIO_FABRIC_STATE_HOLD_RESET) != 0U ||
+	    slot >= AUDIO_FABRIC_SLOT_COUNT)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	hold_reset = (flags & SDK_AUDIO_FABRIC_STATE_HOLD_RESET) != 0U;
+	if (!audio_fabric_slot_state(
+		    slot, audio_pump_meter_identity(
+			      g_audio_playback.source_kind),
+		    hold_reset, &state))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKAudioFabricStateResultPayload *)
+		comp->payload;
+	put_be32(result->slot, slot);
+	put_be32(result->generation, state.generation);
+	put_be32(result->state, state.state);
+	/* Heartbeat age is measured by the compositor ISR's direct-ring
+	 * scan (fabric_lease_isr_tick): 20 ms granularity, UNKNOWN while
+	 * the slot is free or unmeasured. */
+	put_be32(result->heartbeat_ms, state.heartbeat_ms);
+	put_be32(result->cursor_write_hi,
+	         (uint32_t)(state.written_bytes >> 32));
+	put_be32(result->cursor_write_lo, (uint32_t)state.written_bytes);
+	put_be32(result->cursor_read_hi,
+	         (uint32_t)(state.consumed_bytes >> 32));
+	put_be32(result->cursor_read_lo, (uint32_t)state.consumed_bytes);
+	put_be32(result->starvation_count, state.underruns);
+	put_be32(result->flags,
+	         hold_reset ? SDK_AUDIO_FABRIC_STATE_HOLD_RESET : 0U);
+	put_be32(result->peak, state.peak);
+	put_be32(result->clip, state.clips);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_audio_ring_acquire(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
+{
+	volatile struct SDKAudioRingAcquirePayload *payload;
+	volatile struct SDKAudioRingAcquireResultPayload *result;
+	struct audio_fabric_ring_grant grant;
+	uint32_t slot;
+	uint32_t identity;
+	uint32_t gain;
+	uint32_t flags;
+	int rc;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload =
+		(volatile struct SDKAudioRingAcquirePayload *)req->payload;
+	slot = get_be32(payload->slot);
+	identity = get_be32(payload->identity);
+	gain = get_be32(payload->gain);
+	flags = get_be32(payload->flags);
+	/* flags is REQUIRED ZERO (the bypass path consumes 48 kHz stereo
+	 * S16LE only); gain is the single 0..255 mixer scale. */
+	if (flags != 0U || gain > 255U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	rc = audio_fabric_ring_acquire(slot, identity, gain, &grant);
+	if (rc == AUDIO_FABRIC_LEASE_EBAD_SLOT)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (rc == AUDIO_FABRIC_LEASE_ENO_MAP)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (rc != AUDIO_FABRIC_LEASE_OK)
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKAudioRingAcquireResultPayload *)
+		comp->payload;
+	put_be32(result->slot, slot);
+	put_be32(result->generation, grant.generation);
+	put_be32(result->ring_offset, grant.ring_offset);
+	put_be32(result->ring_capacity, grant.ring_capacity);
+	put_be32(result->control_offset, grant.control_offset);
+	/* Pinned grant geometry (R1/R3): the compositor consumes whole
+	 * 20-ms periods of 48 kHz stereo S16LE, and a granted capacity
+	 * is a whole number of periods. */
+	put_be32(result->period_bytes, SDK_AUDIO_RING_PERIOD_BYTES);
+	put_be32(result->period_us, SDK_AUDIO_RING_PERIOD_US);
+	put_be32(result->sample_contract,
+	         SDK_AUDIO_RING_CONTRACT_48K_STEREO_S16LE);
+	put_be32(result->gain_applied, grant.gain_applied);
+	put_be32(result->slot_count, grant.slot_count);
+	put_be32(result->flags,
+	         (grant.bounded ? SDK_AUDIO_RING_RESULT_GAIN_BOUNDED
+		                : 0U) |
+	         (grant.bus_zorro2 ? SDK_AUDIO_RING_RESULT_BUS_ZORRO2
+		                   : 0U));
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_audio_ring_release(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
+{
+	volatile struct SDKAudioRingReleasePayload *payload;
+	uint32_t slot;
+	uint32_t generation;
+	uint32_t flags;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload =
+		(volatile struct SDKAudioRingReleasePayload *)req->payload;
+	slot = get_be32(payload->slot);
+	generation = get_be32(payload->generation);
+	flags = get_be32(payload->flags);
+	if (flags != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	/* slot + generation identify the grant; a stale generation is an
+	 * idempotent no-op (the slot may already have been revoked). The
+	 * completion status is the whole contract -- no result payload. */
+	if (audio_fabric_ring_release(slot, generation) ==
+	    AUDIO_FABRIC_LEASE_EBAD_SLOT)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	return complete_status(req, comp, SDK_STATUS_OK);
 }
 
 static uint16_t handle_audio_stream_begin(volatile struct SDKMailboxEntry *req,
@@ -5156,18 +5147,38 @@ static uint16_t handle_media_session_audio_bind(
 		if (g_audio_playback.session != session ||
 		    g_audio_playback.source_kind != AUDIO_PUMP_SOURCE_MEDIA)
 			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		/* Freeze the compositor slot first (the pump's paused gate):
+		 * while frozen the slot neither fills nor retires, so the
+		 * rewind below races nothing. */
+		audio_fabric_producer_freeze(AUDIO_FABRIC_SLOT_PUMP);
 		g_audio_playback.paused = 1U;
 		__asm__ __volatile__("" ::: "memory");
 		status = sdk_media_session_audio_bind(
 			session, flags, &result);
 		if (status != SDK_STATUS_OK) {
 			g_audio_playback.paused = 0U;
+			__asm__ __volatile__("" ::: "memory");
+			/* Unfreeze without a cursor rebuild: nothing was
+			 * rewound, the frontier stands. */
+			audio_fabric_producer_go_live(
+				AUDIO_FABRIC_SLOT_PUMP);
 			return complete_status(req, comp, status);
 		}
-		audio_playback_clear_periods(
-			g_audio_playback.period_source_bytes,
-			AUDIO_NUM_PERIODS);
-		audio_silence();
+		/* Pause confirmed: drop the pending retirement tags (the
+		 * session rewound its staging to retirement). With a live
+		 * direct-ring peer the historical whole-ring wipe would
+		 * erase its already-mixed future periods (PR #88 review):
+		 * arm the queued-contribution rebuild while the pump tags
+		 * still exist, then clear only the pump's tags -- the
+		 * rebuild re-mixes the peer window and the frozen pump
+		 * contributes silence. Pump-only keeps the ring wipe. */
+		if (audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP)) {
+			audio_fabric_request_rebuild(
+				AUDIO_FABRIC_SLOT_PUMP);
+			audio_fabric_producer_clear(AUDIO_FABRIC_SLOT_PUMP);
+		} else {
+			audio_fabric_ring_silence(AUDIO_FABRIC_SLOT_PUMP);
+		}
 		return complete_media_session_audio_result(
 			req, comp, SDK_STATUS_OK, &result);
 	}
@@ -5184,7 +5195,9 @@ static uint16_t handle_media_session_audio_bind(
 	}
 	if (!audio_codec_present())
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	if (audio_legacy_output_active())
+	/* Same three-way ownership gate as the stream path: reject while
+	 * any fabric producer or a legacy/AHI client owns the output. */
+	if (audio_fabric_ownership() != AUDIO_FABRIC_IDLE)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 	status = sdk_media_session_audio_bind(session, 0U, &result);
 	if (status == SDK_STATUS_OK)
@@ -6043,26 +6056,30 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		const struct audio_feed_op_params *p =
 		    (const struct audio_feed_op_params *)d->op_params;
 		struct SDKAudioStream *stream = find_audio_stream(p->session);
+		uint32_t dirty_offset = 0U;
+		uint32_t dirty_length = 0U;
 
 		*result_len = 0;
 		if (!stream)
 			return SDK_STATUS_BAD_HANDLE;
 		if (stream->faulted)
 			return SDK_STATUS_IO_ERROR;
+		(void)audio_stream_feed_dirty_span(
+			stream->input_offset, stream->input_length, p->src_len,
+			stream->mp3_capacity, &dirty_offset, &dirty_length);
 		audio_stream_feed_compute(stream, p->src_addr, p->src_len,
 		                          p->flags);
-		/* This worker runs on core 1, which owns the mp3 staging ring's
-		 * cache (see core1_affine). Only the FEED path writes that ring
-		 * (feed_compute's memcpy + audio_stream_compact_input); a READ or
-		 * the internal refill just reads it. Clean+invalidate the ring
-		 * here so core 1 leaves no dirty lines behind: CLOSE/free runs on
-		 * core 0 and cannot reach core 1's L1, so without this a later
-		 * eviction of stale compressed data could clobber whatever reuses
-		 * the freed shared buffer. */
-		if (stream->mp3_ring_addr != 0U && stream->mp3_capacity != 0U)
+		/* Only feed_compute's append/compaction writes the compressed
+		 * ring. Flush that exact dirty span once; zero-byte internal
+		 * refills only read clean lines and must not race the core-0
+		 * vblank's global L2 flush/overlay-VDMA rearm. Keeping every
+		 * write clean also prevents a later core-1 eviction from
+		 * clobbering memory after CLOSE frees the shared buffer. */
+		if (dirty_length != 0U)
 			Xil_DCacheFlushRange(
-				(INTPTR)(uintptr_t)stream->mp3_ring_addr,
-				stream->mp3_capacity);
+				(INTPTR)(uintptr_t)(
+					stream->mp3_ring_addr + dirty_offset),
+				dirty_length);
 		audio_stream_fill_result(result_payload, stream);
 		*result_len = sizeof(struct SDKAudioStreamResultPayload);
 		return SDK_STATUS_OK;
@@ -7610,6 +7627,12 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	case SDK_OP_AUDIO_SCENE_SAVE:
 	case SDK_OP_AUDIO_CONTROL_STATE_GET:
 		return handle_audio_control(req, comp, payload_len, opcode);
+	case SDK_OP_AUDIO_FABRIC_STATE_GET:
+		return handle_audio_fabric_state_get(req, comp, payload_len);
+	case SDK_OP_AUDIO_RING_ACQUIRE:
+		return handle_audio_ring_acquire(req, comp, payload_len);
+	case SDK_OP_AUDIO_RING_RELEASE:
+		return handle_audio_ring_release(req, comp, payload_len);
 	case SDK_OP_IMAGE_SESSION_BEGIN:
 		return handle_image_session_begin(req, comp, payload_len);
 	case SDK_OP_IMAGE_SESSION_FEED:
@@ -7712,6 +7735,12 @@ void sdk_mailbox_init(void)
 	sdk_status = SDK_STATUS_OK;
 	sdk_mailbox_active = 0;
 	sdk_mailbox_pending = 0;
+	/* R7 fail-closed fabric teardown BEFORE the generation advances:
+	 * the fabric silences the ring it owns, bumps every lease epoch
+	 * (a stale pre-reset handle must never validate again) and zeroes
+	 * the card-side lease rings. Ordering matters: a task completing
+	 * into the next lifetime must observe a fabric with no leases. */
+	audio_fabric_reset();
 	/* New mailbox lifetime: any task still queued from the previous one is now
 	 * stale and must not post into this mailbox's completion ring. */
 	sdk_mailbox_generation++;
@@ -7737,14 +7766,19 @@ void sdk_mailbox_init(void)
 	media_pcm_ring_session = 0U;
 	memset(shared_buffers, 0, sizeof(shared_buffers));
 	memset(surfaces, 0, sizeof(surfaces));
-	/* Unbind AX playback before the table goes away. */
+	/* Unbind AX playback before the table goes away: the fabric
+	 * reset above already dropped every producer, silenced the ring
+	 * it owned and retired the lease epochs (R7). */
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
+	g_audio_playback.preconvert_session = 0U;
+	audio_pump_preconvert_reset(
+		&g_audio_playback.preconvert,
+		g_audio_pump_preconvert_ring,
+		sizeof(g_audio_pump_preconvert_ring));
 	audio_scene_meter_output_identity(
 		SDK_AUDIO_METER_IDENTITY_UNKNOWN);
-	audio_playback_clear_periods(
-		g_audio_playback.period_source_bytes, AUDIO_NUM_PERIODS);
 	g_audio_playback.refill_pending = 0U;
 	/* Pointer into the coherent region, not an array: size explicitly.
 	 * Flush so the zeroed table is in DRAM whatever MMU attributes the

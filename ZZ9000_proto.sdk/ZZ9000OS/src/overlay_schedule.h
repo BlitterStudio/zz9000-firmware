@@ -41,6 +41,23 @@ static inline uint32_t overlay_buffer_bytes(uint32_t screen_pitch,
 	return screen_bytes >= source_bytes ? screen_bytes : source_bytes;
 }
 
+/* Scanout must restart at vblank entry, before the full cache flush. A buffer
+ * composed during the previous frame takes precedence once that flush has
+ * made it safe; consuming the handoff unblocks composition into the old
+ * scan buffer. */
+static inline uint32_t overlay_vblank_take_rearm(
+	uint32_t scan_address, uint32_t *handoff_address)
+{
+	uint32_t address;
+
+	if (!handoff_address)
+		return scan_address;
+	address = *handoff_address != 0U
+		? *handoff_address : scan_address;
+	*handoff_address = 0U;
+	return address;
+}
+
 static inline void overlay_schedule_reset(struct overlay_schedule_state *state)
 {
 	uint32_t i;

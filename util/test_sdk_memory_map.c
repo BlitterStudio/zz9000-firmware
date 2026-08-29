@@ -120,17 +120,27 @@ int main(int argc, char **argv)
 	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "#define SDK_HOST_WINDOW_HEAP_SIZE    0x00010000");
 	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_HOST_WINDOW_HEAP_GEN2_SIZE 0x00004000");
+	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "(SDK_HOST_WINDOW_HEAP_END - ADDR_ADJ) > 0x00400000");
 	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "SDK_HOST_WINDOW_HEAP_END > (0x003F0000 + ADDR_ADJ)");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_AUDIO_DIRECT_RING_Z3_SLOTS              2U");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS    0x081C0000");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_AUDIO_DIRECT_RING_Z2_SLOTS              1U");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE       0x0000C000");
 
 	ok &= expect_contains(main_source, "main.c",
-	                      "cur_mem_offset = LEGACY_SURFACE_HEAP_ADDRESS");
+	                      "surface_allocator_init(LEGACY_SURFACE_HEAP_ADDRESS, LEGACY_SURFACE_HEAP_SIZE)");
 	ok &= expect_not_contains(main_source, "main.c",
 	                          "cur_mem_offset = 0x3500000");
 
 	ok &= expect_contains(dma_acc, "dma_acc.c",
-	                      "LEGACY_SURFACE_HEAP_END - cur_mem_offset");
+	                      "surface_allocator_alloc(sfc_size)");
 	ok &= expect_contains(dma_acc, "dma_acc.c",
 	                      "not enough legacy surface heap");
 

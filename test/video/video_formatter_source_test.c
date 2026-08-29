@@ -468,9 +468,9 @@ static int test_videocap_probe_compares_sampler_and_line_owner(
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "probe_data[31:0] <= capture_store_word;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "wire capture_head_valid = capture_banking_cap ?");
+	    "wire capture_head_valid = capture_head_skips_settling ?");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "1'b1 : (cap_x > 11'd2);");
+	    "wire capture_head_skips_settling = (FULLRATE != 0) ?");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "probe_seen_mask[14:0] == 15'h7fff");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
@@ -516,11 +516,11 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "localparam integer LINEBUF_BANKS = 2;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "wire capture_banking_cap = (FULLRATE != 0) ? ctl_full_width_cap : 1'b1;");
+	    "wire capture_banking_cap = 1'b1;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "wire read_banking_axi = (FULLRATE != 0) ? ctl_read_full_width : 1'b1;");
+	    "wire read_banking_axi = 1'b1;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "cap_token_y <= cap_y[9:0];");
+	    "cap_token_y <= capture_output_y[9:0];");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "cap_token_bank <= capture_bank;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
@@ -553,13 +553,19 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "vc_row_bank <= vc_saving_bank;");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "if (vcap_line_payload_axi[9:0] < videocap_ymax_sync)");
+	    "if (videocap_writeback_full_width ||");
+	ok &= require_source_contains("mntzorro.v", mntzorro,
+	    "vcap_line_payload_axi[9:0] < videocap_ymax_sync)");
 	ok &= require_source_contains("mntzorro.v", mntzorro,
 	    "vc_saving_bank <= videocap_bank_sync;");
-	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "wire vc_row_line_stale = !videocap_writeback_full_width &&");
-	ok &= require_source_contains("mntzorro.v", mntzorro,
-	    "videocap_save_x == 0 && vc_row_line_stale) begin");
+	/* 800x600 filtered fix: banking and token handoff are unconditional,
+	 * so the filtered stale-skip gate must stay gone. */
+	ok &= require_source_absent("mntzorro.v", mntzorro,
+	    "vc_row_line_stale",
+	    "filtered stale-skip gate reintroduced although every path is banked");
+	ok &= require_source_absent("videocap_sampler.v", sampler,
+	    "capture_banking_cap = (FULLRATE != 0)",
+	    "filtered capture is still unbanked on FULLRATE boards");
 
 	return ok ? 0 : 1;
 }

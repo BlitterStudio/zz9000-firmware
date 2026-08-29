@@ -161,6 +161,36 @@ int audio_scene_trim_submit(uint8_t owner, int16_t paula, int16_t ax,
 	struct audio_scene_trim_result *result);
 int audio_scene_trim_release(uint8_t owner);
 
+/* ---- fabric lease-gain composition (plan U4, R11) ---- */
+
+/*
+ * Result of a lease-gain composition, reported back to the requester
+ * so a bounded request is never silently clamped (the R3 trim
+ * pattern).
+ */
+struct audio_scene_lease_gain_result {
+	uint8_t bounded;    /* nonzero when the request was reduced */
+	uint8_t applied;    /* applied 0..255 producer gain */
+	double gain_bound;  /* maximum gain the current scene, baseline,
+	                     * trims and ceiling allow (>= unity once the
+	                     * mixer composition is boundary-bounded) */
+};
+
+/*
+ * Compose a fabric lease's requested 0..255 producer gain against the
+ * enforced ceiling under the active scene's master chain (R11). The
+ * lease rides the AX mixer leg the current composition leaves
+ * applied; its boost scales that leg linearly (AUDIO_FABRIC-style
+ * 128 = unity). When the Paula leg plus the boosted AX leg would
+ * exceed the enforced boundary, the gain is reduced to the
+ * ceiling-bounded maximum and bounded is set -- single-producer
+ * model, exactly like each owner's trim composing against the same
+ * boundary. Returns 0 and fills *result (when non-NULL); -1 only for
+ * an out-of-range request.
+ */
+int audio_scene_lease_gain_compose(uint32_t requested,
+	struct audio_scene_lease_gain_result *result);
+
 /* ---- staged scene edits and the single commit path (U4, KTD7) ---- */
 
 /*

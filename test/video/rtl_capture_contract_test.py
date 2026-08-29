@@ -220,11 +220,11 @@ def check_writeback_provenance(rtl: str) -> None:
         # A disable mid-row must not resume into the previous session's
         # frozen row: the re-enable path restarts at the row origin.
         "videocap_save_x <= 0;",
-        # Filtered writeback writes a row only while its line is still in
-        # the single line buffer; a scrolled-out row is skipped, not
-        # written with another line's content.
-        "wire vc_row_line_stale = !videocap_writeback_full_width &&",
-        "videocap_save_x == 0 && vc_row_line_stale) begin",
+        # Every capture path is banked and hands rows over by completed
+        # token (800x600 filtered fix): token consumption is not gated on
+        # full-width, and the filtered stale-skip gate is gone.
+        "if (videocap_writeback_full_width ||",
+        "vcap_line_payload_axi[9:0] < videocap_ymax_sync)",
         # Every banked capture path hands rows over by one latched token; the
         # full-width path must normalize rather than leak pre-crop row zero.
         "wire [11:0] vcap_line_payload_cap = {",

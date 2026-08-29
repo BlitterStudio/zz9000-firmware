@@ -57,19 +57,24 @@
 #define SDK_CAP_MEDIA_SESSION          (1U << 22)
 #define SDK_CAP_AUDIO_STREAM_DRAIN     (1U << 23)
 /* QUERY_APERTURE_LAYOUT is available. HOST_WINDOW_HEAP is advertised on
- * generation-1 Z2 only after the driver acknowledges the exact contract. */
+ * generation-2 Z2 only after the driver acknowledges the exact contract. */
 #define SDK_CAP_APERTURE_LAYOUT        (1U << 24)
 /* Audio control plane / metering. Append-only but deliberately NOT
  * advertised in any capability word until the on-hardware verification
  * session qualifies them (R12). */
 #define SDK_CAP_AUDIO_CONTROL          (1U << 25)
 #define SDK_CAP_AUDIO_METERING         (1U << 26)
+/* Audio fabric direct-ring producer plane (opcodes 0x0512-0x0514). The
+ * on-hardware qualification gate passed 2026-08-28
+ * (docs/audio-fabric.md); now advertised in the audio service word and
+ * the global capability set. */
+#define SDK_CAP_AUDIO_FABRIC           (1U << 27)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
 // host-side declaration ("the 68k never touches this buffer") that the
 // firmware merely stores and echoes.
-// Generation-1 Zorro 2 bitstreams require an exact layout acknowledgement
+// Generation-2 Zorro 2 bitstreams require an exact layout acknowledgement
 // before firmware advertises or honors HOST_WINDOW. Zorro 3 and bitstreams
 // without the generation-tagged aperture register retain the legacy fixed
 // heap; zz9k.library strips HOST_WINDOW on Z3 and rejects that legacy address
@@ -138,6 +143,10 @@
  * SDK_CAP_AUDIO_CONTROL gated-advertising discipline: not reported in
  * the audio service flags until qualified. */
 #define SDK_SERVICE_FLAG_AUDIO_CONTROL (1U << 21)
+/* Fabric lease opcodes (0x050f+) are dispatchable (firmware U3).
+ * The qualification gate passed 2026-08-28; now reported in the audio
+ * service flags. */
+#define SDK_SERVICE_FLAG_AUDIO_FABRIC (1U << 22)
 #define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
 #define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)
 #define SDK_SERVICE_FLAG_CODEC_GZIP             (1U << 18)
@@ -211,6 +220,19 @@
 #define SDK_OP_AUDIO_METER_READ        0x050cU
 #define SDK_OP_AUDIO_SCENE_SAVE        0x050dU
 #define SDK_OP_AUDIO_CONTROL_STATE_GET 0x050eU
+/* Audio fabric direct-ring producer plane (implemented in firmware
+ * U3): the payloads mirror the SDK ZZ9KAudio*Payload structs below
+ * byte-for-byte. Producers acquire generation-bound host-visible PCM
+ * rings and publish cursors through shared control lines, so the
+ * steady data path needs no synchronous mailbox work. Values
+ * 0x050f..0x0511 belonged to the retired copy-submit lease
+ * transport and are never reused. The on-hardware qualification gate
+ * passed 2026-08-28 (docs/audio-fabric.md): the plane is now
+ * advertised via SDK_CAP_AUDIO_FABRIC and
+ * SDK_SERVICE_FLAG_AUDIO_FABRIC. */
+#define SDK_OP_AUDIO_FABRIC_STATE_GET  0x0512U
+#define SDK_OP_AUDIO_RING_ACQUIRE      0x0513U
+#define SDK_OP_AUDIO_RING_RELEASE      0x0514U
 
 #define SDK_OP_DECOMPRESS              0x0600U
 #define SDK_OP_DECOMPRESS_TEST         0x0601U
@@ -618,6 +640,253 @@ typedef char SDKAudioControlStateSaveStatus_must_be_at_offset_44[
 	(offsetof(struct SDKAudioControlStateResultPayload, save_status) == 44U) ?
 		1 : -1];
 
+/* Firmware-authoritative audio fabric direct-ring plane vocabulary
+ * and payloads (opcodes 0x0512+). All mailbox payload fields are
+ * big-endian, 48 bytes to match the inline mailbox entry size and
+ * the SDK ZZ9KAudio*Payload structs byte-for-byte. The control lines
+ * below are NOT mailbox payloads: they live in board-visible shared
+ * memory beside the granted PCM ring and mirror ZZ9KAudioRingProducer
+ * Line / ZZ9KAudioRingFirmwareLine byte-for-byte. The plane is
+ * implemented in firmware (U3) but nothing here is advertised in
+ * any capability word or service flag until it passes the on-hardware
+ * verification session (R12 discipline). */
+
+/* Control-block geometry (KTD1): two ownership-separated 64-byte
+ * lines, each occupying one cache line at
+ * SDK_AUDIO_RING_CONTROL_ALIGN. The producer line is written only by
+ * the producer, the firmware line only by firmware. Every field is a
+ * big-endian 32-bit word; the 64-bit cursors are hi/lo word pairs
+ * covered by the line's seqlock. The producer line sits at control
+ * offset +0, the firmware line at +64. */
+#define SDK_AUDIO_RING_CONTROL_LINE_SIZE 64U
+#define SDK_AUDIO_RING_CONTROL_SIZE      128U
+#define SDK_AUDIO_RING_CONTROL_ALIGN     64U
+
+/* Fixed period geometry of the bypass compositor: one 20-ms period
+ * of 48 kHz stereo S16LE is 3840 bytes. Firmware consumes complete
+ * periods only (R7), and a granted ring capacity is a whole number
+ * of periods. */
+#define SDK_AUDIO_RING_PERIOD_BYTES 3840U
+#define SDK_AUDIO_RING_PERIOD_US    20000U
+
+/* Sample contract of a granted ring. The bypass path consumes 48 kHz
+ * stereo S16LE only; the enumerated word leaves room for future
+ * conversion-bearing contracts without moving any field. */
+#define SDK_AUDIO_RING_CONTRACT_NONE             0U
+#define SDK_AUDIO_RING_CONTRACT_48K_STEREO_S16LE 1U
+
+/* Highest leaseable direct-ring slot index. Slot 0 is the firmware
+ * pump and is never granted; the acquire result's slot_count reports
+ * the actual leaseable count for the active bus mode (two on Zorro
+ * III, one on Zorro II). */
+#define SDK_AUDIO_RING_SLOT_MAX 2U
+
+/* Producer-line flags. PAUSED suppresses cursor progress but never
+ * suspends the heartbeat (R12). Firmware rejects lines carrying
+ * unknown flag bits. */
+#define SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED (1U << 0)
+#define SDK_AUDIO_RING_PRODUCER_FLAG_KNOWN \
+	SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED
+
+/* Firmware-line status. REVOKED_HEARTBEAT and FAULT_CURSOR both
+ * invalidate the generation: consumption stops and the slot may be
+ * re-acquired without a card reset (R13, KTD4). */
+#define SDK_AUDIO_RING_STATUS_OK                0U
+#define SDK_AUDIO_RING_STATUS_REVOKED_HEARTBEAT 1U
+#define SDK_AUDIO_RING_STATUS_FAULT_CURSOR      2U
+
+/* Heartbeat age reported by FABRIC_STATE_GET when firmware has no
+ * measurement for the slot (free, or not yet wired by the
+ * direct-ring lifecycle). */
+#define SDK_AUDIO_RING_HEARTBEAT_UNKNOWN 0xffffffffU
+
+/* Per-slot status reported by SDK_OP_AUDIO_FABRIC_STATE_GET. */
+#define SDK_AUDIO_FABRIC_SLOT_FREE    0U
+#define SDK_AUDIO_FABRIC_SLOT_LEASED  1U
+#define SDK_AUDIO_FABRIC_SLOT_ACTIVE  2U
+#define SDK_AUDIO_FABRIC_SLOT_REVOKED 3U
+
+/* Producer-owned control line. sequence is the even/odd seqlock
+ * (even = a stable snapshot, odd = an update in flight). generation
+ * must match the active lease or firmware ignores the line (R4).
+ * write_cursor is the monotonic 64-bit count of PCM bytes made
+ * visible to firmware, published only after the matching PCM bytes
+ * are committed (R6). heartbeat is a producer-refreshed liveness
+ * token: any change refreshes it, and firmware measures its age
+ * against its own clock (R11). flags carries
+ * SDK_AUDIO_RING_PRODUCER_FLAG_*. */
+struct SDKAudioRingProducerLine {
+	uint8_t sequence[4];
+	uint8_t generation[4];
+	uint8_t write_cursor_hi[4];
+	uint8_t write_cursor_lo[4];
+	uint8_t heartbeat[4];
+	uint8_t flags[4];
+	uint8_t reserved[40];
+};
+
+/* Firmware-owned control line. sequence is the even/odd seqlock.
+ * generation mirrors the lease the credits belong to: a differing
+ * generation means the lease was revoked and the credits are void.
+ * consumed_cursor is the monotonic 64-bit count of PCM bytes
+ * firmware has consumed -- ring credit the producer may overwrite
+ * (R7). status is a SDK_AUDIO_RING_STATUS_* value. */
+struct SDKAudioRingFirmwareLine {
+	uint8_t sequence[4];
+	uint8_t generation[4];
+	uint8_t consumed_cursor_hi[4];
+	uint8_t consumed_cursor_lo[4];
+	uint8_t status[4];
+	uint8_t reserved[44];
+};
+
+/* Producer intent for one direct-ring slot (SDK_OP_AUDIO_RING_ACQUIRE).
+ * identity reuses the meter vocabulary (SDK_AUDIO_METER_IDENTITY_*);
+ * gain is the single 0..255 mixer scale (128 = unity). flags is
+ * REQUIRED ZERO: a nonzero flags word is rejected
+ * SDK_STATUS_BAD_REQUEST (the bypass path consumes 48 kHz stereo
+ * S16LE only). */
+struct SDKAudioRingAcquirePayload {
+	uint8_t slot[4];
+	uint8_t identity[4];
+	uint8_t gain[4];
+	uint8_t flags[4];
+	uint8_t reserved[32];
+};
+
+/* The generation-bound grant (R1, R3): every address and capacity
+ * the producer may use is derived from this result -- clients never
+ * hard-code board offsets or ring sizes. ring_offset and
+ * control_offset are board-visible offsets of the PCM ring and the
+ * 128-byte control block, both inside the active board aperture and
+ * non-overlapping with every other granted range (R2). ring_capacity
+ * is a whole number of periods. period_bytes/period_us pin the
+ * 3840-byte 20-ms geometry; sample_contract is a
+ * SDK_AUDIO_RING_CONTRACT_* value. gain_applied is the
+ * scene-composed scale the lease actually runs at: a reduced request
+ * is REPORTED -- with SDK_AUDIO_RING_RESULT_GAIN_BOUNDED in flags --
+ * never silently clamped (the trim-bound pattern). slot_count is the
+ * actual leaseable slot count for the active bus mode (R10), and
+ * flags names the bus so Zorro II compact grants are visible as
+ * such. generation is the revocation token: release and every
+ * control-line publication carry it, and firmware rejects state
+ * whose generation differs (R4). */
+struct SDKAudioRingAcquireResultPayload {
+	uint8_t slot[4];
+	uint8_t generation[4];
+	uint8_t ring_offset[4];
+	uint8_t ring_capacity[4];
+	uint8_t control_offset[4];
+	uint8_t period_bytes[4];
+	uint8_t period_us[4];
+	uint8_t sample_contract[4];
+	uint8_t gain_applied[4];
+	uint8_t slot_count[4];
+	uint8_t flags[4];
+	uint8_t reserved[4];
+};
+
+/* Surrender a direct-ring slot (SDK_OP_AUDIO_RING_RELEASE). slot +
+ * generation identify the grant exactly as acquired; releasing a
+ * stale generation is idempotent (the slot may already have been
+ * revoked). flags is REQUIRED ZERO. No result payload is reserved:
+ * the completion status is the whole contract. */
+struct SDKAudioRingReleasePayload {
+	uint8_t slot[4];
+	uint8_t generation[4];
+	uint8_t flags[4];
+	uint8_t reserved[36];
+};
+
+/* Request one slot's fabric state; slot selects the compositor slot
+ * to report (0 = the pump). */
+struct SDKAudioFabricStateGetPayload {
+	uint8_t slot[4];
+	uint8_t flags[4];
+	uint8_t reserved[40];
+};
+
+/* One framed, non-tearing snapshot of one slot (R16): all words of a
+ * read carry the same generation; a differing generation across
+ * reads means the snapshot tore and must be retried. state is a
+ * SDK_AUDIO_FABRIC_SLOT_* value (REVOKED = the generation was
+ * invalidated by heartbeat expiry or a cursor fault). heartbeat_ms
+ * is the firmware-measured age of the producer's heartbeat token
+ * (SDK_AUDIO_RING_HEARTBEAT_UNKNOWN while free or unmeasured).
+ * cursor_write/cursor_read are the full 64-bit monotonic
+ * produced/consumed byte cursors of the slot's ring.
+ * starvation_count saturates, never wraps. peak is the slot's source
+ * peak-hold, unsigned 16.16 (0x00010000 = digital full scale),
+ * consumed by a SDK_AUDIO_FABRIC_STATE_HOLD_RESET read per the
+ * scene-meter convention (the next compositor source read opens a
+ * fresh window); clip counts at-rail source regions and is monotonic
+ * within the lease. */
+struct SDKAudioFabricStateResultPayload {
+	uint8_t slot[4];
+	uint8_t generation[4];
+	uint8_t state[4];
+	uint8_t heartbeat_ms[4];
+	uint8_t cursor_write_hi[4];
+	uint8_t cursor_write_lo[4];
+	uint8_t cursor_read_hi[4];
+	uint8_t cursor_read_lo[4];
+	uint8_t starvation_count[4];
+	uint8_t flags[4];
+	uint8_t peak[4];
+	uint8_t clip[4];
+};
+
+/* Acquire-result flags: the scene composition reduced the requested
+ * gain (see gain_applied), and the grant lives on the Zorro II
+ * single-slot compact geometry. */
+#define SDK_AUDIO_RING_RESULT_GAIN_BOUNDED (1U << 0)
+#define SDK_AUDIO_RING_RESULT_BUS_ZORRO2   (1U << 1)
+
+/* FABRIC_STATE_GET request flag: consume the slot's peak-hold
+ * window on this read (mirrors SDK_AUDIO_METER_RESULT_HOLD_RESET);
+ * the result's flags word echoes it when the read consumed it. */
+#define SDK_AUDIO_FABRIC_STATE_HOLD_RESET (1U << 0)
+
+typedef char SDKAudioRingAcquirePayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioRingAcquirePayload) == 48U) ? 1 : -1];
+typedef char SDKAudioRingAcquireResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioRingAcquireResultPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioRingReleasePayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioRingReleasePayload) == 48U) ? 1 : -1];
+typedef char SDKAudioFabricStateGetPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioFabricStateGetPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioFabricStateResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioFabricStateResultPayload) == 48U) ? 1 : -1];
+typedef char SDKAudioRingProducerLineIsOneCacheLine[
+	(sizeof(struct SDKAudioRingProducerLine) ==
+	 SDK_AUDIO_RING_CONTROL_LINE_SIZE) ? 1 : -1];
+typedef char SDKAudioRingFirmwareLineIsOneCacheLine[
+	(sizeof(struct SDKAudioRingFirmwareLine) ==
+	 SDK_AUDIO_RING_CONTROL_LINE_SIZE) ? 1 : -1];
+typedef char SDKAudioRingProducerLineFieldOffsets[
+	(offsetof(struct SDKAudioRingProducerLine, generation) == 4U &&
+	 offsetof(struct SDKAudioRingProducerLine, write_cursor_hi) == 8U &&
+	 offsetof(struct SDKAudioRingProducerLine, write_cursor_lo) == 12U &&
+	 offsetof(struct SDKAudioRingProducerLine, heartbeat) == 16U &&
+	 offsetof(struct SDKAudioRingProducerLine, flags) == 20U) ? 1 : -1];
+typedef char SDKAudioRingFirmwareLineFieldOffsets[
+	(offsetof(struct SDKAudioRingFirmwareLine, generation) == 4U &&
+	 offsetof(struct SDKAudioRingFirmwareLine, consumed_cursor_hi) == 8U &&
+	 offsetof(struct SDKAudioRingFirmwareLine, consumed_cursor_lo) == 12U &&
+	 offsetof(struct SDKAudioRingFirmwareLine, status) == 16U) ? 1 : -1];
+typedef char SDKAudioRingControlBlockIsTwoLines[
+	(SDK_AUDIO_RING_CONTROL_SIZE ==
+	 2U * SDK_AUDIO_RING_CONTROL_LINE_SIZE &&
+	 SDK_AUDIO_RING_CONTROL_ALIGN ==
+	 SDK_AUDIO_RING_CONTROL_LINE_SIZE) ? 1 : -1];
+typedef char SDKAudioFabricStateTailIsAppendOnly[
+	(offsetof(struct SDKAudioFabricStateResultPayload,
+	          starvation_count) == 32U &&
+	 offsetof(struct SDKAudioFabricStateResultPayload, flags) == 36U &&
+	 offsetof(struct SDKAudioFabricStateResultPayload, peak) == 40U &&
+	 offsetof(struct SDKAudioFabricStateResultPayload, clip) == 44U) ?
+		1 : -1];
+
 /* Non-volatile big-endian word accessors shared by the control-plane
  * dispatch and any payload pack/unpack that reads plain buffers. */
 static inline uint32_t sdk_get_be32(const uint8_t *p)
@@ -940,16 +1209,11 @@ void sdk_mailbox_poison_core1_audio_streams(void);
  * queued. */
 int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
                                  uint32_t params_len);
-/* AX playback pump, split in two:
- *  - sdk_mailbox_audio_playback_pump_isr: TX-fill half, called from the
- *    audio-formatter period interrupt (isr_audio, every 20 ms) so
- *    main-loop load cannot starve the TX frontier. Integer-only.
- *  - sdk_mailbox_audio_playback_pump: core-1 refill kick, call from the
- *    core-0 main loop every pass.
- * Both are no-ops when nothing is bound. */
+/* AX playback pump, core-1 refill kick: call from the core-0 main
+ * loop every pass. No-op when nothing is bound. The TX-fill half is
+ * the audio fabric compositor (audio_fabric_isr, audio_fabric.h)
+ * since U2. */
 void sdk_mailbox_audio_playback_pump(void);
-void sdk_mailbox_audio_playback_pump_isr(void);
-int sdk_mailbox_audio_playback_active(void);
 
 /*
  * Run a crypto task's compute on the calling core. op_params points at one of

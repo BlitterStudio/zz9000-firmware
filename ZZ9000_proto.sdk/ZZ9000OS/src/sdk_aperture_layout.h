@@ -9,15 +9,24 @@
 #include <stdint.h>
 
 /*
- * Generation-1 Zorro II aperture contract.
+ * Generation-2 Zorro II aperture contract.
  *
  * The FPGA exposes the exact aperture byte count to the ARM through AXI slot
  * 7 and exposes SDK_APERTURE_INFO_WORD() to the host at board offset 0x111c.
  * A matching host writes SDK_APERTURE_ACK_TOKEN to that register before it
- * uses any generation-1 dynamic region.  The acknowledgement is deliberately
- * generation-specific: a newer layout can never silently reuse these ranges.
+ * uses any generation-2 dynamic region.  Both the token's low byte and the
+ * info word's generation field encode the layout generation, so a host
+ * built against an older contract can never acknowledge this one and a
+ * newer layout can never silently reuse these ranges.
+ *
+ * Generation 2 shrinks the host-window heap to 16 KiB (80 KiB on the 8 MiB
+ * profile) and reserves the 48 KiB directly above it, under the audio
+ * scratch, for the single Z2 audio direct-ring grant
+ * (SDK_AUDIO_DIRECT_RING_Z2_* in memorymap.h).  The reservation is not a
+ * payload region: clients learn its geometry only from the
+ * SDK_OP_AUDIO_RING_ACQUIRE grant.
  */
-#define SDK_APERTURE_LAYOUT_GENERATION       1U
+#define SDK_APERTURE_LAYOUT_GENERATION       2U
 #define SDK_APERTURE_INFO_MAGIC              0x5a000000UL
 #define SDK_APERTURE_INFO_MAGIC_MASK         0xff000000UL
 #define SDK_APERTURE_INFO_GENERATION_SHIFT   16U
@@ -26,7 +35,7 @@
 #define SDK_APERTURE_INFO_FLAG_HOST_WINDOW   0x00000400UL
 #define SDK_APERTURE_INFO_FLAG_PIP_POOL      0x00000200UL
 #define SDK_APERTURE_INFO_SIZE_MIB_MASK      0x000000ffUL
-#define SDK_APERTURE_ACK_TOKEN               0xa501U
+#define SDK_APERTURE_ACK_TOKEN               0xa502U
 
 #define SDK_APERTURE_BYTES_2M                0x00200000UL
 #define SDK_APERTURE_BYTES_4M                0x00400000UL

@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "sdk_aperture_layout.h"
+#include "memorymap.h"
 
 #define KIB(x) ((uint32_t)(x) * 1024U)
 
@@ -53,19 +54,23 @@ static int build_canonical_layout(uint32_t aperture_size,
 		return 0;
 	memset(layout, 0, sizeof(*layout));
 
+	/* Generation 2: every profile gives up the top 48 KiB of its host
+	 * window to the direct-ring reservation below the audio scratch.
+	 * The 2 MB and 4 MB heaps drop from 64 KiB to 16 KiB; the 8 MiB
+	 * profile keeps 80 KiB of its former 128 KiB. */
 	switch (aperture_size) {
 	case SDK_APERTURE_BYTES_2M:
 		pip_size = 0U;
-		host_size = KIB(64);
+		host_size = KIB(16);
 		break;
 	case SDK_APERTURE_BYTES_4M:
 		pip_size = KIB(224);
-		host_size = KIB(64);
+		host_size = KIB(16);
 		flags |= SDK_APERTURE_FLAG_PIP_POOL;
 		break;
 	case SDK_APERTURE_BYTES_8M:
 		pip_size = KIB(256);
-		host_size = KIB(128);
+		host_size = KIB(80);
 		flags |= SDK_APERTURE_FLAG_PIP_POOL;
 		break;
 	default:
@@ -77,19 +82,22 @@ static int build_canonical_layout(uint32_t aperture_size,
 	layout->aperture_size = aperture_size;
 	layout->audio.size = KIB(64);
 	layout->audio.base = aperture_size - layout->audio.size;
+	/* The 48 KiB direct-ring reservation (memorymap.h) is the fixed gap
+	 * between the host heap and the audio scratch; the heap keeps the
+	 * low end of the old region so fallback addressing is unchanged. */
 	layout->host_window.size = host_size;
-	layout->host_window.base = layout->audio.base - host_size;
+	layout->host_window.base = layout->audio.base -
+		(SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE + host_size);
 	layout->template_scratch.size = KIB(64);
 	layout->template_scratch.base =
 		layout->host_window.base - layout->template_scratch.size;
 	layout->pip.size = pip_size;
 	layout->pip.base = layout->template_scratch.base - pip_size;
-
 	/* The 2 MB profile deliberately preserves the old driver boundary:
 	 * framebuffer size was BoardSize - 0x40000 from board offset 0x10000,
 	 * ending at BoardSize - 0x30000.  Its PIP-sized gap is empty, leaving
-	 * the old visible VRAM unchanged while naming the spare 64 KB as the
-	 * aperture-relative host heap. */
+	 * the old visible VRAM unchanged while the spare 64 KB above it is
+	 * the aperture-relative host heap plus the direct-ring reservation. */
 	top = pip_size != 0U ? layout->pip.base :
 		(aperture_size - 0x00030000U);
 	layout->framebuffer.base = SDK_APERTURE_FRAMEBUFFER_BASE;

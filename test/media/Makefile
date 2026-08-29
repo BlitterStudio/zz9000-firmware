@@ -9,7 +9,8 @@ test: build/media_session_test build/video_stream_test \
 	build/media_session_test
 	build/video_stream_test
 	build/media_overlay_source_test \
-		$(FIRMWARE_SRC)/sdk_media_session.c $(FIRMWARE_SRC)/overlay.c
+		$(FIRMWARE_SRC)/sdk_media_session.c $(FIRMWARE_SRC)/overlay.c \
+		$(FIRMWARE_SRC)/video.c
 
 build/media_session_test: media_session_test.c \
 	$(FIRMWARE_SRC)/sdk_media_session.c \
@@ -37,7 +38,8 @@ build/video_stream_test: video_stream_test.c mock/xil_cache.h \
 		-I$(FIRMWARE_SRC) -o $@ video_stream_test.c \
 		$(FIRMWARE_SRC)/sdk_video_stream.c
 
-build/media_overlay_source_test: media_overlay_source_test.c
+build/media_overlay_source_test: media_overlay_source_test.c \
+	$(FIRMWARE_SRC)/video.c
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ media_overlay_source_test.c
 

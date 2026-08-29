@@ -2078,6 +2078,63 @@ int audio_scene_trim_release(uint8_t owner)
 	return 0;
 }
 
+int audio_scene_lease_gain_compose(uint32_t requested,
+	struct audio_scene_lease_gain_result *result)
+{
+	struct volume_resolution vol;
+	struct mixer_stage stage;
+	double master;
+	double allowed_ax;
+	double bound;
+	uint32_t applied;
+
+	if (result != NULL)
+		memset(result, 0, sizeof(*result));
+	if (requested > 255U)
+		return -1;
+
+	/* The legs the current composition leaves applied under the
+	 * active scene (the same resolution restage_mixer feeds the
+	 * DSP): the lease rides the AX leg, so its linear boost scales
+	 * exactly that leg while the Paula leg holds its share of the
+	 * boundary budget. A silent chain (master at zero) can never
+	 * compose above anything -- the boost passes through, mirroring
+	 * compute_mixer_stage's silent-chain rule. */
+	resolve_output_volume(&scenes[active_scene_index], &vol);
+	compute_mixer_stage(vol.chain_linear * vol.linear, &stage);
+	if (vol.chain_linear * vol.linear <= 0.0 || stage.ax == 0U) {
+		if (result != NULL) {
+			result->applied = (uint8_t)requested;
+			result->gain_bound = 255.0;
+		}
+		return 0;
+	}
+
+	/* Boundary budget left for the boosted AX leg: the enforced
+	 * boundary over the master chain, minus the Paula leg's
+	 * weighted share. compute_mixer_stage already bounded the pair,
+	 * so the remainder is never below the un-boosted leg: unity is
+	 * never bounded away, only boost above it. */
+	master = vol.chain_linear * vol.linear;
+	allowed_ax = audio_scene_enforced_boundary() / master -
+		(double)stage.paula * paula_weight();
+	if (allowed_ax < 0.0)
+		allowed_ax = 0.0;
+	bound = 128.0 * allowed_ax / (double)stage.ax;
+
+	applied = (uint32_t)bound;   /* floor: never round above the bound */
+	if (applied > 255U)
+		applied = 255U;
+	if (requested < applied)
+		applied = requested;
+	if (result != NULL) {
+		result->applied = (uint8_t)applied;
+		result->bounded = applied < requested;
+		result->gain_bound = bound;
+	}
+	return 0;
+}
+
 int audio_scene_authority_active(void)
 {
 	return authority_claimed;

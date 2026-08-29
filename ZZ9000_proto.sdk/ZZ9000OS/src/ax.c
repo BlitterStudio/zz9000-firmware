@@ -10,6 +10,7 @@
 #include "xi2srx.h"
 #include "xaudioformatter.h"
 #include "xil_cache.h"
+#include "xil_mmu.h"
 #include "mntzorro.h"
 #include "interrupt.h"
 #include "sleep.h"
@@ -18,8 +19,9 @@
 #include "audio_capture.h"
 #include "audio_convert.h"
 #include "audio_scene.h"
-#include "audio_playback_rate.h"
 #include "audio_dsp_gain.h"
+#include "audio_playback_rate.h"
+#include "audio_fabric.h"
 #include "memorymap.h"
 #include "xtime_l.h"
 #include "math.h"
@@ -799,10 +801,7 @@ void audio_debug_timer(int zdata) {
 
 int isra_count = 0;
 
-// TX-fill half of the SDK playback pump (sdk_mailbox.c); ISR-safe.
-extern void sdk_mailbox_audio_playback_pump_isr(void);
-// Nonzero while a pump session owns the formatter TX (sdk_mailbox.c).
-extern int sdk_mailbox_audio_playback_active(void);
+// Audio fabric compositor TX tick (audio_fabric.c); ISR-safe.
 
 // audio formatter interrupt, triggered whenever a period is completed
 void isr_audio(void *dummy) {
@@ -830,11 +829,12 @@ void isr_audio(void *dummy) {
 		isra_count = 0;
 	}
 
-	// Keep the TX ring filled from the bound audio-stream session on a
-	// guaranteed 20 ms cadence: main-loop passes stretched by RTG or
-	// network load previously let the DMA overrun the fill frontier
-	// and glitch MP3 playback. No-op when no session is bound.
-	sdk_mailbox_audio_playback_pump_isr();
+	// Keep the TX ring filled on a guaranteed 20 ms cadence: the
+	// fabric compositor is the sole TX-ring writer while any SDK
+	// producer is bound (main-loop passes stretched by RTG or network
+	// load previously let the DMA overrun the fill frontier and
+	// glitch MP3 playback). No-op when no producer is live.
+	audio_fabric_isr();
 
 	/* U3 metering: bounded per-period peak scan (960 frames) of
 	 * every TX period completed since the previous IRQ -- normally
@@ -847,7 +847,7 @@ void isr_audio(void *dummy) {
 	 * risk; fallback is producer-side peak accumulation). */
 	if (audio_inited_tx_buffer != NULL &&
 	    (audio_legacy_output_active() ||
-	     sdk_mailbox_audio_playback_active())) {
+	     audio_fabric_output_busy())) {
 		if (audio_tx_meter_last_period < 0) {
 			audio_tx_meter_last_period = (int8_t)completed_period;
 		} else {
@@ -876,7 +876,7 @@ void isr_audio(void *dummy) {
 	 * (audio_swab); a completed period with an unchanged sequence
 	 * played unfilled audio. */
 	if (audio_legacy_output_active() &&
-	    !sdk_mailbox_audio_playback_active())
+	    !audio_fabric_output_busy())
 		audio_scene_meter_output_producer_tick(
 			audio_tx_producer_seq);
 
@@ -1140,6 +1140,45 @@ void reset_resampling() {
 void audio_set_tx_buffer(uint8_t* addr) {
 	printf("[audio] set tx buffer: %p\n", addr);
 	audio_tx_buffer = addr;
+	/*
+	 * Permanent coherency fix (two-client drop diagnosis, 2026-08): the
+	 * audio/fabric 1-MiB section at 0x3FC00000 holds the formatter TX
+	 * and RX rings, both direct-lease PCM rings, and their control
+	 * lines. Cached CPU access there is provably incoherent with the
+	 * Zorro producer writes: post-invalidate reads served stale L1/L2
+	 * lines (hex-dump proof: freshly invalidated reads returning
+	 * phase-shifted stale audio into the mix -- audible cancellation
+	 * dips with two identical tones. Mapping the section non-cacheable
+	 * removes the entire stale-line class; the flush/invalidate calls
+	 * on this section elsewhere become harmless no-ops on clean lines.
+	 */
+	{
+		static uint8_t audio_section_remapped;
+
+		if (!audio_section_remapped) {
+			audio_section_remapped = 1U;
+			Xil_DCacheFlushRange((INTPTR)addr,
+				AUDIO_TX_BUFFER_SIZE);
+			Xil_SetTlbAttributes((UINTPTR)addr, NORM_NONCACHE);
+			/* The direct-lease PCM rings and control lines on
+			 * Zorro III live in the SDK low-DDR section
+			 * (0x08100000: reserve 0x081C0000-0x081E0000 plus
+			 * the Z3 audio scratch). That section holds nothing
+			 * the CPU touches cached (the local surface heap
+			 * ends at 0x08000000), so mapping it non-cacheable
+			 * removes the same stale-line class for the lease
+			 * plane at no cost (PR #88 review: the TX remap
+			 * alone never covered the grants). On Zorro II the
+			 * grant sits inside the aperture window beside
+			 * PIP/framebuffer regions the CPU writes cached,
+			 * so it keeps the qualified per-range invalidates
+			 * instead of a whole-section remap. */
+			Xil_SetTlbAttributes(
+				(UINTPTR)0x08100000UL, NORM_NONCACHE);
+			printf("[audio] audio + direct-ring sections mapped "
+			       "non-cacheable\r\n");
+		}
+	}
 	reset_resampling();
 	/* U3 metering: a buffer reassignment breaks TX period
 	 * continuity; resume peak scanning at the next completed

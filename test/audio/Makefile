@@ -10,19 +10,27 @@ PROFILE_TARGET := $(BUILD_DIR)/audio_profile_test
 PLAYBACK_TARGET := $(BUILD_DIR)/audio_playback_frontier_test
 RATE_TARGET := $(BUILD_DIR)/audio_playback_rate_test
 DRAIN_TARGET := $(BUILD_DIR)/audio_stream_drain_test
+PRECONVERT_TARGET := $(BUILD_DIR)/audio_pump_preconvert_test
 SCENE_TARGET := $(BUILD_DIR)/audio_scene_test
 METER_TARGET := $(BUILD_DIR)/audio_meter_test
 CONTROL_TARGET := $(BUILD_DIR)/audio_control_test
 CONFIG_TARGET := $(BUILD_DIR)/audio_config_test
 MP3_PROBE_TARGET := $(BUILD_DIR)/mp3_frame_probe_test
 MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
+FABRIC_TARGET := $(BUILD_DIR)/audio_fabric_test
+RING_TARGET := $(BUILD_DIR)/audio_fabric_ring_test
 TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
-	$(PLAYBACK_TARGET) $(RATE_TARGET) $(DRAIN_TARGET) $(SCENE_TARGET) \
-	$(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
-	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET)
+	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) $(DRAIN_TARGET) \
+	$(SCENE_TARGET) $(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
+	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(FABRIC_TARGET) \
+	$(RING_TARGET)
 
 # mock/ shadows ff.h and xil_cache.h for the TUs (zz_config.c) whose
-# real firmware dependencies are FatFs and the Zynq cache API.
+# real firmware dependencies are FatFs and the Zynq cache API. The
+# fabric lease test additionally compiles xil_cache.h in recording
+# mode (-DXIL_CACHE_MOCK_RECORD) so its cache-fidelity scenario can
+# assert the exact invalidate/flush ranges; every other target keeps
+# the no-op stubs.
 CPPFLAGS += -I$(MOCK_DIR) -I$(SRC_DIR)
 
 .PHONY: test clean check-tables
@@ -31,6 +39,7 @@ test: $(TARGETS)
 	$(CONVERT_TARGET)
 	$(CAPTURE_TARGET)
 	$(RATE_TARGET)
+	$(PRECONVERT_TARGET)
 	$(PROFILE_TARGET)
 	$(PLAYBACK_TARGET)
 	$(DRAIN_TARGET)
@@ -39,6 +48,50 @@ test: $(TARGETS)
 	$(METER_TARGET)
 	$(CONTROL_TARGET)
 	$(MPEG_LAYER2_TARGET)
+	$(FABRIC_TARGET) --srcdir $(SRC_DIR)
+	$(RING_TARGET)
+
+# U2 fabric compositor: the characterization golden (pump_golden.c, a
+# verbatim capture of the pre-fabric pump) drives the parity scenarios
+# against audio_fabric.c + audio_fabric_lease.c through the host seam
+# stubs in the shared harness (fabric_test_common.c).
+$(FABRIC_TARGET): audio_fabric_test.c pump_golden.c pump_golden.h \
+	fabric_test_common.c fabric_test_common.h \
+	$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
+	$(SRC_DIR)/audio_fabric.h $(SRC_DIR)/audio_fabric_internal.h \
+	$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert.h \
+	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h \
+	$(SRC_DIR)/audio_playback_frontier.h $(SRC_DIR)/ax.h \
+	$(SRC_DIR)/memorymap.h $(SRC_DIR)/sdk_mailbox.h \
+	$(MOCK_DIR)/xil_cache.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DAUDIO_FABRIC_HOST_TEST \
+		-o $@ audio_fabric_test.c \
+		pump_golden.c fabric_test_common.c \
+		$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
+		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
+
+# U3 direct-ring lease plane: the SDK-facing acquire/release/state API
+# against the same two firmware TUs, with xil_cache.h compiled in
+# recording mode so the cache-fidelity scenario asserts the exact
+# invalidate/flush ranges.
+$(RING_TARGET): audio_fabric_ring_test.c \
+	fabric_test_common.c fabric_test_common.h \
+	$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
+	$(SRC_DIR)/audio_fabric.h $(SRC_DIR)/audio_fabric_internal.h \
+	$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert.h \
+	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h \
+	$(SRC_DIR)/audio_playback_frontier.h $(SRC_DIR)/ax.h \
+	$(SRC_DIR)/memorymap.h $(SRC_DIR)/sdk_mailbox.h \
+	$(SRC_DIR)/sdk_aperture_layout.h \
+	$(MOCK_DIR)/xil_cache.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DAUDIO_FABRIC_HOST_TEST \
+		-DXIL_CACHE_MOCK_RECORD \
+		-o $@ audio_fabric_ring_test.c fabric_test_common.c \
+		$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
+		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
+
 $(CONVERT_TARGET): audio_convert_test.c $(SRC_DIR)/audio_convert.c \
 	$(SRC_DIR)/audio_convert.h $(SRC_DIR)/audio_convert_tables.c \
 	$(SRC_DIR)/audio_convert_tables.h
@@ -73,6 +126,16 @@ $(RATE_TARGET): audio_playback_rate_test.c $(SRC_DIR)/audio_playback_rate.h \
 	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_playback_rate_test.c \
+		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
+
+$(PRECONVERT_TARGET): audio_pump_preconvert_test.c \
+	$(SRC_DIR)/audio_pump_preconvert.c \
+	$(SRC_DIR)/audio_pump_preconvert.h \
+	$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert.h \
+	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_pump_preconvert_test.c \
+		$(SRC_DIR)/audio_pump_preconvert.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 
 $(DRAIN_TARGET): audio_stream_drain_test.c \

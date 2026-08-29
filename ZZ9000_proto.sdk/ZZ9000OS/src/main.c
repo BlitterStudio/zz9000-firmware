@@ -57,6 +57,7 @@ void Xil_AssertNonVoid() {}
 #include "ax.h"
 #include "audio_capture.h"
 #include "audio_scene.h"
+#include "audio_fabric.h"
 #include "watchdog.h"
 #include "mp3/mp3.h"
 
@@ -323,7 +324,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	// the overlay shadows lived in that heap: drop the overlay too
 	overlay_amiga_reset(video_state);
 
-	/* The generation-1 Z2 command block is host-visible template scratch and
+	/* The generation-2 Z2 command block is host-visible template scratch and
 	 * must be acknowledged again after every Amiga reset. Z3 keeps its fixed
 	 * command block. */
 	sdk_aperture_runtime_init(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7),
@@ -377,6 +378,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
 	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
 }
+
 
 int main() {
 	init_platform();
@@ -557,6 +559,12 @@ int main() {
 	while (1) {
 		watchdog_kick();
 		sd_activity_led_poll();
+#ifdef AUDIO_FABRIC_BENCH
+		/* Instrument build (U5): one aggregate cost report per
+		 * second on the console; compiles away entirely in
+		 * production builds. */
+		audio_fabric_bench_poll();
+#endif
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
 		if (usb_read_pending) {
 			usb_status = zz_usb_read_blocks(0, usb_storage_read_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
@@ -1370,12 +1378,17 @@ int main() {
 					// audio config
 					uint16_t mask = (uint16_t)zdata;
 
-					/* A bound SDK/media session owns the formatter TX
-					 * target. Legacy/AHI register writes have no reply
-					 * channel for BUSY, so reject their PLAY bit here
-					 * rather than silently retargeting live direct audio.
-					 * Capture remains independently usable. */
-					if (sdk_mailbox_audio_playback_active())
+					/* The audio fabric owns the formatter
+					 * TX target from the first SDK
+					 * producer bind (stream or media
+					 * session, U2). Legacy/AHI register
+					 * writes have no reply channel for
+					 * BUSY, so reject their PLAY bit
+					 * here rather than silently
+					 * retargeting live fabric audio.
+					 * Capture remains independently
+					 * usable. */
+					if (audio_fabric_output_busy())
 						mask &= ~ZZ_AUDIO_CONFIG_PLAY;
 					audio_set_interrupt_mask(mask);
 					break;
@@ -1439,7 +1452,11 @@ int main() {
 						int byteswap = 1;
 						if (zdata&(1<<15)) byteswap = 0;
 						audio_offset = (zdata&0x7fff)<<8; // *256
-						if (!sdk_mailbox_audio_playback_active())
+						/* Fabric-owned output: the
+						 * compositor is the sole TX
+						 * writer; the legacy window
+						 * write is dropped. */
+						if (!audio_fabric_output_busy())
 							audio_buffer_collision = audio_swab(
 								audio_scale, audio_offset, byteswap);
 
@@ -1465,7 +1482,7 @@ int main() {
 					if (audio_param == AP_TX_BUF_OFFS_LO) {
 						uint8_t* addr = (uint8_t*)video_state->framebuffer +
 								((audio_params[AP_TX_BUF_OFFS_HI]<<16)|audio_params[AP_TX_BUF_OFFS_LO]);
-						if (sdk_mailbox_audio_playback_active()) {
+						if (audio_fabric_output_busy()) {
 							printf("[audio] TX owner busy\n");
 						} else if (((uint32_t)addr-(uint32_t)video_state->framebuffer)<0x100000*128) {
 							audio_set_tx_buffer(addr);

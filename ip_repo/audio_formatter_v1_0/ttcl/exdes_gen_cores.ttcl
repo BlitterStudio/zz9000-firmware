@@ -1,0 +1,70 @@
+<: ;#Component and file information :>
+<: set ComponentName [getComponentNameString] :>
+<: setOutputDirectory [ttcl_string_concat "./" $ComponentName "/example_design"] :>
+<: setFileName "exdes_gen_cores" :>
+<: setFileExtension ".tcl" :>
+<: set family [getProjectFamily] :>
+<: set mm2s_enabled [getIntValue "C_INCLUDE_MM2S"] :>
+<: set s2mm_enabled [getIntValue "C_INCLUDE_S2MM"] :>
+<: set mm2s_data_format [getIntValue "C_MM2S_DATAFORMAT"] :>
+<: set c_packaging_mode_mm2s [getIntValue "C_PACKING_MODE_MM2S"] :>
+<: set addr_width_mm2s [getIntValue "C_MM2S_ADDR_WIDTH"] :>
+<: set async_mm2s [getIntValue "C_MM2S_ASYNC_CLOCK"] :>
+<: if {$mm2s_data_format > 1} { :>
+<: 	set c_dataformat_gen 2 :>
+<: } else { :>
+<: 	set c_dataformat_gen 0 :>
+<: } :>
+
+
+<: if {[string first "everest" $family] == -1} { :>
+
+create_ip -name clk_wiz  -vendor xilinx.com -library ip -module_name clk_wiz_0
+set_property -dict [list CONFIG.PRIM_SOURCE {Single_ended_clock_capable_pin} CONFIG.PRIM_IN_FREQ {100.000} CONFIG.CLKOUT2_USED {true} CONFIG.CLKOUT3_USED {true} CONFIG.CLKOUT4_USED {true} CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {33} CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {50.000} CONFIG.CLKOUT3_REQUESTED_OUT_FREQ {24.576} CONFIG.CLKOUT4_REQUESTED_OUT_FREQ {70}] [get_ips clk_wiz_0]
+generate_target all [get_ips clk_wiz_0]
+
+
+<: } else { :>
+create_ip -name clk_wizard -vendor xilinx.com -library ip -module_name clk_wiz_0
+set_property -dict [list CONFIG.USE_RESET {true} CONFIG.USE_LOCKED {true} CONFIG.PRIM_IN_FREQ {100.000} CONFIG.PRIM_SOURCE {Single_ended_clock_capable_pin} CONFIG.CLKOUT_USED {true,true,true,true,false,false,false} CONFIG.CLKOUT_PORT {clk_out1,clk_out2,clk_out3,clk_out4,clk_out5,clk_out6,clk_out7} CONFIG.CLKOUT_REQUESTED_OUT_FREQUENCY {33,50,24.576,70.000,100.000,100.000,100.000}] [get_ips clk_wiz_0]
+generate_target all [get_ips clk_wiz_0]
+
+
+<: } :>
+
+create_ip -name axi_bram_ctrl -vendor xilinx.com -library ip -module_name axi_bram_ctrl_0
+set_property -dict [list CONFIG.SUPPORTS_NARROW_BURST {0} CONFIG.SINGLE_PORT_BRAM {1} CONFIG.DATA_WIDTH 32 CONFIG.MEM_DEPTH {1024}] [get_ips axi_bram_ctrl_0]
+generate_target all [get_ips axi_bram_ctrl_0]
+
+
+create_ip -name axi_traffic_gen -vendor xilinx.com -library ip -module_name axi_traffic_gen_0
+set coe1 [lindex [get_property name [get_files *atg_addr.coe]] 0 ]
+set coe2 [lindex [get_property name [get_files *atg_mask.coe]] 0 ]
+set coe3 [lindex [get_property name [get_files *atg_ctrl.coe]] 0 ]
+set coe4 [lindex [get_property name [get_files *atg_data.coe]] 0 ]
+set_property -dict [list CONFIG.C_ATG_MODE {AXI4-Lite} CONFIG.C_ATG_SYSINIT_MODES {System_Test} CONFIG.C_ATG_MIF_DATA_DEPTH {16} CONFIG.C_ATG_SYSTEM_TEST_MAX_CLKS {2147483647} CONFIG.C_ATG_SYSTEM_CMD_MAX_RETRY {2147483647} CONFIG.C_ATG_SYSTEM_INIT_ADDR_MIF $coe1 CONFIG.C_ATG_SYSTEM_INIT_MASK_MIF $coe2 CONFIG.C_ATG_SYSTEM_INIT_CTRL_MIF $coe3 CONFIG.C_ATG_SYSTEM_INIT_DATA_MIF $coe4] [get_ips axi_traffic_gen_0]
+generate_target all [get_ips axi_traffic_gen_0]
+
+<: if {$mm2s_enabled == 1} { :>
+
+create_ip -name axi_traffic_gen -vendor xilinx.com -library ip -module_name axi_traffic_gen_1
+set acoe1 [lindex [get_property name [get_files *atg_addr_1.coe]] 0 ]
+set acoe2 [lindex [get_property name [get_files *atg_mask_1.coe]] 0 ]
+set acoe3 [lindex [get_property name [get_files *atg_ctrl_1.coe]] 0 ]
+set acoe4 [lindex [get_property name [get_files *atg_data_1.coe]] 0 ]
+set_property -dict [list CONFIG.C_ATG_MODE {AXI4-Lite} CONFIG.C_ATG_SYSINIT_MODES {System_Test} CONFIG.C_ATG_MIF_DATA_DEPTH {16} CONFIG.C_ATG_SYSTEM_TEST_MAX_CLKS {2147483647} CONFIG.C_ATG_SYSTEM_CMD_MAX_RETRY {2147483647} CONFIG.C_ATG_SYSTEM_INIT_ADDR_MIF $acoe1 CONFIG.C_ATG_SYSTEM_INIT_MASK_MIF $acoe2 CONFIG.C_ATG_SYSTEM_INIT_CTRL_MIF $acoe3 CONFIG.C_ATG_SYSTEM_INIT_DATA_MIF $acoe4] [get_ips axi_traffic_gen_1]
+generate_target all [get_ips axi_traffic_gen_1]
+
+create_ip -name audio_formatter -vendor xilinx.com -library ip -module_name audio_formatter_s2mm
+set_property -dict [list CONFIG.C_INCLUDE_MM2S {0} CONFIG.C_INCLUDE_S2MM {1} CONFIG.C_MAX_NUM_CHANNELS_S2MM {2} CONFIG.C_PACKING_MODE_S2MM {<=: $c_packaging_mode_mm2s :>} CONFIG.C_S2MM_DATAFORMAT {<=: $c_dataformat_gen :>} CONFIG.C_S2MM_ADDR_WIDTH {<=: addr_width_mm2s :>} CONFIG.C_S2MM_ASYNC_CLOCK {<=: async_mm2s :>} ] [get_ips audio_formatter_s2mm]
+generate_target all [get_ips audio_formatter_s2mm]
+
+<: } :>
+
+
+
+set_property top <=:$ComponentName:>_exdes [current_fileset]
+update_compile_order -fileset sources_1
+set_property top <=:$ComponentName:>_tb_top [get_filesets sim_1]
+update_compile_order -fileset sim_1
+

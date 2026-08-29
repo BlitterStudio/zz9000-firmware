@@ -22,6 +22,39 @@ static int check_decode_gate(void)
 		MIN_INPUT_BYTES, MIN_INPUT_BYTES, 0, 0);
 }
 
+static int check_decode_quantum(void)
+{
+	if (!audio_stream_decode_quantum_available(0U))
+		return 0;
+	if (!audio_stream_decode_quantum_available(1U))
+		return 0;
+	return !audio_stream_decode_quantum_available(2U);
+}
+
+static int check_feed_dirty_span(void)
+{
+	uint32_t offset;
+	uint32_t length;
+
+	if (audio_stream_feed_dirty_span(
+		    100U, 200U, 0U, 1024U, &offset, &length))
+		return 0;
+	if (audio_stream_feed_dirty_span(
+		    0U, 900U, 200U, 1024U, &offset, &length))
+		return 0;
+	if (!audio_stream_feed_dirty_span(
+		    100U, 200U, 50U, 1024U, &offset, &length) ||
+	    offset != 300U || length != 50U)
+		return 0;
+	if (!audio_stream_feed_dirty_span(
+		    900U, 100U, 100U, 1024U, &offset, &length) ||
+	    offset != 0U || length != 200U)
+		return 0;
+	return audio_stream_feed_dirty_span(
+		       800U, 100U, 124U, 1024U, &offset, &length) &&
+	       offset == 900U && length == 124U;
+}
+
 static int check_source_tail_state(void)
 {
 	if (audio_stream_source_tail_ready(0, 17U, 0, 0))
@@ -74,13 +107,17 @@ int main(void)
 {
 	if (!check_decode_gate())
 		return 1;
-	if (!check_source_tail_state())
+	if (!check_decode_quantum())
 		return 2;
-	if (!check_drain_input_state())
+	if (!check_feed_dirty_span())
 		return 3;
-	if (!check_transient_drain_completion())
+	if (!check_source_tail_state())
 		return 4;
-	if (!check_refill_gate())
+	if (!check_drain_input_state())
 		return 5;
+	if (!check_transient_drain_completion())
+		return 6;
+	if (!check_refill_gate())
+		return 7;
 	return 0;
 }
