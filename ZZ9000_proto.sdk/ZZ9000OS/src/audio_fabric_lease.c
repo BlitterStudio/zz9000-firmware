@@ -524,6 +524,9 @@ void fabric_lease_isr_tick(void)
 				audio_fabric_producer_restart(slot);
 			l->state = (uint8_t)AUDIO_FABRIC_SLOT_STATE_ACTIVE;
 			audio_fabric_producer_go_live(slot);
+#ifndef AUDIO_FABRIC_HOST_TEST
+			audio_fabric_diag_trace_arm();
+#endif
 			FABRIC_LEASE_DIAG("FABRIC-LEASE slot%u ACTIVE gen=%u w=%u "
 				   "paused=%u\r\n",
 				(unsigned int)slot,

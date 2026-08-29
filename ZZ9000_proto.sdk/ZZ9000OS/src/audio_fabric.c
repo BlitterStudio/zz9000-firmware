@@ -99,6 +99,16 @@ static volatile struct {
 	uint32_t retire_periods;
 	uint32_t rebuild_runs;
 	uint32_t printed_isr_calls;
+	/* Per-ISR ground truth for the skip investigation: the first 64
+	 * ISR passes after the first lease goes ACTIVE record
+	 * (xfer, fill, consumed) each; the poll dumps them once. */
+	struct {
+		uint32_t xfer;
+		uint32_t fill;
+		uint32_t consumed;
+	} trace[64];
+	volatile uint32_t trace_len;
+	volatile uint32_t trace_active;
 } g_fabric_diag;
 
 #ifdef AUDIO_FABRIC_HOST_TEST
@@ -341,6 +351,11 @@ void audio_fabric_bench_poll(void)
 }
 #endif /* AUDIO_FABRIC_BENCH */
 
+void audio_fabric_diag_trace_arm(void)
+{
+	g_fabric_diag.trace_active = 1U;
+}
+
 /*
  * Lease open-loop diagnostics (silence-after-start session): one line
  * per ~50 compositor ISRs (nominally one per second) while any lease
@@ -366,6 +381,25 @@ void audio_fabric_lease_diag_poll(void)
 	}
 	if (i == AUDIO_FABRIC_SLOT_COUNT)
 		return;
+	if (g_fabric_diag.trace_len == 64U) {
+		static int dumped;
+		uint32_t n;
+
+		if (!dumped) {
+			dumped = 1;
+			for (n = 0U; n < 64U; n++) {
+				xil_printf("FABRIC-TR n=%u xfer=%u fill=%u "
+					   "c=%u\r\n",
+					(unsigned int)n,
+					(unsigned int)
+						g_fabric_diag.trace[n].xfer,
+					(unsigned int)
+						g_fabric_diag.trace[n].fill,
+					(unsigned int)
+						g_fabric_diag.trace[n].consumed);
+			}
+		}
+	}
 	g_fabric_diag.printed_isr_calls = calls;
 	{
 		XTime now;
@@ -901,6 +935,23 @@ void audio_fabric_isr(void)
 	 * from the main loop, never here. */
 	g_fabric_diag.isr_calls++;
 	g_fabric_diag.last_pos = pos_period;
+	if (g_fabric_diag.trace_active &&
+	    g_fabric_diag.trace_len < 64U) {
+		uint32_t t = g_fabric_diag.trace_len;
+		uint32_t ci;
+
+		for (ci = 0U; ci < AUDIO_FABRIC_SLOT_COUNT; ci++) {
+			if (g_audio_fabric.slot[ci].lease.ring != NULL)
+				break;
+		}
+		g_fabric_diag.trace[t].xfer = g_fabric_diag.raw_xfer;
+		g_fabric_diag.trace[t].fill =
+			g_audio_fabric.fill_offset;
+		g_fabric_diag.trace[t].consumed = ci <
+			AUDIO_FABRIC_SLOT_COUNT ? (uint32_t)
+			g_audio_fabric.slot[ci].lease.consumed : 0U;
+		g_fabric_diag.trace_len = t + 1U;
+	}
 #ifdef AUDIO_FABRIC_BENCH
 	if (!g_fabric_bench.dma_armed) {
 		g_fabric_bench.dma_armed = 1U;
@@ -937,8 +988,7 @@ void audio_fabric_isr(void)
 			AUDIO_FABRIC_PERIOD_BYTES, AUDIO_FABRIC_RING_BYTES,
 			s->period_staged, AUDIO_NUM_PERIODS);
 		if (retired != 0U) {
-			g_fabric_diag.retire_periods +=
-				retired / AUDIO_FABRIC_PERIOD_BYTES;
+			g_fabric_diag.retire_periods++;
 			if (s->ops->retire)
 				s->ops->retire(retired);
 		}

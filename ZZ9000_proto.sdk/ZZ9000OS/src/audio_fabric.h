@@ -296,6 +296,7 @@ void audio_fabric_bench_poll(void);
  * lease is wired. Firmware-only.
  */
 void audio_fabric_lease_diag_poll(void);
+void audio_fabric_diag_trace_arm(void);
 #endif
 
 #endif /* AUDIO_FABRIC_H */
