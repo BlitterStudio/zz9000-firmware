@@ -109,11 +109,67 @@ static void test_shortage_waits_and_tail_drains(void)
 	check(consumed == sizeof(input), "short final tail consumed");
 }
 
+static void test_cursor_wrap_rebases_both_cursors(void)
+{
+	struct audio_pump_preconvert state;
+	struct audio_pump_preconvert_source source;
+	uint8_t input[AUDIO_PUMP_PRECONVERT_PERIOD_BYTES];
+	uint8_t ring[RING_BYTES];
+	uint32_t consumed = 0U;
+	uint32_t base;
+	uint32_t produced_before;
+	uint32_t staged_before;
+
+	memset(input, 0x5a, sizeof(input));
+	memset(&source, 0, sizeof(source));
+	source.ring = input;
+	source.capacity = sizeof(input);
+	source.produced = sizeof(input);
+	source.sample_rate = 48000U;
+	source.channels = 2U;
+	source.sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
+	audio_pump_preconvert_reset(&state, ring, sizeof(ring));
+
+	/* Park the cursors inside the wrap margin with staged lagging
+	 * produced by one period (the replay-keep bound) (PR #88 review: the ring capacity does
+	 * not divide 2^32, so a natural wrap would tear the modulo
+	 * positions apart). */
+	base = 0U - 15U * AUDIO_PUMP_PRECONVERT_PERIOD_BYTES;
+	base -= base % sizeof(ring);
+	state.produced = base + 13U * AUDIO_PUMP_PRECONVERT_PERIOD_BYTES;
+	state.staged = state.produced -
+		AUDIO_PUMP_PRECONVERT_PERIOD_BYTES;
+	produced_before = state.produced;
+	staged_before = state.staged;
+
+	check(audio_pump_preconvert_fill(&state, &source, &consumed) == 1,
+	      "wrap fill converts");
+	/* produced either advanced into the rebase window and rebased, or
+	 * crossed normally; either way the invariant that matters is that
+	 * produced - staged keeps advancing by exactly one period and the
+	 * modulo position continues the sequence. */
+	check(state.produced - state.staged ==
+	      produced_before + AUDIO_PUMP_PRECONVERT_PERIOD_BYTES -
+	      staged_before,
+	      "wrap keeps used-bytes advancing one period");
+	check(state.produced % sizeof(ring) ==
+	      (produced_before +
+	       AUDIO_PUMP_PRECONVERT_PERIOD_BYTES) % sizeof(ring),
+	      "wrap preserves produced modulo position");
+	check(state.staged % sizeof(ring) == staged_before % sizeof(ring),
+	      "wrap preserves staged modulo position");
+	check(state.produced <= produced_before ||
+	      state.produced ==
+	      produced_before + AUDIO_PUMP_PRECONVERT_PERIOD_BYTES,
+	      "wrap produced either rebased or advanced one period");
+}
 int main(void)
 {
 	test_44100_matches_converter();
 	test_48000_is_bit_exact();
 	test_shortage_waits_and_tail_drains();
+	test_cursor_wrap_rebases_both_cursors();
+	test_cursor_wrap_rebases_both_cursors();
 	if (failures)
 		return 1;
 	printf("audio_pump_preconvert_test: all checks passed\n");

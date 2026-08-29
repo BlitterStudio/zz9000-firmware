@@ -216,6 +216,11 @@ static uint32_t pump_standby_start(void)
 static int acquire_lease(uint32_t slot, uint32_t gain,
 	struct audio_fabric_ring_grant *grant)
 {
+	/* The admission scenario deliberately passes out-of-range slots
+	 * (PR #88 review): never index the producer model with them. */
+	if (slot >= AUDIO_FABRIC_SLOT_COUNT)
+		return audio_fabric_ring_acquire(slot,
+			SDK_AUDIO_METER_IDENTITY_MEDIA, gain, grant);
 	memset(&g_producer[slot], 0, sizeof(g_producer[slot]));
 	return audio_fabric_ring_acquire(slot,
 		SDK_AUDIO_METER_IDENTITY_MEDIA, gain, grant);

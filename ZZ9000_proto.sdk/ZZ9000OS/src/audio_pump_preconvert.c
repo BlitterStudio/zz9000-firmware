@@ -88,6 +88,21 @@ static void preconvert_write_period(struct audio_pump_preconvert *state)
 		Xil_DCacheFlushRange((INTPTR)state->ring, second);
 	}
 	state->produced += AUDIO_PUMP_PRECONVERT_PERIOD_BYTES;
+	/* The 32-bit cursors wrap after ~6.2 h at 192 kB/s, and the ring
+	 * capacity does not divide 2^32, so a natural wrap would jump every
+	 * produced % capacity position while staged still holds the old
+	 * lap (PR #88 review). Rebase both cursors by the capacity-aligned
+	 * prefix of the lower one: each keeps its modulo position, the
+	 * used-bytes difference is unchanged, and neither underflows. */
+	if (state->produced >
+	    0xFFFFFFFFU - 16U * AUDIO_PUMP_PRECONVERT_PERIOD_BYTES) {
+		uint32_t lowest = (state->staged < state->produced) ?
+			state->staged : state->produced;
+		uint32_t rebase = lowest - lowest % state->capacity;
+
+		state->produced -= rebase;
+		state->staged -= rebase;
+	}
 }
 
 int audio_pump_preconvert_fill(struct audio_pump_preconvert *state,

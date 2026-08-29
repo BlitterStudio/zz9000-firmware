@@ -1160,7 +1160,22 @@ void audio_set_tx_buffer(uint8_t* addr) {
 			Xil_DCacheFlushRange((INTPTR)addr,
 				AUDIO_TX_BUFFER_SIZE);
 			Xil_SetTlbAttributes((UINTPTR)addr, NORM_NONCACHE);
-			printf("[audio] audio section mapped "
+			/* The direct-lease PCM rings and control lines on
+			 * Zorro III live in the SDK low-DDR section
+			 * (0x08100000: reserve 0x081C0000-0x081E0000 plus
+			 * the Z3 audio scratch). That section holds nothing
+			 * the CPU touches cached (the local surface heap
+			 * ends at 0x08000000), so mapping it non-cacheable
+			 * removes the same stale-line class for the lease
+			 * plane at no cost (PR #88 review: the TX remap
+			 * alone never covered the grants). On Zorro II the
+			 * grant sits inside the aperture window beside
+			 * PIP/framebuffer regions the CPU writes cached,
+			 * so it keeps the qualified per-range invalidates
+			 * instead of a whole-section remap. */
+			Xil_SetTlbAttributes(
+				(UINTPTR)0x08100000UL, NORM_NONCACHE);
+			printf("[audio] audio + direct-ring sections mapped "
 			       "non-cacheable\r\n");
 		}
 	}

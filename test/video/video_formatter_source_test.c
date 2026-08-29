@@ -520,7 +520,7 @@ static int test_videocap_full_width_owns_completed_bank(const char *mntzorro,
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "wire read_banking_axi = 1'b1;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "cap_token_y <= cap_y[9:0];");
+	    "cap_token_y <= capture_output_y[9:0];");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "cap_token_bank <= capture_bank;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,

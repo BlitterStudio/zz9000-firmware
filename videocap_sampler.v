@@ -579,13 +579,15 @@ always @(posedge cap_clk) begin
         cap_x_done <= 0;
         if (capture_banking_cap)
             capture_bank <= ~capture_bank;
-        if (!ctl_full_width_cap) begin
-            /* Completed line (filtered, any FULLRATE): publish its number
-             * and bank as a token one capture clock later.  cap_y and
-             * capture_bank still hold the completed line's values at this
-             * edge.  This now also covers FULLRATE boards, whose filtered
-             * capture previously published no token at all. */
-            cap_token_y <= cap_y[9:0];
+        if (!ctl_full_width_cap && capture_output_line_valid) begin
+            /* Completed visible line (filtered, any FULLRATE): publish
+             * its normalized number and bank as a token one capture
+             * clock later, exactly as the full-width path does (PR #88
+             * review: raw cap_y leaks the pre-crop sentinel row and
+             * shifts the picture down by the field stride).  cap_y and
+             * capture_bank still hold the completed line's values at
+             * this edge. */
+            cap_token_y <= capture_output_y[9:0];
             cap_token_bank <= capture_bank;
             cap_token_pending <= 1;
         end
