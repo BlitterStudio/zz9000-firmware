@@ -468,9 +468,9 @@ static int test_videocap_probe_compares_sampler_and_line_owner(
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "probe_data[31:0] <= capture_store_word;");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "wire capture_head_valid = capture_banking_cap ?");
+	    "wire capture_head_valid = capture_head_skips_settling ?");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
-	    "1'b1 : (cap_x > 11'd2);");
+	    "wire capture_head_skips_settling = (FULLRATE != 0) ?");
 	ok &= require_source_contains("videocap_sampler.v", sampler,
 	    "probe_seen_mask[14:0] == 15'h7fff");
 	ok &= require_source_contains("mntzorro.v", mntzorro,

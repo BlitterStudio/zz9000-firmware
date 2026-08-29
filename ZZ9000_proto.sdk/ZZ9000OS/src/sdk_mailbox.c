@@ -4044,6 +4044,14 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session)
 
 static void audio_playback_stop(void)
 {
+	/* A stopped pump that shares the fabric with a live direct-ring
+	 * producer must have its already-mixed future periods rebuilt out
+	 * of the queue: detach() alone neither silences nor rebuilds when
+	 * another producer keeps the fabric active (PR #88 review). Arm
+	 * the queued-contribution rebuild while the pump is still attached
+	 * and its tags still credit the window; the rebuild replays only
+	 * the remaining live producers. */
+	audio_fabric_request_rebuild(AUDIO_FABRIC_SLOT_PUMP);
 	audio_fabric_producer_detach(AUDIO_FABRIC_SLOT_PUMP);
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
@@ -5157,9 +5165,20 @@ static uint16_t handle_media_session_audio_bind(
 			return complete_status(req, comp, status);
 		}
 		/* Pause confirmed: drop the pending retirement tags (the
-		 * session rewound its staging to retirement) and wipe the
-		 * TX queue -- the historical pause semantics. */
-		audio_fabric_ring_silence(AUDIO_FABRIC_SLOT_PUMP);
+		 * session rewound its staging to retirement). With a live
+		 * direct-ring peer the historical whole-ring wipe would
+		 * erase its already-mixed future periods (PR #88 review):
+		 * arm the queued-contribution rebuild while the pump tags
+		 * still exist, then clear only the pump's tags -- the
+		 * rebuild re-mixes the peer window and the frozen pump
+		 * contributes silence. Pump-only keeps the ring wipe. */
+		if (audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP)) {
+			audio_fabric_request_rebuild(
+				AUDIO_FABRIC_SLOT_PUMP);
+			audio_fabric_producer_clear(AUDIO_FABRIC_SLOT_PUMP);
+		} else {
+			audio_fabric_ring_silence(AUDIO_FABRIC_SLOT_PUMP);
+		}
 		return complete_media_session_audio_result(
 			req, comp, SDK_STATUS_OK, &result);
 	}

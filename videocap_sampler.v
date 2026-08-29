@@ -435,8 +435,13 @@ wire [31:0] capture_store_word = {8'b0,
 
 /* Full-width crop_h names the first displayed 28 MHz sample, so preserve its
  * complete 1280-sample window.  The filtered/legacy path retains its
- * historical three-pixel settling guard. */
-wire capture_head_valid = capture_banking_cap ?
+ * historical three-pixel settling guard (PR #88 review: the guard is a
+ * capture-mode property, not a banking property — unconditional banking
+ * must not remove it on FULLRATE boards; Denise-adapter variants never
+ * had it). */
+wire capture_head_skips_settling = (FULLRATE != 0) ?
+    ctl_full_width_cap : 1'b1;
+wire capture_head_valid = capture_head_skips_settling ?
     1'b1 : (cap_x > 11'd2);
 
 /* cap_y retains row zero (or the interlaced field parity) while the vertical

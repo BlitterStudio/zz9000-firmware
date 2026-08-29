@@ -1197,6 +1197,21 @@ void audio_fabric_ring_silence(uint32_t slot)
 	audio_silence();
 }
 
+void audio_fabric_producer_clear(uint32_t slot)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+
+	if (s == NULL || !s->attached)
+		return;
+	/* Drop only this producer's queued-period tags and leave the shared
+	 * TX ring alone: with a live peer, the whole-ring wipe of
+	 * audio_fabric_ring_silence would erase the peer's already-mixed
+	 * future periods (PR #88 review). Pair with
+	 * audio_fabric_request_rebuild() armed while the tags still exist so
+	 * the queue is re-mixed without this producer. */
+	audio_playback_clear_periods(s->period_staged, AUDIO_NUM_PERIODS);
+}
+
 void audio_fabric_reset(void)
 {
 	uint32_t epoch[AUDIO_FABRIC_SLOT_COUNT];

@@ -116,6 +116,9 @@ void audio_fabric_isr(void);
 int audio_fabric_producer_attach(uint32_t slot,
 	const struct audio_fabric_producer_ops *ops);
 void audio_fabric_producer_detach(uint32_t slot);
+/* Drop one producer's queued-period tags without touching the shared TX
+ * ring (pause with a live peer); pair with audio_fabric_request_rebuild. */
+void audio_fabric_producer_clear(uint32_t slot);
 void audio_fabric_producer_freeze(uint32_t slot);
 void audio_fabric_producer_go_live(uint32_t slot);
 /* Shared-frontier guard for restart callers: nonzero when any slot

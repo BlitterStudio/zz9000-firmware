@@ -152,11 +152,18 @@ int audio_pump_preconvert_fill(struct audio_pump_preconvert *state,
 		state->convert_rate = source->sample_rate;
 		zz_audio_convert_init(&state->convert, source->sample_rate, 48000U);
 	}
-	if (source->sample_rate != 48000U && state->convert.ratio == NULL)
-		return -1;
-	zz_audio_convert_stream(&state->convert, state->source, state->output,
-		(uint16_t)source_frames,
-		AUDIO_PUMP_PRECONVERT_PERIOD_BYTES / 4U);
+	if (source->sample_rate != 48000U && state->convert.ratio == NULL) {
+		/* Off-table rate (e.g. 16/22.05 kHz): the pre-fabric pump
+		 * emitted a silent period while still advancing the source,
+		 * so drain and end-of-stream completed. Bailing out here
+		 * left the undecoded PCM permanently pending (PR #88
+		 * review). Emit the silent period and advance. */
+		memset(state->output, 0, sizeof(state->output));
+	} else {
+		zz_audio_convert_stream(&state->convert, state->source,
+			state->output, (uint16_t)source_frames,
+			AUDIO_PUMP_PRECONVERT_PERIOD_BYTES / 4U);
+	}
 	preconvert_write_period(state);
 	*source_consumed = source->consumed + pull;
 	return 1;
