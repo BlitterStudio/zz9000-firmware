@@ -19,6 +19,16 @@
 #include <string.h>
 
 #include "audio_fabric.h"
+
+#ifdef AUDIO_FABRIC_HOST_TEST
+/* Host-test builds have no UART; the lease-lifecycle diagnostics are
+ * firmware-only and compile out here (the AUDIO_FABRIC_BENCH rule in
+ * audio_fabric.c). */
+#define FABRIC_LEASE_DIAG(...) ((void)0)
+#else
+#include "xil_printf.h"
+#define FABRIC_LEASE_DIAG(...) xil_printf(__VA_ARGS__)
+#endif
 #include "audio_fabric_internal.h"
 #include "audio_scene.h"
 #include "memorymap.h"
@@ -390,6 +400,9 @@ static void fabric_ring_revoke(uint32_t slot, uint32_t status)
 	 * (which bumps again) moves the report on to the new lease. */
 	fabric_ring_record(slot, s->epoch, identity, heartbeat_ms, 1U,
 		(uint8_t)status);
+	FABRIC_LEASE_DIAG("FABRIC-LEASE slot%u REVOKED status=%u hb=%u\r\n",
+		(unsigned int)slot, (unsigned int)status,
+		(unsigned int)heartbeat_ms);
 	audio_fabric_producer_detach(slot);
 }
 
@@ -484,23 +497,39 @@ void fabric_lease_isr_tick(void)
 				SDK_AUDIO_RING_STATUS_REVOKED_HEARTBEAT);
 			continue;
 		}
-		l->paused = (view.flags &
-			     SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED) != 0U;
+		{
+			uint8_t was_paused = l->paused;
+
+			l->paused = (view.flags &
+				     SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED) !=
+				    0U;
+			if (l->paused != was_paused)
+				FABRIC_LEASE_DIAG("FABRIC-LEASE slot%u %s w=%u\r\n",
+					(unsigned int)slot,
+					l->paused ? "PAUSED" : "RESUMED",
+					(unsigned int)view.write);
+		}
 		l->write_cursor = view.write;
 		l->line_valid = 1U;
+		/* A primed first publication: LEASED -> ACTIVE.
+		 * Re-arm the fill frontier only when this slot
+		 * revives an otherwise idle fabric -- joining a
+		 * live mix must never rewind the shared frontier
+		 * (the other producers' staged periods would be
+		 * re-filled and their staging double-counted). */
 		if (l->state == (uint8_t)AUDIO_FABRIC_SLOT_STATE_LEASED &&
 		    (l->paused ||
 		     view.write - l->credited >= FABRIC_RING_PREROLL_BYTES)) {
-			/* A primed first publication: LEASED -> ACTIVE.
-			 * Re-arm the fill frontier only when this slot
-			 * revives an otherwise idle fabric -- joining a
-			 * live mix must never rewind the shared frontier
-			 * (the other producers' staged periods would be
-			 * re-filled and their staging double-counted). */
 			if (!audio_fabric_others_live(slot))
 				audio_fabric_producer_restart(slot);
 			l->state = (uint8_t)AUDIO_FABRIC_SLOT_STATE_ACTIVE;
 			audio_fabric_producer_go_live(slot);
+			FABRIC_LEASE_DIAG("FABRIC-LEASE slot%u ACTIVE gen=%u w=%u "
+				   "paused=%u\r\n",
+				(unsigned int)slot,
+				(unsigned int)l->generation,
+				(unsigned int)view.write,
+				(unsigned int)l->paused);
 		}
 	}
 }
@@ -698,6 +727,10 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	 * never reading a previous lease's residual samples, and the
 	 * control block never carrying a previous generation. */
 	fabric_ring_zero(ring, control, map.capacity);
+
+	FABRIC_LEASE_DIAG("FABRIC-LEASE slot%u ACQUIRE gen=%u rate=%u id=%u\r\n",
+		(unsigned int)slot, (unsigned int)l->generation,
+		(unsigned int)l->source_rate, (unsigned int)identity);
 	if (!audio_fabric_producer_attach(slot, fabric_ring_ops(slot)))
 		return AUDIO_FABRIC_LEASE_EBUSY;
 	/* Wire the lease; ring arms the tick LAST (plain release store)
@@ -763,6 +796,9 @@ int audio_fabric_ring_release(uint32_t slot, uint32_t generation)
 	 * they are DMA-confirmed and monotonic; the block re-zeroes at
 	 * the next acquire. */
 	l->tearing = 1U;
+	FABRIC_LEASE_DIAG("FABRIC-LEASE slot%u RELEASE gen=%u consumed=%u\r\n",
+		(unsigned int)slot, (unsigned int)generation,
+		(unsigned int)l->consumed);
 	fabric_ring_record(slot, l->generation, l->identity,
 		l->heartbeat_ms, 0U, SDK_AUDIO_RING_STATUS_OK);
 	audio_fabric_request_rebuild(slot);
