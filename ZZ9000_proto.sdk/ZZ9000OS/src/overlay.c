@@ -693,6 +693,15 @@ void overlay_vblank_rearm(void)
 
 	if (!ov.hw_active)
 		return;
+	/* Early rearm is safe only for immutable SDK staging (shadows or
+	 * direct-session frames flushed before publication). A legacy
+	 * P96/cgxvideo source is the host-written src_addr: restarting the
+	 * non-coherent VDMA before the mandatory global cache flush can
+	 * fetch stale or partially flushed source data (PR #88 review), so
+	 * the legacy path rearms after the flush instead (in
+	 * overlay_vblank_cache_flushed). */
+	if (ov.direct_session == 0U && ov.hw_scan_addr == ov.src_addr)
+		return;
 	/* The currently scanned staging buffer was flushed before it was first
 	 * published and is immutable while scanned. Restart it at vblank entry,
 	 * before unrelated dirty cache lines can delay the mandatory global
@@ -717,6 +726,12 @@ void overlay_vblank_cache_flushed(void)
 		ov.hw_flip_pending = 0;
 		ov.hw_handoff_addr = ov.shadow[ov.front];
 	}
+
+	/* Legacy direct sources skipped the early rearm: their scan address
+	 * is the host-written src_addr, so restart the VDMA only now that
+	 * the global cache flush has landed (same vblank, correct order). */
+	if (ov.direct_session == 0U && ov.hw_scan_addr == ov.src_addr)
+		overlay_hw_rearm(ov.hw_scan_addr);
 }
 
 void overlay_compose_retired(int ok)

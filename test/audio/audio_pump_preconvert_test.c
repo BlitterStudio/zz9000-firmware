@@ -3,6 +3,14 @@
 #include <string.h>
 
 #include "audio_pump_preconvert.h"
+
+/* Host stubs for the IRQ-safe critical section the firmware's
+ * sdk_smp_lock_arm.c implements with cpsid/cpsie; single-threaded host
+ * builds have no interrupts to mask. */
+uint32_t smp_local_irq_save(void);
+void smp_local_irq_restore(uint32_t saved_i_bit);
+uint32_t smp_local_irq_save(void) { return 0U; }
+void smp_local_irq_restore(uint32_t saved_i_bit) { (void)saved_i_bit; }
 #include "sdk_mailbox.h"
 
 #define RING_BYTES (AUDIO_PUMP_PRECONVERT_PERIOD_BYTES * 8U)

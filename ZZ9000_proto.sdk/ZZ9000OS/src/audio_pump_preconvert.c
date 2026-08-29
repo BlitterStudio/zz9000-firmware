@@ -4,6 +4,7 @@
 
 #include "sdk_mailbox.h"
 #include "xil_cache.h"
+#include "sdk_smp_lock.h"
 
 void audio_pump_preconvert_reset(struct audio_pump_preconvert *state,
 	uint8_t *ring, uint32_t capacity)
@@ -99,9 +100,16 @@ static void preconvert_write_period(struct audio_pump_preconvert *state)
 		uint32_t lowest = (state->staged < state->produced) ?
 			state->staged : state->produced;
 		uint32_t rebase = lowest - lowest % state->capacity;
+		/* The audio ISR concurrently advances staged (and observes
+		 * produced); the two-word adjustment must be atomic or a
+		 * period staged between the load and store is overwritten
+		 * and the compositor repeats/skips a period (PR #88
+		 * review). IRQ-safe critical section, held for two stores. */
+		uint32_t irq_state = smp_local_irq_save();
 
 		state->produced -= rebase;
 		state->staged -= rebase;
+		smp_local_irq_restore(irq_state);
 	}
 }
 

@@ -77,6 +77,10 @@ static struct {
  * converters are per-slot state. */
 static int16_t g_fabric_src[AUDIO_FABRIC_PERIOD_BYTES / 2];
 static int16_t g_fabric_stereo[AUDIO_FABRIC_PERIOD_BYTES / 2];
+/* Mono expansion input for rate conversion: the converter cannot run in
+ * place, and the staging slot IS g_fabric_stereo (PR #88 review), so the
+ * expanded mono frames need their own buffer. */
+static int16_t g_fabric_mono[AUDIO_FABRIC_PERIOD_BYTES / 2];
 static int32_t g_fabric_mix[AUDIO_FABRIC_PERIOD_BYTES / 2];
 
 #ifdef AUDIO_FABRIC_HOST_TEST
@@ -423,10 +427,10 @@ static uint32_t fabric_slot_fill(struct audio_fabric_slot *s)
 	pcm = g_fabric_src;
 	if (channels == 1U) {
 		for (i = 0; i < src_frames; i++) {
-			g_fabric_stereo[2U * i] = g_fabric_src[i];
-			g_fabric_stereo[2U * i + 1U] = g_fabric_src[i];
+			g_fabric_mono[2U * i] = g_fabric_src[i];
+			g_fabric_mono[2U * i + 1U] = g_fabric_src[i];
 		}
-		pcm = g_fabric_stereo;
+		pcm = g_fabric_mono;
 	}
 	if (rate == 48000U) {
 		memcpy(slot, pcm, AUDIO_FABRIC_PERIOD_BYTES);
