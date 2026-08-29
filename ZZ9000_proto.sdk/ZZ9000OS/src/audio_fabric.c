@@ -52,6 +52,7 @@
  * host builds compile it out with the same rule. */
 #ifndef AUDIO_FABRIC_HOST_TEST
 #include "xil_printf.h"
+#include "xtime_l.h"
 #endif
 
 #define AUDIO_FABRIC_PERIOD_BYTES  AUDIO_BYTES_PER_PERIOD
@@ -363,11 +364,26 @@ void audio_fabric_lease_diag_poll(void)
 	if (i == AUDIO_FABRIC_SLOT_COUNT)
 		return;
 	g_fabric_diag.printed_isr_calls = calls;
+	{
+		XTime now;
+
+		XTime_GetTime(&now);
+		xil_printf("FABRIC-DIAG t=%lu isr=%u pos=%u fill=%u slot%u "
+			   "consumed=%u credited=%u srcpk=%04x txpk=%04x\r\n",
+			(unsigned long)(now / 333333333UL),
+			(unsigned int)calls,
+			(unsigned int)g_fabric_diag.last_pos,
+			(unsigned int)g_audio_fabric.fill_offset,
+			(unsigned int)i,
+			(unsigned int)g_audio_fabric.slot[i].lease.consumed,
+			(unsigned int)g_audio_fabric.slot[i].lease.credited,
+			(unsigned int)src_peak, (unsigned int)tx_peak);
+	}
 
 	/* Source side: the most recently staged lease period -- the
 	 * 3840 bytes ending at the slot's staged cursor (the runway
 	 * bound keeps this region intact behind the producer's write
-	 * cursor). */
+	 * cursor). Peak = max |sample| of the little-endian pairs. */
 	{
 		const struct audio_fabric_slot *s =
 			&g_audio_fabric.slot[i];
@@ -381,10 +397,14 @@ void audio_fabric_lease_diag_poll(void)
 			scan = s->lease.ring + off;
 			for (uint32_t b = 0U;
 			     b < AUDIO_FABRIC_PERIOD_BYTES; b += 2U) {
-				uint32_t v = scan[b] | scan[b + 1U];
+				uint16_t v16 = (uint16_t)(
+					scan[b] |
+					((uint16_t)scan[b + 1U] << 8));
+				uint32_t mag = v16 > 0x7fffU
+					? 0x10000U - v16 : v16;
 
-				if (v > src_peak)
-					src_peak = v;
+				if (mag > src_peak)
+					src_peak = mag;
 			}
 		}
 	}
@@ -393,20 +413,13 @@ void audio_fabric_lease_diag_poll(void)
 	    ((g_fabric_diag.last_pos + AUDIO_FABRIC_RING_BYTES -
 	      AUDIO_FABRIC_PERIOD_BYTES) % AUDIO_FABRIC_RING_BYTES);
 	for (uint32_t b = 0U; b < AUDIO_FABRIC_PERIOD_BYTES; b += 2U) {
-		uint32_t v = scan[b] | scan[b + 1U];
+		uint16_t v16 = (uint16_t)(
+			scan[b] | ((uint16_t)scan[b + 1U] << 8));
+		uint32_t mag = v16 > 0x7fffU ? 0x10000U - v16 : v16;
 
-		if (v > tx_peak)
-			tx_peak = v;
+		if (mag > tx_peak)
+			tx_peak = mag;
 	}
-	xil_printf("FABRIC-DIAG isr=%u pos=%u fill=%u slot%u "
-		   "consumed=%u credited=%u srcpk=%04x txpk=%04x\r\n",
-		(unsigned int)calls,
-		(unsigned int)g_fabric_diag.last_pos,
-		(unsigned int)g_audio_fabric.fill_offset,
-		(unsigned int)i,
-		(unsigned int)g_audio_fabric.slot[i].lease.consumed,
-		(unsigned int)g_audio_fabric.slot[i].lease.credited,
-		(unsigned int)src_peak, (unsigned int)tx_peak);
 }
 #endif /* !AUDIO_FABRIC_HOST_TEST */
 
