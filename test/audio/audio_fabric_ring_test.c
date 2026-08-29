@@ -995,78 +995,8 @@ static void scenario_cache_fidelity(void)
 	      "cache: credit publication flushes the fw line", "");
 }
 
-
-/* ---- TEMP: offline driver-pump model (half-speed investigation) ---- */
-
-static void scenario_pump_model(void)
-{
-	struct audio_fabric_ring_grant grant;
-	struct SDKAudioRingFirmwareLine fw;
-	uint8_t *ring = g_ring_pcm_a;
-	const uint32_t src_period = 3528U;   /* 44.1 kHz */
-	uint64_t write = 0U;                 /* driver write_cursor   */
-	uint64_t consumed = 0U;              /* driver adopted credits */
-	uint32_t flags = SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED;
-	uint64_t staged_total = 0U;
-	uint32_t tick;
-	uint32_t wake;
-	int paused = 1;
-
-	fabric_reset_state();
-	if (acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44100U,
-	                       &grant) != AUDIO_FABRIC_LEASE_OK) {
-		check(0, "pump model: acquire", "");
-		return;
-	}
-	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation =
-		grant.generation;
-	memset(ring, 0x11, RING_TEST_CAPACITY);
-	producer_publish(AUDIO_FABRIC_SLOT_MAILBOX, 0U, flags);
-
-	/* 200 compositor ticks = 4 simulated seconds; two 10-ms driver
-	 * wakes per 20-ms tick (wake, tick, wake, tick ...). */
-	for (tick = 0U; tick < 200U; tick++) {
-		for (wake = 0U; wake < 2U; wake++) {
-			/* take_credits: adopt the firmware credited cursor */
-			firmware_snapshot(AUDIO_FABRIC_SLOT_MAILBOX, &fw);
-			if (be32(fw.generation) == grant.generation)
-				consumed = ((uint64_t)
-					be32(fw.consumed_cursor_hi) << 32) |
-					be32(fw.consumed_cursor_lo);
-			/* stage at most one period per wake */
-			if ((write - consumed) < 2ULL * src_period) {
-				uint32_t off = (uint32_t)(write %
-					RING_TEST_CAPACITY);
-				uint32_t first = RING_TEST_CAPACITY - off;
-
-				if (first > src_period)
-					first = src_period;
-				memset(ring + off, 0x33, first);
-				memset(ring, 0x33, src_period - first);
-				write += src_period;
-				staged_total += src_period;
-			}
-			/* PAUSED prefill clear */
-			if (paused && (write - consumed) >=
-					2ULL * src_period) {
-				paused = 0;
-				flags = 0U;
-			}
-			producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
-				write, flags);
-		}
-		fabric_pass();
-	}
-	printf("PUMP-MODEL staged=%llu over 4s -> %llu B/s "
-	       "(realtime 44.1k = 176400; informational -- the offline "
-	       "model diverges from hardware pacing, see lease diag)\n",
-		(unsigned long long)staged_total,
-		(unsigned long long)(staged_total / 4U));
-}
-
 int main(void)
 {
-	scenario_pump_model();
 	scenario_admission();
 	scenario_rate_admission();
 	scenario_lifecycle();

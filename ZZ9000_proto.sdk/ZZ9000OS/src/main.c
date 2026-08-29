@@ -565,15 +565,6 @@ int main() {
 		 * production builds. */
 		audio_fabric_bench_poll();
 #endif
-#ifndef AUDIO_FABRIC_HOST_TEST
-		/* Lease open-loop diagnostics: one line per ~50 ISRs while
-		 * a lease is wired (silence-after-start investigation). */
-		audio_fabric_lease_diag_poll();
-		/* Legacy-path pacing diagnostics (RC2->master MP3 skip
-		 * bisection): one line per ~50 swab periods while legacy
-		 * playback is active. */
-		audio_legacy_diag_poll();
-#endif
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
 		if (usb_read_pending) {
 			usb_status = zz_usb_read_blocks(0, usb_storage_read_block, usb_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
