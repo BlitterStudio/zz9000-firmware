@@ -659,6 +659,8 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	struct audio_fabric_slot *s;
 	struct audio_fabric_lease *l;
 	struct audio_scene_lease_gain_result composed;
+	uint8_t *ring;
+	uint8_t *control;
 	if (grant != NULL) {
 		memset(grant, 0, sizeof(*grant));
 	}

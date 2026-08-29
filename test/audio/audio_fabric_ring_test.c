@@ -374,8 +374,6 @@ static void scenario_rate_conversion(void)
 		ring[frame * 4U + 2U] = (uint8_t)(uint16_t)r;
 		ring[frame * 4U + 3U] = (uint8_t)((uint16_t)r >> 8);
 	}
-	producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
-		RING_TEST_CAPACITY, 0U);
 	/* Reference: the same qualified kernel fed the same repeating
 	 * source; the third output period is the settled image. */
 	zz_audio_convert_init(&ref, 44100U, 48000U);
@@ -383,8 +381,14 @@ static void scenario_rate_conversion(void)
 	zz_audio_convert_stream(&ref, src, out, 882U, TICK_BYTES / 4U);
 	zz_audio_convert_stream(&ref, src, out, 882U, TICK_BYTES / 4U);
 	memcpy(expected, out, sizeof(expected));
-	for (pass = 0U; pass < 6U; pass++)
+	/* Publish before every pass: the heartbeat token must change on
+	 * every publication (R11) or the harness's 3-tick timeout revokes
+	 * the lease mid-scenario. */
+	for (pass = 0U; pass < 6U; pass++) {
+		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
+			RING_TEST_CAPACITY, 0U);
 		fabric_pass();
+	}
 	for (pass = 0U; pass < AUDIO_TX_BUFFER_SIZE / TICK_BYTES;
 	     pass++) {
 		if (memcmp(g_fabric_tx + pass * TICK_BYTES, expected,
@@ -392,8 +396,7 @@ static void scenario_rate_conversion(void)
 			matched = 1;
 	}
 	check(matched,
-	      "rate conv: TX carries the kernel image of the source",
-	      "");
+	      "rate conv: TX carries the kernel image of the source", "");
 	/* Credits are source-byte paced: whole 3528-byte periods. */
 	firmware_snapshot(AUDIO_FABRIC_SLOT_MAILBOX, &fw);
 	consumed = ((uint64_t)be32(fw.consumed_cursor_hi) << 32) |
