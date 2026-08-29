@@ -435,6 +435,13 @@ void audio_fabric_lease_diag_poll(void)
 			uint32_t off = (uint32_t)(
 				(staged - src_period) % s->lease.capacity);
 
+			/* The direct-ring grant lives in cacheable DDR
+			 * (memorymap.h, outside the 0x3FC00000 noncache
+			 * section): invalidate before reading or the scan
+			 * observes the acquire-time zeros through stale
+			 * lines -- the fill's own read discipline. */
+			Xil_DCacheInvalidateRange(
+				(INTPTR)(s->lease.ring + off), src_period);
 			scan = s->lease.ring + off;
 			for (uint32_t b = 0U; b < src_period; b += 2U) {
 				uint16_t v16 = (uint16_t)(
