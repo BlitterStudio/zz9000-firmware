@@ -24,6 +24,7 @@
 #include "audio_fabric.h"
 #include "memorymap.h"
 #include "xtime_l.h"
+#include "xil_printf.h"
 #include "math.h"
 #include "ax.h"
 
@@ -799,6 +800,39 @@ void audio_debug_timer(int zdata) {
 	}
 }
 
+static unsigned long xtime_now_secs(void)
+{
+	XTime now;
+
+	XTime_GetTime(&now);
+	return (unsigned long)(now / 333333333UL);
+}
+
+/* Legacy-path pacing diagnostics (RC2->master MP3 skip bisection):
+ * the ISR accumulates, the main-loop poll prints. Volatile: IRQ writer. */
+static volatile struct {
+	uint32_t swab_calls;
+	uint32_t isr_calls;
+	uint32_t printed;
+} g_audio_legacy_diag;
+
+void audio_legacy_diag_poll(void)
+{
+	uint32_t swab = g_audio_legacy_diag.swab_calls;
+	uint32_t isr = g_audio_legacy_diag.isr_calls;
+
+	if (!audio_legacy_output_active())
+		return;
+	if (swab - g_audio_legacy_diag.printed < 50U)
+		return;
+	g_audio_legacy_diag.printed = swab;
+	xil_printf("LEGACY-DIAG t=%lu swab=%u isr=%u xfer=%u\r\n",
+		(unsigned long)(xtime_now_secs()),
+		(unsigned int)swab,
+		(unsigned int)isr,
+		(unsigned int)audio_get_dma_transfer_count());
+}
+
 int isra_count = 0;
 
 // Audio fabric compositor TX tick (audio_fabric.c); ISR-safe.
@@ -806,6 +840,8 @@ int isra_count = 0;
 // audio formatter interrupt, triggered whenever a period is completed
 void isr_audio(void *dummy) {
 	uint32_t transfer_count;
+
+	g_audio_legacy_diag.isr_calls++;
 	uint8_t completed_period;
 	uint16_t sequence;
 	uint32_t val = XAudioFormatter_ReadReg(XPAR_XAUDIOFORMATTER_0_BASEADDR, XAUD_FORMATTER_STS + XAUD_FORMATTER_MM2S_OFFSET);
@@ -1052,6 +1088,7 @@ static int16_t audio_playback_scratch[AUDIO_BYTES_PER_PERIOD / 2];
 // returns audio_buffer_collision (1 or 0)
 int audio_swab(uint16_t audio_buf_samples, uint32_t offset, int byteswap) {
 	int audio_buffer_collision = 0;
+	g_audio_legacy_diag.swab_calls++;
 	uint16_t* data = (uint16_t*)(audio_tx_buffer + offset);
 	uint32_t audio_freq = zz_audio_playback_rate(audio_buf_samples);
 
