@@ -95,6 +95,9 @@ static int32_t g_fabric_mix[AUDIO_FABRIC_PERIOD_BYTES / 2];
 static volatile struct {
 	uint32_t isr_calls;
 	uint32_t last_pos;
+	uint32_t raw_xfer;
+	uint32_t retire_periods;
+	uint32_t rebuild_runs;
 	uint32_t printed_isr_calls;
 } g_fabric_diag;
 
@@ -368,12 +371,16 @@ void audio_fabric_lease_diag_poll(void)
 		XTime now;
 
 		XTime_GetTime(&now);
-		xil_printf("FABRIC-DIAG t=%lu isr=%u pos=%u fill=%u slot%u "
+		xil_printf("FABRIC-DIAG t=%lu isr=%u xfer=%u pos=%u "
+			   "fill=%u rtr=%u rb=%u slot%u "
 			   "consumed=%u credited=%u srcpk=%04x txpk=%04x\r\n",
 			(unsigned long)(now / 333333333UL),
+			(unsigned int)g_fabric_diag.raw_xfer,
 			(unsigned int)calls,
 			(unsigned int)g_fabric_diag.last_pos,
 			(unsigned int)g_audio_fabric.fill_offset,
+			(unsigned int)g_fabric_diag.retire_periods,
+			(unsigned int)g_fabric_diag.rebuild_runs,
 			(unsigned int)i,
 			(unsigned int)g_audio_fabric.slot[i].lease.consumed,
 			(unsigned int)g_audio_fabric.slot[i].lease.credited,
@@ -381,22 +388,21 @@ void audio_fabric_lease_diag_poll(void)
 	}
 
 	/* Source side: the most recently staged lease period -- the
-	 * 3840 bytes ending at the slot's staged cursor (the runway
-	 * bound keeps this region intact behind the producer's write
-	 * cursor). Peak = max |sample| of the little-endian pairs. */
+	 * lease's OWN period bytes (source rate / 50 * 4; 3840 only at
+	 * 48 kHz) ending at the slot's staged cursor. Peak = max
+	 * |sample| of the little-endian pairs. */
 	{
 		const struct audio_fabric_slot *s =
 			&g_audio_fabric.slot[i];
 		uint64_t staged = s->source.staged_bytes;
+		uint32_t src_period = (s->lease.source_rate / 50U) * 4U;
 
-		if (staged >= AUDIO_FABRIC_PERIOD_BYTES) {
+		if (src_period != 0U && staged >= src_period) {
 			uint32_t off = (uint32_t)(
-				(staged - AUDIO_FABRIC_PERIOD_BYTES) %
-				s->lease.capacity);
+				(staged - src_period) % s->lease.capacity);
 
 			scan = s->lease.ring + off;
-			for (uint32_t b = 0U;
-			     b < AUDIO_FABRIC_PERIOD_BYTES; b += 2U) {
+			for (uint32_t b = 0U; b < src_period; b += 2U) {
 				uint16_t v16 = (uint16_t)(
 					scan[b] |
 					((uint16_t)scan[b + 1U] << 8));
@@ -408,9 +414,10 @@ void audio_fabric_lease_diag_poll(void)
 			}
 		}
 	}
-	/* Output side: the last TX period the DMA completed. */
+	/* Output side: the freshest FILLED period (one behind the fill
+	 * frontier) -- independent of the DMA-position readback. */
 	scan = g_fabric_tx +
-	    ((g_fabric_diag.last_pos + AUDIO_FABRIC_RING_BYTES -
+	    ((g_audio_fabric.fill_offset + AUDIO_FABRIC_RING_BYTES -
 	      AUDIO_FABRIC_PERIOD_BYTES) % AUDIO_FABRIC_RING_BYTES);
 	for (uint32_t b = 0U; b < AUDIO_FABRIC_PERIOD_BYTES; b += 2U) {
 		uint16_t v16 = (uint16_t)(
@@ -885,8 +892,8 @@ void audio_fabric_isr(void)
 		return;
 #endif
 
-	pos_period =
-		audio_get_dma_transfer_count() % AUDIO_FABRIC_RING_BYTES;
+	g_fabric_diag.raw_xfer = audio_get_dma_transfer_count();
+	pos_period = g_fabric_diag.raw_xfer % AUDIO_FABRIC_RING_BYTES;
 	pos_period -= pos_period % AUDIO_FABRIC_PERIOD_BYTES;
 
 	/* Lease open-loop diagnostics (silence-after-start session): the
@@ -929,8 +936,12 @@ void audio_fabric_isr(void)
 			&s->last_dma_offset, pos_period,
 			AUDIO_FABRIC_PERIOD_BYTES, AUDIO_FABRIC_RING_BYTES,
 			s->period_staged, AUDIO_NUM_PERIODS);
-		if (retired != 0U && s->ops->retire)
-			s->ops->retire(retired);
+		if (retired != 0U) {
+			g_fabric_diag.retire_periods +=
+				retired / AUDIO_FABRIC_PERIOD_BYTES;
+			if (s->ops->retire)
+				s->ops->retire(retired);
+		}
 	}
 
 	/* Queued-contribution rebuild (plan U3): when a direct-ring
@@ -943,6 +954,7 @@ void audio_fabric_isr(void)
 	 * Unmeasured by the bench accumulator, like the retire pass. */
 	if (g_audio_fabric.rebuild_pending) {
 		g_audio_fabric.rebuild_pending = 0U;
+		g_fabric_diag.rebuild_runs++;
 		fabric_rebuild_queued(pos_period);
 	}
 
