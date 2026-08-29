@@ -1291,7 +1291,8 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_AUDIO_MP3_DECODE |
 			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM |
 			SDK_SERVICE_FLAG_AUDIO_CONTROL |
-			SDK_SERVICE_FLAG_AUDIO_FABRIC,
+			SDK_SERVICE_FLAG_AUDIO_FABRIC |
+			SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE,
 		21,	/* 0x0500..0x0514 incl. audio control plane and the
 			 * fabric lease plane (0x0512-0x0514; 0x050f..0x0511
 			 * reserved gaps); the on-hardware qualification gate
@@ -4097,14 +4098,15 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	 * byte order) would play byte-swapped noise. */
 	if (stream->sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	/* The fabric owns the output from the first bind (review
-	 * decision 1): any other producer session is just as busy as a
-	 * legacy/AHI client that repointed the formatter DMA away from
-	 * the standard ring (AP_TX_BUF_OFFS). On the Amiga side MHI and
-	 * AHI already exclude each other via the interrupt-server
-	 * ownership token; this enforces the same exclusion for raw SDK
-	 * clients through the three-way ownership state. */
-	if (audio_fabric_ownership() != AUDIO_FABRIC_IDLE)
+	/* A legacy/AHI register client that repointed the formatter DMA
+	 * away from the standard ring (AP_TX_BUF_OFFS) still blocks every
+	 * pump bind (LEGACY_EXCLUSIVE). A lease-held fabric no longer
+	 * does (AHI migration): the compositor mixes bounded lease
+	 * producers behind the single TX writer, so the pump may attach
+	 * while leases are live -- this supersedes the earlier
+	 * first-bind-exclusive review decision, whose rationale (the
+	 * MHI/AHI interrupt-server exclusion) the fabric dissolves. */
+	if (audio_fabric_ownership() == AUDIO_FABRIC_LEGACY_EXCLUSIVE)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 
 	/* Formatter recovery after a legacy session moved the DMA is the
@@ -4253,6 +4255,7 @@ static uint16_t handle_audio_ring_acquire(
 	uint32_t identity;
 	uint32_t gain;
 	uint32_t flags;
+	uint32_t rate;
 	int rc;
 
 	if (payload_len < sizeof(*payload))
@@ -4263,11 +4266,30 @@ static uint16_t handle_audio_ring_acquire(
 	identity = get_be32(payload->identity);
 	gain = get_be32(payload->gain);
 	flags = get_be32(payload->flags);
-	/* flags is REQUIRED ZERO (the bypass path consumes 48 kHz stereo
-	 * S16LE only); gain is the single 0..255 mixer scale. */
-	if (flags != 0U || gain > 255U)
+	rate = get_be32(payload->source_rate_hz);
+	/* flags carries SDK_AUDIO_RING_ACQUIRE_FLAG_* and the carved rate
+	 * word must agree with it: zero flags is the original bypass
+	 * acquire (48 kHz stereo S16LE, rate word zero); SOURCE_RATE
+	 * names a rate from the qualified conversion vocabulary.
+	 * Anything else is BAD_REQUEST -- including the rate-bearing
+	 * request on a firmware that does not implement it, which is the
+	 * client's fallback signal. gain is the single 0..255 mixer
+	 * scale. */
+	if (gain > 255U ||
+	    (flags & ~SDK_AUDIO_RING_ACQUIRE_FLAG_KNOWN) != 0U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	rc = audio_fabric_ring_acquire(slot, identity, gain, &grant);
+	if ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE) != 0U) {
+		if (rate != 8000U && rate != 12000U && rate != 24000U &&
+		    rate != 32000U && rate != 44100U && rate != 48000U)
+			return complete_status(req, comp,
+			                       SDK_STATUS_BAD_REQUEST);
+	} else if (rate != 0U) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+	rc = audio_fabric_ring_acquire(slot, identity, gain,
+		((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE) != 0U)
+			? rate : 0U,
+		&grant);
 	if (rc == AUDIO_FABRIC_LEASE_EBAD_SLOT)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if (rc == AUDIO_FABRIC_LEASE_ENO_MAP)
@@ -4283,13 +4305,23 @@ static uint16_t handle_audio_ring_acquire(
 	put_be32(result->ring_offset, grant.ring_offset);
 	put_be32(result->ring_capacity, grant.ring_capacity);
 	put_be32(result->control_offset, grant.control_offset);
-	/* Pinned grant geometry (R1/R3): the compositor consumes whole
-	 * 20-ms periods of 48 kHz stereo S16LE, and a granted capacity
-	 * is a whole number of periods. */
+	/* Pinned grant geometry (R1/R3): the ring holds whole 20-ms
+	 * periods of the 48-kHz output domain, and a granted capacity is
+	 * a whole number of periods. The contract names the source: the
+	 * original bypass (48 kHz stereo S16LE) or a source-rate lease
+	 * whose per-slot conversion the compositor performs; the carved
+	 * rate word echoes the granted rate under both contracts. */
 	put_be32(result->period_bytes, SDK_AUDIO_RING_PERIOD_BYTES);
 	put_be32(result->period_us, SDK_AUDIO_RING_PERIOD_US);
-	put_be32(result->sample_contract,
-	         SDK_AUDIO_RING_CONTRACT_48K_STEREO_S16LE);
+	if ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE) != 0U) {
+		put_be32(result->sample_contract,
+		         SDK_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE);
+		put_be32(result->source_rate, rate);
+	} else {
+		put_be32(result->sample_contract,
+		         SDK_AUDIO_RING_CONTRACT_48K_STEREO_S16LE);
+		put_be32(result->source_rate, 48000U);
+	}
 	put_be32(result->gain_applied, grant.gain_applied);
 	put_be32(result->slot_count, grant.slot_count);
 	put_be32(result->flags,
@@ -5195,9 +5227,11 @@ static uint16_t handle_media_session_audio_bind(
 	}
 	if (!audio_codec_present())
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	/* Same three-way ownership gate as the stream path: reject while
-	 * any fabric producer or a legacy/AHI client owns the output. */
-	if (audio_fabric_ownership() != AUDIO_FABRIC_IDLE)
+	/* Same three-way ownership gate as the stream path: a legacy/AHI
+	 * register client blocks the bind (LEGACY_EXCLUSIVE); live fabric
+	 * leases do not -- the pump mixes alongside them (AHI
+	 * migration). */
+	if (audio_fabric_ownership() == AUDIO_FABRIC_LEGACY_EXCLUSIVE)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 	status = sdk_media_session_audio_bind(session, 0U, &result);
 	if (status == SDK_STATUS_OK)

@@ -15,14 +15,25 @@ records it.
 
 ## Reading "done" correctly (consumer honesty)
 
-The fabric capability, once advertised, has **no shipping consumer**:
-AHI, MHI and ZZTop do not touch the lease plane until the AHI
-migration follow-on lands. Until then the proof client
-`zz9k-fabriclease` (SDK `tools/zz9k-fabriclease.c`) is the only
-exerciser of the opcodes. A recorded pass on this page means *the
-budget is measured, the plane is qualified on hardware, and the
-advertising is shipped in a matched set* — not that any shipping
-application can yet mix a second producer.
+The fabric capability is advertised and the plane is qualified on
+hardware. The AHI migration (this matched set) makes the matched AHI
+driver the **first shipping consumer**: when the card advertises the
+fabric and `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE`, AHI acquires a
+rate-bearing lease at its selected mix frequency instead of the
+legacy register path, publishes PAUSED across Stop/Start, and mixes
+alongside the pump (MHI/ZZPlay) — the Amiga-side AHI/MHI interrupt
+exclusion is dropped on fabric-capable stacks. The proof client
+`zz9k-fabriclease` (SDK `tools/zz9k-fabriclease.c`) remains the
+bypass-plane exerciser. A rate-bearing lease acquires with
+`SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE` and a rate from the
+qualified vocabulary (8000/12000/24000/32000/44100/48000 Hz); the
+compositor converts per-slot with the qualified kernel and enforces
+the documented two-converting-producer budget at acquire time
+(refused acquires fail closed with BUSY). Firmware predating the
+rate flag rejects the flag with BAD_REQUEST — the driver's fallback
+signal back to the legacy exclusive path. The rate path's hardware
+session (AHI+MHI coexistence, rate modes, PAUSED, warm reset) is the
+remaining user gate before the coordinated `v2.8.0-rc3` tag.
 
 ## The admitted-budget model
 

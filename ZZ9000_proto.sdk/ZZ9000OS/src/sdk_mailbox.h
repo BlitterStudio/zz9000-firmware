@@ -147,6 +147,7 @@
  * The qualification gate passed 2026-08-28; now reported in the audio
  * service flags. */
 #define SDK_SERVICE_FLAG_AUDIO_FABRIC (1U << 22)
+#define SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE (1U << 23)
 #define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
 #define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)
 #define SDK_SERVICE_FLAG_CODEC_GZIP             (1U << 18)
@@ -674,6 +675,18 @@ typedef char SDKAudioControlStateSaveStatus_must_be_at_offset_44[
  * conversion-bearing contracts without moving any field. */
 #define SDK_AUDIO_RING_CONTRACT_NONE             0U
 #define SDK_AUDIO_RING_CONTRACT_48K_STEREO_S16LE 1U
+#define SDK_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE 2U
+
+/* Acquire-request flags. SOURCE_RATE makes the carved
+ * source_rate_hz word meaningful: the lease delivers stereo S16LE at
+ * that rate and the compositor converts per-slot with the qualified
+ * kernel (AHI migration). The rate vocabulary is the conversion
+ * table: 8000/12000/24000/32000/44100/48000 Hz. Advertised through
+ * SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE; firmware without it still
+ * rejects any nonzero flags word with SDK_STATUS_BAD_REQUEST. */
+#define SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE (1U << 0)
+#define SDK_AUDIO_RING_ACQUIRE_FLAG_KNOWN \
+	SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE
 
 /* Highest leaseable direct-ring slot index. Slot 0 is the firmware
  * pump and is never granted; the acquire result's slot_count reports
@@ -742,16 +755,19 @@ struct SDKAudioRingFirmwareLine {
 
 /* Producer intent for one direct-ring slot (SDK_OP_AUDIO_RING_ACQUIRE).
  * identity reuses the meter vocabulary (SDK_AUDIO_METER_IDENTITY_*);
- * gain is the single 0..255 mixer scale (128 = unity). flags is
- * REQUIRED ZERO: a nonzero flags word is rejected
- * SDK_STATUS_BAD_REQUEST (the bypass path consumes 48 kHz stereo
- * S16LE only). */
+ * gain is the single 0..255 mixer scale (128 = unity). flags carries
+ * SDK_AUDIO_RING_ACQUIRE_FLAG_*: zero is the original bypass acquire
+ * (48 kHz stereo S16LE), SOURCE_RATE names a conversion-bearing
+ * source rate in the carved word. Unknown bits, an off-vocabulary
+ * rate, or a rate without the flag are rejected
+ * SDK_STATUS_BAD_REQUEST. */
 struct SDKAudioRingAcquirePayload {
 	uint8_t slot[4];
 	uint8_t identity[4];
 	uint8_t gain[4];
 	uint8_t flags[4];
-	uint8_t reserved[32];
+	uint8_t source_rate_hz[4];
+	uint8_t reserved[28];
 };
 
 /* The generation-bound grant (R1, R3): every address and capacity
@@ -783,7 +799,7 @@ struct SDKAudioRingAcquireResultPayload {
 	uint8_t gain_applied[4];
 	uint8_t slot_count[4];
 	uint8_t flags[4];
-	uint8_t reserved[4];
+	uint8_t source_rate[4];
 };
 
 /* Surrender a direct-ring slot (SDK_OP_AUDIO_RING_RELEASE). slot +

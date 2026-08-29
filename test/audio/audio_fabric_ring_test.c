@@ -14,6 +14,12 @@
  *   A. admission and grant shape: leaseable slots, pump/out-of-range
  *      rejection, double-acquire BUSY, legacy rejection, grant fields
  *      (generation, capacity, slot count, gain bounding reported);
+ *   A2. rate-bearing admission (AHI migration): off-table rate
+ *      refusal, the two-converting-producer budget across pump and
+ *      leases, bypass leases always admissible, budget re-opening;
+ *   B2. rate-lease conversion parity: a 44.1-kHz lease's TX periods
+ *      are the qualified kernel's image of the source, credits
+ *      advance in source-rate periods;
  *   B. lifecycle: LEASED -> first valid publication -> ACTIVE, TX
  *      periods carrying the producer's PCM, DMA-retirement credits
  *      published on the firmware line (seqlock-stable read), state
@@ -55,6 +61,7 @@
 #include <string.h>
 
 #include "fabric_test_common.h"
+#include "audio_convert.h"
 #include "sdk_mailbox.h"
 #include "xil_cache.h"
 
@@ -213,17 +220,23 @@ static uint32_t pump_standby_start(void)
 	return st.underruns;
 }
 
-static int acquire_lease(uint32_t slot, uint32_t gain,
-	struct audio_fabric_ring_grant *grant)
+static int acquire_lease_rate(uint32_t slot, uint32_t gain,
+	uint32_t rate, struct audio_fabric_ring_grant *grant)
 {
 	/* The admission scenario deliberately passes out-of-range slots
 	 * (PR #88 review): never index the producer model with them. */
 	if (slot >= AUDIO_FABRIC_SLOT_COUNT)
 		return audio_fabric_ring_acquire(slot,
-			SDK_AUDIO_METER_IDENTITY_MEDIA, gain, grant);
+			SDK_AUDIO_METER_IDENTITY_MEDIA, gain, rate, grant);
 	memset(&g_producer[slot], 0, sizeof(g_producer[slot]));
 	return audio_fabric_ring_acquire(slot,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, gain, grant);
+		SDK_AUDIO_METER_IDENTITY_MEDIA, gain, rate, grant);
+}
+
+static int acquire_lease(uint32_t slot, uint32_t gain,
+	struct audio_fabric_ring_grant *grant)
+{
+	return acquire_lease_rate(slot, gain, 0U, grant);
 }
 
 /* ---- A. admission and grant shape ---- */
@@ -274,6 +287,123 @@ static void scenario_admission(void)
 	      AUDIO_FABRIC_LEASE_ELEGACY,
 	      "admission: legacy-exclusive output rejected", "");
 	g_legacy_active = 0;
+}
+
+/* ---- A2. rate-bearing admission and conversion budget ---- */
+
+static void scenario_rate_admission(void)
+{
+	struct audio_fabric_ring_grant grant;
+	struct audio_fabric_ring_grant conv;
+
+	fabric_reset_state();
+	/* Off-vocabulary rates are refused like a bad slot (the mailbox
+	 * layer validates the same set; the fabric re-arms it so no
+	 * internal caller can arm a geometry the fill would silence). */
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44101U,
+	                         &grant) == AUDIO_FABRIC_LEASE_EBAD_SLOT,
+	      "rate admission: off-table rate refused", "");
+	/* A converting pump occupies one of the two qualified
+	 * conversion-bearing slots; a converting lease fills the budget,
+	 * a second converting lease is refused like an occupied slot,
+	 * and a bypass lease stays admissible regardless. */
+	model_init(&g_model_b, 44100U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_prefill_constant(&g_model_b, PUMP_PCM);
+	fabric_pump_start();
+	fabric_pass();	/* cached pump source carries the rate now */
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44100U,
+	                         &conv) == AUDIO_FABRIC_LEASE_OK,
+	      "rate admission: converting lease beside converting pump",
+	      "");
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_RESERVED, 128U, 8000U,
+	                         &grant) == AUDIO_FABRIC_LEASE_EBUSY,
+	      "rate admission: third converting producer refused", "");
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_RESERVED, 128U, 48000U,
+	                         &grant) == AUDIO_FABRIC_LEASE_OK,
+	      "rate admission: bypass lease still admissible", "");
+	check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_RESERVED,
+		grant.generation) == AUDIO_FABRIC_LEASE_OK, "", "");
+	/* Releasing a converting lease re-opens the budget slot. */
+	check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
+		conv.generation) == AUDIO_FABRIC_LEASE_OK, "", "");
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_RESERVED, 128U, 12000U,
+	                         &grant) == AUDIO_FABRIC_LEASE_OK,
+	      "rate admission: budget re-opens after release", "");
+	(void)audio_fabric_ring_release(AUDIO_FABRIC_SLOT_RESERVED,
+		grant.generation);
+}
+
+/* ---- B2. rate-lease conversion parity (AHI migration) ---- */
+
+static void scenario_rate_conversion(void)
+{
+	struct audio_fabric_ring_grant grant;
+	struct SDKAudioRingFirmwareLine fw;
+	struct zz_audio_convert ref;
+	static int16_t src[882U * 2U];
+	static int16_t out[TICK_BYTES / 2U];
+	static int16_t expected[TICK_BYTES / 2U];
+	uint8_t *ring = g_ring_pcm_a;
+	uint64_t consumed;
+	uint32_t frame;
+	uint32_t pass;
+	int matched = 0;
+
+	fabric_reset_state();
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44100U,
+	                         &grant) == AUDIO_FABRIC_LEASE_OK,
+	      "rate conv: acquire 44.1-kHz lease", "");
+	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation =
+		grant.generation;
+	/* A repeating 882-frame stereo pattern: period-synchronized, so
+	 * once the converter history settles, every output period is the
+	 * same fixed image of it and a position-independent TX search is
+	 * exact. */
+	for (frame = 0U; frame < 882U; frame++) {
+		src[2U * frame] =
+			(int16_t)(1200 + (int32_t)(frame * 7U % 3000U));
+		src[2U * frame + 1U] =
+			(int16_t)(-900 - (int32_t)(frame * 11U % 2500U));
+	}
+	for (frame = 0U; frame < RING_TEST_CAPACITY / 4U; frame++) {
+		int16_t l = src[2U * (frame % 882U)];
+		int16_t r = src[2U * (frame % 882U) + 1U];
+
+		ring[frame * 4U] = (uint8_t)(uint16_t)l;
+		ring[frame * 4U + 1U] = (uint8_t)((uint16_t)l >> 8);
+		ring[frame * 4U + 2U] = (uint8_t)(uint16_t)r;
+		ring[frame * 4U + 3U] = (uint8_t)((uint16_t)r >> 8);
+	}
+	producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
+		RING_TEST_CAPACITY, 0U);
+	/* Reference: the same qualified kernel fed the same repeating
+	 * source; the third output period is the settled image. */
+	zz_audio_convert_init(&ref, 44100U, 48000U);
+	zz_audio_convert_stream(&ref, src, out, 882U, TICK_BYTES / 4U);
+	zz_audio_convert_stream(&ref, src, out, 882U, TICK_BYTES / 4U);
+	zz_audio_convert_stream(&ref, src, out, 882U, TICK_BYTES / 4U);
+	memcpy(expected, out, sizeof(expected));
+	for (pass = 0U; pass < 6U; pass++)
+		fabric_pass();
+	for (pass = 0U; pass < AUDIO_TX_BUFFER_SIZE / TICK_BYTES;
+	     pass++) {
+		if (memcmp(g_fabric_tx + pass * TICK_BYTES, expected,
+		           TICK_BYTES) == 0)
+			matched = 1;
+	}
+	check(matched,
+	      "rate conv: TX carries the kernel image of the source",
+	      "");
+	/* Credits are source-byte paced: whole 3528-byte periods. */
+	firmware_snapshot(AUDIO_FABRIC_SLOT_MAILBOX, &fw);
+	consumed = ((uint64_t)be32(fw.consumed_cursor_hi) << 32) |
+	           be32(fw.consumed_cursor_lo);
+	check(consumed >= 2U * 3528U && (consumed % 3528U) == 0U,
+	      "rate conv: credits advance in source periods",
+	      fmt("consumed=%llu", (unsigned long long)consumed));
+	check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
+		grant.generation) == AUDIO_FABRIC_LEASE_OK, "", "");
+	(void)zz_audio_convert_clips(&ref);
 }
 
 /* ---- B. lifecycle, audible periods, retirement credits ---- */
@@ -860,14 +990,14 @@ static void scenario_cache_fidelity(void)
 	      "cache: producer-line read invalidates the line", "");
 	check(firmware_flushed,
 	      "cache: credit publication flushes the fw line", "");
-	(void)audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
-		grant.generation);
 }
 
 int main(void)
 {
 	scenario_admission();
+	scenario_rate_admission();
 	scenario_lifecycle();
+	scenario_rate_conversion();
 	scenario_malformed();
 	scenario_grace();
 	scenario_cursor_fault();

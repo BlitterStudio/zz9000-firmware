@@ -238,7 +238,8 @@ struct audio_fabric_ring_grant {
  * LEASED until the producer's first valid line publication.
  */
 int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
-	uint32_t gain, struct audio_fabric_ring_grant *grant);
+	uint32_t gain, uint32_t source_rate,
+	struct audio_fabric_ring_grant *grant);
 
 /*
  * Surrender a direct-ring lease, quiesce-then-rebuild (KTD3): the
