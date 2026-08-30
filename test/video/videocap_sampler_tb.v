@@ -507,6 +507,14 @@ integer last_frame_sync_x;
 integer last_frame_phase_abs_delta;
 integer last_frame_phase_changed;
 
+integer hsync_rise_count = 0;
+integer hsync_fall_count = 0;
+
+always @(posedge hsync)
+    hsync_rise_count = hsync_rise_count + 1;
+
+always @(negedge hsync)
+    hsync_fall_count = hsync_fall_count + 1;
 always @(posedge cap_clk) begin
     if (dut.frame_sync) begin
         last_frame_sync_x = dut.phase_x;
@@ -750,6 +758,76 @@ task drive_plain_field;
                 @(posedge cap_clk);
             end
         end
+    end
+endtask
+
+/*
+ * Characterize the two measured Video Toaster timing shapes without making
+ * either edge orientation the oracle.  The reporter saw one rise and one fall
+ * for every one of 262/263 field lines in both modes; genlock changed the
+ * pulse orientation and VSYNC phase, not the edge count.
+ */
+task drive_characterization_line;
+    input integer pattern_seed;
+    input integer pulse_clks;
+    input integer inverted_pulse;
+    input integer vsync_drop_phase;
+    integer i;
+    integer px;
+    begin
+        for (i = 0; i < LINECLKS; i = i + 1) begin
+            if (inverted_pulse)
+                hsync = (i < pulse_clks);
+            else
+                hsync = (i >= pulse_clks);
+            if (i == vsync_drop_phase)
+                vsync = 0;
+            px = (i / PIXSPAN) + pattern_seed;
+            r = px[7:0];
+            g = ~px[7:0];
+            b = {px[3:0], px[7:4]};
+            @(posedge cap_clk);
+        end
+    end
+endtask
+
+task drive_characterization_field;
+    input integer seed;
+    input integer total_lines;
+    input integer pulse_clks;
+    input integer inverted_pulse;
+    input integer vsync_drop_phase;
+    integer ln;
+    integer rises_before;
+    integer falls_before;
+    begin
+        /* Put the input on the opposite level before counting so every driven
+         * line contributes exactly one rising and one falling edge. */
+        hsync = inverted_pulse ? 0 : 1;
+        @(posedge cap_clk);
+        rises_before = hsync_rise_count;
+        falls_before = hsync_fall_count;
+
+        vsync = 1;
+        drive_characterization_line(seed, pulse_clks, inverted_pulse,
+                                    vsync_drop_phase);
+        drive_characterization_line(seed + 1, pulse_clks, inverted_pulse, -1);
+        vsync = 1;
+        for (ln = 2; ln < total_lines; ln = ln + 1)
+            drive_characterization_line(seed + ln, pulse_clks,
+                                        inverted_pulse, -1);
+
+        check_eq("characterization_rise_lines",
+                 hsync_rise_count - rises_before, total_lines);
+        check_eq("characterization_fall_lines",
+                 hsync_fall_count - falls_before, total_lines);
+        check_eq("characterization_capture_complete", cap_x_done, 1);
+        if (FULLWIDTH)
+            check_eq("characterization_full_width_extent",
+                     (cap_x >= 1280), 1);
+        else
+            check_eq("characterization_filtered_extent",
+                     (cap_x > 512), 1);
     end
 endtask
 
@@ -1037,6 +1115,30 @@ initial begin
     check_eq("fullrate_field_parity_a", cap_y[0],
              !interlace_field_parity);
 
+
+    /*
+     * Run the full 262/263-line reporter characterization only in the two
+     * representative hires configurations.  Repeating it for every crop and
+     * sample-mode permutation adds simulation time but no timing coverage.
+     *
+     * Normal video uses the established half-line phase alternation.  The
+     * Toaster-like pair keeps the reported phase fixed while inverting the
+     * narrow pulse, matching hspol=1/fall=1/lowWide=1.  Current master
+     * completes both capture windows, so this model does not reproduce the
+     * visible duplication; the missing discriminator belongs in the passive
+     * telemetry round rather than in a speculative polarity assertion.
+     */
+    if (PIXSPAN == 2 && SAMPLEMODE == 0 && CROPH == 188 && CROPV == 26) begin
+        drive_characterization_field(500, 262, 67, 0, 400);
+        drive_characterization_field(600, 263, 67, 0,
+                                     400 + LINECLKS / 2);
+        check_eq("characterization_normal_interlace", cap_interlace, 1);
+
+        drive_characterization_field(700, 262, 67, 1, 114);
+        drive_characterization_field(800, 263, 67, 1, 114);
+        check_eq("characterization_toaster_repeat_phase", cap_interlace, 0);
+        $display("CHARACTERIZATION Toaster-like edges complete the capture window; telemetry required");
+    end
     /* The standalone tracker makes the two-frame validity rule explicit
      * without lengthening every pixel-format raster configuration. */
     check_eq("standard_startup_invalid", tracked_standard, 0);
