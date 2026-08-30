@@ -115,6 +115,10 @@ void audio_fabric_isr(void);
  */
 int audio_fabric_producer_attach(uint32_t slot,
 	const struct audio_fabric_producer_ops *ops);
+/* Publish the producer's negotiated rate while its attached slot is
+ * frozen. Admission checks use this owner-written value immediately,
+ * without waiting for the compositor's first source snapshot. */
+void audio_fabric_producer_rate_set(uint32_t slot, uint32_t source_rate);
 void audio_fabric_producer_detach(uint32_t slot);
 /* Drop one producer's queued-period tags without touching the shared TX
  * ring (pause with a live peer); pair with audio_fabric_request_rebuild. */
@@ -220,6 +224,13 @@ struct audio_fabric_ring_grant {
 };
 
 /*
+ * Conversion-bearing admission shared by direct-ring acquisition and
+ * pump binding. Bypass rates (0/48000) are always admissible; any other
+ * rate requires one of the two qualified converter slots to remain free.
+ */
+int audio_fabric_conversion_admissible(uint32_t source_rate);
+
+/*
  * Acquire a direct-ring lease. slot 0 (the pump) is never leaseable;
  * a slot beyond the active bus mode's grant map (two leaseable slots
  * on Zorro III, one on Zorro II under an acknowledged generation-2
@@ -238,7 +249,8 @@ struct audio_fabric_ring_grant {
  * LEASED until the producer's first valid line publication.
  */
 int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
-	uint32_t gain, struct audio_fabric_ring_grant *grant);
+	uint32_t gain, uint32_t source_rate,
+	struct audio_fabric_ring_grant *grant);
 
 /*
  * Surrender a direct-ring lease, quiesce-then-rebuild (KTD3): the

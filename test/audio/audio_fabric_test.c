@@ -942,6 +942,18 @@ static void scenario_source_contract(void)
 			      srcs[0], "audio_pump_preconvert_stage(") == 1,
 		      "contract: ISR stages converted ring, not native PCM",
 		      paths[0]);
+		check(count_occurrences(
+			      srcs[0],
+			      "audio_fabric_conversion_admissible(result.sample_rate)") ==
+		      1,
+		      "contract: media bind enforces converter budget",
+		      paths[0]);
+		check(count_occurrences(
+			      srcs[0],
+			      "sdk_media_session_audio_unbind(session, 0U, &result)") ==
+		      1,
+		      "contract: rejected media bind rolls back",
+		      paths[0]);
 	}
 
 	check(srcs[1] != NULL, "contract: ax.c readable", paths[1]);

@@ -32,6 +32,8 @@ struct audio_fabric_lease {
 	                           * line at +64 (SDKAudioRingFirmwareLine) */
 	uint32_t capacity;
 	uint32_t identity;        /* SDK_AUDIO_METER_IDENTITY_* */
+	uint32_t source_rate;     /* 48000 bypass, or the validated
+	                           * conversion-bearing source rate */
 	uint32_t generation;      /* slot epoch this lease runs under */
 	uint64_t consumed;        /* bytes staged into the TX ring; the
 	                           * compositor ISR is the single writer */
@@ -67,6 +69,8 @@ struct audio_fabric_slot {
 	uint8_t tail_pending;    /* real PCM staged, tail not played out */
 	/* Cached producer snapshot (KTD2): ring, capacity, cursors. */
 	struct audio_fabric_source source;
+	uint32_t admission_rate;  /* negotiated rate published by the owner
+	                           * before a newly attached slot goes live */
 	uint32_t last_dma_offset; /* active DMA period at the last ISR */
 	uint32_t period_staged[AUDIO_NUM_PERIODS];
 	uint32_t silence_run;     /* consecutive silent ISR periods */

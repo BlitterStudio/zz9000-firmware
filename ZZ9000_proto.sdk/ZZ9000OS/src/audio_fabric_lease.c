@@ -533,7 +533,8 @@ static int fabric_ring_source_snapshot(uint32_t slot_index,
 	source->capacity = l->capacity;
 	source->produced_bytes = l->write_cursor;
 	source->staged_bytes = l->consumed;
-	source->sample_rate = 48000U;
+	source->sample_rate = (l->source_rate != 0U) ? l->source_rate
+	                                             : 48000U;
 	source->channels = 2U;
 	source->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
 	/* PAUSED is intentional silence: cursor progress is suppressed
@@ -604,15 +605,61 @@ static const struct audio_fabric_producer_ops *fabric_ring_ops(uint32_t slot)
 	return slot == AUDIO_FABRIC_SLOT_MAILBOX
 		? &fabric_ring_ops_mailbox : &fabric_ring_ops_reserved;
 }
-
 /*
  * Lease plane lifecycle. Acquire and release run in main-loop context
  * on core 0; the compositor touches the lease only through the
  * producer ops and the tick above.
  */
 
+/* Conversion-bearing admission (AHI migration): the qualified budget
+ * is at most two converting producers across all live slots -- the
+ * pump (a bound stream below 48 kHz) plus any conversion-bearing
+ * leases. A bypass acquire (48000) is always admissible on a free
+ * slot; a rate-bearing acquire that would push the converting count
+ * past the budget is refused like an occupied slot (EBUSY) rather
+ * than granted with unqualified cycle cost. Fail closed, visibly. */
+static uint32_t fabric_converting_count(void)
+{
+	uint32_t count = 0U;
+	uint32_t i;
+
+	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
+		struct audio_fabric_slot *s = fabric_slot(i);
+
+		if (s == NULL || !s->attached)
+			continue;
+		if (i == AUDIO_FABRIC_SLOT_PUMP) {
+			if (s->admission_rate != 0U &&
+			    s->admission_rate != 48000U)
+				count++;
+		} else if (s->lease.ring != NULL &&
+			   s->lease.source_rate != 0U &&
+			   s->lease.source_rate != 48000U) {
+			count++;
+		}
+	}
+	return count;
+}
+
+int audio_fabric_conversion_admissible(uint32_t source_rate)
+{
+	return source_rate == 0U || source_rate == 48000U ||
+	       fabric_converting_count() < 2U;
+}
+
+/* Rate vocabulary of conversion-bearing leases: the qualified
+ * conversion table (the mailbox layer validates the same set; this
+ * re-arm mirrors the gain policy so no internal caller can arm an
+ * unusable geometry the fill would silently drop). */
+static int fabric_rate_known(uint32_t rate)
+{
+	return rate == 8000U || rate == 12000U || rate == 24000U ||
+	       rate == 32000U || rate == 44100U || rate == 48000U;
+}
+
 int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
-	uint32_t gain, struct audio_fabric_ring_grant *grant)
+	uint32_t gain, uint32_t source_rate,
+	struct audio_fabric_ring_grant *grant)
 {
 	struct fabric_ring_map map;
 	struct audio_fabric_slot *s;
@@ -620,7 +667,6 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	struct audio_scene_lease_gain_result composed;
 	uint8_t *ring;
 	uint8_t *control;
-
 	if (grant != NULL) {
 		memset(grant, 0, sizeof(*grant));
 	}
@@ -632,6 +678,8 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	if (s == NULL)
 		return AUDIO_FABRIC_LEASE_EBAD_SLOT;
 	l = &s->lease;
+	if (source_rate != 0U && !fabric_rate_known(source_rate))
+		return AUDIO_FABRIC_LEASE_EBAD_SLOT;
 	/* R11: the lease gain composes against the enforced ceiling under
 	 * the active scene (audio_scene.c), exactly like an owner trim: a
 	 * request above the composition is bounded and REPORTED through
@@ -643,6 +691,12 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 		return AUDIO_FABRIC_LEASE_EBUSY;
 	if (audio_fabric_ownership() == AUDIO_FABRIC_LEGACY_EXCLUSIVE)
 		return AUDIO_FABRIC_LEASE_ELEGACY;
+	/* Conversion-bearing admission (AHI migration): the qualified
+	 * budget allows at most two converting producers; a rate-bearing
+	 * acquire past it is refused like an occupied slot, never granted
+	 * with unqualified cycle cost. */
+	if (!audio_fabric_conversion_admissible(source_rate))
+		return AUDIO_FABRIC_LEASE_EBUSY;
 	ring = map.ring[slot];
 	control = map.control[slot];
 	/* Fresh grant (R5): the ghost-period bound depends on a lease
@@ -657,6 +711,7 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	l->control = control;
 	l->capacity = map.capacity;
 	l->identity = identity;
+	l->source_rate = (source_rate != 0U) ? source_rate : 48000U;
 	l->generation = s->epoch;   /* attach bumped it onto this lease */
 	l->state = (uint8_t)AUDIO_FABRIC_SLOT_STATE_LEASED;
 	/* Sentinel: the zeroed block carries generation 0, so the first

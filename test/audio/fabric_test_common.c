@@ -328,6 +328,8 @@ void fabric_pump_start(void)
 {
 	(void)audio_fabric_producer_attach(
 		AUDIO_FABRIC_SLOT_PUMP, &g_ops_b);
+	audio_fabric_producer_rate_set(
+		AUDIO_FABRIC_SLOT_PUMP, g_model_b.sample_rate);
 	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
 	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
 }
@@ -339,6 +341,8 @@ void fabric_pump_resume(void)
 {
 	(void)audio_fabric_producer_attach(
 		AUDIO_FABRIC_SLOT_PUMP, &g_ops_b);
+	audio_fabric_producer_rate_set(
+		AUDIO_FABRIC_SLOT_PUMP, g_model_b.sample_rate);
 	if (!audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP))
 		audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
 	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
