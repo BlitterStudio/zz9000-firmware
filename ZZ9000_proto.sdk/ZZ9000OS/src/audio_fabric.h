@@ -115,6 +115,10 @@ void audio_fabric_isr(void);
  */
 int audio_fabric_producer_attach(uint32_t slot,
 	const struct audio_fabric_producer_ops *ops);
+/* Publish the producer's negotiated rate while its attached slot is
+ * frozen. Admission checks use this owner-written value immediately,
+ * without waiting for the compositor's first source snapshot. */
+void audio_fabric_producer_rate_set(uint32_t slot, uint32_t source_rate);
 void audio_fabric_producer_detach(uint32_t slot);
 /* Drop one producer's queued-period tags without touching the shared TX
  * ring (pause with a live peer); pair with audio_fabric_request_rebuild. */

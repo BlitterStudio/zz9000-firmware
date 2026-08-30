@@ -4006,13 +4006,15 @@ void sdk_mailbox_audio_playback_pump(void)
  * position; go_live publishes LAST so an audio IRQ never sees a live
  * slot with a half-published session.
  */
-static void audio_playback_start(uint32_t source_kind, uint32_t session)
+static void audio_playback_start(uint32_t source_kind, uint32_t session,
+	uint32_t source_rate)
 {
 	if (!audio_fabric_producer_attach(
 		    AUDIO_FABRIC_SLOT_PUMP, &audio_pump_producer_ops)) {
 		/* Unreachable: every caller gates on ownership first. */
 		return;
 	}
+	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP, source_rate);
 	if (source_kind == AUDIO_PUMP_SOURCE_STREAM) {
 		struct SDKAudioStream *stream = find_audio_stream(session);
 
@@ -4116,7 +4118,7 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	 * buffer and conditionally re-inits, audio_fabric.c); SAFE here:
 	 * PLAY runs in the main loop with the slot still frozen. */
 	stream->pump_tail_pending = 0U;
-	audio_playback_start(AUDIO_PUMP_SOURCE_STREAM, session);
+	audio_playback_start(AUDIO_PUMP_SOURCE_STREAM, session, 48000U);
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
 }
 
@@ -5223,7 +5225,8 @@ static uint16_t handle_media_session_audio_bind(
 			session, 0U, &result);
 		if (status == SDK_STATUS_OK && g_audio_playback.paused)
 			audio_playback_start(
-				AUDIO_PUMP_SOURCE_MEDIA, session);
+				AUDIO_PUMP_SOURCE_MEDIA, session,
+				result.sample_rate);
 		return complete_media_session_audio_result(
 			req, comp, status, &result);
 	}
@@ -5245,7 +5248,8 @@ static uint16_t handle_media_session_audio_bind(
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 	}
 	if (status == SDK_STATUS_OK)
-		audio_playback_start(AUDIO_PUMP_SOURCE_MEDIA, session);
+		audio_playback_start(AUDIO_PUMP_SOURCE_MEDIA, session,
+		                     result.sample_rate);
 	return complete_media_session_audio_result(
 		req, comp, status, &result);
 }

@@ -303,14 +303,13 @@ static void scenario_rate_admission(void)
 	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44101U,
 	                         &grant) == AUDIO_FABRIC_LEASE_EBAD_SLOT,
 	      "rate admission: off-table rate refused", "");
-	/* A converting pump occupies one of the two qualified
-	 * conversion-bearing slots; a converting lease fills the budget,
-	 * a second converting lease is refused like an occupied slot,
-	 * and a bypass lease stays admissible regardless. */
+	/* A newly attached converting pump occupies one of the two
+	 * qualified conversion slots before its first compositor ISR;
+	 * a converting lease fills the budget, a second converting lease
+	 * is refused, and a bypass lease stays admissible regardless. */
 	model_init(&g_model_b, 44100U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
 	model_prefill_constant(&g_model_b, PUMP_PCM);
 	fabric_pump_start();
-	fabric_pass();	/* cached pump source carries the rate now */
 	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44100U,
 	                         &conv) == AUDIO_FABRIC_LEASE_OK,
 	      "rate admission: converting lease beside converting pump",

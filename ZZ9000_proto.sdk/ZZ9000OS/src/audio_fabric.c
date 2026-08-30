@@ -1138,6 +1138,14 @@ int audio_fabric_producer_attach(uint32_t slot,
 	return 1;
 }
 
+void audio_fabric_producer_rate_set(uint32_t slot, uint32_t source_rate)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+
+	if (s != NULL && s->attached)
+		s->admission_rate = source_rate;
+}
+
 void audio_fabric_producer_detach(uint32_t slot)
 {
 	struct audio_fabric_slot *s = fabric_slot(slot);

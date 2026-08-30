@@ -629,8 +629,8 @@ static uint32_t fabric_converting_count(void)
 		if (s == NULL || !s->attached)
 			continue;
 		if (i == AUDIO_FABRIC_SLOT_PUMP) {
-			if (s->source.sample_rate != 0U &&
-			    s->source.sample_rate != 48000U)
+			if (s->admission_rate != 0U &&
+			    s->admission_rate != 48000U)
 				count++;
 		} else if (s->lease.ring != NULL &&
 			   s->lease.source_rate != 0U &&

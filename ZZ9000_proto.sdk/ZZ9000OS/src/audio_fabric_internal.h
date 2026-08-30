@@ -69,6 +69,8 @@ struct audio_fabric_slot {
 	uint8_t tail_pending;    /* real PCM staged, tail not played out */
 	/* Cached producer snapshot (KTD2): ring, capacity, cursors. */
 	struct audio_fabric_source source;
+	uint32_t admission_rate;  /* negotiated rate published by the owner
+	                           * before a newly attached slot goes live */
 	uint32_t last_dma_offset; /* active DMA period at the last ISR */
 	uint32_t period_staged[AUDIO_NUM_PERIODS];
 	uint32_t silence_run;     /* consecutive silent ISR periods */
