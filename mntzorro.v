@@ -37,6 +37,10 @@
 `define C_S_AXI_DATA_WIDTH 32
 `define C_S_AXI_ADDR_WIDTH 5
 
+`ifndef VCAP_DIAG_BUILD_ID
+`define VCAP_DIAG_BUILD_ID 32'h00000000
+`endif
+
 // Videocap sampler variant selection. This block must stay below the AXI
 // width definitions: build_variant_bitstreams.sh replaces everything from
 // the variant switch through C_S_AXI_DATA_WIDTH for each board target.
@@ -1069,6 +1073,43 @@ module MNTZorro_v0_1_S00_AXI
   localparam [15:0] VCAP_PROBE_SAMPLER_CONFIG = 16'h01b8;
   localparam [15:0] VCAP_PROBE_SAMPLER_CONFIG_LO = 16'h01ba;
   localparam [15:0] VCAP_PROBE_OWNER_BASE = 16'h01c0;
+  // Atomic field diagnostic bundle. Host-visible offsets are 0x1200..0x123f.
+  localparam [15:0] VCAP_DIAG_CAPABILITY = 16'h0200;
+  localparam [15:0] VCAP_DIAG_CAPABILITY_LO = 16'h0202;
+  localparam [15:0] VCAP_DIAG_BUILD_ID = 16'h0204;
+  localparam [15:0] VCAP_DIAG_BUILD_ID_LO = 16'h0206;
+  localparam [15:0] VCAP_DIAG_VARIANT_ID = 16'h0208;
+  localparam [15:0] VCAP_DIAG_VARIANT_ID_LO = 16'h020a;
+  localparam [15:0] VCAP_DIAG_STATUS = 16'h020c;
+  localparam [15:0] VCAP_DIAG_STATUS_LO = 16'h020e;
+  localparam [15:0] VCAP_DIAG_DATA_BASE = 16'h0210;
+`ifdef ZORRO3
+  localparam VCAP_DIAG_VARIANT_Z3 = 1'b1;
+`else
+  localparam VCAP_DIAG_VARIANT_Z3 = 1'b0;
+`endif
+`ifdef VARIANT_Z3_FASTRAM
+  localparam VCAP_DIAG_VARIANT_FASTRAM = 1'b1;
+`else
+  localparam VCAP_DIAG_VARIANT_FASTRAM = 1'b0;
+`endif
+`ifdef VARIANT_2MB
+  localparam VCAP_DIAG_VARIANT_2MB = 1'b1;
+`else
+  localparam VCAP_DIAG_VARIANT_2MB = 1'b0;
+`endif
+`ifdef VARIANT_AUTOBOOT
+  localparam VCAP_DIAG_VARIANT_AUTOBOOT = 1'b1;
+`else
+  localparam VCAP_DIAG_VARIANT_AUTOBOOT = 1'b0;
+`endif
+  localparam [1:0] VCAP_DIAG_VARIANT_RGB_MODE = `VCAP_RGB_MODE;
+  localparam [31:0] VCAP_DIAG_VARIANT_VALUE = {
+      16'h0001, 8'h00, VCAP_DIAG_VARIANT_AUTOBOOT,
+      VCAP_DIAG_VARIANT_RGB_MODE, (`VCAP_CSYNC_VSYNC != 0),
+      (`VCAP_FULLRATE_INT != 0), VCAP_DIAG_VARIANT_2MB,
+      VCAP_DIAG_VARIANT_FASTRAM, VCAP_DIAG_VARIANT_Z3
+  };
   // Raw sampler words immediately before the configured horizontal crop.
   // Host-visible direct-register offsets are 0x12e0 and 0x1300..0x13ff.
   localparam [15:0] VCAP_PRE_CROP_PROBE_META = 16'h02e0;
@@ -1296,6 +1337,8 @@ module MNTZorro_v0_1_S00_AXI
   wire [11:0] vcap_sampler_probe_source_x;
   wire [31:0] vcap_sampler_probe_context;
   wire [31:0] vcap_sampler_probe_config;
+  wire vcap_sampler_diag_valid;
+  wire [383:0] vcap_sampler_diag_data;
   wire vcap_sampler_probe_precrop_valid;
   wire [31:0] vcap_sampler_probe_precrop_context;
   wire [5:0] vcap_sampler_probe_precrop_raddr =
@@ -1305,6 +1348,7 @@ module MNTZorro_v0_1_S00_AXI
   wire vcap_sampler_probe_arm_seen_axi;
   wire vcap_sampler_probe_valid_axi;
   wire vcap_sampler_probe_precrop_valid_axi;
+  wire vcap_sampler_diag_valid_axi;
   reg vcap_probe_arm_toggle = 0;
   wire [11:0] vcap_raddr = videocap_save_x;
   wire clkfbout_zz9000_ps_clk_wiz_1_0;
@@ -1480,6 +1524,8 @@ module MNTZorro_v0_1_S00_AXI
       .probe_source_x(vcap_sampler_probe_source_x),
       .probe_context(vcap_sampler_probe_context),
       .probe_config(vcap_sampler_probe_config),
+      .diag_valid(vcap_sampler_diag_valid),
+      .diag_data(vcap_sampler_diag_data),
       .probe_precrop_valid(vcap_sampler_probe_precrop_valid),
       .probe_precrop_context(vcap_sampler_probe_precrop_context),
       .probe_precrop_raddr(vcap_sampler_probe_precrop_raddr),
@@ -1512,6 +1558,18 @@ module MNTZorro_v0_1_S00_AXI
       .src_in(vcap_sampler_probe_valid),
       .dest_clk(S_AXI_ACLK),
       .dest_out(vcap_sampler_probe_valid_axi)
+  );
+
+  xpm_cdc_single #(
+      .DEST_SYNC_FF(3),
+      .INIT_SYNC_FF(1),
+      .SIM_ASSERT_CHK(0),
+      .SRC_INPUT_REG(0)
+  ) videocap_diag_valid_cdc (
+      .src_clk(e7m_shifted),
+      .src_in(vcap_sampler_diag_valid),
+      .dest_clk(S_AXI_ACLK),
+      .dest_out(vcap_sampler_diag_valid_axi)
   );
 
   xpm_cdc_single #(
@@ -1583,6 +1641,13 @@ module MNTZorro_v0_1_S00_AXI
         4'd14: vcap_sampler_probe_word = vcap_sampler_probe_data[479:448];
         default: vcap_sampler_probe_word = vcap_sampler_probe_data[511:480];
       endcase
+    end
+  endfunction
+
+  function [31:0] vcap_diag_word;
+    input [3:0] index;
+    begin
+      vcap_diag_word = vcap_sampler_diag_data[index * 32 +: 32];
     end
   endfunction
 
@@ -2876,6 +2941,33 @@ module MNTZorro_v0_1_S00_AXI
             VCAP_PROBE_SAMPLER_CONFIG_LO: begin
               rr_data <= vcap_sampler_probe_config;
             end
+            VCAP_DIAG_CAPABILITY,
+            VCAP_DIAG_CAPABILITY_LO: begin
+              // "VD", ABI version 1, sixteen total 32-bit words.
+              rr_data <= 32'h56440110;
+            end
+            VCAP_DIAG_BUILD_ID,
+            VCAP_DIAG_BUILD_ID_LO: begin
+              rr_data <= `VCAP_DIAG_BUILD_ID;
+            end
+            VCAP_DIAG_VARIANT_ID,
+            VCAP_DIAG_VARIANT_ID_LO: begin
+              rr_data <= VCAP_DIAG_VARIANT_VALUE;
+            end
+            VCAP_DIAG_STATUS,
+            VCAP_DIAG_STATUS_LO: begin
+              rr_data <= {
+                  vcap_sampler_diag_valid_axi,
+                  vcap_sampler_probe_arm_seen_axi == vcap_probe_arm_toggle,
+                  vcap_sampler_diag_data[335],
+                  vcap_sampler_diag_data[333],
+                  vcap_sampler_diag_data[332],
+                  vcap_sampler_diag_data[331],
+                  vcap_sampler_diag_data[328],
+                  vcap_sampler_diag_data[327],
+                  8'h00, vcap_sampler_diag_data[351:336]
+              };
+            end
             VCAP_PRE_CROP_PROBE_META,
             VCAP_PRE_CROP_PROBE_META_LO: begin
               rr_data[31:16] <= 16'h5652;
@@ -2919,6 +3011,13 @@ module MNTZorro_v0_1_S00_AXI
                 rr_data <= vcap_probe_owner[
                     ((regread_addr & SDK_REG_OFFSET_MASK) -
                      VCAP_PROBE_OWNER_BASE) >> 2];
+              end else if ((regread_addr & SDK_REG_OFFSET_MASK) >=
+                      VCAP_DIAG_DATA_BASE &&
+                  (regread_addr & SDK_REG_OFFSET_MASK) <
+                      VCAP_DIAG_DATA_BASE + 16'h0030) begin
+                rr_data <= vcap_diag_word(
+                    ((regread_addr & SDK_REG_OFFSET_MASK) -
+                     VCAP_DIAG_DATA_BASE) >> 2);
               end else if ((regread_addr & SDK_REG_OFFSET_MASK) >=
                       VCAP_PRE_CROP_PROBE_DATA_BASE &&
                   (regread_addr & SDK_REG_OFFSET_MASK) <

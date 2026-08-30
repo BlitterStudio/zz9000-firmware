@@ -163,6 +163,26 @@ update_ip_catalog -rebuild
 
 # Set 'sources_1' fileset object
 set obj [get_filesets sources_1]
+set vcap_diag_build_id ""
+if {[info exists ::env(VCAP_DIAG_BUILD_ID)]} {
+  set vcap_diag_build_id $::env(VCAP_DIAG_BUILD_ID)
+}
+if {$vcap_diag_build_id eq ""} {
+  if {[catch {
+    exec git -C $origin_dir rev-parse --short=8 HEAD
+  } vcap_diag_build_id]} {
+    set vcap_diag_build_id "00000000"
+  }
+}
+set vcap_diag_build_id [string trim $vcap_diag_build_id]
+if {![regexp -nocase {^[0-9a-f]{8}$} $vcap_diag_build_id]} {
+  error "VCAP_DIAG_BUILD_ID must be exactly eight hexadecimal digits"
+}
+set verilog_defines [get_property verilog_define $obj]
+lappend verilog_defines \
+  "VCAP_DIAG_BUILD_ID=32'h[string tolower $vcap_diag_build_id]"
+set_property verilog_define $verilog_defines $obj
+puts "INFO: VCAP diagnostic build ID: $vcap_diag_build_id"
 if { $no_autoboot } {
   set verilog_defines [get_property verilog_define $obj]
   lappend verilog_defines VARIANT_DISABLE_AUTOBOOT

@@ -25,6 +25,7 @@ RTL_PATH = ROOT / "mntzorro.v"
 BUILD_SCRIPT = ROOT / "build_variant_bitstreams.sh"
 SAMPLER_PATH = ROOT / "videocap_sampler.v"
 BUILD_RUN_PATH = ROOT / "build_run_synthesis.tcl"
+PROJECT_TCL_PATH = ROOT / "zz9000_project.tcl"
 IOB_VERIFY_PATH = ROOT / "verify_vcap_iob_placement.tcl"
 
 BLOCK_START = "// ZORRO2/3 switch"
@@ -289,11 +290,56 @@ def check_vcap_iob_capture_contract(sampler: str, build_run: str) -> None:
         )
 
 
+def check_vcap_diag_contract(rtl: str, sampler: str, project_tcl: str) -> None:
+    """The field bundle must remain atomic, versioned, and arm-coupled."""
+    rtl_fragments = (
+        "localparam [15:0] VCAP_DIAG_CAPABILITY = 16'h0200;",
+        "localparam [15:0] VCAP_DIAG_DATA_BASE = 16'h0210;",
+        "rr_data <= 32'h56440110;",
+        "rr_data <= `VCAP_DIAG_BUILD_ID;",
+        "rr_data <= VCAP_DIAG_VARIANT_VALUE;",
+        ".src_in(vcap_sampler_diag_valid),",
+        "VCAP_DIAG_DATA_BASE + 16'h0030",
+        "vcap_probe_arm_toggle <= ~vcap_probe_arm_toggle;",
+    )
+    sampler_fragments = (
+        "output reg         diag_valid = 0,",
+        "output reg  [383:0] diag_data = 0,",
+        "if (frame_sync && probe_arm_seen == probe_arm_toggle_cap &&",
+        "diag_publish_pending <= 1;",
+        "if (probe_arm_seen == probe_arm_toggle_cap && diag_publish_pending)",
+        "diag_valid <= 1;",
+    )
+    for fragment in rtl_fragments:
+        if fragment not in rtl:
+            raise SystemExit(
+                "VCAP diagnostic register contract violated: missing "
+                f"fragment: {fragment}"
+            )
+    for fragment in sampler_fragments:
+        if fragment not in sampler:
+            raise SystemExit(
+                "VCAP diagnostic snapshot contract violated: missing "
+                f"fragment: {fragment}"
+            )
+    for fragment in (
+        'exec git -C $origin_dir rev-parse --short=8 HEAD',
+        '"VCAP_DIAG_BUILD_ID=32\'h[string tolower $vcap_diag_build_id]"',
+        "VCAP_DIAG_BUILD_ID must be exactly eight hexadecimal digits",
+    ):
+        if fragment not in project_tcl:
+            raise SystemExit(
+                "VCAP diagnostic build identity contract violated: missing "
+                f"fragment: {fragment}"
+            )
+
+
 def main():
     rtl = RTL_PATH.read_text(encoding="utf-8")
     script = BUILD_SCRIPT.read_text(encoding="utf-8")
     sampler = SAMPLER_PATH.read_text(encoding="utf-8")
     build_run = BUILD_RUN_PATH.read_text(encoding="utf-8")
+    project_tcl = PROJECT_TCL_PATH.read_text(encoding="utf-8")
 
     # The committed default keeps ZORRO3 first in every ladder, so the
     # simultaneously-defined VARIANT_SUPERDENISE must not leak into the
@@ -327,6 +373,7 @@ def main():
 
     check_writeback_provenance(rtl)
     check_vcap_iob_capture_contract(sampler, build_run)
+    check_vcap_diag_contract(rtl, sampler, project_tcl)
 
     print("RTL capture contract checks passed")
 

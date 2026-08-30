@@ -282,6 +282,10 @@ module videocap_sampler #(
     output reg  [11:0] probe_source_x = 0,
     output reg  [31:0] probe_context = 0,
     output reg  [31:0] probe_config = 0,
+    /* Frozen timing/geometry snapshot for the first complete field after
+     * each shared probe arm.  The payload is stable before diag_valid rises. */
+    output reg         diag_valid = 0,
+    output reg  [383:0] diag_data = 0,
     output reg         probe_precrop_valid = 0,
     output reg  [31:0] probe_precrop_context = 0,
     input  wire [5:0]  probe_precrop_raddr,
@@ -550,6 +554,37 @@ reg probe_precrop_publish_pending = 0;
 reg [31:0] probe_precrop_mem [0:63];
 assign probe_precrop_rdata = probe_precrop_mem[probe_precrop_raddr];
 
+reg diag_waiting = 0;
+reg diag_field_started = 0;
+reg diag_publish_pending = 0;
+reg diag_seen_rise = 0;
+reg diag_seen_fall = 0;
+wire [15:0] diag_field_sequence = diag_data[351:336];
+reg [15:0] diag_rise_count = 0;
+reg [15:0] diag_fall_count = 0;
+reg [15:0] diag_transition_age = 0;
+reg [15:0] diag_rise_age = 0;
+reg [15:0] diag_fall_age = 0;
+reg [15:0] diag_low_min = 16'hffff;
+reg [15:0] diag_low_max = 0;
+reg [15:0] diag_high_min = 16'hffff;
+reg [15:0] diag_high_max = 0;
+reg [15:0] diag_rise_period_min = 16'hffff;
+reg [15:0] diag_rise_period_max = 0;
+reg [15:0] diag_fall_period_min = 16'hffff;
+reg [15:0] diag_fall_period_max = 0;
+reg [10:0] diag_cap_x_max = 0;
+reg [10:0] diag_completed_y_max = 0;
+wire diag_hsync_rise = (hs[6:5] == 2'b01);
+wire diag_hsync_fall = (hs[6:5] == 2'b10);
+wire [15:0] diag_transition_interval =
+    (diag_transition_age == 16'hffff) ? 16'hffff :
+    diag_transition_age + 1'b1;
+wire [15:0] diag_rise_period =
+    (diag_rise_age == 16'hffff) ? 16'hffff : diag_rise_age + 1'b1;
+wire [15:0] diag_fall_period =
+    (diag_fall_age == 16'hffff) ? 16'hffff : diag_fall_age + 1'b1;
+
 xpm_cdc_single #(
     .DEST_SYNC_FF(3),
     .INIT_SYNC_FF(1),
@@ -602,6 +637,121 @@ always @(posedge cap_clk) begin
         phase_x <= phase_x + 1'b1;
     end
 
+    /* Measure only after an armed frame boundary.  This excludes partial
+     * intervals at the arm edge and leaves the capture pipeline untouched. */
+    if (diag_waiting && diag_field_started) begin
+        if (diag_hsync_rise) begin
+            if (diag_rise_count != 16'hffff)
+                diag_rise_count <= diag_rise_count + 1'b1;
+            if (diag_seen_fall) begin
+                if (diag_transition_interval < diag_low_min)
+                    diag_low_min <= diag_transition_interval;
+                if (diag_transition_interval > diag_low_max)
+                    diag_low_max <= diag_transition_interval;
+            end
+            if (diag_seen_rise) begin
+                if (diag_rise_period < diag_rise_period_min)
+                    diag_rise_period_min <= diag_rise_period;
+                if (diag_rise_period > diag_rise_period_max)
+                    diag_rise_period_max <= diag_rise_period;
+            end
+            diag_seen_rise <= 1;
+        end
+
+        if (diag_hsync_fall) begin
+            if (diag_fall_count != 16'hffff)
+                diag_fall_count <= diag_fall_count + 1'b1;
+            if (diag_seen_rise) begin
+                if (diag_transition_interval < diag_high_min)
+                    diag_high_min <= diag_transition_interval;
+                if (diag_transition_interval > diag_high_max)
+                    diag_high_max <= diag_transition_interval;
+            end
+            if (diag_seen_fall) begin
+                if (diag_fall_period < diag_fall_period_min)
+                    diag_fall_period_min <= diag_fall_period;
+                if (diag_fall_period > diag_fall_period_max)
+                    diag_fall_period_max <= diag_fall_period;
+            end
+            diag_seen_fall <= 1;
+        end
+
+        if (diag_hsync_rise || diag_hsync_fall)
+            diag_transition_age <= 0;
+        else if (diag_transition_age != 16'hffff)
+            diag_transition_age <= diag_transition_age + 1'b1;
+
+        if (diag_hsync_rise)
+            diag_rise_age <= 0;
+        else if (diag_rise_age != 16'hffff)
+            diag_rise_age <= diag_rise_age + 1'b1;
+
+        if (diag_hsync_fall)
+            diag_fall_age <= 0;
+        else if (diag_fall_age != 16'hffff)
+            diag_fall_age <= diag_fall_age + 1'b1;
+
+        if (cap_x > diag_cap_x_max)
+            diag_cap_x_max <= cap_x;
+        if (line_sync && !ctl_full_width_cap &&
+                capture_output_line_valid &&
+                capture_output_y > diag_completed_y_max)
+            diag_completed_y_max <= capture_output_y;
+        if (ctl_full_width_cap && FULLRATE != 0 && !cap_x_done &&
+                cap_x >= 11'd1279 && capture_output_line_valid &&
+                capture_output_y > diag_completed_y_max)
+            diag_completed_y_max <= capture_output_y;
+    end
+
+    if (frame_sync && probe_arm_seen == probe_arm_toggle_cap &&
+            diag_waiting) begin
+        if (diag_field_started) begin
+            diag_data[31:0] <= {16'b0, diag_rise_count};
+            diag_data[63:32] <= {16'b0, diag_fall_count};
+            diag_data[95:64] <= {diag_low_max, diag_low_min};
+            diag_data[127:96] <= {diag_high_max, diag_high_min};
+            diag_data[159:128] <=
+                {diag_rise_period_max, diag_rise_period_min};
+            diag_data[191:160] <=
+                {diag_fall_period_max, diag_fall_period_min};
+            diag_data[223:192] <= {diag_rise_age, diag_fall_age};
+            diag_data[255:224] <=
+                {5'b0, diag_cap_x_max, 5'b0, diag_completed_y_max};
+            diag_data[287:256] <= {5'b0, raw_y, 5'b0, cap_y};
+            diag_data[319:288] <=
+                {4'b0, ctl_full_width_cap, ctl_sample_mode_cap, 1'b0,
+                 ctl_crop_v_cap, ctl_crop_h_cap};
+            diag_data[351:320] <=
+                {diag_field_sequence + 1'b1, lace_field, next_lace_field,
+                 cap_interlace, cap_ntsc, ctl_full_width_cap,
+                 ctl_sample_mode_cap, (FULLRATE != 0),
+                 (CSYNC_VSYNC != 0), RGB_MODE[1:0], 1'b0, shortlines};
+            diag_data[383:352] <=
+                {4'b0, phase_line_period, 4'b0, vsync_phase_x};
+            diag_publish_pending <= 1;
+            diag_field_started <= 0;
+        end else begin
+            diag_field_started <= 1;
+            diag_seen_rise <= 0;
+            diag_seen_fall <= 0;
+            diag_rise_count <= 0;
+            diag_fall_count <= 0;
+            diag_transition_age <= 0;
+            diag_rise_age <= 0;
+            diag_fall_age <= 0;
+            diag_low_min <= 16'hffff;
+            diag_low_max <= 0;
+            diag_high_min <= 16'hffff;
+            diag_high_max <= 0;
+            diag_rise_period_min <= 16'hffff;
+            diag_rise_period_max <= 0;
+            diag_fall_period_min <= 16'hffff;
+            diag_fall_period_max <= 0;
+            diag_cap_x_max <= 0;
+            diag_completed_y_max <= 0;
+        end
+    end
+
     if (probe_arm_seen != probe_arm_toggle_cap) begin
         probe_arm_seen <= probe_arm_toggle_cap;
         probe_valid <= 0;
@@ -611,12 +761,23 @@ always @(posedge cap_clk) begin
         probe_precrop_valid <= 0;
         probe_precrop_waiting <= 1;
         probe_precrop_publish_pending <= 0;
+        diag_valid <= 0;
+        diag_waiting <= 1;
+        diag_field_started <= 0;
+        diag_publish_pending <= 0;
     end else if (probe_publish_pending) begin
         /* The complete 512-bit snapshot has been stable for one capture
          * clock before valid crosses back to AXI. */
         probe_valid <= 1;
         probe_waiting <= 0;
         probe_publish_pending <= 0;
+    end
+
+    if (probe_arm_seen == probe_arm_toggle_cap && diag_publish_pending) begin
+        /* The complete diagnostic bundle was frozen on the prior clock. */
+        diag_valid <= 1;
+        diag_waiting <= 0;
+        diag_publish_pending <= 0;
     end
 
     if (probe_arm_seen == probe_arm_toggle_cap &&

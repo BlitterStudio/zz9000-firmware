@@ -89,6 +89,8 @@ wire [9:0] probe_line;
 wire [11:0] probe_source_x;
 wire [31:0] probe_context;
 wire [31:0] probe_config;
+wire diag_valid;
+wire [383:0] diag_data;
 wire probe_precrop_valid;
 wire [31:0] probe_precrop_context;
 reg [5:0] probe_precrop_raddr = 0;
@@ -223,6 +225,8 @@ videocap_sampler #(
     .probe_source_x(probe_source_x),
     .probe_context(probe_context),
     .probe_config(probe_config),
+    .diag_valid(diag_valid),
+    .diag_data(diag_data),
     .probe_precrop_valid(probe_precrop_valid),
     .probe_precrop_context(probe_precrop_context),
     .probe_precrop_raddr(probe_precrop_raddr),
@@ -273,6 +277,8 @@ videocap_sampler #(
     .probe_source_x(),
     .probe_context(),
     .probe_config(),
+    .diag_valid(),
+    .diag_data(),
     .probe_precrop_valid(),
     .probe_precrop_context(),
     .probe_precrop_raddr(6'd0),
@@ -802,9 +808,13 @@ task drive_characterization_field;
     integer falls_before;
     begin
         /* Put the input on the opposite level before counting so every driven
-         * line contributes exactly one rising and one falling edge. */
-        hsync = inverted_pulse ? 0 : 1;
-        @(posedge cap_clk);
+         * line contributes exactly one rising and one falling edge.  Do not
+         * insert an extra clock between same-polarity fields: that would be a
+         * synthetic one-clock line-period outlier in the telemetry oracle. */
+        if (hsync !== (inverted_pulse ? 1'b0 : 1'b1)) begin
+            hsync = inverted_pulse ? 0 : 1;
+            @(posedge cap_clk);
+        end
         rises_before = hsync_rise_count;
         falls_before = hsync_fall_count;
 
@@ -892,6 +902,7 @@ reg [31:0] raw_before;
 reg [26:0] payload_before;
 reg [7:0] sequence_before;
 reg [31:0] focused_raw;
+reg [15:0] diag_sequence_before;
 
 initial begin
     PIXSPAN = DEFAULT_PIXSPAN;
@@ -1129,14 +1140,53 @@ initial begin
      * telemetry round rather than in a speculative polarity assertion.
      */
     if (PIXSPAN == 2 && SAMPLEMODE == 0 && CROPH == 188 && CROPV == 26) begin
+        diag_sequence_before = diag_data[351:336];
+        probe_arm_toggle = ~probe_arm_toggle;
+        wait (probe_arm_seen == probe_arm_toggle);
         drive_characterization_field(500, 262, 67, 0, 400);
         drive_characterization_field(600, 263, 67, 0,
                                      400 + LINECLKS / 2);
         check_eq("characterization_normal_interlace", cap_interlace, 1);
+        check_eq("diag_normal_valid", diag_valid, 1);
+        check_eq("diag_normal_rise_count", diag_data[31:0], 262);
+        check_eq("diag_normal_fall_count", diag_data[63:32], 262);
+        check_eq("diag_normal_low_min_max", diag_data[95:64],
+                 {16'd67, 16'd67});
+        check_eq("diag_normal_high_min", diag_data[111:96],
+                 LINECLKS - 67);
+        check_eq("diag_normal_high_max", diag_data[127:112],
+                 LINECLKS - 67);
+        check_eq("diag_normal_rise_period_min", diag_data[143:128],
+                 LINECLKS);
+        check_eq("diag_normal_rise_period_max", diag_data[159:144],
+                 LINECLKS);
+        check_eq("diag_normal_fall_period_min", diag_data[175:160],
+                 LINECLKS);
+        check_eq("diag_normal_fall_period_max", diag_data[191:176],
+                 LINECLKS);
+        check_eq("diag_normal_sequence", diag_data[351:336],
+                 diag_sequence_before + 1'b1);
+        diag_sequence_before = diag_data[351:336];
 
+        probe_arm_toggle = ~probe_arm_toggle;
+        wait (probe_arm_seen == probe_arm_toggle);
         drive_characterization_field(700, 262, 67, 1, 114);
+        check_eq("diag_toaster_stale_invalid", diag_valid, 0);
+        check_eq("diag_toaster_prior_payload_frozen",
+                 diag_data[351:336], diag_sequence_before);
         drive_characterization_field(800, 263, 67, 1, 114);
         check_eq("characterization_toaster_repeat_phase", cap_interlace, 0);
+        check_eq("diag_toaster_valid", diag_valid, 1);
+        check_eq("diag_toaster_rise_count", diag_data[31:0], 262);
+        check_eq("diag_toaster_fall_count", diag_data[63:32], 262);
+        check_eq("diag_toaster_low_min", diag_data[79:64],
+                 LINECLKS - 67);
+        check_eq("diag_toaster_low_max", diag_data[95:80],
+                 LINECLKS - 67);
+        check_eq("diag_toaster_high_min_max", diag_data[127:96],
+                 {16'd67, 16'd67});
+        check_eq("diag_sequence_advanced", diag_data[351:336],
+                 diag_sequence_before + 1'b1);
         $display("CHARACTERIZATION Toaster-like edges complete the capture window; telemetry required");
     end
     /* The standalone tracker makes the two-frame validity rule explicit
