@@ -641,6 +641,12 @@ static uint32_t fabric_converting_count(void)
 	return count;
 }
 
+int audio_fabric_conversion_admissible(uint32_t source_rate)
+{
+	return source_rate == 0U || source_rate == 48000U ||
+	       fabric_converting_count() < 2U;
+}
+
 /* Rate vocabulary of conversion-bearing leases: the qualified
  * conversion table (the mailbox layer validates the same set; this
  * re-arm mirrors the gain policy so no internal caller can arm an
@@ -689,8 +695,7 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	 * budget allows at most two converting producers; a rate-bearing
 	 * acquire past it is refused like an occupied slot, never granted
 	 * with unqualified cycle cost. */
-	if (source_rate != 0U && source_rate != 48000U &&
-	    fabric_converting_count() >= 2U)
+	if (!audio_fabric_conversion_admissible(source_rate))
 		return AUDIO_FABRIC_LEASE_EBUSY;
 	ring = map.ring[slot];
 	control = map.control[slot];

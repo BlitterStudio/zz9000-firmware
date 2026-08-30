@@ -220,6 +220,13 @@ struct audio_fabric_ring_grant {
 };
 
 /*
+ * Conversion-bearing admission shared by direct-ring acquisition and
+ * pump binding. Bypass rates (0/48000) are always admissible; any other
+ * rate requires one of the two qualified converter slots to remain free.
+ */
+int audio_fabric_conversion_admissible(uint32_t source_rate);
+
+/*
  * Acquire a direct-ring lease. slot 0 (the pump) is never leaseable;
  * a slot beyond the active bus mode's grant map (two leaseable slots
  * on Zorro III, one on Zorro II under an acknowledged generation-2

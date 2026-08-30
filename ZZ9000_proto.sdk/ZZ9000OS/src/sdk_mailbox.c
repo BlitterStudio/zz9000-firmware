@@ -5236,6 +5236,14 @@ static uint16_t handle_media_session_audio_bind(
 	if (audio_fabric_ownership() == AUDIO_FABRIC_LEGACY_EXCLUSIVE)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 	status = sdk_media_session_audio_bind(session, 0U, &result);
+	if (status == SDK_STATUS_OK &&
+	    !audio_fabric_conversion_admissible(result.sample_rate)) {
+		/* Bind validated and exposed the coherent media format. Roll it
+		 * back before returning BUSY so the over-budget source never
+		 * reaches the pump and the session is not left bound. */
+		(void)sdk_media_session_audio_unbind(session, 0U, &result);
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
 	if (status == SDK_STATUS_OK)
 		audio_playback_start(AUDIO_PUMP_SOURCE_MEDIA, session);
 	return complete_media_session_audio_result(

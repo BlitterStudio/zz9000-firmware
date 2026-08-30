@@ -331,6 +331,24 @@ static void scenario_rate_admission(void)
 	      "rate admission: budget re-opens after release", "");
 	(void)audio_fabric_ring_release(AUDIO_FABRIC_SLOT_RESERVED,
 		grant.generation);
+	/* The media-bind path asks the same central policy before attaching
+	 * the pump. Model the reported join order directly: two converting
+	 * direct-ring leases exhaust the budget, while bypass stays free. */
+	fabric_reset_state();
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44100U,
+	                         &conv) == AUDIO_FABRIC_LEASE_OK,
+	      "rate admission: first direct converter admitted", "");
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_RESERVED, 128U, 8000U,
+	                         &grant) == AUDIO_FABRIC_LEASE_OK,
+	      "rate admission: second direct converter admitted", "");
+	check(!audio_fabric_conversion_admissible(32000U),
+	      "rate admission: media converter refused after two leases", "");
+	check(audio_fabric_conversion_admissible(48000U),
+	      "rate admission: media bypass remains admissible", "");
+	(void)audio_fabric_ring_release(AUDIO_FABRIC_SLOT_RESERVED,
+		grant.generation);
+	(void)audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
+		conv.generation);
 }
 
 /* ---- B2. rate-lease conversion parity (AHI migration) ---- */
