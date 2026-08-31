@@ -152,6 +152,12 @@ static volatile int usb_proxy_pending_v2 = 0;
 static struct ZZUSBCommand usb_proxy_cmd_snapshot __attribute__((aligned(64)));
 static struct ZZUSBProtocolExtension usb_proxy_ext_snapshot __attribute__((aligned(16)));
 static uint8_t usb_proxy_data_snapshot[ZZUSB_MAX_XFER] __attribute__((aligned(64)));
+static struct ZZUSBCommand usb_proxy_maint_cmd_snapshot
+	__attribute__((aligned(64)));
+static struct ZZUSBProtocolExtension usb_proxy_maint_ext_snapshot
+	__attribute__((aligned(16)));
+static uint8_t usb_proxy_maint_data_snapshot[ZZUSB_MAINT_DATA_MAX]
+	__attribute__((aligned(64)));
 
 static int usb_proxy_request_matches(
     volatile struct ZZUSBCommand *shared_cmd,
@@ -171,6 +177,94 @@ static int usb_proxy_request_matches(
          be32(&shared_ext->controller_epoch) != request_epoch))
         return 0;
     return 1;
+}
+
+void usb_proxy_poll_maintenance(void)
+{
+	volatile struct ZZUSBCommand *shared_cmd =
+		(volatile struct ZZUSBCommand *)(USB_BLOCK_STORAGE_ADDRESS +
+		                                ZZUSB_MAINT_HEADER_OFFSET);
+	volatile struct ZZUSBProtocolExtension *shared_ext =
+		(volatile struct ZZUSBProtocolExtension *)
+			(USB_BLOCK_STORAGE_ADDRESS + ZZUSB_MAINT_HEADER_OFFSET +
+			 ZZUSB_CMD_SIZE);
+	uint8_t *shared_data =
+		(uint8_t *)USB_BLOCK_STORAGE_ADDRESS + ZZUSB_MAINT_DATA_OFFSET;
+	uint32_t data_length;
+	uint32_t actual_length;
+	uint32_t request_id;
+	uint32_t request_epoch;
+	uint16_t command;
+	uint16_t result;
+	int request_matches;
+
+	Xil_DCacheInvalidateRange((u32)shared_cmd, ZZUSB_V2_HEADER_SIZE);
+	__asm__ __volatile__("dsb" ::: "memory");
+	if (be16(&shared_cmd->status) != ZZUSB_STATUS_PENDING)
+		return;
+
+	memcpy(&usb_proxy_maint_cmd_snapshot, (const void *)shared_cmd,
+	       sizeof(usb_proxy_maint_cmd_snapshot));
+	memcpy(&usb_proxy_maint_ext_snapshot, (const void *)shared_ext,
+	       sizeof(usb_proxy_maint_ext_snapshot));
+	request_id = be32(&usb_proxy_maint_ext_snapshot.request_id);
+	request_epoch = be32(&usb_proxy_maint_ext_snapshot.controller_epoch);
+	command = be16(&usb_proxy_maint_cmd_snapshot.cmd);
+	data_length = be32(&usb_proxy_maint_cmd_snapshot.data_length);
+
+	result = zzusb_validate_command(
+		&usb_proxy_maint_cmd_snapshot, &usb_proxy_maint_ext_snapshot, 1,
+		usb_proxy_get_controller_epoch());
+	if (result == ZZUSB_STATUS_OK &&
+	    command != ZZUSB_CMD_ISO_QUEUE &&
+	    command != ZZUSB_CMD_ISO_REAP &&
+	    command != ZZUSB_CMD_ISO_STOP)
+		result = ZZUSB_STATUS_UNSUPPORTED;
+	if (result == ZZUSB_STATUS_OK && data_length > ZZUSB_MAINT_DATA_MAX)
+		result = ZZUSB_STATUS_BADPARAM;
+	if (result == ZZUSB_STATUS_OK && data_length != 0 &&
+	    command == ZZUSB_CMD_ISO_QUEUE) {
+		Xil_DCacheInvalidateRange((u32)shared_data, data_length);
+		__asm__ __volatile__("dsb" ::: "memory");
+		memcpy(usb_proxy_maint_data_snapshot, shared_data, data_length);
+	}
+	if (result == ZZUSB_STATUS_OK)
+		result = usb_proxy_handle_command(
+			&usb_proxy_maint_cmd_snapshot, &usb_proxy_maint_ext_snapshot,
+			usb_proxy_maint_data_snapshot, 1);
+
+	actual_length = be32(&usb_proxy_maint_cmd_snapshot.actual_length);
+	if (actual_length > ZZUSB_MAINT_DATA_MAX) {
+		actual_length = 0;
+		put_be32(&usb_proxy_maint_cmd_snapshot.actual_length, 0);
+		result = ZZUSB_STATUS_OVERRUN;
+	}
+
+	Xil_DCacheInvalidateRange((u32)shared_cmd, ZZUSB_V2_HEADER_SIZE);
+	__asm__ __volatile__("dsb" ::: "memory");
+	request_matches = usb_proxy_request_matches(
+		shared_cmd, shared_ext, &usb_proxy_maint_cmd_snapshot,
+		request_id, request_epoch, 1);
+	if (!request_matches) {
+		usb_proxy_note_late_completion(
+			&usb_proxy_maint_cmd_snapshot, &usb_proxy_maint_ext_snapshot,
+			1);
+		usb_proxy_advance_controller_epoch();
+		return;
+	}
+
+	if (result == ZZUSB_STATUS_OK && actual_length != 0 &&
+	    command == ZZUSB_CMD_ISO_REAP) {
+		memcpy(shared_data, usb_proxy_maint_data_snapshot, actual_length);
+		Xil_DCacheFlushRange((u32)shared_data, actual_length);
+	}
+	put_be16(&usb_proxy_maint_cmd_snapshot.status, result);
+	memcpy((void *)shared_cmd, &usb_proxy_maint_cmd_snapshot,
+	       sizeof(usb_proxy_maint_cmd_snapshot));
+	memcpy((void *)shared_ext, &usb_proxy_maint_ext_snapshot,
+	       sizeof(usb_proxy_maint_ext_snapshot));
+	Xil_DCacheFlushRange((u32)shared_cmd, ZZUSB_V2_HEADER_SIZE);
+	__asm__ __volatile__("dsb" ::: "memory");
 }
 static uint32_t sd_storage_read_block = 0;
 static uint32_t sd_storage_write_block = 0;
@@ -1806,6 +1900,7 @@ int main() {
 		} else {
 			// there are no read/write requests, we can do other housekeeping
 
+			usb_proxy_poll_maintenance();
 			if (usb_proxy_pending) {
 				volatile struct ZZUSBCommand *proxy_cmd =
 					(volatile struct ZZUSBCommand *)USB_BLOCK_STORAGE_ADDRESS;

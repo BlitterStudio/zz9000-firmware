@@ -93,6 +93,11 @@ struct ehci_ctrl;
 #define ZZUSB_V2_DATA_MAX        16384
 #define ZZUSB_DIAG_SIZE          4096
 #define ZZUSB_DIAG_OFFSET        (ZZUSB_APERTURE_SIZE - ZZUSB_DIAG_SIZE)
+#define ZZUSB_MAINT_HEADER_OFFSET (ZZUSB_DATA_OFFSET + ZZUSB_V2_DATA_MAX)
+#define ZZUSB_MAINT_DATA_OFFSET   (ZZUSB_MAINT_HEADER_OFFSET + \
+                                   ZZUSB_V2_HEADER_SIZE)
+#define ZZUSB_MAINT_DATA_MAX      (ZZUSB_DIAG_OFFSET - \
+                                   ZZUSB_MAINT_DATA_OFFSET)
 #define ZZUSB_DOORBELL_V2        0x8000
 
 #define ZZUSB_CAP_PROTOCOL_V2      (1U << 0)
@@ -105,11 +110,13 @@ struct ehci_ctrl;
 #define ZZUSB_CAP_ISO_REALTIME     (1U << 7)
 #define ZZUSB_CAP_EVENT_IRQ        (1U << 8)
 #define ZZUSB_CAP_PRECISE_ERRORS   (1U << 9)
+#define ZZUSB_CAP_MAINTENANCE      (1U << 10)
 #define ZZUSB_CAP_BASE (ZZUSB_CAP_PROTOCOL_V2 | ZZUSB_CAP_REQUEST_ID | \
                         ZZUSB_CAP_CONTROLLER_EPOCH | ZZUSB_CAP_VALIDATION | \
                         ZZUSB_CAP_DIAGNOSTICS | ZZUSB_CAP_PERIODIC | \
                         ZZUSB_CAP_ISO_SIMPLE | ZZUSB_CAP_ISO_REALTIME | \
-                        ZZUSB_CAP_EVENT_IRQ | ZZUSB_CAP_PRECISE_ERRORS)
+                        ZZUSB_CAP_EVENT_IRQ | ZZUSB_CAP_PRECISE_ERRORS | \
+                        ZZUSB_CAP_MAINTENANCE)
 
 struct ZZUSBCommand {
     uint16_t cmd;
@@ -351,6 +358,7 @@ uint32_t usb_proxy_periodic_queue_state(void);
 uint32_t usb_proxy_periodic_schedule_bits(void);
 void usb_proxy_refresh_event_irq(void);
 void usb_proxy_iso_pump(void);
+void usb_proxy_poll_maintenance(void);
 uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
                                   volatile struct ZZUSBProtocolExtension *ext,
                                   uint8_t *data_buf, int is_v2);
