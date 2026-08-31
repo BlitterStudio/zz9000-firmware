@@ -344,6 +344,7 @@ static inline uint16_t zzusb_validate_command(
 
 uint32_t usb_proxy_get_controller_epoch(void);
 struct ehci_ctrl *usb_proxy_get_ehci_controller(void);
+int usb_proxy_can_stage_payload(void);
 void usb_proxy_advance_controller_epoch(void);
 void usb_proxy_periodic_pump(void);
 uint32_t usb_proxy_periodic_queue_state(void);

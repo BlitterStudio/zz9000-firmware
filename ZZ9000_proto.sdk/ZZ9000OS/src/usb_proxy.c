@@ -88,6 +88,11 @@ struct ehci_ctrl *usb_proxy_get_ehci_controller(void)
 {
     return get_ehci_ctrl();
 }
+int usb_proxy_can_stage_payload(void)
+{
+    return !ehci_controller_needs_recovery();
+}
+
 
 static int wait_port_reset_clear(uint32_t *portsc, uint32_t timeout_us,
                                  uint32_t *observed)
@@ -654,6 +659,11 @@ static uint16_t handle_periodic_arm(volatile struct ZZUSBCommand *cmd,
         &endpoint->dev, pipe, 1, (int)length, endpoint->buffer,
         key.interval);
     if (!endpoint->queue) {
+        if (ehci_controller_needs_recovery()) {
+            endpoint->used = 1;
+            endpoint->failed = 1;
+            return ZZUSB_STATUS_HOSTERROR;
+        }
         memset(endpoint, 0, sizeof(*endpoint));
         return ZZUSB_STATUS_NOMEM;
     }

@@ -1846,7 +1846,8 @@ int main() {
 				data_length = be32(&usb_proxy_cmd_snapshot.data_length);
 				direction = be16(&usb_proxy_cmd_snapshot.direction);
 				command = be16(&usb_proxy_cmd_snapshot.cmd);
-				if (result == ZZUSB_STATUS_OK && data_length != 0 &&
+				if (result == ZZUSB_STATUS_OK &&
+				    usb_proxy_can_stage_payload() && data_length != 0 &&
 				    (direction == 0 ||
 				     command == ZZUSB_CMD_ISO_QUEUE)) {
 					memcpy(usb_proxy_data_snapshot, proxy_data, data_length);

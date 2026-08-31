@@ -137,6 +137,7 @@ int ehci_iso_schedule(struct ehci_iso_transfer *transfer,
     uint32_t step;
     unsigned packet_index;
     int result = EHCI_ISO_ERR_INVALID;
+    int missed;
 
     if (!transfer || !ctrl || !config || !packets || !buffer ||
         packet_count == 0 || packet_count > EHCI_ISO_MAX_PACKETS ||
@@ -163,15 +164,11 @@ int ehci_iso_schedule(struct ehci_iso_transfer *transfer,
                       packets[0].microframe;
     current = ehci_iso_current_frame(ctrl);
     base_distance = ehci_iso_frame_distance(packets[0].frame, current);
-    if (!ehci_iso_frame_schedulable(packets[0].frame, current))
-        return EHCI_ISO_ERR_MISSED;
+    missed = !ehci_iso_frame_schedulable(packets[0].frame, current);
     for (packet_index = 0; packet_index < packet_count; packet_index++) {
         struct ehci_iso_packet *packet = &transfer->packets[packet_index];
         uint32_t frame_offset =
             (absolute_uframe >> 3) - packets[0].frame;
-
-        if ((uint32_t)base_distance + frame_offset >= 1024U)
-            return EHCI_ISO_ERR_MISSED;
 
         *packet = packets[packet_index];
         packet->frame = (uint16_t)((absolute_uframe >> 3) &
@@ -179,7 +176,16 @@ int ehci_iso_schedule(struct ehci_iso_transfer *transfer,
         packet->microframe = (uint8_t)(absolute_uframe & 7U);
         packet->actual = 0;
         packet->status = EHCI_ISO_PACKET_PENDING;
+        if ((uint32_t)base_distance + frame_offset >= 1024U)
+            missed = 1;
         absolute_uframe += step;
+    }
+    if (missed) {
+        for (packet_index = 0; packet_index < packet_count; packet_index++)
+            transfer->packets[packet_index].status =
+                EHCI_ISO_PACKET_MISSED;
+        transfer->complete = 1;
+        return EHCI_ISO_ERR_MISSED;
     }
 
 
