@@ -302,6 +302,7 @@ struct periodic_endpoint {
     struct usb_device split_hub;
     struct int_queue *queue;
     struct ehci_periodic_plan plan;
+    struct ehci_periodic_plan bandwidth_plan;
     uint64_t interval_ticks;
     uint64_t next_due;
     uint32_t length;
@@ -312,6 +313,9 @@ struct periodic_endpoint {
     uint8_t needs_rearm;
     uint8_t failed;
     uint8_t software_polled;
+    uint8_t bandwidth_reserved;
+    uint8_t reservation_mask;
+    uint16_t reservation_bytes;
     uint8_t buffer[1024] __attribute__((aligned(32)));
 } __attribute__((aligned(32)));
 
@@ -346,6 +350,16 @@ static void periodic_remove_ready(unsigned position)
                                &periodic_ready_count, position);
 }
 
+
+static void periodic_release_bandwidth(struct periodic_endpoint *endpoint)
+{
+    if (!endpoint->bandwidth_reserved)
+        return;
+    ehci_periodic_release_bandwidth(
+        &endpoint->bandwidth_plan, endpoint->reservation_mask,
+        endpoint->reservation_bytes);
+    endpoint->bandwidth_reserved = 0;
+}
 static int periodic_release_slot(unsigned index)
 {
     struct periodic_endpoint *endpoint = &periodic_endpoints[index];
@@ -372,6 +386,7 @@ static int periodic_release_slot(unsigned index)
             break;
         }
     }
+    periodic_release_bandwidth(endpoint);
     memset(endpoint, 0, sizeof(*endpoint));
     return 0;
 }
@@ -637,6 +652,23 @@ static uint16_t handle_periodic_arm(volatile struct ZZUSBCommand *cmd,
         8000ULL;
     if (!endpoint->interval_ticks)
         endpoint->interval_ticks = 1;
+    endpoint->bandwidth_plan = plan;
+    if (endpoint->bandwidth_plan.frame_interval > 1024U) {
+        endpoint->bandwidth_plan.frame_interval = 1U;
+        endpoint->bandwidth_plan.frame_phase = 0;
+    }
+    endpoint->reservation_mask =
+        (uint8_t)(plan.start_mask | plan.complete_mask);
+    endpoint->reservation_bytes = key.max_packet;
+    if (split_hub_ptr && endpoint->reservation_bytes > 188U)
+        endpoint->reservation_bytes = 188U;
+    if (!ehci_periodic_reserve_bandwidth(
+            &endpoint->bandwidth_plan, endpoint->reservation_mask,
+            endpoint->reservation_bytes)) {
+        memset(endpoint, 0, sizeof(*endpoint));
+        return ZZUSB_STATUS_BUSY;
+    }
+    endpoint->bandwidth_reserved = 1;
     if (split_hub_ptr) {
         endpoint->split_hub = split_hub;
         endpoint->dev.parent = &endpoint->split_hub;
@@ -664,6 +696,7 @@ static uint16_t handle_periodic_arm(volatile struct ZZUSBCommand *cmd,
             endpoint->failed = 1;
             return ZZUSB_STATUS_HOSTERROR;
         }
+        periodic_release_bandwidth(endpoint);
         memset(endpoint, 0, sizeof(*endpoint));
         return ZZUSB_STATUS_NOMEM;
     }

@@ -53,6 +53,7 @@ struct ehci_iso_itd {
 } __attribute__((aligned(32)));
 
 struct ehci_ctrl;
+struct ehci_periodic_plan;
 
 struct ehci_iso_sitd {
     uint32_t next;
@@ -241,5 +242,9 @@ int ehci_iso_poll(struct ehci_iso_transfer *transfer);
 int ehci_iso_retire(struct ehci_iso_transfer *transfer,
                     uint8_t unfinished_status);
 void ehci_iso_reset_bandwidth(void);
+int ehci_periodic_reserve_bandwidth(
+    const struct ehci_periodic_plan *plan, uint8_t mask, uint16_t bytes);
+void ehci_periodic_release_bandwidth(
+    const struct ehci_periodic_plan *plan, uint8_t mask, uint16_t bytes);
 
 #endif

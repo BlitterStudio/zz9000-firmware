@@ -4,12 +4,15 @@
 
 #include "ehci.h"
 #include "ehci-iso.h"
+#include "ehci_periodic.h"
 #include "io.h"
 #include "memalign.h"
 
 #define EHCI_ISO_UFRAME_BUDGET 4915U
 
 static uint16_t iso_bandwidth[1024][8];
+static int unlink_descriptor(struct ehci_iso_transfer *transfer,
+                             unsigned packet_index);
 
 static uint32_t descriptor_next(union ehci_iso_descriptor *descriptor,
                                 int split)
@@ -72,6 +75,56 @@ static void release_bandwidth(struct ehci_iso_transfer *transfer)
 void ehci_iso_reset_bandwidth(void)
 {
     memset(iso_bandwidth, 0, sizeof(iso_bandwidth));
+}
+
+int ehci_periodic_reserve_bandwidth(
+    const struct ehci_periodic_plan *plan, uint8_t mask, uint16_t bytes)
+{
+    unsigned frame;
+    unsigned uframe;
+
+    if (!plan || !mask || !bytes)
+        return 0;
+    for (frame = 0; frame < 1024U; frame++) {
+        if (!ehci_periodic_frame_due(plan, (uint16_t)frame))
+            continue;
+        for (uframe = 0; uframe < 8U; uframe++) {
+            if ((mask & (1U << uframe)) &&
+                (unsigned)iso_bandwidth[frame][uframe] + bytes >
+                    EHCI_ISO_UFRAME_BUDGET)
+                return 0;
+        }
+    }
+    for (frame = 0; frame < 1024U; frame++) {
+        if (!ehci_periodic_frame_due(plan, (uint16_t)frame))
+            continue;
+        for (uframe = 0; uframe < 8U; uframe++)
+            if (mask & (1U << uframe))
+                iso_bandwidth[frame][uframe] += bytes;
+    }
+    return 1;
+}
+
+void ehci_periodic_release_bandwidth(
+    const struct ehci_periodic_plan *plan, uint8_t mask, uint16_t bytes)
+{
+    unsigned frame;
+    unsigned uframe;
+
+    if (!plan || !mask || !bytes)
+        return;
+    for (frame = 0; frame < 1024U; frame++) {
+        if (!ehci_periodic_frame_due(plan, (uint16_t)frame))
+            continue;
+        for (uframe = 0; uframe < 8U; uframe++) {
+            if (!(mask & (1U << uframe)))
+                continue;
+            if (iso_bandwidth[frame][uframe] >= bytes)
+                iso_bandwidth[frame][uframe] -= bytes;
+            else
+                iso_bandwidth[frame][uframe] = 0;
+        }
+    }
 }
 
 uint16_t ehci_iso_current_frame(struct ehci_ctrl *ctrl)
@@ -219,10 +272,6 @@ int ehci_iso_schedule(struct ehci_iso_transfer *transfer,
         }
     }
 
-    if (ehci_periodic_schedule_pause(ctrl) < 0) {
-        result = EHCI_ISO_ERR_TIMEOUT;
-        goto fail;
-    }
 
     for (packet_index = 0; packet_index < packet_count; packet_index++) {
         struct ehci_iso_packet *packet = &transfer->packets[packet_index];
@@ -279,9 +328,12 @@ int ehci_iso_schedule(struct ehci_iso_transfer *transfer,
     return 0;
 
 unlink_partial:
-    transfer->linked = 1;
-    ehci_periodic_schedule_resume(ctrl, 1);
-    ehci_iso_retire(transfer, EHCI_ISO_PACKET_CANCELLED);
+    while (packet_index > 0) {
+        packet_index--;
+        unlink_descriptor(transfer, packet_index);
+    }
+    release_bandwidth(transfer);
+    memset(transfer, 0, sizeof(*transfer));
     return result;
 
 fail:
@@ -381,14 +433,22 @@ int ehci_iso_retire(struct ehci_iso_transfer *transfer,
 {
     unsigned packet_index;
     int resume_result;
-
+    int has_pending = 0;
     if (!transfer)
         return EHCI_ISO_ERR_INVALID;
     if (!transfer->linked) {
         release_bandwidth(transfer);
         return 0;
     }
-    if (ehci_periodic_schedule_pause(transfer->ctrl) < 0)
+    for (packet_index = 0; packet_index < transfer->packet_count;
+         packet_index++)
+        if (transfer->packets[packet_index].status ==
+            EHCI_ISO_PACKET_PENDING) {
+            has_pending = 1;
+            break;
+        }
+    if ((has_pending || transfer->ctrl->periodic_schedules == 1) &&
+        ehci_periodic_schedule_pause(transfer->ctrl) < 0)
         return EHCI_ISO_ERR_TIMEOUT;
     for (packet_index = 0; packet_index < transfer->packet_count;
          packet_index++)
