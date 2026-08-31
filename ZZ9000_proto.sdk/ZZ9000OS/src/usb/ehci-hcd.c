@@ -94,6 +94,8 @@ struct ehci_async_allocation {
 
 static struct ehci_async_allocation *quarantined_async;
 static int ehci_recovery_required;
+struct int_queue;
+static struct int_queue *active_interrupt_queues;
 
 static void ehci_release_async(struct ehci_async_allocation *allocation)
 {
@@ -1429,6 +1431,7 @@ struct int_queue {
 	struct QH *last;
 	struct qTD *tds;
 	struct int_queue *next_quarantined;
+	struct int_queue *next_active;
 	int linked;
 	struct ehci_periodic_plan plan;
 };
@@ -1459,6 +1462,7 @@ static void ehci_reclaim_interrupt_after_reset(void)
 		quarantined_interrupt = queue->next_quarantined;
 		ehci_release_int_queue(queue);
 	}
+	active_interrupt_queues = NULL;
 }
 
 #define NEXT_QH(qh) (struct QH *)((unsigned long)hc32_to_cpu((qh)->qh_link) & ~0x1f)
@@ -1524,6 +1528,102 @@ int ehci_periodic_schedule_resume(struct ehci_ctrl *ctrl, int delta)
 	if (ctrl->periodic_schedules > 0 && enable_periodic(ctrl) < 0) {
 		ehci_recovery_required = 1;
 		return -ETIMEDOUT;
+	}
+	return 0;
+}
+
+static unsigned ehci_interrupt_frame_interval(
+	const struct int_queue *queue)
+{
+	unsigned interval =
+		ehci_periodic_hardware_frame_interval(&queue->plan);
+
+	return interval;
+}
+
+static void ehci_insert_interrupt_queue(struct int_queue *queue)
+{
+	struct int_queue **link = &active_interrupt_queues;
+	unsigned interval = ehci_interrupt_frame_interval(queue);
+
+	while (*link &&
+	       ehci_interrupt_frame_interval(*link) >= interval)
+		link = &(*link)->next_active;
+	queue->next_active = *link;
+	*link = queue;
+}
+
+static int ehci_remove_interrupt_queue(struct int_queue *queue)
+{
+	struct int_queue **link = &active_interrupt_queues;
+
+	while (*link && *link != queue)
+		link = &(*link)->next_active;
+	if (!*link)
+		return 0;
+	*link = queue->next_active;
+	queue->next_active = NULL;
+	return 1;
+}
+
+static uint32_t *ehci_periodic_interrupt_link(struct ehci_ctrl *ctrl,
+					      unsigned frame)
+{
+	uint32_t *link = &ctrl->periodic_list[frame];
+	unsigned guard = 0;
+
+	while (guard++ < 128U) {
+		uint32_t value = hc32_to_cpu(*link);
+		uint32_t type;
+
+		if (value & QH_LINK_TERMINATE)
+			return link;
+		type = value & 0x06U;
+		if (type == QH_LINK_TYPE_QH)
+			return link;
+		if (type != QH_LINK_TYPE_ITD &&
+		    type != QH_LINK_TYPE_SITD)
+			return NULL;
+		link = (uint32_t *)(unsigned long)(value & ~0x1fU);
+	}
+	return NULL;
+}
+
+static int ehci_rebuild_interrupt_schedule(struct ehci_ctrl *ctrl)
+{
+	struct int_queue *queue;
+	unsigned frame;
+
+	for (queue = active_interrupt_queues; queue;
+	     queue = queue->next_active) {
+		uint32_t next = queue->next_active ?
+			(uint32_t)(unsigned long)queue->next_active->first :
+			(uint32_t)(unsigned long)&ctrl->periodic_queue;
+
+		queue->last->qh_link =
+			cpu_to_hc32(next | QH_LINK_TYPE_QH);
+		flush_dcache_range((unsigned long)queue->last,
+				   ALIGN_END_ADDR(struct QH, queue->last, 1));
+	}
+
+	for (frame = 0; frame < 1024U; frame++) {
+		uint32_t *link = ehci_periodic_interrupt_link(ctrl, frame);
+		uint32_t target;
+
+		if (!link)
+			return -EINVAL;
+		for (queue = active_interrupt_queues; queue;
+		     queue = queue->next_active) {
+			if (ehci_periodic_frame_due(&queue->plan,
+						    (uint16_t)frame))
+				break;
+		}
+		target = queue ?
+			(uint32_t)(unsigned long)queue->first :
+			(uint32_t)(unsigned long)&ctrl->periodic_queue;
+		*link = cpu_to_hc32(target | QH_LINK_TYPE_QH);
+		flush_dcache_range((unsigned long)link,
+				   ALIGN_END_ADDR(uint32_t, link, 1));
 	}
 	return 0;
 }
@@ -1656,16 +1756,15 @@ static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 		}
 	}
 
-	/* hook up to periodic list */
-	struct QH *list = &ctrl->periodic_queue;
-	result->last->qh_link = list->qh_link;
-	list->qh_link = cpu_to_hc32((unsigned long)result->first | QH_LINK_TYPE_QH);
+	/* Build a power-of-two frame skeleton so bInterval > 1 queues are
+	 * unreachable in frames where the endpoint must not be polled. */
+	ehci_insert_interrupt_queue(result);
 	result->linked = 1;
-
-	flush_dcache_range((unsigned long)result->last,
-			   ALIGN_END_ADDR(struct QH, result->last, 1));
-	flush_dcache_range((unsigned long)list,
-			   ALIGN_END_ADDR(struct QH, list, 1));
+	if (ehci_rebuild_interrupt_schedule(ctrl) < 0) {
+		ehci_recovery_required = 1;
+		ehci_quarantine_int_queue(result);
+		return NULL;
+	}
 
 	if (enable_periodic(ctrl) < 0) {
 		ehci_quarantine_int_queue(result);
@@ -1747,7 +1846,7 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 		break;
 	}
 
-	if (!(cur->qh_link & QH_LINK_TERMINATE))
+	if (cur != queue->last)
 		queue->current++;
 	else
 		queue->current = NULL;
@@ -1811,8 +1910,6 @@ static int _ehci_destroy_int_queue(struct usb_device *dev,
 				   struct int_queue *queue)
 {
 	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
-	struct QH *cur;
-	unsigned long start;
 	int result = 0;
 
 	if (!queue)
@@ -1829,28 +1926,14 @@ static int _ehci_destroy_int_queue(struct usb_device *dev,
 	if (ctrl->periodic_schedules > 0)
 		ctrl->periodic_schedules--;
 
-	cur = &ctrl->periodic_queue;
-	start = get_timer(0);
-	while (!(cur->qh_link & cpu_to_hc32(QH_LINK_TERMINATE))) {
-		if (NEXT_QH(cur) == queue->first) {
-			cur->qh_link = queue->last->qh_link;
-			flush_dcache_range((unsigned long)cur,
-					   ALIGN_END_ADDR(struct QH, cur, 1));
-			queue->linked = 0;
-			break;
-		}
-		cur = NEXT_QH(cur);
-		if (ehci_deadline_expired_u32((uint32_t)get_timer(0),
-					      (uint32_t)start, 20U)) {
-			ehci_quarantine_int_queue(queue);
-			return -ETIMEDOUT;
-		}
+	if (!ehci_remove_interrupt_queue(queue) ||
+	    ehci_rebuild_interrupt_schedule(ctrl) < 0) {
+		ehci_recovery_required = 1;
+		ehci_quarantine_int_queue(queue);
+		return -ETIMEDOUT;
 	}
 
-	/*
-	 * PSS=0 is the retirement acknowledgement for periodic memory. If the
-	 * queue was not found, the stopped schedule cannot reference it.
-	 */
+	/* PSS=0 acknowledged retirement before the queue left every frame. */
 	queue->linked = 0;
 	if (ctrl->periodic_schedules > 0 && enable_periodic(ctrl) < 0) {
 		ehci_recovery_required = 1;

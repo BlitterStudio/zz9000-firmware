@@ -11,6 +11,16 @@ static void test_frame_wrap(void)
     assert(ehci_iso_frame_distance(2, 2046) == 4);
     assert(ehci_iso_frame_distance(2046, 2) == 2044);
     assert(ehci_iso_frame_distance(0, 0) == 0);
+    assert(ehci_iso_frame_schedulable(2, 2046));
+    assert(!ehci_iso_frame_schedulable(1, 2046));
+    assert(!ehci_iso_frame_schedulable(1024, 0));
+}
+
+static void test_itd_completion_length(void)
+{
+    assert(ehci_iso_itd_actual(1024U << 16, 1024) == 1024);
+    assert(ehci_iso_itd_actual(64U << 16, 1024) == 64);
+    assert(ehci_iso_itd_actual(1025U << 16, 1024) == 0);
 }
 
 static void test_split_masks(void)
@@ -106,6 +116,7 @@ static void test_sitd_builder(void)
 int main(void)
 {
     test_frame_wrap();
+    test_itd_completion_length();
     test_split_masks();
     test_itd_builder();
     test_sitd_builder();

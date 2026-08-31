@@ -111,6 +111,23 @@ static inline uint16_t ehci_iso_frame_distance(uint16_t future,
     return (uint16_t)((future - current) & EHCI_ISO_FRAME_MASK);
 }
 
+static inline int ehci_iso_frame_schedulable(uint16_t future,
+                                              uint16_t current)
+{
+    uint16_t distance = ehci_iso_frame_distance(future, current);
+
+    return distance >= 4U && distance < 1024U;
+}
+
+static inline uint16_t ehci_iso_itd_actual(uint32_t transaction,
+                                           uint16_t requested)
+{
+    uint16_t transferred = (uint16_t)((transaction >> 16) &
+                                      EHCI_ITD_LENGTH_MASK);
+
+    return transferred <= requested ? transferred : 0;
+}
+
 static inline int ehci_iso_split_masks(uint16_t length, int direction_in,
                                        unsigned think_time, int multi_tt,
                                        unsigned seed, uint8_t *smask,

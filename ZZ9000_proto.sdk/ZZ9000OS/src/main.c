@@ -1298,8 +1298,9 @@ int main() {
 					usb_proxy_pending_v2 =
 						(zdata & ZZUSB_DOORBELL_V2) ? 1 : 0;
 					usb_proxy_pending = 1;
-					usb_proxy_publish_diagnostics(
-						(volatile void *)USB_BLOCK_STORAGE_ADDRESS, 1U);
+					if (usb_proxy_pending_v2)
+						usb_proxy_publish_diagnostics(
+							(volatile void *)USB_BLOCK_STORAGE_ADDRESS, 1U);
 					break;
 				}
 				case REG_ZZ_SDBLK_TX_HI: {
@@ -1893,8 +1894,9 @@ int main() {
 				}
 
 				usb_proxy_status = 0;
-				usb_proxy_publish_diagnostics(
-					(volatile void *)USB_BLOCK_STORAGE_ADDRESS, 0U);
+				if (is_v2)
+					usb_proxy_publish_diagnostics(
+						(volatile void *)USB_BLOCK_STORAGE_ADDRESS, 0U);
 			}
 
 			{

@@ -15,6 +15,21 @@ struct ehci_periodic_plan {
     uint8_t complete_mask;
 };
 
+static inline uint16_t ehci_periodic_hardware_frame_interval(
+    const struct ehci_periodic_plan *plan)
+{
+    if (!plan || plan->frame_interval == 0)
+        return 1U;
+    return plan->frame_interval > 1024U ? 1024U :
+                                             plan->frame_interval;
+}
+
+static inline int ehci_periodic_frame_due(
+    const struct ehci_periodic_plan *plan, uint16_t frame)
+{
+    return frame % ehci_periodic_hardware_frame_interval(plan) == 0;
+}
+
 static inline int ehci_periodic_build_plan(
     unsigned speed, unsigned interval, int split,
     unsigned think_time, int multi_tt, unsigned slot_seed,
@@ -50,8 +65,12 @@ static inline int ehci_periodic_build_plan(
          speed != EHCI_PERIODIC_SPEED_FULL) || interval > 255U)
         return 0;
 
-    plan->interval_microframes = interval * 8U;
-    plan->frame_interval = (uint16_t)interval;
+    plan->frame_interval = 1U;
+    while ((uint32_t)plan->frame_interval * 2U <= interval &&
+           plan->frame_interval < 1024U)
+        plan->frame_interval = (uint16_t)(plan->frame_interval * 2U);
+    plan->interval_microframes =
+        (uint32_t)plan->frame_interval * 8U;
     plan->complete_mask = 0;
     if (!split) {
         plan->start_mask = 0x01U;

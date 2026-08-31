@@ -665,6 +665,11 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
         return ZZUSB_STATUS_ERROR;
     periodic_stop_all();
     usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED);
+    if (ehci_controller_needs_recovery()) {
+        if (ehci_controller_recover() < 0)
+            return ZZUSB_STATUS_HOSTERROR;
+        usb_proxy_iso_after_controller_reset();
+    }
     memset(toggle_bits, 0, sizeof(toggle_bits));
     root_port_connected = 0;
 
