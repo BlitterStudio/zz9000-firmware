@@ -130,6 +130,7 @@ C_SRCS = \
 	$(SRC_DIR)/mp3/decode_mp3.c \
 	$(SRC_DIR)/compression/audio/adpcm.c \
 	$(SRC_DIR)/usb/ehci-hcd.c \
+	$(SRC_DIR)/usb/ehci-iso.c \
 	$(SRC_DIR)/usb/ehci-zynq.c \
 	$(SRC_DIR)/usb/ulpi-viewport.c \
 	$(SRC_DIR)/usb/ulpi.c \
@@ -142,6 +143,8 @@ C_SRCS = \
 	$(SRC_DIR)/zz_config.c \
 	$(SRC_DIR)/fw_update.c \
 	$(SRC_DIR)/usb_proxy.c \
+	$(SRC_DIR)/usb_proxy_diag.c \
+	$(SRC_DIR)/usb_proxy_iso.c \
 	$(SRC_DIR)/sdk_compression.c \
 	$(SRC_DIR)/lzh/extract.c \
 	$(SRC_DIR)/lzh/huf.c \

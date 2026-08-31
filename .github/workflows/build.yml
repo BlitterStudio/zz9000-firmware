@@ -68,6 +68,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+      - name: USB proxy and EHCI regression suite
+        run: make -C test/usb test
       - name: RTG regression suite
         run: make -C test/rtg test
       - name: Video pipeline regression suite

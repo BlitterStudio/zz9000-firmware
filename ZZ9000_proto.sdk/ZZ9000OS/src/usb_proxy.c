@@ -20,13 +20,19 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <stdio.h>
 #include <string.h>
 #include <sleep.h>
+#include <xtime_l.h>
 #include "xil_cache.h"
 #include "usb_proxy.h"
 #include "usb/usb.h"
+#include "usb_proxy_diag.h"
+#include "usb_proxy_iso.h"
+#include "usb_proxy_periodic_ring.h"
 #include "usb/ehci.h"
+#include "usb/ehci-iso.h"
+#include "usb/ehci_periodic.h"
+#include "interrupt.h"
 #include "memorymap.h"
 
 #ifndef ALIGN
@@ -44,12 +50,70 @@
 static unsigned int toggle_bits[128][2];
 static uint8_t dma_buf[24576] __attribute__((aligned(32)));
 static int root_port_speed_zz = ZZUSB_SPEED_FULL;
+static int root_port_connected;
+static uint32_t controller_epoch = 1;
+static uint32_t last_request_id = 0;
+static uint32_t diag_detail;
+
+static void periodic_stop_all(void);
+
+uint32_t usb_proxy_get_controller_epoch(void)
+{
+    return controller_epoch;
+}
+
+void usb_proxy_advance_controller_epoch(void)
+{
+    periodic_stop_all();
+    usb_proxy_iso_stop_all(EHCI_ISO_PACKET_OFFLINE);
+    controller_epoch++;
+    if (controller_epoch == 0)
+        controller_epoch = 1;
+    last_request_id = 0;
+}
+
+static int request_id_after(uint32_t request_id, uint32_t previous)
+{
+    return previous == 0 || (int32_t)(request_id - previous) > 0;
+}
 
 static struct ehci_ctrl *get_ehci_ctrl(void)
 {
     struct usb_device *root = usb_get_dev_index(0);
     if (!root) return NULL;
     return (struct ehci_ctrl *)root->controller;
+}
+
+struct ehci_ctrl *usb_proxy_get_ehci_controller(void)
+{
+    return get_ehci_ctrl();
+}
+
+static int wait_port_reset_clear(uint32_t *portsc, uint32_t timeout_us,
+                                 uint32_t *observed)
+{
+    XTime start;
+    XTime now;
+    uint64_t budget = ((uint64_t)timeout_us * COUNTS_PER_SECOND +
+                       999999ULL) / 1000000ULL;
+
+    XTime_GetTime(&start);
+    for (;;) {
+        uint32_t reg = ehci_readl(portsc);
+
+        if (!(reg & EHCI_PS_PR)) {
+            if (observed)
+                *observed = reg;
+            return 0;
+        }
+        XTime_GetTime(&now);
+        if ((uint64_t)(now - start) >= budget) {
+            if (observed)
+                *observed = reg;
+            return -1;
+        }
+        udelay(5);
+    }
 }
 
 static int zz_speed_to_usb(int zz)
@@ -78,8 +142,7 @@ static int read_data_length(volatile struct ZZUSBCommand *cmd,
 {
     *data_len = be32(&cmd->data_length);
     if (*data_len > ZZUSB_MAX_XFER) {
-        printf("[usb-proxy] bad data_length=%lu max=%lu\n",
-               (unsigned long)*data_len, (unsigned long)ZZUSB_MAX_XFER);
+        diag_detail = *data_len;
         put_be32(&cmd->actual_length, 0);
         return 0;
     }
@@ -113,7 +176,7 @@ static int read_split(volatile struct ZZUSBCommand *cmd,
         return 0;
     if (*hub_addr <= 0 || *hub_addr >= 128)
         return 0;
-    if (*hub_port <= 0 || *hub_port > 15)
+    if (*hub_port <= 0 || *hub_port > 127)
         return 0;
 
     return 1;
@@ -127,6 +190,7 @@ static void drop_direct_root_split(struct ehci_ctrl *ctrl,
                                    int *split_hub_port)
 {
     uint32_t portsc_now;
+    (void)tag;
 
     if (!ctrl || !split_hub_ptr || !*split_hub_ptr)
         return;
@@ -137,9 +201,7 @@ static void drop_direct_root_split(struct ehci_ctrl *ctrl,
     if (PORTSC_PSPD(portsc_now) == PORTSC_PSPD_HS)
         return;
 
-    printf("[usb-proxy] %s direct root: ignoring split hub=%d port=%d portsc=%08x\n",
-           tag, *split_hub_addr, *split_hub_port,
-           (unsigned int)portsc_now);
+    diag_detail = portsc_now;
     *split_hub_ptr = NULL;
     *split_hub_addr = 0;
     *split_hub_port = 0;
@@ -199,15 +261,401 @@ static void save_toggle(int addr, struct usb_device *dev)
 
 static uint16_t usb_status_to_zz(unsigned long status)
 {
-    if (status & (USB_ST_BABBLE_DET | USB_ST_BUF_ERR))
+    if (status & USB_ST_BABBLE_DET)
         return ZZUSB_STATUS_BABBLE;
+    if (status & USB_ST_BUF_ERR)
+        return ZZUSB_STATUS_OVERRUN;
     if (status & USB_ST_CRC_ERR)
         return ZZUSB_STATUS_CRC;
     if (status & USB_ST_STALLED)
         return ZZUSB_STATUS_STALL;
     if (status & USB_ST_NAK_REC)
         return ZZUSB_STATUS_NAK;
-    return ZZUSB_STATUS_ERROR;
+    return ZZUSB_STATUS_HOSTERROR;
+}
+
+#define ZZUSB_PERIODIC_ENDPOINTS ZZUSB_PERIODIC_RING_CAPACITY
+#define ZZUSB_PERIODIC_PUMP_BUDGET 4U
+
+struct periodic_key {
+    uint32_t epoch;
+    uint16_t generation;
+    uint16_t address;
+    uint16_t endpoint;
+    uint16_t direction;
+    uint16_t speed;
+    uint16_t max_packet;
+    uint16_t interval;
+    uint16_t hub_address;
+    uint16_t hub_port;
+    uint16_t flags;
+};
+
+struct periodic_endpoint {
+    struct periodic_key key;
+    struct usb_device dev;
+    struct usb_device split_hub;
+    struct int_queue *queue;
+    struct ehci_periodic_plan plan;
+    uint64_t interval_ticks;
+    uint64_t next_due;
+    uint32_t length;
+    uint32_t actual;
+    uint16_t completion_status;
+    uint8_t used;
+    uint8_t completion_pending;
+    uint8_t needs_rearm;
+    uint8_t failed;
+    uint8_t buffer[1024] __attribute__((aligned(32)));
+} __attribute__((aligned(32)));
+
+static struct periodic_endpoint periodic_endpoints[ZZUSB_PERIODIC_ENDPOINTS]
+    __attribute__((aligned(32)));
+static uint8_t periodic_ready[ZZUSB_PERIODIC_ENDPOINTS];
+static uint8_t periodic_ready_head;
+static uint8_t periodic_ready_count;
+static uint8_t periodic_pump_cursor;
+
+static int periodic_identity_matches(
+    const struct periodic_endpoint *endpoint,
+    volatile struct ZZUSBCommand *cmd)
+{
+    return endpoint->used &&
+           endpoint->key.epoch == controller_epoch &&
+           endpoint->key.generation == be16(&cmd->reserved) &&
+           endpoint->key.address == be32(&cmd->dev_addr) &&
+           endpoint->key.endpoint == be16(&cmd->endpoint) &&
+           endpoint->key.direction == be16(&cmd->direction);
+}
+
+static int periodic_keys_equal(const struct periodic_key *left,
+                               const struct periodic_key *right)
+{
+    return memcmp(left, right, sizeof(*left)) == 0;
+}
+
+static void periodic_remove_ready(unsigned position)
+{
+    zzusb_periodic_ring_remove(periodic_ready, &periodic_ready_head,
+                               &periodic_ready_count, position);
+}
+
+static void periodic_release_slot(unsigned index)
+{
+    struct periodic_endpoint *endpoint = &periodic_endpoints[index];
+    unsigned position;
+
+    if (!endpoint->used)
+        return;
+    for (position = 0; position < periodic_ready_count; position++) {
+        if (periodic_ready[(periodic_ready_head + position) %
+                           ZZUSB_PERIODIC_ENDPOINTS] == index) {
+            periodic_remove_ready(position);
+            break;
+        }
+    }
+    if (endpoint->queue)
+        destroy_int_queue(&endpoint->dev, endpoint->queue);
+    save_toggle(endpoint->key.address, &endpoint->dev);
+    memset(endpoint, 0, sizeof(*endpoint));
+}
+
+static void periodic_stop_all(void)
+{
+    unsigned index;
+
+    for (index = 0; index < ZZUSB_PERIODIC_ENDPOINTS; index++)
+        periodic_release_slot(index);
+    periodic_ready_head = 0;
+    periodic_ready_count = 0;
+    amiga_interrupt_clear(AMIGA_INTERRUPT_USB);
+}
+
+static void periodic_queue_completion(unsigned index, uint16_t status,
+                                      uint32_t actual)
+{
+    struct periodic_endpoint *endpoint = &periodic_endpoints[index];
+
+    if (endpoint->completion_pending ||
+        !zzusb_periodic_ring_push(periodic_ready, periodic_ready_head,
+                                  &periodic_ready_count, (uint8_t)index))
+        return;
+    endpoint->completion_pending = 1;
+    endpoint->completion_status = status;
+    endpoint->actual = actual;
+    zzusb_diag_high_water(periodic_ready_count);
+    amiga_interrupt_set(AMIGA_INTERRUPT_USB);
+}
+
+static uint64_t periodic_now(void)
+{
+    XTime now;
+
+    XTime_GetTime(&now);
+    return (uint64_t)now;
+}
+
+void usb_proxy_periodic_pump(void)
+{
+    uint64_t now = periodic_now();
+    unsigned visited;
+
+    for (visited = 0; visited < ZZUSB_PERIODIC_PUMP_BUDGET; visited++) {
+        unsigned index = periodic_pump_cursor;
+        struct periodic_endpoint *endpoint = &periodic_endpoints[index];
+        void *completed;
+
+        periodic_pump_cursor =
+            (uint8_t)((periodic_pump_cursor + 1U) %
+                      ZZUSB_PERIODIC_ENDPOINTS);
+        if (!endpoint->used || endpoint->completion_pending)
+            continue;
+        if (endpoint->needs_rearm) {
+            if (now < endpoint->next_due)
+                continue;
+            if (rearm_int_queue(&endpoint->dev, endpoint->queue) < 0) {
+                endpoint->failed = 1;
+                periodic_queue_completion(index, ZZUSB_STATUS_HOSTERROR, 0);
+                continue;
+            }
+            endpoint->needs_rearm = 0;
+        }
+
+        completed = poll_int_queue(&endpoint->dev, endpoint->queue);
+        if (!completed)
+            continue;
+        save_toggle(endpoint->key.address, &endpoint->dev);
+        endpoint->next_due = now + endpoint->interval_ticks;
+        if (endpoint->dev.status != 0) {
+            endpoint->failed = 1;
+            periodic_queue_completion(
+                index, usb_status_to_zz(endpoint->dev.status), 0);
+        } else if (endpoint->dev.act_len > 0) {
+            periodic_queue_completion(index, ZZUSB_STATUS_OK,
+                                      endpoint->dev.act_len);
+        } else {
+            endpoint->needs_rearm = 1;
+        }
+    }
+}
+uint32_t usb_proxy_periodic_queue_state(void)
+{
+    unsigned index;
+    uint32_t active = 0;
+
+    for (index = 0; index < ZZUSB_PERIODIC_ENDPOINTS; index++)
+        if (periodic_endpoints[index].used)
+            active++;
+    return (active << 16) | ((uint32_t)periodic_ready_count << 8);
+}
+
+uint32_t usb_proxy_periodic_schedule_bits(void)
+{
+    unsigned index;
+    uint32_t masks = 0;
+
+    for (index = 0; index < ZZUSB_PERIODIC_ENDPOINTS; index++) {
+        if (!periodic_endpoints[index].used)
+            continue;
+        masks |= periodic_endpoints[index].plan.start_mask;
+        masks |= (uint32_t)periodic_endpoints[index].plan.complete_mask << 8;
+    }
+    return masks;
+}
+
+void usb_proxy_refresh_event_irq(void)
+{
+    if (periodic_ready_count ||
+        (usb_proxy_iso_queue_state() & 0xf0000000U))
+        amiga_interrupt_set(AMIGA_INTERRUPT_USB);
+    else
+        amiga_interrupt_clear(AMIGA_INTERRUPT_USB);
+}
+
+static uint16_t handle_periodic_arm(volatile struct ZZUSBCommand *cmd,
+                                    uint8_t *data_buf)
+{
+    struct ehci_ctrl *ctrl = get_ehci_ctrl();
+    struct periodic_key key;
+    struct periodic_endpoint *endpoint = NULL;
+    struct usb_device dev;
+    struct usb_device split_hub;
+    struct usb_device *split_hub_ptr;
+    struct ehci_periodic_plan plan;
+    unsigned long pipe;
+    uint32_t length;
+    uint16_t flags;
+    int split_hub_addr = 0;
+    int split_hub_port = 0;
+    int speed_usb;
+    int is_in;
+    unsigned index;
+    unsigned free_index = ZZUSB_PERIODIC_ENDPOINTS;
+
+    if (!ctrl || !read_data_length(cmd, &length) ||
+        length == 0 || length > 1024U)
+        return ZZUSB_STATUS_BADPARAM;
+
+    flags = be16(&cmd->flags);
+    speed_usb = zz_speed_to_usb(be16(&cmd->speed));
+    is_in = (be16(&cmd->direction) & 0x80) != 0;
+    split_hub_ptr =
+        read_split(cmd, &split_hub_addr, &split_hub_port) ?
+        &split_hub : NULL;
+    drop_direct_root_split(ctrl, "periodic", speed_usb, &split_hub_ptr,
+                           &split_hub_addr, &split_hub_port);
+    if (!split_hub_ptr)
+        flags &= (uint16_t)~(ZZUSB_FLAG_SPLIT | ZZUSB_FLAG_MULTI_TT |
+                            ZZUSB_FLAG_TT_THINK_MASK);
+
+    memset(&key, 0, sizeof(key));
+    key.epoch = controller_epoch;
+    key.generation = be16(&cmd->reserved);
+    key.address = (uint16_t)be32(&cmd->dev_addr);
+    key.endpoint = be16(&cmd->endpoint);
+    key.direction = be16(&cmd->direction);
+    key.speed = be16(&cmd->speed);
+    key.max_packet = be16(&cmd->max_pkt_size);
+    key.interval = be16(&cmd->interval);
+    key.hub_address = (uint16_t)split_hub_addr;
+    key.hub_port = (uint16_t)split_hub_port;
+    key.flags = flags;
+
+    for (index = 0; index < ZZUSB_PERIODIC_ENDPOINTS; index++) {
+        if (!periodic_endpoints[index].used) {
+            if (free_index == ZZUSB_PERIODIC_ENDPOINTS)
+                free_index = index;
+            continue;
+        }
+        if (periodic_keys_equal(&periodic_endpoints[index].key, &key)) {
+            if (periodic_endpoints[index].completion_pending)
+                amiga_interrupt_set(AMIGA_INTERRUPT_USB);
+            put_be32(&cmd->actual_length, 0);
+            return ZZUSB_STATUS_OK;
+        }
+        if (periodic_identity_matches(&periodic_endpoints[index], cmd)) {
+            periodic_release_slot(index);
+            if (free_index == ZZUSB_PERIODIC_ENDPOINTS)
+                free_index = index;
+        }
+    }
+    if (free_index == ZZUSB_PERIODIC_ENDPOINTS)
+        return ZZUSB_STATUS_BUSY;
+
+    prep_dev(&dev, key.address, speed_usb, key.max_packet, key.endpoint,
+             split_hub_ptr, split_hub_addr, split_hub_port);
+    dev.tt_think_time =
+        (uint8_t)((flags & ZZUSB_FLAG_TT_THINK_MASK) >>
+                  ZZUSB_FLAG_TT_THINK_SHIFT);
+    dev.tt_multi = (flags & ZZUSB_FLAG_MULTI_TT) != 0;
+    if (!ehci_periodic_build_plan(
+            dev.speed, key.interval, split_hub_ptr != NULL,
+            dev.tt_think_time, dev.tt_multi,
+            key.endpoint + key.hub_port, &plan))
+        return ZZUSB_STATUS_BADPARAM;
+
+    endpoint = &periodic_endpoints[free_index];
+    memset(endpoint, 0, sizeof(*endpoint));
+    endpoint->key = key;
+    endpoint->dev = dev;
+    endpoint->plan = plan;
+    endpoint->length = length;
+    endpoint->interval_ticks =
+        ((uint64_t)plan.interval_microframes * COUNTS_PER_SECOND + 7999ULL) /
+        8000ULL;
+    if (!endpoint->interval_ticks)
+        endpoint->interval_ticks = 1;
+    if (split_hub_ptr) {
+        endpoint->split_hub = split_hub;
+        endpoint->dev.parent = &endpoint->split_hub;
+    }
+    if (!is_in)
+        memcpy(endpoint->buffer, data_buf, length);
+    if (is_in)
+        pipe = usb_rcvintpipe(&endpoint->dev, key.endpoint);
+    else
+        pipe = usb_sndintpipe(&endpoint->dev, key.endpoint);
+    endpoint->queue = create_int_queue(
+        &endpoint->dev, pipe, 1, (int)length, endpoint->buffer,
+        key.interval);
+    if (!endpoint->queue) {
+        memset(endpoint, 0, sizeof(*endpoint));
+        return ZZUSB_STATUS_NOMEM;
+    }
+    endpoint->used = 1;
+    zzusb_diag_count(ZZUSB_DIAG_COUNT_PERIODIC_ARM);
+    put_be32(&cmd->actual_length, 0);
+    return ZZUSB_STATUS_OK;
+}
+
+static uint16_t handle_periodic_reap(volatile struct ZZUSBCommand *cmd,
+                                     uint8_t *data_buf)
+{
+    uint32_t capacity = be32(&cmd->data_length);
+    unsigned position;
+
+    for (position = 0; position < periodic_ready_count; position++) {
+        unsigned index = periodic_ready[
+            (periodic_ready_head + position) % ZZUSB_PERIODIC_ENDPOINTS];
+        struct periodic_endpoint *endpoint = &periodic_endpoints[index];
+        uint16_t status;
+        uint32_t actual;
+
+        if (!periodic_identity_matches(endpoint, cmd))
+            continue;
+        status = endpoint->completion_status;
+        actual = endpoint->actual;
+        if (status == ZZUSB_STATUS_OK && actual > capacity)
+            return ZZUSB_STATUS_BADPARAM;
+        if (status == ZZUSB_STATUS_OK && actual)
+            memcpy(data_buf, endpoint->buffer, actual);
+        put_be32(&cmd->actual_length,
+                 status == ZZUSB_STATUS_OK ? actual : 0);
+        periodic_remove_ready(position);
+        endpoint->completion_pending = 0;
+        zzusb_diag_count(ZZUSB_DIAG_COUNT_PERIODIC_REAP);
+        if (endpoint->failed || endpoint->key.direction == 0) {
+            periodic_release_slot(index);
+        } else {
+            endpoint->needs_rearm = 1;
+        }
+        if (periodic_ready_count)
+            amiga_interrupt_set(AMIGA_INTERRUPT_USB);
+        usb_proxy_refresh_event_irq();
+        return status;
+    }
+
+    put_be32(&cmd->actual_length, 0);
+    return ZZUSB_STATUS_NAK;
+}
+
+static uint16_t handle_periodic_stop(volatile struct ZZUSBCommand *cmd)
+{
+    unsigned index;
+    int stopped = 0;
+
+    for (index = 0; index < ZZUSB_PERIODIC_ENDPOINTS; index++) {
+        if (periodic_identity_matches(&periodic_endpoints[index], cmd)) {
+            periodic_release_slot(index);
+            stopped = 1;
+        }
+    }
+    usb_proxy_refresh_event_irq();
+    put_be32(&cmd->actual_length, 0);
+    return stopped ? ZZUSB_STATUS_OK : ZZUSB_STATUS_NAK;
+}
+
+static uint16_t handle_cancel_ep(volatile struct ZZUSBCommand *cmd)
+{
+    uint16_t periodic = handle_periodic_stop(cmd);
+    uint16_t iso = usb_proxy_iso_handle_stop(cmd);
+
+    if (periodic == ZZUSB_STATUS_HOSTERROR ||
+        iso == ZZUSB_STATUS_HOSTERROR)
+        return ZZUSB_STATUS_HOSTERROR;
+    if (periodic == ZZUSB_STATUS_OK || iso == ZZUSB_STATUS_OK)
+        return ZZUSB_STATUS_OK;
+    return ZZUSB_STATUS_NAK;
 }
 
 static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
@@ -215,17 +663,19 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
     struct ehci_ctrl *ctrl = get_ehci_ctrl();
     if (!ctrl)
         return ZZUSB_STATUS_ERROR;
+    periodic_stop_all();
+    usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED);
+    memset(toggle_bits, 0, sizeof(toggle_bits));
+    root_port_connected = 0;
 
     uint32_t *portsc = (uint32_t *)&ctrl->hcor->or_portsc[0];
-    uint32_t reg_pre, reg, reg_after_hold;
+    uint32_t reg_pre, reg;
     int ret;
     int reset_flags;
-    int speed_hint;
     int use_fsls_reset;
 
     reg_pre = ehci_readl(portsc);
     reset_flags = be16(&cmd->flags);
-    speed_hint = be16(&cmd->speed);
     use_fsls_reset = (reset_flags & ZZUSB_FLAG_RESET_FSLS) ? 1 : 0;
 
     /*
@@ -244,13 +694,10 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
             reg &= ~PORTSC_PFSC;
         reg &= ~EHCI_PS_PR;
         ehci_writel(portsc, reg);
-        for (int i = 0; i < 800; i++) {
-            reg_pre = ehci_readl(portsc);
-            if (!(reg_pre & EHCI_PS_PR))
-                break;
-            udelay(5);
+        if (wait_port_reset_clear(portsc, 4000U, &reg_pre) < 0) {
+            diag_detail = reg_pre;
+            return ZZUSB_STATUS_HOSTERROR;
         }
-        reg_pre = ehci_readl(portsc);
     }
 
     /*
@@ -300,7 +747,6 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
     /* USB 2.0 spec: hold reset for 50ms on root ports. */
     mdelay(50);
 
-    reg_after_hold = ehci_readl(portsc);
 
     /*
      * De-assert reset. Crucially, use the VALUE WE WROTE (with W1C
@@ -320,12 +766,7 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
      * but don't sit here forever — on failure we want to return
      * status to Poseidon promptly so the Zorro bus keeps flowing.
      */
-    ret = -1;
-    for (int i = 0; i < 800; i++) {  /* 800 * 5us = 4ms bound */
-        reg = ehci_readl(portsc);
-        if (!(reg & EHCI_PS_PR)) { ret = 0; break; }
-        udelay(5);
-    }
+    ret = wait_port_reset_clear(portsc, 4000U, &reg);
     if (ret < 0) {
         int stuck_speed;
 
@@ -333,14 +774,7 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
         stuck_speed = portsc_to_zz_speed(reg);
         root_port_speed_zz = stuck_speed;
         put_be16(&cmd->speed, stuck_speed);
-        printf("[usb-proxy] reset: PR didn't clear "
-               "(pre=%08x after_hold=%08x now=%08x hint=%d path=%d speed=%d)\n",
-               (unsigned int)reg_pre,
-               (unsigned int)reg_after_hold,
-               (unsigned int)reg,
-               speed_hint,
-               use_fsls_reset,
-               stuck_speed);
+        diag_detail = reg;
         if (stuck_speed == ZZUSB_SPEED_LOW)
             return ZZUSB_STATUS_OFFLINE;
         return ZZUSB_STATUS_ERROR;
@@ -351,21 +785,17 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
     if (!(reg & EHCI_PS_CS)) {
         root_port_speed_zz = ZZUSB_SPEED_FULL;
         ehci_zynq_set_phy_speed(USB_SPEED_HIGH);
-        printf("[usb-proxy] reset: no device connected after reset "
-               "(portsc=%08x)\n", (unsigned int)reg);
+        diag_detail = reg;
         return ZZUSB_STATUS_ERROR;
     }
 
     if (!(reg & EHCI_PS_PE)) {
-        printf("[usb-proxy] reset: port not enabled "
-               "(portsc=%08x pre=%08x)\n",
-               (unsigned int)reg, (unsigned int)reg_pre);
+        diag_detail = reg;
         return ZZUSB_STATUS_ERROR;
     }
 
     int zz_speed = portsc_to_zz_speed(reg);
     int usb_speed = zz_speed_to_usb(zz_speed);
-    int phy_rc;
     root_port_speed_zz = zz_speed;
 
     /*
@@ -374,20 +804,17 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
      * classified the device, switch the ULPI function-control register to
      * the actual wire speed before the first address-0 transaction.
      */
-    phy_rc = ehci_zynq_set_phy_speed(usb_speed);
+    ehci_zynq_set_phy_speed(usb_speed);
     udelay(100);
     reg = ehci_readl(portsc);
 
     /* USB 2.0 TRSTRCY recovery. 10 ms is the spec floor. */
     mdelay(10);
 
-    toggle_bits[0][0] = 0;
-    toggle_bits[0][1] = 0;
+    memset(toggle_bits, 0, sizeof(toggle_bits));
+    root_port_connected = 1;
 
-    printf("[usb-proxy] reset done: speed=%d portsc=%08x phy=%d%s\n",
-           zz_speed, (unsigned int)reg,
-           phy_rc,
-           use_fsls_reset ? " (FSLS/PFSC path)" : "");
+    diag_detail = reg;
     put_be16(&cmd->speed, zz_speed);
     return ZZUSB_STATUS_OK;
 }
@@ -433,9 +860,7 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
                         ? ZZUSB_SPEED_HIGH : root_port_speed_zz;
         if (root_pspd != PORTSC_PSPD_HS) {
             if (split_hub_ptr) {
-                printf("[usb-proxy] ctrl0 direct root: ignoring split hub=%d port=%d portsc=%08x\n",
-                       split_hub_addr, split_hub_port,
-                       (unsigned int)portsc_now);
+                diag_detail = portsc_now;
                 split_hub_ptr = NULL;
                 split_hub_addr = 0;
                 split_hub_port = 0;
@@ -443,8 +868,7 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
             direct_root_addr0 = 1;
         }
         if (root_speed_zz != speed_zz) {
-            printf("[usb-proxy] ctrl0 root speed override: cmd=%d port=%d portsc=%08x\n",
-                   speed_zz, root_speed_zz, (unsigned int)portsc_now);
+            diag_detail = portsc_now;
             speed_zz = root_speed_zz;
             speed_usb = zz_speed_to_usb(speed_zz);
             put_be16(&cmd->speed, speed_zz);
@@ -471,7 +895,7 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
          * long enough to crash the OS. LS behind a high-speed hub still
          * uses the split path above.
          */
-        printf("[usb-proxy] direct LS root EP0 unsupported; offline\n");
+        diag_detail = portsc_now;
         put_be32(&cmd->actual_length, 0);
         return ZZUSB_STATUS_OFFLINE;
     }
@@ -531,7 +955,7 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
 
         if (setup.requesttype == 0x00 && setup.request == 0x05) {
             int new_addr = setup.value;
-            printf("[usb-proxy] set_addr: %d -> %d\n", dev_addr, new_addr);
+            diag_detail = (uint32_t)new_addr;
             if (new_addr > 0 && new_addr < 128) {
                 toggle_bits[new_addr][0] = 0;
                 toggle_bits[new_addr][1] = 0;
@@ -568,8 +992,7 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
         }
         return ZZUSB_STATUS_OK;
     } else {
-        printf("[usb-proxy] ctrl fail: addr=%d ep=%d req=%02x/%02x result=%d status=%lx act_len=%d\n",
-               dev_addr, endpoint, setup.requesttype, setup.request, result, dev.status, dev.act_len);
+        diag_detail = (uint32_t)dev.status;
         put_be32(&cmd->actual_length, 0);
         return usb_status_to_zz(dev.status);
     }
@@ -644,10 +1067,7 @@ static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
         put_be32(&cmd->actual_length, dev.act_len);
         return ZZUSB_STATUS_OK;
     } else {
-        /* Keep the failure print — it's rare and tells us why a
-         * bulk transfer errored. */
-        printf("[bulk] FAIL addr=%d ep=%d result=%d status=%lx\n",
-               dev_addr, endpoint, result, dev.status);
+        diag_detail = (uint32_t)dev.status;
         put_be32(&cmd->actual_length, 0);
         return usb_status_to_zz(dev.status);
     }
@@ -719,8 +1139,7 @@ static uint16_t handle_int_xfer(volatile struct ZZUSBCommand *cmd,
         return ZZUSB_STATUS_OK;
     } else {
         put_be32(&cmd->actual_length, 0);
-        printf("[usb-proxy] int fail: addr=%d ep=%d result=%d status=%lx\n",
-               dev_addr, endpoint, result, dev.status);
+        diag_detail = (uint32_t)dev.status;
         return usb_status_to_zz(dev.status);
     }
 }
@@ -775,9 +1194,35 @@ static uint16_t handle_enumerate(volatile struct ZZUSBCommand *cmd,
 static int is_port_connected(void)
 {
     struct ehci_ctrl *ctrl = get_ehci_ctrl();
-    if (!ctrl) return 0;
-    uint32_t portsc = ehci_readl(&ctrl->hcor->or_portsc[0]);
-    return (portsc & EHCI_PS_CS) ? 1 : 0;
+    uint32_t portsc;
+    int connected;
+
+    if (!ctrl)
+        return 0;
+    portsc = ehci_readl(&ctrl->hcor->or_portsc[0]);
+    connected = (portsc & EHCI_PS_CS) ? 1 : 0;
+    if (!connected && root_port_connected) {
+        memset(toggle_bits, 0, sizeof(toggle_bits));
+        root_port_connected = 0;
+        usb_proxy_advance_controller_epoch();
+    } else if (connected && !root_port_connected) {
+        memset(toggle_bits, 0, sizeof(toggle_bits));
+        root_port_connected = 1;
+    }
+    return connected;
+}
+
+static uint16_t handle_retire_ep(volatile struct ZZUSBCommand *cmd)
+{
+    uint32_t address = be32(&cmd->dev_addr);
+    uint16_t endpoint = be16(&cmd->endpoint);
+    uint16_t direction = be16(&cmd->direction);
+
+    if (address > 127 || endpoint > 15)
+        return ZZUSB_STATUS_BADPARAM;
+    toggle_bits[address][(direction & 0x80) ? 1 : 0] &=
+        ~(1U << endpoint);
+    return ZZUSB_STATUS_OK;
 }
 
 static uint16_t handle_check_port(volatile struct ZZUSBCommand *cmd)
@@ -798,32 +1243,246 @@ static uint16_t handle_check_port(volatile struct ZZUSBCommand *cmd)
     return ZZUSB_STATUS_OK;
 }
 
+static uint32_t diag_timestamp(void)
+{
+    XTime now;
+    XTime_GetTime(&now);
+    return (uint32_t)now;
+}
+
+static void diag_flush(volatile void *address, size_t length)
+{
+    Xil_DCacheFlushRange((UINTPTR)address, (u32)length);
+}
+
+static uint32_t diag_request_id(
+    volatile struct ZZUSBProtocolExtension *ext, int is_v2)
+{
+    return is_v2 ? be32(&ext->request_id) : 0U;
+}
+
+static uint16_t diag_topology(volatile struct ZZUSBCommand *cmd)
+{
+    return (uint16_t)((be16(&cmd->split_hub_addr) << 8) |
+                      (be16(&cmd->split_hub_port) & 0xffU));
+}
+
+static void diag_begin_command(
+    volatile struct ZZUSBCommand *cmd,
+    volatile struct ZZUSBProtocolExtension *ext, int is_v2)
+{
+    diag_detail = 0;
+    zzusb_diag_count(ZZUSB_DIAG_COUNT_REQUEST);
+    zzusb_diag_record(ZZUSB_DIAG_EVENT_REQUEST, ZZUSB_STATUS_PENDING,
+                      diag_request_id(ext, is_v2), controller_epoch,
+                      (uint16_t)be32(&cmd->dev_addr),
+                      (uint8_t)be16(&cmd->endpoint),
+                      (uint8_t)be16(&cmd->direction),
+                      diag_topology(cmd), be16(&cmd->flags),
+                      be16(&cmd->cmd), diag_timestamp());
+}
+
+static uint16_t diag_complete_command(
+    volatile struct ZZUSBCommand *cmd,
+    volatile struct ZZUSBProtocolExtension *ext, int is_v2,
+    uint16_t result)
+{
+    uint16_t event_type = ZZUSB_DIAG_EVENT_COMPLETION;
+    uint16_t command = be16(&cmd->cmd);
+
+    zzusb_diag_count(ZZUSB_DIAG_COUNT_COMPLETION);
+    if (command == ZZUSB_CMD_RESET_PORT) {
+        zzusb_diag_count(ZZUSB_DIAG_COUNT_RESET);
+        event_type = ZZUSB_DIAG_EVENT_RESET;
+    } else if (result == ZZUSB_STATUS_TIMEOUT) {
+        zzusb_diag_count(ZZUSB_DIAG_COUNT_TIMEOUT);
+        event_type = ZZUSB_DIAG_EVENT_TIMEOUT;
+    } else if (result == ZZUSB_STATUS_CANCELLED) {
+        zzusb_diag_count(ZZUSB_DIAG_COUNT_CANCELLATION);
+        event_type = ZZUSB_DIAG_EVENT_CANCELLATION;
+    } else if (result == ZZUSB_STATUS_STALE) {
+        zzusb_diag_count(ZZUSB_DIAG_COUNT_STALE);
+        event_type = ZZUSB_DIAG_EVENT_STALE;
+    } else if (result == ZZUSB_STATUS_HOSTERROR) {
+        zzusb_diag_count(ZZUSB_DIAG_COUNT_EHCI_ERROR);
+        event_type = ZZUSB_DIAG_EVENT_EHCI_ERROR;
+    }
+
+    zzusb_diag_record(event_type, result,
+                      diag_request_id(ext, is_v2), controller_epoch,
+                      (uint16_t)be32(&cmd->dev_addr),
+                      (uint8_t)be16(&cmd->endpoint),
+                      (uint8_t)be16(&cmd->direction),
+                      diag_topology(cmd), be16(&cmd->flags),
+                      diag_detail ? diag_detail : be32(&cmd->actual_length),
+                      diag_timestamp());
+    return result;
+}
+
+void usb_proxy_publish_diagnostics(volatile void *aperture,
+                                   uint32_t queue_state)
+{
+    struct ehci_ctrl *ctrl = get_ehci_ctrl();
+    uint32_t schedule_bits = 0;
+
+    if (ctrl) {
+        schedule_bits = ehci_readl(&ctrl->hcor->or_usbcmd) & 0x00000031U;
+        schedule_bits |=
+            (ehci_readl(&ctrl->hcor->or_usbsts) & 0x0000f03fU) << 8;
+    }
+    queue_state |= usb_proxy_periodic_queue_state();
+    queue_state |= usb_proxy_iso_queue_state();
+    schedule_bits |= usb_proxy_periodic_schedule_bits() << 16;
+    zzusb_diag_publish((volatile uint8_t *)aperture + ZZUSB_DIAG_OFFSET,
+                       ZZUSB_DIAG_SIZE, ZZUSB_CAP_BASE, controller_epoch,
+                       last_request_id, queue_state, schedule_bits,
+                       diag_flush);
+}
+
+void usb_proxy_note_late_completion(
+    volatile struct ZZUSBCommand *cmd,
+    volatile struct ZZUSBProtocolExtension *ext, int is_v2)
+{
+    zzusb_diag_count(ZZUSB_DIAG_COUNT_LATE_COMPLETION);
+    zzusb_diag_record(ZZUSB_DIAG_EVENT_LATE_COMPLETION,
+                      be16(&cmd->status), diag_request_id(ext, is_v2),
+                      controller_epoch, (uint16_t)be32(&cmd->dev_addr),
+                      (uint8_t)be16(&cmd->endpoint),
+                      (uint8_t)be16(&cmd->direction),
+                      diag_topology(cmd), be16(&cmd->flags),
+                      be32(&cmd->actual_length), diag_timestamp());
+}
+
 uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
-                              uint8_t *data_buf)
+                                  volatile struct ZZUSBProtocolExtension *ext,
+                                  uint8_t *data_buf, int is_v2)
 {
     uint16_t command = be16(&cmd->cmd);
+    uint16_t result;
+    uint16_t validation;
+
     put_be32(&cmd->actual_length, 0);
-
-    if (command != ZZUSB_CMD_RESET_PORT && command != ZZUSB_CMD_CHECK_PORT && !is_port_connected()) {
-        return ZZUSB_STATUS_OFFLINE;
+    diag_begin_command(cmd, ext, is_v2);
+    if (command != ZZUSB_CMD_QUERY_CAPS &&
+        ehci_controller_needs_recovery()) {
+        zzusb_diag_count(ZZUSB_DIAG_COUNT_RECOVERY);
+        zzusb_diag_record(ZZUSB_DIAG_EVENT_RECOVERY, ZZUSB_STATUS_PENDING,
+                          diag_request_id(ext, is_v2), controller_epoch,
+                          0, 0, 0, 0, 0, command, diag_timestamp());
+        periodic_stop_all();
+        usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED);
+        if (ehci_controller_recover() < 0)
+            return diag_complete_command(cmd, ext, is_v2,
+                                         ZZUSB_STATUS_HOSTERROR);
+        usb_proxy_iso_after_controller_reset();
+        memset(toggle_bits, 0, sizeof(toggle_bits));
+        usb_proxy_advance_controller_epoch();
+        if (is_v2) {
+            put_be16(&ext->version, ZZUSB_PROTOCOL_VERSION);
+            put_be16(&ext->header_size, ZZUSB_V2_HEADER_SIZE);
+            put_be32(&ext->controller_epoch, controller_epoch);
+            put_be32(&ext->capabilities, ZZUSB_CAP_BASE);
+        }
+        return diag_complete_command(
+            cmd, ext, is_v2,
+            is_v2 ? ZZUSB_STATUS_STALE : ZZUSB_STATUS_HOSTERROR);
     }
 
-    switch (command) {
-    case ZZUSB_CMD_CONTROL_XFER:
-        return handle_control_xfer(cmd, data_buf);
-    case ZZUSB_CMD_BULK_XFER:
-        return handle_bulk_xfer(cmd, data_buf);
-    case ZZUSB_CMD_INT_XFER:
-        return handle_int_xfer(cmd, data_buf);
-    case ZZUSB_CMD_CLEAR_STALL:
-        return handle_clear_stall(cmd);
-    case ZZUSB_CMD_RESET_PORT:
-        return handle_reset_port(cmd);
-    case ZZUSB_CMD_CHECK_PORT:
-        return handle_check_port(cmd);
-    case ZZUSB_CMD_ENUMERATE:
-        return handle_enumerate(cmd, data_buf);
-    default:
-        return ZZUSB_STATUS_BADPARAM;
+    validation = zzusb_validate_command(cmd, ext, is_v2, controller_epoch);
+    if (validation != ZZUSB_STATUS_OK)
+        return diag_complete_command(cmd, ext, is_v2, validation);
+
+    if (is_v2) {
+        uint32_t request_id = be32(&ext->request_id);
+
+        if (command == ZZUSB_CMD_QUERY_CAPS) {
+            last_request_id = request_id;
+            put_be16(&ext->version, ZZUSB_PROTOCOL_VERSION);
+            put_be16(&ext->header_size, ZZUSB_V2_HEADER_SIZE);
+            put_be32(&ext->controller_epoch, controller_epoch);
+            put_be32(&ext->capabilities, ZZUSB_CAP_BASE);
+            return diag_complete_command(cmd, ext, is_v2,
+                                         ZZUSB_STATUS_OK);
+        }
+        if (!request_id_after(request_id, last_request_id))
+            return diag_complete_command(cmd, ext, is_v2,
+                                         ZZUSB_STATUS_STALE);
+        last_request_id = request_id;
     }
+
+    if (command != ZZUSB_CMD_RESET_PORT &&
+        command != ZZUSB_CMD_CHECK_PORT &&
+        !is_port_connected()) {
+        result = ZZUSB_STATUS_OFFLINE;
+    } else {
+        switch (command) {
+        case ZZUSB_CMD_CONTROL_XFER:
+            result = handle_control_xfer(cmd, data_buf);
+            break;
+        case ZZUSB_CMD_BULK_XFER:
+            result = handle_bulk_xfer(cmd, data_buf);
+            break;
+        case ZZUSB_CMD_INT_XFER:
+            result = handle_int_xfer(cmd, data_buf);
+            break;
+        case ZZUSB_CMD_CLEAR_STALL:
+            result = handle_clear_stall(cmd);
+            break;
+        case ZZUSB_CMD_RESET_PORT:
+            result = handle_reset_port(cmd);
+            if (result == ZZUSB_STATUS_OK)
+                usb_proxy_iso_after_controller_reset();
+            usb_proxy_advance_controller_epoch();
+            break;
+        case ZZUSB_CMD_CHECK_PORT:
+            result = handle_check_port(cmd);
+            break;
+        case ZZUSB_CMD_ENUMERATE:
+            result = handle_enumerate(cmd, data_buf);
+            break;
+        case ZZUSB_CMD_RETIRE_EP:
+            result = handle_retire_ep(cmd);
+            break;
+        case ZZUSB_CMD_CANCEL_EP:
+            result = handle_cancel_ep(cmd);
+            break;
+        case ZZUSB_CMD_PERIODIC_ARM:
+            result = handle_periodic_arm(cmd, data_buf);
+            break;
+        case ZZUSB_CMD_PERIODIC_REAP:
+            result = handle_periodic_reap(cmd, data_buf);
+            break;
+        case ZZUSB_CMD_PERIODIC_STOP:
+            result = handle_periodic_stop(cmd);
+            break;
+        case ZZUSB_CMD_ISO_QUEUE:
+            result = usb_proxy_iso_handle_queue(cmd, data_buf);
+            break;
+        case ZZUSB_CMD_ISO_REAP:
+            result = usb_proxy_iso_handle_reap(cmd, data_buf);
+            break;
+        case ZZUSB_CMD_ISO_STOP:
+            result = usb_proxy_iso_handle_stop(cmd);
+            break;
+        case ZZUSB_CMD_RESUME_PORT:
+        case ZZUSB_CMD_SUSPEND_PORT:
+        case ZZUSB_CMD_QUERY_DEVICE:
+        case ZZUSB_CMD_SET_ADDRESS:
+        case ZZUSB_CMD_DIAG_SNAPSHOT:
+        case ZZUSB_CMD_ISO_XFER:
+            result = ZZUSB_STATUS_UNSUPPORTED;
+            break;
+        default:
+            result = ZZUSB_STATUS_BADPARAM;
+            break;
+        }
+    }
+
+    if (is_v2) {
+        put_be16(&ext->version, ZZUSB_PROTOCOL_VERSION);
+        put_be16(&ext->header_size, ZZUSB_V2_HEADER_SIZE);
+        put_be32(&ext->controller_epoch, controller_epoch);
+        put_be32(&ext->capabilities, ZZUSB_CAP_BASE);
+    }
+    return diag_complete_command(cmd, ext, is_v2, result);
 }

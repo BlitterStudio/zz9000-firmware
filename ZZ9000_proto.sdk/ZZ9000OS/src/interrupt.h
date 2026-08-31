@@ -4,6 +4,7 @@
  */
 
 #include <xscugic.h>
+#include "usb_event_irq.h"
 
 #ifndef ZZ_INTERRUPT_H
 #define ZZ_INTERRUPT_H
@@ -13,6 +14,7 @@
 #define AMIGA_INTERRUPT_AUDIO  2
 #define AMIGA_INTERRUPT_VBLANK 4
 #define AMIGA_INTERRUPT_SDK    8
+#define AMIGA_INTERRUPT_USB    ZZUSB_EVENT_INTERRUPT_BIT
 
 XScuGic* interrupt_get_intc();
 int interrupt_configure();
