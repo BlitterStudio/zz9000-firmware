@@ -368,7 +368,13 @@ static int periodic_release_slot(unsigned index)
 
     if (!endpoint->used)
         return 0;
-    if (!endpoint->software_polled) {
+    if (endpoint->software_polled) {
+        if (!ehci_periodic_buffer_reclaimable(
+                ehci_controller_needs_recovery())) {
+            endpoint->failed = 1;
+            return -1;
+        }
+    } else {
         if (!endpoint->queue)
             return -1;
         if (destroy_int_queue(&endpoint->dev, endpoint->queue) < 0) {

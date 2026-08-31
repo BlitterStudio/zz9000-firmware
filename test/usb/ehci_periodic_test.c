@@ -68,6 +68,12 @@ static void test_split_masks(void)
                                      4, 0, 0, &plan));
 }
 
+static void test_transient_buffer_retirement(void)
+{
+    assert(ehci_periodic_buffer_reclaimable(0));
+    assert(!ehci_periodic_buffer_reclaimable(1));
+}
+
 static void test_ready_ring_wrap_and_no_overwrite(void)
 {
     uint8_t entries[ZZUSB_PERIODIC_RING_CAPACITY];
@@ -98,6 +104,7 @@ int main(void)
 {
     test_high_speed_cadence();
     test_split_masks();
+    test_transient_buffer_retirement();
     test_ready_ring_wrap_and_no_overwrite();
     puts("EHCI periodic cadence, split masks, and bounded ring contract satisfied");
     return 0;

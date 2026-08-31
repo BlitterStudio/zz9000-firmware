@@ -20,6 +20,7 @@ static int fake_retire_failure;
 static unsigned fake_retire_count;
 static unsigned fake_bandwidth_reset_count;
 static unsigned fake_refresh_count;
+static uint16_t fake_current_frame = 100;
 static uint8_t *fake_buffer;
 static unsigned fake_schedule_count;
 static uint16_t fake_start_frame[ZZUSB_ISO_MAX_BATCHES];
@@ -50,7 +51,7 @@ void zzusb_diag_count(enum zzusb_diag_counter counter)
 uint16_t ehci_iso_current_frame(struct ehci_ctrl *ctrl)
 {
     assert(ctrl == &fake_ctrl);
-    return 100;
+    return fake_current_frame;
 }
 
 int ehci_iso_schedule(struct ehci_iso_transfer *transfer,
@@ -174,6 +175,7 @@ static void reset_fixture(void)
     fake_retire_failure = 0;
     fake_retire_count = 0;
     fake_refresh_count = 0;
+    fake_current_frame = 100;
     fake_schedule_count = 0;
     memset(fake_start_frame, 0, sizeof(fake_start_frame));
     memset(fake_start_microframe, 0, sizeof(fake_start_microframe));
@@ -237,6 +239,29 @@ static void test_asap_batches_chain(void)
     assert(fake_start_microframe[0] == 0);
     assert(fake_start_frame[1] == 104);
     assert(fake_start_microframe[1] == 2);
+    assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
+}
+
+static void test_completed_batch_does_not_delay_asap(void)
+{
+    struct ZZUSBCommand cmd;
+    uint8_t wire[ZZUSB_V2_DATA_MAX];
+    unsigned metadata_size;
+
+    reset_fixture();
+    metadata_size = make_batch(wire, 12, 0, 100);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    fake_complete = 1;
+    usb_proxy_iso_pump();
+    assert(usb_proxy_iso_queue_state() == 0x11000000);
+
+    fake_current_frame = 1200;
+    metadata_size = make_batch(wire, 13, ZZUSB_ISO_FLAG_ASAP, 0);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    assert(fake_start_frame[1] == 1204);
+    assert(fake_start_microframe[1] == 0);
     assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
 }
 
@@ -352,11 +377,12 @@ int main(void)
 {
     test_queue_complete_reap();
     test_asap_batches_chain();
+    test_completed_batch_does_not_delay_asap();
     test_full_speed_asap_batches_use_exponential_interval();
     test_missed_frame_status();
     test_linked_failure_is_quarantined();
     test_ring_backpressure_and_retirement();
-    assert(fake_bandwidth_reset_count == 6);
+    assert(fake_bandwidth_reset_count == 7);
     puts("usb_proxy_iso_test: ok");
     return 0;
 }

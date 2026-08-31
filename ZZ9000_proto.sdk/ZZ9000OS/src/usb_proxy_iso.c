@@ -100,7 +100,7 @@ static void iso_choose_asap(const struct usb_proxy_iso_batch *new_batch,
         uint32_t candidate;
         uint32_t distance;
 
-        if (batch == new_batch || !batch->used ||
+        if (batch == new_batch || !batch->used || batch->ready ||
             batch->key.epoch != new_batch->key.epoch ||
             batch->key.generation != new_batch->key.generation ||
             batch->key.address != new_batch->key.address ||

@@ -16,6 +16,16 @@ struct ehci_periodic_plan {
     uint8_t complete_mask;
 };
 
+/*
+ * A timed-out transient QH can still reference its endpoint-owned buffer
+ * until controller recovery removes every quarantined descriptor.
+ */
+static inline int ehci_periodic_buffer_reclaimable(
+    int controller_recovery_pending)
+{
+    return !controller_recovery_pending;
+}
+
 static inline uint16_t ehci_periodic_hardware_frame_interval(
     const struct ehci_periodic_plan *plan)
 {
