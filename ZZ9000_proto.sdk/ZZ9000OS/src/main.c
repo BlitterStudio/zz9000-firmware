@@ -1900,7 +1900,8 @@ int main() {
 		} else {
 			// there are no read/write requests, we can do other housekeeping
 
-			usb_proxy_poll_maintenance();
+			if (!usb_proxy_pending)
+				usb_proxy_poll_maintenance();
 			if (usb_proxy_pending) {
 				volatile struct ZZUSBCommand *proxy_cmd =
 					(volatile struct ZZUSBCommand *)USB_BLOCK_STORAGE_ADDRESS;

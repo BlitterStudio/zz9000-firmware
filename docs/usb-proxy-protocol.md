@@ -89,15 +89,15 @@ Explicit scheduling preserves the requested frame and microframe. ASAP schedulin
 | `16` | `u32` | firmware capabilities |
 | `20` | `u32` | controller epoch |
 | `24` | `u32` | last request ID |
-| `28` | `u32` | next event sequence |
+| `28` | `u32` | next physical event-ring slot (`0`-`63`); when the ring is full this is also the oldest retained slot |
 | `32` | `u32` | retained event count |
 | `36` | `u32` | overwritten/lost event count |
 | `40` | `u32` | queue state: mailbox in bits 0-7, periodic ready depth in bits 8-15, active periodic endpoints in bits 16-23 |
 | `44` | `u32` | EHCI command/status bits in the low half, aggregate periodic S/C masks in the high half |
 | `48` | 16 × `u32` | fixed counters |
-| `128` | 64 × 32 bytes | oldest-to-newest retained events |
+| `128` | 64 × 32 bytes | events in physical ring slots |
 
-Each event contains sequence, request ID, epoch, detail, timestamp, type, status, address, topology, endpoint, direction, and schedule bits. A reader copies only when the generation is even and unchanged before and after the copy. Firmware flushes the odd generation, page body, and final even generation in that order. A legacy peer neither advertises the capability nor has its aperture tail interpreted as a snapshot.
+Each event contains sequence, request ID, epoch, detail, timestamp, type, status, address, topology, endpoint, direction, and schedule bits. Before the first wrap, the retained events occupy slots zero through `count - 1`. Once `count` is 64, readers start at the slot from offset 28 and wrap modulo 64 to traverse oldest-to-newest. The sequence stored in each event is the authoritative monotonic identity and lets readers detect overwritten or concurrently replaced slots. A reader copies only when the generation is even and unchanged before and after the copy. Firmware flushes the odd generation, page body, and final even generation in that order. A legacy peer neither advertises the capability nor has its aperture tail interpreted as a snapshot.
 
 ## Validation
 
