@@ -187,6 +187,8 @@ int submit_control_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
 			int transfer_len, struct devrequest *setup);
 int submit_int_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
 			int transfer_len, int interval);
+int submit_int_msg_once(struct usb_device *dev, unsigned long pipe,
+			void *buffer, int transfer_len);
 
 #if defined CONFIG_USB_EHCI_HCD || defined CONFIG_USB_MUSB_HOST
 struct int_queue *create_int_queue(struct usb_device *dev, unsigned long pipe,

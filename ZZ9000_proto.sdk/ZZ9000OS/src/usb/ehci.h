@@ -330,6 +330,8 @@ int ehci_controller_needs_recovery(void);
 int ehci_controller_recover(void);
 int ehci_periodic_schedule_pause(struct ehci_ctrl *ctrl);
 int ehci_periodic_schedule_resume(struct ehci_ctrl *ctrl, int delta);
+int submit_int_msg_once(struct usb_device *dev, unsigned long pipe,
+			void *buffer, int transfer_len);
 struct int_queue *create_int_queue(struct usb_device *dev,
 		unsigned long pipe, int queuesize, int elementsize,
 		void *buffer, int interval);

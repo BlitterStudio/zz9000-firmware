@@ -306,6 +306,7 @@ struct periodic_endpoint {
     uint8_t completion_pending;
     uint8_t needs_rearm;
     uint8_t failed;
+    uint8_t software_polled;
     uint8_t buffer[1024] __attribute__((aligned(32)));
 } __attribute__((aligned(32)));
 
@@ -347,16 +348,18 @@ static int periodic_release_slot(unsigned index)
 
     if (!endpoint->used)
         return 0;
-    if (endpoint->queue &&
-        destroy_int_queue(&endpoint->dev, endpoint->queue) < 0) {
-        /* The queue is quarantined until controller reset. Preserve the
-         * endpoint-owned DMA buffer and suppress its pump in the meantime. */
-        endpoint->queue = NULL;
-        endpoint->failed = 1;
-        return -1;
+    if (!endpoint->software_polled) {
+        if (!endpoint->queue)
+            return -1;
+        if (destroy_int_queue(&endpoint->dev, endpoint->queue) < 0) {
+            /* The queue is quarantined until controller reset. Preserve the
+             * endpoint-owned DMA buffer and suppress its pump meanwhile. */
+            endpoint->queue = NULL;
+            endpoint->failed = 1;
+            return -1;
+        }
+        save_toggle(endpoint->key.address, &endpoint->dev);
     }
-    if (!endpoint->queue)
-        return -1;
     for (position = 0; position < periodic_ready_count; position++) {
         if (periodic_ready[(periodic_ready_head + position) %
                            ZZUSB_PERIODIC_ENDPOINTS] == index) {
@@ -364,7 +367,6 @@ static int periodic_release_slot(unsigned index)
             break;
         }
     }
-    save_toggle(endpoint->key.address, &endpoint->dev);
     memset(endpoint, 0, sizeof(*endpoint));
     return 0;
 }
@@ -413,6 +415,29 @@ static uint64_t periodic_now(void)
     XTime_GetTime(&now);
     return (uint64_t)now;
 }
+static uint16_t periodic_poll_software(struct periodic_endpoint *endpoint,
+                                       uint32_t *actual)
+{
+    unsigned long pipe;
+    int result;
+
+    if (endpoint->key.direction & 0x80)
+        pipe = usb_rcvintpipe(&endpoint->dev, endpoint->key.endpoint);
+    else
+        pipe = usb_sndintpipe(&endpoint->dev, endpoint->key.endpoint);
+    endpoint->dev.status = 0;
+    endpoint->dev.act_len = 0;
+    result = submit_int_msg_once(&endpoint->dev, pipe, endpoint->buffer,
+                                 (int)endpoint->length);
+    save_toggle(endpoint->key.address, &endpoint->dev);
+    if (result >= 0 && endpoint->dev.status == 0) {
+        *actual = endpoint->dev.act_len;
+        return ZZUSB_STATUS_OK;
+    }
+    *actual = 0;
+    return usb_status_to_zz(endpoint->dev.status);
+}
+
 
 void usb_proxy_periodic_pump(void)
 {
@@ -429,6 +454,26 @@ void usb_proxy_periodic_pump(void)
                       ZZUSB_PERIODIC_ENDPOINTS);
         if (!endpoint->used || endpoint->completion_pending)
             continue;
+        if (endpoint->software_polled) {
+            uint16_t status;
+            uint32_t actual;
+
+            if (now < endpoint->next_due)
+                continue;
+            endpoint->next_due = now + endpoint->interval_ticks;
+            actual = 0;
+            status = periodic_poll_software(endpoint, &actual);
+            if (actual > endpoint->length)
+                actual = endpoint->length;
+            if (status == ZZUSB_STATUS_OK &&
+                (endpoint->key.direction == 0 || actual != 0))
+                periodic_queue_completion(index, status, actual);
+            else if (status != ZZUSB_STATUS_OK) {
+                endpoint->failed = 1;
+                periodic_queue_completion(index, status, 0);
+            }
+            continue;
+        }
         if (!endpoint->queue)
             continue;
         if (endpoint->needs_rearm) {
@@ -593,6 +638,14 @@ static uint16_t handle_periodic_arm(volatile struct ZZUSBCommand *cmd,
     }
     if (!is_in)
         memcpy(endpoint->buffer, data_buf, length);
+    if (plan.frame_interval > 1024U) {
+        endpoint->software_polled = 1;
+        endpoint->next_due = periodic_now();
+        endpoint->used = 1;
+        zzusb_diag_count(ZZUSB_DIAG_COUNT_PERIODIC_ARM);
+        put_be32(&cmd->actual_length, 0);
+        return ZZUSB_STATUS_OK;
+    }
     if (is_in)
         pipe = usb_rcvintpipe(&endpoint->dev, key.endpoint);
     else
@@ -639,7 +692,7 @@ static uint16_t handle_periodic_reap(volatile struct ZZUSBCommand *cmd,
         if (endpoint->failed || endpoint->key.direction == 0) {
             if (periodic_release_slot(index) < 0)
                 status = ZZUSB_STATUS_HOSTERROR;
-        } else {
+        } else if (!endpoint->software_polled) {
             endpoint->needs_rearm = 1;
         }
         if (periodic_ready_count)

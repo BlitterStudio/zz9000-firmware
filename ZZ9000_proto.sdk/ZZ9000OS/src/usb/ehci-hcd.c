@@ -1423,10 +1423,6 @@ static int _ehci_submit_control_msg(struct usb_device *dev, unsigned long pipe,
 	return ehci_submit_async(dev, pipe, buffer, length, setup);
 }
 
-#define EHCI_LONG_GATE_ARMED      0U
-#define EHCI_LONG_GATE_AFTER_WRAP 1U
-#define EHCI_LONG_GATE_WAIT       2U
-
 struct int_queue {
 	int elementsize;
 	unsigned long pipe;
@@ -1438,10 +1434,6 @@ struct int_queue {
 	struct int_queue *next_active;
 	int linked;
 	struct ehci_periodic_plan plan;
-	uint16_t gate_last_frame;
-	uint8_t gate_cycle_factor;
-	uint8_t gate_wait_cycles;
-	uint8_t gate_state;
 };
 
 static struct int_queue *quarantined_interrupt;
@@ -1684,9 +1676,6 @@ static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 	result->elementsize = elementsize;
 	result->pipe = pipe;
 	result->plan = plan;
-	result->gate_cycle_factor = ehci_periodic_frame_list_cycles(&plan);
-	result->gate_last_frame = (uint16_t)(
-		(ehci_readl(&ctrl->hcor->or_frindex) >> 3) & 0x3ffU);
 	result->first = memalign(USB_DMA_MINALIGN,
 				 sizeof(struct QH) * queuesize); // FIXME dynamic allocation
 	if (!result->first) {
@@ -1796,72 +1785,6 @@ fail1:
 	return NULL;
 }
 
-static void ehci_long_interval_set_active(struct int_queue *queue,
-					  struct qTD *td, int active)
-{
-	struct QH *qh = queue->current;
-	uint32_t td_token;
-	uint32_t overlay_token;
-
-	invalidate_dcache_range((unsigned long)qh,
-				ALIGN_END_ADDR(struct QH, qh, 1));
-	td_token = hc32_to_cpu(td->qt_token);
-	overlay_token = hc32_to_cpu(qh->qh_overlay.qt_token);
-	if (active) {
-		td_token |= QT_TOKEN_STATUS_ACTIVE;
-		overlay_token |= QT_TOKEN_STATUS_ACTIVE;
-	} else {
-		td_token &= ~QT_TOKEN_STATUS_ACTIVE;
-		overlay_token &= ~QT_TOKEN_STATUS_ACTIVE;
-	}
-	td->qt_token = cpu_to_hc32(td_token);
-	qh->qh_overlay.qt_token = cpu_to_hc32(overlay_token);
-	flush_dcache_range((unsigned long)td,
-			   ALIGN_END_ADDR(struct qTD, td, 1));
-	flush_dcache_range((unsigned long)qh,
-			   ALIGN_END_ADDR(struct QH, qh, 1));
-}
-
-static int ehci_long_interval_completion_ready(
-	struct ehci_ctrl *ctrl, struct int_queue *queue,
-	struct qTD *td, uint32_t token)
-{
-	uint16_t frame;
-	int wrapped;
-
-	if (queue->gate_cycle_factor <= 1U)
-		return 1;
-	frame = (uint16_t)(
-		(ehci_readl(&ctrl->hcor->or_frindex) >> 3) & 0x3ffU);
-	wrapped = frame < queue->gate_last_frame;
-	queue->gate_last_frame = frame;
-
-	if (queue->gate_state != EHCI_LONG_GATE_WAIT) {
-		if (!(QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE))
-			return 1;
-		if (queue->gate_state == EHCI_LONG_GATE_ARMED && wrapped)
-			queue->gate_state = EHCI_LONG_GATE_AFTER_WRAP;
-		if (queue->gate_state == EHCI_LONG_GATE_AFTER_WRAP && frame != 0U) {
-			ehci_long_interval_set_active(queue, td, 0);
-			queue->gate_wait_cycles =
-				(uint8_t)(queue->gate_cycle_factor - 1U);
-			queue->gate_state = EHCI_LONG_GATE_WAIT;
-		}
-		return 0;
-	}
-
-	if (wrapped && queue->gate_wait_cycles)
-		queue->gate_wait_cycles--;
-	/*
-	 * Arm after frame zero of the final skipped list cycle. The QH is
-	 * reachable only in frame zero, so it cannot run until the next wrap.
-	 */
-	if (!queue->gate_wait_cycles && frame != 0U) {
-		ehci_long_interval_set_active(queue, td, 1);
-		queue->gate_state = EHCI_LONG_GATE_ARMED;
-	}
-	return 0;
-}
 
 static void *_ehci_poll_int_queue(struct usb_device *dev,
 				  struct int_queue *queue)
@@ -1870,9 +1793,6 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 	struct qTD *cur_td;
 	uint32_t token, toggle;
 	unsigned long pipe = queue->pipe;
-	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
-
-	(void)ctrl;
 
 	/* depleted queue */
 	if (cur == NULL) {
@@ -1883,8 +1803,6 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 	invalidate_dcache_range((unsigned long)cur_td,
 				ALIGN_END_ADDR(struct qTD, cur_td, 1));
 	token = hc32_to_cpu(cur_td->qt_token);
-	if (!ehci_long_interval_completion_ready(ctrl, queue, cur_td, token))
-		return NULL;
 	if (QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE) {
 		/*
 		 * Silent hot path: mouse/keyboard NAK every microframe
@@ -1983,11 +1901,6 @@ static int _ehci_rearm_int_queue(struct usb_device *dev,
 	queue->current = qh;
 	flush_dcache_range((unsigned long)qh,
 			   ALIGN_END_ADDR(struct QH, qh, 1));
-	queue->gate_wait_cycles = 0;
-	queue->gate_state = EHCI_LONG_GATE_ARMED;
-	queue->gate_last_frame = (uint16_t)(
-		(ehci_readl(&ehci_get_ctrl(dev)->hcor->or_frindex) >> 3) &
-		0x3ffU);
 	return 0;
 }
 
@@ -2126,6 +2039,62 @@ static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 
 	return result;
 }
+/*
+ * Execute one high-speed interrupt opportunity at microframe zero of the
+ * next frame. Unlike a persistent qTD, this retires the queue immediately
+ * after a NAK, so software can honor intervals longer than the 1024-frame
+ * EHCI list without leaving the endpoint reachable on every list rollover.
+ */
+static int _ehci_submit_int_msg_once(struct usb_device *dev,
+				     unsigned long pipe,
+				     void *buffer, int length)
+{
+	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
+	struct int_queue *queue;
+	void *backbuffer = NULL;
+	unsigned long timeout;
+	uint16_t start_frame;
+	int result = 0;
+	int ret;
+
+	if (!ctrl || dev->speed != USB_SPEED_HIGH)
+		return -EINVAL;
+	queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer, 4);
+	if (!queue)
+		return -1;
+	start_frame = (uint16_t)(
+		(ehci_readl(&ctrl->hcor->or_frindex) >> 3) & 0x3ffU);
+	timeout = get_timer(0);
+	for (;;) {
+		uint32_t frame_index;
+
+		backbuffer = _ehci_poll_int_queue(dev, queue);
+		if (backbuffer)
+			break;
+		frame_index = ehci_readl(&ctrl->hcor->or_frindex);
+		if (((frame_index >> 3) & 0x3ffU) != start_frame &&
+		    (frame_index & 7U) != 0U) {
+			dev->status = 0;
+			dev->act_len = 0;
+			break;
+		}
+		if (ehci_deadline_expired_u32((uint32_t)get_timer(0),
+					      (uint32_t)timeout, 3U)) {
+			dev->status = 0;
+			dev->act_len = 0;
+			break;
+		}
+	}
+	if (backbuffer && backbuffer != buffer) {
+		dev->status = USB_ST_BUF_ERR;
+		result = -EINVAL;
+	}
+	ret = _ehci_destroy_int_queue(dev, queue);
+	if (ret < 0 && result == 0)
+		result = ret;
+	return result;
+}
+
 
 int submit_bulk_msg(struct usb_device *dev, unsigned long pipe,
 			    void *buffer, int length)
@@ -2144,6 +2113,12 @@ int submit_int_msg(struct usb_device *dev, unsigned long pipe,
 {
 	return _ehci_submit_int_msg(dev, pipe, buffer, length, interval);
 }
+int submit_int_msg_once(struct usb_device *dev, unsigned long pipe,
+			void *buffer, int length)
+{
+	return _ehci_submit_int_msg_once(dev, pipe, buffer, length);
+}
+
 
 struct int_queue *create_int_queue(struct usb_device *dev,
 		unsigned long pipe, int queuesize, int elementsize,

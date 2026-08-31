@@ -113,6 +113,11 @@ int main(void)
     make_valid_control(&cmd, &ext);
     CHECK(zzusb_validate_command(&cmd, &ext, 1, 7) ==
           ZZUSB_STATUS_OK);
+    cmd.setup_bRequestType = 0;
+    CHECK(zzusb_validate_command(&cmd, &ext, 1, 7) ==
+          ZZUSB_STATUS_BADPARAM);
+
+    make_valid_control(&cmd, &ext);
 
     put_be32(&cmd.dev_addr, 128);
     CHECK(zzusb_validate_command(&cmd, &ext, 1, 7) ==
@@ -142,6 +147,14 @@ int main(void)
           ZZUSB_STATUS_OK);
     CHECK(zzusb_validate_command(&cmd, &ext, 0, 7) ==
           ZZUSB_STATUS_BADPARAM);
+    put_be16(&cmd.max_pkt_size, 0x1400);
+    CHECK(zzusb_validate_command(&cmd, &ext, 1, 7) ==
+          ZZUSB_STATUS_OK);
+    put_be16(&cmd.max_pkt_size, 0x1401);
+    CHECK(zzusb_validate_command(&cmd, &ext, 1, 7) ==
+          ZZUSB_STATUS_BADPARAM);
+    put_be16(&cmd.max_pkt_size, 1024);
+
 
     put_be32(&cmd.data_length, 31);
     CHECK(zzusb_validate_command(&cmd, &ext, 1, 7) ==

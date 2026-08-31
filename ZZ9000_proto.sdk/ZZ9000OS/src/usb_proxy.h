@@ -190,6 +190,14 @@ static inline int zzusb_command_is_transfer(uint16_t command) {
            command == ZZUSB_CMD_INT_XFER ||
            command == ZZUSB_CMD_ISO_XFER;
 }
+static inline int zzusb_valid_hs_iso_max_packet(uint16_t encoded) {
+    uint16_t base = encoded & 0x07ffU;
+    uint16_t multiplier = (encoded >> 11) & 3U;
+
+    return base != 0 && base <= 1024U && multiplier <= 2U &&
+           (encoded & 0xe000U) == 0;
+}
+
 
 static inline uint16_t zzusb_validate_command(
     const volatile struct ZZUSBCommand *cmd,
@@ -252,7 +260,8 @@ static inline uint16_t zzusb_validate_command(
     case ZZUSB_CMD_CONTROL_XFER:
         if ((is_v2 && xfer_type != ZZUSB_XFER_CONTROL) ||
             endpoint != 0 || max_packet == 0 || max_packet > 64 ||
-            le16(&cmd->setup_wLength) != data_length)
+            le16(&cmd->setup_wLength) != data_length ||
+            direction != ((cmd->setup_bRequestType & 0x80U) ? 0x80U : 0U))
             return ZZUSB_STATUS_BADPARAM;
         break;
     case ZZUSB_CMD_BULK_XFER:
@@ -268,8 +277,11 @@ static inline uint16_t zzusb_validate_command(
         break;
     case ZZUSB_CMD_ISO_XFER:
         if ((is_v2 && xfer_type != ZZUSB_XFER_ISO) ||
-            endpoint == 0 || max_packet == 0 || max_packet > 0x13ff ||
-            be16(&cmd->interval) == 0)
+            endpoint == 0 || be16(&cmd->interval) == 0 ||
+            speed == ZZUSB_SPEED_LOW ||
+            (speed == ZZUSB_SPEED_HIGH &&
+             !zzusb_valid_hs_iso_max_packet(max_packet)) ||
+            (speed == ZZUSB_SPEED_FULL && max_packet > 1023U))
             return ZZUSB_STATUS_BADPARAM;
         break;
     case ZZUSB_CMD_QUERY_CAPS:
@@ -310,7 +322,8 @@ static inline uint16_t zzusb_validate_command(
             be16(&cmd->interval) == 0 ||
             speed == ZZUSB_SPEED_LOW ||
             (speed == ZZUSB_SPEED_HIGH &&
-             (max_packet > 0x13ff || be16(&cmd->interval) > 16 ||
+             (!zzusb_valid_hs_iso_max_packet(max_packet) ||
+              be16(&cmd->interval) > 16 ||
               (flags & ZZUSB_FLAG_SPLIT))) ||
             (speed == ZZUSB_SPEED_FULL &&
              (max_packet > 1023 || be16(&cmd->interval) > 16 ||
