@@ -340,13 +340,23 @@ static void periodic_remove_ready(unsigned position)
                                &periodic_ready_count, position);
 }
 
-static void periodic_release_slot(unsigned index)
+static int periodic_release_slot(unsigned index)
 {
     struct periodic_endpoint *endpoint = &periodic_endpoints[index];
     unsigned position;
 
     if (!endpoint->used)
-        return;
+        return 0;
+    if (endpoint->queue &&
+        destroy_int_queue(&endpoint->dev, endpoint->queue) < 0) {
+        /* The queue is quarantined until controller reset. Preserve the
+         * endpoint-owned DMA buffer and suppress its pump in the meantime. */
+        endpoint->queue = NULL;
+        endpoint->failed = 1;
+        return -1;
+    }
+    if (!endpoint->queue)
+        return -1;
     for (position = 0; position < periodic_ready_count; position++) {
         if (periodic_ready[(periodic_ready_head + position) %
                            ZZUSB_PERIODIC_ENDPOINTS] == index) {
@@ -354,10 +364,9 @@ static void periodic_release_slot(unsigned index)
             break;
         }
     }
-    if (endpoint->queue)
-        destroy_int_queue(&endpoint->dev, endpoint->queue);
     save_toggle(endpoint->key.address, &endpoint->dev);
     memset(endpoint, 0, sizeof(*endpoint));
+    return 0;
 }
 
 static void periodic_stop_all(void)
@@ -368,6 +377,16 @@ static void periodic_stop_all(void)
         periodic_release_slot(index);
     periodic_ready_head = 0;
     periodic_ready_count = 0;
+    amiga_interrupt_clear(AMIGA_INTERRUPT_USB);
+}
+
+static void periodic_after_controller_reset(void)
+{
+    memset(periodic_endpoints, 0, sizeof(periodic_endpoints));
+    memset(periodic_ready, 0, sizeof(periodic_ready));
+    periodic_ready_head = 0;
+    periodic_ready_count = 0;
+    periodic_pump_cursor = 0;
     amiga_interrupt_clear(AMIGA_INTERRUPT_USB);
 }
 
@@ -409,6 +428,8 @@ void usb_proxy_periodic_pump(void)
             (uint8_t)((periodic_pump_cursor + 1U) %
                       ZZUSB_PERIODIC_ENDPOINTS);
         if (!endpoint->used || endpoint->completion_pending)
+            continue;
+        if (!endpoint->queue)
             continue;
         if (endpoint->needs_rearm) {
             if (now < endpoint->next_due)
@@ -534,7 +555,8 @@ static uint16_t handle_periodic_arm(volatile struct ZZUSBCommand *cmd,
             return ZZUSB_STATUS_OK;
         }
         if (periodic_identity_matches(&periodic_endpoints[index], cmd)) {
-            periodic_release_slot(index);
+            if (periodic_release_slot(index) < 0)
+                return ZZUSB_STATUS_HOSTERROR;
             if (free_index == ZZUSB_PERIODIC_ENDPOINTS)
                 free_index = index;
         }
@@ -615,7 +637,8 @@ static uint16_t handle_periodic_reap(volatile struct ZZUSBCommand *cmd,
         endpoint->completion_pending = 0;
         zzusb_diag_count(ZZUSB_DIAG_COUNT_PERIODIC_REAP);
         if (endpoint->failed || endpoint->key.direction == 0) {
-            periodic_release_slot(index);
+            if (periodic_release_slot(index) < 0)
+                status = ZZUSB_STATUS_HOSTERROR;
         } else {
             endpoint->needs_rearm = 1;
         }
@@ -636,7 +659,8 @@ static uint16_t handle_periodic_stop(volatile struct ZZUSBCommand *cmd)
 
     for (index = 0; index < ZZUSB_PERIODIC_ENDPOINTS; index++) {
         if (periodic_identity_matches(&periodic_endpoints[index], cmd)) {
-            periodic_release_slot(index);
+            if (periodic_release_slot(index) < 0)
+                return ZZUSB_STATUS_HOSTERROR;
             stopped = 1;
         }
     }
@@ -669,6 +693,7 @@ static uint16_t handle_reset_port(volatile struct ZZUSBCommand *cmd)
         if (ehci_controller_recover() < 0)
             return ZZUSB_STATUS_HOSTERROR;
         usb_proxy_iso_after_controller_reset();
+        periodic_after_controller_reset();
     }
     memset(toggle_bits, 0, sizeof(toggle_bits));
     root_port_connected = 0;
@@ -1380,6 +1405,7 @@ uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
             return diag_complete_command(cmd, ext, is_v2,
                                          ZZUSB_STATUS_HOSTERROR);
         usb_proxy_iso_after_controller_reset();
+        periodic_after_controller_reset();
         memset(toggle_bits, 0, sizeof(toggle_bits));
         usb_proxy_advance_controller_epoch();
         if (is_v2) {
@@ -1416,7 +1442,6 @@ uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
     }
 
     if (command != ZZUSB_CMD_RESET_PORT &&
-        command != ZZUSB_CMD_CHECK_PORT &&
         !is_port_connected()) {
         result = ZZUSB_STATUS_OFFLINE;
     } else {

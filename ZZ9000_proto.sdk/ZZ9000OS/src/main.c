@@ -167,11 +167,15 @@ static int usb_proxy_request_matches(
         be32(&shared_cmd->data_length) != be32(&snapshot->data_length))
         return 0;
 
-    if (is_v2 &&
-        (be32(&shared_ext->request_id) != be32(&ext_snapshot->request_id) ||
-         be32(&shared_ext->controller_epoch) !=
-             be32(&ext_snapshot->controller_epoch)))
-        return 0;
+    if (is_v2) {
+        if (be32(&shared_ext->request_id) !=
+            be32(&ext_snapshot->request_id))
+            return 0;
+        if (be16(&snapshot->cmd) != ZZUSB_CMD_QUERY_CAPS &&
+            be32(&shared_ext->controller_epoch) !=
+                be32(&ext_snapshot->controller_epoch))
+            return 0;
+    }
     return 1;
 }
 static uint32_t sd_storage_read_block = 0;
