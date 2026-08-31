@@ -264,12 +264,13 @@ static void save_toggle(int addr, struct usb_device *dev)
     }
 }
 
-static uint16_t usb_status_to_zz(unsigned long status)
+static uint16_t usb_status_to_zz(unsigned long status, int direction_in)
 {
     if (status & USB_ST_BABBLE_DET)
         return ZZUSB_STATUS_BABBLE;
     if (status & USB_ST_BUF_ERR)
-        return ZZUSB_STATUS_OVERRUN;
+        return direction_in ? ZZUSB_STATUS_OVERRUN :
+                              ZZUSB_STATUS_UNDERRUN;
     if (status & USB_ST_CRC_ERR)
         return ZZUSB_STATUS_CRC;
     if (status & USB_ST_STALLED)
@@ -455,7 +456,8 @@ static uint16_t periodic_poll_software(struct periodic_endpoint *endpoint,
         return ZZUSB_STATUS_OK;
     }
     *actual = 0;
-    return usb_status_to_zz(endpoint->dev.status);
+    return usb_status_to_zz(endpoint->dev.status,
+                            endpoint->key.direction & 0x80);
 }
 
 
@@ -515,7 +517,9 @@ void usb_proxy_periodic_pump(void)
         if (endpoint->dev.status != 0) {
             endpoint->failed = 1;
             periodic_queue_completion(
-                index, usb_status_to_zz(endpoint->dev.status), 0);
+                index, usb_status_to_zz(
+                    endpoint->dev.status,
+                    endpoint->key.direction & 0x80), 0);
         } else if (endpoint->dev.act_len > 0) {
             periodic_queue_completion(index, ZZUSB_STATUS_OK,
                                       endpoint->dev.act_len);
@@ -1120,7 +1124,7 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
     } else {
         diag_detail = (uint32_t)dev.status;
         put_be32(&cmd->actual_length, 0);
-        return usb_status_to_zz(dev.status);
+        return usb_status_to_zz(dev.status, is_in);
     }
 }
 
@@ -1195,7 +1199,7 @@ static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
     } else {
         diag_detail = (uint32_t)dev.status;
         put_be32(&cmd->actual_length, 0);
-        return usb_status_to_zz(dev.status);
+        return usb_status_to_zz(dev.status, is_in);
     }
 }
 
@@ -1266,7 +1270,7 @@ static uint16_t handle_int_xfer(volatile struct ZZUSBCommand *cmd,
     } else {
         put_be32(&cmd->actual_length, 0);
         diag_detail = (uint32_t)dev.status;
-        return usb_status_to_zz(dev.status);
+        return usb_status_to_zz(dev.status, is_in);
     }
 }
 

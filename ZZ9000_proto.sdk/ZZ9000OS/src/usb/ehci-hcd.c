@@ -720,6 +720,7 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	vtd = &qtd[qtd_counter - 1];
 	timeout = timeout_ms ? timeout_ms : USB_TIMEOUT_MS(pipe);
 	do {
+		usb_proxy_iso_pump();
 		usb_proxy_poll_maintenance();
 		/* Invalidate dcache */
 		invalidate_dcache_range((unsigned long)&ctrl->qh_list,
