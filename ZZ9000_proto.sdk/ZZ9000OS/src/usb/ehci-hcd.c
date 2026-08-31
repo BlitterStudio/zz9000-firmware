@@ -1433,6 +1433,7 @@ struct int_queue {
 	struct int_queue *next_quarantined;
 	struct int_queue *next_active;
 	int linked;
+	int one_shot;
 	struct ehci_periodic_plan plan;
 };
 
@@ -1596,12 +1597,16 @@ static int ehci_rebuild_interrupt_schedule(struct ehci_ctrl *ctrl)
 
 	for (queue = active_interrupt_queues; queue;
 	     queue = queue->next_active) {
-		uint32_t next = queue->next_active ?
-			(uint32_t)(unsigned long)queue->next_active->first :
-			(uint32_t)(unsigned long)&ctrl->periodic_queue;
+		struct int_queue *next = queue->next_active;
+		uint32_t target;
 
+		while (next && next->one_shot)
+			next = next->next_active;
+		target = (!queue->one_shot && next) ?
+			(uint32_t)(unsigned long)next->first :
+			(uint32_t)(unsigned long)&ctrl->periodic_queue;
 		queue->last->qh_link =
-			cpu_to_hc32(next | QH_LINK_TYPE_QH);
+			cpu_to_hc32(target | QH_LINK_TYPE_QH);
 		flush_dcache_range((unsigned long)queue->last,
 				   ALIGN_END_ADDR(struct QH, queue->last, 1));
 	}
@@ -1612,11 +1617,24 @@ static int ehci_rebuild_interrupt_schedule(struct ehci_ctrl *ctrl)
 
 		if (!link)
 			return -EINVAL;
-		for (queue = active_interrupt_queues; queue;
-		     queue = queue->next_active) {
-			if (ehci_periodic_frame_due(&queue->plan,
-						    (uint16_t)frame))
+		queue = NULL;
+		for (struct int_queue *candidate = active_interrupt_queues;
+		     candidate; candidate = candidate->next_active) {
+			if (candidate->one_shot &&
+			    ehci_periodic_frame_due(
+				    &candidate->plan, (uint16_t)frame)) {
+				queue = candidate;
 				break;
+			}
+		}
+		if (!queue) {
+			for (queue = active_interrupt_queues; queue;
+			     queue = queue->next_active) {
+				if (!queue->one_shot &&
+				    ehci_periodic_frame_due(
+					    &queue->plan, (uint16_t)frame))
+					break;
+			}
 		}
 		target = queue ?
 			(uint32_t)(unsigned long)queue->first :
@@ -1691,6 +1709,7 @@ static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 	if (!result->first) {
 		goto fail2;
 	}
+	result->one_shot = one_shot;
 	result->current = result->first;
 	result->last = result->first + queuesize - 1;
 	result->tds = memalign(USB_DMA_MINALIGN,
