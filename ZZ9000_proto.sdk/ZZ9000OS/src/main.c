@@ -157,8 +157,7 @@ static int usb_proxy_request_matches(
     volatile struct ZZUSBCommand *shared_cmd,
     volatile struct ZZUSBProtocolExtension *shared_ext,
     const struct ZZUSBCommand *snapshot,
-    const struct ZZUSBProtocolExtension *ext_snapshot,
-    int is_v2)
+    uint32_t request_id, uint32_t request_epoch, int is_v2)
 {
     if (be16(&shared_cmd->cmd) != be16(&snapshot->cmd) ||
         be32(&shared_cmd->dev_addr) != be32(&snapshot->dev_addr) ||
@@ -167,15 +166,10 @@ static int usb_proxy_request_matches(
         be32(&shared_cmd->data_length) != be32(&snapshot->data_length))
         return 0;
 
-    if (is_v2) {
-        if (be32(&shared_ext->request_id) !=
-            be32(&ext_snapshot->request_id))
-            return 0;
-        if (be16(&snapshot->cmd) != ZZUSB_CMD_QUERY_CAPS &&
-            be32(&shared_ext->controller_epoch) !=
-                be32(&ext_snapshot->controller_epoch))
-            return 0;
-    }
+    if (is_v2 &&
+        (be32(&shared_ext->request_id) != request_id ||
+         be32(&shared_ext->controller_epoch) != request_epoch))
+        return 0;
     return 1;
 }
 static uint32_t sd_storage_read_block = 0;
@@ -1817,6 +1811,8 @@ int main() {
 				u32 proxy_buf_size = ZZUSB_APERTURE_SIZE;
 				uint32_t data_length;
 				uint32_t actual_length;
+				uint32_t request_id;
+				uint32_t request_epoch;
 				uint16_t command;
 				uint16_t direction;
 				uint16_t result;
@@ -1833,9 +1829,15 @@ int main() {
 				if (is_v2) {
 					memcpy(&usb_proxy_ext_snapshot, (const void *)proxy_ext,
 					       sizeof(usb_proxy_ext_snapshot));
+					request_id =
+						be32(&usb_proxy_ext_snapshot.request_id);
+					request_epoch =
+						be32(&usb_proxy_ext_snapshot.controller_epoch);
 				} else {
 					memset(&usb_proxy_ext_snapshot, 0,
 					       sizeof(usb_proxy_ext_snapshot));
+					request_id = 0;
+					request_epoch = 0;
 				}
 
 				result = zzusb_validate_command(
@@ -1868,7 +1870,7 @@ int main() {
 				__asm__ __volatile__("dsb" ::: "memory");
 				request_matches = usb_proxy_request_matches(
 					proxy_cmd, proxy_ext, &usb_proxy_cmd_snapshot,
-					&usb_proxy_ext_snapshot, is_v2);
+					request_id, request_epoch, is_v2);
 
 				if (request_matches) {
 					if (result == ZZUSB_STATUS_OK && actual_length != 0 &&

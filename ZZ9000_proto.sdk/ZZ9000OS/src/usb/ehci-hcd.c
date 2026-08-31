@@ -1834,6 +1834,7 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 		dev->status = USB_ST_STALLED;
 		break;
 	case QT_TOKEN_STATUS_ACTIVE | QT_TOKEN_STATUS_DATBUFERR:
+	case QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_DATBUFERR:
 	case QT_TOKEN_STATUS_DATBUFERR:
 		dev->status = USB_ST_BUF_ERR;
 		break;
