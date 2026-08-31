@@ -23,6 +23,13 @@ static inline uint16_t ehci_periodic_hardware_frame_interval(
     return plan->frame_interval > 1024U ? 1024U :
                                              plan->frame_interval;
 }
+static inline uint8_t ehci_periodic_frame_list_cycles(
+    const struct ehci_periodic_plan *plan)
+{
+    if (!plan || plan->frame_interval <= 1024U)
+        return 1U;
+    return (uint8_t)(plan->frame_interval / 1024U);
+}
 
 static inline int ehci_periodic_frame_due(
     const struct ehci_periodic_plan *plan, uint16_t frame)

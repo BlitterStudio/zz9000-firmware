@@ -1873,6 +1873,10 @@ int main() {
 					request_id, request_epoch, is_v2);
 
 				if (request_matches) {
+					if (command == ZZUSB_CMD_DIAG_SNAPSHOT &&
+					    result == ZZUSB_STATUS_OK)
+						usb_proxy_publish_diagnostics(
+							(volatile void *)USB_BLOCK_STORAGE_ADDRESS, 0U);
 					if (result == ZZUSB_STATUS_OK && actual_length != 0 &&
 					    (direction == 0x80 ||
 					     command == ZZUSB_CMD_ENUMERATE ||
@@ -1900,7 +1904,7 @@ int main() {
 				}
 
 				usb_proxy_status = 0;
-				if (is_v2)
+				if (is_v2 && command != ZZUSB_CMD_DIAG_SNAPSHOT)
 					usb_proxy_publish_diagnostics(
 						(volatile void *)USB_BLOCK_STORAGE_ADDRESS, 0U);
 			}

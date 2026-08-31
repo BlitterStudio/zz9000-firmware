@@ -69,7 +69,7 @@ int main(void)
     CHECK(read_be32(page + ZZUSB_DIAG_OFF_MAGIC) == ZZUSB_DIAG_MAGIC);
     CHECK((read_be32(page + ZZUSB_DIAG_OFF_GENERATION) & 1u) == 0u);
     CHECK(read_be16(page + ZZUSB_DIAG_OFF_VERSION) == ZZUSB_DIAG_VERSION);
-    CHECK(read_be32(page + ZZUSB_DIAG_OFF_EVENT_NEXT) == 201u);
+    CHECK(read_be32(page + ZZUSB_DIAG_OFF_EVENT_NEXT) == 9u);
     CHECK(read_be32(page + ZZUSB_DIAG_OFF_EVENT_COUNT) == 64u);
     CHECK(read_be32(page + ZZUSB_DIAG_OFF_LOST_EVENTS) == 137u);
     CHECK(read_be32(page + ZZUSB_DIAG_OFF_COUNTERS +
@@ -77,9 +77,10 @@ int main(void)
     CHECK(read_be32(page + ZZUSB_DIAG_OFF_COUNTERS +
                     ZZUSB_DIAG_COUNT_QUEUE_HIGH_WATER * 4u) == 9u);
     CHECK(read_be32(page + ZZUSB_DIAG_OFF_EVENTS +
+                    9u * ZZUSB_DIAG_EVENT_SIZE +
                     ZZUSB_DIAG_EVT_OFF_SEQUENCE) == 138u);
     CHECK(read_be32(page + ZZUSB_DIAG_OFF_EVENTS +
-                    63u * ZZUSB_DIAG_EVENT_SIZE +
+                    8u * ZZUSB_DIAG_EVENT_SIZE +
                     ZZUSB_DIAG_EVT_OFF_SEQUENCE) == 201u);
 
     CHECK(zzusb_diag_read_coherent(page, snapshot,
@@ -93,9 +94,9 @@ int main(void)
 
     zzusb_diag_publish(page, sizeof(page), 0x1fu, 7u, 201u,
                        0u, 0u, NULL);
-    CHECK(read_be32(page + ZZUSB_DIAG_OFF_EVENT_NEXT) == 201u);
+    CHECK(read_be32(page + ZZUSB_DIAG_OFF_EVENT_NEXT) == 9u);
     CHECK(read_be32(page + ZZUSB_DIAG_OFF_EVENTS +
-                    63u * ZZUSB_DIAG_EVENT_SIZE +
+                    8u * ZZUSB_DIAG_EVENT_SIZE +
                     ZZUSB_DIAG_EVT_OFF_SEQUENCE) == 201u);
 
     puts("USB diagnostic ring and seqlock snapshot contract satisfied");

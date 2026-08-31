@@ -98,11 +98,11 @@ void zzusb_diag_publish(volatile void *page, size_t page_size,
                         uint32_t schedule_bits, zzusb_diag_flush_fn flush)
 {
     volatile uint8_t *wire = (volatile uint8_t *)page;
-    uint32_t next;
+    uint32_t next_sequence;
+    uint32_t next_index;
     uint32_t count;
     uint32_t first;
     uint32_t generation;
-    uint32_t encoded = 0;
 
     if (!page || page_size < ZZUSB_DIAG_PAGE_SIZE)
         return;
@@ -117,9 +117,12 @@ void zzusb_diag_publish(volatile void *page, size_t page_size,
     if (flush)
         flush(wire, 64U);
 
-    next = __atomic_load_n(&diag.next_sequence, __ATOMIC_ACQUIRE);
-    count = next < ZZUSB_DIAG_EVENT_COUNT ? next : ZZUSB_DIAG_EVENT_COUNT;
-    first = count ? next - count + 1U : 0U;
+    next_sequence =
+        __atomic_load_n(&diag.next_sequence, __ATOMIC_ACQUIRE);
+    count = next_sequence < ZZUSB_DIAG_EVENT_COUNT ?
+            next_sequence : ZZUSB_DIAG_EVENT_COUNT;
+    first = count ? next_sequence - count + 1U : 0U;
+    next_index = next_sequence % ZZUSB_DIAG_EVENT_COUNT;
 
     put_be32(wire + ZZUSB_DIAG_OFF_MAGIC, ZZUSB_DIAG_MAGIC);
     put_be16(wire + ZZUSB_DIAG_OFF_VERSION, ZZUSB_DIAG_VERSION);
@@ -128,7 +131,7 @@ void zzusb_diag_publish(volatile void *page, size_t page_size,
     put_be32(wire + ZZUSB_DIAG_OFF_CAPABILITIES, capabilities);
     put_be32(wire + ZZUSB_DIAG_OFF_EPOCH, epoch);
     put_be32(wire + ZZUSB_DIAG_OFF_LAST_ID, last_request_id);
-    put_be32(wire + ZZUSB_DIAG_OFF_EVENT_NEXT, next);
+    put_be32(wire + ZZUSB_DIAG_OFF_EVENT_NEXT, next_index);
     put_be32(wire + ZZUSB_DIAG_OFF_LOST_EVENTS,
              __atomic_load_n(&diag.lost_events, __ATOMIC_RELAXED));
     put_be32(wire + ZZUSB_DIAG_OFF_QUEUE_STATE, queue_state);
@@ -139,22 +142,22 @@ void zzusb_diag_publish(volatile void *page, size_t page_size,
                  __atomic_load_n(&diag.counters[i], __ATOMIC_RELAXED));
     }
 
+    for (uint32_t i = 0; i < ZZUSB_DIAG_EVENT_COUNT; i++)
+        put_be32(wire + ZZUSB_DIAG_OFF_EVENTS +
+                 i * ZZUSB_DIAG_EVENT_SIZE, 0U);
     for (uint32_t i = 0; i < count; i++) {
         uint32_t sequence = first + i;
-        const struct zzusb_diag_event *event =
-            &diag.events[(sequence - 1U) % ZZUSB_DIAG_EVENT_COUNT];
-        uint32_t committed = __atomic_load_n(&event->sequence, __ATOMIC_ACQUIRE);
+        uint32_t physical = (sequence - 1U) % ZZUSB_DIAG_EVENT_COUNT;
+        const struct zzusb_diag_event *event = &diag.events[physical];
+        uint32_t committed = __atomic_load_n(&event->sequence,
+                                              __ATOMIC_ACQUIRE);
 
         if (committed != sequence)
             continue;
         encode_event(wire + ZZUSB_DIAG_OFF_EVENTS +
-                     encoded * ZZUSB_DIAG_EVENT_SIZE, event, sequence);
-        encoded++;
+                     physical * ZZUSB_DIAG_EVENT_SIZE, event, sequence);
     }
-    put_be32(wire + ZZUSB_DIAG_OFF_EVENT_COUNT, encoded);
-    for (uint32_t i = encoded; i < ZZUSB_DIAG_EVENT_COUNT; i++)
-        put_be32(wire + ZZUSB_DIAG_OFF_EVENTS +
-                   i * ZZUSB_DIAG_EVENT_SIZE, 0U);
+    put_be32(wire + ZZUSB_DIAG_OFF_EVENT_COUNT, count);
 
     __atomic_thread_fence(__ATOMIC_RELEASE);
     if (flush)

@@ -1442,6 +1442,7 @@ uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
     }
 
     if (command != ZZUSB_CMD_RESET_PORT &&
+        command != ZZUSB_CMD_DIAG_SNAPSHOT &&
         !is_port_connected()) {
         result = ZZUSB_STATUS_OFFLINE;
     } else {
@@ -1494,11 +1495,13 @@ uint16_t usb_proxy_handle_command(volatile struct ZZUSBCommand *cmd,
         case ZZUSB_CMD_ISO_STOP:
             result = usb_proxy_iso_handle_stop(cmd);
             break;
+        case ZZUSB_CMD_DIAG_SNAPSHOT:
+            result = ZZUSB_STATUS_OK;
+            break;
         case ZZUSB_CMD_RESUME_PORT:
         case ZZUSB_CMD_SUSPEND_PORT:
         case ZZUSB_CMD_QUERY_DEVICE:
         case ZZUSB_CMD_SET_ADDRESS:
-        case ZZUSB_CMD_DIAG_SNAPSHOT:
         case ZZUSB_CMD_ISO_XFER:
             result = ZZUSB_STATUS_UNSUPPORTED;
             break;
