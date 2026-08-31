@@ -332,6 +332,12 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	audio_set_rx_buffer((uint8_t*)AUDIO_RX_BUFFER_ADDRESS);
 
 	reset_storage_request_state();
+	/*
+	 * A warm Amiga reset abandons every host-owned USB request. Retire
+	 * persistent EHCI work before a rebooted driver can negotiate, and
+	 * move the epoch fence so no pre-reset completion can match it.
+	 */
+	usb_proxy_advance_controller_epoch();
 	if (mode == AMIGA_RESET_INIT_MEDIA) {
 		init_storage_services();
 	}
