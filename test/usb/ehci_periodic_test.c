@@ -27,11 +27,17 @@ static void test_high_speed_cadence(void)
     assert(plan.interval_microframes == 32768);
     assert(plan.frame_interval == 4096);
     assert(ehci_periodic_hardware_frame_interval(&plan) == 1024);
+    assert(plan.frame_phase == 0);
     assert(ehci_periodic_frame_due(&plan, 0));
     assert(!ehci_periodic_frame_due(&plan, 1));
     assert(plan.start_mask == 0x01);
     assert(!ehci_periodic_build_plan(EHCI_PERIODIC_SPEED_HIGH, 17, 0,
                                      0, 0, 0, &plan));
+
+    plan.frame_interval = 1024;
+    plan.frame_phase = 1023;
+    assert(ehci_periodic_frame_due(&plan, 1023));
+    assert(!ehci_periodic_frame_due(&plan, 0));
 }
 
 static void test_split_masks(void)

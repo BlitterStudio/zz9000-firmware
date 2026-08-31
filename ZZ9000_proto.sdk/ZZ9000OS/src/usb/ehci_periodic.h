@@ -11,6 +11,7 @@
 struct ehci_periodic_plan {
     uint32_t interval_microframes;
     uint16_t frame_interval;
+    uint16_t frame_phase;
     uint8_t start_mask;
     uint8_t complete_mask;
 };
@@ -27,7 +28,10 @@ static inline uint16_t ehci_periodic_hardware_frame_interval(
 static inline int ehci_periodic_frame_due(
     const struct ehci_periodic_plan *plan, uint16_t frame)
 {
-    return frame % ehci_periodic_hardware_frame_interval(plan) == 0;
+    uint16_t interval = ehci_periodic_hardware_frame_interval(plan);
+    uint16_t phase = plan ? (uint16_t)(plan->frame_phase % interval) : 0;
+
+    return (uint16_t)((frame + interval - phase) % interval) == 0;
 }
 
 static inline int ehci_periodic_build_plan(
@@ -40,6 +44,7 @@ static inline int ehci_periodic_build_plan(
 
     if (!plan || interval == 0)
         return 0;
+    plan->frame_phase = 0;
 
     if (speed == EHCI_PERIODIC_SPEED_HIGH) {
         if (interval > 16U || split)

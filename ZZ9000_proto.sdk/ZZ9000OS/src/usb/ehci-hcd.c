@@ -1630,7 +1630,7 @@ static int ehci_rebuild_interrupt_schedule(struct ehci_ctrl *ctrl)
 
 static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 			unsigned long pipe, int queuesize, int elementsize,
-			void *buffer, int interval)
+			void *buffer, int interval, int one_shot)
 {
 	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
 	struct int_queue *result = NULL;
@@ -1646,6 +1646,16 @@ static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 		return NULL;
 	if (ehci_recovery_required)
 		return NULL;
+	if (one_shot) {
+		uint32_t frame_index = ehci_readl(&ctrl->hcor->or_frindex);
+
+		plan.interval_microframes = 8192U;
+		plan.frame_interval = 1024U;
+		plan.frame_phase = (uint16_t)(
+			((frame_index >> 3) + 2U) & 0x3ffU);
+		plan.start_mask = 0x01U;
+		plan.complete_mask = 0;
+	}
 
 	/*
 	 * Each queue element must fit in one transaction and one qTD. Persistent
@@ -1994,7 +2004,8 @@ static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 	unsigned long timeout;
 	int result = 0, ret;
 
-	queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer, interval);
+	queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer, interval,
+				       0);
 	if (!queue)
 		return -1;
 
@@ -2040,10 +2051,11 @@ static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 	return result;
 }
 /*
- * Execute one high-speed interrupt opportunity at microframe zero of the
- * next frame. Unlike a persistent qTD, this retires the queue immediately
- * after a NAK, so software can honor intervals longer than the 1024-frame
- * EHCI list without leaving the endpoint reachable on every list rollover.
+ * Execute one high-speed interrupt opportunity at microframe zero of a
+ * selected near-future frame. Unlike a persistent qTD, this queue is linked
+ * into only that frame-list slot and retires immediately after a NAK, so
+ * software can honor intervals longer than the 1024-frame EHCI list without
+ * exposing the endpoint on adjacent frames or list rollovers.
  */
 static int _ehci_submit_int_msg_once(struct usb_device *dev,
 				     unsigned long pipe,
@@ -2053,17 +2065,16 @@ static int _ehci_submit_int_msg_once(struct usb_device *dev,
 	struct int_queue *queue;
 	void *backbuffer = NULL;
 	unsigned long timeout;
-	uint16_t start_frame;
+	uint16_t target_frame;
 	int result = 0;
 	int ret;
 
 	if (!ctrl || dev->speed != USB_SPEED_HIGH)
 		return -EINVAL;
-	queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer, 4);
+	queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer, 4, 1);
 	if (!queue)
 		return -1;
-	start_frame = (uint16_t)(
-		(ehci_readl(&ctrl->hcor->or_frindex) >> 3) & 0x3ffU);
+	target_frame = queue->plan.frame_phase;
 	timeout = get_timer(0);
 	for (;;) {
 		uint32_t frame_index;
@@ -2072,14 +2083,24 @@ static int _ehci_submit_int_msg_once(struct usb_device *dev,
 		if (backbuffer)
 			break;
 		frame_index = ehci_readl(&ctrl->hcor->or_frindex);
-		if (((frame_index >> 3) & 0x3ffU) != start_frame &&
-		    (frame_index & 7U) != 0U) {
-			dev->status = 0;
-			dev->act_len = 0;
-			break;
+		{
+			uint16_t frame = (uint16_t)(
+				(frame_index >> 3) & 0x3ffU);
+			uint16_t distance = (uint16_t)(
+				(frame - target_frame) & 0x3ffU);
+
+			if ((distance == 0U && (frame_index & 7U) != 0U) ||
+			    (distance > 0U && distance < 512U)) {
+				backbuffer = _ehci_poll_int_queue(dev, queue);
+				if (!backbuffer) {
+					dev->status = 0;
+					dev->act_len = 0;
+				}
+				break;
+			}
 		}
 		if (ehci_deadline_expired_u32((uint32_t)get_timer(0),
-					      (uint32_t)timeout, 3U)) {
+					      (uint32_t)timeout, 5U)) {
 			dev->status = 0;
 			dev->act_len = 0;
 			break;
@@ -2125,7 +2146,7 @@ struct int_queue *create_int_queue(struct usb_device *dev,
 		void *buffer, int interval)
 {
 	return _ehci_create_int_queue(dev, pipe, queuesize, elementsize,
-				      buffer, interval);
+				      buffer, interval, 0);
 }
 
 void *poll_int_queue(struct usb_device *dev, struct int_queue *queue)
