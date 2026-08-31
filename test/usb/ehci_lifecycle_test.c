@@ -28,6 +28,11 @@ int main(void)
     CHECK(ehci_deadline_expired_u32(12u, start, 20u));
     CHECK(ehci_deadline_expired_u32(200u, start, 20u));
 
+    CHECK(!ehci_deadline_reached_u32(UINT32_MAX - 4u, 20u));
+    CHECK(!ehci_deadline_reached_u32(19u, 20u));
+    CHECK(ehci_deadline_reached_u32(20u, 20u));
+    CHECK(ehci_deadline_reached_u32(21u, 20u));
+
     puts("EHCI lifetime and wrap-safe deadline contract satisfied");
     return EXIT_SUCCESS;
 }
