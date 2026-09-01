@@ -2078,9 +2078,9 @@ static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 /*
  * Execute one high-speed interrupt opportunity at microframe zero of a
  * selected near-future frame. Unlike a persistent qTD, this queue is linked
- * into only that frame-list slot and retires immediately after a NAK, so
- * software can honor intervals longer than the 1024-frame EHCI list without
- * exposing the endpoint on adjacent frames or list rollovers.
+ * into only that frame-list slot and then unlinked, so software can honor
+ * intervals longer than the 1024-frame EHCI list without exposing the
+ * endpoint on adjacent frames or list rollovers.
  */
 static int _ehci_submit_int_msg_once(struct usb_device *dev,
 				     unsigned long pipe,
@@ -2118,7 +2118,8 @@ static int _ehci_submit_int_msg_once(struct usb_device *dev,
 			    (distance > 0U && distance < 512U)) {
 				backbuffer = _ehci_poll_int_queue(dev, queue);
 				if (!backbuffer) {
-					dev->status = 0;
+					dev->status = usb_pipein(pipe) ?
+						0 : USB_ST_NAK_REC;
 					dev->act_len = 0;
 				}
 				break;
@@ -2126,7 +2127,8 @@ static int _ehci_submit_int_msg_once(struct usb_device *dev,
 		}
 		if (ehci_deadline_expired_u32((uint32_t)get_timer(0),
 					      (uint32_t)timeout, 5U)) {
-			dev->status = 0;
+			dev->status = usb_pipein(pipe) ?
+				0 : USB_ST_NAK_REC;
 			dev->act_len = 0;
 			break;
 		}

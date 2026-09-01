@@ -496,7 +496,8 @@ void usb_proxy_periodic_pump(void)
             if (status == ZZUSB_STATUS_OK &&
                 (endpoint->key.direction == 0 || actual != 0))
                 periodic_queue_completion(index, status, actual);
-            else if (status != ZZUSB_STATUS_OK) {
+            else if (status != ZZUSB_STATUS_OK &&
+                     status != ZZUSB_STATUS_NAK) {
                 endpoint->failed = 1;
                 periodic_queue_completion(index, status, 0);
             }
