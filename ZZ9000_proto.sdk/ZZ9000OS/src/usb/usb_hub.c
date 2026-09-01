@@ -36,9 +36,11 @@
 #include <asm/byteorder.h>
 //#include <asm/unaligned.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "usb.h"
+#include "ehci_lifecycle.h"
 
 unsigned long get_timer(unsigned long i);
 void mdelay(int ms);
@@ -55,6 +57,7 @@ void mdelay(int ms);
 #define HUB_LONG_RESET_TIME	200
 
 #define PORT_OVERCURRENT_MAX_SCAN_COUNT		3
+
 
 struct usb_device_scan {
 	struct usb_device *dev;		/* USB hub device to scan */
@@ -387,13 +390,16 @@ static int usb_scan_port(struct usb_device_scan *usb_scan)
 	 * Don't talk to the device before the query delay is expired.
 	 * This is needed for voltages to stabalize.
 	 */
-	if (get_timer(0) < hub->query_delay)
+	if (!ehci_deadline_reached_u32((uint32_t)get_timer(0),
+					 (uint32_t)hub->query_delay))
 		return 0;
 
 	ret = usb_get_port_status(dev, i + 1, portsts);
 	if (ret < 0) {
 		printf("get_port_status failed\n");
-		if (get_timer(0) >= hub->connect_timeout) {
+		if (ehci_deadline_reached_u32(
+				(uint32_t)get_timer(0),
+				(uint32_t)hub->connect_timeout)) {
 			printf("[usb-hub] devnum=%d port=%d: timeout\n",
 			      dev->devnum, i + 1);
 			/* Remove this device from scanning list */
@@ -417,7 +423,9 @@ static int usb_scan_port(struct usb_device_scan *usb_scan)
 	 */
 	if (!(portchange & USB_PORT_STAT_C_CONNECTION) &&
 	    !(portstatus & USB_PORT_STAT_CONNECTION)) {
-		if (get_timer(0) >= hub->connect_timeout) {
+		if (ehci_deadline_reached_u32(
+				(uint32_t)get_timer(0),
+				(uint32_t)hub->connect_timeout)) {
 			printf("[usb-hub] devnum=%d port=%d: timeout\n",
 			      dev->devnum, i + 1);
 			/* Remove this device from scanning list */

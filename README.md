@@ -312,6 +312,28 @@ Keep these rules in mind:
 See the commented [ZZ9000.CFG sample](ZZ9000.CFG) for every accepted value and
 additional notes.
 
+## USB host stack
+
+Firmware 2.9 and `zzusbhw.device` 2.2 form one USB proxy release. The
+matched pair negotiates protocol v2 before advertising persistent interrupt,
+simple ISO, or realtime ISO support. A driver that does not receive the
+required capability set leaves those public capabilities disabled rather than
+using an incompatible mailbox path.
+
+Implemented transport paths are control, bulk, persistent interrupt, and
+high-speed or split full-speed ISO IN/OUT. Full-speed ISO requires a
+high-speed hub transaction translator. Direct low-speed devices remain
+unadvertised. MIDIStreaming stays on its descriptor-defined bulk endpoints;
+enabling USB audio ISO does not reroute MIDI through ISO.
+
+Host-side models cover mailbox ownership, EHCI retirement, error mapping,
+periodic cadence, ISO descriptors/batches, and stop/reset races. These are not
+physical-device qualification. The current hardware evidence and every
+unavailable topology are listed in the drivers repository's
+[`docs/usb-qualification-matrix.md`](https://github.com/BlitterStudio/zz9000-drivers/blob/master/docs/usb-qualification-matrix.md).
+Run the matched `ZZDiag` binary on AmigaOS to capture driver/firmware
+capabilities, epochs, counters, queue state, schedule bits, and recent events.
+
 ## Amiga MMU and Cache Notes
 
 On 68040/68060 systems, configure any pure ZZ9000 RAM window in the

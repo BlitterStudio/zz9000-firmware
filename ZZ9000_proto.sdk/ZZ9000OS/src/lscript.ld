@@ -44,8 +44,8 @@ SECTIONS
 .text : {
    KEEP (*(.vectors))
    KEEP (*(.boot))
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o) .text)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o) .text.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o) .text)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o) .text.*)
    *(.gnu.linkonce.t.*)
    *(.plt)
    *(.gnu_warning)
@@ -67,8 +67,8 @@ SECTIONS
 
 .rodata : {
    __rodata_start = .;
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_scene.o) .rodata)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_scene.o) .rodata.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_scene.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o) .rodata)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_scene.o *usb_proxy.o *ehci-iso.o *usb_proxy_iso.o) .rodata.*)
    *(.gnu.linkonce.r.*)
    __rodata_end = .;
 } > ps7_ddr_0
@@ -319,6 +319,28 @@ ASSERT(__z2_direct_ring_end <= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
    *audio_scene.o(.rodata.*)
    . = ALIGN(16);
    __audio_tables_end = .;
+} > ps7_ddr_hi
+
+/* USB proxy dispatch and the isochronous scheduler are not boot-path code.
+ * Keep them in high DDR so feature growth cannot consume the fixed low-DDR
+ * framebuffer boundary. */
+.usb_iso_text : {
+   . = ALIGN(16);
+   __usb_iso_text_start = .;
+   *ehci-iso.o(.text)
+   *ehci-iso.o(.text.*)
+   *ehci-iso.o(.rodata)
+   *ehci-iso.o(.rodata.*)
+   *usb_proxy_iso.o(.text)
+   *usb_proxy_iso.o(.text.*)
+   *usb_proxy_iso.o(.rodata)
+   *usb_proxy.o(.text)
+   *usb_proxy.o(.text.*)
+   *usb_proxy.o(.rodata)
+   *usb_proxy.o(.rodata.*)
+   *usb_proxy_iso.o(.rodata.*)
+   . = ALIGN(16);
+   __usb_iso_text_end = .;
 } > ps7_ddr_hi
 
 .bss (NOLOAD) : {

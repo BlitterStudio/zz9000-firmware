@@ -19,9 +19,13 @@
 #include <xil_cache.h>
 #include <string.h>
 #include <sleep.h>
+#include <xtime_l.h>
 
 #include "ehci.h"
 #include "memalign.h"
+#include "ehci_lifecycle.h"
+#include "ehci_periodic.h"
+#include "usb_proxy.h"
 
 
 void flush_dcache_range(unsigned long start, unsigned long stop) {
@@ -36,18 +40,39 @@ uint32_t virt_to_phys(void* addr) {
 	return (uint32_t)addr;
 }
 
-// FIXME
-unsigned long tmr=0;
-void udelay(int us) {
+static uint64_t ehci_now_ticks(void)
+{
+	XTime now;
+
+	XTime_GetTime(&now);
+	return (uint64_t)now;
+}
+
+static uint64_t ehci_ticks_for_us(uint32_t usec)
+{
+	return ((uint64_t)usec * (uint64_t)COUNTS_PER_SECOND + 999999ULL) /
+	       1000000ULL;
+}
+
+void udelay(int us)
+{
 	usleep(us);
 }
-void mdelay(int ms) {
-	usleep(1000*ms);
+
+void mdelay(int ms)
+{
+	usleep(1000 * ms);
 }
-unsigned long get_timer(unsigned long i) {
-	mdelay(1);
-	tmr++;
-	return (tmr-i);
+
+unsigned long get_timer(unsigned long base)
+{
+	uint64_t ticks = ehci_now_ticks();
+	uint64_t seconds = ticks / (uint64_t)COUNTS_PER_SECOND;
+	uint64_t remainder = ticks % (uint64_t)COUNTS_PER_SECOND;
+	uint32_t now_ms = (uint32_t)(seconds * 1000ULL +
+		(remainder * 1000ULL) / (uint64_t)COUNTS_PER_SECOND);
+
+	return (uint32_t)(now_ms - (uint32_t)base);
 }
 
 #ifndef CONFIG_USB_MAX_CONTROLLER_COUNT
@@ -61,6 +86,43 @@ unsigned long get_timer(unsigned long i) {
 #define HCHALT_TIMEOUT (8 * 1000)
 
 static struct ehci_ctrl ehcic[CONFIG_USB_MAX_CONTROLLER_COUNT];
+
+struct ehci_async_allocation {
+	struct QH *qh;
+	struct qTD *qtd;
+	struct ehci_async_allocation *next;
+};
+
+static struct ehci_async_allocation *quarantined_async;
+static int ehci_recovery_required;
+struct int_queue;
+static struct int_queue *active_interrupt_queues;
+
+static void ehci_release_async(struct ehci_async_allocation *allocation)
+{
+	if (!allocation)
+		return;
+	free(allocation->qtd);
+	free(allocation->qh);
+	free(allocation);
+}
+
+static void ehci_quarantine_async(struct ehci_async_allocation *allocation)
+{
+	allocation->next = quarantined_async;
+	quarantined_async = allocation;
+	ehci_recovery_required = 1;
+}
+
+static void ehci_reclaim_async_after_reset(void)
+{
+	while (quarantined_async) {
+		struct ehci_async_allocation *allocation = quarantined_async;
+
+		quarantined_async = allocation->next;
+		ehci_release_async(allocation);
+	}
+}
 
 static struct descriptor {
 	struct usb_hub_descriptor hub;
@@ -151,7 +213,6 @@ static void ehci_set_usbmode(struct ehci_ctrl *ctrl)
 
 	reg_ptr = (uint32_t *)((u8 *)&ctrl->hcor->or_usbcmd + USBMODE);
 	tmp = ehci_readl(reg_ptr);
-	printf("[usbmode] before: %08lx\n", (unsigned long)tmp);
 	tmp |= USBMODE_CM_HC;
 #if defined(CONFIG_EHCI_MMIO_BIG_ENDIAN)
 	tmp |= USBMODE_BE;
@@ -159,8 +220,6 @@ static void ehci_set_usbmode(struct ehci_ctrl *ctrl)
 	tmp &= ~USBMODE_BE;
 #endif
 	ehci_writel(reg_ptr, tmp);
-	tmp = ehci_readl(reg_ptr);
-	printf("[usbmode] after: %08lx\n", (unsigned long)tmp);
 }
 
 static void ehci_powerup_fixup(struct ehci_ctrl *ctrl, uint32_t *status_reg,
@@ -174,8 +233,6 @@ static uint32_t *ehci_get_portsc_register(struct ehci_ctrl *ctrl, int port)
 	int max_ports = HCS_N_PORTS(ehci_readl(&ctrl->hccr->cr_hcsparams));
 
 	if (port < 0 || port >= max_ports) {
-		/* Printing the message would cause a scan failure! */
-		printf("The request port(%u) exceeds maximum port number\n", port);
 		return NULL;
 	}
 
@@ -184,18 +241,23 @@ static uint32_t *ehci_get_portsc_register(struct ehci_ctrl *ctrl, int port)
 
 static int handshake(uint32_t *ptr, uint32_t mask, uint32_t done, int usec)
 {
+	uint64_t start = ehci_now_ticks();
+	uint64_t budget;
 	uint32_t result;
-	do {
+
+	if (usec <= 0)
+		return -1;
+	budget = ehci_ticks_for_us((uint32_t)usec);
+	for (;;) {
 		result = ehci_readl(ptr);
-		udelay(5);
 		if (result == ~(uint32_t)0)
 			return -1;
-		result &= mask;
-		if (result == done)
+		if ((result & mask) == done)
 			return 0;
-		usec--;
-	} while (usec > 0);
-	return -1;
+		if ((uint64_t)(ehci_now_ticks() - start) >= budget)
+			return -1;
+		udelay(5);
+	}
 }
 
 static int ehci_reset(struct ehci_ctrl *ctrl)
@@ -209,7 +271,6 @@ static int ehci_reset(struct ehci_ctrl *ctrl)
 	ret = handshake((uint32_t *)&ctrl->hcor->or_usbcmd,
 			CMD_RESET, 0, 250 * 1000);
 	if (ret < 0) {
-		printf("EHCI fail to reset\n");
 		goto out;
 	}
 
@@ -254,8 +315,6 @@ static int ehci_shutdown(struct ehci_ctrl *ctrl)
 			HCHALT_TIMEOUT);
 	}
 
-	if (ret)
-		puts("EHCI failed to shut down host controller.\n");
 
 	return ret;
 }
@@ -266,8 +325,6 @@ static int ehci_td_buffer(struct qTD *td, void *buf, size_t sz)
 	unsigned long addr = (unsigned long)buf;
 	int idx;
 
-	if (addr != ALIGN(addr, ARCH_DMA_MINALIGN))
-		printf("EHCI-HCD: Misaligned buffer address (%p vs %lx)\n", buf, ALIGN(addr, ARCH_DMA_MINALIGN));
 
 	flush_dcache_range(addr, ALIGN(addr + sz, ARCH_DMA_MINALIGN));
 
@@ -285,7 +342,6 @@ static int ehci_td_buffer(struct qTD *td, void *buf, size_t sz)
 	}
 
 	if (idx == QT_BUFFER_CNT) {
-		printf("out of buffer pointers (%zu bytes left)\n", sz);
 		return -1;
 	}
 
@@ -338,12 +394,42 @@ static void ehci_update_endpt2_dev_n_port(struct usb_device *udev,
 				     QH_ENDPT2_HUBADDR(hubaddr));
 }
 
+static int ehci_stop_async_schedule(struct ehci_ctrl *ctrl)
+{
+	uint32_t cmd = ehci_readl(&ctrl->hcor->or_usbcmd);
+
+	cmd &= ~CMD_ASE;
+	ehci_writel(&ctrl->hcor->or_usbcmd, cmd);
+	return handshake((uint32_t *)&ctrl->hcor->or_usbsts,
+			 STS_ASS, 0, 100 * 1000);
+}
+
+static int ehci_unlink_async_qh(struct ehci_ctrl *ctrl)
+{
+	uint32_t cmd;
+
+	ctrl->qh_list.qh_link = cpu_to_hc32(
+		virt_to_phys(&ctrl->qh_list) | QH_LINK_TYPE_QH);
+	flush_dcache_range((unsigned long)&ctrl->qh_list,
+		ALIGN_END_ADDR(struct QH, &ctrl->qh_list, 1));
+
+	ehci_writel(&ctrl->hcor->or_usbsts, STS_IAA);
+	cmd = ehci_readl(&ctrl->hcor->or_usbcmd);
+	ehci_writel(&ctrl->hcor->or_usbcmd, cmd | CMD_IAAD);
+	if (handshake((uint32_t *)&ctrl->hcor->or_usbsts,
+		      STS_IAA, STS_IAA, 10 * 1000) < 0)
+		return -ETIMEDOUT;
+	ehci_writel(&ctrl->hcor->or_usbsts, STS_IAA);
+	return 0;
+}
+
 static int
 ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 		   void *buffer, int length, struct devrequest *req,
 		   unsigned long timeout_ms)
 {
-	ALLOC_ALIGN_BUFFER(struct QH, qh, 1, USB_DMA_MINALIGN);
+	struct ehci_async_allocation *allocation;
+	struct QH *qh;
 	struct qTD *qtd;
 	int qtd_count = 0;
 	int qtd_counter = 0;
@@ -353,9 +439,16 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	uint32_t endpt, maxpacket, token, usbsts;
 	uint32_t c, toggle;
 	uint32_t cmd;
+	int async_linked = 0;
+	int descriptors_reclaimable = 0;
 	unsigned long timeout;
 	int ret = 0;
 	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
+	if (ehci_recovery_required) {
+		dev->status = USB_ST_CRC_ERR;
+		dev->act_len = 0;
+		return -EAGAIN;
+	}
 
 	//printf("dev=%p, pipe=%lx, buffer=%p, length=%d, req=%p\n", dev, pipe,
 	//      buffer, length, req);
@@ -428,11 +521,18 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 
 	// FIXME needs 128kB ram?
 
-	qtd = memalign(USB_DMA_MINALIGN, qtd_count * sizeof(struct qTD)); // FIXME dynamic allocation
-	if (qtd == NULL) {
-		printf("unable to allocate TDs\n");
-		return -1;
+	allocation = malloc(sizeof(*allocation));
+	qh = memalign(USB_DMA_MINALIGN, sizeof(*qh));
+	qtd = memalign(USB_DMA_MINALIGN, qtd_count * sizeof(*qtd));
+	if (!allocation || !qh || !qtd) {
+		free(qtd);
+		free(qh);
+		free(allocation);
+		return -ENOMEM;
 	}
+	allocation->qh = qh;
+	allocation->qtd = qtd;
+	allocation->next = NULL;
 
 	memset(qh, 0, sizeof(struct QH));
 	memset(qtd, 0, qtd_count * sizeof(*qtd));
@@ -492,7 +592,6 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 			QT_TOKEN_STATUS(QT_TOKEN_STATUS_ACTIVE);
 		qtd[qtd_counter].qt_token = cpu_to_hc32(token);
 		if (ehci_td_buffer(&qtd[qtd_counter], req, sizeof(*req))) {
-			printf("unable to construct SETUP TD\n");
 			goto fail;
 		}
 		/* Update previous qTD! */
@@ -551,8 +650,6 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 			qtd[qtd_counter].qt_token = cpu_to_hc32(token);
 			if (ehci_td_buffer(&qtd[qtd_counter], buf_ptr,
 						xfr_bytes)) {
-				printf("unable to construct DATA TD\n");
-
 				goto fail;
 			}
 			/* Update previous qTD! */
@@ -592,6 +689,7 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	}
 
 	ctrl->qh_list.qh_link = cpu_to_hc32(virt_to_phys(qh) | QH_LINK_TYPE_QH);
+	async_linked = 1;
 
 	/* Flush dcache */
 	uint32_t end = ALIGN_END_ADDR(struct QH, &ctrl->qh_list, 1);
@@ -614,7 +712,6 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	ret = handshake((uint32_t *)&ctrl->hcor->or_usbsts, STS_ASS, STS_ASS,
 			100 * 1000);
 	if (ret < 0) {
-		printf("EHCI fail timeout STS_ASS set\n");
 		goto fail;
 	}
 
@@ -623,6 +720,9 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	vtd = &qtd[qtd_counter - 1];
 	timeout = timeout_ms ? timeout_ms : USB_TIMEOUT_MS(pipe);
 	do {
+		usb_proxy_iso_pump();
+		usb_proxy_periodic_pump();
+		usb_proxy_poll_maintenance();
 		/* Invalidate dcache */
 		invalidate_dcache_range((unsigned long)&ctrl->qh_list,
 			ALIGN_END_ADDR(struct QH, &ctrl->qh_list, 1));
@@ -650,48 +750,19 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 		invalidate_dcache_range((unsigned long)buffer,
 			ALIGN((unsigned long)buffer + length, ARCH_DMA_MINALIGN));
 
-	/* Check that the TD processing happened */
-	if (QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE) {
-		printf("EHCI timeout\n");
-		printf("[ehci-dbg] === AFTER TIMEOUT ===\n");
-		printf("[ehci-dbg] cmd=%08lx sts=%08lx asynclist=%08lx configflag=%08lx portsc=%08lx\n",
-		       (unsigned long)ehci_readl(&ctrl->hcor->or_usbcmd),
-		       (unsigned long)ehci_readl(&ctrl->hcor->or_usbsts),
-		       (unsigned long)ehci_readl(&ctrl->hcor->or_asynclistaddr),
-		       (unsigned long)ehci_readl(&ctrl->hcor->or_configflag),
-		       (unsigned long)ehci_readl(&ctrl->hcor->or_portsc[0]));
-		printf("[ehci-dbg] qh_endpt1=%08lx qh_endpt2=%08lx\n",
-		       (unsigned long)hc32_to_cpu(qh->qh_endpt1),
-		       (unsigned long)hc32_to_cpu(qh->qh_endpt2));
-		printf("[ehci-dbg] qh_overlay after: next=%08lx altnext=%08lx token=%08lx\n",
-		       (unsigned long)hc32_to_cpu(qh->qh_overlay.qt_next),
-		       (unsigned long)hc32_to_cpu(qh->qh_overlay.qt_altnext),
-		       (unsigned long)hc32_to_cpu(qh->qh_overlay.qt_token));
-		for (int i = 0; i < qtd_count; i++) {
-			printf("[ehci-dbg] qtd[%d] after: next=%08lx altnext=%08lx token=%08lx buf0=%08lx\n",
-			       i,
-			       (unsigned long)hc32_to_cpu(qtd[i].qt_next),
-			       (unsigned long)hc32_to_cpu(qtd[i].qt_altnext),
-			       (unsigned long)hc32_to_cpu(qtd[i].qt_token),
-			       (unsigned long)hc32_to_cpu(qtd[i].qt_buffer[0]));
-		}
-		printf("[ehci-dbg] dev: addr=%d speed=%d maxpkt=%d ep=%lu dir=%s\n",
-		       dev->devnum, dev->speed, dev->maxpacketsize,
-		       usb_pipeendpoint(pipe),
-		       usb_pipein(pipe) ? "IN" : "OUT");
-		printf("[ehci-dbg] pipe=%08lx req=%p buffer=%p length=%d\n",
-		       pipe, req, buffer, length);
-	}
 
-	/* Disable async schedule. */
-	cmd = ehci_readl(&ctrl->hcor->or_usbcmd);
-	cmd &= ~CMD_ASE;
-	ehci_writel(&ctrl->hcor->or_usbcmd, cmd);
+	if (ehci_unlink_async_qh(ctrl) == 0)
+		descriptors_reclaimable = 1;
 
-	ret = handshake((uint32_t *)&ctrl->hcor->or_usbsts, STS_ASS, 0,
-			100 * 1000);
-	if (ret < 0) {
-		printf("EHCI fail timeout STS_ASS reset\n");
+	ret = ehci_stop_async_schedule(ctrl);
+	if (ret == 0)
+		descriptors_reclaimable = 1;
+	else
+		ehci_recovery_required = 1;
+
+	if (!ehci_dma_reclaimable(ret == 0, descriptors_reclaimable, 0)) {
+		dev->status = USB_ST_CRC_ERR;
+		dev->act_len = 0;
 		goto fail;
 	}
 
@@ -702,8 +773,8 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	 * scrub the async-ring state so the next ehci_submit_async call
 	 * starts fresh:
 	 *
-	 *   1. Point qh_list.qh_link back at qh_list itself (no dangling
-	 *      pointer to the stack-allocated qh we're about to unwind).
+	 *   1. Point qh_list.qh_link back at qh_list itself so no later
+	 *      schedule traversal reaches the retired heap QH.
 	 *   2. Zero qh_list.qh_overlay and set its qt_next / qt_altnext
 	 *      to TERMINATE — otherwise the HC, on the next async-enable,
 	 *      may resume from the cached overlay state (which may still
@@ -787,11 +858,19 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 		//      ehci_readl(&ctrl->hcor->or_portsc[1]));
 	}
 
-	free(qtd);
+	ehci_release_async(allocation);
 	return (dev->status != USB_ST_NOT_PROC) ? 0 : -1;
 
 fail:
-	free(qtd);
+	if (async_linked && !descriptors_reclaimable &&
+	    ehci_unlink_async_qh(ctrl) == 0)
+		descriptors_reclaimable = 1;
+	if (async_linked && ehci_stop_async_schedule(ctrl) == 0)
+		descriptors_reclaimable = 1;
+	if (!async_linked || descriptors_reclaimable)
+		ehci_release_async(allocation);
+	else
+		ehci_quarantine_async(allocation);
 	return -1;
 }
 
@@ -876,13 +955,10 @@ static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
 				srclen = 42;
 				break;
 			default:
-				printf("unknown value DT_STRING %x\n",
-					le16_to_cpu(req->value));
 				goto unknown;
 			}
 			break;
 		default:
-			printf("unknown value %x\n", le16_to_cpu(req->value));
 			goto unknown;
 		}
 		break;
@@ -894,7 +970,6 @@ static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
 			srclen = descriptor.hub.bLength;
 			break;
 		default:
-			printf("unknown value %x\n", le16_to_cpu(req->value));
 			goto unknown;
 		}
 		break;
@@ -975,8 +1050,6 @@ static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
 			    !ehci_is_TDI() &&
 			    EHCI_PS_IS_LOWSPEED(reg)) {
 				/* Low speed device, give up ownership. */
-				printf("port %d low speed --> companion\n",
-				      port - 1);
 				reg |= EHCI_PS_PO;
 				ehci_writel(status_reg, reg);
 				return -ENXIO;
@@ -1009,7 +1082,6 @@ static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
 					reg = ehci_readl(status_reg);
 					if ((reg & (EHCI_PS_PE | EHCI_PS_CS))
 					    == EHCI_PS_CS && !ehci_is_TDI()) {
-						printf("port %d full speed --> companion\n", port - 1);
 						reg &= ~EHCI_PS_CLEAR;
 						reg |= EHCI_PS_PO;
 						ehci_writel(status_reg, reg);
@@ -1018,8 +1090,6 @@ static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
 						ctrl->portreset |= 1 << port;
 					}
 				} else {
-					printf("port(%d) reset error\n",
-					       port - 1);
 				}
 			}
 			break;
@@ -1030,7 +1100,6 @@ static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
 			ehci_writel(status_reg, reg);
 			break;
 		default:
-			printf("unknown feature %x\n", le16_to_cpu(req->value));
 			goto unknown;
 		}
 		/* unblock posted writes */
@@ -1060,7 +1129,6 @@ static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
 			ctrl->portreset &= ~(1 << port);
 			break;
 		default:
-			printf("unknown feature %x\n", le16_to_cpu(req->value));
 			goto unknown;
 		}
 		ehci_writel(status_reg, reg);
@@ -1068,7 +1136,6 @@ static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
 		(void) ehci_readl(&ctrl->hcor->or_usbcmd);
 		break;
 	default:
-		printf("Unknown request\n");
 		goto unknown;
 	}
 
@@ -1084,9 +1151,6 @@ static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
 	return 0;
 
 unknown:
-	printf("[ehci unknown] requesttype=%x, request=%x, value=%x, index=%x, length=%x\n",
-	      req->requesttype, req->request, le16_to_cpu(req->value),
-	      le16_to_cpu(req->index), le16_to_cpu(req->length));
 
 	dev->act_len = 0;
 	dev->status = USB_ST_STALLED;
@@ -1129,6 +1193,34 @@ void ehci_set_controller_priv(int index, void *priv, const struct ehci_ops *ops)
 void *ehci_get_controller_priv(int index)
 {
 	return ehcic[index].priv;
+}
+
+/*
+ * Zynq AR47540: after reset, do not assert USBCMD.RS until ULPI post-reset
+ * processing has completed, observed as PORTSC.PR clear on every root port.
+ */
+static int ehci_wait_ulpi_post_reset(struct ehci_ctrl *ctrl)
+{
+	int ports = HCS_N_PORTS(ehci_readl(&ctrl->hccr->cr_hcsparams));
+	int port;
+
+	for (port = 0; port < ports; port++) {
+		unsigned long start = get_timer(0);
+		uint32_t reg;
+
+		do {
+			reg = ehci_readl(&ctrl->hcor->or_portsc[port]);
+			if (reg == ~(uint32_t)0)
+				return -ENODEV;
+			if (!(reg & EHCI_PS_PR))
+				break;
+			if (ehci_deadline_expired_u32((uint32_t)get_timer(0),
+						      (uint32_t)start, 10U))
+				return -ETIMEDOUT;
+			udelay(5);
+		} while (1);
+	}
+	return 0;
 }
 
 static int ehci_common_init(struct ehci_ctrl *ctrl, unsigned int tweaks)
@@ -1215,6 +1307,11 @@ static int ehci_common_init(struct ehci_ctrl *ctrl, unsigned int tweaks)
 	if (HCS_PPC(reg))
 		put_unaligned(get_unaligned(&descriptor.hub.wHubCharacteristics)
 				| 0x01, &descriptor.hub.wHubCharacteristics);
+
+	if (ehci_wait_ulpi_post_reset(ctrl) < 0) {
+		printf("EHCI ULPI post-reset processing timed out\n");
+		return -ETIMEDOUT;
+	}
 
 	/* Start the host controller. */
 	cmd = ehci_readl(&ctrl->hcor->or_usbcmd);
@@ -1339,7 +1436,41 @@ struct int_queue {
 	struct QH *current;
 	struct QH *last;
 	struct qTD *tds;
+	struct int_queue *next_quarantined;
+	struct int_queue *next_active;
+	int linked;
+	int one_shot;
+	struct ehci_periodic_plan plan;
 };
+
+static struct int_queue *quarantined_interrupt;
+
+static void ehci_release_int_queue(struct int_queue *queue)
+{
+	if (!queue)
+		return;
+	free(queue->tds);
+	free(queue->first);
+	free(queue);
+}
+
+static void ehci_quarantine_int_queue(struct int_queue *queue)
+{
+	queue->next_quarantined = quarantined_interrupt;
+	quarantined_interrupt = queue;
+	ehci_recovery_required = 1;
+}
+
+static void ehci_reclaim_interrupt_after_reset(void)
+{
+	while (quarantined_interrupt) {
+		struct int_queue *queue = quarantined_interrupt;
+
+		quarantined_interrupt = queue->next_quarantined;
+		ehci_release_int_queue(queue);
+	}
+	active_interrupt_queues = NULL;
+}
 
 #define NEXT_QH(qh) (struct QH *)((unsigned long)hc32_to_cpu((qh)->qh_link) & ~0x1f)
 
@@ -1357,7 +1488,6 @@ enable_periodic(struct ehci_ctrl *ctrl)
 	ret = handshake((uint32_t *)&hcor->or_usbsts,
 			STS_PSS, STS_PSS, 1000);
 	if (ret < 0) {
-		printf("EHCI failed: timeout when enabling periodic list\n");
 		return -ETIMEDOUT;
 	}
 	udelay(100);
@@ -1378,39 +1508,189 @@ disable_periodic(struct ehci_ctrl *ctrl)
 	ret = handshake((uint32_t *)&hcor->or_usbsts,
 			STS_PSS, 0, 1000);
 	if (ret < 0) {
-		printf("EHCI failed: timeout when disabling periodic list\n");
 		return -ETIMEDOUT;
+	}
+	return 0;
+}
+
+int ehci_periodic_schedule_pause(struct ehci_ctrl *ctrl)
+{
+	int result;
+
+	if (!ctrl)
+		return -EINVAL;
+	if (ctrl->periodic_schedules <= 0)
+		return 0;
+	result = disable_periodic(ctrl);
+	if (result < 0)
+		ehci_recovery_required = 1;
+	return result;
+}
+
+int ehci_periodic_schedule_resume(struct ehci_ctrl *ctrl, int delta)
+{
+	if (!ctrl || ctrl->periodic_schedules + delta < 0)
+		return -EINVAL;
+	ctrl->periodic_schedules += delta;
+	if (ctrl->periodic_schedules > 0 && enable_periodic(ctrl) < 0) {
+		ehci_recovery_required = 1;
+		return -ETIMEDOUT;
+	}
+	return 0;
+}
+
+static unsigned ehci_interrupt_frame_interval(
+	const struct int_queue *queue)
+{
+	unsigned interval =
+		ehci_periodic_hardware_frame_interval(&queue->plan);
+
+	return interval;
+}
+
+static void ehci_insert_interrupt_queue(struct int_queue *queue)
+{
+	struct int_queue **link = &active_interrupt_queues;
+	unsigned interval = ehci_interrupt_frame_interval(queue);
+
+	while (*link &&
+	       ehci_interrupt_frame_interval(*link) >= interval)
+		link = &(*link)->next_active;
+	queue->next_active = *link;
+	*link = queue;
+}
+
+static int ehci_remove_interrupt_queue(struct int_queue *queue)
+{
+	struct int_queue **link = &active_interrupt_queues;
+
+	while (*link && *link != queue)
+		link = &(*link)->next_active;
+	if (!*link)
+		return 0;
+	*link = queue->next_active;
+	queue->next_active = NULL;
+	return 1;
+}
+
+static uint32_t *ehci_periodic_interrupt_link(struct ehci_ctrl *ctrl,
+					      unsigned frame)
+{
+	uint32_t *link = &ctrl->periodic_list[frame];
+	unsigned guard = 0;
+
+	while (guard++ < 128U) {
+		uint32_t value = hc32_to_cpu(*link);
+		uint32_t type;
+
+		if (value & QH_LINK_TERMINATE)
+			return link;
+		type = value & 0x06U;
+		if (type == QH_LINK_TYPE_QH)
+			return link;
+		if (type != QH_LINK_TYPE_ITD &&
+		    type != QH_LINK_TYPE_SITD)
+			return NULL;
+		link = (uint32_t *)(unsigned long)(value & ~0x1fU);
+	}
+	return NULL;
+}
+
+static int ehci_rebuild_interrupt_schedule(struct ehci_ctrl *ctrl)
+{
+	struct int_queue *queue;
+	unsigned frame;
+
+	for (queue = active_interrupt_queues; queue;
+	     queue = queue->next_active) {
+		struct int_queue *next = queue->next_active;
+		uint32_t target;
+
+		while (next && next->one_shot)
+			next = next->next_active;
+		target = (!queue->one_shot && next) ?
+			(uint32_t)(unsigned long)next->first :
+			(uint32_t)(unsigned long)&ctrl->periodic_queue;
+		queue->last->qh_link =
+			cpu_to_hc32(target | QH_LINK_TYPE_QH);
+		flush_dcache_range((unsigned long)queue->last,
+				   ALIGN_END_ADDR(struct QH, queue->last, 1));
+	}
+
+	for (frame = 0; frame < 1024U; frame++) {
+		uint32_t *link = ehci_periodic_interrupt_link(ctrl, frame);
+		uint32_t target;
+
+		if (!link)
+			return -EINVAL;
+		queue = NULL;
+		for (struct int_queue *candidate = active_interrupt_queues;
+		     candidate; candidate = candidate->next_active) {
+			if (candidate->one_shot &&
+			    ehci_periodic_frame_due(
+				    &candidate->plan, (uint16_t)frame)) {
+				queue = candidate;
+				break;
+			}
+		}
+		if (!queue) {
+			for (queue = active_interrupt_queues; queue;
+			     queue = queue->next_active) {
+				if (!queue->one_shot &&
+				    ehci_periodic_frame_due(
+					    &queue->plan, (uint16_t)frame))
+					break;
+			}
+		}
+		target = queue ?
+			(uint32_t)(unsigned long)queue->first :
+			(uint32_t)(unsigned long)&ctrl->periodic_queue;
+		*link = cpu_to_hc32(target | QH_LINK_TYPE_QH);
+		flush_dcache_range((unsigned long)link,
+				   ALIGN_END_ADDR(uint32_t, link, 1));
 	}
 	return 0;
 }
 
 static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 			unsigned long pipe, int queuesize, int elementsize,
-			void *buffer, int interval)
+			void *buffer, int interval, int one_shot)
 {
 	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
 	struct int_queue *result = NULL;
+	struct ehci_periodic_plan plan;
 	uint32_t i, toggle;
+	int split = dev->parent && dev->parent->parent;
+	unsigned slot_seed = (unsigned)usb_pipeendpoint(pipe) +
+			     (unsigned)dev->portnr;
+
+	if (!ehci_periodic_build_plan(
+		    dev->speed, (unsigned)interval, split,
+		    dev->tt_think_time, dev->tt_multi, slot_seed, &plan))
+		return NULL;
+	if (ehci_recovery_required)
+		return NULL;
+	if (one_shot) {
+		uint32_t frame_index = ehci_readl(&ctrl->hcor->or_frindex);
+
+		plan.interval_microframes = 8192U;
+		plan.frame_interval = 1024U;
+		plan.frame_phase = (uint16_t)(
+			((frame_index >> 3) + 2U) & 0x3ffU);
+		plan.start_mask = 0x01U;
+		plan.complete_mask = 0;
+	}
 
 	/*
-	 * Interrupt transfers requiring several transactions are not supported
-	 * because bInterval is ignored.
-	 *
-	 * Also, ehci_submit_async() relies on wMaxPacketSize being a power of 2
-	 * <= PKT_ALIGN if several qTDs are required, while the USB
-	 * specification does not constrain this for interrupt transfers. That
-	 * means that ehci_submit_async() would support interrupt transfers
-	 * requiring several transactions only as long as the transfer size does
-	 * not require more than a single qTD.
+	 * Each queue element must fit in one transaction and one qTD. Persistent
+	 * queues are rearmed after completion instead of chaining transactions
+	 * that could execute within the same service interval.
 	 */
 	if (elementsize > usb_maxpacket(dev, pipe)) {
-		printf("%s: xfers requiring several transactions are not supported.\n",
-		       __func__);
 		return NULL;
 	}
 
 	if (usb_pipetype(pipe) != PIPE_INTERRUPT) {
-		printf("non-interrupt pipe (type=%lu)", usb_pipetype(pipe));
 		return NULL;
 	}
 
@@ -1419,29 +1699,28 @@ static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 	 * no matter the alignment
 	 */
 	if (elementsize >= 16384) {
-		printf("too large elements for interrupt transfers\n");
 		return NULL;
 	}
 
 	result = malloc(sizeof(*result));  // FIXME dynamic allocation
 	if (!result) {
-		printf("ehci intr queue: out of memory\n");
 		goto fail1;
 	}
+	memset(result, 0, sizeof(*result));
 	result->elementsize = elementsize;
 	result->pipe = pipe;
+	result->plan = plan;
 	result->first = memalign(USB_DMA_MINALIGN,
 				 sizeof(struct QH) * queuesize); // FIXME dynamic allocation
 	if (!result->first) {
-		printf("ehci intr queue: out of memory\n");
 		goto fail2;
 	}
+	result->one_shot = one_shot;
 	result->current = result->first;
 	result->last = result->first + queuesize - 1;
 	result->tds = memalign(USB_DMA_MINALIGN,
 			       sizeof(struct qTD) * queuesize); // FIXME dynamic allocation
 	if (!result->tds) {
-		printf("ehci intr queue: out of memory\n");
 		goto fail3;
 	}
 	memset(result->first, 0, sizeof(struct QH) * queuesize);
@@ -1467,13 +1746,9 @@ static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 			QH_ENDPT1_EPS(ehci_encode_speed(dev->speed)) |
 			(usb_pipeendpoint(pipe) << 8) | /* Endpoint Number */
 			(usb_pipedevice(pipe) << 0));
-		qh->qh_endpt2 = cpu_to_hc32((1 << 30) | /* 1 Tx per mframe */
-			(1 << 0)); /* S-mask: microframe 0 */
-		if (dev->speed == USB_SPEED_LOW ||
-				dev->speed == USB_SPEED_FULL) {
-			/* C-mask: microframes 2-4 */
-			qh->qh_endpt2 |= cpu_to_hc32((0x1c << 8));
-		}
+		qh->qh_endpt2 = cpu_to_hc32((1 << 30) |
+			(uint32_t)plan.start_mask |
+			((uint32_t)plan.complete_mask << 8));
 		ehci_update_endpt2_dev_n_port(dev, qh);
 
 		td->qt_next = cpu_to_hc32(QT_NEXT_TERMINATE);
@@ -1511,24 +1786,24 @@ static struct int_queue *_ehci_create_int_queue(struct usb_device *dev,
 
 	if (ctrl->periodic_schedules > 0) {
 		if (disable_periodic(ctrl) < 0) {
-			printf("FATAL: periodic should never fail, but did");
+			ehci_recovery_required = 1;
 			goto fail3;
 		}
 	}
 
-	/* hook up to periodic list */
-	struct QH *list = &ctrl->periodic_queue;
-	result->last->qh_link = list->qh_link;
-	list->qh_link = cpu_to_hc32((unsigned long)result->first | QH_LINK_TYPE_QH);
-
-	flush_dcache_range((unsigned long)result->last,
-			   ALIGN_END_ADDR(struct QH, result->last, 1));
-	flush_dcache_range((unsigned long)list,
-			   ALIGN_END_ADDR(struct QH, list, 1));
+	/* Build a power-of-two frame skeleton so bInterval > 1 queues are
+	 * unreachable in frames where the endpoint must not be polled. */
+	ehci_insert_interrupt_queue(result);
+	result->linked = 1;
+	if (ehci_rebuild_interrupt_schedule(ctrl) < 0) {
+		ehci_recovery_required = 1;
+		ehci_quarantine_int_queue(result);
+		return NULL;
+	}
 
 	if (enable_periodic(ctrl) < 0) {
-		printf("FATAL: periodic should never fail, but did");
-		goto fail3;
+		ehci_quarantine_int_queue(result);
+		return NULL;
 	}
 	ctrl->periodic_schedules++;
 
@@ -1545,6 +1820,7 @@ fail1:
 	return NULL;
 }
 
+
 static void *_ehci_poll_int_queue(struct usb_device *dev,
 				  struct int_queue *queue)
 {
@@ -1552,13 +1828,9 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 	struct qTD *cur_td;
 	uint32_t token, toggle;
 	unsigned long pipe = queue->pipe;
-	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
-
-	(void)ctrl;
 
 	/* depleted queue */
 	if (cur == NULL) {
-		printf("Exit poll_int_queue with completed queue\n");
 		return NULL;
 	}
 	/* still active */
@@ -1595,6 +1867,7 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 		dev->status = USB_ST_STALLED;
 		break;
 	case QT_TOKEN_STATUS_ACTIVE | QT_TOKEN_STATUS_DATBUFERR:
+	case QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_DATBUFERR:
 	case QT_TOKEN_STATUS_DATBUFERR:
 		dev->status = USB_ST_BUF_ERR;
 		break;
@@ -1607,7 +1880,7 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 		break;
 	}
 
-	if (!(cur->qh_link & QH_LINK_TERMINATE))
+	if (cur != queue->last)
 		queue->current++;
 	else
 		queue->current = NULL;
@@ -1619,51 +1892,121 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 	return cur->buffer;
 }
 
+static int _ehci_rearm_int_queue(struct usb_device *dev,
+				 struct int_queue *queue)
+{
+	struct QH *qh;
+	struct qTD *td;
+	unsigned long pipe;
+	uint32_t toggle;
+	uint32_t address;
+
+	if (!queue || !queue->linked || queue->first != queue->last)
+		return -EINVAL;
+
+	qh = queue->first;
+	td = queue->tds;
+	pipe = queue->pipe;
+	toggle = usb_gettoggle(dev, usb_pipeendpoint(pipe), usb_pipeout(pipe));
+	address = (uint32_t)(unsigned long)qh->buffer;
+
+	memset(td, 0, sizeof(*td));
+	td->qt_next = cpu_to_hc32(QT_NEXT_TERMINATE);
+	td->qt_altnext = cpu_to_hc32(QT_NEXT_TERMINATE);
+	td->qt_token = cpu_to_hc32(
+		QT_TOKEN_DT(toggle) |
+		(queue->elementsize << 16) |
+		(3 << 10) |
+		((usb_pipein(pipe) ? 1 : 0) << 8) |
+		QT_TOKEN_STATUS_ACTIVE);
+	td->qt_buffer[0] = cpu_to_hc32(address);
+	td->qt_buffer[1] = cpu_to_hc32((address + 0x1000) & ~0xfff);
+	td->qt_buffer[2] = cpu_to_hc32((address + 0x2000) & ~0xfff);
+	td->qt_buffer[3] = cpu_to_hc32((address + 0x3000) & ~0xfff);
+	td->qt_buffer[4] = cpu_to_hc32((address + 0x4000) & ~0xfff);
+	flush_dcache_range((unsigned long)qh->buffer,
+			   ALIGN_END_ADDR(char, qh->buffer, queue->elementsize));
+	flush_dcache_range((unsigned long)td,
+			   ALIGN_END_ADDR(struct qTD, td, 1));
+
+	qh->qh_curtd = 0;
+	memset(&qh->qh_overlay, 0, sizeof(qh->qh_overlay));
+	qh->qh_overlay.qt_next = cpu_to_hc32((unsigned long)td);
+	qh->qh_overlay.qt_altnext = cpu_to_hc32(QT_NEXT_TERMINATE);
+	queue->current = qh;
+	flush_dcache_range((unsigned long)qh,
+			   ALIGN_END_ADDR(struct QH, qh, 1));
+	return 0;
+}
+
 /* Do not free buffers associated with QHs, they're owned by someone else */
 static int _ehci_destroy_int_queue(struct usb_device *dev,
 				   struct int_queue *queue)
 {
 	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
-	int result = -1;
-	unsigned long timeout;
+	int result = 0;
+
+	if (!queue)
+		return 0;
+	if (!queue->linked) {
+		ehci_release_int_queue(queue);
+		return 0;
+	}
 
 	if (disable_periodic(ctrl) < 0) {
-		printf("FATAL: periodic should never fail, but did");
-		goto out;
+		ehci_quarantine_int_queue(queue);
+		return -ETIMEDOUT;
 	}
-	ctrl->periodic_schedules--;
+	if (ctrl->periodic_schedules > 0)
+		ctrl->periodic_schedules--;
 
-	struct QH *cur = &ctrl->periodic_queue;
-	timeout = get_timer(0) + 20; /* abort after 20ms */
-	while (!(cur->qh_link & cpu_to_hc32(QH_LINK_TERMINATE))) {
-		if (NEXT_QH(cur) == queue->first) {
-			cur->qh_link = queue->last->qh_link;
-			flush_dcache_range((unsigned long)cur,
-					   ALIGN_END_ADDR(struct QH, cur, 1));
-			result = 0;
-			break;
-		}
-		cur = NEXT_QH(cur);
-		if (get_timer(0) > timeout) {
-			printf("Timeout destroying interrupt endpoint queue\n");
-			result = -1;
-			goto out;
-		}
+	if (!ehci_remove_interrupt_queue(queue) ||
+	    ehci_rebuild_interrupt_schedule(ctrl) < 0) {
+		ehci_recovery_required = 1;
+		ehci_quarantine_int_queue(queue);
+		return -ETIMEDOUT;
 	}
 
-	if (ctrl->periodic_schedules > 0) {
-		result = enable_periodic(ctrl);
-		if (result < 0)
-			printf("FATAL: periodic should never fail, but did");
+	/* PSS=0 acknowledged retirement before the queue left every frame. */
+	queue->linked = 0;
+	if (ctrl->periodic_schedules > 0 && enable_periodic(ctrl) < 0) {
+		ehci_recovery_required = 1;
+		result = -ETIMEDOUT;
 	}
 
-out:
-	free(queue->tds);
-	free(queue->first);
-	free(queue);
-
+	ehci_release_int_queue(queue);
 	return result;
 }
+
+int ehci_controller_needs_recovery(void)
+{
+	return ehci_recovery_required;
+}
+
+int ehci_controller_recover(void)
+{
+	struct ehci_ctrl *ctrl = &ehcic[0];
+	int result;
+
+	if (!ehci_recovery_required)
+		return 0;
+	if (!ctrl->hccr || !ctrl->hcor)
+		return -ENODEV;
+
+	result = ehci_reset(ctrl);
+	if (result < 0)
+		return result;
+
+	/* CMD_RESET acknowledgement is the only safe bulk reclaim fence. */
+	ehci_reclaim_async_after_reset();
+	ehci_reclaim_interrupt_after_reset();
+	result = ehci_common_init(ctrl, 0);
+	if (result < 0)
+		return result;
+	ehci_recovery_required = 0;
+	return 0;
+}
+
 
 /*
  * Interrupt-xfer poll budget: keep it short so the ZZ9000 main loop can
@@ -1686,13 +2029,16 @@ static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 	unsigned long timeout;
 	int result = 0, ret;
 
-	queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer, interval);
+	queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer, interval,
+				       0);
 	if (!queue)
 		return -1;
 
-	timeout = get_timer(0) + EHCI_INT_POLL_MS;
+	timeout = get_timer(0);
 	while ((backbuffer = _ehci_poll_int_queue(dev, queue)) == NULL)
-		if (get_timer(0) > timeout) {
+		if (ehci_deadline_expired_u32((uint32_t)get_timer(0),
+					      (uint32_t)timeout,
+					      EHCI_INT_POLL_MS)) {
 			/*
 			 * No qTD retired within our poll window. For an
 			 * interrupt endpoint this is normal USB behavior —
@@ -1719,8 +2065,6 @@ static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 	 * before returning so the periodic list stays clean.
 	 */
 	if (backbuffer && backbuffer != buffer) {
-		printf("got wrong buffer back (%p instead of %p)\n",
-		      backbuffer, buffer);
 		dev->status = USB_ST_BUF_ERR;
 		result = -EINVAL;
 	}
@@ -1731,6 +2075,74 @@ static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 
 	return result;
 }
+/*
+ * Execute one high-speed interrupt opportunity at microframe zero of a
+ * selected near-future frame. Unlike a persistent qTD, this queue is linked
+ * into only that frame-list slot and then unlinked, so software can honor
+ * intervals longer than the 1024-frame EHCI list without exposing the
+ * endpoint on adjacent frames or list rollovers.
+ */
+static int _ehci_submit_int_msg_once(struct usb_device *dev,
+				     unsigned long pipe,
+				     void *buffer, int length)
+{
+	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
+	struct int_queue *queue;
+	void *backbuffer = NULL;
+	unsigned long timeout;
+	uint16_t target_frame;
+	int result = 0;
+	int ret;
+
+	if (!ctrl || dev->speed != USB_SPEED_HIGH)
+		return -EINVAL;
+	queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer, 4, 1);
+	if (!queue)
+		return -1;
+	target_frame = queue->plan.frame_phase;
+	timeout = get_timer(0);
+	for (;;) {
+		uint32_t frame_index;
+
+		backbuffer = _ehci_poll_int_queue(dev, queue);
+		if (backbuffer)
+			break;
+		frame_index = ehci_readl(&ctrl->hcor->or_frindex);
+		{
+			uint16_t frame = (uint16_t)(
+				(frame_index >> 3) & 0x3ffU);
+			uint16_t distance = (uint16_t)(
+				(frame - target_frame) & 0x3ffU);
+
+			if ((distance == 0U && (frame_index & 7U) != 0U) ||
+			    (distance > 0U && distance < 512U)) {
+				backbuffer = _ehci_poll_int_queue(dev, queue);
+				if (!backbuffer) {
+					dev->status = usb_pipein(pipe) ?
+						0 : USB_ST_NAK_REC;
+					dev->act_len = 0;
+				}
+				break;
+			}
+		}
+		if (ehci_deadline_expired_u32((uint32_t)get_timer(0),
+					      (uint32_t)timeout, 5U)) {
+			dev->status = usb_pipein(pipe) ?
+				0 : USB_ST_NAK_REC;
+			dev->act_len = 0;
+			break;
+		}
+	}
+	if (backbuffer && backbuffer != buffer) {
+		dev->status = USB_ST_BUF_ERR;
+		result = -EINVAL;
+	}
+	ret = _ehci_destroy_int_queue(dev, queue);
+	if (ret < 0 && result == 0)
+		result = ret;
+	return result;
+}
+
 
 int submit_bulk_msg(struct usb_device *dev, unsigned long pipe,
 			    void *buffer, int length)
@@ -1749,18 +2161,29 @@ int submit_int_msg(struct usb_device *dev, unsigned long pipe,
 {
 	return _ehci_submit_int_msg(dev, pipe, buffer, length, interval);
 }
+int submit_int_msg_once(struct usb_device *dev, unsigned long pipe,
+			void *buffer, int length)
+{
+	return _ehci_submit_int_msg_once(dev, pipe, buffer, length);
+}
+
 
 struct int_queue *create_int_queue(struct usb_device *dev,
 		unsigned long pipe, int queuesize, int elementsize,
 		void *buffer, int interval)
 {
 	return _ehci_create_int_queue(dev, pipe, queuesize, elementsize,
-				      buffer, interval);
+				      buffer, interval, 0);
 }
 
 void *poll_int_queue(struct usb_device *dev, struct int_queue *queue)
 {
 	return _ehci_poll_int_queue(dev, queue);
+}
+
+int rearm_int_queue(struct usb_device *dev, struct int_queue *queue)
+{
+	return _ehci_rearm_int_queue(dev, queue);
 }
 
 int destroy_int_queue(struct usb_device *dev, struct int_queue *queue)

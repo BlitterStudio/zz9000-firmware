@@ -45,6 +45,24 @@ or from a POSIX shell:
 The Docker wrappers cache the official Arm GNU Toolchain and bootgen in Docker
 volumes named `zz9000-arm-toolchain` and `zz9000-bootgen`.
 
+**USB proxy change** — run the bounded host models before building the ARM
+artifact:
+
+```bash
+make -C test/usb test
+```
+
+Then verify the mirrored driver contract from a sibling
+`zz9000-drivers` checkout:
+
+```bash
+python3 ../zz9000-drivers/tools/check-usb-proxy-contract.py "$PWD"
+```
+
+ISO protocol changes must update firmware and driver constants together.
+Physical Poseidon qualification is separate from these host checks; record it
+in `zz9000-drivers/docs/usb-qualification-matrix.md`.
+
 **HDL change (bitstream rebuild)** — requires a Linux box with Vivado:
 ```bash
 ./build_bitstream.sh       # regenerates project from zz9000_project.tcl
@@ -175,9 +193,10 @@ LED should turn green after the firmware loads.
 
 The GitHub Actions workflow
 [`.github/workflows/build.yml`](.github/workflows/build.yml) runs on
-every push and pull request: installs the Arm GNU Toolchain (cached),
-builds bootgen from source (cached), then runs `./build_firmware.sh`
-+ `./build_bootimage.sh` against the committed bitstream. It does **not**
+every push and pull request: runs the host regression suites, including
+`test/usb`; installs the Arm GNU Toolchain (cached); builds bootgen from
+source (cached); then runs `./build_firmware.sh` +
+`./build_bootimage.sh` against the committed bitstream. It does **not**
 run Vivado — any HDL change must include an updated
 `bootimage_work/zz9000_ps_wrapper.bit` for CI to pick up the new logic.
 Release-style ZIP artifacts are uploaded per run.

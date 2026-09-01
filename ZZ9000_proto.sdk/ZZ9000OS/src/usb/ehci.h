@@ -49,6 +49,7 @@ struct ehci_hcor {
 #define STS_ASS		(1 << 15)
 #define	STS_PSS		(1 << 14)
 #define STS_HALT	(1 << 12)
+#define STS_IAA		(1 << 5)
 #define STS_RUNNING	(1 << 4)
 	uint32_t or_usbintr;
 #define INTR_UE         (1 << 0)                /* USB interrupt enable */
@@ -325,5 +326,17 @@ int ehci_submit_async(struct usb_device *dev, unsigned long pipe,
 int ehci_submit_async_timeout(struct usb_device *dev, unsigned long pipe,
 		      void *buffer, int length, struct devrequest *req,
 		      unsigned long timeout_ms);
+int ehci_controller_needs_recovery(void);
+int ehci_controller_recover(void);
+int ehci_periodic_schedule_pause(struct ehci_ctrl *ctrl);
+int ehci_periodic_schedule_resume(struct ehci_ctrl *ctrl, int delta);
+int submit_int_msg_once(struct usb_device *dev, unsigned long pipe,
+			void *buffer, int transfer_len);
+struct int_queue *create_int_queue(struct usb_device *dev,
+		unsigned long pipe, int queuesize, int elementsize,
+		void *buffer, int interval);
+void *poll_int_queue(struct usb_device *dev, struct int_queue *queue);
+int rearm_int_queue(struct usb_device *dev, struct int_queue *queue);
+int destroy_int_queue(struct usb_device *dev, struct int_queue *queue);
 
 #endif /* USB_EHCI_H */
