@@ -265,6 +265,29 @@ static void test_completed_batch_does_not_delay_asap(void)
     assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
 }
 
+static void test_explicit_batches_reject_overlap(void)
+{
+    struct ZZUSBCommand cmd;
+    uint8_t wire[ZZUSB_V2_DATA_MAX];
+    unsigned metadata_size;
+
+    reset_fixture();
+    metadata_size = make_batch(wire, 14, 0, 104);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+
+    metadata_size = make_batch(wire, 15, 0, 104);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_BUSY);
+    assert(fake_schedule_count == 1);
+
+    metadata_size = make_batch(wire, 16, 0, 105);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    assert(fake_schedule_count == 2);
+    assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
+}
+
 static void test_full_speed_asap_batches_use_exponential_interval(void)
 {
     struct ZZUSBCommand cmd;
@@ -378,11 +401,12 @@ int main(void)
     test_queue_complete_reap();
     test_asap_batches_chain();
     test_completed_batch_does_not_delay_asap();
+    test_explicit_batches_reject_overlap();
     test_full_speed_asap_batches_use_exponential_interval();
     test_missed_frame_status();
     test_linked_failure_is_quarantined();
     test_ring_backpressure_and_retirement();
-    assert(fake_bandwidth_reset_count == 7);
+    assert(fake_bandwidth_reset_count == 8);
     puts("usb_proxy_iso_test: ok");
     return 0;
 }

@@ -125,6 +125,52 @@ static void iso_choose_asap(const struct usb_proxy_iso_batch *new_batch,
     *start_microframe = (uint8_t)(current & 7U);
 }
 
+static int iso_active_batch_overlaps(
+    const struct usb_proxy_iso_batch *new_batch,
+    const struct ehci_iso_config *config, uint16_t start_frame,
+    uint8_t start_microframe, unsigned packet_count)
+{
+    uint32_t start_uframe =
+        (uint32_t)start_frame * 8U + start_microframe;
+    uint32_t step = iso_interval_uframes(config);
+    unsigned slot;
+    unsigned packet;
+
+    for (slot = 0; slot < ZZUSB_ISO_MAX_BATCHES; slot++) {
+        const struct usb_proxy_iso_batch *batch = &iso_batches[slot];
+        unsigned existing_packet;
+        uint32_t absolute_uframe = start_uframe;
+
+        if (batch == new_batch || !batch->used || batch->ready ||
+            !batch->transfer.linked ||
+            batch->key.epoch != new_batch->key.epoch ||
+            batch->key.generation != new_batch->key.generation ||
+            batch->key.address != new_batch->key.address ||
+            batch->key.endpoint != new_batch->key.endpoint ||
+            batch->key.direction != new_batch->key.direction)
+            continue;
+        for (packet = 0; packet < packet_count; packet++) {
+            uint16_t frame = (uint16_t)(
+                (absolute_uframe >> 3) & EHCI_ISO_FRAME_MASK);
+            uint8_t microframe = (uint8_t)(absolute_uframe & 7U);
+
+            for (existing_packet = 0;
+                 existing_packet < batch->transfer.packet_count;
+                 existing_packet++) {
+                const struct ehci_iso_packet *existing =
+                    &batch->transfer.packets[existing_packet];
+
+                if (existing->frame == frame &&
+                    (config->split ||
+                     existing->microframe == microframe))
+                    return 1;
+            }
+            absolute_uframe += step;
+        }
+    }
+    return 0;
+}
+
 static void iso_mark_packets(struct usb_proxy_iso_batch *batch,
                              uint8_t status)
 {
@@ -263,6 +309,11 @@ uint16_t usb_proxy_iso_handle_queue(volatile struct ZZUSBCommand *cmd,
 
     if (flags & ZZUSB_ISO_FLAG_ASAP)
         iso_choose_asap(batch, ctrl, &start_frame, &start_microframe);
+    if (iso_active_batch_overlaps(batch, &config, start_frame,
+                                  start_microframe, packet_count)) {
+        memset(batch, 0, sizeof(*batch));
+        return ZZUSB_STATUS_BUSY;
+    }
     packets[0].frame = start_frame;
     packets[0].microframe = start_microframe;
     schedule_result = ehci_iso_schedule(&batch->transfer, ctrl, &config,
