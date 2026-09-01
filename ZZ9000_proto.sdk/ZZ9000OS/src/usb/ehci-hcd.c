@@ -757,6 +757,8 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	ret = ehci_stop_async_schedule(ctrl);
 	if (ret == 0)
 		descriptors_reclaimable = 1;
+	else
+		ehci_recovery_required = 1;
 
 	if (!ehci_dma_reclaimable(ret == 0, descriptors_reclaimable, 0)) {
 		dev->status = USB_ST_CRC_ERR;
