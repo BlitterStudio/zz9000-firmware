@@ -695,10 +695,8 @@ static uint16_t handle_periodic_arm(volatile struct ZZUSBCommand *cmd,
     if (!endpoint->interval_ticks)
         endpoint->interval_ticks = 1;
     endpoint->bandwidth_plan = plan;
-    if (endpoint->bandwidth_plan.frame_interval > 1024U) {
-        endpoint->bandwidth_plan.frame_interval = 1U;
-        endpoint->bandwidth_plan.frame_phase = 0;
-    }
+    ehci_periodic_prepare_bandwidth_plan(
+        dev.speed, &endpoint->bandwidth_plan);
     endpoint->reservation_mask =
         (uint8_t)(plan.start_mask | plan.complete_mask);
     endpoint->reservation_bytes = key.max_packet;

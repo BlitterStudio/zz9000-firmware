@@ -87,6 +87,25 @@ static inline int ehci_periodic_use_software_poll(
            plan->interval_microframes > 8U;
 }
 
+static inline void ehci_periodic_prepare_bandwidth_plan(
+    unsigned speed, struct ehci_periodic_plan *plan)
+{
+    if (!plan)
+        return;
+    if (ehci_periodic_use_software_poll(speed, plan)) {
+        /*
+         * A one-shot QH is placed relative to the live frame counter, not at
+         * the endpoint's descriptor phase. Reserve its microframes in every
+         * frame so ISO admission cannot overlap a dynamically chosen poll.
+         */
+        plan->frame_interval = 1U;
+        plan->frame_phase = 0;
+    } else if (plan->frame_interval > 1024U) {
+        plan->frame_interval = 1024U;
+        plan->frame_phase %= 1024U;
+    }
+}
+
 static inline int ehci_periodic_build_plan(
     unsigned speed, unsigned interval, int split,
     unsigned think_time, int multi_tt, unsigned slot_seed,

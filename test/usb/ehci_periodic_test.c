@@ -46,6 +46,34 @@ static void test_high_speed_cadence(void)
     assert(!ehci_periodic_frame_due(&plan, 0));
 }
 
+static void test_software_poll_reserves_every_frame(void)
+{
+    struct ehci_periodic_plan plan;
+
+    assert(ehci_periodic_build_plan(EHCI_PERIODIC_SPEED_HIGH, 16, 0,
+                                    0, 0, 0, &plan));
+    assert(plan.frame_interval == 2);
+    ehci_periodic_prepare_bandwidth_plan(
+        EHCI_PERIODIC_SPEED_HIGH, &plan);
+    assert(plan.frame_interval == 1);
+    assert(plan.frame_phase == 0);
+    assert(ehci_periodic_frame_due(&plan, 0));
+    assert(ehci_periodic_frame_due(&plan, 1));
+
+    assert(ehci_periodic_build_plan(EHCI_PERIODIC_SPEED_HIGH, 8192, 0,
+                                    0, 0, 0, &plan));
+    ehci_periodic_prepare_bandwidth_plan(
+        EHCI_PERIODIC_SPEED_HIGH, &plan);
+    assert(plan.frame_interval == 1);
+
+    assert(ehci_periodic_build_plan(EHCI_PERIODIC_SPEED_HIGH, 8, 0,
+                                    0, 0, 0, &plan));
+    ehci_periodic_prepare_bandwidth_plan(
+        EHCI_PERIODIC_SPEED_HIGH, &plan);
+    assert(plan.frame_interval == 1);
+}
+
+
 static void test_legacy_high_speed_interval_exponent(void)
 {
     assert(ehci_periodic_normalize_hs_binterval(1) == 1);
@@ -153,6 +181,7 @@ static void test_all_input_completion_paths_require_rearm(void)
 int main(void)
 {
     test_high_speed_cadence();
+    test_software_poll_reserves_every_frame();
     test_legacy_high_speed_interval_exponent();
     test_split_masks();
     test_transient_buffer_retirement();
