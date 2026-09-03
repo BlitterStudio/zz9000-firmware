@@ -57,6 +57,8 @@ struct usb_proxy_iso_batch {
 static struct usb_proxy_iso_batch iso_batches[ZZUSB_ISO_MAX_BATCHES]
     __attribute__((aligned(32)));
 static uint8_t iso_pump_cursor;
+static uint16_t iso_retired_frame[ZZUSB_ISO_MAX_BATCHES];
+static uint8_t iso_retired_valid[ZZUSB_ISO_MAX_BATCHES];
 
 static struct ehci_ctrl *iso_controller(void)
 {
@@ -81,7 +83,7 @@ static unsigned iso_metadata_size(unsigned packet_count)
 
 static uint32_t iso_interval_uframes(const struct ehci_iso_config *config)
 {
-    return (1U << (config->interval - 1U)) *
+    return (uint32_t)config->interval *
            (config->speed == 3U ? 1U : 8U);
 }
 
@@ -217,6 +219,7 @@ uint16_t usb_proxy_iso_handle_queue(volatile struct ZZUSBCommand *cmd,
     uint16_t start_frame;
     uint8_t start_microframe;
     uint16_t flags;
+    uint16_t current_frame;
     unsigned metadata_size;
     unsigned slot;
     unsigned packet;
@@ -245,9 +248,14 @@ uint16_t usb_proxy_iso_handle_queue(volatile struct ZZUSBCommand *cmd,
         (be16(&cmd->direction) == 0x80 && wire_length != metadata_size))
         return ZZUSB_STATUS_BADPARAM;
 
+    current_frame = ehci_iso_current_frame(ctrl);
     for (slot = 0; slot < ZZUSB_ISO_MAX_BATCHES; slot++) {
-        if (!iso_batches[slot].used && !batch)
+        if (!iso_batches[slot].used && !batch &&
+            (!iso_retired_valid[slot] ||
+             iso_retired_frame[slot] != current_frame)) {
+            iso_retired_valid[slot] = 0;
             batch = &iso_batches[slot];
+        }
         if (iso_identity_matches(&iso_batches[slot], cmd) &&
             iso_batches[slot].batch_id == batch_id)
             return ZZUSB_STATUS_STALE;
@@ -400,6 +408,15 @@ uint16_t usb_proxy_iso_handle_reap(volatile struct ZZUSBCommand *cmd,
         }
         put_be32(&cmd->actual_length, output_size);
         zzusb_diag_count(ZZUSB_DIAG_COUNT_ISO_REAP);
+        /*
+         * EHCI may retain a prefetched siTD through the current frame.
+         * Linux likewise refuses to recycle a completed siTD in its
+         * retirement frame; keep this slot unavailable until FRINDEX
+         * advances before allowing its descriptor storage to be reused.
+         */
+        iso_retired_frame[slot] = ehci_iso_current_frame(
+            batch->transfer.ctrl);
+        iso_retired_valid[slot] = 1;
         memset(batch, 0, sizeof(*batch));
         usb_proxy_refresh_event_irq();
         return ZZUSB_STATUS_OK;
@@ -447,6 +464,7 @@ int usb_proxy_iso_stop_all(uint8_t unfinished_status)
         }
         memset(batch, 0, sizeof(*batch));
     }
+    memset(iso_retired_valid, 0, sizeof(iso_retired_valid));
     usb_proxy_refresh_event_irq();
     return result;
 }
@@ -454,6 +472,7 @@ int usb_proxy_iso_stop_all(uint8_t unfinished_status)
 void usb_proxy_iso_after_controller_reset(void)
 {
     memset(iso_batches, 0, sizeof(iso_batches));
+    memset(iso_retired_valid, 0, sizeof(iso_retired_valid));
     ehci_iso_reset_bandwidth();
     iso_pump_cursor = 0;
 }

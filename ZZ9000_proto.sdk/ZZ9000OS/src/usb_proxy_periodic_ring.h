@@ -41,4 +41,10 @@ static inline int zzusb_periodic_ring_remove(
     return 1;
 }
 
+static inline int zzusb_periodic_rearm_ready(
+    int needs_rearm, int host_requested)
+{
+    return needs_rearm && host_requested;
+}
+
 #endif

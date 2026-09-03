@@ -365,25 +365,19 @@ static void ehci_update_endpt2_dev_n_port(struct usb_device *udev,
 {
 	uint8_t portnr = 0;
 	uint8_t hubaddr = 0;
-	int parent_devnum = -1;
 
 	if (udev->speed != USB_SPEED_LOW && udev->speed != USB_SPEED_FULL)
 		return;
 
-	if (udev->parent) {
-		parent_devnum = udev->parent->devnum;
-	}
 
 	/*
-	 * A FS/LS device directly attached to the root port does not sit
-	 * behind an external high-speed hub TT. U-Boot's generic helper also
-	 * returns hub address 0 for this case, but keep the direct-root case
-	 * explicit here because the proxy path builds synthetic usb_device
-	 * objects rather than using the full hub enumerator.
+	 * A FS/LS device directly attached to the root port has the root device
+	 * as its immediate parent. Synthetic proxy devices behind an external
+	 * hub have a hub parent even while they still use address zero during
+	 * enumeration; address zero must therefore not bypass the external TT.
 	 */
 	if (!udev->parent ||
-	    (udev->parent && udev->parent->parent == NULL) ||
-	    (udev->devnum == 0 && parent_devnum <= 1 && udev->portnr == 1)) {
+	    (udev->parent && udev->parent->parent == NULL)) {
 		hubaddr = 0;
 		portnr = udev->portnr ? udev->portnr : 1;
 	} else {
@@ -443,6 +437,7 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	int descriptors_reclaimable = 0;
 	unsigned long timeout;
 	int ret = 0;
+	int idle_bulk_in_timeout = 0;
 	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
 	if (ehci_recovery_required) {
 		dev->status = USB_ST_CRC_ERR;
@@ -736,6 +731,9 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 			break;
 		//WATCHDOG_RESET(); // FIXME
 	} while (get_timer(ts) < timeout);
+	if (req == NULL && usb_pipein(pipe) &&
+	    QT_TOKEN_GET_STATUS(token) == QT_TOKEN_STATUS_ACTIVE)
+		idle_bulk_in_timeout = 1;
 
 	/*
 	 * Invalidate the memory area occupied by buffer
@@ -781,11 +779,9 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	 *      have the HALTED bit or a stale qTD pointer).
 	 *   3. Clear any W1C error bits in USBSTS so subsequent
 	 *      handshakes don't misinterpret stale flags.
-	 *   4. Ensure dev->status conveys a mapped error code. Leaving
-	 *      it as USB_ST_NOT_PROC propagates as the generic
-	 *      ZZUSB_STATUS_ERROR and the driver has no useful
-	 *      response — map it to USB_ST_CRC_ERR which upper layers
-	 *      handle as a transaction error that can be retried.
+	 *   4. Ensure dev->status conveys a mapped result. An error-free
+	 *      bulk-IN timeout is an idle endpoint (NAK); actual qTD error
+	 *      bits remain a CRC/transaction failure.
 	 *
 	 * Without this cleanup, a USB ethernet device that glitched and
 	 * left a stuck qTD would poison the next transfer's queue head
@@ -810,16 +806,15 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 		ehci_writel(&ctrl->hcor->or_usbsts, sts & 0x3f);
 
 		/*
-		 * qTD still ACTIVE after USB_TIMEOUT_MS — the transfer
-		 * didn't retire. Give callers a mapped error (CRC) so
-		 * they can retry or surface the failure instead of
-		 * seeing the uninitialised USB_ST_NOT_PROC. The Amiga
-		 * driver's per-unit zz_PortDead sticky flag handles
-		 * "device unreachable" escalation if multiple errors
-		 * occur in a row.
+		 * A still-active bulk-IN qTD with no error bits is normally an
+		 * idle streaming endpoint returning NAK. Preserve that semantic
+		 * across the bounded synchronous proxy poll so the Amiga driver
+		 * can keep the original asynchronous IOR pending. Real transaction
+		 * errors retain USB_ST_CRC_ERR and remain visible to Poseidon.
 		 */
 		if (QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE)
-			dev->status = USB_ST_CRC_ERR;
+			dev->status = idle_bulk_in_timeout ?
+				USB_ST_NAK_REC : USB_ST_CRC_ERR;
 	}
 
 	if (!(QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE)) {
@@ -1981,6 +1976,12 @@ static int _ehci_destroy_int_queue(struct usb_device *dev,
 int ehci_controller_needs_recovery(void)
 {
 	return ehci_recovery_required;
+}
+
+int ehci_async_schedule_active(struct ehci_ctrl *ctrl)
+{
+	return ctrl && ctrl->hcor &&
+	       (ehci_readl(&ctrl->hcor->or_usbsts) & STS_ASS) != 0;
 }
 
 int ehci_controller_recover(void)

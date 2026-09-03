@@ -17,12 +17,14 @@ static void test_high_speed_cadence(void)
     assert(plan.start_mask == 0xff);
     assert(plan.complete_mask == 0);
 
-    assert(ehci_periodic_build_plan(EHCI_PERIODIC_SPEED_HIGH, 3, 0,
+    assert(ehci_periodic_build_plan(EHCI_PERIODIC_SPEED_HIGH, 4, 0,
                                     0, 0, 0, &plan));
     assert(plan.interval_microframes == 4);
+    assert(!ehci_periodic_use_software_poll(
+        EHCI_PERIODIC_SPEED_HIGH, &plan));
     assert(plan.start_mask == 0x11);
 
-    assert(ehci_periodic_build_plan(EHCI_PERIODIC_SPEED_HIGH, 16, 0,
+    assert(ehci_periodic_build_plan(EHCI_PERIODIC_SPEED_HIGH, 32768, 0,
                                     0, 0, 0, &plan));
     assert(plan.interval_microframes == 32768);
     assert(plan.frame_interval == 4096);
@@ -31,7 +33,11 @@ static void test_high_speed_cadence(void)
     assert(ehci_periodic_frame_due(&plan, 0));
     assert(!ehci_periodic_frame_due(&plan, 1));
     assert(plan.start_mask == 0x01);
-    assert(!ehci_periodic_build_plan(EHCI_PERIODIC_SPEED_HIGH, 17, 0,
+    assert(ehci_periodic_use_software_poll(
+        EHCI_PERIODIC_SPEED_HIGH, &plan));
+    assert(!ehci_periodic_use_software_poll(
+        EHCI_PERIODIC_SPEED_FULL, &plan));
+    assert(!ehci_periodic_build_plan(EHCI_PERIODIC_SPEED_HIGH, 3, 0,
                                      0, 0, 0, &plan));
 
     plan.frame_interval = 1024;
@@ -100,12 +106,20 @@ static void test_ready_ring_wrap_and_no_overwrite(void)
     assert(head == 0);
 }
 
+static void test_completed_endpoint_waits_for_host_rearm(void)
+{
+    assert(!zzusb_periodic_rearm_ready(1, 0));
+    assert(zzusb_periodic_rearm_ready(1, 1));
+    assert(!zzusb_periodic_rearm_ready(0, 1));
+}
+
 int main(void)
 {
     test_high_speed_cadence();
     test_split_masks();
     test_transient_buffer_retirement();
     test_ready_ring_wrap_and_no_overwrite();
+    test_completed_endpoint_waits_for_host_rearm();
     puts("EHCI periodic cadence, split masks, and bounded ring contract satisfied");
     return 0;
 }

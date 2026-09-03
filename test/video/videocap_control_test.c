@@ -145,7 +145,7 @@ static int main_source_contract(void)
 	fclose(source);
 
 	if (revision_major_defines != 1U || revision_minor_defines != 1U ||
-	    ((revision_major << 8) | revision_minor) != 0x0209U) {
+	    ((revision_major << 8) | revision_minor) != 0x0208U) {
 		printf("firmware revision contract mismatch: defines=%u/%u revision=0x%04x\n",
 		       revision_major_defines, revision_minor_defines,
 		       (revision_major << 8) | revision_minor);

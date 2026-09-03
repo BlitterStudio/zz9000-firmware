@@ -120,6 +120,18 @@ static inline int ehci_iso_frame_schedulable(uint16_t future,
     return distance >= 4U && distance < 1024U;
 }
 
+static inline int ehci_iso_sitd_frame_expired(uint16_t current,
+                                              uint16_t scheduled)
+{
+    uint16_t distance = ehci_iso_frame_distance(current, scheduled);
+
+    /*
+     * Complete-split processing may still own a siTD during the frame
+     * following its scheduled start-split frame.
+     */
+    return distance > 1U && distance < 1024U;
+}
+
 static inline uint16_t ehci_iso_itd_actual(uint32_t transaction,
                                            uint16_t requested)
 {

@@ -44,6 +44,18 @@ static inline int ehci_periodic_frame_due(
     return (uint16_t)((frame + interval - phase) % interval) == 0;
 }
 
+/*
+ * Persistent QHs have only been hardware-verified for sub-frame high-speed
+ * cadence. Sparse high-speed endpoints use bounded one-shot transactions so
+ * a hub's long status interval cannot destabilize the periodic frame list.
+ */
+static inline int ehci_periodic_use_software_poll(
+    unsigned speed, const struct ehci_periodic_plan *plan)
+{
+    return speed == EHCI_PERIODIC_SPEED_HIGH && plan &&
+           plan->interval_microframes > 8U;
+}
+
 static inline int ehci_periodic_build_plan(
     unsigned speed, unsigned interval, int split,
     unsigned think_time, int multi_tt, unsigned slot_seed,
@@ -57,9 +69,10 @@ static inline int ehci_periodic_build_plan(
     plan->frame_phase = 0;
 
     if (speed == EHCI_PERIODIC_SPEED_HIGH) {
-        if (interval > 16U || split)
+        if (interval > 32768U || (interval & (interval - 1U)) != 0 ||
+            split)
             return 0;
-        microframes = 1UL << (interval - 1U);
+        microframes = interval;
         plan->interval_microframes = microframes;
         plan->frame_interval = (uint16_t)(
             microframes > 8U ? microframes / 8U : 1U);

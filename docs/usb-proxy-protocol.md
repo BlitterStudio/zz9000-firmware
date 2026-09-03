@@ -51,7 +51,7 @@ Firmware raises interrupt-source bit `16` in `REG_ZZ_CONFIG` only after it queue
 
 ## Isochronous transport
 
-`ISO_QUEUE`, `ISO_REAP`, and `ISO_STOP` use transfer type ISO and are available only in negotiated v2 mode. The firmware retains at most eight batches globally, with at most 32 packets and 15840 data bytes per batch. High-speed endpoints use iTDs; full-speed endpoints are accepted only behind a high-speed hub and use split-transaction siTDs. Low-speed ISO is invalid. High- and full-speed `bInterval` values use the USB 2.0 exponent rule.
+`ISO_QUEUE`, `ISO_REAP`, and `ISO_STOP` use transfer type ISO and are available only in negotiated v2 mode. The firmware retains at most eight batches globally, with at most 32 packets and 15840 data bytes per batch. High-speed endpoints use iTDs; full-speed endpoints are accepted only behind a high-speed hub and use split-transaction siTDs. Low-speed ISO is invalid. Poseidon normalizes high-speed intervals to microframes and full-speed intervals to frames before submitting hardware requests; the proxy carries those normalized power-of-two values unchanged.
 
 The batch header is 32 bytes:
 

@@ -199,14 +199,16 @@ int ehci_iso_schedule(struct ehci_iso_transfer *transfer,
         packets[0].microframe > 7U)
         return EHCI_ISO_ERR_INVALID;
     if (config->speed == 3U) {
-        if (config->split || config->interval > 16U)
+        if (config->split || config->interval > 32768U ||
+            (config->interval & (config->interval - 1U)) != 0)
             return EHCI_ISO_ERR_INVALID;
-        step = 1U << (config->interval - 1U);
+        step = config->interval;
     } else {
         if (!config->split || config->speed != 2U ||
-            config->interval > 16U)
+            config->interval > 32768U ||
+            (config->interval & (config->interval - 1U)) != 0)
             return EHCI_ISO_ERR_INVALID;
-        step = (uint32_t)(1U << (config->interval - 1U)) * 8U;
+        step = (uint32_t)config->interval * 8U;
     }
 
     memset(transfer, 0, sizeof(*transfer));
@@ -365,7 +367,7 @@ int ehci_iso_poll(struct ehci_iso_transfer *transfer)
         if (transfer->config.split) {
             state = descriptor->sitd.results;
             if (state & EHCI_SITD_ACTIVE) {
-                if (frame_has_passed(current, packet->frame))
+                if (ehci_iso_sitd_frame_expired(current, packet->frame))
                     packet->status = EHCI_ISO_PACKET_MISSED;
                 else
                     pending++;

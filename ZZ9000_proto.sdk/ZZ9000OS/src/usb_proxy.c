@@ -312,6 +312,7 @@ struct periodic_endpoint {
     uint8_t used;
     uint8_t completion_pending;
     uint8_t needs_rearm;
+    uint8_t rearm_requested;
     uint8_t failed;
     uint8_t software_polled;
     uint8_t bandwidth_reserved;
@@ -486,6 +487,14 @@ void usb_proxy_periodic_pump(void)
             uint16_t status;
             uint32_t actual;
 
+            /*
+             * A software-polled endpoint creates and retires a temporary
+             * periodic QH. Do not mutate that schedule from inside an active
+             * async control/bulk transfer; defer the hub poll to the next
+             * pump pass instead.
+             */
+            if (ehci_async_schedule_active(endpoint->dev.controller))
+                continue;
             if (now < endpoint->next_due)
                 continue;
             endpoint->next_due = now + endpoint->interval_ticks;
@@ -506,7 +515,9 @@ void usb_proxy_periodic_pump(void)
         if (!endpoint->queue)
             continue;
         if (endpoint->needs_rearm) {
-            if (now < endpoint->next_due)
+            if (!zzusb_periodic_rearm_ready(
+                    endpoint->needs_rearm, endpoint->rearm_requested) ||
+                now < endpoint->next_due)
                 continue;
             if (rearm_int_queue(&endpoint->dev, endpoint->queue) < 0) {
                 endpoint->failed = 1;
@@ -514,6 +525,7 @@ void usb_proxy_periodic_pump(void)
                 continue;
             }
             endpoint->needs_rearm = 0;
+            endpoint->rearm_requested = 0;
         }
 
         completed = poll_int_queue(&endpoint->dev, endpoint->queue);
@@ -532,6 +544,7 @@ void usb_proxy_periodic_pump(void)
                                       endpoint->dev.act_len);
         } else {
             endpoint->needs_rearm = 1;
+            endpoint->rearm_requested = 1;
         }
     }
 }
@@ -625,6 +638,8 @@ static uint16_t handle_periodic_arm(volatile struct ZZUSBCommand *cmd,
             continue;
         }
         if (periodic_keys_equal(&periodic_endpoints[index].key, &key)) {
+            if (periodic_endpoints[index].needs_rearm)
+                periodic_endpoints[index].rearm_requested = 1;
             if (periodic_endpoints[index].completion_pending)
                 amiga_interrupt_set(AMIGA_INTERRUPT_USB);
             put_be32(&cmd->actual_length, 0);
@@ -686,7 +701,7 @@ static uint16_t handle_periodic_arm(volatile struct ZZUSBCommand *cmd,
     }
     if (!is_in)
         memcpy(endpoint->buffer, data_buf, length);
-    if (plan.frame_interval > 1024U) {
+    if (ehci_periodic_use_software_poll(dev.speed, &plan)) {
         endpoint->software_polled = 1;
         endpoint->next_due = periodic_now();
         endpoint->used = 1;
@@ -747,7 +762,14 @@ static uint16_t handle_periodic_reap(volatile struct ZZUSBCommand *cmd,
             if (periodic_release_slot(index) < 0)
                 status = ZZUSB_STATUS_HOSTERROR;
         } else if (!endpoint->software_polled) {
+            /*
+             * A hub change bit remains asserted until its class driver
+             * clears the port feature. Wait for the next Amiga IOR before
+             * polling again; otherwise duplicate change reports can pile up
+             * while Poseidon is still tearing down the removed child.
+             */
             endpoint->needs_rearm = 1;
+            endpoint->rearm_requested = 0;
         }
         if (periodic_ready_count)
             amiga_interrupt_set(AMIGA_INTERRUPT_USB);
@@ -987,7 +1009,7 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
      * [usb-proxy] ctrl fail / set_addr / reset prints below
      * still fire for rare events and are enough for triage. */
 
-    if (dev_addr == 0 && endpoint == 0) {
+    if (dev_addr == 0 && endpoint == 0 && !split_hub_ptr) {
         int root_speed_zz;
         int root_pspd;
 
