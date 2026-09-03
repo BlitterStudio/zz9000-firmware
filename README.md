@@ -314,7 +314,7 @@ additional notes.
 
 ## USB host stack
 
-Firmware 2.9 and `zzusbhw.device` 2.2 form one USB proxy release. The
+Firmware 2.8.0 RC3 and `zzusbhw.device` 2.2 form one USB proxy release. The
 matched pair negotiates protocol v2 before advertising persistent interrupt,
 simple ISO, or realtime ISO support. A driver that does not receive the
 required capability set leaves those public capabilities disabled rather than

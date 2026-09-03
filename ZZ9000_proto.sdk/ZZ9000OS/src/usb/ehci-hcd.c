@@ -365,25 +365,19 @@ static void ehci_update_endpt2_dev_n_port(struct usb_device *udev,
 {
 	uint8_t portnr = 0;
 	uint8_t hubaddr = 0;
-	int parent_devnum = -1;
 
 	if (udev->speed != USB_SPEED_LOW && udev->speed != USB_SPEED_FULL)
 		return;
 
-	if (udev->parent) {
-		parent_devnum = udev->parent->devnum;
-	}
 
 	/*
-	 * A FS/LS device directly attached to the root port does not sit
-	 * behind an external high-speed hub TT. U-Boot's generic helper also
-	 * returns hub address 0 for this case, but keep the direct-root case
-	 * explicit here because the proxy path builds synthetic usb_device
-	 * objects rather than using the full hub enumerator.
+	 * A FS/LS device directly attached to the root port has the root device
+	 * as its immediate parent. Synthetic proxy devices behind an external
+	 * hub have a hub parent even while they still use address zero during
+	 * enumeration; address zero must therefore not bypass the external TT.
 	 */
 	if (!udev->parent ||
-	    (udev->parent && udev->parent->parent == NULL) ||
-	    (udev->devnum == 0 && parent_devnum <= 1 && udev->portnr == 1)) {
+	    (udev->parent && udev->parent->parent == NULL)) {
 		hubaddr = 0;
 		portnr = udev->portnr ? udev->portnr : 1;
 	} else {
@@ -426,7 +420,7 @@ static int ehci_unlink_async_qh(struct ehci_ctrl *ctrl)
 static int
 ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 		   void *buffer, int length, struct devrequest *req,
-		   unsigned long timeout_ms)
+		   unsigned long timeout_ms, int idle_bulk_poll)
 {
 	struct ehci_async_allocation *allocation;
 	struct QH *qh;
@@ -443,6 +437,7 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	int descriptors_reclaimable = 0;
 	unsigned long timeout;
 	int ret = 0;
+	int idle_bulk_in_timeout = 0;
 	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
 	if (ehci_recovery_required) {
 		dev->status = USB_ST_CRC_ERR;
@@ -736,6 +731,9 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 			break;
 		//WATCHDOG_RESET(); // FIXME
 	} while (get_timer(ts) < timeout);
+	if (idle_bulk_poll && req == NULL && usb_pipein(pipe) &&
+	    ehci_qtd_idle_active((uint8_t)QT_TOKEN_GET_STATUS(token)))
+		idle_bulk_in_timeout = 1;
 
 	/*
 	 * Invalidate the memory area occupied by buffer
@@ -781,11 +779,9 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 	 *      have the HALTED bit or a stale qTD pointer).
 	 *   3. Clear any W1C error bits in USBSTS so subsequent
 	 *      handshakes don't misinterpret stale flags.
-	 *   4. Ensure dev->status conveys a mapped error code. Leaving
-	 *      it as USB_ST_NOT_PROC propagates as the generic
-	 *      ZZUSB_STATUS_ERROR and the driver has no useful
-	 *      response — map it to USB_ST_CRC_ERR which upper layers
-	 *      handle as a transaction error that can be retried.
+	 *   4. Ensure dev->status conveys a mapped result. An error-free
+	 *      bulk-IN timeout is an idle endpoint (NAK); actual qTD error
+	 *      bits remain a CRC/transaction failure.
 	 *
 	 * Without this cleanup, a USB ethernet device that glitched and
 	 * left a stuck qTD would poison the next transfer's queue head
@@ -810,16 +806,14 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 		ehci_writel(&ctrl->hcor->or_usbsts, sts & 0x3f);
 
 		/*
-		 * qTD still ACTIVE after USB_TIMEOUT_MS — the transfer
-		 * didn't retire. Give callers a mapped error (CRC) so
-		 * they can retry or surface the failure instead of
-		 * seeing the uninitialised USB_ST_NOT_PROC. The Amiga
-		 * driver's per-unit zz_PortDead sticky flag handles
-		 * "device unreachable" escalation if multiple errors
-		 * occur in a row.
+		 * Only an explicitly marked open-ended bulk-IN poll converts an
+		 * idle qTD deadline to NAK. Ordinary finite requests must surface
+		 * the requested timeout rather than remain pending indefinitely.
+		 * Real qTD transaction errors are decoded below.
 		 */
 		if (QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE)
-			dev->status = USB_ST_CRC_ERR;
+			dev->status = idle_bulk_in_timeout ?
+				USB_ST_NAK_REC : USB_ST_TIMEOUT;
 	}
 
 	if (!(QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE)) {
@@ -877,15 +871,15 @@ fail:
 int ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
 		   int length, struct devrequest *req)
 {
-	return ehci_submit_async_internal(dev, pipe, buffer, length, req, 0);
+	return ehci_submit_async_internal(dev, pipe, buffer, length, req, 0, 0);
 }
 
 int ehci_submit_async_timeout(struct usb_device *dev, unsigned long pipe,
 		   void *buffer, int length, struct devrequest *req,
-		   unsigned long timeout_ms)
+		   unsigned long timeout_ms, int idle_bulk_poll)
 {
 	return ehci_submit_async_internal(dev, pipe, buffer, length, req,
-					  timeout_ms);
+					  timeout_ms, idle_bulk_poll);
 }
 
 static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,
@@ -1827,6 +1821,7 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 	struct QH *cur = queue->current;
 	struct qTD *cur_td;
 	uint32_t token, toggle;
+	uint8_t qtd_status;
 	unsigned long pipe = queue->pipe;
 
 	/* depleted queue */
@@ -1858,26 +1853,36 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 	 * errors exactly the way it expects.
 	 */
 	dev->act_len = queue->elementsize - QT_TOKEN_GET_TOTALBYTES(token);
-	switch (QT_TOKEN_GET_STATUS(token) &
-		~(QT_TOKEN_STATUS_SPLITXSTATE | QT_TOKEN_STATUS_PERR)) {
-	case 0:
-		dev->status = 0;
-		break;
-	case QT_TOKEN_STATUS_HALTED:
-		dev->status = USB_ST_STALLED;
-		break;
-	case QT_TOKEN_STATUS_ACTIVE | QT_TOKEN_STATUS_DATBUFERR:
-	case QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_DATBUFERR:
-	case QT_TOKEN_STATUS_DATBUFERR:
-		dev->status = USB_ST_BUF_ERR;
-		break;
-	case QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_BABBLEDET:
-	case QT_TOKEN_STATUS_BABBLEDET:
-		dev->status = USB_ST_BABBLE_DET;
-		break;
-	default:
-		dev->status = USB_ST_CRC_ERR;
-		break;
+	qtd_status = (uint8_t)(QT_TOKEN_GET_STATUS(token) &
+		~(QT_TOKEN_STATUS_SPLITXSTATE | QT_TOKEN_STATUS_PERR));
+	if (ehci_periodic_qtd_missed(qtd_status)) {
+		/*
+		 * The controller did not execute this periodic opportunity.
+		 * Leave the interrupt request pending and rearm it instead of
+		 * reporting a packet CRC error for a transaction that never ran.
+		 */
+		dev->status = USB_ST_NAK_REC;
+	} else {
+		switch (qtd_status) {
+		case 0:
+			dev->status = 0;
+			break;
+		case QT_TOKEN_STATUS_HALTED:
+			dev->status = USB_ST_STALLED;
+			break;
+		case QT_TOKEN_STATUS_ACTIVE | QT_TOKEN_STATUS_DATBUFERR:
+		case QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_DATBUFERR:
+		case QT_TOKEN_STATUS_DATBUFERR:
+			dev->status = USB_ST_BUF_ERR;
+			break;
+		case QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_BABBLEDET:
+		case QT_TOKEN_STATUS_BABBLEDET:
+			dev->status = USB_ST_BABBLE_DET;
+			break;
+		default:
+			dev->status = USB_ST_CRC_ERR;
+			break;
+		}
 	}
 
 	if (cur != queue->last)
@@ -1981,6 +1986,12 @@ static int _ehci_destroy_int_queue(struct usb_device *dev,
 int ehci_controller_needs_recovery(void)
 {
 	return ehci_recovery_required;
+}
+
+int ehci_async_schedule_active(struct ehci_ctrl *ctrl)
+{
+	return ctrl && ctrl->hcor &&
+	       (ehci_readl(&ctrl->hcor->or_usbsts) & STS_ASS) != 0;
 }
 
 int ehci_controller_recover(void)

@@ -88,7 +88,7 @@ void Xil_AssertNonVoid() {}
  * live calibration also requires the bitstream's exact capability. Other
  * SDK additions use service flags and status pages that self-gate. */
 #define REVISION_MAJOR 2
-#define REVISION_MINOR 9
+#define REVISION_MINOR 8
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
@@ -216,6 +216,7 @@ void usb_proxy_poll_maintenance(void)
 		&usb_proxy_maint_cmd_snapshot, &usb_proxy_maint_ext_snapshot, 1,
 		usb_proxy_get_controller_epoch());
 	if (result == ZZUSB_STATUS_OK &&
+	    command != ZZUSB_CMD_QUERY_CAPS &&
 	    command != ZZUSB_CMD_ISO_QUEUE &&
 	    command != ZZUSB_CMD_ISO_REAP &&
 	    command != ZZUSB_CMD_ISO_STOP)

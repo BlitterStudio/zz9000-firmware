@@ -26,6 +26,37 @@ static inline int ehci_periodic_buffer_reclaimable(
     return !controller_recovery_pending;
 }
 
+/*
+ * EHCI reports a missed periodic opportunity in the qTD status byte. It is
+ * not a packet CRC failure: no transaction completed, so the interrupt
+ * request must remain pending and be scheduled again.
+ */
+static inline int ehci_periodic_qtd_missed(uint8_t status)
+{
+    const uint8_t halted = 0x40U;
+    const uint8_t missed = 0x04U;
+    const uint8_t non_error_state = 0x03U;
+    uint8_t normalized = (uint8_t)(status & (uint8_t)~non_error_state);
+
+    return normalized == missed || normalized == (halted | missed);
+}
+
+static inline int ehci_qtd_idle_active(uint8_t status)
+{
+    const uint8_t active = 0x80U;
+    const uint8_t non_error_state = 0x03U;
+
+    return (uint8_t)(status & (uint8_t)~non_error_state) == active;
+}
+
+static inline uint16_t ehci_periodic_normalize_hs_binterval(
+    uint16_t interval)
+{
+    if (interval == 0 || interval > 16U)
+        return 0;
+    return (uint16_t)(1U << (interval - 1U));
+}
+
 static inline uint16_t ehci_periodic_hardware_frame_interval(
     const struct ehci_periodic_plan *plan)
 {
@@ -44,6 +75,37 @@ static inline int ehci_periodic_frame_due(
     return (uint16_t)((frame + interval - phase) % interval) == 0;
 }
 
+/*
+ * Persistent QHs have only been hardware-verified for sub-frame high-speed
+ * cadence. Sparse high-speed endpoints use bounded one-shot transactions so
+ * a hub's long status interval cannot destabilize the periodic frame list.
+ */
+static inline int ehci_periodic_use_software_poll(
+    unsigned speed, const struct ehci_periodic_plan *plan)
+{
+    return speed == EHCI_PERIODIC_SPEED_HIGH && plan &&
+           plan->interval_microframes > 8U;
+}
+
+static inline void ehci_periodic_prepare_bandwidth_plan(
+    unsigned speed, struct ehci_periodic_plan *plan)
+{
+    if (!plan)
+        return;
+    if (ehci_periodic_use_software_poll(speed, plan)) {
+        /*
+         * A one-shot QH is placed relative to the live frame counter, not at
+         * the endpoint's descriptor phase. Reserve its microframes in every
+         * frame so ISO admission cannot overlap a dynamically chosen poll.
+         */
+        plan->frame_interval = 1U;
+        plan->frame_phase = 0;
+    } else if (plan->frame_interval > 1024U) {
+        plan->frame_interval = 1024U;
+        plan->frame_phase %= 1024U;
+    }
+}
+
 static inline int ehci_periodic_build_plan(
     unsigned speed, unsigned interval, int split,
     unsigned think_time, int multi_tt, unsigned slot_seed,
@@ -57,9 +119,10 @@ static inline int ehci_periodic_build_plan(
     plan->frame_phase = 0;
 
     if (speed == EHCI_PERIODIC_SPEED_HIGH) {
-        if (interval > 16U || split)
+        if (interval > 32768U || (interval & (interval - 1U)) != 0 ||
+            split)
             return 0;
-        microframes = 1UL << (interval - 1U);
+        microframes = interval;
         plan->interval_microframes = microframes;
         plan->frame_interval = (uint16_t)(
             microframes > 8U ? microframes / 8U : 1U);

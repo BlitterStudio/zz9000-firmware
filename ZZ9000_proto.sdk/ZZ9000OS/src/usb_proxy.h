@@ -76,6 +76,7 @@ struct ehci_ctrl;
 #define ZZUSB_FLAG_SPLIT        0x0001
 #define ZZUSB_FLAG_RESET_FSLS   0x0002
 #define ZZUSB_FLAG_MULTI_TT     0x0004
+#define ZZUSB_FLAG_BULK_IN_POLL 0x0008
 #define ZZUSB_FLAG_TT_THINK_SHIFT 4
 #define ZZUSB_FLAG_TT_THINK_MASK  0x0030
 
@@ -204,6 +205,11 @@ static inline int zzusb_valid_hs_iso_max_packet(uint16_t encoded) {
     return base != 0 && base <= 1024U && multiplier <= 2U &&
            (encoded & 0xe000U) == 0;
 }
+static inline int zzusb_valid_normalized_interval(uint16_t interval) {
+    return interval != 0 && interval <= 32768U &&
+           (interval & (interval - 1U)) == 0;
+}
+
 
 
 static inline uint16_t zzusb_validate_command(
@@ -273,7 +279,8 @@ static inline uint16_t zzusb_validate_command(
         break;
     case ZZUSB_CMD_BULK_XFER:
         if ((is_v2 && xfer_type != ZZUSB_XFER_BULK) ||
-            endpoint == 0 || max_packet == 0 || max_packet > 512)
+            endpoint == 0 || max_packet == 0 || max_packet > 512 ||
+            ((flags & ZZUSB_FLAG_BULK_IN_POLL) && direction != 0x80))
             return ZZUSB_STATUS_BADPARAM;
         break;
     case ZZUSB_CMD_INT_XFER:
@@ -314,7 +321,7 @@ static inline uint16_t zzusb_validate_command(
             data_length == 0 || data_length > 1024 ||
             be16(&cmd->interval) == 0 ||
             (speed == ZZUSB_SPEED_HIGH &&
-             be16(&cmd->interval) > 16))
+             !zzusb_valid_normalized_interval(be16(&cmd->interval))))
             return ZZUSB_STATUS_BADPARAM;
         break;
     case ZZUSB_CMD_PERIODIC_STOP:
@@ -330,10 +337,11 @@ static inline uint16_t zzusb_validate_command(
             speed == ZZUSB_SPEED_LOW ||
             (speed == ZZUSB_SPEED_HIGH &&
              (!zzusb_valid_hs_iso_max_packet(max_packet) ||
-              be16(&cmd->interval) > 16 ||
+              !zzusb_valid_normalized_interval(be16(&cmd->interval)) ||
               (flags & ZZUSB_FLAG_SPLIT))) ||
             (speed == ZZUSB_SPEED_FULL &&
-             (max_packet > 1023 || be16(&cmd->interval) > 16 ||
+             (max_packet > 1023 ||
+              !zzusb_valid_normalized_interval(be16(&cmd->interval)) ||
               !(flags & ZZUSB_FLAG_SPLIT))))
             return ZZUSB_STATUS_BADPARAM;
         break;

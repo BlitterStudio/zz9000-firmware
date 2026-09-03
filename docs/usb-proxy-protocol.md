@@ -18,6 +18,8 @@ The physical aperture remains 24576 bytes. A legacy peer may use the historical 
 
 The packed 48-byte prefix is, in order: command, status, device address, endpoint, direction, transfer type, maximum packet size, requested length, actual length, timeout, speed, interval, the eight-byte USB setup packet, split-hub address, split-hub port, flags, and reserved word. Setup `wValue`, `wIndex`, and `wLength` remain USB little-endian; the other multi-byte values are big-endian. Persistent periodic commands use the reserved word as a device generation so a reused USB address cannot inherit an earlier endpoint.
 
+`ZZUSB_FLAG_BULK_IN_POLL` (bit 3) marks an explicitly open-ended bulk-IN slice. An error-free qTD deadline returns `NAK` only with this flag; finite bulk requests return `TIMEOUT`. The flag is invalid for bulk OUT.
+
 ## v2 extension
 
 | Relative offset | Type | Field | Rule |
@@ -43,15 +45,15 @@ Firmware snapshots the command and OUT payload before starting EHCI. It copies I
 
 ## Persistent interrupt transport
 
-`PERIODIC_ARM` creates or reuses one EHCI interrupt queue keyed by epoch, device generation, address, endpoint, direction, speed, maximum packet, interval, and split topology. Full/low-speed split queues encode the transaction-translator think time and multi-TT slot in legal start/complete masks. High-speed `bInterval` values use the USB 2.0 exponent rule. Firmware retains at most 16 endpoints and one unread completion per endpoint; it pauses that endpoint rather than overwrite unread data.
+`PERIODIC_ARM` creates or reuses one EHCI interrupt queue keyed by epoch, device generation, address, endpoint, direction, speed, maximum packet, interval, and split topology. Full/low-speed split queues encode the transaction-translator think time and multi-TT slot in legal start/complete masks. Poseidon normalizes high-speed descriptor `bInterval` exponents to power-of-two microframe intervals before submitting `PERIODIC_ARM` or `PERIODIC_REAP`; the proxy carries those normalized values unchanged. Firmware retains at most 16 endpoints and one unread completion per endpoint; it pauses that endpoint rather than overwrite unread data.
 
-`PERIODIC_REAP` returns one matching completion. `NAK`, a zero-length IN transaction, and an all-zero hub change report are non-terminal to the Poseidon request. A successful reap rearms the retained descriptor no sooner than its declared interval. Transfer errors are terminal and retire the endpoint. `PERIODIC_STOP`, reset, detach, epoch advance, and controller recovery retire matching queues through the fenced EHCI unlink path.
+`PERIODIC_REAP` returns one matching completion. `NAK`, a zero-length IN transaction, and an all-zero hub change report are non-terminal to the Poseidon request. A successful reap rearms the retained descriptor no sooner than its declared interval. The first `STALL` from a split IN endpoint is deferred for 50 ms and retried once, giving the parent hub change endpoint time to report child removal before a disappearing HID endpoint enters Poseidon's clear-halt loop. Before queuing a nonzero hub change report, firmware retires any already-stalled split periodic child whose recorded hub address and port match an asserted port bit; unrelated live children and unrelated hub changes are untouched. Poseidon's subsequent `AbortIO` therefore observes an already quiesced child instead of unlinking its halted QH during class teardown. A repeated stall and all other transfer errors are terminal and retire the endpoint. `PERIODIC_STOP`, reset, detach, epoch advance, and controller recovery retire matching queues through the fenced EHCI unlink path.
 
 Firmware raises interrupt-source bit `16` in `REG_ZZ_CONFIG` only after it queues data or a terminal error. The Amiga interrupt server acknowledges only that source by writing `8 | 256` and signals the mailbox-owning worker; it never accesses the mailbox itself. More unread completions cause firmware to reassert the coalesced source after a reap. The driver installs this shared server on INT6 by default or INT2 when `ZZ9000.CFG` selects `INT2`.
 
 ## Isochronous transport
 
-`ISO_QUEUE`, `ISO_REAP`, and `ISO_STOP` use transfer type ISO and are available only in negotiated v2 mode. The firmware retains at most eight batches globally, with at most 32 packets and 15840 data bytes per batch. High-speed endpoints use iTDs; full-speed endpoints are accepted only behind a high-speed hub and use split-transaction siTDs. Low-speed ISO is invalid. High- and full-speed `bInterval` values use the USB 2.0 exponent rule.
+`ISO_QUEUE`, `ISO_REAP`, and `ISO_STOP` use transfer type ISO and are available only in negotiated v2 mode. The firmware retains at most eight batches globally, with at most 32 packets and 15840 data bytes per batch. High-speed endpoints use iTDs; full-speed endpoints are accepted only behind a high-speed hub and use split-transaction siTDs. Low-speed ISO is invalid. Poseidon normalizes high-speed intervals to microframes and full-speed intervals to frames before submitting hardware requests; the proxy carries those normalized power-of-two values unchanged.
 
 The batch header is 32 bytes:
 

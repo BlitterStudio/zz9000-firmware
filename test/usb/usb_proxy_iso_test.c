@@ -23,8 +23,9 @@ static unsigned fake_refresh_count;
 static uint16_t fake_current_frame = 100;
 static uint8_t *fake_buffer;
 static unsigned fake_schedule_count;
-static uint16_t fake_start_frame[ZZUSB_ISO_MAX_BATCHES];
-static uint8_t fake_start_microframe[ZZUSB_ISO_MAX_BATCHES];
+static uint16_t fake_start_frame[ZZUSB_ISO_MAX_BATCHES + 1U];
+static uint8_t fake_start_microframe[ZZUSB_ISO_MAX_BATCHES + 1U];
+static uint16_t fake_interval;
 
 struct ehci_ctrl *usb_proxy_get_ehci_controller(void)
 {
@@ -71,11 +72,12 @@ int ehci_iso_schedule(struct ehci_iso_transfer *transfer,
     transfer->packet_count = (uint8_t)packet_count;
     absolute_uframe = (uint32_t)packets[0].frame * 8U +
                       packets[0].microframe;
-    step = config->speed == 3U ? 1U << (config->interval - 1U) :
-           (uint32_t)(1U << (config->interval - 1U)) * 8U;
-    assert(fake_schedule_count < ZZUSB_ISO_MAX_BATCHES);
+    step = (uint32_t)config->interval *
+           (config->speed == 3U ? 1U : 8U);
+    assert(fake_schedule_count < ZZUSB_ISO_MAX_BATCHES + 1U);
     fake_start_frame[fake_schedule_count] = packets[0].frame;
     fake_start_microframe[fake_schedule_count] = packets[0].microframe;
+    fake_interval = config->interval;
     fake_schedule_count++;
     for (unsigned index = 0; index < packet_count; index++) {
         transfer->packets[index] = packets[index];
@@ -168,6 +170,33 @@ static unsigned make_batch(uint8_t *wire, uint32_t batch_id,
     return metadata_size;
 }
 
+static unsigned make_single_out_batch_length(uint8_t *wire,
+                                             uint32_t batch_id,
+                                             uint16_t packet_length)
+{
+    unsigned metadata_size = ZZUSB_ISO_HEADER_SIZE +
+                             ZZUSB_ISO_PACKET_SIZE;
+
+    memset(wire, 0, ZZUSB_V2_DATA_MAX);
+    put_be32(wire + ZZUSB_ISO_HDR_OFF_MAGIC, ZZUSB_ISO_MAGIC);
+    put_be16(wire + ZZUSB_ISO_HDR_OFF_VERSION, ZZUSB_ISO_VERSION);
+    put_be16(wire + ZZUSB_ISO_HDR_OFF_FLAGS, ZZUSB_ISO_FLAG_ASAP);
+    put_be32(wire + ZZUSB_ISO_HDR_OFF_BATCH_ID, batch_id);
+    put_be16(wire + ZZUSB_ISO_HDR_OFF_COUNT, 1);
+    put_be32(wire + ZZUSB_ISO_HDR_OFF_DATA_LEN, packet_length);
+    put_be16(wire + ZZUSB_ISO_HEADER_SIZE +
+             ZZUSB_ISO_PKT_OFF_REQUESTED, packet_length);
+    for (unsigned index = 0; index < packet_length; index++)
+        wire[metadata_size + index] = (uint8_t)index;
+    return metadata_size + packet_length;
+}
+
+static unsigned make_single_out_batch(uint8_t *wire, uint32_t batch_id)
+{
+    return make_single_out_batch_length(wire, batch_id, 192);
+}
+
+
 static void reset_fixture(void)
 {
     fake_schedule_result = 0;
@@ -179,6 +208,7 @@ static void reset_fixture(void)
     fake_schedule_count = 0;
     memset(fake_start_frame, 0, sizeof(fake_start_frame));
     memset(fake_start_microframe, 0, sizeof(fake_start_microframe));
+    fake_interval = 0;
     fake_buffer = NULL;
     usb_proxy_iso_after_controller_reset();
 }
@@ -288,7 +318,7 @@ static void test_explicit_batches_reject_overlap(void)
     assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
 }
 
-static void test_full_speed_asap_batches_use_exponential_interval(void)
+static void test_full_speed_asap_batches_use_normalized_interval(void)
 {
     struct ZZUSBCommand cmd;
     uint8_t wire[ZZUSB_V2_DATA_MAX];
@@ -299,7 +329,7 @@ static void test_full_speed_asap_batches_use_exponential_interval(void)
     make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
     put_be16(&cmd.speed, ZZUSB_SPEED_FULL);
     put_be16(&cmd.max_pkt_size, 64);
-    put_be16(&cmd.interval, 3);
+    put_be16(&cmd.interval, 4);
     put_be16(&cmd.flags, ZZUSB_FLAG_SPLIT);
     put_be16(&cmd.split_hub_addr, 1);
     put_be16(&cmd.split_hub_port, 2);
@@ -309,7 +339,7 @@ static void test_full_speed_asap_batches_use_exponential_interval(void)
     make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
     put_be16(&cmd.speed, ZZUSB_SPEED_FULL);
     put_be16(&cmd.max_pkt_size, 64);
-    put_be16(&cmd.interval, 3);
+    put_be16(&cmd.interval, 4);
     put_be16(&cmd.flags, ZZUSB_FLAG_SPLIT);
     put_be16(&cmd.split_hub_addr, 1);
     put_be16(&cmd.split_hub_port, 2);
@@ -322,6 +352,70 @@ static void test_full_speed_asap_batches_use_exponential_interval(void)
     assert(fake_start_microframe[1] == 0);
     assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
 }
+
+static void test_large_normalized_interval_is_not_narrowed(void)
+{
+    struct ZZUSBCommand cmd;
+    uint8_t wire[ZZUSB_V2_DATA_MAX];
+    unsigned metadata_size;
+
+    reset_fixture();
+    metadata_size = make_batch(wire, 22, ZZUSB_ISO_FLAG_ASAP, 0);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    put_be16(&cmd.interval, 256);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    assert(fake_interval == 256);
+    assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
+}
+
+static void test_full_speed_single_packet_pipeline_stays_contiguous(void)
+{
+    struct ZZUSBCommand cmd;
+    uint8_t wire[ZZUSB_V2_DATA_MAX];
+    unsigned wire_size;
+
+    reset_fixture();
+    for (uint32_t batch_id = 30; batch_id < 38; batch_id++) {
+        wire_size = make_single_out_batch(wire, batch_id);
+        make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, wire_size);
+        put_be16(&cmd.direction, 0);
+        put_be16(&cmd.speed, ZZUSB_SPEED_FULL);
+        put_be16(&cmd.max_pkt_size, 253);
+        put_be16(&cmd.interval, 1);
+        put_be16(&cmd.flags, ZZUSB_FLAG_SPLIT);
+        put_be16(&cmd.split_hub_addr, 1);
+        put_be16(&cmd.split_hub_port, 2);
+        assert(usb_proxy_iso_handle_queue(&cmd, wire) ==
+               ZZUSB_STATUS_OK);
+    }
+    assert(fake_schedule_count == 8);
+    for (unsigned index = 0; index < 8; index++) {
+        assert(fake_start_frame[index] == 104U + index);
+        assert(fake_start_microframe[index] == 0);
+    }
+
+    fake_complete = 1;
+    usb_proxy_iso_pump();
+    make_command(&cmd, ZZUSB_CMD_ISO_REAP, sizeof(wire));
+    put_be16(&cmd.direction, 0);
+    put_be16(&cmd.speed, ZZUSB_SPEED_FULL);
+    put_be16(&cmd.max_pkt_size, 253);
+    put_be16(&cmd.interval, 1);
+    put_be16(&cmd.flags, ZZUSB_FLAG_SPLIT);
+    put_be16(&cmd.split_hub_addr, 1);
+    put_be16(&cmd.split_hub_port, 2);
+    assert(usb_proxy_iso_handle_reap(&cmd, wire) == ZZUSB_STATUS_OK);
+
+    fake_current_frame = 105;
+    wire_size = make_single_out_batch(wire, 38);
+    put_be32(&cmd.data_length, wire_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    assert(fake_schedule_count == 9);
+    assert(fake_start_frame[8] == 112);
+    assert(fake_start_microframe[8] == 0);
+    assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
+}
+
 
 static void test_missed_frame_status(void)
 {
@@ -396,17 +490,172 @@ static void test_ring_backpressure_and_retirement(void)
     assert(usb_proxy_iso_queue_state() == 0);
 }
 
+static void test_completed_sitd_is_not_reused_in_same_frame(void)
+{
+    struct ZZUSBCommand cmd;
+    uint8_t wire[ZZUSB_V2_DATA_MAX];
+    uint8_t *first_descriptor_buffer;
+    unsigned wire_size;
+
+    reset_fixture();
+    wire_size = make_single_out_batch_length(wire, 90, 176);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, wire_size);
+    put_be16(&cmd.direction, 0);
+    put_be16(&cmd.speed, ZZUSB_SPEED_FULL);
+    put_be16(&cmd.max_pkt_size, 200);
+    put_be16(&cmd.interval, 1);
+    put_be16(&cmd.flags, ZZUSB_FLAG_SPLIT);
+    put_be16(&cmd.split_hub_addr, 4);
+    put_be16(&cmd.split_hub_port, 2);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    first_descriptor_buffer = fake_buffer;
+
+    fake_current_frame = 104;
+    fake_complete = 1;
+    for (unsigned pump = 0; pump < 4; pump++)
+        usb_proxy_iso_pump();
+    make_command(&cmd, ZZUSB_CMD_ISO_REAP, sizeof(wire));
+    put_be16(&cmd.direction, 0);
+    put_be16(&cmd.speed, ZZUSB_SPEED_FULL);
+    put_be16(&cmd.max_pkt_size, 200);
+    put_be16(&cmd.interval, 1);
+    put_be16(&cmd.flags, ZZUSB_FLAG_SPLIT);
+    put_be16(&cmd.split_hub_addr, 4);
+    put_be16(&cmd.split_hub_port, 2);
+    assert(usb_proxy_iso_handle_reap(&cmd, wire) == ZZUSB_STATUS_OK);
+
+    fake_complete = 0;
+    wire_size = make_single_out_batch_length(wire, 91, 180);
+    put_be32(&cmd.data_length, wire_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    assert(fake_buffer != first_descriptor_buffer);
+
+    fake_current_frame = 105;
+    wire_size = make_single_out_batch_length(wire, 92, 176);
+    put_be32(&cmd.data_length, wire_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    assert(fake_buffer == first_descriptor_buffer);
+    assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
+}
+
+static void test_all_stale_retirement_markers_expire(void)
+{
+    struct ZZUSBCommand cmd;
+    uint8_t wire[ZZUSB_V2_DATA_MAX];
+    unsigned metadata_size;
+
+    reset_fixture();
+    for (unsigned batch = 1; batch <= ZZUSB_ISO_MAX_BATCHES; batch++) {
+        metadata_size = make_batch(wire, batch,
+                                   ZZUSB_ISO_FLAG_ASAP, 0);
+        make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+        assert(usb_proxy_iso_handle_queue(&cmd, wire) ==
+               ZZUSB_STATUS_OK);
+    }
+
+    fake_current_frame = 104;
+    fake_complete = 1;
+    for (unsigned pump = 0; pump < ZZUSB_ISO_MAX_BATCHES; pump++)
+        usb_proxy_iso_pump();
+    for (unsigned batch = 0; batch < ZZUSB_ISO_MAX_BATCHES; batch++) {
+        make_command(&cmd, ZZUSB_CMD_ISO_REAP, sizeof(wire));
+        assert(usb_proxy_iso_handle_reap(&cmd, wire) ==
+               ZZUSB_STATUS_OK);
+    }
+    fake_schedule_count = 0;
+
+    fake_complete = 0;
+    fake_current_frame = 105;
+    metadata_size = make_batch(wire, 100, ZZUSB_ISO_FLAG_ASAP, 0);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    make_command(&cmd, ZZUSB_CMD_ISO_STOP, 0);
+    assert(usb_proxy_iso_handle_stop(&cmd) == ZZUSB_STATUS_OK);
+
+    /*
+     * Simulate the 11-bit frame counter wrapping to the retirement frame.
+     * Both queues must succeed: selecting slot zero must not prevent stale
+     * markers on the remaining free slots from being expired.
+     */
+    fake_current_frame = 104;
+    metadata_size = make_batch(wire, 101, ZZUSB_ISO_FLAG_ASAP, 0);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    metadata_size = make_batch(wire, 102, ZZUSB_ISO_FLAG_ASAP, 0);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
+}
+
+static void test_full_speed_pipeline_survives_frame_wraps(void)
+{
+    struct ZZUSBCommand cmd;
+    uint8_t wire[ZZUSB_V2_DATA_MAX];
+    uint16_t expected_frame = 2044;
+    uint32_t batch_id = 100;
+
+    reset_fixture();
+    fake_current_frame = 2040;
+    for (unsigned cycle = 0; cycle < 1024; cycle++) {
+        fake_schedule_count = 0;
+        fake_complete = 0;
+        for (unsigned packet = 0; packet < 4; packet++) {
+            uint16_t length = (batch_id & 1U) ? 176U : 180U;
+            unsigned wire_size =
+                make_single_out_batch_length(wire, batch_id++, length);
+
+            make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, wire_size);
+            put_be16(&cmd.direction, 0);
+            put_be16(&cmd.speed, ZZUSB_SPEED_FULL);
+            put_be16(&cmd.max_pkt_size, 200);
+            put_be16(&cmd.interval, 1);
+            put_be16(&cmd.flags, ZZUSB_FLAG_SPLIT);
+            put_be16(&cmd.split_hub_addr, 4);
+            put_be16(&cmd.split_hub_port, 2);
+            assert(usb_proxy_iso_handle_queue(&cmd, wire) ==
+                   ZZUSB_STATUS_OK);
+            assert(fake_start_frame[packet] == expected_frame);
+            expected_frame =
+                (uint16_t)((expected_frame + 1U) & EHCI_ISO_FRAME_MASK);
+        }
+
+        fake_complete = 1;
+        for (unsigned pump = 0; pump < 4; pump++)
+            usb_proxy_iso_pump();
+        for (unsigned packet = 0; packet < 4; packet++) {
+            make_command(&cmd, ZZUSB_CMD_ISO_REAP, sizeof(wire));
+            put_be16(&cmd.direction, 0);
+            put_be16(&cmd.speed, ZZUSB_SPEED_FULL);
+            put_be16(&cmd.max_pkt_size, 200);
+            put_be16(&cmd.interval, 1);
+            put_be16(&cmd.flags, ZZUSB_FLAG_SPLIT);
+            put_be16(&cmd.split_hub_addr, 4);
+            put_be16(&cmd.split_hub_port, 2);
+            assert(usb_proxy_iso_handle_reap(&cmd, wire) ==
+                   ZZUSB_STATUS_OK);
+        }
+        assert(usb_proxy_iso_queue_state() == 0);
+        fake_current_frame =
+            (uint16_t)((fake_current_frame + 4U) & EHCI_ISO_FRAME_MASK);
+    }
+}
+
 int main(void)
 {
     test_queue_complete_reap();
     test_asap_batches_chain();
     test_completed_batch_does_not_delay_asap();
     test_explicit_batches_reject_overlap();
-    test_full_speed_asap_batches_use_exponential_interval();
+    test_full_speed_asap_batches_use_normalized_interval();
+    test_large_normalized_interval_is_not_narrowed();
+    test_full_speed_single_packet_pipeline_stays_contiguous();
     test_missed_frame_status();
     test_linked_failure_is_quarantined();
     test_ring_backpressure_and_retirement();
-    assert(fake_bandwidth_reset_count == 8);
+    test_full_speed_pipeline_survives_frame_wraps();
+    test_all_stale_retirement_markers_expire();
+    test_completed_sitd_is_not_reused_in_same_frame();
+    assert(fake_bandwidth_reset_count == 13);
     puts("usb_proxy_iso_test: ok");
     return 0;
 }

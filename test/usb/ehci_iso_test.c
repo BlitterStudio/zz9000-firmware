@@ -16,6 +16,17 @@ static void test_frame_wrap(void)
     assert(!ehci_iso_frame_schedulable(1024, 0));
 }
 
+
+static void test_sitd_retirement_grace(void)
+{
+    assert(!ehci_iso_sitd_frame_expired(100, 100));
+    assert(!ehci_iso_sitd_frame_expired(101, 100));
+    assert(ehci_iso_sitd_frame_expired(102, 100));
+    assert(!ehci_iso_sitd_frame_expired(0, 2047));
+    assert(ehci_iso_sitd_frame_expired(1, 2047));
+    assert(!ehci_iso_sitd_frame_expired(99, 100));
+}
+
 static void test_itd_completion_length(void)
 {
     assert(ehci_iso_itd_actual(1024U << 16, 1024) == 1024);
@@ -116,6 +127,7 @@ static void test_sitd_builder(void)
 int main(void)
 {
     test_frame_wrap();
+    test_sitd_retirement_grace();
     test_itd_completion_length();
     test_split_masks();
     test_itd_builder();

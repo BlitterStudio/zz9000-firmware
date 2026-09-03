@@ -325,8 +325,9 @@ int ehci_submit_async(struct usb_device *dev, unsigned long pipe,
 		      void *buffer, int length, struct devrequest *req);
 int ehci_submit_async_timeout(struct usb_device *dev, unsigned long pipe,
 		      void *buffer, int length, struct devrequest *req,
-		      unsigned long timeout_ms);
+		      unsigned long timeout_ms, int idle_bulk_poll);
 int ehci_controller_needs_recovery(void);
+int ehci_async_schedule_active(struct ehci_ctrl *ctrl);
 int ehci_controller_recover(void);
 int ehci_periodic_schedule_pause(struct ehci_ctrl *ctrl);
 int ehci_periodic_schedule_resume(struct ehci_ctrl *ctrl, int delta);

@@ -40,6 +40,7 @@
 #include "part.h"
 #include "usb.h"
 #include "blk.h"
+#include "ehci_periodic.h"
 
 #undef BBB_COMDAT_TRACE
 #undef BBB_XPORT_TRACE
@@ -87,7 +88,7 @@ struct us_data {
 	int		*irq_handle;		/* for USB int requests */
 	unsigned int	irqpipe;	 	/* pipe for release_irq */
 	unsigned char	irqmaxp;		/* max packed for irq Pipe */
-	unsigned char	irqinterval;		/* Intervall for IRQ Pipe */
+	unsigned int	irqinterval;		/* interval for IRQ pipe */
 	struct scsi_cmd	*srb;			/* current srb */
 	trans_reset	transport_reset;	/* reset routine */
 	trans_cmnd	transport;		/* transport routine */
@@ -1273,7 +1274,11 @@ int usb_storage_probe(struct usb_device *dev, unsigned int ifnum,
 		     USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT) {
 			ss->ep_int = ep_desc->bEndpointAddress &
 						USB_ENDPOINT_NUMBER_MASK;
-			ss->irqinterval = ep_desc->bInterval;
+			ss->irqinterval =
+				dev->speed == USB_SPEED_HIGH ?
+				ehci_periodic_normalize_hs_binterval(
+					ep_desc->bInterval) :
+				ep_desc->bInterval;
 		}
 	}
 	printf("[usb-storage] Endpoints In %d Out %d Int %d\n",
