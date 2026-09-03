@@ -440,6 +440,36 @@ static void periodic_queue_completion(unsigned index, uint16_t status,
     amiga_interrupt_set(AMIGA_INTERRUPT_USB);
 }
 
+/*
+ * A hub change report is the removal fence for stalled split children on the
+ * indicated ports. Retire those periodic schedules before exposing the
+ * report to Poseidon; otherwise its ensuing AbortIO has to unlink a halted
+ * child QH while class and device teardown are already in progress.
+ */
+static void periodic_quiesce_changed_children(unsigned parent_index,
+                                               uint32_t actual)
+{
+    struct periodic_endpoint *parent = &periodic_endpoints[parent_index];
+    unsigned index;
+
+    for (index = 0; index < ZZUSB_PERIODIC_ENDPOINTS; index++) {
+        struct periodic_endpoint *child = &periodic_endpoints[index];
+
+        if (!zzusb_periodic_child_on_changed_hub_port(
+                (child->key.flags & ZZUSB_FLAG_SPLIT) != 0,
+                child->stall_deferred != 0, child->key.hub_address,
+                child->key.hub_port, parent->key.address,
+                parent->buffer, actual))
+            continue;
+        /*
+         * A failure leaves the endpoint quarantined for controller recovery.
+         * The parent report must still reach Poseidon so logical child
+         * teardown can proceed.
+         */
+        (void)periodic_release_slot(index);
+    }
+}
+
 static uint64_t periodic_now(void)
 {
     XTime now;
@@ -523,8 +553,11 @@ void usb_proxy_periodic_pump(void)
                 actual = endpoint->length;
             if (status == ZZUSB_STATUS_OK) {
                 endpoint->stall_deferred = 0;
-                if (endpoint->key.direction == 0 || actual != 0)
+                if (endpoint->key.direction == 0 || actual != 0) {
+                    if (endpoint->key.direction != 0 && actual != 0)
+                        periodic_quiesce_changed_children(index, actual);
                     periodic_queue_completion(index, status, actual);
+                }
             } else if (status != ZZUSB_STATUS_NAK) {
                 if (zzusb_periodic_defer_split_stall(
                         status == ZZUSB_STATUS_STALL,
@@ -589,6 +622,9 @@ void usb_proxy_periodic_pump(void)
         } else {
             endpoint->stall_deferred = 0;
             if (endpoint->dev.act_len > 0) {
+                if (endpoint->key.direction != 0)
+                    periodic_quiesce_changed_children(
+                        index, endpoint->dev.act_len);
                 periodic_queue_completion(index, ZZUSB_STATUS_OK,
                                           endpoint->dev.act_len);
             } else {

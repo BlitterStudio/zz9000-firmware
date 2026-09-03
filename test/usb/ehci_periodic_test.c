@@ -187,6 +187,30 @@ static void test_split_input_stall_gets_one_teardown_grace(void)
     assert(!zzusb_periodic_defer_split_stall(0, 1, 1, 0));
 }
 
+static void test_hub_change_retires_only_matching_split_children(void)
+{
+    const uint8_t changes[] = { 0x04, 0x02 };
+
+    assert(zzusb_periodic_child_on_changed_hub_port(
+        1, 1, 6, 2, 6, changes, sizeof(changes)));
+    assert(zzusb_periodic_child_on_changed_hub_port(
+        1, 1, 6, 9, 6, changes, sizeof(changes)));
+    assert(!zzusb_periodic_child_on_changed_hub_port(
+        1, 1, 6, 1, 6, changes, sizeof(changes)));
+    assert(!zzusb_periodic_child_on_changed_hub_port(
+        1, 1, 7, 2, 6, changes, sizeof(changes)));
+    assert(!zzusb_periodic_child_on_changed_hub_port(
+        0, 1, 6, 2, 6, changes, sizeof(changes)));
+    assert(!zzusb_periodic_child_on_changed_hub_port(
+        1, 0, 6, 2, 6, changes, sizeof(changes)));
+    assert(!zzusb_periodic_child_on_changed_hub_port(
+        1, 1, 6, 16, 6, changes, sizeof(changes)));
+    assert(!zzusb_periodic_child_on_changed_hub_port(
+        1, 1, 6, 0, 6, changes, sizeof(changes)));
+    assert(!zzusb_periodic_child_on_changed_hub_port(
+        1, 1, 6, 2, 6, NULL, sizeof(changes)));
+}
+
 int main(void)
 {
     test_high_speed_cadence();
@@ -200,6 +224,7 @@ int main(void)
     test_completed_endpoint_waits_for_host_rearm();
     test_all_input_completion_paths_require_rearm();
     test_split_input_stall_gets_one_teardown_grace();
+    test_hub_change_retires_only_matching_split_children();
     puts("EHCI periodic cadence, split masks, and bounded ring contract satisfied");
     return 0;
 }
