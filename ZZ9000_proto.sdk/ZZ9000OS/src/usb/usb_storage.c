@@ -88,7 +88,7 @@ struct us_data {
 	int		*irq_handle;		/* for USB int requests */
 	unsigned int	irqpipe;	 	/* pipe for release_irq */
 	unsigned char	irqmaxp;		/* max packed for irq Pipe */
-	unsigned char	irqinterval;		/* Intervall for IRQ Pipe */
+	unsigned int	irqinterval;		/* interval for IRQ pipe */
 	struct scsi_cmd	*srb;			/* current srb */
 	trans_reset	transport_reset;	/* reset routine */
 	trans_cmnd	transport;		/* transport routine */
