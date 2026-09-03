@@ -284,6 +284,7 @@ static uint16_t usb_status_to_zz(unsigned long status, int direction_in)
 
 #define ZZUSB_PERIODIC_ENDPOINTS ZZUSB_PERIODIC_RING_CAPACITY
 #define ZZUSB_PERIODIC_PUMP_BUDGET 4U
+#define ZZUSB_PERIODIC_STALL_GRACE_TICKS (COUNTS_PER_SECOND / 20U)
 
 struct periodic_key {
     uint32_t epoch;
@@ -316,6 +317,7 @@ struct periodic_endpoint {
     uint8_t needs_rearm;
     uint8_t rearm_requested;
     uint8_t failed;
+    uint8_t stall_deferred;
     uint8_t software_polled;
     uint8_t bandwidth_reserved;
     uint8_t reservation_mask;
@@ -479,6 +481,7 @@ void usb_proxy_periodic_pump(void)
         unsigned index = periodic_pump_cursor;
         struct periodic_endpoint *endpoint = &periodic_endpoints[index];
         void *completed;
+        uint16_t completion_status;
 
         periodic_pump_cursor =
             (uint8_t)((periodic_pump_cursor + 1U) %
@@ -518,13 +521,30 @@ void usb_proxy_periodic_pump(void)
             status = periodic_poll_software(endpoint, &actual);
             if (actual > endpoint->length)
                 actual = endpoint->length;
-            if (status == ZZUSB_STATUS_OK &&
-                (endpoint->key.direction == 0 || actual != 0))
-                periodic_queue_completion(index, status, actual);
-            else if (status != ZZUSB_STATUS_OK &&
-                     status != ZZUSB_STATUS_NAK) {
-                endpoint->failed = 1;
-                periodic_queue_completion(index, status, 0);
+            if (status == ZZUSB_STATUS_OK) {
+                endpoint->stall_deferred = 0;
+                if (endpoint->key.direction == 0 || actual != 0)
+                    periodic_queue_completion(index, status, actual);
+            } else if (status != ZZUSB_STATUS_NAK) {
+                if (zzusb_periodic_defer_split_stall(
+                        status == ZZUSB_STATUS_STALL,
+                        (endpoint->key.flags & ZZUSB_FLAG_SPLIT) != 0,
+                        endpoint->key.direction != 0,
+                        endpoint->stall_deferred)) {
+                    /*
+                     * A disappearing split child can halt its interrupt qTD
+                     * before the hub change endpoint is serviced. Defer the
+                     * first STALL for one full round-robin pass so Poseidon
+                     * can receive the hub report and abort this IOR instead
+                     * of entering hid.class's clear-halt retry loop.
+                     */
+                    endpoint->stall_deferred = 1;
+                    endpoint->next_due =
+                        now + ZZUSB_PERIODIC_STALL_GRACE_TICKS;
+                } else {
+                    endpoint->failed = 1;
+                    periodic_queue_completion(index, status, 0);
+                }
             }
             continue;
         }
@@ -550,17 +570,31 @@ void usb_proxy_periodic_pump(void)
             continue;
         }
         if (endpoint->dev.status != 0) {
-            endpoint->failed = 1;
-            periodic_queue_completion(
-                index, usb_status_to_zz(
-                    endpoint->dev.status,
-                    endpoint->key.direction & 0x80), 0);
-        } else if (endpoint->dev.act_len > 0) {
-            periodic_queue_completion(index, ZZUSB_STATUS_OK,
-                                      endpoint->dev.act_len);
+            completion_status = usb_status_to_zz(
+                endpoint->dev.status, endpoint->key.direction & 0x80);
+            if (zzusb_periodic_defer_split_stall(
+                    completion_status == ZZUSB_STATUS_STALL,
+                    (endpoint->key.flags & ZZUSB_FLAG_SPLIT) != 0,
+                    endpoint->key.direction != 0,
+                    endpoint->stall_deferred)) {
+                endpoint->stall_deferred = 1;
+                endpoint->next_due =
+                    now + ZZUSB_PERIODIC_STALL_GRACE_TICKS;
+                endpoint->needs_rearm = 1;
+                endpoint->rearm_requested = 1;
+            } else {
+                endpoint->failed = 1;
+                periodic_queue_completion(index, completion_status, 0);
+            }
         } else {
-            endpoint->needs_rearm = 1;
-            endpoint->rearm_requested = 1;
+            endpoint->stall_deferred = 0;
+            if (endpoint->dev.act_len > 0) {
+                periodic_queue_completion(index, ZZUSB_STATUS_OK,
+                                          endpoint->dev.act_len);
+            } else {
+                endpoint->needs_rearm = 1;
+                endpoint->rearm_requested = 1;
+            }
         }
     }
 }

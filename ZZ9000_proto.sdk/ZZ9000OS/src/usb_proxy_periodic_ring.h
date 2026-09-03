@@ -53,4 +53,10 @@ static inline int zzusb_periodic_completion_needs_rearm(
     return !failed && direction_in;
 }
 
+static inline int zzusb_periodic_defer_split_stall(
+    int stalled, int split, int direction_in, int already_deferred)
+{
+    return stalled && split && direction_in && !already_deferred;
+}
+
 #endif
