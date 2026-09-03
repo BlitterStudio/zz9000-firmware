@@ -35,6 +35,27 @@ static void make_valid_control(struct ZZUSBCommand *cmd,
     put_be32(&ext->controller_epoch, 7);
 }
 
+static void make_valid_bulk(struct ZZUSBCommand *cmd,
+                            struct ZZUSBProtocolExtension *ext,
+                            uint16_t direction)
+{
+    memset(cmd, 0, sizeof(*cmd));
+    memset(ext, 0, sizeof(*ext));
+    put_be16(&cmd->cmd, ZZUSB_CMD_BULK_XFER);
+    put_be32(&cmd->dev_addr, 1);
+    put_be16(&cmd->endpoint, 1);
+    put_be16(&cmd->direction, direction);
+    put_be16(&cmd->xfer_type, ZZUSB_XFER_BULK);
+    put_be16(&cmd->max_pkt_size, 512);
+    put_be32(&cmd->data_length, 512);
+    put_be32(&cmd->timeout_ms, 5);
+    put_be16(&cmd->speed, ZZUSB_SPEED_HIGH);
+    put_be16(&ext->version, ZZUSB_PROTOCOL_VERSION);
+    put_be16(&ext->header_size, ZZUSB_V2_HEADER_SIZE);
+    put_be32(&ext->request_id, 2);
+    put_be32(&ext->controller_epoch, 7);
+}
+
 static void make_valid_iso(struct ZZUSBCommand *cmd,
                            struct ZZUSBProtocolExtension *ext,
                            uint16_t command, uint32_t data_length)
@@ -141,6 +162,17 @@ int main(void)
     put_be16(&cmd.split_hub_port, 1);
     CHECK(zzusb_validate_command(&cmd, &ext, 1, 7) ==
           ZZUSB_STATUS_BADPARAM);
+
+    make_valid_bulk(&cmd, &ext, 0x80);
+    put_be16(&cmd.flags, ZZUSB_FLAG_BULK_IN_POLL);
+    CHECK(zzusb_validate_command(&cmd, &ext, 1, 7) ==
+          ZZUSB_STATUS_OK);
+    put_be16(&cmd.direction, 0);
+    CHECK(zzusb_validate_command(&cmd, &ext, 1, 7) ==
+          ZZUSB_STATUS_BADPARAM);
+    put_be16(&cmd.flags, 0);
+    CHECK(zzusb_validate_command(&cmd, &ext, 1, 7) ==
+          ZZUSB_STATUS_OK);
 
     make_valid_iso(&cmd, &ext, ZZUSB_CMD_ISO_QUEUE, 32);
     CHECK(zzusb_validate_command(&cmd, &ext, 1, 7) ==

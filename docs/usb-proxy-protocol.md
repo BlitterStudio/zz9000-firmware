@@ -18,6 +18,8 @@ The physical aperture remains 24576 bytes. A legacy peer may use the historical 
 
 The packed 48-byte prefix is, in order: command, status, device address, endpoint, direction, transfer type, maximum packet size, requested length, actual length, timeout, speed, interval, the eight-byte USB setup packet, split-hub address, split-hub port, flags, and reserved word. Setup `wValue`, `wIndex`, and `wLength` remain USB little-endian; the other multi-byte values are big-endian. Persistent periodic commands use the reserved word as a device generation so a reused USB address cannot inherit an earlier endpoint.
 
+`ZZUSB_FLAG_BULK_IN_POLL` (bit 3) marks an explicitly open-ended bulk-IN slice. An error-free qTD deadline returns `NAK` only with this flag; finite bulk requests return `TIMEOUT`. The flag is invalid for bulk OUT.
+
 ## v2 extension
 
 | Relative offset | Type | Field | Rule |

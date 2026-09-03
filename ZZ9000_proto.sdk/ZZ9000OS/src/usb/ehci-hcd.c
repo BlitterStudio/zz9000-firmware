@@ -420,7 +420,7 @@ static int ehci_unlink_async_qh(struct ehci_ctrl *ctrl)
 static int
 ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 		   void *buffer, int length, struct devrequest *req,
-		   unsigned long timeout_ms)
+		   unsigned long timeout_ms, int idle_bulk_poll)
 {
 	struct ehci_async_allocation *allocation;
 	struct QH *qh;
@@ -731,7 +731,7 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 			break;
 		//WATCHDOG_RESET(); // FIXME
 	} while (get_timer(ts) < timeout);
-	if (req == NULL && usb_pipein(pipe) &&
+	if (idle_bulk_poll && req == NULL && usb_pipein(pipe) &&
 	    QT_TOKEN_GET_STATUS(token) == QT_TOKEN_STATUS_ACTIVE)
 		idle_bulk_in_timeout = 1;
 
@@ -806,15 +806,14 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 		ehci_writel(&ctrl->hcor->or_usbsts, sts & 0x3f);
 
 		/*
-		 * A still-active bulk-IN qTD with no error bits is normally an
-		 * idle streaming endpoint returning NAK. Preserve that semantic
-		 * across the bounded synchronous proxy poll so the Amiga driver
-		 * can keep the original asynchronous IOR pending. Real transaction
-		 * errors retain USB_ST_CRC_ERR and remain visible to Poseidon.
+		 * Only an explicitly marked open-ended bulk-IN poll converts an
+		 * idle qTD deadline to NAK. Ordinary finite requests must surface
+		 * the requested timeout rather than remain pending indefinitely.
+		 * Real qTD transaction errors are decoded below.
 		 */
 		if (QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE)
 			dev->status = idle_bulk_in_timeout ?
-				USB_ST_NAK_REC : USB_ST_CRC_ERR;
+				USB_ST_NAK_REC : USB_ST_TIMEOUT;
 	}
 
 	if (!(QT_TOKEN_GET_STATUS(token) & QT_TOKEN_STATUS_ACTIVE)) {
@@ -872,15 +871,15 @@ fail:
 int ehci_submit_async(struct usb_device *dev, unsigned long pipe, void *buffer,
 		   int length, struct devrequest *req)
 {
-	return ehci_submit_async_internal(dev, pipe, buffer, length, req, 0);
+	return ehci_submit_async_internal(dev, pipe, buffer, length, req, 0, 0);
 }
 
 int ehci_submit_async_timeout(struct usb_device *dev, unsigned long pipe,
 		   void *buffer, int length, struct devrequest *req,
-		   unsigned long timeout_ms)
+		   unsigned long timeout_ms, int idle_bulk_poll)
 {
 	return ehci_submit_async_internal(dev, pipe, buffer, length, req,
-					  timeout_ms);
+					  timeout_ms, idle_bulk_poll);
 }
 
 static int ehci_submit_root(struct usb_device *dev, unsigned long pipe,

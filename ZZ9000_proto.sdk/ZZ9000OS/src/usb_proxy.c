@@ -271,6 +271,8 @@ static uint16_t usb_status_to_zz(unsigned long status, int direction_in)
     if (status & USB_ST_BUF_ERR)
         return direction_in ? ZZUSB_STATUS_OVERRUN :
                               ZZUSB_STATUS_UNDERRUN;
+    if (status & USB_ST_TIMEOUT)
+        return ZZUSB_STATUS_TIMEOUT;
     if (status & USB_ST_CRC_ERR)
         return ZZUSB_STATUS_CRC;
     if (status & USB_ST_STALLED)
@@ -1117,7 +1119,7 @@ static uint16_t handle_control_xfer(volatile struct ZZUSBCommand *cmd,
     }
 
     int result = ehci_submit_async_timeout(&dev, pipe, buf, data_len, &setup,
-                                           timeout_ms);
+                                           timeout_ms, 0);
 
     save_toggle(dev_addr, &dev);
 
@@ -1228,10 +1230,10 @@ static uint16_t handle_bulk_xfer(volatile struct ZZUSBCommand *cmd,
         }
     }
 
-    int result = ehci_submit_async_timeout(&dev, pipe,
-                                           data_len > 0 ? xfer_buf : NULL,
-                                           data_len, NULL,
-                                           read_timeout_ms(cmd));
+    int result = ehci_submit_async_timeout(
+        &dev, pipe, data_len > 0 ? xfer_buf : NULL, data_len, NULL,
+        read_timeout_ms(cmd),
+        (be16(&cmd->flags) & ZZUSB_FLAG_BULK_IN_POLL) != 0);
 
     save_toggle(dev_addr, &dev);
 
