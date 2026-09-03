@@ -78,7 +78,7 @@ struct ehci_iso_config {
     uint8_t split;
     uint8_t multi_tt;
     uint8_t tt_think_time;
-    uint8_t interval;
+    uint16_t interval;
     uint8_t hub_address;
     uint8_t hub_port;
     uint16_t max_packet;

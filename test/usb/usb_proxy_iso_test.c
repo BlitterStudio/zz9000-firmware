@@ -25,6 +25,7 @@ static uint8_t *fake_buffer;
 static unsigned fake_schedule_count;
 static uint16_t fake_start_frame[ZZUSB_ISO_MAX_BATCHES + 1U];
 static uint8_t fake_start_microframe[ZZUSB_ISO_MAX_BATCHES + 1U];
+static uint16_t fake_interval;
 
 struct ehci_ctrl *usb_proxy_get_ehci_controller(void)
 {
@@ -76,6 +77,7 @@ int ehci_iso_schedule(struct ehci_iso_transfer *transfer,
     assert(fake_schedule_count < ZZUSB_ISO_MAX_BATCHES + 1U);
     fake_start_frame[fake_schedule_count] = packets[0].frame;
     fake_start_microframe[fake_schedule_count] = packets[0].microframe;
+    fake_interval = config->interval;
     fake_schedule_count++;
     for (unsigned index = 0; index < packet_count; index++) {
         transfer->packets[index] = packets[index];
@@ -206,6 +208,7 @@ static void reset_fixture(void)
     fake_schedule_count = 0;
     memset(fake_start_frame, 0, sizeof(fake_start_frame));
     memset(fake_start_microframe, 0, sizeof(fake_start_microframe));
+    fake_interval = 0;
     fake_buffer = NULL;
     usb_proxy_iso_after_controller_reset();
 }
@@ -347,6 +350,21 @@ static void test_full_speed_asap_batches_use_normalized_interval(void)
     assert(fake_start_microframe[0] == 0);
     assert(fake_start_frame[1] == 112);
     assert(fake_start_microframe[1] == 0);
+    assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
+}
+
+static void test_large_normalized_interval_is_not_narrowed(void)
+{
+    struct ZZUSBCommand cmd;
+    uint8_t wire[ZZUSB_V2_DATA_MAX];
+    unsigned metadata_size;
+
+    reset_fixture();
+    metadata_size = make_batch(wire, 22, ZZUSB_ISO_FLAG_ASAP, 0);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    put_be16(&cmd.interval, 256);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    assert(fake_interval == 256);
     assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
 }
 
@@ -580,13 +598,14 @@ int main(void)
     test_completed_batch_does_not_delay_asap();
     test_explicit_batches_reject_overlap();
     test_full_speed_asap_batches_use_normalized_interval();
+    test_large_normalized_interval_is_not_narrowed();
     test_full_speed_single_packet_pipeline_stays_contiguous();
     test_missed_frame_status();
     test_linked_failure_is_quarantined();
     test_ring_backpressure_and_retirement();
     test_full_speed_pipeline_survives_frame_wraps();
     test_completed_sitd_is_not_reused_in_same_frame();
-    assert(fake_bandwidth_reset_count == 11);
+    assert(fake_bandwidth_reset_count == 12);
     puts("usb_proxy_iso_test: ok");
     return 0;
 }

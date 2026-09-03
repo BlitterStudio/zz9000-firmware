@@ -310,7 +310,7 @@ uint16_t usb_proxy_iso_handle_queue(volatile struct ZZUSBCommand *cmd,
     config.tt_think_time = (uint8_t)(
         (be16(&cmd->flags) & ZZUSB_FLAG_TT_THINK_MASK) >>
         ZZUSB_FLAG_TT_THINK_SHIFT);
-    config.interval = (uint8_t)be16(&cmd->interval);
+    config.interval = be16(&cmd->interval);
     config.hub_address = (uint8_t)be16(&cmd->split_hub_addr);
     config.hub_port = (uint8_t)be16(&cmd->split_hub_port);
     config.max_packet = be16(&cmd->max_pkt_size);
