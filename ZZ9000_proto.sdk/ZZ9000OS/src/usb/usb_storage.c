@@ -40,6 +40,7 @@
 #include "part.h"
 #include "usb.h"
 #include "blk.h"
+#include "ehci_periodic.h"
 
 #undef BBB_COMDAT_TRACE
 #undef BBB_XPORT_TRACE
@@ -1273,7 +1274,11 @@ int usb_storage_probe(struct usb_device *dev, unsigned int ifnum,
 		     USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT) {
 			ss->ep_int = ep_desc->bEndpointAddress &
 						USB_ENDPOINT_NUMBER_MASK;
-			ss->irqinterval = ep_desc->bInterval;
+			ss->irqinterval =
+				dev->speed == USB_SPEED_HIGH ?
+				ehci_periodic_normalize_hs_binterval(
+					ep_desc->bInterval) :
+				ep_desc->bInterval;
 		}
 	}
 	printf("[usb-storage] Endpoints In %d Out %d Int %d\n",
