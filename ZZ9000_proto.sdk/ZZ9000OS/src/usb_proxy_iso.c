@@ -250,12 +250,12 @@ uint16_t usb_proxy_iso_handle_queue(volatile struct ZZUSBCommand *cmd,
 
     current_frame = ehci_iso_current_frame(ctrl);
     for (slot = 0; slot < ZZUSB_ISO_MAX_BATCHES; slot++) {
-        if (!iso_batches[slot].used && !batch &&
-            (!iso_retired_valid[slot] ||
-             iso_retired_frame[slot] != current_frame)) {
+        if (!iso_batches[slot].used && iso_retired_valid[slot] &&
+            iso_retired_frame[slot] != current_frame)
             iso_retired_valid[slot] = 0;
+        if (!iso_batches[slot].used && !batch &&
+            !iso_retired_valid[slot])
             batch = &iso_batches[slot];
-        }
         if (iso_identity_matches(&iso_batches[slot], cmd) &&
             iso_batches[slot].batch_id == batch_id)
             return ZZUSB_STATUS_STALE;

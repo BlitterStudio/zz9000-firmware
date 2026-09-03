@@ -1822,6 +1822,7 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 	struct QH *cur = queue->current;
 	struct qTD *cur_td;
 	uint32_t token, toggle;
+	uint8_t qtd_status;
 	unsigned long pipe = queue->pipe;
 
 	/* depleted queue */
@@ -1853,26 +1854,36 @@ static void *_ehci_poll_int_queue(struct usb_device *dev,
 	 * errors exactly the way it expects.
 	 */
 	dev->act_len = queue->elementsize - QT_TOKEN_GET_TOTALBYTES(token);
-	switch (QT_TOKEN_GET_STATUS(token) &
-		~(QT_TOKEN_STATUS_SPLITXSTATE | QT_TOKEN_STATUS_PERR)) {
-	case 0:
-		dev->status = 0;
-		break;
-	case QT_TOKEN_STATUS_HALTED:
-		dev->status = USB_ST_STALLED;
-		break;
-	case QT_TOKEN_STATUS_ACTIVE | QT_TOKEN_STATUS_DATBUFERR:
-	case QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_DATBUFERR:
-	case QT_TOKEN_STATUS_DATBUFERR:
-		dev->status = USB_ST_BUF_ERR;
-		break;
-	case QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_BABBLEDET:
-	case QT_TOKEN_STATUS_BABBLEDET:
-		dev->status = USB_ST_BABBLE_DET;
-		break;
-	default:
-		dev->status = USB_ST_CRC_ERR;
-		break;
+	qtd_status = (uint8_t)(QT_TOKEN_GET_STATUS(token) &
+		~(QT_TOKEN_STATUS_SPLITXSTATE | QT_TOKEN_STATUS_PERR));
+	if (ehci_periodic_qtd_missed(qtd_status)) {
+		/*
+		 * The controller did not execute this periodic opportunity.
+		 * Leave the interrupt request pending and rearm it instead of
+		 * reporting a packet CRC error for a transaction that never ran.
+		 */
+		dev->status = USB_ST_NAK_REC;
+	} else {
+		switch (qtd_status) {
+		case 0:
+			dev->status = 0;
+			break;
+		case QT_TOKEN_STATUS_HALTED:
+			dev->status = USB_ST_STALLED;
+			break;
+		case QT_TOKEN_STATUS_ACTIVE | QT_TOKEN_STATUS_DATBUFERR:
+		case QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_DATBUFERR:
+		case QT_TOKEN_STATUS_DATBUFERR:
+			dev->status = USB_ST_BUF_ERR;
+			break;
+		case QT_TOKEN_STATUS_HALTED | QT_TOKEN_STATUS_BABBLEDET:
+		case QT_TOKEN_STATUS_BABBLEDET:
+			dev->status = USB_ST_BABBLE_DET;
+			break;
+		default:
+			dev->status = USB_ST_CRC_ERR;
+			break;
+		}
 	}
 
 	if (cur != queue->last)

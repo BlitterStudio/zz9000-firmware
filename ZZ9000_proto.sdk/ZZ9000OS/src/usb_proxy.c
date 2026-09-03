@@ -534,6 +534,19 @@ void usb_proxy_periodic_pump(void)
             continue;
         save_toggle(endpoint->key.address, &endpoint->dev);
         endpoint->next_due = now + endpoint->interval_ticks;
+        if (endpoint->dev.status == USB_ST_NAK_REC) {
+            /*
+             * A missed microframe retires the qTD without attempting the
+             * interrupt transaction. Rearm the same host request internally;
+             * there is no completion for the Amiga side to reap or rearm.
+             */
+            if (rearm_int_queue(&endpoint->dev, endpoint->queue) < 0) {
+                endpoint->failed = 1;
+                periodic_queue_completion(
+                    index, ZZUSB_STATUS_HOSTERROR, 0);
+            }
+            continue;
+        }
         if (endpoint->dev.status != 0) {
             endpoint->failed = 1;
             periodic_queue_completion(
@@ -1251,6 +1264,17 @@ static uint16_t handle_int_xfer(volatile struct ZZUSBCommand *cmd,
         return ZZUSB_STATUS_BADPARAM;
     int data_len = (int)data_len_u32;
     int is_in = (be16(&cmd->direction) & 0x80);
+    uint16_t interval = be16(&cmd->interval);
+
+    /*
+     * Legacy INT_XFER carries the USB descriptor's high-speed bInterval
+     * exponent. PERIODIC_ARM uses the v2 normalized microframe interval.
+     */
+    if (speed_usb == USB_SPEED_HIGH) {
+        interval = ehci_periodic_normalize_hs_binterval(interval);
+        if (!interval)
+            return ZZUSB_STATUS_BADPARAM;
+    }
 
     int split_hub_addr = 0;
     int split_hub_port = 0;
@@ -1278,7 +1302,7 @@ static uint16_t handle_int_xfer(volatile struct ZZUSBCommand *cmd,
     }
 
     int result = submit_int_msg(&dev, pipe, data_len > 0 ? dma_buf : NULL,
-                                 data_len, be16(&cmd->interval));
+                                 data_len, interval);
 
     save_toggle(dev_addr, &dev);
 

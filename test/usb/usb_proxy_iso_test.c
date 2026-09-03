@@ -538,6 +538,55 @@ static void test_completed_sitd_is_not_reused_in_same_frame(void)
     assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
 }
 
+static void test_all_stale_retirement_markers_expire(void)
+{
+    struct ZZUSBCommand cmd;
+    uint8_t wire[ZZUSB_V2_DATA_MAX];
+    unsigned metadata_size;
+
+    reset_fixture();
+    for (unsigned batch = 1; batch <= ZZUSB_ISO_MAX_BATCHES; batch++) {
+        metadata_size = make_batch(wire, batch,
+                                   ZZUSB_ISO_FLAG_ASAP, 0);
+        make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+        assert(usb_proxy_iso_handle_queue(&cmd, wire) ==
+               ZZUSB_STATUS_OK);
+    }
+
+    fake_current_frame = 104;
+    fake_complete = 1;
+    for (unsigned pump = 0; pump < ZZUSB_ISO_MAX_BATCHES; pump++)
+        usb_proxy_iso_pump();
+    for (unsigned batch = 0; batch < ZZUSB_ISO_MAX_BATCHES; batch++) {
+        make_command(&cmd, ZZUSB_CMD_ISO_REAP, sizeof(wire));
+        assert(usb_proxy_iso_handle_reap(&cmd, wire) ==
+               ZZUSB_STATUS_OK);
+    }
+    fake_schedule_count = 0;
+
+    fake_complete = 0;
+    fake_current_frame = 105;
+    metadata_size = make_batch(wire, 100, ZZUSB_ISO_FLAG_ASAP, 0);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    make_command(&cmd, ZZUSB_CMD_ISO_STOP, 0);
+    assert(usb_proxy_iso_handle_stop(&cmd) == ZZUSB_STATUS_OK);
+
+    /*
+     * Simulate the 11-bit frame counter wrapping to the retirement frame.
+     * Both queues must succeed: selecting slot zero must not prevent stale
+     * markers on the remaining free slots from being expired.
+     */
+    fake_current_frame = 104;
+    metadata_size = make_batch(wire, 101, ZZUSB_ISO_FLAG_ASAP, 0);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    metadata_size = make_batch(wire, 102, ZZUSB_ISO_FLAG_ASAP, 0);
+    make_command(&cmd, ZZUSB_CMD_ISO_QUEUE, metadata_size);
+    assert(usb_proxy_iso_handle_queue(&cmd, wire) == ZZUSB_STATUS_OK);
+    assert(usb_proxy_iso_stop_all(EHCI_ISO_PACKET_CANCELLED) == 0);
+}
+
 static void test_full_speed_pipeline_survives_frame_wraps(void)
 {
     struct ZZUSBCommand cmd;
@@ -604,8 +653,9 @@ int main(void)
     test_linked_failure_is_quarantined();
     test_ring_backpressure_and_retirement();
     test_full_speed_pipeline_survives_frame_wraps();
+    test_all_stale_retirement_markers_expire();
     test_completed_sitd_is_not_reused_in_same_frame();
-    assert(fake_bandwidth_reset_count == 12);
+    assert(fake_bandwidth_reset_count == 13);
     puts("usb_proxy_iso_test: ok");
     return 0;
 }

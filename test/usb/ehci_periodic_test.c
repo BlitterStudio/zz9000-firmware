@@ -46,6 +46,16 @@ static void test_high_speed_cadence(void)
     assert(!ehci_periodic_frame_due(&plan, 0));
 }
 
+static void test_legacy_high_speed_interval_exponent(void)
+{
+    assert(ehci_periodic_normalize_hs_binterval(1) == 1);
+    assert(ehci_periodic_normalize_hs_binterval(3) == 4);
+    assert(ehci_periodic_normalize_hs_binterval(12) == 2048);
+    assert(ehci_periodic_normalize_hs_binterval(16) == 32768);
+    assert(ehci_periodic_normalize_hs_binterval(0) == 0);
+    assert(ehci_periodic_normalize_hs_binterval(17) == 0);
+}
+
 static void test_split_masks(void)
 {
     struct ehci_periodic_plan plan;
@@ -78,6 +88,16 @@ static void test_transient_buffer_retirement(void)
 {
     assert(ehci_periodic_buffer_reclaimable(0));
     assert(!ehci_periodic_buffer_reclaimable(1));
+}
+
+static void test_missed_microframe_is_retryable_not_crc(void)
+{
+    assert(ehci_periodic_qtd_missed(0x04));
+    assert(ehci_periodic_qtd_missed(0x44));
+    assert(ehci_periodic_qtd_missed(0x07));
+    assert(!ehci_periodic_qtd_missed(0x08));
+    assert(!ehci_periodic_qtd_missed(0x48));
+    assert(!ehci_periodic_qtd_missed(0x40));
 }
 
 static void test_ready_ring_wrap_and_no_overwrite(void)
@@ -123,8 +143,10 @@ static void test_all_input_completion_paths_require_rearm(void)
 int main(void)
 {
     test_high_speed_cadence();
+    test_legacy_high_speed_interval_exponent();
     test_split_masks();
     test_transient_buffer_retirement();
+    test_missed_microframe_is_retryable_not_crc();
     test_ready_ring_wrap_and_no_overwrite();
     test_completed_endpoint_waits_for_host_rearm();
     test_all_input_completion_paths_require_rearm();
