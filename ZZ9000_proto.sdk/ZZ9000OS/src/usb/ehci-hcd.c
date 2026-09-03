@@ -732,7 +732,7 @@ ehci_submit_async_internal(struct usb_device *dev, unsigned long pipe,
 		//WATCHDOG_RESET(); // FIXME
 	} while (get_timer(ts) < timeout);
 	if (idle_bulk_poll && req == NULL && usb_pipein(pipe) &&
-	    QT_TOKEN_GET_STATUS(token) == QT_TOKEN_STATUS_ACTIVE)
+	    ehci_qtd_idle_active((uint8_t)QT_TOKEN_GET_STATUS(token)))
 		idle_bulk_in_timeout = 1;
 
 	/*

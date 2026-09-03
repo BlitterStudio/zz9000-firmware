@@ -100,6 +100,16 @@ static void test_missed_microframe_is_retryable_not_crc(void)
     assert(!ehci_periodic_qtd_missed(0x40));
 }
 
+static void test_idle_active_masks_split_state(void)
+{
+    assert(ehci_qtd_idle_active(0x80));
+    assert(ehci_qtd_idle_active(0x81));
+    assert(ehci_qtd_idle_active(0x82));
+    assert(ehci_qtd_idle_active(0x83));
+    assert(!ehci_qtd_idle_active(0x88));
+    assert(!ehci_qtd_idle_active(0x40));
+}
+
 static void test_ready_ring_wrap_and_no_overwrite(void)
 {
     uint8_t entries[ZZUSB_PERIODIC_RING_CAPACITY];
@@ -147,6 +157,7 @@ int main(void)
     test_split_masks();
     test_transient_buffer_retirement();
     test_missed_microframe_is_retryable_not_crc();
+    test_idle_active_masks_split_state();
     test_ready_ring_wrap_and_no_overwrite();
     test_completed_endpoint_waits_for_host_rearm();
     test_all_input_completion_paths_require_rearm();

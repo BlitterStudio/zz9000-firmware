@@ -45,7 +45,7 @@ Firmware snapshots the command and OUT payload before starting EHCI. It copies I
 
 ## Persistent interrupt transport
 
-`PERIODIC_ARM` creates or reuses one EHCI interrupt queue keyed by epoch, device generation, address, endpoint, direction, speed, maximum packet, interval, and split topology. Full/low-speed split queues encode the transaction-translator think time and multi-TT slot in legal start/complete masks. High-speed `bInterval` values use the USB 2.0 exponent rule. Firmware retains at most 16 endpoints and one unread completion per endpoint; it pauses that endpoint rather than overwrite unread data.
+`PERIODIC_ARM` creates or reuses one EHCI interrupt queue keyed by epoch, device generation, address, endpoint, direction, speed, maximum packet, interval, and split topology. Full/low-speed split queues encode the transaction-translator think time and multi-TT slot in legal start/complete masks. Poseidon normalizes high-speed descriptor `bInterval` exponents to power-of-two microframe intervals before submitting `PERIODIC_ARM` or `PERIODIC_REAP`; the proxy carries those normalized values unchanged. Firmware retains at most 16 endpoints and one unread completion per endpoint; it pauses that endpoint rather than overwrite unread data.
 
 `PERIODIC_REAP` returns one matching completion. `NAK`, a zero-length IN transaction, and an all-zero hub change report are non-terminal to the Poseidon request. A successful reap rearms the retained descriptor no sooner than its declared interval. Transfer errors are terminal and retire the endpoint. `PERIODIC_STOP`, reset, detach, epoch advance, and controller recovery retire matching queues through the fenced EHCI unlink path.
 

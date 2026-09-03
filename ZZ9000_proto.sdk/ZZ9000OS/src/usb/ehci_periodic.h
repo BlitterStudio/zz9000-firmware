@@ -41,6 +41,14 @@ static inline int ehci_periodic_qtd_missed(uint8_t status)
     return normalized == missed || normalized == (halted | missed);
 }
 
+static inline int ehci_qtd_idle_active(uint8_t status)
+{
+    const uint8_t active = 0x80U;
+    const uint8_t non_error_state = 0x03U;
+
+    return (uint8_t)(status & (uint8_t)~non_error_state) == active;
+}
+
 static inline uint16_t ehci_periodic_normalize_hs_binterval(
     uint16_t interval)
 {
