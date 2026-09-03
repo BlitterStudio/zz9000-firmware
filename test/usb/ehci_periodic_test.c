@@ -113,6 +113,13 @@ static void test_completed_endpoint_waits_for_host_rearm(void)
     assert(!zzusb_periodic_rearm_ready(0, 1));
 }
 
+static void test_all_input_completion_paths_require_rearm(void)
+{
+    assert(zzusb_periodic_completion_needs_rearm(0, 1));
+    assert(!zzusb_periodic_completion_needs_rearm(0, 0));
+    assert(!zzusb_periodic_completion_needs_rearm(1, 1));
+}
+
 int main(void)
 {
     test_high_speed_cadence();
@@ -120,6 +127,7 @@ int main(void)
     test_transient_buffer_retirement();
     test_ready_ring_wrap_and_no_overwrite();
     test_completed_endpoint_waits_for_host_rearm();
+    test_all_input_completion_paths_require_rearm();
     puts("EHCI periodic cadence, split masks, and bounded ring contract satisfied");
     return 0;
 }

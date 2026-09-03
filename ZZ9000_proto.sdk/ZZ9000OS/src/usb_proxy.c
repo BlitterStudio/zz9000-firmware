@@ -483,6 +483,20 @@ void usb_proxy_periodic_pump(void)
                       ZZUSB_PERIODIC_ENDPOINTS);
         if (!endpoint->used || endpoint->completion_pending)
             continue;
+        if (endpoint->needs_rearm) {
+            if (!zzusb_periodic_rearm_ready(
+                    endpoint->needs_rearm, endpoint->rearm_requested) ||
+                now < endpoint->next_due)
+                continue;
+            if (!endpoint->software_polled &&
+                rearm_int_queue(&endpoint->dev, endpoint->queue) < 0) {
+                endpoint->failed = 1;
+                periodic_queue_completion(index, ZZUSB_STATUS_HOSTERROR, 0);
+                continue;
+            }
+            endpoint->needs_rearm = 0;
+            endpoint->rearm_requested = 0;
+        }
         if (endpoint->software_polled) {
             uint16_t status;
             uint32_t actual;
@@ -514,19 +528,6 @@ void usb_proxy_periodic_pump(void)
         }
         if (!endpoint->queue)
             continue;
-        if (endpoint->needs_rearm) {
-            if (!zzusb_periodic_rearm_ready(
-                    endpoint->needs_rearm, endpoint->rearm_requested) ||
-                now < endpoint->next_due)
-                continue;
-            if (rearm_int_queue(&endpoint->dev, endpoint->queue) < 0) {
-                endpoint->failed = 1;
-                periodic_queue_completion(index, ZZUSB_STATUS_HOSTERROR, 0);
-                continue;
-            }
-            endpoint->needs_rearm = 0;
-            endpoint->rearm_requested = 0;
-        }
 
         completed = poll_int_queue(&endpoint->dev, endpoint->queue);
         if (!completed)
@@ -761,12 +762,14 @@ static uint16_t handle_periodic_reap(volatile struct ZZUSBCommand *cmd,
         if (endpoint->failed || endpoint->key.direction == 0) {
             if (periodic_release_slot(index) < 0)
                 status = ZZUSB_STATUS_HOSTERROR;
-        } else if (!endpoint->software_polled) {
+        } else if (zzusb_periodic_completion_needs_rearm(
+                       endpoint->failed,
+                       endpoint->key.direction != 0)) {
             /*
              * A hub change bit remains asserted until its class driver
-             * clears the port feature. Wait for the next Amiga IOR before
-             * polling again; otherwise duplicate change reports can pile up
-             * while Poseidon is still tearing down the removed child.
+             * clears the port feature. This applies equally to persistent
+             * interrupt queues and long-interval software polling: wait for
+             * the next Amiga IOR before polling again.
              */
             endpoint->needs_rearm = 1;
             endpoint->rearm_requested = 0;

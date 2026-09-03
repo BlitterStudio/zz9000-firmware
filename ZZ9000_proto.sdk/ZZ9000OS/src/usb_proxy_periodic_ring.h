@@ -47,4 +47,10 @@ static inline int zzusb_periodic_rearm_ready(
     return needs_rearm && host_requested;
 }
 
+static inline int zzusb_periodic_completion_needs_rearm(
+    int failed, int direction_in)
+{
+    return !failed && direction_in;
+}
+
 #endif
