@@ -192,11 +192,16 @@ The bench persists two per-card clean ceilings. For Paula ceiling
 $C_P$, AX ceiling $C_A$, mixer legs $P/A$ and scene gain $G$, firmware
 enforces:
 
-$$G\left(P\frac{C_A}{C_P}+A\right) \le \frac{3}{4}C_A$$
+$$G\left(P\frac{C_A}{C_P}+A\right) \le C_P\frac{C_A}{C_P}+C_A = 2C_A$$
 
-The 3/4 factor is approximately 2.5 dB of component/unit headroom.
-Defaults 256/256 preserve the legacy uncalibrated 192-unit policy;
-measured cards save different pairs. This avoids discarding AX
+Each leg is additionally clamped to its own measured ceiling,
+independent of the sum. The shipped post-mix limiter (engaged at
+0.47 FS) bounds the summed output, so the boundary admits both legs at
+their clean ceilings (160 at the 48/80 calibration; 512 at the
+uncalibrated 256/256 defaults) instead of the pre-limiter
+$\frac{3}{4}C_A$ sum headroom (60 at 48/80; approximately 2.5 dB of
+component/unit margin) that the 2026-08 measurements below were taken
+under. Measured cards save different pairs; this avoids discarding AX
 headroom on an R1 card whose Paula path is hotter, and avoids assuming
 the same ratio across repaired cards.
 
@@ -302,9 +307,11 @@ would suggest boundary 36.
 
 The intervals do not match, disproving an unweighted mixer sum on this
 R1 card. The adopted persisted calibration is Paula ceiling 48 / AX
-ceiling 80: Paula weight $80/48=1.667$ and derived AX-equivalent
-boundary 60. ZZTop exposes both measured ceilings; scene Save persists
-them as `audio_ceiling_paula` / `audio_ceiling_ax`.
+ceiling 80: Paula weight $80/48=1.667$ and a derived AX-equivalent
+boundary of 60 under the then-current 3/4 policy (the limiter-era
+boundary for the same pair is 160). ZZTop exposes both measured
+ceilings; scene Save persists them as `audio_ceiling_paula` /
+`audio_ceiling_ax`.
 
 ## Hardware smoke checklist (verification session)
 

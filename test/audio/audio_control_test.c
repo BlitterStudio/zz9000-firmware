@@ -35,6 +35,7 @@
 #include <string.h>
 #include "audio_scene.h"
 #include "ax.h"
+#include "limiter_stub.h"
 #include "ff.h"
 #include "sdk_audio_control.h"
 #include "sdk_mailbox.h"
@@ -509,13 +510,18 @@ static void test_trim_submit_result(void)
 	uint16_t status;
 
 	audio_scene_init();
+	check(audio_scene_set_calibration(128, 128) == 0,
+		"weight-1 calibration accepted", NULL);
+	check(audio_scene_set_baseline(128, 128) == 0,
+		"at-boundary baseline accepted", NULL);
+	pump_scene();
 	memset(&tr, 0, sizeof(tr));
 	memset(&get, 0, sizeof(get));
 
-	/* Scene 0 (unity) with the default baseline (128+64 = 192, at
-	 * the boundary): an absolute balance below the composed limit is
-	 * applied verbatim, unbounded. */
-	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(108, 44));
+	/* Scene 0 (unity) with the baseline composing exactly at the
+	 * enforced boundary: an absolute balance below the composed
+	 * limit is applied verbatim, unbounded. */
+	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(108, 108));
 	status = run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr));
 	check(status == SDK_STATUS_OK && result_len == sizeof(
 			struct SDKAudioTrimResultPayload),
@@ -524,26 +530,25 @@ static void test_trim_submit_result(void)
 	applied = w32(&result_buf[0]);
 	bound = w32(&result_buf[4]);
 	flags = w32(&result_buf[8]);
-	check(applied == SDK_AUDIO_BALANCE_PACK(108, 44) &&
+	check(applied == SDK_AUDIO_BALANCE_PACK(108, 108) &&
 		flags == 0 && bound == 0,
 		"within-boundary trim applied verbatim, unbounded",
 		fmt("applied=0x%lx bound=0x%lx flags=%lu",
 			(unsigned long)applied, (unsigned long)bound,
 			(unsigned long)flags));
-
-	/* One step over the composed boundary: reduced legs, BOUNDED
-	 * flag, and the applied bound reported back (138+64 = 202 scaled
-	 * by 192/202 -> 131+60 = 191). */
-	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(138, 64));
+	/* Legs past their own clean ceilings: each clamps to its
+	 * ceiling (138,138 -> 128,128), BOUNDED flag set, and the
+	 * applied bound reported back. */
+	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(138, 138));
 	status = run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr));
 	check(status == SDK_STATUS_OK, "bounded trim submit accepted",
 		fmt("status=%u", status));
 	applied = w32(&result_buf[0]);
 	bound = w32(&result_buf[4]);
 	flags = w32(&result_buf[8]);
-	check(applied == SDK_AUDIO_BALANCE_PACK(131, 60) &&
+	check(applied == SDK_AUDIO_BALANCE_PACK(128, 128) &&
 		flags == SDK_AUDIO_TRIM_RESULT_BOUNDED &&
-		bound == SDK_AUDIO_BALANCE_PACK(131, 60),
+		bound == SDK_AUDIO_BALANCE_PACK(128, 128),
 		"over-boundary trim bounded and reported",
 		fmt("applied=0x%lx bound=0x%lx flags=%lu",
 			(unsigned long)applied, (unsigned long)bound,
@@ -559,12 +564,12 @@ static void test_trim_submit_result(void)
 	baseline = w32(&result_buf[8]);
 	trim = w32(&result_buf[12]);
 	check(flags == SDK_AUDIO_CONTROL_FLAG_TRIM_BOUNDED &&
-		trim == SDK_AUDIO_BALANCE_PACK(131, 60),
+		trim == SDK_AUDIO_BALANCE_PACK(128, 128),
 		"state get reports bounded applied trim",
 		fmt("flags=0x%lx trim=0x%lx", (unsigned long)flags,
 			(unsigned long)trim));
-	check(baseline == SDK_AUDIO_BALANCE_PACK(128, 64) &&
-		w32(&result_buf[16]) == 192,
+	check(baseline == SDK_AUDIO_BALANCE_PACK(128, 128) &&
+		w32(&result_buf[16]) == 256,
 		"state get reports baseline pair and enforced ceiling",
 		fmt("baseline=0x%lx ceiling=%lu",
 			(unsigned long)baseline,
@@ -1216,7 +1221,7 @@ static void test_calibration_write_path(void)
 		"calibration stored", NULL);
 	check(run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get)) ==
 		SDK_STATUS_OK, "state get after calibration", NULL);
-	check(w32(&result_buf[16]) == 60 &&
+	check(w32(&result_buf[16]) == 160 &&
 		w32(&result_buf[24]) == 48 &&
 		w32(&result_buf[28]) == 80,
 		"state reports measured ceilings and derived boundary",

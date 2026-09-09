@@ -1,4 +1,4 @@
-/* Isolated hardware experiment; never part of a production build. */
+/* Private, magic+calibration-gated bench protocol for hardware qualification. */
 #ifndef AUDIO_LIMITER_BENCH_H
 #define AUDIO_LIMITER_BENCH_H
 #include "xtime_l.h"

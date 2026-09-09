@@ -1,4 +1,4 @@
-/* Instrument-build mapping to the limiter graph's runtime threshold. */
+/* Mapping to the limiter graph's runtime threshold parameter. */
 #ifndef LIMITER_PARAMETER_H
 #define LIMITER_PARAMETER_H
 #include "adau_PARAM.h"

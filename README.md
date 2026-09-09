@@ -129,15 +129,17 @@ Values are plain decimals; band pairs and prefactor/volume pack two
 0-100 fields as `hi*128+lo`, and baseline packs mixer legs as
 `paula*256+ax` (0-255 each, 127 = 0 dB). The ceiling keys are measured
 clean combined levels (1-4095): firmware weights Paula by
-`audio_ceiling_ax/audio_ceiling_paula` and enforces 3/4 of the AX
-ceiling. Name keys pack two ASCII characters as `c1*256+c2`.
+`audio_ceiling_ax/audio_ceiling_paula`, admits each leg up to its own
+measured ceiling, and enforces the weighted sum of both ceilings as
+the AX-equivalent boundary (the post-mix limiter bounds the summed
+output). Name keys pack two ASCII characters as `c1*256+c2`.
 
 | Key | Purpose |
 |---|---|
 | `audio_active` | Audio scene slot (0-7) applied at boot and after every warm reset |
 | `audio_baseline` | Operator Paula/AX balance packed paula*256+ax, replacing the old `ZZ9K_MIX_LEVELS` env var |
 | `audio_ceiling_paula` | Measured clean Paula-only ceiling (1-4095); pair with `audio_ceiling_ax` |
-| `audio_ceiling_ax` | Measured clean AX-only ceiling (1-4095); 3/4 of this is the AX-equivalent enforced boundary |
+| `audio_ceiling_ax` | Measured clean AX-only ceiling (1-4095); with the Paula ceiling it forms the enforced AX-equivalent boundary |
 | `audio_scene0_lpf` | Scene 1 low-pass cutoff in Hz (1-23900; 23900 = DSP default) |
 | `audio_scene0_eq01` | Scene 1 EQ bands 0+1 packed b0*128+b1 (each 0-100, 50 = 0 dB) |
 | `audio_scene0_eq23` | Scene 1 EQ bands 2+3 packed b2*128+b3 |

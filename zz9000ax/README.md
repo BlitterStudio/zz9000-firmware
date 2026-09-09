@@ -1,7 +1,11 @@
 # ZZ9000AX ADAU1701 production profile
 
-`zz9000ax-mix1-lowpass-eq.dspproj` is the source-authoritative SigmaStudio
-4.7 project for the ADAU1701 program embedded in the firmware.
+`dsp/limiter-postvolume.dspproj` (SigmaStudio 4.7) is the
+source-authoritative project for the ADAU1701 program embedded in the
+firmware: the original mixer/LPF/prefactor/EQ/volume chain plus the
+post-Volume stereo-linked peak limiter that ships engaged at 0.47 FS.
+The pre-limiter `zz9000ax/zz9000ax-mix1-lowpass-eq.dspproj` remains in
+the tree for history and comparison.
 
 Rate conversion in and out of this fixed 48-kHz domain is handled by the
 ARM-side qualified converter kernel; see `docs/audio-conversion.md` for
@@ -16,7 +20,7 @@ The normal graph routes:
 - physical right RCA / ADC1 to `Output6` / `DIG1`;
 - physical ADC/Paula stereo and FPGA playback into `St Mixer1`; and
 - the combined mixer output through low-pass, prefactor, equalizer,
-  volume/pan, and `DAC0` / `DAC1`.
+  volume/pan, the stereo-linked limiter, and `DAC0` / `DAC1`.
 
 The ADC capture taps remain before the mixer and master scene chain, so
 recording observes the physical inputs without internally feeding back
@@ -39,9 +43,9 @@ characterization control portal are not part of the production image.
 
 | Input | SHA-256 |
 |---|---|
-| `zz9000ax-mix1-lowpass-eq.dspproj` | `df62c9f36c1675bc959c94b0cbfb546df71921a482df201d361889d517ba2952` |
-| `Program_Data_Normal_ADC_IC_1` (5120 bytes) | `bda1406175755779e630fec41863a1897509199c9bd42e2ae51620dc75e1a80c` |
-| `Param_Data_Normal_ADC_IC_1` (4096 bytes) | `979c11315dfc59b85d86fa82cd88f34597f1df49f39ee14ff18b9acb4769d4f0` |
+| `dsp/limiter-postvolume.dspproj` | `5d002c6876c37a357cfd8b5f45791167be5d315162c2867b319bdaf683d697be` |
+| `Program_Data_Limiter_IC_1` (5120 bytes) | `b703b62adac2ee2d859384fcc92e8369d4273ed6d20f698cc5bd46d1630e9fd8` |
+| `Param_Data_Limiter_IC_1` (4096 bytes) | `7565c1b872f2abac46fd4dcd14f388164441ec1a0e0857d42f766f7099b21b8a` |
 
 The graph source and its program/parameter arrays are independent of the
 serial framing register, which firmware writes and verifies after every cold
@@ -52,13 +56,14 @@ verified.
 
 ## Regenerating and verifying
 
-1. Open `zz9000ax-mix1-lowpass-eq.dspproj` in SigmaStudio 4.7.
+1. Open `dsp/limiter-postvolume.dspproj` in SigmaStudio 4.7.
 2. Link, compile, save, and export the system files.
-3. Copy the exported `Program_Data_IC_1` and `Param_Data_IC_1` bodies into
-   `Program_Data_Normal_ADC_IC_1` and `Param_Data_Normal_ADC_IC_1` in
-   `adau.h`.
+3. Copy the exported `Program_Data_IC_1` and `Param_Data_IC_1` bodies
+   into `adau_limiter_image.h` (the loader symbols in `adau.h` alias
+   onto `Program_Data_Limiter_IC_1` / `Param_Data_Limiter_IC_1`).
 4. Update the three hashes above and in `test/audio/audio_profile_test.c`.
-5. Copy the generated parameter map to `adau_PARAM.h` if the graph changes.
+5. Copy the generated parameter map to `adau_limiter_PARAM.h` if the
+   graph changes.
 6. Run `make -C test/audio test`.
 
 `adau.h` deliberately supplies its own integration wrapper instead of

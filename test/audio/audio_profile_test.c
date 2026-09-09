@@ -21,14 +21,14 @@
 	} while (0)
 
 static const char normal_project_sha256[] =
-	"df62c9f36c1675bc959c94b0cbfb546d"
-	"f71921a482df201d361889d517ba2952";
+	"5d002c6876c37a357cfd8b5f45791167"
+	"be5d315162c2867b319bdaf683d697be";
 static const char normal_program_sha256[] =
-	"bda1406175755779e630fec41863a1897"
-	"509199c9bd42e2ae51620dc75e1a80c";
+	"b703b62adac2ee2d859384fcc92e8369"
+	"d4273ed6d20f698cc5bd46d1630e9fd8";
 static const char normal_parameter_sha256[] =
-	"979c11315dfc59b85d86fa82cd88f34"
-	"597f1df49f39ee14ff18b9acb4769d4f0";
+	"7565c1b872f2abac46fd4dcd14f38816"
+	"4441ec1a0e0857d42f766f7099b21b8a";
 
 static int digest_matches_hex(const uint8_t *data, size_t length,
 		const char expected[65])
@@ -89,7 +89,7 @@ static void test_normal_image_identity(void)
 			sizeof(Param_Data_Normal_ADC_IC_1),
 			normal_parameter_sha256));
 	CHECK(file_digest_matches(
-			"zz9000ax/zz9000ax-mix1-lowpass-eq.dspproj",
+		"dsp/limiter-postvolume.dspproj",
 			normal_project_sha256));
 }
 
@@ -105,22 +105,25 @@ static void test_production_transport_contract(void)
 
 static void test_parameter_map(void)
 {
-	CHECK(MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR == 0U);
-	CHECK(MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR == 1U);
-	CHECK(MOD_GENFILTER1_ALG0_STAGE0_B0_ADDR == 2U);
-	CHECK(MOD_GENFILTER1_ALG0_STAGE0_A2_ADDR == 6U);
-	CHECK(MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_ADDR == 7U);
-	CHECK(MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR == 8U);
-	CHECK(MOD_EQUALIZER_ALG0_STAGE0_B0_ADDR == 9U);
-	CHECK(MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR == 59U);
-	CHECK(MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR == 60U);
+	CHECK(MOD_LIMITTHRESHOLD_DCINPALG1_ADDR == 0U);
+	CHECK(MOD_STMIXER1_ALG0_STAGE0_VOLUME_ADDR == 2U);
+	CHECK(MOD_STMIXER1_ALG0_STAGE1_VOLUME_ADDR == 3U);
+	CHECK(MOD_GENFILTER1_ALG0_STAGE0_B0_ADDR == 4U);
+	CHECK(MOD_GENFILTER1_ALG0_STAGE0_A2_ADDR == 8U);
+	CHECK(MOD_PREFACTOR_ALG0_GAIN1940ALGNS3_ADDR == 9U);
+	CHECK(MOD_PREFACTOR_ALG1_GAIN1940ALGNS4_ADDR == 10U);
+	CHECK(MOD_EQUALIZER_ALG0_STAGE0_B0_ADDR == 11U);
+	CHECK(MOD_VOLUME_ALG0_GAIN1940ALGNS1_ADDR == 61U);
+	CHECK(MOD_VOLUME_ALG1_GAIN1940ALGNS2_ADDR == 62U);
 }
 
 /*
  * SigmaStudio assigns parameters in compiled signal-flow order. Pinning
  * the mixer before every scene block prevents the source graph from
- * regressing to the old AX-only chain where Paula joined after volume.
- * The image hashes above pin the complete compiled topology.
+ * regressing to the old AX-only chain where Paula joined after volume;
+ * the limiter threshold and decay sit ahead of the master chain at
+ * addresses 0 and 1. The image hashes above pin the complete compiled
+ * topology.
  */
 static void test_master_chain_parameter_order(void)
 {
