@@ -115,11 +115,11 @@ static void preconvert_write_period(struct audio_pump_preconvert *state)
 
 int audio_pump_preconvert_fill(struct audio_pump_preconvert *state,
 	const struct audio_pump_preconvert_source *source,
-	uint32_t *source_consumed)
+	uint64_t *source_consumed)
 {
 	uint32_t source_frames;
 	uint32_t source_bytes;
-	uint32_t available;
+	uint64_t available;
 	uint32_t pull;
 	uint32_t offset;
 
@@ -151,8 +151,8 @@ int audio_pump_preconvert_fill(struct audio_pump_preconvert *state,
 	else if (!source->done || available == 0U)
 		return 0;
 	else
-		pull = available;
-	offset = source->consumed % source->capacity;
+		pull = (uint32_t)available;
+	offset = (uint32_t)(source->consumed % source->capacity);
 	preconvert_copy_source(state, source, offset, pull, source_bytes);
 	if (source->channels == 1U)
 		preconvert_expand_mono(state, source_frames);

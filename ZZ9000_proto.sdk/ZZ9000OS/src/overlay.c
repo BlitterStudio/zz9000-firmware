@@ -706,7 +706,11 @@ void overlay_vblank_rearm(void)
 	 * published and is immutable while scanned. Restart it at vblank entry,
 	 * before unrelated dirty cache lines can delay the mandatory global
 	 * flush and leave the native-overlay VDMA stalled on a black frame. A
-	 * newly composed buffer becomes eligible one vblank after that flush. */
+	 * newly composed buffer becomes eligible one vblank after that flush.
+	 * The restart is also the overlay stream's phase lock to the raster:
+	 * the VDMA and the display both restart at row zero together, which
+	 * is what keeps the free-running line fetcher on the right source
+	 * row (an unlocked stream drifts and shows wrong/black rows). */
 	address = overlay_vblank_take_rearm(
 		ov.hw_scan_addr, &ov.hw_handoff_addr);
 	overlay_hw_rearm(address);

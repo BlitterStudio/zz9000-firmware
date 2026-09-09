@@ -20,8 +20,10 @@ MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
 FABRIC_TARGET := $(BUILD_DIR)/audio_fabric_test
 RING_TARGET := $(BUILD_DIR)/audio_fabric_ring_test
 BENCH_SMOKE_TARGET := $(BUILD_DIR)/bench_smoke_test
+MEDIA_VIEW_TARGET := $(BUILD_DIR)/audio_pump_media_view_test
 TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
-	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) $(DRAIN_TARGET) \
+	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
+	$(MEDIA_VIEW_TARGET) $(DRAIN_TARGET) \
 	$(SCENE_TARGET) $(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
 	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(FABRIC_TARGET) \
 	$(RING_TARGET) $(BENCH_SMOKE_TARGET)
@@ -49,6 +51,7 @@ test: $(TARGETS)
 	$(CONTROL_TARGET)
 	$(MPEG_LAYER2_TARGET)
 	$(FABRIC_TARGET) --srcdir $(SRC_DIR)
+	$(MEDIA_VIEW_TARGET)
 	$(RING_TARGET)
 	$(BENCH_SMOKE_TARGET)
 
@@ -154,6 +157,13 @@ $(PRECONVERT_TARGET): audio_pump_preconvert_test.c \
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_pump_preconvert_test.c \
 		$(SRC_DIR)/audio_pump_preconvert.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
+
+# Media-session preconvert view: the exact 48 kHz view <-> session cursor
+# mapping that keeps the fabric ISR on the memcpy-only path (drivers#83).
+$(MEDIA_VIEW_TARGET): audio_pump_media_view_test.c \
+	$(SRC_DIR)/audio_pump_media_view.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_pump_media_view_test.c
 
 $(DRAIN_TARGET): audio_stream_drain_test.c \
 	$(SRC_DIR)/audio_stream_drain.h

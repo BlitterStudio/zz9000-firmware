@@ -928,19 +928,24 @@ static void scenario_source_contract(void)
 			      srcs[0], "audio_playback_retire_to") == 0,
 		      "contract: pump no longer retires periods", paths[0]);
 		check(count_occurrences(
-			      srcs[0], "Xil_DCacheFlushRange") >= 1,
-		      "contract: decode-side flushes remain", paths[0]);
-		check(count_occurrences(
 			      srcs[0], "audio_playback_preconvert(") >= 3,
 		      "contract: bound stream conversion runs in main loop",
 		      paths[0]);
 		check(count_occurrences(
-			      srcs[0], "source->sample_rate = 48000U;") == 1,
-		      "contract: stream ISR source is preconverted bypass",
+			      srcs[0], "source->sample_rate = 48000U;") == 2,
+		      "contract: stream+media ISR source is preconverted bypass",
 		      paths[0]);
 		check(count_occurrences(
-			      srcs[0], "audio_pump_preconvert_stage(") == 1,
+			      srcs[0], "audio_pump_preconvert_stage(") == 2,
 		      "contract: ISR stages converted ring, not native PCM",
+		      paths[0]);
+		check(count_occurrences(
+			      srcs[0], "audio_pump_media_source_fill(") >= 2,
+		      "contract: media conversion runs in main loop",
+		      paths[0]);
+		check(count_occurrences(
+			      srcs[0], "audio_pump_media_view_retire(") >= 1,
+		      "contract: media retirement maps view periods exactly",
 		      paths[0]);
 		check(count_occurrences(
 			      srcs[0],

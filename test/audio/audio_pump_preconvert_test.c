@@ -33,7 +33,7 @@ static void test_44100_matches_converter(void)
 	uint8_t input[882U * 4U];
 	uint8_t ring[RING_BYTES];
 	int16_t expected[960U * 2U];
-	uint32_t consumed = 0U;
+	uint64_t consumed = 0U;
 	uint32_t i;
 
 	for (i = 0U; i < 882U * 2U; i++)
@@ -70,7 +70,7 @@ static void test_48000_is_bit_exact(void)
 	struct audio_pump_preconvert_source source;
 	uint8_t input[AUDIO_PUMP_PRECONVERT_PERIOD_BYTES];
 	uint8_t ring[RING_BYTES];
-	uint32_t consumed = 0U;
+	uint64_t consumed = 0U;
 	uint32_t i;
 
 	for (i = 0U; i < sizeof(input); i++)
@@ -96,7 +96,7 @@ static void test_shortage_waits_and_tail_drains(void)
 	struct audio_pump_preconvert_source source;
 	uint8_t input[100U * 4U];
 	uint8_t ring[RING_BYTES];
-	uint32_t consumed = 0U;
+	uint64_t consumed = 0U;
 
 	memset(input, 0x35, sizeof(input));
 	memset(&source, 0, sizeof(source));
@@ -123,9 +123,9 @@ static void test_cursor_wrap_rebases_both_cursors(void)
 	struct audio_pump_preconvert_source source;
 	uint8_t input[AUDIO_PUMP_PRECONVERT_PERIOD_BYTES];
 	uint8_t ring[RING_BYTES];
-	uint32_t consumed = 0U;
+	uint64_t consumed = 0U;
 	uint32_t base;
-	uint32_t produced_before;
+	uint64_t produced_before;
 	uint32_t staged_before;
 
 	memset(input, 0x5a, sizeof(input));
