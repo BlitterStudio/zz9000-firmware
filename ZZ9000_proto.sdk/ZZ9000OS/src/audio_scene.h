@@ -139,12 +139,10 @@ uint8_t audio_scene_active_index(void);
 int audio_scene_set_baseline(uint8_t paula, uint8_t ax);
 uint8_t audio_scene_baseline_paula(void);
 uint8_t audio_scene_baseline_ax(void);
-#ifdef ZZ_AUDIO_LIMITER_BENCH
-/* Limiter-build boot default for cards with no saved operator
+/* Boot default for cards with no saved operator
  * baseline: Paula at 3/4 of its clean ceiling, AX exactly 2x Paula
  * capped by the AX clean ceiling. */
 void audio_scene_baseline_apply_parity_default(void);
-#endif
 
 /* Per-card measured clean ceilings. Values 1..4095 apply immediately
  * through the same differential commit path as the baseline. */

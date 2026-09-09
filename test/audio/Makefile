@@ -31,8 +31,7 @@ TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 # fabric lease test additionally compiles xil_cache.h in recording
 # mode (-DXIL_CACHE_MOCK_RECORD) so its cache-fidelity scenario can
 # assert the exact invalidate/flush ranges; every other target keeps
-# the no-op stubs.
-CPPFLAGS += -I$(MOCK_DIR) -I$(SRC_DIR)
+CPPFLAGS += -I$(MOCK_DIR) -I$(SRC_DIR) -Ihost_stubs
 
 .PHONY: test clean check-tables
 
@@ -73,10 +72,9 @@ $(FABRIC_TARGET): audio_fabric_test.c pump_golden.c pump_golden.h \
 		$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 
-# Instrument bench smoke: compiles the scene module with
-# -DZZ_AUDIO_LIMITER_BENCH=1 so the limiter graph mapping, bench
-# protocol, boot-threshold default and boundary policy are exercised
-# beside the unflagged production configuration. host_stubs/ supplies
+# Bench smoke: drives the bench protocol end to end (boost/restore,
+# watchdog, warm reset, fail-closed BEGIN, leg validation, parity boot
+# default) against the scene and control modules. host_stubs/ supplies
 # the XTime shim backed by the smoke's manual clock.
 $(BENCH_SMOKE_TARGET): bench_smoke.c audio_scene_test.c \
 	$(SRC_DIR)/sdk_audio_control.c $(SRC_DIR)/audio_scene.c \
@@ -86,8 +84,7 @@ $(BENCH_SMOKE_TARGET): bench_smoke.c audio_scene_test.c \
 	$(SRC_DIR)/zz_config.h $(MOCK_DIR)/ff.h $(MOCK_DIR)/xil_cache.h \
 	host_stubs/xtime_l.h fatfs_mock.c
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DZZ_AUDIO_LIMITER_BENCH=1 \
-		-Ihost_stubs -o $@ bench_smoke.c \
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ bench_smoke.c \
 		$(SRC_DIR)/sdk_audio_control.c $(SRC_DIR)/audio_scene.c \
 		$(SRC_DIR)/zz_config.c fatfs_mock.c -lm
 

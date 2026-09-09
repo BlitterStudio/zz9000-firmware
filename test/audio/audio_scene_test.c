@@ -19,6 +19,7 @@
 
 #include "audio_scene.h"
 #include "ax.h"
+#include "limiter_stub.h"
 #include "sdk_mailbox.h"
 
 /* ---- recording stubs for the ax.h DSP setters ---- */
@@ -370,10 +371,16 @@ static void test_staging_at_boundary(void)
 	int a = -1, b = -1;
 
 	audio_scene_init();
+	check(audio_scene_set_calibration(128, 128) == 0,
+		"weight-1 calibration accepted", NULL);
+	pump_scene();
+	check(audio_scene_set_baseline(128, 128) == 0,
+		"at-boundary baseline accepted", NULL);
+	pump_scene();
 	clear_writes();
 	check(audio_scene_select(0) == 0, "apply default scene", NULL);
 	pump_scene();
-	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 64,
+	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 128,
 		"at-boundary composition passes at full legs",
 		fmt("v1=%d v2=%d", a, b));
 	check(audio_scene_gain_reduction_events() == 0,
@@ -387,6 +394,12 @@ static void test_staging_one_step_over(void)
 	int a = -1, b = -1;
 
 	audio_scene_init();
+	check(audio_scene_set_calibration(128, 128) == 0,
+		"weight-1 calibration accepted", NULL);
+	pump_scene();
+	check(audio_scene_set_baseline(128, 128) == 0,
+		"at-boundary baseline accepted", NULL);
+	pump_scene();
 	audio_scene_select(0);
 	pump_scene();
 	clear_writes();
@@ -395,13 +408,13 @@ static void test_staging_one_step_over(void)
 			&result) == 0, "trim submit accepted for processing",
 		NULL);
 	check(result.bounded == 1, "one-step-over trim is bounded", NULL);
-	check(result.mixer_paula == 128 && result.mixer_ax == 63,
+	check(result.mixer_paula == 128 && result.mixer_ax == 127,
 		"bounded trim applied legs",
 		fmt("v1=%u v2=%u", result.mixer_paula, result.mixer_ax));
 	check(near(result.trim_bound, 0.0),
 		"bound reports zero headroom at the boundary",
 		fmt("trim_bound=%.3f", result.trim_bound));
-	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 63,
+	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 127,
 		"clamped mixer write issued",
 		fmt("v1=%d v2=%d", a, b));
 	check(audio_scene_gain_reduction_events() == 1,
@@ -409,8 +422,8 @@ static void test_staging_one_step_over(void)
 		fmt("events=%lu",
 			(unsigned long)audio_scene_gain_reduction_events()));
 	event = audio_scene_last_gain_reduction();
-	check(event != NULL && near(event->requested, 193.0) &&
-		near(event->applied, 191.0) &&
+	check(event != NULL && near(event->requested, 257.0) &&
+		near(event->applied, 255.0) &&
 		near(event->boundary, audio_scene_enforced_boundary()),
 		"event reports requested/applied/boundary",
 		event ? fmt("req=%.3f applied=%.3f boundary=%.3f",
@@ -418,7 +431,7 @@ static void test_staging_one_step_over(void)
 			: "no event");
 
 	audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI);
-	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 64,
+	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 128,
 		"release restores neutral legs",
 		fmt("v1=%d v2=%d", a, b));
 	check(audio_scene_gain_reduction_events() == 1,
@@ -438,7 +451,7 @@ static void test_leg_calibration_weighting(void)
 	pump_scene();
 	audio_scene_control_state(&state);
 	check(state.ceiling_paula == 48 && state.ceiling_ax == 80 &&
-		state.ceiling == 60,
+		state.ceiling == 160,
 		"calibration state derives AX-equivalent boundary",
 		fmt("p=%lu ax=%lu boundary=%lu",
 			(unsigned long)state.ceiling_paula,
@@ -448,22 +461,24 @@ static void test_leg_calibration_weighting(void)
 	memset(&result, 0, sizeof(result));
 	audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 36, 0, &result);
 	check(!result.bounded && result.mixer_paula == 36,
-		"pure Paula policy boundary is 36", NULL);
+		"half Paula ceiling composes within the boundary", NULL);
 	audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI);
 
 	audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 0, 60, &result);
 	check(!result.bounded && result.mixer_ax == 60,
-		"pure AX policy boundary is 60", NULL);
+		"three-quarter AX ceiling composes within the boundary",
+		NULL);
 	audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI);
 
-	audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 18, 30, &result);
+	audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 48, 80, &result);
 	check(!result.bounded,
-		"half Paula plus half AX ceiling reaches policy boundary", NULL);
+		"both legs at their clean ceilings compose exactly at the boundary",
+		NULL);
 	audio_scene_trim_release(AUDIO_SCENE_OWNER_AHI);
 
-	audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 19, 30, &result);
-	check(result.bounded && result.mixer_paula == 18 &&
-		result.mixer_ax == 29,
+	audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 49, 80, &result);
+	check(result.bounded && result.mixer_paula == 48 &&
+		result.mixer_ax == 79,
 		"weighted step over boundary clamps proportionally",
 		fmt("bounded=%u p=%u ax=%u", result.bounded,
 			result.mixer_paula, result.mixer_ax));
@@ -566,8 +581,13 @@ static void test_baseline_trim_composition(void)
 	int a = -1, b = -1;
 
 	unity_scene(&def);
-	def.volume = 50; /* scene linear gain 0.5 -> summed bound 384 */
+	def.volume = 50; /* scene linear gain 0.5 -> summed bound 400 */
 	audio_scene_init();
+	check(audio_scene_set_calibration(100, 100) == 0,
+		"weight-1 calibration accepted", NULL);
+	pump_scene();
+	check(audio_scene_set_baseline(60, 60) == 0,
+		"low baseline accepted", NULL);
 	audio_scene_write(5, &def);
 	audio_scene_select(5);
 	pump_scene();
@@ -575,20 +595,20 @@ static void test_baseline_trim_composition(void)
 	memset(&result, 0, sizeof(result));
 	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, 50, 50,
 			&result) == 0 && result.bounded == 0 &&
-		result.mixer_paula == 178 && result.mixer_ax == 114,
+		result.mixer_paula == 110 && result.mixer_ax == 110,
 		"trim accepted at low baseline",
 		fmt("bounded=%u v1=%u v2=%u", result.bounded,
 			result.mixer_paula, result.mixer_ax));
-	check(near(result.trim_bound, 192.0),
+	check(near(result.trim_bound, 280.0),
 		"trim headroom at low baseline",
 		fmt("trim_bound=%.3f", result.trim_bound));
 	audio_scene_trim_release(AUDIO_SCENE_OWNER_MHI);
 
-	audio_scene_set_baseline(200, 100);
+	audio_scene_set_baseline(100, 100);
 	pump_scene();
-	check(audio_scene_baseline_paula() == 200 &&
+	check(audio_scene_baseline_paula() == 100 &&
 		audio_scene_baseline_ax() == 100, "baseline stored", NULL);
-	check(last_write(WRITE_MIXER_P, &a, &b) && a == 200 &&
+	check(last_write(WRITE_MIXER_P, &a, &b) && a == 100 &&
 		last_write(WRITE_MIXER_A, &a, &b) && a == 100,
 		"baseline restaged without clamp (per-leg)",
 		fmt("p=%d a=%d", last_write(WRITE_MIXER_P, &a, &b) ? a : -1,
@@ -597,20 +617,20 @@ static void test_baseline_trim_composition(void)
 		"baseline within boundary emits no event", NULL);
 
 	memset(&result, 0xFF, sizeof(result));
-	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, 50, 50,
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_MHI, 200, 200,
 			&result) == 0 && result.bounded == 1 &&
-		result.mixer_paula == 240 && result.mixer_ax == 144,
-		"same trim bounded at high baseline",
+		result.mixer_paula == 200 && result.mixer_ax == 200,
+		"same-sized trim bounded at high baseline",
 		fmt("bounded=%u v1=%u v2=%u", result.bounded,
 			result.mixer_paula, result.mixer_ax));
-	check(near(result.trim_bound, 84.0),
+	check(near(result.trim_bound, 200.0),
 		"reported bound reflects the raised baseline",
 		fmt("trim_bound=%.3f", result.trim_bound));
 	check(audio_scene_gain_reduction_events() == 1,
 		"baseline-shifted bound emits one event", NULL);
 	event = audio_scene_last_gain_reduction();
-	check(event != NULL && near(event->requested, 200.0) &&
-		near(event->applied, 192.0),
+	check(event != NULL && near(event->requested, 255.0) &&
+		near(event->applied, 200.0),
 		"event reports composed levels across baseline and trim",
 		event ? fmt("req=%.3f applied=%.3f", event->requested,
 			event->applied) : "no event");
@@ -627,11 +647,17 @@ static void test_lease_gain_composition(void)
 	struct audio_scene_trim_result trim;
 	struct audio_scene_lease_gain_result result;
 
-	/* Default scene: the mixer composition sits exactly at the
-	 * enforced boundary, so unity rides exactly at it and every
-	 * boost is bounded back to unity. Attenuation is always the
+	/* Default scene with the baseline composing exactly at the
+	 * enforced boundary: unity rides exactly at it and every boost
+	 * is bounded back to unity. Attenuation is always the
 	 * producer's own choice. */
 	audio_scene_init();
+	check(audio_scene_set_calibration(128, 128) == 0,
+		"weight-1 calibration accepted", NULL);
+	pump_scene();
+	check(audio_scene_set_baseline(128, 128) == 0,
+		"at-boundary baseline accepted", NULL);
+	pump_scene();
 	memset(&result, 0xFF, sizeof(result));
 	check(audio_scene_lease_gain_compose(128U, &result) == 0 &&
 		result.applied == 128U && result.bounded == 0U &&
@@ -653,26 +679,38 @@ static void test_lease_gain_composition(void)
 		"lease gain: NULL result tolerated", NULL);
 
 	/* A quieter scene leaves digital boost headroom: volume 75 is
-	 * 0.75 linear (exact in binary), the boundary budget doubles
-	 * and the full 0..255 range fits below the composition. */
+	 * 0.75 linear (exact in binary); with a low-AX baseline the
+	 * AX-remainder bound opens past the full 0..255 range. */
 	unity_scene(&def);
 	def.volume = 75;
 	audio_scene_init();
+	check(audio_scene_set_calibration(192, 96) == 0,
+		"half-weight calibration accepted", NULL);
+	pump_scene();
+	check(audio_scene_set_baseline(128, 64) == 0,
+		"low-AX baseline accepted", NULL);
+	pump_scene();
 	audio_scene_write(5, &def);
 	audio_scene_select(5);
 	pump_scene();
 	check(audio_scene_lease_gain_compose(255U, &result) == 0 &&
 		result.applied == 255U && result.bounded == 0U &&
-		near(result.gain_bound, 256.0),
+		near(result.gain_bound, 384.0),
 		"lease gain: quiet scene grants full boost headroom",
 		fmt("applied=%u bounded=%u bound=%.3f", result.applied,
 			result.bounded, result.gain_bound));
 
 	/* A trim loading the mixer consumes the headroom: the bounded
-	 * pair sits at the boundary again, the AX remainder (55 of the
-	 * 96-unit leg after the 137 Paula units) allows exactly
-	 * floor(128*55/54) = 130. */
+	 * pair sits at the boundary again, and the AX remainder (114
+	 * weighted units after the 142 Paula units) allows exactly
+	 * floor(128*114/113) = 129. */
 	audio_scene_init();
+	check(audio_scene_set_calibration(128, 128) == 0,
+		"weight-1 calibration accepted", NULL);
+	pump_scene();
+	check(audio_scene_set_baseline(128, 128) == 0,
+		"at-boundary baseline accepted", NULL);
+	pump_scene();
 	memset(&trim, 0, sizeof(trim));
 	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 32, 0,
 			&trim) == 0 && trim.bounded == 1,
@@ -684,11 +722,11 @@ static void test_lease_gain_composition(void)
 		"lease gain: unity still never bounded on loaded mixer",
 		fmt("applied=%u bounded=%u", result.applied,
 			result.bounded));
-	check(near(result.gain_bound, 128.0 * 55.0 / 54.0),
+	check(near(result.gain_bound, 128.0 * 114.0 / 113.0),
 		"lease gain: loaded-mixer bound is the AX remainder",
 		fmt("bound=%.3f", result.gain_bound));
 	check(audio_scene_lease_gain_compose(255U, &result) == 0 &&
-		result.applied == 130U && result.bounded == 1U,
+		result.applied == 129U && result.bounded == 1U,
 		"lease gain: boost bounded to the loaded-mixer remainder",
 		fmt("applied=%u bounded=%u", result.applied,
 			result.bounded));
@@ -793,6 +831,12 @@ static void test_trim_lifecycle(void)
 	int a = -1, b = -1;
 
 	audio_scene_init();
+	check(audio_scene_set_calibration(128, 128) == 0,
+		"weight-1 calibration accepted", NULL);
+	pump_scene();
+	check(audio_scene_set_baseline(128, 128) == 0,
+		"at-boundary baseline accepted", NULL);
+	pump_scene();
 	audio_scene_select(0);
 	pump_scene();
 	clear_writes();
@@ -802,11 +846,11 @@ static void test_trim_lifecycle(void)
 	memset(&result, 0, sizeof(result));
 	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_SDK, -20, -20,
 			&result) == 0 && result.bounded == 0 &&
-		result.mixer_paula == 108 && result.mixer_ax == 44,
+		result.mixer_paula == 108 && result.mixer_ax == 108,
 		"negative trim accepted",
 		fmt("bounded=%u v1=%u v2=%u", result.bounded,
 			result.mixer_paula, result.mixer_ax));
-	check(last_write(WRITE_MIXER, &a, &b) && a == 108 && b == 44,
+	check(last_write(WRITE_MIXER, &a, &b) && a == 108 && b == 108,
 		"accepted trim applied to mixer legs",
 		fmt("v1=%d v2=%d", a, b));
 
@@ -827,10 +871,10 @@ static void test_trim_lifecycle(void)
 	audio_scene_trim_release(AUDIO_SCENE_OWNER_NONE);
 	check(write_count == 0,
 		"refused or unknown-owner trim touches no DSP state", NULL);
-
 	audio_scene_trim_release(AUDIO_SCENE_OWNER_SDK);
-	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 64,
-		"release resets trim to neutral baseline", NULL);
+	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 128,
+		"release resets trim to neutral baseline",
+		fmt("v1=%d v2=%d", a, b));
 }
 
 /*

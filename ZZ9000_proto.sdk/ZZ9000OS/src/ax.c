@@ -5,9 +5,7 @@
 #include "xparameters.h"
 #include "adau.h"
 #include "adau_PARAM.h"
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 #include "limiter_parameter.h"
-#endif
 #include "xiicps.h"
 #include "xi2stx.h"
 #include "xi2srx.h"
@@ -629,11 +627,9 @@ uint8_t* audio_get_inited_tx_buffer() {
 
 // returns 1 if adau1701 found, otherwise 0
 // set audio_tx_buffer and audio_rx_buffer before!
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 /* Applies the operator-kept power-on limiter engagement after the
  * parameter-table load; defined beside the verify helper below. */
 int audio_adau_limiter_apply_boot_threshold(void);
-#endif
 int audio_adau_init(int program_dsp) {
 	XIicPs_Config* i2c_config;
 	i2c_config = XIicPs_LookupConfig(IIC2_DEVICE_ID);
@@ -771,10 +767,8 @@ int audio_adau_init(int program_dsp) {
 			status = audio_adau_set_lpf_params(23900);
 		if (status == 0)
 			status = audio_adau_set_mixer_vol(128, 64);
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 		if (status == 0)
 			status = audio_adau_limiter_apply_boot_threshold();
-#endif
 		if (status != 0) {
 			printf("[adau] verified normal DSP load failed; "
 					"capture remains unavailable.\n");
@@ -1712,7 +1706,6 @@ int audio_adau_set_eq_gain(int band, int gain) {
 	return 0;
 }
 
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 int audio_adau_limiter_verify(uint16_t address, uint32_t expected)
 {
 	uint8_t actual[4], bytes[4];
@@ -1723,9 +1716,7 @@ int audio_adau_limiter_verify(uint16_t address, uint32_t expected)
 	return adau_read32(0x34, address, actual) == 0 &&
 		audio_adau_readback_matches(bytes, actual, sizeof(bytes)) ? 0 : -1;
 }
-#endif
 
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 /* Power-on limiter engagement (user decision 2026-09-09): 0.47 FS
  * instead of the exported 7.0 bypass, so the operator-kept boost
  * baseline stays protected without a bench session. Runs while the
@@ -1771,4 +1762,3 @@ int audio_adau_limiter_threshold_get(uint32_t *value)
 		((uint32_t)actual[2] << 8) | (uint32_t)actual[3];
 	return 0;
 }
-#endif

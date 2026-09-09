@@ -22,6 +22,7 @@
 #include "sdk_mailbox.h"
 
 #include "audio_scene.c"
+#include "limiter_stub.h"
 
 /* ---- no-op stubs for the ax.h DSP setters ---- */
 
@@ -549,6 +550,10 @@ static void test_frame_packing(void)
 	uint32_t gain_events;
 
 	audio_scene_init();
+	check(audio_scene_set_calibration(128, 128) == 0,
+		"weight-1 calibration accepted", NULL);
+	check(audio_scene_set_baseline(128, 128) == 0,
+		"at-boundary baseline accepted", NULL);
 	audio_scene_meter_output_identity(SDK_AUDIO_METER_IDENTITY_MEDIA);
 	out_fill(0x1234, -0x2345);
 	audio_scene_meter_output_period(out_period, TEST_FRAMES);

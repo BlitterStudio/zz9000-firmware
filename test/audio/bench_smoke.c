@@ -1,3 +1,4 @@
+#define ZZ_TEST_LIMITER_STUBS_EXCLUDED
 #define main original_scene_tests
 #include "audio_scene_test.c"
 #undef main

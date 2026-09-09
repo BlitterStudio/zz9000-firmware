@@ -22,6 +22,7 @@
 #include "ff.h"
 #include "audio_scene.h"
 #include "ax.h"
+#include "limiter_stub.h"
 #include "zz_config.h"
 
 /* ---- link-time stubs for the ax.h DSP setters ---- */
@@ -333,9 +334,9 @@ static void test_absent_and_corrupt_degrade(void)
 	check(audio_scene_active_index() == 0,
 		"corrupt audio_active rejected",
 		fmt("active=%u", audio_scene_active_index()));
-	check(audio_scene_baseline_paula() == 128 &&
-		audio_scene_baseline_ax() == 64,
-		"corrupt audio_baseline rejected",
+	check(audio_scene_baseline_paula() == 192 &&
+		audio_scene_baseline_ax() == 255,
+		"corrupt audio_baseline rejected; parity boot default applies",
 		fmt("paula=%u ax=%u", audio_scene_baseline_paula(),
 			audio_scene_baseline_ax()));
 	check(audio_scene_ceiling_paula() ==

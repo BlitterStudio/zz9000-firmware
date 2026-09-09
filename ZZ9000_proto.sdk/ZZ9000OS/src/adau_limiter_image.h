@@ -1,5 +1,5 @@
 /* Generated from SigmaStudio export-postvolume (post-Volume limiter graph).
- * Instrument build only (ZZ_AUDIO_LIMITER_BENCH). */
+ * Production graph: post-Volume limiter in the shared master chain. */
 #ifndef ADAU_LIMITER_IMAGE_H
 #define ADAU_LIMITER_IMAGE_H
 #define PROGRAM_SIZE_LIMITER_IC_1 5120

@@ -53,9 +53,7 @@
 #include "sdk_mailbox.h"
 #include "zz_config.h"
 #include "ax.h"
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 #include "audio_limiter_bench.h"
-#endif
 
 /* Operator baseline default: today's power-on mixer state written by
  * audio_adau_init (Paula 128, AX 64; 127 = 0 dB). */
@@ -382,19 +380,12 @@ static double baseline_sum_linear(void)
 
 double audio_scene_enforced_boundary(void)
 {
-#ifdef ZZ_AUDIO_LIMITER_BENCH
-	/* Instrument build, permanently engaged limiter (th047 boot
-	 * default): the DSP bounds the summed mix, so the boundary
-	 * admits each leg at its measured clean ceiling instead of the
-	 * production 3/4-of-AX-ceiling sum headroom. Per-leg ceilings
-	 * remain the authoritative calibration; the stage-time leg
-	 * checks keep unsavable pairs out of the operator UI. */
+	/* The permanently engaged limiter (th047 boot default) bounds
+	 * the summed mix, so the boundary admits each leg at its
+	 * measured clean ceiling. Per-leg ceilings remain the
+	 * authoritative calibration; the stage-time leg checks keep
+	 * unsavable pairs out of the operator UI. */
 	return weighted_pair((double)ceiling_paula, (double)ceiling_ax);
-#else
-	return (double)ceiling_ax *
-		(double)AUDIO_SCENE_HEADROOM_NUMERATOR /
-		(double)AUDIO_SCENE_HEADROOM_DENOMINATOR;
-#endif
 }
 
 struct volume_resolution {
@@ -427,10 +418,8 @@ static void resolve_output_volume(const struct audio_scene_def *scene,
 	out->reduced = 0;
 	out->requested_level = level;
 	out->applied_level = level;
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 	if (limiter_bench.active && limiter_bench.armed && !limiter_bench.restoring)
 		return; /* explicit instrument session; DSP bounds real peaks */
-#endif
 	if (level > audio_scene_enforced_boundary()) {
 		double allowed = audio_scene_enforced_boundary() /
 			(baseline * chain);
@@ -883,14 +872,9 @@ static void commit_step(void)
 		break;
 	case COMMIT_RESTORE:
 	case COMMIT_ABORT_RESTORE:
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 		rc = audio_adau_set_vol_pan(
 			(limiter_bench.active && commit.failed) ? 0 :
 			commit.vol.applied_volume, scene->pan);
-#else
-		rc = audio_adau_set_vol_pan(commit.vol.applied_volume,
-			scene->pan);
-#endif
 		if (rc != 0) {
 			printf("[scene] apply failed; restoring output "
 				"volume\n");
@@ -1087,9 +1071,7 @@ int audio_scene_poll(void)
 	if (commit_stepping)
 		return 1; /* nested poll from inside a setter: defer */
 	commit_stepping = 1;
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 	limiter_bench_poll();
-#endif
 	/* Commit steps first. A queued save waiting on that commit takes
 	 * its snapshot only after commit_step reaches the terminal state;
 	 * then at most one save step runs in this pass. */
@@ -1421,9 +1403,7 @@ int audio_scene_apply_after_dsp_init(void)
 {
 	if (!module_initialized)
 		return -1;
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 	limiter_bench_reset();
-#endif
 	/* The DSP instance the counters described was just replaced, and
 	 * the reset tore every owner session -- and every uncommitted
 	 * staged edit's client -- down (R10). Any incremental commit in
@@ -1544,10 +1524,8 @@ int audio_scene_set_baseline(uint8_t paula, uint8_t ax)
 {
 	if (!module_initialized)
 		return -1;
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 	if (paula > ceiling_paula || ax > ceiling_ax)
 		return -1;
-#endif
 	baseline_paula = paula;
 	baseline_ax = ax;
 	/* The baseline participates in scene resolution, so re-run the
@@ -1619,14 +1597,12 @@ int audio_scene_stage_param(uint8_t index, uint32_t param,
 		 * ignored; it joins the next commit. */
 		uint32_t paula = SDK_AUDIO_BALANCE_CH1(value);
 		uint32_t ax = SDK_AUDIO_BALANCE_CH2(value);
-#ifdef ZZ_AUDIO_LIMITER_BENCH
-		/* Instrument build: a leg beyond its measured clean ceiling
+		/* A leg beyond its measured clean ceiling
 		 * is refused at stage (SDK_STATUS_BAD_REQUEST) so the
 		 * operator UI snaps the slider back instead of accepting a
 		 * value the save validator would reject. */
 		if (paula > ceiling_paula || ax > ceiling_ax)
 			return -1;
-#endif
 		staged_baseline_paula = (uint8_t)paula;
 		staged_baseline_ax = (uint8_t)ax;
 		baseline_staged = 1;
@@ -1948,10 +1924,8 @@ static int save_prepare(void)
 
 int audio_scene_save_start(uint8_t index)
 {
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 	if (limiter_bench.active)
 		return AUDIO_SCENE_SAVE_REJECTED;
-#endif
 	if (index >= AUDIO_SCENE_COUNT || !module_initialized)
 		return -1;
 	if (save.phase != SAVE_IDLE)
@@ -1974,8 +1948,7 @@ int audio_scene_save_status(void)
 }
 
 
-#ifdef ZZ_AUDIO_LIMITER_BENCH
-/* Limiter-build boot default when no operator baseline is saved:
+/* Boot default when no operator baseline is saved:
  * measured Paula/AHI parity -- Paula at 3/4 of its clean ceiling, AX
  * exactly 2x Paula capped by the AX clean ceiling (36/72 at the 48/80
  * calibration). Saved state always wins. */
@@ -1993,7 +1966,6 @@ void audio_scene_baseline_apply_parity_default(void)
 	baseline_paula = (uint8_t)paula;
 	baseline_ax = (uint8_t)ax;
 }
-#endif
 
 void audio_scene_load_config(void)
 {
@@ -2056,11 +2028,9 @@ void audio_scene_load_config(void)
  		baseline_paula = (uint8_t)(c->audio_baseline >> 8);
  		baseline_ax = (uint8_t)(c->audio_baseline & 0xff);
  	}
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 	else {
 		audio_scene_baseline_apply_parity_default();
 	}
-#endif
 }
 
 
@@ -2240,6 +2210,4 @@ audio_scene_last_gain_reduction(void)
 	return &last_gain_reduction;
 }
 
-#ifdef ZZ_AUDIO_LIMITER_BENCH
 #include "audio_limiter_bench.inc"
-#endif
