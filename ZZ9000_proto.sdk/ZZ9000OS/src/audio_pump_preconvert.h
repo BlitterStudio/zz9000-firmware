@@ -21,8 +21,8 @@
 struct audio_pump_preconvert_source {
 	uint8_t *ring;
 	uint32_t capacity;
-	uint32_t produced;
-	uint32_t consumed;
+	uint64_t produced;
+	uint64_t consumed;
 	uint32_t sample_rate;
 	uint32_t channels;
 	uint32_t sample_format;
@@ -46,7 +46,7 @@ uint32_t audio_pump_preconvert_used(
 	const struct audio_pump_preconvert *state);
 int audio_pump_preconvert_fill(struct audio_pump_preconvert *state,
 	const struct audio_pump_preconvert_source *source,
-	uint32_t *source_consumed);
+	uint64_t *source_consumed);
 int audio_pump_preconvert_stage(struct audio_pump_preconvert *state,
 	uint32_t bytes);
 

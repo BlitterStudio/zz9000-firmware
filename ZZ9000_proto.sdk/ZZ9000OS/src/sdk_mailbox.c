@@ -25,6 +25,7 @@
 #include "audio_stream_drain.h"
 #include "audio_convert.h"
 #include "audio_pump_preconvert.h"
+#include "audio_pump_media_view.h"
 #include "sdk_jpeg.h"
 #include "sdk_surface.h"
 #include "sdk_aperture_layout.h"
@@ -3748,12 +3749,19 @@ static uint8_t g_audio_pump_preconvert_ring[
 static struct {
 	uint32_t session;         /* 0 = unbound */
 	uint32_t source_kind;
+	uint32_t refill_session;  /* session that refill targets (valid while
+	                           * refill_pending; survives an unbind) */
 	uint32_t paused;
 	uint32_t refill_pending;  /* internal core-1 refill task in flight */
-	uint32_t refill_session;  /* session that refill targets (valid while
-	                             refill_pending; survives an unbind) */
-	uint32_t preconvert_session; /* retained across Pause/Play rebind */
+	uint32_t preconvert_session; /* retained across same-kind Pause/Play
+	                              * rebind */
+	uint32_t preconvert_kind;    /* owner kind: media and stream session
+	                              * ids are independent namespaces, so a
+	                              * kind change must reset the ring */
 	struct audio_pump_preconvert preconvert;
+	struct audio_pump_media_view media_view; /* 48 kHz ISR view of a
+	                                          * non-48k media session
+	                                          * (drivers#83) */
 } g_audio_playback;
 
 
@@ -3792,6 +3800,29 @@ static int audio_pump_source_snapshot(struct audio_fabric_source *source)
 		if (!sdk_media_session_audio_source(
 			    g_audio_playback.session, &media_source))
 			return 0;
+		if (g_audio_playback.media_view.active) {
+			/* 48 kHz preconvert view of the session ring: the
+			 * rate conversion ran on the main loop (see
+			 * audio_pump_media_source_fill), so this ISR path
+			 * copies only. Retirement maps view periods back to
+			 * session bytes exactly (audio_pump_source_retire). */
+			source->ring =
+				g_audio_playback.preconvert.ring;
+			source->capacity =
+				g_audio_playback.preconvert.capacity;
+			source->produced_bytes =
+				g_audio_playback.preconvert.produced;
+			source->staged_bytes =
+				g_audio_playback.preconvert.staged;
+			source->sample_rate = 48000U;
+			source->channels = 2U;
+			source->sample_format =
+				SDK_AUDIO_SAMPLE_FORMAT_S16LE;
+			source->done = media_source.done &&
+				audio_pump_preconvert_used(
+					&g_audio_playback.preconvert) == 0U;
+			return 1;
+		}
 		source->ring = media_source.ring;
 		source->capacity = media_source.capacity;
 		source->produced_bytes = media_source.produced_bytes;
@@ -3816,18 +3847,34 @@ static int audio_pump_source_stage(uint32_t bytes)
 		return audio_pump_preconvert_stage(
 			&g_audio_playback.preconvert, bytes);
 	}
-	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
+	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA) {
+		if (g_audio_playback.media_view.active)
+			return audio_pump_preconvert_stage(
+				&g_audio_playback.preconvert, bytes);
 		return sdk_media_session_audio_stage(
 			g_audio_playback.session, bytes);
+	}
 	return 0;
 }
 
 static void audio_pump_source_retire(uint32_t bytes)
 {
-	if (bytes != 0U &&
-	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
+	uint64_t session_bytes;
+
+	if (bytes == 0U ||
+	    g_audio_playback.source_kind != AUDIO_PUMP_SOURCE_MEDIA)
+		return;
+	/* View retirement maps whole 48 kHz periods back to exact session
+	 * bytes (audio_pump_media_view); the direct path (a 48 kHz
+	 * session, already memcpy-only) retires its own bytes. */
+	session_bytes = bytes;
+	if (g_audio_playback.media_view.active)
+		session_bytes = audio_pump_media_view_retire(
+			&g_audio_playback.media_view, bytes);
+	if (session_bytes != 0U)
 		(void)sdk_media_session_audio_retire(
-			g_audio_playback.session, bytes);
+			g_audio_playback.session,
+			(uint32_t)session_bytes);
 }
 
 static void audio_pump_source_underrun(void)
@@ -3908,7 +3955,7 @@ static void audio_playback_preconvert(
 
 	for (i = 0U; stream && i < budget; i++) {
 		struct audio_pump_preconvert_source source;
-		uint32_t consumed = stream->pcm_consumed_total;
+		uint64_t consumed = stream->pcm_consumed_total;
 		int result;
 
 		memset(&source, 0, sizeof(source));
@@ -3928,7 +3975,52 @@ static void audio_playback_preconvert(
 		if (result <= 0)
 			break;
 		stream->pump_tail_pending = 1U;
-		stream->pcm_consumed_total = consumed;
+		stream->pcm_consumed_total = (uint32_t)consumed;
+	}
+}
+
+/* Main-loop conversion stage for bound media sessions (the AX path):
+ * the decoder publishes native-rate PCM; this consumes exact 20 ms
+ * source periods into the shared preconvert ring so the audio ISR
+ * copies at 48 kHz instead of running the polyphase FIR in interrupt
+ * context -- the vblank-delaying cost behind the windowed-PIP flicker
+ * (zz9000-drivers#83). Session staging advances here; retirement still
+ * tracks actual playback in audio_pump_source_retire. */
+static void audio_pump_media_source_fill(uint32_t budget)
+{
+	struct SDKMediaAudioSource media_source;
+	struct audio_pump_preconvert_source source;
+	uint64_t consumed;
+	uint32_t i;
+
+	if (!sdk_media_session_audio_source(
+		    g_audio_playback.session, &media_source))
+		return;
+	memset(&source, 0, sizeof(source));
+	source.ring = media_source.ring;
+	source.capacity = media_source.capacity;
+	source.produced = media_source.produced_bytes;
+	source.consumed = media_source.staged_bytes;
+	source.sample_rate = media_source.sample_rate;
+	source.channels = media_source.channels;
+	source.sample_format = media_source.sample_format;
+	source.done = media_source.done;
+	consumed = source.consumed;
+	for (i = 0U; i < budget; i++) {
+		if (audio_pump_preconvert_fill(
+			    &g_audio_playback.preconvert, &source,
+			    &consumed) <= 0)
+			break;
+		source.consumed = consumed;
+	}
+	if (consumed > media_source.staged_bytes) {
+		(void)sdk_media_session_audio_stage(
+			g_audio_playback.session,
+			(uint32_t)(consumed - media_source.staged_bytes));
+		/* Bound retirement by what the converter really consumed:
+		 * the final converted period can be zero-padded. */
+		audio_pump_media_view_note_staged(
+			&g_audio_playback.media_view, consumed);
 	}
 }
 
@@ -3937,9 +4029,17 @@ void sdk_mailbox_audio_playback_pump(void)
 {
 	struct SDKAudioStream *stream;
 
-	if (g_audio_playback.session == 0U ||
-	    g_audio_playback.source_kind != AUDIO_PUMP_SOURCE_STREAM ||
-	    g_audio_playback.paused)
+	if (g_audio_playback.session == 0U || g_audio_playback.paused)
+		return;
+	if (g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA) {
+		/* Media sessions convert ahead on the main loop; the ISR
+		 * fill only copies the staged 48 kHz periods. */
+		if (g_audio_playback.media_view.active)
+			audio_pump_media_source_fill(
+				AUDIO_PUMP_PRECONVERT_FILL_BUDGET);
+		return;
+	}
+	if (g_audio_playback.source_kind != AUDIO_PUMP_SOURCE_STREAM)
 		return;
 	stream = find_audio_stream(g_audio_playback.session);
 	if (!stream) {
@@ -4015,15 +4115,45 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session,
 		return;
 	}
 	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP, source_rate);
+	if (source_kind == AUDIO_PUMP_SOURCE_MEDIA) {
+		struct SDKMediaAudioSource media_source;
+
+		/* Media preconvert view (zz9000-drivers#83): a non-48 kHz
+		 * session converts ahead on the main loop so the audio ISR
+		 * copies only; the admission rate follows the view. ALWAYS
+		 * re-anchor here: Pause/Play rewinds session staging, so
+		 * retained view content would re-convert played audio. A
+		 * 48 kHz session stays on the direct memcpy path. */
+		audio_pump_preconvert_reset(
+			&g_audio_playback.preconvert,
+			g_audio_pump_preconvert_ring,
+			sizeof(g_audio_pump_preconvert_ring));
+		g_audio_playback.preconvert_session = session;
+		g_audio_playback.preconvert_kind = AUDIO_PUMP_SOURCE_MEDIA;
+		audio_pump_media_view_reset(&g_audio_playback.media_view);
+		if (sdk_media_session_audio_source(
+			    session, &media_source) &&
+		    audio_pump_media_view_begin(
+			    &g_audio_playback.media_view,
+			    media_source.sample_rate,
+			    media_source.channels)) {
+			audio_fabric_producer_rate_set(
+				AUDIO_FABRIC_SLOT_PUMP, 48000U);
+			audio_pump_media_source_fill(
+				AUDIO_PUMP_PRECONVERT_FILL_BUDGET);
+		}
+	}
 	if (source_kind == AUDIO_PUMP_SOURCE_STREAM) {
 		struct SDKAudioStream *stream = find_audio_stream(session);
 
-		if (g_audio_playback.preconvert_session != session) {
+		if (g_audio_playback.preconvert_session != session ||
+		    g_audio_playback.preconvert_kind != AUDIO_PUMP_SOURCE_STREAM) {
 			audio_pump_preconvert_reset(
 				&g_audio_playback.preconvert,
 				g_audio_pump_preconvert_ring,
 				sizeof(g_audio_pump_preconvert_ring));
 			g_audio_playback.preconvert_session = session;
+			g_audio_playback.preconvert_kind = AUDIO_PUMP_SOURCE_STREAM;
 		}
 		audio_playback_preconvert(
 			stream, AUDIO_PUMP_PRECONVERT_FILL_BUDGET);
@@ -4061,6 +4191,9 @@ static void audio_playback_stop(void)
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
+	/* Drop the media view with the pump: a later bind re-anchors it
+	 * against the (possibly rewound) session cursors. */
+	audio_pump_media_view_reset(&g_audio_playback.media_view);
 	audio_scene_meter_output_identity(
 		SDK_AUDIO_METER_IDENTITY_UNKNOWN);
 	/* Last-release ring silence is the compositor's policy (KTD8):
@@ -7821,6 +7954,7 @@ void sdk_mailbox_init(void)
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
 	g_audio_playback.paused = 0U;
 	g_audio_playback.preconvert_session = 0U;
+	g_audio_playback.preconvert_kind = AUDIO_PUMP_SOURCE_NONE;
 	audio_pump_preconvert_reset(
 		&g_audio_playback.preconvert,
 		g_audio_pump_preconvert_ring,
