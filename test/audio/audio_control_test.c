@@ -536,10 +536,9 @@ static void test_trim_submit_result(void)
 		fmt("applied=0x%lx bound=0x%lx flags=%lu",
 			(unsigned long)applied, (unsigned long)bound,
 			(unsigned long)flags));
-
-	/* One step over the composed boundary: reduced legs, BOUNDED
-	 * flag, and the applied bound reported back (138+138 = 276
-	 * scaled by 256/276 -> 128+128 = 256). */
+	/* Legs past their own clean ceilings: each clamps to its
+	 * ceiling (138,138 -> 128,128), BOUNDED flag set, and the
+	 * applied bound reported back. */
 	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(138, 138));
 	status = run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr));
 	check(status == SDK_STATUS_OK, "bounded trim submit accepted",

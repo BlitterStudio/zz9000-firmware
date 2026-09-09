@@ -454,8 +454,12 @@ static int clamp_u8(int value)
 }
 
 /*
- * Baseline + trim composition against the calibrated boundary. Mixer
- * legs are proportionally reduced, preserving the requested balance;
+ * Baseline + trim composition against the calibrated boundary. Each
+ * leg is first clamped to its own measured clean ceiling -- one
+ * source cannot borrow the other's unused sum budget to overdrive
+ * its input path, which the post-mix limiter cannot undo (it bounds
+ * the summed output, not per-source distortion). The weighted sum is
+ * then proportionally reduced, preserving the requested balance;
  * Paula contributes ceiling_ax/ceiling_paula AX-equivalent units.
  */
 static void compute_mixer_stage(double master_linear,
@@ -466,6 +470,7 @@ static void compute_mixer_stage(double master_linear,
 	int paula = baseline_paula;
 	int ax = baseline_ax;
 	int owner;
+	int bounded = 0;
 
 	for (owner = AUDIO_SCENE_OWNER_AHI;
 			owner < AUDIO_SCENE_OWNER_SLOTS; owner++) {
@@ -482,25 +487,45 @@ static void compute_mixer_stage(double master_linear,
 	if (master_linear <= 0.0)
 		return; /* chain is silent: nothing can exceed */
 
+	requested_weighted = weighted_pair((double)paula, (double)ax);
+
+	/* Per-leg clean-ceiling clamp, independent of the sum budget
+	 * (also covers a calibration lowered below a stored baseline:
+	 * the composition degrades to the new ceilings instead of
+	 * overdriving either input). */
+	if (paula > (int)ceiling_paula) {
+		paula = (int)ceiling_paula;
+		bounded = 1;
+	}
+	if (ax > (int)ceiling_ax) {
+		ax = (int)ceiling_ax;
+		bounded = 1;
+	}
+	out->paula = (uint8_t)paula;
+	out->ax = (uint8_t)ax;
+
 	max_weighted = audio_scene_enforced_boundary() / master_linear;
-	/* The former armed-bench x2 doubling is subsumed by the
-	 * instrument boundary (both legs at their clean ceilings). */
 	out->trim_bound = max_weighted - baseline_sum_linear();
 	if (out->trim_bound < 0.0)
 		out->trim_bound = 0.0;
 
-	requested_weighted = weighted_pair((double)paula, (double)ax);
-	if (requested_weighted > max_weighted) {
-		double scale = max_weighted / requested_weighted;
+	if (weighted_pair((double)paula, (double)ax) > max_weighted) {
+		double scale = max_weighted /
+			weighted_pair((double)paula, (double)ax);
 		int c_paula = (int)((double)paula * scale);
 		int c_ax = (int)((double)ax * scale);
 
-		out->bounded = 1;
+		bounded = 1;
 		out->paula = (uint8_t)clamp_u8(c_paula);
 		out->ax = (uint8_t)clamp_u8(c_ax);
+		paula = c_paula;
+		ax = c_ax;
+	}
+	if (bounded) {
+		out->bounded = 1;
 		out->requested = requested_weighted * master_linear;
-		out->applied = weighted_pair((double)c_paula,
-			(double)c_ax) * master_linear;
+		out->applied = weighted_pair((double)paula,
+			(double)ax) * master_linear;
 	}
 }
 
