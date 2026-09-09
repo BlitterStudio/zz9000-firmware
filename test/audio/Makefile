@@ -19,11 +19,12 @@ MP3_PROBE_TARGET := $(BUILD_DIR)/mp3_frame_probe_test
 MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
 FABRIC_TARGET := $(BUILD_DIR)/audio_fabric_test
 RING_TARGET := $(BUILD_DIR)/audio_fabric_ring_test
+BENCH_SMOKE_TARGET := $(BUILD_DIR)/bench_smoke_test
 TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) $(DRAIN_TARGET) \
 	$(SCENE_TARGET) $(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
 	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(FABRIC_TARGET) \
-	$(RING_TARGET)
+	$(RING_TARGET) $(BENCH_SMOKE_TARGET)
 
 # mock/ shadows ff.h and xil_cache.h for the TUs (zz_config.c) whose
 # real firmware dependencies are FatFs and the Zynq cache API. The
@@ -50,6 +51,7 @@ test: $(TARGETS)
 	$(MPEG_LAYER2_TARGET)
 	$(FABRIC_TARGET) --srcdir $(SRC_DIR)
 	$(RING_TARGET)
+	$(BENCH_SMOKE_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -70,6 +72,24 @@ $(FABRIC_TARGET): audio_fabric_test.c pump_golden.c pump_golden.h \
 		pump_golden.c fabric_test_common.c \
 		$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
+
+# Instrument bench smoke: compiles the scene module with
+# -DZZ_AUDIO_LIMITER_BENCH=1 so the limiter graph mapping, bench
+# protocol, boot-threshold default and boundary policy are exercised
+# beside the unflagged production configuration. host_stubs/ supplies
+# the XTime shim backed by the smoke's manual clock.
+$(BENCH_SMOKE_TARGET): bench_smoke.c audio_scene_test.c \
+	$(SRC_DIR)/sdk_audio_control.c $(SRC_DIR)/audio_scene.c \
+	$(SRC_DIR)/audio_scene.h $(SRC_DIR)/sdk_audio_control.h \
+	$(SRC_DIR)/audio_limiter_bench.h $(SRC_DIR)/audio_limiter_bench.inc \
+	$(SRC_DIR)/limiter_parameter.h $(SRC_DIR)/zz_config.c \
+	$(SRC_DIR)/zz_config.h $(MOCK_DIR)/ff.h $(MOCK_DIR)/xil_cache.h \
+	host_stubs/xtime_l.h fatfs_mock.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DZZ_AUDIO_LIMITER_BENCH=1 \
+		-Ihost_stubs -o $@ bench_smoke.c \
+		$(SRC_DIR)/sdk_audio_control.c $(SRC_DIR)/audio_scene.c \
+		$(SRC_DIR)/zz_config.c fatfs_mock.c -lm
 
 # U3 direct-ring lease plane: the SDK-facing acquire/release/state API
 # against the same two firmware TUs, with xil_cache.h compiled in

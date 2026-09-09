@@ -26,8 +26,17 @@
 #define DEVICE_ADDR_IC_1                          0x0
 
 /* DSP Program Data: production ADC left/right -> DIG0/DIG1. */
-#define PROGRAM_SIZE_NORMAL_ADC_IC_1 5120
 #define PROGRAM_ADDR_NORMAL_ADC_IC_1 1024
+#ifdef ZZ_AUDIO_LIMITER_BENCH
+/* Instrument image: post-mix stereo-linked limiter graph; alias the
+ * loader symbols onto the generated limiter tables (same sizes). */
+#include "adau_limiter_image.h"
+#define PROGRAM_SIZE_NORMAL_ADC_IC_1 PROGRAM_SIZE_LIMITER_IC_1
+#define Program_Data_Normal_ADC_IC_1 Program_Data_Limiter_IC_1
+#define PARAM_SIZE_NORMAL_ADC_IC_1 PARAM_SIZE_LIMITER_IC_1
+#define Param_Data_Normal_ADC_IC_1 Param_Data_Limiter_IC_1
+#else
+#define PROGRAM_SIZE_NORMAL_ADC_IC_1 5120
 ADI_REG_TYPE
 Program_Data_Normal_ADC_IC_1[PROGRAM_SIZE_NORMAL_ADC_IC_1] = {
 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -2085,6 +2094,7 @@ ADI_REG_TYPE Param_Data_Normal_ADC_IC_1[PARAM_SIZE_NORMAL_ADC_IC_1] = {
 0x00, 0x00, 0x00, 0x00,
 0x00, 0x00, 0x00, 0x00,
 };
+#endif
 
 /* Register Default - IC 1.CoreRegister */
 ADI_REG_TYPE R0_COREREGISTER_IC_1_Default[REG_COREREGISTER_IC_1_BYTE] = {

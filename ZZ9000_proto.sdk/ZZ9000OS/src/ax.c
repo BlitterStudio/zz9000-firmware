@@ -5,6 +5,9 @@
 #include "xparameters.h"
 #include "adau.h"
 #include "adau_PARAM.h"
+#ifdef ZZ_AUDIO_LIMITER_BENCH
+#include "limiter_parameter.h"
+#endif
 #include "xiicps.h"
 #include "xi2stx.h"
 #include "xi2srx.h"
@@ -626,6 +629,11 @@ uint8_t* audio_get_inited_tx_buffer() {
 
 // returns 1 if adau1701 found, otherwise 0
 // set audio_tx_buffer and audio_rx_buffer before!
+#ifdef ZZ_AUDIO_LIMITER_BENCH
+/* Applies the operator-kept power-on limiter engagement after the
+ * parameter-table load; defined beside the verify helper below. */
+int audio_adau_limiter_apply_boot_threshold(void);
+#endif
 int audio_adau_init(int program_dsp) {
 	XIicPs_Config* i2c_config;
 	i2c_config = XIicPs_LookupConfig(IIC2_DEVICE_ID);
@@ -763,6 +771,10 @@ int audio_adau_init(int program_dsp) {
 			status = audio_adau_set_lpf_params(23900);
 		if (status == 0)
 			status = audio_adau_set_mixer_vol(128, 64);
+#ifdef ZZ_AUDIO_LIMITER_BENCH
+		if (status == 0)
+			status = audio_adau_limiter_apply_boot_threshold();
+#endif
 		if (status != 0) {
 			printf("[adau] verified normal DSP load failed; "
 					"capture remains unavailable.\n");
@@ -1699,3 +1711,64 @@ int audio_adau_set_eq_gain(int band, int gain) {
 	}
 	return 0;
 }
+
+#ifdef ZZ_AUDIO_LIMITER_BENCH
+int audio_adau_limiter_verify(uint16_t address, uint32_t expected)
+{
+	uint8_t actual[4], bytes[4];
+	bytes[0] = (uint8_t)(expected >> 24) & 0x0fU;
+	bytes[1] = (uint8_t)(expected >> 16);
+	bytes[2] = (uint8_t)(expected >> 8);
+	bytes[3] = (uint8_t)expected;
+	return adau_read32(0x34, address, actual) == 0 &&
+		audio_adau_readback_matches(bytes, actual, sizeof(bytes)) ? 0 : -1;
+}
+#endif
+
+#ifdef ZZ_AUDIO_LIMITER_BENCH
+/* Power-on limiter engagement (user decision 2026-09-09): 0.47 FS
+ * instead of the exported 7.0 bypass, so the operator-kept boost
+ * baseline stays protected without a bench session. Runs while the
+ * DSP core is still held after the parameter-table load, where a
+ * direct write plus readback is the correct (non-safeload) path;
+ * runtime changes keep using safeload. audio_adau_init(1) runs at
+ * cold boot and every warm reset, so the engagement survives both. */
+int audio_adau_limiter_apply_boot_threshold(void)
+{
+	uint8_t bytes[ADAU_PARAMETER_WORD_BYTES];
+	uint32_t t = LIMITER_BOOT_THRESHOLD_Q23;
+
+	bytes[0] = (uint8_t)(t >> 24) & 0x0fU;
+	bytes[1] = (uint8_t)(t >> 16);
+	bytes[2] = (uint8_t)(t >> 8);
+	bytes[3] = (uint8_t)t;
+	if (audio_adau_write_parameter(LIMITER_THRESHOLD_ADDR, bytes) != 0) {
+		printf("[adau] limiter boot threshold write failed\n");
+		return -1;
+	}
+	if (audio_adau_limiter_verify(LIMITER_THRESHOLD_ADDR, t) != 0) {
+		printf("[adau] limiter boot threshold verify failed\n");
+		return -1;
+	}
+	printf("[adau] limiter boot threshold set: 0.47 FS (q23 %lu)\n",
+		(unsigned long)t);
+	return 0;
+}
+
+/* Live threshold read for the bench BEGIN snapshot: one bounded I2C
+ * read in the mailbox handler, serialized with poll-side I2C by the
+ * single-threaded service loop. */
+int audio_adau_limiter_threshold_get(uint32_t *value)
+{
+	uint8_t actual[ADAU_PARAMETER_WORD_BYTES];
+
+	if (value == 0)
+		return -1;
+	if (adau_read32(0x34, LIMITER_THRESHOLD_ADDR, actual) != 0)
+		return -1;
+	*value = ((uint32_t)(actual[0] & 0x0fU) << 24) |
+		((uint32_t)actual[1] << 16) |
+		((uint32_t)actual[2] << 8) | (uint32_t)actual[3];
+	return 0;
+}
+#endif

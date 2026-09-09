@@ -22,6 +22,11 @@
 #include "audio_scene.h"
 #include "sdk_audio_control.h"
 #include "sdk_mailbox.h"
+#ifdef ZZ_AUDIO_LIMITER_BENCH
+extern int audio_scene_limiter_bench_active(void);
+extern uint16_t audio_scene_limiter_bench_command(uint32_t command,
+	uint8_t *reply, uint16_t *reply_len);
+#endif
 
 /* Scene select: switch the active scene through the single
  * glitch-free commit path (F3). */
@@ -279,6 +284,29 @@ uint16_t sdk_audio_control_run(uint16_t opcode, const uint8_t *params,
 		*result_len = 0;
 	if (params == NULL || result_payload == NULL || result_len == NULL)
 		return SDK_STATUS_BAD_REQUEST;
+#ifdef ZZ_AUDIO_LIMITER_BENCH
+	if (opcode == SDK_OP_AUDIO_SCENE_WRITE &&
+			payload_len >= sizeof(struct SDKAudioSceneWritePayload)) {
+		const struct SDKAudioSceneWritePayload *p =
+			(const struct SDKAudioSceneWritePayload *)(const void *)params;
+		if (sdk_get_be32(p->param) == 0x4c494d31U) {
+			if (sdk_get_be32(p->scene) || sdk_get_be32(p->flags))
+				return SDK_STATUS_BAD_REQUEST;
+			return audio_scene_limiter_bench_command(
+				sdk_get_be32(p->value), result_payload, result_len);
+		}
+	}
+	if (audio_scene_limiter_bench_active() &&
+			(opcode == SDK_OP_AUDIO_SCENE_SELECT ||
+			 opcode == SDK_OP_AUDIO_SCENE_WRITE ||
+			 opcode == SDK_OP_AUDIO_SCENE_SAVE))
+		return SDK_STATUS_BUSY;
+	if (audio_scene_limiter_bench_active() &&
+			opcode == SDK_OP_AUDIO_TRIM_SUBMIT &&
+			(payload_len < sizeof(struct SDKAudioTrimSubmitPayload) ||
+			 sdk_get_be32(params) != SDK_AUDIO_BALANCE_NEUTRAL))
+		return SDK_STATUS_BUSY;
+#endif
 
 	switch (opcode) {
 	case SDK_OP_AUDIO_SCENE_SELECT:
