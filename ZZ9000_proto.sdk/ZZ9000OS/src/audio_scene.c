@@ -481,18 +481,14 @@ static void compute_mixer_stage(double master_linear,
 	ax = clamp_u8(ax);
 
 	memset(out, 0, sizeof(*out));
-	out->paula = (uint8_t)paula;
-	out->ax = (uint8_t)ax;
-
-	if (master_linear <= 0.0)
-		return; /* chain is silent: nothing can exceed */
-
-	requested_weighted = weighted_pair((double)paula, (double)ax);
 
 	/* Per-leg clean-ceiling clamp, independent of the sum budget
 	 * (also covers a calibration lowered below a stored baseline:
 	 * the composition degrades to the new ceilings instead of
-	 * overdriving either input). */
+	 * overdriving either input). Runs before the silent-chain
+	 * shortcut: the leg values are written and reported even when
+	 * the master chain contributes nothing. */
+	requested_weighted = weighted_pair((double)paula, (double)ax);
 	if (paula > (int)ceiling_paula) {
 		paula = (int)ceiling_paula;
 		bounded = 1;
@@ -503,6 +499,20 @@ static void compute_mixer_stage(double master_linear,
 	}
 	out->paula = (uint8_t)paula;
 	out->ax = (uint8_t)ax;
+
+	if (master_linear <= 0.0) {
+		/* Chain is silent: the weighted sum cannot exceed
+		 * anything, but a leg clamp still reports itself with
+		 * the mixer-leg levels -- the master multiplies both
+		 * sides by zero. */
+		if (bounded) {
+			out->bounded = 1;
+			out->requested = requested_weighted;
+			out->applied = weighted_pair((double)paula,
+				(double)ax);
+		}
+		return;
+	}
 
 	max_weighted = audio_scene_enforced_boundary() / master_linear;
 	out->trim_bound = max_weighted - baseline_sum_linear();

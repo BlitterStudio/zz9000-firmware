@@ -746,6 +746,49 @@ static void test_lease_gain_composition(void)
 }
 
 /*
+ * A silent master chain (scene volume 0) skips the weighted-sum
+ * bounding but not the per-leg clean-ceiling clamp: an over-ceiling
+ * trim still composes at the ceilings and reports itself bounded,
+ * with the event carrying the mixer-leg levels.
+ */
+static void test_silent_chain_leg_clamp(void)
+{
+	struct audio_scene_def def;
+	struct audio_scene_trim_result result;
+	const struct audio_scene_gain_event *event;
+
+	unity_scene(&def);
+	def.volume = 0;
+	audio_scene_init();
+	check(audio_scene_set_calibration(128, 128) == 0,
+		"weight-1 calibration accepted", NULL);
+	pump_scene();
+	check(audio_scene_set_baseline(60, 60) == 0,
+		"low baseline accepted", NULL);
+	pump_scene();
+	check(audio_scene_write(5, &def) == 0 &&
+		audio_scene_select(5) == 0, "apply silent scene", NULL);
+	pump_scene();
+
+	memset(&result, 0, sizeof(result));
+	check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 200, 200,
+			&result) == 0 && result.bounded == 1 &&
+		result.mixer_paula == 128 && result.mixer_ax == 128,
+		"silent chain still clamps legs to their ceilings",
+		fmt("bounded=%u v1=%u v2=%u", result.bounded,
+			result.mixer_paula, result.mixer_ax));
+	check(audio_scene_gain_reduction_events() == 1,
+		"silent-chain leg clamp emits one event", NULL);
+	event = audio_scene_last_gain_reduction();
+	check(event != NULL && near(event->requested, 510.0) &&
+		near(event->applied, 256.0),
+		"silent-chain event reports mixer-leg levels",
+		event ? fmt("req=%.3f applied=%.3f", event->requested,
+			event->applied) : "no event");
+}
+
+
+/*
  * Boot and warm-reset apply: scene writes follow the ADAU init
  * defaults and land before the request loop could service an owner
  * (the gate stays closed throughout), and the order repeats after a
@@ -1679,6 +1722,7 @@ int main(void)
 	test_eq_boost_clamps();
 	test_baseline_trim_composition();
 	test_lease_gain_composition();
+	test_silent_chain_leg_clamp();
 	test_boot_apply_order();
 	test_trim_lifecycle();
 	test_trim_write_failure_is_transactional();
