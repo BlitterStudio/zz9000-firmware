@@ -80,6 +80,23 @@ static inline void audio_pump_media_view_note_staged(
 		view->src_staged = src_staged;
 }
 
+/* Anchor both cursors to the session's current staged position. Called
+ * once when a view (re)begins: a resumed session rewinds staging to its
+ * retired cursor, which is nonzero -- anchoring keeps src_staged and
+ * src_retired in the same absolute reference so the EOS clamp measures
+ * the real unretired span (an unanchored view mixes an absolute staged
+ * cursor with a zero-based retired cursor and the final zero-padded
+ * period then retires a full period the session must reject, wedging
+ * end-of-stream drain). */
+static inline void audio_pump_media_view_anchor(
+	struct audio_pump_media_view *view, uint64_t src_staged)
+{
+	if (!view || !view->active)
+		return;
+	view->src_staged = src_staged;
+	view->src_retired = src_staged;
+}
+
 /* Map whole view periods retired by the fabric compositor onto session
  * bytes and advance the retired cursor. Non-period deltas map to zero:
  * the compositor stages and retires whole periods only, so anything else

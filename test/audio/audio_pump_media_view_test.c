@@ -62,6 +62,23 @@ int main(void)
 	/* Staged notes only move forward. */
 	audio_pump_media_view_note_staged(&view, 5U);
 	assert(view.src_staged == 2U * 3528U + 1000U);
+
+	/* Resume anchoring (PR #100 review): a resumed session's staged
+	 * cursor is nonzero; both view cursors must share that absolute
+	 * reference or the EOS clamp mixes references and the final padded
+	 * period retires a full period the session rejects. */
+	audio_pump_media_view_anchor(&view, 100U * 3528U);
+	audio_pump_media_view_note_staged(
+		&view, 100U * 3528U + 3528U + 1000U);
+	assert(audio_pump_media_view_retire(&view, 3840U) == 3528U);
+	/* The zero-padded EOS tail retires only the real 1000-byte span. */
+	assert(audio_pump_media_view_retire(&view, 3840U) == 1000U);
+	assert(view.src_retired ==
+	       100U * 3528U + 3528U + 1000U);
+	/* An inactive view cannot be anchored. */
+	audio_pump_media_view_reset(&view);
+	audio_pump_media_view_anchor(&view, 500U);
+	assert(view.src_staged == 0U && view.src_retired == 0U);
 	/* A drain-shaped burst retires the same total either way: three
 	 * single periods and one triple must agree (exactness, not drift). */
 	assert(audio_pump_media_view_begin(&view, 44100U, 2U));

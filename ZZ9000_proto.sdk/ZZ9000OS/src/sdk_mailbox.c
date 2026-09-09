@@ -4137,6 +4137,13 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session,
 			    &g_audio_playback.media_view,
 			    media_source.sample_rate,
 			    media_source.channels)) {
+			/* Anchor to the session's staged cursor: a resumed
+			 * session rewinds staging to a nonzero retired
+			 * position, and both view cursors must share that
+			 * absolute reference for the EOS retire clamp. */
+			audio_pump_media_view_anchor(
+				&g_audio_playback.media_view,
+				media_source.staged_bytes);
 			audio_fabric_producer_rate_set(
 				AUDIO_FABRIC_SLOT_PUMP, 48000U);
 			audio_pump_media_source_fill(
