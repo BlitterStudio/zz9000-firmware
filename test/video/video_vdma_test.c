@@ -102,13 +102,12 @@ static int test_native_scanout_starts_at_capture_row(void)
 	return 0;
 }
 
-static int test_centered_output_keeps_native_content_geometry(void)
+static int test_centered_output_keeps_native_content_geometry(uint32_t profile)
 {
 	struct video_videocap_geometry full =
 		video_videocap_output_geometry(ZZ_VIDEOCAP_OUTPUT_FULL_60);
 	struct video_videocap_geometry centered =
-		video_videocap_output_geometry(
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
+		video_videocap_output_geometry(profile);
 
 	if (!expect_u32("full canvas width", full.canvas_width, 1280U) ||
 	    !expect_u32("full canvas height", full.canvas_height, 1024U) ||
@@ -163,9 +162,14 @@ int main(void)
 	if (result)
 		return 70 + result;
 
-	result = test_centered_output_keeps_native_content_geometry();
+	result = test_centered_output_keeps_native_content_geometry(
+		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
 	if (result)
 		return 90 + result;
+	result = test_centered_output_keeps_native_content_geometry(
+		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50);
+	if (result)
+		return 100 + result;
 
 	return 0;
 }

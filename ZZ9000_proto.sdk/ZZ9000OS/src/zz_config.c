@@ -191,6 +191,11 @@ static int apply_key(const char *key, const char *value) {
 			cfg.videocap_shres = 1;
 			cfg.ns_vsync = 0;
 			output_profile = ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60;
+		} else if (token_eq(value, "centered_1080p_50")) {
+			cfg.videocap_mode = ZZVMODE_800x600;
+			cfg.videocap_shres = 1;
+			cfg.ns_vsync = 0;
+			output_profile = ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50;
 		} else {
 			return -1;
 		}
@@ -648,6 +653,9 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 		if (cfg.videocap_output_profile ==
 		    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60)
 			v = ZZVMODE_1920x1080_60;
+		else if (cfg.videocap_output_profile ==
+		     ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50)
+			v = ZZVMODE_1920x1080_50;
 		break;
 	case ZZ_CONFIG_KEY_VIDEOCAP_SAMPLE:
 		p = cfg.videocap_sample_present;
@@ -726,6 +734,9 @@ static const char *videocap_profile_name(void) {
 	if (cfg.videocap_output_profile ==
 	    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60)
 		return "centered_1080p_60";
+	if (cfg.videocap_output_profile ==
+	    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50)
+		return "centered_1080p_50";
 	if (full) return vsync ? "full_exact" : "full_60";
 	if (pal && vsync == 1) return "filtered_pal_exact";
 	if (pal && vsync == 2) return "filtered_ntsc_exact";

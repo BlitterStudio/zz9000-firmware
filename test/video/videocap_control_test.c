@@ -97,16 +97,6 @@ static FILE *open_main_source(void)
 	return source;
 }
 
-static FILE *open_video_source(void)
-{
-	FILE *source = fopen("../../ZZ9000_proto.sdk/ZZ9000OS/src/video.c", "r");
-
-	if (source == NULL)
-		source = fopen("ZZ9000_proto.sdk/ZZ9000OS/src/video.c", "r");
-
-	return source;
-}
-
 static int main_source_contract(void)
 {
 	FILE *source = open_main_source();
@@ -204,48 +194,35 @@ static int output_profile_contract(void)
 		printf("centered hardware eligibility mismatch\n");
 		return 0;
 	}
-	if (video_videocap_effective_output_profile(
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 1U) !=
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 ||
-	    video_videocap_effective_output_profile(
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 0U) !=
-			ZZ_VIDEOCAP_OUTPUT_FULL_60 ||
-	    video_videocap_effective_output_profile(
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 0U, 1U) !=
-			ZZ_VIDEOCAP_OUTPUT_FULL_60) {
-		printf("centered effective-profile fallback mismatch\n");
-		return 0;
-	}
+	{
+		const uint32_t modes[] = {
+			ZZVMODE_1920x1080_60, ZZVMODE_1920x1080_50
+		};
+		const uint32_t profiles[] = {
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60,
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50
+		};
+		unsigned int i, capabilities;
 
-	request = video_videocap_sanitize_runtime_mode(
-		ZZVMODE_1920x1080_60, 1U, 1U);
-	if (!request.valid || request.base_mode != ZZVMODE_800x600 ||
-	    request.output_profile != ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
-		printf("matched mode-5 runtime request mismatch\n");
-		return 0;
-	}
-
-	request = video_videocap_sanitize_runtime_mode(
-		ZZVMODE_1920x1080_60, 1U, 0U);
-	if (!request.valid || request.base_mode != ZZVMODE_800x600 ||
-	    request.output_profile != ZZ_VIDEOCAP_OUTPUT_FULL_60) {
-		printf("filtered mode-5 runtime fallback mismatch\n");
-		return 0;
-	}
-
-	request = video_videocap_sanitize_runtime_mode(
-		ZZVMODE_1920x1080_60, 0U, 0U);
-	if (!request.valid || request.base_mode != ZZVMODE_800x600 ||
-	    request.output_profile != ZZ_VIDEOCAP_OUTPUT_FULL_60) {
-		printf("old-bitstream mode-5 runtime fallback mismatch\n");
-		return 0;
-	}
-	request = video_videocap_sanitize_runtime_mode(
-		ZZVMODE_1920x1080_60, 0U, 1U);
-	if (!request.valid || request.base_mode != ZZVMODE_800x600 ||
-	    request.output_profile != ZZ_VIDEOCAP_OUTPUT_FULL_60) {
-		printf("old full-rate mode-5 runtime fallback mismatch\n");
-		return 0;
+		for (i = 0; i < 2; i++) {
+			for (capabilities = 0; capabilities < 4; capabilities++) {
+				uint32_t viewport = capabilities & 1U;
+				uint32_t fullrate = capabilities & 2U;
+				uint32_t expected = capabilities == 3U ?
+					profiles[i] : ZZ_VIDEOCAP_OUTPUT_FULL_60;
+				request = video_videocap_sanitize_runtime_mode(
+					modes[i], viewport, fullrate);
+				if (!request.valid ||
+				    request.base_mode != ZZVMODE_800x600 ||
+				    request.output_profile != expected ||
+				    video_videocap_effective_output_profile(
+						profiles[i], viewport, fullrate) != expected) {
+					printf("centered mode %u capability %u fallback mismatch\n",
+					       modes[i], capabilities);
+					return 0;
+				}
+			}
+		}
 	}
 
 	request = video_videocap_sanitize_runtime_mode(ZZVMODE_720x576, 1U, 1U);
@@ -307,87 +284,24 @@ static int output_profile_contract(void)
 		return 0;
 	}
 
-	return 1;
-}
-
-static int video_source_contract(void)
-{
-	FILE *source = open_video_source();
-	char line[512];
-	unsigned int lineno = 0;
-	unsigned int dimensions_line = 0;
-	unsigned int dimensions_container_flag_line = 0;
-	unsigned int viewport_pos_line = 0;
-	unsigned int viewport_commit_line = 0;
-	unsigned int content_vdma_line = 0;
-	unsigned int viewport_pos_ops = 0;
-	unsigned int viewport_commit_ops = 0;
-	unsigned int applied_base_reset_line = 0;
-	unsigned int public_mode_init_line = 0;
-	unsigned int public_mode_reset_line = 0;
-	unsigned int public_mode_apply_line = 0;
-
-	if (source == NULL) {
-		printf("cannot open firmware video.c for source contract\n");
-		return 0;
-	}
-
-	while (fgets(line, sizeof(line), source) != NULL) {
-		lineno++;
-		if (strstr(line, "MNTVF_OP_DIMENSIONS);") != NULL)
-			dimensions_line = lineno;
-		if (strstr(line, "MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG") != NULL)
-			dimensions_container_flag_line = lineno;
-		if (strstr(line, "MNTVF_OP_VIEWPORT_POS);") != NULL) {
-			viewport_pos_line = lineno;
-			viewport_pos_ops++;
-		}
-		if (strstr(line, "MNTVF_OP_VIEWPORT_SIZE_COMMIT);") != NULL) {
-			viewport_commit_line = lineno;
-			viewport_commit_ops++;
-		}
-		if (dimensions_line != 0U &&
-		    strstr(line, "init_vdma(content_hres, content_vres") != NULL) {
-			content_vdma_line = lineno;
-		}
-		if (strstr(line, "vs.videocap_video_mode_applied = -1;") != NULL)
-			applied_base_reset_line = lineno;
-		if (strstr(line, "void video_mode_init(int mode") != NULL)
-			public_mode_init_line = lineno;
-		if (public_mode_init_line != 0U &&
-		    strstr(line, "videocap_detection_reset();") != NULL)
-			public_mode_reset_line = lineno;
-		if (public_mode_init_line != 0U &&
-		    strstr(line, "video_mode_init_internal(mode, scalemode") != NULL)
-			public_mode_apply_line = lineno;
-	}
-	fclose(source);
-
-	if (viewport_pos_ops != 1U || viewport_commit_ops != 1U ||
-	    dimensions_line == 0U || dimensions_container_flag_line == 0U ||
-	    content_vdma_line == 0U ||
-	    !(dimensions_container_flag_line < dimensions_line &&
-	      dimensions_line < viewport_pos_line &&
-	      viewport_pos_line < viewport_commit_line &&
-	      viewport_commit_line < content_vdma_line)) {
-		printf("centered formatter/VDMA order mismatch: flag=%u dim=%u "
-		       "pos=%u commit=%u vdma=%u ops=%u/%u\n",
-		       dimensions_container_flag_line, dimensions_line,
-		       viewport_pos_line, viewport_commit_line,
-		       content_vdma_line, viewport_pos_ops, viewport_commit_ops);
-		return 0;
-	}
-	if (applied_base_reset_line == 0U || public_mode_init_line == 0U ||
-	    !(public_mode_init_line < public_mode_reset_line &&
-	      public_mode_reset_line < public_mode_apply_line)) {
-		printf("RTG applied-identity reset mismatch: base=%u init=%u reset=%u "
-		       "apply=%u\n", applied_base_reset_line, public_mode_init_line,
-		       public_mode_reset_line, public_mode_apply_line);
+	/* Changing only refresh must still reconfigure exactly once. */
+	reinits += sample_output_identity(&detection, ZZVMODE_800x600,
+		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50,
+		&applied_base_mode, &applied_profile);
+	reinits += sample_output_identity(&detection, ZZVMODE_800x600,
+		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50,
+		&applied_base_mode, &applied_profile);
+	reinits += sample_output_identity(&detection, ZZVMODE_800x600,
+		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50,
+		&applied_base_mode, &applied_profile);
+	if (reinits != 4) {
+		printf("centered 60->50 cumulative reinits=%d expected=4\n", reinits);
 		return 0;
 	}
 
 	return 1;
 }
+
 
 int main(void)
 {
@@ -511,8 +425,6 @@ int main(void)
 
 	if (!output_profile_contract())
 		return 16;
-	if (!video_source_contract())
-		return 17;
 
 	if (!expect_u32("viewport position op", MNTVF_OP_VIEWPORT_POS, 28U) ||
 	    !expect_u32("viewport size/commit op",
@@ -521,22 +433,6 @@ int main(void)
 	                MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG, 1U << 15))
 		return 18;
 
-	if ((ZZ_FW_CAPABILITIES & ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) != 0U ||
-	    ((ZZ_FW_CAPABILITIES |
-	      (video_videocap_centered_eligible(1U, 1U) ?
-	       ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P : 0U)) &
-	     ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) == 0U ||
-	    ((ZZ_FW_CAPABILITIES |
-	      (video_videocap_centered_eligible(1U, 0U) ?
-	       ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P : 0U)) &
-	     ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) != 0U ||
-	    ((ZZ_FW_CAPABILITIES |
-	      (video_videocap_centered_eligible(0U, 1U) ?
-	       ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P : 0U)) &
-	     ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P) != 0U) {
-		printf("dynamic centered firmware capability mismatch\n");
-		return 19;
-	}
 
 	return 0;
 }

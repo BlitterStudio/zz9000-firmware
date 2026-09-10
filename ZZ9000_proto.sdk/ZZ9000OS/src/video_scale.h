@@ -44,15 +44,23 @@ static inline uint32_t video_videocap_centered_eligible(
 	return (viewport_layout_capable != 0U) && (fullrate_capable != 0U);
 }
 
+/* Both centered variants share the same canvas/viewport layout and the same
+ * eligibility gate; only the output timing (mode 5 vs mode 7) differs. */
+static inline uint32_t video_videocap_output_profile_centered(
+		uint32_t output_profile)
+{
+	return output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 ||
+	       output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50;
+}
+
 static inline uint32_t video_videocap_effective_output_profile(
 		uint32_t requested, uint32_t viewport_layout_capable,
 		uint32_t fullrate_capable)
 {
-	return requested == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 &&
+	return video_videocap_output_profile_centered(requested) &&
 	       video_videocap_centered_eligible(viewport_layout_capable,
 	                                           fullrate_capable) ?
-		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 :
-		ZZ_VIDEOCAP_OUTPUT_FULL_60;
+		requested : ZZ_VIDEOCAP_OUTPUT_FULL_60;
 }
 
 static inline struct video_videocap_geometry
@@ -67,7 +75,7 @@ video_videocap_output_geometry(uint32_t output_profile)
 		0U,
 	};
 
-	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
+	if (video_videocap_output_profile_centered(output_profile)) {
 		geometry.canvas_width = VIDEO_VIDEOCAP_CENTERED_CANVAS_WIDTH;
 		geometry.canvas_height = VIDEO_VIDEOCAP_CENTERED_CANVAS_HEIGHT;
 		geometry.viewport_x = VIDEO_VIDEOCAP_CENTERED_VIEWPORT_X;
@@ -120,11 +128,12 @@ video_videocap_sanitize_runtime_mode(uint32_t mode,
 		0U, ZZVMODE_800x600, ZZ_VIDEOCAP_OUTPUT_FULL_60
 	};
 
-	if (mode == ZZVMODE_1920x1080_60) {
+	if (mode == ZZVMODE_1920x1080_60 || mode == ZZVMODE_1920x1080_50) {
 		request.valid = 1U;
 		if (video_videocap_centered_eligible(viewport_layout_capable,
 		                                        fullrate_capable)) {
-			request.output_profile =
+			request.output_profile = mode == ZZVMODE_1920x1080_50 ?
+				ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50 :
 				ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60;
 		}
 	} else if (mode == ZZVMODE_800x600 || mode == ZZVMODE_720x576) {

@@ -221,8 +221,8 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 static int videocap_full_width_enabled(u32 zstate) {
 	const struct zz_config *cfg = zz_config_get();
 	uint32_t requested =
-		vs.videocap_output_profile_requested ==
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 ? 1U :
+		video_videocap_output_profile_centered(
+			(uint32_t)vs.videocap_output_profile_requested) ? 1U :
 		cfg->videocap_shres_present ?
 		cfg->videocap_shres : VIDEOCAP_FULL_WIDTH_DEFAULT;
 	uint32_t fullrate_capable =
@@ -275,7 +275,8 @@ uint32_t video_firmware_capabilities(void)
 	if (video_videocap_centered_eligible(
 			!!(zstate & MNTZORRO_STATUS_VCAP_VIEWPORT),
 			!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE))) {
-		capabilities |= ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P;
+		capabilities |= ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+		                ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50;
 	}
 
 	return capabilities;
@@ -305,12 +306,13 @@ static void init_videocap_video_mode(int ntsc, int full_width,
 		int output_profile) {
 	int mode = ZZVMODE_1280x1024_NATIVE_60;
 
-	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
-		video_mode_init_internal(ZZVMODE_1920x1080_60, 4,
-			MNTVA_COLOR_32BIT, 1, output_profile);
+	if (video_videocap_output_profile_centered(output_profile)) {
+		mode = output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50 ?
+			ZZVMODE_1920x1080_50 : ZZVMODE_1920x1080_60;
+		video_mode_init_internal(mode, 4, MNTVA_COLOR_32BIT, 1,
+			output_profile);
 		return;
 	}
-
 	if (!full_width) {
 		init_filtered_videocap_video_mode(ntsc);
 		return;
@@ -714,7 +716,7 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode,
 	                              (uint32_t)vmode->hres;
 	struct video_videocap_geometry geometry;
 
-	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
+	if (video_videocap_output_profile_centered((uint32_t)output_profile)) {
 		geometry = video_videocap_output_geometry((uint32_t)output_profile);
 		content_hres = geometry.content_width;
 		content_vres = geometry.content_height;
@@ -730,7 +732,7 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode,
 	// causes a visible horizontal split (the "split picture" NTSC bug).
 	video_formatter_write((vmode->vmax << 16) | vmode->hmax, MNTVF_OP_MAX);
 	video_formatter_write(dimensions_control, MNTVF_OP_DIMENSIONS);
-	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
+	if (video_videocap_output_profile_centered((uint32_t)output_profile)) {
 		video_formatter_write((geometry.viewport_y << 16) |
 		                      geometry.viewport_x,
 		                      MNTVF_OP_VIEWPORT_POS);

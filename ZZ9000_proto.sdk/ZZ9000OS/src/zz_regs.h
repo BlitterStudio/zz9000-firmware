@@ -192,8 +192,11 @@ enum zz_reg_offsets {
 #define ZZ_FW_CAP_VIDEOCAP_LIVE    (1U << 1)
 #define ZZ_FW_CAP_Z2_APERTURE_LAYOUT (1U << 2)
 #define ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P (1U << 3)
-/* Centered 1080p is intentionally excluded here: firmware advertises it
- * dynamically only when the loaded bitstream exposes both required paths. */
+#define ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 (1U << 4)
+/* The centered 1080p profiles are intentionally excluded here: firmware
+ * advertises them dynamically only when the loaded bitstream exposes both
+ * required paths (viewport layout AND full-rate capture). Bit 3 stays the
+ * 60 Hz variant; bit 4 is the 50 Hz variant on the same eligibility. */
 #define ZZ_FW_CAPABILITIES \
   (ZZ_FW_CAP_VIDEOCAP_PROFILE | ZZ_FW_CAP_VIDEOCAP_LIVE | \
    ZZ_FW_CAP_Z2_APERTURE_LAYOUT)

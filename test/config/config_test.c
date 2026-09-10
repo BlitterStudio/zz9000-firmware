@@ -293,6 +293,39 @@ static void test_videocap_profiles(void) {
           ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
 }
 
+static void test_centered_refresh_round_trip(void) {
+    char saved[ZZ_CONFIG_MAX_SIZE];
+    uint16_t present;
+    int len;
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = centered_1080p_60\n"
+                    "videocap_profile = CENTERED_1080P_50\n"
+                    "videocap_profile = unknown\n"
+                    "scanline_mode = 2\n") == 3);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_1920x1080_50);
+    CHECK(present);
+    len = zz_config_emit_present_keys(saved, sizeof(saved), 0);
+    CHECK(len > 0);
+    if (len <= 0) return;
+
+    zz_config_reset();
+    CHECK(zz_config_parse(saved, (unsigned)len) == 2);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_1920x1080_50);
+    CHECK(present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_SCANLINE_MODE, &present) == 2);
+    CHECK(present);
+
+    CHECK(parse_str("videocap_profile = centered_1080p_60\n") == 1);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_1920x1080_60);
+    CHECK(parse_str("nonstandard_vsync = off\n") == 1);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_800x600);
+}
+
 static void test_videocap_sample(void) {
     zz_config_reset();
     CHECK(parse_str("videocap_sample = even\n") == 1);
@@ -574,6 +607,7 @@ int main(void) {
     test_case_whitespace_comments();
     test_videocap_aliases();
     test_videocap_profiles();
+    test_centered_refresh_round_trip();
     test_videocap_sample();
     test_videocap_shres_and_crop();
     test_bad_values_skipped();
