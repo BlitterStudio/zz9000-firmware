@@ -880,15 +880,19 @@ wire [11:0] next_scanout_source_line =
 
 /* Purely observational side channel: publishes the synchronizer's
  * 64-bit diagnostic bus (bit map in video_source_sync.v) to the ARM
- * domain once per output frame.  The source half snapshots the whole
- * bus on the frame-wrap line_advance cycle (the exact predicate the
- * raster counter wraps on) and holds that snapshot register stable for
- * the entire XPM handshake; the destination half publishes a value
- * only when a completed transfer arrives and then holds it until the
- * next one, so a stopped pixel clock simply freezes the last coherent
- * sample.  The transport is never gated on enable/lock/picture state
- * or on any firmware action, so diagnostics stay visible while the
- * synchronizer is disabled (fixed50/RTG fallback) or disengaged. */
+ * domain once per output frame.  The source half arms on the
+ * frame-wrap line_advance cycle (the exact predicate the raster
+ * counter wraps on) and snapshots the bus one dvi_clk later: the
+ * controller updates its wrap metrics (anchor age, frame total,
+ * max-forced) with nonblocking assignments on the wrap edge itself,
+ * so sampling in that same cycle would publish the previous frame's
+ * metrics.  The snapshot register then stays stable for the entire
+ * XPM handshake; the destination half publishes a value only when a
+ * completed transfer arrives and then holds it until the next one, so
+ * a stopped pixel clock simply freezes the last coherent sample.  The
+ * transport is never gated on enable/lock/picture state or on any
+ * firmware action, so diagnostics stay visible while the synchronizer
+ * is disabled (fixed50/RTG fallback) or disengaged. */
 localparam [1:0] SS_DIAG_IDLE   = 2'd0;
 localparam [1:0] SS_DIAG_LOAD   = 2'd1;
 localparam [1:0] SS_DIAG_SEND   = 2'd2;
@@ -932,11 +936,13 @@ always @(posedge dvi_clk) begin
   end else begin
     case (source_sync_diag_state)
       SS_DIAG_IDLE:
-        if (source_sync_line_advance && frame_wrap_this_line) begin
-          source_sync_diag_src_payload <= source_sync_diag_bus;
+        if (source_sync_line_advance && frame_wrap_this_line)
           source_sync_diag_state <= SS_DIAG_LOAD;
-        end
+      /* Latch the post-update wrap metrics one cycle after the wrap
+       * edge; raising src_send in the same edge keeps the payload
+       * stable for the whole handshake. */
       SS_DIAG_LOAD: begin
+        source_sync_diag_src_payload <= source_sync_diag_bus;
         source_sync_diag_src_send <= 1'b1;
         source_sync_diag_state <= SS_DIAG_SEND;
       end

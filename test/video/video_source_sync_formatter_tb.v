@@ -408,6 +408,7 @@ real min_rbw_margin = 99999.0;
 integer margin_frames = 0;
 integer last_wrap_line = 0;
 integer frame_lines;
+integer diag_prev_total = -1;
 integer line_count = 0;
 reg line_tick_d = 0;
 
@@ -453,6 +454,21 @@ always @(negedge dvi_clk) begin
         errors = errors + 1;
         if (errors < 30) $display("ERR: disabled frame total %0d != %0d", frame_lines, V_MAX);
       end
+      /* The diagnostic side channel must publish the metrics of the
+       * frame that completed at the previous wrap: the source FSM
+       * snapshots the bus one cycle after each wrap edge, and the
+       * transfer finishes far inside the following frame.  A payload
+       * latched on the wrap edge itself would still hold the
+       * penultimate frame's totals here. */
+      if (diag_prev_total > 0) begin
+        if (uut.source_sync_diagnostic[31:20] !== (diag_prev_total % 4096)) begin
+          errors = errors + 1;
+          if (errors < 30)
+            $display("ERR: diag frame total %0d != published %0d for the previous frame",
+                     diag_prev_total % 4096, uut.source_sync_diagnostic[31:20]);
+        end
+      end
+      diag_prev_total = frame_lines;
     end
   end
 end
