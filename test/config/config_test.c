@@ -428,6 +428,43 @@ static void test_videocap_shres_and_crop(void) {
     CHECK(!zz_config_get()->videocap_crop_v_present);
 }
 
+static void test_videocap_phase(void) {
+    uint16_t present = 0;
+    char saved[512];
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_phase = -64\n") == 1);
+    CHECK(zz_config_get()->videocap_phase_present);
+    CHECK(zz_config_get()->videocap_phase == -64);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_PHASE, &present) ==
+          (uint16_t)-64 && present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_phase = 255\n") == 1);
+    CHECK(zz_config_get()->videocap_phase == 255);
+    CHECK(parse_str("videocap_phase = -255\n") == 1);
+    CHECK(zz_config_get()->videocap_phase == -255);
+
+    /* Range guards: out-of-range and malformed values are rejected. */
+    zz_config_reset();
+    CHECK(parse_str("videocap_phase = 256\n") == 0);
+    CHECK(parse_str("videocap_phase = -256\n") == 0);
+    CHECK(parse_str("videocap_phase = --8\n") == 0);
+    CHECK(parse_str("videocap_phase = eight\n") == 0);
+    CHECK(!zz_config_get()->videocap_phase_present);
+
+    /* The key must survive a ZZTop-style regenerate round trip. */
+    zz_config_reset();
+    CHECK(parse_str("videocap_phase = -112\n") == 1);
+    int len = zz_config_emit_present_keys(saved, sizeof(saved), 0);
+    CHECK(len > 0);
+    if (len <= 0) return;
+    zz_config_reset();
+    CHECK(parse_str(saved) == 1);
+    CHECK(zz_config_get()->videocap_phase_present);
+    CHECK(zz_config_get()->videocap_phase == -112);
+}
+
 static void test_bad_values_skipped(void) {
     zz_config_reset();
     const char *text =
@@ -646,6 +683,7 @@ int main(void) {
     test_videocap_profiles();
     test_centered_refresh_round_trip();
     test_videocap_sample();
+    test_videocap_phase();
     test_videocap_shres_and_crop();
     test_bad_values_skipped();
     test_last_value_wins();

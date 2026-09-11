@@ -55,6 +55,7 @@ enum zz_config_key {
 	 * Slots from 16 up are the audio control plane (plan U5, KTD4);
 	 * slot 10 above stays permanently reserved. */
 	ZZ_CONFIG_KEY_AUDIO_TRUNCATED = 16,
+	ZZ_CONFIG_KEY_VIDEOCAP_PHASE  = 17, /* signed MMCM phase steps, -255..255 */
 	ZZ_CONFIG_KEY_NUM
 };
 
@@ -89,6 +90,8 @@ struct zz_config {
 	uint16_t videocap_crop_h;       /* 0-4095, 28 MHz samples */
 	uint8_t videocap_crop_v_present;
 	uint16_t videocap_crop_v;       /* 0-4095, captured lines */
+	uint8_t videocap_phase_present;
+	int16_t videocap_phase;          /* MMCM fine-phase steps, -255..255 */
 
 	uint8_t ns_vsync_present;
 	uint16_t ns_vsync;              /* 0=off 1=pal 2=ntsc */

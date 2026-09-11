@@ -1136,6 +1136,21 @@ module MNTZorro_v0_1_S00_AXI
   localparam [15:0] VCAP_LIVE_COMMIT = 16'h0414;
   localparam [31:0] VCAP_LIVE_CAPABILITY_VALUE = 32'h564c010f;
   localparam [15:0] VCAP_LIVE_COMMIT_TOKEN = 16'hca1b;
+  // Runtime capture-phase control over the E7M MMCM fine phase shift.
+  // Host-visible direct-register offsets are 0x0240..0x024e. One step moves
+  // every fine-phase CLKOUT by 1/56 of the VCO period (~78 ps at 32xE7M);
+  // a full capture-clock turn is 448 steps. Targets are signed steps
+  // relative to the routed build phase, range -255..255.
+  localparam [15:0] VCAP_PHASE_CAPABILITY = 16'h0240;
+  localparam [15:0] VCAP_PHASE_CAPABILITY_LO = 16'h0242;
+  localparam [15:0] VCAP_PHASE_TARGET_HI = 16'h0244;
+  localparam [15:0] VCAP_PHASE_TARGET_LO = 16'h0246;
+  localparam [15:0] VCAP_PHASE_COMMIT = 16'h0248;
+  localparam [15:0] VCAP_PHASE_COMMIT_LO = 16'h024a;
+  localparam [15:0] VCAP_PHASE_STATUS = 16'h024c;
+  localparam [15:0] VCAP_PHASE_STATUS_LO = 16'h024e;
+  localparam [31:0] VCAP_PHASE_CAPABILITY_VALUE = 32'h56510106;
+  localparam [15:0] VCAP_PHASE_COMMIT_TOKEN = 16'hf05a;
   localparam [15:0] SDK_REG_OFFSET_MASK = 16'h0fff;
   localparam [31:0] SDK_CTRL_DOORBELL_CLEAR = 32'h20000000;
   localparam [31:0] SDK_CTRL_IRQ_ACK_CLEAR = 32'h10000000;
@@ -1379,6 +1394,101 @@ module MNTZorro_v0_1_S00_AXI
 
   reg E7M_PSEN = 0;
   reg E7M_PSINCDEC = 0;
+
+  wire E7M_PSDONE;
+
+  /* Runtime capture-phase engine. The MMCM fine phase shifter advances or
+   * retards every fine-phase CLKOUT by 1/56 VCO period per acknowledged
+   * PSEN pulse. Two front doors set the same signed step target: the ARM
+   * video-control op 26 (data[15:0], signed) and the host SDK window
+   * staged/commit registers. PSCLK is S_AXI_ACLK, so PSDONE is sampled
+   * directly. E7M_RESET/E7M_PWRDWN stay deasserted, and the applied offset
+   * only loses meaning across a power cycle, matching the register reset. */
+  reg [31:0] vcap_phase_staged = 0;
+  reg vcap_phase_commit_toggle = 0;
+  reg vcap_phase_commit_seen = 0;
+  reg [9:0] vcap_phase_goal = 0; /* signed steps from the build phase */
+  reg [9:0] vcap_phase_applied = 0; /* signed steps from the build phase */
+  reg vcap_phase_dir = 0;
+  reg vcap_phase_busy = 0;
+  reg vcap_phase_done = 0; /* sticky target-reached per commit */
+  reg vcap_phase_error = 0; /* sticky out-of-range commit */
+  reg [1:0] vcap_phase_state = 0;
+  wire [15:0] vcap_phase_staged_value = vcap_phase_staged[15:0];
+  wire vcap_phase_staged_in_range =
+      ($signed(vcap_phase_staged_value) <= 255) &&
+      ($signed(vcap_phase_staged_value) >= -255);
+  wire [15:0] vcap_phase_op_value = axi_reg3[15:0];
+  wire vcap_phase_op_in_range =
+      ($signed(vcap_phase_op_value) <= 255) &&
+      ($signed(vcap_phase_op_value) >= -255);
+  wire video_control_axi_op31_event =
+      axi_reg2[31] && !video_control_axi_strobe_d && axi_reg2[7:0] == 8'd31;
+  wire vcap_phase_goal_gt_applied =
+      $signed(vcap_phase_goal) > $signed(vcap_phase_applied);
+
+  localparam [1:0] VCAP_PHASE_IDLE = 2'd0;
+  localparam [1:0] VCAP_PHASE_PSEN = 2'd1;
+  localparam [1:0] VCAP_PHASE_WAIT = 2'd2;
+
+  always @(posedge S_AXI_ACLK) begin
+      if (!S_AXI_ARESETN) begin
+          E7M_PSEN <= 1'b0;
+          E7M_PSINCDEC <= 1'b0;
+          vcap_phase_commit_seen <= 1'b0;
+          vcap_phase_goal <= 10'sd0;
+          vcap_phase_applied <= 10'sd0;
+          vcap_phase_dir <= 1'b0;
+          vcap_phase_busy <= 1'b0;
+          vcap_phase_done <= 1'b0;
+          vcap_phase_error <= 1'b0;
+          vcap_phase_state <= VCAP_PHASE_IDLE;
+      end else begin
+          if (vcap_phase_commit_seen != vcap_phase_commit_toggle) begin
+              vcap_phase_commit_seen <= vcap_phase_commit_toggle;
+              if (vcap_phase_staged_in_range)
+                  vcap_phase_goal <= vcap_phase_staged_value[9:0];
+              vcap_phase_error <= !vcap_phase_staged_in_range;
+              vcap_phase_done <= 1'b0;
+          end
+          if (video_control_axi_op31_event) begin
+              if (vcap_phase_op_in_range)
+                  vcap_phase_goal <= vcap_phase_op_value[9:0];
+              vcap_phase_error <= !vcap_phase_op_in_range;
+              vcap_phase_done <= 1'b0;
+          end
+          case (vcap_phase_state)
+              VCAP_PHASE_IDLE: begin
+                  vcap_phase_busy <= 1'b0;
+                  if (vcap_phase_applied == vcap_phase_goal) begin
+                      vcap_phase_done <= 1'b1;
+                  end else begin
+                      vcap_phase_dir <= vcap_phase_goal_gt_applied;
+                      E7M_PSINCDEC <= vcap_phase_goal_gt_applied;
+                      E7M_PSEN <= 1'b1;
+                      vcap_phase_busy <= 1'b1;
+                      vcap_phase_state <= VCAP_PHASE_PSEN;
+                  end
+              end
+              VCAP_PHASE_PSEN: begin
+                  E7M_PSEN <= 1'b0;
+                  vcap_phase_state <= VCAP_PHASE_WAIT;
+              end
+              VCAP_PHASE_WAIT: begin
+                  if (E7M_PSDONE) begin
+                      vcap_phase_applied <= vcap_phase_applied +
+                          (vcap_phase_dir ? 10'sd1 : -10'sd1);
+                      /* Re-enter IDLE so a goal that changed mid-stepping
+                       * gets a fresh direction decision; IDLE also clears
+                       * busy and retimes the done flag. */
+                      vcap_phase_state <= VCAP_PHASE_IDLE;
+                  end
+              end
+              default: vcap_phase_state <= VCAP_PHASE_IDLE;
+          endcase
+      end
+  end
+
   reg E7M_RESET = 0;
   reg E7M_PWRDWN = 0;
 
@@ -1456,7 +1566,7 @@ module MNTZorro_v0_1_S00_AXI
      .DWE(1'b0),
      //.LOCKED(NLW_mmcm_adv_inst_LOCKED_UNCONNECTED),
      .PSCLK(S_AXI_ACLK),
-     //.PSDONE(psdone),
+     .PSDONE(E7M_PSDONE),
      .PSEN(E7M_PSEN),
      .PSINCDEC(E7M_PSINCDEC),
      .PWRDWN(E7M_PWRDWN),
@@ -2941,6 +3051,15 @@ module MNTZorro_v0_1_S00_AXI
             VCAP_PROBE_SAMPLER_CONFIG_LO: begin
               rr_data <= vcap_sampler_probe_config;
             end
+            VCAP_PHASE_CAPABILITY,
+            VCAP_PHASE_CAPABILITY_LO: begin
+              rr_data <= VCAP_PHASE_CAPABILITY_VALUE;
+            end
+            VCAP_PHASE_STATUS,
+            VCAP_PHASE_STATUS_LO: begin
+              rr_data <= {19'b0, vcap_phase_error, vcap_phase_done,
+                          vcap_phase_busy, vcap_phase_applied[9:0]};
+            end
             VCAP_DIAG_CAPABILITY,
             VCAP_DIAG_CAPABILITY_LO: begin
               // "VD", ABI version 1, sixteen total 32-bit words.
@@ -3074,6 +3193,14 @@ module MNTZorro_v0_1_S00_AXI
               videocap_control_staged_raw[31:16] <= regdata_in;
             VCAP_LIVE_STAGED_RAW_LO:
               videocap_control_staged_raw[15:0] <= regdata_in;
+            VCAP_PHASE_TARGET_HI:
+              vcap_phase_staged[31:16] <= regdata_in;
+            VCAP_PHASE_TARGET_LO:
+              vcap_phase_staged[15:0] <= regdata_in;
+            VCAP_PHASE_COMMIT,
+            VCAP_PHASE_COMMIT_LO:
+              if (regdata_in == VCAP_PHASE_COMMIT_TOKEN)
+                vcap_phase_commit_toggle <= ~vcap_phase_commit_toggle;
             VCAP_LIVE_COMMIT: begin
               videocap_control_live_event <= 1'b1;
               videocap_control_live_token_valid <=
@@ -3111,8 +3238,6 @@ module MNTZorro_v0_1_S00_AXI
                 'h20: if (regdata_in[5:0]>0) dtack_timeout <= regdata_in[5:0];
                 //'h24: dataout_time[7:0]     <= regdata_in[7:0];
                 'h24: zorro_interrupt_len <= regdata_in[7:0];
-                //'h10: E7M_PSINCDEC <= regdata_in[0];
-                //'h12: E7M_PSEN     <= regdata_in[0];
                 //'h30: debug_counter <= debug_counter + 1;
                 'h34: debug_counter <= 0;
               endcase
@@ -3125,8 +3250,6 @@ module MNTZorro_v0_1_S00_AXI
         end
       endcase
 
-    // PSEN reset
-    //if (E7M_PSEN==1'b1) E7M_PSEN <= 1'b0;
 
     // ARM video control
     if (axi_reg2[31]==1'b1) begin

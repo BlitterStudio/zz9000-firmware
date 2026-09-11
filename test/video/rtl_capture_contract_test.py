@@ -333,6 +333,45 @@ def check_vcap_diag_contract(rtl: str, sampler: str, project_tcl: str) -> None:
                 f"fragment: {fragment}"
             )
 
+def check_vcap_phase_contract(rtl: str) -> None:
+    """Runtime capture-phase control must stay driven and decodable.
+
+    The fine phase shifter was historically instantiated with its register
+    writes commented out, which is exactly how the machine-dependent
+    sampling aperture became uncalibratable (issue #96). The engine, both
+    front doors, and the register window must stay wired.
+    """
+    for fragment in (
+        "localparam [15:0] VCAP_PHASE_CAPABILITY = 16'h0240;",
+        "localparam [15:0] VCAP_PHASE_COMMIT = 16'h0248;",
+        "localparam [15:0] VCAP_PHASE_STATUS = 16'h024c;",
+        "localparam [31:0] VCAP_PHASE_CAPABILITY_VALUE = 32'h56510106;",
+        ".PSDONE(E7M_PSDONE),",
+        "E7M_PSEN <= 1'b1;",
+        "if (E7M_PSDONE) begin",
+        "axi_reg2[7:0] == 8'd31",
+        "VCAP_PHASE_COMMIT_TOKEN)",
+        "rr_data <= VCAP_PHASE_CAPABILITY_VALUE;",
+    ):
+        if fragment not in rtl:
+            raise SystemExit(
+                "VCAP phase control contract violated: missing "
+                f"fragment: {fragment}"
+            )
+    # The legacy commented-out write decodes must not come back while the
+    # engine owns the pins.
+    for fragment in (
+        "//'h10: E7M_PSINCDEC <= regdata_in[0];",
+        "//'h12: E7M_PSEN     <= regdata_in[0];",
+        "//.PSDONE(psdone),",
+    ):
+        if fragment in rtl:
+            raise SystemExit(
+                "VCAP phase control contract violated: resurrected "
+                f"dead fragment: {fragment}"
+            )
+
+
 
 def main():
     rtl = RTL_PATH.read_text(encoding="utf-8")
@@ -374,6 +413,7 @@ def main():
     check_writeback_provenance(rtl)
     check_vcap_iob_capture_contract(sampler, build_run)
     check_vcap_diag_contract(rtl, sampler, project_tcl)
+    check_vcap_phase_contract(rtl)
 
     print("RTL capture contract checks passed")
 
