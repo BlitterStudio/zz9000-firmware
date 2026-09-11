@@ -102,6 +102,48 @@ static int test_native_scanout_starts_at_capture_row(void)
 	return 0;
 }
 
+static int test_native_scanout_pan_base(void)
+{
+	/* The 0x00dff2f8 origin is the tuned exception for PAL 800x600
+	 * filtered only. Every other combination must start at the capture
+	 * row base 0x00e00000: the host driver's legacy native-pan write
+	 * carries the PAL constant unconditionally, and scanning 720x480
+	 * lines from 190 words before their capture rows wraps the left
+	 * edge of every line (zz9000-drivers #84). */
+	if (!expect_u32("ntsc filtered 800x600 base",
+	                video_videocap_scanout_pan_base(1U, 0U,
+	                ZZVMODE_800x600), 0x00e00000U)) {
+		return 1;
+	}
+	if (!expect_u32("ntsc filtered 720x576 base",
+	                video_videocap_scanout_pan_base(1U, 0U,
+	                ZZVMODE_720x576), 0x00e00000U)) {
+		return 2;
+	}
+	if (!expect_u32("ntsc full width",
+	                video_videocap_scanout_pan_base(1U, 1U,
+	                ZZVMODE_800x600), 0x00e00000U)) {
+		return 3;
+	}
+	if (!expect_u32("pal full width",
+	                video_videocap_scanout_pan_base(0U, 1U,
+	                ZZVMODE_800x600), 0x00e00000U)) {
+		return 4;
+	}
+	if (!expect_u32("pal filtered 720x576 base",
+	                video_videocap_scanout_pan_base(0U, 0U,
+	                ZZVMODE_720x576), 0x00e00000U)) {
+		return 5;
+	}
+	if (!expect_u32("pal filtered 800x600 tuned origin preserved",
+	                video_videocap_scanout_pan_base(0U, 0U,
+	                ZZVMODE_800x600), 0x00dff2f8U)) {
+		return 6;
+	}
+
+	return 0;
+}
+
 static int test_centered_output_keeps_native_content_geometry(uint32_t profile)
 {
 	struct video_videocap_geometry full =
@@ -161,6 +203,10 @@ int main(void)
 	result = test_native_scanout_starts_at_capture_row();
 	if (result)
 		return 70 + result;
+
+	result = test_native_scanout_pan_base();
+	if (result)
+		return 80 + result;
 
 	result = test_centered_output_keeps_native_content_geometry(
 		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);

@@ -194,15 +194,22 @@ enum zz_reg_offsets {
 #define ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P (1U << 3)
 #define ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 (1U << 4)
 #define ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC (1U << 5)
+#define ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN (1U << 6)
 /* The centered 1080p profiles are intentionally excluded here: firmware
  * advertises them dynamically only when the loaded bitstream exposes both
  * required paths (viewport layout AND full-rate capture). Bit 3 stays the
  * 60 Hz variant; bit 4 is the 50 Hz variant on the same eligibility. Bit 5
  * (the source-locked match pair: profile + virtual mode 0x100) additionally
- * requires the source-sync controller (REG3 bit 14) on top of bits 3/4. */
+ * requires the source-sync controller (REG3 bit 14) on top of bits 3/4.
+ *
+ * Bit 6 is static: the ISR re-derives the capture-area scanout origin and
+ * clears the RTG pan width at every capture VDMA restart, so a driver's
+ * legacy native-pan write can no longer displace or skew the picture
+ * (zz9000-drivers #84). Drivers gate the raw 0x00e00000 native pan on
+ * this bit; without it they keep writing the legacy tuned constant. */
 #define ZZ_FW_CAPABILITIES \
   (ZZ_FW_CAP_VIDEOCAP_PROFILE | ZZ_FW_CAP_VIDEOCAP_LIVE | \
-   ZZ_FW_CAP_Z2_APERTURE_LAYOUT)
+   ZZ_FW_CAP_Z2_APERTURE_LAYOUT | ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN)
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,
