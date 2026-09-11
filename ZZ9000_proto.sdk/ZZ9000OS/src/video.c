@@ -456,12 +456,14 @@ void isr_video(void *dummy) {
 		// can proceed (the overlay present hook does not run in this
 		// branch and would otherwise stay latched as presenting)
 		if (vblank && overlay_scanout_active()) {
-			/* Same origin discipline as the mode-change trigger: a
-			 * stale driver native-pan write inside the capture area
-			 * must not become the scanout base here either. */
+			/* Same geometry discipline as the mode-change trigger:
+			 * a driver pan write that landed inside the capture area
+			 * must not become the scanout base or stride here; both
+			 * are firmware-owned in this region. */
 			if (vs.framebuffer_pan_offset >= 0x00dff000 &&
 			    !video_videocap_output_profile_centered(
 					(uint32_t)videocap_output_profile)) {
+				vs.framebuffer_pan_width = 0;
 				vs.framebuffer_pan_offset =
 					videocap_scanout_pan_offset(videocap_ntsc,
 						videocap_full_width);
@@ -558,13 +560,15 @@ void isr_video(void *dummy) {
 					vs.scalemode = (int)videocap_scalemode;
 					vs.vmode_vdiv = (int)video_vertical_scale_factor(videocap_scalemode);
 					/* The mode-change trigger above may have run
-					 * several vblanks earlier; a host driver native-pan
-					 * write that landed since then must not leak into
-					 * this VDMA restart. Re-derive the origin (the
+					 * several vblanks earlier; a host driver pan
+					 * write that landed since then must not leak
+					 * into this VDMA restart — neither its origin
+					 * nor the RTG stride width. Re-derive both (the
 					 * centered profiles keep the driver-provided
 					 * canvas base). */
 					if (!video_videocap_output_profile_centered(
 							(uint32_t)videocap_output_profile)) {
+						vs.framebuffer_pan_width = 0;
 						vs.framebuffer_pan_offset =
 							videocap_scanout_pan_offset(
 								videocap_ntsc,
