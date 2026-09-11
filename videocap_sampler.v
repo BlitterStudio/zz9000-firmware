@@ -471,6 +471,12 @@ reg pair_parity = 0;
 reg [26:0] grid_intra_sum = 0;
 reg [26:0] grid_cross_sum = 0;
 reg [23:0] grid_prev_second = 0;
+/* The cross-pair metric must never compare against the previous
+ * line's blanking tail: at the first stored pair after line sync
+ * that stale sample would inject a blank-to-content edge (PR
+ * review), which on sparse-edge misaligned content can equal the
+ * only real intra-pair delta and pin pair_parity wrong. */
+reg grid_prev_second_valid = 0;
 wire grid_pair_first = (cap_grid[0] == pair_parity);
 
 /* Alignment metric across all three channels: edges that change
@@ -487,7 +493,8 @@ function [9:0] grid_rgb_delta;
     end
 endfunction
 wire [9:0] grid_intra_delta = grid_rgb_delta(rgbin, rgb_prev);
-wire [9:0] grid_cross_delta = grid_rgb_delta(rgbin, grid_prev_second);
+wire [9:0] grid_cross_delta = grid_prev_second_valid ?
+    grid_rgb_delta(rgbin, grid_prev_second) : 10'd0;
 /* Margin comparison in a widened domain: both sums saturate
  * at 27 bits on max-activity frames, where a 27-bit add would
  * wrap and misread equal metrics as misaligned (PR review).
@@ -692,6 +699,7 @@ always @(posedge cap_clk) begin
         if (raw_y != 0)
             cap_ymax <= raw_y;
     end else if (line_sync) begin
+        grid_prev_second_valid <= 0;
         cap_x <= 0;
         sample_x <= 0;
         half <= 0;
@@ -793,6 +801,7 @@ always @(posedge cap_clk) begin
                     half <= 0;
                     if (grid_seen) begin
                         grid_prev_second <= rgbin;
+                        grid_prev_second_valid <= 1;
                         if (grid_intra_sum <=
                                 27'h7ffffff - {17'd0, grid_intra_delta})
                             grid_intra_sum <=
