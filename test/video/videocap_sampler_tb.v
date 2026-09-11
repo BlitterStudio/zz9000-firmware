@@ -542,19 +542,23 @@ task drive_line;
             /* Toggle aggressively after the 1280-sample capture window.
              * Blanking activity must not make hires or lores look like
              * SuperHires content. */
-            if (GRIDSHIFT != 0)
-                /* Odd-period bars: the auto-phase measurement needs
-                 * content whose even- and odd-offset edge sums differ.
+            if (GRIDSHIFT != 0) begin
+                /* Odd-period bars varying only in blue: edges a
+                /* red-only phase metric cannot see (PR review).
                  */
-                px = (((i + jitter_accum) / PIXSPAN) % 3 == 0) ? 8'hff : 8'h00;
-            else if (i >= CROPH + 1300)
-                px = (i[0] != 0) ? 8'hff : 8'h00;
-            else
-                px = ((i + jitter_accum) / PIXSPAN) + pattern_seed;
+                r = 8'h80;
+                g = 8'h80;
+                b = (((i + jitter_accum) / PIXSPAN) % 3 == 0) ? 8'hff : 8'h00;
+            end else begin
+                if (i >= CROPH + 1300)
+                    px = (i[0] != 0) ? 8'hff : 8'h00;
+                else
+                    px = ((i + jitter_accum) / PIXSPAN) + pattern_seed;
+                r = px[7:0];
+                g = ~px[7:0];
+                b = {px[3:0], px[7:4]};
+            end
             grid_ref = (((i + jitter_accum + GRIDSHIFT) % 4) == 0);
-            r = px[7:0];
-            g = ~px[7:0];
-            b = {px[3:0], px[7:4]};
             @(posedge cap_clk);
 
             if (FULLWIDTH && !full_width_ready_checked &&

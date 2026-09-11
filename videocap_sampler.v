@@ -470,15 +470,24 @@ reg grid_seen = 0;
 reg pair_parity = 0;
 reg [26:0] grid_intra_sum = 0;
 reg [26:0] grid_cross_sum = 0;
-reg [7:0] grid_prev_second = 0;
+reg [23:0] grid_prev_second = 0;
 wire grid_pair_first = (cap_grid[0] == pair_parity);
 
-wire [7:0] grid_intra_delta = (rgbin[23:16] > rgb_prev[23:16]) ?
-    (rgbin[23:16] - rgb_prev[23:16]) :
-    (rgb_prev[23:16] - rgbin[23:16]);
-wire [7:0] grid_cross_delta = (rgbin[23:16] > grid_prev_second) ?
-    (rgbin[23:16] - grid_prev_second) :
-    (grid_prev_second - rgbin[23:16]);
+/* Alignment metric across all three channels: edges that change
+ * only green or blue while red stays constant must still move the
+ * phase measurement, or such content would never adapt. */
+function [9:0] grid_rgb_delta;
+    input [23:0] a;
+    input [23:0] b;
+    begin
+        grid_rgb_delta =
+            (a[23:16] > b[23:16] ? a[23:16] - b[23:16] : b[23:16] - a[23:16]) +
+            (a[15:8] > b[15:8] ? a[15:8] - b[15:8] : b[15:8] - a[15:8]) +
+            (a[7:0] > b[7:0] ? a[7:0] - b[7:0] : b[7:0] - a[7:0]);
+    end
+endfunction
+wire [9:0] grid_intra_delta = grid_rgb_delta(rgbin, rgb_prev);
+wire [9:0] grid_cross_delta = grid_rgb_delta(rgbin, grid_prev_second);
 /* SuperHires changes within a 28 MHz sample pair; hires and lores do not.
  * Keep classification independent of whether that pair is stored separately
  * or filtered into one output pixel. */
@@ -771,17 +780,17 @@ always @(posedge cap_clk) begin
                     half <= 1;
                     if (grid_seen &&
                             grid_cross_sum <=
-                                27'h7ffffff - {19'd0, grid_cross_delta})
+                                27'h7ffffff - {17'd0, grid_cross_delta})
                         grid_cross_sum <=
-                            grid_cross_sum + {19'd0, grid_cross_delta};
+                            grid_cross_sum + {17'd0, grid_cross_delta};
                 end else if (half) begin
                     half <= 0;
                     if (grid_seen) begin
-                        grid_prev_second <= rgbin[23:16];
+                        grid_prev_second <= rgbin;
                         if (grid_intra_sum <=
-                                27'h7ffffff - {19'd0, grid_intra_delta})
+                                27'h7ffffff - {17'd0, grid_intra_delta})
                             grid_intra_sum <=
-                                grid_intra_sum + {19'd0, grid_intra_delta};
+                                grid_intra_sum + {17'd0, grid_intra_delta};
                     end
                     if (capture_head_valid)
                         linebuf[capture_buf_addr] <= {8'b0, filtered_sample};
