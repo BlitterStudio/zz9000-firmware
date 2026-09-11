@@ -841,6 +841,55 @@ task drive_characterization_field;
     end
 endtask
 
+/* Jittered line-length variants for the horizontal-jitter telemetry: each
+ * line still contributes exactly one HSYNC rise and fall, but the
+ * line-to-line period alternates between short_len and long_len. Only the
+ * diagnostic min/max period fields are asserted by callers; capture
+ * geometry is intentionally not checked here. */
+task drive_jitter_line;
+    input integer pattern_seed;
+    input integer line_clks;
+    input integer pulse_clks;
+    input integer vsync_drop_phase;
+    integer i;
+    integer px;
+    begin
+        for (i = 0; i < line_clks; i = i + 1) begin
+            hsync = (i >= pulse_clks);
+            if (i == vsync_drop_phase)
+                vsync = 0;
+            px = (i / PIXSPAN) + pattern_seed;
+            r = px[7:0];
+            g = ~px[7:0];
+            b = {px[3:0], px[7:4]};
+            @(posedge cap_clk);
+        end
+    end
+endtask
+
+task drive_jitter_field;
+    input integer seed;
+    input integer total_lines;
+    input integer pulse_clks;
+    input integer short_len;
+    input integer long_len;
+    integer ln;
+    begin
+        if (hsync !== 1'b1) begin
+            hsync = 1;
+            @(posedge cap_clk);
+        end
+        vsync = 1;
+        drive_jitter_line(seed, short_len, pulse_clks, 400);
+        drive_jitter_line(seed + 1, long_len, pulse_clks, -1);
+        vsync = 1;
+        for (ln = 2; ln < total_lines; ln = ln + 1)
+            drive_jitter_line(seed + ln,
+                              (ln % 2 == 0) ? short_len : long_len,
+                              pulse_clks, -1);
+    end
+endtask
+
 integer sample_idx;
 integer pix_even;
 integer pix_odd;
@@ -1187,7 +1236,24 @@ initial begin
                  {16'd67, 16'd67});
         check_eq("diag_sequence_advanced", diag_data[351:336],
                  diag_sequence_before + 1'b1);
+        diag_sequence_before = diag_data[351:336];
         $display("CHARACTERIZATION Toaster-like edges complete the capture window; telemetry required");
+        probe_arm_toggle = ~probe_arm_toggle;
+        wait (probe_arm_seen == probe_arm_toggle);
+        drive_jitter_field(900, 262, 67, LINECLKS - 5, LINECLKS + 5);
+        drive_jitter_field(950, 262, 67, LINECLKS - 5, LINECLKS + 5);
+        check_eq("diag_jitter_valid", diag_valid, 1);
+        check_eq("diag_jitter_rise_period_min", diag_data[143:128],
+                 LINECLKS - 5);
+        check_eq("diag_jitter_rise_period_max", diag_data[159:144],
+                 LINECLKS + 5);
+        check_eq("diag_jitter_fall_period_min", diag_data[175:160],
+                 LINECLKS - 5);
+        check_eq("diag_jitter_fall_period_max", diag_data[191:176],
+                 LINECLKS + 5);
+        check_eq("diag_jitter_sequence", diag_data[351:336],
+                 diag_sequence_before + 1'b1);
+        $display("CHARACTERIZATION Alternating line periods tracked by telemetry min/max");
     end
     /* The standalone tracker makes the two-frame validity rule explicit
      * without lengthening every pixel-format raster configuration. */
