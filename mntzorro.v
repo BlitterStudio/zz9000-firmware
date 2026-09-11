@@ -1446,6 +1446,7 @@ module MNTZorro_v0_1_S00_AXI
       .PROBE_SOURCE_X(VCAP_PROBE_SOURCE_X)
   ) videocap_sampler_inst (
       .cap_clk(e7m_shifted),
+      .grid_ref(e7m_shifted180),
       .vcap_vsync(VCAP_VSYNC),
       .vcap_hsync(VCAP_HSYNC),
       .vcap_r({VCAP_R7, VCAP_R6, VCAP_R5, VCAP_R4,
