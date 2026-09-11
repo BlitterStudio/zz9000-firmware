@@ -140,6 +140,23 @@ static int test_native_scanout_pan_base(void)
 	                ZZVMODE_800x600), 0x00dff2f8U)) {
 		return 6;
 	}
+	/* Centered profiles route through this same contract: their runtime
+	 * request keeps the default base mode ZZVMODE_800x600
+	 * (video_videocap_sanitize_runtime_mode), so the VDMA-restart heal
+	 * must derive NTSC centered from the capture row base — not the
+	 * stale PAL constant the driver writes — while PAL centered keeps
+	 * the tuned origin. These pins guard the base-mode default the
+	 * centered scanout origin depends on (the #84 centered residual). */
+	if (!expect_u32("ntsc centered origin",
+	                video_videocap_scanout_pan_base(1U, 0U,
+	                ZZVMODE_800x600), 0x00e00000U)) {
+		return 7;
+	}
+	if (!expect_u32("pal centered origin",
+	                video_videocap_scanout_pan_base(0U, 0U,
+	                ZZVMODE_800x600), 0x00dff2f8U)) {
+		return 8;
+	}
 
 	return 0;
 }
