@@ -257,11 +257,14 @@ module MNTZorro_v0_1_S00_AXI
    output reg [31:0] video_control_data_out,
    output reg [7:0]  video_control_op_out,
    output reg video_control_interlace_out,
+   output wire video_capture_anchor_toggle,
    output reg [7:0] scanline_intensity_out,
    output reg [1:0] scanline_width_out,
    output reg        scanline_parity_out,
    output reg [7:0] scanline_intensity2_out,
    input wire [1:0] video_control_vblank_in,
+   // Coherent diagnostic snapshot, already in S_AXI_ACLK (FCLK0).
+   input wire [63:0] source_sync_diagnostic,
    
    // ZZ9000AX peripheral reset
    output reg zz9000ax_reset_out,
@@ -370,6 +373,7 @@ module MNTZorro_v0_1_S00_AXI
   reg [`C_S_AXI_DATA_WIDTH-1:0] out_reg1;
   reg [`C_S_AXI_DATA_WIDTH-1:0] out_reg2;
   reg [`C_S_AXI_DATA_WIDTH-1:0] out_reg3;
+  reg [63:0] source_sync_read_snapshot;
 
   // I/O Connections assignments
 
@@ -651,6 +655,7 @@ module MNTZorro_v0_1_S00_AXI
       if ( S_AXI_ARESETN == 1'b0 )
         begin
           axi_rdata  <= 0;
+          source_sync_read_snapshot <= 64'd0;
         end
       else
         begin
@@ -660,6 +665,10 @@ module MNTZorro_v0_1_S00_AXI
           if (slv_reg_rden)
             begin
               axi_rdata <= reg_data_out;     // register read data
+              // REG4 returns the live low word and freezes its matching
+              // high word for REG5. Writes retain their existing meanings.
+              if (axi_araddr[ADDR_LSB+OPT_MEM_ADDR_BITS:ADDR_LSB] == 3'h4)
+                source_sync_read_snapshot <= source_sync_diagnostic;
             end
         end
     end
@@ -1453,6 +1462,7 @@ module MNTZorro_v0_1_S00_AXI
       .cap_x(vcap_x),
       .cap_y(vcap_y),
       .cap_line_toggle(vcap_line_toggle),
+      .cap_frame_anchor_toggle(video_capture_anchor_toggle),
       .cap_write_bank(vcap_write_bank),
       .cap_token_y(vcap_token_y),
       .cap_token_bank(vcap_token_bank),
@@ -3109,11 +3119,13 @@ module MNTZorro_v0_1_S00_AXI
     out_reg2 <= last_z3addr;
     // Status: [24] interlace, [23] videocap, [22] NTSC, [21] vblank,
     // [20] hblank, [19] SDK doorbell, [18] SDK IRQ ack, [17] SuperHires,
-    // [16] full-rate capture path, [15] formatter viewport layout.
+    // [16] full-rate capture, [15] viewport, [14] native source sync,
+    // [13] diagnostic REG4/REG5 snapshot available.
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
                 video_control_interlace, videocap_mode, vcap_ntsc, video_control_vblank, video_control_hblank,
                 sdk_doorbell_pending, sdk_irq_ack_pending, vcap_shres,
-                (`VCAP_FULLRATE_INT != 0), 1'b1, 7'b0, zorro_state};
+                (`VCAP_FULLRATE_INT != 0), 1'b1,
+                (`VCAP_FULLRATE_INT != 0), 1'b1, 5'b0, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;
@@ -3125,6 +3137,8 @@ module MNTZorro_v0_1_S00_AXI
         3'h1   : reg_data_out <= out_reg1;
         3'h2   : reg_data_out <= out_reg2;
         3'h3   : reg_data_out <= out_reg3;
+        3'h4   : reg_data_out <= source_sync_diagnostic[31:0];
+        3'h5   : reg_data_out <= source_sync_read_snapshot[63:32];
         // Slot 6 is PS-written for the Z3 fast-RAM ready gate, but had no
         // readable value. Reuse its read direction for the host layout ack.
         3'h6   : reg_data_out <= sdk_aperture_layout_ack ?

@@ -928,7 +928,13 @@ int main() {
 				}
 				case REG_ZZ_VCAP_MODE:
 					printf("videocap default mode select: %lx\n", zdata);
-					video_set_videocap_video_mode(zdata & 0xff);
+					/* Full 16-bit register value: bit 8 and
+					 * up carry virtual ids (currently
+					 * ZZVMODE_CENTERED_1080P_MATCH
+					 * 0x100), which the sanitizer maps to
+					 * output profiles rather than preset
+					 * rows. Unknown values stay rejected. */
+					video_set_videocap_video_mode(zdata & 0xffffU);
 					break;
 				//case REG_ZZ_SPRITE_X:
 				case REG_ZZ_SPRITE_Y:

@@ -31,10 +31,11 @@ if [ "$VARIANT" = "master" ] || [ "$VARIANT" = "reference" ]; then
     EXTRA=""
 else
     cp "$ROOT/video_formatter.v" dut.v
+    cp "$ROOT/video_source_sync.v" .
     cp "$ROOT/video_overlay_pixel.v" .
     cp "$ROOT/video_overlay_linebuffer.v" .
     DEFINE=""
-    EXTRA="video_overlay_pixel.v video_overlay_linebuffer.v"
+    EXTRA="video_source_sync.v video_overlay_pixel.v video_overlay_linebuffer.v"
 fi
 
 if [ "$ON_WINDOWS" = 1 ]; then

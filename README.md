@@ -111,7 +111,7 @@ The file controls these boot-time defaults:
 
 | Key | Purpose |
 |---|---|
-| `videocap_profile` | Native output: `full_60`, `full_exact`, `filtered_60` (default), `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60` |
+| `videocap_profile` | Native output: `full_60`, `full_exact`, `filtered_60` (default), `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60`, `centered_1080p_50`, `centered_1080p_match` |
 | `videocap_sample` | Native-video capture sampling |
 | `videocap_crop_h` | Horizontal picture position; omit for Automatic |
 | `videocap_crop_v` | Vertical picture position; omit for Automatic |
@@ -273,8 +273,8 @@ Absent audio keys keep the firmware defaults. The firmware applies the
 saved active scene at cold boot and again after every Amiga warm
 reset, before any application can allocate the audio device.
 
-Note that both save paths — ZZTop's Settings **Save** and the
-firmware's audio **Save** — regenerate the file from the settings they
+Both save mechanisms — ZZTop's Settings/Scandoubler **Save** and the
+firmware-backed Audio **Save** — regenerate the file from settings they
 know and keep the previous copy as `ZZ9000.bak`: hand-written comments
 are not preserved. The file parser reads at most 4 KiB; a larger file
 has its tail ignored, which the drivers can observe through the
@@ -290,17 +290,61 @@ scanline_mode = 2
 scanline_parity = 0
 ```
 
-With no valid profile, `filtered_60` provides the monitor-safe 800x600 60 Hz
-output. Explicit `full_60` and `full_exact` selections preserve full SuperHires
-detail in a 1280x1024 output. On supported full-rate variants,
-`centered_1080p_60` places the unchanged 1280x1024 native picture in a
-1920x1080 signal with black borders at approximately 60.61 Hz. It is separate
-from the Picasso96 1920x1080 RTG mode. An explicitly selected centered profile
-falls back to `full_60` on older or unsupported stacks.
+With no valid profile, `filtered_60` provides filtered 60 Hz output:
+800x600 for PAL input or 720x480 for NTSC input. Explicit `full_60` and
+`full_exact` selections preserve full SuperHires detail in a 1280x1024 output.
+On supported full-rate variants, `centered_1080p_60` and `centered_1080p_50`
+place the unchanged 1280x1024 native picture in a 1920x1080 signal with
+320-pixel side borders and 28-line top/bottom borders. Their nominal 60/50 Hz
+timings run at approximately 60.03/50.02 Hz. Both use the closest legal
+100 MHz integer-PLL setting to 148.5 MHz: 52/5/7 = 148.5714286 MHz, with
+standard blanking unchanged. They are free-running, not input-genlocked.
+These native profiles are separate from Picasso96 RTG modes, but centered
+60 Hz shares its hardware timing preset with 1920x1080 RTG. The matching
+driver and stock Picasso96 settings use the updated clock metadata too.
+Centered 60 Hz needs firmware capability
+bit 3; centered 50 Hz needs both bits 3 and 4. These are advertised only
+on matching viewport/full-rate bitstreams. Use matching firmware, bitstream,
+`ZZ9000.card` and ZZTop. Current ZZTop hides unsupported centered choices
+and substitutes `full_60` when loading an unsupported selection; that
+fallback also applies when another configuration window saves a stored
+unsupported profile. Older firmware ignores an unknown profile token,
+which is not a guaranteed `full_60` fallback for hand-edited old stacks.
 
-ZZTop 2.8 can also preview and calibrate native-picture positioning. Its
-**Save** action writes the file and keeps the previous copy as `ZZ9000.bak`;
-power-cycle afterwards to apply the saved settings at boot.
+The existing `full_exact` profile selects fixed PAL/NTSC timing
+approximations (about 49.93/59.95 Hz); it does not phase-lock to the input.
+The experimental `centered_1080p_match` profile instead tracks the captured
+source cadence by adjusting vertical blanking. Interlaced input uses a
+bounded field-pair phase correction rather than copying alternating field
+anchor intervals directly into output frame lengths; progressive input
+retains direct anchor tracking. This is not a fixed 50/60 Hz approximation.
+During interlaced acquisition or reacquisition, pixels remain hidden until
+the output reaches a safe capture/read phase. Cadence lock can precede this;
+monitor sync continues while the phase converges.
+Use the matching experimental bitstream, firmware, `ZZ9000.card` and ZZTop.
+The cadence-repair candidate passed native-pixel hardware testing on an
+A4000 with a default-Z3 ZZ9000: all tested interlace modes displayed correctly
+with no reported visual anomalies. This qualifies that tested setup, not
+monitor acceptance or tear-free operation on every machine.
+
+ZZTop's **Scandoubler** window groups dependent **Output**/**Refresh**,
+scanlines and parity. Its **Capture…** button opens sampling, framing and
+native-picture preview/calibration. Open it with the main **Scandoubler…**
+button directly above **Audio…**, or **Project > Scandoubler…**; the menu
+remains accessible when bottom buttons are off-screen.
+**Project > Settings…** opens INT2, MAC, HDF, offscreen-bitmap and video-overlay
+configuration; **Project > Audio…** opens audio controls.
+
+Each editor applies its own edits and ENV overrides while preserving
+supported settings from the other sections. General Settings Save keeps
+absent/commented native keys inactive rather than persisting default output
+or unsaved live scanline changes. Scandoubler Save activates its displayed
+native settings. Save keeps the previous file as `ZZ9000.bak`; power-cycle
+afterwards to apply Output/Refresh and other boot settings. Scanline mode
+and parity change live but still need Save for persistence.
+
+See the driver's [Output/Refresh profile table](https://github.com/BlitterStudio/zz9000-drivers#scandoubler-output-and-refresh)
+for every supported selector combination.
 
 Keep these rules in mind:
 

@@ -63,11 +63,18 @@ struct ZZ_VIDEO_STATE* video_get_state() {
 }
 
 static void videocap_detection_reset() {
+	/* Also covers leaving capture by panning without a mode write. */
+	if (vs.videocap_output_profile_applied ==
+	    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH)
+		video_formatter_write(0, MNTVF_OP_SOURCE_SYNC);
 	vs.videocap_ntsc_old = -1;
 	vs.videocap_shres_old = -1;
 	vs.interlace_old = -1;
 	vs.videocap_video_mode_applied = -1;
 	vs.videocap_output_profile_applied = -1;
+	/* Unknown again: the sampler may have been reconfigured while the
+	 * videocap area was not being viewed. */
+	vs.videocap_full_width_applied = -1;
 	video_videocap_detection_reset(&vs.videocap_detection);
 }
 
@@ -221,8 +228,8 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 static int videocap_full_width_enabled(u32 zstate) {
 	const struct zz_config *cfg = zz_config_get();
 	uint32_t requested =
-		vs.videocap_output_profile_requested ==
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 ? 1U :
+		video_videocap_output_profile_centered(
+			(uint32_t)vs.videocap_output_profile_requested) ? 1U :
 		cfg->videocap_shres_present ?
 		cfg->videocap_shres : VIDEOCAP_FULL_WIDTH_DEFAULT;
 	uint32_t fullrate_capable =
@@ -236,7 +243,8 @@ static int videocap_effective_output_profile(u32 zstate)
 	return (int)video_videocap_effective_output_profile(
 		(uint32_t)vs.videocap_output_profile_requested,
 		!!(zstate & MNTZORRO_STATUS_VCAP_VIEWPORT),
-		!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE));
+		!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE),
+		!!(zstate & MNTZORRO_STATUS_VCAP_SOURCE_SYNC));
 }
 
 int video_set_videocap_video_mode(uint32_t mode)
@@ -246,7 +254,8 @@ int video_set_videocap_video_mode(uint32_t mode)
 		video_videocap_sanitize_runtime_mode(
 			mode,
 			!!(zstate & MNTZORRO_STATUS_VCAP_VIEWPORT),
-			!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE));
+			!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE),
+			!!(zstate & MNTZORRO_STATUS_VCAP_SOURCE_SYNC));
 
 	if (!request.valid)
 		return 0;
@@ -270,12 +279,21 @@ int video_set_videocap_vsync(uint32_t setting)
 uint32_t video_firmware_capabilities(void)
 {
 	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
+	uint32_t viewport_layout_capable =
+		!!(zstate & MNTZORRO_STATUS_VCAP_VIEWPORT);
+	uint32_t fullrate_capable =
+		!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE);
 	uint32_t capabilities = ZZ_FW_CAPABILITIES;
 
-	if (video_videocap_centered_eligible(
-			!!(zstate & MNTZORRO_STATUS_VCAP_VIEWPORT),
-			!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE))) {
-		capabilities |= ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P;
+	if (video_videocap_centered_eligible(viewport_layout_capable,
+			fullrate_capable)) {
+		capabilities |= ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P |
+		                ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50;
+	}
+	if (video_videocap_source_sync_eligible(viewport_layout_capable,
+			fullrate_capable,
+			!!(zstate & MNTZORRO_STATUS_VCAP_SOURCE_SYNC))) {
+		capabilities |= ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC;
 	}
 
 	return capabilities;
@@ -305,12 +323,23 @@ static void init_videocap_video_mode(int ntsc, int full_width,
 		int output_profile) {
 	int mode = ZZVMODE_1280x1024_NATIVE_60;
 
-	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
-		video_mode_init_internal(ZZVMODE_1920x1080_60, 4,
-			MNTVA_COLOR_32BIT, 1, output_profile);
+	if (video_videocap_output_profile_centered(output_profile)) {
+		if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH) {
+			/* Source-locked refresh: the detected standard picks
+			 * the existing physical preset (PAL -> 1080p50 mode 7,
+			 * NTSC -> 1080p60 mode 5). Geometry and cadence stay
+			 * in the FPGA's measured-source domain; no static
+			 * ~49.92 Hz preset row exists or is needed. */
+			mode = ntsc ? ZZVMODE_1920x1080_60 :
+			              ZZVMODE_1920x1080_50;
+		} else {
+			mode = output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50 ?
+				ZZVMODE_1920x1080_50 : ZZVMODE_1920x1080_60;
+		}
+		video_mode_init_internal(mode, 4, MNTVA_COLOR_32BIT, 1,
+			output_profile);
 		return;
 	}
-
 	if (!full_width) {
 		init_filtered_videocap_video_mode(ntsc);
 		return;
@@ -464,6 +493,23 @@ void isr_video(void *dummy) {
 					// hide sprite
 					sprite_request_hide = 1;
 
+					if (videocap_full_width != vs.videocap_full_width_applied) {
+						/* The output profile owns the capture geometry: the
+						 * sampler's full-width bit gates both anchor emission
+						 * and the writeback layout, and no boot path establishes
+						 * it for a profile selected at runtime. Route the change
+						 * through the acknowledged control engine as a width-only
+						 * update, preserving the live sample/crop configuration
+						 * (the Amiga can commit calibration the CFG never saw).
+						 * The engine merges it with any in-flight commit, so a
+						 * runtime MATCH enable cannot race live calibration. */
+						video_formatter_write(
+						    videocap_control_width_only(
+						        (uint32_t)videocap_full_width),
+						    MNTVF_OP_VIDEOCAP);
+						vs.videocap_full_width_applied = videocap_full_width;
+					}
+
 					if (videocap_ntsc) {
 						// NTSC
 						printf("videocap: ntsc\n");
@@ -497,6 +543,9 @@ void isr_video(void *dummy) {
 
 				if (videocap_detection_stable &&
 						(interlace != vs.interlace_old || videocap_reset)) {
+					if (videocap_output_profile ==
+					    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH)
+						video_formatter_write(0, MNTVF_OP_SOURCE_SYNC);
 					// interlace has changed, we need to reconfigure vdma for the new screen height
 					uint32_t videocap_scalemode = video_videocap_scalemode(
 							(uint32_t)videocap_full_width,
@@ -509,6 +558,11 @@ void isr_video(void *dummy) {
 					init_vdma(vs.vmode_hsize, vs.vmode_vsize, 1, vs.vmode_vdiv,
 							(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 					video_formatter_valign();
+					/* Both first entry and x2/x4 transitions must finish
+					 * VDMA setup before acquisition can show content. */
+					if (videocap_output_profile ==
+					    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH)
+						video_formatter_write(1, MNTVF_OP_SOURCE_SYNC);
 					printf("videocap interlace mode changed to %d.\n", interlace);
 				}
 
@@ -714,12 +768,18 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode,
 	                              (uint32_t)vmode->hres;
 	struct video_videocap_geometry geometry;
 
-	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
+	if (video_videocap_output_profile_centered((uint32_t)output_profile)) {
 		geometry = video_videocap_output_geometry((uint32_t)output_profile);
 		content_hres = geometry.content_width;
 		content_vres = geometry.content_height;
 		dimensions_control |= MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG;
 	}
+	/* Source-locked output is valid only for the matched centered profile
+	 * and only after the full mode sequence below. Drop it BEFORE any
+	 * timing/viewport reprogramming (this path also covers every RTG
+	 * switch and the native reselect) so the sync controller never tracks
+	 * a half-programmed mode. */
+	video_formatter_write(0, MNTVF_OP_SOURCE_SYNC);
 
 	// Reset input state machine before reconfiguring to prevent stale line fetches.
 	video_formatter_valign();
@@ -730,7 +790,7 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode,
 	// causes a visible horizontal split (the "split picture" NTSC bug).
 	video_formatter_write((vmode->vmax << 16) | vmode->hmax, MNTVF_OP_MAX);
 	video_formatter_write(dimensions_control, MNTVF_OP_DIMENSIONS);
-	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
+	if (video_videocap_output_profile_centered((uint32_t)output_profile)) {
 		video_formatter_write((geometry.viewport_y << 16) |
 		                      geometry.viewport_x,
 		                      MNTVF_OP_VIEWPORT_POS);

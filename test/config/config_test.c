@@ -227,6 +227,20 @@ static void test_videocap_profiles(void) {
           ZZVMODE_1920x1080_60);
     CHECK(present);
 
+    /* The driver must recover MATCH from the boot query, not silently
+     * replace it with the fixed centered 60 Hz profile. */
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = centered_1080p_match\n") == 1);
+    CHECK(zz_config_get()->videocap_output_profile ==
+          ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH);
+    CHECK(zz_config_get()->videocap_mode == ZZVMODE_800x600);
+    CHECK(zz_config_get()->videocap_shres == 1);
+    CHECK(zz_config_get()->ns_vsync == 0);
+    present = 0;
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_CENTERED_1080P_MATCH);
+    CHECK(present);
+
     zz_config_reset();
     CHECK(parse_str("videocap_profile = unclear\n") == 0);
     CHECK(zz_config_get()->videocap_output_profile ==
@@ -283,6 +297,14 @@ static void test_videocap_profiles(void) {
     CHECK(zz_config_get()->videocap_output_profile ==
           ZZ_VIDEOCAP_OUTPUT_FULL_60);
 
+    /* Legacy native-video keys clear the matched identity exactly like
+     * the fixed centered one (the override stays intentional). */
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = centered_1080p_match\n"
+                    "videocap_mode = 800x600\n") == 2);
+    CHECK(zz_config_get()->videocap_output_profile ==
+          ZZ_VIDEOCAP_OUTPUT_FULL_60);
+
     /* Unrelated settings preserve the centered request. */
     zz_config_reset();
     CHECK(parse_str("videocap_profile = centered_1080p_60\n"
@@ -291,6 +313,54 @@ static void test_videocap_profiles(void) {
                     "scanline_mode = 2\n") == 4);
     CHECK(zz_config_get()->videocap_output_profile ==
           ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
+}
+
+static void test_centered_refresh_round_trip(void) {
+    char saved[ZZ_CONFIG_MAX_SIZE];
+    uint16_t present;
+    int len;
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = centered_1080p_60\n"
+                    "videocap_profile = CENTERED_1080P_50\n"
+                    "videocap_profile = unknown\n"
+                    "scanline_mode = 2\n") == 3);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_1920x1080_50);
+    CHECK(present);
+    len = zz_config_emit_present_keys(saved, sizeof(saved), 0);
+    CHECK(len > 0);
+    if (len <= 0) return;
+
+    zz_config_reset();
+    CHECK(zz_config_parse(saved, (unsigned)len) == 2);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_1920x1080_50);
+    CHECK(present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_SCANLINE_MODE, &present) == 2);
+    CHECK(present);
+
+    CHECK(parse_str("videocap_profile = centered_1080p_60\n") == 1);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_1920x1080_60);
+    CHECK(parse_str("nonstandard_vsync = off\n") == 1);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_800x600);
+
+    /* Saving and reloading preserves the driver-visible virtual mode. */
+    zz_config_reset();
+    CHECK(parse_str("videocap_profile = centered_1080p_match\n") == 1);
+    len = zz_config_emit_present_keys(saved, sizeof(saved), 0);
+    CHECK(len > 0);
+    if (len <= 0) return;
+    zz_config_reset();
+    CHECK(zz_config_parse(saved, (unsigned)len) == 1);
+    CHECK(zz_config_get()->videocap_output_profile ==
+          ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH);
+    present = 0;
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_MODE, &present) ==
+          ZZVMODE_CENTERED_1080P_MATCH);
+    CHECK(present);
 }
 
 static void test_videocap_sample(void) {
@@ -574,6 +644,7 @@ int main(void) {
     test_case_whitespace_comments();
     test_videocap_aliases();
     test_videocap_profiles();
+    test_centered_refresh_round_trip();
     test_videocap_sample();
     test_videocap_shres_and_crop();
     test_bad_values_skipped();

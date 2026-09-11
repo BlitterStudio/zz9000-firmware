@@ -43,7 +43,14 @@ module video_formatter(
   input [31:0] control_data,
   input [7:0] control_op,
   input control_interlace,
+  // capture anchor toggle (cap_clk domain; one edge per input field/frame,
+  // at the first completed post-crop full-width source row)
+  input capture_anchor_toggle,
   output reg [1:0]control_vblank,
+  // source-sync diagnostic snapshot (m_axis_vid_aclk domain): coherent
+  // 64-bit copy of video_source_sync's diagnostic_data, refreshed once
+  // per output frame - bit map documented in video_source_sync.v
+  output reg [63:0] source_sync_diagnostic,
   input [7:0] scanline_intensity,
   input [1:0] scanline_width,
   input        scanline_parity,
@@ -78,6 +85,7 @@ localparam OP_OVERLAY_SOURCE_SIZE=26;
 localparam OP_OVERLAY_FRAME=27;
 localparam OP_VIEWPORT_POS=28;
 localparam OP_VIEWPORT_SIZE_COMMIT=29;
+localparam OP_SOURCE_SYNC=30; // output frame follows the capture anchor (bit0: enable)
 
 localparam DPMS_ON=0;
 localparam DPMS_STANDBY=1; // HSync disabled, VSync enabled
@@ -99,6 +107,7 @@ reg vsync_request;
 reg sync_polarity = 1; // negative polarity
 reg selected_palette = 0;
 reg [1:0] dpms_level = DPMS_ON;
+reg source_sync_enable = 0; // aclk domain; OP_SOURCE_SYNC bit0, CDC'd below
 
 /* P96 PIP pending state. Firmware writes a complete set while the plane is
  * disabled; the pixel domain snapshots it in vblank. */
@@ -397,6 +406,35 @@ xpm_cdc_single #(
   .dest_out(viewport_unsettled_pixel)
 );
 
+/* Source-sync control crosses to the pixel domain like the other
+ * quasi-static control bits.  The anchor arrives from the capture
+ * clock, which is not present here, so it is only double-flop
+ * synchronized (SRC_INPUT_REG=0, no source register stage). */
+wire source_sync_enable_pix;
+wire capture_anchor_pix;
+xpm_cdc_single #(
+  .DEST_SYNC_FF(3),
+  .INIT_SYNC_FF(1),
+  .SIM_ASSERT_CHK(0),
+  .SRC_INPUT_REG(1)
+) source_sync_enable_cdc (
+  .src_clk(m_axis_vid_aclk),
+  .src_in(source_sync_enable),
+  .dest_clk(dvi_clk),
+  .dest_out(source_sync_enable_pix)
+);
+xpm_cdc_single #(
+  .DEST_SYNC_FF(3),
+  .INIT_SYNC_FF(1),
+  .SIM_ASSERT_CHK(0),
+  .SRC_INPUT_REG(0)
+) capture_anchor_cdc (
+  .src_clk(1'b0), // no source clock available; unused with SRC_INPUT_REG=0
+  .src_in(capture_anchor_toggle),
+  .dest_clk(dvi_clk),
+  .dest_out(capture_anchor_pix)
+);
+
 always @(posedge m_axis_vid_aclk) begin
   if (!aresetn) begin
     viewport_staged_x <= 0;
@@ -548,6 +586,7 @@ begin
         overlay_source_width <= control_data_in[15:0];
       end
     OP_OVERLAY_FRAME: overlay_frame_generation <= control_data_in;
+    OP_SOURCE_SYNC: source_sync_enable <= control_data_in[0];
   endcase
 end
 
@@ -790,13 +829,153 @@ wire [31:0] overlay_accepted_generation;
 wire [11:0] overlay_scheduler_line;
 wire overlay_scheduler_line_ready;
 
-wire [11:0] next_raster_y = counter_y >= vga_v_max
+/* Source-synchronous frame timing.  The controller sees the live dvi
+ * domain geometry and the raster position, and decides once per line,
+ * before the line begins, whether that line ends the output frame.
+ * While disabled (or disengaged) frame_wrap_this_line is exactly the
+ * original free-running compare, so fixed modes and RTG are unchanged
+ * bit for bit; every vertical wrap consumer below is muxed on this one
+ * wire, which is why the hmax-1 line-bank prefetch decision and the
+ * actual counter_y wrap can never disagree. */
+wire [12:0] source_sync_active_end =
+  {1'b0, vga_v_rez} + {1'b0, vga_scale_y_factor};
+wire source_sync_line_advance = counter_x >= vga_h_max;
+wire [63:0] source_sync_diag_bus;
+wire source_sync_line_uses_sync;
+wire source_sync_line_is_last;
+wire source_sync_video_hidden;
+
+video_source_sync video_source_sync_i (
+  .dvi_clk(dvi_clk),
+  .resetn(aresetn),
+  .enable(source_sync_enable_pix),
+  .anchor_toggle(capture_anchor_pix),
+  .nominal_last_line(vga_v_max),
+  .vsync_end_line(vga_v_sync_end),
+  .active_end_line(source_sync_active_end),
+  .line_last_pixel(vga_h_max),
+  .interlace(control_interlace),
+  .raster_y(counter_y),
+  .line_advance(source_sync_line_advance),
+  .line_uses_sync(source_sync_line_uses_sync),
+  .line_is_last(source_sync_line_is_last),
+  .video_hidden(source_sync_video_hidden),
+  .diagnostic_data(source_sync_diag_bus)
+);
+
+wire frame_wrap_this_line = source_sync_line_uses_sync
+  ? source_sync_line_is_last
+  : counter_y >= vga_v_max;
+wire [11:0] next_raster_y = frame_wrap_this_line
   ? 12'b0 : counter_y + 1'b1;
 wire [11:0] next_scanout_content_y = next_raster_y - vga_viewport_y;
 wire [11:0] next_scanout_source_line =
   (next_raster_y >= vga_viewport_y + vga_scale_y_factor)
     ? ((next_scanout_content_y - vga_scale_y_factor) >> vga_scale_y)
     : 12'b0;
+
+/* ------------------------------------------------------------------ */
+/* Source-sync diagnostic transport (dvi_clk -> m_axis_vid_aclk)       */
+/* ------------------------------------------------------------------ */
+
+/* Purely observational side channel: publishes the synchronizer's
+ * 64-bit diagnostic bus (bit map in video_source_sync.v) to the ARM
+ * domain once per output frame.  The source half arms on the
+ * frame-wrap line_advance cycle (the exact predicate the raster
+ * counter wraps on) and snapshots the bus one dvi_clk later: the
+ * controller updates its wrap metrics (anchor age, frame total,
+ * max-forced) with nonblocking assignments on the wrap edge itself,
+ * so sampling in that same cycle would publish the previous frame's
+ * metrics.  The snapshot register then stays stable for the entire
+ * XPM handshake; the destination half publishes a value only when a
+ * completed transfer arrives and then holds it until the next one, so
+ * a stopped pixel clock simply freezes the last coherent sample.  The
+ * transport is never gated on enable/lock/picture state or on any
+ * firmware action, so diagnostics stay visible while the synchronizer
+ * is disabled (fixed50/RTG fallback) or disengaged. */
+localparam [1:0] SS_DIAG_IDLE   = 2'd0;
+localparam [1:0] SS_DIAG_LOAD   = 2'd1;
+localparam [1:0] SS_DIAG_SEND   = 2'd2;
+localparam [1:0] SS_DIAG_RETURN = 2'd3;
+
+reg [1:0]  source_sync_diag_state = SS_DIAG_IDLE;
+reg [63:0] source_sync_diag_src_payload = 64'd0;
+reg        source_sync_diag_src_send = 1'b0;
+wire       source_sync_diag_src_rcv;
+wire [63:0] source_sync_diag_dest_payload;
+wire       source_sync_diag_dest_req;
+reg        source_sync_diag_dest_ack = 1'b0;
+
+xpm_cdc_handshake #(
+  .DEST_EXT_HSK(1),
+  .DEST_SYNC_FF(3),
+  .INIT_SYNC_FF(1),
+  .SIM_ASSERT_CHK(0),
+  .SRC_SYNC_FF(3),
+  .WIDTH(64)
+) source_sync_diag_cdc (
+  .src_clk(dvi_clk),
+  .src_in(source_sync_diag_src_payload),
+  .src_send(source_sync_diag_src_send),
+  .src_rcv(source_sync_diag_src_rcv),
+  .dest_clk(m_axis_vid_aclk),
+  .dest_out(source_sync_diag_dest_payload),
+  .dest_req(source_sync_diag_dest_req),
+  .dest_ack(source_sync_diag_dest_ack)
+);
+
+/* Source half (dvi_clk), mirroring the viewport control CDC state
+ * machine in the opposite direction: the payload register is loaded
+ * once per frame wrap and then never touched until the handshake has
+ * fully returned. */
+always @(posedge dvi_clk) begin
+  if (!aresetn) begin
+    source_sync_diag_state <= SS_DIAG_IDLE;
+    source_sync_diag_src_payload <= 64'd0;
+    source_sync_diag_src_send <= 1'b0;
+  end else begin
+    case (source_sync_diag_state)
+      SS_DIAG_IDLE:
+        if (source_sync_line_advance && frame_wrap_this_line)
+          source_sync_diag_state <= SS_DIAG_LOAD;
+      /* Latch the post-update wrap metrics one cycle after the wrap
+       * edge; raising src_send in the same edge keeps the payload
+       * stable for the whole handshake. */
+      SS_DIAG_LOAD: begin
+        source_sync_diag_src_payload <= source_sync_diag_bus;
+        source_sync_diag_src_send <= 1'b1;
+        source_sync_diag_state <= SS_DIAG_SEND;
+      end
+      SS_DIAG_SEND:
+        if (source_sync_diag_src_rcv) begin
+          source_sync_diag_src_send <= 1'b0;
+          source_sync_diag_state <= SS_DIAG_RETURN;
+        end
+      SS_DIAG_RETURN:
+        if (!source_sync_diag_src_rcv)
+          source_sync_diag_state <= SS_DIAG_IDLE;
+    endcase
+  end
+end
+
+/* Destination half (m_axis_vid_aclk): latch-and-ack like the viewport
+ * installer, but immediate - debug data must never wait for a frame
+ * boundary.  source_sync_diagnostic (the module output) only ever
+ * changes on a completed transfer and is a plain register, so the ARM
+ * side always reads one coherent 64-bit snapshot. */
+always @(posedge m_axis_vid_aclk) begin
+  if (!aresetn) begin
+    source_sync_diag_dest_ack <= 1'b0;
+    source_sync_diagnostic <= 64'd0;
+  end else begin
+    if (!source_sync_diag_dest_req)
+      source_sync_diag_dest_ack <= 1'b0;
+    else if (!source_sync_diag_dest_ack) begin
+      source_sync_diagnostic <= source_sync_diag_dest_payload;
+      source_sync_diag_dest_ack <= 1'b1;
+    end
+  end
+end
 
 video_overlay_linebuffer overlay_linebuffer (
   .axis_clk(m_axis_vid_aclk),
@@ -1240,7 +1419,10 @@ end else case (vga_scanline_width)
     default: pixout_sl <= pixout_composited;
 endcase
 
-  dvi_rgb <= viewport_output_active ? composed_rgb : 32'b0;
+  if (source_sync_video_hidden)
+    dvi_rgb <= 32'b0;
+  else
+    dvi_rgb <= viewport_output_active ? composed_rgb : 32'b0;
 
   /* The refill side can overwrite the bank from the completed row during
    * horizontal blanking. Select the upcoming row one clock before raster
@@ -1260,7 +1442,7 @@ endcase
       (vga_overlay_enable ? $signed(OVERLAY_PIPE_DELAY) : 17'sd0);
     viewport_output_y_row <= next_raster_y - vga_scale_y_factor;
 
-    if (counter_y >= vga_v_max) begin
+    if (frame_wrap_this_line) begin
       overlay_screen_y_row <= overlay_screen_y_origin;
       overlay_local_y_row <= overlay_local_y_origin;
       overlay_displayed_line_row <= overlay_local_y_origin >= 0
@@ -1284,7 +1466,7 @@ endcase
 
   if (counter_x >= vga_h_max) begin
     counter_x <= 0;
-    if (counter_y >= vga_v_max) begin
+    if (frame_wrap_this_line) begin
       counter_y <= 0;
       sprite_px <= 0;
       sprite_py <= 0;
@@ -1376,7 +1558,7 @@ endcase
   end
 
   // internal vblank signal
-  if (counter_y >= vga_v_rez && counter_y < vga_v_max) begin
+  if (counter_y >= vga_v_rez && !frame_wrap_this_line) begin
     control_vblank[0] <= 1;
     // propagate report (interrupt) line position in vblank
     // to avoid glitches

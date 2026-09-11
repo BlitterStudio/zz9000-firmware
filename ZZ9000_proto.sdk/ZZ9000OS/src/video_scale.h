@@ -44,15 +44,45 @@ static inline uint32_t video_videocap_centered_eligible(
 	return (viewport_layout_capable != 0U) && (fullrate_capable != 0U);
 }
 
+/* All centered variants share the same canvas/viewport layout and the same
+ * base eligibility gate; the fixed pair differs only in output timing
+ * (mode 5 vs mode 7), while MATCH additionally tracks the detected source
+ * standard and needs the source-sync controller. */
+static inline uint32_t video_videocap_output_profile_centered(
+		uint32_t output_profile)
+{
+	return output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 ||
+	       output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50 ||
+	       output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH;
+}
+
+/* Missing any hardware prerequisite uses the same full_60 fallback as
+ * the driver profile table; never retain MATCH without source tracking. */
+static inline uint32_t video_videocap_source_sync_eligible(
+		uint32_t viewport_layout_capable, uint32_t fullrate_capable,
+		uint32_t source_sync_capable)
+{
+	return video_videocap_centered_eligible(viewport_layout_capable,
+	                                        fullrate_capable) &&
+	       (source_sync_capable != 0U);
+}
+
 static inline uint32_t video_videocap_effective_output_profile(
 		uint32_t requested, uint32_t viewport_layout_capable,
-		uint32_t fullrate_capable)
+		uint32_t fullrate_capable, uint32_t source_sync_capable)
 {
-	return requested == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 &&
+	if (requested == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH) {
+		if (video_videocap_source_sync_eligible(viewport_layout_capable,
+		                                        fullrate_capable,
+		                                        source_sync_capable))
+			return requested;
+		return ZZ_VIDEOCAP_OUTPUT_FULL_60;
+	}
+
+	return video_videocap_output_profile_centered(requested) &&
 	       video_videocap_centered_eligible(viewport_layout_capable,
-	                                           fullrate_capable) ?
-		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 :
-		ZZ_VIDEOCAP_OUTPUT_FULL_60;
+	                                       fullrate_capable) ?
+		requested : ZZ_VIDEOCAP_OUTPUT_FULL_60;
 }
 
 static inline struct video_videocap_geometry
@@ -67,7 +97,7 @@ video_videocap_output_geometry(uint32_t output_profile)
 		0U,
 	};
 
-	if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60) {
+	if (video_videocap_output_profile_centered(output_profile)) {
 		geometry.canvas_width = VIDEO_VIDEOCAP_CENTERED_CANVAS_WIDTH;
 		geometry.canvas_height = VIDEO_VIDEOCAP_CENTERED_CANVAS_HEIGHT;
 		geometry.viewport_x = VIDEO_VIDEOCAP_CENTERED_VIEWPORT_X;
@@ -112,29 +142,6 @@ static inline int video_videocap_detection_stable(
 	return state->stable_count >= VIDEO_VIDEOCAP_MODE_STABLE_VBLANKS;
 }
 
-static inline struct video_videocap_runtime_request
-video_videocap_sanitize_runtime_mode(uint32_t mode,
-		uint32_t viewport_layout_capable, uint32_t fullrate_capable)
-{
-	struct video_videocap_runtime_request request = {
-		0U, ZZVMODE_800x600, ZZ_VIDEOCAP_OUTPUT_FULL_60
-	};
-
-	if (mode == ZZVMODE_1920x1080_60) {
-		request.valid = 1U;
-		if (video_videocap_centered_eligible(viewport_layout_capable,
-		                                        fullrate_capable)) {
-			request.output_profile =
-				ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60;
-		}
-	} else if (mode == ZZVMODE_800x600 || mode == ZZVMODE_720x576) {
-		request.valid = 1U;
-		request.base_mode = (uint8_t)mode;
-	}
-
-	return request;
-}
-
 static inline uint32_t video_vertical_scale_factor(uint32_t scalemode)
 {
 	return 1U << ((scalemode >> 1) & 3U);
@@ -146,6 +153,38 @@ static inline uint32_t video_formatter_scale_control(uint32_t scalemode)
 	 * doubling. Preserve the historical behavior where an x2 vertical
 	 * mode also doubled the RTG hardware sprite; x4 videocap does not. */
 	return (scalemode & 7U) | ((scalemode & 2U) << 2);
+}
+
+static inline struct video_videocap_runtime_request
+video_videocap_sanitize_runtime_mode(uint32_t mode,
+		uint32_t viewport_layout_capable, uint32_t fullrate_capable,
+		uint32_t source_sync_capable)
+{
+	struct video_videocap_runtime_request request = {
+		0U, ZZVMODE_800x600, ZZ_VIDEOCAP_OUTPUT_FULL_60
+	};
+
+	if (mode == ZZVMODE_CENTERED_1080P_MATCH) {
+		/* Virtual id: always resolve to a safe physical base mode. */
+		request.valid = 1U;
+		request.output_profile = video_videocap_effective_output_profile(
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH,
+			viewport_layout_capable, fullrate_capable,
+			source_sync_capable);
+	} else if (mode == ZZVMODE_1920x1080_60 || mode == ZZVMODE_1920x1080_50) {
+		request.valid = 1U;
+		if (video_videocap_centered_eligible(viewport_layout_capable,
+		                                        fullrate_capable)) {
+			request.output_profile = mode == ZZVMODE_1920x1080_50 ?
+				ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50 :
+				ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60;
+		}
+	} else if (mode == ZZVMODE_800x600 || mode == ZZVMODE_720x576) {
+		request.valid = 1U;
+		request.base_mode = (uint8_t)mode;
+	}
+
+	return request;
 }
 
 static inline uint32_t video_videocap_full_width(uint32_t requested,

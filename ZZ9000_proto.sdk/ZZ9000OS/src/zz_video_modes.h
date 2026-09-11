@@ -27,6 +27,14 @@ enum zz_video_modes {
 	ZZVMODE_NUM,
 };
 
+/* Virtual runtime id for the experimental source-locked centered profile,
+ * written to REG_ZZ_VCAP_MODE by drivers that saw capability
+ * ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC. It deliberately lives far above the enum
+ * so it can NEVER index preset_video_modes: the ISR maps it to the
+ * detected standard's existing physical preset (PAL -> ZZVMODE_1920x1080_50,
+ * NTSC -> ZZVMODE_1920x1080_60) at mode-init time. */
+#define ZZVMODE_CENTERED_1080P_MATCH 0x100
+
 struct zz_video_mode {
 	int hres, vres;
 	int hstart, hend, hmax;
