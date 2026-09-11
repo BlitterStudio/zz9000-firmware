@@ -488,6 +488,12 @@ function [9:0] grid_rgb_delta;
 endfunction
 wire [9:0] grid_intra_delta = grid_rgb_delta(rgbin, rgb_prev);
 wire [9:0] grid_cross_delta = grid_rgb_delta(rgbin, grid_prev_second);
+/* Margin comparison in a widened domain: both sums saturate
+ * at 27 bits on max-activity frames, where a 27-bit add would
+ * wrap and misread equal metrics as misaligned (PR review).
+ */
+wire [29:0] grid_intra_w = {3'b0, grid_intra_sum};
+wire [29:0] grid_margin_w = {6'd0, grid_intra_sum[26:3]};
 /* SuperHires changes within a 28 MHz sample pair; hires and lores do not.
  * Keep classification independent of whether that pair is stored separately
  * or filtered into one output pixel. */
@@ -678,7 +684,7 @@ always @(posedge cap_clk) begin
          * patterns) from oscillating, and flat content accumulates too
          * little difference to clear it. */
         if (grid_seen &&
-                (grid_cross_sum + (grid_intra_sum >> 3)) < grid_intra_sum)
+                ({3'b0, grid_cross_sum} + grid_margin_w) < grid_intra_w)
             pair_parity <= ~pair_parity;
         grid_intra_sum <= 0;
         grid_cross_sum <= 0;
