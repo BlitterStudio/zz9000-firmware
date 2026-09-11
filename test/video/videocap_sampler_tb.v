@@ -25,6 +25,21 @@ integer CROPH;
 integer CROPV;
 integer LINES;
 integer LINECLKS;
+integer JITTER;
+integer GRIDSHIFT;
+
+/* Issue #96 reproduction: the A4000 video-slot capture runs at 4x E7M,
+ * and the filtered path pairs 28 MHz samples starting from the decoded
+ * HSYNC edge.  Sub-clock movement of that decode (sync conditioning,
+ * temperature drift) shifts the pair phase by one sample: pairs then
+ * straddle adjacent hires pixels, so every vertical edge averages two
+ * pixels (blur) and a per-line alternating decode lands every other row
+ * half a pixel off (zig-zag).  Denise content is raster-locked, so the
+ * stimulus keeps pixel content on the nominal raster grid while the
+ * HSYNC position jitters by one capture clock per line. */
+integer jitter_line_count = 0;
+integer jitter_accum = 0;
+reg [255:0] jitter_name;
 
 /*
  * The sampler recognizes HSYNC through a six-stage synchronizer and registers
@@ -35,6 +50,7 @@ integer LINECLKS;
 localparam integer CAPTURE_INPUT_OFFSET = 4;
 
 reg cap_clk = 0;
+reg grid_ref = 0;
 reg axi_clk = 0;
 reg vsync = 1;
 reg hsync = 1;
@@ -175,6 +191,7 @@ videocap_sampler #(
     .PROBE_SOURCE_X(32)
 ) dut (
     .cap_clk(cap_clk),
+    .grid_ref(grid_ref),
     .vcap_vsync(vsync),
     .vcap_hsync(hsync),
     .vcap_r(r),
@@ -224,6 +241,7 @@ videocap_sampler #(
     .FULLRATE(0)
 ) legacy_dut (
     .cap_clk(cap_clk),
+    .grid_ref(1'b0),
     .vcap_vsync(vsync),
     .vcap_hsync(hsync),
     .vcap_r(r),
@@ -378,12 +396,29 @@ endtask
 task legacy_buf_read;
     input [11:0] addr;
     output [31:0] data;
+
     begin
         @(posedge axi_clk);
         buf_raddr <= addr;
         @(posedge axi_clk);
         @(posedge axi_clk);
         data = legacy_buf_rdata;
+    end
+endtask
+
+/* Bars purity for GRIDSHIFT runs: after one frame of auto-phase
+ * adaptation the stored words must be pure bar pixels again. */
+task jitter_check_bars;
+    input integer k;
+    input integer bank;
+    input [31:0] got_word;
+    begin
+        checks = checks + 1;
+        if (got_word[7:0] !== 8'h00 && got_word[7:0] !== 8'hff) begin
+            errors = errors + 1;
+            $display("MISMATCH grid_adapt bank=%0d k=%0d got_b=%02x",
+                     bank, k, got_word[7:0]);
+        end
     end
 endtask
 
@@ -483,22 +518,40 @@ task drive_line;
     input integer pattern_seed;
     integer i;
     integer px;
+    integer line_skew;
     reg line_toggle_before;
     begin
         line_toggle_before = cap_line_toggle;
         monitor_armed = 1;
+        /* Alternating one-clock HSYNC displacement: the decode lands on
+         * either side of a capture-clock edge from line to line while
+         * the pixel content stays on the nominal raster (jitter_accum
+         * shifts content relative to the decode, not the raster). */
+        if (JITTER != 0) begin
+            line_skew = jitter_line_count[0] ? -1 : 1;
+            jitter_line_count = jitter_line_count + 1;
+            jitter_accum = jitter_accum + line_skew;
+        end else begin
+            line_skew = 0;
+        end
         hsync = 0;
-        for (i = 0; i < 67; i = i + 1)
+        for (i = 0; i < 67 + line_skew; i = i + 1)
             @(posedge cap_clk);
         hsync = 1;
-        for (i = 0; i < LINECLKS - 67; i = i + 1) begin
+        for (i = 0; i < LINECLKS - 67 - line_skew; i = i + 1) begin
             /* Toggle aggressively after the 1280-sample capture window.
              * Blanking activity must not make hires or lores look like
              * SuperHires content. */
-            if (i >= CROPH + 1300)
+            if (GRIDSHIFT != 0)
+                /* Odd-period bars: the auto-phase measurement needs
+                 * content whose even- and odd-offset edge sums differ.
+                 */
+                px = (((i + jitter_accum) / PIXSPAN) % 3 == 0) ? 8'hff : 8'h00;
+            else if (i >= CROPH + 1300)
                 px = (i[0] != 0) ? 8'hff : 8'h00;
             else
-                px = (i / PIXSPAN) + pattern_seed;
+                px = ((i + jitter_accum) / PIXSPAN) + pattern_seed;
+            grid_ref = (((i + jitter_accum + GRIDSHIFT) % 4) == 0);
             r = px[7:0];
             g = ~px[7:0];
             b = {px[3:0], px[7:4]};
@@ -699,6 +752,39 @@ integer pix_even;
 integer pix_odd;
 integer line_seed;
 integer legacy_line_seed;
+
+/* Pixel-purity oracle for the #96 decode-jitter stimulus.  The blue
+ * channel swaps nibbles per pixel, so the average of two adjacent
+ * pixels sits strictly between their pure values and cannot equal any
+ * pure byte in the +/-2 pixel window a one-sample window shift can
+ * reach. */
+task jitter_check_pure;
+    input integer k;
+    input integer bank;
+    input [31:0] got_word;
+    integer s0;
+    integer p0;
+    reg [7:0] bc0;
+    reg [7:0] bc1;
+    reg [7:0] bc2;
+    reg [7:0] bc3;
+    begin
+        s0 = CROPH + 2 * k + CAPTURE_INPUT_OFFSET;
+        p0 = ((s0 + jitter_accum) / PIXSPAN) + line_seed;
+        bc0 = {p0[3:0] - 4'd1, p0[7:4]};
+        bc1 = {p0[3:0], p0[7:4]};
+        bc2 = {p0[3:0] + 4'd1, p0[7:4]};
+        bc3 = {p0[3:0] + 4'd2, p0[7:4]};
+        checks = checks + 1;
+        if (got_word[7:0] !== bc0 && got_word[7:0] !== bc1 &&
+                got_word[7:0] !== bc2 && got_word[7:0] !== bc3) begin
+            errors = errors + 1;
+            $display("MISMATCH jitter_pure bank=%0d k=%0d got_b=%02x want near %02x",
+                     bank, k, got_word[7:0], bc1);
+        end
+    end
+endtask
+
 reg [31:0] legacy_got0;
 integer k;
 reg [31:0] got;
@@ -725,6 +811,8 @@ initial begin
     CROPV = DEFAULT_CROPV;
     LINES = 40;
     LINECLKS = 1816;
+    GRIDSHIFT = 0;
+    JITTER = 0;
     first_full_width_ready_x = -1;
     full_width_ready_checked = 0;
     full_width_completed_lines = 0;
@@ -737,6 +825,8 @@ initial begin
     if ($value$plusargs("CROPV=%d", CROPV)) ;
     if ($value$plusargs("LINES=%d", LINES)) ;
     if ($value$plusargs("LINECLKS=%d", LINECLKS)) ;
+    if ($value$plusargs("JITTER=%d", JITTER)) ;
+    if ($value$plusargs("GRIDSHIFT=%d", GRIDSHIFT)) ;
 
     repeat (10) @(posedge cap_clk);
     probe_arm_toggle = 1;
@@ -784,7 +874,10 @@ initial begin
              control_request_raw);
     drive_field(0, 1);
 
-    check_eq("cap_shres", cap_shres, (PIXSPAN == 1));
+    /* GRIDSHIFT runs re-phase over the first frame; cap_shres settles
+     * one frame after the odd-period bars are pure again. */
+    if (GRIDSHIFT == 0)
+        check_eq("cap_shres", cap_shres, (PIXSPAN == 1));
     check_eq("legacy_cap_shres", legacy_cap_shres, 0);
 
     if (FULLWIDTH) begin
@@ -833,6 +926,7 @@ initial begin
     check_eq("legacy_token_bank_completed",
              {31'b0, legacy_cap_token_bank},
              {31'b0, ~legacy_cap_write_bank});
+    if (JITTER == 0 && GRIDSHIFT == 0) begin
     /* The banked line buffer holds the two most recent lines, one per
      * bank; the final driven line lives in whichever bank its parity
      * selected.  Its cropped data must be readable through one of them. */
@@ -853,16 +947,21 @@ initial begin
         $display("MISMATCH legacy_crop b0=%06x b1=%06x want=%06x",
                  legacy_got0[23:0], got[23:0], {want_r, want_g, want_b});
     end
+    end
     legacy_buf_rbank = 1'b0;
 
     /* The final active raster line remains in its completed bank.  Since
-     * the 800x600 filtered fix every capture path banks, so the filtered
+     * the 800x600 filtered fix every capture path banks, the filtered
      * read also selects cap_write_bank. */
+    if (JITTER == 0 && GRIDSHIFT == 0) begin
     buf_rbank = cap_write_bank;
     for (k = (FULLWIDTH ? 0 : 4);
             k < (FULLWIDTH ? 1280 : 32); k = k + 1) begin
         buf_read(k[11:0], got);
-        sample_idx = CROPH + k * (FULLWIDTH ? 1 : 2)
+        /* Grid quantization: an odd crop origin delays the first
+         * stored pair to the next absolute pair boundary. */
+        sample_idx = (FULLWIDTH ? CROPH : ((CROPH + 1) & ~1)) +
+                     k * (FULLWIDTH ? 1 : 2)
                      + CAPTURE_INPUT_OFFSET;
         pix_even = sample_idx / PIXSPAN + line_seed;
         pix_odd = (sample_idx + 1) / PIXSPAN + line_seed;
@@ -886,6 +985,25 @@ initial begin
             want_b = ({1'b0, even_b} + {1'b0, odd_b} + 9'd1) >> 1;
         end
         check_eq("entry", got[23:0], {want_r, want_g, want_b});
+    end
+    end else if (!FULLWIDTH && SAMPLEMODE == 0 &&
+            (JITTER != 0 || GRIDSHIFT != 0)) begin
+        /* Pixel-purity reproduction (#96): the two banks hold the two
+         * most recent lines, and with alternating decode jitter exactly
+         * one of them pairs across pixel boundaries.  A pixel-pure row
+         * stores one raster pixel per word; a straddling row stores the
+         * average of two adjacent pixels, which the blue nibble-swap
+         * pattern makes distinguishable from either pure value. */
+        for (k = 8; k < 24; k = k + 1) begin
+            buf_rbank = 1'b0;
+            buf_read(k[11:0], got);
+            if (GRIDSHIFT != 0) jitter_check_bars(k, 0, got);
+            else jitter_check_pure(k, 0, got);
+            buf_rbank = 1'b1;
+            buf_read(k[11:0], got);
+            if (GRIDSHIFT != 0) jitter_check_bars(k, 1, got);
+            else jitter_check_pure(k, 1, got);
+        end
     end
 
     /* A4000/A3000 video-slot capture runs at the full 28.37 MHz rate. Put

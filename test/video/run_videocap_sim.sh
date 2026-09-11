@@ -36,35 +36,36 @@ else
         || { cat xelab.log; exit 1; }
 fi
 
-# PIXSPAN SAMPLEMODE FULLWIDTH CROPH CROPV
+# PIXSPAN SAMPLEMODE FULLWIDTH CROPH CROPV JITTER
 CONFIGS="
-4 0 0 188 26
-2 0 0 188 26
-2 0 0 189 26
-2 0 0 288 26
-2 0 0 188 40
-1 0 0 188 26
-4 0 1 188 26
-2 0 1 188 26
-2 0 1 189 26
-1 0 1 188 26
-1 0 1 288 40
-1 1 0 188 26
-1 2 0 188 26
-2 1 0 188 26
-2 2 0 188 26
+4 0 0 188 26 0 0
+2 0 0 188 26 0 0
+2 0 0 189 26 0 0
+2 0 0 288 26 0 0
+2 0 0 188 40 0 0
+1 0 0 188 26 0 0
+4 0 1 188 26 0 0
+2 0 1 188 26 0 0
+2 0 1 189 26 0 0
+1 0 1 188 26 0 0
+1 0 1 288 40 0 0
+1 1 0 188 26 0 0
+1 2 0 188 26 0 0
+2 1 0 188 26 0 0
+2 2 0 188 26 0 0
+2 0 0 188 26 1 0
 "
 
 rm -f run_*.log
 EXPECTED=$(echo "$CONFIGS" | grep -c '[0-9]')
-echo "$CONFIGS" | while read -r PS SM FW CH CV; do
+echo "$CONFIGS" | while read -r PS SM FW CH CV JIT GS; do
     [ -z "$PS" ] && continue
-    LOG="run_${PS}_${SM}_${FW}_${CH}_${CV}.log"
+    LOG="run_${PS}_${SM}_${FW}_${CH}_${CV}_${JIT}_${GS}.log"
     if [ "$ON_WINDOWS" = 1 ]; then
-        cmd //c "$(cygpath -w "$VIVADO_BIN/xsim.bat") tb --runall --testplusarg \"PIXSPAN=$PS\" --testplusarg \"SAMPLEMODE=$SM\" --testplusarg \"FULLWIDTH=$FW\" --testplusarg \"CROPH=$CH\" --testplusarg \"CROPV=$CV\"" \
+        cmd //c "$(cygpath -w "$VIVADO_BIN/xsim.bat") tb --runall --testplusarg \"PIXSPAN=$PS\" --testplusarg \"SAMPLEMODE=$SM\" --testplusarg \"FULLWIDTH=$FW\" --testplusarg \"CROPH=$CH\" --testplusarg \"CROPV=$CV\" --testplusarg \"JITTER=$JIT\" --testplusarg \"GRIDSHIFT=$GS\"" \
             < /dev/null > "$LOG" 2>&1 || true
     else
-        "$VIVADO_BIN/xsim" tb --runall --testplusarg "PIXSPAN=$PS" --testplusarg "SAMPLEMODE=$SM" --testplusarg "FULLWIDTH=$FW" --testplusarg "CROPH=$CH" --testplusarg "CROPV=$CV" \
+        "$VIVADO_BIN/xsim" tb --runall --testplusarg "PIXSPAN=$PS" --testplusarg "SAMPLEMODE=$SM" --testplusarg "FULLWIDTH=$FW" --testplusarg "CROPH=$CH" --testplusarg "CROPV=$CV" --testplusarg "JITTER=$JIT" --testplusarg "GRIDSHIFT=$GS" \
             < /dev/null > "$LOG" 2>&1 || true
     fi
     grep -E "RESULT|MISMATCH" "$LOG" | head -8 || true

@@ -249,6 +249,7 @@ module videocap_sampler #(
     input  wire [7:0]  vcap_r,
     input  wire [7:0]  vcap_g,
     input  wire [7:0]  vcap_b,
+    input  wire        grid_ref,
 
     input  wire        ctl_send,
     input  wire [26:0] ctl_payload,
@@ -446,9 +447,38 @@ wire [11:0] crop_h_local = (FULLRATE != 0) ?
 wire [11:0] probe_precrop_start = crop_h_local - 12'd64;
 
 reg half = 0;
+
 reg [23:0] rgb_prev = 0;
 wire filter_pairs = (FULLRATE != 0) && !ctl_full_width_cap;
 
+/* E7M-locked sample grid (#96).  The capture clock is 4x the E7M
+ * reference, so a 4-phase counter anchored to grid_ref marks the two
+ * hires-pixel halves of every E7M cycle absolutely - independent of the
+ * decoded HSYNC edge, whose sub-clock phase is machine-dependent and
+ * temperature-marginal.  Pairing filtered samples on this grid keeps
+ * decimation pixel-pure and immune to per-line decode jitter. */
+reg grid_ref_meta = 0;
+reg grid_ref_sync = 0;
+reg grid_ref_prev = 0;
+reg [1:0] cap_grid = 0;
+reg grid_seen = 0;
+/* Which grid phase starts a stored pair.  The detected reference edge
+ * keeps a fixed but implementation-set phase against real pixel
+ * boundaries, so a per-frame content measurement selects between the
+ * two pairings: on hires content the aligned pairing shows far smaller
+ * intra-pair than cross-pair differences. */
+reg pair_parity = 0;
+reg [26:0] grid_intra_sum = 0;
+reg [26:0] grid_cross_sum = 0;
+reg [7:0] grid_prev_second = 0;
+wire grid_pair_first = (cap_grid[0] == pair_parity);
+
+wire [7:0] grid_intra_delta = (rgbin[23:16] > rgb_prev[23:16]) ?
+    (rgbin[23:16] - rgb_prev[23:16]) :
+    (rgb_prev[23:16] - rgbin[23:16]);
+wire [7:0] grid_cross_delta = (rgbin[23:16] > grid_prev_second) ?
+    (rgbin[23:16] - grid_prev_second) :
+    (grid_prev_second - rgbin[23:16]);
 /* SuperHires changes within a 28 MHz sample pair; hires and lores do not.
  * Keep classification independent of whether that pair is stored separately
  * or filtered into one output pixel. */
@@ -576,6 +606,16 @@ always @(posedge cap_clk) begin
         probe_precrop_publish_pending <= 0;
     end
 
+    grid_ref_meta <= grid_ref;
+    grid_ref_sync <= grid_ref_meta;
+    grid_ref_prev <= grid_ref_sync;
+    if (grid_ref_sync && !grid_ref_prev) begin
+        cap_grid <= 0;
+        grid_seen <= 1;
+    end else if (grid_seen) begin
+        cap_grid <= cap_grid + 2'd1;
+    end
+
     vs <= {vs[5:0], vcap_vsync};
     hs <= {hs[5:0], vcap_hsync};
 
@@ -621,6 +661,18 @@ always @(posedge cap_clk) begin
 
         cap_shres <= (diff_count > 16'd64);
         diff_count <= 0;
+
+        /* Auto-phase (#96): when this frame's cross-pair difference is
+         * clearly smaller than the intra-pair one, the pairing sits one
+         * sample off the pixel grid; realign.  The margin keeps content
+         * where both pairings measure alike (SuperHires, symmetric
+         * patterns) from oscillating, and flat content accumulates too
+         * little difference to clear it. */
+        if (grid_seen &&
+                (grid_cross_sum + (grid_intra_sum >> 3)) < grid_intra_sum)
+            pair_parity <= ~pair_parity;
+        grid_intra_sum <= 0;
+        grid_cross_sum <= 0;
 
         if (raw_y != 0)
             cap_ymax <= raw_y;
@@ -684,13 +736,14 @@ always @(posedge cap_clk) begin
                 probe_precrop_publish_pending <= 1;
         end
 
-        /* Keep the SHR pair phase tied to line sync, not to the runtime crop
-         * origin.  An odd crop value must not re-pair adjacent hires pixels
-         * and falsely classify them as SuperHires.  The first pair crossing
-         * the crop boundary is ignored because one sample lies outside the
-         * captured window. */
+        /* Keep the SHR pair phase tied to the absolute grid when the E7M
+         * reference is present, and to line sync otherwise: an odd crop
+         * value or a one-sample decoded-edge displacement must not
+         * re-pair adjacent hires pixels and falsely classify them as
+         * SuperHires.  The first pair crossing the crop boundary is
+         * ignored because one sample lies outside the captured window. */
         if (FULLRATE != 0) begin
-            if (!shres_half) begin
+            if (grid_seen ? grid_pair_first : !shres_half) begin
                 shres_prev <= rgbin;
                 shres_half <= 1;
             end else begin
@@ -706,11 +759,30 @@ always @(posedge cap_clk) begin
             half <= 0;
         end else begin
             if (filter_pairs) begin
-                if (!half) begin
+                /* Grid-locked pairing (#96): with the E7M reference
+                 * present, a stored pair always begins on the absolute
+                 * pair phase, so a decoded-edge displacement of one
+                 * sample only delays the first stored pair to the same
+                 * grid position it would have had anyway.  Without the
+                 * reference (Denise adapters) the legacy edge-anchored
+                 * half-toggle stands. */
+                if (grid_seen ? grid_pair_first : !half) begin
                     rgb_prev <= rgbin;
                     half <= 1;
-                end else begin
+                    if (grid_seen &&
+                            grid_cross_sum <=
+                                27'h7ffffff - {19'd0, grid_cross_delta})
+                        grid_cross_sum <=
+                            grid_cross_sum + {19'd0, grid_cross_delta};
+                end else if (half) begin
                     half <= 0;
+                    if (grid_seen) begin
+                        grid_prev_second <= rgbin[23:16];
+                        if (grid_intra_sum <=
+                                27'h7ffffff - {19'd0, grid_intra_delta})
+                            grid_intra_sum <=
+                                grid_intra_sum + {19'd0, grid_intra_delta};
+                    end
                     if (capture_head_valid)
                         linebuf[capture_buf_addr] <= {8'b0, filtered_sample};
                     else
