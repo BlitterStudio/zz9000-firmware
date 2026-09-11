@@ -60,6 +60,8 @@ wire cap_ntsc;
 wire cap_x_done;
 wire cap_shres;
 wire cap_line_toggle;
+wire cap_frame_anchor_toggle;
+wire legacy_frame_anchor_toggle;
 wire cap_write_bank;
 wire [9:0] cap_token_y;
 wire cap_token_bank;
@@ -191,6 +193,7 @@ videocap_sampler #(
     .cap_x_done(cap_x_done),
     .cap_shres(cap_shres),
     .cap_line_toggle(cap_line_toggle),
+    .cap_frame_anchor_toggle(cap_frame_anchor_toggle),
     .cap_write_bank(cap_write_bank),
     .cap_token_y(cap_token_y),
     .cap_token_bank(cap_token_bank),
@@ -239,6 +242,7 @@ videocap_sampler #(
     .cap_x_done(),
     .cap_shres(legacy_cap_shres),
     .cap_line_toggle(legacy_cap_line_toggle),
+    .cap_frame_anchor_toggle(legacy_frame_anchor_toggle),
     .cap_write_bank(legacy_cap_write_bank),
     .cap_token_y(legacy_cap_token_y),
     .cap_token_bank(legacy_cap_token_bank),
@@ -278,6 +282,20 @@ task check_eq;
         end
     end
 endtask
+
+integer frame_anchor_count = 0;
+reg frame_anchor_seen = 0;
+reg line_toggle_at_previous_sample = 0;
+always @(negedge cap_clk) begin
+    if (cap_frame_anchor_toggle != frame_anchor_seen) begin
+        frame_anchor_seen = cap_frame_anchor_toggle;
+        frame_anchor_count = frame_anchor_count + 1;
+        check_eq("anchor_first_cropped_row", cap_token_y >> 1, 0);
+        check_eq("anchor_completed_row", cap_line_toggle !=
+                 line_toggle_at_previous_sample, 1);
+    end
+    line_toggle_at_previous_sample = cap_line_toggle;
+end
 
 task pulse_control_request;
     input [31:0] raw;
@@ -421,15 +439,23 @@ reg [9:0] last_completed_y;
 wire [10:0] full_width_field_stride = cap_interlace ? 11'd2 : 11'd1;
 
 /* 800x600 filtered fix: every completed-line token must carry the bank
- * opposite to the previous token's.  Filtered capture emits one token
- * per line_sync with no validity gate, so strict alternation holds per
- * toggle edge - even on vsync serration lines that emit two tokens.
- * Armed at the first driven line to skip power-up initialization edges;
- * full-width tokens are allowed to skip invalid lines and stay checked
- * by the per-line full-width assertions instead. */
+ * opposite to the previous token's within the same field.  Filtered
+ * capture emits one token per line_sync with no validity gate, so strict
+ * alternation holds per toggle edge - even on vsync serration lines that
+ * emit two tokens.  The tracking restarts at each frame boundary: the
+ * number of line_syncs inside a vertical blank is a property of the
+ * source's field phase, so the first visible row of a field may land in
+ * the same bank as the previous field's last visible row - a new field
+ * legitimately rewrites that row from its top.  Armed at the first
+ * driven line to skip power-up initialization edges; full-width tokens
+ * are allowed to skip invalid lines and stay checked by the per-line
+ * full-width assertions instead. */
 reg monitor_prev_bank_valid = 0;
 reg monitor_prev_bank = 0;
 reg monitor_armed = 0;
+always @(posedge cap_clk)
+    if (monitor_armed && dut.frame_sync)
+        monitor_prev_bank_valid = 0;
 always @(cap_line_toggle) begin
     if (monitor_armed && !FULLWIDTH &&
             monitor_prev_bank_valid &&
@@ -542,7 +568,9 @@ task drive_field;
     input integer check_vertical;
     integer ln;
     reg completed_bank_before_line;
+    integer anchors_before_field;
     begin
+        anchors_before_field = frame_anchor_count;
         vsync = 0;
         drive_line(seed);
         drive_line(seed);
@@ -575,6 +603,10 @@ task drive_field;
         if (check_vertical && LINES >= CROPV)
             check_eq("crop_v_extent", cap_y,
                      (LINES - CROPV + 1) * (cap_interlace ? 2 : 1));
+        check_eq("one_anchor_per_field",
+                 frame_anchor_count - anchors_before_field,
+                 FULLWIDTH && LINES >= CROPV ? 1 : 0);
+        check_eq("filtered_only_has_no_anchor", legacy_frame_anchor_toggle, 0);
     end
 endtask
 
@@ -588,7 +620,9 @@ task drive_field_with_vsync_phase;
     integer i;
     integer px;
     integer ln;
+    integer anchors_before_field;
     begin
+        anchors_before_field = frame_anchor_count;
         vsync = 1;
         hsync = 0;
         for (i = 0; i < 67; i = i + 1)
@@ -609,6 +643,54 @@ task drive_field_with_vsync_phase;
         vsync = 1;
         for (ln = 0; ln < LINES; ln = ln + 1)
             drive_line(seed + ln);
+        /* The phased VSYNC lands after line A's line_sync, so raw_y
+         * restarts one line later than in drive_field, and the
+         * interlaced parity sentinel costs another: an anchor needs
+         * LINES >= CROPV + 2. A field whose crop consumed every row
+         * must publish no anchor at all. */
+        check_eq("phased_field_anchor",
+                 frame_anchor_count - anchors_before_field,
+                 FULLWIDTH && LINES >= CROPV + 2 ? 1 : 0);
+    end
+endtask
+
+/* Minimal two-line-VSYNC field for the width-only regression.  Deliberately
+ * avoids drive_line's capture-config assertions: the engine width here
+ * differs from the FULLWIDTH plusarg that keys them. */
+task drive_plain_field;
+    input integer seed;
+    integer i;
+    integer ln;
+    integer px;
+    begin
+        vsync = 0;
+        for (ln = 0; ln < 2; ln = ln + 1) begin
+            hsync = 0;
+            for (i = 0; i < 67; i = i + 1)
+                @(posedge cap_clk);
+            hsync = 1;
+            for (i = 0; i < LINECLKS - 67; i = i + 1) begin
+                px = (i / PIXSPAN) + seed + ln;
+                r = px[7:0];
+                g = ~px[7:0];
+                b = {px[3:0], px[7:4]};
+                @(posedge cap_clk);
+            end
+        end
+        vsync = 1;
+        for (ln = 0; ln < LINES; ln = ln + 1) begin
+            hsync = 0;
+            for (i = 0; i < 67; i = i + 1)
+                @(posedge cap_clk);
+            hsync = 1;
+            for (i = 0; i < LINECLKS - 67; i = i + 1) begin
+                px = (i / PIXSPAN) + seed + 2 + ln;
+                r = px[7:0];
+                g = ~px[7:0];
+                b = {px[3:0], px[7:4]};
+                @(posedge cap_clk);
+            end
+        end
     end
 endtask
 
@@ -932,6 +1014,111 @@ initial begin
     wait_control_complete;
     check_eq("sequence_wrap_applied", control_applied_sequence, 0);
     check_eq("sequence_wrap_idle", control_busy, 0);
+
+
+
+    /* ARM-private width-only updates: a runtime-selected output profile
+     * must be able to flip only the sampler's full-width bit through the
+     * acknowledged engine - the shape a filtered/default boot leaves
+     * behind when MATCH is selected later - while the live sample/crop
+     * configuration survives and anchors flow once committed. */
+    begin : width_only_regression
+        integer anchors_before_width;
+
+        /* Manual-crop base state as left by the commit above (sample 0,
+         * manual 188/26, width 0). */
+        anchors_before_width = frame_anchor_count;
+        drive_plain_field(0);
+        check_eq("width_only_base_no_anchor",
+                 frame_anchor_count - anchors_before_width, 0);
+
+        /* Masked fields of the width-only word (invalid sample mode,
+         * junk manual crops) must be ignored in favor of the applied
+         * configuration. */
+        raw_before = control_applied_raw;
+        pulse_control_request(32'h80000000 | (1 << 2) | 3 | (9 << 4),
+                              1'b1);
+        wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
+        check_eq("width_only_payload_preserved", control_payload,
+                 (26 << 15) | (188 << 3) | (1 << 2));
+        force_control_frame_boundary;
+        wait_control_complete;
+        check_eq("width_only_set_raw", control_applied_raw,
+                 raw_before | (1 << 2));
+        check_eq("width_only_set_effective", control_applied_effective,
+                 (26 << 16) | 188);
+        check_eq("width_only_set_legacy",
+                 legacy_control_applied_effective, (26 << 16) | 188);
+        check_eq("width_only_set_valid", control_applied_valid, 1);
+        check_eq("width_only_set_rejected", control_rejected, 0);
+
+        /* The full-width anchor starts flowing from the width-only
+         * commit, without any full-word reconfiguration. */
+        drive_plain_field(0);
+        check_eq("width_only_anchor_emitted",
+                 frame_anchor_count - anchors_before_width, 1);
+
+        /* Clearing the bit returns to filtered capture with the
+         * preserved configuration intact. */
+        pulse_control_request(32'h80000000, 1'b1);
+        wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
+        force_control_frame_boundary;
+        wait_control_complete;
+        check_eq("width_only_clear_raw", control_applied_raw, raw_before);
+        check_eq("width_only_clear_effective", control_applied_effective,
+                 (26 << 16) | 188);
+
+        drive_plain_field(0);
+        check_eq("width_only_cleared_no_anchor",
+                 frame_anchor_count - anchors_before_width, 1);
+
+        /* Auto-crop base (the absent-CFG boot shape): the width flip
+         * re-derives the automatic crop constants per width while the
+         * auto flags and sample mode survive. */
+        focused_raw = (1 << 28) | (1 << 29) | 2;
+        pulse_control_request(focused_raw, 1'b1);
+        wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
+        force_control_frame_boundary;
+        wait_control_complete;
+        check_eq("width_only_auto_base", control_applied_effective,
+                 (26 << 16) | 188);
+
+        pulse_control_request(32'h80000000 | (1 << 2), 1'b1);
+        wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
+        check_eq("width_only_auto_payload", control_payload,
+                 (40 << 15) | (279 << 3) | (1 << 2) | 2);
+        force_control_frame_boundary;
+        wait_control_complete;
+        check_eq("width_only_auto_set_raw", control_applied_raw,
+                 focused_raw | (1 << 2));
+        check_eq("width_only_auto_fullrate", control_applied_effective,
+                 (40 << 16) | 279);
+        check_eq("width_only_auto_compat",
+                 legacy_control_applied_effective, (26 << 16) | 188);
+    end
+
+    /* A width request colliding with an in-flight ordinary commit is
+     * queued, not rejected: it must merge with whatever configuration
+     * that commit applied, never clobber it. */
+    pulse_control_request((41 << 16) | (290 << 4) | 1, 1'b1);
+    wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
+    pulse_control_request(32'h80000000 | (1 << 2), 1'b1);
+    repeat (4) @(posedge axi_clk);
+    check_eq("width_busy_queued", control_busy, 1);
+    check_eq("width_busy_rejected", control_rejected, 0);
+    sequence_before = control_request_sequence;
+    force_control_frame_boundary;
+    wait (control_request_sequence == sequence_before + 1);
+    wait (dut.ctl_dest_req);
+    force_control_frame_boundary;
+    wait_control_complete;
+    check_eq("width_deferred_raw", control_applied_raw,
+             (41 << 16) | (290 << 4) | 1 | (1 << 2));
+    check_eq("width_deferred_effective", control_applied_effective,
+             (41 << 16) | 290);
+    check_eq("width_deferred_legacy",
+             legacy_control_applied_effective, (41 << 16) | 290);
+    check_eq("width_deferred_rejected", control_rejected, 0);
 
     if (errors == 0)
         $display("RESULT PASS checks=%0d", checks);

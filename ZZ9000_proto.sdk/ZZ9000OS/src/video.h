@@ -34,7 +34,10 @@
  *   [27:16] vertical crop origin, in captured lines
  *   [28]    horizontal crop is automatic
  *   [29]    vertical crop is automatic
- *   [31:30] reserved, zero
+ *   [30]    reserved, zero
+ *   [31]    width-only update (ARM-private): the control engine applies
+ *           [2] on top of the applied sampler configuration and ignores
+ *           every other field; the staged Zorro bank keeps this bit zero
  */
 #define MNTVF_OP_VIDEOCAP 16
 /* A missing or invalid CFG profile must keep the monitor-safe legacy output:
@@ -64,6 +67,18 @@ static inline uint32_t videocap_control_pack(uint32_t sample,
 
 	return data;
 }
+
+/* Width-only control word for MNTVF_OP_VIDEOCAP: flips the sampler's
+ * full-width bit through the acknowledged control engine while it
+ * preserves the live sample/crop configuration. Used when a runtime-
+ * selected output profile needs a capture width the boot-time CFG word
+ * never established (or must drop again when leaving that profile). */
+#define VIDEOCAP_WIDTH_ONLY_FLAG (1U << 31)
+
+static inline uint32_t videocap_control_width_only(uint32_t full_width)
+{
+	return VIDEOCAP_WIDTH_ONLY_FLAG | ((full_width & 1U) << 2);
+}
 // decoded by mntzorro.v (snooped off the op stream, like OP_VIDEOCAP),
 // not by the video formatter: data[1:0] = scanline mode, data[2] = parity
 #define MNTVF_OP_SCANLINES 20
@@ -76,6 +91,7 @@ static inline uint32_t videocap_control_pack(uint32_t sample,
 #define MNTVF_OP_OVERLAY_FRAME 27
 #define MNTVF_OP_VIEWPORT_POS 28
 #define MNTVF_OP_VIEWPORT_SIZE_COMMIT 29
+#define MNTVF_OP_SOURCE_SYNC 30
 
 enum zz_dpms_level {
 	ZZ_DPMS_ON,
@@ -100,6 +116,7 @@ struct ZZ_VIDEO_STATE {
 	int videocap_video_mode_applied;
 	int videocap_output_profile_requested;
 	int videocap_output_profile_applied;
+	int videocap_full_width_applied;
 
 	int interlace_old;
 	int videocap_ntsc_old;

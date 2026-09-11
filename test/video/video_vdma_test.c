@@ -170,6 +170,10 @@ int main(void)
 		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50);
 	if (result)
 		return 100 + result;
+	result = test_centered_output_keeps_native_content_geometry(
+		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH);
+	if (result)
+		return 110 + result;
 
 	return 0;
 }

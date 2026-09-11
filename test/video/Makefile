@@ -10,7 +10,6 @@ TARGETS := \
 	$(BUILD_DIR)/video_scale_test \
 	$(BUILD_DIR)/videocap_control_test \
 	$(BUILD_DIR)/video_mode_pll_test \
-	$(BUILD_DIR)/video_formatter_source_test \
 	$(BUILD_DIR)/overlay_color_test \
 	$(BUILD_DIR)/overlay_schedule_test \
 	$(BUILD_DIR)/overlay_hw_test
@@ -26,7 +25,6 @@ test: $(TARGETS)
 	$(BUILD_DIR)/video_scale_test
 	$(BUILD_DIR)/videocap_control_test
 	$(BUILD_DIR)/video_mode_pll_test
-	$(BUILD_DIR)/video_formatter_source_test
 	$(BUILD_DIR)/overlay_color_test
 	$(BUILD_DIR)/overlay_schedule_test
 	$(BUILD_DIR)/overlay_hw_test
@@ -49,10 +47,6 @@ $(BUILD_DIR)/video_mode_pll_test: video_mode_pll_test.c \
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
 		video_mode_pll_test.c $(SRC_DIR)/zz_video_modes.c -lm
-
-$(BUILD_DIR)/video_formatter_source_test: video_formatter_source_test.c
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ video_formatter_source_test.c
 
 $(BUILD_DIR)/overlay_color_test: overlay_color_test.c $(SRC_DIR)/overlay_color.h
 	@mkdir -p $(BUILD_DIR)

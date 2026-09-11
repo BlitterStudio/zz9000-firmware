@@ -59,14 +59,20 @@ enum zz_config_key {
 };
 
 /* Output identity is deliberately separate from the legacy mode/width/vsync
- * tuple. Both CENTERED profiles project to the full_60 tuple for
+ * tuple. The CENTERED profiles project to the full_60 tuple for
  * compatibility, but must still cause a distinct output-mode application in
  * the video ISR (60 Hz uses mode ZZVMODE_1920x1080_60, 50 Hz uses
- * ZZVMODE_1920x1080_50). */
+ * ZZVMODE_1920x1080_50). The MATCH variant is the experimental source-locked
+ * profile: same canvas/geometry and same legacy tuple, but the output
+ * refresh follows the runtime-detected source standard (PAL selects mode
+ * ZZVMODE_1920x1080_50, NTSC ZZVMODE_1920x1080_60) and requires the
+ * source-sync controller in the loaded bitstream; without it the effective
+ * profile degrades to CENTERED_1080P_60, never to free-running sync. */
 enum zz_videocap_output_profile {
 	ZZ_VIDEOCAP_OUTPUT_FULL_60 = 0,
 	ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60 = 1,
 	ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50 = 2,
+	ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH = 3,
 };
 
 struct zz_config {

@@ -49,35 +49,62 @@ localparam [11:0] CROP_V_FULLRATE = 12'd40;
 reg [1:0] control_state = CONTROL_IDLE;
 reg [31:0] pending_raw =
     {2'b00, 1'b0, 1'b0, 12'd26, 12'd188, 1'b0, 1'b0, 2'd0};
+reg width_pending = 0;
+reg pending_width = 0;
 
-wire request_fullrate_path = (FULLRATE != 0) && request_raw[2];
-wire [11:0] request_crop_h_effective = request_raw[28] ?
+/* Bit 31 marks an ARM-private width-only request: the engine applies bit 2
+ * on top of the applied configuration and masks every other field, so the
+ * sample mode and crop/auto-crop state - including live Zorro-side
+ * calibration commits the ARM never sees - survive a capture-width change
+ * driven by a runtime-selected output profile. A width request that
+ * collides with a busy engine is retained and merged after the in-flight
+ * commit completes, so it can never be lost or overwrite that commit.
+ * Bit 30 stays reserved-zero and keeps rejecting as before. */
+wire request_width_only = request_raw[31] & ~request_raw[30];
+wire width_request = request_event && request_token_valid && request_width_only;
+wire apply_width_only = width_pending || width_request;
+wire requested_width = width_request ? request_raw[2] : pending_width;
+wire [31:0] request_effective_raw = apply_width_only ?
+    {2'b00, applied_raw[29:3], requested_width, applied_raw[1:0]} :
+    request_raw;
+wire request_fullrate_path = (FULLRATE != 0) && request_effective_raw[2];
+wire [11:0] request_crop_h_effective = request_effective_raw[28] ?
     (request_fullrate_path ? CROP_H_FULLRATE : CROP_H_COMPAT) :
-    request_raw[15:4];
-wire [11:0] request_crop_v_effective = request_raw[29] ?
+    request_effective_raw[15:4];
+wire [11:0] request_crop_v_effective = request_effective_raw[29] ?
     (request_fullrate_path ? CROP_V_FULLRATE : CROP_V_COMPAT) :
-    request_raw[27:16];
+    request_effective_raw[27:16];
 wire request_raw_valid =
-    request_raw[31:30] == 2'b00 && request_raw[1:0] <= 2'd2;
+    request_width_only ||
+    (request_raw[31:30] == 2'b00 && request_raw[1:0] <= 2'd2);
 
-assign busy = (control_state != CONTROL_IDLE);
+assign busy = (control_state != CONTROL_IDLE) || width_pending;
 
 always @(posedge source_clk) begin
-    /* An event observed anywhere in the four-phase busy interval is rejected
-     * without replacing the XPM-held payload or changing either sequence. */
-    if (request_event && control_state != CONTROL_IDLE)
+    if (width_request) begin
+        width_pending <= 1'b1;
+        pending_width <= request_raw[2];
+    end
+    /* Ordinary commits keep their busy-rejection contract; the private
+     * width request is retained instead of rejected, and the deferred
+     * width commit reports rejection only when it displaced an ordinary
+     * request that arrived in the same cycle. */
+    if (request_event && !width_request && busy)
         last_commit_rejected <= 1'b1;
 
     case (control_state)
         CONTROL_IDLE: begin
-            if (request_event) begin
-                if (request_token_valid && request_raw_valid) begin
-                    pending_raw <= request_raw;
+            if (width_pending || request_event) begin
+                if (width_pending || (request_token_valid && request_raw_valid)) begin
+                    pending_raw <= request_effective_raw;
                     control_payload <= {request_crop_v_effective,
                                         request_crop_h_effective,
-                                        request_raw[2], request_raw[1:0]};
+                                        request_effective_raw[2],
+                                        request_effective_raw[1:0]};
                     request_sequence <= request_sequence + 1'b1;
-                    last_commit_rejected <= 1'b0;
+                    width_pending <= 1'b0;
+                    last_commit_rejected <=
+                        width_pending && request_event && !width_request;
                     control_state <= CONTROL_LOAD;
                 end else begin
                     last_commit_rejected <= 1'b1;
@@ -237,6 +264,9 @@ module videocap_sampler #(
     output reg         cap_x_done,
     output reg         cap_shres,
     output reg         cap_line_toggle = 0,
+    /* One event per input field/frame, after its first post-crop row.
+     * The formatter synchronizes this capture-clock toggle itself. */
+    output reg         cap_frame_anchor_toggle = 0,
     output wire        cap_write_bank,
     /* Completed-line token payload for every banked path; valid when
      * cap_line_toggle changes. */
@@ -358,6 +388,7 @@ assign cap_write_bank = capture_banking_cap ? capture_bank : 1'b0;
  * the toggle changes one capture clock later so the whole payload is stable
  * on both sides of the line-CDC event. */
 reg cap_token_pending = 0;
+reg cap_frame_anchor_sent = 0;
 
 always @(posedge axi_clk)
     buf_rdata_r <= linebuf[read_buf_addr];
@@ -370,17 +401,22 @@ always @(posedge axi_clk)
  * below the interlace threshold.  Measure the raw line period so a stable
  * VSYNC edge straddling HSYNC still has a small circular distance. */
 localparam [11:0] INTERLACE_PHASE_DELTA = 12'h080;
-wire [11:0] vsync_phase_abs_delta =
-    (phase_x > vsync_phase_x) ?
-    (phase_x - vsync_phase_x) : (vsync_phase_x - phase_x);
-/* Both directions around the measured line must exceed the threshold.
- * This is equivalent to min(abs_delta, period - abs_delta) >= threshold,
- * without putting a second subtract-and-min chain on cap_interlace. */
-wire [12:0] vsync_phase_abs_plus_threshold =
-    {1'b0, vsync_phase_abs_delta} + {1'b0, INTERLACE_PHASE_DELTA};
-wire vsync_phase_changed =
-    (vsync_phase_abs_delta >= INTERLACE_PHASE_DELTA) &&
-    (vsync_phase_abs_plus_threshold <= {1'b0, phase_line_period});
+/* The phase delta and the changed decision are pipelined (two register
+ * stages) so the deep subtract/compare chain never reaches the
+ * cap_interlace destination on the 8.75 ns e7m_shifted budget; the
+ * one- or two-capture-clock lag shifts the measured delta by at most
+ * two counts against a 128-count threshold (real PAL half-lines are
+ * ~908 clocks), so the interlace classification is unaffected. */
+reg [11:0] vsync_phase_abs_delta = 0;
+reg        vsync_phase_changed = 0;
+always @(posedge cap_clk) begin
+    vsync_phase_abs_delta <= (phase_x > vsync_phase_x) ?
+        (phase_x - vsync_phase_x) : (vsync_phase_x - phase_x);
+    vsync_phase_changed <=
+        (vsync_phase_abs_delta >= INTERLACE_PHASE_DELTA) &&
+        (({1'b0, vsync_phase_abs_delta} + {1'b0, INTERLACE_PHASE_DELTA})
+            <= {1'b0, phase_line_period});
+end
 
 wire frame_sync = (CSYNC_VSYNC != 0) ?
     (hs[6:1] == 6'b000111 && hs_pulse_width >= 8'd128) :
@@ -492,6 +528,18 @@ always @(posedge cap_clk) begin
     if (cap_token_pending) begin
         cap_token_pending <= 0;
         cap_line_toggle <= ~cap_line_toggle;
+    end
+
+    /* Anchor to actual captured content, not raw VSYNC: custom vertical
+     * crop must not move the writer through a fixed scanout phase.
+     * DDR writeback follows this token; the scanout phase guard must also
+     * cover that latency and the formatter's early line-zero prefetch. */
+    if (frame_sync)
+        cap_frame_anchor_sent <= 0;
+    else if (cap_token_pending && FULLRATE != 0 &&
+            ctl_full_width_cap && !cap_frame_anchor_sent) begin
+        cap_frame_anchor_toggle <= ~cap_frame_anchor_toggle;
+        cap_frame_anchor_sent <= 1;
     end
 
     if (line_sync) begin

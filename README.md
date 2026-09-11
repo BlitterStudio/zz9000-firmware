@@ -111,7 +111,7 @@ The file controls these boot-time defaults:
 
 | Key | Purpose |
 |---|---|
-| `videocap_profile` | Native output: `full_60`, `full_exact`, `filtered_60` (default), `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60`, `centered_1080p_50` |
+| `videocap_profile` | Native output: `full_60`, `full_exact`, `filtered_60` (default), `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60`, `centered_1080p_50`, `centered_1080p_match` |
 | `videocap_sample` | Native-video capture sampling |
 | `videocap_crop_h` | Horizontal picture position; omit for Automatic |
 | `videocap_crop_v` | Vertical picture position; omit for Automatic |
@@ -313,7 +313,19 @@ which is not a guaranteed `full_60` fallback for hand-edited old stacks.
 
 The existing `full_exact` profile selects fixed PAL/NTSC timing
 approximations (about 49.93/59.95 Hz); it does not phase-lock to the input.
-Centered output currently offers fixed 50 Hz and 60 Hz, not source locking.
+The experimental `centered_1080p_match` profile instead tracks the captured
+source cadence by adjusting vertical blanking. Interlaced input uses a
+bounded field-pair phase correction rather than copying alternating field
+anchor intervals directly into output frame lengths; progressive input
+retains direct anchor tracking. This is not a fixed 50/60 Hz approximation.
+During interlaced acquisition or reacquisition, pixels remain hidden until
+the output reaches a safe capture/read phase. Cadence lock can precede this;
+monitor sync continues while the phase converges.
+Use the matching experimental bitstream, firmware, `ZZ9000.card` and ZZTop.
+The cadence-repair candidate passed native-pixel hardware testing on an
+A4000 with a default-Z3 ZZ9000: all tested interlace modes displayed correctly
+with no reported visual anomalies. This qualifies that tested setup, not
+monitor acceptance or tear-free operation on every machine.
 
 ZZTop's **Scandoubler** window groups dependent **Output**/**Refresh**,
 scanlines and parity. Its **Capture…** button opens sampling, framing and

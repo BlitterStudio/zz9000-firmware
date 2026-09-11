@@ -110,8 +110,9 @@ video_formatter uut (
   .overlay_axis_tkeep(overlay_tkeep),
   .overlay_axis_tlast(overlay_tlast),
   .overlay_axis_tready(overlay_tready),
-  .overlay_axis_tuser(overlay_tuser),
   .overlay_axis_tvalid(overlay_tvalid),
+  .overlay_axis_tuser(overlay_tuser),
+  .capture_anchor_toggle(1'b0),
 `endif
   .m_axis_vid_tlast(tlast),
   .m_axis_vid_tready(tready),

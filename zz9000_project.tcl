@@ -175,6 +175,7 @@ set files [list \
  [file normalize "${origin_dir}/videocap_sampler.v" ]\
  [file normalize "${origin_dir}/videocap_writeback_layout.v" ]\
  [file normalize "${origin_dir}/video_formatter.v" ]\
+ [file normalize "${origin_dir}/video_source_sync.v" ]\
  [file normalize "${origin_dir}/video_overlay_pixel.v" ]\
  [file normalize "${origin_dir}/video_overlay_linebuffer.v" ]\
  [file normalize "${origin_dir}/ZZ9000_proto.srcs/sources_1/new/audio_clock.v" ]\
@@ -266,6 +267,9 @@ if { [get_files videocap_writeback_layout.v] == "" } {
 }
 if { [get_files video_formatter.v] == "" } {
   import_files -quiet -fileset sources_1 video_formatter.v
+}
+if { [get_files video_source_sync.v] == "" } {
+  import_files -quiet -fileset sources_1 video_source_sync.v
 }
 if { [get_files video_overlay_pixel.v] == "" } {
   import_files -quiet -fileset sources_1 video_overlay_pixel.v
@@ -414,6 +418,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   create_bd_pin -dir I -type rst axi_resetn
   create_bd_pin -dir I -from 31 -to 0 control_data
   create_bd_pin -dir I control_interlace
+  create_bd_pin -dir I capture_anchor_toggle
+  create_bd_pin -dir O -from 63 -to 0 source_sync_diagnostic
   create_bd_pin -dir I -from 7 -to 0 control_op
   create_bd_pin -dir O -from 1 -to 0 control_vblank
   # Scanlines boundary pins on the "video" sub-BD
@@ -488,6 +494,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   # Create port connections
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_data [get_bd_pins control_data] [get_bd_pins video_formatter_0/control_data]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_interlace [get_bd_pins control_interlace] [get_bd_pins video_formatter_0/control_interlace]
+  connect_bd_net -net video_capture_anchor_toggle [get_bd_pins capture_anchor_toggle] [get_bd_pins video_formatter_0/capture_anchor_toggle]
+  connect_bd_net -net source_sync_diagnostic [get_bd_pins source_sync_diagnostic] [get_bd_pins video_formatter_0/source_sync_diagnostic]
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_op [get_bd_pins control_op] [get_bd_pins video_formatter_0/control_op]
   # Scanlines: propagate the sub-BD boundary pins down to video_formatter_0
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_scanline_intensity_out [get_bd_pins scanline_intensity] [get_bd_pins video_formatter_0/scanline_intensity]
@@ -1380,6 +1388,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net sdata_0_in_0_1 [get_bd_ports I2SI_D0] [get_bd_pins audio_clock_0/sdata_in]
   connect_bd_net -net v_axi4s_vid_out_0_vid_data [get_bd_pins video/dvi_rgb] [get_bd_pins xlslice_0/Din] [get_bd_pins xlslice_1/Din] [get_bd_pins xlslice_2/Din]
   connect_bd_net -net video_control_vblank [get_bd_pins MNTZorro_v0_1_S00_AXI_0/video_control_vblank_in] [get_bd_pins video/control_vblank]
+  connect_bd_net -net video_capture_anchor_toggle [get_bd_pins MNTZorro_v0_1_S00_AXI_0/video_capture_anchor_toggle] [get_bd_pins video/capture_anchor_toggle]
+  connect_bd_net -net source_sync_diagnostic [get_bd_pins video/source_sync_diagnostic] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/source_sync_diagnostic]
   connect_bd_net -net video_subsystem_VGA_DE [get_bd_ports VGA_DE] [get_bd_pins video/VGA_DE]
   connect_bd_net -net video_subsystem_VGA_HS [get_bd_ports VGA_HS] [get_bd_pins video/VGA_HS]
   connect_bd_net -net video_subsystem_VGA_VS [get_bd_ports VGA_VS] [get_bd_pins video/VGA_VS]
