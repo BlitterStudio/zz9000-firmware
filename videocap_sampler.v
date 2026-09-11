@@ -792,14 +792,20 @@ always @(posedge cap_clk) begin
                 if (grid_seen ? grid_pair_first : !half) begin
                     rgb_prev <= rgbin;
                     half <= 1;
-                    if (grid_seen &&
+                    /* Phase metrics stay inside the captured image
+                     * window and visible rows: activity beyond the
+                     * 512-pair output window (or on cropped rows)
+                     * would dilute the margin (PR review). */
+                    if (grid_seen && cap_x < 11'h200 &&
+                            capture_output_line_valid &&
                             grid_cross_sum <=
                                 27'h7ffffff - {17'd0, grid_cross_delta})
                         grid_cross_sum <=
                             grid_cross_sum + {17'd0, grid_cross_delta};
                 end else if (half) begin
                     half <= 0;
-                    if (grid_seen) begin
+                    if (grid_seen && cap_x < 11'h200 &&
+                            capture_output_line_valid) begin
                         grid_prev_second <= rgbin;
                         grid_prev_second_valid <= 1;
                         if (grid_intra_sum <=

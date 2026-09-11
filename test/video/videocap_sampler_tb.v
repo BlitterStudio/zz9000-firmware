@@ -39,6 +39,7 @@ integer GRIDSHIFT;
  * HSYNC position jitters by one capture clock per line. */
 integer jitter_line_count = 0;
 integer jitter_accum = 0;
+integer jitter_last_skew = 0;
 reg [255:0] jitter_name;
 
 /*
@@ -531,6 +532,7 @@ task drive_line;
             line_skew = jitter_line_count[0] ? -1 : 1;
             jitter_line_count = jitter_line_count + 1;
             jitter_accum = jitter_accum + line_skew;
+            jitter_last_skew = line_skew;
         end else begin
             line_skew = 0;
         end
@@ -548,17 +550,17 @@ task drive_line;
                  */
                 r = 8'h80;
                 g = 8'h80;
-                b = (((i + jitter_accum) / PIXSPAN) % 3 == 0) ? 8'hff : 8'h00;
+                b = (((i + line_skew) / PIXSPAN) % 3 == 0) ? 8'hff : 8'h00;
             end else begin
                 if (i >= CROPH + 1300)
                     px = (i[0] != 0) ? 8'hff : 8'h00;
                 else
-                    px = ((i + jitter_accum) / PIXSPAN) + pattern_seed;
+                    px = ((i + line_skew) / PIXSPAN) + pattern_seed;
                 r = px[7:0];
                 g = ~px[7:0];
                 b = {px[3:0], px[7:4]};
             end
-            grid_ref = (((i + jitter_accum + GRIDSHIFT) % 4) == 0);
+            grid_ref = (((i + line_skew + GRIDSHIFT) % 4) == 0);
             @(posedge cap_clk);
 
             if (FULLWIDTH && !full_width_ready_checked &&
@@ -768,17 +770,23 @@ task jitter_check_pure;
     input [31:0] got_word;
     integer s0;
     integer p0;
+    reg [7:0] p0m1;
+    reg [7:0] p0p1;
+    reg [7:0] p0p2;
     reg [7:0] bc0;
     reg [7:0] bc1;
     reg [7:0] bc2;
     reg [7:0] bc3;
     begin
         s0 = CROPH + 2 * k + CAPTURE_INPUT_OFFSET;
-        p0 = ((s0 + jitter_accum) / PIXSPAN) + line_seed;
-        bc0 = {p0[3:0] - 4'd1, p0[7:4]};
+        p0 = ((s0 + jitter_last_skew) / PIXSPAN) + line_seed;
+        p0m1 = p0 - 1;
+        p0p1 = p0 + 1;
+        p0p2 = p0 + 2;
+        bc0 = {p0m1[3:0], p0m1[7:4]};
         bc1 = {p0[3:0], p0[7:4]};
-        bc2 = {p0[3:0] + 4'd1, p0[7:4]};
-        bc3 = {p0[3:0] + 4'd2, p0[7:4]};
+        bc2 = {p0p1[3:0], p0p1[7:4]};
+        bc3 = {p0p2[3:0], p0p2[7:4]};
         checks = checks + 1;
         if (got_word[7:0] !== bc0 && got_word[7:0] !== bc1 &&
                 got_word[7:0] !== bc2 && got_word[7:0] !== bc3) begin
