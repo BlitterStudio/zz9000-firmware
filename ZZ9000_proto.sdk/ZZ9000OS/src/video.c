@@ -458,18 +458,18 @@ void isr_video(void *dummy) {
 		if (vblank && overlay_scanout_active()) {
 			/* Same geometry discipline as the mode-change trigger:
 			 * a driver pan write that landed inside the capture area
-			 * must not become the scanout stride (any profile) or the
-			 * scanout base (non-centered; centered keeps its
-			 * driver-provided canvas base). */
+			 * must not become the scanout stride or the scanout base
+			 * for any profile. The origin helper already encodes the
+			 * per-standard centered contract — centered profiles keep
+			 * base mode ZZVMODE_800x600, so PAL centered retains the
+			 * tuned origin and NTSC centered takes the capture row
+			 * base instead of the stale PAL constant (#84). */
 			if (vs.framebuffer_pan_offset >= 0x00dff000) {
 				vs.framebuffer_pan_width = 0;
-				if (!video_videocap_output_profile_centered(
-						(uint32_t)videocap_output_profile)) {
-					vs.framebuffer_pan_offset =
-						videocap_scanout_pan_offset(
-							videocap_ntsc,
-							videocap_full_width);
-				}
+				vs.framebuffer_pan_offset =
+					videocap_scanout_pan_offset(
+						videocap_ntsc,
+						videocap_full_width);
 			}
 			init_vdma(vs.vmode_hsize, vs.vmode_vsize, vs.vmode_hdiv,
 					vs.vmode_vdiv,
@@ -568,16 +568,15 @@ void isr_video(void *dummy) {
 					 * into this VDMA restart. The stride width is
 					 * firmware-owned for every profile (the trigger
 					 * clears it unconditionally); the origin is
-					 * re-derived for non-centered profiles only —
-					 * centered keeps its driver-provided base. */
+					 * re-derived for every profile too — the helper
+					 * returns the tuned PAL constant for centered
+					 * (base mode stays ZZVMODE_800x600) and the
+					 * capture row base for NTSC centered (#84). */
 					vs.framebuffer_pan_width = 0;
-					if (!video_videocap_output_profile_centered(
-							(uint32_t)videocap_output_profile)) {
-						vs.framebuffer_pan_offset =
-							videocap_scanout_pan_offset(
-								videocap_ntsc,
-								videocap_full_width);
-					}
+					vs.framebuffer_pan_offset =
+						videocap_scanout_pan_offset(
+							videocap_ntsc,
+							videocap_full_width);
 					videocap_area_clear();
 					video_formatter_write(video_formatter_scale_control(videocap_scalemode),
 					                      MNTVF_OP_SCALE);
