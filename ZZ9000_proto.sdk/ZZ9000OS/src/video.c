@@ -458,15 +458,18 @@ void isr_video(void *dummy) {
 		if (vblank && overlay_scanout_active()) {
 			/* Same geometry discipline as the mode-change trigger:
 			 * a driver pan write that landed inside the capture area
-			 * must not become the scanout base or stride here; both
-			 * are firmware-owned in this region. */
-			if (vs.framebuffer_pan_offset >= 0x00dff000 &&
-			    !video_videocap_output_profile_centered(
-					(uint32_t)videocap_output_profile)) {
+			 * must not become the scanout stride (any profile) or the
+			 * scanout base (non-centered; centered keeps its
+			 * driver-provided canvas base). */
+			if (vs.framebuffer_pan_offset >= 0x00dff000) {
 				vs.framebuffer_pan_width = 0;
-				vs.framebuffer_pan_offset =
-					videocap_scanout_pan_offset(videocap_ntsc,
-						videocap_full_width);
+				if (!video_videocap_output_profile_centered(
+						(uint32_t)videocap_output_profile)) {
+					vs.framebuffer_pan_offset =
+						videocap_scanout_pan_offset(
+							videocap_ntsc,
+							videocap_full_width);
+				}
 			}
 			init_vdma(vs.vmode_hsize, vs.vmode_vsize, vs.vmode_hdiv,
 					vs.vmode_vdiv,
@@ -562,13 +565,14 @@ void isr_video(void *dummy) {
 					/* The mode-change trigger above may have run
 					 * several vblanks earlier; a host driver pan
 					 * write that landed since then must not leak
-					 * into this VDMA restart — neither its origin
-					 * nor the RTG stride width. Re-derive both (the
-					 * centered profiles keep the driver-provided
-					 * canvas base). */
+					 * into this VDMA restart. The stride width is
+					 * firmware-owned for every profile (the trigger
+					 * clears it unconditionally); the origin is
+					 * re-derived for non-centered profiles only —
+					 * centered keeps its driver-provided base. */
+					vs.framebuffer_pan_width = 0;
 					if (!video_videocap_output_profile_centered(
 							(uint32_t)videocap_output_profile)) {
-						vs.framebuffer_pan_width = 0;
 						vs.framebuffer_pan_offset =
 							videocap_scanout_pan_offset(
 								videocap_ntsc,
