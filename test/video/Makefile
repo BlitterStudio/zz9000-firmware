@@ -1,6 +1,11 @@
 CC ?= cc
 CFLAGS ?= -O2 -g -Wall -Wextra
 PYTHON ?= python3
+ifeq ($(shell uname -s),Darwin)
+MODE_SWITCH_LDFLAGS := -Wl,-dead_strip
+else
+MODE_SWITCH_LDFLAGS := -Wl,--gc-sections
+endif
 
 SRC_DIR := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 BUILD_DIR := build
@@ -10,6 +15,7 @@ TARGETS := \
 	$(BUILD_DIR)/video_scale_test \
 	$(BUILD_DIR)/videocap_control_test \
 	$(BUILD_DIR)/video_mode_pll_test \
+	$(BUILD_DIR)/video_mode_switch_test \
 	$(BUILD_DIR)/overlay_color_test \
 	$(BUILD_DIR)/overlay_schedule_test \
 	$(BUILD_DIR)/overlay_hw_test
@@ -25,6 +31,7 @@ test: $(TARGETS)
 	$(BUILD_DIR)/video_scale_test
 	$(BUILD_DIR)/videocap_control_test
 	$(BUILD_DIR)/video_mode_pll_test
+	$(BUILD_DIR)/video_mode_switch_test
 	$(BUILD_DIR)/overlay_color_test
 	$(BUILD_DIR)/overlay_schedule_test
 	$(BUILD_DIR)/overlay_hw_test
@@ -47,6 +54,20 @@ $(BUILD_DIR)/video_mode_pll_test: video_mode_pll_test.c \
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
 		video_mode_pll_test.c $(SRC_DIR)/zz_video_modes.c -lm
+
+$(BUILD_DIR)/video_mode_switch_test: video_mode_switch_test.c \
+		stubs/xil_io.h $(SRC_DIR)/video.c $(SRC_DIR)/video.h \
+		$(SRC_DIR)/video_scale.h $(SRC_DIR)/video_vdma.h \
+		$(SRC_DIR)/hdmi.c $(SRC_DIR)/hdmi.h \
+		$(SRC_DIR)/zz_video_modes.c $(SRC_DIR)/zz_video_modes.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Istubs -I$(BSP_INCLUDE) \
+		-DXIL_IO_H -include stubs/xil_io.h \
+		-include xparameters.h -include xil_printf.h \
+		-ffunction-sections -fdata-sections \
+		-Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
+		-o $@ video_mode_switch_test.c $(SRC_DIR)/hdmi.c \
+		$(SRC_DIR)/zz_video_modes.c $(MODE_SWITCH_LDFLAGS)
 
 $(BUILD_DIR)/overlay_color_test: overlay_color_test.c $(SRC_DIR)/overlay_color.h
 	@mkdir -p $(BUILD_DIR)

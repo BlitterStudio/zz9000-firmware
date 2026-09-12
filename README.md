@@ -311,6 +311,14 @@ fallback also applies when another configuration window saves a stored
 unsupported profile. Older firmware ignores an unknown profile token,
 which is not a guaranteed `full_60` fallback for hand-edited old stacks.
 
+RTG/native switches keep the HDMI signal running when the complete output
+timing is unchanged; framebuffer layout, scaling and pixel format still update.
+For example, centered native 60 Hz and 1920x1080 RTG using the same preset
+do not need transmitter or pixel-clock retraining. Matching resolution alone
+is not enough: different refresh rates or sync timings still require an output
+mode change. Entering `centered_1080p_match` also retains its safe source-phase
+acquisition described below.
+
 The existing `full_exact` profile selects fixed PAL/NTSC timing
 approximations (about 49.93/59.95 Hz); it does not phase-lock to the input.
 The experimental `centered_1080p_match` profile instead tracks the captured

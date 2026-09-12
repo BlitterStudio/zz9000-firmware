@@ -762,6 +762,10 @@ void pixelclock_init_2(struct zz_video_mode *mode) {
 
 static void video_mode_init_internal(int mode, int scalemode, int colormode,
 		int skip_vdma, int output_profile) {
+	/* Keep a value snapshot: custom mode slots can be edited in place, and
+	 * RTG/native layouts can share output timing despite different mode IDs. */
+	static struct zz_video_mode output_mode;
+	static int output_mode_valid;
 	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
 	// reset interlace tracking
@@ -787,6 +791,22 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode,
 		hdiv *= 2;
 
 	struct zz_video_mode *vmode = &preset_video_modes[mode];
+	int clock_unchanged = output_mode_valid &&
+		output_mode.mul == vmode->mul && output_mode.div == vmode->div &&
+		output_mode.div2 == vmode->div2 &&
+		(XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR,
+			CLK_WIZ_STATUS_OFFSET) & CLK_WIZ_STATUS_LOCKED) &&
+		!(XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR,
+			CLK_WIZ_RECONFIG_OFFSET) & CLK_WIZ_RECONFIG_LOAD);
+	int output_unchanged = clock_unchanged &&
+		output_mode.hres == vmode->hres && output_mode.vres == vmode->vres &&
+		output_mode.hstart == vmode->hstart && output_mode.hend == vmode->hend &&
+		output_mode.hmax == vmode->hmax &&
+		output_mode.vstart == vmode->vstart && output_mode.vend == vmode->vend &&
+		output_mode.vmax == vmode->vmax &&
+		output_mode.polarity == vmode->polarity &&
+		output_mode.phz == vmode->phz && output_mode.vhz == vmode->vhz &&
+		output_mode.hdmi == vmode->hdmi;
 	uint32_t content_hres = (uint32_t)vmode->hres;
 	uint32_t content_vres = (uint32_t)vmode->vres;
 	uint32_t dimensions_control = ((uint32_t)vmode->vres << 16) |
@@ -829,13 +849,17 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode,
 	video_formatter_write(video_formatter_scale_control((uint32_t)scalemode),
 	                      MNTVF_OP_SCALE);
 	video_formatter_write(colormode, MNTVF_OP_COLORMODE);
-	/* Power down TMDS and publish the new timing metadata before changing
-	 * the live pixel clock.  This is a lightweight mode update, not the old
-	 * 16ms transmitter reset that broke native-video switching in the ISR. */
-	hdmi_ctrl_prepare_mode(vmode);
+	/* Layout/color changes must not interrupt an unchanged output signal:
+	 * a TMDS power-down forces receiver reacquisition even at the same
+	 * resolution. Real timing changes retain the established retrain path. */
+	if (!output_unchanged)
+		hdmi_ctrl_prepare_mode(vmode);
 
-	// Now safe to switch the pixel clock — VGA counters already have new geometry.
-	pixelclock_init_2(vmode);
+	/* Different timings can share a PLL (e.g. 1080p50/60). Keep it running
+	 * when already locked; otherwise the new geometry is in place before
+	 * reloading it, as required by the formatter's counter pipeline. */
+	if (!clock_unchanged)
+		pixelclock_init_2(vmode);
 
 	if (!skip_vdma) {
 		init_vdma(content_hres, content_vres, hdiv, vdiv,
@@ -848,7 +872,11 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode,
 	/* A mode change is also the fail-safe wake path: never leave a display
 	 * stranded with one or both syncs suppressed after reprogramming timing. */
 	video_set_dpms(ZZ_DPMS_ON);
-	hdmi_ctrl_enable_output();
+	if (!output_unchanged)
+		hdmi_ctrl_enable_output();
+
+	output_mode = *vmode;
+	output_mode_valid = 1;
 
 	vs.vmode_hsize = content_hres;
 	vs.vmode_vsize = content_vres;
