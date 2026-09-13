@@ -146,6 +146,16 @@ across all color modes (8/15/16/32 bpp), scale_x/scale_y, odd-width
 tkeep tails, the native videocap shape and 1920-wide 32 bpp lines. The
 sweep fails if any configuration mismatches or fails to report.
 
+Capture-clock phase regression (Vivado 2018.3 UNISIM; set `VIVADO_BIN` for a
+non-default installation):
+```bash
+python3 test/video/run_videocap_phase_sim.py
+```
+This runs the production phase engine and MMCM, measuring both capture and
+grid clock displacement for positive, negative, and restored-zero targets.
+A completed phase request is not sufficient: enabling fine phase shift on
+both feedback and outputs cancels the intended clock movement.
+
 ## Flashing
 
 Copy `bootimage_work/BOOT.bin` to the ZZ9000 SD card (rename if needed

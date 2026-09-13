@@ -1137,7 +1137,7 @@ module MNTZorro_v0_1_S00_AXI
   localparam [31:0] VCAP_LIVE_CAPABILITY_VALUE = 32'h564c010f;
   localparam [15:0] VCAP_LIVE_COMMIT_TOKEN = 16'hca1b;
   // Runtime capture-phase control over the E7M MMCM fine phase shift.
-  // Host-visible direct-register offsets are 0x0240..0x024e. One step moves
+  // Host-visible direct-register offsets are 0x1240..0x124e. One step moves
   // every fine-phase CLKOUT by 1/56 of the VCO period (~78 ps at 32xE7M);
   // a full capture-clock turn is 448 steps. Targets are signed steps
   // relative to the routed build phase, range -255..255.
@@ -1400,7 +1400,7 @@ module MNTZorro_v0_1_S00_AXI
   /* Runtime capture-phase engine. The MMCM fine phase shifter advances or
    * retards every fine-phase CLKOUT by 1/56 VCO period per acknowledged
    * PSEN pulse. Two front doors set the same signed step target: the ARM
-   * video-control op 26 (data[15:0], signed) and the host SDK window
+   * video-control op 31 (data[15:0], signed) and the host SDK window
    * staged/commit registers. PSCLK is S_AXI_ACLK, so PSDONE is sampled
    * directly. E7M_RESET/E7M_PWRDWN stay deasserted, and the applied offset
    * only loses meaning across a power cycle, matching the register reset. */
@@ -1497,7 +1497,9 @@ module MNTZorro_v0_1_S00_AXI
                .BANDWIDTH("OPTIMIZED"),
                .CLKFBOUT_MULT_F(32.000000),
                .CLKFBOUT_PHASE(0.000000),
-               .CLKFBOUT_USE_FINE_PS("TRUE"),
+               // Shift outputs only: shifting feedback too cancels their
+               // movement relative to E7M (UG472, dynamic fine phase shift).
+               .CLKFBOUT_USE_FINE_PS("FALSE"),
                .CLKIN1_PERIOD(35.000000),
                .CLKIN2_PERIOD(0.000000),
 `ifdef ZORRO3
