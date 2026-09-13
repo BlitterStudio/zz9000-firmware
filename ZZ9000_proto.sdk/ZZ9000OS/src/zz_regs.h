@@ -18,6 +18,8 @@
 #ifndef ZZ_REGS_H
 #define ZZ_REGS_H
 
+#include "zz_custom_mode.h"
+
 // Registers offsets relative to the register base, although the offset on the ARM side is always 0.
 enum zz_reg_offsets {
   REG_ZZ_UNUSED_REG00   = 0x00,
@@ -206,10 +208,20 @@ enum zz_reg_offsets {
  * clears the RTG pan width at every capture VDMA restart, so a driver's
  * legacy native-pan write can no longer displace or skew the picture
  * (zz9000-drivers #84). Drivers gate the raw 0x00e00000 native pan on
- * this bit; without it they keep writing the legacy tuned constant. */
+ * this bit; without it they keep writing the legacy tuned constant.
+ *
+ * Bit 7 is the staged custom-modeline transaction (contract in
+ * zz_custom_mode.h): SELECT 0x56 with slot 20 begins a transaction,
+ * PARAM 0x52 / VALUE 0x54 stage one 16-bit word at a time, COMMIT 0x58
+ * carries slot | (color << 8) with no scale, and the commit status
+ * (IDLE/OK/INVALID/CLOCK_FAILED) reads back from the 0x58 group's
+ * upper half. Older firmware reports 0 here: drivers without the bit
+ * must stay on the preset-only path.
+ */
 #define ZZ_FW_CAPABILITIES \
   (ZZ_FW_CAP_VIDEOCAP_PROFILE | ZZ_FW_CAP_VIDEOCAP_LIVE | \
-   ZZ_FW_CAP_Z2_APERTURE_LAYOUT | ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN)
+   ZZ_FW_CAP_Z2_APERTURE_LAYOUT | ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN | \
+   ZZ_FW_CAP_CUSTOM_MODE)
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,

@@ -164,6 +164,18 @@ void clip_hw_sprite(int16_t offset_x, int16_t offset_y);
 void clear_hw_sprite();
 struct zz_video_mode* get_custom_video_mode_ptr(int custom_video_mode);
 
+/* Staged custom-modeline transaction over the CVMODE registers
+ * (zz_custom_mode.h contract). SELECT(slot) with ZZ_CUSTOM_MODE_SLOT
+ * begins a fresh transaction and resets the status to IDLE; unknown
+ * selects or params poison it until the next SELECT. Commit applies
+ * slot | (color << 8) with no inherited scale and returns/keeps the
+ * ZZ_CUSTOM_STATUS_* word for the 0x58 read group. */
+void video_custom_select(uint16_t slot);
+void video_custom_set_param(uint16_t param);
+void video_custom_set_value(uint16_t value);
+uint16_t video_custom_commit(uint16_t commit_word);
+uint16_t video_custom_status(void);
+
 struct ZZ_VIDEO_STATE* video_get_state();
 void video_formatter_write(uint32_t data, uint16_t op);
 

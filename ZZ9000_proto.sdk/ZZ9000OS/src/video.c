@@ -6,6 +6,7 @@
 #include "zz_config.h"
 #include "mntzorro.h"
 #include "interrupt.h"
+#include "zz_custom_mode.h"
 #include "xaxivdma.h"
 #include "xclk_wiz.h"
 #include "hdmi.h"
@@ -45,10 +46,11 @@ int sprite_request_hide = 0;
 int sprite_request_pos_x = 0;
 int sprite_request_pos_y = 0;
 
+static uint32_t output_source_sync;
 void _update_hw_sprite_pos(int16_t x, int16_t y);
 void _clip_hw_sprite(int16_t offset_x, int16_t offset_y);
-static void video_mode_init_internal(int mode, int scalemode, int colormode,
-		int skip_vdma, int output_profile);
+static int video_mode_init_internal(int mode, int scalemode, int colormode,
+		int skip_vdma, int output_profile, int transactional);
 
 /* Capture-area scanout origin for the detected standard and requested
  * base mode. One derivation for every capture-area VDMA start, so a
@@ -321,7 +323,7 @@ static void init_filtered_videocap_video_mode(int ntsc) {
 	}
 
 	video_mode_init_internal(mode, 2, MNTVA_COLOR_32BIT, 1,
-		ZZ_VIDEOCAP_OUTPUT_FULL_60);
+		ZZ_VIDEOCAP_OUTPUT_FULL_60, 0);
 }
 
 static void init_videocap_video_mode(int ntsc, int full_width,
@@ -342,7 +344,7 @@ static void init_videocap_video_mode(int ntsc, int full_width,
 				ZZVMODE_1920x1080_50 : ZZVMODE_1920x1080_60;
 		}
 		video_mode_init_internal(mode, 4, MNTVA_COLOR_32BIT, 1,
-			output_profile);
+			output_profile, 0);
 		return;
 	}
 	if (!full_width) {
@@ -355,7 +357,7 @@ static void init_videocap_video_mode(int ntsc, int full_width,
 	}
 
 	video_mode_init_internal(mode, 4, MNTVA_COLOR_32BIT, 1,
-		ZZ_VIDEOCAP_OUTPUT_FULL_60);
+		ZZ_VIDEOCAP_OUTPUT_FULL_60, 0);
 }
 
 void fb_fill(uint32_t offset) {
@@ -383,7 +385,6 @@ void video_formatter_valign() {
 	VF_DLY;
 }
 
-// ONLY isr_video is allowed to call this!
 void video_formatter_write(uint32_t data, uint16_t op) {
 	/* REG3 data + REG2 strobe is one transaction. A vblank IRQ interleaving
 	 * another formatter write between them would pair the wrong data/op. */
@@ -399,6 +400,8 @@ void video_formatter_write(uint32_t data, uint16_t op) {
 	VF_DLY;
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG3, 0); // unlock access, NOP
 	VF_DLY;
+	if (op == MNTVF_OP_SOURCE_SYNC)
+		output_source_sync = data;
 	smp_local_irq_restore(irq_state);
 }
 
@@ -722,7 +725,10 @@ u32 dump_vdma_status(XAxiVdma *InstancePtr) {
 	return status;
 }
 
-void pixelclock_init_2(struct zz_video_mode *mode) {
+/* Program the PLL tuple and wait for the wizard to accept it.  Returns 0
+ * once STATUS LOCKED is asserted and LOAD has cleared; -1 on timeout, when
+ * the wizard may or may not have applied the request. */
+static int pixelclock_program(struct zz_video_mode *mode) {
 	XClk_Wiz_Config conf;
 	XClk_Wiz_CfgInitialize(&clkwiz, &conf, XPAR_CLK_WIZ_0_BASEADDR);
 
@@ -738,10 +744,9 @@ void pixelclock_init_2(struct zz_video_mode *mode) {
 		0x00000003);
 
 	/* Do not expose the new signal based on a guessed delay.  A short first
-	 * pause ensures the AXI reconfiguration request has reached the MMCM,
+	 * pause ensures the AXI reconfiguration request has reached the PLL,
 	 * then the bounded poll accepts it only after LOAD clears and LOCKED is
-	 * asserted.  The timeout preserves the old fail-open behaviour so a
-	 * status-register fault cannot leave the monitor permanently dark. */
+	 * asserted. */
 	usleep(CLK_WIZ_LOCK_POLL_US);
 	for (int waited = CLK_WIZ_LOCK_POLL_US;
 			waited < CLK_WIZ_LOCK_TIMEOUT_US;
@@ -752,20 +757,36 @@ void pixelclock_init_2(struct zz_video_mode *mode) {
 			u32 reconfig = XClk_Wiz_ReadReg(XPAR_CLK_WIZ_0_BASEADDR,
 				CLK_WIZ_RECONFIG_OFFSET);
 			if (!(reconfig & CLK_WIZ_RECONFIG_LOAD))
-				return;
+				return 0;
 		}
 		usleep(CLK_WIZ_LOCK_POLL_US);
 	}
 
 	printf("pixel clock lock timeout for %ux%u\n", mode->hres, mode->vres);
+	return -1;
 }
 
-static void video_mode_init_internal(int mode, int scalemode, int colormode,
-		int skip_vdma, int output_profile) {
+/* Returns 0 when the mode was applied.  A transactional caller (custom
+ * commit) additionally gets -1 on a PLL lock timeout, with the previous
+ * output replayed; preset callers keep the historical fail-open timeout. */
+static int video_mode_init_internal(int mode, int scalemode, int colormode,
+		int skip_vdma, int output_profile, int transactional) {
 	/* Keep a value snapshot: custom mode slots can be edited in place, and
-	 * RTG/native layouts can share output timing despite different mode IDs. */
+	 * RTG/native layouts can share output timing despite different mode IDs.
+	 * The recorded control words capture exactly what the last successful
+	 * mode wrote, so a failed transactional commit can replay the old
+	 * output word for word. */
 	static struct zz_video_mode output_mode;
+	static uint32_t output_dimensions_control;
+	static uint32_t output_viewport_pos, output_viewport_size;
+	static int output_colormode;
 	static int output_mode_valid;
+	int prev_mode = vs.video_mode;
+	int prev_scalemode = vs.scalemode;
+	int prev_colormode = vs.colormode;
+	int prev_interlace_old = vs.interlace_old;
+	uint8_t prev_stride_div = stride_div;
+	uint32_t prev_source_sync = output_source_sync;
 	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
 	// reset interlace tracking
@@ -857,9 +878,58 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode,
 
 	/* Different timings can share a PLL (e.g. 1080p50/60). Keep it running
 	 * when already locked; otherwise the new geometry is in place before
-	 * reloading it, as required by the formatter's counter pipeline. */
+	 * reloading it, as required by the formatter's counter pipeline.
+	 * Preset callers keep the historical fail-open timeout; a transactional
+	 * custom commit replays the previous output instead, so a lock failure
+	 * can never half-apply a mode. */
+	int clock_failed = 0;
 	if (!clock_unchanged)
-		pixelclock_init_2(vmode);
+		clock_failed = (pixelclock_program(vmode) != 0);
+	if (clock_failed && transactional) {
+		if (output_mode_valid) {
+			/* Restore geometry before changing dvi_clk, just as on
+			 * the forward path. VDMA still scans the old geometry:
+			 * it is programmed only after the clock succeeds. */
+			video_formatter_write(
+				(output_mode.vmax << 16) | output_mode.hmax,
+				MNTVF_OP_MAX);
+			video_formatter_write(output_dimensions_control,
+				MNTVF_OP_DIMENSIONS);
+			if (output_dimensions_control & MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG) {
+				video_formatter_write(output_viewport_pos,
+					MNTVF_OP_VIEWPORT_POS);
+				video_formatter_write(output_viewport_size,
+					MNTVF_OP_VIEWPORT_SIZE_COMMIT);
+			}
+			video_formatter_write(
+				(output_mode.hstart << 16) | output_mode.hend,
+				MNTVF_OP_HS);
+			video_formatter_write(
+				(output_mode.vstart << 16) | output_mode.vend,
+				MNTVF_OP_VS);
+			video_formatter_write(output_mode.polarity,
+				MNTVF_OP_POLARITY);
+			video_formatter_write(video_formatter_scale_control(
+					(uint32_t)prev_scalemode),
+				MNTVF_OP_SCALE);
+			video_formatter_write(output_colormode,
+				MNTVF_OP_COLORMODE);
+			pixelclock_program(&output_mode);
+			video_formatter_write(prev_source_sync,
+				MNTVF_OP_SOURCE_SYNC);
+			video_formatter_valign();
+			hdmi_ctrl_prepare_mode(&output_mode);
+			video_set_dpms(ZZ_DPMS_ON);
+			hdmi_ctrl_enable_output();
+		}
+		/* Undo the state this call staged before touching hardware. */
+		vs.video_mode = prev_mode;
+		vs.scalemode = prev_scalemode;
+		vs.colormode = prev_colormode;
+		vs.interlace_old = prev_interlace_old;
+		stride_div = prev_stride_div;
+		return -1;
+	}
 
 	if (!skip_vdma) {
 		init_vdma(content_hres, content_vres, hdiv, vdiv,
@@ -876,18 +946,190 @@ static void video_mode_init_internal(int mode, int scalemode, int colormode,
 		hdmi_ctrl_enable_output();
 
 	output_mode = *vmode;
+	output_dimensions_control = dimensions_control;
+	if (dimensions_control & MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG) {
+		output_viewport_pos = (geometry.viewport_y << 16) |
+		                      geometry.viewport_x;
+		output_viewport_size = (geometry.content_height << 16) |
+		                       geometry.content_width;
+	}
+	output_colormode = colormode;
 	output_mode_valid = 1;
 
 	vs.vmode_hsize = content_hres;
 	vs.vmode_vsize = content_vres;
 	vs.vmode_vdiv = vdiv;
 	vs.vmode_hdiv = hdiv;
+	return 0;
 }
 
 void video_mode_init(int mode, int scalemode, int colormode) {
+	/* REG_ZZ_MODE forwards an untrusted 8-bit index: reject anything
+	 * outside the preset table before it is dereferenced. */
+	if (mode < 0 || mode >= ZZVMODE_NUM) {
+		printf("video_mode_init: invalid mode %d\n", mode);
+		return;
+	}
 	videocap_detection_reset();
 	video_mode_init_internal(mode, scalemode, colormode, 0,
-		ZZ_VIDEOCAP_OUTPUT_FULL_60);
+		ZZ_VIDEOCAP_OUTPUT_FULL_60, 0);
+}
+
+/* Staged custom-modeline transaction over the CVMODE registers
+ * (zz_custom_mode.h contract). SELECT with the custom slot begins a fresh
+ * transaction and resets the status to IDLE; PARAM/VALUE stage one
+ * 16-bit word at a time into a shadow copy. Nothing touches the live
+ * ZZVMODE_CUSTOM slot or the output until a fully staged, valid modeline
+ * is committed with an explicit color and no scale. Unknown params or a
+ * select of anything but the custom slot poison the transaction until
+ * the next SELECT. */
+static struct {
+	struct zz_custom_mode staged;
+	uint32_t fields;
+	uint16_t param;
+	uint8_t active;
+	uint8_t poisoned;
+	uint16_t status;
+} custom_txn;
+
+void video_custom_select(uint16_t slot)
+{
+	if (slot == ZZ_CUSTOM_MODE_SLOT) {
+		memset(&custom_txn.staged, 0, sizeof(custom_txn.staged));
+		custom_txn.fields = 0;
+		custom_txn.param = ZZ_CUSTOM_HRES;
+		custom_txn.active = 1;
+		custom_txn.poisoned = 0;
+		custom_txn.status = ZZ_CUSTOM_STATUS_IDLE;
+	} else {
+		custom_txn.poisoned = 1;
+	}
+}
+
+void video_custom_set_param(uint16_t param)
+{
+	if (!custom_txn.active || custom_txn.poisoned)
+		return;
+	if (param > ZZ_CUSTOM_DIV2 ||
+	    !(ZZ_CUSTOM_REQUIRED_FIELDS & (1U << param))) {
+		custom_txn.poisoned = 1;
+		return;
+	}
+	custom_txn.param = param;
+}
+
+static uint16_t *custom_txn_field(uint16_t param)
+{
+	switch (param) {
+	case ZZ_CUSTOM_HRES:     return &custom_txn.staged.width;
+	case ZZ_CUSTOM_VRES:     return &custom_txn.staged.height;
+	case ZZ_CUSTOM_HSTART:   return &custom_txn.staged.hsync_start;
+	case ZZ_CUSTOM_HEND:     return &custom_txn.staged.hsync_end;
+	case ZZ_CUSTOM_HTOTAL:   return &custom_txn.staged.htotal;
+	case ZZ_CUSTOM_VSTART:   return &custom_txn.staged.vsync_start;
+	case ZZ_CUSTOM_VEND:     return &custom_txn.staged.vsync_end;
+	case ZZ_CUSTOM_VTOTAL:   return &custom_txn.staged.vtotal;
+	case ZZ_CUSTOM_POLARITY: return &custom_txn.staged.polarity;
+	case ZZ_CUSTOM_MUL:      return &custom_txn.staged.mul;
+	case ZZ_CUSTOM_DIV:      return &custom_txn.staged.div;
+	case ZZ_CUSTOM_DIV2:     return &custom_txn.staged.div2;
+	}
+	return NULL;
+}
+
+void video_custom_set_value(uint16_t value)
+{
+	uint16_t *field;
+
+	if (!custom_txn.active || custom_txn.poisoned)
+		return;
+	field = custom_txn_field(custom_txn.param);
+	if (!field) {
+		custom_txn.poisoned = 1;
+		return;
+	}
+	*field = value;
+	custom_txn.fields |= 1U << custom_txn.param;
+}
+
+uint16_t video_custom_commit(uint16_t commit_word)
+{
+	struct zz_custom_mode staged = custom_txn.staged;
+	struct zz_video_mode previous_slot;
+	uint32_t color = (uint32_t)commit_word >> 8;
+	uint32_t pixelclock, frame_div, frame_hz;
+	uint32_t video_irq_enabled;
+	int applied;
+
+	if (!custom_txn.active || custom_txn.poisoned ||
+	    custom_txn.fields != ZZ_CUSTOM_REQUIRED_FIELDS ||
+	    (commit_word & 0xffU) != ZZ_CUSTOM_MODE_SLOT ||
+	    color >= MNTVA_COLOR_NUM) {
+		custom_txn.status = ZZ_CUSTOM_STATUS_INVALID;
+		printf("custom mode: rejected (active %d poisoned %d fields %04x word %04x)\n",
+			(int)custom_txn.active, (int)custom_txn.poisoned,
+			(unsigned)custom_txn.fields, (unsigned)commit_word);
+		return custom_txn.status;
+	}
+	if (!zz_custom_mode_valid(&staged)) {
+		custom_txn.status = ZZ_CUSTOM_STATUS_INVALID;
+		return custom_txn.status;
+	}
+
+	/* Clock/refresh metadata is derived from the validated PLL tuple,
+	 * never sent through a word: the display is told the achieved clock. */
+	pixelclock = zz_custom_clock_hz(staged.mul, staged.div, staged.div2);
+	frame_div = (uint32_t)staged.htotal * (uint32_t)staged.vtotal;
+	frame_hz = (uint32_t)(((uint64_t)pixelclock + frame_div / 2U) /
+		frame_div);
+
+	video_irq_enabled = video_interrupt_pause();
+
+	previous_slot = preset_video_modes[ZZVMODE_CUSTOM];
+	preset_video_modes[ZZVMODE_CUSTOM].hres = staged.width;
+	preset_video_modes[ZZVMODE_CUSTOM].vres = staged.height;
+	preset_video_modes[ZZVMODE_CUSTOM].hstart = staged.hsync_start;
+	preset_video_modes[ZZVMODE_CUSTOM].hend = staged.hsync_end;
+	preset_video_modes[ZZVMODE_CUSTOM].hmax = staged.htotal;
+	preset_video_modes[ZZVMODE_CUSTOM].vstart = staged.vsync_start;
+	preset_video_modes[ZZVMODE_CUSTOM].vend = staged.vsync_end;
+	preset_video_modes[ZZVMODE_CUSTOM].vmax = staged.vtotal;
+	preset_video_modes[ZZVMODE_CUSTOM].polarity = staged.polarity;
+	preset_video_modes[ZZVMODE_CUSTOM].mhz =
+		(int)((pixelclock + 500000U) / 1000000U);
+	preset_video_modes[ZZVMODE_CUSTOM].phz = (int)pixelclock;
+	preset_video_modes[ZZVMODE_CUSTOM].vhz = (int)frame_hz;
+	preset_video_modes[ZZVMODE_CUSTOM].hdmi = 0;
+	preset_video_modes[ZZVMODE_CUSTOM].mul = staged.mul;
+	preset_video_modes[ZZVMODE_CUSTOM].div = staged.div;
+	preset_video_modes[ZZVMODE_CUSTOM].div2 = staged.div2;
+
+	printf("custom mode: %ux%u color %u @ %u Hz (PLL %u/%u/%u)\n",
+		(unsigned)staged.width, (unsigned)staged.height,
+		(unsigned)color, (unsigned)frame_hz,
+		(unsigned)staged.mul, (unsigned)staged.div,
+		(unsigned)staged.div2);
+
+	/* Explicit color, no inherited scale: unsupported scan flags were
+	 * already rejected with the commit word instead of being stripped. */
+	applied = video_mode_init_internal(ZZVMODE_CUSTOM, 0, (int)color, 0,
+		ZZ_VIDEOCAP_OUTPUT_FULL_60, 1);
+	if (applied != 0) {
+		/* A mode that could not lock must not stay visible in the
+		 * live slot either. */
+		preset_video_modes[ZZVMODE_CUSTOM] = previous_slot;
+		custom_txn.status = ZZ_CUSTOM_STATUS_CLOCK_FAILED;
+	} else {
+		videocap_detection_reset();
+		custom_txn.status = ZZ_CUSTOM_STATUS_OK;
+	}
+	video_interrupt_restore(video_irq_enabled);
+	return custom_txn.status;
+}
+
+uint16_t video_custom_status(void)
+{
+	return custom_txn.status;
 }
 
 void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite)

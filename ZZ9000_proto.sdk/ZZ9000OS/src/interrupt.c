@@ -3,6 +3,7 @@
 #include "mntzorro.h"
 #include "xil_exception.h"
 #include "xpseudo_asm.h"
+#include "sdk_smp_lock.h"
 
 static XScuGic intc_handle;
 
@@ -43,6 +44,26 @@ int interrupt_configure() {
 #define INTC_INTERRUPT_ID_0 61 // IRQ_F2P[0:0]
 #define INTC_INTERRUPT_ID_1 62 // IRQ_F2P[1:1]
 #define INTC_INTERRUPT_ID_2 63 // IRQ_F2P[2:2]
+
+/* Keep native-mode/VDMA interrupts out of a staged output transaction.
+ * Preserve the GIC enable state and leave audio/other IRQs serviceable. */
+uint32_t video_interrupt_pause(void) {
+	uint32_t irq_state = smp_local_irq_save();
+	XScuGic *intc = interrupt_get_intc();
+	uint32_t enabled = XScuGic_DistReadReg(intc,
+		XSCUGIC_ENABLE_SET_OFFSET + (INTC_INTERRUPT_ID_0 / 32U) * 4U) &
+		(1U << (INTC_INTERRUPT_ID_0 % 32U));
+	XScuGic_Disable(intc, INTC_INTERRUPT_ID_0);
+	dsb();
+	isb();
+	smp_local_irq_restore(irq_state);
+	return enabled;
+}
+
+void video_interrupt_restore(uint32_t enabled) {
+	if (enabled)
+		XScuGic_Enable(interrupt_get_intc(), INTC_INTERRUPT_ID_0);
+}
 
 int fpga_interrupt_connect(void* isr_video, void* isr_audio_tx, void* isr_audio_rx) {
   int result;

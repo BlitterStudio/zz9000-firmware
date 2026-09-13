@@ -366,6 +366,37 @@ Keep these rules in mind:
 See the commented [ZZ9000.CFG sample](ZZ9000.CFG) for every accepted value and
 additional notes.
 
+## Custom Picasso96 Modelines
+
+Matched `ZZ9000.card` 2.11 and firmware advertising `ZZ_FW_CAP_CUSTOM_MODE`
+(capability bit 7) support custom progressive RTG timings, including 960x720.
+No new FPGA registers are required. The driver sends active dimensions,
+sync positions, totals, common sync polarity, and a legal pixel-clock PLL
+tuple through the existing custom-mode register window.
+
+Custom timings have these bounds:
+
+- Active width 320–2560 pixels, aligned to 8 pixels; height at least 200.
+- Positive front porch, sync width, and back porch on both axes; totals
+  at most 4095.
+- Pixel clock 25–165 MHz, resolved to the nearest supported PLL clock
+  within 0.5% of the request. P96 receives the achieved clock; requests
+  with no legal clock inside that tolerance are rejected.
+- Progressive scan only. Both syncs must have the same polarity: the
+  current formatter has one polarity bit shared by HSync and VSync.
+
+The firmware stages the whole modeline before applying it. Invalid or
+incomplete requests do not alter the live mode; a PLL lock failure triggers
+rollback to the previous output. Video interrupts are deferred during
+the transaction; audio and other interrupts remain enabled. Exact packaged presets retain their
+existing output timings. In particular, their historical P96 polarity
+flags do not change the fixed preset's polarity.
+
+Use P96's temporary test display before saving a custom mode. Firmware
+acceptance does not guarantee that the connected monitor supports it.
+Back up the installed `BOOT.bin`, `ZZ9000.card`, and P96 settings first;
+see the [driver instructions](https://github.com/BlitterStudio/zz9000-drivers#custom-picasso96-modelines).
+
 ## USB host stack
 
 Firmware 2.8.0 RC3 and `zzusbhw.device` 2.2 form one USB proxy release. The

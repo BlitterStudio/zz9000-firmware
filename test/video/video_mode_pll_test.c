@@ -11,6 +11,7 @@
 #include <stdio.h>
 
 #include "zz_video_modes.h"
+#include "zz_custom_mode.h"
 
 #define PLL_INPUT_MHZ 100.0
 #define PLL_PFD_MIN_MHZ 19.0
@@ -133,11 +134,68 @@ static int check_centered_1080p_timing(enum zz_video_modes index,
 	return 1;
 }
 
+/* Compare the fast resolver against exhaustive legal-divider enumeration,
+ * using floating-point arithmetic independent of its integer rounding. */
+static int check_custom_clock(uint32_t requested)
+{
+	struct zz_custom_mode mode = {0};
+	uint32_t actual = zz_custom_resolve_clock(requested, &mode);
+	double best_error = 1e30;
+	unsigned mul, div, output;
+
+	for (div = 1; div <= 5; div++) {
+		for (mul = 2; mul <= 64; mul++) {
+			double vco = 100000000.0 * mul / div;
+			if (vco < 1000000000.0 || vco > 1500000000.0)
+				continue;
+			for (output = 1; output <= 128; output++) {
+				double hz = floor(vco / output + 0.5);
+				double error = fabs(hz - requested);
+				if (hz >= ZZ_CUSTOM_MIN_CLOCK_HZ &&
+				    hz <= ZZ_CUSTOM_MAX_CLOCK_HZ && error < best_error)
+					best_error = error;
+			}
+		}
+	}
+	if (!actual || fabs((double)actual - requested) != best_error ||
+	    fabs((double)actual - requested) > requested / 200.0 ||
+	    actual != zz_custom_clock_hz(mode.mul, mode.div, mode.div2)) {
+		fprintf(stderr, "custom clock %lu resolved to %lu, minimum error %.0f\n",
+			(unsigned long)requested, (unsigned long)actual, best_error);
+		return 0;
+	}
+	printf("custom clock: requested %lu, achieved %lu Hz\n",
+		(unsigned long)requested, (unsigned long)actual);
+	return 1;
+}
+
+static int check_custom_clock_rejection(void)
+{
+	struct zz_custom_mode mode = {0};
+	mode.mul = 12;
+	mode.div = 1;
+	mode.div2 = 20;
+	if (zz_custom_resolve_clock(ZZ_CUSTOM_MIN_CLOCK_HZ - 1U, &mode) ||
+	    zz_custom_resolve_clock(ZZ_CUSTOM_MAX_CLOCK_HZ + 1U, &mode) ||
+	    mode.mul != 12 || mode.div != 1 || mode.div2 != 20 ||
+	    zz_custom_clock_hz(12, 0, 20) ||
+	    zz_custom_clock_hz(12, 1, 0) ||
+	    zz_custom_clock_hz(64, 1, 20)) {
+		fprintf(stderr, "invalid custom clock accepted or modified the previous tuple\n");
+		return 0;
+	}
+	return 1;
+}
+
 int main(void)
 {
 	int ok = 1;
 
 	ok &= check_all_mode_clock_metadata();
+	ok &= check_custom_clock(ZZ_CUSTOM_MIN_CLOCK_HZ);
+	ok &= check_custom_clock(64123456U);
+	ok &= check_custom_clock(ZZ_CUSTOM_MAX_CLOCK_HZ);
+	ok &= check_custom_clock_rejection();
 	ok &= check_mode("1280x1024 PAL exact-refresh",
 		ZZVMODE_1280x1024_NS_PAL, 49.92226);
 	ok &= check_mode("1280x1024 NTSC exact-refresh",

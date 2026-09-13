@@ -50,7 +50,8 @@ $(BUILD_DIR)/videocap_control_test: videocap_control_test.c $(SRC_DIR)/video.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ videocap_control_test.c
 
 $(BUILD_DIR)/video_mode_pll_test: video_mode_pll_test.c \
-		$(SRC_DIR)/zz_video_modes.c $(SRC_DIR)/zz_video_modes.h
+		$(SRC_DIR)/zz_video_modes.c $(SRC_DIR)/zz_video_modes.h \
+		$(SRC_DIR)/zz_custom_mode.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ \
 		video_mode_pll_test.c $(SRC_DIR)/zz_video_modes.c -lm
@@ -58,6 +59,7 @@ $(BUILD_DIR)/video_mode_pll_test: video_mode_pll_test.c \
 $(BUILD_DIR)/video_mode_switch_test: video_mode_switch_test.c \
 		stubs/xil_io.h $(SRC_DIR)/video.c $(SRC_DIR)/video.h \
 		$(SRC_DIR)/video_scale.h $(SRC_DIR)/video_vdma.h \
+		$(SRC_DIR)/zz_custom_mode.h \
 		$(SRC_DIR)/hdmi.c $(SRC_DIR)/hdmi.h \
 		$(SRC_DIR)/zz_video_modes.c $(SRC_DIR)/zz_video_modes.h
 	@mkdir -p $(BUILD_DIR)

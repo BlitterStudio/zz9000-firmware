@@ -19,6 +19,8 @@
 XScuGic* interrupt_get_intc();
 int interrupt_configure();
 int fpga_interrupt_connect(void* isr_video, void* isr_audio_tx, void* isr_audio_rx);
+uint32_t video_interrupt_pause(void);
+void video_interrupt_restore(uint32_t enabled);
 
 void amiga_interrupt_set(uint32_t bit);
 void amiga_interrupt_clear(uint32_t bit);

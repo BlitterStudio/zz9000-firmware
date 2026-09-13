@@ -653,9 +653,8 @@ int main() {
 	uint16_t blitter_user2 = 0;
 	int16_t blitter_user3 = 0;	// line Bresenham work-variable seed
 
-	// custom video mode
-	int custom_video_mode = ZZVMODE_CUSTOM;
-	int custom_vmode_param = VMODE_PARAM_HRES;
+	// custom video mode transaction state lives in video.c
+	// (video_custom_select/param/value/commit)
 
 	// key selected for REG_ZZ_CONFIG_KEY queries
 	uint16_t config_query_key = ZZ_CONFIG_KEY_LOADED;
@@ -1138,44 +1137,29 @@ int main() {
 					break;
 				}
 
-				case REG_ZZ_CVMODE_PARAM: // Custom video mode param
-					// FIXME
-					custom_vmode_param = zdata;
+				case REG_ZZ_CVMODE_PARAM:
+					// staged custom modeline: field select
+					video_custom_set_param((uint16_t)zdata);
 					break;
 
-				case REG_ZZ_CVMODE_VAL: { // Custom video mode data
-					struct zz_video_mode* vm = get_custom_video_mode_ptr(custom_video_mode);
-					int *target = &vm->hres;
-					switch(custom_vmode_param) {
-						case VMODE_PARAM_VRES: target = &vm->vres; break;
-						case VMODE_PARAM_HSTART: target = &vm->hstart; break;
-						case VMODE_PARAM_HEND: target = &vm->hend; break;
-						case VMODE_PARAM_HMAX: target = &vm->hmax; break;
-						case VMODE_PARAM_VSTART: target = &vm->vstart; break;
-						case VMODE_PARAM_VEND: target = &vm->vend; break;
-						case VMODE_PARAM_VMAX: target = &vm->vmax; break;
-						case VMODE_PARAM_POLARITY: target = &vm->polarity; break;
-						case VMODE_PARAM_MHZ: target = &vm->mhz; break;
-						case VMODE_PARAM_PHZ: target = &vm->phz; break;
-						case VMODE_PARAM_VHZ: target = &vm->vhz; break;
-						case VMODE_PARAM_HDMI: target = &vm->hdmi; break;
-						case VMODE_PARAM_MUL: target = &vm->mul; break;
-						case VMODE_PARAM_DIV: target = &vm->div; break;
-						case VMODE_PARAM_DIV2: target = &vm->div2; break;
-						default: break;
-					}
-
-					*target = zdata;
-					break;
-				}
-
-				case REG_ZZ_CVMODE_SEL: // Set custom video mode index
-					custom_video_mode = zdata;
+				case REG_ZZ_CVMODE_VAL:
+					// staged custom modeline: 16-bit field word
+					video_custom_set_value((uint16_t)zdata);
 					break;
 
-				case REG_ZZ_CVMODE: // Set custom video mode without any questions asked.
-					// This assumes that the custom video mode is 640x480 or higher resolution.
-					video_mode_init(custom_video_mode, video_state->scalemode, video_state->colormode);
+				case REG_ZZ_CVMODE_SEL:
+					/* staged custom modeline: only the custom
+					 * slot may begin a transaction; any other
+					 * value poisons it, so raw writes can no
+					 * longer mutate a preset row. */
+					video_custom_select((uint16_t)zdata);
+					break;
+
+				case REG_ZZ_CVMODE:
+					/* staged custom modeline commit:
+					 * slot | (color << 8), no scale. The
+					 * result reads back from this group. */
+					video_custom_commit((uint16_t)zdata);
 					break;
 
 				case REG_ZZ_SET_FEATURE:
@@ -1842,6 +1826,15 @@ int main() {
 						    (uint16_t)adau_enabled |
 						        ZZ_AUDIO_CONFIG_TX_STATUS_CAPABLE,
 						    audio_get_rx_status());
+						break;
+					}
+					case REG_ZZ_CVMODE: {
+						/* Custom modeline commit status
+						 * (IDLE/OK/INVALID/CLOCK_FAILED)
+						 * in the upper half: a Z2 word read
+						 * of 0x58 and a Z3 group read both
+						 * resolve it. */
+						data = ((uint32_t)video_custom_status()) << 16;
 						break;
 					}
 					case REG_ZZ_AUDIO_TX_STATUS: {
