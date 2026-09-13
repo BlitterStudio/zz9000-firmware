@@ -787,6 +787,7 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 	int prev_interlace_old = vs.interlace_old;
 	uint8_t prev_stride_div = stride_div;
 	uint32_t prev_source_sync = output_source_sync;
+	uint8_t prev_dpms = vs.card_feature_enabled[CARD_FEATURE_DPMS];
 	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
 	// reset interlace tracking
@@ -919,7 +920,7 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 				MNTVF_OP_SOURCE_SYNC);
 			video_formatter_valign();
 			hdmi_ctrl_prepare_mode(&output_mode);
-			video_set_dpms(ZZ_DPMS_ON);
+			video_set_dpms(prev_dpms);
 			hdmi_ctrl_enable_output();
 		}
 		/* Undo the state this call staged before touching hardware. */

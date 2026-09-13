@@ -388,6 +388,7 @@ int main(void)
 	slot_saved = preset_video_modes[ZZVMODE_CUSTOM];
 
 	/* PLL lock failure: CLOCK_FAILED, old output replayed exactly. */
+	video_set_dpms(ZZ_DPMS_OFF);
 	clear_measurements();
 	clock_fail_locks = 1;
 	assert(commit_custom(MNTVA_COLOR_32BIT) ==
@@ -402,6 +403,8 @@ int main(void)
 	assert(delay_us > CLK_WIZ_LOCK_TIMEOUT_US / 2U); /* bounded poll ran */
 	assert(memcmp(&preset_video_modes[ZZVMODE_CUSTOM], &slot_saved,
 	       sizeof(slot_saved)) == 0);
+	assert(vs.card_feature_enabled[CARD_FEATURE_DPMS] == ZZ_DPMS_OFF);
+	assert(formatter_ops[MNTVF_OP_DPMS] == ZZ_DPMS_OFF);
 
 	/* Successful retry without re-staging: the failed commit kept the
 	 * staged words, so one commit word is enough. */
@@ -416,6 +419,8 @@ int main(void)
 	       video_formatter_scale_control(0));
 	assert(clock_reloads == 1 && tmds_interruptions == 1);
 	assert(clock_mul_div == (53U << 8 | 4U) && clock_div2 == 25U);
+	assert(vs.card_feature_enabled[CARD_FEATURE_DPMS] == ZZ_DPMS_ON);
+	assert(formatter_ops[MNTVF_OP_DPMS] == ZZ_DPMS_ON);
 
 	/* An IRQ must not replace a failed requested PLL with a locked native
 	 * clock, or mutate centered viewport state underneath rollback. */
