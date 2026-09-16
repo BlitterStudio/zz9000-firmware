@@ -19,8 +19,11 @@
 #include "jpeglib.h"
 #include "png.h"
 
-#define SDK_IMAGE_STREAM_MAX_DIMENSION 4096U
-#define SDK_IMAGE_STREAM_MAX_PIXELS    (2048U * 2048U)
+#define SDK_IMAGE_STREAM_MAX_DIMENSION 8192U
+/* Progressive JPEG decode holds the whole image's MCU coefficient state
+ * in the ARM heap (~3 bytes/pixel for 4:2:0); 24 MP caps that at
+ * ~72 MB transient. */
+#define SDK_IMAGE_STREAM_MAX_PIXELS    (24U * 1024U * 1024U)
 #define SDK_IMAGE_STREAM_MAX_FIT_SOURCE_PIXELS (256U * 1024U * 1024U)
 #define SDK_IMAGE_STREAM_MAX_DECODE_WIDTH 8192U
 #define SDK_IMAGE_STREAM_DIRECT_SCALE_ROWS_PER_FEED 64U
