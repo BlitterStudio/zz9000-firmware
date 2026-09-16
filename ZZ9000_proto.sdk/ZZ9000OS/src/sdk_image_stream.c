@@ -20,31 +20,33 @@
 #include "png.h"
 
 #define SDK_IMAGE_STREAM_MAX_DIMENSION 8192U
-/* Coarse pre-header source-size filter; the sampling-layout-aware
- * JPEG coefficient-state cap is the precise bound, checked once the
- * SOF header is parsed. */
+/* Coarse pre-header source-size filter; the whole-image decode-state
+ * budget is the precise bound, checked once the image header is
+ * parsed (the SOF for JPEG, the IHDR for PNG). */
 #define SDK_IMAGE_STREAM_MAX_PIXELS    (24U * 1024U * 1024U)
 #define SDK_IMAGE_STREAM_MAX_FIT_SOURCE_PIXELS (256U * 1024U * 1024U)
-/* Whole-image JPEG coefficient state (MCU coefficient buffers) lives
- * in the ARM heap for the whole decode. Its size scales with the
- * sampling layout: 3 B/px for 4:2:0, 4 B/px for 4:2:2, 6 B/px for
- * 3-component 4:4:4, 8 B/px for 4-component (CMYK) 4:4:4. jmem_zz9k.c
- * has no backing store, so an image whose coefficient state exceeds
- * the budget must be rejected once the header is known, instead of
- * failing mid-decode against the 128 MiB newlib heap (lscript.ld).
+/* Whole-image decode state lives in the shared ARM decode heap for
+ * the whole session: a progressive JPEG holds the full-resolution
+ * MCU coefficient buffers (3 B/px for 4:2:0, 4 B/px for 4:2:2,
+ * 6 B/px for 3-component 4:4:4, 8 B/px for CMYK), and an interlaced
+ * PNG holds the full-image interlace buffer (output_height x
+ * transformed rowbytes) unless its rows combine directly into the
+ * destination. jmem_zz9k.c has no backing store, so a session whose
+ * decode state exceeds the budget must be rejected once the header is
+ * known, instead of failing mid-decode against the 128 MiB newlib
+ * heap (lscript.ld).
  *
- * The budget bounds the coefficient state of ALL live sessions, not
- * just one: the 128 MiB heap is shared by up to
- * SDK_MAX_IMAGE_SESSIONS, so a per-session check would let several
- * large decodes coexist and exhaust it. 72 MiB keeps the verified
- * hardware envelope (one 24 MP 4:2:0 decode transient ~72 MiB,
- * leaving ~56 MiB for everything else); for other layouts the
- * pixel-equivalent cap is the layout-safe ceiling (18 MP 4:2:2,
- * 12 MP 3-component 4:4:4, 9 MP CMYK). Baseline decodes allocate no
- * whole-image pool; reserving their share anyway is deliberate - it
- * only limits the concurrency of large baseline decodes and keeps
- * the accounting uniform. */
-#define SDK_IMAGE_STREAM_MAX_JPEG_COEFF_BYTES (72U * 1024U * 1024U)
+ * The budget bounds the decode state of ALL live sessions, not just
+ * one: the heap is shared by up to SDK_MAX_IMAGE_SESSIONS, so a
+ * per-session check would let several large decodes coexist and
+ * exhaust it. 72 MiB keeps the verified hardware envelope (one
+ * 24 MP 4:2:0 decode transient ~72 MiB, leaving ~56 MiB for
+ * everything else); for other layouts the pixel-equivalent cap is
+ * the layout-safe ceiling (18 MP 4:2:2, 12 MP 3-component 4:4:4,
+ * 9 MP CMYK). Decodes with no whole-image pool (baseline JPEG,
+ * non-interlaced or directly-combined interlaced PNG) commit 0,
+ * which is exact for them. */
+#define SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES (72U * 1024U * 1024U)
 /* 64 coefficients x 2 bytes, per component DCT block. */
 #define SDK_IMAGE_STREAM_JPEG_COEFF_BLOCK_BYTES 128U
 #define SDK_IMAGE_STREAM_MAX_DECODE_WIDTH 8192U
@@ -102,7 +104,7 @@ struct SDKImageStreamSession {
 	uint8_t png_interlaced;
 	uint8_t png_interlace_direct;
 	uint8_t header_ready;
-	uint32_t coefficient_committed;
+	uint32_t decode_state_committed;
 	uint8_t output_prepared;
 	uint8_t started;
 	uint8_t input_eof;
@@ -429,7 +431,7 @@ static void destroy_jpeg(struct SDKImageStreamSession *session)
 		jpeg_destroy_decompress(&session->cinfo);
 		session->jpeg_created = 0U;
 	}
-	session->coefficient_committed = 0U;
+	session->decode_state_committed = 0U;
 	session->header_ready = 0U;
 	session->output_prepared = 0U;
 	session->started = 0U;
@@ -546,20 +548,22 @@ static uint64_t jpeg_coefficient_state_bytes(
 }
 
 /*
- * Coefficient state already committed by live sessions. Charged into a
- * session's own coefficient_committed field (SCU-coherent, visible to
- * both cores) when its SOF header is accepted, and cleared in
- * destroy_jpeg(); the charge brackets the coefficient pool, which the
- * first feed (jpeg_start_decompress) allocates and the same teardown
- * paths free.
+ * Whole-image decode state already committed by live sessions.
+ * Charged into a session's own decode_state_committed field
+ * (SCU-coherent, visible to both cores) when its image header is
+ * accepted - the SOF for JPEG, the IHDR for PNG - and cleared in
+ * destroy_jpeg()/destroy_png(); the charge brackets the committed
+ * pool (the JPEG coefficient state that jpeg_start_decompress
+ * allocates on the first feed, the PNG interlace buffer allocated at
+ * the header stage), which the same teardown paths free.
  */
-static uint32_t jpeg_coefficient_committed_total(void)
+static uint32_t decode_state_committed_total(void)
 {
 	uint32_t total = 0U;
 	uint32_t i;
 
 	for (i = 0U; i < SDK_MAX_IMAGE_SESSIONS; i++)
-		total += image_sessions[i].coefficient_committed;
+		total += image_sessions[i].decode_state_committed;
 	return total;
 }
 
@@ -995,6 +999,7 @@ static void destroy_png(struct SDKImageStreamSession *session)
 		sdk_decode_heap_free(session->png_interlace_buffer);
 		session->png_interlace_buffer = 0;
 	}
+	session->decode_state_committed = 0U;
 	if (session->png_created) {
 		png_destroy_read_struct(&session->png_ptr, &session->png_info,
 		                        0);
@@ -1181,6 +1186,23 @@ static int png_write_combined_interlace_row(
 		                 session->output_format);
 	}
 	return 1;
+}
+
+/*
+ * Whole-image decode state an interlaced PNG session commits to the
+ * shared decode heap: the full-image interlace buffer
+ * (output_height x transformed rowbytes). The direct-combine path
+ * combines rows straight into the destination and commits nothing.
+ */
+static uint64_t png_decode_state_bytes(
+        const struct SDKImageStreamSession *session, png_size_t rowbytes)
+{
+	if (!session->png_interlaced ||
+	    png_interlace_can_combine_direct(session) ||
+	    rowbytes == 0U || rowbytes > 0xffffffffU) {
+		return 0U;
+	}
+	return (uint64_t)session->output_height * (uint32_t)rowbytes;
 }
 
 static int png_prepare_interlace_storage(
@@ -1405,10 +1427,22 @@ static void png_info_callback(png_structp png_ptr, png_infop info_ptr)
 		}
 	}
 
-	if (session->png_interlaced &&
-	    !png_prepare_interlace_storage(session, rowbytes)) {
-		png_fail(session, SDK_STATUS_NO_MEMORY,
-		         "PNG interlace storage unavailable");
+	if (session->png_interlaced) {
+		uint64_t state_bytes = png_decode_state_bytes(
+			session, rowbytes);
+
+		if (state_bytes != 0U &&
+		    (uint64_t)decode_state_committed_total() + state_bytes >
+		    (uint64_t)SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES) {
+			png_fail(session, SDK_STATUS_BAD_REQUEST,
+			         "PNG image exceeds decode state budget");
+		} else if (!png_prepare_interlace_storage(session, rowbytes)) {
+			png_fail(session, SDK_STATUS_NO_MEMORY,
+			         "PNG interlace storage unavailable");
+		} else {
+			session->decode_state_committed =
+			    (uint32_t)state_bytes;
+		}
 	}
 
 	session->header_ready = 1U;
@@ -1629,11 +1663,11 @@ static uint16_t process_jpeg_stream(struct SDKImageStreamSession *session,
 		}
 		coeff_bytes = jpeg_coefficient_state_bytes(session);
 		if (coeff_bytes == 0U ||
-		    (uint64_t)jpeg_coefficient_committed_total() + coeff_bytes >
-		    (uint64_t)SDK_IMAGE_STREAM_MAX_JPEG_COEFF_BYTES) {
+		    (uint64_t)decode_state_committed_total() + coeff_bytes >
+		    (uint64_t)SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES) {
 			return SDK_STATUS_BAD_REQUEST;
 		}
-		session->coefficient_committed = (uint32_t)coeff_bytes;
+		session->decode_state_committed = (uint32_t)coeff_bytes;
 		session->header_ready = 1U;
 	}
 
