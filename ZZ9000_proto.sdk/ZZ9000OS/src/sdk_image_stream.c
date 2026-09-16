@@ -25,14 +25,25 @@
  * SOF header is parsed. */
 #define SDK_IMAGE_STREAM_MAX_PIXELS    (24U * 1024U * 1024U)
 #define SDK_IMAGE_STREAM_MAX_FIT_SOURCE_PIXELS (256U * 1024U * 1024U)
-/* Whole-image JPEG coefficient state (MCU coefficient buffers) lives in
- * the ARM heap for the whole decode. Its size scales with the sampling
- * layout: 3 B/px for 4:2:0, 4 B/px for 4:2:2, 6 B/px for 3-component
- * 4:4:4, 8 B/px for 4-component (CMYK) 4:4:4. jmem_zz9k.c has no
- * backing store, so an over-budget image must be rejected once the
- * header is known, instead of failing mid-decode against the 128 MiB
- * newlib heap (lscript.ld). 72 MiB keeps the decode transient within
- * the same envelope as the 24 MP 4:2:0 cap. */
+/* Whole-image JPEG coefficient state (MCU coefficient buffers) lives
+ * in the ARM heap for the whole decode. Its size scales with the
+ * sampling layout: 3 B/px for 4:2:0, 4 B/px for 4:2:2, 6 B/px for
+ * 3-component 4:4:4, 8 B/px for 4-component (CMYK) 4:4:4. jmem_zz9k.c
+ * has no backing store, so an image whose coefficient state exceeds
+ * the budget must be rejected once the header is known, instead of
+ * failing mid-decode against the 128 MiB newlib heap (lscript.ld).
+ *
+ * The budget bounds the coefficient state of ALL live sessions, not
+ * just one: the 128 MiB heap is shared by up to
+ * SDK_MAX_IMAGE_SESSIONS, so a per-session check would let several
+ * large decodes coexist and exhaust it. 72 MiB keeps the verified
+ * hardware envelope (one 24 MP 4:2:0 decode transient ~72 MiB,
+ * leaving ~56 MiB for everything else); for other layouts the
+ * pixel-equivalent cap is the layout-safe ceiling (18 MP 4:2:2,
+ * 12 MP 3-component 4:4:4, 9 MP CMYK). Baseline decodes allocate no
+ * whole-image pool; reserving their share anyway is deliberate - it
+ * only limits the concurrency of large baseline decodes and keeps
+ * the accounting uniform. */
 #define SDK_IMAGE_STREAM_MAX_JPEG_COEFF_BYTES (72U * 1024U * 1024U)
 /* 64 coefficients x 2 bytes, per component DCT block. */
 #define SDK_IMAGE_STREAM_JPEG_COEFF_BLOCK_BYTES 128U
@@ -91,6 +102,7 @@ struct SDKImageStreamSession {
 	uint8_t png_interlaced;
 	uint8_t png_interlace_direct;
 	uint8_t header_ready;
+	uint32_t coefficient_committed;
 	uint8_t output_prepared;
 	uint8_t started;
 	uint8_t input_eof;
@@ -417,6 +429,7 @@ static void destroy_jpeg(struct SDKImageStreamSession *session)
 		jpeg_destroy_decompress(&session->cinfo);
 		session->jpeg_created = 0U;
 	}
+	session->coefficient_committed = 0U;
 	session->header_ready = 0U;
 	session->output_prepared = 0U;
 	session->started = 0U;
@@ -495,14 +508,15 @@ static int source_dimensions_valid(
 }
 
 /*
- * Bound the whole-image JPEG coefficient state by the actual sampling
- * layout once the SOF header is parsed. A static pixel cap is only safe
- * for one layout (the 24 MP pixel cap presumes 4:2:0): the same pixel
- * count at 4:4:4 needs twice the coefficient memory. The per-component
- * block counts mirror libjpeg's width_in_blocks/height_in_blocks sizing
- * for the whole-image huffman pool.
+ * Compute the whole-image JPEG coefficient state (bytes) from the
+ * sampling layout once the SOF header is parsed. A static pixel cap is
+ * only safe for one layout (the 24 MP pixel cap presumes 4:2:0): the
+ * same pixel count at 4:4:4 needs twice the coefficient memory. The
+ * per-component block counts mirror libjpeg's width_in_blocks/
+ * height_in_blocks sizing for the whole-image huffman pool.
+ * Returns 0 when the SOF header is malformed.
  */
-static int jpeg_coefficient_state_valid(
+static uint64_t jpeg_coefficient_state_bytes(
         const struct SDKImageStreamSession *session)
 {
 	const struct jpeg_decompress_struct *cinfo = &session->cinfo;
@@ -512,7 +526,7 @@ static int jpeg_coefficient_state_valid(
 	unsigned int i;
 
 	if (cinfo->num_components <= 0 || max_h == 0U || max_v == 0U)
-		return 0;
+		return 0U;
 	for (i = 0U; i < (unsigned int)cinfo->num_components; i++) {
 		const jpeg_component_info *comp =
 		    &cinfo->comp_info[i];
@@ -520,7 +534,7 @@ static int jpeg_coefficient_state_valid(
 		uint32_t blocks_y;
 
 		if (comp->h_samp_factor == 0U || comp->v_samp_factor == 0U)
-			return 0;
+			return 0U;
 		blocks_x = ((uint32_t)cinfo->image_width * comp->h_samp_factor +
 		    max_h * 8U - 1U) / (max_h * 8U);
 		blocks_y = ((uint32_t)cinfo->image_height * comp->v_samp_factor +
@@ -528,8 +542,25 @@ static int jpeg_coefficient_state_valid(
 		coeff_bytes += (uint64_t)blocks_x * blocks_y *
 		    SDK_IMAGE_STREAM_JPEG_COEFF_BLOCK_BYTES;
 	}
-	return coeff_bytes <=
-	    (uint64_t)SDK_IMAGE_STREAM_MAX_JPEG_COEFF_BYTES;
+	return coeff_bytes;
+}
+
+/*
+ * Coefficient state already committed by live sessions. Charged into a
+ * session's own coefficient_committed field (SCU-coherent, visible to
+ * both cores) when its SOF header is accepted, and cleared in
+ * destroy_jpeg(); the charge brackets the coefficient pool, which the
+ * first feed (jpeg_start_decompress) allocates and the same teardown
+ * paths free.
+ */
+static uint32_t jpeg_coefficient_committed_total(void)
+{
+	uint32_t total = 0U;
+	uint32_t i;
+
+	for (i = 0U; i < SDK_MAX_IMAGE_SESSIONS; i++)
+		total += image_sessions[i].coefficient_committed;
+	return total;
 }
 
 static int direct_destination_valid(const struct SDKImageStreamSession *session,
@@ -1566,6 +1597,7 @@ static uint16_t process_jpeg_stream(struct SDKImageStreamSession *session,
 	uint32_t direct_rows_written;
 	uint16_t status;
 	int header_status;
+	uint64_t coeff_bytes;
 
 	if (create_jpeg_if_needed(session) != SDK_STATUS_OK)
 		return SDK_STATUS_INTERNAL_ERROR;
@@ -1595,9 +1627,13 @@ static uint16_t process_jpeg_stream(struct SDKImageStreamSession *session,
 		if (!source_dimensions_valid(session)) {
 			return SDK_STATUS_BAD_REQUEST;
 		}
-		if (!jpeg_coefficient_state_valid(session)) {
+		coeff_bytes = jpeg_coefficient_state_bytes(session);
+		if (coeff_bytes == 0U ||
+		    (uint64_t)jpeg_coefficient_committed_total() + coeff_bytes >
+		    (uint64_t)SDK_IMAGE_STREAM_MAX_JPEG_COEFF_BYTES) {
 			return SDK_STATUS_BAD_REQUEST;
 		}
+		session->coefficient_committed = (uint32_t)coeff_bytes;
 		session->header_ready = 1U;
 	}
 
