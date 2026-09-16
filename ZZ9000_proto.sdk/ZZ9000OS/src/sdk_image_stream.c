@@ -20,11 +20,22 @@
 #include "png.h"
 
 #define SDK_IMAGE_STREAM_MAX_DIMENSION 8192U
-/* Progressive JPEG decode holds the whole image's MCU coefficient state
- * in the ARM heap (~3 bytes/pixel for 4:2:0); 24 MP caps that at
- * ~72 MB transient. */
+/* Coarse pre-header source-size filter; the sampling-layout-aware
+ * JPEG coefficient-state cap is the precise bound, checked once the
+ * SOF header is parsed. */
 #define SDK_IMAGE_STREAM_MAX_PIXELS    (24U * 1024U * 1024U)
 #define SDK_IMAGE_STREAM_MAX_FIT_SOURCE_PIXELS (256U * 1024U * 1024U)
+/* Whole-image JPEG coefficient state (MCU coefficient buffers) lives in
+ * the ARM heap for the whole decode. Its size scales with the sampling
+ * layout: 3 B/px for 4:2:0, 4 B/px for 4:2:2, 6 B/px for 3-component
+ * 4:4:4, 8 B/px for 4-component (CMYK) 4:4:4. jmem_zz9k.c has no
+ * backing store, so an over-budget image must be rejected once the
+ * header is known, instead of failing mid-decode against the 128 MiB
+ * newlib heap (lscript.ld). 72 MiB keeps the decode transient within
+ * the same envelope as the 24 MP 4:2:0 cap. */
+#define SDK_IMAGE_STREAM_MAX_JPEG_COEFF_BYTES (72U * 1024U * 1024U)
+/* 64 coefficients x 2 bytes, per component DCT block. */
+#define SDK_IMAGE_STREAM_JPEG_COEFF_BLOCK_BYTES 128U
 #define SDK_IMAGE_STREAM_MAX_DECODE_WIDTH 8192U
 #define SDK_IMAGE_STREAM_DIRECT_SCALE_ROWS_PER_FEED 64U
 
@@ -481,6 +492,44 @@ static int source_dimensions_valid(
 		return 0;
 	}
 	return 1;
+}
+
+/*
+ * Bound the whole-image JPEG coefficient state by the actual sampling
+ * layout once the SOF header is parsed. A static pixel cap is only safe
+ * for one layout (the 24 MP pixel cap presumes 4:2:0): the same pixel
+ * count at 4:4:4 needs twice the coefficient memory. The per-component
+ * block counts mirror libjpeg's width_in_blocks/height_in_blocks sizing
+ * for the whole-image huffman pool.
+ */
+static int jpeg_coefficient_state_valid(
+        const struct SDKImageStreamSession *session)
+{
+	const struct jpeg_decompress_struct *cinfo = &session->cinfo;
+	uint32_t max_h = (uint32_t)cinfo->max_h_samp_factor;
+	uint32_t max_v = (uint32_t)cinfo->max_v_samp_factor;
+	uint64_t coeff_bytes = 0U;
+	unsigned int i;
+
+	if (cinfo->num_components <= 0 || max_h == 0U || max_v == 0U)
+		return 0;
+	for (i = 0U; i < (unsigned int)cinfo->num_components; i++) {
+		const jpeg_component_info *comp =
+		    &cinfo->comp_info[i];
+		uint32_t blocks_x;
+		uint32_t blocks_y;
+
+		if (comp->h_samp_factor == 0U || comp->v_samp_factor == 0U)
+			return 0;
+		blocks_x = ((uint32_t)cinfo->image_width * comp->h_samp_factor +
+		    max_h * 8U - 1U) / (max_h * 8U);
+		blocks_y = ((uint32_t)cinfo->image_height * comp->v_samp_factor +
+		    max_v * 8U - 1U) / (max_v * 8U);
+		coeff_bytes += (uint64_t)blocks_x * blocks_y *
+		    SDK_IMAGE_STREAM_JPEG_COEFF_BLOCK_BYTES;
+	}
+	return coeff_bytes <=
+	    (uint64_t)SDK_IMAGE_STREAM_MAX_JPEG_COEFF_BYTES;
 }
 
 static int direct_destination_valid(const struct SDKImageStreamSession *session,
@@ -1544,6 +1593,9 @@ static uint16_t process_jpeg_stream(struct SDKImageStreamSession *session,
 		session->image_width = (uint32_t)session->cinfo.image_width;
 		session->image_height = (uint32_t)session->cinfo.image_height;
 		if (!source_dimensions_valid(session)) {
+			return SDK_STATUS_BAD_REQUEST;
+		}
+		if (!jpeg_coefficient_state_valid(session)) {
 			return SDK_STATUS_BAD_REQUEST;
 		}
 		session->header_ready = 1U;
