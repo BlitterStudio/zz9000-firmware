@@ -1149,7 +1149,18 @@ module MNTZorro_v0_1_S00_AXI
   localparam [15:0] VCAP_PHASE_COMMIT_LO = 16'h024a;
   localparam [15:0] VCAP_PHASE_STATUS = 16'h024c;
   localparam [15:0] VCAP_PHASE_STATUS_LO = 16'h024e;
+`ifdef VCAP_C28
+  localparam [31:0] VCAP_PHASE_CAPABILITY_VALUE = 32'h56510206;
+`else
   localparam [31:0] VCAP_PHASE_CAPABILITY_VALUE = 32'h56510106;
+`endif
+  localparam [15:0] VCAP_CLOCK_STATUS = 16'h0250;
+  localparam [15:0] VCAP_CLOCK_COUNTS = 16'h0254;
+  localparam [15:0] VCAP_CAL_STATUS = 16'h0260;
+  localparam [15:0] VCAP_CAL_ARM = 16'h0264;
+  localparam [15:0] VCAP_CAL_ADDRESS = 16'h026a;
+  localparam [15:0] VCAP_CAL_DATA = 16'h026c;
+  localparam [15:0] VCAP_CAL_GEOMETRY = 16'h0270;
   localparam [15:0] VCAP_PHASE_COMMIT_TOKEN = 16'hf05a;
   localparam [15:0] SDK_REG_OFFSET_MASK = 16'h0fff;
   localparam [31:0] SDK_CTRL_DOORBELL_CLEAR = 32'h20000000;
@@ -1392,105 +1403,43 @@ module MNTZorro_v0_1_S00_AXI
       .dest_out(vcap_line_payload_axi)
   );
 
-  reg E7M_PSEN = 0;
-  reg E7M_PSINCDEC = 0;
-
-  wire E7M_PSDONE;
-
-  /* Runtime capture-phase engine. The MMCM fine phase shifter advances or
-   * retards every fine-phase CLKOUT by 1/56 VCO period per acknowledged
-   * PSEN pulse. Two front doors set the same signed step target: the ARM
-   * video-control op 31 (data[15:0], signed) and the host SDK window
-   * staged/commit registers. PSCLK is S_AXI_ACLK, so PSDONE is sampled
-   * directly. E7M_RESET/E7M_PWRDWN stay deasserted, and the applied offset
-   * only loses meaning across a power cycle, matching the register reset. */
+  // Capture clock control begins (also extracted by the UNISIM regression).
+`ifdef VCAP_C28
+  localparam integer VCAP_C28_ENABLE = 1;
+`else
+  localparam integer VCAP_C28_ENABLE = 0;
+`endif
+  wire E7M_PSEN, E7M_PSINCDEC, E7M_RESET;
+  wire E7M_PSDONE, E7M_LOCKED;
+  wire E7M_PWRDWN = 1'b0;
   reg [31:0] vcap_phase_staged = 0;
   reg vcap_phase_commit_toggle = 0;
   reg vcap_phase_commit_seen = 0;
-  reg [9:0] vcap_phase_goal = 0; /* signed steps from the build phase */
-  reg [9:0] vcap_phase_applied = 0; /* signed steps from the build phase */
-  reg vcap_phase_dir = 0;
-  reg vcap_phase_busy = 0;
-  reg vcap_phase_done = 0; /* sticky target-reached per commit */
-  reg vcap_phase_error = 0; /* sticky out-of-range commit */
-  reg [1:0] vcap_phase_state = 0;
-  wire [15:0] vcap_phase_staged_value = vcap_phase_staged[15:0];
-  wire vcap_phase_staged_in_range =
-      ($signed(vcap_phase_staged_value) <= 255) &&
-      ($signed(vcap_phase_staged_value) >= -255);
-  wire [15:0] vcap_phase_op_value = axi_reg3[15:0];
-  wire vcap_phase_op_in_range =
-      ($signed(vcap_phase_op_value) <= 255) &&
-      ($signed(vcap_phase_op_value) >= -255);
-  wire video_control_axi_op31_event =
-      axi_reg2[31] && !video_control_axi_strobe_d && axi_reg2[7:0] == 8'd31;
-  wire vcap_phase_goal_gt_applied =
-      $signed(vcap_phase_goal) > $signed(vcap_phase_applied);
-
-  localparam [1:0] VCAP_PHASE_IDLE = 2'd0;
-  localparam [1:0] VCAP_PHASE_PSEN = 2'd1;
-  localparam [1:0] VCAP_PHASE_WAIT = 2'd2;
-
+  wire [11:0] vcap_phase_applied;
+  wire vcap_phase_busy, vcap_phase_done, vcap_phase_error;
+  wire vcap_clock_ready, vcap_clock_frequency_valid, vcap_clock_locked;
+  wire vcap_clock_phase_fault;
+  wire [15:0] vcap_c28_count, vcap_e7m_count;
+  wire vcap_phase_arm_request = axi_reg2[31] &&
+      !video_control_axi_strobe_d &&
+      axi_reg2[7:0] == (VCAP_C28_ENABLE ? 8'd32 : 8'd31);
+  wire vcap_phase_host_request = vcap_phase_commit_seen != vcap_phase_commit_toggle;
   always @(posedge S_AXI_ACLK) begin
-      if (!S_AXI_ARESETN) begin
-          E7M_PSEN <= 1'b0;
-          E7M_PSINCDEC <= 1'b0;
-          vcap_phase_commit_seen <= 1'b0;
-          vcap_phase_goal <= 10'sd0;
-          vcap_phase_applied <= 10'sd0;
-          vcap_phase_dir <= 1'b0;
-          vcap_phase_busy <= 1'b0;
-          vcap_phase_done <= 1'b0;
-          vcap_phase_error <= 1'b0;
-          vcap_phase_state <= VCAP_PHASE_IDLE;
-      end else begin
-          if (vcap_phase_commit_seen != vcap_phase_commit_toggle) begin
-              vcap_phase_commit_seen <= vcap_phase_commit_toggle;
-              if (vcap_phase_staged_in_range)
-                  vcap_phase_goal <= vcap_phase_staged_value[9:0];
-              vcap_phase_error <= !vcap_phase_staged_in_range;
-              vcap_phase_done <= 1'b0;
-          end
-          if (video_control_axi_op31_event) begin
-              if (vcap_phase_op_in_range)
-                  vcap_phase_goal <= vcap_phase_op_value[9:0];
-              vcap_phase_error <= !vcap_phase_op_in_range;
-              vcap_phase_done <= 1'b0;
-          end
-          case (vcap_phase_state)
-              VCAP_PHASE_IDLE: begin
-                  vcap_phase_busy <= 1'b0;
-                  if (vcap_phase_applied == vcap_phase_goal) begin
-                      vcap_phase_done <= 1'b1;
-                  end else begin
-                      vcap_phase_dir <= vcap_phase_goal_gt_applied;
-                      E7M_PSINCDEC <= vcap_phase_goal_gt_applied;
-                      E7M_PSEN <= 1'b1;
-                      vcap_phase_busy <= 1'b1;
-                      vcap_phase_state <= VCAP_PHASE_PSEN;
-                  end
-              end
-              VCAP_PHASE_PSEN: begin
-                  E7M_PSEN <= 1'b0;
-                  vcap_phase_state <= VCAP_PHASE_WAIT;
-              end
-              VCAP_PHASE_WAIT: begin
-                  if (E7M_PSDONE) begin
-                      vcap_phase_applied <= vcap_phase_applied +
-                          (vcap_phase_dir ? 10'sd1 : -10'sd1);
-                      /* Re-enter IDLE so a goal that changed mid-stepping
-                       * gets a fresh direction decision; IDLE also clears
-                       * busy and retimes the done flag. */
-                      vcap_phase_state <= VCAP_PHASE_IDLE;
-                  end
-              end
-              default: vcap_phase_state <= VCAP_PHASE_IDLE;
-          endcase
-      end
+      vcap_phase_commit_seen <= vcap_phase_commit_toggle;
   end
-
-  reg E7M_RESET = 0;
-  reg E7M_PWRDWN = 0;
+  videocap_clock_control #(.C28_MODE(VCAP_C28_ENABLE)) capture_clock_control (
+      .clk(S_AXI_ACLK), .resetn(S_AXI_ARESETN),
+      .c28(ZORRO_C28D), .e7m(ZORRO_E7M),
+      .locked(E7M_LOCKED), .psdone(E7M_PSDONE),
+      .request(vcap_phase_arm_request || vcap_phase_host_request),
+      .target(vcap_phase_arm_request ? axi_reg3[15:0] : vcap_phase_staged[15:0]),
+      .psen(E7M_PSEN), .inc(E7M_PSINCDEC), .mmcm_reset(E7M_RESET),
+      .ready(vcap_clock_ready), .applied(vcap_phase_applied),
+      .busy(vcap_phase_busy), .done(vcap_phase_done), .error(vcap_phase_error),
+      .phase_fault(vcap_clock_phase_fault), .c28_count(vcap_c28_count),
+      .e7m_count(vcap_e7m_count), .frequency_valid(vcap_clock_frequency_valid),
+      .lock_seen(vcap_clock_locked)
+  );
 
   // video capture clock adjustment
   MMCME2_ADV #(
@@ -1502,7 +1451,9 @@ module MNTZorro_v0_1_S00_AXI
                .CLKFBOUT_USE_FINE_PS("FALSE"),
                .CLKIN1_PERIOD(35.000000),
                .CLKIN2_PERIOD(0.000000),
-`ifdef ZORRO3
+`ifdef VCAP_C28
+               .CLKOUT0_DIVIDE_F(32.000000),
+`elsif ZORRO3
                .CLKOUT0_DIVIDE_F(8.000000),
 `elsif VCAP_DENISE_ADAPTER
                .CLKOUT0_DIVIDE_F(16.000000),
@@ -1520,7 +1471,11 @@ module MNTZorro_v0_1_S00_AXI
 `endif
 
                .CLKOUT0_USE_FINE_PS("TRUE"),
+`ifdef VCAP_C28
+               .CLKOUT1_DIVIDE(128),
+`else
                .CLKOUT1_DIVIDE(32),
+`endif
                .CLKOUT1_DUTY_CYCLE(0.500000),
 
 `ifdef ZORRO3
@@ -1544,13 +1499,17 @@ module MNTZorro_v0_1_S00_AXI
                .SS_EN("FALSE"),
                .SS_MODE("CENTER_HIGH"),
                .SS_MOD_PERIOD(10000),
-               .STARTUP_WAIT("TRUE"))
+               .STARTUP_WAIT("FALSE"))
   mmcm_adv_inst
     (.CLKFBIN(clkfbout_zz9000_ps_clk_wiz_1_0),
      .CLKFBOUT(clkfbout_zz9000_ps_clk_wiz_1_0),
      //.CLKFBOUTB(NLW_mmcm_adv_inst_CLKFBOUTB_UNCONNECTED),
      //.CLKFBSTOPPED(NLW_mmcm_adv_inst_CLKFBSTOPPED_UNCONNECTED),
+`ifdef VCAP_C28
+     .CLKIN1(ZORRO_C28D),
+`else
      .CLKIN1(ZORRO_E7M),
+`endif
      .CLKIN2(1'b0),
      .CLKINSEL(1'b1),
      //.CLKINSTOPPED(NLW_mmcm_adv_inst_CLKINSTOPPED_UNCONNECTED),
@@ -1566,13 +1525,14 @@ module MNTZorro_v0_1_S00_AXI
      //.DO(NLW_mmcm_adv_inst_DO_UNCONNECTED[15:0]),
      //.DRDY(NLW_mmcm_adv_inst_DRDY_UNCONNECTED),
      .DWE(1'b0),
-     //.LOCKED(NLW_mmcm_adv_inst_LOCKED_UNCONNECTED),
+     .LOCKED(E7M_LOCKED),
      .PSCLK(S_AXI_ACLK),
      .PSDONE(E7M_PSDONE),
      .PSEN(E7M_PSEN),
      .PSINCDEC(E7M_PSINCDEC),
      .PWRDWN(E7M_PWRDWN),
      .RST(E7M_RESET));
+  // Capture clock control ends.
 
   videocap_control_source #(
       .FULLRATE(`VCAP_FULLRATE_INT)
@@ -1593,6 +1553,19 @@ module MNTZorro_v0_1_S00_AXI
       .applied_effective_crop(videocap_control_applied_effective_crop)
   );
 
+  reg vcap_cal_arm = 0;
+  reg [9:0] vcap_cal_address = 0;
+  wire [31:0] vcap_cal_status, vcap_cal_data, vcap_cal_geometry;
+  (* ASYNC_REG = "TRUE" *) reg [2:0] vcap_reset_sync = 3'b111;
+  always @(posedge e7m_shifted or negedge vcap_clock_ready)
+      if (!vcap_clock_ready) vcap_reset_sync <= 3'b111;
+      else vcap_reset_sync <= {vcap_reset_sync[1:0], 1'b0};
+  wire vcap_sampler_ready;
+  (* ASYNC_REG = "TRUE" *) reg [2:0] vcap_ready_sync = 0;
+  always @(posedge S_AXI_ACLK)
+      vcap_ready_sync <= {vcap_ready_sync[1:0], vcap_sampler_ready};
+  wire vcap_capture_ready_axi = vcap_clock_ready && vcap_ready_sync[2];
+
   videocap_sampler #(
       .BUF_DEPTH(2048),
       .RGB_MODE(`VCAP_RGB_MODE),
@@ -1602,6 +1575,10 @@ module MNTZorro_v0_1_S00_AXI
       .PROBE_SOURCE_X(VCAP_PROBE_SOURCE_X)
   ) videocap_sampler_inst (
       .cap_clk(e7m_shifted),
+      .cap_reset(vcap_reset_sync[2]), .capture_ready(vcap_sampler_ready),
+      .cal_arm(vcap_cal_arm), .cal_address(vcap_cal_address),
+      .cal_status(vcap_cal_status), .cal_data(vcap_cal_data),
+      .cal_geometry(vcap_cal_geometry), .axi_resetn(S_AXI_ARESETN),
       .grid_ref(e7m_shifted180),
       .vcap_vsync(VCAP_VSYNC),
       .vcap_hsync(VCAP_HSYNC),
@@ -1720,6 +1697,8 @@ module MNTZorro_v0_1_S00_AXI
   reg [31:0] m01_axi_awaddr_out;
   reg m01_axi_awvalid_out = 0;
   reg m01_axi_wvalid_out = 0;
+  reg m01_axi_wdata_hold = 0;
+  reg [31:0] m01_axi_wdata_held;
 
   reg [31:0] vcap_probe_data [0:15];
   reg [31:0] vcap_probe_owner [0:15];
@@ -1777,7 +1756,7 @@ module MNTZorro_v0_1_S00_AXI
 
   assign m01_axi_awaddr  = m01_axi_awaddr_out;
   assign m01_axi_awvalid = m01_axi_awvalid_out;
-  assign m01_axi_wdata   = vcap_rdata;
+  assign m01_axi_wdata   = m01_axi_wdata_hold ? m01_axi_wdata_held : vcap_rdata;
   assign m01_axi_wstrb   = 4'b1111;
   assign m01_axi_wvalid  = m01_axi_wvalid_out;
 
@@ -1817,6 +1796,7 @@ module MNTZorro_v0_1_S00_AXI
   reg [9:0] videocap_y_sync2;
   reg vcap_line_toggle_seen = 0;
   reg videocap_bank_sync = 0;
+  reg vcap_loss_pending = 0;
 
   // pipeline stages for videocap save addr calculation
   reg [23:0] vc_saveaddr1;
@@ -1871,7 +1851,7 @@ module MNTZorro_v0_1_S00_AXI
      * the issue #76 follow-up video).  Tokens past the letterbox bound
      * are consumed without updating the row, preserving the top/bottom
      * boxing of noisy lines. */
-    if (vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
+    if (vcap_capture_ready_axi && vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
       vcap_line_toggle_seen <= vcap_line_payload_axi[11];
       videocap_bank_sync <= vcap_line_payload_axi[10];
       if (vcap_line_payload_axi[9:0] < videocap_ymax_sync)
@@ -1883,7 +1863,7 @@ module MNTZorro_v0_1_S00_AXI
     else
       videocap_ymax_sync <= vcap_ymax;
 
-    if (vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
+    if (vcap_capture_ready_axi && vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
       vcap_line_toggle_seen <= vcap_line_payload_axi[11];
       videocap_bank_sync <= vcap_line_payload_axi[10];
       /* Full-width tokens are pre-normalized; filtered tokens follow the
@@ -1909,7 +1889,7 @@ module MNTZorro_v0_1_S00_AXI
     // A new capture row appears; the in-flight row keeps its frozen
     // vc_row_base/vc_row_line until it completes, so this handoff is
     // safe even while the previous row's bursts are still draining.
-    if (videocap_save_line_done!=videocap_y_sync) begin
+    if (vcap_capture_ready_axi && videocap_save_line_done!=videocap_y_sync) begin
       vc_saving_line <= videocap_y_sync;
       vc_saving_bank <= videocap_bank_sync;
     end
@@ -1924,7 +1904,24 @@ module MNTZorro_v0_1_S00_AXI
       m01_axi_wvalid_out  <= 0;
       m01_axi_awvalid_out <= 0;
       m01_axi_wlast <= 0;
+      m01_axi_wdata_hold <= 0;
+      vcap_loss_pending <= 0;
     end else begin
+      // Keep loss until idle even when readiness returns during a stalled
+      // burst. Its already-presented AW and sixteen W beats must drain.
+      if (!vcap_capture_ready_axi)
+        vcap_loss_pending <= 1;
+
+      // The BRAM output refreshes even at a fixed address. Capture the word
+      // on its first stalled VALID edge, before a simultaneous RAM read can
+      // replace it, and hold through acceptance if capture reuses the bank.
+      // Latching in state 5 instead would sample the previous address's word.
+      if (!m01_axi_wvalid_out || m01_axi_wready)
+        m01_axi_wdata_hold <= 0;
+      else if (videocap_save_state == 1 && !m01_axi_wdata_hold) begin
+        m01_axi_wdata_held <= vcap_rdata;
+        m01_axi_wdata_hold <= 1;
+      end
 
       // one-hot encoded
       case (videocap_save_state)
@@ -1965,7 +1962,14 @@ module MNTZorro_v0_1_S00_AXI
           vc_beat <= 0;
           m01_axi_wlast <= 0;
 
-          if (videocap_save_x >= videocap_pitch_sync) begin
+          if (!vcap_capture_ready_axi || vcap_loss_pending) begin
+            vcap_loss_pending <= !vcap_capture_ready_axi;
+            videocap_save_x <= 0;
+            videocap_save_line_done <= 10'h3ff;
+            vc_saving_line <= 10'h3ff;
+            videocap_y_sync <= 10'h3ff;
+            vcap_line_toggle_seen <= vcap_line_payload_axi[11];
+          end else if (videocap_save_x >= videocap_pitch_sync) begin
             // Completed the row that was actually written, not whatever
             // vc_saving_line points at now.
             videocap_save_line_done <= vc_row_line;
@@ -1993,7 +1997,7 @@ module MNTZorro_v0_1_S00_AXI
         end
         4'h4: begin
           // videocap is disabled, lets wait here
-          if (videocap_mode_sync) begin
+          if (videocap_mode_sync && vcap_capture_ready_axi) begin
             videocap_save_state <= 0;
             // Restart at the next row origin so the freeze regs relatch
             // from the current mode instead of resuming a stale x into
@@ -2007,7 +2011,8 @@ module MNTZorro_v0_1_S00_AXI
         end
         4'h5: begin
           // The BRAM address has remained stable for a complete AXI clock.
-          // WDATA now stays fixed even if WREADY stalls this beat.
+          // Its next word appears with WVALID; the skid hold preserves it
+          // if WREADY stalls and the capture bank is subsequently reused.
           // Without interconnect stalls, the resulting one-cycle bubble per
           // beat writes a 1280-word line in about 27 us at 100 MHz, leaving
           // ample margin inside a PAL/NTSC line.
@@ -3057,10 +3062,23 @@ module MNTZorro_v0_1_S00_AXI
             VCAP_PHASE_CAPABILITY_LO: begin
               rr_data <= VCAP_PHASE_CAPABILITY_VALUE;
             end
+            VCAP_CLOCK_STATUS, (VCAP_CLOCK_STATUS + 2):
+              rr_data <= {27'b0, (VCAP_C28_ENABLE != 0), vcap_clock_phase_fault,
+                          vcap_clock_ready, vcap_clock_locked, vcap_clock_frequency_valid};
+            VCAP_CLOCK_COUNTS, (VCAP_CLOCK_COUNTS + 2):
+              rr_data <= {vcap_e7m_count, vcap_c28_count};
+            VCAP_CAL_STATUS, (VCAP_CAL_STATUS + 2): rr_data <= vcap_cal_status;
+            VCAP_CAL_DATA, (VCAP_CAL_DATA + 2): rr_data <= vcap_cal_data;
+            VCAP_CAL_GEOMETRY, (VCAP_CAL_GEOMETRY + 2): rr_data <= vcap_cal_geometry;
             VCAP_PHASE_STATUS,
             VCAP_PHASE_STATUS_LO: begin
+`ifdef VCAP_C28
+              rr_data <= {16'b0, vcap_clock_ready, vcap_phase_error,
+                          vcap_phase_done, vcap_phase_busy, vcap_phase_applied};
+`else
               rr_data <= {19'b0, vcap_phase_error, vcap_phase_done,
                           vcap_phase_busy, vcap_phase_applied[9:0]};
+`endif
             end
             VCAP_DIAG_CAPABILITY,
             VCAP_DIAG_CAPABILITY_LO: begin
@@ -3195,6 +3213,9 @@ module MNTZorro_v0_1_S00_AXI
               videocap_control_staged_raw[31:16] <= regdata_in;
             VCAP_LIVE_STAGED_RAW_LO:
               videocap_control_staged_raw[15:0] <= regdata_in;
+            VCAP_CAL_ARM:
+              if (regdata_in == 16'hca1c) vcap_cal_arm <= ~vcap_cal_arm;
+            VCAP_CAL_ADDRESS: vcap_cal_address <= regdata_in[9:0];
             VCAP_PHASE_TARGET_HI:
               vcap_phase_staged[31:16] <= regdata_in;
             VCAP_PHASE_TARGET_LO:

@@ -347,6 +347,18 @@ def main():
     committed = VariantConfig("committed default (zorro3)", rtl)
     check_variant(committed, dict(VIDEO_SLOT, bus_defines=("ZORRO3",)))
 
+    # The opt-in source uses a legal physical VCO and preserves full-rate
+    # pixel/grid frequencies without inheriting the legacy divider.
+    c28 = VariantConfig("A4000 C28 candidate", "`define VCAP_C28\n" + rtl)
+    check_variant(c28, dict(VIDEO_SLOT, CLKOUT0_DIVIDE_F="32",
+                            bus_defines=("ZORRO3",)))
+    for param, expected in (("CLKFBOUT_MULT_F", 32),
+                            ("DIVCLK_DIVIDE", 1), ("CLKOUT1_DIVIDE", 128)):
+        if float(c28.mmcm(param) or 0) != expected:
+            die(c28, param, f"expected {expected}")
+    if not c28.has(".CLKIN1(ZORRO_C28D)"):
+        die(c28, "clock source", "C28 must feed the capture MMCM")
+
     expectations = {
         "zorro3": dict(VIDEO_SLOT, bus_defines=("ZORRO3", "VARIANT_Z3_FASTRAM")),
         "zorro3-nofast": dict(VIDEO_SLOT, bus_defines=("ZORRO3",)),

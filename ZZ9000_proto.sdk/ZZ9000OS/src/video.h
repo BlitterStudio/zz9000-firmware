@@ -102,6 +102,13 @@ static inline uint32_t videocap_control_width_only(uint32_t full_width)
  * direct-register window at 0x0240..0x024e. */
 #define MNTVF_OP_VIDEOCAP_PHASE 31
 
+/* C28-input MMCM phase offset, signed 16-bit steps relative to the routed
+ * default. The C28 clock has 1792 fine steps per capture period; canonical
+ * range -896..895. C28 bitstreams accept this op and ignore legacy op 31;
+ * legacy bitstreams ignore this op. Stored legacy values are never scaled
+ * or reinterpreted as a C28 calibration. */
+#define MNTVF_OP_VIDEOCAP_C28_PHASE 32
+
 enum zz_dpms_level {
 	ZZ_DPMS_ON,
 	ZZ_DPMS_STANDBY,

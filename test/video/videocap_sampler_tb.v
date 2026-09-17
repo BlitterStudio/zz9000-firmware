@@ -193,7 +193,8 @@ videocap_sampler #(
     .PROBE_LINE(0),
     .PROBE_SOURCE_X(32)
 ) dut (
-    .cap_clk(cap_clk),
+    .cap_clk(cap_clk), .cap_reset(1'b0), .axi_resetn(1'b1),
+    .cal_arm(1'b0), .cal_address(10'd0),
     .grid_ref(grid_ref),
     .vcap_vsync(vsync),
     .vcap_hsync(hsync),
@@ -245,7 +246,8 @@ videocap_sampler #(
     .CSYNC_VSYNC(0),
     .FULLRATE(0)
 ) legacy_dut (
-    .cap_clk(cap_clk),
+    .cap_clk(cap_clk), .cap_reset(1'b0), .axi_resetn(1'b1),
+    .cal_arm(1'b0), .cal_address(10'd0),
     .grid_ref(1'b0),
     .vcap_vsync(vsync),
     .vcap_hsync(hsync),

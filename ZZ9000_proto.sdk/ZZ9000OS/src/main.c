@@ -590,6 +590,14 @@ int main() {
 		                      MNTVF_OP_VIDEOCAP_PHASE);
 		printf("[CFG] videocap: phase %d steps\n", (int)cfg->videocap_phase);
 	}
+	if (zz_config_get()->videocap_c28_phase_present) {
+		// Clock-specific op: only the C28 bitstream consumes these units.
+		const struct zz_config *cfg = zz_config_get();
+		video_formatter_write((uint32_t)(uint16_t)cfg->videocap_c28_phase,
+		                      MNTVF_OP_VIDEOCAP_C28_PHASE);
+		printf("[CFG] videocap: C28 phase %d steps\n",
+		       (int)cfg->videocap_c28_phase);
+	}
 
 	// RTG rect ops may write anywhere in framebuffer + legacy surface
 	// memory, but never past it into the SDK heaps and beyond

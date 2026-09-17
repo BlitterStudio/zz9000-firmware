@@ -92,8 +92,6 @@ set_property IOSTANDARD LVCMOS33 [get_ports ZORRO_E7M]
 
 set_property IOSTANDARD LVCMOS33 [get_ports ZORRO_INT6]
 
-set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets ZORRO_E7M]
-set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets ZORRO_E7M_IBUF]
 
 set_property PACKAGE_PIN V20 [get_ports {ZORRO_DATA[15]}]
 set_property PACKAGE_PIN W15 [get_ports {ZORRO_DATA[14]}]
@@ -288,28 +286,6 @@ set_property PACKAGE_PIN U19 [get_ports {I2SO_RESETn[0]}]
 #set_property IOSTANDARD LVCMOS33 [get_ports HDMI_INTN]
 #set_property PACKAGE_PIN W19 [get_ports HDMI_INTN]
 
-# well...
-create_clock -period 35.000 -name amiga_e7m -add [get_ports ZORRO_E7M]
-
-# The 35.000 ns E7M declaration above is a modeling fiction: it keeps the
-# MMCM's modeled VCO (x32) above the Artix-7 FVCOMIN of 600 MHz. Physically
-# E7M is 7.094 MHz (PAL) / 7.159 MHz (NTSC), so the MMCM-derived capture
-# clock on CLKOUT0 (CLKIN x4) really runs at 28.375/28.636 MHz - period
-# 35.24/34.93 ns - while STA analyzes it at 8.750 ns, exactly 4x too fast.
-# Restore the physical single-cycle budget for intra-capture-domain paths
-# with a 4-cycle setup multicycle (3-cycle hold keeps the original
-# adjacent-edge hold relationship). Cross-domain paths are unaffected:
-# the CLKOUT0->ACLK and CLKOUT0->CLKOUT1 crossings are false-pathed above
-# and use XPM/handshake synchronization. Without this correction, deep
-# capture-domain logic such as the E7M-locked sample-grid pairing (17
-# logic levels, ~12.5 ns) can never meet the fictional 8.75 ns budget and
-# the post-route timing gate rejects physically sound builds.
-set_multicycle_path -quiet 4 -setup \
-    -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] \
-    -to [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]]
-set_multicycle_path -quiet 3 -hold \
-    -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] \
-    -to [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]]
 
 # ZORRO_NFCS is used as the ODDR clock (C input) for the z3_nslave_oddr and
 # z3_ncinh_oddr primitives that drive /SLAVE and /CINH.  Declaring it as a
@@ -352,7 +328,10 @@ set_false_path -from [get_clocks clk_fpga_0] -to [get_clocks -of_objects [get_pi
 
 set_false_path -from [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]] -to [get_clocks clk_fpga_0]
 
-set_false_path -from [get_clocks amiga_e7m] -to [get_clocks clk_fpga_0]
+# The active capture source XDC declares E7M in both builds and C28 only
+# in the opt-in build. A non-empty clock collection avoids conditional Tcl,
+# which Vivado 2018.3 does not support inside XDC files.
+set_false_path -from [get_clocks -quiet {amiga_e7m amiga_c28}] -to [get_clocks clk_fpga_0]
 
 set_false_path -quiet -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT1]] -to [get_clocks -quiet clk_fpga_0]
 set_false_path -quiet -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] -to [get_clocks -quiet clk_fpga_0]

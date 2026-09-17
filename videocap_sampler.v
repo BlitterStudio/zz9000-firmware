@@ -244,6 +244,8 @@ module videocap_sampler #(
     parameter integer PROBE_SOURCE_X = 928
 ) (
     input  wire        cap_clk,
+    input  wire        cap_reset,
+    output wire        capture_ready,
     input  wire        vcap_vsync,
     input  wire        vcap_hsync,
     input  wire [7:0]  vcap_r,
@@ -292,6 +294,10 @@ module videocap_sampler #(
     output wire [31:0] probe_precrop_rdata,
 
     input  wire        axi_clk,
+    input  wire        axi_resetn,
+    input  wire        cal_arm,
+    input  wire [9:0]  cal_address,
+    output wire [31:0] cal_status, cal_data, cal_geometry,
     input  wire        buf_rbank,
     input  wire [11:0] buf_raddr,
     output wire [31:0] buf_rdata
@@ -427,6 +433,16 @@ wire frame_sync = (CSYNC_VSYNC != 0) ?
     (hs[6:1] == 6'b000111 && hs_pulse_width >= 8'd128) :
     (vs[6:1] == 6'b111000);
 wire line_sync = (hs[6:1] == 6'b000111);
+// After a clock reset, discard two field boundaries while timing and the
+// pixel-pair grid settle. Clock loss invalidates readiness even if cap_clk stops.
+reg [1:0] recovery_fields = 0;
+assign capture_ready = !cap_reset && recovery_fields == 0;
+always @(posedge cap_clk) begin
+    if (cap_reset) recovery_fields <= 2;
+    else if (frame_sync && recovery_fields != 0)
+        recovery_fields <= recovery_fields - 1'b1;
+end
+
 wire completed_frame_ntsc = (raw_y >= 11'h190) ?
     ((raw_y >= 11'h23a) ? 1'b0 : 1'b1) :
     ((raw_y >= ((CSYNC_VSYNC != 0) ? 11'h130 : 11'h138)) ?
@@ -435,7 +451,7 @@ wire completed_frame_ntsc = (raw_y >= 11'h190) ?
 videocap_standard_cdc videocap_standard_publish (
     .cap_clk(cap_clk),
     .axi_clk(axi_clk),
-    .frame_complete(frame_sync && raw_y != 0),
+    .frame_complete(frame_sync && raw_y != 0 && capture_ready),
     .frame_ntsc(completed_frame_ntsc),
     .standard_axi(detected_standard)
 );
@@ -449,6 +465,16 @@ videocap_standard_cdc videocap_standard_publish (
 wire [11:0] crop_h_local = (FULLRATE != 0) ?
     ctl_crop_h_cap : {1'b0, ctl_crop_h_cap[11:1]};
 wire [11:0] probe_precrop_start = crop_h_local - 12'd64;
+
+videocap_calibration_capture calibration_capture (
+    .cap_clk(cap_clk), .cap_reset(!capture_ready), .frame_sync(frame_sync),
+    .raw_x(sample_x), .raw_y(raw_y), .crop_h(crop_h_local),
+    .crop_v(ctl_crop_v_cap), .rgb(rgbin), .interlace(cap_interlace),
+    .field_parity(lace_field), .ntsc(cap_ntsc),
+    .axi_clk(axi_clk), .axi_resetn(axi_resetn), .arm_toggle(cal_arm),
+    .read_addr(cal_address), .read_data(cal_data), .status(cal_status),
+    .geometry(cal_geometry)
+);
 
 reg half = 0;
 
@@ -599,10 +625,17 @@ xpm_cdc_single #(
 
 reg [15:0] diff_count = 0;
 
+// Keep the RGB input registers reset-free so all 24 fit in input ILOGIC.
+always @(posedge cap_clk) begin
+    vcap_r_iob <= vcap_r;
+    vcap_g_iob <= vcap_g;
+    vcap_b_iob <= vcap_b;
+end
+
 always @(posedge cap_clk) begin
     if (!ctl_dest_req)
         ctl_dest_ack <= 1'b0;
-    else if (!ctl_dest_ack && frame_sync) begin
+    else if (!ctl_dest_ack && frame_sync && !cap_reset) begin
         ctl_sample_mode_cap <= ctl_dest_payload[1:0];
         ctl_full_width_cap <= ctl_dest_payload[2];
         ctl_crop_h_cap <= ctl_dest_payload[14:3];
@@ -610,9 +643,32 @@ always @(posedge cap_clk) begin
         ctl_dest_ack <= 1'b1;
     end
 
+    if (cap_reset) begin
+        hs <= 0; vs <= 0;
+        sample_x <= 0; raw_y <= 0;
+        cap_x <= 0; cap_y <= 0; cap_ymax <= 0;
+        cap_interlace <= 0; cap_ntsc <= 0; cap_shres <= 0;
+        cap_x_done <= 0;
+        lace_field <= 0; next_lace_field <= 0;
+        shortlines <= 0; hs_pulse_width <= 0;
+        phase_x <= 0; phase_line_period <= 0; vsync_phase_x <= 0;
+        grid_ref_meta <= 0; grid_ref_sync <= 0; grid_ref_prev <= 0;
+        grid_seen <= 0; cap_grid <= 0;
+        pair_parity <= 0; grid_intra_sum <= 0; grid_cross_sum <= 0;
+        grid_prev_second_valid <= 0;
+        half <= 0; shres_half <= 0; diff_count <= 0;
+        cap_token_pending <= 0; cap_frame_anchor_sent <= 0;
+        // Keep event toggles monotonic; resetting them would create fake tokens.
+        probe_valid <= 0; probe_waiting <= 0; probe_publish_pending <= 0;
+        probe_arm_seen <= probe_arm_toggle_cap;
+        probe_precrop_valid <= 0; probe_precrop_waiting <= 0;
+        probe_precrop_publish_pending <= 0;
+        diag_valid <= 0; diag_waiting <= 0; diag_field_started <= 0;
+        diag_publish_pending <= 0;
+    end else begin
     /* Publish the completed-line token one capture clock after its payload
      * was latched, so it is stable across the line-CDC toggle edge. */
-    if (cap_token_pending) begin
+    if (cap_token_pending && capture_ready) begin
         cap_token_pending <= 0;
         cap_line_toggle <= ~cap_line_toggle;
     end
@@ -623,7 +679,7 @@ always @(posedge cap_clk) begin
      * cover that latency and the formatter's early line-zero prefetch. */
     if (frame_sync)
         cap_frame_anchor_sent <= 0;
-    else if (cap_token_pending && FULLRATE != 0 &&
+    else if (cap_token_pending && capture_ready && FULLRATE != 0 &&
             ctl_full_width_cap && !cap_frame_anchor_sent) begin
         cap_frame_anchor_toggle <= ~cap_frame_anchor_toggle;
         cap_frame_anchor_sent <= 1;
@@ -802,9 +858,6 @@ always @(posedge cap_clk) begin
     vs <= {vs[5:0], vcap_vsync};
     hs <= {hs[5:0], vcap_hsync};
 
-    vcap_r_iob <= vcap_r;
-    vcap_g_iob <= vcap_g;
-    vcap_b_iob <= vcap_b;
 
     if (hs == 0) begin
         if (hs_pulse_width < 8'hff)
@@ -868,7 +921,7 @@ always @(posedge cap_clk) begin
         cap_x_done <= 0;
         if (capture_banking_cap)
             capture_bank <= ~capture_bank;
-        if (!ctl_full_width_cap && capture_output_line_valid) begin
+        if (!ctl_full_width_cap && capture_output_line_valid && capture_ready) begin
             /* Completed visible line (filtered, any FULLRATE): publish
              * its normalized number and bank as a token one capture
              * clock later, exactly as the full-width path does (PR #88
@@ -1056,7 +1109,7 @@ always @(posedge cap_clk) begin
              * publishes its completed-line token at line_sync instead. */
             if (!cap_x_done && cap_x >= 11'd1279) begin
                 cap_x_done <= 1;
-                if (capture_output_line_valid) begin
+                if (capture_output_line_valid && capture_ready) begin
                     cap_token_y <= capture_output_y[9:0];
                     cap_token_bank <= capture_bank;
                     cap_token_pending <= 1;
@@ -1066,6 +1119,7 @@ always @(posedge cap_clk) begin
             cap_x_done <= (cap_x > 11'h200);
         end
     end
+end
 end
 
 endmodule

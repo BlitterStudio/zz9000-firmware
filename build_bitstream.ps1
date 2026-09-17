@@ -17,12 +17,22 @@ C:\Xilinx\Vivado\2018.3\bin\vivado.bat.
 
 .PARAMETER NoAutoboot
 Build a diagnostic bitstream that does not advertise the Zorro autoboot ROM.
+
+.PARAMETER CaptureC28
+Build the opt-in A4000 C28 capture candidate. Its default output is
+bootimage_work/capture-c28/zz9000_ps_wrapper.bit, separate from packaged builds.
+
+.PARAMETER OutputBitstream
+Optional output bitstream path, relative to the repository or absolute.
+A C28 build cannot overwrite bootimage_work/zz9000_ps_wrapper.bit.
 #>
 
 [CmdletBinding()]
 param(
     [string]$VivadoBat,
-    [switch]$NoAutoboot
+    [switch]$NoAutoboot,
+    [switch]$CaptureC28,
+    [string]$OutputBitstream
 )
 
 Set-StrictMode -Version 3.0
@@ -131,15 +141,38 @@ $scriptDir = Split-Path -Parent $PSCommandPath
 $repoRoot = [System.IO.Path]::GetFullPath($scriptDir)
 Set-Location -LiteralPath $repoRoot
 
+$packagedOutput = Join-Path $repoRoot 'bootimage_work\zz9000_ps_wrapper.bit'
+if ($OutputBitstream) {
+    if ([System.IO.Path]::IsPathRooted($OutputBitstream)) {
+        $output = [System.IO.Path]::GetFullPath($OutputBitstream)
+    } else {
+        $output = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputBitstream))
+    }
+} elseif ($CaptureC28) {
+    $output = Join-Path $repoRoot 'bootimage_work\capture-c28\zz9000_ps_wrapper.bit'
+} else {
+    $output = $packagedOutput
+}
+if ($CaptureC28 -and [string]::Equals($output, $packagedOutput,
+        [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'A C28 candidate must use a separate output path from the packaged default.'
+}
+
 $vivado = Resolve-VivadoBat -RequestedPath $VivadoBat
 Write-Host "[bitstream] Vivado: $vivado"
 if ($NoAutoboot) {
     Write-Host '[bitstream] autoboot ROM: disabled'
 }
+if ($CaptureC28) {
+    Write-Host '[bitstream] native capture clock: opt-in C28 candidate'
+}
 
 $projectArgs = @('--origin_dir', '.')
 if ($NoAutoboot) {
     $projectArgs += '--no-autoboot'
+}
+if ($CaptureC28) {
+    $projectArgs += '--capture-c28'
 }
 
 $projectDir = Join-Path $repoRoot 'ZZ9000_proto'
@@ -228,8 +261,11 @@ if (-not $bitstream) {
     throw 'Bitstream not produced; check ZZ9000_proto/ZZ9000_proto.runs/impl_1/runme.log.'
 }
 
-$output = Join-Path $repoRoot 'bootimage_work\zz9000_ps_wrapper.bit'
+$outputDir = Split-Path -Parent $output
+New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 Copy-Item -LiteralPath $bitstream.FullName -Destination $output -Force
 
 Write-Host "[bitstream] done: $output"
-Write-Host '[bitstream] NB: commit bootimage_work/zz9000_ps_wrapper.bit so CI picks up HDL changes.'
+if (-not $CaptureC28 -and $output -eq $packagedOutput) {
+    Write-Host '[bitstream] NB: commit bootimage_work/zz9000_ps_wrapper.bit so CI picks up HDL changes.'
+}

@@ -465,6 +465,62 @@ static void test_videocap_phase(void) {
     CHECK(zz_config_get()->videocap_phase == -112);
 }
 
+static void test_videocap_c28_phase(void) {
+    static const char *invalid[] = {
+        "896", "-897", "65536", "-65536", "99999999999999999999",
+        "--8", "+8", "-", "eight", "1.5", "0x20"
+    };
+    uint16_t present = 99;
+    char saved[512], line[128];
+    int len;
+    unsigned i;
+
+    CHECK(ZZ_CONFIG_KEY_VIDEOCAP_PHASE == 17);
+    CHECK(ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE == 18);
+    zz_config_reset();
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE, &present) == 0 && !present);
+    CHECK(zz_config_emit_present_keys(saved, sizeof(saved), 0) == 0);
+    CHECK(strstr(saved, "videocap_c28_phase") == NULL);
+
+    CHECK(parse_str("videocap_phase = -112\nvideocap_c28_phase = -896\n") == 2);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE, &present) == (uint16_t)-896 && present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_PHASE, &present) ==
+          (uint16_t)-112 && present);
+    CHECK(parse_str("VIDEOCAP_C28_PHASE = 895 # upper endpoint\n") == 1);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE, &present) == 895 && present);
+    for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        snprintf(line, sizeof(line), "videocap_c28_phase = %s\n", invalid[i]);
+        CHECK(parse_str(line) == 0);
+        CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE, &present) == 895 && present);
+    }
+
+    /* The firmware audio writer uses this same non-audio serializer. */
+    len = zz_config_emit_present_keys(saved, sizeof(saved), 0);
+    CHECK(len > 0);
+    CHECK(strstr(saved, "videocap_phase = -112\n") != NULL);
+    CHECK(strstr(saved, "videocap_c28_phase = 895\n") != NULL);
+    zz_config_reset();
+    CHECK(parse_str(saved) == 2);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE, &present) == 895 && present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_PHASE, &present) ==
+          (uint16_t)-112 && present);
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_phase = 64\n") == 1);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE, &present) == 0 && !present);
+    zz_config_reset();
+    CHECK(parse_str("videocap_c28_phase = 0\n") == 1);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE, &present) == 0 && present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_PHASE, &present) == 0 && !present);
+
+    zz_config_reset();
+    for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        snprintf(line, sizeof(line), "videocap_c28_phase = %s\n", invalid[i]);
+        CHECK(parse_str(line) == 0);
+    }
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE, &present) == 0 && !present);
+}
+
 static void test_bad_values_skipped(void) {
     zz_config_reset();
     const char *text =
@@ -684,6 +740,7 @@ int main(void) {
     test_centered_refresh_round_trip();
     test_videocap_sample();
     test_videocap_phase();
+    test_videocap_c28_phase();
     test_videocap_shres_and_crop();
     test_bad_values_skipped();
     test_last_value_wins();
