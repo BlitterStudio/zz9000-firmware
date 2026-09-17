@@ -93,6 +93,7 @@ struct SDKImageStreamSession {
 	uint32_t png_write_start_y;
 	uint32_t png_interlace_rowbytes;
 	uint32_t png_interlace_buffer_length;
+	uint32_t png_tile_rows_emitted;
 	uint16_t png_error_status;
 	struct jpeg_decompress_struct cinfo;
 	struct SDKImageStreamJpegErrorManager jerr;
@@ -107,6 +108,7 @@ struct SDKImageStreamSession {
 	uint8_t png_row_rgb888;
 	uint8_t png_interlaced;
 	uint8_t png_interlace_direct;
+	uint8_t png_tile_staging;
 	uint8_t header_ready;
 	uint32_t decode_state_committed;
 	uint8_t output_prepared;
@@ -1049,6 +1051,8 @@ static void destroy_png(struct SDKImageStreamSession *session)
 		sdk_decode_heap_free(session->png_interlace_buffer);
 		session->png_interlace_buffer = 0;
 	}
+	session->png_tile_staging = 0U;
+	session->png_tile_rows_emitted = 0U;
 	release_decode_state(session);
 	if (session->png_created) {
 		png_destroy_read_struct(&session->png_ptr, &session->png_info,
@@ -1239,20 +1243,35 @@ static int png_write_combined_interlace_row(
 }
 
 /*
- * Whole-image decode state an interlaced PNG session commits to the
- * shared decode heap: the full-image interlace buffer
- * (output_height x transformed rowbytes). The direct-combine path
- * combines rows straight into the destination and commits nothing.
+ * Whole-image decode state a PNG session commits to the shared decode
+ * heap: the full-image interlace buffer (output_height x transformed
+ * rowbytes) for interlaced sources, or the full-image staging buffer
+ * (output_height x output row bytes) for non-interlaced sources decoded
+ * through a partial-height streaming tile. Direct-combine interlace
+ * rows and full-height tiles commit nothing.
  */
 static uint64_t png_decode_state_bytes(
         const struct SDKImageStreamSession *session, png_size_t rowbytes)
 {
-	if (!session->png_interlaced ||
-	    png_interlace_can_combine_direct(session) ||
-	    rowbytes == 0U || rowbytes > 0xffffffffU) {
+	uint32_t bytes_per_pixel;
+
+	if (session->png_interlaced) {
+		if (png_interlace_can_combine_direct(session) ||
+		    rowbytes == 0U || rowbytes > 0xffffffffU) {
+			return 0U;
+		}
+		return (uint64_t)session->output_height * (uint32_t)rowbytes;
+	}
+	if (session->output_mode != SDK_IMAGE_OUTPUT_TILE_BUFFER ||
+	    session->tile_rows >= session->output_height) {
 		return 0U;
 	}
-	return (uint64_t)session->output_height * (uint32_t)rowbytes;
+	bytes_per_pixel =
+	    sdk_surface_format_bytes(session->output_format);
+	if (bytes_per_pixel != 3U && bytes_per_pixel != 4U)
+		return 0U;
+	return (uint64_t)session->output_height *
+	    (uint64_t)session->output_width * bytes_per_pixel;
 }
 
 static int png_prepare_interlace_storage(
@@ -1293,6 +1312,41 @@ static int png_prepare_interlace_storage(
 		return 0;
 	memset(session->png_interlace_buffer, 0, image_bytes);
 	session->png_interlace_buffer_length = image_bytes;
+	return 1;
+}
+
+/*
+ * Full-image staging buffer for a non-interlaced PNG decoded through a
+ * partial-height streaming tile: converted rows append here in decode
+ * order, and each feed copies one tile_rows-sized chunk out to the
+ * client's tile. Sized in OUTPUT row bytes (width x destination
+ * bytes-per-pixel), unlike the interlace buffer which keeps libpng's
+ * transformed rows.
+ */
+static int png_prepare_tile_staging(struct SDKImageStreamSession *session)
+{
+	uint32_t bytes_per_pixel;
+	uint32_t row_bytes;
+	uint32_t image_bytes;
+
+	if (!session)
+		return 0;
+	bytes_per_pixel = sdk_surface_format_bytes(session->output_format);
+	if (bytes_per_pixel != 3U && bytes_per_pixel != 4U)
+		return 0;
+	if (session->output_width > (0xffffffffU / bytes_per_pixel))
+		return 0;
+	row_bytes = session->output_width * bytes_per_pixel;
+	if (session->output_height > (0xffffffffU / row_bytes))
+		return 0;
+	image_bytes = session->output_height * row_bytes;
+	session->png_interlace_buffer = (uint8_t *)
+	    sdk_decode_heap_alloc(image_bytes);
+	if (!session->png_interlace_buffer)
+		return 0;
+	memset(session->png_interlace_buffer, 0, image_bytes);
+	session->png_interlace_buffer_length = image_bytes;
+	session->png_interlace_rowbytes = row_bytes;
 	return 1;
 }
 
@@ -1350,22 +1404,44 @@ static int png_write_output_row(struct SDKImageStreamSession *session,
 	if (bytes_per_pixel != 3U && bytes_per_pixel != 4U)
 		return -1;
 	row_bytes = session->output_width * bytes_per_pixel;
-	if (session->png_rows_this_feed == 0U)
-		session->png_write_start_y = row_num;
 
-	if (session->output_mode == SDK_IMAGE_OUTPUT_TILE_BUFFER) {
-		if (session->png_rows_this_feed >= session->tile_rows ||
-		    session->tile_stride < row_bytes) {
+	if (session->png_tile_staging) {
+		/*
+		 * Streaming tile: the converted row appends to the
+		 * staging buffer in decode order; the feed path later
+		 * copies tile_rows-sized chunks out to the client's
+		 * tile. Per-feed tile counters stay untouched here.
+		 */
+		if (!session->png_interlace_buffer ||
+		    session->png_interlace_rowbytes < row_bytes ||
+		    session->rows_output >=
+		    (session->png_interlace_buffer_length /
+		     session->png_interlace_rowbytes)) {
 			return -1;
 		}
-		dst = (uint8_t *)(uintptr_t)
-			(session->tile_address +
-			 (session->png_rows_this_feed * session->tile_stride));
+		dst = session->png_interlace_buffer +
+		    (session->rows_output *
+		     session->png_interlace_rowbytes);
 	} else {
-		dst = (uint8_t *)(uintptr_t)
-			(session->dst_address +
-			 ((session->dst_y + row_num) * session->dst_pitch) +
-			 (session->dst_x * bytes_per_pixel));
+		if (session->png_rows_this_feed == 0U)
+			session->png_write_start_y = row_num;
+		if (session->output_mode == SDK_IMAGE_OUTPUT_TILE_BUFFER) {
+			if (session->tile_stride < row_bytes ||
+			    session->png_rows_this_feed >=
+			    session->tile_rows) {
+				return -1;
+			}
+			dst = (uint8_t *)(uintptr_t)
+				(session->tile_address +
+				 (session->png_rows_this_feed *
+				  session->tile_stride));
+		} else {
+			dst = (uint8_t *)(uintptr_t)
+				(session->dst_address +
+				 ((session->dst_y + row_num) *
+				  session->dst_pitch) +
+				 (session->dst_x * bytes_per_pixel));
+		}
 	}
 
 	if (session->png_row_rgb888) {
@@ -1377,7 +1453,8 @@ static int png_write_output_row(struct SDKImageStreamSession *session,
 		                 session->output_format);
 	}
 	session->rows_output++;
-	session->png_rows_this_feed++;
+	if (!session->png_tile_staging)
+		session->png_rows_this_feed++;
 	return 1;
 }
 
@@ -1460,14 +1537,28 @@ static void png_info_callback(png_structp png_ptr, png_infop info_ptr)
 		         "unsupported PNG destination format");
 	}
 	if (session->output_mode == SDK_IMAGE_OUTPUT_TILE_BUFFER) {
+		/*
+		 * Non-interlaced rows arrive strictly in order, so a
+		 * partial-height tile streams fine (each feed resumes
+		 * at rows_output; an overflowing row is carried and
+		 * the push reader paused). Interlaced passes revisit
+		 * rows out of order and the combine path needs the
+		 * whole image in the destination, so those still
+		 * require a full-height tile.
+		 */
 		if (session->output_width >
 		    (0xffffffffU / bytes_per_pixel) ||
 		    session->tile_stride <
 		    (session->output_width * bytes_per_pixel) ||
-		    session->tile_rows < session->output_height) {
+		    session->tile_rows == 0U ||
+		    (session->png_interlaced &&
+		     session->tile_rows < session->output_height)) {
 			png_fail(session, SDK_STATUS_BAD_REQUEST,
 			         "PNG tile destination is too small");
 		}
+		session->png_tile_staging =
+		    (!session->png_interlaced &&
+		     session->tile_rows < session->output_height) ? 1U : 0U;
 	} else {
 		if (!direct_destination_valid(session, session->output_width,
 		                              session->output_height,
@@ -1477,7 +1568,7 @@ static void png_info_callback(png_structp png_ptr, png_infop info_ptr)
 		}
 	}
 
-	if (session->png_interlaced) {
+	if (session->png_interlaced || session->png_tile_staging) {
 		uint64_t state_bytes = png_decode_state_bytes(
 			session, rowbytes);
 
@@ -1488,10 +1579,12 @@ static void png_info_callback(png_structp png_ptr, png_infop info_ptr)
 		if (!reserve_decode_state(session, state_bytes)) {
 			png_fail(session, SDK_STATUS_BAD_REQUEST,
 			         "PNG image exceeds decode state budget");
-		} else if (!png_prepare_interlace_storage(session, rowbytes)) {
+		} else if (session->png_interlaced ?
+		           !png_prepare_interlace_storage(session, rowbytes) :
+		           !png_prepare_tile_staging(session)) {
 			release_decode_state(session);
 			png_fail(session, SDK_STATUS_NO_MEMORY,
-			         "PNG interlace storage unavailable");
+			         "PNG decode staging unavailable");
 		}
 	}
 
@@ -1599,6 +1692,33 @@ static void fill_png_direct_result(const struct SDKImageStreamSession *session,
 	                 bytes_per_pixel, result);
 }
 
+/*
+ * Copy one tile_rows-sized chunk of staged rows out to the client's
+ * tile. Called after each feed's png_process_data (and on drain feeds
+ * while staged rows remain), so a large PNG flows through a small tile
+ * in strict row order.
+ */
+static void png_emit_staged_tile(struct SDKImageStreamSession *session)
+{
+	uint32_t emitted = session->png_tile_rows_emitted;
+	uint32_t available = session->rows_output - emitted;
+	uint32_t count = available > session->tile_rows ?
+	    session->tile_rows : available;
+	uint32_t i;
+
+	for (i = 0U; i < count; i++) {
+		memcpy((void *)(uintptr_t)
+			(session->tile_address +
+			 (i * session->tile_stride)),
+		       session->png_interlace_buffer +
+		       ((emitted + i) * session->png_interlace_rowbytes),
+		       session->png_interlace_rowbytes);
+	}
+	session->png_tile_rows_emitted = emitted + count;
+	session->png_write_start_y = emitted;
+	session->png_rows_this_feed = count;
+}
+
 static uint16_t process_png_stream(struct SDKImageStreamSession *session,
                                    const uint8_t *src, uint32_t src_length,
                                    struct SDKImageStreamResult *result)
@@ -1622,6 +1742,17 @@ static uint16_t process_png_stream(struct SDKImageStreamSession *session,
 	}
 
 	if (session->png_complete) {
+		/*
+		 * Streaming tiles keep emitting staged rows across drain
+		 * feeds; completion is only reported once every staged
+		 * row has been handed to the client.
+		 */
+		if (session->png_tile_staging &&
+		    session->png_tile_rows_emitted < session->rows_output) {
+			png_emit_staged_tile(session);
+			fill_png_tile_result(session, 0U, result);
+			return SDK_STATUS_OK;
+		}
 		fill_complete_output_result(session, 0U, result);
 		destroy_png(session);
 		return SDK_STATUS_OK;
@@ -1632,6 +1763,9 @@ static uint16_t process_png_stream(struct SDKImageStreamSession *session,
 		                 (png_bytep)src, src_length);
 
 	consumed = png_feed_consumed(session, src_length);
+
+	if (session->png_tile_staging)
+		png_emit_staged_tile(session);
 
 	if (session->png_rows_this_feed != 0U) {
 		if (session->output_mode == SDK_IMAGE_OUTPUT_TILE_BUFFER) {
@@ -2103,6 +2237,8 @@ void sdk_image_stream_poison_core1_sessions(void)
 		slot->png_info = 0;
 		slot->png_interlace_buffer = 0;
 		slot->png_interlace_buffer_length = 0U;
+		slot->png_tile_staging = 0U;
+		slot->png_tile_rows_emitted = 0U;
 		/*
 		 * The decode-reclaim pass freed the pool this charge
 		 * covered, so the charge is void. Clear it lock-free:
