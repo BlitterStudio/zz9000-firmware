@@ -16,6 +16,99 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include "memorymap.h"
+#include "sdk_smp_lock.h"
+
+/*
+ * The firmware places the session table in a fixed-address SCU-coherent
+ * slab (SDK_IMAGE_SESSIONS_ADDRESS, memorymap.h); the host has no such
+ * carve-out, so map it before the stream API runs.
+ */
+static int host_map_session_region(void)
+{
+	void *region = mmap((void *)SDK_IMAGE_SESSIONS_ADDRESS,
+			    SDK_IMAGE_SESSIONS_MAX_BYTES,
+			    PROT_READ | PROT_WRITE,
+			    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+
+	if (region == MAP_FAILED) {
+		printf("could not map host session region at 0x%lx\n",
+		       (unsigned long)SDK_IMAGE_SESSIONS_ADDRESS);
+		return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * Host stand-ins for the SMP-lock platform primitives (weak in the
+ * firmware's sdk_smp_lock_arm.c): the host test is single-threaded, so
+ * the raw spinlock is a plain word and the IRQ save/restore are no-ops.
+ * Every mock here is WEAK: if a host build links the real portable
+ * state machine (sdk_smp_lock.c) or its own mocks, the strong
+ * definitions win and these drop out; if it does not, these satisfy
+ * the link so the file builds standalone.
+ */
+__attribute__((weak)) int smp_cpu_id(void)
+{
+	return 0;
+}
+
+__attribute__((weak)) uint32_t smp_local_irq_save(void)
+{
+	return 0U;
+}
+
+__attribute__((weak)) void smp_local_irq_restore(uint32_t saved)
+{
+	(void)saved;
+}
+
+__attribute__((weak)) void smp_raw_spin_lock(volatile uint32_t *word)
+{
+	*word = 1U;
+}
+
+__attribute__((weak)) void smp_raw_spin_unlock(volatile uint32_t *word)
+{
+	*word = 0U;
+}
+
+/*
+ * Single-threaded stand-ins for the portable lock state machine (the
+ * real one in sdk_smp_lock.c tracks owner/depth/IRQ state; nothing in
+ * this test ever contends, so plain field writes are equivalent).
+ */
+__attribute__((weak)) void sdk_smp_lock_acquire(sdk_smp_lock_t *lock)
+{
+	if (lock->owner == smp_cpu_id()) {
+		lock->depth++;
+		return;
+	}
+	lock->raw = 1U;
+	lock->owner = smp_cpu_id();
+	lock->depth = 1U;
+}
+
+__attribute__((weak)) void sdk_smp_lock_release(sdk_smp_lock_t *lock)
+{
+	if (lock->depth == 0U)
+		return;
+	lock->depth--;
+	if (lock->depth == 0U) {
+		lock->owner = -1;
+		lock->raw = 0U;
+	}
+}
+
+__attribute__((weak)) void sdk_smp_lock_reset(sdk_smp_lock_t *lock)
+{
+	lock->raw = 0U;
+	lock->owner = -1;
+	lock->depth = 0U;
+	lock->saved_irq = 0U;
+}
 
 static const uint8_t png_2x2[] = {
 	0x89U, 0x50U, 0x4eU, 0x47U, 0x0dU, 0x0aU, 0x1aU, 0x0aU,
@@ -1283,6 +1376,9 @@ static int test_jpeg_stream_direct_scaled_output_is_sliced(void)
 int main(void)
 {
 	int result;
+
+	if (host_map_session_region() != 0)
+		return 1;
 
 	result = test_direct_scale_row_uses_bilinear_filter();
 	if (result) {

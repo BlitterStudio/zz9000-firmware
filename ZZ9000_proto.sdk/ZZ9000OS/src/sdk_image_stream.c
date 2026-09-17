@@ -9,6 +9,7 @@
 #include "sdk_image_stream.h"
 #include "sdk_surface.h"
 #include "sdk_compression.h"
+#include "sdk_smp_lock.h"
 #include "memorymap.h"
 #include <xil_cache.h>
 #include <setjmp.h>
@@ -43,9 +44,12 @@
  * 24 MP 4:2:0 decode transient ~72 MiB, leaving ~56 MiB for
  * everything else); for other layouts the pixel-equivalent cap is
  * the layout-safe ceiling (18 MP 4:2:2, 12 MP 3-component 4:4:4,
- * 9 MP CMYK). Decodes with no whole-image pool (baseline JPEG,
- * non-interlaced or directly-combined interlaced PNG) commit 0,
- * which is exact for them. */
+ * 9 MP CMYK). Decodes with no whole-image pool (single-scan
+ * baseline JPEG, non-interlaced or directly-combined interlaced
+ * PNG) commit 0, which is exact for them. The check-and-reserve
+ * step is atomic under the cross-core budget lock, so concurrent
+ * feeds on core 0 and core 1 cannot both pass their total check
+ * against a stale sum. */
 #define SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES (72U * 1024U * 1024U)
 /* 64 coefficients x 2 bytes, per component DCT block. */
 #define SDK_IMAGE_STREAM_JPEG_COEFF_BLOCK_BYTES 128U
@@ -134,6 +138,21 @@ typedef char image_sessions_fit_check[
      SDK_IMAGE_SESSIONS_MAX_BYTES) ? 1 : -1];
 
 static uint32_t next_image_session_id;
+
+/*
+ * Cross-core guard for the decode-state budget. The feed paths run on
+ * both cores (core-1-affine sessions on the worker, everything else
+ * inline on core 0) and the session table is SCU-coherent, so the raw
+ * charge words are always visible to both; what must be atomic is the
+ * check-and-reserve sequence itself. The critical section is a few
+ * word accesses (ns-scale, never held across decode work), so a decode
+ * fault can never land inside it.
+ */
+static sdk_smp_lock_t image_decode_state_lock = SDK_SMP_LOCK_INIT;
+
+static int reserve_decode_state(struct SDKImageStreamSession *session,
+                                uint64_t bytes);
+static void release_decode_state(struct SDKImageStreamSession *session);
 
 static struct SDKImageStreamSession *find_session(uint32_t session)
 {
@@ -431,7 +450,7 @@ static void destroy_jpeg(struct SDKImageStreamSession *session)
 		jpeg_destroy_decompress(&session->cinfo);
 		session->jpeg_created = 0U;
 	}
-	session->decode_state_committed = 0U;
+	release_decode_state(session);
 	session->header_ready = 0U;
 	session->output_prepared = 0U;
 	session->started = 0U;
@@ -552,10 +571,11 @@ static uint64_t jpeg_coefficient_state_bytes(
  * Charged into a session's own decode_state_committed field
  * (SCU-coherent, visible to both cores) when its image header is
  * accepted - the SOF for JPEG, the IHDR for PNG - and cleared in
- * destroy_jpeg()/destroy_png(); the charge brackets the committed
- * pool (the JPEG coefficient state that jpeg_start_decompress
- * allocates on the first feed, the PNG interlace buffer allocated at
- * the header stage), which the same teardown paths free.
+ * destroy_jpeg()/destroy_png() and the core-1 poison path; the charge
+ * brackets the committed pool (the JPEG coefficient state that
+ * jpeg_start_decompress allocates on the first feed, the PNG interlace
+ * buffer allocated at the header stage), which the same teardown paths
+ * free.
  */
 static uint32_t decode_state_committed_total(void)
 {
@@ -565,6 +585,36 @@ static uint32_t decode_state_committed_total(void)
 	for (i = 0U; i < SDK_MAX_IMAGE_SESSIONS; i++)
 		total += image_sessions[i].decode_state_committed;
 	return total;
+}
+
+/*
+ * Cross-core check-and-reserve for the decode-state budget. The feed
+ * paths run concurrently on core 0 and core 1, so the total check and
+ * the charge publish must be one atomic step; otherwise two sessions
+ * can both observe enough budget against a stale sum and overcommit
+ * the shared heap. Reserve BEFORE the pool is allocated, and release
+ * again if the allocation fails.
+ */
+static int reserve_decode_state(struct SDKImageStreamSession *session,
+                                uint64_t bytes)
+{
+	int ok;
+
+	sdk_smp_lock_acquire(&image_decode_state_lock);
+	ok = (bytes <=
+	      (uint64_t)SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES -
+	      decode_state_committed_total());
+	session->decode_state_committed = ok ? (uint32_t)bytes : 0U;
+	sdk_smp_lock_release(&image_decode_state_lock);
+
+	return ok;
+}
+
+static void release_decode_state(struct SDKImageStreamSession *session)
+{
+	sdk_smp_lock_acquire(&image_decode_state_lock);
+	session->decode_state_committed = 0U;
+	sdk_smp_lock_release(&image_decode_state_lock);
 }
 
 static int direct_destination_valid(const struct SDKImageStreamSession *session,
@@ -999,7 +1049,7 @@ static void destroy_png(struct SDKImageStreamSession *session)
 		sdk_decode_heap_free(session->png_interlace_buffer);
 		session->png_interlace_buffer = 0;
 	}
-	session->decode_state_committed = 0U;
+	release_decode_state(session);
 	if (session->png_created) {
 		png_destroy_read_struct(&session->png_ptr, &session->png_info,
 		                        0);
@@ -1431,17 +1481,17 @@ static void png_info_callback(png_structp png_ptr, png_infop info_ptr)
 		uint64_t state_bytes = png_decode_state_bytes(
 			session, rowbytes);
 
-		if (state_bytes != 0U &&
-		    (uint64_t)decode_state_committed_total() + state_bytes >
-		    (uint64_t)SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES) {
+		/* Reserve BEFORE the buffer is carved out of the decode
+		 * heap: the charge is published under the budget lock, so
+		 * a concurrent session cannot pass its own total check
+		 * against the pre-allocation sum. */
+		if (!reserve_decode_state(session, state_bytes)) {
 			png_fail(session, SDK_STATUS_BAD_REQUEST,
 			         "PNG image exceeds decode state budget");
 		} else if (!png_prepare_interlace_storage(session, rowbytes)) {
+			release_decode_state(session);
 			png_fail(session, SDK_STATUS_NO_MEMORY,
 			         "PNG interlace storage unavailable");
-		} else {
-			session->decode_state_committed =
-			    (uint32_t)state_bytes;
 		}
 	}
 
@@ -1661,13 +1711,20 @@ static uint16_t process_jpeg_stream(struct SDKImageStreamSession *session,
 		if (!source_dimensions_valid(session)) {
 			return SDK_STATUS_BAD_REQUEST;
 		}
-		coeff_bytes = jpeg_coefficient_state_bytes(session);
-		if (coeff_bytes == 0U ||
-		    (uint64_t)decode_state_committed_total() + coeff_bytes >
-		    (uint64_t)SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES) {
+		/*
+		 * libjpeg allocates the whole-image coefficient pool
+		 * only when the file's scan structure needs it:
+		 * progressive or multi-scan decoding (its use_c_buffer
+		 * condition; the firmware never sets buffered_image).
+		 * A single-scan baseline decode holds streaming MCU
+		 * state only, so only multi-scan files charge the
+		 * coefficient state.
+		 */
+		coeff_bytes = jpeg_has_multiple_scans(&session->cinfo) ?
+		    (uint32_t)jpeg_coefficient_state_bytes(session) : 0U;
+		if (!reserve_decode_state(session, coeff_bytes)) {
 			return SDK_STATUS_BAD_REQUEST;
 		}
-		session->decode_state_committed = (uint32_t)coeff_bytes;
 		session->header_ready = 1U;
 	}
 
@@ -2026,7 +2083,10 @@ int sdk_image_stream_has_core1_sessions(void)
  * buffer). Drop the dangling references of core-1-affine sessions WITHOUT
  * running the codec destructors -- destroying against reclaimed memory
  * would be a use-after-free -- and mark the sessions failed so subsequent
- * feeds report IO_ERROR and close reduces to a plain slot reset.
+ * feeds report IO_ERROR and close reduces to a plain slot reset. Also
+ * clear each session's decode-state charge: the reclaim pass freed the
+ * pool it covered, so the budget it held is usable by the surviving
+ * sessions at once.
  */
 void sdk_image_stream_poison_core1_sessions(void)
 {
@@ -2043,6 +2103,30 @@ void sdk_image_stream_poison_core1_sessions(void)
 		slot->png_info = 0;
 		slot->png_interlace_buffer = 0;
 		slot->png_interlace_buffer_length = 0U;
+		/*
+		 * The decode-reclaim pass freed the pool this charge
+		 * covered, so the charge is void. Clear it lock-free:
+		 * core 1 is provably halted here (the caller parks the
+		 * worker before the cold restart), and if a reset
+		 * orphaned the budget lock, taking it would wedge the
+		 * recovery -- the restart path resets the lock
+		 * unconditionally.
+		 */
+		slot->decode_state_committed = 0U;
 		slot->failed = 1U;
 	}
+}
+
+/*
+ * core-1 fault recovery only (core1_cold_restart, beside
+ * sdk_smp_lock_reset_malloc): a cold reset can land inside the
+ * decode-state budget critical section (the few-instruction
+ * check-and-reserve window in header parsing) and orphan the lock
+ * with the dead core as owner. With core 1 provably halted, force
+ * the lock back to the free state so neither the restarted worker
+ * nor core 0's next reservation spins on the orphaned lock.
+ */
+void sdk_image_stream_reset_decode_state_lock(void)
+{
+	sdk_smp_lock_reset(&image_decode_state_lock);
 }

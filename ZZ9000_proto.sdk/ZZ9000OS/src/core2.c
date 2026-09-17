@@ -10,6 +10,7 @@
 #include "memorymap.h"
 #include "sdk_smp_lock.h"
 #include "sdk_compression.h"
+#include "sdk_image_stream.h"
 
 #define A9_CPU_RST_CTRL		(XSLCR_BASEADDR + 0x244)
 #define A9_RST1_MASK 		0x00000002
@@ -169,6 +170,15 @@ void core1_cold_restart(void)
 	 * and the quiesce-timeout path (scheduler_quiesce_for_reset).
 	 */
 	sdk_smp_lock_reset_malloc();
+
+	/*
+	 * Same orphan-lock exposure as the malloc lock: the cold reset
+	 * can land inside the image-stream decode-state budget
+	 * critical section (the few-instruction check-and-reserve
+	 * window in header parsing), leaving that lock owned by the
+	 * dead core.
+	 */
+	sdk_image_stream_reset_decode_state_lock();
 
 	/*
 	 * CPU1 is still halted and the malloc lock is now free: reclaim any heap
