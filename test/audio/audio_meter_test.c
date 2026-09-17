@@ -14,6 +14,7 @@
  */
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -471,6 +472,10 @@ static void test_identity(void)
 
 struct tear_ctx {
 	volatile int done;
+	/* Set once the first period has been fed: the reader waits for
+	 * it so the "live accumulation" check cannot race the writer's
+	 * first scheduling. */
+	volatile int started;
 	uint32_t fed;
 };
 
@@ -493,6 +498,7 @@ static void *tear_writer(void *arg)
 		}
 		audio_scene_meter_output_period(period, 16U);
 		ctx->fed++;
+		ctx->started = 1;
 	}
 	ctx->done = 1;
 	return NULL;
@@ -510,6 +516,13 @@ static void test_snapshot_no_tear(void)
 	memset(&ctx, 0, sizeof(ctx));
 	check(pthread_create(&writer, NULL, tear_writer, &ctx) == 0,
 		"writer thread starts", NULL);
+	/* Wait for the writer's first period so the first read below
+	 * observes a live peak; without this, a fast reader can
+	 * exhaust its read budget before the writer thread is first
+	 * scheduled and the "live accumulation" check would be
+	 * scheduling-dependent. */
+	while (!ctx.started)
+		sched_yield();
 
 	while (reads < 20000U) {
 		struct audio_meter_snapshot s;
