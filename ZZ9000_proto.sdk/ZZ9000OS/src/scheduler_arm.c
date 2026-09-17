@@ -13,9 +13,11 @@
 #include "scheduler.h"
 #include "memorymap.h"
 #include "sdk_mailbox.h"
+#include "sdk_compression.h"
 #include "sdk_image_stream.h"
 #include "sdk_video_stream.h"
 #include "sdk_media_session.h"
+#include "sdk_smp_lock.h"
 #include "core2.h"
 #include "sleep.h"
 #include "xil_types.h"
@@ -293,8 +295,9 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
     dmb();  /* publish the clear before the reset re-enters the worker */
     taskq_watchdog_on_fault(&g_sched_watchdog);
     /* Core-1-affine image sessions lost their codec heap objects with the
-     * fault (cold_restart's reclaim frees them; on permanent disable they
-     * are parked-unreachable). Drop the dangling references in BOTH
+     * fault; both branches below reclaim the decode blocks core 1 left
+     * allocated (the cold restart inside core1_cold_restart, the
+     * single-core fallback inline). Drop the dangling references in BOTH
      * branches so core 0 never destroys against reclaimed memory. Audio
      * streams hold no heap objects, but their embedded decoder state may
      * be mid-frame; mark them faulted so feeds/reads fail cleanly. */
@@ -305,6 +308,17 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
     if (taskq_watchdog_core1_enabled(&g_sched_watchdog)) {
       core1_cold_restart();
     } else {
+      /* Single-core fallback: core 1 never runs again, so the
+       * cold-restart recovery duties cannot run in core1_cold_restart.
+       * Mirror them inline: core 1 is halted on the fault, the malloc
+       * lock reset clears any spinlock it may hold, the decode-state
+       * lock reset clears any budget lock it orphaned, and the reclaim
+       * frees the decode blocks it left allocated (the poisoned sessions
+       * above have already released their charges, so the 72 MiB budget
+       * stays usable). */
+      sdk_smp_lock_reset_malloc();
+      sdk_image_stream_reset_decode_state_lock();
+      sdk_compression_reclaim_core1_decode();
       g_core1_started = 0;  /* give up on core 1 -> single-core fallback */
     }
   }
