@@ -1662,8 +1662,15 @@ static void fill_png_tile_result(const struct SDKImageStreamSession *session,
 	result->bytes_written = session->output_width *
 	                        session->png_rows_this_feed *
 	                        bytes_per_pixel;
-	if (!session->png_complete)
+	if (!session->png_complete ||
+	    (session->png_tile_staging &&
+	     session->png_tile_rows_emitted < session->rows_output)) {
+		/* PARTIAL means "more output is pending": for a
+		 * streaming tile, staged rows still awaiting emission
+		 * count as pending even after the input completed -
+		 * clients treat a non-PARTIAL tile at EOF as final. */
 		result->flags |= SDK_IMAGE_SESSION_RESULT_PARTIAL;
+	}
 	set_tile_flush(session, session->output_width * bytes_per_pixel,
 	               session->png_rows_this_feed, result);
 }
