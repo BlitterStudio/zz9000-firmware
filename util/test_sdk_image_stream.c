@@ -11,11 +11,123 @@
 #undef main
 
 #include "sdk_image_stream.h"
+#include "png.h"
 #include "jpeglib.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include "memorymap.h"
+#include "sdk_smp_lock.h"
+
+/*
+ * The firmware places the session table in a fixed-address SCU-coherent
+ * slab (SDK_IMAGE_SESSIONS_ADDRESS, memorymap.h); the host has no such
+ * carve-out, so map it before the stream API runs.
+ */
+static int host_map_session_region(void)
+{
+	void *region = mmap((void *)SDK_IMAGE_SESSIONS_ADDRESS,
+			    SDK_IMAGE_SESSIONS_MAX_BYTES,
+			    PROT_READ | PROT_WRITE,
+			    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+
+	if (region == MAP_FAILED) {
+		printf("could not map host session region at 0x%lx\n",
+		       (unsigned long)SDK_IMAGE_SESSIONS_ADDRESS);
+		return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * Host stand-ins for the SMP-lock platform primitives (weak in the
+ * firmware's sdk_smp_lock_arm.c): the host test is single-threaded, so
+ * the raw spinlock is a plain word and the IRQ save/restore are no-ops.
+ * Every mock here is WEAK: if a host build links the real portable
+ * state machine (sdk_smp_lock.c) or its own mocks, the strong
+ * definitions win and these drop out; if it does not, these satisfy
+ * the link so the file builds standalone.
+ */
+__attribute__((weak)) int smp_cpu_id(void)
+{
+	return 0;
+}
+
+__attribute__((weak)) uint32_t smp_local_irq_save(void)
+{
+	return 0U;
+}
+
+__attribute__((weak)) void smp_local_irq_restore(uint32_t saved)
+{
+	(void)saved;
+}
+
+__attribute__((weak)) void smp_raw_spin_lock(volatile uint32_t *word)
+{
+	*word = 1U;
+}
+
+__attribute__((weak)) void smp_raw_spin_unlock(volatile uint32_t *word)
+{
+	*word = 0U;
+}
+
+/*
+ * Single-threaded stand-ins for the portable lock state machine (the
+ * real one in sdk_smp_lock.c tracks owner/depth/IRQ state; nothing in
+ * this test ever contends, so plain field writes are equivalent).
+ */
+__attribute__((weak)) void sdk_smp_lock_acquire(sdk_smp_lock_t *lock)
+{
+	if (lock->owner == smp_cpu_id()) {
+		lock->depth++;
+		return;
+	}
+	lock->raw = 1U;
+	lock->owner = smp_cpu_id();
+	lock->depth = 1U;
+}
+
+__attribute__((weak)) void sdk_smp_lock_release(sdk_smp_lock_t *lock)
+{
+	if (lock->depth == 0U)
+		return;
+	lock->depth--;
+	if (lock->depth == 0U) {
+		lock->owner = -1;
+		lock->raw = 0U;
+	}
+}
+
+__attribute__((weak)) void sdk_smp_lock_reset(sdk_smp_lock_t *lock)
+{
+	lock->raw = 0U;
+	lock->owner = -1;
+	lock->depth = 0U;
+	lock->saved_irq = 0U;
+}
+
+/*
+ * Host stand-ins for the decode-heap wrappers: the strong definitions in
+ * sdk_compression.c route core-1 allocations through the decode-reclaim
+ * table, but this host test links without that file. The test is
+ * single-threaded on "core 0" (the smp_cpu_id mock below), where the real
+ * wrappers reduce to plain malloc/free, so this matches them exactly.
+ * WEAK: a build that links the real definitions drops this out.
+ */
+__attribute__((weak)) void *sdk_decode_heap_alloc(size_t size)
+{
+	return malloc(size);
+}
+
+__attribute__((weak)) void sdk_decode_heap_free(void *ptr)
+{
+	free(ptr);
+}
 
 static const uint8_t png_2x2[] = {
 	0x89U, 0x50U, 0x4eU, 0x47U, 0x0dU, 0x0aU, 0x1aU, 0x0aU,
@@ -117,6 +229,118 @@ static int make_solid_rgb_jpeg(uint32_t width, uint32_t height,
 	jpeg_destroy_compress(&cinfo);
 	free(row);
 	return *out != 0 && *out_size != 0UL;
+}
+
+/* Growable in-memory PNG writer: solid-color interlaced sources for the
+ * decode-state budget tests (the content is irrelevant, only the IHDR
+ * fields matter). */
+struct png_mem_ctx {
+	uint8_t *data;
+	uint32_t size;
+	uint32_t cap;
+};
+
+static void png_mem_write(png_structp png, png_bytep data, png_size_t size)
+{
+	struct png_mem_ctx *ctx = (struct png_mem_ctx *)png_get_io_ptr(png);
+	uint32_t need;
+
+	need = ctx->size + (uint32_t)size;
+	if (need > ctx->cap) {
+		uint32_t grow = ctx->cap;
+
+		while (grow < need)
+			grow *= 2U;
+		ctx->data = (uint8_t *)realloc(ctx->data, grow);
+		if (!ctx->data)
+			return;
+		ctx->cap = grow;
+	}
+	memcpy(ctx->data + ctx->size, data, size);
+	ctx->size += (uint32_t)size;
+}
+
+static void png_mem_flush(png_structp png)
+{
+	(void)png;
+}
+
+static void png_mem_error(png_structp png, const char *message)
+{
+	(void)png;
+	(void)message;
+}
+
+static int make_solid_rgba_png(uint32_t width, uint32_t height,
+                               uint8_t **out, uint32_t *out_len)
+{
+	struct png_mem_ctx ctx;
+	png_structp png;
+	png_infop info;
+	uint8_t *row;
+	uint32_t x;
+	uint32_t y;
+	uint32_t pass;
+	int passes;
+	row = 0;
+	int ok = 0;
+
+	if (!out || !out_len || width == 0U || height == 0U)
+		return 0;
+	*out = 0;
+	*out_len = 0;
+
+	ctx.data = (uint8_t *)malloc(1U << 20U);
+	ctx.size = 0U;
+	ctx.cap = 1U << 20U;
+	if (!ctx.data)
+		return 0;
+
+	png = png_create_write_struct(PNG_LIBPNG_VER_STRING, &ctx,
+	                               png_mem_error, 0);
+	if (!png)
+		goto out;
+	png_set_write_fn(png, &ctx, png_mem_write, png_mem_flush);
+	info = png_create_info_struct(png);
+	if (!info) {
+		png_destroy_write_struct(&png, 0);
+		goto out;
+	}
+	png_set_IHDR(png, info, width, height, 8,
+	               PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_ADAM7,
+	               PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+	png_write_info(png, info);
+	passes = png_set_interlace_handling(png);
+	/* Interlaced writing goes through the same row-conversion path as
+	 * the single-pass case, so the row bytes come from the
+	 * post-conversion layout. */
+	row = (uint8_t *)malloc(png_get_rowbytes(png, info));
+	if (!row) {
+		png_destroy_write_struct(&png, &info);
+		goto out;
+	}
+	for (x = 0U; x < width; x++) {
+		row[x * 4U + 0U] = 0x10U;
+		row[x * 4U + 1U] = 0x20U;
+		row[x * 4U + 2U] = 0x30U;
+		row[x * 4U + 3U] = 0xffU;
+	}
+	for (pass = 0U; pass < (uint32_t)passes; pass++)
+		for (y = 0U; y < height; y++)
+			png_write_row(png, row);
+	png_write_end(png, info);
+	png_destroy_write_struct(&png, &info);
+	if (ctx.size > 0U) {
+		*out = ctx.data;
+		*out_len = ctx.size;
+		ok = 1;
+		ctx.data = 0;
+	}
+out:
+	if (ctx.data)
+		free(ctx.data);
+	free(row);
+	return ok;
 }
 
 static int test_direct_scale_row_uses_bilinear_filter(void)
@@ -1280,9 +1504,190 @@ static int test_jpeg_stream_direct_scaled_output_is_sliced(void)
 	return 0;
 }
 
+/*
+ * Regression for the whole-image decode-state budget lifecycle (PR #107
+ * findings 2/3/5/6): the aggregate charge is enforced across live
+ * sessions, a baseline single-scan JPEG commits 0 decode state (not the
+ * full-image coefficient estimate), and the core-1 poison path releases
+ * the charges of the faulted sessions so the budget stays usable.
+ *
+ * 4096x3200 RGBA interlaced source with an RGB888 tile destination: the
+ * rows keep the RGBA layout (an RGB888 surface cannot take them straight
+ * in), so the whole-image interlace buffer is 3200 x (4096 x 4) =
+ * 48 MiB per session. The charge commits at the header stage and lives
+ * until the interlace buffer is freed, so a half-fed session still
+ * holds it: two such sessions (96 MiB) exceed the 72 MiB budget while
+ * one fits.
+ */
+static int test_decode_state_budget_charge_lifecycle(void)
+{
+	struct SDKImageStreamBegin begin;
+	struct SDKImageStreamFeed feed;
+	struct SDKImageStreamResult result;
+	uint8_t *png_data = 0;
+	uint32_t png_len = 0;
+	uint8_t *jpg_data = 0;
+	unsigned long jpg_len = 0;
+	uint8_t *tile_a = 0, *tile_c = 0, *tile_d = 0;
+	uint32_t tile_bytes = 4096U * 3200U * 3U;
+	uint32_t session_a = 0, session_c = 0, session_j = 0, session_d = 0;
+	uint32_t prefix_len;
+	uint16_t status;
+	int step;
+
+	sdk_image_stream_init();
+	if (!make_solid_rgba_png(4096U, 3200U, &png_data, &png_len) ||
+	    !make_solid_rgb_jpeg(4096U, 3200U, &jpg_data, &jpg_len))
+		return 1;
+	tile_a = (uint8_t *)malloc(tile_bytes);
+	tile_c = (uint8_t *)malloc(tile_bytes);
+	tile_d = (uint8_t *)malloc(tile_bytes);
+	if (!tile_a || !tile_c || !tile_d)
+		return 2;
+
+	/* A stream prefix that holds the IHDR but stops before the
+	 * IEND: the decode stays mid-image, so the charge stays live. */
+	prefix_len = png_len / 2U;
+
+	/* A: core-1-affine session; the 48 MiB charge commits at the
+	 * header stage, and the prefix-only feed leaves the decode
+	 * mid-image so the charge stays live through the C/J checks
+	 * and the simulated poison. */
+	memset(&begin, 0, sizeof(begin));
+	begin.codec = SDK_IMAGE_CODEC_PNG;
+	begin.output_mode = SDK_IMAGE_OUTPUT_TILE_BUFFER;
+	begin.output_format = SDK_SURFACE_FORMAT_RGB888;
+	begin.tile_handle = 0x40000001UL;
+	begin.tile_stride = 4096U * 3U;
+	begin.tile_rows = 3200U;
+	begin.tile_address = (uintptr_t)tile_a;
+	begin.tile_length = tile_bytes;
+	begin.core1_affine = 1U;
+	step = 3;
+	if (sdk_image_stream_begin(&begin, &result) != SDK_STATUS_OK)
+		goto out;
+	session_a = result.session;
+
+	step = 4;
+	memset(&feed, 0, sizeof(feed));
+	feed.session = session_a;
+	feed.src_handle = 0x40000002UL;
+	feed.src_length = prefix_len;
+	memset(&result, 0, sizeof(result));
+	status = sdk_image_stream_feed(&feed, png_data, &result);
+	if (status != SDK_STATUS_OK)
+		goto out;
+
+	/* C: a second same-sized session must be rejected by the
+	 * aggregate budget (48 + 48 MiB > 72 MiB) while A is
+	 * mid-decode. */
+	step = 5;
+	begin.tile_handle = 0x40000002UL;
+	begin.tile_address = (uintptr_t)tile_c;
+	begin.core1_affine = 0U;
+	if (sdk_image_stream_begin(&begin, &result) != SDK_STATUS_OK)
+		goto out;
+	session_c = result.session;
+
+	step = 6;
+	memset(&feed, 0, sizeof(feed));
+	feed.session = session_c;
+	feed.src_handle = 0x40000003UL;
+	feed.src_length = prefix_len;
+	memset(&result, 0, sizeof(result));
+	status = sdk_image_stream_feed(&feed, png_data, &result);
+	if (status != SDK_STATUS_BAD_REQUEST)
+		goto out;
+	step = 7;
+	if (sdk_image_stream_close(session_c) != SDK_STATUS_OK)
+		goto out;
+
+	/* J: a baseline single-scan JPEG commits 0 decode state, so it
+	 * must be accepted even while A holds 48 MiB of the 72 MiB
+	 * budget (a charged 4096x3200x3 coefficient pool would not fit
+	 * and the reservation would reject it). */
+	step = 8;
+	begin.codec = SDK_IMAGE_CODEC_JPEG;
+	begin.tile_handle = 0x40000003UL;
+	begin.tile_address = (uintptr_t)tile_c;
+	begin.core1_affine = 0U;
+	if (sdk_image_stream_begin(&begin, &result) != SDK_STATUS_OK)
+		goto out;
+	session_j = result.session;
+
+	step = 9;
+	memset(&feed, 0, sizeof(feed));
+	feed.session = session_j;
+	feed.src_handle = 0x40000004UL;
+	feed.src_length = (uint32_t)jpg_len;
+	feed.flags = SDK_IMAGE_SESSION_FEED_EOF;
+	memset(&result, 0, sizeof(result));
+	status = sdk_image_stream_feed(&feed, jpg_data, &result);
+	if (status != SDK_STATUS_OK ||
+	    result.image_width != 4096U ||
+	    result.image_height != 3200U ||
+	    result.state == SDK_IMAGE_SESSION_STATE_ERROR)
+		goto out;
+	step = 10;
+	if (sdk_image_stream_close(session_j) != SDK_STATUS_OK)
+		goto out;
+
+	/* Simulate the core-1 fault recovery: A is still mid-decode
+	 * and charged; the poison path drops the dangling session
+	 * references WITHOUT running the destructors, so it must also
+	 * release A's charge (the blocks themselves were freed by the
+	 * decode-reclaim pass). */
+	sdk_image_stream_poison_core1_sessions();
+
+	/* D: the budget must be usable again: the session shape that
+	 * was rejected while A was charged now fits. The 48 MiB
+	 * reservation happens at the header stage, so an accepted feed
+	 * proves the poisoned charge was released. */
+	step = 11;
+	begin.codec = SDK_IMAGE_CODEC_PNG;
+	begin.tile_handle = 0x40000004UL;
+	begin.tile_address = (uintptr_t)tile_d;
+	begin.core1_affine = 0U;
+	if (sdk_image_stream_begin(&begin, &result) != SDK_STATUS_OK)
+		goto out;
+	session_d = result.session;
+
+	step = 12;
+	memset(&feed, 0, sizeof(feed));
+	feed.session = session_d;
+	feed.src_handle = 0x40000005UL;
+	feed.src_length = prefix_len;
+	memset(&result, 0, sizeof(result));
+	status = sdk_image_stream_feed(&feed, png_data, &result);
+	if (status != SDK_STATUS_OK)
+		goto out;
+	step = 13;
+	if (sdk_image_stream_close(session_d) != SDK_STATUS_OK)
+		goto out;
+
+	/* A was poisoned: closing it must reduce to a plain slot reset. */
+	step = 14;
+	if (sdk_image_stream_close(session_a) != SDK_STATUS_OK)
+		goto out;
+	step = 0;
+out:
+	if (step)
+		printf("decode-state budget charge lifecycle failed at step %d\n",
+		       step);
+	free(tile_a);
+	free(tile_c);
+	free(tile_d);
+	free(jpg_data);
+	free(png_data);
+	return step;
+}
+
 int main(void)
 {
 	int result;
+
+	if (host_map_session_region() != 0)
+		return 1;
 
 	result = test_direct_scale_row_uses_bilinear_filter();
 	if (result) {
@@ -1390,6 +1795,12 @@ int main(void)
 	if (result) {
 		printf("sliced direct scaled jpeg stream failed: %d\n", result);
 		return 200 + result;
+	}
+
+	result = test_decode_state_budget_charge_lifecycle();
+	if (result) {
+		printf("decode-state budget charge lifecycle failed: %d\n", result);
+		return 210 + result;
 	}
 
 	return 0;
