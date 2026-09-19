@@ -266,6 +266,13 @@ void fabric_lease_meter(struct audio_fabric_slot *s,
  * read is detected (the cached re-read alone could not see it). A
  * producer mid-update or writing faster than firmware reads simply
  * fails the read; the tick isolates the slot for one pass.
+ *
+ * The _at core reads a caller-supplied control block so a main-loop
+ * caller preemptible by the audio ISR can read through its own
+ * snapshot -- the ISR's revocation path clears l->control, and the
+ * reader must never invalidate or dereference through the nulled
+ * pointer. The caller revalidates the lease after the read; a lease
+ * that died mid-read only yields a discarded view.
  */
 struct fabric_ring_producer_view {
 	uint64_t write;
@@ -274,11 +281,11 @@ struct fabric_ring_producer_view {
 	uint32_t flags;
 };
 
-static int fabric_ring_read_producer(struct audio_fabric_lease *l,
+static int fabric_ring_read_producer_at(uint8_t *control,
 	struct fabric_ring_producer_view *view)
 {
 	volatile struct SDKAudioRingProducerLine *p =
-		(volatile struct SDKAudioRingProducerLine *)l->control;
+		(volatile struct SDKAudioRingProducerLine *)control;
 	uint32_t attempt;
 
 	for (attempt = 0U; attempt < FABRIC_RING_SEQLOCK_ATTEMPTS;
@@ -305,6 +312,15 @@ static int fabric_ring_read_producer(struct audio_fabric_lease *l,
 			return 1;   /* stable snapshot */
 	}
 	return 0;
+}
+
+/* Lease-bound wrapper: for callers running in the compositor ISR's
+ * own context -- the tick, which is the revoker itself, so its
+ * l->control can never change under it. */
+static int fabric_ring_read_producer(struct audio_fabric_lease *l,
+	struct fabric_ring_producer_view *view)
+{
+	return fabric_ring_read_producer_at(l->control, view);
 }
 
 /*
@@ -491,27 +507,41 @@ void fabric_lease_isr_tick(void)
 		l->line_valid = 1U;
 		if (l->state == (uint8_t)AUDIO_FABRIC_SLOT_STATE_LEASED &&
 		    (l->paused ||
-		     view.write - l->credited >= FABRIC_RING_PREROLL_BYTES) &&
-		    (!s->preconvert.active ||
-		     s->preconvert.staged - s->preconvert.consumed >=
-			     AUDIO_TX_BUFFER_SIZE -
-				     2U * AUDIO_BYTES_PER_PERIOD)) {
-			/* A primed first publication: LEASED -> ACTIVE.
-			 * Re-arm the fill frontier only when this slot
-			 * revives an otherwise idle fabric -- joining a
-			 * live mix must never rewind the shared frontier
-			 * (the other producers' staged periods would be
+		     (view.write - l->credited >=
+		      FABRIC_RING_PREROLL_BYTES &&
+		      (!s->preconvert.active ||
+		       s->preconvert.staged - s->preconvert.consumed >=
+			       AUDIO_TX_BUFFER_SIZE -
+				       2U * AUDIO_BYTES_PER_PERIOD)))) {
+			/* A first publication: LEASED -> ACTIVE. Re-arm
+			 * the fill frontier only when this slot revives
+			 * an otherwise idle fabric -- joining a live mix
+			 * must never rewind the shared frontier (the
+			 * other producers' staged periods would be
 			 * re-filled and their staging double-counted).
 			 *
-			 * A converting lease additionally needs the full
+			 * The preroll gates guard UNPAUSED activation: a
+			 * converting lease additionally needs the full
 			 * frontier preroll (the TX fill target ahead)
-			 * already staged: the producer line's preroll says
-			 * the SOURCE is ready, but the fill consumes the
-			 * converted ring -- activating before the poll
-			 * staged AUDIO_FABRIC_TARGET_AHEAD periods would
-			 * commit silence for the shortfall and queue the
-			 * real startup audio behind it (and count the
-			 * misses as underruns once primed). */
+			 * already staged, because the producer line's
+			 * preroll says the SOURCE is ready while the fill
+			 * consumes the converted ring -- activating
+			 * before the poll staged AUDIO_FABRIC_TARGET_AHEAD
+			 * periods would commit silence for the shortfall
+			 * and queue the real startup audio behind it (and
+			 * count the misses as underruns once primed).
+			 *
+			 * A PAUSED publication bypasses both gates: a
+			 * paused converting client publishes no source
+			 * bytes, so its staging can never prime -- the
+			 * gate would wedge the lease LEASED forever. The
+			 * bypass is safe: the fill snapshot marks paused
+			 * (and unprimed converting) leases faulted, so
+			 * the fill contributes silence with no staging
+			 * charge and the frontier-rebase underrun counter
+			 * excludes faulted slots, while the activation
+			 * restart leaves the pristine staging untouched
+			 * (consumed == 0) for the unpause. */
 			if (!audio_fabric_others_live(slot))
 				audio_fabric_producer_restart(slot);
 			l->state = (uint8_t)AUDIO_FABRIC_SLOT_STATE_ACTIVE;
@@ -647,6 +677,7 @@ void audio_fabric_lease_poll(void)
 		struct audio_fabric_slot *s = fabric_slot(slot);
 		struct fabric_lease_preconvert *p;
 		struct audio_fabric_lease *l;
+		uint8_t *control;
 		uint32_t budget = AUDIO_FABRIC_LEASE_PRECONVERT_BUDGET;
 		uint32_t frames;
 		uint32_t src_bytes;
@@ -671,8 +702,24 @@ void audio_fabric_lease_poll(void)
 		 * activation pass already finds primed staging and fills
 		 * real PCM instead of leaving the frontier silent. A
 		 * transient seqlock miss or a foreign line just delays
-		 * this pass. */
-		if (!fabric_ring_read_producer(l, &view) ||
+		 * this pass.
+		 *
+		 * The control block is snapshotted and the lease
+		 * revalidated after the read -- the loop body's
+		 * discipline applied to this earlier access: the audio
+		 * ISR can revoke the lease between the guard above and
+		 * the read (fabric_ring_revoke ->
+		 * audio_fabric_producer_detach memsets the slot,
+		 * clearing l->control), and the reader would invalidate
+		 * and dereference through NULL. Reading through the
+		 * snapshot is safe (the grant is permanent board-visible
+		 * memory); a lease that died mid-read only loses this
+		 * pass, its view discarded unstaged. */
+		control = l->control;
+		if (control == NULL ||
+		    !fabric_ring_read_producer_at(control, &view) ||
+		    l->tearing || l->ring == NULL ||
+		    l->control != control ||
 		    view.generation != l->generation)
 			continue;
 		while (budget-- != 0U) {
