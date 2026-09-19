@@ -670,7 +670,18 @@ void audio_fabric_lease_poll(void)
 			uint32_t offset;
 			uint8_t *ring;
 			uint32_t first;
+			/* Lease fields snapshotted per iteration: the audio
+			 * ISR can preempt the FIR below and revoke this
+			 * lease (heartbeat expiry, cursor fault), and the
+			 * drop path memsets the whole slot -- a resumed
+			 * poll would then divide by a zeroed capacity or
+			 * copy through a nulled ring. Work from the
+			 * snapshot and revalidate before publishing. */
+			uint8_t *src_ring = l->ring;
+			uint32_t src_capacity = l->capacity;
 
+			if (src_ring == NULL || src_capacity == 0U)
+				break;
 			consumed64 = fabric_lease_read_cursor(
 				&p->src_consumed);
 			staged = p->staged;
@@ -690,9 +701,9 @@ void audio_fabric_lease_poll(void)
 			/* Pull one source period, wrap-safe (the producer
 			 * wrote these bytes below the write cursor it
 			 * published; reader-side invalidate). */
-			offset = (uint32_t)(consumed64 % l->capacity);
-			ring = l->ring;
-			first = l->capacity - offset;
+			offset = (uint32_t)(consumed64 % src_capacity);
+			ring = src_ring;
+			first = src_capacity - offset;
 			if (first > src_bytes)
 				first = src_bytes;
 			Xil_DCacheInvalidateRange(
@@ -722,14 +733,17 @@ void audio_fabric_lease_poll(void)
 					src_scratch, out_scratch,
 					(uint16_t)frames,
 					AUDIO_BYTES_PER_PERIOD / 4U);
-			/* Re-validate against the activation restart: only
-			 * it rewrites p->staged mid-flight (the ISR fill
-			 * advances p->consumed, which does not invalidate a
-			 * publish keyed on staged/src_consumed). Dropping a
-			 * converted period here would also replay it through
-			 * already-advanced FIR history, so no consumed
-			 * check: publish what was converted. */
-			if (p->staged != staged)
+			/* Re-validate before publishing: the activation
+			 * restart rewrites p->staged mid-flight (the ISR
+			 * fill advances only p->consumed, which does not
+			 * invalidate a publish keyed on staged), and an
+			 * ISR-side revocation tears the lease down
+			 * entirely (ring cleared, tearing set) -- the
+			 * converted period is discarded either way.
+			 * Dropping it here also means never replaying it
+			 * through already-advanced FIR history. */
+			if (p->staged != staged || l->ring != src_ring ||
+			    l->tearing)
 				break;
 			/* Publish bytes + cost first, then the cursor: the
 			 * ISR sees a period as available only whole. */
