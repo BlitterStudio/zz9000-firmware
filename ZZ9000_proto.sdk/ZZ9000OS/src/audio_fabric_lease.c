@@ -491,13 +491,27 @@ void fabric_lease_isr_tick(void)
 		l->line_valid = 1U;
 		if (l->state == (uint8_t)AUDIO_FABRIC_SLOT_STATE_LEASED &&
 		    (l->paused ||
-		     view.write - l->credited >= FABRIC_RING_PREROLL_BYTES)) {
+		     view.write - l->credited >= FABRIC_RING_PREROLL_BYTES) &&
+		    (!s->preconvert.active ||
+		     s->preconvert.staged - s->preconvert.consumed >=
+			     AUDIO_TX_BUFFER_SIZE -
+				     2U * AUDIO_BYTES_PER_PERIOD)) {
 			/* A primed first publication: LEASED -> ACTIVE.
 			 * Re-arm the fill frontier only when this slot
 			 * revives an otherwise idle fabric -- joining a
 			 * live mix must never rewind the shared frontier
 			 * (the other producers' staged periods would be
-			 * re-filled and their staging double-counted). */
+			 * re-filled and their staging double-counted).
+			 *
+			 * A converting lease additionally needs the full
+			 * frontier preroll (the TX fill target ahead)
+			 * already staged: the producer line's preroll says
+			 * the SOURCE is ready, but the fill consumes the
+			 * converted ring -- activating before the poll
+			 * staged AUDIO_FABRIC_TARGET_AHEAD periods would
+			 * commit silence for the shortfall and queue the
+			 * real startup audio behind it (and count the
+			 * misses as underruns once primed). */
 			if (!audio_fabric_others_live(slot))
 				audio_fabric_producer_restart(slot);
 			l->state = (uint8_t)AUDIO_FABRIC_SLOT_STATE_ACTIVE;
