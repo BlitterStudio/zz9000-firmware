@@ -47,6 +47,13 @@
 #include "fabric_test_common.h"
 #include "memorymap.h"
 #include "pump_golden.h"
+
+/* Host stub: the lease poll's boundary rebase disables local IRQs on
+ * firmware; the host run is single-threaded. */
+uint32_t smp_local_irq_save(void);
+void smp_local_irq_restore(uint32_t saved_i_bit);
+uint32_t smp_local_irq_save(void) { return 0U; }
+void smp_local_irq_restore(uint32_t saved_i_bit) { (void)saved_i_bit; }
 #include "sdk_mailbox.h"
 
 /* The model snapshot fills either source struct; the golden capture
