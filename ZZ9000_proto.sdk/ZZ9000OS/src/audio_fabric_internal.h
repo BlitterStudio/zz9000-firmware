@@ -20,6 +20,42 @@
 #include "memorymap.h"
 #include "sdk_mailbox.h"
 
+/* Lease preconvert staging (drivers#83 follow-up: the #100 discipline
+ * on the lease plane). A converting lease (source rate other than
+ * 48 kHz) gets its whole source periods converted on the main loop
+ * (audio_fabric_lease_poll) into a private staging ring of 48-kHz
+ * periods; the compositor ISR fill then only copies. Each staging
+ * period carries the whole-period source-byte cost, so the
+ * period-tag/credit plane stays source-denominated and the producer
+ * line's cursors are untouched (the ISR's stage op still advances
+ * lease.consumed by exactly that cost).
+ *
+ * The 32-bit staging cursors wrap after ~6.2 h of continuous
+ * converted playback; the poll rebases both under an IRQ-safe
+ * critical section exactly like the pump's preconvert ring (PR #88
+ * review), so the ISR's single-word reads never tear and the modulo
+ * ring position never jumps (2^32 is not a multiple of the staging
+ * ring size). */
+#define AUDIO_FABRIC_LEASE_STAGING_PERIODS 32U
+/* Staging periods the queued-period rebuild may still replay: bounded
+ * by the TX ring (a staged-but-unretired TX window). The poll keeps
+ * this many periods behind the ISR consumed cursor intact, leaving
+ * 23 periods (~460 ms) of main-loop jitter runway -- pump-preconvert
+ * comparable. */
+#define AUDIO_FABRIC_LEASE_REPLAY_PERIODS AUDIO_NUM_PERIODS
+#define FABRIC_LEASE_STAGING_NONE UINT32_MAX
+
+struct fabric_lease_preconvert {
+	uint32_t staged;       /* staging bytes published (poll writer) */
+	uint32_t consumed;     /* staging bytes staged into TX (ISR writer) */
+	uint64_t src_consumed; /* source bytes pulled by the poll */
+	uint32_t cost[AUDIO_FABRIC_LEASE_STAGING_PERIODS];
+	uint8_t active;
+	uint8_t primed;
+};
+
+uint8_t *fabric_lease_staging_ring(uint32_t slot);
+
 /* Lease-plane per-slot state (plan U3, direct rings). ring == NULL means
  * no lease holds the slot. The granted PCM ring and the 128-byte seqlock
  * control block live in board-visible memory (memorymap.h direct-ring
@@ -77,9 +113,18 @@ struct audio_fabric_slot {
 	uint32_t underruns;       /* saturating, this slot only (R8) */
 	uint8_t staged_real;      /* real PCM staged this ISR */
 	uint16_t gain;            /* unity until the lease plane */
-	/* Per-slot conversion instance (phase continuity per producer). */
+	/* Staging period sequence number staged into each TX period
+	 * (FABRIC_LEASE_STAGING_NONE when that TX period carries none of
+	 * this slot's audio). Set by the compositor fill; read by the
+	 * queued-period rebuild; cleared wholesale by
+	 * audio_fabric_producer_restart / ring_silence / producer_clear,
+	 * which run from both the compositor tick (ISR) and the owner's
+	 * main-loop setup paths. */
+	uint32_t staged_seq[AUDIO_NUM_PERIODS];
 	struct zz_audio_convert convert;
 	uint32_t convert_rate;
+	/* Lease preconvert staging; active only for converting leases. */
+	struct fabric_lease_preconvert preconvert;
 	/* Lease-plane state; zero (ring NULL) for the pump slot. */
 	struct audio_fabric_lease lease;
 };

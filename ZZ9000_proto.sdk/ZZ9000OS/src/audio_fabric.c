@@ -94,12 +94,72 @@ void audio_fabric_host_set_tx_base(uint8_t *base)
 #define g_fabric_tx ((uint8_t *)AUDIO_TX_BUFFER_ADDRESS)
 #endif
 
+/* Per-slot preconvert staging rings (converting leases only; slot 0
+ * is the pump and never converts through staging). Whole 48-kHz
+ * periods, 16 deep: the ISR never wants more than the fill target
+ * ahead, and the queued-period rebuild replays at most the TX ring. */
+static uint8_t g_lease_staging
+	[AUDIO_FABRIC_SLOT_COUNT - 1U]
+	[AUDIO_FABRIC_LEASE_STAGING_PERIODS * AUDIO_FABRIC_PERIOD_BYTES];
+
+uint8_t *fabric_lease_staging_ring(uint32_t slot)
+{
+	if (slot == AUDIO_FABRIC_SLOT_PUMP || slot >= AUDIO_FABRIC_SLOT_COUNT)
+		return NULL;
+	return g_lease_staging[slot - 1U];
+}
+
+#ifdef AUDIO_FABRIC_HOST_TEST
+/* Test-only evidence seam (drivers#83 follow-up): counts every
+ * zz_audio_convert_stream call made from the compositor ISR context
+ * (fill and queued-period rebuild). The lease preconvert staging keeps
+ * rate conversion on the main loop, so a converting lease must leave
+ * this at zero while its audio still flows. */
+static uint32_t g_fabric_host_isr_conversions;
+
+uint32_t audio_fabric_host_isr_conversions(void)
+{
+	return g_fabric_host_isr_conversions;
+}
+#endif
+
 struct audio_fabric_slot *fabric_slot(uint32_t slot)
 {
 	if (slot >= AUDIO_FABRIC_SLOT_COUNT)
 		return NULL;
 	return &g_audio_fabric.slot[slot];
 }
+
+#ifdef AUDIO_FABRIC_HOST_TEST
+/* Wrap-regression seam: shift a flowing converting lease's staging
+ * cursors up by a staging-ring-aligned delta so `staged` lands a
+ * couple of ring depths below the 2^32 boundary. Aligned shift keeps
+ * seq % STAGING_PERIODS, the cost array's coherence, and the
+ * outstanding depth intact, so the next publishes exercise the poll's
+ * boundary rebase from a fully consistent state. */
+void audio_fabric_host_preconvert_near_wrap(uint32_t slot)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+	struct fabric_lease_preconvert *p;
+	uint32_t target = 0xFFFFFFFFU -
+		2U * AUDIO_FABRIC_LEASE_STAGING_PERIODS *
+			AUDIO_FABRIC_PERIOD_BYTES + 1U;
+	uint32_t ring_bytes = AUDIO_FABRIC_LEASE_STAGING_PERIODS *
+		AUDIO_FABRIC_PERIOD_BYTES;
+	uint32_t delta;
+
+	if (s == NULL || !s->preconvert.active)
+		return;
+	p = &s->preconvert;
+	/* Align the shift so the ring position is preserved exactly. */
+	delta = target - p->staged;
+	delta += (ring_bytes - delta % ring_bytes) % ring_bytes;
+	if (p->consumed + delta < p->consumed)
+		return;   /* would wrap consumed: caller retried too late */
+	p->staged += delta;
+	p->consumed += delta;
+}
+#endif
 
 static int fabric_any_attached(void)
 {
@@ -323,6 +383,75 @@ void audio_fabric_bench_poll(void)
 }
 #endif /* AUDIO_FABRIC_BENCH */
 
+/* Lease balance scale (post-fill pass, shared by every fill path). */
+static void fabric_apply_lease_gain(struct audio_fabric_slot *s)
+{
+	if (s->gain != AUDIO_FABRIC_GAIN_UNITY) {
+		int16_t *out = (int16_t *)g_fabric_stereo;
+		uint32_t g = s->gain;
+		uint32_t i;
+
+		for (i = 0U; i < AUDIO_FABRIC_PERIOD_BYTES / 2U; i++) {
+			int32_t v = ((int32_t)out[i] * (int32_t)g) >> 7;
+
+			if (v > 32767)
+				v = 32767;
+			else if (v < -32768)
+				v = -32768;
+			out[i] = (int16_t)v;
+		}
+	}
+}
+
+
+/* Clear the per-TX-period staging replay tags to their sentinel; the
+ * paired period_staged tags are zeroed separately by the callers. */
+static void fabric_slot_clear_staged_seq(struct audio_fabric_slot *s)
+{
+	uint32_t i;
+
+	for (i = 0U; i < AUDIO_NUM_PERIODS; i++)
+		s->staged_seq[i] = FABRIC_LEASE_STAGING_NONE;
+}
+/* Converting-lease fill: copy one staged 48-kHz period and charge the
+ * whole-period source cost through the same stage op the direct path
+ * uses, so tags, credits and the producer-line cursors stay
+ * source-denominated. The FIR itself ran on the main loop. */
+static uint32_t fabric_slot_fill_lease_preconvert(
+	struct audio_fabric_slot *s, uint32_t index)
+{
+	struct fabric_lease_preconvert *p = &s->preconvert;
+	uint8_t *ring = fabric_lease_staging_ring(
+		(uint32_t)(s - g_audio_fabric.slot));
+	uint32_t staged;
+	uint32_t seq;
+	uint32_t cost;
+	uint32_t offset;
+
+	s->staged_seq[index] = FABRIC_LEASE_STAGING_NONE;
+	if (s->source.faulted || ring == NULL)
+		return 0U;
+	staged = p->staged;
+	/* Wrap-safe outstanding depth: the poll's boundary rebase keeps
+	 * both cursors below 2^32, so the u32 difference is exact. */
+	if (staged - p->consumed < AUDIO_FABRIC_PERIOD_BYTES)
+		return 0U;
+	seq = p->consumed / AUDIO_FABRIC_PERIOD_BYTES;
+	offset = (seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS) *
+		AUDIO_FABRIC_PERIOD_BYTES;
+	memcpy(g_fabric_stereo, ring + offset, AUDIO_FABRIC_PERIOD_BYTES);
+	cost = p->cost[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS];
+	if (!s->ops->stage(cost)) {
+		/* Tearing raced in: consumed stays, so the same staged
+		 * period is re-offered next pass. */
+		return 0U;
+	}
+	p->consumed += AUDIO_FABRIC_PERIOD_BYTES;
+	s->staged_seq[index] = seq;
+	fabric_apply_lease_gain(s);
+	return cost;
+}
+
 /*
  * Per-slot fill: the pre-fabric pump's audio_pump_fill_period, ported
  * verbatim. Writes one period of S16 stereo into the shared stereo
@@ -330,9 +459,13 @@ void audio_fabric_bench_poll(void)
  * the slot contributes silence: temporary shortage, fault, unusable
  * geometry, or a drained end-of-stream). The caller owns the mix.
  */
-static uint32_t fabric_slot_fill(struct audio_fabric_slot *s)
+static uint32_t fabric_slot_fill(struct audio_fabric_slot *s,
+	uint32_t index)
 {
 	const struct audio_fabric_source *source = &s->source;
+
+	if (s->preconvert.active && s->lease.ring != NULL)
+		return fabric_slot_fill_lease_preconvert(s, index);
 	uint8_t *slot = (uint8_t *)g_fabric_stereo;
 	uint32_t rate;
 	uint32_t channels;
@@ -454,27 +587,18 @@ static uint32_t fabric_slot_fill(struct audio_fabric_slot *s)
 		zz_audio_convert_stream(&s->convert, pcm, (int16_t *)slot,
 		                        (uint16_t)src_frames,
 		                        AUDIO_FABRIC_PERIOD_BYTES / 4);
+#ifdef AUDIO_FABRIC_HOST_TEST
+		g_fabric_host_isr_conversions++;
+#endif
 #ifdef AUDIO_FABRIC_BENCH
 		fabric_bench_add(&g_fabric_bench.conv[bench_slot], bench_conv);
 #endif
 	}
+
 	/* Lease gain (0..255 mixer scale; unity skips the pass so the
 	 * pump's bit-identical parity is untouched): one saturating
 	 * clamp per frame, then the shared mix clamps again. */
-	if (s->gain != AUDIO_FABRIC_GAIN_UNITY) {
-		int16_t *out = (int16_t *)slot;
-		uint32_t g = s->gain;
-
-		for (i = 0U; i < AUDIO_FABRIC_PERIOD_BYTES / 2U; i++) {
-			int32_t v = ((int32_t)out[i] * (int32_t)g) >> 7;
-
-			if (v > 32767)
-				v = 32767;
-			else if (v < -32768)
-				v = -32768;
-			out[i] = (int16_t)v;
-		}
-	}
+	fabric_apply_lease_gain(s);
 	return pull;
 silence:
 	/* The caller commits either the mix (this slot adds nothing) or a
@@ -536,7 +660,7 @@ static void fabric_mix_commit(uint8_t *dst)
  * and underrun counters are untouched: only TX bytes change.
  */
 static uint32_t fabric_rebuild_pull(struct audio_fabric_slot *s,
-	uint64_t *cursor, uint32_t want)
+	uint64_t *cursor, uint32_t want, uint32_t index)
 {
 	const struct audio_fabric_source *source = &s->source;
 	uint8_t *slot = (uint8_t *)g_fabric_stereo;
@@ -552,6 +676,24 @@ static uint32_t fabric_rebuild_pull(struct audio_fabric_slot *s,
 
 	if (want == 0U || !source->ring || source->capacity == 0U)
 		return 0U;
+	if (s->preconvert.active) {
+		/* Replay the exact converted period from the staging ring:
+		 * byte-identical to the first staging (no converter
+		 * transient). The tag carries its whole-period source
+		 * cost; staging slots behind the ISR consumed cursor stay
+		 * intact for exactly this window. */
+		uint32_t seq = s->staged_seq[index];
+		uint8_t *staging = fabric_lease_staging_ring(
+			(uint32_t)(s - g_audio_fabric.slot));
+
+		if (seq == FABRIC_LEASE_STAGING_NONE || staging == NULL)
+			return 0U;
+		offset = (seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS) *
+			AUDIO_FABRIC_PERIOD_BYTES;
+		memcpy(slot, staging + offset, AUDIO_FABRIC_PERIOD_BYTES);
+		fabric_apply_lease_gain(s);
+		return want;
+	}
 	src_frames = rate / 50U;
 	if (src_frames == 0U ||
 	    src_frames > (AUDIO_FABRIC_PERIOD_BYTES / 4U))
@@ -617,21 +759,11 @@ static uint32_t fabric_rebuild_pull(struct audio_fabric_slot *s,
 		zz_audio_convert_stream(&s->convert, pcm, (int16_t *)slot,
 		                        (uint16_t)src_frames,
 		                        AUDIO_FABRIC_PERIOD_BYTES / 4);
+#ifdef AUDIO_FABRIC_HOST_TEST
+		g_fabric_host_isr_conversions++;
+#endif
 	}
-	if (s->gain != AUDIO_FABRIC_GAIN_UNITY) {
-		int16_t *out = (int16_t *)slot;
-		uint32_t g = s->gain;
-
-		for (i = 0U; i < AUDIO_FABRIC_PERIOD_BYTES / 2U; i++) {
-			int32_t v = ((int32_t)out[i] * (int32_t)g) >> 7;
-
-			if (v > 32767)
-				v = 32767;
-			else if (v < -32768)
-				v = -32768;
-			out[i] = (int16_t)v;
-		}
-	}
+	fabric_apply_lease_gain(s);
 	return want;
 }
 
@@ -661,7 +793,8 @@ static void fabric_rebuild_queued(uint32_t pos_period)
 		cursor[i] = 0U;
 		if (!s->live || s->lease.tearing)
 			continue;
-		if (s->source.sample_rate != 48000U) {
+		if (!s->preconvert.active &&
+		    s->source.sample_rate != 48000U) {
 			s->convert_rate = s->source.sample_rate;
 			zz_audio_convert_init(&s->convert,
 				s->source.sample_rate, 48000U);
@@ -692,7 +825,7 @@ static void fabric_rebuild_queued(uint32_t pos_period)
 			    s->period_staged[index] == 0U)
 				continue;
 			got = fabric_rebuild_pull(s, &cursor[i],
-				s->period_staged[index]);
+				s->period_staged[index], index);
 			if (got == 0U)
 				continue;   /* defensive: absent peer */
 			if (committed == 0U)
@@ -942,7 +1075,7 @@ void audio_fabric_isr(void)
 #ifdef AUDIO_FABRIC_BENCH
 			bench_fill = fabric_bench_now();
 #endif
-			staged = fabric_slot_fill(s);
+			staged = fabric_slot_fill(s, index);
 #ifdef AUDIO_FABRIC_BENCH
 			fabric_bench_add(&g_fabric_bench.fill[i], bench_fill);
 #endif
@@ -1197,10 +1330,30 @@ void audio_fabric_producer_restart(uint32_t slot)
 		(pos + AUDIO_FABRIC_PERIOD_BYTES) % AUDIO_FABRIC_RING_BYTES;
 	s->last_dma_offset = pos;
 	audio_playback_clear_periods(s->period_staged, AUDIO_NUM_PERIODS);
+	fabric_slot_clear_staged_seq(s);
 	s->silence_run = 0U;
 	s->staged_real = 0U;
-	zz_audio_convert_reset(&s->convert);
-	s->convert_rate = 0U;
+	/* Frontier re-arm under a converting lease: activation restarts
+	 * happen before anything was ever staged into the TX ring, so the
+	 * staged periods survive the re-arm and the activation pass fills
+	 * real PCM (a silent frontier build leaves the DMA catching the
+	 * frontier next pass, which counted one spurious played underrun
+	 * per activation). */
+	if (!s->preconvert.active) {
+		zz_audio_convert_reset(&s->convert);
+		s->convert_rate = 0U;
+	} else if (s->preconvert.consumed != 0U) {
+		/* Mid-stream re-arm: rewind the staging AND its converter
++		 * history together (credits stand; the re-conversion
+		 * restarts from the credited cursor with fresh phase). */
+		zz_audio_convert_reset(&s->convert);
+		s->convert_rate = 0U;
+		s->preconvert.staged = 0U;
+		s->preconvert.consumed = 0U;
+		s->preconvert.primed = 0U;
+		s->preconvert.src_consumed =
+			fabric_lease_read_cursor(&s->lease.credited);
+	}
 }
 
 void audio_fabric_ring_silence(uint32_t slot)
@@ -1210,6 +1363,7 @@ void audio_fabric_ring_silence(uint32_t slot)
 	if (s == NULL || !s->attached)
 		return;
 	audio_playback_clear_periods(s->period_staged, AUDIO_NUM_PERIODS);
+	fabric_slot_clear_staged_seq(s);
 	audio_silence();
 }
 
@@ -1226,6 +1380,7 @@ void audio_fabric_producer_clear(uint32_t slot)
 	 * audio_fabric_request_rebuild() armed while the tags still exist so
 	 * the queue is re-mixed without this producer. */
 	audio_playback_clear_periods(s->period_staged, AUDIO_NUM_PERIODS);
+	fabric_slot_clear_staged_seq(s);
 }
 
 void audio_fabric_reset(void)

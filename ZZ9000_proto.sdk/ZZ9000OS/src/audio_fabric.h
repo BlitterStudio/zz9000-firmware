@@ -253,6 +253,14 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	struct audio_fabric_ring_grant *grant);
 
 /*
+ * Main-loop fill for converting leases (the #100 discipline applied to
+ * the lease plane): converts whole source periods into per-slot
+ * staging rings so audio_fabric_isr only copies for those slots. Call
+ * once per core-0 main-loop pass; bounded per call.
+ */
+void audio_fabric_lease_poll(void);
+
+/*
  * Surrender a direct-ring lease, quiesce-then-rebuild (KTD3): the
  * slot stops contributing after at most the current 20-ms period (the
  * next compositor ISR rebuilds every queued future TX period from the
@@ -287,6 +295,13 @@ int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
 void audio_fabric_host_set_ring_grant(uint32_t slot, uint8_t *ring,
 	uint8_t *control, uint32_t capacity);
 void audio_fabric_host_set_heartbeat_timeout(uint32_t ms);
+/* Rate-conversion calls made from compositor ISR context (fill and
+ * queued-period rebuild): a converting lease must keep this at zero
+ * while its audio flows. */
+uint32_t audio_fabric_host_isr_conversions(void);
+/* Shift a flowing converting lease's staging cursors next to the
+ * 2^32 boundary, coherently (wrap-regression tests). */
+void audio_fabric_host_preconvert_near_wrap(uint32_t slot);
 void audio_fabric_host_set_tx_base(uint8_t *base);
 #endif
 

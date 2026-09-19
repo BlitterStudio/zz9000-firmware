@@ -69,6 +69,13 @@
 #define PUMP_PCM 5000      /* constant peer pump sample */
 #define MIXED_PCM 12777    /* saturating sum of the two */
 
+/* Host stub: the poll's boundary rebase disables local IRQs on
+ * firmware; the host run is single-threaded. */
+uint32_t smp_local_irq_save(void);
+void smp_local_irq_restore(uint32_t saved_i_bit);
+uint32_t smp_local_irq_save(void) { return 0U; }
+void smp_local_irq_restore(uint32_t saved_i_bit) { (void)saved_i_bit; }
+
 /* ---- producer-side model (mirrors the SDK client's publisher) ---- */
 
 static struct {
@@ -366,7 +373,10 @@ static void scenario_rate_conversion(void)
 	uint32_t pass;
 	int matched = 0;
 
+	uint32_t isr_conversions;
+
 	fabric_reset_state();
+	isr_conversions = audio_fabric_host_isr_conversions();
 	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44100U,
 	                         &grant) == AUDIO_FABRIC_LEASE_OK,
 	      "rate conv: acquire 44.1-kHz lease", "");
@@ -404,6 +414,7 @@ static void scenario_rate_conversion(void)
 	for (pass = 0U; pass < 6U; pass++) {
 		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
 			RING_TEST_CAPACITY, 0U);
+		audio_fabric_lease_poll();
 		fabric_pass();
 	}
 	for (pass = 0U; pass < AUDIO_TX_BUFFER_SIZE / TICK_BYTES;
@@ -421,11 +432,151 @@ static void scenario_rate_conversion(void)
 	check(consumed >= 2U * 3528U && (consumed % 3528U) == 0U,
 	      "rate conv: credits advance in source periods",
 	      fmt("consumed=%llu", (unsigned long long)consumed));
+	check(audio_fabric_host_isr_conversions() == isr_conversions,
+	      "rate conv: FIR runs on the main loop, not the ISR",
+	      fmt("delta=%u", audio_fabric_host_isr_conversions() -
+	                      isr_conversions));
 	check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
 		grant.generation) == AUDIO_FABRIC_LEASE_OK, "", "");
 	(void)zz_audio_convert_clips(&ref);
 }
 
+static void scenario_rate_wrap(void)
+{
+	struct audio_fabric_ring_grant grant;
+	struct SDKAudioRingFirmwareLine fw;
+	uint64_t consumed;
+	uint32_t warm;
+	uint32_t pass;
+
+	fabric_reset_state();
+	g_dma_count = 0;
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44100U,
+	                         &grant) == AUDIO_FABRIC_LEASE_OK,
+	      "rate wrap: acquire 44.1-kHz lease", "");
+	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation =
+		grant.generation;
+	producer_fill(AUDIO_FABRIC_SLOT_MAILBOX, LEASE_PCM);
+	/* The poll runs once per MAIN-LOOP pass (many per 20-ms tick on
+	 * hardware); model that cadence so the staging keeps the fill
+	 * target fed -- the budget is 2 periods per call by design. */
+	for (pass = 0U; pass < 8U; pass++) {
+		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
+			RING_TEST_CAPACITY, 0U);
+		for (warm = 0U; warm < 4U; warm++)
+			audio_fabric_lease_poll();
+		if (pass == 2U) {
+			/* Flowing now: shift the staging cursors to just
+			 * below the 2^32 boundary. Without the poll's
+			 * boundary rebase the next publishes wrap staged
+			 * past consumed and the lease wedges silent (the
+			 * review P1 -- ~6.2 h of continuous playback hits
+			 * the same state). */
+			audio_fabric_host_preconvert_near_wrap(
+				AUDIO_FABRIC_SLOT_MAILBOX);
+		}
+		fabric_pass();
+	}
+	firmware_snapshot(AUDIO_FABRIC_SLOT_MAILBOX, &fw);
+	consumed = ((uint64_t)be32(fw.consumed_cursor_hi) << 32) |
+	           be32(fw.consumed_cursor_lo);
+	check(consumed >= 4U * 3528U,
+	      "rate wrap: credits advance across the boundary rebase",
+	      fmt("consumed=%llu", (unsigned long long)consumed));
+	check(lease_state(AUDIO_FABRIC_SLOT_MAILBOX).underruns == 0U,
+	      "rate wrap: no underruns around the rebase", "");
+	check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
+		grant.generation) == AUDIO_FABRIC_LEASE_OK, "", "");
+}
+
+static void scenario_rebuild_converting(void)
+{
+	struct audio_fabric_ring_grant grant_a;
+	struct audio_fabric_ring_grant grant_b;
+	struct zz_audio_convert ref;
+	static int16_t src[882U * 2U];
+	static int16_t out[TICK_BYTES / 2U];
+	static int16_t expected[TICK_BYTES / 2U];
+	uint8_t *ring = g_ring_pcm_b;
+	uint32_t frame;
+	uint32_t pass;
+	int replayed = 0;
+
+	fabric_reset_state();
+	g_dma_count = 0;
+	/* A bypass peer on the mailbox slot (constant PCM) detaches
+	 * mid-mix; the converting survivor runs on the reserved slot,
+	 * exercising its own staging-ring index. */
+	check(acquire_lease(AUDIO_FABRIC_SLOT_MAILBOX, 128U, &grant_a) ==
+	      AUDIO_FABRIC_LEASE_OK, "rebuild conv: bypass acquire", "");
+	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation =
+		grant_a.generation;
+	producer_fill(AUDIO_FABRIC_SLOT_MAILBOX, LEASE_PCM);
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_RESERVED, 128U, 44100U,
+	                         &grant_b) == AUDIO_FABRIC_LEASE_OK,
+	      "rebuild conv: converting acquire", "");
+	g_producer[AUDIO_FABRIC_SLOT_RESERVED].generation =
+		grant_b.generation;
+	/* The period-synchronized pattern from the rate scenarios: once
+	 * the converter history settles, every converted period is the
+	 * same image, so a byte-identical replay of any staged period is
+	 * exactly this image. */
+	for (frame = 0U; frame < 882U; frame++) {
+		src[2U * frame] =
+			(int16_t)(1200 + (int32_t)(frame * 7U % 3000U));
+		src[2U * frame + 1U] =
+			(int16_t)(-900 - (int32_t)(frame * 11U % 2500U));
+	}
+	for (frame = 0U; frame < RING_TEST_CAPACITY / 4U; frame++) {
+		int16_t l = src[2U * (frame % 882U)];
+		int16_t r = src[2U * (frame % 882U) + 1U];
+
+		ring[frame * 4U] = (uint8_t)(uint16_t)l;
+		ring[frame * 4U + 1U] = (uint8_t)((uint16_t)l >> 8);
+		ring[frame * 4U + 2U] = (uint8_t)(uint16_t)r;
+		ring[frame * 4U + 3U] = (uint8_t)((uint16_t)r >> 8);
+	}
+	zz_audio_convert_init(&ref, 44100U, 48000U);
+	zz_audio_convert_stream(&ref, src, out, 882U, TICK_BYTES / 4U);
+	zz_audio_convert_stream(&ref, src, out, 882U, TICK_BYTES / 4U);
+	zz_audio_convert_stream(&ref, src, out, 882U, TICK_BYTES / 4U);
+	memcpy(expected, out, sizeof(expected));
+	for (pass = 0U; pass < 6U; pass++) {
+		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
+			RING_TEST_CAPACITY, 0U);
+		producer_publish(AUDIO_FABRIC_SLOT_RESERVED,
+			RING_TEST_CAPACITY, 0U);
+		audio_fabric_lease_poll();
+		if (pass == 4U) {
+			check(audio_fabric_ring_release(
+				AUDIO_FABRIC_SLOT_MAILBOX,
+				grant_a.generation) ==
+				AUDIO_FABRIC_LEASE_OK,
+				"rebuild conv: mid-mix bypass release", "");
+		}
+		fabric_pass();
+	}
+	/* Post-release queued periods are rebuilt from the survivors; the
+	 * converting lease's contribution must be the byte-identical
+	 * staged image (staged_seq replay), not a re-converted
+	 * approximation. */
+	for (pass = 0U; pass < AUDIO_TX_BUFFER_SIZE / TICK_BYTES;
+	     pass++) {
+		if (memcmp(g_fabric_tx + pass * TICK_BYTES, expected,
+		           TICK_BYTES) == 0)
+			replayed = 1;
+	}
+	check(replayed,
+	      "rebuild conv: staged image replays byte-identically", "");
+	check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_RESERVED,
+		grant_b.generation) == AUDIO_FABRIC_LEASE_OK, "", "");
+	(void)zz_audio_convert_clips(&ref);
+}
+
+/* The #100 discipline for the lease plane: a converting lease's audio
+ * flows (kernel image on TX, source-paced credits) with ZERO rate
+ * conversions inside the compositor ISR -- the main-loop poll owns the
+ * FIR. Red until the lease preconvert staging lands. */
 /* ---- B. lifecycle, audible periods, retirement credits ---- */
 
 static void scenario_lifecycle(void)
@@ -1018,6 +1169,8 @@ int main(void)
 	scenario_rate_admission();
 	scenario_lifecycle();
 	scenario_rate_conversion();
+	scenario_rate_wrap();
+	scenario_rebuild_converting();
 	scenario_malformed();
 	scenario_grace();
 	scenario_cursor_fault();
