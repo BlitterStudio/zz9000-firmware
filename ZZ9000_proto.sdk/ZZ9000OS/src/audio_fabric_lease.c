@@ -24,6 +24,7 @@
 #include "memorymap.h"
 #include "sdk_aperture_layout.h"
 #include "sdk_mailbox.h"
+#include "sdk_smp_lock.h"
 #include "xil_cache.h"
 
 /* Heartbeat budget (R11/R13): a producer token that goes this stale
@@ -265,6 +266,13 @@ void fabric_lease_meter(struct audio_fabric_slot *s,
  * read is detected (the cached re-read alone could not see it). A
  * producer mid-update or writing faster than firmware reads simply
  * fails the read; the tick isolates the slot for one pass.
+ *
+ * The _at core reads a caller-supplied control block so a main-loop
+ * caller preemptible by the audio ISR can read through its own
+ * snapshot -- the ISR's revocation path clears l->control, and the
+ * reader must never invalidate or dereference through the nulled
+ * pointer. The caller revalidates the lease after the read; a lease
+ * that died mid-read only yields a discarded view.
  */
 struct fabric_ring_producer_view {
 	uint64_t write;
@@ -273,11 +281,11 @@ struct fabric_ring_producer_view {
 	uint32_t flags;
 };
 
-static int fabric_ring_read_producer(struct audio_fabric_lease *l,
+static int fabric_ring_read_producer_at(uint8_t *control,
 	struct fabric_ring_producer_view *view)
 {
 	volatile struct SDKAudioRingProducerLine *p =
-		(volatile struct SDKAudioRingProducerLine *)l->control;
+		(volatile struct SDKAudioRingProducerLine *)control;
 	uint32_t attempt;
 
 	for (attempt = 0U; attempt < FABRIC_RING_SEQLOCK_ATTEMPTS;
@@ -304,6 +312,15 @@ static int fabric_ring_read_producer(struct audio_fabric_lease *l,
 			return 1;   /* stable snapshot */
 	}
 	return 0;
+}
+
+/* Lease-bound wrapper: for callers running in the compositor ISR's
+ * own context -- the tick, which is the revoker itself, so its
+ * l->control can never change under it. */
+static int fabric_ring_read_producer(struct audio_fabric_lease *l,
+	struct fabric_ring_producer_view *view)
+{
+	return fabric_ring_read_producer_at(l->control, view);
 }
 
 /*
@@ -490,13 +507,41 @@ void fabric_lease_isr_tick(void)
 		l->line_valid = 1U;
 		if (l->state == (uint8_t)AUDIO_FABRIC_SLOT_STATE_LEASED &&
 		    (l->paused ||
-		     view.write - l->credited >= FABRIC_RING_PREROLL_BYTES)) {
-			/* A primed first publication: LEASED -> ACTIVE.
-			 * Re-arm the fill frontier only when this slot
-			 * revives an otherwise idle fabric -- joining a
-			 * live mix must never rewind the shared frontier
-			 * (the other producers' staged periods would be
-			 * re-filled and their staging double-counted). */
+		     (view.write - l->credited >=
+		      FABRIC_RING_PREROLL_BYTES &&
+		      (!s->preconvert.active ||
+		       s->preconvert.staged - s->preconvert.consumed >=
+			       AUDIO_TX_BUFFER_SIZE -
+				       2U * AUDIO_BYTES_PER_PERIOD)))) {
+			/* A first publication: LEASED -> ACTIVE. Re-arm
+			 * the fill frontier only when this slot revives
+			 * an otherwise idle fabric -- joining a live mix
+			 * must never rewind the shared frontier (the
+			 * other producers' staged periods would be
+			 * re-filled and their staging double-counted).
+			 *
+			 * The preroll gates guard UNPAUSED activation: a
+			 * converting lease additionally needs the full
+			 * frontier preroll (the TX fill target ahead)
+			 * already staged, because the producer line's
+			 * preroll says the SOURCE is ready while the fill
+			 * consumes the converted ring -- activating
+			 * before the poll staged AUDIO_FABRIC_TARGET_AHEAD
+			 * periods would commit silence for the shortfall
+			 * and queue the real startup audio behind it (and
+			 * count the misses as underruns once primed).
+			 *
+			 * A PAUSED publication bypasses both gates: a
+			 * paused converting client publishes no source
+			 * bytes, so its staging can never prime -- the
+			 * gate would wedge the lease LEASED forever. The
+			 * bypass is safe: the fill snapshot marks paused
+			 * (and unprimed converting) leases faulted, so
+			 * the fill contributes silence with no staging
+			 * charge and the frontier-rebase underrun counter
+			 * excludes faulted slots, while the activation
+			 * restart leaves the pristine staging untouched
+			 * (consumed == 0) for the unpause. */
 			if (!audio_fabric_others_live(slot))
 				audio_fabric_producer_restart(slot);
 			l->state = (uint8_t)AUDIO_FABRIC_SLOT_STATE_ACTIVE;
@@ -538,8 +583,12 @@ static int fabric_ring_source_snapshot(uint32_t slot_index,
 	source->channels = 2U;
 	source->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
 	/* PAUSED is intentional silence: cursor progress is suppressed
-	 * (the fill loop never pulls) without an underrun. */
-	source->faulted = l->paused != 0U;
+	 * (the fill loop never pulls) without an underrun. So is a
+	 * converting lease whose staging is not primed yet: the
+	 * activation tick may go live one pass before the poll's first
+	 * converted period, and that gap is startup, not starvation. */
+	source->faulted = (l->paused != 0U) ||
+		(s->preconvert.active && !s->preconvert.primed);
 	return 1;
 }
 
@@ -604,6 +653,200 @@ static const struct audio_fabric_producer_ops *fabric_ring_ops(uint32_t slot)
 {
 	return slot == AUDIO_FABRIC_SLOT_MAILBOX
 		? &fabric_ring_ops_mailbox : &fabric_ring_ops_reserved;
+}
+
+/* Main-loop fill for converting leases (the #100 discipline on the
+ * lease plane): convert whole source periods into the per-slot
+ * staging ring so the compositor ISR fill only copies. Bounded per
+ * call; the usable runway is AUDIO_FABRIC_LEASE_STAGING_PERIODS -
+ * AUDIO_FABRIC_LEASE_REPLAY_PERIODS - 1 periods (~460 ms), comparable
+ * to the pump's preconvert ring. Runs on core 0 with the compositor
+ * ISR: the only cross-context words are the 32-bit staging cursors,
+ * single-word atomic per side, rebased at the 2^32 boundary under an
+ * IRQ-safe critical section (PR #88 discipline). */
+#define AUDIO_FABRIC_LEASE_PRECONVERT_BUDGET 2U
+
+void audio_fabric_lease_poll(void)
+{
+	static int16_t src_scratch[(AUDIO_BYTES_PER_PERIOD / 4U) * 2U];
+	static int16_t out_scratch[AUDIO_BYTES_PER_PERIOD / 2U];
+	uint32_t slot;
+
+	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
+	     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
+		struct audio_fabric_slot *s = fabric_slot(slot);
+		struct fabric_lease_preconvert *p;
+		struct audio_fabric_lease *l;
+		uint8_t *control;
+		uint32_t budget = AUDIO_FABRIC_LEASE_PRECONVERT_BUDGET;
+		uint32_t frames;
+		uint32_t src_bytes;
+		struct fabric_ring_producer_view view;
+
+		if (s == NULL || !s->attached || !s->preconvert.active)
+			continue;
+		l = &s->lease;
+		p = &s->preconvert;
+		if (l->ring == NULL || l->tearing)
+			continue;
+		if (l->source_rate == 48000U)
+			continue;
+		frames = l->source_rate / 50U;
+		src_bytes = frames * 4U;   /* lease plane: stereo S16LE */
+		if (frames == 0U ||
+		    frames > (AUDIO_BYTES_PER_PERIOD / 4U))
+			continue;
+
+		/* Fresh producer-line read (not the tick's cached view):
+		 * the poll must stage during LEASED too, so the
+		 * activation pass already finds primed staging and fills
+		 * real PCM instead of leaving the frontier silent. A
+		 * transient seqlock miss or a foreign line just delays
+		 * this pass.
+		 *
+		 * The control block is snapshotted and the lease
+		 * revalidated after the read -- the loop body's
+		 * discipline applied to this earlier access: the audio
+		 * ISR can revoke the lease between the guard above and
+		 * the read (fabric_ring_revoke ->
+		 * audio_fabric_producer_detach memsets the slot,
+		 * clearing l->control), and the reader would invalidate
+		 * and dereference through NULL. Reading through the
+		 * snapshot is safe (the grant is permanent board-visible
+		 * memory); a lease that died mid-read only loses this
+		 * pass, its view discarded unstaged. */
+		control = l->control;
+		if (control == NULL ||
+		    !fabric_ring_read_producer_at(control, &view) ||
+		    l->tearing || l->ring == NULL ||
+		    l->control != control ||
+		    view.generation != l->generation)
+			continue;
+		while (budget-- != 0U) {
+			uint64_t write = view.write;
+			uint64_t consumed64;
+			uint32_t staged;
+			uint32_t consumed;
+			uint32_t seq;
+			uint32_t offset;
+			uint8_t *ring;
+			uint32_t first;
+			/* Lease fields snapshotted per iteration: the audio
+			 * ISR can preempt the FIR below and revoke this
+			 * lease (heartbeat expiry, cursor fault), and the
+			 * drop path memsets the whole slot -- a resumed
+			 * poll would then divide by a zeroed capacity or
+			 * copy through a nulled ring. Work from the
+			 * snapshot and revalidate before publishing. */
+			uint8_t *src_ring = l->ring;
+			uint32_t src_capacity = l->capacity;
+
+			if (src_ring == NULL || src_capacity == 0U)
+				break;
+			consumed64 = fabric_lease_read_cursor(
+				&p->src_consumed);
+			staged = p->staged;
+			consumed = p->consumed;
+			/* Space guard: keep the replay window (a TX ring of
+			 * staging periods behind the ISR cursor) intact for
+			 * the queued-period rebuild. Exact across the
+			 * boundary rebase: in-flight never exceeds the
+			 * staging depth. */
+			if (staged - consumed >
+			    (AUDIO_FABRIC_LEASE_STAGING_PERIODS -
+			     AUDIO_FABRIC_LEASE_REPLAY_PERIODS - 1U) *
+			    AUDIO_BYTES_PER_PERIOD)
+				break;
+			if (consumed64 + src_bytes > write)
+				break;   /* no whole source period yet */
+			/* Pull one source period, wrap-safe (the producer
+			 * wrote these bytes below the write cursor it
+			 * published; reader-side invalidate). */
+			offset = (uint32_t)(consumed64 % src_capacity);
+			ring = src_ring;
+			first = src_capacity - offset;
+			if (first > src_bytes)
+				first = src_bytes;
+			Xil_DCacheInvalidateRange(
+				(INTPTR)(ring + offset), first);
+			memcpy(src_scratch, ring + offset, first);
+			if (src_bytes > first) {
+				Xil_DCacheInvalidateRange(
+					(INTPTR)ring, src_bytes - first);
+				memcpy((uint8_t *)src_scratch + first,
+				       ring, src_bytes - first);
+			}
+			/* Meter the source period here: the ISR fill no
+			 * longer sees this lease's pre-conversion PCM. */
+			fabric_lease_meter(s, src_scratch, src_bytes);
+			/* Convert one whole period. Off-table rates are
+			 * refused at acquire; the silent-period branch only
+			 * mirrors the pump's defensive policy. */
+			if (s->convert_rate != l->source_rate) {
+				s->convert_rate = l->source_rate;
+				zz_audio_convert_init(&s->convert,
+					l->source_rate, 48000U);
+			}
+			if (s->convert.ratio == NULL)
+				memset(out_scratch, 0, sizeof(out_scratch));
+			else
+				zz_audio_convert_stream(&s->convert,
+					src_scratch, out_scratch,
+					(uint16_t)frames,
+					AUDIO_BYTES_PER_PERIOD / 4U);
+			/* Re-validate before publishing: the activation
+			 * restart rewrites p->staged mid-flight (the ISR
+			 * fill advances only p->consumed, which does not
+			 * invalidate a publish keyed on staged), and an
+			 * ISR-side revocation tears the lease down
+			 * entirely (ring cleared, tearing set) -- the
+			 * converted period is discarded either way.
+			 * Dropping it here also means never replaying it
+			 * through already-advanced FIR history. */
+			if (p->staged != staged || l->ring != src_ring ||
+			    l->tearing)
+				break;
+			/* Publish bytes + cost first, then the cursor: the
+			 * ISR sees a period as available only whole. */
+			seq = staged / AUDIO_BYTES_PER_PERIOD;
+			ring = fabric_lease_staging_ring(slot);
+			if (ring == NULL)
+				break;
+			offset = (seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS) *
+				AUDIO_BYTES_PER_PERIOD;
+			memcpy(ring + offset, out_scratch,
+			       AUDIO_BYTES_PER_PERIOD);
+			Xil_DCacheFlushRange(
+				(INTPTR)(ring + offset),
+				AUDIO_BYTES_PER_PERIOD);
+			p->cost[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS] =
+				src_bytes;
+			__asm__ __volatile__("" ::: "memory");
+			p->staged = staged + AUDIO_BYTES_PER_PERIOD;
+			p->src_consumed = consumed64 + src_bytes;
+			p->primed = 1U;
+			/* Boundary rebase (PR #88): 2^32 is not a multiple
+			 * of the staging ring, so a natural wrap would jump
+			 * the ring position and wedge the lease silent.
+			 * Rebase both cursors by the ring-aligned prefix of
+			 * the lower one, IRQ-safe so the ISR never sees the
+			 * two words mid-adjustment. */
+			if (p->staged >
+			    0xFFFFFFFFU - AUDIO_FABRIC_LEASE_STAGING_PERIODS *
+				    AUDIO_BYTES_PER_PERIOD) {
+				uint32_t lowest = (p->consumed < p->staged)
+					? p->consumed : p->staged;
+				uint32_t rebase = lowest -
+					lowest % (AUDIO_FABRIC_LEASE_STAGING_PERIODS *
+						 AUDIO_BYTES_PER_PERIOD);
+				uint32_t irq_state = smp_local_irq_save();
+
+				p->staged -= rebase;
+				p->consumed -= rebase;
+				smp_local_irq_restore(irq_state);
+			}
+		}
+	}
 }
 /*
  * Lease plane lifecycle. Acquire and release run in main-loop context
@@ -722,6 +965,13 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	__asm__ __volatile__("" ::: "memory");
 	l->ring = ring;
 	s->gain = (uint16_t)composed.applied;
+	if (l->source_rate != 48000U) {
+		/* Converting lease: the main-loop preconvert staging owns
+		 * the FIR from here on (audio_fabric_lease_poll); the
+		 * compositor ISR fill only copies. attach already zeroed
+		 * the slot, so only the activation flag is needed. */
+		s->preconvert.active = 1U;
+	}
 	fabric_ring_record(slot, l->generation, identity, 0U, 0U,
 		SDK_AUDIO_RING_STATUS_OK);
 	if (grant != NULL) {

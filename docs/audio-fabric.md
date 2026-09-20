@@ -118,13 +118,17 @@ frontier):
   run any full-screen RTG animation), forcing sustained RTG blits
   through the card while measuring.
 
-**Producer configurations.** One deviation from the plan's first
-sketch, forced by the ABI: the lease plane's geometry is fixed bypass
-— 48 kHz stereo S16LE, `flags` required zero, the lease source pinned
-to 48000 — so a lease can never be the conversion-bearing producer.
-The conversion-bearing producer is therefore always the pump (an SDK
-playback binding at a non-48-kHz rate), and the conversion rows pair
-it with bypass leases:
+**Producer configurations.** The lease plane's geometry was originally
+fixed bypass — 48 kHz stereo S16LE, `flags` required zero, the lease
+source pinned to 48000. The AHI migration later admitted
+conversion-bearing leases (the six-rate vocabulary below 48 kHz,
+budgeted by the two-converting-producer quota). Since the drivers#83
+follow-up to #100, those leases preconvert on the main loop:
+`audio_fabric_lease_poll()` stages whole converted 48-kHz periods into
+a per-slot ring, and the compositor ISR fill is copy-only for every
+producer. The quota still bounds total conversion cost; it now prices
+main-loop work instead of ISR time. The conversion rows pair the pump
+(an SDK playback binding at a non-48-kHz rate) with bypass leases:
 
 | Row | Producers | How to produce it |
 |---|---|---|
@@ -133,18 +137,17 @@ it with bypass leases:
 | B3 | Pump 44.1 kHz + one bypass lease | B2 plus `zz9k-fabriclease` playing its generated 48 kHz tone |
 | B4 | Pump 44.1 kHz + two direct-ring producers (three sources) | The normal benchmark build; two independent `zz9k-fabriclease` instances acquire slots 1 and 2 |
 
-The three-source row measures the production admission path directly. Slot 0 remains the pump and the two Zorro III direct-ring slots are native peers. No instrument-only admission override is involved.
-What that build cannot construct is the two-conversion-bearing case
-(only the pump converts, through any ABI), so that half of the
-admission rule stays extrapolated: measured `slot0 conv` doubled over
-identical per-slot converter instances, which the bounded per-slot
-fill makes linear by construction.
-
-**Procedure per row:** start the standing load plus the row's
-producers, wait at least 30 s of steady state, transcribe the report
-block, and read the underrun counters (state read below) — they must
-be stable (0 for healthy rows). Record the firmware/image SHA-256
-with the results.
+The three-source row measures the production admission path directly.
+Slot 0 remains the pump and the two Zorro III direct-ring slots are
+native peers. No instrument-only admission override is involved.
+Since leases can carry conversion-bearing rates themselves (pre-
+converted on the main loop), the two-conversion-bearing case is now
+constructible too: pair B2's converting pump with one converting
+direct-ring lease (a rate-bearing `zz9k-fabriclease`), and measure the
+main-loop poll cost while both convert. Until that row is measured,
+the second converting producer stays extrapolated: measured `slot0
+conv` doubled over identical per-slot converter instances, which the
+bounded per-slot work makes linear by construction.
 
 ## Results — recorded PASS 2026-08-28 (operator session, PAL A4000 / R1 card)
 

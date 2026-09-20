@@ -2026,6 +2026,11 @@ int main() {
 			// keep the AX TX ring fed from a bound audio-stream session
 			// (SDK_OP_AUDIO_STREAM_PLAY); no-op when nothing is bound
 			sdk_mailbox_audio_playback_pump();
+			// convert whole source periods for rate-converted
+			// AHI/MHI leases on the main loop so the fabric ISR
+			// only copies (drivers#83 follow-up); no-op without
+			// converting leases
+			audio_fabric_lease_poll();
 
 			if (sdk_mailbox_register_events) {
 				uint32_t events = sdk_mailbox_register_events;
