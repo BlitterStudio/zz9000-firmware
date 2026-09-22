@@ -73,6 +73,11 @@ static volatile int rx_backpressure = 0;
 static volatile int rx_pause_frames = 0;
 static volatile int rx_slot_mismatch = 0;
 static volatile int frames_ack_rejected = 0;	/* issue #29: RX-accept handshake rejects */
+#define ETH_CONFIG_CAP_MULTICAST_HASH 0x0001
+#define ETH_CONFIG_HASH_SET            0x8000
+#define ETH_CONFIG_HASH_CLEAR          0x4000
+#define ETH_CONFIG_HASH_RESET          0x2000
+#define ETH_CONFIG_HASH_INDEX          0x003f
 
 #define ETH_PHY_TYPE_MICREL 0
 #define ETH_PHY_TYPE_MOTORCOMM 1
@@ -335,6 +340,45 @@ int ethernet_init() {
 	return XST_SUCCESS;
 }
 
+/* Program one GEM multicast-hash bucket. The SANA-II driver owns group and
+ * collision reference counts; firmware only changes the hardware bitmap. */
+void ethernet_set_multicast_hash(u16 command)
+{
+	u32 base = EmacPsInstance.Config.BaseAddress;
+	u32 config, hash;
+	u16 index = command & ETH_CONFIG_HASH_INDEX;
+
+	if (!base)
+		return;
+
+	config = XEmacPs_ReadReg(base, XEMACPS_NWCFG_OFFSET);
+	if (command & ETH_CONFIG_HASH_RESET) {
+		XEmacPs_WriteReg(base, XEMACPS_HASHL_OFFSET, 0);
+		XEmacPs_WriteReg(base, XEMACPS_HASHH_OFFSET, 0);
+		config &= ~XEMACPS_NWCFG_MCASTHASHEN_MASK;
+	} else if (command & ETH_CONFIG_HASH_SET) {
+		u32 offset = index < 32 ? XEMACPS_HASHL_OFFSET : XEMACPS_HASHH_OFFSET;
+		u32 bit = 1U << (index & 31);
+		hash = XEmacPs_ReadReg(base, offset);
+		XEmacPs_WriteReg(base, offset, hash | bit);
+		config |= XEMACPS_NWCFG_MCASTHASHEN_MASK;
+	} else if (command & ETH_CONFIG_HASH_CLEAR) {
+		u32 offset = index < 32 ? XEMACPS_HASHL_OFFSET : XEMACPS_HASHH_OFFSET;
+		u32 bit = 1U << (index & 31);
+		hash = XEmacPs_ReadReg(base, offset);
+		XEmacPs_WriteReg(base, offset, hash & ~bit);
+		if (XEmacPs_ReadReg(base, XEMACPS_HASHL_OFFSET) == 0 &&
+		    XEmacPs_ReadReg(base, XEMACPS_HASHH_OFFSET) == 0)
+			config &= ~XEMACPS_NWCFG_MCASTHASHEN_MASK;
+	}
+	XEmacPs_WriteReg(base, XEMACPS_NWCFG_OFFSET, config);
+}
+
+u16 ethernet_get_multicast_config(void)
+{
+	return ETH_CONFIG_CAP_MULTICAST_HASH;
+}
+
 enum {
 	ETH_TASK_SETUP,
 	ETH_TASK_NEGOTIATE,
@@ -512,6 +556,9 @@ static int ethernet_restart_dma(const char *reason) {
 
 void ethernet_reset_for_amiga() {
 	ethernet_log_status("amiga-reset-before");
+	/* A rebooted SANA-II driver owns no memberships. Close the receive gate
+	 * even though the GEM hash registers themselves survive a warm reset. */
+	ethernet_set_multicast_hash(ETH_CONFIG_HASH_RESET);
 
 	if (ethernet_task_state == ETH_TASK_READY) {
 		ethernet_restart_dma("amiga-reset");

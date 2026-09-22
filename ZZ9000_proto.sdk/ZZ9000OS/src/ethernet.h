@@ -18,6 +18,8 @@
 #define ETHERNET_H_
 
 int ethernet_init();
+void ethernet_set_multicast_hash(u16 command);
+u16 ethernet_get_multicast_config(void);
 u16 ethernet_send_frame(u16 frame_size);
 int ethernet_receive_frame(u16 acked_serial);
 u32 get_frames_received();

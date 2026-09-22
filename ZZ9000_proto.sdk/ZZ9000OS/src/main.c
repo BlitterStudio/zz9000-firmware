@@ -1316,6 +1316,9 @@ int main() {
 					ethernet_update_mac_address();
 					break;
 				}
+				case REG_ZZ_ETH_CONFIG:
+					ethernet_set_multicast_hash((u16)zdata);
+					break;
 				case REG_ZZ_USBBLK_TX_HI: {
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
 					usb_storage_write_block = ((u32) zdata) << 16;
@@ -1729,7 +1732,8 @@ int main() {
 					}
 					case REG_ZZ_ETH_MAC_LO: {
 						uint8_t* mac = ethernet_get_mac_address_ptr();
-						data = mac[4] << 24 | mac[5] << 16;
+						data = mac[4] << 24 | mac[5] << 16 |
+						       ethernet_get_multicast_config();
 						break;
 					}
 					case REG_ZZ_ETH_TX:
