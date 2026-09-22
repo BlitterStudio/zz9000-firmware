@@ -334,6 +334,61 @@ def check_vcap_diag_contract(rtl: str, sampler: str, project_tcl: str) -> None:
             )
 
 
+def check_vcap_row_metadata_contract(rtl: str, sampler: str) -> None:
+    """Every capture variant must expose the same frozen row-timing ABI."""
+    rtl_fragments = (
+        "localparam [15:0] VCAP_CAL_META_CAPABILITY = 16'h0274;",
+        "localparam [15:0] VCAP_CAL_META_ADDRESS = 16'h0278;",
+        "localparam [15:0] VCAP_CAL_META_DATA = 16'h027c;",
+        "localparam [31:0] VCAP_CAL_META_CAPABILITY_VALUE = 32'h564d010c;",
+        ".cal_metadata_address(vcap_cal_metadata_address),",
+        ".cal_metadata_data(vcap_cal_metadata_data),",
+        "vcap_cal_metadata_address <= regdata_in[3:0];",
+    )
+    sampler_fragments = (
+        "input  wire [3:0]  cal_metadata_address,",
+        "output wire [31:0] cal_metadata_data,",
+        "reg [15:0] line_cycle = 0;",
+        "line_cycle - previous_line_cycle",
+        "line_meta_identity <= {",
+        "line_meta_context <= {",
+        ".metadata_read_addr(cal_metadata_address),",
+        ".metadata_read_data(cal_metadata_data)",
+    )
+    for fragment in rtl_fragments:
+        if fragment not in rtl:
+            raise SystemExit(
+                "VCAP row metadata register contract violated: missing "
+                f"fragment: {fragment}"
+            )
+    for fragment in sampler_fragments:
+        if fragment not in sampler:
+            raise SystemExit(
+                "VCAP row metadata sampler contract violated: missing "
+                f"fragment: {fragment}"
+            )
+
+
+def check_vcap_window_origin_contract(sampler: str) -> None:
+    """Full-rate capture normalizes only its horizontal window origin."""
+    fragments = (
+        "wire use_grid_window = (FULLRATE != 0) && grid_seen && window_phase_valid;",
+        "wire [1:0] window_phase_delta = cap_grid - window_phase_ref;",
+        "capture_ready && raw_y == ctl_crop_v_cap[10:0]",
+        "window_phase_ref <= cap_grid;",
+        "default: begin window_x <= 0; window_x_hold <= 1; end",
+        ".raw_x(capture_window_x[10:0])",
+        "if (capture_window_x < crop_h_local)",
+        "1'b0, sample_x, phase_x, grid_pair_first,",
+    )
+    for fragment in fragments:
+        if fragment not in sampler:
+            raise SystemExit(
+                "VCAP horizontal window-origin contract violated: missing "
+                f"fragment: {fragment}"
+            )
+
+
 def main():
     rtl = RTL_PATH.read_text(encoding="utf-8")
     script = BUILD_SCRIPT.read_text(encoding="utf-8")
@@ -386,6 +441,8 @@ def main():
     check_writeback_provenance(rtl)
     check_vcap_iob_capture_contract(sampler, build_run)
     check_vcap_diag_contract(rtl, sampler, project_tcl)
+    check_vcap_row_metadata_contract(rtl, sampler)
+    check_vcap_window_origin_contract(sampler)
 
     print("RTL capture contract checks passed")
 

@@ -12,7 +12,9 @@ module videocap_recovery_tb;
     reg [23:0] pins = 0;
     reg cal_arm = 0;
     reg [9:0] cal_address = 0;
+    reg [3:0] cal_metadata_address = 0;
     wire [31:0] cal_status, cal_data, cal_geometry;
+    wire [31:0] cal_metadata_data;
     wire capture_ready, line_toggle, anchor_toggle;
     wire [10:0] cap_x, cap_y;
     wire cap_ntsc, cap_interlace;
@@ -25,6 +27,7 @@ module videocap_recovery_tb;
     reg last_line = 0, last_anchor = 0;
     integer old_lines, old_anchors;
     reg [31:0] frozen_status, frozen_geometry;
+    reg [31:0] frozen_metadata [0:11];
 
     always begin
         #(cap_half_period);
@@ -55,6 +58,8 @@ module videocap_recovery_tb;
         .probe_arm_toggle(1'b0), .probe_precrop_raddr(6'd0),
         .axi_clk(axi_clk), .axi_resetn(axi_resetn), .cal_arm(cal_arm),
         .cal_address(cal_address), .cal_status(cal_status), .cal_data(cal_data),
+        .cal_metadata_address(cal_metadata_address),
+        .cal_metadata_data(cal_metadata_data),
         .cal_geometry(cal_geometry), .buf_rbank(1'b0), .buf_raddr(12'd0)
     );
 
@@ -189,8 +194,11 @@ module videocap_recovery_tb;
     task check_snapshot;
         input integer h, v, seed;
         input ntsc;
-        integer tries, index, x, y;
-        reg [31:0] expected;
+        input full_width;
+        input [1:0] sample_mode;
+        integer tries, index, row, word_index, x, y;
+        reg [31:0] expected, identity, timing, context;
+        reg [15:0] first_timestamp;
         begin
             tries = 0;
             while (!cal_status[0] && tries < 200) begin
@@ -201,6 +209,33 @@ module videocap_recovery_tb;
             require(cal_status[31:16] != 0, "snapshot identifies a completed source field");
             require(cal_status[5:3] == {ntsc, 2'b00}, "progressive PAL/NTSC telemetry matches source");
             require(cal_geometry == ((v << 12) | h), "snapshot contains applied raw crop geometry");
+            first_timestamp = 0;
+            for (row = 0; row < 4; row = row + 1) begin
+                word_index = row * 3;
+                @(negedge axi_clk); cal_metadata_address = word_index;
+                @(posedge axi_clk); #0.001; identity = cal_metadata_data;
+                @(negedge axi_clk); cal_metadata_address = word_index + 1;
+                @(posedge axi_clk); #0.001; timing = cal_metadata_data;
+                @(negedge axi_clk); cal_metadata_address = word_index + 2;
+                @(posedge axi_clk); #0.001; context = cal_metadata_data;
+                require(identity[31], "row metadata has prior-line timing history");
+                require(identity[30], "row metadata saw the external capture grid");
+                require(identity[26:16] == v + 64 + row,
+                    "row metadata identifies the exact captured raw source row");
+                require(timing[15:0] == 16'd1816,
+                    "row metadata preserves the accepted line-edge interval");
+                require(context[31:20] == 12'd1815,
+                    "row metadata preserves the pre-reset sample counter");
+                require(context[19:8] == 12'd1815,
+                    "row metadata preserves the pre-reset phase counter");
+                require(context[6:0] == {full_width, sample_mode, 1'b1, 1'b0, 2'b00},
+                    "row metadata preserves the active sampler configuration");
+                if (row == 0)
+                    first_timestamp = timing[31:16];
+                else
+                    require(timing[31:16] == first_timestamp + row * 1816,
+                        "row timestamps remain consecutive in the free-running clock domain");
+            end
             for (index = 0; index < 1024; index = index + 1) begin
                 @(negedge axi_clk);
                 cal_address = index;
@@ -245,13 +280,24 @@ module videocap_recovery_tb;
         $display("CASE actual sampler RGB/geometry integration and frozen payload");
         arm();
         drive_field(312, 30);
-        check_snapshot(279, 40, 30, 1'b0);
+        check_snapshot(279, 40, 30, 1'b0, 1'b1, 2'd0);
         frozen_status = cal_status;
         frozen_geometry = cal_geometry;
+        for (old_lines = 0; old_lines < 12; old_lines = old_lines + 1) begin
+            @(negedge axi_clk); cal_metadata_address = old_lines;
+            @(posedge axi_clk); #0.001;
+            frozen_metadata[old_lines] = cal_metadata_data;
+        end
         drive_field(312, 40);
         require(cal_status == frozen_status && cal_geometry == frozen_geometry,
             "new native fields do not mutate published snapshot metadata");
-        check_snapshot(279, 40, 30, 1'b0);
+        for (old_lines = 0; old_lines < 12; old_lines = old_lines + 1) begin
+            @(negedge axi_clk); cal_metadata_address = old_lines;
+            @(posedge axi_clk); #0.001;
+            require(cal_metadata_data == frozen_metadata[old_lines],
+                "new native fields do not mutate frozen row timing metadata");
+        end
+        check_snapshot(279, 40, 30, 1'b0, 1'b1, 2'd0);
 
         $display("CASE rearm and same-boundary crop/filter change");
         request_config(189, 26, 1'b0, 2'd1);
@@ -259,7 +305,7 @@ module videocap_recovery_tb;
         drive_field(312, 50);
         check_config(189, 26, 1'b0, 2'd1);
         require(cal_status[31:16] != frozen_status[31:16], "rearm selects a new field sequence");
-        check_snapshot(189, 26, 50, 1'b0);
+        check_snapshot(189, 26, 50, 1'b0, 1'b0, 2'd1);
 
         $display("CASE stopped capture clock invalidation and pending config recovery");
         old_lines = line_events;
@@ -290,7 +336,7 @@ module videocap_recovery_tb;
         require(!cal_status[0], "recovery requires a fresh arm, never replays an old request");
         arm();
         drive_field(262, 80);
-        check_snapshot(281, 41, 80, 1'b1);
+        check_snapshot(281, 41, 80, 1'b1, 1'b1, 2'd2);
         require(line_events > old_lines && anchor_events > old_anchors,
             "native line output resumes with the new configuration");
 

@@ -18,9 +18,14 @@ module videocap_calibration_capture_tb;
     reg interlace = 0;
     reg field_parity = 0;
     reg ntsc = 0;
+    reg [31:0] line_meta_identity = 0;
+    reg [31:0] line_meta_timing = 0;
+    reg [31:0] line_meta_context = 0;
     reg arm_toggle = 0;
     reg [9:0] read_addr = 0;
+    reg [3:0] metadata_read_addr = 0;
     wire [31:0] read_data;
+    wire [31:0] metadata_read_data;
     wire [31:0] status;
     wire [31:0] geometry;
     integer failures = 0;
@@ -39,7 +44,12 @@ module videocap_calibration_capture_tb;
         .raw_x(raw_x), .raw_y(raw_y), .crop_h(crop_h), .crop_v(crop_v),
         .rgb(rgb), .interlace(interlace), .field_parity(field_parity),
         .ntsc(ntsc), .axi_clk(axi_clk), .axi_resetn(axi_resetn),
+        .line_meta_identity(line_meta_identity),
+        .line_meta_timing(line_meta_timing),
+        .line_meta_context(line_meta_context),
         .arm_toggle(arm_toggle), .read_addr(read_addr), .read_data(read_data),
+        .metadata_read_addr(metadata_read_addr),
+        .metadata_read_data(metadata_read_data),
         .status(status), .geometry(geometry)
     );
 
@@ -65,6 +75,26 @@ module videocap_calibration_capture_tb;
             green = y ^ (seed * 3);
             blue = (x >> 8) ^ (y >> 3) ^ (seed * 7);
             pixel_value = {red, green, blue};
+        end
+    endfunction
+
+    function [31:0] expected_line_metadata;
+        input integer word, row, y, seed;
+        begin
+            case (word % 3)
+                0: expected_line_metadata = 32'hc0000000 |
+                    ((row & 1) << 29) | ((row & 3) << 27) |
+                    ((y & 11'h7ff) << 16) |
+                    (((8'h20 + row) & 8'hff) << 8) |
+                    ((row & 4'hf) << 4);
+                1: expected_line_metadata =
+                    (((16'h4000 + y + seed) & 16'hffff) << 16) |
+                    ((16'd1820 + row) & 16'hffff);
+                default: expected_line_metadata =
+                    (((12'd1819 + row) & 12'hfff) << 20) |
+                    (((12'd1818 + row) & 12'hfff) << 8) |
+                    8'hf8;
+            endcase
         end
     endfunction
 
@@ -128,17 +158,25 @@ module videocap_calibration_capture_tb;
 
     task region;
         input integer h, v, seed, first, count;
-        integer index;
+        integer index, row, y;
         begin
-            for (index = first; index < first + count; index = index + 1)
+            for (index = first; index < first + count; index = index + 1) begin
+                if ((index % 256) == 0) begin
+                    row = index / 256;
+                    y = v + 64 + row;
+                    line_meta_identity = expected_line_metadata(row * 3, row, y, seed);
+                    line_meta_timing = expected_line_metadata(row * 3 + 1, row, y, seed);
+                    line_meta_context = expected_line_metadata(row * 3 + 2, row, y, seed);
+                end
                 sample(h + 128 + index % 256, v + 64 + index / 256, seed);
+            end
         end
     endtask
 
     task complete;
         input integer h, v, seed, sequence;
         input lace, parity, standard_ntsc;
-        integer tries, index, x, y;
+        integer tries, index, x, y, row;
         reg [31:0] expected_status;
         reg [31:0] previous_read;
         begin
@@ -164,6 +202,17 @@ module videocap_calibration_capture_tb;
                 require(read_data === {8'b0, pixel_value(x, y, seed)},
                         "every raw RGB word belongs to one snapshot");
                 require(status == expected_status, "snapshot status remains frozen during read");
+            end
+            for (index = 0; index < 12; index = index + 1) begin
+                @(negedge axi_clk);
+                metadata_read_addr = index;
+                @(posedge axi_clk); #0.001;
+                row = index / 3;
+                require(metadata_read_data === expected_line_metadata(
+                            index, row, v + 64 + row, seed),
+                        "row timing metadata belongs to the frozen pixel snapshot");
+                require(status == expected_status,
+                        "snapshot status remains frozen during metadata read");
             end
         end
     endtask

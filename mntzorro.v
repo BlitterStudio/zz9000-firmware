@@ -1161,6 +1161,13 @@ module MNTZorro_v0_1_S00_AXI
   localparam [15:0] VCAP_CAL_ADDRESS = 16'h026a;
   localparam [15:0] VCAP_CAL_DATA = 16'h026c;
   localparam [15:0] VCAP_CAL_GEOMETRY = 16'h0270;
+  // Frozen per-row timing paired with the 4x256 raw calibration pixels.
+  // Host-visible offsets are 0x1274, 0x1278 and 0x127c.
+  localparam [15:0] VCAP_CAL_META_CAPABILITY = 16'h0274;
+  localparam [15:0] VCAP_CAL_META_ADDRESS = 16'h0278;
+  localparam [15:0] VCAP_CAL_META_DATA = 16'h027c;
+  // "VM", ABI version 1, twelve 32-bit words (three per captured row).
+  localparam [31:0] VCAP_CAL_META_CAPABILITY_VALUE = 32'h564d010c;
   localparam [15:0] VCAP_PHASE_COMMIT_TOKEN = 16'hf05a;
   localparam [15:0] SDK_REG_OFFSET_MASK = 16'h0fff;
   localparam [31:0] SDK_CTRL_DOORBELL_CLEAR = 32'h20000000;
@@ -1555,7 +1562,9 @@ module MNTZorro_v0_1_S00_AXI
 
   reg vcap_cal_arm = 0;
   reg [9:0] vcap_cal_address = 0;
+  reg [3:0] vcap_cal_metadata_address = 0;
   wire [31:0] vcap_cal_status, vcap_cal_data, vcap_cal_geometry;
+  wire [31:0] vcap_cal_metadata_data;
   (* ASYNC_REG = "TRUE" *) reg [2:0] vcap_reset_sync = 3'b111;
   always @(posedge e7m_shifted or negedge vcap_clock_ready)
       if (!vcap_clock_ready) vcap_reset_sync <= 3'b111;
@@ -1578,7 +1587,10 @@ module MNTZorro_v0_1_S00_AXI
       .cap_reset(vcap_reset_sync[2]), .capture_ready(vcap_sampler_ready),
       .cal_arm(vcap_cal_arm), .cal_address(vcap_cal_address),
       .cal_status(vcap_cal_status), .cal_data(vcap_cal_data),
-      .cal_geometry(vcap_cal_geometry), .axi_resetn(S_AXI_ARESETN),
+      .cal_geometry(vcap_cal_geometry),
+      .cal_metadata_address(vcap_cal_metadata_address),
+      .cal_metadata_data(vcap_cal_metadata_data),
+      .axi_resetn(S_AXI_ARESETN),
       .grid_ref(e7m_shifted180),
       .vcap_vsync(VCAP_VSYNC),
       .vcap_hsync(VCAP_HSYNC),
@@ -3070,6 +3082,12 @@ module MNTZorro_v0_1_S00_AXI
             VCAP_CAL_STATUS, (VCAP_CAL_STATUS + 2): rr_data <= vcap_cal_status;
             VCAP_CAL_DATA, (VCAP_CAL_DATA + 2): rr_data <= vcap_cal_data;
             VCAP_CAL_GEOMETRY, (VCAP_CAL_GEOMETRY + 2): rr_data <= vcap_cal_geometry;
+            VCAP_CAL_META_CAPABILITY,
+            (VCAP_CAL_META_CAPABILITY + 2): begin
+              rr_data <= VCAP_CAL_META_CAPABILITY_VALUE;
+            end
+            VCAP_CAL_META_DATA,
+            (VCAP_CAL_META_DATA + 2): rr_data <= vcap_cal_metadata_data;
             VCAP_PHASE_STATUS,
             VCAP_PHASE_STATUS_LO: begin
 `ifdef VCAP_C28
@@ -3216,6 +3234,8 @@ module MNTZorro_v0_1_S00_AXI
             VCAP_CAL_ARM:
               if (regdata_in == 16'hca1c) vcap_cal_arm <= ~vcap_cal_arm;
             VCAP_CAL_ADDRESS: vcap_cal_address <= regdata_in[9:0];
+            VCAP_CAL_META_ADDRESS:
+              vcap_cal_metadata_address <= regdata_in[3:0];
             VCAP_PHASE_TARGET_HI:
               vcap_phase_staged[31:16] <= regdata_in;
             VCAP_PHASE_TARGET_LO:

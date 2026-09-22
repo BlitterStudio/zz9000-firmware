@@ -297,7 +297,9 @@ module videocap_sampler #(
     input  wire        axi_resetn,
     input  wire        cal_arm,
     input  wire [9:0]  cal_address,
+    input  wire [3:0]  cal_metadata_address,
     output wire [31:0] cal_status, cal_data, cal_geometry,
+    output wire [31:0] cal_metadata_data,
     input  wire        buf_rbank,
     input  wire [11:0] buf_raddr,
     output wire [31:0] buf_rdata
@@ -355,6 +357,12 @@ wire [23:0] rgbin =
                        vcap_b_iob[7:4], vcap_b_iob[7:4]} :
                       {vcap_r_iob, vcap_g_iob, vcap_b_iob};
 reg [10:0] sample_x = 0;
+reg [10:0] window_x = 0;
+reg window_x_hold = 0;
+reg [1:0] window_phase_ref = 0;
+reg window_phase_valid = 0;
+reg [1:0] cap_grid = 0;
+reg grid_seen = 0;
 reg [10:0] raw_y = 0;
 reg lace_field = 0;
 reg next_lace_field = 0;
@@ -363,6 +371,12 @@ reg [7:0] hs_pulse_width = 0;
 reg [11:0] phase_x = 0;
 reg [11:0] phase_line_period = 0;
 reg [11:0] vsync_phase_x = 0;
+reg [15:0] line_cycle = 0;
+reg [15:0] previous_line_cycle = 0;
+reg line_history_valid = 0;
+reg [31:0] line_meta_identity = 0;
+reg [31:0] line_meta_timing = 0;
+reg [31:0] line_meta_context = 0;
 
 /* Both capture paths use a two-bank line buffer.  Full-rate variants bank
  * only in full-width mode as before; filtered (Denise-adapter) variants
@@ -464,16 +478,24 @@ videocap_standard_cdc videocap_standard_publish (
  */
 wire [11:0] crop_h_local = (FULLRATE != 0) ?
     ctl_crop_h_cap : {1'b0, ctl_crop_h_cap[11:1]};
+wire use_grid_window = (FULLRATE != 0) && grid_seen && window_phase_valid;
+wire [11:0] capture_window_x = use_grid_window ?
+    {1'b0, window_x} : {1'b0, sample_x};
+wire [1:0] window_phase_delta = cap_grid - window_phase_ref;
 wire [11:0] probe_precrop_start = crop_h_local - 12'd64;
 
 videocap_calibration_capture calibration_capture (
     .cap_clk(cap_clk), .cap_reset(!capture_ready), .frame_sync(frame_sync),
-    .raw_x(sample_x), .raw_y(raw_y), .crop_h(crop_h_local),
+    .raw_x(capture_window_x[10:0]), .raw_y(raw_y), .crop_h(crop_h_local),
     .crop_v(ctl_crop_v_cap), .rgb(rgbin), .interlace(cap_interlace),
     .field_parity(lace_field), .ntsc(cap_ntsc),
+    .line_meta_identity(line_meta_identity),
+    .line_meta_timing(line_meta_timing),
+    .line_meta_context(line_meta_context),
     .axi_clk(axi_clk), .axi_resetn(axi_resetn), .arm_toggle(cal_arm),
     .read_addr(cal_address), .read_data(cal_data), .status(cal_status),
-    .geometry(cal_geometry)
+    .metadata_read_addr(cal_metadata_address),
+    .metadata_read_data(cal_metadata_data), .geometry(cal_geometry)
 );
 
 reg half = 0;
@@ -490,8 +512,6 @@ wire filter_pairs = (FULLRATE != 0) && !ctl_full_width_cap;
 reg grid_ref_meta = 0;
 reg grid_ref_sync = 0;
 reg grid_ref_prev = 0;
-reg [1:0] cap_grid = 0;
-reg grid_seen = 0;
 /* Which grid phase starts a stored pair.  The detected reference edge
  * keeps a fixed but implementation-set phase against real pixel
  * boundaries, so a per-frame content measurement selects between the
@@ -645,13 +665,18 @@ always @(posedge cap_clk) begin
 
     if (cap_reset) begin
         hs <= 0; vs <= 0;
-        sample_x <= 0; raw_y <= 0;
+        sample_x <= 0; window_x <= 0; window_x_hold <= 0;
+        window_phase_ref <= 0; window_phase_valid <= 0; raw_y <= 0;
         cap_x <= 0; cap_y <= 0; cap_ymax <= 0;
         cap_interlace <= 0; cap_ntsc <= 0; cap_shres <= 0;
         cap_x_done <= 0;
         lace_field <= 0; next_lace_field <= 0;
         shortlines <= 0; hs_pulse_width <= 0;
         phase_x <= 0; phase_line_period <= 0; vsync_phase_x <= 0;
+        line_cycle <= 0; previous_line_cycle <= 0;
+        line_history_valid <= 0;
+        line_meta_identity <= 0; line_meta_timing <= 0;
+        line_meta_context <= 0;
         grid_ref_meta <= 0; grid_ref_sync <= 0; grid_ref_prev <= 0;
         grid_seen <= 0; cap_grid <= 0;
         pair_parity <= 0; grid_intra_sum <= 0; grid_cross_sum <= 0;
@@ -685,7 +710,25 @@ always @(posedge cap_clk) begin
         cap_frame_anchor_sent <= 1;
     end
 
+    line_cycle <= line_cycle + 1'b1;
     if (line_sync) begin
+        /* Freeze the accepted edge that establishes the next raw row's
+         * coordinate origin. A free-running timestamp exposes missed or
+         * displaced edges independently of the counters reset below. */
+        line_meta_identity <= {
+            line_history_valid, grid_seen, pair_parity, cap_grid,
+            raw_y + 1'b1, hs_pulse_width, shortlines, 4'b0
+        };
+        line_meta_timing <= {
+            line_cycle, line_cycle - previous_line_cycle
+        };
+        line_meta_context <= {
+            1'b0, sample_x, phase_x, grid_pair_first,
+            ctl_full_width_cap, ctl_sample_mode_cap,
+            (FULLRATE != 0), (CSYNC_VSYNC != 0), RGB_MODE[1:0]
+        };
+        previous_line_cycle <= line_cycle;
+        line_history_valid <= 1;
         if (phase_x != 0)
             phase_line_period <= phase_x;
         phase_x <= 0;
@@ -916,6 +959,34 @@ always @(posedge cap_clk) begin
         grid_prev_second_valid <= 0;
         cap_x <= 0;
         sample_x <= 0;
+        /* Keep horizontal window placement independent of a one-tick move
+         * in the accepted HSYNC edge.  Learn the normal absolute grid phase
+         * on the first post-recovery crop boundary, preserving each full-rate
+         * topology's existing crop semantics instead of assuming phase zero.
+         * Later lines start their window coordinate at the signed circular
+         * displacement from that phase.  Phase 3 represents -1 and therefore
+         * holds the coordinate for one tick; phases 1/2 start at +1/+2.
+         * sample_x remains edge-relative for vertical/framing and diagnostics. */
+        if ((FULLRATE != 0) && grid_seen) begin
+            if (!window_phase_valid) begin
+                window_x <= 0;
+                window_x_hold <= 0;
+                if (capture_ready && raw_y == ctl_crop_v_cap[10:0]) begin
+                    window_phase_ref <= cap_grid;
+                    window_phase_valid <= 1;
+                end
+            end else begin
+                case (window_phase_delta)
+                    2'd0: begin window_x <= 0; window_x_hold <= 0; end
+                    2'd1: begin window_x <= 1; window_x_hold <= 0; end
+                    2'd2: begin window_x <= 2; window_x_hold <= 0; end
+                    default: begin window_x <= 0; window_x_hold <= 1; end
+                endcase
+            end
+        end else begin
+            window_x <= 0;
+            window_x_hold <= 0;
+        end
         half <= 0;
         shres_half <= 0;
         cap_x_done <= 0;
@@ -953,6 +1024,10 @@ always @(posedge cap_clk) begin
         raw_y <= raw_y + 1'b1;
     end else begin
         sample_x <= sample_x + 1'b1;
+        if (window_x_hold)
+            window_x_hold <= 0;
+        else
+            window_x <= window_x + 1'b1;
 
         /* Snapshot the 64 raw RGB samples immediately before the configured
          * crop origin.  The preceding post-window probe found only blanking,
@@ -961,15 +1036,15 @@ always @(posedge cap_clk) begin
         if (capture_banking_cap && crop_h_local >= 12'd64 &&
                 probe_precrop_waiting &&
                 !probe_precrop_publish_pending && cap_y == PROBE_LINE &&
-                {1'b0, sample_x} >= probe_precrop_start &&
-                {1'b0, sample_x} < crop_h_local) begin
-            probe_precrop_mem[{1'b0, sample_x} - probe_precrop_start]
+                capture_window_x >= probe_precrop_start &&
+                capture_window_x < crop_h_local) begin
+            probe_precrop_mem[capture_window_x - probe_precrop_start]
                 <= {8'b0, rgbin};
 
-            if ({1'b0, sample_x} == probe_precrop_start)
+            if (capture_window_x == probe_precrop_start)
                 probe_precrop_context <= {9'h000, capture_bank,
                                            raw_y, sample_x};
-            if ({1'b0, sample_x} == crop_h_local - 1'b1)
+            if (capture_window_x == crop_h_local - 1'b1)
                 probe_precrop_publish_pending <= 1;
         end
 
@@ -985,14 +1060,14 @@ always @(posedge cap_clk) begin
                 shres_half <= 1;
             end else begin
                 shres_half <= 0;
-                if ({1'b0, sample_x} > crop_h_local &&
+                if (capture_window_x > crop_h_local &&
                         cap_x < (ctl_full_width_cap ? 11'h500 : 11'h200) &&
                         (rgbin !== shres_prev) && diff_count != 16'hffff)
                     diff_count <= diff_count + 1'b1;
             end
         end
 
-        if ({1'b0, sample_x} < crop_h_local) begin
+        if (capture_window_x < crop_h_local) begin
             half <= 0;
         end else begin
             if (filter_pairs) begin

@@ -28,11 +28,16 @@ module videocap_calibration_capture (
     input  wire        interlace,
     input  wire        field_parity,
     input  wire        ntsc,
+    input  wire [31:0] line_meta_identity,
+    input  wire [31:0] line_meta_timing,
+    input  wire [31:0] line_meta_context,
     input  wire        axi_clk,
     input  wire        axi_resetn,
     input  wire        arm_toggle,
     input  wire [9:0]  read_addr,
+    input  wire [3:0]  metadata_read_addr,
     output reg  [31:0] read_data,
+    output reg  [31:0] metadata_read_data,
     output reg  [31:0] status,
     output reg  [31:0] geometry
 );
@@ -57,6 +62,10 @@ reg [15:0] field_sequence;
 reg [15:0] snapshot_sequence;
 reg [2:0] snapshot_mode;
 reg [23:0] snapshot_geometry;
+reg [383:0] snapshot_line_metadata;
+reg [3:0] snapshot_line_valid;
+(* ASYNC_REG = "TRUE" *) reg [383:0] line_metadata_meta;
+(* ASYNC_REG = "TRUE" *) reg [383:0] line_metadata_sync;
 reg [11:0] expected_x;
 reg [11:0] expected_y;
 reg [9:0] write_addr;
@@ -73,6 +82,9 @@ wire geometry_changed = {crop_v, crop_h} != snapshot_geometry;
 wire mode_changed = {ntsc, field_parity, interlace} != snapshot_mode;
 wire new_arm = arm_sync[2] != arm_seen;
 wire sample_matches = sample_x == expected_x && sample_y == expected_y;
+wire row_start = sample_x == roi_x_first;
+wire line_metadata_matches = line_meta_identity[31] &&
+    line_meta_identity[26:16] == sample_y[10:0];
 wire reset_request = cap_reset || !axi_resetn;
 
 /* AXI reset can release independently of cap_clk. Synchronize the release
@@ -89,15 +101,33 @@ end
 always @(posedge cap_clk) begin
     if (!reset_cap[2] && cap_ready && !new_arm &&
             state == CAPTURE && !frame_sync && !geometry_changed &&
-            !mode_changed && in_roi && sample_matches)
+            !mode_changed && in_roi && sample_matches &&
+            (!row_start || line_metadata_matches))
         pixels[write_addr] <= rgb;
 end
 
 always @(posedge axi_clk) begin
-    if (!axi_resetn)
+    if (!axi_resetn) begin
         read_data <= 0;
-    else
+        metadata_read_data <= 0;
+    end else begin
         read_data <= {8'b0, pixels[read_addr]};
+        case (metadata_read_addr)
+            4'd0: metadata_read_data <= line_metadata_sync[31:0];
+            4'd1: metadata_read_data <= line_metadata_sync[63:32];
+            4'd2: metadata_read_data <= line_metadata_sync[95:64];
+            4'd3: metadata_read_data <= line_metadata_sync[127:96];
+            4'd4: metadata_read_data <= line_metadata_sync[159:128];
+            4'd5: metadata_read_data <= line_metadata_sync[191:160];
+            4'd6: metadata_read_data <= line_metadata_sync[223:192];
+            4'd7: metadata_read_data <= line_metadata_sync[255:224];
+            4'd8: metadata_read_data <= line_metadata_sync[287:256];
+            4'd9: metadata_read_data <= line_metadata_sync[319:288];
+            4'd10: metadata_read_data <= line_metadata_sync[351:320];
+            4'd11: metadata_read_data <= line_metadata_sync[383:352];
+            default: metadata_read_data <= 0;
+        endcase
+    end
 end
 
 /* cap_reset is supplied with asynchronous assertion and capture-clock
@@ -116,6 +146,8 @@ always @(posedge cap_clk or posedge reset_cap[2]) begin
         snapshot_sequence <= 0;
         snapshot_mode <= 0;
         snapshot_geometry <= 0;
+        snapshot_line_metadata <= 0;
+        snapshot_line_valid <= 0;
         expected_x <= 0;
         expected_y <= 0;
         write_addr <= 0;
@@ -137,6 +169,8 @@ always @(posedge cap_clk or posedge reset_cap[2]) begin
             cap_valid <= 0;
             cap_busy <= 1;
             write_addr <= 0;
+            snapshot_line_metadata <= 0;
+            snapshot_line_valid <= 0;
             state <= WAIT_FRAME;
         end else begin
             case (state)
@@ -155,6 +189,8 @@ always @(posedge cap_clk or posedge reset_cap[2]) begin
                         expected_x <= crop_h + 12'd128;
                         expected_y <= crop_v + 12'd64;
                         write_addr <= 0;
+                        snapshot_line_metadata <= 0;
+                        snapshot_line_valid <= 0;
                         /* Reject an ROI beyond the 11-bit source raster;
                          * no truncation or wrap may produce a false pass. */
                         if (crop_h > 12'd1664 || crop_v > 12'd1980) begin
@@ -170,6 +206,8 @@ always @(posedge cap_clk or posedge reset_cap[2]) begin
                         /* A mid-field transition restarts only at a clean
                          * subsequent boundary; never mix configurations. */
                         write_addr <= 0;
+                        snapshot_line_metadata <= 0;
+                        snapshot_line_valid <= 0;
                         state <= WAIT_FRAME;
                     end else if (frame_sync) begin
                         /* The field ended before all coordinates arrived.
@@ -182,15 +220,61 @@ always @(posedge cap_clk or posedge reset_cap[2]) begin
                              * incomplete capture, even if the total is 1024. */
                             cap_busy <= 0;
                             state <= IDLE;
-                        end else if (write_addr == 10'd1023) begin
-                            state <= PUBLISH;
+                        end else if (row_start && !line_metadata_matches) begin
+                            /* Every row must carry the decoded line edge that
+                             * established its raw coordinate origin. Never
+                             * publish pixels with stale or missing timing. */
+                            cap_busy <= 0;
+                            state <= IDLE;
                         end else begin
-                            write_addr <= write_addr + 1'b1;
-                            if (expected_x == roi_x_last) begin
-                                expected_x <= roi_x_first;
-                                expected_y <= expected_y + 1'b1;
+                            if (row_start) begin
+                                case (sample_y - roi_y_first)
+                                    12'd0: begin
+                                        snapshot_line_metadata[31:0] <= line_meta_identity;
+                                        snapshot_line_metadata[63:32] <= line_meta_timing;
+                                        snapshot_line_metadata[95:64] <= line_meta_context;
+                                        snapshot_line_valid[0] <= 1;
+                                    end
+                                    12'd1: begin
+                                        snapshot_line_metadata[127:96] <= line_meta_identity;
+                                        snapshot_line_metadata[159:128] <= line_meta_timing;
+                                        snapshot_line_metadata[191:160] <= line_meta_context;
+                                        snapshot_line_valid[1] <= 1;
+                                    end
+                                    12'd2: begin
+                                        snapshot_line_metadata[223:192] <= line_meta_identity;
+                                        snapshot_line_metadata[255:224] <= line_meta_timing;
+                                        snapshot_line_metadata[287:256] <= line_meta_context;
+                                        snapshot_line_valid[2] <= 1;
+                                    end
+                                    12'd3: begin
+                                        snapshot_line_metadata[319:288] <= line_meta_identity;
+                                        snapshot_line_metadata[351:320] <= line_meta_timing;
+                                        snapshot_line_metadata[383:352] <= line_meta_context;
+                                        snapshot_line_valid[3] <= 1;
+                                    end
+                                    default: begin
+                                        cap_busy <= 0;
+                                        state <= IDLE;
+                                    end
+                                endcase
+                            end
+
+                            if (write_addr == 10'd1023) begin
+                                if (snapshot_line_valid != 4'b1111) begin
+                                    cap_busy <= 0;
+                                    state <= IDLE;
+                                end else begin
+                                    state <= PUBLISH;
+                                end
                             end else begin
-                                expected_x <= expected_x + 1'b1;
+                                write_addr <= write_addr + 1'b1;
+                                if (expected_x == roi_x_last) begin
+                                    expected_x <= roi_x_first;
+                                    expected_y <= expected_y + 1'b1;
+                                end else begin
+                                    expected_x <= expected_x + 1'b1;
+                                end
                             end
                         end
                     end
@@ -251,6 +335,8 @@ always @(posedge axi_clk) begin
         metadata_sync <= 0;
         geometry_meta <= 0;
         geometry_sync <= 0;
+        line_metadata_meta <= 0;
+        line_metadata_sync <= 0;
         axi_initialized <= 0;
         arm_local <= arm_toggle;
         local_armed <= 0;
@@ -265,6 +351,8 @@ always @(posedge axi_clk) begin
         metadata_sync <= metadata_meta;
         geometry_meta <= snapshot_geometry;
         geometry_sync <= geometry_meta;
+        line_metadata_meta <= snapshot_line_metadata;
+        line_metadata_sync <= line_metadata_meta;
 
         if (!control_settled[3]) begin
             axi_initialized <= 0;
