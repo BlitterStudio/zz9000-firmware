@@ -2508,11 +2508,16 @@ static int fill_framebuffer_surface(struct SDKSurface *surface_info)
 	                        state->framebuffer_pan_offset;
 	surface_info->width = state->vmode_hsize ?
 	                      state->vmode_hsize : (uint32_t)mode->hres;
-	surface_info->height = state->vmode_vsize ?
-	                       state->vmode_vsize : (uint32_t)mode->vres;
+	surface_info->height = state->vmode_vdma_rows;
+	if (!surface_info->height) {
+		surface_info->height = state->vmode_vsize ?
+		                       state->vmode_vsize :
+		                       (uint32_t)mode->vres;
+		surface_info->height /=
+			video_vertical_scale_factor(state->scalemode);
+	}
 	if (state->scalemode & 1)
 		surface_info->width /= 2U;
-	surface_info->height /= video_vertical_scale_factor(state->scalemode);
 	if (surface_info->width == 0 || surface_info->height == 0)
 		return 0;
 
