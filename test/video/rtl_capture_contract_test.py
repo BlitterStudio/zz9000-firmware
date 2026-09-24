@@ -25,6 +25,7 @@ RTL_PATH = ROOT / "mntzorro.v"
 BUILD_SCRIPT = ROOT / "build_variant_bitstreams.sh"
 SAMPLER_PATH = ROOT / "videocap_sampler.v"
 BUILD_RUN_PATH = ROOT / "build_run_synthesis.tcl"
+PROJECT_TCL_PATH = ROOT / "zz9000_project.tcl"
 IOB_VERIFY_PATH = ROOT / "verify_vcap_iob_placement.tcl"
 
 BLOCK_START = "// ZORRO2/3 switch"
@@ -289,17 +290,129 @@ def check_vcap_iob_capture_contract(sampler: str, build_run: str) -> None:
         )
 
 
+def check_vcap_diag_contract(rtl: str, sampler: str, project_tcl: str) -> None:
+    """The field bundle must remain atomic, versioned, and arm-coupled."""
+    rtl_fragments = (
+        "localparam [15:0] VCAP_DIAG_CAPABILITY = 16'h0200;",
+        "localparam [15:0] VCAP_DIAG_DATA_BASE = 16'h0210;",
+        "rr_data <= 32'h56440110;",
+        "rr_data <= `VCAP_DIAG_BUILD_ID;",
+        "rr_data <= VCAP_DIAG_VARIANT_VALUE;",
+        ".src_in(vcap_sampler_diag_valid),",
+        "VCAP_DIAG_DATA_BASE + 16'h0030",
+        "vcap_probe_arm_toggle <= ~vcap_probe_arm_toggle;",
+    )
+    sampler_fragments = (
+        "output reg         diag_valid = 0,",
+        "output reg  [383:0] diag_data = 0,",
+        "if (frame_sync && probe_arm_seen == probe_arm_toggle_cap &&",
+        "diag_publish_pending <= 1;",
+        "if (probe_arm_seen == probe_arm_toggle_cap && diag_publish_pending)",
+        "diag_valid <= 1;",
+    )
+    for fragment in rtl_fragments:
+        if fragment not in rtl:
+            raise SystemExit(
+                "VCAP diagnostic register contract violated: missing "
+                f"fragment: {fragment}"
+            )
+    for fragment in sampler_fragments:
+        if fragment not in sampler:
+            raise SystemExit(
+                "VCAP diagnostic snapshot contract violated: missing "
+                f"fragment: {fragment}"
+            )
+    for fragment in (
+        'exec git -C $origin_dir rev-parse --short=8 HEAD',
+        '"VCAP_DIAG_BUILD_ID=32\'h[string tolower $vcap_diag_build_id]"',
+        "VCAP_DIAG_BUILD_ID must be exactly eight hexadecimal digits",
+    ):
+        if fragment not in project_tcl:
+            raise SystemExit(
+                "VCAP diagnostic build identity contract violated: missing "
+                f"fragment: {fragment}"
+            )
+
+
+def check_vcap_row_metadata_contract(rtl: str, sampler: str) -> None:
+    """Every capture variant must expose the same frozen row-timing ABI."""
+    rtl_fragments = (
+        "localparam [15:0] VCAP_CAL_META_CAPABILITY = 16'h0274;",
+        "localparam [15:0] VCAP_CAL_META_ADDRESS = 16'h0278;",
+        "localparam [15:0] VCAP_CAL_META_DATA = 16'h027c;",
+        "localparam [31:0] VCAP_CAL_META_CAPABILITY_VALUE = 32'h564d010c;",
+        ".cal_metadata_address(vcap_cal_metadata_address),",
+        ".cal_metadata_data(vcap_cal_metadata_data),",
+        "vcap_cal_metadata_address <= regdata_in[3:0];",
+    )
+    sampler_fragments = (
+        "input  wire [3:0]  cal_metadata_address,",
+        "output wire [31:0] cal_metadata_data,",
+        "reg [15:0] line_cycle = 0;",
+        "line_cycle - previous_line_cycle",
+        "line_meta_identity <= {",
+        "line_meta_context <= {",
+        ".metadata_read_addr(cal_metadata_address),",
+        ".metadata_read_data(cal_metadata_data)",
+    )
+    for fragment in rtl_fragments:
+        if fragment not in rtl:
+            raise SystemExit(
+                "VCAP row metadata register contract violated: missing "
+                f"fragment: {fragment}"
+            )
+    for fragment in sampler_fragments:
+        if fragment not in sampler:
+            raise SystemExit(
+                "VCAP row metadata sampler contract violated: missing "
+                f"fragment: {fragment}"
+            )
+
+
+def check_vcap_window_origin_contract(sampler: str) -> None:
+    """Full-rate capture normalizes only its horizontal window origin."""
+    fragments = (
+        "wire use_grid_window = (FULLRATE != 0) && grid_seen && window_phase_valid;",
+        "wire [1:0] window_phase_delta = cap_grid - window_phase_ref;",
+        "capture_ready && raw_y == ctl_crop_v_cap[10:0]",
+        "window_phase_ref <= cap_grid;",
+        "default: begin window_x <= 0; window_x_hold <= 1; end",
+        ".raw_x(capture_window_x[10:0])",
+        "if (capture_window_x < crop_h_local)",
+        "1'b0, sample_x, phase_x, grid_pair_first,",
+    )
+    for fragment in fragments:
+        if fragment not in sampler:
+            raise SystemExit(
+                "VCAP horizontal window-origin contract violated: missing "
+                f"fragment: {fragment}"
+            )
+
+
 def main():
     rtl = RTL_PATH.read_text(encoding="utf-8")
     script = BUILD_SCRIPT.read_text(encoding="utf-8")
     sampler = SAMPLER_PATH.read_text(encoding="utf-8")
     build_run = BUILD_RUN_PATH.read_text(encoding="utf-8")
+    project_tcl = PROJECT_TCL_PATH.read_text(encoding="utf-8")
 
     # The committed default keeps ZORRO3 first in every ladder, so the
     # simultaneously-defined VARIANT_SUPERDENISE must not leak into the
     # video-slot capture configuration.
     committed = VariantConfig("committed default (zorro3)", rtl)
     check_variant(committed, dict(VIDEO_SLOT, bus_defines=("ZORRO3",)))
+
+    # The opt-in source uses a legal physical VCO and preserves full-rate
+    # pixel/grid frequencies without inheriting the legacy divider.
+    c28 = VariantConfig("A4000 C28 candidate", "`define VCAP_C28\n" + rtl)
+    check_variant(c28, dict(VIDEO_SLOT, CLKOUT0_DIVIDE_F="32",
+                            bus_defines=("ZORRO3",)))
+    for param, expected in (("CLKFBOUT_MULT_F", 32),
+                            ("DIVCLK_DIVIDE", 1), ("CLKOUT1_DIVIDE", 128)):
+        if float(c28.mmcm(param) or 0) != expected:
+            die(c28, param, f"expected {expected}")
+    if not c28.has(".CLKIN1(ZORRO_C28D)"):
+        die(c28, "clock source", "C28 must feed the capture MMCM")
 
     expectations = {
         "zorro3": dict(VIDEO_SLOT, bus_defines=("ZORRO3", "VARIANT_Z3_FASTRAM")),
@@ -327,6 +440,9 @@ def main():
 
     check_writeback_provenance(rtl)
     check_vcap_iob_capture_contract(sampler, build_run)
+    check_vcap_diag_contract(rtl, sampler, project_tcl)
+    check_vcap_row_metadata_contract(rtl, sampler)
+    check_vcap_window_origin_contract(sampler)
 
     print("RTL capture contract checks passed")
 

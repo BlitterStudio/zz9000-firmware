@@ -58,6 +58,24 @@ static long parse_uint(const char *s) {
 	return v;
 }
 
+/* Parse a signed decimal number. Returns PARSE_INT_ERROR (outside every
+ * accepted key range) on garbage/overflow, never a value a caller could
+ * mistake for valid input like -1. */
+#define PARSE_INT_ERROR 0x7fffL
+static long parse_int(const char *s) {
+	long v = 0;
+	int neg = 0;
+	if (*s == '-') { neg = 1; s++; }
+	if (!*s) return PARSE_INT_ERROR;
+	while (*s) {
+		if (*s < '0' || *s > '9') return PARSE_INT_ERROR;
+		v = v * 10 + (*s - '0');
+		if (v > 0xffff) return PARSE_INT_ERROR;
+		s++;
+	}
+	return neg ? -v : v;
+}
+
 static int parse_onoff(const char *s) {
 	if (token_eq(s, "on") || token_eq(s, "1")) return 1;
 	if (token_eq(s, "off") || token_eq(s, "0")) return 0;
@@ -257,6 +275,20 @@ static int apply_key(const char *key, const char *value) {
 		if (v < 0 || v > 4095) return -1;
 		cfg.videocap_crop_v = (uint16_t)v;
 		cfg.videocap_crop_v_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "videocap_phase")) {
+		long v = parse_int(value);
+		if (v < -255 || v > 255) return -1;
+		cfg.videocap_phase = (int16_t)v;
+		cfg.videocap_phase_present = 1;
+		return 0;
+	}
+	if (token_eq(key, "videocap_c28_phase")) {
+		long v = parse_int(value);
+		if (v < -896 || v > 895) return -1;
+		cfg.videocap_c28_phase = (int16_t)v;
+		cfg.videocap_c28_phase_present = 1;
 		return 0;
 	}
 	if (token_eq(key, "nonstandard_vsync")) {
@@ -683,6 +715,14 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 		p = cfg.videocap_crop_v_present;
 		v = cfg.videocap_crop_v;
 		break;
+	case ZZ_CONFIG_KEY_VIDEOCAP_PHASE:
+		p = cfg.videocap_phase_present;
+		v = (uint16_t)cfg.videocap_phase;
+		break;
+	case ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE:
+		p = cfg.videocap_c28_phase_present;
+		v = (uint16_t)cfg.videocap_c28_phase;
+		break;
 	case ZZ_CONFIG_KEY_NS_VSYNC:
 		p = cfg.ns_vsync_present;
 		v = cfg.ns_vsync;
@@ -792,6 +832,10 @@ int zz_config_emit_present_keys(char *buf, unsigned size, int off) {
 		EMIT("videocap_crop_h = %u\n", (unsigned)cfg.videocap_crop_h);
 	if (cfg.videocap_crop_v_present)
 		EMIT("videocap_crop_v = %u\n", (unsigned)cfg.videocap_crop_v);
+	if (cfg.videocap_phase_present)
+		EMIT("videocap_phase = %d\n", (int)cfg.videocap_phase);
+	if (cfg.videocap_c28_phase_present)
+		EMIT("videocap_c28_phase = %d\n", (int)cfg.videocap_c28_phase);
 	if (cfg.scanline_mode_present)
 		EMIT("scanline_mode = %u\n", (unsigned)cfg.scanline_mode);
 	if (cfg.scanline_parity_present)

@@ -113,6 +113,8 @@ The file controls these boot-time defaults:
 |---|---|
 | `videocap_profile` | Native output: `full_60`, `full_exact`, `filtered_60` (default), `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60`, `centered_1080p_50`, `centered_1080p_match` |
 | `videocap_sample` | Native-video capture sampling |
+| `videocap_phase` | Legacy E7M diagnostic phase, signed fine steps (`-255..255`); omit unless calibrated |
+| `videocap_c28_phase` | A4000 C28 diagnostic phase, independent fine steps (`-896..895`); requires matching C28 bitstream |
 | `videocap_crop_h` | Horizontal picture position; omit for Automatic |
 | `videocap_crop_v` | Vertical picture position; omit for Automatic |
 | `scanline_mode` | Scanline style, or off |
@@ -368,6 +370,44 @@ Keep these rules in mind:
 
 See the commented [ZZ9000.CFG sample](ZZ9000.CFG) for every accepted value and
 additional notes.
+
+## Experimental A4000 capture clock
+
+The opt-in C28 build captures AGA pixels from the 28 MHz video-slot signal.
+It runs the capture MMCM at approximately 908-916 MHz, with one capture
+clock per source pixel. Existing hardware variants retain their E7M source.
+C28 is currently an A4000 diagnostic candidate; other machines and adapter
+routes require separate clock qualification.
+
+Build it with Vivado 2018.3 on Windows:
+
+```powershell
+.\build_bitstream.ps1 -CaptureC28
+```
+
+The result is `bootimage_work/capture-c28/zz9000_ps_wrapper.bit`. Package it
+with the matching rebuilt ARM firmware using `build_bootimage.sh --bitstream`
+and a separate `--output` path. A C28 build does not replace the default
+packaged bitstream. A missing or out-of-range C28 signal holds native capture
+inactive; the independent host diagnostics remain available.
+
+Use the matching `ZZCapture` tool from the
+[drivers repository](https://github.com/BlitterStudio/zz9000-drivers)
+(`ZZCapture/README.md`) to inspect clocks and calibrate a still SuperHires pattern. It checks exact
+raw RGB values and frame stability, sweeps the complete phase circle, refines
+the clean boundaries, and retests their midpoint. On failure it attempts and
+checks entry-phase restoration, reporting any failure. On success it prints
+`videocap_c28_phase`; saving is explicit. Run `Stack 32768` in the Amiga Shell
+before applying a phase or starting calibration.
+This key is independent of the legacy diagnostic `videocap_phase` because
+the clocks use different phase units. Matching firmware and ZZTop preserve
+both values when saving other settings.
+
+Qualification needs cold and warm tests on affected PAL and NTSC machines,
+then lores, hires, SuperHires, progressive/interlaced and filtered/full-detail
+checks. Calibration samples raw input pixels; it does not qualify vertical
+geometry or the complete HDMI path. Keep the previous working BOOT image
+for comparison and restoration.
 
 ## Custom Picasso96 Modelines
 

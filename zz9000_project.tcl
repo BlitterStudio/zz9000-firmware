@@ -67,6 +67,7 @@ proc print_help {} {
   puts "$script_file -tclargs \[--origin_dir <path>\]"
   puts "$script_file -tclargs \[--project_name <name>\]"
   puts "$script_file -tclargs \[--no-autoboot\]"
+  puts "$script_file -tclargs \[--capture-c28\]"
   puts "$script_file -tclargs \[--help\]\n"
   puts "Usage:"
   puts "Name                   Description"
@@ -79,12 +80,14 @@ proc print_help {} {
   puts "                       name is the name of the project from where this"
   puts "                       script was generated.\n"
   puts "\[--no-autoboot\]        Build without advertising the Zorro autoboot ROM.\n"
+  puts "\[--capture-c28\]        Opt-in A4000 C28 native capture clock candidate.\n"
   puts "\[--help\]               Print help information for this script"
   puts "-------------------------------------------------------------------------\n"
   exit 0
 }
 
 set no_autoboot 0
+set capture_c28 0
 
 if { $::argc > 0 } {
   for {set i 0} {$i < $::argc} {incr i} {
@@ -93,6 +96,7 @@ if { $::argc > 0 } {
       "--origin_dir"   { incr i; set origin_dir [lindex $::argv $i] }
       "--project_name" { incr i; set _xil_proj_name_ [lindex $::argv $i] }
       "--no-autoboot"  { set no_autoboot 1 }
+      "--capture-c28"  { set capture_c28 1 }
       "--help"         { print_help }
       default {
         if { [regexp {^-} $option] } {
@@ -163,6 +167,31 @@ update_ip_catalog -rebuild
 
 # Set 'sources_1' fileset object
 set obj [get_filesets sources_1]
+set vcap_diag_build_id ""
+if {[info exists ::env(VCAP_DIAG_BUILD_ID)]} {
+  set vcap_diag_build_id $::env(VCAP_DIAG_BUILD_ID)
+}
+if {$vcap_diag_build_id eq ""} {
+  if {[catch {
+    exec git -C $origin_dir rev-parse --short=8 HEAD
+  } vcap_diag_build_id]} {
+    set vcap_diag_build_id "00000000"
+  }
+}
+set vcap_diag_build_id [string trim $vcap_diag_build_id]
+if {![regexp -nocase {^[0-9a-f]{8}$} $vcap_diag_build_id]} {
+  error "VCAP_DIAG_BUILD_ID must be exactly eight hexadecimal digits"
+}
+set verilog_defines [get_property verilog_define $obj]
+lappend verilog_defines \
+  "VCAP_DIAG_BUILD_ID=32'h[string tolower $vcap_diag_build_id]"
+set_property verilog_define $verilog_defines $obj
+puts "INFO: VCAP diagnostic build ID: $vcap_diag_build_id"
+if { $capture_c28 } {
+  lappend verilog_defines VCAP_C28
+  set_property verilog_define $verilog_defines $obj
+  puts "INFO: VCAP_C28 set; opt-in A4000 C28 capture clock."
+}
 if { $no_autoboot } {
   set verilog_defines [get_property verilog_define $obj]
   lappend verilog_defines VARIANT_DISABLE_AUTOBOOT
@@ -173,6 +202,8 @@ if { $no_autoboot } {
 set files [list \
  [file normalize "${origin_dir}/mntzorro.v" ]\
  [file normalize "${origin_dir}/videocap_sampler.v" ]\
+ [file normalize "${origin_dir}/videocap_clock_control.v" ]\
+ [file normalize "${origin_dir}/videocap_calibration_capture.v" ]\
  [file normalize "${origin_dir}/videocap_writeback_layout.v" ]\
  [file normalize "${origin_dir}/video_formatter.v" ]\
  [file normalize "${origin_dir}/video_source_sync.v" ]\
@@ -204,12 +235,30 @@ if {[string equal [get_filesets -quiet constrs_1] ""]} {
 # Set 'constrs_1' fileset object
 set obj [get_filesets constrs_1]
 
-# Add/Import constrs file and set constrs file properties
+# Select source-specific constraints here: conditional Tcl is unsupported
+# inside Vivado 2018.3 XDC files. Only the selected source's clock, route
+# exceptions and (legacy only) multicycle constraints enter the design.
+set capture_xdc [expr {$capture_c28 ? "capture_c28.xdc" : "capture_e7m.xdc"}]
+set file "[file normalize "$origin_dir/ZZ9000_proto.srcs/constrs_1/new/$capture_xdc"]"
+import_files -fileset constrs_1 [list $file]
+set file_obj [get_files -of_objects [get_filesets constrs_1] *new/$capture_xdc]
+set_property file_type XDC $file_obj
+set_property processing_order EARLY $file_obj
 set file "[file normalize "$origin_dir/ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc"]"
 set file_imported [import_files -fileset constrs_1 [list $file]]
 set file "new/zz9000.xdc"
 set file_obj [get_files -of_objects [get_filesets constrs_1] [list "*$file"]]
 set_property -name "file_type" -value "XDC" -objects $file_obj
+
+# Apply CDC entry-point exceptions after the implemented hierarchy is
+# available. Synchronizer stages and synchronous reset release stay timed.
+set file "[file normalize "$origin_dir/ZZ9000_proto.srcs/constrs_1/new/capture_cdc.xdc"]"
+import_files -fileset constrs_1 [list $file]
+set file_obj [get_files -of_objects [get_filesets constrs_1] *new/capture_cdc.xdc]
+set_property file_type XDC $file_obj
+set_property processing_order LATE $file_obj
+set_property used_in_synthesis false $file_obj
+set_property used_in_implementation true $file_obj
 
 # The runtime pixel-clock constraint must be evaluated after the clock-wizard
 # IP creates its ordinary generated clock, so physical exclusivity covers both
@@ -261,6 +310,12 @@ if { [get_files mntzorro.v] == "" } {
 }
 if { [get_files videocap_sampler.v] == "" } {
   import_files -quiet -fileset sources_1 videocap_sampler.v
+}
+if { [get_files videocap_clock_control.v] == "" } {
+  import_files -quiet -fileset sources_1 videocap_clock_control.v
+}
+if { [get_files videocap_calibration_capture.v] == "" } {
+  import_files -quiet -fileset sources_1 videocap_calibration_capture.v
 }
 if { [get_files videocap_writeback_layout.v] == "" } {
   import_files -quiet -fileset sources_1 videocap_writeback_layout.v

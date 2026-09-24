@@ -579,6 +579,26 @@ int main() {
 		       (uint32_t)!cfg->videocap_crop_v_present);
 	}
 
+	if (zz_config_get()->videocap_phase_present) {
+		// Push the capture-phase offset through the same op path.
+		// MNTVF_OP_VIDEOCAP_PHASE drives the MMCM fine phase shifter in
+		// mntzorro.v; older bitstreams ignore the op. The offset persists
+		// in the MMCM until power-off, so a single boot-time push is
+		// enough. Safe here for the same reason as the ops above.
+		const struct zz_config *cfg = zz_config_get();
+		video_formatter_write((uint32_t)(uint16_t)cfg->videocap_phase,
+		                      MNTVF_OP_VIDEOCAP_PHASE);
+		printf("[CFG] videocap: phase %d steps\n", (int)cfg->videocap_phase);
+	}
+	if (zz_config_get()->videocap_c28_phase_present) {
+		// Clock-specific op: only the C28 bitstream consumes these units.
+		const struct zz_config *cfg = zz_config_get();
+		video_formatter_write((uint32_t)(uint16_t)cfg->videocap_c28_phase,
+		                      MNTVF_OP_VIDEOCAP_C28_PHASE);
+		printf("[CFG] videocap: C28 phase %d steps\n",
+		       (int)cfg->videocap_c28_phase);
+	}
+
 	// RTG rect ops may write anywhere in framebuffer + legacy surface
 	// memory, but never past it into the SDK heaps and beyond
 	apply_aperture_framebuffer_limit();
