@@ -874,10 +874,12 @@ wire frame_wrap_this_line = source_sync_line_uses_sync
   : counter_y >= vga_v_max;
 wire [11:0] next_raster_y = frame_wrap_this_line
   ? 12'b0 : counter_y + 1'b1;
-wire [11:0] next_scanout_content_y = next_raster_y - vga_viewport_y;
+reg [11:0] next_raster_y_staged = 0;
+wire [11:0] staged_next_scanout_content_y =
+  next_raster_y_staged - vga_viewport_y;
 wire [11:0] power_of_two_next_source_line =
-  (next_raster_y >= vga_viewport_y + vga_scale_y_factor)
-    ? ((next_scanout_content_y - vga_scale_y_factor) >> vga_scale_y)
+  (next_raster_y_staged >= vga_viewport_y + vga_scale_y_factor)
+    ? ((staged_next_scanout_content_y - vga_scale_y_factor) >> vga_scale_y)
     : 12'b0;
 
 /* Full-width NTSC has 200 progressive (400 woven) source rows, which do
@@ -898,11 +900,11 @@ wire [12:0] fractional_next_y_error = fractional_y_advance
   ? fractional_y_sum - {1'b0, vga_viewport_height}
   : fractional_y_sum;
 wire fractional_next_row_active =
-  {1'b0, next_raster_y} >= fractional_content_start &&
-  {1'b0, next_raster_y} < fractional_content_end;
+  {1'b0, next_raster_y_staged} >= fractional_content_start &&
+  {1'b0, next_raster_y_staged} < fractional_content_end;
 wire fractional_next_row_advances =
-  {1'b0, next_raster_y} > fractional_content_start &&
-  {1'b0, next_raster_y} < fractional_content_end;
+  {1'b0, next_raster_y_staged} > fractional_content_start &&
+  {1'b0, next_raster_y_staged} < fractional_content_end;
 reg fractional_next_row_advances_latched = 0;
 wire fractional_current_row_active =
   {1'b0, counter_y} >= fractional_content_start &&
@@ -912,12 +914,14 @@ wire [12:0] fractional_prefetch_source_line =
 reg fractional_current_row_active_latched = 0;
 reg [11:0] fractional_prefetch_source_line_latched = 0;
 reg fractional_prefetch_valid_latched = 0;
-wire [11:0] next_scanout_source_line = fractional_scale_y
-  ? ({1'b0, next_raster_y} == fractional_content_start
-      ? 12'b0
-      : (fractional_next_row_active
-          ? fractional_next_source_line : 12'b0))
-  : power_of_two_next_source_line;
+wire [11:0] next_scanout_source_line =
+  fractional_scale_y
+    ? ({1'b0, next_raster_y_staged} == fractional_content_start
+        ? 12'b0
+        : (fractional_next_row_active
+            ? fractional_next_source_line : 12'b0))
+    : power_of_two_next_source_line;
+reg [11:0] next_scanout_source_line_latched = 0;
 
 /* Pipeline the viewport bounds and next-row decision: deriving them on the
  * line-wrap edge otherwise puts multiple carry chains in the 150 MHz
@@ -926,6 +930,8 @@ always @(posedge dvi_clk) begin
   if (!aresetn) begin
     fractional_content_start <= 0;
     fractional_content_end <= 0;
+    next_raster_y_staged <= 0;
+    next_scanout_source_line_latched <= 0;
     fractional_next_row_advances_latched <= 0;
     fractional_current_row_active_latched <= 0;
     fractional_prefetch_source_line_latched <= 0;
@@ -936,19 +942,24 @@ always @(posedge dvi_clk) begin
     fractional_content_end <=
       fractional_content_start + {1'b0, vga_viewport_height};
     if (counter_x == 0) begin
-      fractional_next_row_advances_latched <=
-        fractional_next_row_advances;
+      /* Stage the wrap decision before the accumulator/comparison stage.
+       * This keeps vga_v_max and source-sync wrap logic off the 150 MHz
+       * scanout-row update path. */
+      next_raster_y_staged <= next_raster_y;
       fractional_current_row_active_latched <=
         fractional_current_row_active;
       fractional_prefetch_source_line_latched <=
         fractional_prefetch_source_line[11:0];
     end else if (counter_x == 1) begin
+      fractional_next_row_advances_latched <=
+        fractional_next_row_advances;
+      next_scanout_source_line_latched <= next_scanout_source_line;
       fractional_prefetch_valid_latched <=
         fractional_current_row_active_latched &&
         {1'b0, fractional_prefetch_source_line_latched} <
           {1'b0, vga_scale_source_rows};
     end
-end
+  end
 end
 
 always @(posedge dvi_clk) begin
@@ -1522,7 +1533,7 @@ endcase
    * wrap so that stale-bank data has cleared the registered pixel pipeline
    * before active column zero. */
   if (counter_x + 1'b1 == vga_h_max)
-    scanout_source_line_row <= next_scanout_source_line;
+    scanout_source_line_row <= next_scanout_source_line_latched;
 
   /* These registered coordinates advance on the same edge as counter_x/y.
    * Their values therefore retain the existing pixel/row phase while
