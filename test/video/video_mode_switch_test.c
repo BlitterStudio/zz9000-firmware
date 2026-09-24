@@ -212,7 +212,8 @@ int main(void)
 		clock_reloads, tmds_interruptions, delay_us);
 	fflush(stdout);
 	assert(clock_reloads == 0 && tmds_interruptions == 0);
-	assert(vs.vmode_hsize == 1280 && vs.vmode_vsize == 1024 && vs.vmode_vdiv == 4);
+	assert(vs.vmode_hsize == 1280 && vs.vmode_vsize == 1024 &&
+	       vs.vmode_vdma_rows == 256);
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (1024U << 16 | 1280U));
 
 	/* DPMS is formatter-owned: the fast path must still restore syncs. */
@@ -332,7 +333,7 @@ int main(void)
 	assert(vs.video_mode == ZZVMODE_CUSTOM &&
 	       vs.colormode == MNTVA_COLOR_16BIT565 && vs.scalemode == 0);
 	assert(vs.vmode_hsize == 960 && vs.vmode_vsize == 720 &&
-	       vs.vmode_hdiv == 2 && vs.vmode_vdiv == 1);
+	       vs.vmode_hdiv == 2 && vs.vmode_vdma_rows == 720);
 	assert(formatter_ops[MNTVF_OP_MAX] == (746U << 16 | 1188U));
 	assert(formatter_ops[MNTVF_OP_DIMENSIONS] == (720U << 16 | 960U));
 	assert(formatter_ops[MNTVF_OP_HS] == (1024U << 16 | 1040U));
@@ -385,6 +386,15 @@ int main(void)
 	/* Native output is the rollback target for a failed custom lock. */
 	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_FULL_60);
 	assert(vs.video_mode == ZZVMODE_1280x1024_NATIVE_60);
+	/* Model a detected progressive NTSC field: rollback must retain both
+	 * its 200-row VDMA contract and the formatter's fractional scale word. */
+	vs.scalemode = (int)video_videocap_scalemode(1, 0);
+	vs.vmode_vdma_rows =
+		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 0);
+	vs.interlace_old = 0;
+	video_formatter_write(video_videocap_scale_control(1, 1, 0),
+	                      MNTVF_OP_SCALE);
+	init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, 1, 0);
 	slot_saved = preset_video_modes[ZZVMODE_CUSTOM];
 
 	/* PLL lock failure: CLOCK_FAILED, old output replayed exactly. */
@@ -400,6 +410,8 @@ int main(void)
 	assert(formatter_ops[MNTVF_OP_MAX] == (1066U << 16 | 1688U));
 	assert(formatter_ops[MNTVF_OP_DIMENSIONS] == (1024U << 16 | 1280U));
 	assert(formatter_ops[MNTVF_OP_HS] == (1328U << 16 | 1440U));
+	assert(formatter_ops[MNTVF_OP_SCALE] ==
+	       video_videocap_scale_control(1, 1, 0));
 	assert(delay_us > CLK_WIZ_LOCK_TIMEOUT_US / 2U); /* bounded poll ran */
 	assert(memcmp(&preset_video_modes[ZZVMODE_CUSTOM], &slot_saved,
 	       sizeof(slot_saved)) == 0);
@@ -444,14 +456,15 @@ int main(void)
 	assert(formatter_ops[MNTVF_OP_SOURCE_SYNC] ==
 	       saved_formatter[MNTVF_OP_SOURCE_SYNC]);
 	assert(memcmp(&dma_setup, &saved_dma, sizeof(saved_dma)) == 0);
-	/* Once capture has enabled source locking, rollback preserves it too. */
-	/* Capture may have changed from x4 to interlaced x2 after mode init. */
+	/* Once capture has enabled source locking, rollback preserves it too.
+	 * Capture may have changed from progressive to woven NTSC after init. */
 	vs.scalemode = (int)video_videocap_scalemode(1, 1);
-	vs.vmode_vdiv = (int)video_vertical_scale_factor((uint32_t)vs.scalemode);
+	vs.vmode_vdma_rows =
+		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 1);
 	vs.interlace_old = 1;
-	video_formatter_write(video_formatter_scale_control((uint32_t)vs.scalemode),
+	video_formatter_write(video_videocap_scale_control(1, 1, 1),
 	                      MNTVF_OP_SCALE);
-	init_vdma(vs.vmode_hsize, vs.vmode_vsize, 1, vs.vmode_vdiv, 0);
+	init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, 1, 0);
 	saved_dma = dma_setup;
 	video_formatter_write(1, MNTVF_OP_SOURCE_SYNC);
 	clock_fail_locks = 1;
@@ -459,7 +472,7 @@ int main(void)
 	       ZZ_CUSTOM_STATUS_CLOCK_FAILED);
 	assert(formatter_ops[MNTVF_OP_SOURCE_SYNC] == 1);
 	assert(formatter_ops[MNTVF_OP_SCALE] ==
-	       video_formatter_scale_control((uint32_t)vs.scalemode));
+	       video_videocap_scale_control(1, 1, 1));
 	assert(vs.interlace_old == 1);
 	assert(memcmp(&dma_setup, &saved_dma, sizeof(saved_dma)) == 0);
 

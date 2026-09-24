@@ -310,6 +310,14 @@ module videocap_recovery_tb;
         $display("CASE stopped capture clock invalidation and pending config recovery");
         old_lines = line_events;
         old_anchors = anchor_events;
+        /* Stop with #114's alignment pipeline demonstrably occupied.  The
+         * clock-recovery reset must discard this work rather than applying a
+         * stale delta after the restarted capture clock becomes ready. */
+        while (!(dut.grid_intra_channels_valid ||
+                 dut.grid_cross_channels_valid ||
+                 dut.grid_intra_delta_valid ||
+                 dut.grid_cross_delta_valid))
+            @(posedge cap_clk);
         @(negedge cap_clk); cap_clock_enabled = 0;
         #1; cap_reset = 1;
         repeat (100) @(posedge axi_clk); #0.001;
@@ -325,6 +333,12 @@ module videocap_recovery_tb;
         cap_half_period = 17.460;
         cap_clock_enabled = 1;
         repeat (12) @(posedge cap_clk);
+        #0.001;
+        require(!(dut.grid_intra_channels_valid ||
+                  dut.grid_cross_channels_valid ||
+                  dut.grid_intra_delta_valid ||
+                  dut.grid_cross_delta_valid),
+            "clock recovery clears pending grid-alignment pipeline work");
         @(negedge cap_clk); cap_reset = 0;
         drive_field(262, 60);
         require(!capture_ready, "first restarted field remains suppressed");

@@ -518,9 +518,21 @@ reg grid_ref_prev = 0;
  * two pairings: on hires content the aligned pairing shows far smaller
  * intra-pair than cross-pair differences. */
 reg pair_parity = 0;
-reg [26:0] grid_intra_sum = 0;
-reg [26:0] grid_cross_sum = 0;
+reg [29:0] grid_intra_sum = 0;
+reg [29:0] grid_cross_sum = 0;
 reg [23:0] grid_prev_second = 0;
+reg [7:0] grid_intra_r_delta = 0;
+reg [7:0] grid_intra_g_delta = 0;
+reg [7:0] grid_intra_b_delta = 0;
+reg [7:0] grid_cross_r_delta = 0;
+reg [7:0] grid_cross_g_delta = 0;
+reg [7:0] grid_cross_b_delta = 0;
+reg grid_intra_channels_valid = 0;
+reg grid_cross_channels_valid = 0;
+reg [9:0] grid_intra_delta_pending = 0;
+reg [9:0] grid_cross_delta_pending = 0;
+reg grid_intra_delta_valid = 0;
+reg grid_cross_delta_valid = 0;
 /* The cross-pair metric must never compare against the previous
  * line's blanking tail: at the first stored pair after line sync
  * that stale sample would inject a blank-to-content edge (PR
@@ -529,28 +541,31 @@ reg [23:0] grid_prev_second = 0;
 reg grid_prev_second_valid = 0;
 wire grid_pair_first = (cap_grid[0] == pair_parity);
 
-/* Alignment metric across all three channels: edges that change
- * only green or blue while red stays constant must still move the
- * phase measurement, or such content would never adapt. */
-function [9:0] grid_rgb_delta;
-    input [23:0] a;
-    input [23:0] b;
+/* Alignment metric across all three channels: edges that change only green
+ * or blue while red stays constant must still move the phase measurement.
+ * Register each channel difference before adding the three channels; the
+ * direct input path otherwise exceeds one 114 MHz capture cycle. */
+function [7:0] grid_channel_delta;
+    input [7:0] a;
+    input [7:0] b;
     begin
-        grid_rgb_delta =
-            (a[23:16] > b[23:16] ? a[23:16] - b[23:16] : b[23:16] - a[23:16]) +
-            (a[15:8] > b[15:8] ? a[15:8] - b[15:8] : b[15:8] - a[15:8]) +
-            (a[7:0] > b[7:0] ? a[7:0] - b[7:0] : b[7:0] - a[7:0]);
+        grid_channel_delta = (a > b) ? a - b : b - a;
     end
 endfunction
-wire [9:0] grid_intra_delta = grid_rgb_delta(rgbin, rgb_prev);
-wire [9:0] grid_cross_delta = grid_prev_second_valid ?
-    grid_rgb_delta(rgbin, grid_prev_second) : 10'd0;
-/* Margin comparison in a widened domain: both sums saturate
- * at 27 bits on max-activity frames, where a 27-bit add would
- * wrap and misread equal metrics as misaligned (PR review).
- */
-wire [29:0] grid_intra_w = {3'b0, grid_intra_sum};
-wire [29:0] grid_margin_w = {6'd0, grid_intra_sum[26:3]};
+wire [7:0] grid_intra_r = grid_channel_delta(rgbin[23:16],
+                                             rgb_prev[23:16]);
+wire [7:0] grid_intra_g = grid_channel_delta(rgbin[15:8],
+                                             rgb_prev[15:8]);
+wire [7:0] grid_intra_b = grid_channel_delta(rgbin[7:0],
+                                             rgb_prev[7:0]);
+wire [7:0] grid_cross_r = grid_channel_delta(rgbin[23:16],
+                                             grid_prev_second[23:16]);
+wire [7:0] grid_cross_g = grid_channel_delta(rgbin[15:8],
+                                             grid_prev_second[15:8]);
+wire [7:0] grid_cross_b = grid_channel_delta(rgbin[7:0],
+                                             grid_prev_second[7:0]);
+wire [29:0] grid_intra_w = grid_intra_sum;
+wire [29:0] grid_margin_w = {3'd0, grid_intra_sum[29:3]};
 /* SuperHires changes within a 28 MHz sample pair; hires and lores do not.
  * Keep classification independent of whether that pair is stored separately
  * or filtered into one output pixel. */
@@ -680,6 +695,9 @@ always @(posedge cap_clk) begin
         grid_ref_meta <= 0; grid_ref_sync <= 0; grid_ref_prev <= 0;
         grid_seen <= 0; cap_grid <= 0;
         pair_parity <= 0; grid_intra_sum <= 0; grid_cross_sum <= 0;
+        grid_intra_channels_valid <= 0; grid_cross_channels_valid <= 0;
+        grid_intra_delta_pending <= 0; grid_cross_delta_pending <= 0;
+        grid_intra_delta_valid <= 0; grid_cross_delta_valid <= 0;
         grid_prev_second_valid <= 0;
         half <= 0; shres_half <= 0; diff_count <= 0;
         cap_token_pending <= 0; cap_frame_anchor_sent <= 0;
@@ -898,6 +916,34 @@ always @(posedge cap_clk) begin
         cap_grid <= cap_grid + 2'd1;
     end
 
+    if (grid_intra_channels_valid) begin
+        grid_intra_delta_pending <=
+            {2'd0, grid_intra_r_delta} +
+            {2'd0, grid_intra_g_delta} +
+            {2'd0, grid_intra_b_delta};
+        grid_intra_delta_valid <= 1;
+        grid_intra_channels_valid <= 0;
+    end
+    if (grid_cross_channels_valid) begin
+        grid_cross_delta_pending <=
+            {2'd0, grid_cross_r_delta} +
+            {2'd0, grid_cross_g_delta} +
+            {2'd0, grid_cross_b_delta};
+        grid_cross_delta_valid <= 1;
+        grid_cross_channels_valid <= 0;
+    end
+
+    if (grid_intra_delta_valid) begin
+        grid_intra_sum <=
+            grid_intra_sum + {20'd0, grid_intra_delta_pending};
+        grid_intra_delta_valid <= 0;
+    end
+    if (grid_cross_delta_valid) begin
+        grid_cross_sum <=
+            grid_cross_sum + {20'd0, grid_cross_delta_pending};
+        grid_cross_delta_valid <= 0;
+    end
+
     vs <= {vs[5:0], vcap_vsync};
     hs <= {hs[5:0], vcap_hsync};
 
@@ -948,10 +994,14 @@ always @(posedge cap_clk) begin
          * patterns) from oscillating, and flat content accumulates too
          * little difference to clear it. */
         if (grid_seen &&
-                ({3'b0, grid_cross_sum} + grid_margin_w) < grid_intra_w)
+                (grid_cross_sum + grid_margin_w) < grid_intra_w)
             pair_parity <= ~pair_parity;
         grid_intra_sum <= 0;
         grid_cross_sum <= 0;
+        grid_intra_delta_valid <= 0;
+        grid_cross_delta_valid <= 0;
+        grid_intra_channels_valid <= 0;
+        grid_cross_channels_valid <= 0;
 
         if (raw_y != 0)
             cap_ymax <= raw_y;
@@ -1085,22 +1135,24 @@ always @(posedge cap_clk) begin
                      * window and visible rows: activity beyond the
                      * 512-pair output window (or on cropped rows)
                      * would dilute the margin (PR review). */
-                    if (grid_seen && cap_x < 11'h200 &&
-                            capture_output_line_valid &&
-                            grid_cross_sum <=
-                                27'h7ffffff - {17'd0, grid_cross_delta})
-                        grid_cross_sum <=
-                            grid_cross_sum + {17'd0, grid_cross_delta};
+                    if (grid_seen && grid_prev_second_valid &&
+                            cap_x < 11'h200 &&
+                            capture_output_line_valid) begin
+                        grid_cross_r_delta <= grid_cross_r;
+                        grid_cross_g_delta <= grid_cross_g;
+                        grid_cross_b_delta <= grid_cross_b;
+                        grid_cross_channels_valid <= 1;
+                    end
                 end else if (half) begin
                     half <= 0;
                     if (grid_seen && cap_x < 11'h200 &&
                             capture_output_line_valid) begin
                         grid_prev_second <= rgbin;
                         grid_prev_second_valid <= 1;
-                        if (grid_intra_sum <=
-                                27'h7ffffff - {17'd0, grid_intra_delta})
-                            grid_intra_sum <=
-                                grid_intra_sum + {17'd0, grid_intra_delta};
+                        grid_intra_r_delta <= grid_intra_r;
+                        grid_intra_g_delta <= grid_intra_g;
+                        grid_intra_b_delta <= grid_intra_b;
+                        grid_intra_channels_valid <= 1;
                     end
                     if (capture_head_valid)
                         linebuf[capture_buf_addr] <= {8'b0, filtered_sample};

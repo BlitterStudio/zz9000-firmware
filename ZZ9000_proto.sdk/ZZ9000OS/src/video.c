@@ -47,6 +47,7 @@ int sprite_request_pos_x = 0;
 int sprite_request_pos_y = 0;
 
 static uint32_t output_source_sync;
+static uint32_t output_scale_control;
 void _update_hw_sprite_pos(int16_t x, int16_t y);
 void _clip_hw_sprite(int16_t offset_x, int16_t offset_y);
 static int video_mode_init_internal(int mode, int scalemode, int colormode,
@@ -164,7 +165,7 @@ void video_reset() {
 uint8_t stride_div = 1;
 
 // 32bit: hdiv=1, 16bit: hdiv=2, 8bit: hdiv=4, ...
-int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
+int init_vdma(int hsize, int source_rows, int hdiv, u32 bufpos) {
 	int status;
 	XAxiVdma_Config *Config;
 
@@ -196,9 +197,9 @@ int init_vdma(int hsize, int vsize, int hdiv, int vdiv, u32 bufpos) {
 
 	XAxiVdma_DmaSetup ReadCfg;
 
-	//printf("VDMA HDIV: %d VDIV: %d\n", hdiv, vdiv);
+	//printf("VDMA HDIV: %d ROWS: %d\n", hdiv, source_rows);
 
-	ReadCfg.VertSizeInput = vsize / vdiv;
+	ReadCfg.VertSizeInput = source_rows;
 	ReadCfg.HoriSizeInput = line_bytes; // note: changing this breaks the output
 	ReadCfg.Stride = stride; // note: changing this is not a problem
 	ReadCfg.FrameDelay = 0; /* This example does not test frame delay */
@@ -402,6 +403,8 @@ void video_formatter_write(uint32_t data, uint16_t op) {
 	VF_DLY;
 	if (op == MNTVF_OP_SOURCE_SYNC)
 		output_source_sync = data;
+	if (op == MNTVF_OP_SCALE)
+		output_scale_control = data;
 	smp_local_irq_restore(irq_state);
 }
 
@@ -436,7 +439,7 @@ void isr_video(void *dummy) {
 				if (vs.card_feature_enabled[CARD_FEATURE_SECONDARY_PALETTE]) {
 					video_formatter_write(1, MNTVF_OP_PALETTE_SEL);
 				}
-				init_vdma(vs.vmode_hsize, vs.vmode_vsize, vs.vmode_hdiv, vs.vmode_vdiv,
+				init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, vs.vmode_hdiv,
 						(u32)vs.framebuffer + vs.bgbuf_offset);
 			}
 		} else {
@@ -447,7 +450,7 @@ void isr_video(void *dummy) {
 			// P96 video overlay: present a composited shadow buffer
 			// instead of the framebuffer while the overlay is active
 			// (returns the regular pan address otherwise)
-			init_vdma(vs.vmode_hsize, vs.vmode_vsize, vs.vmode_hdiv, vs.vmode_vdiv,
+			init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, vs.vmode_hdiv,
 					overlay_present_bufpos(&vs));
 		}
 		vs.videocap_enabled_old = 0;
@@ -474,8 +477,7 @@ void isr_video(void *dummy) {
 						videocap_ntsc,
 						videocap_full_width);
 			}
-			init_vdma(vs.vmode_hsize, vs.vmode_vsize, vs.vmode_hdiv,
-					vs.vmode_vdiv,
+			init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, vs.vmode_hdiv,
 					(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 			overlay_scanout_released();
 		}
@@ -564,7 +566,13 @@ void isr_video(void *dummy) {
 							(uint32_t)videocap_full_width,
 							(uint32_t)interlace);
 					vs.scalemode = (int)videocap_scalemode;
-					vs.vmode_vdiv = (int)video_vertical_scale_factor(videocap_scalemode);
+					uint32_t videocap_source_rows =
+							video_videocap_source_rows(
+								vs.vmode_vsize,
+								(uint32_t)videocap_full_width,
+								(uint32_t)videocap_ntsc,
+								(uint32_t)interlace);
+					vs.vmode_vdma_rows = videocap_source_rows;
 					/* The mode-change trigger above may have run
 					 * several vblanks earlier; a host driver pan
 					 * write that landed since then must not leak
@@ -581,9 +589,13 @@ void isr_video(void *dummy) {
 							videocap_ntsc,
 							videocap_full_width);
 					videocap_area_clear();
-					video_formatter_write(video_formatter_scale_control(videocap_scalemode),
-					                      MNTVF_OP_SCALE);
-					init_vdma(vs.vmode_hsize, vs.vmode_vsize, 1, vs.vmode_vdiv,
+					video_formatter_write(
+							video_videocap_scale_control(
+								(uint32_t)videocap_full_width,
+								(uint32_t)videocap_ntsc,
+								(uint32_t)interlace),
+							MNTVF_OP_SCALE);
+					init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, 1,
 							(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 					video_formatter_valign();
 					/* Both first entry and x2/x4 transitions must finish
@@ -787,6 +799,7 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 	int prev_interlace_old = vs.interlace_old;
 	uint8_t prev_stride_div = stride_div;
 	uint32_t prev_source_sync = output_source_sync;
+	uint32_t prev_scale_control = output_scale_control;
 	uint8_t prev_dpms = vs.card_feature_enabled[CARD_FEATURE_DPMS];
 	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
@@ -910,9 +923,7 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 				MNTVF_OP_VS);
 			video_formatter_write(output_mode.polarity,
 				MNTVF_OP_POLARITY);
-			video_formatter_write(video_formatter_scale_control(
-					(uint32_t)prev_scalemode),
-				MNTVF_OP_SCALE);
+			video_formatter_write(prev_scale_control, MNTVF_OP_SCALE);
 			video_formatter_write(output_colormode,
 				MNTVF_OP_COLORMODE);
 			pixelclock_program(&output_mode);
@@ -933,7 +944,7 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 	}
 
 	if (!skip_vdma) {
-		init_vdma(content_hres, content_vres, hdiv, vdiv,
+		init_vdma(content_hres, content_vres / (uint32_t)vdiv, hdiv,
 				(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 	}
 
@@ -959,7 +970,7 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 
 	vs.vmode_hsize = content_hres;
 	vs.vmode_vsize = content_vres;
-	vs.vmode_vdiv = vdiv;
+	vs.vmode_vdma_rows = content_vres / (uint32_t)vdiv;
 	vs.vmode_hdiv = hdiv;
 	return 0;
 }

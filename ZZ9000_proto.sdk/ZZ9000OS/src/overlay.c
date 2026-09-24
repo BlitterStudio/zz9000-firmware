@@ -169,7 +169,7 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	uint16_t flags = data->user[0];
 	uint8_t variant = data->u8_user[GFXDATA_U8_YUV_VARIANT];
 
-	uint32_t rows = vs->vmode_vdiv ? (vs->vmode_vsize / vs->vmode_vdiv) : 0;
+	uint32_t rows = vs->vmode_vdma_rows;
 	uint32_t stride = video_vdma_stride_bytes(vs->vmode_hsize,
 			vs->vmode_hdiv, vs->framebuffer_pan_width, stride_div);
 

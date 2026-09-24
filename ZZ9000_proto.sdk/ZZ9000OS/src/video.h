@@ -126,7 +126,7 @@ struct ZZ_VIDEO_STATE {
 	uint32_t vmode_hsize;
 	uint32_t vmode_vsize;
 	uint32_t vmode_hdiv;
-	uint32_t vmode_vdiv;
+	uint32_t vmode_vdma_rows;
 
 	int videocap_video_mode;
 	int videocap_video_mode_applied;
