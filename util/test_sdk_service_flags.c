@@ -97,21 +97,24 @@ static unsigned count_occurrences(const char *source, const char *needle)
 int main(int argc, char **argv)
 {
 	char *mailbox_source;
+	char *catalog_source;
 	char *mailbox_header;
 	unsigned png_flag_refs;
 	int ok = 1;
 
-	if (argc != 3) {
-		printf("usage: %s <sdk_mailbox.c> <sdk_mailbox.h>\n", argv[0]);
+	if (argc != 4) {
+		printf("usage: %s <sdk_mailbox.c> <sdk_mailbox.h> <sdk_service_catalog.h>\n", argv[0]);
 		return 2;
 	}
 
 	mailbox_source = read_file(argv[1]);
 	mailbox_header = read_file(argv[2]);
-	if (!mailbox_source || !mailbox_header) {
+	catalog_source = read_file(argv[3]);
+	if (!mailbox_source || !mailbox_header || !catalog_source) {
 		printf("failed to read input sources\n");
 		free(mailbox_source);
 		free(mailbox_header);
+		free(catalog_source);
 		return 2;
 	}
 
@@ -143,7 +146,7 @@ int main(int argc, char **argv)
 	/* The behaviour lives in test/palette; what only the descriptor can go
 	 * wrong on is advertising the op without dispatching it, or bumping the
 	 * flag without the opcode count. */
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(catalog_source, "sdk_service_catalog.h",
 	                      "SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "case SDK_OP_QUERY_PALETTE:");
@@ -155,9 +158,9 @@ int main(int argc, char **argv)
 	                      "#define SDK_SERVICE_FLAG_VIDEO_EXPLICIT_PRESENT");
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(catalog_source, "sdk_service_catalog.h",
 	                      "SDK_CAP_AUDIO_DECODE");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(catalog_source, "sdk_service_catalog.h",
 	                      "SDK_SERVICE_AUDIO");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "case SDK_OP_DECODE_MP3:");
@@ -177,26 +180,26 @@ int main(int argc, char **argv)
 	                      "max_pcm_this_call");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "stream->high_water_bytes");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(catalog_source, "sdk_service_catalog.h",
 	                      "SDK_SERVICE_FLAG_AUDIO_MP3_STREAM");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
-	                      "put_be32(info->flags, service_flags(service));");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "sdk_service_write_info(info, service, capabilities, service_flags(service),");
+	ok &= expect_contains(catalog_source, "sdk_service_catalog.h",
 	                      "SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT");
 	ok &= expect_contains_between(
-		mailbox_source, "sdk_mailbox.c image descriptor",
-		"\n\t{\n\t\tSDK_SERVICE_IMAGE,\n",
-		"\n\t\t\"image\"",
+		catalog_source, "SDK image descriptor",
+		"\n\t{\n\t\t.service_id = SDK_SERVICE_IMAGE,\n",
+		"\n\t\t.name = \"image\"",
 		"SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(catalog_source, "sdk_service_catalog.h",
 	                      "SDK_SERVICE_FLAG_VIDEO_MEDIA_SESSION");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(catalog_source, "sdk_service_catalog.h",
 	                      "SDK_SERVICE_FLAG_VIDEO_EXPLICIT_PRESENT");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(catalog_source, "sdk_service_catalog.h",
 	                      "SDK_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(catalog_source, "sdk_service_catalog.h",
 	                      "SDK_SERVICE_FLAG_VIDEO_MEDIA_MP2");
-	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	ok &= expect_contains(catalog_source, "sdk_service_catalog.h",
 	                      "SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "audio_codec_present()");
@@ -204,7 +207,9 @@ int main(int argc, char **argv)
 	                      "SDK_SERVICE_FLAG_VIDEO_AUDIO_BIND");
 
 	png_flag_refs = count_occurrences(
-		mailbox_source, "SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA");
+		mailbox_source, "SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA") +
+		count_occurrences(catalog_source,
+				  "SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA");
 	if (png_flag_refs < 2U) {
 		printf("sdk_mailbox.c: PNG flag should be present in both the "
 		       "image service descriptor and dynamic service flags "
@@ -215,5 +220,6 @@ int main(int argc, char **argv)
 
 	free(mailbox_source);
 	free(mailbox_header);
+	free(catalog_source);
 	return ok ? 0 : 1;
 }
