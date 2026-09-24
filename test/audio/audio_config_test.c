@@ -372,6 +372,8 @@ static void test_save_roundtrip(void)
 		"videocap_sample = odd\n"
 		"videocap_crop_h = 300\n"
 		"videocap_crop_v = 31\n"
+		"videocap_phase = -255\n"
+		"videocap_c28_phase = -896\n"
 		"scanline_mode = 3\n"
 		"scanline_parity = 1\n"
 		"int2 = on\n"
@@ -419,7 +421,7 @@ static void test_save_roundtrip(void)
 		"save includes calibration keys", NULL);
 	/* The saved text must reparse into the same state. */
 	zz_config_reset();
-	check(zz_config_parse(saved, (unsigned)len) == 143,
+	check(zz_config_parse(saved, (unsigned)len) == 145,
 		"every key line accepted on reparse", NULL);
 	audio_scene_init();
 	audio_scene_load_config();
@@ -435,6 +437,9 @@ static void test_save_roundtrip(void)
 	check(c->videocap_crop_h == 300 && c->videocap_crop_h_present &&
 		c->videocap_crop_v == 31 && c->videocap_crop_v_present,
 		"crop round-trips", NULL);
+	check(c->videocap_phase == -255 && c->videocap_phase_present &&
+		c->videocap_c28_phase == -896 && c->videocap_c28_phase_present,
+		"audio save preserves both clock-specific phases", NULL);
 	check(c->scanline_mode == 3 && c->scanline_mode_present &&
 		c->scanline_parity == 1 && c->scanline_parity_present,
 		"scanlines round-trip", NULL);
@@ -505,6 +510,8 @@ static void test_save_budget(void)
 		"videocap_sample = odd\n"
 		"videocap_crop_h = 4095\n"
 		"videocap_crop_v = 4095\n"
+		"videocap_phase = -255\n"
+		"videocap_c28_phase = -896\n"
 		"scanline_mode = 3\n"
 		"scanline_parity = 1\n"
 		"int2 = on\n"
@@ -539,7 +546,7 @@ static void test_save_budget(void)
 
 	zz_config_reset();
 	check(saved != NULL &&
-		zz_config_parse(saved, (unsigned)len) == 143,
+		zz_config_parse(saved, (unsigned)len) == 145,
 		"widest file reparses with every key accepted", NULL);
 }
 
@@ -1039,4 +1046,3 @@ int main(void)
 	printf("audio_config: all checks passed\n");
 	return 0;
 }
-

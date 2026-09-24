@@ -92,8 +92,6 @@ set_property IOSTANDARD LVCMOS33 [get_ports ZORRO_E7M]
 
 set_property IOSTANDARD LVCMOS33 [get_ports ZORRO_INT6]
 
-set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets ZORRO_E7M]
-set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets ZORRO_E7M_IBUF]
 
 set_property PACKAGE_PIN V20 [get_ports {ZORRO_DATA[15]}]
 set_property PACKAGE_PIN W15 [get_ports {ZORRO_DATA[14]}]
@@ -288,8 +286,6 @@ set_property PACKAGE_PIN U19 [get_ports {I2SO_RESETn[0]}]
 #set_property IOSTANDARD LVCMOS33 [get_ports HDMI_INTN]
 #set_property PACKAGE_PIN W19 [get_ports HDMI_INTN]
 
-# well...
-create_clock -period 35.000 -name amiga_e7m -add [get_ports ZORRO_E7M]
 
 # ZORRO_NFCS is used as the ODDR clock (C input) for the z3_nslave_oddr and
 # z3_ncinh_oddr primitives that drive /SLAVE and /CINH.  Declaring it as a
@@ -332,7 +328,10 @@ set_false_path -from [get_clocks clk_fpga_0] -to [get_clocks -of_objects [get_pi
 
 set_false_path -from [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]] -to [get_clocks clk_fpga_0]
 
-set_false_path -from [get_clocks amiga_e7m] -to [get_clocks clk_fpga_0]
+# The active capture source XDC declares E7M in both builds and C28 only
+# in the opt-in build. A non-empty clock collection avoids conditional Tcl,
+# which Vivado 2018.3 does not support inside XDC files.
+set_false_path -from [get_clocks -quiet {amiga_e7m amiga_c28}] -to [get_clocks clk_fpga_0]
 
 set_false_path -quiet -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT1]] -to [get_clocks -quiet clk_fpga_0]
 set_false_path -quiet -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] -to [get_clocks -quiet clk_fpga_0]

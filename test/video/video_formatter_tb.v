@@ -12,6 +12,7 @@
  *   +SCALEX=<0|1>      horizontal doubling, default 0
  *   +SCALEY=<0|1|2>    vertical scale shift (x1/x2/x4), default 0
  *   +INTERLACE=<0|1>   mark woven interlaced input; scaling still applies
+ *   +SOURCE_ROWS=<rows> arbitrary vertical source height, default 0/off
  *   +WIDTH=<pixels>    displayed width, default 64
  *   +STREAM_GAP_EVERY=<beats>  insert a VDMA delivery pause at this cadence
  *   +STREAM_GAP_CYCLES=<clocks> length of each delivery pause
@@ -57,6 +58,7 @@ integer cfg_stream_gap_every;
 integer cfg_stream_gap_cycles;
 integer cfg_viewport;
 integer cfg_scanline;
+integer cfg_source_rows;
 integer canvas_width;
 integer canvas_height;
 integer content_height;
@@ -297,6 +299,14 @@ function [31:0] expected_pix(input integer l, input integer x);
   end
 endfunction
 
+function integer expected_source_line(input integer output_line);
+  begin
+    expected_source_line = cfg_source_rows > 0
+      ? (output_line * cfg_source_rows) / content_height
+      : output_line >> cfg_scaley;
+  end
+endfunction
+
 // control op helper
 task op(input [7:0] o, input [31:0] d);
   begin
@@ -478,7 +488,7 @@ endtask
 `endif
 
 // main
-integer i, x, mism, shown, overlay_start_frame;
+integer i, x, mism, shown, overlay_start_frame, expected_row;
 integer overlay_src_x, overlay_src_y;
 reg [31:0] got, exp;
 initial begin
@@ -491,6 +501,7 @@ initial begin
   cfg_stream_gap_cycles = 0;
   cfg_viewport = 0;
   cfg_scanline = 0;
+  cfg_source_rows = 0;
   stream_beats_sent = 0;
   if ($value$plusargs("CMODE=%d", cfg_cmode)) ;
   if ($value$plusargs("SCALEX=%d", cfg_scalex)) ;
@@ -501,6 +512,7 @@ initial begin
   if ($value$plusargs("STREAM_GAP_CYCLES=%d", cfg_stream_gap_cycles)) ;
   if ($value$plusargs("VIEWPORT=%d", cfg_viewport)) ;
   if ($value$plusargs("SCANLINE=%d", cfg_scanline)) ;
+  if ($value$plusargs("SOURCE_ROWS=%d", cfg_source_rows)) ;
 
   canvas_width = cfg_width;
   canvas_height = DEFAULT_LINES;
@@ -526,7 +538,8 @@ initial begin
 
   scale_y_factor = 1 << cfg_scaley;
   src_pixels = cfg_width >> cfg_scalex;
-  src_lines = content_height >> cfg_scaley;
+  src_lines = cfg_source_rows > 0
+    ? cfg_source_rows : content_height >> cfg_scaley;
   case (cfg_cmode)
     0: words_per_line = src_pixels / 4;
     2: words_per_line = src_pixels;
@@ -539,10 +552,10 @@ initial begin
 `endif
   h_max = canvas_width + 56;
 
-  $display("CONFIG cmode=%0d scalex=%0d scaley=%0d interlace=%0d width=%0d words=%0d beats=%0d gap=%0d/%0d",
+  $display("CONFIG cmode=%0d scalex=%0d scaley=%0d interlace=%0d width=%0d source_rows=%0d words=%0d beats=%0d gap=%0d/%0d",
            cfg_cmode, cfg_scalex, cfg_scaley, cfg_interlace, cfg_width,
-           words_per_line, beats_per_line, cfg_stream_gap_every,
-           cfg_stream_gap_cycles);
+           cfg_source_rows, words_per_line, beats_per_line,
+           cfg_stream_gap_every, cfg_stream_gap_cycles);
 
   repeat (10) @(negedge aclk);
   aresetn <= 1;
@@ -557,7 +570,8 @@ initial begin
   op(OP_HS, ((canvas_width + 16) << 16) | (canvas_width + 32));
   op(OP_VS, (vs_start << 16) | vs_end);
   op(OP_COLORMODE, cfg_cmode);
-  op(OP_SCALE, ((cfg_scaley & 3) << 1) | (cfg_scalex & 1));
+  op(OP_SCALE, (cfg_source_rows << 16) |
+               ((cfg_scaley & 3) << 1) | (cfg_scalex & 1));
   op(OP_SPRITEXY, (2000 << 16) | 2000);
   if (cfg_cmode == 0)
     for (i = 0; i < 256; i = i + 1)
@@ -575,7 +589,9 @@ initial begin
   // Captured rows are normalized to zero at the first active line.
   mism = 0;
   shown = 0;
-  for (i = 0; i < canvas_height; i = i + 1)
+  for (i = 0; i < canvas_height; i = i + 1) begin
+    expected_row = expected_source_line(
+      cfg_viewport != 0 ? i - viewport_y : i);
     for (x = 0; x < canvas_width; x = x + 1) begin
       got = cap[i * MAXW + x];
       if (cfg_viewport != 0 &&
@@ -583,10 +599,9 @@ initial begin
            i < viewport_y || i >= viewport_y + content_height))
         exp = 0;
       else if (cfg_viewport != 0)
-        exp = expected_pix((i - viewport_y) >> cfg_scaley,
-                           x - viewport_x);
+        exp = expected_pix(expected_row, x - viewport_x);
       else
-        exp = expected_pix(i >> cfg_scaley, x);
+        exp = expected_pix(expected_row, x);
       if (cfg_scanline != 0 && cfg_viewport != 0 &&
           ((i - viewport_y) & 1) == 0)
         exp = 0;
@@ -598,6 +613,7 @@ initial begin
         end
       end
     end
+  end
 
 `ifndef MASTER_DUT
   if (cfg_viewport == 1 && cfg_scalex == 0 && cfg_scaley == 0 &&

@@ -46,6 +46,32 @@ int main(void)
 	if (!expect_u32("full interlaced capture uses x2",
 	                video_videocap_scalemode(1U, 1U), 2U))
 		return 9;
+	if (!expect_u32("PAL progressive fullscan reads 256 rows",
+	                video_videocap_source_rows(1024U, 1U, 0U, 0U), 256U))
+		return 10;
+	if (!expect_u32("NTSC progressive fullscan reads 200 rows",
+	                video_videocap_source_rows(1024U, 1U, 1U, 0U), 200U))
+		return 11;
+	if (!expect_u32("PAL interlaced fullscan reads 512 rows",
+	                video_videocap_source_rows(1024U, 1U, 0U, 1U), 512U))
+		return 12;
+	if (!expect_u32("NTSC interlaced fullscan reads 400 rows",
+	                video_videocap_source_rows(1024U, 1U, 1U, 1U), 400U))
+		return 13;
+	if (!expect_u32("filtered NTSC keeps legacy output-row division",
+	                video_videocap_source_rows(480U, 0U, 1U, 0U), 240U))
+		return 14;
+	if (!expect_u32("PAL fullscan keeps power-of-two scale control",
+	                video_videocap_scale_control(1U, 0U, 0U), 4U))
+		return 15;
+	if (!expect_u32("NTSC progressive fullscan carries 200 source rows",
+	                video_videocap_scale_control(1U, 1U, 0U),
+	                (200U << 16) | 4U))
+		return 16;
+	if (!expect_u32("NTSC interlaced fullscan carries 400 source rows",
+	                video_videocap_scale_control(1U, 1U, 1U),
+	                (400U << 16) | 10U))
+		return 17;
 	if (!expect_u32("filtered request stays filtered",
 	                video_videocap_full_width(0U, 1U), 0U))
 		return 10;

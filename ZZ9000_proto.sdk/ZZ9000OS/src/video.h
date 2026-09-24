@@ -92,6 +92,22 @@ static inline uint32_t videocap_control_width_only(uint32_t full_width)
 #define MNTVF_OP_VIEWPORT_POS 28
 #define MNTVF_OP_VIEWPORT_SIZE_COMMIT 29
 #define MNTVF_OP_SOURCE_SYNC 30
+/* Runtime capture-phase control, snooped by mntzorro.v (the video
+ * formatter ignores it). data[15:0] is a SIGNED step count in the MMCM
+ * fine phase domain: one step moves the E7M-locked capture clocks by
+ * 1/56 of the VCO period (~78 ps; 448 steps = one capture-clock turn),
+ * relative to the routed build phase. Valid range -255..255; out-of-range
+ * commits set the error bit in the VCAP_PHASE_STATUS register and move
+ * nothing. Diagnostic bitstreams expose the same engine through the
+ * direct-register window at 0x0240..0x024e. */
+#define MNTVF_OP_VIDEOCAP_PHASE 31
+
+/* C28-input MMCM phase offset, signed 16-bit steps relative to the routed
+ * default. The C28 clock has 1792 fine steps per capture period; canonical
+ * range -896..895. C28 bitstreams accept this op and ignore legacy op 31;
+ * legacy bitstreams ignore this op. Stored legacy values are never scaled
+ * or reinterpreted as a C28 calibration. */
+#define MNTVF_OP_VIDEOCAP_C28_PHASE 32
 
 enum zz_dpms_level {
 	ZZ_DPMS_ON,
@@ -110,7 +126,7 @@ struct ZZ_VIDEO_STATE {
 	uint32_t vmode_hsize;
 	uint32_t vmode_vsize;
 	uint32_t vmode_hdiv;
-	uint32_t vmode_vdiv;
+	uint32_t vmode_vdma_rows;
 
 	int videocap_video_mode;
 	int videocap_video_mode_applied;
