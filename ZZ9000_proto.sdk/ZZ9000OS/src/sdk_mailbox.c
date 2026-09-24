@@ -12,6 +12,7 @@
 #include "xtime_l.h"
 #include "sdk_palette.h"
 #include "sdk_mailbox.h"
+#include "sdk_service_catalog.h"
 #include "sdk_compression.h"
 #include "lzh/zz9k_lzh.h"
 #include "sdk_crypto.h"
@@ -135,27 +136,6 @@ struct SDKQueryApertureLayoutPayload {
 	uint8_t host_window_size[4];
 	uint8_t audio_base[4];
 	uint8_t audio_size[4];
-};
-
-struct SDKServiceInfoPayload {
-	uint8_t service_id[4];
-	uint8_t version[4];
-	uint8_t capability_bits[4];
-	uint8_t flags[4];
-	uint8_t opcode_base[4];
-	uint8_t opcode_count[4];
-	uint8_t max_inline_payload[4];
-	uint8_t name[20];
-};
-
-struct SDKServiceDescriptor {
-	uint32_t service_id;
-	uint32_t version;
-	uint32_t capability_bits;
-	uint32_t flags;
-	uint32_t opcode_base;
-	uint32_t opcode_count;
-	const char *name;
 };
 
 struct SDKAllocSharedPayload {
@@ -1211,141 +1191,6 @@ static uint32_t mailbox_capability_bits(void)
 	return capabilities;
 }
 
-static const struct SDKServiceDescriptor sdk_services[] = {
-	{
-		SDK_SERVICE_CORE,
-		0x00020000U,
-		SDK_CAP_MAILBOX | SDK_CAP_POLLING_COMPLETION |
-			SDK_CAP_SERVICE_DISCOVERY,
-		SDK_SERVICE_FLAG_FIRMWARE,
-		SDK_SERVICE_CORE,
-		6,
-		"core"
-	},
-	{
-		SDK_SERVICE_MEMORY,
-		0x00020000U,
-		SDK_CAP_SHARED_ALLOC | SDK_CAP_MEMORY_OPS,
-		SDK_SERVICE_FLAG_FIRMWARE,
-		SDK_SERVICE_MEMORY,
-		4,
-		"memory"
-	},
-	{
-		SDK_SERVICE_SURFACE,
-		0x00020000U,
-		SDK_CAP_SURFACES | SDK_CAP_FRAMEBUFFER_SURFACE |
-			SDK_CAP_SURFACE_OPS,
-		SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_ZERO_COPY |
-			SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY,
-		SDK_SERVICE_SURFACE,
-		6,
-		"surface"
-	},
-	{
-		SDK_SERVICE_IMAGE,
-		0x00020000U,
-		SDK_CAP_IMAGE_SCALE | SDK_CAP_IMAGE_DECODE,
-		SDK_SERVICE_FLAG_FIRMWARE |
-			SDK_SERVICE_FLAG_IMAGE_STREAMING_INPUT |
-			SDK_SERVICE_FLAG_IMAGE_TILE_OUTPUT |
-			SDK_SERVICE_FLAG_IMAGE_FRAMEBUFFER_OUTPUT |
-			SDK_SERVICE_FLAG_IMAGE_SCALE_BILINEAR |
-			SDK_SERVICE_FLAG_IMAGE_SCALE_CLIPPED |
-			SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA |
-			SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT |
-			SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565,
-		SDK_SERVICE_IMAGE,
-		8,
-		"image"
-	},
-	{
-		SDK_SERVICE_CODEC,
-		0x00020000U,
-		SDK_CAP_COMPRESSION,
-		SDK_SERVICE_FLAG_FIRMWARE |
-			SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW |
-			SDK_SERVICE_FLAG_CODEC_ZLIB |
-			SDK_SERVICE_FLAG_CODEC_GZIP |
-			SDK_SERVICE_FLAG_CODEC_LZMA_ALONE |
-			SDK_SERVICE_FLAG_CODEC_LZMA2 |
-			SDK_SERVICE_FLAG_CODEC_CHECKSUM |
-			SDK_SERVICE_FLAG_CODEC_DECOMPRESS_TEST |
-			SDK_SERVICE_FLAG_CODEC_DECOMPRESS_STREAM |
-			SDK_SERVICE_FLAG_CODEC_DECOMPRESS_FEED |
-			SDK_SERVICE_FLAG_CODEC_DEFLATE_FEED |
-			SDK_SERVICE_FLAG_CODEC_ZLIB_FEED |
-			SDK_SERVICE_FLAG_CODEC_GZIP_FEED |
-			SDK_SERVICE_FLAG_CODEC_LZH |
-			SDK_SERVICE_FLAG_CODEC_DECOMPRESS_BATCH,
-		SDK_SERVICE_CODEC,
-		7,	/* 0x0600..0x0606 incl. SDK_OP_DECOMPRESS_BATCH */
-		"codec"
-	},
-	{
-		SDK_SERVICE_AUDIO,
-		0x00020001U,
-		SDK_CAP_AUDIO_DECODE | SDK_CAP_AUDIO_PLAYBACK |
-			SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING |
-			SDK_CAP_AUDIO_FABRIC,
-		SDK_SERVICE_FLAG_FIRMWARE |
-			SDK_SERVICE_FLAG_AUDIO_MP3_DECODE |
-			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM |
-			SDK_SERVICE_FLAG_AUDIO_CONTROL |
-			SDK_SERVICE_FLAG_AUDIO_FABRIC |
-			SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE,
-		21,	/* 0x0500..0x0514 incl. audio control plane and the
-			 * fabric lease plane (0x0512-0x0514; 0x050f..0x0511
-			 * reserved gaps); the on-hardware qualification gate
-			 * passed 2026-08-28 (docs/audio-fabric.md), so the
-			 * lease opcodes are counted and advertised */
-		"audio"
-	},
-	{
-		SDK_SERVICE_CRYPTO,
-		0x00020000U,
-		SDK_CAP_CRYPTO,
-		SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_CRYPTO_X25519 |
-			SDK_SERVICE_FLAG_CRYPTO_P256 |
-			SDK_SERVICE_FLAG_CRYPTO_P256_KEYGEN |
-			SDK_SERVICE_FLAG_CRYPTO_ECDSA_P256 |
-			SDK_SERVICE_FLAG_CRYPTO_RSA_2048 |
-			SDK_SERVICE_FLAG_CRYPTO_AES_GCM,
-		SDK_SERVICE_CRYPTO,
-		5,
-		"crypto"
-	},
-	{
-		SDK_SERVICE_DIAG,
-		0x00020000U,
-		SDK_CAP_DIAGNOSTICS,
-		SDK_SERVICE_FLAG_FIRMWARE,
-		SDK_SERVICE_DIAG,
-		4,
-		"diag"
-	},
-	{
-		SDK_SERVICE_VIDEO,
-		0x00020000U,
-		SDK_CAP_VIDEO_DECODE | SDK_CAP_MEDIA_SESSION,
-		SDK_SERVICE_FLAG_FIRMWARE |
-			SDK_SERVICE_FLAG_ASYNC |
-			SDK_SERVICE_FLAG_VIDEO_MPEG1 |
-			SDK_SERVICE_FLAG_VIDEO_MPEG_PS |
-			SDK_SERVICE_FLAG_VIDEO_DIRECT_OVERLAY |
-			SDK_SERVICE_FLAG_VIDEO_STREAMING_INPUT |
-			SDK_SERVICE_FLAG_VIDEO_CORE1 |
-			SDK_SERVICE_FLAG_VIDEO_MEDIA_SESSION |
-			SDK_SERVICE_FLAG_VIDEO_MEDIA_MP2 |
-			SDK_SERVICE_FLAG_VIDEO_EXPLICIT_PRESENT |
-			SDK_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ |
-			SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS,
-		SDK_SERVICE_VIDEO,
-		14,
-		"video"
-	}
-};
-
 static inline uint16_t get_be16(const volatile void *p)
 {
 	const volatile uint8_t *b = (const volatile uint8_t *)p;
@@ -1509,30 +1354,6 @@ static void copy_payload(volatile uint8_t *dst, const volatile uint8_t *src,
 	uint32_t i;
 	for (i = 0; i < length; i++)
 		dst[i] = src[i];
-}
-
-static void copy_name(volatile uint8_t *dst, const char *src)
-{
-	uint32_t i;
-
-	for (i = 0; i < 20U; i++) {
-		if (src && src[i] != '\0')
-			dst[i] = (uint8_t)src[i];
-		else
-			dst[i] = 0;
-	}
-}
-
-static const struct SDKServiceDescriptor *find_service(uint32_t service_id)
-{
-	uint32_t i;
-
-	for (i = 0; i < sizeof(sdk_services) / sizeof(sdk_services[0]); i++) {
-		if (sdk_services[i].service_id == service_id)
-			return &sdk_services[i];
-	}
-
-	return 0;
 }
 
 static uint32_t service_flags(const struct SDKServiceDescriptor *service)
@@ -7637,6 +7458,7 @@ static uint16_t handle_query_service(volatile struct SDKMailboxEntry *req,
 	volatile struct SDKServiceInfoPayload *info;
 	const struct SDKServiceDescriptor *service;
 	uint32_t service_id;
+	uint32_t capabilities;
 
 	if (payload_len < 4U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -7648,25 +7470,16 @@ static uint16_t handle_query_service(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_NOT_FOUND);
 
 	write_completion(comp, req, SDK_STATUS_OK, sizeof(*info));
-	memset((void *)comp->payload, 0, sizeof(comp->payload));
 	info = (volatile struct SDKServiceInfoPayload *)comp->payload;
-	put_be32(info->service_id, service->service_id);
-	put_be32(info->version, service->version);
-	{
-		uint32_t capabilities = service->capability_bits;
-		if (service->service_id == SDK_SERVICE_CORE)
-			capabilities |= mailbox_capability_bits() &
-				SDK_CAP_APERTURE_LAYOUT;
-		if (service->service_id == SDK_SERVICE_MEMORY)
-			capabilities |= mailbox_capability_bits() &
-				SDK_CAP_HOST_WINDOW_HEAP;
-		put_be32(info->capability_bits, capabilities);
-	}
-	put_be32(info->flags, service_flags(service));
-	put_be32(info->opcode_base, service->opcode_base);
-	put_be32(info->opcode_count, service->opcode_count);
-	put_be32(info->max_inline_payload, sizeof(req->payload));
-	copy_name(info->name, service->name);
+	capabilities = service->capability_bits;
+	if (service->service_id == SDK_SERVICE_CORE)
+		capabilities |= mailbox_capability_bits() &
+			SDK_CAP_APERTURE_LAYOUT;
+	if (service->service_id == SDK_SERVICE_MEMORY)
+		capabilities |= mailbox_capability_bits() &
+			SDK_CAP_HOST_WINDOW_HEAP;
+	sdk_service_write_info(info, service, capabilities, service_flags(service),
+			       sizeof(req->payload));
 	return SDK_STATUS_OK;
 }
 

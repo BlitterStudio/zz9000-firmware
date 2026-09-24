@@ -109,7 +109,10 @@ jobs:
             -o /tmp/test_sdk_service_flags
           /tmp/test_sdk_service_flags \
             ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.c \
-            ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.h
+            ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.h \
+            ZZ9000_proto.sdk/ZZ9000OS/src/sdk_service_catalog.h
+      - name: SDK service discovery descriptors
+        run: make -C test/sdk_service test
 
   build:
     name: Build & package firmware
