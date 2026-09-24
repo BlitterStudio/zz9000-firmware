@@ -199,11 +199,39 @@ static inline uint32_t video_videocap_full_width(uint32_t requested,
 static inline uint32_t video_videocap_scalemode(uint32_t full_width,
 		uint32_t interlace)
 {
-	/* Full-width progressive capture needs x4 to fill 1024 lines;
-	 * filtered capture retains the legacy x2 path. Interlaced input
-	 * already supplies twice as many source lines. */
+	/* Full-width PAL progressive capture uses x4 to fill 1024 lines;
+	 * NTSC keeps the same low-bit mode while OP_SCALE's source-row field
+	 * enables fractional resampling. Filtered capture retains the legacy
+	 * x2 path. Interlaced input already supplies twice as many source lines. */
 	return full_width ? (interlace ? 2U : 4U)
 	                  : (interlace ? 0U : 2U);
+}
+
+#define VIDEO_VIDEOCAP_NTSC_PROGRESSIVE_ROWS 200U
+/* OP_SCALE[27:16]: non-zero source rows select fractional vertical scaling. */
+#define VIDEO_FORMATTER_SCALE_SOURCE_ROWS_SHIFT 16U
+
+static inline uint32_t video_videocap_source_rows(uint32_t content_height,
+		uint32_t full_width, uint32_t ntsc, uint32_t interlace)
+{
+	if (full_width && ntsc)
+		return VIDEO_VIDEOCAP_NTSC_PROGRESSIVE_ROWS << (interlace != 0U);
+
+	return content_height /
+		video_vertical_scale_factor(
+			video_videocap_scalemode(full_width, interlace));
+}
+
+static inline uint32_t video_videocap_scale_control(uint32_t full_width,
+		uint32_t ntsc, uint32_t interlace)
+{
+	uint32_t scalemode = video_videocap_scalemode(full_width, interlace);
+	uint32_t source_rows = full_width && ntsc ?
+		video_videocap_source_rows(VIDEO_VIDEOCAP_CONTENT_HEIGHT,
+			full_width, ntsc, interlace) : 0U;
+
+	return video_formatter_scale_control(scalemode) |
+		(source_rows << VIDEO_FORMATTER_SCALE_SOURCE_ROWS_SHIFT);
 }
 
 #endif
