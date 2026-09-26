@@ -875,17 +875,13 @@ void audio_fabric_lease_poll(void)
 					smp_local_irq_restore(irq_state);
 					break;
 				}
-				smp_local_irq_restore(irq_state);
-			}
-			if (p->staged != staged || l->ring != src_ring ||
-			    l->tearing) {
-				g_poll_inflight[slot] = 0U;
-				g_poll_stolen[slot] = 0U;
-				break;
-			}
-			{
-				uint32_t irq_state = smp_local_irq_save();
-
+				if (p->staged != staged || l->ring != src_ring ||
+				    l->tearing) {
+					g_poll_inflight[slot] = 0U;
+					g_poll_stolen[slot] = 0U;
+					smp_local_irq_restore(irq_state);
+					break;
+				}
 				seq = staged / AUDIO_BYTES_PER_PERIOD;
 				ring = fabric_lease_staging_ring(slot);
 				if (ring == NULL) {
