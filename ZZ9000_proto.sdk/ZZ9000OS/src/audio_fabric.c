@@ -932,7 +932,19 @@ void audio_fabric_isr(void)
 		ahead = AUDIO_FABRIC_PERIOD_BYTES;
 	{
 		uint32_t deficit = 0U;
-		uint32_t cap = fabric_ready_source_count() > 1U
+		uint32_t cap;
+
+		/* The ready count reads source snapshots. Refresh them from
+		 * the cursors this tick just accepted; the previous ISR's
+		 * view can be empty after a delayed interrupt and would
+		 * select the full-ring cap. */
+		for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
+			struct audio_fabric_slot *s = &g_audio_fabric.slot[i];
+
+			if (s->live && s->ops != NULL && s->ops->snapshot != NULL)
+				s->ops->snapshot(&s->source);
+		}
+		cap = fabric_ready_source_count() > 1U
 			? AUDIO_FABRIC_MULTISLOT_MAX_FILLS
 			: AUDIO_FABRIC_RING_PERIODS;
 

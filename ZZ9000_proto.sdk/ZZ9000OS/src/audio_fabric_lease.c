@@ -851,6 +851,7 @@ void audio_fabric_lease_poll(void)
 			if (p->staged != staged || l->ring != src_ring ||
 			    l->tearing) {
 				g_poll_inflight[slot] = 0U;
+				g_poll_stolen[slot] = 0U;
 				break;
 			}
 			{
@@ -859,6 +860,7 @@ void audio_fabric_lease_poll(void)
 				if (g_poll_stolen[slot]) {
 					s->convert = g_poll_snap[slot];
 					g_poll_inflight[slot] = 0U;
+					g_poll_stolen[slot] = 0U;
 					smp_local_irq_restore(irq_state);
 					break;
 				}
@@ -913,7 +915,7 @@ void audio_fabric_lease_poll(void)
 /* The poll is inside its FIR and cannot resume until this ISR returns.
  * Finish the period it already claimed, from the pre-FIR snapshot, so
  * fill does not play silence over published PCM. */
-static void fabric_lease_finish_inflight(void)
+static void fabric_lease_finish_inflight(uint32_t periods)
 {
 	static int16_t src_scratch[(AUDIO_BYTES_PER_PERIOD / 4U) * 2U];
 	static int16_t out_scratch[AUDIO_BYTES_PER_PERIOD / 2U];
@@ -941,7 +943,8 @@ static void fabric_lease_finish_inflight(void)
 		p = &s->preconvert;
 		if (l->ring == NULL || l->tearing || l->capacity == 0U)
 			continue;
-		if (p->staged - p->consumed >= AUDIO_BYTES_PER_PERIOD)
+		if ((p->staged - p->consumed) / AUDIO_BYTES_PER_PERIOD >=
+		    periods)
 			continue;
 		if (p->src_consumed != g_poll_inflight_src[slot])
 			continue;
@@ -1021,6 +1024,7 @@ static void fabric_lease_catchup_unclaimed(uint32_t periods)
 		uint32_t staged;
 		uint64_t consumed64;
 		uint32_t periods_left;
+		uint32_t have;
 		uint8_t *ring;
 		uint8_t *src_ring;
 		struct zz_audio_convert *convert;
@@ -1034,15 +1038,12 @@ static void fabric_lease_catchup_unclaimed(uint32_t periods)
 			continue;
 		if (g_poll_inflight[slot] && !g_poll_stolen[slot])
 			continue;
-		if (g_poll_stolen[slot]) {
-			if (periods <= 1U)
-				continue;
-			periods_left = periods - 1U;
-			convert = &g_poll_snap[slot];
-		} else {
-			periods_left = periods;
-			convert = &s->convert;
-		}
+		have = (p->staged - p->consumed) / AUDIO_BYTES_PER_PERIOD;
+		if (have >= periods)
+			continue;
+		periods_left = periods - have;
+		convert = g_poll_stolen[slot] ? &g_poll_snap[slot]
+					      : &s->convert;
 		for (; periods_left != 0U; periods_left--) {
 			if (p->staged - p->consumed >=
 			    (AUDIO_FABRIC_LEASE_STAGING_PERIODS -
@@ -1108,7 +1109,7 @@ void fabric_lease_catchup(uint32_t periods)
 	if (periods == 0U)
 		return;
 	if (g_lease_poll_busy)
-		fabric_lease_finish_inflight();
+		fabric_lease_finish_inflight(periods);
 	fabric_lease_catchup_unclaimed(periods);
 }
 /*
