@@ -154,10 +154,10 @@ void fabric_lease_reset_rings(void);
  * heartbeat expiry and cursor faults. Malformed lines isolate the slot
  * to silence for the pass; peers are untouched. */
 void fabric_lease_isr_tick(void);
-/* Convert published source the main loop has not staged yet. The ISR
- * calls this before fill so a late poll cannot play silence over PCM
- * the host already wrote. No-op when staging is already ahead. */
-void fabric_lease_catchup(void);
+/* Stage up to periods of published source the main loop has not
+ * staged. The ISR passes the number of TX periods this fill can
+ * still consume. No-op at zero. */
+void fabric_lease_catchup(uint32_t periods);
 
 /* Request the queued-contribution rebuild (core TU): after this slot
  * detaches, the next compositor ISR rebuilds every TX period strictly

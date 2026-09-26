@@ -918,19 +918,33 @@ void audio_fabric_isr(void)
 	bench_isr = fabric_bench_now();
 #endif
 	/* A converting lease's FIR normally runs on the main loop. If that
-	 * loop missed the period, stage the owed source here before fill
-	 * so the DMA does not play silence over PCM already published. */
-	fabric_lease_catchup();
-	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
-		return;
-#ifdef AUDIO_FABRIC_STATIC_TX_DIAG
-	if (g_fabric_static_tx_armed)
-		return;
-#endif
-
+	 * loop missed the period, stage every period this fill can consume
+	 * so a multi-period DMA jump does not play silence over published PCM. */
 	pos_period =
 		audio_get_dma_transfer_count() % AUDIO_FABRIC_RING_BYTES;
 	pos_period -= pos_period % AUDIO_FABRIC_PERIOD_BYTES;
+	ahead = audio_playback_ring_distance(
+		g_audio_fabric.fill_offset, pos_period,
+		AUDIO_FABRIC_RING_BYTES);
+	if (audio_playback_frontier_needs_rebase(
+		    g_audio_fabric.fill_offset, pos_period,
+		    AUDIO_FABRIC_TARGET_AHEAD, AUDIO_FABRIC_RING_BYTES))
+		ahead = AUDIO_FABRIC_PERIOD_BYTES;
+	{
+		uint32_t deficit = 0U;
+		uint32_t cap = fabric_ready_source_count() > 1U
+			? AUDIO_FABRIC_MULTISLOT_MAX_FILLS
+			: AUDIO_FABRIC_RING_PERIODS;
+
+		if (ahead < AUDIO_FABRIC_TARGET_AHEAD)
+			deficit = (AUDIO_FABRIC_TARGET_AHEAD - ahead) /
+				AUDIO_FABRIC_PERIOD_BYTES;
+		if (deficit > cap)
+			deficit = cap;
+		fabric_lease_catchup(deficit);
+	}
+	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
+		return;
 #ifdef AUDIO_FABRIC_BENCH
 	if (!g_fabric_bench.dma_armed) {
 		g_fabric_bench.dma_armed = 1U;
