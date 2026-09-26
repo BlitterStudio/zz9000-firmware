@@ -505,47 +505,47 @@ void fabric_lease_isr_tick(void)
 			     SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED) != 0U;
 		l->write_cursor = view.write;
 		l->line_valid = 1U;
-		if (l->state == (uint8_t)AUDIO_FABRIC_SLOT_STATE_LEASED &&
-		    (l->paused ||
-		     (view.write - l->credited >=
-		      FABRIC_RING_PREROLL_BYTES &&
-		      (!s->preconvert.active ||
-		       s->preconvert.staged - s->preconvert.consumed >=
-			       AUDIO_TX_BUFFER_SIZE -
-				       2U * AUDIO_BYTES_PER_PERIOD)))) {
-			/* A first publication: LEASED -> ACTIVE. Re-arm
-			 * the fill frontier only when this slot revives
-			 * an otherwise idle fabric -- joining a live mix
-			 * must never rewind the shared frontier (the
-			 * other producers' staged periods would be
-			 * re-filled and their staging double-counted).
-			 *
-			 * The preroll gates guard UNPAUSED activation: a
-			 * converting lease additionally needs the full
-			 * frontier preroll (the TX fill target ahead)
-			 * already staged, because the producer line's
-			 * preroll says the SOURCE is ready while the fill
-			 * consumes the converted ring -- activating
-			 * before the poll staged AUDIO_FABRIC_TARGET_AHEAD
-			 * periods would commit silence for the shortfall
-			 * and queue the real startup audio behind it (and
-			 * count the misses as underruns once primed).
-			 *
-			 * A PAUSED publication bypasses both gates: a
-			 * paused converting client publishes no source
-			 * bytes, so its staging can never prime -- the
-			 * gate would wedge the lease LEASED forever. The
-			 * bypass is safe: the fill snapshot marks paused
-			 * (and unprimed converting) leases faulted, so
-			 * the fill contributes silence with no staging
-			 * charge and the frontier-rebase underrun counter
-			 * excludes faulted slots, while the activation
-			 * restart leaves the pristine staging untouched
-			 * (consumed == 0) for the unpause. */
-			if (!audio_fabric_others_live(slot))
-				audio_fabric_producer_restart(slot);
-			l->state = (uint8_t)AUDIO_FABRIC_SLOT_STATE_ACTIVE;
-			audio_fabric_producer_go_live(slot);
+		{
+			int converting = s->preconvert.active != 0U;
+			int source_ready = view.write - l->credited >=
+				FABRIC_RING_PREROLL_BYTES;
+			int staging_ready = !converting ||
+				s->preconvert.staged -
+					s->preconvert.consumed >=
+				AUDIO_TX_BUFFER_SIZE -
+					2U * AUDIO_BYTES_PER_PERIOD;
+			/* Idle pause publishes no PCM. Bypass leases still
+			 * go live, matching the pre-preroll contract. A
+			 * converting lease only records ACTIVE: AHI's
+			 * acquire publish is exactly this line, and going
+			 * live here arms the DMA frontier with nothing
+			 * staged. The worker then unpauses at two source
+			 * periods, the fill can never reach the six-period
+			 * target, and every tick writes silence one period
+			 * ahead of the DMA. */
+			int idle_pause = l->paused != 0U &&
+				view.write == l->credited;
+			int play_ready = source_ready && staging_ready &&
+				l->paused == 0U;
+
+			if (l->state == (uint8_t)
+					AUDIO_FABRIC_SLOT_STATE_LEASED &&
+			    (idle_pause ||
+			     (!converting && l->paused != 0U) ||
+			     play_ready ||
+			     (!converting && source_ready)))
+				l->state = (uint8_t)
+					AUDIO_FABRIC_SLOT_STATE_ACTIVE;
+			if (l->state == (uint8_t)
+					AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
+			    !s->live &&
+			    ((!converting &&
+			      (l->paused != 0U || source_ready)) ||
+			     play_ready)) {
+				if (!audio_fabric_others_live(slot))
+					audio_fabric_producer_restart(slot);
+				audio_fabric_producer_go_live(slot);
+			}
 		}
 	}
 }
