@@ -4248,6 +4248,9 @@ static uint16_t handle_audio_ring_acquire(
 	if (gain > 255U ||
 	    (flags & ~SDK_AUDIO_RING_ACQUIRE_FLAG_KNOWN) != 0U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE) != 0U &&
+	    (flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE) == 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE) != 0U) {
 		if (rate != 8000U && rate != 12000U && rate != 24000U &&
 		    rate != 32000U && rate != 44100U && rate != 48000U)
@@ -4266,6 +4269,8 @@ static uint16_t handle_audio_ring_acquire(
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	if (rc != AUDIO_FABRIC_LEASE_OK)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
+	if ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE) != 0U)
+		audio_fabric_lease_source_be(slot, 1);
 	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
 	memset((void *)comp->payload, 0, sizeof(comp->payload));
 	result = (volatile struct SDKAudioRingAcquireResultPayload *)
@@ -4285,7 +4290,9 @@ static uint16_t handle_audio_ring_acquire(
 	put_be32(result->period_us, SDK_AUDIO_RING_PERIOD_US);
 	if ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE) != 0U) {
 		put_be32(result->sample_contract,
-		         SDK_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE);
+		         ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE) != 0U)
+		             ? SDK_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16BE
+		             : SDK_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE);
 		put_be32(result->source_rate, rate);
 	} else {
 		put_be32(result->sample_contract,

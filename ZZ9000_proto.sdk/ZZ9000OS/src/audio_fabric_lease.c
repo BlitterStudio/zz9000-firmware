@@ -580,7 +580,9 @@ static int fabric_ring_source_snapshot(uint32_t slot_index,
 	source->sample_rate = (l->source_rate != 0U) ? l->source_rate
 	                                             : 48000U;
 	source->channels = 2U;
-	source->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
+	source->sample_format = l->source_be
+		? SDK_AUDIO_SAMPLE_FORMAT_S16BE
+		: SDK_AUDIO_SAMPLE_FORMAT_S16LE;
 	/* PAUSED is intentional silence: cursor progress is suppressed
 	 * (the fill loop never pulls) without an underrun. So is a
 	 * converting lease whose staging is not primed yet: the
@@ -665,11 +667,40 @@ static const struct audio_fabric_producer_ops *fabric_ring_ops(uint32_t slot)
  * IRQ-safe critical section (PR #88 discipline). */
 #define AUDIO_FABRIC_LEASE_PRECONVERT_BUDGET 2U
 
+/* ARM is little-endian. A big-endian grant is byte-swapped here so the
+ * FIR and the meter see host int16, matching the little-endian path. */
+static void fabric_swap_s16be(int16_t *samples, uint32_t bytes)
+{
+	uint8_t *p = (uint8_t *)samples;
+	uint32_t i;
+
+	for (i = 0U; i + 1U < bytes; i += 2U) {
+		uint8_t hi = p[i];
+
+		p[i] = p[i + 1U];
+		p[i + 1U] = hi;
+	}
+}
+
+/* Set for the poll body. The audio ISR may preempt the FIR. It must
+ * not re-enter the poll scratch; it finishes the claimed period from
+ * the pre-FIR converter snapshot instead of skipping it. */
+static uint8_t g_lease_poll_busy;
+static struct zz_audio_convert g_poll_snap[AUDIO_FABRIC_SLOT_COUNT];
+static uint64_t g_poll_inflight_src[AUDIO_FABRIC_SLOT_COUNT];
+static uint8_t g_poll_inflight[AUDIO_FABRIC_SLOT_COUNT];
+static uint8_t g_poll_stolen[AUDIO_FABRIC_SLOT_COUNT];
+static uint8_t g_poll_metered[AUDIO_FABRIC_SLOT_COUNT];
+
 void audio_fabric_lease_poll(void)
 {
 	static int16_t src_scratch[(AUDIO_BYTES_PER_PERIOD / 4U) * 2U];
 	static int16_t out_scratch[AUDIO_BYTES_PER_PERIOD / 2U];
 	uint32_t slot;
+
+	if (g_lease_poll_busy)
+		return;
+	g_lease_poll_busy = 1U;
 
 	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
 	     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
@@ -758,6 +789,31 @@ void audio_fabric_lease_poll(void)
 				break;
 			if (consumed64 + src_bytes > write)
 				break;   /* no whole source period yet */
+			/* Init before the handoff snapshot. An ISR that
+			 * steals the first period otherwise publishes a
+			 * null-ratio conversion, and the resumed poll
+			 * adopts that snapshot while convert_rate already
+			 * matches, so the converter never initializes. */
+			if (s->convert_rate != l->source_rate) {
+				s->convert_rate = l->source_rate;
+				zz_audio_convert_init(&s->convert,
+					l->source_rate, 48000U);
+			}
+			{
+				uint32_t irq_state = smp_local_irq_save();
+
+				if (p->src_consumed != consumed64 ||
+				    p->staged != staged) {
+					smp_local_irq_restore(irq_state);
+					break;
+				}
+				g_poll_snap[slot] = s->convert;
+				g_poll_inflight_src[slot] = consumed64;
+				g_poll_stolen[slot] = 0U;
+				g_poll_metered[slot] = 0U;
+				g_poll_inflight[slot] = 1U;
+				smp_local_irq_restore(irq_state);
+			}
 			/* Pull one source period, wrap-safe (the producer
 			 * wrote these bytes below the write cursor it
 			 * published; reader-side invalidate). */
@@ -775,17 +831,24 @@ void audio_fabric_lease_poll(void)
 				memcpy((uint8_t *)src_scratch + first,
 				       ring, src_bytes - first);
 			}
-			/* Meter the source period here: the ISR fill no
-			 * longer sees this lease's pre-conversion PCM. */
-			fabric_lease_meter(s, src_scratch, src_bytes);
+			if (l->source_be)
+				fabric_swap_s16be(src_scratch, src_bytes);
+			/* Meter under IRQ-off. Catch-up may stage the
+			 * following periods and must not re-enter the
+			 * clip latch mid-period. */
+			{
+				uint32_t irq_state = smp_local_irq_save();
+
+				if (!g_poll_metered[slot]) {
+					fabric_lease_meter(s, src_scratch,
+							   src_bytes);
+					g_poll_metered[slot] = 1U;
+				}
+				smp_local_irq_restore(irq_state);
+			}
 			/* Convert one whole period. Off-table rates are
 			 * refused at acquire; the silent-period branch only
 			 * mirrors the pump's defensive policy. */
-			if (s->convert_rate != l->source_rate) {
-				s->convert_rate = l->source_rate;
-				zz_audio_convert_init(&s->convert,
-					l->source_rate, 48000U);
-			}
 			if (s->convert.ratio == NULL)
 				memset(out_scratch, 0, sizeof(out_scratch));
 			else
@@ -802,28 +865,46 @@ void audio_fabric_lease_poll(void)
 			 * converted period is discarded either way.
 			 * Dropping it here also means never replaying it
 			 * through already-advanced FIR history. */
-			if (p->staged != staged || l->ring != src_ring ||
-			    l->tearing)
-				break;
-			/* Publish bytes + cost first, then the cursor: the
-			 * ISR sees a period as available only whole. */
-			seq = staged / AUDIO_BYTES_PER_PERIOD;
-			ring = fabric_lease_staging_ring(slot);
-			if (ring == NULL)
-				break;
-			offset = (seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS) *
-				AUDIO_BYTES_PER_PERIOD;
-			memcpy(ring + offset, out_scratch,
-			       AUDIO_BYTES_PER_PERIOD);
-			Xil_DCacheFlushRange(
-				(INTPTR)(ring + offset),
-				AUDIO_BYTES_PER_PERIOD);
-			p->cost[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS] =
-				src_bytes;
-			__asm__ __volatile__("" ::: "memory");
-			p->staged = staged + AUDIO_BYTES_PER_PERIOD;
-			p->src_consumed = consumed64 + src_bytes;
-			p->primed = 1U;
+			{
+				uint32_t irq_state = smp_local_irq_save();
+
+				if (g_poll_stolen[slot]) {
+					s->convert = g_poll_snap[slot];
+					g_poll_inflight[slot] = 0U;
+					g_poll_stolen[slot] = 0U;
+					smp_local_irq_restore(irq_state);
+					break;
+				}
+				if (p->staged != staged || l->ring != src_ring ||
+				    l->tearing) {
+					g_poll_inflight[slot] = 0U;
+					g_poll_stolen[slot] = 0U;
+					smp_local_irq_restore(irq_state);
+					break;
+				}
+				seq = staged / AUDIO_BYTES_PER_PERIOD;
+				ring = fabric_lease_staging_ring(slot);
+				if (ring == NULL) {
+					g_poll_inflight[slot] = 0U;
+					smp_local_irq_restore(irq_state);
+					break;
+				}
+				offset = (seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS) *
+					AUDIO_BYTES_PER_PERIOD;
+				memcpy(ring + offset, out_scratch,
+				       AUDIO_BYTES_PER_PERIOD);
+				Xil_DCacheFlushRange(
+					(INTPTR)(ring + offset),
+					AUDIO_BYTES_PER_PERIOD);
+				p->cost[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS] =
+					src_bytes;
+				__asm__ __volatile__("" ::: "memory");
+				p->staged = staged + AUDIO_BYTES_PER_PERIOD;
+				p->src_consumed = consumed64 + src_bytes;
+				p->primed = 1U;
+				g_poll_inflight[slot] = 0U;
+				smp_local_irq_restore(irq_state);
+			}
 			/* Boundary rebase (PR #88): 2^32 is not a multiple
 			 * of the staging ring, so a natural wrap would jump
 			 * the ring position and wedge the lease silent.
@@ -846,6 +927,235 @@ void audio_fabric_lease_poll(void)
 			}
 		}
 	}
+	g_lease_poll_busy = 0U;
+}
+
+/* 2^32 is not a multiple of the staging ring. A publisher that never
+ * hits the poll's rebase — catch-up, when the main loop is stalled —
+ * wraps the ring position and replays or skips converted periods. */
+static void fabric_lease_rebase_cursors(struct fabric_lease_preconvert *p)
+{
+	uint32_t ring_bytes = AUDIO_FABRIC_LEASE_STAGING_PERIODS *
+		AUDIO_BYTES_PER_PERIOD;
+	uint32_t lowest;
+	uint32_t rebase;
+	uint32_t irq_state;
+
+	if (p->staged <= 0xFFFFFFFFU - ring_bytes)
+		return;
+	lowest = (p->consumed < p->staged) ? p->consumed : p->staged;
+	rebase = lowest - lowest % ring_bytes;
+	irq_state = smp_local_irq_save();
+	p->staged -= rebase;
+	p->consumed -= rebase;
+	smp_local_irq_restore(irq_state);
+}
+
+/* The poll is inside its FIR and cannot resume until this ISR returns.
+ * Finish the period it already claimed, from the pre-FIR snapshot, so
+ * fill does not play silence over published PCM. */
+static void fabric_lease_finish_inflight(uint32_t periods)
+{
+	static int16_t src_scratch[(AUDIO_BYTES_PER_PERIOD / 4U) * 2U];
+	static int16_t out_scratch[AUDIO_BYTES_PER_PERIOD / 2U];
+	uint32_t slot;
+
+	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
+	     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
+		struct audio_fabric_slot *s = fabric_slot(slot);
+		struct fabric_lease_preconvert *p;
+		struct audio_fabric_lease *l;
+		uint32_t frames;
+		uint32_t src_bytes;
+		uint32_t offset;
+		uint32_t first;
+		uint32_t seq;
+		uint32_t staged;
+		uint8_t *ring;
+		uint8_t *src_ring;
+
+		if (!g_poll_inflight[slot] || g_poll_stolen[slot])
+			continue;
+		if (s == NULL || !s->live || !s->preconvert.active)
+			continue;
+		l = &s->lease;
+		p = &s->preconvert;
+		if (l->ring == NULL || l->tearing || l->capacity == 0U)
+			continue;
+		if ((p->staged - p->consumed) / AUDIO_BYTES_PER_PERIOD >=
+		    periods)
+			continue;
+		if (p->src_consumed != g_poll_inflight_src[slot])
+			continue;
+		frames = l->source_rate / 50U;
+		src_bytes = frames * 4U;
+		if (frames == 0U || frames > (AUDIO_BYTES_PER_PERIOD / 4U))
+			continue;
+		src_ring = l->ring;
+		offset = (uint32_t)(p->src_consumed % l->capacity);
+		first = l->capacity - offset;
+		if (first > src_bytes)
+			first = src_bytes;
+		Xil_DCacheInvalidateRange((INTPTR)(src_ring + offset), first);
+		memcpy(src_scratch, src_ring + offset, first);
+		if (src_bytes > first) {
+			Xil_DCacheInvalidateRange((INTPTR)src_ring,
+						  src_bytes - first);
+			memcpy((uint8_t *)src_scratch + first, src_ring,
+			       src_bytes - first);
+		}
+		if (l->source_be)
+			fabric_swap_s16be(src_scratch, src_bytes);
+		if (!g_poll_metered[slot]) {
+			fabric_lease_meter(s, src_scratch, src_bytes);
+			g_poll_metered[slot] = 1U;
+		}
+		if (g_poll_snap[slot].ratio == NULL)
+			memset(out_scratch, 0, sizeof(out_scratch));
+		else
+			zz_audio_convert_stream(&g_poll_snap[slot],
+				src_scratch, out_scratch, (uint16_t)frames,
+				AUDIO_BYTES_PER_PERIOD / 4U);
+		staged = p->staged;
+		seq = staged / AUDIO_BYTES_PER_PERIOD;
+		ring = fabric_lease_staging_ring(slot);
+		if (ring == NULL)
+			continue;
+		offset = (seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS) *
+			AUDIO_BYTES_PER_PERIOD;
+		memcpy(ring + offset, out_scratch, AUDIO_BYTES_PER_PERIOD);
+		Xil_DCacheFlushRange((INTPTR)(ring + offset),
+				     AUDIO_BYTES_PER_PERIOD);
+		p->cost[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS] = src_bytes;
+		__asm__ __volatile__("" ::: "memory");
+		p->staged = staged + AUDIO_BYTES_PER_PERIOD;
+		p->src_consumed = g_poll_inflight_src[slot] + src_bytes;
+		p->primed = 1U;
+		g_poll_stolen[slot] = 1U;
+		fabric_lease_rebase_cursors(p);
+	}
+}
+
+void audio_fabric_lease_source_be(uint32_t slot, int be)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+
+	if (s == NULL)
+		return;
+	s->lease.source_be = be ? 1U : 0U;
+}
+
+/* The poll holds the busy flag but has not claimed a period, or it
+ * claimed one and the ISR already finished that period. Stage up to
+ * periods more from the tick cursor. A stolen claim continues from
+ * the snapshot so the poll adopts the same converter state. */
+static void fabric_lease_catchup_unclaimed(uint32_t periods)
+{
+	static int16_t src_scratch[(AUDIO_BYTES_PER_PERIOD / 4U) * 2U];
+	static int16_t out_scratch[AUDIO_BYTES_PER_PERIOD / 2U];
+	uint32_t slot;
+
+	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
+	     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
+		struct audio_fabric_slot *s = fabric_slot(slot);
+		struct fabric_lease_preconvert *p;
+		struct audio_fabric_lease *l;
+		uint32_t frames;
+		uint32_t src_bytes;
+		uint32_t offset;
+		uint32_t first;
+		uint32_t seq;
+		uint32_t staged;
+		uint64_t consumed64;
+		uint32_t periods_left;
+		uint32_t have;
+		uint8_t *ring;
+		uint8_t *src_ring;
+		struct zz_audio_convert *convert;
+
+		if (s == NULL || !s->live || !s->preconvert.active)
+			continue;
+		l = &s->lease;
+		p = &s->preconvert;
+		if (l->paused != 0U || l->ring == NULL || l->tearing ||
+		    l->capacity == 0U)
+			continue;
+		if (g_poll_inflight[slot] && !g_poll_stolen[slot])
+			continue;
+		have = (p->staged - p->consumed) / AUDIO_BYTES_PER_PERIOD;
+		if (have >= periods)
+			continue;
+		periods_left = periods - have;
+		convert = g_poll_stolen[slot] ? &g_poll_snap[slot]
+					      : &s->convert;
+		for (; periods_left != 0U; periods_left--) {
+			if (p->staged - p->consumed >=
+			    (AUDIO_FABRIC_LEASE_STAGING_PERIODS -
+			     AUDIO_FABRIC_LEASE_REPLAY_PERIODS - 1U) *
+			    AUDIO_BYTES_PER_PERIOD)
+				break;
+			frames = l->source_rate / 50U;
+			src_bytes = frames * 4U;
+			if (frames == 0U ||
+			    frames > (AUDIO_BYTES_PER_PERIOD / 4U) ||
+			    p->src_consumed + src_bytes > l->write_cursor)
+				break;
+			consumed64 = p->src_consumed;
+			src_ring = l->ring;
+			offset = (uint32_t)(consumed64 % l->capacity);
+			first = l->capacity - offset;
+			if (first > src_bytes)
+				first = src_bytes;
+			Xil_DCacheInvalidateRange(
+				(INTPTR)(src_ring + offset), first);
+			memcpy(src_scratch, src_ring + offset, first);
+			if (src_bytes > first) {
+				Xil_DCacheInvalidateRange((INTPTR)src_ring,
+							  src_bytes - first);
+				memcpy((uint8_t *)src_scratch + first,
+				       src_ring, src_bytes - first);
+			}
+			if (l->source_be)
+				fabric_swap_s16be(src_scratch, src_bytes);
+			fabric_lease_meter(s, src_scratch, src_bytes);
+			if (convert->ratio == NULL)
+				memset(out_scratch, 0, sizeof(out_scratch));
+			else
+				zz_audio_convert_stream(convert, src_scratch,
+					out_scratch, (uint16_t)frames,
+					AUDIO_BYTES_PER_PERIOD / 4U);
+			staged = p->staged;
+			seq = staged / AUDIO_BYTES_PER_PERIOD;
+			ring = fabric_lease_staging_ring(slot);
+			if (ring == NULL)
+				break;
+			offset = (seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS) *
+				AUDIO_BYTES_PER_PERIOD;
+			memcpy(ring + offset, out_scratch,
+			       AUDIO_BYTES_PER_PERIOD);
+			Xil_DCacheFlushRange((INTPTR)(ring + offset),
+					     AUDIO_BYTES_PER_PERIOD);
+			p->cost[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS] =
+				src_bytes;
+			__asm__ __volatile__("" ::: "memory");
+			p->staged = staged + AUDIO_BYTES_PER_PERIOD;
+			p->src_consumed = consumed64 + src_bytes;
+			p->primed = 1U;
+			fabric_lease_rebase_cursors(p);
+		}
+	}
+}
+
+/* Stage owed source from the tick's write cursor. periods is the
+ * refill this ISR will consume, so one staged period does not leave
+ * the rest of a multi-period fill silent. */
+void fabric_lease_catchup(uint32_t periods)
+{
+	if (periods == 0U)
+		return;
+	if (g_lease_poll_busy)
+		fabric_lease_finish_inflight(periods);
+	fabric_lease_catchup_unclaimed(periods);
 }
 /*
  * Lease plane lifecycle. Acquire and release run in main-loop context

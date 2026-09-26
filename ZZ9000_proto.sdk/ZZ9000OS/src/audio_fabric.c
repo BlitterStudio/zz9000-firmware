@@ -198,6 +198,46 @@ static uint32_t fabric_ready_source_count(void)
 	return count;
 }
 
+/* Catch-up runs before the source-snapshot refresh. Lease readiness,
+ * converting or bypass, is the cursor the tick just accepted. The
+ * previous IRQ's snapshot can still show a bypass peer empty. Calling
+ * snapshot here would consume the producer's snapshot budget. */
+static uint32_t fabric_catchup_ready_count(void)
+{
+	uint32_t count = 0U;
+	uint32_t i;
+
+	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
+		const struct audio_fabric_slot *s = &g_audio_fabric.slot[i];
+		const struct audio_fabric_lease *l;
+
+		if (!s->live)
+			continue;
+		l = &s->lease;
+		if (l->ring != NULL && l->line_valid && l->paused == 0U &&
+		    !l->tearing) {
+			if (s->preconvert.active) {
+				if (l->write_cursor > s->preconvert.src_consumed ||
+				    s->preconvert.staged > s->preconvert.consumed)
+					count++;
+			} else if (l->write_cursor > l->consumed) {
+				count++;
+			}
+		} else if (i == AUDIO_FABRIC_SLOT_PUMP) {
+			/* The pump cursor is not in the lease tick, and
+			 * reading it through snapshot would consume the
+			 * canonical producer read. A live pump may have
+			 * published since the previous IRQ, so count it
+			 * toward the multislot cap. */
+			count++;
+		} else if (!s->source.faulted && s->source.ring &&
+			   s->source.produced_bytes > s->source.staged_bytes) {
+			count++;
+		}
+	}
+	return count;
+}
+
 /* Shared-frontier guard for restart callers: nonzero when any slot
  * other than `slot` is live. Re-arming the shared fill frontier under
  * a live mix would re-fill the other producers' staged periods and
@@ -911,16 +951,51 @@ void audio_fabric_isr(void)
 	 * fill passes below then see it) or drop a revoked one (with
 	 * the last-producer silence when it was the only attachment). */
 	fabric_lease_isr_tick();
-	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
-		return;
+#ifdef AUDIO_FABRIC_BENCH
+	/* Catch-up may run two FIRs. Start the isr sample before it so
+	 * the bench does not report a quiet interrupt when the fallback
+	 * is the expensive part. */
+	bench_isr = fabric_bench_now();
+#endif
 #ifdef AUDIO_FABRIC_STATIC_TX_DIAG
+	/* Armed diagnostic: the cloned period must stay untouched.
+	 * Catch-up and fill both write the TX ring. */
 	if (g_fabric_static_tx_armed)
 		return;
 #endif
-
+	/* A converting lease's FIR normally runs on the main loop. If that
+	 * loop missed the period, stage every period this fill can consume
+	 * so a multi-period DMA jump does not play silence over published PCM. */
 	pos_period =
 		audio_get_dma_transfer_count() % AUDIO_FABRIC_RING_BYTES;
 	pos_period -= pos_period % AUDIO_FABRIC_PERIOD_BYTES;
+	ahead = audio_playback_ring_distance(
+		g_audio_fabric.fill_offset, pos_period,
+		AUDIO_FABRIC_RING_BYTES);
+	if (audio_playback_frontier_needs_rebase(
+		    g_audio_fabric.fill_offset, pos_period,
+		    AUDIO_FABRIC_TARGET_AHEAD, AUDIO_FABRIC_RING_BYTES))
+		ahead = AUDIO_FABRIC_PERIOD_BYTES;
+	{
+		uint32_t deficit = 0U;
+		uint32_t cap;
+
+		/* Do not snapshot here. The mid-loop failure path counts
+		 * snapshot calls, and the previous ISR's source view can
+		 * be empty after a delayed interrupt. */
+		cap = fabric_catchup_ready_count() > 1U
+			? AUDIO_FABRIC_MULTISLOT_MAX_FILLS
+			: AUDIO_FABRIC_RING_PERIODS;
+
+		if (ahead < AUDIO_FABRIC_TARGET_AHEAD)
+			deficit = (AUDIO_FABRIC_TARGET_AHEAD - ahead) /
+				AUDIO_FABRIC_PERIOD_BYTES;
+		if (deficit > cap)
+			deficit = cap;
+		fabric_lease_catchup(deficit);
+	}
+	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
+		return;
 #ifdef AUDIO_FABRIC_BENCH
 	if (!g_fabric_bench.dma_armed) {
 		g_fabric_bench.dma_armed = 1U;
@@ -998,10 +1073,8 @@ void audio_fabric_isr(void)
 		return;
 
 #ifdef AUDIO_FABRIC_BENCH
-	/* Instrument build (U5): the tick accumulator spans one active
-	 * compositor pass -- frontier through tail tracking; the idle
-	 * early-outs above are not counted. */
-	bench_isr = fabric_bench_now();
+	/* bench_isr already includes catch-up. Idle early-outs above
+	 * return before the accumulator add, so they stay uncounted. */
 #endif
 
 

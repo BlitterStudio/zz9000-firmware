@@ -1239,6 +1239,7 @@ static void scenario_cache_fidelity(void)
  * does not divide that capacity). The poll runs once per tick, which
  * is a healthy main loop. */
 static void ahi_paced_run(uint32_t ticks, uint32_t poll_every,
+	uint32_t poll_until,
 	uint32_t *underruns, uint32_t *nonzero, uint32_t *state)
 {
 	struct audio_fabric_ring_grant grant;
@@ -1282,7 +1283,8 @@ static void ahi_paced_run(uint32_t ticks, uint32_t poll_every,
 		if (write < consumed + 2U * src_period)
 			flags = SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED;
 		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX, write, flags);
-		if (poll_every != 0U && (tick % poll_every) == 0U)
+		if ((poll_until == 0U || tick < poll_until) &&
+		    poll_every != 0U && (tick % poll_every) == 0U)
 			audio_fabric_lease_poll();
 		fabric_pass();
 	}
@@ -1299,7 +1301,7 @@ static void scenario_ahi_paced(void)
 	uint32_t nonzero;
 	uint32_t state;
 
-	ahi_paced_run(40U, 1U, &underruns, &nonzero, &state);
+	ahi_paced_run(40U, 1U, 0U, &underruns, &nonzero, &state);
 	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
 	check(state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
 	      underruns == 0U &&
@@ -1309,6 +1311,19 @@ static void scenario_ahi_paced(void)
 	      fmt("state=%u underruns=%u consumed=%llu", state, underruns,
 	          (unsigned long long)st.consumed_bytes));
 	(void)nonzero;
+
+	/* After the frontier is primed, the main loop stops polling for
+	 * 16 ticks (320 ms). The ISR must stage the published source
+	 * itself; otherwise the DMA plays silence for the rest of the run. */
+	ahi_paced_run(36U, 1U, 20U, &underruns, &nonzero, &state);
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
+	      underruns == 0U &&
+	      st.consumed_bytes >= 20U * 3528U &&
+	      (st.consumed_bytes % 3528U) == 0U,
+	      "ahi pace: a stalled main-loop poll does not drop playback",
+	      fmt("state=%u underruns=%u consumed=%llu", state, underruns,
+	          (unsigned long long)st.consumed_bytes));
 
 	/* First valid publication is PAUSED and already has PCM. ACTIVE
 	 * must be recorded so a client waiting on that state can unpause;

@@ -251,6 +251,7 @@ int audio_fabric_conversion_admissible(uint32_t source_rate);
 int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	uint32_t gain, uint32_t source_rate,
 	struct audio_fabric_ring_grant *grant);
+void audio_fabric_lease_source_be(uint32_t slot, int be);
 
 /*
  * Main-loop fill for converting leases (the #100 discipline applied to
