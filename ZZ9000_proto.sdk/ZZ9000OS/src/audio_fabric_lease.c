@@ -580,7 +580,9 @@ static int fabric_ring_source_snapshot(uint32_t slot_index,
 	source->sample_rate = (l->source_rate != 0U) ? l->source_rate
 	                                             : 48000U;
 	source->channels = 2U;
-	source->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
+	source->sample_format = l->source_be
+		? SDK_AUDIO_SAMPLE_FORMAT_S16BE
+		: SDK_AUDIO_SAMPLE_FORMAT_S16LE;
 	/* PAUSED is intentional silence: cursor progress is suppressed
 	 * (the fill loop never pulls) without an underrun. So is a
 	 * converting lease whose staging is not primed yet: the
@@ -664,6 +666,21 @@ static const struct audio_fabric_producer_ops *fabric_ring_ops(uint32_t slot)
  * single-word atomic per side, rebased at the 2^32 boundary under an
  * IRQ-safe critical section (PR #88 discipline). */
 #define AUDIO_FABRIC_LEASE_PRECONVERT_BUDGET 2U
+
+/* ARM is little-endian. A big-endian grant is byte-swapped here so the
+ * FIR and the meter see host int16, matching the little-endian path. */
+static void fabric_swap_s16be(int16_t *samples, uint32_t bytes)
+{
+	uint8_t *p = (uint8_t *)samples;
+	uint32_t i;
+
+	for (i = 0U; i + 1U < bytes; i += 2U) {
+		uint8_t hi = p[i];
+
+		p[i] = p[i + 1U];
+		p[i + 1U] = hi;
+	}
+}
 
 /* Set for the poll body. The audio ISR may preempt the FIR. It must
  * not re-enter the poll scratch; it finishes the claimed period from
@@ -793,6 +810,8 @@ void audio_fabric_lease_poll(void)
 				memcpy((uint8_t *)src_scratch + first,
 				       ring, src_bytes - first);
 			}
+			if (l->source_be)
+				fabric_swap_s16be(src_scratch, src_bytes);
 			/* Meter the source period here: the ISR fill no
 			 * longer sees this lease's pre-conversion PCM. */
 			fabric_lease_meter(s, src_scratch, src_bytes);
@@ -929,7 +948,9 @@ static void fabric_lease_finish_inflight(void)
 		memcpy(src_scratch, src_ring + offset, first);
 		if (src_bytes > first)
 			memcpy((uint8_t *)src_scratch + first, src_ring,
-			       src_bytes - first);
+		       src_bytes - first);
+		if (l->source_be)
+			fabric_swap_s16be(src_scratch, src_bytes);
 		if (g_poll_snap[slot].ratio == NULL)
 			memset(out_scratch, 0, sizeof(out_scratch));
 		else
@@ -954,6 +975,14 @@ static void fabric_lease_finish_inflight(void)
 	}
 }
 
+void audio_fabric_lease_source_be(uint32_t slot, int be)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+
+	if (s == NULL)
+		return;
+	s->lease.source_be = be ? 1U : 0U;
+}
 /* Stage one owed source period when the main loop has not. Runs from
  * the audio ISR after the lease tick, so l->write_cursor is current.
  * A healthy poll keeps staging ahead and this returns without converting. */
