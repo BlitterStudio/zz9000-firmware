@@ -213,6 +213,11 @@ jobs:
           fi
           ./build_release_assets.sh "${ARGS[@]}"
 
+      - name: Verify A4000 C28 release BOOT payloads
+        run: |
+          BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
+          python3 test/release/verify_a4000_c28_assets.py release_assets "$BUILD_LABEL"
+
       # The former "ns-pal" firmware flavor (PAL Amiga ~49.92Hz videocap
       # default, issue #7) is no longer packaged: the same behavior comes
       # from `videocap_mode = pal` + `nonstandard_vsync = pal` in the

@@ -43,6 +43,8 @@ Builds all release variants when no variant is specified.
 Variants:
   zorro3          Zorro III / A3000 / A4000
   zorro3-nofast   Zorro III / A3000 / A4000, no Zorro RAM
+  zorro3-a4000-c28         A4000 with video-slot C28, Zorro III Fast RAM
+  zorro3-nofast-a4000-c28  A4000 with video-slot C28, no Zorro RAM
   zorro2          Zorro II 4MB / A2000
   zorro2-2mb      Zorro II 2MB / A2000
   a500            A500 4MB / ZZ9500CX Denise adapter
@@ -51,12 +53,14 @@ Variants:
 EOF
 }
 
-all_variants=(zorro3 zorro3-nofast zorro2 zorro2-2mb a500 a500-2mb a500plus)
+all_variants=(zorro3 zorro3-nofast zorro3-a4000-c28 zorro3-nofast-a4000-c28 zorro2 zorro2-2mb a500 a500-2mb a500plus)
 
 variant_label() {
     case "$1" in
         zorro3) echo "Zorro III / A3000 / A4000" ;;
         zorro3-nofast) echo "Zorro III / A3000 / A4000, no Zorro RAM" ;;
+        zorro3-a4000-c28) echo "A4000 / C28, Zorro III Fast RAM" ;;
+        zorro3-nofast-a4000-c28) echo "A4000 / C28, no Zorro RAM" ;;
         zorro2) echo "Zorro II 4MB / A2000" ;;
         zorro2-2mb) echo "Zorro II 2MB / A2000" ;;
         a500) echo "A500 4MB / ZZ9500CX Denise adapter" ;;
@@ -70,6 +74,8 @@ variant_output() {
     case "$1" in
         zorro3) echo "$CANONICAL_BIT" ;;
         zorro3-nofast) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro3-nofast.bit" ;;
+        zorro3-a4000-c28) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro3-a4000-c28.bit" ;;
+        zorro3-nofast-a4000-c28) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro3-nofast-a4000-c28.bit" ;;
         zorro2) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro2.bit" ;;
         zorro2-2mb) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro2-2mb.bit" ;;
         a500) echo "$VARIANT_DIR/zz9000_ps_wrapper-a500.bit" ;;
@@ -81,7 +87,7 @@ variant_output() {
 
 variant_block() {
     case "$1" in
-        zorro3)
+        zorro3|zorro3-a4000-c28)
             cat <<'EOF'
 // ZORRO2/3 switch
 //`define ZORRO2
@@ -98,7 +104,7 @@ variant_block() {
 
 EOF
             ;;
-        zorro3-nofast)
+        zorro3-nofast|zorro3-nofast-a4000-c28)
             cat <<'EOF'
 // ZORRO2/3 switch
 //`define ZORRO2
@@ -264,6 +270,25 @@ else
         selected+=("$variant")
     done
 fi
+if [ -n "${C28_BITSTREAM_BUILDER:-}" ]; then
+    # shellcheck disable=SC2206  # deliberate word split of the builder command
+    C28_BUILDER_CMD=(${C28_BITSTREAM_BUILDER})
+elif [ -n "${BITSTREAM_BUILDER:-}" ]; then
+    C28_BUILDER_CMD=()
+else
+    C28_BUILDER_CMD=(./build_bitstream.sh --capture-c28 --output)
+fi
+for variant in "${selected[@]}"; do
+    case "$variant" in
+        zorro3-a4000-c28|zorro3-nofast-a4000-c28)
+            if [ "${#C28_BUILDER_CMD[@]}" -eq 0 ]; then
+                echo "ERROR: set C28_BITSTREAM_BUILDER to a C28 builder ending in its output-path option." >&2
+                exit 1
+            fi
+            ;;
+    esac
+done
+
 
 if [ ! -f "$MNTZORRO" ]; then
     echo "ERROR: missing $MNTZORRO" >&2
@@ -312,12 +337,19 @@ for variant in "${selected[@]}"; do
     variant_block "$variant" > "$block_tmp"
     replace_define_block "$block_tmp"
 
-    "${BITSTREAM_BUILDER_CMD[@]}"
-
-    mkdir -p "$(dirname "$output")"
-    if [ "$output" != "$CANONICAL_BIT" ]; then
-        cp "$CANONICAL_BIT" "$output"
-    fi
+    case "$variant" in
+        zorro3-a4000-c28|zorro3-nofast-a4000-c28)
+            mkdir -p "$(dirname "$output")"
+            "${C28_BUILDER_CMD[@]}" "$output"
+            ;;
+        *)
+            "${BITSTREAM_BUILDER_CMD[@]}"
+            mkdir -p "$(dirname "$output")"
+            if [ "$output" != "$CANONICAL_BIT" ]; then
+                cp "$CANONICAL_BIT" "$output"
+            fi
+            ;;
+    esac
     if [ "$variant" = zorro3 ]; then
         cp "$CANONICAL_BIT" "$zorro3_result"
     fi
