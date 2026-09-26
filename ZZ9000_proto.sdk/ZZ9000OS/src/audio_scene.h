@@ -18,16 +18,14 @@
 
 #include <stdint.h>
 
-/*
- * Per-card clean-ceiling defaults in raw mixer units. Equal 256/256
- * preserves the legacy uncalibrated model and its 192-unit boundary.
- * A measured card persists both values through ZZ9000.CFG; firmware
- * derives Paula weight as AX/Paula and enforces 3/4 of AX ceiling.
- */
-#define AUDIO_SCENE_DEFAULT_CEILING_PAULA 256U
-#define AUDIO_SCENE_DEFAULT_CEILING_AX    256U
-#define AUDIO_SCENE_HEADROOM_NUMERATOR    3U
-#define AUDIO_SCENE_HEADROOM_DENOMINATOR  4U
+/* Conservative fallback measured on one R1 card. A saved calibration
+ * and baseline take precedence; this is not a universal safety proof.
+ * Power-on levels match the parity preset at these ceilings so the
+ * codec never briefly starts at the former hotter 128/64 pair. */
+#define AUDIO_SCENE_DEFAULT_CEILING_PAULA 48U
+#define AUDIO_SCENE_DEFAULT_CEILING_AX    80U
+#define AUDIO_SCENE_DEFAULT_BASELINE_PAULA 36U
+#define AUDIO_SCENE_DEFAULT_BASELINE_AX    72U
 
 /* Fixed scene slots; the name is a user label carried alongside the
  * master-chain assignment (it never reaches the DSP). */

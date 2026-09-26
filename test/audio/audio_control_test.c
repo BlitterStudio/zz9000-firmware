@@ -98,6 +98,12 @@ int audio_adau_set_lpf_params(int f0)
 	record_write(WRITE_LPF, f0, 0);
 	return 0;
 }
+int audio_adau_lpf_substep(int f0, int substep)
+{
+	record_write(WRITE_LPF_SUB, f0, substep);
+	return substep == 10 ? 1 : 0;
+}
+
 
 int audio_adau_set_mixer_vol(int vol1, int vol2)
 {
@@ -304,10 +310,24 @@ static void test_select_state_roundtrip(void)
 		fmt("active=%lu count=%lu",
 			(unsigned long)w32(&result_buf[0]),
 			(unsigned long)w32(&result_buf[4])));
-	check(w32(&result_buf[24]) ==
-			AUDIO_SCENE_DEFAULT_CEILING_PAULA &&
-		w32(&result_buf[28]) == AUDIO_SCENE_DEFAULT_CEILING_AX,
-		"state get reports default per-leg ceilings", NULL);
+	check(w32(&result_buf[8]) == SDK_AUDIO_BALANCE_PACK(36, 72),
+		"state get reports the boot baseline",
+		fmt("baseline=0x%lx",
+			(unsigned long)w32(&result_buf[8])));
+	check(w32(&result_buf[12]) == SDK_AUDIO_BALANCE_PACK(36, 72) &&
+		w32(&result_buf[20]) == 0,
+		"state get reports the boot mixer applied, unbounded",
+		fmt("trim=0x%lx flags=0x%lx",
+			(unsigned long)w32(&result_buf[12]),
+			(unsigned long)w32(&result_buf[20])));
+	check(w32(&result_buf[16]) == 160 &&
+		w32(&result_buf[24]) == 48 &&
+		w32(&result_buf[28]) == 80,
+		"state get reports boot ceilings and derived boundary",
+		fmt("boundary=%lu p=%lu ax=%lu",
+			(unsigned long)w32(&result_buf[16]),
+			(unsigned long)w32(&result_buf[24]),
+			(unsigned long)w32(&result_buf[28])));
 	check(audio_scene_active_index() == 3,
 		"module active index agrees", NULL);
 	check(last_write(WRITE_VOLPAN, &a, &b) && a == 75 && b == 50,
@@ -420,8 +440,8 @@ static void test_commit_ordering(void)
 	check(write_count == 15,
 		"one commit sequence per select",
 		fmt("writes=%d", write_count));
-	check_commit_sequence("scene 3", 0, 18000, eq3, 50, 75, 50, 128,
-		64);
+	check_commit_sequence("scene 3", 0, 18000, eq3, 50, 75, 50, 36,
+		72);
 }
 
 /* ---- two rapid switches serialize ---- */
@@ -455,10 +475,10 @@ static void test_rapid_switches_serialize(void)
 	check(write_count == 30,
 		"two rapid switches produce two complete sequences",
 		fmt("writes=%d", write_count));
-	check_commit_sequence("switch A", 0, 16000, eq2, 50, 75, 50, 128,
-		64);
-	check_commit_sequence("switch B", 15, 12000, eq5, 50, 90, 50, 128,
-		64);
+	check_commit_sequence("switch A", 0, 16000, eq2, 50, 75, 50, 36,
+		72);
+	check_commit_sequence("switch B", 15, 12000, eq5, 50, 90, 50, 36,
+		72);
 }
 
 /* ---- nested select during a commit coalesces, never interleaves ---- */
@@ -493,9 +513,9 @@ static void test_nested_commit_coalesces(void)
 		fmt("writes=%d", write_count));
 	check_commit_sequence("outer", 0, 18000,
 		(const uint8_t[]){ 50, 50, 50, 50, 50, 50, 55, 55, 50, 50 },
-		50, 75, 50, 128, 64);
+		50, 75, 50, 36, 72);
 	check_commit_sequence("coalesced", 15, 23900, eq_unity, 60, 70,
-		50, 128, 64);
+		50, 36, 72);
 	check(audio_scene_active_index() == 4,
 		"coalesced selection becomes the active scene", NULL);
 }
@@ -589,12 +609,12 @@ static void test_trim_neutral_keep_baseline(void)
 	memset(&tr, 0, sizeof(tr));
 	memset(&wr, 0, sizeof(wr));
 
-	/* A non-default operator baseline (150/40) through the staged
-	 * commit path, so the default 128/64 pair cannot mask the
+	/* A non-boot operator baseline (20/40) through the staged
+	 * commit path, so the boot 36/72 pair cannot mask the
 	 * distinction between "baseline" and "neutral word". */
 	put32(wr.scene, 0);
 	put32(wr.param, SDK_AUDIO_SCENE_PARAM_BASELINE);
-	put32(wr.value, SDK_AUDIO_BALANCE_PACK(150, 40));
+	put32(wr.value, SDK_AUDIO_BALANCE_PACK(20, 40));
 	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
 	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
 		SDK_STATUS_OK, "non-default baseline committed", NULL);
@@ -614,7 +634,7 @@ static void test_trim_neutral_keep_baseline(void)
 	applied = w32(&result_buf[0]);
 	bound = w32(&result_buf[4]);
 	flags = w32(&result_buf[8]);
-	check(applied == SDK_AUDIO_BALANCE_PACK(150, 40) &&
+	check(applied == SDK_AUDIO_BALANCE_PACK(20, 40) &&
 		flags == 0 && bound == 0,
 		"neutral submit reports the baseline pair, unbounded",
 		fmt("applied=0x%lx bound=0x%lx flags=%lu",
@@ -627,17 +647,17 @@ static void test_trim_neutral_keep_baseline(void)
 		"neutral submit emits no gain-reduction event", NULL);
 
 	/* Absolute requests still convert against the baseline: asking
-	 * for 140/30 lands exactly that pair (baseline-relative deltas,
+	 * for 24/30 lands exactly that pair (baseline-relative deltas,
 	 * composed within the boundary), proving the reserved word did
 	 * not redefine the ordinary path. */
-	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(140, 30));
+	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(24, 30));
 	status = run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr));
 	check(status == SDK_STATUS_OK, "absolute trim submit accepted",
 		fmt("status=%u", status));
 	applied = w32(&result_buf[0]);
 	bound = w32(&result_buf[4]);
 	flags = w32(&result_buf[8]);
-	check(applied == SDK_AUDIO_BALANCE_PACK(140, 30) &&
+	check(applied == SDK_AUDIO_BALANCE_PACK(24, 30) &&
 		flags == 0 && bound == 0,
 		"absolute submit still converts against the baseline",
 		fmt("applied=0x%lx bound=0x%lx flags=%lu",
@@ -670,11 +690,11 @@ static void test_trim_neutral_releases_held_trim(void)
 
 	/* A non-neutral balance takes the SDK trim slot and moves the
 	 * applied mixer legs off the baseline. */
-	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(108, 44));
+	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(20, 40));
 	check(run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr)) ==
 		SDK_STATUS_OK, "non-neutral trim accepted", NULL);
 	applied = w32(&result_buf[0]);
-	check(applied == SDK_AUDIO_BALANCE_PACK(108, 44),
+	check(applied == SDK_AUDIO_BALANCE_PACK(20, 40),
 		"held trim reports its applied pair",
 		fmt("applied=0x%lx", (unsigned long)applied));
 
@@ -688,19 +708,19 @@ static void test_trim_neutral_releases_held_trim(void)
 	applied = w32(&result_buf[0]);
 	bound = w32(&result_buf[4]);
 	flags = w32(&result_buf[8]);
-	check(applied == SDK_AUDIO_BALANCE_PACK(128, 64) &&
+	check(applied == SDK_AUDIO_BALANCE_PACK(36, 72) &&
 		flags == 0 && bound == 0,
 		"neutral release reports the baseline pair, unbounded",
 		fmt("applied=0x%lx bound=0x%lx flags=0x%lx",
 			(unsigned long)applied, (unsigned long)bound,
 			(unsigned long)flags));
-	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 64,
+	check(last_write(WRITE_MIXER, &a, &b) && a == 36 && b == 72,
 		"neutral release restages the mixer to the baseline legs",
 		fmt("v1=%d v2=%d", a, b));
 
 	status = run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get));
 	check(status == SDK_STATUS_OK, "state get after release", NULL);
-	check(w32(&result_buf[12]) == SDK_AUDIO_BALANCE_PACK(128, 64) &&
+	check(w32(&result_buf[12]) == SDK_AUDIO_BALANCE_PACK(36, 72) &&
 		w32(&result_buf[20]) == 0,
 		"control state reports the baseline applied, unbounded",
 		fmt("trim=0x%lx flags=0x%lx",
@@ -713,7 +733,7 @@ static void test_trim_neutral_releases_held_trim(void)
 	put32(tr.balance, SDK_AUDIO_BALANCE_NEUTRAL);
 	check(run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr)) ==
 		SDK_STATUS_OK, "repeat neutral submit accepted", NULL);
-	check(w32(&result_buf[0]) == SDK_AUDIO_BALANCE_PACK(128, 64),
+	check(w32(&result_buf[0]) == SDK_AUDIO_BALANCE_PACK(36, 72),
 		"repeat neutral still reports the baseline pair",
 		fmt("applied=0x%lx", (unsigned long)w32(&result_buf[0])));
 	check(write_count == 0,
@@ -744,10 +764,10 @@ static void test_trim_neutral_release_write_failure(void)
 	memset(&get, 0, sizeof(get));
 
 	/* Hold a non-neutral SDK trim. */
-	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(108, 44));
+	put32(tr.balance, SDK_AUDIO_BALANCE_PACK(20, 40));
 	check(run_op(SDK_OP_AUDIO_TRIM_SUBMIT, &tr, sizeof(tr)) ==
 		SDK_STATUS_OK, "non-neutral trim accepted", NULL);
-	check(w32(&result_buf[0]) == SDK_AUDIO_BALANCE_PACK(108, 44),
+	check(w32(&result_buf[0]) == SDK_AUDIO_BALANCE_PACK(20, 40),
 		"held trim reports its applied pair",
 		fmt("applied=0x%lx",
 			(unsigned long)w32(&result_buf[0])));
@@ -780,11 +800,11 @@ static void test_trim_neutral_release_write_failure(void)
 	flags = w32(&result_buf[20]);
 	trim = w32(&result_buf[12]);
 	baseline = w32(&result_buf[8]);
-	check(trim == SDK_AUDIO_BALANCE_PACK(108, 44) && flags == 0,
+	check(trim == SDK_AUDIO_BALANCE_PACK(20, 40) && flags == 0,
 		"control state keeps the held trim, unbounded",
 		fmt("trim=0x%lx flags=0x%lx", (unsigned long)trim,
 			(unsigned long)flags));
-	check(baseline == SDK_AUDIO_BALANCE_PACK(128, 64),
+	check(baseline == SDK_AUDIO_BALANCE_PACK(36, 72),
 		"baseline unchanged by the failed release",
 		fmt("baseline=0x%lx", (unsigned long)baseline));
 
@@ -800,19 +820,19 @@ static void test_trim_neutral_release_write_failure(void)
 	bound = w32(&result_buf[4]);
 	flags = w32(&result_buf[8]);
 	check(result_len == sizeof(struct SDKAudioTrimResultPayload) &&
-		applied == SDK_AUDIO_BALANCE_PACK(128, 64) &&
+		applied == SDK_AUDIO_BALANCE_PACK(36, 72) &&
 		flags == 0 && bound == 0,
 		"retry reports the baseline pair, unbounded",
 		fmt("applied=0x%lx bound=0x%lx flags=0x%lx",
 			(unsigned long)applied, (unsigned long)bound,
 			(unsigned long)flags));
-	check(last_write(WRITE_MIXER, &a, &b) && a == 128 && b == 64,
+	check(last_write(WRITE_MIXER, &a, &b) && a == 36 && b == 72,
 		"retry re-issues the neutral mixer write",
 		fmt("v1=%d v2=%d", a, b));
 	status = run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get,
 		sizeof(get));
 	check(status == SDK_STATUS_OK, "state get after retry", NULL);
-	check(w32(&result_buf[12]) == SDK_AUDIO_BALANCE_PACK(128, 64) &&
+	check(w32(&result_buf[12]) == SDK_AUDIO_BALANCE_PACK(36, 72) &&
 		w32(&result_buf[20]) == 0,
 		"control state reports the baseline after the retry",
 		fmt("trim=0x%lx flags=0x%lx",
@@ -1067,13 +1087,13 @@ static void test_baseline_write_persists_through_queued_save(void)
 
 	put32(wr.scene, 0);
 	put32(wr.param, SDK_AUDIO_SCENE_PARAM_BASELINE);
-	put32(wr.value, SDK_AUDIO_BALANCE_PACK(128, 63));
+	put32(wr.value, SDK_AUDIO_BALANCE_PACK(30, 50));
 	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
 	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
 		SDK_STATUS_OK, "UI baseline write accepted", NULL);
 	check(run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get)) ==
 			SDK_STATUS_OK &&
-			w32(&result_buf[8]) == SDK_AUDIO_BALANCE_PACK(128, 63),
+			w32(&result_buf[8]) == SDK_AUDIO_BALANCE_PACK(30, 50),
 		"control state owns the edited baseline before Save", NULL);
 
 	status = run_op(SDK_OP_AUDIO_SCENE_SAVE, &save, sizeof(save));
@@ -1085,11 +1105,11 @@ static void test_baseline_write_persists_through_queued_save(void)
 		"baseline Save settles OK", NULL);
 	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
 			strstr(mock_fs_file("0:/ZZ9000.CFG"),
-				"audio_baseline = 32831\n") != NULL,
+				"audio_baseline = 7730\n") != NULL,
 		"queued Save persists the edited baseline", NULL);
 	check(run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get)) ==
 			SDK_STATUS_OK &&
-			w32(&result_buf[8]) == SDK_AUDIO_BALANCE_PACK(128, 63),
+			w32(&result_buf[8]) == SDK_AUDIO_BALANCE_PACK(30, 50),
 		"control state retains the baseline after Save", NULL);
 }
 
@@ -1158,11 +1178,11 @@ static void test_baseline_write_path(void)
 
 	put32(wr.scene, 5); /* ignored for BASELINE */
 	put32(wr.param, SDK_AUDIO_SCENE_PARAM_BASELINE);
-	put32(wr.value, SDK_AUDIO_BALANCE_PACK(150, 40));
+	put32(wr.value, SDK_AUDIO_BALANCE_PACK(24, 40));
 	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
 	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
 		SDK_STATUS_OK, "baseline stage+commit", NULL);
-	check(audio_scene_baseline_paula() == 150 &&
+	check(audio_scene_baseline_paula() == 24 &&
 		audio_scene_baseline_ax() == 40,
 		"baseline stored", NULL);
 	pump_scene();
@@ -1180,7 +1200,7 @@ static void test_baseline_write_path(void)
 
 	check(run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get)) ==
 		SDK_STATUS_OK, "state get after baseline", NULL);
-	check(w32(&result_buf[8]) == SDK_AUDIO_BALANCE_PACK(150, 40),
+	check(w32(&result_buf[8]) == SDK_AUDIO_BALANCE_PACK(24, 40),
 		"state get reports the committed baseline",
 		fmt("baseline=0x%lx",
 			(unsigned long)w32(&result_buf[8])));
@@ -1191,7 +1211,7 @@ static void test_baseline_write_path(void)
 	memset(&wr, 0, sizeof(wr));
 	put32(wr.scene, 8);
 	put32(wr.param, SDK_AUDIO_SCENE_PARAM_BASELINE);
-	put32(wr.value, SDK_AUDIO_BALANCE_PACK(150, 40));
+	put32(wr.value, SDK_AUDIO_BALANCE_PACK(24, 40));
 	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
 		SDK_STATUS_OK,
 		"baseline stage ignores the scene index", NULL);

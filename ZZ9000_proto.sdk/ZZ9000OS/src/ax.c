@@ -766,7 +766,9 @@ int audio_adau_init(int program_dsp) {
 		if (status == 0)
 			status = audio_adau_set_lpf_params(23900);
 		if (status == 0)
-			status = audio_adau_set_mixer_vol(128, 64);
+			status = audio_adau_set_mixer_vol(
+				AUDIO_SCENE_DEFAULT_BASELINE_PAULA,
+				AUDIO_SCENE_DEFAULT_BASELINE_AX);
 		if (status == 0)
 			status = audio_adau_limiter_apply_boot_threshold();
 		if (status != 0) {
@@ -1295,6 +1297,65 @@ int audio_adau_set_lpf_params(int f0) {
 	printf("[lpf] a2: %f\t%02x %02x %02x %02x\n\n", a2, buf[0], buf[1], buf[2], buf[3]);
 	return 0;
 }
+/* A live LPF edit must not expose a half-updated biquad to the DSP.
+ * Stage all five words into the ADAU1701 safeload slots, latch once at
+ * a sample boundary, then verify. One substep per service-loop poll
+ * keeps I2C off the blocking mailbox path. The full faded scene
+ * assignment uses the original direct setter while output is muted. */
+int audio_adau_lpf_substep(int f0, int substep)
+{
+	static const uint16_t addresses[5] = {
+		MOD_GENFILTER1_ALG0_STAGE0_B0_ADDR,
+		MOD_GENFILTER1_ALG0_STAGE0_B1_ADDR,
+		MOD_GENFILTER1_ALG0_STAGE0_B2_ADDR,
+		MOD_GENFILTER1_ALG0_STAGE0_A1_ADDR,
+		MOD_GENFILTER1_ALG0_STAGE0_A2_ADDR
+	};
+	static struct {
+		int cutoff;
+		uint8_t expected[5][ADAU_PARAMETER_WORD_BYTES];
+		int valid;
+	} ctx;
+	double coefficients[5];
+	uint8_t buf[5];
+	uint8_t readback[ADAU_PARAMETER_WORD_BYTES];
+	int i;
+
+	if (substep < 0 || substep > 10)
+		return -1;
+	if (substep == 0) {
+		audio_adau_lpf_coefficients(f0, coefficients);
+		for (i = 0; i < 5; i++)
+			adau_to_5_23(coefficients[i], ctx.expected[i]);
+		ctx.cutoff = f0;
+		ctx.valid = 1;
+	}
+	if (!ctx.valid || ctx.cutoff != f0)
+		return -1;
+	if (substep < 5) {
+		buf[0] = 0;
+		memcpy(&buf[1], ctx.expected[substep],
+			ADAU_PARAMETER_WORD_BYTES);
+		if (adau_write40(0x34, 0x0810 + substep, buf) != 0 ||
+				adau_write16(0x34, 0x0815 + substep,
+					addresses[substep]) != 0)
+			return -1;
+		return 0;
+	}
+	if (substep == 5)
+		return (adau_write16(0x34, 0x081C, 0x003C) != 0) ? -1 : 0;
+	i = substep - 6;
+	if (adau_read32(0x34, addresses[i], readback) != 0 ||
+			!audio_adau_readback_matches(ctx.expected[i], readback,
+				ADAU_PARAMETER_WORD_BYTES))
+		return -1;
+	if (substep == 10) {
+		ctx.valid = 0;
+		return 1;
+	}
+	return 0;
+}
+
 
 // vol range: 0-255. 127 = 0db
 // vol1: paula
