@@ -911,6 +911,12 @@ void audio_fabric_isr(void)
 	 * fill passes below then see it) or drop a revoked one (with
 	 * the last-producer silence when it was the only attachment). */
 	fabric_lease_isr_tick();
+#ifdef AUDIO_FABRIC_BENCH
+	/* Catch-up may run two FIRs. Start the isr sample before it so
+	 * the bench does not report a quiet interrupt when the fallback
+	 * is the expensive part. */
+	bench_isr = fabric_bench_now();
+#endif
 	/* A converting lease's FIR normally runs on the main loop. If that
 	 * loop missed the period, stage the owed source here before fill
 	 * so the DMA does not play silence over PCM already published. */
@@ -1002,10 +1008,8 @@ void audio_fabric_isr(void)
 		return;
 
 #ifdef AUDIO_FABRIC_BENCH
-	/* Instrument build (U5): the tick accumulator spans one active
-	 * compositor pass -- frontier through tail tracking; the idle
-	 * early-outs above are not counted. */
-	bench_isr = fabric_bench_now();
+	/* bench_isr already includes catch-up. Idle early-outs above
+	 * return before the accumulator add, so they stay uncounted. */
 #endif
 
 
