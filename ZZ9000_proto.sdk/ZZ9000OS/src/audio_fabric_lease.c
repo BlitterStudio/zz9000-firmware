@@ -934,6 +934,27 @@ void audio_fabric_lease_poll(void)
 	g_lease_poll_busy = 0U;
 }
 
+/* 2^32 is not a multiple of the staging ring. A publisher that never
+ * hits the poll's rebase — catch-up, when the main loop is stalled —
+ * wraps the ring position and replays or skips converted periods. */
+static void fabric_lease_rebase_cursors(struct fabric_lease_preconvert *p)
+{
+	uint32_t ring_bytes = AUDIO_FABRIC_LEASE_STAGING_PERIODS *
+		AUDIO_BYTES_PER_PERIOD;
+	uint32_t lowest;
+	uint32_t rebase;
+	uint32_t irq_state;
+
+	if (p->staged <= 0xFFFFFFFFU - ring_bytes)
+		return;
+	lowest = (p->consumed < p->staged) ? p->consumed : p->staged;
+	rebase = lowest - lowest % ring_bytes;
+	irq_state = smp_local_irq_save();
+	p->staged -= rebase;
+	p->consumed -= rebase;
+	smp_local_irq_restore(irq_state);
+}
+
 /* The poll is inside its FIR and cannot resume until this ISR returns.
  * Finish the period it already claimed, from the pre-FIR snapshot, so
  * fill does not play silence over published PCM. */
@@ -1015,6 +1036,7 @@ static void fabric_lease_finish_inflight(uint32_t periods)
 		p->src_consumed = g_poll_inflight_src[slot] + src_bytes;
 		p->primed = 1U;
 		g_poll_stolen[slot] = 1U;
+		fabric_lease_rebase_cursors(p);
 	}
 }
 
@@ -1123,6 +1145,7 @@ static void fabric_lease_catchup_unclaimed(uint32_t periods)
 			p->staged = staged + AUDIO_BYTES_PER_PERIOD;
 			p->src_consumed = consumed64 + src_bytes;
 			p->primed = 1U;
+			fabric_lease_rebase_cursors(p);
 		}
 	}
 }
