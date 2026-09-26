@@ -986,7 +986,6 @@ static void fabric_lease_finish_inflight(void)
 		p->src_consumed = g_poll_inflight_src[slot] + src_bytes;
 		p->primed = 1U;
 		g_poll_stolen[slot] = 1U;
-		return;
 	}
 }
 
@@ -1055,6 +1054,7 @@ static void fabric_lease_catchup_unclaimed(void)
 		}
 		if (l->source_be)
 			fabric_swap_s16be(src_scratch, src_bytes);
+		fabric_lease_meter(s, src_scratch, src_bytes);
 		if (s->convert.ratio == NULL)
 			memset(out_scratch, 0, sizeof(out_scratch));
 		else
@@ -1076,56 +1076,17 @@ static void fabric_lease_catchup_unclaimed(void)
 		p->staged = staged + AUDIO_BYTES_PER_PERIOD;
 		p->src_consumed = consumed64 + src_bytes;
 		p->primed = 1U;
-		return;
 	}
 }
 
-/* Stage one owed source period when the main loop has not. Runs from
- * the audio ISR after the lease tick, so l->write_cursor is current.
- * A healthy poll keeps staging ahead and this returns without converting. */
+/* Stage owed source from the tick's write cursor. One period per empty
+ * converting slot, so a claimed slot does not hide an empty peer and a
+ * transient seqlock miss cannot drop a period the tick already proved. */
 void fabric_lease_catchup(void)
 {
-	uint32_t slot;
-
-	if (g_lease_poll_busy) {
-		uint32_t slot;
-		int claimed = 0;
-
-		for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
-		     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
-			if (g_poll_inflight[slot])
-				claimed = 1;
-		}
-		if (claimed)
-			fabric_lease_finish_inflight();
-		else
-			fabric_lease_catchup_unclaimed();
-		return;
-	}
-	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
-	     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
-		struct audio_fabric_slot *s = fabric_slot(slot);
-		struct fabric_lease_preconvert *p;
-		struct audio_fabric_lease *l;
-		uint32_t frames;
-		uint32_t src_bytes;
-
-		if (s == NULL || !s->live || !s->preconvert.active)
-			continue;
-		l = &s->lease;
-		p = &s->preconvert;
-		if (l->paused != 0U || l->ring == NULL || l->tearing)
-			continue;
-		if (p->staged - p->consumed >= AUDIO_BYTES_PER_PERIOD)
-			continue;
-		frames = l->source_rate / 50U;
-		src_bytes = frames * 4U;
-		if (frames == 0U ||
-		    p->src_consumed + src_bytes > l->write_cursor)
-			continue;
-		audio_fabric_lease_poll();
-		return;
-	}
+	if (g_lease_poll_busy)
+		fabric_lease_finish_inflight();
+	fabric_lease_catchup_unclaimed();
 }
 /*
  * Lease plane lifecycle. Acquire and release run in main-loop context
