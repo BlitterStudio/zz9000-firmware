@@ -198,6 +198,33 @@ static uint32_t fabric_ready_source_count(void)
 	return count;
 }
 
+/* Catch-up runs before the source-snapshot refresh. A converting lease's
+ * readiness is the cursor the tick just accepted, not the previous ISR's
+ * snapshot. Calling snapshot here would consume the producer's snapshot
+ * budget and drop a slot the mid-loop failure path still owns. */
+static uint32_t fabric_catchup_ready_count(void)
+{
+	uint32_t count = 0U;
+	uint32_t i;
+
+	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
+		const struct audio_fabric_slot *s = &g_audio_fabric.slot[i];
+
+		if (!s->live)
+			continue;
+		if (s->preconvert.active) {
+			if (s->lease.line_valid && s->lease.paused == 0U &&
+			    (s->lease.write_cursor > s->preconvert.src_consumed ||
+			     s->preconvert.staged > s->preconvert.consumed))
+				count++;
+		} else if (!s->source.faulted && s->source.ring &&
+			   s->source.produced_bytes > s->source.staged_bytes) {
+			count++;
+		}
+	}
+	return count;
+}
+
 /* Shared-frontier guard for restart callers: nonzero when any slot
  * other than `slot` is live. Re-arming the shared fill frontier under
  * a live mix would re-fill the other producers' staged periods and
@@ -934,17 +961,10 @@ void audio_fabric_isr(void)
 		uint32_t deficit = 0U;
 		uint32_t cap;
 
-		/* The ready count reads source snapshots. Refresh them from
-		 * the cursors this tick just accepted; the previous ISR's
-		 * view can be empty after a delayed interrupt and would
-		 * select the full-ring cap. */
-		for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
-			struct audio_fabric_slot *s = &g_audio_fabric.slot[i];
-
-			if (s->live && s->ops != NULL && s->ops->snapshot != NULL)
-				s->ops->snapshot(&s->source);
-		}
-		cap = fabric_ready_source_count() > 1U
+		/* Do not snapshot here. The mid-loop failure path counts
+		 * snapshot calls, and the previous ISR's source view can
+		 * be empty after a delayed interrupt. */
+		cap = fabric_catchup_ready_count() > 1U
 			? AUDIO_FABRIC_MULTISLOT_MAX_FILLS
 			: AUDIO_FABRIC_RING_PERIODS;
 
