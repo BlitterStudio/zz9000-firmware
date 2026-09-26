@@ -35,7 +35,7 @@ coprocessor platform. These are the highest-value differences for an owner:
 | **Hardware-assisted images, archives, audio and secure networking** | Firmware services accelerate JPEG/PNG work, MP3/audio streaming, LHA/LZH decompression, and selected cryptography used by the accelerated AmiSSL build. Applications fall back safely when a service is unavailable. |
 | **Settings without special firmware builds** | One readable `ZZ9000.CFG` file on the microSD card now controls native-video profiles, framing, scanlines, INT2, MAC address, PIP/off-screen features, and the boot HDF. The old separate `ns-pal` firmware flavor is no longer needed. |
 | **Updates and recovery from AmigaOS** | `ZZFwUpdate` can install firmware files without removing the microSD card, keeps a `.bak` copy when replacing a file, and can restore that backup if an update boots but misbehaves. |
-| **More supported machines and card configurations** | Releases maintain seven FPGA images covering Zorro III, Zorro II, A500/ZZ9500CX, 2 MB, no-Fast-RAM, and Super Denise configurations. |
+| **More supported machines and card configurations** | Releases maintain nine FPGA images covering A4000 C28 and E7M capture, Zorro III, Zorro II, A500/ZZ9500CX, 2 MB, no-Fast-RAM, and Super Denise configurations. |
 
 The less visible work matters too: USB 2.0/Poseidon support, gigabit Ethernet,
 SD-card HDF boot, on-board audio improvements, safer Zorro II memory sharing,
@@ -84,16 +84,20 @@ Use the ZIP whose board/bitstream variant matches the target machine:
 
 | Variant | Use for |
 |---|---|
-| `zorro3` | A3000/A4000 with Zorro III FastRAM enabled |
-| `zorro3-nofast` | A3000/A4000 without the extra Zorro RAM advertisement |
+| `zorro3` | A3000/A4000 with Zorro III FastRAM; E7M capture |
+| `zorro3-nofast` | A3000/A4000 without extra Zorro RAM; E7M capture |
+| `zorro3-a4000-c28` | A4000 with the 28 MHz video-slot connection and Zorro III FastRAM; C28 capture |
+| `zorro3-nofast-a4000-c28` | A4000 with the 28 MHz video-slot connection, without extra Zorro RAM; C28 capture |
 | `zorro2` | A2000, Zorro II, 4 MB window |
 | `zorro2-2mb` | A2000, Zorro II, 2 MB window |
 | `a500` | A500 with ZZ9500CX Denise adapter, 4 MB window |
 | `a500-2mb` | A500 with ZZ9500CX Denise adapter, 2 MB window |
 | `a500plus` | A500+ or Super Denise with ZZ9500CX Denise adapter |
 
-These are hardware/autoconfig bitstream variants. Current releases use
-one firmware flavor across all of them; settings that used to require a
+These are hardware/autoconfig bitstream variants; they use one ARM firmware.
+The A4000 C28 images require the video-slot C28 connection. Do not install
+them on an A3000 or Denise-adapter machine. Keep the E7M Zorro III images as
+the A3000 builds and as an A4000 fallback. Settings that used to require a
 separate firmware flavor or ENV: variables now live in the optional
 [`ZZ9000.CFG`](ZZ9000.CFG) config file (see below). Older releases also
 shipped an `ns-pal` firmware flavor; its behavior is now the
@@ -378,25 +382,29 @@ Keep these rules in mind:
 See the commented [ZZ9000.CFG sample](ZZ9000.CFG) for every accepted value and
 additional notes.
 
-## Experimental A4000 capture clock
+## A4000 C28 capture clock
 
-The opt-in C28 build captures AGA pixels from the 28 MHz video-slot signal.
-It runs the capture MMCM at approximately 908-916 MHz, with one capture
-clock per source pixel. Existing hardware variants retain their E7M source.
-C28 is currently an A4000 diagnostic candidate; other machines and adapter
-routes require separate clock qualification.
+The separate A4000 C28 bitstreams capture AGA pixels from the 28 MHz
+video-slot signal. They run the capture MMCM at approximately 908-916 MHz,
+with one capture clock per source pixel. E7M bitstreams remain available
+for A3000, other machines, and A4000 fallback; the clock source cannot be
+changed by ZZ9000.CFG alone. Other machines and adapter routes require
+separate clock qualification.
 
-Build it with Vivado 2018.3 on Windows:
+Build the two A4000 C28 release bitstreams with Vivado 2018.3 using
+`build_variant_bitstreams.sh zorro3-a4000-c28 zorro3-nofast-a4000-c28`;
+see [BUILD.md](BUILD.md). For a separate single-image diagnostic build
+on Windows:
 
 ```powershell
 .\build_bitstream.ps1 -CaptureC28
 ```
 
-The result is `bootimage_work/capture-c28/zz9000_ps_wrapper.bit`. Package it
-with the matching rebuilt ARM firmware using `build_bootimage.sh --bitstream`
-and a separate `--output` path. A C28 build does not replace the default
-packaged bitstream. A missing or out-of-range C28 signal holds native capture
-inactive; the independent host diagnostics remain available.
+Its default output is `bootimage_work/capture-c28/zz9000_ps_wrapper.bit`,
+not the release bitstream. Package any diagnostic build with the matching
+ARM firmware using `build_bootimage.sh --bitstream` and a separate
+`--output` path. A missing or out-of-range C28 signal holds native
+capture inactive; independent host diagnostics remain available.
 
 Use the matching `ZZCapture` tool from the
 [drivers repository](https://github.com/BlitterStudio/zz9000-drivers)

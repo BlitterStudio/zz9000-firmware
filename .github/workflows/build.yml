@@ -74,6 +74,12 @@ jobs:
         run: make -C test/rtg test
       - name: Video pipeline regression suite
         run: make -C test/video test
+      - name: Native capture RTL regressions
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends verilator
+          bash test/video/run_videocap_clock_verilator.sh
+          bash test/video/run_videocap_verilator_sim.sh
       - name: Video codec regression suite
         run: make -C test/video_codec test
       - name: Audio capture regression suite
@@ -214,6 +220,11 @@ jobs:
             ARGS+=(--require-all)
           fi
           ./build_release_assets.sh "${ARGS[@]}"
+
+      - name: Verify A4000 C28 release BOOT payloads
+        run: |
+          BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
+          python3 test/release/verify_a4000_c28_assets.py release_assets "$BUILD_LABEL"
 
       # The former "ns-pal" firmware flavor (PAL Amiga ~49.92Hz videocap
       # default, issue #7) is no longer packaged: the same behavior comes

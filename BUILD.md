@@ -107,15 +107,20 @@ the built-in default stays at 60 Hz.
 ```bash
 ./build_variant_bitstreams.sh
 ```
+
 These are hardware/autoconfig bitstream variants, not separate firmware
-behavior flavors. Build them when an HDL/block-design change must ship
-across supported boards. The script builds the default Zorro III
-bitstream and the Zorro III no-RAM / Zorro II / A500 / 2MB variants,
-copies them to the release paths under `bootimage_work/`, and restores
-`mntzorro.v` afterward. You can also pass one or more variant names, for
-example:
+behavior flavors. The standard Zorro III pair uses E7M capture; two
+A4000-only builds use the video-slot C28 capture clock. The script
+restores `mntzorro.v` and the canonical E7M bitstream afterward.
+To rebuild selected variants on Linux, for example:
 ```bash
-./build_variant_bitstreams.sh zorro3-nofast zorro2 zorro2-2mb a500plus
+./build_variant_bitstreams.sh zorro3-nofast zorro2 zorro3-a4000-c28 zorro3-nofast-a4000-c28
+```
+On Windows with Git Bash, pass both builders when selecting a C28 variant:
+```bash
+BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1" \
+C28_BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1 -CaptureC28 -OutputBitstream" \
+  ./build_variant_bitstreams.sh zorro3-a4000-c28 zorro3-nofast-a4000-c28
 ```
 
 **Clean rebuild** — no Vivado, uses the committed bitstream:
@@ -130,7 +135,23 @@ example:
 Host-side suites (any machine with a C compiler):
 ```bash
 make -C test/rtg test        # RTG correctness regression
-make -C test/video test      # VDMA math + video_formatter source invariants
+make -C test/video test      # VDMA, native modes, overlays
+```
+
+Capture RTL simulations also run in CI with Verilator. They exercise the
+production C28/E7M clock controller, filtered and full-width PAL-shaped
+capture, the 28 MHz line origin, writeback layout, diagnostics, and the
+video-slot/Denise/Zorro II RGB pin mappings:
+```bash
+bash test/video/run_videocap_clock_verilator.sh
+bash test/video/run_videocap_verilator_sim.sh
+```
+The sampler CI suite uses a test-only XPM handshake model. It does not
+replace vendor XPM, MMCM phase, IOB placement, routed timing, or physical
+capture qualification. Run the full sampler matrix against Vivado's XPM
+library before rebuilding FPGA bitstreams:
+```bash
+test/video/run_videocap_sim.sh
 ```
 
 Functional simulation of the video formatter (needs Vivado 2018.3 for
@@ -229,14 +250,14 @@ git push origin v2.2.0
 Tags containing `-` are marked as pre-releases.
 
 CI cannot run Vivado, so it packages variants from committed bitstreams.
-The default Zorro III bitstream is `bootimage_work/zz9000_ps_wrapper.bit`.
-The Zorro III no-RAM, Zorro II, A500, and 2MB variant bitstreams live under
-`bootimage_work/variants/`; see
-[`bootimage_work/variants/README.md`](bootimage_work/variants/README.md).
+The default Zorro III E7M bitstream is
+`bootimage_work/zz9000_ps_wrapper.bit`; the Zorro III no-RAM, A4000 C28,
+Zorro II, A500, and 2MB variants live under `bootimage_work/variants/`;
+see [`bootimage_work/variants/README.md`](bootimage_work/variants/README.md).
 Build them with `./build_variant_bitstreams.sh` on a Vivado machine.
-Tagged release builds require all listed variant bitstreams, while
-branch/PR builds package whatever is present. The deprecated
-no-USB-autoboot variant is intentionally skipped.
+Tagged release builds require all listed bitstreams; branch/PR builds
+package whatever is present. The deprecated no-USB-autoboot variant
+is intentionally skipped.
 
 ## Why `bootimage_work/` is the canonical output dir
 

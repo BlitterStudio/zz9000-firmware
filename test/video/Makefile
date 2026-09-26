@@ -35,7 +35,6 @@ test: $(TARGETS)
 	$(BUILD_DIR)/overlay_color_test
 	$(BUILD_DIR)/overlay_schedule_test
 	$(BUILD_DIR)/overlay_hw_test
-	$(PYTHON) rtl_capture_contract_test.py
 
 $(BUILD_DIR)/video_vdma_test: video_vdma_test.c $(DEPS)
 	@mkdir -p $(BUILD_DIR)

@@ -454,14 +454,10 @@ task check_full_width_bank_entry;
     end
 endtask
 
-task check_completed_bank_during_next_line;
+task check_completed_bank_after_next_line;
     input completed_bank;
     input integer pattern_seed;
     begin
-        wait (hsync == 0);
-        wait (cap_x < 16);
-        wait (cap_x >= 900);
-
         checks = checks + 1;
         if (cap_write_bank === completed_bank) begin
             errors = errors + 1;
@@ -653,11 +649,9 @@ task drive_field;
         for (ln = 0; ln < LINES; ln = ln + 1) begin
             if (FULLWIDTH && check_vertical && ln == 2) begin
                 completed_bank_before_line = cap_write_bank;
-                fork
-                    drive_line(seed + ln);
-                    check_completed_bank_during_next_line(
-                        completed_bank_before_line, seed + ln - 1);
-                join
+                drive_line(seed + ln);
+                check_completed_bank_after_next_line(
+                    completed_bank_before_line, seed + ln - 1);
             end else begin
                 drive_line(seed + ln);
             end

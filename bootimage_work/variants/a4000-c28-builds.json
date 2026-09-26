@@ -1,0 +1,15 @@
+{
+  "source_revision": "797713caca59e9afc2ba9b28bc0152959175da3e",
+  "bitstreams": {
+    "zorro3-a4000-c28": {
+      "sha256": "845a3310377cf49b85766e4da2b7a23db9d67a8307c6e908008b6da8159637ed",
+      "diagnostic_build_id": "33936313",
+      "variant_id": "0001008b"
+    },
+    "zorro3-nofast-a4000-c28": {
+      "sha256": "5226dd1284c36068abcfca4fed8eeac233b9ff9900c7609e48901f90ddcb7d85",
+      "diagnostic_build_id": "890f32c8",
+      "variant_id": "00010089"
+    }
+  }
+}
