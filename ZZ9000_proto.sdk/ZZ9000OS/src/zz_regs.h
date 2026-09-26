@@ -99,7 +99,8 @@ enum zz_reg_offsets {
   REG_ZZ_ETH_MAC_HI     = 0x84,
   REG_ZZ_ETH_MAC_HI2    = 0x86,
   REG_ZZ_ETH_MAC_LO     = 0x88,
-  REG_ZZ_UNUSED_REG8A   = 0x8A,
+  /* Read: capability bits. Write: multicast hash set/clear/reset command. */
+  REG_ZZ_ETH_CONFIG     = 0x8A,
   REG_ZZ_ETH_RX_STATUS  = 0x8C,
   REG_ZZ_ETH_RX_STATS   = 0x8E,
 

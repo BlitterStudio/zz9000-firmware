@@ -1336,6 +1336,9 @@ int main() {
 					ethernet_update_mac_address();
 					break;
 				}
+				case REG_ZZ_ETH_CONFIG:
+					ethernet_set_multicast_hash((u16)zdata);
+					break;
 				case REG_ZZ_USBBLK_TX_HI: {
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
 					usb_storage_write_block = ((u32) zdata) << 16;
@@ -1749,7 +1752,7 @@ int main() {
 					}
 					case REG_ZZ_ETH_MAC_LO: {
 						uint8_t* mac = ethernet_get_mac_address_ptr();
-						data = mac[4] << 24 | mac[5] << 16;
+						data = ethernet_mac_lo_word(mac);
 						break;
 					}
 					case REG_ZZ_ETH_TX:
@@ -1904,13 +1907,8 @@ int main() {
 				if (z3) {
 					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1, data);
 				} else {
-					if (zaddr & 2) {
-						// lower 16 bit
-						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1, data);
-					} else {
-						// upper 16 bit
-						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1, data >> 16);
-					}
+					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1,
+						ethernet_zorro16(data, zaddr));
 				}
 			}
 

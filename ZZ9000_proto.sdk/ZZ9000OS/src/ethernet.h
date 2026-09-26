@@ -17,7 +17,27 @@
 #ifndef ETHERNET_H_
 #define ETHERNET_H_
 
+#define ETH_CONFIG_CAP_MULTICAST_HASH 0x0001
+#define ETH_CONFIG_HASH_SET            0x8000
+#define ETH_CONFIG_HASH_CLEAR          0x4000
+#define ETH_CONFIG_HASH_RESET          0x2000
+#define ETH_CONFIG_HASH_INDEX          0x003f
+
+enum {
+	ETH_TASK_SETUP,
+	ETH_TASK_NEGOTIATE,
+	ETH_TASK_INIT,
+	ETH_TASK_READY
+};
+
+extern int ethernet_task_state;
+
 int ethernet_init();
+void ethernet_set_multicast_hash(u16 command);
+u16 ethernet_get_multicast_config(void);
+u32 ethernet_emac_base(void);
+u32 ethernet_mac_lo_word(const uint8_t mac[6]);
+u16 ethernet_zorro16(u32 word, u32 zaddr);
 u16 ethernet_send_frame(u16 frame_size);
 int ethernet_receive_frame(u16 acked_serial);
 u32 get_frames_received();
