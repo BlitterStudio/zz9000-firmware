@@ -28,6 +28,11 @@
 /* ---- no-op stubs for the ax.h DSP setters ---- */
 
 int audio_adau_set_lpf_params(int f0) { (void)f0; return 0; }
+int audio_adau_lpf_substep(int f0, int substep)
+{
+	(void)f0;
+	return substep == 10 ? 1 : 0;
+}
 int audio_adau_set_mixer_vol(int vol1, int vol2)
 {
 	(void)vol1; (void)vol2; return 0;

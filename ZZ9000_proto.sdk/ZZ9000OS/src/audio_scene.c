@@ -29,18 +29,15 @@
  * per-period scans, and seqlock-framed coherent snapshots consumed by
  * the meter-read dispatch. See the metering section below.
  *
- * Gain staging (R7) composes conservatively: the summed applied mixer
- * legs (operator baseline plus owner trims) multiplied by the scene's
- * prefactor, applied output volume, and worst-case positive EQ band
- * gain, evaluated against AUDIO_SCENE_ENFORCED_BOUNDARY. A composition
- * over the boundary is reduced -- the mixer sum first (reported back
- * to the requesting owner), the applied output volume when the scene
- * alone exceeds it -- and each reduction emits exactly one
- * gain-reduction event.
+ * Gain staging (R7) weights Paula by ceiling_ax/ceiling_paula,
+ * clamps each leg to its configured ceiling, then bounds the
+ * weighted mix after scene prefactor, volume and worst positive EQ
+ * gain. The conservative 48/80 fallback came from one measured R1
+ * card; it reduces first-run gain but is not a clean guarantee across
+ * board revisions. Saved per-card values remain authoritative.
  *
- * Host tests link this file without ax.c and provide their own
- * definitions of the five DSP setters (see test/audio/
- * audio_scene_test.c).
+ * Host tests link this file without ax.c and provide recording DSP
+ * setters (test/audio/audio_scene_test.c).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -55,24 +52,16 @@
 #include "ax.h"
 #include "audio_limiter_bench.h"
 
-/* Operator baseline default: today's power-on mixer state written by
- * audio_adau_init (Paula 128, AX 64; 127 = 0 dB). */
-#define BASELINE_DEFAULT_PAULA 128
-#define BASELINE_DEFAULT_AX 64
-
 /* LPF cutoff range accepted in scene definitions (23900 Hz is the
  * DSP default; above it approaches the 48 kHz Nyquist). */
 #define LPF_HZ_MIN 1
 #define LPF_HZ_MAX 23900
 
 /*
- * Fixed scene slots. Every default composes to
- * at or below the enforced boundary with the default baseline summed
- * (192): the worst defaults apply 192 * prefactor * volume * EQ-boost
- * <= 192. Slot 0 is today's power-on default (LPF 23900, unity EQ,
- * unity prefactor, full volume) and composes exactly at the boundary.
- * Names are user labels ("Scene N" is the built-in default) and never
- * join the DSP write set.
+ * Fixed scene slots. Slot 0 has LPF 23900, unity EQ/prefactor and
+ * full volume. Boot loads either a saved baseline or a parity preset
+ * derived from the configured ceilings, after audio_adau_init's
+ * temporary 36/72 mixer setup. Names never join the DSP write set.
  */
 static const struct audio_scene_def default_scenes[AUDIO_SCENE_COUNT] = {
 	{ 23900, { 50, 50, 50, 50, 50, 50, 50, 50, 50, 50 }, 50, 100, 50, "Scene 1" },
@@ -87,8 +76,8 @@ static const struct audio_scene_def default_scenes[AUDIO_SCENE_COUNT] = {
 
 static struct audio_scene_def scenes[AUDIO_SCENE_COUNT];
 static uint8_t active_scene_index;
-static uint8_t baseline_paula = BASELINE_DEFAULT_PAULA;
-static uint8_t baseline_ax = BASELINE_DEFAULT_AX;
+static uint8_t baseline_paula = AUDIO_SCENE_DEFAULT_BASELINE_PAULA;
+static uint8_t baseline_ax = AUDIO_SCENE_DEFAULT_BASELINE_AX;
 static uint16_t ceiling_paula = AUDIO_SCENE_DEFAULT_CEILING_PAULA;
 static uint16_t ceiling_ax = AUDIO_SCENE_DEFAULT_CEILING_AX;
 
@@ -152,6 +141,7 @@ static int calibration_staged;
 enum commit_phase {
 	COMMIT_FADE,         /* verified fade of the output to zero */
 	COMMIT_FAST,         /* differential: the changed parameters only */
+	COMMIT_LPF_RECOVER, /* overwrite abandoned safeload slots first */
 	COMMIT_LPF,
 	COMMIT_EQ,           /* eq_band in flight, 0..9 */
 	COMMIT_PREF,
@@ -201,7 +191,7 @@ static int last_applied_valid;
 
 /* One differential todo entry: a DSP setter call with its arguments. */
 enum fast_op {
-	FAST_LPF,    /* audio_adau_set_lpf_params(a) */
+	FAST_LPF,    /* audio_adau_lpf_substep(a, sub) */
 	FAST_EQ,     /* audio_adau_set_eq_gain(a, b) */
 	FAST_PREF,   /* audio_adau_set_prefactor(a) */
 	FAST_MIXER_P, /* audio_adau_set_mixer_leg(0, a) - Paula */
@@ -214,7 +204,7 @@ struct fast_step {
 	int op;
 	int a;
 	int b;
-	int sub; /* EQ substep fan-out index */
+	int sub; /* safeload substep index */
 };
 
 /*
@@ -586,6 +576,7 @@ struct commit_machine {
 	struct fast_step todo[224]; /* worst: full diff + 99-step ramp */
 	int todo_count;
 	int todo_next;     /* next todo entry to issue */
+	int lpf_recover_sub; /* stage the previous filter after failure */
 };
 
 static struct commit_machine commit;
@@ -822,9 +813,23 @@ static void commit_step(void)
 		 * sequence's cadence; the output was never faded, so
 		 * there is nothing to restore afterwards. */
 		switch (step->op) {
-		case FAST_LPF:
-			rc = audio_adau_set_lpf_params(step->a);
+		case FAST_LPF: {
+			int r = audio_adau_lpf_substep(step->a,
+				commit.todo[commit.todo_next].sub++);
+			if (r == 0)
+				return;
+			if (r < 0) {
+				/* The chip retains every safeload slot written
+				 * since its last latch. No other safeload may
+				 * install the partially staged filter. */
+				commit.failed = 1;
+				commit.lpf_recover_sub = 0;
+				commit.phase = COMMIT_LPF_RECOVER;
+				return;
+			}
+			rc = 0;
 			break;
+		}
 		case FAST_EQ: {
 			int r = audio_adau_eq_substep(step->a, step->b,
 				commit.todo[commit.todo_next].sub++);
@@ -884,6 +889,26 @@ static void commit_step(void)
 		if (rc == 0 && ++commit.todo_next >= commit.todo_count)
 			commit.phase = COMMIT_DONE;
 		break;
+	}
+	case COMMIT_LPF_RECOVER: {
+		int cutoff = last_applied_valid ?
+			last_applied_scene.lpf_hz : default_scenes[0].lpf_hz;
+		int r = audio_adau_lpf_substep(cutoff,
+			commit.lpf_recover_sub);
+
+		if (r == 0) {
+			commit.lpf_recover_sub++;
+			return;
+		}
+		if (r < 0) {
+			/* Do not release stale hardware slots to an unrelated
+			 * safeload. Retry once per poll until I2C recovers;
+			 * resetting the DSP abandons this machine. */
+			commit.lpf_recover_sub = 0;
+			return;
+		}
+		commit.phase = COMMIT_ABORT_RESTORE;
+		return;
 	}
 	case COMMIT_LPF:
 		rc = audio_adau_set_lpf_params(scene->lpf_hz);
@@ -1106,7 +1131,8 @@ int audio_scene_poll(void)
 	if (commit_stepping)
 		return 1; /* nested poll from inside a setter: defer */
 	commit_stepping = 1;
-	limiter_bench_poll();
+	if (commit.phase != COMMIT_LPF_RECOVER)
+		limiter_bench_poll(); /* no other safeload before recovery */
 	/* Commit steps first. A queued save waiting on that commit takes
 	 * its snapshot only after commit_step reaches the terminal state;
 	 * then at most one save step runs in this pass. */
@@ -1393,8 +1419,8 @@ void audio_scene_init(void)
 {
 	memcpy(scenes, default_scenes, sizeof(scenes));
 	active_scene_index = 0;
-	baseline_paula = BASELINE_DEFAULT_PAULA;
-	baseline_ax = BASELINE_DEFAULT_AX;
+	baseline_paula = AUDIO_SCENE_DEFAULT_BASELINE_PAULA;
+	baseline_ax = AUDIO_SCENE_DEFAULT_BASELINE_AX;
 	ceiling_paula = AUDIO_SCENE_DEFAULT_CEILING_PAULA;
 	ceiling_ax = AUDIO_SCENE_DEFAULT_CEILING_AX;
 	memset(trims, 0, sizeof(trims));

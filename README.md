@@ -129,12 +129,19 @@ The audio control plane (ZZ9000AX) adds one group of keys per scene,
 the active selection, operator baseline and per-card clean ceilings.
 Values are plain decimals; band pairs and prefactor/volume pack two
 0-100 fields as `hi*128+lo`, and baseline packs mixer legs as
-`paula*256+ax` (0-255 each, 127 = 0 dB). The ceiling keys are measured
-clean combined levels (1-4095): firmware weights Paula by
-`audio_ceiling_ax/audio_ceiling_paula`, admits each leg up to its own
-measured ceiling, and enforces the weighted sum of both ceilings as
-the AX-equivalent boundary (the post-mix limiter bounds the summed
-output). Name keys pack two ASCII characters as `c1*256+c2`.
+`paula*256+ax` (0-255 each, 127 = 0 dB). The ceiling keys store
+**measured** clean single-source levels (1-4095): firmware weights
+Paula by `audio_ceiling_ax/audio_ceiling_paula`, caps each leg at its
+configured ceiling, then bounds the combined output with a limiter.
+With no saved calibration the conservative fallback ceilings are
+Paula 48 / AX 80, based on one R1 card's measurements; with no saved
+baseline, parity selects Paula 36 / AX 72 (weighted Level 132/160).
+These are not verified clean limits for every board. Existing saved
+`audio_ceiling_*` and `audio_baseline` values take precedence, including
+older 256/256 or 192/255 settings; remove or recalibrate those keys
+to adopt the new fallback. Do not increase ceilings to mask distortion.
+LPF, EQ, prefactor and volume process the **shared** Paula/AX output.
+Name keys pack two ASCII characters as `c1*256+c2`.
 
 | Key | Purpose |
 |---|---|

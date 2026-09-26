@@ -48,6 +48,20 @@ int audio_adau_set_lpf_params(int f0)
 	record_write(WRITE_LPF, f0, 0);
 	return fail_next_write ? -1 : 0;
 }
+static int fail_lpf_substep = -1;
+
+int audio_adau_lpf_substep(int f0, int substep)
+{
+	record_write(WRITE_LPF_SUB, f0, substep);
+	if (substep == fail_lpf_substep) {
+		fail_lpf_substep = -1;
+		return -1;
+	}
+	if (fail_next_write)
+		return -1;
+	return substep == 10 ? 1 : 0;
+}
+
 
 int audio_adau_set_mixer_vol(int vol1, int vol2)
 {
@@ -195,6 +209,20 @@ static void unity_scene(struct audio_scene_def *def)
 	def->pan = 50;
 }
 
+/* Historical weight-1 ceiling and 128/64 mixer. Tests that compose
+ * against that pair install it explicitly; the production fallback
+ * (48/80 ceilings, 36/72 mixer) is covered by audio_config_test.c.
+ * Call after audio_scene_init(), before the scenario under test. */
+static void install_legacy_mixer(void)
+{
+	check(audio_scene_set_calibration(256, 256) == 0,
+		"legacy ceiling installed", NULL);
+	pump_scene();
+	check(audio_scene_set_baseline(128, 64) == 0,
+		"legacy baseline installed", NULL);
+	pump_scene();
+}
+
 /*
  * Authority gate, exact dispatcher coverage over every AP_* index.
  * Master-chain params 9-22 are structurally rejected on the register
@@ -268,6 +296,7 @@ static void test_accepted_paths_route_through_scene(void)
 	def.pan = 30;
 
 	audio_scene_init();
+	install_legacy_mixer();
 	clear_writes();
 	check(audio_scene_write(6, &def) == 0, "scene write slot 6", NULL);
 	check(write_count == 0, "write to inactive slot touches no DSP",
@@ -499,7 +528,7 @@ static void test_leg_calibration_weighting(void)
 
 /*
  * A scene whose own master-chain level exceeds the boundary -- with
- * the neutral baseline and no requester -- clamps on apply.
+ * the installed 128/64 baseline and no requester -- clamps on apply.
  */
 static void test_scene_alone_clamps(void)
 {
@@ -512,6 +541,7 @@ static void test_scene_alone_clamps(void)
 	def.prefactor = 100; /* +12 dB */
 	def.volume = 100;
 	audio_scene_init();
+	install_legacy_mixer();
 	clear_writes();
 	check(audio_scene_write(2, &def) == 0 &&
 		audio_scene_select(2) == 0, "apply boosting scene", NULL);
@@ -552,6 +582,7 @@ static void test_eq_boost_clamps(void)
 	unity_scene(&def);
 	def.eq[0] = 100; /* +12 dB on band 1, prefactor/volume unity */
 	audio_scene_init();
+	install_legacy_mixer();
 	clear_writes();
 	check(audio_scene_write(3, &def) == 0 &&
 		audio_scene_select(3) == 0, "apply EQ-boosted scene", NULL);
@@ -804,10 +835,11 @@ static void test_boot_apply_order(void)
 	audio_scene_init();
 	clear_writes();
 
-	/* audio_adau_init(1) writes its defaults: LPF 23900, mixer
-	 * 128/64 (ax.c:753-755). Simulated through the same seam. */
+	/* audio_adau_init leaves the codec at the power-on mixer
+	 * (AUDIO_SCENE_DEFAULT_BASELINE_*, 36/72). Simulated here. */
 	audio_adau_set_lpf_params(23900);
-	audio_adau_set_mixer_vol(128, 64);
+	audio_adau_set_mixer_vol(AUDIO_SCENE_DEFAULT_BASELINE_PAULA,
+		AUDIO_SCENE_DEFAULT_BASELINE_AX);
 	check(audio_scene_apply_after_dsp_init() == 0,
 		"apply after DSP init succeeds", NULL);
 
@@ -815,7 +847,8 @@ static void test_boot_apply_order(void)
 		fmt("writes=%d", write_count));
 	ok = log_at(0, &kind, &a, &b) && kind == WRITE_LPF && a == 23900 &&
 		log_at(1, &kind, &a, &b) && kind == WRITE_MIXER &&
-		a == 128 && b == 64;
+		a == AUDIO_SCENE_DEFAULT_BASELINE_PAULA &&
+		b == AUDIO_SCENE_DEFAULT_BASELINE_AX;
 	check(ok, "ADAU init defaults precede scene writes", NULL);
 	base = 2;
 	ok = log_at(base, &kind, &a, &b) && kind == WRITE_VOLPAN &&
@@ -828,7 +861,9 @@ static void test_boot_apply_order(void)
 	ok = ok && log_at(base + 12, &kind, &a, &b) &&
 		kind == WRITE_PREF && a == 50;
 	ok = ok && log_at(base + 13, &kind, &a, &b) &&
-		kind == WRITE_MIXER && a == 128 && b == 64;
+		kind == WRITE_MIXER &&
+		a == AUDIO_SCENE_DEFAULT_BASELINE_PAULA &&
+		b == AUDIO_SCENE_DEFAULT_BASELINE_AX;
 	ok = ok && log_at(base + 14, &kind, &a, &b) &&
 		kind == WRITE_VOLPAN && a == 100 && b == 50;
 	check(ok, "scene commit: fade, LPF, EQ 0..9, prefactor, mixer, "
@@ -847,12 +882,15 @@ static void test_boot_apply_order(void)
 	{
 		struct audio_scene_trim_result result;
 		memset(&result, 0, sizeof(result));
-		check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, 10, 10,
+		/* A cut fits under the power-on ceilings; warm reset
+		 * must still tear that owner trim down. */
+		check(audio_scene_trim_submit(AUDIO_SCENE_OWNER_AHI, -4, -4,
 				&result) == 0 && result.bounded == 0,
 			"owner trim before warm reset", NULL);
 	}
 	audio_adau_set_lpf_params(23900);
-	audio_adau_set_mixer_vol(128, 64);
+	audio_adau_set_mixer_vol(AUDIO_SCENE_DEFAULT_BASELINE_PAULA,
+		AUDIO_SCENE_DEFAULT_BASELINE_AX);
 	check(audio_scene_apply_after_dsp_init() == 0,
 		"warm-reset re-apply succeeds", NULL);
 	base = write_count - 15;
@@ -866,7 +904,9 @@ static void test_boot_apply_order(void)
 	ok = ok && log_at(base + 12, &kind, &a, &b) &&
 		kind == WRITE_PREF && a == 50;
 	ok = ok && log_at(base + 13, &kind, &a, &b) &&
-		kind == WRITE_MIXER && a == 128 && b == 64;
+		kind == WRITE_MIXER &&
+		a == AUDIO_SCENE_DEFAULT_BASELINE_PAULA &&
+		b == AUDIO_SCENE_DEFAULT_BASELINE_AX;
 	ok = ok && log_at(base + 14, &kind, &a, &b) &&
 		kind == WRITE_VOLPAN && a == 80 && b == 50;
 	check(ok, "warm reset re-applies active scene with neutral trim",
@@ -941,6 +981,7 @@ static void test_trim_write_failure_is_transactional(void)
 	int a = -1, b = -1;
 
 	audio_scene_init();
+	install_legacy_mixer();
 	audio_scene_select(0);
 	pump_scene();
 	clear_writes();
@@ -1074,6 +1115,7 @@ static void test_commit_failure_keeps_staging(void)
 	int a = -1, b = -1;
 
 	audio_scene_init();
+	install_legacy_mixer();
 	clear_writes();
 
 	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_VOLUME, 70)
@@ -1167,6 +1209,7 @@ static void test_dispatch_does_not_block(void)
 	int a = -1, b = -1;
 
 	audio_scene_init();
+	install_legacy_mixer();
 	clear_writes();
 
 	check(audio_scene_select(3) == 0,
@@ -1377,6 +1420,7 @@ static void test_running_failure_keeps_queued_baseline(void)
 	int i;
 
 	audio_scene_init();
+	install_legacy_mixer();
 	clear_writes();
 
 	/* The running machine: a volume edit on the active scene. */
@@ -1444,6 +1488,7 @@ static void test_fast_commit_diff(void)
 	int ok;
 
 	audio_scene_init();
+	install_legacy_mixer();
 	clear_writes();
 
 	/* One changed parameter: exactly that setter, nothing else. */
@@ -1484,28 +1529,28 @@ static void test_fast_commit_diff(void)
 		"fast commit issues no DSP writes before poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 34,
-		"multi-param: LPF + 2x11 EQ + 5 pref-sub + 2x3 mixer-sub",
+	check(write_count == 44,
+		"live LPF safeload completes before the EQ changes",
 		fmt("writes=%d", write_count));
-	ok = log_at(0, &kind, &a, &b) && kind == WRITE_LPF &&
-		a == 12000;
-	check(ok, "diff order: LPF first",
-		fmt("kind=%d f0=%d", kind, a));
-	ok = log_at(1, &kind, &a, &b) && kind == WRITE_EQ_SUB &&
-		a == 2 && b == 0;
-	check(ok, "diff order: first EQ band starts its substep run",
-		fmt("kind=%d band=%d sub=%d", kind, a, b));
+	ok = log_at(0, &kind, &a, &b) && kind == WRITE_LPF_SUB &&
+		a == 12000 && b == 0;
+	check(ok, "live LPF stages new coefficients", NULL);
+	ok = log_at(5, &kind, &a, &b) && kind == WRITE_LPF_SUB &&
+		a == 12000 && b == 5;
+	check(ok, "live LPF latches one complete coefficient set", NULL);
+	check(count_writes(WRITE_LPF) == 0,
+		"live LPF never writes a partially updated active filter", NULL);
 	ok = log_at(11, &kind, &a, &b) && kind == WRITE_EQ_SUB &&
+		a == 2 && b == 0;
+	check(ok, "first EQ band follows the complete LPF update", NULL);
+	ok = log_at(21, &kind, &a, &b) && kind == WRITE_EQ_SUB &&
 		a == 2 && b == 10;
-	check(ok, "first EQ band completes at substep 10",
-		fmt("kind=%d band=%d sub=%d", kind, a, b));
-	ok = log_at(12, &kind, &a, &b) && kind == WRITE_EQ_SUB &&
+	check(ok, "first EQ band completes at substep 10", NULL);
+	ok = log_at(22, &kind, &a, &b) && kind == WRITE_EQ_SUB &&
 		a == 8 && b == 0;
-	check(ok, "diff order: second EQ band follows",
-		fmt("kind=%d band=%d sub=%d", kind, a, b));
-	ok = log_at(23, &kind, &a, &b) && kind == WRITE_PREF && a == 55;
-	check(ok, "diff order: prefactor after the EQ substeps",
-		fmt("kind=%d pre=%d", kind, a));
+	check(ok, "second EQ band follows", NULL);
+	ok = log_at(33, &kind, &a, &b) && kind == WRITE_PREF && a == 55;
+	check(ok, "prefactor follows both complete filter updates", NULL);
 	ok = last_write(WRITE_MIXER_A, &a, &b) && a == 60 &&
 		last_write(WRITE_MIXER_P, &a, &b) && a == 140;
 	check(ok, "diff order: both mixer legs land after the rest",
@@ -1576,6 +1621,65 @@ static void test_fast_commit_failure_keeps_diff(void)
 	check(audio_scene_get(0)->volume == 70 &&
 		audio_scene_get(0)->eq[4] == 40,
 		"retried diff lands the staged edits", NULL);
+	/* A failed partial safeload must restore all five old coefficients
+	 * before any unrelated safeload can latch the abandoned slots. */
+	audio_scene_init();
+	clear_writes();
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_LPF,
+		12000) == 0, "stage live LPF edit", NULL);
+	fail_lpf_substep = 2;
+	check(audio_scene_commit_staged(0) == 0, "LPF commit accepted", NULL);
+	pump_scene();
+	check(audio_scene_get(0)->lpf_hz == 23900 &&
+		count_writes(WRITE_LPF_SUB) == 14 &&
+		log_at(3, &kind, &a, &b) &&
+		kind == WRITE_LPF_SUB && a == 23900 && b == 0 &&
+		last_write(WRITE_LPF_SUB, &a, &b) &&
+		a == 23900 && b == 10,
+		"failed LPF stage restores the previous complete biquad",
+		fmt("lpf=%u steps=%d", audio_scene_get(0)->lpf_hz,
+			count_writes(WRITE_LPF_SUB)));
+	clear_writes();
+	check(audio_scene_commit_staged(0) == 0, "LPF retry accepted", NULL);
+	pump_scene();
+	check(audio_scene_get(0)->lpf_hz == 12000 &&
+		count_writes(WRITE_LPF_SUB) == 11 &&
+		count_writes(WRITE_LPF) == 0,
+		"retry latches the complete live LPF edit", NULL);
+
+	/* A persistent bus fault keeps the pending LPF slots exclusive:
+	 * a queued EQ edit must not latch them before recovery succeeds. */
+	audio_scene_init();
+	clear_writes();
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_LPF,
+		12000) == 0, "stage filter before bus fault", NULL);
+	fail_lpf_substep = 2;
+	check(audio_scene_commit_staged(0) == 0,
+		"filter commit accepted before bus fault", NULL);
+	(void)audio_scene_poll();
+	(void)audio_scene_poll();
+	(void)audio_scene_poll(); /* the third LPF stage fails */
+	fail_next_write = 1;
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_EQ_BAND_3,
+		40) == 0 && audio_scene_commit_staged(0) == 0,
+		"EQ change queued behind LPF recovery", NULL);
+	for (int i = 0; i < 20; i++)
+		check(audio_scene_poll() != 0,
+			"recovery holds the safeload channel on bus failure", NULL);
+	check(count_writes(WRITE_EQ_SUB) == 0,
+		"queued EQ cannot latch an abandoned LPF slot", NULL);
+	fail_next_write = 0;
+	pump_scene();
+	check(audio_scene_get(0)->lpf_hz == 23900 &&
+		audio_scene_get(0)->eq[2] == 50,
+		"recovered commit rolls both staged edits back", NULL);
+	clear_writes();
+	check(audio_scene_commit_staged(0) == 0,
+		"queued filter and EQ retry accepted", NULL);
+	pump_scene();
+	check(audio_scene_get(0)->lpf_hz == 12000 &&
+		audio_scene_get(0)->eq[2] == 40,
+		"retry applies both changes after full LPF recovery", NULL);
 }
 
 /*

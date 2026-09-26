@@ -1,28 +1,28 @@
 # ZZ9000AX DAC saturation ceiling and the enforced boundary
 
-The firmware-authoritative control plane (`audio_scene.c`, plan R6/R7)
-enforces a gain-staging boundary in combined-level units instead of
-the community-forum figure both drivers used to quote. This document
-defines the boundary's units, the bench method that replaces the
-forum figure with a measured one, the analysis helper, the headroom
-policy, the hardware smoke checklist for the verification session, and
-the runbook that lands the measured value and the capability
-advertising after a recorded pass.
+Firmware (`audio_scene.c`) enforces per-source ceilings and a weighted
+combined-level boundary. This document records the bench method and
+the corrected R1 measurements (48/80); these are **per-card** results,
+not safe defaults for every board revision. The permanent post-mix
+limiter protects the combined output, not distortion introduced earlier
+on either input.
 
-Host tests in `test/audio` enforce the staging math; nothing on this
-page is enforced until the hardware session records it.
+Host tests verify staging arithmetic and DSP write order. Clean output
+and click-free filter transitions require measurements on real hardware.
 
 ## The combined-level model
 
-The boundary applies to the composed level the staging code evaluates
-(`audio_scene.c`: `resolve_output_volume`, `compute_mixer_stage`):
+The boundary applies to the composed level evaluated by
+`audio_scene.c` (`resolve_output_volume`, `compute_mixer_stage`):
 
-    combined = (baseline_paula + baseline_ax + sum(owner trims))
+    combined = ((baseline_paula + paula_trims) * ceiling_ax / ceiling_paula
+                + baseline_ax + ax_trims)
                * prefactor_gain * (volume / 100) * eq_worst_boost
 
-- Mixer legs (`audio_adau_set_mixer_vol` scale): 0..255 each,
-  127 = 0 dB. Power-on baseline is Paula 128 / AX 64 (the state
-  `audio_adau_init` writes).
+- Mixer legs are 0..255 (127 = 0 dB). `audio_adau_init` starts at
+  Paula 36 / AX 72; boot re-applies a saved baseline if present.
+  With no saved calibration the one-card-informed fallback ceilings
+  are Paula 48 / AX 80 (Level 132/160 at the parity baseline).
 - Prefactor: 0..100, -12 dB .. +12 dB, 50 = 0 dB
   (`audio_dsp_gain.h`).
 - Scene volume: 0..100, 0 dB at 100. Pan does not enter the model.
@@ -33,27 +33,34 @@ The boundary applies to the composed level the staging code evaluates
 MHI add no owner trim, so their allocation leaves the operator's
 baseline pair applied verbatim.
 
-## Provisional enforced boundary (current state)
+## Current limiter-era boundary
 
-The single named definition is:
+This firmware derives the AX-equivalent boundary as `2 * ceiling_ax`
+and independently caps each applied mixer leg at its configured
+ceiling. With no saved calibration the fallback is Paula 48 / AX 80,
+giving a boundary of 160 and a boot baseline of 36/72. The pair was
+measured on one R1 board; it is a conservative shipping candidate,
+**not a clean guarantee for other boards**. Saved per-card settings
+remain authoritative. `ZZ9K_OP_AUDIO_CONTROL_STATE_GET` reports the
+resulting boundary.
 
-    ZZ9000_proto.sdk/ZZ9000OS/src/audio_scene.h
-    #define AUDIO_SCENE_ENFORCED_BOUNDARY 192.0
+The original pre-limiter provisional value was 192: a 3/4 reduction
+from an uncalibrated 256-unit forum estimate. It is historical and is
+not an enforced constant in the current firmware. Scene-alone boost
+reduces applied output volume; a composed over-boundary trim is bounded
+and reported. Neither action undoes distortion that occurred before
+the limiter. Do not derive a universal clean input ceiling from the
+limiter threshold or the one qualified R1 card.
 
-Provisional derivation: both drivers documented that summed mixer
-values above ~0x100 (256) saturate the DAC (`zz9000ax-ahi.c`,
-`mhizz9000.c`, since removed); scaled by 3/4 that gives ~2.5 dB of
-stated headroom below the forum figure. This value ships until the
-bench session below replaces it; `ZZ9K_OP_AUDIO_CONTROL_STATE_GET`
-reports it as the `ceiling` field, and the staging host tests pin
-behavior against it.
+## Historical pre-limiter measurement method (2026-08)
 
-A composition over the boundary is reduced — the mixer sum first
-(reported back to the requesting owner as a bound), the applied output
-volume when the scene alone exceeds it — and each reduction emits
-exactly one gain-reduction telemetry event.
-
-## Measurement method (bench session)
+The following 0/254 and 254/0 sweeps documented the original bench
+session. **Do not replay them unchanged on the limiter build:** the
+current per-leg ceilings reject such uncalibrated mixer levels, and
+the engaged limiter changes the distortion curve. Do not raise
+ceilings solely to run this historical stimulus. For current hardware
+qualification use independent line-output/source-reference captures
+within each card's safe range, and separately note limiter engagement.
 
 Single session on target hardware, on the operator's own card. The
 primary self-capture sweep calibrates the AX-only path in combined-level
@@ -194,16 +201,13 @@ enforces:
 
 $$G\left(P\frac{C_A}{C_P}+A\right) \le C_P\frac{C_A}{C_P}+C_A = 2C_A$$
 
-Each leg is additionally clamped to its own measured ceiling,
-independent of the sum. The shipped post-mix limiter (engaged at
-0.47 FS) bounds the summed output, so the boundary admits both legs at
-their clean ceilings (160 at the 48/80 calibration; 512 at the
-uncalibrated 256/256 defaults) instead of the pre-limiter
-$\frac{3}{4}C_A$ sum headroom (60 at 48/80; approximately 2.5 dB of
-component/unit margin) that the 2026-08 measurements below were taken
-under. Measured cards save different pairs; this avoids discarding AX
-headroom on an R1 card whose Paula path is hotter, and avoids assuming
-the same ratio across repaired cards.
+Each applied leg is additionally capped to its configured ceiling,
+independent of the sum. The post-mix limiter (engaged at 0.47 FS)
+bounds the summed output, so a card using the 48/80 fallback has a
+modeled boundary of 160. The earlier pre-limiter
+$\frac{3}{4}C_A$ headroom policy (60 on that R1 card) applies only
+to the 2026-08 measurements below. The 48/80 fallback is not a
+universal per-card calibration; saving a measured pair replaces it.
 
 ## Measurement records — 2026-08-23
 
@@ -241,9 +245,9 @@ Mixer1` first and its combined output traverses the complete scene
 chain; the raw ADC capture taps remain before that mixer. Because the
 recorded sweep predates this topology correction, its `(80, 97]`
 AX-only interval and candidate boundary 60 are informational only and
-must be remeasured on the corrected instrument build. Boundary 60 is
-not accepted; `AUDIO_SCENE_ENFORCED_BOUNDARY` remains the provisional
-192 and capability advertising remains blocked.
+must be remeasured on the corrected instrument build. Boundary 60 was
+not accepted; at that stage the pre-limiter boundary remained the
+provisional 192 and capability advertising was still blocked.
 
 Corrected instrument image
 `5cc8265d81421d6c132c594b68d1dd68ae95d53a8181c18311f66f78f474a046`
@@ -334,27 +338,32 @@ expected observation traces to the plan's acceptance examples.
 S8 needs non-AX hardware (or the AX-absent probe path); if the session
 only has an AX card, record it as not exercised rather than passed.
 
-## Post-pass capability state
+## Historical pre-limiter gate and current qualification
 
-The calibrated hardware gate passed on the qualified R1 card:
+The earlier calibrated hardware gate passed on one R1 card:
 
 - Paula 36 safe / 37 reduced;
 - AX 60 safe / 61 reduced;
 - mixed 18/30 safe / 19/30 reduced;
-- measured ceilings 48/80 and derived boundary 60 survived Save and
-  power-cycle.
+- measured ceilings 48/80 and the **then-current** derived boundary 60
+  survived Save and power-cycle.
 
-The matched release therefore advertises
-`SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING` globally and on the
-audio service. `SDK_SERVICE_FLAG_AUDIO_CONTROL` is set and the service
-reports 15 opcodes through `0x050e`. ZZTop, AHI and MHI continue to
-gate on those bits, so older firmware retains its documented fallback.
+The production limiter later replaced that 3/4 policy with the
+weighted sum of both per-leg ceilings. In this candidate, 48/80
+becomes the uncalibrated fallback (boundary 160, parity baseline
+36/72). It was measured on one R1 card and is not a cross-revision
+guarantee. Existing saved calibration and baseline keys override it.
+For issue #117, record continuous output while dragging LPF/EQ to
+distinguish parameter transients from input distortion; safeloaded
+live LPF and a reduced edit rate improve clicks but do not prove
+click-free audio on hardware. More representative returned-output
+and source-reference measurements are still required before calling
+the fallback clean on every board.
 
-The release candidate uses the persisted 48/80 pair on this card.
-Uncalibrated cards retain defaults 256/256 and boundary 192 until their
-measured pair is saved. Final gates are the full audio/config suites,
-SDK ABI/release-service tests, driver CFG/UI contracts, matched
-cross-builds and `git diff --check`.
+The matched release advertises `SDK_CAP_AUDIO_CONTROL |
+SDK_CAP_AUDIO_METERING` and `SDK_SERVICE_FLAG_AUDIO_CONTROL`. ZZTop,
+AHI and MHI gate on those capabilities, so older firmware keeps its
+documented fallback.
 
 ## Matched-set release coordination
 
