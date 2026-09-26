@@ -223,6 +223,13 @@ static uint32_t fabric_catchup_ready_count(void)
 			} else if (l->write_cursor > l->consumed) {
 				count++;
 			}
+		} else if (i == AUDIO_FABRIC_SLOT_PUMP) {
+			/* The pump cursor is not in the lease tick, and
+			 * reading it through snapshot would consume the
+			 * canonical producer read. A live pump may have
+			 * published since the previous IRQ, so count it
+			 * toward the multislot cap. */
+			count++;
 		} else if (!s->source.faulted && s->source.ring &&
 			   s->source.produced_bytes > s->source.staged_bytes) {
 			count++;
