@@ -690,6 +690,7 @@ static struct zz_audio_convert g_poll_snap[AUDIO_FABRIC_SLOT_COUNT];
 static uint64_t g_poll_inflight_src[AUDIO_FABRIC_SLOT_COUNT];
 static uint8_t g_poll_inflight[AUDIO_FABRIC_SLOT_COUNT];
 static uint8_t g_poll_stolen[AUDIO_FABRIC_SLOT_COUNT];
+static uint8_t g_poll_metered[AUDIO_FABRIC_SLOT_COUNT];
 
 void audio_fabric_lease_poll(void)
 {
@@ -809,6 +810,7 @@ void audio_fabric_lease_poll(void)
 				g_poll_snap[slot] = s->convert;
 				g_poll_inflight_src[slot] = consumed64;
 				g_poll_stolen[slot] = 0U;
+				g_poll_metered[slot] = 0U;
 				g_poll_inflight[slot] = 1U;
 				smp_local_irq_restore(irq_state);
 			}
@@ -831,9 +833,19 @@ void audio_fabric_lease_poll(void)
 			}
 			if (l->source_be)
 				fabric_swap_s16be(src_scratch, src_bytes);
-			/* Meter the source period here: the ISR fill no
-			 * longer sees this lease's pre-conversion PCM. */
-			fabric_lease_meter(s, src_scratch, src_bytes);
+			/* Meter under IRQ-off. Catch-up may stage the
+			 * following periods and must not re-enter the
+			 * clip latch mid-period. */
+			{
+				uint32_t irq_state = smp_local_irq_save();
+
+				if (!g_poll_metered[slot]) {
+					fabric_lease_meter(s, src_scratch,
+							   src_bytes);
+					g_poll_metered[slot] = 1U;
+				}
+				smp_local_irq_restore(irq_state);
+			}
 			/* Convert one whole period. Off-table rates are
 			 * refused at acquire; the silent-period branch only
 			 * mirrors the pump's defensive policy. */
@@ -853,12 +865,6 @@ void audio_fabric_lease_poll(void)
 			 * converted period is discarded either way.
 			 * Dropping it here also means never replaying it
 			 * through already-advanced FIR history. */
-			if (p->staged != staged || l->ring != src_ring ||
-			    l->tearing) {
-				g_poll_inflight[slot] = 0U;
-				g_poll_stolen[slot] = 0U;
-				break;
-			}
 			{
 				uint32_t irq_state = smp_local_irq_save();
 
@@ -869,6 +875,17 @@ void audio_fabric_lease_poll(void)
 					smp_local_irq_restore(irq_state);
 					break;
 				}
+				smp_local_irq_restore(irq_state);
+			}
+			if (p->staged != staged || l->ring != src_ring ||
+			    l->tearing) {
+				g_poll_inflight[slot] = 0U;
+				g_poll_stolen[slot] = 0U;
+				break;
+			}
+			{
+				uint32_t irq_state = smp_local_irq_save();
+
 				seq = staged / AUDIO_BYTES_PER_PERIOD;
 				ring = fabric_lease_staging_ring(slot);
 				if (ring == NULL) {
@@ -972,6 +989,10 @@ static void fabric_lease_finish_inflight(uint32_t periods)
 		}
 		if (l->source_be)
 			fabric_swap_s16be(src_scratch, src_bytes);
+		if (!g_poll_metered[slot]) {
+			fabric_lease_meter(s, src_scratch, src_bytes);
+			g_poll_metered[slot] = 1U;
+		}
 		if (g_poll_snap[slot].ratio == NULL)
 			memset(out_scratch, 0, sizeof(out_scratch));
 		else
