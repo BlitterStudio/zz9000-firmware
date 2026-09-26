@@ -98,6 +98,8 @@ int audio_program_adau_params(uint8_t *params, uint32_t param_len);
 int audio_adau_write_parameter(uint16_t address,
 		const uint8_t value[4]);
 int audio_adau_set_lpf_params(int f0);
+/* Live LPF edit: stage the whole biquad and latch once (11 poll steps). */
+int audio_adau_lpf_substep(int f0, int substep);
 
 /* vol range: 0-255. 127 = 0 dB */
 int audio_adau_set_mixer_vol(int vol1, int vol2);

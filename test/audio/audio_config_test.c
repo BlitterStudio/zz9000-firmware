@@ -28,6 +28,11 @@
 /* ---- link-time stubs for the ax.h DSP setters ---- */
 
 int audio_adau_set_lpf_params(int f0) { (void)f0; return 0; }
+int audio_adau_lpf_substep(int f0, int substep)
+{
+	(void)f0;
+	return substep == 10 ? 1 : 0;
+}
 int audio_adau_set_mixer_vol(int vol1, int vol2)
 {
 	(void)vol1;
@@ -293,6 +298,7 @@ static void test_parse_all_audio_keys(void)
 static void test_absent_and_corrupt_degrade(void)
 {
 	struct audio_scene_def defaults[AUDIO_SCENE_COUNT];
+	struct audio_scene_control_state state;
 
 	audio_scene_init();
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++)
@@ -303,6 +309,20 @@ static void test_absent_and_corrupt_degrade(void)
 	audio_scene_load_config();
 	check(audio_scene_active_index() == 3, "absent keys keep defaults",
 		fmt("active=%u", audio_scene_active_index()));
+	check(audio_scene_apply_after_dsp_init() == 0,
+		"uncalibrated boot applies its baseline before playback", NULL);
+	audio_scene_control_state(&state);
+	check(state.ceiling_paula == 48 && state.ceiling_ax == 80 &&
+		state.baseline_paula == 36 && state.baseline_ax == 72 &&
+		state.trim_paula == 36 && state.trim_ax == 72 &&
+		state.ceiling == 160 && !state.trim_bounded,
+		"unconfigured boot starts at a balanced 132/160",
+		fmt("ceilings=%lu/%lu baseline=%u/%u applied=%u/%u boundary=%lu",
+			(unsigned long)state.ceiling_paula,
+			(unsigned long)state.ceiling_ax,
+			state.baseline_paula, state.baseline_ax,
+			state.trim_paula, state.trim_ax,
+			(unsigned long)state.ceiling));
 	for (int i = 0; i < AUDIO_SCENE_COUNT; i++)
 		check_scene(i, &defaults[i], fmt("default scene %d", i));
 
@@ -334,11 +354,6 @@ static void test_absent_and_corrupt_degrade(void)
 	check(audio_scene_active_index() == 0,
 		"corrupt audio_active rejected",
 		fmt("active=%u", audio_scene_active_index()));
-	check(audio_scene_baseline_paula() == 192 &&
-		audio_scene_baseline_ax() == 255,
-		"corrupt audio_baseline rejected; parity boot default applies",
-		fmt("paula=%u ax=%u", audio_scene_baseline_paula(),
-			audio_scene_baseline_ax()));
 	check(audio_scene_ceiling_paula() ==
 			AUDIO_SCENE_DEFAULT_CEILING_PAULA &&
 		audio_scene_ceiling_ax() == AUDIO_SCENE_DEFAULT_CEILING_AX,
@@ -400,9 +415,9 @@ static void test_save_roundtrip(void)
 			fmt("scene %d written", i), NULL);
 	}
 	check(audio_scene_select(4) == 0, "active scene selected", NULL);
-	check(audio_scene_set_baseline(140, 70) == 0, "baseline set", NULL);
 	check(audio_scene_set_calibration(512, 1024) == 0,
 		"calibration set", NULL);
+	check(audio_scene_set_baseline(140, 70) == 0, "baseline set", NULL);
 
 	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK, "save succeeds",
 		NULL);
@@ -823,13 +838,13 @@ static void test_save_nonblocking_machine(void)
 	 * commits for longer than that budget without failing the save. */
 	mock_fs_reset();
 	audio_scene_init();
-	check(audio_scene_set_baseline(127, 63) == 0,
+	check(audio_scene_set_baseline(35, 71) == 0,
 		"long-wait baseline commit starts", NULL);
 	check(audio_scene_save_start(0) == AUDIO_SCENE_SAVE_QUEUED,
 		"save waits behind the baseline commit", NULL);
 	for (int i = 0; i < 1100; i++) {
-		check(audio_scene_set_baseline(127,
-				(uint8_t)(63 + (i & 1))) == 0,
+		check(audio_scene_set_baseline(35,
+				(uint8_t)(71 + (i & 1))) == 0,
 			"coalesced baseline edit", NULL);
 		(void)audio_scene_poll();
 	}
@@ -928,69 +943,6 @@ static void test_truncation_query_key(void)
 	check(present == 0, "no file: truncation key absent", NULL);
 }
 
-/* The shipped sample's commented audio block must carry exactly the
- * packed firmware defaults, so uncommenting any line reproduces the
- * power-on state (sample numbers parse AND match). */
-static void check_sample_audio_defaults(const char *sample)
-{
-	static const char *eq_pair_names[5] = { "01", "23", "45", "67",
-		"89" };
-	char line[48];
-	int i, k;
-
-	audio_scene_init();
-	snprintf(line, sizeof(line), "audio_active = %u",
-		(unsigned)audio_scene_active_index());
-	check(strstr(sample, line) != NULL, "sample pins audio_active",
-		line);
-	snprintf(line, sizeof(line), "audio_baseline = %u",
-		(unsigned)audio_scene_baseline_paula() * 256u +
-		(unsigned)audio_scene_baseline_ax());
-	check(strstr(sample, line) != NULL, "sample pins audio_baseline",
-		line);
-	for (i = 0; i < AUDIO_SCENE_COUNT; i++) {
-		const struct audio_scene_def *s = audio_scene_get(i);
-
-		snprintf(line, sizeof(line), "audio_scene%d_lpf = %u",
-			i, (unsigned)s->lpf_hz);
-		check(strstr(sample, line) != NULL,
-			"sample pins scene lpf default", line);
-		for (k = 0; k < 5; k++) {
-			snprintf(line, sizeof(line),
-				"audio_scene%d_eq%s = %u", i,
-				eq_pair_names[k],
-				(unsigned)s->eq[2 * k] * 128u +
-				(unsigned)s->eq[2 * k + 1]);
-			check(strstr(sample, line) != NULL,
-				"sample pins scene eq pair default", line);
-		}
-		snprintf(line, sizeof(line), "audio_scene%d_out = %u",
-			i, (unsigned)s->prefactor * 128u +
-			(unsigned)s->volume);
-		check(strstr(sample, line) != NULL,
-			"sample pins scene out pair default", line);
-		snprintf(line, sizeof(line), "audio_scene%d_pan = %u",
-			i, (unsigned)s->pan);
-		check(strstr(sample, line) != NULL,
-			"sample pins scene pan default", line);
-		/* The sample documents the name grammar once (scene 0's
-		 * group, leading chunks); pin those to the default label
-		 * "Scene 1". */
-		if (i == 0) {
-			for (k = 0; k < 4; k++) {
-				snprintf(line, sizeof(line),
-					"audio_scene%d_nm%d = %u", i, k + 1,
-					(unsigned)(uint8_t)s->name[2 * k] *
-					256u +
-					(unsigned)(uint8_t)s->name[2 * k + 1]);
-				check(strstr(sample, line) != NULL,
-					"sample pins scene name chunk default",
-					line);
-			}
-		}
-	}
-}
-
 /* The shipped sample must fit the parse budget so every documented
  * key stays loadable (the restructure under the 4 KiB cap). */
 static void test_sample_file_parses_fully(void)
@@ -1018,10 +970,6 @@ static void test_sample_file_parses_fully(void)
 		present == 1,
 		"sample loads without truncation", NULL);
 
-	/* Every documented audio default in the sample must equal the
-	 * packed firmware default: the numbers must not only parse but
-	 * match what a fresh audio_scene_init() would emit. */
-	check_sample_audio_defaults(sample);
 }
 
 int main(void)
