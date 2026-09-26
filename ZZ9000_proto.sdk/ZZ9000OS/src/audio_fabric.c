@@ -911,6 +911,10 @@ void audio_fabric_isr(void)
 	 * fill passes below then see it) or drop a revoked one (with
 	 * the last-producer silence when it was the only attachment). */
 	fabric_lease_isr_tick();
+	/* A converting lease's FIR normally runs on the main loop. If that
+	 * loop missed the period, stage the owed source here before fill
+	 * so the DMA does not play silence over PCM already published. */
+	fabric_lease_catchup();
 	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
 		return;
 #ifdef AUDIO_FABRIC_STATIC_TX_DIAG

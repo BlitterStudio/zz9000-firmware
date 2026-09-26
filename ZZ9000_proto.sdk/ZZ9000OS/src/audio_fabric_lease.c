@@ -665,11 +665,19 @@ static const struct audio_fabric_producer_ops *fabric_ring_ops(uint32_t slot)
  * IRQ-safe critical section (PR #88 discipline). */
 #define AUDIO_FABRIC_LEASE_PRECONVERT_BUDGET 2U
 
+/* Set for the poll body. The audio ISR may call the poll to catch up;
+ * the static convert scratch must not be re-entered. */
+static uint8_t g_lease_poll_busy;
+
 void audio_fabric_lease_poll(void)
 {
 	static int16_t src_scratch[(AUDIO_BYTES_PER_PERIOD / 4U) * 2U];
 	static int16_t out_scratch[AUDIO_BYTES_PER_PERIOD / 2U];
 	uint32_t slot;
+
+	if (g_lease_poll_busy)
+		return;
+	g_lease_poll_busy = 1U;
 
 	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
 	     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
@@ -845,6 +853,42 @@ void audio_fabric_lease_poll(void)
 				smp_local_irq_restore(irq_state);
 			}
 		}
+	}
+	g_lease_poll_busy = 0U;
+}
+
+/* Stage one owed source period when the main loop has not. Runs from
+ * the audio ISR after the lease tick, so l->write_cursor is current.
+ * A healthy poll keeps staging ahead and this returns without converting. */
+void fabric_lease_catchup(void)
+{
+	uint32_t slot;
+
+	if (g_lease_poll_busy)
+		return;
+	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
+	     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
+		struct audio_fabric_slot *s = fabric_slot(slot);
+		struct fabric_lease_preconvert *p;
+		struct audio_fabric_lease *l;
+		uint32_t frames;
+		uint32_t src_bytes;
+
+		if (s == NULL || !s->live || !s->preconvert.active)
+			continue;
+		l = &s->lease;
+		p = &s->preconvert;
+		if (l->paused != 0U || l->ring == NULL || l->tearing)
+			continue;
+		if (p->staged - p->consumed >= AUDIO_BYTES_PER_PERIOD)
+			continue;
+		frames = l->source_rate / 50U;
+		src_bytes = frames * 4U;
+		if (frames == 0U ||
+		    p->src_consumed + src_bytes > l->write_cursor)
+			continue;
+		audio_fabric_lease_poll();
+		return;
 	}
 }
 /*
