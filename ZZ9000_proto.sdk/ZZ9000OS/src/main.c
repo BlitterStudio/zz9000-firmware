@@ -1752,8 +1752,7 @@ int main() {
 					}
 					case REG_ZZ_ETH_MAC_LO: {
 						uint8_t* mac = ethernet_get_mac_address_ptr();
-						data = mac[4] << 24 | mac[5] << 16 |
-						       ethernet_get_multicast_config();
+						data = ethernet_mac_lo_word(mac);
 						break;
 					}
 					case REG_ZZ_ETH_TX:
@@ -1908,13 +1907,8 @@ int main() {
 				if (z3) {
 					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1, data);
 				} else {
-					if (zaddr & 2) {
-						// lower 16 bit
-						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1, data);
-					} else {
-						// upper 16 bit
-						mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1, data >> 16);
-					}
+					mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG1,
+						ethernet_zorro16(data, zaddr));
 				}
 			}
 
