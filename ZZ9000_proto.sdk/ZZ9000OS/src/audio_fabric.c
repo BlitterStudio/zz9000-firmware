@@ -944,6 +944,12 @@ void audio_fabric_isr(void)
 	 * is the expensive part. */
 	bench_isr = fabric_bench_now();
 #endif
+#ifdef AUDIO_FABRIC_STATIC_TX_DIAG
+	/* Armed diagnostic: the cloned period must stay untouched.
+	 * Catch-up and fill both write the TX ring. */
+	if (g_fabric_static_tx_armed)
+		return;
+#endif
 	/* A converting lease's FIR normally runs on the main loop. If that
 	 * loop missed the period, stage every period this fill can consume
 	 * so a multi-period DMA jump does not play silence over published PCM. */

@@ -788,6 +788,16 @@ void audio_fabric_lease_poll(void)
 				break;
 			if (consumed64 + src_bytes > write)
 				break;   /* no whole source period yet */
+			/* Init before the handoff snapshot. An ISR that
+			 * steals the first period otherwise publishes a
+			 * null-ratio conversion, and the resumed poll
+			 * adopts that snapshot while convert_rate already
+			 * matches, so the converter never initializes. */
+			if (s->convert_rate != l->source_rate) {
+				s->convert_rate = l->source_rate;
+				zz_audio_convert_init(&s->convert,
+					l->source_rate, 48000U);
+			}
 			{
 				uint32_t irq_state = smp_local_irq_save();
 
@@ -827,11 +837,6 @@ void audio_fabric_lease_poll(void)
 			/* Convert one whole period. Off-table rates are
 			 * refused at acquire; the silent-period branch only
 			 * mirrors the pump's defensive policy. */
-			if (s->convert_rate != l->source_rate) {
-				s->convert_rate = l->source_rate;
-				zz_audio_convert_init(&s->convert,
-					l->source_rate, 48000U);
-			}
 			if (s->convert.ratio == NULL)
 				memset(out_scratch, 0, sizeof(out_scratch));
 			else
