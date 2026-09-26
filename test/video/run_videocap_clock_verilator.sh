@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run the production capture-clock controller against its PAL/NTSC fault model.
+# Exercise production C28 and E7M clock-control recovery and phase requests.
 # Vendor MMCM phase displacement and routed I/O timing still require Vivado.
 set -euo pipefail
 
