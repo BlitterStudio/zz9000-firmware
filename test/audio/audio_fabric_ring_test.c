@@ -1309,6 +1309,32 @@ static void scenario_ahi_paced(void)
 	      fmt("state=%u underruns=%u consumed=%llu", state, underruns,
 	          (unsigned long long)st.consumed_bytes));
 	(void)nonzero;
+
+	/* First valid publication is PAUSED and already has PCM. ACTIVE
+	 * must be recorded so a client waiting on that state can unpause;
+	 * the DMA must still stay dark until the prerolls are met. */
+	fabric_reset_state();
+	{
+		struct audio_fabric_ring_grant grant;
+
+		check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U,
+		                         44100U, &grant) ==
+		          AUDIO_FABRIC_LEASE_OK,
+		      "paused-with-pcm: acquire", "");
+		g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation =
+			grant.generation;
+		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX, 3528U,
+			SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED);
+		audio_fabric_lease_poll();
+		fabric_pass();
+		st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+		check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
+		      st.underruns == 0U && st.consumed_bytes == 0U,
+		      "paused-with-pcm: first paused publication records ACTIVE",
+		      fmt("state=%u underruns=%u consumed=%llu", st.state,
+		          st.underruns,
+		          (unsigned long long)st.consumed_bytes));
+	}
 }
 
 int main(void)

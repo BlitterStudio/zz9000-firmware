@@ -514,26 +514,25 @@ void fabric_lease_isr_tick(void)
 					s->preconvert.consumed >=
 				AUDIO_TX_BUFFER_SIZE -
 					2U * AUDIO_BYTES_PER_PERIOD;
-			/* Idle pause publishes no PCM. Bypass leases still
-			 * go live, matching the pre-preroll contract. A
-			 * converting lease only records ACTIVE: AHI's
-			 * acquire publish is exactly this line, and going
-			 * live here arms the DMA frontier with nothing
-			 * staged. The worker then unpauses at two source
-			 * periods, the fill can never reach the six-period
-			 * target, and every tick writes silence one period
-			 * ahead of the DMA. */
-			int idle_pause = l->paused != 0U &&
-				view.write == l->credited;
+			/* Any valid paused publication records ACTIVE,
+			 * including one that already holds PCM. A client
+			 * that waits for ACTIVE before unpausing would
+			 * otherwise deadlock. Going live is separate:
+			 * a converting lease stays off the DMA until the
+			 * source and staging prerolls are met and the
+			 * producer is unpaused. AHI's acquire line is an
+			 * empty pause; arming the frontier there leaves
+			 * the fill one period ahead of the DMA after the
+			 * two-period unpause. Bypass leases still go
+			 * live on pause. */
 			int play_ready = source_ready && staging_ready &&
 				l->paused == 0U;
 
 			if (l->state == (uint8_t)
 					AUDIO_FABRIC_SLOT_STATE_LEASED &&
-			    (idle_pause ||
-			     (!converting && l->paused != 0U) ||
-			     play_ready ||
-			     (!converting && source_ready)))
+			    (l->paused != 0U ||
+			     (!converting && source_ready) ||
+			     play_ready))
 				l->state = (uint8_t)
 					AUDIO_FABRIC_SLOT_STATE_ACTIVE;
 			if (l->state == (uint8_t)
