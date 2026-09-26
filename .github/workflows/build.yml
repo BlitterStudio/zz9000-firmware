@@ -74,6 +74,11 @@ jobs:
         run: make -C test/rtg test
       - name: Video pipeline regression suite
         run: make -C test/video test
+      - name: Native capture-clock RTL regressions
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends verilator
+          bash test/video/run_videocap_clock_verilator.sh
       - name: Video codec regression suite
         run: make -C test/video_codec test
       - name: Audio capture regression suite
