@@ -4248,6 +4248,9 @@ static uint16_t handle_audio_ring_acquire(
 	if (gain > 255U ||
 	    (flags & ~SDK_AUDIO_RING_ACQUIRE_FLAG_KNOWN) != 0U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE) != 0U &&
+	    (flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE) == 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE) != 0U) {
 		if (rate != 8000U && rate != 12000U && rate != 24000U &&
 		    rate != 32000U && rate != 44100U && rate != 48000U)
@@ -4290,6 +4293,7 @@ static uint16_t handle_audio_ring_acquire(
 		         ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE) != 0U)
 		             ? SDK_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16BE
 		             : SDK_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE);
+		put_be32(result->source_rate, rate);
 	} else {
 		put_be32(result->sample_contract,
 		         SDK_AUDIO_RING_CONTRACT_48K_STEREO_S16LE);
