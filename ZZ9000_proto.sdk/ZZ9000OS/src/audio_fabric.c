@@ -198,10 +198,10 @@ static uint32_t fabric_ready_source_count(void)
 	return count;
 }
 
-/* Catch-up runs before the source-snapshot refresh. A converting lease's
- * readiness is the cursor the tick just accepted, not the previous ISR's
- * snapshot. Calling snapshot here would consume the producer's snapshot
- * budget and drop a slot the mid-loop failure path still owns. */
+/* Catch-up runs before the source-snapshot refresh. Lease readiness,
+ * converting or bypass, is the cursor the tick just accepted. The
+ * previous IRQ's snapshot can still show a bypass peer empty. Calling
+ * snapshot here would consume the producer's snapshot budget. */
 static uint32_t fabric_catchup_ready_count(void)
 {
 	uint32_t count = 0U;
@@ -209,14 +209,20 @@ static uint32_t fabric_catchup_ready_count(void)
 
 	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
 		const struct audio_fabric_slot *s = &g_audio_fabric.slot[i];
+		const struct audio_fabric_lease *l;
 
 		if (!s->live)
 			continue;
-		if (s->preconvert.active) {
-			if (s->lease.line_valid && s->lease.paused == 0U &&
-			    (s->lease.write_cursor > s->preconvert.src_consumed ||
-			     s->preconvert.staged > s->preconvert.consumed))
+		l = &s->lease;
+		if (l->ring != NULL && l->line_valid && l->paused == 0U &&
+		    !l->tearing) {
+			if (s->preconvert.active) {
+				if (l->write_cursor > s->preconvert.src_consumed ||
+				    s->preconvert.staged > s->preconvert.consumed)
+					count++;
+			} else if (l->write_cursor > l->consumed) {
 				count++;
+			}
 		} else if (!s->source.faulted && s->source.ring &&
 			   s->source.produced_bytes > s->source.staged_bytes) {
 			count++;
