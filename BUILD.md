@@ -135,7 +135,23 @@ C28_BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./bui
 Host-side suites (any machine with a C compiler):
 ```bash
 make -C test/rtg test        # RTG correctness regression
-make -C test/video test      # VDMA math + video_formatter source invariants
+make -C test/video test      # VDMA, native modes, overlays
+```
+
+Capture RTL simulations also run in CI with Verilator. They exercise the
+production C28/E7M clock controller, filtered and full-width PAL-shaped
+capture, the 28 MHz line origin, writeback layout, diagnostics, and the
+video-slot/Denise/Zorro II RGB pin mappings:
+```bash
+bash test/video/run_videocap_clock_verilator.sh
+bash test/video/run_videocap_verilator_sim.sh
+```
+The sampler CI suite uses a test-only XPM handshake model. It does not
+replace vendor XPM, MMCM phase, IOB placement, routed timing, or physical
+capture qualification. Run the full sampler matrix against Vivado's XPM
+library before rebuilding FPGA bitstreams:
+```bash
+test/video/run_videocap_sim.sh
 ```
 
 Functional simulation of the video formatter (needs Vivado 2018.3 for
