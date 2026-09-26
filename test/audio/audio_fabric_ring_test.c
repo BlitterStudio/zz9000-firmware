@@ -1234,12 +1234,116 @@ static void scenario_cache_fidelity(void)
 	      "cache: credit publication flushes the fw line", "");
 }
 
+/* AHI worker pace: one 3528-byte source period per 20 ms tick, paused
+ * until two periods are outstanding, on the real 16*3840 ring (3528
+ * does not divide that capacity). The poll runs once per tick, which
+ * is a healthy main loop. */
+static void ahi_paced_run(uint32_t ticks, uint32_t poll_every,
+	uint32_t *underruns, uint32_t *nonzero, uint32_t *state)
+{
+	struct audio_fabric_ring_grant grant;
+	struct SDKAudioRingFirmwareLine fw;
+	struct audio_fabric_slot_state st;
+	uint8_t *ring = g_ring_pcm_a;
+	const uint32_t src_period = 3528U;
+	uint64_t write = 0U;
+	uint32_t tick;
+
+	*underruns = 0U;
+	*nonzero = 0U;
+	*state = 0U;
+	fabric_reset_state();
+	if (acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44100U,
+	                       &grant) != AUDIO_FABRIC_LEASE_OK)
+		return;
+	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation = grant.generation;
+	for (tick = 0U; tick < ticks; tick++) {
+		uint64_t consumed = 0U;
+		uint32_t flags = 0U;
+		uint32_t i;
+
+		firmware_snapshot(AUDIO_FABRIC_SLOT_MAILBOX, &fw);
+		if (be32(fw.generation) == grant.generation &&
+		    be32(fw.status) == SDK_AUDIO_RING_STATUS_OK)
+			consumed = ((uint64_t)be32(fw.consumed_cursor_hi) << 32) |
+				be32(fw.consumed_cursor_lo);
+		if (write >= consumed &&
+		    write - consumed + src_period <= RING_TEST_CAPACITY) {
+			uint32_t offset = (uint32_t)(write % RING_TEST_CAPACITY);
+
+			for (i = 0U; i < src_period; i += 2U) {
+				uint32_t at = (offset + i) % RING_TEST_CAPACITY;
+
+				ring[at] = 0xa0U;
+				ring[(at + 1U) % RING_TEST_CAPACITY] = 0x0fU;
+			}
+			write += src_period;
+		}
+		if (write < consumed + 2U * src_period)
+			flags = SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED;
+		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX, write, flags);
+		if (poll_every != 0U && (tick % poll_every) == 0U)
+			audio_fabric_lease_poll();
+		fabric_pass();
+	}
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	*underruns = st.underruns;
+	*state = st.state;
+	*nonzero = count_nonzero_periods(g_fabric_tx);
+}
+
+static void scenario_ahi_paced(void)
+{
+	struct audio_fabric_slot_state st;
+	uint32_t underruns;
+	uint32_t nonzero;
+	uint32_t state;
+
+	ahi_paced_run(40U, 1U, &underruns, &nonzero, &state);
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
+	      underruns == 0U &&
+	      st.consumed_bytes >= 8U * 3528U &&
+	      (st.consumed_bytes % 3528U) == 0U,
+	      "ahi pace: 44.1 kHz one-period publishes stay continuous",
+	      fmt("state=%u underruns=%u consumed=%llu", state, underruns,
+	          (unsigned long long)st.consumed_bytes));
+	(void)nonzero;
+
+	/* First valid publication is PAUSED and already has PCM. ACTIVE
+	 * must be recorded so a client waiting on that state can unpause;
+	 * the DMA must still stay dark until the prerolls are met. */
+	fabric_reset_state();
+	{
+		struct audio_fabric_ring_grant grant;
+
+		check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U,
+		                         44100U, &grant) ==
+		          AUDIO_FABRIC_LEASE_OK,
+		      "paused-with-pcm: acquire", "");
+		g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation =
+			grant.generation;
+		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX, 3528U,
+			SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED);
+		audio_fabric_lease_poll();
+		fabric_pass();
+		st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+		check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
+		      st.underruns == 0U && st.consumed_bytes == 0U,
+		      "paused-with-pcm: first paused publication records ACTIVE",
+		      fmt("state=%u underruns=%u consumed=%llu", st.state,
+		          st.underruns,
+		          (unsigned long long)st.consumed_bytes));
+	}
+}
+
 int main(void)
 {
 	scenario_admission();
 	scenario_rate_admission();
 	scenario_lifecycle();
 	scenario_rate_conversion();
+	scenario_ahi_paced();
 	scenario_rate_wrap();
 	scenario_rate_paused();
 	scenario_rebuild_converting();
