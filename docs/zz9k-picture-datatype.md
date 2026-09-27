@@ -2,7 +2,7 @@
 
 Copyright (C) 2024-2026, Dimitris Panokostas / BlitterStudio
 
-`zz9k-picture.datatype 42.150` is the validated SDK v2 DataType for
+`zz9k-picture.datatype 42.151` is the validated SDK v2 DataType for
 the current package. It is packaged as a side-by-side subclass of the system
 `picture.datatype` and must not replace `Classes/DataTypes/picture.datatype`.
 OS3.1 remains the minimum target: the class opens against
@@ -111,6 +111,15 @@ removes the multi-second startup slowdown reported for MUI applications
 such as IBrowse and YAM when their 8-bit PNG image sets are routed through
 `zz9k-picture.datatype` (GitHub issue #73), on every screen depth.
 Truecolour PNGs with alpha keep the 42.149 behaviour.
+
+`42.151` decodes non-interlaced PNGs through firmware streaming tiles.
+The previous full-height PNG tile could exceed the shared heap on files
+past roughly 1.3 megapixels, so Multiview reported `Invalid data` for
+large PNGs (for example 1920x1080 indexed files) while `zz9k-view`
+decoded the same file. Non-interlaced sources now use the JPEG-style
+streaming tile layout (bounded at 768 KB per tile); interlaced PNGs keep
+the full-height layout their combine path requires. Requires the matched
+v2.8 firmware that streams PNG sessions through partial tiles.
 
 `42.148` makes `GM_RENDER` lock-safe. The old undocumented framebuffer
 `fill`/`scale*` diagnostic modes synchronously called the SDK mailbox while

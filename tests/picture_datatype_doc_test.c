@@ -75,7 +75,7 @@ int main(int argc, char **argv)
   }
 
   ok = 1;
-  ok &= expect_contains(source, "zz9k-picture.datatype 42.150");
+  ok &= expect_contains(source, "zz9k-picture.datatype 42.151");
   ok &= expect_contains(source, "PNGdt44-compatible LUT8 path");
   ok &= expect_contains(source, "- `mskHasTransparentColor`");
   ok &= expect_contains(source, "GitHub issue #73");

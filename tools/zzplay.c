@@ -72,7 +72,7 @@ struct Device *TimerBase;
 
 static volatile sig_atomic_t zzplay_ctrl_c_requested;
 
-static const char zzplay_version[] = "$VER: ZZPlay 0.4 (07.08.2026)";
+static const char zzplay_version[] = "$VER: ZZPlay 0.5 (27.09.2026)";
 
 struct ZZPlayTimer {
   struct MsgPort *port;

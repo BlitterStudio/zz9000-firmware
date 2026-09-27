@@ -138,12 +138,12 @@ int main(int argc, char **argv)
       source, "Copyright (C) 2024-2026, Dimitris Panokostas / BlitterStudio");
   ok &= expect_contains(source, "\"zz9k-picture.datatype\"");
   ok &= expect_contains(source, "ZZ9K_PICTURE_DATATYPE_VERSION 42");
-  ok &= expect_contains(source, "ZZ9K_PICTURE_DATATYPE_REVISION 150");
-  ok &= expect_contains(source, "$VER: zz9k-picture.datatype 42.150");
+  ok &= expect_contains(source, "ZZ9K_PICTURE_DATATYPE_REVISION 151");
+  ok &= expect_contains(source, "$VER: zz9k-picture.datatype 42.151");
   ok &= expect_contains(source, "ZZ9K_PICTURE_BUILD_MARKER");
   ok &= expect_contains(
       source,
-      "\"metadata: build 2026-09-03 png-palette-lut8-v150\"");
+      "\"metadata: build 2026-09-27 png-streaming-tiles-v151\"");
   ok &= expect_contains(source, "ZZ9K_PICTURE_PNG_TRANSPARENT_NONE 0x0100U");
   ok &= expect_contains(source, "ZZ9K_PICTURE_LUT8_MAP_SLOTS 512U");
   ok &= expect_contains(source, "ZZ9KPicturePngPalette png_palette;");

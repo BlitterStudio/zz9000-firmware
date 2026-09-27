@@ -66,6 +66,7 @@ parentheses in Workbench's *Information* window to enable one.
 | `--verbose` | `VERBOSE` | Force progress output even from Workbench |
 | `--fps` | `FPS` | Rolling playback and decode-call frame rates |
 | `--benchmark` | `BENCHMARK` | Remove pacing; implies `--fps`, and mutes audio unless a backend was named |
+| `--trace[=P]` | `TRACE[=P]` | Write per-frame timing diagnostics to the trace file (default `T:zzplay.trace`) |
 | `--help` | — | Print usage |
 
 ### Choosing an audio backend
