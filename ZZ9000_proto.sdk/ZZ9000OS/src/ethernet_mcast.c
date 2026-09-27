@@ -47,7 +47,18 @@ void ethernet_set_multicast_hash(u16 command)
 
 u16 ethernet_get_multicast_config(void)
 {
-	return ETH_CONFIG_CAP_MULTICAST_HASH;
+	u16 config = ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE;
+
+	/* READY is reached only after PHY auto-negotiation completes, i.e.
+	 * a cable was connected at some point since power-on. It is not
+	 * cleared if the cable is pulled later. hw_ready gates on EMAC
+	 * init actually succeeding: the task machine sets READY even when
+	 * init_ethernet_buffers() failed, and a boot-time consumer must
+	 * not start a stack on that interface. */
+	if (ethernet_task_state == ETH_TASK_READY && ethernet_hw_ready)
+		config |= ETH_CONFIG_LINK_READY;
+
+	return config;
 }
 
 u32 ethernet_mac_lo_word(const uint8_t mac[6])

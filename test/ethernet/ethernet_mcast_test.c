@@ -36,6 +36,7 @@ static int resume_count;
 static const char *last_restart;
 
 int ethernet_task_state = ETH_TASK_SETUP;
+int ethernet_hw_ready = 0;
 
 u32 ethernet_emac_base(void)
 {
@@ -251,21 +252,35 @@ static int test_capability_read_preserves_mac_bytes(void)
 	u16 config16;
 
 	memcpy(before, mac, sizeof(mac));
-	CHECK(ethernet_get_multicast_config() == ETH_CONFIG_CAP_MULTICAST_HASH);
+	ethernet_hw_ready = 0;
+	ethernet_task_state = ETH_TASK_NEGOTIATE;
+	CHECK(ethernet_get_multicast_config() ==
+	      (ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE));
+	/* The task machine reaches READY even when init_ethernet_buffers()
+	 * failed; the register must not claim a usable link then. */
+	ethernet_task_state = ETH_TASK_READY;
+	CHECK(ethernet_get_multicast_config() ==
+	      (ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE));
+	ethernet_hw_ready = 1;
+	CHECK(ethernet_get_multicast_config() ==
+	      (ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE |
+	       ETH_CONFIG_LINK_READY));
 	CHECK(ETH_CONFIG_CAP_MULTICAST_HASH == 0x0001);
+	CHECK(ETH_CONFIG_CAP_LINK_STATE == 0x0002);
+	CHECK(ETH_CONFIG_LINK_READY == 0x0100);
 	CHECK(REG_ZZ_ETH_MAC_LO == 0x88);
 	CHECK(REG_ZZ_ETH_CONFIG == 0x8A);
 	CHECK((REG_ZZ_ETH_CONFIG & ~3u) == REG_ZZ_ETH_MAC_LO);
 
 	word = ethernet_mac_lo_word(mac);
 	CHECK(memcmp(mac, before, sizeof(mac)) == 0);
-	CHECK(word == 0xabcd0001U);
+	CHECK(word == 0xabcd0103U);
 	CHECK((word >> 16) == 0xabcdU);
-	CHECK((word & 0xffffU) == 0x0001U);
+	CHECK((word & 0xffffU) == 0x0103U);
 
 	/* Z2 16-bit read of 0x8A is the low half; 0x88 is the two MAC bytes. */
 	config16 = ethernet_zorro16(word, REG_ZZ_ETH_CONFIG);
-	CHECK(config16 == 0x0001);
+	CHECK(config16 == 0x0103);
 	CHECK(ethernet_zorro16(word, REG_ZZ_ETH_MAC_LO) == 0xabcd);
 	CHECK(memcmp(mac, before, sizeof(mac)) == 0);
 	return EXIT_SUCCESS;
