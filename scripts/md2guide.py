@@ -56,7 +56,18 @@ def slugify(text):
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", ascii_value.lower())).strip("-") or "section"
 
 
-def render_inline(text, anchor_map, line_number):
+
+def sibling_guides(names):
+    """Map case-insensitive guide stems to the caller's exact guide names."""
+    guides = {}
+    for name in names:
+        filename = name.replace("\\", "/").rsplit("/", 1)[-1]
+        if filename.lower().endswith(".guide"):
+            guides[filename[:-6].casefold()] = name
+    return guides
+
+
+def render_inline(text, anchor_map, siblings, line_number):
     """Render inline syntax while protecting code spans from later substitutions."""
     protected = []
 
@@ -77,6 +88,14 @@ def render_inline(text, anchor_map, line_number):
         if url.startswith("#"):
             target = anchor_map.get(url[1:], slugify(url[1:]))
             return '@{{"{}" link {}}}'.format(label, target)
+        target, separator, _anchor = url.partition("#")
+        relative = not target.startswith("/") and not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target)
+        if not separator and relative and target.lower().endswith(".md"):
+            filename = target.replace("\\", "/").rsplit("/", 1)[-1]
+            stem = filename[:-3]
+            sibling = siblings.get(stem.casefold())
+            if sibling and stem.casefold() != "readme":
+                return '@{{"{}" link "{}/Main"}}'.format(label, sibling)
         return "{} ({})".format(label, url)
 
     text = re.sub(r"(?<!!)\[([^]]+)\]\(([^)]+)\)", link, text)
@@ -101,8 +120,9 @@ def table_alignment(cells):
     return all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
 
 
-def render_table(rows, alignment, anchor_map, line_numbers):
-    rendered = [[render_inline(cell, anchor_map, number) for cell in row] for row, number in zip(rows, line_numbers)]
+def render_table(rows, alignment, anchor_map, siblings, line_numbers):
+    rendered = [[render_inline(cell, anchor_map, siblings, number) for cell in row]
+                for row, number in zip(rows, line_numbers)]
     columns = max(len(row) for row in rendered)
     for row in rendered:
         row.extend([""] * (columns - len(row)))
@@ -238,17 +258,18 @@ def parse_markdown(source):
     return nodes, contents, anchors
 
 
-def guide_text(source, input_name, title=None, name=None, version="1.0", date=None):
+def guide_text(source, input_name, title=None, name=None, version="1.0", date=None, siblings=()):
     nodes, contents, anchors = parse_markdown(source)
     guide_name = ascii_text((name or pathlib.Path(input_name).stem).removesuffix(".guide"))
     document_title = title or nodes[0]["title"] or guide_name
     version = ascii_text(version)
     date = ascii_text(date) if date else "{}.{}.{}".format(_datetime.date.today().day, _datetime.date.today().month, _datetime.date.today().year)
+    sibling_map = sibling_guides(siblings)
     output = ["@database {}.guide".format(guide_name), "@$VER: {}.guide {} ({})".format(guide_name, version, date), ""]
 
     def emit_block(kind, value, number):
         if kind == "paragraph":
-            output.append(render_inline(" ".join(text for text, _ in value), anchors, number))
+            output.append(render_inline(" ".join(text for text, _ in value), anchors, sibling_map, number))
         elif kind == "line":
             output.append(ascii_text(value, number))
         elif kind == "rule":
@@ -260,14 +281,14 @@ def guide_text(source, input_name, title=None, name=None, version="1.0", date=No
                 output.append("@" + content if content.startswith("@") else content)
             output.append("")
         elif kind == "quote":
-            output.extend("> " + render_inline(line, anchors, line_number) for line, line_number in value)
+            output.extend("> " + render_inline(line, anchors, sibling_map, line_number) for line, line_number in value)
         elif kind == "list":
             for level, marker, item, line_number in value:
-                output.append("  " * level + marker + " " + render_inline(item, anchors, line_number))
+                output.append("  " * level + marker + " " + render_inline(item, anchors, sibling_map, line_number))
             output.append("")
         elif kind == "table":
             rows, alignment, row_numbers = value
-            output.extend(render_table(rows, alignment, anchors, row_numbers))
+            output.extend(render_table(rows, alignment, anchors, sibling_map, row_numbers))
 
     output.append('@node Main "{}"'.format(ascii_text(document_title)))
     for section_title, section_name in contents:
@@ -322,7 +343,7 @@ def check_guide(path):
         elif line.startswith("@"):
             if not (line.startswith("@database ") or line.startswith("@$VER:") or line.startswith("@{") or line.startswith("@@")):
                 errors.append("line {}: unknown AmigaGuide command".format(number))
-        links.extend(re.findall(r'@\{"[^"\n]*"\s+link\s+([^}\s]+)\}', line))
+        links.extend(re.findall(r'@\{"[^"\n]*"\s+link\s+([^}"\s]+)\}', line))
     if depth:
         errors.append("missing @endnode")
     for target in links:
@@ -337,7 +358,7 @@ def selftest():
     fixture = """# Demo — Guide
 <!-- ignored -->
 Intro wraps
-onto one line with [local](#part) and [site](https://example.test), ![logo](logo.png), `code`, **bold**, and *italic*.
+onto one line with [local](#part), [play](zzplay.md), [library](../docs/zz9k-library.md), [readme](../README.md), [missing](missing.md), [site](https://example.test), ![logo](logo.png), `code`, **bold**, and *italic*.
 
 ## Part
 > quoted **line**
@@ -366,7 +387,8 @@ plain
 ### Child
 An unknown snowman ☃ and an arrow →. A timing is 5µs ≈ exact.
 """
-    result = guide_text(fixture, "demo.md", date="1.2.2003")
+    result = guide_text(fixture, "demo.md", date="1.2.2003",
+                        siblings=["ZZPlay.guide", "zz9k-library.guide", "README.guide"])
     expected = [
         "@database demo.guide",
         "@$VER: demo.guide 1.0 (1.2.2003)",
@@ -377,7 +399,8 @@ An unknown snowman ☃ and an arrow →. A timing is 5µs ≈ exact.
         "Left | Right", "----+-----", "a    |    12",
         "@{b}Small heading@{ub}", "----------------------------------------",
         "@@command", '@{"Back" link part}', '@{"Contents" link Main}',
-        "local", "site (https://example.test)", "logo (image: logo.png)",
+        '@{"play" link "ZZPlay.guide/Main"}', '@{"library" link "zz9k-library.guide/Main"}',
+        "readme (../README.md)", "missing (missing.md)", "site (https://example.test)", "logo (image: logo.png)",
         "@{b}code@{ub}", "@{b}bold@{ub}", "@{i}italic@{ui}",
         "An unknown snowman ? and an arrow ->. A timing is 5us ~ exact.",
         "| +--+ >",
@@ -404,6 +427,7 @@ def main(argv=None):
     parser.add_argument("--version", default="1.0")
     parser.add_argument("--date")
     parser.add_argument("--check", metavar="FILE.guide")
+    parser.add_argument("--sibling", metavar="NAME.guide", action="append", default=[])
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("input", nargs="?")
     parser.add_argument("output", nargs="?")
@@ -420,7 +444,8 @@ def main(argv=None):
         if not arguments.input:
             parser.error("INPUT.md is required")
         source = pathlib.Path(arguments.input).read_text(encoding="utf-8")
-        result = guide_text(source, arguments.input, arguments.title, arguments.name, arguments.version, arguments.date)
+        result = guide_text(source, arguments.input, arguments.title, arguments.name, arguments.version, arguments.date,
+                            arguments.sibling)
         if arguments.output:
             pathlib.Path(arguments.output).write_bytes(result.encode("ascii"))
         else:
