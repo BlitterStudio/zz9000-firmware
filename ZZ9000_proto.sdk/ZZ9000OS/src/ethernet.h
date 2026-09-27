@@ -18,6 +18,10 @@
 #define ETHERNET_H_
 
 #define ETH_CONFIG_CAP_MULTICAST_HASH 0x0001
+/* Read-side: firmware reports Ethernet link readiness in bit 8. */
+#define ETH_CONFIG_CAP_LINK_STATE     0x0002
+/* Set once PHY auto-negotiation has completed and the EMAC is running. */
+#define ETH_CONFIG_LINK_READY         0x0100
 #define ETH_CONFIG_HASH_SET            0x8000
 #define ETH_CONFIG_HASH_CLEAR          0x4000
 #define ETH_CONFIG_HASH_RESET          0x2000
