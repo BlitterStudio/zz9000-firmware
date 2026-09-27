@@ -67,6 +67,111 @@ def sibling_guides(names):
     return guides
 
 
+def protect_guide_references(text):
+    """Replace complete @{"..." link ...} references with whitespace-free tokens."""
+    references = []
+    output = []
+    index = 0
+    while index < len(text):
+        if not text.startswith('@{"', index):
+            output.append(text[index])
+            index += 1
+            continue
+        depth = 1
+        end = index + 2
+        while end < len(text) and depth:
+            if text.startswith("@{", end):
+                depth += 1
+                end += 2
+            elif text[end] == "}":
+                depth -= 1
+                end += 1
+            else:
+                end += 1
+        if depth:
+            output.append(text[index])
+            index += 1
+            continue
+        references.append(text[index:end])
+        output.append("\x00{}\x00".format(len(references) - 1))
+        index = end
+    return "".join(output), references
+
+def display_text(text):
+    """Return the text MultiView displays, without AmigaGuide control markup."""
+    text = re.sub(r'@\{"(.*?)"\s+link\s+(?:"[^"]+"|[^}]+)\}', r"\1", text)
+    return re.sub(r"@\{(?:b|ub|i|ui)\}", "", text)
+
+
+
+
+def wrap_flow(text, width, first_prefix="", following_prefix=None):
+    """Wrap rendered flowing text without splitting words or guide references."""
+    if width < 1:
+        raise ValueError("width must be positive")
+    following_prefix = first_prefix if following_prefix is None else following_prefix
+    protected, references = protect_guide_references(text)
+    words = protected.split()
+    if not words:
+        return []
+
+    def visible_width(value):
+        for index, reference in enumerate(references):
+            value = value.replace("\x00{}\x00".format(index), reference)
+        return len(display_text(value))
+
+    lines = []
+    prefix = first_prefix
+    line = prefix
+    for word in words:
+        separator = "" if line == prefix else " "
+        if line != prefix and visible_width(line + separator + word) > width:
+            lines.append(line)
+            prefix = following_prefix
+            line = prefix + word
+        else:
+            line += separator + word
+    lines.append(line)
+    for index, reference in enumerate(references):
+        token = "\x00{}\x00".format(index)
+        lines = [line.replace(token, reference) for line in lines]
+    return lines
+
+
+def longest_token(text):
+    protected, references = protect_guide_references(text)
+    tokens = protected.split()
+    return max([len(display_text(token)) for token in tokens] +
+               [len(display_text(reference)) for reference in references] + [1])
+
+
+def distribute_widths(rows, width):
+    columns = len(rows[0])
+    available = max(1, width - 3 * (columns - 1))
+    minimums = [max(longest_token(row[column]) for row in rows) for column in range(columns)]
+    maximums = [max(len(display_text(row[column])) for row in rows) for column in range(columns)]
+    widths = list(minimums)
+    remaining = available - sum(widths)
+    while remaining > 0:
+        candidates = [column for column in range(columns) if widths[column] < maximums[column]]
+        if not candidates:
+            break
+        weights = [max(1, maximums[column] - widths[column]) for column in candidates]
+        total = sum(weights)
+        changed = False
+        for column, weight in zip(candidates, weights):
+            share = max(1, remaining * weight // total)
+            addition = min(share, maximums[column] - widths[column], remaining)
+            if addition:
+                widths[column] += addition
+                remaining -= addition
+                changed = True
+            if not remaining:
+                break
+        if not changed:
+            break
+    return widths
+
 def render_inline(text, anchor_map, siblings, line_number):
     """Render inline syntax while protecting code spans from later substitutions."""
     protected = []
@@ -120,30 +225,42 @@ def table_alignment(cells):
     return all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
 
 
-def render_table(rows, alignment, anchor_map, siblings, line_numbers):
+def render_table(rows, alignment, anchor_map, siblings, line_numbers, width):
     rendered = [[render_inline(cell, anchor_map, siblings, number) for cell in row]
                 for row, number in zip(rows, line_numbers)]
     columns = max(len(row) for row in rendered)
     for row in rendered:
         row.extend([""] * (columns - len(row)))
-    widths = [max(len(row[column]) for row in rendered) for column in range(columns)]
+    if columns == 1:
+        return [wrap_flow(row[0], width) for row in rendered]
+    widths = distribute_widths(rendered, width)
     modes = []
     for column in range(columns):
         marker = alignment[column] if alignment and column < len(alignment) else ""
         modes.append("center" if marker.startswith(":") and marker.endswith(":") else
                      "right" if marker.endswith(":") else "left")
 
-    def padded(value, width, mode):
+    def padded(value, cell_width, mode):
+        padding = max(0, cell_width - len(display_text(value)))
         if mode == "right":
-            return value.rjust(width)
+            return " " * padding + value
         if mode == "center":
-            return value.center(width)
-        return value.ljust(width)
+            left = padding // 2
+            return " " * left + value + " " * (padding - left)
+        return value + " " * padding
 
-    output = [" | ".join(padded(value, widths[column], modes[column])
-                           for column, value in enumerate(row)) for row in rendered]
-    separator = "+".join("-" * width for width in widths)
-    return [output[0], separator] + output[1:]
+    def row_lines(row):
+        cells = [wrap_flow(value, widths[column]) or [""] for column, value in enumerate(row)]
+        height = max(len(cell) for cell in cells)
+        return [" | ".join(padded(cells[column][line] if line < len(cells[column]) else "",
+                                  widths[column], modes[column])
+                            for column in range(columns)) for line in range(height)]
+
+    header = ["@{b}" + line + "@{ub}" for line in row_lines(rendered[0])]
+    table_width = sum(widths) + 3 * (columns - 1)
+    units = [header + ["-" * table_width]]
+    units.extend(row_lines(row) for row in rendered[1:])
+    return units
 
 
 def node_name(title, used):
@@ -235,9 +352,21 @@ def parse_markdown(source):
                     break
                 indent, marker, item = match.group(1), match.group(2), match.group(3)
                 level = len(indent.expandtabs(2)) // 2
-                marker = "-" if marker in ("-", "*") else marker + "."
-                entries.append((level, marker, item, index + 1))
+                base_indent = len(indent.expandtabs(2))
+                item_lines = [item]
+                line_number = index + 1
                 index += 1
+                while index < len(lines):
+                    candidate = lines[index]
+                    if not candidate.strip() or re.match(r"^(\s*)(?:[-*]|\d+[.)])\s+", candidate):
+                        break
+                    candidate_indent = len(candidate) - len(candidate.lstrip(" \t"))
+                    if candidate_indent <= base_indent:
+                        break
+                    item_lines.append(candidate.strip())
+                    index += 1
+                marker = "-" if marker in ("-", "*") else marker + "."
+                entries.append((level, marker, item_lines, line_number))
             add_block("list", entries, number)
             continue
         paragraph = [(line.strip(), number)]
@@ -258,7 +387,7 @@ def parse_markdown(source):
     return nodes, contents, anchors
 
 
-def guide_text(source, input_name, title=None, name=None, version="1.0", date=None, siblings=()):
+def guide_text(source, input_name, title=None, name=None, version="1.0", date=None, siblings=(), width=75):
     nodes, contents, anchors = parse_markdown(source)
     guide_name = ascii_text((name or pathlib.Path(input_name).stem).removesuffix(".guide"))
     document_title = title or nodes[0]["title"] or guide_name
@@ -267,44 +396,55 @@ def guide_text(source, input_name, title=None, name=None, version="1.0", date=No
     sibling_map = sibling_guides(siblings)
     output = ["@database {}.guide".format(guide_name), "@$VER: {}.guide {} ({})".format(guide_name, version, date), ""]
 
+    def emit_unit(lines):
+        output.extend(lines)
+        output.append("")
+
     def emit_block(kind, value, number):
         if kind == "paragraph":
-            output.append(render_inline(" ".join(text for text, _ in value), anchors, sibling_map, number))
+            text = render_inline(" ".join(text for text, _ in value), anchors, sibling_map, number)
+            emit_unit(wrap_flow(text, width))
         elif kind == "line":
-            output.append(ascii_text(value, number))
+            emit_unit(wrap_flow(ascii_text(value, number), width))
         elif kind == "rule":
-            output.append("-" * 40)
+            emit_unit(["-" * 40])
         elif kind == "code":
-            output.append("")
+            if output[-1] != "":
+                output.append("")
             for line, line_number in value:
                 content = ascii_text(line, line_number)
                 output.append("@" + content if content.startswith("@") else content)
             output.append("")
         elif kind == "quote":
-            output.extend("> " + render_inline(line, anchors, sibling_map, line_number) for line, line_number in value)
+            text = render_inline(" ".join(line for line, _ in value), anchors, sibling_map, number)
+            emit_unit(wrap_flow(text, width, "> "))
         elif kind == "list":
-            for level, marker, item, line_number in value:
-                output.append("  " * level + marker + " " + render_inline(item, anchors, sibling_map, line_number))
-            output.append("")
+            for level, marker, item_lines, line_number in value:
+                text = render_inline(" ".join(item_lines), anchors, sibling_map, line_number)
+                indent = "  " * level
+                emit_unit(wrap_flow(text, width, indent + marker + " ",
+                                    indent + " " * (len(marker) + 1)))
         elif kind == "table":
             rows, alignment, row_numbers = value
-            output.extend(render_table(rows, alignment, anchors, sibling_map, row_numbers))
+            for table_unit in render_table(rows, alignment, anchors, sibling_map, row_numbers, width):
+                emit_unit(table_unit)
 
     output.append('@node Main "{}"'.format(ascii_text(document_title)))
-    for section_title, section_name in contents:
-        output.append('@{{"{}" link {}}}'.format(ascii_text(section_title), section_name))
-    if contents:
-        output.append("")
     for kind, value, number in nodes[0]["blocks"]:
         emit_block(kind, value, number)
+    if contents:
+        emit_unit(wrap_flow("Contents", width))
+        for section_title, section_name in contents:
+            emit_unit(['@{{"{}" link {}}}'.format(ascii_text(section_title), section_name)])
     output.append("@endnode")
     for node in nodes[1:]:
-        output.extend(["", '@node {} "{}"'.format(node["name"], ascii_text(node["title"])), ""])
+        output.extend(["", '@node {} "{}"'.format(node["name"], ascii_text(node["title"]))])
         for kind, value, number in node["blocks"]:
             emit_block(kind, value, number)
         if node["parent"]:
-            output.extend(["", '@{"Back" link ' + node["parent"] + "}"])
-        output.extend(["", '@{"Contents" link Main}', "@endnode"])
+            emit_unit(['@{"Back" link ' + node["parent"] + "}"])
+        emit_unit(['@{"Contents" link Main}'])
+        output.append("@endnode")
     return "\n".join(output).rstrip() + "\n"
 
 
@@ -355,24 +495,32 @@ def check_guide(path):
 
 
 def selftest():
+    width = 42
     fixture = """# Demo — Guide
 <!-- ignored -->
-Intro wraps
-onto one line with [local](#part), [play](zzplay.md), [library](../docs/zz9k-library.md), [readme](../README.md), [missing](missing.md), [site](https://example.test), ![logo](logo.png), `code`, **bold**, and *italic*.
+Intro wraps onto one line with [local](#part), [play](zzplay.md),
+[library](../docs/zz9k-library.md), [readme](../README.md),
+[missing](missing.md), [site](https://example.test), ![logo](logo.png),
+`code`, **bold**, and *italic*.
+
+This **bold phrase
+continues over source lines** without literal Markdown markers.
 
 ## Part
 > quoted **line**
 > next line
 
-- one
-  - nested
-* two
+- A list item begins here and continues
+  over a source line without becoming another block unit
+- second item
+  - nested item
 1. first
 2. second
 
-| Left | Right |
+| Left Column | Right Value |
 | :--- | ---: |
-| a | 12 |
+| a long value that wraps | 12345678 |
+| more text | 12 |
 
 #### Small heading
 
@@ -387,29 +535,53 @@ plain
 ### Child
 An unknown snowman ☃ and an arrow →. A timing is 5µs ≈ exact.
 """
-    result = guide_text(fixture, "demo.md", date="1.2.2003",
+    result = guide_text(fixture, "demo.md", date="1.2.2003", width=width,
                         siblings=["ZZPlay.guide", "zz9k-library.guide", "README.guide"])
     expected = [
         "@database demo.guide",
         "@$VER: demo.guide 1.0 (1.2.2003)",
         '@node Main "Demo - Guide"',
-        '@{"Part" link part}', '@{"Child" link child}',
         '@node part "Part"', '> quoted @{b}line@{ub}',
-        "- one", "  - nested", "1. first", "2. second",
-        "Left | Right", "----+-----", "a    |    12",
         "@{b}Small heading@{ub}", "----------------------------------------",
         "@@command", '@{"Back" link part}', '@{"Contents" link Main}',
         '@{"play" link "ZZPlay.guide/Main"}', '@{"library" link "zz9k-library.guide/Main"}',
-        "readme (../README.md)", "missing (missing.md)", "site (https://example.test)", "logo (image: logo.png)",
+        "../README.md", "missing.md", "https://example.test", "logo.png",
         "@{b}code@{ub}", "@{b}bold@{ub}", "@{i}italic@{ui}",
-        "An unknown snowman ? and an arrow ->. A timing is 5us ~ exact.",
+        "An unknown snowman ? and an arrow ->.", "5us ~", "exact.",
         "| +--+ >",
     ]
     for value in expected:
         if value not in result:
             raise AssertionError("missing {!r}".format(value))
+    if "**bold phrase" in result or "source lines**" in result:
+        raise AssertionError("cross-line bold was not rendered")
     if '@{"local" link part}' not in result:
         raise AssertionError("missing local link form")
+    intro = result.index("Intro wraps")
+    contents = result.index("\nContents\n")
+    toc = result.index('@{"Part" link part}')
+    if not intro < contents < toc:
+        raise AssertionError("contents does not follow Main intro")
+    lines = result.splitlines()
+    list_start = next(index for index, line in enumerate(lines) if line.startswith("- A list item"))
+    list_end = next(index for index in range(list_start + 1, len(lines)) if not lines[index])
+    if list_end == list_start + 1 or not lines[list_start + 1].startswith("  "):
+        raise AssertionError("list item was split into multiple block units")
+    if not all(lines[index].strip() for index in range(list_start, list_end)):
+        raise AssertionError("blank line inside list item")
+    second_item = next(index for index, line in enumerate(lines) if line == "- second item")
+    if lines[second_item - 1] != "":
+        raise AssertionError("list items lack separating blank lines")
+    for line in lines:
+        if line.startswith("@") and not line.startswith("@{b}"):
+            continue
+        visual = display_text(line)
+        if line and len(visual) > width and len(visual.split()) > 1:
+            raise AssertionError("flowing line exceeds width: {!r}".format(line))
+    table_lines = [display_text(line) for line in lines
+                   if " | " in line or (line and set(line) == {"-"})]
+    if any(len(line) > width for line in table_lines):
+        raise AssertionError("table exceeds width")
     with tempfile.TemporaryDirectory() as directory:
         guide = pathlib.Path(directory) / "demo.guide"
         guide.write_bytes(result.encode("ascii"))
@@ -426,6 +598,7 @@ def main(argv=None):
     parser.add_argument("--name")
     parser.add_argument("--version", default="1.0")
     parser.add_argument("--date")
+    parser.add_argument("--width", type=int, default=75)
     parser.add_argument("--check", metavar="FILE.guide")
     parser.add_argument("--sibling", metavar="NAME.guide", action="append", default=[])
     parser.add_argument("--selftest", action="store_true")
@@ -441,11 +614,13 @@ def main(argv=None):
             if arguments.input or arguments.output:
                 parser.error("--check does not accept input or output paths")
             return 0 if check_guide(arguments.check) else 1
+        if arguments.width < 1:
+            parser.error("--width must be positive")
         if not arguments.input:
             parser.error("INPUT.md is required")
         source = pathlib.Path(arguments.input).read_text(encoding="utf-8")
         result = guide_text(source, arguments.input, arguments.title, arguments.name, arguments.version, arguments.date,
-                            arguments.sibling)
+                            arguments.sibling, arguments.width)
         if arguments.output:
             pathlib.Path(arguments.output).write_bytes(result.encode("ascii"))
         else:
