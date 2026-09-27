@@ -82,8 +82,11 @@ void Xil_AssertNonVoid() {}
  * 2.8: v2.8 release identity — MPEG-1 media sessions, hardware overlay
  * scaling, per-stage pipeline profiling (MEDIA_STATUS page 5), the
  * primary-CLUT query, atomic videocap_profile configuration, reliable
- * display-transmitter retraining during output-mode changes, and the
- * host-visible firmware half of the matched live-videocap contract.
+ * display-transmitter retraining during output-mode changes, the
+ * host-visible firmware half of the matched live-videocap contract, the
+ * A4000 C28 capture variants with runtime phase control, SANA-II
+ * multicast hash programming, and the post-mix stereo audio limiter
+ * with parity boot defaults.
  * Startup operation 16 enters the shared acknowledged RTL control engine;
  * live calibration also requires the bitstream's exact capability. Other
  * SDK additions use service flags and status pages that self-gate. */
