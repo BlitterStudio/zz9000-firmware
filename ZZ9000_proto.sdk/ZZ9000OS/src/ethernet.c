@@ -519,10 +519,16 @@ void ethernet_task() {
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
 
 	if (ethernet_task_state == ETH_TASK_SETUP) {
-		// FIXME
-		EmacPsSetupIntrSystem(EmacPsInstancePtr, EMACPS_IRPT_INTR);
+		LONG intr_status = EmacPsSetupIntrSystem(EmacPsInstancePtr,
+		                                          EMACPS_IRPT_INTR);
 
-		ethernet_task_state = ETH_TASK_NEGOTIATE;
+		/* Without the EMAC interrupt connected, RX/TX cannot work and
+		 * a later successful init_ethernet_buffers() must not make
+		 * the link-ready register claim a usable interface. Stay in
+		 * SETUP instead; the task retries on its next pass. */
+		if (intr_status == XST_SUCCESS) {
+			ethernet_task_state = ETH_TASK_NEGOTIATE;
+		}
 	} else if (ethernet_task_state == ETH_TASK_NEGOTIATE) {
 		int complete = micrel_auto_negotiate_step2(EmacPsInstancePtr, PhyAddr);
 
