@@ -79,6 +79,16 @@ function Decode-Base64File {
   [System.IO.File]::WriteAllBytes($Dest, $Bytes)
 }
 
+function Make-Guide {
+  param([string]$SourceRel, [string]$Name)
+  # Amiga-side manuals ship as AmigaGuide databases generated from the
+  # canonical Markdown sources: raw .md has no reader on AmigaOS.
+  & python "$RepoRoot\scripts\md2guide.py" --name $Name `
+    "$RepoRoot\$($SourceRel -replace '/', '\')" `
+    (Join-Path $PackageRoot "Docs\$Name.guide")
+  if ($LASTEXITCODE -ne 0) { exit 1 }
+}
+
 Copy-One "build/zz9k.library" "Libs/zz9k.library"
 Copy-One "build/mpega.library" "Libs/mpega.library"
 
@@ -152,23 +162,16 @@ Copy-One "amiga/fd/mpega_lib.fd" "Developer/FD/mpega_lib.fd"
 Copy-One "amiga/fd/mpega.fd" "Developer/FD/mpega.fd"
 Copy-One "amiga/fd/mpega.fd" "Developer/Include/fd/mpega.fd"
 
-Copy-One "README.md" "Docs/README.md"
-Copy-One "docs/zz9k-library.md" "Docs/zz9k-library.md"
-Copy-One "docs/zz9k-zorro2-services.md" "Docs/zz9k-zorro2-services.md"
-Copy-One "docs/zz9k-modules.md" "Docs/zz9k-modules.md"
-Copy-One "docs/zz9k-picture-datatype.md" "Docs/zz9k-picture-datatype.md"
-Copy-One "docs/zz9k-68k-offload.md" "Docs/zz9k-68k-offload.md"
-Copy-One "docs/zz9k-release-smoke.md" "Docs/zz9k-release-smoke.md"
-Copy-One "docs/zzplay.md" "Docs/zzplay.md"
-Copy-One "docs/zz9k-amissl-provider.md" "Docs/zz9k-amissl-provider.md"
-Copy-One "docs/zz9k-crypto-acceleration.md" "Docs/zz9k-crypto-acceleration.md"
-
-# Docs/ is flat in the package, but README.md links to the companion docs with
-# a "docs/" prefix. Rewrite those link targets so they resolve to the sibling
-# files inside the package instead of a nonexistent Docs/docs/ subfolder.
-$packagedReadme = Join-Path $PackageRoot "Docs\README.md"
-(Get-Content -LiteralPath $packagedReadme -Raw) -replace '\]\(docs/', '](' |
-  Set-Content -LiteralPath $packagedReadme -NoNewline
+Make-Guide "README.md" "README"
+Make-Guide "docs/zz9k-library.md" "zz9k-library"
+Make-Guide "docs/zz9k-zorro2-services.md" "zz9k-zorro2-services"
+Make-Guide "docs/zz9k-modules.md" "zz9k-modules"
+Make-Guide "docs/zz9k-picture-datatype.md" "zz9k-picture-datatype"
+Make-Guide "docs/zz9k-68k-offload.md" "zz9k-68k-offload"
+Make-Guide "docs/zz9k-release-smoke.md" "zz9k-release-smoke"
+Make-Guide "docs/zzplay.md" "ZZPlay"
+Make-Guide "docs/zz9k-amissl-provider.md" "zz9k-amissl-provider"
+Make-Guide "docs/zz9k-crypto-acceleration.md" "zz9k-crypto-acceleration"
 
 Decode-Base64File "tests/fixtures/archives/split-deflate.7z.b64" `
   "Archives/split-deflate.7z"

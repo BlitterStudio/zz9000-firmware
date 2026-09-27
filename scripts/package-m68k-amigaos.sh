@@ -79,6 +79,35 @@ copy_tree() {
   cp -R "$REPO_ROOT/$1"/. "$PACKAGE_ROOT/$2"
 }
 
+# Amiga-side manuals ship as AmigaGuide databases generated from the
+# canonical Markdown sources: raw .md has no reader on AmigaOS. The
+# converter is stdlib-only Python and this script runs on the host,
+# never inside the m68k Docker container. Cross-document links resolve
+# to the sibling guides in GUIDE_SPECS, so the shipped doc set and this
+# list must stay in sync.
+GUIDE_SPECS="README.md:README \
+docs/zz9k-library.md:zz9k-library \
+docs/zz9k-zorro2-services.md:zz9k-zorro2-services \
+docs/zz9k-modules.md:zz9k-modules \
+docs/zz9k-picture-datatype.md:zz9k-picture-datatype \
+docs/zz9k-68k-offload.md:zz9k-68k-offload \
+docs/zz9k-release-smoke.md:zz9k-release-smoke \
+docs/zzplay.md:ZZPlay \
+docs/zz9k-amissl-provider.md:zz9k-amissl-provider \
+docs/zz9k-crypto-acceleration.md:zz9k-crypto-acceleration"
+GUIDE_SIBLINGS=""
+for spec in $GUIDE_SPECS; do
+  GUIDE_SIBLINGS="$GUIDE_SIBLINGS --sibling ${spec##*:}.guide"
+done
+make_guide() {
+  src=${1%%:*}
+  name=${1##*:}
+  # shellcheck disable=SC2086
+  python3 "$REPO_ROOT/scripts/md2guide.py" \
+    --name "$name" $GUIDE_SIBLINGS \
+    "$REPO_ROOT/$src" "$PACKAGE_ROOT/Docs/$name.guide"
+}
+
 decode_base64_file() {
   if base64 -d "$REPO_ROOT/$1" > "$PACKAGE_ROOT/$2" 2>/dev/null; then
     return
@@ -167,14 +196,9 @@ copy_one "amiga/fd/mpega_lib.fd" "Developer/FD/mpega_lib.fd"
 copy_one "amiga/fd/mpega.fd" "Developer/FD/mpega.fd"
 copy_one "amiga/fd/mpega.fd" "Developer/Include/fd/mpega.fd"
 
-copy_one "README.md" "Docs/README.md"
-copy_one "docs/zz9k-library.md" "Docs/zz9k-library.md"
-copy_one "docs/zz9k-zorro2-services.md" "Docs/zz9k-zorro2-services.md"
-copy_one "docs/zz9k-modules.md" "Docs/zz9k-modules.md"
-copy_one "docs/zz9k-picture-datatype.md" "Docs/zz9k-picture-datatype.md"
-copy_one "docs/zz9k-68k-offload.md" "Docs/zz9k-68k-offload.md"
-copy_one "docs/zz9k-release-smoke.md" "Docs/zz9k-release-smoke.md"
-copy_one "docs/zzplay.md" "Docs/zzplay.md"
+for spec in $GUIDE_SPECS; do
+  make_guide "$spec"
+done
 decode_base64_file "tests/fixtures/archives/split-deflate.7z.b64" \
   "Archives/split-deflate.7z"
 decode_base64_file "tests/fixtures/archives/split-lzma.7z.b64" \

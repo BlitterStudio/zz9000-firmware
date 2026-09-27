@@ -175,9 +175,10 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name, "docs/zz9k-picture-datatype.md");
   ok &= expect_contains(script, name, "docs/zz9k-68k-offload.md");
   ok &= expect_contains(script, name, "docs/zz9k-release-smoke.md");
-  ok &= expect_contains(script, name, "Docs/zz9k-68k-offload.md");
-  ok &= expect_contains(script, name, "Docs/zz9k-zorro2-services.md");
-  ok &= expect_contains(script, name, "Docs/zz9k-release-smoke.md");
+  ok &= expect_contains(script, name, "md2guide.py");
+  ok &= expect_contains(script, name, "docs/zzplay.md");
+  ok &= expect_contains(script, name, "docs/zz9k-amissl-provider.md");
+  ok &= expect_contains(script, name, "docs/zz9k-crypto-acceleration.md");
   ok &= expect_contains(script, name,
                         "tests/fixtures/archives/split-deflate.7z.b64");
   ok &= expect_contains(script, name,
@@ -198,10 +199,12 @@ static int check_script(const char *path, const char *name)
   if (strstr(name, ".ps1")) {
     ok &= expect_contains(script, name, "Get-FileHash");
     ok &= expect_contains(script, name, "ToLowerInvariant");
+    ok &= expect_contains(script, name, "Make-Guide \"docs/zzplay.md\" \"ZZPlay\"");
   } else {
     ok &= expect_contains(script, name, "sha256");
     ok &= expect_contains(script, name, "SAFE_ROOT");
     ok &= expect_contains(script, name, "PACKAGE_PARENT");
+    ok &= expect_contains(script, name, "docs/zzplay.md:ZZPlay");
   }
 
   free(script);
