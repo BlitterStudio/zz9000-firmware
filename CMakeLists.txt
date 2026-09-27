@@ -1293,6 +1293,15 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/docs/zz9k-picture-datatype.md
 )
 
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+add_test(
+  NAME md2guide_test
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scripts/md2guide.py
+          --selftest
+)
+
 add_executable(datatype_probe_source_test
   tests/datatype_probe_source_test.c
 )
