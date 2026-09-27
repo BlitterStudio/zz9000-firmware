@@ -85,16 +85,12 @@ copy_tree() {
 # never inside the m68k Docker container. Cross-document links resolve
 # to the sibling guides in GUIDE_SPECS, so the shipped doc set and this
 # list must stay in sync.
-GUIDE_SPECS="README.md:README \
+GUIDE_SPECS="README.md:ZZ9000-SDK \
 docs/zz9k-library.md:zz9k-library \
 docs/zz9k-zorro2-services.md:zz9k-zorro2-services \
-docs/zz9k-modules.md:zz9k-modules \
 docs/zz9k-picture-datatype.md:zz9k-picture-datatype \
-docs/zz9k-68k-offload.md:zz9k-68k-offload \
-docs/zz9k-release-smoke.md:zz9k-release-smoke \
 docs/zzplay.md:ZZPlay \
-docs/zz9k-amissl-provider.md:zz9k-amissl-provider \
-docs/zz9k-crypto-acceleration.md:zz9k-crypto-acceleration"
+docs/zz9k-amissl-provider.md:zz9k-amissl-provider"
 GUIDE_SIBLINGS=""
 for spec in $GUIDE_SPECS; do
   GUIDE_SIBLINGS="$GUIDE_SIBLINGS --sibling ${spec##*:}.guide"

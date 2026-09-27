@@ -81,9 +81,10 @@ function Decode-Base64File {
 
 function Make-Guide {
   param([string]$SourceRel, [string]$Name)
-  # Amiga-side manuals ship as AmigaGuide databases generated from the
-  # canonical Markdown sources: raw .md has no reader on AmigaOS.
-  & python "$RepoRoot\scripts\md2guide.py" --name $Name `
+  # Amiga-side manuals ship as AmiGuide databases generated from the
+  # canonical Markdown sources: raw .md has no Amiga reader. Sibling
+  # names must match $GuideSpecs so cross-document links resolve.
+  & python "$RepoRoot\scripts\md2guide.py" --name $Name @GuideSiblings `
     "$RepoRoot\$($SourceRel -replace '/', '\')" `
     (Join-Path $PackageRoot "Docs\$Name.guide")
   if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -162,16 +163,23 @@ Copy-One "amiga/fd/mpega_lib.fd" "Developer/FD/mpega_lib.fd"
 Copy-One "amiga/fd/mpega.fd" "Developer/FD/mpega.fd"
 Copy-One "amiga/fd/mpega.fd" "Developer/Include/fd/mpega.fd"
 
-Make-Guide "README.md" "README"
-Make-Guide "docs/zz9k-library.md" "zz9k-library"
-Make-Guide "docs/zz9k-zorro2-services.md" "zz9k-zorro2-services"
-Make-Guide "docs/zz9k-modules.md" "zz9k-modules"
-Make-Guide "docs/zz9k-picture-datatype.md" "zz9k-picture-datatype"
-Make-Guide "docs/zz9k-68k-offload.md" "zz9k-68k-offload"
-Make-Guide "docs/zz9k-release-smoke.md" "zz9k-release-smoke"
-Make-Guide "docs/zzplay.md" "ZZPlay"
-Make-Guide "docs/zz9k-amissl-provider.md" "zz9k-amissl-provider"
-Make-Guide "docs/zz9k-crypto-acceleration.md" "zz9k-crypto-acceleration"
+$GuideSpecs = @(
+  "README.md:ZZ9000-SDK",
+  "docs/zz9k-library.md:zz9k-library",
+  "docs/zz9k-zorro2-services.md:zz9k-zorro2-services",
+  "docs/zz9k-picture-datatype.md:zz9k-picture-datatype",
+  "docs/zzplay.md:ZZPlay",
+  "docs/zz9k-amissl-provider.md:zz9k-amissl-provider"
+)
+$GuideSiblings = @()
+foreach ($spec in $GuideSpecs) {
+  $GuideSiblings += "--sibling"
+  $GuideSiblings += "$($spec.Split(':')[1]).guide"
+}
+foreach ($spec in $GuideSpecs) {
+  $parts = $spec.Split(':')
+  Make-Guide $parts[0] $parts[1]
+}
 
 Decode-Base64File "tests/fixtures/archives/split-deflate.7z.b64" `
   "Archives/split-deflate.7z"

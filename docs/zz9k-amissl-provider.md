@@ -39,8 +39,8 @@ else fall through to AmiSSL's own (default) provider.
 ```
 
 A provider that sets the default property query to `?provider=zz9000` is
-*preferred* for every algorithm it advertises, so libssl fetches **our**
-implementation for the whole of any key type we name — not just the leaf
+*preferred* for every algorithm it advertises, so libssl fetches our
+implementation for the whole of any key type we name, not only the leaf
 operation we accelerate. Two kinds of algorithm are advertised, and they are
 owned differently:
 
@@ -87,7 +87,7 @@ host unit tests. Two things make them use the hardware:
 * **An open offload context.** `zz9k_provider_init` opens the board once for
   the provider's lifetime (`zz9k_offload_open`), keeps it only when the
   firmware's crypto service responds, and records the advertised service
-  flags. Each operation additionally gates its offload on the matching
+  flags. Each operation also gates its offload on the matching
   `ZZ9K_SERVICE_FLAG_CRYPTO_*` bit, so firmware that lacks one algorithm never
   pays a failing mailbox round trip for it. If the board (or the crypto
   service) is absent the provider still loads and every operation transparently

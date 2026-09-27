@@ -1733,7 +1733,7 @@ if (ZZ9KBase->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_CRYPTO_KX) {
 }
 ```
 
-The firmware additionally advertises X25519 support through the crypto
+The firmware also advertises X25519 support through the crypto
 service flags; gate hardware use on `ZZ9K_SERVICE_FLAG_CRYPTO_X25519` from
 `ZZ9KQueryService()`.
 
