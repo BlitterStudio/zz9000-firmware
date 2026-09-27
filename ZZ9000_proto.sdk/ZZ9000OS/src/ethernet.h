@@ -35,6 +35,7 @@ enum {
 };
 
 extern int ethernet_task_state;
+extern int ethernet_hw_ready;
 
 int ethernet_init();
 void ethernet_set_multicast_hash(u16 command);

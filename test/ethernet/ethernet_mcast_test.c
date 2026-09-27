@@ -36,6 +36,7 @@ static int resume_count;
 static const char *last_restart;
 
 int ethernet_task_state = ETH_TASK_SETUP;
+int ethernet_hw_ready = 0;
 
 u32 ethernet_emac_base(void)
 {
@@ -251,10 +252,16 @@ static int test_capability_read_preserves_mac_bytes(void)
 	u16 config16;
 
 	memcpy(before, mac, sizeof(mac));
+	ethernet_hw_ready = 0;
 	ethernet_task_state = ETH_TASK_NEGOTIATE;
 	CHECK(ethernet_get_multicast_config() ==
 	      (ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE));
+	/* The task machine reaches READY even when init_ethernet_buffers()
+	 * failed; the register must not claim a usable link then. */
 	ethernet_task_state = ETH_TASK_READY;
+	CHECK(ethernet_get_multicast_config() ==
+	      (ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE));
+	ethernet_hw_ready = 1;
 	CHECK(ethernet_get_multicast_config() ==
 	      (ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE |
 	       ETH_CONFIG_LINK_READY));

@@ -51,8 +51,11 @@ u16 ethernet_get_multicast_config(void)
 
 	/* READY is reached only after PHY auto-negotiation completes, i.e.
 	 * a cable was connected at some point since power-on. It is not
-	 * cleared if the cable is pulled later. */
-	if (ethernet_task_state == ETH_TASK_READY)
+	 * cleared if the cable is pulled later. hw_ready gates on EMAC
+	 * init actually succeeding: the task machine sets READY even when
+	 * init_ethernet_buffers() failed, and a boot-time consumer must
+	 * not start a stack on that interface. */
+	if (ethernet_task_state == ETH_TASK_READY && ethernet_hw_ready)
 		config |= ETH_CONFIG_LINK_READY;
 
 	return config;

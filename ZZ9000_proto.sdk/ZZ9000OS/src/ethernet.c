@@ -343,6 +343,10 @@ int ethernet_init() {
 
 
 int ethernet_task_state = ETH_TASK_SETUP;
+/* Set only when init_ethernet_buffers() (which also starts the EMAC)
+ * succeeded; the task state machine reaches READY regardless, so the
+ * link-ready register bit requires both. */
+int ethernet_hw_ready = 0;
 
 #define ETH_RX_INTERRUPT_MASK (XEMACPS_IXR_FRAMERX_MASK | XEMACPS_IXR_RX_ERR_MASK)
 /*
@@ -532,6 +536,8 @@ void ethernet_task() {
 		u16 status = init_ethernet_buffers();
 		if (status != XST_SUCCESS) {
 			printf("EMAC: init_ethernet_buffers() error\n");
+		} else {
+			ethernet_hw_ready = 1;
 		}
 
 		ethernet_task_state = ETH_TASK_READY;
