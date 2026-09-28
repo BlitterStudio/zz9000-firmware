@@ -1,0 +1,11 @@
+# Source metadata for the packaged ZZ9000 JPEG DataTypes descriptor.
+# Copyright (C) 2024-2026, Dimitris Panokostas / BlitterStudio
+# SPDX-License-Identifier: GPL-3.0-or-later
+FileName=Storage/DataTypes/ZZ9000-JPEG
+Version=42.5
+DTName=ZZ9000-JPEG,zz9k-picture
+ID=pict,jpeg
+Recog=ff d8 ff
+Pattern=#?
+Flags=Binary,n,10
+Install=inactive

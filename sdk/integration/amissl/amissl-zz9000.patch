@@ -1,0 +1,79 @@
+diff --git a/Makefile b/Makefile
+index 39f0cbe97..2366eb43c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -409,7 +409,8 @@ LIBOBJS = $(BUILD_D)/amissl_libinit.o \
+           $(BUILD_D)/amissl_norestore.o \
+           $(BUILD_D)/amissl_init.o \
+           $(BUILD_D)/debug.o \
+-          $(EXTRALIBOBJS)
++          $(EXTRALIBOBJS) \
++          $(ZZ9000_OBJS)
+ 
+ MASTEROBJS = $(BUILD_D)/amisslmaster_libinit.o \
+              $(BUILD_D)/amisslmaster_library.o \
+@@ -476,6 +477,39 @@ $(BUILD_D)/%.o: $(SRC_D)/%.c
+ 	@echo "  CC $<"
+ 	@$(CC) $(CFLAGS) -c $< -o $@
+ 
++# --- ZZ9000 crypto-offload provider (built into amissl.library) ---
++# Sources live in the zz9000-sdk checkout; point ZZ9000_SDK at it.
++ZZ9000_SDK ?= $(CURDIR)/../zz9000-sdk
++ZZ9000_CFLAGS = -DZZ9K_PROVIDER_OFFLOAD \
++                -I$(ZZ9000_SDK)/include \
++                -I$(ZZ9000_SDK)/host/include \
++                -I$(ZZ9000_SDK)/tools \
++                -I$(ZZ9000_SDK)/amiga/provider
++ZZ9000_OBJS = $(BUILD_D)/zz9k_provider.o \
++              $(BUILD_D)/zz9k_algorithms.o \
++              $(BUILD_D)/zz9k_x25519.o \
++              $(BUILD_D)/zz9k_aead.o \
++              $(BUILD_D)/zz9k_ecdsa.o \
++              $(BUILD_D)/zz9k_rsa.o \
++              $(BUILD_D)/zz9k_offload.o \
++              $(BUILD_D)/zz9k_amissl_builtin.o \
++              $(BUILD_D)/zz9k_host.o \
++              $(BUILD_D)/zz9k_crypto_soft.o
++
++$(BUILD_D)/zz9k_%.o: $(ZZ9000_SDK)/amiga/provider/zz9k_%.c
++	@echo "  CC (zz9000) $<"
++	@$(CC) $(CFLAGS) $(ZZ9000_CFLAGS) -c $< -o $@
++$(BUILD_D)/zz9k_host.o: $(ZZ9000_SDK)/host/src/zz9k_host.c
++	@echo "  CC (zz9000) $<"
++	@$(CC) $(CFLAGS) $(ZZ9000_CFLAGS) -c $< -o $@
++$(BUILD_D)/zz9k_crypto_soft.o: $(ZZ9000_SDK)/tools/zz9k-crypto-soft.c
++	@echo "  CC (zz9000) $<"
++	@$(CC) $(CFLAGS) $(ZZ9000_CFLAGS) -c $< -o $@
++
++# amissl_library.c includes zz9k_amissl_builtin.h; give its compile the
++# provider include paths so the call is checked against the real prototype.
++$(BUILD_D)/amissl_library.o: CFLAGS += $(ZZ9000_CFLAGS)
++
+ ## OPENSSL BUILD RULES ##
+ 
+ ifeq ($(DEBUG),)
+diff --git a/src/amissl_library.c b/src/amissl_library.c
+index dd86092e6..10619dae6 100644
+--- a/src/amissl_library.c
++++ b/src/amissl_library.c
+@@ -36,6 +36,8 @@
+ #include <openssl/crypto.h>
+ #include <openssl/lhash.h>
+ 
++#include "zz9k_amissl_builtin.h" /* ZZ9000 crypto-offload provider */
++
+ //#include <clib/amissl_protos.h>
+ #define NO_MTCP_PROTOS
+ #ifdef __GNUC__
+@@ -361,6 +363,11 @@ LIBPROTO(InitAmiSSLA, LONG, REG(a6, __BASE_OR_IFACE), REG(a0, struct TagItem *ta
+ 
+     initialize_socket_errno(state);
+ 
++    /* ZZ9000: register the hardware crypto-offload provider for this
++     * application's default OpenSSL context (best-effort; on failure
++     * the application simply uses AmiSSL software crypto). */
++    zz9k_provider_register_builtin(NULL);
++
+     err = 0;
+   }
+   else

@@ -1,0 +1,13 @@
+build
+*.lha
+*.o
+*.obj
+*.bin
+*.exe
+.DS_Store
+/archive_tool_*
+
+build-cmake
+build-host
+.worktrees
+build-host-flip
