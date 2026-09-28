@@ -4,7 +4,7 @@ CFLAGS ?= -O2 -g -Wall -Wextra
 SRC_DIR := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 MOCK_DIR := mock
 BUILD_DIR := build
-TARGET := $(BUILD_DIR)/config_test
+TARGETS := $(BUILD_DIR)/config_test $(BUILD_DIR)/boot_order_test
 
 CPPFLAGS += -I$(MOCK_DIR) -I$(SRC_DIR)
 
@@ -13,10 +13,15 @@ DEPS := $(MOCK_DIR)/ff.h $(MOCK_DIR)/xil_cache.h $(SRC_DIR)/zz_config.h $(SRC_DI
 
 .PHONY: test clean
 
-test: $(TARGET)
-	$(TARGET)
+test: $(TARGETS)
+	$(BUILD_DIR)/config_test
+	$(BUILD_DIR)/boot_order_test
 
-$(TARGET): $(SOURCES) $(DEPS)
+$(BUILD_DIR)/boot_order_test: boot_order_test.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+
+$(BUILD_DIR)/config_test: $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SOURCES)
 

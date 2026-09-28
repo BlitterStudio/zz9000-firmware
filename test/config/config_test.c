@@ -25,9 +25,22 @@ void mock_set_bak_file(const char *contents) { mock_bak_file = contents; }
 void mock_set_mount_result(FRESULT fr) { mock_mount_fr = fr; }
 int mock_mount_balance(void) { return mounts; }
 
+/* sd_boot_deadline stubs: the ARM implementation (XTime-based) lives
+ * in the firmware build only; the host tests provide the state the
+ * bounded loader reads. */
+volatile uint64_t sd_boot_deadline_xtime;
+volatile uint8_t sd_boot_deadline_fired;
+static int fire_on_mount;
+
+void mock_set_fire_on_mount(int on) { fire_on_mount = on; }
+
+void sd_boot_deadline_arm(uint32_t ms) { (void)ms; sd_boot_deadline_fired = 0; }
+void sd_boot_deadline_disarm(void) {}
+
 FRESULT f_mount(FATFS *fs, const char *path, unsigned char opt) {
     (void)path; (void)opt;
     if (fs == NULL) { mounts--; return FR_OK; }   /* unregister */
+    if (fire_on_mount) sd_boot_deadline_fired = 1;
     if (mock_mount_fr != FR_OK) return mock_mount_fr;
     mounts++;
     return FR_OK;
@@ -854,6 +867,73 @@ static void test_fastram_emit_round_trip(void) {
     CHECK(zz_config_fastram_enabled());
 }
 
+
+static void test_fastram_bounded_outcomes(void) {
+    uint16_t present = 0;
+
+    /* healthy file: enabled */
+    mock_set_file("fast_ram = on\n");
+    mock_set_bak_file(NULL);
+    mock_set_mount_result(FR_OK);
+    mock_set_fire_on_mount(0);
+    CHECK(zz_config_load_fastram(1000) == 0);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
+          ZZ_FASTRAM_OUTCOME_ENABLED && present);
+
+    /* parsed `off` */
+    mock_set_file("fast_ram = off\n");
+    CHECK(zz_config_load_fastram(1000) == 0);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
+          ZZ_FASTRAM_OUTCOME_OFF && present);
+
+    /* key absent from a parsed file */
+    mock_set_file("int2 = on\n");
+    CHECK(zz_config_load_fastram(1000) == 0);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
+          ZZ_FASTRAM_OUTCOME_ABSENT && present);
+
+    /* malformed key line */
+    mock_set_file("fast_ram = on\nfast_ram = maybe\n");
+    CHECK(zz_config_load_fastram(1000) == 0);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
+          ZZ_FASTRAM_OUTCOME_INVALID && present);
+
+    /* no file and no BAK: no enabling authority */
+    mock_set_file(NULL);
+    CHECK(zz_config_load_fastram(1000) == -1);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
+          ZZ_FASTRAM_OUTCOME_ABSENT && present);
+
+    /* mount failure (no card) */
+    mock_set_mount_result(FR_NOT_READY);
+    CHECK(zz_config_load_fastram(1000) == -1);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
+          ZZ_FASTRAM_OUTCOME_MEDIA_ERR && present);
+
+    /* deadline fired during the load: fail closed even for `on` */
+    mock_set_mount_result(FR_OK);
+    mock_set_file("fast_ram = on\n");
+    mock_set_fire_on_mount(1);
+    CHECK(zz_config_load_fastram(1000) == 0);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
+          ZZ_FASTRAM_OUTCOME_TIMEOUT && present);
+    mock_set_fire_on_mount(0);
+
+    /* a fired deadline never upgrades a disabled outcome */
+    mock_set_file("fast_ram = off\n");
+    mock_set_fire_on_mount(1);
+    CHECK(zz_config_load_fastram(1000) == 0);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
+          ZZ_FASTRAM_OUTCOME_OFF && present);
+    mock_set_fire_on_mount(0);
+
+    /* BAK-recovered `on` reports its own outcome */
+    mock_set_file(NULL);
+    mock_set_bak_file("fast_ram = on\n");
+    CHECK(zz_config_load_fastram(1000) == 0);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
+          ZZ_FASTRAM_OUTCOME_BAK_ON && present);
+}
 static void test_sample_file_under_budget(void) {
     /* the shipped sample must fit the 4 KiB parse budget and ships
      * fast_ram commented out (fail-closed default) */
@@ -893,6 +973,7 @@ int main(void) {
     test_loader_no_card();
     test_read_raw();
     test_fastram_key();
+    test_fastram_bounded_outcomes();
     test_fastram_truncated_file();
     test_fastram_bak_recovery();
     test_fastram_query_and_outcome();

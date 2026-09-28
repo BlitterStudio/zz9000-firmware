@@ -413,10 +413,28 @@ static void activate_aperture_layout_if_acknowledged(void)
 }
 
 void handle_amiga_reset(enum amiga_reset_mode mode) {
+	/* Fast-Ram gate (fast-ram-cfg KTD4): close the gate the moment a
+	 * reset is detected -- the fail-safe presentation -- then rederive
+	 * the decision from the SD file with the same bounded, fail-closed
+	 * loader as cold boot and reopen only on an enabling outcome. The
+	 * RTL retains the gate across a warm reset and restarts autoconfig
+	 * once reset releases, so this runs before any other reset work
+	 * and before the banner. ZZTop saves travel the FWUP file-push
+	 * path, so the file (not stale parsed state) is the authority; a
+	 * warm reboot therefore applies a saved fast_ram change, and a
+	 * failed or too-slow re-read boots without Fast RAM. */
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6, 0);
+	/* Cold boot reaches this handler as media init right after main()
+	 * decided the gate; only a genuine warm reset re-reads the file. */
+	if (mode != AMIGA_RESET_INIT_MEDIA)
+		zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS);
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
+		zz_config_fastram_advertise() ? 1 : 0);
+
 	printf("    _______________   ___   ___   ___  \n");
 	printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
 	printf("      / /   / / (_) | | | | | | | | | |\n");
-	printf("     / /   / / \\__, | | | | | | | | | |\n");
+	printf("     / /   / / \\__, | | | | | | | | |\n");
 	printf("    / /__ / /__  / /| |_| | |_| | |_| |\n");
 	printf("   /_____/_____|/_/  \\___/ \\___/ \\___/ \n\n");
 	printf("[reset] Amiga reset (%s)\r\n",
@@ -512,26 +530,46 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 int main() {
 	init_platform();
 
+	/* Fast-Ram advertisement (fast-ram-cfg plan, KTD1/KTD6): the RTL
+	 * withholds the second Z3 autoconfig PIC (256 MiB Fast RAM) until
+	 * REG6 bit 0 is set (issue #25). The gate now opens only on a
+	 * successful, bounded, fail-closed ZZ9000.CFG decision, and the
+	 * CFG read runs before every other boot step so the decision
+	 * lands as early as possible in the race against the Amiga's
+	 * autoconfig pass. Every other condition -- key absent, off,
+	 * malformed, truncated, unreadable, or past the deadline -- leaves
+	 * the gate closed, so the card presents without Fast RAM (the old
+	 * nofast behavior) rather than advertising RAM an early
+	 * accelerator probe could mark defective. On Zorro II/A500
+	 * bitstreams the write is inert. */
+	XTime fastram_t0, fastram_t1;
+	XTime_GetTime(&fastram_t0);
+	zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS);
+	XTime_GetTime(&fastram_t1);
+	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
+		zz_config_fastram_advertise() ? 1 : 0);
+	{
+		uint64_t load_counts = (uint64_t)(fastram_t1 - fastram_t0);
+		uint32_t load_ms = (uint32_t)((load_counts * 1000U) /
+			COUNTS_PER_SECOND);
+		/* The one bounded boot-timing report (KTD5): printed after
+		 * the gate write so it cannot delay the decision, and the
+		 * only UART output this path produces before the service
+		 * bring-up. */
+		printf("[boot] fastram: %s cfg=%ums diag=%u\n",
+			zz_fastram_outcome_name((enum zz_fastram_outcome)
+				zz_config_get()->fastram_outcome),
+			load_ms, zz_config_diag_count());
+	}
+
 	sd_activity_led_init();
 
-	// issue #25: tell the FPGA the Zynq is up and the Z3 fast-RAM DDR window is
-	// ready, so it may advertise the fast-RAM autoconfig PIC. Until this is set
-	// (e.g. while still cold-booting from SD), the FPGA withholds that PIC so a
-	// fast accelerator's boot-time Zorro III memory test cannot mark the
-	// not-yet-ready RAM as defective. Set as early as possible to minimise the
-	// window in which the card could appear without its fast RAM.
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6, 1);
 	sdk_aperture_runtime_init(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7),
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
 
 	boot_rom_init();
 
 	disable_reset_out();
-
-	// Read ZZ9000.CFG from the SD card before video/ethernet bring-up so
-	// its settings apply from cold boot (issue #33). Failure of any kind
-	// leaves the built-in defaults untouched.
-	zz_config_load();
 
 	if (zz_config_get()->mac_present) {
 		// seed the MAC before ethernet_init() programs the GEM; the

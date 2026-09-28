@@ -102,6 +102,7 @@
 #include "xsdps.h"
 #include "sleep.h"
 #include "xtime_l.h"
+#include "sd_boot_deadline.h"
 
 /************************** Constant Definitions *****************************/
 #define XSDPS_CMD8_VOL_PATTERN	0x1AAU
@@ -160,6 +161,21 @@ static int XSdPs_PollTimedOut(XTime start)
 
 	XTime_GetTime(&now);
 	return (now - start) >= XSDPS_POLL_TIMEOUT_COUNTS;
+}
+
+/* Bounded early-boot access: nonzero when the armed boot deadline
+ * (sd_boot_deadline.h) has passed. Disarmed keeps the vendor
+ * behavior, so later SD users are unaffected. */
+static int XSdPs_BootDeadlineHit(void)
+{
+	uint64_t deadline = sd_boot_deadline_xtime;
+	XTime now;
+
+	if (deadline == 0U) {
+		return 0;
+	}
+	XTime_GetTime(&now);
+	return ((uint64_t)now >= deadline);
 }
 
 static void XSdPs_AbortTimedOutTransfer(XSdPs *InstancePtr)
@@ -275,6 +291,10 @@ s32 XSdPs_CfgInitialize(XSdPs *InstancePtr, XSdPs_Config *ConfigPtr,
 	ReadReg = XSdPs_ReadReg8(InstancePtr->Config.BaseAddress,
 				XSDPS_SW_RST_OFFSET);
 	while ((ReadReg & XSDPS_SWRST_ALL_MASK) != 0U) {
+		if (XSdPs_BootDeadlineHit()) {
+			sd_boot_deadline_fired = 1;
+			return XST_FAILURE;
+		}
 		ReadReg = XSdPs_ReadReg8(InstancePtr->Config.BaseAddress,
 				XSDPS_SW_RST_OFFSET);
 	}
@@ -460,6 +480,11 @@ s32 XSdPs_SdCardInitialize(XSdPs *InstancePtr)
 		ReadReg = XSdPs_ReadReg8(InstancePtr->Config.BaseAddress,
 						XSDPS_SW_RST_OFFSET);
 		while ((ReadReg & XSDPS_SWRST_CMD_LINE_MASK) != 0U) {
+		if (XSdPs_BootDeadlineHit()) {
+			sd_boot_deadline_fired = 1;
+			Status = XST_FAILURE;
+			goto RETURN_PATH;
+		}
 			ReadReg = XSdPs_ReadReg8(InstancePtr->Config.BaseAddress,
 						XSDPS_SW_RST_OFFSET);
 		}
@@ -477,6 +502,11 @@ s32 XSdPs_SdCardInitialize(XSdPs *InstancePtr)
 	RespOCR = 0U;
 	/* Send ACMD41 while card is still busy with power up */
 	while ((RespOCR & XSDPS_RESPOCR_READY) == 0U) {
+	if (XSdPs_BootDeadlineHit()) {
+		sd_boot_deadline_fired = 1;
+		Status = XST_FAILURE;
+		goto RETURN_PATH;
+	}
 		Status = XSdPs_CmdTransfer(InstancePtr, CMD55, 0U, 0U);
 		if (Status != XST_SUCCESS) {
 			Status = XST_FAILURE;
@@ -544,6 +574,11 @@ s32 XSdPs_SdCardInitialize(XSdPs *InstancePtr)
 			XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 			XSDPS_RESP3_OFFSET);
 	do {
+		if (XSdPs_BootDeadlineHit()) {
+			sd_boot_deadline_fired = 1;
+			Status = XST_FAILURE;
+			goto RETURN_PATH;
+		}
 		Status = XSdPs_CmdTransfer(InstancePtr, CMD3, 0U, 0U);
 		if (Status != XST_SUCCESS) {
 			Status = XST_FAILURE;
@@ -777,6 +812,11 @@ s32 XSdPs_CardInitialize(XSdPs *InstancePtr)
 			ClockReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 								XSDPS_CLK_CTRL_OFFSET);
 			while((ClockReg & XSDPS_CC_INT_CLK_STABLE_MASK) == 0U) {
+			if (XSdPs_BootDeadlineHit()) {
+				sd_boot_deadline_fired = 1;
+				Status = XST_FAILURE;
+				goto RETURN_PATH;
+			}
 				ClockReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 							XSDPS_CLK_CTRL_OFFSET);
 			}
@@ -1030,6 +1070,11 @@ static s32 XSdPs_IdentifyCard(XSdPs *InstancePtr)
 	ReadReg = XSdPs_ReadReg8(InstancePtr->Config.BaseAddress,
 					XSDPS_SW_RST_OFFSET);
 	while ((ReadReg & XSDPS_SWRST_CMD_LINE_MASK) != 0U) {
+	if (XSdPs_BootDeadlineHit()) {
+		sd_boot_deadline_fired = 1;
+		Status = XST_FAILURE;
+		goto RETURN_PATH;
+	}
 		ReadReg = XSdPs_ReadReg8(InstancePtr->Config.BaseAddress,
 					XSDPS_SW_RST_OFFSET);
 	}
@@ -1066,6 +1111,11 @@ static s32 XSdPs_Switch_Voltage(XSdPs *InstancePtr)
 				XSDPS_PRES_STATE_OFFSET);
 	while ((ReadReg & (XSDPS_PSR_CMD_SG_LVL_MASK |
 					XSDPS_PSR_DAT30_SG_LVL_MASK)) != 0U) {
+	if (XSdPs_BootDeadlineHit()) {
+		sd_boot_deadline_fired = 1;
+		Status = XST_FAILURE;
+		goto RETURN_PATH;
+	}
 		ReadReg = XSdPs_ReadReg(InstancePtr->Config.BaseAddress,
 					XSDPS_PRES_STATE_OFFSET);
 	}
@@ -1104,6 +1154,11 @@ static s32 XSdPs_Switch_Voltage(XSdPs *InstancePtr)
 	ClockReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 						XSDPS_CLK_CTRL_OFFSET);
 	while((ClockReg & XSDPS_CC_INT_CLK_STABLE_MASK) == 0U) {
+	if (XSdPs_BootDeadlineHit()) {
+		sd_boot_deadline_fired = 1;
+		Status = XST_FAILURE;
+		goto RETURN_PATH;
+	}
 		ClockReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 					XSDPS_CLK_CTRL_OFFSET);
 	}
@@ -1123,6 +1178,11 @@ static s32 XSdPs_Switch_Voltage(XSdPs *InstancePtr)
 				XSDPS_PRES_STATE_OFFSET);
 	while ((ReadReg & (XSDPS_PSR_CMD_SG_LVL_MASK | XSDPS_PSR_DAT30_SG_LVL_MASK))
 			!= (XSDPS_PSR_CMD_SG_LVL_MASK | XSDPS_PSR_DAT30_SG_LVL_MASK)) {
+	if (XSdPs_BootDeadlineHit()) {
+		sd_boot_deadline_fired = 1;
+		Status = XST_FAILURE;
+		goto RETURN_PATH;
+	}
 		ReadReg = XSdPs_ReadReg(InstancePtr->Config.BaseAddress,
 					XSDPS_PRES_STATE_OFFSET);
 	}
@@ -1800,6 +1860,11 @@ s32 XSdPs_MmcCardInitialize(XSdPs *InstancePtr)
 	RespOCR = 0U;
 	/* Send CMD1 while card is still busy with power up */
 	while ((RespOCR & XSDPS_RESPOCR_READY) == 0U) {
+	if (XSdPs_BootDeadlineHit()) {
+		sd_boot_deadline_fired = 1;
+		Status = XST_FAILURE;
+		goto RETURN_PATH;
+	}
 
 		/* Host High Capacity support & High volage window */
 		Status = XSdPs_CmdTransfer(InstancePtr, CMD1,

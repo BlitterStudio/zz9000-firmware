@@ -16,9 +16,30 @@
 #include <ff.h>
 #include "xil_cache.h"
 #include "zz_config.h"
+#include "sd_boot_deadline.h"
 #include "zz_video_modes.h"
 
 static struct zz_config cfg;
+
+/* Quiet-load support (fast-ram-cfg KTD5): the bounded boot load
+ * runs before the Fast-Ram gate write, and polled UART costs
+ * ~8 ms per line, so diagnostics there are counted for the
+ * post-decision summary instead of printed. */
+static uint8_t cfg_quiet;
+static uint16_t cfg_suppressed;
+
+static void cfg_diag(const char *fmt, ...)
+{
+	va_list ap;
+
+	if (cfg_quiet) {
+		cfg_suppressed++;
+		return;
+	}
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+}
 
 void zz_config_reset(void) {
 	memset(&cfg, 0, sizeof(cfg));
@@ -581,7 +602,7 @@ int zz_config_parse(const char *text, unsigned len) {
 		if (!eq) {
 			if (first_token_is(p, "fast_ram"))
 				cfg.fast_ram_invalid = 1;
-			printf("[CFG] line %d: not `key = value`, skipped\n", lineno);
+			cfg_diag("[CFG] line %d: not `key = value`, skipped\n", lineno);
 			continue;
 		}
 
@@ -596,7 +617,7 @@ int zz_config_parse(const char *text, unsigned len) {
 		if (!*p || !*value) {
 			if (*p && first_token_is(p, "fast_ram"))
 				cfg.fast_ram_invalid = 1;
-			printf("[CFG] line %d: empty key or value, skipped\n", lineno);
+			cfg_diag("[CFG] line %d: empty key or value, skipped\n", lineno);
 			continue;
 		}
 
@@ -604,9 +625,9 @@ int zz_config_parse(const char *text, unsigned len) {
 		if (r == 0) {
 			accepted++;
 		} else if (r == -2) {
-			printf("[CFG] line %d: unknown key '%s', skipped\n", lineno, p);
+			cfg_diag("[CFG] line %d: unknown key '%s', skipped\n", lineno, p);
 		} else {
-			printf("[CFG] line %d: bad value '%s' for '%s', skipped\n",
+			cfg_diag("[CFG] line %d: bad value '%s' for '%s', skipped\n",
 			       lineno, value, p);
 		}
 	}
@@ -621,20 +642,28 @@ int zz_config_parse(const char *text, unsigned len) {
 #define ZZ_CONFIG_BAK_FILENAME "ZZ9000.BAK"
 #define ZZ_CONFIG_BAK_PATH    "0:/" ZZ_CONFIG_BAK_FILENAME
 
-int zz_config_load(void) {
+enum zz_config_load_status {
+	ZZ_CFG_LOAD_OK = 0,
+	ZZ_CFG_LOAD_NO_FILE,    /* neither CFG nor BAK present */
+	ZZ_CFG_LOAD_MOUNT_FAIL, /* volume would not mount (no card) */
+	ZZ_CFG_LOAD_READ_FAIL,
+};
+
+static enum zz_config_load_status zz_config_load_core(int *bak_recovered) {
 	static FATFS cfg_fs;
 	static char buf[ZZ_CONFIG_MAX_SIZE];
 	FIL f;
 	UINT nread = 0;
 	FRESULT fr;
 
+	if (bak_recovered) *bak_recovered = 0;
 	zz_config_reset();
 
 	fr = f_mount(&cfg_fs, "0:/", 1);
 	if (fr != FR_OK) {
-		printf("[CFG] f_mount failed: %d (no card / not FAT?), using defaults\n",
+		cfg_diag("[CFG] f_mount failed: %d (no card / not FAT?), using defaults\n",
 		       (int)fr);
-		return -1;
+		return ZZ_CFG_LOAD_MOUNT_FAIL;
 	}
 
 	fr = f_open(&f, ZZ_CONFIG_FILE_PATH, FA_READ);
@@ -643,14 +672,15 @@ int zz_config_load(void) {
 		 * missing CFG with a BAK present means the last save died
 		 * between the backup and commit renames -- recover from the
 		 * backup instead of silently booting defaults. */
-		printf("[CFG] *** no " ZZ_CONFIG_FILENAME " (%d); recovering "
+		cfg_diag("[CFG] *** no " ZZ_CONFIG_FILENAME " (%d); recovering "
 			"from " ZZ_CONFIG_BAK_FILENAME " ***\n", (int)fr);
 		fr = f_open(&f, ZZ_CONFIG_BAK_PATH, FA_READ);
+		if (fr == FR_OK && bak_recovered) *bak_recovered = 1;
 	}
 	if (fr != FR_OK) {
-		printf("[CFG] no " ZZ_CONFIG_FILENAME " (%d), using defaults\n", (int)fr);
+		cfg_diag("[CFG] no " ZZ_CONFIG_FILENAME " (%d), using defaults\n", (int)fr);
 		f_mount(0, "0:/", 0);
-		return -1;
+		return ZZ_CFG_LOAD_NO_FILE;
 	}
 
 	fr = f_read(&f, buf, sizeof(buf) - 1, &nread);
@@ -658,11 +688,11 @@ int zz_config_load(void) {
 	f_mount(0, "0:/", 0);
 
 	if (fr != FR_OK) {
-		printf("[CFG] read of " ZZ_CONFIG_FILENAME " failed: %d\n", (int)fr);
-		return -1;
+		cfg_diag("[CFG] read of " ZZ_CONFIG_FILENAME " failed: %d\n", (int)fr);
+		return ZZ_CFG_LOAD_READ_FAIL;
 	}
 	if (nread == sizeof(buf) - 1) {
-		printf("[CFG] warning: " ZZ_CONFIG_FILENAME " larger than %u bytes, tail ignored\n",
+		cfg_diag("[CFG] warning: " ZZ_CONFIG_FILENAME " larger than %u bytes, tail ignored\n",
 		       (unsigned)(sizeof(buf) - 1));
 		/* The audio keys serialize last, so an oversized file drops
 		 * them first. Make the truncation queryable (U5). */
@@ -672,8 +702,62 @@ int zz_config_load(void) {
 
 	int n = zz_config_parse(buf, nread);
 	cfg.loaded = 1;
-	printf("[CFG] " ZZ_CONFIG_FILENAME ": %d option(s) set\n", n);
-	return 0;
+	cfg_diag("[CFG] " ZZ_CONFIG_FILENAME ": %d option(s) set\n", n);
+	return ZZ_CFG_LOAD_OK;
+}
+
+int zz_config_load(void) {
+	return zz_config_load_core(NULL) == ZZ_CFG_LOAD_OK ? 0 : -1;
+}
+
+int zz_config_load_fastram(uint32_t deadline_ms) {
+	enum zz_config_load_status st;
+	enum zz_fastram_outcome o;
+	int bak = 0;
+
+	if (deadline_ms != 0U)
+		sd_boot_deadline_arm(deadline_ms);
+	/* Count diagnostics instead of printing: the load runs before the
+	 * gate write and every polled UART line delays the decision. */
+	cfg_suppressed = 0;
+	cfg_quiet = 1;
+	st = zz_config_load_core(&bak);
+	cfg_quiet = 0;
+	if (deadline_ms != 0U)
+		sd_boot_deadline_disarm();
+
+	if (st == ZZ_CFG_LOAD_OK) {
+		if (cfg.truncated)
+			o = ZZ_FASTRAM_OUTCOME_TRUNCATED;
+		else if (cfg.fast_ram_invalid)
+			o = ZZ_FASTRAM_OUTCOME_INVALID;
+		else if (!cfg.fast_ram_present)
+			o = ZZ_FASTRAM_OUTCOME_ABSENT;
+		else if (cfg.fast_ram != 0U)
+			o = bak ? ZZ_FASTRAM_OUTCOME_BAK_ON
+				: ZZ_FASTRAM_OUTCOME_ENABLED;
+		else
+			o = ZZ_FASTRAM_OUTCOME_OFF;
+	} else if (st == ZZ_CFG_LOAD_NO_FILE) {
+		/* No file and no BAK: no enabling authority at all. */
+		o = ZZ_FASTRAM_OUTCOME_ABSENT;
+	} else {
+		o = ZZ_FASTRAM_OUTCOME_MEDIA_ERR;
+	}
+
+	/* A deadline that fired during the load fails the decision
+	 * closed: an enabling result becomes TIMEOUT, and a load-level
+	 * failure is attributed to the deadline rather than the media.
+	 * Parse-derived disabled outcomes (OFF / INVALID / TRUNCATED /
+	 * absent key) stay exact -- the load completed, the decision is
+	 * disabled either way. */
+	if (deadline_ms != 0U && sd_boot_deadline_fired != 0U &&
+			(st != ZZ_CFG_LOAD_OK || o == ZZ_FASTRAM_OUTCOME_ENABLED ||
+			 o == ZZ_FASTRAM_OUTCOME_BAK_ON))
+		o = ZZ_FASTRAM_OUTCOME_TIMEOUT;
+
+	cfg.fastram_outcome = (uint8_t)o;
+	return st == ZZ_CFG_LOAD_OK ? 0 : -1;
 }
 
 uint16_t zz_config_read_raw(void *buffer, uint32_t max_len, uint32_t *out_len) {
@@ -814,8 +898,31 @@ int zz_config_fastram_enabled(void) {
 	       cfg.fast_ram_present && cfg.fast_ram != 0;
 }
 
+int zz_config_fastram_advertise(void) {
+	return cfg.fastram_outcome == ZZ_FASTRAM_OUTCOME_ENABLED ||
+	       cfg.fastram_outcome == ZZ_FASTRAM_OUTCOME_BAK_ON;
+}
+
 void zz_config_fastram_outcome_set(enum zz_fastram_outcome outcome) {
 	cfg.fastram_outcome = (uint8_t)outcome;
+}
+
+uint16_t zz_config_diag_count(void) {
+	return cfg_suppressed;
+}
+
+const char *zz_fastram_outcome_name(enum zz_fastram_outcome o) {
+	switch (o) {
+	case ZZ_FASTRAM_OUTCOME_ENABLED:   return "enabled";
+	case ZZ_FASTRAM_OUTCOME_OFF:       return "off";
+	case ZZ_FASTRAM_OUTCOME_ABSENT:    return "absent";
+	case ZZ_FASTRAM_OUTCOME_INVALID:   return "invalid";
+	case ZZ_FASTRAM_OUTCOME_TRUNCATED: return "truncated";
+	case ZZ_FASTRAM_OUTCOME_MEDIA_ERR: return "media-error";
+	case ZZ_FASTRAM_OUTCOME_TIMEOUT:   return "timeout";
+	case ZZ_FASTRAM_OUTCOME_BAK_ON:    return "bak-on";
+	default:                           return "pending";
+	}
 }
 /* ---- persistence writer (plan U5, KTD5) ---- */
 
@@ -827,7 +934,6 @@ static const char *videocap_profile_name(void) {
 	int pal = cfg.videocap_mode == ZZVMODE_720x576;
 	int full = cfg.videocap_shres != 0;
 	int vsync = cfg.ns_vsync;
-
 	if (cfg.videocap_output_profile ==
 	    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60)
 		return "centered_1080p_60";

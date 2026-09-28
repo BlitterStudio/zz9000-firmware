@@ -187,6 +187,30 @@ enum zz_config_file_status {
  * if the file was found and parsed, -1 otherwise (defaults remain). */
 int zz_config_load(void);
 
+/* Bounded boot-time variant for the Fast-Ram decision: arms the SD
+ * deadline for `deadline_ms` (0 = unbounded vendor behavior) around
+ * the same load, then records the effective Fast-Ram boot outcome
+ * (read back through ZZ_CONFIG_KEY_FAST_RAM_OUTCOME). Same return
+ * convention as zz_config_load(). */
+int zz_config_load_fastram(uint32_t deadline_ms);
+
+/* Boot deadline for the early CFG load, in milliseconds. Generous
+ * against a healthy card (typical mount+read is far shorter) and
+ * tuned from hardware qualification measurements. */
+#define ZZ_CONFIG_FASTRAM_DEADLINE_MS 1000u
+
+/* Effective advertisement decision from the recorded boot outcome:
+ * true only for ENABLED and BAK_ON -- a TIMEOUT result reads false
+ * even when the parsed preference was `on` (fail closed). */
+int zz_config_fastram_advertise(void);
+
+/* Diagnostics suppressed by the last bounded load (its summary line
+ * reports the count instead of one UART line per skipped key). */
+uint16_t zz_config_diag_count(void);
+
+/* Stable lowercase name for an outcome (boot summary line, logs). */
+const char *zz_fastram_outcome_name(enum zz_fastram_outcome o);
+
 /* Read the current raw ZZ9000.CFG contents into `buffer` (up to
  * max_len bytes; the tail of an oversized file is ignored, matching
  * what the boot-time parser sees). Uses the already-registered FAT
