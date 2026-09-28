@@ -155,6 +155,7 @@ copy_one "amiga/datatypes/descriptors/ZZ9000-PNG.info" \
   "Storage/DataTypes/ZZ9000-PNG.info"
 copy_one "build/zz9k-smoke" "C/zz9k-smoke"
 copy_one "build/zz9k-surface-info" "C/zz9k-surface-info"
+copy_one "build/zz9k-palette" "C/zz9k-palette"
 copy_one "build/zz9k-fbtest" "C/zz9k-fbtest"
 copy_one "build/zz9k-scaletest" "C/zz9k-scaletest"
 copy_one "build/zz9k-surfaceops" "C/zz9k-surfaceops"

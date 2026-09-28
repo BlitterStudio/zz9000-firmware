@@ -89,6 +89,7 @@ m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga
   amiga/datatypes/zz9k_picture_datatype.c -o build/zz9k-picture.datatype
 m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zz9k-smoke.c -o build/zz9k-smoke
 m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zz9k-surface-info.c -o build/zz9k-surface-info
+m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zz9k-palette.c -o build/zz9k-palette
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o \
   tools/zz9k-fbtest.c -o build/zz9k-fbtest
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o \

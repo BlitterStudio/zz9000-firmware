@@ -130,6 +130,7 @@ Copy-One "amiga/datatypes/descriptors/ZZ9000-PNG.info" `
   "Storage/DataTypes/ZZ9000-PNG.info"
 Copy-One "build/zz9k-smoke" "C/zz9k-smoke"
 Copy-One "build/zz9k-surface-info" "C/zz9k-surface-info"
+Copy-One "build/zz9k-palette" "C/zz9k-palette"
 Copy-One "build/zz9k-fbtest" "C/zz9k-fbtest"
 Copy-One "build/zz9k-scaletest" "C/zz9k-scaletest"
 Copy-One "build/zz9k-surfaceops" "C/zz9k-surfaceops"
