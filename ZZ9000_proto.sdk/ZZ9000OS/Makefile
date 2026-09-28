@@ -30,6 +30,7 @@ BSP_INC = $(BSP_DIR)/include
 BSP_LIB = $(BSP_DIR)/lib
 BSP_SDPS_DIR = $(BSP_DIR)/libsrc/sdps_v3_6/src
 BSP_SDPS_SRC = $(BSP_SDPS_DIR)/xsdps.c
+BSP_SDPS_OBJ = $(BUILD_DIR)/bsp/xsdps.o
 BSP_FF_DIR = $(BSP_DIR)/libsrc/xilffs_v4_0/src
 BSP_DISKIO_SRC = $(BSP_FF_DIR)/diskio.c
 BSP_DISKIO_OBJ = $(BUILD_DIR)/bsp/diskio.o

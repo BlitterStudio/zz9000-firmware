@@ -70,12 +70,21 @@ static int token_eq(const char *s, const char *keyword) {
  * Fails the fast_ram safety key closed on malformed lines the
  * generic lexer would skip before key dispatch (missing '=' or an
  * empty value). */
+static int is_ident_char(char c) {
+	char lc = lower(c);
+	return (lc >= 'a' && lc <= 'z') || (c >= '0' && c <= '9') ||
+		c == '_';
+}
+
 static int first_token_is(const char *s, const char *keyword) {
 	while (*keyword) {
 		if (lower(*s) != *keyword) return 0;
 		s++; keyword++;
 	}
-	return *s == 0 || is_space(*s) || *s == '=';
+	/* The token ends at any non-identifier byte: '=', ':' or another
+	 * stray delimiter still names the key, so the malformed line
+	 * poisons the fail-closed decision (KTD3). */
+	return *s == 0 || !is_ident_char(*s);
 }
 
 /* Parse an unsigned decimal number; returns -1 on garbage/overflow. */
@@ -583,10 +592,15 @@ int zz_config_parse(const char *text, unsigned len) {
 
 		/* copy one line, dropping comments and the terminator */
 		int in_comment = 0;
+		int dropped = 0;
 		while (pos < len && text[pos] != '\n') {
 			char c = text[pos++];
 			if (c == '#' || c == ';') in_comment = 1;
-			if (!in_comment && n < sizeof(line) - 1) line[n++] = c;
+			if (!in_comment && n < sizeof(line) - 1) {
+				line[n++] = c;
+			} else if (!in_comment) {
+				dropped++;
+			}
 		}
 		if (pos < len) pos++; /* skip '\n' */
 		line[n] = 0;
@@ -597,6 +611,12 @@ int zz_config_parse(const char *text, unsigned len) {
 		char *p = line;
 		while (is_space(*p)) p++;
 		if (!*p) continue;
+
+		/* A line too long for the buffer keeps only its first 127
+		 * bytes; a truncated fast_ram line is not a valid decision,
+		 * so it poisons (fail closed) instead of parsing the prefix. */
+		if (dropped && first_token_is(p, "fast_ram"))
+			cfg.fast_ram_invalid = 1;
 
 		char *eq = strchr(p, '=');
 		if (!eq) {
@@ -649,7 +669,8 @@ enum zz_config_load_status {
 	ZZ_CFG_LOAD_READ_FAIL,
 };
 
-static enum zz_config_load_status zz_config_load_core(int *bak_recovered) {
+static enum zz_config_load_status zz_config_load_core(int *bak_recovered,
+		int mount_volume) {
 	static FATFS cfg_fs;
 	static char buf[ZZ_CONFIG_MAX_SIZE];
 	FIL f;
@@ -659,7 +680,14 @@ static enum zz_config_load_status zz_config_load_core(int *bak_recovered) {
 	if (bak_recovered) *bak_recovered = 0;
 	zz_config_reset();
 
-	fr = f_mount(&cfg_fs, "0:/", 1);
+	if (!mount_volume) {
+		/* The volume is already registered (sd_storage at warm
+		 * reset): mounting here would replace that registration,
+		 * and the trailing unmount would leave the card without
+		 * a filesystem for every later SD user. */
+	}
+
+	fr = mount_volume ? f_mount(&cfg_fs, "0:/", 1) : FR_OK;
 	if (fr != FR_OK) {
 		cfg_diag("[CFG] f_mount failed: %d (no card / not FAT?), using defaults\n",
 		       (int)fr);
@@ -679,13 +707,20 @@ static enum zz_config_load_status zz_config_load_core(int *bak_recovered) {
 	}
 	if (fr != FR_OK) {
 		cfg_diag("[CFG] no " ZZ_CONFIG_FILENAME " (%d), using defaults\n", (int)fr);
-		f_mount(0, "0:/", 0);
-		return ZZ_CFG_LOAD_NO_FILE;
+		if (mount_volume)
+			f_mount(0, "0:/", 0);
+		if (fr == FR_NO_FILE || fr == FR_NO_PATH)
+			return ZZ_CFG_LOAD_NO_FILE;
+		/* A hard open error is media trouble, not a missing file:
+		 * report MEDIA_ERR through the outcome so tooling can tell
+		 * an absent config from an unreadable card. */
+		return ZZ_CFG_LOAD_READ_FAIL;
 	}
 
 	fr = f_read(&f, buf, sizeof(buf) - 1, &nread);
 	f_close(&f);
-	f_mount(0, "0:/", 0);
+	if (mount_volume)
+		f_mount(0, "0:/", 0);
 
 	if (fr != FR_OK) {
 		cfg_diag("[CFG] read of " ZZ_CONFIG_FILENAME " failed: %d\n", (int)fr);
@@ -707,10 +742,10 @@ static enum zz_config_load_status zz_config_load_core(int *bak_recovered) {
 }
 
 int zz_config_load(void) {
-	return zz_config_load_core(NULL) == ZZ_CFG_LOAD_OK ? 0 : -1;
+	return zz_config_load_core(NULL, 1) == ZZ_CFG_LOAD_OK ? 0 : -1;
 }
 
-int zz_config_load_fastram(uint32_t deadline_ms) {
+int zz_config_load_fastram(uint32_t deadline_ms, int mount_volume) {
 	enum zz_config_load_status st;
 	enum zz_fastram_outcome o;
 	int bak = 0;
@@ -721,7 +756,7 @@ int zz_config_load_fastram(uint32_t deadline_ms) {
 	 * gate write and every polled UART line delays the decision. */
 	cfg_suppressed = 0;
 	cfg_quiet = 1;
-	st = zz_config_load_core(&bak);
+	st = zz_config_load_core(&bak, mount_volume);
 	cfg_quiet = 0;
 	if (deadline_ms != 0U)
 		sd_boot_deadline_disarm();

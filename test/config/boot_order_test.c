@@ -38,14 +38,17 @@ int main(void) {
     buf[n] = 0;
 
     const char *load = strstr(buf,
-        "zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS);");
+        "zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS, 1);");
     const char *gate = strstr(buf,
         "zz_config_fastram_advertise() ? 1 : 0");
 
     CHECK(load != NULL);
     CHECK(gate != NULL);
-    /* the decision is made (bounded load) before the gate is written */
-    CHECK(load != NULL && gate != NULL && load < gate);
+    /* the cold-boot gate write follows the cold-boot bounded load
+     * (the warm-reset handler earlier in the file rewrites the gate
+     * from its own reload) */
+    CHECK(load != NULL && strstr(load,
+        "zz_config_fastram_advertise() ? 1 : 0") != NULL);
     /* the unconditional early write (issue #25's original form) is gone */
     CHECK(strstr(buf, "MNTZORRO_REG6, 1);") == NULL);
 

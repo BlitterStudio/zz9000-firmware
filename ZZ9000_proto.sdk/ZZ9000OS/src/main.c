@@ -427,7 +427,10 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* Cold boot reaches this handler as media init right after main()
 	 * decided the gate; only a genuine warm reset re-reads the file. */
 	if (mode != AMIGA_RESET_INIT_MEDIA)
-		zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS);
+		/* No private remount here: sd_storage's live volume is the
+		 * one to read, and replacing its registration would break
+		 * every later SD user. */
+		zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS, 0);
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
 		zz_config_fastram_advertise() ? 1 : 0);
 
@@ -544,7 +547,7 @@ int main() {
 	 * bitstreams the write is inert. */
 	XTime fastram_t0, fastram_t1;
 	XTime_GetTime(&fastram_t0);
-	zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS);
+	zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS, 1);
 	XTime_GetTime(&fastram_t1);
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
 		zz_config_fastram_advertise() ? 1 : 0);

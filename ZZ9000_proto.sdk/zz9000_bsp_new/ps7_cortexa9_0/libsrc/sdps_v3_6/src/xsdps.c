@@ -202,6 +202,11 @@ static s32 XSdPs_WaitForTransferComplete(XSdPs *InstancePtr,
 					XSDPS_ERROR_INTR_ALL_MASK);
 			return XST_FAILURE;
 		}
+		if (XSdPs_BootDeadlineHit()) {
+			sd_boot_deadline_fired = 1;
+			XSdPs_AbortTimedOutTransfer(InstancePtr);
+			return XST_FAILURE;
+		}
 		if (XSdPs_PollTimedOut(poll_start)) {
 			XSdPs_AbortTimedOutTransfer(InstancePtr);
 			return XST_FAILURE;
@@ -1297,6 +1302,12 @@ s32 XSdPs_CmdTransfer(XSdPs *InstancePtr, u32 Cmd, u32 Arg, u32 BlkCnt)
 			XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
 					XSDPS_ERR_INTR_STS_OFFSET,
 					XSDPS_ERROR_INTR_ALL_MASK);
+			goto RETURN_PATH;
+		}
+		if (XSdPs_BootDeadlineHit()) {
+			sd_boot_deadline_fired = 1;
+			XSdPs_AbortTimedOutTransfer(InstancePtr);
+			Status = XST_FAILURE;
 			goto RETURN_PATH;
 		}
 		if (XSdPs_PollTimedOut(poll_start)) {

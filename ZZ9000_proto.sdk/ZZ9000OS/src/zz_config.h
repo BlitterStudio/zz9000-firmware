@@ -190,9 +190,12 @@ int zz_config_load(void);
 /* Bounded boot-time variant for the Fast-Ram decision: arms the SD
  * deadline for `deadline_ms` (0 = unbounded vendor behavior) around
  * the same load, then records the effective Fast-Ram boot outcome
- * (read back through ZZ_CONFIG_KEY_FAST_RAM_OUTCOME). Same return
- * convention as zz_config_load(). */
-int zz_config_load_fastram(uint32_t deadline_ms);
+ * (read back through ZZ_CONFIG_KEY_FAST_RAM_OUTCOME). mount_volume
+ * selects the cold-boot path (mount the card, unmount after); pass 0
+ * when the FAT volume is already registered (the warm-reset reload
+ * runs against sd_storage's live mount, which a private remount
+ * would destroy). Same return convention as zz_config_load(). */
+int zz_config_load_fastram(uint32_t deadline_ms, int mount_volume);
 
 /* Boot deadline for the early CFG load, in milliseconds. Generous
  * against a healthy card (typical mount+read is far shorter) and

@@ -111,10 +111,11 @@ shipped an `ns-pal` firmware flavor; its behavior is now the
 ## Configuration File (ZZ9000.CFG)
 
 `ZZ9000.CFG` is an optional text file stored beside `BOOT.bin` in the root of
-the FAT32 microSD card. Firmware reads it once at power-on; a soft reset does
-not reload it. The easiest way to manage it is **ZZTop → Project → Settings**.
-Release ZIPs also include a fully commented [sample file](ZZ9000.CFG) for
-manual editing.
+the FAT32 microSD card. Firmware reads it at power-on; a soft reset does not
+reload it, except `fast_ram`, which every reset re-reads to re-derive the
+Fast-RAM advertisement. The easiest way to manage it is **ZZTop → Project →
+Settings**. Release ZIPs also include a fully commented
+[sample file](ZZ9000.CFG) for manual editing.
 
 The file controls these boot-time defaults:
 
