@@ -845,12 +845,6 @@ static void test_fastram_query_and_outcome(void) {
     /* configured-on-but-withheld: the effective boot decision reads
      * separately from the saved preference */
     CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) == 0 && !present);
-    zz_config_fastram_outcome_set(ZZ_FASTRAM_OUTCOME_ENABLED);
-    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
-          ZZ_FASTRAM_OUTCOME_ENABLED && present);
-    zz_config_fastram_outcome_set(ZZ_FASTRAM_OUTCOME_TIMEOUT);
-    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
-          ZZ_FASTRAM_OUTCOME_TIMEOUT && present);
     zz_config_reset();
     CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) == 0 && !present);
 }

@@ -98,8 +98,8 @@ enabled with `fast_ram = on` in [`ZZ9000.CFG`](ZZ9000.CFG) (fail-closed —
 absent, malformed, unreadable, or too-slow configuration boots without it,
 which is the old `zorro3-nofast` behavior). Former `zorro3-nofast` /
 `zorro3-nofast-a4000-c28` users need no CFG key; former `zorro3` /
-`zorro3-a4000-c28` users add `fast_ram = on` to keep their RAM. A ZZTop
-save applies at the next reboot; a manually edited card needs a power cycle.
+`zorro3-a4000-c28` users add `fast_ram = on` to keep their RAM. Changes
+take effect at the next reboot (a warm reset re-reads the card).
 The A4000 C28 images require the video-slot C28 connection. Do not install
 them on an A3000 or Denise-adapter machine. Keep the E7M Zorro III images as
 the A3000 builds and as an A4000 fallback. Settings that used to require a

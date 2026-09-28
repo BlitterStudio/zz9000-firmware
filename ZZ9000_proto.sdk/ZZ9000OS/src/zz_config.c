@@ -903,10 +903,6 @@ int zz_config_fastram_advertise(void) {
 	       cfg.fastram_outcome == ZZ_FASTRAM_OUTCOME_BAK_ON;
 }
 
-void zz_config_fastram_outcome_set(enum zz_fastram_outcome outcome) {
-	cfg.fastram_outcome = (uint8_t)outcome;
-}
-
 uint16_t zz_config_diag_count(void) {
 	return cfg_suppressed;
 }

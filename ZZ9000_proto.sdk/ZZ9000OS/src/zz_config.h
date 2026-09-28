@@ -240,9 +240,6 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present);
  * without checking `loaded`. */
 int zz_config_fastram_enabled(void);
 
-/* Record the effective boot decision; read back through
- * ZZ_CONFIG_KEY_FAST_RAM_OUTCOME. */
-void zz_config_fastram_outcome_set(enum zz_fastram_outcome outcome);
 
 /* Regenerate the non-audio keys of ZZ9000.CFG from parsed state (the
  * U5 writer content policy: present keys only, the atomic
