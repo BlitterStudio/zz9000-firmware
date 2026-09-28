@@ -56,9 +56,14 @@ Third-party or loadable services in the `0x8000+` range are covered by
 
 ## Quick Start
 
+> The SDK lives at `sdk/` inside the consolidated `zz9000-firmware`
+> repository. Run the commands below from that `sdk/` directory (or from the
+> repository root with `sdk/`-prefixed paths).
+
 Build the AmigaOS 3 SDK tools and package with Docker:
 
 ```powershell
+cd sdk
 powershell -ExecutionPolicy Bypass -File scripts\build-m68k-amigaos.ps1
 powershell -ExecutionPolicy Bypass -File scripts\package-m68k-amigaos.ps1
 ```
@@ -66,11 +71,12 @@ powershell -ExecutionPolicy Bypass -File scripts\package-m68k-amigaos.ps1
 or from a POSIX shell:
 
 ```sh
+cd sdk
 ./scripts/build-m68k-amigaos.sh
 ./scripts/package-m68k-amigaos.sh
 ```
 
-The package is written to `build/package/amigaos3`. It contains:
+The package is written to `sdk/build/package/amigaos3`. It contains:
 
 - `Libs/zz9k.library`
 - `Libs/mpega.library` as the accelerated exact-name drop-in
