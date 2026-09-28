@@ -1,0 +1,98 @@
+# Build amissl.library with the ZZ9000 crypto-offload provider compiled in
+# (Path A). The result is a drop-in library users copy into LIBS:.
+#
+# Built inside the pinned adtools container (sdk/integration/amissl/Dockerfile)
+# with the sources cloned onto the container's own ext4 filesystem. That is the
+# supported, reproducible way to build AmiSSL + OpenSSL 3.x for m68k: the 2017
+# adtools gcc 2.95.3 trips over bind-mount inodes / CRLF and over the sfdc stub
+# generation when run bare on a hosted runner. The drivers repo builds the same
+# library the same way from its pin.
+#
+# Ported from the zz9000-sdk repo during the consolidation: workflows under
+# sdk/.github/workflows are not discovered by GitHub, so this lives at the root
+# with sdk/-prefixed paths. The Docker mount now carries the full firmware
+# repo (the sdk/ subtree has no .git of its own to clone from) and
+# ZZ9000_SDK points into the clone's sdk/ subdirectory.
+#
+# Trigger manually (Actions tab -> Run workflow) or on changes to the provider
+# or integration files. Artifacts: amissl-zz9000-<platform>.
+name: Build AmiSSL + ZZ9000 provider
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - sdk/amiga/provider/**
+      - sdk/host/src/zz9k_host.c
+      - sdk/include/zz9k/**
+      - sdk/host/include/zz9k/**
+      - sdk/tools/zz9k-crypto-soft.*
+      - sdk/integration/amissl/**
+      - .github/workflows/build-amissl-provider.yml
+
+concurrency:
+  group: amissl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [os3-68020, os3-68060]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # The library is fully determined by the provider / integration / host
+      # crypto sources and the toolchain image, so cache the built libs keyed on
+      # those — unchanged runs skip the slow OpenSSL-for-m68k build entirely.
+      - name: Restore cached amissl.library
+        id: amisslcache
+        uses: actions/cache@v5
+        with:
+          path: sdk/integration/amissl/work/out
+          key: >-
+            amissl-${{ matrix.platform }}-${{ hashFiles(
+              'sdk/integration/amissl/AMISSL_REF',
+              'sdk/integration/amissl/amissl-zz9000.patch',
+              'sdk/integration/amissl/build.sh',
+              'sdk/integration/amissl/Dockerfile',
+              'sdk/amiga/provider/**',
+              'sdk/host/src/zz9k_host.c',
+              'sdk/include/zz9k/**',
+              'sdk/host/include/zz9k/**',
+              'sdk/tools/zz9k-crypto-soft.c',
+              'sdk/tools/zz9k-crypto-soft.h') }}
+
+      - name: Build amissl.library (${{ matrix.platform }})
+        if: steps.amisslcache.outputs.cache-hit != 'true'
+        run: |
+          docker build -t zz9000-amissl-adtools sdk/integration/amissl
+          mkdir -p sdk/integration/amissl/work/out
+          docker run --rm \
+            -v "$PWD":/fw-src:ro \
+            -v "$PWD/sdk/integration/amissl/work/out":/out \
+            -e OS=${{ matrix.platform }} \
+            zz9000-amissl-adtools sh -ec '
+              git config --global --add safe.directory "*"
+              git clone -q /fw-src /build/zz9000-fw
+              case "$OS" in
+                os3-68020) libdir=68020-40 ;;
+                os3-68060) libdir=68060 ;;
+                *) echo "unknown OS target: $OS" >&2; exit 1 ;;
+              esac
+              AMISSL_DIR= ZZ9000_SDK=/build/zz9000-fw/sdk OS="$OS" WORK=/build/work \
+                sh /build/zz9000-fw/sdk/integration/amissl/build.sh
+              mkdir -p "/out/$libdir"
+              cp -v /build/work/out/"$OS"/amissl_v*.library "/out/$libdir/"
+            '
+
+      - name: Upload library artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: amissl-zz9000-${{ matrix.platform }}
+          path: sdk/integration/amissl/work/out/*/amissl_v*.library
+          if-no-files-found: error

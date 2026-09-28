@@ -1,0 +1,47 @@
+# Line-ending + binary policy for zz9000-sdk.
+#
+# Text is normalized to LF in the repository, and scripts / workflows / sources
+# are forced to LF in the working copy too. This keeps Windows checkouts from
+# introducing CRLF (or losing exec bits) that break the Linux/m68k toolchains
+# and CI. Binary types are marked explicitly so they are never EOL-converted.
+
+* text=auto
+
+# Always-LF text (executed or parsed on Linux or the m68k toolchain)
+*.sh           text eol=lf
+*.bash         text eol=lf
+*.yml          text eol=lf
+*.yaml         text eol=lf
+*.c            text eol=lf
+*.h            text eol=lf
+*.md           text eol=lf
+*.cmake        text eol=lf
+CMakeLists.txt text eol=lf
+Dockerfile     text eol=lf
+*.fd           text eol=lf
+*.b64          text eol=lf
+
+# Binary — never EOL-convert
+*.bit       binary
+*.bin       binary
+*.elf       binary
+*.o         binary
+*.a         binary
+*.info      binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.iff       binary
+*.lha       binary
+*.7z        binary
+*.zip       binary
+*.gz        binary
+*.xz        binary
+*.bz2       binary
+*.library   binary
+*.device    binary
+*.card      binary
+*.audio     binary
+*.datatype  binary

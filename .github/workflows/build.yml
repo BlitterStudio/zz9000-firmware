@@ -38,29 +38,58 @@ jobs:
     name: mailbox ABI mirror
     runs-on: ubuntu-latest
     steps:
-      # The mailbox ABI is mirrored by hand across two repos: the SDK's
-      # include/zz9k/abi.h and this repo's ZZ9000OS/src/sdk_mailbox.h. Same
-      # name, different opcode or flag bit, and firmware misdispatches or
-      # mis-advertises capabilities on hardware -- invisible to either repo's
-      # own test suite.
-      #
-      # The SDK already runs this check against firmware master. That only
-      # catches SDK-side drift: a change made here was validated by nothing
-      # until someone happened to run SDK CI. Run it from this side too, so
-      # whichever repo moves first is the one that fails.
+      # The mailbox ABI is mirrored by hand between the SDK's
+      # sdk/include/zz9k/abi.h and ZZ9000OS/src/sdk_mailbox.h. Same name,
+      # different opcode or flag bit, and firmware misdispatches or
+      # mis-advertises capabilities on hardware -- invisible to either
+      # suite alone. Since the SDK consolidation both files live in this
+      # tree; the check needs no cross-repo checkout.
       - name: Checkout firmware
         uses: actions/checkout@v6
-      - name: Checkout SDK (for abi.h and the comparison script)
-        uses: actions/checkout@v6
-        with:
-          repository: BlitterStudio/zz9000-sdk
-          path: zz9000-sdk
-          fetch-depth: 1
       - name: Compare mailbox ABI constants
         run: |
-          sh zz9000-sdk/scripts/check-abi-mirror.sh \
-            zz9000-sdk/include/zz9k/abi.h \
+          sh sdk/scripts/check-abi-mirror.sh \
+            sdk/include/zz9k/abi.h \
             ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.h
+
+  sdk-host-tests:
+    name: SDK host tests (cmake + ctest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      # OpenSSL 3 dev headers turn on the provider unit tests; without
+      # them CMake silently skips that set (same as the SDK's own CI).
+      - name: Install OpenSSL 3 headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libssl-dev
+      - name: Configure
+        run: cmake -S sdk -B build-sdk -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build-sdk --parallel
+      - name: Test
+        run: ctest --test-dir build-sdk --output-on-failure
+
+  sdk-m68k-build:
+    name: SDK m68k build + package (AmigaOS 3)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      # Invoked via sh so a missing executable bit never breaks the build.
+      # The script drives the m68k toolchain in Docker; its REPO_ROOT is
+      # self-contained under sdk/.
+      - name: Build m68k payloads (Docker)
+        run: sh sdk/scripts/build-m68k-amigaos.sh
+      - name: Package AmigaOS 3 SDK
+        run: sh sdk/scripts/package-m68k-amigaos.sh --skip-build
+      - name: Upload AmigaOS 3 package
+        uses: actions/upload-artifact@v7
+        with:
+          name: zz9000-sdk-amigaos3
+          path: sdk/build/package/amigaos3/
+          if-no-files-found: error
 
   host-tests:
     name: Host regression tests
@@ -242,7 +271,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [build, host-tests]
+    needs: [build, host-tests, abi-mirror, sdk-host-tests, sdk-m68k-build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

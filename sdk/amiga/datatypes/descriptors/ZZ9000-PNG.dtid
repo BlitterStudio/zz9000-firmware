@@ -1,0 +1,11 @@
+# Source metadata for the packaged ZZ9000 PNG DataTypes descriptor.
+# Copyright (C) 2024-2026, Dimitris Panokostas / BlitterStudio
+# SPDX-License-Identifier: GPL-3.0-or-later
+FileName=Storage/DataTypes/ZZ9000-PNG
+Version=42.5
+DTName=ZZ9000-PNG,zz9k-picture
+ID=pict,png<nul>
+Recog=89 50 4e 47 0d 0a
+Pattern=#?
+Flags=Binary,n,10
+Install=inactive

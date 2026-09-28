@@ -1,0 +1,12 @@
+** ZZ9000-backed mpega.library compatibility FD.
+##base _MPEGABase
+##bias 30
+##public
+MPEGA_open(filename,ctrl)(a0,a1)
+MPEGA_close(mpds)(a0)
+MPEGA_decode_frame(mpds,pcm)(a0,a1)
+MPEGA_seek(mpds,ms_time_position)(a0,d0)
+MPEGA_time(mpds,ms_time_position)(a0,a1)
+MPEGA_find_sync(buffer,buffer_size)(a0,d0)
+MPEGA_scale(mpds,scale_percent)(a0,d0)
+##end
