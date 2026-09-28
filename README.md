@@ -99,7 +99,12 @@ absent, malformed, unreadable, or too-slow configuration boots without it,
 which is the old `zorro3-nofast` behavior). Former `zorro3-nofast` /
 `zorro3-nofast-a4000-c28` users need no CFG key; former `zorro3` /
 `zorro3-a4000-c28` users add `fast_ram = on` to keep their RAM. Changes
-take effect at the next reboot (a warm reset re-reads the card).
+take effect at the next reboot (a warm reset re-reads the card). If the
+card is unusually slow at a warm reset, the re-read can finish after the
+Amiga has already passed the Fast-RAM slot in autoconfig; the card then
+boots without Fast RAM for that one pass (never wrongly enabled) and the
+next reset picks it up again.
+
 The A4000 C28 images require the video-slot C28 connection. Do not install
 them on an A3000 or Denise-adapter machine. Keep the E7M Zorro III images as
 the A3000 builds and as an A4000 fallback. Settings that used to require a
