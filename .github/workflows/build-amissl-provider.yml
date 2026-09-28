@@ -24,6 +24,8 @@ on:
     paths:
       - sdk/amiga/provider/**
       - sdk/host/src/zz9k_host.c
+      - sdk/include/zz9k/**
+      - sdk/host/include/zz9k/**
       - sdk/tools/zz9k-crypto-soft.*
       - sdk/integration/amissl/**
       - .github/workflows/build-amissl-provider.yml
@@ -60,6 +62,8 @@ jobs:
               'sdk/integration/amissl/Dockerfile',
               'sdk/amiga/provider/**',
               'sdk/host/src/zz9k_host.c',
+              'sdk/include/zz9k/**',
+              'sdk/host/include/zz9k/**',
               'sdk/tools/zz9k-crypto-soft.c',
               'sdk/tools/zz9k-crypto-soft.h') }}
 
