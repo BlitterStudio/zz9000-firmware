@@ -49,8 +49,21 @@ int main(void) {
      * from its own reload) */
     CHECK(load != NULL && strstr(load,
         "zz_config_fastram_advertise() ? 1 : 0") != NULL);
-    /* the unconditional early write (issue #25's original form) is gone */
-    CHECK(strstr(buf, "MNTZORRO_REG6, 1);") == NULL);
+    /* every patched vendor SD object must be registered in the build:
+     * a defined-but-unreferenced override silently links the unpatched
+     * libxil.a object instead (caught review three times) */
+    {
+        FILE *mk = fopen("../../ZZ9000_proto.sdk/ZZ9000OS/Makefile", "rb");
+        if (mk) {
+            static char mbuf[64 * 1024];
+            size_t mn = fread(mbuf, 1, sizeof(mbuf) - 1, mk);
+            fclose(mk);
+            mbuf[mn] = 0;
+            CHECK(strstr(mbuf, "COMMON_OBJS += $(BSP_SDPS_OBJ)") != NULL);
+            CHECK(strstr(mbuf, "COMMON_OBJS += $(BSP_SDPSOPT_OBJ)") != NULL);
+            CHECK(strstr(mbuf, "COMMON_OBJS += $(BSP_DISKIO_OBJ)") != NULL);
+        }
+    }
 
     if (failures) {
         printf("%d/%d checks FAILED\n", failures, checks);

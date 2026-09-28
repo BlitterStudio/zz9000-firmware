@@ -84,6 +84,7 @@
 #include "sd_boot_deadline.h"
 #if defined (__aarch64__)
 #include "xil_smc.h"
+#endif
 
 /* Bounded early-boot access: nonzero when the armed boot deadline
  * (sd_boot_deadline.h) has passed. Disarmed keeps the vendor
@@ -99,8 +100,6 @@ static int XSdPs_BootDeadlineHit(void)
 	XTime_GetTime(&now);
 	return ((uint64_t)now >= deadline);
 }
-
-#endif
 /************************** Constant Definitions *****************************/
 #define UHS_SDR12_SUPPORT	0x1U
 #define UHS_SDR25_SUPPORT	0x2U
