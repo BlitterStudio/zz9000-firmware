@@ -25,6 +25,18 @@ void sd_boot_deadline_arm(uint32_t ms)
 	sd_boot_deadline_fired = 0;
 }
 
+
+int sd_boot_deadline_expired_now(void)
+{
+	uint64_t deadline = sd_boot_deadline_xtime;
+	XTime now;
+
+	if (deadline == 0U)
+		return 0;
+	XTime_GetTime(&now);
+	return (uint64_t)now >= deadline;
+}
+
 void sd_boot_deadline_disarm(void)
 {
 	sd_boot_deadline_xtime = 0;

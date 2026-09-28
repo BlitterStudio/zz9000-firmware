@@ -412,6 +412,8 @@ static void activate_aperture_layout_if_acknowledged(void)
 	}
 }
 
+static uint8_t amiga_boot_reset_pass = 1;
+
 void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* Fast-Ram gate (fast-ram-cfg KTD4): close the gate the moment a
 	 * reset is detected -- the fail-safe presentation -- then rederive
@@ -424,13 +426,16 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	 * warm reboot therefore applies a saved fast_ram change, and a
 	 * failed or too-slow re-read boots without Fast RAM. */
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6, 0);
-	/* Cold boot reaches this handler as media init right after main()
-	 * decided the gate; only a genuine warm reset re-reads the file. */
-	if (mode != AMIGA_RESET_INIT_MEDIA)
-		/* No private remount here: sd_storage's live volume is the
-		 * one to read, and replacing its registration would break
-		 * every later SD user. */
+	/* Cold boot reaches this handler right after main() decided the
+	 * gate: as media init normally, and as a FAST reset in the
+	 * ZZ9000_SKIP_INITIAL_MEDIA_INIT build where no volume is ever
+	 * registered. Only a genuine later warm reset re-reads the file
+	 * (through sd_storage's live volume -- a private remount would
+	 * break every later SD user); the boot-pass call keeps main()'s
+	 * decision instead of failing closed on an unmounted card. */
+	if (mode != AMIGA_RESET_INIT_MEDIA && !amiga_boot_reset_pass)
 		zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS, 0);
+	amiga_boot_reset_pass = 0;
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
 		zz_config_fastram_advertise() ? 1 : 0);
 

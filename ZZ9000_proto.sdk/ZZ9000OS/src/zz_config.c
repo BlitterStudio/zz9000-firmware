@@ -749,6 +749,7 @@ int zz_config_load_fastram(uint32_t deadline_ms, int mount_volume) {
 	enum zz_config_load_status st;
 	enum zz_fastram_outcome o;
 	int bak = 0;
+	int late;
 
 	if (deadline_ms != 0U)
 		sd_boot_deadline_arm(deadline_ms);
@@ -758,6 +759,11 @@ int zz_config_load_fastram(uint32_t deadline_ms, int mount_volume) {
 	cfg_quiet = 1;
 	st = zz_config_load_core(&bak, mount_volume);
 	cfg_quiet = 0;
+	/* A load that finished past the deadline without any vendor poll
+	 * exiting on it (final command completed just before the cutoff,
+	 * FatFs bookkeeping and parsing after) must still fail closed:
+	 * compare against the armed absolute deadline before disarming. */
+	late = deadline_ms != 0U && sd_boot_deadline_expired_now();
 	if (deadline_ms != 0U)
 		sd_boot_deadline_disarm();
 
@@ -786,7 +792,8 @@ int zz_config_load_fastram(uint32_t deadline_ms, int mount_volume) {
 	 * Parse-derived disabled outcomes (OFF / INVALID / TRUNCATED /
 	 * absent key) stay exact -- the load completed, the decision is
 	 * disabled either way. */
-	if (deadline_ms != 0U && sd_boot_deadline_fired != 0U &&
+	if (deadline_ms != 0U &&
+			(sd_boot_deadline_fired != 0U || late) &&
 			(st != ZZ_CFG_LOAD_OK || o == ZZ_FASTRAM_OUTCOME_ENABLED ||
 			 o == ZZ_FASTRAM_OUTCOME_BAK_ON))
 		o = ZZ_FASTRAM_OUTCOME_TIMEOUT;

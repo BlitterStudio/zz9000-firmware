@@ -37,6 +37,7 @@ void mock_set_fire_on_mount(int on) { fire_on_mount = on; }
 void mock_set_open_result(FRESULT fr) { mock_open_fr = fr; }
 
 void sd_boot_deadline_arm(uint32_t ms) { (void)ms; sd_boot_deadline_fired = 0; }
+int sd_boot_deadline_expired_now(void) { return 0; }
 void sd_boot_deadline_disarm(void) {}
 
 FRESULT f_mount(FATFS *fs, const char *path, unsigned char opt) {

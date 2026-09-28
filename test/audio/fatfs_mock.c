@@ -203,3 +203,4 @@ volatile uint8_t sd_boot_deadline_fired;
 
 void sd_boot_deadline_arm(uint32_t ms) { (void)ms; sd_boot_deadline_fired = 0; }
 void sd_boot_deadline_disarm(void) {}
+int sd_boot_deadline_expired_now(void) { return 0; }

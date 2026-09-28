@@ -29,6 +29,13 @@ extern volatile uint64_t sd_boot_deadline_xtime;
  * passed (the loader maps a fired deadline to its TIMEOUT outcome). */
 extern volatile uint8_t sd_boot_deadline_fired;
 
+
+/* Nonzero when NOW is already past the armed deadline (disarmed: 0).
+ * The bounded loader calls this after its load completes: a load that
+ * finished late without any vendor poll exiting on the deadline must
+ * still fail closed, and the loop-fired flag alone cannot see it. */
+int sd_boot_deadline_expired_now(void);
+
 /* Arm for `ms` milliseconds from now (also clears `fired`). */
 void sd_boot_deadline_arm(uint32_t ms);
 
