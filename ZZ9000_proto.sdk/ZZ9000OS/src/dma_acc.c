@@ -167,6 +167,7 @@ void handle_acc_op(uint16_t zdata)
                 break;
             }
 
+            uint32_t requested_size = sfc_size;
             uint32_t sfc_addr = surface_allocator_alloc(sfc_size);
             if (!sfc_addr) {
                 printf("not enough legacy surface heap for %d bytes.\n", sfc_size);
@@ -174,8 +175,29 @@ void handle_acc_op(uint16_t zdata)
             }
 
             sfc_size = surface_allocator_block_size(sfc_addr);
-            memset((void *)sfc_addr, 0x00, sfc_size);
-            Xil_DCacheFlushRange((INTPTR)sfc_addr, sfc_size);
+            /* Conditional clear protocol: u8_user[3]==1 means the
+             * driver's caller did not ask for ABMA_Clear, so skip the
+             * zero-fill. Anything else -- including the 0 an older
+             * driver leaves in this untouched byte -- keeps the legacy
+             * cleared surface, preserving BMF_CLEAR across mixed
+             * firmware/driver versions. graphics.library AllocBitMap
+             * does not promise cleared memory; zero-filling anyway
+             * turned re-allocated smart-refresh save buffers into
+             * black window restores. */
+            int clear_requested = data->u8_user[3] != 1;
+            /* Lifecycle trace for the black-background-window reports:
+             * alloc/free is rare (window/screen churn), so one UART line
+             * each is free. Offsets are framebuffer-relative like every
+             * consumer; pair with the FREE line to spot recycling into a
+             * still-scanned region. */
+            printf("[acc] surface alloc +%lx (%u bytes, requested %u, clear %u)\n",
+                   (unsigned long)(sfc_addr - (u32)FRAMEBUFFER_ADDRESS),
+                   (unsigned)sfc_size, (unsigned)requested_size,
+                   (unsigned)clear_requested);
+            if (clear_requested) {
+                memset((void *)sfc_addr, 0x00, sfc_size);
+                Xil_DCacheFlushRange((INTPTR)sfc_addr, sfc_size);
+            }
             // MemoryBase-relative, like every RTG blit offset (the
             // driver computes Planes[0] = MemoryBase + offset and all
             // consumers map offset -> ARM via framebuffer/0x200000).
@@ -189,6 +211,8 @@ void handle_acc_op(uint16_t zdata)
         case ACC_OP_FREE_SURFACE: {
             SWAP32(data->offset[0]);
             data->offset[0] += (u32)FRAMEBUFFER_ADDRESS;
+            printf("[acc] surface free +%lx\n",
+                   (unsigned long)(data->offset[0] - (u32)FRAMEBUFFER_ADDRESS));
             if (surface_allocator_free(data->offset[0]) != 0) {
                 printf("Ignoring free of unknown surface at %p.\n",
                        (void *)data->offset[0]);
