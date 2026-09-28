@@ -109,18 +109,20 @@ the built-in default stays at 60 Hz.
 ```
 
 These are hardware/autoconfig bitstream variants, not separate firmware
-behavior flavors. The standard Zorro III pair uses E7M capture; two
-A4000-only builds use the video-slot C28 capture clock. The script
-restores `mntzorro.v` and the canonical E7M bitstream afterward.
+behavior flavors. The standard Zorro III build uses E7M capture; the
+A4000-only build uses the video-slot C28 capture clock. Zorro III FastRAM
+is a `fast_ram` `ZZ9000.CFG` setting, not a variant: the former
+`zorro3-nofast` pair is gone and its behavior is the fail-closed default.
+The script restores `mntzorro.v` and the canonical E7M bitstream afterward.
 To rebuild selected variants on Linux, for example:
 ```bash
-./build_variant_bitstreams.sh zorro3-nofast zorro2 zorro3-a4000-c28 zorro3-nofast-a4000-c28
+./build_variant_bitstreams.sh zorro2 zorro3-a4000-c28
 ```
 On Windows with Git Bash, pass both builders when selecting a C28 variant:
 ```bash
 BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1" \
 C28_BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1 -CaptureC28 -OutputBitstream" \
-  ./build_variant_bitstreams.sh zorro3-a4000-c28 zorro3-nofast-a4000-c28
+  ./build_variant_bitstreams.sh zorro3-a4000-c28
 ```
 
 **Clean rebuild** — no Vivado, uses the committed bitstream:
