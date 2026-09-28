@@ -31,6 +31,8 @@ BSP_LIB = $(BSP_DIR)/lib
 BSP_SDPS_DIR = $(BSP_DIR)/libsrc/sdps_v3_6/src
 BSP_SDPS_SRC = $(BSP_SDPS_DIR)/xsdps.c
 BSP_SDPS_OBJ = $(BUILD_DIR)/bsp/xsdps.o
+BSP_SDPSOPT_SRC = $(BSP_SDPS_DIR)/xsdps_options.c
+BSP_SDPSOPT_OBJ = $(BUILD_DIR)/bsp/xsdps_options.o
 BSP_FF_DIR = $(BSP_DIR)/libsrc/xilffs_v4_0/src
 BSP_DISKIO_SRC = $(BSP_FF_DIR)/diskio.c
 BSP_DISKIO_OBJ = $(BUILD_DIR)/bsp/diskio.o
@@ -291,6 +293,12 @@ $(OVERLAY_HW_FALLBACK_OBJ): $(SRC_DIR)/overlay_hw.c
 # unbounded vendor object from libxil.a. Because this object defines the
 # complete driver translation unit, the archive member is not extracted.
 $(BSP_SDPS_OBJ): $(BSP_SDPS_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(BSP_SDPS_DIR) -MMD -MP -o $@ $<
+
+# Same override for the option-layer translation unit: its bus-width and
+# bus-speed transfer polls are bounded for the armed boot deadline too.
+$(BSP_SDPSOPT_OBJ): $(BSP_SDPSOPT_SRC)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(BSP_SDPS_DIR) -MMD -MP -o $@ $<
 

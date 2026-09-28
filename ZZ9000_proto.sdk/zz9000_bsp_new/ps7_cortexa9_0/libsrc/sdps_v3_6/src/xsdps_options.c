@@ -80,8 +80,26 @@
 /***************************** Include Files *********************************/
 #include "xsdps.h"
 #include "sleep.h"
+#include "xtime_l.h"
+#include "sd_boot_deadline.h"
 #if defined (__aarch64__)
 #include "xil_smc.h"
+
+/* Bounded early-boot access: nonzero when the armed boot deadline
+ * (sd_boot_deadline.h) has passed. Disarmed keeps the vendor
+ * behavior, so later SD users are unaffected. */
+static int XSdPs_BootDeadlineHit(void)
+{
+	uint64_t deadline = sd_boot_deadline_xtime;
+	XTime now;
+
+	if (deadline == 0U) {
+		return 0;
+	}
+	XTime_GetTime(&now);
+	return ((uint64_t)now >= deadline);
+}
+
 #endif
 /************************** Constant Definitions *****************************/
 #define UHS_SDR12_SUPPORT	0x1U
@@ -220,6 +238,11 @@ s32 XSdPs_Get_BusWidth(XSdPs *InstancePtr, u8 *SCR)
 	do {
 		StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 					XSDPS_NORM_INTR_STS_OFFSET);
+		if (XSdPs_BootDeadlineHit()) {
+			sd_boot_deadline_fired = 1;
+			Status = XST_FAILURE;
+			goto RETURN_PATH;
+		}
 		if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
 			/* Write to clear error bits */
 			XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
@@ -327,6 +350,11 @@ s32 XSdPs_Change_BusWidth(XSdPs *InstancePtr)
 		do {
 			StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 						XSDPS_NORM_INTR_STS_OFFSET);
+			if (XSdPs_BootDeadlineHit()) {
+				sd_boot_deadline_fired = 1;
+				Status = XST_FAILURE;
+				goto RETURN_PATH;
+			}
 			if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
 				/* Write to clear error bits */
 				XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
@@ -436,6 +464,11 @@ s32 XSdPs_Get_BusSpeed(XSdPs *InstancePtr, u8 *ReadBuff)
 	do {
 		StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 					XSDPS_NORM_INTR_STS_OFFSET);
+		if (XSdPs_BootDeadlineHit()) {
+			sd_boot_deadline_fired = 1;
+			Status = XST_FAILURE;
+			goto RETURN_PATH;
+		}
 		if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
 			/* Write to clear error bits */
 			XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
@@ -515,6 +548,11 @@ s32 XSdPs_Change_BusSpeed(XSdPs *InstancePtr)
 		do {
 			StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 						XSDPS_NORM_INTR_STS_OFFSET);
+			if (XSdPs_BootDeadlineHit()) {
+				sd_boot_deadline_fired = 1;
+				Status = XST_FAILURE;
+				goto RETURN_PATH;
+			}
 			if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
 				/* Write to clear error bits */
 				XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
@@ -552,6 +590,11 @@ s32 XSdPs_Change_BusSpeed(XSdPs *InstancePtr)
 		do {
 			StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 						XSDPS_NORM_INTR_STS_OFFSET);
+			if (XSdPs_BootDeadlineHit()) {
+				sd_boot_deadline_fired = 1;
+				Status = XST_FAILURE;
+				goto RETURN_PATH;
+			}
 			if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
 				/*
 				 * Write to clear error bits
@@ -601,6 +644,11 @@ s32 XSdPs_Change_BusSpeed(XSdPs *InstancePtr)
 		do {
 			StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 						XSDPS_NORM_INTR_STS_OFFSET);
+			if (XSdPs_BootDeadlineHit()) {
+				sd_boot_deadline_fired = 1;
+				Status = XST_FAILURE;
+				goto RETURN_PATH;
+			}
 			if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
 				/*
 				 * Write to clear error bits
@@ -753,6 +801,10 @@ s32 XSdPs_Change_ClkFreq(XSdPs *InstancePtr, u32 SelFreq)
 	ReadReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 				XSDPS_CLK_CTRL_OFFSET);
 	while((ReadReg & XSDPS_CC_INT_CLK_STABLE_MASK) == 0U) {
+		if (XSdPs_BootDeadlineHit()) {
+			sd_boot_deadline_fired = 1;
+			return XST_FAILURE;
+		}
 		ReadReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 					XSDPS_CLK_CTRL_OFFSET);;
 	}
@@ -873,6 +925,11 @@ s32 XSdPs_Get_Mmc_ExtCsd(XSdPs *InstancePtr, u8 *ReadBuff)
 	do {
 		StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 					XSDPS_NORM_INTR_STS_OFFSET);
+		if (XSdPs_BootDeadlineHit()) {
+			sd_boot_deadline_fired = 1;
+			Status = XST_FAILURE;
+			goto RETURN_PATH;
+		}
 		if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
 			/* Write to clear error bits */
 			XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
@@ -927,6 +984,11 @@ s32 XSdPs_Set_Mmc_ExtCsd(XSdPs *InstancePtr, u32 Arg)
 	do {
 		StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 					XSDPS_NORM_INTR_STS_OFFSET);
+		if (XSdPs_BootDeadlineHit()) {
+			sd_boot_deadline_fired = 1;
+			Status = XST_FAILURE;
+			goto RETURN_PATH;
+		}
 		if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
 			/*
 			 * Write to clear error bits
@@ -1082,6 +1144,11 @@ s32 XSdPs_Uhs_ModeInit(XSdPs *InstancePtr, u8 Mode)
 	do {
 		StatusReg = XSdPs_ReadReg16(InstancePtr->Config.BaseAddress,
 				XSDPS_NORM_INTR_STS_OFFSET);
+		if (XSdPs_BootDeadlineHit()) {
+			sd_boot_deadline_fired = 1;
+			Status = XST_FAILURE;
+			goto RETURN_PATH;
+		}
 		if ((StatusReg & XSDPS_INTR_ERR_MASK) != 0U) {
 			/* Write to clear error bits */
 			XSdPs_WriteReg16(InstancePtr->Config.BaseAddress,
