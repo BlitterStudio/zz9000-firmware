@@ -19,8 +19,12 @@ $PackageRoot = [System.IO.Path]::GetFullPath($OutputDir)
 $SafeRoot = [System.IO.Path]::GetFullPath(
   (Join-Path $RepoRoot "build\package")
 )
+# Append a trailing separator so the containment check compares whole path
+# components: a prefix-only check would accept siblings like
+# build\package-backup and the Remove-Item below would erase them.
+$SafeRootWithSep = $SafeRoot.TrimEnd('\') + '\'
 if (-not $PackageRoot.StartsWith(
-    $SafeRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    $SafeRootWithSep, [System.StringComparison]::OrdinalIgnoreCase)) {
   throw "OutputDir must stay under build/package"
 }
 

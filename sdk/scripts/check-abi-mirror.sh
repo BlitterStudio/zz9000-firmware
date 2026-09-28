@@ -14,15 +14,18 @@
 #
 # Usage:
 #   scripts/check-abi-mirror.sh [SDK_ABI_H] [FIRMWARE_SDK_MAILBOX_H]
-# Defaults assume the firmware repo is a sibling checkout of the SDK repo, or
-# is pointed at by $ZZ9K_FIRMWARE_HEADER.
+# Defaults assume the firmware layout after the consolidation: this script
+# lives at sdk/scripts/ inside the firmware repository, so the firmware
+# header is two levels up. A standalone SDK checkout (or any other layout)
+# can pass paths explicitly or set $ZZ9K_FIRMWARE_HEADER.
 #
 # Exit: 0 = in sync, 1 = mismatch(es), 2 = a header could not be read.
 set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 SDK_ABI=${1:-"$SCRIPT_DIR/../include/zz9k/abi.h"}
-FW_HDR=${2:-${ZZ9K_FIRMWARE_HEADER:-"$SCRIPT_DIR/../../zz9000-firmware/ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.h"}}
+FW_DEFAULT="$SCRIPT_DIR/../../ZZ9000_proto.sdk/ZZ9000OS/src/sdk_mailbox.h"
+FW_HDR=${2:-${ZZ9K_FIRMWARE_HEADER:-"$FW_DEFAULT"}}
 
 for f in "$SDK_ABI" "$FW_HDR"; do
   if [ ! -r "$f" ]; then
