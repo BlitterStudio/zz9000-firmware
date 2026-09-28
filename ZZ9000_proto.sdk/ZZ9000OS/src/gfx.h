@@ -41,6 +41,10 @@ typedef struct {
 void video_formatter_write(uint32_t data, uint16_t op);
 void handle_blitter_dma_op(struct ZZ_VIDEO_STATE* vs, uint16_t zdata);
 void handle_acc_op(uint16_t zdata);
+/* Allocation-clear protocol latch (dma_acc.c): 1 after the driver
+ * wrote REG_ZZ_ALLOC_CLEAR_PROTOCOL with the token, which is the only
+ * condition under which u8_user[3] is honored as a no-clear flag. */
+extern uint8_t alloc_clear_protocol_v2;
 
 /* Destination pitch units are part of the RTG command ABI: rect/line/planar
  * ops use 32-bit words, while template/pattern ops use bytes. Keep the unit

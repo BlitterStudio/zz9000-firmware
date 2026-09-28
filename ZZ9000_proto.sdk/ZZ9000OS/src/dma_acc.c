@@ -16,6 +16,9 @@
 
 extern uint8_t imc_tables_initialized;
 int current_c37_encoder = -1;
+/* Set only by the REG_ZZ_ALLOC_CLEAR_PROTOCOL register write (see
+ * main.c); cleared on Amiga reset so a warm reboot re-handshakes. */
+uint8_t alloc_clear_protocol_v2 = 0;
 
 void handle_acc_op(uint16_t zdata)
 {
@@ -175,16 +178,18 @@ void handle_acc_op(uint16_t zdata)
             }
 
             sfc_size = surface_allocator_block_size(sfc_addr);
-            /* Conditional clear protocol: u8_user[3]==1 means the
-             * driver's caller did not ask for ABMA_Clear, so skip the
-             * zero-fill. Anything else -- including the 0 an older
-             * driver leaves in this untouched byte -- keeps the legacy
-             * cleared surface, preserving BMF_CLEAR across mixed
-             * firmware/driver versions. graphics.library AllocBitMap
-             * does not promise cleared memory; zero-filling anyway
-             * turned re-allocated smart-refresh save buffers into
-             * black window restores. */
-            int clear_requested = data->u8_user[3] != 1;
+            /* Conditional clear protocol, gated on the init-time
+             * handshake: honored only after the driver announced
+             * itself via REG_ZZ_ALLOC_CLEAR_PROTOCOL. Legacy drivers
+             * leave stale DrawLine padding in u8_user[3] -- without
+             * the latch a stale 1 would skip the zero-fill their
+             * ABMA_Clear relies on. With the latch active,
+             * u8_user[3]==1 means the caller did not ask for
+             * ABMA_Clear; graphics.library AllocBitMap promises no
+             * clearing, and zero-filling anyway turned re-allocated
+             * smart-refresh save buffers into black window restores. */
+            int clear_requested = !alloc_clear_protocol_v2 ||
+                                  data->u8_user[3] != 1;
             /* Lifecycle trace for the black-background-window reports:
              * alloc/free is rare (window/screen churn), so one UART line
              * each is free. Offsets are framebuffer-relative like every

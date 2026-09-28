@@ -486,6 +486,10 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
 	apply_aperture_framebuffer_limit();
 	clear_runtime_gfxdata();
+	/* The alloc-clear protocol handshake is driver-init state: a warm
+	 * reboot re-runs InitCard, so drop the latch until the new driver
+	 * generation announces itself again. */
+	alloc_clear_protocol_v2 = 0;
 
 	// clear audio buffer on reset
 	memset((void*)AUDIO_TX_BUFFER_ADDRESS, 0, AUDIO_TX_BUFFER_SIZE);
@@ -1570,6 +1574,15 @@ int main() {
 				case REG_ZZ_PRINT_HEX: {
 					// print zdata has hex (follow up by \n via chr!)
 					printf("%04x", (unsigned int)(zdata&0xffff));
+					break;
+				}
+				case REG_ZZ_ALLOC_CLEAR_PROTOCOL: {
+					/* Driver init handshake: only after this token
+					 * does the ACC surface allocator honor
+					 * u8_user[3] as a no-clear flag. Any other
+					 * value drops back to always-clear. */
+					alloc_clear_protocol_v2 =
+						(zdata == ZZ_REG_ZZ_ALLOC_CLEAR_TOKEN);
 					break;
 				}
 				case REG_ZZ_AUDIO_CONFIG: {
