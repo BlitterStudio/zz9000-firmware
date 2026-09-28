@@ -601,7 +601,14 @@ static int zz9k_wait_block(ZZ9KContext *ctx)
   if (ctx->timer_request->tr_node.io_Error != 0) {
     /* Heartbeat could not be armed: Wait() would then block on a signal
      * that never comes -- the same unbounded-sleep risk as having no
-     * timer at all. Fall back to the bounded poll above. */
+     * timer at all. Reap the failed request first: SendIO may have
+     * queued and replied it even on error, and an outstanding request
+     * must not be reused by zz9k_now_ms()'s DoIO or a later SendIO.
+     * Then fall back to the bounded poll. */
+    if (!CheckIO((struct IORequest *)ctx->timer_request)) {
+      AbortIO((struct IORequest *)ctx->timer_request);
+    }
+    WaitIO((struct IORequest *)ctx->timer_request);
     zz9k_idle_between_polls_backoff(22U);
     ctx->wait_heartbeats++;
     return (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) ? 1 : 0;
