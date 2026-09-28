@@ -56,7 +56,28 @@ enum zz_config_key {
 	ZZ_CONFIG_KEY_AUDIO_TRUNCATED = 16,
 	ZZ_CONFIG_KEY_VIDEOCAP_PHASE  = 17, /* legacy E7M MMCM steps, -255..255 */
 	ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE = 18, /* C28 MMCM steps, -896..895 */
+	/* Fail-closed Z3 Fast-RAM advertisement. FAST_RAM reads the saved
+	 * preference; FAST_RAM_OUTCOME reads the effective boot decision
+	 * (enum zz_fastram_outcome), so Amiga software distinguishes
+	 * configured-on-but-withheld from enabled. */
+	ZZ_CONFIG_KEY_FAST_RAM        = 19, /* 0=off 1=on */
+	ZZ_CONFIG_KEY_FAST_RAM_OUTCOME = 20, /* enum zz_fastram_outcome */
 	ZZ_CONFIG_KEY_NUM
+};
+
+/* Effective boot decision for the Z3 Fast-RAM advertisement, set by
+ * the boot gate path after the bounded CFG load. PENDING means the
+ * decision has not run (pre-gate firmware reads it as absent). */
+enum zz_fastram_outcome {
+	ZZ_FASTRAM_OUTCOME_PENDING   = 0,
+	ZZ_FASTRAM_OUTCOME_ENABLED   = 1, /* parsed `on`, advertised */
+	ZZ_FASTRAM_OUTCOME_OFF       = 2, /* parsed `off` */
+	ZZ_FASTRAM_OUTCOME_ABSENT    = 3, /* key absent from the file */
+	ZZ_FASTRAM_OUTCOME_INVALID   = 4, /* malformed fast_ram line(s) */
+	ZZ_FASTRAM_OUTCOME_TRUNCATED = 5, /* file over the parse budget */
+	ZZ_FASTRAM_OUTCOME_MEDIA_ERR = 6, /* mount/open/read failed */
+	ZZ_FASTRAM_OUTCOME_TIMEOUT   = 7, /* bounded load missed the deadline */
+	ZZ_FASTRAM_OUTCOME_BAK_ON    = 8, /* enabled via ZZ9000.BAK recovery */
 };
 
 /* Output identity is deliberately separate from the legacy mode/width/vsync
@@ -117,6 +138,11 @@ struct zz_config {
 
 	uint8_t video_overlay_present;
 	uint16_t video_overlay;         /* 0-1, informational (drivers query it) */
+
+	uint8_t fast_ram_present;
+	uint16_t fast_ram;              /* 0-1; advertisement is fail-closed */
+	uint8_t fast_ram_invalid;       /* any malformed fast_ram line poisons */
+	uint8_t fastram_outcome;        /* enum zz_fastram_outcome */
 
 	/* Audio control-plane keys, parsed here and folded into the scene
 	 * module at boot. Absent/out-of-range keys keep built-in defaults.
@@ -183,6 +209,16 @@ const struct zz_config* zz_config_get(void);
  * the key was given in the config file (for ZZ_CONFIG_KEY_LOADED,
  * whether the file was loaded). Unknown keys read as 0/absent. */
 uint16_t zz_config_query(uint16_t key, uint16_t *present);
+
+/* Fail-closed Fast-RAM advertisement decision from parsed state: true
+ * only for an un-truncated, un-poisoned, present `on`. Load failures
+ * leave the fields cleared (reset runs first), so they read disabled
+ * without checking `loaded`. */
+int zz_config_fastram_enabled(void);
+
+/* Record the effective boot decision; read back through
+ * ZZ_CONFIG_KEY_FAST_RAM_OUTCOME. */
+void zz_config_fastram_outcome_set(enum zz_fastram_outcome outcome);
 
 /* Regenerate the non-audio keys of ZZ9000.CFG from parsed state (the
  * U5 writer content policy: present keys only, the atomic

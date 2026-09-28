@@ -45,6 +45,18 @@ static int token_eq(const char *s, const char *keyword) {
 	return *s == 0;
 }
 
+/* Does the line's first token name `keyword` (case-insensitive)?
+ * Fails the fast_ram safety key closed on malformed lines the
+ * generic lexer would skip before key dispatch (missing '=' or an
+ * empty value). */
+static int first_token_is(const char *s, const char *keyword) {
+	while (*keyword) {
+		if (lower(*s) != *keyword) return 0;
+		s++; keyword++;
+	}
+	return *s == 0 || is_space(*s) || *s == '=';
+}
+
 /* Parse an unsigned decimal number; returns -1 on garbage/overflow. */
 static long parse_uint(const char *s) {
 	long v = 0;
@@ -342,6 +354,20 @@ static int apply_key(const char *key, const char *value) {
 		cfg.video_overlay_present = 1;
 		return 0;
 	}
+	if (token_eq(key, "fast_ram")) {
+		int v = parse_onoff(value);
+		if (v < 0) {
+			/* Safety key (fail-closed): a malformed value
+			 * poisons the boot decision even though the line
+			 * itself is only skipped like any other bad
+			 * value. */
+			cfg.fast_ram_invalid = 1;
+			return -1;
+		}
+		cfg.fast_ram = (uint16_t)v;
+		cfg.fast_ram_present = 1;
+		return 0;
+	}
 
 	/* ---- audio control-plane keys (plan U5, KTD4) ----
 	 *
@@ -553,6 +579,8 @@ int zz_config_parse(const char *text, unsigned len) {
 
 		char *eq = strchr(p, '=');
 		if (!eq) {
+			if (first_token_is(p, "fast_ram"))
+				cfg.fast_ram_invalid = 1;
 			printf("[CFG] line %d: not `key = value`, skipped\n", lineno);
 			continue;
 		}
@@ -566,6 +594,8 @@ int zz_config_parse(const char *text, unsigned len) {
 		while (is_space(*value)) value++;
 
 		if (!*p || !*value) {
+			if (*p && first_token_is(p, "fast_ram"))
+				cfg.fast_ram_invalid = 1;
 			printf("[CFG] line %d: empty key or value, skipped\n", lineno);
 			continue;
 		}
@@ -759,6 +789,14 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 		p = cfg.video_overlay_present;
 		v = cfg.video_overlay;
 		break;
+	case ZZ_CONFIG_KEY_FAST_RAM:
+		p = cfg.fast_ram_present;
+		v = cfg.fast_ram;
+		break;
+	case ZZ_CONFIG_KEY_FAST_RAM_OUTCOME:
+		p = cfg.fastram_outcome != ZZ_FASTRAM_OUTCOME_PENDING;
+		v = cfg.fastram_outcome;
+		break;
 	case ZZ_CONFIG_KEY_AUDIO_TRUNCATED:
 		p = cfg.loaded;
 		v = cfg.truncated;
@@ -769,6 +807,15 @@ uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 
 	if (present) *present = p;
 	return p ? v : 0;
+}
+
+int zz_config_fastram_enabled(void) {
+	return !cfg.truncated && !cfg.fast_ram_invalid &&
+	       cfg.fast_ram_present && cfg.fast_ram != 0;
+}
+
+void zz_config_fastram_outcome_set(enum zz_fastram_outcome outcome) {
+	cfg.fastram_outcome = (uint8_t)outcome;
 }
 /* ---- persistence writer (plan U5, KTD5) ---- */
 
@@ -847,6 +894,8 @@ int zz_config_emit_present_keys(char *buf, unsigned size, int off) {
 			cfg.offscreen_bitmaps ? "on" : "off");
 	if (cfg.video_overlay_present)
 		EMIT("video_overlay = %s\n", cfg.video_overlay ? "on" : "off");
+	if (cfg.fast_ram_present)
+		EMIT("fast_ram = %s\n", cfg.fast_ram ? "on" : "off");
 	if (cfg.mac_present)
 		EMIT("mac = %02x:%02x:%02x:%02x:%02x:%02x\n",
 			cfg.mac[0], cfg.mac[1], cfg.mac[2], cfg.mac[3],
