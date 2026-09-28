@@ -434,7 +434,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	 * break every later SD user); the boot-pass call keeps main()'s
 	 * decision instead of failing closed on an unmounted card. */
 	if (mode != AMIGA_RESET_INIT_MEDIA && !amiga_boot_reset_pass)
-		zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS, 0);
+		zz_config_fastram_reload_warm(ZZ_CONFIG_FASTRAM_DEADLINE_MS);
 	amiga_boot_reset_pass = 0;
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
 		zz_config_fastram_advertise() ? 1 : 0);

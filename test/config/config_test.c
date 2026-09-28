@@ -983,6 +983,55 @@ static void test_fastram_no_mount_reload(void) {
     mock_set_open_result(FR_OK);
 }
 
+static void test_fastram_warm_reload_preserves_other_keys(void) {
+    uint16_t present = 0;
+
+    /* cold boot loads the full config */
+    mock_set_file("fast_ram = on\nint2 = on\n");
+    mock_set_bak_file(NULL);
+    mock_set_mount_result(FR_OK);
+    mock_set_fire_on_mount(0);
+    CHECK(zz_config_load_fastram(1000, 1) == 0);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_INT2, &present) == 1 && present);
+
+    /* card removed before the warm reset: only the Fast-Ram decision
+     * changes -- other keys and their queries keep the cold values */
+    mock_set_file(NULL);
+    CHECK(zz_config_fastram_reload_warm(1000) == -1);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
+          ZZ_FASTRAM_OUTCOME_ABSENT && present);
+    CHECK(!zz_config_fastram_advertise());
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_INT2, &present) == 1 && present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_LOADED, &present) == 1 && present);
+
+    /* card edited between boots: the fast_ram change applies, the
+     * rest of the config stays at its cold-boot snapshot */
+    mock_set_file("fast_ram = off\n");
+    CHECK(zz_config_fastram_reload_warm(1000) == 0);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_FAST_RAM_OUTCOME, &present) ==
+          ZZ_FASTRAM_OUTCOME_OFF && present);
+    CHECK(!zz_config_fastram_advertise());
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_INT2, &present) == 1 && present);
+}
+
+static void test_fastram_colon_key_with_equals_poison(void) {
+    /* `fast_ram:off = x` carries an '=', so the lexer dispatches it as
+     * an unknown key named fast_ram:off -- the boundary rule must
+     * still poison the safety key */
+    zz_config_reset();
+    CHECK(parse_str("fast_ram = on\n") == 1);
+    parse_str("fast_ram:off = x\n");
+    CHECK(zz_config_get()->fast_ram_invalid);
+    CHECK(!zz_config_fastram_enabled());
+
+    /* a genuinely different identifier does not poison */
+    zz_config_reset();
+    CHECK(parse_str("fast_ram = on\n") == 1);
+    parse_str("fast_ramx = 1\n");
+    CHECK(!zz_config_get()->fast_ram_invalid);
+    CHECK(zz_config_fastram_enabled());
+}
+
 static void test_sample_file_under_budget(void) {
     /* the shipped sample must fit the 4 KiB parse budget and ships
      * fast_ram commented out (fail-closed default) */
@@ -1024,6 +1073,8 @@ int main(void) {
     test_fastram_key();
     test_fastram_bounded_outcomes();
     test_fastram_poison_edge_forms();
+    test_fastram_warm_reload_preserves_other_keys();
+    test_fastram_colon_key_with_equals_poison();
     test_fastram_no_mount_reload();
     test_fastram_truncated_file();
     test_fastram_bak_recovery();

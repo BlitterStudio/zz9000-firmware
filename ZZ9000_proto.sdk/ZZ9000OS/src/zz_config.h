@@ -211,6 +211,13 @@ int zz_config_fastram_advertise(void);
  * reports the count instead of one UART line per skipped key). */
 uint16_t zz_config_diag_count(void);
 
+/* Warm-reset variant: same bounded load through the live volume and
+ * the same outcome recording, but only the Fast-Ram fields of the
+ * live configuration change -- every other key keeps its cold-boot
+ * value so register queries and boot-applied settings do not shift
+ * mid-session when the card was edited, removed, or unreadable. */
+int zz_config_fastram_reload_warm(uint32_t deadline_ms);
+
 /* Stable lowercase name for an outcome (boot summary line, logs). */
 const char *zz_fastram_outcome_name(enum zz_fastram_outcome o);
 

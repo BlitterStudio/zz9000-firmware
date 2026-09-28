@@ -645,6 +645,12 @@ int zz_config_parse(const char *text, unsigned len) {
 		if (r == 0) {
 			accepted++;
 		} else if (r == -2) {
+			/* `fast_ram:off = x` carries an '=', so the lexer
+			 * dispatches it as a key named fast_ram:off; the
+			 * boundary rule still identifies the safety key, so
+			 * poison rather than skip as a plain unknown key. */
+			if (first_token_is(p, "fast_ram"))
+				cfg.fast_ram_invalid = 1;
 			cfg_diag("[CFG] line %d: unknown key '%s', skipped\n", lineno, p);
 		} else {
 			cfg_diag("[CFG] line %d: bad value '%s' for '%s', skipped\n",
@@ -800,6 +806,33 @@ int zz_config_load_fastram(uint32_t deadline_ms, int mount_volume) {
 
 	cfg.fastram_outcome = (uint8_t)o;
 	return st == ZZ_CFG_LOAD_OK ? 0 : -1;
+}
+
+int zz_config_fastram_reload_warm(uint32_t deadline_ms) {
+	static struct zz_config saved;
+	uint8_t fr_present, fr_invalid, fr_outcome;
+	uint16_t fr;
+	int r;
+
+	/* The warm reload decides only the Fast-Ram gate. Snapshot the
+	 * cold-boot configuration, run the same bounded load against the
+	 * live volume, then restore everything except the Fast-Ram fields:
+	 * an edited, removed, or temporarily unreadable card must not
+	 * shift video/MAC/audio/HDF state or their register queries
+	 * mid-session, because none of those settings are reapplied after
+	 * cold boot. */
+	saved = cfg;
+	r = zz_config_load_fastram(deadline_ms, 0);
+	fr_present = cfg.fast_ram_present;
+	fr = cfg.fast_ram;
+	fr_invalid = cfg.fast_ram_invalid;
+	fr_outcome = cfg.fastram_outcome;
+	cfg = saved;
+	cfg.fast_ram_present = fr_present;
+	cfg.fast_ram = fr;
+	cfg.fast_ram_invalid = fr_invalid;
+	cfg.fastram_outcome = fr_outcome;
+	return r;
 }
 
 uint16_t zz_config_read_raw(void *buffer, uint32_t max_len, uint32_t *out_len) {
