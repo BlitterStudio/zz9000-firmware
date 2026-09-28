@@ -31,6 +31,11 @@ BSP_LIB = $(BSP_DIR)/lib
 BSP_SDPS_DIR = $(BSP_DIR)/libsrc/sdps_v3_6/src
 BSP_SDPS_SRC = $(BSP_SDPS_DIR)/xsdps.c
 BSP_SDPS_OBJ = $(BUILD_DIR)/bsp/xsdps.o
+BSP_SDPSOPT_SRC = $(BSP_SDPS_DIR)/xsdps_options.c
+BSP_SDPSOPT_OBJ = $(BUILD_DIR)/bsp/xsdps_options.o
+BSP_FF_DIR = $(BSP_DIR)/libsrc/xilffs_v4_0/src
+BSP_DISKIO_SRC = $(BSP_FF_DIR)/diskio.c
+BSP_DISKIO_OBJ = $(BUILD_DIR)/bsp/diskio.o
 BUILD_DIR = build
 LIBJPEG_TURBO_VERSION ?= 3.1.4.1
 LIBJPEG_TURBO_DIR ?= $(BUILD_DIR)/deps/libjpeg-turbo/$(LIBJPEG_TURBO_VERSION)
@@ -211,7 +216,8 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_aperture_layout.c \
 	$(SRC_DIR)/sdk_mailbox.c \
 	$(SRC_DIR)/watchdog.c \
-	$(SRC_DIR)/newlib_compat.c
+	$(SRC_DIR)/newlib_compat.c \
+	$(SRC_DIR)/sd_boot_deadline.c
 
 # Object files shared by both bitstream-capability firmware images.
 COMMON_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SRCS))
@@ -222,6 +228,8 @@ BOOTROM_IMAGE_BIN = $(BUILD_DIR)/bootrom_image.bin
 BOOTROM_IMAGE_OBJ = $(BUILD_DIR)/bootrom_image.o
 COMMON_OBJS += $(BOOTROM_IMAGE_OBJ)
 COMMON_OBJS += $(BSP_SDPS_OBJ)
+COMMON_OBJS += $(BSP_SDPSOPT_OBJ)
+COMMON_OBJS += $(BSP_DISKIO_OBJ)
 OVERLAY_HW_OBJ = $(BUILD_DIR)/overlay_hw.o
 OVERLAY_HW_FALLBACK_OBJ = $(BUILD_DIR)/overlay_hw_fallback.o
 OBJS = $(COMMON_OBJS) $(OVERLAY_HW_OBJ)
@@ -288,6 +296,18 @@ $(OVERLAY_HW_FALLBACK_OBJ): $(SRC_DIR)/overlay_hw.c
 $(BSP_SDPS_OBJ): $(BSP_SDPS_SRC)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(BSP_SDPS_DIR) -MMD -MP -o $@ $<
+
+# Same override for the option-layer translation unit: its bus-width and
+# bus-speed transfer polls are bounded for the armed boot deadline too.
+$(BSP_SDPSOPT_OBJ): $(BSP_SDPSOPT_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(BSP_SDPS_DIR) -MMD -MP -o $@ $<
+
+# Same override for the FatFs diskio layer: its card-detect wait is
+# bounded for the armed boot deadline (sd_boot_deadline.h).
+$(BSP_DISKIO_OBJ): $(BSP_DISKIO_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(BSP_FF_DIR) -MMD -MP -o $@ $<
 
 $(BOOTROM_TOOL): ../../util/make_bootrom_image.c $(SRC_DIR)/bootrom_layout.h $(SRC_DIR)/bootrom.h $(SRC_DIR)/diag-code.h $(SRC_DIR)/zzsd-device.h
 	@mkdir -p $(dir $@)

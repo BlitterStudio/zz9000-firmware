@@ -84,10 +84,8 @@ Use the ZIP whose board/bitstream variant matches the target machine:
 
 | Variant | Use for |
 |---|---|
-| `zorro3` | A3000/A4000 with Zorro III FastRAM; E7M capture |
-| `zorro3-nofast` | A3000/A4000 without extra Zorro RAM; E7M capture |
-| `zorro3-a4000-c28` | A4000 with the 28 MHz video-slot connection and Zorro III FastRAM; C28 capture |
-| `zorro3-nofast-a4000-c28` | A4000 with the 28 MHz video-slot connection, without extra Zorro RAM; C28 capture |
+| `zorro3` | A3000/A4000 with optional Zorro III FastRAM; E7M capture |
+| `zorro3-a4000-c28` | A4000 with the 28 MHz video-slot connection, optional Zorro III FastRAM; C28 capture |
 | `zorro2` | A2000, Zorro II, 4 MB window |
 | `zorro2-2mb` | A2000, Zorro II, 2 MB window |
 | `a500` | A500 with ZZ9500CX Denise adapter, 4 MB window |
@@ -95,21 +93,34 @@ Use the ZIP whose board/bitstream variant matches the target machine:
 | `a500plus` | A500+ or Super Denise with ZZ9500CX Denise adapter |
 
 These are hardware/autoconfig bitstream variants; they use one ARM firmware.
+Zorro III FastRAM is no longer a bitstream choice: it is off by default and
+enabled with `fast_ram = on` in [`ZZ9000.CFG`](ZZ9000.CFG) (fail-closed —
+absent, malformed, unreadable, or too-slow configuration boots without it,
+which is the old `zorro3-nofast` behavior). Former `zorro3-nofast` /
+`zorro3-nofast-a4000-c28` users need no CFG key; former `zorro3` /
+`zorro3-a4000-c28` users add `fast_ram = on` to keep their RAM. Changes
+take effect at the next reboot (a warm reset re-reads the card). If the
+card is unusually slow at a warm reset, the re-read can finish after the
+Amiga has already passed the Fast-RAM slot in autoconfig; the card then
+boots without Fast RAM for that one pass (never wrongly enabled) and the
+next reset picks it up again.
+
 The A4000 C28 images require the video-slot C28 connection. Do not install
 them on an A3000 or Denise-adapter machine. Keep the E7M Zorro III images as
 the A3000 builds and as an A4000 fallback. Settings that used to require a
 separate firmware flavor or ENV: variables now live in the optional
-[`ZZ9000.CFG`](ZZ9000.CFG) config file (see below). Older releases also
+`ZZ9000.CFG` config file (see below). Older releases also
 shipped an `ns-pal` firmware flavor; its behavior is now the
 `filtered_pal_exact` native-video profile in `ZZ9000.CFG`.
 
 ## Configuration File (ZZ9000.CFG)
 
 `ZZ9000.CFG` is an optional text file stored beside `BOOT.bin` in the root of
-the FAT32 microSD card. Firmware reads it once at power-on; a soft reset does
-not reload it. The easiest way to manage it is **ZZTop → Project → Settings**.
-Release ZIPs also include a fully commented [sample file](ZZ9000.CFG) for
-manual editing.
+the FAT32 microSD card. Firmware reads it at power-on; a soft reset does not
+reload it, except `fast_ram`, which every reset re-reads to re-derive the
+Fast-RAM advertisement. The easiest way to manage it is **ZZTop → Project →
+Settings**. Release ZIPs also include a fully commented
+[sample file](ZZ9000.CFG) for manual editing.
 
 The file controls these boot-time defaults:
 
@@ -124,6 +135,7 @@ The file controls these boot-time defaults:
 | `scanline_mode` | Scanline style, or off |
 | `scanline_parity` | Which line is darkened |
 | `int2` | Use INT2 instead of INT6 |
+| `fast_ram` | Zorro III Fast RAM (Z3 images only), off by default and fail-closed; see [Board / Bitstream Variants](#board--bitstream-variants) |
 | `offscreen_bitmaps` | Enable or disable Picasso96 off-screen bitmaps |
 | `video_overlay` | Enable or disable the Picasso96 video window |
 | `mac` | Ethernet MAC-address override |
@@ -391,8 +403,8 @@ for A3000, other machines, and A4000 fallback; the clock source cannot be
 changed by ZZ9000.CFG alone. Other machines and adapter routes require
 separate clock qualification.
 
-Build the two A4000 C28 release bitstreams with Vivado 2018.3 using
-`build_variant_bitstreams.sh zorro3-a4000-c28 zorro3-nofast-a4000-c28`;
+Build the A4000 C28 release bitstream with Vivado 2018.3 using
+`build_variant_bitstreams.sh zorro3-a4000-c28`;
 see [BUILD.md](BUILD.md). For a separate single-image diagnostic build
 on Windows:
 
@@ -497,7 +509,7 @@ unstable with `Writethrough`, fall back to `Data NoCache` /
 cache enabled. 68030 systems do not need this workaround.
 
 If a 68040/68060 machine remains unstable with Zorro III FastRAM enabled,
-use the `zorro3-nofast` firmware variant.
+remove `fast_ram` from (or set `fast_ram = off` in) `ZZ9000.CFG` and reboot.
 
 ## Building
 

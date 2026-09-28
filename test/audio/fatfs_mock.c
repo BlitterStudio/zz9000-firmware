@@ -10,6 +10,7 @@
  * host suite.
  */
 #include <string.h>
+#include <stdint.h>
 
 #include "ff.h"
 
@@ -192,3 +193,14 @@ FRESULT f_rename(const char *path_old, const char *path_new)
     src->used = 0;
     return FR_OK;
 }
+
+/* ---- sd_boot_deadline stubs ------------------------------------------
+ * The ARM implementation (XTime-based, sd_boot_deadline.c) is compiled
+ * into the firmware only; zz_config.c's bounded loader reads this host
+ * state instead (mirroring the config suite's stubs). */
+volatile uint64_t sd_boot_deadline_xtime;
+volatile uint8_t sd_boot_deadline_fired;
+
+void sd_boot_deadline_arm(uint32_t ms) { (void)ms; sd_boot_deadline_fired = 0; }
+void sd_boot_deadline_disarm(void) {}
+int sd_boot_deadline_expired_now(void) { return 0; }

@@ -56,7 +56,28 @@ enum zz_config_key {
 	ZZ_CONFIG_KEY_AUDIO_TRUNCATED = 16,
 	ZZ_CONFIG_KEY_VIDEOCAP_PHASE  = 17, /* legacy E7M MMCM steps, -255..255 */
 	ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE = 18, /* C28 MMCM steps, -896..895 */
+	/* Fail-closed Z3 Fast-RAM advertisement. FAST_RAM reads the saved
+	 * preference; FAST_RAM_OUTCOME reads the effective boot decision
+	 * (enum zz_fastram_outcome), so Amiga software distinguishes
+	 * configured-on-but-withheld from enabled. */
+	ZZ_CONFIG_KEY_FAST_RAM        = 19, /* 0=off 1=on */
+	ZZ_CONFIG_KEY_FAST_RAM_OUTCOME = 20, /* enum zz_fastram_outcome */
 	ZZ_CONFIG_KEY_NUM
+};
+
+/* Effective boot decision for the Z3 Fast-RAM advertisement, set by
+ * the boot gate path after the bounded CFG load. PENDING means the
+ * decision has not run (pre-gate firmware reads it as absent). */
+enum zz_fastram_outcome {
+	ZZ_FASTRAM_OUTCOME_PENDING   = 0,
+	ZZ_FASTRAM_OUTCOME_ENABLED   = 1, /* parsed `on`, advertised */
+	ZZ_FASTRAM_OUTCOME_OFF       = 2, /* parsed `off` */
+	ZZ_FASTRAM_OUTCOME_ABSENT    = 3, /* key absent from the file */
+	ZZ_FASTRAM_OUTCOME_INVALID   = 4, /* malformed fast_ram line(s) */
+	ZZ_FASTRAM_OUTCOME_TRUNCATED = 5, /* file over the parse budget */
+	ZZ_FASTRAM_OUTCOME_MEDIA_ERR = 6, /* mount/open/read failed */
+	ZZ_FASTRAM_OUTCOME_TIMEOUT   = 7, /* bounded load missed the deadline */
+	ZZ_FASTRAM_OUTCOME_BAK_ON    = 8, /* enabled via ZZ9000.BAK recovery */
 };
 
 /* Output identity is deliberately separate from the legacy mode/width/vsync
@@ -118,6 +139,11 @@ struct zz_config {
 	uint8_t video_overlay_present;
 	uint16_t video_overlay;         /* 0-1, informational (drivers query it) */
 
+	uint8_t fast_ram_present;
+	uint16_t fast_ram;              /* 0-1; advertisement is fail-closed */
+	uint8_t fast_ram_invalid;       /* any malformed fast_ram line poisons */
+	uint8_t fastram_outcome;        /* enum zz_fastram_outcome */
+
 	/* Audio control-plane keys, parsed here and folded into the scene
 	 * module at boot. Absent/out-of-range keys keep built-in defaults.
 	 * audio_ceiling_paula/audio_ceiling_ax are per-card measured clean
@@ -161,6 +187,40 @@ enum zz_config_file_status {
  * if the file was found and parsed, -1 otherwise (defaults remain). */
 int zz_config_load(void);
 
+/* Bounded boot-time variant for the Fast-Ram decision: arms the SD
+ * deadline for `deadline_ms` (0 = unbounded vendor behavior) around
+ * the same load, then records the effective Fast-Ram boot outcome
+ * (read back through ZZ_CONFIG_KEY_FAST_RAM_OUTCOME). mount_volume
+ * selects the cold-boot path (mount the card, unmount after); pass 0
+ * when the FAT volume is already registered (the warm-reset reload
+ * runs against sd_storage's live mount, which a private remount
+ * would destroy). Same return convention as zz_config_load(). */
+int zz_config_load_fastram(uint32_t deadline_ms, int mount_volume);
+
+/* Boot deadline for the early CFG load, in milliseconds. Generous
+ * against a healthy card (typical mount+read is far shorter) and
+ * tuned from hardware qualification measurements. */
+#define ZZ_CONFIG_FASTRAM_DEADLINE_MS 1000u
+
+/* Effective advertisement decision from the recorded boot outcome:
+ * true only for ENABLED and BAK_ON -- a TIMEOUT result reads false
+ * even when the parsed preference was `on` (fail closed). */
+int zz_config_fastram_advertise(void);
+
+/* Diagnostics suppressed by the last bounded load (its summary line
+ * reports the count instead of one UART line per skipped key). */
+uint16_t zz_config_diag_count(void);
+
+/* Warm-reset variant: same bounded load through the live volume and
+ * the same outcome recording, but only the Fast-Ram fields of the
+ * live configuration change -- every other key keeps its cold-boot
+ * value so register queries and boot-applied settings do not shift
+ * mid-session when the card was edited, removed, or unreadable. */
+int zz_config_fastram_reload_warm(uint32_t deadline_ms);
+
+/* Stable lowercase name for an outcome (boot summary line, logs). */
+const char *zz_fastram_outcome_name(enum zz_fastram_outcome o);
+
 /* Read the current raw ZZ9000.CFG contents into `buffer` (up to
  * max_len bytes; the tail of an oversized file is ignored, matching
  * what the boot-time parser sees). Uses the already-registered FAT
@@ -183,6 +243,13 @@ const struct zz_config* zz_config_get(void);
  * the key was given in the config file (for ZZ_CONFIG_KEY_LOADED,
  * whether the file was loaded). Unknown keys read as 0/absent. */
 uint16_t zz_config_query(uint16_t key, uint16_t *present);
+
+/* Fail-closed Fast-RAM advertisement decision from parsed state: true
+ * only for an un-truncated, un-poisoned, present `on`. Load failures
+ * leave the fields cleared (reset runs first), so they read disabled
+ * without checking `loaded`. */
+int zz_config_fastram_enabled(void);
+
 
 /* Regenerate the non-audio keys of ZZ9000.CFG from parsed state (the
  * U5 writer content policy: present keys only, the atomic

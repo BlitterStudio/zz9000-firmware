@@ -98,6 +98,8 @@
 #endif
 #include "sleep.h"
 #include "xil_printf.h"
+#include "xtime_l.h"
+#include "sd_boot_deadline.h"
 
 #define HIGH_SPEED_SUPPORT	0x01U
 #define WIDTH_4_BIT_SUPPORT	0x4U
@@ -109,6 +111,21 @@
 #define EXT_CSD_HIGH_SPEED_BYTE		185
 #define EXT_CSD_DEVICE_TYPE_HIGH_SPEED	0x3
 #define SD_CD_DELAY		10000U
+
+/* Bounded early-boot access: nonzero when the armed boot deadline
+ * (sd_boot_deadline.h) has passed. Disarmed keeps the vendor
+ * behavior, so later SD users are unaffected. */
+static int SdBootDeadlineHit(void)
+{
+	uint64_t deadline = sd_boot_deadline_xtime;
+	XTime now;
+
+	if (deadline == 0U) {
+		return 0;
+	}
+	XTime_GetTime(&now);
+	return ((uint64_t)now >= deadline);
+}
 
 #ifdef FILE_SYSTEM_INTERFACE_RAM
 #include "xparameters.h"
@@ -198,6 +215,11 @@ DSTATUS disk_status (
 		if (SlotType[pdrv] != XSDPS_CAPS_EMB_SLOT) {
 			if (CardDetect) {
 				while ((StatusReg & XSDPS_PSR_CARD_INSRT_MASK) == 0U) {
+					if (SdBootDeadlineHit()) {
+						sd_boot_deadline_fired = 1;
+						s = STA_NODISK | STA_NOINIT;
+						goto Label;
+					}
 					if (DelayCount == 500U) {
 						s = STA_NODISK | STA_NOINIT;
 						goto Label;
@@ -283,7 +305,13 @@ DSTATUS disk_initialize (
 					( XSdPs_GetPresentStatusReg((u32)BaseAddress) &
 					(XSDPS_PSR_CARD_DPL_MASK |
 					XSDPS_PSR_CARD_STABLE_MASK |
-					XSDPS_PSR_CARD_INSRT_MASK))));
+					XSDPS_PSR_CARD_INSRT_MASK)))) {
+				if (SdBootDeadlineHit()) {
+					sd_boot_deadline_fired = 1;
+					s |= STA_NOINIT;
+					return s;
+				}
+			}
 	}
 
 	/*

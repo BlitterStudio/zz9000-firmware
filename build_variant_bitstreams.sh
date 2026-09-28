@@ -42,9 +42,7 @@ Builds all release variants when no variant is specified.
 
 Variants:
   zorro3          Zorro III / A3000 / A4000
-  zorro3-nofast   Zorro III / A3000 / A4000, no Zorro RAM
-  zorro3-a4000-c28         A4000 with video-slot C28, Zorro III Fast RAM
-  zorro3-nofast-a4000-c28  A4000 with video-slot C28, no Zorro RAM
+  zorro3-a4000-c28  A4000 with video-slot C28, Zorro III Fast RAM
   zorro2          Zorro II 4MB / A2000
   zorro2-2mb      Zorro II 2MB / A2000
   a500            A500 4MB / ZZ9500CX Denise adapter
@@ -53,14 +51,12 @@ Variants:
 EOF
 }
 
-all_variants=(zorro3 zorro3-nofast zorro3-a4000-c28 zorro3-nofast-a4000-c28 zorro2 zorro2-2mb a500 a500-2mb a500plus)
+all_variants=(zorro3 zorro3-a4000-c28 zorro2 zorro2-2mb a500 a500-2mb a500plus)
 
 variant_label() {
     case "$1" in
         zorro3) echo "Zorro III / A3000 / A4000" ;;
-        zorro3-nofast) echo "Zorro III / A3000 / A4000, no Zorro RAM" ;;
         zorro3-a4000-c28) echo "A4000 / C28, Zorro III Fast RAM" ;;
-        zorro3-nofast-a4000-c28) echo "A4000 / C28, no Zorro RAM" ;;
         zorro2) echo "Zorro II 4MB / A2000" ;;
         zorro2-2mb) echo "Zorro II 2MB / A2000" ;;
         a500) echo "A500 4MB / ZZ9500CX Denise adapter" ;;
@@ -73,9 +69,7 @@ variant_label() {
 variant_output() {
     case "$1" in
         zorro3) echo "$CANONICAL_BIT" ;;
-        zorro3-nofast) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro3-nofast.bit" ;;
         zorro3-a4000-c28) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro3-a4000-c28.bit" ;;
-        zorro3-nofast-a4000-c28) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro3-nofast-a4000-c28.bit" ;;
         zorro2) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro2.bit" ;;
         zorro2-2mb) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro2-2mb.bit" ;;
         a500) echo "$VARIANT_DIR/zz9000_ps_wrapper-a500.bit" ;;
@@ -100,23 +94,6 @@ variant_block() {
 
 //`define VARIANT_FW20
 `define VARIANT_Z3_FASTRAM
-`define VARIANT_AUTOBOOT        // enable autoboot ROM
-
-EOF
-            ;;
-        zorro3-nofast|zorro3-nofast-a4000-c28)
-            cat <<'EOF'
-// ZORRO2/3 switch
-//`define ZORRO2
-`define ZORRO3
-
-// use only together with ZORRO2:
-//`define VARIANT_ZZ9500        // uses Denise adapter/A500 specific video capture
-//`define VARIANT_2MB           // uses only 2MB address space
-//`define VARIANT_SUPERDENISE   // for A500+ and super denise
-
-//`define VARIANT_FW20
-//`define VARIANT_Z3_FASTRAM
 `define VARIANT_AUTOBOOT        // enable autoboot ROM
 
 EOF
@@ -280,7 +257,7 @@ else
 fi
 for variant in "${selected[@]}"; do
     case "$variant" in
-        zorro3-a4000-c28|zorro3-nofast-a4000-c28)
+        zorro3-a4000-c28)
             if [ "${#C28_BUILDER_CMD[@]}" -eq 0 ]; then
                 echo "ERROR: set C28_BITSTREAM_BUILDER to a C28 builder ending in its output-path option." >&2
                 exit 1
@@ -338,7 +315,7 @@ for variant in "${selected[@]}"; do
     replace_define_block "$block_tmp"
 
     case "$variant" in
-        zorro3-a4000-c28|zorro3-nofast-a4000-c28)
+        zorro3-a4000-c28)
             mkdir -p "$(dirname "$output")"
             "${C28_BUILDER_CMD[@]}" "$output"
             ;;
