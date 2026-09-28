@@ -1244,6 +1244,7 @@ module MNTZorro_v0_1_S00_AXI
   localparam WAIT_READ3B = 58;
   localparam WAIT_READ3C = 59;
   localparam Z3_WRITE_FINALIZE2 = 60;
+  localparam Z2_REGREAD_DTACK = 62;
   localparam Z2_WRITE_FINALIZE2 = 61;
 
   (* mark_debug = "true" *) reg [7:0] zorro_state = COLD;
@@ -2673,6 +2674,14 @@ module MNTZorro_v0_1_S00_AXI
             data_out <= rr_data[15:0];
           else
             data_out <= rr_data[31:16];
+          // Keep data_out stable for one clock before DTACK rises, like
+          // the Z2 memory-read path (WAIT_READ2 -> WAIT_READ2D).  Register
+          // reads used to assert DTACK on the same edge, leaving no data
+          // setup margin on marginal buses (back-to-back descriptor reads
+          // could sample a halfword as zero).
+          zorro_state <= Z2_REGREAD_DTACK;
+        end
+        Z2_REGREAD_DTACK: begin
           dtack <= 1;
           zorro_state <= Z2_ENDCYCLE;
         end
@@ -2959,8 +2968,8 @@ module MNTZorro_v0_1_S00_AXI
         end
 `endif
 
-        // FIXME why is there no dataout time on REGREAD? (see memory reads)
-        // now fixed for Z3, still pending for Z2
+        // Register reads now drive data_out one state before DTACK on both
+        // Z2 (Z2_REGREAD_POST -> Z2_REGREAD_DTACK) and Z3 paths.
         REGREAD: begin
           // TODO split up into z3/z2
 `ifdef ZORRO3
