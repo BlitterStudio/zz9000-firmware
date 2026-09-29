@@ -103,7 +103,7 @@ fi
 
 variant_defs=(
     "zorro3|bootimage_work/zz9000_ps_wrapper.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|Zorro III, A3000/A4000, E7M capture"
-    "zorro3-a4000-c28|bootimage_work/variants/zz9000_ps_wrapper-zorro3-a4000-c28.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|A4000 video-slot C28, Zorro III Fast RAM"
+    "zorro3-aga|bootimage_work/variants/zz9000_ps_wrapper-zorro3-aga.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|A4000/A4000T AGA video-slot capture, Zorro III Fast RAM"
     "zorro2|bootimage_work/variants/zz9000_ps_wrapper-zorro2.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|Zorro II 4MB, A2000"
     "zorro2-2mb|bootimage_work/variants/zz9000_ps_wrapper-zorro2-2mb.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|Zorro II 2MB, A2000"
     "a500|bootimage_work/variants/zz9000_ps_wrapper-a500.bit|ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf|A500 4MB, ZZ9500CX Denise adapter"

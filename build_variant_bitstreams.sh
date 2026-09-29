@@ -42,7 +42,7 @@ Builds all release variants when no variant is specified.
 
 Variants:
   zorro3          Zorro III / A3000 / A4000
-  zorro3-a4000-c28  A4000 with video-slot C28, Zorro III Fast RAM
+  zorro3-aga  A4000/A4000T AGA video-slot capture, Zorro III Fast RAM
   zorro2          Zorro II 4MB / A2000
   zorro2-2mb      Zorro II 2MB / A2000
   a500            A500 4MB / ZZ9500CX Denise adapter
@@ -51,12 +51,12 @@ Variants:
 EOF
 }
 
-all_variants=(zorro3 zorro3-a4000-c28 zorro2 zorro2-2mb a500 a500-2mb a500plus)
+all_variants=(zorro3 zorro3-aga zorro2 zorro2-2mb a500 a500-2mb a500plus)
 
 variant_label() {
     case "$1" in
         zorro3) echo "Zorro III / A3000 / A4000" ;;
-        zorro3-a4000-c28) echo "A4000 / C28, Zorro III Fast RAM" ;;
+        zorro3-aga) echo "A4000/A4000T AGA, Zorro III Fast RAM" ;;
         zorro2) echo "Zorro II 4MB / A2000" ;;
         zorro2-2mb) echo "Zorro II 2MB / A2000" ;;
         a500) echo "A500 4MB / ZZ9500CX Denise adapter" ;;
@@ -69,7 +69,7 @@ variant_label() {
 variant_output() {
     case "$1" in
         zorro3) echo "$CANONICAL_BIT" ;;
-        zorro3-a4000-c28) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro3-a4000-c28.bit" ;;
+        zorro3-aga) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro3-aga.bit" ;;
         zorro2) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro2.bit" ;;
         zorro2-2mb) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro2-2mb.bit" ;;
         a500) echo "$VARIANT_DIR/zz9000_ps_wrapper-a500.bit" ;;
@@ -81,7 +81,7 @@ variant_output() {
 
 variant_block() {
     case "$1" in
-        zorro3|zorro3-a4000-c28)
+        zorro3|zorro3-aga)
             cat <<'EOF'
 // ZORRO2/3 switch
 //`define ZORRO2
@@ -257,7 +257,7 @@ else
 fi
 for variant in "${selected[@]}"; do
     case "$variant" in
-        zorro3-a4000-c28)
+        zorro3-aga)
             if [ "${#C28_BUILDER_CMD[@]}" -eq 0 ]; then
                 echo "ERROR: set C28_BITSTREAM_BUILDER to a C28 builder ending in its output-path option." >&2
                 exit 1
@@ -315,7 +315,7 @@ for variant in "${selected[@]}"; do
     replace_define_block "$block_tmp"
 
     case "$variant" in
-        zorro3-a4000-c28)
+        zorro3-aga)
             mkdir -p "$(dirname "$output")"
             "${C28_BUILDER_CMD[@]}" "$output"
             ;;

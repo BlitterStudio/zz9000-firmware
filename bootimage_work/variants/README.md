@@ -21,7 +21,7 @@ firmware flavor is not part of the release matrix.
 | Variant | Bitstream |
 |---|---|
 | Zorro III / A3000 / A4000, E7M capture | `bootimage_work/zz9000_ps_wrapper.bit` |
-| A4000 video-slot C28, Fast RAM capable | `bootimage_work/variants/zz9000_ps_wrapper-zorro3-a4000-c28.bit` |
+| A4000/A4000T AGA video-slot capture, Fast RAM capable (formerly `zorro3-a4000-c28`) | `bootimage_work/variants/zz9000_ps_wrapper-zorro3-aga.bit` |
 | Zorro II 4MB / A2000 | `bootimage_work/variants/zz9000_ps_wrapper-zorro2.bit` |
 | Zorro II 2MB / A2000 | `bootimage_work/variants/zz9000_ps_wrapper-zorro2-2mb.bit` |
 | A500 4MB / ZZ9500CX Denise adapter | `bootimage_work/variants/zz9000_ps_wrapper-a500.bit` |

@@ -116,13 +116,13 @@ is a `fast_ram` `ZZ9000.CFG` setting, not a variant: the former
 The script restores `mntzorro.v` and the canonical E7M bitstream afterward.
 To rebuild selected variants on Linux, for example:
 ```bash
-./build_variant_bitstreams.sh zorro2 zorro3-a4000-c28
+./build_variant_bitstreams.sh zorro2 zorro3-aga
 ```
 On Windows with Git Bash, pass both builders when selecting a C28 variant:
 ```bash
 BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1" \
 C28_BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1 -CaptureC28 -OutputBitstream" \
-  ./build_variant_bitstreams.sh zorro3-a4000-c28
+  ./build_variant_bitstreams.sh zorro3-aga
 ```
 
 **Clean rebuild** — no Vivado, uses the committed bitstream:

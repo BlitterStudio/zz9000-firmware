@@ -35,7 +35,7 @@ coprocessor platform. These are the highest-value differences for an owner:
 | **Hardware-assisted images, archives, audio and secure networking** | Firmware services accelerate JPEG/PNG work, MP3/audio streaming, LHA/LZH decompression, and selected cryptography used by the accelerated AmiSSL build. Applications fall back safely when a service is unavailable. |
 | **Settings without special firmware builds** | One readable `ZZ9000.CFG` file on the microSD card now controls native-video profiles, framing, scanlines, INT2, MAC address, PIP/off-screen features, and the boot HDF. The old separate `ns-pal` firmware flavor is no longer needed. |
 | **Updates and recovery from AmigaOS** | `ZZFwUpdate` can install firmware files without removing the microSD card, keeps a `.bak` copy when replacing a file, and can restore that backup if an update boots but misbehaves. |
-| **More supported machines and card configurations** | Releases maintain nine FPGA images covering A4000 C28 and E7M capture, Zorro III, Zorro II, A500/ZZ9500CX, 2 MB, no-Fast-RAM, and Super Denise configurations. |
+| **More supported machines and card configurations** | Releases maintain nine FPGA images covering AGA (video-slot) and E7M capture, Zorro III, Zorro II, A500/ZZ9500CX, 2 MB, no-Fast-RAM, and Super Denise configurations. |
 
 The less visible work matters too: USB 2.0/Poseidon support, gigabit Ethernet,
 SD-card HDF boot, on-board audio improvements, safer Zorro II memory sharing,
@@ -85,7 +85,7 @@ Use the ZIP whose board/bitstream variant matches the target machine:
 | Variant | Use for |
 |---|---|
 | `zorro3` | A3000/A4000 with optional Zorro III FastRAM; E7M capture |
-| `zorro3-a4000-c28` | A4000 with the 28 MHz video-slot connection, optional Zorro III FastRAM; C28 capture |
+| `zorro3-aga` | A4000/A4000T AGA with the 28 MHz video-slot connection, optional Zorro III FastRAM; AGA capture (renamed from `zorro3-a4000-c28`) |
 | `zorro2` | A2000, Zorro II, 4 MB window |
 | `zorro2-2mb` | A2000, Zorro II, 2 MB window |
 | `a500` | A500 with ZZ9500CX Denise adapter, 4 MB window |
@@ -97,15 +97,15 @@ Zorro III FastRAM is no longer a bitstream choice: it is off by default and
 enabled with `fast_ram = on` in [`ZZ9000.CFG`](ZZ9000.CFG) (fail-closed —
 absent, malformed, unreadable, or too-slow configuration boots without it,
 which is the old `zorro3-nofast` behavior). Former `zorro3-nofast` /
-`zorro3-nofast-a4000-c28` users need no CFG key; former `zorro3` /
-`zorro3-a4000-c28` users add `fast_ram = on` to keep their RAM. Changes
+`zorro3-nofast-aga` (former name) users need no CFG key; former `zorro3` /
+`zorro3-aga` (formerly `zorro3-a4000-c28`) users add `fast_ram = on` to keep their RAM. Changes
 take effect at the next reboot (a warm reset re-reads the card). If the
 card is unusually slow at a warm reset, the re-read can finish after the
 Amiga has already passed the Fast-RAM slot in autoconfig; the card then
 boots without Fast RAM for that one pass (never wrongly enabled) and the
 next reset picks it up again.
 
-The A4000 C28 images require the video-slot C28 connection. Do not install
+The AGA (formerly A4000 C28) images require the video-slot C28 connection. Do not install
 them on an A3000 or Denise-adapter machine. Keep the E7M Zorro III images as
 the A3000 builds and as an A4000 fallback. Settings that used to require a
 separate firmware flavor or ENV: variables now live in the optional
@@ -129,9 +129,11 @@ The file controls these boot-time defaults:
 | `videocap_profile` | Native output: `full_60`, `full_exact`, `filtered_60` (default), `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60`, `centered_1080p_50`, `centered_1080p_match` |
 | `videocap_sample` | Native-video capture sampling |
 | `videocap_phase` | Legacy E7M diagnostic phase, signed fine steps (`-255..255`); omit unless calibrated |
-| `videocap_c28_phase` | A4000 C28 diagnostic phase, independent fine steps (`-896..895`); requires matching C28 bitstream |
+| `videocap_c28_phase` | A4000 C28 diagnostic phase, independent fine steps (`-896..895`); requires matching AGA (video-slot C28) bitstream |
 | `videocap_crop_h` | Horizontal picture position; omit for Automatic |
 | `videocap_crop_v` | Vertical picture position; omit for Automatic |
+| `videocap_width` | Manual capture window width, 16-aligned words (`256..1280`); omit for Automatic |
+| `videocap_height` | Manual capture window height in source lines (`100..1024`); omit for Automatic |
 | `scanline_mode` | Scanline style, or off |
 | `scanline_parity` | Which line is darkened |
 | `int2` | Use INT2 instead of INT6 |
@@ -301,7 +303,7 @@ reset, before any application can allocate the audio device.
 Both save mechanisms — ZZTop's Settings/Scandoubler **Save** and the
 firmware-backed Audio **Save** — regenerate the file from settings they
 know and keep the previous copy as `ZZ9000.bak`: hand-written comments
-are not preserved. The file parser reads at most 4 KiB; a larger file
+are not preserved. The file parser reads at most 8 KiB; a larger file
 has its tail ignored, which the drivers can observe through the
 config-query key `ZZ_CONFIG_KEY_AUDIO_TRUNCATED` (the audio keys
 serialize last, so they are the first casualty of an oversized file).
@@ -399,17 +401,17 @@ Keep these rules in mind:
 See the commented [ZZ9000.CFG sample](ZZ9000.CFG) for every accepted value and
 additional notes.
 
-## A4000 C28 capture clock
+## AGA video-slot capture clock (formerly A4000 C28)
 
-The separate A4000 C28 bitstreams capture AGA pixels from the 28 MHz
+The separate AGA (`zorro3-aga`, formerly A4000 C28) bitstreams capture AGA pixels from the 28 MHz
 video-slot signal. They run the capture MMCM at approximately 908-916 MHz,
 with one capture clock per source pixel. E7M bitstreams remain available
 for A3000, other machines, and A4000 fallback; the clock source cannot be
 changed by ZZ9000.CFG alone. Other machines and adapter routes require
 separate clock qualification.
 
-Build the A4000 C28 release bitstream with Vivado 2018.3 using
-`build_variant_bitstreams.sh zorro3-a4000-c28`;
+Build the AGA (video-slot C28) release bitstream with Vivado 2018.3 using
+`build_variant_bitstreams.sh zorro3-aga`;
 see [BUILD.md](BUILD.md). For a separate single-image diagnostic build
 on Windows:
 
