@@ -1878,15 +1878,23 @@ int main() {
 						data |= video_firmware_capabilities();
 						break;
 					}
-					case REG_ZZ_CONFIG_KEY: {
-						// value of the selected ZZ9000.CFG key in the
-						// upper half, present flag in the lower half
-						// (REG_ZZ_CONFIG_PRESENT on Z2)
-						uint16_t present = 0;
-						uint16_t value = zz_config_query(config_query_key, &present);
-						data = ((uint32_t)value << 16) | present;
-						break;
+				case REG_ZZ_CONFIG_KEY: {
+					// value of the selected ZZ9000.CFG key in the
+					// upper half, present flag in the lower half
+					// (REG_ZZ_CONFIG_PRESENT on Z2)
+					uint16_t present = 0;
+					uint16_t value;
+					if (config_query_key >=
+					    ZZ_CONFIG_KEY_RTG_GEOM_LINE) {
+						value = video_rtg_diag_value(
+							config_query_key, &present);
+					} else {
+						value = zz_config_query(
+							config_query_key, &present);
 					}
+					data = ((uint32_t)value << 16) | present;
+					break;
+				}
 					case REG_ZZ_CONFIG_FILE: {
 						// status in the upper half, staged byte count
 						// in the lower half (REG_ZZ_CONFIG_FILE_LEN on Z2)

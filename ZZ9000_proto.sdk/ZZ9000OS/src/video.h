@@ -165,6 +165,10 @@ struct ZZ_VIDEO_STATE {
 
 struct ZZ_VIDEO_STATE* video_init();
 void video_reset();
+
+/* Runtime RTG scanout-geometry diagnostics (config keys 21-25):
+ * value of a diagnostic key from the last video_mode_init snapshot. */
+uint16_t video_rtg_diag_value(uint16_t key, uint8_t *present);
 void isr_video(void *dummy);
 void video_mode_init(int mode, int scalemode, int colormode);
 void video_set_dpms(uint8_t level);
