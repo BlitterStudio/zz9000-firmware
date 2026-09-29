@@ -890,17 +890,17 @@ static void test_save_rejects_over_boundary(void)
 		"recovered save persists the CFG", NULL);
 }
 
-/* ---- truncation: the 4 KiB overflow is queryable ---- */
+/* ---- truncation: the 8 KiB overflow is queryable ---- */
 
 static void test_truncation_query_key(void)
 {
-	static char big[4400];
+	static char big[8600];
 	uint16_t present = 0;
 	unsigned off = 0;
 
 	/* A file past the parse budget with audio keys in the ignored
 	 * tail. */
-	while (off < 4160) {
+	while (off < 8320) {
 		big[off++] = '#';
 		for (int i = 0; i < 78; i++)
 			big[off++] = 'x';
