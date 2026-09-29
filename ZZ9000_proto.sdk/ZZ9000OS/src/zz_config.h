@@ -21,7 +21,11 @@
 #include <stdint.h>
 
 #define ZZ_CONFIG_FILENAME  "ZZ9000.CFG"
-#define ZZ_CONFIG_MAX_SIZE  4096
+/* Doubled for the ZZTop scandoubler-calibration keys (width/height ride
+ * with the phase/crop block) so the eight saved audio scenes no longer
+ * brush the truncation ceiling. Shared with the Amiga editor's
+ * ZZCFG_MAX_SIZE. */
+#define ZZ_CONFIG_MAX_SIZE  8192
 #define ZZ_CONFIG_HDF_NAME_MAX 63
 
 /* Key ids for the REG_ZZ_CONFIG_KEY query interface. Shared by
@@ -56,6 +60,12 @@ enum zz_config_key {
 	ZZ_CONFIG_KEY_AUDIO_TRUNCATED = 16,
 	ZZ_CONFIG_KEY_VIDEOCAP_PHASE  = 17, /* legacy E7M MMCM steps, -255..255 */
 	ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE = 18, /* C28 MMCM steps, -896..895 */
+	/* Manual capture-window bounds (ZZTop calibration): width in
+	 * captured words (16-aligned, 256..1280), height in source lines
+	 * (100..1024). 0/absent = automatic. The live runtime override is
+	 * CARD_FEATURE_VIDEOCAP_GEOMETRY; these keys persist it. */
+	ZZ_CONFIG_KEY_VIDEOCAP_WIDTH  = 26, /* captured words, 0=automatic */
+	ZZ_CONFIG_KEY_VIDEOCAP_HEIGHT = 27, /* source lines, 0=automatic */
 	/* Fail-closed Z3 Fast-RAM advertisement. FAST_RAM reads the saved
 	 * preference; FAST_RAM_OUTCOME reads the effective boot decision
 	 * (enum zz_fastram_outcome), so Amiga software distinguishes
@@ -127,6 +137,10 @@ struct zz_config {
 	int16_t videocap_phase;          /* legacy E7M fine-phase steps, -255..255 */
 	uint8_t videocap_c28_phase_present;
 	int16_t videocap_c28_phase;      /* C28 fine-phase steps, -896..895 */
+	uint8_t videocap_width_present;
+	uint16_t videocap_width;         /* capture window words, 0=automatic */
+	uint8_t videocap_height_present;
+	uint16_t videocap_height;        /* capture window lines, 0=automatic */
 
 	uint8_t ns_vsync_present;
 	uint16_t ns_vsync;              /* 0=off 1=pal 2=ntsc */
