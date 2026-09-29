@@ -16,6 +16,9 @@
 
 extern uint8_t imc_tables_initialized;
 int current_c37_encoder = -1;
+/* Set only by the REG_ZZ_ALLOC_CLEAR_PROTOCOL register write (see
+ * main.c); cleared on Amiga reset so a warm reboot re-handshakes. */
+uint8_t alloc_clear_protocol_v2 = 0;
 
 void handle_acc_op(uint16_t zdata)
 {
@@ -167,6 +170,7 @@ void handle_acc_op(uint16_t zdata)
                 break;
             }
 
+            uint32_t requested_size = sfc_size;
             uint32_t sfc_addr = surface_allocator_alloc(sfc_size);
             if (!sfc_addr) {
                 printf("not enough legacy surface heap for %d bytes.\n", sfc_size);
@@ -174,8 +178,31 @@ void handle_acc_op(uint16_t zdata)
             }
 
             sfc_size = surface_allocator_block_size(sfc_addr);
-            memset((void *)sfc_addr, 0x00, sfc_size);
-            Xil_DCacheFlushRange((INTPTR)sfc_addr, sfc_size);
+            /* Conditional clear protocol, gated on the init-time
+             * handshake: honored only after the driver announced
+             * itself via REG_ZZ_ALLOC_CLEAR_PROTOCOL. Legacy drivers
+             * leave stale DrawLine padding in u8_user[3] -- without
+             * the latch a stale 1 would skip the zero-fill their
+             * ABMA_Clear relies on. With the latch active,
+             * u8_user[3]==1 means the caller did not ask for
+             * ABMA_Clear; graphics.library AllocBitMap promises no
+             * clearing, and zero-filling anyway turned re-allocated
+             * smart-refresh save buffers into black window restores. */
+            int clear_requested = !alloc_clear_protocol_v2 ||
+                                  data->u8_user[3] != 1;
+            /* Lifecycle trace for the black-background-window reports:
+             * alloc/free is rare (window/screen churn), so one UART line
+             * each is free. Offsets are framebuffer-relative like every
+             * consumer; pair with the FREE line to spot recycling into a
+             * still-scanned region. */
+            printf("[acc] surface alloc +%lx (%u bytes, requested %u, clear %u)\n",
+                   (unsigned long)(sfc_addr - (u32)FRAMEBUFFER_ADDRESS),
+                   (unsigned)sfc_size, (unsigned)requested_size,
+                   (unsigned)clear_requested);
+            if (clear_requested) {
+                memset((void *)sfc_addr, 0x00, sfc_size);
+                Xil_DCacheFlushRange((INTPTR)sfc_addr, sfc_size);
+            }
             // MemoryBase-relative, like every RTG blit offset (the
             // driver computes Planes[0] = MemoryBase + offset and all
             // consumers map offset -> ARM via framebuffer/0x200000).
@@ -189,6 +216,8 @@ void handle_acc_op(uint16_t zdata)
         case ACC_OP_FREE_SURFACE: {
             SWAP32(data->offset[0]);
             data->offset[0] += (u32)FRAMEBUFFER_ADDRESS;
+            printf("[acc] surface free +%lx\n",
+                   (unsigned long)(data->offset[0] - (u32)FRAMEBUFFER_ADDRESS));
             if (surface_allocator_free(data->offset[0]) != 0) {
                 printf("Ignoring free of unknown surface at %p.\n",
                        (void *)data->offset[0]);

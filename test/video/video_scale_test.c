@@ -64,23 +64,52 @@ int main(void)
 	if (!expect_u32("PAL fullscan keeps power-of-two scale control",
 	                video_videocap_scale_control(1U, 0U, 0U), 4U))
 		return 15;
-	if (!expect_u32("NTSC progressive fullscan carries 200 source rows",
-	                video_videocap_scale_control(1U, 1U, 0U),
-	                (200U << 16) | 4U))
+	if (!expect_u32("PAL fullscan interlaced keeps legacy x2 control",
+	                video_videocap_scale_control(1U, 0U, 1U), 10U))
 		return 16;
-	if (!expect_u32("NTSC interlaced fullscan carries 400 source rows",
-	                video_videocap_scale_control(1U, 1U, 1U),
-	                (400U << 16) | 10U))
+	if (!expect_u32("NTSC progressive fullscan keeps legacy x4 control",
+	                video_videocap_scale_control(1U, 1U, 0U), 4U))
 		return 17;
+	if (!expect_u32("NTSC interlaced fullscan keeps legacy x2 control",
+	                video_videocap_scale_control(1U, 1U, 1U), 10U))
+		return 18;
 	if (!expect_u32("filtered request stays filtered",
 	                video_videocap_full_width(0U, 1U), 0U))
-		return 10;
+		return 19;
 	if (!expect_u32("full request needs full-rate hardware",
 	                video_videocap_full_width(1U, 0U), 0U))
-		return 11;
+		return 20;
 	if (!expect_u32("full request uses full-rate hardware",
 	                video_videocap_full_width(1U, 1U), 1U))
-		return 12;
+		return 21;
+	{
+		struct video_videocap_scanout_rect r =
+			video_videocap_fullscan_rect(
+				ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U);
+		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
+		    r.height != 1024U)
+			return 22;
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U);
+		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
+		    r.height != 800U)
+			return 23;
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U);
+		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
+		    r.height != 800U)
+			return 24;
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 0U);
+		if (r.x != 320U || r.y != 140U || r.width != 1280U ||
+		    r.height != 800U)
+			return 25;
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50, 0U, 1U);
+		if (r.x != 320U || r.y != 28U || r.width != 1280U ||
+		    r.height != 1024U)
+			return 26;
+	}
 
 	return 0;
 }

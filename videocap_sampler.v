@@ -23,8 +23,8 @@ module videocap_control_source #(
     input  wire        request_token_valid,
     input  wire        control_received,
     output reg         control_send = 0,
-    output reg  [26:0] control_payload =
-        {12'd26, 12'd188, 1'b0, 2'd0},
+    output reg  [27:0] control_payload =
+        {1'b0, 12'd26, 12'd188, 1'b0, 2'd0},
     output wire        busy,
     output reg  [7:0]  request_sequence = 0,
     output reg  [7:0]  applied_sequence = 0,
@@ -43,8 +43,14 @@ localparam [1:0] CONTROL_RETURN = 2'd3;
 
 localparam [11:0] CROP_H_COMPAT = 12'd188;
 localparam [11:0] CROP_V_COMPAT = 12'd26;
-localparam [11:0] CROP_H_FULLRATE = 12'd279;
-localparam [11:0] CROP_V_FULLRATE = 12'd40;
+/* Calibrated full-rate auto defaults (2026-09-29, C28 A4000 + A3000):
+ * H 278 centers both standards; PAL needs V 40 while NTSC needs V 39
+ * (V 39 on PAL cuts the bottom line). The commit-time vertical value is
+ * the PAL default — the capture domain re-resolves the standard-dependent
+ * vertical crop while the automatic flag is set. */
+localparam [11:0] CROP_H_FULLRATE = 12'd278;
+localparam [11:0] CROP_V_FULLRATE_PAL = 12'd40;
+localparam [11:0] CROP_V_FULLRATE_NTSC = 12'd39;
 
 reg [1:0] control_state = CONTROL_IDLE;
 reg [31:0] pending_raw =
@@ -72,7 +78,7 @@ wire [11:0] request_crop_h_effective = request_effective_raw[28] ?
     (request_fullrate_path ? CROP_H_FULLRATE : CROP_H_COMPAT) :
     request_effective_raw[15:4];
 wire [11:0] request_crop_v_effective = request_effective_raw[29] ?
-    (request_fullrate_path ? CROP_V_FULLRATE : CROP_V_COMPAT) :
+    (request_fullrate_path ? CROP_V_FULLRATE_PAL : CROP_V_COMPAT) :
     request_effective_raw[27:16];
 wire request_raw_valid =
     request_width_only ||
@@ -97,7 +103,8 @@ always @(posedge source_clk) begin
             if (width_pending || request_event) begin
                 if (width_pending || (request_token_valid && request_raw_valid)) begin
                     pending_raw <= request_effective_raw;
-                    control_payload <= {request_crop_v_effective,
+                    control_payload <= {request_effective_raw[29],
+                                        request_crop_v_effective,
                                         request_crop_h_effective,
                                         request_effective_raw[2],
                                         request_effective_raw[1:0]};
@@ -254,7 +261,7 @@ module videocap_sampler #(
     input  wire        grid_ref,
 
     input  wire        ctl_send,
-    input  wire [26:0] ctl_payload,
+    input  wire [27:0] ctl_payload,
     output wire        ctl_received,
     input  wire        ctl_read_full_width,
     output wire [1:0]  detected_standard,
@@ -308,7 +315,7 @@ module videocap_sampler #(
 /* The source holds this bundled payload for the complete four-phase XPM
  * transaction.  External destination acknowledgement delays completion
  * until the next capture frame boundary. */
-wire [26:0] ctl_dest_payload;
+wire [27:0] ctl_dest_payload;
 wire ctl_dest_req;
 reg ctl_dest_ack = 0;
 
@@ -318,7 +325,7 @@ xpm_cdc_handshake #(
     .INIT_SYNC_FF(1),
     .SIM_ASSERT_CHK(0),
     .SRC_SYNC_FF(4),
-    .WIDTH(27)
+    .WIDTH(28)
 ) videocap_control_handshake (
     .src_clk(axi_clk),
     .src_in(ctl_payload),
@@ -330,10 +337,18 @@ xpm_cdc_handshake #(
     .dest_ack(ctl_dest_ack)
 );
 
+localparam [11:0] CROP_V_AUTO_PAL = 12'd40;
+localparam [11:0] CROP_V_AUTO_NTSC = 12'd39;
+
 reg [1:0] ctl_sample_mode_cap = 2'd0;
 reg ctl_full_width_cap = 1'b0;
 reg [11:0] ctl_crop_h_cap = 12'd188;
 reg [11:0] ctl_crop_v_cap = 12'd26;
+/* Mirrors the request's automatic-vertical flag: while set, the applied
+ * vertical crop follows the detected standard (PAL 40, NTSC 39). The
+ * commit payload carries the PAL-resolved value because the source domain
+ * cannot see the detector; the re-resolution below owns the difference. */
+reg ctl_crop_v_auto_cap = 1'b0;
 
 reg [6:0] hs = 0;
 reg [6:0] vs = 0;
@@ -674,8 +689,21 @@ always @(posedge cap_clk) begin
         ctl_sample_mode_cap <= ctl_dest_payload[1:0];
         ctl_full_width_cap <= ctl_dest_payload[2];
         ctl_crop_h_cap <= ctl_dest_payload[14:3];
+        ctl_crop_v_auto_cap <= ctl_dest_payload[27];
         ctl_crop_v_cap <= ctl_dest_payload[26:15];
         ctl_dest_ack <= 1'b1;
+    end
+
+    /* Automatic vertical crop follows the detected standard. The boot
+     * commit resolves before NTSC detection settles (the source domain
+     * cannot see the detector), so re-resolve at every frame boundary
+     * while automatic; reloads of the register itself keep the existing
+     * compare paths and their timing margins unchanged. An explicit
+     * commit arriving in the same cycle clears the flag and wins. */
+    if (frame_sync && !cap_reset && ctl_crop_v_auto_cap &&
+            !(ctl_dest_req && !ctl_dest_ack)) begin
+        ctl_crop_v_cap <= cap_ntsc ?
+            CROP_V_AUTO_NTSC : CROP_V_AUTO_PAL;
     end
 
     if (cap_reset) begin

@@ -114,6 +114,7 @@ struct ZZ9KContext {
   uint32_t sync_cookie_mask;
   uint32_t offload_timeout_ms;
   uint32_t sync_wait_timeout_ms;   /* armed-wait ENV bound, read once; 0 = unread */
+  uint32_t wait_heartbeats;        /* coarse clock when timer.device is unusable */
   unsigned char irq_armed;
   unsigned char late_irq_expected; /* cancelled op still in flight */
   unsigned char aperture_layout_valid;
@@ -545,12 +546,18 @@ static uint32_t zz9k_armed_wait_timeout_ms(ZZ9KContext *ctx)
   return ctx->sync_wait_timeout_ms;
 }
 
-/* Monotonic-ish millisecond reading; unsigned deltas absorb wrap. */
+/* Monotonic-ish millisecond reading; unsigned deltas absorb wrap.
+ * Without timer.device there is no wall clock, and returning a frozen 0
+ * would silently disable every hard-timeout check in the armed wait --
+ * one freeze mode is exactly that: no timer plus a missing completion
+ * IRQ. Derive a coarse heartbeat-scaled count instead;
+ * zz9k_wait_block() bumps the counter once per wait cycle. */
 static uint32_t zz9k_now_ms(ZZ9KContext *ctx)
 {
 #if ZZ9K_HOST_AMIGA
   if (!ctx->timer_open || !ctx->timer_request) {
-    return 0;
+    return ctx->wait_heartbeats *
+           (uint32_t)(ZZ9K_SYNC_WAIT_HEARTBEAT_MICROS / 1000UL);
   }
   ctx->timer_request->tr_node.io_Command = TR_GETSYSTIME;
   DoIO((struct IORequest *)ctx->timer_request);
@@ -574,23 +581,47 @@ static int zz9k_wait_block(ZZ9KContext *ctx)
   unsigned long signals;
   int have_timer = ctx->timer_open && ctx->timer_request && ctx->timer_port;
 
-  wait_mask = ctx->irq_signal_mask | SIGBREAKF_CTRL_C;
-  if (have_timer) {
-    ctx->timer_request->tr_node.io_Command = TR_ADDREQUEST;
-    ctx->timer_request->tr_time.tv_secs = 0;
-    ctx->timer_request->tr_time.tv_micro = ZZ9K_SYNC_WAIT_HEARTBEAT_MICROS;
-    SendIO((struct IORequest *)ctx->timer_request);
-    wait_mask |= (1UL << ctx->timer_port->mp_SigBit);
+  if (!have_timer) {
+    /* No timer.device: Wait() below would wake only on the completion
+     * IRQ or Ctrl-C, and if the IRQ never arrives (wrong INT2 wiring,
+     * arming failure, wedged board) the caller sleeps forever with no
+     * deadline. Poll at the flat backoff cadence (~heartbeat scale) so
+     * the caller's timeout logic keeps making progress; consume Ctrl-C
+     * the same way Wait() would. */
+    zz9k_idle_between_polls_backoff(22U);
+    ctx->wait_heartbeats++;
+    return (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) ? 1 : 0;
   }
 
-  signals = Wait(wait_mask);
-
-  if (have_timer) {
+  wait_mask = ctx->irq_signal_mask | SIGBREAKF_CTRL_C;
+  ctx->timer_request->tr_node.io_Command = TR_ADDREQUEST;
+  ctx->timer_request->tr_time.tv_secs = 0;
+  ctx->timer_request->tr_time.tv_micro = ZZ9K_SYNC_WAIT_HEARTBEAT_MICROS;
+  SendIO((struct IORequest *)ctx->timer_request);
+  if (ctx->timer_request->tr_node.io_Error != 0) {
+    /* Heartbeat could not be armed: Wait() would then block on a signal
+     * that never comes -- the same unbounded-sleep risk as having no
+     * timer at all. Reap the failed request first: SendIO may have
+     * queued and replied it even on error, and an outstanding request
+     * must not be reused by zz9k_now_ms()'s DoIO or a later SendIO.
+     * Then fall back to the bounded poll. */
     if (!CheckIO((struct IORequest *)ctx->timer_request)) {
       AbortIO((struct IORequest *)ctx->timer_request);
     }
     WaitIO((struct IORequest *)ctx->timer_request);
+    zz9k_idle_between_polls_backoff(22U);
+    ctx->wait_heartbeats++;
+    return (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) ? 1 : 0;
   }
+  wait_mask |= (1UL << ctx->timer_port->mp_SigBit);
+
+  signals = Wait(wait_mask);
+  ctx->wait_heartbeats++;
+
+  if (!CheckIO((struct IORequest *)ctx->timer_request)) {
+    AbortIO((struct IORequest *)ctx->timer_request);
+  }
+  WaitIO((struct IORequest *)ctx->timer_request);
 
   return (signals & SIGBREAKF_CTRL_C) ? 1 : 0;
 #else
@@ -601,6 +632,7 @@ static int zz9k_wait_block(ZZ9KContext *ctx)
   return 0;
 #endif
 }
+
 
 /* Forward declaration: defined later in this file, needed here because
  * zz9k_await_completion_locked is placed alongside the other wait seams. */
@@ -672,6 +704,7 @@ static int zz9k_await_completion_locked(ZZ9KContext *ctx, uint32_t request_id,
           break;
         }
         zz9k_idle_between_polls_backoff(28U);
+        ctx->wait_heartbeats++;
       }
       /* Only a drain that timed out with the request still outstanding
          leaves the ARM working after we return: it will post its

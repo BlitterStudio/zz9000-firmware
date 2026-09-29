@@ -21,7 +21,7 @@ module videocap_recovery_tb;
     reg request_event = 0;
     reg [31:0] request_raw = 0;
     wire control_send, control_received, control_busy, applied_valid;
-    wire [26:0] control_payload;
+    wire [27:0] control_payload;
     wire [31:0] applied_raw, applied_effective;
     integer checks = 0, failures = 0, line_events = 0, anchor_events = 0;
     reg last_line = 0, last_anchor = 0;
@@ -353,6 +353,37 @@ module videocap_recovery_tb;
         check_snapshot(281, 41, 80, 1'b1, 1'b1, 2'd2);
         require(line_events > old_lines && anchor_events > old_anchors,
             "native line output resumes with the new configuration");
+
+        $display("CASE automatic vertical crop follows the detected standard");
+        /* Both crop axes automatic, full width, average sampling. The
+         * source is currently NTSC (262-line fields above). */
+        @(negedge axi_clk);
+        request_raw = (1 << 29) | (1 << 28) | (1 << 2);
+        request_event = 1;
+        @(negedge axi_clk); request_event = 0;
+        repeat (20) @(posedge axi_clk); #0.001;
+        require(control_busy, "auto configuration waits for a field boundary");
+        drive_field(262, 90);
+        require(applied_valid && !control_busy,
+            "auto configuration acknowledged at the field boundary");
+        require(applied_effective == ((12'd40 << 16) | 12'd278),
+            "auto commit resolves H 278 with the PAL vertical default");
+        /* One clean field for the re-resolution, then freeze: NTSC V 39. */
+        drive_field(262, 95);
+        arm();
+        drive_field(262, 100);
+        require(cal_geometry == ((12'd39 << 12) | 12'd278),
+            "NTSC detection re-resolves the automatic vertical crop to 39");
+        check_snapshot(278, 39, 100, 1'b1, 1'b1, 2'd0);
+        /* Two PAL fields settle the detector, a third applies V 40. */
+        drive_field(312, 105);
+        drive_field(312, 110);
+        drive_field(312, 115);
+        arm();
+        drive_field(312, 120);
+        require(cal_geometry == ((12'd40 << 12) | 12'd278),
+            "PAL detection restores the automatic vertical crop to 40");
+        check_snapshot(278, 40, 120, 1'b0, 1'b1, 2'd0);
 
         if (failures)
             $display("RESULT FAIL recovery: %0d failures / %0d checks", failures, checks);

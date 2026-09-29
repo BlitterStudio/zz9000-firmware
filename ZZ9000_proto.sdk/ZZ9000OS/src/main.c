@@ -486,6 +486,10 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
 	apply_aperture_framebuffer_limit();
 	clear_runtime_gfxdata();
+	/* The alloc-clear protocol handshake is driver-init state: a warm
+	 * reboot re-runs InitCard, so drop the latch until the new driver
+	 * generation announces itself again. */
+	alloc_clear_protocol_v2 = 0;
 
 	// clear audio buffer on reset
 	memset((void*)AUDIO_TX_BUFFER_ADDRESS, 0, AUDIO_TX_BUFFER_SIZE);
@@ -1572,6 +1576,15 @@ int main() {
 					printf("%04x", (unsigned int)(zdata&0xffff));
 					break;
 				}
+				case REG_ZZ_ALLOC_CLEAR_PROTOCOL: {
+					/* Driver init handshake: only after this token
+					 * does the ACC surface allocator honor
+					 * u8_user[3] as a no-clear flag. Any other
+					 * value drops back to always-clear. */
+					alloc_clear_protocol_v2 =
+						(zdata == ZZ_REG_ZZ_ALLOC_CLEAR_TOKEN);
+					break;
+				}
 				case REG_ZZ_AUDIO_CONFIG: {
 					// audio config
 					uint16_t mask = (uint16_t)zdata;
@@ -1865,15 +1878,23 @@ int main() {
 						data |= video_firmware_capabilities();
 						break;
 					}
-					case REG_ZZ_CONFIG_KEY: {
-						// value of the selected ZZ9000.CFG key in the
-						// upper half, present flag in the lower half
-						// (REG_ZZ_CONFIG_PRESENT on Z2)
-						uint16_t present = 0;
-						uint16_t value = zz_config_query(config_query_key, &present);
-						data = ((uint32_t)value << 16) | present;
-						break;
+				case REG_ZZ_CONFIG_KEY: {
+					// value of the selected ZZ9000.CFG key in the
+					// upper half, present flag in the lower half
+					// (REG_ZZ_CONFIG_PRESENT on Z2)
+					uint16_t present = 0;
+					uint16_t value;
+					if (config_query_key >=
+					    ZZ_CONFIG_KEY_RTG_GEOM_LINE) {
+						value = video_rtg_diag_value(
+							config_query_key, &present);
+					} else {
+						value = zz_config_query(
+							config_query_key, &present);
 					}
+					data = ((uint32_t)value << 16) | present;
+					break;
+				}
 					case REG_ZZ_CONFIG_FILE: {
 						// status in the upper half, staged byte count
 						// in the lower half (REG_ZZ_CONFIG_FILE_LEN on Z2)

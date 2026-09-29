@@ -2,4 +2,5 @@
 # Local driver: run build_variant_bitstreams.sh with the Windows PowerShell
 # bitstream builder. Invoke from Git Bash in the repo root.
 export BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1"
+export C28_BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1 -CaptureC28 -OutputBitstream"
 exec ./build_variant_bitstreams.sh "$@"

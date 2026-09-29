@@ -62,6 +62,18 @@ enum zz_config_key {
 	 * configured-on-but-withheld from enabled. */
 	ZZ_CONFIG_KEY_FAST_RAM        = 19, /* 0=off 1=on */
 	ZZ_CONFIG_KEY_FAST_RAM_OUTCOME = 20, /* enum zz_fastram_outcome */
+	/* Runtime RTG VDMA geometry diagnostics (keys 21-25; NOT config
+	 * file values — served from live video state so UART-less users
+	 * can capture the scanout geometry during a transient display
+	 * fault). LINE/STRIDE/PAN return the raw 16-bit values the last
+	 * video_mode_init programmed; INFO packs [15:13] hdiv,
+	 * [12:11] stride_div, [10:0] content hsize; MODESEL packs
+	 * [15:10] colormode, [9:8] scalemode, [7:0] mode id. */
+	ZZ_CONFIG_KEY_RTG_GEOM_LINE    = 21,
+	ZZ_CONFIG_KEY_RTG_GEOM_STRIDE  = 22,
+	ZZ_CONFIG_KEY_RTG_GEOM_PAN     = 23,
+	ZZ_CONFIG_KEY_RTG_GEOM_INFO    = 24,
+	ZZ_CONFIG_KEY_RTG_GEOM_MODESEL = 25,
 	ZZ_CONFIG_KEY_NUM
 };
 

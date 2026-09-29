@@ -175,7 +175,12 @@ enum zz_reg_offsets {
   REG_ZZ_AUDIO_CONFIG   = 0xF4,
   REG_ZZ_AUDIO_RX_STATUS = 0xF6,
   REG_ZZ_AUDIO_TX_STATUS = 0xF8,
-  REG_ZZ_UNUSED_REGFA   = 0xFA,
+  /* Allocation-clear protocol handshake (firmware 2.8.1): the RTG
+   * driver writes the token once at init; until then the firmware
+   * zero-fills every ACC surface unconditionally (legacy drivers
+   * leave stale DrawLine padding in u8_user[3] and must keep the
+   * always-clear behavior their ABMA_Clear relies on). */
+  REG_ZZ_ALLOC_CLEAR_PROTOCOL = 0xFA,
   REG_ZZ_DEBUG          = 0xFC,
   REG_ZZ_DEBUG_TIMER    = 0xFE,
 
@@ -190,6 +195,10 @@ enum zz_reg_offsets {
   REG_ZZ_SDK_DIAG_DATA  = 0x114,
   REG_ZZ_SDK_DIAG_ZADDR = 0x118,
 };
+
+/* Token written by the RTG driver to REG_ZZ_ALLOC_CLEAR_PROTOCOL at
+ * init to activate the conditional ACC surface clear. */
+#define ZZ_REG_ZZ_ALLOC_CLEAR_TOKEN 0x5AC1U
 
 #define ZZ_FW_CAP_VIDEOCAP_PROFILE (1U << 0)
 #define ZZ_FW_CAP_VIDEOCAP_LIVE    (1U << 1)

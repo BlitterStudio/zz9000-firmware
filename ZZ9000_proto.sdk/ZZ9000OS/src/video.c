@@ -164,6 +164,53 @@ void video_reset() {
 
 uint8_t stride_div = 1;
 
+/* Runtime scanout-geometry snapshot for the config-key diagnostics
+ * (keys 21-25): what the last video_mode_init actually programmed.
+ * Written in video_mode_init_internal; read via video_rtg_diag_value. */
+static struct {
+	uint16_t line_bytes;
+	uint16_t stride;
+	uint16_t pan_width;
+	uint16_t mode;
+	uint16_t colormode;
+	uint16_t scalemode;
+	uint16_t hsize;
+	uint16_t hdiv;
+	uint16_t stride_div;
+	uint8_t valid;
+} video_geom_diag;
+
+uint16_t video_rtg_diag_value(uint16_t key, uint8_t *present)
+{
+	if (present)
+		*present = 0;
+	if (!video_geom_diag.valid)
+		return 0;
+	switch (key) {
+	case ZZ_CONFIG_KEY_RTG_GEOM_LINE:
+		if (present) *present = 1;
+		return video_geom_diag.line_bytes;
+	case ZZ_CONFIG_KEY_RTG_GEOM_STRIDE:
+		if (present) *present = 1;
+		return video_geom_diag.stride;
+	case ZZ_CONFIG_KEY_RTG_GEOM_PAN:
+		if (present) *present = 1;
+		return video_geom_diag.pan_width;
+	case ZZ_CONFIG_KEY_RTG_GEOM_INFO:
+		if (present) *present = 1;
+		return (uint16_t)(((video_geom_diag.hdiv & 7U) << 13) |
+		                  ((video_geom_diag.stride_div & 3U) << 11) |
+		                  (video_geom_diag.hsize & 0x7FFU));
+	case ZZ_CONFIG_KEY_RTG_GEOM_MODESEL:
+		if (present) *present = 1;
+		return (uint16_t)(((video_geom_diag.colormode & 0x3FU) << 10) |
+		                  ((video_geom_diag.scalemode & 3U) << 8) |
+		                  (video_geom_diag.mode & 0xFFU));
+	default:
+		return 0;
+	}
+}
+
 // 32bit: hdiv=1, 16bit: hdiv=2, 8bit: hdiv=4, ...
 int init_vdma(int hsize, int source_rows, int hdiv, u32 bufpos) {
 	int status;
@@ -589,6 +636,31 @@ void isr_video(void *dummy) {
 							videocap_ntsc,
 							videocap_full_width);
 					videocap_area_clear();
+					if (videocap_full_width) {
+						/* Fullscan scales vertically by an
+						 * integer factor: publish the exact
+						 * content rectangle so the formatter
+						 * duplicates rows uniformly and
+						 * letterboxes the remainder. Every
+						 * fullscan transition rewrites it, so
+						 * PAL also restores the full raster
+						 * after an NTSC letterbox without
+						 * relying on mode-change side
+						 * effects. */
+						struct video_videocap_scanout_rect rect =
+							video_videocap_fullscan_rect(
+								(uint32_t)videocap_output_profile,
+								(uint32_t)videocap_ntsc,
+								(uint32_t)interlace);
+
+						video_formatter_write(
+								(rect.y << 16) | rect.x,
+								MNTVF_OP_VIEWPORT_POS);
+						video_formatter_write(
+								(rect.height << 16) |
+									rect.width,
+								MNTVF_OP_VIEWPORT_SIZE_COMMIT);
+					}
 					video_formatter_write(
 							video_videocap_scale_control(
 								(uint32_t)videocap_full_width,
@@ -947,6 +1019,19 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 		init_vdma(content_hres, content_vres / (uint32_t)vdiv, hdiv,
 				(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 	}
+	video_geom_diag.line_bytes =
+		(uint16_t)video_vdma_line_bytes(content_hres, (uint32_t)hdiv);
+	video_geom_diag.stride = (uint16_t)video_vdma_stride_bytes(
+		content_hres, (uint32_t)hdiv, vs.framebuffer_pan_width,
+		stride_div);
+	video_geom_diag.pan_width = (uint16_t)vs.framebuffer_pan_width;
+	video_geom_diag.mode = (uint16_t)mode;
+	video_geom_diag.colormode = (uint16_t)colormode;
+	video_geom_diag.scalemode = (uint16_t)scalemode;
+	video_geom_diag.hsize = (uint16_t)content_hres;
+	video_geom_diag.hdiv = (uint16_t)hdiv;
+	video_geom_diag.stride_div = (uint16_t)stride_div;
+	video_geom_diag.valid = 1;
 
 	// Re-sync input state machine with the now-stable output timing.
 	video_formatter_valign();
