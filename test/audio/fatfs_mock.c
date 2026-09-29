@@ -15,7 +15,7 @@
 #include "ff.h"
 
 #define MOCK_FILES_MAX 8
-#define MOCK_FILE_CAP  8192
+#define MOCK_FILE_CAP  16384
 #define MOCK_PATH_MAX  64
 
 struct mock_file {
