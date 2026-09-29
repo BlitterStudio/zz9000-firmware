@@ -59,6 +59,7 @@ integer cfg_stream_gap_cycles;
 integer cfg_viewport;
 integer cfg_scanline;
 integer cfg_source_rows;
+integer cfg_letterbox_h;
 integer canvas_width;
 integer canvas_height;
 integer content_height;
@@ -502,6 +503,7 @@ initial begin
   cfg_viewport = 0;
   cfg_scanline = 0;
   cfg_source_rows = 0;
+  cfg_letterbox_h = 0;
   stream_beats_sent = 0;
   if ($value$plusargs("CMODE=%d", cfg_cmode)) ;
   if ($value$plusargs("SCALEX=%d", cfg_scalex)) ;
@@ -513,6 +515,7 @@ initial begin
   if ($value$plusargs("VIEWPORT=%d", cfg_viewport)) ;
   if ($value$plusargs("SCANLINE=%d", cfg_scanline)) ;
   if ($value$plusargs("SOURCE_ROWS=%d", cfg_source_rows)) ;
+  if ($value$plusargs("LETTERBOX_H=%d", cfg_letterbox_h)) ;
 
   canvas_width = cfg_width;
   canvas_height = DEFAULT_LINES;
@@ -531,6 +534,12 @@ initial begin
     content_height = 1024;
     viewport_x = 320;
     viewport_y = 28;
+    /* Fullscan integer letterbox (NTSC): shrink the viewport height to
+     * the integer-scaled content and center it inside the raster. */
+    if (cfg_letterbox_h > 0 && cfg_letterbox_h <= content_height) begin
+      viewport_y = 28 + (1024 - cfg_letterbox_h) / 2;
+      content_height = cfg_letterbox_h;
+    end
   end
   v_max = canvas_height + 8;
   vs_start = canvas_height + 2;

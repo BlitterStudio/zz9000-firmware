@@ -636,6 +636,31 @@ void isr_video(void *dummy) {
 							videocap_ntsc,
 							videocap_full_width);
 					videocap_area_clear();
+					if (videocap_full_width) {
+						/* Fullscan scales vertically by an
+						 * integer factor: publish the exact
+						 * content rectangle so the formatter
+						 * duplicates rows uniformly and
+						 * letterboxes the remainder. Every
+						 * fullscan transition rewrites it, so
+						 * PAL also restores the full raster
+						 * after an NTSC letterbox without
+						 * relying on mode-change side
+						 * effects. */
+						struct video_videocap_scanout_rect rect =
+							video_videocap_fullscan_rect(
+								(uint32_t)videocap_output_profile,
+								(uint32_t)videocap_ntsc,
+								(uint32_t)interlace);
+
+						video_formatter_write(
+								(rect.y << 16) | rect.x,
+								MNTVF_OP_VIEWPORT_POS);
+						video_formatter_write(
+								(rect.height << 16) |
+									rect.width,
+								MNTVF_OP_VIEWPORT_SIZE_COMMIT);
+					}
 					video_formatter_write(
 							video_videocap_scale_control(
 								(uint32_t)videocap_full_width,

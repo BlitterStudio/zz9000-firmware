@@ -51,7 +51,7 @@ else
         || { cat xelab.log; exit 1; }
 fi
 
-# CMODE SCALEX SCALEY WIDTH STREAM_GAP_EVERY STREAM_GAP_CYCLES INTERLACE VIEWPORT SCANLINE SOURCE_ROWS
+# CMODE SCALEX SCALEY WIDTH STREAM_GAP_EVERY STREAM_GAP_CYCLES INTERLACE VIEWPORT SCANLINE SOURCE_ROWS LETTERBOX_H
 CONFIGS="
 2 0 0 64 0 0 0 0 0
 1 0 0 64 0 0 0 0 0
@@ -84,10 +84,10 @@ if [ "$VARIANT" != "master" ] && [ "$VARIANT" != "reference" ]; then
 2 0 0 1280 0 0 0 2 0
 2 0 2 1280 0 0 0 2 0
 2 0 1 1280 0 0 1 2 0
-2 0 2 1280 0 0 0 2 0 200
-2 0 1 1280 0 0 1 2 0 400
-2 0 2 1280 16 32 0 2 0 200
-2 0 1 1280 16 32 1 2 0 400
+2 0 2 1280 0 0 0 2 0 200 1000
+2 0 1 1280 0 0 1 2 0 0 800
+2 0 2 1280 16 32 0 2 0 200 1000
+2 0 1 1280 16 32 1 2 0 0 800
 "
 fi
 
@@ -99,17 +99,18 @@ fi
 
 rm -f run_*.log
 EXPECTED=$(echo "$CONFIGS" | grep -c '[0-9]')
-echo "$CONFIGS" | while read -r CM SX SY W GE GC IL VP SL SR; do
+echo "$CONFIGS" | while read -r CM SX SY W GE GC IL VP SL SR LH; do
     [ -z "$CM" ] && continue
     SR="${SR:-0}"
+    LH="${LH:-0}"
     if [ "$ON_WINDOWS" = 1 ]; then
-        cmd //c "$(cygpath -w "$VIVADO_BIN/xsim.bat") tb --runall --testplusarg \"CMODE=$CM\" --testplusarg \"SCALEX=$SX\" --testplusarg \"SCALEY=$SY\" --testplusarg \"WIDTH=$W\" --testplusarg \"STREAM_GAP_EVERY=$GE\" --testplusarg \"STREAM_GAP_CYCLES=$GC\" --testplusarg \"INTERLACE=$IL\" --testplusarg \"VIEWPORT=$VP\" --testplusarg \"SCANLINE=$SL\" --testplusarg \"SOURCE_ROWS=$SR\"" \
-            < /dev/null > "run_${CM}_${SX}_${SY}_${W}_${GE}_${GC}_${IL}_${VP}_${SL}_${SR}.log" 2>&1 || true
+        cmd //c "$(cygpath -w "$VIVADO_BIN/xsim.bat") tb --runall --testplusarg \"CMODE=$CM\" --testplusarg \"SCALEX=$SX\" --testplusarg \"SCALEY=$SY\" --testplusarg \"WIDTH=$W\" --testplusarg \"STREAM_GAP_EVERY=$GE\" --testplusarg \"STREAM_GAP_CYCLES=$GC\" --testplusarg \"INTERLACE=$IL\" --testplusarg \"VIEWPORT=$VP\" --testplusarg \"SCANLINE=$SL\" --testplusarg \"SOURCE_ROWS=$SR\" --testplusarg \"LETTERBOX_H=$LH\"" \
+            < /dev/null > "run_${CM}_${SX}_${SY}_${W}_${GE}_${GC}_${IL}_${VP}_${SL}_${SR}_${LH}.log" 2>&1 || true
     else
-        "$VIVADO_BIN/xsim" tb --runall --testplusarg "CMODE=$CM" --testplusarg "SCALEX=$SX" --testplusarg "SCALEY=$SY" --testplusarg "WIDTH=$W" --testplusarg "STREAM_GAP_EVERY=$GE" --testplusarg "STREAM_GAP_CYCLES=$GC" --testplusarg "INTERLACE=$IL" --testplusarg "VIEWPORT=$VP" --testplusarg "SCANLINE=$SL" --testplusarg "SOURCE_ROWS=$SR" \
-            < /dev/null > "run_${CM}_${SX}_${SY}_${W}_${GE}_${GC}_${IL}_${VP}_${SL}_${SR}.log" 2>&1 || true
+        "$VIVADO_BIN/xsim" tb --runall --testplusarg "CMODE=$CM" --testplusarg "SCALEX=$SX" --testplusarg "SCALEY=$SY" --testplusarg "WIDTH=$W" --testplusarg "STREAM_GAP_EVERY=$GE" --testplusarg "STREAM_GAP_CYCLES=$GC" --testplusarg "INTERLACE=$IL" --testplusarg "VIEWPORT=$VP" --testplusarg "SCANLINE=$SL" --testplusarg "SOURCE_ROWS=$SR" --testplusarg "LETTERBOX_H=$LH" \
+            < /dev/null > "run_${CM}_${SX}_${SY}_${W}_${GE}_${GC}_${IL}_${VP}_${SL}_${SR}_${LH}.log" 2>&1 || true
     fi
-    grep -E "RESULT|MISMATCH row=[0-9]+ x=(0|1|2|3|4|5|6|7) " "run_${CM}_${SX}_${SY}_${W}_${GE}_${GC}_${IL}_${VP}_${SL}_${SR}.log" | head -8
+    grep -E "RESULT|MISMATCH row=[0-9]+ x=(0|1|2|3|4|5|6|7) " "run_${CM}_${SX}_${SY}_${W}_${GE}_${GC}_${IL}_${VP}_${SL}_${SR}_${LH}.log" | head -8
 done
 
 echo "---- summary ($VARIANT) ----"

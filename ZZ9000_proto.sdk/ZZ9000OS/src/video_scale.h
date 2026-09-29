@@ -199,16 +199,18 @@ static inline uint32_t video_videocap_full_width(uint32_t requested,
 static inline uint32_t video_videocap_scalemode(uint32_t full_width,
 		uint32_t interlace)
 {
-	/* Full-width PAL progressive capture uses x4 to fill 1024 lines;
-	 * NTSC keeps the same low-bit mode while OP_SCALE's source-row field
-	 * enables fractional resampling. Filtered capture retains the legacy
-	 * x2 path. Interlaced input already supplies twice as many source lines. */
+	/* Full-width capture scales by an integer factor: PAL uses x4/x2 to
+	 * fill 1024 lines, NTSC letterboxes 200 rows at x5. Filtered capture
+	 * retains the legacy x2 path. Interlaced input already supplies
+	 * twice as many source lines. */
 	return full_width ? (interlace ? 2U : 4U)
 	                  : (interlace ? 0U : 2U);
 }
 
 #define VIDEO_VIDEOCAP_NTSC_PROGRESSIVE_ROWS 200U
-/* OP_SCALE[27:16]: non-zero source rows select fractional vertical scaling. */
+/* OP_SCALE[27:16]: non-zero source rows select fractional vertical scaling.
+ * The formatter's accumulator then maps the source rows onto the viewport
+ * height; an exact integer ratio degenerates to uniform duplication. */
 #define VIDEO_FORMATTER_SCALE_SOURCE_ROWS_SHIFT 16U
 
 static inline uint32_t video_videocap_source_rows(uint32_t content_height,
@@ -226,12 +228,64 @@ static inline uint32_t video_videocap_scale_control(uint32_t full_width,
 		uint32_t ntsc, uint32_t interlace)
 {
 	uint32_t scalemode = video_videocap_scalemode(full_width, interlace);
-	uint32_t source_rows = full_width && ntsc ?
-		video_videocap_source_rows(VIDEO_VIDEOCAP_CONTENT_HEIGHT,
-			full_width, ntsc, interlace) : 0U;
+
+	/* Only NTSC progressive fullscan needs the fractional engine: 200
+	 * rows have no power-of-two factor for the letterbox height (x5).
+	 * NTSC interlaced letterboxes at exactly x2, so it keeps the legacy
+	 * duplication path (and its full two-line fetch budget) like PAL;
+	 * a fractional x2 would halve the prefetch headroom and drop source
+	 * rows under capture-write contention (the missing-lines report). */
+	uint32_t source_rows = full_width && ntsc && !interlace ?
+		VIDEO_VIDEOCAP_NTSC_PROGRESSIVE_ROWS : 0U;
 
 	return video_formatter_scale_control(scalemode) |
 		(source_rows << VIDEO_FORMATTER_SCALE_SOURCE_ROWS_SHIFT);
+}
+
+/* The largest integer vertical scale that fits the 1024-line scandoubler
+ * raster; the remainder letterboxes symmetrically. PAL divides exactly
+ * (256x4, 512x2) and keeps filling the raster; NTSC letterboxes
+ * (200x5 = 1000, 400x2 = 800). */
+static inline uint32_t video_videocap_fullscan_content_height(
+		uint32_t source_rows)
+{
+	return source_rows *
+		(VIDEO_VIDEOCAP_CONTENT_HEIGHT / source_rows);
+}
+
+struct video_videocap_scanout_rect {
+	uint32_t x;
+	uint32_t y;
+	uint32_t width;
+	uint32_t height;
+};
+
+/* Fullscan content rectangle inside the active output canvas: the native
+ * 1280x1024 raster (or the centered profile's viewport) shrinks to the
+ * integer-scaled NTSC height and stays centered; PAL spans it fully. */
+static inline struct video_videocap_scanout_rect
+video_videocap_fullscan_rect(uint32_t output_profile, uint32_t ntsc,
+		uint32_t interlace)
+{
+	struct video_videocap_scanout_rect rect = {
+		0U, 0U, VIDEO_VIDEOCAP_CONTENT_WIDTH,
+		VIDEO_VIDEOCAP_CONTENT_HEIGHT
+	};
+
+	if (video_videocap_output_profile_centered(output_profile)) {
+		rect.x = VIDEO_VIDEOCAP_CENTERED_VIEWPORT_X;
+		rect.y = VIDEO_VIDEOCAP_CENTERED_VIEWPORT_Y;
+	}
+	if (ntsc != 0U) {
+		uint32_t content = video_videocap_fullscan_content_height(
+			VIDEO_VIDEOCAP_NTSC_PROGRESSIVE_ROWS <<
+				(interlace != 0U));
+
+		rect.y += (VIDEO_VIDEOCAP_CONTENT_HEIGHT - content) / 2U;
+		rect.height = content;
+	}
+
+	return rect;
 }
 
 #endif
