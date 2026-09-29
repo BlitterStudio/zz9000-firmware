@@ -100,7 +100,7 @@ reg control_request_event = 0;
 reg [31:0] control_request_raw = 0;
 reg control_request_token_valid = 1;
 wire control_send;
-wire [26:0] control_payload;
+wire [27:0] control_payload;
 wire control_received;
 wire control_busy;
 wire [7:0] control_request_sequence;
@@ -110,7 +110,7 @@ wire control_applied_valid;
 wire [31:0] control_applied_raw;
 wire [31:0] control_applied_effective;
 wire legacy_control_send;
-wire [26:0] legacy_control_payload;
+wire [27:0] legacy_control_payload;
 wire legacy_control_received;
 wire legacy_control_busy;
 wire [7:0] legacy_control_request_sequence;
@@ -944,7 +944,7 @@ reg [7:0] odd_g;
 reg [7:0] odd_b;
 reg interlace_field_parity;
 reg [31:0] raw_before;
-reg [26:0] payload_before;
+reg [27:0] payload_before;
 reg [7:0] sequence_before;
 reg [31:0] focused_raw;
 reg [15:0] diag_sequence_before;
@@ -1309,7 +1309,7 @@ initial begin
     check_eq("control_ack_returned_low", dut.ctl_dest_ack, 0);
     check_eq("mixed_auto_raw", control_applied_raw, focused_raw);
     check_eq("mixed_auto_fullrate_effective", control_applied_effective,
-             (4095 << 16) | 279);
+             (4095 << 16) | 278);
     check_eq("mixed_auto_compat_effective", legacy_control_applied_effective,
              (4095 << 16) | 188);
     check_eq("writeback_owner_full_width", control_applied_raw[2], 1);
@@ -1430,13 +1430,13 @@ initial begin
         pulse_control_request(32'h80000000 | (1 << 2), 1'b1);
         wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
         check_eq("width_only_auto_payload", control_payload,
-                 (40 << 15) | (279 << 3) | (1 << 2) | 2);
+                 (1 << 27) | (40 << 15) | (278 << 3) | (1 << 2) | 2);
         force_control_frame_boundary;
         wait_control_complete;
         check_eq("width_only_auto_set_raw", control_applied_raw,
                  focused_raw | (1 << 2));
         check_eq("width_only_auto_fullrate", control_applied_effective,
-                 (40 << 16) | 279);
+                 (40 << 16) | 278);
         check_eq("width_only_auto_compat",
                  legacy_control_applied_effective, (26 << 16) | 188);
     end

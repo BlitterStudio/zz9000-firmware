@@ -318,12 +318,13 @@ scanline_parity = 0
 With no valid profile, `filtered_60` provides filtered 60 Hz output:
 800x600 for PAL input or 720x480 for NTSC input. Explicit `full_60` and
 `full_exact` selections preserve full SuperHires detail in a 1280x1024 output.
-Fullscan scales vertically by the largest integer factor that fits the
-1024-line raster, so every source row is duplicated uniformly: PAL's 256
-progressive or 512 interlaced source rows fill it at x4/x2, while NTSC's 200
-progressive rows letterbox at x5 (1000 lines, 12-line black bars) and 400
-interlaced rows at x2 (800 lines, 112-line bars), each centered and keeping
-its pixel aspect ratio. On supported full-rate variants,
+Fullscan scales vertically by an integer factor on the classic power-of-two
+paths, so every source row is duplicated uniformly: PAL's 256 progressive or
+512 interlaced source rows fill the 1024-line raster at x4/x2, while NTSC
+letterboxes the same 800 lines for both 200 progressive rows at x4 and 400
+interlaced rows at x2 (112-line black bars, centered). Progressive and
+interlaced pictures therefore render at one physical size per standard,
+matching a real monitor. On supported full-rate variants,
 `centered_1080p_60` and `centered_1080p_50`
 place the native picture in a 1920x1080 signal with 320-pixel side borders
 and 28-line top/bottom borders; an NTSC source letterboxes inside that

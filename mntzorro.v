@@ -1327,7 +1327,7 @@ module MNTZorro_v0_1_S00_AXI
       (video_control_axi_op16_event ? axi_reg3 : videocap_control_zorro_raw);
   wire videocap_control_request_token_valid =
       !videocap_control_live_event || videocap_control_live_token_valid;
-  wire [26:0] videocap_control_payload;
+  wire [27:0] videocap_control_payload;
   wire videocap_control_send;
   wire videocap_control_received;
   wire videocap_control_busy;
