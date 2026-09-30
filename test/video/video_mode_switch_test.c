@@ -82,7 +82,7 @@ void usleep(unsigned long useconds)
 		inject_native_irq = 0;
 		if (video_irq_enabled)
 			init_videocap_video_mode(0, 1,
-				ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
+				ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 0);
 		else
 			++deferred_native_irqs;
 	}
@@ -207,7 +207,7 @@ int main(void)
 
 	/* Native has the same 1080p canvas, but a centered x4 capture layout. */
 	clear_measurements();
-	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
+	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 0);
 	printf("RTG -> native, same timing: PLL reloads=%u TMDS interruptions=%u explicit waits=%u us\n",
 		clock_reloads, tmds_interruptions, delay_us);
 	fflush(stdout);
@@ -371,7 +371,7 @@ int main(void)
 	assert(clock_reloads == 0 && tmds_interruptions == 1);
 
 	/* custom -> native -> custom round trip. */
-	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_FULL_60);
+	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_FULL_60, 0);
 	assert(vs.video_mode == ZZVMODE_1280x1024_NATIVE_60);
 	assert(formatter_ops[MNTVF_OP_MAX] == (1066U << 16 | 1688U));
 	clear_measurements();
@@ -384,15 +384,15 @@ int main(void)
 	assert(clock_mul_div == (53U << 8 | 4U) && clock_div2 == 25U);
 
 	/* Native output is the rollback target for a failed custom lock. */
-	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_FULL_60);
+	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_FULL_60, 0);
 	assert(vs.video_mode == ZZVMODE_1280x1024_NATIVE_60);
 	/* Model a detected progressive NTSC field: rollback must retain both
 	 * its 200-row VDMA contract and the formatter's fractional scale word. */
-	vs.scalemode = (int)video_videocap_scalemode(1, 0);
+	vs.scalemode = (int)video_videocap_scalemode(1, 0, 0);
 	vs.vmode_vdma_rows =
-		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 0);
+		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 0, 0, 0);
 	vs.interlace_old = 0;
-	video_formatter_write(video_videocap_scale_control(1, 1, 0),
+	video_formatter_write(video_videocap_scale_control(1, 1, 0, 0),
 	                      MNTVF_OP_SCALE);
 	init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, 1, 0);
 	slot_saved = preset_video_modes[ZZVMODE_CUSTOM];
@@ -411,7 +411,7 @@ int main(void)
 	assert(formatter_ops[MNTVF_OP_DIMENSIONS] == (1024U << 16 | 1280U));
 	assert(formatter_ops[MNTVF_OP_HS] == (1328U << 16 | 1440U));
 	assert(formatter_ops[MNTVF_OP_SCALE] ==
-	       video_videocap_scale_control(1, 1, 0));
+	       video_videocap_scale_control(1, 1, 0, 0));
 	assert(delay_us > CLK_WIZ_LOCK_TIMEOUT_US / 2U); /* bounded poll ran */
 	assert(memcmp(&preset_video_modes[ZZVMODE_CUSTOM], &slot_saved,
 	       sizeof(slot_saved)) == 0);
@@ -437,7 +437,7 @@ int main(void)
 	/* An IRQ must not replace a failed requested PLL with a locked native
 	 * clock, or mutate centered viewport state underneath rollback. */
 	init_videocap_video_mode(0, 1,
-		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH);
+		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH, 0);
 	uint32_t saved_formatter[32];
 	memcpy(saved_formatter, formatter_ops, sizeof(saved_formatter));
 	XAxiVdma_DmaSetup saved_dma = dma_setup;
@@ -458,11 +458,11 @@ int main(void)
 	assert(memcmp(&dma_setup, &saved_dma, sizeof(saved_dma)) == 0);
 	/* Once capture has enabled source locking, rollback preserves it too.
 	 * Capture may have changed from progressive to woven NTSC after init. */
-	vs.scalemode = (int)video_videocap_scalemode(1, 1);
+	vs.scalemode = (int)video_videocap_scalemode(1, 1, 0);
 	vs.vmode_vdma_rows =
-		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 1);
+		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 1, 0, 0);
 	vs.interlace_old = 1;
-	video_formatter_write(video_videocap_scale_control(1, 1, 1),
+	video_formatter_write(video_videocap_scale_control(1, 1, 1, 0),
 	                      MNTVF_OP_SCALE);
 	init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, 1, 0);
 	saved_dma = dma_setup;
@@ -472,7 +472,7 @@ int main(void)
 	       ZZ_CUSTOM_STATUS_CLOCK_FAILED);
 	assert(formatter_ops[MNTVF_OP_SOURCE_SYNC] == 1);
 	assert(formatter_ops[MNTVF_OP_SCALE] ==
-	       video_videocap_scale_control(1, 1, 1));
+	       video_videocap_scale_control(1, 1, 1, 0));
 	assert(vs.interlace_old == 1);
 	assert(memcmp(&dma_setup, &saved_dma, sizeof(saved_dma)) == 0);
 

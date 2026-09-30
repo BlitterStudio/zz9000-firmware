@@ -137,8 +137,17 @@ struct ZZ_VIDEO_STATE {
 	int interlace_old;
 	int videocap_ntsc_old;
 	int videocap_shres_old;
+	int videocap_source_class_old;   /* status [12:10]: doubled / short / tall */
 	int videocap_enabled_old;
 	struct video_videocap_detection_state videocap_detection;
+	/* Manual capture-window overrides (0 = automatic): set from
+	 * ZZ9000.CFG at boot and by CARD_FEATURE_VIDEOCAP_GEOMETRY at
+	 * runtime; the ISR letterboxes the smaller window at the next
+	 * stable vblank. */
+	uint32_t videocap_width_override;
+	uint32_t videocap_height_override;
+	uint32_t videocap_geometry_serial;
+	uint32_t videocap_geometry_serial_applied;
 	uint16_t split_request_pos;
 	uint16_t split_pos;
 	uint32_t bgbuf_offset;
@@ -174,6 +183,7 @@ void video_mode_init(int mode, int scalemode, int colormode);
 void video_set_dpms(uint8_t level);
 int video_set_videocap_video_mode(uint32_t mode);
 int video_set_videocap_vsync(uint32_t setting);
+int video_set_videocap_geometry(uint32_t value);
 uint32_t video_firmware_capabilities(void);
 void hw_sprite_show(int show);
 void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite);

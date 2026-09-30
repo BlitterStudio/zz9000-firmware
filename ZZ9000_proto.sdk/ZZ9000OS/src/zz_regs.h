@@ -207,6 +207,7 @@ enum zz_reg_offsets {
 #define ZZ_FW_CAP_VIDEOCAP_CENTERED_1080P_50 (1U << 4)
 #define ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC (1U << 5)
 #define ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN (1U << 6)
+#define ZZ_FW_CAP_VIDEOCAP_GEOMETRY (1U << 8)
 /* The centered 1080p profiles are intentionally excluded here: firmware
  * advertises them dynamically only when the loaded bitstream exposes both
  * required paths (viewport layout AND full-rate capture). Bit 3 stays the
@@ -227,11 +228,16 @@ enum zz_reg_offsets {
  * (IDLE/OK/INVALID/CLOCK_FAILED) reads back from the 0x58 group's
  * upper half. Older firmware reports 0 here: drivers without the bit
  * must stay on the preset-only path.
+ *
+ * Bit 8 is the capture-window override (videocap_width / videocap_height):
+ * CARD_FEATURE_VIDEOCAP_GEOMETRY accepts (height << 16) | width at a
+ * frame boundary and the scanout letterboxes the smaller window. Older
+ * firmware ignores the feature; drivers gate the calibration UI on it.
  */
 #define ZZ_FW_CAPABILITIES \
   (ZZ_FW_CAP_VIDEOCAP_PROFILE | ZZ_FW_CAP_VIDEOCAP_LIVE | \
    ZZ_FW_CAP_Z2_APERTURE_LAYOUT | ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN | \
-   ZZ_FW_CAP_CUSTOM_MODE)
+   ZZ_FW_CAP_CUSTOM_MODE | ZZ_FW_CAP_VIDEOCAP_GEOMETRY)
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,
@@ -239,6 +245,11 @@ enum zz9k_card_features {
   CARD_FEATURE_NONSTANDARD_VSYNC,
   CARD_FEATURE_VIDEO_OVERLAY,
   CARD_FEATURE_DPMS,
+  /* Capture-window override (ZZTop calibration): value packs
+   * (height << 16) | width in captured words, both validated by
+   * video_scale.h; 0 restores the automatic window. Gated by
+   * ZZ_FW_CAP_VIDEOCAP_GEOMETRY. */
+  CARD_FEATURE_VIDEOCAP_GEOMETRY,
   CARD_FEATURE_NUM,
 };
 

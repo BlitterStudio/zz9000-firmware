@@ -190,11 +190,11 @@ static int test_centered_output_keeps_native_content_geometry(uint32_t profile)
 	    !expect_u32("centered progressive capture rows",
 	                centered.content_height /
 	                video_vertical_scale_factor(
-	                    video_videocap_scalemode(1U, 0U)), 256U) ||
+	                    video_videocap_scalemode(1U, 0U, 0U)), 256U) ||
 	    !expect_u32("centered interlaced capture rows",
 	                centered.content_height /
 	                video_vertical_scale_factor(
-	                    video_videocap_scalemode(1U, 1U)), 512U)) {
+	                    video_videocap_scalemode(1U, 1U, 0U)), 512U)) {
 		return 2;
 	}
 

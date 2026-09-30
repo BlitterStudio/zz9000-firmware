@@ -35,43 +35,43 @@ int main(void)
 	                video_formatter_scale_control(4U), 4U))
 		return 5;
 	if (!expect_u32("filtered progressive capture uses x2",
-	                video_videocap_scalemode(0U, 0U), 2U))
+	                video_videocap_scalemode(0U, 0U, 0U), 2U))
 		return 6;
 	if (!expect_u32("filtered interlaced capture uses x1",
-	                video_videocap_scalemode(0U, 1U), 0U))
+	                video_videocap_scalemode(0U, 1U, 0U), 0U))
 		return 7;
 	if (!expect_u32("full progressive capture uses x4",
-	                video_videocap_scalemode(1U, 0U), 4U))
+	                video_videocap_scalemode(1U, 0U, 0U), 4U))
 		return 8;
 	if (!expect_u32("full interlaced capture uses x2",
-	                video_videocap_scalemode(1U, 1U), 2U))
+	                video_videocap_scalemode(1U, 1U, 0U), 2U))
 		return 9;
 	if (!expect_u32("PAL progressive fullscan reads 256 rows",
-	                video_videocap_source_rows(1024U, 1U, 0U, 0U), 256U))
+	                video_videocap_source_rows(1024U, 1U, 0U, 0U, 0U, 0U), 256U))
 		return 10;
 	if (!expect_u32("NTSC progressive fullscan reads 200 rows",
-	                video_videocap_source_rows(1024U, 1U, 1U, 0U), 200U))
+	                video_videocap_source_rows(1024U, 1U, 1U, 0U, 0U, 0U), 200U))
 		return 11;
 	if (!expect_u32("PAL interlaced fullscan reads 512 rows",
-	                video_videocap_source_rows(1024U, 1U, 0U, 1U), 512U))
+	                video_videocap_source_rows(1024U, 1U, 0U, 1U, 0U, 0U), 512U))
 		return 12;
 	if (!expect_u32("NTSC interlaced fullscan reads 400 rows",
-	                video_videocap_source_rows(1024U, 1U, 1U, 1U), 400U))
+	                video_videocap_source_rows(1024U, 1U, 1U, 1U, 0U, 0U), 400U))
 		return 13;
 	if (!expect_u32("filtered NTSC keeps legacy output-row division",
-	                video_videocap_source_rows(480U, 0U, 1U, 0U), 240U))
+	                video_videocap_source_rows(480U, 0U, 1U, 0U, 0U, 0U), 240U))
 		return 14;
 	if (!expect_u32("PAL fullscan keeps power-of-two scale control",
-	                video_videocap_scale_control(1U, 0U, 0U), 4U))
+	                video_videocap_scale_control(1U, 0U, 0U, 0U), 4U))
 		return 15;
 	if (!expect_u32("PAL fullscan interlaced keeps legacy x2 control",
-	                video_videocap_scale_control(1U, 0U, 1U), 10U))
+	                video_videocap_scale_control(1U, 0U, 1U, 0U), 10U))
 		return 16;
 	if (!expect_u32("NTSC progressive fullscan keeps legacy x4 control",
-	                video_videocap_scale_control(1U, 1U, 0U), 4U))
+	                video_videocap_scale_control(1U, 1U, 0U, 0U), 4U))
 		return 17;
 	if (!expect_u32("NTSC interlaced fullscan keeps legacy x2 control",
-	                video_videocap_scale_control(1U, 1U, 1U), 10U))
+	                video_videocap_scale_control(1U, 1U, 1U, 0U), 10U))
 		return 18;
 	if (!expect_u32("filtered request stays filtered",
 	                video_videocap_full_width(0U, 1U), 0U))
@@ -85,31 +85,144 @@ int main(void)
 	{
 		struct video_videocap_scanout_rect r =
 			video_videocap_fullscan_rect(
-				ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U);
+				ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U, 0U, 0U, 0U,
+				256U);
 		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 22;
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U);
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U, 0U, 0U, 200U);
 		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
 		    r.height != 800U)
 			return 23;
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U);
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 0U, 0U, 0U, 400U);
 		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
 		    r.height != 800U)
 			return 24;
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 0U);
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 0U, 0U, 0U,
+			0U, 200U);
 		if (r.x != 320U || r.y != 140U || r.width != 1280U ||
 		    r.height != 800U)
 			return 25;
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50, 0U, 1U);
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50, 0U, 1U, 0U, 0U,
+			0U, 512U);
 		if (r.x != 320U || r.y != 28U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 26;
 	}
+	/* Doubled-scan and 24 kHz sources (status [12:10]): rows shown one
+	 * to one on filtered output; full-width pixel-doubled (bit 0) with
+	 * x2 rows while the woven frame fits 512, x1 when it is taller; the
+	 * NTSC 200/400-row window is a 15 kHz property and stays off. */
+	if (!expect_u32("doubled filtered capture uses x1",
+	                video_videocap_scalemode(0U, 0U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED), 0U))
+		return 40;
+	if (!expect_u32("doubled full capture doubles rows only (Euro72 427)",
+	                video_videocap_scalemode(1U, 0U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED), 2U))
+		return 41;
+	if (!expect_u32("590+-row shapes show rows x1 (Super72 laced)",
+	                video_videocap_scalemode(1U, 1U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+	                    VIDEO_VIDEOCAP_SOURCE_TALL |
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_3), 0U))
+		return 42;
+	if (!expect_u32("DblPAL no-lace (256 visible) scales like PAL x4",
+	                video_videocap_scalemode(1U, 0U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_1), 4U))
+		return 54;
+	if (!expect_u32("DblPAL laced (512 woven) fills the canvas x2",
+	                video_videocap_scalemode(1U, 1U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_2), 2U))
+		return 55;
+	if (!expect_u32("unknown row class on a short source falls back x2",
+	                video_videocap_scalemode(1U, 0U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED), 2U))
+		return 56;
+	if (!expect_u32("Super72 full capture (658 woven) shows rows x1",
+	                video_videocap_scalemode(1U, 1U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_TALL |
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_3), 0U))
+		return 43;
+	if (!expect_u32("doubled NTSC-class full capture has no 200-row window",
+	                video_videocap_scale_control(1U, 1U, 0U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED),
+	                2U | 8U))
+		return 44;
+	if (!expect_u32("doubled full capture reads 512 source rows at x2",
+	                video_videocap_source_rows(1024U, 1U, 1U, 0U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED,
+	                    0U), 512U))
+		return 45;
+	/* Doubled-scan automatic letterbox: true 640-word width centered,
+	 * tall frames clipped to the guaranteed-fresh 512 rows. */
+	{
+		struct video_videocap_scanout_rect r =
+			video_videocap_fullscan_rect(
+				ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U,
+				VIDEO_VIDEOCAP_SOURCE_SHORT |
+				VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+				VIDEO_VIDEOCAP_SOURCE_TALL |
+				VIDEO_VIDEOCAP_ROWS_CLASS_3,
+				0U, 0U, 1024U);
+		if (r.x != 320U || r.y != 0U || r.width != 640U ||
+		    r.height != 512U)
+			return 52;
+		/* DblPAL no-lace: class-1 x4 fills the canvas exactly, only
+		 * the doubled 640-wide letterbox applies. */
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U,
+			VIDEO_VIDEOCAP_SOURCE_SHORT |
+			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+			VIDEO_VIDEOCAP_ROWS_CLASS_1,
+			0U, 0U, 256U);
+		if (r.x != 320U || r.y != 0U || r.width != 640U ||
+		    r.height != 1024U)
+			return 53;
+	}
+	/* Manual capture-window overrides: height bounds the source rows and
+	 * can only shrink the automatic window; width/height letterbox the
+	 * fullscan rectangle around the shrunken content. */
+	if (!expect_u32("height override shrinks PAL progressive rows",
+	                video_videocap_source_rows(1024U, 1U, 0U, 0U, 0U, 240U),
+	                240U))
+		return 46;
+	if (!expect_u32("height override cannot grow NTSC rows",
+	                video_videocap_source_rows(1024U, 1U, 1U, 0U, 0U, 400U),
+	                200U))
+		return 47;
+	{
+		struct video_videocap_scanout_rect r =
+			video_videocap_fullscan_rect(
+				ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U, 0U, 640U,
+				240U, 240U);
+		if (r.x != 320U || r.y != 32U || r.width != 640U ||
+		    r.height != 960U)
+			return 48;
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 0U, 0U, 0U,
+			640U, 240U, 240U);
+		if (r.x != 320U + 320U || r.y != 28U + 32U ||
+		    r.width != 640U || r.height != 960U)
+			return 49;
+	}
+	if (!expect_u32("width bounds reject unaligned or out-of-range values",
+	                video_videocap_width_valid(640U) +
+	                video_videocap_width_valid(648U) +
+	                video_videocap_width_valid(1296U) +
+	                video_videocap_width_valid(240U), 1U))
+		return 50;
+	if (!expect_u32("height bounds reject out-of-range values",
+	                video_videocap_height_valid(240U) +
+	                video_videocap_height_valid(99U) +
+	                video_videocap_height_valid(1025U), 1U))
+		return 51;
 
 	return 0;
 }

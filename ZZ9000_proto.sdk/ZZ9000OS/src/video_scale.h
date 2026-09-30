@@ -29,8 +29,30 @@ struct video_videocap_detection_state {
 	int shres_candidate;
 	int base_mode_candidate;
 	int output_profile_candidate;
+	/* Doubled-scan / short-line / tall-frame source (status [12:10]):
+	 * a change of line class re-runs the mode selection like a change
+	 * of standard does. */
+	int source_class_candidate;
 	uint8_t stable_count;
 };
+
+#define VIDEO_VIDEOCAP_SOURCE_SHORT   1U
+#define VIDEO_VIDEOCAP_SOURCE_DOUBLED 2U
+#define VIDEO_VIDEOCAP_SOURCE_TALL    4U
+/* Row-count class in status [9:8], folded into the same integer above
+ * bits 7..0: the woven frame shape bucket that picks the scanout
+ * factor.  0 = 15 kHz/not short (old bitstreams read 0 - the x2
+ * fallback); 1 = 256/200-visible shapes (DblPAL/DblNTSC no-lace);
+ * 2 = 400..589 woven rows (Dbl laced, Euro72, Multiscan progressive);
+ * 3 = 590+ (Super72/Multiscan laced: shown x1, clipped to 512 rows). */
+#define VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT 8
+#define VIDEO_VIDEOCAP_ROWS_CLASS_MASK  3U
+#define VIDEO_VIDEOCAP_ROWS_CLASS_1 \
+	(1U << VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT)
+#define VIDEO_VIDEOCAP_ROWS_CLASS_2 \
+	(2U << VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT)
+#define VIDEO_VIDEOCAP_ROWS_CLASS_3 \
+	(3U << VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT)
 
 struct video_videocap_runtime_request {
 	uint8_t valid;
@@ -115,23 +137,27 @@ static inline void video_videocap_detection_reset(
 	state->shres_candidate = -1;
 	state->base_mode_candidate = -1;
 	state->output_profile_candidate = -1;
+	state->source_class_candidate = -1;
 	state->stable_count = 0;
 }
 
 static inline int video_videocap_detection_stable(
 		struct video_videocap_detection_state *state, int ntsc,
-		int interlace, int shres, int base_mode, int output_profile)
+		int interlace, int shres, int base_mode, int output_profile,
+		int source_class)
 {
 	if (ntsc != state->ntsc_candidate ||
 	    interlace != state->interlace_candidate ||
 	    shres != state->shres_candidate ||
 	    base_mode != state->base_mode_candidate ||
-	    output_profile != state->output_profile_candidate) {
+	    output_profile != state->output_profile_candidate ||
+	    source_class != state->source_class_candidate) {
 		state->ntsc_candidate = ntsc;
 		state->interlace_candidate = interlace;
 		state->shres_candidate = shres;
 		state->base_mode_candidate = base_mode;
 		state->output_profile_candidate = output_profile;
+		state->source_class_candidate = source_class;
 		state->stable_count = 1;
 		return 0;
 	}
@@ -197,8 +223,32 @@ static inline uint32_t video_videocap_full_width(uint32_t requested,
 }
 
 static inline uint32_t video_videocap_scalemode(uint32_t full_width,
-		uint32_t interlace)
+		uint32_t interlace, uint32_t source_class)
 {
+	/* Doubled-scan / 24 kHz sources.  Filtered output (720x576 /
+	 * 800x600) shows the rows one to one (the sampler stores every
+	 * sample there, so the line is 640 wide as a paired 15 kHz line
+	 * is).  Full-width output (1280x1024) has NO horizontal scaler -
+	 * the formatter's scale bit 0 register is write-only dead RTL -
+	 * so the 640-sample line is shown at its true width, centered by
+	 * the viewport letterbox (video_videocap_fullscan_rect); hdiv
+	 * stays 1 (32-bit fetch).  The VERTICAL factor comes from the
+	 * row-count class: the 256/200-visible shapes (DblPAL/DblNTSC
+	 * no-lace) scale exactly like their 15 kHz parents (x4), the
+	 * 400..589 woven shapes x2, the 590+ exotics x1 with the viewport
+	 * clipping to the guaranteed-fresh 512 rows.  Class 0 (old
+	 * bitstream) falls back to x2. */
+	if ((source_class & VIDEO_VIDEOCAP_SOURCE_SHORT) != 0U) {
+		if (full_width == 0U)
+			return 0U;
+		switch ((source_class >> VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT) &
+			VIDEO_VIDEOCAP_ROWS_CLASS_MASK) {
+		case 1U: return 4U;
+		case 2U: return 2U;
+		case 3U: return 0U;
+		default: return 2U;
+		}
+	}
 	/* Full-width capture scales by an integer factor on the legacy
 	 * power-of-two paths: PAL fills 1024 lines (x4/x2), NTSC letterboxes
 	 * 800 lines with the SAME factors so progressive and laced pictures
@@ -215,27 +265,41 @@ static inline uint32_t video_videocap_scalemode(uint32_t full_width,
 #define VIDEO_VIDEOCAP_NTSC_LETTERBOX_HEIGHT 800U
 
 static inline uint32_t video_videocap_source_rows(uint32_t content_height,
-		uint32_t full_width, uint32_t ntsc, uint32_t interlace)
+		uint32_t full_width, uint32_t ntsc, uint32_t interlace,
+		uint32_t source_class, uint32_t height_override)
 {
-	if (full_width && ntsc)
-		return VIDEO_VIDEOCAP_NTSC_PROGRESSIVE_ROWS << (interlace != 0U);
+	uint32_t base;
 
-	return content_height /
-		video_vertical_scale_factor(
-			video_videocap_scalemode(full_width, interlace));
+	/* The NTSC fractional-resampling row count is a 15 kHz property (200
+	 * or 400 rows of a 480-row picture); a short-line source is shown
+	 * whole, at an integer factor. */
+	if (full_width && ntsc &&
+			(source_class & VIDEO_VIDEOCAP_SOURCE_SHORT) == 0U)
+		base = VIDEO_VIDEOCAP_NTSC_PROGRESSIVE_ROWS << (interlace != 0U);
+	else
+		base = content_height /
+			video_vertical_scale_factor(
+				video_videocap_scalemode(full_width, interlace,
+					source_class));
+
+	/* A manual capture-height bound can only shrink the window: the
+	 * source itself caps the automatic size. */
+	if (height_override != 0U && height_override < base)
+		return height_override;
+	return base;
 }
 
 static inline uint32_t video_videocap_scale_control(uint32_t full_width,
-		uint32_t ntsc, uint32_t interlace)
+		uint32_t ntsc, uint32_t interlace, uint32_t source_class)
 {
 	/* Fullscan stays on the legacy duplication paths for every standard
 	 * and mode: the x2/x4 fetch budgets are identical to PAL's, which the
-	 * missing-lines report proved necessary under full-width write
+	 * missing-lines report proved necessary under full-width writeback
 	 * contention. The fractional source-row engine remains available in
 	 * the formatter but no fullscan mode selects it. */
 	(void)ntsc;
 	return video_formatter_scale_control(
-		video_videocap_scalemode(full_width, interlace));
+		video_videocap_scalemode(full_width, interlace, source_class));
 }
 
 struct video_videocap_scanout_rect {
@@ -248,17 +312,28 @@ struct video_videocap_scanout_rect {
 /* Fullscan content rectangle inside the active output canvas: PAL fills
  * the 1024-line raster; NTSC letterboxes the same 800 lines for
  * progressive and interlaced alike, centered, so both modes render the
- * picture at one physical size with its aspect ratio intact. */
+ * picture at one physical size with its aspect ratio intact.
+ *
+ * Manual capture-window overrides (ZZTop calibration, videocap_width /
+ * videocap_height) shrink the displayed content the same way: width is
+ * in captured words (doubled horizontally by scalemode bit 0, exactly
+ * as a doubled-scan source is), height in source rows multiplied by the
+ * vertical factor.  The shrunken rectangle is centered inside the
+ * content box the profile would otherwise fill; borders render black. */
 static inline struct video_videocap_scanout_rect
 video_videocap_fullscan_rect(uint32_t output_profile, uint32_t ntsc,
-		uint32_t interlace)
+		uint32_t interlace, uint32_t source_class,
+		uint32_t width_override, uint32_t height_override,
+		uint32_t source_rows)
 {
 	struct video_videocap_scanout_rect rect = {
 		0U, 0U, VIDEO_VIDEOCAP_CONTENT_WIDTH,
 		VIDEO_VIDEOCAP_CONTENT_HEIGHT
 	};
+	uint32_t scalemode = video_videocap_scalemode(1U, interlace,
+		source_class);
+	uint32_t hdiv = (scalemode & 1U) != 0U ? 2U : 1U;
 
-	(void)interlace;
 	if (video_videocap_output_profile_centered(output_profile)) {
 		rect.x = VIDEO_VIDEOCAP_CENTERED_VIEWPORT_X;
 		rect.y = VIDEO_VIDEOCAP_CENTERED_VIEWPORT_Y;
@@ -268,8 +343,64 @@ video_videocap_fullscan_rect(uint32_t output_profile, uint32_t ntsc,
 			VIDEO_VIDEOCAP_NTSC_LETTERBOX_HEIGHT) / 2U;
 		rect.height = VIDEO_VIDEOCAP_NTSC_LETTERBOX_HEIGHT;
 	}
+	/* Doubled-scan sources: one stored sample per output pixel (no
+	 * horizontal scaler), so the 640-sample line is placed at its
+	 * true width, centered. Manual width overrides replace this. */
+	if ((source_class & VIDEO_VIDEOCAP_SOURCE_DOUBLED) != 0U &&
+			width_override == 0U && 640U < rect.width) {
+		rect.x += (rect.width - 640U) / 2U;
+		rect.width = 640U;
+	}
+	/* Short-line sources: classes 1/2 fill the canvas exactly (or the
+	 * 800-line NTSC letterbox above) at their class factor, so only
+	 * the 590+-row exotics (shown x1) need a clip - to the 512 rows
+	 * that are always fresh, since the ARM cannot read the exact
+	 * captured line count. Manual height overrides replace this. */
+	if (((source_class >> VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT) &
+			VIDEO_VIDEOCAP_ROWS_CLASS_MASK) == 3U &&
+			height_override == 0U) {
+		if (rect.height > 512U)
+			rect.height = 512U;
+	}
+	if (width_override != 0U && width_override * hdiv < rect.width) {
+		uint32_t shown = width_override * hdiv;
+
+		rect.x += (rect.width - shown) / 2U;
+		rect.width = shown;
+	}
+	if (height_override != 0U) {
+		uint32_t shown = source_rows *
+			video_vertical_scale_factor(scalemode);
+
+		if (shown < rect.height) {
+			rect.y += (rect.height - shown) / 2U;
+			rect.height = shown;
+		}
+	}
 
 	return rect;
+}
+
+/* Manual capture-window bounds shared by the CFG boot path and the
+ * ZZTop live card-feature path.  Width is in captured words and must be
+ * 16-aligned (the writeback burst), height in source lines; both count
+ * from the crop origin.  Zero means automatic. */
+#define VIDEO_VIDEOCAP_WIDTH_MIN  256U
+#define VIDEO_VIDEOCAP_WIDTH_MAX  1280U
+#define VIDEO_VIDEOCAP_HEIGHT_MIN 100U
+#define VIDEO_VIDEOCAP_HEIGHT_MAX 1024U
+
+static inline uint32_t video_videocap_width_valid(uint32_t width)
+{
+	return width >= VIDEO_VIDEOCAP_WIDTH_MIN &&
+	       width <= VIDEO_VIDEOCAP_WIDTH_MAX &&
+	       (width & 15U) == 0U;
+}
+
+static inline uint32_t video_videocap_height_valid(uint32_t height)
+{
+	return height >= VIDEO_VIDEOCAP_HEIGHT_MIN &&
+	       height <= VIDEO_VIDEOCAP_HEIGHT_MAX;
 }
 
 #endif

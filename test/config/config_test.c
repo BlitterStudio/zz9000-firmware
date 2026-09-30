@@ -538,6 +538,50 @@ static void test_videocap_c28_phase(void) {
     CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE, &present) == 0 && !present);
 }
 
+static void test_videocap_geometry(void) {
+    uint16_t present = 0;
+    char saved[512];
+    int len;
+
+    zz_config_reset();
+    CHECK(parse_str("videocap_width = 640\nvideocap_height = 240\n") == 2);
+    CHECK(zz_config_get()->videocap_width_present);
+    CHECK(zz_config_get()->videocap_width == 640);
+    CHECK(zz_config_get()->videocap_height_present);
+    CHECK(zz_config_get()->videocap_height == 240);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_WIDTH, &present) == 640 &&
+          present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_HEIGHT, &present) == 240 &&
+          present);
+
+    /* Range/alignment guards: unaligned widths and out-of-range values
+     * keep the automatic window. */
+    zz_config_reset();
+    CHECK(parse_str("videocap_width = 648\n") == 0);
+    CHECK(parse_str("videocap_width = 240\n") == 0);
+    CHECK(parse_str("videocap_width = 1296\n") == 0);
+    CHECK(parse_str("videocap_height = 99\n") == 0);
+    CHECK(parse_str("videocap_height = 1025\n") == 0);
+    CHECK(parse_str("videocap_height = 1.5\n") == 0);
+    CHECK(!zz_config_get()->videocap_width_present);
+    CHECK(!zz_config_get()->videocap_height_present);
+
+    /* Both keys survive a ZZTop-style regenerate round trip. */
+    zz_config_reset();
+    CHECK(parse_str("videocap_width = 1024\nvideocap_height = 256\n") == 2);
+    len = zz_config_emit_present_keys(saved, sizeof(saved), 0);
+    CHECK(len > 0);
+    if (len <= 0) return;
+    CHECK(strstr(saved, "videocap_width = 1024\n") != NULL);
+    CHECK(strstr(saved, "videocap_height = 256\n") != NULL);
+    zz_config_reset();
+    CHECK(parse_str(saved) == 2);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_WIDTH, &present) == 1024 &&
+          present);
+    CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_HEIGHT, &present) == 256 &&
+          present);
+}
+
 static void test_bad_values_skipped(void) {
     zz_config_reset();
     const char *text =
@@ -1056,6 +1100,7 @@ int main(void) {
     test_videocap_sample();
     test_videocap_phase();
     test_videocap_c28_phase();
+    test_videocap_geometry();
     test_videocap_shres_and_crop();
     test_bad_values_skipped();
     test_last_value_wins();

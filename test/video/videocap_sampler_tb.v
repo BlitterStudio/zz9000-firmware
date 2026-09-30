@@ -100,7 +100,7 @@ reg control_request_event = 0;
 reg [31:0] control_request_raw = 0;
 reg control_request_token_valid = 1;
 wire control_send;
-wire [27:0] control_payload;
+wire [28:0] control_payload;
 wire control_received;
 wire control_busy;
 wire [7:0] control_request_sequence;
@@ -110,7 +110,7 @@ wire control_applied_valid;
 wire [31:0] control_applied_raw;
 wire [31:0] control_applied_effective;
 wire legacy_control_send;
-wire [27:0] legacy_control_payload;
+wire [28:0] legacy_control_payload;
 wire legacy_control_received;
 wire legacy_control_busy;
 wire [7:0] legacy_control_request_sequence;
@@ -1430,7 +1430,7 @@ initial begin
         pulse_control_request(32'h80000000 | (1 << 2), 1'b1);
         wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
         check_eq("width_only_auto_payload", control_payload,
-                 (1 << 27) | (40 << 15) | (278 << 3) | (1 << 2) | 2);
+                 (3 << 27) | (40 << 15) | (278 << 3) | (1 << 2) | 2);
         force_control_frame_boundary;
         wait_control_complete;
         check_eq("width_only_auto_set_raw", control_applied_raw,

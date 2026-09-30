@@ -26,7 +26,7 @@ static int sample_output_identity(
 		int *applied_base_mode, int *applied_profile)
 {
 	int stable = video_videocap_detection_stable(detection, 0, 0, 1,
-		requested_base_mode, requested_profile);
+		requested_base_mode, requested_profile, 0);
 
 	if (!stable ||
 	    (*applied_base_mode == requested_base_mode &&

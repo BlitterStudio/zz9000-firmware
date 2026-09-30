@@ -651,6 +651,22 @@ int main() {
 		printf("[CFG] videocap: C28 phase %d steps\n",
 		       (int)cfg->videocap_c28_phase);
 	}
+	{
+		// Capture-window bounds ride the ARM scanout geometry at the
+		// first stable detection (video_init seeds the overrides);
+		// report them here so a calibration session starts from known
+		// state.
+		const struct zz_config *cfg = zz_config_get();
+
+		if (cfg->videocap_width_present || cfg->videocap_height_present)
+			printf("[CFG] videocap: window %s%u x %s%u\n",
+			       cfg->videocap_width_present ? "" : "auto ",
+			       (unsigned)(cfg->videocap_width_present ?
+			                  cfg->videocap_width : 0),
+			       cfg->videocap_height_present ? "" : "auto ",
+			       (unsigned)(cfg->videocap_height_present ?
+			                  cfg->videocap_height : 0));
+	}
 
 	// RTG rect ops may write anywhere in framebuffer + legacy surface
 	// memory, but never past it into the SDK heaps and beyond
@@ -1257,6 +1273,29 @@ int main() {
 							if (zdata <= ZZ_DPMS_OFF) {
 								printf("[feature] DPMS: %lu\n", zdata);
 								video_set_dpms((uint8_t)zdata);
+							}
+							break;
+						case CARD_FEATURE_VIDEOCAP_GEOMETRY:
+							/* Live capture-window calibration from
+							 * ZZTop: REG_ZZ_USER2 stages the width,
+							 * this write carries the height (both
+							 * are 16-bit bus values). 0/0 restores
+							 * the automatic window; an invalid pair
+							 * is rejected without touching the
+							 * applied geometry. */
+							{
+								uint32_t packed =
+									((zdata & 0xffffU) << 16) |
+									blitter_user2;
+
+								if (video_set_videocap_geometry(packed))
+									printf("[feature] VIDEOCAP_GEOMETRY: %lux%lu\n",
+										(unsigned long)blitter_user2,
+										(unsigned long)(zdata & 0xffffU));
+								else
+									printf("[feature] VIDEOCAP_GEOMETRY rejected: %lux%lu\n",
+										(unsigned long)blitter_user2,
+										(unsigned long)(zdata & 0xffffU));
 							}
 							break;
 						default:

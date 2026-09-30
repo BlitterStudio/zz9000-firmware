@@ -1327,7 +1327,7 @@ module MNTZorro_v0_1_S00_AXI
       (video_control_axi_op16_event ? axi_reg3 : videocap_control_zorro_raw);
   wire videocap_control_request_token_valid =
       !videocap_control_live_event || videocap_control_live_token_valid;
-  wire [27:0] videocap_control_payload;
+  wire [28:0] videocap_control_payload;
   wire videocap_control_send;
   wire videocap_control_received;
   wire videocap_control_busy;
@@ -1360,6 +1360,20 @@ module MNTZorro_v0_1_S00_AXI
   wire vcap_x_done;
   wire vcap_shres;
   wire vcap_line_toggle;
+  wire vcap_doubled;      /* a doubled-scan (31 kHz) source: one pixel a clock */
+  wire vcap_short;        /* ... or a 24 kHz one: a line under 1400 clocks */
+  wire vcap_tall;         /* the woven frame is more than 512 rows */
+  /* Row-count class for the scanout factor (status [9:8]): buckets the
+   * woven frame line count so the ARM picks a canvas-filling power-of-two
+   * without needing the exact count. 0 = 15 kHz (not short); 1 = the
+   * DblPAL/DblNTSC no-lace shapes (<= 329 total lines: 256/200 visible);
+   * 2 = the 400..589 shapes (Dbl laced, Euro72, Multiscan progressive);
+   * 3 = 590+ (Super72/Multiscan laced - shown x1, clipped to 512). */
+  wire [10:0] vcap_woven_rows = vcap_interlace ?
+      {1'b0, vcap_ymax} << 1 : {1'b0, vcap_ymax};
+  wire [1:0] vcap_rows_class = !vcap_short ? 2'd0 :
+      (vcap_woven_rows >= 11'd590) ? 2'd3 :
+      (vcap_woven_rows >= 11'd330) ? 2'd2 : 2'd1;
   wire vcap_write_bank;
   wire [9:0] vcap_token_y;
   wire vcap_token_bank;
@@ -1616,6 +1630,9 @@ module MNTZorro_v0_1_S00_AXI
       .cap_ymax(vcap_ymax),
       .cap_interlace(vcap_interlace),
       .cap_ntsc(vcap_ntsc),
+      .cap_doubled(vcap_doubled),
+      .cap_short(vcap_short),
+      .cap_tall(vcap_tall),
       .cap_x_done(vcap_x_done),
       .cap_shres(vcap_shres),
       .probe_arm_toggle(vcap_probe_arm_toggle),
@@ -3395,12 +3412,18 @@ module MNTZorro_v0_1_S00_AXI
     // Status: [24] interlace, [23] videocap, [22] NTSC, [21] vblank,
     // [20] hblank, [19] SDK doorbell, [18] SDK IRQ ack, [17] SuperHires,
     // [16] full-rate capture, [15] viewport, [14] native source sync,
-    // [13] diagnostic REG4/REG5 snapshot available.
+    // [13] diagnostic REG4/REG5 snapshot available,
+    // [12] doubled-scan source (31 kHz, one pixel a clock),
+    // [11] short-line source (24 or 31 kHz), [10] the woven frame is
+    // taller than 512 rows; [9:8] woven row-count class for the scanout
+    // factor (0 = 15 kHz; 1 = 256/200-visible shapes; 2 = 400..589;
+    // 3 = 590+, shown x1 and clipped to 512 rows).
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
                 video_control_interlace, videocap_mode, vcap_ntsc, video_control_vblank, video_control_hblank,
                 sdk_doorbell_pending, sdk_irq_ack_pending, vcap_shres,
                 (`VCAP_FULLRATE_INT != 0), 1'b1,
-                (`VCAP_FULLRATE_INT != 0), 1'b1, 5'b0, zorro_state};
+                (`VCAP_FULLRATE_INT != 0), 1'b1,
+                vcap_doubled, vcap_short, vcap_tall, vcap_rows_class, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;

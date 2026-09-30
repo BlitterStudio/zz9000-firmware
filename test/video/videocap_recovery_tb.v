@@ -21,7 +21,7 @@ module videocap_recovery_tb;
     reg request_event = 0;
     reg [31:0] request_raw = 0;
     wire control_send, control_received, control_busy, applied_valid;
-    wire [27:0] control_payload;
+    wire [28:0] control_payload;
     wire [31:0] applied_raw, applied_effective;
     integer checks = 0, failures = 0, line_events = 0, anchor_events = 0;
     reg last_line = 0, last_anchor = 0;

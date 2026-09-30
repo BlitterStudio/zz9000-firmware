@@ -77,6 +77,7 @@ static void videocap_detection_reset() {
 		video_formatter_write(0, MNTVF_OP_SOURCE_SYNC);
 	vs.videocap_ntsc_old = -1;
 	vs.videocap_shres_old = -1;
+	vs.videocap_source_class_old = -1;
 	vs.interlace_old = -1;
 	vs.videocap_video_mode_applied = -1;
 	vs.videocap_output_profile_applied = -1;
@@ -136,6 +137,12 @@ struct ZZ_VIDEO_STATE* video_init() {
 		vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = cfg->ns_vsync;
 		vs.scandoubler_mode_adjust = (cfg->ns_vsync == 2) ? 2 : 0;
 	}
+	if (cfg->videocap_width_present &&
+			video_videocap_width_valid(cfg->videocap_width))
+		vs.videocap_width_override = cfg->videocap_width;
+	if (cfg->videocap_height_present &&
+			video_videocap_height_valid(cfg->videocap_height))
+		vs.videocap_height_override = cfg->videocap_height;
 
 	vs.colormode = 0;
 
@@ -331,6 +338,29 @@ int video_set_videocap_vsync(uint32_t setting)
 	return 1;
 }
 
+int video_set_videocap_geometry(uint32_t value)
+{
+	uint32_t width = value & 0xffffU;
+	uint32_t height = (value >> 16) & 0xffffU;
+
+	/* 0/0 restores the automatic window; any other combination must be
+	 * fully valid, or nothing changes (the caller reads the accept from
+	 * the feature status). */
+	if (width == 0U && height == 0U) {
+		vs.videocap_width_override = 0;
+		vs.videocap_height_override = 0;
+	} else {
+		if (!video_videocap_width_valid(width) ||
+				!video_videocap_height_valid(height))
+			return 0;
+		vs.videocap_width_override = width;
+		vs.videocap_height_override = height;
+	}
+	vs.videocap_geometry_serial++;
+	return 1;
+}
+
+
 uint32_t video_firmware_capabilities(void)
 {
 	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
@@ -354,8 +384,19 @@ uint32_t video_firmware_capabilities(void)
 	return capabilities;
 }
 
-static void init_filtered_videocap_video_mode(int ntsc) {
+static void init_filtered_videocap_video_mode(int ntsc, int source_class) {
 	int mode;
+
+	/* A doubled-scan or 24 kHz source has its rows already: 720x576 (or
+	 * 720x480 when the woven frame fits 480) at x1, no line doubling.
+	 * The non-standard-VSync 50 / 60 Hz variants are 15 kHz cadences and
+	 * are not offered for it. */
+	if (source_class & VIDEO_VIDEOCAP_SOURCE_SHORT) {
+		mode = ntsc ? ZZVMODE_720x480 : ZZVMODE_720x576;
+		video_mode_init_internal(mode, 0, MNTVA_COLOR_32BIT, 1,
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 0);
+		return;
+	}
 
 	if (ntsc) {
 		mode = ZZVMODE_720x480;
@@ -375,8 +416,9 @@ static void init_filtered_videocap_video_mode(int ntsc) {
 }
 
 static void init_videocap_video_mode(int ntsc, int full_width,
-		int output_profile) {
+		int output_profile, int source_class) {
 	int mode = ZZVMODE_1280x1024_NATIVE_60;
+	int scalemode = 4;
 
 	if (video_videocap_output_profile_centered(output_profile)) {
 		if (output_profile == ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH) {
@@ -396,15 +438,21 @@ static void init_videocap_video_mode(int ntsc, int full_width,
 		return;
 	}
 	if (!full_width) {
-		init_filtered_videocap_video_mode(ntsc);
+		init_filtered_videocap_video_mode(ntsc, source_class);
 		return;
 	}
-	if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
+	if (source_class & VIDEO_VIDEOCAP_SOURCE_SHORT) {
+		/* 1280x1024 at 60 Hz for every short-line source: pixel-doubled
+		 * on the doubled-scan ones, rows x2 while they fit (see
+		 * video_videocap_scalemode). */
+		scalemode = (int)video_videocap_scalemode(1U, 0U,
+			(uint32_t)source_class);
+	} else if (vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC]) {
 		mode = ntsc ? ZZVMODE_1280x1024_NS_NTSC :
 		              ZZVMODE_1280x1024_NS_PAL;
 	}
 
-	video_mode_init_internal(mode, 4, MNTVA_COLOR_32BIT, 1,
+	video_mode_init_internal(mode, scalemode, MNTVA_COLOR_32BIT, 1,
 		ZZ_VIDEOCAP_OUTPUT_FULL_60, 0);
 }
 
@@ -473,6 +521,17 @@ void isr_video(void *dummy) {
 	int videocap_ntsc = !!(zstate & (1 << 22));
 	int interlace = !!(zstate & (1 << 24));
 	int videocap_shres = !!(zstate & (1 << 17));
+	/* [12] doubled scan, [11] short line, [10] tall frame: the line class
+	 * the sampler measured (bitstreams before this change read zero
+	 * here and keep the 15 kHz behaviour). */
+	int videocap_source_class =
+		((zstate & (1 << 11)) ? VIDEO_VIDEOCAP_SOURCE_SHORT : 0) |
+		((zstate & (1 << 12)) ? VIDEO_VIDEOCAP_SOURCE_DOUBLED : 0) |
+		((zstate & (1 << 10)) ? VIDEO_VIDEOCAP_SOURCE_TALL : 0) |
+		/* [9:8] row-count class: the woven frame shape, so the scanout
+		 * picks a canvas-filling power-of-two (0 on pre-class
+		 * bitstreams - handled as the x2 fallback). */
+		(int)(((zstate >> 8) & 3U) << VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT);
 	int videocap_full_width = videocap_full_width_enabled(zstate);
 	int videocap_output_profile = videocap_effective_output_profile(zstate);
 
@@ -550,10 +609,13 @@ void isr_video(void *dummy) {
 						video_videocap_detection_stable(
 								&vs.videocap_detection, videocap_ntsc, interlace,
 								videocap_shres, vs.videocap_video_mode,
-								videocap_output_profile);
+								videocap_output_profile,
+								videocap_source_class);
 
 				if (videocap_detection_stable &&
 						(videocap_ntsc != vs.videocap_ntsc_old ||
+						 videocap_source_class !=
+							 vs.videocap_source_class_old ||
 						 vs.videocap_video_mode !=
 							 vs.videocap_video_mode_applied ||
 						 videocap_output_profile !=
@@ -587,14 +649,18 @@ void isr_video(void *dummy) {
 						videocap_ntsc, videocap_full_width);
 					if (videocap_ntsc) {
 						// NTSC
-						printf("videocap: ntsc\n");
+						printf("videocap: ntsc (class %d)\n",
+							videocap_source_class);
 						init_videocap_video_mode(1, videocap_full_width,
-							videocap_output_profile);
+							videocap_output_profile,
+							videocap_source_class);
 					} else {
 						// PAL
-						printf("videocap: pal\n");
+						printf("videocap: pal (class %d)\n",
+							videocap_source_class);
 						init_videocap_video_mode(0, videocap_full_width,
-							videocap_output_profile);
+							videocap_output_profile,
+							videocap_source_class);
 					}
 					vs.videocap_video_mode_applied =
 						vs.videocap_video_mode;
@@ -604,21 +670,28 @@ void isr_video(void *dummy) {
 				}
 
 				if (videocap_detection_stable &&
-						(interlace != vs.interlace_old || videocap_reset)) {
+						(interlace != vs.interlace_old || videocap_reset ||
+						 vs.videocap_geometry_serial !=
+							vs.videocap_geometry_serial_applied)) {
 					if (videocap_output_profile ==
 					    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH)
 						video_formatter_write(0, MNTVF_OP_SOURCE_SYNC);
 					// interlace has changed, we need to reconfigure vdma for the new screen height
 					uint32_t videocap_scalemode = video_videocap_scalemode(
 							(uint32_t)videocap_full_width,
-							(uint32_t)interlace);
+							(uint32_t)interlace,
+							(uint32_t)videocap_source_class);
 					vs.scalemode = (int)videocap_scalemode;
 					uint32_t videocap_source_rows =
 							video_videocap_source_rows(
 								vs.vmode_vsize,
 								(uint32_t)videocap_full_width,
 								(uint32_t)videocap_ntsc,
-								(uint32_t)interlace);
+								(uint32_t)interlace,
+								(uint32_t)videocap_source_class,
+								vs.videocap_height_override);
+					vs.videocap_geometry_serial_applied =
+						vs.videocap_geometry_serial;
 					vs.vmode_vdma_rows = videocap_source_rows;
 					/* The mode-change trigger above may have run
 					 * several vblanks earlier; a host driver pan
@@ -636,7 +709,9 @@ void isr_video(void *dummy) {
 							videocap_ntsc,
 							videocap_full_width);
 					videocap_area_clear();
-					if (videocap_full_width) {
+					if (videocap_full_width ||
+							vs.videocap_width_override ||
+							vs.videocap_height_override) {
 						/* Fullscan scales vertically by an
 						 * integer factor: publish the exact
 						 * content rectangle so the formatter
@@ -646,12 +721,18 @@ void isr_video(void *dummy) {
 						 * PAL also restores the full raster
 						 * after an NTSC letterbox without
 						 * relying on mode-change side
-						 * effects. */
+						 * effects.  A manual capture-window
+						 * override letterboxes the filtered
+						 * profiles the same way. */
 						struct video_videocap_scanout_rect rect =
 							video_videocap_fullscan_rect(
 								(uint32_t)videocap_output_profile,
 								(uint32_t)videocap_ntsc,
-								(uint32_t)interlace);
+								(uint32_t)interlace,
+								(uint32_t)videocap_source_class,
+								vs.videocap_width_override,
+								vs.videocap_height_override,
+								videocap_source_rows);
 
 						video_formatter_write(
 								(rect.y << 16) | rect.x,
@@ -665,8 +746,15 @@ void isr_video(void *dummy) {
 							video_videocap_scale_control(
 								(uint32_t)videocap_full_width,
 								(uint32_t)videocap_ntsc,
-								(uint32_t)interlace),
+								(uint32_t)interlace,
+								(uint32_t)videocap_source_class),
 							MNTVF_OP_SCALE);
+					/* hdiv is the color-depth divider
+					 * (32bit: 1), never a fetch-halving
+					 * control: the formatter has no
+					 * horizontal scaler, so the capture
+					 * scanout always reads 32-bit rows and
+					 * letterboxes width in the viewport. */
 					init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, 1,
 							(u32)vs.framebuffer + vs.framebuffer_pan_offset);
 					video_formatter_valign();
@@ -682,6 +770,7 @@ void isr_video(void *dummy) {
 					vs.interlace_old = interlace;
 					vs.videocap_ntsc_old = videocap_ntsc;
 					vs.videocap_shres_old = videocap_shres;
+					vs.videocap_source_class_old = videocap_source_class;
 				}
 			}
 		} else {
