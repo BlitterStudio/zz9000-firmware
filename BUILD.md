@@ -45,6 +45,14 @@ or from a POSIX shell:
 The Docker wrappers cache the official Arm GNU Toolchain and bootgen in Docker
 volumes named `zz9000-arm-toolchain` and `zz9000-bootgen`.
 
+The firmware linker keeps low DDR below the framebuffer at `0x00200000`.
+Video/HDMI control code and constants use the existing high-DDR code region;
+mutable state retains the normal data/BSS placement. Keep the
+`firmware low sections overlap framebuffer memory` assertion intact: a
+failure means the image layout must be repaired, not the framebuffer boundary
+increased. Both normal and legacy-bitstream firmware targets depend on
+`src/lscript.ld`, so linker-script changes trigger relinking.
+
 **USB proxy change** — run the bounded host models before building the ARM
 artifact:
 

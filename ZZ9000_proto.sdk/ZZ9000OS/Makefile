@@ -243,12 +243,12 @@ FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 
 all: $(TARGET) $(FALLBACK_TARGET) size
 
-$(TARGET): $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(OBJS)
+$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 	@echo 'Done.'
 
-$(FALLBACK_TARGET): $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(FALLBACK_OBJS)
+$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(FALLBACK_OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(FALLBACK_OBJS) $(LIBS)
 	@echo 'Done.'
