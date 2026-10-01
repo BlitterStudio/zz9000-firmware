@@ -816,10 +816,12 @@ void isr_video(void *dummy) {
 						vs.videocap_geometry_requested_width :
 						(uint16_t)vs.vmode_hsize;
 					uint16_t geometry_height = (uint16_t)vs.vmode_vdma_rows;
+					vs.framebuffer_pan_width = (uint32_t)vs.vmode_hsize;
 					if (init_vdma(geometry_width, geometry_height, 1,
 							(u32)vs.framebuffer + vs.framebuffer_pan_offset) ==
 						XST_SUCCESS)
 						videocap_geometry_commit(geometry_width, geometry_height);
+					vs.framebuffer_pan_width = 0;
 					video_formatter_valign();
 					/* Both first entry and x2/x4 transitions must finish
 					 * VDMA setup before acquisition can show content. */

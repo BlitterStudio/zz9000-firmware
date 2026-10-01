@@ -312,7 +312,9 @@ int main(void)
 		(uint16_t)vs.vmode_vdma_rows);
 	assert(video_videocap_geometry_value(
 		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_HEIGHT, NULL) != 400);
-
+	assert(dma_setup.HoriSizeInput == 640 * 4);
+	assert(dma_setup.Stride == 800 * 4);
+	assert(vs.framebuffer_pan_width == 0);
 	assert(video_set_videocap_geometry(656, 416));
 	dma_config_status = XST_FAILURE;
 	geometry_native_vblank();
