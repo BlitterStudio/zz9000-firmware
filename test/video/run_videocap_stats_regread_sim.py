@@ -102,12 +102,12 @@ initial begin
     regread_addr = 32'h0000004e;
     vcap_ymax = 11'h3ff;
     #1;
-    if (rr_data !== 32'h000003ff)
-        $fatal(1, "0x4e did not return the capped line count: %h", rr_data);
+    if (rr_data !== 32'h03ff03ff)
+        $fatal(1, "0x4e did not return the capped line count in both halves: %h", rr_data);
     vcap_ymax = 11'h5a5;
     #1;
-    if (rr_data !== 32'h000001a5)
-        $fatal(1, "0x4e did not reserve bits [15:10]: %h", rr_data);
+    if (rr_data !== 32'h01a501a5)
+        $fatal(1, "0x4e did not reserve bits [15:10] in both halves: %h", rr_data);
     $display("VIDEOCAP STATS REGREAD PASS");
     $finish;
 end

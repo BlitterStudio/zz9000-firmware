@@ -350,9 +350,18 @@ int main(void)
 	geometry_native_vblank();
 	assert(video_videocap_geometry_value(
 		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_WIDTH, NULL) == 800);
+	/* A width override larger than the active mode pitch is clamped
+	 * to vs.vmode_hsize to protect VDMA stride integrity. */
+	assert(video_set_videocap_geometry(1280, 400));
+	geometry_native_vblank();
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_WIDTH, NULL) == 800);
+	assert(dma_setup.HoriSizeInput == 800 * 4);
+	assert(dma_setup.Stride == 800 * 4);
+
 	assert(!video_set_videocap_geometry(255, 400));
 	assert(video_videocap_geometry_value(
-		ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_SERIAL, NULL) == 5);
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_SERIAL, NULL) == 6);
 	assert(video_videocap_geometry_value(
 		ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS, NULL) ==
 		(ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID |

@@ -811,10 +811,10 @@ void isr_video(void *dummy) {
 					 * SCALEX repeats pixels in the formatter without
 					 * changing source-row pitch, so fullscan VDMA reads
 					 * complete 32-bit rows. */
-					uint16_t geometry_width =
-						vs.videocap_geometry_requested_width ?
-						vs.videocap_geometry_requested_width :
-						(uint16_t)vs.vmode_hsize;
+					uint16_t geometry_width = (uint16_t)vs.vmode_hsize;
+					if (vs.videocap_geometry_requested_width &&
+					    vs.videocap_geometry_requested_width < geometry_width)
+						geometry_width = vs.videocap_geometry_requested_width;
 					uint16_t geometry_height = (uint16_t)vs.vmode_vdma_rows;
 					vs.framebuffer_pan_width = (uint32_t)vs.vmode_hsize;
 					if (init_vdma(geometry_width, geometry_height, 1,

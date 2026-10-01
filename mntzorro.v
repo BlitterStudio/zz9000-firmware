@@ -3228,7 +3228,8 @@ module MNTZorro_v0_1_S00_AXI
                   rr_data <= debug_counter << 16;
                 end
                 'h4e: begin
-                  rr_data <= {12'h0, vcap_ymax[9:0]};
+                  rr_data[31:16] <= {6'h0, vcap_ymax[9:0]};
+                  rr_data[15:0]  <= {6'h0, vcap_ymax[9:0]};
                 end
                 default: begin
                   rr_data[31:16] <= REVISION;
