@@ -86,29 +86,31 @@ int main(void)
 		struct video_videocap_scanout_rect r =
 			video_videocap_fullscan_rect(
 				ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U, 0U, 0U, 0U,
-				256U);
+				256U, 0U, 0U);
 		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 22;
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 0U, 0U, 0U, 0U, 200U);
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 0U, 0U, 0U, 0U, 200U,
+			0U, 0U);
 		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
 		    r.height != 800U)
 			return 23;
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 1U, 0U, 0U, 0U, 400U);
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 1U, 0U, 0U, 0U, 400U,
+			0U, 0U);
 		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
 		    r.height != 800U)
 			return 24;
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 1U, 0U, 0U, 0U,
-			0U, 200U);
+			0U, 200U, 0U, 0U);
 		if (r.x != 320U || r.y != 140U || r.width != 1280U ||
 		    r.height != 800U)
 			return 25;
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50, 1U, 0U, 1U, 0U, 0U,
-			0U, 512U);
+			0U, 512U, 0U, 0U);
 		if (r.x != 320U || r.y != 28U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 26;
@@ -169,7 +171,7 @@ int main(void)
 				VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 				VIDEO_VIDEOCAP_SOURCE_TALL |
 				VIDEO_VIDEOCAP_ROWS_CLASS_3,
-				0U, 0U, 1024U);
+				0U, 0U, 1024U, 0U, 0U);
 		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 512U)
 			return 52;
@@ -179,7 +181,7 @@ int main(void)
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
 			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 			VIDEO_VIDEOCAP_ROWS_CLASS_1,
-			0U, 0U, 256U);
+			0U, 0U, 256U, 0U, 0U);
 		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 53;
@@ -189,20 +191,40 @@ int main(void)
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
 			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 			VIDEO_VIDEOCAP_ROWS_CLASS_2,
-			0U, 0U, 512U);
+			0U, 0U, 512U, 0U, 0U);
 		if (r.x != 320U || r.y != 28U || r.width != 1280U ||
 		    r.height != 1024U)
-			return 54;
+			return 57;
 		/* Width override stays in captured words, then repeats 2x. */
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50, 1U, 0U, 0U,
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
 			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 			VIDEO_VIDEOCAP_ROWS_CLASS_2,
-			320U, 0U, 512U);
+			320U, 0U, 512U, 0U, 0U);
 		if (r.x != 640U || r.y != 28U || r.width != 640U ||
 		    r.height != 1024U)
-			return 55;
+			return 58;
+		/* Euro72 / DblNTSC class 2 must not take the 15 kHz 800-line
+		 * letterbox: vertical x2 would then consume only 400 rows. */
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 0U,
+			VIDEO_VIDEOCAP_SOURCE_SHORT |
+			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+			VIDEO_VIDEOCAP_ROWS_CLASS_2,
+			0U, 0U, 512U, 0U, 0U);
+		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
+		    r.height != 1024U)
+			return 59;
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 1U, 0U,
+			VIDEO_VIDEOCAP_SOURCE_SHORT |
+			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+			VIDEO_VIDEOCAP_ROWS_CLASS_2,
+			0U, 0U, 512U, 0U, 0U);
+		if (r.x != 320U || r.y != 28U || r.width != 1280U ||
+		    r.height != 1024U)
+			return 60;
 	}
 	/* Manual capture-window overrides: height bounds the source rows and
 	 * can only shrink the automatic window; width/height letterbox the
@@ -219,16 +241,31 @@ int main(void)
 		struct video_videocap_scanout_rect r =
 			video_videocap_fullscan_rect(
 				ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U, 0U, 640U,
-				240U, 240U);
+				240U, 240U, 0U, 0U);
 		if (r.x != 320U || r.y != 32U || r.width != 640U ||
 		    r.height != 960U)
 			return 48;
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 0U, 0U, 0U,
-			640U, 240U, 240U);
+			640U, 240U, 240U, 0U, 0U);
 		if (r.x != 320U + 320U || r.y != 28U + 32U ||
 		    r.width != 640U || r.height != 960U)
 			return 49;
+		/* Filtered override centers in the active mode, not 1280x1024.
+		 * Progressive PAL 640x240 at vertical x2 is 640x480 inside
+		 * 800x600. */
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U, 0U, 0U, 640U,
+			240U, 240U, 800U, 600U);
+		if (r.x != 80U || r.y != 60U || r.width != 640U ||
+		    r.height != 480U)
+			return 61;
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 1U, 0U, 0U, 640U,
+			200U, 200U, 720U, 480U);
+		if (r.x != 40U || r.y != 40U || r.width != 640U ||
+		    r.height != 400U)
+			return 62;
 	}
 	if (!expect_u32("width bounds reject unaligned or out-of-range values",
 	                video_videocap_width_valid(640U) +

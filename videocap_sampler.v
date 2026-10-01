@@ -31,9 +31,7 @@ module videocap_control_source #(
     output reg         last_commit_rejected = 0,
     output reg         applied_valid = 0,
     output reg  [31:0] applied_raw =
-        {2'b00, 1'b0, 1'b0, 12'd26, 12'd188, 1'b0, 1'b0, 2'd0},
-    output reg  [31:0] applied_effective_crop =
-        {4'b0000, 12'd26, 4'b0000, 12'd188}
+        {2'b00, 1'b0, 1'b0, 12'd26, 12'd188, 1'b0, 1'b0, 2'd0}
 );
 
 localparam [1:0] CONTROL_IDLE   = 2'd0;
@@ -129,10 +127,6 @@ always @(posedge source_clk) begin
         CONTROL_SEND: begin
             if (control_received) begin
                 applied_raw <= pending_raw;
-                applied_effective_crop <= {
-                    4'b0000, control_payload[26:15],
-                    4'b0000, control_payload[14:3]
-                };
                 applied_sequence <= request_sequence;
                 applied_valid <= 1'b1;
                 control_send <= 1'b0;
@@ -243,6 +237,90 @@ end
 
 endmodule
 
+/* Publish the resolved crop and frame line count as one coherent AXI
+ * snapshot. Hold the payload through the complete four-phase handshake.
+ * settled lets the control ACK wait until its crop is visible to readers. */
+module videocap_live_publish (
+    input  wire        cap_clk,
+    input  wire [11:0] crop_h,
+    input  wire [11:0] crop_v,
+    input  wire [9:0]  line_count,
+    input  wire        axi_clk,
+    output wire        settled,
+    output reg  [31:0] live_effective_crop =
+        {4'b0000, 12'd26, 4'b0000, 12'd188},
+    output reg  [9:0]  live_line_count = 0
+);
+    localparam [1:0] LIVE_IDLE   = 2'd0;
+    localparam [1:0] LIVE_LOAD   = 2'd1;
+    localparam [1:0] LIVE_SEND   = 2'd2;
+    localparam [1:0] LIVE_RETURN = 2'd3;
+
+    wire [33:0] live_cap = {line_count, crop_v, crop_h};
+    reg [33:0] live_sent = {10'd0, 12'd26, 12'd188};
+    reg [33:0] live_payload = {10'd0, 12'd26, 12'd188};
+    reg [1:0] live_state = LIVE_IDLE;
+    reg live_send = 1'b0;
+    wire live_received;
+    wire [33:0] live_dest_payload;
+    wire live_dest_req;
+
+    assign settled = live_state == LIVE_IDLE && live_sent == live_cap;
+
+    xpm_cdc_handshake #(
+        .DEST_EXT_HSK(0),
+        .DEST_SYNC_FF(4),
+        .INIT_SYNC_FF(1),
+        .SIM_ASSERT_CHK(0),
+        .SRC_SYNC_FF(4),
+        .WIDTH(34)
+    ) videocap_live_handshake (
+        .src_clk(cap_clk),
+        .src_in(live_payload),
+        .src_send(live_send),
+        .src_rcv(live_received),
+        .dest_clk(axi_clk),
+        .dest_out(live_dest_payload),
+        .dest_req(live_dest_req),
+        .dest_ack(1'b0)
+    );
+
+    always @(posedge cap_clk) begin
+        case (live_state)
+            LIVE_IDLE: begin
+                if (live_cap != live_sent) begin
+                    live_payload <= live_cap;
+                    live_state <= LIVE_LOAD;
+                end
+            end
+            LIVE_LOAD: begin
+                live_send <= 1'b1;
+                live_state <= LIVE_SEND;
+            end
+            LIVE_SEND: begin
+                if (live_received) begin
+                    live_send <= 1'b0;
+                    live_sent <= live_payload;
+                    live_state <= LIVE_RETURN;
+                end
+            end
+            LIVE_RETURN: begin
+                if (!live_received)
+                    live_state <= LIVE_IDLE;
+            end
+        endcase
+    end
+
+    always @(posedge axi_clk) begin
+        if (live_dest_req) begin
+            live_effective_crop <= {4'b0, live_dest_payload[23:12],
+                                    4'b0, live_dest_payload[11:0]};
+            live_line_count <= live_dest_payload[33:24];
+        end
+    end
+endmodule
+
+
 module videocap_sampler #(
     parameter integer BUF_DEPTH   = 2048,
     parameter integer RGB_MODE    = 0,
@@ -266,6 +344,9 @@ module videocap_sampler #(
     output wire        ctl_received,
     input  wire        ctl_read_full_width,
     output wire [1:0]  detected_standard,
+    /* AXI-domain coherent snapshot of the actual capture configuration. */
+    output wire [31:0] live_effective_crop,
+    output wire [9:0]  live_line_count,
 
     output reg  [10:0] cap_x,
     output reg  [10:0] cap_y,
@@ -328,6 +409,8 @@ module videocap_sampler #(
 wire [28:0] ctl_dest_payload;
 wire ctl_dest_req;
 reg ctl_dest_ack = 0;
+reg ctl_apply_pending = 0;
+wire live_publish_settled;
 
 xpm_cdc_handshake #(
     .DEST_EXT_HSK(1),
@@ -409,6 +492,17 @@ wire [11:0] crop_v_eff = (ctl_crop_v_auto_cap &&
                              (ctl_full_width_cap ? CROP_V_CLASS :
                                                    CROP_V_CLASS_F) :
                          ctl_crop_v_cap;
+
+videocap_live_publish videocap_live_publish_inst (
+    .cap_clk(cap_clk),
+    .crop_h(crop_h_eff),
+    .crop_v(crop_v_eff),
+    .line_count(cap_ymax[9:0]),
+    .axi_clk(axi_clk),
+    .settled(live_publish_settled),
+    .live_effective_crop(live_effective_crop),
+    .live_line_count(live_line_count)
+);
 
 reg [6:0] hs = 0;
 reg [6:0] vs = 0;
@@ -748,15 +842,19 @@ always @(posedge cap_clk) begin
 end
 
 always @(posedge cap_clk) begin
-    if (!ctl_dest_req)
+    if (!ctl_dest_req) begin
         ctl_dest_ack <= 1'b0;
-    else if (!ctl_dest_ack && frame_sync && !cap_reset) begin
+        ctl_apply_pending <= 1'b0;
+    end else if (!ctl_dest_ack && !ctl_apply_pending &&
+                 frame_sync && !cap_reset) begin
         ctl_sample_mode_cap <= ctl_dest_payload[1:0];
         ctl_full_width_cap <= ctl_dest_payload[2];
         ctl_crop_h_cap <= ctl_dest_payload[14:3];
         ctl_crop_v_auto_cap <= ctl_dest_payload[28];
         ctl_crop_h_auto_cap <= ctl_dest_payload[27];
         ctl_crop_v_cap <= ctl_dest_payload[26:15];
+        ctl_apply_pending <= 1'b1;
+    end else if (ctl_apply_pending && live_publish_settled && !cap_reset) begin
         ctl_dest_ack <= 1'b1;
     end
 

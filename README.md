@@ -322,11 +322,13 @@ With no valid profile, `filtered_60` provides filtered 60 Hz output:
 `full_exact` selections preserve full SuperHires detail in a 1280x1024 output.
 Fullscan scales vertically by an integer factor on the classic power-of-two
 paths, so every source row is duplicated uniformly: PAL's 256 progressive or
-512 interlaced source rows fill the 1024-line raster at x4/x2, while NTSC
-letterboxes the same 800 lines for both 200 progressive rows at x4 and 400
-interlaced rows at x2 (112-line black bars, centered). Progressive and
-interlaced pictures therefore render at one physical size per standard,
-matching a real monitor.
+512 interlaced source rows fill the 1024-line raster at x4/x2, while 15 kHz
+NTSC letterboxes the same 800 lines for both 200 progressive rows at x4 and
+400 interlaced rows at x2 (112-line black bars, centered). Short-line
+NTSC-class sources such as Euro72 and DblNTSC do not take that letterbox:
+their row-class factor already shows the captured rows, and an 800-line
+viewport would clip the bottom. Progressive and interlaced 15 kHz pictures
+therefore render at one physical size per standard, matching a real monitor.
 
 On full-rate doubled sources such as DblPAL and Euro72, the measured
 640-pixel line is repeated 2x horizontally and the existing row-class
@@ -340,8 +342,8 @@ content pitch.
 On supported full-rate variants,
 `centered_1080p_60` and `centered_1080p_50`
 place the native picture in a 1920x1080 signal with 320-pixel side borders
-and 28-line top/bottom borders; an NTSC source letterboxes inside that
-viewport with the same integer scaling. Their nominal 60/50 Hz
+and 28-line top/bottom borders; a 15 kHz NTSC source letterboxes inside
+that viewport with the same integer scaling. Their nominal 60/50 Hz
 timings run at approximately 60.03/50.02 Hz. Both use the closest legal
 100 MHz integer-PLL setting to 148.5 MHz: 52/5/7 = 148.5714286 MHz, with
 standard blanking unchanged. They are free-running, not input-genlocked.
@@ -358,6 +360,8 @@ unsupported profile. Older firmware ignores an unknown profile token,
 which is not a guaranteed `full_60` fallback for hand-edited old stacks.
 Capture-window overrides use `videocap_width` and `videocap_height`; set either
 axis to 0 (or omit its CFG key) to retain that axis's automatic dimension.
+On a filtered profile the override is centered in the active mode canvas
+(800x600, 720x576, or 720x480), not in the 1280x1024 fullscan box.
 Firmware capability bit 8 accepts the live `CARD_FEATURE_VIDEOCAP_GEOMETRY`
 request; bit 10 adds the acknowledgement contract. The `REG_ZZ_CONFIG_KEY`
 runtime queries 28--34 report requested/applied width and height,
@@ -369,6 +373,14 @@ remains pending until stable native-vblank VDMA programming succeeds with
 that serial. RTG vblanks and VDMA configuration/address/start failures do
 not acknowledge it; a failed pending request retries on a stable native
 vblank. Tools must not treat a successful feature write as an applied window.
+
+Live calibration reads the capture-domain resolved automatic crop at
+`VCAP_LIVE_EFFECTIVE_CROP` (host offset `0x140c`), including doubled/short-line
+crop replacement and PAL/NTSC vertical changes. Crop axes and the live line
+count cross coherently into the AXI domain; a crop commit is acknowledged
+only after its resolved pair is visible there. `REG_ZZ_VIDEOCAP_STATS`
+(`0x4e`) returns the ten-bit frame line count with reserved bits zero in
+both word halves, including the upper half used by Zorro II reads.
 
 RTG/native switches keep the HDMI signal running when the complete output
 timing is unchanged; framebuffer layout, scaling and pixel format still update.

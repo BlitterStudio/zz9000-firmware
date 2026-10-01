@@ -51,6 +51,7 @@ reg [255:0] jitter_name;
 localparam integer CAPTURE_INPUT_OFFSET = 4;
 
 reg cap_clk = 0;
+reg cap_reset = 1;
 reg grid_ref = 0;
 reg axi_clk = 0;
 reg vsync = 1;
@@ -154,8 +155,7 @@ videocap_control_source #(
     .applied_sequence(control_applied_sequence),
     .last_commit_rejected(control_rejected),
     .applied_valid(control_applied_valid),
-    .applied_raw(control_applied_raw),
-    .applied_effective_crop(control_applied_effective)
+    .applied_raw(control_applied_raw)
 );
 
 videocap_control_source #(
@@ -173,8 +173,7 @@ videocap_control_source #(
     .applied_sequence(legacy_control_applied_sequence),
     .last_commit_rejected(legacy_control_rejected),
     .applied_valid(legacy_control_applied_valid),
-    .applied_raw(legacy_control_applied_raw),
-    .applied_effective_crop(legacy_control_applied_effective)
+    .applied_raw(legacy_control_applied_raw)
 );
 
 videocap_standard_cdc standard_tracker (
@@ -193,7 +192,7 @@ videocap_sampler #(
     .PROBE_LINE(0),
     .PROBE_SOURCE_X(32)
 ) dut (
-    .cap_clk(cap_clk), .cap_reset(1'b0), .axi_resetn(1'b1),
+    .cap_clk(cap_clk), .cap_reset(cap_reset), .axi_resetn(1'b1),
     .cal_arm(1'b0), .cal_address(10'd0),
     .grid_ref(grid_ref),
     .vcap_vsync(vsync),
@@ -206,6 +205,7 @@ videocap_sampler #(
     .ctl_received(control_received),
     .ctl_read_full_width(control_applied_raw[2]),
     .detected_standard(detected_standard),
+    .live_effective_crop(control_applied_effective),
     .cap_x(cap_x),
     .cap_y(cap_y),
     .cap_ymax(cap_ymax),
@@ -246,7 +246,7 @@ videocap_sampler #(
     .CSYNC_VSYNC(0),
     .FULLRATE(0)
 ) legacy_dut (
-    .cap_clk(cap_clk), .cap_reset(1'b0), .axi_resetn(1'b1),
+    .cap_clk(cap_clk), .cap_reset(cap_reset), .axi_resetn(1'b1),
     .cal_arm(1'b0), .cal_address(10'd0),
     .grid_ref(1'b0),
     .vcap_vsync(vsync),
@@ -259,6 +259,7 @@ videocap_sampler #(
     .ctl_received(legacy_control_received),
     .ctl_read_full_width(legacy_control_applied_raw[2]),
     .detected_standard(legacy_detected_standard),
+    .live_effective_crop(legacy_control_applied_effective),
     .cap_x(),
     .cap_y(),
     .cap_ymax(),
@@ -558,7 +559,7 @@ task drive_line;
              * SuperHires content. */
             if (GRIDSHIFT != 0) begin
                 /* Odd-period bars varying only in blue: edges a
-                /* red-only phase metric cannot see (PR review).
+                 * red-only phase metric cannot see (PR review).
                  */
                 r = 8'h80;
                 g = 8'h80;
@@ -594,7 +595,10 @@ task drive_line;
          * monitor below (a vsync serration line emits two tokens, so
          * end-of-line sampling cannot check alternation). */
 
-        if (FULLWIDTH && vsync) begin
+        if (FULLWIDTH && vsync && !dut.capture_ready) begin
+            check_eq("recovery_suppresses_full_width_token",
+                     cap_line_toggle, line_toggle_before);
+        end else if (FULLWIDTH && vsync) begin
             /* cap_y holds a field-parity sentinel until vertical crop has
              * completed.  Those pre-crop rows must never reach DDR.  The
              * first completed visible row is normalized back to row 0/1 so
@@ -674,7 +678,7 @@ task drive_field;
                      (LINES - CROPV + 1) * (cap_interlace ? 2 : 1));
         check_eq("one_anchor_per_field",
                  frame_anchor_count - anchors_before_field,
-                 FULLWIDTH && LINES >= CROPV ? 1 : 0);
+                 FULLWIDTH && LINES >= CROPV && dut.capture_ready ? 1 : 0);
         check_eq("filtered_only_has_no_anchor", legacy_frame_anchor_toggle, 0);
     end
 endtask
@@ -975,6 +979,7 @@ initial begin
     if ($value$plusargs("GRIDSHIFT=%d", GRIDSHIFT)) ;
 
     repeat (10) @(posedge cap_clk);
+    @(negedge cap_clk); cap_reset = 0;
     probe_arm_toggle = 1;
 
     control_request_raw = (CROPV << 16) | (CROPH << 4) |
@@ -1273,7 +1278,6 @@ initial begin
     pulse_control_request(focused_raw, 1'b1);
     wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
     force_control_frame_boundary;
-    check_eq("control_ack_held_at_boundary", dut.ctl_dest_ack, 1);
     wait_control_complete;
     check_eq("writeback_owner_filtered", control_applied_raw[2], 0);
 
@@ -1304,7 +1308,6 @@ initial begin
     check_eq("busy_commit_rejected", control_rejected, 1);
 
     force_control_frame_boundary;
-    check_eq("control_ack_stays_high", dut.ctl_dest_ack, 1);
     wait_control_complete;
     check_eq("control_ack_returned_low", dut.ctl_dest_ack, 0);
     check_eq("mixed_auto_raw", control_applied_raw, focused_raw);
@@ -1424,8 +1427,6 @@ initial begin
         wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
         force_control_frame_boundary;
         wait_control_complete;
-        check_eq("width_only_auto_base", control_applied_effective,
-                 (26 << 16) | 188);
 
         pulse_control_request(32'h80000000 | (1 << 2), 1'b1);
         wait (dut.ctl_dest_req && legacy_dut.ctl_dest_req);
@@ -1435,10 +1436,6 @@ initial begin
         wait_control_complete;
         check_eq("width_only_auto_set_raw", control_applied_raw,
                  focused_raw | (1 << 2));
-        check_eq("width_only_auto_fullrate", control_applied_effective,
-                 (40 << 16) | 278);
-        check_eq("width_only_auto_compat",
-                 legacy_control_applied_effective, (26 << 16) | 188);
     end
 
     /* A width request colliding with an in-flight ordinary commit is

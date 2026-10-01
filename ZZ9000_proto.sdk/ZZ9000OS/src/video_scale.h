@@ -245,9 +245,10 @@ static inline uint32_t video_videocap_scalemode(uint32_t full_width,
 		}
 	}
 	/* Full-width capture scales by an integer factor on the legacy
-	 * power-of-two paths: PAL fills 1024 lines (x4/x2), NTSC letterboxes
-	 * 800 lines with the SAME factors so progressive and laced pictures
-	 * keep the identical physical height they share on a real monitor.
+	 * power-of-two paths: PAL fills 1024 lines (x4/x2), 15 kHz NTSC
+	 * letterboxes 800 lines with the SAME factors so progressive and
+	 * laced pictures keep the identical physical height they share on
+	 * a real monitor. Short-line NTSC does not take that letterbox.
 	 * Filtered capture retains the legacy x2 path. Interlaced input
 	 * already supplies twice as many source lines. */
 	return full_width ? (interlace ? 2U : 4U)
@@ -305,21 +306,26 @@ struct video_videocap_scanout_rect {
 };
 
 /* Fullscan content rectangle inside the active output canvas: PAL fills
- * the 1024-line raster; NTSC letterboxes the same 800 lines for
+ * the 1024-line raster; 15 kHz NTSC letterboxes the same 800 lines for
  * progressive and interlaced alike, centered, so both modes render the
- * picture at one physical size with its aspect ratio intact.
+ * picture at one physical size with its aspect ratio intact. Short-line
+ * NTSC (Euro72, DblNTSC) is not that window: its row-class factor already
+ * shows the source whole, and the 800-line rule would clip it.
  *
  * Manual capture-window overrides (ZZTop calibration, videocap_width /
  * videocap_height) shrink the displayed content the same way: width is
  * in captured words (doubled horizontally by scalemode bit 0, exactly
  * as a doubled-scan source is), height in source rows multiplied by the
  * vertical factor.  The shrunken rectangle is centered inside the
- * content box the profile would otherwise fill; borders render black. */
+ * content box the profile would otherwise fill; borders render black.
+ * Filtered profiles pass that box as canvas_width/canvas_height (the
+ * active mode, 800x600 or 720x480/576); fullscan ignores those dimensions. */
 static inline struct video_videocap_scanout_rect
 video_videocap_fullscan_rect(uint32_t output_profile, uint32_t full_width,
 		uint32_t ntsc, uint32_t interlace, uint32_t source_class,
 		uint32_t width_override, uint32_t height_override,
-		uint32_t source_rows)
+		uint32_t source_rows, uint32_t canvas_width,
+		uint32_t canvas_height)
 {
 	struct video_videocap_scanout_rect rect = {
 		0U, 0U, VIDEO_VIDEOCAP_CONTENT_WIDTH,
@@ -329,28 +335,37 @@ video_videocap_fullscan_rect(uint32_t output_profile, uint32_t full_width,
 		source_class);
 	uint32_t hdiv = (scalemode & 1U) != 0U ? 2U : 1U;
 
-	if (video_videocap_output_profile_centered(output_profile)) {
-		rect.x = VIDEO_VIDEOCAP_CENTERED_VIEWPORT_X;
-		rect.y = VIDEO_VIDEOCAP_CENTERED_VIEWPORT_Y;
-	}
-	if (ntsc != 0U) {
-		rect.y += (VIDEO_VIDEOCAP_CONTENT_HEIGHT -
-			VIDEO_VIDEOCAP_NTSC_LETTERBOX_HEIGHT) / 2U;
-		rect.height = VIDEO_VIDEOCAP_NTSC_LETTERBOX_HEIGHT;
+	if (full_width == 0U) {
+		rect.width = canvas_width;
+		rect.height = canvas_height;
+	} else {
+		if (video_videocap_output_profile_centered(output_profile)) {
+			rect.x = VIDEO_VIDEOCAP_CENTERED_VIEWPORT_X;
+			rect.y = VIDEO_VIDEOCAP_CENTERED_VIEWPORT_Y;
+		}
+		/* 15 kHz fullscan NTSC only. Class 2 short-line NTSC is
+		 * vertical x2, so an 800-line viewport would consume 400
+		 * rows and clip Euro72 (~427) and DblNTSC (~478). */
+		if (full_width != 0U && ntsc != 0U &&
+				(source_class & VIDEO_VIDEOCAP_SOURCE_SHORT) == 0U) {
+			rect.y += (VIDEO_VIDEOCAP_CONTENT_HEIGHT -
+				VIDEO_VIDEOCAP_NTSC_LETTERBOX_HEIGHT) / 2U;
+			rect.height = VIDEO_VIDEOCAP_NTSC_LETTERBOX_HEIGHT;
+		}
+		/* Short-line classes 1/2 fill the canvas at their class
+		 * factor. Only the 590+-row exotics (shown x1) clip to the
+		 * 512 rows that are always fresh: the ARM cannot read the
+		 * exact captured line count. Manual height overrides
+		 * replace this. */
+		if (((source_class >> VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT) &
+				VIDEO_VIDEOCAP_ROWS_CLASS_MASK) == 3U &&
+				height_override == 0U) {
+			if (rect.height > 512U)
+				rect.height = 512U;
+		}
 	}
 	/* The doubled-source scale bit repeats each stored pixel to fill the
-	 * 1280-word content viewport; only an explicit width override shrinks it. */
-	/* Short-line sources: classes 1/2 fill the canvas exactly (or the
-	 * 800-line NTSC letterbox above) at their class factor, so only
-	 * the 590+-row exotics (shown x1) need a clip - to the 512 rows
-	 * that are always fresh, since the ARM cannot read the exact
-	 * captured line count. Manual height overrides replace this. */
-	if (((source_class >> VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT) &
-			VIDEO_VIDEOCAP_ROWS_CLASS_MASK) == 3U &&
-			height_override == 0U) {
-		if (rect.height > 512U)
-			rect.height = 512U;
-	}
+	 * content viewport; only an explicit width override shrinks it. */
 	if (width_override != 0U && width_override * hdiv < rect.width) {
 		uint32_t shown = width_override * hdiv;
 

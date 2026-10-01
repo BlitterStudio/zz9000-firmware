@@ -49,6 +49,8 @@ integer EXPECT_CROPH = 168;   /* the doubled-scan default on the filtered
 integer EXPECT_CROPV = 2;
 
 reg cap_clk = 0;
+reg cap_reset = 1;
+reg custom_pending = 0;
 reg axi_clk = 0;
 reg vsync = 1;
 reg hsync = 1;
@@ -66,7 +68,7 @@ wire control_received;
 wire control_busy;
 wire [7:0] control_request_sequence, control_applied_sequence;
 wire control_rejected, control_applied_valid;
-wire [31:0] control_applied_raw, control_applied_effective;
+wire [31:0] control_applied_raw;
 
 videocap_control_source #(.FULLRATE(1)) control (
     .source_clk(axi_clk),
@@ -81,8 +83,7 @@ videocap_control_source #(.FULLRATE(1)) control (
     .applied_sequence(control_applied_sequence),
     .last_commit_rejected(control_rejected),
     .applied_valid(control_applied_valid),
-    .applied_raw(control_applied_raw),
-    .applied_effective_crop(control_applied_effective)
+    .applied_raw(control_applied_raw)
 );
 
 wire capture_ready;
@@ -93,12 +94,14 @@ wire cap_write_bank;
 wire [9:0] cap_token_y;
 wire cap_token_bank;
 wire [1:0] detected_standard;
+wire [31:0] live_effective_crop;
+wire [9:0] live_line_count;
 wire [31:0] buf_rdata;
 
 videocap_sampler #(
     .BUF_DEPTH(2048), .RGB_MODE(0), .CSYNC_VSYNC(0), .FULLRATE(1)
 ) dut (
-    .cap_clk(cap_clk), .cap_reset(1'b0), .capture_ready(capture_ready),
+    .cap_clk(cap_clk), .cap_reset(cap_reset), .capture_ready(capture_ready),
     .axi_resetn(1'b1),
     .cal_arm(1'b0), .cal_address(10'd0), .cal_metadata_address(4'd0),
     .grid_ref(1'b0),
@@ -108,6 +111,8 @@ videocap_sampler #(
     .ctl_received(control_received),
     .ctl_read_full_width(control_applied_raw[2]),
     .detected_standard(detected_standard),
+    .live_effective_crop(live_effective_crop),
+    .live_line_count(live_line_count),
     .cap_x(cap_x), .cap_y(cap_y), .cap_ymax(cap_ymax),
     .cap_interlace(cap_interlace), .cap_ntsc(cap_ntsc),
     .cap_doubled(cap_doubled), .cap_short(cap_short), .cap_tall(cap_tall),
@@ -224,6 +229,8 @@ task drive_frames;
 endtask
 
 initial begin
+    repeat (8) @(posedge cap_clk);
+    @(negedge cap_clk); cap_reset = 0;
     if ($value$plusargs("CASE=%d", CASE)) ;
     case (CASE)
         1: begin FULLWIDTH = 1; EXPECT_CROPH = 213; EXPECT_CROPV = 16; end
@@ -255,9 +262,10 @@ initial begin
     @(negedge axi_clk);
     control_request_event = 0;
 
-    /* three frames to settle (the request lands at a frame boundary, the
-     * class is decided at the next, the standard needs two agreeing) */
-    drive_frames(3);
+    /* Reset recovery suppresses the first field; classification then
+     * resolves line class, interlace parity, and the woven PAL/NTSC flag
+     * on successive boundaries. Settle before measuring two fields. */
+    drive_frames(4);
     tokens = 0; max_cap_x = 0;
     drive_frames(2);
 
@@ -268,6 +276,19 @@ initial begin
     check_eq("ntsc_flag", cap_ntsc, EXPECT_NTSC);
     check_eq("crop_h_in_use", dut.crop_h_local, EXPECT_CROPH);
     check_eq("crop_v_in_use", dut.crop_v_eff, EXPECT_CROPV);
+    /* Both live axes must catch up to the class-resolved crop in use. */
+    begin : wait_live_crop
+        integer crop_wait;
+        for (crop_wait = 0; crop_wait < 64; crop_wait = crop_wait + 1) begin
+            if (live_effective_crop[11:0] == EXPECT_CROPH[11:0] &&
+                    live_effective_crop[27:16] == EXPECT_CROPV[11:0])
+                crop_wait = 64;
+            else
+                @(posedge axi_clk);
+        end
+    end
+    check_eq("live_effective_crop_h", live_effective_crop[11:0], EXPECT_CROPH);
+    check_eq("live_effective_crop_v", live_effective_crop[27:16], EXPECT_CROPV);
     /* a laced field's VSYNC lands half a line later every other field:
      * counted from VSYNC to VSYNC the fields read LINES + 1 and LINES - 1 */
     check_eq("field_lines", (cap_ymax == LINES) ||
@@ -299,11 +320,29 @@ initial begin
         check_eq("short_source_not_shres", cap_shres, 0);
 
     $display("field lines %0d, tokens %0d, widest %0d", cap_ymax, tokens, max_cap_x);
+    /* A custom commit on a detected short-line source must replace the
+     * automatic pair, and ACK must not race its AXI-visible snapshot. */
+    @(negedge axi_clk);
+    custom_pending = 1;
+    control_request_raw = (21 << 16) | (300 << 4) |
+                          (FULLWIDTH ? (1 << 2) : 0);
+    control_request_event = 1;
+    @(negedge axi_clk);
+    control_request_event = 0;
+    drive_frames(2);
+    check_eq("custom_crop_commit_complete", control_busy, 0);
+    check_eq("custom_crop_readback", live_effective_crop, (21 << 16) | 300);
+    check_eq("live_frame_line_count", live_line_count, cap_ymax[9:0]);
     if (errors == 0)
         $display("RESULT PASS checks=%0d", checks);
     else
         $display("RESULT FAIL checks=%0d errors=%0d", checks, errors);
     $finish;
+end
+
+always @(posedge control_received) begin
+    if (custom_pending && live_effective_crop !== ((21 << 16) | 300))
+        $fatal(1, "control ACK preceded coherent live crop readback");
 end
 
 endmodule

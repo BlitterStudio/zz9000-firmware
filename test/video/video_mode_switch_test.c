@@ -371,6 +371,39 @@ int main(void)
 		 ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK)) ==
 		(ZZ_FW_CAP_VIDEOCAP_GEOMETRY |
 		 ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK));
+	/* The viewport and VDMA must agree on the active filtered canvas,
+	 * including restoring Automatic without an output-mode transition. */
+	assert(video_set_videocap_geometry(640, 240));
+	geometry_native_vblank();
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (60U << 16 | 80U));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (480U << 16 | 640U));
+	assert(dma_setup.HoriSizeInput == 640 * 4 &&
+	       dma_setup.Stride == 800 * 4 && dma_setup.VertSizeInput == 240);
+	assert(video_set_videocap_geometry(0, 0));
+	geometry_native_vblank();
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == 0);
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (600U << 16 | 800U));
+
+	videocap_zstate |= 1U << 22;
+	assert(video_set_videocap_geometry(640, 200));
+	geometry_native_vblank();
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (40U << 16 | 40U));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (400U << 16 | 640U));
+	assert(dma_setup.Stride == 720 * 4 && dma_setup.VertSizeInput == 200);
+
+	/* Euro72 / DblNTSC class-2 NTSC keeps all 512 scanout rows at x2,
+	 * not the 400 rows consumed by a legacy 800-line letterbox. */
+	vs.videocap_output_profile_requested = ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60;
+	videocap_zstate |= MNTZORRO_STATUS_VCAP_FULLRATE |
+	                  MNTZORRO_STATUS_VCAP_VIEWPORT |
+	                  (1U << 11) | (1U << 12) | (2U << 8);
+	assert(video_set_videocap_geometry(0, 0));
+	geometry_native_vblank();
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (28U << 16 | 320U));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (1024U << 16 | 1280U));
+	assert(dma_setup.VertSizeInput == 512);
+	printf("Native geometry: PAL 640x480@(80,60), NTSC 640x400@(40,40), "
+	       "Automatic restored, short NTSC retains 512 rows\n");
 	/* Restore the pre-regression centered native state for the independent
 	 * mode-switch transaction cases below. */
 	vs.videocap_width_override = 0;

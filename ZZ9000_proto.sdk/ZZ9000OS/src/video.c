@@ -766,9 +766,7 @@ void isr_video(void *dummy) {
 							videocap_ntsc,
 							videocap_full_width);
 					videocap_area_clear();
-					if (videocap_full_width ||
-							vs.videocap_width_override ||
-							vs.videocap_height_override) {
+					{
 						/* Fullscan scales vertically by an
 						 * integer factor: publish the exact
 						 * content rectangle so the formatter
@@ -778,9 +776,10 @@ void isr_video(void *dummy) {
 						 * PAL also restores the full raster
 						 * after an NTSC letterbox without
 						 * relying on mode-change side
-						 * effects.  A manual capture-window
-						 * override letterboxes the filtered
-						 * profiles the same way. */
+						 * effects. A filtered override is
+						 * centered in the active mode canvas
+						 * (800x600 / 720x480 / 720x576), not
+						 * the 1280x1024 fullscan box. */
 						struct video_videocap_scanout_rect rect =
 							video_videocap_fullscan_rect(
 								(uint32_t)videocap_output_profile,
@@ -790,7 +789,11 @@ void isr_video(void *dummy) {
 								(uint32_t)videocap_source_class,
 								vs.videocap_width_override,
 								vs.videocap_height_override,
-								videocap_source_rows);
+								videocap_source_rows,
+								videocap_full_width ? 0U :
+									(uint32_t)vs.vmode_hsize,
+								videocap_full_width ? 0U :
+									(uint32_t)vs.vmode_vsize);
 
 						video_formatter_write(
 								(rect.y << 16) | rect.x,

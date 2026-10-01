@@ -1336,7 +1336,8 @@ module MNTZorro_v0_1_S00_AXI
   wire videocap_control_last_commit_rejected;
   wire videocap_control_applied_valid;
   wire [31:0] videocap_control_applied_raw;
-  wire [31:0] videocap_control_applied_effective_crop;
+  wire [31:0] vcap_live_effective_crop;
+  wire [9:0] vcap_live_line_count;
   wire videocap_control_applied_full_width =
       videocap_control_applied_raw[2];
   reg [9:0] videocap_y_sync;
@@ -1571,8 +1572,7 @@ module MNTZorro_v0_1_S00_AXI
       .applied_sequence(videocap_control_applied_sequence),
       .last_commit_rejected(videocap_control_last_commit_rejected),
       .applied_valid(videocap_control_applied_valid),
-      .applied_raw(videocap_control_applied_raw),
-      .applied_effective_crop(videocap_control_applied_effective_crop)
+      .applied_raw(videocap_control_applied_raw)
   );
 
   reg vcap_cal_arm = 0;
@@ -1620,6 +1620,8 @@ module MNTZorro_v0_1_S00_AXI
       .ctl_received(videocap_control_received),
       .ctl_read_full_width(videocap_control_applied_full_width),
       .detected_standard(vcap_detected_standard),
+      .live_effective_crop(vcap_live_effective_crop),
+      .live_line_count(vcap_live_line_count),
       .cap_x(vcap_x),
       .cap_y(vcap_y),
       .cap_line_toggle(vcap_line_toggle),
@@ -3057,7 +3059,9 @@ module MNTZorro_v0_1_S00_AXI
             end
             VCAP_LIVE_EFFECTIVE_CROP,
             VCAP_LIVE_EFFECTIVE_CROP_LO: begin
-              rr_data <= videocap_control_applied_effective_crop;
+              /* Capture-domain resolved pair, not the commit-time
+               * 15 kHz default. The handshake word is coherent. */
+              rr_data <= vcap_live_effective_crop;
             end
             VCAP_PROBE_META,
             VCAP_PROBE_META_LO: begin
@@ -3228,8 +3232,8 @@ module MNTZorro_v0_1_S00_AXI
                   rr_data <= debug_counter << 16;
                 end
                 'h4e: begin
-                  rr_data[31:16] <= {6'h0, vcap_ymax[9:0]};
-                  rr_data[15:0]  <= {6'h0, vcap_ymax[9:0]};
+                  rr_data[31:16] <= {6'h0, vcap_live_line_count};
+                  rr_data[15:0]  <= {6'h0, vcap_live_line_count};
                 end
                 default: begin
                   rr_data[31:16] <= REVISION;
