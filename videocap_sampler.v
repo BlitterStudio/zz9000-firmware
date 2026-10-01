@@ -779,6 +779,7 @@ always @(posedge cap_clk) begin
         cap_x <= 0; cap_y <= 0; cap_ymax <= 0;
         cap_prev_ymax_par <= 0;
         cap_prev_ymax_valid <= 0;
+        cap_interlace <= 0; cap_ntsc <= 0; cap_shres <= 0;
         cap_doubled <= 0; cap_short <= 0; cap_tall <= 0;
         cap_x_done <= 0;
         lace_field <= 0; next_lace_field <= 0;
