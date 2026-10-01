@@ -1283,20 +1283,15 @@ int main() {
 							 * the automatic window; an invalid pair
 							 * is rejected without touching the
 							 * applied geometry. */
-							{
-								uint32_t packed =
-									((zdata & 0xffffU) << 16) |
-									blitter_user2;
-
-								if (video_set_videocap_geometry(packed))
-									printf("[feature] VIDEOCAP_GEOMETRY: %lux%lu\n",
-										(unsigned long)blitter_user2,
-										(unsigned long)(zdata & 0xffffU));
-								else
-									printf("[feature] VIDEOCAP_GEOMETRY rejected: %lux%lu\n",
-										(unsigned long)blitter_user2,
-										(unsigned long)(zdata & 0xffffU));
-							}
+							if (video_set_videocap_geometry(blitter_user2,
+										(uint16_t)zdata))
+								printf("[feature] VIDEOCAP_GEOMETRY: %lux%lu\n",
+									(unsigned long)blitter_user2,
+									(unsigned long)(zdata & 0xffffU));
+							else
+								printf("[feature] VIDEOCAP_GEOMETRY rejected: %lux%lu\n",
+									(unsigned long)blitter_user2,
+									(unsigned long)(zdata & 0xffffU));
 							break;
 						default:
 							break;
@@ -1923,9 +1918,15 @@ int main() {
 					// (REG_ZZ_CONFIG_PRESENT on Z2)
 					uint16_t present = 0;
 					uint16_t value;
-					if (config_query_key >=
-					    ZZ_CONFIG_KEY_RTG_GEOM_LINE) {
+					if (config_query_key >= ZZ_CONFIG_KEY_RTG_GEOM_LINE &&
+					    config_query_key <= ZZ_CONFIG_KEY_RTG_GEOM_MODESEL) {
 						value = video_rtg_diag_value(
+							config_query_key, &present);
+					} else if (config_query_key >=
+					           ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_WIDTH &&
+					           config_query_key <=
+					           ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS) {
+						value = video_videocap_geometry_value(
 							config_query_key, &present);
 					} else {
 						value = zz_config_query(

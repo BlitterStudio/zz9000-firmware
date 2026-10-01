@@ -39,10 +39,11 @@ else
 fi
 
 if [ "$ON_WINDOWS" = 1 ]; then
+# Keep MSYS from rewriting cmd.exe's /c switch as a path.
     TB="$(cygpath -w "$HERE/video_formatter_tb.v")"
-    cmd //c "$(cygpath -w "$VIVADO_BIN/xvlog.bat") $DEFINE dut.v $EXTRA $TB $(cygpath -w "$GLBL")" > xvlog.log 2>&1 \
+    MSYS_NO_PATHCONV=1 cmd.exe /c "$(cygpath -w "$VIVADO_BIN/xvlog.bat") $DEFINE dut.v $EXTRA $TB $(cygpath -w "$GLBL")" \
         || { cat xvlog.log; exit 1; }
-    cmd //c "$(cygpath -w "$VIVADO_BIN/xelab.bat") -L xpm work.video_formatter_tb work.glbl -s tb" > xelab.log 2>&1 \
+    MSYS_NO_PATHCONV=1 cmd.exe /c "$(cygpath -w "$VIVADO_BIN/xelab.bat") -L xpm work.video_formatter_tb work.glbl -s tb" \
         || { cat xelab.log; exit 1; }
 else
     "$VIVADO_BIN/xvlog" $DEFINE dut.v $EXTRA "$HERE/video_formatter_tb.v" "$GLBL" > xvlog.log 2>&1 \
@@ -84,6 +85,7 @@ if [ "$VARIANT" != "master" ] && [ "$VARIANT" != "reference" ]; then
 2 0 0 1280 0 0 0 2 0
 2 0 2 1280 0 0 0 2 0
 2 0 1 1280 0 0 1 2 0
+2 1 1 1280 0 0 0 2 0 512 1024
 2 0 2 1280 0 0 0 2 0 0 800
 2 0 1 1280 0 0 1 2 0 0 800
 2 0 2 1280 16 32 0 2 0 0 800
@@ -105,7 +107,7 @@ echo "$CONFIGS" | while read -r CM SX SY W GE GC IL VP SL SR LH; do
     SR="${SR:-0}"
     LH="${LH:-0}"
     if [ "$ON_WINDOWS" = 1 ]; then
-        cmd //c "$(cygpath -w "$VIVADO_BIN/xsim.bat") tb --runall --testplusarg \"CMODE=$CM\" --testplusarg \"SCALEX=$SX\" --testplusarg \"SCALEY=$SY\" --testplusarg \"WIDTH=$W\" --testplusarg \"STREAM_GAP_EVERY=$GE\" --testplusarg \"STREAM_GAP_CYCLES=$GC\" --testplusarg \"INTERLACE=$IL\" --testplusarg \"VIEWPORT=$VP\" --testplusarg \"SCANLINE=$SL\" --testplusarg \"SOURCE_ROWS=$SR\" --testplusarg \"LETTERBOX_H=$LH\"" \
+        MSYS_NO_PATHCONV=1 cmd.exe /c "$(cygpath -w "$VIVADO_BIN/xsim.bat") tb --runall --testplusarg \"CMODE=$CM\" --testplusarg \"SCALEX=$SX\" --testplusarg \"SCALEY=$SY\" --testplusarg \"WIDTH=$W\" --testplusarg \"STREAM_GAP_EVERY=$GE\" --testplusarg \"STREAM_GAP_CYCLES=$GC\" --testplusarg \"INTERLACE=$IL\" --testplusarg \"VIEWPORT=$VP\" --testplusarg \"SCANLINE=$SL\" --testplusarg \"SOURCE_ROWS=$SR\" --testplusarg \"LETTERBOX_H=$LH\"" \
             < /dev/null > "run_${CM}_${SX}_${SY}_${W}_${GE}_${GC}_${IL}_${VP}_${SL}_${SR}_${LH}.log" 2>&1 || true
     else
         "$VIVADO_BIN/xsim" tb --runall --testplusarg "CMODE=$CM" --testplusarg "SCALEX=$SX" --testplusarg "SCALEY=$SY" --testplusarg "WIDTH=$W" --testplusarg "STREAM_GAP_EVERY=$GE" --testplusarg "STREAM_GAP_CYCLES=$GC" --testplusarg "INTERLACE=$IL" --testplusarg "VIEWPORT=$VP" --testplusarg "SCANLINE=$SL" --testplusarg "SOURCE_ROWS=$SR" --testplusarg "LETTERBOX_H=$LH" \

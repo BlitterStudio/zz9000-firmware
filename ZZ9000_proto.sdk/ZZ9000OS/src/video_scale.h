@@ -225,28 +225,23 @@ static inline uint32_t video_videocap_full_width(uint32_t requested,
 static inline uint32_t video_videocap_scalemode(uint32_t full_width,
 		uint32_t interlace, uint32_t source_class)
 {
-	/* Doubled-scan / 24 kHz sources.  Filtered output (720x576 /
-	 * 800x600) shows the rows one to one (the sampler stores every
-	 * sample there, so the line is 640 wide as a paired 15 kHz line
-	 * is).  Full-width output (1280x1024) has NO horizontal scaler -
-	 * the formatter's scale bit 0 register is write-only dead RTL -
-	 * so the 640-sample line is shown at its true width, centered by
-	 * the viewport letterbox (video_videocap_fullscan_rect); hdiv
-	 * stays 1 (32-bit fetch).  The VERTICAL factor comes from the
-	 * row-count class: the 256/200-visible shapes (DblPAL/DblNTSC
-	 * no-lace) scale exactly like their 15 kHz parents (x4), the
-	 * 400..589 woven shapes x2, the 590+ exotics x1 with the viewport
-	 * clipping to the guaranteed-fresh 512 rows.  Class 0 (old
-	 * bitstream) falls back to x2. */
+	/* Short-line sources. Filtered capture is unchanged. For full-width
+	 * measured doubled-scan input, the formatter repeats each captured
+	 * 28 MHz pixel horizontally once (SCALEX=2x); the VDMA remains at its
+	 * 32-bit content pitch. 24 kHz Super72 is short but not doubled and
+	 * keeps its existing horizontal sampling. Vertical scaling remains
+	 * selected by the woven row-count class. */
 	if ((source_class & VIDEO_VIDEOCAP_SOURCE_SHORT) != 0U) {
 		if (full_width == 0U)
 			return 0U;
+		uint32_t scale_x =
+			(source_class & VIDEO_VIDEOCAP_SOURCE_DOUBLED) != 0U ? 1U : 0U;
 		switch ((source_class >> VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT) &
 			VIDEO_VIDEOCAP_ROWS_CLASS_MASK) {
-		case 1U: return 4U;
-		case 2U: return 2U;
-		case 3U: return 0U;
-		default: return 2U;
+		case 1U: return 4U | scale_x;
+		case 2U: return 2U | scale_x;
+		case 3U: return scale_x;
+		default: return 2U | scale_x;
 		}
 	}
 	/* Full-width capture scales by an integer factor on the legacy
@@ -321,8 +316,8 @@ struct video_videocap_scanout_rect {
  * vertical factor.  The shrunken rectangle is centered inside the
  * content box the profile would otherwise fill; borders render black. */
 static inline struct video_videocap_scanout_rect
-video_videocap_fullscan_rect(uint32_t output_profile, uint32_t ntsc,
-		uint32_t interlace, uint32_t source_class,
+video_videocap_fullscan_rect(uint32_t output_profile, uint32_t full_width,
+		uint32_t ntsc, uint32_t interlace, uint32_t source_class,
 		uint32_t width_override, uint32_t height_override,
 		uint32_t source_rows)
 {
@@ -330,7 +325,7 @@ video_videocap_fullscan_rect(uint32_t output_profile, uint32_t ntsc,
 		0U, 0U, VIDEO_VIDEOCAP_CONTENT_WIDTH,
 		VIDEO_VIDEOCAP_CONTENT_HEIGHT
 	};
-	uint32_t scalemode = video_videocap_scalemode(1U, interlace,
+	uint32_t scalemode = video_videocap_scalemode(full_width, interlace,
 		source_class);
 	uint32_t hdiv = (scalemode & 1U) != 0U ? 2U : 1U;
 
@@ -343,14 +338,8 @@ video_videocap_fullscan_rect(uint32_t output_profile, uint32_t ntsc,
 			VIDEO_VIDEOCAP_NTSC_LETTERBOX_HEIGHT) / 2U;
 		rect.height = VIDEO_VIDEOCAP_NTSC_LETTERBOX_HEIGHT;
 	}
-	/* Doubled-scan sources: one stored sample per output pixel (no
-	 * horizontal scaler), so the 640-sample line is placed at its
-	 * true width, centered. Manual width overrides replace this. */
-	if ((source_class & VIDEO_VIDEOCAP_SOURCE_DOUBLED) != 0U &&
-			width_override == 0U && 640U < rect.width) {
-		rect.x += (rect.width - 640U) / 2U;
-		rect.width = 640U;
-	}
+	/* The doubled-source scale bit repeats each stored pixel to fill the
+	 * 1280-word content viewport; only an explicit width override shrinks it. */
 	/* Short-line sources: classes 1/2 fill the canvas exactly (or the
 	 * 800-line NTSC letterbox above) at their class factor, so only
 	 * the 590+-row exotics (shown x1) need a clip - to the 512 rows

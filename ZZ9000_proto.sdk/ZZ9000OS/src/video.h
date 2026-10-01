@@ -17,8 +17,9 @@
 #define MNTVF_OP_POLARITY 10
 #define MNTVF_OP_SCALE 4
 #define MNTVF_OP_DIMENSIONS 2
-/* OP_DIMENSIONS bit 15 marks a larger output canvas whose capture pitch is
- * published later by OP_VIEWPORT_SIZE_COMMIT. Width itself occupies [11:0]. */
+/* OP_DIMENSIONS bit 15 marks a larger output canvas. Its first
+ * OP_VIEWPORT_SIZE_COMMIT establishes the content pitch; later viewport
+ * commits resize the visible area without changing the framebuffer stride. */
 #define MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG (1U << 15)
 #define MNTVF_OP_COLORMODE 1
 #define MNTVF_OP_REPORT_LINE 17
@@ -74,6 +75,9 @@ static inline uint32_t videocap_control_pack(uint32_t sample,
  * selected output profile needs a capture width the boot-time CFG word
  * never established (or must drop again when leaving that profile). */
 #define VIDEOCAP_WIDTH_ONLY_FLAG (1U << 31)
+#define ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID 1U
+#define ZZ_VCAP_GEOMETRY_STATUS_PENDING       2U
+#define ZZ_VCAP_GEOMETRY_STATUS_REJECTED      4U
 
 static inline uint32_t videocap_control_width_only(uint32_t full_width)
 {
@@ -146,8 +150,14 @@ struct ZZ_VIDEO_STATE {
 	 * stable vblank. */
 	uint32_t videocap_width_override;
 	uint32_t videocap_height_override;
-	uint32_t videocap_geometry_serial;
-	uint32_t videocap_geometry_serial_applied;
+	uint16_t videocap_geometry_requested_width;
+	uint16_t videocap_geometry_requested_height;
+	uint16_t videocap_geometry_applied_width;
+	uint16_t videocap_geometry_applied_height;
+	uint16_t videocap_geometry_request_serial;
+	uint16_t videocap_geometry_applied_serial;
+	uint8_t videocap_geometry_applied_valid;
+	uint8_t videocap_geometry_rejected;
 	uint16_t split_request_pos;
 	uint16_t split_pos;
 	uint32_t bgbuf_offset;
@@ -183,7 +193,8 @@ void video_mode_init(int mode, int scalemode, int colormode);
 void video_set_dpms(uint8_t level);
 int video_set_videocap_video_mode(uint32_t mode);
 int video_set_videocap_vsync(uint32_t setting);
-int video_set_videocap_geometry(uint32_t value);
+int video_set_videocap_geometry(uint16_t width, uint16_t height);
+uint16_t video_videocap_geometry_value(uint16_t key, uint16_t *present);
 uint32_t video_firmware_capabilities(void);
 void hw_sprite_show(int show);
 void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite);

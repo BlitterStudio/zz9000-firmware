@@ -65,7 +65,7 @@ enum zz_reg_offsets {
   REG_ZZ_SPRITE_BITMAP  = 0x48,
   REG_ZZ_SPRITE_COLORS  = 0x4A,
   REG_ZZ_VBLANK_STATUS  = 0x4C,
-  REG_ZZ_UNUSED_REG4E   = 0x4E,
+  REG_ZZ_VIDEOCAP_STATS = 0x4E,
 
   REG_ZZ_SCRATCH_COPY   = 0x50,
   REG_ZZ_CVMODE_PARAM   = 0x52,
@@ -208,6 +208,8 @@ enum zz_reg_offsets {
 #define ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC (1U << 5)
 #define ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN (1U << 6)
 #define ZZ_FW_CAP_VIDEOCAP_GEOMETRY (1U << 8)
+#define ZZ_FW_CAP_VIDEOCAP_STATS (1U << 9)
+#define ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK (1U << 10)
 /* The centered 1080p profiles are intentionally excluded here: firmware
  * advertises them dynamically only when the loaded bitstream exposes both
  * required paths (viewport layout AND full-rate capture). Bit 3 stays the
@@ -233,11 +235,19 @@ enum zz_reg_offsets {
  * CARD_FEATURE_VIDEOCAP_GEOMETRY accepts (height << 16) | width at a
  * frame boundary and the scanout letterboxes the smaller window. Older
  * firmware ignores the feature; drivers gate the calibration UI on it.
+ *
+ * Bit 9 is live videocap stats: REG_ZZ_VIDEOCAP_STATS (0x4E) returns
+ * {12'h0, cap_ymax[9:0]}; the low ten bits are the live line count and
+ * bits[15:10] are reserved. Older firmware returns REVISION here, so
+ * drivers gate the readout on this bit. Bit 10 adds the native-vblank ACK
+ * contract: queries 28--34 report requested and successfully applied VDMA
+ * geometry, serials, and status. Drivers require bits 8 and 10 together.
  */
 #define ZZ_FW_CAPABILITIES \
   (ZZ_FW_CAP_VIDEOCAP_PROFILE | ZZ_FW_CAP_VIDEOCAP_LIVE | \
    ZZ_FW_CAP_Z2_APERTURE_LAYOUT | ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN | \
-   ZZ_FW_CAP_CUSTOM_MODE | ZZ_FW_CAP_VIDEOCAP_GEOMETRY)
+   ZZ_FW_CAP_CUSTOM_MODE | ZZ_FW_CAP_VIDEOCAP_GEOMETRY | \
+   ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK | ZZ_FW_CAP_VIDEOCAP_STATS)
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,

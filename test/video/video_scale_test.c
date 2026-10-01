@@ -85,29 +85,29 @@ int main(void)
 	{
 		struct video_videocap_scanout_rect r =
 			video_videocap_fullscan_rect(
-				ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U, 0U, 0U, 0U,
+				ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U, 0U, 0U, 0U,
 				256U);
 		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 22;
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U, 0U, 0U, 200U);
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 0U, 0U, 0U, 0U, 200U);
 		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
 		    r.height != 800U)
 			return 23;
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 0U, 0U, 0U, 400U);
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 1U, 0U, 0U, 0U, 400U);
 		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
 		    r.height != 800U)
 			return 24;
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 0U, 0U, 0U,
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 1U, 0U, 0U, 0U,
 			0U, 200U);
 		if (r.x != 320U || r.y != 140U || r.width != 1280U ||
 		    r.height != 800U)
 			return 25;
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50, 0U, 1U, 0U, 0U,
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50, 1U, 0U, 1U, 0U, 0U,
 			0U, 512U);
 		if (r.x != 320U || r.y != 28U || r.width != 1280U ||
 		    r.height != 1024U)
@@ -121,70 +121,88 @@ int main(void)
 	                video_videocap_scalemode(0U, 0U,
 	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED), 0U))
 		return 40;
-	if (!expect_u32("doubled full capture doubles rows only (Euro72 427)",
+	if (!expect_u32("doubled full capture selects horizontal x2 (Euro72 427)",
 	                video_videocap_scalemode(1U, 0U,
-	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED), 2U))
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED), 3U))
 		return 41;
-	if (!expect_u32("590+-row shapes show rows x1 (Super72 laced)",
+	if (!expect_u32("tall doubled source uses horizontal x2 and vertical x1",
 	                video_videocap_scalemode(1U, 1U,
 	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 	                    VIDEO_VIDEOCAP_SOURCE_TALL |
-	                    VIDEO_VIDEOCAP_ROWS_CLASS_3), 0U))
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_3), 1U))
 		return 42;
-	if (!expect_u32("DblPAL no-lace (256 visible) scales like PAL x4",
+	if (!expect_u32("DblPAL no-lace combines horizontal x2 with vertical x4",
 	                video_videocap_scalemode(1U, 0U,
 	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED |
-	                    VIDEO_VIDEOCAP_ROWS_CLASS_1), 4U))
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_1), 5U))
 		return 54;
-	if (!expect_u32("DblPAL laced (512 woven) fills the canvas x2",
+	if (!expect_u32("DblPAL laced combines horizontal and vertical x2",
 	                video_videocap_scalemode(1U, 1U,
 	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED |
-	                    VIDEO_VIDEOCAP_ROWS_CLASS_2), 2U))
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_2), 3U))
 		return 55;
-	if (!expect_u32("unknown row class on a short source falls back x2",
+	if (!expect_u32("unknown doubled row class falls back to horizontal plus vertical x2",
 	                video_videocap_scalemode(1U, 0U,
-	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED), 2U))
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED), 3U))
 		return 56;
 	if (!expect_u32("Super72 full capture (658 woven) shows rows x1",
 	                video_videocap_scalemode(1U, 1U,
 	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_TALL |
 	                    VIDEO_VIDEOCAP_ROWS_CLASS_3), 0U))
 		return 43;
-	if (!expect_u32("doubled NTSC-class full capture has no 200-row window",
+	if (!expect_u32("doubled full capture enables integer horizontal repeat",
 	                video_videocap_scale_control(1U, 1U, 0U,
 	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED),
-	                2U | 8U))
+	                3U | 8U))
 		return 44;
 	if (!expect_u32("doubled full capture reads 512 source rows at x2",
 	                video_videocap_source_rows(1024U, 1U, 1U, 0U,
 	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED,
 	                    0U), 512U))
 		return 45;
-	/* Doubled-scan automatic letterbox: true 640-word width centered,
-	 * tall frames clipped to the guaranteed-fresh 512 rows. */
+	/* Full-width doubled sources use SCALEX to fill the 1280-word canvas. */
 	{
 		struct video_videocap_scanout_rect r =
 			video_videocap_fullscan_rect(
-				ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U,
+				ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U,
 				VIDEO_VIDEOCAP_SOURCE_SHORT |
 				VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 				VIDEO_VIDEOCAP_SOURCE_TALL |
 				VIDEO_VIDEOCAP_ROWS_CLASS_3,
 				0U, 0U, 1024U);
-		if (r.x != 320U || r.y != 0U || r.width != 640U ||
+		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 512U)
 			return 52;
-		/* DblPAL no-lace: class-1 x4 fills the canvas exactly, only
-		 * the doubled 640-wide letterbox applies. */
+		/* DblPAL no-lace class-1 x4 fills both canvas dimensions. */
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U,
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U,
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
 			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 			VIDEO_VIDEOCAP_ROWS_CLASS_1,
 			0U, 0U, 256U);
-		if (r.x != 320U || r.y != 0U || r.width != 640U ||
+		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 53;
+		/* DblPAL class-2 fills 1024 rows and centers in 1080p. */
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50, 1U, 0U, 0U,
+			VIDEO_VIDEOCAP_SOURCE_SHORT |
+			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+			VIDEO_VIDEOCAP_ROWS_CLASS_2,
+			0U, 0U, 512U);
+		if (r.x != 320U || r.y != 28U || r.width != 1280U ||
+		    r.height != 1024U)
+			return 54;
+		/* Width override stays in captured words, then repeats 2x. */
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50, 1U, 0U, 0U,
+			VIDEO_VIDEOCAP_SOURCE_SHORT |
+			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+			VIDEO_VIDEOCAP_ROWS_CLASS_2,
+			320U, 0U, 512U);
+		if (r.x != 640U || r.y != 28U || r.width != 640U ||
+		    r.height != 1024U)
+			return 55;
 	}
 	/* Manual capture-window overrides: height bounds the source rows and
 	 * can only shrink the automatic window; width/height letterbox the
@@ -200,13 +218,13 @@ int main(void)
 	{
 		struct video_videocap_scanout_rect r =
 			video_videocap_fullscan_rect(
-				ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U, 0U, 640U,
+				ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U, 0U, 640U,
 				240U, 240U);
 		if (r.x != 320U || r.y != 32U || r.width != 640U ||
 		    r.height != 960U)
 			return 48;
 		r = video_videocap_fullscan_rect(
-			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 0U, 0U, 0U,
+			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 0U, 0U, 0U,
 			640U, 240U, 240U);
 		if (r.x != 320U + 320U || r.y != 28U + 32U ||
 		    r.width != 640U || r.height != 960U)

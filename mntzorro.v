@@ -1703,6 +1703,7 @@ module MNTZorro_v0_1_S00_AXI
       .dest_out(vcap_sampler_probe_precrop_valid_axi)
   );
   reg [11:0] videocap_pitch;
+  reg videocap_pitch_viewport_pending = 0;
   reg [11:0] videocap_pitch_sync;
   reg [9:0]  videocap_save_line_done;
   reg [31:0] videocap_save_addr;
@@ -3226,6 +3227,9 @@ module MNTZorro_v0_1_S00_AXI
                 'h30: begin
                   rr_data <= debug_counter << 16;
                 end
+                'h4e: begin
+                  rr_data <= {12'h0, vcap_ymax[9:0]};
+                end
                 default: begin
                   rr_data[31:16] <= REVISION;
                   rr_data[15:0]  <= REVISION;
@@ -3377,18 +3381,20 @@ module MNTZorro_v0_1_S00_AXI
     scanline_width_out      <= scanline_width;
     scanline_parity_out     <= scanline_parity;
 
-    // Snoop the content width for capture pitch. Bit 15 marks a larger output
-    // canvas; OP_VIEWPORT_SIZE_COMMIT publishes its content width atomically.
-    if (video_control_op == 2 && !video_control_data[15]) begin
-      // OP_DIMENSIONS = 2
+    // OP_DIMENSIONS establishes the writeback pitch. For a larger output
+    // canvas its first atomic viewport commit publishes the content width;
+    // later commits resize only the displayed viewport. Those dimensions
+    // can be narrower than the framebuffer row (doubled scan is 640 pixels
+    // displayed in a 1280-word scanout), so they must not change DDR pitch.
+    if (!S_AXI_ARESETN || z_reset) begin
+      videocap_pitch_viewport_pending <= 0;
+    end else if (video_control_op == 2) begin
+      videocap_pitch_viewport_pending <= video_control_data[15];
+      if (!video_control_data[15])
+        videocap_pitch <= video_control_data[11:0];
+    end else if (video_control_op == 29 && videocap_pitch_viewport_pending) begin
       videocap_pitch <= video_control_data[11:0];
-    end
-
-    // The committed content width is authoritative after a larger output
-    // canvas has been installed by OP_DIMENSIONS.
-    if (video_control_op == 29) begin
-      // OP_VIEWPORT_SIZE_COMMIT = 29
-      videocap_pitch <= video_control_data[11:0];
+      videocap_pitch_viewport_pending <= 0;
     end
 
     // snoop scanline settings sent over the video-control op path

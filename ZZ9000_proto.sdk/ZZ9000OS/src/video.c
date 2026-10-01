@@ -52,6 +52,20 @@ void _update_hw_sprite_pos(int16_t x, int16_t y);
 void _clip_hw_sprite(int16_t offset_x, int16_t offset_y);
 static int video_mode_init_internal(int mode, int scalemode, int colormode,
 		int skip_vdma, int output_profile, int transactional);
+static int videocap_geometry_valid(uint16_t width, uint16_t height)
+{
+	return (!width || video_videocap_width_valid(width)) &&
+		(!height || video_videocap_height_valid(height));
+}
+
+static void videocap_geometry_commit(uint16_t width, uint16_t height)
+{
+	vs.videocap_geometry_applied_width = width;
+	vs.videocap_geometry_applied_height = height;
+	vs.videocap_geometry_applied_serial =
+		vs.videocap_geometry_request_serial;
+	vs.videocap_geometry_applied_valid = 1;
+}
 
 /* Capture-area scanout origin for the detected standard and requested
  * base mode. One derivation for every capture-area VDMA start, so a
@@ -143,6 +157,13 @@ struct ZZ_VIDEO_STATE* video_init() {
 	if (cfg->videocap_height_present &&
 			video_videocap_height_valid(cfg->videocap_height))
 		vs.videocap_height_override = cfg->videocap_height;
+	/* Treat the boot configuration as the first request. It remains pending
+	 * until a stable native vblank has successfully programmed the VDMA. */
+	vs.videocap_geometry_requested_width =
+		(uint16_t)vs.videocap_width_override;
+	vs.videocap_geometry_requested_height =
+		(uint16_t)vs.videocap_height_override;
+	vs.videocap_geometry_request_serial = 1;
 
 	vs.colormode = 0;
 
@@ -238,7 +259,7 @@ int init_vdma(int hsize, int source_rows, int hdiv, u32 bufpos) {
 	if (status != XST_SUCCESS) {
 		printf("VDMA Configuration Initialization failed, status: 0x%X\r\n",
 				status);
-		//return status;
+		return status;
 	}
 
 	//printf("VDMA MM2S DRE: %d\n", vdma.HasMm2SDRE);
@@ -338,26 +359,63 @@ int video_set_videocap_vsync(uint32_t setting)
 	return 1;
 }
 
-int video_set_videocap_geometry(uint32_t value)
+int video_set_videocap_geometry(uint16_t width, uint16_t height)
 {
-	uint32_t width = value & 0xffffU;
-	uint32_t height = (value >> 16) & 0xffffU;
-
-	/* 0/0 restores the automatic window; any other combination must be
-	 * fully valid, or nothing changes (the caller reads the accept from
-	 * the feature status). */
-	if (width == 0U && height == 0U) {
-		vs.videocap_width_override = 0;
-		vs.videocap_height_override = 0;
-	} else {
-		if (!video_videocap_width_valid(width) ||
-				!video_videocap_height_valid(height))
-			return 0;
-		vs.videocap_width_override = width;
-		vs.videocap_height_override = height;
+	if (!videocap_geometry_valid(width, height)) {
+		vs.videocap_geometry_rejected = 1;
+		return 0;
 	}
-	vs.videocap_geometry_serial++;
+
+	vs.videocap_geometry_requested_width = width;
+	vs.videocap_geometry_requested_height = height;
+	vs.videocap_width_override = width;
+	vs.videocap_height_override = height;
+	vs.videocap_geometry_request_serial++;
+	vs.videocap_geometry_rejected = 0;
 	return 1;
+}
+
+uint16_t video_videocap_geometry_value(uint16_t key, uint16_t *present)
+{
+	uint16_t value = 0;
+
+	if (present)
+		*present = 1;
+	switch (key) {
+	case ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_WIDTH:
+		value = vs.videocap_geometry_requested_width;
+		break;
+	case ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_HEIGHT:
+		value = vs.videocap_geometry_requested_height;
+		break;
+	case ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_WIDTH:
+		value = vs.videocap_geometry_applied_width;
+		break;
+	case ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_HEIGHT:
+		value = vs.videocap_geometry_applied_height;
+		break;
+	case ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_SERIAL:
+		value = vs.videocap_geometry_request_serial;
+		break;
+	case ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_SERIAL:
+		value = vs.videocap_geometry_applied_serial;
+		break;
+	case ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS:
+		if (vs.videocap_geometry_applied_valid)
+			value |= ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID;
+		if (!vs.videocap_geometry_applied_valid ||
+		    vs.videocap_geometry_applied_serial !=
+			vs.videocap_geometry_request_serial)
+			value |= ZZ_VCAP_GEOMETRY_STATUS_PENDING;
+		if (vs.videocap_geometry_rejected)
+			value |= ZZ_VCAP_GEOMETRY_STATUS_REJECTED;
+		break;
+	default:
+		if (present)
+			*present = 0;
+		break;
+	}
+	return value;
 }
 
 
@@ -671,8 +729,9 @@ void isr_video(void *dummy) {
 
 				if (videocap_detection_stable &&
 						(interlace != vs.interlace_old || videocap_reset ||
-						 vs.videocap_geometry_serial !=
-							vs.videocap_geometry_serial_applied)) {
+						 !vs.videocap_geometry_applied_valid ||
+						 vs.videocap_geometry_applied_serial !=
+							vs.videocap_geometry_request_serial)) {
 					if (videocap_output_profile ==
 					    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH)
 						video_formatter_write(0, MNTVF_OP_SOURCE_SYNC);
@@ -690,8 +749,6 @@ void isr_video(void *dummy) {
 								(uint32_t)interlace,
 								(uint32_t)videocap_source_class,
 								vs.videocap_height_override);
-					vs.videocap_geometry_serial_applied =
-						vs.videocap_geometry_serial;
 					vs.vmode_vdma_rows = videocap_source_rows;
 					/* The mode-change trigger above may have run
 					 * several vblanks earlier; a host driver pan
@@ -727,6 +784,7 @@ void isr_video(void *dummy) {
 						struct video_videocap_scanout_rect rect =
 							video_videocap_fullscan_rect(
 								(uint32_t)videocap_output_profile,
+								(uint32_t)videocap_full_width,
 								(uint32_t)videocap_ntsc,
 								(uint32_t)interlace,
 								(uint32_t)videocap_source_class,
@@ -749,14 +807,19 @@ void isr_video(void *dummy) {
 								(uint32_t)interlace,
 								(uint32_t)videocap_source_class),
 							MNTVF_OP_SCALE);
-					/* hdiv is the color-depth divider
-					 * (32bit: 1), never a fetch-halving
-					 * control: the formatter has no
-					 * horizontal scaler, so the capture
-					 * scanout always reads 32-bit rows and
-					 * letterboxes width in the viewport. */
-					init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, 1,
-							(u32)vs.framebuffer + vs.framebuffer_pan_offset);
+					/* hdiv is the color-depth divider (32-bit: 1).
+					 * SCALEX repeats pixels in the formatter without
+					 * changing source-row pitch, so fullscan VDMA reads
+					 * complete 32-bit rows. */
+					uint16_t geometry_width =
+						vs.videocap_geometry_requested_width ?
+						vs.videocap_geometry_requested_width :
+						(uint16_t)vs.vmode_hsize;
+					uint16_t geometry_height = (uint16_t)vs.vmode_vdma_rows;
+					if (init_vdma(geometry_width, geometry_height, 1,
+							(u32)vs.framebuffer + vs.framebuffer_pan_offset) ==
+						XST_SUCCESS)
+						videocap_geometry_commit(geometry_width, geometry_height);
 					video_formatter_valign();
 					/* Both first entry and x2/x4 transitions must finish
 					 * VDMA setup before acquisition can show content. */
@@ -975,7 +1038,9 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 	int vdiv = (int)video_vertical_scale_factor((uint32_t)scalemode);
 	stride_div = 1;
 
-	if (scalemode & 1) {
+	/* Native capture repeats pixels in the formatter; its VDMA must keep
+	 * the 32-bit content pitch. RTG modes still use SCALEX to halve fetch. */
+	if ((scalemode & 1) && !skip_vdma) {
 		hdiv = 2;
 		stride_div = 2;
 	}
