@@ -90,6 +90,7 @@ uint32_t test_xil_in32(uintptr_t address)
 
 uint32_t smp_local_irq_save(void) { return 0; }
 void smp_local_irq_restore(uint32_t state) { (void)state; }
+int videocap_stats_hw_present(void) { return 1; }
 uint32_t video_interrupt_pause(void)
 {
 	uint32_t enabled = video_irq_enabled;
@@ -368,9 +369,11 @@ int main(void)
 		 ZZ_VCAP_GEOMETRY_STATUS_REJECTED));
 	assert((video_firmware_capabilities() &
 		(ZZ_FW_CAP_VIDEOCAP_GEOMETRY |
-		 ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK)) ==
+		 ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK |
+		 ZZ_FW_CAP_VIDEOCAP_STATS)) ==
 		(ZZ_FW_CAP_VIDEOCAP_GEOMETRY |
-		 ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK));
+		 ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK |
+		 ZZ_FW_CAP_VIDEOCAP_STATS));
 	/* The viewport and VDMA must agree on the active filtered canvas,
 	 * including restoring Automatic without an output-mode transition. */
 	assert(video_set_videocap_geometry(640, 240));
@@ -383,6 +386,17 @@ int main(void)
 	geometry_native_vblank();
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == 0);
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (600U << 16 | 800U));
+	/* 15 kHz filtered 800x600 keeps the tuned origin. A short-line PAL
+	 * field on that same configured base is shown on 720x576 and must
+	 * start at the capture row, not 190 words before it. */
+	assert(vs.framebuffer_pan_offset == VIDEO_VDMA_CAPTURE_PAN_PAL_800X600);
+	videocap_zstate |= 1U << 11;
+	assert(video_set_videocap_geometry(0, 0));
+	geometry_native_vblank();
+	assert(vs.framebuffer_pan_offset == VIDEO_VDMA_CAPTURE_PAN_BASE);
+	assert(dma_setup.Stride == 720 * 4);
+	videocap_zstate &= ~(1U << 11);
+	vs.videocap_source_class_old = 0;
 
 	videocap_zstate |= 1U << 22;
 	assert(video_set_videocap_geometry(640, 200));
@@ -589,6 +603,10 @@ int main(void)
 	video_formatter_write(video_videocap_scale_control(1, 1, 0, 0),
 	                      MNTVF_OP_SCALE);
 	init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, 1, 0);
+	/* A native letterbox written after mode init must be the rollback
+	 * target, not the viewport mode init cached. */
+	video_formatter_write((112U << 16) | 0U, MNTVF_OP_VIEWPORT_POS);
+	video_formatter_write((800U << 16) | 1280U, MNTVF_OP_VIEWPORT_SIZE_COMMIT);
 	slot_saved = preset_video_modes[ZZVMODE_CUSTOM];
 
 	/* PLL lock failure: CLOCK_FAILED, old output replayed exactly. */
@@ -606,6 +624,9 @@ int main(void)
 	assert(formatter_ops[MNTVF_OP_HS] == (1328U << 16 | 1440U));
 	assert(formatter_ops[MNTVF_OP_SCALE] ==
 	       video_videocap_scale_control(1, 1, 0, 0));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (112U << 16));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] ==
+	       (800U << 16 | 1280U));
 	assert(delay_us > CLK_WIZ_LOCK_TIMEOUT_US / 2U); /* bounded poll ran */
 	assert(memcmp(&preset_video_modes[ZZVMODE_CUSTOM], &slot_saved,
 	       sizeof(slot_saved)) == 0);

@@ -266,6 +266,20 @@ initial begin
      * resolves line class, interlace parity, and the woven PAL/NTSC flag
      * on successive boundaries. Settle before measuring two fields. */
     drive_frames(4);
+    /* The published standard settles a few fields after the class flags:
+     * the interlace-parity rule needs two laced fields, the candidate must
+     * then agree twice, and the handshake carries it across.  Wait for
+     * the AXI-side value before measuring, so the token counters below
+     * only see the two measured fields. */
+    begin : wait_published_standard
+        integer std_wait;
+        for (std_wait = 0; std_wait < 8; std_wait = std_wait + 1) begin
+            if (detected_standard == (EXPECT_NTSC ? 2 : 1))
+                std_wait = 8;
+            else
+                drive_frames(1);
+        end
+    end
     tokens = 0; max_cap_x = 0;
     drive_frames(2);
 
@@ -274,6 +288,10 @@ initial begin
     check_eq("interlace", cap_interlace, EXPECT_LACED);
     check_eq("tall", cap_tall, EXPECT_TALL);
     check_eq("ntsc_flag", cap_ntsc, EXPECT_NTSC);
+    /* VCAP_LIVE_STATUS publishes the standard the ARM applies: the coherent
+     * AXI-side value must agree with cap_ntsc on every line class (a laced
+     * DblPAL field of 287 lines is PAL, a 329-row Super72 frame NTSC). */
+    check_eq("published_standard", detected_standard, EXPECT_NTSC ? 2 : 1);
     check_eq("crop_h_in_use", dut.crop_h_local, EXPECT_CROPH);
     check_eq("crop_v_in_use", dut.crop_v_eff, EXPECT_CROPV);
     /* Both live axes must catch up to the class-resolved crop in use. */

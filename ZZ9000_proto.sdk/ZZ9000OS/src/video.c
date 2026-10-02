@@ -17,6 +17,7 @@
 /* kept after the Xilinx headers: overlay.h pulls in gfx.h (see the
  * pack note on struct GFXData) */
 #include "overlay.h"
+#include "overlay_hw.h"
 
 #define VDMA_DEVICE_ID	XPAR_AXIVDMA_0_DEVICE_ID
 
@@ -48,6 +49,8 @@ int sprite_request_pos_y = 0;
 
 static uint32_t output_source_sync;
 static uint32_t output_scale_control;
+static uint32_t output_viewport_pos;
+static uint32_t output_viewport_size;
 void _update_hw_sprite_pos(int16_t x, int16_t y);
 void _clip_hw_sprite(int16_t offset_x, int16_t offset_y);
 static int video_mode_init_internal(int mode, int scalemode, int colormode,
@@ -71,10 +74,20 @@ static void videocap_geometry_commit(uint16_t width, uint16_t height)
  * base mode. One derivation for every capture-area VDMA start, so a
  * stale legacy native-pan write from the host driver (its constant is
  * tuned for PAL 800x600 only) can never wrap NTSC lines (#84). */
-static uint32_t videocap_scanout_pan_offset(int ntsc, int full_width)
+static uint32_t videocap_scanout_pan_offset(int ntsc, int full_width,
+		int source_class)
 {
+	uint32_t base_mode = (uint32_t)vs.videocap_video_mode;
+
+	/* The tuned pre-row origin belongs only to a 15 kHz filtered
+	 * 800x600 canvas. A short-line source is shown on 720x480/576
+	 * even when the configured base stays 800x600, and that origin
+	 * would prepend the previous capture row. */
+	if (source_class & VIDEO_VIDEOCAP_SOURCE_SHORT)
+		base_mode = ntsc ? ZZVMODE_720x480 : ZZVMODE_720x576;
+
 	return video_videocap_scanout_pan_base((uint32_t)ntsc,
-		(uint32_t)full_width, (uint32_t)vs.videocap_video_mode);
+		(uint32_t)full_width, base_mode);
 }
 
 static int isr_flush_count = 0;
@@ -95,6 +108,7 @@ static void videocap_detection_reset() {
 	vs.interlace_old = -1;
 	vs.videocap_video_mode_applied = -1;
 	vs.videocap_output_profile_applied = -1;
+	vs.videocap_ns_vsync_applied = -1;
 	/* Unknown again: the sampler may have been reconfigured while the
 	 * videocap area was not being viewed. */
 	vs.videocap_full_width_applied = -1;
@@ -355,6 +369,9 @@ int video_set_videocap_vsync(uint32_t setting)
 
 	vs.scandoubler_mode_adjust = setting == 2U ? 2 : 0;
 	vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = setting;
+	/* The ISR's mode predicate does not otherwise see this flag, so a
+	 * stable 15 kHz picture would keep the previous cadence. */
+	vs.videocap_ns_vsync_applied = -1;
 	vs.videocap_output_profile_requested = ZZ_VIDEOCAP_OUTPUT_FULL_60;
 	return 1;
 }
@@ -366,12 +383,16 @@ int video_set_videocap_geometry(uint16_t width, uint16_t height)
 		return 0;
 	}
 
+	uint32_t irq_state = smp_local_irq_save();
+
 	vs.videocap_geometry_requested_width = width;
 	vs.videocap_geometry_requested_height = height;
 	vs.videocap_width_override = width;
 	vs.videocap_height_override = height;
-	vs.videocap_geometry_request_serial++;
 	vs.videocap_geometry_rejected = 0;
+	/* Serial last: the ISR must not ACK a mixed width/height pair. */
+	vs.videocap_geometry_request_serial++;
+	smp_local_irq_restore(irq_state);
 	return 1;
 }
 
@@ -427,6 +448,8 @@ uint32_t video_firmware_capabilities(void)
 	uint32_t fullrate_capable =
 		!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE);
 	uint32_t capabilities = ZZ_FW_CAPABILITIES;
+	if (videocap_stats_hw_present())
+		capabilities |= ZZ_FW_CAP_VIDEOCAP_STATS;
 
 	if (video_videocap_centered_eligible(viewport_layout_capable,
 			fullrate_capable)) {
@@ -558,6 +581,10 @@ void video_formatter_write(uint32_t data, uint16_t op) {
 		output_source_sync = data;
 	if (op == MNTVF_OP_SCALE)
 		output_scale_control = data;
+	if (op == MNTVF_OP_VIEWPORT_POS)
+		output_viewport_pos = data;
+	if (op == MNTVF_OP_VIEWPORT_SIZE_COMMIT)
+		output_viewport_size = data;
 	smp_local_irq_restore(irq_state);
 }
 
@@ -639,7 +666,8 @@ void isr_video(void *dummy) {
 				vs.framebuffer_pan_offset =
 					videocap_scanout_pan_offset(
 						videocap_ntsc,
-						videocap_full_width);
+						videocap_full_width,
+						videocap_source_class);
 			}
 			init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, vs.vmode_hdiv,
 					(u32)vs.framebuffer + vs.framebuffer_pan_offset);
@@ -678,6 +706,8 @@ void isr_video(void *dummy) {
 							 vs.videocap_video_mode_applied ||
 						 videocap_output_profile !=
 							 vs.videocap_output_profile_applied ||
+						 vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] !=
+							 (uint8_t)vs.videocap_ns_vsync_applied ||
 						 videocap_reset)) {
 					// change between ntsc+pal
 					videocap_area_clear();
@@ -704,7 +734,8 @@ void isr_video(void *dummy) {
 
 					vs.framebuffer_pan_width = 0;
 					vs.framebuffer_pan_offset = videocap_scanout_pan_offset(
-						videocap_ntsc, videocap_full_width);
+						videocap_ntsc, videocap_full_width,
+						videocap_source_class);
 					if (videocap_ntsc) {
 						// NTSC
 						printf("videocap: ntsc (class %d)\n",
@@ -724,6 +755,8 @@ void isr_video(void *dummy) {
 						vs.videocap_video_mode;
 					vs.videocap_output_profile_applied =
 						videocap_output_profile;
+					vs.videocap_ns_vsync_applied =
+						vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC];
 					videocap_reset = 1;
 				}
 
@@ -764,7 +797,8 @@ void isr_video(void *dummy) {
 					vs.framebuffer_pan_offset =
 						videocap_scanout_pan_offset(
 							videocap_ntsc,
-							videocap_full_width);
+							videocap_full_width,
+							videocap_source_class);
 					videocap_area_clear();
 					{
 						/* Fullscan scales vertically by an
@@ -1019,7 +1053,6 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 	 * output word for word. */
 	static struct zz_video_mode output_mode;
 	static uint32_t output_dimensions_control;
-	static uint32_t output_viewport_pos, output_viewport_size;
 	static int output_colormode;
 	static int output_mode_valid;
 	int prev_mode = vs.video_mode;
@@ -1029,6 +1062,8 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 	uint8_t prev_stride_div = stride_div;
 	uint32_t prev_source_sync = output_source_sync;
 	uint32_t prev_scale_control = output_scale_control;
+	uint32_t prev_viewport_pos = output_viewport_pos;
+	uint32_t prev_viewport_size = output_viewport_size;
 	uint8_t prev_dpms = vs.card_feature_enabled[CARD_FEATURE_DPMS];
 	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
@@ -1140,12 +1175,11 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 				MNTVF_OP_MAX);
 			video_formatter_write(output_dimensions_control,
 				MNTVF_OP_DIMENSIONS);
-			if (output_dimensions_control & MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG) {
-				video_formatter_write(output_viewport_pos,
-					MNTVF_OP_VIEWPORT_POS);
-				video_formatter_write(output_viewport_size,
-					MNTVF_OP_VIEWPORT_SIZE_COMMIT);
-			}
+			/* The native ISR rewrites the viewport after mode init.
+			 * Restore that rectangle for container and fullscan alike. */
+			video_formatter_write(prev_viewport_pos, MNTVF_OP_VIEWPORT_POS);
+			video_formatter_write(prev_viewport_size,
+				MNTVF_OP_VIEWPORT_SIZE_COMMIT);
 			video_formatter_write(
 				(output_mode.hstart << 16) | output_mode.hend,
 				MNTVF_OP_HS);

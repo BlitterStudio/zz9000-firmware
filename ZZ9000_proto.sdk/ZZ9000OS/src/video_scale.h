@@ -277,6 +277,13 @@ static inline uint32_t video_videocap_source_rows(uint32_t content_height,
 			video_vertical_scale_factor(
 				video_videocap_scalemode(full_width, interlace,
 					source_class));
+	/* Class-3 exotics (590+ rows, shown x1) clip the viewport to the
+	 * 512 rows that are always fresh; the VDMA must match or the next
+	 * frame starts from the second half of the DMA buffer. */
+	if (((source_class >> VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT) &
+			VIDEO_VIDEOCAP_ROWS_CLASS_MASK) == 3U &&
+			height_override == 0U && base > 512U)
+		base = 512U;
 
 	/* A manual capture-height bound can only shrink the window: the
 	 * source itself caps the automatic size. */

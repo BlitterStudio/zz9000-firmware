@@ -28,6 +28,10 @@ int overlay_hw_supported(void)
 {
 	return ZZ_OVERLAY_HW_PRESENT != 0;
 }
+int videocap_stats_hw_present(void)
+{
+	return ZZ_OVERLAY_HW_PRESENT != 0;
+}
 
 static void overlay_vdma_write(uint32_t offset, uint32_t value)
 {

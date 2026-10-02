@@ -226,6 +226,17 @@ int main(void)
 		    r.height != 1024U)
 			return 60;
 	}
+	if (!expect_u32("class-3 full capture reads 512 source rows at x1",
+	                video_videocap_source_rows(1024U, 1U, 0U, 1U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT |
+	                    VIDEO_VIDEOCAP_SOURCE_TALL |
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_3, 0U), 512U))
+		return 63;
+	if (!expect_u32("class-3 height override still shrinks below 512",
+	                video_videocap_source_rows(1024U, 1U, 0U, 1U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT |
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_3, 400U), 400U))
+		return 64;
 	/* Manual capture-window overrides: height bounds the source rows and
 	 * can only shrink the automatic window; width/height letterbox the
 	 * fullscan rectangle around the shrunken content. */

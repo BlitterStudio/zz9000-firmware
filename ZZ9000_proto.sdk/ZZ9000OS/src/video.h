@@ -137,6 +137,7 @@ struct ZZ_VIDEO_STATE {
 	int videocap_output_profile_requested;
 	int videocap_output_profile_applied;
 	int videocap_full_width_applied;
+	int videocap_ns_vsync_applied;
 
 	int interlace_old;
 	int videocap_ntsc_old;

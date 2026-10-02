@@ -1338,6 +1338,7 @@ module MNTZorro_v0_1_S00_AXI
   wire [31:0] videocap_control_applied_raw;
   wire [31:0] vcap_live_effective_crop;
   wire [9:0] vcap_live_line_count;
+  wire [4:0] vcap_live_frame_class;
   wire videocap_control_applied_full_width =
       videocap_control_applied_raw[2];
   reg [9:0] videocap_y_sync;
@@ -1370,9 +1371,12 @@ module MNTZorro_v0_1_S00_AXI
    * DblPAL/DblNTSC no-lace shapes (<= 329 total lines: 256/200 visible);
    * 2 = the 400..589 shapes (Dbl laced, Euro72, Multiscan progressive);
    * 3 = 590+ (Super72/Multiscan laced - shown x1, clipped to 512). */
-  wire [10:0] vcap_woven_rows = vcap_interlace ?
-      {1'b0, vcap_ymax} << 1 : {1'b0, vcap_ymax};
-  wire [1:0] vcap_rows_class = !vcap_short ? 2'd0 :
+  /* The live-publish snapshot is the only capture -> AXI crossing of the
+   * frame class; derive the row-count class from it, never from the
+   * capture-domain regs. */
+  wire [10:0] vcap_woven_rows = vcap_live_frame_class[4] ?
+      {1'b0, vcap_live_line_count} << 1 : {1'b0, vcap_live_line_count};
+  wire [1:0] vcap_rows_class = !vcap_live_frame_class[2] ? 2'd0 :
       (vcap_woven_rows >= 11'd590) ? 2'd3 :
       (vcap_woven_rows >= 11'd330) ? 2'd2 : 2'd1;
   wire vcap_write_bank;
@@ -1622,6 +1626,7 @@ module MNTZorro_v0_1_S00_AXI
       .detected_standard(vcap_detected_standard),
       .live_effective_crop(vcap_live_effective_crop),
       .live_line_count(vcap_live_line_count),
+      .live_frame_class(vcap_live_frame_class),
       .cap_x(vcap_x),
       .cap_y(vcap_y),
       .cap_line_toggle(vcap_line_toggle),
@@ -1862,7 +1867,7 @@ module MNTZorro_v0_1_S00_AXI
     // VIDEOCAP
 
     // pass interlace mode to video control block
-    video_control_interlace <= vcap_interlace;
+    video_control_interlace <= vcap_live_frame_class[4];
 
     videocap_pitch_sync <= videocap_pitch;
 
@@ -1871,10 +1876,10 @@ module MNTZorro_v0_1_S00_AXI
     videocap_mode_sync <= videocap_mode;
 
 `ifdef VCAP_DENISE_ADAPTER
-    if (vcap_interlace)
-      videocap_ymax_sync <= (vcap_ymax<<1)-(2*40);
+    if (vcap_live_frame_class[4])
+      videocap_ymax_sync <= (vcap_woven_rows - 11'd80)[9:0];
     else
-      videocap_ymax_sync <= vcap_ymax-36;
+      videocap_ymax_sync <= vcap_live_line_count - 10'd36;
 
     /* Completed-line tokens own the row handoff: each token's bank holds
      * one full completed capture line, so the writeback has a whole line
@@ -1891,10 +1896,10 @@ module MNTZorro_v0_1_S00_AXI
         videocap_y_sync <= vcap_line_payload_axi[9:0];
     end
 `else
-    if (vcap_interlace)
-      videocap_ymax_sync <= (vcap_ymax<<1);
+    if (vcap_live_frame_class[4])
+      videocap_ymax_sync <= vcap_woven_rows[9:0];
     else
-      videocap_ymax_sync <= vcap_ymax;
+      videocap_ymax_sync <= vcap_live_line_count;
 
     if (vcap_capture_ready_axi && vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
       vcap_line_toggle_seen <= vcap_line_payload_axi[11];
@@ -3231,6 +3236,14 @@ module MNTZorro_v0_1_S00_AXI
                 'h30: begin
                   rr_data <= debug_counter << 16;
                 end
+                /* Z3 presents the 0x4E halfword inside the 0x4C longword
+                 * (z3addr2 forces 2'b00; ds1/low16 is address|2).  The
+                 * high half stays the Z2 0x4C read (REVISION); do not
+                 * alias VBLANK_STATUS to the line count. */
+                'h4c: begin
+                  rr_data[31:16] <= REVISION;
+                  rr_data[15:0]  <= {6'h0, vcap_live_line_count};
+                end
                 'h4e: begin
                   rr_data[31:16] <= {6'h0, vcap_live_line_count};
                   rr_data[15:0]  <= {6'h0, vcap_live_line_count};
@@ -3430,11 +3443,11 @@ module MNTZorro_v0_1_S00_AXI
     // factor (0 = 15 kHz; 1 = 256/200-visible shapes; 2 = 400..589;
     // 3 = 590+, shown x1 and clipped to 512 rows).
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
-                video_control_interlace, videocap_mode, vcap_ntsc, video_control_vblank, video_control_hblank,
+                video_control_interlace, videocap_mode, vcap_live_frame_class[0], video_control_vblank, video_control_hblank,
                 sdk_doorbell_pending, sdk_irq_ack_pending, vcap_shres,
                 (`VCAP_FULLRATE_INT != 0), 1'b1,
                 (`VCAP_FULLRATE_INT != 0), 1'b1,
-                vcap_doubled, vcap_short, vcap_tall, vcap_rows_class, zorro_state};
+                vcap_live_frame_class[3:1], vcap_rows_class, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;
