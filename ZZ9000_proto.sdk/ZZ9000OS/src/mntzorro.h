@@ -18,6 +18,12 @@
 #define MNTZORRO_REG5 20
 #define MNTZORRO_REG6 24
 #define MNTZORRO_REG7 28
+/* Read direction of REG2 (write direction remains the formatter strobe).
+ * [31:16] is the magic below on bitstreams that publish the coherent
+ * completed-field line count; older images return last_z3addr and must
+ * be ignored. [9:0] is that field count, 0 until the first field. */
+#define MNTZORRO_REG2_LIVE_ROWS_MAGIC 0x4C43U
+#define MNTZORRO_REG2_LIVE_ROWS_MASK  0x3ffU
 
 /* Read direction of REG6: generation-2 host aperture acknowledgement. */
 #define MNTZORRO_APERTURE_ACK_STATUS 0xa5020001UL

@@ -262,7 +262,8 @@ static inline uint32_t video_videocap_scalemode(uint32_t full_width,
 
 static inline uint32_t video_videocap_source_rows(uint32_t content_height,
 		uint32_t full_width, uint32_t ntsc, uint32_t interlace,
-		uint32_t source_class, uint32_t height_override)
+		uint32_t source_class, uint32_t height_override,
+		uint32_t captured_rows)
 {
 	uint32_t base;
 
@@ -277,6 +278,20 @@ static inline uint32_t video_videocap_source_rows(uint32_t content_height,
 			video_vertical_scale_factor(
 				video_videocap_scalemode(full_width, interlace,
 					source_class));
+	/* The sampler publishes the completed field line count. A short
+	 * source smaller than its class bucket must DMA that count: the
+	 * tail of a 256/512-row fetch is the previous source. Interlaced
+	 * capture stores both fields at stride 2, so the field count is
+	 * doubled. Zero means no count has been published yet. */
+	if ((source_class & VIDEO_VIDEOCAP_SOURCE_SHORT) != 0U &&
+			captured_rows != 0U) {
+		uint32_t measured = captured_rows;
+
+		if (interlace != 0U && measured <= 512U)
+			measured <<= 1;
+		if (measured < base)
+			base = measured;
+	}
 	/* Class-3 exotics (590+ rows, shown x1) clip the viewport to the
 	 * 512 rows that are always fresh; the VDMA must match or the next
 	 * frame starts from the second half of the DMA buffer. */
@@ -359,11 +374,11 @@ video_videocap_fullscan_rect(uint32_t output_profile, uint32_t full_width,
 				VIDEO_VIDEOCAP_NTSC_LETTERBOX_HEIGHT) / 2U;
 			rect.height = VIDEO_VIDEOCAP_NTSC_LETTERBOX_HEIGHT;
 		}
-		/* Short-line classes 1/2 fill the canvas at their class
-		 * factor. Only the 590+-row exotics (shown x1) clip to the
-		 * 512 rows that are always fresh: the ARM cannot read the
-		 * exact captured line count. Manual height overrides
-		 * replace this. */
+		/* Short-line classes fill the canvas at their class factor
+		 * when the captured count is unknown or fills the bucket.
+		 * A published count smaller than the bucket centers that
+		 * window below. 590+-row exotics (shown x1) still clip to
+		 * the 512 rows that are always fresh. */
 		if (((source_class >> VIDEO_VIDEOCAP_ROWS_CLASS_SHIFT) &
 				VIDEO_VIDEOCAP_ROWS_CLASS_MASK) == 3U &&
 				height_override == 0U) {
@@ -379,11 +394,17 @@ video_videocap_fullscan_rect(uint32_t output_profile, uint32_t full_width,
 		rect.x += (rect.width - shown) / 2U;
 		rect.width = shown;
 	}
-	if (height_override != 0U) {
+	/* A measured short-source row count smaller than the class fill,
+	 * or a manual height override (which already shrank source_rows),
+	 * centers that window. source_rows == 0 means the caller has no
+	 * count and the class fill stands. */
+	if (source_rows != 0U &&
+			(height_override != 0U ||
+			 (source_class & VIDEO_VIDEOCAP_SOURCE_SHORT) != 0U)) {
 		uint32_t shown = source_rows *
 			video_vertical_scale_factor(scalemode);
 
-		if (shown < rect.height) {
+		if (shown != 0U && shown < rect.height) {
 			rect.y += (rect.height - shown) / 2U;
 			rect.height = shown;
 		}

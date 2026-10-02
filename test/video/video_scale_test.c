@@ -47,19 +47,19 @@ int main(void)
 	                video_videocap_scalemode(1U, 1U, 0U), 2U))
 		return 9;
 	if (!expect_u32("PAL progressive fullscan reads 256 rows",
-	                video_videocap_source_rows(1024U, 1U, 0U, 0U, 0U, 0U), 256U))
+	                video_videocap_source_rows(1024U, 1U, 0U, 0U, 0U, 0U, 0U), 256U))
 		return 10;
 	if (!expect_u32("NTSC progressive fullscan reads 200 rows",
-	                video_videocap_source_rows(1024U, 1U, 1U, 0U, 0U, 0U), 200U))
+	                video_videocap_source_rows(1024U, 1U, 1U, 0U, 0U, 0U, 0U), 200U))
 		return 11;
 	if (!expect_u32("PAL interlaced fullscan reads 512 rows",
-	                video_videocap_source_rows(1024U, 1U, 0U, 1U, 0U, 0U), 512U))
+	                video_videocap_source_rows(1024U, 1U, 0U, 1U, 0U, 0U, 0U), 512U))
 		return 12;
 	if (!expect_u32("NTSC interlaced fullscan reads 400 rows",
-	                video_videocap_source_rows(1024U, 1U, 1U, 1U, 0U, 0U), 400U))
+	                video_videocap_source_rows(1024U, 1U, 1U, 1U, 0U, 0U, 0U), 400U))
 		return 13;
 	if (!expect_u32("filtered NTSC keeps legacy output-row division",
-	                video_videocap_source_rows(480U, 0U, 1U, 0U, 0U, 0U), 240U))
+	                video_videocap_source_rows(480U, 0U, 1U, 0U, 0U, 0U, 0U), 240U))
 		return 14;
 	if (!expect_u32("PAL fullscan keeps power-of-two scale control",
 	                video_videocap_scale_control(1U, 0U, 0U, 0U), 4U))
@@ -160,8 +160,29 @@ int main(void)
 	if (!expect_u32("doubled full capture reads 512 source rows at x2",
 	                video_videocap_source_rows(1024U, 1U, 1U, 0U,
 	                    VIDEO_VIDEOCAP_SOURCE_SHORT | VIDEO_VIDEOCAP_SOURCE_DOUBLED,
-	                    0U), 512U))
+	                    0U, 0U), 512U))
 		return 45;
+	if (!expect_u32("published 200-row DblNTSC reads 200, not the class-1 bucket",
+	                video_videocap_source_rows(1024U, 1U, 1U, 0U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT |
+	                    VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_1,
+	                    0U, 200U), 200U))
+		return 65;
+	if (!expect_u32("published 427-row Euro72 reads 427, not the class-2 bucket",
+	                video_videocap_source_rows(1024U, 1U, 0U, 0U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT |
+	                    VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_2,
+	                    0U, 427U), 427U))
+		return 66;
+	if (!expect_u32("unpublished short source keeps the class bucket",
+	                video_videocap_source_rows(1024U, 1U, 0U, 0U,
+	                    VIDEO_VIDEOCAP_SOURCE_SHORT |
+	                    VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_2,
+	                    0U, 0U), 512U))
+		return 67;
 	/* Full-width doubled sources use SCALEX to fill the 1280-word canvas. */
 	{
 		struct video_videocap_scanout_rect r =
@@ -216,6 +237,26 @@ int main(void)
 		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 59;
+		/* A published count smaller than the class bucket centers
+		 * that window. 200 rows at x4 is 800 lines; 427 at x2 is 854. */
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 0U,
+			VIDEO_VIDEOCAP_SOURCE_SHORT |
+			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+			VIDEO_VIDEOCAP_ROWS_CLASS_1,
+			0U, 0U, 200U, 0U, 0U);
+		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
+		    r.height != 800U)
+			return 68;
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U,
+			VIDEO_VIDEOCAP_SOURCE_SHORT |
+			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+			VIDEO_VIDEOCAP_ROWS_CLASS_2,
+			0U, 0U, 427U, 0U, 0U);
+		if (r.x != 0U || r.y != 85U || r.width != 1280U ||
+		    r.height != 854U)
+			return 69;
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 1U, 0U,
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
@@ -230,22 +271,22 @@ int main(void)
 	                video_videocap_source_rows(1024U, 1U, 0U, 1U,
 	                    VIDEO_VIDEOCAP_SOURCE_SHORT |
 	                    VIDEO_VIDEOCAP_SOURCE_TALL |
-	                    VIDEO_VIDEOCAP_ROWS_CLASS_3, 0U), 512U))
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_3, 0U, 0U), 512U))
 		return 63;
 	if (!expect_u32("class-3 height override still shrinks below 512",
 	                video_videocap_source_rows(1024U, 1U, 0U, 1U,
 	                    VIDEO_VIDEOCAP_SOURCE_SHORT |
-	                    VIDEO_VIDEOCAP_ROWS_CLASS_3, 400U), 400U))
+	                    VIDEO_VIDEOCAP_ROWS_CLASS_3, 400U, 0U), 400U))
 		return 64;
 	/* Manual capture-window overrides: height bounds the source rows and
 	 * can only shrink the automatic window; width/height letterbox the
 	 * fullscan rectangle around the shrunken content. */
 	if (!expect_u32("height override shrinks PAL progressive rows",
-	                video_videocap_source_rows(1024U, 1U, 0U, 0U, 0U, 240U),
+	                video_videocap_source_rows(1024U, 1U, 0U, 0U, 0U, 240U, 0U),
 	                240U))
 		return 46;
 	if (!expect_u32("height override cannot grow NTSC rows",
-	                video_videocap_source_rows(1024U, 1U, 1U, 0U, 0U, 400U),
+	                video_videocap_source_rows(1024U, 1U, 1U, 0U, 0U, 400U, 0U),
 	                200U))
 		return 47;
 	{

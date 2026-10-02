@@ -28,6 +28,7 @@ static unsigned dma_starts;
 static uint32_t video_irq_enabled = 1;
 static unsigned inject_native_irq, deferred_native_irqs;
 static uint32_t videocap_zstate;
+static uint32_t videocap_live_rows_reg;
 static int dma_cfg_initialize_status;
 static int dma_config_status;
 static int dma_address_status;
@@ -85,6 +86,8 @@ uint32_t test_xil_in32(uintptr_t address)
 		return clock_load;
 	if (address == MNTZ_BASE_ADDR + MNTZORRO_REG3)
 		return videocap_zstate;
+	if (address == MNTZ_BASE_ADDR + MNTZORRO_REG2)
+		return videocap_live_rows_reg;
 	return 0;
 }
 
@@ -416,6 +419,16 @@ int main(void)
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (28U << 16 | 320U));
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (1024U << 16 | 1280U));
 	assert(dma_setup.VertSizeInput == 512);
+	/* Same class, smaller published field: DMA and viewport follow the
+	 * count, or the bucket tail keeps the previous source. */
+	videocap_live_rows_reg =
+		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 427U;
+	isr_video(NULL);
+	assert(dma_setup.VertSizeInput == 427);
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (113U << 16 | 320U));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] ==
+	       (854U << 16 | 1280U));
+	videocap_live_rows_reg = 0;
 	printf("Native geometry: PAL 640x480@(80,60), NTSC 640x400@(40,40), "
 	       "Automatic restored, short NTSC retains 512 rows\n");
 	/* Restore the pre-regression centered native state for the independent
@@ -598,7 +611,7 @@ int main(void)
 	 * its 200-row VDMA contract and the formatter's fractional scale word. */
 	vs.scalemode = (int)video_videocap_scalemode(1, 0, 0);
 	vs.vmode_vdma_rows =
-		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 0, 0, 0);
+		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 0, 0, 0, 0);
 	vs.interlace_old = 0;
 	video_formatter_write(video_videocap_scale_control(1, 1, 0, 0),
 	                      MNTVF_OP_SCALE);
@@ -675,7 +688,7 @@ int main(void)
 	 * Capture may have changed from progressive to woven NTSC after init. */
 	vs.scalemode = (int)video_videocap_scalemode(1, 1, 0);
 	vs.vmode_vdma_rows =
-		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 1, 0, 0);
+		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 1, 0, 0, 0);
 	vs.interlace_old = 1;
 	video_formatter_write(video_videocap_scale_control(1, 1, 1, 0),
 	                      MNTVF_OP_SCALE);
@@ -701,6 +714,20 @@ int main(void)
 	video_custom_select(ZZ_CUSTOM_MODE_SLOT);
 	assert(video_custom_status() == ZZ_CUSTOM_STATUS_IDLE);
 
+	/* Ordinary RTG never installed a viewport. A failed custom lock must
+	 * not write a stale native rectangle over the restored canvas. */
+	video_mode_init(ZZVMODE_1920x1080_60, 0, MNTVA_COLOR_16BIT565);
+	formatter_ops[MNTVF_OP_VIEWPORT_POS] = 0xA5A5A5A5U;
+	formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] = 0xA5A5A5A5U;
+	stage_custom_960(1024, UINT16_MAX);
+	clock_fail_locks = 1;
+	assert(commit_custom(MNTVA_COLOR_32BIT) ==
+	       ZZ_CUSTOM_STATUS_CLOCK_FAILED);
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == 0xA5A5A5A5U);
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == 0xA5A5A5A5U);
+	assert(formatter_ops[MNTVF_OP_DIMENSIONS] ==
+	       (((uint32_t)preset_video_modes[ZZVMODE_1920x1080_60].vres << 16) |
+	        (uint32_t)preset_video_modes[ZZVMODE_1920x1080_60].hres));
 	puts("video mode switch: PASS");
 	return 0;
 }

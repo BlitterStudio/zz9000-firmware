@@ -51,6 +51,8 @@ static uint32_t output_source_sync;
 static uint32_t output_scale_control;
 static uint32_t output_viewport_pos;
 static uint32_t output_viewport_size;
+static int output_viewport_explicit;
+static int videocap_rows_applied = -1;
 void _update_hw_sprite_pos(int16_t x, int16_t y);
 void _clip_hw_sprite(int16_t offset_x, int16_t offset_y);
 static int video_mode_init_internal(int mode, int scalemode, int colormode,
@@ -112,6 +114,7 @@ static void videocap_detection_reset() {
 	/* Unknown again: the sampler may have been reconfigured while the
 	 * videocap area was not being viewed. */
 	vs.videocap_full_width_applied = -1;
+	videocap_rows_applied = -1;
 	video_videocap_detection_reset(&vs.videocap_detection);
 }
 
@@ -583,8 +586,13 @@ void video_formatter_write(uint32_t data, uint16_t op) {
 		output_scale_control = data;
 	if (op == MNTVF_OP_VIEWPORT_POS)
 		output_viewport_pos = data;
-	if (op == MNTVF_OP_VIEWPORT_SIZE_COMMIT)
+	if (op == MNTVF_OP_VIEWPORT_SIZE_COMMIT) {
 		output_viewport_size = data;
+		output_viewport_explicit = 1;
+	}
+	if (op == MNTVF_OP_DIMENSIONS &&
+			(data & MNTVF_DIMENSIONS_VIEWPORT_CONTAINER_FLAG) == 0U)
+		output_viewport_explicit = 0;
 	smp_local_irq_restore(irq_state);
 }
 
@@ -600,6 +608,10 @@ void video_set_dpms(uint8_t level) {
 // vblank + raster position interrupt
 void isr_video(void *dummy) {
 	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
+	u32 live_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG2);
+	uint32_t videocap_live_rows =
+		((live_raw >> 16) == MNTZORRO_REG2_LIVE_ROWS_MAGIC) ?
+		(live_raw & MNTZORRO_REG2_LIVE_ROWS_MASK) : 0U;
 
 	int vblank = !!(zstate & (1 << 21));
 	int videocap_enabled = !!(zstate & (1 << 23));
@@ -764,7 +776,10 @@ void isr_video(void *dummy) {
 						(interlace != vs.interlace_old || videocap_reset ||
 						 !vs.videocap_geometry_applied_valid ||
 						 vs.videocap_geometry_applied_serial !=
-							vs.videocap_geometry_request_serial)) {
+							vs.videocap_geometry_request_serial ||
+						 (videocap_live_rows != 0U &&
+						  (int)videocap_live_rows !=
+							videocap_rows_applied))) {
 					if (videocap_output_profile ==
 					    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH)
 						video_formatter_write(0, MNTVF_OP_SOURCE_SYNC);
@@ -781,7 +796,8 @@ void isr_video(void *dummy) {
 								(uint32_t)videocap_ntsc,
 								(uint32_t)interlace,
 								(uint32_t)videocap_source_class,
-								vs.videocap_height_override);
+								vs.videocap_height_override,
+								videocap_live_rows);
 					vs.vmode_vdma_rows = videocap_source_rows;
 					/* The mode-change trigger above may have run
 					 * several vblanks earlier; a host driver pan
@@ -856,8 +872,10 @@ void isr_video(void *dummy) {
 					vs.framebuffer_pan_width = (uint32_t)vs.vmode_hsize;
 					if (init_vdma(geometry_width, geometry_height, 1,
 							(u32)vs.framebuffer + vs.framebuffer_pan_offset) ==
-						XST_SUCCESS)
+						XST_SUCCESS) {
 						videocap_geometry_commit(geometry_width, geometry_height);
+						videocap_rows_applied = (int)videocap_live_rows;
+					}
 					vs.framebuffer_pan_width = 0;
 					video_formatter_valign();
 					/* Both first entry and x2/x4 transitions must finish
@@ -1064,6 +1082,7 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 	uint32_t prev_scale_control = output_scale_control;
 	uint32_t prev_viewport_pos = output_viewport_pos;
 	uint32_t prev_viewport_size = output_viewport_size;
+	int prev_viewport_explicit = output_viewport_explicit;
 	uint8_t prev_dpms = vs.card_feature_enabled[CARD_FEATURE_DPMS];
 	printf("video_mode_init: %d color: %d scale: %d\n", mode, colormode, scalemode);
 
@@ -1175,11 +1194,17 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 				MNTVF_OP_MAX);
 			video_formatter_write(output_dimensions_control,
 				MNTVF_OP_DIMENSIONS);
-			/* The native ISR rewrites the viewport after mode init.
-			 * Restore that rectangle for container and fullscan alike. */
-			video_formatter_write(prev_viewport_pos, MNTVF_OP_VIEWPORT_POS);
-			video_formatter_write(prev_viewport_size,
-				MNTVF_OP_VIEWPORT_SIZE_COMMIT);
+			/* Replay an explicit viewport only when the previous
+			 * mode installed one. Ordinary RTG leaves the formatter
+			 * on the implicit full-canvas rectangle; writing the
+			 * last native rectangle (or the zero boot value) clips
+			 * that picture. */
+			if (prev_viewport_explicit) {
+				video_formatter_write(prev_viewport_pos,
+					MNTVF_OP_VIEWPORT_POS);
+				video_formatter_write(prev_viewport_size,
+					MNTVF_OP_VIEWPORT_SIZE_COMMIT);
+			}
 			video_formatter_write(
 				(output_mode.hstart << 16) | output_mode.hend,
 				MNTVF_OP_HS);
@@ -1199,6 +1224,10 @@ static int video_mode_init_internal(int mode, int scalemode, int colormode,
 			video_set_dpms(prev_dpms);
 			hdmi_ctrl_enable_output();
 		}
+		/* The forward DIMENSIONS write clears the explicit flag.
+		 * Put back the value this call observed, whether or not a
+		 * previous output existed to replay. */
+		output_viewport_explicit = prev_viewport_explicit;
 		/* Undo the state this call staged before touching hardware. */
 		vs.video_mode = prev_mode;
 		vs.scalemode = prev_scalemode;

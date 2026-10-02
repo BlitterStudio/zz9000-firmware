@@ -3434,7 +3434,13 @@ module MNTZorro_v0_1_S00_AXI
 
     out_reg0 <= ZORRO3 ? last_z3addr : last_addr;
     out_reg1 <= zorro_ram_write_data;
-    out_reg2 <= last_z3addr;
+    // REG2 write is the formatter strobe. Its read direction is the
+    // coherent completed-field line count, so the ARM sizes short-source
+    // DMA from the rows actually captured rather than the class bucket.
+    // [31:16] = 16'h4C43 distinguishes this from older bitstreams, whose
+    // REG2 read was last_z3addr. [9:0] is the field count (0 until the
+    // first completed field). last_z3addr remains in out_reg0 on Z3.
+    out_reg2 <= {16'h4C43, 6'b0, vcap_live_line_count};
     // Status: [24] interlace, [23] videocap, [22] NTSC, [21] vblank,
     // [20] hblank, [19] SDK doorbell, [18] SDK IRQ ack, [17] SuperHires,
     // [16] full-rate capture, [15] viewport, [14] native source sync,
