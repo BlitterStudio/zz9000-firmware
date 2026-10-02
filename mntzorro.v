@@ -1877,7 +1877,9 @@ module MNTZorro_v0_1_S00_AXI
 
 `ifdef VCAP_DENISE_ADAPTER
     if (vcap_live_frame_class[4])
-      videocap_ymax_sync <= (vcap_woven_rows - 11'd80)[9:0];
+      /* 10-bit destination truncates; Vivado 2018.3 rejects a
+       * part-select on the subtraction itself. */
+      videocap_ymax_sync <= vcap_woven_rows - 11'd80;
     else
       videocap_ymax_sync <= vcap_live_line_count - 10'd36;
 
