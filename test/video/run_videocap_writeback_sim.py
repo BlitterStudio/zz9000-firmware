@@ -62,6 +62,12 @@ module extracted_videocap_writeback (
 wire vcap_interlace = 1'b0;
 wire [10:0] vcap_y = 0;
 wire [10:0] vcap_ymax = 512;
+/* The production FSM reads the AXI-side live snapshot, which this
+ * extract does not instantiate.  Progressive 512 matches the old
+ * vcap_ymax stub the writeback cases were written against. */
+wire [4:0] vcap_live_frame_class = 5'b0;
+wire [9:0] vcap_live_line_count = 10'd512;
+wire [10:0] vcap_woven_rows = 11'd512;
 reg video_control_interlace;
 """
     return (prefix + geometry + declaration + read_address + "\n" + outputs +
