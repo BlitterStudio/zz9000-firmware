@@ -26,6 +26,15 @@
 #define MNTZORRO_REG2_LIVE_ROWS_MAGIC 0x4C43U
 #define MNTZORRO_REG2_LIVE_ROWS_MASK  0x3ffU
 
+/* Read direction of REG1 (write direction remains the Zorro read-reply
+ * data). [31:16] is the magic below on bitstreams that publish the
+ * coherent completed line width; older images return
+ * zorro_ram_write_data and must be ignored. [10:0] is that width in
+ * captured words, rounded down to the 16-word writeback burst (1280
+ * until the first completed frame). */
+#define MNTZORRO_REG1_LIVE_WORDS_MAGIC 0x4C48U
+#define MNTZORRO_REG1_LIVE_WORDS_MASK  0x7ffU
+
 /* Read direction of REG6: generation-2 host aperture acknowledgement. */
 #define MNTZORRO_APERTURE_ACK_STATUS 0xa5020001UL
 

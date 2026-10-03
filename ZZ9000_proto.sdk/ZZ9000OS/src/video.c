@@ -53,6 +53,7 @@ static uint32_t output_viewport_pos;
 static uint32_t output_viewport_size;
 static int output_viewport_explicit;
 static int videocap_rows_applied = -1;
+static int videocap_words_applied = -1;
 void _update_hw_sprite_pos(int16_t x, int16_t y);
 void _clip_hw_sprite(int16_t offset_x, int16_t offset_y);
 static int video_mode_init_internal(int mode, int scalemode, int colormode,
@@ -115,6 +116,7 @@ static void videocap_detection_reset() {
 	 * videocap area was not being viewed. */
 	vs.videocap_full_width_applied = -1;
 	videocap_rows_applied = -1;
+	videocap_words_applied = -1;
 	video_videocap_detection_reset(&vs.videocap_detection);
 }
 
@@ -630,6 +632,10 @@ void isr_video(void *dummy) {
 	uint32_t videocap_live_rows =
 		((live_raw >> 16) == MNTZORRO_REG2_LIVE_ROWS_MAGIC) ?
 		(live_raw & MNTZORRO_REG2_LIVE_ROWS_MASK) : 0U;
+	u32 words_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG1);
+	uint32_t videocap_live_words =
+		((words_raw >> 16) == MNTZORRO_REG1_LIVE_WORDS_MAGIC) ?
+		(words_raw & MNTZORRO_REG1_LIVE_WORDS_MASK) : 0U;
 
 	int vblank = !!(zstate & (1 << 21));
 	int videocap_enabled = !!(zstate & (1 << 23));
@@ -819,7 +825,10 @@ void isr_video(void *dummy) {
 						 vs.videocap_geometry_applied_serial !=
 							vs.videocap_geometry_request_serial ||
 						 (videocap_live_rows != 0U &&
-						  videocap_rows_changed))) {
+						  videocap_rows_changed) ||
+						 (videocap_live_words != 0U &&
+						  (int)videocap_live_words !=
+							videocap_words_applied))) {
 					if (videocap_output_profile ==
 					    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH)
 						video_formatter_write(0, MNTVF_OP_SOURCE_SYNC);
@@ -871,6 +880,7 @@ void isr_video(void *dummy) {
 								vs.videocap_width_override,
 								vs.videocap_height_override,
 								videocap_source_rows,
+								videocap_live_words,
 								videocap_full_width ? 0U :
 									(uint32_t)vs.vmode_hsize,
 								videocap_full_width ? 0U :
@@ -894,8 +904,22 @@ void isr_video(void *dummy) {
 					/* hdiv is the color-depth divider (32-bit: 1).
 					 * SCALEX repeats pixels in the formatter without
 					 * changing source-row pitch, so fullscan VDMA reads
-					 * complete 32-bit rows. */
+					 * complete 32-bit rows.
+					 *
+					 * A short source without pixel repeat completes its
+					 * lines before the 1280-word pitch: the writeback
+					 * row keeps the fixed pitch, so both the fetch and
+					 * the shown viewport must stop at the measured
+					 * width or the tail shows the previous line. */
 					uint16_t geometry_width = (uint16_t)vs.vmode_hsize;
+					if (videocap_full_width &&
+							(videocap_source_class &
+							 VIDEO_VIDEOCAP_SOURCE_SHORT) &&
+							!(videocap_source_class &
+							 VIDEO_VIDEOCAP_SOURCE_DOUBLED) &&
+							videocap_live_words != 0U &&
+							videocap_live_words < geometry_width)
+						geometry_width = (uint16_t)videocap_live_words;
 					if (vs.videocap_geometry_requested_width &&
 					    vs.videocap_geometry_requested_width < geometry_width)
 						geometry_width = vs.videocap_geometry_requested_width;
@@ -906,6 +930,7 @@ void isr_video(void *dummy) {
 						XST_SUCCESS) {
 						videocap_geometry_commit(geometry_width, geometry_height);
 						videocap_rows_applied = (int)videocap_source_rows;
+						videocap_words_applied = (int)videocap_live_words;
 					}
 					vs.framebuffer_pan_width = 0;
 					video_formatter_valign();

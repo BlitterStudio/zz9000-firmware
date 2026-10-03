@@ -1338,6 +1338,10 @@ module MNTZorro_v0_1_S00_AXI
   wire [31:0] videocap_control_applied_raw;
   wire [31:0] vcap_live_effective_crop;
   wire [9:0] vcap_live_line_count;
+  /* Coherent completed line width, rounded down to the writeback burst
+   * (16 words) so per-line HSYNC jitter cannot move it frame to frame. */
+  wire [11:0] vcap_live_line_words;
+  wire [11:0] vcap_captured_words = vcap_live_line_words & ~12'd15;
   /* Writeback publishes a row only after raw_y passes crop_v, and the
    * first of those is the sentinel (cap_y advances before the token is
    * valid). Completed destination rows are therefore field_lines -
@@ -1652,6 +1656,7 @@ module MNTZorro_v0_1_S00_AXI
       .detected_standard(vcap_detected_standard),
       .live_effective_crop(vcap_live_effective_crop),
       .live_line_count(vcap_live_line_count),
+      .live_line_words(vcap_live_line_words),
       .live_frame_class(vcap_live_frame_class),
       .cap_x(vcap_x),
       .cap_y(vcap_y),
@@ -3459,7 +3464,12 @@ module MNTZorro_v0_1_S00_AXI
     // formatter, which intentionally ignores this operation.
 
     out_reg0 <= ZORRO3 ? last_z3addr : last_addr;
-    out_reg1 <= zorro_ram_write_data;
+    // REG1 write is the Zorro read-reply data. Its read direction is the
+    // coherent completed line width in words, rounded down to the writeback
+    // burst. [31:16] = 16'h4C48 distinguishes this from older bitstreams,
+    // whose REG1 read was zorro_ram_write_data. [10:0] is the width
+    // (1280 until the first completed frame).
+    out_reg1 <= {16'h4C48, 5'b0, vcap_captured_words[10:0]};
     // REG2 write is the formatter strobe. Its read direction is the
     // coherent completed post-crop field row count, so the ARM sizes
     // short-source DMA from rows writeback actually published. [31:16]

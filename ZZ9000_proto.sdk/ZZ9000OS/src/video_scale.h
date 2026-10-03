@@ -347,8 +347,8 @@ static inline struct video_videocap_scanout_rect
 video_videocap_fullscan_rect(uint32_t output_profile, uint32_t full_width,
 		uint32_t ntsc, uint32_t interlace, uint32_t source_class,
 		uint32_t width_override, uint32_t height_override,
-		uint32_t source_rows, uint32_t canvas_width,
-		uint32_t canvas_height)
+		uint32_t source_rows, uint32_t captured_words,
+		uint32_t canvas_width, uint32_t canvas_height)
 {
 	struct video_videocap_scanout_rect rect = {
 		0U, 0U, VIDEO_VIDEOCAP_CONTENT_WIDTH,
@@ -388,9 +388,17 @@ video_videocap_fullscan_rect(uint32_t output_profile, uint32_t full_width,
 		}
 	}
 	/* The doubled-source scale bit repeats each stored pixel to fill the
-	 * content viewport; only an explicit width override shrinks it. */
-	if (width_override != 0U && width_override * hdiv < rect.width) {
-		uint32_t shown = width_override * hdiv;
+	 * content viewport. Without it (24 kHz sources), a measured line
+	 * width below the 1280-word pitch bounds the shown window the same
+	 * way an explicit override does; only the smaller of the two binds. */
+	uint32_t width_bound = width_override;
+	if (captured_words != 0U &&
+			(source_class & VIDEO_VIDEOCAP_SOURCE_SHORT) != 0U &&
+			(source_class & VIDEO_VIDEOCAP_SOURCE_DOUBLED) == 0U &&
+			(width_bound == 0U || captured_words < width_bound))
+		width_bound = captured_words;
+	if (width_bound != 0U && width_bound * hdiv < rect.width) {
+		uint32_t shown = width_bound * hdiv;
 
 		rect.x += (rect.width - shown) / 2U;
 		rect.width = shown;

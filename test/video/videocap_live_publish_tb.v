@@ -11,14 +11,17 @@ module videocap_live_publish_tb;
 
     reg [11:0] crop_h = 188, crop_v = 26;
     reg [9:0] line_count = 0;
+    reg [11:0] line_words = 1280;
     wire [31:0] live_crop, rr_data;
     wire [9:0] live_count;
+    wire [11:0] live_words;
     wire settled;
     videocap_live_publish publisher (
         .cap_clk(cap_clk), .axi_clk(axi_clk),
         .crop_h(crop_h), .crop_v(crop_v), .line_count(line_count),
+        .line_words(line_words),
         .settled(settled), .live_effective_crop(live_crop),
-        .live_line_count(live_count)
+        .live_line_count(live_count), .live_line_words(live_words)
     );
     videocap_stats_read_mux mux (
         .regread_addr(32'h4e), .vcap_live_line_count(live_count),

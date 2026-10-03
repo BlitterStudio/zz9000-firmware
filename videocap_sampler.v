@@ -249,6 +249,9 @@ module videocap_live_publish (
     input  wire [11:0] crop_h,
     input  wire [11:0] crop_v,
     input  wire [9:0]  line_count,
+    /* Completed words of the frame's last captured line: the writeback
+     * pitch is fixed, so short-not-doubled lines must be sized from it. */
+    input  wire [11:0] line_words,
     input  wire        interlace,
     input  wire        doubled,
     input  wire        short_l,
@@ -259,6 +262,7 @@ module videocap_live_publish (
     output reg  [31:0] live_effective_crop =
         {4'b0000, 12'd26, 4'b0000, 12'd188},
     output reg  [9:0]  live_line_count = 0,
+    output reg  [11:0] live_line_words = 12'd1280,
     /* {interlace, doubled, short, tall, ntsc} in the AXI domain. */
     output reg  [4:0]  live_frame_class = 5'd0
 );
@@ -267,14 +271,14 @@ module videocap_live_publish (
     localparam [1:0] LIVE_SEND   = 2'd2;
     localparam [1:0] LIVE_RETURN = 2'd3;
 
-    wire [39:0] live_cap = {interlace, doubled, short_l, tall, ntsc,
-                            line_count, crop_v, crop_h};
-    reg [39:0] live_sent = {6'd0, 10'd0, 12'd26, 12'd188};
-    reg [39:0] live_payload = {6'd0, 10'd0, 12'd26, 12'd188};
+    wire [50:0] live_cap = {interlace, doubled, short_l, tall, ntsc,
+                            line_count, line_words, crop_v, crop_h};
+    reg [50:0] live_sent = {5'd0, 10'd0, 12'd1280, 12'd26, 12'd188};
+    reg [50:0] live_payload = {5'd0, 10'd0, 12'd1280, 12'd26, 12'd188};
     reg [1:0] live_state = LIVE_IDLE;
     reg live_send = 1'b0;
     wire live_received;
-    wire [39:0] live_dest_payload;
+    wire [50:0] live_dest_payload;
     wire live_dest_req;
 
     assign settled = live_state == LIVE_IDLE && live_sent == live_cap;
@@ -285,7 +289,7 @@ module videocap_live_publish (
         .INIT_SYNC_FF(1),
         .SIM_ASSERT_CHK(0),
         .SRC_SYNC_FF(4),
-        .WIDTH(40)
+        .WIDTH(51)
     ) videocap_live_handshake (
         .src_clk(cap_clk),
         .src_in(live_payload),
@@ -327,8 +331,9 @@ module videocap_live_publish (
         if (live_dest_req) begin
             live_effective_crop <= {4'b0, live_dest_payload[23:12],
                                     4'b0, live_dest_payload[11:0]};
-            live_line_count <= live_dest_payload[33:24];
-            live_frame_class <= live_dest_payload[38:34];
+            live_line_count <= live_dest_payload[45:36];
+            live_line_words <= live_dest_payload[35:24];
+            live_frame_class <= live_dest_payload[50:46];
         end
     end
 endmodule
@@ -360,6 +365,8 @@ module videocap_sampler #(
     /* AXI-domain coherent snapshot of the actual capture configuration. */
     output wire [31:0] live_effective_crop,
     output wire [9:0]  live_line_count,
+    /* Coherent AXI snapshot of the frame's completed line width. */
+    output wire [11:0] live_line_words,
     /* Coherent AXI snapshot {interlace, doubled, short, tall, ntsc}. */
     output wire [4:0]  live_frame_class,
 
@@ -453,6 +460,11 @@ reg cap_prev_ymax_par = 0;   /* last frame's cap_ymax parity: laced
                                * doubled fields alternate it */
 reg cap_prev_ymax_valid = 0; /* set by the first ready frame; guards the
                                * parity compare against power-on X state */
+/* Completed words of each line (latched at its sync) and of the frame
+ * (its last line), so full-width short-not-doubled sources can size
+ * scanout from the words capture actually produced. */
+reg [10:0] cap_line_words = 0;
+reg [10:0] cap_xmax = 0;
 reg ctl_full_width_cap = 1'b0;
 reg [11:0] ctl_crop_h_cap = 12'd188;
 reg [11:0] ctl_crop_v_cap = 12'd26;
@@ -520,6 +532,7 @@ videocap_live_publish videocap_live_publish_inst (
     .crop_h(crop_h_eff),
     .crop_v(crop_v_eff),
     .line_count(cap_ymax[9:0]),
+    .line_words({1'b0, cap_xmax}),
     .axi_clk(axi_clk),
     .settled(live_publish_settled),
     .live_effective_crop(live_effective_crop),
@@ -529,6 +542,7 @@ videocap_live_publish videocap_live_publish_inst (
     .tall(cap_tall),
     .ntsc(cap_ntsc),
     .live_line_count(live_line_count),
+    .live_line_words(live_line_words),
     .live_frame_class(live_frame_class)
 );
 
@@ -926,6 +940,7 @@ always @(posedge cap_clk) begin
         sample_x <= 0; window_x <= 0; window_x_hold <= 0;
         window_phase_ref <= 0; window_phase_valid <= 0; raw_y <= 0;
         cap_x <= 0; cap_y <= 0; cap_ymax <= 0;
+        cap_line_words <= 0; cap_xmax <= 0;
         cap_prev_ymax_par <= 0;
         cap_prev_ymax_valid <= 0;
         cap_interlace <= 0; cap_ntsc <= 0; cap_shres <= 0;
@@ -1286,11 +1301,14 @@ always @(posedge cap_clk) begin
         grid_intra_channels_valid <= 0;
         grid_cross_channels_valid <= 0;
 
-        if (raw_y != 0)
+        if (raw_y != 0) begin
             cap_ymax <= raw_y;
+            cap_xmax <= cap_line_words;
+        end
     end else if (line_sync) begin
         grid_prev_second_valid <= 0;
         cap_x <= 0;
+        cap_line_words <= cap_x;
         sample_x <= 0;
         /* Keep horizontal window placement independent of a one-tick move
          * in the accepted HSYNC edge.  Learn the normal absolute grid phase

@@ -86,31 +86,31 @@ int main(void)
 		struct video_videocap_scanout_rect r =
 			video_videocap_fullscan_rect(
 				ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U, 0U, 0U, 0U,
-				256U, 0U, 0U);
+				256U, 0U, 0U, 0U);
 		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 22;
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 0U, 0U, 0U, 0U, 200U,
-			0U, 0U);
+			0U, 0U, 0U);
 		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
 		    r.height != 800U)
 			return 23;
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 1U, 1U, 0U, 0U, 0U, 400U,
-			0U, 0U);
+			0U, 0U, 0U);
 		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
 		    r.height != 800U)
 			return 24;
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 1U, 0U, 0U, 0U,
-			0U, 200U, 0U, 0U);
+			0U, 200U, 0U, 0U, 0U);
 		if (r.x != 320U || r.y != 140U || r.width != 1280U ||
 		    r.height != 800U)
 			return 25;
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_50, 1U, 0U, 1U, 0U, 0U,
-			0U, 512U, 0U, 0U);
+			0U, 512U, 0U, 0U, 0U);
 		if (r.x != 320U || r.y != 28U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 26;
@@ -192,7 +192,7 @@ int main(void)
 				VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 				VIDEO_VIDEOCAP_SOURCE_TALL |
 				VIDEO_VIDEOCAP_ROWS_CLASS_3,
-				0U, 0U, 1024U, 0U, 0U);
+			0U, 0U, 1024U, 0U, 0U, 0U);
 		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 512U)
 			return 52;
@@ -202,7 +202,7 @@ int main(void)
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
 			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 			VIDEO_VIDEOCAP_ROWS_CLASS_1,
-			0U, 0U, 256U, 0U, 0U);
+			0U, 0U, 256U, 0U, 0U, 0U);
 		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 53;
@@ -212,7 +212,7 @@ int main(void)
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
 			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 			VIDEO_VIDEOCAP_ROWS_CLASS_2,
-			0U, 0U, 512U, 0U, 0U);
+			0U, 0U, 512U, 0U, 0U, 0U);
 		if (r.x != 320U || r.y != 28U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 57;
@@ -222,7 +222,7 @@ int main(void)
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
 			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 			VIDEO_VIDEOCAP_ROWS_CLASS_2,
-			320U, 0U, 512U, 0U, 0U);
+			320U, 0U, 512U, 0U, 0U, 0U);
 		if (r.x != 640U || r.y != 28U || r.width != 640U ||
 		    r.height != 1024U)
 			return 58;
@@ -233,7 +233,7 @@ int main(void)
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
 			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 			VIDEO_VIDEOCAP_ROWS_CLASS_2,
-			0U, 0U, 512U, 0U, 0U);
+			0U, 0U, 512U, 0U, 0U, 0U);
 		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 59;
@@ -244,7 +244,7 @@ int main(void)
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
 			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 			VIDEO_VIDEOCAP_ROWS_CLASS_1,
-			0U, 0U, 200U, 0U, 0U);
+			0U, 0U, 200U, 0U, 0U, 0U);
 		if (r.x != 0U || r.y != 112U || r.width != 1280U ||
 		    r.height != 800U)
 			return 68;
@@ -253,7 +253,7 @@ int main(void)
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
 			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 			VIDEO_VIDEOCAP_ROWS_CLASS_2,
-			0U, 0U, 427U, 0U, 0U);
+			0U, 0U, 427U, 0U, 0U, 0U);
 		if (r.x != 0U || r.y != 85U || r.width != 1280U ||
 		    r.height != 854U)
 			return 69;
@@ -262,10 +262,39 @@ int main(void)
 			VIDEO_VIDEOCAP_SOURCE_SHORT |
 			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
 			VIDEO_VIDEOCAP_ROWS_CLASS_2,
-			0U, 0U, 512U, 0U, 0U);
+			0U, 0U, 512U, 0U, 0U, 0U);
 		if (r.x != 320U || r.y != 28U || r.width != 1280U ||
 		    r.height != 1024U)
 			return 60;
+		/* A 24 kHz short-not-doubled line completes before the
+		 * 1280-word pitch: the measured width bounds and centers
+		 * the window, and an override cannot exceed it. Doubled
+		 * sources ignore the measured width (pixel repeat fills). */
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U,
+			VIDEO_VIDEOCAP_SOURCE_SHORT |
+			VIDEO_VIDEOCAP_ROWS_CLASS_2,
+			0U, 0U, 512U, 1008U, 0U, 0U);
+		if (r.x != 136U || r.y != 0U || r.width != 1008U ||
+		    r.height != 1024U)
+			return 70;
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U,
+			VIDEO_VIDEOCAP_SOURCE_SHORT |
+			VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+			VIDEO_VIDEOCAP_ROWS_CLASS_2,
+			0U, 0U, 512U, 900U, 0U, 0U);
+		if (r.x != 0U || r.y != 0U || r.width != 1280U ||
+		    r.height != 1024U)
+			return 71;
+		r = video_videocap_fullscan_rect(
+			ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U,
+			VIDEO_VIDEOCAP_SOURCE_SHORT |
+			VIDEO_VIDEOCAP_ROWS_CLASS_2,
+			1120U, 0U, 512U, 1008U, 0U, 0U);
+		if (r.x != 136U || r.y != 0U || r.width != 1008U ||
+		    r.height != 1024U)
+			return 72;
 	}
 	if (!expect_u32("class-3 full capture reads 512 source rows at x1",
 	                video_videocap_source_rows(1024U, 1U, 0U, 1U,
@@ -293,13 +322,13 @@ int main(void)
 		struct video_videocap_scanout_rect r =
 			video_videocap_fullscan_rect(
 				ZZ_VIDEOCAP_OUTPUT_FULL_60, 1U, 0U, 0U, 0U, 640U,
-				240U, 240U, 0U, 0U);
+				240U, 240U, 0U, 0U, 0U);
 		if (r.x != 320U || r.y != 32U || r.width != 640U ||
 		    r.height != 960U)
 			return 48;
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 1U, 0U, 0U, 0U,
-			640U, 240U, 240U, 0U, 0U);
+			640U, 240U, 240U, 0U, 0U, 0U);
 		if (r.x != 320U + 320U || r.y != 28U + 32U ||
 		    r.width != 640U || r.height != 960U)
 			return 49;
@@ -308,13 +337,13 @@ int main(void)
 		 * 800x600. */
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 0U, 0U, 0U, 640U,
-			240U, 240U, 800U, 600U);
+			240U, 240U, 0U, 800U, 600U);
 		if (r.x != 80U || r.y != 60U || r.width != 640U ||
 		    r.height != 480U)
 			return 61;
 		r = video_videocap_fullscan_rect(
 			ZZ_VIDEOCAP_OUTPUT_FULL_60, 0U, 1U, 0U, 0U, 640U,
-			200U, 200U, 720U, 480U);
+			200U, 200U, 0U, 720U, 480U);
 		if (r.x != 40U || r.y != 40U || r.width != 640U ||
 		    r.height != 400U)
 			return 62;

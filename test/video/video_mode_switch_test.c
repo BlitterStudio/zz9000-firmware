@@ -29,6 +29,7 @@ static uint32_t video_irq_enabled = 1;
 static unsigned inject_native_irq, deferred_native_irqs;
 static uint32_t videocap_zstate;
 static uint32_t videocap_live_rows_reg;
+static uint32_t videocap_live_words_reg;
 static int dma_cfg_initialize_status;
 static int dma_config_status;
 static int dma_address_status;
@@ -88,6 +89,8 @@ uint32_t test_xil_in32(uintptr_t address)
 		return videocap_zstate;
 	if (address == MNTZ_BASE_ADDR + MNTZORRO_REG2)
 		return videocap_live_rows_reg;
+	if (address == MNTZ_BASE_ADDR + MNTZORRO_REG1)
+		return videocap_live_words_reg;
 	return 0;
 }
 
@@ -499,6 +502,23 @@ int main(void)
 	assert(dma_setup.VertSizeInput == 390);
 	videocap_zstate &= ~(1U << 24);
 	videocap_live_rows_reg = 0;
+	/* Super72 completes its lines before the 1280-word pitch: the
+	 * measured width bounds the fetch and the shown viewport, and an
+	 * unchanged width must not restart VDMA. */
+	videocap_zstate &= ~(1U << 12);
+	videocap_live_words_reg =
+		(MNTZORRO_REG1_LIVE_WORDS_MAGIC << 16) | 1008U;
+	geometry_native_vblank();
+	assert(dma_setup.HoriSizeInput == 1008 * 4);
+	assert(dma_setup.VertSizeInput == 512);
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (28U << 16 | 456U));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] ==
+	       (1024U << 16 | 1008U));
+	clear_measurements();
+	isr_video(NULL);
+	assert(dma_starts == 0);
+	videocap_live_words_reg = 0;
+	videocap_zstate |= 1U << 12;
 	printf("Native geometry: PAL 640x480@(80,60), NTSC 640x400@(40,40), "
 	       "Automatic restored, short NTSC retains 512 rows\n");
 	/* Restore the pre-regression centered native state for the independent
