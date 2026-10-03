@@ -843,8 +843,17 @@ wire overlay_scheduler_line_ready;
  * bit for bit; every vertical wrap consumer below is muxed on this one
  * wire, which is why the hmax-1 line-bank prefetch decision and the
  * actual counter_y wrap can never disagree. */
-wire [12:0] source_sync_active_end =
-  {1'b0, vga_v_rez} + {1'b0, vga_scale_y_factor};
+/* Quasi-static geometry.  A combinational 13-bit add here lands on the
+ * 150 MHz compare that clocks good_intervals and misses timing on the
+ * 2MB Zorro II placement.  One pixel of delay is inside the frame-boundary
+ * bounds pipeline. */
+reg [12:0] source_sync_active_end = 13'd0;
+always @(posedge dvi_clk) begin
+  if (!aresetn)
+    source_sync_active_end <= 13'd0;
+  else
+    source_sync_active_end <= {1'b0, vga_v_rez} + {1'b0, vga_scale_y_factor};
+end
 wire source_sync_line_advance = counter_x >= vga_h_max;
 wire [63:0] source_sync_diag_bus;
 wire source_sync_line_uses_sync;

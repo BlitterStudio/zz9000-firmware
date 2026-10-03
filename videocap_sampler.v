@@ -23,17 +23,15 @@ module videocap_control_source #(
     input  wire        request_token_valid,
     input  wire        control_received,
     output reg         control_send = 0,
-    output reg  [27:0] control_payload =
-        {1'b0, 12'd26, 12'd188, 1'b0, 2'd0},
+    output reg  [28:0] control_payload =
+        {1'b0, 1'b0, 12'd26, 12'd188, 1'b0, 2'd0},
     output wire        busy,
     output reg  [7:0]  request_sequence = 0,
     output reg  [7:0]  applied_sequence = 0,
     output reg         last_commit_rejected = 0,
     output reg         applied_valid = 0,
     output reg  [31:0] applied_raw =
-        {2'b00, 1'b0, 1'b0, 12'd26, 12'd188, 1'b0, 1'b0, 2'd0},
-    output reg  [31:0] applied_effective_crop =
-        {4'b0000, 12'd26, 4'b0000, 12'd188}
+        {2'b00, 1'b0, 1'b0, 12'd26, 12'd188, 1'b0, 1'b0, 2'd0}
 );
 
 localparam [1:0] CONTROL_IDLE   = 2'd0;
@@ -104,6 +102,7 @@ always @(posedge source_clk) begin
                 if (width_pending || (request_token_valid && request_raw_valid)) begin
                     pending_raw <= request_effective_raw;
                     control_payload <= {request_effective_raw[29],
+                                        request_effective_raw[28],
                                         request_crop_v_effective,
                                         request_crop_h_effective,
                                         request_effective_raw[2],
@@ -128,10 +127,6 @@ always @(posedge source_clk) begin
         CONTROL_SEND: begin
             if (control_received) begin
                 applied_raw <= pending_raw;
-                applied_effective_crop <= {
-                    4'b0000, control_payload[26:15],
-                    4'b0000, control_payload[14:3]
-                };
                 applied_sequence <= request_sequence;
                 applied_valid <= 1'b1;
                 control_send <= 1'b0;
@@ -242,6 +237,108 @@ end
 
 endmodule
 
+/* Publish the resolved crop, frame line count, and the capture class
+ * flags as one coherent AXI snapshot.  The class bits (interlace, line
+ * class, NTSC/PAL) change only at field boundaries, so the payload -
+ * held through the complete four-phase handshake - is the only capture
+ * -> AXI crossing for them: AXI logic must never sample those regs
+ * directly.  Hold the payload until the handshake completes; settled
+ * lets the control ACK wait until its crop is visible to readers. */
+module videocap_live_publish (
+    input  wire        cap_clk,
+    input  wire [11:0] crop_h,
+    input  wire [11:0] crop_v,
+    input  wire [9:0]  line_count,
+    /* Completed words of the frame's last captured line: the writeback
+     * pitch is fixed, so short-not-doubled lines must be sized from it. */
+    input  wire [11:0] line_words,
+    input  wire        interlace,
+    input  wire        doubled,
+    input  wire        short_l,
+    input  wire        tall,
+    input  wire        ntsc,
+    input  wire        axi_clk,
+    output wire        settled,
+    output reg  [31:0] live_effective_crop =
+        {4'b0000, 12'd26, 4'b0000, 12'd188},
+    output reg  [9:0]  live_line_count = 0,
+    output reg  [11:0] live_line_words = 12'd1280,
+    /* {interlace, doubled, short, tall, ntsc} in the AXI domain. */
+    output reg  [4:0]  live_frame_class = 5'd0
+);
+    localparam [1:0] LIVE_IDLE   = 2'd0;
+    localparam [1:0] LIVE_LOAD   = 2'd1;
+    localparam [1:0] LIVE_SEND   = 2'd2;
+    localparam [1:0] LIVE_RETURN = 2'd3;
+
+    wire [50:0] live_cap = {interlace, doubled, short_l, tall, ntsc,
+                            line_count, line_words, crop_v, crop_h};
+    reg [50:0] live_sent = {5'd0, 10'd0, 12'd1280, 12'd26, 12'd188};
+    reg [50:0] live_payload = {5'd0, 10'd0, 12'd1280, 12'd26, 12'd188};
+    reg [1:0] live_state = LIVE_IDLE;
+    reg live_send = 1'b0;
+    wire live_received;
+    wire [50:0] live_dest_payload;
+    wire live_dest_req;
+
+    assign settled = live_state == LIVE_IDLE && live_sent == live_cap;
+
+    xpm_cdc_handshake #(
+        .DEST_EXT_HSK(0),
+        .DEST_SYNC_FF(4),
+        .INIT_SYNC_FF(1),
+        .SIM_ASSERT_CHK(0),
+        .SRC_SYNC_FF(4),
+        .WIDTH(51)
+    ) videocap_live_handshake (
+        .src_clk(cap_clk),
+        .src_in(live_payload),
+        .src_send(live_send),
+        .src_rcv(live_received),
+        .dest_clk(axi_clk),
+        .dest_out(live_dest_payload),
+        .dest_req(live_dest_req),
+        .dest_ack(1'b0)
+    );
+
+    always @(posedge cap_clk) begin
+        case (live_state)
+            LIVE_IDLE: begin
+                if (live_cap != live_sent) begin
+                    live_payload <= live_cap;
+                    live_state <= LIVE_LOAD;
+                end
+            end
+            LIVE_LOAD: begin
+                live_send <= 1'b1;
+                live_state <= LIVE_SEND;
+            end
+            LIVE_SEND: begin
+                if (live_received) begin
+                    live_send <= 1'b0;
+                    live_sent <= live_payload;
+                    live_state <= LIVE_RETURN;
+                end
+            end
+            LIVE_RETURN: begin
+                if (!live_received)
+                    live_state <= LIVE_IDLE;
+            end
+        endcase
+    end
+
+    always @(posedge axi_clk) begin
+        if (live_dest_req) begin
+            live_effective_crop <= {4'b0, live_dest_payload[23:12],
+                                    4'b0, live_dest_payload[11:0]};
+            live_line_count <= live_dest_payload[45:36];
+            live_line_words <= live_dest_payload[35:24];
+            live_frame_class <= live_dest_payload[50:46];
+        end
+    end
+endmodule
+
+
 module videocap_sampler #(
     parameter integer BUF_DEPTH   = 2048,
     parameter integer RGB_MODE    = 0,
@@ -261,16 +358,32 @@ module videocap_sampler #(
     input  wire        grid_ref,
 
     input  wire        ctl_send,
-    input  wire [27:0] ctl_payload,
+    input  wire [28:0] ctl_payload,
     output wire        ctl_received,
     input  wire        ctl_read_full_width,
     output wire [1:0]  detected_standard,
+    /* AXI-domain coherent snapshot of the actual capture configuration. */
+    output wire [31:0] live_effective_crop,
+    output wire [9:0]  live_line_count,
+    /* Coherent AXI snapshot of the frame's completed line width. */
+    output wire [11:0] live_line_words,
+    /* Coherent AXI snapshot {interlace, doubled, short, tall, ntsc}. */
+    output wire [4:0]  live_frame_class,
 
     output reg  [10:0] cap_x,
     output reg  [10:0] cap_y,
     output reg  [10:0] cap_ymax,
     output reg         cap_interlace,
     output reg         cap_ntsc,
+    /* Doubled-scan source (DblPAL, DblNTSC, Euro72, Multiscan: a line of
+     * 900..1100 capture clocks at 28 MHz, one pixel per clock) and a
+     * 24 kHz one (Super72, ~1230 clocks, two clocks a pixel), decided
+     * per frame from the measured line period like the standard is from
+     * the line count.  cap_tall: the woven frame holds more than 512 rows
+     * (the ARM picks x1 instead of x2 for full-width output). */
+    output reg         cap_doubled = 0,
+    output reg         cap_short = 0,
+    output reg         cap_tall = 0,
     output reg         cap_x_done,
     output reg         cap_shres,
     output reg         cap_line_toggle = 0,
@@ -315,9 +428,11 @@ module videocap_sampler #(
 /* The source holds this bundled payload for the complete four-phase XPM
  * transaction.  External destination acknowledgement delays completion
  * until the next capture frame boundary. */
-wire [27:0] ctl_dest_payload;
+wire [28:0] ctl_dest_payload;
 wire ctl_dest_req;
 reg ctl_dest_ack = 0;
+reg ctl_apply_pending = 0;
+wire live_publish_settled;
 
 xpm_cdc_handshake #(
     .DEST_EXT_HSK(1),
@@ -325,7 +440,7 @@ xpm_cdc_handshake #(
     .INIT_SYNC_FF(1),
     .SIM_ASSERT_CHK(0),
     .SRC_SYNC_FF(4),
-    .WIDTH(28)
+    .WIDTH(29)
 ) videocap_control_handshake (
     .src_clk(axi_clk),
     .src_in(ctl_payload),
@@ -341,6 +456,15 @@ localparam [11:0] CROP_V_AUTO_PAL = 12'd40;
 localparam [11:0] CROP_V_AUTO_NTSC = 12'd39;
 
 reg [1:0] ctl_sample_mode_cap = 2'd0;
+reg cap_prev_ymax_par = 0;   /* last frame's cap_ymax parity: laced
+                               * doubled fields alternate it */
+reg cap_prev_ymax_valid = 0; /* set by the first ready frame; guards the
+                               * parity compare against power-on X state */
+/* Completed words of each line (latched at its sync) and of the frame
+ * (its last line), so full-width short-not-doubled sources can size
+ * scanout from the words capture actually produced. */
+reg [10:0] cap_line_words = 0;
+reg [10:0] cap_xmax = 0;
 reg ctl_full_width_cap = 1'b0;
 reg [11:0] ctl_crop_h_cap = 12'd188;
 reg [11:0] ctl_crop_v_cap = 12'd26;
@@ -349,6 +473,78 @@ reg [11:0] ctl_crop_v_cap = 12'd26;
  * commit payload carries the PAL-resolved value because the source domain
  * cannot see the detector; the re-resolution below owns the difference. */
 reg ctl_crop_v_auto_cap = 1'b0;
+/* The horizontal twin of the flag above: while set, the applied crop
+ * follows the measured line class (the doubled-scan and 24 kHz modes
+ * have their own measured origins), with the committed value as the
+ * 15 kHz fallback. */
+reg ctl_crop_h_auto_cap = 1'b0;
+
+/* THE LINE CLASS, from the measured line period (phase_line_period, in
+ * capture clocks): the 15 kHz standards run 1800..1830 clocks at 28 MHz,
+ * Super72 about 1232, the AGA/ECS doubled modes 912..1040.  Frozen at
+ * frame_sync so the pairing and the crop cannot move inside a frame.
+ * Thresholds in 28 MHz clocks; a 14 MHz front end counts half as many. */
+localparam [11:0] LINE_SHORT_MAX   = (FULLRATE != 0) ? 12'd1400 : 12'd700;
+localparam [11:0] LINE_DOUBLED_MAX = (FULLRATE != 0) ? 12'd1100 : 12'd550;
+/* Below the floor (~12.4 us at 28 MHz, twice that at the Denise front
+ * end's halved counts) no physical source line exists: input-resolution
+ * glitches at power-on measure a handful of clocks and must classify as
+ * nothing, or the first real field runs with the pairing and the SHR
+ * metric gated off (the one-frame-late class latch). */
+localparam [11:0] LINE_CLASS_FLOOR  = (FULLRATE != 0) ? 12'd350 : 12'd175;
+/* A VSYNC-burst-spanning interval (the filtered path has no line_sync
+ * in the burst, so the first line after it carries the whole burst in
+ * phase_x) must not set the class.  Every valid source line - 15 kHz
+ * 1830 at 28 MHz, 915 at 14 MHz - is below this cap. */
+localparam [11:0] LINE_PERIOD_CAP   = (FULLRATE != 0) ? 12'd2048 : 12'd1024;
+/* Where the doubled and 24 kHz pictures start, measured on an A4000
+ * against the BigBox's tables (ZZ9000_CAPTURE_TABLES.md, 29 Sep 2026):
+ * the sync pulse of these modes is 2.5 us (71 clocks), not 4.7.  The
+ * full-width path starts at the picture's first pixel, as 278 / 40 does
+ * for a 15 kHz line; the filtered path keeps the margin 188 / 26 gives
+ * a 15 kHz picture in 720 columns - 45 pixels and 14 lines before it
+ * (91 samples of pairs, 45 of a doubled-scan line).  AGA numbers; the
+ * ECS origins (145 / 30 and 193 / 25 full width) are per machine and
+ * stay explicit-commit territory. */
+/* 28 MHz control units, same as the commit payload.  crop_h_local is the
+ * only Denise halving; pre-halving these constants would apply it twice. */
+localparam [11:0] CROP_H_DOUBLED   = 12'd213;
+localparam [11:0] CROP_H_DOUBLED_F = 12'd168;
+localparam [11:0] CROP_H_SHORT     = 12'd261;
+localparam [11:0] CROP_H_SHORT_F   = 12'd171;
+localparam [11:0] CROP_V_CLASS     = 12'd16;
+localparam [11:0] CROP_V_CLASS_F   = 12'd2;
+wire [11:0] crop_h_eff = (ctl_crop_h_auto_cap && cap_doubled) ?
+                             (ctl_full_width_cap ? CROP_H_DOUBLED :
+                                                   CROP_H_DOUBLED_F) :
+                         (ctl_crop_h_auto_cap && cap_short) ?
+                             (ctl_full_width_cap ? CROP_H_SHORT :
+                                                   CROP_H_SHORT_F) :
+                         ctl_crop_h_cap;
+wire [11:0] crop_v_eff = (ctl_crop_v_auto_cap &&
+                          (cap_doubled || cap_short)) ?
+                             (ctl_full_width_cap ? CROP_V_CLASS :
+                                                   CROP_V_CLASS_F) :
+                         ctl_crop_v_cap;
+
+videocap_live_publish videocap_live_publish_inst (
+    .cap_clk(cap_clk),
+    .crop_h(crop_h_eff),
+    .crop_v(crop_v_eff),
+    .line_count(cap_ymax[9:0]),
+    .line_words({1'b0, cap_xmax}),
+    .axi_clk(axi_clk),
+    .settled(live_publish_settled),
+    .live_effective_crop(live_effective_crop),
+    .interlace(cap_interlace),
+    .doubled(cap_doubled),
+    .short_l(cap_short),
+    .tall(cap_tall),
+    .ntsc(cap_ntsc),
+    .live_line_count(live_line_count),
+    .live_line_words(live_line_words),
+    .live_frame_class(live_frame_class)
+);
 
 reg [6:0] hs = 0;
 reg [6:0] vs = 0;
@@ -385,6 +581,7 @@ reg [3:0] shortlines = 0;
 reg [7:0] hs_pulse_width = 0;
 reg [11:0] phase_x = 0;
 reg [11:0] phase_line_period = 0;
+reg [11:0] field_max_period = 0;
 reg [11:0] vsync_phase_x = 0;
 reg [15:0] line_cycle = 0;
 reg [15:0] previous_line_cycle = 0;
@@ -462,6 +659,15 @@ wire frame_sync = (CSYNC_VSYNC != 0) ?
     (hs[6:1] == 6'b000111 && hs_pulse_width >= 8'd128) :
     (vs[6:1] == 6'b111000);
 wire line_sync = (hs[6:1] == 6'b000111);
+/* The class is set from the field's longest line period, not the last
+ * sync-edge interval: a composite 15 kHz source's equalisation burst
+ * ends on a half-line, which would misread as doubled / short.  The
+ * max over the field is the video-line period for 15 kHz (the burst's
+ * half-lines are shorter) and the only period for doubled / 24 kHz
+ * sources (no burst half-lines).  Falls back to phase_line_period when
+ * no line has been seen (first field after reset). */
+wire [11:0] class_period = (field_max_period != 0) ?
+    field_max_period : phase_line_period;
 // After a clock reset, discard two field boundaries while timing and the
 // pixel-pair grid settle. Clock loss invalidates readiness even if cap_clk stops.
 reg [1:0] recovery_fields = 0;
@@ -472,10 +678,19 @@ always @(posedge cap_clk) begin
         recovery_fields <= recovery_fields - 1'b1;
 end
 
-wire completed_frame_ntsc = (raw_y >= 11'h190) ?
-    ((raw_y >= 11'h23a) ? 1'b0 : 1'b1) :
-    ((raw_y >= ((CSYNC_VSYNC != 0) ? 11'h130 : 11'h138)) ?
-        1'b0 : 1'b1);
+/* The standard the publisher carries must agree with cap_ntsc (what the
+ * ARM applies): short-line (doubled / 24 kHz) sources classify by the
+ * woven frame - 480 rows fits (DblNTSC 478, Euro72 427) - PAL needs 576
+ * (DblPAL 574, Multiscan 507, Super72 658).  15 kHz sources keep the
+ * line-count rule.  At frame_sync raw_y is the just-completed field's
+ * count - the value the cap_ntsc register latches on this boundary - so
+ * both paths compare the same quantity and cannot drift apart. */
+wire completed_frame_ntsc = cap_short ?
+    ((cap_interlace ? {raw_y[9:0], 1'b0} : raw_y) <= 11'd480) :
+    ((raw_y >= 11'h190) ?
+        ((raw_y >= 11'h23a) ? 1'b0 : 1'b1) :
+        ((raw_y >= ((CSYNC_VSYNC != 0) ? 11'h130 : 11'h138)) ?
+            1'b0 : 1'b1));
 
 videocap_standard_cdc videocap_standard_publish (
     .cap_clk(cap_clk),
@@ -492,7 +707,7 @@ videocap_standard_cdc videocap_standard_publish (
  * to the historical 94-clock crop without requiring a firmware variant.
  */
 wire [11:0] crop_h_local = (FULLRATE != 0) ?
-    ctl_crop_h_cap : {1'b0, ctl_crop_h_cap[11:1]};
+    crop_h_eff : {1'b0, crop_h_eff[11:1]};
 wire use_grid_window = (FULLRATE != 0) && grid_seen && window_phase_valid;
 wire [11:0] capture_window_x = use_grid_window ?
     {1'b0, window_x} : {1'b0, sample_x};
@@ -502,7 +717,7 @@ wire [11:0] probe_precrop_start = crop_h_local - 12'd64;
 videocap_calibration_capture calibration_capture (
     .cap_clk(cap_clk), .cap_reset(!capture_ready), .frame_sync(frame_sync),
     .raw_x(capture_window_x[10:0]), .raw_y(raw_y), .crop_h(crop_h_local),
-    .crop_v(ctl_crop_v_cap), .rgb(rgbin), .interlace(cap_interlace),
+    .crop_v(crop_v_eff), .rgb(rgbin), .interlace(cap_interlace),
     .field_parity(lace_field), .ntsc(cap_ntsc),
     .line_meta_identity(line_meta_identity),
     .line_meta_timing(line_meta_timing),
@@ -516,7 +731,12 @@ videocap_calibration_capture calibration_capture (
 reg half = 0;
 
 reg [23:0] rgb_prev = 0;
-wire filter_pairs = (FULLRATE != 0) && !ctl_full_width_cap;
+/* A doubled-scan line carries one pixel per 28 MHz clock (640 in 640),
+ * so pairing would keep every other pixel: the filtered path stores
+ * every sample there and the line comes out 640 wide, as a paired
+ * 15 kHz HiRes line does after pairing.  Denise-adapter (14 MHz)
+ * variants cannot: half the pixels never reach them. */
+wire filter_pairs = (FULLRATE != 0) && !ctl_full_width_cap && !cap_doubled;
 
 /* E7M-locked sample grid (#96).  The capture clock is 4x the E7M
  * reference, so a 4-phase counter anchored to grid_ref marks the two
@@ -683,24 +903,33 @@ always @(posedge cap_clk) begin
 end
 
 always @(posedge cap_clk) begin
-    if (!ctl_dest_req)
+    if (!ctl_dest_req) begin
         ctl_dest_ack <= 1'b0;
-    else if (!ctl_dest_ack && frame_sync && !cap_reset) begin
+        ctl_apply_pending <= 1'b0;
+    end else if (!ctl_dest_ack && !ctl_apply_pending &&
+                 frame_sync && !cap_reset) begin
         ctl_sample_mode_cap <= ctl_dest_payload[1:0];
         ctl_full_width_cap <= ctl_dest_payload[2];
         ctl_crop_h_cap <= ctl_dest_payload[14:3];
-        ctl_crop_v_auto_cap <= ctl_dest_payload[27];
+        ctl_crop_v_auto_cap <= ctl_dest_payload[28];
+        ctl_crop_h_auto_cap <= ctl_dest_payload[27];
         ctl_crop_v_cap <= ctl_dest_payload[26:15];
+        ctl_apply_pending <= 1'b1;
+    end else if (ctl_apply_pending && live_publish_settled && !cap_reset) begin
         ctl_dest_ack <= 1'b1;
     end
 
     /* Automatic vertical crop follows the detected standard. The boot
      * commit resolves before NTSC detection settles (the source domain
      * cannot see the detector), so re-resolve at every frame boundary
-     * while automatic; reloads of the register itself keep the existing
-     * compare paths and their timing margins unchanged. An explicit
-     * commit arriving in the same cycle clears the flag and wins. */
+     * while automatic. Full-rate only: the Denise path's compatible
+     * crop is 26 lines, and 40/39 would over-crop it. A short-line
+     * source's cap_ntsc means "fits 480 rows", not the 15 kHz crop, so
+     * it must not clobber the register the 15 kHz path reads next.
+     * An explicit commit arriving in the same cycle clears the flag
+     * and wins. */
     if (frame_sync && !cap_reset && ctl_crop_v_auto_cap &&
+            FULLRATE != 0 && !cap_short &&
             !(ctl_dest_req && !ctl_dest_ack)) begin
         ctl_crop_v_cap <= cap_ntsc ?
             CROP_V_AUTO_NTSC : CROP_V_AUTO_PAL;
@@ -711,11 +940,16 @@ always @(posedge cap_clk) begin
         sample_x <= 0; window_x <= 0; window_x_hold <= 0;
         window_phase_ref <= 0; window_phase_valid <= 0; raw_y <= 0;
         cap_x <= 0; cap_y <= 0; cap_ymax <= 0;
+        cap_line_words <= 0; cap_xmax <= 0;
+        cap_prev_ymax_par <= 0;
+        cap_prev_ymax_valid <= 0;
         cap_interlace <= 0; cap_ntsc <= 0; cap_shres <= 0;
+        cap_doubled <= 0; cap_short <= 0; cap_tall <= 0;
         cap_x_done <= 0;
         lace_field <= 0; next_lace_field <= 0;
         shortlines <= 0; hs_pulse_width <= 0;
         phase_x <= 0; phase_line_period <= 0; vsync_phase_x <= 0;
+        field_max_period <= 0;
         line_cycle <= 0; previous_line_cycle <= 0;
         line_history_valid <= 0;
         line_meta_identity <= 0; line_meta_timing <= 0;
@@ -777,6 +1011,8 @@ always @(posedge cap_clk) begin
         line_history_valid <= 1;
         if (phase_x != 0)
             phase_line_period <= phase_x;
+        if (phase_x > field_max_period && phase_x < LINE_PERIOD_CAP)
+            field_max_period <= phase_x;
         phase_x <= 0;
     end else if (phase_x != 12'hfff) begin
         phase_x <= phase_x + 1'b1;
@@ -865,7 +1101,7 @@ always @(posedge cap_clk) begin
             diag_data[287:256] <= {5'b0, raw_y, 5'b0, cap_y};
             diag_data[319:288] <=
                 {4'b0, ctl_full_width_cap, ctl_sample_mode_cap, 1'b0,
-                 ctl_crop_v_cap, ctl_crop_h_cap};
+                 crop_v_eff, crop_h_eff};
             diag_data[351:320] <=
                 {diag_field_sequence + 1'b1, lace_field, next_lace_field,
                  cap_interlace, cap_ntsc, ctl_full_width_cap,
@@ -985,14 +1221,38 @@ always @(posedge cap_clk) begin
     end
 
     if (frame_sync) begin
-        cap_x_done <= 0;
-        if (cap_ymax >= 11'h190)
+        /* The line class for the frame now starting.  class_period is
+         * the field's longest line (the video line for 15 kHz, the only
+         * line for doubled / 24 kHz), not the last sync-edge interval,
+         * which a composite equalisation burst would leave at a half
+         * line and misread as doubled / short. */
+        cap_doubled <= (class_period >= LINE_CLASS_FLOOR) &&
+                       (class_period < LINE_DOUBLED_MAX);
+        cap_short   <= (class_period >= LINE_CLASS_FLOOR) &&
+                       (class_period < LINE_SHORT_MAX);
+        field_max_period <= 0;
+        /* Interlace detection.  15 kHz keeps its hardware-proven rules
+         * (400+ lines a field is progressive; otherwise the VSYNC
+         * phase).  Doubled/24 kHz sources use the field line-count
+         * PARITY instead: laced fields alternate N/N+1 lines (287/288
+         * DblPAL, 213/214 Euro72) while a no-lace frame is constant
+         * (574 DblPAL NoLace) - and a doubled VSYNC can alternate its
+         * horizontal phase every frame even without lacing, which the
+         * phase test misreads as interlace (comb: rows written with
+         * stride 2, every other output line stale). */
+        if (cap_short && capture_ready) begin
+            if (cap_prev_ymax_valid)
+                cap_interlace <= cap_ymax[0] != cap_prev_ymax_par;
+            cap_prev_ymax_par <= cap_ymax[0];
+            cap_prev_ymax_valid <= 1;
+        end else if (cap_ymax >= 11'h190)
             cap_interlace <= 0;
         else if (CSYNC_VSYNC != 0)
             cap_interlace <= (next_lace_field != lace_field);
         else
             cap_interlace <=
                 vsync_phase_changed;
+        cap_prev_ymax_par <= cap_ymax[0];
 
         if (CSYNC_VSYNC != 0)
             lace_field <= next_lace_field;
@@ -1001,11 +1261,21 @@ always @(posedge cap_clk) begin
             lace_field <= cap_ymax[0];
         end
 
-        if (cap_ymax >= 11'h190)
+        /* On a doubled or 24 kHz source "NTSC" means "the woven frame
+         * fits 480 rows" - DblNTSC (478), Euro72 (427) - and PAL that it
+         * needs 576 - DblPAL (574), Multiscan (507), Super72 (658): the
+         * flag picks the 720x480 / 720x576 output and nothing else there.
+         * A 15 kHz source keeps the line-count rule. */
+        if (cap_short)
+            cap_ntsc <= (cap_interlace ? {cap_ymax[9:0], 1'b0} : cap_ymax)
+                        <= 11'd480;
+        else if (cap_ymax >= 11'h190)
             cap_ntsc <= (cap_ymax >= 11'h23a) ? 1'b0 : 1'b1;
         else
             cap_ntsc <= (cap_ymax >=
                 ((CSYNC_VSYNC != 0) ? 11'h130 : 11'h138)) ? 1'b0 : 1'b1;
+        cap_tall <= (cap_interlace ? {cap_ymax[9:0], 1'b0} : cap_ymax)
+                    > 11'd512;
 
         raw_y <= 0;
         cap_y <= cap_interlace ?
@@ -1031,11 +1301,14 @@ always @(posedge cap_clk) begin
         grid_intra_channels_valid <= 0;
         grid_cross_channels_valid <= 0;
 
-        if (raw_y != 0)
+        if (raw_y != 0) begin
             cap_ymax <= raw_y;
+            cap_xmax <= cap_line_words;
+        end
     end else if (line_sync) begin
         grid_prev_second_valid <= 0;
         cap_x <= 0;
+        cap_line_words <= cap_x;
         sample_x <= 0;
         /* Keep horizontal window placement independent of a one-tick move
          * in the accepted HSYNC edge.  Learn the normal absolute grid phase
@@ -1049,7 +1322,7 @@ always @(posedge cap_clk) begin
             if (!window_phase_valid) begin
                 window_x <= 0;
                 window_x_hold <= 0;
-                if (capture_ready && raw_y == ctl_crop_v_cap[10:0]) begin
+                if (capture_ready && raw_y == crop_v_eff[10:0]) begin
                     window_phase_ref <= cap_grid;
                     window_phase_valid <= 1;
                 end
@@ -1070,7 +1343,12 @@ always @(posedge cap_clk) begin
         cap_x_done <= 0;
         if (capture_banking_cap)
             capture_bank <= ~capture_bank;
-        if (!ctl_full_width_cap && capture_output_line_valid && capture_ready) begin
+        /* A full-width line that ended before its 1280th sample - every
+         * line of a doubled or 24 kHz source - is complete now, and is
+         * published here; a 15 kHz line published itself at sample 1279
+         * (cap_x_done) and is not published twice. */
+        if ((!ctl_full_width_cap || (!cap_x_done && cap_x != 0)) &&
+                capture_output_line_valid && capture_ready) begin
             /* Completed visible line (filtered, any FULLRATE): publish
              * its normalized number and bank as a token one capture
              * clock later, exactly as the full-width path does (PR #88
@@ -1093,7 +1371,7 @@ always @(posedge cap_clk) begin
             end
         end
 
-        if (raw_y > ctl_crop_v_cap[10:0]) begin
+        if (raw_y > crop_v_eff[10:0]) begin
             if (cap_interlace)
                 cap_y <= cap_y + 2'b10;
             else
@@ -1140,6 +1418,7 @@ always @(posedge cap_clk) begin
                 shres_half <= 0;
                 if (capture_window_x > crop_h_local &&
                         cap_x < (ctl_full_width_cap ? 11'h500 : 11'h200) &&
+                        !cap_short &&
                         (rgbin !== shres_prev) && diff_count != 16'hffff)
                     diff_count <= diff_count + 1'b1;
             end
@@ -1211,7 +1490,7 @@ always @(posedge cap_clk) begin
                     probe_context <= {9'h000, capture_bank,
                                       raw_y, sample_x};
                     probe_config <= {7'h00, ctl_full_width_cap,
-                                     ctl_crop_v_cap, ctl_crop_h_cap};
+                                     crop_v_eff, crop_h_eff};
                 end else begin
                     probe_seen_mask[cap_x - PROBE_SOURCE_X] <= 1'b1;
                 end

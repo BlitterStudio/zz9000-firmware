@@ -1327,7 +1327,7 @@ module MNTZorro_v0_1_S00_AXI
       (video_control_axi_op16_event ? axi_reg3 : videocap_control_zorro_raw);
   wire videocap_control_request_token_valid =
       !videocap_control_live_event || videocap_control_live_token_valid;
-  wire [27:0] videocap_control_payload;
+  wire [28:0] videocap_control_payload;
   wire videocap_control_send;
   wire videocap_control_received;
   wire videocap_control_busy;
@@ -1336,7 +1336,39 @@ module MNTZorro_v0_1_S00_AXI
   wire videocap_control_last_commit_rejected;
   wire videocap_control_applied_valid;
   wire [31:0] videocap_control_applied_raw;
-  wire [31:0] videocap_control_applied_effective_crop;
+  wire [31:0] vcap_live_effective_crop;
+  wire [9:0] vcap_live_line_count;
+  /* Coherent completed line width, rounded down to the writeback burst
+   * (16 words) so per-line HSYNC jitter cannot move it frame to frame. */
+  wire [11:0] vcap_live_line_words;
+  wire [11:0] vcap_captured_words = vcap_live_line_words & ~12'd15;
+  /* Writeback publishes a row only after raw_y passes crop_v, and the
+   * first of those is the sentinel (cap_y advances before the token is
+   * valid). Completed destination rows are therefore field_lines -
+   * crop_v - 2. Row class keeps the raw field count. */
+  wire [11:0] vcap_written_field_rows_crop =
+      ({2'b0, vcap_live_line_count} >
+       vcap_live_effective_crop[27:16] + 12'd2) ?
+      ({2'b0, vcap_live_line_count} -
+       vcap_live_effective_crop[27:16] - 12'd2) : 12'd0;
+`ifdef VCAP_DENISE_ADAPTER
+  /* The Denise y-sync letterbox consumes tokens past its bound without
+   * writing them (progressive lines - 36, interlaced woven - 80, i.e.
+   * 40 per field), so the published count takes the same cutoff. The
+   * subtraction wraps below the bound exactly as videocap_ymax_sync
+   * does; the min then keeps the crop-limited count, matching what the
+   * token filter actually accepts. */
+  wire [11:0] vcap_denise_field_bound =
+      vcap_live_frame_class[4] ? 12'd40 : 12'd36;
+  wire [11:0] vcap_written_field_rows =
+      (vcap_written_field_rows_crop <
+       {2'b0, vcap_live_line_count} - vcap_denise_field_bound) ?
+      vcap_written_field_rows_crop :
+      ({2'b0, vcap_live_line_count} - vcap_denise_field_bound);
+`else
+  wire [11:0] vcap_written_field_rows = vcap_written_field_rows_crop;
+`endif
+  wire [4:0] vcap_live_frame_class;
   wire videocap_control_applied_full_width =
       videocap_control_applied_raw[2];
   reg [9:0] videocap_y_sync;
@@ -1360,6 +1392,23 @@ module MNTZorro_v0_1_S00_AXI
   wire vcap_x_done;
   wire vcap_shres;
   wire vcap_line_toggle;
+  wire vcap_doubled;      /* a doubled-scan (31 kHz) source: one pixel a clock */
+  wire vcap_short;        /* ... or a 24 kHz one: a line under 1400 clocks */
+  wire vcap_tall;         /* the woven frame is more than 512 rows */
+  /* Row-count class for the scanout factor (status [9:8]): buckets the
+   * woven frame line count so the ARM picks a canvas-filling power-of-two
+   * without needing the exact count. 0 = 15 kHz (not short); 1 = the
+   * DblPAL/DblNTSC no-lace shapes (<= 329 total lines: 256/200 visible);
+   * 2 = the 400..589 shapes (Dbl laced, Euro72, Multiscan progressive);
+   * 3 = 590+ (Super72/Multiscan laced - shown x1, clipped to 512). */
+  /* The live-publish snapshot is the only capture -> AXI crossing of the
+   * frame class; derive the row-count class from it, never from the
+   * capture-domain regs. */
+  wire [10:0] vcap_woven_rows = vcap_live_frame_class[4] ?
+      {1'b0, vcap_live_line_count} << 1 : {1'b0, vcap_live_line_count};
+  wire [1:0] vcap_rows_class = !vcap_live_frame_class[2] ? 2'd0 :
+      (vcap_woven_rows >= 11'd590) ? 2'd3 :
+      (vcap_woven_rows >= 11'd330) ? 2'd2 : 2'd1;
   wire vcap_write_bank;
   wire [9:0] vcap_token_y;
   wire vcap_token_bank;
@@ -1557,8 +1606,7 @@ module MNTZorro_v0_1_S00_AXI
       .applied_sequence(videocap_control_applied_sequence),
       .last_commit_rejected(videocap_control_last_commit_rejected),
       .applied_valid(videocap_control_applied_valid),
-      .applied_raw(videocap_control_applied_raw),
-      .applied_effective_crop(videocap_control_applied_effective_crop)
+      .applied_raw(videocap_control_applied_raw)
   );
 
   reg vcap_cal_arm = 0;
@@ -1606,6 +1654,10 @@ module MNTZorro_v0_1_S00_AXI
       .ctl_received(videocap_control_received),
       .ctl_read_full_width(videocap_control_applied_full_width),
       .detected_standard(vcap_detected_standard),
+      .live_effective_crop(vcap_live_effective_crop),
+      .live_line_count(vcap_live_line_count),
+      .live_line_words(vcap_live_line_words),
+      .live_frame_class(vcap_live_frame_class),
       .cap_x(vcap_x),
       .cap_y(vcap_y),
       .cap_line_toggle(vcap_line_toggle),
@@ -1616,6 +1668,9 @@ module MNTZorro_v0_1_S00_AXI
       .cap_ymax(vcap_ymax),
       .cap_interlace(vcap_interlace),
       .cap_ntsc(vcap_ntsc),
+      .cap_doubled(vcap_doubled),
+      .cap_short(vcap_short),
+      .cap_tall(vcap_tall),
       .cap_x_done(vcap_x_done),
       .cap_shres(vcap_shres),
       .probe_arm_toggle(vcap_probe_arm_toggle),
@@ -1686,6 +1741,7 @@ module MNTZorro_v0_1_S00_AXI
       .dest_out(vcap_sampler_probe_precrop_valid_axi)
   );
   reg [11:0] videocap_pitch;
+  reg videocap_pitch_viewport_pending = 0;
   reg [11:0] videocap_pitch_sync;
   reg [9:0]  videocap_save_line_done;
   reg [31:0] videocap_save_addr;
@@ -1842,7 +1898,7 @@ module MNTZorro_v0_1_S00_AXI
     // VIDEOCAP
 
     // pass interlace mode to video control block
-    video_control_interlace <= vcap_interlace;
+    video_control_interlace <= vcap_live_frame_class[4];
 
     videocap_pitch_sync <= videocap_pitch;
 
@@ -1851,10 +1907,12 @@ module MNTZorro_v0_1_S00_AXI
     videocap_mode_sync <= videocap_mode;
 
 `ifdef VCAP_DENISE_ADAPTER
-    if (vcap_interlace)
-      videocap_ymax_sync <= (vcap_ymax<<1)-(2*40);
+    if (vcap_live_frame_class[4])
+      /* 10-bit destination truncates; Vivado 2018.3 rejects a
+       * part-select on the subtraction itself. */
+      videocap_ymax_sync <= vcap_woven_rows - 11'd80;
     else
-      videocap_ymax_sync <= vcap_ymax-36;
+      videocap_ymax_sync <= vcap_live_line_count - 10'd36;
 
     /* Completed-line tokens own the row handoff: each token's bank holds
      * one full completed capture line, so the writeback has a whole line
@@ -1871,10 +1929,10 @@ module MNTZorro_v0_1_S00_AXI
         videocap_y_sync <= vcap_line_payload_axi[9:0];
     end
 `else
-    if (vcap_interlace)
-      videocap_ymax_sync <= (vcap_ymax<<1);
+    if (vcap_live_frame_class[4])
+      videocap_ymax_sync <= vcap_woven_rows[9:0];
     else
-      videocap_ymax_sync <= vcap_ymax;
+      videocap_ymax_sync <= vcap_live_line_count;
 
     if (vcap_capture_ready_axi && vcap_line_payload_axi[11] != vcap_line_toggle_seen) begin
       vcap_line_toggle_seen <= vcap_line_payload_axi[11];
@@ -3039,7 +3097,9 @@ module MNTZorro_v0_1_S00_AXI
             end
             VCAP_LIVE_EFFECTIVE_CROP,
             VCAP_LIVE_EFFECTIVE_CROP_LO: begin
-              rr_data <= videocap_control_applied_effective_crop;
+              /* Capture-domain resolved pair, not the commit-time
+               * 15 kHz default. The handshake word is coherent. */
+              rr_data <= vcap_live_effective_crop;
             end
             VCAP_PROBE_META,
             VCAP_PROBE_META_LO: begin
@@ -3209,6 +3269,18 @@ module MNTZorro_v0_1_S00_AXI
                 'h30: begin
                   rr_data <= debug_counter << 16;
                 end
+                /* Z3 presents the 0x4E halfword inside the 0x4C longword
+                 * (z3addr2 forces 2'b00; ds1/low16 is address|2).  The
+                 * high half stays the Z2 0x4C read (REVISION); do not
+                 * alias VBLANK_STATUS to the line count. */
+                'h4c: begin
+                  rr_data[31:16] <= REVISION;
+                  rr_data[15:0]  <= {6'h0, vcap_live_line_count};
+                end
+                'h4e: begin
+                  rr_data[31:16] <= {6'h0, vcap_live_line_count};
+                  rr_data[15:0]  <= {6'h0, vcap_live_line_count};
+                end
                 default: begin
                   rr_data[31:16] <= REVISION;
                   rr_data[15:0]  <= REVISION;
@@ -3360,18 +3432,20 @@ module MNTZorro_v0_1_S00_AXI
     scanline_width_out      <= scanline_width;
     scanline_parity_out     <= scanline_parity;
 
-    // Snoop the content width for capture pitch. Bit 15 marks a larger output
-    // canvas; OP_VIEWPORT_SIZE_COMMIT publishes its content width atomically.
-    if (video_control_op == 2 && !video_control_data[15]) begin
-      // OP_DIMENSIONS = 2
+    // OP_DIMENSIONS establishes the writeback pitch. For a larger output
+    // canvas its first atomic viewport commit publishes the content width;
+    // later commits resize only the displayed viewport. Those dimensions
+    // can be narrower than the framebuffer row (doubled scan is 640 pixels
+    // displayed in a 1280-word scanout), so they must not change DDR pitch.
+    if (!S_AXI_ARESETN || z_reset) begin
+      videocap_pitch_viewport_pending <= 0;
+    end else if (video_control_op == 2) begin
+      videocap_pitch_viewport_pending <= video_control_data[15];
+      if (!video_control_data[15])
+        videocap_pitch <= video_control_data[11:0];
+    end else if (video_control_op == 29 && videocap_pitch_viewport_pending) begin
       videocap_pitch <= video_control_data[11:0];
-    end
-
-    // The committed content width is authoritative after a larger output
-    // canvas has been installed by OP_DIMENSIONS.
-    if (video_control_op == 29) begin
-      // OP_VIEWPORT_SIZE_COMMIT = 29
-      videocap_pitch <= video_control_data[11:0];
+      videocap_pitch_viewport_pending <= 0;
     end
 
     // snoop scanline settings sent over the video-control op path
@@ -3390,17 +3464,34 @@ module MNTZorro_v0_1_S00_AXI
     // formatter, which intentionally ignores this operation.
 
     out_reg0 <= ZORRO3 ? last_z3addr : last_addr;
-    out_reg1 <= zorro_ram_write_data;
-    out_reg2 <= last_z3addr;
+    // REG1 write is the Zorro read-reply data. Its read direction is the
+    // coherent completed line width in words, rounded down to the writeback
+    // burst. [31:16] = 16'h4C48 distinguishes this from older bitstreams,
+    // whose REG1 read was zorro_ram_write_data. [10:0] is the width
+    // (1280 until the first completed frame).
+    out_reg1 <= {16'h4C48, 5'b0, vcap_captured_words[10:0]};
+    // REG2 write is the formatter strobe. Its read direction is the
+    // coherent completed post-crop field row count, so the ARM sizes
+    // short-source DMA from rows writeback actually published. [31:16]
+    // = 16'h4C43 distinguishes this from older bitstreams, whose REG2
+    // read was last_z3addr. [9:0] is that count (0 until the first
+    // field). The raw field total remains on the 0x4E stats word.
+    out_reg2 <= {16'h4C43, 6'b0, vcap_written_field_rows[9:0]};
     // Status: [24] interlace, [23] videocap, [22] NTSC, [21] vblank,
     // [20] hblank, [19] SDK doorbell, [18] SDK IRQ ack, [17] SuperHires,
     // [16] full-rate capture, [15] viewport, [14] native source sync,
-    // [13] diagnostic REG4/REG5 snapshot available.
+    // [13] diagnostic REG4/REG5 snapshot available,
+    // [12] doubled-scan source (31 kHz, one pixel a clock),
+    // [11] short-line source (24 or 31 kHz), [10] the woven frame is
+    // taller than 512 rows; [9:8] woven row-count class for the scanout
+    // factor (0 = 15 kHz; 1 = 256/200-visible shapes; 2 = 400..589;
+    // 3 = 590+, shown x1 and clipped to 512 rows).
     out_reg3 <= {zorro_ram_write_request, zorro_ram_read_request, zorro_ram_write_bytes, ZORRO3,
-                video_control_interlace, videocap_mode, vcap_ntsc, video_control_vblank, video_control_hblank,
+                video_control_interlace, videocap_mode, vcap_live_frame_class[0], video_control_vblank, video_control_hblank,
                 sdk_doorbell_pending, sdk_irq_ack_pending, vcap_shres,
                 (`VCAP_FULLRATE_INT != 0), 1'b1,
-                (`VCAP_FULLRATE_INT != 0), 1'b1, 5'b0, zorro_state};
+                (`VCAP_FULLRATE_INT != 0), 1'b1,
+                vcap_live_frame_class[3:1], vcap_rows_class, zorro_state};
   end
 
   assign slv_reg_rden = axi_arready & S_AXI_ARVALID & ~axi_rvalid;

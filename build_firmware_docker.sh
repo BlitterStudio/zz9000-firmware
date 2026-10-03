@@ -47,6 +47,12 @@ done
 
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
+# Docker Desktop needs a Windows bind-mount path, while MSYS rewrites
+# container paths such as /work unless path conversion is disabled.
+if command -v cygpath >/dev/null 2>&1; then
+  REPO_ROOT="$(cygpath -w "$REPO_ROOT")"
+  export MSYS_NO_PATHCONV=1
+fi
 docker run --rm \
   -v "$REPO_ROOT:/work" \
   -v zz9000-arm-toolchain:/opt/arm-gnu-toolchain \

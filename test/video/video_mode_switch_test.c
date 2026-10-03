@@ -27,6 +27,33 @@ static XAxiVdma_DmaSetup dma_setup;
 static unsigned dma_starts;
 static uint32_t video_irq_enabled = 1;
 static unsigned inject_native_irq, deferred_native_irqs;
+static uint32_t videocap_zstate;
+static uint32_t videocap_live_rows_reg;
+static uint32_t videocap_live_words_reg;
+static int dma_cfg_initialize_status;
+static int dma_config_status;
+static int dma_address_status;
+static int dma_start_status;
+static uint32_t capture_framebuffer[6 * 1280 * 1024];
+int interrupt_enabled_vblank;
+static struct zz_config test_config = {
+	.videocap_output_profile = ZZ_VIDEOCAP_OUTPUT_FULL_60,
+};
+const struct zz_config *zz_config_get(void)
+{
+	return &test_config;
+}
+void Xil_L1DCacheFlush(void) {}
+void Xil_L2CacheFlush(void) {}
+uint32_t overlay_present_bufpos(struct ZZ_VIDEO_STATE *state)
+{
+	return (uint32_t)state->framebuffer + state->framebuffer_pan_offset;
+}
+int overlay_scanout_active(void) { return 0; }
+void overlay_scanout_released(void) {}
+void overlay_vblank_rearm(void) {}
+void overlay_vblank_cache_flushed(void) {}
+void amiga_interrupt_set(uint32_t bit) { (void)bit; }
 
 void test_xil_out32(uintptr_t address, uint32_t value)
 {
@@ -58,11 +85,18 @@ uint32_t test_xil_in32(uintptr_t address)
 		return clock_locked;
 	if (address == XPAR_CLK_WIZ_0_BASEADDR + CLK_WIZ_RECONFIG_OFFSET)
 		return clock_load;
+	if (address == MNTZ_BASE_ADDR + MNTZORRO_REG3)
+		return videocap_zstate;
+	if (address == MNTZ_BASE_ADDR + MNTZORRO_REG2)
+		return videocap_live_rows_reg;
+	if (address == MNTZ_BASE_ADDR + MNTZORRO_REG1)
+		return videocap_live_words_reg;
 	return 0;
 }
 
 uint32_t smp_local_irq_save(void) { return 0; }
 void smp_local_irq_restore(uint32_t state) { (void)state; }
+int videocap_stats_hw_present(void) { return 1; }
 uint32_t video_interrupt_pause(void)
 {
 	uint32_t enabled = video_irq_enabled;
@@ -82,7 +116,7 @@ void usleep(unsigned long useconds)
 		inject_native_irq = 0;
 		if (video_irq_enabled)
 			init_videocap_video_mode(0, 1,
-				ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
+				ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 0);
 		else
 			++deferred_native_irqs;
 	}
@@ -105,26 +139,26 @@ int XAxiVdma_CfgInitialize(XAxiVdma *instance, XAxiVdma_Config *config,
 		UINTPTR address)
 {
 	(void)instance; (void)config; (void)address;
-	return XST_SUCCESS;
+	return dma_cfg_initialize_status;
 }
 int XAxiVdma_DmaConfig(XAxiVdma *instance, u16 direction,
 		XAxiVdma_DmaSetup *config)
 {
 	(void)instance; (void)direction;
 	dma_setup = *config;
-	return XST_SUCCESS;
+	return dma_config_status;
 }
 int XAxiVdma_DmaSetBufferAddr(XAxiVdma *instance, u16 direction,
 		UINTPTR *addresses)
 {
 	(void)instance; (void)direction; (void)addresses;
-	return XST_SUCCESS;
+	return dma_address_status;
 }
 int XAxiVdma_DmaStart(XAxiVdma *instance, u16 direction)
 {
 	(void)instance; (void)direction;
 	++dma_starts;
-	return XST_SUCCESS;
+	return dma_start_status;
 }
 
 XIicPs_Config *XIicPs_LookupConfig(u16 id)
@@ -197,17 +231,64 @@ static uint16_t commit_custom(uint32_t color)
 static void clear_measurements(void)
 {
 	clock_reloads = tmds_interruptions = delay_us = dma_starts = 0;
+	dma_cfg_initialize_status = dma_config_status = dma_address_status =
+		dma_start_status = XST_SUCCESS;
+}
+static void geometry_native_vblank(void)
+{
+	for (unsigned i = 0; i < VIDEO_VIDEOCAP_MODE_STABLE_VBLANKS; ++i)
+		isr_video(NULL);
+}
+
+static void assert_geometry_pending(uint16_t request_serial)
+{
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS, NULL) &
+		ZZ_VCAP_GEOMETRY_STATUS_PENDING);
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_SERIAL, NULL) ==
+		request_serial);
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_SERIAL, NULL) !=
+		request_serial);
 }
 
 int main(void)
 {
+	/* The persisted boot override follows the viewport bit: a legacy
+	 * bitstream keeps the automatic window. */
+	test_config.videocap_width = 640;
+	test_config.videocap_height = 240;
+	test_config.videocap_width_present = 1;
+	test_config.videocap_height_present = 1;
+	video_init();
+	assert(vs.videocap_width_override == 0 &&
+	       vs.videocap_height_override == 0);
+	assert(vs.videocap_geometry_requested_width == 0 &&
+	       vs.videocap_geometry_requested_height == 0);
+	videocap_zstate = MNTZORRO_STATUS_VCAP_VIEWPORT;
+	video_init();
+	assert(vs.videocap_width_override == 640 &&
+	       vs.videocap_height_override == 240);
+	assert(vs.videocap_geometry_requested_width == 640 &&
+	       vs.videocap_geometry_requested_height == 240);
+	assert(vs.videocap_geometry_request_serial == 1);
+	/* Leave the automatic window and the empty config for the rest. */
+	test_config.videocap_width_present = 0;
+	test_config.videocap_height_present = 0;
+	videocap_zstate = 0;
+	video_init();
+	/* The geometry section below counts setter calls from a boot that
+	 * never carried an override. */
+	vs.videocap_geometry_request_serial = 0;
+
 	/* Cold start must initialize the physical output. */
 	video_mode_init(ZZVMODE_1920x1080_60, 0, MNTVA_COLOR_16BIT565);
 	assert(clock_reloads == 1 && tmds_interruptions == 1);
 
 	/* Native has the same 1080p canvas, but a centered x4 capture layout. */
 	clear_measurements();
-	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60);
+	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 0);
 	printf("RTG -> native, same timing: PLL reloads=%u TMDS interruptions=%u explicit waits=%u us\n",
 		clock_reloads, tmds_interruptions, delay_us);
 	fflush(stdout);
@@ -215,6 +296,236 @@ int main(void)
 	assert(vs.vmode_hsize == 1280 && vs.vmode_vsize == 1024 &&
 	       vs.vmode_vdma_rows == 256);
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (1024U << 16 | 1280U));
+
+	clear_measurements();
+	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_FULL_60,
+		VIDEO_VIDEOCAP_SOURCE_SHORT |
+		VIDEO_VIDEOCAP_SOURCE_DOUBLED |
+		VIDEO_VIDEOCAP_ROWS_CLASS_2);
+	assert(vs.vmode_hsize == 1280 && vs.vmode_vsize == 1024 &&
+	       vs.vmode_hdiv == 1 && vs.vmode_vdma_rows == 512);
+	assert(formatter_ops[MNTVF_OP_SCALE] ==
+	       video_formatter_scale_control(3U));
+
+	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 0);
+	/* A native geometry ACK follows the successful VDMA programming, not the
+	 * accepted feature write. Every VDMA failure leaves the request pending;
+	 * the unchanged serial mismatch retries on the next stable vblank. */
+	vs.framebuffer = capture_framebuffer;
+	vs.framebuffer_pan_offset = 0x00dff000;
+	vs.videocap_enabled_old = 1;
+	vs.videocap_video_mode = ZZVMODE_800x600;
+	vs.videocap_video_mode_applied = ZZVMODE_800x600;
+	vs.videocap_output_profile_requested = ZZ_VIDEOCAP_OUTPUT_FULL_60;
+	vs.videocap_output_profile_applied = ZZ_VIDEOCAP_OUTPUT_FULL_60;
+	vs.videocap_full_width_applied = 0;
+	vs.videocap_ntsc_old = vs.videocap_shres_old = 0;
+	vs.videocap_source_class_old = vs.interlace_old = 0;
+	vs.vmode_hsize = 800;
+	vs.vmode_vsize = 600;
+	videocap_detection_reset();
+	videocap_zstate = (1U << 21) | (1U << 23);
+	assert((video_firmware_capabilities() &
+		(ZZ_FW_CAP_VIDEOCAP_GEOMETRY |
+		 ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK)) == 0U);
+	assert(!video_set_videocap_geometry(640, 400));
+	videocap_zstate |= MNTZORRO_STATUS_VCAP_VIEWPORT;
+	assert(video_set_videocap_geometry(640, 400));
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_WIDTH, NULL) == 640);
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS, NULL) ==
+		ZZ_VCAP_GEOMETRY_STATUS_PENDING);
+	dma_cfg_initialize_status = XST_FAILURE;
+	geometry_native_vblank();
+	assert_geometry_pending(1);
+	dma_cfg_initialize_status = XST_SUCCESS;
+	geometry_native_vblank();
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS, NULL) ==
+		ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID);
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_WIDTH, NULL) == 640);
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_HEIGHT, NULL) ==
+		(uint16_t)vs.vmode_vdma_rows);
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_HEIGHT, NULL) != 400);
+	assert(dma_setup.HoriSizeInput == 640 * 4);
+	assert(dma_setup.Stride == 800 * 4);
+	assert(vs.framebuffer_pan_width == 0);
+	assert(video_set_videocap_geometry(656, 416));
+	dma_config_status = XST_FAILURE;
+	geometry_native_vblank();
+	assert_geometry_pending(2);
+	dma_config_status = XST_SUCCESS;
+	geometry_native_vblank();
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_SERIAL, NULL) == 2);
+
+	assert(video_set_videocap_geometry(672, 432));
+	dma_address_status = XST_FAILURE;
+	geometry_native_vblank();
+	assert_geometry_pending(3);
+	dma_address_status = XST_SUCCESS;
+	geometry_native_vblank();
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_SERIAL, NULL) == 3);
+
+	assert(video_set_videocap_geometry(688, 448));
+	dma_start_status = XST_FAILURE;
+	geometry_native_vblank();
+	assert_geometry_pending(4);
+	dma_start_status = XST_SUCCESS;
+	geometry_native_vblank();
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_SERIAL, NULL) == 4);
+
+	/* Each axis independently accepts automatic geometry; an invalid request
+	 * does not perturb the accepted pair or serial. */
+	assert(video_set_videocap_geometry(0, 400));
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_WIDTH, NULL) == 0);
+	geometry_native_vblank();
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_WIDTH, NULL) == 800);
+	/* A width override larger than the active mode pitch is clamped
+	 * to vs.vmode_hsize to protect VDMA stride integrity. */
+	assert(video_set_videocap_geometry(1280, 400));
+	geometry_native_vblank();
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_APPLIED_WIDTH, NULL) == 800);
+	assert(dma_setup.HoriSizeInput == 800 * 4);
+	assert(dma_setup.Stride == 800 * 4);
+
+	assert(!video_set_videocap_geometry(255, 400));
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_SERIAL, NULL) == 6);
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS, NULL) ==
+		(ZZ_VCAP_GEOMETRY_STATUS_APPLIED_VALID |
+		 ZZ_VCAP_GEOMETRY_STATUS_REJECTED));
+	assert((video_firmware_capabilities() &
+		(ZZ_FW_CAP_VIDEOCAP_GEOMETRY |
+		 ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK |
+		 ZZ_FW_CAP_VIDEOCAP_STATS)) ==
+		(ZZ_FW_CAP_VIDEOCAP_GEOMETRY |
+		 ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK |
+		 ZZ_FW_CAP_VIDEOCAP_STATS));
+	/* An accepted request invalidates the ACK even when the 16-bit
+	 * serial wraps onto the applied value. */
+	vs.videocap_geometry_applied_serial = 0xffff;
+	vs.videocap_geometry_request_serial = 0xffff;
+	assert(video_set_videocap_geometry(640, 400));
+	assert(vs.videocap_geometry_request_serial == 0);
+	assert(!vs.videocap_geometry_applied_valid);
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS, NULL) &
+		ZZ_VCAP_GEOMETRY_STATUS_PENDING);
+	/* The viewport and VDMA must agree on the active filtered canvas,
+	 * including restoring Automatic without an output-mode transition. */
+	assert(video_set_videocap_geometry(640, 240));
+	geometry_native_vblank();
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (60U << 16 | 80U));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (480U << 16 | 640U));
+	assert(dma_setup.HoriSizeInput == 640 * 4 &&
+	       dma_setup.Stride == 800 * 4 && dma_setup.VertSizeInput == 240);
+	assert(video_set_videocap_geometry(0, 0));
+	geometry_native_vblank();
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == 0);
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (600U << 16 | 800U));
+	/* 15 kHz filtered 800x600 keeps the tuned origin. A short-line PAL
+	 * field on that same configured base is shown on 720x576 and must
+	 * start at the capture row, not 190 words before it. */
+	assert(vs.framebuffer_pan_offset == VIDEO_VDMA_CAPTURE_PAN_PAL_800X600);
+	videocap_zstate |= 1U << 11;
+	assert(video_set_videocap_geometry(0, 0));
+	geometry_native_vblank();
+	assert(vs.framebuffer_pan_offset == VIDEO_VDMA_CAPTURE_PAN_BASE);
+	assert(dma_setup.Stride == 720 * 4);
+	videocap_zstate &= ~(1U << 11);
+	vs.videocap_source_class_old = 0;
+
+	videocap_zstate |= 1U << 22;
+	assert(video_set_videocap_geometry(640, 200));
+	geometry_native_vblank();
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (40U << 16 | 40U));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (400U << 16 | 640U));
+	assert(dma_setup.Stride == 720 * 4 && dma_setup.VertSizeInput == 200);
+
+	/* Euro72 / DblNTSC class-2 NTSC keeps all 512 scanout rows at x2,
+	 * not the 400 rows consumed by a legacy 800-line letterbox. */
+	vs.videocap_output_profile_requested = ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60;
+	videocap_zstate |= MNTZORRO_STATUS_VCAP_FULLRATE |
+	                  MNTZORRO_STATUS_VCAP_VIEWPORT |
+	                  (1U << 11) | (1U << 12) | (2U << 8);
+	assert(video_set_videocap_geometry(0, 0));
+	geometry_native_vblank();
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (28U << 16 | 320U));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (1024U << 16 | 1280U));
+	assert(dma_setup.VertSizeInput == 512);
+	/* Same class, smaller published field: DMA and viewport follow the
+	 * count, or the bucket tail keeps the previous source. */
+	videocap_live_rows_reg =
+		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 427U;
+	isr_video(NULL);
+	assert(dma_setup.VertSizeInput == 427);
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (113U << 16 | 320U));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] ==
+	       (854U << 16 | 1280U));
+	videocap_live_rows_reg = 0;
+	/* DblPAL fields alternate 287/288. Both clamp to the class-2
+	 * bucket, so the second field must not restart VDMA. */
+	videocap_zstate |= 1U << 24;
+	videocap_live_rows_reg =
+		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 287U;
+	geometry_native_vblank();
+	assert(dma_setup.VertSizeInput == 512);
+	clear_measurements();
+	videocap_live_rows_reg =
+		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 288U;
+	isr_video(NULL);
+	assert(dma_starts == 0);
+	assert(dma_setup.VertSizeInput == 512);
+	/* Euro72 fields alternate 213/214: post-crop published counts
+	 * 195/196 double to 390/392, both below the class-2 bucket, so the
+	 * delta must not restart VDMA either. */
+	videocap_live_rows_reg =
+		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 195U;
+	geometry_native_vblank();
+	assert(dma_setup.VertSizeInput == 390);
+	clear_measurements();
+	videocap_live_rows_reg =
+		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 196U;
+	isr_video(NULL);
+	assert(dma_starts == 0);
+	assert(dma_setup.VertSizeInput == 390);
+	videocap_zstate &= ~(1U << 24);
+	videocap_live_rows_reg = 0;
+	/* Super72 completes its lines before the 1280-word pitch: the
+	 * measured width bounds the fetch and the shown viewport, and an
+	 * unchanged width must not restart VDMA. */
+	videocap_zstate &= ~(1U << 12);
+	videocap_live_words_reg =
+		(MNTZORRO_REG1_LIVE_WORDS_MAGIC << 16) | 1008U;
+	geometry_native_vblank();
+	assert(dma_setup.HoriSizeInput == 1008 * 4);
+	assert(dma_setup.VertSizeInput == 512);
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (28U << 16 | 456U));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] ==
+	       (1024U << 16 | 1008U));
+	clear_measurements();
+	isr_video(NULL);
+	assert(dma_starts == 0);
+	videocap_live_words_reg = 0;
+	videocap_zstate |= 1U << 12;
+	printf("Native geometry: PAL 640x480@(80,60), NTSC 640x400@(40,40), "
+	       "Automatic restored, short NTSC retains 512 rows\n");
+	/* Restore the pre-regression centered native state for the independent
+	 * mode-switch transaction cases below. */
+	vs.videocap_width_override = 0;
+	vs.videocap_height_override = 0;
+	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_60, 0);
 
 	/* DPMS is formatter-owned: the fast path must still restore syncs. */
 	video_set_dpms(ZZ_DPMS_OFF);
@@ -371,7 +682,7 @@ int main(void)
 	assert(clock_reloads == 0 && tmds_interruptions == 1);
 
 	/* custom -> native -> custom round trip. */
-	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_FULL_60);
+	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_FULL_60, 0);
 	assert(vs.video_mode == ZZVMODE_1280x1024_NATIVE_60);
 	assert(formatter_ops[MNTVF_OP_MAX] == (1066U << 16 | 1688U));
 	clear_measurements();
@@ -384,17 +695,21 @@ int main(void)
 	assert(clock_mul_div == (53U << 8 | 4U) && clock_div2 == 25U);
 
 	/* Native output is the rollback target for a failed custom lock. */
-	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_FULL_60);
+	init_videocap_video_mode(0, 1, ZZ_VIDEOCAP_OUTPUT_FULL_60, 0);
 	assert(vs.video_mode == ZZVMODE_1280x1024_NATIVE_60);
 	/* Model a detected progressive NTSC field: rollback must retain both
 	 * its 200-row VDMA contract and the formatter's fractional scale word. */
-	vs.scalemode = (int)video_videocap_scalemode(1, 0);
+	vs.scalemode = (int)video_videocap_scalemode(1, 0, 0);
 	vs.vmode_vdma_rows =
-		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 0);
+		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 0, 0, 0, 0);
 	vs.interlace_old = 0;
-	video_formatter_write(video_videocap_scale_control(1, 1, 0),
+	video_formatter_write(video_videocap_scale_control(1, 1, 0, 0),
 	                      MNTVF_OP_SCALE);
 	init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, 1, 0);
+	/* A native letterbox written after mode init must be the rollback
+	 * target, not the viewport mode init cached. */
+	video_formatter_write((112U << 16) | 0U, MNTVF_OP_VIEWPORT_POS);
+	video_formatter_write((800U << 16) | 1280U, MNTVF_OP_VIEWPORT_SIZE_COMMIT);
 	slot_saved = preset_video_modes[ZZVMODE_CUSTOM];
 
 	/* PLL lock failure: CLOCK_FAILED, old output replayed exactly. */
@@ -411,7 +726,10 @@ int main(void)
 	assert(formatter_ops[MNTVF_OP_DIMENSIONS] == (1024U << 16 | 1280U));
 	assert(formatter_ops[MNTVF_OP_HS] == (1328U << 16 | 1440U));
 	assert(formatter_ops[MNTVF_OP_SCALE] ==
-	       video_videocap_scale_control(1, 1, 0));
+	       video_videocap_scale_control(1, 1, 0, 0));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (112U << 16));
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] ==
+	       (800U << 16 | 1280U));
 	assert(delay_us > CLK_WIZ_LOCK_TIMEOUT_US / 2U); /* bounded poll ran */
 	assert(memcmp(&preset_video_modes[ZZVMODE_CUSTOM], &slot_saved,
 	       sizeof(slot_saved)) == 0);
@@ -437,7 +755,7 @@ int main(void)
 	/* An IRQ must not replace a failed requested PLL with a locked native
 	 * clock, or mutate centered viewport state underneath rollback. */
 	init_videocap_video_mode(0, 1,
-		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH);
+		ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH, 0);
 	uint32_t saved_formatter[32];
 	memcpy(saved_formatter, formatter_ops, sizeof(saved_formatter));
 	XAxiVdma_DmaSetup saved_dma = dma_setup;
@@ -458,11 +776,11 @@ int main(void)
 	assert(memcmp(&dma_setup, &saved_dma, sizeof(saved_dma)) == 0);
 	/* Once capture has enabled source locking, rollback preserves it too.
 	 * Capture may have changed from progressive to woven NTSC after init. */
-	vs.scalemode = (int)video_videocap_scalemode(1, 1);
+	vs.scalemode = (int)video_videocap_scalemode(1, 1, 0);
 	vs.vmode_vdma_rows =
-		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 1);
+		video_videocap_source_rows(vs.vmode_vsize, 1, 1, 1, 0, 0, 0);
 	vs.interlace_old = 1;
-	video_formatter_write(video_videocap_scale_control(1, 1, 1),
+	video_formatter_write(video_videocap_scale_control(1, 1, 1, 0),
 	                      MNTVF_OP_SCALE);
 	init_vdma(vs.vmode_hsize, vs.vmode_vdma_rows, 1, 0);
 	saved_dma = dma_setup;
@@ -472,7 +790,7 @@ int main(void)
 	       ZZ_CUSTOM_STATUS_CLOCK_FAILED);
 	assert(formatter_ops[MNTVF_OP_SOURCE_SYNC] == 1);
 	assert(formatter_ops[MNTVF_OP_SCALE] ==
-	       video_videocap_scale_control(1, 1, 1));
+	       video_videocap_scale_control(1, 1, 1, 0));
 	assert(vs.interlace_old == 1);
 	assert(memcmp(&dma_setup, &saved_dma, sizeof(saved_dma)) == 0);
 
@@ -486,6 +804,20 @@ int main(void)
 	video_custom_select(ZZ_CUSTOM_MODE_SLOT);
 	assert(video_custom_status() == ZZ_CUSTOM_STATUS_IDLE);
 
+	/* Ordinary RTG never installed a viewport. A failed custom lock must
+	 * not write a stale native rectangle over the restored canvas. */
+	video_mode_init(ZZVMODE_1920x1080_60, 0, MNTVA_COLOR_16BIT565);
+	formatter_ops[MNTVF_OP_VIEWPORT_POS] = 0xA5A5A5A5U;
+	formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] = 0xA5A5A5A5U;
+	stage_custom_960(1024, UINT16_MAX);
+	clock_fail_locks = 1;
+	assert(commit_custom(MNTVA_COLOR_32BIT) ==
+	       ZZ_CUSTOM_STATUS_CLOCK_FAILED);
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == 0xA5A5A5A5U);
+	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == 0xA5A5A5A5U);
+	assert(formatter_ops[MNTVF_OP_DIMENSIONS] ==
+	       (((uint32_t)preset_video_modes[ZZVMODE_1920x1080_60].vres << 16) |
+	        (uint32_t)preset_video_modes[ZZVMODE_1920x1080_60].hres));
 	puts("video mode switch: PASS");
 	return 0;
 }

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Exercise the production M01 AXI FSM under capture loss and backpressure.
 
-The FSM, register declarations, output assignments, AXI burst constants and
-sampler read-bank/address connections are extracted from mntzorro.v each run.
-The wrapper supplies only boundary inputs; it contains no replacement FSM.
+The pitch-decode fragment, M01 AXI FSM, declarations, output assignments, AXI
+burst constants, and sampler read-bank/address connections are extracted
+from mntzorro.v; the wrapper supplies only boundary inputs.
 """
+import argparse
 import hashlib
 import os
 from pathlib import Path
@@ -26,8 +27,8 @@ def make_wrapper(source):
                        "  // Diagnostic target selected")
     declaration = between(source, "  reg [11:0] videocap_pitch;",
                           "  reg [31:0] vcap_probe_data [0:15];")
-    # Pitch is an externally supplied mode input in this isolated wrapper.
-    declaration = declaration.replace("  reg [11:0] videocap_pitch;", "", 1)
+    pitch_tracker = between(source, "    // OP_DIMENSIONS establishes the writeback pitch.",
+                            "    // snoop scanline settings sent over the video-control op path")
     fsm = between(source, "  reg [9:0] videocap_x_sync;",
                   "  // Snapshot the exact WDATA values accepted")
     outputs = between(source, "  assign m01_axi_awaddr  =",
@@ -45,7 +46,9 @@ module extracted_videocap_writeback (
     input S_AXI_ACLK, input m01_axi_aresetn,
     input vcap_capture_ready_axi, input [11:0] vcap_line_payload_axi,
     input videocap_mode, input [31:0] videocap_address,
-    input [11:0] videocap_pitch, input videocap_control_applied_full_width,
+    input [7:0] video_control_op, input [31:0] video_control_data,
+    input S_AXI_ARESETN, input z_reset,
+    input videocap_control_applied_full_width,
     input m01_axi_awready, input m01_axi_wready, input [31:0] vcap_rdata,
     output [31:0] m01_axi_awaddr, output m01_axi_awvalid,
     output [31:0] m01_axi_wdata, output [3:0] m01_axi_wstrb,
@@ -59,15 +62,26 @@ module extracted_videocap_writeback (
 wire vcap_interlace = 1'b0;
 wire [10:0] vcap_y = 0;
 wire [10:0] vcap_ymax = 512;
+/* The production FSM reads the AXI-side live snapshot, which this
+ * extract does not instantiate.  Progressive 512 matches the old
+ * vcap_ymax stub the writeback cases were written against. */
+wire [4:0] vcap_live_frame_class = 5'b0;
+wire [9:0] vcap_live_line_count = 10'd512;
+wire [10:0] vcap_woven_rows = 11'd512;
 reg video_control_interlace;
 """
     return (prefix + geometry + declaration + read_address + "\n" + outputs +
-            "always @(posedge S_AXI_ACLK) begin\n" + constants + fsm +
+            "always @(posedge S_AXI_ACLK) begin\n" + constants +
+            "always @(posedge S_AXI_ACLK) begin\n" + pitch_tracker + "\n  end\n" + fsm +
             f"assign memory_bank = {bank};\nassign memory_address = {address};\n" +
             "assign state = videocap_save_state;\nassign beat = vc_beat;\nendmodule\n")
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--verilator", action="store_true",
+                        help="run with Verilator instead of Vivado xsim")
+    args = parser.parse_args()
     source = (ROOT / "mntzorro.v").read_text(encoding="utf-8")
     wrapper = make_wrapper(source)
     simdir = HERE / "build" / "sim_videocap_writeback"
@@ -78,21 +92,40 @@ def main():
     vivado_bin = Path(os.environ.get("VIVADO_BIN", default))
     suffix = ".bat" if os.name == "nt" else ""
 
-    def run(name, *args):
+    def run(command, timeout=120, log=None):
         result = subprocess.run(
-            [str(vivado_bin / (name + suffix)), *map(str, args)], cwd=simdir,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120,
+            [str(arg) for arg in command], cwd=simdir,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout,
         )
-        (simdir / (name + ".log")).write_text(result.stdout, encoding="utf-8")
+        if log:
+            (simdir / log).write_text(result.stdout, encoding="utf-8")
         if result.returncode:
             print(result.stdout)
             result.check_returncode()
         return result.stdout
 
-    run("xvlog", "extracted_videocap_writeback.v", ROOT / "videocap_writeback_layout.v",
-        HERE / "videocap_writeback_tb.v")
-    run("xelab", "work.videocap_writeback_tb", "-s", "videocap_writeback_tb")
-    output = run("xsim", "videocap_writeback_tb", "--runall")
+    def run_vivado(name, *args):
+        return run(
+            [vivado_bin / (name + suffix), *args],
+            log=name + ".log",
+        )
+
+    if args.verilator:
+        build = simdir / "verilator"
+        run(
+            ["verilator", "--binary", "--timing", "-Wno-fatal", "-Wno-WIDTH",
+             "--top-module", "videocap_writeback_tb", "--Mdir", build,
+             simdir / "extracted_videocap_writeback.v",
+             ROOT / "videocap_writeback_layout.v",
+             HERE / "videocap_writeback_tb.v"],
+            timeout=300, log="verilator-build.log",
+        )
+        output = run([build / "Vvideocap_writeback_tb"])
+    else:
+        run_vivado("xvlog", "extracted_videocap_writeback.v", ROOT / "videocap_writeback_layout.v",
+                   HERE / "videocap_writeback_tb.v")
+        run_vivado("xelab", "work.videocap_writeback_tb", "-s", "videocap_writeback_tb")
+        output = run_vivado("xsim", "videocap_writeback_tb", "--runall")
     for line in output.splitlines():
         if line.startswith(("CASE ", "MISMATCH ", "RESULT ")):
             print(line)

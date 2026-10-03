@@ -7,9 +7,11 @@
  */
 module videocap_writeback_tb;
     localparam [31:0] BASE = 32'h08000000;
-    localparam integer PITCH = 32;
+    integer expected_pitch = 32;
     reg clk = 0, resetn = 0, capture_ready = 0;
     reg [11:0] token = 0;
+    reg [7:0] video_control_op = 0;
+    reg [31:0] video_control_data = 0;
     reg awready = 0, wready = 0;
     wire [31:0] awaddr, wdata;
     wire awvalid, wvalid, wlast;
@@ -42,8 +44,10 @@ module videocap_writeback_tb;
 
     extracted_videocap_writeback dut (
         .S_AXI_ACLK(clk), .m01_axi_aresetn(resetn),
+        .S_AXI_ARESETN(1'b1), .z_reset(1'b0),
         .vcap_capture_ready_axi(capture_ready), .vcap_line_payload_axi(token),
-        .videocap_mode(1'b1), .videocap_address(BASE), .videocap_pitch(12'd32),
+        .videocap_mode(1'b1), .videocap_address(BASE),
+        .video_control_op(video_control_op), .video_control_data(video_control_data),
         .videocap_control_applied_full_width(1'b1),
         .m01_axi_awready(awready), .m01_axi_wready(wready), .vcap_rdata(memory_data),
         .m01_axi_awaddr(awaddr), .m01_axi_awvalid(awvalid),
@@ -86,6 +90,21 @@ module videocap_writeback_tb;
         begin repeat (count) begin @(posedge clk); #0.001; end end
     endtask
 
+    task send_video_control;
+        input [7:0] op;
+        input [31:0] data;
+        begin
+            @(negedge clk);
+            video_control_op = op;
+            video_control_data = data;
+            clocks(1);
+            @(negedge clk);
+            video_control_op = 0;
+            video_control_data = 0;
+            clocks(2); /* let the production pitch register reach its AXI sync */
+        end
+    endtask
+
     task publish_row;
         input integer row_number, bank_number;
         begin
@@ -122,7 +141,7 @@ module videocap_writeback_tb;
                 require(!outstanding, "only one write-data burst is outstanding");
                 require(awlen == 15 && awsize == 2 && awburst == 1,
                     "production AW attributes describe sixteen incrementing 32-bit beats");
-                require(awaddr == BASE + 4 * (expected_row * PITCH + row_bursts * 16),
+                require(awaddr == BASE + 4 * (expected_row * expected_pitch + row_bursts * 16),
                     "AW address belongs to the frozen row and sequential burst");
                 outstanding = 1;
                 burst_row = expected_row;
@@ -302,6 +321,8 @@ module videocap_writeback_tb;
     end
 
     initial begin
+        send_video_control(8'd2, 32'd32);
+        send_video_control(8'd29, 32'd16); /* ordinary-mode viewport must not replace pitch */
         $display("CASE loss with AW pending in state 3 and W stalled before/after loss");
         start_case(5, 1);
         /* Let a newer completed-row token advance the handoff pipeline
@@ -390,6 +411,16 @@ module videocap_writeback_tb;
         $display("CASE selected final RAM word overwritten while WLAST is stalled");
         overwrite_stalled_word(23, 0, 15);
 
+        $display("CASE centered viewport shrink preserves capture row pitch");
+        send_video_control(8'd2, 32'h04388780); /* 1920 canvas, container flag */
+        send_video_control(8'd29, 32'h04000500); /* initial 1280-word content */
+        send_video_control(8'd29, 32'h04000280); /* doubled viewport is 640 */
+        expected_pitch = 1280;
+        start_case(2, 0);
+        require(awaddr == BASE + 32'h00002800,
+            "640-word viewport keeps row 2 at the 1280-word capture pitch");
+        @(negedge clk); capture_ready = 0;
+        drain_and_check_invalid();
         if (failures)
             $display("RESULT FAIL writeback: %0d failures / %0d checks", failures, checks);
         else

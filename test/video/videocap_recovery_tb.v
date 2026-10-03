@@ -15,14 +15,15 @@ module videocap_recovery_tb;
     reg [3:0] cal_metadata_address = 0;
     wire [31:0] cal_status, cal_data, cal_geometry;
     wire [31:0] cal_metadata_data;
+    wire [31:0] live_effective_crop;
     wire capture_ready, line_toggle, anchor_toggle;
     wire [10:0] cap_x, cap_y;
     wire cap_ntsc, cap_interlace;
     reg request_event = 0;
     reg [31:0] request_raw = 0;
     wire control_send, control_received, control_busy, applied_valid;
-    wire [27:0] control_payload;
-    wire [31:0] applied_raw, applied_effective;
+    wire [28:0] control_payload;
+    wire [31:0] applied_raw;
     integer checks = 0, failures = 0, line_events = 0, anchor_events = 0;
     reg last_line = 0, last_anchor = 0;
     integer old_lines, old_anchors;
@@ -41,8 +42,7 @@ module videocap_recovery_tb;
         .request_raw(request_raw), .request_token_valid(1'b1),
         .control_received(control_received), .control_send(control_send),
         .control_payload(control_payload), .busy(control_busy),
-        .applied_valid(applied_valid), .applied_raw(applied_raw),
-        .applied_effective_crop(applied_effective)
+        .applied_valid(applied_valid), .applied_raw(applied_raw)
     );
 
     videocap_sampler #(.BUF_DEPTH(2048), .RGB_MODE(0),
@@ -52,6 +52,7 @@ module videocap_recovery_tb;
         .vcap_g(pins[15:8]), .vcap_b(pins[7:0]), .grid_ref(grid_ref),
         .ctl_send(control_send), .ctl_payload(control_payload),
         .ctl_received(control_received), .ctl_read_full_width(applied_raw[2]),
+        .live_effective_crop(live_effective_crop),
         .cap_x(cap_x), .cap_y(cap_y), .cap_ntsc(cap_ntsc),
         .cap_interlace(cap_interlace), .cap_line_toggle(line_toggle),
         .cap_frame_anchor_toggle(anchor_toggle),
@@ -171,7 +172,7 @@ module videocap_recovery_tb;
             require(!control_busy && applied_valid, "configuration handshake completes after recovery boundary");
             require(applied_raw == ((v << 16) | (h << 4) | (full_width << 2) | sample_mode),
                 "acknowledged control retains crop, width and sampling mode");
-            require(applied_effective == ((v << 16) | h), "effective crop readback survives recovery");
+            require(live_effective_crop == ((v << 16) | h), "effective crop readback survives recovery");
         end
     endtask
 
@@ -197,7 +198,7 @@ module videocap_recovery_tb;
         input full_width;
         input [1:0] sample_mode;
         integer tries, index, row, word_index, x, y;
-        reg [31:0] expected, identity, timing, context;
+        reg [31:0] expected, identity, timing, row_context;
         reg [15:0] first_timestamp;
         begin
             tries = 0;
@@ -217,18 +218,18 @@ module videocap_recovery_tb;
                 @(negedge axi_clk); cal_metadata_address = word_index + 1;
                 @(posedge axi_clk); #0.001; timing = cal_metadata_data;
                 @(negedge axi_clk); cal_metadata_address = word_index + 2;
-                @(posedge axi_clk); #0.001; context = cal_metadata_data;
+                @(posedge axi_clk); #0.001; row_context = cal_metadata_data;
                 require(identity[31], "row metadata has prior-line timing history");
                 require(identity[30], "row metadata saw the external capture grid");
                 require(identity[26:16] == v + 64 + row,
                     "row metadata identifies the exact captured raw source row");
                 require(timing[15:0] == 16'd1816,
                     "row metadata preserves the accepted line-edge interval");
-                require(context[31:20] == 12'd1815,
+                require(row_context[31:20] == 12'd1815,
                     "row metadata preserves the pre-reset sample counter");
-                require(context[19:8] == 12'd1815,
+                require(row_context[19:8] == 12'd1815,
                     "row metadata preserves the pre-reset phase counter");
-                require(context[6:0] == {full_width, sample_mode, 1'b1, 1'b0, 2'b00},
+                require(row_context[6:0] == {full_width, sample_mode, 1'b1, 1'b0, 2'b00},
                     "row metadata preserves the active sampler configuration");
                 if (row == 0)
                     first_timestamp = timing[31:16];
@@ -366,14 +367,14 @@ module videocap_recovery_tb;
         drive_field(262, 90);
         require(applied_valid && !control_busy,
             "auto configuration acknowledged at the field boundary");
-        require(applied_effective == ((12'd40 << 16) | 12'd278),
-            "auto commit resolves H 278 with the PAL vertical default");
         /* One clean field for the re-resolution, then freeze: NTSC V 39. */
         drive_field(262, 95);
         arm();
         drive_field(262, 100);
         require(cal_geometry == ((12'd39 << 12) | 12'd278),
             "NTSC detection re-resolves the automatic vertical crop to 39");
+        require(live_effective_crop == ((12'd39 << 16) | 12'd278),
+            "live crop readback follows the NTSC automatic crop");
         check_snapshot(278, 39, 100, 1'b1, 1'b1, 2'd0);
         /* Two PAL fields settle the detector, a third applies V 40. */
         drive_field(312, 105);
@@ -383,6 +384,8 @@ module videocap_recovery_tb;
         drive_field(312, 120);
         require(cal_geometry == ((12'd40 << 12) | 12'd278),
             "PAL detection restores the automatic vertical crop to 40");
+        require(live_effective_crop == ((12'd40 << 16) | 12'd278),
+            "live crop readback follows the PAL automatic crop");
         check_snapshot(278, 40, 120, 1'b0, 1'b1, 2'd0);
 
         if (failures)

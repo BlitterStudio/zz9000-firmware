@@ -6,6 +6,9 @@
 #include <stdint.h>
 
 int overlay_hw_supported(void);
+/* 1 on the current-bitstream image, 0 on the legacy-bitstream ELF.
+ * REG_ZZ_VIDEOCAP_STATS exists only in RTL paired with the current image. */
+int videocap_stats_hw_present(void);
 void overlay_hw_stop(void);
 int overlay_hw_start(uint32_t src_addr, uint32_t src_pitch,
                      uint16_t width, uint16_t height,

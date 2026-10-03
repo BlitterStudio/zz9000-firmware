@@ -63,3 +63,5 @@ if ! grep -q '^RESULT PASS RGB topology:' "$variant_build/run.log" ||
     exit 1
 fi
 grep '^RESULT PASS RGB topology:' "$variant_build/run.log"
+
+python3 "$ROOT/test/video/run_videocap_writeback_sim.py" --verilator
