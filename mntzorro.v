@@ -1338,6 +1338,15 @@ module MNTZorro_v0_1_S00_AXI
   wire [31:0] videocap_control_applied_raw;
   wire [31:0] vcap_live_effective_crop;
   wire [9:0] vcap_live_line_count;
+  /* Writeback publishes a row only after raw_y passes crop_v, and the
+   * first of those is the sentinel (cap_y advances before the token is
+   * valid). Completed destination rows are therefore field_lines -
+   * crop_v - 2. Row class keeps the raw field count. */
+  wire [11:0] vcap_written_field_rows =
+      ({2'b0, vcap_live_line_count} >
+       vcap_live_effective_crop[27:16] + 12'd2) ?
+      ({2'b0, vcap_live_line_count} -
+       vcap_live_effective_crop[27:16] - 12'd2) : 12'd0;
   wire [4:0] vcap_live_frame_class;
   wire videocap_control_applied_full_width =
       videocap_control_applied_raw[2];
@@ -3435,12 +3444,12 @@ module MNTZorro_v0_1_S00_AXI
     out_reg0 <= ZORRO3 ? last_z3addr : last_addr;
     out_reg1 <= zorro_ram_write_data;
     // REG2 write is the formatter strobe. Its read direction is the
-    // coherent completed-field line count, so the ARM sizes short-source
-    // DMA from the rows actually captured rather than the class bucket.
-    // [31:16] = 16'h4C43 distinguishes this from older bitstreams, whose
-    // REG2 read was last_z3addr. [9:0] is the field count (0 until the
-    // first completed field). last_z3addr remains in out_reg0 on Z3.
-    out_reg2 <= {16'h4C43, 6'b0, vcap_live_line_count};
+    // coherent completed post-crop field row count, so the ARM sizes
+    // short-source DMA from rows writeback actually published. [31:16]
+    // = 16'h4C43 distinguishes this from older bitstreams, whose REG2
+    // read was last_z3addr. [9:0] is that count (0 until the first
+    // field). The raw field total remains on the 0x4E stats word.
+    out_reg2 <= {16'h4C43, 6'b0, vcap_written_field_rows[9:0]};
     // Status: [24] interlace, [23] videocap, [22] NTSC, [21] vblank,
     // [20] hblank, [19] SDK doorbell, [18] SDK IRQ ack, [17] SuperHires,
     // [16] full-rate capture, [15] viewport, [14] native source sync,

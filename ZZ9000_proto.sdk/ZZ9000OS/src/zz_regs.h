@@ -231,6 +231,12 @@ enum zz_reg_offsets {
  * upper half. Older firmware reports 0 here: drivers without the bit
  * must stay on the preset-only path.
  *
+ * Bits 8 and 10 are dynamic, like the centered profiles: firmware
+ * advertises the capture-window override and its ACK only when the
+ * loaded bitstream exposes the viewport path. A legacy image keeps
+ * REG3 bit 15 clear and must not be told that a narrowed window will
+ * be applied. Drivers require bits 8 and 10 together.
+ *
  * Bit 8 is the capture-window override (videocap_width / videocap_height):
  * CARD_FEATURE_VIDEOCAP_GEOMETRY accepts (height << 16) | width at a
  * frame boundary and the scanout letterboxes the smaller window. Older
@@ -243,13 +249,12 @@ enum zz_reg_offsets {
  * The current-bitstream image ORs it at runtime; it is not part of the
  * unconditional mask. Bit 10 adds the native-vblank ACK contract:
  * queries 28--34 report requested and successfully applied VDMA
- * geometry, serials, and status. Drivers require bits 8 and 10 together.
+ * geometry, serials, and status.
  */
 #define ZZ_FW_CAPABILITIES \
   (ZZ_FW_CAP_VIDEOCAP_PROFILE | ZZ_FW_CAP_VIDEOCAP_LIVE | \
    ZZ_FW_CAP_Z2_APERTURE_LAYOUT | ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN | \
-   ZZ_FW_CAP_CUSTOM_MODE | ZZ_FW_CAP_VIDEOCAP_GEOMETRY | \
-   ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK)
+   ZZ_FW_CAP_CUSTOM_MODE)
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,

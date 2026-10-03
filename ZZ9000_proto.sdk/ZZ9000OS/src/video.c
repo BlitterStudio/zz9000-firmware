@@ -381,7 +381,9 @@ int video_set_videocap_vsync(uint32_t setting)
 
 int video_set_videocap_geometry(uint16_t width, uint16_t height)
 {
-	if (!videocap_geometry_valid(width, height)) {
+	if ((mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) &
+			MNTZORRO_STATUS_VCAP_VIEWPORT) == 0U ||
+			!videocap_geometry_valid(width, height)) {
 		vs.videocap_geometry_rejected = 1;
 		return 0;
 	}
@@ -451,6 +453,9 @@ uint32_t video_firmware_capabilities(void)
 	uint32_t fullrate_capable =
 		!!(zstate & MNTZORRO_STATUS_VCAP_FULLRATE);
 	uint32_t capabilities = ZZ_FW_CAPABILITIES;
+	if (viewport_layout_capable)
+		capabilities |= ZZ_FW_CAP_VIDEOCAP_GEOMETRY |
+		                ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK;
 	if (videocap_stats_hw_present())
 		capabilities |= ZZ_FW_CAP_VIDEOCAP_STATS;
 
@@ -772,13 +777,27 @@ void isr_video(void *dummy) {
 					videocap_reset = 1;
 				}
 
+				uint32_t videocap_source_rows =
+						video_videocap_source_rows(
+							vs.vmode_vsize,
+							(uint32_t)videocap_full_width,
+							(uint32_t)videocap_ntsc,
+							(uint32_t)interlace,
+							(uint32_t)videocap_source_class,
+							vs.videocap_height_override,
+							videocap_live_rows);
+				/* Compare the resolved DMA height, not the raw field
+				 * count. Interlaced short fields alternate N/N+1
+				 * while the clamped woven count stays put;
+				 * restarting on the raw count blanks a stable
+				 * picture every field. */
 				if (videocap_detection_stable &&
 						(interlace != vs.interlace_old || videocap_reset ||
 						 !vs.videocap_geometry_applied_valid ||
 						 vs.videocap_geometry_applied_serial !=
 							vs.videocap_geometry_request_serial ||
 						 (videocap_live_rows != 0U &&
-						  (int)videocap_live_rows !=
+						  (int)videocap_source_rows !=
 							videocap_rows_applied))) {
 					if (videocap_output_profile ==
 					    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH)
@@ -789,15 +808,6 @@ void isr_video(void *dummy) {
 							(uint32_t)interlace,
 							(uint32_t)videocap_source_class);
 					vs.scalemode = (int)videocap_scalemode;
-					uint32_t videocap_source_rows =
-							video_videocap_source_rows(
-								vs.vmode_vsize,
-								(uint32_t)videocap_full_width,
-								(uint32_t)videocap_ntsc,
-								(uint32_t)interlace,
-								(uint32_t)videocap_source_class,
-								vs.videocap_height_override,
-								videocap_live_rows);
 					vs.vmode_vdma_rows = videocap_source_rows;
 					/* The mode-change trigger above may have run
 					 * several vblanks earlier; a host driver pan
@@ -874,7 +884,7 @@ void isr_video(void *dummy) {
 							(u32)vs.framebuffer + vs.framebuffer_pan_offset) ==
 						XST_SUCCESS) {
 						videocap_geometry_commit(geometry_width, geometry_height);
-						videocap_rows_applied = (int)videocap_live_rows;
+						videocap_rows_applied = (int)videocap_source_rows;
 					}
 					vs.framebuffer_pan_width = 0;
 					video_formatter_valign();

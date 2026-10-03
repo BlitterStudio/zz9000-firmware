@@ -20,8 +20,9 @@
 #define MNTZORRO_REG7 28
 /* Read direction of REG2 (write direction remains the formatter strobe).
  * [31:16] is the magic below on bitstreams that publish the coherent
- * completed-field line count; older images return last_z3addr and must
- * be ignored. [9:0] is that field count, 0 until the first field. */
+ * completed post-crop field row count; older images return last_z3addr
+ * and must be ignored. [9:0] is that count (field lines minus the
+ * vertical crop and the unpublished sentinel), 0 until the first field. */
 #define MNTZORRO_REG2_LIVE_ROWS_MAGIC 0x4C43U
 #define MNTZORRO_REG2_LIVE_ROWS_MASK  0x3ffU
 

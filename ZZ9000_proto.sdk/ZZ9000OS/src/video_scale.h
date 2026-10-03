@@ -278,11 +278,12 @@ static inline uint32_t video_videocap_source_rows(uint32_t content_height,
 			video_vertical_scale_factor(
 				video_videocap_scalemode(full_width, interlace,
 					source_class));
-	/* The sampler publishes the completed field line count. A short
-	 * source smaller than its class bucket must DMA that count: the
-	 * tail of a 256/512-row fetch is the previous source. Interlaced
-	 * capture stores both fields at stride 2, so the field count is
-	 * doubled. Zero means no count has been published yet. */
+	/* captured_rows is the completed post-crop field row count (REG2),
+	 * not the raw field total. A short source smaller than its class
+	 * bucket must DMA that count: the tail of a 256/512-row fetch is
+	 * the previous source. Interlaced capture stores both fields at
+	 * stride 2, so the field count is doubled. Zero means no count
+	 * has been published yet. */
 	if ((source_class & VIDEO_VIDEOCAP_SOURCE_SHORT) != 0U &&
 			captured_rows != 0U) {
 		uint32_t measured = captured_rows;

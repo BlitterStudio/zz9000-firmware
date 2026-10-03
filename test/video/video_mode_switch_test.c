@@ -295,6 +295,11 @@ int main(void)
 	vs.vmode_vsize = 600;
 	videocap_detection_reset();
 	videocap_zstate = (1U << 21) | (1U << 23);
+	assert((video_firmware_capabilities() &
+		(ZZ_FW_CAP_VIDEOCAP_GEOMETRY |
+		 ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK)) == 0U);
+	assert(!video_set_videocap_geometry(640, 400));
+	videocap_zstate |= MNTZORRO_STATUS_VCAP_VIEWPORT;
 	assert(video_set_videocap_geometry(640, 400));
 	assert(video_videocap_geometry_value(
 		ZZ_CONFIG_KEY_VCAP_GEOMETRY_REQUEST_WIDTH, NULL) == 640);
@@ -428,6 +433,21 @@ int main(void)
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (113U << 16 | 320U));
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] ==
 	       (854U << 16 | 1280U));
+	videocap_live_rows_reg = 0;
+	/* DblPAL fields alternate 287/288. Both clamp to the class-2
+	 * bucket, so the second field must not restart VDMA. */
+	videocap_zstate |= 1U << 24;
+	videocap_live_rows_reg =
+		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 287U;
+	geometry_native_vblank();
+	assert(dma_setup.VertSizeInput == 512);
+	clear_measurements();
+	videocap_live_rows_reg =
+		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 288U;
+	isr_video(NULL);
+	assert(dma_starts == 0);
+	assert(dma_setup.VertSizeInput == 512);
+	videocap_zstate &= ~(1U << 24);
 	videocap_live_rows_reg = 0;
 	printf("Native geometry: PAL 640x480@(80,60), NTSC 640x400@(40,40), "
 	       "Automatic restored, short NTSC retains 512 rows\n");
