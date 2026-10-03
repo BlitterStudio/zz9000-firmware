@@ -238,9 +238,11 @@ enum zz_reg_offsets {
  * be applied. Drivers require bits 8 and 10 together.
  *
  * Bit 8 is the capture-window override (videocap_width / videocap_height):
- * CARD_FEATURE_VIDEOCAP_GEOMETRY accepts (height << 16) | width at a
- * frame boundary and the scanout letterboxes the smaller window. Older
- * firmware ignores the feature; drivers gate the calibration UI on it.
+ * the caller first stages the width (captured words) in REG_ZZ_USER2,
+ * then writes the feature with the height as the 16-bit value; the
+ * pair applies at the next stable frame boundary and the scanout
+ * letterboxes the smaller window. Older firmware ignores the feature;
+ * drivers gate the calibration UI on it.
  *
  * Bit 9 is live videocap stats: REG_ZZ_VIDEOCAP_STATS (0x4E) returns
  * {12'h0, cap_ymax[9:0]}; the low ten bits are the live line count and
@@ -262,9 +264,10 @@ enum zz9k_card_features {
   CARD_FEATURE_NONSTANDARD_VSYNC,
   CARD_FEATURE_VIDEO_OVERLAY,
   CARD_FEATURE_DPMS,
-  /* Capture-window override (ZZTop calibration): value packs
-   * (height << 16) | width in captured words, both validated by
-   * video_scale.h; 0 restores the automatic window. Gated by
+  /* Capture-window override (ZZTop calibration): REG_ZZ_USER2 stages
+   * the width and the feature value carries the height, both in
+   * captured words / source lines and validated by video_scale.h;
+   * 0/0 restores the automatic window. Gated by
    * ZZ_FW_CAP_VIDEOCAP_GEOMETRY. */
   CARD_FEATURE_VIDEOCAP_GEOMETRY,
   CARD_FEATURE_NUM,
