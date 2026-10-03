@@ -787,18 +787,26 @@ void isr_video(void *dummy) {
 							vs.videocap_height_override,
 							videocap_live_rows);
 				/* Compare the resolved DMA height, not the raw field
-				 * count. Interlaced short fields alternate N/N+1
-				 * while the clamped woven count stays put;
-				 * restarting on the raw count blanks a stable
-				 * picture every field. */
+				 * count. Interlaced short fields alternate N/N+1,
+				 * which resolves to heights two rows apart; both
+				 * the clamped bucket and that alternation must
+				 * stay quiet, or a stable picture blanks every
+				 * field. A real source change moves tens of rows
+				 * or crosses a class bucket. */
+				int videocap_rows_delta =
+					(int)videocap_source_rows -
+					videocap_rows_applied;
+				int videocap_rows_changed = interlace
+					? (videocap_rows_delta > 2 ||
+					   videocap_rows_delta < -2)
+					: (videocap_rows_delta != 0);
 				if (videocap_detection_stable &&
 						(interlace != vs.interlace_old || videocap_reset ||
 						 !vs.videocap_geometry_applied_valid ||
 						 vs.videocap_geometry_applied_serial !=
 							vs.videocap_geometry_request_serial ||
 						 (videocap_live_rows != 0U &&
-						  (int)videocap_source_rows !=
-							videocap_rows_applied))) {
+						  videocap_rows_changed))) {
 					if (videocap_output_profile ==
 					    ZZ_VIDEOCAP_OUTPUT_CENTERED_1080P_MATCH)
 						video_formatter_write(0, MNTVF_OP_SOURCE_SYNC);

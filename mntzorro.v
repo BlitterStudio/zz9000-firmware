@@ -1342,11 +1342,28 @@ module MNTZorro_v0_1_S00_AXI
    * first of those is the sentinel (cap_y advances before the token is
    * valid). Completed destination rows are therefore field_lines -
    * crop_v - 2. Row class keeps the raw field count. */
-  wire [11:0] vcap_written_field_rows =
+  wire [11:0] vcap_written_field_rows_crop =
       ({2'b0, vcap_live_line_count} >
        vcap_live_effective_crop[27:16] + 12'd2) ?
       ({2'b0, vcap_live_line_count} -
        vcap_live_effective_crop[27:16] - 12'd2) : 12'd0;
+`ifdef VCAP_DENISE_ADAPTER
+  /* The Denise y-sync letterbox consumes tokens past its bound without
+   * writing them (progressive lines - 36, interlaced woven - 80, i.e.
+   * 40 per field), so the published count takes the same cutoff. The
+   * subtraction wraps below the bound exactly as videocap_ymax_sync
+   * does; the min then keeps the crop-limited count, matching what the
+   * token filter actually accepts. */
+  wire [11:0] vcap_denise_field_bound =
+      vcap_live_frame_class[4] ? 12'd40 : 12'd36;
+  wire [11:0] vcap_written_field_rows =
+      (vcap_written_field_rows_crop <
+       {2'b0, vcap_live_line_count} - vcap_denise_field_bound) ?
+      vcap_written_field_rows_crop :
+      ({2'b0, vcap_live_line_count} - vcap_denise_field_bound);
+`else
+  wire [11:0] vcap_written_field_rows = vcap_written_field_rows_crop;
+`endif
   wire [4:0] vcap_live_frame_class;
   wire videocap_control_applied_full_width =
       videocap_control_applied_raw[2];

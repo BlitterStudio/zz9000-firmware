@@ -447,6 +447,19 @@ int main(void)
 	isr_video(NULL);
 	assert(dma_starts == 0);
 	assert(dma_setup.VertSizeInput == 512);
+	/* Euro72 fields alternate 213/214: post-crop published counts
+	 * 195/196 double to 390/392, both below the class-2 bucket, so the
+	 * delta must not restart VDMA either. */
+	videocap_live_rows_reg =
+		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 195U;
+	geometry_native_vblank();
+	assert(dma_setup.VertSizeInput == 390);
+	clear_measurements();
+	videocap_live_rows_reg =
+		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 196U;
+	isr_video(NULL);
+	assert(dma_starts == 0);
+	assert(dma_setup.VertSizeInput == 390);
 	videocap_zstate &= ~(1U << 24);
 	videocap_live_rows_reg = 0;
 	printf("Native geometry: PAL 640x480@(80,60), NTSC 640x400@(40,40), "
