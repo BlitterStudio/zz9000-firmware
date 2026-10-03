@@ -409,6 +409,16 @@ int main(void)
 		(ZZ_FW_CAP_VIDEOCAP_GEOMETRY |
 		 ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK |
 		 ZZ_FW_CAP_VIDEOCAP_STATS));
+	/* An accepted request invalidates the ACK even when the 16-bit
+	 * serial wraps onto the applied value. */
+	vs.videocap_geometry_applied_serial = 0xffff;
+	vs.videocap_geometry_request_serial = 0xffff;
+	assert(video_set_videocap_geometry(640, 400));
+	assert(vs.videocap_geometry_request_serial == 0);
+	assert(!vs.videocap_geometry_applied_valid);
+	assert(video_videocap_geometry_value(
+		ZZ_CONFIG_KEY_VCAP_GEOMETRY_STATUS, NULL) &
+		ZZ_VCAP_GEOMETRY_STATUS_PENDING);
 	/* The viewport and VDMA must agree on the active filtered canvas,
 	 * including restoring Automatic without an output-mode transition. */
 	assert(video_set_videocap_geometry(640, 240));

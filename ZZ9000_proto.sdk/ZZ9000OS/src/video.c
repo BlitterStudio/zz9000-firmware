@@ -404,6 +404,10 @@ int video_set_videocap_geometry(uint16_t width, uint16_t height)
 	vs.videocap_width_override = width;
 	vs.videocap_height_override = height;
 	vs.videocap_geometry_rejected = 0;
+	/* Every accepted request invalidates the ACK: the 16-bit serial
+	 * wraps after 65536 updates and can alias the applied value, so
+	 * validity — not the serial alone — must gate the reconfigure. */
+	vs.videocap_geometry_applied_valid = 0;
 	/* Serial last: the ISR must not ACK a mixed width/height pair. */
 	vs.videocap_geometry_request_serial++;
 	smp_local_irq_restore(irq_state);
