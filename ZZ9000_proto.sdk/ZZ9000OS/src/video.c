@@ -168,12 +168,21 @@ struct ZZ_VIDEO_STATE* video_init() {
 		vs.card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = cfg->ns_vsync;
 		vs.scandoubler_mode_adjust = (cfg->ns_vsync == 2) ? 2 : 0;
 	}
-	if (cfg->videocap_width_present &&
-			video_videocap_width_valid(cfg->videocap_width))
-		vs.videocap_width_override = cfg->videocap_width;
-	if (cfg->videocap_height_present &&
-			video_videocap_height_valid(cfg->videocap_height))
-		vs.videocap_height_override = cfg->videocap_height;
+	/* The persisted override needs the viewport path exactly like the
+	 * runtime setter: on a legacy bitstream the formatter keeps its
+	 * implicit full-canvas layout, so a narrowed VDMA window would
+	 * scan rows capture never refreshed. The calibration UI is not
+	 * advertised there either (capability bits 8/10 follow REG3 bit
+	 * 15), so the automatic window is the documented fallback. */
+	if ((mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) &
+			MNTZORRO_STATUS_VCAP_VIEWPORT) != 0U) {
+		if (cfg->videocap_width_present &&
+				video_videocap_width_valid(cfg->videocap_width))
+			vs.videocap_width_override = cfg->videocap_width;
+		if (cfg->videocap_height_present &&
+				video_videocap_height_valid(cfg->videocap_height))
+			vs.videocap_height_override = cfg->videocap_height;
+	}
 	/* Treat the boot configuration as the first request. It remains pending
 	 * until a stable native vblank has successfully programmed the VDMA. */
 	vs.videocap_geometry_requested_width =

@@ -35,12 +35,12 @@ static int dma_address_status;
 static int dma_start_status;
 static uint32_t capture_framebuffer[6 * 1280 * 1024];
 int interrupt_enabled_vblank;
+static struct zz_config test_config = {
+	.videocap_output_profile = ZZ_VIDEOCAP_OUTPUT_FULL_60,
+};
 const struct zz_config *zz_config_get(void)
 {
-	static const struct zz_config config = {
-		.videocap_output_profile = ZZ_VIDEOCAP_OUTPUT_FULL_60,
-	};
-	return &config;
+	return &test_config;
 }
 void Xil_L1DCacheFlush(void) {}
 void Xil_L2CacheFlush(void) {}
@@ -252,6 +252,33 @@ static void assert_geometry_pending(uint16_t request_serial)
 
 int main(void)
 {
+	/* The persisted boot override follows the viewport bit: a legacy
+	 * bitstream keeps the automatic window. */
+	test_config.videocap_width = 640;
+	test_config.videocap_height = 240;
+	test_config.videocap_width_present = 1;
+	test_config.videocap_height_present = 1;
+	video_init();
+	assert(vs.videocap_width_override == 0 &&
+	       vs.videocap_height_override == 0);
+	assert(vs.videocap_geometry_requested_width == 0 &&
+	       vs.videocap_geometry_requested_height == 0);
+	videocap_zstate = MNTZORRO_STATUS_VCAP_VIEWPORT;
+	video_init();
+	assert(vs.videocap_width_override == 640 &&
+	       vs.videocap_height_override == 240);
+	assert(vs.videocap_geometry_requested_width == 640 &&
+	       vs.videocap_geometry_requested_height == 240);
+	assert(vs.videocap_geometry_request_serial == 1);
+	/* Leave the automatic window and the empty config for the rest. */
+	test_config.videocap_width_present = 0;
+	test_config.videocap_height_present = 0;
+	videocap_zstate = 0;
+	video_init();
+	/* The geometry section below counts setter calls from a boot that
+	 * never carried an override. */
+	vs.videocap_geometry_request_serial = 0;
+
 	/* Cold start must initialize the physical output. */
 	video_mode_init(ZZVMODE_1920x1080_60, 0, MNTVA_COLOR_16BIT565);
 	assert(clock_reloads == 1 && tmds_interruptions == 1);
