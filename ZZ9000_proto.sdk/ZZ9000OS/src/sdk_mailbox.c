@@ -7748,9 +7748,10 @@ static void select_mailbox_placement(void)
 	mailbox_base = SDK_MAILBOX_Z3_ADDRESS;
 }
 
-int sdk_mailbox_shares_io_window(void)
+int sdk_mailbox_io_staging_reaches(uint32_t staged_bytes)
 {
-	return mailbox_base == SDK_MAILBOX_Z2_ADDRESS;
+	return mailbox_base == SDK_MAILBOX_Z2_ADDRESS &&
+	       staged_bytes > SDK_MAILBOX_Z2_BUFFER_OFFSET;
 }
 
 void sdk_mailbox_init(void)

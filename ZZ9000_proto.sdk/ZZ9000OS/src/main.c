@@ -318,6 +318,11 @@ static uint16_t fwup_status = 0;
 static uint16_t fwup_pending_cmd = 0;
 static uint32_t fwup_pending_len = 0;
 static volatile int fwup_pending = 0;
+/* A ZZ9000.CFG save stages the whole file in one FWUP WRITE, and the raw
+ * config read returns it in the same buffer: neither may reach the Zorro II
+ * SDK mailbox, or saving settings would stop every SDK client. */
+typedef char zz_config_must_stay_below_z2_mailbox[
+	(ZZ_CONFIG_MAX_SIZE <= SDK_MAILBOX_Z2_BUFFER_OFFSET) ? 1 : -1];
 // debug things like individual reads/writes, greatly slowing the system down
 uint32_t debug_lowlevel = 0;
 
@@ -833,10 +838,14 @@ int main() {
 			fwup_pending = 0;
 			/* The firmware-update staging buffer is the shared
 			 * 0xa000..0xffff window that also holds the Zorro II SDK
-			 * mailbox. WRITE chunks may overwrite it there, so restore
-			 * it once the chunk has been consumed by FatFs. The Zorro
-			 * III mailbox lives elsewhere and keeps its clients. */
-			if (sdk_mailbox_shares_io_window())
+			 * mailbox. A WRITE chunk long enough to reach it has
+			 * clobbered the descriptor, so rebuild it once FatFs has
+			 * consumed the chunk. Rebuilding tears down every live SDK
+			 * client (an MHI stream stops), so the name-only commands
+			 * and shorter chunks, including every ZZ9000.CFG save,
+			 * leave it alone. */
+			if (fwup_pending_cmd == FWUP_CMD_WRITE &&
+			    sdk_mailbox_io_staging_reaches(fwup_pending_len))
 				sdk_mailbox_init();
 		}
 
