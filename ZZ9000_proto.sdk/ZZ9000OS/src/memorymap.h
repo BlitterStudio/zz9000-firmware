@@ -402,8 +402,11 @@
 #define SDK_MAILBOX_Z3_RESERVE_END \
 	(SDK_MAILBOX_Z3_ADDRESS + SDK_MAILBOX_Z3_RESERVE_SIZE)
 #define SDK_MAILBOX_Z2_WINDOW_OFFSET 0x0000D000
+/* Offset of the Zorro II mailbox inside the shared I/O buffer (board 0xa000):
+ * host staging that ends at or below it leaves the mailbox intact. */
+#define SDK_MAILBOX_Z2_BUFFER_OFFSET (SDK_MAILBOX_Z2_WINDOW_OFFSET - 0x0000A000)
 #define SDK_MAILBOX_Z2_ADDRESS \
-	(USB_BLOCK_STORAGE_ADDRESS + (SDK_MAILBOX_Z2_WINDOW_OFFSET - 0x0000A000))
+	(USB_BLOCK_STORAGE_ADDRESS + SDK_MAILBOX_Z2_BUFFER_OFFSET)
 
 #if SDK_MAILBOX_Z3_ADDRESS < SDK_LOW_DDR_RESERVED_END
 #error "Z3 SDK mailbox overlaps the linker-managed low DDR"

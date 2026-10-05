@@ -1222,9 +1222,10 @@ void sdk_mailbox_irq_disable(void);
 void sdk_mailbox_task(void);
 uint16_t sdk_mailbox_status(void);
 uint32_t sdk_mailbox_address(void);
-/* Nonzero when the live mailbox sits in the shared 0xa000..0xffff I/O buffer
- * (Zorro II), where storage and firmware-update staging overwrite it. */
-int sdk_mailbox_shares_io_window(void);
+/* Nonzero when host staging of `staged_bytes` from the start of the shared
+ * 0xa000..0xffff I/O buffer overwrote the live mailbox. Only the Zorro II
+ * mailbox lives in that buffer; storage and firmware-update staging share it. */
+int sdk_mailbox_io_staging_reaches(uint32_t staged_bytes);
 /* After a core-1 fault: mark core-1-affine audio streams faulted so their
  * feeds/reads fail cleanly (the embedded decoder may be mid-frame). */
 void sdk_mailbox_poison_core1_audio_streams(void);
