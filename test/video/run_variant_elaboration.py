@@ -4,6 +4,7 @@
 Proves that all release variants continue to elaborate clean after
 RTL cleanup and constraint changes.
 """
+import os
 import re
 import subprocess
 import sys
@@ -11,7 +12,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-VIVADO = Path("D:/Xilinx/Vivado/2018.3/bin")
+_DEFAULT_VIVADO = ("D:/Xilinx/Vivado/2018.3/bin" if os.name == "nt"
+                  else "/opt/Xilinx/Vivado/2018.3/bin")
+VIVADO = Path(os.environ.get("VIVADO_BIN", _DEFAULT_VIVADO))
 WORK = HERE / "build" / "variant_elab"
 SH_SCRIPT = ROOT / "build_variant_bitstreams.sh"
 
@@ -43,10 +46,11 @@ def parse_variants_and_blocks():
     return all_vars, block_map
 
 
-def win(p):
+def native(p):
     if not isinstance(p, Path):
         return str(p)
-    return str(p.resolve()).replace("/", "\\")
+    path = str(p.resolve())
+    return path.replace("/", "\\") if os.name == "nt" else path
 
 
 def apply_define_block(orig_text, block):
@@ -88,8 +92,12 @@ def relocate_row_bank(text):
 
 
 def run(cmd, cwd):
+    if os.name == "nt":
+        argv = ["cmd", "/c", native(VIVADO / f"{cmd[0]}.bat")]
+    else:
+        argv = [str(VIVADO / cmd[0])]
     result = subprocess.run(
-        ["cmd", "/c", win(VIVADO / cmd[0]), *map(win, cmd[1:])],
+        [*argv, *map(native, cmd[1:])],
         cwd=cwd,
         text=True,
         capture_output=True,

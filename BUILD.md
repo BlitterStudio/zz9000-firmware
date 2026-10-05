@@ -216,10 +216,10 @@ grid clock displacement for positive, negative, and restored-zero targets.
 A completed phase request is not sufficient: enabling fine phase shift on
 both feedback and outputs cancels the intended clock movement.
 
-Variant elaboration (Vivado 2018.3 xvlog/xelab): compiles `MNTZorro` once for
-each release variant, using the `define blocks from
-`build_variant_bitstreams.sh`. Run it after RTL changes, before an
-hours-long variant rebuild:
+Variant elaboration (Vivado 2018.3 xvlog/xelab; set `VIVADO_BIN` for a
+non-default installation): compiles `MNTZorro` once for each release
+variant, using the `define blocks from `build_variant_bitstreams.sh`. Run it
+after RTL changes, before an hours-long variant rebuild:
 ```bash
 python3 test/video/run_variant_elaboration.py
 ```

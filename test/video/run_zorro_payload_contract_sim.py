@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Full MNTZorro Z2/Z3 public-bus payload proof using native Vivado xsim."""
 import argparse
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -8,10 +9,17 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-VIVADO = Path("D:/Xilinx/Vivado/2018.3/bin")
+VIVADO = Path(os.environ.get("VIVADO_BIN", "D:/Xilinx/Vivado/2018.3/bin" if os.name == "nt" else "/opt/Xilinx/Vivado/2018.3/bin"))
 
 
-def win(path): return str(path.resolve()).replace("/", "\\")
+def native(path):
+    if not isinstance(path, Path): return str(path)
+    resolved = str(path.resolve())
+    return resolved.replace("/", "\\") if os.name == "nt" else resolved
+
+def tool(name, *args):
+    head = ["cmd", "/c", native(VIVADO / f"{name}.bat")] if os.name == "nt" else [str(VIVADO / name)]
+    return [*head, *map(native, args)]
 
 def call(command, cwd):
     result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, timeout=210)
@@ -34,9 +42,9 @@ def simulate(z3):
     with tempfile.TemporaryDirectory(prefix="zorro_payload_", dir=build) as tmp:
         work = Path(tmp); (work / "mntzorro.v").write_text(source(z3), encoding="utf-8")
         files = [work / "mntzorro.v", ROOT / "videocap_sampler.v", ROOT / "videocap_calibration_capture.v", ROOT / "videocap_clock_control.v", ROOT / "videocap_writeback_layout.v", HERE / "zorro_payload_contract_tb.v", VIVADO.parent / "data/verilog/src/glbl.v"]
-        call(["cmd", "/c", win(VIVADO / "xvlog.bat"), *map(win, files)], work)
-        call(["cmd", "/c", win(VIVADO / "xelab.bat"), "-L", "xpm", "-L", "unisims_ver", "work.zorro_payload_contract_tb", "work.glbl", "-s", "payload"], work)
-        return call(["cmd", "/c", win(VIVADO / "xsim.bat"), "payload", "--runall"], work)
+        call(tool("xvlog", *files), work)
+        call(tool("xelab", "-L", "xpm", "-L", "unisims_ver", "work.zorro_payload_contract_tb", "work.glbl", "-s", "payload"), work)
+        return call(tool("xsim", "payload", "--runall"), work)
 
 def main():
     parser = argparse.ArgumentParser()
