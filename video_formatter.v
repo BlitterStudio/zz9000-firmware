@@ -23,6 +23,7 @@ module video_formatter(
   output m_axis_vid_tready,
   input [0:0]  m_axis_vid_tuser,
   input m_axis_vid_tvalid,
+  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF m_axis_vid:overlay_axis" *)
   input m_axis_vid_aclk,
   input aresetn,
 
@@ -178,12 +179,14 @@ wire [31:0] overlay_div_result_quotient =
   overlay_div_quotient |
   (overlay_div_subtract ? (32'b1 << overlay_div_bit) : 32'b0);
 
-reg [15:0] screen_h_max;
-reg [15:0] screen_v_max;
-reg [15:0] screen_h_sync_start;
-reg [15:0] screen_h_sync_end;
-reg [15:0] screen_v_sync_start;
-reg [15:0] screen_v_sync_end;
+// VGA timing consumers are 12-bit; the control words carry them in [27:16]
+// and [11:0], so the upper nibbles were never observable.
+reg [11:0] screen_h_max;
+reg [11:0] screen_v_max;
+reg [11:0] screen_h_sync_start;
+reg [11:0] screen_h_sync_end;
+reg [11:0] screen_v_sync_start;
+reg [11:0] screen_v_sync_end;
 
 localparam MAXWIDTH=2560;              // line buffer capacity in 32-bit words
 localparam LINE_BUFFER_BEATS=1280;     // 64-bit words used in each bank
@@ -237,12 +240,11 @@ localparam SPRITE_W = 32;
 localparam SPRITE_H = 48;
 localparam SPRITE_SIZE = SPRITE_W*SPRITE_H;
 reg [23:0] sprite_buffer[SPRITE_SIZE-1:0];
-reg [11:0] sprite_addr_in;
+reg [10:0] sprite_addr_in; // sprite_buffer has 1536 = 2^11 entries
 reg [11:0] sprite_x;
 reg [11:0] sprite_y;
 reg sprite_dbl;
 reg [11:0] report_y = 0;
-reg vga_sprite_dbl; // vga_domain
 reg [11:0] vga_sprite_x; // vga domain
 reg [11:0] vga_sprite_y; // vga domain
 reg [11:0] vga_sprite_x2; // vga domain
@@ -260,8 +262,10 @@ reg [1:0]  vga_scanline_width;
 reg        vga_scanline_parity;
 reg vga_scanlines_en;
 reg [31:0] pixout_sl;
-reg [11:0] counter_y_d1;
-reg [11:0] counter_y_d2;
+// Only the two low scanline-parity bits of counter_y are consumed (see
+// scanline_content_y); pipeline just those bits.
+reg [1:0] counter_y_d1;
+reg [1:0] counter_y_d2;
 
 always @(posedge m_axis_vid_aclk)
   begin
@@ -347,7 +351,6 @@ reg [7:0] control_op_in = 0;
 reg control_interlace_in = 0;
 reg [31:0] control_data_in2 = 0;
 reg [7:0] control_op_in2 = 0;
-reg control_interlace_in2 = 0;
 
 /* Viewport position and size form one mode transaction.  The source-side
  * bundle is held unchanged for the complete XPM handshake.  A second slot
@@ -503,7 +506,6 @@ begin
   control_interlace_in <= control_interlace;
   control_op_in2        <= control_op_in;
   control_data_in2      <= control_data_in;
-  control_interlace_in2 <= control_interlace_in;
 
   if (next_input_state==0) begin
     vsync_request <= 0;
@@ -536,16 +538,16 @@ begin
     OP_COLORMODE: colormode  <= control_data_in[1:0]; // FIXME
     OP_VSYNC: vsync_request <= 1; //control_data[0];
     OP_MAX: begin
-        screen_v_max <= control_data_in[31:16];
-        screen_h_max <= control_data_in[15:0];
+        screen_v_max <= control_data_in[27:16];
+        screen_h_max <= control_data_in[11:0];
       end
     OP_HS: begin
-        screen_h_sync_start <= control_data_in[31:16];
-        screen_h_sync_end <= control_data_in[15:0];
+        screen_h_sync_start <= control_data_in[27:16];
+        screen_h_sync_end <= control_data_in[11:0];
       end
     OP_VS: begin
-        screen_v_sync_start <= control_data_in[31:16];
-        screen_v_sync_end <= control_data_in[15:0];
+        screen_v_sync_start <= control_data_in[27:16];
+        screen_v_sync_end <= control_data_in[11:0];
       end
     OP_THRESH: begin
       end
@@ -560,7 +562,7 @@ begin
         sprite_x <= control_data_in[15:0];
       end
     OP_SPRITE_ADDR: begin
-        sprite_addr_in <= control_data_in[11:0];
+        sprite_addr_in <= control_data_in[10:0];
       end
     OP_SPRITE_DATA: begin
         sprite_buffer[sprite_addr_in] <= control_data_in[23:0];
@@ -748,8 +750,6 @@ reg signed [15:0] vga_overlay_x = 0;
 reg signed [15:0] vga_overlay_y = 0;
 reg [15:0] vga_overlay_width = 0;
 reg [15:0] vga_overlay_height = 0;
-reg [15:0] vga_overlay_source_width = 0;
-reg [15:0] vga_overlay_source_height = 0;
 reg [15:0] vga_overlay_x_step_integer = 0;
 reg [15:0] vga_overlay_x_step_remainder = 0;
 reg [15:0] vga_overlay_y_step_integer = 0;
@@ -765,7 +765,9 @@ reg [31:0] vga_overlay_frame_generation = 0;
 reg [11:0] overlay_fetch_line = 0;
 reg overlay_fetch_request = 0;
 reg [15:0] overlay_scale_read_x = 0;
-reg [15:0] overlay_scale_read_x_d1 = 0;
+/* Only the luma-phase bit of the delayed scale read position is consumed
+ * (see overlay_selected_luma_phase). */
+reg overlay_scale_read_x_d1 = 0;
 reg [15:0] overlay_scale_x_error = 0;
 reg [15:0] overlay_scale_source_y = 0;
 reg [15:0] overlay_scale_y_error = 0;
@@ -811,7 +813,7 @@ wire signed [16:0] overlay_read_x = overlay_read_x_position;
 wire [15:0] overlay_selected_read_x =
   vga_overlay_scaling ? overlay_scale_read_x : overlay_read_x[15:0];
 wire overlay_selected_luma_phase =
-  vga_overlay_scaling ? overlay_scale_read_x_d1[0] : overlay_local_x[0];
+  vga_overlay_scaling ? overlay_scale_read_x_d1 : overlay_local_x[0];
 wire [10:0] overlay_read_addr = overlay_selected_read_x[11:1];
 wire overlay_scale_x_carry =
   overlay_scale_x_error >= vga_overlay_x_step_threshold;
@@ -1144,7 +1146,7 @@ wire viewport_output_active = viewport_geometry_ready &&
   viewport_output_x < $signed({1'b0, viewport_output_x_end}) &&
   viewport_output_y >= vga_viewport_y &&
   viewport_output_y < vga_viewport_y + vga_viewport_height;
-wire [11:0] scanline_content_y = counter_y_d2 - vga_viewport_y;
+wire [1:0] scanline_content_y = counter_y_d2 - vga_viewport_y[1:0];
 
 wire [11:0] scanout_source_line = scanout_source_line_row;
 
@@ -1253,6 +1255,9 @@ always @(posedge dvi_clk) begin
   vga_v_rez <= screen_height;
   vga_h_max <= screen_h_max - 1'b1;
   vga_v_max <= screen_v_max - 1'b1;
+  /* screen_h_sync_start/end are quasi-static mode config written once per
+   * mode change on m_axis_vid_aclk (OP_HS); this continuous resample on
+   * dvi_clk is a snapshot crossing, not a 2-flop CDC - by design. */
   vga_h_sync_start <= screen_h_sync_start;
   vga_h_sync_end <= screen_h_sync_end;
 
@@ -1280,8 +1285,6 @@ always @(posedge dvi_clk) begin
     vga_overlay_y <= overlay_y;
     vga_overlay_width <= overlay_width;
     vga_overlay_height <= overlay_height;
-    vga_overlay_source_width <= overlay_source_width;
-    vga_overlay_source_height <= overlay_source_height;
     vga_overlay_x_step_integer <= overlay_x_step_integer;
     vga_overlay_x_step_remainder <= overlay_x_step_remainder;
     vga_overlay_y_step_integer <= overlay_y_step_integer;
@@ -1330,10 +1333,10 @@ always @(posedge dvi_clk) begin
     overlay_local_y < $signed({1'b0, vga_overlay_height});
   overlay_scheduler_screen_y_nonnegative <= overlay_screen_y >= 0;
   overlay_scheduler_next_source_y <= overlay_scale_next_source_y[11:0];
-  overlay_scale_read_x_d1 <= overlay_scale_read_x;
+  overlay_scale_read_x_d1 <= overlay_scale_read_x[0];
   if (counter_x == 0) begin
     overlay_scale_read_x <= vga_overlay_x_start_source;
-    overlay_scale_read_x_d1 <= vga_overlay_x_start_source;
+    overlay_scale_read_x_d1 <= vga_overlay_x_start_source[0];
     overlay_scale_x_error <= vga_overlay_x_start_remainder;
   end else if (vga_overlay_scaling &&
                overlay_screen_x >= overlay_visible_x0_minus_one &&
@@ -1368,7 +1371,6 @@ always @(posedge dvi_clk) begin
   end
   vga_sprite_x2 <= vga_sprite_x+(SPRITE_W<<sprite_dbl);
   vga_sprite_y2 <= vga_sprite_y+(SPRITE_H<<sprite_dbl);
-  vga_sprite_dbl <= sprite_dbl;
   vga_report_y_next <= report_y;
   vga_selected_palette <= selected_palette;
   vga_scanline_width      <= scanline_width;
@@ -1481,7 +1483,7 @@ always @(posedge dvi_clk) begin
   sprite_on_d3 <= sprite_on_d2;
   sprite_on_d4 <= sprite_on_d3;
 
-counter_y_d1 <= counter_y;
+counter_y_d1 <= counter_y[1:0];
 counter_y_d2 <= counter_y_d1;
 
 if (!vga_scanlines_en || vga_scanline_width == 2'b00) begin

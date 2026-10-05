@@ -367,7 +367,6 @@ proc cr_bd_zz9000_ps { parentCell } {
   xilinx.com:ip:i2s_transmitter:1.0\
   xilinx.com:ip:proc_sys_reset:5.0\
   xilinx.com:ip:processing_system7:5.5\
-  xilinx.com:ip:xadc_wiz:3.3\
   xilinx.com:ip:xlconcat:2.1\
   xilinx.com:ip:xlslice:1.0\
   xilinx.com:ip:axi_vdma:6.3\
@@ -544,7 +543,7 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_intf_net -intf_net axi_vdma_1_M_AXIS_MM2S [get_bd_intf_pins axi_vdma_1/M_AXIS_MM2S] [get_bd_intf_pins video_formatter_0/overlay_axis]
   connect_bd_intf_net -intf_net axis_data_fifo_0_M_AXIS [get_bd_intf_pins axis_data_fifo_0/M_AXIS] [get_bd_intf_pins video_formatter_0/m_axis_vid]
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M01_AXI [get_bd_intf_pins S_AXI_LITE] [get_bd_intf_pins axi_vdma_0/S_AXI_LITE]
-  connect_bd_intf_net -intf_net ps7_0_axi_periph_M07_AXI [get_bd_intf_pins S_AXI_LITE2] [get_bd_intf_pins axi_vdma_1/S_AXI_LITE]
+  connect_bd_intf_net -intf_net ps7_0_axi_periph_M06_AXI [get_bd_intf_pins S_AXI_LITE2] [get_bd_intf_pins axi_vdma_1/S_AXI_LITE]
 
   # Create port connections
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_video_control_data [get_bd_pins control_data] [get_bd_pins video_formatter_0/control_data]
@@ -1249,7 +1248,7 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.M00_HAS_REGSLICE {3} \
    CONFIG.M01_HAS_DATA_FIFO {0} \
    CONFIG.M01_HAS_REGSLICE {3} \
-   CONFIG.NUM_MI {8} \
+   CONFIG.NUM_MI {7} \
    CONFIG.S00_HAS_DATA_FIFO {0} \
    CONFIG.S00_HAS_REGSLICE {3} \
  ] $ps7_0_axi_periph
@@ -1264,38 +1263,9 @@ proc create_hier_cell_video { parentCell nameHier } {
   # Create instance: video
   create_hier_cell_video [current_bd_instance .] video
 
-  # Create instance: xadc_wiz_0, and set properties
-  set xadc_wiz_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:xadc_wiz:3.3 xadc_wiz_0 ]
-  set_property -dict [ list \
-   CONFIG.AVERAGE_ENABLE_TEMPERATURE {true} \
-   CONFIG.AVERAGE_ENABLE_VBRAM {true} \
-   CONFIG.AVERAGE_ENABLE_VCCAUX {true} \
-   CONFIG.AVERAGE_ENABLE_VCCDDRO {true} \
-   CONFIG.AVERAGE_ENABLE_VCCINT {true} \
-   CONFIG.AVERAGE_ENABLE_VCCPAUX {true} \
-   CONFIG.AVERAGE_ENABLE_VCCPINT {true} \
-   CONFIG.CHANNEL_ENABLE_TEMPERATURE {true} \
-   CONFIG.CHANNEL_ENABLE_VBRAM {true} \
-   CONFIG.CHANNEL_ENABLE_VCCAUX {true} \
-   CONFIG.CHANNEL_ENABLE_VCCDDRO {true} \
-   CONFIG.CHANNEL_ENABLE_VCCINT {true} \
-   CONFIG.CHANNEL_ENABLE_VCCPAUX {true} \
-   CONFIG.CHANNEL_ENABLE_VCCPINT {true} \
-   CONFIG.CHANNEL_ENABLE_VP_VN {false} \
-   CONFIG.ENABLE_VCCDDRO_ALARM {false} \
-   CONFIG.ENABLE_VCCPAUX_ALARM {false} \
-   CONFIG.ENABLE_VCCPINT_ALARM {false} \
-   CONFIG.EXTERNAL_MUX_CHANNEL {VP_VN} \
-   CONFIG.SEQUENCER_MODE {Off} \
-   CONFIG.SINGLE_CHANNEL_SELECTION {TEMPERATURE} \
-   CONFIG.TEMPERATURE_ALARM_OT_TRIGGER {80} \
-   CONFIG.TEMPERATURE_ALARM_TRIGGER {85.0} \
-   CONFIG.TIMING_MODE {Continuous} \
-   CONFIG.USER_TEMP_ALARM {false} \
-   CONFIG.VCCAUX_ALARM {false} \
-   CONFIG.VCCINT_ALARM {false} \
-   CONFIG.XADC_STARUP_SELECTION {simultaneous_sampling} \
- ] $xadc_wiz_0
+  # The unused PL xadc_wiz_0 (0x83C10000) was removed: firmware reads
+  # temperatures/voltages through the PS7 XADC (XAdcPs, 0xF8007100) and
+  # neither ZZ9000OS nor the Amiga-side drivers reference 0x83C1xxxx.
 
   # Create instance: xlconcat_0, and set properties
   set xlconcat_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 xlconcat_0 ]
@@ -1352,12 +1322,11 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_intf_net -intf_net processing_system7_0_FIXED_IO [get_bd_intf_ports FIXED_IO] [get_bd_intf_pins processing_system7_0/FIXED_IO]
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M00_AXI [get_bd_intf_pins clk_wiz_0/s_axi_lite] [get_bd_intf_pins ps7_0_axi_periph/M00_AXI]
   connect_bd_intf_net -intf_net ps7_0_axi_periph_M01_AXI [get_bd_intf_pins ps7_0_axi_periph/M01_AXI] [get_bd_intf_pins video/S_AXI_LITE]
-  connect_bd_intf_net -intf_net ps7_0_axi_periph_M02_AXI [get_bd_intf_pins ps7_0_axi_periph/M02_AXI] [get_bd_intf_pins xadc_wiz_0/s_axi_lite]
-  connect_bd_intf_net -intf_net ps7_0_axi_periph_M03_AXI [get_bd_intf_pins i2s_transmitter_0/s_axi_ctrl] [get_bd_intf_pins ps7_0_axi_periph/M03_AXI]
-  connect_bd_intf_net -intf_net ps7_0_axi_periph_M04_AXI [get_bd_intf_pins audio_formatter_0/s_axi_lite] [get_bd_intf_pins ps7_0_axi_periph/M04_AXI]
-  connect_bd_intf_net -intf_net ps7_0_axi_periph_M05_AXI [get_bd_intf_pins i2s_receiver_0/s_axi_ctrl] [get_bd_intf_pins ps7_0_axi_periph/M05_AXI]
-  connect_bd_intf_net -intf_net ps7_0_axi_periph_M06_AXI [get_bd_intf_pins audio_formatter_1/s_axi_lite] [get_bd_intf_pins ps7_0_axi_periph/M06_AXI]
-  connect_bd_intf_net -intf_net ps7_0_axi_periph_M07_AXI [get_bd_intf_pins ps7_0_axi_periph/M07_AXI] [get_bd_intf_pins video/S_AXI_LITE2]
+  connect_bd_intf_net -intf_net ps7_0_axi_periph_M02_AXI [get_bd_intf_pins i2s_transmitter_0/s_axi_ctrl] [get_bd_intf_pins ps7_0_axi_periph/M02_AXI]
+  connect_bd_intf_net -intf_net ps7_0_axi_periph_M03_AXI [get_bd_intf_pins audio_formatter_0/s_axi_lite] [get_bd_intf_pins ps7_0_axi_periph/M03_AXI]
+  connect_bd_intf_net -intf_net ps7_0_axi_periph_M04_AXI [get_bd_intf_pins i2s_receiver_0/s_axi_ctrl] [get_bd_intf_pins ps7_0_axi_periph/M04_AXI]
+  connect_bd_intf_net -intf_net ps7_0_axi_periph_M05_AXI [get_bd_intf_pins audio_formatter_1/s_axi_lite] [get_bd_intf_pins ps7_0_axi_periph/M05_AXI]
+  connect_bd_intf_net -intf_net ps7_0_axi_periph_M06_AXI [get_bd_intf_pins ps7_0_axi_periph/M06_AXI] [get_bd_intf_pins video/S_AXI_LITE2]
 
   # Create port connections
   connect_bd_net -net I2SO_BCLK_1 [get_bd_ports I2SO_BCLK] [get_bd_pins audio_clock_0/bclk_in]
@@ -1382,8 +1351,7 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net MNTZorro_v0_1_S00_AXI_0_zz900ax_reset_out [get_bd_ports I2SO_RESETn] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/zz9000ax_reset_out]
   connect_bd_net -net Net [get_bd_ports ZORRO_ADDR] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/ZORRO_ADDR]
   connect_bd_net -net Net1 [get_bd_ports ZORRO_DATA] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/ZORRO_DATA]
-  connect_bd_net -net S00_ACLK_1 [get_bd_pins audio_formatter_0/m_axis_mm2s_aclk] [get_bd_pins audio_formatter_0/s_axi_lite_aclk] [get_bd_pins audio_formatter_1/s_axi_lite_aclk] [get_bd_pins audio_formatter_1/s_axis_s2mm_aclk] [get_bd_pins axi_interconnect_3/ACLK] [get_bd_pins axi_interconnect_3/M00_ACLK] [get_bd_pins axi_interconnect_3/S00_ACLK] [get_bd_pins axi_interconnect_4/ACLK] [get_bd_pins axi_interconnect_4/M00_ACLK] [get_bd_pins axi_interconnect_4/S00_ACLK] [get_bd_pins clk_wiz_0/s_axi_aclk] [get_bd_pins i2s_receiver_0/m_axis_aud_aclk] [get_bd_pins i2s_receiver_0/s_axi_ctrl_aclk] [get_bd_pins i2s_transmitter_0/s_axi_ctrl_aclk] [get_bd_pins i2s_transmitter_0/s_axis_aud_aclk] [get_bd_pins processing_system7_0/FCLK_CLK1] [get_bd_pins processing_system7_0/M_AXI_GP1_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP2_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP3_ACLK] [get_bd_pins ps7_0_axi_periph/ACLK] [get_bd_pins ps7_0_axi_periph/M00_ACLK] [get_bd_pins ps7_0_axi_periph/M01_ACLK] [get_bd_pins ps7_0_axi_periph/M02_ACLK] [get_bd_pins ps7_0_axi_periph/M03_ACLK] [get_bd_pins ps7_0_axi_periph/M04_ACLK] [get_bd_pins ps7_0_axi_periph/M05_ACLK] [get_bd_pins ps7_0_axi_periph/M06_ACLK] [get_bd_pins ps7_0_axi_periph/S00_ACLK] [get_bd_pins rst_ps7_0_25M/slowest_sync_clk] [get_bd_pins video/s_axi_lite_aclk] [get_bd_pins xadc_wiz_0/s_axi_aclk]
-  connect_bd_net -net S00_ACLK_1 [get_bd_pins ps7_0_axi_periph/M07_ACLK]
+  connect_bd_net -net S00_ACLK_1 [get_bd_pins audio_formatter_0/m_axis_mm2s_aclk] [get_bd_pins audio_formatter_0/s_axi_lite_aclk] [get_bd_pins audio_formatter_1/s_axi_lite_aclk] [get_bd_pins audio_formatter_1/s_axis_s2mm_aclk] [get_bd_pins axi_interconnect_3/ACLK] [get_bd_pins axi_interconnect_3/M00_ACLK] [get_bd_pins axi_interconnect_3/S00_ACLK] [get_bd_pins axi_interconnect_4/ACLK] [get_bd_pins axi_interconnect_4/M00_ACLK] [get_bd_pins axi_interconnect_4/S00_ACLK] [get_bd_pins clk_wiz_0/s_axi_aclk] [get_bd_pins i2s_receiver_0/m_axis_aud_aclk] [get_bd_pins i2s_receiver_0/s_axi_ctrl_aclk] [get_bd_pins i2s_transmitter_0/s_axi_ctrl_aclk] [get_bd_pins i2s_transmitter_0/s_axis_aud_aclk] [get_bd_pins processing_system7_0/FCLK_CLK1] [get_bd_pins processing_system7_0/M_AXI_GP1_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP2_ACLK] [get_bd_pins processing_system7_0/S_AXI_HP3_ACLK] [get_bd_pins ps7_0_axi_periph/ACLK] [get_bd_pins ps7_0_axi_periph/M00_ACLK] [get_bd_pins ps7_0_axi_periph/M01_ACLK] [get_bd_pins ps7_0_axi_periph/M02_ACLK] [get_bd_pins ps7_0_axi_periph/M03_ACLK] [get_bd_pins ps7_0_axi_periph/M04_ACLK] [get_bd_pins ps7_0_axi_periph/M05_ACLK] [get_bd_pins ps7_0_axi_periph/M06_ACLK] [get_bd_pins ps7_0_axi_periph/S00_ACLK] [get_bd_pins rst_ps7_0_25M/slowest_sync_clk] [get_bd_pins video/s_axi_lite_aclk]
   connect_bd_net -net VCAP_B0_0_1 [get_bd_ports VCAP_B0] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/VCAP_B0]
   connect_bd_net -net VCAP_B1_0_1 [get_bd_ports VCAP_B1] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/VCAP_B1]
   connect_bd_net -net VCAP_B2_0_1 [get_bd_ports VCAP_B2] [get_bd_pins MNTZorro_v0_1_S00_AXI_0/VCAP_B2]
@@ -1438,8 +1406,7 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins axi_interconnect_1/S01_ACLK]
   connect_bd_net -net processing_system7_0_FCLK_RESET0_N [get_bd_pins proc_sys_reset_0/ext_reset_in] [get_bd_pins processing_system7_0/FCLK_RESET0_N]
   connect_bd_net -net processing_system7_0_FCLK_RESET1_N [get_bd_pins processing_system7_0/FCLK_RESET1_N] [get_bd_pins rst_ps7_0_25M/ext_reset_in]
-  connect_bd_net -net rst_ps7_0_25M_peripheral_aresetn [get_bd_pins audio_formatter_0/m_axis_mm2s_aresetn] [get_bd_pins audio_formatter_0/s_axi_lite_aresetn] [get_bd_pins audio_formatter_1/s_axi_lite_aresetn] [get_bd_pins audio_formatter_1/s_axis_s2mm_aresetn] [get_bd_pins axi_interconnect_3/ARESETN] [get_bd_pins axi_interconnect_3/M00_ARESETN] [get_bd_pins axi_interconnect_3/S00_ARESETN] [get_bd_pins axi_interconnect_4/ARESETN] [get_bd_pins axi_interconnect_4/M00_ARESETN] [get_bd_pins axi_interconnect_4/S00_ARESETN] [get_bd_pins clk_wiz_0/s_axi_aresetn] [get_bd_pins i2s_receiver_0/m_axis_aud_aresetn] [get_bd_pins i2s_receiver_0/s_axi_ctrl_aresetn] [get_bd_pins i2s_transmitter_0/s_axi_ctrl_aresetn] [get_bd_pins i2s_transmitter_0/s_axis_aud_aresetn] [get_bd_pins ps7_0_axi_periph/ARESETN] [get_bd_pins ps7_0_axi_periph/M00_ARESETN] [get_bd_pins ps7_0_axi_periph/M01_ARESETN] [get_bd_pins ps7_0_axi_periph/M02_ARESETN] [get_bd_pins ps7_0_axi_periph/M03_ARESETN] [get_bd_pins ps7_0_axi_periph/M04_ARESETN] [get_bd_pins ps7_0_axi_periph/M05_ARESETN] [get_bd_pins ps7_0_axi_periph/M06_ARESETN] [get_bd_pins ps7_0_axi_periph/S00_ARESETN] [get_bd_pins rst_ps7_0_25M/peripheral_aresetn] [get_bd_pins video/axi_resetn] [get_bd_pins xadc_wiz_0/s_axi_aresetn]
-  connect_bd_net -net rst_ps7_0_25M_peripheral_aresetn [get_bd_pins ps7_0_axi_periph/M07_ARESETN]
+  connect_bd_net -net rst_ps7_0_25M_peripheral_aresetn [get_bd_pins audio_formatter_0/m_axis_mm2s_aresetn] [get_bd_pins audio_formatter_0/s_axi_lite_aresetn] [get_bd_pins audio_formatter_1/s_axi_lite_aresetn] [get_bd_pins audio_formatter_1/s_axis_s2mm_aresetn] [get_bd_pins axi_interconnect_3/ARESETN] [get_bd_pins axi_interconnect_3/M00_ARESETN] [get_bd_pins axi_interconnect_3/S00_ARESETN] [get_bd_pins axi_interconnect_4/ARESETN] [get_bd_pins axi_interconnect_4/M00_ARESETN] [get_bd_pins axi_interconnect_4/S00_ARESETN] [get_bd_pins clk_wiz_0/s_axi_aresetn] [get_bd_pins i2s_receiver_0/m_axis_aud_aresetn] [get_bd_pins i2s_receiver_0/s_axi_ctrl_aresetn] [get_bd_pins i2s_transmitter_0/s_axi_ctrl_aresetn] [get_bd_pins i2s_transmitter_0/s_axis_aud_aresetn] [get_bd_pins ps7_0_axi_periph/ARESETN] [get_bd_pins ps7_0_axi_periph/M00_ARESETN] [get_bd_pins ps7_0_axi_periph/M01_ARESETN] [get_bd_pins ps7_0_axi_periph/M02_ARESETN] [get_bd_pins ps7_0_axi_periph/M03_ARESETN] [get_bd_pins ps7_0_axi_periph/M04_ARESETN] [get_bd_pins ps7_0_axi_periph/M05_ARESETN] [get_bd_pins ps7_0_axi_periph/M06_ARESETN] [get_bd_pins ps7_0_axi_periph/S00_ARESETN] [get_bd_pins rst_ps7_0_25M/peripheral_aresetn] [get_bd_pins video/axi_resetn]
   connect_bd_net -net sdata_0_in_0_1 [get_bd_ports I2SI_D0] [get_bd_pins audio_clock_0/sdata_in]
   connect_bd_net -net v_axi4s_vid_out_0_vid_data [get_bd_pins video/dvi_rgb] [get_bd_pins xlslice_0/Din] [get_bd_pins xlslice_1/Din] [get_bd_pins xlslice_2/Din]
   connect_bd_net -net video_control_vblank [get_bd_pins MNTZorro_v0_1_S00_AXI_0/video_control_vblank_in] [get_bd_pins video/control_vblank]
@@ -1470,7 +1437,6 @@ proc create_hier_cell_video { parentCell nameHier } {
   create_bd_addr_seg -range 0x00010000 -offset 0x83C00000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs clk_wiz_0/s_axi_lite/Reg] SEG_clk_wiz_0_Reg
   create_bd_addr_seg -range 0x00010000 -offset 0x83C40000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs i2s_receiver_0/s_axi_ctrl/Reg] SEG_i2s_receiver_0_Reg
   create_bd_addr_seg -range 0x00010000 -offset 0x83C30000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs i2s_transmitter_0/s_axi_ctrl/Reg] SEG_i2s_transmitter_0_Reg
-  create_bd_addr_seg -range 0x00010000 -offset 0x83C10000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs xadc_wiz_0/s_axi_lite/Reg] SEG_xadc_wiz_0_Reg
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces video/axi_vdma_0/Data_MM2S] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] SEG_processing_system7_0_HP0_DDR_LOWOCM
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces video/axi_vdma_1/Data_MM2S] [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] SEG_processing_system7_0_HP0_DDR_LOWOCM_1
 
@@ -1551,7 +1517,6 @@ preplace inst rst_ps7_0_25M -pg 1 -lvl 1 -y 1140 -defaultsOSRD
 preplace inst xlslice_0 -pg 1 -lvl 7 -y 1720 -defaultsOSRD
 preplace inst audio_formatter_1 -pg 1 -lvl 4 -y 520 -defaultsOSRD
 preplace inst xlslice_1 -pg 1 -lvl 7 -y 1520 -defaultsOSRD
-preplace inst xadc_wiz_0 -pg 1 -lvl 3 -y 750 -defaultsOSRD
 preplace inst xlslice_2 -pg 1 -lvl 7 -y 1620 -defaultsOSRD
 preplace inst axi_dwidth_converter_0 -pg 1 -lvl 4 -y 1130 -defaultsOSRD
 preplace inst xlconcat_0 -pg 1 -lvl 5 -y 630 -defaultsOSRD
@@ -1582,13 +1547,12 @@ preplace netloc VCAP_VSYNC_0_1 1 0 6 NJ 1920 NJ 1920 NJ 1920 NJ 1920 NJ 1920 NJ
 preplace netloc VCAP_B0_0_1 1 0 6 NJ 2260 NJ 2260 NJ 2260 NJ 2260 NJ 2260 NJ
 preplace netloc MNTZorro_v0_1_S00_AXI_0_ZORRO_NCINH 1 6 2 NJ 2170 2970J
 preplace netloc rst_ps7_0_25M_peripheral_aresetn 1 1 5 400 1050 810 300 1250 150 1670 550 2120
-preplace netloc ps7_0_axi_periph_M02_AXI 1 2 1 800
 preplace netloc VCAP_G6_0_1 1 0 6 NJ 2080 NJ 2080 NJ 2080 NJ 2080 NJ 2080 NJ
 preplace netloc VCAP_R2_0_1 1 0 6 NJ 2380 NJ 2380 NJ 2380 NJ 2380 NJ 2380 NJ
 preplace netloc VCAP_G5_0_1 1 0 6 NJ 2060 NJ 2060 NJ 2060 NJ 2060 NJ 2060 NJ
 preplace netloc video_subsystem_VGA_HS 1 6 2 NJ 1420 NJ
 preplace netloc axi_dwidth_converter_0_M_AXI 1 4 1 1680
-preplace netloc ps7_0_axi_periph_M04_AXI 1 2 2 730 210 NJ
+preplace netloc ps7_0_axi_periph_M03_AXI 1 2 2 730 210 NJ
 preplace netloc VCAP_R5_0_1 1 0 6 NJ 2320 NJ 2320 NJ 2320 NJ 2320 NJ 2320 NJ
 preplace netloc VCAP_G3_0_1 1 0 6 NJ 2020 NJ 2020 NJ 2020 NJ 2020 NJ 2020 NJ
 preplace netloc VCAP_R1_0_1 1 0 6 NJ 2400 NJ 2400 NJ 2400 NJ 2400 NJ 2400 NJ
@@ -1597,7 +1561,7 @@ preplace netloc xlconcat_0_dout 1 5 1 2050
 preplace netloc VCAP_B3_0_1 1 0 6 NJ 2200 NJ 2200 NJ 2200 NJ 2200 NJ 2200 NJ
 preplace netloc ZORRO_NDS0_1 1 0 6 NJ 1760 NJ 1760 NJ 1760 NJ 1760 NJ 1760 NJ
 preplace netloc ZORRO_NDS1_1 1 0 6 NJ 1740 NJ 1740 NJ 1740 NJ 1740 NJ 1740 NJ
-preplace netloc ps7_0_axi_periph_M03_AXI 1 2 4 720 20 NJ 20 NJ 20 2170J
+preplace netloc ps7_0_axi_periph_M02_AXI 1 2 4 720 20 NJ 20 NJ 20 2170J
 preplace netloc video_subsystem_VGA_DE 1 6 2 NJ 1460 NJ
 preplace netloc VCAP_G7_0_1 1 0 6 NJ 2100 NJ 2100 NJ 2100 NJ 2100 NJ 2100 NJ
 preplace netloc processing_system7_0_FCLK_RESET1_N 1 0 7 10 10 NJ 10 NJ 10 NJ 10 NJ 10 NJ 10 2690
@@ -1641,7 +1605,7 @@ preplace netloc processing_system7_0_FCLK_CLK0 1 2 5 850 1280 1260 1220 1660 60 
 preplace netloc VCAP_R7_0_1 1 0 6 NJ 2280 NJ 2280 NJ 2280 NJ 2280 NJ 2280 NJ
 preplace netloc axi_interconnect_2_M00_AXI 1 5 1 2110
 preplace netloc VCAP_B6_0_1 1 0 6 NJ 2140 NJ 2140 NJ 2140 NJ 2140 NJ 2140 NJ
-preplace netloc ps7_0_axi_periph_M06_AXI 1 2 2 780 320 1240J
+preplace netloc ps7_0_axi_periph_M05_AXI 1 2 2 780 320 1240J
 preplace netloc lrclk_in_0_1 1 0 6 NJ 510 NJ 510 770 40 NJ 40 NJ 40 2130
 preplace netloc v_axi4s_vid_out_0_vid_data 1 6 1 2750
 preplace netloc audio_formatter_0_m_axi_mm2s 1 4 1 1640
@@ -1650,7 +1614,7 @@ preplace netloc VCAP_G0_0_1 1 0 6 NJ 1960 NJ 1960 NJ 1960 NJ 1960 NJ 1960 NJ
 preplace netloc VCAP_R6_0_1 1 0 6 NJ 2300 NJ 2300 NJ 2300 NJ 2300 NJ 2300 NJ
 preplace netloc proc_sys_reset_1_peripheral_aresetn 1 3 3 1230 1210 1670 1370 2010
 preplace netloc MNTZorro_v0_1_S00_AXI_0_ZORRO_NCFGOUT 1 6 2 NJ 2130 2970J
-preplace netloc ps7_0_axi_periph_M05_AXI 1 2 1 790
+preplace netloc ps7_0_axi_periph_M04_AXI 1 2 1 790
 preplace netloc ZORRO_NCFGIN_1 1 0 6 NJ 1860 NJ 1860 NJ 1860 NJ 1860 NJ 1860 NJ
 preplace netloc ZORRO_NCCS_1 1 0 6 NJ 1780 NJ 1780 NJ 1780 NJ 1780 NJ 1780 NJ
 preplace netloc VCAP_B7_0_1 1 0 6 NJ 2120 NJ 2120 NJ 2120 NJ 2120 NJ 2120 NJ

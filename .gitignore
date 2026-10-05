@@ -27,6 +27,7 @@ NONE/
 
 # Build outputs
 build/
+.zz9000-build-firmware-*.sh
 ZZ9000_proto.sdk/ZZ9000OS/build/
 bootgen/
 bootimage_work/BOOT.bin

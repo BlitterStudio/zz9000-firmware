@@ -63,8 +63,8 @@ if [ "$BOOTIMAGE" = "1" ]; then
 fi
 '@
 
-$TempScript = Join-Path ([System.IO.Path]::GetTempPath()) `
-  "zz9000-build-firmware-docker.sh"
+$TempScript = Join-Path $RepoRoot `
+  (".zz9000-build-firmware-" + [guid]::NewGuid().ToString("N") + ".sh")
 [System.IO.File]::WriteAllText(
   $TempScript,
   ($ContainerScript -replace "`r`n", "`n" -replace "`r", "`n"),

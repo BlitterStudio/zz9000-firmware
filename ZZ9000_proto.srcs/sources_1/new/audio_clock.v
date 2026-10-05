@@ -29,14 +29,28 @@ module audio_clock(
     wire unused_fclk = fclk_in;
     assign mclk_out = bclk_in;
 
+    /* resetn comes from the PS reset in the FCLK0 domain, asynchronous to
+     * the source-synchronous bclk_in logic below. A two-stage synchronizer
+     * asserts reset asynchronously and releases it on the falling BCLK edge
+     * that the main logic uses (CDC-7). The rising-edge input samplers see
+     * the release half a BCLK earlier; this does not change audio data
+     * timing. */
+    (* ASYNC_REG = "TRUE" *) reg [1:0] resetn_sync = 2'b00;
+    always @(negedge bclk_in or negedge resetn)
+      if (!resetn)
+        resetn_sync <= 2'b00;
+      else
+        resetn_sync <= {resetn_sync[0], 1'b1};
+    wire reset_active = !resetn_sync[1];
+
     reg [2:0] clkgen;
     assign bclk_out = clkgen[2];
 
     (* IOB = "TRUE" *) reg sampled_lrclk;
     (* IOB = "TRUE" *) reg sampled_sdata;
 
-    always @(posedge bclk_in or negedge resetn) begin
-      if (!resetn) begin
+    always @(posedge bclk_in) begin
+      if (reset_active) begin
         sampled_lrclk <= 1'b1;
         sampled_sdata <= 1'b0;
       end else begin
@@ -70,8 +84,8 @@ module audio_clock(
      * 32..47. A complete 256-bit frame is accepted only when its LRCLK
      * midpoint and closing edge are coherent.
      */
-    always @(negedge bclk_in or negedge resetn) begin
-      if (!resetn) begin
+    always @(negedge bclk_in) begin
+      if (reset_active) begin
         clkgen <= 3'b000;
 
         observed_lrclk <= 1'b1;

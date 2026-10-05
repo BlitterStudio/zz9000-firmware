@@ -86,8 +86,17 @@ module videocap_clock_control #(
     // Legacy E7M can supply usable clocks without asserting LOCKED.
     // Keep its real lock telemetry, but qualify capture only in C28 mode.
     wire lock_qualified = (C28_MODE == 0) || lock_seen;
-    assign mmcm_reset = !resetn || !source_valid ||
-                        clock_state == WAIT_SOURCE || clock_state == RESET_CLOCK;
+    /* The MMCM RST pin is asynchronous; a combinational LUT driving it can
+     * glitch and spuriously re-reset the capture clock (LUTAR-1).  Register
+     * the request in this clock domain instead: assertion and release are
+     * each delayed one clk cycle, and LOCKED still qualifies the release
+     * downstream. */
+    reg mmcm_reset_reg = 1'b1;
+    always @(posedge clk)
+        mmcm_reset_reg <= !resetn || !source_valid ||
+                          clock_state == WAIT_SOURCE ||
+                          clock_state == RESET_CLOCK;
+    assign mmcm_reset = mmcm_reset_reg;
     assign ready = clock_state == RUN && source_valid && lock_qualified && !phase_fault;
 
     always @(posedge clk) begin

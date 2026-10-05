@@ -11,7 +11,9 @@ REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # compile. Pass the invoking host user/group ids so the container can hand the
 # build outputs back at the end (below) — otherwise the root-owned build/ tree
 # blocks the host-side packaging step from writing build/package on Linux/CI.
-docker run --rm -v "$REPO_ROOT:/work" -w /work \
+# MSYS_NO_PATHCONV=1 keeps Git Bash from rewriting the container-absolute
+# -w /work into a host path; the Docker daemon accepts the /d/... mount form.
+MSYS_NO_PATHCONV=1 docker run --rm -v "$REPO_ROOT:/work" -w /work \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" "$IMAGE" sh -c '
 set -e
 mkdir -p build/m68k
