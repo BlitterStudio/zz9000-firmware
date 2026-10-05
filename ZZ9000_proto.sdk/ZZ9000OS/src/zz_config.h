@@ -166,8 +166,10 @@ struct zz_config {
 
 	uint8_t mac_present;
 	uint8_t mac[6];
+	/* hdf_present with an empty hdf_path is `hdf = off`: SD boot is
+	 * disabled. Absent key means the default 0:/zz9000.hdf. */
 	uint8_t hdf_present;
-	char hdf_path[ZZ_CONFIG_HDF_NAME_MAX + 4]; /* "0:/" + name + NUL */
+	char hdf_path[ZZ_CONFIG_HDF_NAME_MAX + 4]; /* "0:/" + name + NUL, or "" */
 
 	uint8_t offscreen_bitmaps_present;
 	uint16_t offscreen_bitmaps;     /* 0-1, informational (drivers query it) */

@@ -141,7 +141,7 @@ The file controls these boot-time defaults:
 | `offscreen_bitmaps` | Enable or disable Picasso96 off-screen bitmaps |
 | `video_overlay` | Enable or disable the Picasso96 video window |
 | `mac` | Ethernet MAC-address override |
-| `hdf` | Root-level HDF image used for SD-card boot |
+| `hdf` | Root-level HDF image used for SD-card boot (default `zz9000.hdf`); `off` disables SD boot |
 
 The audio control plane (ZZ9000AX) adds one group of keys per scene,
 the active selection, operator baseline and per-card clean ceilings.
