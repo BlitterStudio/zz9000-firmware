@@ -755,6 +755,37 @@ static void test_hdf_comment_markers(void) {
     CHECK(strcmp(zz_config_get()->hdf_path, "0:/disk") == 0);
 }
 
+static void test_hdf_off(void) {
+    char buf[256];
+
+    /* `hdf = off` disables SD boot, distinct from the absent key that
+     * selects the default zz9000.hdf (issue #131). */
+    zz_config_reset();
+    CHECK(parse_str("HDF = OFF\n") == 1);
+    CHECK(zz_config_get()->hdf_present);
+    CHECK(zz_config_get()->hdf_path[0] == '\0');
+
+    /* Survives the firmware's own CFG rewrite (audio scene save). */
+    CHECK(zz_config_emit_present_keys(buf, sizeof(buf), 0) > 0);
+    CHECK(strstr(buf, "hdf = off\n") != NULL);
+    zz_config_reset();
+    CHECK(parse_str(buf) == 1);
+    CHECK(zz_config_get()->hdf_present && zz_config_get()->hdf_path[0] == '\0');
+
+    /* Last assignment wins in both directions. */
+    zz_config_reset();
+    CHECK(parse_str("hdf = off\nhdf = games.hdf\n") == 2);
+    CHECK(strcmp(zz_config_get()->hdf_path, "0:/games.hdf") == 0);
+    zz_config_reset();
+    CHECK(parse_str("hdf = games.hdf\nhdf = off\n") == 2);
+    CHECK(zz_config_get()->hdf_present && zz_config_get()->hdf_path[0] == '\0');
+
+    /* Only the bare token disables; a real image name stays a name. */
+    zz_config_reset();
+    CHECK(parse_str("hdf = off.hdf\n") == 1);
+    CHECK(strcmp(zz_config_get()->hdf_path, "0:/off.hdf") == 0);
+}
+
 static void test_loader_no_file(void) {
     mock_set_file(NULL);
     mock_set_bak_file(NULL);
@@ -1113,6 +1144,7 @@ int main(void) {
     test_loader_no_file();
     test_loader_bak_fallback();
     test_hdf_comment_markers();
+    test_hdf_off();
     test_loader_no_card();
     test_read_raw();
     test_fastram_key();

@@ -586,6 +586,13 @@ static int apply_key(const char *key, const char *value) {
 	if (token_eq(key, "audio_scene7_nm7"))  return audio_scene_key(7, 14, value);
 	if (token_eq(key, "audio_scene7_nm8"))  return audio_scene_key(7, 15, value);
 	if (token_eq(key, "hdf")) {
+		/* `off` disables SD boot. Firmware without this branch treats
+		 * it as a missing 0:/off image, which also presents no HDF. */
+		if (token_eq(value, "off")) {
+			cfg.hdf_path[0] = '\0';
+			cfg.hdf_present = 1;
+			return 0;
+		}
 		if (!hdf_name_valid(value)) return -1;
 		cfg.hdf_path[0] = '0';
 		cfg.hdf_path[1] = ':';
@@ -1107,7 +1114,7 @@ int zz_config_emit_present_keys(char *buf, unsigned size, int off) {
 			cfg.mac[0], cfg.mac[1], cfg.mac[2], cfg.mac[3],
 			cfg.mac[4], cfg.mac[5]);
 	if (cfg.hdf_present)
-		EMIT("hdf = %s\n", cfg.hdf_path + 3);
+		EMIT("hdf = %s\n", cfg.hdf_path[0] ? cfg.hdf_path + 3 : "off");
 
 #undef EMIT
 	return off;

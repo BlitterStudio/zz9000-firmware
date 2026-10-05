@@ -28,13 +28,16 @@
 #define SD_MAX_BLOCKS_AT_ONCE 48
 
 /* Default HDF path at the root of the FAT32 volume; a `hdf = name`
- * line in ZZ9000.CFG selects a different image. */
+ * line in ZZ9000.CFG selects a different image and `hdf = off`
+ * disables SD boot. */
 #define HDF_VOLUME "0:"
 #define HDF_PATH   HDF_VOLUME "/zz9000.hdf"
 
+/* NULL when ZZ9000.CFG disables SD boot. */
 static const char* hdf_path(void) {
     const struct zz_config *cfg = zz_config_get();
-    return cfg->hdf_present ? cfg->hdf_path : HDF_PATH;
+    if (!cfg->hdf_present) return HDF_PATH;
+    return cfg->hdf_path[0] ? cfg->hdf_path : NULL;
 }
 
 static FATFS fatfs;
@@ -201,6 +204,11 @@ int sd_storage_init(void) {
     }
 
     const char *path = hdf_path();
+    if (!path) {
+        printf("[SD] HDF disabled by ZZ9000.CFG (hdf = off)\n");
+        printf("[SD] FAT volume remains mounted for firmware-file push\n");
+        return 0;
+    }
     fr = f_open(&hdf_file, path, FA_READ | FA_WRITE | FA_OPEN_EXISTING);
     if (fr != FR_OK) {
         /* Retry read-only in case the HDF is on a read-only FS or the
