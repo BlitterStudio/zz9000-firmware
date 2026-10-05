@@ -3464,19 +3464,13 @@ module MNTZorro_v0_1_S00_AXI
     // formatter, which intentionally ignores this operation.
 
     out_reg0 <= ZORRO3 ? last_z3addr : last_addr;
-    // REG1 write is the Zorro read-reply data. Its read direction is the
-    // coherent completed line width in words, rounded down to the writeback
-    // burst. [31:16] = 16'h4C48 distinguishes this from older bitstreams,
-    // whose REG1 read was zorro_ram_write_data. [10:0] is the width
-    // (1280 until the first completed frame).
-    out_reg1 <= {16'h4C48, 5'b0, vcap_captured_words[10:0]};
-    // REG2 write is the formatter strobe. Its read direction is the
-    // coherent completed post-crop field row count, so the ARM sizes
-    // short-source DMA from rows writeback actually published. [31:16]
-    // = 16'h4C43 distinguishes this from older bitstreams, whose REG2
-    // read was last_z3addr. [9:0] is that count (0 until the first
-    // field). The raw field total remains on the 0x4E stats word.
-    out_reg2 <= {16'h4C43, 6'b0, vcap_written_field_rows[9:0]};
+    // REG1 is the ARM-visible Zorro RAM-write payload for every request.
+    // Never multiplex telemetry here: MODE, PAN and FWUP selectors share it.
+    out_reg1 <= zorro_ram_write_data;
+    // REG2 writes remain the formatter strobe; reads expose capture geometry.
+    // [31:21] is the 11'h265 marker, [20:10] words, [9:0] published rows.
+    out_reg2 <= {11'h265, vcap_captured_words[10:0],
+                 vcap_written_field_rows[9:0]};
     // Status: [24] interlace, [23] videocap, [22] NTSC, [21] vblank,
     // [20] hblank, [19] SDK doorbell, [18] SDK IRQ ack, [17] SuperHires,
     // [16] full-rate capture, [15] viewport, [14] native source sync,

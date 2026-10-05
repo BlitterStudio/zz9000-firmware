@@ -629,13 +629,17 @@ void video_set_dpms(uint8_t level) {
 void isr_video(void *dummy) {
 	u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 	u32 live_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG2);
-	uint32_t videocap_live_rows =
-		((live_raw >> 16) == MNTZORRO_REG2_LIVE_ROWS_MAGIC) ?
-		(live_raw & MNTZORRO_REG2_LIVE_ROWS_MASK) : 0U;
-	u32 words_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG1);
-	uint32_t videocap_live_words =
-		((words_raw >> 16) == MNTZORRO_REG1_LIVE_WORDS_MAGIC) ?
-		(words_raw & MNTZORRO_REG1_LIVE_WORDS_MASK) : 0U;
+	uint32_t videocap_live_rows = 0U;
+	uint32_t videocap_live_words = 0U;
+
+	if ((live_raw & MNTZORRO_REG2_LIVE_GEOMETRY_MASK) ==
+	    MNTZORRO_REG2_LIVE_GEOMETRY_MAGIC) {
+		videocap_live_rows = live_raw &
+			MNTZORRO_REG2_LIVE_GEOMETRY_ROWS_MASK;
+		videocap_live_words = (live_raw >>
+			MNTZORRO_REG2_LIVE_GEOMETRY_WORDS_SHIFT) &
+			MNTZORRO_REG2_LIVE_GEOMETRY_WORDS_MASK;
+	}
 
 	int vblank = !!(zstate & (1 << 21));
 	int videocap_enabled = !!(zstate & (1 << 23));
