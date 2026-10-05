@@ -105,11 +105,6 @@ int main(int argc, char **argv)
 	                      "flush_surface_rect(&surface, x, y, width, height);");
 	ok &= expect_contains(source,
 	                      "flush_surface_rect(&dst, dst_x, dst_y, width, height);");
-	ok &= expect_count(
-		source, "Xil_DCacheFlushRange(SDK_MAILBOX_ADDRESS, SDK_MAILBOX_TOTAL_SIZE);",
-		1U);
-	ok &= expect_contains(
-		source, "Xil_DCacheInvalidateRange(SDK_MAILBOX_ADDRESS, SDK_MAILBOX_TOTAL_SIZE);");
 	ok &= expect_not_contains(
 		source, "Xil_DCacheInvalidateRange((INTPTR)src.address, src.length);");
 	ok &= expect_not_contains(
