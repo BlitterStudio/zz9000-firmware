@@ -7739,8 +7739,8 @@ static void select_mailbox_placement(void)
 		return;
 	}
 	if (!z3_section_uncached) {
-		/* The same section audio_set_tx_buffer() remaps for the Z3
-		 * direct rings; remapping it twice is harmless. */
+		/* ax.c remaps this same section for the Z3 direct rings when
+		 * audio starts; remapping it twice is harmless. */
 		Xil_SetTlbAttributes((UINTPTR)SDK_MAILBOX_Z3_ADDRESS,
 		                     NORM_NONCACHE);
 		z3_section_uncached = 1U;
