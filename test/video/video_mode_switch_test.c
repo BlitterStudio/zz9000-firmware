@@ -28,8 +28,16 @@ static unsigned dma_starts;
 static uint32_t video_irq_enabled = 1;
 static unsigned inject_native_irq, deferred_native_irqs;
 static uint32_t videocap_zstate;
-static uint32_t videocap_live_rows_reg;
-static uint32_t videocap_live_words_reg;
+static uint32_t videocap_live_geometry_reg;
+static uint32_t zorro_ram_write_data;
+
+static uint32_t videocap_live_geometry(uint16_t words, uint16_t rows)
+{
+	return MNTZORRO_REG2_LIVE_GEOMETRY_MAGIC |
+		(((uint32_t)words & MNTZORRO_REG2_LIVE_GEOMETRY_WORDS_MASK) <<
+		 MNTZORRO_REG2_LIVE_GEOMETRY_WORDS_SHIFT) |
+		((uint32_t)rows & MNTZORRO_REG2_LIVE_GEOMETRY_ROWS_MASK);
+}
 static int dma_cfg_initialize_status;
 static int dma_config_status;
 static int dma_address_status;
@@ -88,9 +96,9 @@ uint32_t test_xil_in32(uintptr_t address)
 	if (address == MNTZ_BASE_ADDR + MNTZORRO_REG3)
 		return videocap_zstate;
 	if (address == MNTZ_BASE_ADDR + MNTZORRO_REG2)
-		return videocap_live_rows_reg;
+		return videocap_live_geometry_reg;
 	if (address == MNTZ_BASE_ADDR + MNTZORRO_REG1)
-		return videocap_live_words_reg;
+		return zorro_ram_write_data;
 	return 0;
 }
 
@@ -466,48 +474,44 @@ int main(void)
 	assert(dma_setup.VertSizeInput == 512);
 	/* Same class, smaller published field: DMA and viewport follow the
 	 * count, or the bucket tail keeps the previous source. */
-	videocap_live_rows_reg =
-		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 427U;
+	videocap_live_geometry_reg = videocap_live_geometry(1280U, 427U);
 	isr_video(NULL);
 	assert(dma_setup.VertSizeInput == 427);
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == (113U << 16 | 320U));
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] ==
 	       (854U << 16 | 1280U));
-	videocap_live_rows_reg = 0;
+	videocap_live_geometry_reg = 0;
 	/* DblPAL fields alternate 287/288. Both clamp to the class-2
 	 * bucket, so the second field must not restart VDMA. */
 	videocap_zstate |= 1U << 24;
-	videocap_live_rows_reg =
-		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 287U;
+	videocap_live_geometry_reg = videocap_live_geometry(1280U, 287U);
 	geometry_native_vblank();
 	assert(dma_setup.VertSizeInput == 512);
 	clear_measurements();
-	videocap_live_rows_reg =
-		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 288U;
+	videocap_live_geometry_reg = videocap_live_geometry(1280U, 288U);
 	isr_video(NULL);
 	assert(dma_starts == 0);
 	assert(dma_setup.VertSizeInput == 512);
 	/* Euro72 fields alternate 213/214: post-crop published counts
 	 * 195/196 double to 390/392, both below the class-2 bucket, so the
 	 * delta must not restart VDMA either. */
-	videocap_live_rows_reg =
-		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 195U;
+	videocap_live_geometry_reg = videocap_live_geometry(1280U, 195U);
 	geometry_native_vblank();
 	assert(dma_setup.VertSizeInput == 390);
 	clear_measurements();
-	videocap_live_rows_reg =
-		(MNTZORRO_REG2_LIVE_ROWS_MAGIC << 16) | 196U;
+	videocap_live_geometry_reg = videocap_live_geometry(1280U, 196U);
 	isr_video(NULL);
 	assert(dma_starts == 0);
 	assert(dma_setup.VertSizeInput == 390);
 	videocap_zstate &= ~(1U << 24);
-	videocap_live_rows_reg = 0;
+	videocap_live_geometry_reg = 0;
 	/* Super72 completes its lines before the 1280-word pitch: the
 	 * measured width bounds the fetch and the shown viewport, and an
-	 * unchanged width must not restart VDMA. */
+	 * unchanged width must not restart VDMA. REG1 holds a pending host
+	 * payload, so capture geometry must come only from the packed REG2 read. */
 	videocap_zstate &= ~(1U << 12);
-	videocap_live_words_reg =
-		(MNTZORRO_REG1_LIVE_WORDS_MAGIC << 16) | 1008U;
+	zorro_ram_write_data = 0x00ca0000U;
+	videocap_live_geometry_reg = videocap_live_geometry(1008U, 0U);
 	geometry_native_vblank();
 	assert(dma_setup.HoriSizeInput == 1008 * 4);
 	assert(dma_setup.VertSizeInput == 512);
@@ -517,7 +521,7 @@ int main(void)
 	clear_measurements();
 	isr_video(NULL);
 	assert(dma_starts == 0);
-	videocap_live_words_reg = 0;
+	videocap_live_geometry_reg = 0;
 	videocap_zstate |= 1U << 12;
 	printf("Native geometry: PAL 640x480@(80,60), NTSC 640x400@(40,40), "
 	       "Automatic restored, short NTSC retains 512 rows\n");

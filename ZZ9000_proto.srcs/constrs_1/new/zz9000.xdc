@@ -271,8 +271,14 @@ create_clock -period 80.000 -name i2s_mclk -add [get_ports I2SO_BCLK]
 
 # ADAU1701 TDM8 serial output data and LRCLK change after OUTPUT_BCLK falls.
 # Register them on the following rising edge. The 40 ns maximum is the
-# datasheet tSODM limit; zero is the conservative minimum because no minimum
-# clock-to-output delay is specified.
+# datasheet tSODM limit (Table 7, "SDATA_OUTx delay. Time from OUTPUT_BCLK
+# falling in master mode"); zero is the conservative minimum because no
+# minimum clock-to-output delay is specified.  Because tSODM consumes the
+# entire half period, the setup margin here is structurally only
+# (BCLK insertion 1.6 ns) - (pin-to-register delay ~1.4 ns) - uncertainty;
+# the post-route phys_opt_design step in the build flow exists to close
+# exactly this margin (trial build: routed WNS -0.090 -> +0.143 after
+# post-route phys_opt, fast corner).
 set_input_delay -clock i2s_mclk -clock_fall -max 40.000 [get_ports {I2SI_D0 I2SO_LRCLK}]
 set_input_delay -clock i2s_mclk -clock_fall -min 0.000 [get_ports {I2SI_D0 I2SO_LRCLK}]
 
@@ -287,12 +293,13 @@ set_property PACKAGE_PIN U19 [get_ports {I2SO_RESETn[0]}]
 #set_property PACKAGE_PIN W19 [get_ports HDMI_INTN]
 
 
-# ZORRO_NFCS is used as the ODDR clock (C input) for the z3_nslave_oddr and
+# ZORRO_NFCS is the ODDR clock (C input) for the z3_nslave_oddr and
 # z3_ncinh_oddr primitives that drive /SLAVE and /CINH.  Declaring it as a
-# clock lets Vivado analyse the combinatorial D2 setup path (z3_addr_phase_match,
-# sourced from ACLK-domain registers) against the falling edge of ZORRO_NFCS.
-# ZORRO_NFCS idles high and falls to start a Z3 bus cycle (active-low /FCS).
-# Minimum Z3 cycle ≈ 140 ns; waveform {0 70} = rising at 0 ns, falling at 70 ns.
+# clock keeps the port-to-ODDR address-phase claim paths edge-timed
+# (zorro_fcs fall to fall) and anchors the ZORRO_ADDR/DATA//CFGIN input
+# delays below.  ZORRO_NFCS idles high and falls to start a Z3 bus cycle
+# (active-low /FCS).  Minimum Z3 cycle ≈ 140 ns; waveform {0 70} = rising
+# at 0 ns, falling at 70 ns.
 create_clock -period 140.000 -name zorro_fcs -waveform {0 70} -add [get_ports ZORRO_NFCS]
 
 # Address, data, and /CFGIN are sampled combinatorially into the address-phase
@@ -300,258 +307,111 @@ create_clock -period 140.000 -name zorro_fcs -waveform {0 70} -add [get_ports ZO
 # ADDR/DATA are stable at least 15 ns before /FCS falls, giving about 55 ns of
 # slack with 100 ns max input delay relative to the falling edge at t=70 ns.
 set_input_delay -clock zorro_fcs -clock_fall -max 100.000 [get_ports {ZORRO_DATA[*]}]
+set_input_delay -clock zorro_fcs -clock_fall -min 0.000 [get_ports {ZORRO_DATA[*]}]
 set_input_delay -clock zorro_fcs -clock_fall -max 100.000 [get_ports {ZORRO_ADDR[*]}]
+set_input_delay -clock zorro_fcs -clock_fall -min 0.000 [get_ports {ZORRO_ADDR[*]}]
 set_input_delay -clock zorro_fcs -clock_fall -max 100.000 [get_ports ZORRO_NCFGIN]
-# These same ports are also consumed by ACLK-domain registers (z3addr2, z3_din_*,
-# zdata_in_sync2, zaddr) which are properly handled by the ACLK synchronizer chain.
-# Suppress the spurious zorro_fcs→clk_fpga_0 setup violations Vivado would otherwise
-# report for those paths due to the 100 ns input delay above.
+set_input_delay -clock zorro_fcs -clock_fall -min 0.000 [get_ports ZORRO_NCFGIN]
+
+# The same ports are also consumed by ACLK-domain registers: the Z3
+# phase-sampled latches z3addr2 / z3_din_* / zdata_in_sync2 and the
+# znCFGIN_sync chain.  Zorro has no FPGA-known capture clock, and the design
+# guarantees the margin by construction (bus stable >= 15 ns before the
+# /FCS edge that matters, cycle >= 140 ns; single-bit controls cross through
+# synchronizers), so these port-to-ACLK paths are cut.  They must stay port
+# scoped: a datapath-only bound from zorro_fcs still adds the 100 ns input
+# delay above to the arrival time and fails by about 82 ns.
+# report_exceptions lists these lines as "Non-existent path" on the
+# implemented netlist even though they do cut the paths (Vivado 2018.3
+# status quirk for -clock_fall input-delay launches).
 set_false_path -from [get_ports {ZORRO_DATA[*]}] -to [get_clocks clk_fpga_0]
 set_false_path -from [get_ports {ZORRO_ADDR[*]}] -to [get_clocks clk_fpga_0]
-# /CFGIN is also consumed by the ACLK-domain synchronizer (znCFGIN_sync).  Keep
-# that asynchronous crossing false-pathed while leaving the /CFGIN to zorro_fcs
-# ODDR path timed.
 set_false_path -from [get_ports ZORRO_NCFGIN] -to [get_clocks clk_fpga_0]
 
-# ACLK-domain registers driving the ODDR D2 combinatorial path (z_confout,
-# z3_ram_low, z3_reg_low, z3_fast_low) are intentionally asynchronous to
-# zorro_fcs: they are written by the FSM and are stable for many full Z3 bus
-# cycles before /FCS falls.  Vivado cannot express a meaningful hold
-# requirement for an async crossing like this — any multicycle approach
-# produces bogus hold violations because the tool picks worst-case edge pairs
-# across unrelated clock cycles.  False-path the ACLK→zorro_fcs direction
-# entirely; the setup margin is guaranteed by design (registers settle in <1
-# ACLK cycle = 10 ns, /FCS period ≥ 140 ns).
-set_false_path -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs]
+# ZORRO_NFCS itself is also sampled as data by the znFCS_sync two-stage
+# synchronizer (its only data consumer); the first stage of a synchronizer is
+# unanalyzable by construction, so cut just that entry.  The create_clock
+# above keeps the /FCS-driven ODDR paths and the bus input delays timed.
+set_false_path -quiet -from [get_ports -quiet ZORRO_NFCS]
 
-set_false_path -from [get_clocks clk_fpga_0] -to [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]]
+# ACLK-domain registers driving the ODDR D2 combinatorial claim path
+# (z_confout, z3_ram_low, z3_reg_low, z3_fast_low) are intentionally
+# asynchronous to zorro_fcs: the FSM writes them and they stay stable for
+# many full Z3 bus cycles before /FCS falls.  A datapath-only bound keeps
+# that guarantee measurable (settle well inside one 140 ns cycle, and well
+# under the 15 ns /FCS setup budget) without the bogus hold relationships an
+# edge-based exception produces across unrelated clocks.
+set_max_delay -datapath_only -from [get_clocks clk_fpga_0] -to [get_clocks zorro_fcs] 20.000
 
-set_false_path -from [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]] -to [get_clocks clk_fpga_0]
+# ACLK <-> default (75 MHz power-on) pixel-clock crossings: the formatter
+# snapshots configuration in vblank, crosses status through two-stage
+# synchronizers (need_frame_sync_reg / need_line_fetch_reg /
+# video_control_*_blank), and moves stream data through XPM / FIFO CDC
+# primitives that carry their own, more specific set_max_delay
+# -datapath_only and false-path exceptions.  A blanket false path here used
+# to override those generated constraints (methodology TIMING-24) and left
+# the whole boundary unanalyzed; a clock-pair bound restores analysis while
+# XPM's per-cell exceptions keep precedence by specificity.  The 150 MHz
+# runtime reconfiguration of the same PLL output is bounded separately in
+# runtime_pixel_timing.xdc.
+set_max_delay -datapath_only -from [get_clocks clk_fpga_0] -to [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]] 20.000
+set_max_delay -datapath_only -from [get_clocks -of_objects [get_pins zz9000_ps_i/clk_wiz_0/inst/CLK_CORE_DRP_I/clk_inst/plle2_adv_inst/CLKOUT0]] -to [get_clocks clk_fpga_0] 20.000
 
 # The active capture source XDC declares E7M in both builds and C28 only
 # in the opt-in build. A non-empty clock collection avoids conditional Tcl,
-# which Vivado 2018.3 does not support inside XDC files.
-set_false_path -from [get_clocks -quiet {amiga_e7m amiga_c28}] -to [get_clocks clk_fpga_0]
+# which Vivado 2018.3 does not support inside XDC files.  The one path this
+# cuts today is the capture_clock_control/e7m_sync_reg[0] two-stage
+# synchronizer entry, for which a false path is the canonical treatment.
+set_false_path -quiet -from [get_clocks -quiet {amiga_e7m amiga_c28}] -to [get_clocks -quiet clk_fpga_0]
 
-set_false_path -quiet -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT1]] -to [get_clocks -quiet clk_fpga_0]
-set_false_path -quiet -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] -to [get_clocks -quiet clk_fpga_0]
-set_false_path -quiet -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] -to [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT1]]
+# Capture clock -> ACLK: sample data and status cross through videocap XPM
+# CDC primitives (their generated max_dpo / false-path exceptions are more
+# specific than this bound and keep precedence) and through quasi-static
+# readback registers (rr_data and friends).  The previous blanket false path
+# overrode the XPM bounds (methodology TIMING-24).  The two lines that used
+# to follow it (capture MMCM CLKOUT1 -> clk_fpga_0 and CLKOUT0 -> CLKOUT1)
+# matched no paths on the implemented netlist and were removed; the real
+# CLKOUT1 -> CLKOUT0 capture-domain crossing stays timed by the MMCM phase
+# relationship.
+set_max_delay -datapath_only -quiet -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] -to [get_clocks -quiet clk_fpga_0] 20.000
 
-create_debug_core u_ila_0 ila
-set_property ALL_PROBE_SAME_MU true [get_debug_cores u_ila_0]
-set_property ALL_PROBE_SAME_MU_CNT 1 [get_debug_cores u_ila_0]
-set_property C_ADV_TRIGGER false [get_debug_cores u_ila_0]
-set_property C_DATA_DEPTH 1024 [get_debug_cores u_ila_0]
-set_property C_EN_STRG_QUAL false [get_debug_cores u_ila_0]
-set_property C_INPUT_PIPE_STAGES 0 [get_debug_cores u_ila_0]
-set_property C_TRIGIN_EN false [get_debug_cores u_ila_0]
-set_property C_TRIGOUT_EN false [get_debug_cores u_ila_0]
-set_property port_width 1 [get_debug_ports u_ila_0/clk]
-connect_debug_port u_ila_0/clk [get_nets [list zz9000_ps_i/processing_system7_0/inst/FCLK_CLK0]]
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe0]
-set_property port_width 3 [get_debug_ports u_ila_0/probe0]
-connect_debug_port u_ila_0/probe0 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znDS0_sync[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znDS0_sync[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znDS0_sync[2]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe1]
-set_property port_width 4 [get_debug_ports u_ila_0/probe1]
-connect_debug_port u_ila_0/probe1 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_bytes[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_bytes[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_bytes[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_bytes[3]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe2]
-set_property port_width 32 [get_debug_ports u_ila_0/probe2]
-connect_debug_port u_ila_0/probe2 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_addr[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe3]
-set_property port_width 4 [get_debug_ports u_ila_0/probe3]
-connect_debug_port u_ila_0/probe3 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_bytes[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_bytes[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_bytes[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_bytes[3]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe4]
-set_property port_width 3 [get_debug_ports u_ila_0/probe4]
-connect_debug_port u_ila_0/probe4 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znLDS_sync[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znLDS_sync[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znLDS_sync[2]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe5]
-set_property port_width 3 [get_debug_ports u_ila_0/probe5]
-connect_debug_port u_ila_0/probe5 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znDS1_sync[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znDS1_sync[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znDS1_sync[2]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe6]
-set_property port_width 32 [get_debug_ports u_ila_0/probe6]
-connect_debug_port u_ila_0/probe6 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_addr[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe7]
-set_property port_width 3 [get_debug_ports u_ila_0/probe7]
-connect_debug_port u_ila_0/probe7 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znUDS_sync[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znUDS_sync[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znUDS_sync[2]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe8]
-set_property port_width 5 [get_debug_ports u_ila_0/probe8]
-connect_debug_port u_ila_0/probe8 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znFCS_sync[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znFCS_sync[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znFCS_sync[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znFCS_sync[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znFCS_sync[4]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe9]
-set_property port_width 32 [get_debug_ports u_ila_0/probe9]
-connect_debug_port u_ila_0/probe9 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr2[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe10]
-set_property port_width 2 [get_debug_ports u_ila_0/probe10]
-connect_debug_port u_ila_0/probe10 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zDOE_sync[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zDOE_sync[1]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe11]
-set_property port_width 3 [get_debug_ports u_ila_0/probe11]
-connect_debug_port u_ila_0/probe11 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zREAD_sync[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zREAD_sync[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zREAD_sync[2]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe12]
-set_property port_width 5 [get_debug_ports u_ila_0/probe12]
-connect_debug_port u_ila_0/probe12 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zE7M_sync[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zE7M_sync[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zE7M_sync[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zE7M_sync[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zE7M_sync[4]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe13]
-set_property port_width 32 [get_debug_ports u_ila_0/probe13]
-connect_debug_port u_ila_0/probe13 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_ram_low[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe14]
-set_property port_width 32 [get_debug_ports u_ila_0/probe14]
-connect_debug_port u_ila_0/probe14 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_addr[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe15]
-set_property port_width 16 [get_debug_ports u_ila_0/probe15]
-connect_debug_port u_ila_0/probe15 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_read_data[15]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe16]
-set_property port_width 32 [get_debug_ports u_ila_0/probe16]
-connect_debug_port u_ila_0/probe16 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_high[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe17]
-set_property port_width 32 [get_debug_ports u_ila_0/probe17]
-connect_debug_port u_ila_0/probe17 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_reg_low[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe18]
-set_property port_width 32 [get_debug_ports u_ila_0/probe18]
-connect_debug_port u_ila_0/probe18 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe19]
-set_property port_width 16 [get_debug_ports u_ila_0/probe19]
-connect_debug_port u_ila_0/probe19 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync2[15]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe20]
-set_property port_width 16 [get_debug_ports u_ila_0/probe20]
-connect_debug_port u_ila_0/probe20 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zdata_in_sync[15]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe21]
-set_property port_width 24 [get_debug_ports u_ila_0/probe21]
-connect_debug_port u_ila_0/probe21 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync[23]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe22]
-set_property port_width 24 [get_debug_ports u_ila_0/probe22]
-connect_debug_port u_ila_0/probe22 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr[23]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe23]
-set_property port_width 16 [get_debug_ports u_ila_0/probe23]
-connect_debug_port u_ila_0/probe23 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_high_s2[15]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe24]
-set_property port_width 32 [get_debug_ports u_ila_0/probe24]
-connect_debug_port u_ila_0/probe24 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fast_low[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe25]
-set_property port_width 32 [get_debug_ports u_ila_0/probe25]
-connect_debug_port u_ila_0/probe25 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_mapped_addr[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe26]
-set_property port_width 32 [get_debug_ports u_ila_0/probe26]
-connect_debug_port u_ila_0/probe26 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_data[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe27]
-set_property port_width 24 [get_debug_ports u_ila_0/probe27]
-connect_debug_port u_ila_0/probe27 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zaddr_sync2[23]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe28]
-set_property port_width 5 [get_debug_ports u_ila_0/probe28]
-connect_debug_port u_ila_0/probe28 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znAS_sync[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znAS_sync[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znAS_sync[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znAS_sync[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/znAS_sync[4]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe29]
-set_property port_width 8 [get_debug_ports u_ila_0/probe29]
-connect_debug_port u_ila_0/probe29 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_state[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_state[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_state[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_state[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_state[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_state[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_state[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_state[7]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe30]
-set_property port_width 16 [get_debug_ports u_ila_0/probe30]
-connect_debug_port u_ila_0/probe30 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_din_low_s2[15]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe31]
-set_property port_width 32 [get_debug_ports u_ila_0/probe31]
-connect_debug_port u_ila_0/probe31 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/axi_reg5[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe32]
-set_property port_width 32 [get_debug_ports u_ila_0/probe32]
-connect_debug_port u_ila_0/probe32 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/debug_counter[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe33]
-set_property port_width 32 [get_debug_ports u_ila_0/probe33]
-connect_debug_port u_ila_0/probe33 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[15]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[16]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[17]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[18]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[19]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[20]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[21]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[22]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[23]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[24]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[25]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[26]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[27]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[28]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[29]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[30]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/last_z3addr[31]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe34]
-set_property port_width 16 [get_debug_ports u_ila_0/probe34]
-connect_debug_port u_ila_0/probe34 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_low16_latched[15]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe35]
-set_property port_width 16 [get_debug_ports u_ila_0/probe35]
-connect_debug_port u_ila_0/probe35 [get_nets [list {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[0]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[1]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[2]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[3]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[4]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[5]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[6]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[7]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[8]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[9]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[10]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[11]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[12]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[13]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[14]} {zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/data_z3_hi16_latched[15]}]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe36]
-set_property port_width 1 [get_debug_ports u_ila_0/probe36]
-connect_debug_port u_ila_0/probe36 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/dataout]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe37]
-set_property port_width 1 [get_debug_ports u_ila_0/probe37]
-connect_debug_port u_ila_0/probe37 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/dataout_enable]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe38]
-set_property port_width 1 [get_debug_ports u_ila_0/probe38]
-connect_debug_port u_ila_0/probe38 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/dataout_z3]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe39]
-set_property port_width 1 [get_debug_ports u_ila_0/probe39]
-connect_debug_port u_ila_0/probe39 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/dtack]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe40]
-set_property port_width 1 [get_debug_ports u_ila_0/probe40]
-connect_debug_port u_ila_0/probe40 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/slaven]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe41]
-set_property port_width 1 [get_debug_ports u_ila_0/probe41]
-connect_debug_port u_ila_0/probe41 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_end_cycle]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe42]
-set_property port_width 1 [get_debug_ports u_ila_0/probe42]
-connect_debug_port u_ila_0/probe42 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3_fcs_state]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe43]
-set_property port_width 1 [get_debug_ports u_ila_0/probe43]
-connect_debug_port u_ila_0/probe43 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr_autoconfig]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe44]
-set_property port_width 1 [get_debug_ports u_ila_0/probe44]
-connect_debug_port u_ila_0/probe44 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr_in_ram]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe45]
-set_property port_width 1 [get_debug_ports u_ila_0/probe45]
-connect_debug_port u_ila_0/probe45 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/z3addr_in_reg]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe46]
-set_property port_width 1 [get_debug_ports u_ila_0/probe46]
-connect_debug_port u_ila_0/probe46 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_interrupt_pulse]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe47]
-set_property port_width 1 [get_debug_ports u_ila_0/probe47]
-connect_debug_port u_ila_0/probe47 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_read_request]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe48]
-set_property port_width 1 [get_debug_ports u_ila_0/probe48]
-connect_debug_port u_ila_0/probe48 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_ram_write_request]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe49]
-set_property port_width 1 [get_debug_ports u_ila_0/probe49]
-connect_debug_port u_ila_0/probe49 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_read]]
-create_debug_port u_ila_0 probe
-set_property PROBE_TYPE DATA_AND_TRIGGER [get_debug_ports u_ila_0/probe50]
-set_property port_width 1 [get_debug_ports u_ila_0/probe50]
-connect_debug_port u_ila_0/probe50 [get_nets [list zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/zorro_write]]
-set_property C_CLK_INPUT_FREQ_HZ 300000000 [get_debug_cores dbg_hub]
-set_property C_ENABLE_CLK_DIVIDER false [get_debug_cores dbg_hub]
-set_property C_USER_SCAN_CHAIN 1 [get_debug_cores dbg_hub]
-connect_debug_port dbg_hub/clk [get_nets u_ila_0_FCLK_CLK0]
+# ---------------------------------------------------------------------------
+# Unconstrained I/O closure (check_timing hygiene).
+#
+# VCAP_* RGB/sync inputs sample the Amiga video pipeline.  The source is
+# asynchronous to every FPGA-declared clock, and the capture MMCM phase is
+# trained at runtime to centre the sampling eye (videocap calibration), so
+# any numbered input delay would be fiction.  False-path the capture entry;
+# all intra-capture-domain timing stays constrained via capture_e7m.xdc /
+# capture_c28.xdc.
+set_false_path -quiet -from [get_ports -quiet {VCAP_B? VCAP_G? VCAP_R? VCAP_HSYNC VCAP_VSYNC}]
+
+# Zorro bus strobes and reset are asynchronous control inputs; they enter
+# the ACLK domain only through the two-stage synchronizer chains
+# (zREAD_sync, znDS0/znDS1_sync, znUDS/znLDS_sync, znRST_sync - ASYNC_REG).
+set_false_path -quiet -from [get_ports -quiet {ZORRO_NDS0 ZORRO_NDS1 ZORRO_NLDS ZORRO_NUDS ZORRO_READ ZORRO_NIORST}]
+
+# Zorro bus outputs (/DTACK, /SLAVE, /CINH, /CFGOUT, direction and interrupt
+# pins, and the master-cycle address/data outputs) follow an asynchronous
+# handshake: the bus master samples them late in cycles that last >= 140 ns
+# (Z3) / >= 500 ns (Z2), so there is no FPGA-known capture edge to constrain
+# against.  False-path the output boundary; the input direction of the bus
+# pins stays constrained by the zorro_fcs input delays above.
+set_false_path -quiet -to [get_ports -quiet {ZORRO_ADDR[*] ZORRO_DATA[*] ZORRO_ADDRDIR ZORRO_DATADIR ZORRO_INT6 ZORRO_NCFGOUT ZORRO_NCINH ZORRO_NDTACK ZORRO_NSLAVE}]
+
+# I2SO_D0 is launched by the I2S transmitter's BCLK rising-edge register
+# (rSDataOut, launch edge 0 ns on the routed netlist) and captured by the
+# ADAU1701 half a BCLK period later; the constraint therefore references
+# the BCLK falling edge.  [Inference: with rising-edge capture the
+# 1.7-5.7 ns clock-to-pin delay could not meet tSIH, yet audio works.]
+# tSIS = tSIH = 10 ns (datasheet Table 7).  Trial netlist: setup +18.6 ns,
+# hold +33.3 ns.
+set_output_delay -clock i2s_mclk -clock_fall -max 10.000 [get_ports I2SO_D0]
+set_output_delay -clock i2s_mclk -clock_fall -min -10.000 [get_ports I2SO_D0]
+
+# I2SO_MCLK is a forwarded audio master clock with no companion data at the
+# codec's MCLKI pin (the codec PLL only requires pulse widths, tMP), and
+# I2SO_RESETn is a quasi-static reset (tRLPW only).  No edge relationship to
+# constrain; false-path both.
+set_false_path -quiet -to [get_ports -quiet {I2SO_MCLK I2SO_RESETn[*]}]
+

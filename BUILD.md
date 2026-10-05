@@ -93,6 +93,35 @@ default. SD HDF boot and the Poseidon USB proxy remain enabled. For an
 old-driver regression test, rebuild firmware with
 `EXTRA_CFLAGS=-DENABLE_LEGACY_USB_BLOCK_STORAGE=1`.
 
+### Timing gates
+
+`build_bitstream.sh` / `build_bitstream.ps1` source three gate scripts after
+implementation (before `write_bitstream`): `verify_formatter_ooc_timing.tcl`,
+`verify_vcap_cdc_timing.tcl`, and `verify_runtime_pixel_timing.tcl`. The
+release timing gate fails the build on **any** negative setup or hold slack in
+**any** clock group (a per-clock loop over `get_clocks`, including port
+clocks such as `i2s_mclk` and `zorro_fcs` that launch input-delay paths), in
+addition to the dedicated 150 MHz runtime pixel-clock checks. The final
+`TIMING_GATE: PASS - ...` line is what CI-style greps key on; a failure
+raises a Tcl error naming the violating group and slack.
+
+The build runs implementation through the post-route `phys_opt_design` step
+before the gates execute. That step is load-bearing for the ADAU1701 I2S
+input capture (`tSODM` = 40 ns consumes the whole BCLK half period, so the
+fast-corner margin is only BCLK insertion minus pin-to-register delay; the
+trial build moved from −0.090 ns routed to +0.143 ns after post-route
+phys_opt). Treat a routed-checkpoint WNS of a few hundred picoseconds
+negative on `i2s_mclk` as "let phys_opt finish" rather than a real
+regression; the gated (final) netlist is the authority.
+
+Clock-domain crossings are bounded with `set_max_delay -datapath_only`
+instead of blanket false paths so XPM/FIFO-generated CDC constraints keep
+precedence (Vivado otherwise reports methodology TIMING-24 and leaves the
+boundary unanalyzed). Every exception in `ZZ9000_proto.srcs/constrs_1/new/`
+carries a comment stating its rationale; `check_timing` is expected to
+report no unconstrained input or output ports.
+
+
 **Native-PAL videocap default (issue #7)** — for setups that boot
 without the host driver (no startup-sequence, floppy-only demo
 sessions), the standard 60 Hz videocap default produces visible
@@ -186,6 +215,14 @@ This runs the production phase engine and MMCM, measuring both capture and
 grid clock displacement for positive, negative, and restored-zero targets.
 A completed phase request is not sufficient: enabling fine phase shift on
 both feedback and outputs cancels the intended clock movement.
+
+Variant elaboration (Vivado 2018.3 xvlog/xelab; set `VIVADO_BIN` for a
+non-default installation): compiles `MNTZorro` once for each release
+variant, using the `define blocks from `build_variant_bitstreams.sh`. Run it
+after RTL changes, before an hours-long variant rebuild:
+```bash
+python3 test/video/run_variant_elaboration.py
+```
 
 ## Flashing
 

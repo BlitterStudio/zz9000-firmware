@@ -51,7 +51,6 @@ localparam [2:0] FROZEN = 3'd5;
 
 (* ram_style = "block" *) reg [23:0] pixels [0:1023];
 (* ASYNC_REG = "TRUE" *) reg [2:0] arm_sync;
-(* ASYNC_REG = "TRUE" *) reg [2:0] reset_cap;
 reg [2:0] startup;
 reg cap_ready;
 reg arm_seen;
@@ -85,21 +84,22 @@ wire sample_matches = sample_x == expected_x && sample_y == expected_y;
 wire row_start = sample_x == roi_x_first;
 wire line_metadata_matches = line_meta_identity[31] &&
     line_meta_identity[26:16] == sample_y[10:0];
-wire reset_request = cap_reset || !axi_resetn;
-
-/* AXI reset can release independently of cap_clk. Synchronize the release
- * of either reset before any transaction state is allowed to advance. */
-always @(posedge cap_clk or posedge reset_request) begin
-    if (reset_request)
-        reset_cap <= 3'b111;
-    else
-        reset_cap <= {reset_cap[1:0], 1'b0};
-end
+/* Each reset request is synchronized by its own three-stage chain, so
+ * stage 0 always samples exactly one asynchronous source with no LUT
+ * in front of it (CDC-10). cap_reset is a cap_clk-domain signal (the
+ * sampler drives it from vcap_reset_sync[2] through recovery_fields),
+ * so the capture side combines it after the AXI-reset synchronizer and
+ * vice versa; both sides keep a power-up asserted state and a three-edge
+ * synchronized release. */
+(* ASYNC_REG = "TRUE" *) reg [2:0] axi_resetn_sync_cap = 3'b000;
+always @(posedge cap_clk)
+    axi_resetn_sync_cap <= {axi_resetn_sync_cap[1:0], axi_resetn};
+wire reset_cap = !axi_resetn_sync_cap[2] || cap_reset;
 
 /* Keep reset outside the inferred dual-clock RAM. A read is meaningful
  * only with valid set; an aborted capture can leave partial words behind. */
 always @(posedge cap_clk) begin
-    if (!reset_cap[2] && cap_ready && !new_arm &&
+    if (!reset_cap && cap_ready && !new_arm &&
             state == CAPTURE && !frame_sync && !geometry_changed &&
             !mode_changed && in_roi && sample_matches &&
             (!row_start || line_metadata_matches))
@@ -130,11 +130,12 @@ always @(posedge axi_clk) begin
     end
 end
 
-/* cap_reset is supplied with asynchronous assertion and capture-clock
- * synchronous release. Assertion also works when the input clock stops.
- * AXI reset aborts both sides of the transaction. */
-always @(posedge cap_clk or posedge reset_cap[2]) begin
-    if (reset_cap[2]) begin
+/* The capture state is held in reset while reset_cap (the synchronized
+ * AXI reset ORed with same-domain cap_reset) is asserted; release is the
+ * three-edge synchronized sequence above. AXI reset aborts both sides of
+ * the transaction. */
+always @(posedge cap_clk) begin
+    if (reset_cap) begin
         arm_sync <= 0;
         startup <= 0;
         cap_ready <= 0;
@@ -309,7 +310,7 @@ end
 (* ASYNC_REG = "TRUE" *) reg [18:0] metadata_sync;
 (* ASYNC_REG = "TRUE" *) reg [23:0] geometry_meta;
 (* ASYNC_REG = "TRUE" *) reg [23:0] geometry_sync;
-(* ASYNC_REG = "TRUE" *) reg [2:0] reset_axi;
+(* ASYNC_REG = "TRUE" *) reg [2:0] cap_reset_sync_axi = 3'b111;
 reg axi_initialized;
 reg arm_local;
 reg local_armed;
@@ -319,15 +320,12 @@ wire seen_axi = control_settled[2];
 wire busy_axi = control_settled[1];
 wire valid_axi = control_settled[0];
 
-always @(posedge axi_clk or posedge reset_request) begin
-    if (reset_request)
-        reset_axi <= 3'b111;
-    else
-        reset_axi <= {reset_axi[1:0], 1'b0};
-end
+always @(posedge axi_clk)
+    cap_reset_sync_axi <= {cap_reset_sync_axi[1:0], cap_reset};
+wire reset_axi = !axi_resetn || cap_reset_sync_axi[2];
 
 always @(posedge axi_clk) begin
-    if (!axi_resetn || reset_axi[2]) begin
+    if (reset_axi) begin
         control_meta <= 0;
         control_sync <= 0;
         control_settled <= 0;

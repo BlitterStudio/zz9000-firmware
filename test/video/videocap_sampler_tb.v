@@ -367,6 +367,7 @@ task force_control_frame_boundary;
     end
 endtask
 
+
 task pulse_standard_frame;
     input ntsc;
     begin
@@ -1018,12 +1019,12 @@ initial begin
     end
 
     drive_field(0, 0);
+    drive_field(0, 1);
     wait_control_complete;
     check_eq("initial_applied_valid", control_applied_valid, 1);
     check_eq("initial_applied_sequence", control_applied_sequence, 1);
     check_eq("initial_applied_raw", control_applied_raw,
              control_request_raw);
-    drive_field(0, 1);
 
     /* GRIDSHIFT runs re-phase over the first frame; cap_shres settles
      * one frame after the odd-period bars are pure again. */

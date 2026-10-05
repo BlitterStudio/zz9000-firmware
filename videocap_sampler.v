@@ -671,6 +671,10 @@ wire [11:0] class_period = (field_max_period != 0) ?
 // After a clock reset, discard two field boundaries while timing and the
 // pixel-pair grid settle. Clock loss invalidates readiness even if cap_clk stops.
 reg [1:0] recovery_fields = 0;
+/* Readiness must drop on clock loss without any capture-clock edge
+ * (behavioral contract, videocap_recovery_tb), so the pin stays
+ * combinational even though it feeds the ACLK-domain vcap_ready_sync
+ * synchronizer in mntzorro.v. */
 assign capture_ready = !cap_reset && recovery_fields == 0;
 always @(posedge cap_clk) begin
     if (cap_reset) recovery_fields <= 2;

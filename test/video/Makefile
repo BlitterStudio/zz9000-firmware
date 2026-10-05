@@ -57,7 +57,7 @@ $(BUILD_DIR)/video_mode_pll_test: video_mode_pll_test.c \
 
 $(BUILD_DIR)/video_mode_switch_test: video_mode_switch_test.c \
 		stubs/xil_io.h $(SRC_DIR)/video.c $(SRC_DIR)/video.h \
-		$(SRC_DIR)/video_scale.h $(SRC_DIR)/video_vdma.h \
+		$(SRC_DIR)/mntzorro.h $(SRC_DIR)/video_scale.h $(SRC_DIR)/video_vdma.h \
 		$(SRC_DIR)/zz_custom_mode.h \
 		$(SRC_DIR)/hdmi.c $(SRC_DIR)/hdmi.h \
 		$(SRC_DIR)/zz_video_modes.c $(SRC_DIR)/zz_video_modes.h

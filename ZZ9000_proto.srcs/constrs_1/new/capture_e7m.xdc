@@ -3,6 +3,9 @@
 
 # Legacy E7M capture only. This preserves the existing physical operating
 # point and STA workaround; it does not qualify the under-frequency VCO.
+# (R14 is a regular I/O with respect to the capture MMCM site; the per-net
+# CLOCK_DEDICATED_ROUTE overrides below are the scoped workaround for the
+# PLCK-23 placement check and are hardware-pin-constrained.)
 set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets ZORRO_E7M]
 set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets ZORRO_E7M_IBUF]
 
@@ -16,14 +19,20 @@ create_clock -period 35.000 -name amiga_e7m -add [get_ports ZORRO_E7M]
 # Restore the physical single-cycle budget for intra-capture-domain paths
 # with a 4-cycle setup multicycle (3-cycle hold keeps the original
 # adjacent-edge hold relationship). Cross-domain paths are unaffected:
-# the CLKOUT0->ACLK and CLKOUT0->CLKOUT1 crossings are false-pathed in zz9000.xdc
-# and use XPM/handshake synchronization. Without this correction, deep
-# capture-domain logic such as the E7M-locked sample-grid pairing (17
-# logic levels, ~12.5 ns) can never meet the fictional 8.75 ns budget and
-# the post-route timing gate rejects physically sound builds.
+# the CLKOUT0->ACLK crossing is bounded with set_max_delay -datapath_only
+# in zz9000.xdc and uses XPM/handshake synchronization. Without this
+# correction, deep capture-domain logic such as the E7M-locked sample-grid
+# pairing (17 logic levels, ~12.5 ns) can never meet the fictional 8.75 ns
+# budget and the post-route timing gate rejects physically sound builds.
 set_multicycle_path -quiet 4 -setup \
     -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] \
     -to [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]]
 set_multicycle_path -quiet 3 -hold \
     -from [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]] \
     -to [get_clocks -quiet -of_objects [get_pins -quiet zz9000_ps_i/MNTZorro_v0_1_S00_AXI_0/inst/mmcm_adv_inst/CLKOUT0]]
+
+# ZORRO_C28D is the unused alternate capture-clock pin in E7M builds (the
+# capture MMCM clocks from ZORRO_E7M here), so it has no timing paths.
+# capture_c28.xdc declares the real amiga_c28 clock on this pin in opt-in
+# C28 builds.
+set_false_path -from [get_ports ZORRO_C28D]
