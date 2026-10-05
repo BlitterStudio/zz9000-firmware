@@ -381,11 +381,43 @@
 #error "core-1 stack overlaps the Z3 fast-RAM DDR window"
 #endif
 
-// SDK v2 bootstrap mailbox. The Amiga side reaches this through the existing
-// board window at 0xd000, inside the legacy 0xa000..0xffff shared I/O buffer.
-#define SDK_MAILBOX_WINDOW_OFFSET   0x0000D000
-#define SDK_MAILBOX_ADDRESS \
-	(USB_BLOCK_STORAGE_ADDRESS + (SDK_MAILBOX_WINDOW_OFFSET - 0x0000A000))
+// SDK v2 bootstrap mailbox (descriptor plus both rings; firmware publishes
+// the chosen ARM address through REG_ZZ_SDK_MAILBOX_HI/LO and the Amiga
+// library maps whatever it reads). The placement is per bus.
+//
+// Zorro III: a private block in the free 0x08000000..0x081C0000 belt below
+// the Z3 direct-ring reservation, reached through the main board aperture
+// (board offset = ARM - ADDR_ADJ). It shares the 1 MB section that
+// sdk_mailbox_init() maps non-cacheable with the direct rings: the Amiga
+// writes it through non-coherent AXI and the descriptor packs host- and
+// firmware-owned cursors into the same cache lines.
+//
+// Zorro II: board 0xd000 inside the legacy 0xa000..0xffff shared I/O buffer,
+// the only spare host-reachable range there. USB proxy transfers, zzsd
+// block I/O and firmware-update chunks all stage up to 24 KB in that buffer
+// and overwrite this mailbox (issue #129); Zorro II has no free
+// host-reachable non-cacheable range to move it to.
+#define SDK_MAILBOX_Z3_ADDRESS      0x08100000
+#define SDK_MAILBOX_Z3_RESERVE_SIZE 0x00010000
+#define SDK_MAILBOX_Z3_RESERVE_END \
+	(SDK_MAILBOX_Z3_ADDRESS + SDK_MAILBOX_Z3_RESERVE_SIZE)
+#define SDK_MAILBOX_Z2_WINDOW_OFFSET 0x0000D000
+#define SDK_MAILBOX_Z2_ADDRESS \
+	(USB_BLOCK_STORAGE_ADDRESS + (SDK_MAILBOX_Z2_WINDOW_OFFSET - 0x0000A000))
+
+#if SDK_MAILBOX_Z3_ADDRESS < SDK_LOW_DDR_RESERVED_END
+#error "Z3 SDK mailbox overlaps the linker-managed low DDR"
+#endif
+#if SDK_MAILBOX_Z3_RESERVE_END > SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS
+#error "Z3 SDK mailbox overlaps the Z3 direct-ring reservation"
+#endif
+#if (SDK_MAILBOX_Z3_ADDRESS & ~0x000FFFFF) != \
+    (SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS & ~0x000FFFFF)
+#error "Z3 SDK mailbox must share the non-cacheable direct-ring MMU section"
+#endif
+#if (SDK_MAILBOX_Z3_RESERVE_END - ADDR_ADJ) > Z3_MAIN_BOARD_WINDOW_SIZE
+#error "Z3 SDK mailbox lies outside the Zorro III main board aperture"
+#endif
 #define RX_FRAME_PAD 4
 #define FRAME_SIZE 2048
 

@@ -831,11 +831,13 @@ int main() {
 			}
 			fwup_status = result;
 			fwup_pending = 0;
-			/* The firmware-update staging buffer is the same legacy
-			 * 0xa000..0xffff window used by the SDK bootstrap mailbox.
-			 * WRITE chunks may overwrite the mailbox, so restore it
-			 * once the chunk has been consumed by FatFs. */
-			sdk_mailbox_init();
+			/* The firmware-update staging buffer is the shared
+			 * 0xa000..0xffff window that also holds the Zorro II SDK
+			 * mailbox. WRITE chunks may overwrite it there, so restore
+			 * it once the chunk has been consumed by FatFs. The Zorro
+			 * III mailbox lives elsewhere and keeps its clients. */
+			if (sdk_mailbox_shares_io_window())
+				sdk_mailbox_init();
 		}
 
 		/* Scene commit machine (P1): one verified-I2C setter step per

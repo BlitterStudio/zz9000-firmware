@@ -41,10 +41,13 @@ typedef struct ZZ9KMediaClock {
   (ZZ9K_ARM_MEMORY_START + (ZZ9K_AMIGA_MEMORY_LIMIT - ZZ9K_AMIGA_MEMORY_OFFSET))
 
 /*
- * Legacy firmware-serviced board window. The current ZZ9000 firmware already
- * maps board offsets 0xa000..0xffff to this ARM buffer for SD/USB proxy I/O.
- * SDK v2 keeps its bootstrap mailbox inside the upper part of that window so
- * early discovery does not depend on generic DDR reads from the Amiga side.
+ * Legacy firmware-serviced board window. The firmware maps board offsets
+ * 0xa000..0xffff to this ARM buffer for SD/USB proxy and firmware-update I/O.
+ * Zorro II firmware keeps the SDK v2 bootstrap mailbox at board 0xd000 in
+ * this window. Zorro III firmware places it in the main board aperture
+ * instead, because storage staging overwrites this window. Clients must map
+ * the address published in ZZ9K_REG_SDK_MAILBOX_HI/LO and never assume
+ * either placement.
  */
 #define ZZ9K_MAPPED_IO_ARM_START    0x3FE40000UL
 #define ZZ9K_MAPPED_IO_BOARD_OFFSET 0x0000A000UL
