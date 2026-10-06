@@ -33,6 +33,8 @@
 #include "interrupt.h"
 #include "memorymap.h"
 #include "mntzorro.h"
+#include "sdk_smp_lock.h"
+#include "xpseudo_asm.h"
 
 #ifndef ETH_DEBUG_VERBOSE
 #define ETH_DEBUG_VERBOSE 0
@@ -426,7 +428,6 @@ int ethernet_task_state = ETH_TASK_SETUP;
  * link-ready register bit requires both. */
 int ethernet_hw_ready = 0;
 
-#define ETH_RX_INTERRUPT_MASK (XEMACPS_IXR_FRAMERX_MASK | XEMACPS_IXR_RX_ERR_MASK)
 /*
  * Stop rearming RX BDs while there is still room for the descriptors that may
  * already be owned by the GEM. This avoids accepting frames that cannot fit in
@@ -446,20 +447,39 @@ static u16 ethernet_backlog_pending()
 	return frames_backlog + frames_backlog_reserved;
 }
 
+/*
+ * Keep the GEM's interrupt out of a main-loop section that changes the RX
+ * backlog accounting or the RX BD ring.
+ *
+ * Clearing the RX bits in IER is not enough: XEmacPs_IntrHandler dispatches
+ * on the raw ISR, not ISR & IMR, so a GEM interrupt raised for any other
+ * cause (TX completion, a TX or RX error) still runs XEmacPsRecvHandler when
+ * a frame has landed meanwhile.  It then races ethernet_receive_frame() on
+ * frames_backlog, frames_backlog_reserved and the RX BD ring; a lost update
+ * lets ethernet_prepare_rx_bd() or the drained-backlog clear zero the header
+ * of the frame the host is being shown, and RX wedges: the status register
+ * reports frames ready while the window shows an empty slot.  Mask the GEM's
+ * line at the GIC instead (as video_interrupt_pause() does for video); an
+ * interrupt that arrives meanwhile stays pending and is taken on resume.
+ */
 int ethernet_pause_rx_irq(void)
 {
 	if (ethernet_task_state != ETH_TASK_READY) {
 		return 0;
 	}
 
-	XEmacPs_IntDisable(&EmacPsInstance, ETH_RX_INTERRUPT_MASK);
+	uint32_t irq_state = smp_local_irq_save();
+	XScuGic_Disable(interrupt_get_intc(), EMACPS_IRPT_INTR);
+	dsb();
+	isb();
+	smp_local_irq_restore(irq_state);
 	return 1;
 }
 
 void ethernet_resume_rx_irq(int paused)
 {
 	if (paused) {
-		XEmacPs_IntEnable(&EmacPsInstance, ETH_RX_INTERRUPT_MASK);
+		XScuGic_Enable(interrupt_get_intc(), EMACPS_IRPT_INTR);
 	}
 }
 
