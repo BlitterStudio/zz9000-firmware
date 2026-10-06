@@ -34,7 +34,7 @@ def macro(source, name, occurrence=0):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cc", default="clang")
-    cases = ["pressure", "offset2", "scan", "publish", "rollback", "cycle", "burst"]
+    cases = ["pressure", "offset2", "csum", "scan", "publish", "rollback", "cycle", "burst"]
     parser.add_argument("case", nargs="?", default="all", choices=["all"] + cases)
     args = parser.parse_args()
     here = Path(__file__).resolve().parent

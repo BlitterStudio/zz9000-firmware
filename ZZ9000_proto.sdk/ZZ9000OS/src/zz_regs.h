@@ -119,7 +119,9 @@ enum zz_reg_offsets {
   REG_ZZ_ARM_ARGV5      = 0xA0,
   REG_ZZ_ARM_ARGV6      = 0xA2,
   REG_ZZ_ARM_ARGV7      = 0xA4,
-  REG_ZZ_UNUSED_REGA6   = 0xA6,
+  /* read: GEM checksum capabilities and the presented frame's RX verdict
+     (ethernet.h ETH_RX_META_*); the low half of the 0xA4 longword. */
+  REG_ZZ_ETH_RX_META    = 0xA6,
   REG_ZZ_UNUSED_REGA8   = 0xA8,
   REG_ZZ_UNUSED_REGAA   = 0xAA,
   REG_ZZ_UNUSED_REGAC   = 0xAC,

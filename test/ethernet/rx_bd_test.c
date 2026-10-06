@@ -24,6 +24,7 @@ static unsigned barriers;
 /* BSP_DEFINITIONS */
 #define W ETH_BACKLOG_HIGH_WATERMARK
 static u32 rx_offset_ring;
+static u8 rx_backlog_csum[FRAME_MAX_BACKLOG];
 typedef struct { struct { u32 BaseAddress; } Config; XEmacPs_BdRing RxRing; } XEmacPs;
 static XEmacPs EmacPsInstance;
 static XEmacPs_Bd descriptors[RXBD_CNT];
@@ -99,6 +100,7 @@ static void setup(void)
     frames_backlog = frames_backlog_read = frames_backlog_write = frames_backlog_reserved = frames_backlog_reserve = frame_serial = 0;
     frames_received = barriers = grants = unsafe_grants = pauses = clears = watch_grants = 0;
     payload_publications = header_publications = 0; rx_offset_ring = 0;
+    memset(rx_backlog_csum, 0, sizeof(rx_backlog_csum));
     memset(payload_published, 0, sizeof(payload_published));
 }
 static void complete(unsigned bd)
@@ -138,6 +140,14 @@ int main(int argc, char **argv)
         assert(frame_bytes[W - 1][0] == (0x80 | 0x05) && frame_bytes[W - 1][1] == 0xea &&
                frame_bytes[W - 1][2] == 0x00 && frame_bytes[W - 1][3] == 0x02);
         puts("PASS offset2: shifted frame is published in full and flagged in its length word");
+    } else if (!strcmp(argv[1], "csum")) {
+        /* The GEM's checksum verdict (descriptor bits 23..22) is kept with
+           the slot for REG_ZZ_ETH_RX_META. */
+        arm_last_slot(); complete(0);
+        descriptors[0][1] |= 2u << 22; /* IP and TCP checked good */
+        XEmacPsRecvHandler(&EmacPsInstance);
+        assert(frames_backlog == W && rx_backlog_csum[W - 1] == 2);
+        puts("PASS csum: the descriptor's checksum verdict is kept with its slot");
     } else if (!strcmp(argv[1], "scan")) {
         arm_last_slot(); complete(0);
         /* Software-owned descriptors may retain old EOF/NEW from prior laps. */

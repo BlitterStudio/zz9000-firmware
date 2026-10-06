@@ -1989,6 +1989,12 @@ int main() {
 						data = 0;
 						break;
 					}
+					/* 0xa6 is the low word of the 0xa4 group; 0xa4 itself is
+					 * the write-only ARM argv interface and reads 0. */
+					case REG_ZZ_ARM_ARGV7: {
+						data = ethernet_get_rx_meta();
+						break;
+					}
 					case REG_ZZ_ETH_RX_STATUS: {
 						data = ((uint32_t)ethernet_get_rx_status() << 16)
 						     | ethernet_get_rx_stats();
