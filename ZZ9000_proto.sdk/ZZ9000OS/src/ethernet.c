@@ -30,6 +30,7 @@
 #include <xemacps.h>
 #include <xscugic.h>
 #include "ethernet.h"
+#include "eth_tx_order.h"
 #include "interrupt.h"
 #include "memorymap.h"
 #include "mntzorro.h"
@@ -94,6 +95,9 @@ u32 PhyAddr;
 typedef char EthernetFrame[XEMACPS_MAX_VLAN_FRAME_SIZE_JUMBO] __attribute__ ((aligned(64)));
 
 volatile char* TxFrame = (char*)TX_FRAME_ADDRESS;		/* Transmit buffer */
+/* Asynchronous submissions retired in order; see eth_tx_order.h.  Touched by
+ * the send handler and, under ethernet_pause_rx_irq(), by the main loop. */
+static struct eth_tx_order eth_tx_ord;
 
 /*
  * Buffer descriptors are allocated in uncached memory. The memory is made
@@ -558,6 +562,7 @@ void ethernet_log_status(const char *reason) {
 }
 
 void ethernet_clear_host_state(void) {
+	eth_tx_order_flush(&eth_tx_ord);
 	frames_backlog = 0;
 	frames_backlog_read = 0;
 	frames_backlog_write = 0;
@@ -696,9 +701,10 @@ static void XEmacPsSendHandler(void *Callback)
 
 	//printf("XEMACPS_TXSR status: %lu\n", status);
 
-	int bds_sent = XEmacPs_BdRingFromHwTx(&(XEmacPs_GetTxRing(EmacPsInstancePtr)), 1, &BdTxPtr);
-
-	if (bds_sent == 1) {
+	/* Every BD the GEM has finished, not one per interrupt: two frames that
+	 * complete before this runs raise one interrupt, and a BD left in the
+	 * hardware state is a slot the asynchronous path never gets back. */
+	while (XEmacPs_BdRingFromHwTx(&(XEmacPs_GetTxRing(EmacPsInstancePtr)), 1, &BdTxPtr) == 1) {
 		status = XEmacPs_BdGetStatus(BdTxPtr);
 
 		/*printf("BD status: ");
@@ -723,6 +729,7 @@ static void XEmacPsSendHandler(void *Callback)
 	    XEmacPs_BdSetStatus(BdTxPtr, XEMACPS_TXBUF_USED_MASK); // XEMACPS_TXBUF_WRAP_MASK
 
 	    FramesTx++;
+	    eth_tx_order_retire_bd(&eth_tx_ord);
 	}
 }
 
@@ -1061,6 +1068,53 @@ u16 ethernet_get_rx_meta(void) {
 		capabilities |= ETH_TX_CSUM_PRESENT;
 
 	return capabilities | verdict;
+}
+
+void ethernet_send_frame_async(u16 slot, u16 frame_size) {
+	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
+	XEmacPs_Bd *BdTxPtr;
+	LONG Status;
+
+	/* The send handler frees BDs of this ring and retires eth_tx_order from
+	 * the GEM's interrupt; neither is safe against that without the pause
+	 * (see ethernet_pause_rx_irq). */
+	int paused = ethernet_pause_rx_irq();
+
+	if (ethernet_task_state != ETH_TASK_READY || frame_size == 0 ||
+	    frame_size > FRAME_SIZE)
+		goto refused;
+
+	/* The TX window's section is strongly ordered and the 68k never reads
+	 * it, so there is no cached line to drop: the bytes are in DDR.  The
+	 * driver keeps at most TXBD_CNT in flight and reuses a slot only after
+	 * the status count says its frame is done, so a BD is always free. */
+	Status = XEmacPs_BdRingAlloc(&(XEmacPs_GetTxRing(EmacPsInstancePtr)), 1, &BdTxPtr);
+	if (Status != XST_SUCCESS)
+		goto refused;
+
+	XEmacPs_BdSetAddressTx(BdTxPtr, (UINTPTR)TxFrame + (UINTPTR)slot * FRAME_SIZE);
+	XEmacPs_BdSetLength(BdTxPtr, frame_size);
+	XEmacPs_BdClearTxUsed(BdTxPtr);
+	XEmacPs_BdSetLast(BdTxPtr);
+
+	Status = XEmacPs_BdRingToHw(&(XEmacPs_GetTxRing(EmacPsInstancePtr)), 1, BdTxPtr);
+	if (Status != XST_SUCCESS) {
+		XEmacPs_BdRingUnAlloc(&(XEmacPs_GetTxRing(EmacPsInstancePtr)), 1, BdTxPtr);
+		goto refused;
+	}
+
+	eth_tx_order_push(&eth_tx_ord, 1);
+	XEmacPs_Transmit(EmacPsInstancePtr);
+	ethernet_resume_rx_irq(paused);
+	return;
+
+refused:
+	eth_tx_order_push(&eth_tx_ord, 0);
+	ethernet_resume_rx_irq(paused);
+}
+
+u16 ethernet_get_tx_status(void) {
+	return (u16)(ETH_TX_STATUS_PRESENT | (eth_tx_ord.done & ETH_TX_STATUS_COUNT));
 }
 
 u32 get_frames_received() {

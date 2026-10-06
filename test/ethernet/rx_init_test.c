@@ -34,6 +34,7 @@ typedef struct { struct { u32 BaseAddress; } Config; XEmacPs_BdRing RxRing, TxRi
 #define XEMACPS_NWCFG_OFFSET 0x4u
 #define XEMACPS_NWCFG_RXOFFS_MASK 0xC000u
 static u32 nwcfg, rx_offset_req, rx_offset_ring;
+static int eth_tx_ord; /* the async-TX completion order, flushed with host state */
 static XEmacPs EmacPsInstance;
 static XEmacPs_Bd rx[RXBD_CNT], tx[TXBD_CNT];
 #define RX_BD_LIST_START_ADDRESS ((UINTPTR)rx)
@@ -71,6 +72,7 @@ static void bd_write(XEmacPs_Bd *bd, unsigned offset, UINTPTR value)
 static int failing(const char *stage) { return failure && !strcmp(failure, stage); }
 static u32 XEmacPs_ReadReg(u32 base, u32 off) { (void)base; assert(off == XEMACPS_NWCFG_OFFSET); return nwcfg; }
 static void XEmacPs_WriteReg(u32 base, u32 off, u32 v) { (void)base; assert(off == XEMACPS_NWCFG_OFFSET && !running && grants == RXBD_CNT); nwcfg = v; }
+static void eth_tx_order_flush(int *p) { assert(p == &eth_tx_ord && !running); }
 static void XEmacPs_Stop(XEmacPs *p) { assert(p == &EmacPsInstance); running = 0; stopped++; }
 static void ethernet_clear_backlog_slot(u16 slot)
 { assert(slot < FRAME_MAX_BACKLOG && !running); }

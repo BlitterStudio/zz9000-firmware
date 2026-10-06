@@ -80,7 +80,10 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REG62   = 0x62,
   REG_ZZ_UNUSED_REG64   = 0x64,
   REG_ZZ_UNUSED_REG66   = 0x66,
-  REG_ZZ_UNUSED_REG68   = 0x68,
+  /* read: asynchronous-send status, bit 15 = present, 14..0 frames done
+     (ethernet.h ETH_TX_ASYNC).  Its own aligned register: the value is the
+     high half of the longword the read switch answers with. */
+  REG_ZZ_ETH_TX_STATUS  = 0x68,
   REG_ZZ_UNUSED_REG6A   = 0x6A,
   /* read: receive capacity, bit 15 = present, bits 14..0 = frames the
      firmware takes from the wire without dropping or pausing (ethernet.h
@@ -280,5 +283,7 @@ enum zz9k_card_features {
 
 _Static_assert((REG_ZZ_ETH_RX_FRAMES & 3) == 0,
                "REG_ZZ_ETH_RX_FRAMES has its own read case: keep it aligned");
+_Static_assert((REG_ZZ_ETH_TX_STATUS & 3) == 0,
+               "REG_ZZ_ETH_TX_STATUS has its own read case: keep it aligned");
 
 #endif
