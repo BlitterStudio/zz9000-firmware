@@ -82,7 +82,10 @@ enum zz_reg_offsets {
   REG_ZZ_UNUSED_REG66   = 0x66,
   REG_ZZ_UNUSED_REG68   = 0x68,
   REG_ZZ_UNUSED_REG6A   = 0x6A,
-  REG_ZZ_UNUSED_REG6C   = 0x6C,
+  /* read: receive capacity, bit 15 = present, bits 14..0 = frames the
+     firmware takes from the wire without dropping or pausing (ethernet.h
+     ETH_RX_FRAMES_*).  Aligned register: the value is the high half. */
+  REG_ZZ_ETH_RX_FRAMES  = 0x6C,
   REG_ZZ_UNUSED_REG6E   = 0x6E,
 
   REG_ZZ_AUDIO_SWAB     = 0x70,
@@ -272,5 +275,8 @@ enum zz9k_card_features {
   CARD_FEATURE_VIDEOCAP_GEOMETRY,
   CARD_FEATURE_NUM,
 };
+
+_Static_assert((REG_ZZ_ETH_RX_FRAMES & 3) == 0,
+               "REG_ZZ_ETH_RX_FRAMES has its own read case: keep it aligned");
 
 #endif

@@ -426,8 +426,13 @@ int ethernet_hw_ready = 0;
  * already be owned by the GEM. This avoids accepting frames that cannot fit in
  * the Amiga-facing backlog, and gives pause frames time to slow the sender.
  */
-#define ETH_BACKLOG_HIGH_WATERMARK (FRAME_MAX_BACKLOG - RXBD_CNT)
-#define ETH_BACKLOG_LOW_WATERMARK (ETH_BACKLOG_HIGH_WATERMARK / 2)
+/* Pending = queued for the host + armed for the GEM.  Pause the wire when the
+ * ring is nearly full and arm again once the host has drained it below the
+ * low mark; with RXBD_CNT armed, the host may leave HIGH - RXBD_CNT frames
+ * queued without a pause.  Derived from RXBD_CNT alone (MAX - RXBD_CNT) the
+ * high mark would leave no room for queued frames at 64 descriptors. */
+#define ETH_BACKLOG_HIGH_WATERMARK (FRAME_MAX_BACKLOG - 8)
+#define ETH_BACKLOG_LOW_WATERMARK (FRAME_MAX_BACKLOG - RXBD_CNT + RXBD_CNT / 2)
 #define ETH_PAUSE_QUANTUM 0x0800
 
 static u16 ethernet_backlog_pending()
@@ -997,6 +1002,14 @@ int ethernet_receive_frame(u16 acked_serial) {
 	ethernet_resume_rx_irq(paused);
 
 	return(frames_backlog_read);
+}
+
+u16 ethernet_get_rx_frames(void) {
+	u16 burst = RXBD_CNT;
+	u16 queued = (u16)(ETH_BACKLOG_HIGH_WATERMARK - RXBD_CNT);
+
+	return (u16)(ETH_RX_FRAMES_PRESENT |
+	             ((burst < queued ? burst : queued) & ETH_RX_FRAMES_COUNT));
 }
 
 u32 get_frames_received() {

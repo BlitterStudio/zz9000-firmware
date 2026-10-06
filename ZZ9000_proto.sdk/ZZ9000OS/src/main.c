@@ -1852,6 +1852,10 @@ int main() {
 						data = ethernet_mac_lo_word(mac);
 						break;
 					}
+					case REG_ZZ_ETH_RX_FRAMES:
+						/* aligned: the value is the high half */
+						data = (u32)ethernet_get_rx_frames() << 16;
+						break;
 					case REG_ZZ_ETH_TX:
 						// FIXME this is probably wrong (doesn't need swapping?)
 						data = (ethernet_send_result & 0xff) << 24
