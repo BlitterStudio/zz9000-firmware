@@ -216,6 +216,8 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_aperture_layout.c \
 	$(SRC_DIR)/mmu_page.c \
 	$(SRC_DIR)/sdk_mailbox.c \
+	$(SRC_DIR)/rfb/rfb_encode.c \
+	$(SRC_DIR)/rfb/rfb_words.c \
 	$(SRC_DIR)/watchdog.c \
 	$(SRC_DIR)/newlib_compat.c \
 	$(SRC_DIR)/sd_boot_deadline.c

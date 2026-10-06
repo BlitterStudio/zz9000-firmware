@@ -22,7 +22,8 @@ static const struct ExpectedService expected[] = {
 	{ 0x0500U, 22U, "audio" },
 	{ 0x0800U, 5U, "crypto" },
 	{ 0x0900U, 4U, "diag" },
-	{ 0x0b00U, 14U, "video" }
+	{ 0x0b00U, 14U, "video" },
+	{ 0x8200U, 1U, "console" }
 };
 
 static uint32_t read_be32(const volatile uint8_t *src)
