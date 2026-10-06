@@ -95,12 +95,22 @@ void ethernet_reset_for_amiga();
  * drivers keep working.
  */
 #define ETH_TX_ASYNC          0x8000u
+/* The frame begins two bytes into its slot, so the IP header after the
+ * 14-byte Ethernet header lands on a longword. */
+#define ETH_TX_OFFSET2        0x4000u
+/* Shifted frames only: the TCP/UDP checksum field holds the opener's
+ * pseudo-header seed and the firmware zeroes it for the GEM's full checksum
+ * insertion.  Without this bit a frame goes exactly as written (a raw or
+ * unnegotiated frame keeps its bytes).  Staged frames are prepared by the
+ * host. */
+#define ETH_TX_CSUM           0x2000u
 #define ETH_TX_SLOT_SHIFT     11
 #define ETH_TX_SLOT_MASK      0x3u
+#define ETH_TX_FIELD_MASK     0xfu	/* slot, checksum consent, offset2 */
 #define ETH_TX_LEN_MASK       0x7ffu
 #define ETH_TX_STATUS_PRESENT 0x8000u
 #define ETH_TX_STATUS_COUNT   0x7fffu
-void ethernet_send_frame_async(u16 slot, u16 frame_size);
+void ethernet_send_frame_async(u16 field, u16 frame_size);  /* bits 14..11 of the length word */
 u16 ethernet_get_tx_status(void);
 
 /*
@@ -137,6 +147,9 @@ u16 ethernet_get_rx_frames(void);
  */
 #define ETH_RX_META_PRESENT 0x8000u
 #define ETH_TX_CSUM_PRESENT 0x4000u
+/* Bit 13: shifted TX slots (ETH_TX_OFFSET2) with checksum consent
+ * (ETH_TX_CSUM) are understood. */
+#define ETH_TX_OFFSET2_PRESENT 0x2000u
 #define ETH_RX_META_MASK    0x0003u
 #define ETH_RX_META_NONE    0u
 #define ETH_RX_META_IP      1u

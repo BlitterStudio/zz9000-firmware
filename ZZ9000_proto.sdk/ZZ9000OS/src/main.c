@@ -1393,7 +1393,7 @@ int main() {
 					if (zdata & ETH_TX_ASYNC) {
 						/* the bus is given back before the GEM has sent;
 						 * completion is counted in REG_ZZ_ETH_TX_STATUS */
-						ethernet_send_frame_async((zdata >> ETH_TX_SLOT_SHIFT) & ETH_TX_SLOT_MASK,
+						ethernet_send_frame_async((zdata >> ETH_TX_SLOT_SHIFT) & ETH_TX_FIELD_MASK,
 						                          zdata & ETH_TX_LEN_MASK);
 					} else {
 						ethernet_send_result = ethernet_send_frame(zdata);
