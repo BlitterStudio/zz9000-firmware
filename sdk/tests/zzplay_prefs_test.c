@@ -171,6 +171,41 @@ static int test_session_read_modify_write(void)
   return 0;
 }
 
+static int test_session_settle_drops_launch_overrides(void)
+{
+  ZZPlayPrefs stored;
+  ZZPlayPrefs started;
+  ZZPlayPrefs session;
+
+  /* Saved: volume 70, repeat off. This launch: VOLUME=20 and LOOP. */
+  zzplay_prefs_defaults(&stored);
+  stored.volume = 70U;
+  stored.repeat = ZZPLAY_REPEAT_OFF;
+  stored.shuffle = 1;
+  started = stored;
+  started.volume = 20U;
+  started.repeat = ZZPLAY_REPEAT_ONE;
+
+  /* Untouched overrides fall back to the saved values. */
+  session = started;
+  zzplay_prefs_settle_session(&session, &stored, &started);
+  if (session.volume != 70U) return 1;
+  if (session.repeat != ZZPLAY_REPEAT_OFF) return 2;
+  if (!session.shuffle) return 3;
+
+  /* Values the user changed during the session are remembered. */
+  session = started;
+  session.volume = 45U;
+  session.repeat = ZZPLAY_REPEAT_ALL;
+  session.shuffle = 0;
+  zzplay_prefs_settle_session(&session, &stored, &started);
+  if (session.volume != 45U) return 4;
+  if (session.repeat != ZZPLAY_REPEAT_ALL) return 5;
+  if (session.shuffle) return 6;
+
+  return 0;
+}
+
 static int test_requested_backend_matrix(void)
 {
   ZZPlayPrefs prefs;
@@ -340,6 +375,12 @@ int main(void)
   if (rc) {
     fprintf(stderr, "test_ahiprefs_parser failed: %d\n", rc);
     return 5;
+  }
+  rc = test_session_settle_drops_launch_overrides();
+  if (rc) {
+    fprintf(stderr, "test_session_settle_drops_launch_overrides failed: %d\n",
+            rc);
+    return 6;
   }
 
   printf("zzplay_prefs_test: all tests passed\n");

@@ -85,6 +85,14 @@ void zzplay_prefs_copy_session(ZZPlayPrefs *to, const ZZPlayPrefs *from);
  * "Use". Returns 1 on success. */
 int zzplay_prefs_save_session(const ZZPlayPrefs *current, const char *path);
 
+/* Keep launch-only overrides out of a remembered session: a volume, repeat
+ * or shuffle value in `session` still where this launch `started` it goes
+ * back to the `stored` setting, so VOLUME=N or LOOP never become the saved
+ * default; a value the user changed during the session is kept. */
+void zzplay_prefs_settle_session(ZZPlayPrefs *session,
+                                 const ZZPlayPrefs *stored,
+                                 const ZZPlayPrefs *started);
+
 /* A driver name is a plain file name: non-empty, shorter than
  * ZZPLAY_PREFS_DRIVER_MAX, no ':' or '/'. */
 int zzplay_prefs_valid_driver(const char *name);

@@ -180,6 +180,10 @@ struct ZZPlayRuntime {
 typedef struct ZZPlayApp {
   ZZPlayOptions options;
   ZZPlayPrefs prefs;
+  /* What ENV held before this launch's overrides, and the values the
+   * session started with, so launch-only overrides are not saved. */
+  ZZPlayPrefs stored_prefs;
+  ZZPlayPrefs started_prefs;
   ZZPlayController ctl;
   ZZPlayPlaylist playlist;
   int player_mode;
@@ -3346,9 +3350,11 @@ static int zzplay_app_run(ZZPlayApp *app)
   ZZPlayAppStep step;
   int32_t index;
 
-  /* A one-shot run plays the list and exits; the player waits for input
-   * instead of starting anything by itself. */
-  step = app->player_mode ? ZZPLAY_APP_IDLE : ZZPLAY_APP_START;
+  /* A one-shot run plays the list and exits. The player starts the files
+   * it was launched with, and an empty player waits for input. */
+  step = (app->player_mode && app->playlist.count == 0U)
+             ? ZZPLAY_APP_IDLE
+             : ZZPLAY_APP_START;
   if (!app->player_mode && app->playlist.count == 0U) {
     return app->had_failure ? 20 : 0;
   }
@@ -3452,6 +3458,7 @@ int main(int argc, char **argv)
   /* Settings: defaults < ENV:ZZPlay.prefs < this launch's overrides. */
   zzplay_prefs_defaults(&app.prefs);
   (void)zzplay_prefs_load(&app.prefs, ZZPLAY_PREFS_ENV_PATH);
+  app.stored_prefs = app.prefs;
   zzplay_prefs_apply_options(&app.prefs, &app.options);
   {
     ZZPlayRepeat repeat = app.prefs.repeat;
@@ -3464,6 +3471,10 @@ int main(int argc, char **argv)
     zzplay_controller_init(&app.ctl, app.prefs.volume, repeat,
                            app.prefs.shuffle);
   }
+  app.started_prefs = app.prefs;
+  app.started_prefs.volume = app.ctl.volume;
+  app.started_prefs.repeat = app.ctl.repeat;
+  app.started_prefs.shuffle = app.ctl.shuffle;
 
   zzplay_playlist_init(&app.playlist);
   for (i = 0U; i < app.options.path_count; i++) {
@@ -3517,12 +3528,15 @@ int main(int argc, char **argv)
 
   exit_code = zzplay_app_run(&app);
 
+  /* Closing the window records its final position in prefs, so it must
+   * happen before the session is saved. */
+  zzplay_gui_close();
   if (app.player_mode) {
-    /* Remember the session on the way out; the GUI keeps the window
-     * position and last drawer current in prefs. */
     app.prefs.volume = app.ctl.volume;
     app.prefs.repeat = app.ctl.repeat;
     app.prefs.shuffle = app.ctl.shuffle;
+    zzplay_prefs_settle_session(&app.prefs, &app.stored_prefs,
+                                &app.started_prefs);
     (void)zzplay_prefs_save_session(&app.prefs,
                                     ZZPLAY_PREFS_ENV_PATH);
     (void)zzplay_prefs_save_session(&app.prefs,
@@ -3532,7 +3546,6 @@ int main(int argc, char **argv)
     Close(app.trace);
     app.trace = 0;
   }
-  zzplay_gui_close();
   zzplay_playlist_free(&app.playlist);
   zzplay_launch_end(&launch);
   return exit_code;

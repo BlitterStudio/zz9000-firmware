@@ -437,6 +437,24 @@ int zzplay_prefs_save_session(const ZZPlayPrefs *current, const char *path)
   return zzplay_prefs_save(&saved, path);
 }
 
+void zzplay_prefs_settle_session(ZZPlayPrefs *session,
+                                 const ZZPlayPrefs *stored,
+                                 const ZZPlayPrefs *started)
+{
+  if (!session || !stored || !started) {
+    return;
+  }
+  if (session->volume == started->volume) {
+    session->volume = stored->volume;
+  }
+  if (session->repeat == started->repeat) {
+    session->repeat = stored->repeat;
+  }
+  if (session->shuffle == started->shuffle) {
+    session->shuffle = stored->shuffle;
+  }
+}
+
 void zzplay_prefs_apply_options(ZZPlayPrefs *prefs,
                                 const ZZPlayOptions *options)
 {
