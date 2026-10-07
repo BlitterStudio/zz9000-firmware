@@ -316,8 +316,17 @@ static void rebuild_playlist_nodes(void)
       node->ln_Name = name_buf;
       AddTail(&playlist_exec_list, node);
     } else {
+      /* Row N must stay entry N for the click and Remove handlers, so
+       * list only the entries before the first one that could not be
+       * allocated rather than skipping it. */
       if (name_buf) free(name_buf);
       if (node) free(node);
+      if (gui_context->controller) {
+        zzplay_controller_set_message(gui_context->controller,
+                                      "Not enough memory to list the "
+                                      "whole playlist");
+      }
+      break;
     }
   }
 
