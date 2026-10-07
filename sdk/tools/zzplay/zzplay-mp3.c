@@ -491,8 +491,12 @@ static void zzplay_mp3_decode_cleanup(ZZPlayMP3Decode *decode)
   }
 }
 
+/* `unavailable`, when given, is a caller that can still fall back: if the
+ * accelerated service or the AHI unit cannot be had before anything has
+ * played, it is set and nothing is reported. Without it these failures are
+ * reported like any other. */
 static ZZPlayEngineResult zzplay_mp3_accelerated(
-    ZZPlayMP3Engine *engine)
+    ZZPlayMP3Engine *engine, int *unavailable)
 {
   const ZZPlayEngineRun *run = engine->run;
   ZZ9KContext *ctx = 0;
@@ -503,14 +507,19 @@ static ZZPlayEngineResult zzplay_mp3_accelerated(
   uint32_t base_ms = run->seek_ms;
   uint32_t repeats = run->options->loop_count;
   uint32_t completed = 0U;
+  int started = 0;
   ZZPlayEngineResult result = ZZPLAY_ENGINE_FAILED;
   ZZPlayAHISink ahi;
 
   memset(&caps, 0, sizeof(caps));
   if (zz9k_open(&ctx) != ZZ9K_STATUS_OK ||
       !zzplay_mp3_service_ready(ctx, &caps)) {
-    zzplay_launch_reportf(engine->ctl, engine->run->options,
-                          "accelerated MP3 streaming is unavailable");
+    if (unavailable) {
+      *unavailable = 1;
+    } else {
+      zzplay_launch_reportf(engine->ctl, engine->run->options,
+                            "accelerated MP3 streaming is unavailable");
+    }
     goto done;
   }
   for (;;) {
@@ -547,16 +556,21 @@ static ZZPlayEngineResult zzplay_mp3_accelerated(
           !zzplay_ahi_prepare(&ahi, run->prefs->ahi_unit,
                               engine->info->sample_rate,
                               engine->info->channels, period)) {
-        zzplay_launch_reportf(
-            engine->ctl, engine->run->options,
-            "AHI backend acquisition failed (device error %d)",
-            ahi.last_error);
+        if (unavailable && !started) {
+          *unavailable = 1;
+        } else {
+          zzplay_launch_reportf(
+              engine->ctl, engine->run->options,
+              "AHI backend acquisition failed (device error %d)",
+              ahi.last_error);
+        }
         zzplay_mp3_decode_cleanup(&decode);
         goto done;
       }
       zzplay_ahi_set_volume(&ahi, engine->ctl->volume);
       decode.ahi = &ahi;
     }
+    started = 1;
     pass = zzplay_mp3_decode_once(&decode);
     /* Saturating casts: libnix printf has no %ll length modifier. */
     zzplay_info("zzplay: MP3 loop %lu: %lu input bytes, %lu audio frames\n",
@@ -862,5 +876,28 @@ ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run)
             (unsigned long)run->prefs->ahi_unit);
     zzplay_mp3_refresh_output(&engine);
   }
-  return zzplay_mp3_accelerated(&engine);
+  if (requested == ZZPLAY_AUDIO_AHI && !strict) {
+    /* A saved AHI preference falls back like AUTO when its path cannot
+     * be had before playback; an explicit --audio=ahi does not. */
+    int unavailable = 0;
+    ZZPlayEngineResult result = zzplay_mp3_accelerated(&engine, &unavailable);
+
+    if (!unavailable || run->ctl->request != ZZPLAY_REQUEST_NONE) {
+      return result;
+    }
+    zzplay_info("zzplay: saved AHI output unavailable before playback; "
+           "falling back to MHI\n");
+    result = zzplay_mp3_mhi(&engine, &mhi_status);
+    if (result != ZZPLAY_ENGINE_FAILED) {
+      return result;
+    }
+    if (run->ctl->request != ZZPLAY_REQUEST_NONE) {
+      return ZZPLAY_ENGINE_STOPPED;
+    }
+    zzplay_launch_reportf(engine.ctl, engine.run->options,
+                          "AHI output unavailable; MHI playback failed: %s",
+                          zzplay_mhi_status_name(mhi_status));
+    return ZZPLAY_ENGINE_FAILED;
+  }
+  return zzplay_mp3_accelerated(&engine, 0);
 }

@@ -3268,6 +3268,12 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   }
   switch (outcome) {
     case ZZPLAY_ENGINE_EOF:
+      /* A retry that played through clears an earlier failure, so repeat
+       * and later passes stop skipping the entry. */
+      if (app->playlist.current >= 0) {
+        zzplay_playlist_mark_failed(&app->playlist,
+                                    (uint32_t)app->playlist.current, 0);
+      }
       return ZZPLAY_APP_AUTO;
     case ZZPLAY_ENGINE_FAILED:
       /* Not `index`: the playlist may have been edited during playback.
