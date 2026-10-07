@@ -126,6 +126,8 @@ struct ZZPlayRuntime {
   LONG pip_error;
   uint32_t session;
   uint32_t frames;
+  /* `frames` when the current loop pass began: the displayed position. */
+  uint32_t pass_frame_origin;
   uint32_t final_underruns;
   uint32_t completed_loops;
   uint64_t audio_origin_pts;
@@ -2995,7 +2997,8 @@ playback_session:
          * player window; one-shot MPEG has no seekable status to update. */
         zzplay_controller_set_position(
             runtime.ctl,
-            (uint32_t)((uint64_t)runtime.frames * frame_period_us / 1000U),
+            (uint32_t)((uint64_t)(runtime.frames - runtime.pass_frame_origin) *
+                       frame_period_us / 1000U),
             1);
       }
       continue;
@@ -3049,6 +3052,9 @@ playback_failed:
           runtime.options.loop_count--;
         }
         runtime.completed_loops++;
+        /* The displayed position restarts with each pass; `frames`
+         * stays cumulative for the trace and the run summary. */
+        runtime.pass_frame_origin = runtime.frames;
         media_done = 0;
         held_decode_us = 0U;
         memset(&result, 0, sizeof(result));

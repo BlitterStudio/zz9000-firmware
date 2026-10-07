@@ -122,9 +122,14 @@ static uint32_t add_pattern(ZZPlayPlaylist *list, const char *pattern)
         if (!match_path || match_path[0] == '\0') {
           match_path = (const char *)anchor->ap_Info.fib_FileName;
         }
-        if (match_path && match_path[0] != '\0' &&
-            zzplay_playlist_add(list, match_path) >= 0) {
-          added++;
+        /* A match behaves like the same path named directly: a playlist
+         * contributes its entries, anything else is one entry. */
+        if (match_path && match_path[0] != '\0') {
+          if (zzplay_playlist_is_playlist_path(match_path)) {
+            added += zzplay_playlist_load_m3u(list, match_path);
+          } else if (zzplay_playlist_add(list, match_path) >= 0) {
+            added++;
+          }
         }
       } else {
         /* Do not enter directory nodes while matching files. */
