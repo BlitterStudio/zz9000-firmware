@@ -23,8 +23,9 @@
  * profile) and reserves the 48 KiB directly above it, under the audio
  * scratch, for the single Z2 audio direct-ring grant
  * (SDK_AUDIO_DIRECT_RING_Z2_* in memorymap.h).  The reservation is not a
- * payload region: clients learn its geometry only from the
- * SDK_OP_AUDIO_RING_ACQUIRE grant.
+ * payload region: clients learn the grant's geometry only from
+ * SDK_OP_AUDIO_RING_ACQUIRE, and the SDK mailbox in the reservation's tail
+ * only from REG_ZZ_SDK_MAILBOX_HI/LO.
  */
 #define SDK_APERTURE_LAYOUT_GENERATION       2U
 #define SDK_APERTURE_INFO_MAGIC              0x5a000000UL
@@ -102,6 +103,13 @@ uint32_t sdk_aperture_runtime_reported_size(void);
 uint32_t sdk_aperture_runtime_diag_state(void);
 uint32_t sdk_aperture_host_window_address(void);
 uint32_t sdk_aperture_host_window_size(void);
+/* ARM address of the Zorro II SDK mailbox (SDK_MAILBOX_Z2_* in memorymap.h),
+ * or 0 until the host acknowledges the generation-2 contract. */
+uint32_t sdk_aperture_mailbox_address(void);
+/* ARM address of the 4 KiB page holding that mailbox, known from the
+ * aperture size alone so firmware can map it before anything runs; 0 on
+ * Zorro III, legacy and invalid apertures. */
+uint32_t sdk_aperture_mailbox_page(void);
 uint32_t sdk_aperture_framebuffer_size(void);
 uint32_t sdk_aperture_gfxdata_address(uint32_t z3_scratch_address);
 

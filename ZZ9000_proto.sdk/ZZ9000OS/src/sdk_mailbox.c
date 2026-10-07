@@ -7,6 +7,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "xil_cache.h"
 #include "xil_mmu.h"
@@ -33,6 +34,7 @@
 #include "sdk_aperture_layout.h"
 #include "sdk_smp_lock.h"
 #include "memorymap.h"
+#include "mmu_page.h"
 #include "scheduler.h"
 #include "core2.h"
 #include "ax.h"
@@ -43,13 +45,13 @@
 #include "mp3/mp3.h"
 #include "mp3/minimp3.h"
 
+/* Ring geometry is per placement (SDK_MAILBOX_Z3_RING_ENTRIES in the Zorro
+ * III reservation, SDK_MAILBOX_Z2_RING_ENTRIES in the Zorro II one); the
+ * descriptor publishes it and the host library sizes its rings from there. */
 #define SDK_MAILBOX_REQUEST_OFFSET     SDK_MAILBOX_DESCRIPTOR_SIZE
-#define SDK_MAILBOX_COMPLETION_OFFSET  \
-	(SDK_MAILBOX_REQUEST_OFFSET + \
-	 (SDK_MAILBOX_RING_ENTRIES * SDK_MAILBOX_ENTRY_SIZE))
-#define SDK_MAILBOX_TOTAL_SIZE         \
-	(SDK_MAILBOX_COMPLETION_OFFSET + \
-	 (SDK_MAILBOX_RING_ENTRIES * SDK_MAILBOX_ENTRY_SIZE))
+#define SDK_MAILBOX_SIZE(entries)      \
+	(SDK_MAILBOX_DESCRIPTOR_SIZE + \
+	 2U * (entries) * SDK_MAILBOX_ENTRY_SIZE)
 #define SDK_MAILBOX_BASE_CAPABILITY_BITS \
 	(SDK_CAP_MAILBOX | SDK_TRANSPORT_CAPABILITY_BITS | \
 	 SDK_CAP_SERVICE_DISCOVERY | \
@@ -72,12 +74,13 @@
  * again: a permanent stall. */
 #define SDK_AUDIO_STREAM_MIN_INPUT_BYTES (4U * 1024U)
 
-typedef char SDKMailbox_must_fit_z2_io_window[
-	((SDK_MAILBOX_Z2_WINDOW_OFFSET + SDK_MAILBOX_TOTAL_SIZE) <= 0x00010000U) ?
-	1 : -1
-];
 typedef char SDKMailbox_must_fit_z3_reservation[
-	(SDK_MAILBOX_TOTAL_SIZE <= SDK_MAILBOX_Z3_RESERVE_SIZE) ? 1 : -1
+	(SDK_MAILBOX_SIZE(SDK_MAILBOX_Z3_RING_ENTRIES) <=
+	 SDK_MAILBOX_Z3_RESERVE_SIZE) ? 1 : -1
+];
+typedef char SDKMailbox_must_match_z2_reservation_tail[
+	(SDK_MAILBOX_SIZE(SDK_MAILBOX_Z2_RING_ENTRIES) ==
+	 SDK_MAILBOX_Z2_SIZE) ? 1 : -1
 ];
 
 struct SDKMailboxDescriptor {
@@ -1292,23 +1295,27 @@ static void record_request_timing(uint32_t opcode, uint32_t elapsed_us)
 	}
 }
 
-/* ARM address of the live mailbox; chosen per bus by sdk_mailbox_init()
- * (see SDK_MAILBOX_Z3_ADDRESS in memorymap.h) and stable for the lifetime
- * that init starts. Read/written by core 0 only. */
-static uintptr_t mailbox_base = SDK_MAILBOX_Z2_ADDRESS;
+/* ARM address and ring size of the live mailbox, or 0 while none is
+ * published (Zorro II before the generation-2 ack). Chosen per bus by
+ * select_mailbox_placement() and stable until the next Amiga reset.
+ * Read/written by core 0 only. */
+static uintptr_t mailbox_base;
+static uint32_t mailbox_ring_entries;
 
 static inline volatile struct SDKMailboxDescriptor *descriptor(void)
 {
 	return (volatile struct SDKMailboxDescriptor *)mailbox_base;
 }
 
-void sdk_mailbox_refresh_capabilities(void)
+static inline uint32_t mailbox_completion_offset(void)
 {
-	volatile struct SDKMailboxDescriptor *desc = descriptor();
+	return SDK_MAILBOX_REQUEST_OFFSET +
+		mailbox_ring_entries * SDK_MAILBOX_ENTRY_SIZE;
+}
 
-	put_be32(desc->capability_bits, mailbox_capability_bits());
-	Xil_DCacheFlushRange((INTPTR)desc, sizeof(*desc));
-	__asm__ __volatile__("dsb" ::: "memory");
+static inline uint32_t mailbox_total_size(void)
+{
+	return SDK_MAILBOX_SIZE(mailbox_ring_entries);
 }
 
 static inline volatile struct SDKMailboxEntry *request_ring(void)
@@ -1320,13 +1327,13 @@ static inline volatile struct SDKMailboxEntry *request_ring(void)
 static inline volatile struct SDKMailboxEntry *completion_ring(void)
 {
 	return (volatile struct SDKMailboxEntry *)
-		(mailbox_base + SDK_MAILBOX_COMPLETION_OFFSET);
+		(mailbox_base + mailbox_completion_offset());
 }
 
 static uint32_t next_index(uint32_t index)
 {
 	index++;
-	if (index >= SDK_MAILBOX_RING_ENTRIES)
+	if (index >= mailbox_ring_entries)
 		index = 0;
 	return index;
 }
@@ -1346,11 +1353,11 @@ static int descriptor_valid(volatile struct SDKMailboxDescriptor *desc)
 		return 0;
 	if (get_be32(desc->request_ring_offset) != SDK_MAILBOX_REQUEST_OFFSET)
 		return 0;
-	if (get_be32(desc->completion_ring_offset) != SDK_MAILBOX_COMPLETION_OFFSET)
+	if (get_be32(desc->completion_ring_offset) != mailbox_completion_offset())
 		return 0;
-	if (get_be32(desc->request_ring_entries) != SDK_MAILBOX_RING_ENTRIES)
+	if (get_be32(desc->request_ring_entries) != mailbox_ring_entries)
 		return 0;
-	if (get_be32(desc->completion_ring_entries) != SDK_MAILBOX_RING_ENTRIES)
+	if (get_be32(desc->completion_ring_entries) != mailbox_ring_entries)
 		return 0;
 	if ((get_be32(desc->capability_bits) & SDK_CAP_MAILBOX) == 0)
 		return 0;
@@ -1359,10 +1366,10 @@ static int descriptor_valid(volatile struct SDKMailboxDescriptor *desc)
 	request_tail = get_be32(desc->request_tail);
 	completion_head = get_be32(desc->completion_head);
 	completion_tail = get_be32(desc->completion_tail);
-	if (request_head >= SDK_MAILBOX_RING_ENTRIES ||
-	    request_tail >= SDK_MAILBOX_RING_ENTRIES ||
-	    completion_head >= SDK_MAILBOX_RING_ENTRIES ||
-	    completion_tail >= SDK_MAILBOX_RING_ENTRIES) {
+	if (request_head >= mailbox_ring_entries ||
+	    request_tail >= mailbox_ring_entries ||
+	    completion_head >= mailbox_ring_entries ||
+	    completion_tail >= mailbox_ring_entries) {
 		return 0;
 	}
 
@@ -7393,7 +7400,7 @@ static uint16_t handle_diag_read(volatile struct SDKMailboxEntry *req,
 	put_be32(diag->shared_heap_free, free_total);
 	put_be32(diag->shared_heap_largest_free, largest_free);
 	put_be32(diag->mailbox_arm_addr, (uint32_t)mailbox_base);
-	put_be32(diag->mailbox_ring_entries, SDK_MAILBOX_RING_ENTRIES);
+	put_be32(diag->mailbox_ring_entries, mailbox_ring_entries);
 	put_be32(diag->surfaces_used, count_used_surfaces());
 	put_be32(diag->allocator_invalid_slots, invalid_slots);
 	return SDK_STATUS_OK;
@@ -7640,8 +7647,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		put_be32(caps->max_shared_buffers, SDK_MAX_SHARED_BUFFERS);
 		put_be32(caps->max_surfaces, SDK_MAX_SURFACES + 1U);
 		put_be32(caps->firmware_version, 0);
-		put_be32(caps->request_ring_entries, SDK_MAILBOX_RING_ENTRIES);
-		put_be32(caps->completion_ring_entries, SDK_MAILBOX_RING_ENTRIES);
+		put_be32(caps->request_ring_entries, mailbox_ring_entries);
+		put_be32(caps->completion_ring_entries, mailbox_ring_entries);
 		put_be32(caps->host_window_heap_size,
 		         effective_host_window_size());
 		return SDK_STATUS_OK;
@@ -7780,37 +7787,96 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	}
 }
 
-/* Zorro III keeps the mailbox out of the shared I/O buffer that USB proxy,
- * zzsd and firmware-update staging overwrite (issue #129). The bus is fixed
- * by the bitstream, so the placement never changes under a live client. */
+/* Set once at boot by sdk_mailbox_map_z2_page(); the mailbox page stays
+ * non-cacheable for the life of the firmware. */
+static uint8_t z2_mailbox_page_uncached;
+
+void sdk_mailbox_map_z2_page(void)
+{
+	uint32_t page = sdk_aperture_mailbox_page();
+
+	if (page == 0U)
+		return;
+	z2_mailbox_page_uncached =
+		mmu_page_set_noncacheable((uintptr_t)page) ? 1U : 0U;
+	if (!z2_mailbox_page_uncached)
+		printf("[sdk] Z2 mailbox page 0x%08lx not mappable "
+		       "non-cacheable; SDK mailbox unavailable\r\n",
+		       (unsigned long)page);
+}
+
+/* Neither bus uses the 0xa000..0xffff shared I/O buffer that USB proxy,
+ * zzsd and firmware-update staging overwrite (issue #129). Zorro III uses a
+ * fixed block. Zorro II uses the tail of the direct-ring reservation, which
+ * exists only while the host acknowledges the generation-2 aperture
+ * contract; until then (or for good, with an older RTG driver or a legacy
+ * bitstream) Zorro II has no mailbox, discovery reads address 0 and
+ * zz9k_open() fails instead of sharing a buffer storage I/O overwrites.
+ * Both choices hold until the next Amiga reset. */
 static void select_mailbox_placement(void)
 {
 	static uint8_t z3_section_uncached;
+	uint32_t z2_address;
 
-	if (!sdk_aperture_runtime_is_zorro3()) {
-		mailbox_base = SDK_MAILBOX_Z2_ADDRESS;
+	mailbox_base = 0U;
+	mailbox_ring_entries = 0U;
+	if (sdk_aperture_runtime_is_zorro3()) {
+		if (!z3_section_uncached) {
+			/* ax.c remaps this same section for the Z3 direct
+			 * rings when audio starts; remapping it twice is
+			 * harmless. */
+			Xil_SetTlbAttributes((UINTPTR)SDK_MAILBOX_Z3_ADDRESS,
+			                     NORM_NONCACHE);
+			z3_section_uncached = 1U;
+		}
+		mailbox_base = SDK_MAILBOX_Z3_ADDRESS;
+		mailbox_ring_entries = SDK_MAILBOX_Z3_RING_ENTRIES;
 		return;
 	}
-	if (!z3_section_uncached) {
-		/* ax.c remaps this same section for the Z3 direct rings when
-		 * audio starts; remapping it twice is harmless. */
-		Xil_SetTlbAttributes((UINTPTR)SDK_MAILBOX_Z3_ADDRESS,
-		                     NORM_NONCACHE);
-		z3_section_uncached = 1U;
-	}
-	mailbox_base = SDK_MAILBOX_Z3_ADDRESS;
+
+	z2_address = sdk_aperture_mailbox_address();
+	if (z2_address == 0U || !z2_mailbox_page_uncached)
+		return;
+	mailbox_base = z2_address;
+	mailbox_ring_entries = SDK_MAILBOX_Z2_RING_ENTRIES;
 }
 
-int sdk_mailbox_io_staging_reaches(uint32_t staged_bytes)
+static void write_mailbox_descriptor(void)
 {
-	return mailbox_base == SDK_MAILBOX_Z2_ADDRESS &&
-	       staged_bytes > SDK_MAILBOX_Z2_BUFFER_OFFSET;
+	volatile struct SDKMailboxDescriptor *desc = descriptor();
+
+	memset((void *)mailbox_base, 0, mailbox_total_size());
+	put_be32(desc->magic, SDK_MAILBOX_MAGIC);
+	put_be16(desc->abi_major, SDK_MAILBOX_ABI_MAJOR);
+	put_be16(desc->abi_minor, SDK_MAILBOX_ABI_MINOR);
+	put_be32(desc->descriptor_size, sizeof(*desc));
+	put_be32(desc->request_ring_offset, SDK_MAILBOX_REQUEST_OFFSET);
+	put_be32(desc->request_ring_entries, mailbox_ring_entries);
+	put_be32(desc->completion_ring_offset, mailbox_completion_offset());
+	put_be32(desc->completion_ring_entries, mailbox_ring_entries);
+	put_be32(desc->capability_bits, mailbox_capability_bits());
+	Xil_DCacheFlushRange(mailbox_base, mailbox_total_size());
+	__asm__ __volatile__("dsb" ::: "memory");
+}
+
+void sdk_mailbox_publish_after_aperture_ack(void)
+{
+	if (mailbox_base != 0U || sdk_aperture_runtime_is_zorro3())
+		return;
+	/* Nothing could reach the SDK since the reset that cleared the ack,
+	 * so the state sdk_mailbox_init() reset is still clean: only the
+	 * mailbox itself is new. */
+	select_mailbox_placement();
+	if (mailbox_base == 0U)
+		return;
+	write_mailbox_descriptor();
+	sdk_status = SDK_STATUS_OK;
+	sdk_mailbox_active = 0;
+	sdk_mailbox_pending = 0;
 }
 
 void sdk_mailbox_init(void)
 {
-	volatile struct SDKMailboxDescriptor *desc;
-
 	/* Drain any in-flight core-1 task before we tear the mailbox down. A task
 	 * still executing on core 1 is mid-write into its resolved data buffers;
 	 * the shared-buffer allocator reset below (next_shared_handle = 1 +
@@ -7824,17 +7890,8 @@ void sdk_mailbox_init(void)
 	overlay_scheduler_reset();
 
 	select_mailbox_placement();
-	desc = descriptor();
-	memset((void *)mailbox_base, 0, SDK_MAILBOX_TOTAL_SIZE);
-	put_be32(desc->magic, SDK_MAILBOX_MAGIC);
-	put_be16(desc->abi_major, SDK_MAILBOX_ABI_MAJOR);
-	put_be16(desc->abi_minor, SDK_MAILBOX_ABI_MINOR);
-	put_be32(desc->descriptor_size, sizeof(*desc));
-	put_be32(desc->request_ring_offset, SDK_MAILBOX_REQUEST_OFFSET);
-	put_be32(desc->request_ring_entries, SDK_MAILBOX_RING_ENTRIES);
-	put_be32(desc->completion_ring_offset, SDK_MAILBOX_COMPLETION_OFFSET);
-	put_be32(desc->completion_ring_entries, SDK_MAILBOX_RING_ENTRIES);
-	put_be32(desc->capability_bits, mailbox_capability_bits());
+	if (mailbox_base != 0U)
+		write_mailbox_descriptor();
 
 	sdk_status = SDK_STATUS_OK;
 	sdk_mailbox_active = 0;
@@ -7911,9 +7968,6 @@ void sdk_mailbox_init(void)
 	sdk_video_stream_init();
 	sdk_media_session_init();
 	amiga_interrupt_clear(AMIGA_INTERRUPT_SDK);
-
-	Xil_DCacheFlushRange(mailbox_base, SDK_MAILBOX_TOTAL_SIZE);
-	__asm__ __volatile__("dsb" ::: "memory");
 }
 
 void sdk_mailbox_activate(void)
@@ -7956,6 +8010,10 @@ void sdk_mailbox_task(void)
 	uint32_t next_comp_tail;
 	int completed_any = 0;
 
+	if (mailbox_base == 0U) {
+		sdk_mailbox_pending = 0;
+		return;
+	}
 	if (!sdk_mailbox_active && !sdk_mailbox_pending)
 		return;
 
@@ -7977,7 +8035,7 @@ void sdk_mailbox_task(void)
 	 * completion ring appear full. ARM-owned descriptor/completion writes
 	 * are flushed at their write sites.
 	 */
-	Xil_DCacheInvalidateRange(mailbox_base, SDK_MAILBOX_TOTAL_SIZE);
+	Xil_DCacheInvalidateRange(mailbox_base, mailbox_total_size());
 	__asm__ __volatile__("dsb" ::: "memory");
 
 	if (!descriptor_valid(desc)) {
@@ -8006,7 +8064,7 @@ void sdk_mailbox_task(void)
 		if (req_tail >= req_head)
 			pending_requests = req_tail - req_head;
 		else
-			pending_requests = SDK_MAILBOX_RING_ENTRIES - req_head + req_tail;
+			pending_requests = mailbox_ring_entries - req_head + req_tail;
 
 		opcode = get_be16(req_ring[req_head].opcode);
 		/* Gate crypto offload: defer to core 1 only when nothing in this batch
@@ -8105,7 +8163,7 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 		return 1;
 	}
 
-	if (!sdk_mailbox_active)
+	if (!sdk_mailbox_active || mailbox_base == 0U)
 		return 0;
 
 	/* Refresh the Amiga-owned completion_head before checking for room. */

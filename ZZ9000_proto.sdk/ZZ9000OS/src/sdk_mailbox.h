@@ -20,7 +20,9 @@
 #define SDK_MAILBOX_ABI_MINOR          0U
 #define SDK_MAILBOX_ENTRY_SIZE         64U
 #define SDK_MAILBOX_DESCRIPTOR_SIZE    128U
-#define SDK_MAILBOX_RING_ENTRIES       64U
+/* Ring entries of the Zorro III mailbox; Zorro II uses
+ * SDK_MAILBOX_Z2_RING_ENTRIES (memorymap.h). */
+#define SDK_MAILBOX_Z3_RING_ENTRIES    64U
 
 #define SDK_STATUS_OK                  0U
 #define SDK_STATUS_QUEUED              1U
@@ -1214,8 +1216,13 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_DECOMPRESS_RESULT_NEED_INPUT      (1U << 2)
 
 void sdk_mailbox_init(void);
-/* Refresh descriptor capability bits after a late driver layout ack. */
-void sdk_mailbox_refresh_capabilities(void);
+/* Map the Zorro II mailbox page non-cacheable. Boot only, after
+ * sdk_aperture_runtime_init() and before core 1 or interrupts start:
+ * splitting the section is break-before-make (mmu_page.h). */
+void sdk_mailbox_map_z2_page(void);
+/* Publish the Zorro II mailbox once the host acknowledges the generation-2
+ * aperture contract; Zorro II has no mailbox before that. */
+void sdk_mailbox_publish_after_aperture_ack(void);
 void sdk_mailbox_activate(void);
 void sdk_mailbox_doorbell(void);
 void sdk_mailbox_ack_irq(void);
@@ -1223,11 +1230,8 @@ void sdk_mailbox_irq_enable(void);
 void sdk_mailbox_irq_disable(void);
 void sdk_mailbox_task(void);
 uint16_t sdk_mailbox_status(void);
+/* ARM address of the live mailbox, 0 while none is published. */
 uint32_t sdk_mailbox_address(void);
-/* Nonzero when host staging of `staged_bytes` from the start of the shared
- * 0xa000..0xffff I/O buffer overwrote the live mailbox. Only the Zorro II
- * mailbox lives in that buffer; storage and firmware-update staging share it. */
-int sdk_mailbox_io_staging_reaches(uint32_t staged_bytes);
 /* After a core-1 fault: mark core-1-affine audio streams faulted so their
  * feeds/reads fail cleanly (the embedded decoder may be mid-frame). */
 void sdk_mailbox_poison_core1_audio_streams(void);

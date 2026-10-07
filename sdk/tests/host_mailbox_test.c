@@ -1102,6 +1102,8 @@ static int test_alloc_surface_maps_legacy_io_window_address(void)
   ZZ9KBoard board;
   ZZ9KSurface surface;
   uintptr_t expected_ptr;
+  const uint32_t window_offset = 0x3000UL;
+  const uint32_t arm_addr = ZZ9K_MAPPED_IO_ARM_START + window_offset;
 
   init_mailbox(&mailbox);
   memset(&board, 0, sizeof(board));
@@ -1109,8 +1111,7 @@ static int test_alloc_surface_maps_legacy_io_window_address(void)
   board.board_size = 0x00010000UL;
   prepare_completion(&mailbox, 1, ZZ9K_OP_ALLOC_SURFACE, ZZ9K_STATUS_OK, 48);
   zz9k_put_be32(&mailbox.completion_ring[0].payload[0], 0x40000005UL);
-  zz9k_put_be32(&mailbox.completion_ring[0].payload[4],
-                ZZ9K_SDK_MAILBOX_ARM_ADDRESS);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[4], arm_addr);
   zz9k_put_be32(&mailbox.completion_ring[0].payload[8], 16);
   zz9k_put_be32(&mailbox.completion_ring[0].payload[12], 16);
   zz9k_put_be32(&mailbox.completion_ring[0].payload[16], 64);
@@ -1131,9 +1132,10 @@ static int test_alloc_surface_maps_legacy_io_window_address(void)
     return 2;
   }
   if (surface.handle != 0x40000005UL) return 3;
-  if (surface.arm_addr != ZZ9K_SDK_MAILBOX_ARM_ADDRESS) return 4;
+  if (surface.arm_addr != arm_addr) return 4;
 
-  expected_ptr = (uintptr_t)board.board_addr + ZZ9K_SDK_MAILBOX_BOARD_OFFSET;
+  expected_ptr = (uintptr_t)board.board_addr + ZZ9K_MAPPED_IO_BOARD_OFFSET +
+                 window_offset;
   if ((uintptr_t)surface.data != expected_ptr) return 5;
 
   zz9k_close(ctx);

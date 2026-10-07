@@ -134,6 +134,9 @@ static void test_runtime_ack_gate(void)
 	CHECK(sdk_aperture_host_window_size() == 0U);
 	CHECK(sdk_aperture_framebuffer_size() == 0x001c0000U);
 	CHECK(sdk_aperture_gfxdata_address(0x033f0000U) == 0U);
+	CHECK(sdk_aperture_mailbox_address() == 0U);
+	/* The page is mapped at boot, before any driver can acknowledge. */
+	CHECK(sdk_aperture_mailbox_page() == 0x003df000U);
 	CHECK(sdk_aperture_runtime_ack());
 	CHECK(sdk_aperture_runtime_diag_state() ==
 	      SDK_APERTURE_DIAG_STATE_ACTIVE);
@@ -141,16 +144,19 @@ static void test_runtime_ack_gate(void)
 	CHECK(sdk_aperture_host_window_size() == 0x00004000U);
 	CHECK(sdk_aperture_framebuffer_size() == layout->framebuffer.size);
 	CHECK(sdk_aperture_gfxdata_address(0x033f0000U) == 0x003c0000U);
+	CHECK(sdk_aperture_mailbox_address() == 0x003df480U);
 
 	sdk_aperture_runtime_init(0x00400000U, 0);
 	CHECK(sdk_aperture_runtime_ack());
 	CHECK(sdk_aperture_host_window_address() == 0x005d0000U);
 	CHECK(sdk_aperture_gfxdata_address(0x033f0000U) == 0x005c0000U);
+	CHECK(sdk_aperture_mailbox_address() == 0x005df480U);
 
 	sdk_aperture_runtime_init(0x00800000U, 0);
 	CHECK(sdk_aperture_runtime_ack());
 	CHECK(sdk_aperture_host_window_address() == 0x009c0000U);
 	CHECK(sdk_aperture_gfxdata_address(0x033f0000U) == 0x009b0000U);
+	CHECK(sdk_aperture_mailbox_address() == 0x009df480U);
 
 	sdk_aperture_runtime_init(0U, 1);
 	CHECK(!sdk_aperture_runtime_ack());
@@ -159,12 +165,16 @@ static void test_runtime_ack_gate(void)
 	CHECK(sdk_aperture_runtime_diag_state() ==
 	      SDK_APERTURE_DIAG_STATE_LEGACY);
 	CHECK(sdk_aperture_gfxdata_address(0x033f0000U) == 0x033f0000U);
+	CHECK(sdk_aperture_mailbox_address() == 0U);
+	CHECK(sdk_aperture_mailbox_page() == 0U);
 
 	sdk_aperture_runtime_init(0U, 0);
 	CHECK(!sdk_aperture_runtime_is_zorro3());
 	CHECK(sdk_aperture_runtime_is_legacy());
 	CHECK(sdk_aperture_runtime_diag_state() ==
 	      SDK_APERTURE_DIAG_STATE_LEGACY);
+	CHECK(sdk_aperture_mailbox_address() == 0U);
+	CHECK(sdk_aperture_mailbox_page() == 0U);
 
 	sdk_aperture_runtime_init(0x00300000U, 0);
 	CHECK(!sdk_aperture_runtime_is_zorro3());
@@ -174,6 +184,8 @@ static void test_runtime_ack_gate(void)
 	CHECK(sdk_aperture_runtime_diag_state() ==
 	      SDK_APERTURE_DIAG_STATE_INVALID);
 	CHECK(sdk_aperture_host_window_address() == 0U);
+	CHECK(sdk_aperture_mailbox_address() == 0U);
+	CHECK(sdk_aperture_mailbox_page() == 0U);
 	CHECK(!sdk_aperture_runtime_ack());
 }
 
@@ -234,6 +246,50 @@ static void test_direct_ring_geometry(void)
 	      end_of(&layout.host_window));
 }
 
+/* The Zorro II SDK mailbox sits in the reservation tail the single grant
+ * leaves free, and the one page firmware maps non-cacheable for it holds
+ * nothing but that tail and the end of the grant's ring: never the host
+ * window, template scratch or audio scratch the ARM keeps cached. */
+static void check_z2_mailbox_placement(uint32_t aperture)
+{
+	const struct sdk_aperture_layout *layout;
+	uint32_t mailbox;
+	uint32_t mailbox_end;
+	uint32_t grant_end;
+	uint32_t page;
+
+	sdk_aperture_runtime_init(aperture, 0);
+	page = sdk_aperture_mailbox_page() - 0x001f0000U;
+	CHECK(sdk_aperture_runtime_ack());
+	CHECK(sdk_aperture_mailbox_page() - 0x001f0000U == page);
+	layout = sdk_aperture_runtime_layout();
+	mailbox = sdk_aperture_mailbox_address() - 0x001f0000U;
+	mailbox_end = mailbox + SDK_MAILBOX_Z2_SIZE;
+	grant_end = layout->audio.base - SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE +
+		0x80U + SDK_AUDIO_DIRECT_RING_Z2_CAPACITY_BYTES;
+	CHECK(page == ((mailbox_end - 1U) & ~(SDK_MAILBOX_Z2_PAGE_SIZE - 1U)));
+
+	CHECK((mailbox % 64U) == 0U);
+	CHECK(mailbox >= grant_end);
+	CHECK(mailbox_end == layout->audio.base);
+	CHECK((mailbox & ~(SDK_MAILBOX_Z2_PAGE_SIZE - 1U)) == page);
+	CHECK(page >= end_of(&layout->host_window));
+	CHECK(page + SDK_MAILBOX_Z2_PAGE_SIZE == layout->audio.base);
+}
+
+static void test_z2_mailbox_placement(void)
+{
+	/* 128-byte descriptor plus two rings of 64-byte entries. */
+	CHECK(SDK_MAILBOX_Z2_SIZE ==
+	      128U + 2U * SDK_MAILBOX_Z2_RING_ENTRIES * 64U);
+	/* Deeper than the 16-request pipelines zz9k-bench and the crypto batch
+	 * keep in flight: a ring holds entries - 1 requests. */
+	CHECK(SDK_MAILBOX_Z2_RING_ENTRIES - 1U >= 16U);
+	check_z2_mailbox_placement(0x00200000U);
+	check_z2_mailbox_placement(0x00400000U);
+	check_z2_mailbox_placement(0x00800000U);
+}
+
 int main(void)
 {
 	test_2m();
@@ -242,6 +298,7 @@ int main(void)
 	test_invalid_sizes_and_layouts();
 	test_runtime_ack_gate();
 	test_direct_ring_geometry();
+	test_z2_mailbox_placement();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

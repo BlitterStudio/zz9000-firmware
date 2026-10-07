@@ -258,13 +258,47 @@
 #error "Z2 direct-ring slot exceeds the reservation"
 #endif
 // Deterministic second-slot impossibility: after the single grant, the
-// leftover cannot hold even one more control block plus one period. If a
-// future layout change grows this reservation past that bound, the Z2
-// slot count must be revisited explicitly, never silently granted twice.
+// leftover cannot hold even one more control block plus one period. The
+// Z2 SDK mailbox owns that leftover (below). If a future layout change
+// grows this reservation past that bound, the Z2 slot count must be
+// revisited explicitly, never silently granted twice.
 #if (SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE - 0x80 - \
      SDK_AUDIO_DIRECT_RING_Z2_CAPACITY_BYTES) >= \
     (0x80 + AUDIO_BYTES_PER_PERIOD)
 #error "Z2 direct-ring reservation can admit a second slot; revisit the Z2 slot count"
+#endif
+
+// Zorro II SDK v2 mailbox: the 0xB80-byte tail of the direct-ring
+// reservation that the single grant leaves unused (its control block and
+// ring end at +0xB480). A 128-byte descriptor plus two rings of
+// SDK_MAILBOX_Z2_RING_ENTRIES 64-byte entries fills that tail exactly and
+// ends at the audio scratch base. Like the grant it is window-relative,
+// ARM = layout->audio.base - SDK_MAILBOX_Z2_SIZE + ADDR_ADJ, and it exists
+// only while the generation-2 contract is acknowledged.
+//
+// The Amiga writes the mailbox through non-coherent AXI and the descriptor
+// packs host- and firmware-owned cursors into the same cache lines, so the
+// ARM must map it non-cacheable. Its 1 MB section also holds VRAM and the
+// PIP pool, which the ARM writes cached, so mmu_page.c makes only the 4 KiB
+// page directly below the audio scratch base non-cacheable. That page also
+// holds the last 0x480 bytes of the grant's ring; the lease code's
+// per-range cache maintenance there is harmless on non-cacheable memory.
+#define SDK_MAILBOX_Z2_RING_ENTRIES    22U
+#define SDK_MAILBOX_Z2_SIZE \
+    (0x80U + 2U * SDK_MAILBOX_Z2_RING_ENTRIES * 0x40U)
+#define SDK_MAILBOX_Z2_RESERVE_OFFSET \
+    (SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE - SDK_MAILBOX_Z2_SIZE)
+#define SDK_MAILBOX_Z2_PAGE_SIZE       0x1000U
+
+#if (0x80 + SDK_AUDIO_DIRECT_RING_Z2_CAPACITY_BYTES) > \
+    SDK_MAILBOX_Z2_RESERVE_OFFSET
+#error "Z2 SDK mailbox overlaps the direct-ring grant"
+#endif
+#if (SDK_MAILBOX_Z2_RESERVE_OFFSET % 64) != 0
+#error "Z2 SDK mailbox must be 64-byte aligned"
+#endif
+#if SDK_MAILBOX_Z2_SIZE > SDK_MAILBOX_Z2_PAGE_SIZE
+#error "Z2 SDK mailbox must fit the non-cacheable page below the audio scratch"
 #endif
 
 // Z3 fast-RAM DDR window. VARIANT_Z3_FASTRAM bitstreams map the 256 MB
@@ -383,7 +417,9 @@
 
 // SDK v2 bootstrap mailbox (descriptor plus both rings; firmware publishes
 // the chosen ARM address through REG_ZZ_SDK_MAILBOX_HI/LO and the Amiga
-// library maps whatever it reads). The placement is per bus.
+// library maps whatever it reads). The placement is per bus; neither bus
+// uses the 0xa000..0xffff shared I/O buffer, which USB proxy transfers,
+// zzsd block I/O and firmware-update chunks overwrite (issue #129).
 //
 // Zorro III: a private block in the free 0x08000000..0x081C0000 belt below
 // the Z3 direct-ring reservation, reached through the main board aperture
@@ -392,21 +428,11 @@
 // writes it through non-coherent AXI and the descriptor packs host- and
 // firmware-owned cursors into the same cache lines.
 //
-// Zorro II: board 0xd000 inside the legacy 0xa000..0xffff shared I/O buffer,
-// the only spare host-reachable range there. USB proxy transfers, zzsd
-// block I/O and firmware-update chunks all stage up to 24 KB in that buffer
-// and overwrite this mailbox (issue #129); Zorro II has no free
-// host-reachable non-cacheable range to move it to.
+// Zorro II: the tail of the direct-ring reservation (SDK_MAILBOX_Z2_* above).
 #define SDK_MAILBOX_Z3_ADDRESS      0x08100000
 #define SDK_MAILBOX_Z3_RESERVE_SIZE 0x00010000
 #define SDK_MAILBOX_Z3_RESERVE_END \
 	(SDK_MAILBOX_Z3_ADDRESS + SDK_MAILBOX_Z3_RESERVE_SIZE)
-#define SDK_MAILBOX_Z2_WINDOW_OFFSET 0x0000D000
-/* Offset of the Zorro II mailbox inside the shared I/O buffer (board 0xa000):
- * host staging that ends at or below it leaves the mailbox intact. */
-#define SDK_MAILBOX_Z2_BUFFER_OFFSET (SDK_MAILBOX_Z2_WINDOW_OFFSET - 0x0000A000)
-#define SDK_MAILBOX_Z2_ADDRESS \
-	(USB_BLOCK_STORAGE_ADDRESS + SDK_MAILBOX_Z2_BUFFER_OFFSET)
 
 #if SDK_MAILBOX_Z3_ADDRESS < SDK_LOW_DDR_RESERVED_END
 #error "Z3 SDK mailbox overlaps the linker-managed low DDR"
