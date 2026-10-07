@@ -87,6 +87,9 @@ static void test_refusals_change_nothing(void)
 	mmu_page_test_l1[0x006U] = 0x00500000U | BSP_DDR_WB; /* not identity */
 	CHECK(!mmu_page_set_noncacheable(0x006df000U));
 	CHECK(mmu_page_test_l1[0x006U] == (0x00500000U | BSP_DDR_WB));
+	set_section(0x00aU, BSP_DDR_WB | 0x40000U);         /* supersection */
+	CHECK(!mmu_page_set_noncacheable(0x00adf000U));
+	CHECK(mmu_page_test_l1[0x00aU] == (0x00a00000U | BSP_DDR_WB | 0x40000U));
 	CHECK(mmu_page_test_l1[0x005U] == (0x00500000U | BSP_DDR_WB));
 	CHECK(g_xil_cache_mock.count == 0U);
 }
@@ -113,6 +116,9 @@ static void check_split_section(uint32_t section, const uint32_t *nc_pages,
 	uint32_t i;
 
 	CHECK((l1 & 3U) == 1U);                 /* page-table descriptor */
+	/* The host build places the table so its base sets bit 18, which a
+	 * supersection check must not misread on later calls. */
+	CHECK((l1 & 0x40000U) != 0U);
 	CHECK(((l1 >> 5) & 0xfU) ==
 	      ((BSP_DDR_WB >> 5) & 0xfU));     /* same domain */
 	for (i = 0U; i < 256U; i++) {

@@ -22,13 +22,15 @@
  * ARMv7 short-descriptor encodings. translation_table.S gives every DDR
  * section 0x15de6: Normal, inner and outer write-back write-allocate,
  * shareable, AP=11, domain 15. Firmware stamps whole sections with the
- * BSP's NORM_NONCACHE (0x11de2) or STRONG_ORDERED (0xc02). Section
- * descriptors keep the attributes in bits [19:0] and use type 0b10 with
- * bit 18 clear (bit 18 set is a supersection).
+ * BSP's NORM_NONCACHE (0x11de2) or STRONG_ORDERED (0xc02). Bits [1:0]
+ * give the descriptor type. Section descriptors (0b10) keep the
+ * attributes in bits [19:0], with bit 18 set marking a supersection. In a
+ * page-table descriptor (0b01) bit 18 is part of the table base.
  */
-#define MMU_L1_TYPE_MASK       0x00040003U
+#define MMU_L1_TYPE_MASK       0x00000003U
 #define MMU_L1_TYPE_SECTION    0x00000002U
 #define MMU_L1_TYPE_PAGE_TABLE 0x00000001U
+#define MMU_L1_SUPERSECTION    0x00040000U
 #define MMU_L1_ATTR_MASK       0x000FFFFFU
 #define MMU_SECTION_DDR_WB     0x00015DE6U
 #define MMU_SECTION_NONCACHE   0x00011DE2U
@@ -43,8 +45,21 @@
 #define MMU_L1_TABLE_BASE_MASK 0xFFFFFC00U
 #define MMU_L1_DOMAIN_15       (15U << 5)
 
+#define PAGE_TABLE_BYTES (MMU_PAGES_PER_SECTION * sizeof(uint32_t))
+
+#ifdef MMU_PAGE_HOST_TEST
+/* Host tests place the table where bit 18 of its address is set: in a
+ * page-table descriptor that bit is table base, never a supersection flag. */
+static uint32_t page_table_arena[0x80000U / sizeof(uint32_t)]
+	__attribute__((aligned(0x40000)));
+#define page_table \
+	(page_table_arena + \
+	 ((((uintptr_t)page_table_arena & 0x40000U) != 0U) ? \
+	  0U : 0x40000U / sizeof(uint32_t)))
+#else
 static uint32_t page_table[MMU_PAGES_PER_SECTION]
 	__attribute__((aligned(1024)));
+#endif
 static uint32_t page_table_section = MMU_SECTION_COUNT;
 
 #ifdef MMU_PAGE_HOST_TEST
@@ -118,6 +133,7 @@ int mmu_page_set_noncacheable(uintptr_t page_addr)
 		uint32_t i;
 
 		if ((entry & MMU_L1_TYPE_MASK) != MMU_L1_TYPE_SECTION ||
+		    (entry & MMU_L1_SUPERSECTION) != 0U ||
 		    (entry >> MMU_SECTION_SHIFT) != section)
 			return 0;
 		if (attr == MMU_SECTION_NONCACHE || attr == MMU_SECTION_STRONG)
@@ -135,7 +151,7 @@ int mmu_page_set_noncacheable(uintptr_t page_addr)
 	 * not, a dirty line evicted later would overwrite host writes. */
 	Xil_DCacheFlushRange((INTPTR)page_addr, MMU_PAGE_SIZE);
 	page_table[index] = noncache_page;
-	Xil_DCacheFlushRange((INTPTR)(uintptr_t)page_table, sizeof(page_table));
+	Xil_DCacheFlushRange((INTPTR)(uintptr_t)page_table, PAGE_TABLE_BYTES);
 	if (install) {
 		l1[section] = page_table_descriptor();
 		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&l1[section],
