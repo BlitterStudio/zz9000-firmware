@@ -36,10 +36,10 @@ int main(int argc, char **argv)
   if (argc != 2 || !(source = read_file(argv[1]))) return 2;
   ok = strstr(source, "#include <libraries/mhi.h>") &&
        strstr(source, "#include <proto/mhi.h>") &&
+       strstr(source, "#define ZZPLAY_MHI_LIBRARY_PREFIX \"MHI/\"") &&
        strstr(source,
-              "#define ZZPLAY_MHI_LIBRARY_PATH \"MHI/mhizz9000.library\"") &&
-       strstr(source,
-              "OpenLibrary((CONST_STRPTR)ZZPLAY_MHI_LIBRARY_PATH") &&
+              "#define ZZPLAY_MHI_DEFAULT_DRIVER \"mhizz9000.library\"") &&
+       strstr(source, "OpenLibrary((CONST_STRPTR)path, 0U)") &&
        !strstr(source,
                "OpenLibrary((CONST_STRPTR)\"mhizz9000.library\"") &&
        strstr(source, "struct Library *MHIBase = 0;") &&

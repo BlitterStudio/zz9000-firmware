@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "../tools/zzplay-probe.h"
-#include "../tools/zzplay-stats.h"
-#include "../tools/zzplay-stream.h"
+#include "../tools/zzplay/zzplay-probe.h"
+#include "../tools/zzplay/zzplay-stats.h"
+#include "../tools/zzplay/zzplay-stream.h"
 
 #include <stdint.h>
 #include <stdio.h>

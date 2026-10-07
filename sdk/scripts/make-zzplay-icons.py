@@ -173,7 +173,16 @@ TOOLTYPES = [
     "(VERBOSE)",
     "(FPS)",
     "(BENCHMARK)",
+    "(PLAYER=NO)",
+    "(AHIUNIT=0)",
+    "(MHIDRIVER=mhizz9000.library)",
+    "(VOLUME=100)",
 ]
+
+# A Workbench launch gets exactly this stack. The player window opens ASL
+# requesters, whose own call chain needs more than 16 KiB on top of the
+# player's frames; 32 KiB is the floor for ASL-using GUI tools here.
+STACK_BYTES = 32768
 
 
 def main():
@@ -184,7 +193,7 @@ def main():
         ("zzplay-project.info", WB_PROJECT, "ZZPlay"),
     ]
     for name, icon_type, default_tool in targets:
-        data = build(icon_type, default_tool, TOOLTYPES, 16384)
+        data = build(icon_type, default_tool, TOOLTYPES, STACK_BYTES)
         path = os.path.join(out_dir, name)
         with open(path, "wb") as handle:
             handle.write(data)

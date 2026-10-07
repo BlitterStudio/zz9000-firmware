@@ -2,19 +2,22 @@
 
 #include "zzplay-launch.h"
 
+#include "zzplay-controller.h"
+#include "zzplay-gui.h"
+
 #include <dos/dos.h>
+#include <exec/memory.h>
 #include <exec/types.h>
 #include <intuition/intuition.h>
-#include <libraries/asl.h>
 #include <workbench/startup.h>
 #include <workbench/workbench.h>
 
-#include <proto/asl.h>
 #include <proto/dos.h>
 #include <proto/exec.h>
 #include <proto/icon.h>
 #include <proto/intuition.h>
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -22,7 +25,9 @@ struct Library *IconBase;
 struct Library *AslBase;
 /* proto/intuition.h resolves EasyRequestArgs() through this exact global, so
  * it must be the one we open — a private handle would not be used by the
- * call. A -noixemul startup does not provide it. */
+ * call. A -noixemul startup does not provide it. The player window may
+ * open asl.library into AslBase later; launch_end closes whatever is
+ * there. */
 struct IntuitionBase *IntuitionBase;
 static int zzplay_launch_owns_intuition;
 
@@ -54,33 +59,37 @@ static void zzplay_launch_set_dir(ZZPlayLaunch *launch, BPTR lock)
   }
 }
 
-/* Join a lock and a name into a full path. The 68k build has no snprintf
- * guarantees worth relying on, and NameFromLock is the documented way to
- * turn a WBArg lock into text. */
-static int zzplay_launch_join(ZZPlayLaunch *launch, BPTR lock,
-                              const char *name)
+/* Resolve one Workbench argument into a full path in storage owned by the
+ * launch. The 68k build has no snprintf guarantees worth relying on, and
+ * NameFromLock is the documented way to turn a WBArg lock into text. */
+static char *zzplay_launch_path(BPTR lock, const char *name)
 {
-  if (!launch || !name || !*name) {
+  char *path;
+
+  if (!name || !*name) {
     return 0;
   }
-  launch->path[0] = '\0';
-  if (lock) {
-    if (!NameFromLock(lock, (STRPTR)launch->path,
-                      (LONG)sizeof(launch->path))) {
-      return 0;
-    }
-    if (!AddPart((STRPTR)launch->path, (CONST_STRPTR)name,
-                 (ULONG)sizeof(launch->path))) {
-      return 0;
-    }
-  } else {
-    if (strlen(name) >= sizeof(launch->path)) {
-      return 0;
-    }
-    strcpy(launch->path, name);
+  path = (char *)AllocVec((ULONG)ZZPLAY_LAUNCH_PATH_MAX,
+                          MEMF_PUBLIC | MEMF_CLEAR);
+  if (!path) {
+    return 0;
   }
-  launch->have_path = 1;
-  return 1;
+  if (lock) {
+    if (!NameFromLock(lock, (STRPTR)path,
+                      (LONG)ZZPLAY_LAUNCH_PATH_MAX) ||
+        !AddPart((STRPTR)path, (CONST_STRPTR)name,
+                 (ULONG)ZZPLAY_LAUNCH_PATH_MAX)) {
+      FreeVec(path);
+      return 0;
+    }
+    return path;
+  }
+  if (strlen(name) >= ZZPLAY_LAUNCH_PATH_MAX) {
+    FreeVec(path);
+    return 0;
+  }
+  strcpy(path, name);
+  return path;
 }
 
 static void zzplay_launch_apply_tooltypes(ZZPlayOptions *options,
@@ -126,41 +135,36 @@ void zzplay_launch_report(const ZZPlayOptions *options, const char *message)
   fprintf(stderr, "zzplay: %s\n", message);
 }
 
-int zzplay_launch_request_file(ZZPlayLaunch *launch)
+void zzplay_launch_report_surface(const ZZPlayOptions *options,
+                                  const char *message)
 {
-  struct FileRequester *requester;
-  int chosen = 0;
+  if (!message) {
+    return;
+  }
+  /* The player window's message line is the desktop player's error
+   * surface; only a headless run needs the console/requester routing. */
+  if (zzplay_options_wants_player(options) && zzplay_gui_is_open() &&
+      zzplay_gui_report(message)) {
+    return;
+  }
+  zzplay_launch_report(options, message);
+}
 
-  if (!launch) {
-    return 0;
-  }
-  if (!AslBase) {
-    AslBase = OpenLibrary((CONST_STRPTR)"asl.library", 37U);
-  }
-  if (!AslBase) {
-    return 0;
-  }
-  requester = (struct FileRequester *)AllocAslRequestTags(
-      ASL_FileRequest,
-      ASLFR_TitleText, (ULONG) "Select an MPEG-1 Program Stream or MP3",
-      ASLFR_DoPatterns, TRUE,
-      ASLFR_InitialPattern, (ULONG) "#?.(mpg|mpeg|mp3)",
-      TAG_DONE);
-  if (!requester) {
-    return 0;
-  }
-  if (AslRequestTags(requester, TAG_DONE)) {
-    BPTR lock = Lock((CONST_STRPTR)requester->fr_Drawer, ACCESS_READ);
+void zzplay_launch_reportf(ZZPlayController *controller,
+                           const ZZPlayOptions *options,
+                           const char *format, ...)
+{
+  static char message[512];
+  va_list args;
 
-    if (lock) {
-      chosen = zzplay_launch_join(launch, lock, requester->fr_File);
-      UnLock(lock);
-    } else {
-      chosen = zzplay_launch_join(launch, 0, requester->fr_File);
-    }
+  va_start(args, format);
+  /* Messages carry user paths of any length: truncate, never overrun. */
+  (void)vsnprintf(message, sizeof(message), format, args);
+  va_end(args);
+  if (controller) {
+    zzplay_controller_set_message(controller, message);
   }
-  FreeAslRequest(requester);
-  return chosen;
+  zzplay_launch_report_surface(options, message);
 }
 
 ZZPlayOptionsResult zzplay_launch_begin(int argc, char **argv,
@@ -171,6 +175,7 @@ ZZPlayOptionsResult zzplay_launch_begin(int argc, char **argv,
   struct WBArg *args;
   struct DiskObject *icon;
   int bad_tooltype = 0;
+  unsigned i;
 
   if (!options || !launch) {
     return ZZPLAY_OPTIONS_ERROR;
@@ -179,7 +184,8 @@ ZZPlayOptionsResult zzplay_launch_begin(int argc, char **argv,
   launch->old_directory = -1;
   zzplay_launch_open_intuition();
 
-  /* A CLI launch keeps the existing behaviour exactly. */
+  /* A CLI launch keeps the existing behaviour: options and file arguments
+   * may be interleaved, and the parsed paths borrow argv storage. */
   if (argc != 0) {
     return zzplay_options_parse_cli(argc, argv, options);
   }
@@ -199,8 +205,8 @@ ZZPlayOptionsResult zzplay_launch_begin(int argc, char **argv,
   args = startup->sm_ArgList;
 
   /* sm_ArgList[0] is always the tool itself; its ToolTypes are the user's
-   * defaults. A dropped project (argument 1) may then override them, which
-   * is the conventional Workbench precedence. */
+   * defaults. The first dropped project may then override them, which is
+   * the conventional Workbench precedence. */
   zzplay_launch_set_dir(launch, args[0].wa_Lock);
   icon = GetDiskObject((STRPTR)args[0].wa_Name);
   if (icon) {
@@ -215,33 +221,44 @@ ZZPlayOptionsResult zzplay_launch_begin(int argc, char **argv,
       zzplay_launch_apply_tooltypes(options, icon, &bad_tooltype);
       FreeDiskObject(icon);
     }
-    /* The path is built from the lock itself, so it stays correct
-     * regardless of where CurrentDir currently points. */
-    if (!zzplay_launch_join(launch, args[1].wa_Lock, args[1].wa_Name)) {
-      return ZZPLAY_OPTIONS_ERROR;
+  }
+
+  /* Every dropped argument becomes a playlist entry; the paths are built
+   * from the locks themselves, so they stay correct regardless of where
+   * CurrentDir currently points. An argument that cannot be resolved is
+   * skipped: one unreadable icon must not hide the other drops. */
+  for (i = 1U; (long)i < startup->sm_NumArgs; i++) {
+    char *path = zzplay_launch_path(args[i].wa_Lock,
+                                    (const char *)args[i].wa_Name);
+
+    if (!path) {
+      continue;
     }
+    if (!zzplay_options_add_path(options, path)) {
+      FreeVec(path);
+      break;
+    }
+    launch->paths[launch->path_count++] = path;
   }
 
   if (bad_tooltype) {
     return ZZPLAY_OPTIONS_ERROR;
   }
-  /* Started from its own icon with nothing dropped on it: ask. */
-  if (!launch->have_path && !zzplay_launch_request_file(launch)) {
-    return ZZPLAY_OPTIONS_ERROR;
-  }
-  options->path = launch->path;
   return zzplay_options_finish(options);
 }
 
 void zzplay_launch_end(ZZPlayLaunch *launch)
 {
+  unsigned i;
+
   if (!launch) {
     return;
   }
-  if (launch->disk_object) {
-    FreeDiskObject((struct DiskObject *)launch->disk_object);
-    launch->disk_object = 0;
+  for (i = 0U; i < launch->path_count; i++) {
+    FreeVec(launch->paths[i]);
+    launch->paths[i] = 0;
   }
+  launch->path_count = 0U;
   if (launch->old_directory != -1) {
     (void)CurrentDir((BPTR)launch->old_directory);
     launch->old_directory = -1;
@@ -260,5 +277,4 @@ void zzplay_launch_end(ZZPlayLaunch *launch)
     zzplay_launch_owns_intuition = 0;
   }
   launch->startup = 0;
-  launch->have_path = 0;
 }

@@ -34,4 +34,22 @@ int zzplay_mp3_input_room_low(uint32_t bytes_fed,
                               uint32_t capacity,
                               uint32_t next_feed_bytes);
 
+/* CBR duration estimate for the audio payload only (file size minus ID3v2
+ * header and ID3v1 trailer): bytes * 8 / kbps yields milliseconds
+ * directly. Returns 0 when the bitrate is unknown, and saturates rather
+ * than wraps for implausibly large inputs. */
+uint32_t zzplay_mp3_duration_ms(uint64_t audio_bytes,
+                                uint32_t bitrate_kbps);
+
+/* Byte offset to restart a CBR pass at `target_ms`, proportionally inside
+ * the audio range [audio_start, audio_end] of a `total_ms` stream. Always
+ * clamped into that range: target 0 restarts, a target at or past the end
+ * returns audio_end, and a degenerate range (unknown duration, tag-only
+ * file) restarts at audio_start. The decoder resyncs on the next frame
+ * header at the returned offset. */
+uint64_t zzplay_mp3_seek_offset(uint64_t audio_start,
+                                uint64_t audio_end,
+                                uint64_t total_ms,
+                                uint64_t target_ms);
+
 #endif /* ZZPLAY_MP3_TRANSPORT_H */

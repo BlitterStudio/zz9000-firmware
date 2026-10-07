@@ -43,11 +43,32 @@ typedef enum ZZPlayOptionKey {
   ZZPLAY_OPT_QUIET,
   ZZPLAY_OPT_VERBOSE,
   ZZPLAY_OPT_TRACE,
-  ZZPLAY_OPT_HELP
+  ZZPLAY_OPT_HELP,
+  /* PLAYER (stay open as a desktop player) / PLAYER=NO. */
+  ZZPLAY_OPT_PLAYER,
+  /* AHIUNIT=0..3: ahi.device unit for this launch. */
+  ZZPLAY_OPT_AHI_UNIT,
+  /* MHIDRIVER=name: driver file in LIBS:MHI/ for this launch. */
+  ZZPLAY_OPT_MHI_DRIVER,
+  /* VOLUME=0..100: starting volume for this launch. */
+  ZZPLAY_OPT_VOLUME
 } ZZPlayOptionKey;
 
+/* Files named on the command line or selected in Workbench. More than this
+ * is an error that suggests a pattern or a playlist instead. */
+#define ZZPLAY_OPTIONS_MAX_PATHS 64U
+
 typedef struct ZZPlayOptions {
-  const char *path;
+  /* Media files, patterns, drawers or playlists, in the order given. The
+   * pointers are borrowed (argv or ZZPlayLaunch storage). */
+  const char *paths[ZZPLAY_OPTIONS_MAX_PATHS];
+  uint32_t path_count;
+  /* -1 automatic (see zzplay_options_wants_player), 0 off, 1 on. */
+  int player;
+  /* -1 when not given for this launch; the saved settings apply. */
+  int32_t ahi_unit;
+  int32_t volume;
+  const char *mhi_driver;    /* NULL when not given */
   ZZPlayAudioBackend audio_backend;
   uint32_t loop_count;
   ZZPlayLoopMode loop_mode;
@@ -89,9 +110,22 @@ ZZPlayOptionKey zzplay_options_key_from_tooltype(const char *tooltype,
 int zzplay_options_apply_tooltype(ZZPlayOptions *options,
                                   const char *tooltype);
 
-/* Final cross-option validation, shared by every launch path. */
+/* Append one file argument. Returns 0 when the list is full. */
+int zzplay_options_add_path(ZZPlayOptions *options, const char *path);
+
+/* Final cross-option validation, shared by every launch path. A launch
+ * without files is valid: it opens the player with an empty playlist. */
 ZZPlayOptionsResult zzplay_options_finish(ZZPlayOptions *options);
 
+/* Whether to run as a desktop player that stays open after the playlist
+ * ends. PLAYER / PLAYER=NO decide when given. Otherwise: always when no file
+ * was named (there is nothing else to do), and for a Workbench launch
+ * unless FULLSCREEN asks for a chrome-free video sequence. A shell launch
+ * with files plays them and exits, as it always has. */
+int zzplay_options_wants_player(const ZZPlayOptions *options);
+
+/* CLI: options and file arguments may be interleaved; every non-option
+ * token is a file argument. */
 ZZPlayOptionsResult zzplay_options_parse_cli(
     int argc, char **argv, ZZPlayOptions *options);
 

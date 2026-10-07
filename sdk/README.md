@@ -32,7 +32,7 @@ can install and run. The biggest additions are:
 
 | Improvement | What it delivers |
 |---|---|
-| **ZZPlay** | A Workbench media player that sends MPEG-1 video and MP3/MP2 audio to the ZZ9000's ARM cores for decoding. It supports a resizable hardware video window and a dedicated-screen presentation, while the Amiga remains responsible for the familiar user interface. |
+| **ZZPlay** | A Workbench media player that sends MPEG-1 video and MP3/MP2 audio to the ZZ9000's ARM cores for decoding. It runs as a desktop player with a playlist, seeking, volume, repeat/shuffle and selectable AHI unit and MHI driver, or as a one-shot command for scripts, and supports a resizable hardware video window and a dedicated-screen presentation while the Amiga remains responsible for the familiar user interface. |
 | **Faster image handling** | Card-assisted JPEG/PNG decoding and scaling powers image-viewing tools and an optional `zz9k-picture.datatype`, allowing DataTypes-aware Amiga applications to benefit without each application learning a private hardware protocol. |
 | **AmiSSL acceleration for existing software** | A drop-in AmiSSL build uses the ZZ9000 for supported TLS key exchange, signature verification and encrypted data. Compatible browsers and network tools benefit without being rewritten; anything unsupported falls back to the Amiga CPU. |
 | **Audio and archive offload** | `mpega.library`, streaming audio helpers and LHA/LZH decompression services move useful work away from the classic Amiga CPU. The archive tools include verification and safe software fallback paths. |

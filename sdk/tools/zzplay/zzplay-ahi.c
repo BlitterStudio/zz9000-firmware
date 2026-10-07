@@ -64,7 +64,7 @@ static void zzplay_ahi_configure(ZZPlayAHISink *sink, unsigned slot)
   request->ahir_Type =
       sink->channels == 1U ? AHIST_M16S : AHIST_S16S;
   request->ahir_Frequency = sink->sample_rate;
-  request->ahir_Volume = 0x10000L;
+  request->ahir_Volume = (LONG)sink->volume_fixed;
   request->ahir_Position = 0x8000L;
   request->ahir_Link = zzplay_ahi_predecessor(sink, slot);
 }
@@ -105,6 +105,7 @@ static int zzplay_ahi_control(ZZPlayAHISink *sink, UWORD command)
 }
 
 int zzplay_ahi_prepare(ZZPlayAHISink *sink,
+                       uint32_t unit,
                        uint32_t sample_rate,
                        uint32_t channels,
                        uint32_t period_frames)
@@ -113,17 +114,19 @@ int zzplay_ahi_prepare(ZZPlayAHISink *sink,
   unsigned i;
   int failure = -1;
 
-  if (!sink || sample_rate == 0U ||
+  if (!sink || unit > 3U || sample_rate == 0U ||
       (channels != 1U && channels != 2U) ||
       period_frames == 0U) {
     return 0;
   }
   memset(sink, 0, sizeof(*sink));
   sink->fill_slot = -1;
+  sink->unit = unit;
   sink->sample_rate = sample_rate;
   sink->channels = channels;
   sink->frame_bytes = channels * 2U;
   sink->period_frames = period_frames;
+  sink->volume_fixed = 0x10000U;
   period_bytes = (size_t)period_frames * sink->frame_bytes;
 
   sink->port = CreateMsgPort();
@@ -136,7 +139,7 @@ int zzplay_ahi_prepare(ZZPlayAHISink *sink,
     goto fail;
   }
   sink->control->ahir_Version = ZZPLAY_AHI_VERSION;
-  if (OpenDevice((CONST_STRPTR)AHINAME, AHI_DEFAULT_UNIT,
+  if (OpenDevice((CONST_STRPTR)AHINAME, unit,
                  (struct IORequest *)sink->control, 0U) != 0) {
     failure = sink->control->ahir_Std.io_Error;
     goto fail;
@@ -169,6 +172,17 @@ fail:
   zzplay_ahi_close(sink);
   sink->last_error = failure;
   return 0;
+}
+
+void zzplay_ahi_set_volume(ZZPlayAHISink *sink, uint32_t percent)
+{
+  if (!sink) {
+    return;
+  }
+  if (percent > 100U) {
+    percent = 100U;
+  }
+  sink->volume_fixed = percent * 0x10000U / 100U;
 }
 
 void *zzplay_ahi_acquire_buffer(ZZPlayAHISink *sink,

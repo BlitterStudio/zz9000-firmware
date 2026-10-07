@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../tools/zzplay-options.h"
+#include "../tools/zzplay/zzplay-options.h"
 
 #define WB_TOOL 3
 #define WB_PROJECT 4

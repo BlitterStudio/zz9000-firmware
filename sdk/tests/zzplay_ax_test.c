@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "../tools/zzplay-ax.h"
+#include "../tools/zzplay/zzplay-ax.h"
 
 #include <string.h>
 

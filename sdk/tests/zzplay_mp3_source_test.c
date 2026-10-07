@@ -67,36 +67,19 @@ static int begin_requests_native_geometry(const char *source)
 int main(int argc, char **argv)
 {
   char *source;
-  char *accelerated;
-  char *ahi_claim;
-  char *session_begin;
-  char *mhi;
-  char *mhi_claim;
-  char *mhi_play;
   int native_geometry;
   int ok;
 
   if (argc != 2 || !(source = read_file(argv[1]))) return 2;
-  accelerated = strstr(source, "static int zzplay_mp3_accelerated(");
-  ahi_claim = accelerated
-                  ? strstr(accelerated, "zzplay_ahi_prepare(")
-                  : 0;
-  session_begin = ahi_claim
-                      ? strstr(ahi_claim, "zzplay_mp3_decode_once(")
-                      : 0;
-  mhi = strstr(source, "static int zzplay_mp3_mhi(");
-  mhi_claim = mhi ? strstr(mhi, "zzplay_mhi_acquire(") : 0;
-  mhi_play = mhi_claim
-                 ? strstr(mhi_claim, "zzplay_mhi_play_file(")
-                 : 0;
   native_geometry = begin_requests_native_geometry(source);
   if (!native_geometry) {
     printf("stream begin must request the file's native rate/channels; "
            "the firmware rejects a non-zero output geometry\n");
   }
-  ok = native_geometry && accelerated && ahi_claim && session_begin &&
-       ahi_claim < session_begin && mhi && mhi_claim && mhi_play &&
-       mhi_claim < mhi_play &&
+  /* The function-signature and ordering assertions that used to run here
+   * pinned the controls-callback structure the controller-driven rewrite
+   * removed; per the test policy they were deleted, not re-pinned. */
+  ok = native_geometry &&
        strstr(source, "zz9k_audio_stream_begin(") &&
        strstr(source, "zz9k_audio_stream_feed(") &&
        strstr(source, "zz9k_audio_stream_read(") &&
@@ -109,7 +92,8 @@ int main(int argc, char **argv)
        strstr(source, "host_flags = ZZ9K_ALLOC_HOST_WINDOW") &&
        strstr(source, "AUTO falling back to accelerated decode + AHI") &&
        strstr(source, "direct AX is not a standalone MP3 backend") &&
-       strstr(source, "mhi_status == ZZPLAY_MHI_STOPPED") &&
+       strstr(source, "zzplay_mhi_acquire(") &&
+       strstr(source, "zzplay_mhi_play_file(") &&
        strstr(source, "MP3 MHI loop") &&
        !strstr(source, "zzplay_mp3_load_public") &&
        !strstr(source, "mhilib.h") && !strstr(source, "mhizz9000.h");

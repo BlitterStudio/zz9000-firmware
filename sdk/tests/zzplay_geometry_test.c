@@ -5,8 +5,8 @@
 
 #include <stdio.h>
 
-#include "../tools/zzplay-controls.h"
-#include "../tools/zzplay-geometry.h"
+#include "../tools/zzplay/zzplay-controls.h"
+#include "../tools/zzplay/zzplay-geometry.h"
 
 static int test_exact_fit(void)
 {
@@ -114,7 +114,7 @@ static int test_controls(void)
   if (zzplay_control_action_from_key('F') !=
       ZZPLAY_CONTROL_TOGGLE_FULLSCREEN)
     return 6;
-  if (zzplay_control_action_from_key('l') != ZZPLAY_CONTROL_TOGGLE_LOOP)
+  if (zzplay_control_action_from_key('l') != ZZPLAY_CONTROL_CYCLE_REPEAT)
     return 7;
   if (zzplay_control_action_from_key('x') != ZZPLAY_CONTROL_NONE)
     return 8;

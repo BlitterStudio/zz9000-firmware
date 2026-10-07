@@ -7,7 +7,7 @@
 #include <string.h>
 
 #include "zz9k/abi.h"
-#include "../tools/zzplay-path.h"
+#include "../tools/zzplay/zzplay-path.h"
 
 static void build(uint64_t *value, uint16_t src_w, uint16_t src_h,
                   uint16_t dst_w, uint16_t dst_h, int16_t dst_x,

@@ -126,3 +126,36 @@ int zzplay_mp3_input_room_low(uint32_t bytes_fed,
   buffered = zzplay_mp3_input_buffered(bytes_fed, bytes_consumed);
   return buffered > capacity - next_feed_bytes;
 }
+
+uint32_t zzplay_mp3_duration_ms(uint64_t audio_bytes,
+                                uint32_t bitrate_kbps)
+{
+  uint64_t milliseconds;
+
+  if (bitrate_kbps == 0U) {
+    return 0U;
+  }
+  /* bytes * 8 / (kbit/s) gives milliseconds directly; a VBR file makes
+   * this an approximation, which is why a position derived from it is
+   * reported as inexact. */
+  milliseconds = (audio_bytes * 8ULL) / bitrate_kbps;
+  if (milliseconds > 0xffffffffULL) {
+    return 0xffffffffU;
+  }
+  return (uint32_t)milliseconds;
+}
+
+uint64_t zzplay_mp3_seek_offset(uint64_t audio_start,
+                                uint64_t audio_end,
+                                uint64_t total_ms,
+                                uint64_t target_ms)
+{
+  if (total_ms == 0U || audio_end <= audio_start) {
+    return audio_start;
+  }
+  if (target_ms > total_ms) {
+    target_ms = total_ms;
+  }
+  return audio_start +
+         ((audio_end - audio_start) * target_ms) / total_ms;
+}

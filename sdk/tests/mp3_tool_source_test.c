@@ -78,7 +78,6 @@ int main(int argc, char **argv)
   ok &= expect_contains(source, "#include \"zz9k/audio.h\"");
   ok &= expect_contains(source, "#include \"zz9k/caps.h\"");
   ok &= expect_contains(source, "#include \"zz9k/shared.h\"");
-  ok &= expect_contains(source, "#include \"zzplay-mp3-transport.h\"");
   ok &= expect_contains(source, "ZZ9K_CAP_AUDIO_DECODE");
   ok &= expect_contains(source, "ZZ9K_SERVICE_AUDIO");
   ok &= expect_contains(source, "ZZ9K_SERVICE_FLAG_AUDIO_MP3_DECODE");

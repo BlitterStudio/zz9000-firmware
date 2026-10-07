@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "../tools/zzplay-controls.h"
-#include "../tools/zzplay-core.h"
-#include "../tools/zzplay-options.h"
-#include "../tools/zzplay-sync.h"
+#include "../tools/zzplay/zzplay-controls.h"
+#include "../tools/zzplay/zzplay-core.h"
+#include "../tools/zzplay/zzplay-options.h"
+#include "../tools/zzplay/zzplay-sync.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -79,34 +79,34 @@ static int check_options(void)
           ZZPLAY_OPTIONS_OK ||
       !options.show_fps || options.uncapped ||
       options.audio_backend != ZZPLAY_AUDIO_AUTO ||
-      options.path != fps_argv[2]) {
+      options.path_count != 1U || options.paths[0] != fps_argv[2]) {
     return 0;
   }
   if (zzplay_options_parse_cli(3, benchmark_argv, &options) !=
           ZZPLAY_OPTIONS_OK ||
       !options.show_fps || !options.uncapped ||
       options.audio_backend != ZZPLAY_AUDIO_NONE ||
-      options.path != benchmark_argv[2]) {
+      options.path_count != 1U || options.paths[0] != benchmark_argv[2]) {
     return 0;
   }
   if (zzplay_options_parse_cli(3, audio_argv, &options) !=
           ZZPLAY_OPTIONS_OK ||
       options.audio_backend != ZZPLAY_AUDIO_AHI ||
-      options.path != audio_argv[2]) {
+      options.path_count != 1U || options.paths[0] != audio_argv[2]) {
     return 0;
   }
   if (zzplay_options_parse_cli(3, loop_argv, &options) !=
           ZZPLAY_OPTIONS_OK ||
       options.loop_mode != ZZPLAY_LOOP_FOREVER ||
       options.loop_count != 0U ||
-      options.path != loop_argv[2]) {
+      options.path_count != 1U || options.paths[0] != loop_argv[2]) {
     return 0;
   }
   if (zzplay_options_parse_cli(3, loops_argv, &options) !=
           ZZPLAY_OPTIONS_OK ||
       options.loop_mode != ZZPLAY_LOOP_FINITE ||
       options.loop_count != 20U ||
-      options.path != loops_argv[2]) {
+      options.path_count != 1U || options.paths[0] != loops_argv[2]) {
     return 0;
   }
   if (zzplay_options_parse_cli(2, help_argv, &options) !=
@@ -114,12 +114,16 @@ static int check_options(void)
     return 0;
   }
   if (zzplay_options_parse_cli(3, extra_argv, &options) !=
-          ZZPLAY_OPTIONS_ERROR ||
-      zzplay_options_parse_cli(3, zero_loops_argv, &options) !=
+          ZZPLAY_OPTIONS_OK ||
+      options.path_count != 2U ||
+      zzplay_options_parse_cli(1, missing_argv, &options) !=
+          ZZPLAY_OPTIONS_OK ||
+      options.path_count != 0U) {
+    return 0;
+  }
+  if (zzplay_options_parse_cli(3, zero_loops_argv, &options) !=
           ZZPLAY_OPTIONS_ERROR ||
       zzplay_options_parse_cli(3, bad_loops_argv, &options) !=
-          ZZPLAY_OPTIONS_ERROR ||
-      zzplay_options_parse_cli(1, missing_argv, &options) !=
           ZZPLAY_OPTIONS_ERROR) {
     return 0;
   }

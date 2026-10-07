@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "zzplay-mhi.h"
+#include "zzplay-core.h"
 
 #include <exec/libraries.h>
 #include <exec/tasks.h>
@@ -12,21 +13,40 @@
 #include <string.h>
 
 #define ZZPLAY_MHI_BUFFER_BYTES (16UL * 1024UL)
-#define ZZPLAY_MHI_LIBRARY_PATH "MHI/mhizz9000.library"
+/* Upper bound, in 20 ms ticks, between handing over the last input and the
+ * driver reporting MHIF_OUT_OF_DATA. Generous (10 s) because a driver may
+ * still hold decoded audio after it has returned every input buffer; the
+ * bound only exists so a driver that never reports the end cannot stall
+ * the playlist. */
+#define ZZPLAY_MHI_DRAIN_TICKS 500U
+#define ZZPLAY_MHI_LIBRARY_PREFIX "MHI/"
+#define ZZPLAY_MHI_DEFAULT_DRIVER "mhizz9000.library"
 
 /* A strong definition prevents the Amiga linker from satisfying this base
  * with libstubs.a(mhi.o), whose pre-main hook opens the unrelated
  * MHI.library before zzplay can select the runtime driver. */
 struct Library *MHIBase = 0;
 
-ZZPlayMHIStatus zzplay_mhi_acquire(ZZPlayMHISink *sink)
+
+ZZPlayMHIStatus zzplay_mhi_acquire(ZZPlayMHISink *sink,
+                                   const char *driver)
 {
+  char path[sizeof(ZZPLAY_MHI_LIBRARY_PREFIX) + ZZPLAY_MHI_DRIVER_MAX];
+
   if (!sink) {
     return ZZPLAY_MHI_IO_ERROR;
   }
   memset(sink, 0, sizeof(*sink));
   sink->signal_bit = -1;
-  MHIBase = OpenLibrary((CONST_STRPTR)ZZPLAY_MHI_LIBRARY_PATH, 0U);
+  if (!driver || !*driver) {
+    driver = ZZPLAY_MHI_DEFAULT_DRIVER;
+  }
+  strcpy(sink->driver, driver);
+  sink->eof_marker = (uint8_t)zzplay_ascii_equal_fold(
+      driver, ZZPLAY_MHI_DEFAULT_DRIVER);
+  strcpy(path, ZZPLAY_MHI_LIBRARY_PREFIX);
+  strcat(path, driver);
+  MHIBase = OpenLibrary((CONST_STRPTR)path, 0U);
   if (!MHIBase) {
     return ZZPLAY_MHI_MISSING;
   }
@@ -35,6 +55,8 @@ ZZPlayMHIStatus zzplay_mhi_acquire(ZZPlayMHISink *sink)
     zzplay_mhi_release(sink);
     return ZZPLAY_MHI_UNSUPPORTED;
   }
+  sink->volume_supported = (uint8_t)(
+      MHIQuery(MHIQ_VOLUME_CONTROL) == MHIF_SUPPORTED);
   sink->signal_bit = AllocSignal(-1L);
   if (sink->signal_bit < 0) {
     zzplay_mhi_release(sink);
@@ -92,11 +114,11 @@ ZZPlayMHIStatus zzplay_mhi_play_file(
     void *user)
 {
   uint32_t queued = 0U;
+  uint32_t drain_ticks = 0U;
   ZZPlayMHIStatus result = ZZPLAY_MHI_IO_ERROR;
   unsigned i;
   int eof = 0;
   int eof_announced = 0;
-
   if (!sink || !sink->decoder || !file) {
     return ZZPLAY_MHI_IO_ERROR;
   }
@@ -128,6 +150,10 @@ ZZPlayMHIStatus zzplay_mhi_play_file(
   MHIPlay(sink->decoder);
   sink->playing = 1U;
   sink->paused = 0U;
+  /* A restarted paused seek must not leak audio before the poll loop runs. */
+  if (paused && paused(user) && !zzplay_mhi_pause(sink)) {
+    goto done;
+  }
   for (;;) {
     UBYTE status;
     APTR empty;
@@ -178,13 +204,21 @@ ZZPlayMHIStatus zzplay_mhi_play_file(
       }
     }
     if (eof && queued == 0U && !eof_announced) {
-      /* mhizz9000 extends the public queue call with a self-detecting
-       * zero-length EOF marker. Firmware needs the corresponding stream EOF
-       * flag to decode the last short input and drain a sub-period PCM tail. */
-      if (!MHIQueueBuffer(sink->decoder, sink->buffers[0], 0U)) {
-        goto done;
+      if (sink->eof_marker) {
+        /* mhizz9000 extends the public queue call with a self-detecting
+         * zero-length EOF marker. Firmware needs the corresponding stream
+         * EOF flag to decode the last short input and drain a sub-period
+         * PCM tail. */
+        if (!MHIQueueBuffer(sink->decoder, sink->buffers[0], 0U)) {
+          goto done;
+        }
       }
+      /* Public MHI has no marker: EOF is announced by having nothing left
+       * queued, and the driver reports MHIF_OUT_OF_DATA once its last
+       * buffer has played out. A non-terminal third-party driver must not
+       * stall playlist advance forever after this point. */
       eof_announced = 1;
+      drain_ticks = 0U;
     }
     status = MHIGetStatus(sink->decoder);
     if (eof && queued == 0U && eof_announced &&
@@ -193,6 +227,15 @@ ZZPlayMHIStatus zzplay_mhi_play_file(
       goto done;
     }
     if (status == MHIF_STOPPED) {
+      goto done;
+    }
+    if (eof && queued == 0U && eof_announced &&
+        drain_ticks++ >= ZZPLAY_MHI_DRAIN_TICKS) {
+      /* Every byte was handed over and the driver has had the drain window
+       * to play it out: treat the item as finished rather than failed, so a
+       * driver that never reports OUT_OF_DATA is not marked unplayable and
+       * skipped on the next pass of the playlist. */
+      result = ZZPLAY_MHI_OK;
       goto done;
     }
     /* Poll as well as accepting the MHI completion signal: public MHI does
@@ -271,6 +314,24 @@ void zzplay_mhi_release(ZZPlayMHISink *sink)
   memset(sink, 0, sizeof(*sink));
   sink->signal_bit = -1;
   MHIBase = 0;
+}
+
+int zzplay_mhi_set_volume(ZZPlayMHISink *sink, uint32_t percent)
+{
+  if (!sink || !sink->decoder || !sink->volume_supported) {
+    return 0;
+  }
+  if (percent > 100U) {
+    percent = 100U;
+  }
+  MHISetParam(sink->decoder, MHIP_VOLUME, percent);
+  return 1;
+}
+
+const char *zzplay_mhi_driver_name(const ZZPlayMHISink *sink)
+{
+  return sink && sink->driver[0] != '\0' ? sink->driver
+                                         : ZZPLAY_MHI_DEFAULT_DRIVER;
 }
 
 const char *zzplay_mhi_status_name(ZZPlayMHIStatus status)
