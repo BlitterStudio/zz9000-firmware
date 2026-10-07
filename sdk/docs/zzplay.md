@@ -95,7 +95,9 @@ From top to bottom:
   continues with the entry that followed it.
 
 Drop files, drawers or playlists from Workbench onto the window to add them;
-if nothing is playing, the first dropped file starts.
+if nothing is playing, the first dropped file starts. Playback pauses while
+the dropped items are read and then continues, as it does while a file
+requester is open.
 
 The window position, volume, repeat, shuffle and the last drawer used in a
 file requester are remembered between sessions.

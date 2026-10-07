@@ -149,6 +149,48 @@ static struct TextAttr *gui_text_attr;
 
 static struct List playlist_exec_list;
 static int32_t playlist_selected_row = -1;
+/* Files dropped on the window wait here for the modal gate: expanding a
+ * drawer or a long playlist blocks this task, which also feeds playback, so
+ * an active item is paused first. Paths are copied because the AppMessage
+ * (and its locks) is replied at once. */
+static char **drop_paths;
+static uint32_t drop_count;
+static uint32_t drop_capacity;
+static char drop_path_buf[ZZPLAY_PLAYLIST_PATH_MAX];
+
+static void drop_queue_push(const char *path)
+{
+  char *copy;
+
+  if (drop_count == drop_capacity) {
+    uint32_t capacity = drop_capacity ? drop_capacity * 2U : 8U;
+    char **grown = (char **)realloc(drop_paths, capacity * sizeof(char *));
+
+    if (!grown) {
+      return;
+    }
+    drop_paths = grown;
+    drop_capacity = capacity;
+  }
+  copy = strdup(path);
+  if (copy) {
+    drop_paths[drop_count++] = copy;
+  }
+}
+
+static void drop_queue_free(void)
+{
+  uint32_t i;
+
+  for (i = 0U; i < drop_count; i++) {
+    free(drop_paths[i]);
+  }
+  free(drop_paths);
+  drop_paths = 0;
+  drop_count = 0U;
+  drop_capacity = 0U;
+}
+
 /* The rendered marker lets item changes touch only two ListView labels. */
 static int32_t playlist_rendered_current = -1;
 static ULONG last_click_s = 0UL;
@@ -354,6 +396,9 @@ static void update_current_playlist_node(void)
     }
   }
   playlist_rendered_current = current;
+  /* The listview highlights the new current row, so Remove must act on
+   * that row too. */
+  playlist_selected_row = current;
   if (pl_listview_gad && player_win) {
     GT_SetGadgetAttrs(pl_listview_gad, player_win, 0,
                       GTLV_Labels, (ULONG)&playlist_exec_list,
@@ -926,6 +971,29 @@ static void execute_modal_op(ZZPlayModal op)
   pl = gui_context->playlist;
   prefs = gui_context->prefs;
 
+  if (op == ZZPLAY_MODAL_ADD_DROPPED) {
+    int32_t first_added = -1;
+    uint32_t count_before = pl->count;
+    uint32_t i;
+
+    for (i = 0U; i < drop_count; i++) {
+      uint32_t added = zzplay_files_add(pl, drop_paths[i]);
+
+      if (added > 0U && first_added < 0) {
+        first_added = (int32_t)count_before;
+      }
+      count_before += added;
+    }
+    drop_queue_free();
+    /* Dropping onto an idle player starts what was dropped; an item that
+     * is playing (paused by the gate) keeps playing afterwards. */
+    if (!ctl->item_active && first_added >= 0) {
+      zzplay_controller_jump(ctl, first_added);
+    }
+    ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+    return;
+  }
+
   if (op == ZZPLAY_MODAL_ABOUT) {
     struct EasyStruct es;
     size_t count;
@@ -1460,6 +1528,7 @@ void zzplay_gui_close(void)
   }
 
   free_exec_list_nodes(&playlist_exec_list);
+  drop_queue_free();
 
   if (player_win && player_menus) {
     ClearMenuStrip(player_win);
@@ -1588,26 +1657,21 @@ void zzplay_gui_poll(void)
   /* 1. AppWindow drag-and-drop messages */
   if (app_port) {
     while ((amsg = (struct AppMessage *)GetMsg(app_port)) != 0) {
-      int32_t first_added = -1;
-      uint32_t count_before = pl->count;
-      int was_active = ctl->item_active;
       int i;
 
       for (i = 0; i < amsg->am_NumArgs; i++) {
         struct WBArg *arg = &amsg->am_ArgList[i];
-        uint32_t added = zzplay_files_add_lock(pl, (long)arg->wa_Lock,
-                                               (const char *)arg->wa_Name);
-        if (added > 0U && first_added < 0) {
-          first_added = (int32_t)count_before;
-        }
-        count_before += added;
-      }
 
-      if (!was_active && first_added >= 0) {
-        zzplay_controller_jump(ctl, first_added);
+        if (zzplay_files_lock_path((long)arg->wa_Lock,
+                                   (const char *)arg->wa_Name,
+                                   drop_path_buf, sizeof(drop_path_buf))) {
+          drop_queue_push(drop_path_buf);
+        }
       }
-      ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
       ReplyMsg((struct Message *)amsg);
+    }
+    if (drop_count != 0U && ctl->modal == ZZPLAY_MODAL_NONE) {
+      (void)zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_ADD_DROPPED);
     }
   }
 
@@ -1975,6 +2039,10 @@ void zzplay_gui_poll(void)
   if (modal_op != ZZPLAY_MODAL_NONE) {
     execute_modal_op(modal_op);
     zzplay_controller_end_modal(ctl);
+  }
+  /* Drops that arrived while another operation held the gate. */
+  if (drop_count != 0U && ctl->modal == ZZPLAY_MODAL_NONE) {
+    (void)zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_ADD_DROPPED);
   }
 
   /* 5. Dirty redraw processing */

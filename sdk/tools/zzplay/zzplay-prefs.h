@@ -105,7 +105,8 @@ void zzplay_prefs_apply_options(ZZPlayPrefs *prefs,
 /* The backend to try first for `media`, and whether failing to get it is an
  * error (`*strict` = 1) rather than a reason to fall back as AUTO would.
  * An explicit AUDIO= option or --benchmark wins; it is strict unless it is
- * AUDIO=AUTO, which overrides the saved output but may fall back. Otherwise
+ * AUTO (AUDIO=AUTO, with or without --benchmark), which overrides the saved
+ * output but may fall back. Otherwise
  * the saved preference for that media type applies, non-strict. A saved
  * preference that cannot apply to the media type (none can for
  * ZZPLAY_MEDIA_AUDIO_NONE) resolves to AUTO. */

@@ -275,34 +275,38 @@ uint32_t zzplay_files_add(ZZPlayPlaylist *list, const char *path)
   return (zzplay_playlist_add(list, path) >= 0) ? 1U : 0U;
 }
 
+int zzplay_files_lock_path(long lock, const char *name, char *path,
+                           uint32_t size)
+{
+  if (!path || size == 0U) {
+    return 0;
+  }
+  path[0] = '\0';
+  if (lock) {
+    if (!NameFromLock((BPTR)lock, (STRPTR)path, (LONG)size)) {
+      path[0] = '\0';
+    }
+  }
+
+  if (name && name[0] != '\0') {
+    if (path[0] != '\0') {
+      AddPart((STRPTR)path, (CONST_STRPTR)name, size);
+    } else {
+      strncpy(path, name, size - 1U);
+      path[size - 1U] = '\0';
+    }
+  }
+  return path[0] != '\0';
+}
+
 uint32_t zzplay_files_add_lock(ZZPlayPlaylist *list, long lock,
                                const char *name)
 {
   char path_buf[ZZPLAY_PLAYLIST_PATH_MAX];
 
-  if (!list) {
+  if (!list ||
+      !zzplay_files_lock_path(lock, name, path_buf, sizeof(path_buf))) {
     return 0U;
   }
-
-  path_buf[0] = '\0';
-  if (lock) {
-    if (!NameFromLock((BPTR)lock, (STRPTR)path_buf, sizeof(path_buf))) {
-      path_buf[0] = '\0';
-    }
-  }
-
-  if (name && name[0] != '\0') {
-    if (path_buf[0] != '\0') {
-      AddPart((STRPTR)path_buf, (CONST_STRPTR)name, sizeof(path_buf));
-    } else {
-      strncpy(path_buf, name, sizeof(path_buf) - 1U);
-      path_buf[sizeof(path_buf) - 1U] = '\0';
-    }
-  }
-
-  if (path_buf[0] == '\0') {
-    return 0U;
-  }
-
   return zzplay_files_add(list, path_buf);
 }

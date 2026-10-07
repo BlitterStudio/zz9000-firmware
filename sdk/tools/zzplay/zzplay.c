@@ -3576,8 +3576,9 @@ int main(int argc, char **argv)
     if (!zzplay_gui_is_open()) {
       /* Without a window the idle wait could only ever be left with
        * Ctrl-C - invisible and unkillable from Workbench. Play what was
-       * named and exit instead. */
+       * named and exit instead, reporting errors as a one-shot run does. */
       app.player_mode = 0;
+      app.options.player = 0;
     }
   }
   if (!app.player_mode) {

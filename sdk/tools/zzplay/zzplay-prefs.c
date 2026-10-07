@@ -480,10 +480,10 @@ ZZPlayAudioBackend zzplay_prefs_requested_backend(
 {
   if (options && (options->audio_explicit || options->uncapped)) {
     /* AUDIO=AUTO overrides the saved output but still means "pick what
-     * works", so only a named backend (or --benchmark) is strict. */
+     * works", also under --benchmark; only a named backend is strict.
+     * --benchmark without AUDIO= resolves to NONE, which cannot fail. */
     if (strict) {
-      *strict = options->uncapped ||
-                options->audio_backend != ZZPLAY_AUDIO_AUTO;
+      *strict = options->audio_backend != ZZPLAY_AUDIO_AUTO;
     }
     return options->audio_backend;
   }

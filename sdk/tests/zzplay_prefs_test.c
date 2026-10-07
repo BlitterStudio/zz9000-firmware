@@ -234,6 +234,11 @@ static int test_requested_backend_matrix(void)
   b = zzplay_prefs_requested_backend(&prefs, &options, ZZPLAY_MEDIA_AUDIO_MP2,
                                      &strict);
   if (b != ZZPLAY_AUDIO_AUTO || strict != 0) return 9;
+  options.uncapped = 1;
+  strict = -1;
+  b = zzplay_prefs_requested_backend(&prefs, &options, ZZPLAY_MEDIA_AUDIO_MP2,
+                                     &strict);
+  if (b != ZZPLAY_AUDIO_AUTO || strict != 0) return 10;
 
   /* 2. --benchmark (uncapped) wins and is strict */
   zzplay_options_init(&options, ZZPLAY_LAUNCH_CLI);

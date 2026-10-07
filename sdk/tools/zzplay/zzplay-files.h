@@ -14,7 +14,8 @@
 #include "zzplay-playlist.h"
 
 /* Add whatever `path` names:
- *   - an AmigaDOS pattern ("Work:Music/#?.mp3"): every matching file;
+ *   - an AmigaDOS pattern ("Work:Music/#?.mp3"): every matching file, each
+ *     treated as if it had been named on its own (a playlist expands);
  *   - a drawer or volume: its files whose extension is a registered media
  *     format (zzplay-formats.h), sorted by name, recursing into sub-drawers
  *     up to ZZPLAY_FILES_MAX_DEPTH levels;
@@ -29,5 +30,10 @@ uint32_t zzplay_files_add(ZZPlayPlaylist *list, const char *path);
  * the lock is the object itself (a dropped drawer or volume). */
 uint32_t zzplay_files_add_lock(ZZPlayPlaylist *list, long lock,
                                const char *name);
+
+/* The full path of a Workbench argument (as above) in `path`, without
+ * touching what it names. Returns 0 when it cannot be resolved. */
+int zzplay_files_lock_path(long lock, const char *name, char *path,
+                           uint32_t size);
 
 #endif /* ZZPLAY_FILES_H */

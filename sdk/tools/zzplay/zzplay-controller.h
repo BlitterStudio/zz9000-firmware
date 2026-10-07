@@ -57,7 +57,8 @@ typedef enum ZZPlayModal {
   ZZPLAY_MODAL_ADD_DRAWER,
   ZZPLAY_MODAL_LOAD_PLAYLIST,
   ZZPLAY_MODAL_SAVE_PLAYLIST,
-  ZZPLAY_MODAL_ABOUT
+  ZZPLAY_MODAL_ABOUT,
+  ZZPLAY_MODAL_ADD_DROPPED      /* expand files dropped on the window */
 } ZZPlayModal;
 
 #define ZZPLAY_NOW_TEXT_MAX 96U

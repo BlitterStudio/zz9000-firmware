@@ -143,7 +143,8 @@ void zzplay_launch_report_surface(const ZZPlayOptions *options,
   }
   /* The player window's message line is the desktop player's error
    * surface; only a headless run needs the console/requester routing. */
-  if (zzplay_gui_is_open() && zzplay_gui_report(message)) {
+  if (zzplay_options_wants_player(options) && zzplay_gui_is_open() &&
+      zzplay_gui_report(message)) {
     return;
   }
   zzplay_launch_report(options, message);
