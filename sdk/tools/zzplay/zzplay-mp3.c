@@ -93,10 +93,9 @@ typedef struct ZZPlayMP3Decode {
   uint32_t pending_ack;
   uint32_t input_bytes;
   uint64_t output_frames;
-  /* Position across seeks: the offset in time and output frames the
-   * current pass started from. */
+  /* Where in the item this pass started; positions are reported from
+   * here plus the frames this pass has output. */
   uint32_t position_base_ms;
-  uint64_t frames_origin;
   uint8_t session_open;
   uint8_t ahi_started;
   uint8_t compact_z2;
@@ -113,11 +112,11 @@ static int zzplay_mp3_should_stop(const ZZPlayMP3Decode *decode)
   return zzplay_controller_item_should_end(decode->engine->ctl);
 }
 
-/* Live controls for the AHI path: volume now, and the one request the
- * engine handles itself. A SEEK restarts the pass at the computed byte
- * offset without tearing the decode session down - the card's decoder
- * resyncs on the next frame header - and re-bases the position; any other
- * request ends the item (returns 1, left pending for the application). */
+/* Live controls for the AHI path: volume is applied here; any request
+ * ends the pass (returns 1) and stays pending. zzplay_mp3_accelerated
+ * turns a SEEK into a fresh pass at the new offset, so neither compressed
+ * data the card already accepted nor PCM queued to AHI from the old
+ * position is played after the jump. */
 static int zzplay_mp3_service_controls(ZZPlayMP3Decode *decode)
 {
   ZZPlayController *ctl = decode->engine->ctl;
@@ -129,36 +128,17 @@ static int zzplay_mp3_service_controls(ZZPlayMP3Decode *decode)
     }
     zzplay_mp3_refresh_output(decode->engine);
   }
-  if (!zzplay_controller_item_should_end(ctl)) {
-    return 0;
-  }
-  if (ctl->request == ZZPLAY_REQUEST_SEEK) {
-    uint32_t seek_ms = 0U;
-    uint64_t offset;
-
-    (void)zzplay_controller_take_request(ctl, 0, &seek_ms);
-    offset = zzplay_mp3_seek_offset(
-        decode->engine->audio_start, decode->engine->audio_end,
-        decode->engine->total_ms, seek_ms);
-    if (fseek(decode->file, (long)offset, SEEK_SET) != 0) {
-      return 1;
-    }
-    decode->position_base_ms = seek_ms;
-    decode->frames_origin = decode->output_frames;
-    return 0;
-  }
-  return 1;
+  return zzplay_controller_item_should_end(ctl);
 }
 
 static void zzplay_mp3_report_progress(const ZZPlayMP3Decode *decode)
 {
   if (decode->probe->sample_rate != 0U) {
-    uint64_t frames = decode->output_frames - decode->frames_origin;
-
     zzplay_controller_set_position(
         decode->engine->ctl,
         decode->position_base_ms +
-            (uint32_t)(frames * 1000ULL / decode->probe->sample_rate),
+            (uint32_t)(decode->output_frames * 1000ULL /
+                       decode->probe->sample_rate),
         1);
   }
 }
@@ -580,6 +560,20 @@ static ZZPlayEngineResult zzplay_mp3_accelerated(
                                ? 0xffffffffULL
                                : decode.output_frames));
     zzplay_mp3_decode_cleanup(&decode);
+    if (pass == ZZPLAY_MP3_PASS_STOPPED &&
+        engine->ctl->request == ZZPLAY_REQUEST_SEEK) {
+      uint32_t seek_ms = 0U;
+
+      /* Cleanup closed the stream session and the AHI queue, dropping
+       * everything decoded from the old position; start a fresh pass
+       * there. Any stop point may have ended the pass on the seek. */
+      (void)zzplay_controller_take_request(engine->ctl, 0, &seek_ms);
+      offset = zzplay_mp3_seek_offset(engine->audio_start,
+                                      engine->audio_end, engine->total_ms,
+                                      seek_ms);
+      base_ms = seek_ms;
+      continue;
+    }
     if (pass == ZZPLAY_MP3_PASS_STOPPED) {
       result = ZZPLAY_ENGINE_STOPPED;
       goto done;

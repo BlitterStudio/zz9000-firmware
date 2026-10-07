@@ -3525,6 +3525,18 @@ int main(int argc, char **argv)
       app.player_mode = 0;
     }
   }
+  if (!app.player_mode) {
+    /* A one-shot run plays its list once, in order: remembered repeat
+     * and shuffle belong to the desktop player, and only this launch's
+     * LOOP may repeat a file. Also covers a player whose window failed. */
+    zzplay_controller_set_repeat(
+        &app.ctl, app.options.loop_mode == ZZPLAY_LOOP_FOREVER
+                      ? ZZPLAY_REPEAT_ONE
+                      : ZZPLAY_REPEAT_OFF);
+    zzplay_controller_set_shuffle(&app.ctl, 0);
+    zzplay_playlist_set_repeat(&app.playlist, app.ctl.repeat);
+    zzplay_playlist_set_shuffle(&app.playlist, 0, 0U);
+  }
 
   exit_code = zzplay_app_run(&app);
 
