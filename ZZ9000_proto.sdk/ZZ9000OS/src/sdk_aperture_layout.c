@@ -247,6 +247,16 @@ uint32_t sdk_aperture_host_window_size(void)
 		runtime_layout.host_window.size : 0U;
 }
 
+uint32_t sdk_aperture_mailbox_address(void)
+{
+	if ((runtime_flags & (SDK_APERTURE_FLAG_VALID |
+	                      SDK_APERTURE_FLAG_ACKED)) !=
+	    (SDK_APERTURE_FLAG_VALID | SDK_APERTURE_FLAG_ACKED))
+		return 0U;
+	return runtime_layout.audio.base - SDK_MAILBOX_Z2_SIZE +
+		SDK_APERTURE_ARM_ADDRESS_ADJUSTMENT;
+}
+
 uint32_t sdk_aperture_framebuffer_size(void)
 {
 	if ((runtime_flags & SDK_APERTURE_FLAG_VALID) == 0U)

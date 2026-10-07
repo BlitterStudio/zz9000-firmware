@@ -43,19 +43,17 @@ typedef struct ZZ9KMediaClock {
 /*
  * Legacy firmware-serviced board window. The firmware maps board offsets
  * 0xa000..0xffff to this ARM buffer for SD/USB proxy and firmware-update I/O.
- * Zorro II firmware keeps the SDK v2 bootstrap mailbox at board 0xd000 in
- * this window. Zorro III firmware places it in the main board aperture
- * instead, because storage staging overwrites this window. Clients must map
- * the address published in ZZ9K_REG_SDK_MAILBOX_HI/LO and never assume
- * either placement.
+ * Current firmware never places the SDK v2 bootstrap mailbox here, because
+ * storage staging overwrites this window: Zorro III uses the main board
+ * aperture, and Zorro II uses its aperture once the RTG driver acknowledges
+ * the generation-2 layout (until then it publishes address 0). Older Zorro II
+ * firmware published board 0xd000 in this window, so clients still map it.
+ * Clients must map the address published in ZZ9K_REG_SDK_MAILBOX_HI/LO and
+ * size the rings from the descriptor, never assume a placement.
  */
 #define ZZ9K_MAPPED_IO_ARM_START    0x3FE40000UL
 #define ZZ9K_MAPPED_IO_BOARD_OFFSET 0x0000A000UL
 #define ZZ9K_MAPPED_IO_WINDOW_SIZE  0x00006000UL
-#define ZZ9K_SDK_MAILBOX_BOARD_OFFSET 0x0000D000UL
-#define ZZ9K_SDK_MAILBOX_ARM_ADDRESS \
-  (ZZ9K_MAPPED_IO_ARM_START + \
-   (ZZ9K_SDK_MAILBOX_BOARD_OFFSET - ZZ9K_MAPPED_IO_BOARD_OFFSET))
 
 /*
  * SDK v2 bootstrap registers. Reads use the low board offsets below so older
