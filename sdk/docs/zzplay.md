@@ -161,9 +161,11 @@ it really used. Only a backend named for one launch with `AUDIO=` (or
 `--audio=`) is strict and reports an error instead of falling back.
 
 **Volume** works through AHI (MP3 and video sound) and through MHI drivers
-that advertise a volume control. `mhizz9000.library` and ZZ9000AX direct
-output do not: their level belongs to ZZTop's audio settings, and the volume
-slider is greyed out while they play.
+that advertise a volume control. `mhizz9000.library` does on firmware with
+per-stream audio gain and zz9k.library 2.31 or newer: the slider then scales
+the MP3 below the level set in ZZTop's audio settings, where 100% is that
+level. With older firmware or libraries, and for ZZ9000AX direct output, the
+level belongs to ZZTop's audio settings and the slider is greyed out.
 
 ## Options
 
