@@ -135,14 +135,51 @@ static void check_split_section(uint32_t section, const uint32_t *nc_pages,
 	}
 }
 
+/* Every recorded flush sees the watched descriptor go old -> 0 -> new in
+ * that order: nothing walks the new entry while the old one could still be
+ * cached in a TLB. */
+static void check_break_before_make(int page_level, uint32_t before,
+				    uint32_t after)
+{
+	unsigned i;
+	int phase = 0;
+	int saw_break = 0;
+	int ordered = 1;
+
+	for (i = 0U; i < g_xil_cache_mock.count; i++) {
+		const struct xil_cache_mock_flush *op = &g_xil_cache_mock.ops[i];
+		uint32_t v = page_level ? op->page_entry : op->l1_entry;
+
+		if (v == before && phase == 0)
+			continue;
+		if (v == 0U && phase <= 1) {
+			phase = 1;
+			saw_break = 1;
+			continue;
+		}
+		if (v == after && phase >= 1) {
+			phase = 2;
+			continue;
+		}
+		ordered = 0;
+	}
+	CHECK(saw_break);
+	CHECK(ordered);
+	CHECK(phase == 2);
+}
+
 static void test_split_one_page(void)
 {
 	static const uint32_t nc[] = { 0xdfU };
 
 	set_section(0x005U, BSP_DDR_WB);
 	g_xil_cache_mock.count = 0U;
+	g_xil_cache_mock.watch_section = 0x005U;
+	g_xil_cache_mock.watch_page = 0xdfU;
 	CHECK(mmu_page_set_noncacheable(0x005df000U));
 	check_split_section(0x005U, nc, 1U);
+	check_break_before_make(0, 0x00500000U | BSP_DDR_WB,
+				mmu_page_test_l1[0x005U]);
 
 	/* The page is cleaned and invalidated while its section entry still
 	 * maps it cacheable, and again once the page table is live. */
@@ -163,14 +200,18 @@ static void test_repeat_and_second_page(void)
 {
 	static const uint32_t nc[] = { 0xdeU, 0xdfU };
 	uint32_t l1 = mmu_page_test_l1[0x005U];
+	uint32_t cached_de = mmu_page_test_page_table()[0xdeU];
 
 	g_xil_cache_mock.count = 0U;
 	CHECK(mmu_page_set_noncacheable(0x005df000U));
 	CHECK(g_xil_cache_mock.count == 0U);    /* already done: no-op */
 
+	g_xil_cache_mock.watch_page = 0xdeU;
 	CHECK(mmu_page_set_noncacheable(0x005de000U));
 	CHECK(mmu_page_test_l1[0x005U] == l1);
 	check_split_section(0x005U, nc, 2U);
+	check_break_before_make(1, cached_de,
+				mmu_page_test_page_table()[0xdeU]);
 }
 
 static void test_second_cached_section_refused(void)

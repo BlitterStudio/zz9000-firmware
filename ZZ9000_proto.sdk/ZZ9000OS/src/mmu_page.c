@@ -150,13 +150,30 @@ int mmu_page_set_noncacheable(uintptr_t page_addr)
 	/* Write back and drop the page while it is still cacheable: once it is
 	 * not, a dirty line evicted later would overwrite host writes. */
 	Xil_DCacheFlushRange((INTPTR)page_addr, MMU_PAGE_SIZE);
-	page_table[index] = noncache_page;
-	Xil_DCacheFlushRange((INTPTR)(uintptr_t)page_table, PAGE_TABLE_BYTES);
 	if (install) {
+		/* Break before make: changing a section to pages changes the
+		 * mapping size, so no TLB may hold the section entry once a
+		 * page entry for the same range can be walked. */
+		page_table[index] = noncache_page;
+		Xil_DCacheFlushRange((INTPTR)(uintptr_t)page_table,
+		                     PAGE_TABLE_BYTES);
+		l1[section] = 0U;
+		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&l1[section],
+		                     sizeof(l1[section]));
+		sync_translation();
 		l1[section] = page_table_descriptor();
 		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&l1[section],
 		                     sizeof(l1[section]));
 		page_table_section = section;
+	} else {
+		/* Break before make on the page entry: it changes memory type. */
+		page_table[index] = 0U;
+		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&page_table[index],
+		                     sizeof(page_table[index]));
+		sync_translation();
+		page_table[index] = noncache_page;
+		Xil_DCacheFlushRange((INTPTR)(uintptr_t)&page_table[index],
+		                     sizeof(page_table[index]));
 	}
 	sync_translation();
 	/* Drop any clean line a speculative fill brought in under the old

@@ -135,6 +135,8 @@ static void test_runtime_ack_gate(void)
 	CHECK(sdk_aperture_framebuffer_size() == 0x001c0000U);
 	CHECK(sdk_aperture_gfxdata_address(0x033f0000U) == 0U);
 	CHECK(sdk_aperture_mailbox_address() == 0U);
+	/* The page is mapped at boot, before any driver can acknowledge. */
+	CHECK(sdk_aperture_mailbox_page() == 0x003df000U);
 	CHECK(sdk_aperture_runtime_ack());
 	CHECK(sdk_aperture_runtime_diag_state() ==
 	      SDK_APERTURE_DIAG_STATE_ACTIVE);
@@ -164,6 +166,7 @@ static void test_runtime_ack_gate(void)
 	      SDK_APERTURE_DIAG_STATE_LEGACY);
 	CHECK(sdk_aperture_gfxdata_address(0x033f0000U) == 0x033f0000U);
 	CHECK(sdk_aperture_mailbox_address() == 0U);
+	CHECK(sdk_aperture_mailbox_page() == 0U);
 
 	sdk_aperture_runtime_init(0U, 0);
 	CHECK(!sdk_aperture_runtime_is_zorro3());
@@ -171,6 +174,7 @@ static void test_runtime_ack_gate(void)
 	CHECK(sdk_aperture_runtime_diag_state() ==
 	      SDK_APERTURE_DIAG_STATE_LEGACY);
 	CHECK(sdk_aperture_mailbox_address() == 0U);
+	CHECK(sdk_aperture_mailbox_page() == 0U);
 
 	sdk_aperture_runtime_init(0x00300000U, 0);
 	CHECK(!sdk_aperture_runtime_is_zorro3());
@@ -181,6 +185,7 @@ static void test_runtime_ack_gate(void)
 	      SDK_APERTURE_DIAG_STATE_INVALID);
 	CHECK(sdk_aperture_host_window_address() == 0U);
 	CHECK(sdk_aperture_mailbox_address() == 0U);
+	CHECK(sdk_aperture_mailbox_page() == 0U);
 	CHECK(!sdk_aperture_runtime_ack());
 }
 
@@ -254,13 +259,15 @@ static void check_z2_mailbox_placement(uint32_t aperture)
 	uint32_t page;
 
 	sdk_aperture_runtime_init(aperture, 0);
+	page = sdk_aperture_mailbox_page() - 0x001f0000U;
 	CHECK(sdk_aperture_runtime_ack());
+	CHECK(sdk_aperture_mailbox_page() - 0x001f0000U == page);
 	layout = sdk_aperture_runtime_layout();
 	mailbox = sdk_aperture_mailbox_address() - 0x001f0000U;
 	mailbox_end = mailbox + SDK_MAILBOX_Z2_SIZE;
 	grant_end = layout->audio.base - SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE +
 		0x80U + SDK_AUDIO_DIRECT_RING_Z2_CAPACITY_BYTES;
-	page = (mailbox_end - 1U) & ~(SDK_MAILBOX_Z2_PAGE_SIZE - 1U);
+	CHECK(page == ((mailbox_end - 1U) & ~(SDK_MAILBOX_Z2_PAGE_SIZE - 1U)));
 
 	CHECK((mailbox % 64U) == 0U);
 	CHECK(mailbox >= grant_end);

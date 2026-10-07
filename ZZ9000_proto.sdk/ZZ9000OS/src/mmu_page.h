@@ -14,12 +14,16 @@
  * DDR in 1 MB sections only, so the first call for a cached section swaps
  * that section for a page table; one section can be split per boot.
  *
+ * The change is break-before-make: the section (or page) is unmapped while
+ * the TLBs are invalidated, so any access to it in that window faults.
+ * Call only while nothing else can touch the section: on core 0 before
+ * core 1 starts and before interrupts are enabled. The TLB invalidate is
+ * inner-shareable because core 1 later walks the same table.
+ *
  * Returns 1 when the page is non-cacheable on return: newly split, already
  * split, or inside a section firmware already mapped non-cacheable or
  * strongly ordered. Returns 0 (and changes nothing) for an unaligned
  * address, a section with any other mapping, or a second cached section.
- * Core 0 only; the TLB invalidate is broadcast to core 1, which walks the
- * same table.
  */
 int mmu_page_set_noncacheable(uintptr_t page_addr);
 

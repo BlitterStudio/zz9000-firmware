@@ -578,6 +578,9 @@ int main() {
 
 	sdk_aperture_runtime_init(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7),
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
+	/* The section split is break-before-make: do it while core 1 is still
+	 * held and no interrupt can touch the framebuffer/PIP section. */
+	sdk_mailbox_map_z2_page();
 
 	boot_rom_init();
 

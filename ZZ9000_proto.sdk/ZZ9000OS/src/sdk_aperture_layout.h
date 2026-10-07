@@ -106,6 +106,10 @@ uint32_t sdk_aperture_host_window_size(void);
 /* ARM address of the Zorro II SDK mailbox (SDK_MAILBOX_Z2_* in memorymap.h),
  * or 0 until the host acknowledges the generation-2 contract. */
 uint32_t sdk_aperture_mailbox_address(void);
+/* ARM address of the 4 KiB page holding that mailbox, known from the
+ * aperture size alone so firmware can map it before anything runs; 0 on
+ * Zorro III, legacy and invalid apertures. */
+uint32_t sdk_aperture_mailbox_page(void);
 uint32_t sdk_aperture_framebuffer_size(void);
 uint32_t sdk_aperture_gfxdata_address(uint32_t z3_scratch_address);
 

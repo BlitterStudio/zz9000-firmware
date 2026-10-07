@@ -7787,6 +7787,24 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	}
 }
 
+/* Set once at boot by sdk_mailbox_map_z2_page(); the mailbox page stays
+ * non-cacheable for the life of the firmware. */
+static uint8_t z2_mailbox_page_uncached;
+
+void sdk_mailbox_map_z2_page(void)
+{
+	uint32_t page = sdk_aperture_mailbox_page();
+
+	if (page == 0U)
+		return;
+	z2_mailbox_page_uncached =
+		mmu_page_set_noncacheable((uintptr_t)page) ? 1U : 0U;
+	if (!z2_mailbox_page_uncached)
+		printf("[sdk] Z2 mailbox page 0x%08lx not mappable "
+		       "non-cacheable; SDK mailbox unavailable\r\n",
+		       (unsigned long)page);
+}
+
 /* Neither bus uses the 0xa000..0xffff shared I/O buffer that USB proxy,
  * zzsd and firmware-update staging overwrite (issue #129). Zorro III uses a
  * fixed block. Zorro II uses the tail of the direct-ring reservation, which
@@ -7799,7 +7817,6 @@ static void select_mailbox_placement(void)
 {
 	static uint8_t z3_section_uncached;
 	uint32_t z2_address;
-	uintptr_t z2_page;
 
 	mailbox_base = 0U;
 	mailbox_ring_entries = 0U;
@@ -7818,18 +7835,8 @@ static void select_mailbox_placement(void)
 	}
 
 	z2_address = sdk_aperture_mailbox_address();
-	if (z2_address == 0U)
+	if (z2_address == 0U || !z2_mailbox_page_uncached)
 		return;
-	/* The mailbox ends at the 64 KiB-aligned audio scratch base, inside
-	 * the one page below it. */
-	z2_page = (uintptr_t)(z2_address + SDK_MAILBOX_Z2_SIZE -
-	                      SDK_MAILBOX_Z2_PAGE_SIZE);
-	if (!mmu_page_set_noncacheable(z2_page)) {
-		printf("[sdk] Z2 mailbox page 0x%08lx not mappable "
-		       "non-cacheable; SDK mailbox unavailable\r\n",
-		       (unsigned long)z2_page);
-		return;
-	}
 	mailbox_base = z2_address;
 	mailbox_ring_entries = SDK_MAILBOX_Z2_RING_ENTRIES;
 }

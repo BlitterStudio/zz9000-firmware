@@ -1216,6 +1216,10 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_DECOMPRESS_RESULT_NEED_INPUT      (1U << 2)
 
 void sdk_mailbox_init(void);
+/* Map the Zorro II mailbox page non-cacheable. Boot only, after
+ * sdk_aperture_runtime_init() and before core 1 or interrupts start:
+ * splitting the section is break-before-make (mmu_page.h). */
+void sdk_mailbox_map_z2_page(void);
 /* Publish the Zorro II mailbox once the host acknowledges the generation-2
  * aperture contract; Zorro II has no mailbox before that. */
 void sdk_mailbox_publish_after_aperture_ack(void);
