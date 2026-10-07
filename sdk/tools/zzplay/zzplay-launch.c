@@ -157,7 +157,8 @@ void zzplay_launch_reportf(ZZPlayController *controller,
   va_list args;
 
   va_start(args, format);
-  (void)vsprintf(message, format, args);
+  /* Messages carry user paths of any length: truncate, never overrun. */
+  (void)vsnprintf(message, sizeof(message), format, args);
   va_end(args);
   if (controller) {
     zzplay_controller_set_message(controller, message);

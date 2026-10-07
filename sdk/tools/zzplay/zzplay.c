@@ -258,7 +258,8 @@ static void zzplay_error(const struct ZZPlayRuntime *runtime,
 
   (void)runtime;
   va_start(args, format);
-  (void)vsprintf(message, format, args);
+  /* Messages carry user paths of any length: truncate, never overrun. */
+  (void)vsnprintf(message, sizeof(message), format, args);
   va_end(args);
   if (strncmp(text, "zzplay: ", 8U) == 0) {
     text += 8;
