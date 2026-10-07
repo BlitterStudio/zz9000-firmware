@@ -154,6 +154,9 @@ struct ZZPlayRuntime {
   /* The requested backend was an explicit choice that must not silently
    * fall back (zzplay_prefs_requested_backend). */
   uint8_t audio_strict;
+  /* Direct AX output is advertised and has not failed for this item: a
+   * saved AHI output that cannot open may still fall back to it. */
+  uint8_t ax_available;
   uint8_t audio_enabled;
   uint8_t audio_prepared;
   uint8_t audio_started;
@@ -1197,6 +1200,36 @@ static const char *zzplay_audio_backend_name(ZZPlayAudioBackend backend)
   }
 }
 
+static void zzplay_engine_refresh_output(struct ZZPlayRuntime *runtime)
+{
+  char output[ZZPLAY_NOW_OUTPUT_MAX];
+
+  if (runtime->audio_backend == ZZPLAY_AUDIO_AX) {
+    strcpy(output, "ZZ9000AX direct");
+  } else if (runtime->audio_backend == ZZPLAY_AUDIO_AHI) {
+    sprintf(output, "AHI unit %lu",
+            (unsigned long)runtime->prefs.ahi_unit);
+  } else {
+    strcpy(output, "no audio");
+  }
+  if (runtime->ctl->volume == 0U &&
+      runtime->ctl->now.volume_supported) {
+    strcat(output, ", muted");
+  }
+  zzplay_controller_set_output(runtime->ctl, output);
+}
+
+/* Switch the item's audio backend, keeping what the player shows - the
+ * output name and whether the volume slider works - in step with it. */
+static void zzplay_engine_set_backend(struct ZZPlayRuntime *runtime,
+                                      ZZPlayAudioBackend backend)
+{
+  runtime->audio_backend = backend;
+  zzplay_controller_set_capabilities(
+      runtime->ctl, 0, backend == ZZPLAY_AUDIO_AHI, 1);
+  zzplay_engine_refresh_output(runtime);
+}
+
 static int zzplay_audio_prepare_from_result(
     struct ZZPlayRuntime *runtime,
     const ZZ9KMediaSessionAudioResult *audio)
@@ -1248,7 +1281,17 @@ static int zzplay_audio_prepare_from_result(
   if (!zzplay_ahi_prepare(
           &runtime->ahi, runtime->prefs.ahi_unit, audio->sample_rate,
           audio->channels, period_frames)) {
-    return ZZ9K_STATUS_IO_ERROR;
+    if (runtime->audio_strict || !runtime->ax_available) {
+      return ZZ9K_STATUS_IO_ERROR;
+    }
+    /* A saved AHI output whose unit cannot be opened falls back like
+     * AUTO to the card's direct AX output. */
+    zzplay_info("zzplay: AHI unit %lu unavailable; falling back to "
+           "direct AX\n", (unsigned long)runtime->prefs.ahi_unit);
+    zzplay_engine_set_backend(runtime, ZZPLAY_AUDIO_AX);
+    zzplay_ax_init(&runtime->ax, runtime->session,
+                   &zzplay_ax_control_ops, runtime);
+    return zzplay_audio_prepare_from_result(runtime, audio);
   }
   /* The controller's volume applies from the first queued request on. */
   zzplay_ahi_set_volume(&runtime->ahi, runtime->ctl->volume);
@@ -1562,7 +1605,9 @@ static int zzplay_audio_fallback_to_ahi(
   if (status != ZZ9K_STATUS_OK) {
     return status;
   }
-  runtime->audio_backend = ZZPLAY_AUDIO_AHI;
+  /* AX failed for this item: an AHI failure must not bounce back to it. */
+  runtime->ax_available = 0U;
+  zzplay_engine_set_backend(runtime, ZZPLAY_AUDIO_AHI);
   runtime->audio_prepared = 0U;
   runtime->audio_started = 0U;
   runtime->pcm_ring.acknowledged =
@@ -2451,30 +2496,9 @@ static void zzplay_app_open_gui(ZZPlayApp *app)
   }
 }
 
-
-
 /* ------------------------------------------------------------------ */
 /* MPEG-1 Program Stream engine (the former main() playback body).     */
 /* ------------------------------------------------------------------ */
-
-static void zzplay_engine_refresh_output(struct ZZPlayRuntime *runtime)
-{
-  char output[ZZPLAY_NOW_OUTPUT_MAX];
-
-  if (runtime->audio_backend == ZZPLAY_AUDIO_AX) {
-    strcpy(output, "ZZ9000AX direct");
-  } else if (runtime->audio_backend == ZZPLAY_AUDIO_AHI) {
-    sprintf(output, "AHI unit %lu",
-            (unsigned long)runtime->prefs.ahi_unit);
-  } else {
-    strcpy(output, "no audio");
-  }
-  if (runtime->ctl->volume == 0U &&
-      runtime->ctl->now.volume_supported) {
-    strcat(output, ", muted");
-  }
-  zzplay_controller_set_output(runtime->ctl, output);
-}
 
 /* PIP input plus the GUI pump, shared by the playback loop and the drain
  * wait. Returns 1 when the item must end (a request is pending). */
@@ -2697,13 +2721,13 @@ static ZZPlayEngineResult zzplay_engine_mpeg(const ZZPlayEngineRun *run)
                 ZZ9K_STATUS_UNSUPPORTED);
     goto cleanup;
   }
-  if (runtime.audio_backend == ZZPLAY_AUDIO_AX &&
-      (service.flags & ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND) == 0U) {
+  runtime.ax_available =
+      (uint8_t)((service.flags & ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND) != 0U);
+  if (runtime.audio_backend == ZZPLAY_AUDIO_AX && !runtime.ax_available) {
     if (!strict) {
-      runtime.audio_backend = ZZPLAY_AUDIO_AHI;
+      zzplay_engine_set_backend(&runtime, ZZPLAY_AUDIO_AHI);
       audio_decision.selected = ZZPLAY_AUDIO_AHI;
       audio_decision.fell_back = 1;
-      zzplay_engine_refresh_output(&runtime);
       zzplay_info("zzplay: card-local AX media output unavailable; "
              "falling back to AHI\n");
     } else {
@@ -3196,8 +3220,15 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
       zzplay_tags_display(&tags, display, sizeof(display));
     }
     if (display[0] != '\0') {
-      (void)zzplay_playlist_set_title(&app->playlist,
-                                      (uint32_t)index, display);
+      /* The row was drawn from the file name; redraw it only when the
+       * tag actually changes what it shows. */
+      if ((uint32_t)index < app->playlist.count &&
+          strncmp(app->playlist.entries[index].title, display,
+                  ZZPLAY_PLAYLIST_TITLE_MAX - 1U) != 0 &&
+          zzplay_playlist_set_title(&app->playlist, (uint32_t)index,
+                                    display)) {
+        app->ctl.dirty |= ZZPLAY_DIRTY_PLAYLIST;
+      }
       zzplay_controller_set_title(&app->ctl, display);
     } else {
       zzplay_controller_set_title(
