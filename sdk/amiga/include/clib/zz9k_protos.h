@@ -55,6 +55,7 @@ int ZZ9KCryptoVerify(const ZZ9KCryptoVerifyDesc *desc, int *valid);
 int ZZ9KAudioStreamPlay(uint32_t session, uint32_t flags, ZZ9KAudioStreamResult *result);
 int ZZ9KAudioStreamStop(uint32_t session, uint32_t flags, ZZ9KAudioStreamResult *result);
 int ZZ9KQueryPalette(const ZZ9KPaletteQueryDesc *desc);
+int ZZ9KAudioStreamSetGain(uint32_t session, uint32_t gain, uint32_t flags, ZZ9KAudioStreamResult *result);
 int ZZ9KCryptoHash(const ZZ9KCryptoHashDesc *desc, ZZ9KCryptoResult *result);
 int ZZ9KCryptoHashBatch(const ZZ9KCryptoHashDesc *descs, ZZ9KCryptoResult *results, uint32_t count, uint32_t max_in_flight, uint32_t timeout_ticks);
 int ZZ9KCryptoStream(const ZZ9KCryptoStreamDesc *desc, ZZ9KCryptoResult *result);

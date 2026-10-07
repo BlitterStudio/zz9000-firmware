@@ -470,6 +470,12 @@ struct SDKAudioStreamClosePayload {
 	uint8_t reserved[40];
 };
 
+struct SDKAudioStreamGainPayload {
+	uint8_t session[4];
+	uint8_t gain[4];
+	uint8_t flags[4];
+	uint8_t reserved[36];
+};
 struct SDKAudioStreamResultPayload {
 	uint8_t session[4];
 	uint8_t state[4];
@@ -881,6 +887,9 @@ struct SDKAudioStream {
 	 * the pump slot; always 0 for unbound streams (the READ consumer
 	 * hears bytes immediately). */
 	uint8_t pump_tail_pending;
+	/* Main-loop writers update this aligned word; the fabric ISR consumes it
+	 * only through the pump slot's existing Q7 gain pass. */
+	uint16_t gain;
 	mp3dec_t decoder;
 	mp3d_sample_t scratch[MINIMP3_MAX_SAMPLES_PER_FRAME];
 };
@@ -971,6 +980,9 @@ typedef char SDKAudioDecodeResultPayload_must_be_48_bytes[
 ];
 typedef char SDKAudioStreamBeginPayload_must_be_48_bytes[
 	(sizeof(struct SDKAudioStreamBeginPayload) == 48U) ? 1 : -1
+];
+typedef char SDKAudioStreamGainPayload_must_be_48_bytes[
+	(sizeof(struct SDKAudioStreamGainPayload) == 48U) ? 1 : -1
 ];
 typedef char SDKAudioStreamFeedPayload_must_be_48_bytes[
 	(sizeof(struct SDKAudioStreamFeedPayload) == 48U) ? 1 : -1
@@ -3950,6 +3962,8 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session,
 		return;
 	}
 	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP, source_rate);
+	audio_fabric_producer_gain_set(AUDIO_FABRIC_SLOT_PUMP,
+		AUDIO_FABRIC_GAIN_UNITY);
 	if (source_kind == AUDIO_PUMP_SOURCE_MEDIA) {
 		struct SDKMediaAudioSource media_source;
 
@@ -3987,6 +4001,12 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session,
 	}
 	if (source_kind == AUDIO_PUMP_SOURCE_STREAM) {
 		struct SDKAudioStream *stream = find_audio_stream(session);
+
+		/* The session's own attenuation rides the pump while it is
+		 * bound; the reset above keeps it from outliving the bind. */
+		if (stream)
+			audio_fabric_producer_gain_set(AUDIO_FABRIC_SLOT_PUMP,
+				stream->gain);
 
 		if (g_audio_playback.preconvert_session != session ||
 		    g_audio_playback.preconvert_kind != AUDIO_PUMP_SOURCE_STREAM) {
@@ -4029,6 +4049,8 @@ static void audio_playback_stop(void)
 	 * and its tags still credit the window; the rebuild replays only
 	 * the remaining live producers. */
 	audio_fabric_request_rebuild(AUDIO_FABRIC_SLOT_PUMP);
+	audio_fabric_producer_gain_set(AUDIO_FABRIC_SLOT_PUMP,
+		AUDIO_FABRIC_GAIN_UNITY);
 	audio_fabric_producer_detach(AUDIO_FABRIC_SLOT_PUMP);
 	g_audio_playback.session = 0U;
 	g_audio_playback.source_kind = AUDIO_PUMP_SOURCE_NONE;
@@ -4097,6 +4119,34 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
 }
 
+static uint16_t handle_audio_stream_gain(volatile struct SDKMailboxEntry *req,
+                                         volatile struct SDKMailboxEntry *comp,
+                                         uint16_t payload_len)
+{
+	volatile struct SDKAudioStreamGainPayload *payload;
+	struct SDKAudioStream *stream;
+	uint32_t session;
+	uint32_t gain;
+	uint32_t flags;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioStreamGainPayload *)req->payload;
+	session = get_be32(payload->session);
+	gain = get_be32(payload->gain);
+	flags = get_be32(payload->flags);
+	if (flags != 0U || gain > AUDIO_FABRIC_GAIN_UNITY)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	stream = find_audio_stream(session);
+	if (!stream)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	stream->gain = (uint16_t)gain;
+	if (g_audio_playback.session == session &&
+	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM)
+		audio_fabric_producer_gain_set(AUDIO_FABRIC_SLOT_PUMP,
+			(uint16_t)gain);
+	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
+}
 static uint16_t handle_audio_stream_stop(volatile struct SDKMailboxEntry *req,
                                          volatile struct SDKMailboxEntry *comp,
                                          uint16_t payload_len)
@@ -4416,6 +4466,7 @@ static uint16_t handle_audio_stream_begin(volatile struct SDKMailboxEntry *req,
 	stream->core1_affine = scheduler_core1_available() ? 1U : 0U;
 	mp3dec_init(&stream->decoder);
 	stream->initialized = 1;
+	stream->gain = AUDIO_FABRIC_GAIN_UNITY;
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
 }
 
@@ -7642,6 +7693,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_audio_stream_play(req, comp, payload_len);
 	case SDK_OP_AUDIO_STREAM_STOP:
 		return handle_audio_stream_stop(req, comp, payload_len);
+	case SDK_OP_AUDIO_STREAM_GAIN:
+		return handle_audio_stream_gain(req, comp, payload_len);
 	case SDK_OP_AUDIO_SCENE_SELECT:
 	case SDK_OP_AUDIO_SCENE_WRITE:
 	case SDK_OP_AUDIO_TRIM_SUBMIT:

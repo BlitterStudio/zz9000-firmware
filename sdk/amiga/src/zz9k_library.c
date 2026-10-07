@@ -794,6 +794,17 @@ int ZZ9KAudioStreamStop(ZZ9KLibrary *library, uint32_t session,
   return zz9k_audio_stream_stop(library->ctx, session, flags, result);
 }
 
+int ZZ9KAudioStreamSetGain(ZZ9KLibrary *library, uint32_t session,
+                           uint32_t gain, uint32_t flags,
+                           ZZ9KAudioStreamResult *result)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_audio_stream_set_gain(library->ctx, session, gain, flags,
+                                    result);
+}
 int ZZ9KQueryPalette(ZZ9KLibrary *library, const ZZ9KPaletteQueryDesc *desc)
 {
   if (!zz9k_library_has_context(library)) {

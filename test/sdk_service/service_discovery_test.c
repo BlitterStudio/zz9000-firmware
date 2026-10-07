@@ -19,7 +19,7 @@ static const struct ExpectedService expected[] = {
 	{ 0x0200U, 6U, "surface" },
 	{ 0x0400U, 8U, "image" },
 	{ 0x0600U, 7U, "codec" },
-	{ 0x0500U, 21U, "audio" },
+	{ 0x0500U, 22U, "audio" },
 	{ 0x0800U, 5U, "crypto" },
 	{ 0x0900U, 4U, "diag" },
 	{ 0x0b00U, 14U, "video" }

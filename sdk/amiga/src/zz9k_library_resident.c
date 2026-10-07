@@ -261,6 +261,12 @@ static int zz9k_lib_audio_stream_stop(REG(a6, struct ZZ9KBase *base),
                                       REG(d0, uint32_t session),
                                       REG(d1, uint32_t flags),
                                       REG(a0, ZZ9KAudioStreamResult *result));
+static int zz9k_lib_audio_stream_set_gain(
+    REG(a6, struct ZZ9KBase *base),
+    REG(d0, uint32_t session),
+    REG(d1, uint32_t gain),
+    REG(d2, uint32_t flags),
+    REG(a0, ZZ9KAudioStreamResult *result));
 static int zz9k_lib_query_palette(REG(a6, struct ZZ9KBase *base),
                                   REG(a0, const ZZ9KPaletteQueryDesc *desc));
 
@@ -317,6 +323,7 @@ static const APTR zz9k_lib_vectors[] = {
   (APTR)zz9k_lib_audio_stream_play,
   (APTR)zz9k_lib_audio_stream_stop,
   (APTR)zz9k_lib_query_palette,
+  (APTR)zz9k_lib_audio_stream_set_gain,
   (APTR)-1
 };
 
@@ -1687,6 +1694,22 @@ static int zz9k_lib_audio_stream_stop(REG(a6, struct ZZ9KBase *base),
   return status;
 }
 
+static int zz9k_lib_audio_stream_set_gain(
+    REG(a6, struct ZZ9KBase *base),
+    REG(d0, uint32_t session),
+    REG(d1, uint32_t gain),
+    REG(d2, uint32_t flags),
+    REG(a0, ZZ9KAudioStreamResult *result))
+{
+  int status = zz9k_lib_enter(base);
+
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  status = ZZ9KAudioStreamSetGain(&base->core, session, gain, flags, result);
+  zz9k_lib_leave(base);
+  return status;
+}
 static int zz9k_lib_query_palette(REG(a6, struct ZZ9KBase *base),
                                   REG(a0, const ZZ9KPaletteQueryDesc *desc))
 {

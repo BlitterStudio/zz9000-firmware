@@ -119,6 +119,9 @@ int audio_fabric_producer_attach(uint32_t slot,
  * frozen. Admission checks use this owner-written value immediately,
  * without waiting for the compositor's first source snapshot. */
 void audio_fabric_producer_rate_set(uint32_t slot, uint32_t source_rate);
+/* Sets an attached producer's 0..128 PCM attenuation without changing
+ * its scene-owned mixer path. */
+void audio_fabric_producer_gain_set(uint32_t slot, uint16_t gain);
 void audio_fabric_producer_detach(uint32_t slot);
 /* Drop one producer's queued-period tags without touching the shared TX
  * ring (pause with a live peer); pair with audio_fabric_request_rebuild. */

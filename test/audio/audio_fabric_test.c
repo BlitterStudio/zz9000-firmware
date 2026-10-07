@@ -1002,6 +1002,44 @@ static void scenario_source_contract(void)
 		free(srcs[i]);
 }
 
+static void scenario_pump_gain(void)
+{
+	const int16_t *period;
+
+	fabric_reset_state();
+	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	g_dma_count = 0;
+	model_prefill_constant(&g_model_b, 8000);
+	fabric_pump_start();
+	dma_tick(1);
+	audio_fabric_isr();
+	dma_tick(1);
+	audio_fabric_isr();
+	period = (const int16_t *)(g_fabric_tx + 2U * TICK_BYTES);
+	check(period[0] == 8000, "pump gain: default unity", "");
+
+	fabric_reset_state();
+	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	g_dma_count = 0;
+	model_prefill_constant(&g_model_b, 8000);
+	fabric_pump_start();
+	audio_fabric_producer_gain_set(AUDIO_FABRIC_SLOT_PUMP, 64U);
+	dma_tick(1);
+	audio_fabric_isr();
+	dma_tick(1);
+	audio_fabric_isr();
+	period = (const int16_t *)(g_fabric_tx + 2U * TICK_BYTES);
+	check(period[0] == 4000, "pump gain: bound attenuation", "");
+
+	audio_fabric_producer_detach(AUDIO_FABRIC_SLOT_PUMP);
+	fabric_pump_start();
+	dma_tick(1);
+	audio_fabric_isr();
+	dma_tick(1);
+	audio_fabric_isr();
+	period = (const int16_t *)(g_fabric_tx + 4U * TICK_BYTES);
+	check(period[0] == 8000, "pump gain: rebind restores unity", "");
+}
 int main(int argc, char **argv)
 {
 	int i;
@@ -1048,6 +1086,7 @@ int main(int argc, char **argv)
 	characterization_invariants();
 
 	scenario_mix();
+	scenario_pump_gain();
 	scenario_gate();
 	scenario_silence_policy();
 	scenario_underrun_isolation();

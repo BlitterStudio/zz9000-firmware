@@ -89,13 +89,15 @@ static int test_audio_service_requires_calibrated_surface(void)
         (ZZ9K_CAP_AUDIO_CONTROL | ZZ9K_CAP_AUDIO_METERING |
          ZZ9K_CAP_AUDIO_FABRIC) ||
         (release_services[i].required_flags &
-         (ZZ9K_SERVICE_FLAG_AUDIO_CONTROL |
-          ZZ9K_SERVICE_FLAG_AUDIO_FABRIC |
-          ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE)) !=
+        (ZZ9K_SERVICE_FLAG_AUDIO_CONTROL |
+         ZZ9K_SERVICE_FLAG_AUDIO_FABRIC |
+         ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE |
+         ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN)) !=
             (ZZ9K_SERVICE_FLAG_AUDIO_CONTROL |
              ZZ9K_SERVICE_FLAG_AUDIO_FABRIC |
-             ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE) ||
-        release_services[i].min_opcode_count != 21U) {
+             ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE |
+             ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN) ||
+        release_services[i].min_opcode_count != 22U) {
       printf("audio service omits calibrated control + fabric surface\n");
       return 1;
     }
@@ -103,6 +105,11 @@ static int test_audio_service_requires_calibrated_surface(void)
                                 ZZ9K_SERVICE_FLAG_AUDIO_CONTROL)) {
       printf("AUDIO_CONTROL service flag has no printable name\n");
       return 3;
+    }
+    if (!zz9k_service_flag_name(ZZ9K_SERVICE_AUDIO,
+                                ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN)) {
+      printf("AUDIO_STREAM_GAIN service flag has no printable name\n");
+      return 4;
     }
     return 0;
   }
