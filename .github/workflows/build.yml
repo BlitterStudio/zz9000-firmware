@@ -125,6 +125,8 @@ jobs:
         run: make -C test/allocator test
       - name: Zorro II aperture layout suite
         run: make -C test/aperture test
+      - name: MMU page split suite
+        run: make -C test/mmu test
       - name: Media session suite
         run: make -C test/media test
       - name: Palette shadow suite
