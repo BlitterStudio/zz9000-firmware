@@ -9,8 +9,8 @@
 
 #define ZZ9K_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 30
-#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.29 (30.08.2026)"
+#define ZZ9K_LIBRARY_REVISION 31
+#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.31 (07.10.2026)"
 
 #define ZZ9K_LIBRARY_MIN_REVISION_CALL_ASYNC_BATCH_MSG 1
 #define ZZ9K_LIBRARY_MIN_REVISION_CANCEL_ASYNC 2
@@ -41,6 +41,7 @@
  * (no new vector; firmware support is gated by the matching capability). */
 #define ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_DRAIN 27
 #define ZZ9K_LIBRARY_MIN_REVISION_QUERY_PALETTE 28
+#define ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN 31
 
 #define ZZ9K_LVO_OPEN (-6)
 #define ZZ9K_LVO_CLOSE (-12)
@@ -98,7 +99,8 @@
  * AUDIO_STREAM_PLAY. Taking the next free vector instead; merging that branch
  * as-is would have aliased two calls onto one entry. */
 #define ZZ9K_LVO_QUERY_PALETTE (-312)
+#define ZZ9K_LVO_AUDIO_STREAM_SET_GAIN (-318)
 
-#define ZZ9K_LVO_FUNCTION_COUNT 48
+#define ZZ9K_LVO_FUNCTION_COUNT 49
 
 #endif /* ZZ9K_LIBRARY_VECTORS_H */

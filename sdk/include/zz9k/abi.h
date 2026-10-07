@@ -212,6 +212,7 @@ enum ZZ9KOpcode {
   ZZ9K_OP_AUDIO_FABRIC_STATE_GET = ZZ9K_SERVICE_AUDIO + 0x12,
   ZZ9K_OP_AUDIO_RING_ACQUIRE = ZZ9K_SERVICE_AUDIO + 0x13,
   ZZ9K_OP_AUDIO_RING_RELEASE = ZZ9K_SERVICE_AUDIO + 0x14,
+  ZZ9K_OP_AUDIO_STREAM_GAIN = ZZ9K_SERVICE_AUDIO + 0x15,
 
   ZZ9K_OP_DECOMPRESS = ZZ9K_SERVICE_CODEC + 0x00,
   ZZ9K_OP_DECOMPRESS_TEST = ZZ9K_SERVICE_CODEC + 0x01,
@@ -373,6 +374,8 @@ enum ZZ9KServiceFlags {
    * firmware converts per-slot with the qualified kernel. Gated the
    * same way as AUDIO_FABRIC itself. */
   ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE = 1U << 23,
+  /* Per-session SDK stream attenuation through the fabric pump. */
+  ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN = 1U << 24,
 
 
   ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 = 1U << 16,
@@ -808,6 +811,15 @@ typedef struct ZZ9KAudioStreamStopPayload {
   uint8_t flags[4];
   uint8_t reserved[40];
 } ZZ9KAudioStreamStopPayload;
+/* Per-session stream attenuation: gain is 0..128, where 128 preserves
+ * the scene level; flags must be zero. The reply is
+ * ZZ9KAudioStreamResultPayload for the requested session. */
+typedef struct ZZ9KAudioStreamGainPayload {
+  uint8_t session[4];
+  uint8_t gain[4];
+  uint8_t flags[4];
+  uint8_t reserved[36];
+} ZZ9KAudioStreamGainPayload;
 
 typedef struct ZZ9KAudioStreamResultPayload {
   uint8_t session[4];

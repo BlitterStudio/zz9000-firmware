@@ -517,7 +517,8 @@ static inline int zz9k_reply_audio_stream_result(
        opcode != ZZ9K_OP_AUDIO_STREAM_READ &&
        opcode != ZZ9K_OP_AUDIO_STREAM_CLOSE &&
        opcode != ZZ9K_OP_AUDIO_STREAM_PLAY &&
-       opcode != ZZ9K_OP_AUDIO_STREAM_STOP)) {
+       opcode != ZZ9K_OP_AUDIO_STREAM_STOP &&
+       opcode != ZZ9K_OP_AUDIO_STREAM_GAIN)) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
 

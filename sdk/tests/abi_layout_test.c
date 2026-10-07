@@ -131,6 +131,9 @@ typedef char audio_stream_play_payload_is_48_bytes[
 typedef char audio_stream_stop_payload_is_48_bytes[
   (sizeof(ZZ9KAudioStreamStopPayload) == 48U) ? 1 : -1
 ];
+typedef char audio_stream_gain_payload_is_48_bytes[
+  (sizeof(ZZ9KAudioStreamGainPayload) == 48U) ? 1 : -1
+];
 
 typedef char audio_stream_result_payload_is_48_bytes[
   (sizeof(ZZ9KAudioStreamResultPayload) == 48U) ? 1 : -1
@@ -387,6 +390,8 @@ int main(void)
   if (ZZ9K_OP_AUDIO_RING_RELEASE != 0x0514U) return 124;
   if (ZZ9K_OP_AUDIO_RING_ACQUIRE != ZZ9K_SERVICE_AUDIO + 0x13U) return 127;
   if (ZZ9K_OP_AUDIO_RING_RELEASE != ZZ9K_SERVICE_AUDIO + 0x14U) return 125;
+  if (ZZ9K_OP_AUDIO_STREAM_GAIN != 0x0515U) return 141;
+  if (ZZ9K_OP_AUDIO_STREAM_GAIN != ZZ9K_SERVICE_AUDIO + 0x15U) return 142;
   if (ZZ9K_OP_AUDIO_FABRIC_STATE_GET != ZZ9K_SERVICE_AUDIO + 0x12U) {
     return 128;
   }
@@ -407,6 +412,7 @@ int main(void)
     return 134;
   }
   if (ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE != (1U << 23)) return 139;
+  if (ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN != (1U << 24)) return 143;
   if (ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE != (1U << 0) ||
       ZZ9K_AUDIO_RING_ACQUIRE_FLAG_KNOWN !=
           ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE) return 140;

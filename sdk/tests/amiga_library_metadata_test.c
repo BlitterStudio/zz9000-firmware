@@ -289,8 +289,13 @@ int main(int argc, char **argv)
      "ZZ9KAudioStreamResult *result);",
      "jsr -306(a6)"},
     {"ZZ9KQueryPalette", "ZZ9KQueryPalette(desc)(a0)",
-      "int ZZ9KQueryPalette(const ZZ9KPaletteQueryDesc *desc);",
-      "jsr -312(a6)"}
+     "int ZZ9KQueryPalette(const ZZ9KPaletteQueryDesc *desc);",
+     "jsr -312(a6)"},
+    {"ZZ9KAudioStreamSetGain",
+     "ZZ9KAudioStreamSetGain(session,gain,flags,result)(d0/d1/d2/a0)",
+     "int ZZ9KAudioStreamSetGain(uint32_t session, uint32_t gain, "
+     "uint32_t flags, ZZ9KAudioStreamResult *result);",
+     "jsr -318(a6)"}
   };
   char *fd;
   char *clib;

@@ -268,6 +268,7 @@ static void fabric_slot_drop(struct audio_fabric_slot *s)
 	uint32_t epoch = s->epoch;
 
 	memset(s, 0, sizeof(*s));
+	s->gain = AUDIO_FABRIC_GAIN_UNITY;
 	s->epoch = epoch;
 }
 
@@ -1352,6 +1353,14 @@ void audio_fabric_producer_rate_set(uint32_t slot, uint32_t source_rate)
 		s->admission_rate = source_rate;
 }
 
+void audio_fabric_producer_gain_set(uint32_t slot, uint16_t gain)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+
+	if (s == NULL || !s->attached || gain > AUDIO_FABRIC_GAIN_UNITY)
+		return;
+	s->gain = gain;
+}
 void audio_fabric_producer_detach(uint32_t slot)
 {
 	struct audio_fabric_slot *s = fabric_slot(slot);

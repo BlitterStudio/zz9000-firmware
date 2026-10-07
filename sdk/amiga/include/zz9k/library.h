@@ -144,6 +144,9 @@ int ZZ9KAudioStreamClose(ZZ9KLibrary *library, uint32_t session,
 int ZZ9KAudioStreamPlay(ZZ9KLibrary *library, uint32_t session,
                         uint32_t flags,
                         ZZ9KAudioStreamResult *result);
+int ZZ9KAudioStreamSetGain(ZZ9KLibrary *library, uint32_t session,
+                           uint32_t gain, uint32_t flags,
+                           ZZ9KAudioStreamResult *result);
 int ZZ9KQueryPalette(ZZ9KLibrary *library, const ZZ9KPaletteQueryDesc *desc);
 int ZZ9KAudioStreamStop(ZZ9KLibrary *library, uint32_t session,
                         uint32_t flags,

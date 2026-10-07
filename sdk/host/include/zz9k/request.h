@@ -696,6 +696,26 @@ static inline int zz9k_request_audio_stream_stop(ZZ9KRequest *request,
   return ZZ9K_STATUS_OK;
 }
 
+static inline int zz9k_request_audio_stream_set_gain(ZZ9KRequest *request,
+                                                     uint32_t session,
+                                                     uint32_t gain,
+                                                     uint32_t flags)
+{
+  ZZ9KAudioStreamGainPayload *payload;
+
+  if (!request || session == 0U || gain > 128U || flags != 0U) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  zz9k_request_init(request, ZZ9K_OP_AUDIO_STREAM_GAIN);
+  request->entry.payload_len = sizeof(ZZ9KAudioStreamGainPayload);
+  payload =
+      (ZZ9KAudioStreamGainPayload *)request->entry.payload.inline_data;
+  zz9k_put_be32(payload->session, session);
+  zz9k_put_be32(payload->gain, gain);
+  zz9k_put_be32(payload->flags, flags);
+  return ZZ9K_STATUS_OK;
+}
 static inline int zz9k_request_audio_ring_acquire(
     ZZ9KRequest *request,
     const ZZ9KAudioRingAcquireDesc *desc)

@@ -2205,6 +2205,32 @@ int zz9k_audio_stream_play(ZZ9KContext *ctx, uint32_t session,
                                         result);
 }
 
+int zz9k_audio_stream_set_gain(ZZ9KContext *ctx, uint32_t session,
+                               uint32_t gain, uint32_t flags,
+                               ZZ9KAudioStreamResult *result)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  if (!ctx || !result) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  memset(result, 0, sizeof(*result));
+  memset(&reply, 0, sizeof(reply));
+  status = zz9k_request_audio_stream_set_gain(&request, session, gain, flags);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  return zz9k_reply_audio_stream_result(&reply,
+                                        ZZ9K_OP_AUDIO_STREAM_GAIN,
+                                        result);
+}
 int zz9k_audio_stream_stop(ZZ9KContext *ctx, uint32_t session,
                            uint32_t flags,
                            ZZ9KAudioStreamResult *result)

@@ -668,6 +668,24 @@ static int test_audio_stream_builders_encode_descriptors(void)
   return 0;
 }
 
+static int test_audio_stream_gain_builder_encodes_request(void)
+{
+  ZZ9KRequest request;
+  const ZZ9KAudioStreamGainPayload *payload;
+
+  if (zz9k_request_audio_stream_set_gain(&request, 7U, 64U, 0U) !=
+      ZZ9K_STATUS_OK) return 1;
+  if (request.entry.opcode != ZZ9K_OP_AUDIO_STREAM_GAIN ||
+      request.entry.payload_len != sizeof(ZZ9KAudioStreamGainPayload)) return 2;
+  payload = (const ZZ9KAudioStreamGainPayload *)request.entry.payload.inline_data;
+  if (zz9k_get_be32(payload->session) != 7U ||
+      zz9k_get_be32(payload->gain) != 64U ||
+      zz9k_get_be32(payload->flags) != 0U) return 3;
+  if (zz9k_request_audio_stream_set_gain(&request, 0U, 64U, 0U) != ZZ9K_STATUS_BAD_REQUEST) return 4;
+  if (zz9k_request_audio_stream_set_gain(&request, 7U, 129U, 0U) != ZZ9K_STATUS_BAD_REQUEST) return 5;
+  if (zz9k_request_audio_stream_set_gain(&request, 7U, 64U, 1U) != ZZ9K_STATUS_BAD_REQUEST) return 6;
+  return 0;
+}
 static int test_crypto_stream_builder_encodes_descriptor(void)
 {
   ZZ9KRequest request;
@@ -1420,6 +1438,8 @@ int main(void)
 
   result = test_audio_stream_builders_encode_descriptors();
   if (result) return 165 + result;
+  result = test_audio_stream_gain_builder_encodes_request();
+  if (result) return 168 + result;
 
   result = test_crypto_stream_builder_encodes_descriptor();
   if (result) return 170 + result;

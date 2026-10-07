@@ -8,7 +8,7 @@ The current library identity is:
 ```c
 #define ZZ9K_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 29
+#define ZZ9K_LIBRARY_REVISION 31
 ```
 
 Open the library with at least version 2:
@@ -1788,6 +1788,15 @@ grant matches the requested contract and source rate, and releases malformed
 or mismatched grants before reporting failure. This prevents a failed acquire
 from leaking a firmware lease and prevents clients from accepting a different
 audio contract than they requested.
+ZZ9K_OP_AUDIO_STREAM_GAIN is the per-session gain request. Library revision 31
+appends ZZ9KAudioStreamSetGain(session, gain, flags, result) at
+ZZ9K_LVO_AUDIO_STREAM_SET_GAIN; callers must gate it on
+ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN and the audio-service
+ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN. Gain is per audio-stream session and
+is attenuation under the active scene: 0 is silence and 128 preserves the
+scene level. flags must be zero. A gain selected while unbound is retained
+for the next ZZ9KAudioStreamPlay; changing a currently bound session takes
+effect in the fabric pump without modifying the scene-owned master chain.
 
 `ZZ9KAudioStreamBeginDesc.low_water_bytes` is the PCM-ring refill
 threshold: while a session is bound to the AX output, the firmware tops the

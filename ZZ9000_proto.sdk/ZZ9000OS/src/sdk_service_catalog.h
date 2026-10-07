@@ -111,13 +111,12 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM |
 			SDK_SERVICE_FLAG_AUDIO_CONTROL |
 			SDK_SERVICE_FLAG_AUDIO_FABRIC |
-			SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE,
+			SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE |
+			SDK_SERVICE_FLAG_AUDIO_STREAM_GAIN,
 		.opcode_base = SDK_SERVICE_AUDIO,
-		.opcode_count = 21,	/* 0x0500..0x0514 incl. audio control plane and the
+		.opcode_count = 22,	/* 0x0500..0x0515 incl. audio control plane,
 			 * fabric lease plane (0x0512-0x0514; 0x050f..0x0511
-			 * reserved gaps); the on-hardware qualification gate
-			 * passed 2026-08-28 (docs/audio-fabric.md), so the
-			 * lease opcodes are counted and advertised */
+			 * reserved gaps), and per-stream gain (0x0515). */
 		.name = "audio"
 	},
 	{
