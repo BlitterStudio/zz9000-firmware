@@ -94,7 +94,7 @@ typedef struct ZZPlayMP3Decode {
   uint32_t input_bytes;
   uint64_t output_frames;
   /* Where in the item this pass started; positions are reported from
-   * here plus the frames this pass has output. */
+   * here plus the frames this pass has played. */
   uint32_t position_base_ms;
   uint8_t session_open;
   uint8_t ahi_started;
@@ -133,12 +133,17 @@ static int zzplay_mp3_service_controls(ZZPlayMP3Decode *decode)
 
 static void zzplay_mp3_report_progress(const ZZPlayMP3Decode *decode)
 {
+  /* Count what AHI has played, not what was queued to it: the queue holds
+   * a few hundred milliseconds, which would put the position ahead of the
+   * sound. Without a sink (muted) output is consumed as it is produced. */
+  uint64_t frames = decode->ahi ? zzplay_ahi_played_frames(decode->ahi)
+                                : decode->output_frames;
+
   if (decode->probe->sample_rate != 0U) {
     zzplay_controller_set_position(
         decode->engine->ctl,
         decode->position_base_ms +
-            (uint32_t)(decode->output_frames * 1000ULL /
-                       decode->probe->sample_rate),
+            (uint32_t)(frames * 1000ULL / decode->probe->sample_rate),
         1);
   }
 }
@@ -316,6 +321,7 @@ static int zzplay_mp3_finish_ahi(ZZPlayMP3Decode *decode)
         !zzplay_ahi_poll(decode->ahi)) {
       return 0;
     }
+    zzplay_mp3_report_progress(decode);
     zzplay_mp3_pump(decode->engine);
     Delay(1U);
   }
