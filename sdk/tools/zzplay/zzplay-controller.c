@@ -258,7 +258,10 @@ ZZPlayRequest zzplay_controller_take_request(ZZPlayController *ctl,
   if (seek_ms) {
     *seek_ms = ctl->seek_ms;
   }
+  /* The offset belongs to the request it came with: a later PLAY must
+   * not inherit an old seek position. */
   ctl->request = ZZPLAY_REQUEST_NONE;
+  ctl->seek_ms = 0U;
   return req;
 }
 

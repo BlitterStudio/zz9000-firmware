@@ -226,6 +226,15 @@ static int test_requested_backend_matrix(void)
                                      &strict);
   if (b != ZZPLAY_AUDIO_AHI || strict != 1) return 1;
 
+  /* 1b. Explicit AUDIO=AUTO overrides the saved output but may fall back */
+  zzplay_options_init(&options, ZZPLAY_LAUNCH_CLI);
+  options.audio_backend = ZZPLAY_AUDIO_AUTO;
+  options.audio_explicit = 1;
+  strict = -1;
+  b = zzplay_prefs_requested_backend(&prefs, &options, ZZPLAY_MEDIA_AUDIO_MP2,
+                                     &strict);
+  if (b != ZZPLAY_AUDIO_AUTO || strict != 0) return 9;
+
   /* 2. --benchmark (uncapped) wins and is strict */
   zzplay_options_init(&options, ZZPLAY_LAUNCH_CLI);
   options.uncapped = 1;

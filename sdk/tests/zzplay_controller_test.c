@@ -116,7 +116,19 @@ static int test_seek_clamping_and_advance(void)
   ctl.request = ZZPLAY_REQUEST_NONE;
   if (!zzplay_controller_seek_to(&ctl, 99000U)) return 10;
   if (ctl.request != ZZPLAY_REQUEST_SEEK || ctl.seek_ms != 99000U) return 11;
-  ctl.request = ZZPLAY_REQUEST_NONE;
+  {
+    uint32_t taken = 0U;
+
+    if (zzplay_controller_take_request(&ctl, 0, &taken) !=
+            ZZPLAY_REQUEST_SEEK ||
+        taken != 99000U) return 12;
+    /* A later PLAY restarts from the beginning, not the old seek. */
+    if (!zzplay_controller_request(&ctl, ZZPLAY_REQUEST_PLAY)) return 13;
+    taken = 1U;
+    if (zzplay_controller_take_request(&ctl, 0, &taken) !=
+            ZZPLAY_REQUEST_PLAY ||
+        taken != 0U) return 14;
+  }
 
   /* Seek fails when not seekable or idle */
   zzplay_controller_set_capabilities(&ctl, 0, 1, 0);

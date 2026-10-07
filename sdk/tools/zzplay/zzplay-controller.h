@@ -146,7 +146,8 @@ void zzplay_controller_set_shuffle(ZZPlayController *ctl, int shuffle);
 /* Any pending request ends the current item. */
 int zzplay_controller_item_should_end(const ZZPlayController *ctl);
 
-/* Return and clear the pending request (NONE when there is none). */
+/* Return and clear the pending request (NONE when there is none) and its
+ * seek offset, which is 0 for every request except SEEK. */
 ZZPlayRequest zzplay_controller_take_request(ZZPlayController *ctl,
                                              int32_t *jump_index,
                                              uint32_t *seek_ms);

@@ -3525,9 +3525,20 @@ int main(int argc, char **argv)
       app.had_failure = 1;
     }
   }
-  /* The playlist navigates by the same repeat/shuffle the user sees. */
+  /* The playlist navigates by the same repeat/shuffle the user sees. A
+   * remembered shuffle is seeded from the clock so each launch gets its
+   * own order. */
   zzplay_playlist_set_repeat(&app.playlist, app.ctl.repeat);
-  zzplay_playlist_set_shuffle(&app.playlist, app.ctl.shuffle, 0U);
+  {
+    struct DateStamp now;
+    uint32_t seed;
+
+    DateStamp(&now);
+    seed = ((uint32_t)now.ds_Days << 20) ^ ((uint32_t)now.ds_Minute << 8) ^
+           (uint32_t)now.ds_Tick;
+    zzplay_playlist_set_shuffle(&app.playlist, app.ctl.shuffle,
+                                seed != 0U ? seed : 1U);
+  }
 
   if (app.options.trace_path) {
     app.trace = Open((CONST_STRPTR)app.options.trace_path,
