@@ -1,33 +1,60 @@
-/* First-class standalone MP3 playback for zzplay.
+/* Standalone MP3 playback engine for zzplay.
+ *
+ * The engine is driven by the playback controller (zzplay-controller.h):
+ * it polls item-ending requests, applies live controls (pause, volume),
+ * reports position/capabilities/output text and calls back into the
+ * application pump from every wait loop so the player window stays live.
+ * It never opens a window of its own.
+ *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #ifndef ZZPLAY_MP3_H
 #define ZZPLAY_MP3_H
 
+#include "zzplay-controller.h"
 #include "zzplay-options.h"
+#include "zzplay-prefs.h"
 #include "zzplay-probe.h"
 
-typedef int (*ZZPlayMP3StopRequested)(void *user);
+/* What an engine run ended with. The application loop consumes any
+ * controller request itself (that is how STOP/QUIT/NEXT/... are routed),
+ * so these only distinguish "ran to its own end" from "a request ended
+ * it" and "it could not play". */
+typedef enum ZZPlayEngineResult {
+  ZZPLAY_ENGINE_EOF = 0,   /* the item completed on its own */
+  ZZPLAY_ENGINE_STOPPED,   /* a controller request ended the item */
+  ZZPLAY_ENGINE_QUIT,      /* the engine observed a quit by itself */
+  ZZPLAY_ENGINE_FAILED     /* the item could not be played; already reported */
+} ZZPlayEngineResult;
 
-/* Standalone MP3 has no video window, so U6 gives it a small status window
- * of its own; this is how that window's keys reach the playback loops.
- * Returning non-zero from `paused` holds playback without ending it. Both
- * callbacks are optional. */
-typedef struct ZZPlayMP3Controls {
-  ZZPlayMP3StopRequested stop_requested;
-  int (*paused)(void *user);
-  /* Called when the backend is known, so the window can show it. */
-  void (*backend)(void *user, const char *name);
-  /* Playback position. Exact on the AHI path (decoded output frames);
-   * on MHI it is derived from bytes handed to the decoder and therefore
-   * runs slightly ahead, which the UI marks as approximate. */
-  void (*progress)(void *user, uint32_t elapsed_ms, int exact);
-  void *user;
-} ZZPlayMP3Controls;
+/* One engine invocation. `path` is private storage that outlives the run
+ * (the playlist must stay editable while an item plays). `probe` is the
+ * result of zzplay_probe_media_file() on that path. `seek_ms` starts the
+ * first pass at that position when non-zero (MP3 only). */
+typedef struct ZZPlayEngineRun {
+  ZZPlayController *ctl;
+  const char *path;
+  const ZZPlayProbeInfo *probe;
+  const ZZPlayOptions *options;
+  const ZZPlayPrefs *prefs;
+  /* Metadata and length read during probe; the MP3 engine owns only its
+   * streaming handles. */
+  uint64_t audio_start;
+  uint32_t trailer_bytes;
+  uint64_t file_size;
+  uint32_t seek_ms;
+  /* Called regularly from every wait loop so the GUI stays live while
+   * the engine blocks; may be NULL when there is nothing to pump. */
+  void (*pump)(void *user);
+  void *pump_user;
+} ZZPlayEngineRun;
 
-int zzplay_mp3_run(const char *path,
-                   const ZZPlayMP3Info *info,
-                   const ZZPlayOptions *options,
-                   const ZZPlayMP3Controls *controls);
+typedef ZZPlayEngineResult (*ZZPlayEngineFn)(const ZZPlayEngineRun *run);
+
+/* Play one standalone MP3 file. Backend, AHI unit and MHI driver come
+ * from `prefs` resolved with `options` (zzplay_prefs_requested_backend);
+ * a strict requested backend that cannot play fails instead of falling
+ * back. */
+ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run);
 
 #endif /* ZZPLAY_MP3_H */

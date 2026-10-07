@@ -1,15 +1,25 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "zzplay-options.h"
+#include "zzplay-core.h"
+#include "zzplay-prefs.h"
 
 #include <stdint.h>
 #include <string.h>
 
-static int zzplay_parse_loop_count(const char *value, uint32_t *count)
+static char zzplay_lower(char c)
+{
+  if (c >= 'A' && c <= 'Z') {
+    return (char)(c - 'A' + 'a');
+  }
+  return c;
+}
+
+static int zzplay_parse_uint(const char *value, uint32_t *out, uint32_t max_val)
 {
   uint32_t parsed = 0U;
 
-  if (!value || !*value || !count) {
+  if (!value || !*value || !out) {
     return 0;
   }
   while (*value) {
@@ -25,36 +35,22 @@ static int zzplay_parse_loop_count(const char *value, uint32_t *count)
     parsed = parsed * 10U + digit;
     value++;
   }
-  if (parsed == 0U) {
+  if (parsed > max_val) {
+    return 0;
+  }
+  *out = parsed;
+  return 1;
+}
+
+static int zzplay_parse_loop_count(const char *value, uint32_t *count)
+{
+  uint32_t parsed = 0U;
+
+  if (!zzplay_parse_uint(value, &parsed, UINT32_MAX) || parsed == 0U) {
     return 0;
   }
   *count = parsed;
   return 1;
-}
-
-static char zzplay_lower(char c)
-{
-  if (c >= 'A' && c <= 'Z') {
-    return (char)(c - 'A' + 'a');
-  }
-  return c;
-}
-
-/* Case-insensitive compare; ToolTypes are conventionally upper case while
- * the CLI is lower case, and both must reach the same option. */
-static int zzplay_equals_fold(const char *a, const char *b)
-{
-  if (!a || !b) {
-    return 0;
-  }
-  while (*a && *b) {
-    if (zzplay_lower(*a) != zzplay_lower(*b)) {
-      return 0;
-    }
-    a++;
-    b++;
-  }
-  return *a == '\0' && *b == '\0';
 }
 
 static int zzplay_parse_audio_backend(const char *value,
@@ -63,15 +59,15 @@ static int zzplay_parse_audio_backend(const char *value,
   if (!value || !backend) {
     return 0;
   }
-  if (zzplay_equals_fold(value, "auto")) {
+  if (zzplay_ascii_equal_fold(value, "auto")) {
     *backend = ZZPLAY_AUDIO_AUTO;
-  } else if (zzplay_equals_fold(value, "ahi")) {
+  } else if (zzplay_ascii_equal_fold(value, "ahi")) {
     *backend = ZZPLAY_AUDIO_AHI;
-  } else if (zzplay_equals_fold(value, "mhi")) {
+  } else if (zzplay_ascii_equal_fold(value, "mhi")) {
     *backend = ZZPLAY_AUDIO_MHI;
-  } else if (zzplay_equals_fold(value, "ax")) {
+  } else if (zzplay_ascii_equal_fold(value, "ax")) {
     *backend = ZZPLAY_AUDIO_AX;
-  } else if (zzplay_equals_fold(value, "none")) {
+  } else if (zzplay_ascii_equal_fold(value, "none")) {
     *backend = ZZPLAY_AUDIO_NONE;
   } else {
     return 0;
@@ -85,6 +81,9 @@ void zzplay_options_init(ZZPlayOptions *options, ZZPlayLaunchSource launch)
     return;
   }
   memset(options, 0, sizeof(*options));
+  options->player = -1;
+  options->ahi_unit = -1;
+  options->volume = -1;
   options->audio_backend = ZZPLAY_AUDIO_AUTO;
   options->launch = launch;
 }
@@ -153,6 +152,48 @@ int zzplay_options_apply(ZZPlayOptions *options, ZZPlayOptionKey key,
     }
     options->audio_explicit = 1;
     return 1;
+  case ZZPLAY_OPT_PLAYER:
+    if (!value) {
+      options->player = 1;
+      return 1;
+    }
+    if (zzplay_ascii_equal_fold(value, "yes") ||
+        zzplay_ascii_equal_fold(value, "1") ||
+        zzplay_ascii_equal_fold(value, "true")) {
+      options->player = 1;
+      return 1;
+    }
+    if (zzplay_ascii_equal_fold(value, "no") ||
+        zzplay_ascii_equal_fold(value, "0") ||
+        zzplay_ascii_equal_fold(value, "false")) {
+      options->player = 0;
+      return 1;
+    }
+    return 0;
+  case ZZPLAY_OPT_AHI_UNIT:
+    {
+      uint32_t unit = 0U;
+      if (!zzplay_parse_uint(value, &unit, 3U)) {
+        return 0;
+      }
+      options->ahi_unit = (int32_t)unit;
+      return 1;
+    }
+  case ZZPLAY_OPT_MHI_DRIVER:
+    if (!zzplay_prefs_valid_driver(value)) {
+      return 0;
+    }
+    options->mhi_driver = value;
+    return 1;
+  case ZZPLAY_OPT_VOLUME:
+    {
+      uint32_t vol = 0U;
+      if (!zzplay_parse_uint(value, &vol, 100U)) {
+        return 0;
+      }
+      options->volume = (int32_t)vol;
+      return 1;
+    }
   case ZZPLAY_OPT_HELP:
   case ZZPLAY_OPT_NONE:
   default:
@@ -212,6 +253,33 @@ ZZPlayOptionKey zzplay_options_key_from_cli(const char *token,
     }
     return ZZPLAY_OPT_AUDIO;
   }
+  if (strcmp(token, "player") == 0) {
+    return ZZPLAY_OPT_PLAYER;
+  }
+  if (strncmp(token, "player=", 7U) == 0) {
+    if (value) {
+      *value = token + 7;
+    }
+    return ZZPLAY_OPT_PLAYER;
+  }
+  if (strncmp(token, "ahiunit=", 8U) == 0) {
+    if (value) {
+      *value = token + 8;
+    }
+    return ZZPLAY_OPT_AHI_UNIT;
+  }
+  if (strncmp(token, "mhidriver=", 10U) == 0) {
+    if (value) {
+      *value = token + 10;
+    }
+    return ZZPLAY_OPT_MHI_DRIVER;
+  }
+  if (strncmp(token, "volume=", 7U) == 0) {
+    if (value) {
+      *value = token + 7;
+    }
+    return ZZPLAY_OPT_VOLUME;
+  }
   return ZZPLAY_OPT_NONE;
 }
 
@@ -248,7 +316,11 @@ ZZPlayOptionKey zzplay_options_key_from_tooltype(const char *tooltype,
       { "VERBOSE", ZZPLAY_OPT_VERBOSE },
       { "TRACE", ZZPLAY_OPT_TRACE },
       { "LOOP", ZZPLAY_OPT_LOOP },
-      { "AUDIO", ZZPLAY_OPT_AUDIO }
+      { "AUDIO", ZZPLAY_OPT_AUDIO },
+      { "PLAYER", ZZPLAY_OPT_PLAYER },
+      { "AHIUNIT", ZZPLAY_OPT_AHI_UNIT },
+      { "MHIDRIVER", ZZPLAY_OPT_MHI_DRIVER },
+      { "VOLUME", ZZPLAY_OPT_VOLUME },
     };
     unsigned i;
 
@@ -298,6 +370,15 @@ int zzplay_options_apply_tooltype(ZZPlayOptions *options,
   return zzplay_options_apply(options, key, value);
 }
 
+int zzplay_options_add_path(ZZPlayOptions *options, const char *path)
+{
+  if (!options || !path || options->path_count >= ZZPLAY_OPTIONS_MAX_PATHS) {
+    return 0;
+  }
+  options->paths[options->path_count++] = path;
+  return 1;
+}
+
 ZZPlayOptionsResult zzplay_options_finish(ZZPlayOptions *options)
 {
   if (!options) {
@@ -317,7 +398,24 @@ ZZPlayOptionsResult zzplay_options_finish(ZZPlayOptions *options)
                          ? 1
                          : 0;
   }
-  return options->path ? ZZPLAY_OPTIONS_OK : ZZPLAY_OPTIONS_ERROR;
+  return ZZPLAY_OPTIONS_OK;
+}
+
+int zzplay_options_wants_player(const ZZPlayOptions *options)
+{
+  if (!options) {
+    return 0;
+  }
+  if (options->player >= 0) {
+    return options->player != 0;
+  }
+  if (options->path_count == 0U) {
+    return 1;
+  }
+  if (options->launch == ZZPLAY_LAUNCH_WORKBENCH) {
+    return !options->fullscreen;
+  }
+  return 0;
 }
 
 ZZPlayOptionsResult zzplay_options_parse_cli(
@@ -347,11 +445,9 @@ ZZPlayOptionsResult zzplay_options_parse_cli(
     if (argv[i][0] == '-' && argv[i][1] == '-') {
       return ZZPLAY_OPTIONS_ERROR;
     }
-    if (!options->path) {
-      options->path = argv[i];
-      continue;
+    if (!zzplay_options_add_path(options, argv[i])) {
+      return ZZPLAY_OPTIONS_ERROR;
     }
-    return ZZPLAY_OPTIONS_ERROR;
   }
   return zzplay_options_finish(options);
 }

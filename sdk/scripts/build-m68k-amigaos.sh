@@ -38,7 +38,7 @@ for src in bitio crcio dhuf extract huf larc maketbl maketree shuf slide zz9k_lh
     -c tools/lha-unix/$src.c -o build/m68k/lha-$src.o
 done
 LHA_OBJS="build/m68k/lha-bitio.o build/m68k/lha-crcio.o build/m68k/lha-dhuf.o build/m68k/lha-extract.o build/m68k/lha-huf.o build/m68k/lha-larc.o build/m68k/lha-maketbl.o build/m68k/lha-maketree.o build/m68k/lha-shuf.o build/m68k/lha-slide.o build/m68k/lha-zz9k_lha_unix.o build/m68k/lha-zz9k_lha_unix_support.o"
-ZZPLAY_SOURCES="tools/zzplay-ahi.c tools/zzplay-audio.c tools/zzplay-audio-clock.c tools/zzplay-ax.c tools/zzplay-core.c tools/zzplay-geometry.c tools/zzplay-launch.c tools/zzplay-media.c tools/zzplay-mhi.c tools/zzplay-mp3.c tools/zzplay-mp3-transport.c tools/zzplay-options.c tools/zzplay-path.c tools/zzplay-probe.c tools/zzplay-stats.c tools/zzplay-statuswin.c tools/zzplay-stream.c tools/zzplay-sync.c tools/zzplay-video.c tools/zzplay.c"
+ZZPLAY_SOURCES="tools/zzplay-ahi.c tools/zzplay-ahiprefs.c tools/zzplay-audio.c tools/zzplay-audio-clock.c tools/zzplay-ax.c tools/zzplay-controller.c tools/zzplay-core.c tools/zzplay-devices.c tools/zzplay-files.c tools/zzplay-formats.c tools/zzplay-geometry.c tools/zzplay-gui.c tools/zzplay-launch.c tools/zzplay-media.c tools/zzplay-mhi.c tools/zzplay-mp3.c tools/zzplay-mp3-transport.c tools/zzplay-options.c tools/zzplay-path.c tools/zzplay-playlist.c tools/zzplay-prefs.c tools/zzplay-probe.c tools/zzplay-stats.c tools/zzplay-stream.c tools/zzplay-sync.c tools/zzplay-tags.c tools/zzplay-video.c tools/zzplay.c"
 
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   build/m68k/zz9k_library_resident.o build/m68k/zz9k_library.o \
@@ -82,7 +82,10 @@ m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zz9k-aead.c -o build/zz9k-
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o tools/zz9k-crypto-soft.c tools/zz9k-cryptobench.c -o build/zz9k-cryptobench
 m68k-amigaos-gcc $CFLAGS -Itools tools/zz9k-m68kbench.c -o build/zz9k-m68kbench
 m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zzplay-mp3-transport.c tools/zz9k-mp3.c -o build/zz9k-mp3
-m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o $ZZPLAY_SOURCES -o build/zzplay
+# swapstack.o grows the stack at startup to the __stack zzplay.c asks for:
+# GadTools, ASL and AHI calls run on the calling task stack, and a Shell
+# launch otherwise gets only its (often 4 KiB) default.
+m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o $ZZPLAY_SOURCES "$(m68k-amigaos-gcc -noixemul -print-file-name=swapstack.o)" -o build/zzplay
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-mpega-smoke.c -o build/zz9k-mpega-smoke
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-jpeg.c -o build/zz9k-jpeg
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-png.c -o build/zz9k-png

@@ -75,6 +75,8 @@ typedef int (*ZZPlayReleaseResource)(void *user,
 void zzplay_set_quiet(int quiet);
 int zzplay_is_quiet(void);
 void zzplay_info(const char *format, ...);
+/* ASCII-only case-insensitive equality. NULL never equals a string. */
+int zzplay_ascii_equal_fold(const char *a, const char *b);
 
 void zzplay_core_init(ZZPlayCore *core);
 int zzplay_core_begin_prebuffer(ZZPlayCore *core);

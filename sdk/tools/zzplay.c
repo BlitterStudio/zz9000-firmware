@@ -1,12 +1,15 @@
 /*
- * zzplay: first standalone client for the ZZ9000 streaming video service.
+ * zzplay: desktop multi-format player for the ZZ9000 streaming media
+ * service.
  *
- * MPEG-1 Program Stream is the first backend, but all mailbox interaction is
- * expressed as codec/container/output descriptors so later backends do not
- * require a new player protocol.
+ * The application loop owns the playlist, settings and the playback
+ * controller; every media format is one row in zzplay_engines[] (see
+ * zzplay-formats.h). MPEG-1 Program Stream playback lives here; standalone
+ * MP3 is zzplay-mp3.c. All mailbox interaction is expressed as
+ * codec/container/output descriptors so later backends do not require a
+ * new player protocol.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
+ * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "zz9k/sdk.h"
 #include "zzplay-ahi.h"
@@ -14,18 +17,25 @@
 #include "zzplay-ax.h"
 #include "zzplay-controls.h"
 #include "zzplay-core.h"
+#include "zzplay-controller.h"
+#include "zzplay-files.h"
+#include "zzplay-formats.h"
 #include "zzplay-geometry.h"
+#include "zzplay-gui.h"
 #include "zzplay-launch.h"
 #include "zzplay-media.h"
-#include "zzplay-path.h"
 #include "zzplay-mp3.h"
 #include "zzplay-options.h"
+#include "zzplay-path.h"
+#include "zzplay-playlist.h"
+#include "zzplay-prefs.h"
 #include "zzplay-probe.h"
-#include "zzplay-statuswin.h"
 #include "zzplay-stats.h"
 #include "zzplay-stream.h"
 #include "zzplay-sync.h"
+#include "zzplay-tags.h"
 #include "zzplay-video.h"
+
 
 #include <devices/timer.h>
 #include <exec/libraries.h>
@@ -72,7 +82,15 @@ struct Device *TimerBase;
 
 static volatile sig_atomic_t zzplay_ctrl_c_requested;
 
-static const char zzplay_version[] = "$VER: ZZPlay 0.5 (27.09.2026)";
+static const char zzplay_version[] = "$VER: ZZPlay 0.6 (07.10.2026)";
+
+/* Minimum stack, enforced at startup by libnix's swapstack.o (linked by the
+ * build scripts): a smaller launch stack is replaced before main() runs.
+ * The player window's GadTools/ASL calls and the settings window's AHI
+ * device and mode-database queries all run on this task's stack, nested
+ * inside the playback loops; a Shell launch otherwise gets only its
+ * default (often 4 KiB), which those calls overrun. */
+unsigned long __stack = 65536UL;
 
 struct ZZPlayTimer {
   struct MsgPort *port;
@@ -91,6 +109,8 @@ struct ZZPlayStats {
 struct ZZPlayRuntime {
   ZZPlayCore core;
   ZZPlayOptions options;
+  ZZPlayPrefs prefs;
+  ZZPlayController *ctl;
   FILE *file;
   ZZ9KContext *ctx;
   ZZ9KSharedBuffer input;
@@ -110,7 +130,7 @@ struct ZZPlayRuntime {
   uint32_t completed_loops;
   uint64_t audio_origin_pts;
   uint64_t final_audio_frames;
-  /* Per-frame playback trace (diagnostics; --trace). dos.library
+  /* Per-item playback trace (diagnostics; --trace). dos.library
    * BPTR with one unbuffered Write() per line: diagnostics must not
    * take the player down with them, and partial data has to survive
    * a crash (the first stdio-file-write build gurud the machine with
@@ -131,6 +151,9 @@ struct ZZPlayRuntime {
   ZZ9KMediaSessionAudioResult audio_result;
   ZZPlaySyncPolicy sync_policy;
   ZZPlayAudioBackend audio_backend;
+  /* The requested backend was an explicit choice that must not silently
+   * fall back (zzplay_prefs_requested_backend). */
+  uint8_t audio_strict;
   uint8_t audio_enabled;
   uint8_t audio_prepared;
   uint8_t audio_started;
@@ -152,6 +175,25 @@ struct ZZPlayRuntime {
   char title[128];
 };
 
+/* Application state, which outlives every per-item engine run: options,
+ * settings, the controller and the playlist the player window edits. */
+typedef struct ZZPlayApp {
+  ZZPlayOptions options;
+  ZZPlayPrefs prefs;
+  ZZPlayController ctl;
+  ZZPlayPlaylist playlist;
+  int player_mode;
+  int had_failure;
+  int32_t jump_index;      /* pending JUMP target */
+  uint32_t start_seek_ms;  /* restart position for the next START */
+  BPTR trace;
+  /* Private copy of the playing entry's path: playlist edits must not
+   * free the path an engine is reading from. */
+  char item_path[ZZPLAY_PLAYLIST_PATH_MAX];
+} ZZPlayApp;
+
+static ZZPlayApp app;
+
 static uint32_t zzplay_elapsed_us(const TimeVal_Type *start,
                                   const TimeVal_Type *end);
 
@@ -159,53 +201,6 @@ static void zzplay_sigint_handler(int signal_number)
 {
   (void)signal_number;
   zzplay_ctrl_c_requested = 1;
-}
-
-/* The standalone-MP3 control surface (U6 D3). The status window supplies the
- * keys; the SIGINT flag still has to be consulted because libnix converts a
- * Ctrl-C taken during I/O into a signal the window never sees. */
-static int zzplay_mp3_paused(void *user)
-{
-  ZZPlayStatusWindow *status = (ZZPlayStatusWindow *)user;
-
-  return status ? status->paused : 0;
-}
-
-static void zzplay_mp3_backend(void *user, const char *name)
-{
-  zzplay_statuswin_set_backend((ZZPlayStatusWindow *)user, name);
-}
-
-static void zzplay_mp3_progress(void *user, uint32_t elapsed_ms, int exact)
-{
-  zzplay_statuswin_set_position((ZZPlayStatusWindow *)user, elapsed_ms,
-                                exact);
-}
-
-static int zzplay_mp3_stop_requested(void *user)
-{
-  ZZPlayStatusWindow *status = (ZZPlayStatusWindow *)user;
-
-  if (zzplay_ctrl_c_requested != 0) {
-    return 1;
-  }
-  /* This is the one callback both playback loops poll every pass, so it is
-   * also where the status window's input is drained. Polling in the paused
-   * callback as well would consume a single keypress twice. */
-  if (status) {
-    (void)zzplay_statuswin_poll(status);
-    if (status->stop) {
-      return 1;
-    }
-    /* The window already consumed any pending break. */
-    return 0;
-  }
-  if ((SetSignal(0L, SIGBREAKF_CTRL_C) &
-       SIGBREAKF_CTRL_C) != 0U) {
-    zzplay_ctrl_c_requested = 1;
-    return 1;
-  }
-  return 0;
 }
 
 static uint64_t zzplay_now_us(void)
@@ -239,10 +234,11 @@ static void zzplay_profile_end(struct ZZPlayRuntime *runtime,
       zzplay_elapsed_us(started, &ended));
 }
 
-/* Route a failure to whichever surface the user can see. A CLI launch keeps
- * byte-identical stderr output; a Workbench launch has no console at all, so
- * the same text goes to a requester with the redundant "zzplay: " prefix and
- * trailing newline trimmed. */
+/* Route a failure to whichever surface the user can see: the player
+ * window's message line first (it is the desktop player's error surface),
+ * then stderr for a CLI launch, or a Workbench requester. The redundant
+ * "zzplay: " prefix and trailing newline are trimmed for the window and
+ * the requester; stderr output stays byte-identical to the old one. */
 static void zzplay_error(const struct ZZPlayRuntime *runtime,
                          const char *format, ...)
 {
@@ -251,12 +247,7 @@ static void zzplay_error(const struct ZZPlayRuntime *runtime,
   char *text = message;
   size_t length;
 
-  if (!runtime || runtime->options.launch != ZZPLAY_LAUNCH_WORKBENCH) {
-    va_start(args, format);
-    (void)vfprintf(stderr, format, args);
-    va_end(args);
-    return;
-  }
+  (void)runtime;
   va_start(args, format);
   (void)vsprintf(message, format, args);
   va_end(args);
@@ -268,22 +259,34 @@ static void zzplay_error(const struct ZZPlayRuntime *runtime,
     length--;
     text[length] = '\0';
   }
-  zzplay_launch_report(&runtime->options, text);
+  if (runtime && runtime->ctl) {
+    zzplay_controller_set_message(runtime->ctl, text);
+  }
+  zzplay_launch_report_surface(&app.options, text);
 }
 
 static void zzplay_usage(FILE *stream)
 {
   fprintf(stream,
           "%s\n"
-          "Usage: zzplay [--fps|--benchmark] "
-          "[--loop[=count]] "
-          "[--fullscreen] "
-          "[--audio=auto|ahi|mhi|ax|none] "
-          "<mpeg1-program-stream|mp3>\n"
+          "Usage: zzplay [--fps|--benchmark] [--loop[=count]] "
+          "[--fullscreen]\n"
+          "          [--audio=auto|ahi|mhi|ax|none] [--player[=no]]\n"
+          "          [--ahiunit=0..3] [--mhidriver=name] "
+          "[--volume=0..100]\n"
+          "          <file|drawer|pattern|playlist>...\n"
           "  --fps         rolling paced-playback and decode-call FPS\n"
           "  --benchmark   disable pacing and audio unless requested\n"
           "  --loop        repeat forever; --loop=N repeats N times\n"
           "  --fullscreen  start filling the screen, aspect preserved\n"
+          "  --player      stay open as a desktop player (the default\n"
+          "                without files, and from Workbench); "
+          "--player=no\n"
+          "                plays the named files once and exits\n"
+          "  --ahiunit=N   ahi.device unit for AHI output (0..3)\n"
+          "  --mhidriver=N MHI driver file in LIBS:MHI/ "
+          "(default mhizz9000.library)\n"
+          "  --volume=N    starting volume, 0..100\n"
           "  --quiet       no progress output (the default from Workbench)\n"
           "  --verbose     force progress output even from Workbench\n"
           "  --audio=...   select MPEG/MP3 audio output "
@@ -291,12 +294,21 @@ static void zzplay_usage(FILE *stream)
           "  --trace[=p]   log per-frame timing diagnostics "
           "(default T:zzplay.trace)\n"
           "\n"
-          "Workbench: drop a file on the zzplay icon, or start zzplay to be\n"
-          "asked for one. ToolTypes FPS, BENCHMARK, LOOP[=N], FULLSCREEN,\n"
-          "QUIET, VERBOSE, TRACE[=PATH] and AUDIO=<backend> match the\n"
-          "options above. A Workbench launch is quiet by default, because\n"
-          "printing there makes AmigaDOS open an output window that never\n"
-          "closes.\n",
+          "Several files, drawers, patterns or playlists (#?.m3u) may be\n"
+          "named; each is expanded into the playlist.\n"
+          "\n"
+          "Keys (video and player window): space pause, N next, P\n"
+          "previous, S shuffle, L repeat off/track/playlist, + and -\n"
+          "(also cursor up/down) volume, cursor left/right seek (MP3),\n"
+          "F fullscreen, Esc or Q stop.\n"
+          "\n"
+          "Workbench: drop files (or a drawer) on the zzplay icon; every\n"
+          "dropped file is added to the playlist. ToolTypes FPS,\n"
+          "BENCHMARK, LOOP[=N], FULLSCREEN, PLAYER[=NO], AHIUNIT=n,\n"
+          "MHIDRIVER=name, VOLUME=n, QUIET, VERBOSE, TRACE[=PATH] and\n"
+          "AUDIO=<backend> match the options above. A Workbench launch is\n"
+          "quiet by default, because printing there makes AmigaDOS open an\n"
+          "output window that never closes.\n",
           zzplay_version + 6);
 }
 
@@ -484,9 +496,13 @@ static uint32_t zzplay_elapsed_us(const TimeVal_Type *start,
   return seconds * 1000000U + (uint32_t)micros;
 }
 
-/* Defined further down; the window helpers below need them. */
+/* Defined further down; the window and drain helpers below need them. */
 static int zzplay_release_resource(void *user, ZZPlayResource resource);
 static const char *zzplay_audio_backend_name(ZZPlayAudioBackend backend);
+static int zzplay_engine_service_input(struct ZZPlayRuntime *runtime,
+                                       int *resized);
+static void zzplay_engine_stop_from_request(
+    struct ZZPlayRuntime *runtime);
 
 static ZZPlayControlAction zzplay_poll_control(
     struct ZZPlayRuntime *runtime, int *resized)
@@ -518,6 +534,15 @@ static ZZPlayControlAction zzplay_poll_control(
        * must not let a later NONE overwrite a real request. */
       if (action != ZZPLAY_CONTROL_NONE && input.key == 0U) {
         input.key = (unsigned)message->Code;
+      }
+    } else if (message->Class == IDCMP_RAWKEY) {
+      /* Cursor keys have no VANILLAKEY translation; rawkey is consulted
+       * only when no vanilla key mapped to anything (see resolve). */
+      ZZPlayControlAction action = zzplay_control_action_from_rawkey(
+          (unsigned)message->Code);
+
+      if (action != ZZPLAY_CONTROL_NONE && input.rawkey == 0U) {
+        input.rawkey = (unsigned)message->Code;
       }
     } else if (message->Class == IDCMP_NEWSIZE) {
       if (resized) {
@@ -649,7 +674,8 @@ static struct Window *zzplay_open_pip(const ZZPlayVideoInfo *info,
   }
   open_tags[i].ti_Tag = WA_IDCMP;
   open_tags[i++].ti_Data =
-      IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY | IDCMP_NEWSIZE;
+      IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY | IDCMP_RAWKEY |
+      IDCMP_NEWSIZE;
   open_tags[i].ti_Tag = TAG_DONE;
   open_tags[i].ti_Data = 0U;
 
@@ -1216,10 +1242,12 @@ static int zzplay_audio_prepare_from_result(
     period_frames = 1U;
   }
   if (!zzplay_ahi_prepare(
-          &runtime->ahi, audio->sample_rate, audio->channels,
-          period_frames)) {
+          &runtime->ahi, runtime->prefs.ahi_unit, audio->sample_rate,
+          audio->channels, period_frames)) {
     return ZZ9K_STATUS_IO_ERROR;
   }
+  /* The controller's volume applies from the first queued request on. */
+  zzplay_ahi_set_volume(&runtime->ahi, runtime->ctl->volume);
   runtime->audio_prepared = 1U;
   (void)zzplay_resource_acquire(
       &runtime->core.resources, ZZPLAY_RESOURCE_AUDIO_SINK);
@@ -1523,8 +1551,7 @@ static int zzplay_audio_fallback_to_ahi(
 {
   int status;
 
-  if (runtime->options.audio_backend != ZZPLAY_AUDIO_AUTO ||
-      runtime->ax.bound) {
+  if (runtime->audio_strict || runtime->ax.bound) {
     return ax_status;
   }
   status = zzplay_ax_close(&runtime->ax);
@@ -1891,7 +1918,6 @@ static int zzplay_drain_audio(struct ZZPlayRuntime *runtime)
   if (runtime->audio_backend == ZZPLAY_AUDIO_AX) {
     for (;;) {
       TimeVal_Type now;
-      ZZPlayStopReason stop_reason;
       int status = zzplay_audio_pump(
           runtime, 1, refresh_status);
 
@@ -1929,10 +1955,8 @@ static int zzplay_drain_audio(struct ZZPlayRuntime *runtime)
           ZZPLAY_DRAIN_DEADLINE_US) {
         return ZZ9K_STATUS_OK;
       }
-      stop_reason = zzplay_control_stop_reason_from_action(
-          zzplay_poll_control(runtime, 0));
-      if (stop_reason != ZZPLAY_STOP_NONE) {
-        zzplay_core_stop(&runtime->core, stop_reason);
+      if (zzplay_engine_service_input(runtime, 0)) {
+        zzplay_engine_stop_from_request(runtime);
         return ZZ9K_STATUS_CANCELLED;
       }
       zzplay_wait_us(&runtime->timer, ZZPLAY_SYNC_POLL_US);
@@ -1940,7 +1964,6 @@ static int zzplay_drain_audio(struct ZZPlayRuntime *runtime)
   }
   for (;;) {
     TimeVal_Type now;
-    ZZPlayStopReason stop_reason;
     int status = zzplay_audio_pump(
         runtime, 1, refresh_status);
 
@@ -1989,10 +2012,8 @@ static int zzplay_drain_audio(struct ZZPlayRuntime *runtime)
         ZZPLAY_DRAIN_DEADLINE_US) {
       return ZZ9K_STATUS_OK;
     }
-    stop_reason = zzplay_control_stop_reason_from_action(
-        zzplay_poll_control(runtime, 0));
-    if (stop_reason != ZZPLAY_STOP_NONE) {
-      zzplay_core_stop(&runtime->core, stop_reason);
+    if (zzplay_engine_service_input(runtime, 0)) {
+      zzplay_engine_stop_from_request(runtime);
       return ZZ9K_STATUS_CANCELLED;
     }
     zzplay_wait_us(&runtime->timer, ZZPLAY_SYNC_POLL_US);
@@ -2343,151 +2364,183 @@ static ZZPlayFeedResult zzplay_feed_round(
   return ZZPLAY_FEED_DONE;
 }
 
-/* The large startup locals live in static storage, not on the shell's
- * stack: main's frame on the caller-provided stack plus a DOS write
- * path (the trace's first Write) overflowed it on hardware and faulted
- * inside the handler -- instant guru before the window opened, with
- * the trace file created but empty. Plain and --fps runs never enter
- * a file-write path, which is why only --trace died. */
+/* The large statics live in static storage, not on the shell's stack: a
+ * caller-provided stack plus a DOS write path (the trace's first Write)
+ * overflowed it on hardware and faulted inside the handler -- instant
+ * guru before the window opened, with the trace file created but empty.
+ * Plain and --fps runs never enter a file-write path, which is why only
+ * --trace died. The runtime is reset per item; the app state is not. */
 static struct ZZPlayRuntime runtime;
 static ZZPlayLaunch launch;
-static ZZPlayStatusWindow status_window;
-static ZZPlayMP3Controls mp3_controls;
 static ZZPlayProbeInfo probe;
 static ZZPlayVideoInfo info;
 static ZZPlayTransport transport;
 
-int main(int argc, char **argv)
+/* ------------------------------------------------------------------ */
+/* Application: playlist, settings, request routing.                    */
+/* ------------------------------------------------------------------ */
+
+/* What the application loop should do next. */
+typedef enum ZZPlayAppStep {
+  ZZPLAY_APP_START,         /* play the current (or first) entry */
+  ZZPLAY_APP_AUTO,          /* advance after EOF or failure */
+  ZZPLAY_APP_USER_NEXT,     /* the user asked for next/previous */
+  ZZPLAY_APP_USER_PREVIOUS,
+  ZZPLAY_APP_JUMP,
+  ZZPLAY_APP_IDLE,          /* player mode: wait for input */
+  ZZPLAY_APP_EXIT,          /* leave the program normally */
+  ZZPLAY_APP_QUIT           /* leave the program on a quit request */
+} ZZPlayAppStep;
+
+static void zzplay_app_after_input(ZZPlayApp *app)
 {
-  ZZPlayOptionsResult options_result;
-  int have_status_window;
+  if (app->ctl.settings_changed) {
+    app->ctl.settings_changed = 0;
+    /* Device settings changed: entries that failed on the old output
+     * deserve another chance on the new one. */
+    zzplay_playlist_clear_failed(&app->playlist);
+  }
+  /* Repeat/shuffle may change from the video window's keys with no player
+   * window open to sync them, and AUTO advance reads the playlist's copy. */
+  if (app->playlist.repeat != app->ctl.repeat) {
+    zzplay_playlist_set_repeat(&app->playlist, app->ctl.repeat);
+  }
+  if ((app->playlist.shuffle != 0) != (app->ctl.shuffle != 0)) {
+    zzplay_playlist_set_shuffle(&app->playlist, app->ctl.shuffle, 0U);
+  }
+}
+
+/* The generic pump samples Ctrl-C. MPEG has already consumed it with PIP
+ * input, so its hot path calls zzplay_app_after_input() directly. */
+static void zzplay_app_pump(void *user)
+{
+  ZZPlayApp *app = (ZZPlayApp *)user;
+
+  if (zzplay_ctrl_c_requested != 0 ||
+      (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) != 0U) {
+    zzplay_ctrl_c_requested = 1;
+    (void)zzplay_controller_request(&app->ctl, ZZPLAY_REQUEST_QUIT);
+  }
+  zzplay_gui_poll();
+  zzplay_app_after_input(app);
+}
+
+static void zzplay_app_open_gui(ZZPlayApp *app)
+{
+  ZZPlayGuiContext context;
+
+  if (zzplay_gui_is_open()) {
+    return;
+  }
+  context.controller = &app->ctl;
+  context.playlist = &app->playlist;
+  context.prefs = &app->prefs;
+  context.version = zzplay_version + 6;
+  if (!zzplay_gui_open(&context)) {
+    /* Headless fallback: playback still works, and the message line
+     * state is kept for the day the window does open. */
+    zzplay_controller_set_message(&app->ctl,
+                                  "cannot open the player window");
+    zzplay_launch_report(&app->options,
+                         "cannot open the player window; "
+                         "continuing without it");
+  }
+}
+
+
+
+/* ------------------------------------------------------------------ */
+/* MPEG-1 Program Stream engine (the former main() playback body).     */
+/* ------------------------------------------------------------------ */
+
+static void zzplay_engine_refresh_output(struct ZZPlayRuntime *runtime)
+{
+  char output[ZZPLAY_NOW_OUTPUT_MAX];
+
+  if (runtime->audio_backend == ZZPLAY_AUDIO_AX) {
+    strcpy(output, "ZZ9000AX direct");
+  } else if (runtime->audio_backend == ZZPLAY_AUDIO_AHI) {
+    sprintf(output, "AHI unit %lu",
+            (unsigned long)runtime->prefs.ahi_unit);
+  } else {
+    strcpy(output, "no audio");
+  }
+  if (runtime->ctl->volume == 0U &&
+      runtime->ctl->now.volume_supported) {
+    strcat(output, ", muted");
+  }
+  zzplay_controller_set_output(runtime->ctl, output);
+}
+
+/* PIP input plus the GUI pump, shared by the playback loop and the drain
+ * wait. Returns 1 when the item must end (a request is pending). */
+static int zzplay_engine_service_input(struct ZZPlayRuntime *runtime,
+                                       int *resized)
+{
+  ZZPlayControlAction control = zzplay_poll_control(runtime, resized);
+
+  if (control != ZZPLAY_CONTROL_NONE) {
+    /* PIP-window actions become controller state; the stop keys post the
+     * item-ending requests the application loop then routes. */
+    (void)zzplay_controller_apply(runtime->ctl, control);
+  }
+  zzplay_gui_poll();
+  zzplay_app_after_input(&app);
+  return zzplay_controller_item_should_end(runtime->ctl);
+}
+
+static void zzplay_engine_stop_from_request(struct ZZPlayRuntime *runtime)
+{
+  zzplay_core_stop(&runtime->core,
+                   runtime->ctl->request == ZZPLAY_REQUEST_QUIT
+                       ? ZZPLAY_STOP_CTRL_C
+                       : ZZPLAY_STOP_WINDOW_CLOSE);
+}
+
+static ZZPlayEngineResult zzplay_engine_mpeg(const ZZPlayEngineRun *run)
+{
   ZZ9KBoard board;
   ZZ9KCaps caps;
   ZZ9KApertureLayout aperture;
   ZZ9KServiceInfo service;
   ZZ9KMediaSessionMainResult result;
   ZZPlayBackendDecision audio_decision;
+  ZZPlayAudioBackend requested;
   uint32_t frame_period_us;
   uint32_t input_bytes;
   uint32_t pcm_bytes;
   uint32_t held_decode_us = 0U;
   int media_done = 0;
   int cleanup_status;
+  int strict = 0;
+  int gui_open;
 
-  zzplay_ctrl_c_requested = 0;
-  (void)signal(SIGINT, zzplay_sigint_handler);
+  /* Fresh per-item state; options, prefs and the controller belong to
+   * the application and are only read (the per-item options copy holds
+   * the loop counters). */
   memset(&runtime, 0, sizeof(runtime));
-  memset(&probe, 0, sizeof(probe));
-  memset(&info, 0, sizeof(info));
   memset(&board, 0, sizeof(board));
+  memset(&caps, 0, sizeof(caps));
   memset(&aperture, 0, sizeof(aperture));
   memset(&result, 0, sizeof(result));
   runtime.audio_origin_pts = ZZ9K_MEDIA_NO_PTS;
+  runtime.ctl = run->ctl;
+  runtime.options = *run->options;
+  runtime.prefs = *run->prefs;
+  runtime.trace = app.trace;
+  gui_open = zzplay_gui_is_open();
   zzplay_core_init(&runtime.core);
   zzplay_transport_init(&transport);
 
-  options_result = zzplay_launch_begin(
-      argc, argv, &runtime.options, &launch);
-  if (options_result == ZZPLAY_OPTIONS_HELP) {
-    zzplay_usage(stdout);
-    zzplay_launch_end(&launch);
-    return 0;
-  }
-  if (options_result != ZZPLAY_OPTIONS_OK) {
-    /* A Workbench launch has no console: the requester is the only place
-     * the user will ever see this. A cancelled file requester lands here
-     * too, which is why the text has to suit both. */
-    if (runtime.options.launch == ZZPLAY_LAUNCH_WORKBENCH) {
-      zzplay_launch_report(&runtime.options,
-                           "No playable file was selected, or an icon "
-                           "ToolType is invalid.");
-    } else {
-      zzplay_usage(stderr);
-    }
-    zzplay_launch_end(&launch);
-    return 20;
-  }
-
-  zzplay_set_quiet(runtime.options.quiet);
-
-  if (runtime.options.trace_path) {
-    runtime.trace = Open((CONST_STRPTR)runtime.options.trace_path,
-                         MODE_NEWFILE);
-    if (runtime.trace) {
-      static const char header[] =
-              "# zzplay trace v1: F frame t=ms v=videoMs m=masterMs "
-              "dr=driftMs d=decision(P/H/D/N) dec=decodeUs gap=us "
-              "acc=inputBytesSinceLastF ni=needInputPolls "
-              "wb=writeBusy db=decodeBusy rd=fileReads "
-              "rmax=maxReadUs q=audioQueuedFrames und=underruns\n";
-
-      /* No GetSysTime here: TimerBase is not open yet (see
-       * zzplay_trace_ms). The clock anchors on the first traced
-       * frame, after the timer is open. */
-      (void)Write(runtime.trace, (APTR)header,
-                  (LONG)(sizeof(header) - 1U));
-    } else {
-      zzplay_info("zzplay: cannot open trace file %s\n",
-                  runtime.options.trace_path);
-    }
-  }
-
-  runtime.file = fopen(runtime.options.path, "rb");
+  runtime.file = fopen(run->path, "rb");
   if (!runtime.file) {
-    zzplay_error(&runtime, "zzplay: cannot open %s\n",
-                 runtime.options.path);
-    zzplay_launch_end(&launch);
-    return 20;
+    zzplay_error(&runtime, "zzplay: cannot open %s\n", run->path);
+    return ZZPLAY_ENGINE_FAILED;
   }
   (void)zzplay_resource_acquire(
       &runtime.core.resources, ZZPLAY_RESOURCE_INPUT_FILE);
 
-  if (!zzplay_probe_media_file(runtime.file, &probe)) {
-    zzplay_error(&runtime,
-            "zzplay: input is not a supported MPEG-1 Program Stream "
-            "or Layer III file\n");
-    zzplay_fail(&runtime, ZZPLAY_FAILURE_INVALID_INPUT,
-                ZZ9K_STATUS_UNSUPPORTED);
-    goto cleanup;
-  }
-  if (probe.kind == ZZPLAY_MEDIA_KIND_MP3) {
-    int mp3_ok;
-
-    zzplay_info("zzplay: standalone MP3, %lu Hz, %lu channel%s, "
-           "first frame %lu kbps\n",
-           (unsigned long)probe.mp3.sample_rate,
-           (unsigned long)probe.mp3.channels,
-           probe.mp3.channels == 1U ? "" : "s",
-           (unsigned long)probe.mp3.bitrate_kbps);
-    (void)zzplay_resource_release(
-        &runtime.core.resources, ZZPLAY_RESOURCE_INPUT_FILE,
-        zzplay_release_resource, &runtime);
-    /* Standalone MP3 has no PIP window, so give it its own control surface
-     * (U6 D3). Playback must still work if the window cannot open. */
-    memset(&status_window, 0, sizeof(status_window));
-    have_status_window = zzplay_statuswin_open(
-        &status_window, runtime.options.path, probe.mp3.sample_rate,
-        probe.mp3.channels, probe.mp3.bitrate_kbps,
-        zzplay_statuswin_duration_ms(runtime.options.path,
-                                     probe.mp3.bitrate_kbps));
-    status_window.loop =
-        runtime.options.loop_mode != ZZPLAY_LOOP_NONE ? 1 : 0;
-    memset(&mp3_controls, 0, sizeof(mp3_controls));
-    mp3_controls.stop_requested = zzplay_mp3_stop_requested;
-    mp3_controls.paused = zzplay_mp3_paused;
-    mp3_controls.backend = zzplay_mp3_backend;
-    mp3_controls.progress = zzplay_mp3_progress;
-    mp3_controls.user = have_status_window ? &status_window : 0;
-    mp3_ok = zzplay_mp3_run(
-        runtime.options.path, &probe.mp3, &runtime.options,
-        &mp3_controls);
-    if (have_status_window) {
-      zzplay_statuswin_close(&status_window);
-    }
-    zzplay_launch_end(&launch);
-    return mp3_ok ? 0 : 20;
-  }
-  info = probe.video;
+  info = run->probe->video;
   if (!zzplay_video_info_supported(&info)) {
     zzplay_error(&runtime, "zzplay: unsupported MPEG-1 video geometry\n");
     zzplay_fail(&runtime, ZZPLAY_FAILURE_INVALID_INPUT,
@@ -2502,9 +2555,12 @@ int main(int argc, char **argv)
                 ZZ9K_STATUS_UNSUPPORTED);
     goto cleanup;
   }
+  requested = zzplay_prefs_requested_backend(
+      &runtime.prefs, &runtime.options, ZZPLAY_MEDIA_AUDIO_MP2, &strict);
+  runtime.audio_strict = (uint8_t)(strict ? 1 : 0);
   if (!info.has_audio_pes &&
-      runtime.options.audio_backend != ZZPLAY_AUDIO_AUTO &&
-      runtime.options.audio_backend != ZZPLAY_AUDIO_NONE) {
+      requested != ZZPLAY_AUDIO_AUTO && requested != ZZPLAY_AUDIO_NONE &&
+      strict) {
     zzplay_error(&runtime,
             "zzplay: the Program Stream has no supported MP2 audio\n");
     zzplay_fail(&runtime, ZZPLAY_FAILURE_INVALID_INPUT,
@@ -2520,14 +2576,18 @@ int main(int argc, char **argv)
     availability.mhi = ZZPLAY_BACKEND_MISSING;
     availability.ax = ZZPLAY_BACKEND_FREE;
     audio_decision = zzplay_audio_select(
-        ZZPLAY_MEDIA_AUDIO_MP2, runtime.options.audio_backend,
-        &availability);
+        ZZPLAY_MEDIA_AUDIO_MP2, requested, &availability);
+    if (audio_decision.status != ZZPLAY_BACKEND_OK && !strict) {
+      /* A saved (non-strict) preference that cannot play falls back
+       * exactly like AUTO instead of failing the item. */
+      audio_decision = zzplay_audio_select(
+          ZZPLAY_MEDIA_AUDIO_MP2, ZZPLAY_AUDIO_AUTO, &availability);
+    }
     if (audio_decision.status != ZZPLAY_BACKEND_OK) {
       zzplay_error(&runtime,
               "zzplay: audio backend %s cannot play Program "
               "Stream MP2 (status %u)\n",
-              zzplay_audio_backend_name(
-                  runtime.options.audio_backend),
+              zzplay_audio_backend_name(requested),
               (unsigned)audio_decision.status);
       zzplay_fail(&runtime, ZZPLAY_FAILURE_CAPABILITY,
                   ZZ9K_STATUS_UNSUPPORTED);
@@ -2549,6 +2609,20 @@ int main(int argc, char **argv)
          (unsigned long)(info.frame_rate_milli / 1000U),
          (unsigned long)(info.frame_rate_milli % 1000U),
          info.has_audio_pes ? "MP2" : "none");
+  zzplay_controller_set_capabilities(
+      runtime.ctl, 0, runtime.audio_backend == ZZPLAY_AUDIO_AHI, 1);
+  {
+    char format[ZZPLAY_NOW_TEXT_MAX];
+
+    sprintf(format, "MPEG-1 %lux%lu, %lu.%03lu fps, %s",
+            (unsigned long)info.width, (unsigned long)info.height,
+            (unsigned long)(info.frame_rate_milli / 1000U),
+            (unsigned long)(info.frame_rate_milli % 1000U),
+            info.has_audio_pes ? "MP2" : "no audio");
+    zzplay_controller_set_format(runtime.ctl, format);
+  }
+  zzplay_controller_set_duration(runtime.ctl, 0U);
+  zzplay_engine_refresh_output(&runtime);
 
   if (zz9k_find_board(&board) != ZZ9K_STATUS_OK ||
       (board.zorro_version != 2U && board.zorro_version != 3U)) {
@@ -2621,12 +2695,13 @@ int main(int argc, char **argv)
   }
   if (runtime.audio_backend == ZZPLAY_AUDIO_AX &&
       (service.flags & ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND) == 0U) {
-    if (runtime.options.audio_backend == ZZPLAY_AUDIO_AUTO) {
+    if (!strict) {
       runtime.audio_backend = ZZPLAY_AUDIO_AHI;
       audio_decision.selected = ZZPLAY_AUDIO_AHI;
       audio_decision.fell_back = 1;
+      zzplay_engine_refresh_output(&runtime);
       zzplay_info("zzplay: card-local AX media output unavailable; "
-             "AUTO falling back to AHI\n");
+             "falling back to AHI\n");
     } else {
       zzplay_error(&runtime,
               "zzplay: firmware or hardware does not advertise "
@@ -2638,7 +2713,7 @@ int main(int argc, char **argv)
   }
   zzplay_info("zzplay: selected audio backend %s%s\n",
          zzplay_audio_backend_name(runtime.audio_backend),
-         audio_decision.fell_back ? " (AUTO fallback)" : "");
+         audio_decision.fell_back ? " (fallback)" : "");
 
   input_bytes = board.zorro_version == 2U ? ZZPLAY_Z2_INPUT_BYTES
                                          : ZZPLAY_INPUT_BYTES;
@@ -2704,21 +2779,20 @@ int main(int argc, char **argv)
 playback_session:
   while (runtime.core.state == ZZPLAY_STATE_PLAYING ||
          runtime.core.state == ZZPLAY_STATE_PAUSED) {
-    ZZPlayControlAction control;
-    ZZPlayStopReason stop_reason;
     ZZPlayMediaAction action;
     int resized = 0;
 
-    control = zzplay_poll_control(&runtime, &resized);
-    stop_reason = zzplay_control_stop_reason_from_action(control);
-    if (stop_reason != ZZPLAY_STOP_NONE) {
-      zzplay_core_stop(&runtime.core, stop_reason);
+    if (zzplay_engine_service_input(&runtime, &resized)) {
+      zzplay_engine_stop_from_request(&runtime);
       break;
     }
     if (resized) {
       zzplay_apply_resize(&runtime);
     }
-    if (control == ZZPLAY_CONTROL_TOGGLE_PAUSE) {
+    /* Pause follows the controller and is confirmed back once the engine
+     * is really holding, so modal operations may run while paused. */
+    if ((runtime.core.state == ZZPLAY_STATE_PAUSED) !=
+        (runtime.ctl->paused != 0)) {
       cleanup_status = zzplay_toggle_pause(&runtime);
       if (cleanup_status != ZZ9K_STATUS_OK) {
         zzplay_error(&runtime, "zzplay: pause/resume failed: %s\n",
@@ -2726,8 +2800,12 @@ playback_session:
         zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
         break;
       }
+      zzplay_controller_set_engine_paused(
+          runtime.ctl,
+          runtime.core.state == ZZPLAY_STATE_PAUSED);
       runtime.title_dirty = 1U;
-    } else if (control == ZZPLAY_CONTROL_TOGGLE_FULLSCREEN) {
+    }
+    if (zzplay_controller_take_fullscreen_toggle(runtime.ctl)) {
       if (!zzplay_toggle_fullscreen(&runtime)) {
         zzplay_error(&runtime,
                      "zzplay: cannot reopen the P96 PIP window "
@@ -2736,20 +2814,16 @@ playback_session:
                     ZZ9K_STATUS_UNSUPPORTED);
         break;
       }
-    } else if (control == ZZPLAY_CONTROL_TOGGLE_LOOP) {
-      /* Toggling loop mid-play affects what happens at the next EOF; an
-       * indefinite loop becomes "stop after this pass". */
-      if (runtime.options.loop_mode == ZZPLAY_LOOP_NONE) {
-        runtime.options.loop_mode = ZZPLAY_LOOP_FOREVER;
-        runtime.options.loop_count = 0U;
-      } else {
-        runtime.options.loop_mode = ZZPLAY_LOOP_NONE;
-        runtime.options.loop_count = 0U;
+    }
+    {
+      uint32_t volume;
+
+      if (zzplay_controller_take_volume(runtime.ctl, &volume)) {
+        if (runtime.audio_backend == ZZPLAY_AUDIO_AHI) {
+          zzplay_ahi_set_volume(&runtime.ahi, volume);
+        }
+        zzplay_engine_refresh_output(&runtime);
       }
-      zzplay_info("zzplay: loop %s\n",
-             runtime.options.loop_mode == ZZPLAY_LOOP_NONE ? "off"
-                                                           : "on");
-      runtime.title_dirty = 1U;
     }
     zzplay_update_title(&runtime);
     if (runtime.core.state == ZZPLAY_STATE_PAUSED) {
@@ -2868,7 +2942,7 @@ playback_session:
       zzplay_error(&runtime, "zzplay: media decode failed: %s\n",
               zz9k_status_name(cleanup_status));
       zzplay_fail(&runtime, ZZPLAY_FAILURE_SESSION,
-                  cleanup_status);
+              cleanup_status);
       break;
     }
     if (result.frame_rate_num != 0U &&
@@ -2888,6 +2962,14 @@ playback_session:
       runtime.frames++;
       runtime.frame_held = 1U;
       runtime.trace_video_pts = result.video_pts;
+      if (gui_open) {
+        /* Elapsed position from decoded frames is only visible in the
+         * player window; one-shot MPEG has no seekable status to update. */
+        zzplay_controller_set_position(
+            runtime.ctl,
+            (uint32_t)((uint64_t)runtime.frames * frame_period_us / 1000U),
+            1);
+      }
       continue;
     }
     if (action == ZZPLAY_MEDIA_DONE) {
@@ -2915,7 +2997,9 @@ playback_failed:
     (void)zzplay_core_begin_drain(&runtime.core);
     cleanup_status = zzplay_drain_audio(&runtime);
     if (cleanup_status == ZZ9K_STATUS_OK) {
-      if (runtime.options.loop_mode == ZZPLAY_LOOP_FOREVER ||
+      /* Repeat ONE is the seamless engine loop; a finite CLI LOOP=N
+       * count is engine-internal and independent of it. */
+      if (zzplay_controller_loop_item(runtime.ctl) ||
           (runtime.options.loop_mode == ZZPLAY_LOOP_FINITE &&
            runtime.options.loop_count != 0U)) {
         if (!zzplay_core_begin_loop(&runtime.core)) {
@@ -2972,10 +3056,8 @@ playback_failed:
   }
 
 cleanup:
-  if (runtime.trace) {
-    Close(runtime.trace);
-    runtime.trace = 0;
-  }
+  /* The trace file belongs to the application and serves every item. */
+  runtime.trace = 0;
   if (runtime.options.show_fps) {
     zzplay_stats_stop(&runtime.stats);
     /* Must run before resource release closes the media session. */
@@ -3019,9 +3101,439 @@ cleanup:
     if (runtime.options.show_fps) {
       zzplay_stats_finish(&runtime.stats);
     }
+  }
+  if (runtime.core.state == ZZPLAY_STATE_ERROR) {
+    return ZZPLAY_ENGINE_FAILED;
+  }
+  if (runtime.ctl->request != ZZPLAY_REQUEST_NONE) {
+    return ZZPLAY_ENGINE_STOPPED;
+  }
+  return ZZPLAY_ENGINE_EOF;
+}
+
+/* ------------------------------------------------------------------ */
+/* Engine table and the application loop.                               */
+/* ------------------------------------------------------------------ */
+
+static const struct ZZPlayEngineEntry {
+  ZZPlayMediaKind kind;
+  ZZPlayEngineFn run;
+} zzplay_engines[] = {
+  { ZZPLAY_MEDIA_KIND_MPEG_PS, zzplay_engine_mpeg },
+  { ZZPLAY_MEDIA_KIND_MP3, zzplay_mp3_run }
+};
+
+static ZZPlayEngineFn zzplay_engine_for_kind(ZZPlayMediaKind kind)
+{
+  unsigned i;
+
+  for (i = 0U;
+       i < (unsigned)(sizeof(zzplay_engines) / sizeof(zzplay_engines[0]));
+       i++) {
+    if (zzplay_engines[i].kind == kind) {
+      return zzplay_engines[i].run;
+    }
+  }
+  return 0;
+}
+
+/* Play one entry and say what happens next. Errors are reported to the
+ * message line / stderr here or by the engine; the entry is marked failed
+ * and playback advances, so one bad file never stops the list. */
+static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
+{
+  ZZPlayEngineRun run;
+  ZZPlayEngineResult outcome = ZZPLAY_ENGINE_FAILED;
+  ZZPlayEngineFn engine = 0;
+  const ZZPlayFormat *format;
+  ZZPlayTags tags;
+  ZZPlayRequest request;
+  FILE *file;
+  uint64_t file_size = 0U;
+  int32_t jump_index;
+  uint32_t seek_ms;
+  int probed = 0;
+
+  if (index < 0 || (uint32_t)index >= app->playlist.count) {
+    return app->player_mode ? ZZPLAY_APP_IDLE : ZZPLAY_APP_EXIT;
+  }
+  /* Private copy: the playlist may be edited while this item plays. */
+  strncpy(app->item_path, app->playlist.entries[index].path,
+          sizeof(app->item_path) - 1U);
+  app->item_path[sizeof(app->item_path) - 1U] = '\0';
+  (void)zzplay_playlist_set_current(&app->playlist, index);
+  zzplay_controller_item_begin(&app->ctl);
+
+  /* Title first, so the window shows the item even when it fails: an
+   * ID3 "Artist - Title" for MP3, else the file name. Probing shares
+   * the same open file. */
+  memset(&tags, 0, sizeof(tags));
+  memset(&probe, 0, sizeof(probe));
+  file = fopen(app->item_path, "rb");
+  if (file) {
+    long length = 0L;
+
+    (void)zzplay_tags_read(file, &tags);
+    if (fseek(file, 0L, SEEK_END) == 0) {
+      length = ftell(file);
+      (void)fseek(file, 0L, SEEK_SET);
+    }
+    if (length > 0L) {
+      file_size = (uint64_t)length;
+    }
+    probed = zzplay_probe_media_file(file, &probe);
+    fclose(file);
+  }
+  {
+    char display[2 * ZZPLAY_TAG_TEXT_MAX + 8];
+
+    display[0] = '\0';
+    if (probe.kind == ZZPLAY_MEDIA_KIND_MP3) {
+      zzplay_tags_display(&tags, display, sizeof(display));
+    }
+    if (display[0] != '\0') {
+      (void)zzplay_playlist_set_title(&app->playlist,
+                                      (uint32_t)index, display);
+      zzplay_controller_set_title(&app->ctl, display);
+    } else {
+      zzplay_controller_set_title(
+          &app->ctl,
+          zzplay_playlist_basename(app->item_path));
+    }
+  }
+
+  if (probed) {
+    engine = zzplay_engine_for_kind(probe.kind);
+  }
+  if (!file) {
+    zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s",
+                          app->item_path);
+  } else if (!engine) {
+    zzplay_launch_reportf(
+        &app->ctl, &app->options,
+        "cannot play %s: not a supported MPEG-1 Program Stream or MP3 file",
+        app->item_path);
+  } else {
+    format = zzplay_format_for_kind(probe.kind);
+    /* A one-shot run shows only the video window; an audio-only item
+     * opens the player window lazily, as the status window's
+     * replacement, and keeps it until exit. */
+    if (!app->player_mode && format &&
+        (format->flags & ZZPLAY_FORMAT_HAS_VIDEO) == 0U) {
+      zzplay_app_open_gui(app);
+    }
+    memset(&run, 0, sizeof(run));
+    run.ctl = &app->ctl;
+    run.path = app->item_path;
+    run.probe = &probe;
+    run.options = &app->options;
+    run.prefs = &app->prefs;
+    run.audio_start = tags.audio_start;
+    run.trailer_bytes = tags.trailer_bytes;
+    run.file_size = file_size;
+    run.seek_ms = app->start_seek_ms;
+    run.pump = zzplay_app_pump;
+    run.pump_user = app;
+    app->start_seek_ms = 0U;
+    outcome = engine(&run);
+  }
+  /* A pending request outranks whatever the engine reported; consume it
+   * before item_end clears the per-item state. */
+  request = zzplay_controller_take_request(&app->ctl, &jump_index,
+                                           &seek_ms);
+  zzplay_controller_item_end(&app->ctl);
+
+  switch (request) {
+    case ZZPLAY_REQUEST_QUIT:
+      return ZZPLAY_APP_QUIT;
+    case ZZPLAY_REQUEST_STOP:
+      return app->player_mode ? ZZPLAY_APP_IDLE : ZZPLAY_APP_EXIT;
+    case ZZPLAY_REQUEST_NEXT:
+      return ZZPLAY_APP_USER_NEXT;
+    case ZZPLAY_REQUEST_PREVIOUS:
+      return ZZPLAY_APP_USER_PREVIOUS;
+    case ZZPLAY_REQUEST_JUMP:
+      app->jump_index = jump_index;
+      return ZZPLAY_APP_JUMP;
+    case ZZPLAY_REQUEST_PLAY:
+    case ZZPLAY_REQUEST_SEEK:
+      app->start_seek_ms = seek_ms;
+      return ZZPLAY_APP_START;
+    default:
+      break;
+  }
+  switch (outcome) {
+    case ZZPLAY_ENGINE_EOF:
+      return ZZPLAY_APP_AUTO;
+    case ZZPLAY_ENGINE_FAILED:
+      /* Not `index`: the playlist may have been edited during playback.
+       * `current` follows the entry through removals and moves, and is -1
+       * when the entry itself was removed (nothing left to mark). */
+      if (app->playlist.current >= 0) {
+        zzplay_playlist_mark_failed(&app->playlist,
+                                    (uint32_t)app->playlist.current, 1);
+      }
+      app->had_failure = 1;
+      return ZZPLAY_APP_AUTO;
+    case ZZPLAY_ENGINE_QUIT:
+      return ZZPLAY_APP_QUIT;
+    case ZZPLAY_ENGINE_STOPPED:
+    default:
+      return app->player_mode ? ZZPLAY_APP_IDLE : ZZPLAY_APP_EXIT;
+  }
+}
+
+/* Player-mode idle wait: sleep until the GUI has input (or Ctrl-C), then
+ * turn the resulting request into the next step. */
+/* Player-mode idle wait services a ready modal before sleeping, so STOP cannot
+ * strand an operation that became runnable during item teardown. */
+static ZZPlayAppStep zzplay_app_idle(ZZPlayApp *app)
+{
+  for (;;) {
+    ZZPlayRequest request;
+    int32_t jump_index = 0;
+    uint32_t seek_ms = 0U;
+
+    zzplay_app_pump(app);
+    if (zzplay_ctrl_c_requested != 0) {
+      return ZZPLAY_APP_QUIT;
+    }
+    if (app->ctl.request == ZZPLAY_REQUEST_NONE) {
+      uint32_t mask = zzplay_gui_signal_mask() | SIGBREAKF_CTRL_C;
+      uint32_t signals = Wait(mask);
+
+      if (zzplay_ctrl_c_requested != 0 ||
+          (signals & SIGBREAKF_CTRL_C) != 0U) {
+        zzplay_ctrl_c_requested = 1;
+        return ZZPLAY_APP_QUIT;
+      }
+      zzplay_app_pump(app);
+    }
+    if (app->ctl.request == ZZPLAY_REQUEST_NONE) {
+      continue;
+    }
+    request = zzplay_controller_take_request(&app->ctl, &jump_index,
+                                             &seek_ms);
+    switch (request) {
+      case ZZPLAY_REQUEST_QUIT:
+        return ZZPLAY_APP_QUIT;
+      case ZZPLAY_REQUEST_STOP:
+        return ZZPLAY_APP_IDLE;
+      case ZZPLAY_REQUEST_NEXT:
+        return ZZPLAY_APP_USER_NEXT;
+      case ZZPLAY_REQUEST_PREVIOUS:
+        return ZZPLAY_APP_USER_PREVIOUS;
+      case ZZPLAY_REQUEST_JUMP:
+        app->jump_index = jump_index;
+        return ZZPLAY_APP_JUMP;
+      case ZZPLAY_REQUEST_PLAY:
+      case ZZPLAY_REQUEST_SEEK:
+        if (app->playlist.count == 0U) {
+          zzplay_launch_reportf(&app->ctl, &app->options,
+                                "the playlist is empty");
+          continue;
+        }
+        app->start_seek_ms = seek_ms;
+        return ZZPLAY_APP_START;
+      default:
+        continue;
+    }
+  }
+}
+
+static int zzplay_app_run(ZZPlayApp *app)
+{
+  ZZPlayAppStep step;
+  int32_t index;
+
+  /* A one-shot run plays the list and exits; the player waits for input
+   * instead of starting anything by itself. */
+  step = app->player_mode ? ZZPLAY_APP_IDLE : ZZPLAY_APP_START;
+  if (!app->player_mode && app->playlist.count == 0U) {
+    return app->had_failure ? 20 : 0;
+  }
+  while (step != ZZPLAY_APP_EXIT && step != ZZPLAY_APP_QUIT) {
+    switch (step) {
+      case ZZPLAY_APP_IDLE:
+        step = zzplay_app_idle(app);
+        break;
+      case ZZPLAY_APP_START:
+        /* PLAY restarts the current entry; with none current the list
+         * starts from its first entry in play order. */
+        index = app->playlist.current >= 0
+                    ? app->playlist.current
+                    : zzplay_playlist_next(&app->playlist,
+                                           ZZPLAY_ADVANCE_AUTO);
+        step = index >= 0 ? zzplay_app_play_index(app, index)
+                          : (app->player_mode ? ZZPLAY_APP_IDLE
+                                              : ZZPLAY_APP_EXIT);
+        break;
+      case ZZPLAY_APP_AUTO:
+        /* AUTO honours repeat-track; failed entries are skipped, and an
+         * exhausted (or all-failed) list ends the run instead of
+         * spinning on it. */
+        index = zzplay_playlist_next(&app->playlist,
+                                     ZZPLAY_ADVANCE_AUTO);
+        step = index >= 0 ? zzplay_app_play_index(app, index)
+                          : (app->player_mode ? ZZPLAY_APP_IDLE
+                                              : ZZPLAY_APP_EXIT);
+        break;
+      case ZZPLAY_APP_USER_NEXT:
+        index = zzplay_playlist_next(&app->playlist,
+                                     ZZPLAY_ADVANCE_USER);
+        step = index >= 0 ? zzplay_app_play_index(app, index)
+                          : (app->player_mode ? ZZPLAY_APP_IDLE
+                                              : ZZPLAY_APP_EXIT);
+        break;
+      case ZZPLAY_APP_USER_PREVIOUS:
+        index = zzplay_playlist_previous(&app->playlist);
+        step = index >= 0 ? zzplay_app_play_index(app, index)
+                          : (app->player_mode ? ZZPLAY_APP_IDLE
+                                              : ZZPLAY_APP_EXIT);
+        break;
+      case ZZPLAY_APP_JUMP:
+        if (app->jump_index >= 0 &&
+            (uint32_t)app->jump_index < app->playlist.count) {
+          step = zzplay_app_play_index(app, app->jump_index);
+        } else {
+          step = app->player_mode ? ZZPLAY_APP_IDLE : ZZPLAY_APP_EXIT;
+        }
+        break;
+      default:
+        step = ZZPLAY_APP_EXIT;
+        break;
+    }
+  }
+  if (step == ZZPLAY_APP_QUIT) {
+    return 0;
+  }
+  if (!app->player_mode && app->had_failure) {
+    return 20;
+  }
+  return 0;
+}
+
+int main(int argc, char **argv)
+{
+  ZZPlayOptionsResult options_result;
+  uint32_t i;
+  int exit_code;
+
+  zzplay_ctrl_c_requested = 0;
+  (void)signal(SIGINT, zzplay_sigint_handler);
+  memset(&runtime, 0, sizeof(runtime));
+  memset(&probe, 0, sizeof(probe));
+  memset(&info, 0, sizeof(info));
+  memset(&app, 0, sizeof(app));
+
+  options_result = zzplay_launch_begin(argc, argv, &app.options,
+                                       &launch);
+  if (options_result == ZZPLAY_OPTIONS_HELP) {
+    zzplay_usage(stdout);
     zzplay_launch_end(&launch);
     return 0;
   }
+  if (options_result != ZZPLAY_OPTIONS_OK) {
+    /* A Workbench launch has no console: the requester is the only place
+     * the user will ever see this. */
+    if (app.options.launch == ZZPLAY_LAUNCH_WORKBENCH) {
+      zzplay_launch_report(&app.options,
+                           "An icon ToolType is invalid.");
+    } else {
+      zzplay_usage(stderr);
+    }
+    zzplay_launch_end(&launch);
+    return 20;
+  }
+
+  zzplay_set_quiet(app.options.quiet);
+  app.player_mode = zzplay_options_wants_player(&app.options);
+
+  /* Settings: defaults < ENV:ZZPlay.prefs < this launch's overrides. */
+  zzplay_prefs_defaults(&app.prefs);
+  (void)zzplay_prefs_load(&app.prefs, ZZPLAY_PREFS_ENV_PATH);
+  zzplay_prefs_apply_options(&app.prefs, &app.options);
+  {
+    ZZPlayRepeat repeat = app.prefs.repeat;
+
+    /* CLI LOOP (forever) starts life as repeat ONE, which the engines
+     * execute as their seamless loop; LOOP=N stays engine-internal. */
+    if (app.options.loop_mode == ZZPLAY_LOOP_FOREVER) {
+      repeat = ZZPLAY_REPEAT_ONE;
+    }
+    zzplay_controller_init(&app.ctl, app.prefs.volume, repeat,
+                           app.prefs.shuffle);
+  }
+
+  zzplay_playlist_init(&app.playlist);
+  for (i = 0U; i < app.options.path_count; i++) {
+    uint32_t added =
+        zzplay_files_add(&app.playlist, app.options.paths[i]);
+
+    if (added == 0U) {
+      zzplay_launch_reportf(&app.ctl, &app.options,
+                            "%s added no playable files",
+                            app.options.paths[i]);
+      app.had_failure = 1;
+    }
+  }
+  /* The playlist navigates by the same repeat/shuffle the user sees. */
+  zzplay_playlist_set_repeat(&app.playlist, app.ctl.repeat);
+  zzplay_playlist_set_shuffle(&app.playlist, app.ctl.shuffle, 0U);
+
+  if (app.options.trace_path) {
+    app.trace = Open((CONST_STRPTR)app.options.trace_path,
+                     MODE_NEWFILE);
+    if (app.trace) {
+      static const char header[] =
+              "# zzplay trace v1: F frame t=ms v=videoMs m=masterMs "
+              "dr=driftMs d=decision(P/H/D/N) dec=decodeUs gap=us "
+              "acc=inputBytesSinceLastF ni=needInputPolls "
+              "wb=writeBusy db=decodeBusy rd=fileReads "
+              "rmax=maxReadUs q=audioQueuedFrames und=underruns\n";
+
+      /* No GetSysTime here: TimerBase is not open yet (see
+       * zzplay_trace_ms). The clock anchors on the first traced
+       * frame, after the timer is open. */
+      (void)Write(app.trace, (APTR)header,
+                  (LONG)(sizeof(header) - 1U));
+    } else {
+      zzplay_info("zzplay: cannot open trace file %s\n",
+                  app.options.trace_path);
+    }
+  }
+
+  /* The desktop player opens its window up front; a one-shot run opens
+   * it lazily before an audio-only item. */
+  if (app.player_mode) {
+    zzplay_app_open_gui(&app);
+    if (!zzplay_gui_is_open()) {
+      /* Without a window the idle wait could only ever be left with
+       * Ctrl-C - invisible and unkillable from Workbench. Play what was
+       * named and exit instead. */
+      app.player_mode = 0;
+    }
+  }
+
+  exit_code = zzplay_app_run(&app);
+
+  if (app.player_mode) {
+    /* Remember the session on the way out; the GUI keeps the window
+     * position and last drawer current in prefs. */
+    app.prefs.volume = app.ctl.volume;
+    app.prefs.repeat = app.ctl.repeat;
+    app.prefs.shuffle = app.ctl.shuffle;
+    (void)zzplay_prefs_save_session(&app.prefs,
+                                    ZZPLAY_PREFS_ENV_PATH);
+    (void)zzplay_prefs_save_session(&app.prefs,
+                                    ZZPLAY_PREFS_ENVARC_PATH);
+  }
+  if (app.trace) {
+    Close(app.trace);
+    app.trace = 0;
+  }
+  zzplay_gui_close();
+  zzplay_playlist_free(&app.playlist);
   zzplay_launch_end(&launch);
-  return 20;
+  return exit_code;
 }

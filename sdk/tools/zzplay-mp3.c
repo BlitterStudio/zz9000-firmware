@@ -8,13 +8,17 @@
 #include "zz9k/shared.h"
 #include "zzplay-ahi.h"
 #include "zzplay-core.h"
+#include "zzplay-gui.h"
+#include "zzplay-launch.h"
 #include "zzplay-mhi.h"
 #include "zzplay-mp3-transport.h"
+#include "zzplay-tags.h"
 
 #include <exec/memory.h>
 #include <proto/dos.h>
 #include <proto/exec.h>
 
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +29,55 @@
 #define ZZPLAY_MP3_Z2_STAGING_CAPACITY (16UL * 1024UL)
 #define ZZPLAY_MP3_DRAIN_GUARD 128U
 
+/* Everything both backends need about the item being played. */
+typedef struct ZZPlayMP3Engine {
+  const ZZPlayEngineRun *run;
+  ZZPlayController *ctl;
+  /* Audio payload boundaries: after the ID3v2 tag, before the ID3v1
+   * trailer. Seeking and the duration estimate work inside this range. */
+  uint64_t audio_start;
+  uint64_t audio_end;
+  const ZZPlayMP3Info *info;
+  uint32_t total_ms;
+  /* Backend descriptor without the muted marker ("MHI <driver>",
+   * "AHI unit N"). */
+  char output_base[40];
+  /* The resolved backend is NONE (AUDIO=none, --benchmark, or a saved
+   * MP3OUTPUT=NONE): decode without opening AHI. */
+  int muted;
+} ZZPlayMP3Engine;
+
+static void zzplay_mp3_pump(const ZZPlayMP3Engine *engine)
+{
+  if (engine->run->pump) {
+    engine->run->pump(engine->run->pump_user);
+  }
+}
+
+
+/* Output text marks a requested mute only when the active backend honours
+ * volume; a saved zero remains available for a later capable backend. */
+static void zzplay_mp3_refresh_output(const ZZPlayMP3Engine *engine)
+{
+  char text[ZZPLAY_NOW_OUTPUT_MAX];
+
+  if (engine->ctl->volume == 0U && engine->ctl->now.volume_supported) {
+    sprintf(text, "%s, muted", engine->output_base);
+  } else {
+    strcpy(text, engine->output_base);
+  }
+  zzplay_controller_set_output(engine->ctl, text);
+}
+
+static void zzplay_mp3_set_output(ZZPlayMP3Engine *engine,
+                                  const char *output)
+{
+  strncpy(engine->output_base, output, sizeof(engine->output_base) - 1U);
+  engine->output_base[sizeof(engine->output_base) - 1U] = '\0';
+  zzplay_mp3_refresh_output(engine);
+}
+
+/* One accelerated-decode pass over the file (the AHI backend). */
 typedef struct ZZPlayMP3Decode {
   ZZ9KContext *ctx;
   FILE *file;
@@ -34,90 +87,80 @@ typedef struct ZZPlayMP3Decode {
   ZZ9KAudioStreamResult result;
   ZZPlayAHISink *ahi;
   const ZZPlayMP3Info *probe;
-  const ZZPlayMP3Controls *controls;
+  const ZZPlayMP3Engine *engine;
   uint32_t produced_seen;
   uint32_t pcm_offset;
   uint32_t pending_ack;
   uint32_t input_bytes;
   uint64_t output_frames;
+  /* Position across seeks: the offset in time and output frames the
+   * current pass started from. */
+  uint32_t position_base_ms;
+  uint64_t frames_origin;
   uint8_t session_open;
   uint8_t ahi_started;
   uint8_t compact_z2;
 } ZZPlayMP3Decode;
 
+typedef enum ZZPlayMP3PassResult {
+  ZZPLAY_MP3_PASS_FAILED = 0,
+  ZZPLAY_MP3_PASS_COMPLETED,
+  ZZPLAY_MP3_PASS_STOPPED
+} ZZPlayMP3PassResult;
+
 static int zzplay_mp3_should_stop(const ZZPlayMP3Decode *decode)
 {
-  return decode->controls && decode->controls->stop_requested &&
-         decode->controls->stop_requested(decode->controls->user);
+  return zzplay_controller_item_should_end(decode->engine->ctl);
 }
 
-static int zzplay_mp3_is_paused(const ZZPlayMP3Decode *decode)
+/* Live controls for the AHI path: volume now, and the one request the
+ * engine handles itself. A SEEK restarts the pass at the computed byte
+ * offset without tearing the decode session down - the card's decoder
+ * resyncs on the next frame header - and re-bases the position; any other
+ * request ends the item (returns 1, left pending for the application). */
+static int zzplay_mp3_service_controls(ZZPlayMP3Decode *decode)
 {
-  return decode->controls && decode->controls->paused &&
-         decode->controls->paused(decode->controls->user);
-}
+  ZZPlayController *ctl = decode->engine->ctl;
+  uint32_t volume;
 
-static int zzplay_mp3_controls_stop(const ZZPlayMP3Controls *controls)
-{
-  return controls && controls->stop_requested &&
-         controls->stop_requested(controls->user);
-}
-
-static int zzplay_mp3_controls_paused(const ZZPlayMP3Controls *controls)
-{
-  return controls && controls->paused &&
-         controls->paused(controls->user);
-}
-
-static void zzplay_mp3_report_progress(const ZZPlayMP3Controls *controls,
-                                       uint32_t elapsed_ms, int exact)
-{
-  if (controls && controls->progress) {
-    controls->progress(controls->user, elapsed_ms, exact);
+  if (zzplay_controller_take_volume(ctl, &volume)) {
+    if (decode->ahi) {
+      zzplay_ahi_set_volume(decode->ahi, volume);
+    }
+    zzplay_mp3_refresh_output(decode->engine);
   }
-}
-
-static void zzplay_mp3_report_backend(const ZZPlayMP3Controls *controls,
-                                      const char *name)
-{
-  if (controls && controls->backend) {
-    controls->backend(controls->user, name);
-  }
-}
-
-/* zzplay_mhi_play_file() carries one opaque pointer, so bundle everything
- * the callbacks need behind it. */
-typedef struct ZZPlayMHIBridge {
-  const ZZPlayMP3Controls *controls;
-  const ZZPlayMHISink *sink;
-  uint32_t bitrate_kbps;
-} ZZPlayMHIBridge;
-
-static int zzplay_mp3_controls_stop_thunk(void *user)
-{
-  const ZZPlayMHIBridge *bridge = (const ZZPlayMHIBridge *)user;
-
-  if (!bridge) {
+  if (!zzplay_controller_item_should_end(ctl)) {
     return 0;
   }
-  /* MHI reports only bytes handed to the decoder, which run ahead of what
-   * has actually been heard by however much is queued - reported as
-   * approximate rather than pretending to a sample-accurate position. */
-  if (bridge->sink && bridge->bitrate_kbps != 0U) {
-    zzplay_mp3_report_progress(
-        bridge->controls,
-        (uint32_t)((bridge->sink->input_bytes * 8ULL) /
-                   bridge->bitrate_kbps),
-        0);
+  if (ctl->request == ZZPLAY_REQUEST_SEEK) {
+    uint32_t seek_ms = 0U;
+    uint64_t offset;
+
+    (void)zzplay_controller_take_request(ctl, 0, &seek_ms);
+    offset = zzplay_mp3_seek_offset(
+        decode->engine->audio_start, decode->engine->audio_end,
+        decode->engine->total_ms, seek_ms);
+    if (fseek(decode->file, (long)offset, SEEK_SET) != 0) {
+      return 1;
+    }
+    decode->position_base_ms = seek_ms;
+    decode->frames_origin = decode->output_frames;
+    return 0;
   }
-  return zzplay_mp3_controls_stop(bridge->controls);
+  return 1;
 }
 
-static int zzplay_mp3_controls_paused_thunk(void *user)
+static void zzplay_mp3_report_progress(const ZZPlayMP3Decode *decode)
 {
-  const ZZPlayMHIBridge *bridge = (const ZZPlayMHIBridge *)user;
+  if (decode->probe->sample_rate != 0U) {
+    uint64_t frames = decode->output_frames - decode->frames_origin;
 
-  return bridge ? zzplay_mp3_controls_paused(bridge->controls) : 0;
+    zzplay_controller_set_position(
+        decode->engine->ctl,
+        decode->position_base_ms +
+            (uint32_t)(frames * 1000ULL / decode->probe->sample_rate),
+        1);
+  }
 }
 
 static int zzplay_mp3_service_ready(ZZ9KContext *ctx, ZZ9KCaps *caps)
@@ -206,6 +249,7 @@ static void *zzplay_mp3_acquire_ahi(ZZPlayMP3Decode *decode,
     if (!zzplay_ahi_poll(decode->ahi)) {
       return 0;
     }
+    zzplay_mp3_pump(decode->engine);
   }
   return buffer;
 }
@@ -292,12 +336,13 @@ static int zzplay_mp3_finish_ahi(ZZPlayMP3Decode *decode)
         !zzplay_ahi_poll(decode->ahi)) {
       return 0;
     }
+    zzplay_mp3_pump(decode->engine);
     Delay(1U);
   }
   return 1;
 }
 
-static int zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
+static ZZPlayMP3PassResult zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
 {
   ZZ9KAudioStreamBeginDesc begin;
   static uint8_t chunk[ZZPLAY_MP3_FEED_MAX_BYTES];
@@ -323,7 +368,7 @@ static int zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
                         16U, host_flags, &decode->pcm) != ZZ9K_STATUS_OK ||
       zz9k_alloc_shared(decode->ctx, staging_capacity,
                         16U, host_flags, &decode->staging) != ZZ9K_STATUS_OK) {
-    return 0;
+    return ZZPLAY_MP3_PASS_FAILED;
   }
   /* The stream decoder has no rate or channel conversion, so the firmware
    * rejects a non-zero output geometry outright. Ask for the file's native
@@ -334,12 +379,12 @@ static int zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
           decode->pcm.handle, decode->pcm.length, 0U, 0U,
           ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE, 0U,
           decode->staging.length, 0U)) {
-    return 0;
+    return ZZPLAY_MP3_PASS_FAILED;
   }
   status = zz9k_audio_stream_begin(
       decode->ctx, &begin, &decode->result);
   if (status != ZZ9K_STATUS_OK) {
-    return 0;
+    return ZZPLAY_MP3_PASS_FAILED;
   }
   decode->session_open = 1U;
   decode->pcm_offset = decode->result.pcm_read;
@@ -350,56 +395,56 @@ static int zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
     uint32_t flags;
     unsigned retry = 0U;
 
-    if (zzplay_mp3_should_stop(decode)) {
-      return 0;
+    if (zzplay_mp3_service_controls(decode)) {
+      return ZZPLAY_MP3_PASS_STOPPED;
     }
-    /* Pause by ceasing to feed. The AHI queue plays out first, so audio
-     * stops after at most the queued depth rather than instantly; MHI has a
-     * real pause primitive and uses it instead. Keep servicing AHI while
-     * held so completed buffers are still reaped. */
-    while (zzplay_mp3_is_paused(decode)) {
-      if (zzplay_mp3_should_stop(decode)) {
-        return 0;
+    zzplay_mp3_pump(decode->engine);
+    /* Pause by ceasing to feed, confirmed once the hold is in place so
+     * modal operations may run. The AHI queue plays out first, so audio
+     * stops after at most the queued depth rather than instantly. Keep
+     * servicing AHI while held so completed buffers are still reaped. */
+    while (decode->engine->ctl->paused) {
+      if (zzplay_mp3_service_controls(decode)) {
+        return ZZPLAY_MP3_PASS_STOPPED;
       }
+      zzplay_controller_set_engine_paused(decode->engine->ctl, 1);
       if (decode->ahi && decode->ahi_started) {
         zzplay_ahi_poll(decode->ahi);
       }
+      zzplay_mp3_pump(decode->engine);
       Delay(1U);
     }
-    if (decode->probe->sample_rate != 0U) {
-      zzplay_mp3_report_progress(
-          decode->controls,
-          (uint32_t)((decode->output_frames * 1000ULL) /
-                     decode->probe->sample_rate),
-          1);
-    }
+    zzplay_controller_set_engine_paused(decode->engine->ctl, 0);
+    zzplay_mp3_report_progress(decode);
     got = fread(chunk, 1U, decode->staging.length, decode->file);
     if (got == 0U && ferror(decode->file)) {
-      return 0;
+      return ZZPLAY_MP3_PASS_FAILED;
     }
     flags = got == 0U ? ZZ9K_AUDIO_STREAM_FEED_EOF : 0U;
     if (got != 0U &&
         !zz9k_shared_copy_to(&decode->staging, 0U, chunk,
                              (uint32_t)got)) {
-      return 0;
+      return ZZPLAY_MP3_PASS_FAILED;
     }
     do {
       if (++retry > 64U ||
           !zz9k_audio_build_stream_feed_desc(
               &feed, decode->result.session, decode->staging.handle,
               0U, (uint32_t)got, flags)) {
-        return 0;
+        return ZZPLAY_MP3_PASS_FAILED;
       }
       status = zz9k_audio_stream_feed(
           decode->ctx, &feed, &decode->result);
       if (status != ZZ9K_STATUS_OK ||
           !zzplay_mp3_pump_pcm(decode, flags != 0U)) {
-        return 0;
+        return zzplay_mp3_should_stop(decode)
+                   ? ZZPLAY_MP3_PASS_STOPPED
+                   : ZZPLAY_MP3_PASS_FAILED;
       }
       if ((decode->result.flags &
            ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) != 0U &&
           !zzplay_mp3_ack(decode, 1)) {
-        return 0;
+        return ZZPLAY_MP3_PASS_FAILED;
       }
     } while ((decode->result.flags &
               ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) != 0U);
@@ -415,7 +460,9 @@ static int zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
 
     if (!zzplay_mp3_pump_pcm(decode, 1) ||
         !zzplay_mp3_ack(decode, 1)) {
-      return 0;
+      return zzplay_mp3_should_stop(decode)
+                 ? ZZPLAY_MP3_PASS_STOPPED
+                 : ZZPLAY_MP3_PASS_FAILED;
     }
     if (decode->pending_ack == 0U &&
         decode->result.bytes_produced == decode->produced_seen &&
@@ -424,9 +471,12 @@ static int zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
       break;
     }
   }
-  return flush_guard < ZZPLAY_MP3_DRAIN_GUARD &&
-         decode->output_frames != 0U &&
-         zzplay_mp3_finish_ahi(decode);
+  if (flush_guard >= ZZPLAY_MP3_DRAIN_GUARD ||
+      decode->output_frames == 0U) {
+    return ZZPLAY_MP3_PASS_FAILED;
+  }
+  return zzplay_mp3_finish_ahi(decode) ? ZZPLAY_MP3_PASS_COMPLETED
+                                       : ZZPLAY_MP3_PASS_FAILED;
 }
 
 static void zzplay_mp3_decode_cleanup(ZZPlayMP3Decode *decode)
@@ -447,34 +497,39 @@ static void zzplay_mp3_decode_cleanup(ZZPlayMP3Decode *decode)
   }
   if (decode->ahi) {
     zzplay_ahi_close(decode->ahi);
+    decode->ahi = 0;
   }
   if (decode->file) {
     fclose(decode->file);
+    decode->file = 0;
   }
 }
 
-static int zzplay_mp3_accelerated(
-    const char *path,
-    const ZZPlayMP3Info *info,
-    const ZZPlayOptions *options,
-    const ZZPlayMP3Controls *controls)
+static ZZPlayEngineResult zzplay_mp3_accelerated(
+    ZZPlayMP3Engine *engine)
 {
+  const ZZPlayEngineRun *run = engine->run;
   ZZ9KContext *ctx = 0;
   ZZ9KCaps caps;
-  uint32_t repeats = options->loop_count;
+  uint64_t offset = zzplay_mp3_seek_offset(
+      engine->audio_start, engine->audio_end, engine->total_ms,
+      run->seek_ms);
+  uint32_t base_ms = run->seek_ms;
+  uint32_t repeats = run->options->loop_count;
   uint32_t completed = 0U;
-  int ok = 0;
+  ZZPlayEngineResult result = ZZPLAY_ENGINE_FAILED;
+  ZZPlayAHISink ahi;
 
   memset(&caps, 0, sizeof(caps));
   if (zz9k_open(&ctx) != ZZ9K_STATUS_OK ||
       !zzplay_mp3_service_ready(ctx, &caps)) {
-    fprintf(stderr,
-            "zzplay: accelerated MP3 streaming is unavailable\n");
+    zzplay_launch_reportf(engine->ctl, engine->run->options,
+                          "accelerated MP3 streaming is unavailable");
     goto done;
   }
   for (;;) {
     ZZPlayMP3Decode decode;
-    ZZPlayAHISink ahi;
+    ZZPlayMP3PassResult pass;
 
     memset(&decode, 0, sizeof(decode));
     memset(&ahi, 0, sizeof(ahi));
@@ -482,58 +537,70 @@ static int zzplay_mp3_accelerated(
     decode.ctx = ctx;
     decode.compact_z2 =
         (caps.capability_bits & ZZ9K_CAP_APERTURE_LAYOUT) != 0U;
-    decode.probe = info;
-    decode.controls = controls;
-    decode.file = fopen(path, "rb");
+    decode.probe = engine->info;
+    decode.engine = engine;
+    decode.position_base_ms = base_ms;
+    decode.file = fopen(run->path, "rb");
     if (!decode.file) {
-      fprintf(stderr, "zzplay: cannot reopen %s\n", path);
+      zzplay_launch_reportf(engine->ctl, engine->run->options,
+                            "cannot reopen %s", run->path);
       zzplay_mp3_decode_cleanup(&decode);
       goto done;
     }
-    if (options->audio_backend != ZZPLAY_AUDIO_NONE) {
+    if (fseek(decode.file, (long)offset, SEEK_SET) != 0) {
+      zzplay_launch_reportf(engine->ctl, engine->run->options,
+                            "cannot seek in %s", run->path);
+      zzplay_mp3_decode_cleanup(&decode);
+      goto done;
+    }
+    if (!engine->muted) {
       uint32_t period = zzplay_mp3_ahi_period_frames(
-          info->sample_rate, ZZPLAY_AHI_BUFFER_COUNT);
+          engine->info->sample_rate, ZZPLAY_AHI_BUFFER_COUNT);
 
       if (period == 0U ||
-          !zzplay_ahi_prepare(&ahi, info->sample_rate,
-                              info->channels, period)) {
-        fprintf(stderr,
-                "zzplay: AHI backend acquisition failed "
-                "(device error %d)\n",
-                ahi.last_error);
+          !zzplay_ahi_prepare(&ahi, run->prefs->ahi_unit,
+                              engine->info->sample_rate,
+                              engine->info->channels, period)) {
+        zzplay_launch_reportf(
+            engine->ctl, engine->run->options,
+            "AHI backend acquisition failed (device error %d)",
+            ahi.last_error);
         zzplay_mp3_decode_cleanup(&decode);
         goto done;
       }
+      zzplay_ahi_set_volume(&ahi, engine->ctl->volume);
       decode.ahi = &ahi;
     }
-    if (!zzplay_mp3_decode_once(&decode)) {
-      int stopped = zzplay_mp3_controls_stop(controls);
-
-      if (!stopped) {
-        fprintf(stderr,
-                "zzplay: accelerated MP3 decode/output failed\n");
-      }
-      zzplay_mp3_decode_cleanup(&decode);
-      if (stopped) {
-        ok = 1;
-      }
-      goto done;
-    }
-    zzplay_info("zzplay: MP3 loop %lu: %lu input bytes, %llu audio frames\n",
+    pass = zzplay_mp3_decode_once(&decode);
+    /* Saturating casts: libnix printf has no %ll length modifier. */
+    zzplay_info("zzplay: MP3 loop %lu: %lu input bytes, %lu audio frames\n",
            (unsigned long)completed,
            (unsigned long)decode.input_bytes,
-           (unsigned long long)decode.output_frames);
+           (unsigned long)(decode.output_frames > 0xffffffffULL
+                               ? 0xffffffffULL
+                               : decode.output_frames));
     zzplay_mp3_decode_cleanup(&decode);
-    if (options->loop_mode == ZZPLAY_LOOP_FOREVER) {
+    if (pass == ZZPLAY_MP3_PASS_STOPPED) {
+      result = ZZPLAY_ENGINE_STOPPED;
+      goto done;
+    }
+    if (pass != ZZPLAY_MP3_PASS_COMPLETED) {
+      zzplay_launch_reportf(engine->ctl, engine->run->options,
+                            "accelerated MP3 decode/output failed");
+      goto done;
+    }
+    if (zzplay_controller_loop_item(engine->ctl) ||
+        (run->options->loop_mode == ZZPLAY_LOOP_FINITE &&
+         repeats != 0U)) {
+      if (run->options->loop_mode == ZZPLAY_LOOP_FINITE) {
+        repeats--;
+      }
+      offset = engine->audio_start;
+      base_ms = 0U;
       completed++;
       continue;
     }
-    if (options->loop_mode == ZZPLAY_LOOP_FINITE && repeats != 0U) {
-      repeats--;
-      completed++;
-      continue;
-    }
-    ok = 1;
+    result = ZZPLAY_ENGINE_EOF;
     break;
   }
 
@@ -541,116 +608,259 @@ done:
   if (ctx) {
     zz9k_close(ctx);
   }
-  return ok;
+  return result;
 }
 
-static int zzplay_mp3_mhi(
-    const char *path,
-    const ZZPlayMP3Info *info,
-    const ZZPlayOptions *options,
-    const ZZPlayMP3Controls *controls,
-    ZZPlayMHIStatus *open_status)
+/* zzplay_mhi_play_file() carries one opaque pointer, so bundle everything
+ * the callbacks need behind it. */
+typedef struct ZZPlayMHIBridge {
+  ZZPlayMP3Engine *engine;
+  ZZPlayMHISink *sink;
+  /* Where the current pass started, in bytes and in time; the reported
+   * MHI position is derived from the bytes handed to the decoder since
+   * then and therefore runs slightly ahead (shown as approximate). */
+  uint64_t offset;
+  uint32_t base_ms;
+  /* A consumed SEEK ended the pass; restart at the new offset. */
+  int seek_restart;
+} ZZPlayMHIBridge;
+
+static int zzplay_mp3_mhi_stop_thunk(void *user)
 {
+  ZZPlayMHIBridge *bridge = (ZZPlayMHIBridge *)user;
+  ZZPlayController *ctl;
+  uint32_t volume;
+
+  if (!bridge) {
+    return 0;
+  }
+  ctl = bridge->engine->ctl;
+  /* Runs once per driver poll: this is where the MHI path pumps the GUI,
+   * reports its position and applies live controls. */
+  zzplay_mp3_pump(bridge->engine);
+  if (bridge->engine->info->bitrate_kbps != 0U) {
+    zzplay_controller_set_position(
+        ctl,
+        bridge->base_ms +
+            (uint32_t)((bridge->sink->input_bytes * 8ULL) /
+                       bridge->engine->info->bitrate_kbps),
+        0);
+  }
+  if (zzplay_controller_take_volume(ctl, &volume)) {
+    (void)zzplay_mhi_set_volume(bridge->sink, volume);
+    zzplay_mp3_refresh_output(bridge->engine);
+  }
+  if (ctl->request == ZZPLAY_REQUEST_SEEK) {
+    uint32_t seek_ms = 0U;
+
+    (void)zzplay_controller_take_request(ctl, 0, &seek_ms);
+    bridge->offset = zzplay_mp3_seek_offset(
+        bridge->engine->audio_start, bridge->engine->audio_end,
+        bridge->engine->total_ms, seek_ms);
+    bridge->base_ms = seek_ms;
+    bridge->seek_restart = 1;
+    return 1;
+  }
+  return zzplay_controller_item_should_end(ctl);
+}
+
+static int zzplay_mp3_mhi_paused_thunk(void *user)
+{
+  ZZPlayMHIBridge *bridge = (ZZPlayMHIBridge *)user;
+  ZZPlayController *ctl;
+
+  if (!bridge) {
+    return 0;
+  }
+  ctl = bridge->engine->ctl;
+  /* play_file drives the sink's real MHI pause off this answer. Confirm
+   * the hold once the sink reports it, so modal operations may run. */
+  if (bridge->sink->paused) {
+    zzplay_controller_set_engine_paused(ctl, 1);
+  } else if (!ctl->paused) {
+    zzplay_controller_set_engine_paused(ctl, 0);
+  }
+  return ctl->paused != 0;
+}
+
+static ZZPlayEngineResult zzplay_mp3_mhi(ZZPlayMP3Engine *engine,
+                                         ZZPlayMHIStatus *open_status)
+{
+  const ZZPlayEngineRun *run = engine->run;
   ZZPlayMHIBridge bridge;
   ZZPlayMHISink sink;
   ZZPlayMHIStatus status;
-  uint32_t repeats = options->loop_count;
+  uint32_t repeats = run->options->loop_count;
   uint32_t completed = 0U;
-  int ok = 0;
+  ZZPlayEngineResult result = ZZPLAY_ENGINE_FAILED;
 
-  bridge.controls = controls;
+  memset(&bridge, 0, sizeof(bridge));
+  memset(&sink, 0, sizeof(sink));
+  bridge.engine = engine;
   bridge.sink = &sink;
-  bridge.bitrate_kbps = info ? info->bitrate_kbps : 0U;
-  status = zzplay_mhi_acquire(&sink);
+  bridge.offset = zzplay_mp3_seek_offset(
+      engine->audio_start, engine->audio_end, engine->total_ms,
+      run->seek_ms);
+  bridge.base_ms = run->seek_ms;
+  status = zzplay_mhi_acquire(&sink, run->prefs->mhi_driver);
   *open_status = status;
   if (status != ZZPLAY_MHI_OK) {
-    return 0;
+    return ZZPLAY_ENGINE_FAILED;
   }
+  zzplay_controller_set_capabilities(
+      run->ctl, 1, sink.volume_supported != 0, 0);
+  {
+    char output[ZZPLAY_NOW_OUTPUT_MAX];
+
+    sprintf(output, "MHI %s", zzplay_mhi_driver_name(&sink));
+    zzplay_mp3_set_output(engine, output);
+  }
+  (void)zzplay_mhi_set_volume(&sink, run->ctl->volume);
   zzplay_info("zzplay: selected audio backend MHI (card-local Layer III)\n");
-  /* The player window has to be told too, or it shows "selecting..." for the
-   * whole track whenever MHI is the chosen backend. */
-  zzplay_mp3_report_backend(controls, "MHI");
   for (;;) {
-    FILE *file = fopen(path, "rb");
+    FILE *file = fopen(run->path, "rb");
 
     if (!file) {
       *open_status = ZZPLAY_MHI_IO_ERROR;
       goto done;
     }
+    if (fseek(file, (long)bridge.offset, SEEK_SET) != 0) {
+      fclose(file);
+      *open_status = ZZPLAY_MHI_IO_ERROR;
+      goto done;
+    }
+    bridge.seek_restart = 0;
     status = zzplay_mhi_play_file(
-        &sink, file, zzplay_mp3_controls_stop_thunk,
-        zzplay_mp3_controls_paused_thunk, &bridge);
+        &sink, file, zzplay_mp3_mhi_stop_thunk,
+        zzplay_mp3_mhi_paused_thunk, &bridge);
     fclose(file);
+    if (bridge.seek_restart) {
+      /* The seek was consumed inside the poll; restart the pass at the
+       * new offset with the decoder still held. */
+      continue;
+    }
+    if (status == ZZPLAY_MHI_STOPPED) {
+      result = ZZPLAY_ENGINE_STOPPED;
+      goto done;
+    }
     if (status != ZZPLAY_MHI_OK) {
       *open_status = status;
       goto done;
     }
-    zzplay_info("zzplay: MP3 MHI loop %lu: %llu input bytes\n",
+    zzplay_info("zzplay: MP3 MHI loop %lu: %lu input bytes\n",
            (unsigned long)completed,
-           (unsigned long long)sink.input_bytes);
-    if (options->loop_mode == ZZPLAY_LOOP_FOREVER) {
-      completed++;
-      continue;
-    }
-    if (options->loop_mode == ZZPLAY_LOOP_FINITE && repeats != 0U) {
-      repeats--;
+           (unsigned long)(sink.input_bytes > 0xffffffffULL
+                               ? 0xffffffffULL
+                               : sink.input_bytes));
+    if (zzplay_controller_loop_item(engine->ctl) ||
+        (run->options->loop_mode == ZZPLAY_LOOP_FINITE &&
+         repeats != 0U)) {
+      if (run->options->loop_mode == ZZPLAY_LOOP_FINITE) {
+        repeats--;
+      }
+      bridge.offset = engine->audio_start;
+      bridge.base_ms = 0U;
       completed++;
       continue;
     }
     zzplay_info("zzplay: MP3 MHI playback complete, %lu loops\n",
            (unsigned long)completed);
-    ok = 1;
+    result = ZZPLAY_ENGINE_EOF;
     break;
   }
 
 done:
   zzplay_mhi_release(&sink);
-  return ok;
+  return result;
 }
 
-int zzplay_mp3_run(const char *path,
-                   const ZZPlayMP3Info *info,
-                   const ZZPlayOptions *options,
-                   const ZZPlayMP3Controls *controls)
+ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run)
 {
+  ZZPlayMP3Engine engine;
   ZZPlayMHIStatus mhi_status = ZZPLAY_MHI_MISSING;
+  ZZPlayAudioBackend requested;
+  int strict = 0;
 
-  if (!path || !info || !options) {
-    return 0;
+  if (!run || !run->ctl || !run->path || !run->probe ||
+      !run->options || !run->prefs) {
+    return ZZPLAY_ENGINE_FAILED;
   }
-  if (options->audio_backend == ZZPLAY_AUDIO_AX) {
-    fprintf(stderr,
-            "zzplay: direct AX is not a standalone MP3 backend; "
-            "use MHI or AHI\n");
-    return 0;
+  memset(&engine, 0, sizeof(engine));
+  engine.run = run;
+  engine.ctl = run->ctl;
+  engine.info = &run->probe->mp3;
+
+  /* The application read these boundaries with the probing handle, so this
+   * engine needs no metadata-only open before its streaming handles. */
+  engine.audio_start = run->audio_start;
+  engine.audio_end = run->file_size > (uint64_t)run->trailer_bytes
+                         ? run->file_size - run->trailer_bytes
+                         : engine.audio_start;
+  engine.total_ms = zzplay_mp3_duration_ms(
+      engine.audio_end - engine.audio_start,
+      engine.info->bitrate_kbps);
+  zzplay_controller_set_duration(run->ctl, engine.total_ms);
+  zzplay_controller_set_capabilities(run->ctl, 1, 0, 0);
+  {
+    char format[ZZPLAY_NOW_TEXT_MAX];
+
+    sprintf(format, "MP3 %lu Hz, %s, %lu kbps",
+            (unsigned long)engine.info->sample_rate,
+            engine.info->channels == 1U ? "mono" : "stereo",
+            (unsigned long)engine.info->bitrate_kbps);
+    zzplay_controller_set_format(run->ctl, format);
   }
-  if (options->audio_backend == ZZPLAY_AUDIO_MHI ||
-      options->audio_backend == ZZPLAY_AUDIO_AUTO) {
-    if (zzplay_mp3_mhi(path, info, options, controls, &mhi_status)) {
-      return 1;
+
+  requested = zzplay_prefs_requested_backend(
+      run->prefs, run->options, ZZPLAY_MEDIA_AUDIO_MP3, &strict);
+  if (requested == ZZPLAY_AUDIO_AX) {
+    if (strict) {
+      zzplay_launch_reportf(
+          engine.ctl, engine.run->options,
+          "direct AX is not a standalone MP3 backend; use MHI or AHI");
+      return ZZPLAY_ENGINE_FAILED;
     }
-    if (mhi_status == ZZPLAY_MHI_STOPPED) {
-      return 1;
+    /* A saved (non-strict) AX preference falls back like AUTO. */
+    requested = ZZPLAY_AUDIO_AUTO;
+  }
+  if (requested == ZZPLAY_AUDIO_MHI || requested == ZZPLAY_AUDIO_AUTO) {
+    ZZPlayEngineResult mhi_result = zzplay_mp3_mhi(&engine, &mhi_status);
+
+    if (mhi_result != ZZPLAY_ENGINE_FAILED) {
+      return mhi_result;
     }
-    if (options->audio_backend == ZZPLAY_AUDIO_MHI ||
-        mhi_status == ZZPLAY_MHI_IO_ERROR) {
-      fprintf(stderr, "zzplay: MHI playback failed: %s\n",
-              zzplay_mhi_status_name(mhi_status));
-      return 0;
+    if (run->ctl->request != ZZPLAY_REQUEST_NONE) {
+      return ZZPLAY_ENGINE_STOPPED;
+    }
+    if (strict && requested == ZZPLAY_AUDIO_MHI) {
+      zzplay_launch_reportf(engine.ctl, engine.run->options,
+                            "MHI playback failed: %s",
+                            zzplay_mhi_status_name(mhi_status));
+      return ZZPLAY_ENGINE_FAILED;
+    }
+    if (mhi_status == ZZPLAY_MHI_IO_ERROR) {
+      zzplay_launch_reportf(engine.ctl, engine.run->options,
+                            "MHI playback failed: %s",
+                            zzplay_mhi_status_name(mhi_status));
+      return ZZPLAY_ENGINE_FAILED;
     }
     zzplay_info("zzplay: MHI unavailable before playback (%s); "
            "AUTO falling back to accelerated decode + AHI\n",
            zzplay_mhi_status_name(mhi_status));
   }
-  if (options->audio_backend != ZZPLAY_AUDIO_NONE) {
-    zzplay_info("zzplay: selected audio backend AHI "
-           "(accelerated Layer III decode, S16BE)\n");
-  } else {
+  if (requested == ZZPLAY_AUDIO_NONE) {
     zzplay_info("zzplay: selected audio backend NONE "
            "(accelerated Layer III decode benchmark)\n");
+    engine.muted = 1;
+    zzplay_controller_set_capabilities(run->ctl, 1, 0, 0);
+    zzplay_mp3_set_output(&engine, "none");
+  } else {
+    zzplay_info("zzplay: selected audio backend AHI "
+           "(accelerated Layer III decode, S16BE)\n");
+    zzplay_controller_set_capabilities(run->ctl, 1, 1, 0);
+    sprintf(engine.output_base, "AHI unit %lu",
+            (unsigned long)run->prefs->ahi_unit);
+    zzplay_mp3_refresh_output(&engine);
   }
-  zzplay_mp3_report_backend(
-      controls,
-      options->audio_backend != ZZPLAY_AUDIO_NONE ? "AHI" : "none");
-  return zzplay_mp3_accelerated(path, info, options, controls);
+  return zzplay_mp3_accelerated(&engine);
 }

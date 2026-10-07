@@ -20,6 +20,30 @@ int zzplay_is_quiet(void)
   return zzplay_quiet_output;
 }
 
+int zzplay_ascii_equal_fold(const char *a, const char *b)
+{
+  if (!a || !b) {
+    return 0;
+  }
+  while (*a && *b) {
+    char a_fold = *a;
+    char b_fold = *b;
+
+    if (a_fold >= 'A' && a_fold <= 'Z') {
+      a_fold = (char)(a_fold + ('a' - 'A'));
+    }
+    if (b_fold >= 'A' && b_fold <= 'Z') {
+      b_fold = (char)(b_fold + ('a' - 'A'));
+    }
+    if (a_fold != b_fold) {
+      return 0;
+    }
+    a++;
+    b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
 void zzplay_info(const char *format, ...)
 {
   va_list args;
@@ -244,7 +268,40 @@ ZZPlayControlAction zzplay_control_action_from_key(unsigned key)
     return ZZPLAY_CONTROL_TOGGLE_FULLSCREEN;
   case 'l':
   case 'L':
-    return ZZPLAY_CONTROL_TOGGLE_LOOP;
+    return ZZPLAY_CONTROL_CYCLE_REPEAT;
+  case 's':
+  case 'S':
+    return ZZPLAY_CONTROL_TOGGLE_SHUFFLE;
+  case 'n':
+  case 'N':
+    return ZZPLAY_CONTROL_NEXT;
+  case 'p':
+  case 'P':
+    return ZZPLAY_CONTROL_PREVIOUS;
+  case '+':
+  case '=':
+    return ZZPLAY_CONTROL_VOLUME_UP;
+  case '-':
+    return ZZPLAY_CONTROL_VOLUME_DOWN;
+  default:
+    return ZZPLAY_CONTROL_NONE;
+  }
+}
+
+ZZPlayControlAction zzplay_control_action_from_rawkey(unsigned code)
+{
+  if (code & 0x80U) {
+    return ZZPLAY_CONTROL_NONE;
+  }
+  switch (code) {
+  case ZZPLAY_RAWKEY_CURSOR_UP:
+    return ZZPLAY_CONTROL_VOLUME_UP;
+  case ZZPLAY_RAWKEY_CURSOR_DOWN:
+    return ZZPLAY_CONTROL_VOLUME_DOWN;
+  case ZZPLAY_RAWKEY_CURSOR_RIGHT:
+    return ZZPLAY_CONTROL_SEEK_FORWARD;
+  case ZZPLAY_RAWKEY_CURSOR_LEFT:
+    return ZZPLAY_CONTROL_SEEK_BACK;
   default:
     return ZZPLAY_CONTROL_NONE;
   }
@@ -252,6 +309,8 @@ ZZPlayControlAction zzplay_control_action_from_key(unsigned key)
 
 ZZPlayControlAction zzplay_control_resolve(const ZZPlayControlInput *input)
 {
+  ZZPlayControlAction action;
+
   if (!input) {
     return ZZPLAY_CONTROL_NONE;
   }
@@ -263,7 +322,11 @@ ZZPlayControlAction zzplay_control_resolve(const ZZPlayControlInput *input)
   if (input->window_close) {
     return ZZPLAY_CONTROL_STOP_WINDOW;
   }
-  return zzplay_control_action_from_key(input->key);
+  action = zzplay_control_action_from_key(input->key);
+  if (action != ZZPLAY_CONTROL_NONE) {
+    return action;
+  }
+  return zzplay_control_action_from_rawkey(input->rawkey);
 }
 
 int zzplay_control_is_stop(ZZPlayControlAction action)

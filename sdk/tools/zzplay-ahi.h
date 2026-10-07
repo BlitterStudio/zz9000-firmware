@@ -33,6 +33,11 @@ typedef struct ZZPlayAHISink {
   uint32_t channels;
   uint32_t frame_bytes;
   uint32_t period_frames;
+  /* Fixed-point 0x10000 == 100%: applied to ahir_Volume of every request
+   * configured from here on. Already-sent requests keep the volume they
+   * were sent with; AHI has no per-request update call. */
+  uint32_t volume_fixed;
+  uint32_t unit;
   int fill_slot;
   int last_error;
   uint8_t device_open;
@@ -40,10 +45,16 @@ typedef struct ZZPlayAHISink {
   uint8_t end_of_stream;
 } ZZPlayAHISink;
 
+/* Open ahi.device on `unit` (0..3, the unit the AHI preferences editor
+ * binds an audio mode to) and allocate the double-buffered sink. */
 int zzplay_ahi_prepare(ZZPlayAHISink *sink,
+                       uint32_t unit,
                        uint32_t sample_rate,
                        uint32_t channels,
                        uint32_t period_frames);
+/* Store the output volume (0..100 percent) used for subsequently sent
+ * requests. Values above 100 are clamped. */
+void zzplay_ahi_set_volume(ZZPlayAHISink *sink, uint32_t percent);
 void *zzplay_ahi_acquire_buffer(ZZPlayAHISink *sink,
                                 size_t *capacity_bytes);
 int zzplay_ahi_submit_buffer(ZZPlayAHISink *sink, size_t bytes);
