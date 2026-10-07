@@ -3508,9 +3508,13 @@ int main(int argc, char **argv)
     ZZPlayRepeat repeat = app.prefs.repeat;
 
     /* CLI LOOP (forever) starts life as repeat ONE, which the engines
-     * execute as their seamless loop; LOOP=N stays engine-internal. */
+     * execute as their seamless loop; LOOP=N stays engine-internal and
+     * starts with repeat off, or a saved repeat would outlast its count.
+     * Like other launch options, neither is saved as the new default. */
     if (app.options.loop_mode == ZZPLAY_LOOP_FOREVER) {
       repeat = ZZPLAY_REPEAT_ONE;
+    } else if (app.options.loop_mode == ZZPLAY_LOOP_FINITE) {
+      repeat = ZZPLAY_REPEAT_OFF;
     }
     zzplay_controller_init(&app.ctl, app.prefs.volume, repeat,
                            app.prefs.shuffle);
