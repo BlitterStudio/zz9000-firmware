@@ -794,7 +794,15 @@ module MNTZorro_v0_1_S00_AXI
   reg z3_ds0;
 
   // level shifter direction pins
+`ifdef ZORRO2
+  // Z2: turn the data level shifter toward the bus for the whole claimed read,
+  // not only while DOE is asserted; the FPGA output buffer below stays
+  // DOE-gated. Fixes A2000/68040 read smearing (MNT 93501420). Z3 keeps the
+  // DOE gate because DATA[15:8] carries A31-A24 during its address phase.
+  assign ZORRO_DATADIR     = dataout_enable | dataout_z3; // d2-d9  d10-15, d0-d1
+`else
   assign ZORRO_DATADIR     = ZORRO_DOE & (dataout_enable | dataout_z3); // d2-d9  d10-15, d0-d1
+`endif
   assign ZORRO_ADDRDIR     = ZORRO_DOE & (dataout_z3); // a16-a23 <- input  a8-a15 <- input
   assign ZORRO_ADDRDIR2    = 0; //ZORRO_DOE & (dataout_z3_latched);
   assign ZORRO_NBRN = 1; // TODO busmastering
@@ -919,8 +927,9 @@ module MNTZorro_v0_1_S00_AXI
     // Z2 ------------------------------------------------
 `ifdef ZORRO2
     // READ and nAS can happen dangerously close to each other. so we delay
-    // the recognition of a valid Z2 cycle 2 clocks more than the other signals.
-    z2_addr_valid <= (znAS_sync[4]==0 && znAS_sync[3]==0);
+    // the recognition of a valid Z2 cycle 1 clock more than the other signals.
+    // The older sync[4:3] tap smeared reads on A2000/68040 (MNT 93501420).
+    z2_addr_valid <= (znAS_sync[3]==0 && znAS_sync[2]==0);
     z2_read  <= (zREAD_sync[2] == 1'b1);
     z2_write <= (zREAD_sync[2] == 1'b0);
 
@@ -2535,7 +2544,6 @@ module MNTZorro_v0_1_S00_AXI
             end else if (z2_read && z2addr_in_reg) begin
               // read from registers
               dataout_enable <= 1;
-              data_out <= default_data;
               slaven <= 1;
               z_ovr <= 1;
               zaddr_regpart <= z2_mapped_addr[15:0];
@@ -2545,7 +2553,6 @@ module MNTZorro_v0_1_S00_AXI
               // read RAM
               // request ram access from arbiter
               last_addr <= z2_mapped_addr-ram_low; // differently done in z3
-              data_out <= default_data;
               dataout_enable <= 1;
               slaven <= 1;
               z_ovr <= 1;
