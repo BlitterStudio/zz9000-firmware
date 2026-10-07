@@ -1013,11 +1013,8 @@ module MNTZorro_v0_1_S00_AXI
 
   localparam [15:0] SDK_REG_MAGIC_VALUE = 16'h5a39;
   localparam [15:0] SDK_REG_VERSION = 16'h0200;
-  localparam [31:0] SDK_MAILBOX_ARM_ADDRESS = 32'h3fe43000;
   localparam [15:0] SDK_REG_MAGIC = 16'h0100;
   localparam [15:0] SDK_REG_VERSION_OFFS = 16'h0102;
-  localparam [15:0] SDK_REG_MAILBOX_HI = 16'h0104;
-  localparam [15:0] SDK_REG_MAILBOX_LO = 16'h0106;
   localparam [15:0] SDK_REG_DOORBELL = 16'h0108;
   localparam [15:0] SDK_REG_STATUS = 16'h010a;
   localparam [15:0] SDK_REG_IRQ_ACK = 16'h010c;
@@ -3042,10 +3039,6 @@ module MNTZorro_v0_1_S00_AXI
             SDK_REG_VERSION_OFFS: begin
               rr_data[31:16] <= SDK_REG_VERSION;
               rr_data[15:0]  <= SDK_REG_VERSION;
-            end
-            SDK_REG_MAILBOX_HI,
-            SDK_REG_MAILBOX_LO: begin
-              rr_data <= SDK_MAILBOX_ARM_ADDRESS;
             end
             SDK_REG_DOORBELL,
             SDK_REG_STATUS: begin
