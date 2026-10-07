@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "../tools/zzplay-audio.h"
-#include "../tools/zzplay-video.h"
+#include "../tools/zzplay/zzplay-audio.h"
+#include "../tools/zzplay/zzplay-video.h"
 
 #include <string.h>
 

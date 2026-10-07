@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "../tools/zzplay-controls.h"
-#include "../tools/zzplay-core.h"
-#include "../tools/zzplay-options.h"
-#include "../tools/zzplay-sync.h"
+#include "../tools/zzplay/zzplay-controls.h"
+#include "../tools/zzplay/zzplay-core.h"
+#include "../tools/zzplay/zzplay-options.h"
+#include "../tools/zzplay/zzplay-sync.h"
 
 #include <stddef.h>
 #include <stdint.h>

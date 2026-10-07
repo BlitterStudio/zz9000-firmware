@@ -485,33 +485,33 @@ target_include_directories(media_session_abi_test
 add_test(NAME media_session_abi_test COMMAND media_session_abi_test)
 
 add_library(zzplay_core STATIC
-  tools/zzplay-ahiprefs.c
-  tools/zzplay-audio.c
-  tools/zzplay-audio-clock.c
-  tools/zzplay-ax.c
-  tools/zzplay-controller.c
-  tools/zzplay-core.c
-  tools/zzplay-formats.c
-  tools/zzplay-geometry.c
-  tools/zzplay-media.c
-  tools/zzplay-mp3-transport.c
-  tools/zzplay-options.c
-  tools/zzplay-path.c
-  tools/zzplay-playlist.c
-  tools/zzplay-prefs.c
-  tools/zzplay-probe.c
-  tools/zzplay-stats.c
-  tools/zzplay-stream.c
-  tools/zzplay-sync.c
-  tools/zzplay-tags.c
-  tools/zzplay-video.c
+  tools/zzplay/zzplay-ahiprefs.c
+  tools/zzplay/zzplay-audio.c
+  tools/zzplay/zzplay-audio-clock.c
+  tools/zzplay/zzplay-ax.c
+  tools/zzplay/zzplay-controller.c
+  tools/zzplay/zzplay-core.c
+  tools/zzplay/zzplay-formats.c
+  tools/zzplay/zzplay-geometry.c
+  tools/zzplay/zzplay-media.c
+  tools/zzplay/zzplay-mp3-transport.c
+  tools/zzplay/zzplay-options.c
+  tools/zzplay/zzplay-path.c
+  tools/zzplay/zzplay-playlist.c
+  tools/zzplay/zzplay-prefs.c
+  tools/zzplay/zzplay-probe.c
+  tools/zzplay/zzplay-stats.c
+  tools/zzplay/zzplay-stream.c
+  tools/zzplay/zzplay-sync.c
+  tools/zzplay/zzplay-tags.c
+  tools/zzplay/zzplay-video.c
 )
 
 target_include_directories(zzplay_core
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/host/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay
 )
 
 add_executable(zzplay_probe_test
@@ -625,9 +625,9 @@ add_executable(zzplay_ux_source_test
 add_test(
   NAME zzplay_ux_source_test
   COMMAND zzplay_ux_source_test
-          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay.c
-          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay-mp3.c
-          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay-mhi.c
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay/zzplay.c
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay/zzplay-mp3.c
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay/zzplay-mhi.c
 )
 
 add_executable(zzplay_icon_test
@@ -649,7 +649,7 @@ add_executable(zzplay_ahi_source_test
 add_test(
   NAME zzplay_ahi_source_test
   COMMAND zzplay_ahi_source_test
-          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay-ahi.c
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay/zzplay-ahi.c
 )
 
 add_executable(zzplay_mp3_transport_test
@@ -670,7 +670,7 @@ add_executable(zzplay_mhi_source_test
 add_test(
   NAME zzplay_mhi_source_test
   COMMAND zzplay_mhi_source_test
-          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay-mhi.c
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay/zzplay-mhi.c
 )
 
 add_executable(zzplay_mp3_source_test
@@ -680,7 +680,7 @@ add_executable(zzplay_mp3_source_test
 add_test(
   NAME zzplay_mp3_source_test
   COMMAND zzplay_mp3_source_test
-          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay-mp3.c
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay/zzplay-mp3.c
 )
 
 add_executable(module_manifest_test
@@ -1443,7 +1443,7 @@ add_test(
 
 add_executable(mp3_tool_logic_test
   tests/mp3_tool_logic_test.c
-  tools/zzplay-mp3-transport.c
+  tools/zzplay/zzplay-mp3-transport.c
 )
 
 target_include_directories(mp3_tool_logic_test
@@ -1581,7 +1581,7 @@ target_link_libraries(zz9k_aead PRIVATE zz9k_host)
 
 add_executable(zz9k_mp3
   tools/zz9k-mp3.c
-  tools/zzplay-mp3-transport.c
+  tools/zzplay/zzplay-mp3-transport.c
 )
 
 target_link_libraries(zz9k_mp3 PRIVATE zz9k_host)

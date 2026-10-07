@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../tools/zzplay-tags.h"
+#include "../tools/zzplay/zzplay-tags.h"
 
 static int test_id3v22_parsing(void)
 {

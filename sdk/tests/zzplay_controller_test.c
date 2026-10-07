@@ -4,8 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../tools/zzplay-controls.h"
-#include "../tools/zzplay-controller.h"
+#include "../tools/zzplay/zzplay-controls.h"
+#include "../tools/zzplay/zzplay-controller.h"
 
 static int test_init_and_text(void)
 {

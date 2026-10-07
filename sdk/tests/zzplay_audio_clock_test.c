@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "../tools/zzplay-audio-clock.h"
+#include "../tools/zzplay/zzplay-audio-clock.h"
 
 #include <stdint.h>
 

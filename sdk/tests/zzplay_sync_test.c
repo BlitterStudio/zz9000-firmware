@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "../tools/zzplay-sync.h"
+#include "../tools/zzplay/zzplay-sync.h"
 
 #include <stdint.h>
 

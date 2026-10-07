@@ -5,8 +5,8 @@
 
 #include <stdio.h>
 
-#include "../tools/zzplay-controls.h"
-#include "../tools/zzplay-geometry.h"
+#include "../tools/zzplay/zzplay-controls.h"
+#include "../tools/zzplay/zzplay-geometry.h"
 
 static int test_exact_fit(void)
 {

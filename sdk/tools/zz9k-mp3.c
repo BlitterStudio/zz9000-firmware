@@ -8,7 +8,7 @@
 #include "zz9k/caps.h"
 #include "zz9k/host.h"
 #include "zz9k/shared.h"
-#include "zzplay-mp3-transport.h"
+#include "zzplay/zzplay-mp3-transport.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

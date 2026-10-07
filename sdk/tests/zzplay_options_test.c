@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../tools/zzplay-options.h"
+#include "../tools/zzplay/zzplay-options.h"
 
 /* Compare everything a launch path can set, except `launch` itself, which is
  * legitimately different between CLI and Workbench. */

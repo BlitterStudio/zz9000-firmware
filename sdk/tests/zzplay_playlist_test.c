@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../tools/zzplay-playlist.h"
+#include "../tools/zzplay/zzplay-playlist.h"
 
 static int check_permutation(const ZZPlayPlaylist *list)
 {

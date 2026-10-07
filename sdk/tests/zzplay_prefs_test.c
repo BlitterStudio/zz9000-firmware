@@ -5,9 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../tools/zzplay-ahiprefs.h"
-#include "../tools/zzplay-options.h"
-#include "../tools/zzplay-prefs.h"
+#include "../tools/zzplay/zzplay-ahiprefs.h"
+#include "../tools/zzplay/zzplay-options.h"
+#include "../tools/zzplay/zzplay-prefs.h"
 
 static int test_prefs_parse_and_format(void)
 {
