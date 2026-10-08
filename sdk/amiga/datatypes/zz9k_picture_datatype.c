@@ -40,11 +40,11 @@
 
 #define ZZ9K_PICTURE_DATATYPE_NAME "zz9k-picture.datatype"
 #define ZZ9K_PICTURE_DATATYPE_VERSION 42
-#define ZZ9K_PICTURE_DATATYPE_REVISION 151
+#define ZZ9K_PICTURE_DATATYPE_REVISION 152
 #define ZZ9K_PICTURE_DATATYPE_ID_STRING \
-  "$VER: zz9k-picture.datatype 42.151 (27.9.2026) ZZ9000 SDK"
+  "$VER: zz9k-picture.datatype 42.152 (8.10.2026) ZZ9000 SDK"
 #define ZZ9K_PICTURE_BUILD_MARKER \
-  "metadata: build 2026-09-27 png-streaming-tiles-v151"
+  "metadata: build 2026-10-08 memory-direct-staging-v152"
 #define ZZ9K_PICTURE_OBJECT_NAME_BYTES 128U
 #define ZZ9K_PICTURE_SMALL_PLACEHOLDER_SIZE 64U
 #define ZZ9K_PICTURE_RGB_BYTES_PER_PIXEL 3U
@@ -4132,16 +4132,18 @@ static int zz9k_picture_alloc_stream_input(ZZ9KContext *ctx,
   }
   zz9k_picture_trace("decode: datatype staging alloc ok");
 
-  input->read_scratch = (uint8_t *)AllocMem(
-      (ULONG)input_bytes, MEMF_PUBLIC);
-  if (!input->read_scratch) {
-    if (failure_out) {
-      *failure_out = "decode: read scratch alloc failed";
+  if (source->type != ZZ9K_PICTURE_SOURCE_MEMORY) {
+    input->read_scratch = (uint8_t *)AllocMem(
+        (ULONG)input_bytes, MEMF_PUBLIC);
+    if (!input->read_scratch) {
+      if (failure_out) {
+        *failure_out = "decode: read scratch alloc failed";
+      }
+      zz9k_picture_free_stream_input(ctx, input);
+      return 0;
     }
-    zz9k_picture_free_stream_input(ctx, input);
-    return 0;
+    input->read_scratch_bytes = input_bytes;
   }
-  input->read_scratch_bytes = input_bytes;
 
   return 1;
 }
@@ -4158,8 +4160,10 @@ static int zz9k_picture_read_chunk_to_shared(ZZ9KPictureSource *source,
 {
   uint32_t total;
 
-  if (!source || !staging || !read_scratch ||
-      read_scratch_length == 0U || !copied || !eof ||
+  if (!source || !staging ||
+      (source->type != ZZ9K_PICTURE_SOURCE_MEMORY &&
+       (!read_scratch || read_scratch_length == 0U)) ||
+      !copied || !eof ||
       offset > staging->length || capacity > (staging->length - offset)) {
     return 0;
   }
@@ -4171,7 +4175,8 @@ static int zz9k_picture_read_chunk_to_shared(ZZ9KPictureSource *source,
     LONG bytes_read;
 
     want = capacity - total;
-    if (want > read_scratch_length) {
+    if (source->type != ZZ9K_PICTURE_SOURCE_MEMORY &&
+        want > read_scratch_length) {
       want = read_scratch_length;
     }
     trace_this = ZZ9K_PICTURE_DATATYPE_TRACE_VERBOSE &&
@@ -4185,7 +4190,17 @@ static int zz9k_picture_read_chunk_to_shared(ZZ9KPictureSource *source,
 #if ZZ9K_PICTURE_TRACE_STREAM_CHUNKS
     zz9k_picture_trace("stream: before file read");
 #endif
-    bytes_read = zz9k_picture_source_read(source, read_scratch, want);
+    if (source->type == ZZ9K_PICTURE_SOURCE_MEMORY) {
+      uint32_t available;
+
+      if (!source->memory || source->position > source->size) {
+        return 0;
+      }
+      available = source->size - source->position;
+      bytes_read = (LONG)(want < available ? want : available);
+    } else {
+      bytes_read = zz9k_picture_source_read(source, read_scratch, want);
+    }
     if (trace_this) {
       zz9k_picture_trace_u32(
           "stream: datatype file read bytes", (uint32_t)bytes_read);
@@ -4211,10 +4226,16 @@ static int zz9k_picture_read_chunk_to_shared(ZZ9KPictureSource *source,
     if (trace_this) {
       zz9k_picture_trace("stream: datatype before shared byte copy");
     }
-    if (!zz9k_picture_shared_copy_to_bytes(staging, offset + total,
-                                           read_scratch,
-                                           (uint32_t)bytes_read)) {
+    if (!zz9k_picture_shared_copy_to_bytes(
+            staging, offset + total,
+            source->type == ZZ9K_PICTURE_SOURCE_MEMORY
+                ? source->memory + source->position
+                : read_scratch,
+            (uint32_t)bytes_read)) {
       return 0;
+    }
+    if (source->type == ZZ9K_PICTURE_SOURCE_MEMORY) {
+      source->position += (uint32_t)bytes_read;
     }
     if (trace_this) {
       zz9k_picture_trace("stream: datatype shared byte copy ok");
@@ -4243,8 +4264,10 @@ static int zz9k_picture_fill_staging(ZZ9KPictureSource *source,
 {
   uint32_t copied;
 
-  if (!source || !staging || !read_scratch ||
-      read_scratch_length == 0U || !buffered || !eof ||
+  if (!source || !staging ||
+      (source->type != ZZ9K_PICTURE_SOURCE_MEMORY &&
+       (!read_scratch || read_scratch_length == 0U)) ||
+      !buffered || !eof ||
       *buffered > staging->length) {
     return 0;
   }
@@ -4295,8 +4318,10 @@ static int zz9k_picture_feed_stream(ZZ9KContext *ctx,
   uint32_t empty_eof_feeds;
   int eof;
 
-  if (!ctx || !source || !staging || !read_scratch ||
-      read_scratch_length == 0U || session == 0U || !final_result) {
+  if (!ctx || !source || !staging ||
+      (source->type != ZZ9K_PICTURE_SOURCE_MEMORY &&
+       (!read_scratch || read_scratch_length == 0U)) ||
+      session == 0U || !final_result) {
     return 0;
   }
 
@@ -5891,8 +5916,10 @@ static int zz9k_picture_feed_stream_to_datatype(
   uint32_t trace_chunks;
   int eof;
 
-  if (!ctx || !source || !staging || !read_scratch ||
-      read_scratch_length == 0U || !tile || !target ||
+  if (!ctx || !source || !staging ||
+      (source->type != ZZ9K_PICTURE_SOURCE_MEMORY &&
+       (!read_scratch || read_scratch_length == 0U)) ||
+      !tile || !target ||
       session == 0U || !final_result) {
     return 0;
   }

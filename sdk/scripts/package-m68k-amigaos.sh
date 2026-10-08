@@ -145,14 +145,14 @@ copy_one "build/zz9k-view" "C/zz9k-view"
 copy_one "build/zz9k-dtprobe" "C/zz9k-dtprobe"
 copy_one "build/zz9k-picture.datatype" \
   "Classes/DataTypes/zz9k-picture.datatype"
-decode_base64_file "amiga/datatypes/descriptors/ZZ9000-JPEG.b64" \
-  "Storage/DataTypes/ZZ9000-JPEG"
-decode_base64_file "amiga/datatypes/descriptors/ZZ9000-PNG.b64" \
-  "Storage/DataTypes/ZZ9000-PNG"
-copy_one "amiga/datatypes/descriptors/ZZ9000-JPEG.info" \
-  "Storage/DataTypes/ZZ9000-JPEG.info"
-copy_one "amiga/datatypes/descriptors/ZZ9000-PNG.info" \
-  "Storage/DataTypes/ZZ9000-PNG.info"
+python3 "$REPO_ROOT/scripts/generate-datatype-descriptors.py" \
+  --source-dir "$REPO_ROOT/amiga/datatypes/descriptors" \
+  --output-dir "$PACKAGE_ROOT/Storage/DataTypes"
+for descriptor in "$REPO_ROOT"/amiga/datatypes/descriptors/*.dtid; do
+  name=$(basename "$descriptor" .dtid)
+  copy_one "amiga/datatypes/descriptors/$name.info" \
+    "Storage/DataTypes/$name.info"
+done
 copy_one "build/zz9k-smoke" "C/zz9k-smoke"
 copy_one "build/zz9k-surface-info" "C/zz9k-surface-info"
 copy_one "build/zz9k-palette" "C/zz9k-palette"

@@ -120,14 +120,14 @@ Copy-One "build/zz9k-view" "C/zz9k-view"
 Copy-One "build/zz9k-dtprobe" "C/zz9k-dtprobe"
 Copy-One "build/zz9k-picture.datatype" `
   "Classes/DataTypes/zz9k-picture.datatype"
-Decode-Base64File "amiga/datatypes/descriptors/ZZ9000-JPEG.b64" `
-  "Storage/DataTypes/ZZ9000-JPEG"
-Decode-Base64File "amiga/datatypes/descriptors/ZZ9000-PNG.b64" `
-  "Storage/DataTypes/ZZ9000-PNG"
-Copy-One "amiga/datatypes/descriptors/ZZ9000-JPEG.info" `
-  "Storage/DataTypes/ZZ9000-JPEG.info"
-Copy-One "amiga/datatypes/descriptors/ZZ9000-PNG.info" `
-  "Storage/DataTypes/ZZ9000-PNG.info"
+$DescriptorDirectory = Join-Path $RepoRoot "amiga/datatypes/descriptors"
+& python "$RepoRoot\scripts\generate-datatype-descriptors.py" --source-dir $DescriptorDirectory --output-dir (Join-Path $PackageRoot "Storage/DataTypes")
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Get-ChildItem -LiteralPath $DescriptorDirectory -Filter *.dtid -File |
+  Sort-Object Name |
+  ForEach-Object {
+    Copy-One ("amiga/datatypes/descriptors/" + $_.BaseName + ".info") ("Storage/DataTypes/" + $_.BaseName + ".info")
+  }
 Copy-One "build/zz9k-smoke" "C/zz9k-smoke"
 Copy-One "build/zz9k-surface-info" "C/zz9k-surface-info"
 Copy-One "build/zz9k-palette" "C/zz9k-palette"
