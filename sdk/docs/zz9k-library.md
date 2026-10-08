@@ -531,9 +531,9 @@ backend capabilities:
 - `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_SCALING`: the backend can scale during JPEG
   decode.
 - `ZZ9K_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA`: streaming PNG decode can write
-  direct 32-bit BGRA output to a surface or mapped framebuffer. PNG tile output,
-  fit scaling, APNG, and interlaced PNG are intentionally not part of this first
-  decoder slice.
+  direct 32-bit BGRA output to a surface or mapped framebuffer. Image sessions
+  also support interlaced PNG and bounded tile output. PNG fit scaling and APNG
+  playback are not supported.
 - `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BILINEAR`: the scaler accepts
   `ZZ9K_SCALE_BILINEAR` for 32-bit surfaces.
 - `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_CLIPPED`: the scaler accepts clipped
@@ -552,11 +552,49 @@ The current libjpeg-turbo backend advertises baseline JPEG, progressive JPEG,
 direct BGRA output, and bounded fit scaling for image sessions. The fit path
 uses libjpeg-turbo DCT scaling first, then a bounded row scaler when the image
 is still larger than the target framebuffer.
-The current libpng backend advertises direct BGRA output only; use the generic
-ARM scaler after decode when PNG fit/upscale behavior is needed.
+The libpng backend uses direct or staged/tiled output as required by interlace
+and destination mode; use the generic ARM scaler for PNG fit/upscale behavior.
 `zz9k-services` prints these flags as `jpeg-baseline`, `jpeg-progressive`,
 `jpeg-direct-bgra`, `jpeg-scaling`, `png-direct-bgra`, `scale-bilinear`,
 `scale-clipped`, `streaming-input`, `tile-output`, and `framebuffer-output`.
+
+#### WebP firmware development contract (unadvertised)
+
+Codec ID `ZZ9K_IMAGE_CODEC_WEBP = 4` and image-service flag
+`ZZ9K_SERVICE_FLAG_IMAGE_WEBP = 1U << 28` are reserved. Firmware contains a
+libwebp 1.6.0 decoder, but does **not** advertise the flag. Public image helpers,
+picture.datatype, zz9k-view and ZZPlay are not yet WebP clients. Do not infer
+support from the codec constant or the generic image-decode capability.
+
+The internal image-session path accepts lossy/lossless WebP and alpha. Animated
+input produces the first fully composited canvas, including frame offsets and
+transparent canvas regions. It validates the complete container before output;
+this preview does not certify decoding later frames and supplies no timed
+playback contract. No existing opcode, payload layout or LVO changes.
+
+- Input is assembled once in ARM-local storage using the declared RIFF length.
+  Each copied fragment is acknowledged immediately; no output is published until
+  EOF validates the container and the static image/first canvas decodes.
+- Tile output reuses the caller's bounded tile buffer. Drain with empty EOF feeds
+  after the compressed bytes are consumed, copy each `TILE_READY` result before
+  the next feed, and continue until `COMPLETE`. Drains consume zero input bytes.
+- Provisional safety caps: 8 MiB compressed input, 8192 pixels per dimension,
+  6 MiPixels per canvas, 1024 top-level chunks, 1024 nested chunks per frame,
+  and 256 animation frames. One WebP session reserves the shared 72 MiB
+  decode-state budget; actual input, canvases, allocation headers and decoder
+  workspace must fit that quota.
+  Exhausted memory or the 64-entry reset tracker returns `NO_MEMORY`, even for
+  inputs within those caps. These are implementation bounds, not measured
+  supported-image guarantees.
+- Decoding requires core 1. ARM-local surface destinations must match the
+  decoded canvas dimensions exactly and use an explicit cache handoff. Partial
+  ARM-local destination rectangles and FIT decoding are unsupported. Existing
+  JPEG/PNG core routing is unchanged.
+- Completed output, error and close release decoder allocations; a core-1 fault
+  poisons the session and reclaims tracked blocks without stale destructors.
+
+Physical Z2/Z3 memory, cache-coherence and throughput qualification, client
+integration, and distribution notices are release gates before advertising WebP.
 
 ### Image Tool Smoke Tests
 
@@ -620,8 +658,8 @@ draws into the window inner rectangle. Refresh and resize redraws query visible
 window clips before submitting clipped scale bands, and the affected
 framebuffer rectangle is backed up with ARM surface-copy operations unless
 `--keep` is supplied. Windowed restore copies only the currently visible clips
-from that backup surface. Static non-interlaced PNG files are supported; APNG,
-interlaced PNG, and tile output are still rejected.
+from that backup surface. Static PNG, including interlaced input, is supported;
+image sessions also support tile output. APNG playback remains unsupported.
 
 `zz9k-view` is the standalone ZZ9000 viewer for the SDK v2 image path. It
 accepts one or more JPEG or PNG files, opens one resizable Intuition window,

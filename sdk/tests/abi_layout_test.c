@@ -7,6 +7,13 @@
 #include "zz9k/abi.h"
 #include <stddef.h>
 #include <stdint.h>
+typedef char webp_codec_is_4[
+  (ZZ9K_IMAGE_CODEC_WEBP == 4U) ? 1 : -1
+];
+
+typedef char webp_image_flag_is_bit_28[
+  (ZZ9K_SERVICE_FLAG_IMAGE_WEBP == (1U << 28)) ? 1 : -1
+];
 
 typedef char mailbox_entry_is_64_bytes[
   (sizeof(ZZ9KMailboxEntry) == ZZ9K_MAILBOX_ENTRY_SIZE) ? 1 : -1

@@ -56,12 +56,20 @@ LZMA_SDK_VERSION ?= 26.01
 LZMA_SDK_DIR ?= $(BUILD_DIR)/deps/lzma-sdk/$(LZMA_SDK_VERSION)
 LZMA_SDK_SRC ?= $(LZMA_SDK_DIR)/src
 LZMA_SDK_BUILD ?= $(LZMA_SDK_DIR)/build
+LIBWEBP_VERSION ?= 1.6.0
+LIBWEBP_DIR ?= $(BUILD_DIR)/deps/libwebp/$(LIBWEBP_VERSION)
+LIBWEBP_ARM_DIR ?= $(LIBWEBP_DIR)/arm
+LIBWEBP_INCLUDE_DIR ?= $(LIBWEBP_ARM_DIR)/include
+LIBWEBP_LIB_DIR ?= $(LIBWEBP_ARM_DIR)/lib
+LIBWEBP_DECODER_LIB ?= $(LIBWEBP_LIB_DIR)/libwebpdecoder.a
+LIBWEBP_DEMUX_LIB ?= $(LIBWEBP_LIB_DIR)/libwebpdemux.a
 
 # Include paths
 INCLUDES = -I$(SRC_DIR) -I$(SRC_DIR)/bearssl -I$(BSP_INC)
 INCLUDES += -I$(LIBJPEG_TURBO_BUILD) -I$(LIBJPEG_TURBO_SRC)/src
 INCLUDES += -I$(ZLIB_SRC)
 INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)
+INCLUDES += -I$(LIBWEBP_INCLUDE_DIR)
 INCLUDES += -I$(LZMA_SDK_SRC)/C
 
 # Common flags (shared by all optimization levels)
@@ -92,7 +100,7 @@ LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -L$(BSP_LIB)
 
 # Libraries (order matters for --start-group)
-LIBS = $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
+LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
 
 # Source files
 C_SRCS = \
@@ -204,6 +212,7 @@ C_SRCS = \
 	$(SRC_DIR)/bearssl/ghash_ctmul.c \
 	$(SRC_DIR)/bearssl/gcm.c \
 	$(SRC_DIR)/sdk_image_stream.c \
+	$(SRC_DIR)/sdk_webp_alloc.c \
 	$(SRC_DIR)/sdk_video_stream.c \
 	$(SRC_DIR)/sdk_media_profile.c \
 	$(SRC_DIR)/sdk_media_session.c \
@@ -244,16 +253,15 @@ FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 
 all: $(TARGET) $(FALLBACK_TARGET) size
 
-$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(OBJS)
+$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 	@echo 'Done.'
 
-$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(FALLBACK_OBJS)
+$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(FALLBACK_OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(FALLBACK_OBJS) $(LIBS)
 	@echo 'Done.'
-
 $(LIBJPEG_TURBO_LIB):
 	@echo 'Building libjpeg-turbo dependency...'
 	cd ../.. && bash ./build_libjpeg_turbo.sh
@@ -271,6 +279,19 @@ $(LZMA_SDK_SRC)/C/LzmaDec.c:
 	cd ../.. && bash ./build_lzma_sdk.sh
 
 $(LZMA_SDK_SRC)/C/Lzma2Dec.c: $(LZMA_SDK_SRC)/C/LzmaDec.c
+$(LIBWEBP_DECODER_LIB): $(SRC_DIR)/webp/CMakeLists.txt $(SRC_DIR)/sdk_webp_alloc.h ../../build_libwebp.sh
+	@echo 'Building libwebp decoder/demux dependency...'
+	cd ../.. && bash ./build_libwebp.sh
+
+# libwebp creates the decoder and demux archives as one unit. Make the
+# demux archive wait for the sole producer, and rebuild that unit if only the
+# secondary archive was removed between invocations.
+$(LIBWEBP_DEMUX_LIB): $(LIBWEBP_DECODER_LIB)
+	@if test ! -f "$@"; then \
+		rm -f "$(LIBWEBP_DECODER_LIB)"; \
+		$(MAKE) "$(LIBWEBP_DECODER_LIB)"; \
+	fi
+	@test -f "$@"
 
 $(LZMA_SDK_BUILD)/LzmaDec.o: $(LZMA_SDK_SRC)/C/LzmaDec.c
 	@mkdir -p $(dir $@)

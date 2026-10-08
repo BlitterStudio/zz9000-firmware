@@ -273,7 +273,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [build, host-tests, abi-mirror, sdk-host-tests, sdk-m68k-build]
+    needs: [build, host-tests, abi-mirror, sdk-host-tests, sdk-m68k-build, image-webp-host-tests]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -322,3 +322,19 @@ jobs:
           fi
           mapfile -t ASSETS < <(find release -maxdepth 1 -type f | sort)
           gh release create "$TAG" "${FLAGS[@]}" "${ASSETS[@]}"
+  image-webp-host-tests:
+    name: WebP image stream host tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Build and run read-only source test
+        run: |
+          docker run --rm -v "$PWD":/source:ro ubuntu:24.04 bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends build-essential ca-certificates cmake curl libjpeg-dev libpng-dev zlib1g-dev
+            mkdir /work
+            tar -C /source --exclude=.context -cf - . | tar -C /work -xf -
+            make -C /work/test/image test
+          '

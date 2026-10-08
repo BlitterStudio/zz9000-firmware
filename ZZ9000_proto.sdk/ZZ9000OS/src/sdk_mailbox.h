@@ -139,6 +139,7 @@
 #define SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA  (1U << 25)
 #define SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT    (1U << 26)
 #define SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565 (1U << 27)
+#define SDK_SERVICE_FLAG_IMAGE_WEBP             (1U << 28)
 #define SDK_SERVICE_FLAG_AUDIO_MP3_DECODE       (1U << 16)
 #define SDK_SERVICE_FLAG_AUDIO_MP3_STREAM       (1U << 20)
 /* Control-plane audio opcodes (0x0509+) are dispatchable. Follows the
@@ -999,7 +1000,7 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_IMAGE_CODEC_JPEG           1U
 #define SDK_IMAGE_CODEC_PNG            2U
 #define SDK_IMAGE_CODEC_GIF            3U
-
+#define SDK_IMAGE_CODEC_WEBP           4U
 #define SDK_IMAGE_OUTPUT_SURFACE       1U
 #define SDK_IMAGE_OUTPUT_FRAMEBUFFER   2U
 #define SDK_IMAGE_OUTPUT_TILE_BUFFER   3U

@@ -38,6 +38,7 @@ struct SDKImageStreamBegin {
 	 * heap objects live in the owning core's cache, so affinity can
 	 * never change mid-session. */
 	uint32_t core1_affine;
+	uint32_t direct_arm_local;
 };
 
 struct SDKImageStreamFeed {
@@ -69,6 +70,11 @@ void sdk_image_stream_init(void);
 uint32_t sdk_image_stream_active_count(void);
 /* Session affinity lookup: 1 = core-1-affine, 0 = core-0, -1 = not found. */
 int sdk_image_stream_session_core1(uint32_t session);
+/* Completed WebP direct output written by core 1 requires a core-0 cache
+ * invalidate before its deferred completion publishes that ownership handoff. */
+int sdk_image_stream_complete_arm_local_output(uint32_t session,
+                                                uintptr_t *address,
+                                                uint32_t *length);
 /* Nonzero when any open session is core-1-affine (mailbox reset gating). */
 int sdk_image_stream_has_core1_sessions(void);
 /* After a core-1 fault: drop core-1-affine sessions' dangling codec

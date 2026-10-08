@@ -4759,19 +4759,26 @@ static uint16_t handle_image_session_begin(
 	/* Fix the session's core affinity for its whole life: feeds/closes
 	 * of a core-1-affine session run on the worker (the codec heap
 	 * objects then live in core 1's cache and never migrate). */
+	if (begin.codec == SDK_IMAGE_CODEC_WEBP && !scheduler_core1_available())
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	begin.core1_affine = scheduler_core1_available() ? 1U : 0U;
 	if (begin.core1_affine &&
 	    (begin.output_mode == SDK_IMAGE_OUTPUT_SURFACE ||
 	     begin.output_mode == SDK_IMAGE_OUTPUT_FRAMEBUFFER)) {
 		struct SDKSurface dst;
 
-		/* ARM-local outputs keep the single-core cache contract
-		 * (reads skip invalidation, so a core-1-written surface
-		 * would go stale for core 0) -- see scale_defer_eligible.
-		 * Keep those sessions fully inline. */
 		if (get_surface_info(begin.dst_surface, &dst) &&
-		    surface_is_arm_local(&dst))
-			begin.core1_affine = 0U;
+		    surface_is_arm_local(&dst)) {
+			if (begin.codec != SDK_IMAGE_CODEC_WEBP) {
+				begin.core1_affine = 0U;
+			} else {
+				if (begin.dst_x != 0U || begin.dst_y != 0U ||
+				    begin.dst_width != dst.width || begin.dst_height != dst.height)
+					return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+				begin.direct_arm_local = 1U;
+				Xil_DCacheFlushRange((INTPTR)dst.address, dst.length);
+			}
+		}
 	}
 
 	status = sdk_image_stream_begin(&begin, &result);
@@ -8191,6 +8198,17 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 		                 ? (uint16_t)sizeof(comp->payload) : payload_len;
 		memset((void *)comp->payload, 0, sizeof(comp->payload));
 		memcpy((void *)comp->payload, payload, n);
+	}
+	if (status == SDK_STATUS_OK && opcode == SDK_OP_IMAGE_SESSION_FEED &&
+	    payload != 0 && payload_len >= sizeof(struct SDKImageSessionResultPayload)) {
+		const struct SDKImageSessionResultPayload *image =
+			(const struct SDKImageSessionResultPayload *)payload;
+		uintptr_t address;
+		uint32_t length;
+
+		if (sdk_image_stream_complete_arm_local_output(
+			get_be32(image->session), &address, &length))
+			Xil_DCacheInvalidateRange((INTPTR)address, length);
 	}
 	Xil_DCacheFlushRange((INTPTR)comp, sizeof(*comp));
 
