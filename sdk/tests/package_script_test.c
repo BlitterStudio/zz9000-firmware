@@ -135,17 +135,14 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name, "build/zz9k-picture.datatype");
   ok &= expect_contains(script, name, "Classes/DataTypes/zz9k-picture.datatype");
   ok &= expect_contains(script, name,
-                        "amiga/datatypes/descriptors/ZZ9000-JPEG.b64");
-  ok &= expect_contains(script, name,
-                        "amiga/datatypes/descriptors/ZZ9000-PNG.b64");
-  ok &= expect_contains(script, name, "Storage/DataTypes/ZZ9000-JPEG");
-  ok &= expect_contains(script, name, "Storage/DataTypes/ZZ9000-PNG");
-  ok &= expect_contains(script, name,
-                        "amiga/datatypes/descriptors/ZZ9000-JPEG.info");
-  ok &= expect_contains(script, name,
-                        "amiga/datatypes/descriptors/ZZ9000-PNG.info");
-  ok &= expect_contains(script, name, "Storage/DataTypes/ZZ9000-JPEG.info");
-  ok &= expect_contains(script, name, "Storage/DataTypes/ZZ9000-PNG.info");
+                        "generate-datatype-descriptors.py");
+  ok &= expect_contains(script, name, "*.dtid");
+  ok &= expect_contains(script, name, "Storage/DataTypes");
+  ok &= expect_contains(script, name, ".info");
+  ok &= expect_not_contains(script, name,
+                            "amiga/datatypes/descriptors/ZZ9000-JPEG.b64");
+  ok &= expect_not_contains(script, name,
+                            "amiga/datatypes/descriptors/ZZ9000-PNG.b64");
   ok &= expect_contains(script, name, "build/zz9k-surfaceops");
   ok &= expect_contains(script, name, "build/zz9k-libdecode");
   ok &= expect_contains(script, name, "build/zz9k-libevent");

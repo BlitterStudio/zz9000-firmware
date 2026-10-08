@@ -1312,28 +1312,6 @@ add_test(NAME picture_view_logic_test
   COMMAND picture_view_logic_test
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-view.c)
 
-add_executable(picture_datatype_source_test
-  tests/picture_datatype_source_test.c
-)
-
-add_test(
-  NAME picture_datatype_source_test
-  COMMAND picture_datatype_source_test
-          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/zz9k_picture_datatype.c
-          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-image-window.h
-          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-image-window.c
-)
-
-add_executable(picture_datatype_doc_test
-  tests/picture_datatype_doc_test.c
-)
-
-add_test(
-  NAME picture_datatype_doc_test
-  COMMAND picture_datatype_doc_test
-          ${CMAKE_CURRENT_SOURCE_DIR}/docs/zz9k-picture-datatype.md
-)
-
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 add_test(
@@ -1360,10 +1338,9 @@ add_executable(datatype_descriptor_test
 add_test(
   NAME datatype_descriptor_test
   COMMAND datatype_descriptor_test
-          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-JPEG.b64
-          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-PNG.b64
-          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-JPEG.dtid
-          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-PNG.dtid
+          ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate-datatype-descriptors.py
+          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-JPEG.info
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-PNG.info
 )

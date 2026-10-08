@@ -2,8 +2,8 @@
 
 Copyright (C) 2024-2026, Dimitris Panokostas / BlitterStudio
 
-`zz9k-picture.datatype 42.151` is the validated SDK v2 DataType for
-the current package. It is packaged as a side-by-side subclass of the system
+`zz9k-picture.datatype 42.152` is the SDK v2 picture DataType.
+It is packaged as a side-by-side subclass of the system
 `picture.datatype` and must not replace `Classes/DataTypes/picture.datatype`.
 OS3.1 remains the minimum target: the class opens against
 `picture.datatype` v39 and dynamically uses newer superclass features only
@@ -112,6 +112,24 @@ such as IBrowse and YAM when their 8-bit PNG image sets are routed through
 `zz9k-picture.datatype` (GitHub issue #73), on every screen depth.
 Truecolour PNGs with alpha keep the 42.149 behaviour.
 
+`42.152` stages memory-backed compressed images directly into the shared input
+buffer. It removes the intermediate public-memory buffer (up to 256 KiB on
+Zorro 3 or 24 KiB on Zorro 2) and one copy of the compressed input. File-backed
+images retain their existing buffered-read path. Shared-memory writes remain
+byte-wise and volatile; pixel, palette, alpha, and rendering contracts are
+unchanged. This is an allocation/copy reduction, not a measured decode-time claim.
+
+Local qualification of `42.152`: the actual m68k staging helper passed its
+bounds, EOF, and failed-copy position checks under Vamos. Amiberry with ZZ9000
+RTG passed file-backed indexed PNG, alpha PNG, and JPEG pixel checks and
+displayed the Workbench wallpaper. Physical Zorro 2/3 hardware was not tested.
+The installed `datatypes.library 47.3` / `picture.datatype 47.19` did not
+qualify the full memory-object route: a `NewDTObject` request using
+`DTST_MEMORY` arrived at the class as `DTST_FILE` with a null handle, and the
+superclass rejected it with error 212 before staging. The same rejection
+occurred with `42.151`; the memory-copy reduction is not a wallpaper speedup
+claim for this OS stack.
+
 `42.151` decodes non-interlaced PNGs through firmware streaming tiles.
 The previous full-height PNG tile could exceed the shared heap on files
 past roughly 1.3 megapixels, so Multiview reported `Invalid data` for
@@ -134,8 +152,44 @@ untrusted replies against the allocated tile buffer; adds a missing overflow
 check in the PNG full-image layout path; and rounds the per-row pixel buffer up
 to the 16-pixel multiple `graphics.library` requires.
 
-Hardware validation passed with real transparent PNGs in MultiView and a browser
-client.
+Earlier revisions were hardware-validated with real transparent PNGs in
+MultiView and a browser client. That does not qualify new revisions on hardware.
 
 Both descriptors use the `zz9k-picture` base name, `pict` group, binary magic
 masks for JPEG and PNG, and priority `10` for the eventual active path.
+
+## Building descriptors and adding formats
+
+The `.dtid` files in `amiga/datatypes/descriptors/` are the sole descriptor
+sources. Both package scripts discover these files, generate the IFF `DTYP`
+descriptors, and copy the matching `.info` icons into `Storage/DataTypes`.
+Descriptors remain inactive until explicitly installed; do not edit generated
+files. To generate them independently, run from the SDK directory:
+
+```text
+python3 scripts/generate-datatype-descriptors.py --source-dir amiga/datatypes/descriptors --output-dir build/datatype-descriptors
+```
+
+`Recog` contains hexadecimal bytes and optional `??` wildcard bytes. Wildcards
+allow recognition across variable fields, such as a RIFF size before a format
+identifier, without claiming every RIFF file. The compiler validates the
+inactive destination, header fields, recognition mask, and matching source name.
+Each source requires a same-name `.info` icon for packaging.
+
+A new descriptor alone does not add decoding support. Add and qualify the
+firmware decoder, codec ID and advertised service support, SDK capability
+checks, and class header parsing/codec selection before shipping its descriptor.
+Reuse the existing image session and pixel-output paths for still images;
+animation requires a separate frame/timing/compositing contract. GIF has a
+reserved ABI ID but is currently unsupported.
+
+Descriptor behavior is covered by the host `datatype_descriptor_test`. The
+actual m68k memory-staging boundary checks can be run with:
+
+```text
+sh tests/run_picture_datatype_staging_test.sh
+```
+
+That runner requires Docker and Python with `amitools`/`machine68k`; it compiles
+the production staging code and runs it under Vamos without GUI libraries.
+Real DataTypes layout and rendering still require an AmigaOS smoke run.
