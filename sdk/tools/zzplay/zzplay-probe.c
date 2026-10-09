@@ -3,6 +3,8 @@
 #include "zzplay-probe.h"
 
 #include "zz9k/image.h"
+/* Shared with the sound DataType so both claim exactly the same files. */
+#include "../../amiga/datatypes/zz9k_sound_flac.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -290,6 +292,10 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
   }
   memset(info, 0, sizeof(*info));
 
+  if (fseek(file, 0L, SEEK_SET) != 0) {
+    clearerr(file);
+    return 0;
+  }
   got = fread(buffer, 1U, sizeof(buffer), file);
   if (got >= ZZ9K_WEBP_HEADER_MIN_BYTES &&
       zzplay_probe_webp(buffer, got, &info->webp)) {
@@ -299,6 +305,18 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
       info->kind = ZZPLAY_MEDIA_KIND_UNSUPPORTED;
     }
     goto done;
+  }
+  {
+    ZZ9KSoundFlacEnvelope flac;
+
+    if (zz9k_sound_recognize_flac(buffer, (uint32_t)got, &flac)) {
+      info->flac.sample_rate = flac.sample_rate;
+      info->flac.channels = flac.channels;
+      info->flac.bits_per_sample = flac.bits_per_sample;
+      info->flac.total_samples = flac.total_samples;
+      info->kind = ZZPLAY_MEDIA_KIND_FLAC;
+      goto done;
+    }
   }
 
   clearerr(file);

@@ -16,6 +16,9 @@ static const char *const zzplay_mp3_extensions[] = {
 static const char *const zzplay_webp_extensions[] = {
   "webp", NULL
 };
+static const char *const zzplay_flac_extensions[] = {
+  "flac", NULL
+};
 
 
 static const ZZPlayFormat zzplay_formats_table[] = {
@@ -36,6 +39,12 @@ static const ZZPlayFormat zzplay_formats_table[] = {
     "Animated WebP",
     zzplay_webp_extensions,
     ZZPLAY_FORMAT_HAS_VIDEO
+  },
+  {
+    ZZPLAY_MEDIA_KIND_FLAC,
+    "FLAC",
+    zzplay_flac_extensions,
+    0U
   }
 };
 

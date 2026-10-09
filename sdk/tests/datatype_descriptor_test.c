@@ -362,15 +362,19 @@ int main(int argc, char **argv)
   static const int webp_recognition[] = {
       0x52, 0x49, 0x46, 0x46, -1, -1, -1, -1, 0x57, 0x45, 0x42, 0x50
   };
+  static const int flac_recognition[] = {0x66, 0x4c, 0x61, 0x43};
+  static const unsigned char native_flac[] = {'f', 'L', 'a', 'C', 0x00, 0x00};
+  static const unsigned char ogg_flac[] = {'O', 'g', 'g', 'S', 0x00, 0x02};
   const char *code_dir = "datatype_descriptor_test_code";
   char code_path[512];
   const char *output = "datatype_descriptor_test_output";
-  char jpeg_path[512], png_path[512], webp_path[512], mp3_path[512];
-  struct byte_buffer jpeg, png, webp, mp3, jpeg_icon, png_icon, webp_icon,
-      mp3_icon;
+  char jpeg_path[512], png_path[512], webp_path[512], mp3_path[512],
+      flac_path[512];
+  struct byte_buffer jpeg, png, webp, mp3, flac, jpeg_icon, png_icon,
+      webp_icon, mp3_icon, flac_icon;
   int ok;
-  if (argc != 8) {
-    printf("usage: %s <python> <generator> <descriptor-dir> <jpeg.info> <png.info> <webp.info> <mp3.info>\n",
+  if (argc != 9) {
+    printf("usage: %s <python> <generator> <descriptor-dir> <jpeg.info> <png.info> <webp.info> <mp3.info> <flac.info>\n",
            argv[0]);
     return 2;
   }
@@ -382,14 +386,17 @@ int main(int argc, char **argv)
   snprintf(png_path, sizeof(png_path), "%s/ZZ9000-PNG", output);
   snprintf(webp_path, sizeof(webp_path), "%s/ZZ9000-WebP", output);
   snprintf(mp3_path, sizeof(mp3_path), "%s/ZZ9000-MP3", output);
+  snprintf(flac_path, sizeof(flac_path), "%s/ZZ9000-FLAC", output);
   jpeg = read_binary_file(jpeg_path);
   png = read_binary_file(png_path);
   webp = read_binary_file(webp_path);
   mp3 = read_binary_file(mp3_path);
+  flac = read_binary_file(flac_path);
   jpeg_icon = read_binary_file(argv[4]);
   png_icon = read_binary_file(argv[5]);
   webp_icon = read_binary_file(argv[6]);
   mp3_icon = read_binary_file(argv[7]);
+  flac_icon = read_binary_file(argv[8]);
   ok = validate_descriptor("ZZ9000-JPEG", &jpeg, "ZZ9000-JPEG", "jpeg",
                            "pict", "zz9k-picture",
                            jpeg_recognition, sizeof(jpeg_recognition) / sizeof(jpeg_recognition[0]), 106U);
@@ -402,6 +409,19 @@ int main(int argc, char **argv)
   ok &= validate_descriptor("ZZ9000-MP3", &mp3, "ZZ9000-MP3", "mp3 ",
                             "soun", "zz9k-sound", 0, 0U, 116U);
   ok &= validate_icon("ZZ9000-MP3.info", &mp3_icon);
+  ok &= validate_descriptor("ZZ9000-FLAC", &flac, "ZZ9000-FLAC", "flac",
+                            "soun", "zz9k-sound", flac_recognition,
+                            sizeof(flac_recognition) / sizeof(flac_recognition[0]),
+                            106U);
+  ok &= validate_icon("ZZ9000-FLAC.info", &flac_icon);
+  if (!recognition_matches(&flac, native_flac, sizeof(native_flac))) {
+    printf("ZZ9000-FLAC: failed to match native FLAC header\n");
+    ok = 0;
+  }
+  if (recognition_matches(&flac, ogg_flac, sizeof(ogg_flac))) {
+    printf("ZZ9000-FLAC: unexpectedly matched Ogg-FLAC header\n");
+    ok = 0;
+  }
   ok &= check_mp3_hook(&mp3);
   ok &= check_code_rules(argv[1], argv[2], code_dir);
   ok &= validate_icon("ZZ9000-JPEG.info", &jpeg_icon);
@@ -411,7 +431,9 @@ int main(int argc, char **argv)
   ok &= check_webp_wildcards(argv[1], argv[2]);
   free(jpeg.data); free(png.data); free(webp.data);
   free(mp3.data); free(mp3_icon.data);
+  free(flac.data); free(flac_icon.data);
   remove(jpeg_path); remove(png_path); remove(webp_path); remove(mp3_path);
+  remove(flac_path);
   remove(code_path);
   remove_directory(output);
   remove_directory(code_dir);

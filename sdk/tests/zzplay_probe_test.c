@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include "../tools/zzplay/zzplay-formats.h"
 #include "../tools/zzplay/zzplay-probe.h"
 #include "../tools/zzplay/zzplay-stats.h"
 #include "../tools/zzplay/zzplay-stream.h"
@@ -137,6 +138,58 @@ static int check_mp3_file_probe(void)
   }
   fclose(file);
   return 1;
+}
+
+/* A native FLAC file is classified with its STREAMINFO geometry; the same
+ * bytes behind an Ogg page header are not claimed. */
+static int check_flac_file_probe(void)
+{
+  uint8_t stream[64];
+  ZZPlayProbeInfo probe;
+  FILE *file;
+  int ok;
+
+  memset(stream, 0, sizeof(stream));
+  memcpy(stream, "fLaC", 4U);
+  stream[4] = 0x80U;            /* last block, STREAMINFO */
+  stream[7] = 34U;
+  stream[8] = 0x10U;            /* 4096-sample blocks */
+  stream[10] = 0x10U;
+  stream[18] = 0x17U;           /* 96000 Hz, stereo, 24-bit */
+  stream[19] = 0x70U;
+  stream[20] = 0x03U;
+  stream[21] = 0x70U;
+  stream[23] = 0x01U;           /* 96000 samples */
+  stream[24] = 0x77U;
+  file = tmpfile();
+  if (!file || fwrite(stream, 1U, sizeof(stream), file) != sizeof(stream) ||
+      fflush(file) != 0) {
+    if (file) fclose(file);
+    return 0;
+  }
+  memset(&probe, 0, sizeof(probe));
+  ok = zzplay_probe_media_file(file, &probe) && ftell(file) == 0L &&
+       probe.kind == ZZPLAY_MEDIA_KIND_FLAC &&
+       probe.flac.sample_rate == 96000U && probe.flac.channels == 2U &&
+       probe.flac.bits_per_sample == 24U &&
+       probe.flac.total_samples == 96000U;
+  fclose(file);
+  if (!ok) {
+    return 0;
+  }
+  memcpy(stream, "OggS", 4U);
+  file = tmpfile();
+  if (!file || fwrite(stream, 1U, sizeof(stream), file) != sizeof(stream) ||
+      fflush(file) != 0) {
+    if (file) fclose(file);
+    return 0;
+  }
+  ok = !zzplay_probe_media_file(file, &probe) &&
+       probe.kind == ZZPLAY_MEDIA_KIND_UNSUPPORTED;
+  fclose(file);
+  return ok && zzplay_format_for_path("Work:a.FLAC") &&
+         zzplay_format_for_path("Work:a.FLAC")->kind ==
+             ZZPLAY_MEDIA_KIND_FLAC;
 }
 
 static int check_stats_and_transport(void)
@@ -464,6 +517,9 @@ int main(void)
   }
   if (!check_mp3_file_probe()) {
     return 14;
+  }
+  if (!check_flac_file_probe()) {
+    return 17;
   }
   if (!check_webp_probe()) {
     return 15;

@@ -3545,7 +3545,8 @@ static const struct ZZPlayEngineEntry {
 } zzplay_engines[] = {
   { ZZPLAY_MEDIA_KIND_MPEG_PS, zzplay_engine_mpeg },
   { ZZPLAY_MEDIA_KIND_MP3, zzplay_mp3_run },
-  { ZZPLAY_MEDIA_KIND_WEBP, zzplay_engine_webp }
+  { ZZPLAY_MEDIA_KIND_WEBP, zzplay_engine_webp },
+  { ZZPLAY_MEDIA_KIND_FLAC, zzplay_flac_run }
 };
 static ZZPlayEngineFn zzplay_engine_for_kind(ZZPlayMediaKind kind)
 {
@@ -3642,7 +3643,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   } else if (!engine) {
     zzplay_launch_reportf(
         &app->ctl, &app->options,
-        "cannot play %s: not a supported MPEG-1 Program Stream, MP3 or WebP animation file",
+        "cannot play %s: not a supported MPEG-1 Program Stream, MP3, FLAC or WebP animation file",
         app->item_path);
   } else {
     format = zzplay_format_for_kind(probe.kind);

@@ -1,6 +1,6 @@
 # ZZPlay — the ZZ9000 accelerated media player
 
-ZZPlay plays MPEG-1 Program Streams and MP3 files using the ZZ9000's ARM
+ZZPlay plays MPEG-1 Program Streams, MP3 and native FLAC files using the ZZ9000's ARM
 coprocessor and FPGA video overlay. Video decoding happens on the card; on the
 accelerated Zorro III path no decoded video ever crosses the Zorro bus.
 
@@ -19,11 +19,12 @@ It works two ways:
 | MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video, card-decoded | MPEG-1 Layer II, card-decoded |
 | MPEG-1 Program Stream, video only | MPEG-1 video, card-decoded | none (a warning is printed) |
 | MPEG Layer III (`.mp3`) | — | card-decoded, CBR and VBR, mono or stereo |
+| Native FLAC (`.flac`) | — | card-decoded, mono or stereo, 4 to 24 bits, 8 to 192 kHz; 24-bit output narrowed to 16-bit for AHI |
 | Animated WebP (`.webp`) | WebP animation, card-decoded | none |
 | Playlist (`.m3u`, `.m3u8`) | the files it lists | |
 
 The format is chosen by inspecting the file, not by its name. MPEG-1
-elementary streams, standalone MP2, MPEG-2 and other codecs are rejected with
+elementary streams, standalone MP2, MPEG-2, Ogg-FLAC, multichannel FLAC and other codecs are rejected with
 a specific message rather than being half-played. File extensions only decide
 what a drawer scan or the file requester offers.
 
@@ -85,7 +86,7 @@ From top to bottom:
   use, the elapsed and total time and the playback state, and a message line
   for notices and errors.
 - **Position slider**: drag it to seek. Seeking is available for MP3; it is
-  greyed out for MPEG-1 video, which plays from the start.
+  greyed out for MPEG-1 video and FLAC, which play from the start.
 - **Transport**: previous, play, pause, stop, next.
 - **Volume**: greyed out when the active output cannot change volume (see
   below).
@@ -211,6 +212,11 @@ and the player window shows what it chose.
   advertises it.
 - MHI is never offered for Program Stream audio: it is a Layer III interface.
   Asking for it explicitly reports that rather than playing silently.
+- **FLAC** always uses accelerated decode plus AHI (or `AUDIO=NONE`). The
+  saved MP3 output does not apply to it; an explicit `AUDIO=MHI` or
+  `AUDIO=AX` reports that FLAC cannot use that backend. FLAC needs firmware
+  that advertises the FLAC stream service; without it ZZPlay reports that
+  accelerated FLAC streaming is unavailable.
 
 Only one backend can own the ZZ9000AX daughterboard at a time. If another
 program holds it, an explicitly requested backend reports `BUSY` instead of

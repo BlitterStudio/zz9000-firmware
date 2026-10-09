@@ -1,4 +1,6 @@
-/* Standalone MP3 playback engine for zzplay.
+/* Standalone compressed-audio playback engine for zzplay: MP3 through MHI
+ * or accelerated decode + AHI, native FLAC through accelerated decode +
+ * AHI.
  *
  * The engine is driven by the playback controller (zzplay-controller.h):
  * it polls item-ending requests, applies live controls (pause, volume),
@@ -56,5 +58,11 @@ typedef ZZPlayEngineResult (*ZZPlayEngineFn)(const ZZPlayEngineRun *run);
  * a strict requested backend that cannot play fails instead of falling
  * back. */
 ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run);
+
+/* Play one native FLAC file through the card's FLAC stream decoder and
+ * AHI. Only an explicit AUDIO= option selects the backend; MHI and AX
+ * cannot play FLAC. Seeking is unsupported (the decoder starts from the
+ * stream header). */
+ZZPlayEngineResult zzplay_flac_run(const ZZPlayEngineRun *run);
 
 #endif /* ZZPLAY_MP3_H */

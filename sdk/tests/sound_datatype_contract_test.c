@@ -246,6 +246,87 @@ static void test_legacy_conversion(void)
               "legacy conversion rejects unsupported channel counts");
 }
 
+/* Builds the 42-byte native FLAC prefix: marker, last-block STREAMINFO
+ * header, 4096-sample blocks, then rate/channels/bits as packed by
+ * STREAMINFO (20-bit rate, 3-bit channels-1, 5-bit bits-1). */
+static void set_flac_header(uint8_t *bytes, uint32_t rate,
+                            uint32_t channels, uint32_t bits)
+{
+  memset(bytes, 0, ZZ9K_SOUND_FLAC_HEADER_BYTES);
+  memcpy(bytes, "fLaC", 4U);
+  bytes[4] = 0x80U;
+  bytes[7] = ZZ9K_SOUND_FLAC_STREAMINFO_BYTES;
+  bytes[8] = 0x10U;
+  bytes[10] = 0x10U;
+  bytes[18] = (uint8_t)(rate >> 12);
+  bytes[19] = (uint8_t)(rate >> 4);
+  bytes[20] = (uint8_t)(((rate & 0x0fU) << 4) | ((channels - 1U) << 1) |
+                        ((bits - 1U) >> 4));
+  bytes[21] = (uint8_t)(((bits - 1U) & 0x0fU) << 4);
+  bytes[25] = 0x10U;
+}
+
+static void test_flac_recognition(void)
+{
+  uint8_t header[ZZ9K_SOUND_FLAC_HEADER_BYTES];
+  ZZ9KSoundFlacEnvelope envelope;
+
+  set_flac_header(header, 44100U, 2U, 16U);
+  memset(&envelope, 0, sizeof(envelope));
+  expect_true(zz9k_sound_recognize_flac(header, sizeof(header), &envelope) &&
+                  envelope.sample_rate == 44100U && envelope.channels == 2U &&
+                  envelope.bits_per_sample == 16U &&
+                  envelope.total_samples == 16U,
+              "16-bit stereo FLAC STREAMINFO is decoded");
+  set_flac_header(header, 96000U, 1U, 24U);
+  expect_true(zz9k_sound_recognize_flac(header, sizeof(header), &envelope) &&
+                  envelope.sample_rate == 96000U && envelope.channels == 1U &&
+                  envelope.bits_per_sample == 24U,
+              "24-bit mono FLAC STREAMINFO is decoded");
+  expect_true(!zz9k_sound_recognize_flac(header, sizeof(header) - 1U, 0),
+              "a truncated STREAMINFO is rejected");
+  set_flac_header(header, 44100U, 3U, 16U);
+  expect_true(!zz9k_sound_recognize_flac(header, sizeof(header), 0),
+              "multichannel FLAC is not claimed");
+  set_flac_header(header, 44100U, 2U, 32U);
+  expect_true(!zz9k_sound_recognize_flac(header, sizeof(header), 0),
+              "FLAC wider than 24 bits is not claimed");
+  set_flac_header(header, 7999U, 2U, 16U);
+  expect_true(!zz9k_sound_recognize_flac(header, sizeof(header), 0),
+              "rates below the decoder floor are not claimed");
+  set_flac_header(header, 192001U, 2U, 16U);
+  expect_true(!zz9k_sound_recognize_flac(header, sizeof(header), 0),
+              "rates above the decoder ceiling are not claimed");
+  set_flac_header(header, 44100U, 2U, 16U);
+  header[4] = 0x84U;
+  expect_true(!zz9k_sound_recognize_flac(header, sizeof(header), 0),
+              "a first block other than STREAMINFO is rejected");
+  set_flac_header(header, 44100U, 2U, 16U);
+  memcpy(header, "OggS", 4U);
+  expect_true(!zz9k_sound_recognize_flac(header, sizeof(header), 0),
+              "Ogg-FLAC is not claimed as native FLAC");
+}
+
+static void test_wide_legacy_conversion(void)
+{
+  /* MSB-justified S32BE stereo: left -1.0, right just under +1.0. */
+  static const uint8_t s32_stereo[8] = {
+    0x80U, 0x00U, 0x12U, 0x00U, 0x7fU, 0xffU, 0xffU, 0x00U
+  };
+  static const uint8_t s32_mono[4] = {0x40U, 0x01U, 0xabU, 0x00U};
+  uint8_t top[4];
+
+  zz9k_sound_frame_top16(s32_stereo, 2U, 4U, top);
+  expect_true(top[0] == 0x80U && top[1] == 0x00U && top[2] == 0x7fU &&
+                  top[3] == 0xffU,
+              "S32 frames keep each channel's top 16 bits for legacy output");
+  expect_true(zz9k_sound_legacy_quantize_s16be(top, 2U) == 0,
+              "wide stereo is averaged after narrowing");
+  zz9k_sound_frame_top16(s32_mono, 1U, 4U, top);
+  expect_true(zz9k_sound_legacy_quantize_s16be(top, 1U) == 64,
+              "wide mono narrows to the same 8-bit sample as S16");
+}
+
 static void test_growth(void)
 {
   uint32_t next;
@@ -303,12 +384,12 @@ static void test_cleanup(void)
   memset(&state, 0, sizeof(state));
   memset(&trace, 0, sizeof(trace));
   state.session = 7U;
-  state.mp3_handle = 11U;
+  state.input_handle = 11U;
   state.pcm_handle = 12U;
   state.staging_handle = 13U;
   state.sample = &sample;
   state.session_open = 1U;
-  state.mp3_allocated = 1U;
+  state.input_allocated = 1U;
   state.pcm_allocated = 1U;
   state.staging_allocated = 1U;
 
@@ -322,7 +403,7 @@ static void test_cleanup(void)
                   trace.events[4] == 0x30000000UL,
               "cleanup closes the session before reverse-order resource frees");
   expect_true(trace.sample == &sample && !state.session_open &&
-                  !state.mp3_allocated && !state.pcm_allocated &&
+                  !state.input_allocated && !state.pcm_allocated &&
                   !state.staging_allocated && state.sample == 0,
               "cleanup clears ownership after releasing resources");
   zz9k_sound_cleanup_owned(&state, &ops, &trace);
@@ -365,6 +446,8 @@ int main(void)
   test_recognition();
   test_hook_recognition();
   test_legacy_conversion();
+  test_flac_recognition();
+  test_wide_legacy_conversion();
   test_growth();
   test_cleanup();
 
