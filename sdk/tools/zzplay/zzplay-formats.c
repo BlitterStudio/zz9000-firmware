@@ -13,6 +13,10 @@ static const char *const zzplay_mpeg_ps_extensions[] = {
 static const char *const zzplay_mp3_extensions[] = {
   "mp3", NULL
 };
+static const char *const zzplay_webp_extensions[] = {
+  "webp", NULL
+};
+
 
 static const ZZPlayFormat zzplay_formats_table[] = {
   {
@@ -26,6 +30,12 @@ static const ZZPlayFormat zzplay_formats_table[] = {
     "MPEG Layer III",
     zzplay_mp3_extensions,
     0U
+  },
+  {
+    ZZPLAY_MEDIA_KIND_WEBP,
+    "Animated WebP",
+    zzplay_webp_extensions,
+    ZZPLAY_FORMAT_HAS_VIDEO
   }
 };
 

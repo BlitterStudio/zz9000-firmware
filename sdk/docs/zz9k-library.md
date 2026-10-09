@@ -8,7 +8,7 @@ The current library identity is:
 ```c
 #define ZZ9K_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 31
+#define ZZ9K_LIBRARY_REVISION 32
 ```
 
 Open the library with at least version 2:
@@ -1838,6 +1838,12 @@ is attenuation under the active scene: 0 is silence and 128 preserves the
 scene level. flags must be zero. A gain selected while unbound is retained
 for the next ZZ9KAudioStreamPlay; changing a currently bound session takes
 effect in the fabric pump without modifying the scene-owned master chain.
+
+Library revision 32 adds timed WebP animation frame LVOs:
+`ZZ9KImageAnimationFrameNext()`, `ZZ9KImageAnimationFramePresent()`,
+`ZZ9KImageAnimationFrameRetire()`, and `ZZ9KImageAnimationRestart()`.
+Callers must gate these on `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION`
+and `ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION`.
 
 `ZZ9KAudioStreamBeginDesc.low_water_bytes` is the PCM-ring refill
 threshold: while a session is bound to the AX output, the firmware tops the

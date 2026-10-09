@@ -492,6 +492,7 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-controller.c
   tools/zzplay/zzplay-core.c
   tools/zzplay/zzplay-formats.c
+  tools/zzplay/zzplay-frame-clock.c
   tools/zzplay/zzplay-geometry.c
   tools/zzplay/zzplay-media.c
   tools/zzplay/zzplay-mp3-transport.c
@@ -547,6 +548,13 @@ add_executable(zzplay_audio_clock_test
 
 target_link_libraries(zzplay_audio_clock_test PRIVATE zzplay_core)
 add_test(NAME zzplay_audio_clock_test COMMAND zzplay_audio_clock_test)
+
+add_executable(zzplay_frame_clock_test
+  tests/zzplay_frame_clock_test.c
+)
+
+target_link_libraries(zzplay_frame_clock_test PRIVATE zzplay_core)
+add_test(NAME zzplay_frame_clock_test COMMAND zzplay_frame_clock_test)
 
 add_executable(zzplay_ax_test
   tests/zzplay_ax_test.c

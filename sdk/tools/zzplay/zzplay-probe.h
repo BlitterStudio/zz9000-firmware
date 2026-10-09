@@ -27,17 +27,26 @@ typedef struct ZZPlayMP3Info {
   uint32_t frame_bytes;
   uint8_t mpeg_version;
 } ZZPlayMP3Info;
+typedef struct ZZPlayWebPInfo {
+  uint32_t width;
+  uint32_t height;
+  uint32_t format;
+  int is_animated;
+  int has_alpha;
+} ZZPlayWebPInfo;
 
 typedef enum ZZPlayMediaKind {
   ZZPLAY_MEDIA_KIND_UNSUPPORTED = 0,
   ZZPLAY_MEDIA_KIND_MPEG_PS,
-  ZZPLAY_MEDIA_KIND_MP3
+  ZZPLAY_MEDIA_KIND_MP3,
+  ZZPLAY_MEDIA_KIND_WEBP
 } ZZPlayMediaKind;
 
 typedef struct ZZPlayProbeInfo {
   ZZPlayMediaKind kind;
   ZZPlayVideoInfo video;
   ZZPlayMP3Info mp3;
+  ZZPlayWebPInfo webp;
 } ZZPlayProbeInfo;
 
 uint32_t zzplay_mpeg_frame_rate_milli(uint8_t code);
@@ -56,5 +65,9 @@ int zzplay_probe_mp3(const uint8_t *data,
                      ZZPlayMP3Info *info);
 int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info);
 int zzplay_video_info_supported(const ZZPlayVideoInfo *info);
+int zzplay_probe_webp(const uint8_t *data,
+                      size_t length,
+                      ZZPlayWebPInfo *info);
+int zzplay_webp_info_supported(const ZZPlayWebPInfo *info);
 
 #endif /* ZZPLAY_PROBE_H */

@@ -20,6 +20,7 @@
 #include "zzplay-controller.h"
 #include "zzplay-files.h"
 #include "zzplay-formats.h"
+#include "zzplay-frame-clock.h"
 #include "zzplay-geometry.h"
 #include "zzplay-gui.h"
 #include "zzplay-launch.h"
@@ -1131,14 +1132,22 @@ static void zzplay_update_title(struct ZZPlayRuntime *runtime)
   }
   state = runtime->core.state == ZZPLAY_STATE_PAUSED ? "paused"
                                                      : "playing";
-  sprintf(runtime->title, "ZZPlay - MPEG-1 - %s - %s - %s%s",
-          zzplay_audio_backend_name(runtime->audio_backend),
-          runtime->present_known
-              ? zzplay_present_path_name(runtime->present.path)
-              : "starting",
-          state,
-          runtime->options.loop_mode != ZZPLAY_LOOP_NONE ? " - loop"
-                                                         : "");
+  if (runtime->video_info.is_program_stream) {
+    sprintf(runtime->title, "ZZPlay - MPEG-1 - %s - %s - %s%s",
+            zzplay_audio_backend_name(runtime->audio_backend),
+            runtime->present_known
+                ? zzplay_present_path_name(runtime->present.path)
+                : "starting",
+            state,
+            runtime->options.loop_mode != ZZPLAY_LOOP_NONE ? " - loop"
+                                                           : "");
+  } else {
+    sprintf(runtime->title, "ZZPlay - WebP - %s%s",
+            state,
+            (runtime->options.loop_mode != ZZPLAY_LOOP_NONE ||
+             zzplay_controller_loop_item(runtime->ctl)) ? " - loop"
+                                                        : "");
+  }
   SetWindowTitles(runtime->window, (CONST_STRPTR)runtime->title,
                   (CONST_STRPTR)~0UL);
   runtime->title_dirty = 0U;
@@ -3147,7 +3156,387 @@ cleanup:
 }
 
 /* ------------------------------------------------------------------ */
-/* Engine table and the application loop.                               */
+/* WebP animation engine.                                             */
+/* ------------------------------------------------------------------ */
+
+static ZZPlayEngineResult zzplay_engine_webp(const ZZPlayEngineRun *run)
+{
+  struct ZZPlayRuntime runtime;
+  ZZ9KBoard board;
+  ZZ9KServiceInfo service;
+  ZZ9KSharedBuffer staging;
+  ZZ9KSurface surface;
+  ZZ9KImageSessionBeginDesc begin;
+  ZZ9KImageSessionResult session_result;
+  ZZ9KImageAnimationFrameResult frame_result;
+  ZZPlayFrameClock clock;
+  ZZ9KRect output_rect;
+  uint32_t active_token = 0U;
+  uint32_t session = 0U;
+  uint32_t width;
+  uint32_t height;
+  uint32_t pitch;
+  uint64_t file_length = 0U;
+  uint64_t file_offset = 0U;
+  int cleanup_status;
+  ZZPlayEngineResult outcome = ZZPLAY_ENGINE_FAILED;
+  int session_open = 0;
+  int staging_allocated = 0;
+  int surface_allocated = 0;
+  int timer_open = 0;
+  int p96_open = 0;
+  int sdk_open = 0;
+
+  if (!run || !run->path || !run->ctl || !run->probe) {
+    return ZZPLAY_ENGINE_FAILED;
+  }
+  if (run->probe->kind != ZZPLAY_MEDIA_KIND_WEBP ||
+      !run->probe->webp.is_animated) {
+    return ZZPLAY_ENGINE_FAILED;
+  }
+  if (!zzplay_webp_info_supported(&run->probe->webp)) {
+    zzplay_info("zzplay: unsupported WebP animation geometry %lux%lu\n",
+                (unsigned long)run->probe->webp.width,
+                (unsigned long)run->probe->webp.height);
+    return ZZPLAY_ENGINE_FAILED;
+  }
+
+  memset(&runtime, 0, sizeof(runtime));
+  memset(&board, 0, sizeof(board));
+  memset(&service, 0, sizeof(service));
+  memset(&staging, 0, sizeof(staging));
+  memset(&surface, 0, sizeof(surface));
+  memset(&begin, 0, sizeof(begin));
+  memset(&session_result, 0, sizeof(session_result));
+  memset(&frame_result, 0, sizeof(frame_result));
+
+  runtime.ctl = run->ctl;
+  runtime.options = *run->options;
+  runtime.prefs = *run->prefs;
+  runtime.video_info.width = run->probe->webp.width;
+  runtime.video_info.height = run->probe->webp.height;
+  runtime.video_info.frame_rate_milli = 25000U;
+  zzplay_core_init(&runtime.core);
+
+  width = run->probe->webp.width;
+  height = run->probe->webp.height;
+  pitch = width * 2U;
+
+  runtime.file = fopen(run->path, "rb");
+  if (!runtime.file) {
+    zzplay_error(&runtime, "zzplay: cannot open %s\n", run->path);
+    return ZZPLAY_ENGINE_FAILED;
+  }
+  if (fseek(runtime.file, 0L, SEEK_END) == 0) {
+    long len = ftell(runtime.file);
+    if (len > 0) {
+      file_length = (uint64_t)len;
+    }
+    (void)fseek(runtime.file, 0L, SEEK_SET);
+  }
+
+  if (zz9k_find_board(&board) != ZZ9K_STATUS_OK ||
+      (board.zorro_version != 2U && board.zorro_version != 3U)) {
+    zzplay_error(&runtime,
+                 "zzplay: the P96 video window requires a supported ZZ9000 aperture\n");
+    zzplay_fail(&runtime, ZZPLAY_FAILURE_UNSUPPORTED_BOARD,
+                ZZ9K_STATUS_UNSUPPORTED);
+    goto cleanup;
+  }
+
+  P96Base = OpenLibrary((CONST_STRPTR)"Picasso96API.library", 2U);
+  if (!P96Base) {
+    zzplay_error(&runtime, "zzplay: cannot open Picasso96API.library\n");
+    zzplay_fail(&runtime, ZZPLAY_FAILURE_P96, ZZ9K_STATUS_UNSUPPORTED);
+    goto cleanup;
+  }
+  p96_open = 1;
+
+  cleanup_status = zz9k_open(&runtime.ctx);
+  if (cleanup_status != ZZ9K_STATUS_OK || !runtime.ctx) {
+    zzplay_error(&runtime, "zzplay: SDK open failed (%d)\n", cleanup_status);
+    zzplay_fail(&runtime, ZZPLAY_FAILURE_SDK, cleanup_status);
+    goto cleanup;
+  }
+  sdk_open = 1;
+
+  cleanup_status = zz9k_query_service(runtime.ctx, ZZ9K_SERVICE_IMAGE, &service);
+  if (cleanup_status != ZZ9K_STATUS_OK) {
+    zzplay_error(&runtime, "zzplay: image service query failed\n");
+    zzplay_fail(&runtime, ZZPLAY_FAILURE_CAPABILITY, ZZ9K_STATUS_UNSUPPORTED);
+    goto cleanup;
+  }
+  if ((service.flags & ZZ9K_SERVICE_FLAG_IMAGE_STREAMING_INPUT) == 0U ||
+      (service.flags & ZZ9K_SERVICE_FLAG_IMAGE_WEBP) == 0U) {
+    zzplay_error(&runtime, "zzplay: firmware does not support WebP streaming\n");
+    zzplay_fail(&runtime, ZZPLAY_FAILURE_CAPABILITY, ZZ9K_STATUS_UNSUPPORTED);
+    goto cleanup;
+  }
+
+  if (!zzplay_timer_open(&runtime.timer)) {
+    zzplay_error(&runtime, "zzplay: timer device open failed\n");
+    goto cleanup;
+  }
+  timer_open = 1;
+
+  zzplay_controller_set_capabilities(run->ctl, 0, 0, 1);
+  {
+    char format_buf[ZZPLAY_NOW_TEXT_MAX];
+    sprintf(format_buf, "WebP Animation %lux%lu",
+            (unsigned long)width, (unsigned long)height);
+    zzplay_controller_set_format(run->ctl, format_buf);
+  }
+  zzplay_controller_set_duration(run->ctl, 0U);
+
+  cleanup_status = zz9k_alloc_shared(runtime.ctx, 32768U, 16U,
+                                     ZZ9K_ALLOC_HOST_WINDOW, &staging);
+  if (cleanup_status != ZZ9K_STATUS_OK) {
+    zzplay_error(&runtime, "zzplay: WebP staging alloc failed (%d)\n", cleanup_status);
+    goto cleanup;
+  }
+  staging_allocated = 1;
+
+  cleanup_status = zz9k_alloc_surface_ex(
+      runtime.ctx, width, height, ZZ9K_SURFACE_FORMAT_YUV422CGX,
+      ZZ9K_SURFACE_FLAG_ARM_LOCAL, pitch, &surface);
+  if (cleanup_status != ZZ9K_STATUS_OK) {
+    zzplay_error(&runtime, "zzplay: WebP PIP surface alloc failed (%d)\n", cleanup_status);
+    goto cleanup;
+  }
+  surface_allocated = 1;
+
+  if (!zzplay_ensure_pip(&runtime)) {
+    zzplay_error(&runtime, "zzplay: cannot open P96 PIP window\n");
+    goto cleanup;
+  }
+
+  output_rect.x = 0U;
+  output_rect.y = 0U;
+  output_rect.w = width;
+  output_rect.h = height;
+  if (!zz9k_image_build_surface_session_begin_desc(
+          &begin, ZZ9K_IMAGE_CODEC_WEBP, surface.handle,
+          &output_rect, ZZ9K_SURFACE_FORMAT_YUV422CGX,
+          ZZ9K_IMAGE_SESSION_BEGIN_ANIMATION)) {
+    zzplay_error(&runtime, "zzplay: could not build WebP begin descriptor\n");
+    goto cleanup;
+  }
+
+  cleanup_status = zz9k_image_session_begin(runtime.ctx, &begin, &session_result);
+  if (cleanup_status != ZZ9K_STATUS_OK || session_result.session == 0U ||
+      session_result.state != ZZ9K_IMAGE_SESSION_STATE_NEED_INPUT) {
+    zzplay_error(&runtime, "zzplay: WebP animation session begin failed (%d)\n",
+                 cleanup_status);
+    goto cleanup;
+  }
+  session = session_result.session;
+  session_open = 1;
+
+  while (file_offset < file_length) {
+    size_t chunk = (size_t)(file_length - file_offset);
+    size_t bytes_read;
+    int is_eof;
+    ZZ9KImageSessionFeedDesc feed;
+
+    if (chunk > staging.length) {
+      chunk = (size_t)staging.length;
+    }
+    bytes_read = fread((void *)staging.data, 1U, chunk, runtime.file);
+    if (bytes_read == 0U && ferror(runtime.file)) {
+      zzplay_error(&runtime, "zzplay: error reading WebP file\n");
+      goto cleanup;
+    }
+    file_offset += (uint64_t)bytes_read;
+    is_eof = (file_offset >= file_length);
+
+    if (!zz9k_image_build_session_feed_desc(
+            &feed, session, staging.handle, 0U, (uint32_t)bytes_read,
+            is_eof ? ZZ9K_IMAGE_SESSION_FEED_EOF : 0U)) {
+      zzplay_error(&runtime, "zzplay: could not build feed desc\n");
+      goto cleanup;
+    }
+
+    cleanup_status = zz9k_image_session_feed(runtime.ctx, &feed, &session_result);
+    if (cleanup_status != ZZ9K_STATUS_OK) {
+      zzplay_error(&runtime, "zzplay: WebP feed failed (%d)\n", cleanup_status);
+      goto cleanup;
+    }
+  }
+
+  if (session_result.state != ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY) {
+    zzplay_error(&runtime, "zzplay: WebP not animation ready after EOF (state %u)\n",
+                 (unsigned)session_result.state);
+    goto cleanup;
+  }
+
+  zzplay_frame_clock_init(&clock, zzplay_controller_loop_item(run->ctl));
+
+  cleanup_status = zz9k_image_animation_frame_next(runtime.ctx, session, 0U, &frame_result);
+  if (cleanup_status != ZZ9K_STATUS_OK || frame_result.frame_token == 0U) {
+    zzplay_error(&runtime, "zzplay: failed to fetch first animation frame (%d)\n",
+                 cleanup_status);
+    goto cleanup;
+  }
+  active_token = frame_result.frame_token;
+
+  {
+    uint64_t now_us = zzplay_now_us();
+    zzplay_frame_clock_start(&clock, now_us, frame_result.frame_duration_ms);
+  }
+  zzplay_controller_set_position(run->ctl, 0U, 1);
+
+  (void)zz9k_image_animation_frame_present(runtime.ctx, session, active_token, 0U, &frame_result);
+  (void)zzplay_core_start(&runtime.core);
+
+  while (runtime.core.state == ZZPLAY_STATE_PLAYING ||
+         runtime.core.state == ZZPLAY_STATE_PAUSED) {
+    int resized = 0;
+    uint64_t now_us;
+    ZZPlayFrameAction action;
+
+    if (zzplay_engine_service_input(&runtime, &resized)) {
+      zzplay_engine_stop_from_request(&runtime);
+      outcome = ZZPLAY_ENGINE_STOPPED;
+      break;
+    }
+    if (resized) {
+      zzplay_apply_resize(&runtime);
+    }
+    if (zzplay_controller_take_fullscreen_toggle(runtime.ctl)) {
+      (void)zzplay_toggle_fullscreen(&runtime);
+    }
+    if ((runtime.core.state == ZZPLAY_STATE_PAUSED) != (runtime.ctl->paused != 0)) {
+      now_us = zzplay_now_us();
+      if (runtime.ctl->paused) {
+        runtime.core.state = ZZPLAY_STATE_PAUSED;
+        zzplay_frame_clock_pause(&clock, now_us);
+      } else {
+        runtime.core.state = ZZPLAY_STATE_PLAYING;
+        zzplay_frame_clock_resume(&clock, now_us);
+      }
+      zzplay_controller_set_engine_paused(runtime.ctl, runtime.core.state == ZZPLAY_STATE_PAUSED);
+      runtime.title_dirty = 1U;
+    }
+    zzplay_update_title(&runtime);
+
+    if (run->pump) {
+      run->pump(run->pump_user);
+    }
+
+    if (runtime.core.state == ZZPLAY_STATE_PAUSED) {
+      zzplay_wait_us(&runtime.timer, ZZPLAY_SYNC_POLL_US);
+      continue;
+    }
+
+    now_us = zzplay_now_us();
+    action = zzplay_frame_clock_poll(&clock, now_us);
+
+    if (action == ZZPLAY_FRAME_ACTION_WAIT) {
+      uint32_t slice_us = zzplay_frame_clock_wait_slice_us(&clock, now_us, ZZPLAY_SYNC_POLL_US);
+      if (slice_us > 0U) {
+        zzplay_wait_us(&runtime.timer, slice_us);
+      }
+      continue;
+    }
+
+    if (action == ZZPLAY_FRAME_ACTION_ADVANCE) {
+      if (active_token != 0U) {
+        (void)zz9k_image_animation_frame_retire(runtime.ctx, session, active_token, 0U, &frame_result);
+        active_token = 0U;
+      }
+      cleanup_status = zz9k_image_animation_frame_next(runtime.ctx, session, 0U, &frame_result);
+      if (cleanup_status != ZZ9K_STATUS_OK) {
+        zzplay_error(&runtime, "zzplay: next frame failed (%d)\n", cleanup_status);
+        outcome = ZZPLAY_ENGINE_FAILED;
+        break;
+      }
+      if (frame_result.state == ZZ9K_IMAGE_SESSION_STATE_ANIMATION_ENDED ||
+          (frame_result.flags & ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_ENDED)) {
+        zzplay_frame_clock_on_end(&clock);
+        continue;
+      }
+      active_token = frame_result.frame_token;
+      now_us = zzplay_now_us();
+      zzplay_frame_clock_advance(&clock, now_us, frame_result.frame_duration_ms);
+      zzplay_controller_set_position(runtime.ctl, (uint32_t)clock.total_elapsed_ms, 1);
+      (void)zz9k_image_animation_frame_present(runtime.ctx, session, active_token, 0U, &frame_result);
+      continue;
+    }
+
+    if (action == ZZPLAY_FRAME_ACTION_RESTART) {
+      if (active_token != 0U) {
+        (void)zz9k_image_animation_frame_retire(runtime.ctx, session, active_token, 0U, &frame_result);
+        active_token = 0U;
+      }
+      cleanup_status = zz9k_image_animation_restart(runtime.ctx, session, 0U, &frame_result);
+      if (cleanup_status != ZZ9K_STATUS_OK) {
+        zzplay_error(&runtime, "zzplay: restart failed (%d)\n", cleanup_status);
+        outcome = ZZPLAY_ENGINE_FAILED;
+        break;
+      }
+      cleanup_status = zz9k_image_animation_frame_next(runtime.ctx, session, 0U, &frame_result);
+      if (cleanup_status != ZZ9K_STATUS_OK || frame_result.frame_token == 0U) {
+        zzplay_error(&runtime, "zzplay: restart next frame failed (%d)\n", cleanup_status);
+        outcome = ZZPLAY_ENGINE_FAILED;
+        break;
+      }
+      active_token = frame_result.frame_token;
+      now_us = zzplay_now_us();
+      zzplay_frame_clock_on_restart(&clock, now_us, frame_result.frame_duration_ms);
+      zzplay_controller_set_position(runtime.ctl, 0U, 1);
+      (void)zz9k_image_animation_frame_present(runtime.ctx, session, active_token, 0U, &frame_result);
+      continue;
+    }
+
+    if (action == ZZPLAY_FRAME_ACTION_EOF) {
+      outcome = ZZPLAY_ENGINE_EOF;
+      break;
+    }
+  }
+
+cleanup:
+  if (active_token != 0U) {
+    (void)zz9k_image_animation_frame_retire(runtime.ctx, session, active_token, 0U, &frame_result);
+    active_token = 0U;
+  }
+  if (session_open && session != 0U) {
+    (void)zz9k_image_session_close(runtime.ctx, session, 0U);
+    session = 0U;
+  }
+  if (surface_allocated && surface.handle != 0U) {
+    (void)zz9k_free_surface(runtime.ctx, surface.handle);
+    surface.handle = 0U;
+  }
+  if (staging_allocated && staging.handle != 0U) {
+    (void)zz9k_free_shared(runtime.ctx, staging.handle);
+    staging.handle = 0U;
+  }
+  zzplay_close_pip(&runtime);
+  zzplay_close_video_screen(&runtime);
+  if (timer_open) {
+    zzplay_timer_close(&runtime.timer);
+  }
+  if (runtime.file) {
+    fclose(runtime.file);
+    runtime.file = NULL;
+  }
+  if (sdk_open && runtime.ctx) {
+    (void)zz9k_close(runtime.ctx);
+    runtime.ctx = NULL;
+  }
+  if (p96_open && P96Base) {
+    CloseLibrary(P96Base);
+    P96Base = NULL;
+  }
+
+  if (run->ctl && run->ctl->request != ZZPLAY_REQUEST_NONE) {
+    return ZZPLAY_ENGINE_STOPPED;
+  }
+  return outcome;
+}
+
+/* ------------------------------------------------------------------ */
+/* Engine table and the application loop.                             */
 /* ------------------------------------------------------------------ */
 
 static const struct ZZPlayEngineEntry {
@@ -3155,9 +3544,9 @@ static const struct ZZPlayEngineEntry {
   ZZPlayEngineFn run;
 } zzplay_engines[] = {
   { ZZPLAY_MEDIA_KIND_MPEG_PS, zzplay_engine_mpeg },
-  { ZZPLAY_MEDIA_KIND_MP3, zzplay_mp3_run }
+  { ZZPLAY_MEDIA_KIND_MP3, zzplay_mp3_run },
+  { ZZPLAY_MEDIA_KIND_WEBP, zzplay_engine_webp }
 };
-
 static ZZPlayEngineFn zzplay_engine_for_kind(ZZPlayMediaKind kind)
 {
   unsigned i;
@@ -3253,7 +3642,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   } else if (!engine) {
     zzplay_launch_reportf(
         &app->ctl, &app->options,
-        "cannot play %s: not a supported MPEG-1 Program Stream or MP3 file",
+        "cannot play %s: not a supported MPEG-1 Program Stream, MP3 or WebP animation file",
         app->item_path);
   } else {
     format = zzplay_format_for_kind(probe.kind);

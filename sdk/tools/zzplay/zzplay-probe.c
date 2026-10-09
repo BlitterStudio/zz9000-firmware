@@ -2,6 +2,7 @@
 
 #include "zzplay-probe.h"
 
+#include "zz9k/image.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -242,6 +243,41 @@ int zzplay_probe_file(FILE *file, ZZPlayVideoInfo *info)
   return found;
 }
 
+int zzplay_probe_webp(const uint8_t *data,
+                      size_t length,
+                      ZZPlayWebPInfo *info)
+{
+  ZZ9KWebPHeader header;
+  ZZ9KWebPParseStatus status;
+
+  if (info) {
+    memset(info, 0, sizeof(*info));
+  }
+  if (!data || length < ZZ9K_WEBP_HEADER_MIN_BYTES) {
+    return 0;
+  }
+  status = zz9k_webp_parse_header(data, (uint32_t)length, &header);
+  if (status != ZZ9K_WEBP_PARSE_READY) {
+    return 0;
+  }
+  if (info) {
+    info->width = header.width;
+    info->height = header.height;
+    info->format = header.format;
+    info->is_animated = header.is_animated ? 1 : 0;
+    info->has_alpha = header.has_alpha ? 1 : 0;
+  }
+  return 1;
+}
+
+int zzplay_webp_info_supported(const ZZPlayWebPInfo *info)
+{
+  return info && info->is_animated &&
+         info->width >= 16U && info->height >= 16U &&
+         info->width <= ZZPLAY_MAX_WIDTH &&
+         info->height <= ZZPLAY_MAX_HEIGHT;
+}
+
 int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
 {
   static uint8_t buffer[ZZPLAY_MP3_PROBE_BYTES];
@@ -253,6 +289,24 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
     return 0;
   }
   memset(info, 0, sizeof(*info));
+
+  got = fread(buffer, 1U, sizeof(buffer), file);
+  if (got >= ZZ9K_WEBP_HEADER_MIN_BYTES &&
+      zzplay_probe_webp(buffer, got, &info->webp)) {
+    if (info->webp.is_animated) {
+      info->kind = ZZPLAY_MEDIA_KIND_WEBP;
+    } else {
+      info->kind = ZZPLAY_MEDIA_KIND_UNSUPPORTED;
+    }
+    goto done;
+  }
+
+  clearerr(file);
+  if (fseek(file, 0L, SEEK_SET) != 0) {
+    clearerr(file);
+    return 0;
+  }
+
   if (zzplay_probe_file(file, &info->video) &&
       info->video.is_program_stream &&
       info->video.has_video_pes) {

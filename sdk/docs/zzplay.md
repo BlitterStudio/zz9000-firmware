@@ -19,6 +19,7 @@ It works two ways:
 | MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video, card-decoded | MPEG-1 Layer II, card-decoded |
 | MPEG-1 Program Stream, video only | MPEG-1 video, card-decoded | none (a warning is printed) |
 | MPEG Layer III (`.mp3`) | — | card-decoded, CBR and VBR, mono or stereo |
+| Animated WebP (`.webp`) | WebP animation, card-decoded | none |
 | Playlist (`.m3u`, `.m3u8`) | the files it lists | |
 
 The format is chosen by inspecting the file, not by its name. MPEG-1
