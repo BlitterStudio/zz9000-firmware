@@ -219,10 +219,11 @@ and the player window shows what it chose.
   need firmware that advertises the matching stream service; without it
   ZZPlay reports that accelerated FLAC or Ogg Vorbis streaming is
   unavailable. An Ogg Vorbis duration comes from the stream's last page and
-  is shown only when that page belongs to the same stream. A chained or
-  multiplexed Ogg file plays its first logical stream (up to a fraction of
-  a second of its end can be cut), then stops with an error saying the card
-  cannot decode the rest; it is never reported as completed.
+  is shown only when that page belongs to the same stream. A chained Ogg
+  file plays its first link to its end (the firmware reports the next link
+  only after every byte of the first has been read), then stops with an
+  error saying the card cannot decode the rest; it is never reported as
+  completed. A multiplexed file is refused before anything plays.
 - The decoded-audio ring is sized from the stream's largest decoder unit
   (an MP3 frame, a FLAC block, a Vorbis packet) and shrinks in bounded steps
   when the compact Zorro II host window is short; if even one unit does not
