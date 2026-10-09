@@ -10,6 +10,7 @@
 #include "sdk_mailbox.h"
 #include "sdk_video_backend.h"
 #include "sdk_video_stream.h"
+#include "webm_parse.h"
 
 static uint8_t decoder_storage;
 static uint32_t create_calls;
@@ -92,6 +93,23 @@ static void mock_set_decode_flags(void *decoder, uint32_t flags)
 	last_decode_flags = flags;
 }
 
+static uint32_t geometry_calls;
+
+/* Stands in for the WebM backend's admission rule. */
+static int mock_webm_geometry_ok(uint32_t width, uint32_t height)
+{
+	geometry_calls++;
+	return webm_size_allowed(width, height);
+}
+
+static int mock_accept_any_geometry(uint32_t width, uint32_t height)
+{
+	(void)width;
+	(void)height;
+	geometry_calls++;
+	return 1;
+}
+
 static struct SDKVideoDecoderOps mock_ops = {
 	SDK_VIDEO_CODEC_MPEG1,
 	SDK_VIDEO_CONTAINER_MPEG_PS,
@@ -104,7 +122,8 @@ static struct SDKVideoDecoderOps mock_ops = {
 	mock_configure_media,
 	mock_get_media_info,
 	mock_ack_media,
-	mock_set_decode_flags
+	mock_set_decode_flags,
+	0
 };
 
 const struct SDKVideoDecoderOps *sdk_video_backend_find(
@@ -177,11 +196,14 @@ static int test_webm_stream_envelopes(void)
 	struct SDKVideoStreamResult result;
 
 	sdk_video_stream_init();
+	mock_ops.codec = SDK_VIDEO_CODEC_VP8;
+	mock_ops.container = SDK_VIDEO_CONTAINER_WEBM;
+	mock_ops.geometry_ok = mock_webm_geometry_ok;
+	geometry_calls = 0U;
 	memset(&begin, 0, sizeof(begin));
 	begin.codec = SDK_VIDEO_CODEC_VP8;
 	begin.container = SDK_VIDEO_CONTAINER_WEBM;
 	begin.output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY;
-
 	/* Oversize width or height -> UNSUPPORTED, not BAD_REQUEST. */
 	begin.width = 2560U;
 	begin.height = 1440U;
@@ -203,7 +225,9 @@ static int test_webm_stream_envelopes(void)
 		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
 	    SDK_STATUS_UNSUPPORTED)
 		return 12;
-
+	/* The backend, not the session layer, owns the WebM caps. */
+	if (geometry_calls != 3U)
+		return 18;
 	/* Zero dimension -> BAD_REQUEST. */
 	begin.width = 0U;
 	begin.height = 120U;
@@ -228,10 +252,7 @@ static int test_webm_stream_envelopes(void)
 	    SDK_STATUS_UNSUPPORTED)
 		return 15;
 
-	/* Portrait and odd dimensions pass the size check (then find backend). */
-	mock_ops.codec = SDK_VIDEO_CODEC_VP8;
-	mock_ops.container = SDK_VIDEO_CONTAINER_WEBM;
-
+	/* Portrait and odd dimensions pass the size check. */
 	begin.codec = SDK_VIDEO_CODEC_VP8;
 	begin.container = SDK_VIDEO_CONTAINER_WEBM;
 	begin.audio_codec = SDK_MEDIA_AUDIO_NONE;
@@ -253,6 +274,42 @@ static int test_webm_stream_envelopes(void)
 
 	mock_ops.codec = SDK_VIDEO_CODEC_MPEG1;
 	mock_ops.container = SDK_VIDEO_CONTAINER_MPEG_PS;
+	mock_ops.geometry_ok = 0;
+	return 0;
+}
+
+static int test_generic_caps_without_geometry_op(void)
+{
+	struct SDKVideoStreamBegin begin;
+	struct SDKVideoStreamResult result;
+
+	sdk_video_stream_init();
+	memset(&begin, 0, sizeof(begin));
+	begin.codec = SDK_VIDEO_CODEC_MPEG1;
+	begin.container = SDK_VIDEO_CONTAINER_MPEG_PS;
+	begin.output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY;
+
+	/* No geometry_ok: the generic cap applies and refuses BAD_REQUEST. */
+	begin.width = 1921U;
+	begin.height = 1080U;
+	if (sdk_video_stream_begin(&begin, &result) != SDK_STATUS_BAD_REQUEST)
+		return 30;
+	begin.width = 1920U;
+	begin.height = 1080U;
+	if (sdk_video_stream_begin(&begin, &result) != SDK_STATUS_OK)
+		return 31;
+	sdk_video_stream_close(result.session, &result);
+
+	/* A backend op replaces the generic cap entirely. */
+	mock_ops.geometry_ok = mock_accept_any_geometry;
+	geometry_calls = 0U;
+	begin.width = 2560U;
+	begin.height = 1440U;
+	if (sdk_video_stream_begin(&begin, &result) != SDK_STATUS_OK ||
+	    geometry_calls != 1U)
+		return 32;
+	sdk_video_stream_close(result.session, &result);
+	mock_ops.geometry_ok = 0;
 	return 0;
 }
 
@@ -299,6 +356,8 @@ int main(void)
 	rc = test_zero_ack_before_lazy_decoder();
 	if (rc != 0) return rc;
 	rc = test_webm_stream_envelopes();
+	if (rc != 0) return rc;
+	rc = test_generic_caps_without_geometry_op();
 	if (rc != 0) return rc;
 	rc = test_decode_flag_forwarding();
 	if (rc != 0) return rc;

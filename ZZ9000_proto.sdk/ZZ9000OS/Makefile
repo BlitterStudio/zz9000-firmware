@@ -251,6 +251,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_media_timeline.c \
 	$(SRC_DIR)/sdk_video_plmpeg.c \
 	$(SRC_DIR)/webm_parse.c \
+	$(SRC_DIR)/webm_window.c \
 	$(SRC_DIR)/sdk_video_webm.c \
 	$(SRC_DIR)/sdk_video_yuy2.c \
 	$(SRC_DIR)/sdk_dvd_ps.c \

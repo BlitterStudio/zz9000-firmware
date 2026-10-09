@@ -31,7 +31,7 @@ build/media_session_test: media_session_test.c \
 
 build/video_stream_test: video_stream_test.c mock/xil_cache.h \
 	$(FIRMWARE_SRC)/sdk_video_stream.c \
-	$(FIRMWARE_SRC)/webm_parse.c \
+	$(FIRMWARE_SRC)/webm_parse.c $(FIRMWARE_SRC)/webm_parse.h \
 	$(FIRMWARE_SRC)/sdk_video_stream.h \
 	$(FIRMWARE_SRC)/sdk_video_backend.h \
 	$(FIRMWARE_SRC)/sdk_mailbox.h

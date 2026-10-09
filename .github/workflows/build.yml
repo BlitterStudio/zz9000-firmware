@@ -235,15 +235,18 @@ jobs:
       - name: Export BOOTGEN
         run: echo "BOOTGEN=${{ github.workspace }}/.toolchain/bootgen/bootgen" >> "$GITHUB_ENV"
 
-      # Codec deps (zlib/libpng/libjpeg-turbo/lzma) are downloaded + built from
-      # source per run. Cache the built archives keyed on the build scripts
-      # (which pin the versions + sha256s) so unchanged runs skip the rebuild
-      # and survive an upstream mirror outage.
+      # Codec deps are downloaded + built from source per run. Cache the
+      # built archives keyed on every input that shapes them: the build
+      # scripts (which pin versions + sha256s and flags), the allocator
+      # headers the FLAC/Vorbis/libvpx/libopus/libwebp builds force-include,
+      # and the libwebp CMake shim. Several scripts (libvpx, libopus) treat
+      # an existing archive as up to date, so a change to any input must
+      # miss the cache rather than reuse a stale archive.
       - name: Cache codec deps
         uses: actions/cache@v5
         with:
           path: ZZ9000_proto.sdk/ZZ9000OS/build/deps
-          key: codec-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build_zlib.sh', 'build_libpng.sh', 'build_libjpeg_turbo.sh', 'build_lzma_sdk.sh') }}
+          key: codec-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build_zlib.sh', 'build_libpng.sh', 'build_libjpeg_turbo.sh', 'build_lzma_sdk.sh', 'build_libwebp.sh', 'build_dvd_codecs.sh', 'build_flac.sh', 'build_vorbis.sh', 'build_libvpx.sh', 'build_opus.sh', 'ZZ9000_proto.sdk/ZZ9000OS/src/sdk_webp_alloc.h', 'ZZ9000_proto.sdk/ZZ9000OS/src/sdk_flac_alloc.h', 'ZZ9000_proto.sdk/ZZ9000OS/src/sdk_vorbis_alloc.h', 'ZZ9000_proto.sdk/ZZ9000OS/src/webp/**') }}
 
       - name: Build firmware (ZZ9000OS.elf)
         run: ./build_firmware.sh

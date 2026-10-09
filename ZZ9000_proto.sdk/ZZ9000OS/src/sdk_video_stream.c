@@ -9,7 +9,6 @@
 #include "memorymap.h"
 #include "overlay.h"
 #include "sdk_video_backend.h"
-#include "webm_parse.h"
 
 #include <string.h>
 #include <xil_cache.h>
@@ -267,10 +266,9 @@ uint16_t sdk_video_stream_begin_owned(
 	    begin->output_format != SDK_VIDEO_OUTPUT_DIRECT_OVERLAY ||
 	    begin->width == 0U || begin->height == 0U)
 		return SDK_STATUS_BAD_REQUEST;
-	if (begin->container == SDK_VIDEO_CONTAINER_WEBM ||
-	    begin->codec == SDK_VIDEO_CODEC_VP8 ||
-	    begin->codec == SDK_VIDEO_CODEC_VP9) {
-		if (!webm_size_allowed(begin->width, begin->height))
+	ops = sdk_video_backend_find(begin->codec, begin->container);
+	if (ops && ops->geometry_ok) {
+		if (!ops->geometry_ok(begin->width, begin->height))
 			return SDK_STATUS_UNSUPPORTED;
 	} else if (begin->width > SDK_VIDEO_MAX_WIDTH ||
 		   begin->height > SDK_VIDEO_MAX_HEIGHT ||
@@ -294,7 +292,6 @@ uint16_t sdk_video_stream_begin_owned(
 	     begin->audio_codec == SDK_VIDEO_MEDIA_AUDIO_VORBIS) &&
 	    begin->container != SDK_VIDEO_CONTAINER_WEBM)
 		return SDK_STATUS_UNSUPPORTED;
-	ops = sdk_video_backend_find(begin->codec, begin->container);
 	if (!ops)
 		return SDK_STATUS_UNSUPPORTED;
 	session = find_free_session();

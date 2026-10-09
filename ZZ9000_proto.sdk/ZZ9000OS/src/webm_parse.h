@@ -5,8 +5,10 @@
  * V_VP9) and one optional audio track (A_OPUS or A_VORBIS), Clusters of
  * SimpleBlock and BlockGroup/Block, lacing none/Xiph/fixed/EBML. Cues,
  * SeekHead, Chapters, Tags and Attachments are skipped by size. Unknown
- * element size is accepted only for Segment and Cluster. Encrypted
- * tracks fail closed. Not a general demuxer.
+ * element size is accepted only for Segment and Cluster; a Segment, or a
+ * Cluster of an unbounded Segment, ending past the 32-bit offsets counts
+ * as unknown. Other elements must fit their parent (WEBM_ERR_LAYOUT).
+ * Encrypted tracks fail closed. Not a general demuxer.
  *
  * Streaming: read() returns -2 when the caller has no more bytes yet and
  * has not signalled EOF (mapped to WEBM_ERR_NEED). seek() is forward-only
@@ -122,5 +124,32 @@ const uint8_t *webm_track_priv(const struct webm_demux *d,
 int webm_size_allowed(uint32_t width, uint32_t height);
 /* Codec keyframe, not the muxer bit. VP9 show-existing is not a reset. */
 int webm_payload_is_keyframe(uint8_t codec, const uint8_t *data, uint32_t size);
+
+/* SKIP_TO_KEYFRAME gate for one decode call: blocks that are not codec
+ * keyframes are dropped, and after `budget` drops the caller yields so a
+ * long GOP cannot stall one command. Inactive gates pass every block. */
+enum {
+	WEBM_SKIP_DECODE = 0,
+	WEBM_SKIP_DROP,
+	WEBM_SKIP_YIELD
+};
+
+struct webm_skip {
+	uint32_t left;
+	uint8_t active;
+};
+
+void webm_skip_start(struct webm_skip *s, int active, uint32_t budget);
+int webm_skip_block(struct webm_skip *s, const struct webm_block *blk);
+
+/* TimestampScale ticks to the 90 kHz media clock; 0 on overflow. Negative
+ * ticks clamp to 0. */
+int webm_pts90(int64_t ticks, uint32_t scale_ns, uint64_t *out);
+/* Frame rate in milli-fps from DefaultDuration; 30000 when absent or
+ * implausible. */
+uint32_t webm_rate_milli(uint64_t duration_ns);
+/* Splits Xiph-laced Vorbis CodecPrivate into its three header packets. */
+int webm_xiph_split(const uint8_t *p, uint32_t n, const uint8_t *pkt[3],
+		    uint32_t len[3]);
 
 #endif

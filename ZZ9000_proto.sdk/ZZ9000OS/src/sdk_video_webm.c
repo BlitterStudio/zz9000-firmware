@@ -9,6 +9,7 @@
  */
 #include "sdk_video_backend.h"
 #include "webm_parse.h"
+#include "webm_window.h"
 #include "sdk_media_profile.h"
 #include "sdk_media_timeline.h"
 #include "sdk_audio_vorbis.h"
@@ -43,19 +44,6 @@
 #define WEBM_OPUS_MAX_SAMPLES 5760
 #define WEBM_RATE_MIN 8000U
 #define WEBM_RATE_MAX 96000U
-
-struct webm_window {
-	uint8_t *data;
-	uint32_t cap;
-	uint32_t start;
-	uint32_t filled;
-	uint32_t cursor;
-	int eof;
-	uint32_t mark_start;
-	uint32_t mark_filled;
-	uint32_t mark_cursor;
-	int mark_eof;
-};
 
 struct webm_pcm_anchor {
 	uint64_t start;
@@ -120,104 +108,6 @@ struct sdk_video_webm {
 #endif
 };
 
-static int webm_pts90(int64_t ticks, uint32_t scale_ns, uint64_t *out)
-{
-	uint64_t product;
-
-	if (!out)
-		return 0;
-	if (ticks < 0)
-		ticks = 0;
-	if (scale_ns == 0U)
-		scale_ns = 1000000U;
-	if ((uint64_t)ticks > UINT64_MAX / scale_ns)
-		return 0;
-	product = (uint64_t)ticks * scale_ns;
-	if (product > UINT64_MAX / 9U)
-		return 0;
-	/* 90 kHz = ticks * scale_ns * 90000 / 1e9 = ticks * scale_ns * 9 / 1e5. */
-	*out = product * 9U / 100000U;
-	return 1;
-}
-
-static int win_read(void *ctx, void *dst, uint32_t n)
-{
-	struct webm_window *w = (struct webm_window *)ctx;
-	uint32_t avail;
-	uint32_t off;
-
-	if (w->cursor < w->start)
-		return -1;
-	avail = w->start + w->filled - w->cursor;
-	if (avail == 0U)
-		return w->eof ? 0 : -2;
-	if (n > avail)
-		n = avail;
-	off = w->cursor - w->start;
-	memcpy(dst, w->data + off, n);
-	w->cursor += n;
-	return (int)n;
-}
-
-static int win_seek(void *ctx, uint32_t pos)
-{
-	struct webm_window *w = (struct webm_window *)ctx;
-
-	if (pos < w->start)
-		return -1;
-	if (pos <= w->start + w->filled) {
-		w->cursor = pos;
-		return 0;
-	}
-	return w->eof ? -1 : -2;
-}
-
-static uint32_t win_tell(void *ctx)
-{
-	return ((struct webm_window *)ctx)->cursor;
-}
-
-static void win_mark(struct webm_window *w)
-{
-	w->mark_start = w->start;
-	w->mark_filled = w->filled;
-	w->mark_cursor = w->cursor;
-	w->mark_eof = w->eof;
-}
-
-static void win_reset(struct webm_window *w)
-{
-	w->start = w->mark_start;
-	w->filled = w->mark_filled;
-	w->cursor = w->mark_cursor;
-	w->eof = w->mark_eof;
-}
-
-static void win_compact(struct webm_window *w)
-{
-	uint32_t drop;
-
-	if (w->cursor < w->start || w->cursor > w->start + w->filled)
-		return;
-	drop = w->cursor - w->start;
-	if (drop == 0U)
-		return;
-	memmove(w->data, w->data + drop, w->filled - drop);
-	w->filled -= drop;
-	w->start += drop;
-}
-
-static int win_append(struct webm_window *w, const uint8_t *src, uint32_t n)
-{
-	win_compact(w);
-	if (n > w->cap - w->filled)
-		return 0;
-	if (n != 0U)
-		memcpy(w->data + w->filled, src, n);
-	w->filled += n;
-	return 1;
-}
-
 #ifndef SDK_VIDEO_HOST_TEST
 static void heap_select(struct sdk_video_webm *d)
 {
@@ -233,10 +123,7 @@ static void heap_clear(void)
 	sdk_vorbis_heap_select(0, 0);
 }
 #else
-static void heap_select(struct sdk_video_webm *d)
-{
-	(void)d;
-}
+/* Host tests allocate with malloc; only the deselect call sites remain. */
 static void heap_clear(void)
 {
 }
@@ -286,47 +173,6 @@ static const struct webm_track *audio_track(const struct sdk_video_webm *d)
 	return 0;
 }
 
-static uint32_t rate_milli_from_duration(uint64_t duration_ns)
-{
-	uint64_t milli;
-
-	if (duration_ns == 0U || duration_ns > 1000000000ULL)
-		return 30000U;
-	milli = 1000000000000ULL / duration_ns;
-	if (milli == 0U || milli > 240000U)
-		return 30000U;
-	return (uint32_t)milli;
-}
-
-static int xiph_split(const uint8_t *p, uint32_t n, const uint8_t **pkt,
-		      uint32_t *len)
-{
-	uint32_t off = 1U;
-	uint32_t i;
-
-	if (!p || n < 3U || p[0] != 2U)
-		return 0;
-	for (i = 0U; i < 2U; i++) {
-		uint32_t acc = 0U;
-
-		for (;;) {
-			if (off >= n)
-				return 0;
-			acc += p[off];
-			if (p[off++] != 255U)
-				break;
-		}
-		len[i] = acc;
-	}
-	if (off + len[0] + len[1] > n)
-		return 0;
-	len[2] = n - off - len[0] - len[1];
-	pkt[0] = p + off;
-	pkt[1] = pkt[0] + len[0];
-	pkt[2] = pkt[1] + len[1];
-	return 1;
-}
-
 static int init_audio(struct sdk_video_webm *d)
 {
 	const struct webm_track *t = audio_track(d);
@@ -367,7 +213,7 @@ static int init_audio(struct sdk_video_webm *d)
 		uint32_t len[3];
 		int i;
 
-		if (!xiph_split(priv, t->priv_len, pkt, len))
+		if (!webm_xiph_split(priv, t->priv_len, pkt, len))
 			return 0;
 		vorbis_info_init(&d->vi);
 		vorbis_comment_init(&d->vc);
@@ -416,7 +262,7 @@ static int init_vpx(struct sdk_video_webm *d)
 	d->vpx_ready = 1U;
 	d->width = t->width;
 	d->height = t->height;
-	d->frame_rate_milli = rate_milli_from_duration(t->default_duration_ns);
+	d->frame_rate_milli = webm_rate_milli(t->default_duration_ns);
 	return 1;
 }
 
@@ -436,7 +282,7 @@ static int finish_open(struct sdk_video_webm *d)
 		return 0;
 	}
 	d->opened = 1U;
-	win_compact(&d->win);
+	webm_window_compact(&d->win);
 	return 1;
 }
 
@@ -449,12 +295,10 @@ static int try_open(struct sdk_video_webm *d)
 		return 1;
 	if (d->unsupported || d->failed)
 		return 0;
+	/* Until the header parses, every attempt starts from the first byte;
+	 * webm_write does not compact before then. */
 	d->win.cursor = d->win.start;
-	memset(&io, 0, sizeof(io));
-	io.ctx = &d->win;
-	io.read = win_read;
-	io.seek = win_seek;
-	io.tell = win_tell;
+	webm_window_bind(&d->win, &io);
 	rc = webm_open(&d->demux, &io, d->block, WEBM_MAX_FRAME);
 	if (rc == 0)
 		return finish_open(d);
@@ -473,12 +317,12 @@ static int pull_block(struct sdk_video_webm *d, struct webm_block *blk)
 	struct webm_demux saved;
 	int rc;
 
-	win_mark(&d->win);
+	webm_window_mark(&d->win);
 	saved = d->demux;
 	rc = webm_next(&d->demux, blk);
 	if (rc < 0 && d->demux.error == WEBM_ERR_NEED) {
 		d->demux = saved;
-		win_reset(&d->win);
+		webm_window_rewind(&d->win);
 		return 0;
 	}
 	if (rc == 0) {
@@ -831,8 +675,9 @@ static void *webm_create(uint32_t codec)
 	d->last_video_pts = SDK_VIDEO_MEDIA_NO_PTS;
 	sdk_media_timeline_init(&d->timeline);
 	d->block = (uint8_t *)WEBM_ALLOC(WEBM_MAX_FRAME);
-	d->win.cap = WEBM_MAX_FRAME + WEBM_WINDOW_SLACK;
-	d->win.data = (uint8_t *)WEBM_ALLOC(d->win.cap);
+	webm_window_init(&d->win,
+			 (uint8_t *)WEBM_ALLOC(WEBM_MAX_FRAME + WEBM_WINDOW_SLACK),
+			 WEBM_MAX_FRAME + WEBM_WINDOW_SLACK);
 	if (!d->block || !d->win.data) {
 		WEBM_FREE(d->block);
 		WEBM_FREE(d->win.data);
@@ -907,13 +752,10 @@ static int webm_write(void *opaque, const uint8_t *src, uint32_t length,
 		return SDK_VIDEO_BACKEND_WRITE_UNSUPPORTED;
 	if (length != 0U && !src)
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
-	if (!d->opened && length > d->win.cap - d->win.filled)
+	if (d->opened)
+		webm_window_compact(&d->win);
+	if (length > webm_window_space(&d->win))
 		return SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE;
-	if (d->opened) {
-		win_compact(&d->win);
-		if (length > d->win.cap - d->win.filled)
-			return SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE;
-	}
 #ifndef SDK_VIDEO_HOST_TEST
 	jumped = 0;
 	if (setjmp(d->alloc_fail) != 0)
@@ -926,7 +768,7 @@ static int webm_write(void *opaque, const uint8_t *src, uint32_t length,
 	}
 	heap_select(d);
 #endif
-	if (length != 0U && !win_append(&d->win, src, length)) {
+	if (length != 0U && !webm_window_append(&d->win, src, length)) {
 		heap_clear();
 		return SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE;
 	}
@@ -1078,8 +920,6 @@ static void webm_set_flags(void *opaque, uint32_t flags)
 
 static int replenish_audio(struct sdk_video_webm *d)
 {
-	int pulled = 0;
-
 	if (d->audio_done ||
 	    d->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE)
 		return 1;
@@ -1111,15 +951,10 @@ static int replenish_audio(struct sdk_video_webm *d)
 			return -1;
 		if (rc == 0)
 			return 1;
-		pulled = 1;
 		if (blk.codec == WEBM_CODEC_VP8 || blk.codec == WEBM_CODEC_VP9) {
-			/* Put the video block back by not consuming the next
-			 * one: the block is already out of the demuxer. Decode
-			 * it in the caller. Signal with a negative-video code
-			 * by stashing it in held_audio? Too small. Fall through
-			 * to the video path by returning 2 and leaving the
-			 * block only valid until the next pull. The caller
-			 * must decode it now. We return a dedicated code. */
+			/* The block is already out of the demuxer and its
+			 * bytes live only until the next pull, so webm_decode
+			 * decodes the stashed block before pulling again. */
 			d->stashed_video = blk;
 			d->have_stashed_video = 1U;
 			return 2;
@@ -1130,15 +965,13 @@ static int replenish_audio(struct sdk_video_webm *d)
 		if (rc == 0)
 			return 0;
 	}
-	(void)pulled;
 	return 1;
 }
 
 static int webm_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 {
 	struct sdk_video_webm *d = (struct sdk_video_webm *)opaque;
-	int skip_left = WEBM_SKIP_BUDGET;
-	int skipping;
+	struct webm_skip skip;
 #ifndef SDK_VIDEO_HOST_TEST
 	int jumped = 0;
 #endif
@@ -1169,7 +1002,7 @@ static int webm_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 					  : SDK_VIDEO_BACKEND_NEED_INPUT;
 		}
 	}
-	skipping = (d->decode_flags & 1U) != 0U;
+	webm_skip_start(&skip, (d->decode_flags & 1U) != 0U, WEBM_SKIP_BUDGET);
 	for (;;) {
 		struct webm_block blk;
 		int rc;
@@ -1222,21 +1055,22 @@ static int webm_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 				continue;
 			}
 		}
-		if (skipping &&
-		    !webm_payload_is_keyframe(blk.codec, blk.data, blk.size)) {
-			if (--skip_left <= 0) {
-				heap_clear();
-				return SDK_VIDEO_BACKEND_PROGRESS;
-			}
-			continue;
+		rc = webm_skip_block(&skip, &blk);
+		if (rc == WEBM_SKIP_YIELD) {
+			heap_clear();
+			return SDK_VIDEO_BACKEND_PROGRESS;
 		}
+		if (rc == WEBM_SKIP_DROP)
+			continue;
 		rc = fill_video(d, &blk, out);
+		/* No picture (invisible or show-existing frame): keep pulling
+		 * with the decoder arena still selected. */
+		if (rc == 0)
+			continue;
 		heap_clear();
 		if (rc < 0)
 			return d->unsupported ? SDK_VIDEO_BACKEND_UNSUPPORTED
 					      : SDK_VIDEO_BACKEND_ERROR;
-		if (rc == 0)
-			continue;
 		return SDK_VIDEO_BACKEND_FRAME;
 	}
 }
@@ -1253,7 +1087,8 @@ static const struct SDKVideoDecoderOps webm_vp8_ops = {
 	.configure_media = webm_configure_media,
 	.get_media_info = webm_get_media_info,
 	.ack_media = webm_ack_media,
-	.set_decode_flags = webm_set_flags
+	.set_decode_flags = webm_set_flags,
+	.geometry_ok = webm_size_allowed
 };
 
 static const struct SDKVideoDecoderOps webm_vp9_ops = {
@@ -1268,7 +1103,8 @@ static const struct SDKVideoDecoderOps webm_vp9_ops = {
 	.configure_media = webm_configure_media,
 	.get_media_info = webm_get_media_info,
 	.ack_media = webm_ack_media,
-	.set_decode_flags = webm_set_flags
+	.set_decode_flags = webm_set_flags,
+	.geometry_ok = webm_size_allowed
 };
 
 const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec)

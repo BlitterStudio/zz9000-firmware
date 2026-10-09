@@ -58,6 +58,23 @@ static uint32_t tell(struct webm_demux *d)
 	return d->io.tell(d->io.ctx);
 }
 
+/* Element sizes are hostile input: compare them with the bytes left in the
+ * parent instead of adding them to the cursor, so a size near 2^32 cannot
+ * wrap an end offset backwards and re-parse (or loop over) earlier bytes.
+ * room(): bytes from the cursor to a bounded end. room_in(): the same with
+ * end 0 meaning an unbounded parent, limited by the 32-bit offset space. */
+static uint32_t room(struct webm_demux *d, uint32_t end)
+{
+	uint32_t pos = tell(d);
+
+	return pos < end ? end - pos : 0U;
+}
+
+static uint32_t room_in(struct webm_demux *d, uint32_t end)
+{
+	return end ? room(d, end) : 0xFFFFFFFFU - tell(d);
+}
+
 static int read_full(struct webm_demux *d, void *dst, uint32_t n)
 {
 	uint8_t *p = dst;
@@ -77,13 +94,15 @@ static int read_full(struct webm_demux *d, void *dst, uint32_t n)
 	return 0;
 }
 
-static int skip_n(struct webm_demux *d, uint32_t n)
+static int skip_n(struct webm_demux *d, uint64_t n)
 {
 	int rc;
 
 	if (n == 0)
 		return 0;
-	rc = d->io.seek(d->io.ctx, tell(d) + n);
+	if (n > room_in(d, 0U))
+		return fail(d, WEBM_ERR_LAYOUT);
+	rc = d->io.seek(d->io.ctx, tell(d) + (uint32_t)n);
 	if (rc == -2)
 		return fail(d, WEBM_ERR_NEED);
 	if (rc != 0)
@@ -152,28 +171,26 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		return fail(d, WEBM_ERR_LIMIT);
 	t = &d->tracks[d->ntracks];
 	memset(t, 0, sizeof(*t));
-	while (tell(d) + 1 < end) {
+	while (room(d, end) > 1U) {
 		uint32_t id, n, child_end;
 		uint64_t size;
 		int unknown = 0;
 
 		if (read_id_size(d, &id, &size, &unknown) != 0)
 			return -1;
-		if (unknown || size > 0xFFFFFFFFULL)
+		if (unknown || size > room(d, end))
 			return fail(d, WEBM_ERR_LAYOUT);
 		n = (uint32_t)size;
 		child_end = tell(d) + n;
-		if (child_end > end)
-			return fail(d, WEBM_ERR_LAYOUT);
 		if (id == ID_VIDEO || id == ID_AUDIO) {
-			while (tell(d) + 1 < child_end) {
+			while (room(d, child_end) > 1U) {
 				uint32_t cid, cn;
 				uint64_t csz;
 				int cu = 0;
 
 				if (read_id_size(d, &cid, &csz, &cu) != 0)
 					return -1;
-				if (cu || csz > 8)
+				if (cu || csz > 8 || csz > room(d, child_end))
 					return fail(d, WEBM_ERR_LAYOUT);
 				cn = (uint32_t)csz;
 				if (read_full(d, scratch, cn) != 0)
@@ -202,7 +219,7 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 						t->rate = (uint32_t)(rate + 0.5);
 				}
 			}
-			if (tell(d) < child_end && skip_n(d, child_end - tell(d)) != 0)
+			if (skip_n(d, room(d, child_end)) != 0)
 				return -1;
 			continue;
 		}
@@ -221,8 +238,10 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		if (id == ID_DURATION) {
 			uint8_t b[8];
 
-			if (n == 0 || n > 8 || read_full(d, b, n) != 0)
+			if (n == 0 || n > 8)
 				return fail(d, WEBM_ERR_LAYOUT);
+			if (read_full(d, b, n) != 0)
+				return -1;
 			t->default_duration_ns = be_uint(b, n);
 			continue;
 		}
@@ -250,7 +269,7 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		if (skip_n(d, n) != 0)
 			return -1;
 	}
-	if (tell(d) < end && skip_n(d, end - tell(d)) != 0)
+	if (skip_n(d, room(d, end)) != 0)
 		return -1;
 	if (t->type == 1) {
 		if (d->have_video ||
@@ -269,21 +288,24 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 
 static int skip_container(struct webm_demux *d, uint32_t end, int kind)
 {
-	while (tell(d) + 2 < end) {
+	while (room(d, end) > 2U) {
 		uint32_t id;
 		uint64_t size;
 		int unknown = 0;
 
 		if (read_id_size(d, &id, &size, &unknown) != 0)
 			return -1;
-		if (unknown || size > 0xFFFFFFFFULL || tell(d) + (uint32_t)size > end)
+		if (unknown || size > room(d, end))
 			return fail(d, WEBM_ERR_LAYOUT);
 		if (kind == 1 && id == ID_SCALE) {
 			uint8_t b[8];
 			uint32_t n = (uint32_t)size;
 
-			if (n == 0 || n > 8 || read_full(d, b, n) != 0)
+			if (n == 0 || n > 8)
 				return fail(d, WEBM_ERR_LAYOUT);
+			/* Keep NEED: a header split across writes retries. */
+			if (read_full(d, b, n) != 0)
+				return -1;
 			d->scale_ns = (uint32_t)be_uint(b, n);
 			if (d->scale_ns == 0)
 				d->scale_ns = 1000000U;
@@ -299,9 +321,7 @@ static int skip_container(struct webm_demux *d, uint32_t end, int kind)
 		if (skip_n(d, (uint32_t)size) != 0)
 			return -1;
 	}
-	if (tell(d) < end)
-		return skip_n(d, end - tell(d));
-	return 0;
+	return skip_n(d, room(d, end));
 }
 
 /* In-place. payload_off is the first byte after the block header. */
@@ -422,7 +442,9 @@ static int split_lace(struct webm_demux *d, uint32_t payload_off,
 	return 0;
 }
 
-static int take_block(struct webm_demux *d, uint32_t size, int simple, int key)
+/* A Block's key flag lives in its BlockGroup; webm_next sets it after the
+ * group. A SimpleBlock carries its own. */
+static int take_block(struct webm_demux *d, uint32_t size, int simple)
 {
 	uint32_t tlen = 1, i, track;
 	uint8_t mark = 0x80;
@@ -444,12 +466,10 @@ static int take_block(struct webm_demux *d, uint32_t size, int simple, int key)
 		track = (track << 8) | d->buf[i];
 	rel = (int16_t)((d->buf[tlen] << 8) | d->buf[tlen + 1]);
 	lacing = (unsigned)((d->buf[tlen + 2] >> 1) & 3);
-	if (simple)
-		key = (d->buf[tlen + 2] & 0x80) != 0;
+	d->lace_key = simple ? (d->buf[tlen + 2] & 0x80) != 0 : 1;
 	if (split_lace(d, tlen + 3, size - tlen - 3, lacing) != 0)
 		return -1;
 	d->lace_track = track;
-	d->lace_key = (uint8_t)key;
 	d->lace_tc = d->cluster_tc + rel;
 	return 0;
 }
@@ -479,9 +499,16 @@ static int enter_cluster(struct webm_demux *d, uint64_t size, int unknown)
 {
 	d->in_cluster = 1;
 	d->cluster_tc = 0;
-	d->cluster_end = (unknown || size > 0xFFFFFFFFULL)
-		? 0U
-		: tell(d) + (uint32_t)size;
+	d->cluster_end = 0U;
+	if (unknown)
+		return 0;
+	if (size > room_in(d, 0U)) {
+		/* Ends past the 32-bit offsets: it cannot fit a bounded
+		 * Segment or input, and an unbounded one runs it to the next
+		 * Cluster or EOF like an unknown size. */
+		return d->segment_end ? fail(d, WEBM_ERR_LAYOUT) : 0;
+	}
+	d->cluster_end = tell(d) + (uint32_t)size;
 	return 0;
 }
 
@@ -509,7 +536,7 @@ int webm_open(struct webm_demux *d, const struct webm_io *io, uint8_t *buf,
 	{
 		uint32_t end = tell(d) + (uint32_t)size;
 
-		while (tell(d) + 2 < end) {
+		while (room(d, end) > 2U) {
 			uint32_t cid;
 			uint64_t csz;
 			int cu = 0;
@@ -519,8 +546,10 @@ int webm_open(struct webm_demux *d, const struct webm_io *io, uint8_t *buf,
 			if (cu || csz > 64)
 				return fail(d, WEBM_ERR_LAYOUT);
 			if (cid == ID_DOCTYPE) {
-				if (csz >= sizeof(doctype) || read_full(d, doctype, (uint32_t)csz) != 0)
+				if (csz >= sizeof(doctype))
 					return fail(d, WEBM_ERR_LAYOUT);
+				if (read_full(d, doctype, (uint32_t)csz) != 0)
+					return -1;
 				doctype[csz] = 0;
 				if (strcmp((char *)doctype, "webm") != 0 &&
 				    strcmp((char *)doctype, "matroska") != 0)
@@ -534,12 +563,15 @@ int webm_open(struct webm_demux *d, const struct webm_io *io, uint8_t *buf,
 		return -1;
 	if (id != ID_SEGMENT)
 		return fail(d, WEBM_ERR_LAYOUT);
-	if (unknown)
+	if (unknown || size > room_in(d, 0U)) {
+		/* Unknown, or a Segment ending past the 32-bit offsets this
+		 * demux tracks (>= 4 GB): bounded by the input instead. */
 		d->segment_end = io->size ? io->size(io->ctx) : 0U;
-	else
+	} else {
 		d->segment_end = tell(d) + (uint32_t)size;
+	}
 	for (;;) {
-		if (d->segment_end && tell(d) + 2 >= d->segment_end)
+		if (d->segment_end && room(d, d->segment_end) <= 2U)
 			return fail(d, WEBM_ERR_LAYOUT);
 		if (read_id_size(d, &id, &size, &unknown) != 0)
 			return -1;
@@ -548,7 +580,7 @@ int webm_open(struct webm_demux *d, const struct webm_io *io, uint8_t *buf,
 				return fail(d, WEBM_ERR_CODEC);
 			return enter_cluster(d, size, unknown);
 		}
-		if (unknown || size > 0xFFFFFFFFULL)
+		if (unknown || size > room_in(d, d->segment_end))
 			return fail(d, WEBM_ERR_LAYOUT);
 		if (id == ID_INFO) {
 			if (skip_container(d, tell(d) + (uint32_t)size, 1) != 0)
@@ -558,7 +590,7 @@ int webm_open(struct webm_demux *d, const struct webm_io *io, uint8_t *buf,
 				return -1;
 		} else if (encrypted_id(id)) {
 			return fail(d, WEBM_ERR_CODEC);
-		} else if (skip_n(d, (uint32_t)size) != 0) {
+		} else if (skip_n(d, size) != 0) {
 			return -1;
 		}
 	}
@@ -573,10 +605,11 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 		uint64_t size;
 		int unknown = 0;
 
-		if (d->in_cluster && d->cluster_end && tell(d) >= d->cluster_end)
+		if (d->in_cluster && d->cluster_end &&
+		    room(d, d->cluster_end) == 0U)
 			d->in_cluster = 0;
 		pos = tell(d);
-		if (d->segment_end && pos + 2 >= d->segment_end)
+		if (d->segment_end && room(d, d->segment_end) <= 2U)
 			return 0;
 		if (d->io.size && pos >= d->io.size(d->io.ctx))
 			return 0;
@@ -584,14 +617,15 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 			return d->error == WEBM_ERR_TRUNC ? 0 : -1;
 		if (!d->in_cluster) {
 			if (id == ID_CLUSTER) {
-				enter_cluster(d, size, unknown);
+				if (enter_cluster(d, size, unknown) != 0)
+					return -1;
 				continue;
 			}
-			if (unknown || size > 0xFFFFFFFFULL)
+			if (unknown || size > room_in(d, d->segment_end))
 				return fail(d, WEBM_ERR_LAYOUT);
 			if (encrypted_id(id))
 				return fail(d, WEBM_ERR_CODEC);
-			if (skip_n(d, (uint32_t)size) != 0)
+			if (skip_n(d, size) != 0)
 				return -1;
 			continue;
 		}
@@ -606,9 +640,9 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 			continue;
 		}
 		if (id == ID_SIMPLE || id == ID_BLOCK) {
-			if (unknown)
+			if (unknown || size > room_in(d, d->cluster_end))
 				return fail(d, WEBM_ERR_LAYOUT);
-			if (take_block(d, (uint32_t)size, id == ID_SIMPLE, 1) != 0)
+			if (take_block(d, (uint32_t)size, id == ID_SIMPLE) != 0)
 				return -1;
 			return emit(d, blk);
 		}
@@ -616,42 +650,48 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 			uint32_t end;
 			int saw = 0, key = 1;
 
-			if (unknown || size > 0xFFFFFFFFULL)
+			if (unknown || size > room_in(d, d->cluster_end))
 				return fail(d, WEBM_ERR_LAYOUT);
 			end = tell(d) + (uint32_t)size;
-			while (tell(d) + 1 < end) {
+			while (room(d, end) > 1U) {
 				uint32_t cid;
 				uint64_t csz;
 				int cu = 0;
 
 				if (read_id_size(d, &cid, &csz, &cu) != 0)
 					return -1;
+				if (cu || csz > room(d, end))
+					return fail(d, WEBM_ERR_LAYOUT);
 				if (cid == ID_REFBLOCK)
 					key = 0;
 				if (cid == ID_BLOCK) {
-					if (take_block(d, (uint32_t)csz, 0, key) != 0)
+					if (take_block(d, (uint32_t)csz, 0) != 0)
 						return -1;
 					saw = 1;
-				} else if (cu || csz > 0xFFFFFFFFULL ||
-					   skip_n(d, (uint32_t)csz) != 0) {
-					return fail(d, WEBM_ERR_LAYOUT);
+				} else if (skip_n(d, csz) != 0) {
+					return -1;
 				}
 			}
-			if (tell(d) < end && skip_n(d, end - tell(d)) != 0)
+			if (skip_n(d, room(d, end)) != 0)
 				return -1;
-			if (saw)
+			if (saw) {
+				/* A ReferenceBlock may follow the Block, so the
+				 * key flag is known only once the group is read. */
+				d->lace_key = (uint8_t)key;
 				return emit(d, blk);
+			}
 			continue;
 		}
 		if (id == ID_CLUSTER) {
-			enter_cluster(d, size, unknown);
+			if (enter_cluster(d, size, unknown) != 0)
+				return -1;
 			continue;
 		}
-		if (unknown || size > 0xFFFFFFFFULL)
+		if (unknown || size > room_in(d, d->cluster_end))
 			return fail(d, WEBM_ERR_LAYOUT);
 		if (encrypted_id(id))
 			return fail(d, WEBM_ERR_CODEC);
-		if (skip_n(d, (uint32_t)size) != 0)
+		if (skip_n(d, size) != 0)
 			return -1;
 	}
 }
@@ -748,4 +788,84 @@ int webm_payload_is_keyframe(uint8_t codec, const uint8_t *data, uint32_t size)
 	if (!bit_get(data, 1, &bit, &v))
 		return 0;
 	return v == 0U;
+}
+
+void webm_skip_start(struct webm_skip *s, int active, uint32_t budget)
+{
+	s->active = active != 0;
+	s->left = budget;
+}
+
+int webm_skip_block(struct webm_skip *s, const struct webm_block *blk)
+{
+	if (!s->active ||
+	    webm_payload_is_keyframe(blk->codec, blk->data, blk->size))
+		return WEBM_SKIP_DECODE;
+	if (s->left <= 1U) {
+		s->left = 0U;
+		return WEBM_SKIP_YIELD;
+	}
+	s->left--;
+	return WEBM_SKIP_DROP;
+}
+
+int webm_pts90(int64_t ticks, uint32_t scale_ns, uint64_t *out)
+{
+	uint64_t product;
+
+	if (!out)
+		return 0;
+	if (ticks < 0)
+		ticks = 0;
+	if (scale_ns == 0U)
+		scale_ns = 1000000U;
+	if ((uint64_t)ticks > UINT64_MAX / scale_ns)
+		return 0;
+	product = (uint64_t)ticks * scale_ns;
+	if (product > UINT64_MAX / 9U)
+		return 0;
+	/* 90 kHz = ticks * scale_ns * 90000 / 1e9 = ticks * scale_ns * 9 / 1e5. */
+	*out = product * 9U / 100000U;
+	return 1;
+}
+
+uint32_t webm_rate_milli(uint64_t duration_ns)
+{
+	uint64_t milli;
+
+	if (duration_ns == 0U || duration_ns > 1000000000ULL)
+		return 30000U;
+	milli = 1000000000000ULL / duration_ns;
+	if (milli == 0U || milli > 240000U)
+		return 30000U;
+	return (uint32_t)milli;
+}
+
+int webm_xiph_split(const uint8_t *p, uint32_t n, const uint8_t *pkt[3],
+		    uint32_t len[3])
+{
+	uint32_t off = 1U;
+	uint32_t i;
+
+	if (!p || n < 3U || p[0] != 2U)
+		return 0;
+	for (i = 0U; i < 2U; i++) {
+		uint32_t acc = 0U;
+
+		for (;;) {
+			if (off >= n)
+				return 0;
+			acc += p[off];
+			if (p[off++] != 255U)
+				break;
+		}
+		len[i] = acc;
+	}
+	if (off + len[0] + len[1] > n)
+		return 0;
+	len[2] = n - off - len[0] - len[1];
+	pkt[0] = p + off;
+	pkt[1] = pkt[0] + len[0];
+	pkt[2] = pkt[1] + len[1];
+	return 1;
 }

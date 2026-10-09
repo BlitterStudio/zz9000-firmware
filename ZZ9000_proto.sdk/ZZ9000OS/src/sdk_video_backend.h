@@ -126,6 +126,11 @@ struct SDKVideoDecoderOps {
 	int (*ack_media)(void *decoder, uint64_t acknowledged);
 	/* Optional. DECODE command flags; NULL ignores them. */
 	void (*set_decode_flags)(void *decoder, uint32_t flags);
+	/* Optional. Coded sizes the backend will decode, checked at session
+	 * begin; a refusal is UNSUPPORTED (the stream is valid, this card
+	 * will not play it). NULL applies the session's generic 1920x1080
+	 * cap, which rejects larger sizes as BAD_REQUEST. */
+	int (*geometry_ok)(uint32_t width, uint32_t height);
 };
 
 const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec);
