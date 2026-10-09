@@ -68,7 +68,7 @@ static int string_matches(const unsigned char *data, size_t length,
 
 static int validate_descriptor(const char *label, const struct byte_buffer *blob,
                                const char *name, const char *identifier,
-                               const unsigned char *recognition,
+                               const int *recognition,
                                size_t recognition_length, size_t expected_length)
 {
   const unsigned char *data = blob->data;
@@ -110,7 +110,8 @@ static int validate_descriptor(const char *label, const struct byte_buffer *blob
       !string_matches(dthd, dthd_length, read_be32(dthd + 4U), "zz9k-picture") ||
       !string_matches(dthd, dthd_length, read_be32(dthd + 8U), "#?")) goto invalid;
   for (i = 0; i < recognition_length; ++i) {
-    if (read_be16(dthd + 32U + i * 2U) != recognition[i]) goto invalid;
+    unsigned int expected = recognition[i] < 0 ? 0xffffU : (unsigned int)recognition[i];
+    if (read_be16(dthd + 32U + i * 2U) != expected) goto invalid;
   }
   return 1;
 invalid:
@@ -132,9 +133,15 @@ static int run_generator(const char *python, const char *generator,
                          const char *source, const char *output)
 {
   char command[4096];
+#ifdef _WIN32
+  int length = snprintf(command, sizeof(command),
+      "\"\"%s\" \"%s\" --source-dir \"%s\" --output-dir \"%s\"\"",
+      python, generator, source, output);
+#else
   int length = snprintf(command, sizeof(command),
       "\"%s\" \"%s\" --source-dir \"%s\" --output-dir \"%s\"",
       python, generator, source, output);
+#endif
   return length >= 0 && (size_t)length < sizeof(command) && system(command) == 0;
 }
 
@@ -257,16 +264,18 @@ static int check_webp_wildcards(const char *python, const char *generator)
 
 int main(int argc, char **argv)
 {
-  static const unsigned char jpeg_recognition[] = {0xff, 0xd8, 0xff};
-  static const unsigned char png_recognition[] = {0x89, 0x50, 0x4e,
-                                                   0x47, 0x0d, 0x0a};
+  static const int jpeg_recognition[] = {0xff, 0xd8, 0xff};
+  static const int png_recognition[] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a};
+  static const int webp_recognition[] = {
+      0x52, 0x49, 0x46, 0x46, -1, -1, -1, -1, 0x57, 0x45, 0x42, 0x50
+  };
   const char *output = "datatype_descriptor_test_output";
-  char jpeg_path[512], png_path[512];
-  struct byte_buffer jpeg, png, jpeg_icon, png_icon;
+  char jpeg_path[512], png_path[512], webp_path[512];
+  struct byte_buffer jpeg, png, webp, jpeg_icon, png_icon, webp_icon;
   int ok;
 
-  if (argc != 6) {
-    printf("usage: %s <python> <generator> <descriptor-dir> <jpeg.info> <png.info>\n",
+  if (argc != 7) {
+    printf("usage: %s <python> <generator> <descriptor-dir> <jpeg.info> <png.info> <webp.info>\n",
            argv[0]);
     return 2;
   }
@@ -274,20 +283,27 @@ int main(int argc, char **argv)
       !run_generator(argv[1], argv[2], argv[3], output)) return 1;
   snprintf(jpeg_path, sizeof(jpeg_path), "%s/ZZ9000-JPEG", output);
   snprintf(png_path, sizeof(png_path), "%s/ZZ9000-PNG", output);
+  snprintf(webp_path, sizeof(webp_path), "%s/ZZ9000-WebP", output);
   jpeg = read_binary_file(jpeg_path);
   png = read_binary_file(png_path);
+  webp = read_binary_file(webp_path);
   jpeg_icon = read_binary_file(argv[4]);
   png_icon = read_binary_file(argv[5]);
+  webp_icon = read_binary_file(argv[6]);
   ok = validate_descriptor("ZZ9000-JPEG", &jpeg, "ZZ9000-JPEG", "jpeg",
-                           jpeg_recognition, sizeof(jpeg_recognition), 106U);
+                           jpeg_recognition, sizeof(jpeg_recognition) / sizeof(jpeg_recognition[0]), 106U);
   ok &= validate_descriptor("ZZ9000-PNG", &png, "ZZ9000-PNG", "png\0",
-                            png_recognition, sizeof(png_recognition), 110U);
+                            png_recognition, sizeof(png_recognition) / sizeof(png_recognition[0]), 110U);
+  ok &= validate_descriptor("ZZ9000-WebP", &webp, "ZZ9000-WebP", "webp",
+                            webp_recognition, sizeof(webp_recognition) / sizeof(webp_recognition[0]), 124U);
   ok &= validate_icon("ZZ9000-JPEG.info", &jpeg_icon);
   ok &= validate_icon("ZZ9000-PNG.info", &png_icon);
+  ok &= validate_icon("ZZ9000-WebP.info", &webp_icon);
   ok &= check_malformed_metadata(argv[1], argv[2]);
   ok &= check_webp_wildcards(argv[1], argv[2]);
-  free(jpeg.data); free(png.data); free(jpeg_icon.data); free(png_icon.data);
-  remove(jpeg_path); remove(png_path); remove_directory(output);
+  free(jpeg.data); free(png.data); free(webp.data);
+  free(jpeg_icon.data); free(png_icon.data); free(webp_icon.data);
+  remove(jpeg_path); remove(png_path); remove(webp_path); remove_directory(output);
   return ok ? 0 : 1;
 }
 

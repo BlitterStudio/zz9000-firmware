@@ -8,6 +8,7 @@
 #define ZZ9K_REQUEST_H
 
 #include "zz9k/host.h"
+#include "zz9k/image.h"
 #include "zz9k/audio.h"
 #include "zz9k/compression.h"
 #include "zz9k/crypto.h"
@@ -425,19 +426,11 @@ static inline int zz9k_request_decode_gif(ZZ9KRequest *request,
   return zz9k_request_decode_image(request, ZZ9K_OP_DECODE_GIF, desc);
 }
 
-static inline int zz9k_image_codec_is_known(uint32_t codec)
-{
-  return codec == ZZ9K_IMAGE_CODEC_JPEG ||
-         codec == ZZ9K_IMAGE_CODEC_PNG ||
-         codec == ZZ9K_IMAGE_CODEC_GIF;
-}
-
 static inline int zz9k_request_image_session_begin(
     ZZ9KRequest *request, const ZZ9KImageSessionBeginDesc *desc)
 {
   ZZ9KImageSessionBeginPayload *payload;
-
-  if (!request || !desc || !zz9k_image_codec_is_known(desc->codec) ||
+  if (!request || !desc || !zz9k_image_codec_known(desc->codec) ||
       desc->output_format == ZZ9K_SURFACE_FORMAT_UNKNOWN) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }

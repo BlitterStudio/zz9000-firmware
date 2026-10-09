@@ -70,6 +70,48 @@ static int test_begin_builder_encodes_descriptor(void)
 
   return 0;
 }
+static int test_begin_builder_encodes_webp_descriptor(void)
+{
+  ZZ9KRequest request;
+  ZZ9KImageSessionBeginDesc desc;
+  const ZZ9KImageSessionBeginPayload *payload;
+
+  memset(&desc, 0, sizeof(desc));
+  desc.codec = ZZ9K_IMAGE_CODEC_WEBP;
+  desc.output_mode = ZZ9K_IMAGE_OUTPUT_TILE_BUFFER;
+  desc.dst_surface = ZZ9K_INVALID_HANDLE;
+  desc.dst_x = 0U;
+  desc.dst_y = 0U;
+  desc.dst_width = 800U;
+  desc.dst_height = 600U;
+  desc.output_format = ZZ9K_SURFACE_FORMAT_RGBA8888;
+  desc.tile_handle = 0x40000045UL;
+  desc.tile_stride = 3200U;
+  desc.tile_rows = 16U;
+  desc.flags = 0U;
+
+  memset(&request, 0xff, sizeof(request));
+  if (zz9k_request_image_session_begin(&request, &desc) != ZZ9K_STATUS_OK) {
+    return 1;
+  }
+  if (request.entry.opcode != ZZ9K_OP_IMAGE_SESSION_BEGIN) return 2;
+  payload = (const ZZ9KImageSessionBeginPayload *)request.entry.payload.inline_data;
+  if (zz9k_get_be32(payload->codec) != ZZ9K_IMAGE_CODEC_WEBP) return 3;
+  if (zz9k_get_be32(payload->output_mode) != ZZ9K_IMAGE_OUTPUT_TILE_BUFFER) return 4;
+  if (zz9k_get_be32(payload->output_format) != ZZ9K_SURFACE_FORMAT_RGBA8888) return 5;
+  if (zz9k_get_be32(payload->tile_handle) != 0x40000045UL) return 6;
+  if (zz9k_get_be32(payload->tile_stride) != 3200U) return 7;
+  if (zz9k_get_be32(payload->tile_rows) != 16U) return 8;
+
+  /* Unknown codec must be rejected */
+  desc.codec = 0xffffffffUL;
+  if (zz9k_request_image_session_begin(&request, &desc) != ZZ9K_STATUS_BAD_REQUEST) {
+    return 9;
+  }
+
+  return 0;
+}
+
 
 static int test_begin_builder_validates_direct_output(void)
 {
@@ -196,11 +238,14 @@ int main(void)
   result = test_begin_builder_encodes_descriptor();
   if (result) return 10 + result;
 
+  result = test_begin_builder_encodes_webp_descriptor();
+  if (result) return 30 + result;
+
   result = test_begin_builder_validates_direct_output();
-  if (result) return 40 + result;
+  if (result) return 50 + result;
 
   result = test_feed_and_close_builders_encode_payloads();
-  if (result) return 70 + result;
+  if (result) return 80 + result;
 
   return 0;
 }
