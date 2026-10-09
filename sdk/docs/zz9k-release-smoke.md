@@ -240,6 +240,37 @@ Failure routing:
   session, and a saturated audio service makes the datatype decode fail
   with a resource error instead of stealing the player session.
 
+### FLAC and Ogg Vorbis
+
+The same class decodes native FLAC and Ogg Vorbis once the firmware
+advertises the matching audio-stream service flag (`FLAC_STREAM`,
+`VORBIS_STREAM`). Current firmware implements both decoders but keeps them
+unadvertised until physical qualification, so on it the expected result is
+a clean refusal, not playback. Activate the optional descriptors, then:
+
+```text
+copy Storage/DataTypes/ZZ9000-FLAC#? TO DEVS:DataTypes/
+copy Storage/DataTypes/ZZ9000-OggVorbis#? TO DEVS:DataTypes/
+AddDataTypes DEVS:DataTypes/ZZ9000-FLAC DEVS:DataTypes/ZZ9000-OggVorbis
+MultiView Work:Audio/test.flac
+MultiView Work:Audio/test.ogg
+ZZPlay --audio=ahi Work:Audio/test.flac
+ZZPlay --audio=ahi Work:Audio/test.ogg
+```
+
+Expected pass signal:
+
+- `AddDataTypes LIST` shows `ZZ9000-FLAC` and `ZZ9000-OggVorbis` routed to
+  `zz9k-sound.datatype`; Ogg Opus and Ogg-FLAC files are not claimed.
+- Firmware without the service flag: object creation fails with
+  `ERROR_NOT_IMPLEMENTED` and ZZPlay reports that accelerated FLAC or Ogg
+  Vorbis streaming is unavailable; repeated attempts leave free memory
+  unchanged.
+- Firmware that advertises the flag: both play like MP3; 24-bit FLAC
+  publishes 32-bit planes on `sound.datatype` 47. A chained Ogg file fails
+  object creation, and ZZPlay plays its first link, then reports that the
+  card cannot decode the rest of the stream.
+
 ## Audio And MPEGA
 
 ```text

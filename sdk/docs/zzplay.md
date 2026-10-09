@@ -1,6 +1,6 @@
 # ZZPlay — the ZZ9000 accelerated media player
 
-ZZPlay plays MPEG-1 Program Streams, MP3 and native FLAC files using the ZZ9000's ARM
+ZZPlay plays MPEG-1 Program Streams, MP3, native FLAC and Ogg Vorbis files using the ZZ9000's ARM
 coprocessor and FPGA video overlay. Video decoding happens on the card; on the
 accelerated Zorro III path no decoded video ever crosses the Zorro bus.
 
@@ -20,11 +20,12 @@ It works two ways:
 | MPEG-1 Program Stream, video only | MPEG-1 video, card-decoded | none (a warning is printed) |
 | MPEG Layer III (`.mp3`) | — | card-decoded, CBR and VBR, mono or stereo |
 | Native FLAC (`.flac`) | — | card-decoded, mono or stereo, 4 to 24 bits, 8 to 192 kHz; 24-bit output narrowed to 16-bit for AHI |
+| Ogg Vorbis (`.ogg`, `.oga`) | — | card-decoded, one logical stream, mono or stereo, 8 to 192 kHz |
 | Animated WebP (`.webp`) | WebP animation, card-decoded | none |
 | Playlist (`.m3u`, `.m3u8`) | the files it lists | |
 
 The format is chosen by inspecting the file, not by its name. MPEG-1
-elementary streams, standalone MP2, MPEG-2, Ogg-FLAC, multichannel FLAC and other codecs are rejected with
+elementary streams, standalone MP2, MPEG-2, Ogg-FLAC, Ogg Opus, multichannel FLAC/Vorbis and other codecs are rejected with
 a specific message rather than being half-played. File extensions only decide
 what a drawer scan or the file requester offers.
 
@@ -86,7 +87,7 @@ From top to bottom:
   use, the elapsed and total time and the playback state, and a message line
   for notices and errors.
 - **Position slider**: drag it to seek. Seeking is available for MP3; it is
-  greyed out for MPEG-1 video and FLAC, which play from the start.
+  greyed out for MPEG-1 video, FLAC and Ogg Vorbis, which play from the start.
 - **Transport**: previous, play, pause, stop, next.
 - **Volume**: greyed out when the active output cannot change volume (see
   below).
@@ -212,11 +213,22 @@ and the player window shows what it chose.
   advertises it.
 - MHI is never offered for Program Stream audio: it is a Layer III interface.
   Asking for it explicitly reports that rather than playing silently.
-- **FLAC** always uses accelerated decode plus AHI (or `AUDIO=NONE`). The
-  saved MP3 output does not apply to it; an explicit `AUDIO=MHI` or
-  `AUDIO=AX` reports that FLAC cannot use that backend. FLAC needs firmware
-  that advertises the FLAC stream service; without it ZZPlay reports that
-  accelerated FLAC streaming is unavailable.
+- **FLAC** and **Ogg Vorbis** always use accelerated decode plus AHI (or
+  `AUDIO=NONE`). The saved MP3 output does not apply to them; an explicit
+  `AUDIO=MHI` or `AUDIO=AX` reports that they cannot use that backend. They
+  need firmware that advertises the matching stream service; without it
+  ZZPlay reports that accelerated FLAC or Ogg Vorbis streaming is
+  unavailable. An Ogg Vorbis duration comes from the stream's last page and
+  is shown only when that page belongs to the same stream. A chained Ogg
+  file plays its first link to its end (the firmware reports the next link
+  only after every byte of the first has been read), then stops with an
+  error saying the card cannot decode the rest; it is never reported as
+  completed. A multiplexed file is refused before anything plays.
+- The decoded-audio ring is sized from the stream's largest decoder unit
+  (an MP3 frame, a FLAC block, a Vorbis packet) and shrinks in bounded steps
+  when the compact Zorro II host window is short; if even one unit does not
+  fit, ZZPlay reports that there is not enough shared card memory for that
+  stream instead of starting it.
 
 Only one backend can own the ZZ9000AX daughterboard at a time. If another
 program holds it, an explicitly requested backend reports `BUSY` instead of

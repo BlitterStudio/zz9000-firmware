@@ -192,6 +192,100 @@ static int check_flac_file_probe(void)
              ZZPLAY_MEDIA_KIND_FLAC;
 }
 
+/* First page of a libvorbis (ffmpeg) stereo 44.1 kHz stream, verbatim. */
+static const uint8_t vorbis_first_page[58] = {
+  0x4f, 0x67, 0x67, 0x53, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x12, 0xea, 0x84, 0x19, 0x00, 0x00, 0x00, 0x00, 0xa6, 0xe9,
+  0x8d, 0xe1, 0x01, 0x1e, 0x01, 0x76, 0x6f, 0x72, 0x62, 0x69, 0x73, 0x00,
+  0x00, 0x00, 0x00, 0x02, 0x44, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x80, 0xb5, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xb8, 0x01
+};
+
+/* Appends a minimal Ogg page header (one empty segment) for `serial` with
+ * the given granule position. */
+static size_t put_ogg_page(uint8_t *out, uint32_t serial, uint64_t granule)
+{
+  int b;
+
+  memset(out, 0, 28U);
+  memcpy(out, "OggS", 4U);
+  for (b = 0; b < 8; b++) {
+    out[6 + b] = (uint8_t)(granule >> (8 * b));
+  }
+  for (b = 0; b < 4; b++) {
+    out[14 + b] = (uint8_t)(serial >> (8 * b));
+  }
+  out[26] = 1U;
+  return 28U;
+}
+
+static FILE *temp_with(const uint8_t *data, size_t length)
+{
+  FILE *file = tmpfile();
+
+  if (!file || fwrite(data, 1U, length, file) != length ||
+      fflush(file) != 0) {
+    if (file) fclose(file);
+    return 0;
+  }
+  return file;
+}
+
+/* An Ogg Vorbis file is classified from its identification page and its
+ * duration comes from the last page of the same logical stream; Ogg Opus
+ * is not claimed, and a tail holding only another stream's pages leaves
+ * the duration unknown. */
+static int check_vorbis_file_probe(void)
+{
+  uint8_t stream[256];
+  ZZPlayProbeInfo probe;
+  uint64_t granule = 0U;
+  size_t length = sizeof(vorbis_first_page);
+  FILE *file;
+  int ok;
+
+  memcpy(stream, vorbis_first_page, length);
+  length += put_ogg_page(stream + length, 0x1984ea12UL, 0U);
+  length += put_ogg_page(stream + length, 0x1984ea12UL, 44100U);
+  length += put_ogg_page(stream + length, 0x1984ea12UL, UINT64_MAX);
+  length += put_ogg_page(stream + length, 0x0badf00dUL, 99999U);
+  file = temp_with(stream, length);
+  if (!file) {
+    return 0;
+  }
+  memset(&probe, 0, sizeof(probe));
+  ok = zzplay_probe_media_file(file, &probe) && ftell(file) == 0L &&
+       probe.kind == ZZPLAY_MEDIA_KIND_VORBIS &&
+       probe.vorbis.sample_rate == 44100U && probe.vorbis.channels == 2U &&
+       probe.vorbis.serial == 0x1984ea12UL &&
+       probe.vorbis.nominal_bitrate == 112000U &&
+       zzplay_ogg_last_granule(file, probe.vorbis.serial, &granule) &&
+       granule == 44100U;
+  granule = 7U;
+  ok = ok && !zzplay_ogg_last_granule(file, 0x12345678UL, &granule) &&
+       granule == 7U;
+  fclose(file);
+  if (!ok) {
+    return 0;
+  }
+  memcpy(stream, vorbis_first_page, sizeof(vorbis_first_page));
+  memcpy(stream + 28, "\x13OpusHead", 9U);
+  stream[27] = 0x13U;
+  file = temp_with(stream, sizeof(vorbis_first_page));
+  if (!file) {
+    return 0;
+  }
+  ok = !zzplay_probe_media_file(file, &probe) &&
+       probe.kind == ZZPLAY_MEDIA_KIND_UNSUPPORTED;
+  fclose(file);
+  return ok && zzplay_format_for_path("Work:a.oga") &&
+         zzplay_format_for_path("Work:a.oga")->kind ==
+             ZZPLAY_MEDIA_KIND_VORBIS &&
+         zzplay_format_for_path("Work:a.OGG") &&
+         zzplay_format_for_path("Work:a.OGG")->kind ==
+             ZZPLAY_MEDIA_KIND_VORBIS;
+}
+
 static int check_stats_and_transport(void)
 {
   ZZPlayStatsCore stats;
@@ -520,6 +614,9 @@ int main(void)
   }
   if (!check_flac_file_probe()) {
     return 17;
+  }
+  if (!check_vorbis_file_probe()) {
+    return 18;
   }
   if (!check_webp_probe()) {
     return 15;
