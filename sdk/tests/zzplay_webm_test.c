@@ -202,6 +202,12 @@ static int check_refusals(void)
 {
   uint8_t tracks[512], file[1024], matroska[128];
   size_t tn, n, i;
+  /* SamplingFrequency as an 8-byte EBML float. */
+  static const uint8_t vorbis_4k[] = {0x40, 0xaf, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
+  static const uint8_t vorbis_8k[] = {0x40, 0xbf, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
+  static const uint8_t vorbis_44k[] = {0x40, 0xe5, 0x88, 0x80, 0x00, 0x00, 0x00, 0x00};
+  static const uint8_t vorbis_96k[] = {0x40, 0xf7, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
+  static const uint8_t vorbis_192k[] = {0x41, 0x07, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
   i = ebml_header(matroska, sizeof(matroska), 0U, "matroska");
   if (!expect_refusal(matroska, i, ZZPLAY_WEBM_MATROSKA, "matroska")) return 0;
   tn = 0; tn = video_track(tracks, sizeof(tracks), tn, "V_VP8", 320, 240, 0, 0, 0, 0, 0);
@@ -220,6 +226,38 @@ static int check_refusals(void)
   tn = 0; tn = video_track(tracks, sizeof(tracks), tn, "V_VP8", 640, 360, 0, 0, 0, 0, 0);
   n = wrap_segment(file, sizeof(file), tracks, tn, 0);
   if (n < 40U || !expect_refusal(file, 40U, ZZPLAY_WEBM_TRUNCATED, "trunc")) return 0;
+  /* One audio track only: a second would leave the card to pick one. */
+  tn = 0; tn = video_track(tracks, sizeof(tracks), tn, "V_VP8", 640, 360, 0, 0, 0, 0, 0);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 2U, 2U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_VORBIS", vorbis_44k, sizeof(vorbis_44k), 2U, 3U);
+  n = wrap_segment(file, sizeof(file), tracks, tn, 0);
+  if (!expect_refusal(file, n, ZZPLAY_WEBM_TWO_AUDIO, "two audio")) return 0;
+  /* Audio-only WebM is not a video item. */
+  tn = 0; tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 2U, 1U);
+  n = wrap_segment(file, sizeof(file), tracks, tn, 0);
+  if (!expect_refusal(file, n, ZZPLAY_WEBM_NO_VIDEO, "no video")) return 0;
+  /* The card mixes mono or stereo only. */
+  tn = 0; tn = video_track(tracks, sizeof(tracks), tn, "V_VP9", 640, 360, 0, 0, 0, 0, 0);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 6U, 2U);
+  n = wrap_segment(file, sizeof(file), tracks, tn, 0);
+  if (!expect_refusal(file, n, ZZPLAY_WEBM_BAD_AUDIO, "6ch")) return 0;
+  /* Vorbis is accepted from 8 kHz to 96 kHz inclusive. */
+  tn = 0; tn = video_track(tracks, sizeof(tracks), tn, "V_VP8", 640, 360, 0, 0, 0, 0, 0);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_VORBIS", vorbis_4k, sizeof(vorbis_4k), 2U, 2U);
+  n = wrap_segment(file, sizeof(file), tracks, tn, 0);
+  if (!expect_refusal(file, n, ZZPLAY_WEBM_BAD_AUDIO, "vorbis 4k")) return 0;
+  tn = 0; tn = video_track(tracks, sizeof(tracks), tn, "V_VP8", 640, 360, 0, 0, 0, 0, 0);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_VORBIS", vorbis_192k, sizeof(vorbis_192k), 2U, 2U);
+  n = wrap_segment(file, sizeof(file), tracks, tn, 0);
+  if (!expect_refusal(file, n, ZZPLAY_WEBM_BAD_AUDIO, "vorbis 192k")) return 0;
+  tn = 0; tn = video_track(tracks, sizeof(tracks), tn, "V_VP8", 640, 360, 0, 0, 0, 0, 0);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_VORBIS", vorbis_8k, sizeof(vorbis_8k), 2U, 2U);
+  n = wrap_segment(file, sizeof(file), tracks, tn, 0);
+  if (!expect_refusal(file, n, ZZPLAY_WEBM_OK, "vorbis 8k")) return 0;
+  tn = 0; tn = video_track(tracks, sizeof(tracks), tn, "V_VP8", 640, 360, 0, 0, 0, 0, 0);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_VORBIS", vorbis_96k, sizeof(vorbis_96k), 2U, 2U);
+  n = wrap_segment(file, sizeof(file), tracks, tn, 0);
+  if (!expect_refusal(file, n, ZZPLAY_WEBM_OK, "vorbis 96k")) return 0;
   if (zzplay_webm_within_cap(1921U, 1080U) || zzplay_webm_within_cap(1920U, 1089U) ||
       zzplay_webm_realtime(ZZPLAY_WEBM_VIDEO_VP9, 1280U, 720U)) return 0;
   return 1;

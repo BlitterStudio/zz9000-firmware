@@ -175,6 +175,19 @@ static int check_card_case(ZZPlayAudioBackend requested, int strict,
   return decision.message && strcmp(decision.message, message) == 0;
 }
 
+/* The strict-MHI refusal must name both outputs FLAC/Vorbis can use, not
+ * claim AHI is the only one: they play on the card first. */
+static int check_card_mhi_refusal(void)
+{
+  ZZPlayCardDecision decision =
+      zzplay_card_stream_decide(ZZPLAY_AUDIO_MHI, 1, ZZPLAY_CARD_NOT_ASKED);
+
+  return decision.path == ZZPLAY_CARD_PATH_REFUSED && decision.message &&
+         !strstr(decision.message, "AHI only") &&
+         strstr(decision.message, "card") &&
+         strstr(decision.message, "AHI") && strstr(decision.message, "MHI");
+}
+
 static int check_card_policy(void)
 {
   const char *mhi = "%s plays on the card or through AHI, not MHI";
@@ -183,8 +196,7 @@ static int check_card_policy(void)
   const char *busy = "on-card %s playback refused: ZZ9000AX is busy";
   const char *failed = "on-card %s playback failed";
 
-  if (strstr(mhi, "AHI only") || !strstr(mhi, "card") ||
-      !strstr(mhi, "AHI") || !strstr(mhi, "MHI")) {
+  if (!check_card_mhi_refusal()) {
     return 0;
   }
   if (!check_card_case(ZZPLAY_AUDIO_AUTO, 0, ZZPLAY_CARD_NOT_ASKED,

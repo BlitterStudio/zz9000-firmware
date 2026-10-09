@@ -402,7 +402,23 @@ static int test_service_flag_names(void)
       !expect_name(zz9k_service_flag_name(
                        ZZ9K_SERVICE_VIDEO,
                        ZZ9K_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ),
-                   "timeline-90khz")) {
+                   "timeline-90khz") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8),
+                   "webm-vp8") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9),
+                   "webm-vp9") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS),
+                   "media-opus") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS),
+                   "media-vorbis")) {
     return 24;
   }
   if (!expect_name(zz9k_service_flag_name(
