@@ -825,10 +825,11 @@ static void XEmacPsRecvHandler(void *Callback)
 				if (rx_bytes + RX_FRAME_PAD > 32U)
 					ethernet_backlog_slot_publish_from(backlog_slot, 32U,
 					                                   rx_bytes + RX_FRAME_PAD - 32U);
-				*(frame_bl_ptr)   = (rx_bytes&0xff00)>>8;
-				*(frame_bl_ptr+1) = (rx_bytes&0xff);
-				*(frame_bl_ptr+2) = (frame_serial&0xff00)>>8;
-				*(frame_bl_ptr+3) = (frame_serial&0xff);
+				/* One aligned 32-bit store (the slot is 2 KB aligned), so a
+				 * driver polling the header never sees a new serial beside a
+				 * stale length or half a serial.  Big-endian for the 68k. */
+				*(volatile u32 *)frame_bl_ptr =
+					__builtin_bswap32(((u32)(rx_bytes & 0xffff) << 16) | (u16)frame_serial);
 				ethernet_backlog_slot_publish_from(backlog_slot, 0U, 32U);
 
 				frames_backlog_write = ethernet_next_backlog_slot(frames_backlog_write);
