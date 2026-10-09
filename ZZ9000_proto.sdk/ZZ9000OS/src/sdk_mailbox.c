@@ -4640,131 +4640,25 @@ static uint16_t handle_audio_ring_release(
 	return complete_status(req, comp, SDK_STATUS_OK);
 }
 
-static uint16_t handle_audio_stream_begin(volatile struct SDKMailboxEntry *req,
-                                          volatile struct SDKMailboxEntry *comp,
-                                          uint16_t payload_len)
+/* Validates ring geometry and opens an unbound session shared by the MP3-only
+ * Begin and the codec-aware BeginEx. Both water marks are PCM-ring
+ * thresholds: low_water is the playback pump's refill trigger, high_water
+ * caps decode output per pass. (Validating low_water against the input ring
+ * here rejected any BEGIN whose input ring was smaller than the PCM refill
+ * mark.) */
+static uint16_t open_audio_stream(volatile struct SDKMailboxEntry *req,
+                                  volatile struct SDKMailboxEntry *comp,
+                                  uint32_t codec,
+                                  struct SDKSharedBuffer *input_ring,
+                                  struct SDKSharedBuffer *pcm_ring,
+                                  uint32_t input_capacity,
+                                  uint32_t pcm_capacity,
+                                  uint32_t output_format,
+                                  uint32_t low_water_bytes,
+                                  uint32_t high_water_bytes)
 {
-	volatile struct SDKAudioStreamBeginPayload *payload;
-	struct SDKSharedBuffer *mp3_ring;
-	struct SDKSharedBuffer *pcm_ring;
 	struct SDKAudioStream *stream;
-	uint32_t mp3_capacity;
-	uint32_t pcm_capacity;
-	uint32_t output_hz;
-	uint32_t output_channels;
-	uint32_t output_format;
-	uint32_t low_water_bytes;
-	uint32_t high_water_bytes;
-	uint32_t flags;
 
-	if (payload_len < sizeof(*payload))
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	payload = (volatile struct SDKAudioStreamBeginPayload *)req->payload;
-	mp3_ring = find_shared_buffer(get_be32(payload->mp3_ring_handle));
-	pcm_ring = find_shared_buffer(get_be32(payload->pcm_ring_handle));
-	if (!mp3_ring || !pcm_ring)
-		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-
-	mp3_capacity = get_be32(payload->mp3_ring_capacity);
-	pcm_capacity = get_be32(payload->pcm_ring_capacity);
-	output_hz = get_be32(payload->output_hz);
-	output_channels = get_be32(payload->output_channels);
-	output_format = get_be32(payload->output_format);
-	low_water_bytes = get_be32(payload->low_water_bytes);
-	high_water_bytes = get_be32(payload->high_water_bytes);
-	flags = get_be32(payload->flags);
-	if (flags != 0U || output_hz != 0U || output_channels != 0U)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
-	    output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	if (mp3_capacity == 0U || pcm_capacity <
-	    (MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t)) ||
-	    mp3_capacity > mp3_ring->length ||
-	    pcm_capacity > pcm_ring->length ||
-	    /* Both water marks are PCM-ring thresholds: low_water is the
-	     * playback pump's refill trigger, high_water caps decode
-	     * output per pass. (Validating low_water against the mp3 ring
-	     * here rejected any BEGIN whose input ring was smaller than
-	     * the PCM refill mark.) */
-	    low_water_bytes >= pcm_capacity ||
-	    high_water_bytes >= pcm_capacity) {
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	}
-
-	stream = alloc_audio_stream();
-	if (!stream)
-		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
-	stream->codec = SDK_AUDIO_CODEC_MP3;
-	stream->mp3_ring = mp3_ring;
-	stream->pcm_ring = pcm_ring;
-	/* Resolved once here: core-1 feeds/reads use these instead of the
-	 * core-0-only shared-buffer registry entries above. */
-	stream->mp3_ring_addr = mp3_ring->address;
-	stream->pcm_ring_addr = pcm_ring->address;
-	stream->mp3_capacity = mp3_capacity;
-	stream->pcm_capacity = pcm_capacity & ~1UL;
-	stream->low_water_bytes = low_water_bytes;
-	stream->high_water_bytes = high_water_bytes & ~1UL;
-	stream->sample_format = output_format;
-	/* Affinity is fixed for the stream's whole life: the mp3 staging
-	 * ring becomes cache-owned by whichever core runs the decoder. */
-	stream->core1_affine = scheduler_core1_available() ? 1U : 0U;
-	mp3dec_init(&stream->decoder);
-	stream->initialized = 1;
-	stream->gain = AUDIO_FABRIC_GAIN_UNITY;
-	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
-}
-
-static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *req,
-                                             volatile struct SDKMailboxEntry *comp,
-                                             uint16_t payload_len)
-{
-	volatile struct SDKAudioStreamBeginExPayload *payload;
-	struct SDKSharedBuffer *input_ring;
-	struct SDKSharedBuffer *pcm_ring;
-	struct SDKAudioStream *stream;
-	uint32_t codec;
-	uint32_t input_capacity;
-	uint32_t pcm_capacity;
-	uint32_t output_hz;
-	uint32_t output_channels;
-	uint32_t output_format;
-	uint32_t low_water_bytes;
-	uint32_t high_water_bytes;
-	uint32_t flags;
-
-	if (payload_len < sizeof(*payload))
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	payload = (volatile struct SDKAudioStreamBeginExPayload *)req->payload;
-	codec = get_be32(payload->codec);
-	if (codec == SDK_AUDIO_CODEC_UNKNOWN || codec > SDK_AUDIO_CODEC_VORBIS)
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (codec != SDK_AUDIO_CODEC_MP3)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-
-	input_ring = find_shared_buffer(get_be32(payload->input_ring_handle));
-	pcm_ring = find_shared_buffer(get_be32(payload->pcm_ring_handle));
-	if (!input_ring || !pcm_ring)
-		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-
-	input_capacity = get_be32(payload->input_ring_capacity);
-	pcm_capacity = get_be32(payload->pcm_ring_capacity);
-	output_hz = get_be32(payload->output_hz);
-	output_channels = get_be32(payload->output_channels);
-	output_format = get_be32(payload->output_format);
-	low_water_bytes = get_be32(payload->low_water_bytes);
-	high_water_bytes = get_be32(payload->high_water_bytes);
-	flags = get_be32(payload->flags);
-	if (flags != 0U || output_hz != 0U || output_channels != 0U)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
-	    output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE) {
-		if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S32LE ||
-		    output_format == SDK_AUDIO_SAMPLE_FORMAT_S32BE)
-			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	}
 	if (input_capacity == 0U || pcm_capacity <
 	    (MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(mp3d_sample_t)) ||
 	    input_capacity > input_ring->length ||
@@ -4780,6 +4674,8 @@ static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *re
 	stream->codec = codec;
 	stream->mp3_ring = input_ring;
 	stream->pcm_ring = pcm_ring;
+	/* Resolved once here: core-1 feeds/reads use these instead of the
+	 * core-0-only shared-buffer registry entries above. */
 	stream->mp3_ring_addr = input_ring->address;
 	stream->pcm_ring_addr = pcm_ring->address;
 	stream->mp3_capacity = input_capacity;
@@ -4787,11 +4683,91 @@ static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *re
 	stream->low_water_bytes = low_water_bytes;
 	stream->high_water_bytes = high_water_bytes & ~1UL;
 	stream->sample_format = output_format;
+	/* Affinity is fixed for the stream's whole life: the input staging
+	 * ring becomes cache-owned by whichever core runs the decoder. */
 	stream->core1_affine = scheduler_core1_available() ? 1U : 0U;
 	mp3dec_init(&stream->decoder);
 	stream->initialized = 1;
 	stream->gain = AUDIO_FABRIC_GAIN_UNITY;
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
+}
+
+static uint16_t handle_audio_stream_begin(volatile struct SDKMailboxEntry *req,
+                                          volatile struct SDKMailboxEntry *comp,
+                                          uint16_t payload_len)
+{
+	volatile struct SDKAudioStreamBeginPayload *payload;
+	struct SDKSharedBuffer *mp3_ring;
+	struct SDKSharedBuffer *pcm_ring;
+	uint32_t output_format;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioStreamBeginPayload *)req->payload;
+	mp3_ring = find_shared_buffer(get_be32(payload->mp3_ring_handle));
+	pcm_ring = find_shared_buffer(get_be32(payload->pcm_ring_handle));
+	if (!mp3_ring || !pcm_ring)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	output_format = get_be32(payload->output_format);
+	if (get_be32(payload->flags) != 0U ||
+	    get_be32(payload->output_hz) != 0U ||
+	    get_be32(payload->output_channels) != 0U)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
+	    output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	return open_audio_stream(req, comp, SDK_AUDIO_CODEC_MP3, mp3_ring,
+	                         pcm_ring,
+	                         get_be32(payload->mp3_ring_capacity),
+	                         get_be32(payload->pcm_ring_capacity),
+	                         output_format,
+	                         get_be32(payload->low_water_bytes),
+	                         get_be32(payload->high_water_bytes));
+}
+
+static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *req,
+                                             volatile struct SDKMailboxEntry *comp,
+                                             uint16_t payload_len)
+{
+	volatile struct SDKAudioStreamBeginExPayload *payload;
+	struct SDKSharedBuffer *input_ring;
+	struct SDKSharedBuffer *pcm_ring;
+	uint32_t codec;
+	uint32_t output_format;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioStreamBeginExPayload *)req->payload;
+	codec = get_be32(payload->codec);
+	if (codec == SDK_AUDIO_CODEC_UNKNOWN || codec > SDK_AUDIO_CODEC_VORBIS)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	/* FLAC and Vorbis are reserved until their backends exist. */
+	if (codec != SDK_AUDIO_CODEC_MP3)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	input_ring = find_shared_buffer(get_be32(payload->input_ring_handle));
+	pcm_ring = find_shared_buffer(get_be32(payload->pcm_ring_handle));
+	if (!input_ring || !pcm_ring)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	output_format = get_be32(payload->output_format);
+	if (get_be32(payload->flags) != 0U ||
+	    get_be32(payload->output_hz) != 0U ||
+	    get_be32(payload->output_channels) != 0U)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	/* The MP3 backend produces 16-bit PCM only; 32-bit containers are a
+	 * valid request that this codec cannot satisfy. */
+	if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S32LE ||
+	    output_format == SDK_AUDIO_SAMPLE_FORMAT_S32BE)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
+	    output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	return open_audio_stream(req, comp, codec, input_ring, pcm_ring,
+	                         get_be32(payload->input_ring_capacity),
+	                         get_be32(payload->pcm_ring_capacity),
+	                         output_format,
+	                         get_be32(payload->low_water_bytes),
+	                         get_be32(payload->high_water_bytes));
 }
 
 static uint16_t handle_audio_stream_feed(volatile struct SDKMailboxEntry *req,

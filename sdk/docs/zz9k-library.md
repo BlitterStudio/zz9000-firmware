@@ -1847,7 +1847,10 @@ and `ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION`.
 
 Library revision 33 adds the codec-aware audio streaming begin LVO:
 `ZZ9KAudioStreamBeginEx()` at `ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX`. Callers must gate
-it on `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX`.
+it on `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX`. Firmware without the
+BeginEx opcode answers `ZZ9K_STATUS_UNSUPPORTED`; there is no silent fallback
+to the MP3-only Begin, so MP3 clients that must run on older firmware keep
+using `ZZ9KAudioStreamBegin()`.
 
 ### Codec-Aware Audio Streaming and PCM Contract
 
