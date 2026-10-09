@@ -1,8 +1,8 @@
 /* The compressed-audio engine shared by zzplay's MP3 engine (zzplay-mp3.c)
  * and its FLAC/Ogg Vorbis engine (zzplay-codec-stream.c): the per-item
  * engine state, one decode pass over the file, and the accelerated decode +
- * AHI backend both use. Implemented in zzplay-mp3.c, where that backend
- * first served MP3; private to those two files.
+ * AHI backend both use. Implemented in zzplay-codec.c; private to those
+ * two files.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 

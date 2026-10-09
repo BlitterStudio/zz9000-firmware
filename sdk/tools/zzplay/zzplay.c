@@ -2958,11 +2958,16 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
   return 1;
 }
 
+/* Prepares one container's policy, video info and audio decision. */
+typedef int (*ZZPlayContainerPrepare)(struct ZZPlayRuntime *runtime,
+                                      const ZZPlayEngineRun *run,
+                                      ZZPlayBackendDecision *decision);
+
 /* One MPEG-1 Program Stream or WebM item through a card media session.
  * The container's prepare step settles everything that differs between
  * them (runtime.container); the session loop below is shared. */
 static ZZPlayEngineResult zzplay_engine_media_session(
-    const ZZPlayEngineRun *run)
+    const ZZPlayEngineRun *run, ZZPlayContainerPrepare prepare)
 {
   ZZ9KBoard board;
   ZZ9KCaps caps;
@@ -3004,9 +3009,7 @@ static ZZPlayEngineResult zzplay_engine_media_session(
   (void)zzplay_resource_acquire(
       &runtime.core.resources, ZZPLAY_RESOURCE_INPUT_FILE);
 
-  if (run->probe->kind == ZZPLAY_MEDIA_KIND_WEBM
-          ? !zzplay_prepare_webm(&runtime, run, &audio_decision)
-          : !zzplay_prepare_mpeg(&runtime, run, &audio_decision)) {
+  if (!prepare(&runtime, run, &audio_decision)) {
     goto cleanup;
   }
   strict = runtime.audio_strict;
@@ -3543,6 +3546,16 @@ cleanup:
   return ZZPLAY_ENGINE_EOF;
 }
 
+static ZZPlayEngineResult zzplay_engine_mpeg(const ZZPlayEngineRun *run)
+{
+  return zzplay_engine_media_session(run, zzplay_prepare_mpeg);
+}
+
+static ZZPlayEngineResult zzplay_engine_webm(const ZZPlayEngineRun *run)
+{
+  return zzplay_engine_media_session(run, zzplay_prepare_webm);
+}
+
 /* ------------------------------------------------------------------ */
 /* WebP animation engine.                                             */
 /* ------------------------------------------------------------------ */
@@ -3934,12 +3947,12 @@ static const struct ZZPlayEngineEntry {
   ZZPlayMediaKind kind;
   ZZPlayEngineFn run;
 } zzplay_engines[] = {
-  { ZZPLAY_MEDIA_KIND_MPEG_PS, zzplay_engine_media_session },
+  { ZZPLAY_MEDIA_KIND_MPEG_PS, zzplay_engine_mpeg },
   { ZZPLAY_MEDIA_KIND_MP3, zzplay_mp3_run },
   { ZZPLAY_MEDIA_KIND_WEBP, zzplay_engine_webp },
   { ZZPLAY_MEDIA_KIND_FLAC, zzplay_flac_run },
    { ZZPLAY_MEDIA_KIND_VORBIS, zzplay_vorbis_run },
-   { ZZPLAY_MEDIA_KIND_WEBM, zzplay_engine_media_session }
+   { ZZPLAY_MEDIA_KIND_WEBM, zzplay_engine_webm }
 };
 static ZZPlayEngineFn zzplay_engine_for_kind(ZZPlayMediaKind kind)
 {

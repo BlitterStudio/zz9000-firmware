@@ -696,6 +696,7 @@ add_test(
   NAME zzplay_mp3_source_test
   COMMAND zzplay_mp3_source_test
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay/zzplay-mp3.c
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zzplay/zzplay-codec.c
 )
 
 add_executable(module_manifest_test
