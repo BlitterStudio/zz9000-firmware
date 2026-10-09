@@ -19,14 +19,21 @@ BACKEND_HDRS := $(FIRMWARE_SRC)/sdk_video_backend.h \
 
 .PHONY: test clean
 
-test: build/webm_parse_test build/webm_backend_test
+test: build/webm_parse_test build/webm_bounds_test build/webm_backend_test
 	build/webm_parse_test
+	build/webm_bounds_test
 	build/webm_backend_test
 
-build/webm_parse_test: webm_parse_test.c $(FIRMWARE_SRC)/webm_parse.c \
-	$(FIRMWARE_SRC)/webm_parse.h
+build/webm_parse_test: webm_parse_test.c ebml_build.h \
+	$(FIRMWARE_SRC)/webm_parse.c $(FIRMWARE_SRC)/webm_parse.h
 	mkdir -p build
 	$(CC) $(CFLAGS) -I$(FIRMWARE_SRC) -o $@ webm_parse_test.c \
+		$(FIRMWARE_SRC)/webm_parse.c
+
+build/webm_bounds_test: webm_bounds_test.c ebml_build.h \
+	$(FIRMWARE_SRC)/webm_parse.c $(FIRMWARE_SRC)/webm_parse.h
+	mkdir -p build
+	$(CC) $(CFLAGS) -I$(FIRMWARE_SRC) -o $@ webm_bounds_test.c \
 		$(FIRMWARE_SRC)/webm_parse.c
 
 build/webm_backend_test: webm_backend_test.c $(BACKEND_SRCS) $(BACKEND_HDRS)
