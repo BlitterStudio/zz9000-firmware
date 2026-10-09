@@ -194,7 +194,10 @@ int init_ethernet_buffers() {
 
 	XEmacPs_Stop(EmacPsInstancePtr);
 
+	/* RX BDs start software-owned (used bit set); a BD is handed to the GEM
+	 * only after a successful XEmacPs_BdRingToHw(). */
 	XEmacPs_BdClear(&BdTemplate);
+	XEmacPs_BdWrite(&BdTemplate, XEMACPS_BD_ADDR_OFFSET, XEMACPS_RXBUF_NEW_MASK);
 
 	int Status = XEmacPs_BdRingCreate(&(XEmacPs_GetRxRing
 				       (EmacPsInstancePtr)),
@@ -258,6 +261,12 @@ int init_ethernet_buffers() {
 		XEmacPs_BdRingUnAlloc(&(XEmacPs_GetRxRing(EmacPsInstancePtr)), RXBD_CNT, BdRxSet);
 		ethernet_clear_host_state();
 		return XST_FAILURE;
+	}
+	dsb();
+	BdRxPtr = BdRxSet;
+	for (int i=0; i<RXBD_CNT; i++) {
+		XEmacPs_BdClearRxNew(BdRxPtr);
+		BdRxPtr = XEmacPs_BdRingNext(&(XEmacPs_GetRxRing(EmacPsInstancePtr)), BdRxPtr);
 	}
 
 	XEmacPs_Start(EmacPsInstancePtr);
@@ -608,7 +617,7 @@ static int ethernet_prepare_rx_bd(XEmacPs_BdRing *rxring, XEmacPs_Bd *rxbd) {
 	frames_backlog_reserve = ethernet_next_backlog_slot(frames_backlog_reserve);
 	frames_backlog_reserved++;
 
-	XEmacPs_BdClearRxNew(rxbd);
+	/* The used bit stays set; the BD is handed over after BdRingToHw(). */
 	XEmacPs_BdSetAddressRx(rxbd, ethernet_backlog_payload_ptr(backlog_slot));
 
 	return XST_SUCCESS;
@@ -665,6 +674,8 @@ void ethernet_alloc_rx_frames() {
 				XEmacPs_BdRingUnAlloc(rxring, 1, rxbd); // FIXME double check
 				break;
 			}
+			dsb();
+			XEmacPs_BdClearRxNew(rxbd);
 		}
 	}
 
@@ -681,7 +692,9 @@ static void XEmacPsRecvHandler(void *Callback)
 	XEmacPs_BdRing* rxring = &(XEmacPs_GetRxRing(EmacPsInstancePtr));
 	XEmacPs_Bd* rxbdset, *cur_bd_ptr;
 
-	int num_rx_bufs = XEmacPs_BdRingFromHwRx(rxring, RXBD_CNT, &rxbdset);
+	/* Bound the walk to the work group: free BDs keep their used bit set
+	 * and must not be counted as received. */
+	int num_rx_bufs = XEmacPs_BdRingFromHwRx(rxring, rxring->HwCnt, &rxbdset);
 
 	// we immediately process the incoming frame.
 	// main task will then signal the Amiga via interrupt
@@ -752,7 +765,9 @@ static void XEmacPsRecvHandler(void *Callback)
 				//printf("bd %d [%d] armed slot %p\n", bd_idx, rx_bytes, frame_bl_ptr);
 			}
 
-			XEmacPs_BdClearRxNew(cur_bd_ptr);
+			/* Leave the used bit set: the BD goes to the free group still
+			 * pointing at this slot, and is handed back to the GEM only
+			 * after ethernet_prepare_rx_bd() and a successful BdRingToHw(). */
 			cur_bd_ptr = XEmacPs_BdRingNext(rxring, cur_bd_ptr);
 
 			frames_received++;
