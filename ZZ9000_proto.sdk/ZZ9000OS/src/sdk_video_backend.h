@@ -115,6 +115,8 @@ struct SDKVideoDecoderOps {
 	const char *name;
 	void *(*create)(void);
 	void (*destroy)(void *decoder);
+	/* May take part of the input (*accepted < length); the caller
+	 * resends the rest. eof applies only when every byte is taken. */
 	int (*write)(void *decoder, const uint8_t *src, uint32_t length,
 	             int eof, uint32_t *accepted);
 	int (*get_info)(void *decoder, struct SDKVideoDecoderInfo *info);

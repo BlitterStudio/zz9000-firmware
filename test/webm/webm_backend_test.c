@@ -570,6 +570,91 @@ static void test_window_exhausted_by_skip(void)
 	ops->destroy(dec);
 }
 
+/* A Void between the Segment start and Tracks larger than the window: the
+ * header can never parse, so the write that fills the window must refuse
+ * the stream rather than keep asking for input. */
+static void test_window_exhausted_in_header(void)
+{
+	static uint8_t zeros[64U * 1024U];
+	/* EBML "webm", Segment of unknown size, Void with 8-byte size 16 MiB. */
+	static const uint8_t head[] = {
+		0x1A, 0x45, 0xDF, 0xA3, 0x87, 0x42, 0x82, 0x84,
+		'w', 'e', 'b', 'm',
+		0x18, 0x53, 0x80, 0x67, 0xFF,
+		0xEC, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00
+	};
+	void *dec = open_decoder();
+	uint32_t fed = 0U;
+	int wr;
+
+	check(feed(dec, head, sizeof(head), sizeof(head)),
+	      "header with huge Void write");
+	for (;;) {
+		uint32_t accepted = 0U;
+
+		wr = ops->write(dec, zeros, sizeof(zeros), 0, &accepted);
+		if (wr != SDK_VIDEO_BACKEND_WRITE_OK)
+			break;
+		fed += accepted;
+		if (fed > 32U * 1024U * 1024U)
+			break;
+	}
+	check(wr == SDK_VIDEO_BACKEND_WRITE_UNSUPPORTED,
+	      "header larger than the window fails instead of waiting");
+	ops->destroy(dec);
+}
+
+/* A final write larger than the space left is taken in part. The end of
+ * stream must wait for the write that delivers the last byte, or the
+ * demux would see a truncated stream and stop early. */
+static void test_partial_final_write(void)
+{
+	static struct stream s;
+	/* More blocks than the 4 MiB + 64 KiB window holds. */
+	const uint32_t blocks = 480U * 1024U;
+	const uint32_t len = blocks * BLOCK_BYTES;
+	uint8_t *tail = (uint8_t *)malloc(len);
+	void *dec = open_decoder();
+	uint32_t off = 0U;
+	uint32_t frames = 0U;
+	uint32_t accepted = 0U;
+	uint32_t i;
+	int rc;
+
+	check(tail != 0, "tail allocation");
+	if (!tail) {
+		ops->destroy(dec);
+		return;
+	}
+	for (i = 0U; i < blocks; i++)
+		put_block(tail + i * BLOCK_BYTES, i == 0U, (uint8_t)(i & 0x7FU),
+			  (int16_t)(i & 0x3FFU));
+	stream_head(&s);
+	check(feed(dec, s.bytes, s.n, s.n), "head write");
+	check(ops->write(dec, tail, len, 1, &accepted) ==
+		      SDK_VIDEO_BACKEND_WRITE_OK && accepted != 0U &&
+	      accepted < len, "oversized final write is taken in part");
+	off = accepted;
+	while ((rc = decode(dec)) == SDK_VIDEO_BACKEND_FRAME)
+		frames++;
+	check(rc == SDK_VIDEO_BACKEND_NEED_INPUT,
+	      "a partly taken final write is not the end of stream");
+	while (off < len) {
+		accepted = 0U;
+		if (ops->write(dec, tail + off, len - off, 1, &accepted) !=
+		    SDK_VIDEO_BACKEND_WRITE_OK)
+			break;
+		off += accepted;
+		while ((rc = decode(dec)) == SDK_VIDEO_BACKEND_FRAME)
+			frames++;
+	}
+	check(off == len, "remainder delivered");
+	check(rc == SDK_VIDEO_BACKEND_DONE, "stream ends after the last byte");
+	check(frames == blocks, "every block decoded");
+	ops->destroy(dec);
+	free(tail);
+}
+
 int main(void)
 {
 	ops = sdk_video_webm_ops(SDK_VIDEO_CODEC_VP8);
@@ -586,6 +671,23 @@ int main(void)
 		      !vp9->geometry_ok(1088U, 1921U),
 		      "VP9 backend owns WebM geometry");
 	}
+	{
+		const struct SDKVideoDecoderOps *vp9 =
+			sdk_video_webm_ops(SDK_VIDEO_CODEC_VP9);
+		int i;
+
+		for (i = 0; i < 2; i++) {
+			const struct SDKVideoDecoderOps *o = i ? vp9 : ops;
+
+			check(o && o->audio_ok &&
+			      o->audio_ok(SDK_VIDEO_MEDIA_AUDIO_NONE) &&
+			      o->audio_ok(SDK_VIDEO_MEDIA_AUDIO_OPUS) &&
+			      o->audio_ok(SDK_VIDEO_MEDIA_AUDIO_VORBIS) &&
+			      !o->audio_ok(SDK_VIDEO_MEDIA_AUDIO_MP2) &&
+			      !o->audio_ok(SDK_VIDEO_MEDIA_AUDIO_AC3),
+			      "WebM carries Opus, Vorbis or no audio");
+		}
+	}
 	test_window();
 	if (ops) {
 		test_chunked_feed();
@@ -594,6 +696,8 @@ int main(void)
 		test_skip_budget();
 		test_invisible_frame();
 		test_window_exhausted_by_skip();
+		test_window_exhausted_in_header();
+		test_partial_final_write();
 	}
 	if (failures) {
 		fprintf(stderr, "webm_backend_test: %d failure(s)\n", failures);

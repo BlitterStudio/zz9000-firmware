@@ -750,8 +750,12 @@ zz9k_video_session_decode(ctx, &decode, &result);
 
 Compressed input is supplied in bounded shared-buffer chunks with
 `ZZ9KVideoSessionWriteDesc`; mark the final chunk with
-`ZZ9K_VIDEO_SESSION_WRITE_EOF`. `NEED_INPUT`, `FRAME_READY`, and `DONE` result
-flags drive the client loop without exposing backend-specific state.
+`ZZ9K_VIDEO_SESSION_WRITE_EOF`. A write may be taken in part:
+`bytes_written` reports this write's count and `bytes_accepted` the running
+total, and the client resends the rest (with the EOF flag again if it was the
+final chunk). End of input takes effect only once the last byte is in.
+`NEED_INPUT`, `FRAME_READY`, and `DONE` result flags drive the client loop
+without exposing backend-specific state.
 
 `build/zzplay` is the standalone AmigaOS media player. It is packaged and
 installed as `ZZPlay` (the build output keeps the lower-case name):

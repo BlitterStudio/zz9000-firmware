@@ -752,6 +752,7 @@ static int webm_write(void *opaque, const uint8_t *src, uint32_t length,
 		      int eof, uint32_t *accepted)
 {
 	struct sdk_video_webm *d = (struct sdk_video_webm *)opaque;
+	uint32_t space;
 #ifndef SDK_VIDEO_HOST_TEST
 	int jumped;
 #endif
@@ -768,10 +769,11 @@ static int webm_write(void *opaque, const uint8_t *src, uint32_t length,
 	 * be refused forever once the window is nearly full, and the demux
 	 * could never see the window as exhausted. The stream reports the
 	 * accepted count and the client resumes from there. */
-	if (length != 0U && webm_window_space(&d->win) == 0U)
+	space = webm_window_space(&d->win);
+	if (length != 0U && space == 0U)
 		return SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE;
-	if (length > webm_window_space(&d->win)) {
-		length = webm_window_space(&d->win);
+	if (length > space) {
+		length = space;
 		eof = 0;
 	}
 #ifndef SDK_VIDEO_HOST_TEST
@@ -786,10 +788,7 @@ static int webm_write(void *opaque, const uint8_t *src, uint32_t length,
 	}
 	heap_select(d);
 #endif
-	if (length != 0U && !webm_window_append(&d->win, src, length)) {
-		heap_clear();
-		return SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE;
-	}
+	(void)webm_window_append(&d->win, src, length);
 	if (eof)
 		d->win.eof = 1;
 	*accepted = length;
@@ -815,15 +814,20 @@ static int webm_get_info(void *opaque, struct SDKVideoDecoderInfo *info)
 	return d->width != 0U && d->height != 0U;
 }
 
+static int webm_audio_ok(uint32_t audio_codec)
+{
+	return audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE ||
+	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_OPUS ||
+	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_VORBIS;
+}
+
 static int webm_configure_media(void *opaque, const struct SDKVideoMediaConfig *config)
 {
 	struct sdk_video_webm *d = (struct sdk_video_webm *)opaque;
 
 	if (!d || !config || d->media_configured)
 		return 0;
-	if (config->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE &&
-	    config->audio_codec != SDK_VIDEO_MEDIA_AUDIO_OPUS &&
-	    config->audio_codec != SDK_VIDEO_MEDIA_AUDIO_VORBIS)
+	if (!webm_audio_ok(config->audio_codec))
 		return 0;
 	if (config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE) {
 		if (config->pcm_ring || config->pcm_ring_capacity != 0U)
@@ -1091,13 +1095,6 @@ static int webm_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 					      : SDK_VIDEO_BACKEND_ERROR;
 		return SDK_VIDEO_BACKEND_FRAME;
 	}
-}
-
-static int webm_audio_ok(uint32_t audio_codec)
-{
-	return audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE ||
-	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_OPUS ||
-	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_VORBIS;
 }
 
 static const struct SDKVideoDecoderOps webm_vp8_ops = {

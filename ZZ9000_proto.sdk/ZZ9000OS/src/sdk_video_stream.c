@@ -33,7 +33,6 @@ struct SDKVideoStreamSession {
 	const struct SDKVideoDecoderOps *ops;
 	void *decoder;
 	struct SDKVideoDecodedFrame direct_frame;
-	uint8_t input_eof;
 	uint8_t failed;
 	uint8_t faulted;
 	uint8_t in_use;
@@ -281,6 +280,8 @@ uint16_t sdk_video_stream_begin_owned(
 	     begin->pcm_low_water_bytes != 0U ||
 	     begin->pcm_high_water_bytes != 0U))
 		return SDK_STATUS_BAD_REQUEST;
+	/* Media audio this firmware offers clients. LPCM and AC-3 stay off
+	 * the list until the MPEG-2/DVD backend is advertised. */
 	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_MP2 &&
@@ -362,11 +363,6 @@ uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
 		session->bytes_accepted = 0xffffffffU;
 	else
 		session->bytes_accepted += accepted;
-	/* A backend may take part of a write; EOF holds only once the last
-	 * byte of the final write is in. */
-	if ((write->flags & SDK_VIDEO_SESSION_WRITE_EOF) != 0U &&
-	    accepted == write->src_length)
-		session->input_eof = 1U;
 	update_info(session);
 
 	result_flags = session->frame_rate_milli != 0U
@@ -375,7 +371,7 @@ uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
 	state = session->frame_rate_milli != 0U
 		? SDK_VIDEO_SESSION_STATE_READY
 		: SDK_VIDEO_SESSION_STATE_NEED_INPUT;
-	fill_result(session, state, 0U, result_flags, result);
+	fill_result(session, state, accepted, result_flags, result);
 	return SDK_STATUS_OK;
 }
 
