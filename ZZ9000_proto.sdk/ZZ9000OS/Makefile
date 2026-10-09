@@ -392,16 +392,18 @@ $(BUILD_DIR)/sdk_video_plmpeg.o: $(SRC_DIR)/sdk_video_plmpeg.c
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
 # DVD hot path (U11 experiment): demux + MPEG-2 decode and AC-3 downmix in
-# the same -O3 tier as the pl_mpeg backend.
+# the same -O3 tier as the pl_mpeg backend. The MPEG-2 and AC-3 wrappers
+# include libmpeg2/liba52 headers that exist only after the pinned dependency
+# build, so those objects depend on the archives.
 $(BUILD_DIR)/sdk_dvd_ps.o: $(SRC_DIR)/sdk_dvd_ps.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
-$(BUILD_DIR)/sdk_video_mpeg2.o: $(SRC_DIR)/sdk_video_mpeg2.c
+$(BUILD_DIR)/sdk_video_mpeg2.o: $(SRC_DIR)/sdk_video_mpeg2.c $(LIBMPEG2_LIB) $(A52_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
-$(BUILD_DIR)/sdk_dvd_ac3.o: $(SRC_DIR)/sdk_dvd_ac3.c
+$(BUILD_DIR)/sdk_dvd_ac3.o: $(SRC_DIR)/sdk_dvd_ac3.c $(LIBMPEG2_LIB) $(A52_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
