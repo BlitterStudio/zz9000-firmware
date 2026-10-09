@@ -853,6 +853,7 @@ struct video_write_op_params {
 
 struct video_session_op_params {
 	uint32_t session;
+	uint32_t flags;
 };
 
 struct media_audio_op_params {
@@ -5627,7 +5628,9 @@ static uint16_t handle_media_session_begin(
 	begin.flags = get_be32(payload->flags);
 	if (!bytes_are_zero(payload->reserved, sizeof(payload->reserved)))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2) {
+	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2 ||
+	    begin.audio_codec == SDK_MEDIA_AUDIO_OPUS ||
+	    begin.audio_codec == SDK_MEDIA_AUDIO_VORBIS) {
 		if (media_pcm_ring)
 			return complete_status(req, comp, SDK_STATUS_BUSY);
 		pcm_ring = find_shared_buffer(begin.pcm_ring_handle);
@@ -5640,7 +5643,9 @@ static uint16_t handle_media_session_begin(
 		begin.pcm_ring = (uint8_t *)(uintptr_t)pcm_ring->address;
 	}
 	status = sdk_media_session_begin(&begin, &result);
-	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2) {
+	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2 ||
+	    begin.audio_codec == SDK_MEDIA_AUDIO_OPUS ||
+	    begin.audio_codec == SDK_MEDIA_AUDIO_VORBIS) {
 		if (status == SDK_STATUS_OK) {
 			media_pcm_ring = pcm_ring;
 			media_pcm_ring_session = result.session;
@@ -5702,7 +5707,11 @@ static uint16_t handle_media_session_deferred_simple(
 	memset(&p, 0, sizeof(p));
 	p.session = get_be32(payload->session);
 	flags = get_be32(payload->flags);
-	if (p.session == 0U || flags != 0U ||
+	p.flags = flags;
+	if (p.session == 0U ||
+	    (opcode == SDK_OP_MEDIA_SESSION_DECODE
+		     ? (flags & ~SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME) != 0U
+		     : flags != 0U) ||
 	    get_be32(payload->value_hi) != 0U ||
 	    get_be32(payload->value_lo) != 0U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -6752,7 +6761,7 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 			return SDK_STATUS_IO_ERROR;
 		if (d->opcode == SDK_OP_MEDIA_SESSION_DECODE)
 			s = sdk_media_session_decode(
-				p->session, 0U, &media_result);
+				p->session, p->flags, &media_result);
 		else
 			s = sdk_media_session_close(
 				p->session, 0U, &media_result);

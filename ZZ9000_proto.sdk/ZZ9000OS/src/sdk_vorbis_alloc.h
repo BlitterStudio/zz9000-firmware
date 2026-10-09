@@ -19,7 +19,7 @@
 
 #ifndef SDK_VORBIS_ALLOC_H
 #define SDK_VORBIS_ALLOC_H
-
+#ifndef __ASSEMBLER__
 #include <setjmp.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -63,6 +63,7 @@ unsigned sdk_vorbis_heap_regions(const struct sdk_vorbis_heap *heap);
 #define calloc(count, size) sdk_vorbis_calloc((count), (size))
 #define realloc(ptr, size) sdk_vorbis_realloc((ptr), (size))
 #define free(ptr) sdk_vorbis_free(ptr)
-#endif
+#endif /* SDK_VORBIS_REPLACE_ALLOCATORS */
+#endif /* __ASSEMBLER__ */
 
 #endif /* SDK_VORBIS_ALLOC_H */

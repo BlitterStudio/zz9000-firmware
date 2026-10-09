@@ -791,11 +791,33 @@ composition. `--benchmark` also disables pacing, making playback FPS the
 uncapped end-to-end throughput for firmware comparisons. Console reporting is
 sampled every two seconds to keep its own overhead small. MPEG Program Stream
 audio is synchronized to video through AHI or compatible direct AX output.
-Additional codecs should be added as new firmware backend registry entries and
-new advertised codec/container flags, without changing the session lifecycle
-or direct-overlay contract. MPEG-1 elementary streams or MJPEG are relatively
-small follow-ups; MPEG-2 and newer inter-frame codecs need separate decoder,
-memory, and hardware-performance qualification.
+Additional codecs are registered as codec/container backend entries and
+advertised via service flags without changing the session lifecycle.
+
+**WebM sessions** (`ZZ9K_VIDEO_CONTAINER_WEBM` with `ZZ9K_VIDEO_CODEC_VP8` or
+`ZZ9K_VIDEO_CODEC_VP9`, and audio `ZZ9K_MEDIA_AUDIO_NONE`,
+`ZZ9K_MEDIA_AUDIO_OPUS`, or `ZZ9K_MEDIA_AUDIO_VORBIS`; gated by
+`ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8`, `ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9`,
+`ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS`, and `ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS`;
+these flags are unadvertised in release firmware until qualified, same
+discipline as WebP/FLAC).
+
+The card accepts any frame size up to a safety cap: longest side &le; 1920
+and pixel count &le; 1920&times;1088 (2,088,960), in either orientation
+(landscape or portrait like phone captures) and with odd dimensions allowed.
+Streams exceeding this cap fail closed at `ZZ9K_OP_MEDIA_SESSION_BEGIN` with
+`ZZ9K_STATUS_UNSUPPORTED`.
+
+The realtime envelope on a Cortex-A9 at 666 MHz is approximately 1280&times;720
+for VP8 and 854&times;480 for VP9. Above this envelope, playback is best-effort:
+audio stays continuous, and video pacing can skip to keyframes via the
+`ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME` flag in `ZZ9KMediaSessionCommandPayload.flags`
+when video lags audio by more than 500 ms.
+
+Opus audio decodes at 48 kHz S16BE (mono or stereo). Vorbis audio decodes at
+the stream's native rate (8000..96000 Hz) and is converted by the card's audio
+pump. Timestamps from the Matroska container are converted internally to the
+90 kHz media clock using `TimestampScale`.
 
 ## Audio Decode Jobs
 

@@ -1092,5 +1092,8 @@ const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
 	if (codec == SDK_VIDEO_CODEC_MPEG2 &&
 	    container == SDK_VIDEO_CONTAINER_MPEG_PS)
 		return sdk_video_mpeg2_backend_ops();
+	if (container == SDK_VIDEO_CONTAINER_WEBM &&
+	    (codec == SDK_VIDEO_CODEC_VP8 || codec == SDK_VIDEO_CODEC_VP9))
+		return sdk_video_webm_ops(codec);
 	return 0;
 }

@@ -63,7 +63,8 @@ static int mock_configure_media(
 	void *decoder, const struct SDKVideoMediaConfig *config)
 {
 	return decoder == &decoder_storage && config &&
-		config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2;
+		(config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE ||
+		 config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2);
 }
 
 static int mock_get_media_info(
@@ -83,7 +84,15 @@ static int mock_ack_media(void *decoder, uint64_t acknowledged)
 	return acknowledged == 0U;
 }
 
-static const struct SDKVideoDecoderOps mock_ops = {
+static uint32_t last_decode_flags;
+
+static void mock_set_decode_flags(void *decoder, uint32_t flags)
+{
+	(void)decoder;
+	last_decode_flags = flags;
+}
+
+static struct SDKVideoDecoderOps mock_ops = {
 	SDK_VIDEO_CODEC_MPEG1,
 	SDK_VIDEO_CONTAINER_MPEG_PS,
 	"mock",
@@ -95,6 +104,7 @@ static const struct SDKVideoDecoderOps mock_ops = {
 	mock_configure_media,
 	mock_get_media_info,
 	mock_ack_media,
+	mock_set_decode_flags
 };
 
 const struct SDKVideoDecoderOps *sdk_video_backend_find(
@@ -161,7 +171,136 @@ static int test_zero_ack_before_lazy_decoder(void)
 	return 0;
 }
 
+static int test_webm_stream_envelopes(void)
+{
+	struct SDKVideoStreamBegin begin;
+	struct SDKVideoStreamResult result;
+
+	sdk_video_stream_init();
+	memset(&begin, 0, sizeof(begin));
+	begin.codec = SDK_VIDEO_CODEC_VP8;
+	begin.container = SDK_VIDEO_CONTAINER_WEBM;
+	begin.output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY;
+
+	/* Oversize width or height -> UNSUPPORTED, not BAD_REQUEST. */
+	begin.width = 2560U;
+	begin.height = 1440U;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_UNSUPPORTED)
+		return 10;
+
+	begin.width = 1920U;
+	begin.height = 1089U;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_UNSUPPORTED)
+		return 11;
+
+	begin.width = 1921U;
+	begin.height = 1080U;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_UNSUPPORTED)
+		return 12;
+
+	/* Zero dimension -> BAD_REQUEST. */
+	begin.width = 0U;
+	begin.height = 120U;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_BAD_REQUEST)
+		return 13;
+
+	/* Opus/Vorbis on non-WebM container -> UNSUPPORTED. */
+	begin.codec = SDK_VIDEO_CODEC_MPEG1;
+	begin.container = SDK_VIDEO_CONTAINER_MPEG_PS;
+	begin.width = 320U;
+	begin.height = 240U;
+	begin.audio_codec = SDK_MEDIA_AUDIO_OPUS;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_UNSUPPORTED)
+		return 14;
+	begin.audio_codec = SDK_MEDIA_AUDIO_VORBIS;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_UNSUPPORTED)
+		return 15;
+
+	/* Portrait and odd dimensions pass the size check (then find backend). */
+	mock_ops.codec = SDK_VIDEO_CODEC_VP8;
+	mock_ops.container = SDK_VIDEO_CONTAINER_WEBM;
+
+	begin.codec = SDK_VIDEO_CODEC_VP8;
+	begin.container = SDK_VIDEO_CONTAINER_WEBM;
+	begin.audio_codec = SDK_MEDIA_AUDIO_NONE;
+	begin.width = 1080U;
+	begin.height = 1920U;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_OK)
+		return 16;
+	sdk_video_stream_close(result.session, &result);
+
+	begin.width = 271U;
+	begin.height = 481U;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_OK)
+		return 17;
+	sdk_video_stream_close(result.session, &result);
+
+	mock_ops.codec = SDK_VIDEO_CODEC_MPEG1;
+	mock_ops.container = SDK_VIDEO_CONTAINER_MPEG_PS;
+	return 0;
+}
+
+static int test_decode_flag_forwarding(void)
+{
+	struct SDKVideoStreamBegin begin;
+	struct SDKVideoStreamDecode decode;
+	struct SDKVideoStreamResult result;
+
+	mock_ops.codec = SDK_VIDEO_CODEC_VP8;
+	mock_ops.container = SDK_VIDEO_CONTAINER_WEBM;
+	last_decode_flags = 0U;
+
+	sdk_video_stream_init();
+	memset(&begin, 0, sizeof(begin));
+	begin.codec = SDK_VIDEO_CODEC_VP8;
+	begin.container = SDK_VIDEO_CONTAINER_WEBM;
+	begin.width = 320U;
+	begin.height = 240U;
+	begin.output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_OK)
+		return 20;
+
+	memset(&decode, 0, sizeof(decode));
+	decode.session = result.session;
+	decode.flags = SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME;
+	if (sdk_video_stream_decode(&decode, &result) != SDK_STATUS_OK)
+		return 21;
+	if (last_decode_flags != SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME)
+		return 22;
+
+	sdk_video_stream_close(result.session, &result);
+	mock_ops.codec = SDK_VIDEO_CODEC_MPEG1;
+	mock_ops.container = SDK_VIDEO_CONTAINER_MPEG_PS;
+	return 0;
+}
+
 int main(void)
 {
-	return test_zero_ack_before_lazy_decoder();
+	int rc;
+
+	rc = test_zero_ack_before_lazy_decoder();
+	if (rc != 0) return rc;
+	rc = test_webm_stream_envelopes();
+	if (rc != 0) return rc;
+	rc = test_decode_flag_forwarding();
+	if (rc != 0) return rc;
+	return 0;
 }

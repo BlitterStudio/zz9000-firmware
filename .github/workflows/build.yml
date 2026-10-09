@@ -133,6 +133,8 @@ jobs:
         run: make -C test/mmu test
       - name: Media session suite
         run: make -C test/media test
+      - name: WebM demux suite
+        run: make -C test/webm test
       - name: Palette shadow suite
         run: make -C test/palette test
       - name: Ethernet multicast hash suite

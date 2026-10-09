@@ -30,12 +30,12 @@ struct SDKServiceDescriptor {
 };
 
 /*
- * Hardware qualification flavor. WebP, FLAC and Ogg Vorbis are implemented
- * but stay unadvertised in release firmware until they pass physical
- * Z2/Z3 qualification. A firmware built with
- * EXTRA_CFLAGS=-DZZ9000_QUALIFY_UNADVERTISED advertises their service flags
- * so the shipped clients exercise them on real hardware. Never package that
- * flavor as a release.
+ * Hardware qualification flavor. WebP, FLAC, Ogg Vorbis and WebM
+ * (VP8/VP9 + Opus/Vorbis) are implemented but stay unadvertised in release
+ * firmware until they pass physical Z2/Z3 qualification. A firmware built
+ * with EXTRA_CFLAGS=-DZZ9000_QUALIFY_UNADVERTISED advertises their service
+ * flags so the shipped clients exercise them on real hardware. Never
+ * package that flavor as a release.
  */
 #ifdef ZZ9000_QUALIFY_UNADVERTISED
 #define SDK_QUALIFY_IMAGE_FLAGS \
@@ -43,9 +43,15 @@ struct SDKServiceDescriptor {
 #define SDK_QUALIFY_AUDIO_FLAGS \
 	(SDK_SERVICE_FLAG_AUDIO_FLAC_STREAM | \
 	 SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM)
+#define SDK_QUALIFY_VIDEO_FLAGS \
+	(SDK_SERVICE_FLAG_VIDEO_WEBM_VP8 | \
+	 SDK_SERVICE_FLAG_VIDEO_WEBM_VP9 | \
+	 SDK_SERVICE_FLAG_VIDEO_MEDIA_OPUS | \
+	 SDK_SERVICE_FLAG_VIDEO_MEDIA_VORBIS)
 #else
 #define SDK_QUALIFY_IMAGE_FLAGS 0U
 #define SDK_QUALIFY_AUDIO_FLAGS 0U
+#define SDK_QUALIFY_VIDEO_FLAGS 0U
 #endif
 
 static const struct SDKServiceDescriptor sdk_services[] = {
@@ -184,7 +190,8 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_VIDEO_MEDIA_MP2 |
 			SDK_SERVICE_FLAG_VIDEO_EXPLICIT_PRESENT |
 			SDK_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ |
-			SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS,
+			SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS |
+			SDK_QUALIFY_VIDEO_FLAGS,
 		.opcode_base = SDK_SERVICE_VIDEO,
 		.opcode_count = 14,
 		.name = "video"

@@ -919,6 +919,15 @@ const struct SDKVideoDecoderOps *sdk_video_mpeg2_backend_ops(void)
 	return &mpeg2_ops;
 }
 
+/* DVD host tests link this file without the WebM backend. The firmware
+ * link provides the strong definition in sdk_video_webm.c. */
+__attribute__((weak))
+const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec)
+{
+	(void)codec;
+	return 0;
+}
+
 #ifdef SDK_VIDEO_HOST_TEST
 int sdk_video_mpeg2_test_milli_from_period(
 	uint32_t frame_period, uint32_t *milli)
