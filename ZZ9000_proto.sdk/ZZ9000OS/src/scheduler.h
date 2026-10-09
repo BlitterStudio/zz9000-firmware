@@ -126,6 +126,11 @@ typedef struct {                /* coherent control block at the queue region */
    * core), so without this core 0's reclaim reads stale heap metadata. */
   volatile uint32_t core1_park_request;
   volatile uint32_t core1_parked;
+  /* Reset-time reclaim without a CPU reset: core 0 sets reclaim_request on
+   * an idle, healthy core 1, which frees its own tracked decode blocks and
+   * sets reclaim_done. Only a faulted or stuck worker is cold-restarted. */
+  volatile uint32_t core1_reclaim_request;
+  volatile uint32_t core1_reclaim_done;
 } taskq_shared_t;
 
 typedef struct {
@@ -182,6 +187,9 @@ void scheduler_core1_worker(void);         /* core 1: dedicated task worker; nev
 void scheduler_core1_park_if_requested(void); /* core 1: clean L1 + park for a cold restart */
 void scheduler_core0_poll(int zorro_pending, int display_pending); /* core 0: harvest+post+drain */
 void scheduler_quiesce_for_reset(void);    /* core 0: drain in-flight core-1 tasks + reset queue before a mailbox teardown */
+/* core 0, after the quiesce: have the idle core 1 free its tracked decode
+ * blocks itself. 0 on success; nonzero means the caller must cold-restart. */
+int  scheduler_core1_reclaim(void);
 #endif
 
 #if defined(SCHED_STRESS_TEST) && !defined(TASKQ_HOST_TEST)

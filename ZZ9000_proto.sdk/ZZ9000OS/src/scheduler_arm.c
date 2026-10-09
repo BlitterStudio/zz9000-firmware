@@ -25,6 +25,9 @@
 #include "xil_cache.h"
 #include "xpseudo_asm.h"
 #include "xreg_cortexa9.h"
+#include <stdio.h>
+
+static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh);
 
 /* BSP flat 1 MB-section translation table (translation_table.S). */
 extern u32 MMUTable;
@@ -93,6 +96,8 @@ void scheduler_boot_init(void)
   sh->tasks_on_core0 = 0;   /* until zeroed here -- must not read back as garbage */
   sh->core1_park_request = 0;  /* garbage here would park core 1 at launch */
   sh->core1_parked = 0;
+  sh->core1_reclaim_request = 0;
+  sh->core1_reclaim_done = 0;
   taskq_watchdog_init(&g_sched_watchdog, 3u);
   g_core1_started = 0;
 }
@@ -239,6 +244,7 @@ void scheduler_core1_worker(void)
     int slot;
 
     /* Checked before every claim: once core 0 asks, no further task runs. */
+    scheduler_core1_reclaim_if_requested(sh);
     scheduler_core1_park_if_requested();
     slot = taskq_claim_any(&sh->queue);
     if (slot < 0) {
@@ -250,6 +256,49 @@ void scheduler_core1_worker(void)
     sh->core1_current_slot = -1;
     sh->tasks_on_core1++;   /* proof: this core executed a crypto task */
   }
+}
+
+/*
+ * Core 1 side of the reset-time reclaim. Core 0 asks only after the quiesce,
+ * so no task is running and this core holds neither the malloc lock nor the
+ * image decode-state lock: it frees its own tracked decode blocks exactly as
+ * a cold restart's reclaim would, but with coherent caches and no CPU reset.
+ */
+static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh)
+{
+  if (!sh->core1_reclaim_request)
+    return;
+  sh->core1_reclaim_request = 0;
+  (void)sdk_compression_reclaim_core1_decode();
+  dsb();
+  sh->core1_reclaim_done = 1;
+  dsb();
+  __asm__ __volatile__("sev" ::: "memory");
+}
+
+#define SCHED_RECLAIM_SPINS 2000U   /* x 10 us */
+
+int scheduler_core1_reclaim(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+  uint32_t spins;
+
+  if (!scheduler_core1_available() || !sh->core1_alive ||
+      sh->core1_current_slot >= 0 || sh->core1_restart_request)
+    return -1;
+  sh->core1_reclaim_done = 0;
+  sh->core1_reclaim_request = 1;
+  dsb();
+  __asm__ __volatile__("sev" ::: "memory");
+  for (spins = 0U; spins < SCHED_RECLAIM_SPINS && !sh->core1_reclaim_done;
+       spins++)
+    usleep(10);
+  if (sh->core1_reclaim_done)
+    return 0;
+  sh->core1_reclaim_request = 0;
+  dsb();
+  printf("[sched] core 1 did not reclaim; cold restart\n");
+  return -1;
 }
 
 /*

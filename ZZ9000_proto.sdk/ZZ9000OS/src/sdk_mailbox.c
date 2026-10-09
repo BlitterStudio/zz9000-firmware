@@ -8670,16 +8670,17 @@ void sdk_mailbox_init(void)
 	                     sizeof(struct SDKAudioStream));
 	sdk_decompress_stream_reset_all();
 	/* A vanished client (Amiga reboot/crash) can leave core-1-affine image
-	 * sessions open with no task in flight; the quiesce above does not
-	 * restart core 1 then, and zeroing the session table would strand the
-	 * sessions' core-1 heap blocks AND their decode-tracker slots (the
-	 * tracker only empties on free or fault reclaim, so repeated resets
-	 * would exhaust it and starve future fault recovery). Cold-restart
-	 * core 1 first: its reclaim pass frees every tracked block while the
-	 * worker is held in reset. */
+	 * sessions or FLAC/Vorbis decoders open with no task in flight; zeroing
+	 * the tables would strand their core-1 heap blocks AND decode-tracker
+	 * slots (the tracker only empties on free or reclaim, so repeated resets
+	 * would exhaust it and starve future fault recovery). The quiesce left
+	 * core 1 idle, so it frees its own tracked blocks; only a faulted or
+	 * stuck worker still takes the cold restart and its core-0 reclaim. A
+	 * cold restart here on a healthy core took the card down with an
+	 * external abort at Amiga warm reset during FLAC playback. */
 	if ((sdk_image_stream_has_core1_sessions() ||
 	     sdk_video_stream_has_core1_sessions() || backend_core1_heap) &&
-	    scheduler_core1_available())
+	    scheduler_core1_available() && scheduler_core1_reclaim() != 0)
 		core1_cold_restart();
 	sdk_image_stream_init();
 	sdk_video_stream_init();
