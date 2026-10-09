@@ -85,8 +85,9 @@ int main(int argc, char **argv)
   }
 
   ok = 1;
-  ok &= expect_contains(source, "#define ZZ9K_LIBRARY_REVISION 31");
+  ok &= expect_contains(source, "#define ZZ9K_LIBRARY_REVISION 32");
   ok &= expect_contains(source, "ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN");
+  ok &= expect_contains(source, "ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION");
   ok &= expect_contains(source, "ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN");
   ok &= expect_contains(source, "ZZ9K_OP_AUDIO_STREAM_GAIN");
   ok &= expect_contains(source, "ZZ9K_SERVICE_FLAG_SURFACE_PALETTE_QUERY");

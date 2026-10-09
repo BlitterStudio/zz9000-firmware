@@ -2818,6 +2818,120 @@ int zz9k_image_session_close(ZZ9KContext *ctx, uint32_t session,
 
   return zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
 }
+int zz9k_image_animation_frame_next(ZZ9KContext *ctx, uint32_t session,
+                                    uint32_t flags,
+                                    ZZ9KImageAnimationFrameResult *result)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  if (!ctx || !result) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  memset(result, 0, sizeof(*result));
+  memset(&reply, 0, sizeof(reply));
+  status = zz9k_request_image_animation_frame_next(&request, session, flags);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  return zz9k_reply_image_animation_frame_result(
+      &reply, ZZ9K_OP_IMAGE_ANIMATION_FRAME_NEXT, result);
+}
+
+int zz9k_image_animation_frame_present(ZZ9KContext *ctx, uint32_t session,
+                                       uint32_t frame_token, uint32_t flags,
+                                       ZZ9KImageAnimationFrameResult *result)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  if (!ctx || !result) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  memset(result, 0, sizeof(*result));
+  memset(&reply, 0, sizeof(reply));
+  status = zz9k_request_image_animation_frame_present(
+      &request, session, frame_token, flags);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  return zz9k_reply_image_animation_frame_result(
+      &reply, ZZ9K_OP_IMAGE_ANIMATION_FRAME_PRESENT, result);
+}
+
+int zz9k_image_animation_frame_retire(ZZ9KContext *ctx, uint32_t session,
+                                      uint32_t frame_token, uint32_t flags,
+                                      ZZ9KImageAnimationFrameResult *result)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  if (!ctx || !result) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  memset(result, 0, sizeof(*result));
+  memset(&reply, 0, sizeof(reply));
+  status = zz9k_request_image_animation_frame_retire(
+      &request, session, frame_token, flags);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  return zz9k_reply_image_animation_frame_result(
+      &reply, ZZ9K_OP_IMAGE_ANIMATION_FRAME_RETIRE, result);
+}
+
+int zz9k_image_animation_restart(ZZ9KContext *ctx, uint32_t session,
+                                 uint32_t flags,
+                                 ZZ9KImageAnimationFrameResult *result)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  if (!ctx || !result) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  memset(result, 0, sizeof(*result));
+  memset(&reply, 0, sizeof(reply));
+  status = zz9k_request_image_animation_restart(&request, session, flags);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  return zz9k_reply_image_animation_frame_result(
+      &reply, ZZ9K_OP_IMAGE_ANIMATION_RESTART, result);
+}
+
 
 int zz9k_crypto_hash(ZZ9KContext *ctx, const ZZ9KCryptoHashDesc *desc,
                      ZZ9KCryptoResult *result)

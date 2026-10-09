@@ -141,6 +141,17 @@ struct SDKImageStreamSession {
 	uint8_t direct_scale_row_valid[2];
 	uint32_t direct_scale_row_y[2];
 	uint8_t direct_scale_rows[2][SDK_IMAGE_STREAM_MAX_DECODE_WIDTH * 4U];
+	uint8_t is_animation;
+	uint32_t anim_state;
+	uint32_t anim_loop_count;
+	uint32_t anim_loop_index;
+	uint32_t anim_frame_index;
+	uint32_t anim_token;
+	uint32_t anim_token_seq;
+	uint8_t anim_token_outstanding;
+	uint8_t anim_presented;
+	uint8_t anim_ended;
+	int anim_prev_timestamp;
 };
 
 /*
@@ -306,10 +317,16 @@ static uint16_t validate_begin(const struct SDKImageStreamBegin *begin)
 {
 	uint32_t tile_length;
 	uint32_t allowed_flags;
+	uint32_t is_animation;
 
 	if (!begin)
 		return SDK_STATUS_BAD_REQUEST;
-	allowed_flags = SDK_IMAGE_DECODE_FLAG_FIT |
+	is_animation = (begin->flags & SDK_IMAGE_SESSION_BEGIN_ANIMATION) != 0U;
+	/* Animation mode owns a stricter contract validated after this gate
+	 * (WebP-only, YUV422CGX surface, core-1); its begin flag is the only
+	 * flag it accepts -- decode options like FIT do not apply. */
+	allowed_flags = is_animation ? SDK_IMAGE_SESSION_BEGIN_ANIMATION :
+	                SDK_IMAGE_DECODE_FLAG_FIT |
 	                SDK_IMAGE_DECODE_FLAG_PRESERVE_ASPECT;
 	if ((begin->flags & ~allowed_flags) != 0U)
 		return SDK_STATUS_BAD_REQUEST;
@@ -326,7 +343,8 @@ static uint16_t validate_begin(const struct SDKImageStreamBegin *begin)
 		return SDK_STATUS_UNSUPPORTED;
 	if (begin->codec == SDK_IMAGE_CODEC_WEBP && !begin->core1_affine)
 		return SDK_STATUS_UNSUPPORTED;
-	if (!output_format_supported(begin->output_format))
+	if (!output_format_supported(begin->output_format) &&
+	    !(is_animation && begin->output_format == SDK_SURFACE_FORMAT_YUV422CGX))
 		return SDK_STATUS_UNSUPPORTED;
 	if (begin->output_mode == SDK_IMAGE_OUTPUT_SURFACE) {
 		if (begin->dst_surface == SDK_INVALID_HANDLE ||
@@ -1363,6 +1381,17 @@ static void destroy_webp(struct SDKImageStreamSession *session)
 	session->webp_header_length = 0U;
 	session->webp_tile_next_y = 0U;
 	session->webp_output_complete = 0U;
+	session->is_animation = 0U;
+	session->anim_state = 0U;
+	session->anim_loop_count = 0U;
+	session->anim_loop_index = 0U;
+	session->anim_frame_index = 0U;
+	session->anim_token = 0U;
+	session->anim_token_seq = 0U;
+	session->anim_token_outstanding = 0U;
+	session->anim_presented = 0U;
+	session->anim_ended = 0U;
+	session->anim_prev_timestamp = 0;
 }
 
 /* Returns 1 when appended, 0 when allocation failed, -1 for declared limits,
@@ -1491,6 +1520,84 @@ static uint16_t process_webp_stream(struct SDKImageStreamSession *session,
 	uint32_t width, height;
 	int animated, appended;
 	uint8_t *rgba = 0;
+
+	if (session->is_animation) {
+		if (session->webp_decoded) {
+			if (src_length != 0U)
+				return fail_stream_session(session, SDK_STATUS_BAD_REQUEST, 0U, result);
+			fill_result(session, session->anim_state, 0U, result);
+			return SDK_STATUS_OK;
+		}
+		appended = webp_append_input(session, src, src_length);
+		if (appended == 0)
+			return fail_stream_session(session, SDK_STATUS_NO_MEMORY, src_length, result);
+		if (appended == -1)
+			return fail_stream_session(session, SDK_STATUS_BAD_REQUEST, 0U, result);
+		if (appended < 0)
+			return fail_stream_session(session, SDK_STATUS_IO_ERROR, 0U, result);
+		if (!session->input_eof) {
+			fill_result(session, SDK_IMAGE_SESSION_STATE_NEED_INPUT, src_length, result);
+			return SDK_STATUS_OK;
+		}
+		if (!webp_preflight_riff(session->webp_input, session->webp_input_length,
+		                         &width, &height, &animated))
+			return fail_stream_session(session, SDK_STATUS_IO_ERROR, src_length, result);
+		if (!animated)
+			return fail_stream_session(session, SDK_STATUS_BAD_REQUEST, src_length, result);
+		if (width == 0U || height == 0U ||
+		    width > SDK_IMAGE_STREAM_MAX_DIMENSION ||
+		    height > SDK_IMAGE_STREAM_MAX_DIMENSION ||
+		    width > SDK_WEBP_MAX_CANVAS_PIXELS / height)
+			return fail_stream_session(session, SDK_STATUS_BAD_REQUEST, src_length, result);
+		sdk_webp_alloc_set_quota(&session->webp_allocated,
+		                         SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES);
+		{
+			WebPData data;
+			WebPAnimDecoderOptions options;
+			WebPAnimDecoder *decoder;
+			WebPAnimInfo info;
+
+			if (!WebPAnimDecoderOptionsInit(&options))
+				return fail_stream_session(session, SDK_STATUS_INTERNAL_ERROR, src_length, result);
+			options.color_mode = MODE_RGBA;
+			data.bytes = session->webp_input;
+			data.size = session->webp_input_length;
+			decoder = WebPAnimDecoderNew(&data, &options);
+			if (!decoder || !WebPAnimDecoderGetInfo(decoder, &info)) {
+				uint16_t status = sdk_webp_alloc_failed() ?
+					SDK_STATUS_NO_MEMORY : SDK_STATUS_IO_ERROR;
+				if (decoder)
+					WebPAnimDecoderDelete(decoder);
+				return fail_stream_session(session, status, src_length, result);
+			}
+			width = info.canvas_width;
+			height = info.canvas_height;
+			if (width == 0U || height == 0U ||
+			    width > SDK_IMAGE_STREAM_MAX_DIMENSION ||
+			    height > SDK_IMAGE_STREAM_MAX_DIMENSION ||
+			    width > SDK_WEBP_MAX_CANVAS_PIXELS / height) {
+				WebPAnimDecoderDelete(decoder);
+				return fail_stream_session(session, SDK_STATUS_BAD_REQUEST, src_length, result);
+			}
+			session->webp_anim_decoder = decoder;
+			session->image_width = width;
+			session->image_height = height;
+			session->output_width = width;
+			session->output_height = height;
+			session->anim_loop_count = info.loop_count;
+			session->anim_loop_index = 0U;
+			session->anim_frame_index = 0U;
+			session->anim_state = SDK_IMAGE_SESSION_STATE_ANIMATION_READY;
+			session->anim_token = 0U;
+			session->anim_token_outstanding = 0U;
+			session->anim_presented = 0U;
+			session->anim_ended = 0U;
+			session->anim_prev_timestamp = 0;
+			session->webp_decoded = 1U;
+			fill_result(session, SDK_IMAGE_SESSION_STATE_ANIMATION_READY, src_length, result);
+			return SDK_STATUS_OK;
+		}
+	}
 
 	if (session->webp_decoded) {
 		if (src_length != 0U)
@@ -2551,6 +2658,22 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 
 	memset(session, 0, sizeof(*session));
 	session->session = next_session_id();
+	if ((begin->flags & SDK_IMAGE_SESSION_BEGIN_ANIMATION) != 0U) {
+		uint32_t min_row_bytes;
+		if (begin->codec != SDK_IMAGE_CODEC_WEBP ||
+		    begin->output_format != SDK_SURFACE_FORMAT_YUV422CGX ||
+		    begin->output_mode != SDK_IMAGE_OUTPUT_SURFACE ||
+		    !begin->core1_affine ||
+		    begin->dst_address == 0U ||
+		    begin->dst_width == 0U || begin->dst_height == 0U) {
+			return SDK_STATUS_BAD_REQUEST;
+		}
+		min_row_bytes = ((begin->dst_width + 1U) / 2U) * 4U;
+		if (begin->dst_pitch < min_row_bytes ||
+		    begin->dst_length < (begin->dst_pitch * begin->dst_height)) {
+			return SDK_STATUS_BAD_REQUEST;
+		}
+	}
 	session->codec = begin->codec;
 	session->output_mode = begin->output_mode;
 	session->dst_surface = begin->dst_surface;
@@ -2576,6 +2699,10 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 		return SDK_STATUS_NO_MEMORY;
 	}
 	session->in_use = 1U;
+	if ((begin->flags & SDK_IMAGE_SESSION_BEGIN_ANIMATION) != 0U) {
+		session->is_animation = 1U;
+		session->anim_state = SDK_IMAGE_SESSION_STATE_NEED_INPUT;
+	}
 
 	fill_result(session, SDK_IMAGE_SESSION_STATE_NEED_INPUT, 0U, result);
 	return SDK_STATUS_OK;
@@ -2652,8 +2779,16 @@ int sdk_image_stream_complete_arm_local_output(uint32_t session,
 {
 	struct SDKImageStreamSession *slot = find_session(session);
 
-	if (!slot || slot->codec != SDK_IMAGE_CODEC_WEBP ||
-	    !slot->direct_arm_local || !slot->webp_output_complete)
+	if (!slot || slot->codec != SDK_IMAGE_CODEC_WEBP)
+		return 0;
+	if (slot->is_animation) {
+		if (address)
+			*address = slot->dst_address;
+		if (length)
+			*length = slot->dst_length;
+		return slot->dst_address != 0U && slot->dst_length != 0U;
+	}
+	if (!slot->direct_arm_local || !slot->webp_output_complete)
 		return 0;
 	if (address)
 		*address = slot->dst_address;
@@ -2713,6 +2848,20 @@ void sdk_image_stream_poison_core1_sessions(void)
 		slot->webp_decoded = 0U;
 		slot->webp_allocated = 0U;
 		slot->webp_output_complete = 0U;
+		/* The session keeps its animation-mode identity (like codec/)
+		 * so post-fault animation ops fail through the poisoned
+		 * IO_ERROR gate rather than looking like a non-animation
+		 * session; every frame/token field is dropped. */
+		slot->anim_state = 0U;
+		slot->anim_loop_count = 0U;
+		slot->anim_loop_index = 0U;
+		slot->anim_frame_index = 0U;
+		slot->anim_token = 0U;
+		slot->anim_token_seq = 0U;
+		slot->anim_token_outstanding = 0U;
+		slot->anim_presented = 0U;
+		slot->anim_ended = 0U;
+		slot->anim_prev_timestamp = 0;
 		/*
 		 * The decode-reclaim pass freed the pool this charge
 		 * covered, so the charge is void. Clear it lock-free:
@@ -2740,3 +2889,332 @@ void sdk_image_stream_reset_decode_state_lock(void)
 {
 	sdk_smp_lock_reset(&image_decode_state_lock);
 }
+static void webp_convert_rgba_to_yuv422cgx(const uint8_t *rgba,
+                                           uint32_t width,
+                                           uint32_t height,
+                                           uint8_t *dst,
+                                           uint32_t dst_pitch)
+{
+	uint32_t y;
+	uint32_t full_pairs = width >> 1;
+	uint32_t is_odd = width & 1U;
+
+	for (y = 0U; y < height; ++y) {
+		const uint8_t *src_row = rgba + (size_t)y * width * 4U;
+		uint8_t *d = dst + (size_t)y * dst_pitch;
+		uint32_t p;
+
+		for (p = 0U; p < full_pairs; ++p) {
+			const uint8_t *px0 = src_row + (size_t)p * 8U;
+			const uint8_t *px1 = px0 + 4U;
+			int32_t r0 = px0[0], g0 = px0[1], b0 = px0[2];
+			int32_t r1 = px1[0], g1 = px1[1], b1 = px1[2];
+			int32_t r_avg = (r0 + r1) >> 1;
+			int32_t g_avg = (g0 + g1) >> 1;
+			int32_t b_avg = (b0 + b1) >> 1;
+
+			int32_t y0 = ((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8) + 16;
+			int32_t y1 = ((66 * r1 + 129 * g1 + 25 * b1 + 128) >> 8) + 16;
+			int32_t u = ((-38 * r_avg - 74 * g_avg + 112 * b_avg + 128) >> 8) + 128;
+			int32_t v = ((112 * r_avg - 94 * g_avg - 18 * b_avg + 128) >> 8) + 128;
+
+			d[p * 4U + 0U] = (uint8_t)(y0 < 0 ? 0 : (y0 > 255 ? 255 : y0));
+			d[p * 4U + 1U] = (uint8_t)(u < 0 ? 0 : (u > 255 ? 255 : u));
+			d[p * 4U + 2U] = (uint8_t)(y1 < 0 ? 0 : (y1 > 255 ? 255 : y1));
+			d[p * 4U + 3U] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+		}
+		if (is_odd) {
+			const uint8_t *px0 = src_row + (size_t)full_pairs * 8U;
+			int32_t r0 = px0[0], g0 = px0[1], b0 = px0[2];
+			int32_t y0 = ((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8) + 16;
+			int32_t u = ((-38 * r0 - 74 * g0 + 112 * b0 + 128) >> 8) + 128;
+			int32_t v = ((112 * r0 - 94 * g0 - 18 * b0 + 128) >> 8) + 128;
+
+			d[full_pairs * 4U + 0U] = (uint8_t)(y0 < 0 ? 0 : (y0 > 255 ? 255 : y0));
+			d[full_pairs * 4U + 1U] = (uint8_t)(u < 0 ? 0 : (u > 255 ? 255 : u));
+			d[full_pairs * 4U + 2U] = (uint8_t)(y0 < 0 ? 0 : (y0 > 255 ? 255 : y0));
+			d[full_pairs * 4U + 3U] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+		}
+	}
+}
+
+uint16_t sdk_image_stream_frame_next(uint32_t session_id,
+                                     uint32_t flags,
+                                     struct SDKImageAnimationFrameResult *result)
+{
+	struct SDKImageStreamSession *session;
+	uint8_t *rgba = 0;
+	int timestamp = 0;
+	uint32_t duration = 0U;
+	int is_last = 0;
+
+	(void)flags;
+	if (!result)
+		return SDK_STATUS_BAD_REQUEST;
+	memset(result, 0, sizeof(*result));
+
+	session = find_session(session_id);
+	if (!session || !session->in_use)
+		return SDK_STATUS_BAD_HANDLE;
+	if (!session->is_animation)
+		return SDK_STATUS_BAD_REQUEST;
+	if (session->failed)
+		return SDK_STATUS_IO_ERROR;
+	if (session->anim_state != SDK_IMAGE_SESSION_STATE_ANIMATION_READY &&
+	    session->anim_state != SDK_IMAGE_SESSION_STATE_ANIMATION_ENDED)
+		return SDK_STATUS_BAD_REQUEST;
+	if (session->anim_token_outstanding)
+		return SDK_STATUS_BAD_REQUEST;
+
+	if (session->anim_ended) {
+		result->session = session->session;
+		result->state = SDK_IMAGE_SESSION_STATE_ANIMATION_ENDED;
+		result->canvas_width = session->image_width;
+		result->canvas_height = session->image_height;
+		result->loop_index = session->anim_loop_index;
+		result->loop_count = session->anim_loop_count;
+		result->frame_token = 0U;
+		result->output_format = SDK_SURFACE_FORMAT_YUV422CGX;
+		result->flags = SDK_IMAGE_ANIMATION_FRAME_FLAG_ENDED;
+		return SDK_STATUS_OK;
+	}
+
+	if (!session->webp_anim_decoder)
+		return SDK_STATUS_BAD_REQUEST;
+
+	if (!WebPAnimDecoderHasMoreFrames(session->webp_anim_decoder)) {
+		if (session->anim_loop_count > 0U &&
+		    session->anim_loop_index + 1U >= session->anim_loop_count) {
+			session->anim_ended = 1U;
+			session->anim_state = SDK_IMAGE_SESSION_STATE_ANIMATION_ENDED;
+			result->session = session->session;
+			result->state = SDK_IMAGE_SESSION_STATE_ANIMATION_ENDED;
+			result->canvas_width = session->image_width;
+			result->canvas_height = session->image_height;
+			result->loop_index = session->anim_loop_index;
+			result->loop_count = session->anim_loop_count;
+			result->frame_token = 0U;
+			result->output_format = SDK_SURFACE_FORMAT_YUV422CGX;
+			result->flags = SDK_IMAGE_ANIMATION_FRAME_FLAG_ENDED;
+			return SDK_STATUS_OK;
+		}
+		WebPAnimDecoderReset(session->webp_anim_decoder);
+		session->anim_loop_index++;
+		session->anim_frame_index = 0U;
+		session->anim_prev_timestamp = 0;
+	}
+
+	if (!WebPAnimDecoderGetNext(session->webp_anim_decoder, &rgba, &timestamp)) {
+		uint16_t status = sdk_webp_alloc_failed() ?
+			SDK_STATUS_NO_MEMORY : SDK_STATUS_IO_ERROR;
+		session->failed = 1U;
+		return status;
+	}
+
+	if (timestamp >= session->anim_prev_timestamp)
+		duration = (uint32_t)(timestamp - session->anim_prev_timestamp);
+	else
+		duration = 0U;
+	session->anim_prev_timestamp = timestamp;
+
+	webp_convert_rgba_to_yuv422cgx(rgba, session->image_width,
+	                              session->image_height,
+	                              (uint8_t *)(uintptr_t)session->dst_address,
+	                              session->dst_pitch);
+
+	session->anim_token_seq++;
+	if (session->anim_token_seq == 0U)
+		session->anim_token_seq = 1U;
+	session->anim_token = session->anim_token_seq;
+	session->anim_token_outstanding = 1U;
+	session->anim_presented = 0U;
+
+	if (!WebPAnimDecoderHasMoreFrames(session->webp_anim_decoder)) {
+		if (session->anim_loop_count > 0U &&
+		    session->anim_loop_index + 1U >= session->anim_loop_count) {
+			is_last = 1;
+		}
+	}
+
+	result->session = session->session;
+	result->state = SDK_IMAGE_SESSION_STATE_ANIMATION_READY;
+	result->canvas_width = session->image_width;
+	result->canvas_height = session->image_height;
+	result->frame_index = session->anim_frame_index;
+	result->frame_duration_ms = duration;
+	result->loop_index = session->anim_loop_index;
+	result->loop_count = session->anim_loop_count;
+	result->frame_token = session->anim_token;
+	result->output_format = SDK_SURFACE_FORMAT_YUV422CGX;
+	result->flags = SDK_IMAGE_ANIMATION_FRAME_FLAG_FRAME_READY;
+	if (is_last)
+		result->flags |= SDK_IMAGE_ANIMATION_FRAME_FLAG_LAST_FRAME;
+
+	session->anim_frame_index++;
+	return SDK_STATUS_OK;
+}
+
+uint16_t sdk_image_stream_frame_present(uint32_t session_id,
+                                        uint32_t frame_token,
+                                        uint32_t flags,
+                                        struct SDKImageAnimationFrameResult *result)
+{
+	struct SDKImageStreamSession *session;
+
+	(void)flags;
+	if (!result || frame_token == 0U)
+		return SDK_STATUS_BAD_REQUEST;
+	memset(result, 0, sizeof(*result));
+
+	session = find_session(session_id);
+	if (!session || !session->in_use)
+		return SDK_STATUS_BAD_HANDLE;
+	if (!session->is_animation)
+		return SDK_STATUS_BAD_REQUEST;
+	if (session->failed)
+		return SDK_STATUS_IO_ERROR;
+	if (!session->anim_token_outstanding || session->anim_token != frame_token)
+		return SDK_STATUS_BAD_REQUEST;
+	if (session->anim_presented)
+		return SDK_STATUS_BAD_REQUEST;
+
+	session->anim_presented = 1U;
+
+	result->session = session->session;
+	result->state = session->anim_state;
+	result->canvas_width = session->image_width;
+	result->canvas_height = session->image_height;
+	result->frame_index = session->anim_frame_index > 0U ? session->anim_frame_index - 1U : 0U;
+	result->loop_index = session->anim_loop_index;
+	result->loop_count = session->anim_loop_count;
+	result->frame_token = session->anim_token;
+	result->output_format = SDK_SURFACE_FORMAT_YUV422CGX;
+	result->flags = SDK_IMAGE_ANIMATION_FRAME_FLAG_PRESENTED;
+	return SDK_STATUS_OK;
+}
+
+uint16_t sdk_image_stream_frame_retire(uint32_t session_id,
+                                       uint32_t frame_token,
+                                       uint32_t flags,
+                                       struct SDKImageAnimationFrameResult *result)
+{
+	struct SDKImageStreamSession *session;
+
+	(void)flags;
+	if (!result || frame_token == 0U)
+		return SDK_STATUS_BAD_REQUEST;
+	memset(result, 0, sizeof(*result));
+
+	session = find_session(session_id);
+	if (!session || !session->in_use)
+		return SDK_STATUS_BAD_HANDLE;
+	if (!session->is_animation)
+		return SDK_STATUS_BAD_REQUEST;
+	if (session->failed)
+		return SDK_STATUS_IO_ERROR;
+	if (!session->anim_token_outstanding || session->anim_token != frame_token)
+		return SDK_STATUS_BAD_REQUEST;
+	if (!session->anim_presented)
+		return SDK_STATUS_BAD_REQUEST;
+
+	session->anim_token_outstanding = 0U;
+	session->anim_presented = 0U;
+	session->anim_token = 0U;
+
+	if (!WebPAnimDecoderHasMoreFrames(session->webp_anim_decoder)) {
+		if (session->anim_loop_count > 0U &&
+		    session->anim_loop_index + 1U >= session->anim_loop_count) {
+			session->anim_ended = 1U;
+		}
+	}
+
+	result->session = session->session;
+	result->state = session->anim_ended ?
+		SDK_IMAGE_SESSION_STATE_ANIMATION_ENDED :
+		SDK_IMAGE_SESSION_STATE_ANIMATION_READY;
+	result->canvas_width = session->image_width;
+	result->canvas_height = session->image_height;
+	result->frame_index = session->anim_frame_index > 0U ? session->anim_frame_index - 1U : 0U;
+	result->loop_index = session->anim_loop_index;
+	result->loop_count = session->anim_loop_count;
+	result->frame_token = 0U;
+	result->output_format = SDK_SURFACE_FORMAT_YUV422CGX;
+	result->flags = session->anim_ended ? SDK_IMAGE_ANIMATION_FRAME_FLAG_ENDED : 0U;
+	return SDK_STATUS_OK;
+}
+
+uint16_t sdk_image_stream_restart(uint32_t session_id,
+                                  uint32_t flags,
+                                  struct SDKImageAnimationFrameResult *result)
+{
+	struct SDKImageStreamSession *session;
+	WebPData data;
+	WebPAnimDecoderOptions options;
+	WebPAnimDecoder *decoder;
+	WebPAnimInfo info;
+
+	(void)flags;
+	if (!result)
+		return SDK_STATUS_BAD_REQUEST;
+	memset(result, 0, sizeof(*result));
+
+	session = find_session(session_id);
+	if (!session || !session->in_use)
+		return SDK_STATUS_BAD_HANDLE;
+	if (!session->is_animation)
+		return SDK_STATUS_BAD_REQUEST;
+	if (session->failed)
+		return SDK_STATUS_IO_ERROR;
+	if (session->anim_token_outstanding)
+		return SDK_STATUS_BAD_REQUEST;
+	if (session->anim_state != SDK_IMAGE_SESSION_STATE_ANIMATION_READY &&
+	    session->anim_state != SDK_IMAGE_SESSION_STATE_ANIMATION_ENDED)
+		return SDK_STATUS_BAD_REQUEST;
+	if (!session->webp_input || session->webp_input_length == 0U)
+		return SDK_STATUS_BAD_REQUEST;
+
+	if (session->webp_anim_decoder) {
+		WebPAnimDecoderDelete(session->webp_anim_decoder);
+		session->webp_anim_decoder = 0;
+	}
+
+	if (!WebPAnimDecoderOptionsInit(&options))
+		return SDK_STATUS_INTERNAL_ERROR;
+	options.color_mode = MODE_RGBA;
+	data.bytes = session->webp_input;
+	data.size = session->webp_input_length;
+	decoder = WebPAnimDecoderNew(&data, &options);
+	if (!decoder || !WebPAnimDecoderGetInfo(decoder, &info)) {
+		uint16_t status = sdk_webp_alloc_failed() ?
+			SDK_STATUS_NO_MEMORY : SDK_STATUS_IO_ERROR;
+		if (decoder)
+			WebPAnimDecoderDelete(decoder);
+		session->failed = 1U;
+		return status;
+	}
+
+	session->webp_anim_decoder = decoder;
+	session->anim_loop_count = info.loop_count;
+	session->anim_loop_index = 0U;
+	session->anim_frame_index = 0U;
+	session->anim_state = SDK_IMAGE_SESSION_STATE_ANIMATION_READY;
+	session->anim_token = 0U;
+	session->anim_token_outstanding = 0U;
+	session->anim_presented = 0U;
+	session->anim_ended = 0U;
+	session->anim_prev_timestamp = 0;
+
+	result->session = session->session;
+	result->state = SDK_IMAGE_SESSION_STATE_ANIMATION_READY;
+	result->canvas_width = session->image_width;
+	result->canvas_height = session->image_height;
+	result->frame_index = 0U;
+	result->frame_duration_ms = 0U;
+	result->loop_index = 0U;
+	result->loop_count = session->anim_loop_count;
+	result->frame_token = 0U;
+	result->output_format = SDK_SURFACE_FORMAT_YUV422CGX;
+	result->flags = 0U;
+	return SDK_STATUS_OK;
+}
+

@@ -65,6 +65,21 @@ struct SDKImageStreamResult {
 	uintptr_t flush_address;
 	uint32_t flush_length;
 };
+struct SDKImageAnimationFrameResult {
+	uint32_t session;
+	uint32_t state;
+	uint32_t canvas_width;
+	uint32_t canvas_height;
+	uint32_t frame_index;
+	uint32_t frame_duration_ms;
+	uint32_t loop_index;
+	uint32_t loop_count;
+	uint32_t frame_token;
+	uint32_t output_format;
+	uint32_t flags;
+	uint32_t reserved;
+};
+
 
 void sdk_image_stream_init(void);
 uint32_t sdk_image_stream_active_count(void);
@@ -92,5 +107,19 @@ uint16_t sdk_image_stream_feed(const struct SDKImageStreamFeed *feed,
                                const uint8_t *src,
                                struct SDKImageStreamResult *result);
 uint16_t sdk_image_stream_close(uint32_t session);
+uint16_t sdk_image_stream_frame_next(uint32_t session,
+                                     uint32_t flags,
+                                     struct SDKImageAnimationFrameResult *result);
+uint16_t sdk_image_stream_frame_present(uint32_t session,
+                                        uint32_t frame_token,
+                                        uint32_t flags,
+                                        struct SDKImageAnimationFrameResult *result);
+uint16_t sdk_image_stream_frame_retire(uint32_t session,
+                                       uint32_t frame_token,
+                                       uint32_t flags,
+                                       struct SDKImageAnimationFrameResult *result);
+uint16_t sdk_image_stream_restart(uint32_t session,
+                                  uint32_t flags,
+                                  struct SDKImageAnimationFrameResult *result);
 
 #endif /* SDK_IMAGE_STREAM_H */

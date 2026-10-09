@@ -72,6 +72,20 @@ static inline int zz9k_image_stream_required_service_flags(
                     output_flag;
   return 1;
 }
+static inline int zz9k_image_stream_animation_required_service_flags(
+    uint32_t codec,
+    uint32_t output_mode,
+    uint32_t *required_flags)
+{
+  if (!required_flags || codec != ZZ9K_IMAGE_CODEC_WEBP ||
+      output_mode != ZZ9K_IMAGE_OUTPUT_SURFACE) {
+    return 0;
+  }
+  *required_flags = ZZ9K_SERVICE_FLAG_IMAGE_STREAMING_INPUT |
+                    ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION;
+  return 1;
+}
+
 
 static inline int zz9k_image_build_decode_desc(
     ZZ9KImageDecodeDesc *desc,

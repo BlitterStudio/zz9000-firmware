@@ -366,6 +366,27 @@ struct SDKImageSessionClosePayload {
 	uint8_t flags[4];
 	uint8_t reserved[40];
 };
+struct SDKImageAnimationFrameRequestPayload {
+	uint8_t session[4];
+	uint8_t frame_token[4];
+	uint8_t flags[4];
+	uint8_t reserved[36];
+};
+
+struct SDKImageAnimationFrameResultPayload {
+	uint8_t session[4];
+	uint8_t state[4];
+	uint8_t canvas_width[4];
+	uint8_t canvas_height[4];
+	uint8_t frame_index[4];
+	uint8_t frame_duration_ms[4];
+	uint8_t loop_index[4];
+	uint8_t loop_count[4];
+	uint8_t frame_token[4];
+	uint8_t output_format[4];
+	uint8_t flags[4];
+	uint8_t reserved[4];
+};
 
 struct SDKAudioDecodePayload {
 	uint8_t src_handle[4];
@@ -796,6 +817,7 @@ struct imgsess_op_params {
 	uint32_t src_addr;      /* resolved src + offset; 0 for EOF-only/close */
 	uint32_t src_len;
 	uint32_t flags;
+	uint32_t frame_token;
 };
 
 typedef char imgsess_op_params_size_check[
@@ -974,6 +996,12 @@ typedef char SDKImageSessionResultPayload_must_be_48_bytes[
 ];
 typedef char SDKImageSessionClosePayload_must_be_48_bytes[
 	(sizeof(struct SDKImageSessionClosePayload) == 48U) ? 1 : -1
+];
+typedef char SDKImageAnimationFrameRequestPayload_must_be_48_bytes[
+	(sizeof(struct SDKImageAnimationFrameRequestPayload) == 48U) ? 1 : -1
+];
+typedef char SDKImageAnimationFrameResultPayload_must_be_48_bytes[
+	(sizeof(struct SDKImageAnimationFrameResultPayload) == 48U) ? 1 : -1
 ];
 typedef char SDKAudioDecodePayload_must_be_48_bytes[
 	(sizeof(struct SDKAudioDecodePayload) == 48U) ? 1 : -1
@@ -1451,6 +1479,187 @@ static uint16_t complete_image_session_result(
 	put_be32(payload->flags, result->flags);
 	return SDK_STATUS_OK;
 }
+static uint16_t complete_image_animation_result(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t status,
+	const struct SDKImageAnimationFrameResult *result)
+{
+	volatile struct SDKImageAnimationFrameResultPayload *payload;
+
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*payload));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	payload = (volatile struct SDKImageAnimationFrameResultPayload *)comp->payload;
+	put_be32(payload->session, result->session);
+	put_be32(payload->state, result->state);
+	put_be32(payload->canvas_width, result->canvas_width);
+	put_be32(payload->canvas_height, result->canvas_height);
+	put_be32(payload->frame_index, result->frame_index);
+	put_be32(payload->frame_duration_ms, result->frame_duration_ms);
+	put_be32(payload->loop_index, result->loop_index);
+	put_be32(payload->loop_count, result->loop_count);
+	put_be32(payload->frame_token, result->frame_token);
+	put_be32(payload->output_format, result->output_format);
+	put_be32(payload->flags, result->flags);
+	put_be32(payload->reserved, 0U);
+	return SDK_STATUS_OK;
+}
+
+static uint16_t handle_image_animation_frame_next(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKImageAnimationFrameRequestPayload *payload;
+	struct SDKImageAnimationFrameResult result;
+	uint32_t session, token, flags;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKImageAnimationFrameRequestPayload *)req->payload;
+	session = get_be32(payload->session);
+	token = get_be32(payload->frame_token);
+	flags = get_be32(payload->flags);
+
+	if (token != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	if (sdk_image_stream_session_core1(session) > 0 &&
+	    scheduler_core1_available()) {
+		struct imgsess_op_params p;
+		memset(&p, 0, sizeof(p));
+		p.session = session;
+		p.flags = flags;
+		p.frame_token = 0U;
+		if (service_try_defer(SDK_OP_IMAGE_ANIMATION_FRAME_NEXT, req, &p,
+		                      sizeof(p), 0U) == SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+
+	status = sdk_image_stream_frame_next(session, flags, &result);
+	return complete_image_animation_result(req, comp, status, &result);
+}
+
+static uint16_t handle_image_animation_frame_present(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKImageAnimationFrameRequestPayload *payload;
+	struct SDKImageAnimationFrameResult result;
+	uint32_t session, token, flags;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKImageAnimationFrameRequestPayload *)req->payload;
+	session = get_be32(payload->session);
+	token = get_be32(payload->frame_token);
+	flags = get_be32(payload->flags);
+
+	if (token == 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	if (sdk_image_stream_session_core1(session) > 0 &&
+	    scheduler_core1_available()) {
+		struct imgsess_op_params p;
+		memset(&p, 0, sizeof(p));
+		p.session = session;
+		p.frame_token = token;
+		p.flags = flags;
+		if (service_try_defer(SDK_OP_IMAGE_ANIMATION_FRAME_PRESENT, req, &p,
+		                      sizeof(p), 0U) == SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+
+	status = sdk_image_stream_frame_present(session, token, flags, &result);
+	return complete_image_animation_result(req, comp, status, &result);
+}
+
+static uint16_t handle_image_animation_frame_retire(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKImageAnimationFrameRequestPayload *payload;
+	struct SDKImageAnimationFrameResult result;
+	uint32_t session, token, flags;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKImageAnimationFrameRequestPayload *)req->payload;
+	session = get_be32(payload->session);
+	token = get_be32(payload->frame_token);
+	flags = get_be32(payload->flags);
+
+	if (token == 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	if (sdk_image_stream_session_core1(session) > 0 &&
+	    scheduler_core1_available()) {
+		struct imgsess_op_params p;
+		memset(&p, 0, sizeof(p));
+		p.session = session;
+		p.frame_token = token;
+		p.flags = flags;
+		if (service_try_defer(SDK_OP_IMAGE_ANIMATION_FRAME_RETIRE, req, &p,
+		                      sizeof(p), 0U) == SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+
+	status = sdk_image_stream_frame_retire(session, token, flags, &result);
+	return complete_image_animation_result(req, comp, status, &result);
+}
+
+static uint16_t handle_image_animation_restart(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKImageAnimationFrameRequestPayload *payload;
+	struct SDKImageAnimationFrameResult result;
+	uint32_t session, token, flags;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKImageAnimationFrameRequestPayload *)req->payload;
+	session = get_be32(payload->session);
+	token = get_be32(payload->frame_token);
+	flags = get_be32(payload->flags);
+
+	if (token != 0U)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	if (sdk_image_stream_session_core1(session) > 0 &&
+	    scheduler_core1_available()) {
+		struct imgsess_op_params p;
+		memset(&p, 0, sizeof(p));
+		p.session = session;
+		p.flags = flags;
+		p.frame_token = 0U;
+		if (service_try_defer(SDK_OP_IMAGE_ANIMATION_RESTART, req, &p,
+		                      sizeof(p), 0U) == SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+
+	status = sdk_image_stream_restart(session, flags, &result);
+	return complete_image_animation_result(req, comp, status, &result);
+}
+
 
 static void encode_video_session_result(
 	volatile struct SDKVideoSessionResultPayload *payload,
@@ -6004,6 +6213,48 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		*result_len = 0;
 		return sdk_image_stream_close(p->session);
 	}
+	case SDK_OP_IMAGE_ANIMATION_FRAME_NEXT:
+	case SDK_OP_IMAGE_ANIMATION_FRAME_PRESENT:
+	case SDK_OP_IMAGE_ANIMATION_FRAME_RETIRE:
+	case SDK_OP_IMAGE_ANIMATION_RESTART: {
+		const struct imgsess_op_params *p =
+		    (const struct imgsess_op_params *)d->op_params;
+		volatile struct SDKImageAnimationFrameResultPayload *reply;
+		struct SDKImageAnimationFrameResult ares;
+		uint16_t s;
+
+		if (d->opcode == SDK_OP_IMAGE_ANIMATION_FRAME_NEXT)
+			s = sdk_image_stream_frame_next(p->session, p->flags, &ares);
+		else if (d->opcode == SDK_OP_IMAGE_ANIMATION_FRAME_PRESENT)
+			s = sdk_image_stream_frame_present(p->session, p->frame_token, p->flags, &ares);
+		else if (d->opcode == SDK_OP_IMAGE_ANIMATION_FRAME_RETIRE)
+			s = sdk_image_stream_frame_retire(p->session, p->frame_token, p->flags, &ares);
+		else
+			s = sdk_image_stream_restart(p->session, p->flags, &ares);
+
+		*result_len = 0;
+		if (s != SDK_STATUS_OK)
+			return s;
+
+		memset(result_payload, 0,
+		       sizeof(struct SDKImageAnimationFrameResultPayload));
+		reply = (volatile struct SDKImageAnimationFrameResultPayload *)
+		    result_payload;
+		put_be32(reply->session, ares.session);
+		put_be32(reply->state, ares.state);
+		put_be32(reply->canvas_width, ares.canvas_width);
+		put_be32(reply->canvas_height, ares.canvas_height);
+		put_be32(reply->frame_index, ares.frame_index);
+		put_be32(reply->frame_duration_ms, ares.frame_duration_ms);
+		put_be32(reply->loop_index, ares.loop_index);
+		put_be32(reply->loop_count, ares.loop_count);
+		put_be32(reply->frame_token, ares.frame_token);
+		put_be32(reply->output_format, ares.output_format);
+		put_be32(reply->flags, ares.flags);
+		put_be32(reply->reserved, 0U);
+		*result_len = sizeof(struct SDKImageAnimationFrameResultPayload);
+		return SDK_STATUS_OK;
+	}
 	case SDK_OP_VIDEO_SESSION_WRITE: {
 		const struct video_write_op_params *p =
 		    (const struct video_write_op_params *)d->op_params;
@@ -7610,6 +7861,10 @@ static int opcode_reserves_request_id_zero(uint16_t opcode)
 	case SDK_OP_CRYPTO_AEAD:
 	case SDK_OP_CRYPTO_KX:
 	case SDK_OP_CRYPTO_VERIFY:
+	case SDK_OP_IMAGE_ANIMATION_FRAME_NEXT:
+	case SDK_OP_IMAGE_ANIMATION_FRAME_PRESENT:
+	case SDK_OP_IMAGE_ANIMATION_FRAME_RETIRE:
+	case SDK_OP_IMAGE_ANIMATION_RESTART:
 		return 1;
 	default:
 		return 0;
@@ -7728,6 +7983,14 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_image_session_feed(req, comp, payload_len);
 	case SDK_OP_IMAGE_SESSION_CLOSE:
 		return handle_image_session_close(req, comp, payload_len);
+	case SDK_OP_IMAGE_ANIMATION_FRAME_NEXT:
+		return handle_image_animation_frame_next(req, comp, payload_len);
+	case SDK_OP_IMAGE_ANIMATION_FRAME_PRESENT:
+		return handle_image_animation_frame_present(req, comp, payload_len);
+	case SDK_OP_IMAGE_ANIMATION_FRAME_RETIRE:
+		return handle_image_animation_frame_retire(req, comp, payload_len);
+	case SDK_OP_IMAGE_ANIMATION_RESTART:
+		return handle_image_animation_restart(req, comp, payload_len);
 	case SDK_OP_VIDEO_SESSION_BEGIN:
 		return handle_video_session_begin(req, comp, payload_len);
 	case SDK_OP_VIDEO_SESSION_WRITE:
@@ -8209,6 +8472,19 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 		if (sdk_image_stream_complete_arm_local_output(
 			get_be32(image->session), &address, &length))
 			Xil_DCacheInvalidateRange((INTPTR)address, length);
+	}
+	if (status == SDK_STATUS_OK && opcode == SDK_OP_IMAGE_ANIMATION_FRAME_NEXT &&
+	    payload != 0 && payload_len >= sizeof(struct SDKImageAnimationFrameResultPayload)) {
+		const struct SDKImageAnimationFrameResultPayload *frame =
+			(const struct SDKImageAnimationFrameResultPayload *)payload;
+		if ((get_be32(frame->flags) & SDK_IMAGE_ANIMATION_FRAME_FLAG_FRAME_READY) != 0U) {
+			uintptr_t address;
+			uint32_t length;
+
+			if (sdk_image_stream_complete_arm_local_output(
+				get_be32(frame->session), &address, &length))
+				Xil_DCacheInvalidateRange((INTPTR)address, length);
+		}
 	}
 	Xil_DCacheFlushRange((INTPTR)comp, sizeof(*comp));
 

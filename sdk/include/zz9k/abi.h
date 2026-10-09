@@ -178,6 +178,10 @@ enum ZZ9KOpcode {
   ZZ9K_OP_IMAGE_SESSION_FEED = ZZ9K_SERVICE_IMAGE + 0x05,
   ZZ9K_OP_IMAGE_SESSION_CLOSE = ZZ9K_SERVICE_IMAGE + 0x06,
   ZZ9K_OP_SCALE_IMAGE_CLIPPED = ZZ9K_SERVICE_IMAGE + 0x07,
+  ZZ9K_OP_IMAGE_ANIMATION_FRAME_NEXT = ZZ9K_SERVICE_IMAGE + 0x08,
+  ZZ9K_OP_IMAGE_ANIMATION_FRAME_PRESENT = ZZ9K_SERVICE_IMAGE + 0x09,
+  ZZ9K_OP_IMAGE_ANIMATION_FRAME_RETIRE = ZZ9K_SERVICE_IMAGE + 0x0a,
+  ZZ9K_OP_IMAGE_ANIMATION_RESTART = ZZ9K_SERVICE_IMAGE + 0x0b,
 
   ZZ9K_OP_DECODE_MP3 = ZZ9K_SERVICE_AUDIO + 0x00,
   ZZ9K_OP_MIX_AUDIO = ZZ9K_SERVICE_AUDIO + 0x01,
@@ -354,6 +358,7 @@ enum ZZ9KServiceFlags {
   ZZ9K_SERVICE_FLAG_IMAGE_RGB888_OUTPUT = 1U << 26,
   ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565 = 1U << 27,
   ZZ9K_SERVICE_FLAG_IMAGE_WEBP = 1U << 28,
+  ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION = 1U << 29,
 
   ZZ9K_SERVICE_FLAG_AUDIO_MP3_DECODE = 1U << 16,
   ZZ9K_SERVICE_FLAG_AUDIO_PCM_MIX = 1U << 17,
@@ -737,6 +742,27 @@ typedef struct ZZ9KImageSessionClosePayload {
   uint8_t flags[4];
   uint8_t reserved[40];
 } ZZ9KImageSessionClosePayload;
+typedef struct ZZ9KImageAnimationFrameRequestPayload {
+  uint8_t session[4];
+  uint8_t frame_token[4];
+  uint8_t flags[4];
+  uint8_t reserved[36];
+} ZZ9KImageAnimationFrameRequestPayload;
+
+typedef struct ZZ9KImageAnimationFrameResultPayload {
+  uint8_t session[4];
+  uint8_t state[4];
+  uint8_t canvas_width[4];
+  uint8_t canvas_height[4];
+  uint8_t frame_index[4];
+  uint8_t frame_duration_ms[4];
+  uint8_t loop_index[4];
+  uint8_t loop_count[4];
+  uint8_t frame_token[4];
+  uint8_t output_format[4];
+  uint8_t flags[4];
+  uint8_t reserved[4];
+} ZZ9KImageAnimationFrameResultPayload;
 
 typedef struct ZZ9KAudioDecodePayload {
   uint8_t src_handle[4];
@@ -1683,6 +1709,12 @@ typedef char ZZ9KImageSessionResultPayload_must_be_48_bytes[
 typedef char ZZ9KImageSessionClosePayload_must_be_48_bytes[
   (sizeof(ZZ9KImageSessionClosePayload) == 48U) ? 1 : -1
 ];
+typedef char ZZ9KImageAnimationFrameRequestPayload_must_be_48_bytes[
+  (sizeof(ZZ9KImageAnimationFrameRequestPayload) == 48U) ? 1 : -1
+];
+typedef char ZZ9KImageAnimationFrameResultPayload_must_be_48_bytes[
+  (sizeof(ZZ9KImageAnimationFrameResultPayload) == 48U) ? 1 : -1
+];
 typedef char ZZ9KAudioDecodePayload_must_be_48_bytes[
   (sizeof(ZZ9KAudioDecodePayload) == 48U) ? 1 : -1
 ];
@@ -2125,6 +2157,20 @@ typedef struct ZZ9KImageSessionResult {
   uint32_t bytes_written;
   uint32_t flags;
 } ZZ9KImageSessionResult;
+typedef struct ZZ9KImageAnimationFrameResult {
+  uint32_t session;
+  uint32_t state;
+  uint32_t canvas_width;
+  uint32_t canvas_height;
+  uint32_t frame_index;
+  uint32_t frame_duration_ms;
+  uint32_t loop_index;
+  uint32_t loop_count;
+  uint32_t frame_token;
+  uint32_t output_format;
+  uint32_t flags;
+  uint32_t reserved;
+} ZZ9KImageAnimationFrameResult;
 
 typedef struct ZZ9KAudioDecodeDesc {
   uint32_t src_handle;
@@ -2560,7 +2606,8 @@ enum ZZ9KSurfaceFormat {
   ZZ9K_SURFACE_FORMAT_PLANAR = 5,
   ZZ9K_SURFACE_FORMAT_RGB555 = 6,
   ZZ9K_SURFACE_FORMAT_BGRA8888 = 7,
-  ZZ9K_SURFACE_FORMAT_RGB888 = 8
+  ZZ9K_SURFACE_FORMAT_RGB888 = 8,
+  ZZ9K_SURFACE_FORMAT_YUV422CGX = 9
 };
 
 enum ZZ9KSurfaceFlags {
@@ -2603,6 +2650,10 @@ enum ZZ9KImageOutputMode {
   ZZ9K_IMAGE_OUTPUT_TILE_BUFFER = 3U
 };
 
+enum ZZ9KImageSessionBeginFlags {
+  ZZ9K_IMAGE_SESSION_BEGIN_ANIMATION = 1U << 3
+};
+
 enum ZZ9KImageSessionFeedFlags {
   ZZ9K_IMAGE_SESSION_FEED_EOF = 1U << 0
 };
@@ -2612,7 +2663,9 @@ enum ZZ9KImageSessionState {
   ZZ9K_IMAGE_SESSION_STATE_HEADER_READY = 2U,
   ZZ9K_IMAGE_SESSION_STATE_TILE_READY = 3U,
   ZZ9K_IMAGE_SESSION_STATE_COMPLETE = 4U,
-  ZZ9K_IMAGE_SESSION_STATE_ERROR = 5U
+  ZZ9K_IMAGE_SESSION_STATE_ERROR = 5U,
+  ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY = 6U,
+  ZZ9K_IMAGE_SESSION_STATE_ANIMATION_ENDED = 7U
 };
 
 enum ZZ9KImageSessionResultFlags {
@@ -2620,6 +2673,13 @@ enum ZZ9KImageSessionResultFlags {
   ZZ9K_IMAGE_SESSION_RESULT_PARTIAL = 1U << 1,
   ZZ9K_IMAGE_SESSION_RESULT_SCALED = 1U << 2
 };
+enum ZZ9KImageAnimationFrameFlags {
+  ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_FRAME_READY = 1U << 0,
+  ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_LAST_FRAME = 1U << 1,
+  ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_PRESENTED = 1U << 2,
+  ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_ENDED = 1U << 3
+};
+
 
 enum ZZ9KAudioStreamFeedFlags {
   ZZ9K_AUDIO_STREAM_FEED_EOF = 1U << 0,

@@ -14,6 +14,18 @@ typedef char webp_codec_is_4[
 typedef char webp_image_flag_is_bit_28[
   (ZZ9K_SERVICE_FLAG_IMAGE_WEBP == (1U << 28)) ? 1 : -1
 ];
+typedef char webp_image_animation_flag_is_bit_29[
+  (ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION == (1U << 29)) ? 1 : -1
+];
+
+typedef char image_animation_request_payload_is_48_bytes[
+  (sizeof(ZZ9KImageAnimationFrameRequestPayload) == 48U) ? 1 : -1
+];
+
+typedef char image_animation_result_payload_is_48_bytes[
+  (sizeof(ZZ9KImageAnimationFrameResultPayload) == 48U) ? 1 : -1
+];
+
 
 typedef char mailbox_entry_is_64_bytes[
   (sizeof(ZZ9KMailboxEntry) == ZZ9K_MAILBOX_ENTRY_SIZE) ? 1 : -1

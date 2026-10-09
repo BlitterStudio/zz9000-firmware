@@ -14,9 +14,10 @@ LDLIBS := $(HOST_DEMUX) $(HOST_LIBWEBP) -lpng -ljpeg -lz -lm
 
 .PHONY: test smoke fixtures sanitize clean
 
-test: $(BUILD)/jpeg_png_image_test $(BUILD)/webp_image_test
+test: $(BUILD)/jpeg_png_image_test $(BUILD)/webp_image_test $(BUILD)/webp_animation_test
 	$(BUILD)/jpeg_png_image_test
 	$(BUILD)/webp_image_test
+	$(BUILD)/webp_animation_test
 
 smoke: $(BUILD)/webp_smoke
 	@printf '%s\n' 'usage: $(BUILD)/webp_smoke input.webp output.ppm'
@@ -46,6 +47,8 @@ $(BUILD)/jpeg_png_image_test: $(ROOT)/util/test_sdk_image_stream.c host_runtime.
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $(ROOT)/util/test_sdk_image_stream.c host_runtime.c $(RUNTIME) $(LDLIBS)
 $(BUILD)/webp_image_test: webp_image_test.c webp_fixtures.h host_runtime.c $(RUNTIME) $(HOST_LIBWEBP) $(HOST_DEMUX) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ webp_image_test.c host_runtime.c $(RUNTIME) $(LDLIBS)
+$(BUILD)/webp_animation_test: webp_animation_test.c webp_animation_fixtures.h webp_fixtures.h host_runtime.c $(RUNTIME) $(HOST_LIBWEBP) $(HOST_DEMUX) | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ webp_animation_test.c host_runtime.c $(RUNTIME) $(LDLIBS)
 
 $(BUILD)/webp_smoke: webp_image_test.c webp_fixtures.h host_runtime.c $(RUNTIME) $(HOST_LIBWEBP) $(HOST_DEMUX) | $(BUILD)
 	$(CC) $(CFLAGS) -DZZ9K_WEBP_SMOKE $(INCLUDES) -o $@ webp_image_test.c host_runtime.c $(RUNTIME) $(LDLIBS)

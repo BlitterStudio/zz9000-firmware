@@ -295,7 +295,27 @@ int main(int argc, char **argv)
      "ZZ9KAudioStreamSetGain(session,gain,flags,result)(d0/d1/d2/a0)",
      "int ZZ9KAudioStreamSetGain(uint32_t session, uint32_t gain, "
      "uint32_t flags, ZZ9KAudioStreamResult *result);",
-     "jsr -318(a6)"}
+     "jsr -318(a6)"},
+    {"ZZ9KImageAnimationFrameNext",
+     "ZZ9KImageAnimationFrameNext(session,flags,result)(d0/d1/a0)",
+     "int ZZ9KImageAnimationFrameNext(uint32_t session, uint32_t flags, "
+     "ZZ9KImageAnimationFrameResult *result);",
+     "jsr -324(a6)"},
+    {"ZZ9KImageAnimationFramePresent",
+     "ZZ9KImageAnimationFramePresent(session,frame_token,flags,result)(d0/d1/d2/a0)",
+     "int ZZ9KImageAnimationFramePresent(uint32_t session, uint32_t frame_token, "
+     "uint32_t flags, ZZ9KImageAnimationFrameResult *result);",
+     "jsr -330(a6)"},
+    {"ZZ9KImageAnimationFrameRetire",
+     "ZZ9KImageAnimationFrameRetire(session,frame_token,flags,result)(d0/d1/d2/a0)",
+     "int ZZ9KImageAnimationFrameRetire(uint32_t session, uint32_t frame_token, "
+     "uint32_t flags, ZZ9KImageAnimationFrameResult *result);",
+     "jsr -336(a6)"},
+    {"ZZ9KImageAnimationRestart",
+     "ZZ9KImageAnimationRestart(session,flags,result)(d0/d1/a0)",
+     "int ZZ9KImageAnimationRestart(uint32_t session, uint32_t flags, "
+     "ZZ9KImageAnimationFrameResult *result);",
+     "jsr -342(a6)"}
   };
   char *fd;
   char *clib;

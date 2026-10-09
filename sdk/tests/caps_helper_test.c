@@ -258,6 +258,11 @@ static int test_service_flag_names(void)
                    "webp")) {
     return 47;
   }
+  if (!expect_name(zz9k_service_flag_name(ZZ9K_SERVICE_IMAGE,
+                                          ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION),
+                   "webp-animation")) {
+    return 48;
+  }
   if (zz9k_service_flag_name(ZZ9K_SERVICE_CRYPTO,
                              ZZ9K_SERVICE_FLAG_IMAGE_JPEG_DIRECT_BGRA) != 0) {
     return 4;
@@ -469,7 +474,7 @@ static int test_service_flag_iteration(void)
   if (zz9k_known_service_flag(ZZ9K_SERVICE_SURFACE, 5) != 0U) {
     return 45;
   }
-  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_IMAGE) != 17U) {
+  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_IMAGE) != 18U) {
     return 5;
   }
   if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 4) !=
@@ -490,7 +495,9 @@ static int test_service_flag_iteration(void)
   }
   if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 16) !=
       ZZ9K_SERVICE_FLAG_IMAGE_WEBP) return 47;
-  if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 17) != 0U) return 48;
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 17) !=
+      ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION) return 48;
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 18) != 0U) return 49;
   if (zz9k_known_service_flag_count(ZZ9K_SERVICE_CODEC) != 19U) {
     return 9;
   }

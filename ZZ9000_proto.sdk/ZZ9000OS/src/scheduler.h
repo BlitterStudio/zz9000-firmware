@@ -48,6 +48,10 @@
  * never drained by core 0). */
 #define TASKQ_OP_IMAGE_SESSION_FEED  0x0405u
 #define TASKQ_OP_IMAGE_SESSION_CLOSE 0x0406u
+#define TASKQ_OP_IMAGE_ANIMATION_FRAME_NEXT    0x0408u
+#define TASKQ_OP_IMAGE_ANIMATION_FRAME_PRESENT 0x0409u
+#define TASKQ_OP_IMAGE_ANIMATION_FRAME_RETIRE  0x040au
+#define TASKQ_OP_IMAGE_ANIMATION_RESTART       0x040bu
 
 /* Audio-stream opcodes mirrored from sdk_mailbox.h. A core-1-affine
  * stream's mp3 staging ring is cache-owned by core 1, so feed/read (both

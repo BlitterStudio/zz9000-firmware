@@ -32,7 +32,7 @@ static void test_library_identity(void)
 {
   expect_str("name", ZZ9K_LIBRARY_NAME, "zz9k.library");
   expect_u32("version", ZZ9K_LIBRARY_VERSION, 2);
-  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 31);
+  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 32);
 }
 
 static void test_standard_lvos(void)
@@ -95,7 +95,11 @@ static void test_public_lvos(void)
   expect_u32("audio_stream_stop", ZZ9K_LVO_AUDIO_STREAM_STOP, -306);
   expect_u32("query_palette", ZZ9K_LVO_QUERY_PALETTE, -312);
   expect_u32("audio_stream_set_gain", ZZ9K_LVO_AUDIO_STREAM_SET_GAIN, -318);
-  expect_u32("function_count", ZZ9K_LVO_FUNCTION_COUNT, 49);
+  expect_u32("image_animation_frame_next", ZZ9K_LVO_IMAGE_ANIMATION_FRAME_NEXT, -324);
+  expect_u32("image_animation_frame_present", ZZ9K_LVO_IMAGE_ANIMATION_FRAME_PRESENT, -330);
+  expect_u32("image_animation_frame_retire", ZZ9K_LVO_IMAGE_ANIMATION_FRAME_RETIRE, -336);
+  expect_u32("image_animation_restart", ZZ9K_LVO_IMAGE_ANIMATION_RESTART, -342);
+  expect_u32("function_count", ZZ9K_LVO_FUNCTION_COUNT, 53);
 }
 
 int main(void)

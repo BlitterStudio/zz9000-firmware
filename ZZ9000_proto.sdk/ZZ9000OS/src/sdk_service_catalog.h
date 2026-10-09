@@ -74,7 +74,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT |
 			SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565,
 		.opcode_base = SDK_SERVICE_IMAGE,
-		.opcode_count = 8,
+		.opcode_count = 12,
 		.name = "image"
 	},
 	{

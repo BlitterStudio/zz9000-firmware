@@ -892,6 +892,82 @@ static __inline int __ZZ9KAudioStreamSetGainInline(
 }
 #define ZZ9KAudioStreamSetGain(session, gain, flags, result) \
   __ZZ9KAudioStreamSetGainInline((session), (gain), (flags), (result))
+static __inline int __ZZ9KImageAnimationFrameNextInline(
+    uint32_t session,
+    uint32_t flags,
+    ZZ9KImageAnimationFrameResult *result)
+{
+  register uint32_t zz9k_d0 __asm("d0") = session;
+  register uint32_t zz9k_d1 __asm("d1") = flags;
+  register struct Library *zz9k_a6 __asm("a6") = ZZ9KBase;
+  register ZZ9KImageAnimationFrameResult *zz9k_a0 __asm("a0") = result;
+  __asm volatile("jsr -324(a6)"
+                 : "+r"(zz9k_d0), "+r"(zz9k_d1), "+r"(zz9k_a0)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_D1_A0);
+  return (int)zz9k_d0;
+}
+#define ZZ9KImageAnimationFrameNext(session, flags, result) \
+  __ZZ9KImageAnimationFrameNextInline((session), (flags), (result))
+
+static __inline int __ZZ9KImageAnimationFramePresentInline(
+    uint32_t session,
+    uint32_t frame_token,
+    uint32_t flags,
+    ZZ9KImageAnimationFrameResult *result)
+{
+  register uint32_t zz9k_d0 __asm("d0") = session;
+  register uint32_t zz9k_d1 __asm("d1") = frame_token;
+  register uint32_t zz9k_d2 __asm("d2") = flags;
+  register struct Library *zz9k_a6 __asm("a6") = ZZ9KBase;
+  register ZZ9KImageAnimationFrameResult *zz9k_a0 __asm("a0") = result;
+  __asm volatile("jsr -330(a6)"
+                 : "+r"(zz9k_d0), "+r"(zz9k_d1), "+r"(zz9k_a0)
+                 : "r"(zz9k_a6), "r"(zz9k_d2)
+                 : ZZ9K_INLINE_CLOBBERS_D1_A0);
+  return (int)zz9k_d0;
+}
+#define ZZ9KImageAnimationFramePresent(session, frame_token, flags, result) \
+  __ZZ9KImageAnimationFramePresentInline((session), (frame_token), (flags), (result))
+
+static __inline int __ZZ9KImageAnimationFrameRetireInline(
+    uint32_t session,
+    uint32_t frame_token,
+    uint32_t flags,
+    ZZ9KImageAnimationFrameResult *result)
+{
+  register uint32_t zz9k_d0 __asm("d0") = session;
+  register uint32_t zz9k_d1 __asm("d1") = frame_token;
+  register uint32_t zz9k_d2 __asm("d2") = flags;
+  register struct Library *zz9k_a6 __asm("a6") = ZZ9KBase;
+  register ZZ9KImageAnimationFrameResult *zz9k_a0 __asm("a0") = result;
+  __asm volatile("jsr -336(a6)"
+                 : "+r"(zz9k_d0), "+r"(zz9k_d1), "+r"(zz9k_a0)
+                 : "r"(zz9k_a6), "r"(zz9k_d2)
+                 : ZZ9K_INLINE_CLOBBERS_D1_A0);
+  return (int)zz9k_d0;
+}
+#define ZZ9KImageAnimationFrameRetire(session, frame_token, flags, result) \
+  __ZZ9KImageAnimationFrameRetireInline((session), (frame_token), (flags), (result))
+
+static __inline int __ZZ9KImageAnimationRestartInline(
+    uint32_t session,
+    uint32_t flags,
+    ZZ9KImageAnimationFrameResult *result)
+{
+  register uint32_t zz9k_d0 __asm("d0") = session;
+  register uint32_t zz9k_d1 __asm("d1") = flags;
+  register struct Library *zz9k_a6 __asm("a6") = ZZ9KBase;
+  register ZZ9KImageAnimationFrameResult *zz9k_a0 __asm("a0") = result;
+  __asm volatile("jsr -342(a6)"
+                 : "+r"(zz9k_d0), "+r"(zz9k_d1), "+r"(zz9k_a0)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_D1_A0);
+  return (int)zz9k_d0;
+}
+#define ZZ9KImageAnimationRestart(session, flags, result) \
+  __ZZ9KImageAnimationRestartInline((session), (flags), (result))
+
 
 #endif
 

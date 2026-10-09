@@ -230,6 +230,64 @@ static int test_feed_and_close_builders_encode_payloads(void)
 
   return 0;
 }
+static int test_animation_builders_encode_payloads(void)
+{
+  ZZ9KRequest request;
+  const ZZ9KImageAnimationFrameRequestPayload *payload;
+
+  memset(&request, 0xff, sizeof(request));
+  if (zz9k_request_image_animation_frame_next(&request, 5U, 0x11U) != ZZ9K_STATUS_OK)
+    return 1;
+  if (request.entry.opcode != ZZ9K_OP_IMAGE_ANIMATION_FRAME_NEXT) return 2;
+  if (request.entry.payload_len != sizeof(ZZ9KImageAnimationFrameRequestPayload)) return 3;
+  payload = (const ZZ9KImageAnimationFrameRequestPayload *)request.entry.payload.inline_data;
+  if (zz9k_get_be32(payload->session) != 5U) return 4;
+  if (zz9k_get_be32(payload->frame_token) != 0U) return 5;
+  if (zz9k_get_be32(payload->flags) != 0x11U) return 6;
+  if (zz9k_request_image_animation_frame_next(&request, 0U, 0U) != ZZ9K_STATUS_BAD_REQUEST)
+    return 7;
+
+  memset(&request, 0xff, sizeof(request));
+  if (zz9k_request_image_animation_frame_present(&request, 5U, 42U, 0x22U) != ZZ9K_STATUS_OK)
+    return 8;
+  if (request.entry.opcode != ZZ9K_OP_IMAGE_ANIMATION_FRAME_PRESENT) return 9;
+  if (request.entry.payload_len != sizeof(ZZ9KImageAnimationFrameRequestPayload)) return 10;
+  payload = (const ZZ9KImageAnimationFrameRequestPayload *)request.entry.payload.inline_data;
+  if (zz9k_get_be32(payload->session) != 5U) return 11;
+  if (zz9k_get_be32(payload->frame_token) != 42U) return 12;
+  if (zz9k_get_be32(payload->flags) != 0x22U) return 13;
+  if (zz9k_request_image_animation_frame_present(&request, 5U, 0U, 0U) != ZZ9K_STATUS_BAD_REQUEST)
+    return 14;
+  if (zz9k_request_image_animation_frame_present(&request, 0U, 42U, 0U) != ZZ9K_STATUS_BAD_REQUEST)
+    return 15;
+
+  memset(&request, 0xff, sizeof(request));
+  if (zz9k_request_image_animation_frame_retire(&request, 5U, 42U, 0x33U) != ZZ9K_STATUS_OK)
+    return 16;
+  if (request.entry.opcode != ZZ9K_OP_IMAGE_ANIMATION_FRAME_RETIRE) return 17;
+  if (request.entry.payload_len != sizeof(ZZ9KImageAnimationFrameRequestPayload)) return 18;
+  payload = (const ZZ9KImageAnimationFrameRequestPayload *)request.entry.payload.inline_data;
+  if (zz9k_get_be32(payload->session) != 5U) return 19;
+  if (zz9k_get_be32(payload->frame_token) != 42U) return 20;
+  if (zz9k_get_be32(payload->flags) != 0x33U) return 21;
+  if (zz9k_request_image_animation_frame_retire(&request, 5U, 0U, 0U) != ZZ9K_STATUS_BAD_REQUEST)
+    return 22;
+
+  memset(&request, 0xff, sizeof(request));
+  if (zz9k_request_image_animation_restart(&request, 5U, 0x44U) != ZZ9K_STATUS_OK)
+    return 23;
+  if (request.entry.opcode != ZZ9K_OP_IMAGE_ANIMATION_RESTART) return 24;
+  if (request.entry.payload_len != sizeof(ZZ9KImageAnimationFrameRequestPayload)) return 25;
+  payload = (const ZZ9KImageAnimationFrameRequestPayload *)request.entry.payload.inline_data;
+  if (zz9k_get_be32(payload->session) != 5U) return 26;
+  if (zz9k_get_be32(payload->frame_token) != 0U) return 27;
+  if (zz9k_get_be32(payload->flags) != 0x44U) return 28;
+  if (zz9k_request_image_animation_restart(&request, 0U, 0U) != ZZ9K_STATUS_BAD_REQUEST)
+    return 29;
+
+  return 0;
+}
+
 
 int main(void)
 {
@@ -246,6 +304,9 @@ int main(void)
 
   result = test_feed_and_close_builders_encode_payloads();
   if (result) return 80 + result;
+
+  result = test_animation_builders_encode_payloads();
+  if (result) return 120 + result;
 
   return 0;
 }
