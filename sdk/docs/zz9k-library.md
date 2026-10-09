@@ -583,14 +583,21 @@ playback contract. No existing opcode, payload layout or LVO changes.
   6 MiPixels per canvas, 1024 top-level chunks, 1024 nested chunks per frame,
   and 256 animation frames. One WebP session reserves the shared 72 MiB
   decode-state budget; actual input, canvases, allocation headers and decoder
-  workspace must fit that quota.
-  Exhausted memory or the 64-entry reset tracker returns `NO_MEMORY`, even for
-  inputs within those caps. These are implementation bounds, not measured
-  supported-image guarantees.
+  workspace must fit that quota. All of a session's allocations come from its
+  own arena of a few large regions, so the animation frame count does not
+  consume entries of the 64-entry core-1 reset tracker. Exhausted memory or
+  tracker entries return `NO_MEMORY`, even for inputs within those caps.
+  These are implementation bounds, not measured supported-image guarantees.
 - Decoding requires core 1. ARM-local surface destinations must match the
   decoded canvas dimensions exactly and use an explicit cache handoff. Partial
   ARM-local destination rectangles and FIT decoding are unsupported. Existing
   JPEG/PNG core routing is unchanged.
+- An animation surface pitch must hold whole two-pixel YUV422CGX macropixels
+  (`((width + 1) / 2) * 4` bytes). PRESENT copies the frame into the open
+  `RGBFB_YUV422CGX` P96 PIP source bitmap, clipped to that bitmap. The PIP must
+  be open before PRESENT, and its source width must be even. A PIP that is
+  reopened, for example by a fullscreen toggle, is repainted with the frame
+  still on show. A bound SDK video session takes precedence over the PIP.
 - Completed output, error and close release decoder allocations; a core-1 fault
   poisons the session and reclaims tracked blocks without stale destructors.
 

@@ -3213,14 +3213,17 @@ static ZZPlayEngineResult zzplay_engine_webp(const ZZPlayEngineRun *run)
   runtime.ctl = run->ctl;
   runtime.options = *run->options;
   runtime.prefs = *run->prefs;
-  runtime.video_info.width = run->probe->webp.width;
+  /* Packed YUV422 stores whole two-pixel macropixels: an odd-width canvas
+   * ends in a duplicated pixel. The PIP source and the surface pitch both
+   * cover that full final macropixel, which the firmware requires. */
+  runtime.video_info.width = (run->probe->webp.width + 1U) & ~1U;
   runtime.video_info.height = run->probe->webp.height;
   runtime.video_info.frame_rate_milli = 25000U;
   zzplay_core_init(&runtime.core);
 
   width = run->probe->webp.width;
   height = run->probe->webp.height;
-  pitch = width * 2U;
+  pitch = ((width + 1U) / 2U) * 4U;
 
   runtime.file = fopen(run->path, "rb");
   if (!runtime.file) {

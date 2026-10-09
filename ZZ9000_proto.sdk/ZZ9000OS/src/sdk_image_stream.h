@@ -90,6 +90,12 @@ int sdk_image_stream_session_core1(uint32_t session);
 int sdk_image_stream_complete_arm_local_output(uint32_t session,
                                                 uintptr_t *address,
                                                 uint32_t *length);
+/* The packed YUV422CGX canvas of an animation session whose outstanding
+ * frame has been presented; core 0 publishes it to the P96 PIP source at
+ * the PRESENT completion (the NEXT completion already invalidated it). */
+int sdk_image_stream_presented_canvas(uint32_t session, uintptr_t *address,
+                                      uint32_t *pitch, uint32_t *width,
+                                      uint32_t *height);
 /* Nonzero when any open session is core-1-affine (mailbox reset gating). */
 int sdk_image_stream_has_core1_sessions(void);
 /* After a core-1 fault: drop core-1-affine sessions' dangling codec

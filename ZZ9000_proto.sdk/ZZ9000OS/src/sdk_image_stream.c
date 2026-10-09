@@ -2796,6 +2796,25 @@ int sdk_image_stream_complete_arm_local_output(uint32_t session,
 		*length = slot->dst_length;
 	return slot->dst_address != 0U && slot->dst_length != 0U;
 }
+
+int sdk_image_stream_presented_canvas(uint32_t session, uintptr_t *address,
+                                      uint32_t *pitch, uint32_t *width,
+                                      uint32_t *height)
+{
+	struct SDKImageStreamSession *slot = find_session(session);
+
+	if (!slot || !slot->in_use || !slot->is_animation || slot->failed ||
+	    !slot->anim_token_outstanding || !slot->anim_presented ||
+	    slot->dst_address == 0U)
+		return 0;
+	*address = slot->dst_address;
+	*pitch = slot->dst_pitch;
+	*width = slot->image_width < slot->dst_width ?
+	    slot->image_width : slot->dst_width;
+	*height = slot->image_height < slot->dst_height ?
+	    slot->image_height : slot->dst_height;
+	return 1;
+}
 int sdk_image_stream_has_core1_sessions(void)
 {
 	uint32_t i;

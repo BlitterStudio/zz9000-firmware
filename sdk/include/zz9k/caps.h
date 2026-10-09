@@ -167,7 +167,7 @@ static inline uint32_t zz9k_known_service_flag_count(uint32_t service_id)
     return 18U;
   }
   if (service_id == ZZ9K_SERVICE_AUDIO) {
-    return 13U;
+    return 15U;
   }
   if (service_id == ZZ9K_SERVICE_CODEC) {
     return 19U;
@@ -292,6 +292,10 @@ static inline uint32_t zz9k_known_service_flag(uint32_t service_id,
       return ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE;
     case 12:
       return ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN;
+    case 13:
+      return ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM;
+    case 14:
+      return ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM;
     default:
       return 0U;
     }

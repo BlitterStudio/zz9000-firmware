@@ -6713,7 +6713,10 @@ static int zz9k_picture_decode_to_datatype_pixels(
 #if ZZ9K_PICTURE_ENABLE_PNG_ALPHA_EXPERIMENTS
   png_alpha_opaque = 0;
 #endif
-  if (instance->codec == ZZ9K_PICTURE_CODEC_PNG) {
+  /* The header scan records WebP alpha (VP8X flag / VP8L alpha hint) in the
+   * same field, so both codecs take the RGBA route on 32-bit screens. */
+  if (instance->codec == ZZ9K_PICTURE_CODEC_PNG ||
+      instance->codec == ZZ9K_PICTURE_CODEC_WEBP) {
     if (instance->png_alpha_known) {
       png_has_alpha = instance->png_has_alpha ? 1 : 0;
     } else {

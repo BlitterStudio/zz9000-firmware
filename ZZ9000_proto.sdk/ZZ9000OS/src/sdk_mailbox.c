@@ -1623,6 +1623,8 @@ static uint16_t handle_image_animation_frame_present(
 	}
 
 	status = sdk_image_stream_frame_present(session, token, flags, &result);
+	if (status == SDK_STATUS_OK)
+		(void)overlay_image_frame_present(session);
 	return complete_image_animation_result(req, comp, status, &result);
 }
 
@@ -8901,6 +8903,17 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 				get_be32(frame->session), &address, &length))
 				Xil_DCacheInvalidateRange((INTPTR)address, length);
 		}
+	}
+	/* A presented animation frame goes onto the P96 PIP before the client
+	 * learns of it, so its next NEXT cannot overwrite the canvas mid-copy. */
+	if (status == SDK_STATUS_OK &&
+	    opcode == SDK_OP_IMAGE_ANIMATION_FRAME_PRESENT &&
+	    payload != 0 &&
+	    payload_len >= sizeof(struct SDKImageAnimationFrameResultPayload)) {
+		const struct SDKImageAnimationFrameResultPayload *frame =
+			(const struct SDKImageAnimationFrameResultPayload *)payload;
+
+		(void)overlay_image_frame_present(get_be32(frame->session));
 	}
 	Xil_DCacheFlushRange((INTPTR)comp, sizeof(*comp));
 
