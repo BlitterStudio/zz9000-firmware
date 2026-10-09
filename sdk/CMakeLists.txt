@@ -1358,6 +1358,7 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-PNG.info
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-WebP.info
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-MP3.info
+          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-FLAC.info
 )
 
 add_executable(scaletest_source_test

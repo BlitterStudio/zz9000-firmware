@@ -2,7 +2,7 @@
 
 Copyright (C) 2024-2026, Dimitris Panokostas / BlitterStudio
 
-`zz9k-sound.datatype 42.1` is the SDK v2 MP3 sound DataType. It is packaged
+`zz9k-sound.datatype 42.1` is the SDK v2 MP3 and native FLAC sound DataType. It is packaged
 as a side-by-side subclass of the system `sound.datatype` and must not
 replace `Classes/DataTypes/sound.datatype`. OS3.1 remains the minimum
 target. The class always subclasses `sound.datatype` and chooses its output
@@ -18,27 +18,31 @@ The class binary installs as:
 Classes/DataTypes/zz9k-sound.datatype
 ```
 
-The MP3 recognition descriptor is packaged inactive under `Storage/DataTypes`
+The recognition descriptors are packaged inactive under `Storage/DataTypes`
 so activation is an explicit install step:
 
 ```text
 Storage/DataTypes/ZZ9000-MP3
 Storage/DataTypes/ZZ9000-MP3.info
+Storage/DataTypes/ZZ9000-FLAC
+Storage/DataTypes/ZZ9000-FLAC.info
 ```
 
 To activate the validated DataType path on a test or release-install system,
-install the class and copy the descriptor into `DEVS:DataTypes`:
+install the class and copy the descriptors into `DEVS:DataTypes`:
 
 ```text
 copy Classes/DataTypes/zz9k-sound.datatype TO SYS:Classes/DataTypes/
 copy Storage/DataTypes/ZZ9000-MP3#? TO DEVS:DataTypes/
-AddDataTypes DEVS:DataTypes/ZZ9000-MP3
+copy Storage/DataTypes/ZZ9000-FLAC#? TO DEVS:DataTypes/
+AddDataTypes DEVS:DataTypes/ZZ9000-MP3 DEVS:DataTypes/ZZ9000-FLAC
 AddDataTypes LIST
 ```
 
-`AddDataTypes LIST` should show `ZZ9000-MP3` before sound-capable clients
-are expected to route matching files to `zz9k-sound.datatype`. Keeping the
-descriptor in `Storage/DataTypes` by default prevents accidental global
+`AddDataTypes LIST` should show `ZZ9000-MP3` and `ZZ9000-FLAC` before
+sound-capable clients are expected to route matching files to
+`zz9k-sound.datatype`. Each descriptor can be activated on its own. Keeping
+the descriptors in `Storage/DataTypes` by default prevents accidental global
 routing on systems that only want the SDK tools, ZZPlay, or manual smoke
 tests. Deactivating works the other way round: remove the descriptor from
 `DEVS:DataTypes` and run `AddDataTypes REFRESH`.
@@ -74,6 +78,19 @@ Recognition is split between the descriptor and the class:
 The hook has no startup code, takes library bases from the hook context,
 and avoids hardware division, so it runs on 68000 systems.
 
+### Native FLAC
+
+The class decodes native FLAC (`fLaC` marker) with mono or stereo audio,
+4 to 24 bits per sample, at 8 to 192 kHz. Ogg-FLAC, multichannel streams,
+and wider samples are not claimed. The `ZZ9000-FLAC` descriptor matches the
+4-byte `fLaC` marker; the class re-validates the 34-byte `STREAMINFO` block
+with the recognizer it shares with ZZPlay
+(`amiga/datatypes/zz9k_sound_flac.h`) and feeds the whole file, metadata
+included, to the card's FLAC stream decoder through the codec-aware
+`ZZ9KAudioStreamBeginEx()`. Sources up to 16 bits decode to S16BE; wider
+sources decode to MSB-justified S32BE so the modern path keeps their
+precision.
+
 ## Whole-sample memory model
 
 The class is a whole-sample decoder, not a streaming one. Neither probed
@@ -86,7 +103,7 @@ Peak allocation during construction:
 - the sample: one `AllocVec` plane per channel on modern stereo, one plane
   otherwise, each starting at 64 KiB, growing geometrically,
   multiplier-checked, hard-capped at 256 MiB;
-- a 128 KiB card-only MP3 input ring;
+- a 128 KiB card-only compressed input ring;
 - a host-window PCM ring plus staging pair, 64 KiB each, shrinking in
   bounded halving steps down to a 4 KiB floor when the host-visible heap is
   compact (the same shrink ladder the archive client uses);
@@ -96,7 +113,8 @@ Every firmware resource (session, rings) is closed and freed before the
 sample is published; only the sample planes survive construction. Steady
 state, for N samples per channel:
 
-- modern output: `N × 2` bytes per channel plane (16-bit);
+- modern output: `N × 2` bytes per channel plane (16-bit), or `N × 4` for
+  FLAC sources wider than 16 bits (32-bit);
 - legacy output: `N` bytes (8-bit mono).
 
 A 44.1 kHz stereo file therefore holds roughly 176 KiB of sample per second
@@ -106,7 +124,7 @@ engine.
 
 The decode follows the same audio-stream protocol as `zz9k-mp3`: each feed
 hands the firmware a whole staged chunk, `bytes_consumed` is the decoder's
-cumulative consumption from the MP3 ring, PCM credit is returned before the
+cumulative consumption from the input ring, PCM credit is returned before the
 ring fills, and a `BACKPRESSURE` result is answered with a forced `Read`
 before the same chunk is fed again. Loops give up only after 64 consecutive
 iterations without progress, so long files on the 4 KiB compact Zorro II
@@ -122,8 +140,8 @@ lock, not a file handle), then constructs the object with:
 | Property | Modern (`sound.datatype` ≥ 47) | Legacy (`sound.datatype` < 47) |
 | --- | --- | --- |
 | Sample data | stereo: `SDTA_LeftSample` + `SDTA_RightSample` (separate `AllocVec` planes); mono: `SDTA_Sample` | `SDTA_Sample`, planar 8-bit mono |
-| Container | signed 16-bit big endian | signed 8-bit |
-| `SDTA_BitsPerSample` | 16 | not set |
+| Container | signed big endian: 16-bit, or 32-bit MSB-justified for FLAC wider than 16 bits | signed 8-bit |
+| `SDTA_BitsPerSample` | 16, or 32 for FLAC wider than 16 bits | not set |
 | Rate | `SDTA_SamplesPerSec` = source rate, no period | `SDTA_Period` from the system colour clock (5 × `ex_EClockFrequency`) |
 | `SDTA_SampleLength` | bytes in one channel plane, as the system WAVE loader publishes 16-bit data | samples (= bytes) |
 | `SDTA_Volume` | 64 | 64 |
@@ -135,7 +153,8 @@ emulated A4000). That clamp is superclass playback behaviour, not a class
 setting.
 
 Stereo on the legacy path is averaged and quantized to signed 8-bit with a
-saturating clamp that covers the full -32768..32767 range without overflow.
+saturating clamp that covers the full -32768..32767 range without overflow;
+32-bit FLAC output is narrowed to its top 16 bits first.
 Memory-source objects (`DTST_RAM`/`DTST_MEMORY`) are refused: the class
 decodes only named files (`DTST_FILE` with `DTA_Name`).
 
@@ -166,10 +185,13 @@ object, stereo planes on v47) leaving free memory unchanged.
   directly after the tag): `datatypes.library` routes it elsewhere; no class
   code runs.
 - Descriptor matched but content invalid (broken frame chain, Layer I/II
-  body, truncated stream): object creation fails with `DTERROR_INVALID_DATA`.
+  body, truncated stream, a FLAC `STREAMINFO` outside the envelope above,
+  corrupt FLAC frames): object creation fails with `DTERROR_INVALID_DATA`.
 - Firmware or `zz9k.library` without the matched audio-stream service
-  (`MP3_DECODE`, `MP3_STREAM`, `PCM16_STEREO` flags): creation fails with
-  `ERROR_NOT_IMPLEMENTED` rather than falling back to software decode.
+  fails creation with `ERROR_NOT_IMPLEMENTED` rather than falling back to
+  software decode. MP3 needs the `MP3_DECODE`, `MP3_STREAM`, and
+  `PCM16_STEREO` flags; FLAC needs `FLAC_STREAM` and `zz9k.library`
+  revision 33 (`ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX`).
 - Audio-stream session busy (another client holds it): `ERROR_OBJECT_IN_USE`.
   Shared-memory, ring or sample allocation failure: `ERROR_NO_FREE_STORE`.
 

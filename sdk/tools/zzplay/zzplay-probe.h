@@ -27,6 +27,14 @@ typedef struct ZZPlayMP3Info {
   uint32_t frame_bytes;
   uint8_t mpeg_version;
 } ZZPlayMP3Info;
+
+typedef struct ZZPlayFLACInfo {
+  uint32_t sample_rate;
+  uint32_t channels;
+  uint32_t bits_per_sample;
+  uint64_t total_samples; /* 0 when STREAMINFO leaves it unknown */
+} ZZPlayFLACInfo;
+
 typedef struct ZZPlayWebPInfo {
   uint32_t width;
   uint32_t height;
@@ -39,7 +47,8 @@ typedef enum ZZPlayMediaKind {
   ZZPLAY_MEDIA_KIND_UNSUPPORTED = 0,
   ZZPLAY_MEDIA_KIND_MPEG_PS,
   ZZPLAY_MEDIA_KIND_MP3,
-  ZZPLAY_MEDIA_KIND_WEBP
+  ZZPLAY_MEDIA_KIND_WEBP,
+  ZZPLAY_MEDIA_KIND_FLAC
 } ZZPlayMediaKind;
 
 typedef struct ZZPlayProbeInfo {
@@ -47,6 +56,7 @@ typedef struct ZZPlayProbeInfo {
   ZZPlayVideoInfo video;
   ZZPlayMP3Info mp3;
   ZZPlayWebPInfo webp;
+  ZZPlayFLACInfo flac;
 } ZZPlayProbeInfo;
 
 uint32_t zzplay_mpeg_frame_rate_milli(uint8_t code);
