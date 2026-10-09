@@ -103,6 +103,54 @@ void sdk_dvd_ac3_destroy(struct SDKDVDAC3 *ac3)
 	ac3->es_staged = 0U;
 }
 
+/* Length of the complete frame at the front of the staging buffer, or 0
+ * when none is staged yet. Garbage before a sync word and sync words with
+ * an invalid header are dropped. */
+static uint32_t staged_frame_length(struct SDKDVDAC3 *ac3)
+{
+	while (resync(ac3)) {
+		int flags = 0;
+		int sample_rate = 0;
+		int bit_rate = 0;
+		uint32_t frame_length;
+
+		/* a52_syncinfo reads the 7-byte syncinfo + BSI prefix. */
+		if (ac3->es_staged < 7U)
+			return 0U;
+		frame_length = (uint32_t)a52_syncinfo(
+			ac3->es, &flags, &sample_rate, &bit_rate);
+		if (frame_length < 8U) {
+			ac3->malformed++;
+			drop_front(ac3, 1U);
+			continue;
+		}
+		return ac3->es_staged >= frame_length ? frame_length : 0U;
+	}
+	return 0U;
+}
+
+uint32_t sdk_dvd_ac3_feed(struct SDKDVDAC3 *ac3, const uint8_t *src,
+                          uint32_t length)
+{
+	uint32_t room;
+
+	if (!ac3 || !src || length == 0U)
+		return 0U;
+	room = SDK_DVD_AC3_ES_CAPACITY - ac3->es_staged;
+	if (length > room)
+		length = room;
+	memcpy(ac3->es + ac3->es_staged, src, length);
+	ac3->es_staged += length;
+	return length;
+}
+
+int sdk_dvd_ac3_frame_ready(struct SDKDVDAC3 *ac3)
+{
+	if (!ac3 || !ac3->state)
+		return 0;
+	return staged_frame_length(ac3) != 0U;
+}
+
 uint32_t sdk_dvd_ac3_decode(struct SDKDVDAC3 *ac3, const uint8_t *src,
                             uint32_t length, uint8_t *dst,
                             uint32_t capacity)
@@ -125,7 +173,7 @@ uint32_t sdk_dvd_ac3_decode(struct SDKDVDAC3 *ac3, const uint8_t *src,
 		ac3->es_staged += length;
 	}
 
-	while (resync(ac3)) {
+	for (;;) {
 		int source_flags = 0;
 		int sample_rate = 0;
 		int bit_rate = 0;
@@ -134,15 +182,16 @@ uint32_t sdk_dvd_ac3_decode(struct SDKDVDAC3 *ac3, const uint8_t *src,
 		uint32_t frame_length;
 		uint32_t block;
 
-		frame_length = (uint32_t)a52_syncinfo(
-			ac3->es, &source_flags, &sample_rate, &bit_rate);
-		if (frame_length < 8U) {
-			ac3->malformed++;
-			drop_front(ac3, 1U);
-			continue;
-		}
-		if (ac3->es_staged < frame_length)
+		frame_length = staged_frame_length(ac3);
+		if (frame_length == 0U)
 			break;
+		if (capacity - produced < SDK_DVD_AC3_FRAME_PCM_BYTES) {
+			/* Output full: keep the frame staged, undecoded, for
+			 * the next call. */
+			break;
+		}
+		(void)a52_syncinfo(ac3->es, &source_flags, &sample_rate,
+		                   &bit_rate);
 		if (a52_frame(ac3->state, ac3->es, &output_flags, &level,
 		              0.0f) != 0) {
 			ac3->malformed++;
@@ -152,13 +201,6 @@ uint32_t sdk_dvd_ac3_decode(struct SDKDVDAC3 *ac3, const uint8_t *src,
 		ac3->sample_rate = (uint32_t)sample_rate;
 		ac3->source_channels = ac3_source_channels(source_flags);
 		ac3->channels = 2U;
-		if (capacity - produced <
-		    SDK_DVD_AC3_BLOCKS_PER_FRAME *
-			    SDK_DVD_AC3_SAMPLES_PER_BLOCK * 4U) {
-			/* Ring full: keep the frame staged for the next
-			 * call after the client acknowledges. */
-			break;
-		}
 		for (block = 0U; block < SDK_DVD_AC3_BLOCKS_PER_FRAME;
 		     block++) {
 			sample_t *samples;

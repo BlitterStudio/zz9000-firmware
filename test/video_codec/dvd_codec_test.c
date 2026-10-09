@@ -7,6 +7,9 @@
  * - NTSC 720x480 30000/1001 with DVD LPCM audio
  * - NTSC film 720x480 24000/1001 with 3:2 repeat-first-field cadence
  * - Deterministic AC-3 5.1-to-stereo downmixing
+ * - Every AC-3 2.0 192 kbit/s frame decoded (2.6 frames per 2 KB pack) and
+ *   the stream reaching DONE, with a roomy and with a tight PCM ring
+ * - One AC-3 substream selected when a VOB carries two
  * - DVD LPCM header parsing and sample unpacking exactness (mono & stereo)
  * - Raw integer 90 kHz PTS/DTS preservation and timeline tracking
  * - Bounded demuxer behavior with chunked/fragmented transport
@@ -30,8 +33,11 @@
 #include "dvd_ntsc_30_fixture.inc"
 #include "dvd_ntsc_film_32_fixture.inc"
 #include "dvd_ac3_51_fixture.inc"
+#include "dvd_ac3_192_fixture.inc"
+#include "dvd_ac3_dual_fixture.inc"
 
 #define PCM_RING_CAPACITY (128U * 1024U)
+#define FNV64_OFFSET UINT64_C(14695981039346656037)
 
 static uint64_t fnv1a64(uint64_t hash, const uint8_t *bytes, uint32_t length)
 {
@@ -381,6 +387,13 @@ static int test_pal_tff_interlaced(void)
 
 	if (r.pcm_produced == 0U || r.audio_rate != 48000U || r.audio_channels != 2U)
 		return 8;
+	/* All 7 AC-3 frames (0.2 s); the last one shares a pack with others. */
+	if (r.pcm_produced != 7U * SDK_DVD_AC3_FRAME_PCM_BYTES) {
+		fprintf(stderr, "test_pal_tff: pcm=%llu (expected %u)\n",
+		        (unsigned long long)r.pcm_produced,
+		        7U * SDK_DVD_AC3_FRAME_PCM_BYTES);
+		return 9;
+	}
 
 	return 0;
 }
@@ -489,6 +502,275 @@ static int test_demuxer_bounded_behavior(void)
 	return 0;
 }
 
+/* ------------------------------------------ AC-3 through an acked ring */
+
+struct acked_result {
+	uint64_t pcm_bytes;
+	uint64_t pcm_hash;
+	uint32_t video_frames;
+	uint32_t audio_frames;
+	uint32_t media_flags;
+	int done;
+};
+
+/* Runs the backend like a player would: writes in chunks, acknowledges at
+ * most max_ack PCM bytes per decode call, hashes the PCM in ack order, and
+ * stops at DONE (or fails after a bounded number of calls). */
+static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
+                     uint32_t ring_capacity, uint32_t max_ack,
+                     struct acked_result *out)
+{
+	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	struct SDKVideoMediaConfig cfg = {0};
+	struct SDKVideoDecodedFrame frame;
+	struct SDKVideoMediaInfo info;
+	uint8_t *ring;
+	void *decoder;
+	uint32_t offset = 0U;
+	uint64_t acked = 0U;
+	uint32_t calls;
+
+	memset(out, 0, sizeof(*out));
+	out->pcm_hash = FNV64_OFFSET;
+	decoder = ops->create();
+	ring = (uint8_t *)malloc(ring_capacity);
+	if (!decoder || !ring) {
+		free(ring);
+		if (decoder)
+			ops->destroy(decoder);
+		return 1;
+	}
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = ring_capacity;
+	cfg.pcm_low_water_bytes = 4096U;
+	cfg.pcm_high_water_bytes = ring_capacity - 4096U;
+	if (!ops->configure_media(decoder, &cfg)) {
+		free(ring);
+		ops->destroy(decoder);
+		return 2;
+	}
+	for (calls = 0U; calls < 200000U; calls++) {
+		int res;
+
+		if (offset < length) {
+			uint32_t n = length - offset < chunk ? length - offset : chunk;
+			uint32_t accepted = 0U;
+
+			if (!ops->write(decoder, stream + offset, n,
+			                offset + n >= length, &accepted)) {
+				free(ring);
+				ops->destroy(decoder);
+				return 3;
+			}
+			offset += accepted;
+		}
+		res = ops->decode(decoder, &frame);
+		if (res == SDK_VIDEO_BACKEND_ERROR) {
+			free(ring);
+			ops->destroy(decoder);
+			return 4;
+		}
+		if (res == SDK_VIDEO_BACKEND_FRAME)
+			out->video_frames++;
+		if (ops->get_media_info(decoder, &info) &&
+		    info.pcm_produced > acked) {
+			uint64_t step = info.pcm_produced - acked;
+
+			if (step > max_ack)
+				step = max_ack;
+			while (step != 0U) {
+				uint32_t at = (uint32_t)(acked % ring_capacity);
+				uint32_t run = ring_capacity - at;
+
+				if (run > step)
+					run = (uint32_t)step;
+				out->pcm_hash = fnv1a64(out->pcm_hash, ring + at, run);
+				acked += run;
+				step -= run;
+			}
+			ops->ack_media(decoder, acked);
+		}
+		if (res == SDK_VIDEO_BACKEND_DONE) {
+			out->done = 1;
+			break;
+		}
+	}
+	if (ops->get_media_info(decoder, &info)) {
+		out->audio_frames = info.audio_frames;
+		out->media_flags = info.flags;
+	}
+	out->pcm_bytes = acked;
+	free(ring);
+	ops->destroy(decoder);
+	return 0;
+}
+
+/* Backend-independent reference: the demux plus the AC-3 wrapper with an
+ * output buffer large enough for every frame a packet can complete. */
+static int ac3_reference(const uint8_t *stream, uint32_t length,
+                         uint64_t *bytes, uint64_t *hash, uint32_t *frames)
+{
+	static struct SDKDVDPSDemux demux;
+	static struct SDKDVDAC3 ac3;
+	static uint8_t pcm[64U * 1024U];
+	uint32_t offset = 0U;
+	uint32_t rounds;
+
+	sdk_dvd_ps_init(&demux);
+	sdk_dvd_ac3_init(&ac3);
+	*bytes = 0U;
+	*hash = FNV64_OFFSET;
+	for (rounds = 0U; !sdk_dvd_ps_done(&demux); rounds++) {
+		const struct SDKDVDPSPacket *p;
+		uint32_t accepted = 0U;
+
+		if (rounds > 100000U) {
+			sdk_dvd_ac3_destroy(&ac3);
+			return 1;
+		}
+		if (offset < length) {
+			sdk_dvd_ps_write(&demux, stream + offset, length - offset,
+			                 &accepted, 1);
+			offset += accepted;
+		}
+		while (sdk_dvd_ps_peek_video(&demux))
+			sdk_dvd_ps_pop_video(&demux, NULL);
+		while ((p = sdk_dvd_ps_peek_audio(&demux)) != NULL) {
+			if (p->kind == SDK_DVD_PS_AC3 &&
+			    p->length > SDK_DVD_AC3_HEADER_BYTES) {
+				uint32_t n = sdk_dvd_ac3_decode(
+					&ac3, p->data + SDK_DVD_AC3_HEADER_BYTES,
+					p->length - SDK_DVD_AC3_HEADER_BYTES,
+					pcm, sizeof(pcm));
+				*hash = fnv1a64(*hash, pcm, n);
+				*bytes += n;
+			}
+			sdk_dvd_ps_pop_audio(&demux, NULL);
+		}
+	}
+	*frames = ac3.frames;
+	sdk_dvd_ac3_destroy(&ac3);
+	return 0;
+}
+
+/* 6. AC-3 2.0 192 kbit/s: 63 frames in 25 packs of up to 2015 payload
+ * bytes. Every frame must reach the ring and the stream must end DONE. */
+static int test_ac3_192_all_frames(void)
+{
+	static const struct {
+		uint32_t chunk;
+		uint32_t ring;
+		uint32_t max_ack;
+	} runs[] = {
+		{ 2048U, 128U * 1024U, 128U * 1024U }, /* roomy ring */
+		{ 777U, 16U * 1024U, 1000U },          /* ring keeps filling */
+	};
+	uint64_t ref_bytes, ref_hash;
+	uint32_t ref_frames;
+	uint32_t i;
+
+	if (ac3_reference(zz9k_dvd_ac3_192_fixture, zz9k_dvd_ac3_192_fixture_len,
+	                  &ref_bytes, &ref_hash, &ref_frames) != 0)
+		return 1;
+	if (ref_frames != 63U ||
+	    ref_bytes != 63U * (uint64_t)SDK_DVD_AC3_FRAME_PCM_BYTES) {
+		fprintf(stderr, "test_ac3_192: reference frames=%u bytes=%llu\n",
+		        ref_frames, (unsigned long long)ref_bytes);
+		return 2;
+	}
+	for (i = 0U; i < sizeof(runs) / sizeof(runs[0]); i++) {
+		struct acked_result r;
+
+		if (run_acked(zz9k_dvd_ac3_192_fixture,
+		              zz9k_dvd_ac3_192_fixture_len, runs[i].chunk,
+		              runs[i].ring, runs[i].max_ack, &r) != 0)
+			return 3;
+		if (!r.done) {
+			fprintf(stderr, "test_ac3_192 run %u: never DONE (pcm=%llu)\n",
+			        i, (unsigned long long)r.pcm_bytes);
+			return 4;
+		}
+		if (r.pcm_bytes != ref_bytes || r.pcm_hash != ref_hash) {
+			fprintf(stderr, "test_ac3_192 run %u: pcm=%llu (expected %llu)\n",
+			        i, (unsigned long long)r.pcm_bytes,
+			        (unsigned long long)ref_bytes);
+			return 5;
+		}
+		if (r.audio_frames != ref_frames)
+			return 6;
+		if ((r.media_flags & SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE) == 0U)
+			return 7;
+		if (r.video_frames != 50U)
+			return 8;
+	}
+	return 0;
+}
+
+/* 7. Two AC-3 tracks: 0x80 (7 frames, first in the stream) and 0x81 (19
+ * frames). Only 0x80 may reach the decoder. */
+static int test_ac3_substream_selection(void)
+{
+	static struct SDKDVDPSDemux demux;
+	const struct SDKDVDPSPacket *p;
+	struct acked_result r;
+	uint64_t ref_bytes, ref_hash;
+	uint32_t ref_frames;
+	uint32_t accepted = 0U;
+	uint32_t ac3_packets = 0U;
+
+	sdk_dvd_ps_init(&demux);
+	sdk_dvd_ps_write(&demux, zz9k_dvd_ac3_dual_fixture,
+	                 zz9k_dvd_ac3_dual_fixture_len, &accepted, 1);
+	while (!sdk_dvd_ps_done(&demux)) {
+		uint32_t before = demux.video.count + demux.audio.count;
+
+		while (sdk_dvd_ps_peek_video(&demux))
+			sdk_dvd_ps_pop_video(&demux, NULL);
+		while ((p = sdk_dvd_ps_peek_audio(&demux)) != NULL) {
+			if (p->kind == SDK_DVD_PS_AC3) {
+				if (p->substream_id != 0x80U)
+					return 1;
+				ac3_packets++;
+			}
+			sdk_dvd_ps_pop_audio(&demux, NULL);
+		}
+		if (accepted < zz9k_dvd_ac3_dual_fixture_len) {
+			uint32_t more = 0U;
+
+			sdk_dvd_ps_write(&demux,
+			                 zz9k_dvd_ac3_dual_fixture + accepted,
+			                 zz9k_dvd_ac3_dual_fixture_len - accepted,
+			                 &more, 1);
+			accepted += more;
+		} else if (before == 0U && demux.video.count == 0U &&
+		           demux.audio.count == 0U) {
+			break;
+		}
+	}
+	if (demux.ac3_substream != 0x80U || ac3_packets != 3U ||
+	    demux.bytes_ignored == 0U)
+		return 2;
+
+	if (ac3_reference(zz9k_dvd_ac3_dual_fixture,
+	                  zz9k_dvd_ac3_dual_fixture_len,
+	                  &ref_bytes, &ref_hash, &ref_frames) != 0)
+		return 3;
+	if (ref_frames != 7U)
+		return 4;
+	if (run_acked(zz9k_dvd_ac3_dual_fixture, zz9k_dvd_ac3_dual_fixture_len,
+	              1024U, 64U * 1024U, 64U * 1024U, &r) != 0)
+		return 5;
+	if (!r.done || r.audio_frames != 7U ||
+	    r.pcm_bytes != 7U * (uint64_t)SDK_DVD_AC3_FRAME_PCM_BYTES ||
+	    r.pcm_hash != ref_hash) {
+		fprintf(stderr, "test_ac3_substream: done=%d frames=%u pcm=%llu\n",
+		        r.done, r.audio_frames, (unsigned long long)r.pcm_bytes);
+		return 6;
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int err;
@@ -536,6 +818,18 @@ int main(void)
 		return 70 + err;
 	}
 	printf("PASS: test_demuxer_bounded_behavior (bounded queues & backpressure)\n");
+
+	if ((err = test_ac3_192_all_frames()) != 0) {
+		fprintf(stderr, "FAIL: test_ac3_192_all_frames (code %d)\n", err);
+		return 80 + err;
+	}
+	printf("PASS: test_ac3_192_all_frames (AC-3 2.0 192k: every frame, DONE)\n");
+
+	if ((err = test_ac3_substream_selection()) != 0) {
+		fprintf(stderr, "FAIL: test_ac3_substream_selection (code %d)\n", err);
+		return 90 + err;
+	}
+	printf("PASS: test_ac3_substream_selection (first AC-3 substream only)\n");
 
 	printf("ALL DVD HOST TESTS PASSED.\n");
 	return 0;

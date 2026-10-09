@@ -12,6 +12,9 @@
 #define SDK_DVD_AC3_SAMPLES_PER_BLOCK 256U
 #define SDK_DVD_AC3_MAX_CHANNELS 6U
 #define SDK_DVD_AC3_ES_CAPACITY (3840U * 2U)
+/* Interleaved S16BE stereo bytes one AC-3 frame decodes to. */
+#define SDK_DVD_AC3_FRAME_PCM_BYTES \
+	(SDK_DVD_AC3_BLOCKS_PER_FRAME * SDK_DVD_AC3_SAMPLES_PER_BLOCK * 4U)
 
 struct SDKDVDAC3 {
 	void *state;             /* a52_state_t */
@@ -29,10 +32,19 @@ void sdk_dvd_ac3_init(struct SDKDVDAC3 *ac3);
 void sdk_dvd_ac3_reset(struct SDKDVDAC3 *ac3);
 void sdk_dvd_ac3_destroy(struct SDKDVDAC3 *ac3);
 /* Append raw AC-3 frame data (substream header already skipped). Resyncs
- * on 0x0B77 and decodes every complete frame into dst as interleaved
- * S16BE stereo. Returns bytes produced, bounded by capacity. */
+ * on 0x0B77 and decodes every complete frame that fits into dst as
+ * interleaved S16BE stereo; frames that do not fit stay staged for the next
+ * call. Input beyond the staging capacity drops the staged bytes. Returns
+ * bytes produced, bounded by capacity. */
 uint32_t sdk_dvd_ac3_decode(struct SDKDVDAC3 *ac3, const uint8_t *src,
                             uint32_t length, uint8_t *dst,
                             uint32_t capacity);
+/* Stage raw AC-3 bytes without decoding, never dropping anything: takes at
+ * most the free staging space and returns how many bytes it took. */
+uint32_t sdk_dvd_ac3_feed(struct SDKDVDAC3 *ac3, const uint8_t *src,
+                          uint32_t length);
+/* 1 when a complete frame is staged at the front (leading garbage is
+ * discarded on the way, as decode would). */
+int sdk_dvd_ac3_frame_ready(struct SDKDVDAC3 *ac3);
 
 #endif

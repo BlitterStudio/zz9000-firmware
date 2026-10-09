@@ -103,6 +103,7 @@ struct sdk_video_mpeg2 {
 	plm_audio_t *mp2;
 	struct SDKDVDLPCM lpcm;
 	struct SDKDVDAC3 ac3;
+	uint32_t ac3_packet_offset;  /* payload bytes of the head packet staged */
 	struct SDKVideoMediaConfig media;
 	struct SDKMediaTimeline timeline;
 	struct m2_pts_slot pts_slot[M2_PTS_SLOTS];
@@ -321,27 +322,73 @@ static uint32_t route_lpcm(struct sdk_video_mpeg2 *d,
 	return 1U;
 }
 
-static uint32_t route_ac3(struct sdk_video_mpeg2 *d,
-                          const struct SDKDVDPSPacket *packet)
+/* Decode every complete staged AC-3 frame, one frame at a time, while the
+ * PCM ring has room for a whole frame. A pack can carry several frames
+ * (about 2.6 at 192 kbit/s), so the stage never backs up as long as the
+ * client acknowledges. Returns 0 when the ring stopped it with a frame
+ * still staged; backpressure is raised so routing pauses until the ack. */
+static uint32_t pump_ac3(struct sdk_video_mpeg2 *d)
 {
-	static uint8_t pcm[SDK_DVD_AC3_BLOCKS_PER_FRAME *
-	                   SDK_DVD_AC3_SAMPLES_PER_BLOCK * 4U * 2U];
-	uint32_t bytes;
+	static uint8_t pcm[SDK_DVD_AC3_FRAME_PCM_BYTES];
 
-	if (packet->length <= SDK_DVD_AC3_HEADER_BYTES)
-		return 1U;
-	bytes = sdk_dvd_ac3_decode(
-		&d->ac3, packet->data + SDK_DVD_AC3_HEADER_BYTES,
-		packet->length - SDK_DVD_AC3_HEADER_BYTES, pcm, sizeof(pcm));
-	if (bytes != 0U) {
-		ring_emit(d, pcm, bytes);
-		d->audio_frames++;
+	while (sdk_dvd_ac3_frame_ready(&d->ac3)) {
+		uint32_t bytes;
+
+		/* ring_emit refuses everything while backpressure is set, so
+		 * a decoded frame would be lost: wait for the ack instead. */
+		if (d->pcm_backpressure ||
+		    ring_free(d) < SDK_DVD_AC3_FRAME_PCM_BYTES) {
+			if (!d->pcm_backpressure)
+				d->backpressure_events++;
+			d->pcm_backpressure = 1U;
+			d->media_flags |= SDK_VIDEO_MEDIA_FLAG_BACKPRESSURE;
+			return 0U;
+		}
+		bytes = sdk_dvd_ac3_decode(&d->ac3, 0, 0U, pcm, sizeof(pcm));
+		if (bytes != 0U) {
+			ring_emit(d, pcm, bytes);
+			d->audio_frames++;
+		}
 	}
 	return 1U;
 }
 
-static void route_audio(struct sdk_video_mpeg2 *d,
-                        const struct SDKDVDPSPacket *packet)
+/* Stage the packet payload in pieces the AC-3 stage can hold, decoding as
+ * it goes. Returns 0 (packet stays queued, resumed at ac3_packet_offset)
+ * when the PCM ring is full. */
+static uint32_t route_ac3(struct sdk_video_mpeg2 *d,
+                          const struct SDKDVDPSPacket *packet)
+{
+	const uint8_t *payload = packet->data + SDK_DVD_AC3_HEADER_BYTES;
+	uint32_t length;
+
+	if (packet->length <= SDK_DVD_AC3_HEADER_BYTES)
+		return 1U;
+	length = packet->length - SDK_DVD_AC3_HEADER_BYTES;
+	while (d->ac3_packet_offset < length) {
+		uint32_t taken;
+
+		if (!pump_ac3(d))
+			return 0U;
+		taken = sdk_dvd_ac3_feed(&d->ac3, payload + d->ac3_packet_offset,
+		                         length - d->ac3_packet_offset);
+		if (taken == 0U) {
+			/* Stage full without a whole frame in it: not AC-3
+			 * the decoder can use. Drop it and resync. */
+			d->malformed++;
+			sdk_dvd_ac3_reset(&d->ac3);
+			continue;
+		}
+		d->ac3_packet_offset += taken;
+	}
+	d->ac3_packet_offset = 0U;
+	pump_ac3(d);
+	return 1U;
+}
+
+/* Returns 0 when the packet must stay queued (AC-3 behind a full ring). */
+static uint32_t route_audio(struct sdk_video_mpeg2 *d,
+                            const struct SDKDVDPSPacket *packet)
 {
 	if (!d->audio_selected) {
 		if (packet->kind == SDK_DVD_PS_MP2 &&
@@ -358,13 +405,13 @@ static void route_audio(struct sdk_video_mpeg2 *d,
 			d->ac3_selected = 1U;
 			d->audio_selected = 1U;
 		} else {
-			return;
+			return 1U;
 		}
 	}
 	if ((packet->kind == SDK_DVD_PS_MP2 && !d->mp2_selected) ||
 	    (packet->kind == SDK_DVD_PS_LPCM && !d->lpcm_selected) ||
 	    (packet->kind == SDK_DVD_PS_AC3 && !d->ac3_selected))
-		return;
+		return 1U;
 	if (packet->pts != SDK_DVD_PS_NO_TS) {
 		if (d->first_audio_pts == M2_NO_PTS)
 			d->first_audio_pts = packet->pts;
@@ -375,23 +422,28 @@ static void route_audio(struct sdk_video_mpeg2 *d,
 	else if (packet->kind == SDK_DVD_PS_LPCM)
 		route_lpcm(d, packet);
 	else
-		route_ac3(d, packet);
+		return route_ac3(d, packet);
+	return 1U;
 }
 
 /* Drain the audio queue: before the stream kind is selected this scans
  * for the configured kind (bounded skip of other candidate streams); after
- * selection it decodes every matching packet up to backpressure. */
+ * selection it decodes every matching packet up to backpressure. AC-3
+ * frames left staged behind a full ring are decoded first. */
 static void route_audio_queue(struct sdk_video_mpeg2 *d)
 {
+	if (d->ac3_selected && !pump_ac3(d))
+		return;
 	while (!d->pcm_backpressure) {
 		const struct SDKDVDPSPacket *packet =
 			sdk_dvd_ps_peek_audio(&d->demux);
 		if (!packet)
 			break;
-		if (packet->kind == SDK_DVD_PS_MP2 ||
-		    packet->kind == SDK_DVD_PS_LPCM ||
-		    packet->kind == SDK_DVD_PS_AC3)
-			route_audio(d, packet);
+		if ((packet->kind == SDK_DVD_PS_MP2 ||
+		     packet->kind == SDK_DVD_PS_LPCM ||
+		     packet->kind == SDK_DVD_PS_AC3) &&
+		    !route_audio(d, packet))
+			break;
 		sdk_dvd_ps_pop_audio(&d->demux, 0);
 	}
 }
@@ -670,8 +722,10 @@ static int mpeg2_write(void *decoder, const uint8_t *src, uint32_t length,
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
 	if (d->input_eof)
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
-	if (!sdk_dvd_ps_write(&d->demux, src, length, &used, eof))
-		return SDK_VIDEO_BACKEND_WRITE_ERROR;
+	/* Inputs are validated above, so a 0 return here only means the
+	 * bounded queues are full and nothing was taken: that is
+	 * backpressure (reported below), not a stream error. */
+	(void)sdk_dvd_ps_write(&d->demux, src, length, &used, eof);
 	if (eof && used == length)
 		d->input_eof = 1U;
 	if (accepted)
@@ -704,8 +758,9 @@ static int audio_drained(struct sdk_video_mpeg2 *d)
 	if (d->mp2_selected)
 		return plm_audio_has_ended(d->mp2) ||
 		       plm_buffer_get_remaining(d->mp2_input) == 0U;
+	/* A trailing partial frame can never complete once input ended. */
 	if (d->ac3_selected)
-		return d->ac3.es_staged == 0U;
+		return !sdk_dvd_ac3_frame_ready(&d->ac3);
 	return 1U;
 }
 

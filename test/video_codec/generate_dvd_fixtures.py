@@ -9,8 +9,14 @@
 # - NTSC film 720x480 24000/1001 with signaled 3:2 repeat-first-field cadence
 # - 5.1 multichannel AC-3 DVD VOB for deterministic stereo downmix verification
 # - DVD LPCM packets with exact known 16-bit mono and stereo patterns
+# - 2 s of AC-3 2.0 192 kbit/s in 2 KB DVD packs (about 2.6 AC-3 frames per
+#   pack), so every frame must be decoded without the stage backing up
+# - two AC-3 tracks (substreams 0x80 and 0x81) of different lengths, so a
+#   demux that merges substreams is visible in the decoded frame count
 #
 # Generator: FFmpeg 7.1.5-0+deb13u1 (built with gcc 14) + Python 3.13
+# "generate_dvd_fixtures.py ac3_tracks" regenerates only the two AC-3 track
+# fixtures and leaves the others byte-identical.
 
 import os
 import subprocess
@@ -136,5 +142,47 @@ def build_fixtures():
             open(ac3_51_vob, "rb").read()
         )
 
+def build_ac3_track_fixtures():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 6. 2 s AC-3 2.0 192 kbit/s (768-byte frames) behind a still video
+        ac3_192_vob = os.path.join(tmpdir, "ac3_192.vob")
+        cmd_ac3_192 = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=gray:size=352x288:rate=25:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+            "-c:v", "mpeg2video", "-pix_fmt", "yuv420p", "-g", "12", "-b:v", "300k",
+            "-c:a", "ac3", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            "-f", "dvd", ac3_192_vob
+        ]
+        subprocess.run(cmd_ac3_192, check=True)
+        write_c_include(
+            os.path.join(HERE, "dvd_ac3_192_fixture.inc"),
+            "zz9k_dvd_ac3_192_fixture",
+            open(ac3_192_vob, "rb").read()
+        )
+
+        # 7. Two AC-3 tracks: 0x80 = 0.2 s at 440 Hz, 0x81 = 0.6 s at 1 kHz
+        ac3_dual_vob = os.path.join(tmpdir, "ac3_dual.vob")
+        cmd_ac3_dual = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=gray:size=352x288:rate=25:duration=0.6",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=0.2",
+            "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=0.6",
+            "-map", "0:v", "-map", "1:a", "-map", "2:a",
+            "-c:v", "mpeg2video", "-pix_fmt", "yuv420p", "-g", "12", "-b:v", "300k",
+            "-c:a", "ac3", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            "-f", "dvd", ac3_dual_vob
+        ]
+        subprocess.run(cmd_ac3_dual, check=True)
+        write_c_include(
+            os.path.join(HERE, "dvd_ac3_dual_fixture.inc"),
+            "zz9k_dvd_ac3_dual_fixture",
+            open(ac3_dual_vob, "rb").read()
+        )
+
 if __name__ == "__main__":
-    build_fixtures()
+    if sys.argv[1:] == ["ac3_tracks"]:
+        build_ac3_track_fixtures()
+    else:
+        build_fixtures()
+        build_ac3_track_fixtures()

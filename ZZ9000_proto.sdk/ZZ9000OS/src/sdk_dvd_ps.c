@@ -214,9 +214,20 @@ static int parse_one(struct SDKDVDPSDemux *d)
 	} else if (sid == 0xbdU && payload_length != 0U) {
 		uint8_t sub = p[payload_at];
 		if (sub >= 0x80U && sub <= 0x87U) {
-			if (payload_length < 4U) queued = -1;
-			else queued = queue_packet(d, &d->audio, SDK_DVD_PS_AC3,
-				sid, sub, 4U, p + payload_at, payload_length, pts, dts);
+			/* One AC-3 track: the first substream seen. Packets of
+			 * the others would interleave foreign frames into the
+			 * one decoder, so they are skipped. */
+			if (d->ac3_substream == 0U)
+				d->ac3_substream = sub;
+			if (sub != d->ac3_substream) {
+				d->bytes_ignored += total;
+			} else if (payload_length < 4U) {
+				queued = -1;
+			} else {
+				queued = queue_packet(d, &d->audio, SDK_DVD_PS_AC3,
+					sid, sub, 4U, p + payload_at, payload_length,
+					pts, dts);
+			}
 		} else if (sub >= 0xa0U && sub <= 0xa7U) {
 			if (payload_length < 7U) queued = -1;
 			else queued = queue_packet(d, &d->audio, SDK_DVD_PS_LPCM,

@@ -106,7 +106,9 @@ DVD_FIXTURES := dvd_pal_25p_fixture.inc \
 	dvd_pal_tff_fixture.inc \
 	dvd_ntsc_30_fixture.inc \
 	dvd_ntsc_film_32_fixture.inc \
-	dvd_ac3_51_fixture.inc
+	dvd_ac3_51_fixture.inc \
+	dvd_ac3_192_fixture.inc \
+	dvd_ac3_dual_fixture.inc
 
 build/dvd_codec_test: dvd_codec_test.c $(DVD_FIXTURES) $(DVD_SRCS) \
 	$(LIBMPEG2_HOST_LIB) $(LIBA52_HOST_LIB)
