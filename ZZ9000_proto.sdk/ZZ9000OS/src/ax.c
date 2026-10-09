@@ -30,6 +30,14 @@
 
 #define IIC2_DEVICE_ID	XPAR_XIICPS_1_DEVICE_ID
 #define IIC2_SCLK_RATE	100000
+/* Bulk program/parameter RAM download only: the ADAU1701 control port is
+ * rated for 400 kHz fast mode. Every burst is read back; any mismatch drops
+ * the bus to IIC2_SCLK_RATE and reloads word by word. */
+#define IIC2_BULK_SCLK_RATE	400000
+/* Words per burst. Reads stay below the PS I2C 255-byte transfer size. */
+#define ADAU_PROGRAM_BURST_WORDS	40
+#define ADAU_PARAMETER_BURST_WORDS	50
+#define ADAU_BURST_MAX_BYTES	200
 #define ADAU_I2C_ADDR	0x68
 #define ADAU_PROGRAM_RAM_BASE	1024
 #define ADAU_PROGRAM_WORD_BYTES	5
@@ -331,6 +339,103 @@ static int adau_read40(u8 i2c_addr, u16 addr, u8* buffer) {
 	return 0;
 }
 
+static int adau_wait_idle(XIicPs *iic)
+{
+	int timeout = 0;
+
+	while (XIicPs_BusIsBusy(iic)) {
+		usleep(1);
+		if (++timeout > 10000) {
+			printf("ADAU I2C burst timeout.\n");
+			return -1;
+		}
+	}
+	return 0;
+}
+
+/* Burst write: the ADAU1701 advances the subaddress after every complete
+ * memory word, so one transfer fills consecutive program/parameter words. */
+static int adau_write_burst(u8 i2c_addr, u16 addr, const u8 *data, u32 len)
+{
+	XIicPs *iic = &Iic2;
+	u8 buffer[2 + ADAU_BURST_MAX_BYTES];
+
+	if (len == 0U || len > ADAU_BURST_MAX_BYTES)
+		return -1;
+	buffer[0] = addr >> 8;
+	buffer[1] = addr & 0xff;
+	memcpy(&buffer[2], data, len);
+	if (adau_wait_idle(iic) != 0)
+		return -1;
+	return XIicPs_MasterSendPolled(iic, buffer, (s32)(2U + len), i2c_addr);
+}
+
+/* Burst read with the same auto-increment, for verification. */
+static int adau_read_burst(u8 i2c_addr, u16 addr, u8 *data, u32 len)
+{
+	XIicPs *iic = &Iic2;
+	u8 abuffer[2];
+	int status;
+
+	if (len == 0U || len > ADAU_BURST_MAX_BYTES)
+		return -1;
+	abuffer[0] = addr >> 8;
+	abuffer[1] = addr & 0xff;
+	XIicPs_SetOptions(iic, XIICPS_REP_START_OPTION);
+	if (adau_wait_idle(iic) != 0) {
+		XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
+		return -1;
+	}
+	status = XIicPs_MasterSendPolled(iic, abuffer, 2, i2c_addr);
+	XIicPs_ClearOptions(iic, XIICPS_REP_START_OPTION);
+	if (status != 0)
+		return status;
+	status = XIicPs_MasterRecvPolled(iic, data, (s32)len, i2c_addr);
+	if (status != 0)
+		return status;
+	return adau_wait_idle(iic);
+}
+
+/* Write and read back one RAM image in bursts at the bulk clock. Parameter
+ * words carry the same high-nibble mask as audio_adau_write_parameter().
+ * Returns 0 only if every burst read back identically; the bus is back at
+ * IIC2_SCLK_RATE on return either way. */
+static int audio_adau_burst_load(u16 base, const uint8_t *image, uint32_t len,
+                                 uint32_t word_bytes, uint32_t burst_words)
+{
+	u8 wire[ADAU_BURST_MAX_BYTES];
+	u8 readback[ADAU_BURST_MAX_BYTES];
+	uint32_t offset = 0U;
+	int ok = 1;
+
+	if (XIicPs_SetSClk(&Iic2, IIC2_BULK_SCLK_RATE) != 0)
+		return -1;
+	while (ok && offset < len) {
+		uint32_t chunk = burst_words * word_bytes;
+		uint32_t w;
+
+		if (chunk > len - offset)
+			chunk = len - offset;
+		memcpy(wire, &image[offset], chunk);
+		if (word_bytes == ADAU_PARAMETER_WORD_BYTES)
+			for (w = 0U; w < chunk; w += word_bytes)
+				wire[w] &= 0x0fU;
+		memset(readback, 0, chunk);
+		ok = adau_write_burst(0x34, base + offset / word_bytes, wire,
+		                      chunk) == 0 &&
+		     adau_read_burst(0x34, base + offset / word_bytes, readback,
+		                     chunk) == 0 &&
+		     memcmp(wire, readback, chunk) == 0;
+		offset += chunk;
+	}
+	(void)XIicPs_SetSClk(&Iic2, IIC2_SCLK_RATE);
+	if (!ok)
+		printf("[adau] burst load at 0x%03x failed near word %lu; "
+		       "reloading word by word\n", base,
+		       (unsigned long)(offset / word_bytes));
+	return ok ? 0 : -1;
+}
+
 
 int audio_adau_write_parameter(uint16_t address,
 		const uint8_t value[ADAU_PARAMETER_WORD_BYTES])
@@ -380,6 +485,13 @@ int audio_program_adau_params(uint8_t *params, uint32_t param_len) {
 		return -1;
 	}
 
+	if (audio_adau_burst_load(ADAU_PARAMETER_RAM_BASE, params, param_len,
+			ADAU_PARAMETER_WORD_BYTES,
+			ADAU_PARAMETER_BURST_WORDS) == 0) {
+		printf("[adau] verified %lu parameter words (burst)\n",
+				(unsigned long)(param_len/ADAU_PARAMETER_WORD_BYTES));
+		return 0;
+	}
 	for (uint32_t i = 0; i < param_len;
 			i += ADAU_PARAMETER_WORD_BYTES) {
 		uint16_t addr = ADAU_PARAMETER_RAM_BASE +
@@ -439,6 +551,13 @@ int audio_program_adau(uint8_t *program, uint32_t program_len) {
 		return -1;
 	}
 
+	if (audio_adau_burst_load(ADAU_PROGRAM_RAM_BASE, program, program_len,
+			ADAU_PROGRAM_WORD_BYTES,
+			ADAU_PROGRAM_BURST_WORDS) == 0) {
+		printf("[adau] verified %lu program words (burst)\n",
+				(unsigned long)(program_len/ADAU_PROGRAM_WORD_BYTES));
+		return 0;
+	}
 	for (offset = 0U; offset < program_len;
 			offset += ADAU_PROGRAM_WORD_BYTES) {
 		if (audio_program_adau_word(program, offset) != 0) {
