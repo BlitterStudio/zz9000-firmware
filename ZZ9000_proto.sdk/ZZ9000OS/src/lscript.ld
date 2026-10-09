@@ -44,8 +44,8 @@ SECTIONS
 .text : {
    KEEP (*(.vectors))
    KEEP (*(.boot))
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .text)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .text.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .text)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .text.*)
    *(.gnu.linkonce.t.*)
    *(.plt)
    *(.gnu_warning)
@@ -67,8 +67,8 @@ SECTIONS
 
 .rodata : {
    __rodata_start = .;
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .rodata)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .rodata.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .rodata)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .rodata.*)
    *(.gnu.linkonce.r.*)
    __rodata_end = .;
 } > ps7_ddr_0
@@ -311,6 +311,30 @@ ASSERT(__z2_direct_ring_end <= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
    *sdk_video_yuy2.o(.text.*)
    *sdk_video_yuy2.o(.rodata)
    *sdk_video_yuy2.o(.rodata.*)
+   *sdk_dvd_ps.o(.text)
+   *sdk_dvd_ps.o(.text.*)
+   *sdk_dvd_ps.o(.rodata)
+   *sdk_dvd_ps.o(.rodata.*)
+   *sdk_dvd_lpcm.o(.text)
+   *sdk_dvd_lpcm.o(.text.*)
+   *sdk_dvd_lpcm.o(.rodata)
+   *sdk_dvd_lpcm.o(.rodata.*)
+   *sdk_dvd_ac3.o(.text)
+   *sdk_dvd_ac3.o(.text.*)
+   *sdk_dvd_ac3.o(.rodata)
+   *sdk_dvd_ac3.o(.rodata.*)
+   *libmpeg2.a:*(.text)
+   *libmpeg2.a:*(.text.*)
+   *libmpeg2.a:*(.rodata)
+   *libmpeg2.a:*(.rodata.*)
+   *liba52.a:*(.text)
+   *liba52.a:*(.text.*)
+   *liba52.a:*(.rodata)
+   *liba52.a:*(.rodata.*)
+   *sdk_video_mpeg2.o(.text)
+   *sdk_video_mpeg2.o(.text.*)
+   *sdk_video_mpeg2.o(.rodata)
+   *sdk_video_mpeg2.o(.rodata.*)
    . = ALIGN(16);
    __sdk_codec_text_end = .;
 } > ps7_ddr_hi

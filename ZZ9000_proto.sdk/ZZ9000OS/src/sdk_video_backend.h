@@ -10,6 +10,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Codec ids shared by the backend registry and the firmware ABI. */
+#define SDK_VIDEO_CODEC_MPEG1 1U
+#define SDK_VIDEO_CODEC_MPEG2 2U
+#define SDK_VIDEO_CONTAINER_MPEG_PS 1U
+
 struct SDKVideoDecoderInfo {
 	uint32_t width;
 	uint32_t height;
@@ -27,13 +32,18 @@ struct SDKVideoDecodedFrame {
 	uint32_t time_millis;
 	uint64_t media_pts;
 	uint64_t raw_pts;
+	uint64_t raw_dts;
 	uint32_t media_flags;
+	uint32_t picture_flags;
+	uint32_t display_fields;
 };
 
 #define SDK_VIDEO_MEDIA_NO_PTS UINT64_C(0xffffffffffffffff)
 #define SDK_VIDEO_MEDIA_AUDIO_NONE 0U
 #define SDK_VIDEO_MEDIA_AUDIO_MP2 1U
 #define SDK_VIDEO_MEDIA_SAMPLE_S16BE 2U
+#define SDK_VIDEO_MEDIA_AUDIO_LPCM 2U
+#define SDK_VIDEO_MEDIA_AUDIO_AC3 3U
 #define SDK_VIDEO_MEDIA_PCM_FRAME_BYTES 4U
 #define SDK_VIDEO_MEDIA_MAX_PCM_RING (256U * 1024U)
 
@@ -43,6 +53,15 @@ struct SDKVideoDecodedFrame {
 #define SDK_VIDEO_MEDIA_FLAG_DISCONTINUITY (1U << 3)
 #define SDK_VIDEO_MEDIA_FLAG_REBASED       (1U << 4)
 #define SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE    (1U << 5)
+
+/* Picture structure reported per decoded frame (U11). TFF/BFF mirror the
+ * MPEG-2 picture header; FIELD_PICTURE means field-coded (interlaced
+ * picture structure); REPEAT_FIRST_FIELD carries the cadence bit. */
+#define SDK_VIDEO_PICTURE_FLAG_PROGRESSIVE (1U << 0)
+#define SDK_VIDEO_PICTURE_FLAG_TFF         (1U << 1)
+#define SDK_VIDEO_PICTURE_FLAG_BFF         (1U << 2)
+#define SDK_VIDEO_PICTURE_FLAG_FIELD       (1U << 3)
+#define SDK_VIDEO_PICTURE_FLAG_REPEAT      (1U << 4)
 
 struct SDKVideoMediaConfig {
 	uint32_t audio_codec;
@@ -103,6 +122,8 @@ struct SDKVideoDecoderOps {
 
 const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
 	                                                     uint32_t container);
+
+const struct SDKVideoDecoderOps *sdk_video_mpeg2_backend_ops(void);
 
 #ifdef SDK_VIDEO_HOST_TEST
 int sdk_video_plmpeg_test_boundary_mp2_probe(void);
