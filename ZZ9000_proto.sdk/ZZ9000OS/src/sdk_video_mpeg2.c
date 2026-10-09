@@ -631,6 +631,18 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 	}
 }
 
+/* Video-only session: nobody consumes audio, and queued packets would
+ * fill the demux until every write reports backpressure nothing can
+ * relieve, or hold back the end of the stream. Each pop re-pumps the
+ * demux, so this runs wherever video is taken too. */
+static void drop_audio(struct sdk_video_mpeg2 *d)
+{
+	if (d->media_configured)
+		return;
+	while (sdk_dvd_ps_peek_audio(&d->demux))
+		sdk_dvd_ps_pop_audio(&d->demux, 0);
+}
+
 /* Hand one queued PES to libmpeg2 per call. mpeg2_tag_picture() latches the
  * tag onto the next picture the decoder PARSES, so a PTS-bearing PES must
  * be tagged and handed over in its own step: batching several pictures into
@@ -660,6 +672,7 @@ static int feed_video(struct sdk_video_mpeg2 *d)
 	mpeg2_buffer(d->decoder, d->es, d->es + d->es_len);
 	d->es_len = 0U;
 	sdk_dvd_ps_pop_video(&d->demux, 0);
+	drop_audio(d);
 	return 1;
 }
 
@@ -768,15 +781,10 @@ static int mpeg2_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 
 	if (!d || !frame || d->failed)
 		return SDK_VIDEO_BACKEND_ERROR;
-	if (d->media_configured) {
+	if (d->media_configured)
 		route_audio_queue(d);
-	} else {
-		/* Video-only session: nobody consumes audio, and queued
-		 * packets would fill the demux until every write reports
-		 * backpressure that nothing can relieve. */
-		while (sdk_dvd_ps_peek_audio(&d->demux))
-			sdk_dvd_ps_pop_audio(&d->demux, 0);
-	}
+	else
+		drop_audio(d);
 	for (;;) {
 		result = parse_video(d, frame);
 		if (result > 0)
@@ -796,6 +804,15 @@ static int mpeg2_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 	return SDK_VIDEO_BACKEND_NEED_INPUT;
 }
 
+/* DVD Program Stream audio: MP2, LPCM or AC-3. A media session always
+ * carries one; video-only playback uses a legacy session. */
+static int mpeg2_audio_ok(uint32_t audio_codec)
+{
+	return audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2 ||
+	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_LPCM ||
+	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_AC3;
+}
+
 static int mpeg2_configure_media(void *decoder,
                                  const struct SDKVideoMediaConfig *config)
 {
@@ -803,9 +820,7 @@ static int mpeg2_configure_media(void *decoder,
 
 	if (!d || !config || d->media_configured)
 		return 0;
-	if (config->audio_codec != SDK_VIDEO_MEDIA_AUDIO_MP2 &&
-	    config->audio_codec != SDK_VIDEO_MEDIA_AUDIO_LPCM &&
-	    config->audio_codec != SDK_VIDEO_MEDIA_AUDIO_AC3)
+	if (!mpeg2_audio_ok(config->audio_codec))
 		return 0;
 	if (!config->pcm_ring || config->pcm_ring_capacity == 0U ||
 	    config->pcm_ring_capacity > SDK_VIDEO_MEDIA_MAX_PCM_RING ||

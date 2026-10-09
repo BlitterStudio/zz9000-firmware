@@ -137,6 +137,8 @@ struct stream_result {
 	uint32_t audio_frames;
 	uint32_t audio_rate;
 	uint32_t audio_channels;
+	int eof_state; /* decode result once the EOF write is all in */
+	int final_state;
 };
 
 static int run_decode_test(const uint8_t *stream, uint32_t length,
@@ -231,6 +233,8 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 			ops->destroy(decoder);
 			return 6;
 		}
+		if (eof && offset == length)
+			out->eof_state = res;
 		/* A backend stuck in backpressure with nothing to decode must
 		 * fail the test, not hang CI. */
 		if (accepted == 0U && out->frame_count == frames_before) {
@@ -273,6 +277,7 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 			}
 			out->frame_count++;
 		}
+		out->final_state = res;
 	}
 
 	{
@@ -789,18 +794,30 @@ static int test_ac3_truncated_mid_frame(void)
 
 /* 6d. A video-only session on a VOB that carries AC-3: the audio is
  * nobody's, so it must be dropped rather than fill the demux and leave
- * every write in backpressure. */
+ * every write in backpressure, and it must not hold back the end of the
+ * stream. Whole-file writes queue the most audio at once. */
 static int test_video_only_ignores_audio(void)
 {
-	struct stream_result r;
-	int rc = run_decode_test(zz9k_dvd_ac3_192_fixture,
-	                         zz9k_dvd_ac3_192_fixture_len, 2048U,
-	                         SDK_VIDEO_MEDIA_AUDIO_NONE, &r);
+	static const uint32_t chunks[] = { 2048U, 65536U, 0U };
+	uint32_t i;
 
-	if (rc != 0)
-		return rc;
-	if (r.frame_count != 50U)
-		return 20;
+	for (i = 0U; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
+		struct stream_result r;
+		int rc = run_decode_test(zz9k_dvd_ac3_192_fixture,
+		                         zz9k_dvd_ac3_192_fixture_len,
+		                         chunks[i], SDK_VIDEO_MEDIA_AUDIO_NONE,
+		                         &r);
+
+		if (rc != 0)
+			return rc;
+		if (r.frame_count != 50U)
+			return 20;
+		/* Once the EOF write is in, decoding runs to DONE without a
+		 * NEED_INPUT the client could only answer with another write. */
+		if (r.eof_state != SDK_VIDEO_BACKEND_DONE ||
+		    r.final_state != SDK_VIDEO_BACKEND_DONE)
+			return 21;
+	}
 	return 0;
 }
 
