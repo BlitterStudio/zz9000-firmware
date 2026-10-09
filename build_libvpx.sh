@@ -60,7 +60,7 @@ fetch() {
     echo "[vpx] sha256 $actual"
     if [ "$actual" != "$SHA256" ]; then
         echo "ERROR: libvpx checksum mismatch" >&2
-        echo "  expected: $LIBVPX_SHA256" >&2
+        echo "  expected: $SHA256" >&2
         echo "  actual:   $actual" >&2
         exit 1
     fi
