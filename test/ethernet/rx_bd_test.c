@@ -61,6 +61,21 @@ static void ethernet_send_pause_frame(void) { pauses++; }
 static void ethernet_clear_backlog_slot(u16 slot) { assert(slot < FRAME_MAX_BACKLOG); clears++; }
 static u8 *ethernet_backlog_payload_ptr(u16 slot) { return (u8 *)(UINTPTR)(0x100000u + slot * FRAME_SIZE + RX_FRAME_PAD); }
 static u8 *ethernet_backlog_slot_ptr(u16 slot) { assert(slot < FRAME_MAX_BACKLOG); return frame_bytes[slot]; }
+static unsigned payload_publications, header_publications;
+static u8 payload_published[FRAME_MAX_BACKLOG];
+static void ethernet_backlog_slot_publish_from(u16 slot, u32 from, u32 bytes)
+{
+    assert(slot < FRAME_MAX_BACKLOG && from + bytes <= FRAME_SIZE);
+    /* A frame's payload lines go first and its header's line last
+       (every frame in these cases is longer than one line). */
+    if (from == 0) {
+        assert(bytes == 32 && payload_published[slot]);
+        payload_published[slot] = 0; header_publications++;
+    } else {
+        assert(from == 32 && !payload_published[slot]);
+        payload_published[slot] = 1; payload_publications++;
+    }
+}
 static u32 XEmacPs_ReadReg(u32 base, u32 offset) { (void)base; (void)offset; return 0; }
 static void XEmacPs_WriteReg(u32 base, u32 offset, u32 value) { (void)base; (void)offset; (void)value; }
 /* RX_FUNCTIONS */
@@ -80,6 +95,8 @@ static void setup(void)
     rx_backpressure = frames_dropped = frames_backlog_full = rx_slot_mismatch = 0;
     frames_backlog = frames_backlog_read = frames_backlog_write = frames_backlog_reserved = frames_backlog_reserve = frame_serial = 0;
     frames_received = barriers = grants = unsafe_grants = pauses = clears = watch_grants = 0;
+    payload_publications = header_publications = 0;
+    memset(payload_published, 0, sizeof(payload_published));
 }
 static void complete(unsigned bd)
 {
@@ -101,6 +118,7 @@ int main(int argc, char **argv)
         arm_last_slot(); complete(0); XEmacPsRecvHandler(&EmacPsInstance);
         assert(frames_backlog == W && !frames_backlog_reserved && !r->HwCnt && r->FreeCnt == RXBD_CNT);
         assert(descriptors[0][0] & XEMACPS_RXBUF_NEW_MASK);
+        assert(payload_publications == 1 && header_publications == 1 && !payload_published[W - 1]);
         puts("PASS pressure: completed descriptor stays CPU-owned while refill is withheld");
     } else if (!strcmp(argv[1], "scan")) {
         arm_last_slot(); complete(0);
