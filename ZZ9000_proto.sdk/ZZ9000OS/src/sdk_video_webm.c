@@ -1093,6 +1093,13 @@ static int webm_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 	}
 }
 
+static int webm_audio_ok(uint32_t audio_codec)
+{
+	return audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE ||
+	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_OPUS ||
+	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_VORBIS;
+}
+
 static const struct SDKVideoDecoderOps webm_vp8_ops = {
 	.codec = SDK_VIDEO_CODEC_VP8,
 	.container = SDK_VIDEO_CONTAINER_WEBM,
@@ -1106,7 +1113,8 @@ static const struct SDKVideoDecoderOps webm_vp8_ops = {
 	.get_media_info = webm_get_media_info,
 	.ack_media = webm_ack_media,
 	.set_decode_flags = webm_set_flags,
-	.geometry_ok = webm_size_allowed
+	.geometry_ok = webm_size_allowed,
+	.audio_ok = webm_audio_ok
 };
 
 static const struct SDKVideoDecoderOps webm_vp9_ops = {
@@ -1122,7 +1130,8 @@ static const struct SDKVideoDecoderOps webm_vp9_ops = {
 	.get_media_info = webm_get_media_info,
 	.ack_media = webm_ack_media,
 	.set_decode_flags = webm_set_flags,
-	.geometry_ok = webm_size_allowed
+	.geometry_ok = webm_size_allowed,
+	.audio_ok = webm_audio_ok
 };
 
 const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec)

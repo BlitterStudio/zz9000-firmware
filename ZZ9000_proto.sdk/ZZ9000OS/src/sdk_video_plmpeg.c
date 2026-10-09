@@ -1069,6 +1069,13 @@ static int plmpeg_ack_media(void *opaque, uint64_t acknowledged)
 	return 1;
 }
 
+/* An MPEG-1 Program Stream carries MP2 audio only. */
+static int plmpeg_audio_ok(uint32_t audio_codec)
+{
+	return audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE ||
+	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2;
+}
+
 static const struct SDKVideoDecoderOps plmpeg_ops = {
 	.codec = SDK_VIDEO_CODEC_MPEG1,
 	.container = SDK_VIDEO_CONTAINER_MPEG_PS,
@@ -1081,6 +1088,7 @@ static const struct SDKVideoDecoderOps plmpeg_ops = {
 	.configure_media = plmpeg_configure_media,
 	.get_media_info = plmpeg_get_media_info,
 	.ack_media = plmpeg_ack_media,
+	.audio_ok = plmpeg_audio_ok,
 };
 
 const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,

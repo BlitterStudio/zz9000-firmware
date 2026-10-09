@@ -110,6 +110,13 @@ static int mock_accept_any_geometry(uint32_t width, uint32_t height)
 	return 1;
 }
 
+/* Stands in for an MPEG-1 PS backend's audio rule (MP2 or none). */
+static int mock_mp2_audio_ok(uint32_t audio_codec)
+{
+	return audio_codec == SDK_MEDIA_AUDIO_NONE ||
+	       audio_codec == SDK_MEDIA_AUDIO_MP2;
+}
+
 static struct SDKVideoDecoderOps mock_ops = {
 	SDK_VIDEO_CODEC_MPEG1,
 	SDK_VIDEO_CONTAINER_MPEG_PS,
@@ -123,6 +130,7 @@ static struct SDKVideoDecoderOps mock_ops = {
 	mock_get_media_info,
 	mock_ack_media,
 	mock_set_decode_flags,
+	0,
 	0
 };
 
@@ -236,12 +244,13 @@ static int test_webm_stream_envelopes(void)
 	    SDK_STATUS_BAD_REQUEST)
 		return 13;
 
-	/* Opus/Vorbis on non-WebM container -> UNSUPPORTED. The mock serves
-	 * MPEG-1 PS here, so a backend exists and only the audio/container
-	 * guard can refuse. */
+	/* Opus/Vorbis on a container whose backend carries only MP2 ->
+	 * UNSUPPORTED. The mock serves MPEG-1 PS here with that rule, so a
+	 * backend exists and only its audio check can refuse. */
 	mock_ops.codec = SDK_VIDEO_CODEC_MPEG1;
 	mock_ops.container = SDK_VIDEO_CONTAINER_MPEG_PS;
 	mock_ops.geometry_ok = 0;
+	mock_ops.audio_ok = mock_mp2_audio_ok;
 	begin.codec = SDK_VIDEO_CODEC_MPEG1;
 	begin.container = SDK_VIDEO_CONTAINER_MPEG_PS;
 	begin.width = 320U;
@@ -265,6 +274,7 @@ static int test_webm_stream_envelopes(void)
 	mock_ops.codec = SDK_VIDEO_CODEC_VP8;
 	mock_ops.container = SDK_VIDEO_CONTAINER_WEBM;
 	mock_ops.geometry_ok = mock_webm_geometry_ok;
+	mock_ops.audio_ok = 0;
 
 	/* Portrait and odd dimensions pass the size check. */
 	begin.codec = SDK_VIDEO_CODEC_VP8;

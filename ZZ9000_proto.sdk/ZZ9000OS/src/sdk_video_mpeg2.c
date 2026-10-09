@@ -912,6 +912,7 @@ static const struct SDKVideoDecoderOps mpeg2_ops = {
 	.configure_media = mpeg2_configure_media,
 	.get_media_info = mpeg2_get_media_info,
 	.ack_media = mpeg2_ack_media,
+	.audio_ok = mpeg2_audio_ok,
 };
 
 const struct SDKVideoDecoderOps *sdk_video_mpeg2_backend_ops(void)

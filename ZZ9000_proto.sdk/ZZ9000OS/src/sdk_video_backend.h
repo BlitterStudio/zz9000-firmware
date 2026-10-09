@@ -131,6 +131,10 @@ struct SDKVideoDecoderOps {
 	 * will not play it). NULL applies the session's generic 1920x1080
 	 * cap, which rejects larger sizes as BAD_REQUEST. */
 	int (*geometry_ok)(uint32_t width, uint32_t height);
+	/* Optional. Media audio codecs this backend's container carries,
+	 * checked at session begin; a refusal is UNSUPPORTED. NULL accepts
+	 * every codec the session layer allows. */
+	int (*audio_ok)(uint32_t audio_codec);
 };
 
 const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec);

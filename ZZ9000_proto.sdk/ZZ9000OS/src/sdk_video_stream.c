@@ -287,10 +287,9 @@ uint16_t sdk_video_stream_begin_owned(
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_OPUS &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_VORBIS)
 		return SDK_STATUS_UNSUPPORTED;
-	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA &&
-	    (begin->audio_codec == SDK_VIDEO_MEDIA_AUDIO_OPUS ||
-	     begin->audio_codec == SDK_VIDEO_MEDIA_AUDIO_VORBIS) &&
-	    begin->container != SDK_VIDEO_CONTAINER_WEBM)
+	/* Which of those a container can carry belongs to its backend. */
+	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA && ops && ops->audio_ok &&
+	    !ops->audio_ok(begin->audio_codec))
 		return SDK_STATUS_UNSUPPORTED;
 	if (!ops)
 		return SDK_STATUS_UNSUPPORTED;
