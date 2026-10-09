@@ -177,7 +177,10 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 		}
 	}
 
+	uint32_t stalls = 0U;
+
 	while (offset < length) {
+		uint32_t frames_before = out->frame_count;
 		uint32_t chunk = chunk_size != 0U ? chunk_size : (length - offset);
 		uint32_t accepted = 0U;
 		int eof = (offset + chunk >= length);
@@ -227,6 +230,17 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 			if (pcm_ring) free(pcm_ring);
 			ops->destroy(decoder);
 			return 6;
+		}
+		/* A backend stuck in backpressure with nothing to decode must
+		 * fail the test, not hang CI. */
+		if (accepted == 0U && out->frame_count == frames_before) {
+			if (++stalls > 1000U) {
+				if (pcm_ring) free(pcm_ring);
+				ops->destroy(decoder);
+				return 7;
+			}
+		} else {
+			stalls = 0U;
 		}
 	}
 
@@ -639,12 +653,23 @@ static int ac3_reference(const uint8_t *stream, uint32_t length,
 		while ((p = sdk_dvd_ps_peek_audio(&demux)) != NULL) {
 			if (p->kind == SDK_DVD_PS_AC3 &&
 			    p->length > SDK_DVD_AC3_HEADER_BYTES) {
-				uint32_t n = sdk_dvd_ac3_decode(
-					&ac3, p->data + SDK_DVD_AC3_HEADER_BYTES,
-					p->length - SDK_DVD_AC3_HEADER_BYTES,
-					pcm, sizeof(pcm));
-				*hash = fnv1a64(*hash, pcm, n);
-				*bytes += n;
+				const uint8_t *in = p->data + SDK_DVD_AC3_HEADER_BYTES;
+				uint32_t left = p->length - SDK_DVD_AC3_HEADER_BYTES;
+
+				/* Stage what fits, decode, repeat: the output
+				 * buffer holds every frame one feed can complete. */
+				while (left != 0U) {
+					uint32_t took = sdk_dvd_ac3_feed(&ac3, in, left);
+					uint32_t n = sdk_dvd_ac3_decode(&ac3, pcm,
+					                                sizeof(pcm));
+
+					*hash = fnv1a64(*hash, pcm, n);
+					*bytes += n;
+					if (took == 0U && n == 0U)
+						break;
+					in += took;
+					left -= took;
+				}
 			}
 			sdk_dvd_ps_pop_audio(&demux, NULL);
 		}
@@ -759,6 +784,23 @@ static int test_ac3_truncated_mid_frame(void)
 		return 4;
 	if (r.audio_frames == 0U || r.audio_frames >= 63U)
 		return 5;
+	return 0;
+}
+
+/* 6d. A video-only session on a VOB that carries AC-3: the audio is
+ * nobody's, so it must be dropped rather than fill the demux and leave
+ * every write in backpressure. */
+static int test_video_only_ignores_audio(void)
+{
+	struct stream_result r;
+	int rc = run_decode_test(zz9k_dvd_ac3_192_fixture,
+	                         zz9k_dvd_ac3_192_fixture_len, 2048U,
+	                         SDK_VIDEO_MEDIA_AUDIO_NONE, &r);
+
+	if (rc != 0)
+		return rc;
+	if (r.frame_count != 50U)
+		return 20;
 	return 0;
 }
 
@@ -891,6 +933,12 @@ int main(void)
 		return 110 + err;
 	}
 	printf("PASS: test_ac3_truncated_mid_frame (cut VOB still ends DONE)\n");
+
+	if ((err = test_video_only_ignores_audio()) != 0) {
+		fprintf(stderr, "FAIL: test_video_only_ignores_audio (code %d)\n", err);
+		return 120 + err;
+	}
+	printf("PASS: test_video_only_ignores_audio (video-only VOB with AC-3)\n");
 
 	if ((err = test_ac3_substream_selection()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_substream_selection (code %d)\n", err);

@@ -151,27 +151,13 @@ int sdk_dvd_ac3_frame_ready(struct SDKDVDAC3 *ac3)
 	return staged_frame_length(ac3) != 0U;
 }
 
-uint32_t sdk_dvd_ac3_decode(struct SDKDVDAC3 *ac3, const uint8_t *src,
-                            uint32_t length, uint8_t *dst,
+uint32_t sdk_dvd_ac3_decode(struct SDKDVDAC3 *ac3, uint8_t *dst,
                             uint32_t capacity)
 {
 	uint32_t produced = 0U;
 
-	if (!ac3 || !ac3->state || (!src && length != 0U) || !dst)
+	if (!ac3 || !ac3->state || !dst)
 		return 0U;
-	if (length != 0U) {
-		if (length > SDK_DVD_AC3_ES_CAPACITY)
-			length = SDK_DVD_AC3_ES_CAPACITY;
-		if (ac3->es_staged + length > SDK_DVD_AC3_ES_CAPACITY) {
-			/* Bounded staging: drop everything and resync on the
-			 * next frame boundary rather than grow. A valid AC-3
-			 * frame (<= 3840 bytes) always fits the buffer. */
-			ac3->malformed += ac3->es_staged;
-			ac3->es_staged = 0U;
-		}
-		memcpy(ac3->es + ac3->es_staged, src, length);
-		ac3->es_staged += length;
-	}
 
 	for (;;) {
 		int source_flags = 0;

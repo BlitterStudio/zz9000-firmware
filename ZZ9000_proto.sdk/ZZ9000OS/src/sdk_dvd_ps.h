@@ -53,9 +53,10 @@ struct SDKDVDPSDemux {
 };
 
 void sdk_dvd_ps_init(struct SDKDVDPSDemux *demux);
-/* Consumes as much input as bounded staging and output queues permit. */
-int sdk_dvd_ps_write(struct SDKDVDPSDemux *demux, const uint8_t *src,
-                     uint32_t length, uint32_t *accepted, int eof);
+/* Consumes as much input as bounded staging and output queues permit and
+ * reports the count in *accepted (0 when the queues are full). */
+void sdk_dvd_ps_write(struct SDKDVDPSDemux *demux, const uint8_t *src,
+                      uint32_t length, uint32_t *accepted, int eof);
 const struct SDKDVDPSPacket *sdk_dvd_ps_peek_video(
 	const struct SDKDVDPSDemux *demux);
 const struct SDKDVDPSPacket *sdk_dvd_ps_peek_audio(

@@ -255,8 +255,8 @@ void sdk_dvd_ps_init(struct SDKDVDPSDemux *d)
 		memset(d, 0, sizeof(*d));
 }
 
-int sdk_dvd_ps_write(struct SDKDVDPSDemux *d, const uint8_t *src,
-                     uint32_t length, uint32_t *accepted, int eof)
+void sdk_dvd_ps_write(struct SDKDVDPSDemux *d, const uint8_t *src,
+                      uint32_t length, uint32_t *accepted, int eof)
 {
 	uint32_t used = 0U;
 	int state = 1;
@@ -264,7 +264,7 @@ int sdk_dvd_ps_write(struct SDKDVDPSDemux *d, const uint8_t *src,
 	if (accepted)
 		*accepted = 0U;
 	if (!d || (length != 0U && !src) || d->eof)
-		return 0;
+		return;
 	while (used < length) {
 		uint32_t room;
 		uint32_t copy;
@@ -287,7 +287,6 @@ int sdk_dvd_ps_write(struct SDKDVDPSDemux *d, const uint8_t *src,
 	while ((state = parse_one(d)) == 1) {}
 	if (accepted)
 		*accepted = used;
-	return state != 0 || used != 0U;
 }
 
 static void pump(struct SDKDVDPSDemux *d)

@@ -344,7 +344,7 @@ static uint32_t pump_ac3(struct sdk_video_mpeg2 *d)
 			d->media_flags |= SDK_VIDEO_MEDIA_FLAG_BACKPRESSURE;
 			return 0U;
 		}
-		bytes = sdk_dvd_ac3_decode(&d->ac3, 0, 0U, pcm, sizeof(pcm));
+		bytes = sdk_dvd_ac3_decode(&d->ac3, pcm, sizeof(pcm));
 		if (bytes != 0U) {
 			ring_emit(d, pcm, bytes);
 			d->audio_frames++;
@@ -722,10 +722,7 @@ static int mpeg2_write(void *decoder, const uint8_t *src, uint32_t length,
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
 	if (d->input_eof)
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
-	/* Inputs are validated above, so a 0 return here only means the
-	 * bounded queues are full and nothing was taken: that is
-	 * backpressure (reported below), not a stream error. */
-	(void)sdk_dvd_ps_write(&d->demux, src, length, &used, eof);
+	sdk_dvd_ps_write(&d->demux, src, length, &used, eof);
 	if (eof && used == length)
 		d->input_eof = 1U;
 	if (accepted)
@@ -771,8 +768,15 @@ static int mpeg2_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 
 	if (!d || !frame || d->failed)
 		return SDK_VIDEO_BACKEND_ERROR;
-	if (d->media_configured)
+	if (d->media_configured) {
 		route_audio_queue(d);
+	} else {
+		/* Video-only session: nobody consumes audio, and queued
+		 * packets would fill the demux until every write reports
+		 * backpressure that nothing can relieve. */
+		while (sdk_dvd_ps_peek_audio(&d->demux))
+			sdk_dvd_ps_pop_audio(&d->demux, 0);
+	}
 	for (;;) {
 		result = parse_video(d, frame);
 		if (result > 0)
