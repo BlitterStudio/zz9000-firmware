@@ -1232,6 +1232,7 @@ static uint32_t timing_decode_requests;
 static uint32_t timing_decode_us;
 
 static uint32_t surface_format_bytes(uint32_t format);
+static uint32_t surface_min_row_bytes(uint32_t format, uint32_t width);
 
 static int aperture_contract_present(void)
 {
@@ -1978,7 +1979,7 @@ static void flush_surface_rect(const struct SDKSurface *surface,
 
 static int surface_live(const struct SDKSurface *surface)
 {
-	uint32_t bytes_per_pixel;
+	uint32_t min_row;
 
 	if (!surface || !surface->in_use)
 		return 0;
@@ -1987,11 +1988,8 @@ static int surface_live(const struct SDKSurface *surface)
 		return 0;
 	if (surface->width == 0 || surface->height == 0 || surface->pitch == 0)
 		return 0;
-	bytes_per_pixel = surface_format_bytes(surface->format);
-	if (bytes_per_pixel == 0 ||
-	    surface->width > (0xffffffffU / bytes_per_pixel))
-		return 0;
-	if (surface->pitch < surface->width * bytes_per_pixel)
+	min_row = surface_min_row_bytes(surface->format, surface->width);
+	if (min_row == 0 || surface->pitch < min_row)
 		return 0;
 	if (surface->height > (0xffffffffU / surface->pitch))
 		return 0;
@@ -2557,6 +2555,24 @@ static uint32_t surface_format_bytes(uint32_t format)
 	return sdk_surface_format_bytes(format);
 }
 
+/* Smallest valid pitch, 0 for an unsupported format or width. Packed
+ * YUV422CGX is allocatable only as an image-animation target and is sized
+ * by whole two-pixel macropixels; it has no per-pixel size, so the fill,
+ * copy and scale ops (which use surface_format_bytes) keep refusing it. */
+static uint32_t surface_min_row_bytes(uint32_t format, uint32_t width)
+{
+	uint32_t bytes_per_pixel;
+
+	if (width == 0U)
+		return 0U;
+	if (format == SDK_SURFACE_FORMAT_YUV422CGX)
+		return width > 0xffffU ? 0U : ((width + 1U) / 2U) * 4U;
+	bytes_per_pixel = surface_format_bytes(format);
+	if (bytes_per_pixel == 0U || width > (0xffffffffU / bytes_per_pixel))
+		return 0U;
+	return width * bytes_per_pixel;
+}
+
 static uint32_t next_surface_id(void)
 {
 	uint32_t handle = SDK_SURFACE_HANDLE_BASE | next_surface_handle++;
@@ -2693,7 +2709,7 @@ static uint16_t handle_alloc_surface(volatile struct SDKMailboxEntry *req,
 	uint32_t format;
 	uint32_t flags;
 	uint32_t pitch;
-	uint32_t bytes_per_pixel;
+	uint32_t min_pitch;
 	uint32_t length;
 	uint32_t address;
 	int arm_local;
@@ -2707,14 +2723,14 @@ static uint16_t handle_alloc_surface(volatile struct SDKMailboxEntry *req,
 	format = get_be32(payload->format);
 	flags = get_be32(payload->flags);
 	pitch = get_be32(payload->pitch);
-	bytes_per_pixel = surface_format_bytes(format);
+	min_pitch = surface_min_row_bytes(format, width);
 	arm_local = (flags & SDK_SURFACE_FLAG_ARM_LOCAL) != 0U;
 
-	if (width == 0 || height == 0 || bytes_per_pixel == 0)
+	if (width == 0 || height == 0 || min_pitch == 0)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if (pitch == 0)
-		pitch = width * bytes_per_pixel;
-	if (pitch < width * bytes_per_pixel)
+		pitch = min_pitch;
+	if (pitch < min_pitch)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if (height > (0xffffffffU / pitch))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
