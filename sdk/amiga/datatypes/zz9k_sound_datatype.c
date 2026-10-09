@@ -221,6 +221,9 @@ typedef struct ZZ9KSoundSource {
   /* Largest PCM unit the decoder writes at once (an MP3 frame, a FLAC
    * block, a Vorbis packet); the PCM ring must hold it whole. */
   uint32_t min_pcm_bytes;
+  /* Largest compressed unit the decoder buffers whole before decoding
+   * (a FLAC frame); 0 when the codec has no such requirement. */
+  uint32_t max_input_unit;
 } ZZ9KSoundSource;
 
 typedef struct ZZ9KSoundDecode {
@@ -248,6 +251,10 @@ typedef struct ZZ9KSoundDecode {
   uint32_t pcm_format;
   uint32_t sample_bytes_in;
   uint8_t modern;
+  /* Fast-RAM bounce buffer for ring reads (the file-read buffer, idle while
+   * PCM is drained); bounce_length is a multiple of 8. */
+  uint8_t *bounce;
+  uint32_t bounce_length;
   /* DOS error for a resource failure; 0 means a stream or content failure
    * reported as DTERROR_INVALID_DATA. */
   LONG error;
@@ -389,6 +396,7 @@ static int zz9k_sound_probe_flac(BPTR file, uint32_t file_size,
       ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE : ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE;
   source->min_pcm_bytes = envelope.max_block_size * envelope.channels *
       (envelope.bits_per_sample > 16U ? 4U : 2U);
+  source->max_input_unit = zz9k_sound_flac_max_frame_bytes(&envelope);
   return 1;
 }
 
@@ -423,6 +431,7 @@ static int zz9k_sound_probe_file(BPTR file, uint32_t file_size,
   if (!file || !source || file_size < 8U) {
     return 0;
   }
+  memset(source, 0, sizeof(*source));
   return zz9k_sound_probe_flac(file, file_size, source) ||
          zz9k_sound_probe_vorbis(file, file_size, source) ||
          zz9k_sound_probe_mp3(file, file_size, source);
@@ -495,10 +504,21 @@ static int zz9k_sound_reserve_plane(uint8_t **plane, uint32_t *capacity,
   return 1;
 }
 
-static uint8_t zz9k_sound_ring_byte(const ZZ9KSoundDecode *decode,
-                                    uint32_t offset)
+/* Copies bytes out of the PCM ring into fast RAM in bulk: card memory is
+ * read in bus-width bursts instead of one Zorro cycle per byte. */
+static int zz9k_sound_ring_read(const ZZ9KSoundDecode *decode,
+                                uint32_t offset, uint8_t *dst,
+                                uint32_t bytes)
 {
-  return ((volatile const uint8_t *)decode->pcm_ring.data)[offset];
+  uint32_t first = decode->pcm_ring.length - offset;
+
+  if (first > bytes) {
+    first = bytes;
+  }
+  return zz9k_shared_copy_from(dst, &decode->pcm_ring, offset, first) &&
+         (first == bytes ||
+          zz9k_shared_copy_from(dst + first, &decode->pcm_ring, 0U,
+                                bytes - first));
 }
 
 /* Copies newly produced whole PCM frames out of the host ring into the
@@ -514,6 +534,7 @@ static int zz9k_sound_copy_pcm(ZZ9KSoundDecode *decode)
   int stereo;
   uint32_t i;
   uint32_t offset;
+  uint32_t remaining;
 
   if (!decode || decode->result.bytes_produced < decode->pcm_seen ||
       decode->pcm_offset >= decode->pcm_ring.length) {
@@ -553,28 +574,38 @@ static int zz9k_sound_copy_pcm(ZZ9KSoundDecode *decode)
     return 0;
   }
   offset = decode->pcm_offset;
-  for (i = 0U; i < frames; i++) {
-    uint8_t frame[8];
-    uint32_t b;
-    for (b = 0U; b < frame_bytes; b++) {
-      frame[b] = zz9k_sound_ring_byte(decode, offset);
-      if (++offset == decode->pcm_ring.length) {
-        offset = 0U;
+  for (remaining = available; remaining != 0U;) {
+    uint32_t chunk = decode->bounce_length - decode->bounce_length % frame_bytes;
+    const uint8_t *frame;
+
+    if (chunk > remaining) {
+      chunk = remaining;
+    }
+    if (chunk == 0U || !zz9k_sound_ring_read(decode, offset, decode->bounce,
+                                             chunk)) {
+      return 0;
+    }
+    offset += chunk;
+    if (offset >= decode->pcm_ring.length) {
+      offset -= decode->pcm_ring.length;
+    }
+    remaining -= chunk;
+    for (frame = decode->bounce, i = chunk / frame_bytes; i != 0U;
+         i--, frame += frame_bytes) {
+      if (!decode->modern) {
+        uint8_t top[4];
+        zz9k_sound_frame_top16(frame, decode->result.channels, width, top);
+        decode->sample[decode->sample_bytes++] =
+            (uint8_t)zz9k_sound_legacy_quantize_s16be(
+                top, decode->result.channels);
+        continue;
       }
+      memcpy(decode->sample + decode->sample_bytes, frame, width);
+      if (stereo) {
+        memcpy(decode->right + decode->sample_bytes, frame + width, width);
+      }
+      decode->sample_bytes += width;
     }
-    if (!decode->modern) {
-      uint8_t top[4];
-      zz9k_sound_frame_top16(frame, decode->result.channels, width, top);
-      decode->sample[decode->sample_bytes++] =
-          (uint8_t)zz9k_sound_legacy_quantize_s16be(
-              top, decode->result.channels);
-      continue;
-    }
-    memcpy(decode->sample + decode->sample_bytes, frame, width);
-    if (stereo) {
-      memcpy(decode->right + decode->sample_bytes, frame + width, width);
-    }
-    decode->sample_bytes += width;
   }
   decode->pcm_offset = offset;
   decode->pcm_seen += available;
@@ -691,6 +722,7 @@ static int zz9k_sound_decode_file(BPTR file, const ZZ9KSoundSource *source,
   uint32_t position;
   uint32_t total_fed;
   uint32_t guard;
+  uint32_t input_bytes;
   int ok;
   int status;
 
@@ -711,15 +743,24 @@ static int zz9k_sound_decode_file(BPTR file, const ZZ9KSoundSource *source,
    * a decode competing with an active player fails as busy/out of memory
    * instead of being mistaken for a corrupt file. */
   decode->error = ERROR_NO_FREE_STORE;
-  if (ZZ9KAllocShared(ZZ9K_SOUND_INPUT_RING_BYTES, 16U, ZZ9K_ALLOC_CARD_ONLY,
+  if (!zz9k_sound_alloc_host_pair(decode, source->min_pcm_bytes)) {
+    goto done;
+  }
+  /* The card-only input ring must hold one whole buffered unit plus the
+   * staged chunk fed after it (a 16384-sample 24-bit FLAC frame is over
+   * 70 KB), so it grows past the default for such streams. */
+  input_bytes = ZZ9K_SOUND_INPUT_RING_BYTES;
+  if (source->max_input_unit != 0U &&
+      source->max_input_unit + decode->staging.length > input_bytes) {
+    input_bytes =
+        (source->max_input_unit + decode->staging.length + 4095UL) & ~4095UL;
+  }
+  if (ZZ9KAllocShared(input_bytes, 16U, ZZ9K_ALLOC_CARD_ONLY,
                       &decode->input_ring) != ZZ9K_STATUS_OK) {
     goto done;
   }
   decode->owned.input_allocated = 1U;
   decode->owned.input_handle = decode->input_ring.handle;
-  if (!zz9k_sound_alloc_host_pair(decode, source->min_pcm_bytes)) {
-    goto done;
-  }
   status = zz9k_sound_begin_stream(source, decode);
   if (status != ZZ9K_STATUS_OK) {
     decode->error = status == ZZ9K_STATUS_BUSY ? ERROR_OBJECT_IN_USE :
@@ -734,6 +775,8 @@ static int zz9k_sound_decode_file(BPTR file, const ZZ9KSoundSource *source,
   if (!input) {
     goto done;
   }
+  decode->bounce = input;
+  decode->bounce_length = decode->staging.length & ~7UL;
   /* From here on a failure is a stream or content problem unless the sample
    * buffer cannot grow (zz9k_sound_copy_pcm sets ERROR_NO_FREE_STORE). */
   decode->error = 0;
@@ -915,10 +958,12 @@ static LONG zz9k_sound_service_error(const ZZ9KSoundSource *source)
   UWORD revision;
 
   if (source->codec == ZZ9K_AUDIO_CODEC_MP3) {
+    /* The stream decoder always emits interleaved S16; firmware advertises
+     * MP3 streaming with these two flags (PCM16_STEREO is not a firmware
+     * flag; only an emulator ever set it). Same gate as ZZPlay. */
     revision = ZZ9K_LIBRARY_MIN_REVISION_ALLOC_FLAGS;
     required = ZZ9K_SERVICE_FLAG_AUDIO_MP3_DECODE |
-               ZZ9K_SERVICE_FLAG_AUDIO_MP3_STREAM |
-               ZZ9K_SERVICE_FLAG_AUDIO_PCM16_STEREO;
+               ZZ9K_SERVICE_FLAG_AUDIO_MP3_STREAM;
   } else {
     revision = ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX;
     required = source->codec == ZZ9K_AUDIO_CODEC_FLAC ?

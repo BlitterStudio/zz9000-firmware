@@ -49,6 +49,9 @@ typedef struct ZZPlayMP3Engine {
   /* Largest PCM unit the decoder writes at once (an MP3 frame, a FLAC
    * block, a Vorbis packet); the firmware needs room for it whole. */
   uint32_t min_pcm_bytes;
+  /* Largest compressed unit the decoder buffers whole before decoding
+   * (a FLAC frame); 0 when the codec has no such requirement. */
+  uint32_t max_input_unit;
   const char *codec_name;
   /* MP3 restarts a pass at any frame boundary; native FLAC is decoded
    * from its stream header, so it always starts at audio_start. */
@@ -471,28 +474,26 @@ static uint32_t zzplay_mp3_pcm_capacity(const ZZPlayMP3Engine *engine,
   return want > base ? want : base;
 }
 
-/* Card-only compressed ring, then the host-visible PCM ring and staging
- * buffer. On failure both shrink in bounded halving steps (KTD6: a compact
- * Zorro II host window may hold only 16 KiB), staging first; the PCM ring
- * never drops below the decoder's largest unit and staging stays below half
- * the PCM ring (high_water must be smaller than the ring). Runs before AHI
- * is prepared so the period can be capped against the ring obtained. */
+/* Host-visible PCM ring and staging buffer, then the card-only compressed
+ * ring. On failure the host pair shrinks in bounded halving steps (KTD6: a
+ * compact Zorro II host window may hold only 16 KiB), staging first; the
+ * PCM ring never drops below the decoder's largest unit and staging stays
+ * below half the PCM ring (high_water must be smaller than the ring). The
+ * compressed ring then holds one whole buffered input unit plus a staged
+ * chunk. Runs before AHI is prepared so the period can be capped against
+ * the ring obtained. */
 static int zzplay_mp3_alloc_rings(ZZPlayMP3Decode *decode)
 {
+  const ZZPlayMP3Engine *engine = decode->engine;
   uint32_t host_flags = decode->compact_z2 ? ZZ9K_ALLOC_HOST_WINDOW : 0U;
   uint32_t staging_max = decode->compact_z2 ? ZZPLAY_MP3_Z2_STAGING_CAPACITY
                                             : ZZPLAY_MP3_FEED_MAX_BYTES;
-  uint32_t pcm = zzplay_mp3_pcm_capacity(decode->engine, decode->compact_z2);
-  uint32_t pcm_floor = zzplay_mp3_round_4k(decode->engine->min_pcm_bytes);
+  uint32_t pcm = zzplay_mp3_pcm_capacity(engine, decode->compact_z2);
+  uint32_t pcm_floor = zzplay_mp3_round_4k(engine->min_pcm_bytes);
+  uint32_t input = ZZPLAY_MP3_INPUT_CAPACITY;
 
   if (pcm_floor < 8192U) {
     pcm_floor = 8192U;
-  }
-  if (zz9k_alloc_shared(decode->ctx, ZZPLAY_MP3_INPUT_CAPACITY, 16U,
-                        ZZ9K_ALLOC_CARD_ONLY, &decode->compressed) !=
-      ZZ9K_STATUS_OK) {
-    memset(&decode->compressed, 0, sizeof(decode->compressed));
-    return 0;
   }
   for (;;) {
     if (zz9k_alloc_shared(decode->ctx, pcm, 16U, host_flags,
@@ -502,7 +503,7 @@ static int zzplay_mp3_alloc_rings(ZZPlayMP3Decode *decode)
       for (; staging >= 4096U; staging /= 2U) {
         if (zz9k_alloc_shared(decode->ctx, staging, 16U, host_flags,
                               &decode->staging) == ZZ9K_STATUS_OK) {
-          return 1;
+          goto input_ring;
         }
         memset(&decode->staging, 0, sizeof(decode->staging));
       }
@@ -517,6 +518,21 @@ static int zzplay_mp3_alloc_rings(ZZPlayMP3Decode *decode)
       pcm = pcm_floor;
     }
   }
+
+input_ring:
+  /* A 16384-sample 24-bit FLAC frame is over 70 KB: with a 64 KiB chunk
+   * behind it, the default ring cannot hold both and the decoder faults. */
+  if (engine->max_input_unit != 0U &&
+      engine->max_input_unit + decode->staging.length > input) {
+    input = zzplay_mp3_round_4k(engine->max_input_unit +
+                                decode->staging.length);
+  }
+  if (zz9k_alloc_shared(decode->ctx, input, 16U, ZZ9K_ALLOC_CARD_ONLY,
+                        &decode->compressed) != ZZ9K_STATUS_OK) {
+    memset(&decode->compressed, 0, sizeof(decode->compressed));
+    return 0;
+  }
+  return 1;
 }
 
 static ZZPlayMP3PassResult zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
@@ -1172,6 +1188,7 @@ ZZPlayEngineResult zzplay_flac_run(const ZZPlayEngineRun *run)
   info = &run->probe->flac;
   engine.codec = ZZ9K_AUDIO_CODEC_FLAC;
   engine.codec_name = "FLAC";
+  engine.max_input_unit = info->max_frame_bytes;
   engine.sample_rate = info->sample_rate;
   engine.channels = info->channels;
   /* The firmware refuses to truncate: wider sources need the

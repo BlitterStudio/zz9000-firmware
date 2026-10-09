@@ -213,8 +213,8 @@ object, stereo planes on v47) leaving free memory unchanged.
   multiplexed Ogg file): object creation fails with `DTERROR_INVALID_DATA`.
 - Firmware or `zz9k.library` without the matched audio-stream service
   fails creation with `ERROR_NOT_IMPLEMENTED` rather than falling back to
-  software decode. MP3 needs the `MP3_DECODE`, `MP3_STREAM`, and
-  `PCM16_STEREO` flags; FLAC and Ogg Vorbis need `FLAC_STREAM` or
+  software decode. MP3 needs the `MP3_DECODE` and `MP3_STREAM` flags;
+  FLAC and Ogg Vorbis need `FLAC_STREAM` or
   `VORBIS_STREAM` and `zz9k.library` revision 33
   (`ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX`). Current firmware implements
   both decoders but does not advertise them before physical qualification.

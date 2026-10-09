@@ -305,6 +305,22 @@ static void test_flac_recognition(void)
   memcpy(header, "OggS", 4U);
   expect_true(!zz9k_sound_recognize_flac(header, sizeof(header), 0),
               "Ogg-FLAC is not claimed as native FLAC");
+
+  /* The input ring is sized from the largest compressed frame: the
+   * recorded STREAMINFO maximum (73771 bytes in a real 16384-sample
+   * 24-bit file), else a verbatim-frame bound. */
+  set_flac_header(header, 48000U, 2U, 24U);
+  header[15] = 0x01U;
+  header[16] = 0x20U;
+  header[17] = 0x2bU;
+  expect_true(zz9k_sound_recognize_flac(header, sizeof(header), &envelope) &&
+                  zz9k_sound_flac_max_frame_bytes(&envelope) == 73771U,
+              "a recorded maximum frame size bounds the input frame");
+  set_flac_header(header, 44100U, 2U, 16U);
+  expect_true(zz9k_sound_recognize_flac(header, sizeof(header), &envelope) &&
+                  zz9k_sound_flac_max_frame_bytes(&envelope) ==
+                      4096U * 2U * 3U + 64U,
+              "an unknown maximum falls back to a verbatim frame bound");
 }
 
 /* First page of a libvorbis (ffmpeg) stereo 44.1 kHz stream, verbatim: the

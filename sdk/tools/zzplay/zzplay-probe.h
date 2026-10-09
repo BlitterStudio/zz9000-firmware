@@ -34,6 +34,7 @@ typedef struct ZZPlayFLACInfo {
   uint32_t bits_per_sample;
   uint64_t total_samples; /* 0 when STREAMINFO leaves it unknown */
   uint32_t max_block_size; /* samples per channel in the largest block */
+  uint32_t max_frame_bytes; /* largest compressed frame (bound if unknown) */
 } ZZPlayFLACInfo;
 
 typedef struct ZZPlayVorbisInfo {

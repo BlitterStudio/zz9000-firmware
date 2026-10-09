@@ -100,4 +100,23 @@ static int zz9k_sound_recognize_flac(const uint8_t *bytes, uint32_t length,
   return 1;
 }
 
+/*
+ * Largest compressed frame the stream can contain. The firmware decodes a
+ * FLAC frame only once it is fully buffered, so its input ring must hold
+ * this plus one feed chunk. STREAMINFO's maximum frame size is used when
+ * the encoder recorded it; otherwise the bound is a verbatim frame (every
+ * sample stored raw, one extra bit for a side channel) plus 64 bytes of
+ * frame and subframe headers and footer.
+ */
+static uint32_t zz9k_sound_flac_max_frame_bytes(
+    const ZZ9KSoundFlacEnvelope *envelope)
+{
+  if (envelope->max_frame_size != 0U) {
+    return envelope->max_frame_size;
+  }
+  return envelope->max_block_size * envelope->channels *
+             ((envelope->bits_per_sample + 8U) / 8U) +
+         64U;
+}
+
 #endif /* ZZ9K_SOUND_FLAC_H */

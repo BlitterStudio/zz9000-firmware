@@ -316,6 +316,7 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
       info->flac.bits_per_sample = flac.bits_per_sample;
       info->flac.total_samples = flac.total_samples;
       info->flac.max_block_size = flac.max_block_size;
+      info->flac.max_frame_bytes = zz9k_sound_flac_max_frame_bytes(&flac);
       info->kind = ZZPLAY_MEDIA_KIND_FLAC;
       goto done;
     }
