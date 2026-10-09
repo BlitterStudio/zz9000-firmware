@@ -177,9 +177,12 @@ python3 scripts/generate-datatype-descriptors.py --source-dir amiga/datatypes/de
 
 `Recog` contains hexadecimal bytes and optional `??` wildcard bytes. Wildcards
 allow recognition across variable fields, such as a RIFF size before a format
-identifier, without claiming every RIFF file. The compiler validates the
-inactive destination, header fields, recognition mask, and matching source name.
-Each source requires a same-name `.info` icon for packaging.
+identifier, without claiming every RIFF file. Formats a byte mask cannot
+describe set `Recog=none` and `Code=<file>`: the generator embeds that m68k
+hunk executable from `--code-dir` as the descriptor's `DTCD` recognition hook
+(see `zz9k-sound-datatype.md`). The compiler validates the inactive
+destination, header fields, recognition mask or hook, and matching source
+name. Each source requires a same-name `.info` icon for packaging.
 
 A new descriptor alone does not add decoding support. Add and qualify the
 firmware decoder, codec ID and advertised service support, SDK capability

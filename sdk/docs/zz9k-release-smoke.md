@@ -149,8 +149,10 @@ validated DataType descriptors before the MultiView/browser checks:
 ```text
 copy Storage/DataTypes/ZZ9000-JPEG#? TO DEVS:DataTypes/
 copy Storage/DataTypes/ZZ9000-PNG#? TO DEVS:DataTypes/
+copy Storage/DataTypes/ZZ9000-MP3#? TO DEVS:DataTypes/
 AddDataTypes DEVS:DataTypes/ZZ9000-JPEG
 AddDataTypes DEVS:DataTypes/ZZ9000-PNG
+AddDataTypes DEVS:DataTypes/ZZ9000-MP3
 AddDataTypes LIST
 ```
 
@@ -184,7 +186,7 @@ Expected pass signal:
 - Viewer resize and occlusion redraw through visible clips without corrupting
   surrounding RTG contents.
 - DataType descriptors are activated from `Storage/DataTypes`, and
-  `AddDataTypes LIST` shows `ZZ9000-JPEG` and `ZZ9000-PNG`.
+  `AddDataTypes LIST` shows `ZZ9000-JPEG`, `ZZ9000-PNG`, and `ZZ9000-MP3`.
 - DataTypes clients display JPEG and PNG through `zz9k-picture.datatype`.
 - Repeat the transparent-PNG DataType client and MUI startup checks on 8-,
   15-, 16-, and 32-bit screens. Low-depth modes must not enter the sustained
@@ -200,6 +202,43 @@ Failure routing:
 - Low-depth transparent-PNG startup or rendering stalls route to the
   `PDTA_Screen` alpha-flattening policy in `zz9k-picture.datatype`; missing
   transparency on a 32-bit screen routes to the retained RGBA path.
+
+## Sound DataType
+
+The MP3 sound datatype is optional. Activate its descriptor first (see the
+Image, Viewer, And DataTypes section), then check the whole-sample sound
+path with both an untagged Layer III file and one with a leading ID3v2 tag:
+
+```text
+AddDataTypes LIST
+MultiView Work:Audio/test-bare.mp3
+MultiView Work:Audio/test.mp3
+```
+
+Expected pass signal:
+
+- `AddDataTypes LIST` shows `ZZ9000-MP3` routed to `zz9k-sound.datatype`.
+- A sound DataTypes consumer (MultiView or any `GID_SOUND` client) opens
+  the file and plays it through the system `sound.datatype`: version 47
+  publishes 16-bit planes (left/right for stereo) at the source rate;
+  earlier versions get planar 8-bit mono.
+- Layer II files and bare ID3 data are not claimed by the `ZZ9000-MP3`
+  recognition hook, so they never reach `zz9k-sound.datatype`.
+- Repeated open/dispose of the same file leaves free memory stable; the
+  superclass frees the published planes exactly once per object.
+
+Failure routing:
+
+- A Layer III file that does not open: check that its first frame follows
+  the ID3v2 tag directly; the descriptor hook does not scan for a later
+  first frame. See [zz9k-sound-datatype.md](zz9k-sound-datatype.md).
+- Decode failures with `DTERROR_INVALID_DATA` route to the class
+  re-validation path; `ERROR_NOT_IMPLEMENTED` routes to missing
+  matched-firmware audio-stream service flags.
+- While ZZPlay plays through MHI, a datatype decode of another file must
+  not disturb either path: the datatype opens its own unbound audio-stream
+  session, and a saturated audio service makes the datatype decode fail
+  with a resource error instead of stealing the player session.
 
 ## Audio And MPEGA
 

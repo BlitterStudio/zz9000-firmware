@@ -11,7 +11,7 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
 $BuildScript = @'
 set -e
-mkdir -p build/m68k
+mkdir -p build/m68k build/dtcode
 CFLAGS="-noixemul -Os -s -Iinclude -Ihost/include"
 LIBCFLAGS="$CFLAGS -Iamiga/include"
 
@@ -95,6 +95,11 @@ m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   build/m68k/zz9k_host.o amiga/datatypes/zz9k_sound_datatype.c \
   -o build/zz9k-sound.datatype
+# Descriptor recognition hook: no startup code or C library; the entry stub
+# must lead the first hunk. Embedded into ZZ9000-MP3 as its DTCD chunk.
+m68k-amigaos-gcc -noixemul -nostartfiles -nostdlib -Os -s -fomit-frame-pointer \
+  -Iinclude amiga/datatypes/zz9k_mp3_dthook_entry.S \
+  amiga/datatypes/zz9k_mp3_dthook.c -o build/dtcode/zz9k-mp3-recog
 m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zz9k-smoke.c -o build/zz9k-smoke
 m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zz9k-surface-info.c -o build/zz9k-surface-info
 m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zz9k-palette.c -o build/zz9k-palette

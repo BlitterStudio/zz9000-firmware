@@ -89,6 +89,7 @@ GUIDE_SPECS="README.md:ZZ9000-SDK \
 docs/zz9k-library.md:zz9k-library \
 docs/zz9k-zorro2-services.md:zz9k-zorro2-services \
 docs/zz9k-picture-datatype.md:zz9k-picture-datatype \
+docs/zz9k-sound-datatype.md:zz9k-sound-datatype \
 docs/zzplay.md:ZZPlay \
 docs/zz9k-amissl-provider.md:zz9k-amissl-provider"
 GUIDE_SIBLINGS=""
@@ -145,9 +146,12 @@ copy_one "build/zz9k-view" "C/zz9k-view"
 copy_one "build/zz9k-dtprobe" "C/zz9k-dtprobe"
 copy_one "build/zz9k-picture.datatype" \
   "Classes/DataTypes/zz9k-picture.datatype"
+copy_one "build/zz9k-sound.datatype" \
+  "Classes/DataTypes/zz9k-sound.datatype"
 python3 "$REPO_ROOT/scripts/generate-datatype-descriptors.py" \
   --source-dir "$REPO_ROOT/amiga/datatypes/descriptors" \
-  --output-dir "$PACKAGE_ROOT/Storage/DataTypes"
+  --output-dir "$PACKAGE_ROOT/Storage/DataTypes" \
+  --code-dir "$REPO_ROOT/build/dtcode"
 for descriptor in "$REPO_ROOT"/amiga/datatypes/descriptors/*.dtid; do
   name=$(basename "$descriptor" .dtid)
   copy_one "amiga/datatypes/descriptors/$name.info" \
