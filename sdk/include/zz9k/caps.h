@@ -407,6 +407,10 @@ static inline const char *zz9k_capability_name(uint32_t capability_bit)
     return "audio-metering";
   case ZZ9K_CAP_AUDIO_FABRIC:
     return "audio-fabric";
+  case ZZ9K_CAP_AUDIO_FLAC:
+    return "audio-flac";
+  case ZZ9K_CAP_AUDIO_VORBIS:
+    return "audio-vorbis";
   default:
     return 0;
   }
@@ -520,6 +524,10 @@ static inline const char *zz9k_service_flag_name(uint32_t service_id,
       return "audio-fabric-rate";
     case ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN:
       return "stream-gain";
+    case ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM:
+      return "flac-stream";
+    case ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM:
+      return "vorbis-stream";
     default:
       return 0;
     }

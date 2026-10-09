@@ -60,6 +60,7 @@ int ZZ9KImageAnimationFrameNext(uint32_t session, uint32_t flags, ZZ9KImageAnima
 int ZZ9KImageAnimationFramePresent(uint32_t session, uint32_t frame_token, uint32_t flags, ZZ9KImageAnimationFrameResult *result);
 int ZZ9KImageAnimationFrameRetire(uint32_t session, uint32_t frame_token, uint32_t flags, ZZ9KImageAnimationFrameResult *result);
 int ZZ9KImageAnimationRestart(uint32_t session, uint32_t flags, ZZ9KImageAnimationFrameResult *result);
+int ZZ9KAudioStreamBeginEx(const ZZ9KAudioStreamBeginExDesc *desc, ZZ9KAudioStreamResult *result);
 int ZZ9KCryptoHash(const ZZ9KCryptoHashDesc *desc, ZZ9KCryptoResult *result);
 int ZZ9KCryptoHashBatch(const ZZ9KCryptoHashDesc *descs, ZZ9KCryptoResult *results, uint32_t count, uint32_t max_in_flight, uint32_t timeout_ticks);
 int ZZ9KCryptoStream(const ZZ9KCryptoStreamDesc *desc, ZZ9KCryptoResult *result);

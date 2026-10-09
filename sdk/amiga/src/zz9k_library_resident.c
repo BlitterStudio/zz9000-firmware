@@ -240,6 +240,10 @@ static int zz9k_lib_image_animation_restart(
     REG(d0, uint32_t session),
     REG(d1, uint32_t flags),
     REG(a0, ZZ9KImageAnimationFrameResult *result));
+static int zz9k_lib_audio_stream_begin_ex(
+    REG(a6, struct ZZ9KBase *base),
+    REG(a0, const ZZ9KAudioStreamBeginExDesc *desc),
+    REG(a1, ZZ9KAudioStreamResult *result));
 static int zz9k_lib_crypto_hash(REG(a6, struct ZZ9KBase *base),
                                 REG(a0, const ZZ9KCryptoHashDesc *desc),
                                 REG(a1, ZZ9KCryptoResult *result));
@@ -350,6 +354,7 @@ static const APTR zz9k_lib_vectors[] = {
   (APTR)zz9k_lib_image_animation_frame_present,
   (APTR)zz9k_lib_image_animation_frame_retire,
   (APTR)zz9k_lib_image_animation_restart,
+  (APTR)zz9k_lib_audio_stream_begin_ex,
   (APTR)-1
 };
 
@@ -1633,6 +1638,20 @@ static int zz9k_lib_image_animation_restart(
     return status;
   }
   status = ZZ9KImageAnimationRestart(&base->core, session, flags, result);
+  zz9k_lib_leave(base);
+  return status;
+}
+
+static int zz9k_lib_audio_stream_begin_ex(
+    REG(a6, struct ZZ9KBase *base),
+    REG(a0, const ZZ9KAudioStreamBeginExDesc *desc),
+    REG(a1, ZZ9KAudioStreamResult *result))
+{
+  int status = zz9k_lib_enter(base);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  status = ZZ9KAudioStreamBeginEx(&base->core, desc, result);
   zz9k_lib_leave(base);
   return status;
 }

@@ -315,7 +315,12 @@ int main(int argc, char **argv)
      "ZZ9KImageAnimationRestart(session,flags,result)(d0/d1/a0)",
      "int ZZ9KImageAnimationRestart(uint32_t session, uint32_t flags, "
      "ZZ9KImageAnimationFrameResult *result);",
-     "jsr -342(a6)"}
+     "jsr -342(a6)"},
+    {"ZZ9KAudioStreamBeginEx",
+     "ZZ9KAudioStreamBeginEx(desc,result)(a0/a1)",
+     "int ZZ9KAudioStreamBeginEx(const ZZ9KAudioStreamBeginExDesc *desc, "
+     "ZZ9KAudioStreamResult *result);",
+     "jsr -348(a6)"}
   };
   char *fd;
   char *clib;

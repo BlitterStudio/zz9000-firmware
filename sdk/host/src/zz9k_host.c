@@ -2096,6 +2096,48 @@ int zz9k_audio_stream_begin(ZZ9KContext *ctx,
                                         result);
 }
 
+int zz9k_audio_stream_begin_ex(ZZ9KContext *ctx,
+                               const ZZ9KAudioStreamBeginExDesc *desc,
+                               ZZ9KAudioStreamResult *result)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  if (!ctx || !desc || !result) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  memset(result, 0, sizeof(*result));
+  memset(&reply, 0, sizeof(reply));
+  status = zz9k_request_audio_stream_begin_ex(&request, desc);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  if (status == ZZ9K_STATUS_UNSUPPORTED && desc->codec == ZZ9K_AUDIO_CODEC_MP3) {
+    ZZ9KAudioStreamBeginDesc legacy_begin;
+    memset(&legacy_begin, 0, sizeof(legacy_begin));
+    legacy_begin.mp3_ring_handle = desc->input_ring_handle;
+    legacy_begin.mp3_ring_capacity = desc->input_ring_capacity;
+    legacy_begin.pcm_ring_handle = desc->pcm_ring_handle;
+    legacy_begin.pcm_ring_capacity = desc->pcm_ring_capacity;
+    legacy_begin.output_hz = desc->output_hz;
+    legacy_begin.output_channels = desc->output_channels;
+    legacy_begin.output_format = desc->output_format;
+    legacy_begin.low_water_bytes = desc->low_water_bytes;
+    legacy_begin.high_water_bytes = desc->high_water_bytes;
+    legacy_begin.flags = desc->flags;
+    return zz9k_audio_stream_begin(ctx, &legacy_begin, result);
+  }
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  return zz9k_reply_audio_stream_result(&reply,
+                                        ZZ9K_OP_AUDIO_STREAM_BEGIN_EX,
+                                        result);
+}
+
 int zz9k_audio_stream_feed(ZZ9KContext *ctx,
                            const ZZ9KAudioStreamFeedDesc *desc,
                            ZZ9KAudioStreamResult *result)

@@ -215,6 +215,7 @@ enum ZZ9KOpcode {
   ZZ9K_OP_AUDIO_RING_ACQUIRE = ZZ9K_SERVICE_AUDIO + 0x13,
   ZZ9K_OP_AUDIO_RING_RELEASE = ZZ9K_SERVICE_AUDIO + 0x14,
   ZZ9K_OP_AUDIO_STREAM_GAIN = ZZ9K_SERVICE_AUDIO + 0x15,
+  ZZ9K_OP_AUDIO_STREAM_BEGIN_EX = ZZ9K_SERVICE_AUDIO + 0x16,
 
   ZZ9K_OP_DECOMPRESS = ZZ9K_SERVICE_CODEC + 0x00,
   ZZ9K_OP_DECOMPRESS_TEST = ZZ9K_SERVICE_CODEC + 0x01,
@@ -292,7 +293,10 @@ enum ZZ9KCapability {
    * 0x0512+). Append-only but deliberately NOT advertised by any
    * capability word until the on-hardware verification session
    * qualifies them, per the ZZ9K_CAP_AUDIO_CONTROL (R12) discipline. */
-  ZZ9K_CAP_AUDIO_FABRIC = 1U << 27
+  ZZ9K_CAP_AUDIO_FABRIC = 1U << 27,
+  /* Codec capability flags for FLAC and Vorbis backends (unadvertised until qualified). */
+  ZZ9K_CAP_AUDIO_FLAC = 1U << 28,
+  ZZ9K_CAP_AUDIO_VORBIS = 1U << 29
 };
 
 #define ZZ9K_APERTURE_LAYOUT_GENERATION_SHIFT 16U
@@ -380,6 +384,9 @@ enum ZZ9KServiceFlags {
   ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE = 1U << 23,
   /* Per-session SDK stream attenuation through the fabric pump. */
   ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN = 1U << 24,
+  /* Stream capability flags for FLAC and Vorbis backends (unadvertised until qualified). */
+  ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM = 1U << 25,
+  ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM = 1U << 26,
 
 
   ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 = 1U << 16,
@@ -424,7 +431,13 @@ enum ZZ9KServiceFlags {
 enum ZZ9KAudioSampleFormat {
   ZZ9K_AUDIO_SAMPLE_FORMAT_NONE = 0,
   ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE = 1,
-  ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE = 2
+  ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE = 2,
+  /* 32-bit container formats: signed 32-bit linear PCM.
+   * When decoding 24-bit sources into a 32-bit container, samples are
+   * left-aligned (shifted left by 8 bits, occupying bits 31..8, with bits 7..0
+   * zeroed) to preserve unity scale / full dynamic range. */
+  ZZ9K_AUDIO_SAMPLE_FORMAT_S32LE = 3,
+  ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE = 4
 };
 
 enum ZZ9KAudioDecodeFlags {
@@ -802,6 +815,23 @@ typedef struct ZZ9KAudioStreamBeginPayload {
   uint8_t flags[4];
   uint8_t reserved[8];
 } ZZ9KAudioStreamBeginPayload;
+
+/* Codec-aware stream begin payload (48 bytes inline).
+ * Replaces MP3-only Begin with generic codec and input ring fields. */
+typedef struct ZZ9KAudioStreamBeginExPayload {
+  uint8_t codec[4];
+  uint8_t input_ring_handle[4];
+  uint8_t input_ring_capacity[4];
+  uint8_t pcm_ring_handle[4];
+  uint8_t pcm_ring_capacity[4];
+  uint8_t output_hz[4];
+  uint8_t output_channels[4];
+  uint8_t output_format[4];
+  uint8_t low_water_bytes[4];
+  uint8_t high_water_bytes[4];
+  uint8_t flags[4];
+  uint8_t reserved[4];
+} ZZ9KAudioStreamBeginExPayload;
 
 typedef struct ZZ9KAudioStreamFeedPayload {
   uint8_t session[4];
@@ -2208,6 +2238,20 @@ typedef struct ZZ9KAudioStreamBeginDesc {
   uint32_t flags;
 } ZZ9KAudioStreamBeginDesc;
 
+typedef struct ZZ9KAudioStreamBeginExDesc {
+  uint32_t codec;
+  uint32_t input_ring_handle;
+  uint32_t input_ring_capacity;
+  uint32_t pcm_ring_handle;
+  uint32_t pcm_ring_capacity;
+  uint32_t output_hz;
+  uint32_t output_channels;
+  uint32_t output_format;
+  uint32_t low_water_bytes;
+  uint32_t high_water_bytes;
+  uint32_t flags;
+} ZZ9KAudioStreamBeginExDesc;
+
 typedef struct ZZ9KAudioStreamFeedDesc {
   uint32_t session;
   uint32_t src_handle;
@@ -2702,6 +2746,13 @@ enum ZZ9KAudioStreamResultFlags {
   ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE = 1U << 3,
   /* The most recent resumable drain reached the real output frontier. */
   ZZ9K_AUDIO_STREAM_RESULT_DRAINED = 1U << 4
+};
+
+enum ZZ9KAudioCodec {
+  ZZ9K_AUDIO_CODEC_UNKNOWN = 0,
+  ZZ9K_AUDIO_CODEC_MP3 = 1,
+  ZZ9K_AUDIO_CODEC_FLAC = 2,
+  ZZ9K_AUDIO_CODEC_VORBIS = 3
 };
 
 enum ZZ9KVideoCodec {

@@ -54,4 +54,5 @@ ZZ9KImageAnimationFrameNext(session,flags,result)(d0/d1/a0)
 ZZ9KImageAnimationFramePresent(session,frame_token,flags,result)(d0/d1/d2/a0)
 ZZ9KImageAnimationFrameRetire(session,frame_token,flags,result)(d0/d1/d2/a0)
 ZZ9KImageAnimationRestart(session,flags,result)(d0/d1/a0)
+ZZ9KAudioStreamBeginEx(desc,result)(a0/a1)
 ##end

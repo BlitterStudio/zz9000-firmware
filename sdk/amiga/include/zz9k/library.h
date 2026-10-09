@@ -132,6 +132,9 @@ int ZZ9KDecodeMp3(ZZ9KLibrary *library,
 int ZZ9KAudioStreamBegin(ZZ9KLibrary *library,
                          const ZZ9KAudioStreamBeginDesc *desc,
                          ZZ9KAudioStreamResult *result);
+int ZZ9KAudioStreamBeginEx(ZZ9KLibrary *library,
+                           const ZZ9KAudioStreamBeginExDesc *desc,
+                           ZZ9KAudioStreamResult *result);
 int ZZ9KAudioStreamFeed(ZZ9KLibrary *library,
                         const ZZ9KAudioStreamFeedDesc *desc,
                         ZZ9KAudioStreamResult *result);

@@ -8,7 +8,7 @@ The current library identity is:
 ```c
 #define ZZ9K_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 32
+#define ZZ9K_LIBRARY_REVISION 33
 ```
 
 Open the library with at least version 2:
@@ -1844,6 +1844,54 @@ Library revision 32 adds timed WebP animation frame LVOs:
 `ZZ9KImageAnimationFrameRetire()`, and `ZZ9KImageAnimationRestart()`.
 Callers must gate these on `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION`
 and `ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION`.
+
+Library revision 33 adds the codec-aware audio streaming begin LVO:
+`ZZ9KAudioStreamBeginEx()` at `ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX`. Callers must gate
+it on `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX`.
+
+### Codec-Aware Audio Streaming and PCM Contract
+
+`ZZ9KAudioStreamBeginEx()` generalizes the audio streaming session model to
+codecs beyond MP3 (e.g. FLAC, Vorbis) while preserving the proven bounded
+shared-memory streaming state machine (`ZZ9KAudioStreamFeed()`,
+`ZZ9KAudioStreamRead()`, `ZZ9KAudioStreamClose()`).
+
+- **Codecs**: Supported codecs are enumerated in `enum ZZ9KAudioCodec`:
+  `ZZ9K_AUDIO_CODEC_MP3` (1), `ZZ9K_AUDIO_CODEC_FLAC` (2), `ZZ9K_AUDIO_CODEC_VORBIS` (3).
+  The codec is specified explicitly in `ZZ9KAudioStreamBeginExDesc.codec`. Unknown or
+  unimplemented codec values are rejected with `ZZ9K_STATUS_BAD_REQUEST` or
+  `ZZ9K_STATUS_UNSUPPORTED`.
+- **Native Rate and Channels**: Setting `output_hz = 0` selects native source rate;
+  setting `output_channels = 0` selects native source channels (1 = mono, 2 = stereo).
+  The actual stream geometry is returned in `ZZ9KAudioStreamResult.sample_rate` and
+  `ZZ9KAudioStreamResult.channels`.
+- **PCM Container Format and Valid-Bit Semantics**: Supported sample formats are
+  `ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE` (1), `ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE` (2),
+  `ZZ9K_AUDIO_SAMPLE_FORMAT_S32LE` (3), and `ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE` (4).
+  For 16-bit containers, samples are signed 16-bit linear PCM.
+  For 32-bit containers, samples are signed 32-bit linear PCM. When decoding 24-bit sources
+  (e.g. 24-bit FLAC) into a 32-bit container, samples are left-aligned (shifted left by 8 bits,
+  MSB-aligned into bits 31..8, with bits 7..0 zeroed) to preserve unity scale and full dynamic range.
+  Requesting an unsupported format for a given codec (e.g. 32-bit output from the 16-bit MP3 backend)
+  returns `ZZ9K_STATUS_UNSUPPORTED`.
+- **Cursor Units and Invariants**: All cursor positions (`bytes_consumed`, `bytes_produced`,
+  `pcm_write`, `pcm_read`) and capacities are strictly byte-denominated. One audio PCM frame consists
+  of `channels * bytes_per_sample` bytes. Acknowledges (`pcm_read` in `ZZ9KAudioStreamRead`) must be
+  whole frames; partial frames are never published or consumed.
+- **Format Stability**: The decoded audio geometry (`sample_rate`, `channels`, `sample_format`) is fixed
+  upon initial header decode. Dynamic mid-stream geometry switching is forbidden; an unannounced
+  format change faults the stream.
+- **Single-Consumer Ownership**: An audio stream session operates in either unbound readback mode
+  (consumed via `ZZ9KAudioStreamRead()`) or bound playback mode (pumped to ZZ9000AX via
+  `ZZ9KAudioStreamPlay()`). A session cannot switch between consumer modes without explicit transition,
+  and attempting to bind playback while another session is active returns `ZZ9K_STATUS_BUSY`.
+- **EOF and Resumable Drain**: Feeding `ZZ9K_AUDIO_STREAM_FEED_EOF` marks permanent end of stream;
+  the session decodes all remaining input and signals `ZZ9K_AUDIO_STREAM_RESULT_DONE` once all PCM has
+  been read. Feeding `ZZ9K_AUDIO_STREAM_FEED_DRAIN` marks a starvation boundary; complete frames are
+  decoded, unread PCM drains to `ZZ9K_AUDIO_STREAM_RESULT_DRAINED`, and incomplete compressed data is
+  retained so subsequent feeds can seamlessly resume decoding.
+- **Cleanup and Reset**: Closing a session reclaims all decoder allocations and invalidates the session handle.
+  A firmware mailbox reset or restart invalidates every active session.
 
 `ZZ9KAudioStreamBeginDesc.low_water_bytes` is the PCM-ring refill
 threshold: while a session is bound to the AX output, the firmware tops the
