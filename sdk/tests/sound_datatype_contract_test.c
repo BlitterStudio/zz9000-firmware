@@ -343,7 +343,8 @@ static void test_vorbis_recognition(void)
                                           &envelope) &&
                   envelope.sample_rate == 44100U && envelope.channels == 2U &&
                   envelope.serial == 0x1984ea12UL &&
-                  envelope.nominal_bitrate == 112000U,
+                  envelope.nominal_bitrate == 112000U &&
+                  envelope.max_block_samples == 2048U,
               "a real Vorbis identification page is recognized");
   expect_true(!zz9k_sound_recognize_vorbis(vorbis_first_page,
                                            sizeof(page) - 1U, 0),

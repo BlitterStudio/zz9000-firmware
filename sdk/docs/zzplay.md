@@ -220,9 +220,14 @@ and the player window shows what it chose.
   ZZPlay reports that accelerated FLAC or Ogg Vorbis streaming is
   unavailable. An Ogg Vorbis duration comes from the stream's last page and
   is shown only when that page belongs to the same stream. A chained or
-  multiplexed Ogg file plays its first logical stream, then stops with an
-  error saying the card cannot decode the rest; it is never reported as
-  completed.
+  multiplexed Ogg file plays its first logical stream (up to a fraction of
+  a second of its end can be cut), then stops with an error saying the card
+  cannot decode the rest; it is never reported as completed.
+- The decoded-audio ring is sized from the stream's largest decoder unit
+  (an MP3 frame, a FLAC block, a Vorbis packet) and shrinks in bounded steps
+  when the compact Zorro II host window is short; if even one unit does not
+  fit, ZZPlay reports that there is not enough shared card memory for that
+  stream instead of starting it.
 
 Only one backend can own the ZZ9000AX daughterboard at a time. If another
 program holds it, an explicitly requested backend reports `BUSY` instead of

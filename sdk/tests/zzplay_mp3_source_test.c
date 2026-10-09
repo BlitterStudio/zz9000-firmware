@@ -78,7 +78,9 @@ int main(int argc, char **argv)
   }
   /* The function-signature and ordering assertions that used to run here
    * pinned the controls-callback structure the controller-driven rewrite
-   * removed; per the test policy they were deleted, not re-pinned. */
+   * removed, and the ring-size/host-flag text pinned the fixed Zorro II
+   * allocation the shrink ladder replaced; per the test policy they were
+   * deleted, not re-pinned. */
   ok = native_geometry &&
        strstr(source, "zz9k_audio_stream_begin(") &&
        strstr(source, "zz9k_audio_stream_feed(") &&
@@ -86,10 +88,6 @@ int main(int argc, char **argv)
        strstr(source, "zz9k_audio_stream_close(") &&
        strstr(source, "zzplay_ahi_begin_drain(") &&
        strstr(source, "ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE") &&
-       strstr(source, "ZZPLAY_MP3_Z2_PCM_CAPACITY (32UL * 1024UL)") &&
-       strstr(source, "ZZPLAY_MP3_Z2_STAGING_CAPACITY (16UL * 1024UL)") &&
-       strstr(source, "ZZ9K_ALLOC_CARD_ONLY, &decode->compressed") &&
-       strstr(source, "host_flags = ZZ9K_ALLOC_HOST_WINDOW") &&
        strstr(source, "AUTO falling back to accelerated decode + AHI") &&
        strstr(source, "direct AX is not a standalone MP3 backend") &&
        strstr(source, "zzplay_mhi_acquire(") &&

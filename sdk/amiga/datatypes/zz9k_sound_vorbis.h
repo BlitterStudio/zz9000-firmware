@@ -24,6 +24,7 @@ typedef struct ZZ9KSoundVorbisEnvelope {
   uint32_t channels;
   uint32_t serial;
   uint32_t nominal_bitrate; /* 0 when unset */
+  uint32_t max_block_samples; /* long-window size, 64..8192 */
 } ZZ9KSoundVorbisEnvelope;
 
 static uint32_t zz9k_sound_vorbis_le32(const uint8_t *p)
@@ -105,6 +106,7 @@ static int zz9k_sound_recognize_vorbis(const uint8_t *bytes, uint32_t length,
     envelope->channels = channels;
     envelope->serial = zz9k_sound_vorbis_le32(bytes + 14U);
     envelope->nominal_bitrate = zz9k_sound_vorbis_le32(packet + 20U);
+    envelope->max_block_samples = 1UL << large_block;
   }
   return 1;
 }

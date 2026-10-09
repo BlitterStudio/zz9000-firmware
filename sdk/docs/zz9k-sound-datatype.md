@@ -124,8 +124,12 @@ Peak allocation during construction:
   multiplier-checked, hard-capped at 256 MiB;
 - a 128 KiB card-only compressed input ring;
 - a host-window PCM ring plus staging pair, 64 KiB each, shrinking in
-  bounded halving steps down to a 4 KiB floor when the host-visible heap is
-  compact (the same shrink ladder the archive client uses);
+  bounded halving steps toward a 4 KiB staging floor when the host-visible
+  heap is compact (the same shrink ladder the archive client uses). The PCM
+  ring never shrinks below the decoder's largest output unit: an MP3 frame
+  (4608 bytes), the stream's largest FLAC block, or half a Vorbis long
+  block, per channel and sample width. If even that cannot be allocated,
+  creation fails with `ERROR_NO_FREE_STORE` before any decoding;
 - one file-read staging `AllocVec` of the staging-pair size.
 
 Every firmware resource (session, rings) is closed and freed before the

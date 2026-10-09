@@ -33,6 +33,7 @@ typedef struct ZZPlayFLACInfo {
   uint32_t channels;
   uint32_t bits_per_sample;
   uint64_t total_samples; /* 0 when STREAMINFO leaves it unknown */
+  uint32_t max_block_size; /* samples per channel in the largest block */
 } ZZPlayFLACInfo;
 
 typedef struct ZZPlayVorbisInfo {
@@ -40,6 +41,7 @@ typedef struct ZZPlayVorbisInfo {
   uint32_t channels;
   uint32_t serial;          /* logical stream of the identification page */
   uint32_t nominal_bitrate; /* bits per second; 0 when unset */
+  uint32_t max_block_samples; /* long-window size */
 } ZZPlayVorbisInfo;
 
 typedef struct ZZPlayWebPInfo {

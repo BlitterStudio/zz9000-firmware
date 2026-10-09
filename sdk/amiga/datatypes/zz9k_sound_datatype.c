@@ -218,6 +218,9 @@ typedef struct ZZ9KSoundSource {
   uint32_t sample_rate;    /* rate the stream must report */
   uint32_t channels;       /* channel count the stream must report */
   uint32_t pcm_format;     /* S16BE, or S32BE for 17..24-bit FLAC */
+  /* Largest PCM unit the decoder writes at once (an MP3 frame, a FLAC
+   * block, a Vorbis packet); the PCM ring must hold it whole. */
+  uint32_t min_pcm_bytes;
 } ZZ9KSoundSource;
 
 typedef struct ZZ9KSoundDecode {
@@ -237,6 +240,10 @@ typedef struct ZZ9KSoundDecode {
   uint32_t pending_ack;
   uint32_t source_channels;
   uint32_t sample_rate;
+  /* Geometry the probe promised; a stream that reports anything else is
+   * rejected rather than published with mismatched planes. */
+  uint32_t expect_rate;
+  uint32_t expect_channels;
   /* Requested PCM container and its bytes per channel sample (2 or 4). */
   uint32_t pcm_format;
   uint32_t sample_bytes_in;
@@ -353,6 +360,8 @@ static int zz9k_sound_probe_mp3(BPTR file, uint32_t file_size,
     source->sample_rate = envelope.sample_rate;
     source->channels = envelope.channels;
     source->pcm_format = ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE;
+    /* One 1152-sample stereo S16 frame: the firmware's MP3 ring minimum. */
+    source->min_pcm_bytes = 1152U * 2U * 2U;
   }
   return ok;
 }
@@ -378,6 +387,8 @@ static int zz9k_sound_probe_flac(BPTR file, uint32_t file_size,
   source->channels = envelope.channels;
   source->pcm_format = envelope.bits_per_sample > 16U ?
       ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE : ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE;
+  source->min_pcm_bytes = envelope.max_block_size * envelope.channels *
+      (envelope.bits_per_sample > 16U ? 4U : 2U);
   return 1;
 }
 
@@ -400,6 +411,9 @@ static int zz9k_sound_probe_vorbis(BPTR file, uint32_t file_size,
   source->sample_rate = envelope.sample_rate;
   source->channels = envelope.channels;
   source->pcm_format = ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE;
+  /* Overlap-add emits at most half the long block per packet. */
+  source->min_pcm_bytes = envelope.max_block_samples / 2U *
+      envelope.channels * 2U;
   return 1;
 }
 
@@ -414,15 +428,22 @@ static int zz9k_sound_probe_file(BPTR file, uint32_t file_size,
          zz9k_sound_probe_mp3(file, file_size, source);
 }
 
-static int zz9k_sound_alloc_host_pair(ZZ9KSoundDecode *decode)
+/* The PCM ring never drops below the decoder's largest output unit; only
+ * the staging half keeps shrinking toward the floor when the host-visible
+ * heap is compact. */
+static int zz9k_sound_alloc_host_pair(ZZ9KSoundDecode *decode,
+                                      uint32_t min_pcm)
 {
   uint32_t budget;
   if (!decode) {
     return 0;
   }
-  budget = ZZ9K_SOUND_HOST_BUFFER_BYTES;
-  while (budget >= ZZ9K_SOUND_HOST_BUFFER_MIN_BYTES) {
-    if (ZZ9KAllocShared(budget, 16U, ZZ9K_ALLOC_HOST_WINDOW,
+  min_pcm = (min_pcm + 15UL) & ~15UL;
+  for (budget = ZZ9K_SOUND_HOST_BUFFER_BYTES;
+       budget >= ZZ9K_SOUND_HOST_BUFFER_MIN_BYTES; budget /= 2U) {
+    uint32_t pcm_bytes = budget > min_pcm ? budget : min_pcm;
+
+    if (ZZ9KAllocShared(pcm_bytes, 16U, ZZ9K_ALLOC_HOST_WINDOW,
                         &decode->pcm_ring) == ZZ9K_STATUS_OK) {
       decode->owned.pcm_allocated = 1U;
       decode->owned.pcm_handle = decode->pcm_ring.handle;
@@ -435,7 +456,6 @@ static int zz9k_sound_alloc_host_pair(ZZ9KSoundDecode *decode)
       (void)ZZ9KFreeShared(decode->pcm_ring.handle);
       decode->owned.pcm_allocated = 0U;
     }
-    budget /= 2U;
   }
   return 0;
 }
@@ -507,7 +527,10 @@ static int zz9k_sound_copy_pcm(ZZ9KSoundDecode *decode)
   if (available > decode->pcm_ring.length ||
       (decode->result.channels != 1U && decode->result.channels != 2U) ||
       decode->result.sample_format != decode->pcm_format ||
-      (width != 2U && width != 4U)) {
+      (width != 2U && width != 4U) ||
+      (decode->result.sample_rate != 0U &&
+       (decode->result.sample_rate != decode->expect_rate ||
+        decode->result.channels != decode->expect_channels))) {
     return 0;
   }
   frame_bytes = decode->result.channels * width;
@@ -559,15 +582,27 @@ static int zz9k_sound_copy_pcm(ZZ9KSoundDecode *decode)
   return 1;
 }
 
+/* A resource status from Feed or Read keeps its DOS meaning; anything else
+ * is a stream or content failure (DTERROR_INVALID_DATA). */
+static LONG zz9k_sound_stream_error(int status)
+{
+  return status == ZZ9K_STATUS_BUSY ? ERROR_OBJECT_IN_USE :
+         status == ZZ9K_STATUS_NO_MEMORY ? ERROR_NO_FREE_STORE : 0;
+}
+
 /* Returns copied PCM credit. A forced Read is sent even with no credit: it is
  * the only way a backpressured stream resumes consuming compressed input. */
 static int zz9k_sound_ack_pcm(ZZ9KSoundDecode *decode, int force)
 {
+  int status;
+
   if (!force && decode->pending_ack < decode->pcm_ring.length / 2U) {
     return 1;
   }
-  if (ZZ9KAudioStreamRead(decode->result.session, decode->pending_ack, 0U,
-                          &decode->result) != ZZ9K_STATUS_OK) {
+  status = ZZ9KAudioStreamRead(decode->result.session, decode->pending_ack,
+                               0U, &decode->result);
+  if (status != ZZ9K_STATUS_OK) {
+    decode->error = zz9k_sound_stream_error(status);
     return 0;
   }
   decode->pending_ack = 0U;
@@ -664,6 +699,8 @@ static int zz9k_sound_decode_file(BPTR file, const ZZ9KSoundSource *source,
   decode->pcm_format = source->pcm_format;
   decode->sample_bytes_in =
       source->pcm_format == ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE ? 4U : 2U;
+  decode->expect_rate = source->sample_rate;
+  decode->expect_channels = source->channels;
   decode->owned.input_handle = ZZ9K_INVALID_HANDLE;
   decode->owned.pcm_handle = ZZ9K_INVALID_HANDLE;
   decode->owned.staging_handle = ZZ9K_INVALID_HANDLE;
@@ -680,7 +717,7 @@ static int zz9k_sound_decode_file(BPTR file, const ZZ9KSoundSource *source,
   }
   decode->owned.input_allocated = 1U;
   decode->owned.input_handle = decode->input_ring.handle;
-  if (!zz9k_sound_alloc_host_pair(decode)) {
+  if (!zz9k_sound_alloc_host_pair(decode, source->min_pcm_bytes)) {
     goto done;
   }
   status = zz9k_sound_begin_stream(source, decode);
@@ -745,9 +782,15 @@ static int zz9k_sound_decode_file(BPTR file, const ZZ9KSoundSource *source,
       uint32_t consumed = decode->result.bytes_consumed;
       if (!zz9k_audio_build_stream_feed_desc(
               &feed, decode->result.session, decode->staging.handle, 0U,
-              chunk, flags) ||
-          ZZ9KAudioStreamFeed(&feed, &decode->result) != ZZ9K_STATUS_OK ||
-          !zz9k_sound_drain_pcm(decode)) {
+              chunk, flags)) {
+        goto done;
+      }
+      status = ZZ9KAudioStreamFeed(&feed, &decode->result);
+      if (status != ZZ9K_STATUS_OK) {
+        decode->error = zz9k_sound_stream_error(status);
+        goto done;
+      }
+      if (!zz9k_sound_drain_pcm(decode)) {
         goto done;
       }
       if ((decode->result.flags & ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) ==

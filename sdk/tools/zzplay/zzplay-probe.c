@@ -315,6 +315,7 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
       info->flac.channels = flac.channels;
       info->flac.bits_per_sample = flac.bits_per_sample;
       info->flac.total_samples = flac.total_samples;
+      info->flac.max_block_size = flac.max_block_size;
       info->kind = ZZPLAY_MEDIA_KIND_FLAC;
       goto done;
     }
@@ -327,6 +328,7 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
       info->vorbis.channels = vorbis.channels;
       info->vorbis.serial = vorbis.serial;
       info->vorbis.nominal_bitrate = vorbis.nominal_bitrate;
+      info->vorbis.max_block_samples = vorbis.max_block_samples;
       info->kind = ZZPLAY_MEDIA_KIND_VORBIS;
       goto done;
     }
