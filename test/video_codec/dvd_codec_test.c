@@ -757,6 +757,33 @@ static int test_ac3_ring_floor(void)
 	return 0;
 }
 
+/* The Program Stream backends own which media audio they accept: MPEG-1
+ * carries MP2 or nothing; a DVD media session always carries MP2, LPCM
+ * or AC-3. Neither takes the WebM codecs. */
+static int test_backend_audio_rules(void)
+{
+	const struct SDKVideoDecoderOps *m1 = sdk_video_backend_find(
+		SDK_VIDEO_CODEC_MPEG1, SDK_VIDEO_CONTAINER_MPEG_PS);
+	const struct SDKVideoDecoderOps *m2 = sdk_video_mpeg2_backend_ops();
+
+	if (!m1 || !m1->audio_ok || !m2 || !m2->audio_ok)
+		return 1;
+	if (!m1->audio_ok(SDK_VIDEO_MEDIA_AUDIO_NONE) ||
+	    !m1->audio_ok(SDK_VIDEO_MEDIA_AUDIO_MP2) ||
+	    m1->audio_ok(SDK_VIDEO_MEDIA_AUDIO_AC3) ||
+	    m1->audio_ok(SDK_VIDEO_MEDIA_AUDIO_OPUS) ||
+	    m1->audio_ok(SDK_VIDEO_MEDIA_AUDIO_VORBIS))
+		return 2;
+	if (m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_NONE) ||
+	    !m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_MP2) ||
+	    !m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_LPCM) ||
+	    !m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_AC3) ||
+	    m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_OPUS) ||
+	    m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_VORBIS))
+		return 3;
+	return 0;
+}
+
 /* 6c. A VOB cut at a pack boundary ends mid AC-3 frame: the partial frame
  * can never complete, so the stream must still reach DONE with only
  * whole frames played. */
@@ -1096,6 +1123,12 @@ int main(void)
 		return 100 + err;
 	}
 	printf("PASS: test_ac3_ring_floor (ring must hold one AC-3 frame)\n");
+
+	if ((err = test_backend_audio_rules()) != 0) {
+		fprintf(stderr, "FAIL: test_backend_audio_rules (code %d)\n", err);
+		return 130 + err;
+	}
+	printf("PASS: test_backend_audio_rules (PS backends own their audio)\n");
 
 	if ((err = test_ac3_truncated_mid_frame()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_truncated_mid_frame (code %d)\n", err);
