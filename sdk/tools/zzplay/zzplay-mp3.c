@@ -29,6 +29,9 @@
 #define ZZPLAY_MP3_Z2_STAGING_CAPACITY (16UL * 1024UL)
 #define ZZPLAY_MP3_DRAIN_GUARD 128U
 
+/* One staging chunk. The AHI and on-card passes never run together. */
+static uint8_t zzplay_mp3_chunk[ZZPLAY_MP3_FEED_MAX_BYTES];
+
 /* Everything both backends need about the item being played. */
 typedef struct ZZPlayMP3Engine {
   const ZZPlayEngineRun *run;
@@ -104,7 +107,7 @@ typedef struct ZZPlayMP3Decode {
   ZZ9KSharedBuffer staging;
   ZZ9KAudioStreamResult result;
   ZZPlayAHISink *ahi;
-  const ZZPlayMP3Engine *engine;
+  ZZPlayMP3Engine *engine;
   uint32_t produced_seen;
   uint32_t pcm_offset;
   uint32_t pending_ack;
@@ -120,6 +123,12 @@ typedef struct ZZPlayMP3Decode {
   uint8_t session_open;
   uint8_t ahi_started;
   uint8_t compact_z2;
+  /* On-card FLAC/Vorbis: the pump, not a Read, consumes the PCM ring. */
+  uint8_t ax_bound;
+  uint8_t ax_resume;
+  uint8_t gain_supported;
+  uint8_t ax_committed;
+  uint8_t eof_sent;
 } ZZPlayMP3Decode;
 
 typedef enum ZZPlayMP3PassResult {
@@ -463,13 +472,14 @@ static uint32_t zzplay_mp3_round_4k(uint32_t bytes)
 
 /* PCM ring for one pass: the bus profile's default, raised to twice the
  * decoder's largest PCM unit so a whole AHI period (at most half the ring)
- * and one more unit fit together. */
-static uint32_t zzplay_mp3_pcm_capacity(const ZZPlayMP3Engine *engine,
-                                        int compact_z2)
+ * and one more unit fit together. Card-only rings skip the Zorro II host
+ * cap: the pump reads them on the card, so they never enter the window. */
+static uint32_t zzplay_mp3_pcm_capacity(uint32_t unit, int compact_z2,
+                                        int card_only)
 {
-  uint32_t base = compact_z2 ? ZZPLAY_MP3_Z2_PCM_CAPACITY
-                             : ZZPLAY_MP3_PCM_CAPACITY;
-  uint32_t want = zzplay_mp3_round_4k(2U * engine->min_pcm_bytes);
+  uint32_t base = (!card_only && compact_z2) ? ZZPLAY_MP3_Z2_PCM_CAPACITY
+                                             : ZZPLAY_MP3_PCM_CAPACITY;
+  uint32_t want = zzplay_mp3_round_4k(2U * unit);
 
   return want > base ? want : base;
 }
@@ -482,21 +492,25 @@ static uint32_t zzplay_mp3_pcm_capacity(const ZZPlayMP3Engine *engine,
  * compressed ring then holds one whole buffered input unit plus a staged
  * chunk. Runs before AHI is prepared so the period can be capped against
  * the ring obtained. */
-static int zzplay_mp3_alloc_rings(ZZPlayMP3Decode *decode)
+static int zzplay_mp3_alloc_rings(ZZPlayMP3Decode *decode, uint32_t pcm_unit,
+                                  int pcm_card_only)
 {
   const ZZPlayMP3Engine *engine = decode->engine;
   uint32_t host_flags = decode->compact_z2 ? ZZ9K_ALLOC_HOST_WINDOW : 0U;
+  uint32_t pcm_flags = pcm_card_only ? ZZ9K_ALLOC_CARD_ONLY : host_flags;
+  uint32_t unit = pcm_unit != 0U ? pcm_unit : engine->min_pcm_bytes;
   uint32_t staging_max = decode->compact_z2 ? ZZPLAY_MP3_Z2_STAGING_CAPACITY
                                             : ZZPLAY_MP3_FEED_MAX_BYTES;
-  uint32_t pcm = zzplay_mp3_pcm_capacity(engine, decode->compact_z2);
-  uint32_t pcm_floor = zzplay_mp3_round_4k(engine->min_pcm_bytes);
+  uint32_t pcm = zzplay_mp3_pcm_capacity(unit, decode->compact_z2,
+                                         pcm_card_only);
+  uint32_t pcm_floor = zzplay_mp3_round_4k(unit);
   uint32_t input = ZZPLAY_MP3_INPUT_CAPACITY;
 
   if (pcm_floor < 8192U) {
     pcm_floor = 8192U;
   }
   for (;;) {
-    if (zz9k_alloc_shared(decode->ctx, pcm, 16U, host_flags,
+    if (zz9k_alloc_shared(decode->ctx, pcm, 16U, pcm_flags,
                           &decode->pcm) == ZZ9K_STATUS_OK) {
       uint32_t staging = staging_max < pcm / 2U ? staging_max : pcm / 2U;
 
@@ -508,6 +522,12 @@ static int zzplay_mp3_alloc_rings(ZZPlayMP3Decode *decode)
         memset(&decode->staging, 0, sizeof(decode->staging));
       }
       (void)zz9k_free_shared(decode->ctx, decode->pcm.handle);
+      /* Staging is the only host-window buffer on the card path; a
+       * smaller PCM ring does not free any of that window. */
+      if (pcm_card_only) {
+        memset(&decode->pcm, 0, sizeof(decode->pcm));
+        return 0;
+      }
     }
     memset(&decode->pcm, 0, sizeof(decode->pcm));
     if (pcm <= pcm_floor) {
@@ -537,7 +557,6 @@ input_ring:
 
 static ZZPlayMP3PassResult zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
 {
-  static uint8_t chunk[ZZPLAY_MP3_FEED_MAX_BYTES];
   int status;
   unsigned flush_guard;
 
@@ -576,13 +595,13 @@ static ZZPlayMP3PassResult zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
     }
     zzplay_controller_set_engine_paused(decode->engine->ctl, 0);
     zzplay_mp3_report_progress(decode);
-    got = fread(chunk, 1U, decode->staging.length, decode->file);
+    got = fread(zzplay_mp3_chunk, 1U, decode->staging.length, decode->file);
     if (got == 0U && ferror(decode->file)) {
       return ZZPLAY_MP3_PASS_FAILED;
     }
     flags = got == 0U ? ZZ9K_AUDIO_STREAM_FEED_EOF : 0U;
     if (got != 0U &&
-        !zz9k_shared_copy_to(&decode->staging, 0U, chunk,
+        !zz9k_shared_copy_to(&decode->staging, 0U, zzplay_mp3_chunk,
                              (uint32_t)got)) {
       return ZZPLAY_MP3_PASS_FAILED;
     }
@@ -645,8 +664,25 @@ static void zzplay_mp3_decode_cleanup(ZZPlayMP3Decode *decode)
 {
   if (decode->session_open) {
     ZZ9KAudioStreamResult result;
-    (void)zz9k_audio_stream_close(
-        decode->ctx, decode->result.session, 0U, &result);
+    unsigned tries;
+    int status = ZZ9K_STATUS_OK;
+
+    /* A bound pump still owns the session; Stop is idempotent if it
+     * is not. Close answers BUSY while a PCM refill is in flight. */
+    if (decode->ax_bound && decode->result.session != 0U) {
+      (void)zz9k_audio_stream_stop(
+          decode->ctx, decode->result.session, 0U, &result);
+      decode->ax_bound = 0U;
+    }
+    for (tries = 0U; tries < 25U; tries++) {
+      status = zz9k_audio_stream_close(
+          decode->ctx, decode->result.session, 0U, &result);
+      if (status != ZZ9K_STATUS_BUSY) {
+        break;
+      }
+      Delay(1);
+    }
+    decode->session_open = 0U;
   }
   if (decode->staging.handle) {
     (void)zz9k_free_shared(decode->ctx, decode->staging.handle);
@@ -726,7 +762,7 @@ static ZZPlayEngineResult zzplay_mp3_accelerated(
       zzplay_mp3_decode_cleanup(&decode);
       goto done;
     }
-    if (!zzplay_mp3_alloc_rings(&decode)) {
+    if (!zzplay_mp3_alloc_rings(&decode, 0U, 0)) {
       if (unavailable && !started) {
         *unavailable = 1;
       } else {
@@ -1121,42 +1157,598 @@ ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run)
   return zzplay_mp3_accelerated(&engine, 0);
 }
 
-/* Backend policy shared by the codecs that only the card's stream decoder
- * plays (FLAC, Ogg Vorbis): accelerated decode + AHI, or NONE. No saved
- * per-media output applies (MP3OUTPUT names an MHI path they cannot use);
- * an explicit AUDIO= option still wins. */
-static ZZPlayEngineResult zzplay_card_stream_run(ZZPlayMP3Engine *engine)
+/* On-card FLAC/Vorbis. The window label is the same one video uses for
+ * the ZZ9000AX output, so the player shows which path actually ran.
+ * Position counts PCM the pump has staged (pcm_read is that cursor modulo
+ * the ring; bytes_produced is the cumulative write). Seeking stays off. */
+#define ZZPLAY_CARD_OUTPUT "ZZ9000AX direct"
+#define ZZPLAY_CARD_WAIT_GUARD 4000U
+
+typedef struct ZZPlayCardAttempt {
+  ZZPlayEngineResult result;
+  ZZPlayCardAnswer answer;
+  int reported;
+} ZZPlayCardAttempt;
+
+static uint32_t zzplay_card_played_bytes(const ZZ9KAudioStreamResult *result,
+                                         uint32_t capacity)
+{
+  uint32_t read;
+  uint32_t used;
+
+  if (!result || capacity == 0U) {
+    return 0U;
+  }
+  read = result->pcm_read % capacity;
+  used = (result->pcm_write + capacity - read) % capacity;
+  if (used > result->bytes_produced) {
+    return 0U;
+  }
+  return result->bytes_produced - used;
+}
+
+static void zzplay_card_report_position(const ZZPlayMP3Decode *decode)
+{
+  uint32_t rate = decode->result.sample_rate != 0U
+                      ? decode->result.sample_rate
+                      : decode->engine->sample_rate;
+  uint32_t channels = decode->result.channels != 0U
+                          ? decode->result.channels
+                          : decode->engine->channels;
+  uint32_t frame = channels * 2U;
+  uint32_t played;
+
+  if (rate == 0U || frame == 0U) {
+    return;
+  }
+  played = zzplay_card_played_bytes(&decode->result, decode->pcm.length);
+  zzplay_controller_set_position(
+      decode->engine->ctl,
+      (uint32_t)(((uint64_t)played / frame) * 1000ULL / rate), 1);
+}
+
+static void zzplay_card_apply_gain(ZZPlayMP3Decode *decode)
+{
+  ZZ9KAudioStreamResult result;
+  uint32_t gain;
+
+  if (!decode->gain_supported || decode->result.session == 0U) {
+    return;
+  }
+  gain = zzplay_card_stream_gain(decode->engine->ctl->volume);
+  if (zz9k_audio_stream_set_gain(decode->ctx, decode->result.session, gain,
+                                 0U, &result) == ZZ9K_STATUS_OK) {
+    decode->result = result;
+  }
+}
+
+static void zzplay_card_show_ax(ZZPlayMP3Engine *engine, int *shown)
+{
+  if (!shown || *shown) {
+    return;
+  }
+  *shown = 1;
+  zzplay_mp3_set_output(engine, ZZPLAY_CARD_OUTPUT);
+  zzplay_info("zzplay: selected audio backend AX (on-card %s, S16LE)\n",
+              engine->codec_name);
+}
+
+static int zzplay_card_service(ZZPlayMP3Decode *decode)
+{
+  ZZPlayController *ctl = decode->engine->ctl;
+  uint32_t volume;
+
+  if (zzplay_controller_take_volume(ctl, &volume)) {
+    zzplay_card_apply_gain(decode);
+    zzplay_mp3_refresh_output(decode->engine);
+  }
+  return zzplay_controller_item_should_end(ctl);
+}
+
+static uint32_t zzplay_card_pcm_unit(const ZZPlayMP3Engine *engine)
+{
+  uint32_t unit = engine->min_pcm_bytes;
+
+  /* AHI narrows S32BE on the host. The card path asks for S16LE, so the
+   * ring only has to hold the narrowed block. */
+  if (engine->pcm_width > 2U) {
+    unit = (unit / engine->pcm_width) * 2U;
+  }
+  return unit == 0U ? 4U : unit;
+}
+
+static int zzplay_card_begin(ZZPlayMP3Decode *decode)
+{
+  ZZ9KAudioStreamBeginExDesc begin;
+
+  if (!zz9k_audio_build_stream_begin_ex_desc(
+          &begin, decode->engine->codec, decode->compressed.handle,
+          decode->compressed.length, decode->pcm.handle,
+          decode->pcm.length, 0U, 0U, ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE, 0U,
+          0U, 0U)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  return zz9k_audio_stream_begin_ex(decode->ctx, &begin, &decode->result);
+}
+
+static int zzplay_card_gain_flag(ZZ9KContext *ctx)
+{
+  ZZ9KServiceInfo service;
+
+  return zz9k_query_service(ctx, ZZ9K_SERVICE_AUDIO, &service) ==
+             ZZ9K_STATUS_OK &&
+         (service.flags & ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN) != 0U;
+}
+
+/* Bind once the decoder has published a sample rate. Play before that is
+ * BAD_REQUEST. A later Play on an already-bound session is the status
+ * probe; Stop then Play resumes without closing. */
+static int zzplay_card_bind(ZZPlayMP3Decode *decode, int *shown,
+                            ZZPlayCardAnswer *refusal)
+{
+  int status;
+
+  if (decode->ax_bound || decode->engine->ctl->paused) {
+    return 1;
+  }
+  if (decode->result.sample_rate == 0U && decode->result.session != 0U) {
+    status = zz9k_audio_stream_read(decode->ctx, decode->result.session, 0U,
+                                     0U, &decode->result);
+    if (status != ZZ9K_STATUS_OK) {
+      decode->stream_status = status;
+      return 0;
+    }
+  }
+  if (decode->result.sample_rate == 0U) {
+    return decode->eof_sent ? 0 : 1;
+  }
+  status = zz9k_audio_stream_play(decode->ctx, decode->result.session, 0U,
+                                   &decode->result);
+  if ((status == ZZ9K_STATUS_UNSUPPORTED || status == ZZ9K_STATUS_BUSY) &&
+      !decode->ax_committed) {
+    *refusal = status == ZZ9K_STATUS_BUSY ? ZZPLAY_CARD_BUSY
+                                          : ZZPLAY_CARD_UNSUPPORTED;
+    decode->stream_status = status;
+    return 0;
+  }
+  if (status != ZZ9K_STATUS_OK) {
+    decode->stream_status = status;
+    return 0;
+  }
+  decode->ax_bound = 1U;
+  decode->ax_committed = 1U;
+  zzplay_controller_set_capabilities(decode->engine->ctl, 0,
+                                     decode->gain_supported != 0U, 0);
+  zzplay_card_show_ax(decode->engine, shown);
+  zzplay_card_apply_gain(decode);
+  return 1;
+}
+
+static int zzplay_card_pause(ZZPlayMP3Decode *decode, int *shown,
+                             ZZPlayCardAnswer *refusal)
+{
+  ZZPlayController *ctl = decode->engine->ctl;
+  int status;
+
+  if (!ctl->paused) {
+    if (!decode->ax_resume) {
+      zzplay_controller_set_engine_paused(ctl, 0);
+    }
+    return 0;
+  }
+  if (decode->ax_bound) {
+    ZZ9KAudioStreamResult result;
+
+    if (zz9k_audio_stream_stop(decode->ctx, decode->result.session, 0U,
+                               &result) == ZZ9K_STATUS_OK) {
+      decode->result = result;
+    }
+    decode->ax_bound = 0U;
+    decode->ax_resume = 1U;
+  }
+  zzplay_controller_set_engine_paused(ctl, 1);
+  while (ctl->paused) {
+    if (zzplay_card_service(decode)) {
+      return 1;
+    }
+    zzplay_mp3_pump(decode->engine);
+    Delay(1);
+  }
+  zzplay_controller_set_engine_paused(ctl, 0);
+  if (!decode->ax_resume) {
+    return 0;
+  }
+  decode->ax_resume = 0U;
+  status = zzplay_card_bind(decode, shown, refusal);
+  return status ? 0 : -1;
+}
+
+static int zzplay_card_wait_pressure(ZZPlayMP3Decode *decode, int *shown,
+                                     ZZPlayCardAnswer *refusal)
+{
+  unsigned guard = 0U;
+
+  while ((decode->result.flags &
+          ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) != 0U) {
+    int held;
+    int status;
+
+    if (++guard > ZZPLAY_CARD_WAIT_GUARD || zzplay_card_service(decode)) {
+      return 0;
+    }
+    held = zzplay_card_pause(decode, shown, refusal);
+    if (held != 0 || !zzplay_card_bind(decode, shown, refusal)) {
+      return 0;
+    }
+    if (!decode->ax_bound) {
+      /* The ring is full and Play has not taken it. Reading the PCM
+       * back would drop samples the pump has not played. */
+      return 0;
+    }
+    status = zz9k_audio_stream_play(decode->ctx, decode->result.session, 0U,
+                                     &decode->result);
+    if (status != ZZ9K_STATUS_OK) {
+      decode->stream_status = status;
+      return 0;
+    }
+    zzplay_card_report_position(decode);
+    zzplay_mp3_pump(decode->engine);
+    Delay(1);
+  }
+  return 1;
+}
+
+static int zzplay_card_drain(ZZPlayMP3Decode *decode, int *shown,
+                             ZZPlayCardAnswer *refusal)
+{
+  unsigned guard;
+
+  for (guard = 0U; guard < ZZPLAY_CARD_WAIT_GUARD; guard++) {
+    int held;
+    int status;
+
+    if (zzplay_card_service(decode)) {
+      return 0;
+    }
+    held = zzplay_card_pause(decode, shown, refusal);
+    if (held != 0) {
+      return 0;
+    }
+    if ((decode->result.flags & ZZ9K_AUDIO_STREAM_RESULT_DONE) != 0U) {
+      zzplay_card_report_position(decode);
+      return 1;
+    }
+    if (decode->ax_bound) {
+      status = zz9k_audio_stream_play(decode->ctx, decode->result.session,
+                                       0U, &decode->result);
+      if (status != ZZ9K_STATUS_OK) {
+        decode->stream_status = status;
+        return 0;
+      }
+    }
+    zzplay_card_report_position(decode);
+    zzplay_mp3_pump(decode->engine);
+    Delay(1);
+  }
+  return 0;
+}
+
+static ZZPlayMP3PassResult zzplay_card_stop_or_fail(ZZPlayMP3Decode *decode)
+{
+  return zzplay_mp3_should_stop(decode) ? ZZPLAY_MP3_PASS_STOPPED
+                                        : ZZPLAY_MP3_PASS_FAILED;
+}
+
+static ZZPlayMP3PassResult zzplay_card_play_once(ZZPlayMP3Decode *decode,
+                                                 int *shown,
+                                                 ZZPlayCardAnswer *refusal)
+{
+  int status;
+
+  *refusal = ZZPLAY_CARD_OK;
+  memset(&decode->result, 0, sizeof(decode->result));
+  status = zzplay_card_begin(decode);
+  if (status == ZZ9K_STATUS_UNSUPPORTED || status == ZZ9K_STATUS_BUSY) {
+    *refusal = status == ZZ9K_STATUS_BUSY ? ZZPLAY_CARD_BUSY
+                                          : ZZPLAY_CARD_UNSUPPORTED;
+    return ZZPLAY_MP3_PASS_FAILED;
+  }
+  if (status != ZZ9K_STATUS_OK) {
+    decode->stream_status = status;
+    return ZZPLAY_MP3_PASS_FAILED;
+  }
+  decode->session_open = 1U;
+  zzplay_card_apply_gain(decode);
+
+  for (;;) {
+    ZZ9KAudioStreamFeedDesc feed;
+    size_t got = 0U;
+    uint32_t flags = 0U;
+    int held;
+    unsigned retry;
+
+    if (zzplay_card_service(decode)) {
+      return ZZPLAY_MP3_PASS_STOPPED;
+    }
+    held = zzplay_card_pause(decode, shown, refusal);
+    if (held > 0) {
+      return ZZPLAY_MP3_PASS_STOPPED;
+    }
+    if (held < 0) {
+      return zzplay_card_stop_or_fail(decode);
+    }
+    zzplay_card_report_position(decode);
+    zzplay_mp3_pump(decode->engine);
+
+    if (!decode->eof_sent) {
+      got = fread(zzplay_mp3_chunk, 1U, decode->staging.length,
+                  decode->file);
+      if (got == 0U && ferror(decode->file)) {
+        return ZZPLAY_MP3_PASS_FAILED;
+      }
+      flags = got == 0U ? ZZ9K_AUDIO_STREAM_FEED_EOF : 0U;
+      if (got != 0U &&
+          !zz9k_shared_copy_to(&decode->staging, 0U, zzplay_mp3_chunk,
+                               (uint32_t)got)) {
+        return ZZPLAY_MP3_PASS_FAILED;
+      }
+      for (retry = 0U;; retry++) {
+        if (retry > 64U ||
+            !zz9k_audio_build_stream_feed_desc(
+                &feed, decode->result.session, decode->staging.handle, 0U,
+                (uint32_t)got, flags)) {
+          return ZZPLAY_MP3_PASS_FAILED;
+        }
+        status = zz9k_audio_stream_feed(decode->ctx, &feed, &decode->result);
+        if (status == ZZ9K_STATUS_UNSUPPORTED) {
+          decode->stream_status = status;
+          if (decode->ax_committed) {
+            (void)zzplay_card_drain(decode, shown, refusal);
+          }
+          return zzplay_mp3_should_stop(decode) ? ZZPLAY_MP3_PASS_STOPPED
+                                                : ZZPLAY_MP3_PASS_UNSUPPORTED;
+        }
+        if (status != ZZ9K_STATUS_OK) {
+          decode->stream_status = status;
+          return zzplay_card_stop_or_fail(decode);
+        }
+        if ((decode->result.flags &
+             ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) == 0U) {
+          break;
+        }
+        if (!zzplay_card_wait_pressure(decode, shown, refusal)) {
+          if (*refusal == ZZPLAY_CARD_UNSUPPORTED ||
+              *refusal == ZZPLAY_CARD_BUSY) {
+            return ZZPLAY_MP3_PASS_FAILED;
+          }
+          return zzplay_card_stop_or_fail(decode);
+        }
+      }
+      decode->input_bytes += (uint32_t)got;
+      if (flags != 0U) {
+        decode->eof_sent = 1U;
+      }
+    }
+
+    if (!zzplay_card_bind(decode, shown, refusal)) {
+      if (*refusal == ZZPLAY_CARD_UNSUPPORTED ||
+          *refusal == ZZPLAY_CARD_BUSY) {
+        return ZZPLAY_MP3_PASS_FAILED;
+      }
+      return zzplay_card_stop_or_fail(decode);
+    }
+    if (!decode->eof_sent) {
+      continue;
+    }
+    if (!decode->ax_bound) {
+      return ZZPLAY_MP3_PASS_FAILED;
+    }
+    if (!zzplay_card_drain(decode, shown, refusal)) {
+      return zzplay_card_stop_or_fail(decode);
+    }
+    if (zzplay_card_played_bytes(&decode->result, decode->pcm.length) ==
+        0U) {
+      return ZZPLAY_MP3_PASS_FAILED;
+    }
+    return ZZPLAY_MP3_PASS_COMPLETED;
+  }
+}
+
+static ZZPlayCardAttempt zzplay_card_ax_run(ZZPlayMP3Engine *engine)
 {
   const ZZPlayEngineRun *run = engine->run;
-  ZZPlayAudioBackend requested;
-  int strict = 0;
+  ZZPlayCardAttempt attempt;
+  ZZ9KContext *ctx = 0;
+  ZZ9KCaps caps;
+  uint32_t repeats = run->options->loop_count;
+  uint32_t completed = 0U;
+  int shown = 0;
+  int gain = 0;
 
-  zzplay_controller_set_duration(run->ctl, engine->total_ms);
-  zzplay_controller_set_capabilities(run->ctl, 0, 0, 0);
-  requested = zzplay_prefs_requested_backend(
-      run->prefs, run->options, ZZPLAY_MEDIA_AUDIO_NONE, &strict);
-  if (strict && (requested == ZZPLAY_AUDIO_MHI ||
-                 requested == ZZPLAY_AUDIO_AX)) {
+  memset(&attempt, 0, sizeof(attempt));
+  memset(&caps, 0, sizeof(caps));
+  attempt.answer = ZZPLAY_CARD_OK;
+  attempt.result = ZZPLAY_ENGINE_FAILED;
+  if (zz9k_open(&ctx) != ZZ9K_STATUS_OK ||
+      !zzplay_mp3_service_ready(ctx, &caps, engine->codec)) {
     zzplay_launch_reportf(engine->ctl, run->options,
-                          "%s plays through accelerated decode + AHI only",
+                          "accelerated %s streaming is unavailable",
                           engine->codec_name);
-    return ZZPLAY_ENGINE_FAILED;
+    attempt.reported = 1;
+    attempt.answer = ZZPLAY_CARD_FAILED;
+    goto done;
   }
-  if (requested == ZZPLAY_AUDIO_NONE) {
+  gain = zzplay_card_gain_flag(ctx);
+  for (;;) {
+    ZZPlayMP3Decode decode;
+    ZZPlayCardAnswer refusal = ZZPLAY_CARD_OK;
+    ZZPlayMP3PassResult pass;
+    uint32_t played;
+
+    memset(&decode, 0, sizeof(decode));
+    decode.ctx = ctx;
+    decode.engine = engine;
+    decode.gain_supported = (uint8_t)(gain ? 1U : 0U);
+    decode.compact_z2 =
+        (caps.capability_bits & ZZ9K_CAP_APERTURE_LAYOUT) != 0U;
+    decode.file = fopen(run->path, "rb");
+    if (!decode.file) {
+      zzplay_launch_reportf(engine->ctl, run->options, "cannot reopen %s",
+                            run->path);
+      attempt.reported = 1;
+      attempt.answer = ZZPLAY_CARD_FAILED;
+      zzplay_mp3_decode_cleanup(&decode);
+      goto done;
+    }
+    if (fseek(decode.file, (long)engine->audio_start, SEEK_SET) != 0) {
+      zzplay_launch_reportf(engine->ctl, run->options, "cannot seek in %s",
+                            run->path);
+      attempt.reported = 1;
+      attempt.answer = ZZPLAY_CARD_FAILED;
+      zzplay_mp3_decode_cleanup(&decode);
+      goto done;
+    }
+    if (!zzplay_mp3_alloc_rings(&decode, zzplay_card_pcm_unit(engine), 1)) {
+      zzplay_launch_reportf(engine->ctl, run->options,
+                            "not enough shared card memory for %s streaming",
+                            engine->codec_name);
+      attempt.reported = 1;
+      attempt.answer = ZZPLAY_CARD_FAILED;
+      zzplay_mp3_decode_cleanup(&decode);
+      goto done;
+    }
+    pass = zzplay_card_play_once(&decode, &shown, &refusal);
+    played = zzplay_card_played_bytes(&decode.result, decode.pcm.length);
+    zzplay_info("zzplay: %s on-card loop %lu: %lu input bytes, %lu played "
+                "bytes\n",
+                engine->codec_name, (unsigned long)completed,
+                (unsigned long)decode.input_bytes, (unsigned long)played);
+    zzplay_mp3_decode_cleanup(&decode);
+    if (pass == ZZPLAY_MP3_PASS_STOPPED) {
+      attempt.result = ZZPLAY_ENGINE_STOPPED;
+      goto done;
+    }
+    if (pass == ZZPLAY_MP3_PASS_UNSUPPORTED) {
+      zzplay_launch_reportf(
+          engine->ctl, run->options,
+          played != 0U
+              ? "the card cannot decode the rest of this %s stream (a "
+                "chained or multiplexed Ogg link follows)"
+              : "the card cannot decode this %s stream (unsupported layout)",
+          engine->codec_name);
+      attempt.reported = 1;
+      goto done;
+    }
+    if (refusal == ZZPLAY_CARD_UNSUPPORTED || refusal == ZZPLAY_CARD_BUSY) {
+      attempt.answer = refusal;
+      attempt.result = ZZPLAY_ENGINE_FAILED;
+      goto done;
+    }
+    if (pass != ZZPLAY_MP3_PASS_COMPLETED) {
+      zzplay_launch_reportf(engine->ctl, run->options,
+                            "on-card %s playback failed", engine->codec_name);
+      attempt.reported = 1;
+      attempt.answer = ZZPLAY_CARD_FAILED;
+      goto done;
+    }
+    if (zzplay_controller_loop_item(engine->ctl) ||
+        (run->options->loop_mode == ZZPLAY_LOOP_FINITE && repeats != 0U)) {
+      if (run->options->loop_mode == ZZPLAY_LOOP_FINITE) {
+        repeats--;
+      }
+      completed++;
+      continue;
+    }
+    attempt.result = ZZPLAY_ENGINE_EOF;
+    break;
+  }
+
+done:
+  if (ctx) {
+    zz9k_close(ctx);
+  }
+  return attempt;
+}
+
+static ZZPlayEngineResult zzplay_card_stream_ahi(ZZPlayMP3Engine *engine)
+{
+  const ZZPlayEngineRun *run = engine->run;
+
+  if (engine->muted) {
     zzplay_info("zzplay: selected audio backend NONE "
-           "(accelerated %s decode benchmark)\n", engine->codec_name);
-    engine->muted = 1;
+                "(accelerated %s decode benchmark)\n",
+                engine->codec_name);
+    zzplay_controller_set_capabilities(run->ctl, 0, 0, 0);
     zzplay_mp3_set_output(engine, "none");
   } else {
     zzplay_info("zzplay: selected audio backend AHI "
-           "(accelerated %s decode, %s)\n", engine->codec_name,
-           engine->pcm_width == 4U ? "S32BE narrowed to S16" : "S16BE");
+                "(accelerated %s decode, %s)\n",
+                engine->codec_name,
+                engine->pcm_width == 4U ? "S32BE narrowed to S16" : "S16BE");
     zzplay_controller_set_capabilities(run->ctl, 0, 1, 0);
     sprintf(engine->output_base, "AHI unit %lu",
             (unsigned long)run->prefs->ahi_unit);
     zzplay_mp3_refresh_output(engine);
   }
   return zzplay_mp3_accelerated(engine, 0);
+}
+
+/* FLAC and Ogg Vorbis. No saved per-format output applies (MP3OUTPUT is an
+ * MHI path they cannot use); an explicit AUDIO= option is strict unless it
+ * is AUTO. AUTO and a non-strict card preference try on-card playback and
+ * fall back to AHI when BeginEx(S16LE) or Play is refused or the AX output
+ * is busy. */
+static ZZPlayEngineResult zzplay_card_stream_run(ZZPlayMP3Engine *engine)
+{
+  const ZZPlayEngineRun *run = engine->run;
+  ZZPlayAudioBackend requested;
+  ZZPlayCardDecision plan;
+  int strict = 0;
+
+  zzplay_controller_set_duration(run->ctl, engine->total_ms);
+  zzplay_controller_set_capabilities(run->ctl, 0, 0, 0);
+  requested = zzplay_prefs_requested_backend(
+      run->prefs, run->options, ZZPLAY_MEDIA_AUDIO_NONE, &strict);
+  plan = zzplay_card_stream_decide(requested, strict, ZZPLAY_CARD_NOT_ASKED);
+  if (plan.path == ZZPLAY_CARD_PATH_REFUSED) {
+    if (plan.message) {
+      zzplay_launch_reportf(engine->ctl, run->options, plan.message,
+                            engine->codec_name);
+    }
+    return ZZPLAY_ENGINE_FAILED;
+  }
+  if (plan.path == ZZPLAY_CARD_PATH_NONE) {
+    engine->muted = 1;
+    return zzplay_card_stream_ahi(engine);
+  }
+  if (plan.path == ZZPLAY_CARD_PATH_AHI) {
+    return zzplay_card_stream_ahi(engine);
+  }
+  {
+    ZZPlayCardAttempt attempt = zzplay_card_ax_run(engine);
+    ZZPlayCardDecision after;
+
+    if (zzplay_controller_item_should_end(run->ctl)) {
+      return ZZPLAY_ENGINE_STOPPED;
+    }
+    if (attempt.answer != ZZPLAY_CARD_UNSUPPORTED &&
+        attempt.answer != ZZPLAY_CARD_BUSY) {
+      return attempt.result;
+    }
+    after = zzplay_card_stream_decide(requested, strict, attempt.answer);
+    if (after.fell_back && after.path == ZZPLAY_CARD_PATH_AHI) {
+      zzplay_info("zzplay: on-card %s %s; falling back to AHI\n",
+                  engine->codec_name,
+                  attempt.answer == ZZPLAY_CARD_BUSY ? "busy"
+                                                     : "unsupported");
+      return zzplay_card_stream_ahi(engine);
+    }
+    if (!attempt.reported && after.message) {
+      zzplay_launch_reportf(engine->ctl, run->options, after.message,
+                            engine->codec_name);
+    }
+    return ZZPLAY_ENGINE_FAILED;
+  }
 }
 
 static int zzplay_card_stream_engine(const ZZPlayEngineRun *run,

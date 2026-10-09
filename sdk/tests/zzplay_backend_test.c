@@ -159,6 +159,76 @@ static int check_audio_start_prebuffer(void)
   return 1;
 }
 
+static int check_card_case(ZZPlayAudioBackend requested, int strict,
+                           ZZPlayCardAnswer answer, ZZPlayCardPath path,
+                           int fell_back, const char *message)
+{
+  ZZPlayCardDecision decision =
+      zzplay_card_stream_decide(requested, strict, answer);
+
+  if (decision.path != path || decision.fell_back != fell_back) {
+    return 0;
+  }
+  if (!message) {
+    return decision.message == 0;
+  }
+  return decision.message && strcmp(decision.message, message) == 0;
+}
+
+static int check_card_policy(void)
+{
+  const char *mhi = "%s plays on the card or through AHI, not MHI";
+  const char *unsupported =
+      "on-card %s playback refused: unsupported stream";
+  const char *busy = "on-card %s playback refused: ZZ9000AX is busy";
+  const char *failed = "on-card %s playback failed";
+
+  if (strstr(mhi, "AHI only") || !strstr(mhi, "card") ||
+      !strstr(mhi, "AHI") || !strstr(mhi, "MHI")) {
+    return 0;
+  }
+  if (!check_card_case(ZZPLAY_AUDIO_AUTO, 0, ZZPLAY_CARD_NOT_ASKED,
+                       ZZPLAY_CARD_PATH_AX, 0, 0) ||
+      !check_card_case(ZZPLAY_AUDIO_AUTO, 0, ZZPLAY_CARD_OK,
+                       ZZPLAY_CARD_PATH_AX, 0, 0) ||
+      !check_card_case(ZZPLAY_AUDIO_AUTO, 0, ZZPLAY_CARD_UNSUPPORTED,
+                       ZZPLAY_CARD_PATH_AHI, 1, 0) ||
+      !check_card_case(ZZPLAY_AUDIO_AUTO, 0, ZZPLAY_CARD_BUSY,
+                       ZZPLAY_CARD_PATH_AHI, 1, 0) ||
+      !check_card_case(ZZPLAY_AUDIO_AUTO, 0, ZZPLAY_CARD_FAILED,
+                       ZZPLAY_CARD_PATH_REFUSED, 0, failed) ||
+      !check_card_case(ZZPLAY_AUDIO_AX, 1, ZZPLAY_CARD_OK,
+                       ZZPLAY_CARD_PATH_AX, 0, 0) ||
+      !check_card_case(ZZPLAY_AUDIO_AX, 1, ZZPLAY_CARD_UNSUPPORTED,
+                       ZZPLAY_CARD_PATH_REFUSED, 0, unsupported) ||
+      !check_card_case(ZZPLAY_AUDIO_AX, 1, ZZPLAY_CARD_BUSY,
+                       ZZPLAY_CARD_PATH_REFUSED, 0, busy) ||
+      !check_card_case(ZZPLAY_AUDIO_AX, 0, ZZPLAY_CARD_UNSUPPORTED,
+                       ZZPLAY_CARD_PATH_AHI, 1, 0) ||
+      !check_card_case(ZZPLAY_AUDIO_AX, 0, ZZPLAY_CARD_BUSY,
+                       ZZPLAY_CARD_PATH_AHI, 1, 0) ||
+      !check_card_case(ZZPLAY_AUDIO_AHI, 1, ZZPLAY_CARD_UNSUPPORTED,
+                       ZZPLAY_CARD_PATH_AHI, 0, 0) ||
+      !check_card_case(ZZPLAY_AUDIO_AHI, 0, ZZPLAY_CARD_BUSY,
+                       ZZPLAY_CARD_PATH_AHI, 0, 0) ||
+      !check_card_case(ZZPLAY_AUDIO_MHI, 1, ZZPLAY_CARD_OK,
+                       ZZPLAY_CARD_PATH_REFUSED, 0, mhi) ||
+      !check_card_case(ZZPLAY_AUDIO_MHI, 0, ZZPLAY_CARD_UNSUPPORTED,
+                       ZZPLAY_CARD_PATH_AHI, 1, 0) ||
+      !check_card_case(ZZPLAY_AUDIO_NONE, 1, ZZPLAY_CARD_OK,
+                       ZZPLAY_CARD_PATH_NONE, 0, 0)) {
+    return 0;
+  }
+  return 1;
+}
+
+static int check_card_gain(void)
+{
+  return zzplay_card_stream_gain(0U) == 0U &&
+         zzplay_card_stream_gain(50U) == 64U &&
+         zzplay_card_stream_gain(100U) == 128U;
+}
+
 int main(void)
 {
   if (!check_video_preflight()) {
@@ -172,6 +242,12 @@ int main(void)
   }
   if (!check_audio_start_prebuffer()) {
     return 4;
+  }
+  if (!check_card_policy()) {
+    return 5;
+  }
+  if (!check_card_gain()) {
+    return 6;
   }
   return 0;
 }
