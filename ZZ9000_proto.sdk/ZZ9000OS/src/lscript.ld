@@ -44,8 +44,8 @@ SECTIONS
 .text : {
    KEEP (*(.vectors))
    KEEP (*(.boot))
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .text)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .text.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o) .text)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o) .text.*)
    *(.gnu.linkonce.t.*)
    *(.plt)
    *(.gnu_warning)
@@ -67,8 +67,8 @@ SECTIONS
 
 .rodata : {
    __rodata_start = .;
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .rodata)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *usb_proxy_iso.o *video.o *hdmi.o) .rodata.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o) .rodata)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_plmpeg.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o) .rodata.*)
    *(.gnu.linkonce.r.*)
    __rodata_end = .;
 } > ps7_ddr_0
@@ -396,7 +396,9 @@ ASSERT(__z2_direct_ring_end <= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
    __audio_lease_text_end = .;
 } > ps7_ddr_hi
 /* Mailbox audio-control requests run after startup. Keeping this small
- * control-plane handler in high DDR preserves the fixed low framebuffer. */
+ * control-plane handler in high DDR preserves the fixed low framebuffer.
+ * The ZZ9000AX codec driver (ax.o, with its DSP program/parameter images)
+ * follows for the same reason: the low image had no room left for it. */
 .audio_control_text : {
    . = ALIGN(16);
    __audio_control_text_start = .;
@@ -404,6 +406,10 @@ ASSERT(__z2_direct_ring_end <= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
    *sdk_audio_control.o(.text.*)
    *sdk_audio_control.o(.rodata)
    *sdk_audio_control.o(.rodata.*)
+   *ax.o(.text)
+   *ax.o(.text.*)
+   *ax.o(.rodata)
+   *ax.o(.rodata.*)
    . = ALIGN(16);
    __audio_control_text_end = .;
 } > ps7_ddr_hi
