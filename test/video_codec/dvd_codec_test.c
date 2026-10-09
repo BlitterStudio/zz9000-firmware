@@ -811,46 +811,166 @@ static int test_video_only_ignores_audio(void)
 
 /* 6e. A VOB that ends inside a pack (a cut copy) or with zero padding:
  * the incomplete tail can never parse, so it must be dropped at end of
- * input instead of keeping the stream from DONE. */
+ * input instead of keeping the stream from DONE, and without losing any
+ * complete picture before it. */
 static int test_ragged_tail_reaches_done(void)
 {
 	const uint32_t len = zz9k_dvd_ac3_192_fixture_len;
-	/* Inside a video PES, then inside pack 30's 14-byte pack header
-	 * (before and after its first 12 bytes), inside the start code and
-	 * the length of the PES after it, inside the last pack; then zero
-	 * padding. */
-	const uint32_t cuts[] = {
-		29U * 2048U + 1000U, 30U * 2048U + 8U, 30U * 2048U + 13U,
-		30U * 2048U + 16U, 30U * 2048U + 19U, len - 1000U
+	const uint32_t pack30 = 30U * 2048U;
+	/* Inside a video PES (the last two pictures are incomplete), then
+	 * inside pack 30's 14-byte pack header (before and after its first
+	 * 12 bytes), inside the start code and the length of the PES after
+	 * it, inside the last pack. */
+	static const struct {
+		uint32_t offset;
+		uint32_t frames;
+	} cuts[] = {
+		{ 29U * 2048U + 1000U, 48U }, { 30U * 2048U + 8U, 50U },
+		{ 30U * 2048U + 13U, 50U }, { 30U * 2048U + 16U, 50U },
+		{ 30U * 2048U + 19U, 50U }, { 0U, 50U }
 	};
-	uint8_t *padded = (uint8_t *)malloc(len + 100U);
+	uint8_t *buf = (uint8_t *)malloc(len + 100U);
 	struct stream_result r;
 	uint32_t i;
 	int rc;
 
-	if (!padded)
+	if (!buf)
 		return 1;
 	for (i = 0U; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
-		rc = run_decode_test(zz9k_dvd_ac3_192_fixture, cuts[i], 2048U,
+		uint32_t cut = cuts[i].offset != 0U ? cuts[i].offset
+		                                    : len - 1000U;
+
+		rc = run_decode_test(zz9k_dvd_ac3_192_fixture, cut, 2048U,
 		                     SDK_VIDEO_MEDIA_AUDIO_NONE, &r);
-		if (rc != 0 || r.frame_count == 0U ||
+		if (rc != 0 || r.frame_count != cuts[i].frames ||
 		    r.eof_state != SDK_VIDEO_BACKEND_DONE ||
 		    r.final_state != SDK_VIDEO_BACKEND_DONE) {
-			free(padded);
+			free(buf);
 			return rc != 0 ? rc : 20 + (int)i;
 		}
 	}
-	memcpy(padded, zz9k_dvd_ac3_192_fixture, len);
-	memset(padded + len, 0, 100U);
-	rc = run_decode_test(padded, len + 100U, 2048U,
+	/* Zero padding after the last pack. */
+	memcpy(buf, zz9k_dvd_ac3_192_fixture, len);
+	memset(buf + len, 0, 100U);
+	rc = run_decode_test(buf, len + 100U, 2048U,
 	                     SDK_VIDEO_MEDIA_AUDIO_NONE, &r);
-	free(padded);
+	if (rc != 0 || r.frame_count != 50U ||
+	    r.eof_state != SDK_VIDEO_BACKEND_DONE ||
+	    r.final_state != SDK_VIDEO_BACKEND_DONE) {
+		free(buf);
+		return rc != 0 ? rc : 30;
+	}
+	/* A pack header announcing 3 stuffing bytes, cut after the first. */
+	memcpy(buf, zz9k_dvd_ac3_192_fixture, pack30 + 14U);
+	buf[pack30 + 13U] = (uint8_t)((buf[pack30 + 13U] & ~7U) | 3U);
+	buf[pack30 + 14U] = 0xffU;
+	rc = run_decode_test(buf, pack30 + 15U, 2048U,
+	                     SDK_VIDEO_MEDIA_AUDIO_NONE, &r);
+	free(buf);
 	if (rc != 0)
 		return rc;
 	if (r.frame_count != 50U || r.eof_state != SDK_VIDEO_BACKEND_DONE ||
 	    r.final_state != SDK_VIDEO_BACKEND_DONE)
-		return 30;
+		return 31;
 	return 0;
+}
+
+/* Copies the video elementary stream out of a Program Stream. */
+static uint32_t extract_video_es(const uint8_t *ps, uint32_t len,
+                                 uint8_t *es)
+{
+	uint32_t i = 0U;
+	uint32_t n = 0U;
+
+	while (i + 6U <= len) {
+		uint32_t total;
+
+		if (ps[i] != 0U || ps[i + 1U] != 0U || ps[i + 2U] != 1U) {
+			i++;
+			continue;
+		}
+		if (ps[i + 3U] == 0xbaU) {
+			i += 14U + (ps[i + 13U] & 7U);
+			continue;
+		}
+		if (ps[i + 3U] == 0xb9U) {
+			i += 4U;
+			continue;
+		}
+		total = 6U + ((uint32_t)ps[i + 4U] << 8 | ps[i + 5U]);
+		if (ps[i + 3U] == 0xe0U) {
+			uint32_t hdr = 9U + ps[i + 8U];
+
+			memcpy(es + n, ps + i + hdr, total - hdr);
+			n += total - hdr;
+		}
+		i += total;
+	}
+	return n;
+}
+
+/* 6f. Video-only, with audio PES packets densely interleaved between tiny
+ * video PES packets: every video pop re-pumps audio into the demux, and
+ * that audio must not hold back the end of the stream. */
+static int test_video_only_dense_audio(void)
+{
+	static const uint8_t audio_pes[14] = {
+		0x00, 0x00, 0x01, 0xc0, 0x00, 0x08, 0x81, 0x00, 0x00,
+		0xff, 0xfb, 0x90, 0x64, 0x00
+	};
+	static const uint32_t chunks[] = { 2048U, 65536U, 0U };
+	const uint32_t piece = 16U;
+	uint8_t *es = (uint8_t *)malloc(zz9k_dvd_ac3_192_fixture_len);
+	uint8_t *ps = NULL;
+	uint32_t es_len;
+	uint32_t ps_len = 0U;
+	uint32_t at;
+	uint32_t i;
+	int rc = 0;
+
+	if (!es)
+		return 1;
+	es_len = extract_video_es(zz9k_dvd_ac3_192_fixture,
+	                          zz9k_dvd_ac3_192_fixture_len, es);
+	ps = (uint8_t *)malloc((es_len / piece + 1U) *
+	                       (5U * sizeof(audio_pes) + 9U + piece));
+	if (!ps || es_len == 0U) {
+		free(es);
+		free(ps);
+		return 2;
+	}
+	for (at = 0U; at < es_len; at += piece) {
+		uint32_t n = es_len - at < piece ? es_len - at : piece;
+
+		for (i = 0U; i < 5U; i++) {
+			memcpy(ps + ps_len, audio_pes, sizeof(audio_pes));
+			ps_len += sizeof(audio_pes);
+		}
+		ps[ps_len++] = 0x00;
+		ps[ps_len++] = 0x00;
+		ps[ps_len++] = 0x01;
+		ps[ps_len++] = 0xe0;
+		ps[ps_len++] = 0x00;
+		ps[ps_len++] = (uint8_t)(n + 3U);
+		ps[ps_len++] = 0x81;
+		ps[ps_len++] = 0x00;
+		ps[ps_len++] = 0x00;
+		memcpy(ps + ps_len, es + at, n);
+		ps_len += n;
+	}
+	free(es);
+	for (i = 0U; i < sizeof(chunks) / sizeof(chunks[0]) && rc == 0; i++) {
+		struct stream_result r;
+
+		rc = run_decode_test(ps, ps_len, chunks[i],
+		                     SDK_VIDEO_MEDIA_AUDIO_NONE, &r);
+		if (rc == 0 && (r.frame_count != 50U ||
+		                r.eof_state != SDK_VIDEO_BACKEND_DONE ||
+		                r.final_state != SDK_VIDEO_BACKEND_DONE))
+			rc = 20 + (int)i;
+	}
+	free(ps);
+	return rc;
 }
 
 /* 7. Two AC-3 tracks: 0x80 (7 frames, first in the stream) and 0x81 (19
@@ -994,6 +1114,12 @@ int main(void)
 		return 140 + err;
 	}
 	printf("PASS: test_ragged_tail_reaches_done (cut or padded VOB ends)\n");
+
+	if ((err = test_video_only_dense_audio()) != 0) {
+		fprintf(stderr, "FAIL: test_video_only_dense_audio (code %d)\n", err);
+		return 150 + err;
+	}
+	printf("PASS: test_video_only_dense_audio (audio between every video PES)\n");
 
 	if ((err = test_ac3_substream_selection()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_substream_selection (code %d)\n", err);
