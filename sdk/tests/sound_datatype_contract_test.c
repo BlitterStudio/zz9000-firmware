@@ -424,6 +424,49 @@ static void test_wide_legacy_conversion(void)
               "wide mono narrows to the same 8-bit sample as S16");
 }
 
+static int bytes_equal(const void *a, const void *b, uint32_t bytes)
+{
+  const uint8_t *x = (const uint8_t *)a;
+  const uint8_t *y = (const uint8_t *)b;
+  while (bytes-- != 0U) {
+    if (*x++ != *y++) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void test_stereo_split(void)
+{
+  static const uint8_t s16[8] = {
+    0x12U, 0x34U, 0xabU, 0xcdU, 0x80U, 0x01U, 0x7fU, 0xfeU
+  };
+  static const uint8_t s32[16] = {
+    0x01U, 0x02U, 0x03U, 0x00U, 0xf1U, 0xf2U, 0xf3U, 0x00U,
+    0x11U, 0x12U, 0x13U, 0x00U, 0xe1U, 0xe2U, 0xe3U, 0x00U
+  };
+  uint16_t left16[3];
+  uint16_t right16[3];
+  uint32_t left32[2];
+  uint32_t right32[2];
+
+  memset(left16, 0xee, sizeof(left16));
+  memset(right16, 0xee, sizeof(right16));
+  zz9k_sound_split_stereo(s16, 2U, 2U, (uint8_t *)left16,
+                          (uint8_t *)right16);
+  expect_true(bytes_equal(left16, "\x12\x34\x80\x01", 4U) &&
+                  bytes_equal(right16, "\xab\xcd\x7f\xfe", 4U),
+              "S16 stereo frames split into byte-exact left/right planes");
+  expect_true(left16[2] == 0xeeeeU && right16[2] == 0xeeeeU,
+              "S16 split writes exactly one sample per frame per plane");
+
+  zz9k_sound_split_stereo(s32, 2U, 4U, (uint8_t *)left32,
+                          (uint8_t *)right32);
+  expect_true(bytes_equal(left32, "\x01\x02\x03\x00\x11\x12\x13\x00", 8U) &&
+                  bytes_equal(right32, "\xf1\xf2\xf3\x00\xe1\xe2\xe3\x00", 8U),
+              "S32 stereo frames split into byte-exact left/right planes");
+}
+
 static void test_growth(void)
 {
   uint32_t next;
@@ -545,6 +588,7 @@ int main(void)
   test_legacy_conversion();
   test_flac_recognition();
   test_vorbis_recognition();
+  test_stereo_split();
   test_wide_legacy_conversion();
   test_growth();
   test_cleanup();

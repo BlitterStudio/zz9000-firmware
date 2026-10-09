@@ -87,6 +87,37 @@ static void zz9k_sound_frame_top16(const uint8_t *frame, uint32_t channels,
   }
 }
 
+typedef uint16_t __attribute__((__may_alias__)) zz9k_sound_u16;
+typedef uint32_t __attribute__((__may_alias__)) zz9k_sound_u32;
+
+/* Splits interleaved stereo frames of big-endian 2- or 4-byte samples into
+ * the left and right planes with word/longword moves. A per-sample memcpy
+ * call here cost a 68k most of the decode time. Every pointer is even
+ * (AllocVec buffers advanced by whole samples), which is all the 68000
+ * needs for word and longword accesses. */
+static void zz9k_sound_split_stereo(const uint8_t *src, uint32_t frames,
+                                    uint32_t sample_bytes, uint8_t *left,
+                                    uint8_t *right)
+{
+  if (sample_bytes == 2U) {
+    const zz9k_sound_u16 *in = (const zz9k_sound_u16 *)src;
+    zz9k_sound_u16 *l = (zz9k_sound_u16 *)left;
+    zz9k_sound_u16 *r = (zz9k_sound_u16 *)right;
+    while (frames-- != 0U) {
+      *l++ = *in++;
+      *r++ = *in++;
+    }
+  } else {
+    const zz9k_sound_u32 *in = (const zz9k_sound_u32 *)src;
+    zz9k_sound_u32 *l = (zz9k_sound_u32 *)left;
+    zz9k_sound_u32 *r = (zz9k_sound_u32 *)right;
+    while (frames-- != 0U) {
+      *l++ = *in++;
+      *r++ = *in++;
+    }
+  }
+}
+
 static int zz9k_sound_next_capacity(uint32_t current, uint32_t required,
                                     uint32_t limit, uint32_t *next)
 {
@@ -574,7 +605,21 @@ static int zz9k_sound_copy_pcm(ZZ9KSoundDecode *decode)
     return 0;
   }
   offset = decode->pcm_offset;
-  for (remaining = available; remaining != 0U;) {
+  if (decode->modern && !stereo) {
+    /* Mono is already plane layout: read the ring straight into it. */
+    if (!zz9k_sound_ring_read(decode, offset,
+                              decode->sample + decode->sample_bytes,
+                              available)) {
+      return 0;
+    }
+    decode->sample_bytes += available;
+    offset += available;
+    if (offset >= decode->pcm_ring.length) {
+      offset -= decode->pcm_ring.length;
+    }
+  }
+  for (remaining = decode->modern && !stereo ? 0U : available;
+       remaining != 0U;) {
     uint32_t chunk = decode->bounce_length - decode->bounce_length % frame_bytes;
     const uint8_t *frame;
 
@@ -590,21 +635,20 @@ static int zz9k_sound_copy_pcm(ZZ9KSoundDecode *decode)
       offset -= decode->pcm_ring.length;
     }
     remaining -= chunk;
+    if (decode->modern) {
+      zz9k_sound_split_stereo(decode->bounce, chunk / frame_bytes, width,
+                              decode->sample + decode->sample_bytes,
+                              decode->right + decode->sample_bytes);
+      decode->sample_bytes += chunk / 2U;
+      continue;
+    }
     for (frame = decode->bounce, i = chunk / frame_bytes; i != 0U;
          i--, frame += frame_bytes) {
-      if (!decode->modern) {
-        uint8_t top[4];
-        zz9k_sound_frame_top16(frame, decode->result.channels, width, top);
-        decode->sample[decode->sample_bytes++] =
-            (uint8_t)zz9k_sound_legacy_quantize_s16be(
-                top, decode->result.channels);
-        continue;
-      }
-      memcpy(decode->sample + decode->sample_bytes, frame, width);
-      if (stereo) {
-        memcpy(decode->right + decode->sample_bytes, frame + width, width);
-      }
-      decode->sample_bytes += width;
+      uint8_t top[4];
+      zz9k_sound_frame_top16(frame, decode->result.channels, width, top);
+      decode->sample[decode->sample_bytes++] =
+          (uint8_t)zz9k_sound_legacy_quantize_s16be(
+              top, decode->result.channels);
     }
   }
   decode->pcm_offset = offset;
