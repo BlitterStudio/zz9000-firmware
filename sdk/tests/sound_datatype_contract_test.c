@@ -181,6 +181,46 @@ static void test_recognition(void)
               "one plausible sync word is not a positive MP3 envelope");
 }
 
+/* The descriptor hook runs zz9k_sound_audio_start on the first buffer and
+ * zz9k_sound_mp3_pair_at at the audio start; unlike the class scan it must
+ * not claim a stream whose first frame is not exactly at that start. */
+static void test_hook_recognition(void)
+{
+  static const uint8_t mpeg2_header[4] = {0xffU, 0xf3U, 0x80U, 0x00U};
+  uint8_t stream[TEST_STREAM_BYTES + 1U];
+  uint8_t tag[10];
+  ZZ9KSoundMp3Envelope envelope;
+  uint32_t start;
+
+  make_two_frame_mp3(stream, 0U, TEST_STREAM_BYTES);
+  expect_true(zz9k_sound_mp3_pair_at(stream, TEST_STREAM_BYTES, 0),
+              "hook accepts a frame pair at the audio start");
+  make_two_frame_mp3(stream, 1U, sizeof(stream));
+  expect_true(!zz9k_sound_mp3_pair_at(stream, sizeof(stream), 0) &&
+                  zz9k_sound_recognize_mp3(stream, sizeof(stream), 0),
+              "hook rejects a displaced first frame the class scan accepts");
+
+  memset(tag, 0, sizeof(tag));
+  memcpy(tag, "ID3", 3U);
+  tag[3] = 4U;
+  tag[5] = 0x10U;
+  tag[8] = 1U;
+  tag[9] = 2U;
+  expect_true(zz9k_sound_audio_start(tag, sizeof(tag), &start) &&
+                  start == 10U + 130U + 10U,
+              "audio start skips a footer-flagged synchsafe ID3v2 tag");
+  expect_true(zz9k_sound_audio_start(stream + 1U, 4U, &start) && start == 0U,
+              "untagged data starts at byte zero");
+  expect_true(!zz9k_sound_audio_start(tag, 9U, &start),
+              "a truncated ID3v2 header is rejected");
+
+  expect_true(zz9k_sound_mp3_header(mpeg2_header, 4U, &envelope) &&
+                  envelope.frame_bytes == 208U &&
+                  envelope.sample_rate == 22050U &&
+                  envelope.samples_per_frame == 576U,
+              "MPEG-2 Layer III 64 kbit/s 22050 Hz frame is 208 bytes");
+}
+
 static void test_legacy_conversion(void)
 {
   static const uint8_t negative_full_scale[2] = {0x80U, 0x00U};
@@ -295,11 +335,35 @@ static void test_cleanup(void)
   zz9k_sound_cleanup_owned(&state, &ops, &trace);
   expect_true(trace.count == 0U && state.sample == &sample,
               "published sample ownership remains with sound.datatype");
+
+  /* A modern stereo sample owns two separate AllocVec planes: both are
+   * freed once before publication and neither after it. */
+  {
+    uint8_t right;
+    memset(&state, 0, sizeof(state));
+    memset(&trace, 0, sizeof(trace));
+    state.sample = &sample;
+    state.right_sample = &right;
+    zz9k_sound_cleanup_owned(&state, &ops, &trace);
+    expect_true(trace.count == 2U && trace.sample == &right &&
+                    state.sample == 0 && state.right_sample == 0,
+                "unpublished stereo cleanup frees both channel planes once");
+    zz9k_sound_cleanup_owned(&state, &ops, &trace);
+    expect_true(trace.count == 2U, "stereo plane cleanup is idempotent");
+    memset(&trace, 0, sizeof(trace));
+    state.sample = &sample;
+    state.right_sample = &right;
+    state.sample_published = 1U;
+    zz9k_sound_cleanup_owned(&state, &ops, &trace);
+    expect_true(trace.count == 0U && state.right_sample == &right,
+                "published stereo planes remain owned by sound.datatype");
+  }
 }
 
 int main(void)
 {
   test_recognition();
+  test_hook_recognition();
   test_legacy_conversion();
   test_growth();
   test_cleanup();

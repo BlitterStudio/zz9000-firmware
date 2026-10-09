@@ -9,25 +9,21 @@
 #include <stddef.h>
 #include <string.h>
 
-#define ZZ9K_SOUND_ID3V2_MAX_BYTES (16UL * 1024UL * 1024UL)
-#define ZZ9K_SOUND_SYNC_SCAN_BYTES (16UL * 1024UL)
+#include "zz9k_sound_mp3.h"
+
 #define ZZ9K_SOUND_SAMPLE_INITIAL_BYTES (64UL * 1024UL)
 #define ZZ9K_SOUND_SAMPLE_MAX_BYTES (256UL * 1024UL * 1024UL)
 #define ZZ9K_SOUND_MP3_RING_BYTES (128UL * 1024UL)
 #define ZZ9K_SOUND_HOST_BUFFER_BYTES (64UL * 1024UL)
 #define ZZ9K_SOUND_HOST_BUFFER_MIN_BYTES (4UL * 1024UL)
-#define ZZ9K_SOUND_MAX_PUMP_ATTEMPTS 65536UL
+/* Consecutive pump iterations without consumed input or produced PCM before
+ * the decode is abandoned as stalled. Progress resets the count, so long
+ * files on the 4 KiB compact Zorro II window are not bounded by it. */
+#define ZZ9K_SOUND_STALL_LIMIT 64U
 
-/* The recognition and conversion core deliberately has no Amiga dependency.
+/* The conversion and cleanup core deliberately has no Amiga dependency.
  * The actual-source host and m68k/vamos harness include this file with
  * ZZ9K_SOUND_DATATYPE_TEST defined. */
-typedef struct ZZ9KSoundMp3Envelope {
-  uint32_t first_frame;
-  uint32_t frame_bytes;
-  uint32_t sample_rate;
-  uint32_t channels;
-  uint32_t samples_per_frame;
-} ZZ9KSoundMp3Envelope;
 
 typedef struct ZZ9KSoundOwnedState {
   uint32_t session;
@@ -35,6 +31,8 @@ typedef struct ZZ9KSoundOwnedState {
   uint32_t pcm_handle;
   uint32_t staging_handle;
   void *sample;
+  /* Right channel plane of a modern stereo sample; sample holds the left. */
+  void *right_sample;
   uint8_t session_open;
   uint8_t mp3_allocated;
   uint8_t pcm_allocated;
@@ -47,137 +45,6 @@ typedef struct ZZ9KSoundCleanupOps {
   void (*free_shared)(void *ctx, uint32_t handle);
   void (*free_sample)(void *ctx, void *sample);
 } ZZ9KSoundCleanupOps;
-
-static uint32_t zz9k_sound_synchsafe32(const uint8_t *p)
-{
-  return ((uint32_t)p[0] << 21) | ((uint32_t)p[1] << 14) |
-         ((uint32_t)p[2] << 7) | (uint32_t)p[3];
-}
-
-static int zz9k_sound_mp3_header(const uint8_t *p, uint32_t available,
-                                 ZZ9KSoundMp3Envelope *out)
-{
-  static const uint16_t rate_table[3][3] = {
-    {11025U, 12000U, 8000U},
-    {0U, 0U, 0U},
-    {22050U, 24000U, 16000U}
-  };
-  static const uint16_t bitrate_v1[16] = {
-    0U, 32U, 40U, 48U, 56U, 64U, 80U, 96U,
-    112U, 128U, 160U, 192U, 224U, 256U, 320U, 0U
-  };
-  static const uint16_t bitrate_v2[16] = {
-    0U, 8U, 16U, 24U, 32U, 40U, 48U, 56U,
-    64U, 80U, 96U, 112U, 128U, 144U, 160U, 0U
-  };
-  uint32_t word;
-  uint32_t version;
-  uint32_t layer;
-  uint32_t bitrate_index;
-  uint32_t rate_index;
-  uint32_t bitrate;
-  uint32_t rate;
-  uint32_t frame_bytes;
-
-  if (!p || available < 4U) {
-    return 0;
-  }
-  word = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-         ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-  if ((word & 0xffe00000UL) != 0xffe00000UL) {
-    return 0;
-  }
-  version = (word >> 19) & 3U;
-  layer = (word >> 17) & 3U;
-  bitrate_index = (word >> 12) & 15U;
-  rate_index = (word >> 10) & 3U;
-  /* Layer bits 01 are Layer III. Version bits 01 are reserved. */
-  if (version == 1U || layer != 1U || bitrate_index == 0U ||
-      bitrate_index == 15U || rate_index == 3U) {
-    return 0;
-  }
-  if (version == 3U) {
-    rate = (uint32_t[]){44100U, 48000U, 32000U}[rate_index];
-    bitrate = bitrate_v1[bitrate_index];
-    frame_bytes = (144000UL * bitrate) / rate + ((word >> 9) & 1U);
-  } else {
-    rate = rate_table[version][rate_index];
-    bitrate = bitrate_v2[bitrate_index];
-    frame_bytes = (72000UL * bitrate) / rate + ((word >> 9) & 1U);
-  }
-  if (rate == 0U || bitrate == 0U || frame_bytes < 4U) {
-    return 0;
-  }
-  if (out) {
-    memset(out, 0, sizeof(*out));
-    out->frame_bytes = frame_bytes;
-    out->sample_rate = rate;
-    out->channels = ((word >> 6) & 3U) == 3U ? 1U : 2U;
-    out->samples_per_frame = version == 3U ? 1152U : 576U;
-  }
-  return 1;
-}
-
-static int zz9k_sound_recognize_mp3(const uint8_t *bytes, uint32_t length,
-                                    ZZ9KSoundMp3Envelope *envelope)
-{
-  uint32_t start;
-  uint32_t scan_end;
-  uint32_t offset;
-
-  if (!bytes || length < 8U) {
-    return 0;
-  }
-  start = 0U;
-  if (length >= 10U && bytes[0] == 'I' && bytes[1] == 'D' &&
-      bytes[2] == '3') {
-    uint32_t body;
-    uint32_t footer;
-    if (bytes[3] == 0xffU || bytes[4] == 0xffU ||
-        (bytes[6] | bytes[7] | bytes[8] | bytes[9]) >= 0x80U) {
-      return 0;
-    }
-    body = zz9k_sound_synchsafe32(bytes + 6U);
-    footer = (bytes[5] & 0x10U) != 0U ? 10U : 0U;
-    if (body > ZZ9K_SOUND_ID3V2_MAX_BYTES ||
-        body > 0xffffffffUL - 10U - footer) {
-      return 0;
-    }
-    start = 10U + body + footer;
-    if (start > length) {
-      return 0;
-    }
-  }
-  scan_end = length;
-  if (scan_end - start > ZZ9K_SOUND_SYNC_SCAN_BYTES) {
-    scan_end = start + ZZ9K_SOUND_SYNC_SCAN_BYTES;
-  }
-  for (offset = start; offset + 8U <= scan_end; offset++) {
-    ZZ9KSoundMp3Envelope first;
-    ZZ9KSoundMp3Envelope second;
-    uint32_t second_offset;
-    if (!zz9k_sound_mp3_header(bytes + offset, length - offset, &first)) {
-      continue;
-    }
-    if (first.frame_bytes > length - offset) {
-      continue;
-    }
-    second_offset = offset + first.frame_bytes;
-    if (second_offset + 4U > length ||
-        !zz9k_sound_mp3_header(bytes + second_offset,
-                               length - second_offset, &second) ||
-        second.sample_rate != first.sample_rate ||
-        second.channels != first.channels) {
-      continue;
-    }
-    if (envelope) {
-      *envelope = first;
-      envelope->first_frame = offset;
-    }
-    return 1;
-  }
-  return 0;
-}
 
 static int8_t zz9k_sound_legacy_quantize_s16be(const uint8_t *frame,
                                                 uint32_t channels)
@@ -262,11 +129,15 @@ static void zz9k_sound_cleanup_owned(ZZ9KSoundOwnedState *state,
     }
     state->mp3_allocated = 0U;
   }
-  if (state->sample && !state->sample_published) {
-    if (ops->free_sample) {
+  if (!state->sample_published) {
+    if (state->sample && ops->free_sample) {
       ops->free_sample(ctx, state->sample);
     }
+    if (state->right_sample && ops->free_sample) {
+      ops->free_sample(ctx, state->right_sample);
+    }
     state->sample = 0;
+    state->right_sample = 0;
   }
 }
 
@@ -295,46 +166,33 @@ static void zz9k_sound_cleanup_owned(ZZ9KSoundOwnedState *state,
 #include <proto/zz9k.h>
 #include <utility/tagitem.h>
 
-#ifndef SDTA_SampleChannels
-#define SDTA_SampleChannels (SDTA_Dummy + 14)
-#endif
-#ifndef SDTA_BitsPerSample
-#define SDTA_BitsPerSample (SDTA_Dummy + 15)
-#endif
-#ifndef SDTA_FreeSampleData
-#define SDTA_FreeSampleData (SDTA_Dummy + 16)
-#endif
-#ifndef SDTA_SamplesPerSec
-#define SDTA_SamplesPerSec (SDTA_Dummy + 17)
-#endif
-
 #define ZZ9K_SOUND_DATATYPE_NAME "zz9k-sound.datatype"
 #define ZZ9K_SOUND_DATATYPE_VERSION 42
 #define ZZ9K_SOUND_DATATYPE_REVISION 1
 #define ZZ9K_SOUND_DATATYPE_ID_STRING \
   "$VER: zz9k-sound.datatype 42.1 (9.10.2026) ZZ9000 SDK"
-#define ZZ9K_SOUND_MODERN_SUPERCLASS "v41sound.datatype"
+/* SDTA_BitsPerSample is a V47 sound.datatype attribute. Earlier V44-V46
+ * classes have no proven high-precision contract (KTD4) and take the legacy
+ * 8-bit mono path. */
+#define ZZ9K_SOUND_MODERN_VERSION 47
 #define ZZ9K_SOUND_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_SOUND_LIBRARY_VERSION 2
 
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
+/* MakeClass/AddClass/RemoveClass/FreeClass are intuition.library calls; a
+ * -nostartfiles resident gets no auto-opened base. */
+struct IntuitionBase *IntuitionBase;
 struct Library *DataTypesBase;
 struct Library *SoundBase;
 struct Library *UtilityBase;
 struct Library *ZZ9KBase;
 
-/* These are class-instance state, not sample ownership. A successfully
- * published sample is owned by sound.datatype through FreeSampleData=TRUE. */
-typedef struct ZZ9KSoundInstance {
-  ZZ9KSoundOwnedState owned;
-} ZZ9KSoundInstance;
-
 typedef struct ZZ9KSoundDatatypeBase {
   struct ClassLibrary class_library;
   BPTR segment;
   UBYTE class_added;
-  UBYTE modern_superclass;
+  UBYTE modern;
 } ZZ9KSoundDatatypeBase;
 
 typedef struct ZZ9KSoundDecode {
@@ -346,11 +204,18 @@ typedef struct ZZ9KSoundDecode {
   uint8_t *sample;
   uint32_t sample_bytes;
   uint32_t sample_capacity;
+  /* Modern stereo right plane; same byte count as sample. */
+  uint8_t *right;
+  uint32_t right_capacity;
   uint32_t pcm_seen;
   uint32_t pcm_offset;
+  uint32_t pending_ack;
   uint32_t source_channels;
   uint32_t sample_rate;
   uint8_t modern;
+  /* DOS error for a resource failure; 0 means a stream or content failure
+   * reported as DTERROR_INVALID_DATA. */
+  LONG error;
 } ZZ9KSoundDecode;
 
 static ZZ9KSoundDatatypeBase *zz9k_sound_datatype_open(
@@ -387,6 +252,8 @@ static const struct Resident zz9k_sound_datatype_romtag
   (APTR)zz9k_sound_datatype_init
 };
 
+/* AmigaDOS Seek returns the position before the move: seek to the end, and
+ * the seek back to the original position returns the file length. */
 static int zz9k_sound_source_size(BPTR file, uint32_t *size)
 {
   LONG old;
@@ -394,16 +261,16 @@ static int zz9k_sound_source_size(BPTR file, uint32_t *size)
   if (!file || !size) {
     return 0;
   }
-  old = Seek(file, 0, OFFSET_CURRENT);
+  old = Seek(file, 0, OFFSET_END);
   if (old < 0) {
     return 0;
   }
-  end = Seek(file, 0, OFFSET_END);
-  if (end < 0 || Seek(file, old, OFFSET_BEGINNING) < 0) {
+  end = Seek(file, old, OFFSET_BEGINNING);
+  if (end < 0) {
     return 0;
   }
   *size = (uint32_t)end;
-  return end >= 0;
+  return 1;
 }
 
 static int zz9k_sound_read_at(BPTR file, uint32_t offset, void *dst,
@@ -431,24 +298,9 @@ static int zz9k_sound_probe_file(BPTR file, uint32_t file_size,
       !zz9k_sound_read_at(file, 0U, header, sizeof(header))) {
     return 0;
   }
-  start = 0U;
-  if (header[0] == 'I' && header[1] == 'D' && header[2] == '3') {
-    uint32_t footer;
-    uint32_t body;
-    if (header[3] == 0xffU || header[4] == 0xffU ||
-        (header[6] | header[7] | header[8] | header[9]) >= 0x80U) {
-      return 0;
-    }
-    body = zz9k_sound_synchsafe32(header + 6U);
-    footer = (header[5] & 0x10U) != 0U ? 10U : 0U;
-    if (body > ZZ9K_SOUND_ID3V2_MAX_BYTES ||
-        body > 0xffffffffUL - 10U - footer) {
-      return 0;
-    }
-    start = 10U + body + footer;
-    if (start >= file_size) {
-      return 0;
-    }
+  if (!zz9k_sound_audio_start(header, sizeof(header), &start) ||
+      start >= file_size) {
+    return 0;
   }
   end = file_size;
   if (end >= 128U && zz9k_sound_read_at(file, end - 128U, header, 3U) &&
@@ -502,36 +354,38 @@ static int zz9k_sound_alloc_host_pair(ZZ9KSoundDecode *decode)
   return 0;
 }
 
-static int zz9k_sound_reserve_sample(ZZ9KSoundDecode *decode,
-                                     uint32_t additional)
+/* Grows one sample plane to hold additional bytes beyond used. */
+static int zz9k_sound_reserve_plane(uint8_t **plane, uint32_t *capacity,
+                                    uint32_t used, uint32_t additional,
+                                    void **owned)
 {
   uint32_t required;
-  uint32_t capacity;
+  uint32_t next;
   uint8_t *replacement;
-  if (!decode || additional > ZZ9K_SOUND_SAMPLE_MAX_BYTES - decode->sample_bytes) {
+  if (additional > ZZ9K_SOUND_SAMPLE_MAX_BYTES - used) {
     return 0;
   }
-  required = decode->sample_bytes + additional;
-  if (required <= decode->sample_capacity) {
+  required = used + additional;
+  if (required <= *capacity) {
     return 1;
   }
-  if (!zz9k_sound_next_capacity(decode->sample_capacity, required,
-                                ZZ9K_SOUND_SAMPLE_MAX_BYTES, &capacity)) {
+  if (!zz9k_sound_next_capacity(*capacity, required,
+                                ZZ9K_SOUND_SAMPLE_MAX_BYTES, &next)) {
     return 0;
   }
-  replacement = (uint8_t *)AllocVec(capacity, MEMF_PUBLIC);
+  replacement = (uint8_t *)AllocVec(next, MEMF_PUBLIC);
   if (!replacement) {
     return 0;
   }
-  if (decode->sample_bytes != 0U) {
-    CopyMem(decode->sample, replacement, decode->sample_bytes);
+  if (used != 0U) {
+    CopyMem(*plane, replacement, used);
   }
-  if (decode->sample) {
-    FreeVec(decode->sample);
+  if (*plane) {
+    FreeVec(*plane);
   }
-  decode->sample = replacement;
-  decode->owned.sample = replacement;
-  decode->sample_capacity = capacity;
+  *plane = replacement;
+  *owned = replacement;
+  *capacity = next;
   return 1;
 }
 
@@ -541,12 +395,16 @@ static uint8_t zz9k_sound_ring_byte(const ZZ9KSoundDecode *decode,
   return ((volatile const uint8_t *)decode->pcm_ring.data)[offset];
 }
 
-static int zz9k_sound_copy_pcm_before_ack(ZZ9KSoundDecode *decode)
+/* Copies newly produced whole PCM frames out of the host ring into the
+ * sample. Firmware may reuse a ring range only after the Read that
+ * acknowledges it, which zz9k_sound_ack_pcm sends afterwards. */
+static int zz9k_sound_copy_pcm(ZZ9KSoundDecode *decode)
 {
   uint32_t available;
   uint32_t frame_bytes;
   uint32_t frames;
-  uint32_t output_bytes;
+  uint32_t plane_bytes;
+  int stereo;
   uint32_t i;
   uint32_t offset;
 
@@ -564,17 +422,21 @@ static int zz9k_sound_copy_pcm_before_ack(ZZ9KSoundDecode *decode)
     return 0;
   }
   frame_bytes = decode->result.channels * 2U;
-  available -= available % frame_bytes;
   frames = available / frame_bytes;
-  if (decode->modern) {
-    if (frames > 0xffffffffUL / frame_bytes) {
-      return 0;
-    }
-    output_bytes = frames * frame_bytes;
-  } else {
-    output_bytes = frames;
-  }
-  if (!zz9k_sound_reserve_sample(decode, output_bytes)) {
+  available = frames * frame_bytes;
+  /* Modern: 16-bit planes, the right channel in its own allocation as the
+   * V44 SDTA_LeftSample/SDTA_RightSample contract requires. Legacy: one
+   * 8-bit mono plane. */
+  plane_bytes = decode->modern ? frames * 2U : frames;
+  stereo = decode->modern && decode->result.channels == 2U;
+  if (!zz9k_sound_reserve_plane(&decode->sample, &decode->sample_capacity,
+                                decode->sample_bytes, plane_bytes,
+                                &decode->owned.sample) ||
+      (stereo &&
+       !zz9k_sound_reserve_plane(&decode->right, &decode->right_capacity,
+                                 decode->sample_bytes, plane_bytes,
+                                 &decode->owned.right_sample))) {
+    decode->error = ERROR_NO_FREE_STORE;
     return 0;
   }
   offset = decode->pcm_offset;
@@ -587,23 +449,59 @@ static int zz9k_sound_copy_pcm_before_ack(ZZ9KSoundDecode *decode)
         offset = 0U;
       }
     }
-    if (decode->modern) {
-      memcpy(decode->sample + decode->sample_bytes, frame, frame_bytes);
-      decode->sample_bytes += frame_bytes;
-    } else {
+    if (!decode->modern) {
       decode->sample[decode->sample_bytes++] =
           (uint8_t)zz9k_sound_legacy_quantize_s16be(
               frame, decode->result.channels);
+      continue;
     }
+    decode->sample[decode->sample_bytes] = frame[0];
+    decode->sample[decode->sample_bytes + 1U] = frame[1];
+    if (stereo) {
+      decode->right[decode->sample_bytes] = frame[2];
+      decode->right[decode->sample_bytes + 1U] = frame[3];
+    }
+    decode->sample_bytes += 2U;
   }
-  /* The host copy is complete before firmware receives this acknowledgement.
-   * It is then free to overwrite the ring range. */
-  if (ZZ9KAudioStreamRead(decode->result.session, available, 0U,
+  decode->pcm_offset = offset;
+  decode->pcm_seen += available;
+  decode->pending_ack += available;
+  return 1;
+}
+
+/* Returns copied PCM credit. A forced Read is sent even with no credit: it is
+ * the only way a backpressured stream resumes consuming compressed input. */
+static int zz9k_sound_ack_pcm(ZZ9KSoundDecode *decode, int force)
+{
+  if (!force && decode->pending_ack < decode->pcm_ring.length / 2U) {
+    return 1;
+  }
+  if (ZZ9KAudioStreamRead(decode->result.session, decode->pending_ack, 0U,
                           &decode->result) != ZZ9K_STATUS_OK) {
     return 0;
   }
-  decode->pcm_seen += available;
+  decode->pending_ack = 0U;
   decode->pcm_offset = decode->result.pcm_read;
+  return 1;
+}
+
+/* Copies and acknowledges while each Read reports new PCM. The pass is
+ * bounded; callers loop until the stream is drained. */
+static int zz9k_sound_drain_pcm(ZZ9KSoundDecode *decode)
+{
+  uint32_t pass;
+  for (pass = 0U; pass < 64U; pass++) {
+    uint32_t seen = decode->pcm_seen;
+    if (!zz9k_sound_copy_pcm(decode)) {
+      return 0;
+    }
+    if (decode->pcm_seen == seen) {
+      return 1;
+    }
+    if (!zz9k_sound_ack_pcm(decode, 0)) {
+      return 0;
+    }
+  }
   return 1;
 }
 
@@ -640,11 +538,10 @@ static int zz9k_sound_decode_file(BPTR file, uint32_t first_frame,
   ZZ9KAudioStreamBeginDesc begin;
   uint8_t *input;
   uint32_t position;
-  uint32_t pending_offset;
-  uint32_t pending_bytes;
-  uint32_t consumed_seen;
-  uint32_t attempts;
+  uint32_t total_fed;
+  uint32_t guard;
   int ok;
+  int status;
 
   memset(decode, 0, sizeof(*decode));
   decode->modern = modern;
@@ -654,6 +551,10 @@ static int zz9k_sound_decode_file(BPTR file, uint32_t first_frame,
   input = 0;
   ok = 0;
 
+  /* Resource failures report a resource error rather than invalid data, so
+   * a decode competing with an active player fails as busy/out of memory
+   * instead of being mistaken for a corrupt file. */
+  decode->error = ERROR_NO_FREE_STORE;
   if (ZZ9KAllocShared(ZZ9K_SOUND_MP3_RING_BYTES, 16U, ZZ9K_ALLOC_CARD_ONLY,
                       &decode->mp3_ring) != ZZ9K_STATUS_OK) {
     goto done;
@@ -666,8 +567,14 @@ static int zz9k_sound_decode_file(BPTR file, uint32_t first_frame,
   if (!zz9k_audio_build_stream_begin_desc(
           &begin, decode->mp3_ring.handle, decode->mp3_ring.length,
           decode->pcm_ring.handle, decode->pcm_ring.length, 0U, 0U,
-          ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE, 0U, 0U, 0U) ||
-      ZZ9KAudioStreamBegin(&begin, &decode->result) != ZZ9K_STATUS_OK) {
+          ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE, 0U, 0U, 0U)) {
+    goto done;
+  }
+  status = ZZ9KAudioStreamBegin(&begin, &decode->result);
+  if (status != ZZ9K_STATUS_OK) {
+    decode->error = status == ZZ9K_STATUS_BUSY ? ERROR_OBJECT_IN_USE :
+        status == ZZ9K_STATUS_NO_MEMORY ? ERROR_NO_FREE_STORE :
+        ERROR_NOT_IMPLEMENTED;
     goto done;
   }
   decode->owned.session_open = 1U;
@@ -677,74 +584,104 @@ static int zz9k_sound_decode_file(BPTR file, uint32_t first_frame,
   if (!input) {
     goto done;
   }
+  /* From here on a failure is a stream or content problem unless the sample
+   * buffer cannot grow (zz9k_sound_copy_pcm sets ERROR_NO_FREE_STORE). */
+  decode->error = 0;
 
+  /* Same protocol as zz9k-mp3: every feed hands the firmware the whole
+   * staged chunk; bytes_consumed is the decoder's cumulative consumption
+   * from the MP3 ring. Before feeding, PCM credit is returned until the ring
+   * has room; a BACKPRESSURE result is answered with a forced Read and the
+   * same chunk is fed again. */
   position = first_frame;
-  pending_offset = 0U;
-  pending_bytes = 0U;
-  consumed_seen = decode->result.bytes_consumed;
-  for (attempts = 0U; attempts < ZZ9K_SOUND_MAX_PUMP_ATTEMPTS; attempts++) {
+  total_fed = 0U;
+  for (;;) {
     ZZ9KAudioStreamFeedDesc feed;
-    uint32_t chunk;
-    uint32_t flags;
-    uint32_t consumed;
+    uint32_t chunk = audio_end - position;
+    uint32_t flags = 0U;
 
-    if (!zz9k_sound_copy_pcm_before_ack(decode)) {
-      goto done;
+    if (chunk > decode->staging.length) {
+      chunk = decode->staging.length;
     }
-    if ((decode->result.flags & ZZ9K_AUDIO_STREAM_RESULT_DONE) != 0U) {
-      ok = 1;
-      break;
-    }
-    if (pending_bytes == 0U && position < audio_end) {
-      chunk = audio_end - position;
-      if (chunk > decode->staging.length) {
-        chunk = decode->staging.length;
+    if (chunk == 0U) {
+      flags = ZZ9K_AUDIO_STREAM_FEED_EOF;
+    } else {
+      for (guard = 0U;
+           decode->result.bytes_consumed < total_fed &&
+           total_fed - decode->result.bytes_consumed >
+               decode->mp3_ring.length - chunk;) {
+        uint32_t consumed = decode->result.bytes_consumed;
+        if (decode->pending_ack == 0U) {
+          break;
+        }
+        if (!zz9k_sound_ack_pcm(decode, 1) || !zz9k_sound_drain_pcm(decode)) {
+          goto done;
+        }
+        guard = decode->result.bytes_consumed == consumed ? guard + 1U : 0U;
+        if (guard >= ZZ9K_SOUND_STALL_LIMIT) {
+          goto done;
+        }
       }
       if (!zz9k_sound_read_at(file, position, input, chunk) ||
           !zz9k_shared_copy_to(&decode->staging, 0U, input, chunk)) {
         goto done;
       }
-      position += chunk;
-      pending_offset = 0U;
-      pending_bytes = chunk;
     }
-    if (pending_bytes != 0U) {
-      chunk = pending_bytes;
-      flags = 0U;
-    } else {
-      chunk = 0U;
-      flags = ZZ9K_AUDIO_STREAM_FEED_EOF;
+    for (guard = 0U;;) {
+      uint32_t seen = decode->pcm_seen;
+      uint32_t consumed = decode->result.bytes_consumed;
+      if (!zz9k_audio_build_stream_feed_desc(
+              &feed, decode->result.session, decode->staging.handle, 0U,
+              chunk, flags) ||
+          ZZ9KAudioStreamFeed(&feed, &decode->result) != ZZ9K_STATUS_OK ||
+          !zz9k_sound_drain_pcm(decode)) {
+        goto done;
+      }
+      if ((decode->result.flags & ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) ==
+          0U) {
+        break;
+      }
+      if (!zz9k_sound_ack_pcm(decode, 1)) {
+        goto done;
+      }
+      guard = decode->pcm_seen == seen &&
+              decode->result.bytes_consumed == consumed ? guard + 1U : 0U;
+      if (guard >= ZZ9K_SOUND_STALL_LIMIT) {
+        goto done;
+      }
     }
-    if (!zz9k_audio_build_stream_feed_desc(
-            &feed, decode->result.session, decode->staging.handle,
-            pending_offset, chunk, flags) ||
-        ZZ9KAudioStreamFeed(&feed, &decode->result) != ZZ9K_STATUS_OK) {
-      goto done;
-    }
-    if (decode->result.bytes_consumed < consumed_seen) {
-      goto done;
-    }
-    consumed = decode->result.bytes_consumed - consumed_seen;
-    if (consumed > pending_bytes) {
-      goto done;
-    }
-    consumed_seen += consumed;
-    pending_offset += consumed;
-    pending_bytes -= consumed;
     if (decode->result.sample_rate != 0U) {
       decode->sample_rate = decode->result.sample_rate;
       decode->source_channels = decode->result.channels;
     }
+    if (flags != 0U) {
+      break;
+    }
+    position += chunk;
+    total_fed += chunk;
   }
-  if (ok && !zz9k_sound_copy_pcm_before_ack(decode)) {
-    ok = 0;
+  /* Flush: copy and acknowledge until a forced Read yields no new PCM. */
+  for (guard = 0U;;) {
+    uint32_t seen = decode->pcm_seen;
+    if (!zz9k_sound_drain_pcm(decode)) {
+      goto done;
+    }
+    /* A trailing partial frame (under 4 bytes) is never published. */
+    if (decode->pending_ack == 0U &&
+        decode->result.bytes_produced - decode->pcm_seen < 4U) {
+      break;
+    }
+    if (!zz9k_sound_ack_pcm(decode, 1)) {
+      goto done;
+    }
+    guard = decode->pcm_seen == seen ? guard + 1U : 0U;
+    if (guard >= ZZ9K_SOUND_STALL_LIMIT) {
+      goto done;
+    }
   }
-  if (ok && (decode->sample_rate == 0U ||
-             (decode->source_channels != 1U &&
-              decode->source_channels != 2U) ||
-             decode->sample_bytes == 0U)) {
-    ok = 0;
-  }
+  ok = decode->sample_rate != 0U &&
+       (decode->source_channels == 1U || decode->source_channels == 2U) &&
+       decode->sample_bytes != 0U;
 
 done:
   if (input) {
@@ -753,82 +690,92 @@ done:
   /* Success still closes and frees every firmware resource before the caller
    * may publish the AllocVec sample to sound.datatype. */
   if (ok) {
-    /* Retain only the host AllocVec sample. The temporary published marker
-     * prevents generic partial-initialization cleanup from freeing it; the
-     * caller still has not handed it to the superclass. */
+    /* Retain only the host AllocVec sample planes. The temporary published
+     * marker keeps generic cleanup from freeing them; the caller still has
+     * not handed them to the superclass. */
     decode->owned.sample_published = 1U;
     zz9k_sound_cleanup_owned(&decode->owned, &zz9k_sound_real_cleanup_ops, 0);
     decode->owned.sample_published = 0U;
-    decode->owned.sample = decode->sample;
   } else {
     zz9k_sound_cleanup_owned(&decode->owned, &zz9k_sound_real_cleanup_ops, 0);
     decode->sample = 0;
+    decode->right = 0;
   }
   return ok;
 }
 
-static int zz9k_sound_publish(Object *object, ZZ9KSoundDecode *decode,
-                              uint8_t modern)
+/* Fills the superclass creation tags at OM_NEW. The modern (sound.datatype
+ * V47) path publishes 16-bit planes with SDTA_BitsPerSample and
+ * SDTA_SamplesPerSec and no period, stereo as V44 SDTA_LeftSample/
+ * SDTA_RightSample. SDTA_SampleLength is the byte length of one channel
+ * plane, matching the system's own 16-bit WAVE loader; for the legacy 8-bit
+ * path bytes equal samples. The legacy path has no rate attribute and gets a
+ * period from the system colour clock (5 x the E clock: PAL 3546895, NTSC
+ * 3579545). */
+static void zz9k_sound_sample_tags(const ZZ9KSoundDecode *decode,
+                                   uint8_t modern, struct TagItem *tags,
+                                   struct TagItem *more)
 {
-  uint32_t channels;
-  uint32_t bytes_per_frame;
-  uint32_t sample_length;
-  ULONG changed;
+  int n = 0;
 
-  if (!object || !decode || !decode->sample || decode->sample_bytes == 0U) {
-    return 0;
+  if (decode->right) {
+    tags[n].ti_Tag = SDTA_LeftSample;
+    tags[n++].ti_Data = (ULONG)decode->sample;
+    tags[n].ti_Tag = SDTA_RightSample;
+    tags[n++].ti_Data = (ULONG)decode->right;
+  } else {
+    tags[n].ti_Tag = SDTA_Sample;
+    tags[n++].ti_Data = (ULONG)decode->sample;
   }
-  channels = modern ? decode->source_channels : 1U;
-  bytes_per_frame = modern ? channels * 2U : 1U;
-  if (bytes_per_frame == 0U || decode->sample_bytes % bytes_per_frame != 0U) {
-    return 0;
+  tags[n].ti_Tag = SDTA_SampleLength;
+  tags[n++].ti_Data = decode->sample_bytes;
+  tags[n].ti_Tag = SDTA_Cycles;
+  tags[n++].ti_Data = 1U;
+  tags[n].ti_Tag = SDTA_FreeSampleData;
+  tags[n++].ti_Data = TRUE;
+  if (modern) {
+    tags[n].ti_Tag = SDTA_BitsPerSample;
+    tags[n++].ti_Data = 16U;
+    tags[n].ti_Tag = SDTA_SamplesPerSec;
+    tags[n++].ti_Data = decode->sample_rate;
+  } else {
+    tags[n].ti_Tag = SDTA_Period;
+    tags[n++].ti_Data = (SysBase->ex_EClockFrequency * 5UL +
+                         decode->sample_rate / 2U) / decode->sample_rate;
   }
-  sample_length = decode->sample_bytes / bytes_per_frame;
-  changed = SetDTAttrs(object, 0, 0,
-                       SDTA_Sample, (ULONG)decode->sample,
-                       SDTA_SampleLength, sample_length,
-                       SDTA_SampleChannels, channels,
-                       SDTA_BitsPerSample, modern ? 16U : 8U,
-                       SDTA_SamplesPerSec, decode->sample_rate,
-                       SDTA_Period, decode->sample_rate ?
-                           (ULONG)(3579545UL / decode->sample_rate) : 0U,
-                       SDTA_Volume, modern ? 64U : 0x10000UL,
-                       SDTA_Cycles, 1U,
-                       SDTA_FreeSampleData, TRUE,
-                       TAG_END);
-  if (changed == 0U) {
-    return 0;
-  }
-  decode->owned.sample_published = 1U;
-  decode->owned.sample = 0;
-  decode->sample = 0;
-  return 1;
+  tags[n].ti_Tag = SDTA_Volume;
+  tags[n++].ti_Data = 64U;
+  tags[n].ti_Tag = TAG_MORE;
+  tags[n].ti_Data = (ULONG)more;
 }
 
-static int zz9k_sound_load(Object *object, ZZ9KSoundDatatypeBase *base,
-                           ZZ9KSoundInstance *instance)
+/* Decodes the whole file named by OM_NEW before the superclass constructs the
+ * object. On success decode->sample is an unpublished AllocVec buffer. */
+static int zz9k_sound_decode_source(ZZ9KSoundDatatypeBase *base,
+                                    struct TagItem *attrs,
+                                    ZZ9KSoundDecode *decode)
 {
   ZZ9KServiceInfo service;
   ZZ9KSoundMp3Envelope envelope;
-  ZZ9KSoundDecode decode;
+  CONST_STRPTR name;
   BPTR file;
-  ULONG source_type;
   uint32_t file_size;
   uint32_t audio_end;
   int ok;
 
-  if (!object || !base || !instance) {
-    return 0;
-  }
-  source_type = DTST_FILE;
-  file = 0;
-  (void)GetDTAttrs(object, DTA_SourceType, (ULONG)&source_type,
-                   DTA_Handle, (ULONG)&file, TAG_END);
-  /* Memory sources are intentionally refused: both probed superclass stacks
-   * reject their relevant NewDTObject memory flow. */
-  if (source_type != DTST_FILE || !file ||
-      !zz9k_sound_source_size(file, &file_size) ||
-      !zz9k_sound_probe_file(file, file_size, &envelope, &audio_end)) {
+  /* Memory sources are refused: both probed superclass stacks reject their
+   * NewDTObject memory flow. Before the superclass constructs the object,
+   * DTA_Handle carries datatypes.library's lock, not a file handle, so the
+   * class opens its own handle by name. */
+  name = (CONST_STRPTR)GetTagData(DTA_Name, 0, attrs);
+  file = GetTagData(DTA_SourceType, DTST_FILE, attrs) == DTST_FILE && name ?
+      Open(name, MODE_OLDFILE) : 0;
+  ok = file && zz9k_sound_source_size(file, &file_size) &&
+       zz9k_sound_probe_file(file, file_size, &envelope, &audio_end);
+  if (!ok) {
+    if (file) {
+      Close(file);
+    }
     SetIoErr(DTERROR_INVALID_DATA);
     return 0;
   }
@@ -841,19 +788,19 @@ static int zz9k_sound_load(Object *object, ZZ9KSoundDatatypeBase *base,
           (ZZ9K_SERVICE_FLAG_AUDIO_MP3_DECODE |
            ZZ9K_SERVICE_FLAG_AUDIO_MP3_STREAM |
            ZZ9K_SERVICE_FLAG_AUDIO_PCM16_STEREO)) {
+    Close(file);
     SetIoErr(ERROR_NOT_IMPLEMENTED);
     return 0;
   }
   ok = zz9k_sound_decode_file(file, envelope.first_frame, audio_end,
-                              base->modern_superclass, &decode);
-  if (!ok || decode.sample_rate != envelope.sample_rate ||
-      decode.source_channels != envelope.channels ||
-      !zz9k_sound_publish(object, &decode, base->modern_superclass)) {
-    zz9k_sound_cleanup_owned(&decode.owned, &zz9k_sound_real_cleanup_ops, 0);
-    SetIoErr(DTERROR_INVALID_DATA);
+                              base->modern, decode);
+  Close(file);
+  if (!ok || decode->sample_rate != envelope.sample_rate ||
+      decode->source_channels != envelope.channels) {
+    zz9k_sound_cleanup_owned(&decode->owned, &zz9k_sound_real_cleanup_ops, 0);
+    SetIoErr(decode->error ? decode->error : DTERROR_INVALID_DATA);
     return 0;
   }
-  instance->owned.sample_published = 1U;
   return 1;
 }
 
@@ -862,43 +809,35 @@ static ULONG zz9k_sound_datatype_dispatch(REG(a0, struct Hook *hook),
                                           REG(a1, Msg msg))
 {
   Class *cl;
-  ULONG result;
   if (!hook || !msg) {
     return 0;
   }
   cl = (Class *)hook;
-  switch (msg->MethodID) {
-  case OM_NEW:
-    result = DoSuperMethodA(cl, object, msg);
-    if (result) {
-      Object *new_object = (Object *)result;
-      ZZ9KSoundInstance *instance =
-          (ZZ9KSoundInstance *)INST_DATA(cl, new_object);
-      ZZ9KSoundDatatypeBase *base =
-          (ZZ9KSoundDatatypeBase *)cl->cl_UserData;
-      memset(instance, 0, sizeof(*instance));
-      if (!zz9k_sound_load(new_object, base, instance)) {
-        CoerceMethod(cl, new_object, OM_DISPOSE);
-        result = 0;
-      }
+  if (msg->MethodID == OM_NEW) {
+    struct opSet *ops = (struct opSet *)msg;
+    struct opSet super_msg;
+    struct TagItem tags[9];
+    ZZ9KSoundDecode decode;
+    ZZ9KSoundDatatypeBase *base = (ZZ9KSoundDatatypeBase *)cl->cl_UserData;
+    ULONG result;
+
+    if (!zz9k_sound_decode_source(base, ops->ops_AttrList, &decode)) {
+      return 0;
+    }
+    zz9k_sound_sample_tags(&decode, base->modern, tags,
+                           ops->ops_AttrList);
+    super_msg = *ops;
+    super_msg.ops_AttrList = tags;
+    result = DoSuperMethodA(cl, object, (Msg)&super_msg);
+    if (!result) {
+      /* Not published: the superclass never took ownership. */
+      zz9k_sound_cleanup_owned(&decode.owned, &zz9k_sound_real_cleanup_ops, 0);
     }
     return result;
-  case OM_DISPOSE:
-  {
-    ZZ9KSoundInstance *instance =
-        (ZZ9KSoundInstance *)INST_DATA(cl, object);
-    if (instance) {
-      /* Published sample ownership remains with the superclass. */
-      memset(instance, 0, sizeof(*instance));
-    }
-    return DoSuperMethodA(cl, object, msg);
   }
-  case DTM_PROCLAYOUT:
-  case DTM_ASYNCLAYOUT:
-    return DoSuperMethodA(cl, object, msg);
-  default:
-    return DoSuperMethodA(cl, object, msg);
-  }
+  /* After OM_NEW the published sample belongs to the superclass, which frees
+   * it exactly once on OM_DISPOSE (SDTA_FreeSampleData = TRUE). */
+  return DoSuperMethodA(cl, object, msg);
 }
 
 static ZZ9KSoundDatatypeBase *zz9k_sound_datatype_open(
@@ -934,6 +873,10 @@ static void zz9k_sound_close_system_bases(void)
   if (UtilityBase) {
     CloseLibrary(UtilityBase);
     UtilityBase = 0;
+  }
+  if (IntuitionBase) {
+    CloseLibrary((struct Library *)IntuitionBase);
+    IntuitionBase = 0;
   }
   if (DataTypesBase) {
     CloseLibrary(DataTypesBase);
@@ -1005,23 +948,22 @@ static void zz9k_sound_free_unpublished(ZZ9KSoundDatatypeBase *base)
 static ZZ9KSoundDatatypeBase *zz9k_sound_datatype_init(REG(a0, BPTR segment))
 {
   ZZ9KSoundDatatypeBase *base;
-  CONST_STRPTR superclass;
 
   SysBase = *(struct ExecBase **)4;
   DOSBase = (struct DosLibrary *)OpenLibrary((CONST_STRPTR)"dos.library", 36);
   UtilityBase = OpenLibrary((CONST_STRPTR)"utility.library", 39);
+  IntuitionBase = (struct IntuitionBase *)OpenLibrary(
+      (CONST_STRPTR)"intuition.library", 39);
   DataTypesBase = OpenLibrary((CONST_STRPTR)"datatypes.library", 39);
-  if (!DOSBase || !UtilityBase || !DataTypesBase) {
+  if (!DOSBase || !UtilityBase || !IntuitionBase || !DataTypesBase) {
     zz9k_sound_close_system_bases();
     return 0;
   }
-  /* Probe the actual installed superclass, not the OS brand. */
-  SoundBase = OpenLibrary((CONST_STRPTR)"datatypes/v41sound.datatype", 0);
-  superclass = (CONST_STRPTR)ZZ9K_SOUND_MODERN_SUPERCLASS;
-  if (!SoundBase) {
-    SoundBase = OpenLibrary((CONST_STRPTR)"datatypes/sound.datatype", 0);
-    superclass = (CONST_STRPTR)SOUNDDTCLASS;
-  }
+  /* Subclass the real sound.datatype and probe its version, not the OS
+   * brand. On v47 the v41sound.datatype compatibility class ignores
+   * SDTA_BitsPerSample; the system's own 16-bit loaders subclass
+   * sound.datatype. */
+  SoundBase = OpenLibrary((CONST_STRPTR)"datatypes/sound.datatype", 0);
   if (!SoundBase) {
     zz9k_sound_close_system_bases();
     return 0;
@@ -1047,11 +989,10 @@ static ZZ9KSoundDatatypeBase *zz9k_sound_datatype_init(REG(a0, BPTR segment))
   base->class_library.cl_Lib.lib_IdString =
       (APTR)ZZ9K_SOUND_DATATYPE_ID_STRING;
   base->segment = segment;
-  base->modern_superclass =
-      strcmp((const char *)superclass, ZZ9K_SOUND_MODERN_SUPERCLASS) == 0;
+  base->modern = SoundBase->lib_Version >= ZZ9K_SOUND_MODERN_VERSION;
   base->class_library.cl_Class = MakeClass(
-      (CONST_STRPTR)ZZ9K_SOUND_DATATYPE_NAME, superclass, 0,
-      sizeof(ZZ9KSoundInstance), 0);
+      (CONST_STRPTR)ZZ9K_SOUND_DATATYPE_NAME, (CONST_STRPTR)SOUNDDTCLASS, 0,
+      0, 0);
   if (!base->class_library.cl_Class) {
     zz9k_sound_free_unpublished(base);
     zz9k_sound_close_system_bases();
