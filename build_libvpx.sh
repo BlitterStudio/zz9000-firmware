@@ -2,10 +2,12 @@
 # Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Decoder-only libvpx for the diag/webm-bench image. Not part of the
-# release firmware. VP8 and VP9 encoders, high bitdepth, examples, tools
-# and the multithreaded row/tile paths are left out: the bare-metal image
-# has no pthreads, and the bench is single-threaded on purpose.
+# Decoder-only libvpx (VP8/VP9) for ZZ9000OS WebM media sessions. VP8 and
+# VP9 encoders, high bitdepth, examples, tools and the multithreaded
+# row/tile paths are left out: the bare-metal image has no pthreads. The
+# pinned upstream archive and every derived file stay below build/deps;
+# the upstream BSD-3-Clause licence and patent grant (COPYING.libvpx,
+# PATENTS.libvpx) are checked in under ZZ9000_proto.sdk/ZZ9000OS/src/webm_codecs/.
 #
 # armv7-linux-gcc is the target that selects the NEON assembly. Its
 # default softfp ABI is rewritten to hard-float so the archive matches
@@ -154,7 +156,4 @@ fi
 echo "[vpx] built $LIB"
 if [ "$TARGET" = arm ]; then
     arm-none-eabi-size -t "$LIB" | tail -1
-    mkdir -p "$OS_DIR/src/webm_codecs"
-    cp -a "$SRC/LICENSE" "$OS_DIR/src/webm_codecs/COPYING.libvpx"
-    cp -a "$SRC/PATENTS" "$OS_DIR/src/webm_codecs/PATENTS.libvpx"
 fi

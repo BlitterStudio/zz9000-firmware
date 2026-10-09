@@ -2,11 +2,14 @@
 # Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Decoder-oriented libopus for the diag/webm-bench image. Fixed-point,
+# Decoder-oriented libopus for ZZ9000OS WebM media sessions. Fixed-point,
 # no float API, no runtime CPU detection, no extra programs. The neural
-# PLC / DRED / OSCE paths added in 1.5+ are disabled so the bench times
-# the RFC 6716 decoder and the archive stays smaller. Opus itself is
-# single-threaded; there is no pthread build to turn off.
+# PLC / DRED / OSCE paths added in 1.5+ are disabled: the card decodes
+# the RFC 6716 stream and the archive stays smaller. Opus itself is
+# single-threaded; there is no pthread build to turn off. The pinned
+# upstream archive and every derived file stay below build/deps; the
+# upstream BSD-3-Clause notice (COPYING.libopus) is checked in under
+# ZZ9000_proto.sdk/ZZ9000OS/src/webm_codecs/.
 
 set -euo pipefail
 
@@ -98,6 +101,4 @@ fi
 echo "[opus] built $LIB"
 if [ "$TARGET" = arm ]; then
     arm-none-eabi-size -t "$LIB" | tail -1
-    mkdir -p "$OS_DIR/src/webm_codecs"
-    cp -a "$SRC/COPYING" "$OS_DIR/src/webm_codecs/COPYING.libopus"
 fi
