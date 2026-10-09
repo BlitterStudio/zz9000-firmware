@@ -1261,11 +1261,14 @@ static int zzplay_card_begin(ZZPlayMP3Decode *decode)
 {
   ZZ9KAudioStreamBeginExDesc begin;
 
+  /* low_water is the firmware pump's refill trigger: decode the next
+   * input when half the PCM ring has played, as mhizz9000 does. At 0
+   * the pump would refill only once the ring had run dry. */
   if (!zz9k_audio_build_stream_begin_ex_desc(
           &begin, decode->engine->codec, decode->compressed.handle,
           decode->compressed.length, decode->pcm.handle,
-          decode->pcm.length, 0U, 0U, ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE, 0U,
-          0U, 0U)) {
+          decode->pcm.length, 0U, 0U, ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE,
+          decode->pcm.length / 2U, 0U, 0U)) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
   return zz9k_audio_stream_begin_ex(decode->ctx, &begin, &decode->result);
@@ -1363,17 +1366,23 @@ static int zzplay_card_pause(ZZPlayMP3Decode *decode, int *shown,
   return status ? 0 : -1;
 }
 
-static int zzplay_card_wait_pressure(ZZPlayMP3Decode *decode, int *shown,
-                                     ZZPlayCardAnswer *refusal)
+/* A BACKPRESSURE feed kept none of the chunk: the input ring had no room.
+ * The flag stays set until the next accepted feed, so it cannot say when
+ * to retry. Room returns as the pump plays and the refill decodes, which
+ * the result reports as bytes_consumed. Wait for room for this chunk,
+ * then feed it again. The guard counts only polls without progress. */
+static int zzplay_card_wait_room(ZZPlayMP3Decode *decode, uint32_t chunk,
+                                 int *shown, ZZPlayCardAnswer *refusal)
 {
-  unsigned guard = 0U;
+  uint32_t consumed = decode->result.bytes_consumed;
+  unsigned idle = 0U;
 
-  while ((decode->result.flags &
-          ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) != 0U) {
+  while (decode->input_bytes - decode->result.bytes_consumed + chunk >
+         decode->compressed.length) {
     int held;
     int status;
 
-    if (++guard > ZZPLAY_CARD_WAIT_GUARD || zzplay_card_service(decode)) {
+    if (zzplay_card_service(decode)) {
       return 0;
     }
     held = zzplay_card_pause(decode, shown, refusal);
@@ -1389,6 +1398,12 @@ static int zzplay_card_wait_pressure(ZZPlayMP3Decode *decode, int *shown,
                                      &decode->result);
     if (status != ZZ9K_STATUS_OK) {
       decode->stream_status = status;
+      return 0;
+    }
+    if (decode->result.bytes_consumed != consumed) {
+      consumed = decode->result.bytes_consumed;
+      idle = 0U;
+    } else if (++idle > ZZPLAY_CARD_WAIT_GUARD) {
       return 0;
     }
     zzplay_card_report_position(decode);
@@ -1516,7 +1531,7 @@ static ZZPlayMP3PassResult zzplay_card_play_once(ZZPlayMP3Decode *decode,
              ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) == 0U) {
           break;
         }
-        if (!zzplay_card_wait_pressure(decode, shown, refusal)) {
+        if (!zzplay_card_wait_room(decode, (uint32_t)got, shown, refusal)) {
           if (*refusal == ZZPLAY_CARD_UNSUPPORTED ||
               *refusal == ZZPLAY_CARD_BUSY) {
             return ZZPLAY_MP3_PASS_FAILED;
