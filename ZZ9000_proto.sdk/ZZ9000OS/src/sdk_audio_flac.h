@@ -31,6 +31,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sdk_audio_codec_io.h"
+
 #define SDK_FLAC_MIN_RATE        8000U
 #define SDK_FLAC_MAX_RATE        192000U
 #define SDK_FLAC_MAX_CHANNELS    2U
@@ -70,32 +72,14 @@ struct sdk_flac_state {
 	uint8_t header[42];
 };
 
-struct sdk_flac_io {
-	/* in */
-	const uint8_t *input;       /* contiguous unconsumed compressed bytes */
-	uint32_t input_length;
-	int eof;                    /* FEED_EOF: no further input will arrive */
-	int drain;                  /* FEED_DRAIN: decode every complete frame */
-	uint8_t *pcm;               /* PCM ring base */
-	uint32_t pcm_capacity;
-	uint32_t pcm_write;         /* ring offset of the next PCM byte */
-	uint32_t pcm_free;          /* writable ring bytes */
-	uint32_t pcm_budget;        /* soft cap on PCM produced by this call */
-	/* out */
-	uint32_t consumed;
-	uint32_t produced;
-	uint32_t frames;
-	int starved;                /* blocked on an incomplete compressed unit */
-	int complete;               /* end of stream reached and validated */
-};
-
 /* output_format must be S16BE or S32BE (validated by the caller). */
 void sdk_flac_init(struct sdk_flac_state *st, uint32_t output_format);
 /* Decode as many complete units as input, PCM room and budget allow.
  * Returns SDK_STATUS_OK or the sticky failure status (UNSUPPORTED for a
  * valid stream outside the envelope, IO_ERROR for malformed/corrupt/
  * truncated input, NO_MEMORY for allocation failure). */
-uint16_t sdk_flac_decode(struct sdk_flac_state *st, struct sdk_flac_io *io);
+uint16_t sdk_flac_decode(struct sdk_flac_state *st,
+                         struct sdk_audio_codec_io *io);
 /* Free the libFLAC decoder on the core that allocated it. */
 void sdk_flac_release(struct sdk_flac_state *st);
 /* Drop the decoder pointer after a core-1 reclaim already freed it. */

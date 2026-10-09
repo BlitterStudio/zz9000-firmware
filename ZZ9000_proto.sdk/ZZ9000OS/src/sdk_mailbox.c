@@ -26,6 +26,7 @@
 #include "sdk_audio_control.h"
 #include "audio_fabric.h"
 #include "audio_stream_drain.h"
+#include "audio_stream_close.h"
 #include "audio_convert.h"
 #include "audio_pump_preconvert.h"
 #include "audio_pump_media_view.h"
@@ -45,6 +46,7 @@
 #include "mp3/mp3.h"
 #include "mp3/minimp3.h"
 #include "sdk_audio_flac.h"
+#include "sdk_audio_vorbis.h"
 
 /* Ring geometry is per placement (SDK_MAILBOX_Z3_RING_ENTRIES in the Zorro
  * III reservation, SDK_MAILBOX_Z2_RING_ENTRIES in the Zorro II one); the
@@ -932,12 +934,21 @@ struct SDKAudioStream {
 	/* Main-loop writers update this aligned word; the fabric ISR consumes it
 	 * only through the pump slot's existing Q7 gain pass. */
 	uint16_t gain;
-	/* FLAC sessions only: sticky Feed/Read status once faulted (0 means
-	 * the legacy IO_ERROR), input starvation of the backend, and the
-	 * backend state whose libFLAC heap lives on the decode core. */
+	/* Native codec sessions (FLAC, Vorbis) only: sticky Feed/Read status
+	 * once faulted (0 means the legacy IO_ERROR), input starvation of the
+	 * backend, and the backend state whose decoder heap lives on the
+	 * decode core. The codec is fixed for the stream's life. */
 	uint16_t fault_status;
-	uint8_t flac_starved;
-	struct sdk_flac_state flac;
+	uint8_t backend_starved;
+	/* Background close (audio_stream_close.h): closed by the client but
+	 * the slot still holds a core-1 decoder heap; release task queued.
+	 * Written by core 0 only. */
+	uint8_t closing;
+	uint8_t release_queued;
+	union {
+		struct sdk_flac_state flac;
+		struct sdk_vorbis_state vorbis;
+	};
 	mp3dec_t decoder;
 	mp3d_sample_t scratch[MINIMP3_MAX_SAMPLES_PER_FRAME];
 };
@@ -3312,7 +3323,9 @@ static uint16_t handle_decode_mp3(volatile struct SDKMailboxEntry *req,
 	return SDK_STATUS_OK;
 }
 
-static struct SDKAudioStream *find_audio_stream(uint32_t session)
+/* Any occupied slot with this id, including one being closed in the
+ * background (internal close/reap paths only). */
+static struct SDKAudioStream *find_audio_stream_slot(uint32_t session)
 {
 	uint32_t i;
 
@@ -3323,6 +3336,15 @@ static struct SDKAudioStream *find_audio_stream(uint32_t session)
 			return &audio_streams[i];
 	}
 	return 0;
+}
+
+/* A live session: a stream closed by the client is gone even while its
+ * slot waits for the background release (audio_stream_close.h). */
+static struct SDKAudioStream *find_audio_stream(uint32_t session)
+{
+	struct SDKAudioStream *stream = find_audio_stream_slot(session);
+
+	return (stream && !stream->closing) ? stream : 0;
 }
 
 static struct SDKAudioStream *alloc_audio_stream(void)
@@ -3343,13 +3365,22 @@ static struct SDKAudioStream *alloc_audio_stream(void)
 	return 0;
 }
 
+/* Free a native codec stream's decoder heap. Runs on the core that owns
+ * it: core 0 for core-0-affine streams (inline close), the internal core-1
+ * CLOSE task for core-1-affine ones (background close, after which core 0
+ * frees the slot with nothing left to release). */
+static void audio_stream_release_decoder(struct SDKAudioStream *stream)
+{
+	if (stream->codec == SDK_AUDIO_CODEC_FLAC)
+		sdk_flac_release(&stream->flac);
+	else if (stream->codec == SDK_AUDIO_CODEC_VORBIS)
+		sdk_vorbis_release(&stream->vorbis);
+}
+
 static void free_audio_stream(struct SDKAudioStream *stream)
 {
 	if (stream) {
-		/* Runs on the core that owns the decoder heap: inline close
-		 * for core-0-affine streams, the core-1 CLOSE task otherwise. */
-		if (stream->codec == SDK_AUDIO_CODEC_FLAC)
-			sdk_flac_release(&stream->flac);
+		audio_stream_release_decoder(stream);
 		memset(stream, 0, sizeof(*stream));
 	}
 }
@@ -3361,10 +3392,13 @@ void sdk_mailbox_poison_core1_audio_streams(void)
 	for (i = 0; i < SDK_MAX_AUDIO_STREAMS; i++) {
 		if (audio_streams[i].id != 0U && audio_streams[i].core1_affine) {
 			audio_streams[i].faulted = 1U;
-			/* The reclaim pass already freed libFLAC's tracked
-			 * blocks; drop the dangling decoder pointer. */
+			/* The reclaim pass already freed the decoder's tracked
+			 * blocks; drop the dangling pointers. */
 			if (audio_streams[i].codec == SDK_AUDIO_CODEC_FLAC)
 				sdk_flac_forget(&audio_streams[i].flac);
+			else if (audio_streams[i].codec ==
+			         SDK_AUDIO_CODEC_VORBIS)
+				sdk_vorbis_forget(&audio_streams[i].vorbis);
 		}
 	}
 }
@@ -3372,9 +3406,19 @@ void sdk_mailbox_poison_core1_audio_streams(void)
 /* Set once sdk_mailbox_init has cleared the coherent stream table. */
 static uint32_t audio_streams_valid;
 
-/* Mailbox reset: free core-0-owned FLAC decoders in place and report
- * whether any core-1-owned decoder needs the cold-restart reclaim. */
-static int audio_streams_release_flac_core0(void)
+/* True while a native codec stream holds decoder heap on its decode core. */
+static int audio_stream_holds_decoder(const struct SDKAudioStream *s)
+{
+	if (s->codec == SDK_AUDIO_CODEC_FLAC)
+		return s->flac.decoder != 0;
+	if (s->codec == SDK_AUDIO_CODEC_VORBIS)
+		return sdk_vorbis_holds_memory(&s->vorbis);
+	return 0;
+}
+
+/* Mailbox reset: free core-0-owned FLAC/Vorbis decoders in place and
+ * report whether any core-1-owned decoder needs the cold-restart reclaim. */
+static int audio_streams_release_backends_core0(void)
 {
 	int core1_heap = 0;
 	uint32_t i;
@@ -3382,13 +3426,12 @@ static int audio_streams_release_flac_core0(void)
 	for (i = 0; i < SDK_MAX_AUDIO_STREAMS; i++) {
 		struct SDKAudioStream *s = &audio_streams[i];
 
-		if (s->id == 0U || s->codec != SDK_AUDIO_CODEC_FLAC ||
-		    !s->flac.decoder)
+		if (s->id == 0U || !audio_stream_holds_decoder(s))
 			continue;
 		if (s->core1_affine)
 			core1_heap = 1;
 		else
-			sdk_flac_release(&s->flac);
+			audio_stream_release_decoder(s);
 	}
 	return core1_heap;
 }
@@ -3524,8 +3567,8 @@ static int audio_stream_check_vbr_tag(const uint8_t *frame,
 
 static int audio_stream_needs_more_input(const struct SDKAudioStream *stream)
 {
-	if (stream && stream->codec == SDK_AUDIO_CODEC_FLAC)
-		return stream->flac_starved && !stream->eof &&
+	if (stream && stream->codec != SDK_AUDIO_CODEC_MP3)
+		return stream->backend_starved && !stream->eof &&
 		       !stream->drain_requested;
 	return stream &&
 	       stream->input_length < SDK_AUDIO_STREAM_MIN_INPUT_BYTES &&
@@ -3558,13 +3601,13 @@ static int audio_stream_process_vbr_tag(struct SDKAudioStream *stream,
 	return ret != 0;
 }
 
-/* FLAC sessions (U7): the backend decodes whole buffered units straight
+/* Native codec sessions (FLAC U7, Vorbis U8): the backend decodes straight
  * into the PCM ring. Cursor ownership, flush-before-publish and drain
  * bookkeeping follow the MP3 loop below; a backend failure faults the
  * stream with its status (UNSUPPORTED / IO_ERROR / NO_MEMORY). */
-static uint32_t audio_stream_decode_flac(struct SDKAudioStream *stream)
+static uint32_t audio_stream_decode_native(struct SDKAudioStream *stream)
 {
-	struct sdk_flac_io io;
+	struct sdk_audio_codec_io io;
 	uint8_t *input = (uint8_t *)(uintptr_t)stream->mp3_ring_addr;
 	uint8_t *pcm_dst = (uint8_t *)(uintptr_t)stream->pcm_ring_addr;
 	uint32_t pcm_flush_start;
@@ -3597,15 +3640,24 @@ static uint32_t audio_stream_decode_flac(struct SDKAudioStream *stream)
 	io.pcm_budget = stream->high_water_bytes;
 	if (io.pcm_budget == 0U || io.pcm_budget > stream->pcm_capacity)
 		io.pcm_budget = stream->pcm_capacity;
-	status = sdk_flac_decode(&stream->flac, &io);
+	io.pcm_unread = audio_stream_pcm_used(stream);
+	if (stream->codec == SDK_AUDIO_CODEC_VORBIS)
+		status = sdk_vorbis_decode(&stream->vorbis, &io);
+	else
+		status = sdk_flac_decode(&stream->flac, &io);
 	if (io.consumed != 0U) {
 		audio_stream_consume_input(stream, io.consumed);
 		stream->bytes_consumed += io.consumed;
 		progress = 1U;
 	}
-	if (stream->sample_rate == 0U && stream->flac.sample_rate != 0U) {
-		stream->sample_rate = stream->flac.sample_rate;
-		stream->channels = stream->flac.channels;
+	if (stream->sample_rate == 0U) {
+		if (stream->codec == SDK_AUDIO_CODEC_VORBIS) {
+			stream->sample_rate = stream->vorbis.sample_rate;
+			stream->channels = stream->vorbis.channels;
+		} else {
+			stream->sample_rate = stream->flac.sample_rate;
+			stream->channels = stream->flac.channels;
+		}
 	}
 	if (io.produced != 0U) {
 		stream->pcm_written_total += io.produced;
@@ -3617,7 +3669,7 @@ static uint32_t audio_stream_decode_flac(struct SDKAudioStream *stream)
 		stream->pcm_ready_total = stream->pcm_written_total;
 		progress = 1U;
 	}
-	stream->flac_starved = io.starved ? 1U : 0U;
+	stream->backend_starved = io.starved ? 1U : 0U;
 	if (io.complete) {
 		stream->decode_complete = 1;
 		audio_stream_discard_input(stream);
@@ -3646,8 +3698,8 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 	uint8_t *input;
 	uint8_t *pcm_dst;
 
-	if (stream && stream->codec == SDK_AUDIO_CODEC_FLAC)
-		return audio_stream_decode_flac(stream);
+	if (stream && stream->codec != SDK_AUDIO_CODEC_MP3)
+		return audio_stream_decode_native(stream);
 	if (!stream || stream->mp3_ring_addr == 0U ||
 	    stream->pcm_ring_addr == 0U)
 		return 0;
@@ -3897,7 +3949,7 @@ static void audio_stream_feed_compute(struct SDKAudioStream *stream,
 			 * complete while the ring has no room for more input --
 			 * the input ring is smaller than one compressed frame. */
 			if (stream->codec == SDK_AUDIO_CODEC_FLAC &&
-			    stream->flac_starved && !stream->faulted) {
+			    stream->backend_starved && !stream->faulted) {
 				stream->faulted = 1U;
 				stream->fault_status = SDK_STATUS_IO_ERROR;
 			}
@@ -4461,7 +4513,8 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	if (stream->faulted)
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
-	/* FLAC sessions are unbound readback only (big-endian PCM). */
+	/* FLAC and Vorbis sessions are unbound readback only (big-endian
+	 * PCM). */
 	if (stream->codec != SDK_AUDIO_CODEC_MP3)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	if (g_audio_playback.session == session &&
@@ -4827,7 +4880,11 @@ static uint16_t open_audio_stream(volatile struct SDKMailboxEntry *req,
 	if (codec == SDK_AUDIO_CODEC_FLAC) {
 		/* Decoder objects are created lazily on the decode core. */
 		sdk_flac_init(&stream->flac, output_format);
-		stream->flac_starved = 1U;
+		stream->backend_starved = 1U;
+	} else if (codec == SDK_AUDIO_CODEC_VORBIS) {
+		/* The arena is created lazily on the decode core. */
+		sdk_vorbis_init(&stream->vorbis);
+		stream->backend_starved = 1U;
 	} else {
 		mp3dec_init(&stream->decoder);
 	}
@@ -4885,9 +4942,6 @@ static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *re
 	codec = get_be32(payload->codec);
 	if (codec == SDK_AUDIO_CODEC_UNKNOWN || codec > SDK_AUDIO_CODEC_VORBIS)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	/* Vorbis is reserved until its backend exists. */
-	if (codec == SDK_AUDIO_CODEC_VORBIS)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 
 	input_ring = find_shared_buffer(get_be32(payload->input_ring_handle));
 	pcm_ring = find_shared_buffer(get_be32(payload->pcm_ring_handle));
@@ -4909,6 +4963,21 @@ static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *re
 		    output_format != SDK_AUDIO_SAMPLE_FORMAT_S32BE)
 			return complete_status(req, comp,
 			                       SDK_STATUS_BAD_REQUEST);
+	} else if (codec == SDK_AUDIO_CODEC_VORBIS) {
+		/* Tremor's PCM is narrowed to big-endian 16-bit only. */
+		if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S16LE ||
+		    output_format == SDK_AUDIO_SAMPLE_FORMAT_S32LE ||
+		    output_format == SDK_AUDIO_SAMPLE_FORMAT_S32BE)
+			return complete_status(req, comp,
+			                       SDK_STATUS_UNSUPPORTED);
+		if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+			return complete_status(req, comp,
+			                       SDK_STATUS_BAD_REQUEST);
+		/* Tremor's codebook setup and residue decode use alloca():
+		 * they need the 1 MiB core-1 stack, not core 0's 16 KiB. */
+		if (!scheduler_core1_available())
+			return complete_status(req, comp,
+			                       SDK_STATUS_UNSUPPORTED);
 	} else {
 		/* The MP3 backend produces 16-bit PCM only; 32-bit
 		 * containers are a valid request this codec cannot satisfy. */
@@ -4998,7 +5067,7 @@ static uint16_t handle_audio_stream_feed(volatile struct SDKMailboxEntry *req,
 	/* Core-0-affine stream: inline, as the pre-scheduler firmware did. */
 	audio_stream_feed_compute(stream, (src_length != 0U) ? src_offset : 0U,
 	                          src_length, flags);
-	if (stream->codec == SDK_AUDIO_CODEC_FLAC && stream->faulted)
+	if (stream->codec != SDK_AUDIO_CODEC_MP3 && stream->faulted)
 		return complete_status(req, comp,
 		                       audio_stream_fault_status(stream));
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
@@ -5047,7 +5116,7 @@ static uint16_t handle_audio_stream_read(volatile struct SDKMailboxEntry *req,
 	}
 	/* Core-0-affine stream: inline, as the pre-scheduler firmware did. */
 	audio_stream_read_compute(stream, pcm_read);
-	if (stream->codec == SDK_AUDIO_CODEC_FLAC && stream->faulted)
+	if (stream->codec != SDK_AUDIO_CODEC_MP3 && stream->faulted)
 		return complete_status(req, comp,
 		                       audio_stream_fault_status(stream));
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
@@ -5059,7 +5128,7 @@ static uint16_t handle_audio_stream_read(volatile struct SDKMailboxEntry *req,
  * slot is deliberately not counted: the worker has finished with the
  * stream and its result payload already lives in the task slot, so
  * only the (harmless) completion post remains. */
-static int audio_stream_tasks_inflight(uint32_t session)
+static int audio_stream_session_tasks_live(uint32_t session, int release)
 {
 	taskq_shared_t *sh;
 	uint32_t i;
@@ -5073,14 +5142,62 @@ static int audio_stream_tasks_inflight(uint32_t session)
 
 		if (st != TASK_QUEUED && st != TASK_CLAIMED)
 			continue;
-		if (d->opcode != SDK_OP_AUDIO_STREAM_FEED &&
-		    d->opcode != SDK_OP_AUDIO_STREAM_READ)
+		if (release ? d->opcode != SDK_OP_AUDIO_STREAM_CLOSE :
+		              (d->opcode != SDK_OP_AUDIO_STREAM_FEED &&
+		               d->opcode != SDK_OP_AUDIO_STREAM_READ))
 			continue;
 		if (((const struct audio_feed_op_params *)
 		         (uintptr_t)d->op_params)->session == session)
 			return 1;
 	}
 	return 0;
+}
+
+static int audio_stream_tasks_inflight(uint32_t session)
+{
+	return audio_stream_session_tasks_live(session, 0);
+}
+
+/*
+ * Main loop (core 0): retire native codec streams the client closed while
+ * their decoder heap belonged to core 1 (audio_stream_close.h). The release
+ * task is internal (request_id 0) and is retried here every pass until the
+ * task queue accepts it; only core 0 ever clears the slot.
+ */
+void sdk_mailbox_audio_stream_reap(void)
+{
+	uint32_t i;
+
+	for (i = 0; i < SDK_MAX_AUDIO_STREAMS; i++) {
+		struct SDKAudioStream *s = &audio_streams[i];
+		struct audio_feed_op_params p;
+
+		if (s->id == 0U || !s->closing)
+			continue;
+		switch (audio_stream_close_step(
+			    s->release_queued,
+			    audio_stream_session_tasks_live(s->id, 1),
+			    audio_stream_session_tasks_live(s->id, 0),
+			    scheduler_core1_available(), s->core1_affine,
+			    audio_stream_holds_decoder(s))) {
+		case AUDIO_STREAM_CLOSE_QUEUE:
+			memset(&p, 0, sizeof(p));
+			p.session = s->id;
+			/* Queue full: retried on the next pass. */
+			if (sdk_mailbox_enqueue_internal(SDK_OP_AUDIO_STREAM_CLOSE,
+			                                 &p, sizeof(p)))
+				s->release_queued = 1U;
+			break;
+		case AUDIO_STREAM_CLOSE_FREE:
+			/* Core 1 has finished with the slot (or never owned
+			 * a heap in it): the decoder release is a no-op or
+			 * core-0 owned, then the id is cleared here. */
+			free_audio_stream(s);
+			break;
+		default:
+			break;
+		}
+	}
 }
 
 static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
@@ -5108,6 +5225,20 @@ static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
 		/* Closing a bound stream implies stop. */
 		audio_playback_stop();
 	}
+	/* A core-1 FLAC decoder's or Vorbis arena's heap is tracked and
+	 * cache-owned by core 1, so it must be released there -- but Close
+	 * never answers BUSY for these streams (clients do not retry it).
+	 * The session ends now; sdk_mailbox_audio_stream_reap() waits for
+	 * the stream's own tasks, queues the core-1 release and clears the
+	 * slot on core 0. Native streams are never bound, so no refill can
+	 * be pending for them. */
+	if (audio_stream_close_deferred(stream->codec != SDK_AUDIO_CODEC_MP3,
+	                                stream->core1_affine,
+	                                scheduler_core1_available())) {
+		stream->closing = 1U;
+		return complete_audio_stream_result(req, comp, SDK_STATUS_OK,
+		                                    stream);
+	}
 	/* An internal PCM-refill FEED (request_id 0) may still be queued or
 	 * running on core 1 against this stream's coherent slot -- it was
 	 * enqueued for the bound session, which a prior STOP may already
@@ -5129,21 +5260,6 @@ static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
 	 * API.) */
 	if (audio_stream_tasks_inflight(session))
 		return complete_status(req, comp, SDK_STATUS_BUSY);
-	/* A core-1 FLAC decoder's heap is tracked and cache-owned by core 1:
-	 * release it there. The deferred completion needs a client id. */
-	if (stream->codec == SDK_AUDIO_CODEC_FLAC && stream->flac.decoder &&
-	    stream->core1_affine && scheduler_core1_available()) {
-		struct audio_feed_op_params p;
-
-		if (get_be32(req->request_id) == 0U)
-			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-		memset(&p, 0, sizeof(p));
-		p.session = session;
-		if (service_try_defer(SDK_OP_AUDIO_STREAM_CLOSE, req, &p,
-		                      sizeof(p), 0U) == SDK_STATUS_QUEUED)
-			return SDK_STATUS_QUEUED;
-		return complete_status(req, comp, SDK_STATUS_BUSY);
-	}
 	snapshot = *stream;
 	free_audio_stream(stream);
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, &snapshot);
@@ -6692,7 +6808,7 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 				(INTPTR)(uintptr_t)(
 					stream->mp3_ring_addr + dirty_offset),
 				dirty_length);
-		if (stream->codec == SDK_AUDIO_CODEC_FLAC && stream->faulted)
+		if (stream->codec != SDK_AUDIO_CODEC_MP3 && stream->faulted)
 			return audio_stream_fault_status(stream);
 		audio_stream_fill_result(result_payload, stream);
 		*result_len = sizeof(struct SDKAudioStreamResultPayload);
@@ -6719,25 +6835,27 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		if (p->pcm_read > audio_stream_pcm_used(stream))
 			return SDK_STATUS_BAD_REQUEST;
 		audio_stream_read_compute(stream, p->pcm_read);
-		if (stream->codec == SDK_AUDIO_CODEC_FLAC && stream->faulted)
+		if (stream->codec != SDK_AUDIO_CODEC_MP3 && stream->faulted)
 			return audio_stream_fault_status(stream);
 		audio_stream_fill_result(result_payload, stream);
 		*result_len = sizeof(struct SDKAudioStreamResultPayload);
 		return SDK_STATUS_OK;
 	}
 	case SDK_OP_AUDIO_STREAM_CLOSE: {
+		/* Internal background-close task (request_id 0, queued by
+		 * sdk_mailbox_audio_stream_reap): release only the decoder
+		 * heap core 1 owns. The slot itself, id included, is cleared
+		 * by core 0 once this task has left the queue, so the core-0
+		 * allocator never sees a half-cleared slot. */
 		const struct audio_feed_op_params *p =
 		    (const struct audio_feed_op_params *)d->op_params;
-		struct SDKAudioStream *stream = find_audio_stream(p->session);
+		struct SDKAudioStream *stream =
+		    find_audio_stream_slot(p->session);
 
 		*result_len = 0;
-		if (!stream)
+		if (!stream || !stream->closing)
 			return SDK_STATUS_BAD_HANDLE;
-		/* Reply first: free_audio_stream releases libFLAC's core-1
-		 * heap and zeroes the slot. */
-		audio_stream_fill_result(result_payload, stream);
-		*result_len = sizeof(struct SDKAudioStreamResultPayload);
-		free_audio_stream(stream);
+		audio_stream_release_decoder(stream);
 		return SDK_STATUS_OK;
 	}
 	case SDK_OP_DECOMPRESS: {
@@ -8434,7 +8552,7 @@ void sdk_mailbox_publish_after_aperture_ack(void)
 
 void sdk_mailbox_init(void)
 {
-	int flac_core1_heap;
+	int backend_core1_heap;
 
 	/* Drain any in-flight core-1 task before we tear the mailbox down. A task
 	 * still executing on core 1 is mid-write into its resolved data buffers;
@@ -8506,9 +8624,9 @@ void sdk_mailbox_init(void)
 	 * lines were filled under (this can run before the scheduler stamps
 	 * the coherent attributes on the section). */
 	/* The table holds garbage before its first clear at boot; only a
-	 * previously cleared table can own FLAC decoders. */
-	flac_core1_heap = audio_streams_valid ?
-	    audio_streams_release_flac_core0() : 0;
+	 * previously cleared table can own FLAC/Vorbis decoders. */
+	backend_core1_heap = audio_streams_valid ?
+	    audio_streams_release_backends_core0() : 0;
 	memset(audio_streams, 0,
 	       SDK_MAX_AUDIO_STREAMS * sizeof(struct SDKAudioStream));
 	audio_streams_valid = 1U;
@@ -8525,7 +8643,7 @@ void sdk_mailbox_init(void)
 	 * core 1 first: its reclaim pass frees every tracked block while the
 	 * worker is held in reset. */
 	if ((sdk_image_stream_has_core1_sessions() ||
-	     sdk_video_stream_has_core1_sessions() || flac_core1_heap) &&
+	     sdk_video_stream_has_core1_sessions() || backend_core1_heap) &&
 	    scheduler_core1_available())
 		core1_cold_restart();
 	sdk_image_stream_init();
@@ -8722,8 +8840,12 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 		 * producer's in-flight marker, dispatched by opcode. */
 		if (opcode == (uint16_t)TASKQ_OP_VIDEO_COMPOSE)
 			overlay_compose_retired(status == SDK_STATUS_OK);
-		else
+		else if (opcode == (uint16_t)SDK_OP_AUDIO_STREAM_CLOSE) {
+			/* Background close: sdk_mailbox_audio_stream_reap
+			 * clears the slot once the task has left the queue. */
+		} else {
 			g_audio_playback.refill_pending = 0U; /* AX refill */
+		}
 		return 1;
 	}
 

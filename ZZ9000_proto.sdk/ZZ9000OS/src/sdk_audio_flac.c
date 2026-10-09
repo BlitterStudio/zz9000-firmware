@@ -512,7 +512,7 @@ static uint32_t frame_boundary(struct sdk_flac_state *st, const uint8_t *in,
 
 static int step_frame(struct sdk_flac_state *st, const uint8_t *in,
                       uint32_t len, int eof, int drain,
-                      struct sdk_flac_io *io, uint32_t room,
+                      struct sdk_audio_codec_io *io, uint32_t room,
                       uint32_t *consumed, uint32_t *produced)
 {
 	struct flac_frame_header h;
@@ -573,7 +573,8 @@ void sdk_flac_init(struct sdk_flac_state *st, uint32_t output_format)
 	st->phase = FLAC_PHASE_MAGIC;
 }
 
-uint16_t sdk_flac_decode(struct sdk_flac_state *st, struct sdk_flac_io *io)
+uint16_t sdk_flac_decode(struct sdk_flac_state *st,
+                         struct sdk_audio_codec_io *io)
 {
 	io->consumed = 0U;
 	io->produced = 0U;

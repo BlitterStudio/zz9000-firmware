@@ -75,6 +75,11 @@ LIBFLAC_VERSION ?= 1.5.0
 LIBFLAC_DIR ?= $(BUILD_DIR)/deps/flac/$(LIBFLAC_VERSION)
 LIBFLAC_LIB ?= $(LIBFLAC_DIR)/arm/libflacdec.a
 LIBFLAC_INCLUDE_DIR ?= $(LIBFLAC_DIR)/arm/include
+# Must match the pins in build_vorbis.sh (libogg version, Tremor commit).
+LIBVORBIS_TAG ?= ogg-1.3.6-tremor-820fb3237ea8
+LIBVORBIS_DIR ?= $(BUILD_DIR)/deps/vorbis/$(LIBVORBIS_TAG)
+LIBVORBIS_LIB ?= $(LIBVORBIS_DIR)/arm/libvorbisdec.a
+LIBVORBIS_INCLUDE_DIR ?= $(LIBVORBIS_DIR)/arm/include
 
 # Include paths
 INCLUDES = -I$(SRC_DIR) -I$(SRC_DIR)/bearssl -I$(BSP_INC)
@@ -83,7 +88,7 @@ INCLUDES += -I$(ZLIB_SRC)
 INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)
 INCLUDES += -I$(LIBWEBP_INCLUDE_DIR)
 INCLUDES += -I$(LIBMPEG2_INCLUDE_DIR) -I$(A52_INCLUDE_DIR)
-INCLUDES += -I$(LIBFLAC_INCLUDE_DIR)
+INCLUDES += -I$(LIBFLAC_INCLUDE_DIR) -I$(LIBVORBIS_INCLUDE_DIR)
 INCLUDES += -I$(LZMA_SDK_SRC)/C
 
 # Common flags (shared by all optimization levels)
@@ -114,7 +119,7 @@ LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -L$(BSP_LIB)
 
 # Libraries (order matters for --start-group)
-LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
+LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
 
 # Source files
 C_SRCS = \
@@ -229,6 +234,8 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_webp_alloc.c \
 	$(SRC_DIR)/sdk_flac_alloc.c \
 	$(SRC_DIR)/sdk_audio_flac.c \
+	$(SRC_DIR)/sdk_vorbis_alloc.c \
+	$(SRC_DIR)/sdk_audio_vorbis.c \
 	$(SRC_DIR)/sdk_video_stream.c \
 	$(SRC_DIR)/sdk_media_profile.c \
 	$(SRC_DIR)/sdk_media_session.c \
@@ -273,12 +280,12 @@ FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 
 all: $(TARGET) $(FALLBACK_TARGET) size
 
-$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(OBJS)
+$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 	@echo 'Done.'
 
-$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(FALLBACK_OBJS)
+$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(FALLBACK_OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(FALLBACK_OBJS) $(LIBS)
 	@echo 'Done.'
@@ -330,6 +337,10 @@ $(A52_LIB): $(LIBMPEG2_LIB)
 $(LIBFLAC_LIB): ../../build_flac.sh $(SRC_DIR)/sdk_flac_alloc.h
 	@echo 'Building decoder-only libFLAC dependency...'
 	cd ../.. && bash ./build_flac.sh --arm
+
+$(LIBVORBIS_LIB): ../../build_vorbis.sh $(SRC_DIR)/sdk_vorbis_alloc.h
+	@echo 'Building decoder-only libogg/Tremor dependency...'
+	cd ../.. && bash ./build_vorbis.sh --arm
 
 $(LZMA_SDK_BUILD)/LzmaDec.o: $(LZMA_SDK_SRC)/C/LzmaDec.c
 	@mkdir -p $(dir $@)
@@ -421,6 +432,12 @@ $(BUILD_DIR)/sdk_dvd_ac3.o: $(SRC_DIR)/sdk_dvd_ac3.c $(LIBMPEG2_LIB) $(A52_LIB)
 # U7 FLAC backend: includes libFLAC headers that exist only after the pinned
 # dependency build, so the object depends on the archive (DVD codec pattern).
 $(BUILD_DIR)/sdk_audio_flac.o: $(SRC_DIR)/sdk_audio_flac.c $(LIBFLAC_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -o $@ $<
+
+# U8 Vorbis backend: includes libogg/Tremor headers that exist only after the
+# pinned dependency build, so the object depends on the archive.
+$(BUILD_DIR)/sdk_audio_vorbis.o: $(SRC_DIR)/sdk_audio_vorbis.c $(LIBVORBIS_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -o $@ $<
 

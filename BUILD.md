@@ -15,6 +15,7 @@ outputs land in `bootimage_work/`. CI runs the same scripts.
 | [`build_libwebp.sh`](build_libwebp.sh) | Pinned libwebp decoder/demux archives under `ZZ9000OS/build/deps/libwebp/1.6.0/{arm,host}/lib/` | Arm GNU Toolchain (native compiler with `--host`), `cmake`, `make`, `curl` or `wget` |
 | [`build_dvd_codecs.sh`](build_dvd_codecs.sh) | Pinned decoder-only libmpeg2 0.5.1 and liba52 0.7.4 archives under `ZZ9000OS/build/deps/{libmpeg2,a52dec}/.../{arm,host}/` (U11 DVD experiment; GPL-2.0-or-later, notices in `ZZ9000OS/src/dvd_codecs/`) | Arm GNU Toolchain (native compiler with `--host`), `make`, `curl` or `wget` |
 | [`build_flac.sh`](build_flac.sh) | Pinned decoder-only libFLAC 1.5.0 archive `libflacdec.a` under `ZZ9000OS/build/deps/flac/1.5.0/{arm,host}/` (U7 native FLAC; BSD-3-Clause, notice in `ZZ9000OS/src/flac/COPYING.Xiph`) | Arm GNU Toolchain (native compiler with `--host`), `xz`, `curl` or `wget` |
+| [`build_vorbis.sh`](build_vorbis.sh) | Pinned decoder-only libogg 1.3.6 + fixed-point Tremor (commit `820fb323`) archive `libvorbisdec.a` under `ZZ9000OS/build/deps/vorbis/ogg-1.3.6-tremor-820fb3237ea8/{arm,host}/` (U8 Ogg Vorbis; BSD-3-Clause, notices in `ZZ9000OS/src/vorbis/`) | Arm GNU Toolchain (native compiler with `--host`), `xz`, `gzip`, `curl` or `wget` |
 | [`build_lzma_sdk.sh`](build_lzma_sdk.sh) | LZMA SDK decoder sources under `ZZ9000_proto.sdk/ZZ9000OS/build/deps/lzma-sdk/` (compiled into `ZZ9000OS.elf` by `build_firmware.sh`) | `wget`, `7z`/`7za`/`7zr` |
 | [`build_bitstream.sh`](build_bitstream.sh) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Linux |
 | [`build_bitstream.ps1`](build_bitstream.ps1) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Windows |
@@ -29,7 +30,7 @@ packaging remain separate commands.
 
 **ARM firmware change only** (most iteration loops). Uses the committed
 bitstream. `build_firmware.sh` automatically downloads, verifies, and builds
-the libjpeg-turbo, zlib, libpng, libwebp, libmpeg2, liba52, libFLAC and LZMA SDK dependencies under
+the libjpeg-turbo, zlib, libpng, libwebp, libmpeg2, liba52, libFLAC, libogg/Tremor and LZMA SDK dependencies under
 `ZZ9000OS/build/deps/` when needed:
 ```bash
 ./build_firmware.sh
@@ -219,6 +220,32 @@ encoded and reference-decoded by the `flac` tool recorded in
 cover fragmented feeds, known/unknown totals, invalid metadata, CRC errors,
 truncation, multichannel and Ogg-FLAC rejection, allocation-failure injection
 and restart reclaim. Host figures are not physical Z2/Z3 measurements.
+
+The Ogg Vorbis backend (`sdk_audio_vorbis.c`, arena `sdk_vorbis_alloc.c`)
+has its own Linux suite, linked against the pinned libogg/Tremor host
+archive:
+```bash
+make -C test/vorbis test
+make -C test/vorbis sanitize
+test/vorbis/gen_fixtures.sh   # regenerate fixtures; needs ffmpeg with libvorbis
+```
+`build_vorbis.sh` downloads `libogg-1.3.6.tar.xz` (release 2025-06-16) from
+downloads.xiph.org and the Tremor master commit `820fb3237ea8` (2025-04-03)
+archive from gitlab.xiph.org, each with a pinned SHA-256, and compiles only
+libogg's framing/bitwise units and Tremor's synthesis core (no vorbisfile,
+examples, ARM assembly or low-accuracy path; Tremor has no encoder), with
+every allocation routed through `src/sdk_vorbis_alloc.h` into a per-stream
+arena of tracked core-1 decode-heap regions. Fixtures under
+`test/vorbis/fixtures/` are encoded by ffmpeg's libvorbis wrapper and
+reference-decoded by ffmpeg's independent floating-point Vorbis decoder
+(versions in `test/vorbis/vorbis_fixtures.h`); decoded PCM must match within
+4 LSB per sample and 1 LSB RMS, and be byte-identical across every chunking,
+ring size and drain pattern. Tests cover mono/stereo, three block-size
+pairs, packets split across pages, 192 KiB comment headers, bad CRC,
+missing/out-of-order headers, oversized setup headers and codebooks,
+truncation, page gaps, chained/multiplexed/Opus/Ogg-FLAC/3-channel
+rejection, allocation-failure injection and restart reclaim. Host figures
+are not physical Z2/Z3 measurements.
 
 For source-preserving Docker runs, mount this checkout read-only, copy the
 firmware/test tree into container-local storage, and clean copied build caches

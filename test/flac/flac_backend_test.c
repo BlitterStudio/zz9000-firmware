@@ -44,7 +44,7 @@ static struct sim g_sim;
 
 static uint16_t sim_decode(struct sim *s, int drain)
 {
-	struct sdk_flac_io io;
+	struct sdk_audio_codec_io io;
 	uint16_t status;
 	uint32_t i, pos;
 
@@ -317,7 +317,7 @@ static void test_corruption(void)
 	CHECK(st == SDK_STATUS_IO_ERROR, "truncated metadata: %u", st);
 	/* Status is sticky. */
 	{
-		struct sdk_flac_io io;
+		struct sdk_audio_codec_io io;
 
 		memset(&io, 0, sizeof(io));
 		io.pcm = g_sim.pcm;

@@ -113,6 +113,8 @@ jobs:
         run: make -C test/video_codec test
       - name: FLAC stream backend suite
         run: make -C test/flac test
+      - name: Ogg Vorbis stream backend suite
+        run: make -C test/vorbis test
       - name: Audio capture regression suite
         run: make -C test/audio test
       - name: Firmware-file restore suite

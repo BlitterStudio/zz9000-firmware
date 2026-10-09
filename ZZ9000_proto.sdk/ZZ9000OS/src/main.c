@@ -2157,6 +2157,9 @@ int main() {
 			// keep the AX TX ring fed from a bound audio-stream session
 			// (SDK_OP_AUDIO_STREAM_PLAY); no-op when nothing is bound
 			sdk_mailbox_audio_playback_pump();
+			// finish client-closed FLAC/Vorbis streams whose decoder
+			// heap is released on core 1; no-op when none is closing
+			sdk_mailbox_audio_stream_reap();
 			// convert whole source periods for rate-converted
 			// AHI/MHI leases on the main loop so the fabric ISR
 			// only copies (drivers#83 follow-up); no-op without

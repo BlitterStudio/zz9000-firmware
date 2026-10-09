@@ -23,6 +23,7 @@ $(BUILD):
 
 $(BUILD)/flac_backend_test: flac_backend_test.c flac_fixtures.h host_runtime.c host_runtime.h \
 	$(RUNTIME) $(FIRMWARE_SRC)/sdk_audio_flac.h $(FIRMWARE_SRC)/sdk_flac_alloc.h \
+	$(FIRMWARE_SRC)/sdk_audio_codec_io.h \
 	$(HOST_LIBFLAC) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ flac_backend_test.c $(RUNTIME) $(HOST_LIBFLAC)
 

@@ -1916,9 +1916,46 @@ frame header is present, `FEED_EOF`, or a CRC-verified tail under
 `FEED_DRAIN`), so `input_ring_capacity` must hold at least one compressed
 frame plus a chunk; a ring that cannot accept the next chunk while the decoder
 waits for a frame faults `ZZ9K_STATUS_IO_ERROR`. FLAC sessions are readback
-only: `ZZ9KAudioStreamPlay()` answers `ZZ9K_STATUS_UNSUPPORTED`. Close of a
-core-1 FLAC session is executed on core 1 and needs a nonzero request id
-(always true through zz9k.library).
+only: `ZZ9KAudioStreamPlay()` answers `ZZ9K_STATUS_UNSUPPORTED`.
+
+**Ogg Vorbis sessions** (`ZZ9K_AUDIO_CODEC_VORBIS`, gated by
+`ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM`; both that flag and
+`ZZ9K_CAP_AUDIO_VORBIS` stay unadvertised until physical qualification, so
+clients refuse Vorbis on current firmware). Feed the whole `.ogg`/`.oga` file
+from byte 0 (the identification BOS page). `output_format` must be `S16BE`
+(Tremor's fixed-point output narrowed to 16 bits); other formats answer
+`ZZ9K_STATUS_UNSUPPORTED` at Begin, as does firmware running without its
+second core (Vorbis decodes only on core 1). Samples are interleaved at the
+native rate and channels; `sample_rate`/`channels` stay 0 until the
+identification header is parsed. The Feed that parses it returns
+`ZZ9K_STATUS_UNSUPPORTED` for more than two channels or rates outside
+8000..192000 Hz; the first page answers `ZZ9K_STATUS_UNSUPPORTED` for a
+non-Vorbis logical stream (Opus, Ogg-FLAC, Theora, ...). Exactly one logical
+stream is decoded: a second BOS page (multiplexed, or a chained second link)
+stops decoding, later input is discarded, and once every PCM byte of the
+first stream has been published and acknowledged by `ZZ9KAudioStreamRead()`
+the next Feed or Read (possibly the Read that acknowledges the last bytes,
+whose acknowledgement still applies) returns `ZZ9K_STATUS_UNSUPPORTED`; a
+player can therefore play the first link completely and then stop with an
+unsupported-stream error. Bytes after the stream's EOS page that are not an
+Ogg page (for example an ID3v1 tag) are ignored. Corrupt (page CRC, lost or
+out-of-sequence page, broken packet, missing or out-of-order header) or
+truncated input (EOF before the EOS page or inside a packet) faults with
+`ZZ9K_STATUS_IO_ERROR`; allocation failure, including reaching the 1 MiB
+per-session decoder ceiling, with `ZZ9K_STATUS_NO_MEMORY`. Comment headers
+are validated while streaming and never buffered, so embedded cover art of
+any size is accepted. Setup headers and audio packets larger than 64 KiB,
+and codebooks with more than 8192 used entries, answer
+`ZZ9K_STATUS_UNSUPPORTED`. Later Feed/Read calls repeat the fault status.
+Firmware copies input into its own page buffer, so any `input_ring_capacity`
+works and a drained session simply waits for the next page. Vorbis sessions
+are readback only: `ZZ9KAudioStreamPlay()` answers `ZZ9K_STATUS_UNSUPPORTED`.
+
+`ZZ9KAudioStreamClose()` of a FLAC or Vorbis session never answers
+`ZZ9K_STATUS_BUSY`: the session handle is invalid as soon as Close returns
+(further Feed/Read/Play/Close answer `ZZ9K_STATUS_BAD_HANDLE`), and when the
+decoder heap belongs to the second core the firmware releases it there in the
+background, keeping the session slot reserved until that has happened.
 
 `ZZ9KAudioStreamBeginDesc.low_water_bytes` is the PCM-ring refill
 threshold: while a session is bound to the AX output, the firmware tops the

@@ -1273,6 +1273,11 @@ int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
  * the audio fabric compositor (audio_fabric_isr, audio_fabric.h)
  * since U2. */
 void sdk_mailbox_audio_playback_pump(void);
+/* Background close of FLAC/Vorbis streams whose decoder heap belongs to
+ * core 1 (audio_stream_close.h): queue the core-1 release and clear the
+ * slot afterwards. Call from the core-0 main loop every pass; no-op when
+ * no stream is closing. */
+void sdk_mailbox_audio_stream_reap(void);
 
 /*
  * Run a crypto task's compute on the calling core. op_params points at one of
