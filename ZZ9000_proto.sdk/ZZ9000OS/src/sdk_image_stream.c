@@ -19,6 +19,7 @@
 #include <string.h>
 #include "jpeglib.h"
 #include "png.h"
+#include "sdk_vorbis_alloc.h"
 #include "sdk_webp_alloc.h"
 #include <webp/decode.h>
 #include <webp/demux.h>
@@ -28,6 +29,9 @@
  * budget is the precise bound, checked once the image header is
  * parsed (the SOF for JPEG, the IHDR for PNG). */
 #define SDK_IMAGE_STREAM_MAX_PIXELS    (24U * 1024U * 1024U)
+/* Default region of a WebP session's allocation arena. Larger requests
+ * (input, canvases, VP8L pixel buffers) get a region of their own. */
+#define SDK_WEBP_ARENA_REGION_BYTES (256U * 1024U)
 #define SDK_IMAGE_STREAM_MAX_FIT_SOURCE_PIXELS (256U * 1024U * 1024U)
 /* Whole-image decode state lives in the shared ARM decode heap for
  * the whole session: a progressive JPEG holds the full-resolution
@@ -117,8 +121,10 @@ struct SDKImageStreamSession {
 	uint8_t *webp_canvas;
 	WebPAnimDecoder *webp_anim_decoder;
 	uint32_t webp_tile_next_y;
-	size_t webp_allocated;
-	uint8_t webp_canvas_owned;
+	/* Every libwebp allocation of the session (and its input buffer) is
+	 * carved from this arena, so frame count does not consume tracker
+	 * slots; see sdk_webp_alloc.h. */
+	struct sdk_vorbis_heap webp_heap;
 	uint8_t webp_decoded;
 	uint8_t eoi_buffer[2];
 	uint8_t jpeg_created;
@@ -1354,22 +1360,16 @@ static void release_webp_decode(struct SDKImageStreamSession *session)
 {
 	if (!session)
 		return;
-	sdk_webp_alloc_set_quota(&session->webp_allocated,
-	                         SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES);
-	if (session->webp_anim_decoder)
-		WebPAnimDecoderDelete(session->webp_anim_decoder);
-	else if (session->webp_canvas_owned && session->webp_canvas)
-		WebPFree(session->webp_canvas);
-	if (session->webp_input)
-		sdk_webp_free(session->webp_input);
+	/* The input buffer and every libwebp allocation live in the session
+	 * arena: dropping it frees them all without running libwebp's own
+	 * teardown. */
+	sdk_vorbis_heap_release(&session->webp_heap);
 	session->webp_input = 0;
 	session->webp_input_length = 0U;
 	session->webp_input_capacity = 0U;
 	session->webp_canvas = 0;
 	session->webp_anim_decoder = 0;
-	session->webp_canvas_owned = 0U;
 	session->webp_decoded = 0U;
-	session->webp_allocated = 0U;
 	release_decode_state(session);
 }
 
@@ -1425,8 +1425,7 @@ static int webp_append_input(struct SDKImageStreamSession *session,
 			return -1;
 		if (total < 12U)
 			return -2;
-		sdk_webp_alloc_set_quota(&session->webp_allocated,
-		                         SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES);
+		sdk_webp_alloc_select(&session->webp_heap);
 		input = (uint8_t *)sdk_webp_malloc(total);
 		if (!input)
 			return 0;
@@ -1549,8 +1548,7 @@ static uint16_t process_webp_stream(struct SDKImageStreamSession *session,
 		    height > SDK_IMAGE_STREAM_MAX_DIMENSION ||
 		    width > SDK_WEBP_MAX_CANVAS_PIXELS / height)
 			return fail_stream_session(session, SDK_STATUS_BAD_REQUEST, src_length, result);
-		sdk_webp_alloc_set_quota(&session->webp_allocated,
-		                         SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES);
+		sdk_webp_alloc_select(&session->webp_heap);
 		{
 			WebPData data;
 			WebPAnimDecoderOptions options;
@@ -1630,8 +1628,7 @@ static uint16_t process_webp_stream(struct SDKImageStreamSession *session,
 	                 height > SDK_IMAGE_STREAM_MAX_DIMENSION ||
 	                 width > SDK_WEBP_MAX_CANVAS_PIXELS / height))
 		return fail_stream_session(session, SDK_STATUS_BAD_REQUEST, src_length, result);
-	sdk_webp_alloc_set_quota(&session->webp_allocated,
-	                         SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES);
+	sdk_webp_alloc_select(&session->webp_heap);
 	if (animated) {
 		WebPData data;
 		WebPAnimDecoderOptions options;
@@ -1684,7 +1681,6 @@ static uint16_t process_webp_stream(struct SDKImageStreamSession *session,
 			                           SDK_STATUS_NO_MEMORY : SDK_STATUS_IO_ERROR,
 			                           src_length, result);
 		session->webp_canvas = rgba;
-		session->webp_canvas_owned = 1U;
 	}
 	session->image_width = width;
 	session->image_height = height;
@@ -2698,6 +2694,10 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 		memset(session, 0, sizeof(*session));
 		return SDK_STATUS_NO_MEMORY;
 	}
+	if (session->codec == SDK_IMAGE_CODEC_WEBP)
+		sdk_vorbis_heap_init(&session->webp_heap,
+		                     SDK_WEBP_ARENA_REGION_BYTES,
+		                     SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES);
 	session->in_use = 1U;
 	if ((begin->flags & SDK_IMAGE_SESSION_BEGIN_ANIMATION) != 0U) {
 		session->is_animation = 1U;
@@ -2844,9 +2844,9 @@ void sdk_image_stream_poison_core1_sessions(void)
 		slot->webp_canvas = 0;
 		slot->webp_anim_decoder = 0;
 		slot->webp_tile_next_y = 0U;
-		slot->webp_canvas_owned = 0U;
 		slot->webp_decoded = 0U;
-		slot->webp_allocated = 0U;
+		/* The reclaim already freed the arena's tracked regions. */
+		sdk_vorbis_heap_forget(&slot->webp_heap);
 		slot->webp_output_complete = 0U;
 		/* The session keeps its animation-mode identity (like codec/)
 		 * so post-fault animation ops fail through the poisoned
@@ -2982,6 +2982,7 @@ uint16_t sdk_image_stream_frame_next(uint32_t session_id,
 	if (!session->webp_anim_decoder)
 		return SDK_STATUS_BAD_REQUEST;
 
+	sdk_webp_alloc_select(&session->webp_heap);
 	if (!WebPAnimDecoderHasMoreFrames(session->webp_anim_decoder)) {
 		if (session->anim_loop_count > 0U &&
 		    session->anim_loop_index + 1U >= session->anim_loop_count) {
@@ -3173,6 +3174,7 @@ uint16_t sdk_image_stream_restart(uint32_t session_id,
 	if (!session->webp_input || session->webp_input_length == 0U)
 		return SDK_STATUS_BAD_REQUEST;
 
+	sdk_webp_alloc_select(&session->webp_heap);
 	if (session->webp_anim_decoder) {
 		WebPAnimDecoderDelete(session->webp_anim_decoder);
 		session->webp_anim_decoder = 0;
