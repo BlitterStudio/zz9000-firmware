@@ -707,6 +707,61 @@ static int test_ac3_192_all_frames(void)
 	return 0;
 }
 
+/* 6b. A ring that cannot hold one decoded AC-3 frame would never emit
+ * audio or drain: configure refuses it; exactly one frame is enough. */
+static int test_ac3_ring_floor(void)
+{
+	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	static uint8_t ring[SDK_DVD_AC3_FRAME_PCM_BYTES];
+	struct SDKVideoMediaConfig cfg = {0};
+	void *decoder;
+	int ok_small, ok_exact;
+
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.pcm_ring = ring;
+	cfg.pcm_low_water_bytes = 1024U;
+	cfg.pcm_ring_capacity = SDK_DVD_AC3_FRAME_PCM_BYTES - 4U;
+	decoder = ops->create();
+	if (!decoder)
+		return 1;
+	ok_small = ops->configure_media(decoder, &cfg);
+	ops->destroy(decoder);
+	cfg.pcm_ring_capacity = SDK_DVD_AC3_FRAME_PCM_BYTES;
+	decoder = ops->create();
+	if (!decoder)
+		return 2;
+	ok_exact = ops->configure_media(decoder, &cfg);
+	ops->destroy(decoder);
+	if (ok_small)
+		return 3;
+	if (!ok_exact)
+		return 4;
+	return 0;
+}
+
+/* 6c. A VOB cut at a pack boundary ends mid AC-3 frame: the partial frame
+ * can never complete, so the stream must still reach DONE with only
+ * whole frames played. */
+static int test_ac3_truncated_mid_frame(void)
+{
+	struct acked_result r;
+	uint32_t cut = 12U * 2048U;
+
+	if (zz9k_dvd_ac3_192_fixture_len <= cut)
+		return 1;
+	if (run_acked(zz9k_dvd_ac3_192_fixture, cut, 2048U, 128U * 1024U,
+	              128U * 1024U, &r) != 0)
+		return 2;
+	if (!r.done)
+		return 3;
+	if (r.pcm_bytes == 0U ||
+	    r.pcm_bytes % SDK_DVD_AC3_FRAME_PCM_BYTES != 0U)
+		return 4;
+	if (r.audio_frames == 0U || r.audio_frames >= 63U)
+		return 5;
+	return 0;
+}
+
 /* 7. Two AC-3 tracks: 0x80 (7 frames, first in the stream) and 0x81 (19
  * frames). Only 0x80 may reach the decoder. */
 static int test_ac3_substream_selection(void)
@@ -824,6 +879,18 @@ int main(void)
 		return 80 + err;
 	}
 	printf("PASS: test_ac3_192_all_frames (AC-3 2.0 192k: every frame, DONE)\n");
+
+	if ((err = test_ac3_ring_floor()) != 0) {
+		fprintf(stderr, "FAIL: test_ac3_ring_floor (code %d)\n", err);
+		return 100 + err;
+	}
+	printf("PASS: test_ac3_ring_floor (ring must hold one AC-3 frame)\n");
+
+	if ((err = test_ac3_truncated_mid_frame()) != 0) {
+		fprintf(stderr, "FAIL: test_ac3_truncated_mid_frame (code %d)\n", err);
+		return 110 + err;
+	}
+	printf("PASS: test_ac3_truncated_mid_frame (cut VOB still ends DONE)\n");
 
 	if ((err = test_ac3_substream_selection()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_substream_selection (code %d)\n", err);

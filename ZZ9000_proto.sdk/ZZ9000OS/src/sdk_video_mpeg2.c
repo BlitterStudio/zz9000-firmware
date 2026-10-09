@@ -807,6 +807,11 @@ static int mpeg2_configure_media(void *decoder,
 	    config->pcm_ring_capacity > SDK_VIDEO_MEDIA_MAX_PCM_RING ||
 	    config->pcm_low_water_bytes >= config->pcm_ring_capacity)
 		return 0;
+	/* AC-3 decodes whole frames only: a ring that cannot hold one would
+	 * never emit audio and never drain. */
+	if (config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_AC3 &&
+	    config->pcm_ring_capacity < SDK_DVD_AC3_FRAME_PCM_BYTES)
+		return 0;
 	d->media = *config;
 	d->media_configured = 1U;
 	if (config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2) {
