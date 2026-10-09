@@ -1,6 +1,6 @@
 /* Standalone compressed-audio playback engine for zzplay: MP3 through MHI
- * or accelerated decode + AHI, native FLAC through accelerated decode +
- * AHI.
+ * or accelerated decode + AHI; native FLAC and Ogg Vorbis through
+ * accelerated decode + AHI.
  *
  * The engine is driven by the playback controller (zzplay-controller.h):
  * it polls item-ending requests, applies live controls (pause, volume),
@@ -64,5 +64,11 @@ ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run);
  * cannot play FLAC. Seeking is unsupported (the decoder starts from the
  * stream header). */
 ZZPlayEngineResult zzplay_flac_run(const ZZPlayEngineRun *run);
+
+/* Play one Ogg Vorbis file (a single logical stream) through the card's
+ * Vorbis stream decoder and AHI, with the FLAC backend policy and no
+ * seeking. A chained or multiplexed file plays its first link, then fails
+ * with an explicit unsupported-stream error. */
+ZZPlayEngineResult zzplay_vorbis_run(const ZZPlayEngineRun *run);
 
 #endif /* ZZPLAY_MP3_H */

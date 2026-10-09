@@ -19,6 +19,9 @@ static const char *const zzplay_webp_extensions[] = {
 static const char *const zzplay_flac_extensions[] = {
   "flac", NULL
 };
+static const char *const zzplay_vorbis_extensions[] = {
+  "ogg", "oga", NULL
+};
 
 
 static const ZZPlayFormat zzplay_formats_table[] = {
@@ -44,6 +47,12 @@ static const ZZPlayFormat zzplay_formats_table[] = {
     ZZPLAY_MEDIA_KIND_FLAC,
     "FLAC",
     zzplay_flac_extensions,
+    0U
+  },
+  {
+    ZZPLAY_MEDIA_KIND_VORBIS,
+    "Ogg Vorbis",
+    zzplay_vorbis_extensions,
     0U
   }
 };

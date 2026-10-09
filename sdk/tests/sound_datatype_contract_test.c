@@ -307,6 +307,86 @@ static void test_flac_recognition(void)
               "Ogg-FLAC is not claimed as native FLAC");
 }
 
+/* First page of a libvorbis (ffmpeg) stereo 44.1 kHz stream, verbatim: the
+ * CRC was written by an independent encoder. */
+static const uint8_t vorbis_first_page[ZZ9K_SOUND_VORBIS_HEADER_BYTES] = {
+  0x4f, 0x67, 0x67, 0x53, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x12, 0xea, 0x84, 0x19, 0x00, 0x00, 0x00, 0x00, 0xa6, 0xe9,
+  0x8d, 0xe1, 0x01, 0x1e, 0x01, 0x76, 0x6f, 0x72, 0x62, 0x69, 0x73, 0x00,
+  0x00, 0x00, 0x00, 0x02, 0x44, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x80, 0xb5, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xb8, 0x01
+};
+
+static void vorbis_reseal(uint8_t *page)
+{
+  uint32_t crc = zz9k_sound_ogg_crc(page, ZZ9K_SOUND_VORBIS_HEADER_BYTES);
+  page[22] = (uint8_t)crc;
+  page[23] = (uint8_t)(crc >> 8);
+  page[24] = (uint8_t)(crc >> 16);
+  page[25] = (uint8_t)(crc >> 24);
+}
+
+static void test_vorbis_recognition(void)
+{
+  /* First page of an ffmpeg libopus stream, zero-padded to the same size. */
+  static const uint8_t opus_first_page[ZZ9K_SOUND_VORBIS_HEADER_BYTES] = {
+    0x4f, 0x67, 0x67, 0x53, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x07, 0x61, 0x23, 0x34, 0x00, 0x00, 0x00, 0x00, 0x04, 0x73,
+    0x33, 0x25, 0x01, 0x13, 0x4f, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64,
+    0x01, 0x01, 0x38, 0x01, 0x80, 0xbb, 0x00, 0x00, 0x00, 0x00, 0x00
+  };
+  uint8_t page[ZZ9K_SOUND_VORBIS_HEADER_BYTES];
+  ZZ9KSoundVorbisEnvelope envelope;
+
+  memset(&envelope, 0, sizeof(envelope));
+  expect_true(zz9k_sound_recognize_vorbis(vorbis_first_page, sizeof(page),
+                                          &envelope) &&
+                  envelope.sample_rate == 44100U && envelope.channels == 2U &&
+                  envelope.serial == 0x1984ea12UL &&
+                  envelope.nominal_bitrate == 112000U,
+              "a real Vorbis identification page is recognized");
+  expect_true(!zz9k_sound_recognize_vorbis(vorbis_first_page,
+                                           sizeof(page) - 1U, 0),
+              "a truncated identification page is rejected");
+  memcpy(page, vorbis_first_page, sizeof(page));
+  page[40] ^= 0x01U;
+  expect_true(!zz9k_sound_recognize_vorbis(page, sizeof(page), 0),
+              "a page whose CRC does not match is rejected");
+  vorbis_reseal(page);
+  expect_true(zz9k_sound_recognize_vorbis(page, sizeof(page), &envelope) &&
+                  envelope.sample_rate == 44101U,
+              "resealing restores the CRC over the changed rate");
+  memcpy(page, vorbis_first_page, sizeof(page));
+  page[28 + 11] = 3U;
+  vorbis_reseal(page);
+  expect_true(!zz9k_sound_recognize_vorbis(page, sizeof(page), 0),
+              "multichannel Vorbis is not claimed");
+  memcpy(page, vorbis_first_page, sizeof(page));
+  page[5] = 0x00U;
+  vorbis_reseal(page);
+  expect_true(!zz9k_sound_recognize_vorbis(page, sizeof(page), 0),
+              "a page without the BOS flag is not a stream start");
+  memcpy(page, vorbis_first_page, sizeof(page));
+  page[28 + 28] = 0x5bU; /* large block 2^5 < small block 2^11 */
+  vorbis_reseal(page);
+  expect_true(!zz9k_sound_recognize_vorbis(page, sizeof(page), 0),
+              "invalid Vorbis block sizes are rejected");
+  memcpy(page, vorbis_first_page, sizeof(page));
+  page[28 + 29] = 0x00U;
+  vorbis_reseal(page);
+  expect_true(!zz9k_sound_recognize_vorbis(page, sizeof(page), 0),
+              "an identification packet without its framing bit is rejected");
+  memcpy(page, vorbis_first_page, sizeof(page));
+  page[28 + 12] = 0x3fU; /* 7999 Hz */
+  page[28 + 13] = 0x1fU;
+  vorbis_reseal(page);
+  expect_true(!zz9k_sound_recognize_vorbis(page, sizeof(page), 0),
+              "rates below the decoder floor are not claimed");
+  expect_true(!zz9k_sound_recognize_vorbis(opus_first_page,
+                                           sizeof(opus_first_page), 0),
+              "Ogg Opus is not claimed as Vorbis");
+}
+
 static void test_wide_legacy_conversion(void)
 {
   /* MSB-justified S32BE stereo: left -1.0, right just under +1.0. */
@@ -447,6 +527,7 @@ int main(void)
   test_hook_recognition();
   test_legacy_conversion();
   test_flac_recognition();
+  test_vorbis_recognition();
   test_wide_legacy_conversion();
   test_growth();
   test_cleanup();

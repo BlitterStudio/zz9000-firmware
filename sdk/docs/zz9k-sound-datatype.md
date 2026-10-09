@@ -2,7 +2,7 @@
 
 Copyright (C) 2024-2026, Dimitris Panokostas / BlitterStudio
 
-`zz9k-sound.datatype 42.1` is the SDK v2 MP3 and native FLAC sound DataType. It is packaged
+`zz9k-sound.datatype 42.1` is the SDK v2 MP3, native FLAC and Ogg Vorbis sound DataType. It is packaged
 as a side-by-side subclass of the system `sound.datatype` and must not
 replace `Classes/DataTypes/sound.datatype`. OS3.1 remains the minimum
 target. The class always subclasses `sound.datatype` and chooses its output
@@ -26,6 +26,8 @@ Storage/DataTypes/ZZ9000-MP3
 Storage/DataTypes/ZZ9000-MP3.info
 Storage/DataTypes/ZZ9000-FLAC
 Storage/DataTypes/ZZ9000-FLAC.info
+Storage/DataTypes/ZZ9000-OggVorbis
+Storage/DataTypes/ZZ9000-OggVorbis.info
 ```
 
 To activate the validated DataType path on a test or release-install system,
@@ -35,17 +37,18 @@ install the class and copy the descriptors into `DEVS:DataTypes`:
 copy Classes/DataTypes/zz9k-sound.datatype TO SYS:Classes/DataTypes/
 copy Storage/DataTypes/ZZ9000-MP3#? TO DEVS:DataTypes/
 copy Storage/DataTypes/ZZ9000-FLAC#? TO DEVS:DataTypes/
-AddDataTypes DEVS:DataTypes/ZZ9000-MP3 DEVS:DataTypes/ZZ9000-FLAC
+copy Storage/DataTypes/ZZ9000-OggVorbis#? TO DEVS:DataTypes/
+AddDataTypes DEVS:DataTypes/ZZ9000-MP3 DEVS:DataTypes/ZZ9000-FLAC DEVS:DataTypes/ZZ9000-OggVorbis
 AddDataTypes LIST
 ```
 
-`AddDataTypes LIST` should show `ZZ9000-MP3` and `ZZ9000-FLAC` before
-sound-capable clients are expected to route matching files to
-`zz9k-sound.datatype`. Each descriptor can be activated on its own. Keeping
-the descriptors in `Storage/DataTypes` by default prevents accidental global
-routing on systems that only want the SDK tools, ZZPlay, or manual smoke
-tests. Deactivating works the other way round: remove the descriptor from
-`DEVS:DataTypes` and run `AddDataTypes REFRESH`.
+`AddDataTypes LIST` should show `ZZ9000-MP3`, `ZZ9000-FLAC` and
+`ZZ9000-OggVorbis` before sound-capable clients are expected to route
+matching files to `zz9k-sound.datatype`. Each descriptor can be activated on
+its own. Keeping the descriptors in `Storage/DataTypes` by default prevents
+accidental global routing on systems that only want the SDK tools, ZZPlay,
+or manual smoke tests. Deactivating works the other way round: remove the
+descriptor from `DEVS:DataTypes` and run `AddDataTypes REFRESH`.
 
 ## Decoded formats and the recognition envelope
 
@@ -90,6 +93,22 @@ included, to the card's FLAC stream decoder through the codec-aware
 `ZZ9KAudioStreamBeginEx()`. Sources up to 16 bits decode to S16BE; wider
 sources decode to MSB-justified S32BE so the modern path keeps their
 precision.
+
+### Ogg Vorbis
+
+The class decodes one logical Ogg Vorbis stream, mono or stereo, at 8 to
+192 kHz, to S16BE. Vorbis I puts only its 30-byte identification packet on
+the first Ogg page, so the `ZZ9000-OggVorbis` descriptor matches that
+58-byte page's fixed fields (`OggS`, version 0, BOS, granule and sequence
+0, one 30-byte segment, `\x01vorbis`, Vorbis version 0) with the serial
+number and CRC as wildcards. The class re-validates the page CRC, channel
+count, rate, block sizes and framing bit with the recognizer it shares with
+ZZPlay (`amiga/datatypes/zz9k_sound_vorbis.h`), then feeds the whole file to
+the card's Vorbis stream decoder through `ZZ9KAudioStreamBeginEx()`. Ogg
+Opus, Ogg-FLAC and other Ogg codecs are not claimed. A chained or
+multiplexed file (a second logical stream anywhere) fails object creation:
+the firmware reports the extra stream instead of returning only the first
+link.
 
 ## Whole-sample memory model
 
@@ -186,12 +205,15 @@ object, stereo planes on v47) leaving free memory unchanged.
   code runs.
 - Descriptor matched but content invalid (broken frame chain, Layer I/II
   body, truncated stream, a FLAC `STREAMINFO` outside the envelope above,
-  corrupt FLAC frames): object creation fails with `DTERROR_INVALID_DATA`.
+  corrupt FLAC frames, a corrupt or truncated Ogg stream, a chained or
+  multiplexed Ogg file): object creation fails with `DTERROR_INVALID_DATA`.
 - Firmware or `zz9k.library` without the matched audio-stream service
   fails creation with `ERROR_NOT_IMPLEMENTED` rather than falling back to
   software decode. MP3 needs the `MP3_DECODE`, `MP3_STREAM`, and
-  `PCM16_STEREO` flags; FLAC needs `FLAC_STREAM` and `zz9k.library`
-  revision 33 (`ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX`).
+  `PCM16_STEREO` flags; FLAC and Ogg Vorbis need `FLAC_STREAM` or
+  `VORBIS_STREAM` and `zz9k.library` revision 33
+  (`ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX`). Current firmware implements
+  both decoders but does not advertise them before physical qualification.
 - Audio-stream session busy (another client holds it): `ERROR_OBJECT_IN_USE`.
   Shared-memory, ring or sample allocation failure: `ERROR_NO_FREE_STORE`.
 

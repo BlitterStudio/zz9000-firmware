@@ -1,0 +1,19 @@
+# Source metadata for the packaged ZZ9000 Ogg Vorbis DataTypes descriptor.
+# Copyright (C) 2024-2026, Dimitris Panokostas / BlitterStudio
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Recognition (KTD8): Vorbis I puts only its 30-byte identification packet
+# on the first Ogg page. The mask matches that 58-byte page's fixed fields:
+# "OggS", stream structure version 0, BOS flag, granule position 0,
+# sequence 0, one segment of 30 bytes, then "\x01vorbis" and Vorbis
+# version 0. Serial number and page CRC are wildcards; the class re-checks
+# the CRC, channel count, rate and block sizes. Opus, Ogg-FLAC and other
+# Ogg codecs carry a different first packet and are not claimed.
+FileName=Storage/DataTypes/ZZ9000-OggVorbis
+Version=42.5
+DTName=ZZ9000-OggVorbis,zz9k-sound
+ID=soun,oggv
+Recog=4F 67 67 53 00 02 00 00 00 00 00 00 00 00 ?? ?? ?? ?? 00 00 00 00 ?? ?? ?? ?? 01 1E 01 76 6F 72 62 69 73 00 00 00 00
+Pattern=#?
+Flags=Binary,n,10
+Install=inactive

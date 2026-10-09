@@ -1,5 +1,5 @@
 /*
- * ZZ9000 MP3 and native FLAC sound DataType class.
+ * ZZ9000 MP3, native FLAC and Ogg Vorbis sound DataType class.
  *
  * Copyright (C) 2026, Dimitris Panokostas / BlitterStudio
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -11,6 +11,7 @@
 
 #include "zz9k_sound_mp3.h"
 #include "zz9k_sound_flac.h"
+#include "zz9k_sound_vorbis.h"
 
 #define ZZ9K_SOUND_SAMPLE_INITIAL_BYTES (64UL * 1024UL)
 #define ZZ9K_SOUND_SAMPLE_MAX_BYTES (256UL * 1024UL * 1024UL)
@@ -211,7 +212,7 @@ typedef struct ZZ9KSoundDatatypeBase {
 
 /* What the source needs from the audio stream service. */
 typedef struct ZZ9KSoundSource {
-  uint32_t codec;          /* ZZ9K_AUDIO_CODEC_MP3 or _FLAC */
+  uint32_t codec;          /* ZZ9K_AUDIO_CODEC_MP3, _FLAC or _VORBIS */
   uint32_t first_byte;     /* first byte fed to the decoder */
   uint32_t end_byte;       /* one past the last byte fed */
   uint32_t sample_rate;    /* rate the stream must report */
@@ -380,6 +381,28 @@ static int zz9k_sound_probe_flac(BPTR file, uint32_t file_size,
   return 1;
 }
 
+/* Ogg Vorbis is fed whole from its identification page; the firmware
+ * decoder rejects chained and multiplexed streams. Vorbis decodes to S16. */
+static int zz9k_sound_probe_vorbis(BPTR file, uint32_t file_size,
+                                   ZZ9KSoundSource *source)
+{
+  ZZ9KSoundVorbisEnvelope envelope;
+  uint8_t header[ZZ9K_SOUND_VORBIS_HEADER_BYTES];
+
+  if (file_size < sizeof(header) ||
+      !zz9k_sound_read_at(file, 0U, header, sizeof(header)) ||
+      !zz9k_sound_recognize_vorbis(header, sizeof(header), &envelope)) {
+    return 0;
+  }
+  source->codec = ZZ9K_AUDIO_CODEC_VORBIS;
+  source->first_byte = 0U;
+  source->end_byte = file_size;
+  source->sample_rate = envelope.sample_rate;
+  source->channels = envelope.channels;
+  source->pcm_format = ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE;
+  return 1;
+}
+
 static int zz9k_sound_probe_file(BPTR file, uint32_t file_size,
                                  ZZ9KSoundSource *source)
 {
@@ -387,6 +410,7 @@ static int zz9k_sound_probe_file(BPTR file, uint32_t file_size,
     return 0;
   }
   return zz9k_sound_probe_flac(file, file_size, source) ||
+         zz9k_sound_probe_vorbis(file, file_size, source) ||
          zz9k_sound_probe_mp3(file, file_size, source);
 }
 
@@ -598,8 +622,8 @@ static const ZZ9KSoundCleanupOps zz9k_sound_real_cleanup_ops = {
 };
 
 /* Opens the stream for the source codec. MP3 keeps the original Begin so it
- * runs on firmware that predates BeginEx; FLAC needs the codec-aware
- * BeginEx. */
+ * runs on firmware that predates BeginEx; FLAC and Vorbis need the
+ * codec-aware BeginEx. */
 static int zz9k_sound_begin_stream(const ZZ9KSoundSource *source,
                                    ZZ9KSoundDecode *decode)
 {
@@ -854,7 +878,9 @@ static LONG zz9k_sound_service_error(const ZZ9KSoundSource *source)
                ZZ9K_SERVICE_FLAG_AUDIO_PCM16_STEREO;
   } else {
     revision = ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX;
-    required = ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM;
+    required = source->codec == ZZ9K_AUDIO_CODEC_FLAC ?
+        ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM :
+        ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM;
   }
   if (!ZZ9KBase || ZZ9KBase->lib_Revision < revision ||
       ZZ9KQueryService(ZZ9K_SERVICE_AUDIO, &service) != ZZ9K_STATUS_OK ||

@@ -27,8 +27,8 @@ static void check_pattern(int include_playlists, const char *want)
 
 int main(void)
 {
-  check_pattern(0, "#?.(mpg|mpeg|mp3|webp|flac)");
-  check_pattern(1, "#?.(mpg|mpeg|mp3|webp|flac|m3u|m3u8)");
+  check_pattern(0, "#?.(mpg|mpeg|mp3|webp|flac|ogg|oga)");
+  check_pattern(1, "#?.(mpg|mpeg|mp3|webp|flac|ogg|oga|m3u|m3u8)");
   if (zzplay_formats_pattern(0, 0U, 0)) {
     printf("null output unexpectedly succeeded\n");
     failures++;

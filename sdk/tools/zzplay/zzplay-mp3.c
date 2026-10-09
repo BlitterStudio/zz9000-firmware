@@ -107,6 +107,10 @@ typedef struct ZZPlayMP3Decode {
   /* Where in the item this pass started; positions are reported from
    * here plus the frames this pass has played. */
   uint32_t position_base_ms;
+  /* Last non-OK status of a Feed or Read; UNSUPPORTED means the card
+   * refused the stream's layout (a chained or multiplexed Ogg link, or a
+   * geometry it cannot decode), not a transport failure. */
+  int stream_status;
   uint8_t session_open;
   uint8_t ahi_started;
   uint8_t compact_z2;
@@ -115,7 +119,8 @@ typedef struct ZZPlayMP3Decode {
 typedef enum ZZPlayMP3PassResult {
   ZZPLAY_MP3_PASS_FAILED = 0,
   ZZPLAY_MP3_PASS_COMPLETED,
-  ZZPLAY_MP3_PASS_STOPPED
+  ZZPLAY_MP3_PASS_STOPPED,
+  ZZPLAY_MP3_PASS_UNSUPPORTED
 } ZZPlayMP3PassResult;
 
 static int zzplay_mp3_should_stop(const ZZPlayMP3Decode *decode)
@@ -159,17 +164,30 @@ static void zzplay_mp3_report_progress(const ZZPlayMP3Decode *decode)
   }
 }
 
+/* MP3 needs the Layer III decode capability and its two stream flags; the
+ * BeginEx codecs need only their own stream flag. */
 static int zzplay_mp3_service_ready(ZZ9KContext *ctx, ZZ9KCaps *caps,
                                     uint32_t codec)
 {
   ZZ9KServiceInfo service;
-  uint32_t required = codec == ZZ9K_AUDIO_CODEC_FLAC
-                          ? ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM
-                          : ZZ9K_SERVICE_FLAG_AUDIO_MP3_DECODE |
-                                ZZ9K_SERVICE_FLAG_AUDIO_MP3_STREAM;
+  uint32_t required;
 
+  switch (codec) {
+  case ZZ9K_AUDIO_CODEC_MP3:
+    required = ZZ9K_SERVICE_FLAG_AUDIO_MP3_DECODE |
+               ZZ9K_SERVICE_FLAG_AUDIO_MP3_STREAM;
+    break;
+  case ZZ9K_AUDIO_CODEC_FLAC:
+    required = ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM;
+    break;
+  case ZZ9K_AUDIO_CODEC_VORBIS:
+    required = ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM;
+    break;
+  default:
+    return 0;
+  }
   return caps && zz9k_query_caps(ctx, caps) == ZZ9K_STATUS_OK &&
-         (codec == ZZ9K_AUDIO_CODEC_FLAC ||
+         (codec != ZZ9K_AUDIO_CODEC_MP3 ||
           (caps->capability_bits & ZZ9K_CAP_AUDIO_DECODE) != 0U) &&
          zz9k_query_service(ctx, ZZ9K_SERVICE_AUDIO, &service) ==
              ZZ9K_STATUS_OK &&
@@ -202,7 +220,11 @@ static int zzplay_mp3_ack(ZZPlayMP3Decode *decode, int force)
   status = zz9k_audio_stream_read(
       decode->ctx, decode->result.session, decode->pending_ack, 0U,
       &decode->result);
-  if (status != ZZ9K_STATUS_OK || !zzplay_mp3_result_valid(decode)) {
+  if (status != ZZ9K_STATUS_OK) {
+    decode->stream_status = status;
+    return 0;
+  }
+  if (!zzplay_mp3_result_valid(decode)) {
     return 0;
   }
   decode->pending_ack = 0U;
@@ -376,6 +398,23 @@ static int zzplay_mp3_finish_ahi(ZZPlayMP3Decode *decode)
   return 1;
 }
 
+/* Why a pass ended early. When the card refused the stream's layout (for
+ * Ogg, a further chained or multiplexed link after the first one played),
+ * the audio already queued to AHI plays out before the item fails with an
+ * explicit unsupported-stream error, so it is never reported as complete. */
+static ZZPlayMP3PassResult zzplay_mp3_pass_failure(ZZPlayMP3Decode *decode)
+{
+  if (zzplay_mp3_should_stop(decode)) {
+    return ZZPLAY_MP3_PASS_STOPPED;
+  }
+  if (decode->stream_status != ZZ9K_STATUS_UNSUPPORTED) {
+    return ZZPLAY_MP3_PASS_FAILED;
+  }
+  (void)zzplay_mp3_finish_ahi(decode);
+  return zzplay_mp3_should_stop(decode) ? ZZPLAY_MP3_PASS_STOPPED
+                                        : ZZPLAY_MP3_PASS_UNSUPPORTED;
+}
+
 /* The stream decoder has no rate or channel conversion, so the firmware
  * rejects a non-zero output geometry outright. Ask for the file's native
  * rate/channels; zzplay_mp3_result_valid then holds the decoded stream to
@@ -489,11 +528,12 @@ static ZZPlayMP3PassResult zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
       }
       status = zz9k_audio_stream_feed(
           decode->ctx, &feed, &decode->result);
+      if (status != ZZ9K_STATUS_OK) {
+        decode->stream_status = status;
+      }
       if (status != ZZ9K_STATUS_OK ||
           !zzplay_mp3_pump_pcm(decode, flags != 0U)) {
-        return zzplay_mp3_should_stop(decode)
-                   ? ZZPLAY_MP3_PASS_STOPPED
-                   : ZZPLAY_MP3_PASS_FAILED;
+        return zzplay_mp3_pass_failure(decode);
       }
       if ((decode->result.flags &
            ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE) != 0U &&
@@ -514,9 +554,7 @@ static ZZPlayMP3PassResult zzplay_mp3_decode_once(ZZPlayMP3Decode *decode)
 
     if (!zzplay_mp3_pump_pcm(decode, 1) ||
         !zzplay_mp3_ack(decode, 1)) {
-      return zzplay_mp3_should_stop(decode)
-                 ? ZZPLAY_MP3_PASS_STOPPED
-                 : ZZPLAY_MP3_PASS_FAILED;
+      return zzplay_mp3_pass_failure(decode);
     }
     if (decode->pending_ack == 0U &&
         decode->result.bytes_produced == decode->produced_seen &&
@@ -666,6 +704,14 @@ static ZZPlayEngineResult zzplay_mp3_accelerated(
     }
     if (pass == ZZPLAY_MP3_PASS_STOPPED) {
       result = ZZPLAY_ENGINE_STOPPED;
+      goto done;
+    }
+    if (pass == ZZPLAY_MP3_PASS_UNSUPPORTED) {
+      zzplay_launch_reportf(
+          engine->ctl, engine->run->options,
+          "the card cannot decode the rest of this %s stream (a chained "
+          "or multiplexed Ogg link, or an unsupported layout)",
+          engine->codec_name);
       goto done;
     }
     if (pass != ZZPLAY_MP3_PASS_COMPLETED) {
@@ -980,72 +1026,130 @@ ZZPlayEngineResult zzplay_mp3_run(const ZZPlayEngineRun *run)
   return zzplay_mp3_accelerated(&engine, 0);
 }
 
-ZZPlayEngineResult zzplay_flac_run(const ZZPlayEngineRun *run)
+/* Backend policy shared by the codecs that only the card's stream decoder
+ * plays (FLAC, Ogg Vorbis): accelerated decode + AHI, or NONE. No saved
+ * per-media output applies (MP3OUTPUT names an MHI path they cannot use);
+ * an explicit AUDIO= option still wins. */
+static ZZPlayEngineResult zzplay_card_stream_run(ZZPlayMP3Engine *engine)
 {
-  ZZPlayMP3Engine engine;
+  const ZZPlayEngineRun *run = engine->run;
   ZZPlayAudioBackend requested;
-  const ZZPlayFLACInfo *info;
   int strict = 0;
 
-  if (!run || !run->ctl || !run->path || !run->probe ||
-      !run->options || !run->prefs) {
-    return ZZPLAY_ENGINE_FAILED;
-  }
-  info = &run->probe->flac;
-  memset(&engine, 0, sizeof(engine));
-  engine.run = run;
-  engine.ctl = run->ctl;
-  engine.codec = ZZ9K_AUDIO_CODEC_FLAC;
-  engine.sample_rate = info->sample_rate;
-  engine.channels = info->channels;
-  /* The firmware refuses to truncate: wider sources need the
-   * MSB-justified S32BE container, narrowed to S16 for AHI here. */
-  engine.pcm_format = info->bits_per_sample > 16U
-                          ? ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE
-                          : ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE;
-  engine.pcm_width = info->bits_per_sample > 16U ? 4U : 2U;
-  engine.codec_name = "FLAC";
-  engine.audio_start = 0U;
-  engine.audio_end = run->file_size;
-  engine.total_ms = info->sample_rate != 0U
-                        ? (uint32_t)(info->total_samples * 1000ULL /
-                                     info->sample_rate)
-                        : 0U;
-  zzplay_controller_set_duration(run->ctl, engine.total_ms);
+  zzplay_controller_set_duration(run->ctl, engine->total_ms);
   zzplay_controller_set_capabilities(run->ctl, 0, 0, 0);
-  {
-    char format[ZZPLAY_NOW_TEXT_MAX];
-
-    sprintf(format, "FLAC %lu Hz, %s, %lu-bit",
-            (unsigned long)info->sample_rate,
-            info->channels == 1U ? "mono" : "stereo",
-            (unsigned long)info->bits_per_sample);
-    zzplay_controller_set_format(run->ctl, format);
-  }
-
-  /* No saved per-media output applies (MP3OUTPUT names an MHI path FLAC
-   * cannot use); an explicit AUDIO= option still wins. */
   requested = zzplay_prefs_requested_backend(
       run->prefs, run->options, ZZPLAY_MEDIA_AUDIO_NONE, &strict);
   if (strict && (requested == ZZPLAY_AUDIO_MHI ||
                  requested == ZZPLAY_AUDIO_AX)) {
-    zzplay_launch_reportf(engine.ctl, engine.run->options,
-                          "FLAC plays through accelerated decode + AHI only");
+    zzplay_launch_reportf(engine->ctl, run->options,
+                          "%s plays through accelerated decode + AHI only",
+                          engine->codec_name);
     return ZZPLAY_ENGINE_FAILED;
   }
   if (requested == ZZPLAY_AUDIO_NONE) {
     zzplay_info("zzplay: selected audio backend NONE "
-           "(accelerated FLAC decode benchmark)\n");
-    engine.muted = 1;
-    zzplay_mp3_set_output(&engine, "none");
+           "(accelerated %s decode benchmark)\n", engine->codec_name);
+    engine->muted = 1;
+    zzplay_mp3_set_output(engine, "none");
   } else {
     zzplay_info("zzplay: selected audio backend AHI "
-           "(accelerated FLAC decode, %s)\n",
-           engine.pcm_width == 4U ? "S32BE narrowed to S16" : "S16BE");
+           "(accelerated %s decode, %s)\n", engine->codec_name,
+           engine->pcm_width == 4U ? "S32BE narrowed to S16" : "S16BE");
     zzplay_controller_set_capabilities(run->ctl, 0, 1, 0);
-    sprintf(engine.output_base, "AHI unit %lu",
+    sprintf(engine->output_base, "AHI unit %lu",
             (unsigned long)run->prefs->ahi_unit);
-    zzplay_mp3_refresh_output(&engine);
+    zzplay_mp3_refresh_output(engine);
   }
-  return zzplay_mp3_accelerated(&engine, 0);
+  return zzplay_mp3_accelerated(engine, 0);
+}
+
+static int zzplay_card_stream_engine(const ZZPlayEngineRun *run,
+                                     ZZPlayMP3Engine *engine)
+{
+  if (!run || !run->ctl || !run->path || !run->probe ||
+      !run->options || !run->prefs) {
+    return 0;
+  }
+  memset(engine, 0, sizeof(*engine));
+  engine->run = run;
+  engine->ctl = run->ctl;
+  engine->pcm_format = ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE;
+  engine->pcm_width = 2U;
+  engine->audio_start = 0U;
+  engine->audio_end = run->file_size;
+  return 1;
+}
+
+ZZPlayEngineResult zzplay_flac_run(const ZZPlayEngineRun *run)
+{
+  ZZPlayMP3Engine engine;
+  const ZZPlayFLACInfo *info;
+  char format[ZZPLAY_NOW_TEXT_MAX];
+
+  if (!zzplay_card_stream_engine(run, &engine)) {
+    return ZZPLAY_ENGINE_FAILED;
+  }
+  info = &run->probe->flac;
+  engine.codec = ZZ9K_AUDIO_CODEC_FLAC;
+  engine.codec_name = "FLAC";
+  engine.sample_rate = info->sample_rate;
+  engine.channels = info->channels;
+  /* The firmware refuses to truncate: wider sources need the
+   * MSB-justified S32BE container, narrowed to S16 for AHI here. */
+  if (info->bits_per_sample > 16U) {
+    engine.pcm_format = ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE;
+    engine.pcm_width = 4U;
+  }
+  engine.total_ms = info->sample_rate != 0U
+                        ? (uint32_t)(info->total_samples * 1000ULL /
+                                     info->sample_rate)
+                        : 0U;
+  sprintf(format, "FLAC %lu Hz, %s, %lu-bit",
+          (unsigned long)info->sample_rate,
+          info->channels == 1U ? "mono" : "stereo",
+          (unsigned long)info->bits_per_sample);
+  zzplay_controller_set_format(run->ctl, format);
+  return zzplay_card_stream_run(&engine);
+}
+
+ZZPlayEngineResult zzplay_vorbis_run(const ZZPlayEngineRun *run)
+{
+  ZZPlayMP3Engine engine;
+  const ZZPlayVorbisInfo *info;
+  char format[ZZPLAY_NOW_TEXT_MAX];
+  uint64_t granule = 0U;
+  FILE *file;
+
+  if (!zzplay_card_stream_engine(run, &engine)) {
+    return ZZPLAY_ENGINE_FAILED;
+  }
+  info = &run->probe->vorbis;
+  engine.codec = ZZ9K_AUDIO_CODEC_VORBIS;
+  engine.codec_name = "Ogg Vorbis";
+  engine.sample_rate = info->sample_rate;
+  engine.channels = info->channels;
+  /* The duration is the last page's granule position (the stream's sample
+   * count) when that page belongs to the same logical stream; otherwise it
+   * stays unknown rather than estimated. */
+  file = fopen(run->path, "rb");
+  if (file) {
+    if (zzplay_ogg_last_granule(file, info->serial, &granule) &&
+        info->sample_rate != 0U) {
+      engine.total_ms = (uint32_t)(granule * 1000ULL / info->sample_rate);
+    }
+    fclose(file);
+  }
+  if (info->nominal_bitrate != 0U) {
+    sprintf(format, "Ogg Vorbis %lu Hz, %s, ~%lu kbps",
+            (unsigned long)info->sample_rate,
+            info->channels == 1U ? "mono" : "stereo",
+            (unsigned long)(info->nominal_bitrate / 1000U));
+  } else {
+    sprintf(format, "Ogg Vorbis %lu Hz, %s",
+            (unsigned long)info->sample_rate,
+            info->channels == 1U ? "mono" : "stereo");
+  }
+  zzplay_controller_set_format(run->ctl, format);
+  return zzplay_card_stream_run(&engine);
 }

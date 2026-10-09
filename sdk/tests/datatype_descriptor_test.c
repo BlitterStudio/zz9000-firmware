@@ -365,16 +365,39 @@ int main(int argc, char **argv)
   static const int flac_recognition[] = {0x66, 0x4c, 0x61, 0x43};
   static const unsigned char native_flac[] = {'f', 'L', 'a', 'C', 0x00, 0x00};
   static const unsigned char ogg_flac[] = {'O', 'g', 'g', 'S', 0x00, 0x02};
+  static const int vorbis_recognition[] = {
+      0x4f, 0x67, 0x67, 0x53, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, -1, -1, -1, -1, 0x00, 0x00, 0x00, 0x00, -1, -1, -1, -1,
+      0x01, 0x1e, 0x01, 0x76, 0x6f, 0x72, 0x62, 0x69, 0x73, 0x00, 0x00, 0x00,
+      0x00
+  };
+  /* First pages of an Ogg Vorbis, an Ogg Opus and an Ogg-FLAC stream: same
+   * page framing, different first packet. */
+  static const unsigned char vorbis_page[] = {
+      'O', 'g', 'g', 'S', 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0,
+      0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd,
+      0x01, 0x1e, 0x01, 'v', 'o', 'r', 'b', 'i', 's', 0, 0, 0, 0
+  };
+  static const unsigned char opus_page[] = {
+      'O', 'g', 'g', 'S', 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0,
+      0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd,
+      0x01, 0x13, 'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 0x01
+  };
+  static const unsigned char ogg_flac_page[] = {
+      'O', 'g', 'g', 'S', 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0,
+      0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd,
+      0x01, 0x33, 0x7f, 'F', 'L', 'A', 'C', 0x01, 0x00, 0, 1, 'f', 'L'
+  };
   const char *code_dir = "datatype_descriptor_test_code";
   char code_path[512];
   const char *output = "datatype_descriptor_test_output";
   char jpeg_path[512], png_path[512], webp_path[512], mp3_path[512],
-      flac_path[512];
-  struct byte_buffer jpeg, png, webp, mp3, flac, jpeg_icon, png_icon,
-      webp_icon, mp3_icon, flac_icon;
+      flac_path[512], vorbis_path[512];
+  struct byte_buffer jpeg, png, webp, mp3, flac, vorbis, jpeg_icon, png_icon,
+      webp_icon, mp3_icon, flac_icon, vorbis_icon;
   int ok;
-  if (argc != 9) {
-    printf("usage: %s <python> <generator> <descriptor-dir> <jpeg.info> <png.info> <webp.info> <mp3.info> <flac.info>\n",
+  if (argc != 10) {
+    printf("usage: %s <python> <generator> <descriptor-dir> <jpeg.info> <png.info> <webp.info> <mp3.info> <flac.info> <oggvorbis.info>\n",
            argv[0]);
     return 2;
   }
@@ -387,16 +410,19 @@ int main(int argc, char **argv)
   snprintf(webp_path, sizeof(webp_path), "%s/ZZ9000-WebP", output);
   snprintf(mp3_path, sizeof(mp3_path), "%s/ZZ9000-MP3", output);
   snprintf(flac_path, sizeof(flac_path), "%s/ZZ9000-FLAC", output);
+  snprintf(vorbis_path, sizeof(vorbis_path), "%s/ZZ9000-OggVorbis", output);
   jpeg = read_binary_file(jpeg_path);
   png = read_binary_file(png_path);
   webp = read_binary_file(webp_path);
   mp3 = read_binary_file(mp3_path);
   flac = read_binary_file(flac_path);
+  vorbis = read_binary_file(vorbis_path);
   jpeg_icon = read_binary_file(argv[4]);
   png_icon = read_binary_file(argv[5]);
   webp_icon = read_binary_file(argv[6]);
   mp3_icon = read_binary_file(argv[7]);
   flac_icon = read_binary_file(argv[8]);
+  vorbis_icon = read_binary_file(argv[9]);
   ok = validate_descriptor("ZZ9000-JPEG", &jpeg, "ZZ9000-JPEG", "jpeg",
                            "pict", "zz9k-picture",
                            jpeg_recognition, sizeof(jpeg_recognition) / sizeof(jpeg_recognition[0]), 106U);
@@ -422,6 +448,21 @@ int main(int argc, char **argv)
     printf("ZZ9000-FLAC: unexpectedly matched Ogg-FLAC header\n");
     ok = 0;
   }
+  ok &= validate_descriptor("ZZ9000-OggVorbis", &vorbis, "ZZ9000-OggVorbis",
+                            "oggv", "soun", "zz9k-sound", vorbis_recognition,
+                            sizeof(vorbis_recognition) /
+                                sizeof(vorbis_recognition[0]),
+                            186U);
+  ok &= validate_icon("ZZ9000-OggVorbis.info", &vorbis_icon);
+  if (!recognition_matches(&vorbis, vorbis_page, sizeof(vorbis_page))) {
+    printf("ZZ9000-OggVorbis: failed to match a Vorbis identification page\n");
+    ok = 0;
+  }
+  if (recognition_matches(&vorbis, opus_page, sizeof(opus_page)) ||
+      recognition_matches(&vorbis, ogg_flac_page, sizeof(ogg_flac_page))) {
+    printf("ZZ9000-OggVorbis: unexpectedly matched an Opus or Ogg-FLAC page\n");
+    ok = 0;
+  }
   ok &= check_mp3_hook(&mp3);
   ok &= check_code_rules(argv[1], argv[2], code_dir);
   ok &= validate_icon("ZZ9000-JPEG.info", &jpeg_icon);
@@ -432,8 +473,9 @@ int main(int argc, char **argv)
   free(jpeg.data); free(png.data); free(webp.data);
   free(mp3.data); free(mp3_icon.data);
   free(flac.data); free(flac_icon.data);
+  free(vorbis.data); free(vorbis_icon.data);
   remove(jpeg_path); remove(png_path); remove(webp_path); remove(mp3_path);
-  remove(flac_path);
+  remove(flac_path); remove(vorbis_path);
   remove(code_path);
   remove_directory(output);
   remove_directory(code_dir);
