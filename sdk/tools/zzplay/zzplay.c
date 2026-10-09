@@ -788,6 +788,16 @@ static int zzplay_open_video_screen(struct ZZPlayRuntime *runtime)
       depth = current;
     }
   }
+  /* ZZ9000.card pixel-doubles every mode smaller than 640x480, and the
+   * card's overlay refuses doubled modes, so the PIP fails with "not
+   * available" on such a screen. Ask for at least 640x480; the window fit
+   * below scales a smaller video up to it. */
+  if (width < 640U) {
+    width = 640U;
+  }
+  if (height < 480U) {
+    height = 480U;
+  }
   mode = p96BestModeIDTags(
       P96BIDTAG_NominalWidth, (ULONG)width,
       P96BIDTAG_NominalHeight, (ULONG)height,

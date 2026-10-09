@@ -1551,6 +1551,21 @@ static uint16_t service_try_defer(uint16_t opcode,
                                   const void *params, uint32_t param_len,
                                   uint32_t in_len);
 
+/* Core-1 half of the canvas handoff: NEXT converted the frame through this
+ * core's cache, and core 0 reads it from DRAM at PRESENT (after the
+ * completion-side invalidate), so write it back before completing. Without
+ * this the PIP shows stale lines from earlier frames and the zeroed
+ * (green) surface. */
+static void flush_image_animation_canvas(
+	uint32_t session, const struct SDKImageAnimationFrameResult *result)
+{
+	uintptr_t address;
+	uint32_t length;
+
+	if ((result->flags & SDK_IMAGE_ANIMATION_FRAME_FLAG_FRAME_READY) != 0U &&
+	    sdk_image_stream_complete_arm_local_output(session, &address, &length))
+		Xil_DCacheFlushRange((INTPTR)address, length);
+}
 static uint16_t handle_image_animation_frame_next(
 	volatile struct SDKMailboxEntry *req,
 	volatile struct SDKMailboxEntry *comp,
@@ -6635,6 +6650,8 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		*result_len = 0;
 		if (s != SDK_STATUS_OK)
 			return s;
+		if (d->opcode == SDK_OP_IMAGE_ANIMATION_FRAME_NEXT)
+			flush_image_animation_canvas(p->session, &ares);
 
 		memset(result_payload, 0,
 		       sizeof(struct SDKImageAnimationFrameResultPayload));
