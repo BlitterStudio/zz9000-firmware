@@ -1896,6 +1896,30 @@ shared-memory streaming state machine (`ZZ9KAudioStreamFeed()`,
 - **Cleanup and Reset**: Closing a session reclaims all decoder allocations and invalidates the session handle.
   A firmware mailbox reset or restart invalidates every active session.
 
+**Native FLAC sessions** (`ZZ9K_AUDIO_CODEC_FLAC`, gated by
+`ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM`; both that flag and `ZZ9K_CAP_AUDIO_FLAC`
+stay unadvertised until physical qualification, so clients refuse FLAC on
+current firmware). Feed the whole native file from byte 0 (`fLaC`);
+firmware skips non-STREAMINFO metadata itself. `output_format` must be
+`S16BE` (sources of at most 16 bits) or `S32BE` (up to 24 bits); LE formats
+answer `ZZ9K_STATUS_UNSUPPORTED` at Begin. Samples are MSB-justified in the
+container (`value << (container_bits - source_bits)`), interleaved, native
+rate and channels; `sample_rate`/`channels` stay 0 until STREAMINFO is
+parsed. The first Feed that parses STREAMINFO returns
+`ZZ9K_STATUS_UNSUPPORTED` for more than two channels, more than 24 bits,
+`S16BE` with a deeper source, rates outside 8000..192000 Hz, Ogg-FLAC or
+ID3v2-prefixed input, or a largest frame that cannot fit `pcm_ring_capacity`.
+Corrupt, CRC-failing or truncated input faults with `ZZ9K_STATUS_IO_ERROR`;
+allocation failure with `ZZ9K_STATUS_NO_MEMORY`. Later Feed/Read calls repeat
+the fault status. A frame is decoded only once it is fully buffered (the next
+frame header is present, `FEED_EOF`, or a CRC-verified tail under
+`FEED_DRAIN`), so `input_ring_capacity` must hold at least one compressed
+frame plus a chunk; a ring that cannot accept the next chunk while the decoder
+waits for a frame faults `ZZ9K_STATUS_IO_ERROR`. FLAC sessions are readback
+only: `ZZ9KAudioStreamPlay()` answers `ZZ9K_STATUS_UNSUPPORTED`. Close of a
+core-1 FLAC session is executed on core 1 and needs a nonzero request id
+(always true through zz9k.library).
+
 `ZZ9KAudioStreamBeginDesc.low_water_bytes` is the PCM-ring refill
 threshold: while a session is bound to the AX output, the firmware tops the
 decoded PCM ring back up whenever it drains to this level. It is validated

@@ -267,8 +267,10 @@ taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len)
     return TASK_LONG;
   case TASKQ_OP_AUDIO_STREAM_FEED:
   case TASKQ_OP_AUDIO_STREAM_READ:
-    /* Same constraint: the stream's mp3 staging ring is cache-owned by
-     * core 1 for core-1-affine streams. */
+  case TASKQ_OP_AUDIO_STREAM_CLOSE:
+    /* Same constraint: the stream's mp3 staging ring (and a FLAC
+     * stream's libFLAC heap) is cache-owned by core 1 for core-1-affine
+     * streams. */
     return TASK_LONG;
   case TASKQ_OP_VIDEO_SESSION_WRITE:
   case TASKQ_OP_VIDEO_SESSION_DECODE:

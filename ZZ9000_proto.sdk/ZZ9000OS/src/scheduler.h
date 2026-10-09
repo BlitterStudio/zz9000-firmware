@@ -55,9 +55,12 @@
 
 /* Audio-stream opcodes mirrored from sdk_mailbox.h. A core-1-affine
  * stream's mp3 staging ring is cache-owned by core 1, so feed/read (both
- * run the decoder) must ONLY execute there: TASK_LONG unconditionally. */
+ * run the decoder) must ONLY execute there: TASK_LONG unconditionally.
+ * CLOSE is deferred only for FLAC streams, whose libFLAC heap is core-1
+ * owned and tracked; it must likewise never drain on core 0. */
 #define TASKQ_OP_AUDIO_STREAM_FEED   0x0504u
 #define TASKQ_OP_AUDIO_STREAM_READ   0x0505u
+#define TASKQ_OP_AUDIO_STREAM_CLOSE  0x0506u
 
 /* Public video-session worker opcodes. Decoder state and its tracked heap
  * graph are core-1-owned, so WRITE/DECODE/CLOSE are always TASK_LONG. */

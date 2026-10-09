@@ -111,6 +111,8 @@ jobs:
           bash test/video/run_videocap_verilator_sim.sh
       - name: Video codec regression suite
         run: make -C test/video_codec test
+      - name: FLAC stream backend suite
+        run: make -C test/flac test
       - name: Audio capture regression suite
         run: make -C test/audio test
       - name: Firmware-file restore suite

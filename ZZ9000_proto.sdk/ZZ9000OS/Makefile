@@ -71,6 +71,10 @@ A52_VERSION ?= 0.7.4
 A52_DIR ?= $(BUILD_DIR)/deps/a52dec/$(A52_VERSION)
 A52_LIB ?= $(A52_DIR)/arm/liba52.a
 A52_INCLUDE_DIR ?= $(A52_DIR)/arm/include
+LIBFLAC_VERSION ?= 1.5.0
+LIBFLAC_DIR ?= $(BUILD_DIR)/deps/flac/$(LIBFLAC_VERSION)
+LIBFLAC_LIB ?= $(LIBFLAC_DIR)/arm/libflacdec.a
+LIBFLAC_INCLUDE_DIR ?= $(LIBFLAC_DIR)/arm/include
 
 # Include paths
 INCLUDES = -I$(SRC_DIR) -I$(SRC_DIR)/bearssl -I$(BSP_INC)
@@ -79,6 +83,7 @@ INCLUDES += -I$(ZLIB_SRC)
 INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)
 INCLUDES += -I$(LIBWEBP_INCLUDE_DIR)
 INCLUDES += -I$(LIBMPEG2_INCLUDE_DIR) -I$(A52_INCLUDE_DIR)
+INCLUDES += -I$(LIBFLAC_INCLUDE_DIR)
 INCLUDES += -I$(LZMA_SDK_SRC)/C
 
 # Common flags (shared by all optimization levels)
@@ -109,7 +114,7 @@ LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -L$(BSP_LIB)
 
 # Libraries (order matters for --start-group)
-LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
+LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
 
 # Source files
 C_SRCS = \
@@ -222,6 +227,8 @@ C_SRCS = \
 	$(SRC_DIR)/bearssl/gcm.c \
 	$(SRC_DIR)/sdk_image_stream.c \
 	$(SRC_DIR)/sdk_webp_alloc.c \
+	$(SRC_DIR)/sdk_flac_alloc.c \
+	$(SRC_DIR)/sdk_audio_flac.c \
 	$(SRC_DIR)/sdk_video_stream.c \
 	$(SRC_DIR)/sdk_media_profile.c \
 	$(SRC_DIR)/sdk_media_session.c \
@@ -266,12 +273,12 @@ FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 
 all: $(TARGET) $(FALLBACK_TARGET) size
 
-$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(OBJS)
+$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 	@echo 'Done.'
 
-$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(FALLBACK_OBJS)
+$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(FALLBACK_OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(FALLBACK_OBJS) $(LIBS)
 	@echo 'Done.'
@@ -319,6 +326,10 @@ $(A52_LIB): $(LIBMPEG2_LIB)
 		$(MAKE) "$(LIBMPEG2_LIB)"; \
 	fi
 	@test -f "$@"
+
+$(LIBFLAC_LIB): ../../build_flac.sh $(SRC_DIR)/sdk_flac_alloc.h
+	@echo 'Building decoder-only libFLAC dependency...'
+	cd ../.. && bash ./build_flac.sh --arm
 
 $(LZMA_SDK_BUILD)/LzmaDec.o: $(LZMA_SDK_SRC)/C/LzmaDec.c
 	@mkdir -p $(dir $@)
@@ -406,6 +417,12 @@ $(BUILD_DIR)/sdk_video_mpeg2.o: $(SRC_DIR)/sdk_video_mpeg2.c $(LIBMPEG2_LIB) $(A
 $(BUILD_DIR)/sdk_dvd_ac3.o: $(SRC_DIR)/sdk_dvd_ac3.c $(LIBMPEG2_LIB) $(A52_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
+
+# U7 FLAC backend: includes libFLAC headers that exist only after the pinned
+# dependency build, so the object depends on the archive (DVD codec pattern).
+$(BUILD_DIR)/sdk_audio_flac.o: $(SRC_DIR)/sdk_audio_flac.c $(LIBFLAC_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -o $@ $<
 
 # Vendored LZH decode core (LHa for UNIX) + firmware I/O shim: every TU here
 # includes lha.h, which does `#include <config.h>` (angle-bracket). Two flags

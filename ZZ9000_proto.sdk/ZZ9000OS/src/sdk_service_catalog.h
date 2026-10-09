@@ -113,6 +113,9 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_AUDIO_FABRIC |
 			SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE |
 			SDK_SERVICE_FLAG_AUDIO_STREAM_GAIN,
+		/* SDK_SERVICE_FLAG_AUDIO_FLAC_STREAM (BeginEx FLAC, U7) is
+		 * implemented but stays unadvertised, like the WebP flags,
+		 * until physical Z2/Z3 qualification. */
 		.opcode_base = SDK_SERVICE_AUDIO,
 		.opcode_count = 23,	/* 0x0500..0x0516 incl. audio control plane,
 			 * fabric lease plane (0x0512-0x0514; 0x050f..0x0511

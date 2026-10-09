@@ -44,6 +44,7 @@
 #include "overlay.h"
 #include "mp3/mp3.h"
 #include "mp3/minimp3.h"
+#include "sdk_audio_flac.h"
 
 /* Ring geometry is per placement (SDK_MAILBOX_Z3_RING_ENTRIES in the Zorro
  * III reservation, SDK_MAILBOX_Z2_RING_ENTRIES in the Zorro II one); the
@@ -931,6 +932,12 @@ struct SDKAudioStream {
 	/* Main-loop writers update this aligned word; the fabric ISR consumes it
 	 * only through the pump slot's existing Q7 gain pass. */
 	uint16_t gain;
+	/* FLAC sessions only: sticky Feed/Read status once faulted (0 means
+	 * the legacy IO_ERROR), input starvation of the backend, and the
+	 * backend state whose libFLAC heap lives on the decode core. */
+	uint16_t fault_status;
+	uint8_t flac_starved;
+	struct sdk_flac_state flac;
 	mp3dec_t decoder;
 	mp3d_sample_t scratch[MINIMP3_MAX_SAMPLES_PER_FRAME];
 };
@@ -3338,8 +3345,13 @@ static struct SDKAudioStream *alloc_audio_stream(void)
 
 static void free_audio_stream(struct SDKAudioStream *stream)
 {
-	if (stream)
+	if (stream) {
+		/* Runs on the core that owns the decoder heap: inline close
+		 * for core-0-affine streams, the core-1 CLOSE task otherwise. */
+		if (stream->codec == SDK_AUDIO_CODEC_FLAC)
+			sdk_flac_release(&stream->flac);
 		memset(stream, 0, sizeof(*stream));
+	}
 }
 
 void sdk_mailbox_poison_core1_audio_streams(void)
@@ -3347,9 +3359,38 @@ void sdk_mailbox_poison_core1_audio_streams(void)
 	uint32_t i;
 
 	for (i = 0; i < SDK_MAX_AUDIO_STREAMS; i++) {
-		if (audio_streams[i].id != 0U && audio_streams[i].core1_affine)
+		if (audio_streams[i].id != 0U && audio_streams[i].core1_affine) {
 			audio_streams[i].faulted = 1U;
+			/* The reclaim pass already freed libFLAC's tracked
+			 * blocks; drop the dangling decoder pointer. */
+			if (audio_streams[i].codec == SDK_AUDIO_CODEC_FLAC)
+				sdk_flac_forget(&audio_streams[i].flac);
+		}
 	}
+}
+
+/* Set once sdk_mailbox_init has cleared the coherent stream table. */
+static uint32_t audio_streams_valid;
+
+/* Mailbox reset: free core-0-owned FLAC decoders in place and report
+ * whether any core-1-owned decoder needs the cold-restart reclaim. */
+static int audio_streams_release_flac_core0(void)
+{
+	int core1_heap = 0;
+	uint32_t i;
+
+	for (i = 0; i < SDK_MAX_AUDIO_STREAMS; i++) {
+		struct SDKAudioStream *s = &audio_streams[i];
+
+		if (s->id == 0U || s->codec != SDK_AUDIO_CODEC_FLAC ||
+		    !s->flac.decoder)
+			continue;
+		if (s->core1_affine)
+			core1_heap = 1;
+		else
+			sdk_flac_release(&s->flac);
+	}
+	return core1_heap;
 }
 
 /* Consumer-visible bytes in the ring (flushed and safe to read). */
@@ -3483,9 +3524,18 @@ static int audio_stream_check_vbr_tag(const uint8_t *frame,
 
 static int audio_stream_needs_more_input(const struct SDKAudioStream *stream)
 {
+	if (stream && stream->codec == SDK_AUDIO_CODEC_FLAC)
+		return stream->flac_starved && !stream->eof &&
+		       !stream->drain_requested;
 	return stream &&
 	       stream->input_length < SDK_AUDIO_STREAM_MIN_INPUT_BYTES &&
 	       !stream->eof && !stream->drain_requested;
+}
+
+static uint16_t audio_stream_fault_status(const struct SDKAudioStream *stream)
+{
+	return stream->fault_status != 0U ? stream->fault_status :
+	                                    SDK_STATUS_IO_ERROR;
 }
 
 static int audio_stream_process_vbr_tag(struct SDKAudioStream *stream,
@@ -3508,6 +3558,81 @@ static int audio_stream_process_vbr_tag(struct SDKAudioStream *stream,
 	return ret != 0;
 }
 
+/* FLAC sessions (U7): the backend decodes whole buffered units straight
+ * into the PCM ring. Cursor ownership, flush-before-publish and drain
+ * bookkeeping follow the MP3 loop below; a backend failure faults the
+ * stream with its status (UNSUPPORTED / IO_ERROR / NO_MEMORY). */
+static uint32_t audio_stream_decode_flac(struct SDKAudioStream *stream)
+{
+	struct sdk_flac_io io;
+	uint8_t *input = (uint8_t *)(uintptr_t)stream->mp3_ring_addr;
+	uint8_t *pcm_dst = (uint8_t *)(uintptr_t)stream->pcm_ring_addr;
+	uint32_t pcm_flush_start;
+	uint32_t progress = 0U;
+	uint16_t status;
+
+	if (stream->faulted)
+		return 0U;
+	if (stream->decode_complete) {
+		if (stream->input_length != 0U) {
+			audio_stream_discard_input(stream);
+			progress = 1U;
+		}
+		if (audio_stream_drain_input_done(
+			    stream->drain_requested, stream->decode_complete,
+			    stream->input_length, 0))
+			stream->drain_input_complete = 1;
+		return progress;
+	}
+	memset(&io, 0, sizeof(io));
+	io.input = input + stream->input_offset;
+	io.input_length = stream->input_length;
+	io.eof = stream->eof;
+	io.drain = stream->drain_requested && !stream->eof;
+	io.pcm = pcm_dst;
+	io.pcm_capacity = stream->pcm_capacity;
+	pcm_flush_start = stream->pcm_written_total % stream->pcm_capacity;
+	io.pcm_write = pcm_flush_start;
+	io.pcm_free = audio_stream_pcm_free(stream);
+	io.pcm_budget = stream->high_water_bytes;
+	if (io.pcm_budget == 0U || io.pcm_budget > stream->pcm_capacity)
+		io.pcm_budget = stream->pcm_capacity;
+	status = sdk_flac_decode(&stream->flac, &io);
+	if (io.consumed != 0U) {
+		audio_stream_consume_input(stream, io.consumed);
+		stream->bytes_consumed += io.consumed;
+		progress = 1U;
+	}
+	if (stream->sample_rate == 0U && stream->flac.sample_rate != 0U) {
+		stream->sample_rate = stream->flac.sample_rate;
+		stream->channels = stream->flac.channels;
+	}
+	if (io.produced != 0U) {
+		stream->pcm_written_total += io.produced;
+		stream->bytes_produced += io.produced;
+		stream->frames_decoded += io.frames;
+		flush_audio_pcm_written(stream, pcm_dst, pcm_flush_start,
+		                        io.produced);
+		/* Publish only after the flush (ends in a DSB). */
+		stream->pcm_ready_total = stream->pcm_written_total;
+		progress = 1U;
+	}
+	stream->flac_starved = io.starved ? 1U : 0U;
+	if (io.complete) {
+		stream->decode_complete = 1;
+		audio_stream_discard_input(stream);
+	}
+	if (status != SDK_STATUS_OK) {
+		stream->faulted = 1U;
+		stream->fault_status = status;
+	}
+	if (audio_stream_drain_input_done(
+		    stream->drain_requested, stream->decode_complete,
+		    stream->input_length, io.starved))
+		stream->drain_input_complete = 1;
+	return progress;
+}
+
 static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 {
 	const uint32_t frame_pcm_bytes =
@@ -3521,6 +3646,8 @@ static uint32_t audio_stream_decode(struct SDKAudioStream *stream)
 	uint8_t *input;
 	uint8_t *pcm_dst;
 
+	if (stream && stream->codec == SDK_AUDIO_CODEC_FLAC)
+		return audio_stream_decode_flac(stream);
 	if (!stream || stream->mp3_ring_addr == 0U ||
 	    stream->pcm_ring_addr == 0U)
 		return 0;
@@ -3766,6 +3893,14 @@ static void audio_stream_feed_compute(struct SDKAudioStream *stream,
 			/* Result reflects backpressure; EOF/decode skipped,
 			 * exactly as the pre-scheduler handler behaved. */
 			stream->backpressure = 1;
+			/* FLAC: the backend is starved on a unit that cannot
+			 * complete while the ring has no room for more input --
+			 * the input ring is smaller than one compressed frame. */
+			if (stream->codec == SDK_AUDIO_CODEC_FLAC &&
+			    stream->flac_starved && !stream->faulted) {
+				stream->faulted = 1U;
+				stream->fault_status = SDK_STATUS_IO_ERROR;
+			}
 			return;
 		}
 		if (stream->input_offset + stream->input_length + src_length >
@@ -4326,6 +4461,9 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	if (stream->faulted)
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
+	/* FLAC sessions are unbound readback only (big-endian PCM). */
+	if (stream->codec != SDK_AUDIO_CODEC_MP3)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	if (g_audio_playback.session == session &&
 	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM) {
 		/* Already playing this session: idempotent, no re-init (the
@@ -4686,7 +4824,13 @@ static uint16_t open_audio_stream(volatile struct SDKMailboxEntry *req,
 	/* Affinity is fixed for the stream's whole life: the input staging
 	 * ring becomes cache-owned by whichever core runs the decoder. */
 	stream->core1_affine = scheduler_core1_available() ? 1U : 0U;
-	mp3dec_init(&stream->decoder);
+	if (codec == SDK_AUDIO_CODEC_FLAC) {
+		/* Decoder objects are created lazily on the decode core. */
+		sdk_flac_init(&stream->flac, output_format);
+		stream->flac_starved = 1U;
+	} else {
+		mp3dec_init(&stream->decoder);
+	}
 	stream->initialized = 1;
 	stream->gain = AUDIO_FABRIC_GAIN_UNITY;
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
@@ -4741,8 +4885,8 @@ static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *re
 	codec = get_be32(payload->codec);
 	if (codec == SDK_AUDIO_CODEC_UNKNOWN || codec > SDK_AUDIO_CODEC_VORBIS)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	/* FLAC and Vorbis are reserved until their backends exist. */
-	if (codec != SDK_AUDIO_CODEC_MP3)
+	/* Vorbis is reserved until its backend exists. */
+	if (codec == SDK_AUDIO_CODEC_VORBIS)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 
 	input_ring = find_shared_buffer(get_be32(payload->input_ring_handle));
@@ -4754,14 +4898,29 @@ static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *re
 	    get_be32(payload->output_hz) != 0U ||
 	    get_be32(payload->output_channels) != 0U)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	/* The MP3 backend produces 16-bit PCM only; 32-bit containers are a
-	 * valid request that this codec cannot satisfy. */
-	if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S32LE ||
-	    output_format == SDK_AUDIO_SAMPLE_FORMAT_S32BE)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
-	    output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (codec == SDK_AUDIO_CODEC_FLAC) {
+		/* FLAC output is big-endian and MSB-justified; whether the
+		 * container holds the source depth is checked at STREAMINFO. */
+		if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S16LE ||
+		    output_format == SDK_AUDIO_SAMPLE_FORMAT_S32LE)
+			return complete_status(req, comp,
+			                       SDK_STATUS_UNSUPPORTED);
+		if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE &&
+		    output_format != SDK_AUDIO_SAMPLE_FORMAT_S32BE)
+			return complete_status(req, comp,
+			                       SDK_STATUS_BAD_REQUEST);
+	} else {
+		/* The MP3 backend produces 16-bit PCM only; 32-bit
+		 * containers are a valid request this codec cannot satisfy. */
+		if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S32LE ||
+		    output_format == SDK_AUDIO_SAMPLE_FORMAT_S32BE)
+			return complete_status(req, comp,
+			                       SDK_STATUS_UNSUPPORTED);
+		if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
+		    output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
+			return complete_status(req, comp,
+			                       SDK_STATUS_BAD_REQUEST);
+	}
 	return open_audio_stream(req, comp, codec, input_ring, pcm_ring,
 	                         get_be32(payload->input_ring_capacity),
 	                         get_be32(payload->pcm_ring_capacity),
@@ -4802,7 +4961,8 @@ static uint16_t handle_audio_stream_feed(volatile struct SDKMailboxEntry *req,
 	     src_length != 0U))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if (stream->faulted)
-		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
+		return complete_status(req, comp,
+		                       audio_stream_fault_status(stream));
 	src_offset = 0U;
 	if (src_length != 0U) {
 		src = find_shared_buffer(get_be32(payload->src_handle));
@@ -4838,6 +4998,9 @@ static uint16_t handle_audio_stream_feed(volatile struct SDKMailboxEntry *req,
 	/* Core-0-affine stream: inline, as the pre-scheduler firmware did. */
 	audio_stream_feed_compute(stream, (src_length != 0U) ? src_offset : 0U,
 	                          src_length, flags);
+	if (stream->codec == SDK_AUDIO_CODEC_FLAC && stream->faulted)
+		return complete_status(req, comp,
+		                       audio_stream_fault_status(stream));
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
 }
 
@@ -4863,7 +5026,8 @@ static uint16_t handle_audio_stream_read(volatile struct SDKMailboxEntry *req,
 	if (flags != 0U || pcm_read > audio_stream_pcm_used(stream))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	if (stream->faulted)
-		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
+		return complete_status(req, comp,
+		                       audio_stream_fault_status(stream));
 	/* A bound stream's consumer is the AX playback pump. */
 	if (g_audio_playback.session == session &&
 	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM)
@@ -4883,6 +5047,9 @@ static uint16_t handle_audio_stream_read(volatile struct SDKMailboxEntry *req,
 	}
 	/* Core-0-affine stream: inline, as the pre-scheduler firmware did. */
 	audio_stream_read_compute(stream, pcm_read);
+	if (stream->codec == SDK_AUDIO_CODEC_FLAC && stream->faulted)
+		return complete_status(req, comp,
+		                       audio_stream_fault_status(stream));
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, stream);
 }
 
@@ -4962,6 +5129,21 @@ static uint16_t handle_audio_stream_close(volatile struct SDKMailboxEntry *req,
 	 * API.) */
 	if (audio_stream_tasks_inflight(session))
 		return complete_status(req, comp, SDK_STATUS_BUSY);
+	/* A core-1 FLAC decoder's heap is tracked and cache-owned by core 1:
+	 * release it there. The deferred completion needs a client id. */
+	if (stream->codec == SDK_AUDIO_CODEC_FLAC && stream->flac.decoder &&
+	    stream->core1_affine && scheduler_core1_available()) {
+		struct audio_feed_op_params p;
+
+		if (get_be32(req->request_id) == 0U)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		memset(&p, 0, sizeof(p));
+		p.session = session;
+		if (service_try_defer(SDK_OP_AUDIO_STREAM_CLOSE, req, &p,
+		                      sizeof(p), 0U) == SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
 	snapshot = *stream;
 	free_audio_stream(stream);
 	return complete_audio_stream_result(req, comp, SDK_STATUS_OK, &snapshot);
@@ -6493,7 +6675,7 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		if (!stream)
 			return SDK_STATUS_BAD_HANDLE;
 		if (stream->faulted)
-			return SDK_STATUS_IO_ERROR;
+			return audio_stream_fault_status(stream);
 		(void)audio_stream_feed_dirty_span(
 			stream->input_offset, stream->input_length, p->src_len,
 			stream->mp3_capacity, &dirty_offset, &dirty_length);
@@ -6510,6 +6692,8 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 				(INTPTR)(uintptr_t)(
 					stream->mp3_ring_addr + dirty_offset),
 				dirty_length);
+		if (stream->codec == SDK_AUDIO_CODEC_FLAC && stream->faulted)
+			return audio_stream_fault_status(stream);
 		audio_stream_fill_result(result_payload, stream);
 		*result_len = sizeof(struct SDKAudioStreamResultPayload);
 		return SDK_STATUS_OK;
@@ -6523,7 +6707,7 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		if (!stream)
 			return SDK_STATUS_BAD_HANDLE;
 		if (stream->faulted)
-			return SDK_STATUS_IO_ERROR;
+			return audio_stream_fault_status(stream);
 		/* Re-validate against the LIVE used count. p->pcm_read was
 		 * checked on core 0 against audio_stream_pcm_used() at intake,
 		 * but an earlier queued READ for this stream may have advanced
@@ -6535,8 +6719,25 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		if (p->pcm_read > audio_stream_pcm_used(stream))
 			return SDK_STATUS_BAD_REQUEST;
 		audio_stream_read_compute(stream, p->pcm_read);
+		if (stream->codec == SDK_AUDIO_CODEC_FLAC && stream->faulted)
+			return audio_stream_fault_status(stream);
 		audio_stream_fill_result(result_payload, stream);
 		*result_len = sizeof(struct SDKAudioStreamResultPayload);
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_AUDIO_STREAM_CLOSE: {
+		const struct audio_feed_op_params *p =
+		    (const struct audio_feed_op_params *)d->op_params;
+		struct SDKAudioStream *stream = find_audio_stream(p->session);
+
+		*result_len = 0;
+		if (!stream)
+			return SDK_STATUS_BAD_HANDLE;
+		/* Reply first: free_audio_stream releases libFLAC's core-1
+		 * heap and zeroes the slot. */
+		audio_stream_fill_result(result_payload, stream);
+		*result_len = sizeof(struct SDKAudioStreamResultPayload);
+		free_audio_stream(stream);
 		return SDK_STATUS_OK;
 	}
 	case SDK_OP_DECOMPRESS: {
@@ -8233,6 +8434,8 @@ void sdk_mailbox_publish_after_aperture_ack(void)
 
 void sdk_mailbox_init(void)
 {
+	int flac_core1_heap;
+
 	/* Drain any in-flight core-1 task before we tear the mailbox down. A task
 	 * still executing on core 1 is mid-write into its resolved data buffers;
 	 * the shared-buffer allocator reset below (next_shared_handle = 1 +
@@ -8302,8 +8505,13 @@ void sdk_mailbox_init(void)
 	 * Flush so the zeroed table is in DRAM whatever MMU attributes the
 	 * lines were filled under (this can run before the scheduler stamps
 	 * the coherent attributes on the section). */
+	/* The table holds garbage before its first clear at boot; only a
+	 * previously cleared table can own FLAC decoders. */
+	flac_core1_heap = audio_streams_valid ?
+	    audio_streams_release_flac_core0() : 0;
 	memset(audio_streams, 0,
 	       SDK_MAX_AUDIO_STREAMS * sizeof(struct SDKAudioStream));
+	audio_streams_valid = 1U;
 	Xil_DCacheFlushRange((INTPTR)(uintptr_t)audio_streams,
 	                     SDK_MAX_AUDIO_STREAMS *
 	                     sizeof(struct SDKAudioStream));
@@ -8317,7 +8525,7 @@ void sdk_mailbox_init(void)
 	 * core 1 first: its reclaim pass frees every tracked block while the
 	 * worker is held in reset. */
 	if ((sdk_image_stream_has_core1_sessions() ||
-	     sdk_video_stream_has_core1_sessions()) &&
+	     sdk_video_stream_has_core1_sessions() || flac_core1_heap) &&
 	    scheduler_core1_available())
 		core1_cold_restart();
 	sdk_image_stream_init();
