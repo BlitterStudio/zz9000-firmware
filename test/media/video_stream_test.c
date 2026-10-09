@@ -30,6 +30,9 @@ static void mock_destroy(void *decoder)
 		destroy_calls++;
 }
 
+/* Nonzero: the most one write takes, like a backend with a full window. */
+static uint32_t mock_write_limit;
+
 static int mock_write(void *decoder, const uint8_t *src, uint32_t length,
                       int eof, uint32_t *accepted)
 {
@@ -38,7 +41,8 @@ static int mock_write(void *decoder, const uint8_t *src, uint32_t length,
 	if (decoder != &decoder_storage || !accepted)
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
 	write_calls++;
-	*accepted = length;
+	*accepted = mock_write_limit != 0U && length > mock_write_limit
+		? mock_write_limit : length;
 	return SDK_VIDEO_BACKEND_WRITE_OK;
 }
 
@@ -373,6 +377,46 @@ static int test_decode_flag_forwarding(void)
 	return 0;
 }
 
+/* A write the backend takes in part reports that write's count and the
+ * running total, so the client knows where to resume. */
+static int test_partial_write_progress(void)
+{
+	struct SDKVideoStreamBegin begin;
+	struct SDKVideoStreamWrite write;
+	struct SDKVideoStreamResult result;
+	uint8_t input[8] = {0};
+
+	sdk_video_stream_init();
+	memset(&begin, 0, sizeof(begin));
+	begin.codec = SDK_VIDEO_CODEC_MPEG1;
+	begin.container = SDK_VIDEO_CONTAINER_MPEG_PS;
+	begin.width = 320U;
+	begin.height = 240U;
+	begin.output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_OK)
+		return 30;
+
+	memset(&write, 0, sizeof(write));
+	write.session = result.session;
+	write.src = input;
+	write.src_length = sizeof(input);
+	write.flags = SDK_VIDEO_SESSION_WRITE_EOF;
+	mock_write_limit = 3U;
+	if (sdk_video_stream_write(&write, &result) != SDK_STATUS_OK ||
+	    result.bytes_written != 3U || result.bytes_accepted != 3U)
+		return 31;
+	mock_write_limit = 0U;
+	write.src = input + 3;
+	write.src_length = sizeof(input) - 3U;
+	if (sdk_video_stream_write(&write, &result) != SDK_STATUS_OK ||
+	    result.bytes_written != 5U || result.bytes_accepted != 8U)
+		return 32;
+	sdk_video_stream_close(result.session, &result);
+	return 0;
+}
+
 int main(void)
 {
 	int rc;
@@ -384,6 +428,8 @@ int main(void)
 	rc = test_generic_caps_without_geometry_op();
 	if (rc != 0) return rc;
 	rc = test_decode_flag_forwarding();
+	if (rc != 0) return rc;
+	rc = test_partial_write_progress();
 	if (rc != 0) return rc;
 	return 0;
 }
