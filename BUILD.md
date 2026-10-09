@@ -13,6 +13,7 @@ outputs land in `bootimage_work/`. CI runs the same scripts.
 | [`build_zlib.sh`](build_zlib.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/zlib/.../libz.a` | Arm GNU Toolchain, `cmake`, `make`, `wget` |
 | [`build_libpng.sh`](build_libpng.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/libpng/.../liblibpng16_static.a` | Arm GNU Toolchain, `cmake`, `make`, `wget`; calls `build_zlib.sh` |
 | [`build_libwebp.sh`](build_libwebp.sh) | Pinned libwebp decoder/demux archives under `ZZ9000OS/build/deps/libwebp/1.6.0/{arm,host}/lib/` | Arm GNU Toolchain (native compiler with `--host`), `cmake`, `make`, `curl` or `wget` |
+| [`build_dvd_codecs.sh`](build_dvd_codecs.sh) | Pinned decoder-only libmpeg2 0.5.1 and liba52 0.7.4 archives under `ZZ9000OS/build/deps/{libmpeg2,a52dec}/.../{arm,host}/` (U11 DVD experiment; GPL-2.0-or-later, notices in `ZZ9000OS/src/dvd_codecs/`) | Arm GNU Toolchain (native compiler with `--host`), `make`, `curl` or `wget` |
 | [`build_lzma_sdk.sh`](build_lzma_sdk.sh) | LZMA SDK decoder sources under `ZZ9000_proto.sdk/ZZ9000OS/build/deps/lzma-sdk/` (compiled into `ZZ9000OS.elf` by `build_firmware.sh`) | `wget`, `7z`/`7za`/`7zr` |
 | [`build_bitstream.sh`](build_bitstream.sh) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Linux |
 | [`build_bitstream.ps1`](build_bitstream.ps1) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Windows |
@@ -27,7 +28,7 @@ packaging remain separate commands.
 
 **ARM firmware change only** (most iteration loops). Uses the committed
 bitstream. `build_firmware.sh` automatically downloads, verifies, and builds
-the libjpeg-turbo, zlib, libpng, libwebp, and LZMA SDK dependencies under
+the libjpeg-turbo, zlib, libpng, libwebp, libmpeg2, liba52 and LZMA SDK dependencies under
 `ZZ9000OS/build/deps/` when needed:
 ```bash
 ./build_firmware.sh

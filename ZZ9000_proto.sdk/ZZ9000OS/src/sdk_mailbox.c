@@ -1508,6 +1508,11 @@ static uint16_t complete_image_animation_result(
 	return SDK_STATUS_OK;
 }
 
+static uint16_t service_try_defer(uint16_t opcode,
+                                  volatile struct SDKMailboxEntry *req,
+                                  const void *params, uint32_t param_len,
+                                  uint32_t in_len);
+
 static uint16_t handle_image_animation_frame_next(
 	volatile struct SDKMailboxEntry *req,
 	volatile struct SDKMailboxEntry *comp,

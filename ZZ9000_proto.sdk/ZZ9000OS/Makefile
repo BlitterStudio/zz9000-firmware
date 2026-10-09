@@ -63,6 +63,14 @@ LIBWEBP_INCLUDE_DIR ?= $(LIBWEBP_ARM_DIR)/include
 LIBWEBP_LIB_DIR ?= $(LIBWEBP_ARM_DIR)/lib
 LIBWEBP_DECODER_LIB ?= $(LIBWEBP_LIB_DIR)/libwebpdecoder.a
 LIBWEBP_DEMUX_LIB ?= $(LIBWEBP_LIB_DIR)/libwebpdemux.a
+LIBMPEG2_VERSION ?= 0.5.1
+LIBMPEG2_DIR ?= $(BUILD_DIR)/deps/libmpeg2/$(LIBMPEG2_VERSION)
+LIBMPEG2_LIB ?= $(LIBMPEG2_DIR)/arm/libmpeg2.a
+LIBMPEG2_INCLUDE_DIR ?= $(LIBMPEG2_DIR)/arm/include
+A52_VERSION ?= 0.7.4
+A52_DIR ?= $(BUILD_DIR)/deps/a52dec/$(A52_VERSION)
+A52_LIB ?= $(A52_DIR)/arm/liba52.a
+A52_INCLUDE_DIR ?= $(A52_DIR)/arm/include
 
 # Include paths
 INCLUDES = -I$(SRC_DIR) -I$(SRC_DIR)/bearssl -I$(BSP_INC)
@@ -70,6 +78,7 @@ INCLUDES += -I$(LIBJPEG_TURBO_BUILD) -I$(LIBJPEG_TURBO_SRC)/src
 INCLUDES += -I$(ZLIB_SRC)
 INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)
 INCLUDES += -I$(LIBWEBP_INCLUDE_DIR)
+INCLUDES += -I$(LIBMPEG2_INCLUDE_DIR) -I$(A52_INCLUDE_DIR)
 INCLUDES += -I$(LZMA_SDK_SRC)/C
 
 # Common flags (shared by all optimization levels)
@@ -100,7 +109,7 @@ LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -L$(BSP_LIB)
 
 # Libraries (order matters for --start-group)
-LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
+LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
 
 # Source files
 C_SRCS = \
@@ -219,6 +228,10 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_media_timeline.c \
 	$(SRC_DIR)/sdk_video_plmpeg.c \
 	$(SRC_DIR)/sdk_video_yuy2.c \
+	$(SRC_DIR)/sdk_dvd_ps.c \
+	$(SRC_DIR)/sdk_dvd_lpcm.c \
+	$(SRC_DIR)/sdk_dvd_ac3.c \
+	$(SRC_DIR)/sdk_video_mpeg2.c \
 	$(SRC_DIR)/sdk_jpeg.c \
 	$(SRC_DIR)/jmem_zz9k.c \
 	$(SRC_DIR)/sdk_surface.c \
@@ -253,12 +266,12 @@ FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 
 all: $(TARGET) $(FALLBACK_TARGET) size
 
-$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(OBJS)
+$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 	@echo 'Done.'
 
-$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(FALLBACK_OBJS)
+$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(FALLBACK_OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(FALLBACK_OBJS) $(LIBS)
 	@echo 'Done.'
@@ -290,6 +303,20 @@ $(LIBWEBP_DEMUX_LIB): $(LIBWEBP_DECODER_LIB)
 	@if test ! -f "$@"; then \
 		rm -f "$(LIBWEBP_DECODER_LIB)"; \
 		$(MAKE) "$(LIBWEBP_DECODER_LIB)"; \
+	fi
+	@test -f "$@"
+
+$(LIBMPEG2_LIB): ../../build_dvd_codecs.sh
+	@echo 'Building DVD decoder dependencies (libmpeg2/liba52)...'
+	cd ../.. && bash ./build_dvd_codecs.sh --arm
+
+# build_dvd_codecs.sh creates both archives in one run; make the a52 archive
+# wait for the sole producer and rebuild that unit if only the secondary
+# archive was removed between invocations (same pattern as libwebp).
+$(A52_LIB): $(LIBMPEG2_LIB)
+	@if test ! -f "$@"; then \
+		rm -f "$(LIBMPEG2_LIB)"; \
+		$(MAKE) "$(LIBMPEG2_LIB)"; \
 	fi
 	@test -f "$@"
 
@@ -361,6 +388,20 @@ $(BUILD_DIR)/gfx.o: $(SRC_DIR)/gfx.c
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
 $(BUILD_DIR)/sdk_video_plmpeg.o: $(SRC_DIR)/sdk_video_plmpeg.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
+
+# DVD hot path (U11 experiment): demux + MPEG-2 decode and AC-3 downmix in
+# the same -O3 tier as the pl_mpeg backend.
+$(BUILD_DIR)/sdk_dvd_ps.o: $(SRC_DIR)/sdk_dvd_ps.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
+
+$(BUILD_DIR)/sdk_video_mpeg2.o: $(SRC_DIR)/sdk_video_mpeg2.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
+
+$(BUILD_DIR)/sdk_dvd_ac3.o: $(SRC_DIR)/sdk_dvd_ac3.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
