@@ -73,6 +73,18 @@ static uint32_t find_start(const uint8_t *p, uint32_t from, uint32_t length)
 	return length;
 }
 
+/* A unit that needs more bytes: wait for them, or once input has ended
+ * (all of it is staged by then) drop the tail, which can never complete,
+ * so the demux still drains. */
+static int need_more(struct SDKDVDPSDemux *d)
+{
+	if (!d->eof || d->staged == 0U)
+		return 2;
+	d->bytes_ignored += d->staged;
+	consume(d, d->staged);
+	return 1;
+}
+
 /* 0: output queue blocked, 1: consumed a unit, 2: need more input. */
 static int parse_one(struct SDKDVDPSDemux *d)
 {
@@ -86,7 +98,7 @@ static int parse_one(struct SDKDVDPSDemux *d)
 	int queued = 1;
 
 	if (d->staged < 4U)
-		return 2;
+		return need_more(d);
 	if (p[0] != 0U || p[1] != 0U || p[2] != 1U) {
 		uint32_t at = find_start(p, 1U, d->staged);
 		uint32_t drop = at == d->staged ? d->staged - 2U : at;
@@ -101,10 +113,10 @@ static int parse_one(struct SDKDVDPSDemux *d)
 	}
 	if (sid == 0xbaU) {
 		if (d->staged < 12U)
-			return 2;
+			return need_more(d);
 		if ((p[4] & 0xc0U) == 0x40U) {
 			if (d->staged < 14U)
-				return 2;
+				return need_more(d);
 			total = 14U + (p[13] & 7U);
 		} else if ((p[4] & 0xf0U) == 0x20U) {
 			total = 12U;
@@ -114,12 +126,12 @@ static int parse_one(struct SDKDVDPSDemux *d)
 			return 1;
 		}
 		if (d->staged < total)
-			return 2;
+			return need_more(d);
 		consume(d, total);
 		return 1;
 	}
 	if (d->staged < 6U)
-		return 2;
+		return need_more(d);
 	total = 6U + be16(p + 4U);
 	if (total == 6U) {
 		uint32_t next = find_start(p, 6U, d->staged);
@@ -137,7 +149,7 @@ static int parse_one(struct SDKDVDPSDemux *d)
 		return 1;
 	}
 	if (d->staged < total)
-		return 2;
+		return need_more(d);
 	if (sid == 0xbbU || sid == 0xbcU || sid == 0xbeU || sid == 0xbfU ||
 	    sid == 0xf0U || sid == 0xf1U || sid == 0xffU) {
 		d->bytes_ignored += total;

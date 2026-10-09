@@ -141,6 +141,34 @@ struct stream_result {
 	int final_state;
 };
 
+/* Logs a decoded frame into out and hashes its YUY2 form. Returns 0 when
+ * the conversion fails (the frame still counts). */
+static int record_frame(struct stream_result *out,
+                        const struct SDKVideoDecodedFrame *frame)
+{
+	uint32_t row_bytes = sdk_video_yuy2_row_bytes(frame->width);
+	uint8_t *yuy2 = (uint8_t *)malloc(row_bytes * frame->height);
+	uint32_t written = 0U;
+	int ok;
+
+	if (out->frame_count < 16U) {
+		out->width = frame->width;
+		out->height = frame->height;
+		out->picture_flags[out->frame_count] = frame->picture_flags;
+		out->display_fields[out->frame_count] = frame->display_fields;
+		out->raw_pts[out->frame_count] = frame->raw_pts;
+	}
+	ok = yuy2 && sdk_video_yuv420_to_yuy2(
+		yuy2, row_bytes, frame->width, frame->height,
+		frame->y, frame->y_pitch, frame->cb, frame->cr,
+		frame->chroma_pitch, &written);
+	if (ok)
+		out->yuy2_hash = fnv1a64(out->yuy2_hash, yuy2, written);
+	free(yuy2);
+	out->frame_count++;
+	return ok;
+}
+
 static int run_decode_test(const uint8_t *stream, uint32_t length,
                            uint32_t chunk_size, uint32_t audio_codec,
                            struct stream_result *out)
@@ -201,32 +229,11 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 			res = ops->decode(decoder, &frame);
 			if (res != SDK_VIDEO_BACKEND_FRAME)
 				break;
-
-			if (out->frame_count < 16U) {
-				out->width = frame.width;
-				out->height = frame.height;
-				out->picture_flags[out->frame_count] = frame.picture_flags;
-				out->display_fields[out->frame_count] = frame.display_fields;
-				out->raw_pts[out->frame_count] = frame.raw_pts;
+			if (!record_frame(out, &frame)) {
+				if (pcm_ring) free(pcm_ring);
+				ops->destroy(decoder);
+				return 5;
 			}
-
-			{
-				uint32_t row_bytes = sdk_video_yuy2_row_bytes(frame.width);
-				uint8_t *yuy2 = (uint8_t *)malloc(row_bytes * frame.height);
-				uint32_t written = 0U;
-				if (!yuy2 || !sdk_video_yuv420_to_yuy2(
-					yuy2, row_bytes, frame.width, frame.height,
-					frame.y, frame.y_pitch, frame.cb, frame.cr,
-					frame.chroma_pitch, &written)) {
-					if (yuy2) free(yuy2);
-					if (pcm_ring) free(pcm_ring);
-					ops->destroy(decoder);
-					return 5;
-				}
-				out->yuy2_hash = fnv1a64(out->yuy2_hash, yuy2, written);
-				free(yuy2);
-			}
-			out->frame_count++;
 		}
 		if (res == SDK_VIDEO_BACKEND_ERROR) {
 			if (pcm_ring) free(pcm_ring);
@@ -256,26 +263,7 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 			res = ops->decode(decoder, &frame);
 			if (res != SDK_VIDEO_BACKEND_FRAME)
 				break;
-			if (out->frame_count < 16U) {
-				out->width = frame.width;
-				out->height = frame.height;
-				out->picture_flags[out->frame_count] = frame.picture_flags;
-				out->display_fields[out->frame_count] = frame.display_fields;
-				out->raw_pts[out->frame_count] = frame.raw_pts;
-			}
-			{
-				uint32_t row_bytes = sdk_video_yuy2_row_bytes(frame.width);
-				uint8_t *yuy2 = (uint8_t *)malloc(row_bytes * frame.height);
-				uint32_t written = 0U;
-				if (yuy2 && sdk_video_yuv420_to_yuy2(
-					yuy2, row_bytes, frame.width, frame.height,
-					frame.y, frame.y_pitch, frame.cb, frame.cr,
-					frame.chroma_pitch, &written)) {
-					out->yuy2_hash = fnv1a64(out->yuy2_hash, yuy2, written);
-				}
-				if (yuy2) free(yuy2);
-			}
-			out->frame_count++;
+			(void)record_frame(out, &frame);
 		}
 		out->final_state = res;
 	}
@@ -821,6 +809,50 @@ static int test_video_only_ignores_audio(void)
 	return 0;
 }
 
+/* 6e. A VOB that ends inside a pack (a cut copy) or with zero padding:
+ * the incomplete tail can never parse, so it must be dropped at end of
+ * input instead of keeping the stream from DONE. */
+static int test_ragged_tail_reaches_done(void)
+{
+	const uint32_t len = zz9k_dvd_ac3_192_fixture_len;
+	/* Inside a video PES, then inside pack 30's 14-byte pack header
+	 * (before and after its first 12 bytes), inside the start code and
+	 * the length of the PES after it, inside the last pack; then zero
+	 * padding. */
+	const uint32_t cuts[] = {
+		29U * 2048U + 1000U, 30U * 2048U + 8U, 30U * 2048U + 13U,
+		30U * 2048U + 16U, 30U * 2048U + 19U, len - 1000U
+	};
+	uint8_t *padded = (uint8_t *)malloc(len + 100U);
+	struct stream_result r;
+	uint32_t i;
+	int rc;
+
+	if (!padded)
+		return 1;
+	for (i = 0U; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
+		rc = run_decode_test(zz9k_dvd_ac3_192_fixture, cuts[i], 2048U,
+		                     SDK_VIDEO_MEDIA_AUDIO_NONE, &r);
+		if (rc != 0 || r.frame_count == 0U ||
+		    r.eof_state != SDK_VIDEO_BACKEND_DONE ||
+		    r.final_state != SDK_VIDEO_BACKEND_DONE) {
+			free(padded);
+			return rc != 0 ? rc : 20 + (int)i;
+		}
+	}
+	memcpy(padded, zz9k_dvd_ac3_192_fixture, len);
+	memset(padded + len, 0, 100U);
+	rc = run_decode_test(padded, len + 100U, 2048U,
+	                     SDK_VIDEO_MEDIA_AUDIO_NONE, &r);
+	free(padded);
+	if (rc != 0)
+		return rc;
+	if (r.frame_count != 50U || r.eof_state != SDK_VIDEO_BACKEND_DONE ||
+	    r.final_state != SDK_VIDEO_BACKEND_DONE)
+		return 30;
+	return 0;
+}
+
 /* 7. Two AC-3 tracks: 0x80 (7 frames, first in the stream) and 0x81 (19
  * frames). Only 0x80 may reach the decoder. */
 static int test_ac3_substream_selection(void)
@@ -956,6 +988,12 @@ int main(void)
 		return 120 + err;
 	}
 	printf("PASS: test_video_only_ignores_audio (video-only VOB with AC-3)\n");
+
+	if ((err = test_ragged_tail_reaches_done()) != 0) {
+		fprintf(stderr, "FAIL: test_ragged_tail_reaches_done (code %d)\n", err);
+		return 140 + err;
+	}
+	printf("PASS: test_ragged_tail_reaches_done (cut or padded VOB ends)\n");
 
 	if ((err = test_ac3_substream_selection()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_substream_selection (code %d)\n", err);
