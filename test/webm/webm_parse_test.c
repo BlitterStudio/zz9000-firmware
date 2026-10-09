@@ -376,6 +376,8 @@ static void add_video_track(struct buf *tracks)
 	bu8(&track, 0xD7, 1);
 	bu8(&track, 0x83, 1);
 	belem(&track, 0x86, "V_VP8", 5);
+	/* DefaultDuration 40 ms: header-prefix tests cut through it too. */
+	belem(&track, 0x23E383, (const uint8_t *)"\x02\x62\x5A\x00", 4);
 	bnest(&track, 0xE0, &video);
 	bnest(tracks, 0xAE, &track);
 }
@@ -567,7 +569,8 @@ static int test_audio_tracks(void)
 			fprintf(stderr, "vorbis xiph split\n");
 			failed = 1;
 		}
-		if (webm_track(&d, 1) == 0 || webm_track(&d, 1)->width != 160U) {
+		if (webm_track(&d, 1) == 0 || webm_track(&d, 1)->width != 160U ||
+		    webm_track(&d, 1)->default_duration_ns != 40000000U) {
 			fprintf(stderr, "audio %d: video track lost\n", pass);
 			failed = 1;
 		}

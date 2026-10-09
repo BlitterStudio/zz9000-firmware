@@ -302,8 +302,12 @@ static int try_open(struct sdk_video_webm *d)
 	rc = webm_open(&d->demux, &io, d->block, WEBM_MAX_FRAME);
 	if (rc == 0)
 		return finish_open(d);
-	if (d->demux.error == WEBM_ERR_NEED)
+	if (d->demux.error == WEBM_ERR_NEED) {
+		/* A header longer than the whole window can never parse. */
+		if (webm_window_exhausted(&d->win, d->win.start))
+			d->unsupported = 1U;
 		return 0;
+	}
 	if (d->demux.error == WEBM_ERR_CODEC ||
 	    d->demux.error == WEBM_ERR_LIMIT)
 		d->unsupported = 1U;
@@ -323,6 +327,12 @@ static int pull_block(struct sdk_video_webm *d, struct webm_block *blk)
 	if (rc < 0 && d->demux.error == WEBM_ERR_NEED) {
 		d->demux = saved;
 		webm_window_rewind(&d->win);
+		/* An element (or skip) larger than the window would leave the
+		 * client feeding a full window forever. */
+		if (webm_window_exhausted(&d->win, d->win.mark)) {
+			d->unsupported = 1U;
+			return -1;
+		}
 		return 0;
 	}
 	if (rc == 0) {
@@ -754,8 +764,16 @@ static int webm_write(void *opaque, const uint8_t *src, uint32_t length,
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
 	if (d->opened)
 		webm_window_compact(&d->win);
-	if (length > webm_window_space(&d->win))
+	/* Take what fits: a write larger than the space left would otherwise
+	 * be refused forever once the window is nearly full, and the demux
+	 * could never see the window as exhausted. The stream reports the
+	 * accepted count and the client resumes from there. */
+	if (length != 0U && webm_window_space(&d->win) == 0U)
 		return SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE;
+	if (length > webm_window_space(&d->win)) {
+		length = webm_window_space(&d->win);
+		eof = 0;
+	}
 #ifndef SDK_VIDEO_HOST_TEST
 	jumped = 0;
 	if (setjmp(d->alloc_fail) != 0)

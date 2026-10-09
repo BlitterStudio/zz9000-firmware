@@ -98,3 +98,13 @@ void webm_window_rewind(struct webm_window *w)
 {
 	w->cursor = w->mark;
 }
+
+int webm_window_exhausted(const struct webm_window *w, uint32_t origin)
+{
+	uint32_t end = w->start + w->filled;
+
+	/* Compaction can drop everything before origin, never past it, so
+	 * end - origin is the most a retry from origin could ever see. */
+	return !w->eof && origin >= w->start && origin <= end &&
+	       end - origin >= w->cap;
+}

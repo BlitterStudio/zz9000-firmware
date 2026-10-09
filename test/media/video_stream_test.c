@@ -236,11 +236,22 @@ static int test_webm_stream_envelopes(void)
 	    SDK_STATUS_BAD_REQUEST)
 		return 13;
 
-	/* Opus/Vorbis on non-WebM container -> UNSUPPORTED. */
+	/* Opus/Vorbis on non-WebM container -> UNSUPPORTED. The mock serves
+	 * MPEG-1 PS here, so a backend exists and only the audio/container
+	 * guard can refuse. */
+	mock_ops.codec = SDK_VIDEO_CODEC_MPEG1;
+	mock_ops.container = SDK_VIDEO_CONTAINER_MPEG_PS;
+	mock_ops.geometry_ok = 0;
 	begin.codec = SDK_VIDEO_CODEC_MPEG1;
 	begin.container = SDK_VIDEO_CONTAINER_MPEG_PS;
 	begin.width = 320U;
 	begin.height = 240U;
+	begin.audio_codec = SDK_MEDIA_AUDIO_MP2;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_OK)
+		return 19;
+	sdk_video_stream_close(result.session, &result);
 	begin.audio_codec = SDK_MEDIA_AUDIO_OPUS;
 	if (sdk_video_stream_begin_owned(
 		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
@@ -251,6 +262,9 @@ static int test_webm_stream_envelopes(void)
 		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
 	    SDK_STATUS_UNSUPPORTED)
 		return 15;
+	mock_ops.codec = SDK_VIDEO_CODEC_VP8;
+	mock_ops.container = SDK_VIDEO_CONTAINER_WEBM;
+	mock_ops.geometry_ok = mock_webm_geometry_ok;
 
 	/* Portrait and odd dimensions pass the size check. */
 	begin.codec = SDK_VIDEO_CODEC_VP8;

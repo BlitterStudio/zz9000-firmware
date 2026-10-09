@@ -41,5 +41,9 @@ int webm_window_append(struct webm_window *w, const uint8_t *src, uint32_t n);
 void webm_window_compact(struct webm_window *w);
 void webm_window_mark(struct webm_window *w);
 void webm_window_rewind(struct webm_window *w);
+/* 1 when the demux, restarting from stream offset `origin`, already has a
+ * whole window of input and still needs more: no write can ever complete
+ * that call, so the stream must fail instead of waiting. */
+int webm_window_exhausted(const struct webm_window *w, uint32_t origin);
 
 #endif

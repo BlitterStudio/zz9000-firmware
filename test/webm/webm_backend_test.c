@@ -262,6 +262,24 @@ static void test_window(void)
 	check(io.read(io.ctx, out, 3) == 3 && memcmp(out, src + 7, 3) == 0,
 	      "read after rewind");
 	check(io.seek(io.ctx, 20) == -2, "seek past fill needs input");
+	/* Retrying from the mark (7) with 3 bytes held: more input can help. */
+	check(!webm_window_exhausted(&w, 7U), "partial window not exhausted");
+	{
+		struct webm_window full;
+		uint8_t fstore[8];
+
+		/* A retry from offset 0 that already holds a whole window
+		 * and still needs input can never complete. */
+		webm_window_init(&full, fstore, sizeof(fstore));
+		check(webm_window_append(&full, src, 8), "fill small window");
+		check(webm_window_exhausted(&full, 0U),
+		      "full window from the retry origin is exhausted");
+		check(!webm_window_exhausted(&full, 2U),
+		      "compaction past the origin can still make room");
+		full.eof = 1;
+		check(!webm_window_exhausted(&full, 0U),
+		      "at EOF the demux ends instead of waiting");
+	}
 	check(io.seek(io.ctx, 10) == 0, "seek to filled edge");
 
 	/* Compaction drops consumed bytes but keeps absolute offsets. */
@@ -512,12 +530,62 @@ static void test_invisible_frame(void)
 	ops->destroy(dec);
 }
 
+/* A Void inside the Cluster larger than the whole input window: the
+ * client fills the window, the demux still needs the rest of the Void,
+ * and nothing can ever free room. The stream must fail as unsupported
+ * instead of answering BUSY/NEED_INPUT forever. */
+static void test_window_exhausted_by_skip(void)
+{
+	static struct stream s;
+	static uint8_t zeros[64U * 1024U];
+	/* Void, 8-byte size 16 MiB. */
+	static const uint8_t void_head[] = {
+		0xEC, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00
+	};
+	void *dec = open_decoder();
+	uint32_t fed = 0U;
+	int rc = SDK_VIDEO_BACKEND_NEED_INPUT;
+
+	stream_head(&s);
+	stream_block(&s, 1, 1);
+	check(feed(dec, s.bytes, s.n, s.n), "head + keyframe write");
+	check(decode(dec) == SDK_VIDEO_BACKEND_FRAME, "keyframe decodes");
+	check(feed(dec, void_head, sizeof(void_head), sizeof(void_head)),
+	      "huge Void header write");
+	for (;;) {
+		uint32_t accepted = 0U;
+		int wr = ops->write(dec, zeros, sizeof(zeros), 0, &accepted);
+
+		rc = decode(dec);
+		if (rc != SDK_VIDEO_BACKEND_NEED_INPUT)
+			break;
+		if (wr != SDK_VIDEO_BACKEND_WRITE_OK)
+			break;
+		fed += accepted;
+		if (fed > 32U * 1024U * 1024U)
+			break;
+	}
+	check(rc == SDK_VIDEO_BACKEND_UNSUPPORTED,
+	      "skip larger than the window fails instead of waiting");
+	ops->destroy(dec);
+}
+
 int main(void)
 {
 	ops = sdk_video_webm_ops(SDK_VIDEO_CODEC_VP8);
 	check(ops != 0, "VP8 ops");
 	check(ops && ops->geometry_ok && ops->geometry_ok(1920U, 1088U) &&
 	      !ops->geometry_ok(1921U, 1080U), "backend owns WebM geometry");
+	{
+		const struct SDKVideoDecoderOps *vp9 =
+			sdk_video_webm_ops(SDK_VIDEO_CODEC_VP9);
+
+		/* Portrait phone sizes must reach the VP9 backend too. */
+		check(vp9 && vp9->geometry_ok &&
+		      vp9->geometry_ok(1080U, 1920U) &&
+		      !vp9->geometry_ok(1088U, 1921U),
+		      "VP9 backend owns WebM geometry");
+	}
 	test_window();
 	if (ops) {
 		test_chunked_feed();
@@ -525,6 +593,7 @@ int main(void)
 		test_skip_without_keyframe();
 		test_skip_budget();
 		test_invisible_frame();
+		test_window_exhausted_by_skip();
 	}
 	if (failures) {
 		fprintf(stderr, "webm_backend_test: %d failure(s)\n", failures);

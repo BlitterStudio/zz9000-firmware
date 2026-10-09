@@ -363,7 +363,10 @@ uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
 		session->bytes_accepted = 0xffffffffU;
 	else
 		session->bytes_accepted += accepted;
-	if ((write->flags & SDK_VIDEO_SESSION_WRITE_EOF) != 0U)
+	/* A backend may take part of a write; EOF holds only once the last
+	 * byte of the final write is in. */
+	if ((write->flags & SDK_VIDEO_SESSION_WRITE_EOF) != 0U &&
+	    accepted == write->src_length)
 		session->input_eof = 1U;
 	update_info(session);
 
