@@ -92,6 +92,9 @@ m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga
   build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o \
   build/m68k/zz9k-image-window-resident.o \
   amiga/datatypes/zz9k_picture_datatype.c -o build/zz9k-picture.datatype
+m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
+  build/m68k/zz9k_host.o amiga/datatypes/zz9k_sound_datatype.c \
+  -o build/zz9k-sound.datatype
 m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zz9k-smoke.c -o build/zz9k-smoke
 m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zz9k-surface-info.c -o build/zz9k-surface-info
 m68k-amigaos-gcc $CFLAGS build/m68k/zz9k_host.o tools/zz9k-palette.c -o build/zz9k-palette

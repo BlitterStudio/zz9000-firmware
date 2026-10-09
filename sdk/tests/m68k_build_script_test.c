@@ -155,6 +155,9 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name,
                         "amiga/datatypes/zz9k_picture_datatype.c");
   ok &= expect_contains(script, name, "build/zz9k-picture.datatype");
+  ok &= expect_contains(script, name,
+                        "amiga/datatypes/zz9k_sound_datatype.c");
+  ok &= expect_contains(script, name, "build/zz9k-sound.datatype");
   ok &= expect_not_contains(script, name, "-Wl,--gc-sections");
   ok &= expect_contains(script, name, "tools/zz9k-surfaceops.c");
   ok &= expect_contains(script, name,
@@ -199,6 +202,7 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name, "build/zz9k-view");
   ok &= expect_contains(script, name, "build/zz9k-dtprobe");
   ok &= expect_contains(script, name, "build/zz9k-picture.datatype");
+  ok &= expect_contains(script, name, "build/zz9k-sound.datatype");
   ok &= expect_contains(script, name, "build/zz9k-surfaceops");
 
   free(script);

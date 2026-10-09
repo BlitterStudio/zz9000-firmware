@@ -1337,6 +1337,12 @@ add_test(
   COMMAND datatype_probe_source_test
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-dtprobe.c
 )
+add_executable(sound_datatype_contract_test
+  tests/sound_datatype_contract_test.c
+)
+
+add_test(NAME sound_datatype_contract_test
+         COMMAND sound_datatype_contract_test)
 
 add_executable(datatype_descriptor_test
   tests/datatype_descriptor_test.c
