@@ -10,6 +10,10 @@ static const char *const zzplay_mpeg_ps_extensions[] = {
   "mpg", "mpeg", NULL
 };
 
+static const char *const zzplay_webm_extensions[] = {
+  "webm", "mkv", NULL
+};
+
 static const char *const zzplay_mp3_extensions[] = {
   "mp3", NULL
 };
@@ -29,6 +33,12 @@ static const ZZPlayFormat zzplay_formats_table[] = {
     ZZPLAY_MEDIA_KIND_MPEG_PS,
     "MPEG-1 Program Stream",
     zzplay_mpeg_ps_extensions,
+    ZZPLAY_FORMAT_HAS_VIDEO
+  },
+  {
+    ZZPLAY_MEDIA_KIND_WEBM,
+    "WebM",
+    zzplay_webm_extensions,
     ZZPLAY_FORMAT_HAS_VIDEO
   },
   {

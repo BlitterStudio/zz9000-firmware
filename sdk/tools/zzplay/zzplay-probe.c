@@ -298,6 +298,12 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
     return 0;
   }
   got = fread(buffer, 1U, sizeof(buffer), file);
+  if (got >= 4U && buffer[0] == 0x1AU && buffer[1] == 0x45U &&
+      buffer[2] == 0xDFU && buffer[3] == 0xA3U &&
+      zzplay_probe_webm_file(file, &info->webm)) {
+    info->kind = ZZPLAY_MEDIA_KIND_WEBM;
+    goto done;
+  }
   if (got >= ZZ9K_WEBP_HEADER_MIN_BYTES &&
       zzplay_probe_webp(buffer, got, &info->webp)) {
     if (info->webp.is_animated) {

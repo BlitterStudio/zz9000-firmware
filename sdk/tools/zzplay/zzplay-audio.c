@@ -34,6 +34,13 @@ static ZZPlayBackendAvailability zzplay_audio_availability(
   return ZZPLAY_BACKEND_FREE;
 }
 
+static int zzplay_audio_is_program(ZZPlayMediaAudio media)
+{
+  return media == ZZPLAY_MEDIA_AUDIO_MP2 ||
+         media == ZZPLAY_MEDIA_AUDIO_OPUS ||
+         media == ZZPLAY_MEDIA_AUDIO_VORBIS;
+}
+
 static int zzplay_audio_supports(ZZPlayMediaAudio media,
                                  ZZPlayAudioBackend backend)
 {
@@ -44,11 +51,11 @@ static int zzplay_audio_supports(ZZPlayMediaAudio media,
     return media == ZZPLAY_MEDIA_AUDIO_MP3;
   }
   if (backend == ZZPLAY_AUDIO_AHI) {
-    return media == ZZPLAY_MEDIA_AUDIO_MP2 ||
-           media == ZZPLAY_MEDIA_AUDIO_MP3;
+    return media == ZZPLAY_MEDIA_AUDIO_MP3 ||
+           zzplay_audio_is_program(media);
   }
   if (backend == ZZPLAY_AUDIO_AX) {
-    return media == ZZPLAY_MEDIA_AUDIO_MP2;
+    return zzplay_audio_is_program(media);
   }
   return 0;
 }
@@ -99,7 +106,7 @@ ZZPlayBackendDecision zzplay_audio_select(
       return decision;
     }
   }
-  if (media == ZZPLAY_MEDIA_AUDIO_MP2) {
+  if (zzplay_audio_is_program(media)) {
     decision = zzplay_audio_select_explicit(media, ZZPLAY_AUDIO_AX,
                                             availability);
     if (decision.status == ZZPLAY_BACKEND_OK) {
@@ -111,10 +118,10 @@ ZZPlayBackendDecision zzplay_audio_select(
   if (decision.status == ZZPLAY_BACKEND_OK) {
     decision.fell_back =
         media == ZZPLAY_MEDIA_AUDIO_MP3 ||
-        media == ZZPLAY_MEDIA_AUDIO_MP2;
+        zzplay_audio_is_program(media);
     return decision;
   }
-  if (media == ZZPLAY_MEDIA_AUDIO_MP2) {
+  if (zzplay_audio_is_program(media)) {
     return decision;
   }
   return decision;

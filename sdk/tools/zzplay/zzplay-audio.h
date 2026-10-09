@@ -18,7 +18,9 @@ typedef enum ZZPlayAudioBackend {
 typedef enum ZZPlayMediaAudio {
   ZZPLAY_MEDIA_AUDIO_NONE = 0,
   ZZPLAY_MEDIA_AUDIO_MP2,
-  ZZPLAY_MEDIA_AUDIO_MP3
+  ZZPLAY_MEDIA_AUDIO_MP3,
+  ZZPLAY_MEDIA_AUDIO_OPUS,
+  ZZPLAY_MEDIA_AUDIO_VORBIS
 } ZZPlayMediaAudio;
 
 typedef enum ZZPlayBackendAvailability {

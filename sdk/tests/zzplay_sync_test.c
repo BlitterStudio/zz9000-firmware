@@ -78,6 +78,18 @@ static int check_audio_starvation_recovery(void)
              ZZPLAY_SYNC_DISCARD, 0U, 960U) == ZZPLAY_SYNC_DISCARD;
 }
 
+static int check_keyframe_skip(void)
+{
+  /* 500 ms is 45000 ticks. Only a larger lag skips. */
+  return !zzplay_sync_needs_keyframe_skip(0) &&
+         !zzplay_sync_needs_keyframe_skip(1800) &&
+         !zzplay_sync_needs_keyframe_skip(-3600) &&
+         !zzplay_sync_needs_keyframe_skip(-45000) &&
+         zzplay_sync_needs_keyframe_skip(-45001) &&
+         zzplay_sync_needs_keyframe_skip(INT64_MIN);
+}
+
+
 int main(void)
 {
   if (!check_periods()) {
@@ -94,6 +106,9 @@ int main(void)
   }
   if (!check_audio_starvation_recovery()) {
     return 5;
+  }
+  if (!check_keyframe_skip()) {
+    return 6;
   }
   return 0;
 }

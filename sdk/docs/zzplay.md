@@ -1,6 +1,6 @@
 # ZZPlay — the ZZ9000 accelerated media player
 
-ZZPlay plays MPEG-1 Program Streams, MP3, native FLAC and Ogg Vorbis files using the ZZ9000's ARM
+ZZPlay plays MPEG-1 Program Streams, WebM, MP3, native FLAC and Ogg Vorbis files using the ZZ9000's ARM
 coprocessor and FPGA video overlay. Video decoding happens on the card; on the
 accelerated Zorro III path no decoded video ever crosses the Zorro bus.
 
@@ -18,16 +18,33 @@ It works two ways:
 | --- | --- | --- |
 | MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video, card-decoded | MPEG-1 Layer II, card-decoded |
 | MPEG-1 Program Stream, video only | MPEG-1 video, card-decoded | none (a warning is printed) |
+| WebM (`.webm`, `.mkv`) | VP8 up to 1280x720 pixels, or VP9 up to 854x480, card-decoded, either orientation | Opus at 48 kHz, or Vorbis at 8 to 96 kHz, card-decoded; on the card when the firmware advertises it, otherwise AHI |
+| WebM, larger than that but within 1920 on the long side and 1920x1088 pixels | same codecs, best effort | audio stays continuous; video may skip ahead to the next keyframe |
+| WebM, video only | VP8 or VP9, card-decoded | none (a warning is printed) |
 | MPEG Layer III (`.mp3`) | — | card-decoded, CBR and VBR, mono or stereo |
 | Native FLAC (`.flac`) | — | card-decoded, mono or stereo, 4 to 24 bits, 8 to 192 kHz; on the card when the AX output can play the rate, otherwise AHI. Wider than 16 bits is narrowed to 16-bit |
 | Ogg Vorbis (`.ogg`, `.oga`) | — | card-decoded, one logical stream, mono or stereo, 8 to 192 kHz; on the card when the AX output can play the rate, otherwise AHI |
 | Animated WebP (`.webp`) | WebP animation, card-decoded | none |
 | Playlist (`.m3u`, `.m3u8`) | the files it lists | |
 
-The format is chosen by inspecting the file, not by its name. MPEG-1
-elementary streams, standalone MP2, MPEG-2, Ogg-FLAC, Ogg Opus, multichannel FLAC/Vorbis and other codecs are rejected with
+The format is chosen by inspecting the file, not by its name. A WebM file is
+recognised by its EBML header and a `webm` DocType, so a misnamed file still
+plays and a Matroska file that is not WebM is refused. MPEG-1
+elementary streams, standalone MP2, MPEG-2, Ogg-FLAC, Ogg Opus, multichannel FLAC/Vorbis, a second WebM video track, an unknown WebM codec and other codecs are rejected with
 a specific message rather than being half-played. File extensions only decide
 what a drawer scan or the file requester offers.
+
+WebM larger than the realtime sizes above is not refused. The window says
+that frames may be skipped. Audio, when there is any, keeps playing; video
+jumps to the next keyframe only when it is more than about half a second
+behind the sound. A video-only file is paced by its frame rate instead, so
+it does not skip. Anything past a 1920-pixel long side, or past 1920x1088
+pixels, is refused before playback starts. Portrait frames, including odd
+sizes, are fitted to the window and to fullscreen with the aspect preserved
+and black bars at the sides rather than stretched. If the file names a
+display size different from the coded frame, that aspect is what the window
+uses. A projection roll hint is printed when progress output is on and is
+not applied.
 
 ZZPlay keeps its formats in one registry, so support for further formats is
 added as the card's decoders grow; the *About* requester lists what the
@@ -87,7 +104,7 @@ From top to bottom:
   use, the elapsed and total time and the playback state, and a message line
   for notices and errors.
 - **Position slider**: drag it to seek. Seeking is available for MP3; it is
-  greyed out for MPEG-1 video, FLAC and Ogg Vorbis, which play from the start.
+  greyed out for MPEG-1 video, WebM, FLAC and Ogg Vorbis, which play from the start.
 - **Transport**: previous, play, pause, stop, next.
 - **Volume**: greyed out when the active output cannot change volume (see
   below).
@@ -213,8 +230,12 @@ and the player window shows what it chose.
   and free, and otherwise uses accelerated decode plus AHI.
 - For **Program Stream MP2**, `AUTO` uses AHI, or direct AX where the firmware
   advertises it.
-- MHI is never offered for Program Stream audio: it is a Layer III interface.
-  Asking for it explicitly reports that rather than playing silently.
+- MHI is never offered for Program Stream or WebM audio: it is a Layer III
+  interface. Asking for it explicitly reports that rather than playing silently.
+- **WebM Opus and Vorbis** use the video-sound choice: on the card when the
+  firmware advertises the matching codec, otherwise AHI. Opus is always
+  48 kHz. Vorbis uses the rate in the file, from 8 to 96 kHz. Firmware that
+  does not advertise WebM reports that rather than starting.
 - **FLAC** and **Ogg Vorbis** `AUTO` plays them on the card. The card decodes
   to 16-bit little-endian and the ZZ9000AX output consumes that PCM, so
   nothing is read back over the bus. If that output is refused — older

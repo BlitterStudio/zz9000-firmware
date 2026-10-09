@@ -4,6 +4,8 @@
 #ifndef ZZPLAY_PROBE_H
 #define ZZPLAY_PROBE_H
 
+#include "zzplay-webm.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -59,7 +61,8 @@ typedef enum ZZPlayMediaKind {
   ZZPLAY_MEDIA_KIND_MP3,
   ZZPLAY_MEDIA_KIND_WEBP,
   ZZPLAY_MEDIA_KIND_FLAC,
-  ZZPLAY_MEDIA_KIND_VORBIS
+  ZZPLAY_MEDIA_KIND_VORBIS,
+  ZZPLAY_MEDIA_KIND_WEBM
 } ZZPlayMediaKind;
 
 typedef struct ZZPlayProbeInfo {
@@ -69,6 +72,7 @@ typedef struct ZZPlayProbeInfo {
   ZZPlayWebPInfo webp;
   ZZPlayFLACInfo flac;
   ZZPlayVorbisInfo vorbis;
+  ZZPlayWebMInfo webm;
 } ZZPlayProbeInfo;
 
 uint32_t zzplay_mpeg_frame_rate_milli(uint8_t code);

@@ -39,4 +39,8 @@ int zzplay_sync_audio_may_start(uint64_t video_pts,
                                 uint64_t audio_origin_pts,
                                 uint64_t allowed_lead_pts);
 
+/* Video is more than 500 ms behind the audio master. Small lags stay on
+ * the ordinary late-frame discard path; this one asks the card to drop
+ * compressed video through the next keyframe. */
+int zzplay_sync_needs_keyframe_skip(int64_t drift_pts);
 #endif /* ZZPLAY_SYNC_H */
