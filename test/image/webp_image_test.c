@@ -817,8 +817,10 @@ static int test_allocation_failures(unsigned *attempts_out, size_t *peak_out)
                                              heights[source_index], 0U,
                                              &attempts, &source_peak),
                  "Could not establish WebP allocation baseline");
-    TEST_REQUIRE(attempts > 1U,
-                 "WebP test allocator did not reach codec allocation sites");
+    /* Codec allocations come out of the session arena, so the host heap
+     * only sees region requests; each one must fail cleanly. */
+    TEST_REQUIRE(attempts >= 1U,
+                 "WebP arena never requested a region from the decode heap");
     for (failure = 1U; failure <= attempts; ++failure) {
       TEST_REQUIRE(run_allocation_failure_case(sources[source_index],
                                                lengths[source_index],
@@ -865,7 +867,7 @@ int main(void)
     return 2;
   if (!test_allocation_failures(&allocation_attempts, &peak_bytes))
     return 2;
-  printf("WebP allocation tracking: %u allocation sites, peak %zu bytes\n",
+  printf("WebP allocation tracking: %u region requests, peak %zu bytes\n",
          allocation_attempts, peak_bytes);
   return 0;
 }

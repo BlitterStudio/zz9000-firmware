@@ -14,6 +14,7 @@
  */
 #include "sdk_decode_reclaim.h"
 #include "sdk_image_stream.h"
+#include "sdk_vorbis_alloc.h"
 #include "sdk_webp_alloc.h"
 #include "memorymap.h"
 #include <sys/mman.h>
@@ -204,14 +205,17 @@ static int pip_matches_reference(const uint8_t *pip, const uint8_t *ref_rgba,
   return 1;
 }
 
-/* Independent oracle over the same fixture bytes. The quota pointer is
- * cleared first so oracle allocations never bill the engine session's
- * budget (the allocator context is process-global on the host build). */
+/* Independent oracle over the same fixture bytes. The host libwebp build
+ * routes allocations through the same shim as the engine, so the oracle
+ * owns a separate arena and selects it before every libwebp call; nothing
+ * it allocates is billed to an engine session. */
 struct ref_decoder {
   WebPAnimDecoder *dec;
   uint32_t loop_count;
   uint32_t frame_count;
 };
+
+static struct sdk_vorbis_heap ref_heap;
 
 static int ref_open(struct ref_decoder *ref, const uint8_t *data, size_t len)
 {
@@ -220,7 +224,8 @@ static int ref_open(struct ref_decoder *ref, const uint8_t *data, size_t len)
   WebPAnimInfo info;
 
   memset(ref, 0, sizeof(*ref));
-  sdk_webp_alloc_set_quota(0, 0);
+  sdk_vorbis_heap_init(&ref_heap, 256U * 1024U, 64U * 1024U * 1024U);
+  sdk_webp_alloc_select(&ref_heap);
   if (!WebPAnimDecoderOptionsInit(&options))
     return 0;
   options.color_mode = MODE_RGBA;
@@ -234,10 +239,22 @@ static int ref_open(struct ref_decoder *ref, const uint8_t *data, size_t len)
   return 1;
 }
 
+static int ref_next(struct ref_decoder *ref, uint8_t **rgba, int *timestamp)
+{
+  sdk_webp_alloc_select(&ref_heap);
+  return WebPAnimDecoderGetNext(ref->dec, rgba, timestamp);
+}
+
+static void ref_reset(struct ref_decoder *ref)
+{
+  sdk_webp_alloc_select(&ref_heap);
+  WebPAnimDecoderReset(ref->dec);
+}
+
 static void ref_close(struct ref_decoder *ref)
 {
-  if (ref->dec)
-    WebPAnimDecoderDelete(ref->dec);
+  /* Dropping the arena frees everything the oracle allocated. */
+  sdk_vorbis_heap_release(&ref_heap);
   memset(ref, 0, sizeof(*ref));
 }
 
@@ -380,7 +397,7 @@ static int test_animation_next_matches_reference(void)
   for (i = 0U; i < 3U; ++i) {
     uint8_t *rgba;
 
-    TEST_REQUIRE(WebPAnimDecoderGetNext(ref.dec, &rgba, &timestamp),
+    TEST_REQUIRE(ref_next(&ref, &rgba, &timestamp),
                  "reference decoder ran out of frames early");
     memset(&ares, 0, sizeof(ares));
     TEST_REQUIRE(sdk_image_stream_frame_next(session, 0U, &ares) ==
@@ -411,9 +428,9 @@ static int test_animation_next_matches_reference(void)
   {
     uint8_t *rgba;
 
-    WebPAnimDecoderReset(ref.dec);
+    ref_reset(&ref);
     TEST_REQUIRE(1, "");
-    TEST_REQUIRE(WebPAnimDecoderGetNext(ref.dec, &rgba, &timestamp),
+    TEST_REQUIRE(ref_next(&ref, &rgba, &timestamp),
                  "reference could not restart for the wrap check");
     memset(&ares, 0, sizeof(ares));
     TEST_REQUIRE(sdk_image_stream_frame_next(session, 0U, &ares) ==
@@ -545,9 +562,9 @@ static int test_animation_finite_loop_and_restart(void)
 
     if ((i % 3U) == 0U && i != 0U) {
       /* the oracle does not loop by itself; the engine does */
-      WebPAnimDecoderReset(ref.dec);
+      ref_reset(&ref);
     }
-    TEST_REQUIRE(WebPAnimDecoderGetNext(ref.dec, &rgba, &timestamp),
+    TEST_REQUIRE(ref_next(&ref, &rgba, &timestamp),
                  "reference exhausted frames before the native end");
     memset(&ares, 0, sizeof(ares));
     TEST_REQUIRE(sdk_image_stream_frame_next(session, 0U, &ares) ==
@@ -593,9 +610,9 @@ static int test_animation_finite_loop_and_restart(void)
   TEST_REQUIRE(ares.state == SDK_IMAGE_SESSION_STATE_ANIMATION_READY &&
                    ares.loop_count == 2U && ares.frame_token == 0U,
                "RESTART lost the canvas/loop metadata");
-  WebPAnimDecoderReset(ref.dec);
+  ref_reset(&ref);
   TEST_REQUIRE(1, "");
-  TEST_REQUIRE(WebPAnimDecoderGetNext(ref.dec, &rgba, &timestamp),
+  TEST_REQUIRE(ref_next(&ref, &rgba, &timestamp),
                "reference could not reset for the restart check");
   memset(&ares, 0, sizeof(ares));
   TEST_REQUIRE(sdk_image_stream_frame_next(session, 0U, &ares) ==
@@ -776,6 +793,114 @@ static int test_animation_poison_without_uaf(void)
   return 1;
 }
 
+/* ------------------------------- 9: many frames, bounded tracker slots */
+
+/* Repeats the first ANMF chunk of the 3-frame fixture `frames` times
+ * behind its RIFF/VP8X/ANIM header. Returns a malloc'd container. */
+static uint8_t *build_long_animation(uint32_t frames, size_t *length)
+{
+  const uint8_t *src = webp_anim3_blend_dispose_8x6;
+  size_t src_len = sizeof(webp_anim3_blend_dispose_8x6);
+  size_t off = 12U, anmf = 0U, anmf_len = 0U, total;
+  uint8_t *out;
+  uint32_t i;
+
+  while (off + 8U <= src_len) {
+    size_t size = (size_t)src[off + 4] | ((size_t)src[off + 5] << 8) |
+                  ((size_t)src[off + 6] << 16) | ((size_t)src[off + 7] << 24);
+
+    if (memcmp(src + off, "ANMF", 4U) == 0) {
+      anmf = off;
+      anmf_len = 8U + size + (size & 1U);
+      break;
+    }
+    off += 8U + size + (size & 1U);
+  }
+  if (anmf_len == 0U)
+    return 0;
+  total = anmf + (size_t)frames * anmf_len;
+  out = (uint8_t *)malloc(total);
+  if (!out)
+    return 0;
+  memcpy(out, src, anmf);
+  for (i = 0U; i < frames; ++i)
+    memcpy(out + anmf + (size_t)i * anmf_len, src + anmf, anmf_len);
+  out[4] = (uint8_t)(total - 8U);
+  out[5] = (uint8_t)((total - 8U) >> 8);
+  out[6] = (uint8_t)((total - 8U) >> 16);
+  out[7] = (uint8_t)((total - 8U) >> 24);
+  *length = total;
+  return out;
+}
+
+/* libwebp's demuxer allocates per frame. On hardware a 72-frame clip
+ * exhausted the 64-slot core-1 decode tracker and failed as out of memory;
+ * the session arena must keep the tracked-block count bounded however long
+ * the animation is, and every frame must still match the reference. */
+static int test_animation_many_frames_bounded_slots(void)
+{
+  enum { FRAMES = 120 };
+  struct SDKImageAnimationFrameResult ares;
+  struct SDKImageStreamResult sres;
+  struct ref_decoder ref;
+  uint8_t pip[PIP_LEN];
+  uint8_t *expected;
+  uint8_t *data;
+  size_t length = 0U;
+  uint32_t session = 0U;
+  uint32_t max_tracked = 0U;
+  uint32_t i;
+  int timestamp = 0;
+
+  host_runtime_reset();
+  data = build_long_animation(FRAMES, &length);
+  expected = (uint8_t *)malloc((size_t)FRAMES * PIP_LEN);
+  TEST_REQUIRE(data && expected, "cannot build the long animation");
+
+  TEST_REQUIRE(ref_open(&ref, data, length) && ref.frame_count == FRAMES,
+               "reference rejected the long animation");
+  for (i = 0U; i < FRAMES; ++i) {
+    uint8_t *rgba;
+
+    TEST_REQUIRE(ref_next(&ref, &rgba, &timestamp),
+                 "reference ran out of frames");
+    memset(expected + (size_t)i * PIP_LEN, PAD_BYTE, PIP_LEN);
+    ref_rgba_to_yuv422cgx(rgba, CANVAS_W, CANVAS_H,
+                          expected + (size_t)i * PIP_LEN, PIP_PITCH);
+  }
+  ref_close(&ref);
+  TEST_REQUIRE(sdk_decode_tracked_count() == 0U,
+               "reference left tracked blocks behind");
+
+  TEST_REQUIRE(animation_open_and_feed(data, length, pip, &sres, &session) ==
+                   SDK_STATUS_OK,
+               "long animation did not reach ready");
+  for (i = 0U; i < FRAMES; ++i) {
+    memset(&ares, 0, sizeof(ares));
+    TEST_REQUIRE(sdk_image_stream_frame_next(session, 0U, &ares) ==
+                     SDK_STATUS_OK &&
+                     ares.frame_index == i,
+                 "long animation NEXT failed");
+    if (sdk_decode_tracked_count() > max_tracked)
+      max_tracked = sdk_decode_tracked_count();
+    TEST_REQUIRE(memcmp(pip, expected + (size_t)i * PIP_LEN, PIP_LEN) == 0,
+                 "long animation frame mismatch");
+    TEST_REQUIRE(retire_current(session, ares.frame_token, &ares),
+                 "long animation frame cycle failed");
+  }
+  TEST_REQUIRE(max_tracked <= SDK_VORBIS_HEAP_MAX_REGIONS,
+               "long animation held more tracked blocks than its arena");
+  TEST_REQUIRE(sdk_image_stream_close(session) == SDK_STATUS_OK &&
+                   sdk_decode_tracked_count() == 0U,
+               "long animation close left tracked blocks");
+  printf("long animation: %u frames, at most %u tracked blocks\n",
+         (unsigned)FRAMES, (unsigned)max_tracked);
+  free(expected);
+  free(data);
+  host_runtime_reset();
+  return 1;
+}
+
 /* ------------------------------------------------------------------ main */
 
 static int failures;
@@ -816,6 +941,8 @@ int main(void)
            test_animation_close_releases_everything);
   run_test("animation core-1 poison without UAF",
            test_animation_poison_without_uaf);
+  run_test("animation of 120 frames holds a bounded arena",
+           test_animation_many_frames_bounded_slots);
 
   printf("WebP animation host peak allocated bytes: %zu\n",
          host_runtime_peak_allocated_bytes());
