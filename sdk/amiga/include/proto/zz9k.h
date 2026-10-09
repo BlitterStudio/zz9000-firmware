@@ -968,6 +968,23 @@ static __inline int __ZZ9KImageAnimationRestartInline(
 #define ZZ9KImageAnimationRestart(session, flags, result) \
   __ZZ9KImageAnimationRestartInline((session), (flags), (result))
 
+static __inline int __ZZ9KAudioStreamBeginExInline(
+    const ZZ9KAudioStreamBeginExDesc *desc,
+    ZZ9KAudioStreamResult *result)
+{
+  register int zz9k_d0 __asm("d0");
+  register struct Library *zz9k_a6 __asm("a6") = ZZ9KBase;
+  register const ZZ9KAudioStreamBeginExDesc *zz9k_a0 __asm("a0") = desc;
+  register ZZ9KAudioStreamResult *zz9k_a1 __asm("a1") = result;
+  __asm volatile("jsr -348(a6)"
+                 : "=r"(zz9k_d0), "+r"(zz9k_a0), "+r"(zz9k_a1)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_A0_A1);
+  return zz9k_d0;
+}
+#define ZZ9KAudioStreamBeginEx(desc, result) \
+  __ZZ9KAudioStreamBeginExInline((desc), (result))
+
 
 #endif
 

@@ -2678,6 +2678,65 @@ static int test_audio_stream_helpers_roundtrip_results(void)
   return 0;
 }
 
+static int test_audio_stream_begin_ex_roundtrip_results(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KContext *ctx;
+  ZZ9KBoard board;
+  ZZ9KAudioStreamBeginExDesc begin;
+  ZZ9KAudioStreamResult result;
+
+  init_mailbox(&mailbox);
+  memset(&board, 0, sizeof(board));
+  memset(&begin, 0, sizeof(begin));
+  begin.codec = ZZ9K_AUDIO_CODEC_MP3;
+  begin.input_ring_handle = 0x40000080UL;
+  begin.input_ring_capacity = 524288U;
+  begin.pcm_ring_handle = 0x40000081UL;
+  begin.pcm_ring_capacity = 1048576U;
+  begin.output_format = ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE;
+  begin.low_water_bytes = 32768U;
+  begin.high_water_bytes = 65536U;
+
+  prepare_completion(&mailbox, 1, ZZ9K_OP_AUDIO_STREAM_BEGIN_EX,
+                     ZZ9K_STATUS_OK,
+                     sizeof(ZZ9KAudioStreamResultPayload));
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[0], 12U);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[4],
+                ZZ9K_AUDIO_STREAM_STATE_STREAMING);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[16],
+                ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE);
+
+  if (zz9k_attach_mailbox(&ctx, &board, &mailbox.descriptor, 0, 0) !=
+      ZZ9K_STATUS_OK) {
+    return 1;
+  }
+
+  memset(&result, 0, sizeof(result));
+  if (zz9k_audio_stream_begin_ex(ctx, &begin, &result) != ZZ9K_STATUS_OK) {
+    zz9k_close(ctx);
+    return 2;
+  }
+  if (zz9k_get_be16(mailbox.request_ring[0].opcode) !=
+      ZZ9K_OP_AUDIO_STREAM_BEGIN_EX) {
+    zz9k_close(ctx);
+    return 3;
+  }
+  if (zz9k_get_be32(&mailbox.request_ring[0].payload[0]) !=
+          ZZ9K_AUDIO_CODEC_MP3 ||
+      zz9k_get_be32(&mailbox.request_ring[0].payload[4]) !=
+          0x40000080UL ||
+      zz9k_get_be32(&mailbox.request_ring[0].payload[16]) != 1048576U ||
+      result.session != 12U ||
+      result.state != ZZ9K_AUDIO_STREAM_STATE_STREAMING) {
+    zz9k_close(ctx);
+    return 4;
+  }
+
+  zz9k_close(ctx);
+  return 0;
+}
+
 static int test_audio_stream_play_stop_roundtrip_results(void)
 {
   struct TestMailbox mailbox;
@@ -3168,6 +3227,9 @@ int main(void)
 
   result = test_audio_stream_helpers_roundtrip_results();
   if (result) return 344 + result;
+
+  result = test_audio_stream_begin_ex_roundtrip_results();
+  if (result) return 372 + result;
 
   result = test_audio_stream_play_stop_roundtrip_results();
   if (result) return 370 + result;

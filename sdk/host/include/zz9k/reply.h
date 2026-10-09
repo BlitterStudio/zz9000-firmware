@@ -556,6 +556,7 @@ static inline int zz9k_reply_audio_stream_result(
 
   if (!result ||
       (opcode != ZZ9K_OP_AUDIO_STREAM_BEGIN &&
+       opcode != ZZ9K_OP_AUDIO_STREAM_BEGIN_EX &&
        opcode != ZZ9K_OP_AUDIO_STREAM_FEED &&
        opcode != ZZ9K_OP_AUDIO_STREAM_READ &&
        opcode != ZZ9K_OP_AUDIO_STREAM_CLOSE &&

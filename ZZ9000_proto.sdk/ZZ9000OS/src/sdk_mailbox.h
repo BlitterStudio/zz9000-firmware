@@ -71,6 +71,8 @@
  * (docs/audio-fabric.md); now advertised in the audio service word and
  * the global capability set. */
 #define SDK_CAP_AUDIO_FABRIC           (1U << 27)
+#define SDK_CAP_AUDIO_FLAC             (1U << 28)
+#define SDK_CAP_AUDIO_VORBIS           (1U << 29)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
@@ -153,6 +155,8 @@
 #define SDK_SERVICE_FLAG_AUDIO_FABRIC (1U << 22)
 #define SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE (1U << 23)
 #define SDK_SERVICE_FLAG_AUDIO_STREAM_GAIN (1U << 24)
+#define SDK_SERVICE_FLAG_AUDIO_FLAC_STREAM (1U << 25)
+#define SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM (1U << 26)
 #define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
 #define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)
 #define SDK_SERVICE_FLAG_CODEC_GZIP             (1U << 18)
@@ -244,6 +248,7 @@
 #define SDK_OP_AUDIO_RING_ACQUIRE      0x0513U
 #define SDK_OP_AUDIO_RING_RELEASE      0x0514U
 #define SDK_OP_AUDIO_STREAM_GAIN       0x0515U
+#define SDK_OP_AUDIO_STREAM_BEGIN_EX   0x0516U
 
 #define SDK_OP_DECOMPRESS              0x0600U
 #define SDK_OP_DECOMPRESS_TEST         0x0601U
@@ -1039,6 +1044,13 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_AUDIO_SAMPLE_FORMAT_NONE   0U
 #define SDK_AUDIO_SAMPLE_FORMAT_S16LE  1U
 #define SDK_AUDIO_SAMPLE_FORMAT_S16BE  2U
+#define SDK_AUDIO_SAMPLE_FORMAT_S32LE  3U
+#define SDK_AUDIO_SAMPLE_FORMAT_S32BE  4U
+
+#define SDK_AUDIO_CODEC_UNKNOWN        0U
+#define SDK_AUDIO_CODEC_MP3            1U
+#define SDK_AUDIO_CODEC_FLAC           2U
+#define SDK_AUDIO_CODEC_VORBIS         3U
 #define SDK_AUDIO_DECODE_FLAG_EXPECT_END (1U << 0)
 #define SDK_AUDIO_DECODE_RESULT_END    (1U << 0)
 #define SDK_MAX_AUDIO_STREAMS          4U

@@ -255,6 +255,9 @@ int zz9k_decode_mp3(ZZ9KContext *ctx, const ZZ9KAudioDecodeDesc *desc,
 int zz9k_audio_stream_begin(ZZ9KContext *ctx,
                             const ZZ9KAudioStreamBeginDesc *desc,
                             ZZ9KAudioStreamResult *result);
+int zz9k_audio_stream_begin_ex(ZZ9KContext *ctx,
+                               const ZZ9KAudioStreamBeginExDesc *desc,
+                               ZZ9KAudioStreamResult *result);
 int zz9k_audio_stream_feed(ZZ9KContext *ctx,
                            const ZZ9KAudioStreamFeedDesc *desc,
                            ZZ9KAudioStreamResult *result);

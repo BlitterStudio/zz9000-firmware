@@ -738,6 +738,17 @@ int ZZ9KAudioStreamBegin(ZZ9KLibrary *library,
   return zz9k_audio_stream_begin(library->ctx, desc, result);
 }
 
+int ZZ9KAudioStreamBeginEx(ZZ9KLibrary *library,
+                           const ZZ9KAudioStreamBeginExDesc *desc,
+                           ZZ9KAudioStreamResult *result)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_audio_stream_begin_ex(library->ctx, desc, result);
+}
+
 int ZZ9KAudioStreamFeed(ZZ9KLibrary *library,
                         const ZZ9KAudioStreamFeedDesc *desc,
                         ZZ9KAudioStreamResult *result)

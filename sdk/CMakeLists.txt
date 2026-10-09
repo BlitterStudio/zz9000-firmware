@@ -1489,6 +1489,19 @@ target_include_directories(audio_ring_contract_test
 
 add_test(NAME audio_ring_contract_test COMMAND audio_ring_contract_test)
 
+add_executable(audio_stream_contract_test
+  tests/audio_stream_contract_test.c
+)
+
+target_include_directories(audio_stream_contract_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include
+)
+
+add_test(NAME audio_stream_contract_test COMMAND audio_stream_contract_test)
+
 add_executable(zz9k_fabriclease
   tools/zz9k-fabriclease.c
 )
