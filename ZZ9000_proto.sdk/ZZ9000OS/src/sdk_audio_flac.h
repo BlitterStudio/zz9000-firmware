@@ -18,9 +18,11 @@
  * before libFLAC sees it, and all libFLAC allocations are quota-bounded
  * (SDK_FLAC_ALLOC_LIMIT) through sdk_flac_alloc.h.
  *
- * Output: native rate and channels (mono/stereo), interleaved big-endian
- * PCM with each sample MSB-justified in its container (value << (container
- * bits - source bits)): S16BE for 4..16-bit sources, S32BE for 4..24-bit.
+ * Output: native rate and channels (mono/stereo). S16BE is big-endian
+ * and MSB-justified, and refuses a source deeper than 16 bits. S32BE is
+ * the same justification in 32 bits (up to 24-bit sources). S16LE is the
+ * little-endian form of that 16-bit container; a deeper source is narrowed
+ * to the top 16 bits of the 32-bit MSB-justified sample.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -49,7 +51,7 @@ struct sdk_flac_state {
 	uint64_t total_samples;     /* STREAMINFO; 0 = unknown */
 	uint64_t samples_decoded;
 	uint32_t phase;
-	uint32_t output_format;     /* SDK_AUDIO_SAMPLE_FORMAT_S16BE / S32BE */
+	uint32_t output_format;     /* S16BE, S16LE, or S32BE */
 	uint32_t sample_rate;
 	uint32_t channels;
 	uint32_t bits_per_sample;
@@ -72,7 +74,7 @@ struct sdk_flac_state {
 	uint8_t header[42];
 };
 
-/* output_format must be S16BE or S32BE (validated by the caller). */
+/* output_format must be S16BE, S16LE, or S32BE (validated by the caller). */
 void sdk_flac_init(struct sdk_flac_state *st, uint32_t output_format);
 /* Decode as many complete units as input, PCM room and budget allow.
  * Returns SDK_STATUS_OK or the sticky failure status (UNSUPPORTED for a

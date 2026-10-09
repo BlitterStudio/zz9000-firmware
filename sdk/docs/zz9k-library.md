@@ -948,11 +948,12 @@ request may carry `ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE` with a
 grant then answers under sample contract
 `ZZ9K_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE` with the validated
 rate echoed in its `source_rate` result word (populated as 48000 for
-bypass grants). The rate vocabulary is exactly the qualified conversion
-table — 8000, 12000, 24000, 32000, 44100, or 48000 Hz — and firmware
-converts each 20-ms source period (`rate/50 * 4` bytes) to the 48-kHz
-output domain with the qualified per-slot kernel; the ring geometry
-words still describe 3,840-byte periods. Firmware advertising this
+bypass grants). The lease rate vocabulary is the qualified conversion
+table restricted to rates whose 20 ms period is an integer frame count
+that fits one 48 kHz period — 8000, 12000, 16000, 22050, 24000, 32000,
+44100, or 48000 Hz — and firmware converts each 20-ms source period
+(`rate/50 * 4` bytes) to the 48-kHz output domain with the qualified
+per-slot kernel; the ring geometry words still describe 3,840-byte periods. Firmware advertising this
 reports `ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE` in the audio service;
 older firmware rejects any nonzero acquire-flags word with
 `ZZ9K_STATUS_BAD_REQUEST`, which is a client's fallback signal. The
@@ -1908,10 +1909,14 @@ shared-memory streaming state machine (`ZZ9KAudioStreamFeed()`,
 stay unadvertised until physical qualification, so clients refuse FLAC on
 current firmware). Feed the whole native file from byte 0 (`fLaC`);
 firmware skips non-STREAMINFO metadata itself. `output_format` must be
-`S16BE` (sources of at most 16 bits) or `S32BE` (up to 24 bits); LE formats
-answer `ZZ9K_STATUS_UNSUPPORTED` at Begin. Samples are MSB-justified in the
+`S16BE` (sources of at most 16 bits), `S16LE` (the little-endian form of
+that 16-bit container; a deeper source is narrowed to the top 16 bits of
+the 32-bit MSB-justified sample), or `S32BE` (up to 24 bits). `S32LE`
+answers `ZZ9K_STATUS_UNSUPPORTED` at Begin; any other value is
+`ZZ9K_STATUS_BAD_REQUEST`. Samples are MSB-justified in a big-endian
 container (`value << (container_bits - source_bits)`), interleaved, native
-rate and channels; `sample_rate`/`channels` stay 0 until STREAMINFO is
+rate and channels; `S16LE` is that same 16-bit value stored little-endian.
+`sample_rate`/`channels` stay 0 until STREAMINFO is
 parsed. The first Feed that parses STREAMINFO returns
 `ZZ9K_STATUS_UNSUPPORTED` for more than two channels, more than 24 bits,
 `S16BE` with a deeper source, rates outside 8000..192000 Hz, Ogg-FLAC or
@@ -1922,16 +1927,23 @@ the fault status. A frame is decoded only once it is fully buffered (the next
 frame header is present, `FEED_EOF`, or a CRC-verified tail under
 `FEED_DRAIN`), so `input_ring_capacity` must hold at least one compressed
 frame plus a chunk; a ring that cannot accept the next chunk while the decoder
-waits for a frame faults `ZZ9K_STATUS_IO_ERROR`. FLAC sessions are readback
-only: `ZZ9KAudioStreamPlay()` answers `ZZ9K_STATUS_UNSUPPORTED`.
+waits for a frame faults `ZZ9K_STATUS_IO_ERROR`. `ZZ9KAudioStreamPlay()`
+binds an `S16LE` mono or stereo session whose rate the AX pump can convert
+to 48 kHz (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000,
+88200, 96000). Any other format, channel count, or rate answers
+`ZZ9K_STATUS_UNSUPPORTED` (the AHI fallback); Play before the rate is known
+answers `ZZ9K_STATUS_BAD_REQUEST`. Gain, Stop, Play-again, Feed EOF/drain
+and the result fields match an MP3 session. 11025 is converted in 40 ms
+quanta because 20 ms is not an integer frame count.
 
 **Ogg Vorbis sessions** (`ZZ9K_AUDIO_CODEC_VORBIS`, gated by
 `ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM`; both that flag and
 `ZZ9K_CAP_AUDIO_VORBIS` stay unadvertised until physical qualification, so
 clients refuse Vorbis on current firmware). Feed the whole `.ogg`/`.oga` file
 from byte 0 (the identification BOS page). `output_format` must be `S16BE`
-(Tremor's fixed-point output narrowed to 16 bits); other formats answer
-`ZZ9K_STATUS_UNSUPPORTED` at Begin, as does firmware running without its
+or `S16LE` (Tremor's fixed-point output narrowed to 16 bits, stored in the
+requested byte order); 32-bit formats answer `ZZ9K_STATUS_UNSUPPORTED` at
+Begin, as does firmware running without its
 second core (Vorbis decodes only on core 1). Samples are interleaved at the
 native rate and channels; `sample_rate`/`channels` stay 0 until the
 identification header is parsed. The Feed that parses it returns
@@ -1955,8 +1967,10 @@ any size is accepted. Setup headers and audio packets larger than 64 KiB,
 and codebooks with more than 8192 used entries, answer
 `ZZ9K_STATUS_UNSUPPORTED`. Later Feed/Read calls repeat the fault status.
 Firmware copies input into its own page buffer, so any `input_ring_capacity`
-works and a drained session simply waits for the next page. Vorbis sessions
-are readback only: `ZZ9KAudioStreamPlay()` answers `ZZ9K_STATUS_UNSUPPORTED`.
+works and a drained session simply waits for the next page. `ZZ9KAudioStreamPlay()`
+accepts an `S16LE` mono or stereo Vorbis session on the same pump rates as
+FLAC, and answers `ZZ9K_STATUS_UNSUPPORTED` otherwise. Gain, Stop, and the
+result fields match MP3.
 
 `ZZ9KAudioStreamClose()` of a FLAC or Vorbis session never answers
 `ZZ9K_STATUS_BUSY`: the session handle is invalid as soon as Close returns

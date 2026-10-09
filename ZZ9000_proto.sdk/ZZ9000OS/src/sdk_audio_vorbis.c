@@ -426,7 +426,7 @@ static int16_t clip16(ogg_int32_t v)
 }
 
 static void write_pcm(struct sdk_audio_codec_io *io, ogg_int32_t **pcm,
-                      uint32_t channels, uint32_t frames)
+                      uint32_t channels, uint32_t frames, int le)
 {
 	uint32_t pos = (io->pcm_write + io->produced) % io->pcm_capacity;
 	uint32_t i, ch;
@@ -434,11 +434,13 @@ static void write_pcm(struct sdk_audio_codec_io *io, ogg_int32_t **pcm,
 	for (i = 0U; i < frames; i++) {
 		for (ch = 0U; ch < channels; ch++) {
 			uint16_t v = (uint16_t)clip16(pcm[ch][i]);
+			uint8_t first = le ? (uint8_t)v : (uint8_t)(v >> 8);
+			uint8_t second = le ? (uint8_t)(v >> 8) : (uint8_t)v;
 
-			io->pcm[pos] = (uint8_t)(v >> 8);
+			io->pcm[pos] = first;
 			if (++pos == io->pcm_capacity)
 				pos = 0U;
-			io->pcm[pos] = (uint8_t)v;
+			io->pcm[pos] = second;
 			if (++pos == io->pcm_capacity)
 				pos = 0U;
 		}
@@ -474,7 +476,9 @@ static void decode_loop(struct sdk_vorbis_state *st,
 					return;             /* PCM ring or budget full */
 				if (frames > (uint32_t)n)
 					frames = (uint32_t)n;
-				write_pcm(io, pcm, st->channels, frames);
+				write_pcm(io, pcm, st->channels, frames,
+				          st->output_format ==
+				          SDK_AUDIO_SAMPLE_FORMAT_S16LE);
 				(void)vorbis_synthesis_read(&c->vd, (int)frames);
 				continue;
 			}
@@ -520,9 +524,10 @@ static void decode_run(struct sdk_vorbis_state *st,
 	decode_loop(st, io);
 }
 
-void sdk_vorbis_init(struct sdk_vorbis_state *st)
+void sdk_vorbis_init(struct sdk_vorbis_state *st, uint32_t output_format)
 {
 	memset(st, 0, sizeof(*st));
+	st->output_format = output_format;
 	sdk_vorbis_heap_init(&st->heap, SDK_VORBIS_REGION_BYTES,
 	                     SDK_VORBIS_ALLOC_LIMIT);
 }

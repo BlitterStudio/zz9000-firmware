@@ -236,12 +236,25 @@ static void test_cursor_and_wraparound_invariants(void)
   (void)pcm_capacity;
 }
 
+static void test_lease_rate_vocabulary(void)
+{
+  expect_true("16 kHz is a lease rate", zz9k_audio_ring_rate_known(16000U));
+  expect_true("22.05 kHz is a lease rate", zz9k_audio_ring_rate_known(22050U));
+  expect_true("44.1 kHz is a lease rate", zz9k_audio_ring_rate_known(44100U));
+  expect_true("48 kHz is a lease rate", zz9k_audio_ring_rate_known(48000U));
+  /* Pump-only: 20 ms is not an integer frame count, or the source
+   * period does not fit the lease scratch. */
+  expect_true("11025 is not a lease rate", !zz9k_audio_ring_rate_known(11025U));
+  expect_true("88.2 kHz is not a lease rate", !zz9k_audio_ring_rate_known(88200U));
+  expect_true("96 kHz is not a lease rate", !zz9k_audio_ring_rate_known(96000U));
+}
 int main(void)
 {
   test_old_mp3_contract_unchanged();
   test_new_begin_ex_contract();
   test_unknown_codec_and_invalid_params_rejected();
   test_pcm_container_semantics();
+  test_lease_rate_vocabulary();
   test_cursor_and_wraparound_invariants();
 
   if (failures) {

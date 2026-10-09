@@ -235,6 +235,30 @@ static FLAC__StreamDecoderReadStatus flac_read_cb(
 	return FLAC__STREAM_DECODER_READ_STATUS_CONTINUE;
 }
 
+static void flac_store_sample(struct sdk_flac_state *st, uint32_t *pos,
+                              int32_t sample)
+{
+	const int le = st->output_format == SDK_AUDIO_SAMPLE_FORMAT_S16LE;
+	uint32_t cb = st->container_bytes;
+	uint32_t v;
+	uint32_t k;
+
+	if (le && st->bits_per_sample > 16U) {
+		/* Top 16 bits of the 32-bit MSB-justified sample. */
+		v = ((uint32_t)sample << (32U - st->bits_per_sample)) >> 16;
+		cb = 2U;
+	} else {
+		v = (uint32_t)sample << (cb * 8U - st->bits_per_sample);
+	}
+	for (k = 0U; k < cb; k++) {
+		uint32_t shift = le ? (8U * k) : (8U * (cb - 1U - k));
+
+		st->pcm[*pos] = (uint8_t)(v >> shift);
+		if (++*pos == st->pcm_capacity)
+			*pos = 0U;
+	}
+}
+
 static FLAC__StreamDecoderWriteStatus flac_write_cb(
 	const FLAC__StreamDecoder *decoder, const FLAC__Frame *frame,
 	const FLAC__int32 *const buffer[], void *client_data)
@@ -243,9 +267,8 @@ static FLAC__StreamDecoderWriteStatus flac_write_cb(
 	const uint32_t blocksize = frame->header.blocksize;
 	const uint32_t channels = st->channels;
 	const uint32_t cb = st->container_bytes;
-	const uint32_t shift = cb * 8U - st->bits_per_sample;
 	uint32_t pos = st->pcm_pos;
-	uint32_t i, c, k;
+	uint32_t i, c;
 
 	(void)decoder;
 	if (st->cb_error != 0U)
@@ -259,25 +282,8 @@ static FLAC__StreamDecoderWriteStatus flac_write_cb(
 		return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
 	}
 	for (i = 0U; i < blocksize; i++) {
-		for (c = 0U; c < channels; c++) {
-			uint32_t v = (uint32_t)buffer[c][i] << shift;
-
-			if (pos + cb <= st->pcm_capacity) {
-				for (k = 0U; k < cb; k++)
-					st->pcm[pos + k] =
-						(uint8_t)(v >> (8U * (cb - 1U - k)));
-				pos += cb;
-				if (pos == st->pcm_capacity)
-					pos = 0U;
-			} else {
-				for (k = 0U; k < cb; k++) {
-					st->pcm[pos] =
-						(uint8_t)(v >> (8U * (cb - 1U - k)));
-					if (++pos == st->pcm_capacity)
-						pos = 0U;
-				}
-			}
-		}
+		for (c = 0U; c < channels; c++)
+			flac_store_sample(st, &pos, buffer[c][i]);
 	}
 	st->pcm_pos = pos;
 	st->frames_written++;
@@ -392,6 +398,8 @@ static int step_magic(struct sdk_flac_state *st, const uint8_t *in,
 	if (st->output_format == SDK_AUDIO_SAMPLE_FORMAT_S16BE) {
 		if (bits > 16U)
 			return step_fail(st, SDK_STATUS_UNSUPPORTED);
+		cb = 2U;
+	} else if (st->output_format == SDK_AUDIO_SAMPLE_FORMAT_S16LE) {
 		cb = 2U;
 	} else {
 		cb = 4U;

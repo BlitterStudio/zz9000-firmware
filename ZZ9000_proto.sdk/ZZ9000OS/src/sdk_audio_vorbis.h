@@ -9,8 +9,8 @@
  * numbers, consistent continuation flags) and no packet is buffered beyond
  * SDK_VORBIS_MAX_PACKET_BYTES. Packets go to fixed-point Tremor; its
  * 32-bit PCM is narrowed exactly like Tremor's ov_read (>> 9, clip) into
- * interleaved S16BE at the native rate and channel count. PCM can stop at
- * any frame boundary when the ring or the per-call budget is full.
+ * interleaved S16BE or S16LE at the native rate and channel count. PCM can
+ * stop at any frame boundary when the ring or the per-call budget is full.
  *
  * Header packets: the identification header must be alone on the BOS page
  * (non-Vorbis BOS packets such as Opus, Ogg-FLAC or Theora are UNSUPPORTED;
@@ -74,12 +74,13 @@ struct sdk_vorbis_state {
 	                             * the first feed and after release */
 	uint32_t sample_rate;       /* 0 until the identification header */
 	uint32_t channels;
+	uint32_t output_format;     /* S16BE or S16LE */
 	uint16_t status;            /* sticky failure status, 0 while healthy */
 	uint16_t pending_status;    /* raised once published PCM is all read */
 	uint8_t done;               /* end of stream validated */
 };
 
-void sdk_vorbis_init(struct sdk_vorbis_state *st);
+void sdk_vorbis_init(struct sdk_vorbis_state *st, uint32_t output_format);
 /* Decode as much as input, PCM room and budget allow. Returns
  * SDK_STATUS_OK or the sticky failure status (UNSUPPORTED for a valid
  * stream outside the envelope, IO_ERROR for malformed/corrupt/truncated

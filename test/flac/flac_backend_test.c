@@ -423,6 +423,56 @@ static void test_restart_reclaim(void)
 	printf("  restart reclaim: %u tracked blocks freed\n", reclaimed);
 }
 
+
+static void swap16(uint8_t *bytes, uint32_t len)
+{
+	uint32_t i;
+
+	for (i = 0U; i + 1U < len; i += 2U) {
+		uint8_t b = bytes[i];
+
+		bytes[i] = bytes[i + 1U];
+		bytes[i + 1U] = b;
+	}
+}
+
+static void test_s16le(void)
+{
+	const struct flac_fixture *s16 = fixture("stereo16");
+	const struct flac_fixture *s24 = fixture("stereo24u");
+	struct sim *s = &g_sim;
+	uint32_t want, i;
+	uint16_t st;
+
+	want = expected_pcm(s16, 2U, g_expect);
+	swap16(g_expect, want);
+	host_runtime_reset();
+	st = run_stream(s, s16->flac, s16->flac_len, 4096U, 16384U, 65536U,
+	                SDK_AUDIO_SAMPLE_FORMAT_S16LE, 0);
+	CHECK(st == SDK_STATUS_OK && s->out_len == want &&
+	      memcmp(s->out, g_expect, want) == 0,
+	      "16-bit S16LE is S16BE byte-swapped");
+	sdk_flac_release(&s->st);
+	check_clean("s16le 16-bit");
+
+	want = expected_pcm(s24, 4U, g_expect);
+	for (i = 0U; i < want / 4U; i++) {
+		uint8_t hi = g_expect[i * 4U];
+		uint8_t lo = g_expect[i * 4U + 1U];
+
+		g_expect[i * 2U] = lo;
+		g_expect[i * 2U + 1U] = hi;
+	}
+	want /= 2U;
+	host_runtime_reset();
+	st = run_stream(s, s24->flac, s24->flac_len, 4096U, 16384U, 65536U,
+	                SDK_AUDIO_SAMPLE_FORMAT_S16LE, 0);
+	CHECK(st == SDK_STATUS_OK && s->out_len == want &&
+	      memcmp(s->out, g_expect, want) == 0,
+	      "24-bit S16LE is the top 16 bits, little-endian");
+	sdk_flac_release(&s->st);
+	check_clean("s16le 24-bit");
+}
 int main(void)
 {
 	test_fixtures_exact();
@@ -431,6 +481,7 @@ int main(void)
 	test_drain_and_budget();
 	test_allocation_failures();
 	test_restart_reclaim();
+	test_s16le();
 	if (failures) {
 		printf("flac_backend_test: %d failure(s)\n", failures);
 		return 1;

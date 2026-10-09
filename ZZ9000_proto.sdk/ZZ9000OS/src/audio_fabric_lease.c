@@ -1200,13 +1200,14 @@ int audio_fabric_conversion_admissible(uint32_t source_rate)
 }
 
 /* Rate vocabulary of conversion-bearing leases: the qualified
- * conversion table (the mailbox layer validates the same set; this
- * re-arm mirrors the gain policy so no internal caller can arm an
- * unusable geometry the fill would silently drop). */
+ * source->48 kHz table, restricted to rates whose 20 ms period is an
+ * integer frame count that fits the lease scratch (960 stereo frames).
+ * 11025, 88200 and 96000 are pump-only. */
 static int fabric_rate_known(uint32_t rate)
 {
-	return rate == 8000U || rate == 12000U || rate == 24000U ||
-	       rate == 32000U || rate == 44100U || rate == 48000U;
+	return rate == 8000U || rate == 12000U || rate == 16000U ||
+	       rate == 22050U || rate == 24000U || rate == 32000U ||
+	       rate == 44100U || rate == 48000U;
 }
 
 int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,

@@ -29,6 +29,7 @@
 #include "audio_stream_close.h"
 #include "audio_convert.h"
 #include "audio_pump_preconvert.h"
+#include "audio_stream_card.h"
 #include "audio_pump_media_view.h"
 #include "sdk_jpeg.h"
 #include "sdk_surface.h"
@@ -4544,12 +4545,16 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	stream = find_audio_stream(session);
 	if (!stream)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-	if (stream->faulted)
+	if (stream->faulted) {
+		/* An envelope rejection (3 channels, a rate the backend
+		 * refuses) is the client's AHI fallback signal. Corruption
+		 * stays IO_ERROR. */
+		if ((stream->codec == SDK_AUDIO_CODEC_FLAC ||
+		     stream->codec == SDK_AUDIO_CODEC_VORBIS) &&
+		    audio_stream_fault_status(stream) == SDK_STATUS_UNSUPPORTED)
+			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 		return complete_status(req, comp, SDK_STATUS_IO_ERROR);
-	/* FLAC and Vorbis sessions are unbound readback only (big-endian
-	 * PCM). */
-	if (stream->codec != SDK_AUDIO_CODEC_MP3)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	}
 	if (g_audio_playback.session == session &&
 	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_STREAM) {
 		/* Already playing this session: idempotent, no re-init (the
@@ -4561,13 +4566,14 @@ static uint16_t handle_audio_stream_play(volatile struct SDKMailboxEntry *req,
 	    (g_audio_playback.session != session ||
 	     g_audio_playback.source_kind != AUDIO_PUMP_SOURCE_STREAM))
 		return complete_status(req, comp, SDK_STATUS_BUSY);
-	if (stream->sample_rate == 0U)   /* client must prebuffer first */
-		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	/* The AX DMA consumes native little-endian samples and the pump
-	 * copies the PCM ring verbatim; an S16BE session (the READ-path
-	 * byte order) would play byte-swapped noise. */
-	if (stream->sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE)
-		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	{
+		uint16_t admit = audio_stream_card_play_status(
+			stream->codec, stream->sample_format, stream->channels,
+			stream->sample_rate);
+
+		if (admit != SDK_STATUS_OK)
+			return complete_status(req, comp, admit);
+	}
 	/* A legacy/AHI register client that repointed the formatter DMA
 	 * away from the standard ring (AP_TX_BUF_OFFS) still blocks every
 	 * pump bind (LEGACY_EXCLUSIVE). A lease-held fabric no longer
@@ -4916,7 +4922,7 @@ static uint16_t open_audio_stream(volatile struct SDKMailboxEntry *req,
 		stream->backend_starved = 1U;
 	} else if (codec == SDK_AUDIO_CODEC_VORBIS) {
 		/* The arena is created lazily on the decode core. */
-		sdk_vorbis_init(&stream->vorbis);
+		sdk_vorbis_init(&stream->vorbis, output_format);
 		stream->backend_starved = 1U;
 	} else {
 		mp3dec_init(&stream->decoder);
@@ -4985,43 +4991,17 @@ static uint16_t handle_audio_stream_begin_ex(volatile struct SDKMailboxEntry *re
 	    get_be32(payload->output_hz) != 0U ||
 	    get_be32(payload->output_channels) != 0U)
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
-	if (codec == SDK_AUDIO_CODEC_FLAC) {
-		/* FLAC output is big-endian and MSB-justified; whether the
-		 * container holds the source depth is checked at STREAMINFO. */
-		if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S16LE ||
-		    output_format == SDK_AUDIO_SAMPLE_FORMAT_S32LE)
-			return complete_status(req, comp,
-			                       SDK_STATUS_UNSUPPORTED);
-		if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE &&
-		    output_format != SDK_AUDIO_SAMPLE_FORMAT_S32BE)
-			return complete_status(req, comp,
-			                       SDK_STATUS_BAD_REQUEST);
-	} else if (codec == SDK_AUDIO_CODEC_VORBIS) {
-		/* Tremor's PCM is narrowed to big-endian 16-bit only. */
-		if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S16LE ||
-		    output_format == SDK_AUDIO_SAMPLE_FORMAT_S32LE ||
-		    output_format == SDK_AUDIO_SAMPLE_FORMAT_S32BE)
-			return complete_status(req, comp,
-			                       SDK_STATUS_UNSUPPORTED);
-		if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
-			return complete_status(req, comp,
-			                       SDK_STATUS_BAD_REQUEST);
+	{
+		uint16_t format_status = audio_stream_begin_ex_format_status(
+			codec, output_format);
+
+		if (format_status != SDK_STATUS_OK)
+			return complete_status(req, comp, format_status);
+	}
+	if (codec == SDK_AUDIO_CODEC_VORBIS && !scheduler_core1_available()) {
 		/* Tremor's codebook setup and residue decode use alloca():
 		 * they need the 1 MiB core-1 stack, not core 0's 16 KiB. */
-		if (!scheduler_core1_available())
-			return complete_status(req, comp,
-			                       SDK_STATUS_UNSUPPORTED);
-	} else {
-		/* The MP3 backend produces 16-bit PCM only; 32-bit
-		 * containers are a valid request this codec cannot satisfy. */
-		if (output_format == SDK_AUDIO_SAMPLE_FORMAT_S32LE ||
-		    output_format == SDK_AUDIO_SAMPLE_FORMAT_S32BE)
-			return complete_status(req, comp,
-			                       SDK_STATUS_UNSUPPORTED);
-		if (output_format != SDK_AUDIO_SAMPLE_FORMAT_S16LE &&
-		    output_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE)
-			return complete_status(req, comp,
-			                       SDK_STATUS_BAD_REQUEST);
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	}
 	return open_audio_stream(req, comp, codec, input_ring, pcm_ring,
 	                         get_be32(payload->input_ring_capacity),

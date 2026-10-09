@@ -29,13 +29,17 @@ static inline int zz9k_audio_codec_known(uint32_t codec)
          codec == ZZ9K_AUDIO_CODEC_VORBIS;
 }
 
-/* Source-rate vocabulary of rate-bearing leases: exactly the
- * qualified conversion table (and the AHI mix-rate table). 48000 is
- * the bypass rate and is always in vocabulary. */
+/* Source-rate vocabulary of rate-bearing leases: the qualified
+ * source->48 kHz table, restricted to rates whose 20 ms period is an
+ * integer frame count that fits one 48 kHz period (960 stereo frames).
+ * 48000 is the bypass rate. 11025, 88200 and 96000 convert on the
+ * stream pump only; a lease of those rates is refused. Keep this list
+ * identical to fabric_rate_known() in audio_fabric_lease.c. */
 static inline int zz9k_audio_ring_rate_known(uint32_t rate)
 {
-  return rate == 8000U || rate == 12000U || rate == 24000U ||
-         rate == 32000U || rate == 44100U || rate == 48000U;
+  return rate == 8000U || rate == 12000U || rate == 16000U ||
+         rate == 22050U || rate == 24000U || rate == 32000U ||
+         rate == 44100U || rate == 48000U;
 }
 
 static inline int zz9k_audio_build_decode_desc(

@@ -143,7 +143,7 @@ static void sim_init(struct sim *s, uint32_t in_cap, uint32_t pcm_cap)
 	s->in_cap = in_cap;
 	s->pcm_cap = pcm_cap;
 	s->pcm_budget = pcm_cap;
-	sdk_vorbis_init(&s->st);
+	sdk_vorbis_init(&s->st, SDK_AUDIO_SAMPLE_FORMAT_S16BE);
 }
 
 /* Feed `data` in `chunk` slices through a bounded input ring, like the
@@ -680,12 +680,47 @@ static void test_arena(void)
 	       heap.peak, SDK_VORBIS_HEAP_MAX_REGIONS);
 }
 
+
+static void test_s16le(void)
+{
+	struct blob ogg = load("mono8k", ".ogg");
+	struct sim *s = &g_sim;
+	static uint8_t be[MAX_OUT];
+	uint32_t be_len, i;
+	uint16_t st;
+
+	host_runtime_reset();
+	st = run_stream(s, ogg.data, ogg.len, 4096U, IN_CAP, 65536U, 0);
+	CHECK(st == SDK_STATUS_OK && s->complete && s->out_len != 0U,
+	      "vorbis BE baseline: %u", st);
+	be_len = s->out_len;
+	memcpy(be, s->out, be_len);
+	sdk_vorbis_release(&s->st);
+	check_clean("vorbis BE baseline");
+
+	host_runtime_reset();
+	sim_init(s, IN_CAP, 65536U);
+	s->st.output_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
+	st = run_fed(s, ogg.data, ogg.len, 4096U, 0);
+	CHECK(st == SDK_STATUS_OK && s->complete && s->out_len == be_len,
+	      "vorbis S16LE length: %u", st);
+	for (i = 0U; i + 1U < be_len; i += 2U) {
+		if (s->out[i] != be[i + 1U] || s->out[i + 1U] != be[i]) {
+			CHECK(0, "vorbis S16LE is not the BE byte swap at %u", i);
+			break;
+		}
+	}
+	sdk_vorbis_release(&s->st);
+	check_clean("vorbis S16LE");
+	free(ogg.data);
+}
 int main(int argc, char **argv)
 {
 	if (argc > 1)
 		fixture_dir = argv[1];
 	test_arena();
 	test_fixtures();
+	test_s16le();
 	test_rejections();
 	test_chained();
 	test_starvation_and_trailer();

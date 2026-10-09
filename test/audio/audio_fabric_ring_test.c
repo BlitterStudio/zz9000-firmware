@@ -311,6 +311,24 @@ static void scenario_rate_admission(void)
 	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44101U,
 	                         &grant) == AUDIO_FABRIC_LEASE_EBAD_SLOT,
 	      "rate admission: off-table rate refused", "");
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 11025U,
+	                         &grant) == AUDIO_FABRIC_LEASE_EBAD_SLOT,
+	      "rate admission: 11025 is pump-only", "");
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 96000U,
+	                         &grant) == AUDIO_FABRIC_LEASE_EBAD_SLOT,
+	      "rate admission: 96 kHz does not fit a lease period", "");
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 16000U,
+	                         &grant) == AUDIO_FABRIC_LEASE_OK,
+	      "rate admission: 16 kHz lease admitted", "");
+	check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
+		grant.generation) == AUDIO_FABRIC_LEASE_OK,
+	      "rate admission: 16 kHz lease released", "");
+	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 22050U,
+	                         &grant) == AUDIO_FABRIC_LEASE_OK,
+	      "rate admission: 22.05 kHz lease admitted", "");
+	check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
+		grant.generation) == AUDIO_FABRIC_LEASE_OK,
+	      "rate admission: 22.05 kHz lease released", "");
 	/* A newly attached converting pump occupies one of the two
 	 * qualified conversion slots before its first compositor ISR;
 	 * a converting lease fills the budget, a second converting lease
