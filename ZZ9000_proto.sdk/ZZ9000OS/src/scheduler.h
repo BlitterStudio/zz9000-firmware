@@ -120,6 +120,12 @@ typedef struct {                /* coherent control block at the queue region */
   volatile uint32_t core1_alive;            /* worker sets 1 on entry */
   volatile uint32_t tasks_on_core1;         /* core-1 worker: tasks it executed */
   volatile uint32_t tasks_on_core0;         /* core-0: inline dispatch + drains  */
+  /* Cold-restart handshake: core 0 sets park_request; core 1, when idle or
+   * parked after a fault, cleans its L1 D-cache and sets parked. Holding a
+   * core in reset drops its dirty L1 lines (the SCU cannot snoop a stopped
+   * core), so without this core 0's reclaim reads stale heap metadata. */
+  volatile uint32_t core1_park_request;
+  volatile uint32_t core1_parked;
 } taskq_shared_t;
 
 typedef struct {
@@ -173,6 +179,7 @@ void scheduler_boot_init(void);            /* core 0: init queue + watchdog at b
 int  scheduler_core1_available(void);      /* core 1 started and not watchdog-disabled */
 void scheduler_confirm_core1_boot(void);   /* core 0: bounded wait for worker liveness at boot */
 void scheduler_core1_worker(void);         /* core 1: dedicated task worker; never returns */
+void scheduler_core1_park_if_requested(void); /* core 1: clean L1 + park for a cold restart */
 void scheduler_core0_poll(int zorro_pending, int display_pending); /* core 0: harvest+post+drain */
 void scheduler_quiesce_for_reset(void);    /* core 0: drain in-flight core-1 tasks + reset queue before a mailbox teardown */
 #endif

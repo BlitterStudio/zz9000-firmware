@@ -91,6 +91,8 @@ void scheduler_boot_init(void)
   sh->core1_alive = 0;
   sh->tasks_on_core1 = 0;   /* observability counters live in uninitialised DDR */
   sh->tasks_on_core0 = 0;   /* until zeroed here -- must not read back as garbage */
+  sh->core1_park_request = 0;  /* garbage here would park core 1 at launch */
+  sh->core1_parked = 0;
   taskq_watchdog_init(&g_sched_watchdog, 3u);
   g_core1_started = 0;
 }
@@ -234,7 +236,11 @@ void scheduler_core1_worker(void)
   dmb();  /* make the alive flag observable to core 0 before we sleep on WFE */
 
   for (;;) {
-    int slot = taskq_claim_any(&sh->queue);
+    int slot;
+
+    /* Checked before every claim: once core 0 asks, no further task runs. */
+    scheduler_core1_park_if_requested();
+    slot = taskq_claim_any(&sh->queue);
     if (slot < 0) {
       __asm__ __volatile__("wfe" ::: "memory");
       continue;
@@ -244,6 +250,29 @@ void scheduler_core1_worker(void)
     sh->core1_current_slot = -1;
     sh->tasks_on_core1++;   /* proof: this core executed a crypto task */
   }
+}
+
+/*
+ * Core 1 side of the cold-restart handshake (taskq_shared_t). Write back every
+ * dirty L1 line -- heap metadata and decoder state allocated on this core --
+ * so core 0 can free those blocks once this core is held in reset, then
+ * acknowledge and stay parked. The L1-only clean is per-core (the PL310 L2 is
+ * shared and already visible to core 0), so it cannot race core 0's own cache
+ * maintenance.
+ */
+void scheduler_core1_park_if_requested(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+
+  if (!sh->core1_park_request)
+    return;
+  Xil_L1DCacheFlush();
+  dsb();
+  sh->core1_parked = 1;
+  dsb();
+  __asm__ __volatile__("sev" ::: "memory");
+  for (;;)
+    __asm__ __volatile__("wfe" ::: "memory");
 }
 
 /*
