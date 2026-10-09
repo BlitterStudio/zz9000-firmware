@@ -477,7 +477,16 @@ u32 LoadBootImage(void)
 			fsbl_printf(DEBUG_INFO, "Application\r\n");
 			PSPartitionFlag = 1;
 			PLPartitionFlag = 0;
-			ApplicationFlag = 1;
+			/*
+			 * ZZ9000: a PS partition without an execution address is
+			 * plain data (the 8 KB Zorro autoboot ROM, placed ahead of
+			 * the bitstream so it is in DDR before the FPGA can answer
+			 * autoconfig). It neither makes a later bitstream "out of
+			 * order" nor becomes the handoff target below.
+			 */
+			if (PartitionExecAddr != 0U) {
+				ApplicationFlag = 1;
+			}
 		}
 
 		/*
@@ -558,7 +567,7 @@ u32 LoadBootImage(void)
         /*
          * Load execution address of first PS partition
          */
-        if (PSPartitionFlag && (!ExecAddrFlag)) {
+        if (PSPartitionFlag && (!ExecAddrFlag) && (PartitionExecAddr != 0U)) {
         	ExecAddrFlag++;
         	ExecAddress = PartitionExecAddr;
         }

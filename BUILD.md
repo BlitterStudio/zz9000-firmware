@@ -405,6 +405,18 @@ is intentionally skipped.
 - The bitstream lives there because that's where `bootgen` reads it
   from per the BIF, and committing it makes CI work without Vivado.
 - The firmware ELF contains an initialized 8 KB `.bootrom_image` segment
-  at `0x3FCF0000`, so FSBL preloads the Zorro autoboot ROM before
-  `main()` starts. The default BOOT image layout still stays
-  `FSBL -> bitstream -> ZZ9000OS`.
+  at `0x3FCF0000`. `build_bootimage.sh` also packages that ROM as a data
+  partition (no exec address) ahead of the bitstream, giving
+  `FSBL -> bootrom.bin@0x3FCF0000 -> bitstream -> ZZ9000OS`. Once the
+  bitstream is up, the board answers autoconfig, and a cold A4000 can read
+  the DiagArea while FSBL is still copying the multi-megabyte firmware.
+  The DiagArea is fetched from DDR through the FPGA's ACP master, and the
+  stock FSBL opened that PL->PS path (level shifters, FPGA resets via
+  `ps7_post_config()`) only at handoff. The ZZ9000 FSBL therefore runs
+  `ps7_post_config()` right after the bitstream (`fsbl_hooks.c`), and
+  treats a PS partition without an exec address as data, so it neither
+  trips "Partition order invalid" nor becomes the handoff target
+  (`image_mover.c`). Cold boots of firmware past roughly 4 MB crashed
+  (guru `80000004`) with the old FSBL. `--no-preload-bootrom` drops the
+  ROM partition for diagnostics; the hand-run `bootimage.bif` keeps the
+  old layout, which the ZZ9000 FSBL still boots.
