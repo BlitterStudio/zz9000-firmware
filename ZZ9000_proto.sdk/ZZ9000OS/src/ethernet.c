@@ -496,6 +496,10 @@ int ethernet_restart_dma(const char *reason) {
 
 	ethernet_log_status(reason);
 
+	/* XEmacPs_Stop() does not mask the GIC line: keep XEmacPsRecvHandler()
+	 * and its refill off the ring while it is cleared and rebuilt. */
+	int paused = ethernet_pause_rx_irq();
+
 	XEmacPs_Stop(EmacPsInstancePtr);
 
 	if (BaseAddress) {
@@ -514,6 +518,7 @@ int ethernet_restart_dma(const char *reason) {
 	ethernet_clear_host_state();
 
 	int Status = init_ethernet_buffers();
+	ethernet_resume_rx_irq(paused);
 	if (Status != XST_SUCCESS) {
 		printf("EMAC: DMA restart failed (%s): %d\n", reason, Status);
 		return XST_FAILURE;
