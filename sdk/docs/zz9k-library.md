@@ -563,8 +563,9 @@ and destination mode; use the generic ARM scaler for PNG fit/upscale behavior.
 Codec ID `ZZ9K_IMAGE_CODEC_WEBP = 4` and image-service flag
 `ZZ9K_SERVICE_FLAG_IMAGE_WEBP = 1U << 28` are reserved. Firmware contains a
 libwebp 1.6.0 decoder, but does **not** advertise the flag. Public image helpers,
-picture.datatype, zz9k-view and ZZPlay are not yet WebP clients. Do not infer
-support from the codec constant or the generic image-decode capability.
+picture.datatype, and zz9k-view now support WebP client integration (gated by
+`ZZ9K_SERVICE_FLAG_IMAGE_WEBP`). ZZPlay timed animation playback follows in U2b.
+Do not infer support from the codec constant or generic image-decode capability alone.
 
 The internal image-session path accepts lossy/lossless WebP and alpha. Animated
 input produces the first fully composited canvas, including frame offsets and
@@ -662,12 +663,12 @@ from that backup surface. Static PNG, including interlaced input, is supported;
 image sessions also support tile output. APNG playback remains unsupported.
 
 `zz9k-view` is the standalone ZZ9000 viewer for the SDK v2 image path. It
-accepts one or more JPEG or PNG files, opens one resizable Intuition window,
+accepts one or more JPEG, PNG, or WebP files, opens one resizable Intuition window,
 decodes the current image into an ARM-local surface, and redraws the fitted
 image through visible layer clips with sliced `ZZ9KScaleImageClipped()` jobs:
 
 ```sh
-zz9k-view Work:Pictures/test.jpg Work:Pictures/test.png
+zz9k-view Work:Pictures/test.jpg Work:Pictures/test.png Work:Pictures/test.webp
 ```
 
 Use Space/Right/Down for next image navigation, Left/Up/Backspace for previous,
@@ -676,6 +677,8 @@ Use Space/Right/Down for next image navigation, Left/Up/Backspace for previous,
 paths; `zz9k-view` is the user-facing demo viewer. With firmware advertising
 `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565`, it supports RGB555,
 RGB565, and native 32-bit BGRA RTG screens.
+Animated WebP displays its first composited canvas as a documented still preview;
+timed multi-frame animation playback belongs to ZZPlay.
 
 These CLI tools are hardware smoke tests. User-facing viewer and DataType output should
 enumerate visible layer or damage clip regions and submit clipped scale bands

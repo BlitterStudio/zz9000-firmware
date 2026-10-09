@@ -30,6 +30,8 @@ m68k-amigaos-gcc $CFLAGS -Itools -DZZ9K_JPEG_NO_MAIN=1 \
   -c tools/zz9k-jpeg.c -o build/m68k/zz9k-jpeg-view.o
 m68k-amigaos-gcc $CFLAGS -Itools -DZZ9K_PNG_NO_MAIN=1 \
   -c tools/zz9k-png.c -o build/m68k/zz9k-png-view.o
+m68k-amigaos-gcc $CFLAGS -Itools -DZZ9K_WEBP_NO_MAIN=1 \
+  -c tools/zz9k-webp.c -o build/m68k/zz9k-webp-view.o
 m68k-amigaos-gcc $CFLAGS -Itools -DZZ9K_IMAGE_WINDOW_NO_UI=1 \
   -ffunction-sections -fdata-sections \
   -c tools/zz9k-image-window.c -o build/m68k/zz9k-image-window-resident.o
@@ -89,7 +91,7 @@ m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o $ZZPLAY_SOURCES "$(m68k-
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-mpega-smoke.c -o build/zz9k-mpega-smoke
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-jpeg.c -o build/zz9k-jpeg
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-png.c -o build/zz9k-png
-m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o build/m68k/zz9k-jpeg-view.o build/m68k/zz9k-png-view.o tools/zz9k-view.c -o build/zz9k-view
+m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o build/m68k/zz9k-jpeg-view.o build/m68k/zz9k-png-view.o build/m68k/zz9k-webp-view.o tools/zz9k-view.c -o build/zz9k-view
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-dtprobe.c -o build/zz9k-dtprobe
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include -Itools \
   build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o \

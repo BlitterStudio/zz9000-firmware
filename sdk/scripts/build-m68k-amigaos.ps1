@@ -25,6 +25,8 @@ m68k-amigaos-gcc $CFLAGS -Itools -DZZ9K_JPEG_NO_MAIN=1 \
   -c tools/zz9k-jpeg.c -o build/m68k/zz9k-jpeg-view.o
 m68k-amigaos-gcc $CFLAGS -Itools -DZZ9K_PNG_NO_MAIN=1 \
   -c tools/zz9k-png.c -o build/m68k/zz9k-png-view.o
+m68k-amigaos-gcc $CFLAGS -Itools -DZZ9K_WEBP_NO_MAIN=1 \
+  -c tools/zz9k-webp.c -o build/m68k/zz9k-webp-view.o
 m68k-amigaos-gcc $CFLAGS -Itools -DZZ9K_IMAGE_WINDOW_NO_UI=1 \
   -ffunction-sections -fdata-sections \
   -c tools/zz9k-image-window.c -o build/m68k/zz9k-image-window-resident.o
@@ -84,7 +86,7 @@ m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o $ZZPLAY_SOURCES "$(m68k-
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-mpega-smoke.c -o build/zz9k-mpega-smoke
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-jpeg.c -o build/zz9k-jpeg
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-png.c -o build/zz9k-png
-m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o build/m68k/zz9k-jpeg-view.o build/m68k/zz9k-png-view.o tools/zz9k-view.c -o build/zz9k-view
+m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o build/m68k/zz9k-jpeg-view.o build/m68k/zz9k-png-view.o build/m68k/zz9k-webp-view.o tools/zz9k-view.c -o build/zz9k-view
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-dtprobe.c -o build/zz9k-dtprobe
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include -Itools \
   build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o \
@@ -104,15 +106,15 @@ m68k-amigaos-gcc $CFLAGS tools/zz9k-probe.c -o build/zz9k-probe
 m68k-amigaos-gcc $CFLAGS tools/zz9k-step.c -o build/zz9k-step
 '@
 
-$TempScript = Join-Path ([System.IO.Path]::GetTempPath()) "zz9k-build-m68k-amigaos.sh"
+New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot "build") | Out-Null
+$TempScript = Join-Path $RepoRoot "build\zz9k-build-m68k.sh"
 $BuildScript = $BuildScript -replace "`r`n", "`n"
 $BuildScript = $BuildScript -replace "`r", "`n"
 [System.IO.File]::WriteAllText($TempScript, $BuildScript,
   [System.Text.Encoding]::ASCII)
 
 try {
-  docker run --rm -v "${RepoRoot}:/work" -v "${TempScript}:/tmp/build.sh:ro" `
-    -w /work $Image sh /tmp/build.sh
+  docker run --rm -v "${RepoRoot}:/work" -w /work $Image sh /work/build/zz9k-build-m68k.sh
   if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
   }
