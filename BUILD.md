@@ -98,6 +98,13 @@ default. SD HDF boot and the Poseidon USB proxy remain enabled. For an
 old-driver regression test, rebuild firmware with
 `EXTRA_CFLAGS=-DENABLE_LEGACY_USB_BLOCK_STORAGE=1`.
 
+WebP, FLAC and Ogg Vorbis decoding are built into every firmware but stay
+unadvertised until physical Zorro II/III qualification. A hardware
+qualification build advertises their service flags so the shipped clients
+use them: `EXTRA_CFLAGS=-DZZ9000_QUALIFY_UNADVERTISED ./build_firmware.sh`,
+then `./build_release_assets.sh --firmware-flavor qual`. Never publish that
+flavor as a release.
+
 ### Timing gates
 
 `build_bitstream.sh` / `build_bitstream.ps1` source three gate scripts after
