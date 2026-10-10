@@ -136,6 +136,7 @@ struct stream_result {
 	uint32_t picture_flags[16];
 	uint32_t display_fields[16];
 	uint64_t raw_pts[16];
+	uint64_t media_pts[16];
 	uint64_t yuy2_hash;
 	uint64_t pcm_hash;
 	uint64_t pcm_produced;
@@ -144,6 +145,7 @@ struct stream_result {
 	uint32_t audio_channels;
 	int eof_state; /* decode result once the EOF write is all in */
 	int final_state;
+	uint64_t first_audio_pts;
 };
 
 /* Logs a decoded frame into out and hashes its YUY2 form. Returns 0 when
@@ -160,8 +162,9 @@ static int record_frame(struct stream_result *out,
 		out->width = frame->width;
 		out->height = frame->height;
 		out->picture_flags[out->frame_count] = frame->picture_flags;
-		out->display_fields[out->frame_count] = frame->display_fields;
 		out->raw_pts[out->frame_count] = frame->raw_pts;
+		out->media_pts[out->frame_count] = frame->media_pts;
+		out->display_fields[out->frame_count] = frame->display_fields;
 	}
 	ok = yuy2 && sdk_video_yuv420_to_yuy2(
 		yuy2, row_bytes, frame->width, frame->height,
@@ -263,12 +266,25 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 	/* Signal EOF with empty buffer */
 	{
 		uint32_t accepted = 0U;
+		uint32_t busy_rounds = 0U;
+		struct SDKVideoMediaInfo ainfo;
+
 		ops->write(decoder, NULL, 0U, 1, &accepted);
 		for (;;) {
 			res = ops->decode(decoder, &frame);
 			if (res != SDK_VIDEO_BACKEND_FRAME)
 				break;
 			(void)record_frame(out, &frame);
+		}
+		/* A session finishing its audio answers BACKPRESSURE until the
+		 * client acknowledges the PCM it holds, exactly like a player
+		 * draining at end of stream. */
+		while (res == SDK_VIDEO_BACKEND_BACKPRESSURE &&
+		       ops->get_media_info(decoder, &ainfo) &&
+		       ainfo.pcm_produced > ainfo.pcm_acknowledged &&
+		       ++busy_rounds < 1000U) {
+			ops->ack_media(decoder, ainfo.pcm_produced);
+			res = ops->decode(decoder, &frame);
 		}
 		out->final_state = res;
 	}
@@ -286,6 +302,7 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 			out->pcm_produced = ainfo.pcm_produced;
 			out->audio_frames = ainfo.audio_frames;
 			out->audio_rate = ainfo.sample_rate;
+			out->first_audio_pts = ainfo.first_audio_pts;
 			out->audio_channels = ainfo.channels;
 			if (ainfo.pcm_produced != 0U) {
 				uint32_t hash_len = ainfo.pcm_produced > PCM_RING_CAPACITY
@@ -1600,6 +1617,263 @@ static int test_audio_only_reaches_done(void)
 	return 0;
 }
 
+/* 8. Timeline behaviour a player syncs against: the video media PTS must
+ * advance per frame (a stuck PTS makes the player discard in bursts), and
+ * the first audio PTS must be reported in the same rebased media space as
+ * the video PTS (a raw first audio PTS looks seconds ahead of video to a
+ * client and delays or deadlocks the audio start). */
+static int test_pts_advance_per_frame(void)
+{
+	struct stream_result r;
+	uint32_t i;
+
+	if (run_decode_test(zz9k_dvd_pal_25p_fixture,
+	                    zz9k_dvd_pal_25p_fixture_len, 197U,
+	                    SDK_VIDEO_MEDIA_AUDIO_MP2, &r) != 0)
+		return 1;
+	if (r.frame_count != 5U)
+		return 2;
+	for (i = 1U; i < r.frame_count; i++) {
+		if (r.media_pts[i] == UINT64_MAX ||
+		    r.media_pts[i] <= r.media_pts[i - 1U]) {
+			fprintf(stderr, "test_pts_advance: frame %u pts %llu "
+			        "(prev %llu) did not advance\n", i,
+			        (unsigned long long)r.media_pts[i],
+			        (unsigned long long)r.media_pts[i - 1U]);
+			return 3;
+		}
+		if (r.media_pts[i] - r.media_pts[i - 1U] > 2U * 3600U) {
+			fprintf(stderr, "test_pts_advance: frame %u jumped %llu "
+			        "ticks (max two PAL frame periods)\n", i,
+			        (unsigned long long)(
+			            r.media_pts[i] - r.media_pts[i - 1U]));
+			return 4;
+		}
+	}
+	if (r.first_audio_pts == UINT64_MAX || r.first_audio_pts > 9000U) {
+		fprintf(stderr, "test_pts_advance: first audio pts %llu is "
+		        "not in media space (<= 9000 expected)\n",
+		        (unsigned long long)r.first_audio_pts);
+		return 5;
+	}
+	return 0;
+}
+
+/* 8b. The demux must keep parsing video while the audio queue is full and
+ * the client is not draining the ring: with the overflow-drop policy set,
+ * audio packets beyond the queue are dropped (counted) instead of
+ * stalling every write behind the ring. */
+static int test_demux_audio_overflow_drop(void)
+{
+	struct SDKDVDPSDemux blocked;
+	struct SDKDVDPSDemux dropping;
+	uint32_t accepted_blocked = 0U;
+	uint32_t accepted_dropping = 0U;
+	uint32_t i;
+
+	sdk_dvd_ps_init(&blocked);
+	for (i = 0U; i < 64U; i++) {
+		uint32_t step = 0U;
+
+		sdk_dvd_ps_write(&blocked, zz9k_dvd_ac3_192_fixture,
+		                 zz9k_dvd_ac3_192_fixture_len, &step, 0);
+		accepted_blocked += step;
+		/* The decoder keeps taking video; audio is what nobody
+		 * drains. */
+		while (sdk_dvd_ps_peek_video(&blocked))
+			sdk_dvd_ps_pop_video(&blocked, NULL);
+		if (step == 0U)
+			break;
+	}
+	sdk_dvd_ps_init(&dropping);
+	dropping.drop_audio_when_full = 1U;
+	for (i = 0U; i < 64U; i++) {
+		uint32_t step = 0U;
+
+		sdk_dvd_ps_write(&dropping, zz9k_dvd_ac3_192_fixture,
+		                 zz9k_dvd_ac3_192_fixture_len, &step, 0);
+		accepted_dropping += step;
+		while (sdk_dvd_ps_peek_video(&dropping))
+			sdk_dvd_ps_pop_video(&dropping, NULL);
+		if (step == 0U)
+			break;
+	}
+	if (accepted_blocked >= zz9k_dvd_ac3_192_fixture_len)
+		return 1; /* baseline never blocked: the test proves nothing */
+	if (accepted_dropping <= accepted_blocked) {
+		fprintf(stderr, "test_demux_audio_overflow_drop: dropping "
+		        "accepted %u of %u (blocked accepted %u)\n",
+		        accepted_dropping, zz9k_dvd_ac3_192_fixture_len,
+		        accepted_blocked);
+		return 2;
+	}
+	if (dropping.audio_packets_dropped == 0U ||
+	    dropping.audio.count > SDK_DVD_PS_QUEUE_DEPTH)
+		return 3;
+	return 0;
+}
+
+/* 8c. A full PCM ring nobody acknowledges must not stop video: the
+ * backend drops the audio it cannot route (the client is not consuming)
+ * and every picture still decodes to DONE. Without this the demux backs
+ * up behind the ring and the picture freezes forever. */
+static int test_starved_ring_keeps_video(void)
+{
+	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	struct SDKVideoMediaConfig cfg = {0};
+	struct SDKVideoDecodedFrame frame;
+	struct SDKVideoMediaInfo info;
+	uint8_t ring[8U * 1024U];
+	void *decoder;
+	uint32_t offset = 0U;
+	uint32_t frames = 0U;
+	uint32_t idle = 0U;
+	int done = 0;
+	int busy = 0;
+
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 1;
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = sizeof(ring);
+	cfg.pcm_low_water_bytes = 2048U;
+	cfg.pcm_high_water_bytes = 4608U;
+	if (!ops->configure_media(decoder, &cfg)) {
+		ops->destroy(decoder);
+		return 2;
+	}
+	while (!done && !busy && idle < 4096U) {
+		uint32_t before = frames;
+		uint32_t accepted = 0U;
+		int res;
+
+		if (offset < zz9k_dvd_ac3_192_fixture_len) {
+			uint32_t n = zz9k_dvd_ac3_192_fixture_len - offset;
+
+			if (n > 2048U)
+				n = 2048U;
+			if (!ops->write(decoder,
+			                zz9k_dvd_ac3_192_fixture + offset, n,
+			                offset + n >=
+			                    zz9k_dvd_ac3_192_fixture_len,
+			                &accepted)) {
+				ops->destroy(decoder);
+				return 3;
+			}
+			offset += accepted;
+		}
+		res = ops->decode(decoder, &frame);
+		if (res == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 4;
+		}
+		if (res == SDK_VIDEO_BACKEND_FRAME)
+			frames++;
+		done = res == SDK_VIDEO_BACKEND_DONE;
+		/* With the whole stream consumed, BUSY is the honest end for
+		 * a client that never acknowledges: video is complete and
+		 * audio waits on the ring. */
+		busy = res == SDK_VIDEO_BACKEND_BACKPRESSURE &&
+		       offset >= zz9k_dvd_ac3_192_fixture_len;
+		idle = (frames == before && offset <
+		        zz9k_dvd_ac3_192_fixture_len) ? idle + 1U : 0U;
+	}
+	(void)ops->get_media_info(decoder, &info);
+	ops->destroy(decoder);
+	if ((!done && !busy) || frames != 50U ||
+	    info.audio_packets_dropped == 0U) {
+		fprintf(stderr, "test_starved_ring: done=%d busy=%d frames=%u "
+		        "(expected 50) dropped=%u\n", done, busy, frames,
+		        info.audio_packets_dropped);
+		return 5;
+	}
+	return 0;
+}
+
+/* 8d. At end of input with every picture decoded and all audio routed,
+ * unacknowledged PCM still in the ring must read as BACKPRESSURE (the
+ * session is busy playing audio out), never NEED_INPUT: a player that
+ * has written everything answers NEED_INPUT with "truncated stream". */
+static int test_eof_unacked_pcm_is_busy(void)
+{
+	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	struct SDKVideoMediaConfig cfg = {0};
+	struct SDKVideoDecodedFrame frame;
+	struct SDKVideoMediaInfo info;
+	static uint8_t ring[128U * 1024U];
+	uint64_t acked = 0U;
+	void *decoder;
+	uint32_t offset = 0U;
+	uint32_t calls;
+	int res = 0;
+
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 1;
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = sizeof(ring);
+	cfg.pcm_low_water_bytes = 4096U;
+	cfg.pcm_high_water_bytes = sizeof(ring) - 4096U;
+	if (!ops->configure_media(decoder, &cfg)) {
+		ops->destroy(decoder);
+		return 2;
+	}
+	for (calls = 0U; calls < 200000U; calls++) {
+		if (offset < zz9k_dvd_ac3_192_fixture_len) {
+			uint32_t n = zz9k_dvd_ac3_192_fixture_len - offset;
+			uint32_t accepted = 0U;
+
+			if (n > 2048U)
+				n = 2048U;
+			if (!ops->write(decoder,
+			                zz9k_dvd_ac3_192_fixture + offset, n,
+			                offset + n >=
+			                    zz9k_dvd_ac3_192_fixture_len,
+			                &accepted)) {
+				ops->destroy(decoder);
+				return 3;
+			}
+			offset += accepted;
+		}
+		res = ops->decode(decoder, &frame);
+		if (res == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 4;
+		}
+		if (res == SDK_VIDEO_BACKEND_DONE)
+			break;
+		/* Ack like a playing client, but stop one AC-3 frame short
+		 * of the end so the ring finishes holding unacked PCM. */
+		if (ops->get_media_info(decoder, &info) &&
+		    info.pcm_produced > acked + SDK_DVD_AC3_FRAME_PCM_BYTES) {
+			acked = info.pcm_produced -
+			        SDK_DVD_AC3_FRAME_PCM_BYTES;
+			ops->ack_media(decoder, acked);
+		}
+	}
+	if (offset < zz9k_dvd_ac3_192_fixture_len || res == 0) {
+		ops->destroy(decoder);
+		return 5;
+	}
+	if (res != SDK_VIDEO_BACKEND_BACKPRESSURE) {
+		fprintf(stderr, "test_eof_unacked_pcm: decode returned %d "
+		        "(expected BACKPRESSURE %d)\n", res,
+		        SDK_VIDEO_BACKEND_BACKPRESSURE);
+		ops->destroy(decoder);
+		return 6;
+	}
+	/* The client drains the tail and the session then completes. */
+	(void)ops->get_media_info(decoder, &info);
+	ops->ack_media(decoder, info.pcm_produced);
+	res = ops->decode(decoder, &frame);
+	ops->destroy(decoder);
+	if (res != SDK_VIDEO_BACKEND_DONE)
+		return 7;
+	return 0;
+}
+
 int main(void)
 {
 	int err;
@@ -1696,6 +1970,29 @@ int main(void)
 	}
 	printf("PASS: test_video_only_dense_audio (audio between every video PES)\n");
 
+	if ((err = test_pts_advance_per_frame()) != 0) {
+		fprintf(stderr, "FAIL: test_pts_advance_per_frame (code %d)\n", err);
+		return 210 + err;
+	}
+	printf("PASS: test_pts_advance_per_frame (per-frame PTS, media-space audio origin)\n");
+
+	if ((err = test_demux_audio_overflow_drop()) != 0) {
+		fprintf(stderr, "FAIL: test_demux_audio_overflow_drop (code %d)\n", err);
+		return 220 + err;
+	}
+	printf("PASS: test_demux_audio_overflow_drop (audio overflow drops, parse continues)\n");
+
+	if ((err = test_starved_ring_keeps_video()) != 0) {
+		fprintf(stderr, "FAIL: test_starved_ring_keeps_video (code %d)\n", err);
+		return 230 + err;
+	}
+	printf("PASS: test_starved_ring_keeps_video (full ring never freezes video)\n");
+
+	if ((err = test_eof_unacked_pcm_is_busy()) != 0) {
+		fprintf(stderr, "FAIL: test_eof_unacked_pcm_is_busy (code %d)\n", err);
+		return 240 + err;
+	}
+	printf("PASS: test_eof_unacked_pcm_is_busy (EOF tail PCM reads BUSY, then DONE)\n");
 	if ((err = test_ac3_substream_selection()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_substream_selection (code %d)\n", err);
 		return 90 + err;

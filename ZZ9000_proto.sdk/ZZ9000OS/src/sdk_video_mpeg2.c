@@ -117,6 +117,7 @@ struct sdk_video_mpeg2 {
 	uint64_t pcm_acknowledged;
 	uint64_t first_audio_pts;
 	uint64_t last_audio_pts;
+	uint64_t last_audio_pts_raw;
 	uint32_t video_frames;
 	uint32_t audio_frames;
 	uint32_t backpressure_events;
@@ -132,6 +133,8 @@ struct sdk_video_mpeg2 {
 	uint8_t video_end_signalled;
 	uint8_t video_done;
 	uint8_t pcm_backpressure;
+	uint64_t audio_block_ack;
+	uint32_t audio_block_checks;
 	uint8_t failed;
 };
 
@@ -455,15 +458,58 @@ static uint32_t route_audio(struct sdk_video_mpeg2 *d,
 	    (packet->kind == SDK_DVD_PS_AC3 && !d->ac3_selected))
 		return 1U;
 	if (packet->pts != SDK_DVD_PS_NO_TS) {
+		/* Media-space audio timestamps, rebased by the same timeline
+		 * origin as the video clock: a raw first audio PTS looks
+		 * hundreds of milliseconds ahead of the rebased video PTS a
+		 * player paces against, delaying or deadlocking the audio
+		 * start. */
+		struct SDKMediaTimelineResult observed;
+		uint64_t media_pts = 0U;
+
+		if (sdk_media_timeline_observe_ordered(
+			    &d->timeline, SDK_MEDIA_TIMELINE_AUDIO,
+			    packet->pts, &observed) &&
+		    observed.pts >= observed.origin)
+			media_pts = observed.pts - observed.origin;
 		if (d->first_audio_pts == M2_NO_PTS)
-			d->first_audio_pts = packet->pts;
-		d->last_audio_pts = packet->pts;
+			d->first_audio_pts = media_pts;
+		d->last_audio_pts = media_pts;
+		d->last_audio_pts_raw = packet->pts;
 	}
 	if (packet->kind == SDK_DVD_PS_MP2)
 		return route_mp2(d, packet);
 	if (packet->kind == SDK_DVD_PS_LPCM)
 		return route_lpcm(d, packet);
 	return route_ac3(d, packet);
+}
+
+/* Decide when the demux may drop audio packets its queue cannot hold.
+ * Dropping is the escape hatch that keeps video flowing while the PCM
+ * ring is full, but it must never trigger while the client still
+ * acknowledges PCM (a slow-but-alive sink simply waits): only a ring
+ * that has stayed full across many checks with no acknowledgement
+ * progress - an output that never started or has stopped - justifies
+ * losing audio rather than freezing the picture. */
+#define M2_AUDIO_DROP_CHECKS 64U
+
+static void update_audio_drop_policy(struct sdk_video_mpeg2 *d)
+{
+	if (!d->media_configured || d->video_done || !d->pcm_backpressure ||
+	    !d->audio_selected ||
+	    d->demux.audio.count < SDK_DVD_PS_QUEUE_DEPTH) {
+		d->audio_block_checks = 0U;
+		d->demux.drop_audio_when_full = 0U;
+		return;
+	}
+	if (d->pcm_acknowledged != d->audio_block_ack) {
+		d->audio_block_ack = d->pcm_acknowledged;
+		d->audio_block_checks = 0U;
+		return;
+	}
+	if (d->audio_block_checks < M2_AUDIO_DROP_CHECKS)
+		d->audio_block_checks++;
+	if (d->audio_block_checks >= M2_AUDIO_DROP_CHECKS)
+		d->demux.drop_audio_when_full = 1U;
 }
 
 /* Drain the audio queue: before the stream kind is selected this scans
@@ -565,6 +611,20 @@ static void picture_timestamps(const struct sdk_video_mpeg2 *d,
 	}
 }
 
+/* Timeline transition flags in the backend's media-flag vocabulary. */
+static uint32_t timeline_media_flags(uint32_t flags)
+{
+	uint32_t mapped = 0U;
+
+	if ((flags & SDK_MEDIA_TIMELINE_DERIVED) != 0U)
+		mapped |= SDK_VIDEO_MEDIA_FLAG_DERIVED_TIME;
+	if ((flags & SDK_MEDIA_TIMELINE_DISCONTINUITY) != 0U)
+		mapped |= SDK_VIDEO_MEDIA_FLAG_DISCONTINUITY;
+	if ((flags & SDK_MEDIA_TIMELINE_REBASED) != 0U)
+		mapped |= SDK_VIDEO_MEDIA_FLAG_REBASED;
+	return mapped;
+}
+
 static void fill_frame(struct sdk_video_mpeg2 *d,
                        const mpeg2_info_t *info,
                        struct SDKVideoDecodedFrame *frame)
@@ -580,12 +640,42 @@ static void fill_frame(struct sdk_video_mpeg2 *d,
 		: 40U;
 
 	picture_timestamps(d, picture, &raw_pts, &raw_dts);
-	if (raw_pts != M2_NO_PTS &&
-	    sdk_media_timeline_observe_ordered(
-		    (struct SDKMediaTimeline *)&d->timeline,
-		    SDK_MEDIA_TIMELINE_VIDEO, raw_pts, &result) &&
-	    result.pts >= result.origin)
-		media_pts = result.pts - result.origin;
+	if (d->media_configured) {
+		/* Advance the timeline one display frame per picture and let a
+		 * tagged picture's raw PTS anchor it, exactly like the MPEG-1
+		 * backend: observing raw PTS alone freezes the reported clock
+		 * for up to the 1 s discontinuity window, and a player pacing
+		 * against that sees the picture jump in ~1 s steps. */
+		uint32_t fields = picture_display_fields(picture);
+		uint64_t step_units = (uint64_t)(fields < 2U ? 2U : fields) *
+		                      500U;
+		uint32_t per_second = d->frame_rate_milli != 0U
+			? d->frame_rate_milli : 25000U;
+
+		if (sdk_media_timeline_map(&d->timeline,
+		                           SDK_MEDIA_TIMELINE_VIDEO,
+		                           SDK_MEDIA_TIMELINE_NO_PTS,
+		                           step_units, per_second, &result)) {
+			uint64_t origin =
+				result.origin != SDK_MEDIA_TIMELINE_NO_PTS
+					? result.origin : 0U;
+
+			/* Before the first PTS the derived clock starts at 0;
+			 * the first tagged picture re-anchors it below. */
+			if (result.pts >= origin)
+				media_pts = result.pts - origin;
+			d->media_flags |= timeline_media_flags(result.flags);
+			if (raw_pts != M2_NO_PTS &&
+			    sdk_media_timeline_observe_ordered(
+				    &d->timeline, SDK_MEDIA_TIMELINE_VIDEO,
+				    raw_pts, &result)) {
+				d->media_flags |=
+					timeline_media_flags(result.flags);
+				if (result.pts >= result.origin)
+					media_pts = result.pts - result.origin;
+			}
+		}
+	}
 	memset(frame, 0, sizeof(*frame));
 	frame->width = d->width;
 	frame->height = d->height;
@@ -605,8 +695,14 @@ static void fill_frame(struct sdk_video_mpeg2 *d,
 
 static int demux_drained(const struct sdk_video_mpeg2 *d)
 {
+	/* Audio still queued behind backpressure must not hold the video
+	 * end hostage: the sequence-end flush has to reach libmpeg2 while
+	 * queued audio waits for ring room the client may give later.
+	 * Routing already ran this decode, so a non-empty audio queue here
+	 * is stuck by definition. */
 	return d->input_eof && d->demux.staged == 0U &&
-	       d->demux.video.count == 0U && d->demux.audio.count == 0U;
+	       d->demux.video.count == 0U &&
+	       (d->demux.audio.count == 0U || d->pcm_backpressure);
 }
 
 static int parse_video(struct sdk_video_mpeg2 *d,
@@ -786,6 +882,7 @@ static int mpeg2_write(void *decoder, const uint8_t *src, uint32_t length,
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
 	if (d->input_eof)
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
+	update_audio_drop_policy(d);
 	sdk_dvd_ps_write(&d->demux, src, length, &used, eof);
 	if (eof && used == length)
 		d->input_eof = 1U;
@@ -845,6 +942,7 @@ static int mpeg2_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 
 	if (!d || !frame || d->failed)
 		return SDK_VIDEO_BACKEND_ERROR;
+	update_audio_drop_policy(d);
 	if (d->media_configured)
 		route_audio_queue(d);
 	else
@@ -858,12 +956,24 @@ static int mpeg2_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 		if (!feed_video(d))
 			break;
 	}
-	if (d->video_done && audio_drained(d) &&
-	    (!d->media_configured ||
-	     d->pcm_produced == d->pcm_acknowledged)) {
-		if (d->media_configured)
-			d->media_flags |= SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE;
-		return SDK_VIDEO_BACKEND_DONE;
+	if (d->video_done && audio_drained(d)) {
+		if (!d->media_configured ||
+		    d->pcm_produced == d->pcm_acknowledged) {
+			if (d->media_configured)
+				d->media_flags |=
+					SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE;
+			return SDK_VIDEO_BACKEND_DONE;
+		}
+		/* Every picture is decoded and every audio packet routed; the
+		 * PCM still in the ring is playing out. The session is busy,
+		 * not hungry: a client that has written everything must drain
+		 * its ring, not report a truncated stream. */
+		return SDK_VIDEO_BACKEND_BACKPRESSURE;
+	}
+	if (d->input_eof && d->media_configured && !audio_drained(d)) {
+		/* Audio packets are stuck behind a ring only the client can
+		 * drain; video is done or starving. BUSY, not NEED_INPUT. */
+		return SDK_VIDEO_BACKEND_BACKPRESSURE;
 	}
 	return SDK_VIDEO_BACKEND_NEED_INPUT;
 }
@@ -952,9 +1062,10 @@ static int mpeg2_get_media_info(void *decoder,
 	info->current_audio_pts = d->last_audio_pts;
 	info->first_audio_pts = d->first_audio_pts;
 	info->pts_origin = 0U;
-	info->raw_pts = d->last_audio_pts;
+	info->raw_pts = d->last_audio_pts_raw;
 	info->audio_frames = d->audio_frames;
 	info->backpressure_events = d->backpressure_events;
+	info->audio_packets_dropped = d->demux.audio_packets_dropped;
 	info->flags = d->media_flags;
 	return 1;
 }

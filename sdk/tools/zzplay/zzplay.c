@@ -1386,7 +1386,7 @@ static int zzplay_audio_prepare_from_result(
     runtime->audio_prepared = 1U;
     (void)zzplay_resource_acquire(
         &runtime->core.resources, ZZPLAY_RESOURCE_AUDIO_SINK);
-    zzplay_info("zzplay: audio path MP2 decode -> card-local AX DMA, "
+    zzplay_info("zzplay: audio path PS audio decode -> card-local AX DMA, "
            "%lu Hz, %lu channel%s\n",
            (unsigned long)audio->sample_rate,
            (unsigned long)audio->channels,
@@ -1421,7 +1421,7 @@ static int zzplay_audio_prepare_from_result(
   runtime->audio_prepared = 1U;
   (void)zzplay_resource_acquire(
       &runtime->core.resources, ZZPLAY_RESOURCE_AUDIO_SINK);
-  zzplay_info("zzplay: audio path MP2 decode -> AHI S16BE, "
+  zzplay_info("zzplay: audio path PS audio decode -> AHI S16BE, "
          "%lu Hz, %lu channel%s\n",
          (unsigned long)audio->sample_rate,
          (unsigned long)audio->channels,
@@ -1979,14 +1979,24 @@ static int zzplay_retire_held_frame(
   uint64_t queued_audio_frames =
       zzplay_audio_queued_frames(runtime);
   int64_t drift = 0;
+  int ring_full;
   int status;
+
+  /* A session reporting BACKPRESSURE has a PCM ring nothing is draining.
+   * If audio output has not started yet, waiting longer can only fill the
+   * ring further until video starves behind it, so the start gate is
+   * waived: losing the lead-in sync beats a frozen picture. */
+  ring_full = (runtime->audio_result.flags &
+               ZZ9K_MEDIA_SESSION_RESULT_BACKPRESSURE) != 0U;
 
   *retired = 0;
   if (!runtime->audio_started && runtime->audio_prepared &&
-      zzplay_audio_start_ready(
-          runtime->audio_backend, queued_audio_frames,
-          runtime->ahi.clock.queue_limit_frames)) {
-    if (zzplay_sync_audio_may_start(
+      (ring_full ||
+       zzplay_audio_start_ready(
+           runtime->audio_backend, queued_audio_frames,
+           runtime->ahi.clock.queue_limit_frames))) {
+    if (ring_full ||
+        zzplay_sync_audio_may_start(
             result->video_pts, runtime->audio_origin_pts,
             runtime->sync_policy.drop_late_pts)) {
       if (!zzplay_ensure_pip(runtime)) {

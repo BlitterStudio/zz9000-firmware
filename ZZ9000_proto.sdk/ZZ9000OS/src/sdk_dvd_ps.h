@@ -58,6 +58,14 @@ struct SDKDVDPSDemux {
 	uint8_t mp2_stream;
 	uint8_t lpcm_substream;
 	uint8_t eof;
+	/* Overflow policy: while set, audio packets that cannot be queued
+	 * (the decoder's PCM ring is full and the client is not draining it)
+	 * are dropped and counted instead of stopping the parse, so video
+	 * packets behind them keep flowing. The owner clears it as soon as
+	 * the client consumes again. */
+	uint8_t drop_audio_when_full;
+	uint32_t audio_packets_dropped;
+	uint64_t audio_bytes_dropped;
 };
 
 void sdk_dvd_ps_init(struct SDKDVDPSDemux *demux);

@@ -263,8 +263,25 @@ static int parse_one(struct SDKDVDPSDemux *d)
 	} else {
 		d->bytes_ignored += total;
 	}
-	if (queued == 0)
+	if (queued == 0) {
+		int audio_packet = (sid >= 0xc0U && sid <= 0xdfU) ||
+		                   sid == 0xbdU;
+
+		if (d->drop_audio_when_full && audio_packet) {
+			/* The audio queue is full behind a PCM ring the client
+			 * is not draining. Drop this packet so the parse (and
+			 * the video packets behind it) keeps moving; the owner
+			 * only sets the policy while video would otherwise
+			 * starve. */
+			d->audio_packets_dropped++;
+			d->audio_bytes_dropped += total;
+			d->bytes_ignored += total;
+			consume(d, total);
+			d->packets_seen++;
+			return 1;
+		}
 		return 0;
+	}
 	if (queued < 0)
 		d->malformed_packets++;
 	consume(d, total);

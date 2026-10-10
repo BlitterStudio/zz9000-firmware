@@ -89,6 +89,7 @@ struct SDKVideoMediaInfo {
 	uint64_t raw_pts;
 	uint32_t audio_frames;
 	uint32_t backpressure_events;
+	uint32_t audio_packets_dropped;
 	uint32_t flags;
 };
 
