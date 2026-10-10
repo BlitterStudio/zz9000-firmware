@@ -29,6 +29,18 @@ int sdk_video_yuv420_to_yuy2_scalar(uint8_t *dst, uint32_t dst_pitch,
                                     uint32_t chroma_pitch,
                                     uint32_t *bytes_written);
 
+/* Packs the frame at half width and half height ((width / 2) x
+ * (height / 2)), for a source too large for the overlay to fetch in time.
+ * Output pixel (r, x) is source luma (2r, 2x); each output pair in row r
+ * takes the chroma of source row 2r at column 2p. Needs width and height
+ * of at least 2. */
+int sdk_video_yuv420_to_yuy2_half(uint8_t *dst, uint32_t dst_pitch,
+                                  uint32_t width, uint32_t height,
+                                  const uint8_t *y, uint32_t y_pitch,
+                                  const uint8_t *cb, const uint8_t *cr,
+                                  uint32_t chroma_pitch,
+                                  uint32_t *bytes_written);
+
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 int sdk_video_yuv420_to_yuy2_neon(uint8_t *dst, uint32_t dst_pitch,
                                   uint32_t width, uint32_t height,
