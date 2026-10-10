@@ -45,6 +45,14 @@
 #define WEBM_PCM_ANCHORS 128U
 #define WEBM_SKIP_BUDGET 128U
 #define WEBM_HELD_AUDIO (8U * 1024U)
+/* Video blocks demuxed ahead of the decoder. WebM muxers interleave by
+ * timestamp, and the host only asks for a picture after showing the last
+ * one, so audio reaches the PCM low-water mark ahead of the picture on
+ * screen only if the demux runs past the video blocks in between. 200 ms
+ * of 1080p VP9 is well under 1 MB; a block that does not fit waits in the
+ * single stash and stops the audio read-ahead until the queue drains. */
+#define WEBM_VIDEO_QUEUE_BYTES (2U * 1024U * 1024U)
+#define WEBM_VIDEO_QUEUE_BLOCKS 64U
 #define WEBM_OPUS_MAX_SAMPLES 5760
 #define WEBM_RATE_MIN 8000U
 #define WEBM_RATE_MAX 96000U
@@ -100,6 +108,14 @@ struct sdk_video_webm {
 	uint64_t last_raw_pts;
 	uint64_t last_video_pts;
 	struct webm_block stashed_video;
+	/* FIFO of demuxed video blocks, older than stashed_video. Payloads
+	 * are copies in video_queue_data; video_queue_write is where the
+	 * next copy goes. */
+	uint8_t *video_queue_data;
+	struct webm_block video_queue[WEBM_VIDEO_QUEUE_BLOCKS];
+	uint32_t video_queue_head;
+	uint32_t video_queue_count;
+	uint32_t video_queue_write;
 	struct webm_pcm_anchor pcm_anchor[WEBM_PCM_ANCHORS];
 	uint32_t pcm_anchor_count;
 	uint8_t held_audio[WEBM_HELD_AUDIO];
@@ -354,6 +370,55 @@ static int pull_block(struct sdk_video_webm *d, struct webm_block *blk)
 		return -1;
 	}
 	return 1;
+}
+
+/* Copy a demuxed video block to the tail of the queue; 0 when it does not
+ * fit. The live payloads run from the head entry's copy to
+ * video_queue_write, wrapping once at the end of the buffer. */
+static int video_queue_push(struct sdk_video_webm *d,
+			    const struct webm_block *blk)
+{
+	struct webm_block *slot;
+	uint32_t at = d->video_queue_write;
+
+	if (!d->video_queue_data ||
+	    d->video_queue_count == WEBM_VIDEO_QUEUE_BLOCKS ||
+	    blk->size > WEBM_VIDEO_QUEUE_BYTES)
+		return 0;
+	if (d->video_queue_count == 0U) {
+		at = 0U;
+	} else {
+		uint32_t read = (uint32_t)(
+			d->video_queue[d->video_queue_head].data -
+			d->video_queue_data);
+
+		if (at > read) {
+			if (WEBM_VIDEO_QUEUE_BYTES - at < blk->size) {
+				if (read < blk->size)
+					return 0;
+				at = 0U;
+			}
+		} else if (read - at < blk->size) {
+			return 0;
+		}
+	}
+	memcpy(d->video_queue_data + at, blk->data, blk->size);
+	slot = &d->video_queue[(d->video_queue_head + d->video_queue_count) %
+			       WEBM_VIDEO_QUEUE_BLOCKS];
+	*slot = *blk;
+	slot->data = d->video_queue_data + at;
+	d->video_queue_count++;
+	d->video_queue_write = at + blk->size;
+	return 1;
+}
+
+/* The popped payload stays valid until the next push. */
+static void video_queue_pop(struct sdk_video_webm *d, struct webm_block *blk)
+{
+	*blk = d->video_queue[d->video_queue_head];
+	d->video_queue_head =
+		(d->video_queue_head + 1U) % WEBM_VIDEO_QUEUE_BLOCKS;
+	d->video_queue_count--;
 }
 
 static void flush_pcm(struct sdk_video_webm *d, uint32_t offset, uint32_t bytes)
@@ -748,6 +813,7 @@ static void webm_destroy(void *opaque)
 	}
 	webm_close(&d->demux);
 	WEBM_FREE(d->block);
+	WEBM_FREE(d->video_queue_data);
 	WEBM_FREE(d->win.data);
 	WEBM_FREE(d);
 }
@@ -838,6 +904,12 @@ static int webm_configure_media(void *opaque, const struct SDKVideoMediaConfig *
 			return 0;
 	} else if (!config->pcm_ring || config->pcm_ring_capacity == 0U) {
 		return 0;
+	} else {
+		/* Only audio reads ahead of the video. */
+		d->video_queue_data =
+			(uint8_t *)WEBM_ALLOC(WEBM_VIDEO_QUEUE_BYTES);
+		if (!d->video_queue_data)
+			return 0;
 	}
 	d->media = *config;
 	d->media_configured = 1U;
@@ -972,15 +1044,24 @@ static int replenish_audio(struct sdk_video_webm *d)
 			d->have_held_audio = 0U;
 			continue;
 		}
+		/* The stash holds the newest video block, so it must enter the
+		 * queue before anything after it is pulled. */
+		if (d->have_stashed_video) {
+			if (!video_queue_push(d, &d->stashed_video))
+				return 2;
+			d->have_stashed_video = 0U;
+		}
 		rc = pull_block(d, &blk);
 		if (rc < 0)
 			return -1;
 		if (rc == 0)
 			return 1;
 		if (blk.codec == WEBM_CODEC_VP8 || blk.codec == WEBM_CODEC_VP9) {
+			if (video_queue_push(d, &blk))
+				continue;
 			/* The block is already out of the demuxer and its
-			 * bytes live only until the next pull, so webm_decode
-			 * decodes the stashed block before pulling again. */
+			 * bytes live only until the next pull, so nothing is
+			 * pulled until the stash is queued or decoded. */
 			d->stashed_video = blk;
 			d->have_stashed_video = 1U;
 			return 2;
@@ -1040,7 +1121,10 @@ static int webm_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 			return d->unsupported ? SDK_VIDEO_BACKEND_UNSUPPORTED
 					      : SDK_VIDEO_BACKEND_ERROR;
 		}
-		if (d->have_stashed_video) {
+		if (d->video_queue_count != 0U) {
+			video_queue_pop(d, &blk);
+			video = 1;
+		} else if (d->have_stashed_video) {
 			blk = d->stashed_video;
 			d->have_stashed_video = 0U;
 			video = 1;

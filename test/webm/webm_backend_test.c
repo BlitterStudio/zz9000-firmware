@@ -103,14 +103,17 @@ vpx_codec_err_t vpx_codec_destroy(vpx_codec_ctx_t *ctx)
 	return VPX_CODEC_OK;
 }
 
-/* Audio is configured off in these tests; the stubs only satisfy the
- * linker and fail closed if reached. */
+/* Opus stubs: every packet is 20 ms of stereo silence at 48 kHz. */
+#define OPUS_PACKET_SAMPLES 960
+
+static char opus_state;
+
 OpusDecoder *opus_decoder_create(opus_int32 fs, int channels, int *error)
 {
 	(void)fs;
 	(void)channels;
-	*error = -1;
-	return 0;
+	*error = OPUS_OK;
+	return (OpusDecoder *)(void *)&opus_state;
 }
 
 void opus_decoder_destroy(OpusDecoder *st)
@@ -124,10 +127,11 @@ int opus_decode(OpusDecoder *st, const unsigned char *data, opus_int32 len,
 	(void)st;
 	(void)data;
 	(void)len;
-	(void)pcm;
-	(void)frame_size;
 	(void)decode_fec;
-	return -1;
+	if (frame_size < OPUS_PACKET_SAMPLES)
+		return -1;
+	memset(pcm, 0, OPUS_PACKET_SAMPLES * 2U * sizeof(*pcm));
+	return OPUS_PACKET_SAMPLES;
 }
 
 int opus_packet_get_nb_samples(const unsigned char *packet, opus_int32 len,
@@ -136,7 +140,7 @@ int opus_packet_get_nb_samples(const unsigned char *packet, opus_int32 len,
 	(void)packet;
 	(void)len;
 	(void)fs;
-	return -1;
+	return OPUS_PACKET_SAMPLES;
 }
 
 void vorbis_info_init(vorbis_info *vi)
@@ -655,6 +659,115 @@ static void test_partial_final_write(void)
 	free(tail);
 }
 
+/* The same header with an Opus track 2 (stereo, no pre-skip). */
+static const uint8_t webm_av_head[] = {
+	0x1A, 0x45, 0xDF, 0xA3, 0x87, 0x42, 0x82, 0x84, 'w', 'e', 'b', 'm',
+	0x18, 0x53, 0x80, 0x67, 0xFF,
+	0x15, 0x49, 0xA9, 0x66, 0x87, 0x2A, 0xD7, 0xB1, 0x83, 0x0F, 0x42, 0x40,
+	0x16, 0x54, 0xAE, 0x6B, 0xCA,
+	0xAE, 0x97,
+	0xD7, 0x81, 0x01,
+	0x83, 0x81, 0x01,
+	0x86, 0x85, 'V', '_', 'V', 'P', '8',
+	0xE0, 0x88, 0xB0, 0x82, 0x00, 0xA0, 0xBA, 0x82, 0x00, 0x78,
+	0xAE, 0xAF,
+	0xD7, 0x81, 0x02,
+	0x83, 0x81, 0x02,
+	0x86, 0x86, 'A', '_', 'O', 'P', 'U', 'S',
+	0x63, 0xA2, 0x93, 'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, 2,
+	0x00, 0x00, 0x80, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0xE1, 0x89, 0x9F, 0x81, 0x02, 0xB5, 0x84, 0x47, 0x3B, 0x80, 0x00,
+	0x1F, 0x43, 0xB6, 0x75, 0xFF, 0xE7, 0x81, 0x00
+};
+
+static void stream_av_block(struct stream *s, uint8_t track, int key,
+			    uint8_t tag, int16_t ms)
+{
+	put_block(s->bytes + s->n, key, tag, ms);
+	s->bytes[s->n + 2U] = (uint8_t)(0x80U | track);
+	if (track != 1U)
+		s->bytes[s->n + 5U] = 0x80;
+	s->n += BLOCK_BYTES;
+}
+
+/* Muxers interleave WebM by timestamp, so each Opus packet sits just after
+ * the picture it plays with. The host shows a picture when the audio clock
+ * reaches it and only then asks for the next one, so the backend must
+ * demux audio past the queued pictures up to the PCM low-water mark; if it
+ * stopped at each video block, the audio queued when a picture is shown
+ * would be one frame period at most and playback would starve. */
+static void test_audio_demuxed_ahead_of_video(void)
+{
+	enum { FRAMES = 25, PACKETS = 50, MS_BYTES = 192 };
+	static struct stream s;
+	static uint8_t ring[128U * 1024U];
+	const uint32_t total = PACKETS * 20U * MS_BYTES;
+	struct SDKVideoMediaConfig cfg;
+	struct SDKVideoMediaInfo mi;
+	void *dec = ops->create();
+	uint32_t accepted = 0U;
+	uint32_t frames = 0U;
+	uint32_t i;
+	int rc = SDK_VIDEO_BACKEND_ERROR;
+	int ahead = 1;
+	int ordered = 1;
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_OPUS;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = sizeof(ring);
+	cfg.pcm_low_water_bytes = 200U * MS_BYTES;
+	cfg.pcm_high_water_bytes = 96U * 1024U;
+	check(dec && ops->configure_media(dec, &cfg), "A/V create + configure");
+	ndecoded = 0U;
+	memcpy(s.bytes, webm_av_head, sizeof(webm_av_head));
+	s.n = sizeof(webm_av_head);
+	for (i = 0U; i < FRAMES; i++) {
+		stream_av_block(&s, 1U, i == 0U, (uint8_t)i, (int16_t)(40U * i));
+		stream_av_block(&s, 2U, 1, 0, (int16_t)(40U * i));
+		stream_av_block(&s, 2U, 1, 0, (int16_t)(40U * i + 20U));
+	}
+	check(feed(dec, s.bytes, s.n, s.n) &&
+	      ops->write(dec, 0, 0, 1, &accepted) ==
+		      SDK_VIDEO_BACKEND_WRITE_OK, "A/V stream write");
+	for (i = 0U; i < 4U * FRAMES; i++) {
+		uint64_t played = (uint64_t)frames * 40U * MS_BYTES;
+		uint64_t want = played + cfg.pcm_low_water_bytes;
+
+		/* The audio clock has reached the next picture's time. */
+		if (ops->get_media_info(dec, &mi))
+			(void)ops->ack_media(dec, mi.pcm_produced < played
+					     ? mi.pcm_produced : played);
+		rc = decode(dec);
+		if (rc == SDK_VIDEO_BACKEND_DONE)
+			break;
+		if (rc == SDK_VIDEO_BACKEND_PROGRESS ||
+		    rc == SDK_VIDEO_BACKEND_BACKPRESSURE)
+			continue;
+		if (rc != SDK_VIDEO_BACKEND_FRAME)
+			break;
+		if (want > total)
+			want = total;
+		if (!ops->get_media_info(dec, &mi) || mi.pcm_produced < want) {
+			if (ahead)
+				fprintf(stderr, "frame %u: audio %llu of %llu\n",
+					frames, (unsigned long long)mi.pcm_produced,
+					(unsigned long long)want);
+			ahead = 0;
+		}
+		if (ndecoded != frames + 1U || decoded[frames] != frames)
+			ordered = 0;
+		frames++;
+	}
+	check(ahead, "audio is decoded to the low-water mark past each picture");
+	check(ordered, "pictures decode once, in order");
+	check(rc == SDK_VIDEO_BACKEND_DONE && frames == FRAMES,
+	      "every picture decodes, then the stream is done");
+	check(ops->get_media_info(dec, &mi) && mi.pcm_produced == total,
+	      "all the audio decodes");
+	ops->destroy(dec);
+}
+
 int main(void)
 {
 	ops = sdk_video_webm_ops(SDK_VIDEO_CODEC_VP8);
@@ -698,6 +811,7 @@ int main(void)
 		test_window_exhausted_by_skip();
 		test_window_exhausted_in_header();
 		test_partial_final_write();
+		test_audio_demuxed_ahead_of_video();
 	}
 	if (failures) {
 		fprintf(stderr, "webm_backend_test: %d failure(s)\n", failures);
