@@ -358,7 +358,7 @@ static int test_errors_and_reclaim(void)
 	reset_mocks();
 	sdk_media_session_init();
 	fill_begin(&begin);
-	begin.audio_codec = 2U;
+	begin.audio_codec = 6U;	/* no such codec */
 	begin.pcm_ring_handle = 0x40000001U;
 	begin.pcm_ring_capacity = 32768U;
 	begin.pcm_low_water_bytes = 4096U;
@@ -668,6 +668,37 @@ static int test_mp2_audio_snapshot_and_ack(void)
 	return 0;
 }
 
+/* MPEG-2 Program Stream sessions carry LPCM or AC-3, decoded on the card
+ * into the PCM ring like MP2. */
+static int test_dvd_audio_codecs_begin(void)
+{
+	static const uint32_t codecs[2] = {
+		SDK_MEDIA_AUDIO_LPCM, SDK_MEDIA_AUDIO_AC3
+	};
+	struct SDKMediaSessionBegin begin;
+	struct SDKMediaSessionMainResult result;
+	unsigned i;
+
+	for (i = 0U; i < 2U; i++) {
+		reset_mocks();
+		sdk_media_session_init();
+		fill_begin(&begin);
+		begin.video_codec = SDK_VIDEO_CODEC_MPEG2;
+		begin.audio_codec = codecs[i];
+		begin.pcm_ring_handle = 0x40000001U;
+		begin.pcm_ring = pcm_ring;
+		begin.pcm_ring_capacity = sizeof(pcm_ring);
+		begin.pcm_low_water_bytes = 6144U;
+		begin.pcm_high_water_bytes = 24576U;
+		/* Before, both were refused here without reaching the
+		 * stream layer. */
+		if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK ||
+		    begin_calls != 1U)
+			return 1 + (int)i;
+	}
+	return 0;
+}
+
 static int test_mp2_direct_audio_output(void)
 {
 	struct SDKMediaSessionBegin begin;
@@ -864,6 +895,8 @@ int main(void)
 	if (rc != 0) return 245 + rc;
 	rc = test_mp2_audio_snapshot_and_ack();
 	if (rc != 0) return 130 + rc;
+	rc = test_dvd_audio_codecs_begin();
+	if (rc != 0) return 120 + rc;
 	rc = test_mp2_direct_audio_output();
 	if (rc != 0) return 170 + rc;
 	rc = test_mp2_direct_audio_cursor_rollover();

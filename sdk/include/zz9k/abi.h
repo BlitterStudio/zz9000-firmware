@@ -434,6 +434,12 @@ enum ZZ9KServiceFlags {
   ZZ9K_SERVICE_FLAG_CRYPTO_P256_KEYGEN = 1U << 21
 };
 
+/* MPEG-2 video in Program Stream (.mpg/.vob) and Matroska files, with AC-3,
+ * LPCM or MP2 audio decoded on the card. Advertised only by the
+ * qualification flavor until it passes hardware qualification. Bit 31
+ * does not fit an int enumerator in strict C, so it is a macro. */
+#define ZZ9K_SERVICE_FLAG_VIDEO_MPEG2 0x80000000UL
+
 enum ZZ9KAudioSampleFormat {
   ZZ9K_AUDIO_SAMPLE_FORMAT_NONE = 0,
   ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE = 1,
@@ -2763,7 +2769,7 @@ enum ZZ9KAudioCodec {
 
 enum ZZ9KVideoCodec {
   ZZ9K_VIDEO_CODEC_MPEG1 = 1U,
-  /* 2 is reserved for MPEG-2. */
+  ZZ9K_VIDEO_CODEC_MPEG2 = 2U,
   ZZ9K_VIDEO_CODEC_VP8 = 3U,
   ZZ9K_VIDEO_CODEC_VP9 = 4U
 };
@@ -2799,8 +2805,8 @@ enum ZZ9KVideoSessionResultFlags {
 enum ZZ9KMediaAudioCodec {
   ZZ9K_MEDIA_AUDIO_NONE = 0U,
   ZZ9K_MEDIA_AUDIO_MP2 = 1U,
-  /* 2 and 3 are LPCM and AC3 inside the firmware DVD backend. Opus and
-   * Vorbis stay clear of that numeric space. */
+  ZZ9K_MEDIA_AUDIO_LPCM = 2U,
+  ZZ9K_MEDIA_AUDIO_AC3 = 3U,
   ZZ9K_MEDIA_AUDIO_OPUS = 4U,
   ZZ9K_MEDIA_AUDIO_VORBIS = 5U
 };

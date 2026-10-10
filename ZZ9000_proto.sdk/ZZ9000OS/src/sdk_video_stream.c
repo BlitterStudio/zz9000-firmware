@@ -286,11 +286,14 @@ uint16_t sdk_video_stream_begin_owned(
 	     begin->pcm_low_water_bytes != 0U ||
 	     begin->pcm_high_water_bytes != 0U))
 		return SDK_STATUS_BAD_REQUEST;
-	/* Media audio this firmware offers clients. LPCM and AC-3 stay off
-	 * the list until the MPEG-2/DVD backend is advertised. */
+	/* Media audio this firmware offers clients. Like the WebM codecs,
+	 * LPCM and AC-3 (MPEG-2 Program Stream) are always accepted; only
+	 * their service flag waits for qualification. */
 	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_MP2 &&
+	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_LPCM &&
+	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_AC3 &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_OPUS &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_VORBIS)
 		return SDK_STATUS_UNSUPPORTED;

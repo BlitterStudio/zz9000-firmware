@@ -414,6 +414,8 @@ void sdk_media_session_close_retired(uint32_t session)
 static int media_pcm_codec(uint32_t codec)
 {
 	return codec == SDK_MEDIA_AUDIO_MP2 ||
+	       codec == SDK_MEDIA_AUDIO_LPCM ||
+	       codec == SDK_MEDIA_AUDIO_AC3 ||
 	       codec == SDK_MEDIA_AUDIO_OPUS ||
 	       codec == SDK_MEDIA_AUDIO_VORBIS;
 }
