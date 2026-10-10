@@ -39,6 +39,10 @@ struct SDKDVDPSQueue {
 
 struct SDKDVDPSDemux {
 	uint8_t staging[SDK_DVD_PS_STAGING_CAPACITY];
+	/* Unparsed input is staging[head..staged). Parsing advances head;
+	 * bytes move down only when an append needs the room, never per
+	 * packet (newlib's unaligned memmove copies byte by byte). */
+	uint32_t head;
 	uint32_t staged;
 	struct SDKDVDPSQueue video;
 	struct SDKDVDPSQueue audio;

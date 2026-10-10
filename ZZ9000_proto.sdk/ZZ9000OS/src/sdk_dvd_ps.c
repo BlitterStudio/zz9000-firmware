@@ -27,9 +27,9 @@ static int valid_timestamp(const uint8_t *p, uint8_t prefix)
 
 static void consume(struct SDKDVDPSDemux *d, uint32_t bytes)
 {
-	if (bytes < d->staged)
-		memmove(d->staging, d->staging + bytes, d->staged - bytes);
-	d->staged -= bytes;
+	d->head += bytes;
+	if (d->head >= d->staged)
+		d->head = d->staged = 0U;
 }
 
 static int queue_packet(struct SDKDVDPSDemux *d, struct SDKDVDPSQueue *q,
@@ -80,15 +80,16 @@ static int need_more(struct SDKDVDPSDemux *d)
 {
 	if (!d->eof || d->staged == 0U)
 		return 2;
-	d->bytes_ignored += d->staged;
-	consume(d, d->staged);
+	d->bytes_ignored += d->staged - d->head;
+	consume(d, d->staged - d->head);
 	return 1;
 }
 
 /* 0: output queue blocked, 1: consumed a unit, 2: need more input. */
 static int parse_one(struct SDKDVDPSDemux *d)
 {
-	uint8_t *p = d->staging;
+	uint8_t *p = d->staging + d->head;
+	uint32_t avail = d->staged - d->head;
 	uint8_t sid;
 	uint32_t total;
 	uint32_t payload_at;
@@ -97,11 +98,11 @@ static int parse_one(struct SDKDVDPSDemux *d)
 	uint64_t dts = SDK_DVD_PS_NO_TS;
 	int queued = 1;
 
-	if (d->staged < 4U)
+	if (avail < 4U)
 		return need_more(d);
 	if (p[0] != 0U || p[1] != 0U || p[2] != 1U) {
-		uint32_t at = find_start(p, 1U, d->staged);
-		uint32_t drop = at == d->staged ? d->staged - 2U : at;
+		uint32_t at = find_start(p, 1U, avail);
+		uint32_t drop = at == avail ? avail - 2U : at;
 		d->bytes_ignored += drop;
 		consume(d, drop);
 		return 1;
@@ -112,10 +113,10 @@ static int parse_one(struct SDKDVDPSDemux *d)
 		return 1;
 	}
 	if (sid == 0xbaU) {
-		if (d->staged < 12U)
+		if (avail < 12U)
 			return need_more(d);
 		if ((p[4] & 0xc0U) == 0x40U) {
-			if (d->staged < 14U)
+			if (avail < 14U)
 				return need_more(d);
 			total = 14U + (p[13] & 7U);
 		} else if ((p[4] & 0xf0U) == 0x20U) {
@@ -125,20 +126,20 @@ static int parse_one(struct SDKDVDPSDemux *d)
 			consume(d, 4U);
 			return 1;
 		}
-		if (d->staged < total)
+		if (avail < total)
 			return need_more(d);
 		consume(d, total);
 		return 1;
 	}
-	if (d->staged < 6U)
+	if (avail < 6U)
 		return need_more(d);
 	total = 6U + be16(p + 4U);
 	if (total == 6U) {
-		uint32_t next = find_start(p, 6U, d->staged);
-		if (next == d->staged) {
+		uint32_t next = find_start(p, 6U, avail);
+		if (next == avail) {
 			if (!d->eof)
 				return 2;
-			total = d->staged;
+			total = avail;
 		} else {
 			total = next;
 		}
@@ -148,7 +149,7 @@ static int parse_one(struct SDKDVDPSDemux *d)
 		consume(d, 4U);
 		return 1;
 	}
-	if (d->staged < total)
+	if (avail < total)
 		return need_more(d);
 	if (sid == 0xbbU || sid == 0xbcU || sid == 0xbeU || sid == 0xbfU ||
 	    sid == 0xf0U || sid == 0xf1U || sid == 0xffU) {
@@ -295,6 +296,15 @@ void sdk_dvd_ps_write(struct SDKDVDPSDemux *d, const uint8_t *src,
 		if (state == 0)
 			break;
 		room = SDK_DVD_PS_STAGING_CAPACITY - d->staged;
+		if (room < length - used && d->head != 0U) {
+			/* Parsing stopped inside a unit: move just that
+			 * unit to the front, once per refill. */
+			memmove(d->staging, d->staging + d->head,
+			        d->staged - d->head);
+			d->staged -= d->head;
+			d->head = 0U;
+			room = SDK_DVD_PS_STAGING_CAPACITY - d->staged;
+		}
 		if (room == 0U)
 			break;
 		copy = length - used;
