@@ -124,7 +124,10 @@ before the gates execute. That step is load-bearing for the ADAU1701 I2S
 input capture (`tSODM` = 40 ns consumes the whole BCLK half period, so the
 fast-corner margin is only BCLK insertion minus pin-to-register delay; the
 trial build moved from −0.090 ns routed to +0.143 ns after post-route
-phys_opt). Treat a routed-checkpoint WNS of a few hundred picoseconds
+phys_opt). When that pass still leaves negative setup slack in any clock
+group, `post_route_phys_opt_retry.tcl` (a post-hook on the same step) runs
+it again, at most twice; designs that already meet timing are not touched.
+Treat a routed-checkpoint WNS of a few hundred picoseconds
 negative on `i2s_mclk` as "let phys_opt finish" rather than a real
 regression; the gated (final) netlist is the authority.
 

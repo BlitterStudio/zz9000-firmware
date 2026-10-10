@@ -46,6 +46,8 @@ if { [string match "*ERROR*" $synth_status] || [string match "*FAILED*" $synth_s
     exit 1
 }
 
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.TCL.POST \
+    [file join $script_dir post_route_phys_opt_retry.tcl] [get_runs impl_1]
 launch_runs impl_1 -to_step {phys_opt_design (Post-Route)} -jobs $njobs
 wait_on_run impl_1
 set impl_status [get_property STATUS [get_runs impl_1]]
