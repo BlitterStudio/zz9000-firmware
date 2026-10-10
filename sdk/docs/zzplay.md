@@ -17,7 +17,7 @@ It works two ways:
 | Input | Video | Audio |
 | --- | --- | --- |
 | MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video, card-decoded | MPEG-1 Layer II, card-decoded |
-| MPEG-2 Program Stream (`.mpg`, `.mpeg`, `.vob`) | MPEG-2 video up to 720x576, card-decoded; needs firmware that advertises MPEG-2 | AC-3, MP2 or LPCM (the first the stream carries, in that order), card-decoded; firmware without the MPEG-2 service refuses the file rather than half-playing it |
+| MPEG-2 Program Stream (`.mpg`, `.mpeg`, `.vob`) | MPEG-2 video up to 720x576, card-decoded; needs firmware that advertises MPEG-2 | AC-3, MP2 or LPCM, one track: AC-3 if the file has any, otherwise MP2, otherwise LPCM, card-decoded; firmware without the MPEG-2 service refuses the file rather than half-playing it |
 | MPEG-2 Program Stream, video only | MPEG-2 video, card-decoded | none (a warning is printed) |
 | WebM (`.webm`, `.mkv`) | VP8 up to 1280x720 pixels, or VP9 up to 854x480, card-decoded, either orientation | Opus at 48 kHz, or Vorbis at 8 to 96 kHz, card-decoded; on the card when the firmware advertises it, otherwise AHI |
 | WebM, larger than that but within 1920 on the long side and 1920x1088 pixels | same codecs, best effort | audio stays continuous; video may skip ahead to the next keyframe |
@@ -111,7 +111,8 @@ From top to bottom:
   use, the elapsed and total time and the playback state, and a message line
   for notices and errors.
 - **Position slider**: drag it to seek. Seeking is available for MP3; it is
-  greyed out for MPEG-1 video, WebM, FLAC and Ogg Vorbis, which play from the start.
+  greyed out for MPEG-1 and MPEG-2 video, WebM, FLAC and Ogg Vorbis, which play
+  from the start.
 - **Transport**: previous, play, pause, stop, next.
 - **Volume**: greyed out when the active output cannot change volume (see
   below).

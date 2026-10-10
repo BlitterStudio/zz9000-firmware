@@ -297,7 +297,12 @@ static size_t zzplay_pes_payload_at(const uint8_t *p, size_t avail)
     return 0U;
   }
   total = 6U + (((size_t)p[4] << 8) | (size_t)p[5]);
-  if (avail >= 9U && (p[6] & 0xc0U) == 0x80U) {
+  if (avail >= 7U && (p[6] & 0xc0U) == 0x80U) {
+    /* An MPEG-2 header's length byte places the payload; a header the
+     * window cuts is left to the next window, not read as MPEG-1. */
+    if (avail < 9U) {
+      return 0U;
+    }
     payload_at = 9U + (size_t)p[8];
   } else {
     while (payload_at < total && payload_at < avail &&

@@ -244,6 +244,21 @@ static int check_mpeg2_audio_priority_probe(void)
   if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_AC3) {
     return 0;
   }
+  /* A probe window that ends inside an LPCM PES's MPEG-2 header: its
+   * flags byte (0x84, data alignment) must not be read as an AC-3
+   * substream id, or the LPCM seen once the window moves on is ignored. */
+  payload[0] = 0xa0;
+  n = probe_put_pes(buf, 0xbdU, payload, sizeof(payload));
+  buf[6] = 0x84;
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, 8U, &info);
+  if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_NONE) {
+    return 0;
+  }
+  zzplay_probe_mpeg_program(buf, n, &info);
+  if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_LPCM) {
+    return 0;
+  }
   /* Video only. */
   memset(&info, 0, sizeof(info));
   n = probe_put_pes(buf, 0xe0U, payload, 4U);
