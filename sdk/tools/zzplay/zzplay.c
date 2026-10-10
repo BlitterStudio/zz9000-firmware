@@ -754,6 +754,12 @@ static void zzplay_force_geometry(struct ZZPlayRuntime *runtime,
  * SharePens leaves them obtainable - between them the PIP can get its key. */
 static UWORD zzplay_screen_pens[] = { (UWORD)~0 };
 
+/* The margins around the fitted video are the screen's background, pen 0,
+ * which a new screen otherwise takes from the Workbench palette; Intuition
+ * also refills uncovered screen areas with it when the window is resized.
+ * Make pen 0 black. Format: count << 16 | first pen, 32-bit R, G, B, 0. */
+static ULONG zzplay_screen_colors[] = { 1UL << 16, 0UL, 0UL, 0UL, 0UL };
+
 static const char *zzplay_pip_error_name(LONG error)
 {
   switch (error) {
@@ -823,6 +829,7 @@ static int zzplay_open_video_screen(struct ZZPlayRuntime *runtime)
       P96SA_AutoScroll, FALSE,
       P96SA_SharePens, TRUE,
       P96SA_Pens, (ULONG)zzplay_screen_pens,
+      P96SA_Colors32, (ULONG)zzplay_screen_colors,
       TAG_DONE);
   if (!runtime->screen) {
     zzplay_info("zzplay: could not open a fullscreen display\n");
@@ -2131,10 +2138,16 @@ static int zzplay_release_resource(void *user,
               runtime->ctx, runtime->session, 0U, &result);
           runtime->frame_held = 0U;
         }
+        /* BUSY lasts until the card's main loop hands the last presented
+         * frame to the compositor; give it a tick between attempts rather
+         * than spending every retry inside one loop iteration. */
         status = ZZ9K_STATUS_BUSY;
         for (retry = 0U;
              retry < 16U && status == ZZ9K_STATUS_BUSY;
              retry++) {
+          if (retry != 0U) {
+            Delay(1);
+          }
           status = zz9k_media_session_close(
               runtime->ctx, runtime->session, 0U, &result);
         }
