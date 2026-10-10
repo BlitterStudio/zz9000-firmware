@@ -1283,6 +1283,10 @@ static void zzplay_update_title(struct ZZPlayRuntime *runtime)
     runtime->title_dirty = 0U;
     return;
   }
+  /* Retried on a later pass: a menu or window drag holds the screen. */
+  if (!zzplay_gui_screen_free(runtime->window)) {
+    return;
+  }
   state = runtime->core.state == ZZPLAY_STATE_PAUSED ? "paused"
                                                      : "playing";
   if (runtime->container.title) {

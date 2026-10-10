@@ -56,6 +56,15 @@ uint32_t zzplay_gui_signal_mask(void);
  * Returns immediately when there is nothing to do. */
 void zzplay_gui_poll(void);
 
+struct Window;
+
+/* Nonzero when nothing holds the layers of the window's screen. Intuition
+ * holds them while a menu is open or a window is dragged; rendering into
+ * any window on that screen then blocks, and since the GUI is polled from
+ * the playback loops, the sound would stop with it. Callers skip
+ * rendering while this returns 0 and do it on a later pass. */
+int zzplay_gui_screen_free(struct Window *window);
+
 /* Report a message to the user: shown in the player window's message line
  * when it is open. Returns 0 when there is no window to show it in. */
 int zzplay_gui_report(const char *message);

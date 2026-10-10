@@ -200,6 +200,12 @@ static int pos_slider_dragging = 0;
 /* -1 means the position gadget was (re)created and has no applied state. */
 static int pos_slider_last_disabled = -1;
 static ULONG pos_slider_last_level;
+/* The time row as last drawn: the position changes on every pass but its
+ * text once a second, and only a change is worth drawing. */
+static char shown_position[128];
+/* An IDCMP_REFRESHWINDOW that waits for the screen's layers to be free. */
+static int refresh_pending = 0;
+static int settings_refresh_pending = 0;
 
 /* AppWindow */
 static struct MsgPort *app_port;
@@ -471,6 +477,55 @@ static void update_menu_checks(void)
   ResetMenuStrip(player_win, player_menus);
 }
 
+/* Take the window's screen LayerInfo lock and then its layer lock, the
+ * layers library order, without waiting. Intuition holds the LayerInfo
+ * lock (with every layer) while a menu is open or a window is dragged. */
+static int try_lock_window(struct Window *window)
+{
+  struct SignalSemaphore *info = &window->WScreen->LayerInfo.Lock;
+
+  if (!AttemptSemaphore(info)) {
+    return 0;
+  }
+  if (!AttemptLockLayerRom(window->WLayer)) {
+    ReleaseSemaphore(info);
+    return 0;
+  }
+  return 1;
+}
+
+static void unlock_window(struct Window *window)
+{
+  UnlockLayerRom(window->WLayer);
+  ReleaseSemaphore(&window->WScreen->LayerInfo.Lock);
+}
+
+int zzplay_gui_screen_free(struct Window *window)
+{
+  if (!window || !window->WScreen) {
+    return 1;
+  }
+  if (!try_lock_window(window)) {
+    return 0;
+  }
+  unlock_window(window);
+  return 1;
+}
+
+/* Pure graphics may run holding these locks: graphics takes the same layer
+ * lock again (it nests), and holding them keeps a menu from opening between
+ * two drawing calls. Intuition and GadTools gadget calls must not run under
+ * them: some hand work to Intuition's input task and wait for it. */
+static int lock_screen_for_drawing(void)
+{
+  return try_lock_window(player_win);
+}
+
+static void unlock_screen_for_drawing(void)
+{
+  unlock_window(player_win);
+}
+
 /* Draw one info line, clipped to the panel so a long title never runs over
  * the bevel or into the window border. */
 static void draw_info_line(struct RastPort *rp, int left, int top, int width,
@@ -514,8 +569,9 @@ static void format_position_line(const ZZPlayController *ctl, char *line)
   }
 }
 
-/* Position-only changes clear one text row, preserving the panel bevel. */
-static void draw_position_info(void)
+/* Position-only changes clear one text row, preserving the panel bevel.
+ * Returns 0 when the screen was locked and nothing was drawn. */
+static int draw_position_info(void)
 {
   struct RastPort *rp;
   ZZPlayController *ctl;
@@ -528,11 +584,18 @@ static void draw_position_info(void)
   int text_width;
 
   if (!player_win || !gui_context || !gui_context->controller) {
-    return;
+    return 1;
   }
   ctl = gui_context->controller;
   if (!ctl->item_active) {
-    return;
+    return 1;
+  }
+  format_position_line(ctl, line);
+  if (strcmp(line, shown_position) == 0) {
+    return 1;
+  }
+  if (!lock_screen_for_drawing()) {
+    return 0;
   }
   rp = player_win->RPort;
   left = win_off_x + ZZPLAY_GUI_MARGIN;
@@ -541,7 +604,6 @@ static void draw_position_info(void)
   text_left = left + 6;
   text_top = top + 3;
   text_width = width - 12;
-  format_position_line(ctl, line);
   SetAPen(rp, player_draw_info ? player_draw_info->dri_Pens[BACKGROUNDPEN] : 0U);
   RectFill(rp, (WORD)(left + 2), (WORD)(text_top + 3 * line_height),
            (WORD)(left + width - 3),
@@ -550,10 +612,14 @@ static void draw_position_info(void)
   SetBPen(rp, player_draw_info ? player_draw_info->dri_Pens[BACKGROUNDPEN] : 0U);
   SetDrMd(rp, JAM2);
   draw_info_line(rp, text_left, text_top, text_width, 3, line);
+  unlock_screen_for_drawing();
+  strcpy(shown_position, line);
+  return 1;
 }
 
 /* --- Redraw Info Text --- */
-static void draw_info(void)
+/* Returns 0 when the screen was locked and nothing was drawn. */
+static int draw_info(void)
 {
   static char shown_title[48];
   struct RastPort *rp;
@@ -567,7 +633,10 @@ static void draw_info(void)
   int text_width;
 
   if (!player_win || !gui_context || !gui_context->controller) {
-    return;
+    return 1;
+  }
+  if (!lock_screen_for_drawing()) {
+    return 0;
   }
 
   ctl = gui_context->controller;
@@ -604,14 +673,17 @@ static void draw_info(void)
 
     format_position_line(ctl, line);
     draw_info_line(rp, text_left, text_top, text_width, 3, line);
+    strcpy(shown_position, line);
   } else {
     /* Idle: say what to do rather than leaving an unexplained label. */
     draw_info_line(rp, text_left, text_top, text_width, 0,
                    gui_context->playlist && gui_context->playlist->count != 0U
                        ? "Stopped. Press Play to start."
                        : "Drop files here, or click Add...");
+    shown_position[0] = '\0';
   }
   draw_info_line(rp, text_left, text_top, text_width, 4, ctl->now.message);
+  unlock_screen_for_drawing();
 
   /* Title bar: only touched when it changes, so playback progress does not
    * make Intuition redraw the title every second. */
@@ -626,6 +698,7 @@ static void draw_info(void)
     SetWindowTitles(player_win, (CONST_STRPTR)shown_title,
                     (CONST_STRPTR)~0UL);
   }
+  return 1;
 }
 
 /* --- Settings Window Backend Mappings --- */
@@ -700,6 +773,7 @@ static void close_settings_window(void)
   if (settings_win) {
     CloseWindow(settings_win);
     settings_win = 0;
+    settings_refresh_pending = 0;
   }
   if (settings_gadgets) {
     FreeGadgets(settings_gadgets);
@@ -1509,7 +1583,9 @@ int zzplay_gui_open(const ZZPlayGuiContext *context)
   context->controller->dirty &=
       ~(ZZPLAY_DIRTY_PLAYLIST | ZZPLAY_DIRTY_CURRENT);
   update_menu_checks();
-  draw_info();
+  if (!draw_info()) {
+    context->controller->dirty |= ZZPLAY_DIRTY_INFO;
+  }
 
   return 1;
 }
@@ -1658,7 +1734,8 @@ void zzplay_gui_poll(void)
    * input events). */
   if (!gui_port_pending(player_win->UserPort) &&
       !(settings_win && gui_port_pending(settings_win->UserPort)) &&
-      !gui_port_pending(app_port) && ctl->dirty == 0U &&
+      !gui_port_pending(app_port) && ctl->dirty == 0U && !refresh_pending &&
+      !settings_refresh_pending &&
       zzplay_controller_modal_ready(ctl) == ZZPLAY_MODAL_NONE) {
     return;
   }
@@ -1684,7 +1761,14 @@ void zzplay_gui_poll(void)
     }
   }
 
-  /* 2. Settings window IDCMP */
+  /* 2. Settings window: a refresh deferred while the screen was locked,
+   * then IDCMP. */
+  if (settings_win && settings_refresh_pending &&
+      zzplay_gui_screen_free(settings_win)) {
+    settings_refresh_pending = 0;
+    GT_BeginRefresh(settings_win);
+    GT_EndRefresh(settings_win, TRUE);
+  }
   /* The loop body can close the settings window (close gadget, Save, Use,
    * Cancel), so re-check it before every GT_GetIMsg. */
   if (settings_win && settings_win->UserPort) {
@@ -1701,8 +1785,8 @@ void zzplay_gui_poll(void)
           break;
 
         case IDCMP_REFRESHWINDOW:
-          GT_BeginRefresh(settings_win);
-          GT_EndRefresh(settings_win, TRUE);
+          /* Refreshed above once the screen's layers are free. */
+          settings_refresh_pending = 1;
           break;
 
         case IDCMP_GADGETUP:
@@ -2030,9 +2114,8 @@ void zzplay_gui_poll(void)
           break;
 
         case IDCMP_REFRESHWINDOW:
-          GT_BeginRefresh(player_win);
-          draw_info();
-          GT_EndRefresh(player_win, TRUE);
+          /* Refreshed below once the screen's layers are free. */
+          refresh_pending = 1;
           GT_ReplyIMsg(imsg);
           break;
 
@@ -2054,9 +2137,23 @@ void zzplay_gui_poll(void)
     (void)zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_ADD_DROPPED);
   }
 
-  /* 5. Dirty redraw processing */
-  if (ctl->dirty != 0U) {
+  /* 5. Redraw what changed, only while the screen's layers are free: a
+   * menu or window drag holds them, and rendering would block this loop
+   * and the sound with it. Whatever is not drawn stays dirty for a later
+   * pass. */
+  if ((ctl->dirty != 0U || refresh_pending) &&
+      zzplay_gui_screen_free(player_win)) {
     uint32_t d = ctl->dirty;
+    uint32_t undrawn = 0U;
+
+    if (refresh_pending) {
+      refresh_pending = 0;
+      GT_BeginRefresh(player_win);
+      if (!draw_info()) {
+        undrawn |= ZZPLAY_DIRTY_INFO;
+      }
+      GT_EndRefresh(player_win, TRUE);
+    }
 
     if (d & ZZPLAY_DIRTY_PLAYLIST) {
       rebuild_playlist_nodes();
@@ -2125,11 +2222,15 @@ void zzplay_gui_poll(void)
     }
 
     if (d & (ZZPLAY_DIRTY_INFO | ZZPLAY_DIRTY_STATE)) {
-      draw_info();
+      if (!draw_info()) {
+        undrawn |= ZZPLAY_DIRTY_INFO;
+      }
     } else if (d & ZZPLAY_DIRTY_POSITION) {
-      draw_position_info();
+      if (!draw_position_info()) {
+        undrawn |= ZZPLAY_DIRTY_POSITION;
+      }
     }
 
-    ctl->dirty = 0U;
+    ctl->dirty = undrawn;
   }
 }
