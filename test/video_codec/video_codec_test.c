@@ -174,6 +174,91 @@ static int test_yuy2_rejects_bad_params(void)
 	return 0;
 }
 
+/* Half-size pack for frames the overlay cannot fetch at full size: output
+ * pixel (r, x) is luma (2r, 2x); output pair p in row r takes chroma
+ * (r, 2p), the chroma row of source row 2r. Written from that definition,
+ * not from the kernel. */
+static void yuy2_half_reference(uint8_t *dst, uint32_t dst_pitch,
+	                            uint32_t width, uint32_t height,
+	                            const uint8_t *y, uint32_t y_pitch,
+	                            const uint8_t *cb, const uint8_t *cr,
+	                            uint32_t chroma_pitch)
+{
+	uint32_t out_w = width / 2U;
+	uint32_t out_h = height / 2U;
+	uint32_t row;
+	uint32_t x;
+
+	for (row = 0U; row < out_h; row++) {
+		uint8_t *d = dst + row * dst_pitch;
+		const uint8_t *luma = y + 2U * row * y_pitch;
+
+		for (x = 0U; x < out_w; x += 2U) {
+			uint32_t pair = x >> 1;
+			uint32_t second = x + 1U < out_w ? x + 1U : x;
+
+			d[0] = luma[2U * x];
+			d[1] = cb[row * chroma_pitch + 2U * pair];
+			d[2] = luma[2U * second];
+			d[3] = cr[row * chroma_pitch + 2U * pair];
+			d += 4;
+		}
+	}
+}
+
+static int test_yuy2_half_pack(void)
+{
+	static const uint32_t widths[] = { 2U, 3U, 4U, 6U, 7U, 34U, 64U, 642U };
+	static const uint32_t heights[] = { 2U, 3U, 4U, 9U };
+	static uint8_t luma[642 * 9];
+	static uint8_t blue[321 * 9];
+	static uint8_t red[321 * 9];
+	static uint8_t want[(642 / 2 + 8) * 2 * 9];
+	static uint8_t got[sizeof(want)];
+	unsigned wi;
+	unsigned hi;
+	uint32_t i;
+
+	for (i = 0U; i < sizeof(luma); i++)
+		luma[i] = (uint8_t)(i * 7U + 1U);
+	for (i = 0U; i < sizeof(blue); i++) {
+		blue[i] = (uint8_t)(i * 13U + 5U);
+		red[i] = (uint8_t)(i * 29U + 200U);
+	}
+	for (wi = 0U; wi < sizeof(widths) / sizeof(widths[0]); wi++) {
+		for (hi = 0U; hi < sizeof(heights) / sizeof(heights[0]); hi++) {
+			uint32_t width = widths[wi];
+			uint32_t height = heights[hi];
+			uint32_t chroma_pitch = (width + 1U) / 2U;
+			uint32_t row_bytes = sdk_video_yuy2_row_bytes(width / 2U);
+			uint32_t pitch = row_bytes + 8U;
+			uint32_t written = 0U;
+
+			memset(want, 0xa5U, sizeof(want));
+			memset(got, 0xa5U, sizeof(got));
+			yuy2_half_reference(want, pitch, width, height, luma,
+			                    width, blue, red, chroma_pitch);
+			if (!sdk_video_yuv420_to_yuy2_half(
+			        got, pitch, width, height, luma, width, blue,
+			        red, chroma_pitch, &written))
+				return 1;
+			if (written != row_bytes * (height / 2U))
+				return 2;
+			/* Rows past the half height stay untouched too. */
+			if (memcmp(want, got, sizeof(want)) != 0)
+				return 3;
+		}
+	}
+	/* A frame with no half-size row or column is refused. */
+	if (sdk_video_yuv420_to_yuy2_half(got, 8U, 1U, 4U, luma, 4U, blue,
+	                                  red, 2U, 0))
+		return 4;
+	if (sdk_video_yuv420_to_yuy2_half(got, 8U, 4U, 1U, luma, 4U, blue,
+	                                  red, 2U, 0))
+		return 5;
+	return 0;
+}
+
 static int test_streaming_decode(void)
 {
 	const struct SDKVideoDecoderOps *ops;
@@ -312,6 +397,9 @@ int main(void)
 	result = test_yuy2_rejects_bad_params();
 	if (result != 0)
 		return 70 + result;
+	result = test_yuy2_half_pack();
+	if (result != 0)
+		return 90 + result;
 	result = test_streaming_decode();
 	if (result != 0)
 		return 30 + result;

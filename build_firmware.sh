@@ -59,6 +59,8 @@ if [ "$#" -eq 0 ] || [ "$1" != "clean" ] || [ "$#" -gt 1 ]; then
     bash ./build_dvd_codecs.sh --arm
     bash ./build_flac.sh --arm
     bash ./build_vorbis.sh --arm
+    bash ./build_libvpx.sh --arm
+    bash ./build_opus.sh --arm
 fi
 
 make -C ZZ9000_proto.sdk/ZZ9000OS "$@"

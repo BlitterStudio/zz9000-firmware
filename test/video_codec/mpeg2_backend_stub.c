@@ -11,3 +11,9 @@ const struct SDKVideoDecoderOps *sdk_video_mpeg2_backend_ops(void)
 {
 	return 0;
 }
+
+const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec)
+{
+	(void)codec;
+	return 0;
+}

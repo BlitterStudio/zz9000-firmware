@@ -402,7 +402,23 @@ static int test_service_flag_names(void)
       !expect_name(zz9k_service_flag_name(
                        ZZ9K_SERVICE_VIDEO,
                        ZZ9K_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ),
-                   "timeline-90khz")) {
+                   "timeline-90khz") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8),
+                   "webm-vp8") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9),
+                   "webm-vp9") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS),
+                   "media-opus") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS),
+                   "media-vorbis")) {
     return 24;
   }
   if (!expect_name(zz9k_service_flag_name(
@@ -596,7 +612,7 @@ static int test_service_flag_iteration(void)
   if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 15) != 0U) {
     return 50;
   }
-  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_VIDEO) != 15U ||
+  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_VIDEO) != 19U ||
       zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 4) !=
           ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 ||
       zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 5) !=
@@ -607,7 +623,11 @@ static int test_service_flag_iteration(void)
           ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_SESSION ||
       zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 14) !=
           ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND ||
-      zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 15) != 0U) {
+      zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 15) !=
+          ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8 ||
+      zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 18) !=
+          ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS ||
+      zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 19) != 0U) {
     return 29;
   }
 

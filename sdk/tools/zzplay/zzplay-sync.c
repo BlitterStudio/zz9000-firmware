@@ -6,6 +6,7 @@
 
 #define ZZPLAY_PTS_HZ 90000U
 #define ZZPLAY_STEADY_MAX_TICKS 3600U
+#define ZZPLAY_KEYFRAME_SKIP_PTS (500U * 90U)
 
 uint32_t zzplay_frame_period_us(uint32_t frame_rate_milli)
 {
@@ -117,4 +118,34 @@ int zzplay_sync_audio_may_start(uint64_t video_pts,
     return 1;
   }
   return audio_origin_pts - video_pts <= allowed_lead_pts;
+}
+
+int zzplay_sync_needs_keyframe_skip(int64_t drift_pts)
+{
+  /* Positive drift means video is ahead. A skip is only for a real lag,
+   * not a one-frame discard: keyframes in phone video can be seconds apart. */
+  if (drift_pts >= 0) {
+    return 0;
+  }
+  if (drift_pts == INT64_MIN) {
+    return 1;
+  }
+  return (uint64_t)(-drift_pts) > (uint64_t)ZZPLAY_KEYFRAME_SKIP_PTS;
+}
+
+ZZPlaySyncDecision zzplay_sync_limit_discard_run(
+    ZZPlaySyncDecision decision,
+    uint32_t discard_run,
+    int64_t drift_pts,
+    int keyframe_skip_available)
+{
+  if (decision != ZZPLAY_SYNC_DISCARD ||
+      discard_run < ZZPLAY_SYNC_MAX_DISCARD_RUN) {
+    return decision;
+  }
+  if (keyframe_skip_available &&
+      zzplay_sync_needs_keyframe_skip(drift_pts)) {
+    return ZZPLAY_SYNC_DISCARD;
+  }
+  return ZZPLAY_SYNC_PRESENT;
 }

@@ -80,6 +80,14 @@ LIBVORBIS_TAG ?= ogg-1.3.6-tremor-820fb3237ea8
 LIBVORBIS_DIR ?= $(BUILD_DIR)/deps/vorbis/$(LIBVORBIS_TAG)
 LIBVORBIS_LIB ?= $(LIBVORBIS_DIR)/arm/libvorbisdec.a
 LIBVORBIS_INCLUDE_DIR ?= $(LIBVORBIS_DIR)/arm/include
+LIBVPX_VERSION ?= 1.17.0
+LIBVPX_DIR ?= $(BUILD_DIR)/deps/vpx/$(LIBVPX_VERSION)
+LIBVPX_LIB ?= $(LIBVPX_DIR)/arm/libvpxdec.a
+LIBVPX_INCLUDE_DIR ?= $(LIBVPX_DIR)/arm/include
+LIBOPUS_VERSION ?= 1.6.1
+LIBOPUS_DIR ?= $(BUILD_DIR)/deps/opus/$(LIBOPUS_VERSION)
+LIBOPUS_LIB ?= $(LIBOPUS_DIR)/arm/libopusdec.a
+LIBOPUS_INCLUDE_DIR ?= $(LIBOPUS_DIR)/arm/include
 
 # Include paths
 INCLUDES = -I$(SRC_DIR) -I$(SRC_DIR)/bearssl -I$(BSP_INC)
@@ -89,6 +97,7 @@ INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)
 INCLUDES += -I$(LIBWEBP_INCLUDE_DIR)
 INCLUDES += -I$(LIBMPEG2_INCLUDE_DIR) -I$(A52_INCLUDE_DIR)
 INCLUDES += -I$(LIBFLAC_INCLUDE_DIR) -I$(LIBVORBIS_INCLUDE_DIR)
+INCLUDES += -I$(LIBVPX_INCLUDE_DIR) -I$(LIBOPUS_INCLUDE_DIR)
 INCLUDES += -I$(LZMA_SDK_SRC)/C
 
 # Common flags (shared by all optimization levels)
@@ -119,7 +128,7 @@ LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -L$(BSP_LIB)
 
 # Libraries (order matters for --start-group)
-LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
+LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBVPX_LIB) $(LIBOPUS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
 
 # Source files
 C_SRCS = \
@@ -241,6 +250,9 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_media_session.c \
 	$(SRC_DIR)/sdk_media_timeline.c \
 	$(SRC_DIR)/sdk_video_plmpeg.c \
+	$(SRC_DIR)/webm_parse.c \
+	$(SRC_DIR)/webm_window.c \
+	$(SRC_DIR)/sdk_video_webm.c \
 	$(SRC_DIR)/sdk_video_yuy2.c \
 	$(SRC_DIR)/sdk_dvd_ps.c \
 	$(SRC_DIR)/sdk_dvd_lpcm.c \
@@ -280,12 +292,12 @@ FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 
 all: $(TARGET) $(FALLBACK_TARGET) size
 
-$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(OBJS)
+$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBVPX_LIB) $(LIBOPUS_LIB) $(OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 	@echo 'Done.'
 
-$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(FALLBACK_OBJS)
+$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBVPX_LIB) $(LIBOPUS_LIB) $(FALLBACK_OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(FALLBACK_OBJS) $(LIBS)
 	@echo 'Done.'
@@ -341,6 +353,14 @@ $(LIBFLAC_LIB): ../../build_flac.sh $(SRC_DIR)/sdk_flac_alloc.h
 $(LIBVORBIS_LIB): ../../build_vorbis.sh $(SRC_DIR)/sdk_vorbis_alloc.h
 	@echo 'Building decoder-only libogg/Tremor dependency...'
 	cd ../.. && bash ./build_vorbis.sh --arm
+
+$(LIBVPX_LIB): ../../build_libvpx.sh $(SRC_DIR)/sdk_vorbis_alloc.h
+	@echo 'Building decoder-only libvpx...'
+	cd ../.. && bash ./build_libvpx.sh --arm
+
+$(LIBOPUS_LIB): ../../build_opus.sh $(SRC_DIR)/sdk_vorbis_alloc.h
+	@echo 'Building fixed-point libopus...'
+	cd ../.. && bash ./build_opus.sh --arm
 
 $(LZMA_SDK_BUILD)/LzmaDec.o: $(LZMA_SDK_SRC)/C/LzmaDec.c
 	@mkdir -p $(dir $@)
@@ -440,6 +460,11 @@ $(BUILD_DIR)/sdk_audio_flac.o: $(SRC_DIR)/sdk_audio_flac.c $(LIBFLAC_LIB)
 $(BUILD_DIR)/sdk_audio_vorbis.o: $(SRC_DIR)/sdk_audio_vorbis.c $(LIBVORBIS_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -o $@ $<
+
+# WebM backend includes libvpx/libopus/Tremor headers from the pinned builds.
+$(BUILD_DIR)/sdk_video_webm.o: $(SRC_DIR)/sdk_video_webm.c $(LIBVPX_LIB) $(LIBOPUS_LIB) $(LIBVORBIS_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -O3 -MMD -MP -o $@ $<
 
 # Vendored LZH decode core (LHa for UNIX) + firmware I/O shim: every TU here
 # includes lha.h, which does `#include <config.h>` (angle-bracket). Two flags

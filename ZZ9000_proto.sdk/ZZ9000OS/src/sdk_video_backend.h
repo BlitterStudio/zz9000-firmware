@@ -13,7 +13,10 @@
 /* Codec ids shared by the backend registry and the firmware ABI. */
 #define SDK_VIDEO_CODEC_MPEG1 1U
 #define SDK_VIDEO_CODEC_MPEG2 2U
+#define SDK_VIDEO_CODEC_VP8 3U
+#define SDK_VIDEO_CODEC_VP9 4U
 #define SDK_VIDEO_CONTAINER_MPEG_PS 1U
+#define SDK_VIDEO_CONTAINER_WEBM 2U
 
 struct SDKVideoDecoderInfo {
 	uint32_t width;
@@ -44,6 +47,8 @@ struct SDKVideoDecodedFrame {
 #define SDK_VIDEO_MEDIA_SAMPLE_S16BE 2U
 #define SDK_VIDEO_MEDIA_AUDIO_LPCM 2U
 #define SDK_VIDEO_MEDIA_AUDIO_AC3 3U
+#define SDK_VIDEO_MEDIA_AUDIO_OPUS 4U
+#define SDK_VIDEO_MEDIA_AUDIO_VORBIS 5U
 #define SDK_VIDEO_MEDIA_PCM_FRAME_BYTES 4U
 #define SDK_VIDEO_MEDIA_MAX_PCM_RING (256U * 1024U)
 
@@ -101,6 +106,7 @@ enum sdk_video_backend_write_result {
 	SDK_VIDEO_BACKEND_WRITE_ERROR = 0,
 	SDK_VIDEO_BACKEND_WRITE_OK = 1,
 	SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE = 2,
+	SDK_VIDEO_BACKEND_WRITE_UNSUPPORTED = 3,
 };
 
 struct SDKVideoDecoderOps {
@@ -109,6 +115,8 @@ struct SDKVideoDecoderOps {
 	const char *name;
 	void *(*create)(void);
 	void (*destroy)(void *decoder);
+	/* May take part of the input (*accepted < length); the caller
+	 * resends the rest. eof applies only when every byte is taken. */
 	int (*write)(void *decoder, const uint8_t *src, uint32_t length,
 	             int eof, uint32_t *accepted);
 	int (*get_info)(void *decoder, struct SDKVideoDecoderInfo *info);
@@ -118,7 +126,20 @@ struct SDKVideoDecoderOps {
 	int (*get_media_info)(
 		void *decoder, struct SDKVideoMediaInfo *info);
 	int (*ack_media)(void *decoder, uint64_t acknowledged);
+	/* Optional. DECODE command flags; NULL ignores them. */
+	void (*set_decode_flags)(void *decoder, uint32_t flags);
+	/* Optional. Coded sizes the backend will decode, checked at session
+	 * begin; a refusal is UNSUPPORTED (the stream is valid, this card
+	 * will not play it). NULL applies the session's generic 1920x1080
+	 * cap, which rejects larger sizes as BAD_REQUEST. */
+	int (*geometry_ok)(uint32_t width, uint32_t height);
+	/* Optional. Media audio codecs this backend's container carries,
+	 * checked at session begin; a refusal is UNSUPPORTED. NULL accepts
+	 * every codec the session layer allows. */
+	int (*audio_ok)(uint32_t audio_codec);
 };
+
+const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec);
 
 const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
 	                                                     uint32_t container);

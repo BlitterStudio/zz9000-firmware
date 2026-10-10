@@ -400,6 +400,12 @@ enum ZZ9KServiceFlags {
   ZZ9K_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ = 1U << 24,
   ZZ9K_SERVICE_FLAG_VIDEO_PCM_RING_STATUS = 1U << 25,
   ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND = 1U << 26,
+  /* WebM backends. Implemented, advertised only by the qualification
+   * flavor (ZZ9000_QUALIFY_UNADVERTISED), same discipline as WebP/FLAC. */
+  ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8 = 1U << 27,
+  ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9 = 1U << 28,
+  ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS = 1U << 29,
+  ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS = 1U << 30,
 
   ZZ9K_SERVICE_FLAG_CODEC_DEFLATE_RAW = 1U << 16,
   ZZ9K_SERVICE_FLAG_CODEC_ZLIB = 1U << 17,
@@ -2756,11 +2762,15 @@ enum ZZ9KAudioCodec {
 };
 
 enum ZZ9KVideoCodec {
-  ZZ9K_VIDEO_CODEC_MPEG1 = 1U
+  ZZ9K_VIDEO_CODEC_MPEG1 = 1U,
+  /* 2 is reserved for MPEG-2. */
+  ZZ9K_VIDEO_CODEC_VP8 = 3U,
+  ZZ9K_VIDEO_CODEC_VP9 = 4U
 };
 
 enum ZZ9KVideoContainer {
-  ZZ9K_VIDEO_CONTAINER_MPEG_PS = 1U
+  ZZ9K_VIDEO_CONTAINER_MPEG_PS = 1U,
+  ZZ9K_VIDEO_CONTAINER_WEBM = 2U
 };
 
 enum ZZ9KVideoOutputFormat {
@@ -2788,11 +2798,21 @@ enum ZZ9KVideoSessionResultFlags {
 
 enum ZZ9KMediaAudioCodec {
   ZZ9K_MEDIA_AUDIO_NONE = 0U,
-  ZZ9K_MEDIA_AUDIO_MP2 = 1U
+  ZZ9K_MEDIA_AUDIO_MP2 = 1U,
+  /* 2 and 3 are LPCM and AC3 inside the firmware DVD backend. Opus and
+   * Vorbis stay clear of that numeric space. */
+  ZZ9K_MEDIA_AUDIO_OPUS = 4U,
+  ZZ9K_MEDIA_AUDIO_VORBIS = 5U
 };
 
 enum ZZ9KMediaSessionWriteFlags {
   ZZ9K_MEDIA_SESSION_WRITE_EOF = 1U << 0
+};
+
+/* DECODE command flags (ZZ9KMediaSessionCommandPayload.flags). The 64-bit
+ * value cursor stays zero. Other codecs ignore this bit. */
+enum ZZ9KMediaDecodeFlags {
+  ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME = 1U << 0
 };
 
 enum ZZ9KMediaAudioBindFlags {

@@ -33,7 +33,6 @@ struct SDKVideoStreamSession {
 	const struct SDKVideoDecoderOps *ops;
 	void *decoder;
 	struct SDKVideoDecodedFrame direct_frame;
-	uint8_t input_eof;
 	uint8_t failed;
 	uint8_t faulted;
 	uint8_t in_use;
@@ -264,22 +263,35 @@ uint16_t sdk_video_stream_begin_owned(
 	     owner != SDK_VIDEO_STREAM_OWNER_MEDIA) ||
 	    begin->flags != 0U ||
 	    begin->output_format != SDK_VIDEO_OUTPUT_DIRECT_OVERLAY ||
-	    begin->width == 0U || begin->height == 0U ||
-	    begin->width > SDK_VIDEO_MAX_WIDTH ||
-	    begin->height > SDK_VIDEO_MAX_HEIGHT ||
-	    begin->width > SDK_VIDEO_MAX_PIXELS / begin->height)
+	    begin->width == 0U || begin->height == 0U)
 		return SDK_STATUS_BAD_REQUEST;
+	ops = sdk_video_backend_find(begin->codec, begin->container);
+	if (ops && ops->geometry_ok) {
+		if (!ops->geometry_ok(begin->width, begin->height))
+			return SDK_STATUS_UNSUPPORTED;
+	} else if (begin->width > SDK_VIDEO_MAX_WIDTH ||
+		   begin->height > SDK_VIDEO_MAX_HEIGHT ||
+		   begin->width > SDK_VIDEO_MAX_PIXELS / begin->height) {
+		return SDK_STATUS_BAD_REQUEST;
+	}
 	if (owner == SDK_VIDEO_STREAM_OWNER_LEGACY &&
 	    (begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE ||
 	     begin->pcm_ring || begin->pcm_ring_capacity != 0U ||
 	     begin->pcm_low_water_bytes != 0U ||
 	     begin->pcm_high_water_bytes != 0U))
 		return SDK_STATUS_BAD_REQUEST;
+	/* Media audio this firmware offers clients. LPCM and AC-3 stay off
+	 * the list until the MPEG-2/DVD backend is advertised. */
 	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE &&
-	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_MP2)
+	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_MP2 &&
+	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_OPUS &&
+	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_VORBIS)
 		return SDK_STATUS_UNSUPPORTED;
-	ops = sdk_video_backend_find(begin->codec, begin->container);
+	/* Which of those a container can carry belongs to its backend. */
+	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA && ops && ops->audio_ok &&
+	    !ops->audio_ok(begin->audio_codec))
+		return SDK_STATUS_UNSUPPORTED;
 	if (!ops)
 		return SDK_STATUS_UNSUPPORTED;
 	session = find_free_session();
@@ -338,6 +350,10 @@ uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
 
 		if (write_result == SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE)
 			return SDK_STATUS_BUSY;
+		if (write_result == SDK_VIDEO_BACKEND_WRITE_UNSUPPORTED) {
+			session->failed = 1U;
+			return SDK_STATUS_UNSUPPORTED;
+		}
 		if (write_result != SDK_VIDEO_BACKEND_WRITE_OK) {
 		session->failed = 1U;
 		return SDK_STATUS_IO_ERROR;
@@ -347,8 +363,6 @@ uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
 		session->bytes_accepted = 0xffffffffU;
 	else
 		session->bytes_accepted += accepted;
-	if ((write->flags & SDK_VIDEO_SESSION_WRITE_EOF) != 0U)
-		session->input_eof = 1U;
 	update_info(session);
 
 	result_flags = session->frame_rate_milli != 0U
@@ -357,7 +371,7 @@ uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
 	state = session->frame_rate_milli != 0U
 		? SDK_VIDEO_SESSION_STATE_READY
 		: SDK_VIDEO_SESSION_STATE_NEED_INPUT;
-	fill_result(session, state, 0U, result_flags, result);
+	fill_result(session, state, accepted, result_flags, result);
 	return SDK_STATUS_OK;
 }
 
@@ -378,6 +392,8 @@ uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 	status = ensure_decoder(session);
 	if (status != SDK_STATUS_OK)
 		return status;
+	if (session->ops->set_decode_flags)
+		session->ops->set_decode_flags(session->decoder, decode->flags);
 	decoded = session->ops->decode(session->decoder, &frame);
 	if (decoded != SDK_VIDEO_BACKEND_PROGRESS ||
 	    session->frame_rate_milli == 0U)
@@ -410,7 +426,8 @@ uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 	}
 	if (frame.width != session->width || frame.height != session->height) {
 		session->failed = 1U;
-		return SDK_STATUS_BAD_REQUEST;
+		return session->container == SDK_VIDEO_CONTAINER_WEBM
+			? SDK_STATUS_UNSUPPORTED : SDK_STATUS_BAD_REQUEST;
 	}
 	/* The compose task is queued ahead of the client's next decode, so
 	 * pl_mpeg's decoder-owned planes remain valid until it retires. */

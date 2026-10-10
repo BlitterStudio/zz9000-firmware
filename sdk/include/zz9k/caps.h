@@ -176,7 +176,7 @@ static inline uint32_t zz9k_known_service_flag_count(uint32_t service_id)
     return 5U;
   }
   if (service_id == ZZ9K_SERVICE_VIDEO) {
-    return 15U;
+    return 19U;
   }
   if (service_id == ZZ9K_SERVICE_SURFACE) {
     return 5U;
@@ -344,6 +344,14 @@ static inline uint32_t zz9k_known_service_flag(uint32_t service_id,
       return ZZ9K_SERVICE_FLAG_VIDEO_PCM_RING_STATUS;
     case 14:
       return ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND;
+    case 15:
+      return ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8;
+    case 16:
+      return ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9;
+    case 17:
+      return ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS;
+    case 18:
+      return ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS;
     default:
       return 0U;
     }
@@ -580,6 +588,14 @@ static inline const char *zz9k_service_flag_name(uint32_t service_id,
       return "pcm-ring-status";
     case ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND:
       return "audio-bind";
+    case ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8:
+      return "webm-vp8";
+    case ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9:
+      return "webm-vp9";
+    case ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS:
+      return "media-opus";
+    case ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS:
+      return "media-vorbis";
     default:
       return 0;
     }

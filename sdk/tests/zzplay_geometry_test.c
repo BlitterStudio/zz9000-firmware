@@ -188,10 +188,31 @@ static int test_controls(void)
   return 0;
 }
 
+static int test_portrait_phone(void)
+{
+  ZZPlayRect a = zzplay_geometry_fit(720U, 1280U, 640U, 480U);
+  ZZPlayRect b = zzplay_geometry_fit(720U, 1280U, 800U, 600U);
+  ZZPlayRect c = zzplay_geometry_fit(720U, 1280U, 1920U, 1080U);
+
+  /* Height binds on every landscape screen: pillarbox, not stretch. */
+  if (a.height != 480U || a.width != 270U || a.x != 185 || a.y != 0) {
+    return 1;
+  }
+  if (b.height != 600U || b.width != 337U || b.x != 231 || b.y != 0) {
+    return 2;
+  }
+  if (c.height != 1080U || c.width != 607U || c.x != 656 || c.y != 0) {
+    return 3;
+  }
+  if ((uint32_t)a.width * 1280U / 720U > 480U) {
+    return 4;
+  }
+  return 0;
+}
+
 int main(void)
 {
   int rc;
-
   rc = test_exact_fit();
   if (rc != 0) { printf("exact %d\n", rc); return 10 + rc; }
   rc = test_pillarbox();
@@ -208,6 +229,8 @@ int main(void)
   if (rc != 0) { printf("controls %d\n", rc); return 130 + rc; }
   rc = test_refit_is_stable();
   if (rc != 0) { printf("refit %d\n", rc); return 150 + rc; }
+  rc = test_portrait_phone();
+  if (rc != 0) { printf("portrait %d\n", rc); return 170 + rc; }
   printf("zzplay_geometry_test: all checks passed\n");
   return 0;
 }

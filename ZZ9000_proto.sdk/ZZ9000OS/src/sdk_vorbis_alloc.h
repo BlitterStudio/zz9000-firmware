@@ -19,14 +19,16 @@
 
 #ifndef SDK_VORBIS_ALLOC_H
 #define SDK_VORBIS_ALLOC_H
-
+#ifndef __ASSEMBLER__
 #include <setjmp.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define SDK_VORBIS_HEAP_MAX_REGIONS 8U
+/* Large blocks get regions of their own (see region_add), so a 1080p VP9
+ * stream needs about ten; each is one of the 64 core-1 tracker slots. */
+#define SDK_VORBIS_HEAP_MAX_REGIONS 16U
 
 struct sdk_vorbis_heap {
 	uint8_t *region[SDK_VORBIS_HEAP_MAX_REGIONS];
@@ -63,6 +65,7 @@ unsigned sdk_vorbis_heap_regions(const struct sdk_vorbis_heap *heap);
 #define calloc(count, size) sdk_vorbis_calloc((count), (size))
 #define realloc(ptr, size) sdk_vorbis_realloc((ptr), (size))
 #define free(ptr) sdk_vorbis_free(ptr)
-#endif
+#endif /* SDK_VORBIS_REPLACE_ALLOCATORS */
+#endif /* __ASSEMBLER__ */
 
 #endif /* SDK_VORBIS_ALLOC_H */

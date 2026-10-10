@@ -78,6 +78,47 @@ static int check_audio_starvation_recovery(void)
              ZZPLAY_SYNC_DISCARD, 0U, 960U) == ZZPLAY_SYNC_DISCARD;
 }
 
+static int check_keyframe_skip(void)
+{
+  /* 500 ms is 45000 ticks. Only a larger lag skips. */
+  return !zzplay_sync_needs_keyframe_skip(0) &&
+         !zzplay_sync_needs_keyframe_skip(1800) &&
+         !zzplay_sync_needs_keyframe_skip(-3600) &&
+         !zzplay_sync_needs_keyframe_skip(-45000) &&
+         zzplay_sync_needs_keyframe_skip(-45001) &&
+         zzplay_sync_needs_keyframe_skip(INT64_MIN);
+}
+
+/* A decoder that only just keeps pace leaves video 40-500 ms behind for
+ * good; discarding decoded frames does not win that time back, so without
+ * a cap every frame was discarded (720p VP9 on the A4000: 874 of 900). */
+static int check_discard_run(void)
+{
+  const int64_t late = -9000;   /* 100 ms behind */
+  const int64_t far = -45001;   /* past the keyframe skip */
+
+  return zzplay_sync_limit_discard_run(ZZPLAY_SYNC_DISCARD, 0U, late, 1) ==
+             ZZPLAY_SYNC_DISCARD &&
+         zzplay_sync_limit_discard_run(ZZPLAY_SYNC_DISCARD, 1U, late, 1) ==
+             ZZPLAY_SYNC_DISCARD &&
+         /* the third late frame in a row is shown */
+         zzplay_sync_limit_discard_run(ZZPLAY_SYNC_DISCARD, 2U, late, 1) ==
+             ZZPLAY_SYNC_PRESENT &&
+         zzplay_sync_limit_discard_run(ZZPLAY_SYNC_DISCARD, 7U, late, 0) ==
+             ZZPLAY_SYNC_PRESENT &&
+         /* past the skip the discard asks the card to skip decoding,
+          * which is how video catches up */
+         zzplay_sync_limit_discard_run(ZZPLAY_SYNC_DISCARD, 2U, far, 1) ==
+             ZZPLAY_SYNC_DISCARD &&
+         /* without a keyframe skip it would only lose the frame */
+         zzplay_sync_limit_discard_run(ZZPLAY_SYNC_DISCARD, 2U, far, 0) ==
+             ZZPLAY_SYNC_PRESENT &&
+         zzplay_sync_limit_discard_run(ZZPLAY_SYNC_HOLD, 5U, 9000, 1) ==
+             ZZPLAY_SYNC_HOLD &&
+         zzplay_sync_limit_discard_run(ZZPLAY_SYNC_PRESENT, 5U, 0, 1) ==
+             ZZPLAY_SYNC_PRESENT;
+}
+
 int main(void)
 {
   if (!check_periods()) {
@@ -94,6 +135,12 @@ int main(void)
   }
   if (!check_audio_starvation_recovery()) {
     return 5;
+  }
+  if (!check_keyframe_skip()) {
+    return 6;
+  }
+  if (!check_discard_run()) {
+    return 7;
   }
   return 0;
 }

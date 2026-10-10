@@ -912,11 +912,21 @@ static const struct SDKVideoDecoderOps mpeg2_ops = {
 	.configure_media = mpeg2_configure_media,
 	.get_media_info = mpeg2_get_media_info,
 	.ack_media = mpeg2_ack_media,
+	.audio_ok = mpeg2_audio_ok,
 };
 
 const struct SDKVideoDecoderOps *sdk_video_mpeg2_backend_ops(void)
 {
 	return &mpeg2_ops;
+}
+
+/* DVD host tests link this file without the WebM backend. The firmware
+ * link provides the strong definition in sdk_video_webm.c. */
+__attribute__((weak))
+const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec)
+{
+	(void)codec;
+	return 0;
 }
 
 #ifdef SDK_VIDEO_HOST_TEST

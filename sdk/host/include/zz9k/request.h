@@ -999,13 +999,16 @@ static inline int zz9k_request_media_session_begin(
   if (!request || !desc || desc->video_codec == 0U ||
       desc->container == 0U || desc->output_format == 0U ||
       desc->width == 0U || desc->height == 0U || desc->flags != 0U ||
-      desc->audio_codec > ZZ9K_MEDIA_AUDIO_MP2 ||
+      (desc->audio_codec != ZZ9K_MEDIA_AUDIO_NONE &&
+       desc->audio_codec != ZZ9K_MEDIA_AUDIO_MP2 &&
+       desc->audio_codec != ZZ9K_MEDIA_AUDIO_OPUS &&
+       desc->audio_codec != ZZ9K_MEDIA_AUDIO_VORBIS) ||
       (desc->audio_codec == ZZ9K_MEDIA_AUDIO_NONE &&
        (desc->pcm_ring_handle != 0U ||
         desc->pcm_ring_capacity != 0U ||
         desc->pcm_low_water_bytes != 0U ||
         desc->pcm_high_water_bytes != 0U)) ||
-      (desc->audio_codec == ZZ9K_MEDIA_AUDIO_MP2 &&
+      (desc->audio_codec != ZZ9K_MEDIA_AUDIO_NONE &&
        (desc->pcm_ring_handle == 0U ||
         desc->pcm_ring_handle == ZZ9K_INVALID_HANDLE ||
         desc->pcm_ring_capacity == 0U ||
@@ -1079,7 +1082,9 @@ static inline int zz9k_request_media_session_command_value(
   uint32_t allowed_flags =
       opcode == ZZ9K_OP_MEDIA_SESSION_AUDIO_BIND
           ? ZZ9K_MEDIA_AUDIO_BIND_PAUSE
-          : 0U;
+          : opcode == ZZ9K_OP_MEDIA_SESSION_DECODE
+                ? ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME
+                : 0U;
 
   if (!request || !zz9k_media_command_opcode_known(opcode) ||
       session == 0U || (flags & ~allowed_flags) != 0U) {

@@ -120,12 +120,15 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name, "tools/zzplay/zzplay-mhi.c");
   ok &= expect_contains(script, name, "tools/zzplay/zzplay-mp3.c");
   ok &= expect_contains(script, name, "tools/zzplay/zzplay-mp3-transport.c");
+  ok &= expect_contains(script, name, "tools/zzplay/zzplay-codec.c");
+  ok &= expect_contains(script, name, "tools/zzplay/zzplay-codec-stream.c");
   ok &= expect_contains(script, name, "tools/zzplay/zzplay-core.c");
   ok &= expect_contains(script, name, "tools/zzplay/zzplay-options.c");
   ok &= expect_contains(script, name, "tools/zzplay/zzplay-probe.c");
   ok &= expect_contains(script, name, "tools/zzplay/zzplay-stats.c");
   ok &= expect_contains(script, name, "tools/zzplay/zzplay-stream.c");
   ok &= expect_contains(script, name, "tools/zzplay/zzplay-video.c");
+  ok &= expect_contains(script, name, "tools/zzplay/zzplay-webm.c");
   ok &= expect_contains(script, name, "tools/zzplay/zzplay.c");
   ok &= expect_contains(script, name, "tools/zz9k-mpega-smoke.c");
   ok &= expect_contains(script, name, "amiga/mpega/mpega_resident.c");

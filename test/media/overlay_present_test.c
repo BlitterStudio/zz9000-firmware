@@ -30,12 +30,14 @@ void sdk_media_session_present_queued(uint32_t session)
 	released_count++;
 }
 
+static struct overlay_compose_params last_compose;
+
 int sdk_mailbox_enqueue_internal(uint32_t op, const void *payload,
                                  uint32_t length)
 {
 	(void)op;
-	(void)payload;
-	(void)length;
+	if (payload && length == sizeof(last_compose))
+		memcpy(&last_compose, payload, sizeof(last_compose));
 	enqueued++;
 	return 1;
 }
@@ -54,20 +56,39 @@ void surface_allocator_free(uint32_t addr)
 }
 
 int scheduler_core1_available(void) { return 1; }
-int overlay_hw_supported(void) { return 0; }
-void overlay_hw_stop(void) {}
-void overlay_hw_set_buffer(uint32_t addr) { (void)addr; }
+static int hw_present;
+static unsigned hw_starts;
+static unsigned hw_buffer_swaps;
+static uint32_t hw_addr;
+static uint32_t hw_pitch;
+static uint16_t hw_src_w;
+static uint16_t hw_src_h;
 
-int overlay_hw_start_scaled(uint32_t src, uint16_t pitch, uint16_t src_w,
+int overlay_hw_supported(void) { return hw_present; }
+void overlay_hw_stop(void) {}
+void overlay_hw_set_buffer(uint32_t addr, uint32_t generation)
+{
+	(void)generation;
+	hw_buffer_swaps++;
+	hw_addr = addr;
+}
+
+int overlay_hw_start_scaled(uint32_t src, uint32_t pitch, uint16_t src_w,
                             uint16_t src_h, int16_t dst_x, int16_t dst_y,
                             uint16_t dst_w, uint16_t dst_h, uint8_t variant,
-                            uint32_t key_rgb, int key_enabled,
+                            uint32_t key_rgb, uint8_t key_enabled,
                             uint32_t generation)
 {
-	(void)src; (void)pitch; (void)src_w; (void)src_h; (void)dst_x;
-	(void)dst_y; (void)dst_w; (void)dst_h; (void)variant; (void)key_rgb;
-	(void)key_enabled; (void)generation;
-	return 0;
+	(void)dst_x; (void)dst_y; (void)dst_w; (void)dst_h; (void)variant;
+	(void)key_rgb; (void)key_enabled; (void)generation;
+	if (!hw_present)
+		return 0;
+	hw_starts++;
+	hw_addr = src;
+	hw_pitch = pitch;
+	hw_src_w = src_w;
+	hw_src_h = src_h;
+	return 1;
 }
 
 uint32_t sdk_media_profile_now_us(void) { return 0U; }
@@ -104,6 +125,18 @@ int sdk_video_yuv420_to_yuy2(uint8_t *dst, uint32_t dst_pitch, uint32_t width,
 	(void)y_pitch; (void)cb; (void)cr; (void)chroma_pitch;
 	(void)bytes_written;
 	return 0;
+}
+
+int sdk_video_yuv420_to_yuy2_half(uint8_t *dst, uint32_t dst_pitch,
+                                  uint32_t width, uint32_t height,
+                                  const uint8_t *y, uint32_t y_pitch,
+                                  const uint8_t *cb, const uint8_t *cr,
+                                  uint32_t chroma_pitch,
+                                  uint32_t *bytes_written)
+{
+	return sdk_video_yuv420_to_yuy2(dst, dst_pitch, width, height, y,
+	                                y_pitch, cb, cr, chroma_pitch,
+	                                bytes_written);
 }
 
 /* Compose runs on core 1; the tests only check what gets queued. */
@@ -178,6 +211,93 @@ static void stop_overlay(void)
 	overlay_handle_op(&vs, &data);
 }
 
+static void reset(void);
+
+static void set_overlay_source(uint16_t w, uint16_t h, uint16_t pitch)
+{
+	struct GFXData data;
+
+	memset(&data, 0, sizeof(data));
+	data.offset[1] = 0x00100000U;
+	data.pitch[1] = pitch;
+	data.x[0] = 16U;
+	data.y[0] = 16U;
+	data.x[1] = 320U;
+	data.y[1] = 240U;
+	data.x[2] = w;
+	data.y[2] = h;
+	data.user[0] = 2U;
+	data.u8_user[GFXDATA_U8_YUV_VARIANT] = YUV422_VARIANT_CGX;
+	overlay_handle_op(&vs, &data);
+	check(data.u32_user[0] == 0U, "overlay SET accepted");
+}
+
+/* One decoded frame through compose, publication and the vblank hand-off
+ * to the native overlay. */
+static void present_frame(uint32_t session)
+{
+	check(overlay_video_frame_ready(session) == 1, "frame accepted");
+	overlay_main_poll(&vs);
+	overlay_compose_retired(1);
+	(void)overlay_present_bufpos(&vs);
+	overlay_vblank_cache_flushed();
+	overlay_vblank_rearm();
+}
+
+/* A 1920x1080 frame cannot be fetched by the overlay in time (A4000: a
+ * few rows, then black, windowed and fullscreen), so a session frame that
+ * large is packed at half size and the overlay scans 960x540 of the same
+ * pitch; the P96 source keeps its full geometry. */
+static void test_large_frames_scan_half_size(void)
+{
+	uint32_t src;
+	unsigned starts;
+
+	reset();
+	hw_present = 1;
+	set_overlay_source(1920U, 1080U, 3840U);
+	src = hw_addr;
+	check(hw_src_w == 1920U && hw_src_h == 1080U,
+	      "the P96 source is scanned at full size");
+
+	present_frame(7U);
+	check(last_compose.variant == 0xfdU && last_compose.scr_h == 540U &&
+	      last_compose.src_w == 1920U && last_compose.src_h == 1080U,
+	      "a 1080p session frame is packed at half size");
+	check(hw_addr != src && hw_src_w == 960U && hw_src_h == 540U &&
+	      hw_pitch == 3840U,
+	      "the overlay scans the half-size staging copy");
+
+	starts = hw_starts;
+	present_frame(7U);
+	check(hw_starts == starts && hw_buffer_swaps != 0U,
+	      "later frames only swap the buffer");
+
+	overlay_video_session_closed(7U);
+	/* The next vblank still scans the last staging frame (the P96 source
+	 * returns only after the cache flush); it is half size whatever the
+	 * session state now says. */
+	overlay_vblank_rearm();
+	check(hw_addr == src || (hw_src_w == 960U && hw_src_h == 540U),
+	      "a closed session's last frame keeps its half-size geometry");
+	overlay_vblank_cache_flushed();
+	overlay_vblank_rearm();
+	check(hw_addr == src && hw_src_w == 1920U && hw_src_h == 1080U,
+	      "closing the session restores the full-size P96 source");
+
+	/* A 720p frame still goes through at full size. */
+	reset();
+	hw_present = 1;
+	set_overlay_source(1280U, 720U, 2560U);
+	starts = hw_starts;
+	present_frame(8U);
+	check(last_compose.variant == 0xfeU && last_compose.scr_h == 720U,
+	      "a 720p session frame is packed at full size");
+	check(hw_starts == starts && hw_src_w == 1280U && hw_src_h == 720U,
+	      "a 720p hand-off keeps the full geometry");
+	hw_present = 0;
+}
+
 static void reset(void)
 {
 	memset(&vs, 0, sizeof(vs));
@@ -187,8 +307,11 @@ static void reset(void)
 	vs.vmode_hdiv = 1U;
 	vs.vmode_vdma_rows = 480U;
 	overlay_amiga_reset(&vs);
+	/* The reset hides the overlay until the driver enables it again. */
+	vs.card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY] = 1U;
 	released_count = 0U;
 	enqueued = 0U;
+	memset(&last_compose, 0, sizeof(last_compose));
 }
 
 int main(void)
@@ -231,6 +354,8 @@ int main(void)
 	overlay_main_poll(&vs);
 	check(enqueued == 1U && released_count == 1U && released[0] == 5U,
 	      "the re-SET overlay composes and releases");
+
+	test_large_frames_scan_half_size();
 
 	if (failures) {
 		fprintf(stderr, "overlay_present_test: %d failure(s)\n", failures);
