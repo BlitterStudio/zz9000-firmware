@@ -36,7 +36,9 @@
 #include "tremor/codec_internal.h"
 
 #define WEBM_WINDOW_SLACK (64U * 1024U)
-#define WEBM_HEAP_REGION (8U * 1024U * 1024U)
+/* Blocks of 2 MB or more (1080p VP9 frames) get their own regions; the
+ * rest of the decoder shares 4 MB ones. */
+#define WEBM_HEAP_REGION (4U * 1024U * 1024U)
 #define WEBM_HEAP_LIMIT (30U * 1024U * 1024U)
 #define WEBM_PCM_ANCHORS 128U
 #define WEBM_SKIP_BUDGET 128U

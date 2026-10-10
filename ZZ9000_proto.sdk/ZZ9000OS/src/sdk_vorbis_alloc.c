@@ -65,7 +65,13 @@ static void region_drop(struct sdk_vorbis_heap *h, unsigned r)
 	h->region_hint[r] = 0U;
 }
 
-/* Add a region with one free block of at least need bytes. */
+/* Add a region with one free block of at least need bytes. Small blocks
+ * share default-size regions. A block of half a region or more gets a
+ * region of its own size: packed with others it would strand the tail of
+ * a default region (two 3.4 MB VP9 frames in an 8 MB region leave 1.2 MB
+ * that no frame fits), and its region is returned as soon as it is freed.
+ * The last region may be smaller than the default, so the whole limit is
+ * usable rather than only whole default regions. */
 static int region_add(struct sdk_vorbis_heap *h, uint32_t need)
 {
 	uint32_t bytes = need + BLK_HDR;   /* + end sentinel */
@@ -73,14 +79,17 @@ static int region_add(struct sdk_vorbis_heap *h, uint32_t need)
 	uint8_t *base;
 	unsigned r;
 
-	if (bytes < h->region_size)
-		bytes = h->region_size;
 	for (r = 0U; r < SDK_VORBIS_HEAP_MAX_REGIONS; r++)
 		if (!h->region[r])
 			break;
 	if (r == SDK_VORBIS_HEAP_MAX_REGIONS ||
 	    bytes > h->limit || h->used > h->limit - bytes)
 		return -1;
+	if (bytes < h->region_size && need < h->region_size / 2U) {
+		bytes = h->region_size;
+		if (bytes > h->limit - h->used)
+			bytes = (h->limit - h->used) & ~7U;
+	}
 	if (smp_cpu_id() == 1 &&
 	    sdk_decode_tracked_count() >= SDK_DECODE_MAX_TRACKED)
 		return -1;

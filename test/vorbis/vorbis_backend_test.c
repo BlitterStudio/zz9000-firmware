@@ -680,6 +680,60 @@ static void test_arena(void)
 	       heap.peak, SDK_VORBIS_HEAP_MAX_REGIONS);
 }
 
+/* Region policy: a block of half a region or more gets its own exact
+ * region, returned when freed, instead of stranding a default region's
+ * tail; and the last region may be partial so the whole limit is usable. */
+static void test_arena_regions(void)
+{
+	struct sdk_vorbis_heap heap;
+	static void *small[256];
+	void *a, *b, *c;
+	uint32_t got = 0U;
+	unsigned i;
+
+	host_runtime_reset();
+	sdk_vorbis_heap_init(&heap, 65536U, 1024U * 1024U);
+	sdk_vorbis_heap_select(&heap, 0);
+	/* Three 40 KiB blocks: three default regions (192 KiB) before. */
+	a = sdk_vorbis_malloc(40000U);
+	b = sdk_vorbis_malloc(40000U);
+	c = sdk_vorbis_malloc(40000U);
+	CHECK(a && b && c, "large blocks allocated");
+	CHECK(sdk_vorbis_heap_regions(&heap) == 3U &&
+	      heap.used < 3U * 40016U + 64U,
+	      "large blocks sized exactly: %u regions, %u B",
+	      sdk_vorbis_heap_regions(&heap), heap.used);
+	sdk_vorbis_free(b);
+	CHECK(sdk_vorbis_heap_regions(&heap) == 2U,
+	      "a freed large block returns its region");
+	sdk_vorbis_free(a);
+	sdk_vorbis_free(c);
+	CHECK(sdk_vorbis_heap_regions(&heap) == 0U && heap.used == 0U,
+	      "large-block regions returned");
+	sdk_vorbis_heap_select(0, 0);
+	check_clean("arena large blocks");
+
+	/* 160 KiB limit, 64 KiB regions: 1 KiB blocks must reach past the
+	 * two whole regions into a partial third one. */
+	host_runtime_reset();
+	sdk_vorbis_heap_init(&heap, 65536U, 160U * 1024U);
+	sdk_vorbis_heap_select(&heap, 0);
+	for (i = 0U; i < 256U; i++) {
+		small[i] = sdk_vorbis_malloc(1024U);
+		if (!small[i])
+			break;
+		got += 1024U;
+	}
+	CHECK(got > 150U * 1024U && heap.used <= heap.limit,
+	      "whole limit usable: %u B in %u B", got, heap.used);
+	for (i = 0U; i < 256U; i++)
+		sdk_vorbis_free(small[i]);
+	CHECK(sdk_vorbis_heap_regions(&heap) == 0U && heap.used == 0U,
+	      "partial region returned");
+	sdk_vorbis_heap_select(0, 0);
+	check_clean("arena partial region");
+}
+
 
 static void test_s16le(void)
 {
@@ -719,6 +773,7 @@ int main(int argc, char **argv)
 	if (argc > 1)
 		fixture_dir = argv[1];
 	test_arena();
+	test_arena_regions();
 	test_fixtures();
 	test_s16le();
 	test_rejections();

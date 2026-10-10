@@ -26,7 +26,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SDK_VORBIS_HEAP_MAX_REGIONS 8U
+/* Large blocks get regions of their own (see region_add), so a 1080p VP9
+ * stream needs about ten; each is one of the 64 core-1 tracker slots. */
+#define SDK_VORBIS_HEAP_MAX_REGIONS 16U
 
 struct sdk_vorbis_heap {
 	uint8_t *region[SDK_VORBIS_HEAP_MAX_REGIONS];
