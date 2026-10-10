@@ -497,6 +497,8 @@ ZZPlayAudioBackend zzplay_prefs_requested_backend(
     return prefs->mp3_output;
   }
   if (media == ZZPLAY_MEDIA_AUDIO_MP2 ||
+      media == ZZPLAY_MEDIA_AUDIO_AC3 ||
+      media == ZZPLAY_MEDIA_AUDIO_LPCM ||
       media == ZZPLAY_MEDIA_AUDIO_OPUS ||
       media == ZZPLAY_MEDIA_AUDIO_VORBIS) {
     return prefs->video_audio;

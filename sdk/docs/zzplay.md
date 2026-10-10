@@ -1,6 +1,6 @@
 # ZZPlay — the ZZ9000 accelerated media player
 
-ZZPlay plays MPEG-1 Program Streams, WebM, MP3, native FLAC and Ogg Vorbis files using the ZZ9000's ARM
+ZZPlay plays MPEG-1 and MPEG-2 Program Streams, WebM, MP3, native FLAC and Ogg Vorbis files using the ZZ9000's ARM
 coprocessor and FPGA video overlay. Video decoding happens on the card; on the
 accelerated Zorro III path no decoded video ever crosses the Zorro bus.
 
@@ -17,7 +17,8 @@ It works two ways:
 | Input | Video | Audio |
 | --- | --- | --- |
 | MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video, card-decoded | MPEG-1 Layer II, card-decoded |
-| MPEG-1 Program Stream, video only | MPEG-1 video, card-decoded | none (a warning is printed) |
+| MPEG-2 Program Stream (`.mpg`, `.mpeg`, `.vob`) | MPEG-2 video up to 720x576, card-decoded; needs firmware that advertises MPEG-2 | AC-3, MP2 or LPCM (the first the stream carries, in that order), card-decoded; firmware without the MPEG-2 service refuses the file rather than half-playing it |
+| MPEG-2 Program Stream, video only | MPEG-2 video, card-decoded | none (a warning is printed) |
 | WebM (`.webm`, `.mkv`) | VP8 up to 1280x720 pixels, or VP9 up to 854x480, card-decoded, either orientation | Opus at 48 kHz, or Vorbis at 8 to 96 kHz, card-decoded; on the card when the firmware advertises it, otherwise AHI |
 | WebM, larger than that but within 1920 on the long side and 1920x1088 pixels | same codecs, best effort | audio stays continuous; video may skip ahead to the next keyframe |
 | WebM, video only | VP8 or VP9, card-decoded | none (a warning is printed) |
@@ -29,8 +30,12 @@ It works two ways:
 
 The format is chosen by inspecting the file, not by its name. A WebM file is
 recognised by its EBML header and a `webm` DocType, so a misnamed file still
-plays and a Matroska file that is not WebM is refused. MPEG-1
-elementary streams, standalone MP2, MPEG-2, Ogg-FLAC, Ogg Opus, multichannel FLAC/Vorbis, a second WebM video track, an unknown WebM codec and other codecs are rejected with
+plays and a Matroska file that is not WebM is refused. An MPEG file is
+known from its pack and sequence headers: MPEG-2 plays when the firmware
+advertises the MPEG-2 service and is refused with a message saying so
+otherwise. MPEG-1 elementary streams, standalone MP2, Ogg-FLAC, Ogg Opus,
+multichannel FLAC/Vorbis, a second WebM video track, an unknown WebM codec
+and other codecs are rejected with
 a specific message rather than being half-played. File extensions only decide
 what a drawer scan or the file requester offers.
 
@@ -230,8 +235,10 @@ and the player window shows what it chose.
 
 - For **MP3**, `AUTO` prefers MHI when the selected MHI driver is installed
   and free, and otherwise uses accelerated decode plus AHI.
-- For **Program Stream MP2**, `AUTO` uses AHI, or direct AX where the firmware
-  advertises it.
+- For **Program Stream audio** — MP2, and the AC-3, MP2 or LPCM an
+  MPEG-2 file carries — `AUTO` uses AHI, or direct AX where the firmware
+  advertises it. The card decodes all three into the PCM ring, so the
+  outputs behave the same whichever the stream holds.
 - MHI is never offered for Program Stream or WebM audio: it is a Layer III
   interface. Asking for it explicitly reports that rather than playing silently.
 - **WebM Opus and Vorbis** use the video-sound choice: on the card when the

@@ -2857,6 +2857,31 @@ refused:
   return 0;
 }
 
+/* Begin-descriptor audio id for the Program Stream audio the probe chose. */
+static uint32_t zzplay_mpeg_audio_codec_id(ZZPlayMediaAudio audio)
+{
+  switch (audio) {
+  case ZZPLAY_MEDIA_AUDIO_AC3:
+    return ZZ9K_MEDIA_AUDIO_AC3;
+  case ZZPLAY_MEDIA_AUDIO_LPCM:
+    return ZZ9K_MEDIA_AUDIO_LPCM;
+  default:
+    return ZZ9K_MEDIA_AUDIO_MP2;
+  }
+}
+
+static const char *zzplay_mpeg_audio_name(ZZPlayMediaAudio audio)
+{
+  switch (audio) {
+  case ZZPLAY_MEDIA_AUDIO_AC3:
+    return "AC-3";
+  case ZZPLAY_MEDIA_AUDIO_LPCM:
+    return "LPCM";
+  default:
+    return "MP2";
+  }
+}
+
 static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
                                const ZZPlayEngineRun *run,
                                ZZPlayBackendDecision *decision)
@@ -2865,46 +2890,69 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
   int strict = 0;
   ZZPlayContainerPolicy *policy = &runtime->container;
 
-  memset(policy, 0, sizeof(*policy));
-  policy->title = "MPEG-1";
-  policy->video_codec = ZZ9K_VIDEO_CODEC_MPEG1;
-  policy->container = ZZ9K_VIDEO_CONTAINER_MPEG_PS;
-  policy->audio_codec = ZZ9K_MEDIA_AUDIO_MP2;
-  policy->video_flags =
-      ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 | ZZ9K_SERVICE_FLAG_VIDEO_MPEG_PS;
-  policy->audio_flags = ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2;
-  policy->service_missing =
-      "zzplay: required MPEG-1/PS direct-overlay backend "
-      "is unavailable\n";
-
   info = run->probe->video;
+  memset(policy, 0, sizeof(*policy));
+  policy->title = info.is_mpeg2 ? "MPEG-2" : "MPEG-1";
+  policy->video_codec = info.is_mpeg2 ? ZZ9K_VIDEO_CODEC_MPEG2
+                                      : ZZ9K_VIDEO_CODEC_MPEG1;
+  policy->container = ZZ9K_VIDEO_CONTAINER_MPEG_PS;
+  policy->audio_codec = zzplay_mpeg_audio_codec_id(info.audio_codec);
+  if (info.is_mpeg2) {
+    /* One flag covers MPEG-2 in a Program Stream with any of its audio
+     * codecs; MP2 additionally rides the baseline media-session flag. */
+    policy->video_flags = ZZ9K_SERVICE_FLAG_VIDEO_MPEG_PS |
+                          ZZ9K_SERVICE_FLAG_VIDEO_MPEG2;
+    policy->video_name = "video";
+    policy->audio_flags = info.audio_codec == ZZPLAY_MEDIA_AUDIO_MP2
+                              ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2
+                              : 0U;
+    policy->service_missing =
+        "zzplay: MPEG-2 playback is not supported by this firmware\n";
+  } else {
+    policy->video_flags =
+        ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 | ZZ9K_SERVICE_FLAG_VIDEO_MPEG_PS;
+    policy->audio_flags = ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2;
+    policy->service_missing =
+        "zzplay: required MPEG-1/PS direct-overlay backend "
+        "is unavailable\n";
+  }
+
   if (!zzplay_video_info_supported(&info)) {
-    zzplay_error(runtime, "zzplay: unsupported MPEG-1 video geometry\n");
+    zzplay_error(runtime, "zzplay: unsupported %s video geometry\n",
+                 policy->title);
     zzplay_fail(runtime, ZZPLAY_FAILURE_INVALID_INPUT,
                 ZZ9K_STATUS_UNSUPPORTED);
     return 0;
   }
   if (!info.is_program_stream || !info.has_video_pes) {
     zzplay_error(runtime,
-            "zzplay: MPEG-1 elementary streams are not supported; "
-            "a Program Stream is required\n");
+            "zzplay: %s elementary streams are not supported; "
+            "a Program Stream is required\n",
+            policy->title);
     zzplay_fail(runtime, ZZPLAY_FAILURE_INVALID_INPUT,
                 ZZ9K_STATUS_UNSUPPORTED);
     return 0;
   }
   requested = zzplay_prefs_requested_backend(
-      &runtime->prefs, &runtime->options, ZZPLAY_MEDIA_AUDIO_MP2, &strict);
+      &runtime->prefs, &runtime->options, info.audio_codec, &strict);
   runtime->audio_strict = (uint8_t)(strict ? 1 : 0);
   if (!info.has_audio_pes &&
       requested != ZZPLAY_AUDIO_AUTO && requested != ZZPLAY_AUDIO_NONE &&
       strict) {
     zzplay_error(runtime,
-            "zzplay: the Program Stream has no supported MP2 audio\n");
+            "zzplay: the Program Stream has no supported audio "
+            "(MP2, AC-3 or LPCM)\n");
     zzplay_fail(runtime, ZZPLAY_FAILURE_INVALID_INPUT,
                 ZZ9K_STATUS_UNSUPPORTED);
     return 0;
   }
   runtime->video_info = info;
+  if (info.is_mpeg2) {
+    /* The sequence header's display aspect drives window and fullscreen
+     * fitting, the same route WebM DisplayWidth/Height takes. */
+    zzplay_video_window_source(&info, &runtime->display_w,
+                               &runtime->display_h);
+  }
   if (info.has_audio_pes) {
     ZZPlayAudioAvailability availability;
 
@@ -2913,18 +2961,19 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
     availability.mhi = ZZPLAY_BACKEND_MISSING;
     availability.ax = ZZPLAY_BACKEND_FREE;
     *decision = zzplay_audio_select(
-        ZZPLAY_MEDIA_AUDIO_MP2, requested, &availability);
+        info.audio_codec, requested, &availability);
     if (decision->status != ZZPLAY_BACKEND_OK && !strict) {
       /* A saved (non-strict) preference that cannot play falls back
        * exactly like AUTO instead of failing the item. */
       *decision = zzplay_audio_select(
-          ZZPLAY_MEDIA_AUDIO_MP2, ZZPLAY_AUDIO_AUTO, &availability);
+          info.audio_codec, ZZPLAY_AUDIO_AUTO, &availability);
     }
     if (decision->status != ZZPLAY_BACKEND_OK) {
       zzplay_error(runtime,
               "zzplay: audio backend %s cannot play Program "
-              "Stream MP2 (status %u)\n",
+              "Stream %s (status %u)\n",
               zzplay_audio_backend_name(requested),
+              zzplay_mpeg_audio_name(info.audio_codec),
               (unsigned)decision->status);
       zzplay_fail(runtime, ZZPLAY_FAILURE_CAPABILITY,
                   ZZ9K_STATUS_UNSUPPORTED);
@@ -2940,22 +2989,26 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
     runtime->audio_backend = ZZPLAY_AUDIO_NONE;
     zzplay_info("zzplay: warning: video-only Program Stream\n");
   }
-  zzplay_info("zzplay: MPEG-1/PS %lux%lu, %lu.%03lu fps, "
+  zzplay_info("zzplay: %s/PS %lux%lu, %lu.%03lu fps, "
          "program audio %s\n",
+         policy->title,
          (unsigned long)info.width, (unsigned long)info.height,
          (unsigned long)(info.frame_rate_milli / 1000U),
          (unsigned long)(info.frame_rate_milli % 1000U),
-         info.has_audio_pes ? "MP2" : "none");
+         info.has_audio_pes ? zzplay_mpeg_audio_name(info.audio_codec)
+                            : "none");
   zzplay_controller_set_capabilities(
       runtime->ctl, 0, runtime->audio_backend == ZZPLAY_AUDIO_AHI, 1);
   {
     char format[ZZPLAY_NOW_TEXT_MAX];
 
-    sprintf(format, "MPEG-1 %lux%lu, %lu.%03lu fps, %s",
+    sprintf(format, "%s %lux%lu, %lu.%03lu fps, %s",
+            policy->title,
             (unsigned long)info.width, (unsigned long)info.height,
             (unsigned long)(info.frame_rate_milli / 1000U),
             (unsigned long)(info.frame_rate_milli % 1000U),
-            info.has_audio_pes ? "MP2" : "no audio");
+            info.has_audio_pes ? zzplay_mpeg_audio_name(info.audio_codec)
+                               : "no audio");
     zzplay_controller_set_format(runtime->ctl, format);
   }
   zzplay_controller_set_duration(runtime->ctl, 0U);
@@ -2968,7 +3021,7 @@ typedef int (*ZZPlayContainerPrepare)(struct ZZPlayRuntime *runtime,
                                       const ZZPlayEngineRun *run,
                                       ZZPlayBackendDecision *decision);
 
-/* One MPEG-1 Program Stream or WebM item through a card media session.
+/* One MPEG Program Stream or WebM item through a card media session.
  * The container's prepare step settles everything that differs between
  * them (runtime.container); the session loop below is shared. */
 static ZZPlayEngineResult zzplay_engine_media_session(
@@ -4054,7 +4107,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   } else if (!engine) {
     zzplay_launch_reportf(
         &app->ctl, &app->options,
-         "cannot play %s: not a supported MPEG-1 Program Stream, WebM, MP3, FLAC, Ogg Vorbis or WebP animation file",
+         "cannot play %s: not a supported MPEG Program Stream, WebM, MP3, FLAC, Ogg Vorbis or WebP animation file",
         app->item_path);
   } else {
     format = zzplay_format_for_kind(probe.kind);

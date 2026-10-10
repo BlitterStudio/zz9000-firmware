@@ -37,6 +37,8 @@ static ZZPlayBackendAvailability zzplay_audio_availability(
 static int zzplay_audio_is_program(ZZPlayMediaAudio media)
 {
   return media == ZZPLAY_MEDIA_AUDIO_MP2 ||
+         media == ZZPLAY_MEDIA_AUDIO_AC3 ||
+         media == ZZPLAY_MEDIA_AUDIO_LPCM ||
          media == ZZPLAY_MEDIA_AUDIO_OPUS ||
          media == ZZPLAY_MEDIA_AUDIO_VORBIS;
 }

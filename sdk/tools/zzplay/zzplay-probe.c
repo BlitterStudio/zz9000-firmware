@@ -11,7 +11,9 @@
 
 #define ZZPLAY_PROBE_BYTES (256U * 1024U)
 #define ZZPLAY_PROBE_CHUNK 4096U
-#define ZZPLAY_PROBE_CARRY 7U
+/* Covers a sequence header plus its extension run, so a header straddling
+ * a chunk edge is re-read whole with the next chunk. */
+#define ZZPLAY_PROBE_CARRY 48U
 #define ZZPLAY_MP3_PROBE_BYTES 4096U
 
 static uint32_t zzplay_synchsafe_u28(const uint8_t *data)
@@ -137,6 +139,98 @@ uint32_t zzplay_mpeg_frame_rate_milli(uint8_t code)
   return rates[code & 0x0fU];
 }
 
+/* MPEG-2 aspect_ratio_information: the display aspect ratio of the coded
+ * frame (1 is square samples). MPEG-1 keeps its pixel-aspect meaning and
+ * is not mapped here. */
+static const uint16_t zzplay_mpeg2_dar_w[5] = {0U, 1U, 4U, 16U, 221U};
+static const uint16_t zzplay_mpeg2_dar_h[5] = {0U, 1U, 3U, 9U, 100U};
+
+/* Square-pixel display size of a coded w x h frame: the display aspect
+ * applies to the sequence display extension's area when present, else to
+ * the whole coded frame. Height is kept, width carries the ratio. */
+static void zzplay_mpeg2_display_size(uint32_t width, uint32_t height,
+                                      uint8_t aspect, uint32_t ext_w,
+                                      uint32_t ext_h,
+                                      uint32_t *out_w, uint32_t *out_h)
+{
+  uint64_t num;
+  uint64_t den;
+
+  if (aspect > 4U || height == 0U) {
+    *out_w = 0U;
+    *out_h = 0U;
+    return;
+  }
+  if (aspect == 1U) {
+    /* Square samples: the display extension's area is the display size. */
+    *out_w = ext_w != 0U ? ext_w : width;
+    *out_h = ext_h != 0U ? ext_h : height;
+    return;
+  }
+  num = (uint64_t)width * zzplay_mpeg2_dar_w[aspect] *
+        (ext_h != 0U ? ext_h : height);
+  den = (uint64_t)zzplay_mpeg2_dar_h[aspect] *
+        (ext_w != 0U ? ext_w : width);
+  *out_w = den != 0U ? (uint32_t)(num / den) : width;
+  if (*out_w == 0U) {
+    *out_w = 1U;
+  }
+  *out_h = height;
+}
+
+/* Walks the extension run that follows a sequence header: the sequence
+ * extension (id 1) marks MPEG-2, the sequence display extension (id 2)
+ * carries the area the display aspect applies to. Best effort: a run cut
+ * short by the buffer end leaves what was seen so far, and the caller
+ * re-reads the header with the next chunk's carried bytes. */
+static void zzplay_probe_mpeg_extensions(const uint8_t *data,
+                                         size_t length,
+                                         size_t from,
+                                         int *is_mpeg2,
+                                         uint32_t *ext_w,
+                                         uint32_t *ext_h)
+{
+  size_t limit = from + 64U; /* a header's extension run is far shorter */
+  size_t i;
+
+  for (i = from; i + 4U <= length && i < limit; i++) {
+    uint8_t ext_id;
+    uint8_t color;
+    size_t base;
+
+    if (data[i] != 0x00U || data[i + 1U] != 0x00U ||
+        data[i + 2U] != 0x01U || data[i + 3U] != 0xb5U) {
+      continue; /* scan forward for the next extension start code */
+    }
+    if (i + 5U > length) {
+      return;
+    }
+    ext_id = (uint8_t)(data[i + 4U] >> 4);
+    color = (uint8_t)(data[i + 4U] & 0x01U);
+    if (ext_id == 1U && i + 10U <= length) {
+      *is_mpeg2 = 1;
+      i += 6U; /* sequence extension body: 6 bytes we do not read */
+    } else if (ext_id == 2U) {
+      base = i + 5U + (color != 0U ? 3U : 0U);
+      if (base + 4U > length) {
+        return;
+      }
+      if ((data[base + 1U] & 0x02U) != 0U) {
+        *ext_w = ((uint32_t)data[base] << 6) |
+                 (uint32_t)(data[base + 1U] >> 2);
+        *ext_h = ((uint32_t)(data[base + 1U] & 0x01U) << 13) |
+                 ((uint32_t)data[base + 2U] << 5) |
+                 (uint32_t)(data[base + 3U] >> 3);
+      }
+      i = base + 3U; /* display sizes end mid-byte; the for-loop adds 1 */
+    } else {
+      /* Not an extension we read: its length is unknown, so the run ends
+       * here rather than risking a skip into the next element. */
+      return;
+    }
+  }
+}
+
 int zzplay_probe_mpeg_sequence(const uint8_t *data,
                                size_t length,
                                ZZPlayVideoInfo *info)
@@ -150,6 +244,9 @@ int zzplay_probe_mpeg_sequence(const uint8_t *data,
     uint32_t width;
     uint32_t height;
     uint32_t rate;
+    int is_mpeg2 = 0;
+    uint32_t ext_w = 0U;
+    uint32_t ext_h = 0U;
 
     if (data[i] != 0x00U || data[i + 1U] != 0x00U ||
         data[i + 2U] != 0x01U || data[i + 3U] != 0xb3U) {
@@ -163,12 +260,65 @@ int zzplay_probe_mpeg_sequence(const uint8_t *data,
     if (width == 0U || height == 0U || rate == 0U) {
       continue;
     }
+    /* A sequence extension after the header means MPEG-2; its display
+     * extension (when present) supplies the area the display aspect
+     * applies to. Extensions cut short by the buffer end are picked up
+     * when the probe re-reads this header with the next chunk's carry. */
+    zzplay_probe_mpeg_extensions(data, length, i + 8U, &is_mpeg2,
+                                  &ext_w, &ext_h);
     info->width = width;
     info->height = height;
     info->frame_rate_milli = rate;
+    is_mpeg2 = is_mpeg2 || info->is_mpeg2;
+    info->is_mpeg2 = is_mpeg2;
+    info->display_width = 0U;
+    info->display_height = 0U;
+    if (is_mpeg2) {
+      zzplay_mpeg2_display_size(width, height,
+                                (uint8_t)(data[i + 7U] >> 4),
+                                ext_w, ext_h,
+                                &info->display_width,
+                                &info->display_height);
+    }
     return 1;
   }
   return 0;
+}
+
+/* First payload byte offset of a PES packet at `p`, the way the firmware
+ * demux computes it: MPEG-2 optional header, else MPEG-1 stuffing and
+ * timestamp skipping. Returns 0 when no payload byte is visible. */
+static size_t zzplay_pes_payload_at(const uint8_t *p, size_t avail)
+{
+  size_t payload_at = 6U;
+  size_t total;
+
+  if (avail < 6U) {
+    return 0U;
+  }
+  total = 6U + (((size_t)p[4] << 8) | (size_t)p[5]);
+  if (avail >= 9U && (p[6] & 0xc0U) == 0x80U) {
+    payload_at = 9U + (size_t)p[8];
+  } else {
+    while (payload_at < total && payload_at < avail &&
+           p[payload_at] == 0xffU) {
+      payload_at++;
+    }
+    if (payload_at + 1U < total && payload_at + 1U < avail &&
+        (p[payload_at] & 0xc0U) == 0x40U) {
+      payload_at += 2U;
+    }
+    if (payload_at < total && payload_at < avail) {
+      if ((p[payload_at] & 0xf0U) == 0x20U) {
+        payload_at += 5U;
+      } else if ((p[payload_at] & 0xf0U) == 0x30U) {
+        payload_at += 10U;
+      } else if (p[payload_at] == 0x0fU) {
+        payload_at++;
+      }
+    }
+  }
+  return payload_at < avail && payload_at < total ? payload_at : 0U;
 }
 
 void zzplay_probe_mpeg_program(const uint8_t *data,
@@ -190,10 +340,37 @@ void zzplay_probe_mpeg_program(const uint8_t *data,
     stream_id = data[i + 3U];
     if (stream_id == 0xbaU) {
       info->is_program_stream = 1;
+      /* MPEG-2 pack headers start with marker bits '01'; MPEG-1 packs
+       * start with '0010'. Only a full 5th byte proves MPEG-2. */
+      if (i + 5U <= length && (data[i + 4U] & 0xc0U) == 0x40U) {
+        info->is_mpeg2 = 1;
+      }
     } else if (stream_id >= 0xe0U && stream_id <= 0xefU) {
       info->has_video_pes = 1;
     } else if (stream_id >= 0xc0U && stream_id <= 0xdfU) {
+      /* The firmware demux latches the first MPEG audio stream; AC-3
+       * still outranks MP2 when both are present. */
       info->has_audio_pes = 1;
+      if (info->audio_codec != ZZPLAY_MEDIA_AUDIO_AC3) {
+        info->audio_codec = ZZPLAY_MEDIA_AUDIO_MP2;
+      }
+    } else if (stream_id == 0xbdU) {
+      /* Private stream 1: AC-3 substreams 0x80-0x87, DVD LPCM 0xA0-0xA7.
+       * AC-3 wins over MP2, MP2 over LPCM, matching the demux's choice. */
+      size_t payload = zzplay_pes_payload_at(data + i, length - i);
+      uint8_t sub;
+
+      if (payload != 0U) {
+        sub = data[i + payload];
+        if (sub >= 0x80U && sub <= 0x87U) {
+          info->has_audio_pes = 1;
+          info->audio_codec = ZZPLAY_MEDIA_AUDIO_AC3;
+        } else if (sub >= 0xa0U && sub <= 0xa7U &&
+                   info->audio_codec == ZZPLAY_MEDIA_AUDIO_NONE) {
+          info->has_audio_pes = 1;
+          info->audio_codec = ZZPLAY_MEDIA_AUDIO_LPCM;
+        }
+      }
     }
   }
 }
@@ -224,9 +401,13 @@ int zzplay_probe_file(FILE *file, ZZPlayVideoInfo *info)
     got = fread(buffer + carry, 1U, want, file);
     available = carry + got;
     zzplay_probe_mpeg_program(buffer, available, info);
-    if (!found &&
-        zzplay_probe_mpeg_sequence(buffer, available, info)) {
-      found = 1;
+    if (!found) {
+      found = zzplay_probe_mpeg_sequence(buffer, available, info);
+    } else if (!info->is_mpeg2 || info->display_width == 0U) {
+      /* Re-read repeat headers so a header whose extensions straddled a
+       * chunk edge (or followed an MPEG-2 pack header) still yields the
+       * MPEG-2 mark and its display aspect. A no-find changes nothing. */
+      (void)zzplay_probe_mpeg_sequence(buffer, available, info);
     }
     total += got;
     if (got == 0U) {
@@ -430,4 +611,47 @@ int zzplay_ogg_last_granule(FILE *file, uint32_t serial, uint64_t *granule)
     }
   }
   return 0;
+}
+
+void zzplay_video_window_source(const ZZPlayVideoInfo *info,
+                                uint32_t *width, uint32_t *height)
+{
+  uint32_t long_src;
+  uint32_t long_disp;
+  uint32_t w;
+  uint32_t h;
+
+  if (!info || info->display_width == 0U || info->display_height == 0U) {
+    /* No display aspect named (MPEG-1): the coded frame is the window. */
+    if (width) {
+      *width = info ? info->width : 0U;
+    }
+    if (height) {
+      *height = info ? info->height : 0U;
+    }
+    return;
+  }
+  w = info->display_width;
+  h = info->display_height;
+  if (w < info->width || h < info->height) {
+    /* A display size below the coded frame is an aspect (the MPEG-2
+     * square-pixel size of an anamorphic frame), not a window: scale it
+     * to the coded long side, like the WebM DisplayWidth/Height path. */
+    long_src = info->width > info->height ? info->width : info->height;
+    long_disp = w > h ? w : h;
+    w = (uint32_t)(((uint64_t)w * long_src) / long_disp);
+    h = (uint32_t)(((uint64_t)h * long_src) / long_disp);
+    if (w == 0U) {
+      w = 1U;
+    }
+    if (h == 0U) {
+      h = 1U;
+    }
+  }
+  if (width) {
+    *width = w;
+  }
+  if (height) {
+    *height = h;
+  }
 }
