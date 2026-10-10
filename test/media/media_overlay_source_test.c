@@ -55,8 +55,6 @@ int main(int argc, char **argv)
 	char *media;
 	char *overlay;
 	char *video;
-	const char *enqueue;
-	const char *release;
 	const char *status;
 	const char *audio_read;
 	int ok;
@@ -78,15 +76,6 @@ int main(int argc, char **argv)
 	                  "sdk_media_session_present_queued(uint32_t session)") &&
 	     require_text(media, argv[1],
 	                  "if (media.present_pending)\n\t\treturn SDK_STATUS_BUSY;");
-	enqueue = strstr(overlay, "sdk_mailbox_enqueue_internal(");
-	release = strstr(overlay,
-	                 "sdk_media_session_present_queued(ov.direct_session);");
-	if (!enqueue || !release || release < enqueue) {
-		fprintf(stderr,
-		        "%s: media planes must be released only after compose enqueue\n",
-		        argv[2]);
-		ok = 0;
-	}
 	status = strstr(media, "sdk_media_session_status(");
 	audio_read = strstr(media, "sdk_media_session_audio_read(");
 	if (!status || !audio_read || audio_read < status ||

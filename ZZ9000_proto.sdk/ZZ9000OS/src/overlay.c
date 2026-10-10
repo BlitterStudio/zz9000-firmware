@@ -127,8 +127,21 @@ void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
 	vs->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY] = 0;
 }
 
+/* A media session's PRESENT stays pending until overlay_main_poll queues
+ * its compose, and the session cannot decode, discard or close meanwhile.
+ * When the overlay is closed or hidden first (a window closing, the
+ * fullscreen toggle), that compose never comes: release the frame instead.
+ * Nothing reads the decoder planes without a queued compose, and any compose
+ * already queued runs ahead of the next decode on core 1. */
+static void overlay_release_direct_present(void)
+{
+	if (ov.direct_session != 0U)
+		sdk_media_session_present_queued(ov.direct_session);
+}
+
 static void overlay_stop(void)
 {
+	overlay_release_direct_present();
 	overlay_hw_stop();
 	if (ov.compose_in_flight)
 		ov.discard_stale = 1;
@@ -359,6 +372,8 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	       (unsigned long)stride, vs->colormode);
 
 out:
+	if (!ov.configured || !ov.active)
+		overlay_release_direct_present();
 	data->u32_user[0] = status;
 	SWAP32(data->u32_user[0]);
 }
