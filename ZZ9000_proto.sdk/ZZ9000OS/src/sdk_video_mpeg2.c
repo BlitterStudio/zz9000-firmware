@@ -105,6 +105,7 @@ struct sdk_video_mpeg2 {
 	struct SDKDVDAC3 ac3;
 	uint32_t ac3_packet_offset;  /* payload bytes of the head packet staged */
 	uint32_t lpcm_packet_offset; /* payload bytes of the head packet emitted */
+	uint32_t mp2_packet_offset;  /* payload bytes of the head packet written */
 	struct SDKVideoMediaConfig media;
 	struct SDKMediaTimeline timeline;
 	struct m2_pts_slot pts_slot[M2_PTS_SLOTS];
@@ -281,21 +282,31 @@ static void pump_mp2(struct sdk_video_mpeg2 *d)
 	}
 }
 
-/* Returns 0 (packet stays queued) while the MPEG audio input is full. */
+/* Write the packet into the MPEG audio input as room allows, decoding as
+ * it goes: a packet near the 64 KiB PES limit never fits beside the
+ * partial frame the input keeps. Returns 0 (packet stays queued, resumed
+ * at mp2_packet_offset) when the input is full behind a full ring. */
 static uint32_t route_mp2(struct sdk_video_mpeg2 *d,
                           const struct SDKDVDPSPacket *packet)
 {
-	size_t remaining = plm_buffer_get_remaining(d->mp2_input);
+	while (d->mp2_packet_offset < packet->length) {
+		size_t remaining = plm_buffer_get_remaining(d->mp2_input);
+		uint32_t n = packet->length - d->mp2_packet_offset;
 
-	if (remaining + packet->length > M2_MP2_CAPACITY)
-		return 0U;
-	if (plm_buffer_write(d->mp2_input,
-	                     (uint8_t *)packet->data,
-	                     packet->length) != packet->length) {
-		d->failed = 1U;
-		return 0U;
+		if (remaining >= M2_MP2_CAPACITY)
+			return 0U;
+		if (n > M2_MP2_CAPACITY - remaining)
+			n = (uint32_t)(M2_MP2_CAPACITY - remaining);
+		if (plm_buffer_write(d->mp2_input,
+		                     (uint8_t *)packet->data +
+		                     d->mp2_packet_offset, n) != n) {
+			d->failed = 1U;
+			return 0U;
+		}
+		d->mp2_packet_offset += n;
+		pump_mp2(d);
 	}
-	pump_mp2(d);
+	d->mp2_packet_offset = 0U;
 	return 1U;
 }
 
@@ -348,7 +359,10 @@ static uint32_t route_lpcm(struct sdk_video_mpeg2 *d,
 		d->lpcm_packet_offset += frames * frame_bytes;
 	}
 	d->lpcm_packet_offset = 0U;
-	d->audio_frames++;
+	/* LPCM has no codec frames: a packet with any whole sample frame
+	 * counts as one audio unit. */
+	if (length != 0U)
+		d->audio_frames++;
 	return 1U;
 }
 

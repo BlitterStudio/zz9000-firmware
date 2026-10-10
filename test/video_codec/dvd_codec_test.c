@@ -932,6 +932,136 @@ static int test_mp2_lpcm_full_ring(void)
 	return 0;
 }
 
+#define BIG_MP2_ES_BYTES (140U * 1024U)
+
+/* The MPEG audio elementary stream of a Program Stream: every 0xc0 PES
+ * payload in order. */
+static uint32_t mp2_elementary(const uint8_t *src, uint32_t length,
+                               uint8_t *dst, uint32_t capacity)
+{
+	uint32_t i = 0U;
+	uint32_t n = 0U;
+
+	while (i + 9U <= length) {
+		uint8_t sid;
+		uint32_t size;
+
+		if (src[i] != 0U || src[i + 1U] != 0U || src[i + 2U] != 1U) {
+			i++;
+			continue;
+		}
+		sid = src[i + 3U];
+		if (sid == 0xb9U)
+			size = 4U;
+		else if (sid == 0xbaU)
+			size = (src[i + 4U] & 0xc0U) == 0x40U
+				? 14U + (src[i + 13U] & 7U) : 12U;
+		else
+			size = 6U + ((uint32_t)src[i + 4U] << 8 | src[i + 5U]);
+		if (i + size > length)
+			break;
+		if (sid == 0xc0U) {
+			uint32_t at = 9U + src[i + 8U];
+
+			if (at < size && n + (size - at) <= capacity) {
+				memcpy(dst + n, src + i + at, size - at);
+				n += size - at;
+			}
+		}
+		i += size;
+	}
+	return n;
+}
+
+/* An audio-only MPEG-2 Program Stream carrying es in 0xc0 PES packets of
+ * at most payload_max bytes, each behind its own pack header; the first
+ * carries PTS 0. */
+static uint32_t wrap_mp2_ps(const uint8_t *es, uint32_t es_len,
+                            uint32_t payload_max, uint8_t *dst)
+{
+	static const uint8_t pack[14] = {
+		0x00, 0x00, 0x01, 0xba, 0x44, 0x00, 0x04, 0x00, 0x04, 0x01,
+		0x01, 0x89, 0xc3, 0xf8
+	};
+	uint32_t at = 0U;
+	uint32_t n = 0U;
+
+	while (at < es_len) {
+		uint32_t take = es_len - at < payload_max ? es_len - at : payload_max;
+		uint32_t header = at == 0U ? 5U : 0U;
+		uint32_t pes_len = 3U + header + take;
+
+		memcpy(dst + n, pack, sizeof(pack));
+		n += sizeof(pack);
+		dst[n++] = 0x00; dst[n++] = 0x00; dst[n++] = 0x01; dst[n++] = 0xc0;
+		dst[n++] = (uint8_t)(pes_len >> 8);
+		dst[n++] = (uint8_t)pes_len;
+		dst[n++] = 0x81;
+		dst[n++] = header != 0U ? 0x80 : 0x00;
+		dst[n++] = (uint8_t)header;
+		if (header != 0U) {
+			static const uint8_t pts0[5] = { 0x21, 0x00, 0x01, 0x00, 0x01 };
+
+			memcpy(dst + n, pts0, sizeof(pts0));
+			n += sizeof(pts0);
+		}
+		memcpy(dst + n, es + at, take);
+		n += take;
+		at += take;
+	}
+	dst[n++] = 0x00; dst[n++] = 0x00; dst[n++] = 0x01; dst[n++] = 0xb9;
+	return n;
+}
+
+/* 6c'''. MPEG audio PES packets near the 64 KiB PES maximum: one never
+ * fits beside the partial frame the MPEG audio input keeps, so it must go
+ * in pieces rather than stay queued and hang the stream. The PCM must
+ * match the same audio carried in DVD-sized packets. */
+static int test_mp2_large_pes(void)
+{
+	static uint8_t source[BIG_MP2_ES_BYTES / 8U];
+	static uint8_t es[BIG_MP2_ES_BYTES];
+	static uint8_t small_ps[BIG_MP2_ES_BYTES + 4096U];
+	static uint8_t big_ps[BIG_MP2_ES_BYTES + 4096U];
+	struct acked_result small, big;
+	uint32_t source_len = mp2_elementary(zz9k_dvd_pal_25p_fixture,
+	                                     zz9k_dvd_pal_25p_fixture_len,
+	                                     source, sizeof(source));
+	uint32_t es_len = 0U;
+	uint32_t small_len, big_len;
+
+	if (source_len == 0U)
+		return 1;
+	/* Whole copies of the fixture's MPEG audio, end to end. */
+	while (es_len + source_len <= sizeof(es)) {
+		memcpy(es + es_len, source, source_len);
+		es_len += source_len;
+	}
+	/* 65520 = 97 frames of 672 bytes + 336: the second packet cannot fit
+	 * beside the 336-byte partial frame the first one leaves. */
+	if (es_len < 2U * 65520U)
+		return 2;
+	small_len = wrap_mp2_ps(es, es_len, 2000U, small_ps);
+	big_len = wrap_mp2_ps(es, es_len, 65520U, big_ps);
+	if (run_acked(small_ps, small_len, 2048U, SDK_VIDEO_MEDIA_AUDIO_MP2,
+	              64U * 1024U, 64U * 1024U, &small) != 0 || !small.done ||
+	    small.pcm_bytes == 0U)
+		return 3;
+	if (run_acked(big_ps, big_len, 2048U, SDK_VIDEO_MEDIA_AUDIO_MP2,
+	              64U * 1024U, 64U * 1024U, &big) != 0)
+		return 4;
+	if (!big.done) {
+		fprintf(stderr, "test_mp2_large_pes: no DONE after %llu PCM bytes "
+		        "(DVD-sized packets: %llu)\n",
+		        (unsigned long long)big.pcm_bytes,
+		        (unsigned long long)small.pcm_bytes);
+		return 5;
+	}
+	if (big.pcm_bytes != small.pcm_bytes || big.pcm_hash != small.pcm_hash)
+		return 6;
+	return 0;
+}
+
 /* 6d. A video-only session on a VOB that carries AC-3: the audio is
  * nobody's, so it must be dropped rather than fill the demux and leave
  * every write in backpressure, and it must not hold back the end of the
@@ -1526,6 +1656,12 @@ int main(void)
 		return 180 + err;
 	}
 	printf("PASS: test_mp2_lpcm_full_ring (MP2/LPCM wait for ring room)\n");
+
+	if ((err = test_mp2_large_pes()) != 0) {
+		fprintf(stderr, "FAIL: test_mp2_large_pes (code %d)\n", err);
+		return 190 + err;
+	}
+	printf("PASS: test_mp2_large_pes (64 KiB MPEG audio packets)\n");
 
 	printf("ALL DVD HOST TESTS PASSED.\n");
 	return 0;
