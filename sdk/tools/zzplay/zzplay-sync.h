@@ -43,4 +43,18 @@ int zzplay_sync_audio_may_start(uint64_t video_pts,
  * the ordinary late-frame discard path; this one asks the card to drop
  * compressed video through the next keyframe. */
 int zzplay_sync_needs_keyframe_skip(int64_t drift_pts);
+
+/* Discarding a late frame that is already decoded only saves showing it.
+ * When decoding alone barely keeps pace, video stays 40-500 ms behind and
+ * every frame would be discarded: the picture froze. After
+ * ZZPLAY_SYNC_MAX_DISCARD_RUN discards in a row the next late frame is
+ * shown, unless it is past the keyframe skip and the stream can skip (that
+ * discard lets the card stop decoding, which is how video catches up).
+ * discard_run counts the discards since the last frame shown. */
+#define ZZPLAY_SYNC_MAX_DISCARD_RUN 2U
+ZZPlaySyncDecision zzplay_sync_limit_discard_run(
+    ZZPlaySyncDecision decision,
+    uint32_t discard_run,
+    int64_t drift_pts,
+    int keyframe_skip_available);
 #endif /* ZZPLAY_SYNC_H */

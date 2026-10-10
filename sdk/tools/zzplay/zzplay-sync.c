@@ -132,3 +132,20 @@ int zzplay_sync_needs_keyframe_skip(int64_t drift_pts)
   }
   return (uint64_t)(-drift_pts) > (uint64_t)ZZPLAY_KEYFRAME_SKIP_PTS;
 }
+
+ZZPlaySyncDecision zzplay_sync_limit_discard_run(
+    ZZPlaySyncDecision decision,
+    uint32_t discard_run,
+    int64_t drift_pts,
+    int keyframe_skip_available)
+{
+  if (decision != ZZPLAY_SYNC_DISCARD ||
+      discard_run < ZZPLAY_SYNC_MAX_DISCARD_RUN) {
+    return decision;
+  }
+  if (keyframe_skip_available &&
+      zzplay_sync_needs_keyframe_skip(drift_pts)) {
+    return ZZPLAY_SYNC_DISCARD;
+  }
+  return ZZPLAY_SYNC_PRESENT;
+}

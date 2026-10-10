@@ -206,6 +206,7 @@ struct ZZPlayRuntime {
   uint8_t audio_refresh_needed;
   uint8_t audio_totals_captured;
   uint8_t frame_held;
+  uint32_t discard_run;  /* late frames discarded since one was shown */
   uint8_t pip_open_failed;
   /* Runtime UX state (U6). */
   ZZPlayWindowGeometry saved_geometry;
@@ -2015,6 +2016,9 @@ static int zzplay_retire_held_frame(
     decision = zzplay_sync_resolve_audio_starvation(
         decision, zzplay_audio_queued_frames(runtime),
         zzplay_audio_low_water_frames(runtime));
+    decision = zzplay_sync_limit_discard_run(
+        decision, runtime->discard_run, drift,
+        runtime->container.keyframe_skip);
     if (decision == ZZPLAY_SYNC_HOLD) {
       runtime->trace_decision = 'H';
       zzplay_stats_record_sync(
@@ -2059,6 +2063,8 @@ static int zzplay_retire_held_frame(
   if (status == ZZ9K_STATUS_OK) {
     runtime->trace_decision =
         decision == ZZPLAY_SYNC_DISCARD ? 'D' : 'P';
+    runtime->discard_run =
+        decision == ZZPLAY_SYNC_DISCARD ? runtime->discard_run + 1U : 0U;
     zzplay_stats_record_sync(
         &runtime->stats.core, decision, drift);
   }
@@ -2365,6 +2371,7 @@ static int zzplay_begin_session(struct ZZPlayRuntime *runtime)
   runtime->audio_refresh_needed = runtime->audio_enabled;
   runtime->audio_totals_captured = 0U;
   runtime->frame_held = 0U;
+  runtime->discard_run = 0U;
   if (runtime->audio_enabled) {
     zzplay_pcm_ring_init(&runtime->pcm_ring, &runtime->pcm);
   }

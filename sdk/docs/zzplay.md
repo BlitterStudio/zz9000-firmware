@@ -35,16 +35,18 @@ a specific message rather than being half-played. File extensions only decide
 what a drawer scan or the file requester offers.
 
 WebM larger than the realtime sizes above is not refused. The window says
-that frames may be skipped. Audio, when there is any, keeps playing; video
-jumps to the next keyframe only when it is more than about half a second
-behind the sound. A video-only file is paced by its frame rate instead, so
-it does not skip. Anything past a 1920-pixel long side, or past 1920x1088
-pixels, is refused before playback starts. Portrait frames, including odd
-sizes, are fitted to the window and to fullscreen with the aspect preserved
-and black bars at the sides rather than stretched. If the file names a
-display size different from the coded frame, that aspect is what the window
-uses. A projection roll hint is printed when progress output is on and is
-not applied.
+that frames may be skipped. Audio, when there is any, keeps playing. A frame
+that is decoded too late is dropped, but never more than two in a row, so
+a stream the card can only just decode still moves at a third of its frame
+rate or better. Video jumps to the next keyframe only when it is more than
+about half a second behind the sound. A video-only file is paced by its
+frame rate instead, so it does not skip. Anything past a 1920-pixel long
+side, or past 1920x1088 pixels, is refused before playback starts. Portrait
+frames, including odd sizes, are fitted to the window and to fullscreen with
+the aspect preserved and black bars at the sides rather than stretched. If
+the file names a display size different from the coded frame, that aspect
+is what the window uses. A projection roll hint is printed when progress
+output is on and is not applied.
 
 ZZPlay keeps its formats in one registry, so support for further formats is
 added as the card's decoders grow; the *About* requester lists what the
