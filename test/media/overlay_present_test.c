@@ -274,6 +274,12 @@ static void test_large_frames_scan_half_size(void)
 	      "later frames only swap the buffer");
 
 	overlay_video_session_closed(7U);
+	/* The next vblank still scans the last staging frame (the P96 source
+	 * returns only after the cache flush); it is half size whatever the
+	 * session state now says. */
+	overlay_vblank_rearm();
+	check(hw_addr == src || (hw_src_w == 960U && hw_src_h == 540U),
+	      "a closed session's last frame keeps its half-size geometry");
 	overlay_vblank_cache_flushed();
 	overlay_vblank_rearm();
 	check(hw_addr == src && hw_src_w == 1920U && hw_src_h == 1080U,

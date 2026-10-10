@@ -55,6 +55,7 @@ static struct {
 	uint32_t key_native;
 
 	uint32_t shadow[2];
+	uint8_t shadow_div[2];      /* size divisor of the frame packed in each */
 	uint32_t shadow_size;
 	volatile int8_t front;      /* shadow being scanned, -1 none */
 	volatile int8_t ready_idx;  /* completed shadow awaiting present */
@@ -82,14 +83,18 @@ static struct {
 extern uint8_t stride_div;
 static int overlay_copy_image_canvas(uint32_t session);
 
-/* Divisor of the frame held at `addr`: a session's staging buffer holds a
- * frame packed at overlay_staging_divisor() of the source size; the P96
- * source bitmap is always full size. */
+/* Divisor of the frame held at `addr`: what was packed into that staging
+ * buffer, recorded when its compose was queued. It must not be derived
+ * from the session state, which changes (a session closing) while the
+ * VDMA is still scanning the last frame. The P96 source bitmap is always
+ * full size. */
 static uint8_t overlay_scan_divisor(uint32_t addr)
 {
-	if (ov.direct_session == 0U || addr == ov.src_addr)
-		return 1U;
-	return overlay_staging_divisor(ov.src_w, ov.src_h);
+	if (addr == ov.shadow[0] && ov.shadow_div[0] != 0U)
+		return ov.shadow_div[0];
+	if (addr == ov.shadow[1] && ov.shadow_div[1] != 0U)
+		return ov.shadow_div[1];
+	return 1U;
 }
 
 /* (Re)start the native overlay on `addr` with the geometry of the frame
@@ -119,6 +124,7 @@ static void overlay_free_shadows(void)
 		if (ov.shadow[i]) {
 			surface_allocator_free(ov.shadow[i]);
 			ov.shadow[i] = 0;
+			ov.shadow_div[i] = 0U;
 		}
 	}
 	ov.shadow_size = 0;
@@ -141,6 +147,8 @@ void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
 	ov.ready_idx = -1;
 	ov.shadow[0] = 0;
 	ov.shadow[1] = 0;
+	ov.shadow_div[0] = 0U;
+	ov.shadow_div[1] = 0U;
 	ov.shadow_size = 0;
 	/* The mailbox reinit drops internal completions, so a compose that was
 	 * queued/running never retires. Clear both markers or the first frame after
@@ -535,6 +543,7 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 
 	struct overlay_compose_params p;
 	uint8_t target = (ov.front == 0) ? 1 : 0;
+	uint8_t packed_div = 1U;
 
 	p.dst_addr = ov.shadow[target];
 	p.dst_pitch = ov.snap_stride;
@@ -567,12 +576,11 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 			 * roughly half a frame write, not a full-screen shadow. A frame
 			 * too large for the overlay to fetch is packed at half size
 			 * (variant 0xfd), and the hand-off scans it at that size. */
-			uint8_t div = overlay_staging_divisor(ov.src_w, ov.src_h);
-
+			packed_div = overlay_staging_divisor(ov.src_w, ov.src_h);
 			p.dst_addr = ov.shadow[target];
 			p.dst_pitch = overlay_staging_pitch(ov.src_w, ov.src_pitch);
-			p.scr_h = (uint16_t)(ov.src_h / div);
-			p.variant = div == 2U ? 0xfdU : 0xfeU;
+			p.scr_h = (uint16_t)(ov.src_h / packed_div);
+			p.variant = packed_div == 2U ? 0xfdU : 0xfeU;
 		} else {
 			p.variant = 0xffU;
 		}
@@ -582,6 +590,7 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 		ov.compose_request = 0;
 		ov.compose_in_flight = 1;
 		ov.compose_target = target;
+		ov.shadow_div[target] = packed_div;
 		if (ov.direct_session != 0U)
 			sdk_media_session_present_queued(ov.direct_session);
 	}
