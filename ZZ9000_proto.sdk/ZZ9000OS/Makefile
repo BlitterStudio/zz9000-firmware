@@ -152,9 +152,6 @@ C_SRCS = \
 	$(SRC_DIR)/audio_scene.c \
 	$(SRC_DIR)/sdk_audio_control.c \
 	$(SRC_DIR)/bootrom.c \
-	$(SRC_DIR)/codec37.c \
-	$(SRC_DIR)/codec47.c \
-	$(SRC_DIR)/compression.c \
 	$(SRC_DIR)/core2.c \
 	$(SRC_DIR)/scheduler.c \
 	$(SRC_DIR)/scheduler_arm.c \
@@ -170,7 +167,6 @@ C_SRCS = \
 	$(SRC_DIR)/overlay.c \
 	$(SRC_DIR)/usb.c \
 	$(SRC_DIR)/mp3/decode_mp3.c \
-	$(SRC_DIR)/compression/audio/adpcm.c \
 	$(SRC_DIR)/usb/ehci-hcd.c \
 	$(SRC_DIR)/usb/ehci-iso.c \
 	$(SRC_DIR)/usb/ehci-zynq.c \
