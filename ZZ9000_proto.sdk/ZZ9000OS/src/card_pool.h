@@ -107,8 +107,18 @@ uint32_t card_pool_alloc(card_pool_t *pool, uint32_t size, uint32_t owner);
 int card_pool_free(card_pool_t *pool, uint32_t addr, uint32_t owner);
 /* Free every block of one owner. Returns the bytes freed. */
 uint32_t card_pool_release_owner(card_pool_t *pool, uint32_t owner);
-/* Free every block whose class is not `keep_class`. Returns bytes freed. */
-uint32_t card_pool_release_all_except(card_pool_t *pool, uint32_t keep_class);
+
+/* Amiga reset, before the fast-RAM gate can reopen: revoke every revocable
+ * range. Returns 1 when one was open, so ARM cache lines for it may still
+ * be dirty and the caller must write them back before the Amiga can see
+ * that memory; 0 when no ARM code had access to it. */
+int card_pool_take_back_lent(card_pool_t *pool);
+/* Amiga reset, after the module resets: release every owner except the
+ * FIRMWARE class, then lend the revocable ranges again when the Amiga
+ * cannot use them -- a Zorro II board has no fast-RAM window, and on
+ * Zorro III the window is free while fast RAM is not advertised. */
+void card_pool_finish_amiga_reset(card_pool_t *pool, int is_zorro3,
+                                  int fastram_advertised);
 
 /* Free bytes in one range; 0 while it is closed. */
 uint32_t card_pool_range_free_bytes(card_pool_t *pool, uint32_t range);

@@ -204,9 +204,28 @@ uint32_t card_pool_release_owner(card_pool_t *pool, uint32_t owner)
     return release_where(pool, owner, 0);
 }
 
-uint32_t card_pool_release_all_except(card_pool_t *pool, uint32_t keep_class)
+int card_pool_take_back_lent(card_pool_t *pool)
 {
-    return release_where(pool, keep_class, 1);
+    int was_open = 0;
+    for (uint32_t r = 0; r < pool->range_count; r++) {
+        if (!pool->ranges[r].revocable)
+            continue;
+        was_open |= pool->ranges[r].open;
+        card_pool_revoke_range(pool, r);
+    }
+    return was_open;
+}
+
+void card_pool_finish_amiga_reset(card_pool_t *pool, int is_zorro3,
+                                  int fastram_advertised)
+{
+    release_where(pool, CARD_POOL_CLASS_FIRMWARE, 1);
+    if (is_zorro3 && fastram_advertised)
+        return;
+    for (uint32_t r = 0; r < pool->range_count; r++) {
+        if (pool->ranges[r].revocable)
+            card_pool_open_range(pool, r);
+    }
 }
 
 uint32_t card_pool_range_free_bytes(card_pool_t *pool, uint32_t range)

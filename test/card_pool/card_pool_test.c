@@ -13,11 +13,21 @@
 #include "card_pool.h"
 #include "memorymap.h"
 
-/* Single-threaded host build: the SMP lock primitives are no-ops. */
-int smp_cpu_id(void) { return 0; }
+/* Single-threaded host build. smp_cpu_id is switchable so a test can leave
+ * the lock held by "core 1"; taking a held raw lock would spin forever on
+ * the card, so here it fails the run instead. */
+static int current_cpu = 0;
+int smp_cpu_id(void) { return current_cpu; }
 uint32_t smp_local_irq_save(void) { return 0u; }
 void smp_local_irq_restore(uint32_t s) { (void)s; }
-void smp_raw_spin_lock(volatile uint32_t *w) { *w = 1u; }
+void smp_raw_spin_lock(volatile uint32_t *w)
+{
+    if (*w) {
+        printf("FAIL: pool lock is held by another core (deadlock)\n");
+        exit(1);
+    }
+    *w = 1u;
+}
 void smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0u; }
 
 #define PAGE CARD_POOL_PAGE_BYTES
@@ -139,28 +149,78 @@ static void test_firmware_never_in_revocable(void)
     CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == 0x20000000u);
 }
 
-static void test_revoke_and_reset_release(void)
+/* Ranges in card order: A and C fixed, B revocable and tried last. */
+#define B_BASE 0x20000000u
+static void card_like_pool(void)
 {
     card_pool_init(&pool);
     CHECK(card_pool_add_range(&pool, A_BASE, A_BASE + PAGE, 0) == 0);
-    CHECK(card_pool_add_range(&pool, 0x20000000u, 0x20000000u + MB(1), 1) == 1);
+    CHECK(card_pool_add_range(&pool, C_BASE, C_BASE + PAGE, 0) == 1);
+    CHECK(card_pool_add_range(&pool, B_BASE, B_BASE + MB(1), 1) == 2);
     card_pool_open_range(&pool, 0);
     card_pool_open_range(&pool, 1);
+}
+
+static void test_reset_fast_ram_switches_on(void)
+{
+    card_like_pool();
+    /* Boot with fast RAM off lends B. */
+    CHECK(card_pool_take_back_lent(&pool) == 0);
+    card_pool_finish_amiga_reset(&pool, 1, 0);
     uint32_t fw = card_pool_alloc(&pool, PAGE, FIRMWARE(1));
-    uint32_t lent = card_pool_alloc(&pool, MB(1), MEDIA(1));
-    CHECK(fw == A_BASE && lent == 0x20000000u);
-    CHECK(card_pool_revoke_range(&pool, 1) == MB(1));
+    uint32_t in_c = card_pool_alloc(&pool, PAGE, MEDIA(1));
+    uint32_t in_b = card_pool_alloc(&pool, MB(1), IMAGE(2));
+    CHECK(fw == A_BASE && in_c == C_BASE && in_b == B_BASE);
+
+    /* Warm reset that enables fast RAM. */
+    CHECK(card_pool_take_back_lent(&pool) == 1);
+    CHECK(card_pool_range_free_bytes(&pool, 2) == 0);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(pool.block_count == 1 && pool.blocks[0].addr == fw &&
+          pool.blocks[0].owner == FIRMWARE(1));
     CHECK(pool.class_used[CARD_POOL_CLASS_MEDIA] == 0);
-    CHECK(card_pool_range_free_bytes(&pool, 1) == 0);
-    /* Closed: nothing lands there, and the old owner's free is ignored. */
-    CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == 0);
-    CHECK(card_pool_free(&pool, lent, MEDIA(1)) == 0);
+    CHECK(pool.class_used[CARD_POOL_CLASS_IMAGE] == 0);
+    CHECK(card_pool_range_free_bytes(&pool, 2) == 0);
+    /* The revoked block's late free is ignored and B is never handed out. */
+    CHECK(card_pool_free(&pool, in_b, IMAGE(2)) == 0);
     CHECK(pool.ignored_frees == 1);
-    card_pool_open_range(&pool, 1);
-    CHECK(card_pool_range_free_bytes(&pool, 1) == MB(1));
-    CHECK(card_pool_alloc(&pool, PAGE, IMAGE(3)) == 0x20000000u);
-    CHECK(card_pool_release_all_except(&pool, CARD_POOL_CLASS_FIRMWARE) == PAGE);
-    CHECK(pool.block_count == 1 && pool.blocks[0].addr == fw);
+    CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == C_BASE);
+    CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == 0);
+    /* Nothing was lent this time, so the next reset has nothing to clean. */
+    CHECK(card_pool_take_back_lent(&pool) == 0);
+}
+
+static void test_reset_relends_when_unused(void)
+{
+    card_like_pool();
+    card_pool_finish_amiga_reset(&pool, 1, 0);
+    CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == A_BASE);
+    CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == C_BASE);
+    CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == B_BASE);
+
+    /* Fast RAM stays off: B comes back empty. */
+    CHECK(card_pool_take_back_lent(&pool) == 1);
+    card_pool_finish_amiga_reset(&pool, 1, 0);
+    CHECK(pool.block_count == 0);
+    CHECK(card_pool_range_free_bytes(&pool, 2) == MB(1));
+
+    /* Zorro II has no fast-RAM window: B is lent whatever the config says. */
+    CHECK(card_pool_take_back_lent(&pool) == 1);
+    card_pool_finish_amiga_reset(&pool, 0, 1);
+    CHECK(card_pool_range_free_bytes(&pool, 2) == MB(1));
+}
+
+static void test_lock_left_by_faulted_core(void)
+{
+    card_like_pool();
+    uint32_t a = card_pool_alloc(&pool, PAGE, MEDIA(5));
+    /* Core 1 faults inside the pool and never releases the lock. */
+    current_cpu = 1;
+    sdk_smp_lock_acquire(&pool.lock);
+    current_cpu = 0;
+    card_pool_reset_lock(&pool);
+    CHECK(card_pool_release_owner(&pool, MEDIA(5)) == PAGE);
+    CHECK(card_pool_alloc(&pool, PAGE, MEDIA(6)) == a);
 }
 
 static void test_full_table(void)
@@ -250,7 +310,9 @@ int main(void)
     test_wrong_owner_and_unknown_frees();
     test_release_owner_merges_gaps();
     test_firmware_never_in_revocable();
-    test_revoke_and_reset_release();
+    test_reset_fast_ram_switches_on();
+    test_reset_relends_when_unused();
+    test_lock_left_by_faulted_core();
     test_full_table();
     test_card_setup();
     test_random();

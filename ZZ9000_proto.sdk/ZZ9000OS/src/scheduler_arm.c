@@ -18,6 +18,7 @@
 #include "sdk_video_stream.h"
 #include "sdk_media_session.h"
 #include "sdk_smp_lock.h"
+#include "card_pool.h"
 #include "core2.h"
 #include "sleep.h"
 #include "xil_types.h"
@@ -28,6 +29,7 @@
 #include <stdio.h>
 
 static void scheduler_core1_reclaim_if_requested(taskq_shared_t *sh);
+static void scheduler_core1_clean_if_requested(taskq_shared_t *sh);
 
 /* BSP flat 1 MB-section translation table (translation_table.S). */
 extern u32 MMUTable;
@@ -98,6 +100,8 @@ void scheduler_boot_init(void)
   sh->core1_parked = 0;
   sh->core1_reclaim_request = 0;
   sh->core1_reclaim_done = 0;
+  sh->core1_clean_request = 0;
+  sh->core1_clean_done = 0;
   taskq_watchdog_init(&g_sched_watchdog, 3u);
   g_core1_started = 0;
 }
@@ -245,6 +249,7 @@ void scheduler_core1_worker(void)
 
     /* Checked before every claim: once core 0 asks, no further task runs. */
     scheduler_core1_reclaim_if_requested(sh);
+    scheduler_core1_clean_if_requested(sh);
     scheduler_core1_park_if_requested();
     slot = taskq_claim_any(&sh->queue);
     if (slot < 0) {
@@ -298,6 +303,44 @@ int scheduler_core1_reclaim(void)
   sh->core1_reclaim_request = 0;
   dsb();
   printf("[sched] core 1 did not reclaim; cold restart\n");
+  return -1;
+}
+
+/* Core 1 side of the cache clean: no task is running, so a set/way clean
+ * of this core's L1 leaves no dirty line behind. */
+static void scheduler_core1_clean_if_requested(taskq_shared_t *sh)
+{
+  if (!sh->core1_clean_request)
+    return;
+  sh->core1_clean_request = 0;
+  Xil_L1DCacheFlush();
+  dsb();
+  sh->core1_clean_done = 1;
+  dsb();
+  __asm__ __volatile__("sev" ::: "memory");
+}
+
+int scheduler_core1_clean_dcache(void)
+{
+  taskq_shared_t *sh = scheduler_shared();
+  uint32_t spins;
+
+  if (!scheduler_core1_available() || !sh->core1_alive)
+    return 0;
+  if (sh->core1_current_slot >= 0 || sh->core1_restart_request)
+    return -1;
+  sh->core1_clean_done = 0;
+  sh->core1_clean_request = 1;
+  dsb();
+  __asm__ __volatile__("sev" ::: "memory");
+  for (spins = 0U; spins < SCHED_RECLAIM_SPINS && !sh->core1_clean_done;
+       spins++)
+    usleep(10);
+  if (sh->core1_clean_done)
+    return 0;
+  sh->core1_clean_request = 0;
+  dsb();
+  printf("[sched] core 1 did not clean its cache; cold restart\n");
   return -1;
 }
 
@@ -377,6 +420,10 @@ void scheduler_core0_poll(int zorro_pending, int display_pending)
     sh->core1_restart_request = 0;
     dmb();  /* publish the clear before the reset re-enters the worker */
     taskq_watchdog_on_fault(&g_sched_watchdog);
+    /* Core 1 is parked in its fault handler. If it faulted inside the card
+     * pool, its lock is still held; free it before the poison handlers
+     * below release their sessions' pool memory. */
+    card_pool_reset_lock(&card_pool);
     /* Core-1-affine image sessions lost their codec heap objects with the
      * fault; both branches below reclaim the decode blocks core 1 left
      * allocated (the cold restart inside core1_cold_restart, the

@@ -131,6 +131,12 @@ typedef struct {                /* coherent control block at the queue region */
    * sets reclaim_done. Only a faulted or stuck worker is cold-restarted. */
   volatile uint32_t core1_reclaim_request;
   volatile uint32_t core1_reclaim_done;
+  /* Cache clean without a CPU reset: core 0 sets clean_request on an idle,
+   * healthy core 1, which writes back and invalidates its L1 D-cache and
+   * sets clean_done. Set/way maintenance is per core, so core 0 cannot do
+   * this for it. */
+  volatile uint32_t core1_clean_request;
+  volatile uint32_t core1_clean_done;
 } taskq_shared_t;
 
 typedef struct {
@@ -190,6 +196,10 @@ void scheduler_quiesce_for_reset(void);    /* core 0: drain in-flight core-1 tas
 /* core 0, after the quiesce: have the idle core 1 free its tracked decode
  * blocks itself. 0 on success; nonzero means the caller must cold-restart. */
 int  scheduler_core1_reclaim(void);
+/* core 0, after the quiesce: have the idle core 1 clean and invalidate its
+ * L1 D-cache. 0 on success or when core 1 is not running; nonzero means
+ * the caller must cold-restart it. */
+int  scheduler_core1_clean_dcache(void);
 #endif
 
 #if defined(SCHED_STRESS_TEST) && !defined(TASKQ_HOST_TEST)
