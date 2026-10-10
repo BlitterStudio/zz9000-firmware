@@ -19,6 +19,7 @@ rx-ring:
 	python3 run_rx_init.py --cc $(CC)
 	python3 run_rx_restart.py --cc $(CC)
 	python3 run_rx_mac_restart.py --cc $(CC)
+	python3 run_rx_offset2_retry.py --cc $(CC)
 
 $(TARGET): ethernet_mcast_test.c $(SRC_DIR)/ethernet_mcast.c \
 		$(SRC_DIR)/ethernet.h stubs/xemacps_hw.h

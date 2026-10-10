@@ -14,7 +14,7 @@ from run_rx_bd import function, macro
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cc", default="clang")
-    cases = ["success", "rx-create", "rx-clone", "tx-create", "tx-clone",
+    cases = ["success", "offset2", "rx-create", "rx-clone", "tx-create", "tx-clone",
              "alloc", "prepare", "commit"]
     parser.add_argument("case", nargs="?", choices=["all"] + cases, default="all")
     args = parser.parse_args()
