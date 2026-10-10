@@ -221,14 +221,17 @@ static int parse_one(struct SDKDVDPSDemux *d)
 		queued = queue_packet(d, &d->video, SDK_DVD_PS_VIDEO, sid, 0U,
 		                      0U, p + payload_at, payload_length, pts, dts);
 	} else if (sid >= 0xc0U && sid <= 0xdfU) {
-		queued = queue_packet(d, &d->audio, SDK_DVD_PS_MP2, sid, 0U,
-		                      0U, p + payload_at, payload_length, pts, dts);
+		if (d->mp2_stream == 0U)
+			d->mp2_stream = sid;
+		if (sid != d->mp2_stream)
+			d->bytes_ignored += total;
+		else
+			queued = queue_packet(d, &d->audio, SDK_DVD_PS_MP2, sid,
+			                      0U, 0U, p + payload_at,
+			                      payload_length, pts, dts);
 	} else if (sid == 0xbdU && payload_length != 0U) {
 		uint8_t sub = p[payload_at];
 		if (sub >= 0x80U && sub <= 0x87U) {
-			/* One AC-3 track: the first substream seen. Packets of
-			 * the others would interleave foreign frames into the
-			 * one decoder, so they are skipped. */
 			if (d->ac3_substream == 0U)
 				d->ac3_substream = sub;
 			if (sub != d->ac3_substream) {
@@ -241,9 +244,16 @@ static int parse_one(struct SDKDVDPSDemux *d)
 					pts, dts);
 			}
 		} else if (sub >= 0xa0U && sub <= 0xa7U) {
-			if (payload_length < 7U) queued = -1;
-			else queued = queue_packet(d, &d->audio, SDK_DVD_PS_LPCM,
-				sid, sub, 7U, p + payload_at, payload_length, pts, dts);
+			if (d->lpcm_substream == 0U)
+				d->lpcm_substream = sub;
+			if (sub != d->lpcm_substream)
+				d->bytes_ignored += total;
+			else if (payload_length < 7U)
+				queued = -1;
+			else
+				queued = queue_packet(d, &d->audio, SDK_DVD_PS_LPCM,
+					sid, sub, 7U, p + payload_at, payload_length,
+					pts, dts);
 		} else {
 			/* 0x20..0x3f subpictures and other private streams are not
 			 * part of the experiment; bounded skip is intentional. */

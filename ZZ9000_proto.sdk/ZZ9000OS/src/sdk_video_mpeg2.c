@@ -611,8 +611,15 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 			d->malformed++;
 			break;
 		case STATE_BUFFER:
-			if (!d->video_end_signalled && d->input_eof &&
-			    demux_drained(d)) {
+			if (d->video_end_signalled) {
+				/* The end code is consumed and libmpeg2 still
+				 * wants input: it reports STATE_END only after a
+				 * sequence header, so a stream without video (or
+				 * with no valid sequence) ends here. */
+				d->video_done = 1U;
+				return got_frame ? 1 : 0;
+			}
+			if (d->input_eof && demux_drained(d)) {
 				static const uint8_t seq_end[4] = {
 					0x00, 0x00, 0x01, 0xb7
 				};

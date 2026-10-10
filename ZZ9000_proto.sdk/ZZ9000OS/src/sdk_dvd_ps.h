@@ -46,9 +46,13 @@ struct SDKDVDPSDemux {
 	uint64_t bytes_ignored;
 	uint32_t malformed_packets;
 	uint32_t backpressure_events;
-	/* AC-3 substream (0x80-0x87) this demux follows: the first one seen;
-	 * 0 until then. Other AC-3 substreams are skipped as ignored bytes. */
+	/* The one track of each audio kind this demux follows: the first AC-3
+	 * substream (0x80-0x87), MPEG audio stream (0xc0-0xdf) and LPCM
+	 * substream (0xa0-0xa7) seen; 0 until then. Packets of the others
+	 * are skipped as ignored bytes, so one decoder never sees two tracks. */
 	uint8_t ac3_substream;
+	uint8_t mp2_stream;
+	uint8_t lpcm_substream;
 	uint8_t eof;
 };
 

@@ -1064,6 +1064,145 @@ static int test_ac3_substream_selection(void)
 	return 0;
 }
 
+/* An MPEG-2 PES packet without timestamps: 00 00 01 sid, length, 0x80,
+ * 0x00, header length 0, payload. */
+static uint32_t put_pes(uint8_t *dst, uint8_t sid, const uint8_t *payload,
+                        uint32_t length)
+{
+	uint32_t pes_length = 3U + length;
+
+	dst[0] = 0x00;
+	dst[1] = 0x00;
+	dst[2] = 0x01;
+	dst[3] = sid;
+	dst[4] = (uint8_t)(pes_length >> 8);
+	dst[5] = (uint8_t)pes_length;
+	dst[6] = 0x80;
+	dst[7] = 0x00;
+	dst[8] = 0x00;
+	memcpy(dst + 9, payload, length);
+	return 9U + length;
+}
+
+/* Like AC-3, a stream with two MPEG audio tracks or two LPCM tracks must
+ * reach the audio queue as one: interleaving another track's packets into
+ * the one decoder plays both languages at once. The first one seen wins. */
+static int test_audio_track_selection(void)
+{
+	static struct SDKDVDPSDemux demux;
+	static uint8_t ps[2048];
+	uint8_t payload[32];
+	const struct SDKDVDPSPacket *p;
+	uint32_t n = 0U;
+	uint32_t accepted = 0U;
+	uint32_t mp2_c0 = 0U, lpcm_a0 = 0U, other = 0U;
+	uint32_t i;
+
+	memset(payload, 0x55, sizeof(payload));
+	for (i = 0U; i < 3U; i++) {
+		n += put_pes(ps + n, 0xc0, payload, sizeof(payload));
+		n += put_pes(ps + n, 0xc1, payload, sizeof(payload));
+		payload[0] = 0xa0;
+		n += put_pes(ps + n, 0xbd, payload, sizeof(payload));
+		payload[0] = 0xa1;
+		n += put_pes(ps + n, 0xbd, payload, sizeof(payload));
+		payload[0] = 0x55;
+	}
+	sdk_dvd_ps_init(&demux);
+	for (i = 0U; i < 64U && !sdk_dvd_ps_done(&demux); i++) {
+		uint32_t more = 0U;
+
+		sdk_dvd_ps_write(&demux, ps + accepted, n - accepted, &more, 1);
+		accepted += more;
+		while ((p = sdk_dvd_ps_peek_audio(&demux)) != NULL) {
+			if (p->kind == SDK_DVD_PS_MP2 && p->stream_id == 0xc0U)
+				mp2_c0++;
+			else if (p->kind == SDK_DVD_PS_LPCM &&
+			         p->substream_id == 0xa0U)
+				lpcm_a0++;
+			else
+				other++;
+			sdk_dvd_ps_pop_audio(&demux, NULL);
+		}
+	}
+	if (!sdk_dvd_ps_done(&demux))
+		return 1;
+	if (other != 0U) {
+		fprintf(stderr, "test_audio_track_selection: %u packets of a second track\n",
+		        other);
+		return 2;
+	}
+	if (mp2_c0 != 3U || lpcm_a0 != 3U)
+		return 3;
+	return 0;
+}
+
+/* The same Program Stream with every video PES removed. */
+static uint32_t strip_video(const uint8_t *src, uint32_t length, uint8_t *dst)
+{
+	uint32_t i = 0U;
+	uint32_t n = 0U;
+
+	while (i + 4U <= length) {
+		uint8_t sid;
+		uint32_t size;
+
+		if (src[i] != 0U || src[i + 1U] != 0U || src[i + 2U] != 1U) {
+			dst[n++] = src[i++];
+			continue;
+		}
+		sid = src[i + 3U];
+		if (sid == 0xb9U)
+			size = 4U;
+		else if (sid == 0xbaU)
+			size = (src[i + 4U] & 0xc0U) == 0x40U
+				? 14U + (src[i + 13U] & 7U) : 12U;
+		else
+			size = 6U + ((uint32_t)src[i + 4U] << 8 | src[i + 5U]);
+		if (i + size > length)
+			size = length - i;
+		if (sid < 0xe0U || sid > 0xefU) {
+			memcpy(dst + n, src + i, size);
+			n += size;
+		}
+		i += size;
+	}
+	while (i < length)
+		dst[n++] = src[i++];
+	return n;
+}
+
+/* A stream with sound but no video (or whose video never has a sequence
+ * header) must still end: libmpeg2 only reports STATE_END after a
+ * sequence, so the backend waited forever for a video end. */
+static int test_audio_only_reaches_done(void)
+{
+	static uint8_t audio_only[sizeof(zz9k_dvd_ac3_192_fixture)];
+	struct acked_result r;
+	uint64_t ref_bytes, ref_hash;
+	uint32_t ref_frames;
+	uint32_t len = strip_video(zz9k_dvd_ac3_192_fixture,
+	                           zz9k_dvd_ac3_192_fixture_len, audio_only);
+
+	if (len == 0U || len >= zz9k_dvd_ac3_192_fixture_len)
+		return 1;
+	if (ac3_reference(audio_only, len, &ref_bytes, &ref_hash,
+	                  &ref_frames) != 0 || ref_frames == 0U)
+		return 2;
+	if (run_acked(audio_only, len, 2048U, 64U * 1024U, 64U * 1024U,
+	              &r) != 0)
+		return 3;
+	if (!r.done) {
+		fprintf(stderr, "test_audio_only: no DONE after %llu PCM bytes\n",
+		        (unsigned long long)r.pcm_bytes);
+		return 4;
+	}
+	if (r.video_frames != 0U || r.pcm_bytes != ref_bytes ||
+	    r.pcm_hash != ref_hash)
+		return 5;
+	return 0;
+}
+
 int main(void)
 {
 	int err;
@@ -1159,6 +1298,18 @@ int main(void)
 		return 90 + err;
 	}
 	printf("PASS: test_ac3_substream_selection (first AC-3 substream only)\n");
+
+	if ((err = test_audio_track_selection()) != 0) {
+		fprintf(stderr, "FAIL: test_audio_track_selection (code %d)\n", err);
+		return 100 + err;
+	}
+	printf("PASS: test_audio_track_selection (first MP2 stream and LPCM track only)\n");
+
+	if ((err = test_audio_only_reaches_done()) != 0) {
+		fprintf(stderr, "FAIL: test_audio_only_reaches_done (code %d)\n", err);
+		return 110 + err;
+	}
+	printf("PASS: test_audio_only_reaches_done (no video still ends DONE)\n");
 
 	printf("ALL DVD HOST TESTS PASSED.\n");
 	return 0;
