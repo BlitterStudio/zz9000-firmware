@@ -127,6 +127,8 @@ jobs:
         run: make -C test/config test
       - name: Surface allocator suite
         run: make -C test/allocator test
+      - name: Card pool suite
+        run: make -C test/card_pool test
       - name: Zorro II aperture layout suite
         run: make -C test/aperture test
       - name: MMU page split suite
