@@ -437,11 +437,12 @@ static void plmpeg_load_es(plm_buffer_t *buffer, void *user)
 		buffer->has_ended = TRUE;
 }
 
-static void *plmpeg_create(void)
+static void *plmpeg_create(uint32_t pool_owner)
 {
 	struct sdk_video_plmpeg *decoder =
 		(struct sdk_video_plmpeg *)PLM_MALLOC(sizeof(*decoder));
 
+	(void)pool_owner;
 	if (!decoder)
 		return 0;
 	memset(decoder, 0, sizeof(*decoder));

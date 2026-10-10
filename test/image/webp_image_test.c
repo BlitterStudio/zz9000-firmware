@@ -5,6 +5,7 @@
  */
 #include "sdk_decode_reclaim.h"
 #include "sdk_image_stream.h"
+#include "host_card_pool.h"
 #include "memorymap.h"
 #include <sys/mman.h>
 
@@ -650,13 +651,15 @@ static int test_reset_reclaims_retained_animation(void)
   TEST_REQUIRE(sdk_image_stream_feed(&feed, webp_animation_offset_6x4, &result) ==
                SDK_STATUS_OK && result.state == SDK_IMAGE_SESSION_STATE_TILE_READY,
                "Animated input did not retain first canvas");
-  TEST_REQUIRE(sdk_decode_tracked_count() > 0U &&
-               host_runtime_allocated_bytes() > 0U,
-               "Retained animation did not own tracked input and canvas allocations");
+  TEST_REQUIRE(host_card_pool_used() > 0U,
+               "Retained animation did not hold its input and canvas in the card pool");
 
+  /* Core-1 fault: the poison handler releases the session's pool owner;
+   * the tracker reclaim that follows has nothing of WebP's to free. */
   sdk_image_stream_poison_core1_sessions();
   reclaimed = sdk_decode_reclaim(free);
-  TEST_REQUIRE(reclaimed > 0U && sdk_decode_tracked_count() == 0U,
+  TEST_REQUIRE(reclaimed == 0U && host_card_pool_used() == 0U &&
+               sdk_decode_tracked_count() == 0U,
                "Reset did not reclaim every retained WebP allocation");
   TEST_REQUIRE(sdk_image_stream_close(session) == SDK_STATUS_OK,
                "Poisoned WebP session close failed");
@@ -686,13 +689,12 @@ static int test_reset_reclaims_pre_eof_input(void)
   TEST_REQUIRE(sdk_image_stream_feed(&feed, webp_alpha_3x4, &result) ==
                SDK_STATUS_OK && result.state == SDK_IMAGE_SESSION_STATE_NEED_INPUT &&
                result.bytes_consumed == 12U && result.bytes_written == 0U &&
-               result.flush_length == 0U && sdk_decode_tracked_count() > 0U &&
-               host_runtime_allocated_bytes() > 0U,
+               result.flush_length == 0U && host_card_pool_used() > 0U,
                "Pre-EOF WebP input was not retained without output");
 
   sdk_image_stream_poison_core1_sessions();
   reclaimed = sdk_decode_reclaim(sdk_decode_heap_free);
-  TEST_REQUIRE(reclaimed > 0U && sdk_decode_tracked_count() == 0U &&
+  TEST_REQUIRE(reclaimed == 0U && sdk_decode_tracked_count() == 0U &&
                host_runtime_allocated_bytes() == 0U,
                "Pre-EOF reset did not reclaim every input-only WebP allocation");
   TEST_REQUIRE(sdk_image_stream_close(session) == SDK_STATUS_OK &&
@@ -713,7 +715,9 @@ static int test_reset_reclaims_pre_eof_input(void)
   return 1;
 }
 
-static int test_tracker_exhaustion(void)
+/* WebP arenas live in the card pool, so a full core-1 decode tracker no
+ * longer stops a WebP session from retaining its input. */
+static int test_tracker_full_leaves_webp_unaffected(void)
 {
   struct SDKImageStreamBegin begin;
   struct SDKImageStreamFeed feed;
@@ -736,11 +740,11 @@ static int test_tracker_exhaustion(void)
   TEST_REQUIRE(sdk_image_stream_begin(&begin, &result) == SDK_STATUS_OK,
                "Tracker-exhaustion begin failed");
   session = result.session;
-  begin_feed(&feed, session, 12U, SDK_IMAGE_SESSION_FEED_EOF);
+  begin_feed(&feed, session, 12U, 0U);
   TEST_REQUIRE(sdk_image_stream_feed(&feed, webp_alpha_3x4, &result) ==
-               SDK_STATUS_NO_MEMORY && result.state == SDK_IMAGE_SESSION_STATE_ERROR &&
-               result.bytes_written == 0U && result.flush_length == 0U,
-               "Tracker exhaustion did not surface WebP NO_MEMORY cleanly");
+               SDK_STATUS_OK && result.state == SDK_IMAGE_SESSION_STATE_NEED_INPUT &&
+               result.bytes_consumed == 12U && host_card_pool_used() > 0U,
+               "WebP input retention depended on a decode tracker slot");
   TEST_REQUIRE(sdk_image_stream_close(session) == SDK_STATUS_OK,
                "Tracker-exhaustion WebP close failed");
 
@@ -863,7 +867,8 @@ int main(void)
       !run_test("WebP session limits", test_session_limit_and_fit) ||
       !run_test("WebP reset reclamation", test_reset_reclaims_retained_animation) ||
       !run_test("WebP pre-EOF reset reclamation", test_reset_reclaims_pre_eof_input) ||
-      !run_test("WebP tracker exhaustion", test_tracker_exhaustion))
+      !run_test("WebP with a full decode tracker",
+                test_tracker_full_leaves_webp_unaffected))
     return 2;
   if (!test_allocation_failures(&allocation_attempts, &peak_bytes))
     return 2;

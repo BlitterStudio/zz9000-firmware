@@ -68,6 +68,7 @@ void Xil_AssertNonVoid() {}
 #include "sdk_mailbox.h"
 #include "sdk_aperture_layout.h"
 #include "surface_allocator.h"
+#include "card_pool.h"
 #include "overlay.h"
 
 /* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
@@ -414,6 +415,23 @@ static void activate_aperture_layout_if_acknowledged(void)
 
 static uint8_t amiga_boot_reset_pass = 1;
 
+static void print_memory_line(void)
+{
+	extern char _heap_start[], _heap_end[];
+	uint32_t a1 = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_A1);
+	uint32_t a2 = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_A2);
+	uint32_t c = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_C);
+	uint32_t b = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_B);
+
+	printf("[mem] heap %u MB, card pool %u MB free (A1 %u, A2 %u, C %u, "
+	       "B %s %u)\n",
+	       (unsigned)((uint32_t)(_heap_end - _heap_start) >> 20),
+	       (unsigned)((a1 + a2 + c + b) >> 20),
+	       (unsigned)(a1 >> 20), (unsigned)(a2 >> 20), (unsigned)(c >> 20),
+	       card_pool.ranges[CARD_POOL_RANGE_B].open ? "lent" : "fast-ram",
+	       (unsigned)(b >> 20));
+}
+
 void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* Fast-Ram gate (fast-ram-cfg KTD4): close the gate the moment a
 	 * reset is detected -- the fail-safe presentation -- then rederive
@@ -426,6 +444,23 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	 * warm reboot therefore applies a saved fast_ram change, and a
 	 * failed or too-slow re-read boots without Fast RAM. */
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6, 0);
+	/* Card pool range B is the fast-RAM window, lent to the ARM while fast
+	 * RAM is not advertised. Take it back before the gate can reopen.
+	 * Core 1 goes first: the quiesce stops any task still writing a block
+	 * in the window, and core 1 cleans and invalidates its own L1. A core
+	 * 1 that faulted (possibly holding the pool lock) or does not answer
+	 * is cold-restarted instead, which also frees that lock, so the
+	 * take-back below cannot spin on it. Core 0 then writes back and
+	 * invalidates L1 and L2, so no dirty line for the window can reach
+	 * DDR once the Amiga owns it. Skipped when the window was not lent,
+	 * which keeps a fast-RAM board's reset as quick as before. */
+	if (card_pool_has_lent(&card_pool)) {
+		scheduler_quiesce_for_reset();
+		if (scheduler_core1_clean_dcache() != 0)
+			core1_cold_restart();
+		card_pool_take_back_lent(&card_pool);
+		Xil_DCacheFlush();
+	}
 	/* Cold boot reaches this handler right after main() decided the
 	 * gate: as media init normally, and as a FAST reset in the
 	 * ZZ9000_SKIP_INITIAL_MEDIA_INIT build where no volume is ever
@@ -533,6 +568,12 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	sdk_diag_irq_ack_count = 0;
 	sdk_diag_task_count = 0;
 	sdk_mailbox_register_events = 0;
+
+	/* Every session went down above: give back what they held, and lend
+	 * the fast-RAM window again when the Amiga cannot use it. */
+	card_pool_finish_amiga_reset(&card_pool,
+		sdk_aperture_runtime_is_zorro3(), zz_config_fastram_advertise());
+	print_memory_line();
 
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
 	//card_feature_enabled[CARD_FEATURE_NONSTANDARD_VSYNC] = 1;
@@ -696,6 +737,7 @@ int main() {
 	// warm reset then share one apply of the persisted scene.
 	audio_scene_load_config();
 
+	card_pool_setup_card(&card_pool);
 #if ZZ9000_SKIP_INITIAL_MEDIA_INIT
 	handle_amiga_reset(AMIGA_RESET_FAST);
 #else

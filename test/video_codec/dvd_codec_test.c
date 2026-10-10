@@ -183,7 +183,7 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 	memset(out, 0, sizeof(*out));
 	out->yuy2_hash = UINT64_C(14695981039346656037);
 
-	decoder = ops->create();
+	decoder = ops->create(0U);
 	if (!decoder)
 		return 1;
 
@@ -539,7 +539,7 @@ static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
 
 	memset(out, 0, sizeof(*out));
 	out->pcm_hash = FNV64_OFFSET;
-	decoder = ops->create();
+	decoder = ops->create(0U);
 	ring = (uint8_t *)malloc(ring_capacity);
 	if (!decoder || !ring) {
 		free(ring);
@@ -739,13 +739,13 @@ static int test_ac3_ring_floor(void)
 	cfg.pcm_ring = ring;
 	cfg.pcm_low_water_bytes = 1024U;
 	cfg.pcm_ring_capacity = SDK_DVD_AC3_FRAME_PCM_BYTES - 4U;
-	decoder = ops->create();
+	decoder = ops->create(0U);
 	if (!decoder)
 		return 1;
 	ok_small = ops->configure_media(decoder, &cfg);
 	ops->destroy(decoder);
 	cfg.pcm_ring_capacity = SDK_DVD_AC3_FRAME_PCM_BYTES;
-	decoder = ops->create();
+	decoder = ops->create(0U);
 	if (!decoder)
 		return 2;
 	ok_exact = ops->configure_media(decoder, &cfg);

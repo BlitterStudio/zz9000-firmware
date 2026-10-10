@@ -7751,8 +7751,7 @@ static uint16_t handle_decompress(volatile struct SDKMailboxEntry *req,
  *
  * Memory: touches ONLY the host-provided arena (inside the SDK shared
  * heap) plus the decoder's private <=64 KB window -- no new reserved DDR
- * region, so it cannot collide with the Z3 fast-RAM window or the video
- * codec scratch at 0x30000000 (see memorymap.h).
+ * region (see memorymap.h).
  */
 static uint16_t handle_decompress_batch(volatile struct SDKMailboxEntry *req,
                                         volatile struct SDKMailboxEntry *comp,

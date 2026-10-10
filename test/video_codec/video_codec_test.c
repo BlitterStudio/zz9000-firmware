@@ -275,7 +275,7 @@ static int test_streaming_decode(void)
 	ops = sdk_video_backend_find(1U, 1U);
 	if (!ops || sdk_video_backend_find(2U, 1U) != 0)
 		return 1;
-	decoder = ops->create();
+	decoder = ops->create(0U);
 	if (!decoder)
 		return 2;
 

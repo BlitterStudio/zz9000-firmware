@@ -529,7 +529,7 @@ void sdk_vorbis_init(struct sdk_vorbis_state *st, uint32_t output_format)
 	memset(st, 0, sizeof(*st));
 	st->output_format = output_format;
 	sdk_vorbis_heap_init(&st->heap, SDK_VORBIS_REGION_BYTES,
-	                     SDK_VORBIS_ALLOC_LIMIT);
+	                     SDK_VORBIS_ALLOC_LIMIT, 0U);
 }
 
 uint16_t sdk_vorbis_decode(struct sdk_vorbis_state *st,

@@ -6,6 +6,7 @@
 
 #include "sdk_video_stream.h"
 
+#include "card_pool.h"
 #include "memorymap.h"
 #include "overlay.h"
 #include "sdk_video_backend.h"
@@ -29,6 +30,9 @@ struct SDKVideoStreamSession {
 	uint32_t frame_number;
 	uint32_t frame_time_millis;
 	uint32_t bytes_accepted;
+	/* card_pool owner of the backend's decoder memory (unique per
+	 * session, so a closed session's stale free never matches). */
+	uint32_t pool_owner;
 	struct SDKVideoMediaConfig media;
 	const struct SDKVideoDecoderOps *ops;
 	void *decoder;
@@ -125,7 +129,7 @@ static uint16_t ensure_decoder(struct SDKVideoStreamSession *session)
 		return SDK_STATUS_IO_ERROR;
 	if (session->decoder)
 		return SDK_STATUS_OK;
-	session->decoder = session->ops->create();
+	session->decoder = session->ops->create(session->pool_owner);
 	if (!session->decoder)
 		return SDK_STATUS_NO_MEMORY;
 	if (session->owner == SDK_VIDEO_STREAM_OWNER_MEDIA) {
@@ -195,7 +199,9 @@ void sdk_video_stream_poison_core1_sessions(void)
 
 		if (!session->in_use)
 			continue;
-		/* The decode-reclaim pass already freed the backend graph. */
+		/* The decode-reclaim pass already freed the backend graph; the
+		 * decoder memory it took from the card pool goes by owner. */
+		card_pool_release_owner(&card_pool, session->pool_owner);
 		session->decoder = 0;
 		memset(&session->direct_frame, 0, sizeof(session->direct_frame));
 		session->direct_frame_valid = 0U;
@@ -313,6 +319,8 @@ uint16_t sdk_video_stream_begin_owned(
 		begin->pcm_low_water_bytes;
 	session->media.pcm_high_water_bytes =
 		begin->pcm_high_water_bytes;
+	session->pool_owner =
+		CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, session->id);
 	session->owner = (uint8_t)owner;
 	session->in_use = 1U;
 	fill_result(session, SDK_VIDEO_SESSION_STATE_NEED_INPUT, 0U,

@@ -373,7 +373,7 @@ static const struct SDKVideoDecoderOps *ops;
 static void *open_decoder(void)
 {
 	struct SDKVideoMediaConfig cfg;
-	void *dec = ops->create();
+	void *dec = ops->create(0U);
 
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_NONE;
@@ -817,7 +817,7 @@ static void test_audio_demuxed_ahead_of_video(void)
 	const uint32_t total = PACKETS * 20U * MS_BYTES;
 	struct SDKVideoMediaConfig cfg;
 	struct SDKVideoMediaInfo mi;
-	void *dec = ops->create();
+	void *dec = ops->create(0U);
 	uint32_t accepted = 0U;
 	uint32_t frames = 0U;
 	uint32_t i;

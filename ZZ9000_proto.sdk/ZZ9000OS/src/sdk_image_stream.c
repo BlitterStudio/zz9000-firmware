@@ -10,6 +10,7 @@
 #include "sdk_surface.h"
 #include "sdk_compression.h"
 #include "sdk_smp_lock.h"
+#include "card_pool.h"
 #include "memorymap.h"
 #include <xil_cache.h>
 #include <setjmp.h>
@@ -2697,7 +2698,9 @@ uint16_t sdk_image_stream_begin(const struct SDKImageStreamBegin *begin,
 	if (session->codec == SDK_IMAGE_CODEC_WEBP)
 		sdk_vorbis_heap_init(&session->webp_heap,
 		                     SDK_WEBP_ARENA_REGION_BYTES,
-		                     SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES);
+		                     SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES,
+		                     CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE,
+		                                     session->session));
 	session->in_use = 1U;
 	if ((begin->flags & SDK_IMAGE_SESSION_BEGIN_ANIMATION) != 0U) {
 		session->is_animation = 1U;
@@ -2864,7 +2867,9 @@ void sdk_image_stream_poison_core1_sessions(void)
 		slot->webp_anim_decoder = 0;
 		slot->webp_tile_next_y = 0U;
 		slot->webp_decoded = 0U;
-		/* The reclaim already freed the arena's tracked regions. */
+		/* The arena's regions belong to the session's pool owner: free
+		 * them whichever core allocated them, then drop the pointers. */
+		card_pool_release_owner(&card_pool, slot->webp_heap.pool_owner);
 		sdk_vorbis_heap_forget(&slot->webp_heap);
 		slot->webp_output_complete = 0U;
 		/* The session keeps its animation-mode identity (like codec/)

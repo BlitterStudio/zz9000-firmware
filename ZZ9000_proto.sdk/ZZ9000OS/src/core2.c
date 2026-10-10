@@ -9,6 +9,7 @@
 #include "scheduler.h"
 #include "memorymap.h"
 #include "sdk_smp_lock.h"
+#include "card_pool.h"
 #include "sdk_compression.h"
 #include "sdk_image_stream.h"
 
@@ -101,6 +102,9 @@ static void record_fault(uint32_t code, const char *name)
 	 * under core 0.
 	 */
 	sdk_smp_lock_reset_malloc_if_owned();
+	/* Same for the card pool lock: WebM and WebP decodes on this core
+	 * allocate arena regions from the pool. */
+	sdk_smp_lock_reset_if_owned(&card_pool.lock);
 
 	taskq_shared_t *sh = scheduler_shared();
 	int slot = sh->core1_current_slot;
@@ -202,6 +206,9 @@ void core1_cold_restart(void)
 	 * restart paths: the fault path (record_fault -> scheduler_core0_poll)
 	 * and the quiesce-timeout path (scheduler_quiesce_for_reset).
 	 */
+	/* The card pool lock has the same exposure. Reset it first so the
+	 * dsb/sev in the malloc reset below publishes both. */
+	card_pool_reset_lock(&card_pool);
 	sdk_smp_lock_reset_malloc();
 
 	/*
