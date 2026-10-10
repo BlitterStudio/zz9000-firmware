@@ -72,13 +72,20 @@ static uint32_t lower_bound(const card_pool_t *pool, uint32_t addr)
     return lo;
 }
 
-static void remove_block(card_pool_t *pool, uint32_t i)
+/* Drop blocks [first, last) and return their bytes. One memmove, so a
+ * whole revoked range costs no more than a single free. */
+static uint32_t remove_blocks(card_pool_t *pool, uint32_t first, uint32_t last)
 {
-    const card_pool_block_t *b = &pool->blocks[i];
-    pool->class_used[CARD_POOL_OWNER_CLASS(b->owner)] -= b->size;
-    memmove(&pool->blocks[i], &pool->blocks[i + 1],
-            (pool->block_count - i - 1) * sizeof(pool->blocks[0]));
-    pool->block_count--;
+    uint32_t bytes = 0;
+    for (uint32_t i = first; i < last; i++) {
+        const card_pool_block_t *b = &pool->blocks[i];
+        pool->class_used[CARD_POOL_OWNER_CLASS(b->owner)] -= b->size;
+        bytes += b->size;
+    }
+    memmove(&pool->blocks[first], &pool->blocks[last],
+            (pool->block_count - last) * sizeof(pool->blocks[0]));
+    pool->block_count -= last - first;
+    return bytes;
 }
 
 void card_pool_open_range(card_pool_t *pool, uint32_t range)
@@ -95,11 +102,8 @@ uint32_t card_pool_revoke_range(card_pool_t *pool, uint32_t range)
     sdk_smp_lock_acquire(&pool->lock);
     if (range < pool->range_count) {
         card_pool_range_t *r = &pool->ranges[range];
-        uint32_t i = lower_bound(pool, r->base);
-        while (i < pool->block_count && pool->blocks[i].addr < r->end) {
-            dropped += pool->blocks[i].size;
-            remove_block(pool, i);
-        }
+        dropped = remove_blocks(pool, lower_bound(pool, r->base),
+                                lower_bound(pool, r->end));
         r->open = 0;
     }
     sdk_smp_lock_release(&pool->lock);
@@ -168,7 +172,7 @@ int card_pool_free(card_pool_t *pool, uint32_t addr, uint32_t owner)
     uint32_t i = lower_bound(pool, addr);
     if (i < pool->block_count && pool->blocks[i].addr == addr &&
         pool->blocks[i].owner == owner) {
-        remove_block(pool, i);
+        remove_blocks(pool, i, i + 1);
         freed = 1;
     } else {
         pool->ignored_frees++;

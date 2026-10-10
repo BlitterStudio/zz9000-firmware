@@ -415,11 +415,6 @@ static void activate_aperture_layout_if_acknowledged(void)
 
 static uint8_t amiga_boot_reset_pass = 1;
 
-static int board_is_zorro3(void)
-{
-	return (mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U;
-}
-
 static void print_memory_line(void)
 {
 	extern char _heap_start[], _heap_end[];
@@ -573,8 +568,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 
 	/* Every session went down above: give back what they held, and lend
 	 * the fast-RAM window again when the Amiga cannot use it. */
-	card_pool_finish_amiga_reset(&card_pool, board_is_zorro3(),
-		zz_config_fastram_advertise());
+	card_pool_finish_amiga_reset(&card_pool,
+		sdk_aperture_runtime_is_zorro3(), zz_config_fastram_advertise());
 	print_memory_line();
 
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
