@@ -210,6 +210,68 @@ static int test_portrait_phone(void)
   return 0;
 }
 
+/* The fullscreen screen must be asked at the video's display size and then
+ * in growing steps, because the card's overlay plane only shows a window
+ * at or above the frame's size correctly (A4000: a 720x576 MPEG-2 frame
+ * letterboxed into a 720x405 window on a 720x576 screen showed just its
+ * top rows, while the same clip windowed at 1024x576 was correct). */
+static int test_fullscreen_screen_request(void)
+{
+  uint16_t w;
+  uint16_t h;
+
+  /* PAL 16:9: the first ask is the display size, not the coded 720x576. */
+  if (!zzplay_geometry_screen_request(0U, 1024U, 576U, 720U, 576U, &w, &h)) {
+    return 1;
+  }
+  if (w != 1024U || h != 576U) return 2;
+  /* The ladder grows, so a screen mode too small for the display can be
+   * left behind without ever asking for a downscale. */
+  if (!zzplay_geometry_screen_request(1U, 1024U, 576U, 720U, 576U, &w, &h)) {
+    return 3;
+  }
+  if (w <= 1024U || h <= 576U) return 4;
+  if (zzplay_geometry_screen_request(4U, 1024U, 576U, 720U, 576U, &w, &h)) {
+    return 5;
+  }
+  /* No display aspect (MPEG-1, WebP): the coded frame is the ask, with
+   * the historical 640x480 pixel-doubling floor. */
+  if (!zzplay_geometry_screen_request(0U, 0U, 0U, 320U, 288U, &w, &h)) {
+    return 6;
+  }
+  if (w != 640U || h != 480U) return 7;
+  return 0;
+}
+
+static int test_fullscreen_screen_upscales(void)
+{
+  /* The failed A4000 shape: a 720x576 screen letterboxes 16:9 into 405
+   * rows, shrinking the coded frame. */
+  if (zzplay_geometry_screen_upscales(720U, 576U, 1024U, 576U, 720U, 576U)) {
+    return 1;
+  }
+  /* 1024x768 holds the display and never shrinks the coded frame. */
+  if (!zzplay_geometry_screen_upscales(1024U, 768U, 1024U, 576U, 720U, 576U)) {
+    return 2;
+  }
+  /* NTSC 4:3 at its own display size shrinks the 720-wide coded frame. */
+  if (zzplay_geometry_screen_upscales(640U, 480U, 640U, 480U, 720U, 480U)) {
+    return 3;
+  }
+  if (!zzplay_geometry_screen_upscales(800U, 600U, 640U, 480U, 720U, 480U)) {
+    return 4;
+  }
+  /* MPEG-1 keeps today's behaviour: the 640x480 floor upscales 352x288. */
+  if (!zzplay_geometry_screen_upscales(640U, 480U, 352U, 288U, 352U, 288U)) {
+    return 5;
+  }
+  /* WebM 1:1 keeps its exact-size screen. */
+  if (!zzplay_geometry_screen_upscales(1280U, 720U, 1280U, 720U, 1280U, 720U)) {
+    return 6;
+  }
+  return 0;
+}
+
 int main(void)
 {
   int rc;
@@ -231,6 +293,10 @@ int main(void)
   if (rc != 0) { printf("refit %d\n", rc); return 150 + rc; }
   rc = test_portrait_phone();
   if (rc != 0) { printf("portrait %d\n", rc); return 170 + rc; }
+  rc = test_fullscreen_screen_request();
+  if (rc != 0) { printf("fsrequest %d\n", rc); return 190 + rc; }
+  rc = test_fullscreen_screen_upscales();
+  if (rc != 0) { printf("fsupscale %d\n", rc); return 210 + rc; }
   printf("zzplay_geometry_test: all checks passed\n");
   return 0;
 }

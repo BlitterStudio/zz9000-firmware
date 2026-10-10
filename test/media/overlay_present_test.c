@@ -63,6 +63,8 @@ static uint32_t hw_addr;
 static uint32_t hw_pitch;
 static uint16_t hw_src_w;
 static uint16_t hw_src_h;
+static int16_t hw_dst_w;
+static int16_t hw_dst_h;
 
 int overlay_hw_supported(void) { return hw_present; }
 void overlay_hw_stop(void) {}
@@ -79,7 +81,7 @@ int overlay_hw_start_scaled(uint32_t src, uint32_t pitch, uint16_t src_w,
                             uint32_t key_rgb, uint8_t key_enabled,
                             uint32_t generation)
 {
-	(void)dst_x; (void)dst_y; (void)dst_w; (void)dst_h; (void)variant;
+	(void)dst_x; (void)dst_y; (void)variant;
 	(void)key_rgb; (void)key_enabled; (void)generation;
 	if (!hw_present)
 		return 0;
@@ -88,6 +90,8 @@ int overlay_hw_start_scaled(uint32_t src, uint32_t pitch, uint16_t src_w,
 	hw_pitch = pitch;
 	hw_src_w = src_w;
 	hw_src_h = src_h;
+	hw_dst_w = (int16_t)dst_w;
+	hw_dst_h = (int16_t)dst_h;
 	return 1;
 }
 
@@ -230,24 +234,27 @@ static void stop_overlay(void)
 
 static void reset(void);
 
-static void set_overlay_source(uint16_t w, uint16_t h, uint16_t pitch)
+static void set_overlay_rect(uint16_t src_w, uint16_t src_h,
+                             uint16_t pitch, int16_t dst_x, int16_t dst_y,
+                             uint16_t dst_w, uint16_t dst_h)
 {
 	struct GFXData data;
 
 	memset(&data, 0, sizeof(data));
 	data.offset[1] = 0x00100000U;
 	data.pitch[1] = pitch;
-	data.x[0] = 16U;
-	data.y[0] = 16U;
-	data.x[1] = 320U;
-	data.y[1] = 240U;
-	data.x[2] = w;
-	data.y[2] = h;
+	data.x[0] = (uint16_t)dst_x;
+	data.y[0] = (uint16_t)dst_y;
+	data.x[1] = dst_w;
+	data.y[1] = dst_h;
+	data.x[2] = src_w;
+	data.y[2] = src_h;
 	data.user[0] = 2U;
 	data.u8_user[GFXDATA_U8_YUV_VARIANT] = YUV422_VARIANT_CGX;
 	overlay_handle_op(&vs, &data);
 	check(data.u32_user[0] == 0U, "overlay SET accepted");
 }
+
 
 /* One decoded frame through compose, publication and the vblank hand-off
  * to the native overlay. */
@@ -272,7 +279,7 @@ static void test_large_frames_scan_half_size(void)
 
 	reset();
 	hw_present = 1;
-	set_overlay_source(1920U, 1080U, 3840U);
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1920U, 1080U);
 	src = hw_addr;
 	check(hw_src_w == 1920U && hw_src_h == 1080U,
 	      "the P96 source is scanned at full size");
@@ -305,7 +312,7 @@ static void test_large_frames_scan_half_size(void)
 	/* A 720p frame still goes through at full size. */
 	reset();
 	hw_present = 1;
-	set_overlay_source(1280U, 720U, 2560U);
+	set_overlay_rect(1280U, 720U, 2560U, 0, 0, 1280U, 720U);
 	starts = hw_starts;
 	present_frame(8U);
 	check(last_compose.variant == 0xfeU && last_compose.scr_h == 720U,
@@ -318,7 +325,7 @@ static void test_interlace_blend_variant(void)
 {
 	reset();
 	hw_present = 1;
-	set_overlay_source(720U, 576U, 1440U);
+	set_overlay_rect(720U, 576U, 1440U, 0, 0, 1024U, 576U);
 
 	/* 1. Interlaced direct frame (TFF, no PROGRESSIVE) -> blend variant (0xfc) */
 	memset(&mock_direct_frame, 0, sizeof(mock_direct_frame));
@@ -357,7 +364,7 @@ static void test_interlace_blend_variant(void)
 	/* 3. >720p frame (1920x1080) -> half-size variant (0xfd) even if interlaced */
 	reset();
 	hw_present = 1;
-	set_overlay_source(1920U, 1080U, 3840U);
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1920U, 1080U);
 	mock_direct_frame.width = 1920U;
 	mock_direct_frame.height = 1080U;
 	mock_direct_frame.picture_flags = SDK_VIDEO_PICTURE_FLAG_TFF;
@@ -367,6 +374,70 @@ static void test_interlace_blend_variant(void)
 	      "a >720p interlaced direct frame composes with 0xfd");
 
 	mock_direct_frame_valid = 0;
+	hw_present = 0;
+}
+
+/* A destination smaller than the scanned source asks the native plane to
+ * downscale. On hardware that shows only the frame's first rows (A4000: a
+ * 720x576 MPEG-2 frame letterboxed into a 720x405 fullscreen window showed
+ * a few rows then black, while the same clip's 1024x576 windowed upscale
+ * was correct; the earlier 1920x1080 report had the same shape), so such
+ * rectangles must stay on the software compositor. Windows at or above the
+ * scan size keep the native plane. */
+static void test_downscaled_window_stays_composited(void)
+{
+	unsigned starts;
+
+	/* The failed fullscreen shape: 720x576 source, 720x405 window. */
+	reset();
+	vs.vmode_hsize = 720U;
+	vs.vmode_vdma_rows = 576U;
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(720U, 576U, 1440U, 0, 85, 720U, 405U);
+	check(hw_starts == starts,
+	      "a window below the scan size stays on the software compositor");
+	present_frame(21U);
+	check(last_compose.variant == 0xffU,
+	      "a downscaled window composites planar frames in software");
+
+	/* The working windowed shape of the same clip keeps the native plane. */
+	reset();
+	vs.vmode_hsize = 1280U;
+	vs.vmode_vdma_rows = 720U;
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(720U, 576U, 1440U, 128, 72, 1024U, 576U);
+	check(hw_starts > starts && hw_dst_w == 1024 && hw_dst_h == 576,
+	      "a window at or above the scan size scans natively");
+	present_frame(22U);
+	check(last_compose.variant == 0xfeU,
+	      "an upscaled window packs for the native plane");
+
+	/* A >720p source is scanned at half size, so the gate compares against
+	 * the scan size, not the P96 source: a 1280x720 window keeps a
+	 * 1920x1080 source on the native plane. */
+	reset();
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1280U, 720U);
+	check(hw_starts > starts,
+	      "a window at or above the half-size scan stays native");
+	present_frame(23U);
+	check(last_compose.variant == 0xfdU && hw_src_w == 960U &&
+	      hw_src_h == 540U,
+	      "a >720p source still packs and scans at half size");
+
+	/* A window smaller than even the half-size scan composites. */
+	reset();
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 800U, 450U);
+	check(hw_starts == starts,
+	      "a window below the half-size scan composites in software");
+	present_frame(24U);
+	check(last_compose.variant == 0xffU,
+	      "a sub-scan window composites planar frames in software");
 	hw_present = 0;
 }
 
@@ -429,6 +500,7 @@ int main(void)
 
 	test_large_frames_scan_half_size();
 	test_interlace_blend_variant();
+	test_downscaled_window_stays_composited();
 
 	if (failures) {
 		fprintf(stderr, "overlay_present_test: %d failure(s)\n", failures);

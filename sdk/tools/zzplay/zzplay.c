@@ -783,13 +783,9 @@ static void zzplay_force_geometry(struct ZZPlayRuntime *runtime,
               (unsigned)runtime->screen_w, (unsigned)runtime->screen_h);
 }
 
-/* Open a dedicated screen matching the video, so fullscreen needs no
- * scaling and no window resizing at all. The overlay rectangle is owned by
- * ZZ9000.card through P96's PIP API - there is no SDK op that positions it -
- * so the PIP is still how the video plane gets placed. Giving it a screen of
- * exactly the source size reduces that to a 1:1 fill, which is both the
- * fastest path and the one that avoids the sizing behaviour that repeatedly
- * failed on this driver. */
+/* Open a dedicated screen for fullscreen playback. The overlay rectangle is
+ * owned by ZZ9000.card through P96's PIP API - there is no SDK op that
+ * positions it - so the PIP is still how the video plane gets placed. */
 /* ~0 terminates the list and asks P96 for the default pen set, while
  * SharePens leaves them obtainable - between them the PIP can get its key. */
 static UWORD zzplay_screen_pens[] = { (UWORD)~0 };
@@ -813,82 +809,9 @@ static const char *zzplay_pip_error_name(LONG error)
   }
 }
 
-static int zzplay_open_video_screen(struct ZZPlayRuntime *runtime)
-{
-  uint16_t width = (uint16_t)runtime->video_info.width;
-  uint16_t height = (uint16_t)runtime->video_info.height;
-  ULONG depth = 16UL;
-  ULONG mode;
-
-  if (runtime->screen) {
-    return 1;
-  }
-  /* Match the Workbench depth where we know it: both 16- and 32-bit are
-   * hardware-qualified for the PIP, and the source stride P96 derives for
-   * the packed-YUV bitmap depends on it. */
-  if (runtime->window && runtime->window->WScreen) {
-    ULONG current = (ULONG)p96GetBitMapAttr(
-        runtime->window->WScreen->RastPort.BitMap, P96BMA_DEPTH);
-
-    if (current == 15UL || current == 16UL || current == 32UL) {
-      depth = current;
-    }
-  }
-  /* ZZ9000.card pixel-doubles every mode smaller than 640x480, and the
-   * card's overlay refuses doubled modes, so the PIP fails with "not
-   * available" on such a screen. Ask for at least 640x480; the window fit
-   * below scales a smaller video up to it. */
-  if (width < 640U) {
-    width = 640U;
-  }
-  if (height < 480U) {
-    height = 480U;
-  }
-  mode = p96BestModeIDTags(
-      P96BIDTAG_NominalWidth, (ULONG)width,
-      P96BIDTAG_NominalHeight, (ULONG)height,
-      P96BIDTAG_Depth, depth,
-      TAG_DONE);
-  if (mode == (ULONG)INVALID_ID) {
-    zzplay_info("zzplay: no %ux%u screen mode available for fullscreen\n",
-                (unsigned)width, (unsigned)height);
-    return 0;
-  }
-  /* Open the mode at its NATIVE size, never at the video's size: a
-   * custom-sized P96 screen is carved out of the bigger mode raster and
-   * renders top-left with a background-pen border on this card, which
-   * is exactly the "fullscreen but not centred" report of issue #83.
-   * The video itself is then scaled by the window fit to fill the
-   * screen. */
-  runtime->screen = p96OpenScreenTags(
-      P96SA_DisplayID, mode,
-      P96SA_Depth, depth,
-      P96SA_Title, (ULONG)"ZZPlay",
-      P96SA_ShowTitle, FALSE,
-      P96SA_Quiet, TRUE,
-      P96SA_AutoScroll, FALSE,
-      P96SA_SharePens, TRUE,
-      P96SA_Pens, (ULONG)zzplay_screen_pens,
-      P96SA_Colors32, (ULONG)zzplay_screen_colors,
-      TAG_DONE);
-  if (!runtime->screen) {
-    zzplay_info("zzplay: could not open a fullscreen display\n");
-    return 0;
-  }
-  (void)zzplay_resource_acquire(
-      &runtime->core.resources, ZZPLAY_RESOURCE_VIDEO_SCREEN);
-  return 1;
-}
-
-static void zzplay_close_video_screen(struct ZZPlayRuntime *runtime)
-{
-  (void)zzplay_resource_release(
-      &runtime->core.resources, ZZPLAY_RESOURCE_VIDEO_SCREEN,
-      zzplay_release_resource, runtime);
-}
-
-/* Display aspect when the file has one (WebM DisplayWidth/Height),
- * otherwise the coded frame. The PIP source stays the coded size. */
+/* Display aspect when the file has one (WebM DisplayWidth/Height, the
+ * MPEG-2 sequence aspect), otherwise the coded frame. The PIP source stays
+ * the coded size. */
 static void zzplay_aspect_pixels(const struct ZZPlayRuntime *runtime,
                                  uint16_t *width, uint16_t *height)
 {
@@ -907,6 +830,121 @@ static void zzplay_aspect_pixels(const struct ZZPlayRuntime *runtime,
   }
   *width = (uint16_t)w;
   *height = (uint16_t)h;
+}
+
+/* Open one candidate mode at its NATIVE size, never at the video's size: a
+ * custom-sized P96 screen is carved out of the bigger mode raster and
+ * renders top-left with a background-pen border on this card, which is
+ * exactly the "fullscreen but not centred" report of issue #83. The video
+ * itself is then scaled by the window fit to fill the screen. */
+static int zzplay_open_screen_mode(struct ZZPlayRuntime *runtime,
+                                   ULONG mode, ULONG depth)
+{
+  runtime->screen = p96OpenScreenTags(
+      P96SA_DisplayID, mode,
+      P96SA_Depth, depth,
+      P96SA_Title, (ULONG)"ZZPlay",
+      P96SA_ShowTitle, FALSE,
+      P96SA_Quiet, TRUE,
+      P96SA_AutoScroll, FALSE,
+      P96SA_SharePens, TRUE,
+      P96SA_Pens, (ULONG)zzplay_screen_pens,
+      P96SA_Colors32, (ULONG)zzplay_screen_colors,
+      TAG_DONE);
+  if (!runtime->screen) {
+    return 0;
+  }
+  (void)zzplay_resource_acquire(
+      &runtime->core.resources, ZZPLAY_RESOURCE_VIDEO_SCREEN);
+  return 1;
+}
+
+static void zzplay_close_video_screen(struct ZZPlayRuntime *runtime);
+
+static int zzplay_open_video_screen(struct ZZPlayRuntime *runtime)
+{
+  uint16_t src_w = (uint16_t)runtime->video_info.width;
+  uint16_t src_h = (uint16_t)runtime->video_info.height;
+  uint16_t aspect_w;
+  uint16_t aspect_h;
+  uint16_t req_w = 0U;
+  uint16_t req_h = 0U;
+  ULONG depth = 16UL;
+  ULONG fallback_mode = (ULONG)INVALID_ID;
+  ULONG rejected_mode = (ULONG)INVALID_ID;
+  unsigned attempt;
+
+  if (runtime->screen) {
+    return 1;
+  }
+  /* Match the Workbench depth where we know it: both 16- and 32-bit are
+   * hardware-qualified for the PIP, and the source stride P96 derives for
+   * the packed-YUV bitmap depends on it. */
+  if (runtime->window && runtime->window->WScreen) {
+    ULONG current = (ULONG)p96GetBitMapAttr(
+        runtime->window->WScreen->RastPort.BitMap, P96BMA_DEPTH);
+
+    if (current == 15UL || current == 16UL || current == 32UL) {
+      depth = current;
+    }
+  }
+  /* The card's overlay only shows a window at or above the frame's size
+   * (an A4000 letterboxed a 720x576 MPEG-2 frame into 720x405 on a
+   * 720x576 screen and got the frame's top rows, while the same clip
+   * windowed at 1024x576 was correct), so ask for the video's display size
+   * first and keep growing the request until the fitted window cannot
+   * shrink the coded frame. The ladder starts at 640x480 because
+   * ZZ9000.card pixel-doubles every smaller mode and the overlay refuses
+   * doubled modes. A display no mode can hold without shrinking falls back
+   * to the first mode that opened; the firmware composites such windows in
+   * software instead of scanning them natively. */
+  zzplay_aspect_pixels(runtime, &aspect_w, &aspect_h);
+  for (attempt = 0U;
+       zzplay_geometry_screen_request(attempt, aspect_w, aspect_h,
+                                      src_w, src_h, &req_w, &req_h);
+       attempt++) {
+    ULONG mode = p96BestModeIDTags(
+        P96BIDTAG_NominalWidth, (ULONG)req_w,
+        P96BIDTAG_NominalHeight, (ULONG)req_h,
+        P96BIDTAG_Depth, depth,
+        TAG_DONE);
+
+    if (mode == (ULONG)INVALID_ID || mode == rejected_mode) {
+      continue;
+    }
+    if (!zzplay_open_screen_mode(runtime, mode, depth)) {
+      rejected_mode = mode;
+      continue;
+    }
+    if (fallback_mode == (ULONG)INVALID_ID) {
+      fallback_mode = mode;
+    }
+    if (zzplay_geometry_screen_upscales(
+            (uint16_t)runtime->screen->Width,
+            (uint16_t)runtime->screen->Height,
+            aspect_w, aspect_h, src_w, src_h)) {
+      return 1;
+    }
+    zzplay_close_video_screen(runtime);
+    rejected_mode = mode;
+  }
+  if (fallback_mode != (ULONG)INVALID_ID &&
+      zzplay_open_screen_mode(runtime, fallback_mode, depth)) {
+    zzplay_info("zzplay: no screen mode holds %ux%u without shrinking; "
+                "letterboxing instead\n",
+                (unsigned)aspect_w, (unsigned)aspect_h);
+    return 1;
+  }
+  zzplay_info("zzplay: no %ux%u screen mode available for fullscreen\n",
+              (unsigned)req_w, (unsigned)req_h);
+  return 0;
+}
+
+static void zzplay_close_video_screen(struct ZZPlayRuntime *runtime)
+{
+  (void)zzplay_resource_release(
+      &runtime->core.resources, ZZPLAY_RESOURCE_VIDEO_SCREEN,
+      zzplay_release_resource, runtime);
 }
 
 /* Where the windowed window should sit. A portrait frame taller than the

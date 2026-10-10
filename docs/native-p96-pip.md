@@ -24,12 +24,19 @@ variant, destination rectangle, activation, and color key. No application or
 driver API fork is introduced.
 
 Firmware and bitstream are a matched ABI. Packed sources with a positive
-destination size and a non-empty screen intersection select the native plane
-in the hardware-capable build, including up/down scaling and clipping.
-Release packaging must pair that firmware with bitstreams built from the
-matching formatter RTL. `ZZ9000OS-legacy-bitstream.elf`, whose hardware
-backend is compile-time inert, remains the compatibility fallback for
-installations that retain an older bitstream. Unsupported source bounds and
+destination size, a non-empty screen intersection, and a window at least as
+large as the scanned source select the native plane in the hardware-capable
+build, including upscaling and clipping. A window smaller than the scanned
+source (a user-resized PIP, or ZZPlay fullscreen letterboxing an anamorphic
+frame onto a screen at the coded size) stays on the ARM compositor: every
+hardware run of a downscaled native window showed only the frame's first
+rows and then black (A4000: a 1920x1080 window at full scan size, and a
+720x576 MPEG-2 frame letterboxed to 720x405), while upscaled and 1:1
+windows of the same clips were correct. Release packaging must pair that
+firmware with bitstreams built from the matching formatter RTL.
+`ZZ9000OS-legacy-bitstream.elf`, whose hardware backend is compile-time
+inert, remains the compatibility fallback for installations that retain an
+older bitstream. Unsupported source bounds, downscale requests, and
 legacy-bitstream operation retain the ARM compositor.
 
 SDK video sessions use the same P96 window/geometry. Their decoder-owned
