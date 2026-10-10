@@ -1422,7 +1422,10 @@ int main() {
 					break;
 				}
 				case REG_ZZ_ETH_CONFIG:
-					ethernet_set_multicast_hash((u16)zdata);
+					if (((u16)zdata & 0xf000) == ETH_CONFIG_RX_OFFSET2)
+						ethernet_set_rx_offset2((u16)zdata & 1);
+					else
+						ethernet_set_multicast_hash((u16)zdata);
 					break;
 				case REG_ZZ_USBBLK_TX_HI: {
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE

@@ -33,6 +33,8 @@ static int restart_count;
 static int pause_count;
 static int clear_count;
 static int resume_count;
+static int offset2_count;
+static int last_offset2 = -1;
 static const char *last_restart;
 
 int ethernet_task_state = ETH_TASK_SETUP;
@@ -90,6 +92,12 @@ void ethernet_resume_rx_irq(int paused)
 {
 	resume_count++;
 	CHECK(paused == 1);
+}
+
+void ethernet_set_rx_offset2_quiet(int on)
+{
+	offset2_count++;
+	last_offset2 = on;
 }
 
 static void gem_reset(void)
@@ -204,7 +212,10 @@ static int test_reset_and_amiga_reset_clear_gate(void)
 	ethernet_set_multicast_hash(ETH_CONFIG_HASH_SET | 0);
 	ethernet_set_multicast_hash(ETH_CONFIG_HASH_SET | 32);
 	ethernet_task_state = ETH_TASK_SETUP;
+	offset2_count = 0;
 	ethernet_reset_for_amiga();
+	CHECK(offset2_count == 1);
+	CHECK(last_offset2 == 0);
 	CHECK(hashl() == 0);
 	CHECK(hashh() == 0);
 	CHECK(!gate_on());
@@ -255,18 +266,21 @@ static int test_capability_read_preserves_mac_bytes(void)
 	ethernet_hw_ready = 0;
 	ethernet_task_state = ETH_TASK_NEGOTIATE;
 	CHECK(ethernet_get_multicast_config() ==
-	      (ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE));
+	      (ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE |
+	       ETH_CONFIG_CAP_RX_OFFSET2));
 	/* The task machine reaches READY even when init_ethernet_buffers()
 	 * failed; the register must not claim a usable link then. */
 	ethernet_task_state = ETH_TASK_READY;
 	CHECK(ethernet_get_multicast_config() ==
-	      (ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE));
+	      (ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE |
+	       ETH_CONFIG_CAP_RX_OFFSET2));
 	ethernet_hw_ready = 1;
 	CHECK(ethernet_get_multicast_config() ==
 	      (ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE |
-	       ETH_CONFIG_LINK_READY));
+	       ETH_CONFIG_CAP_RX_OFFSET2 | ETH_CONFIG_LINK_READY));
 	CHECK(ETH_CONFIG_CAP_MULTICAST_HASH == 0x0001);
 	CHECK(ETH_CONFIG_CAP_LINK_STATE == 0x0002);
+	CHECK(ETH_CONFIG_CAP_RX_OFFSET2 == 0x0004);
 	CHECK(ETH_CONFIG_LINK_READY == 0x0100);
 	CHECK(REG_ZZ_ETH_MAC_LO == 0x88);
 	CHECK(REG_ZZ_ETH_CONFIG == 0x8A);
@@ -274,13 +288,13 @@ static int test_capability_read_preserves_mac_bytes(void)
 
 	word = ethernet_mac_lo_word(mac);
 	CHECK(memcmp(mac, before, sizeof(mac)) == 0);
-	CHECK(word == 0xabcd0103U);
+	CHECK(word == 0xabcd0107U);
 	CHECK((word >> 16) == 0xabcdU);
-	CHECK((word & 0xffffU) == 0x0103U);
+	CHECK((word & 0xffffU) == 0x0107U);
 
 	/* Z2 16-bit read of 0x8A is the low half; 0x88 is the two MAC bytes. */
 	config16 = ethernet_zorro16(word, REG_ZZ_ETH_CONFIG);
-	CHECK(config16 == 0x0103);
+	CHECK(config16 == 0x0107);
 	CHECK(ethernet_zorro16(word, REG_ZZ_ETH_MAC_LO) == 0xabcd);
 	CHECK(memcmp(mac, before, sizeof(mac)) == 0);
 	return EXIT_SUCCESS;
