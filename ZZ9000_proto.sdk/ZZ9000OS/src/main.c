@@ -1432,7 +1432,14 @@ int main() {
 
 				// Ethernet
 				case REG_ZZ_ETH_TX:
-					ethernet_send_result = ethernet_send_frame(zdata);
+					if (zdata & ETH_TX_ASYNC) {
+						/* the bus is given back before the GEM has sent;
+						 * completion is counted in REG_ZZ_ETH_TX_STATUS */
+						ethernet_send_frame_async((zdata >> ETH_TX_SLOT_SHIFT) & ETH_TX_SLOT_MASK,
+						                          zdata & ETH_TX_LEN_MASK);
+					} else {
+						ethernet_send_result = ethernet_send_frame(zdata);
+					}
 					//printf("SEND frame sz: %ld res: %d\n",zdata,ethernet_send_result);
 					break;
 				case REG_ZZ_ETH_RX: {
@@ -1464,7 +1471,10 @@ int main() {
 					break;
 				}
 				case REG_ZZ_ETH_CONFIG:
-					ethernet_set_multicast_hash((u16)zdata);
+					if (((u16)zdata & 0xf000) == ETH_CONFIG_RX_OFFSET2)
+						ethernet_set_rx_offset2((u16)zdata & 1);
+					else
+						ethernet_set_multicast_hash((u16)zdata);
 					break;
 				case REG_ZZ_USBBLK_TX_HI: {
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
@@ -1891,6 +1901,14 @@ int main() {
 						data = ethernet_mac_lo_word(mac);
 						break;
 					}
+					case REG_ZZ_ETH_RX_FRAMES:
+						/* aligned: the value is the high half */
+						data = (u32)ethernet_get_rx_frames() << 16;
+						break;
+					case REG_ZZ_ETH_TX_STATUS:
+						/* aligned: the status is the high half */
+						data = (u32)ethernet_get_tx_status() << 16;
+						break;
 					case REG_ZZ_ETH_TX:
 						// FIXME this is probably wrong (doesn't need swapping?)
 						data = (ethernet_send_result & 0xff) << 24
@@ -2022,6 +2040,12 @@ int main() {
 					case REG_ZZ_DECODER_VAL: {
 						// legacy MP3 decoder removed; reads as 0
 						data = 0;
+						break;
+					}
+					/* 0xa6 is the low word of the 0xa4 group; 0xa4 itself is
+					 * the write-only ARM argv interface and reads 0. */
+					case REG_ZZ_ARM_ARGV7: {
+						data = ethernet_get_rx_meta();
 						break;
 					}
 					case REG_ZZ_ETH_RX_STATUS: {

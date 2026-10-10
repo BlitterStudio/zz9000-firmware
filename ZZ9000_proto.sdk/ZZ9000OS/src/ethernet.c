@@ -22,14 +22,20 @@
 #include <xil_printf.h>
 #include <xil_cache.h>
 #include <xil_mmu.h>
+#include <xl2cc.h>
+#include <xparameters_ps.h>
+#include "xpseudo_asm.h"
 #include "sleep.h"
 #include "xparameters.h"
 #include <xemacps.h>
 #include <xscugic.h>
 #include "ethernet.h"
+#include "eth_tx_order.h"
 #include "interrupt.h"
 #include "memorymap.h"
 #include "mntzorro.h"
+#include "sdk_smp_lock.h"
+#include "xpseudo_asm.h"
 
 #ifndef ETH_DEBUG_VERBOSE
 #define ETH_DEBUG_VERBOSE 0
@@ -89,6 +95,9 @@ u32 PhyAddr;
 typedef char EthernetFrame[XEMACPS_MAX_VLAN_FRAME_SIZE_JUMBO] __attribute__ ((aligned(64)));
 
 volatile char* TxFrame = (char*)TX_FRAME_ADDRESS;		/* Transmit buffer */
+/* Asynchronous submissions retired in order; see eth_tx_order.h.  Touched by
+ * the send handler and, under ethernet_pause_rx_irq(), by the main loop. */
+static struct eth_tx_order eth_tx_ord;
 
 /*
  * Buffer descriptors are allocated in uncached memory. The memory is made
@@ -115,6 +124,11 @@ static int ethernet_prepare_rx_bd(XEmacPs_BdRing *rxring, XEmacPs_Bd *rxbd);
 	(((u32)bdptr - (u32)(ringptr)->BaseBdAddr) / (ringptr)->Separation)
 
 static u16 rx_bd_backlog_slot[RXBD_CNT];
+/* Bits 23..22 of the GEM receive descriptor, indexed by the host backlog
+ * slot.  The slot remains owned by the host until its serial is accepted, so
+ * this verdict and the frame presented through the Zorro window cannot part
+ * company. */
+static u8 rx_backlog_csum[FRAME_MAX_BACKLOG];
 
 static u16 ethernet_next_backlog_slot(u16 slot)
 {
@@ -143,9 +157,58 @@ static uint8_t *ethernet_backlog_payload_ptr(u16 slot)
 	return ethernet_backlog_slot_ptr(slot) + RX_FRAME_PAD;
 }
 
+/*
+ * THE ZORRO SIDE READS THROUGH L2, THIS SIDE WRITES AROUND IT.
+ *
+ * mntzorro.v's bulk path (the RX window at Zorro +0x2000, the framebuffer)
+ * is an AXI master on the ACP with ARCACHE = 0xF, so every longword the
+ * 68k reads is allocated in the PL310.  The backlog section is mapped
+ * strongly ordered here, so the four header bytes written below go to DDR
+ * and never touch that L2 line, and the GEM's DMA lands the payload in DDR
+ * the same way.  A line the 68k has already read -- the header of the
+ * presented slot, which a driver polls while it is empty -- is then served
+ * stale from L2 until something evicts it: measured from an A3000, the
+ * serial appeared 0.1-4 ms after this side had counted the frame, and often
+ * later, while the status register said a frame was ready.  A driver that
+ * polls in a loop waits it out; an interrupt-driven one sees an interrupt
+ * for a frame that is not there.  The payload has the same exposure when
+ * the slot comes round again.
+ *
+ * So the slot's lines are dropped from L2 whenever this side changes them:
+ * after the header is written, and after it is cleared.  Slots are 2 KB
+ * aligned and lines 32 bytes, so no line is shared with anything else.
+ */
+static void ethernet_backlog_slot_publish_from(u16 slot, u32 from, u32 bytes)
+{
+	/* Invalidate by physical address, a line at a time, one sync at the
+	 * end.  Not Xil_L2CacheInvalidateRange(): that masks interrupts, turns
+	 * the whole L2's line fills and write-back off for the duration and
+	 * syncs after every line -- for a frame's 48 lines, inside the GEM's
+	 * interrupt, with a gigabit sender 12 us apart. */
+	u32 addr = (u32)ethernet_backlog_slot_ptr(slot) + from;
+	u32 end  = addr + bytes;
+	volatile u32 *inv  = (volatile u32 *)(XPS_L2CC_BASEADDR + XPS_L2CC_CACHE_INVLD_PA_OFFSET);
+	volatile u32 *sync = (volatile u32 *)(XPS_L2CC_BASEADDR + XPS_L2CC_CACHE_SYNC_OFFSET);
+
+	addr &= ~31U;
+	while (addr < end) {
+		*inv = addr;
+		/* bit 0 stays set while the line operation runs; a write that
+		 * lands before it clears is lost (PL310 TRM), and a line the loop
+		 * skipped is a frame the 68k reads stale. */
+		while ((*inv & 1U) != 0U)
+			;
+		addr += 32U;
+	}
+	*sync = 0U;
+	dsb();
+}
+
 static void ethernet_clear_backlog_slot(u16 slot)
 {
+	rx_backlog_csum[slot] = ETH_RX_META_NONE;
 	memset(ethernet_backlog_slot_ptr(slot), 0, RX_FRAME_PAD);
+	ethernet_backlog_slot_publish_from(slot, 0U, RX_FRAME_PAD);
 }
 
 void micrel_auto_negotiate(XEmacPs *xemacpsp, u32 phy_addr);
@@ -186,6 +249,11 @@ void XEmacPsClkSetup(XEmacPs *EmacPsInstancePtr, u16 EmacPsIntrId, int link_spee
 	}
 }
 
+/* Requested RX buffer offset (0 or 2) and the one programmed into the ring
+ * that is running; the receive handler uses the latter. */
+static u32 rx_offset_req;
+static u32 rx_offset_ring;
+
 int init_ethernet_buffers() {
 	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
 	XEmacPs_Bd BdTemplate;
@@ -194,7 +262,10 @@ int init_ethernet_buffers() {
 
 	XEmacPs_Stop(EmacPsInstancePtr);
 
+	/* RX BDs start software-owned (used bit set); a BD is handed to the GEM
+	 * only after a successful XEmacPs_BdRingToHw(). */
 	XEmacPs_BdClear(&BdTemplate);
+	XEmacPs_BdWrite(&BdTemplate, XEMACPS_BD_ADDR_OFFSET, XEMACPS_RXBUF_NEW_MASK);
 
 	int Status = XEmacPs_BdRingCreate(&(XEmacPs_GetRxRing
 				       (EmacPsInstancePtr)),
@@ -258,6 +329,19 @@ int init_ethernet_buffers() {
 		XEmacPs_BdRingUnAlloc(&(XEmacPs_GetRxRing(EmacPsInstancePtr)), RXBD_CNT, BdRxSet);
 		ethernet_clear_host_state();
 		return XST_FAILURE;
+	}
+	dsb();
+	BdRxPtr = BdRxSet;
+	for (int i=0; i<RXBD_CNT; i++) {
+		XEmacPs_BdClearRxNew(BdRxPtr);
+		BdRxPtr = XEmacPs_BdRingNext(&(XEmacPs_GetRxRing(EmacPsInstancePtr)), BdRxPtr);
+	}
+
+	{
+		u32 base = EmacPsInstancePtr->Config.BaseAddress;
+		u32 cfg = XEmacPs_ReadReg(base, XEMACPS_NWCFG_OFFSET) & ~XEMACPS_NWCFG_RXOFFS_MASK;
+		XEmacPs_WriteReg(base, XEMACPS_NWCFG_OFFSET, cfg | (rx_offset_req << 14));
+		rx_offset_ring = rx_offset_req;
 	}
 
 	XEmacPs_Start(EmacPsInstancePtr);
@@ -348,14 +432,18 @@ int ethernet_task_state = ETH_TASK_SETUP;
  * link-ready register bit requires both. */
 int ethernet_hw_ready = 0;
 
-#define ETH_RX_INTERRUPT_MASK (XEMACPS_IXR_FRAMERX_MASK | XEMACPS_IXR_RX_ERR_MASK)
 /*
  * Stop rearming RX BDs while there is still room for the descriptors that may
  * already be owned by the GEM. This avoids accepting frames that cannot fit in
  * the Amiga-facing backlog, and gives pause frames time to slow the sender.
  */
-#define ETH_BACKLOG_HIGH_WATERMARK (FRAME_MAX_BACKLOG - RXBD_CNT)
-#define ETH_BACKLOG_LOW_WATERMARK (ETH_BACKLOG_HIGH_WATERMARK / 2)
+/* Pending = queued for the host + armed for the GEM.  Pause the wire when the
+ * ring is nearly full and arm again once the host has drained it below the
+ * low mark; with RXBD_CNT armed, the host may leave HIGH - RXBD_CNT frames
+ * queued without a pause.  Derived from RXBD_CNT alone (MAX - RXBD_CNT) the
+ * high mark would leave no room for queued frames at 64 descriptors. */
+#define ETH_BACKLOG_HIGH_WATERMARK (FRAME_MAX_BACKLOG - 8)
+#define ETH_BACKLOG_LOW_WATERMARK (FRAME_MAX_BACKLOG - RXBD_CNT + RXBD_CNT / 2)
 #define ETH_PAUSE_QUANTUM 0x0800
 
 static u16 ethernet_backlog_pending()
@@ -363,20 +451,39 @@ static u16 ethernet_backlog_pending()
 	return frames_backlog + frames_backlog_reserved;
 }
 
+/*
+ * Keep the GEM's interrupt out of a main-loop section that changes the RX
+ * backlog accounting or the RX BD ring.
+ *
+ * Clearing the RX bits in IER is not enough: XEmacPs_IntrHandler dispatches
+ * on the raw ISR, not ISR & IMR, so a GEM interrupt raised for any other
+ * cause (TX completion, a TX or RX error) still runs XEmacPsRecvHandler when
+ * a frame has landed meanwhile.  It then races ethernet_receive_frame() on
+ * frames_backlog, frames_backlog_reserved and the RX BD ring; a lost update
+ * lets ethernet_prepare_rx_bd() or the drained-backlog clear zero the header
+ * of the frame the host is being shown, and RX wedges: the status register
+ * reports frames ready while the window shows an empty slot.  Mask the GEM's
+ * line at the GIC instead (as video_interrupt_pause() does for video); an
+ * interrupt that arrives meanwhile stays pending and is taken on resume.
+ */
 int ethernet_pause_rx_irq(void)
 {
 	if (ethernet_task_state != ETH_TASK_READY) {
 		return 0;
 	}
 
-	XEmacPs_IntDisable(&EmacPsInstance, ETH_RX_INTERRUPT_MASK);
+	uint32_t irq_state = smp_local_irq_save();
+	XScuGic_Disable(interrupt_get_intc(), EMACPS_IRPT_INTR);
+	dsb();
+	isb();
+	smp_local_irq_restore(irq_state);
 	return 1;
 }
 
 void ethernet_resume_rx_irq(int paused)
 {
 	if (paused) {
-		XEmacPs_IntEnable(&EmacPsInstance, ETH_RX_INTERRUPT_MASK);
+		XScuGic_Enable(interrupt_get_intc(), EMACPS_IRPT_INTR);
 	}
 }
 
@@ -455,6 +562,7 @@ void ethernet_log_status(const char *reason) {
 }
 
 void ethernet_clear_host_state(void) {
+	eth_tx_order_flush(&eth_tx_ord);
 	frames_backlog = 0;
 	frames_backlog_read = 0;
 	frames_backlog_write = 0;
@@ -487,6 +595,11 @@ int ethernet_restart_dma(const char *reason) {
 
 	ethernet_log_status(reason);
 
+	/* XEmacPs_Stop() does not mask the GIC line: keep XEmacPsRecvHandler()
+	 * and its refill off the ring while it is cleared and rebuilt. */
+	int paused = ethernet_pause_rx_irq();
+	ethernet_hw_ready = 0;
+
 	XEmacPs_Stop(EmacPsInstancePtr);
 
 	if (BaseAddress) {
@@ -507,11 +620,36 @@ int ethernet_restart_dma(const char *reason) {
 	int Status = init_ethernet_buffers();
 	if (Status != XST_SUCCESS) {
 		printf("EMAC: DMA restart failed (%s): %d\n", reason, Status);
+		ethernet_resume_rx_irq(paused);
 		return XST_FAILURE;
 	}
 
+	ethernet_hw_ready = 1;
 	ethernet_log_status("dma-restart-after");
+	ethernet_resume_rx_irq(paused);
 	return XST_SUCCESS;
+}
+
+/* Takes effect through a full ring rebuild, so no queued frame was written
+ * with the other offset; the frames queued at the switch are dropped.  A
+ * repeat of the same request goes through the rebuild again while the
+ * last one left the ring down, so a driver reopen can bring RX back. */
+void ethernet_set_rx_offset2(int on)
+{
+	u32 want = on ? 2 : 0;
+
+	if (want == rx_offset_req &&
+	    (ethernet_task_state != ETH_TASK_READY || ethernet_hw_ready))
+		return;
+	rx_offset_req = want;
+	if (ethernet_task_state == ETH_TASK_READY)
+		ethernet_restart_dma("rx-offset2");
+}
+
+/* For a caller that rebuilds the ring itself right after. */
+void ethernet_set_rx_offset2_quiet(int on)
+{
+	rx_offset_req = on ? 2 : 0;
 }
 
 
@@ -563,9 +701,10 @@ static void XEmacPsSendHandler(void *Callback)
 
 	//printf("XEMACPS_TXSR status: %lu\n", status);
 
-	int bds_sent = XEmacPs_BdRingFromHwTx(&(XEmacPs_GetTxRing(EmacPsInstancePtr)), 1, &BdTxPtr);
-
-	if (bds_sent == 1) {
+	/* Every BD the GEM has finished, not one per interrupt: two frames that
+	 * complete before this runs raise one interrupt, and a BD left in the
+	 * hardware state is a slot the asynchronous path never gets back. */
+	while (XEmacPs_BdRingFromHwTx(&(XEmacPs_GetTxRing(EmacPsInstancePtr)), 1, &BdTxPtr) == 1) {
 		status = XEmacPs_BdGetStatus(BdTxPtr);
 
 		/*printf("BD status: ");
@@ -590,6 +729,7 @@ static void XEmacPsSendHandler(void *Callback)
 	    XEmacPs_BdSetStatus(BdTxPtr, XEMACPS_TXBUF_USED_MASK); // XEMACPS_TXBUF_WRAP_MASK
 
 	    FramesTx++;
+	    eth_tx_order_retire_bd(&eth_tx_ord);
 	}
 }
 
@@ -608,7 +748,7 @@ static int ethernet_prepare_rx_bd(XEmacPs_BdRing *rxring, XEmacPs_Bd *rxbd) {
 	frames_backlog_reserve = ethernet_next_backlog_slot(frames_backlog_reserve);
 	frames_backlog_reserved++;
 
-	XEmacPs_BdClearRxNew(rxbd);
+	/* The used bit stays set; the BD is handed over after BdRingToHw(). */
 	XEmacPs_BdSetAddressRx(rxbd, ethernet_backlog_payload_ptr(backlog_slot));
 
 	return XST_SUCCESS;
@@ -668,6 +808,8 @@ void ethernet_alloc_rx_frames() {
 				XEmacPs_BdRingUnAlloc(rxring, 1, rxbd); // FIXME double check
 				break;
 			}
+			dsb();
+			XEmacPs_BdClearRxNew(rxbd);
 		}
 	}
 }
@@ -680,7 +822,9 @@ static void XEmacPsRecvHandler(void *Callback)
 	XEmacPs_BdRing* rxring = &(XEmacPs_GetRxRing(EmacPsInstancePtr));
 	XEmacPs_Bd* rxbdset, *cur_bd_ptr;
 
-	int num_rx_bufs = XEmacPs_BdRingFromHwRx(rxring, RXBD_CNT, &rxbdset);
+	/* Bound the walk to the work group: free BDs keep their used bit set
+	 * and must not be counted as received. */
+	int num_rx_bufs = XEmacPs_BdRingFromHwRx(rxring, rxring->HwCnt, &rxbdset);
 
 	// we immediately process the incoming frame.
 	// main task will then signal the Amiga via interrupt
@@ -693,6 +837,7 @@ static void XEmacPsRecvHandler(void *Callback)
 		cur_bd_ptr = rxbdset;
 
 		for (int i=0; i<num_rx_bufs; i++) {
+			u32 bd_status = XEmacPs_BdRead(cur_bd_ptr, XEMACPS_BD_STAT_OFFSET);
 
 			frame_serial++;
 			/* 0 and 1 are reserved values the RX-accept handshake treats
@@ -728,7 +873,7 @@ static void XEmacPsRecvHandler(void *Callback)
 
 			if (backlog_slot == ETH_INVALID_BACKLOG_SLOT) {
 				frames_dropped++;
-			} else if (rx_bytes > (FRAME_SIZE - RX_FRAME_PAD)) {
+			} else if (rx_bytes > (FRAME_SIZE - RX_FRAME_PAD - rx_offset_ring)) {
 				frames_dropped++;
 				ethernet_clear_backlog_slot(backlog_slot);
 			} else if (backlog_slot != frames_backlog_write || frames_backlog >= FRAME_MAX_BACKLOG) {
@@ -740,10 +885,33 @@ static void XEmacPsRecvHandler(void *Callback)
 				ethernet_clear_backlog_slot(backlog_slot);
 			} else {
 				uint8_t* frame_bl_ptr = ethernet_backlog_slot_ptr(backlog_slot);
-				*(frame_bl_ptr)   = (rx_bytes&0xff00)>>8;
-				*(frame_bl_ptr+1) = (rx_bytes&0xff);
-				*(frame_bl_ptr+2) = (frame_serial&0xff00)>>8;
-				*(frame_bl_ptr+3) = (frame_serial&0xff);
+				/* With RX checksum offload enabled, descriptor bits 23..22 are
+				 * none, IP-only, IP+TCP, or IP+UDP.  Kept beside the slot;
+				 * REG_ZZ_ETH_RX_META reports the verdict for exactly the slot
+				 * selected by frames_backlog_read. */
+				rx_backlog_csum[backlog_slot] =
+					(u8)((bd_status & XEMACPS_RXBUF_IDMATCH_MASK) >> 22);
+								/*
+				 * THE ORDER IS THE POINT.  A driver starts copying the moment
+				 * the header's line shows the serial, so every payload line
+				 * must be dropped from L2 before the header is written, and
+				 * the header's own line after.  Header first and payload after
+				 * left a window in which a driver already draining the slot
+				 * read payload lines the L2 still held from the slot's last use
+				 * or from prefetch past the polled header.
+				 */
+				if (rx_bytes + RX_FRAME_PAD + rx_offset_ring > 32U)
+					ethernet_backlog_slot_publish_from(backlog_slot, 32U,
+					                                   rx_bytes + RX_FRAME_PAD + rx_offset_ring - 32U);
+				/* One aligned 32-bit store (the slot is 2 KB aligned), so a
+				 * driver polling the header never sees a new serial beside a
+				 * stale length or half a serial.  Big-endian for the 68k. */
+				{
+					u16 lenword = (u16)rx_bytes | (rx_offset_ring ? ETH_RX_LEN_OFFSET2 : 0);
+					*(volatile u32 *)frame_bl_ptr =
+						__builtin_bswap32(((u32)lenword << 16) | (u16)frame_serial);
+				}
+				ethernet_backlog_slot_publish_from(backlog_slot, 0U, 32U);
 
 				frames_backlog_write = ethernet_next_backlog_slot(frames_backlog_write);
 				frames_backlog++;
@@ -751,7 +919,9 @@ static void XEmacPsRecvHandler(void *Callback)
 				//printf("bd %d [%d] armed slot %p\n", bd_idx, rx_bytes, frame_bl_ptr);
 			}
 
-			XEmacPs_BdClearRxNew(cur_bd_ptr);
+			/* Leave the used bit set: the BD goes to the free group still
+			 * pointing at this slot, and is handed back to the GEM only
+			 * after ethernet_prepare_rx_bd() and a successful BdRingToHw(). */
 			cur_bd_ptr = XEmacPs_BdRingNext(rxring, cur_bd_ptr);
 
 			frames_received++;
@@ -873,6 +1043,79 @@ int ethernet_receive_frame(u16 acked_serial) {
 	return(frames_backlog_read);
 }
 
+u16 ethernet_get_rx_frames(void) {
+	u16 burst = RXBD_CNT;
+	u16 queued = (u16)(ETH_BACKLOG_HIGH_WATERMARK - RXBD_CNT);
+
+	return (u16)(ETH_RX_FRAMES_PRESENT |
+	             ((burst < queued ? burst : queued) & ETH_RX_FRAMES_COUNT));
+}
+
+u16 ethernet_get_rx_meta(void) {
+	u16 verdict = ETH_RX_META_NONE;
+	u16 capabilities = 0;
+
+	if (frames_backlog > 0) {
+		verdict = rx_backlog_csum[frames_backlog_read] & ETH_RX_META_MASK;
+	}
+
+	/* Advertise only engines which are actually enabled in the GEM, not the
+	 * Xilinx library's default options. */
+	if (XEmacPs_IsRxCsum(&EmacPsInstance))
+		capabilities |= ETH_RX_META_PRESENT;
+	if (XEmacPs_IsTxCsum(&EmacPsInstance))
+		capabilities |= ETH_TX_CSUM_PRESENT;
+
+	return capabilities | verdict;
+}
+
+void ethernet_send_frame_async(u16 slot, u16 frame_size) {
+	XEmacPs* EmacPsInstancePtr = &EmacPsInstance;
+	XEmacPs_Bd *BdTxPtr;
+	LONG Status;
+
+	/* The send handler frees BDs of this ring and retires eth_tx_order from
+	 * the GEM's interrupt; neither is safe against that without the pause
+	 * (see ethernet_pause_rx_irq). */
+	int paused = ethernet_pause_rx_irq();
+
+	if (ethernet_task_state != ETH_TASK_READY || frame_size == 0 ||
+	    frame_size > FRAME_SIZE)
+		goto refused;
+
+	/* The TX window's section is strongly ordered and the 68k never reads
+	 * it, so there is no cached line to drop: the bytes are in DDR.  The
+	 * driver keeps at most TXBD_CNT in flight and reuses a slot only after
+	 * the status count says its frame is done, so a BD is always free. */
+	Status = XEmacPs_BdRingAlloc(&(XEmacPs_GetTxRing(EmacPsInstancePtr)), 1, &BdTxPtr);
+	if (Status != XST_SUCCESS)
+		goto refused;
+
+	XEmacPs_BdSetAddressTx(BdTxPtr, (UINTPTR)TxFrame + (UINTPTR)slot * FRAME_SIZE);
+	XEmacPs_BdSetLength(BdTxPtr, frame_size);
+	XEmacPs_BdClearTxUsed(BdTxPtr);
+	XEmacPs_BdSetLast(BdTxPtr);
+
+	Status = XEmacPs_BdRingToHw(&(XEmacPs_GetTxRing(EmacPsInstancePtr)), 1, BdTxPtr);
+	if (Status != XST_SUCCESS) {
+		XEmacPs_BdRingUnAlloc(&(XEmacPs_GetTxRing(EmacPsInstancePtr)), 1, BdTxPtr);
+		goto refused;
+	}
+
+	eth_tx_order_push(&eth_tx_ord, 1);
+	XEmacPs_Transmit(EmacPsInstancePtr);
+	ethernet_resume_rx_irq(paused);
+	return;
+
+refused:
+	eth_tx_order_push(&eth_tx_ord, 0);
+	ethernet_resume_rx_irq(paused);
+}
+
+u16 ethernet_get_tx_status(void) {
+	return (u16)(ETH_TX_STATUS_PRESENT | (eth_tx_ord.done & ETH_TX_STATUS_COUNT));
+}
+
 u32 get_frames_received() {
 	return frames_received;
 }
@@ -893,7 +1136,8 @@ void ethernet_update_mac_address() {
 	ethernet_log_status("mac-update-before");
 
 	XEmacPs_Stop(EmacPsInstancePtr);
-	ethernet_clear_host_state();
+	/* The guarded restart below clears accounting; keep the old ring and
+	 * its accounting consistent until that critical section starts. */
 
 	int Status = XEmacPs_SetMacAddress(EmacPsInstancePtr, EmacPsMAC, 1);
 	if (Status != XST_SUCCESS) {
