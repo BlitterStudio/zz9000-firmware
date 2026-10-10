@@ -355,7 +355,7 @@ static void test_interlace_blend_variant(void)
 	check(last_compose.variant == 0xfeU,
 	      "a progressive direct frame with TFF still composes with 0xfe");
 
-	/* Content without flags (e.g. pl_mpeg) -> plain pack (0xfe) */
+	/* Content without flags (e.g. a client-built frame) -> plain pack (0xfe) */
 	mock_direct_frame.picture_flags = 0U;
 	present_frame(11U);
 	check(last_compose.variant == 0xfeU,

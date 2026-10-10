@@ -50,6 +50,12 @@ static uint64_t fnv1a64(uint64_t hash, const uint8_t *bytes, uint32_t length)
 	return hash;
 }
 
+static const struct SDKVideoDecoderOps *mpeg2_ops(void)
+{
+	return sdk_video_backend_find(SDK_VIDEO_CODEC_MPEG2,
+	                              SDK_VIDEO_CONTAINER_MPEG_PS);
+}
+
 /* -------------------------------------------------------- LPCM exactness */
 
 static int test_lpcm_exactness(void)
@@ -182,7 +188,7 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
                            uint32_t chunk_size, uint32_t audio_codec,
                            struct stream_result *out)
 {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	void *decoder;
 	uint8_t *pcm_ring = NULL;
 	struct SDKVideoDecodedFrame frame;
@@ -551,7 +557,7 @@ static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
                      uint32_t audio_codec, uint32_t ring_capacity,
                      uint32_t max_ack, struct acked_result *out)
 {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	struct SDKVideoMediaConfig cfg = {0};
 	struct SDKVideoDecodedFrame frame;
 	struct SDKVideoMediaInfo info;
@@ -754,7 +760,7 @@ static int test_ac3_192_all_frames(void)
  * audio or drain: configure refuses it; exactly one frame is enough. */
 static int test_ac3_ring_floor(void)
 {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	static uint8_t ring[SDK_DVD_AC3_FRAME_PCM_BYTES];
 	struct SDKVideoMediaConfig cfg = {0};
 	void *decoder;
@@ -789,7 +795,7 @@ static int test_backend_audio_rules(void)
 {
 	const struct SDKVideoDecoderOps *m1 = sdk_video_backend_find(
 		SDK_VIDEO_CODEC_MPEG1, SDK_VIDEO_CONTAINER_MPEG_PS);
-	const struct SDKVideoDecoderOps *m2 = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *m2 = mpeg2_ops();
 
 	if (!m1 || !m1->audio_ok || !m2 || !m2->audio_ok)
 		return 1;
@@ -815,7 +821,7 @@ static int test_backend_audio_rules(void)
  * Program Stream's audio and ends, exactly like an unconfigured decoder. */
 static int test_media_without_audio(void)
 {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	struct SDKVideoMediaConfig cfg = {0};
 	struct SDKVideoMediaInfo info;
 	struct SDKVideoDecodedFrame frame;
@@ -1721,7 +1727,7 @@ static int test_demux_audio_overflow_drop(void)
  * sink; that case must not drop - see 9b.) */
 static int test_starved_ring_keeps_video(void)
 {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	struct SDKVideoMediaConfig cfg = {0};
 	struct SDKVideoDecodedFrame frame;
 	struct SDKVideoMediaInfo info;
@@ -1807,7 +1813,7 @@ static int test_starved_ring_keeps_video(void)
  * has written everything answers NEED_INPUT with "truncated stream". */
 static int test_eof_unacked_pcm_is_busy(void)
 {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	struct SDKVideoMediaConfig cfg = {0};
 	struct SDKVideoDecodedFrame frame;
 	struct SDKVideoMediaInfo info;
@@ -1969,8 +1975,7 @@ static int test_audio_clock_published_early(void)
 	uint32_t i;
 
 	for (i = 0U; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
-		const struct SDKVideoDecoderOps *ops =
-			sdk_video_mpeg2_backend_ops();
+		const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 		struct SDKVideoMediaConfig cfg = {0};
 		struct SDKVideoDecodedFrame frame;
 		struct SDKVideoMediaInfo info;
@@ -2047,7 +2052,7 @@ static int test_audio_clock_published_early(void)
  * pcm_acknowledged is still zero. */
 static int test_no_drops_before_first_ack(void)
 {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	struct SDKVideoMediaConfig cfg = {0};
 	struct SDKVideoDecodedFrame frame;
 	struct SDKVideoMediaInfo info;
@@ -2125,7 +2130,7 @@ static int test_no_drops_before_first_ack(void)
  * moves forward by the dropped span and the rebase is signalled. */
 static int test_drop_resyncs_audio_clock(void)
 {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	struct SDKVideoMediaConfig cfg = {0};
 	struct SDKVideoDecodedFrame frame;
 	struct SDKVideoMediaInfo info;

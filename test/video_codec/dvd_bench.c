@@ -18,7 +18,7 @@ static double now_sec(void) {
 }
 
 static void bench(const char *label, const uint8_t *stream, uint32_t len, uint32_t audio_codec, int iters) {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = sdk_video_backend_find(SDK_VIDEO_CODEC_MPEG2, SDK_VIDEO_CONTAINER_MPEG_PS);
 	uint8_t pcm_ring[64 * 1024];
 	uint32_t total_frames = 0;
 	uint64_t total_pcm = 0;

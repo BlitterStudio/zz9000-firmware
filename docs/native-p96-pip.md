@@ -66,7 +66,7 @@ and cgxvideo players benefit without modification.
 ## Stage 2: planar420 SDK source
 
 Add planar Y/Cb/Cr fetch support and explicit display/decode buffer fences.
-The active pl_mpeg display frame cannot be reused until PL has crossed its
+The active decoder display frame cannot be reused until PL has crossed its
 last visible overlay line. This removes the SDK's final display-surface copy
 while preserving P96 ownership of window geometry and lifetime.
 
@@ -437,7 +437,8 @@ Z3660's vendored `pl_mpeg.h` contains Cortex-A9 NEON motion-compensation and
 IDCT experiments. They must not be copied as-is: nested rounded averages do
 not match MPEG's exact four-sample expression for all inputs, and several
 IDCT expressions add an explicit rounding bias and then use a rounding shift,
-applying the bias twice. The ZZ9000 MPEG translation unit is already compiled
-at `-O3` with Cortex-A9/NEON flags. A corrected, pixel-exact NEON decoder path
-is a worthwhile post-PIP performance follow-up, gated by scalar-vs-NEON
-equivalence tests running on an ARM target.
+applying the bias twice. ZZ9000 decodes MPEG-1 and MPEG-2 video with
+libmpeg2, built at `-O3` with Cortex-A9/NEON flags but using its portable C
+IDCT and motion compensation. A pixel-exact NEON path for those two hooks is
+a worthwhile performance follow-up, gated by C-vs-NEON equivalence tests
+running on an ARM target.

@@ -148,13 +148,4 @@ const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec);
 const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
 	                                                     uint32_t container);
 
-const struct SDKVideoDecoderOps *sdk_video_mpeg2_backend_ops(void);
-
-#ifdef SDK_VIDEO_HOST_TEST
-int sdk_video_plmpeg_test_boundary_mp2_probe(void);
-int sdk_video_plmpeg_test_reserved_mp2_bitrate(void);
-int sdk_video_plmpeg_test_rate(
-	uint32_t frame_rate_milli, uint64_t *units, uint32_t *per_second);
-#endif
-
 #endif /* SDK_VIDEO_BACKEND_H */

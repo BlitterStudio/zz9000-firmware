@@ -2963,6 +2963,9 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
                               : 0U;
     policy->service_missing =
         "zzplay: MPEG-2 playback is not supported by this firmware\n";
+    policy->begin_refused =
+        "zzplay: the firmware refused this MPEG-2 stream "
+        "(video larger than 800x600)\n";
   } else {
     policy->video_flags =
         ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 | ZZ9K_SERVICE_FLAG_VIDEO_MPEG_PS;
@@ -2970,6 +2973,9 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
     policy->service_missing =
         "zzplay: required MPEG-1/PS direct-overlay backend "
         "is unavailable\n";
+    policy->begin_refused =
+        "zzplay: the firmware refused this MPEG-1 stream "
+        "(video larger than 800x600, or audio other than MP2)\n";
   }
 
   if (!zzplay_video_info_supported(&info)) {

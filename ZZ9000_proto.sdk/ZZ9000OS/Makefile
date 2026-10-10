@@ -246,7 +246,6 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_media_profile.c \
 	$(SRC_DIR)/sdk_media_session.c \
 	$(SRC_DIR)/sdk_media_timeline.c \
-	$(SRC_DIR)/sdk_video_plmpeg.c \
 	$(SRC_DIR)/webm_parse.c \
 	$(SRC_DIR)/webm_window.c \
 	$(SRC_DIR)/sdk_video_webm.c \
@@ -426,14 +425,10 @@ $(BUILD_DIR)/gfx.o: $(SRC_DIR)/gfx.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
-$(BUILD_DIR)/sdk_video_plmpeg.o: $(SRC_DIR)/sdk_video_plmpeg.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
-
-# DVD hot path (U11 experiment): demux + MPEG-2 decode and AC-3 downmix in
-# the same -O3 tier as the pl_mpeg backend. The MPEG-2 and AC-3 wrappers
-# include libmpeg2/liba52 headers that exist only after the pinned dependency
-# build, so those objects depend on the archives.
+# Program Stream hot path: demux, MPEG-1/MPEG-2 decode and AC-3 downmix at
+# -O3. The MPEG and AC-3 wrappers include libmpeg2/liba52 headers that exist
+# only after the pinned dependency build, so those objects depend on the
+# archives.
 $(BUILD_DIR)/sdk_dvd_ps.o: $(SRC_DIR)/sdk_dvd_ps.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<

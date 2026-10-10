@@ -592,7 +592,7 @@ All of them run locally without hardware:
 make -C test/rtg test          # RTG correctness
 make -C test/rtg bench         # host micro-benchmarks (comparative only)
 make -C test/video test        # VDMA math + video_formatter invariants
-make -C test/video_codec test  # pl_mpeg fixture + exact YUY2 output
+make -C test/video_codec test  # MPEG-1/MPEG-2 fixtures + exact YUY2 output
 make -C test/media test        # media session state and timing
 make -C test/palette test      # primary-CLUT shadow + query packing
 make -C test/audio test        # audio capture

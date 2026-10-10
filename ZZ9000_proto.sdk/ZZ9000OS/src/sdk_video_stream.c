@@ -441,7 +441,7 @@ uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 			? SDK_STATUS_UNSUPPORTED : SDK_STATUS_BAD_REQUEST;
 	}
 	/* The compose task is queued ahead of the client's next decode, so
-	 * pl_mpeg's decoder-owned planes remain valid until it retires. */
+	 * the decoder-owned planes remain valid until it retires. */
 	session->direct_frame = frame;
 	session->direct_frame_valid = 1U;
 	session->frame_number++;

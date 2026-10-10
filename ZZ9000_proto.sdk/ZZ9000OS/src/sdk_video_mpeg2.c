@@ -1,12 +1,12 @@
 /*
- * libmpeg2 + bounded PS/VOB demux backend: DVD-resolution MPEG-2 video with
- * MP2 / DVD-LPCM / AC-3 audio for the U11 feasibility experiment.
+ * libmpeg2 + bounded PS/VOB demux backend: MPEG-1 and MPEG-2 video up to
+ * 800x600 in a Program Stream, with MP2 / DVD-LPCM / AC-3 audio.
  *
- * The backend reuses the codec-neutral sdk_video_backend contract, the
- * sdk_media_timeline integer clock and the S16BE PCM ring conventions of
- * the pl_mpeg backend, so media sessions, YUY2 packing and the ZZPlay feed
- * path stay codec-neutral. Decoded surfaces are allocated from the
- * card-resident decode heap and stay card-local.
+ * The backend implements the codec-neutral sdk_video_backend contract with
+ * the sdk_media_timeline integer clock and an S16BE PCM ring, so media
+ * sessions, YUY2 packing and the ZZPlay feed path stay codec-neutral.
+ * Decoded surfaces are allocated from the card-resident decode heap and
+ * stay card-local. MPEG audio uses the firmware's minimp3 decoder.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -23,67 +23,45 @@
 
 #ifndef SDK_VIDEO_HOST_TEST
 #include "sdk_compression.h"
-#include "sdk_decode_reclaim.h"
-#include "sdk_smp_lock.h"
 #include "xil_cache.h"
 #endif
 
 #include "mpeg2.h"
+#include "mp3/mp3.h"
 
 #define M2_ES_CAPACITY (256U * 1024U)
 #define M2_MP2_CAPACITY (64U * 1024U)
 #define M2_PTS_SLOTS 64U
-#define M2_MAX_WIDTH 720U
-#define M2_MAX_HEIGHT 576U
-#define M2_MAX_STRIDE 736U
+/* Largest picture either codec decodes. libmpeg2 rounds the coded size up
+ * to whole macroblocks (16 lines, 32 for interlaced MPEG-2), so the frame
+ * buffers can be up to 800x608. */
+#define M2_MAX_WIDTH 800U
+#define M2_MAX_HEIGHT 600U
 
 #define M2_NO_PTS SDK_VIDEO_MEDIA_NO_PTS
 
-#define PLM_NO_STDIO 1
 #ifdef SDK_VIDEO_HOST_TEST
 #define M2_MALLOC(size) malloc(size)
 #define M2_FREE(ptr) free(ptr)
 #else
-static void *m2_alloc(size_t size)
-{
-	void *ptr = sdk_decode_heap_alloc(size);
-
-	if (ptr)
-		sdk_decode_track(ptr);
-	return ptr;
-}
-
-static void m2_free(void *ptr)
-{
-	if (!ptr)
-		return;
-	sdk_decode_untrack(ptr);
-	sdk_decode_heap_free(ptr);
-}
-
+/* sdk_decode_heap_alloc records the block for reclaim when it runs on
+ * core 1, so these hooks must not track it again: reclaim frees every
+ * slot, and a block recorded twice would be freed twice. */
 static void *m2_alloc_hook(unsigned size, mpeg2_alloc_t reason)
 {
 	(void)reason;
-	return m2_alloc((size_t)size);
+	return sdk_decode_heap_alloc((size_t)size);
 }
 
 static int m2_free_hook(void *buf)
 {
-	m2_free(buf);
+	sdk_decode_heap_free(buf);
 	return 1;
 }
 
-#define M2_MALLOC(size) m2_alloc(size)
-#define M2_FREE(ptr) m2_free(ptr)
+#define M2_MALLOC(size) sdk_decode_heap_alloc(size)
+#define M2_FREE(ptr) sdk_decode_heap_free(ptr)
 #endif
-
-/* The pl_mpeg translation unit (compiled with PL_MPEG_IMPLEMENTATION in
- * sdk_video_plmpeg.c) provides the MP2 elementary decoder symbols; this
- * backend consumes the public API only, so the two backends never
- * duplicate the pl_mpeg implementation. */
-#define PLM_NO_STDIO 1
-#include "third_party/pl_mpeg/pl_mpeg.h"
-
 
 struct m2_pts_slot {
 	uint32_t tag;
@@ -99,8 +77,11 @@ struct sdk_video_mpeg2 {
 	uint32_t es_len;
 	uint32_t fbuf_stride;
 	uint8_t fbufs_bound;
-	plm_buffer_t *mp2_input;
-	plm_audio_t *mp2;
+	uint8_t *mp2_input;          /* M2_MP2_CAPACITY bytes of MPEG audio */
+	uint32_t mp2_input_pos;      /* first unread byte */
+	uint32_t mp2_input_len;      /* unread bytes */
+	uint32_t mp2_rate;           /* rate of the first decoded frame */
+	mp3dec_t mp2;
 	struct SDKDVDLPCM lpcm;
 	struct SDKDVDAC3 ac3;
 	uint32_t ac3_packet_offset;  /* payload bytes of the head packet staged */
@@ -122,10 +103,10 @@ struct sdk_video_mpeg2 {
 	uint32_t audio_frames;
 	uint32_t backpressure_events;
 	uint32_t malformed;
-	uint32_t media_flags;
+	uint32_t media_flags;        /* level bits: ready, backpressure, done */
+	uint32_t media_event_flags;  /* audio timeline events, reported once */
 	uint8_t audio_selected;
 	uint8_t mp2_selected;
-	uint8_t mp2_end_signalled;
 	uint8_t lpcm_selected;
 	uint8_t ac3_selected;
 	uint8_t media_configured;
@@ -138,7 +119,11 @@ struct sdk_video_mpeg2 {
 	uint64_t stashed_audio_pts;
 	uint64_t audio_clock_offset;
 	uint32_t audio_drops_routed;
+	uint64_t unclocked_samples;  /* audio decoded before the timeline origin */
+	uint32_t unclocked_rate;
 	uint8_t video_origin_seen;
+	uint8_t video_seen;          /* a video PES reached libmpeg2 */
+	uint8_t mpeg1;
 	uint8_t failed;
 };
 
@@ -248,6 +233,20 @@ static uint32_t ring_emit(struct sdk_video_mpeg2 *d, const uint8_t *src,
 	return bytes;
 }
 
+/* Timeline transition flags in the backend's media-flag vocabulary. */
+static uint32_t timeline_media_flags(uint32_t flags)
+{
+	uint32_t mapped = 0U;
+
+	if ((flags & SDK_MEDIA_TIMELINE_DERIVED) != 0U)
+		mapped |= SDK_VIDEO_MEDIA_FLAG_DERIVED_TIME;
+	if ((flags & SDK_MEDIA_TIMELINE_DISCONTINUITY) != 0U)
+		mapped |= SDK_VIDEO_MEDIA_FLAG_DISCONTINUITY;
+	if ((flags & SDK_MEDIA_TIMELINE_REBASED) != 0U)
+		mapped |= SDK_VIDEO_MEDIA_FLAG_REBASED;
+	return mapped;
+}
+
 /* Advance the audio timeline by the units just decoded into the ring, the
  * same way the MPEG-1 backend does: the packet PTS anchors the track but
  * never moves it inside the 1 s discontinuity window, so without per-unit
@@ -257,8 +256,16 @@ static void advance_audio_timeline(struct sdk_video_mpeg2 *d,
 {
 	struct SDKMediaTimelineResult result;
 
-	if (rate == 0U || samples == 0U || !d->timeline.have_origin)
+	if (rate == 0U || samples == 0U)
 		return;
+	if (!d->timeline.have_origin) {
+		/* Decoded while the first audio PTS waits for the video
+		 * origin: the clock covers these once the track is anchored
+		 * (clock_unclocked_audio), whatever the input chunking. */
+		d->unclocked_samples += samples;
+		d->unclocked_rate = rate;
+		return;
+	}
 	if (!sdk_media_timeline_map(&d->timeline, SDK_MEDIA_TIMELINE_AUDIO,
 	                            SDK_MEDIA_TIMELINE_NO_PTS, samples,
 	                            rate, &result))
@@ -267,6 +274,16 @@ static void advance_audio_timeline(struct sdk_video_mpeg2 *d,
 		d->last_audio_pts = result.pts - result.origin;
 	else
 		d->last_audio_pts = 0U;
+}
+
+static void clock_unclocked_audio(struct sdk_video_mpeg2 *d)
+{
+	uint64_t samples = d->unclocked_samples;
+
+	if (samples == 0U || !d->timeline.have_origin)
+		return;
+	d->unclocked_samples = 0U;
+	advance_audio_timeline(d, samples, d->unclocked_rate);
 }
 
 /* Dropped audio shortened the track by a real span of program time. When
@@ -299,55 +316,117 @@ static void resync_audio_after_drops(struct sdk_video_mpeg2 *d,
 			return;
 		advance_audio_timeline(d, gap * 48000U / 90000U, 48000U);
 		d->audio_clock_offset += gap;
-		d->media_flags |= SDK_VIDEO_MEDIA_FLAG_DISCONTINUITY |
-		                  SDK_VIDEO_MEDIA_FLAG_REBASED;
+		d->media_event_flags |= SDK_VIDEO_MEDIA_FLAG_DISCONTINUITY |
+		                        SDK_VIDEO_MEDIA_FLAG_REBASED;
 	}
 }
 /* ---------------------------------------------------------------- audio */
 
-/* Decode MPEG audio frames while the ring has room for a whole one: a
- * frame decoded into less room would lose its tail. */
-static void pump_mp2(struct sdk_video_mpeg2 *d)
-{
-	static uint8_t swap[PLM_AUDIO_SAMPLES_PER_FRAME * 4U];
+/* minimp3's frame header size: a complete frame followed by fewer bytes
+ * than this cannot be confirmed against the next header. */
+#define M2_MPA_HEADER_BYTES 4U
 
-	while (!d->pcm_backpressure && !plm_audio_has_ended(d->mp2)) {
-		plm_samples_t *samples;
-		uint32_t bytes;
+/* minimp3's hdr_valid: sync, a known version and layer, and a usable
+ * bitrate and sample-rate index. */
+static int mpa_header_valid(const uint8_t *h)
+{
+	return h[0] == 0xffU &&
+	       ((h[1] & 0xf0U) == 0xf0U || (h[1] & 0xfeU) == 0xe2U) &&
+	       ((h[1] >> 1) & 3U) != 0U &&
+	       (h[2] >> 4) != 15U &&
+	       ((h[2] >> 2) & 3U) != 3U;
+}
+
+/* Decode MPEG audio frames while the ring has room for a whole one: a
+ * frame decoded into less room would lose its tail. Until the input ends
+ * only a frame minimp3 confirms complete is decoded: it would skip a frame
+ * split across packets as junk. At the end (and when a full input holds no
+ * confirmable frame) junk up to the next frame minimp3 confirms is
+ * dropped, then minimp3 gets everything and skips what is not a frame,
+ * and a tail it cannot decode is dropped. */
+static void pump_mp2(struct sdk_video_mpeg2 *d, int at_end)
+{
+	static mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+	static uint8_t swap[MINIMP3_MAX_SAMPLES_PER_FRAME * 2U];
+
+	while (!d->pcm_backpressure && d->mp2_input_len != 0U) {
+		const uint8_t *in = d->mp2_input + d->mp2_input_pos;
+		mp3dec_frame_info_t info;
+		uint32_t consumed;
+		uint32_t frames;
 		uint32_t i;
+		int size;
+		int samples;
 
 		if (ring_free(d) < sizeof(swap)) {
 			raise_backpressure(d);
 			break;
 		}
-		samples = plm_audio_decode(d->mp2);
-		if (!samples || samples->count == 0U)
-			break;
-		bytes = samples->count * 4U;
-		if (bytes > sizeof(swap))
-			bytes = sizeof(swap);
-		for (i = 0U; i < bytes / 2U; i++) {
-			float sample = samples->interleaved[i];
-			int16_t value;
+		if (!mp3_probe_complete_frame(&d->mp2, in,
+		                              (int)d->mp2_input_len, &size)) {
+			uint32_t skip;
 
-			if (sample >= 1.0f)
-				value = 32767;
-			else if (sample <= -1.0f)
-				value = -32768;
-			else
-				value = (int16_t)(sample * 32768.0f);
-			swap[2U * i] = (uint8_t)((uint16_t)value >> 8);
-			swap[2U * i + 1U] = (uint8_t)value;
+			if (!at_end && d->mp2_input_len < M2_MP2_CAPACITY)
+				break;
+			/* minimp3 confirms a frame with nothing after it only
+			 * at offset 0: drop the junk before such a frame. */
+			for (skip = 1U; skip + M2_MPA_HEADER_BYTES <
+			                d->mp2_input_len; skip++) {
+				if (mpa_header_valid(in + skip) &&
+				    mp3_probe_complete_frame(
+					    &d->mp2, in + skip,
+					    (int)(d->mp2_input_len - skip),
+					    &size))
+					break;
+			}
+			if (skip + M2_MPA_HEADER_BYTES < d->mp2_input_len) {
+				d->mp2_input_pos += skip;
+				d->mp2_input_len -= skip;
+				continue;
+			}
+			size = (int)d->mp2_input_len;
+		} else if ((uint32_t)size + M2_MPA_HEADER_BYTES <=
+		           d->mp2_input_len) {
+			/* The next header is there: let minimp3 sync on it,
+			 * which also skips junk ahead of the first frame. */
+			size = (int)d->mp2_input_len;
 		}
-		ring_emit(d, swap, bytes);
-		advance_audio_timeline(d, samples->count,
-		                       (uint32_t)plm_audio_get_samplerate(
-			                       d->mp2));
+		memset(&info, 0, sizeof(info));
+		samples = mp3dec_decode_frame(&d->mp2, in, size, pcm, &info);
+		consumed = info.frame_bytes > 0 ? (uint32_t)info.frame_bytes
+		                                : 0U;
+		if (consumed == 0U || consumed > d->mp2_input_len)
+			consumed = d->mp2_input_len;
+		d->mp2_input_pos += consumed;
+		d->mp2_input_len -= consumed;
+		if (d->mp2_input_len == 0U)
+			d->mp2_input_pos = 0U;
+		if (samples <= 0 || info.hz <= 0 ||
+		    (info.channels != 1 && info.channels != 2))
+			continue;
+		/* The ring and the timeline run at the first frame's rate. */
+		if (d->mp2_rate == 0U)
+			d->mp2_rate = (uint32_t)info.hz;
+		else if ((uint32_t)info.hz != d->mp2_rate)
+			continue;
+		frames = (uint32_t)samples;
+		for (i = 0U; i < frames; i++) {
+			uint16_t left = (uint16_t)pcm[i * (uint32_t)info.channels];
+			uint16_t right = info.channels == 2
+				? (uint16_t)pcm[i * 2U + 1U] : left;
+
+			swap[4U * i] = (uint8_t)(left >> 8);
+			swap[4U * i + 1U] = (uint8_t)left;
+			swap[4U * i + 2U] = (uint8_t)(right >> 8);
+			swap[4U * i + 3U] = (uint8_t)right;
+		}
+		ring_emit(d, swap, frames * 4U);
+		advance_audio_timeline(d, frames, d->mp2_rate);
 		d->audio_frames++;
 	}
 }
 
-/* Write the packet into the MPEG audio input as room allows, decoding as
+/* Append the packet to the MPEG audio input as room allows, decoding as
  * it goes: a packet near the 64 KiB PES limit never fits beside the
  * partial frame the input keeps. Returns 0 (packet stays queued, resumed
  * at mp2_packet_offset) when the input is full behind a full ring. */
@@ -355,21 +434,24 @@ static uint32_t route_mp2(struct sdk_video_mpeg2 *d,
                           const struct SDKDVDPSPacket *packet)
 {
 	while (d->mp2_packet_offset < packet->length) {
-		size_t remaining = plm_buffer_get_remaining(d->mp2_input);
 		uint32_t n = packet->length - d->mp2_packet_offset;
+		uint32_t room;
 
-		if (remaining >= M2_MP2_CAPACITY)
-			return 0U;
-		if (n > M2_MP2_CAPACITY - remaining)
-			n = (uint32_t)(M2_MP2_CAPACITY - remaining);
-		if (plm_buffer_write(d->mp2_input,
-		                     (uint8_t *)packet->data +
-		                     d->mp2_packet_offset, n) != n) {
-			d->failed = 1U;
-			return 0U;
+		if (d->mp2_input_pos != 0U) {
+			memmove(d->mp2_input, d->mp2_input + d->mp2_input_pos,
+			        d->mp2_input_len);
+			d->mp2_input_pos = 0U;
 		}
+		room = M2_MP2_CAPACITY - d->mp2_input_len;
+		if (room == 0U)
+			return 0U;
+		if (n > room)
+			n = room;
+		memcpy(d->mp2_input + d->mp2_input_len,
+		       packet->data + d->mp2_packet_offset, n);
+		d->mp2_input_len += n;
 		d->mp2_packet_offset += n;
-		pump_mp2(d);
+		pump_mp2(d, 0);
 	}
 	d->mp2_packet_offset = 0U;
 	return 1U;
@@ -536,24 +618,30 @@ static uint32_t route_audio(struct sdk_video_mpeg2 *d,
 			resync_audio_after_drops(d, packet->pts);
 			if (sdk_media_timeline_observe_ordered(
 				    &d->timeline, SDK_MEDIA_TIMELINE_AUDIO,
-				    packet->pts, &observed) &&
-			    observed.pts >= observed.origin)
-				media_pts = observed.pts - observed.origin;
+				    packet->pts, &observed)) {
+				/* A jump the clock cannot absorb rebases the
+				 * audio track: tell the client once. */
+				d->media_event_flags |=
+					timeline_media_flags(observed.flags);
+				if (observed.pts >= observed.origin)
+					media_pts = observed.pts -
+					            observed.origin;
+			}
 			if (d->first_audio_pts == M2_NO_PTS)
 				d->first_audio_pts = media_pts;
 			d->last_audio_pts_raw = packet->pts;
 		} else if (d->stashed_audio_pts == SDK_DVD_PS_NO_TS &&
 		           (sdk_dvd_ps_peek_video(&d->demux) != 0 ||
-		            !d->demux.eof)) {
-			/* Video is coming; hold the first audio PTS until the
-			 * video origin seeds the timeline. Later packets before
-			 * that seed are deliberately not observed: the stashed
-			 * first PTS anchors the track the moment the seed
-			 * exists. */
+		            !d->demux.eof || d->demux.staged != 0U)) {
+			/* Video is coming (or may still be in the unparsed
+			 * input); hold the first audio PTS until the video
+			 * origin seeds the timeline. Later packets before that
+			 * seed are deliberately not observed: the stashed first
+			 * PTS anchors the track the moment the seed exists. */
 			d->stashed_audio_pts = packet->pts;
 		} else if (d->stashed_audio_pts == SDK_DVD_PS_NO_TS) {
-			/* Audio-only stream (no video packet queued and the
-			 * input has ended): audio itself seeds the timeline. */
+			/* Audio-only stream (input ended and fully parsed, no
+			 * video packet queued): audio seeds the timeline. */
 			struct SDKMediaTimelineResult observed;
 
 			if (sdk_media_timeline_observe_ordered(
@@ -612,7 +700,7 @@ static void route_audio_queue(struct sdk_video_mpeg2 *d)
 	if (d->ac3_selected && !pump_ac3(d))
 		return;
 	if (d->mp2_selected)
-		pump_mp2(d);
+		pump_mp2(d, 0);
 	while (!d->pcm_backpressure) {
 		const struct SDKDVDPSPacket *packet =
 			sdk_dvd_ps_peek_audio(&d->demux);
@@ -629,13 +717,23 @@ static void route_audio_queue(struct sdk_video_mpeg2 *d)
 
 /* --------------------------------------------------------------- video */
 
-static int bind_fbufs(struct sdk_video_mpeg2 *d, uint32_t width,
-                      uint32_t height)
+static int geometry_ok(uint32_t width, uint32_t height)
 {
-	uint32_t stride = (width + 15U) & ~15U;
+	return width != 0U && height != 0U &&
+	       width <= M2_MAX_WIDTH && height <= M2_MAX_HEIGHT;
+}
 
-	if (width == 0U || height == 0U || stride > M2_MAX_STRIDE ||
-	    height > M2_MAX_HEIGHT)
+/* Frames report the picture size; the planes keep libmpeg2's coded
+ * (macroblock-rounded) stride, and the rows below the picture are never
+ * shown. */
+static int bind_fbufs(struct sdk_video_mpeg2 *d,
+                      const mpeg2_sequence_t *sequence)
+{
+	uint32_t width = sequence->picture_width;
+	uint32_t height = sequence->picture_height;
+	uint32_t stride = sequence->width;
+
+	if (!geometry_ok(width, height))
 		return 0;
 	if (d->fbufs_bound && d->fbuf_stride == stride &&
 	    d->width == width && d->height == height)
@@ -701,20 +799,6 @@ static void picture_timestamps(const struct sdk_video_mpeg2 *d,
 	}
 }
 
-/* Timeline transition flags in the backend's media-flag vocabulary. */
-static uint32_t timeline_media_flags(uint32_t flags)
-{
-	uint32_t mapped = 0U;
-
-	if ((flags & SDK_MEDIA_TIMELINE_DERIVED) != 0U)
-		mapped |= SDK_VIDEO_MEDIA_FLAG_DERIVED_TIME;
-	if ((flags & SDK_MEDIA_TIMELINE_DISCONTINUITY) != 0U)
-		mapped |= SDK_VIDEO_MEDIA_FLAG_DISCONTINUITY;
-	if ((flags & SDK_MEDIA_TIMELINE_REBASED) != 0U)
-		mapped |= SDK_VIDEO_MEDIA_FLAG_REBASED;
-	return mapped;
-}
-
 static void fill_frame(struct sdk_video_mpeg2 *d,
                        const mpeg2_info_t *info,
                        struct SDKVideoDecodedFrame *frame)
@@ -724,6 +808,7 @@ static void fill_frame(struct sdk_video_mpeg2 *d,
 	uint64_t raw_pts;
 	uint64_t raw_dts;
 	uint64_t media_pts = M2_NO_PTS;
+	uint32_t timeline_flags = 0U;
 	uint32_t ms_per_frame = d->frame_rate_milli != 0U
 		? (1000000U + d->frame_rate_milli / 2U) /
 			d->frame_rate_milli
@@ -754,12 +839,12 @@ static void fill_frame(struct sdk_video_mpeg2 *d,
 			 * the first tagged picture re-anchors it below. */
 			if (result.pts >= origin)
 				media_pts = result.pts - origin;
-			d->media_flags |= timeline_media_flags(result.flags);
+			timeline_flags |= timeline_media_flags(result.flags);
 			if (raw_pts != M2_NO_PTS &&
 			    sdk_media_timeline_observe_ordered(
 				    &d->timeline, SDK_MEDIA_TIMELINE_VIDEO,
 				    raw_pts, &result)) {
-				d->media_flags |=
+				timeline_flags |=
 					timeline_media_flags(result.flags);
 				if (result.pts >= result.origin)
 					media_pts = result.pts - result.origin;
@@ -778,6 +863,7 @@ static void fill_frame(struct sdk_video_mpeg2 *d,
 	frame->media_pts = media_pts;
 	frame->raw_pts = raw_pts;
 	frame->raw_dts = raw_dts;
+	frame->media_flags = timeline_flags;
 	frame->picture_flags = picture_flags_of(picture);
 	frame->display_fields = picture_display_fields(picture);
 	d->video_frames++;
@@ -807,8 +893,7 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 		switch (state) {
 		case STATE_SEQUENCE:
 		case STATE_SEQUENCE_MODIFIED:
-			if (!bind_fbufs(d, info->sequence->width,
-			                info->sequence->height)) {
+			if (!bind_fbufs(d, info->sequence)) {
 				d->failed = 1U;
 				return -1;
 			}
@@ -879,6 +964,48 @@ static void drop_audio(struct sdk_video_mpeg2 *d)
 		sdk_dvd_ps_pop_audio(&d->demux, 0);
 }
 
+/* The media timeline origin comes from the first VIDEO PTS (like the
+ * MPEG-1 seed_origin rule), so an audio track that starts earlier cannot
+ * skew the video clock; the audio track follows in the timeline the moment
+ * this seed exists. Seeding from the queued head packet before any audio
+ * is routed makes the audio clock independent of how the input was
+ * chunked. */
+static void seed_video_origin(struct sdk_video_mpeg2 *d)
+{
+	const struct SDKDVDPSPacket *packet;
+	uint64_t seed;
+
+	if (d->video_origin_seen)
+		return;
+	packet = sdk_dvd_ps_peek_video(&d->demux);
+	if (packet && packet->pts != SDK_DVD_PS_NO_TS) {
+		seed = packet->pts;
+	} else if (!packet && !d->video_seen && d->input_eof &&
+	           d->demux.staged == 0U &&
+	           d->stashed_audio_pts != SDK_DVD_PS_NO_TS) {
+		/* The input ended without a single video packet: the first
+		 * audio PTS, held for a video origin that never came, anchors
+		 * the audio-only stream itself. */
+		seed = d->stashed_audio_pts;
+	} else {
+		return;
+	}
+	sdk_media_timeline_seed_origin(&d->timeline, seed);
+	d->video_origin_seen = 1U;
+	if (d->stashed_audio_pts != SDK_DVD_PS_NO_TS) {
+		struct SDKMediaTimelineResult observed;
+
+		if (sdk_media_timeline_observe_ordered(
+			    &d->timeline, SDK_MEDIA_TIMELINE_AUDIO,
+			    d->stashed_audio_pts, &observed) &&
+		    observed.pts >= observed.origin &&
+		    d->first_audio_pts == M2_NO_PTS)
+			d->first_audio_pts = observed.pts - observed.origin;
+		d->stashed_audio_pts = SDK_DVD_PS_NO_TS;
+	}
+	clock_unclocked_audio(d);
+}
+
 /* Hand one queued PES to libmpeg2 per call. mpeg2_tag_picture() latches the
  * tag onto the next picture the decoder PARSES, so a PTS-bearing PES must
  * be tagged and handed over in its own step: batching several pictures into
@@ -893,26 +1020,8 @@ static int feed_video(struct sdk_video_mpeg2 *d)
 		return 0;
 	if (packet->length > M2_ES_CAPACITY - d->es_len)
 		return 0;
-	/* The media timeline origin comes from the first VIDEO PTS (like
-	 * the MPEG-1 backend's seed_origin), so an audio track that starts
-	 * earlier cannot skew the video clock; the audio track follows in
-	 * the timeline the moment this seed exists. */
-	if (!d->video_origin_seen && packet->pts != SDK_DVD_PS_NO_TS) {
-		sdk_media_timeline_seed_origin(&d->timeline, packet->pts);
-		d->video_origin_seen = 1U;
-		if (d->stashed_audio_pts != SDK_DVD_PS_NO_TS) {
-			struct SDKMediaTimelineResult observed;
-
-			if (sdk_media_timeline_observe_ordered(
-				    &d->timeline, SDK_MEDIA_TIMELINE_AUDIO,
-				    d->stashed_audio_pts, &observed) &&
-			    observed.pts >= observed.origin &&
-			    d->first_audio_pts == M2_NO_PTS)
-				d->first_audio_pts =
-					observed.pts - observed.origin;
-			d->stashed_audio_pts = SDK_DVD_PS_NO_TS;
-		}
-	}
+	seed_video_origin(d);
+	d->video_seen = 1U;
 	tag = d->next_tag++;
 	if (packet->pts != SDK_DVD_PS_NO_TS ||
 	    packet->dts != SDK_DVD_PS_NO_TS) {
@@ -966,6 +1075,16 @@ static void *mpeg2_create(uint32_t pool_owner)
 	return d;
 }
 
+static void *mpeg1_create(uint32_t pool_owner)
+{
+	struct sdk_video_mpeg2 *d =
+		(struct sdk_video_mpeg2 *)mpeg2_create(pool_owner);
+
+	if (d)
+		d->mpeg1 = 1U;
+	return d;
+}
+
 static void mpeg2_destroy(void *decoder)
 {
 	struct sdk_video_mpeg2 *d = (struct sdk_video_mpeg2 *)decoder;
@@ -974,10 +1093,7 @@ static void mpeg2_destroy(void *decoder)
 		return;
 	if (d->decoder)
 		mpeg2_close(d->decoder);
-	if (d->mp2)
-		plm_audio_destroy(d->mp2);
-	if (d->mp2_input)
-		plm_buffer_destroy(d->mp2_input);
+	M2_FREE(d->mp2_input);
 	sdk_dvd_ac3_destroy(&d->ac3);
 	M2_FREE(d->es);
 	M2_FREE(d);
@@ -1025,20 +1141,12 @@ static int audio_drained(struct sdk_video_mpeg2 *d)
 	if (d->demux.audio.count != 0U || d->demux.staged != 0U)
 		return 0;
 	if (d->mp2_selected) {
-		/* Bytes short of a frame can never decode once the input has
-		 * ended (ffmpeg's DVD MP2 ends with one). pl_mpeg only
-		 * reports the end once it knows where the input stops, so
-		 * tell it, then decode whatever whole frames a full ring held
-		 * back: no later packet will pump them. */
-		if (d->input_eof) {
-			if (!d->mp2_end_signalled) {
-				plm_buffer_signal_end(d->mp2_input);
-				d->mp2_end_signalled = 1U;
-			}
-			pump_mp2(d);
-		}
-		return plm_audio_has_ended(d->mp2) ||
-		       plm_buffer_get_remaining(d->mp2_input) == 0U;
+		/* Once the input has ended no later packet will pump the
+		 * frames a full ring held back, and bytes short of a frame
+		 * (ffmpeg's DVD MP2 ends with some) can never decode. */
+		if (d->input_eof)
+			pump_mp2(d, 1);
+		return d->mp2_input_len == 0U;
 	}
 	/* A trailing partial frame can never complete once input ended. */
 	if (d->ac3_selected)
@@ -1054,6 +1162,7 @@ static int mpeg2_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 	if (!d || !frame || d->failed)
 		return SDK_VIDEO_BACKEND_ERROR;
 	update_audio_drop_policy(d);
+	seed_video_origin(d);
 	if (d->media_configured)
 		route_audio_queue(d);
 	else
@@ -1068,6 +1177,12 @@ static int mpeg2_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 			break;
 	}
 	if (d->video_done && audio_drained(d)) {
+		/* A stream that ended without a single picture or audio frame
+		 * (empty or unparseable), or whose video track never yielded
+		 * a picture, failed. An audio-only stream plays out. */
+		if ((d->video_frames == 0U && d->audio_frames == 0U) ||
+		    (d->video_seen && d->video_frames == 0U))
+			return SDK_VIDEO_BACKEND_ERROR;
 		if (!d->media_configured ||
 		    d->pcm_produced == d->pcm_acknowledged) {
 			if (d->media_configured)
@@ -1099,6 +1214,13 @@ static int mpeg2_audio_ok(uint32_t audio_codec)
 	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_AC3;
 }
 
+/* An MPEG-1 Program Stream carries MPEG audio only. */
+static int mpeg1_audio_ok(uint32_t audio_codec)
+{
+	return audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE ||
+	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2;
+}
+
 static int mpeg2_configure_media(void *decoder,
                                  const struct SDKVideoMediaConfig *config)
 {
@@ -1106,7 +1228,7 @@ static int mpeg2_configure_media(void *decoder,
 
 	if (!d || !config || d->media_configured)
 		return 0;
-	if (!mpeg2_audio_ok(config->audio_codec))
+	if (!(d->mpeg1 ? mpeg1_audio_ok : mpeg2_audio_ok)(config->audio_codec))
 		return 0;
 	/* No audio: no ring, and route_audio never selects a stream, so
 	 * every audio packet is dropped and the end waits on video only. */
@@ -1128,20 +1250,14 @@ static int mpeg2_configure_media(void *decoder,
 	if (config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_AC3 &&
 	    config->pcm_ring_capacity < SDK_DVD_AC3_FRAME_PCM_BYTES)
 		return 0;
-	d->media = *config;
-	d->media_configured = 1U;
 	if (config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2) {
-		d->mp2_input = plm_buffer_create_with_capacity(
-			M2_MP2_CAPACITY);
+		d->mp2_input = (uint8_t *)M2_MALLOC(M2_MP2_CAPACITY);
 		if (!d->mp2_input)
 			return 0;
-		d->mp2 = plm_audio_create_with_buffer(d->mp2_input, 0);
-		if (!d->mp2) {
-			plm_buffer_destroy(d->mp2_input);
-			d->mp2_input = 0;
-			return 0;
-		}
+		mp3dec_init(&d->mp2);
 	}
+	d->media = *config;
+	d->media_configured = 1U;
 	return 1;
 }
 
@@ -1153,11 +1269,11 @@ static int mpeg2_get_media_info(void *decoder,
 	if (!d || !info || !d->media_configured)
 		return 0;
 	memset(info, 0, sizeof(*info));
-	info->sample_format = SDK_VIDEO_MEDIA_SAMPLE_S16BE;
+	if (d->media.audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE)
+		info->sample_format = SDK_VIDEO_MEDIA_SAMPLE_S16BE;
 	if (d->mp2_selected) {
-		if (plm_audio_has_header(d->mp2)) {
-			info->sample_rate =
-				(uint32_t)plm_audio_get_samplerate(d->mp2);
+		if (d->mp2_rate != 0U) {
+			info->sample_rate = d->mp2_rate;
 			info->channels = 2U;
 		}
 	} else if (d->lpcm_selected) {
@@ -1179,7 +1295,8 @@ static int mpeg2_get_media_info(void *decoder,
 	info->audio_frames = d->audio_frames;
 	info->backpressure_events = d->backpressure_events;
 	info->audio_packets_dropped = d->demux.audio_packets_dropped;
-	info->flags = d->media_flags;
+	info->flags = d->media_flags | d->media_event_flags;
+	d->media_event_flags = 0U;
 	return 1;
 }
 
@@ -1189,7 +1306,11 @@ static int mpeg2_ack_media(void *decoder, uint64_t acknowledged)
 
 	if (!d || !d->media_configured)
 		return 0;
-	if (acknowledged > d->pcm_produced)
+	/* Acknowledgements only move forward, in whole stereo frames: a
+	 * cursor moved back would let the decoder overwrite unplayed PCM. */
+	if (acknowledged < d->pcm_acknowledged ||
+	    acknowledged > d->pcm_produced ||
+	    (acknowledged & (SDK_VIDEO_MEDIA_PCM_FRAME_BYTES - 1U)) != 0U)
 		return 0;
 	d->pcm_acknowledged = acknowledged;
 	if (d->pcm_produced - d->pcm_acknowledged <=
@@ -1197,13 +1318,31 @@ static int mpeg2_ack_media(void *decoder, uint64_t acknowledged)
 		d->pcm_backpressure = 0U;
 		d->media_flags &= ~SDK_VIDEO_MEDIA_FLAG_BACKPRESSURE;
 	}
+	if (d->pcm_produced == d->pcm_acknowledged)
+		d->media_flags &= ~SDK_VIDEO_MEDIA_FLAG_AUDIO_READY;
 	return 1;
 }
+
+static const struct SDKVideoDecoderOps mpeg1_ops = {
+	.codec = SDK_VIDEO_CODEC_MPEG1,
+	.container = SDK_VIDEO_CONTAINER_MPEG_PS,
+	.name = "libmpeg2 MPEG-1/PS",
+	.create = mpeg1_create,
+	.destroy = mpeg2_destroy,
+	.write = mpeg2_write,
+	.get_info = mpeg2_get_info,
+	.decode = mpeg2_decode,
+	.configure_media = mpeg2_configure_media,
+	.get_media_info = mpeg2_get_media_info,
+	.ack_media = mpeg2_ack_media,
+	.geometry_ok = geometry_ok,
+	.audio_ok = mpeg1_audio_ok,
+};
 
 static const struct SDKVideoDecoderOps mpeg2_ops = {
 	.codec = SDK_VIDEO_CODEC_MPEG2,
 	.container = SDK_VIDEO_CONTAINER_MPEG_PS,
-	.name = "libmpeg2 MPEG-2/VOB",
+	.name = "libmpeg2 MPEG-2/PS",
 	.create = mpeg2_create,
 	.destroy = mpeg2_destroy,
 	.write = mpeg2_write,
@@ -1212,12 +1351,24 @@ static const struct SDKVideoDecoderOps mpeg2_ops = {
 	.configure_media = mpeg2_configure_media,
 	.get_media_info = mpeg2_get_media_info,
 	.ack_media = mpeg2_ack_media,
+	.geometry_ok = geometry_ok,
 	.audio_ok = mpeg2_audio_ok,
 };
 
-const struct SDKVideoDecoderOps *sdk_video_mpeg2_backend_ops(void)
+const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
+	                                                     uint32_t container)
 {
-	return &mpeg2_ops;
+	if (container == SDK_VIDEO_CONTAINER_MPEG_PS) {
+		if (codec == SDK_VIDEO_CODEC_MPEG1)
+			return &mpeg1_ops;
+		if (codec == SDK_VIDEO_CODEC_MPEG2)
+			return &mpeg2_ops;
+		return 0;
+	}
+	if (container == SDK_VIDEO_CONTAINER_WEBM &&
+	    (codec == SDK_VIDEO_CODEC_VP8 || codec == SDK_VIDEO_CODEC_VP9))
+		return sdk_video_webm_ops(codec);
+	return 0;
 }
 
 /* DVD host tests link this file without the WebM backend. The firmware

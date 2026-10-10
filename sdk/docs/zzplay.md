@@ -16,8 +16,8 @@ It works two ways:
 
 | Input | Video | Audio |
 | --- | --- | --- |
-| MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video, card-decoded | MPEG-1 Layer II, card-decoded |
-| MPEG-2 Program Stream (`.mpg`, `.mpeg`, `.vob`) | MPEG-2 video up to 720x576, card-decoded; needs firmware that advertises MPEG-2 | AC-3, MP2 or LPCM, one track: AC-3 if the file has any, otherwise MP2, otherwise LPCM, card-decoded; firmware without the MPEG-2 service refuses the file rather than half-playing it |
+| MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video up to 800x600, card-decoded; the firmware refuses larger files | MPEG audio (Layer I, II or III), card-decoded |
+| MPEG-2 Program Stream (`.mpg`, `.mpeg`, `.vob`) | MPEG-2 video up to 800x600, card-decoded; needs firmware that advertises MPEG-2 | AC-3, MP2 or LPCM, one track: AC-3 if the file has any, otherwise MP2, otherwise LPCM, card-decoded; firmware without the MPEG-2 service refuses the file rather than half-playing it |
 | MPEG-2 Program Stream, video only | MPEG-2 video, card-decoded | none (a warning is printed) |
 | WebM (`.webm`, `.mkv`) | VP8 up to 1280x720 pixels, or VP9 up to 854x480, card-decoded, either orientation | Opus at 48 kHz, or Vorbis at 8 to 96 kHz, card-decoded; on the card when the firmware advertises it, otherwise AHI |
 | WebM, larger than that but within 1920 on the long side and 1920x1088 pixels | same codecs, best effort | audio stays continuous; video may skip ahead to the next keyframe |

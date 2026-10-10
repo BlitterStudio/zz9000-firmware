@@ -9,9 +9,12 @@
 #include <string.h>
 
 #include "mpeg1_ps_fixture.inc"
+#include "mpeg1_crop_ps_fixture.inc"
 
-#define EXPECTED_FRAMES 5U
-#define EXPECTED_FNV64 UINT64_C(0x12cf0e63c2e2c840)
+/* All 6 pictures of the fixture, decoded by libmpeg2; every sample is
+ * within 1 of ffmpeg's decode of the same stream. */
+#define EXPECTED_FRAMES 6U
+#define EXPECTED_FNV64 UINT64_C(0x9db20b102d9ff58c)
 
 static uint64_t fnv1a64(uint64_t hash, const uint8_t *bytes, uint32_t length)
 {
@@ -456,7 +459,7 @@ static int test_streaming_decode(void)
 	int result;
 
 	ops = sdk_video_backend_find(1U, 1U);
-	if (!ops || sdk_video_backend_find(2U, 1U) != 0)
+	if (!ops || ops->codec != 1U || ops->container != 1U)
 		return 1;
 	decoder = ops->create(0U);
 	if (!decoder)
@@ -568,6 +571,61 @@ static int test_streaming_decode(void)
 	return 0;
 }
 
+/* A 40x24 MPEG-1 picture is coded as 48x32 macroblocks: frames and stream
+ * info carry the picture size (the session refuses frames that differ from
+ * the size the client began with) over the coded stride. Both Program
+ * Stream codecs decode up to 800x600. */
+static int test_picture_size_and_cap(void)
+{
+	const struct SDKVideoDecoderOps *m1 = sdk_video_backend_find(1U, 1U);
+	const struct SDKVideoDecoderOps *m2 = sdk_video_backend_find(2U, 1U);
+	struct SDKVideoDecoderInfo info;
+	struct SDKVideoDecodedFrame frame;
+	uint32_t accepted = 0U;
+	uint32_t frames = 0U;
+	uint32_t guard = 0U;
+	void *decoder;
+	int result;
+
+	if (!m1 || !m2 || !m1->geometry_ok || !m2->geometry_ok)
+		return 1;
+	if (!m1->geometry_ok(800U, 600U) || !m2->geometry_ok(800U, 600U) ||
+	    m1->geometry_ok(801U, 600U) || m2->geometry_ok(801U, 600U) ||
+	    m1->geometry_ok(800U, 601U) || m2->geometry_ok(800U, 601U) ||
+	    m1->geometry_ok(0U, 16U) || m2->geometry_ok(16U, 0U))
+		return 2;
+	decoder = m1->create(0U);
+	if (!decoder)
+		return 3;
+	if (m1->write(decoder, zz9k_mpeg1_crop_ps_fixture,
+	              zz9k_mpeg1_crop_ps_fixture_len, 1, &accepted) !=
+	        SDK_VIDEO_BACKEND_WRITE_OK ||
+	    accepted != zz9k_mpeg1_crop_ps_fixture_len) {
+		m1->destroy(decoder);
+		return 4;
+	}
+	do {
+		result = m1->decode(decoder, &frame);
+		if (result == SDK_VIDEO_BACKEND_FRAME) {
+			if (frame.width != 40U || frame.height != 24U ||
+			    frame.y_pitch != 48U || frame.chroma_pitch != 24U) {
+				m1->destroy(decoder);
+				return 5;
+			}
+			frames++;
+		}
+	} while (result != SDK_VIDEO_BACKEND_DONE &&
+	         result != SDK_VIDEO_BACKEND_ERROR && guard++ < 100U);
+	if (result != SDK_VIDEO_BACKEND_DONE || frames != 3U ||
+	    !m1->get_info(decoder, &info) || info.width != 40U ||
+	    info.height != 24U) {
+		m1->destroy(decoder);
+		return 6;
+	}
+	m1->destroy(decoder);
+	return 0;
+}
+
 int main(void)
 {
 	int result = test_yuy2_conversion();
@@ -595,5 +653,8 @@ int main(void)
 	result = test_streaming_decode();
 	if (result != 0)
 		return 30 + result;
+	result = test_picture_size_and_cap();
+	if (result != 0)
+		return 170 + result;
 	return 0;
 }
