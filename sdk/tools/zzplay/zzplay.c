@@ -2058,6 +2058,13 @@ static int zzplay_retire_held_frame(
       result->video_pts != ZZ9K_MEDIA_NO_PTS) {
     uint64_t master_pts = zzplay_audio_master_pts(runtime);
 
+    /* A backend audio-clock rebase (a dropped audio span) moves the
+     * origin the master clock is derived from; drop the cached query so
+     * the next pump re-reads it instead of pacing against the pre-gap
+     * clock. */
+    if ((result->flags & ZZ9K_MEDIA_SESSION_RESULT_REBASED) != 0U) {
+      runtime->audio_origin_pts = ZZ9K_MEDIA_NO_PTS;
+    }
     decision = zzplay_sync_decide(
         &runtime->sync_policy, result->video_pts, master_pts,
         &drift);

@@ -273,6 +273,10 @@ static int parse_one(struct SDKDVDPSDemux *d)
 			 * the video packets behind it) keeps moving; the owner
 			 * only sets the policy while video would otherwise
 			 * starve. */
+			if (pts != SDK_DVD_PS_NO_TS) {
+				d->last_dropped_audio_pts = pts;
+				d->last_dropped_audio_pts_valid = 1U;
+			}
 			d->audio_packets_dropped++;
 			d->audio_bytes_dropped += total;
 			d->bytes_ignored += total;

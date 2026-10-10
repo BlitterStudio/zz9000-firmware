@@ -66,6 +66,8 @@ struct SDKDVDPSDemux {
 	uint8_t drop_audio_when_full;
 	uint32_t audio_packets_dropped;
 	uint64_t audio_bytes_dropped;
+	uint64_t last_dropped_audio_pts;
+	uint8_t last_dropped_audio_pts_valid;
 };
 
 void sdk_dvd_ps_init(struct SDKDVDPSDemux *demux);

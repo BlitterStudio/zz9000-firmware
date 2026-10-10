@@ -135,6 +135,10 @@ struct sdk_video_mpeg2 {
 	uint8_t pcm_backpressure;
 	uint64_t audio_block_ack;
 	uint32_t audio_block_checks;
+	uint64_t stashed_audio_pts;
+	uint64_t audio_clock_offset;
+	uint32_t audio_drops_routed;
+	uint8_t video_origin_seen;
 	uint8_t failed;
 };
 
@@ -244,6 +248,61 @@ static uint32_t ring_emit(struct sdk_video_mpeg2 *d, const uint8_t *src,
 	return bytes;
 }
 
+/* Advance the audio timeline by the units just decoded into the ring, the
+ * same way the MPEG-1 backend does: the packet PTS anchors the track but
+ * never moves it inside the 1 s discontinuity window, so without per-unit
+ * advance the reported audio clock would stay at the first packet. */
+static void advance_audio_timeline(struct sdk_video_mpeg2 *d,
+                                   uint64_t samples, uint32_t rate)
+{
+	struct SDKMediaTimelineResult result;
+
+	if (rate == 0U || samples == 0U || !d->timeline.have_origin)
+		return;
+	if (!sdk_media_timeline_map(&d->timeline, SDK_MEDIA_TIMELINE_AUDIO,
+	                            SDK_MEDIA_TIMELINE_NO_PTS, samples,
+	                            rate, &result))
+		return;
+	if (result.pts >= result.origin)
+		d->last_audio_pts = result.pts - result.origin;
+	else
+		d->last_audio_pts = 0U;
+}
+
+/* Dropped audio shortened the track by a real span of program time. When
+ * the first packet after the drop run is routed, move the audio clock to
+ * that packet's content time and fold the skipped span into the reported
+ * first audio PTS, so clients deriving clock = first + played stay glued
+ * to the content that actually sounds. */
+static void resync_audio_after_drops(struct sdk_video_mpeg2 *d,
+                                      uint64_t packet_pts)
+{
+	uint64_t last_dropped;
+
+	if (d->demux.audio_packets_dropped == d->audio_drops_routed)
+		return;
+	d->audio_drops_routed = d->demux.audio_packets_dropped;
+	if (!d->demux.last_dropped_audio_pts_valid)
+		return;
+	last_dropped = d->demux.last_dropped_audio_pts;
+	if (packet_pts == SDK_DVD_PS_NO_TS || packet_pts <= last_dropped) {
+		/* Kept packets queued before the drop run: the gap is still
+		 * ahead; resync on the later packet that crosses it. */
+		d->audio_drops_routed =
+			d->demux.audio_packets_dropped - 1U;
+		return;
+	}
+	{
+		uint64_t gap = packet_pts - last_dropped;
+
+		if (gap > SDK_MEDIA_TIMELINE_PTS_MODULUS / 2U)
+			return;
+		advance_audio_timeline(d, gap * 48000U / 90000U, 48000U);
+		d->audio_clock_offset += gap;
+		d->media_flags |= SDK_VIDEO_MEDIA_FLAG_DISCONTINUITY |
+		                  SDK_VIDEO_MEDIA_FLAG_REBASED;
+	}
+}
 /* ---------------------------------------------------------------- audio */
 
 /* Decode MPEG audio frames while the ring has room for a whole one: a
@@ -281,6 +340,9 @@ static void pump_mp2(struct sdk_video_mpeg2 *d)
 			swap[2U * i + 1U] = (uint8_t)value;
 		}
 		ring_emit(d, swap, bytes);
+		advance_audio_timeline(d, samples->count,
+		                       (uint32_t)plm_audio_get_samplerate(
+			                       d->mp2));
 		d->audio_frames++;
 	}
 }
@@ -359,6 +421,8 @@ static uint32_t route_lpcm(struct sdk_video_mpeg2 *d,
 			}
 		}
 		ring_emit(d, pcm, frames * 4U);
+		advance_audio_timeline(d, frames,
+		                       SDK_DVD_LPCM_SAMPLE_RATE_HZ);
 		d->lpcm_packet_offset += frames * frame_bytes;
 	}
 	d->lpcm_packet_offset = 0U;
@@ -391,6 +455,8 @@ static uint32_t pump_ac3(struct sdk_video_mpeg2 *d)
 		bytes = sdk_dvd_ac3_decode(&d->ac3, pcm, sizeof(pcm));
 		if (bytes != 0U) {
 			ring_emit(d, pcm, bytes);
+			advance_audio_timeline(
+				d, bytes / 4U, d->ac3.sample_rate);
 			d->audio_frames++;
 		}
 	}
@@ -430,6 +496,7 @@ static uint32_t route_ac3(struct sdk_video_mpeg2 *d,
 	return 1U;
 }
 
+
 /* Returns 0 when the packet must stay queued (behind a full ring, or a
  * full MPEG audio input). */
 static uint32_t route_audio(struct sdk_video_mpeg2 *d,
@@ -459,22 +526,45 @@ static uint32_t route_audio(struct sdk_video_mpeg2 *d,
 		return 1U;
 	if (packet->pts != SDK_DVD_PS_NO_TS) {
 		/* Media-space audio timestamps, rebased by the same timeline
-		 * origin as the video clock: a raw first audio PTS looks
-		 * hundreds of milliseconds ahead of the rebased video PTS a
-		 * player paces against, delaying or deadlocking the audio
-		 * start. */
-		struct SDKMediaTimelineResult observed;
-		uint64_t media_pts = 0U;
+		 * origin as the video clock (the origin is the first VIDEO
+		 * PTS; until one is seen the packet's PTS is stashed so a
+		 * leading audio track cannot skew the video clock). */
+		if (d->video_origin_seen) {
+			struct SDKMediaTimelineResult observed;
+			uint64_t media_pts = 0U;
 
-		if (sdk_media_timeline_observe_ordered(
-			    &d->timeline, SDK_MEDIA_TIMELINE_AUDIO,
-			    packet->pts, &observed) &&
-		    observed.pts >= observed.origin)
-			media_pts = observed.pts - observed.origin;
-		if (d->first_audio_pts == M2_NO_PTS)
-			d->first_audio_pts = media_pts;
-		d->last_audio_pts = media_pts;
-		d->last_audio_pts_raw = packet->pts;
+			resync_audio_after_drops(d, packet->pts);
+			if (sdk_media_timeline_observe_ordered(
+				    &d->timeline, SDK_MEDIA_TIMELINE_AUDIO,
+				    packet->pts, &observed) &&
+			    observed.pts >= observed.origin)
+				media_pts = observed.pts - observed.origin;
+			if (d->first_audio_pts == M2_NO_PTS)
+				d->first_audio_pts = media_pts;
+			d->last_audio_pts_raw = packet->pts;
+		} else if (d->stashed_audio_pts == SDK_DVD_PS_NO_TS &&
+		           (sdk_dvd_ps_peek_video(&d->demux) != 0 ||
+		            !d->demux.eof)) {
+			/* Video is coming; hold the first audio PTS until the
+			 * video origin seeds the timeline. Later packets before
+			 * that seed are deliberately not observed: the stashed
+			 * first PTS anchors the track the moment the seed
+			 * exists. */
+			d->stashed_audio_pts = packet->pts;
+		} else if (d->stashed_audio_pts == SDK_DVD_PS_NO_TS) {
+			/* Audio-only stream (no video packet queued and the
+			 * input has ended): audio itself seeds the timeline. */
+			struct SDKMediaTimelineResult observed;
+
+			if (sdk_media_timeline_observe_ordered(
+				    &d->timeline, SDK_MEDIA_TIMELINE_AUDIO,
+				    packet->pts, &observed) &&
+			    observed.pts >= observed.origin &&
+			    d->first_audio_pts == M2_NO_PTS)
+				d->first_audio_pts =
+					observed.pts - observed.origin;
+			d->last_audio_pts_raw = packet->pts;
+		}
 	}
 	if (packet->kind == SDK_DVD_PS_MP2)
 		return route_mp2(d, packet);
@@ -495,7 +585,7 @@ static uint32_t route_audio(struct sdk_video_mpeg2 *d,
 static void update_audio_drop_policy(struct sdk_video_mpeg2 *d)
 {
 	if (!d->media_configured || d->video_done || !d->pcm_backpressure ||
-	    !d->audio_selected ||
+	    !d->audio_selected || d->pcm_acknowledged == 0U ||
 	    d->demux.audio.count < SDK_DVD_PS_QUEUE_DEPTH) {
 		d->audio_block_checks = 0U;
 		d->demux.drop_audio_when_full = 0U;
@@ -803,6 +893,26 @@ static int feed_video(struct sdk_video_mpeg2 *d)
 		return 0;
 	if (packet->length > M2_ES_CAPACITY - d->es_len)
 		return 0;
+	/* The media timeline origin comes from the first VIDEO PTS (like
+	 * the MPEG-1 backend's seed_origin), so an audio track that starts
+	 * earlier cannot skew the video clock; the audio track follows in
+	 * the timeline the moment this seed exists. */
+	if (!d->video_origin_seen && packet->pts != SDK_DVD_PS_NO_TS) {
+		sdk_media_timeline_seed_origin(&d->timeline, packet->pts);
+		d->video_origin_seen = 1U;
+		if (d->stashed_audio_pts != SDK_DVD_PS_NO_TS) {
+			struct SDKMediaTimelineResult observed;
+
+			if (sdk_media_timeline_observe_ordered(
+				    &d->timeline, SDK_MEDIA_TIMELINE_AUDIO,
+				    d->stashed_audio_pts, &observed) &&
+			    observed.pts >= observed.origin &&
+			    d->first_audio_pts == M2_NO_PTS)
+				d->first_audio_pts =
+					observed.pts - observed.origin;
+			d->stashed_audio_pts = SDK_DVD_PS_NO_TS;
+		}
+	}
 	tag = d->next_tag++;
 	if (packet->pts != SDK_DVD_PS_NO_TS ||
 	    packet->dts != SDK_DVD_PS_NO_TS) {
@@ -837,6 +947,7 @@ static void *mpeg2_create(uint32_t pool_owner)
 		return 0;
 	memset(d, 0, sizeof(*d));
 	sdk_dvd_ps_init(&d->demux);
+	d->stashed_audio_pts = SDK_DVD_PS_NO_TS;
 	sdk_dvd_ac3_init(&d->ac3);
 	sdk_media_timeline_init(&d->timeline);
 	d->first_audio_pts = M2_NO_PTS;
@@ -1060,7 +1171,9 @@ static int mpeg2_get_media_info(void *decoder,
 	info->pcm_acknowledged = d->pcm_acknowledged;
 	info->audio_pts = d->last_audio_pts;
 	info->current_audio_pts = d->last_audio_pts;
-	info->first_audio_pts = d->first_audio_pts;
+	info->first_audio_pts = d->first_audio_pts == M2_NO_PTS
+		? M2_NO_PTS
+		: d->first_audio_pts + d->audio_clock_offset;
 	info->pts_origin = 0U;
 	info->raw_pts = d->last_audio_pts_raw;
 	info->audio_frames = d->audio_frames;

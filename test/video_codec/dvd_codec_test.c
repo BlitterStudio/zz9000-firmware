@@ -146,6 +146,7 @@ struct stream_result {
 	int eof_state; /* decode result once the EOF write is all in */
 	int final_state;
 	uint64_t first_audio_pts;
+	uint64_t last_audio_pts;
 };
 
 /* Logs a decoded frame into out and hashes its YUY2 form. Returns 0 when
@@ -302,6 +303,7 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 			out->pcm_produced = ainfo.pcm_produced;
 			out->audio_frames = ainfo.audio_frames;
 			out->audio_rate = ainfo.sample_rate;
+			out->last_audio_pts = ainfo.audio_pts;
 			out->first_audio_pts = ainfo.first_audio_pts;
 			out->audio_channels = ainfo.channels;
 			if (ainfo.pcm_produced != 0U) {
@@ -1713,10 +1715,10 @@ static int test_demux_audio_overflow_drop(void)
 	return 0;
 }
 
-/* 8c. A full PCM ring nobody acknowledges must not stop video: the
- * backend drops the audio it cannot route (the client is not consuming)
- * and every picture still decodes to DONE. Without this the demux backs
- * up behind the ring and the picture freezes forever. */
+/* 8c. A client that acknowledged audio and then died must not freeze
+ * video: the backend drops the audio it cannot route and every picture
+ * still decodes. (A ring never acknowledged is a prefill, not a dead
+ * sink; that case must not drop - see 9b.) */
 static int test_starved_ring_keeps_video(void)
 {
 	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
@@ -1730,6 +1732,7 @@ static int test_starved_ring_keeps_video(void)
 	uint32_t idle = 0U;
 	int done = 0;
 	int busy = 0;
+	int sink_alive = 1;
 
 	decoder = ops->create(0U);
 	if (!decoder)
@@ -1762,6 +1765,13 @@ static int test_starved_ring_keeps_video(void)
 				return 3;
 			}
 			offset += accepted;
+		}
+		/* The sink plays until it has consumed 8 KiB, then dies. */
+		if (sink_alive && ops->get_media_info(decoder, &info)) {
+			if (info.pcm_acknowledged > 8192U)
+				sink_alive = 0;
+			else
+				ops->ack_media(decoder, info.pcm_produced);
 		}
 		res = ops->decode(decoder, &frame);
 		if (res == SDK_VIDEO_BACKEND_ERROR) {
@@ -1872,6 +1882,382 @@ static int test_eof_unacked_pcm_is_busy(void)
 	if (res != SDK_VIDEO_BACKEND_DONE)
 		return 7;
 	return 0;
+}
+
+/* Rewrites the PTS of the first audio PES (stream ids 0xbd/0xc0-0xdf)
+ * found in a Program Stream by delta ticks, leaving everything else
+ * byte-identical. Returns 1 when a PTS was patched. */
+static int patch_first_audio_pes_pts(uint8_t *ps, uint32_t len,
+                                     int64_t delta)
+{
+	uint32_t i = 0U;
+
+	while (i + 14U <= len) {
+		uint32_t total;
+		uint64_t pts;
+		uint8_t sid;
+		uint8_t flags;
+
+		if (ps[i] != 0U || ps[i + 1U] != 0U || ps[i + 2U] != 1U) {
+			i++;
+			continue;
+		}
+		sid = ps[i + 3U];
+		if (sid != 0xbdU && (sid < 0xc0U || sid > 0xdfU)) {
+			i += 4U;
+			continue;
+		}
+		total = 6U + ((uint32_t)ps[i + 4U] << 8) + ps[i + 5U];
+		if (total < 14U || i + total > len) {
+			i += 4U;
+			continue;
+		}
+		if ((ps[i + 6U] & 0xc0U) != 0x80U) {
+			i += total;
+			continue;
+		}
+		flags = ps[i + 7U];
+		if ((flags & 0x80U) == 0U || ps[i + 8U] < 5U) {
+			i += total;
+			continue;
+		}
+		pts = ((uint64_t)(ps[i + 9U] >> 1) & 7U) << 30 |
+		      (uint64_t)ps[i + 10U] << 22 |
+		      ((uint64_t)(ps[i + 11U] >> 1) & 0x7fU) << 15 |
+		      (uint64_t)ps[i + 12U] << 7 |
+		      ((uint64_t)(ps[i + 13U] >> 1) & 0x7fU);
+		pts = (pts + (uint64_t)delta) & ((UINT64_C(1) << 33) - 1U);
+		ps[i + 9U] = (uint8_t)(0x21U | ((pts >> 29) & 0x0eU));
+		ps[i + 10U] = (uint8_t)(pts >> 22);
+		ps[i + 11U] = (uint8_t)(0x01U | ((pts >> 14) & 0xfeU));
+		ps[i + 12U] = (uint8_t)(pts >> 7);
+		ps[i + 13U] = (uint8_t)(0x01U | ((pts & 0x7fU) << 1));
+		return 1;
+	}
+	return 0;
+}
+
+/* 9. The reported audio clock must track the PCM actually produced. */
+static int test_audio_pts_tracks_pcm(void)
+{
+	struct stream_result r;
+
+	if (run_decode_test(zz9k_dvd_pal_25p_fixture,
+	                    zz9k_dvd_pal_25p_fixture_len, 197U,
+	                    SDK_VIDEO_MEDIA_AUDIO_MP2, &r) != 0)
+		return 1;
+	if (r.last_audio_pts < 9000U || r.last_audio_pts > 24000U) {
+		fprintf(stderr, "test_audio_pts_tracks_pcm: last audio pts "
+		        "%llu (expected 9000..24000)\n",
+		        (unsigned long long)r.last_audio_pts);
+		return 2;
+	}
+	if (r.last_audio_pts <= r.first_audio_pts)
+		return 3;
+	return 0;
+}
+
+/* 9e. The audio clock must be published promptly and track PCM from the
+ * first frames on: a client (ZZPlay) caches first_audio_pts as soon as
+ * the format is known and paces video against origin + played; a backend
+ * that leaves it NO_PTS, or freezes audio_pts while PCM flows, breaks
+ * the master clock and the picture paces in bursts. Both small and large
+ * write chunks must behave (ZZPlay feeds 16 KiB). */
+static int test_audio_clock_published_early(void)
+{
+	static const uint32_t chunks[] = { 197U, 16384U };
+	uint32_t i;
+
+	for (i = 0U; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
+		const struct SDKVideoDecoderOps *ops =
+			sdk_video_mpeg2_backend_ops();
+		struct SDKVideoMediaConfig cfg = {0};
+		struct SDKVideoDecodedFrame frame;
+		struct SDKVideoMediaInfo info;
+		uint8_t *ring = (uint8_t *)malloc(PCM_RING_CAPACITY);
+		void *decoder;
+		uint32_t offset = 0U;
+		uint32_t frames = 0U;
+		int failed = 0;
+
+		if (!ring)
+			return 1;
+		decoder = ops->create(0U);
+		if (!decoder) {
+			free(ring);
+			return 2;
+		}
+		cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_MP2;
+		cfg.pcm_ring = ring;
+		cfg.pcm_ring_capacity = PCM_RING_CAPACITY;
+		cfg.pcm_low_water_bytes = 4096U;
+		cfg.pcm_high_water_bytes = PCM_RING_CAPACITY - 4096U;
+		if (!ops->configure_media(decoder, &cfg)) {
+			free(ring);
+			ops->destroy(decoder);
+			return 3;
+		}
+		while (frames < 2U &&
+		       offset < zz9k_dvd_pal_25p_fixture_len) {
+			uint32_t n = zz9k_dvd_pal_25p_fixture_len - offset;
+			uint32_t accepted = 0U;
+
+			if (n > chunks[i])
+				n = chunks[i];
+			if (!ops->write(decoder,
+			                zz9k_dvd_pal_25p_fixture + offset,
+			                n, 0, &accepted)) {
+				failed = 1;
+				break;
+			}
+			offset += accepted;
+			if (ops->get_media_info(decoder, &info) &&
+			    info.pcm_produced > info.pcm_acknowledged)
+				ops->ack_media(decoder, info.pcm_produced);
+			if (ops->decode(decoder, &frame) ==
+			    SDK_VIDEO_BACKEND_FRAME)
+				frames++;
+		}
+		(void)ops->get_media_info(decoder, &info);
+		ops->destroy(decoder);
+		free(ring);
+		if (failed || frames < 2U) {
+			fprintf(stderr, "test_audio_clock_early: chunk %u "
+			        "failed=%d frames=%u offset=%u\n",
+			        chunks[i], failed, frames, offset);
+			return (int)(4 + i);
+		}
+		if (info.first_audio_pts == UINT64_MAX ||
+		    info.audio_pts == UINT64_MAX ||
+		    info.audio_pts <= info.first_audio_pts) {
+			fprintf(stderr, "test_audio_clock_early: chunk %u "
+			        "first=%llu audio=%llu (frames %u)\n",
+			        chunks[i],
+			        (unsigned long long)info.first_audio_pts,
+			        (unsigned long long)info.audio_pts,
+			        frames);
+			return (int)(10 + i);
+		}
+	}
+	return 0;
+}
+
+/* 9b. A full ring before the client has ever acknowledged anything is a
+ * prefill, not a dead sink: audio must not be dropped while
+ * pcm_acknowledged is still zero. */
+static int test_no_drops_before_first_ack(void)
+{
+	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	struct SDKVideoMediaConfig cfg = {0};
+	struct SDKVideoDecodedFrame frame;
+	struct SDKVideoMediaInfo info;
+	uint8_t ring[8U * 1024U];
+	void *decoder;
+	uint32_t offset = 0U;
+	uint32_t frames = 0U;
+	uint32_t idle = 0U;
+	int saw_backpressure = 0;
+	int done = 0;
+
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 1;
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = sizeof(ring);
+	cfg.pcm_low_water_bytes = 2048U;
+	cfg.pcm_high_water_bytes = 4608U;
+	if (!ops->configure_media(decoder, &cfg)) {
+		ops->destroy(decoder);
+		return 2;
+	}
+	while (!done && idle < 4096U) {
+		uint32_t before = frames;
+		uint32_t accepted = 0U;
+		int res;
+
+		if (offset < zz9k_dvd_ac3_192_fixture_len) {
+			uint32_t n = zz9k_dvd_ac3_192_fixture_len - offset;
+
+			if (n > 2048U)
+				n = 2048U;
+			if (!ops->write(decoder,
+			                zz9k_dvd_ac3_192_fixture + offset, n,
+			                offset + n >=
+			                    zz9k_dvd_ac3_192_fixture_len,
+			                &accepted)) {
+				ops->destroy(decoder);
+				return 3;
+			}
+			offset += accepted;
+		}
+		/* No acknowledgement at all until the ring has filled. */
+		if (saw_backpressure &&
+		    ops->get_media_info(decoder, &info))
+			ops->ack_media(decoder, info.pcm_produced);
+		res = ops->decode(decoder, &frame);
+		if (res == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 4;
+		}
+		if (res == SDK_VIDEO_BACKEND_FRAME)
+			frames++;
+		done = res == SDK_VIDEO_BACKEND_DONE;
+		if (ops->get_media_info(decoder, &info) &&
+		    (info.flags & SDK_VIDEO_MEDIA_FLAG_BACKPRESSURE) != 0U)
+			saw_backpressure = 1;
+		idle = (frames == before && offset <
+		        zz9k_dvd_ac3_192_fixture_len) ? idle + 1U : 0U;
+	}
+	(void)ops->get_media_info(decoder, &info);
+	ops->destroy(decoder);
+	if (!done || frames != 50U || info.audio_packets_dropped != 0U) {
+		fprintf(stderr, "test_no_drops_before_first_ack: done=%d "
+		        "frames=%u dropped=%u\n", done, frames,
+		        info.audio_packets_dropped);
+		return 5;
+	}
+	return 0;
+}
+
+/* 9c. When a started sink dies and audio is dropped, the reported audio
+ * clock must resync to the content that plays next: the first audio PTS
+ * moves forward by the dropped span and the rebase is signalled. */
+static int test_drop_resyncs_audio_clock(void)
+{
+	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	struct SDKVideoMediaConfig cfg = {0};
+	struct SDKVideoDecodedFrame frame;
+	struct SDKVideoMediaInfo info;
+	static uint8_t ring[8U * 1024U];
+	void *decoder;
+	uint32_t offset = 0U;
+	uint32_t frames = 0U;
+	uint32_t idle = 0U;
+	int sink_state = 0; /* 0 starting, 1 alive, 2 dead, 3 revived */
+	int saw_rebased = 0;
+	int done = 0;
+
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 1;
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = sizeof(ring);
+	cfg.pcm_low_water_bytes = 2048U;
+	cfg.pcm_high_water_bytes = 4608U;
+	if (!ops->configure_media(decoder, &cfg)) {
+		ops->destroy(decoder);
+		return 2;
+	}
+	while (!done && idle < 4096U) {
+		uint32_t before = frames;
+		uint32_t accepted = 0U;
+		int res;
+
+		if (offset < zz9k_dvd_ac3_192_fixture_len) {
+			uint32_t n = zz9k_dvd_ac3_192_fixture_len - offset;
+
+			if (n > 2048U)
+				n = 2048U;
+			if (!ops->write(decoder,
+			                zz9k_dvd_ac3_192_fixture + offset, n,
+			                offset + n >=
+			                    zz9k_dvd_ac3_192_fixture_len,
+			                &accepted)) {
+				ops->destroy(decoder);
+				return 3;
+			}
+			offset += accepted;
+		}
+		if (ops->get_media_info(decoder, &info)) {
+			if (sink_state == 0 && info.pcm_acknowledged > 8192U)
+				sink_state = 1;
+			if (sink_state == 1)
+				sink_state = 2; /* the sink dies now */
+			if (sink_state == 2 &&
+			    info.audio_packets_dropped != 0U)
+				sink_state = 3; /* revived after the drops */
+			if (sink_state != 2)
+				ops->ack_media(decoder, info.pcm_produced);
+			if ((info.flags & SDK_VIDEO_MEDIA_FLAG_REBASED) != 0U)
+				saw_rebased = 1;
+		}
+		res = ops->decode(decoder, &frame);
+		if (res == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 4;
+		}
+		if (res == SDK_VIDEO_BACKEND_FRAME)
+			frames++;
+		done = res == SDK_VIDEO_BACKEND_DONE;
+		idle = (frames == before && offset <
+		        zz9k_dvd_ac3_192_fixture_len) ? idle + 1U : 0U;
+	}
+	(void)ops->get_media_info(decoder, &info);
+	ops->destroy(decoder);
+	if (!done || frames != 50U || info.audio_packets_dropped == 0U) {
+		fprintf(stderr, "test_drop_resyncs: done=%d frames=%u "
+		        "dropped=%u\n", done, frames,
+		        info.audio_packets_dropped);
+		return 5;
+	}
+	if (!saw_rebased || info.first_audio_pts == 0U ||
+	    info.first_audio_pts >= 180000U) {
+		fprintf(stderr, "test_drop_resyncs: rebased=%d first=%llu\n",
+		        saw_rebased,
+		        (unsigned long long)info.first_audio_pts);
+		return 6;
+	}
+	return 0;
+}
+
+/* 9d. The timeline origin must come from the first VIDEO PTS: with audio
+ * shifted 300 ms before or after video, picture one reports media PTS 0
+ * and the first audio PTS reflects the real a/v offset (audio leading
+ * clamps to 0; audio trailing reads ~+300 ms). */
+static int test_timeline_origin_from_video(void)
+{
+	uint8_t *buf = (uint8_t *)malloc(zz9k_dvd_pal_25p_fixture_len);
+	static const int64_t deltas[2] = {-27000, 27000};
+	struct stream_result r;
+	uint32_t i;
+	int rc = 0;
+
+	if (!buf)
+		return 1;
+	for (i = 0U; i < 2U && rc == 0; i++) {
+		memcpy(buf, zz9k_dvd_pal_25p_fixture,
+		       zz9k_dvd_pal_25p_fixture_len);
+		if (!patch_first_audio_pes_pts(
+			    buf, zz9k_dvd_pal_25p_fixture_len, deltas[i])) {
+			rc = (int)(2 + i);
+			break;
+		}
+		rc = run_decode_test(buf, zz9k_dvd_pal_25p_fixture_len,
+		                     197U, SDK_VIDEO_MEDIA_AUDIO_MP2, &r);
+		if (rc != 0)
+			break;
+		if (r.media_pts[0] > 3600U ||
+		    r.media_pts[1] <= r.media_pts[0] ||
+		    r.media_pts[2] <= r.media_pts[1]) {
+			fprintf(stderr, "test_origin_from_video: delta %lld "
+			        "video pts %llu,%llu,%llu\n",
+			        (long long)deltas[i],
+			        (unsigned long long)r.media_pts[0],
+			        (unsigned long long)r.media_pts[1],
+			        (unsigned long long)r.media_pts[2]);
+			rc = (int)(10 + i);
+			break;
+		}
+		if (i == 0U && r.first_audio_pts != 0U)
+			rc = 20;
+		if (i == 1U && (r.first_audio_pts < 25200U ||
+		                r.first_audio_pts > 30600U))
+			rc = 30;
+	}
+	free(buf);
+	return rc;
 }
 
 int main(void)
@@ -1993,6 +2379,36 @@ int main(void)
 		return 240 + err;
 	}
 	printf("PASS: test_eof_unacked_pcm_is_busy (EOF tail PCM reads BUSY, then DONE)\n");
+
+	if ((err = test_audio_pts_tracks_pcm()) != 0) {
+		fprintf(stderr, "FAIL: test_audio_pts_tracks_pcm (code %d)\n", err);
+		return 250 + err;
+	}
+	printf("PASS: test_audio_pts_tracks_pcm (audio clock follows produced PCM)\n");
+
+	if ((err = test_no_drops_before_first_ack()) != 0) {
+		fprintf(stderr, "FAIL: test_no_drops_before_first_ack (code %d)\n", err);
+		return 260 + err;
+	}
+	printf("PASS: test_no_drops_before_first_ack (prefill ring never drops audio)\n");
+
+	if ((err = test_audio_clock_published_early()) != 0) {
+		fprintf(stderr, "FAIL: test_audio_clock_published_early (code %d)\n", err);
+		return 290 + err;
+	}
+	printf("PASS: test_audio_clock_published_early (audio clock prompt, tracks PCM)\n");
+
+	if ((err = test_drop_resyncs_audio_clock()) != 0) {
+		fprintf(stderr, "FAIL: test_drop_resyncs_audio_clock (code %d)\n", err);
+		return 270 + err;
+	}
+	printf("PASS: test_drop_resyncs_audio_clock (drops rebase the audio clock)\n");
+
+	if ((err = test_timeline_origin_from_video()) != 0) {
+		fprintf(stderr, "FAIL: test_timeline_origin_from_video (code %d)\n", err);
+		return 280 + err;
+	}
+	printf("PASS: test_timeline_origin_from_video (origin from first video PTS)\n");
 	if ((err = test_ac3_substream_selection()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_substream_selection (code %d)\n", err);
 		return 90 + err;
