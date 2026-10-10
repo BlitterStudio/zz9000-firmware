@@ -535,6 +535,9 @@ _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
 } > ps7_ddr_hi
 
 _end = .;
+/* Keep synchronized with SDK_TASKQ_REGION_ADDRESS in memorymap.h: the task
+ * queue, the core-1 stack and the card pool live above the linker image. */
+ASSERT(_end <= 0x18000000, "firmware image, heap and stacks reach the task-queue region")
 
 .bootrom_image : {
    KEEP(*(.bootrom_image))
