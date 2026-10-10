@@ -87,6 +87,9 @@ LIBMPEG2_HOST_LIB := $(BUILD_DEPS_DIR)/libmpeg2/0.5.1/host/libmpeg2.a
 LIBA52_HOST_LIB   := $(BUILD_DEPS_DIR)/a52dec/0.7.4/host/liba52.a
 DVD_INCLUDES      := -I$(BUILD_DEPS_DIR)/libmpeg2/0.5.1/host/include \
                      -I$(BUILD_DEPS_DIR)/a52dec/0.7.4/host/include
+# The host codec archives use the firmware's short-enum ABI (see
+# build_dvd_codecs.sh); everything linked with them must match.
+DVD_ABI           := -fshort-enums
 
 $(LIBMPEG2_HOST_LIB): $(REPO_ROOT)/build_dvd_codecs.sh
 	cd $(REPO_ROOT) && bash ./build_dvd_codecs.sh --host
@@ -113,7 +116,7 @@ DVD_FIXTURES := dvd_pal_25p_fixture.inc \
 build/dvd_codec_test: dvd_codec_test.c $(DVD_FIXTURES) $(DVD_SRCS) \
 	$(LIBMPEG2_HOST_LIB) $(LIBA52_HOST_LIB)
 	mkdir -p build
-	$(CC) $(CFLAGS) -DSDK_VIDEO_HOST_TEST=1 -DSDK_MEDIA_HOST_TEST=1 \
+	$(CC) $(CFLAGS) $(DVD_ABI) -DSDK_VIDEO_HOST_TEST=1 -DSDK_MEDIA_HOST_TEST=1 \
 		-I$(FIRMWARE_SRC) $(DVD_INCLUDES) \
 		-o $@ dvd_codec_test.c $(DVD_SRCS) \
 		$(LIBMPEG2_HOST_LIB) $(LIBA52_HOST_LIB) -lm
@@ -121,7 +124,7 @@ build/dvd_codec_test: dvd_codec_test.c $(DVD_FIXTURES) $(DVD_SRCS) \
 build/dvd_codec_test_sanitize: dvd_codec_test.c $(DVD_FIXTURES) $(DVD_SRCS) \
 	$(LIBMPEG2_HOST_LIB) $(LIBA52_HOST_LIB)
 	mkdir -p build
-	$(CC) $(SANITIZE_CFLAGS) -DSDK_VIDEO_HOST_TEST=1 -DSDK_MEDIA_HOST_TEST=1 \
+	$(CC) $(SANITIZE_CFLAGS) $(DVD_ABI) -DSDK_VIDEO_HOST_TEST=1 -DSDK_MEDIA_HOST_TEST=1 \
 		-I$(FIRMWARE_SRC) $(DVD_INCLUDES) \
 		-o $@ dvd_codec_test.c $(DVD_SRCS) \
 		$(LIBMPEG2_HOST_LIB) $(LIBA52_HOST_LIB) -lm
@@ -129,7 +132,7 @@ build/dvd_codec_test_sanitize: dvd_codec_test.c $(DVD_FIXTURES) $(DVD_SRCS) \
 build/dvd_bench: dvd_bench.c $(DVD_FIXTURES) $(DVD_SRCS) \
 	$(LIBMPEG2_HOST_LIB) $(LIBA52_HOST_LIB)
 	mkdir -p build
-	$(CC) $(CFLAGS) -DSDK_VIDEO_HOST_TEST=1 -DSDK_MEDIA_HOST_TEST=1 \
+	$(CC) $(CFLAGS) $(DVD_ABI) -DSDK_VIDEO_HOST_TEST=1 -DSDK_MEDIA_HOST_TEST=1 \
 		-I$(FIRMWARE_SRC) $(DVD_INCLUDES) \
 		-o $@ dvd_bench.c $(DVD_SRCS) \
 		$(LIBMPEG2_HOST_LIB) $(LIBA52_HOST_LIB) -lm
