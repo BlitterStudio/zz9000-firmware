@@ -206,6 +206,189 @@ static void yuy2_half_reference(uint8_t *dst, uint32_t dst_pitch,
 	}
 }
 
+/* U2: interlaced frames are blend-packed - output row r is the rounded
+ * average of luma rows r and r+1 (last row copied) and, within each chroma
+ * plane, of chroma rows (r>>1) and (r>>1)+1 (last chroma row copied),
+ * because 4:2:0 interlaced chroma rows alternate fields too. Written from
+ * that definition, not from the kernel. */
+static void yuy2_blend_reference(uint8_t *dst, uint32_t dst_pitch,
+                                 uint32_t width, uint32_t height,
+                                 const uint8_t *y, uint32_t y_pitch,
+                                 const uint8_t *cb, const uint8_t *cr,
+                                 uint32_t chroma_pitch)
+{
+	uint32_t chroma_rows = (height + 1U) / 2U;
+	uint32_t row;
+	uint32_t x;
+
+	for (row = 0U; row < height; row++) {
+		uint8_t *d = dst + row * dst_pitch;
+		const uint8_t *y0 = y + row * y_pitch;
+		const uint8_t *y1 = row + 1U < height
+			? y + (row + 1U) * y_pitch : y0;
+		uint32_t c = row >> 1;
+		const uint8_t *b0 = cb + c * chroma_pitch;
+		const uint8_t *r0 = cr + c * chroma_pitch;
+		const uint8_t *b1 = c + 1U < chroma_rows
+			? b0 + chroma_pitch : b0;
+		const uint8_t *r1 = c + 1U < chroma_rows
+			? r0 + chroma_pitch : r0;
+
+		for (x = 0U; x < width; x += 2U) {
+			uint32_t pair = x >> 1;
+			uint32_t xl = x + 1U < width ? x + 1U : x;
+
+			d[0] = (uint8_t)((y0[x] + y1[x] + 1U) >> 1);
+			d[1] = (uint8_t)((b0[pair] + b1[pair] + 1U) >> 1);
+			d[2] = (uint8_t)((y0[xl] + y1[xl] + 1U) >> 1);
+			d[3] = (uint8_t)((r0[pair] + r1[pair] + 1U) >> 1);
+			d += 4;
+		}
+	}
+}
+
+static int test_yuy2_blend_exactness_sweep(void)
+{
+	static const uint32_t widths[] = {
+		1U, 2U, 3U, 4U, 5U, 15U, 16U, 17U, 31U, 32U, 33U,
+		37U, 64U, 65U, 176U, 320U, 352U, 639U, 640U
+	};
+	static const uint32_t heights[] = { 1U, 2U, 3U, 5U, 16U };
+	static uint8_t luma[640 * 16];
+	static uint8_t blue[320 * 16];
+	static uint8_t red[320 * 16];
+	static uint8_t want[640 * 2 * 16];
+	static uint8_t got[sizeof(want)];
+	unsigned wi;
+	unsigned hi;
+	uint32_t i;
+
+	for (i = 0U; i < sizeof(luma); i++)
+		luma[i] = (uint8_t)(i * 7U + 1U);
+	for (i = 0U; i < sizeof(blue); i++) {
+		blue[i] = (uint8_t)(i * 13U + 5U);
+		red[i] = (uint8_t)(i * 29U + 200U);
+	}
+
+	for (wi = 0U; wi < sizeof(widths) / sizeof(widths[0]); wi++) {
+		for (hi = 0U; hi < sizeof(heights) / sizeof(heights[0]); hi++) {
+			uint32_t width = widths[wi];
+			uint32_t height = heights[hi];
+			uint32_t chroma_pitch = (width + 1U) / 2U;
+			uint32_t row_bytes = sdk_video_yuy2_row_bytes(width);
+			uint32_t pitch = row_bytes + 8U;
+			uint32_t written = 0U;
+
+			if (pitch * height > sizeof(want))
+				continue;
+			memset(want, 0xa5U, sizeof(want));
+			memset(got, 0xa5U, sizeof(got));
+			yuy2_blend_reference(want, pitch, width, height,
+			                     luma, width, blue, red,
+			                     chroma_pitch);
+			if (!sdk_video_yuv420_to_yuy2_blend_scalar(
+			        got, pitch, width, height, luma, width, blue,
+			        red, chroma_pitch, &written))
+				return 1;
+			if (written != row_bytes * height)
+				return 2;
+			if (memcmp(want, got, pitch * height) != 0)
+				return 3;
+
+			/* The dispatcher must agree too - on ARM that is the
+			 * vrhadd NEON kernel after its self check, on the
+			 * host it re-checks the scalar. */
+			memset(got, 0xa5U, sizeof(got));
+			if (!sdk_video_yuv420_to_yuy2_blend(
+			        got, pitch, width, height, luma, width, blue,
+			        red, chroma_pitch, &written))
+				return 4;
+			if (memcmp(want, got, pitch * height) != 0)
+				return 5;
+		}
+	}
+	return 0;
+}
+
+/* Interlacing must not disturb the progressive pack: with both fields
+ * holding the same data the blend is the identity, so a "blended" call on
+ * duplicated rows must equal the plain packer bit for bit. */
+static int test_blend_of_field_duplicated_frame_matches_plain(void)
+{
+	static uint8_t luma[320 * 16];
+	static uint8_t blue[160 * 16];
+	static uint8_t red[160 * 16];
+	static uint8_t plain[320 * 2 * 16];
+	static uint8_t blended[320 * 2 * 16];
+	uint32_t width = 320U;
+	uint32_t height = 16U;
+	uint32_t chroma_pitch = 160U;
+	uint32_t pitch = sdk_video_yuy2_row_bytes(width);
+	uint32_t i;
+	uint32_t x;
+
+	/* Every luma row identical and every chroma row identical (the two
+	 * fields agree completely): blending rows r and r+1, and chroma rows
+	 * c and c+1, must then be the identity, because (a + a + 1) >> 1 is
+	 * a. The row content still varies per column, so this is not a
+	 * constant-fill comparison. */
+	for (i = 0U; i < width; i++) {
+		uint8_t sample = (uint8_t)(i * 7U + 1U);
+
+		for (x = 0U; x < height; x++)
+			luma[x * width + i] = sample;
+	}
+	for (i = 0U; i < chroma_pitch; i++) {
+		uint8_t bsample = (uint8_t)(i * 13U + 5U);
+		uint8_t rsample = (uint8_t)(i * 29U + 200U);
+
+		for (x = 0U; x < height / 2U; x++) {
+			blue[x * chroma_pitch + i] = bsample;
+			red[x * chroma_pitch + i] = rsample;
+		}
+	}
+	memset(plain, 0xa5U, sizeof(plain));
+	memset(blended, 0x5aU, sizeof(blended));
+	if (!sdk_video_yuv420_to_yuy2_scalar(plain, pitch, width, height,
+	                                     luma, width, blue, red,
+	                                     chroma_pitch, 0))
+		return 1;
+	if (!sdk_video_yuv420_to_yuy2_blend(blended, pitch, width, height,
+	                                    luma, width, blue, red,
+	                                    chroma_pitch, 0))
+		return 2;
+	if (memcmp(plain, blended, pitch * height) != 0)
+		return 3;
+	return 0;
+}
+
+/* Bad geometry must be refused by the blend pack too. */
+static int test_yuy2_blend_rejects_bad_params(void)
+{
+	static uint8_t plane[64];
+	uint8_t dst[64];
+	uint32_t written = 1U;
+
+	if (sdk_video_yuv420_to_yuy2_blend(dst, 3U, 4U, 1U, plane, 4U,
+	                                   plane, plane, 2U, &written))
+		return 1;
+	if (written != 0U)
+		return 2;
+	if (sdk_video_yuv420_to_yuy2_blend(dst, 8U, 4U, 1U, plane, 3U,
+	                                   plane, plane, 2U, &written))
+		return 3;
+	if (sdk_video_yuv420_to_yuy2_blend(dst, 8U, 4U, 1U, plane, 4U,
+	                                   plane, plane, 1U, &written))
+		return 4;
+	if (sdk_video_yuv420_to_yuy2_blend(dst, 8U, 4U, 0U, plane, 4U,
+	                                   plane, plane, 2U, &written))
+		return 5;
+	if (sdk_video_yuv420_to_yuy2_blend(dst, 8U, 4U, 1U, 0, 4U,
+	                                   plane, plane, 2U, &written))
+		return 6;
+	return 0;
+}
+
 static int test_yuy2_half_pack(void)
 {
 	static const uint32_t widths[] = { 2U, 3U, 4U, 6U, 7U, 34U, 64U, 642U };
@@ -400,6 +583,15 @@ int main(void)
 	result = test_yuy2_half_pack();
 	if (result != 0)
 		return 90 + result;
+	result = test_yuy2_blend_exactness_sweep();
+	if (result != 0)
+		return 110 + result;
+	result = test_blend_of_field_duplicated_frame_matches_plain();
+	if (result != 0)
+		return 130 + result;
+	result = test_yuy2_blend_rejects_bad_params();
+	if (result != 0)
+		return 150 + result;
 	result = test_streaming_decode();
 	if (result != 0)
 		return 30 + result;

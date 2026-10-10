@@ -451,6 +451,7 @@ uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 	result->media_pts = frame.media_pts;
 	result->raw_pts = frame.raw_pts;
 	result->media_flags = frame.media_flags;
+	result->display_fields = frame.display_fields;
 	return SDK_STATUS_OK;
 }
 

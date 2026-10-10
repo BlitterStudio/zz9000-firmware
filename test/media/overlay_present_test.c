@@ -107,12 +107,17 @@ int sdk_image_stream_presented_canvas(uint32_t session, uint32_t *address,
 	return 0;
 }
 
+static struct SDKVideoDecodedFrame mock_direct_frame;
+static int mock_direct_frame_valid;
+
 int sdk_video_stream_get_direct_frame(uint32_t session,
                                       struct SDKVideoDecodedFrame *frame)
 {
 	(void)session;
-	(void)frame;
-	return 0;
+	if (!mock_direct_frame_valid || !frame)
+		return 0;
+	*frame = mock_direct_frame;
+	return 1;
 }
 
 int sdk_video_yuv420_to_yuy2(uint8_t *dst, uint32_t dst_pitch, uint32_t width,
@@ -133,6 +138,18 @@ int sdk_video_yuv420_to_yuy2_half(uint8_t *dst, uint32_t dst_pitch,
                                   const uint8_t *cb, const uint8_t *cr,
                                   uint32_t chroma_pitch,
                                   uint32_t *bytes_written)
+{
+	return sdk_video_yuv420_to_yuy2(dst, dst_pitch, width, height, y,
+	                                y_pitch, cb, cr, chroma_pitch,
+	                                bytes_written);
+}
+
+int sdk_video_yuv420_to_yuy2_blend(uint8_t *dst, uint32_t dst_pitch,
+                                   uint32_t width, uint32_t height,
+                                   const uint8_t *y, uint32_t y_pitch,
+                                   const uint8_t *cb, const uint8_t *cr,
+                                   uint32_t chroma_pitch,
+                                   uint32_t *bytes_written)
 {
 	return sdk_video_yuv420_to_yuy2(dst, dst_pitch, width, height, y,
 	                                y_pitch, cb, cr, chroma_pitch,
@@ -297,6 +314,61 @@ static void test_large_frames_scan_half_size(void)
 	      "a 720p hand-off keeps the full geometry");
 	hw_present = 0;
 }
+static void test_interlace_blend_variant(void)
+{
+	reset();
+	hw_present = 1;
+	set_overlay_source(720U, 576U, 1440U);
+
+	/* 1. Interlaced direct frame (TFF, no PROGRESSIVE) -> blend variant (0xfc) */
+	memset(&mock_direct_frame, 0, sizeof(mock_direct_frame));
+	mock_direct_frame.width = 720U;
+	mock_direct_frame.height = 576U;
+	mock_direct_frame.picture_flags = SDK_VIDEO_PICTURE_FLAG_TFF;
+	mock_direct_frame_valid = 1;
+	present_frame(11U);
+	check(last_compose.variant == 0xfcU,
+	      "an interlaced (TFF, no PROGRESSIVE) direct frame composes with the blend variant 0xfc");
+
+	/* Interlaced with BFF, no PROGRESSIVE -> blend variant (0xfc) */
+	mock_direct_frame.picture_flags = SDK_VIDEO_PICTURE_FLAG_BFF;
+	present_frame(11U);
+	check(last_compose.variant == 0xfcU,
+	      "an interlaced (BFF, no PROGRESSIVE) direct frame composes with the blend variant 0xfc");
+
+	/* 2. Progressive direct frame -> plain pack variant (0xfe) */
+	mock_direct_frame.picture_flags = SDK_VIDEO_PICTURE_FLAG_PROGRESSIVE;
+	present_frame(11U);
+	check(last_compose.variant == 0xfeU,
+	      "a progressive direct frame composes with 0xfe");
+
+	/* Progressive frame with TFF bit set (e.g. cadence) -> still plain pack (0xfe) */
+	mock_direct_frame.picture_flags = SDK_VIDEO_PICTURE_FLAG_PROGRESSIVE | SDK_VIDEO_PICTURE_FLAG_TFF;
+	present_frame(11U);
+	check(last_compose.variant == 0xfeU,
+	      "a progressive direct frame with TFF still composes with 0xfe");
+
+	/* Content without flags (e.g. pl_mpeg) -> plain pack (0xfe) */
+	mock_direct_frame.picture_flags = 0U;
+	present_frame(11U);
+	check(last_compose.variant == 0xfeU,
+	      "a direct frame without picture_flags composes with 0xfe");
+
+	/* 3. >720p frame (1920x1080) -> half-size variant (0xfd) even if interlaced */
+	reset();
+	hw_present = 1;
+	set_overlay_source(1920U, 1080U, 3840U);
+	mock_direct_frame.width = 1920U;
+	mock_direct_frame.height = 1080U;
+	mock_direct_frame.picture_flags = SDK_VIDEO_PICTURE_FLAG_TFF;
+	mock_direct_frame_valid = 1;
+	present_frame(12U);
+	check(last_compose.variant == 0xfdU,
+	      "a >720p interlaced direct frame composes with 0xfd");
+
+	mock_direct_frame_valid = 0;
+	hw_present = 0;
+}
 
 static void reset(void)
 {
@@ -356,6 +428,7 @@ int main(void)
 	      "the re-SET overlay composes and releases");
 
 	test_large_frames_scan_half_size();
+	test_interlace_blend_variant();
 
 	if (failures) {
 		fprintf(stderr, "overlay_present_test: %d failure(s)\n", failures);

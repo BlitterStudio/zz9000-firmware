@@ -25,6 +25,11 @@ struct SDKMediaSessionState {
 	uint32_t height;
 	uint32_t frame_rate_num;
 	uint32_t frame_rate_den;
+	/* Display fields of the last decoded frame: a repeat-first-field
+	 * (3:2 pulldown) frame holds the screen for display_fields/2 frame
+	 * durations, which is how long the derived PTS must advance for the
+	 * frame that follows it. */
+	uint32_t last_display_fields;
 	uint32_t frame_number;
 	uint64_t video_pts;
 	uint64_t pts_origin;
@@ -345,7 +350,14 @@ static void advance_video_pts(const struct SDKVideoStreamResult *video)
 		return;
 	}
 	if (media.frame_rate_num != 0U && media.frame_rate_den != 0U) {
-		scaled = UINT64_C(90000) * media.frame_rate_den +
+		uint32_t fields = media.last_display_fields;
+
+		/* Backends without field knowledge report 0 or 1 (WebM);
+		 * both mean one plain two-field frame duration. */
+		if (fields < 2U)
+			fields = 2U;
+		/* fields/2 frame durations: 90000*den*fields / (2*num). */
+		scaled = UINT64_C(45000) * media.frame_rate_den * fields +
 		         media.pts_remainder;
 		media.video_pts += scaled / media.frame_rate_num;
 		media.pts_remainder = scaled % media.frame_rate_num;
@@ -584,6 +596,7 @@ uint16_t sdk_media_session_decode(
 	if ((video_result.flags & SDK_VIDEO_SESSION_RESULT_FRAME_READY) != 0U) {
 		if (video_result.media_pts == SDK_VIDEO_MEDIA_NO_PTS)
 			advance_video_pts(&video_result);
+		media.last_display_fields = video_result.display_fields;
 		media.decoded_frames++;
 		media.held = 1U;
 		media.state = SDK_MEDIA_SESSION_STATE_FRAME_HELD;
