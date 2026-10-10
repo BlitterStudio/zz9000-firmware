@@ -29,7 +29,16 @@
 #include "mpeg2.h"
 #include "mp3/mp3.h"
 
-#define M2_ES_CAPACITY (256U * 1024U)
+/* One PES at a time is handed to libmpeg2 (a PES is at most 64 KiB). */
+#define M2_ES_CAPACITY (64U * 1024U)
+/* Video moved out of the demux ahead of decoding. A Program Stream can
+ * carry a picture's audio well after it (non-DVD muxers lead video by
+ * 0.5 s and more); without room for that much video, the demux could
+ * not reach the audio until the video was decoded that far ahead. 1 MiB
+ * holds about 0.85 s at DVD's 9.8 Mbit/s and several seconds of
+ * MPEG-1. */
+#define M2_VIDEO_FIFO_CAPACITY (1024U * 1024U)
+#define M2_VIDEO_FIFO_WRAP 0xffffffffU
 #define M2_MP2_CAPACITY (64U * 1024U)
 #define M2_PTS_SLOTS 64U
 /* Largest picture either codec decodes. libmpeg2 rounds the coded size up
@@ -70,11 +79,22 @@ struct m2_pts_slot {
 	uint8_t used;
 };
 
+/* A video PES in the FIFO: this header, then the payload padded to 8. */
+struct m2_video_entry {
+	uint64_t pts;
+	uint64_t dts;
+	uint32_t length;
+	uint32_t reserved;
+};
+
 struct sdk_video_mpeg2 {
 	struct SDKDVDPSDemux demux;
 	mpeg2dec_t *decoder;
 	uint8_t *es;
-	uint32_t es_len;
+	uint8_t *video_fifo;         /* M2_VIDEO_FIFO_CAPACITY bytes */
+	uint32_t video_fifo_read;    /* offset of the oldest entry */
+	uint32_t video_fifo_write;   /* offset the next entry goes to */
+	uint32_t video_fifo_count;   /* entries queued */
 	uint32_t fbuf_stride;
 	uint8_t fbufs_bound;
 	uint8_t *mp2_input;          /* M2_MP2_CAPACITY bytes of MPEG audio */
@@ -632,6 +652,7 @@ static uint32_t route_audio(struct sdk_video_mpeg2 *d,
 			d->last_audio_pts_raw = packet->pts;
 		} else if (d->stashed_audio_pts == SDK_DVD_PS_NO_TS &&
 		           (sdk_dvd_ps_peek_video(&d->demux) != 0 ||
+		            d->video_fifo_count != 0U ||
 		            !d->demux.eof || d->demux.staged != 0U)) {
 			/* Video is coming (or may still be in the unparsed
 			 * input); hold the first audio PTS until the video
@@ -877,7 +898,7 @@ static int demux_drained(const struct sdk_video_mpeg2 *d)
 	 * Routing already ran this decode, so a non-empty audio queue here
 	 * is stuck by definition. */
 	return d->input_eof && d->demux.staged == 0U &&
-	       d->demux.video.count == 0U &&
+	       d->demux.video.count == 0U && d->video_fifo_count == 0U &&
 	       (d->demux.audio.count == 0U || d->pcm_backpressure);
 }
 
@@ -967,29 +988,11 @@ static void drop_audio(struct sdk_video_mpeg2 *d)
 /* The media timeline origin comes from the first VIDEO PTS (like the
  * MPEG-1 seed_origin rule), so an audio track that starts earlier cannot
  * skew the video clock; the audio track follows in the timeline the moment
- * this seed exists. Seeding from the queued head packet before any audio
- * is routed makes the audio clock independent of how the input was
+ * this seed exists. Video is buffered (and seeds the origin) before any
+ * audio is routed, so the audio clock does not depend on how the input was
  * chunked. */
-static void seed_video_origin(struct sdk_video_mpeg2 *d)
+static void seed_origin(struct sdk_video_mpeg2 *d, uint64_t seed)
 {
-	const struct SDKDVDPSPacket *packet;
-	uint64_t seed;
-
-	if (d->video_origin_seen)
-		return;
-	packet = sdk_dvd_ps_peek_video(&d->demux);
-	if (packet && packet->pts != SDK_DVD_PS_NO_TS) {
-		seed = packet->pts;
-	} else if (!packet && !d->video_seen && d->input_eof &&
-	           d->demux.staged == 0U &&
-	           d->stashed_audio_pts != SDK_DVD_PS_NO_TS) {
-		/* The input ended without a single video packet: the first
-		 * audio PTS, held for a video origin that never came, anchors
-		 * the audio-only stream itself. */
-		seed = d->stashed_audio_pts;
-	} else {
-		return;
-	}
 	sdk_media_timeline_seed_origin(&d->timeline, seed);
 	d->video_origin_seen = 1U;
 	if (d->stashed_audio_pts != SDK_DVD_PS_NO_TS) {
@@ -1006,38 +1009,145 @@ static void seed_video_origin(struct sdk_video_mpeg2 *d)
 	clock_unclocked_audio(d);
 }
 
-/* Hand one queued PES to libmpeg2 per call. mpeg2_tag_picture() latches the
- * tag onto the next picture the decoder PARSES, so a PTS-bearing PES must
- * be tagged and handed over in its own step: batching several pictures into
- * one mpeg2_buffer() would leave only the last tag set when parsing runs. */
-static int feed_video(struct sdk_video_mpeg2 *d)
+/* The input ended and was parsed without a single video packet: the first
+ * audio PTS, held for a video origin that never came, anchors the
+ * audio-only stream itself. */
+static void seed_audio_only_origin(struct sdk_video_mpeg2 *d)
+{
+	if (!d->video_origin_seen && !d->video_seen && d->input_eof &&
+	    d->demux.staged == 0U && d->demux.video.count == 0U &&
+	    d->stashed_audio_pts != SDK_DVD_PS_NO_TS)
+		seed_origin(d, d->stashed_audio_pts);
+}
+
+static uint32_t video_entry_bytes(uint32_t length)
+{
+	return (uint32_t)sizeof(struct m2_video_entry) + ((length + 7U) & ~7U);
+}
+
+/* The oldest entry, past the wrap point the writer left at the tail. */
+static struct m2_video_entry *video_fifo_head(struct sdk_video_mpeg2 *d)
+{
+	struct m2_video_entry *entry;
+
+	if (d->video_fifo_count == 0U)
+		return 0;
+	if (M2_VIDEO_FIFO_CAPACITY - d->video_fifo_read <
+	    sizeof(struct m2_video_entry))
+		d->video_fifo_read = 0U;
+	entry = (struct m2_video_entry *)(d->video_fifo +
+	                                  d->video_fifo_read);
+	if (entry->length == M2_VIDEO_FIFO_WRAP) {
+		d->video_fifo_read = 0U;
+		entry = (struct m2_video_entry *)d->video_fifo;
+	}
+	return entry;
+}
+
+static void video_fifo_pop(struct sdk_video_mpeg2 *d)
+{
+	struct m2_video_entry *entry = video_fifo_head(d);
+
+	if (!entry)
+		return;
+	d->video_fifo_read += video_entry_bytes(entry->length);
+	if (--d->video_fifo_count == 0U)
+		d->video_fifo_read = d->video_fifo_write = 0U;
+}
+
+/* Append a packet; 0 when the FIFO has no room for it. Entries never
+ * straddle the end: one that does not fit there starts again at 0, and
+ * the write offset never catches up with the read offset from behind. */
+static int video_fifo_push(struct sdk_video_mpeg2 *d,
+                           const struct SDKDVDPSPacket *packet)
+{
+	uint32_t need = video_entry_bytes(packet->length);
+	uint32_t read = d->video_fifo_read;
+	uint32_t write = d->video_fifo_write;
+	uint32_t at;
+	struct m2_video_entry *entry;
+
+	if (d->video_fifo_count == 0U) {
+		at = 0U;
+	} else if (write >= read) {
+		if (M2_VIDEO_FIFO_CAPACITY - write >= need) {
+			at = write;
+		} else if (need < read) {
+			if (M2_VIDEO_FIFO_CAPACITY - write >=
+			    sizeof(struct m2_video_entry))
+				((struct m2_video_entry *)(d->video_fifo +
+				                           write))->length =
+					M2_VIDEO_FIFO_WRAP;
+			at = 0U;
+		} else {
+			return 0;
+		}
+	} else if (read - write > need) {
+		at = write;
+	} else {
+		return 0;
+	}
+	entry = (struct m2_video_entry *)(d->video_fifo + at);
+	entry->pts = packet->pts;
+	entry->dts = packet->dts;
+	entry->length = packet->length;
+	entry->reserved = 0U;
+	memcpy(entry + 1, packet->data, packet->length);
+	if (d->video_fifo_count == 0U)
+		d->video_fifo_read = 0U;
+	d->video_fifo_write = at + need;
+	d->video_fifo_count++;
+	return 1;
+}
+
+/* Move every queued video packet into the FIFO while it has room. Each pop
+ * lets the demux parse further, so the audio a muxer placed after a run of
+ * video reaches the audio queue without decoding that video first. */
+static void buffer_video(struct sdk_video_mpeg2 *d)
 {
 	const struct SDKDVDPSPacket *packet;
+
+	while ((packet = sdk_dvd_ps_peek_video(&d->demux)) != 0) {
+		if (!video_fifo_push(d, packet))
+			break;
+		d->video_seen = 1U;
+		if (!d->video_origin_seen && packet->pts != SDK_DVD_PS_NO_TS)
+			seed_origin(d, packet->pts);
+		sdk_dvd_ps_pop_video(&d->demux, 0);
+		drop_audio(d);
+	}
+}
+
+/* Hand one buffered PES to libmpeg2 per call. mpeg2_tag_picture() latches
+ * the tag onto the next picture the decoder PARSES, so a PTS-bearing PES
+ * must be tagged and handed over in its own step: batching several pictures
+ * into one mpeg2_buffer() would leave only the last tag set when parsing
+ * runs. */
+static int feed_video(struct sdk_video_mpeg2 *d)
+{
+	struct m2_video_entry *entry;
 	uint32_t tag;
 
-	packet = sdk_dvd_ps_peek_video(&d->demux);
-	if (!packet)
+	buffer_video(d);
+	entry = video_fifo_head(d);
+	if (!entry)
 		return 0;
-	if (packet->length > M2_ES_CAPACITY - d->es_len)
-		return 0;
-	seed_video_origin(d);
-	d->video_seen = 1U;
 	tag = d->next_tag++;
-	if (packet->pts != SDK_DVD_PS_NO_TS ||
-	    packet->dts != SDK_DVD_PS_NO_TS) {
+	if (entry->pts != SDK_DVD_PS_NO_TS ||
+	    entry->dts != SDK_DVD_PS_NO_TS) {
 		pts_slot_store(d, tag,
-		               packet->pts == SDK_DVD_PS_NO_TS
-		               ? M2_NO_PTS : packet->pts,
-		               packet->dts == SDK_DVD_PS_NO_TS
-		               ? M2_NO_PTS : packet->dts);
+		               entry->pts == SDK_DVD_PS_NO_TS
+		               ? M2_NO_PTS : entry->pts,
+		               entry->dts == SDK_DVD_PS_NO_TS
+		               ? M2_NO_PTS : entry->dts);
 		mpeg2_tag_picture(d->decoder, tag, 0U);
 	}
-	memcpy(d->es + d->es_len, packet->data, packet->length);
-	d->es_len += packet->length;
-	mpeg2_buffer(d->decoder, d->es, d->es + d->es_len);
-	d->es_len = 0U;
-	sdk_dvd_ps_pop_video(&d->demux, 0);
-	drop_audio(d);
+	/* libmpeg2 reads the buffer until it asks for more, and the FIFO
+	 * entry is reused once popped: hand over a copy. */
+	memcpy(d->es, entry + 1, entry->length);
+	mpeg2_buffer(d->decoder, d->es, d->es + entry->length);
+	video_fifo_pop(d);
+	buffer_video(d);
 	return 1;
 }
 
@@ -1067,7 +1177,10 @@ static void *mpeg2_create(uint32_t pool_owner)
 		return 0;
 	}
 	d->es = (uint8_t *)M2_MALLOC(M2_ES_CAPACITY);
-	if (!d->es) {
+	d->video_fifo = (uint8_t *)M2_MALLOC(M2_VIDEO_FIFO_CAPACITY);
+	if (!d->es || !d->video_fifo) {
+		M2_FREE(d->video_fifo);
+		M2_FREE(d->es);
 		mpeg2_close(d->decoder);
 		M2_FREE(d);
 		return 0;
@@ -1095,6 +1208,7 @@ static void mpeg2_destroy(void *decoder)
 		mpeg2_close(d->decoder);
 	M2_FREE(d->mp2_input);
 	sdk_dvd_ac3_destroy(&d->ac3);
+	M2_FREE(d->video_fifo);
 	M2_FREE(d->es);
 	M2_FREE(d);
 }
@@ -1111,6 +1225,20 @@ static int mpeg2_write(void *decoder, const uint8_t *src, uint32_t length,
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
 	update_audio_drop_policy(d);
 	sdk_dvd_ps_write(&d->demux, src, length, &used, eof);
+	/* Buffering video lets the demux parse further: offer it the rest
+	 * of this write as long as it takes more. */
+	for (;;) {
+		uint32_t more = 0U;
+
+		buffer_video(d);
+		if (used == length)
+			break;
+		sdk_dvd_ps_write(&d->demux, src + used, length - used, &more,
+		                 eof);
+		if (more == 0U)
+			break;
+		used += more;
+	}
 	if (eof && used == length)
 		d->input_eof = 1U;
 	if (accepted)
@@ -1162,7 +1290,8 @@ static int mpeg2_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 	if (!d || !frame || d->failed)
 		return SDK_VIDEO_BACKEND_ERROR;
 	update_audio_drop_policy(d);
-	seed_video_origin(d);
+	buffer_video(d);
+	seed_audio_only_origin(d);
 	if (d->media_configured)
 		route_audio_queue(d);
 	else
