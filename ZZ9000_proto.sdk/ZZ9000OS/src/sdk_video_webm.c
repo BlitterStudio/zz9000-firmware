@@ -36,6 +36,13 @@
 #include "tremor/codec_internal.h"
 
 #define WEBM_WINDOW_SLACK (64U * 1024U)
+/* Input taken ahead of the demux once the header has parsed. The window
+ * could hold 4 MB, but the client reads every byte it is offered while the
+ * picture waits (ZZPlay stalled the first seconds of each file loading it
+ * whole), and compaction moves what is buffered. 256 KB is over a second
+ * of the 1080p60 test clip and covers the 200 ms audio read-ahead at
+ * 10 Mbit/s; a demux waiting inside a larger element takes what fits. */
+#define WEBM_INPUT_AHEAD (256U * 1024U)
 /* Blocks of 2 MB or more (1080p VP9 frames) get their own regions; the
  * rest of the decoder shares 4 MB ones. */
 #define WEBM_HEAP_REGION (4U * 1024U * 1024U)
@@ -91,6 +98,7 @@ struct sdk_video_webm {
 	uint32_t media_event_flags;
 	uint8_t pcm_backpressure;
 	uint8_t have_stashed_video;
+	uint8_t input_wanted;   /* the last pull stopped for more input */
 	struct SDKVideoMediaConfig media;
 	struct SDKMediaTimeline timeline;
 	vpx_codec_ctx_t vpx;
@@ -347,6 +355,7 @@ static int pull_block(struct sdk_video_webm *d, struct webm_block *blk)
 	if (rc < 0 && d->demux.error == WEBM_ERR_NEED) {
 		d->demux = saved;
 		webm_window_rewind(&d->win);
+		d->input_wanted = 1U;
 		/* An element (or skip) larger than the window would leave the
 		 * client feeding a full window forever. */
 		if (webm_window_exhausted(&d->win, d->win.mark)) {
@@ -369,6 +378,7 @@ static int pull_block(struct sdk_video_webm *d, struct webm_block *blk)
 			d->failed = 1U;
 		return -1;
 	}
+	d->input_wanted = 0U;
 	return 1;
 }
 
@@ -823,6 +833,7 @@ static int webm_write(void *opaque, const uint8_t *src, uint32_t length,
 {
 	struct sdk_video_webm *d = (struct sdk_video_webm *)opaque;
 	uint32_t space;
+	int oversized = 0;
 #ifndef SDK_VIDEO_HOST_TEST
 	int jumped;
 #endif
@@ -833,8 +844,29 @@ static int webm_write(void *opaque, const uint8_t *src, uint32_t length,
 		return SDK_VIDEO_BACKEND_WRITE_UNSUPPORTED;
 	if (length != 0U && !src)
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
-	if (d->opened)
-		webm_window_compact(&d->win);
+	if (d->opened) {
+		uint32_t ahead = d->win.start + d->win.filled - d->win.cursor;
+
+		/* A demux still waiting with the limit already buffered is
+		 * inside an element larger than the limit: take what fits
+		 * until a pull completes it. */
+		oversized = ahead >= WEBM_INPUT_AHEAD && d->input_wanted;
+		if (!oversized) {
+			uint32_t room = ahead < WEBM_INPUT_AHEAD
+				? WEBM_INPUT_AHEAD - ahead : 0U;
+
+			if (length != 0U && room == 0U)
+				return SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE;
+			if (length > room) {
+				length = room;
+				eof = 0;
+			}
+		}
+		/* Compact only when the tail cannot take the write, so the
+		 * buffered bytes move once per window, not once per write. */
+		if (length > webm_window_space(&d->win))
+			webm_window_compact(&d->win);
+	}
 	/* Take what fits: a write larger than the space left would otherwise
 	 * be refused forever once the window is nearly full, and the demux
 	 * could never see the window as exhausted. The stream reports the
@@ -859,6 +891,9 @@ static int webm_write(void *opaque, const uint8_t *src, uint32_t length,
 	heap_select(d);
 #endif
 	(void)webm_window_append(&d->win, src, length);
+	/* Below the limit the demux has not tried this input yet. */
+	if (length != 0U && !oversized)
+		d->input_wanted = 0U;
 	if (eof)
 		d->win.eof = 1;
 	*accepted = length;

@@ -659,6 +659,119 @@ static void test_partial_final_write(void)
 	free(tail);
 }
 
+/* The window holds 4 MiB, but input far ahead of the demux only costs: the
+ * client spends the frame period reading it (the picture stalled for the
+ * first seconds while ZZPlay loaded whole files) and every write moves all
+ * of it down the window. Input well ahead is taken in part, and the rest
+ * as the demux consumes it. */
+static void test_input_ahead_is_limited(void)
+{
+	static struct stream s;
+	const uint32_t blocks = 100U * 1024U;
+	const uint32_t len = blocks * BLOCK_BYTES;
+	uint8_t *tail = (uint8_t *)malloc(len);
+	void *dec = open_decoder();
+	uint32_t accepted = 0U;
+	uint32_t off;
+	uint32_t frames = 0U;
+	uint32_t i;
+	int rc;
+
+	check(tail != 0, "tail allocation");
+	if (!tail) {
+		ops->destroy(dec);
+		return;
+	}
+	for (i = 0U; i < blocks; i++)
+		put_block(tail + i * BLOCK_BYTES, i == 0U, (uint8_t)(i & 0x7FU),
+			  (int16_t)(i & 0x3FFU));
+	stream_head(&s);
+	check(feed(dec, s.bytes, s.n, s.n), "head write");
+	check(decode(dec) == SDK_VIDEO_BACKEND_NEED_INPUT, "header parses");
+	check(ops->write(dec, tail, len, 1, &accepted) ==
+		      SDK_VIDEO_BACKEND_WRITE_OK && accepted != 0U &&
+	      accepted < len,
+	      "input far ahead of the demux is taken in part, window or not");
+	off = accepted;
+	accepted = 0U;
+	check(ops->write(dec, tail + off, len - off, 1, &accepted) ==
+		      SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE && accepted == 0U,
+	      "and nothing more until the demux consumes some");
+	while (off < len) {
+		while ((rc = decode(dec)) == SDK_VIDEO_BACKEND_FRAME)
+			frames++;
+		accepted = 0U;
+		rc = ops->write(dec, tail + off, len - off, 1, &accepted);
+		if (rc != SDK_VIDEO_BACKEND_WRITE_OK &&
+		    rc != SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE)
+			break;
+		off += accepted;
+	}
+	while ((rc = decode(dec)) == SDK_VIDEO_BACKEND_FRAME)
+		frames++;
+	check(off == len && rc == SDK_VIDEO_BACKEND_DONE && frames == blocks,
+	      "the rest arrives as it is consumed and every block decodes");
+	ops->destroy(dec);
+	free(tail);
+}
+
+/* A single block larger than the read-ahead limit (a big keyframe) must
+ * still arrive whole: the demux waiting inside it takes what fits. Fed as
+ * ZZPlay does (up to five 16 KB writes per pass, one decode per pass), it
+ * must not slow to one chunk per pass, or a 1 MB keyframe takes about 50
+ * frame periods to load instead of about 13. */
+static void test_block_larger_than_input_ahead(void)
+{
+	static struct stream s;
+	const uint32_t payload = 1024U * 1024U;
+	const uint32_t size = 4U + payload;
+	const uint32_t len = 4U + size;
+	const uint32_t chunk = 16U * 1024U;
+	uint8_t *blk = (uint8_t *)calloc(1U, len);
+	void *dec = open_decoder();
+	uint32_t off = 0U;
+	uint32_t passes;
+	int rc = SDK_VIDEO_BACKEND_NEED_INPUT;
+
+	check(blk != 0, "block allocation");
+	if (!blk) {
+		ops->destroy(dec);
+		return;
+	}
+	/* SimpleBlock, 3-byte size, track 1, timecode 0, keyframe. */
+	blk[0] = 0xA3;
+	blk[1] = (uint8_t)(0x20U | (size >> 16));
+	blk[2] = (uint8_t)(size >> 8);
+	blk[3] = (uint8_t)size;
+	blk[4] = 0x81;
+	blk[7] = 0x80;
+	blk[8] = 0x10;
+	blk[9] = 0x42;
+	stream_head(&s);
+	check(feed(dec, s.bytes, s.n, s.n), "head write");
+	for (passes = 0U; passes < 128U && rc == SDK_VIDEO_BACKEND_NEED_INPUT;
+	     passes++) {
+		uint32_t round;
+
+		for (round = 0U; round < 5U && off < len; round++) {
+			uint32_t want = len - off < chunk ? len - off : chunk;
+			uint32_t accepted = 0U;
+			int wr = ops->write(dec, blk + off, want,
+					    off + want == len, &accepted);
+
+			off += accepted;
+			if (wr != SDK_VIDEO_BACKEND_WRITE_OK || accepted != want)
+				break;
+		}
+		rc = decode(dec);
+	}
+	check(off == len && rc == SDK_VIDEO_BACKEND_FRAME && ndecoded == 1U &&
+	      decoded[0] == 0x42U, "a block larger than the limit decodes");
+	check(passes <= 20U, "and loads at the client's full feed rate");
+	ops->destroy(dec);
+	free(blk);
+}
+
 /* The same header with an Opus track 2 (stereo, no pre-skip). */
 static const uint8_t webm_av_head[] = {
 	0x1A, 0x45, 0xDF, 0xA3, 0x87, 0x42, 0x82, 0x84, 'w', 'e', 'b', 'm',
@@ -812,6 +925,8 @@ int main(void)
 		test_window_exhausted_in_header();
 		test_partial_final_write();
 		test_audio_demuxed_ahead_of_video();
+		test_input_ahead_is_limited();
+		test_block_larger_than_input_ahead();
 	}
 	if (failures) {
 		fprintf(stderr, "webm_backend_test: %d failure(s)\n", failures);
