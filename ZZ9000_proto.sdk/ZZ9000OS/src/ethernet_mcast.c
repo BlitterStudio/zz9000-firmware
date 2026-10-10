@@ -7,6 +7,7 @@ u32 ethernet_emac_base(void);
 
 void ethernet_log_status(const char *reason);
 int ethernet_restart_dma(const char *reason);
+void ethernet_set_rx_offset2_quiet(int on);
 int ethernet_pause_rx_irq(void);
 void ethernet_clear_host_state(void);
 void ethernet_resume_rx_irq(int paused);
@@ -47,7 +48,8 @@ void ethernet_set_multicast_hash(u16 command)
 
 u16 ethernet_get_multicast_config(void)
 {
-	u16 config = ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE;
+	u16 config = ETH_CONFIG_CAP_MULTICAST_HASH | ETH_CONFIG_CAP_LINK_STATE |
+	             ETH_CONFIG_CAP_RX_OFFSET2;
 
 	/* READY is reached only after PHY auto-negotiation completes, i.e.
 	 * a cable was connected at some point since power-on. It is not
@@ -82,6 +84,8 @@ void ethernet_reset_for_amiga(void)
 	/* A rebooted SANA-II driver owns no memberships. Close the receive gate
 	 * even though the GEM hash registers themselves survive a warm reset. */
 	ethernet_set_multicast_hash(ETH_CONFIG_HASH_RESET);
+	/* And the old receive layout: a new driver asks again if it can. */
+	ethernet_set_rx_offset2_quiet(0);
 
 	if (ethernet_task_state == ETH_TASK_READY) {
 		ethernet_restart_dma("amiga-reset");
