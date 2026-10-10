@@ -190,9 +190,21 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 
 				if (read_id_size(d, &cid, &csz, &cu) != 0)
 					return -1;
-				if (cu || csz > 8 || csz > room(d, child_end))
+				if (cu || csz > room(d, child_end))
 					return fail(d, WEBM_ERR_LAYOUT);
 				cn = (uint32_t)csz;
+				/* Colour, Projection and other metadata the
+				 * demux does not read can be masters or longer
+				 * than any number it does read: skip them. */
+				if (cn > 8U) {
+					if (cid == ID_WIDTH || cid == ID_HEIGHT ||
+					    cid == ID_CHANNELS ||
+					    cid == ID_SAMPLERATE)
+						return fail(d, WEBM_ERR_LAYOUT);
+					if (skip_n(d, cn) != 0)
+						return -1;
+					continue;
+				}
 				if (read_full(d, scratch, cn) != 0)
 					return -1;
 				if (cid == ID_WIDTH)

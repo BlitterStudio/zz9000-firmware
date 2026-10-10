@@ -268,6 +268,77 @@ static int test_audio_tracks(void)
 	return failed;
 }
 
+/* Encoders put master and long elements inside Video and Audio: Colour
+ * (here a copy of what ffmpeg writes for a BT.709 phone clip), Projection,
+ * and others this demux does not read. They must be skipped, and the sizes
+ * around them still read. */
+static int test_track_metadata_masters(void)
+{
+	static struct webm_demux d;
+	static struct got g;
+	struct buf seg, info, video, colour, track, tracks, audio, atrack;
+	struct buf cluster, file;
+	uint8_t scale[3] = {0x0F, 0x42, 0x40};
+	uint8_t frame[4] = {0x10, 0x00, 0x00, 1};
+	uint8_t projection[20] = {0};
+	float f48k = 48000.0f;
+	const struct webm_track *v, *a;
+	int failed = 0;
+
+	memset(&seg, 0, sizeof(seg));
+	memset(&info, 0, sizeof(info));
+	memset(&video, 0, sizeof(video));
+	memset(&colour, 0, sizeof(colour));
+	memset(&track, 0, sizeof(track));
+	memset(&tracks, 0, sizeof(tracks));
+	memset(&audio, 0, sizeof(audio));
+	memset(&atrack, 0, sizeof(atrack));
+	memset(&cluster, 0, sizeof(cluster));
+	belem(&info, 0x2AD7B1, scale, 3);
+	bnest(&seg, 0x1549A966, &info);
+	bu16(&video, 0xB0, 720);
+	bu8(&colour, 0x55BA, 1);
+	bu8(&colour, 0x55B1, 1);
+	bu8(&colour, 0x55BB, 1);
+	bu8(&colour, 0x55B9, 1);
+	bnest(&video, 0x55B0, &colour);
+	belem(&video, 0x7670, projection, sizeof(projection));
+	bu16(&video, 0xBA, 1280);
+	bu8(&track, 0xD7, 1);
+	bu8(&track, 0x83, 1);
+	belem(&track, 0x86, "V_VP9", 5);
+	bnest(&track, 0xE0, &video);
+	bnest(&tracks, 0xAE, &track);
+	belem(&audio, 0x7E7B, projection, 12);
+	bu8(&audio, 0x9F, 2);
+	bfloat_be(&audio, 0xB5, &f48k, 4);
+	bu8(&atrack, 0xD7, 2);
+	bu8(&atrack, 0x83, 2);
+	belem(&atrack, 0x86, "A_OPUS", 6);
+	bnest(&atrack, 0xE1, &audio);
+	bnest(&tracks, 0xAE, &atrack);
+	bnest(&seg, 0x1654AE6B, &tracks);
+	bu8(&cluster, 0xE7, 0);
+	add_block(&cluster, 0xA3, 1, 0, 0x80, frame, sizeof(frame));
+	bnest(&seg, 0x1F43B675, &cluster);
+	file = make_file(&seg, SEG_SIZED);
+	if (collect(&file, 1, &d, &g) != 0 || g.n != 1U) {
+		fprintf(stderr, "metadata masters: n=%u err=%d\n", g.n, d.error);
+		free(file.p);
+		return 1;
+	}
+	v = webm_track(&d, 1);
+	a = webm_track(&d, 2);
+	if (!v || v->width != 720U || v->height != 1280U ||
+	    v->codec != WEBM_CODEC_VP9 || !a || a->channels != 2U ||
+	    a->rate != 48000U) {
+		fprintf(stderr, "metadata masters: track fields\n");
+		failed = 1;
+	}
+	free(file.p);
+	return failed;
+}
+
 static int check_laces(const struct got *g, unsigned first, unsigned count,
 		       const uint32_t *sizes, uint8_t seed, const char *name)
 {
@@ -530,6 +601,7 @@ int main(void)
 	}
 	free(laced.p);
 	failed |= test_audio_tracks();
+	failed |= test_track_metadata_masters();
 	failed |= test_lacing();
 	failed |= test_multi_cluster();
 	failed |= test_blockgroup_keyframes();
