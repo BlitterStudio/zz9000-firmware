@@ -2,7 +2,7 @@
  * WebM media-session backend: bounded demux, libvpx VP8/VP9 on core 1,
  * Opus or Tremor into the session PCM ring. Timestamps are converted to
  * the 90 kHz media clock with TimestampScale. Decoder allocations go
- * through the tracked arena (30 MB cap); compressed input is a separate
+ * through the tracked arena (64 MB cap); compressed input is a separate
  * 4 MB window. Anything outside the tested subset fails closed.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -39,7 +39,9 @@
 /* Blocks of 2 MB or more (1080p VP9 frames) get their own regions; the
  * rest of the decoder shares 4 MB ones. */
 #define WEBM_HEAP_REGION (4U * 1024U * 1024U)
-#define WEBM_HEAP_LIMIT (30U * 1024U * 1024U)
+/* 1080p VP9 measured on host: 21 MB live for a typical libvpx stream
+ * (5 of libvpx's 12 frame buffers); all 12 in use is about 46 MB. */
+#define WEBM_HEAP_LIMIT (64U * 1024U * 1024U)
 #define WEBM_PCM_ANCHORS 128U
 #define WEBM_SKIP_BUDGET 128U
 #define WEBM_HELD_AUDIO (8U * 1024U)
