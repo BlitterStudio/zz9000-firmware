@@ -5628,9 +5628,7 @@ static uint16_t handle_media_session_begin(
 	begin.flags = get_be32(payload->flags);
 	if (!bytes_are_zero(payload->reserved, sizeof(payload->reserved)))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2 ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_OPUS ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_VORBIS) {
+	if (sdk_media_session_audio_uses_ring(begin.audio_codec)) {
 		if (media_pcm_ring)
 			return complete_status(req, comp, SDK_STATUS_BUSY);
 		pcm_ring = find_shared_buffer(begin.pcm_ring_handle);
@@ -5643,9 +5641,7 @@ static uint16_t handle_media_session_begin(
 		begin.pcm_ring = (uint8_t *)(uintptr_t)pcm_ring->address;
 	}
 	status = sdk_media_session_begin(&begin, &result);
-	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2 ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_OPUS ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_VORBIS) {
+	if (sdk_media_session_audio_uses_ring(begin.audio_codec)) {
 		if (status == SDK_STATUS_OK) {
 			media_pcm_ring = pcm_ring;
 			media_pcm_ring_session = result.session;

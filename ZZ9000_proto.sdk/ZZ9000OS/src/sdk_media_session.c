@@ -423,7 +423,7 @@ void sdk_media_session_close_retired(uint32_t session)
 	}
 }
 
-static int media_pcm_codec(uint32_t codec)
+int sdk_media_session_audio_uses_ring(uint32_t codec)
 {
 	return codec == SDK_MEDIA_AUDIO_MP2 ||
 	       codec == SDK_MEDIA_AUDIO_LPCM ||
@@ -443,7 +443,7 @@ uint16_t sdk_media_session_begin(
 	if (!begin || !result || begin->flags != 0U)
 		return SDK_STATUS_BAD_REQUEST;
 	if (begin->audio_codec != SDK_MEDIA_AUDIO_NONE &&
-	    !media_pcm_codec(begin->audio_codec))
+	    !sdk_media_session_audio_uses_ring(begin->audio_codec))
 		return SDK_STATUS_UNSUPPORTED;
 	if (begin->audio_codec == SDK_MEDIA_AUDIO_NONE &&
 	    (begin->pcm_ring_handle != 0U || begin->pcm_ring ||
@@ -451,7 +451,7 @@ uint16_t sdk_media_session_begin(
 	     begin->pcm_low_water_bytes != 0U ||
 	     begin->pcm_high_water_bytes != 0U))
 		return SDK_STATUS_BAD_REQUEST;
-	if (media_pcm_codec(begin->audio_codec) &&
+	if (sdk_media_session_audio_uses_ring(begin->audio_codec) &&
 	    (begin->pcm_ring_handle == 0U || !begin->pcm_ring ||
 	    begin->pcm_ring_capacity <
 		    1152U * SDK_VIDEO_MEDIA_PCM_FRAME_BYTES ||
@@ -781,7 +781,7 @@ uint16_t sdk_media_session_audio_bind(
 		return SDK_STATUS_BAD_HANDLE;
 	if (media.state == SDK_MEDIA_SESSION_STATE_ERROR)
 		return SDK_STATUS_IO_ERROR;
-	if (!media_pcm_codec(media.audio_codec))
+	if (!sdk_media_session_audio_uses_ring(media.audio_codec))
 		return SDK_STATUS_UNSUPPORTED;
 	if (!media.audio_bound) {
 		if (flags != 0U)

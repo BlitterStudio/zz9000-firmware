@@ -868,11 +868,12 @@ static int mpeg2_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 	return SDK_VIDEO_BACKEND_NEED_INPUT;
 }
 
-/* DVD Program Stream audio: MP2, LPCM or AC-3. A media session always
- * carries one; video-only playback uses a legacy session. */
+/* DVD Program Stream audio: MP2, LPCM or AC-3, or none (a video-only or
+ * muted file: the audio packets are dropped). */
 static int mpeg2_audio_ok(uint32_t audio_codec)
 {
-	return audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2 ||
+	return audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE ||
+	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2 ||
 	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_LPCM ||
 	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_AC3;
 }
@@ -886,6 +887,17 @@ static int mpeg2_configure_media(void *decoder,
 		return 0;
 	if (!mpeg2_audio_ok(config->audio_codec))
 		return 0;
+	/* No audio: no ring, and route_audio never selects a stream, so
+	 * every audio packet is dropped and the end waits on video only. */
+	if (config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE) {
+		if (config->pcm_ring || config->pcm_ring_capacity != 0U ||
+		    config->pcm_low_water_bytes != 0U ||
+		    config->pcm_high_water_bytes != 0U)
+			return 0;
+		d->media = *config;
+		d->media_configured = 1U;
+		return 1;
+	}
 	if (!config->pcm_ring || config->pcm_ring_capacity == 0U ||
 	    config->pcm_ring_capacity > SDK_VIDEO_MEDIA_MAX_PCM_RING ||
 	    config->pcm_low_water_bytes >= config->pcm_ring_capacity)

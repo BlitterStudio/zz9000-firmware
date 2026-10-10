@@ -780,13 +780,82 @@ static int test_backend_audio_rules(void)
 	    m1->audio_ok(SDK_VIDEO_MEDIA_AUDIO_OPUS) ||
 	    m1->audio_ok(SDK_VIDEO_MEDIA_AUDIO_VORBIS))
 		return 2;
-	if (m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_NONE) ||
+	/* No audio is a media session too: ZZPlay opens video-only (or muted)
+	 * MPEG-2 files that way, as it does MPEG-1. */
+	if (!m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_NONE) ||
 	    !m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_MP2) ||
 	    !m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_LPCM) ||
 	    !m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_AC3) ||
 	    m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_OPUS) ||
 	    m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_VORBIS))
 		return 3;
+	return 0;
+}
+
+/* 6b'. A media session without audio decodes every picture, drops the
+ * Program Stream's audio and ends, exactly like an unconfigured decoder. */
+static int test_media_without_audio(void)
+{
+	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	struct SDKVideoMediaConfig cfg = {0};
+	struct SDKVideoMediaInfo info;
+	struct SDKVideoDecodedFrame frame;
+	struct stream_result legacy;
+	uint32_t offset = 0U;
+	uint32_t frames = 0U;
+	uint32_t calls;
+	int done = 0;
+	void *decoder;
+
+	if (run_decode_test(zz9k_dvd_ac3_192_fixture,
+	                    zz9k_dvd_ac3_192_fixture_len, 2048U,
+	                    SDK_VIDEO_MEDIA_AUDIO_NONE, &legacy) != 0 ||
+	    legacy.frame_count == 0U)
+		return 1;
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 2;
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_NONE;
+	if (!ops->configure_media(decoder, &cfg)) {
+		ops->destroy(decoder);
+		return 3;
+	}
+	for (calls = 0U; calls < 200000U && !done; calls++) {
+		int res;
+
+		if (offset < zz9k_dvd_ac3_192_fixture_len) {
+			uint32_t n = zz9k_dvd_ac3_192_fixture_len - offset;
+			uint32_t accepted = 0U;
+
+			if (n > 2048U)
+				n = 2048U;
+			if (!ops->write(decoder, zz9k_dvd_ac3_192_fixture + offset,
+			                n, offset + n >= zz9k_dvd_ac3_192_fixture_len,
+			                &accepted)) {
+				ops->destroy(decoder);
+				return 4;
+			}
+			offset += accepted;
+		}
+		res = ops->decode(decoder, &frame);
+		if (res == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 5;
+		}
+		if (res == SDK_VIDEO_BACKEND_FRAME)
+			frames++;
+		done = res == SDK_VIDEO_BACKEND_DONE;
+	}
+	if (ops->get_media_info(decoder, &info) && info.pcm_produced != 0U) {
+		ops->destroy(decoder);
+		return 6;
+	}
+	ops->destroy(decoder);
+	if (!done || frames != legacy.frame_count) {
+		fprintf(stderr, "test_media_without_audio: done=%d frames=%u "
+		        "(expected %u)\n", done, frames, legacy.frame_count);
+		return 7;
+	}
 	return 0;
 }
 
@@ -1596,6 +1665,12 @@ int main(void)
 		return 130 + err;
 	}
 	printf("PASS: test_backend_audio_rules (PS backends own their audio)\n");
+
+	if ((err = test_media_without_audio()) != 0) {
+		fprintf(stderr, "FAIL: test_media_without_audio (code %d)\n", err);
+		return 200 + err;
+	}
+	printf("PASS: test_media_without_audio (MPEG-2 media session, no audio)\n");
 
 	if ((err = test_ac3_truncated_mid_frame()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_truncated_mid_frame (code %d)\n", err);
