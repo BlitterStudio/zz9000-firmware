@@ -32,6 +32,14 @@ ZZPlayRect zzplay_geometry_fit(uint16_t src_w, uint16_t src_h,
                                uint16_t avail_w, uint16_t avail_h);
 
 
+/* True when a `width` x `height` area already shows `src_w` x `src_h` at
+ * its aspect to within the one pixel integer fitting rounds away. Every
+ * zzplay_geometry_fit() result passes, so a window resized to a fit must
+ * be left alone: fitting it again rounds down once more, and each
+ * resulting resize would shrink it by another pixel. */
+int zzplay_geometry_is_fitted(uint16_t width, uint16_t height,
+                              uint16_t src_w, uint16_t src_h);
+
 /* True when the fit is exactly 1:1, i.e. the native fast path is reachable
  * at this size. */
 int zzplay_geometry_is_exact(const ZZPlayRect *rect,

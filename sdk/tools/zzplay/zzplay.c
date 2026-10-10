@@ -1042,7 +1042,11 @@ static void zzplay_apply_resize(struct ZZPlayRuntime *runtime)
   if (fitted.width == 0U || fitted.height == 0U) {
     return;
   }
-  if (fitted.width != inner_w || fitted.height != inner_h) {
+  /* Only an off-aspect window is resized. Refitting a fitted one rounds
+   * down again, and the resize it causes comes straight back here. */
+  if (!zzplay_geometry_is_fitted(inner_w, inner_h,
+                                 runtime->video_info.width,
+                                 runtime->video_info.height)) {
     ChangeWindowBox(window, window->LeftEdge, window->TopEdge,
                     (LONG)fitted.width + border_w,
                     (LONG)fitted.height + border_h);
