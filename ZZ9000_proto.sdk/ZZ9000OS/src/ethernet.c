@@ -643,6 +643,9 @@ void ethernet_alloc_rx_frames() {
 		return;
 	}
 
+	/* Zero free descriptors is the healthy case: every one is already armed.
+	 * It is what a refill finds when RX flow control ends after the PAUSE
+	 * frame held the sender off, so it is not reported. */
 	int free_bds = XEmacPs_BdRingGetFreeCnt(rxring);
 
 	for (int i=0; i<free_bds && ethernet_backlog_pending() < ETH_BACKLOG_HIGH_WATERMARK; i++) {
@@ -666,10 +669,6 @@ void ethernet_alloc_rx_frames() {
 				break;
 			}
 		}
-	}
-
-	if (!free_bds) {
-		printf("EMAC: no BDs free for allocation\n");
 	}
 }
 
