@@ -24,6 +24,7 @@
 #include "sdk_mailbox.h"
 #include "sdk_media_profile.h"
 #include "sdk_media_session.h"
+#include "sdk_image_stream.h"
 #include "sdk_video_stream.h"
 #include "sdk_video_yuy2.h"
 #include "scheduler.h"
@@ -68,6 +69,7 @@ static struct {
 	                                     * mode switches) */
 	uint8_t compose_target;
 	uint32_t direct_session;
+	uint32_t image_session;     /* last SDK animation presented to the PIP */
 	uint32_t hw_generation;
 	uint32_t hw_scan_addr;
 	volatile uint8_t hw_flip_pending;
@@ -77,6 +79,7 @@ static struct {
 } ov;
 
 extern uint8_t stride_div;
+static int overlay_copy_image_canvas(uint32_t session);
 
 static void overlay_free_shadows(void)
 {
@@ -119,12 +122,26 @@ void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
 	ov.hw_handoff_addr = 0U;
 	overlay_schedule_reset(&ov.schedule);
 	ov.direct_session = 0U;
+	ov.image_session = 0U;
 	ov.hw_scan_addr = 0U;
 	vs->card_feature_enabled[CARD_FEATURE_VIDEO_OVERLAY] = 0;
 }
 
+/* A media session's PRESENT stays pending until overlay_main_poll queues
+ * its compose, and the session cannot decode, discard or close meanwhile.
+ * When the overlay is closed or hidden first (a window closing, the
+ * fullscreen toggle), that compose never comes: release the frame instead.
+ * Nothing reads the decoder planes without a queued compose, and any compose
+ * already queued runs ahead of the next decode on core 1. */
+static void overlay_release_direct_present(void)
+{
+	if (ov.direct_session != 0U)
+		sdk_media_session_present_queued(ov.direct_session);
+}
+
 static void overlay_stop(void)
 {
+	overlay_release_direct_present();
 	overlay_hw_stop();
 	if (ov.compose_in_flight)
 		ov.discard_stale = 1;
@@ -336,6 +353,12 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 		ov.hw_handoff_addr = 0U;
 	}
 	ov.compose_request = (ov.hw_active && ov.direct_session == 0U) ? 0U : 1U;
+	/* A reopened PIP has a fresh bitmap: repaint the animation frame
+	 * that is still on show instead of leaving it blank until the next
+	 * frame (or for good, when paused or ended). */
+	if (ov.image_session != 0U && ov.active &&
+	    !overlay_copy_image_canvas(ov.image_session))
+		ov.image_session = 0U;
 
 	/* UART fingerprint: proves which firmware build handled the SET
 	 * (stale-BOOT.bin bench rounds are otherwise undetectable) and
@@ -349,6 +372,8 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	       (unsigned long)stride, vs->colormode);
 
 out:
+	if (!ov.configured || !ov.active)
+		overlay_release_direct_present();
 	data->u32_user[0] = status;
 	SWAP32(data->u32_user[0]);
 }
@@ -664,6 +689,59 @@ void overlay_video_session_closed(uint32_t session)
 	if (overlay_schedule_refresh_driven(&ov.schedule) &&
 	    ov.configured && ov.active)
 		ov.compose_request = 1;
+}
+
+/* Copy the presented canvas of `session` into the P96 PIP source. The
+ * session is re-validated on every call, so a closed or advanced session is
+ * never read. */
+static int overlay_copy_image_canvas(uint32_t session)
+{
+	uintptr_t address;
+	const uint8_t *src;
+	uint8_t *dst;
+	uint32_t pitch, width, height;
+	uint32_t row_bytes;
+	uint32_t rows;
+	uint32_t y;
+
+	/* The P96 PIP source is host memory the window owner fills; a stale
+	 * snapshot may describe a reallocated bitmap, and a bound SDK video
+	 * session scans its own staging instead. */
+	if (!ov.configured || ov.mode_stale || ov.direct_session != 0U ||
+	    ov.variant != YUV422_VARIANT_CGX || ov.src_addr == 0U)
+		return 0;
+	if (!sdk_image_stream_presented_canvas(session, &address, &pitch,
+	                                       &width, &height) ||
+	    pitch == 0U || width == 0U || height == 0U)
+		return 0;
+	src = (const uint8_t *)address;
+	if (width > ov.src_w)
+		width = ov.src_w;
+	rows = height < ov.src_h ? height : ov.src_h;
+	/* Whole macropixels: an odd final pixel was duplicated by the
+	 * converter, and SET guarantees the source pitch holds it. */
+	row_bytes = ((width + 1U) / 2U) * 4U;
+	if (row_bytes > ov.src_pitch)
+		row_bytes = ov.src_pitch;
+	if (row_bytes > pitch)
+		row_bytes = pitch;
+	dst = (uint8_t *)(uintptr_t)ov.src_addr;
+	for (y = 0U; y < rows; y++)
+		memcpy(dst + y * ov.src_pitch, src + y * pitch, row_bytes);
+	Xil_DCacheFlushRange((INTPTR)dst, (INTPTR)ov.src_pitch * rows);
+	/* The native plane rescans the source every frame; the software
+	 * compositor needs a fresh compose. */
+	if (!ov.hw_active && ov.active)
+		ov.compose_request = 1;
+	return 1;
+}
+
+int overlay_image_frame_present(uint32_t session)
+{
+	/* Remembered so a reopened PIP (fullscreen toggle, P96 bitmap
+	 * reallocation) is repainted at its SET without a second PRESENT. */
+	ov.image_session = session;
+	return overlay_copy_image_canvas(session);
 }
 
 int overlay_scanout_active(void)

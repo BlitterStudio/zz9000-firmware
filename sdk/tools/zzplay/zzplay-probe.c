@@ -2,6 +2,10 @@
 
 #include "zzplay-probe.h"
 
+#include "zz9k/image.h"
+/* Shared with the sound DataType so both claim exactly the same files. */
+#include "../../amiga/datatypes/zz9k_sound_flac.h"
+#include "../../amiga/datatypes/zz9k_sound_vorbis.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -242,6 +246,41 @@ int zzplay_probe_file(FILE *file, ZZPlayVideoInfo *info)
   return found;
 }
 
+int zzplay_probe_webp(const uint8_t *data,
+                      size_t length,
+                      ZZPlayWebPInfo *info)
+{
+  ZZ9KWebPHeader header;
+  ZZ9KWebPParseStatus status;
+
+  if (info) {
+    memset(info, 0, sizeof(*info));
+  }
+  if (!data || length < ZZ9K_WEBP_HEADER_MIN_BYTES) {
+    return 0;
+  }
+  status = zz9k_webp_parse_header(data, (uint32_t)length, &header);
+  if (status != ZZ9K_WEBP_PARSE_READY) {
+    return 0;
+  }
+  if (info) {
+    info->width = header.width;
+    info->height = header.height;
+    info->format = header.format;
+    info->is_animated = header.is_animated ? 1 : 0;
+    info->has_alpha = header.has_alpha ? 1 : 0;
+  }
+  return 1;
+}
+
+int zzplay_webp_info_supported(const ZZPlayWebPInfo *info)
+{
+  return info && info->is_animated &&
+         info->width >= 16U && info->height >= 16U &&
+         info->width <= ZZPLAY_MAX_WIDTH &&
+         info->height <= ZZPLAY_MAX_HEIGHT;
+}
+
 int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
 {
   static uint8_t buffer[ZZPLAY_MP3_PROBE_BYTES];
@@ -253,6 +292,55 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
     return 0;
   }
   memset(info, 0, sizeof(*info));
+
+  if (fseek(file, 0L, SEEK_SET) != 0) {
+    clearerr(file);
+    return 0;
+  }
+  got = fread(buffer, 1U, sizeof(buffer), file);
+  if (got >= ZZ9K_WEBP_HEADER_MIN_BYTES &&
+      zzplay_probe_webp(buffer, got, &info->webp)) {
+    if (info->webp.is_animated) {
+      info->kind = ZZPLAY_MEDIA_KIND_WEBP;
+    } else {
+      info->kind = ZZPLAY_MEDIA_KIND_UNSUPPORTED;
+    }
+    goto done;
+  }
+  {
+    ZZ9KSoundFlacEnvelope flac;
+
+    if (zz9k_sound_recognize_flac(buffer, (uint32_t)got, &flac)) {
+      info->flac.sample_rate = flac.sample_rate;
+      info->flac.channels = flac.channels;
+      info->flac.bits_per_sample = flac.bits_per_sample;
+      info->flac.total_samples = flac.total_samples;
+      info->flac.max_block_size = flac.max_block_size;
+      info->flac.max_frame_bytes = zz9k_sound_flac_max_frame_bytes(&flac);
+      info->kind = ZZPLAY_MEDIA_KIND_FLAC;
+      goto done;
+    }
+  }
+  {
+    ZZ9KSoundVorbisEnvelope vorbis;
+
+    if (zz9k_sound_recognize_vorbis(buffer, (uint32_t)got, &vorbis)) {
+      info->vorbis.sample_rate = vorbis.sample_rate;
+      info->vorbis.channels = vorbis.channels;
+      info->vorbis.serial = vorbis.serial;
+      info->vorbis.nominal_bitrate = vorbis.nominal_bitrate;
+      info->vorbis.max_block_samples = vorbis.max_block_samples;
+      info->kind = ZZPLAY_MEDIA_KIND_VORBIS;
+      goto done;
+    }
+  }
+
+  clearerr(file);
+  if (fseek(file, 0L, SEEK_SET) != 0) {
+    clearerr(file);
+    return 0;
+  }
+
   if (zzplay_probe_file(file, &info->video) &&
       info->video.is_program_stream &&
       info->video.has_video_pes) {
@@ -293,4 +381,47 @@ int zzplay_video_info_supported(const ZZPlayVideoInfo *info)
          info->width <= ZZPLAY_MAX_WIDTH &&
          info->height <= ZZPLAY_MAX_HEIGHT &&
          info->frame_rate_milli != 0U;
+}
+
+int zzplay_ogg_last_granule(FILE *file, uint32_t serial, uint64_t *granule)
+{
+  static uint8_t tail[64U * 1024U];
+  long size;
+  long start;
+  size_t got;
+  size_t i;
+
+  if (!file || !granule || fseek(file, 0L, SEEK_END) != 0 ||
+      (size = ftell(file)) < 27L) {
+    clearerr(file);
+    return 0;
+  }
+  start = size > (long)sizeof(tail) ? size - (long)sizeof(tail) : 0L;
+  if (fseek(file, start, SEEK_SET) != 0) {
+    clearerr(file);
+    return 0;
+  }
+  got = fread(tail, 1U, (size_t)(size - start), file);
+  clearerr(file);
+  for (i = got >= 27U ? got - 27U + 1U : 0U; i-- > 0U;) {
+    const uint8_t *page = tail + i;
+    uint64_t position = 0U;
+    int b;
+
+    if (page[0] != 'O' || page[1] != 'g' || page[2] != 'g' ||
+        page[3] != 'S' || page[4] != 0U ||
+        zz9k_sound_vorbis_le32(page + 14U) != serial ||
+        i + 27U + page[26] > got) {
+      continue;
+    }
+    for (b = 7; b >= 0; b--) {
+      position = (position << 8) | page[6 + b];
+    }
+    /* All ones marks a page on which no packet ends. */
+    if (position != UINT64_MAX) {
+      *granule = position;
+      return 1;
+    }
+  }
+  return 0;
 }

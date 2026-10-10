@@ -71,6 +71,45 @@ static int test_bounds(void)
   return 0;
 }
 
+/* The windowed player refits after every resize, and each refit that
+ * changes the size causes another resize (A4000: a 1080p window on a
+ * 1280x720 screen shrank by a pixel per frame, 1194x672, 1194x671,
+ * 1192x671...). The size a fit produces must be left alone. */
+static int refit_until_stable(uint16_t src_w, uint16_t src_h,
+                              uint16_t avail_w, uint16_t avail_h,
+                              ZZPlayRect *window)
+{
+  unsigned i;
+
+  *window = zzplay_geometry_fit(src_w, src_h, avail_w, avail_h);
+  for (i = 0U; i < 20U; i++) {
+    ZZPlayRect again;
+
+    if (zzplay_geometry_is_fitted(window->width, window->height,
+                                  src_w, src_h))
+      return 0;
+    again = zzplay_geometry_fit(src_w, src_h, window->width, window->height);
+    window->width = again.width;
+    window->height = again.height;
+  }
+  return 1;
+}
+
+static int test_refit_is_stable(void)
+{
+  ZZPlayRect w;
+
+  if (refit_until_stable(1920U, 1080U, 1248U, 672U, &w)) return 1;
+  if (w.width != 1194U || w.height != 672U) return 2;
+  if (refit_until_stable(720U, 1280U, 1248U, 672U, &w)) return 3;
+  if (w.width != 378U || w.height != 672U) return 4;
+  /* A window the user dragged off the aspect is still corrected. */
+  if (zzplay_geometry_is_fitted(1194U, 600U, 1920U, 1080U)) return 5;
+  if (!zzplay_geometry_is_fitted(640U, 480U, 640U, 480U)) return 6;
+  if (zzplay_geometry_is_fitted(640U, 482U, 640U, 480U)) return 7;
+  return 0;
+}
+
 
 static int test_geometry_memory(void)
 {
@@ -167,6 +206,8 @@ int main(void)
   if (rc != 0) { printf("memory %d\n", rc); return 110 + rc; }
   rc = test_controls();
   if (rc != 0) { printf("controls %d\n", rc); return 130 + rc; }
+  rc = test_refit_is_stable();
+  if (rc != 0) { printf("refit %d\n", rc); return 150 + rc; }
   printf("zzplay_geometry_test: all checks passed\n");
   return 0;
 }

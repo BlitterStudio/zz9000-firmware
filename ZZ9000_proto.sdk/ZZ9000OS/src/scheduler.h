@@ -42,18 +42,26 @@
 #define TASKQ_OP_DECODE_MP3          0x0500u
 
 /* Image-session opcodes mirrored from sdk_mailbox.h. These run the
- * session's libjpeg/libpng objects, whose heap blocks live in the owning
- * core's cache: a core-1-affine session's feed/close must ONLY ever
+ * session's libjpeg/libpng/libwebp objects, whose heap blocks live in the
+ * owning core's cache: a core-1-affine session's feed/close must ONLY ever
  * execute on core 1, so both classify TASK_LONG unconditionally (LONG is
  * never drained by core 0). */
 #define TASKQ_OP_IMAGE_SESSION_FEED  0x0405u
 #define TASKQ_OP_IMAGE_SESSION_CLOSE 0x0406u
+#define TASKQ_OP_IMAGE_ANIMATION_FRAME_NEXT    0x0408u
+#define TASKQ_OP_IMAGE_ANIMATION_FRAME_PRESENT 0x0409u
+#define TASKQ_OP_IMAGE_ANIMATION_FRAME_RETIRE  0x040au
+#define TASKQ_OP_IMAGE_ANIMATION_RESTART       0x040bu
 
 /* Audio-stream opcodes mirrored from sdk_mailbox.h. A core-1-affine
  * stream's mp3 staging ring is cache-owned by core 1, so feed/read (both
- * run the decoder) must ONLY execute there: TASK_LONG unconditionally. */
+ * run the decoder) must ONLY execute there: TASK_LONG unconditionally.
+ * CLOSE is only an internal task (request_id 0) that releases a closed FLAC
+ * or Vorbis stream's decoder heap (libFLAC / the Tremor arena), which is
+ * core-1 owned and tracked; it must likewise never drain on core 0. */
 #define TASKQ_OP_AUDIO_STREAM_FEED   0x0504u
 #define TASKQ_OP_AUDIO_STREAM_READ   0x0505u
+#define TASKQ_OP_AUDIO_STREAM_CLOSE  0x0506u
 
 /* Public video-session worker opcodes. Decoder state and its tracked heap
  * graph are core-1-owned, so WRITE/DECODE/CLOSE are always TASK_LONG. */
@@ -112,6 +120,17 @@ typedef struct {                /* coherent control block at the queue region */
   volatile uint32_t core1_alive;            /* worker sets 1 on entry */
   volatile uint32_t tasks_on_core1;         /* core-1 worker: tasks it executed */
   volatile uint32_t tasks_on_core0;         /* core-0: inline dispatch + drains  */
+  /* Cold-restart handshake: core 0 sets park_request; core 1, when idle or
+   * parked after a fault, cleans its L1 D-cache and sets parked. Holding a
+   * core in reset drops its dirty L1 lines (the SCU cannot snoop a stopped
+   * core), so without this core 0's reclaim reads stale heap metadata. */
+  volatile uint32_t core1_park_request;
+  volatile uint32_t core1_parked;
+  /* Reset-time reclaim without a CPU reset: core 0 sets reclaim_request on
+   * an idle, healthy core 1, which frees its own tracked decode blocks and
+   * sets reclaim_done. Only a faulted or stuck worker is cold-restarted. */
+  volatile uint32_t core1_reclaim_request;
+  volatile uint32_t core1_reclaim_done;
 } taskq_shared_t;
 
 typedef struct {
@@ -165,8 +184,12 @@ void scheduler_boot_init(void);            /* core 0: init queue + watchdog at b
 int  scheduler_core1_available(void);      /* core 1 started and not watchdog-disabled */
 void scheduler_confirm_core1_boot(void);   /* core 0: bounded wait for worker liveness at boot */
 void scheduler_core1_worker(void);         /* core 1: dedicated task worker; never returns */
+void scheduler_core1_park_if_requested(void); /* core 1: clean L1 + park for a cold restart */
 void scheduler_core0_poll(int zorro_pending, int display_pending); /* core 0: harvest+post+drain */
 void scheduler_quiesce_for_reset(void);    /* core 0: drain in-flight core-1 tasks + reset queue before a mailbox teardown */
+/* core 0, after the quiesce: have the idle core 1 free its tracked decode
+ * blocks itself. 0 on success; nonzero means the caller must cold-restart. */
+int  scheduler_core1_reclaim(void);
 #endif
 
 #if defined(SCHED_STRESS_TEST) && !defined(TASKQ_HOST_TEST)

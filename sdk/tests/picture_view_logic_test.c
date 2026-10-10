@@ -74,6 +74,31 @@ int main(int argc, char **argv)
 	uint8_t png_header[8] = {
 		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
 	};
+	static const uint8_t webp_lossy_header[30] = {
+		'R', 'I', 'F', 'F', 0x64, 0x00, 0x00, 0x00, 'W', 'E', 'B', 'P',
+		'V', 'P', '8', ' ', 0x58, 0x00, 0x00, 0x00, 0xf0, 0x02, 0x00,
+		0x9d, 0x01, 0x2a, 0x03, 0x00, 0x05, 0x00
+	};
+	static const uint8_t webp_lossless_header[30] = {
+		'R', 'I', 'F', 'F', 0x62, 0x00, 0x00, 0x00, 'W', 'E', 'B', 'P',
+		'V', 'P', '8', 'L', 0x55, 0x00, 0x00, 0x00, 0x2f, 0x02, 0xc0,
+		0x00, 0x10, 0x57, 0x40, 0x20, 0x40, 0x91
+	};
+	static const uint8_t webp_anim_header[30] = {
+		'R', 'I', 'F', 'F', 0x84, 0x00, 0x00, 0x00, 'W', 'E', 'B', 'P',
+		'V', 'P', '8', 'X', 0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+		0x00, 0x05, 0x00, 0x00, 0x03, 0x00, 0x00
+	};
+	static const uint8_t wave_header[30] = {
+		'R', 'I', 'F', 'F', 0x64, 0x00, 0x00, 0x00, 'W', 'A', 'V', 'E',
+		'f', 'm', 't', ' ', 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02,
+		0x00, 0x44, 0xac, 0x00, 0x00, 0x10, 0x00
+	};
+	static const uint8_t avi_header[30] = {
+		'R', 'I', 'F', 'F', 0x64, 0x00, 0x00, 0x00, 'A', 'V', 'I', ' ',
+		'L', 'I', 'S', 'T', 0x10, 0x00, 0x00, 0x00, 0x68, 0x64, 0x72,
+		0x6c, 0x61, 0x76, 0x69, 0x68, 0x38, 0x00
+	};
 	uint8_t unknown_header[8] = {0};
 	char *viewer_argv[4] = {
 		"zz9k-view",
@@ -111,6 +136,35 @@ int main(int argc, char **argv)
 	    ZZ9K_PICTURE_VIEWER_CODEC_UNKNOWN) {
 		printf("accepted unknown picture header\n");
 		return 3;
+	}
+	if (zz9k_picture_viewer_detect_codec(webp_lossy_header,
+	                                     sizeof(webp_lossy_header)) !=
+	        ZZ9K_PICTURE_VIEWER_CODEC_WEBP ||
+	    zz9k_picture_viewer_detect_codec(webp_lossless_header,
+	                                     sizeof(webp_lossless_header)) !=
+	        ZZ9K_PICTURE_VIEWER_CODEC_WEBP ||
+	    zz9k_picture_viewer_detect_codec(webp_anim_header,
+	                                     sizeof(webp_anim_header)) !=
+	        ZZ9K_PICTURE_VIEWER_CODEC_WEBP) {
+		printf("did not detect WebP header\n");
+		return 50;
+	}
+	if (zz9k_picture_viewer_detect_codec(wave_header, sizeof(wave_header)) !=
+	    ZZ9K_PICTURE_VIEWER_CODEC_UNKNOWN) {
+		printf("accepted WAVE header as picture\n");
+		return 51;
+	}
+	if (zz9k_picture_viewer_detect_codec(avi_header, sizeof(avi_header)) !=
+	    ZZ9K_PICTURE_VIEWER_CODEC_UNKNOWN) {
+		printf("accepted AVI header as picture\n");
+		return 52;
+	}
+	if (zz9k_picture_viewer_detect_codec(webp_lossy_header, 12U) !=
+	        ZZ9K_PICTURE_VIEWER_CODEC_UNKNOWN ||
+	    zz9k_picture_viewer_detect_codec(webp_lossy_header, 20U) !=
+	        ZZ9K_PICTURE_VIEWER_CODEC_UNKNOWN) {
+		printf("accepted truncated WebP header\n");
+		return 53;
 	}
 
 	memset(&args, 0, sizeof(args));
@@ -228,6 +282,19 @@ int main(int argc, char **argv)
 		return 8;
 	}
 
+	zz9k_picture_viewer_image_init(&image);
+	image.codec = ZZ9K_PICTURE_VIEWER_CODEC_WEBP;
+	image.path = "Work:Pictures/test.webp";
+	image.width = 640U;
+	image.height = 480U;
+	if (!zz9k_picture_viewer_format_title(title, sizeof(title), 2U, 3U,
+	                                      &image) ||
+	    strcmp(title,
+	           "ZZ9000 View 2/3 WebP 640 x 480 - test.webp") != 0) {
+		printf("did not format WebP viewer title: %s\n", title);
+		return 54;
+	}
+
 	if (zz9k_picture_viewer_next_index(2U, 3U) != 0U ||
 	    zz9k_picture_viewer_previous_index(0U, 3U) != 2U ||
 	    zz9k_picture_viewer_next_index(0U, 0U) != 0U ||
@@ -281,8 +348,10 @@ int main(int argc, char **argv)
 	ok &= expect_not_contains(source, "zz9k_view_build_command");
 	ok &= expect_not_contains(source, "zz9k-jpeg --view");
 	ok &= expect_not_contains(source, "zz9k-png --view");
+	ok &= expect_not_contains(source, "zz9k-webp --view");
 	ok &= expect_contains(source, "zz9k_jpeg_decode_viewer_image");
 	ok &= expect_contains(source, "zz9k_png_decode_viewer_image");
+	ok &= expect_contains(source, "zz9k_webp_decode_viewer_image");
 	ok &= expect_contains(source, "zz9k_image_window_poll_event");
 	ok &= expect_contains(source, "zz9k_picture_viewer_render_image");
 	ok &= expect_contains(source, "zz9k_image_window_set_title");

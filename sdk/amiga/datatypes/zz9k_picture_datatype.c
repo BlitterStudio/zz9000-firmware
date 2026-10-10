@@ -137,7 +137,8 @@ static uint8_t zz9k_picture_render_mode_ready;
 typedef enum ZZ9KPictureCodec {
   ZZ9K_PICTURE_CODEC_UNKNOWN = 0,
   ZZ9K_PICTURE_CODEC_JPEG,
-  ZZ9K_PICTURE_CODEC_PNG
+  ZZ9K_PICTURE_CODEC_PNG,
+  ZZ9K_PICTURE_CODEC_WEBP
 } ZZ9KPictureCodec;
 
 typedef enum ZZ9KPictureRenderMode {
@@ -1154,6 +1155,37 @@ static int zz9k_picture_file_size(ZZ9KPictureSource *source, uint32_t *size)
   return zz9k_picture_source_size(source, size);
 }
 
+static int zz9k_picture_read_webp_metadata(
+    ZZ9KPictureSource *source,
+    uint32_t *out_width,
+    uint32_t *out_height,
+    int *has_alpha)
+{
+  uint8_t header[ZZ9K_WEBP_HEADER_MIN_BYTES];
+  ZZ9KWebPHeader parsed;
+  ZZ9KWebPParseStatus status;
+
+  if (!source || !out_width || !out_height) {
+    return 0;
+  }
+
+  if (!zz9k_picture_read_exact(source, header, (uint32_t)sizeof(header))) {
+    return 0;
+  }
+
+  status = zz9k_webp_parse_header(header, (uint32_t)sizeof(header), &parsed);
+  if (status != ZZ9K_WEBP_PARSE_READY) {
+    return 0;
+  }
+
+  *out_width = parsed.width;
+  *out_height = parsed.height;
+  if (has_alpha) {
+    *has_alpha = parsed.has_alpha ? 1 : 0;
+  }
+  return 1;
+}
+
 static int zz9k_picture_read_dimensions(ZZ9KPictureSource *source,
                                         ZZ9KPictureCodec *codec,
                                         uint32_t *width,
@@ -1192,13 +1224,42 @@ static int zz9k_picture_read_dimensions(ZZ9KPictureSource *source,
     return 1;
   }
 
+  if (!zz9k_picture_seek_begin(source)) {
+    zz9k_picture_restore_pos(source, original_pos);
+    return 0;
+  }
+  {
+    int webp_has_alpha = 0;
+    if (zz9k_picture_read_webp_metadata(
+            source, width, height, &webp_has_alpha)) {
+      zz9k_picture_restore_pos(source, original_pos);
+      *codec = ZZ9K_PICTURE_CODEC_WEBP;
+      if (png_has_alpha) {
+        *png_has_alpha = webp_has_alpha;
+      }
+      if (png_interlace) {
+        *png_interlace = 0U;
+      }
+      return 1;
+    }
+  }
+
   zz9k_picture_restore_pos(source, original_pos);
   return 0;
 }
 
 static const char *zz9k_picture_object_name(ZZ9KPictureCodec codec)
 {
-  return codec == ZZ9K_PICTURE_CODEC_JPEG ? "ZZ9000 JPEG" : "ZZ9000 PNG";
+  switch (codec) {
+  case ZZ9K_PICTURE_CODEC_JPEG:
+    return "ZZ9000 JPEG";
+  case ZZ9K_PICTURE_CODEC_PNG:
+    return "ZZ9000 PNG";
+  case ZZ9K_PICTURE_CODEC_WEBP:
+    return "ZZ9000 WebP";
+  default:
+    return "ZZ9000 Picture";
+  }
 }
 
 static const char *zz9k_picture_instance_object_name(
@@ -3679,6 +3740,8 @@ static uint32_t zz9k_picture_image_codec(ZZ9KPictureCodec codec)
     return ZZ9K_IMAGE_CODEC_JPEG;
   case ZZ9K_PICTURE_CODEC_PNG:
     return ZZ9K_IMAGE_CODEC_PNG;
+  case ZZ9K_PICTURE_CODEC_WEBP:
+    return ZZ9K_IMAGE_CODEC_WEBP;
   default:
     return 0U;
   }
@@ -6020,12 +6083,15 @@ static int zz9k_picture_feed_stream_to_datatype(
 #if ZZ9K_PICTURE_DATATYPE_TRACE_VERBOSE
         zz9k_picture_trace("decode: datatype tile copy ok");
 #endif
-        if (codec == ZZ9K_PICTURE_CODEC_PNG &&
+        if ((codec == ZZ9K_PICTURE_CODEC_PNG ||
+             codec == ZZ9K_PICTURE_CODEC_WEBP) &&
             eof && buffered == 0U &&
             (result.flags & ZZ9K_IMAGE_SESSION_RESULT_PARTIAL) == 0U) {
           *final_result = result;
           final_result->state = ZZ9K_IMAGE_SESSION_STATE_COMPLETE;
-          zz9k_picture_trace("decode: datatype final png tile");
+          zz9k_picture_trace(codec == ZZ9K_PICTURE_CODEC_PNG ?
+              "decode: datatype final png tile" :
+              "decode: datatype final webp tile");
           break;
         }
       } else if (result.state == ZZ9K_IMAGE_SESSION_STATE_COMPLETE) {
@@ -6548,7 +6614,8 @@ static int zz9k_picture_try_datatype_v43_writepixelarray(
     return 0;
   }
 
-  if (instance->codec == ZZ9K_PICTURE_CODEC_PNG) {
+  if (instance->codec == ZZ9K_PICTURE_CODEC_PNG ||
+      instance->codec == ZZ9K_PICTURE_CODEC_WEBP) {
     if (!zz9k_picture_prepare_png_datatype_v43(
             object, instance, png_has_alpha)) {
       return 0;
@@ -6646,7 +6713,10 @@ static int zz9k_picture_decode_to_datatype_pixels(
 #if ZZ9K_PICTURE_ENABLE_PNG_ALPHA_EXPERIMENTS
   png_alpha_opaque = 0;
 #endif
-  if (instance->codec == ZZ9K_PICTURE_CODEC_PNG) {
+  /* The header scan records WebP alpha (VP8X flag / VP8L alpha hint) in the
+   * same field, so both codecs take the RGBA route on 32-bit screens. */
+  if (instance->codec == ZZ9K_PICTURE_CODEC_PNG ||
+      instance->codec == ZZ9K_PICTURE_CODEC_WEBP) {
     if (instance->png_alpha_known) {
       png_has_alpha = instance->png_has_alpha ? 1 : 0;
     } else {
@@ -6765,9 +6835,10 @@ static int zz9k_picture_decode_to_datatype_pixels(
           "metadata: datatype jpeg v47 rgb unavailable; v43 fallback");
     }
   } else if (version >= 47U &&
-             instance->codec == ZZ9K_PICTURE_CODEC_PNG) {
+             (instance->codec == ZZ9K_PICTURE_CODEC_PNG ||
+              instance->codec == ZZ9K_PICTURE_CODEC_WEBP)) {
     zz9k_picture_trace(
-        "metadata: datatype v47 png uses v43 writepixelarray");
+        "metadata: datatype v47 alpha uses v43 writepixelarray");
   }
 #elif ZZ9K_PICTURE_ENABLE_DATATYPE_V47_DIRECT
   if (version >= 47U) {
@@ -6788,9 +6859,7 @@ static int zz9k_picture_decode_to_datatype_pixels(
     if (version >= 43U) {
       if (!zz9k_picture_try_datatype_v43_writepixelarray(
               object, instance, png_has_alpha)) {
-        failure = instance->codec == ZZ9K_PICTURE_CODEC_PNG ?
-            "metadata: datatype png v43 prepare failed" :
-            "metadata: datatype v43 prepare failed";
+        failure = "metadata: datatype v43 prepare failed";
         goto cleanup;
       }
     } else if (!zz9k_picture_decode_to_legacy_bitmap(
@@ -6879,13 +6948,15 @@ static int zz9k_picture_decode_to_datatype_pixels(
     target.direct_pixels = 0;
     if (!zz9k_picture_try_datatype_v43_writepixelarray(
             object, instance, png_has_alpha)) {
-      failure = instance->codec == ZZ9K_PICTURE_CODEC_PNG ?
-          "metadata: datatype png v43 prepare failed" :
+      failure = (instance->codec == ZZ9K_PICTURE_CODEC_PNG ||
+                 instance->codec == ZZ9K_PICTURE_CODEC_WEBP) ?
+          "metadata: datatype v43 prepare failed" :
           "metadata: datatype v43 prepare failed";
       goto cleanup;
     }
   }
-  if (instance->codec == ZZ9K_PICTURE_CODEC_PNG) {
+  if (instance->codec == ZZ9K_PICTURE_CODEC_PNG ||
+      instance->codec == ZZ9K_PICTURE_CODEC_WEBP) {
     if (!zz9k_picture_choose_png_datatype_tile_format(
             &image_service, target.direct ? target.direct_pixels : 0,
             png_has_alpha,
@@ -7428,12 +7499,17 @@ static int zz9k_picture_load_metadata(Class *cl,
     zz9k_picture_trace_source("metadata: codec jpeg");
   } else if (codec == ZZ9K_PICTURE_CODEC_PNG) {
     zz9k_picture_trace_source("metadata: codec png");
+  } else if (codec == ZZ9K_PICTURE_CODEC_WEBP) {
+    zz9k_picture_trace_source("metadata: codec webp");
   }
   zz9k_picture_trace_source_hex("metadata: image width", width);
   zz9k_picture_trace_source_hex("metadata: image height", height);
   if (codec == ZZ9K_PICTURE_CODEC_PNG) {
     zz9k_picture_trace_source_hex(
         "metadata: png alpha", png_has_alpha ? 1U : 0U);
+  } else if (codec == ZZ9K_PICTURE_CODEC_WEBP) {
+    zz9k_picture_trace_source_hex(
+        "metadata: webp alpha", png_has_alpha ? 1U : 0U);
   }
 
   instance->codec = codec;
@@ -7447,7 +7523,7 @@ static int zz9k_picture_load_metadata(Class *cl,
   instance->render_attrs_ready = 0;
   instance->ctx = 0;
   instance->png_alpha_known =
-      codec == ZZ9K_PICTURE_CODEC_PNG ? 1U : 0U;
+      (codec == ZZ9K_PICTURE_CODEC_PNG || codec == ZZ9K_PICTURE_CODEC_WEBP) ? 1U : 0U;
   instance->png_has_alpha = png_has_alpha ? 1U : 0U;
   instance->png_interlaced =
       codec == ZZ9K_PICTURE_CODEC_PNG ? png_interlace : 0U;
@@ -7501,8 +7577,11 @@ static int zz9k_picture_load_metadata(Class *cl,
     }
     zz9k_picture_trace_source("metadata: datatype decode failed");
     instance->source_ready = 0;
-    if (codec == ZZ9K_PICTURE_CODEC_PNG) {
-      zz9k_picture_trace("metadata: png datatype decode failed; aborting");
+    if (codec == ZZ9K_PICTURE_CODEC_PNG || codec == ZZ9K_PICTURE_CODEC_WEBP) {
+      zz9k_picture_trace(
+          codec == ZZ9K_PICTURE_CODEC_WEBP ?
+          "metadata: webp datatype decode failed; aborting" :
+          "metadata: png datatype decode failed; aborting");
       SetIoErr(DTERROR_INVALID_DATA);
       return 0;
     }

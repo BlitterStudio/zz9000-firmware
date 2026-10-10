@@ -56,12 +56,39 @@ LZMA_SDK_VERSION ?= 26.01
 LZMA_SDK_DIR ?= $(BUILD_DIR)/deps/lzma-sdk/$(LZMA_SDK_VERSION)
 LZMA_SDK_SRC ?= $(LZMA_SDK_DIR)/src
 LZMA_SDK_BUILD ?= $(LZMA_SDK_DIR)/build
+LIBWEBP_VERSION ?= 1.6.0
+LIBWEBP_DIR ?= $(BUILD_DIR)/deps/libwebp/$(LIBWEBP_VERSION)
+LIBWEBP_ARM_DIR ?= $(LIBWEBP_DIR)/arm
+LIBWEBP_INCLUDE_DIR ?= $(LIBWEBP_ARM_DIR)/include
+LIBWEBP_LIB_DIR ?= $(LIBWEBP_ARM_DIR)/lib
+LIBWEBP_DECODER_LIB ?= $(LIBWEBP_LIB_DIR)/libwebpdecoder.a
+LIBWEBP_DEMUX_LIB ?= $(LIBWEBP_LIB_DIR)/libwebpdemux.a
+LIBMPEG2_VERSION ?= 0.5.1
+LIBMPEG2_DIR ?= $(BUILD_DIR)/deps/libmpeg2/$(LIBMPEG2_VERSION)
+LIBMPEG2_LIB ?= $(LIBMPEG2_DIR)/arm/libmpeg2.a
+LIBMPEG2_INCLUDE_DIR ?= $(LIBMPEG2_DIR)/arm/include
+A52_VERSION ?= 0.7.4
+A52_DIR ?= $(BUILD_DIR)/deps/a52dec/$(A52_VERSION)
+A52_LIB ?= $(A52_DIR)/arm/liba52.a
+A52_INCLUDE_DIR ?= $(A52_DIR)/arm/include
+LIBFLAC_VERSION ?= 1.5.0
+LIBFLAC_DIR ?= $(BUILD_DIR)/deps/flac/$(LIBFLAC_VERSION)
+LIBFLAC_LIB ?= $(LIBFLAC_DIR)/arm/libflacdec.a
+LIBFLAC_INCLUDE_DIR ?= $(LIBFLAC_DIR)/arm/include
+# Must match the pins in build_vorbis.sh (libogg version, Tremor commit).
+LIBVORBIS_TAG ?= ogg-1.3.6-tremor-820fb3237ea8
+LIBVORBIS_DIR ?= $(BUILD_DIR)/deps/vorbis/$(LIBVORBIS_TAG)
+LIBVORBIS_LIB ?= $(LIBVORBIS_DIR)/arm/libvorbisdec.a
+LIBVORBIS_INCLUDE_DIR ?= $(LIBVORBIS_DIR)/arm/include
 
 # Include paths
 INCLUDES = -I$(SRC_DIR) -I$(SRC_DIR)/bearssl -I$(BSP_INC)
 INCLUDES += -I$(LIBJPEG_TURBO_BUILD) -I$(LIBJPEG_TURBO_SRC)/src
 INCLUDES += -I$(ZLIB_SRC)
 INCLUDES += -I$(LIBPNG_BUILD) -I$(LIBPNG_SRC)
+INCLUDES += -I$(LIBWEBP_INCLUDE_DIR)
+INCLUDES += -I$(LIBMPEG2_INCLUDE_DIR) -I$(A52_INCLUDE_DIR)
+INCLUDES += -I$(LIBFLAC_INCLUDE_DIR) -I$(LIBVORBIS_INCLUDE_DIR)
 INCLUDES += -I$(LZMA_SDK_SRC)/C
 
 # Common flags (shared by all optimization levels)
@@ -92,7 +119,7 @@ LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
 LDFLAGS += -L$(BSP_LIB)
 
 # Libraries (order matters for --start-group)
-LIBS = $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
+LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
 
 # Source files
 C_SRCS = \
@@ -204,12 +231,21 @@ C_SRCS = \
 	$(SRC_DIR)/bearssl/ghash_ctmul.c \
 	$(SRC_DIR)/bearssl/gcm.c \
 	$(SRC_DIR)/sdk_image_stream.c \
+	$(SRC_DIR)/sdk_webp_alloc.c \
+	$(SRC_DIR)/sdk_flac_alloc.c \
+	$(SRC_DIR)/sdk_audio_flac.c \
+	$(SRC_DIR)/sdk_vorbis_alloc.c \
+	$(SRC_DIR)/sdk_audio_vorbis.c \
 	$(SRC_DIR)/sdk_video_stream.c \
 	$(SRC_DIR)/sdk_media_profile.c \
 	$(SRC_DIR)/sdk_media_session.c \
 	$(SRC_DIR)/sdk_media_timeline.c \
 	$(SRC_DIR)/sdk_video_plmpeg.c \
 	$(SRC_DIR)/sdk_video_yuy2.c \
+	$(SRC_DIR)/sdk_dvd_ps.c \
+	$(SRC_DIR)/sdk_dvd_lpcm.c \
+	$(SRC_DIR)/sdk_dvd_ac3.c \
+	$(SRC_DIR)/sdk_video_mpeg2.c \
 	$(SRC_DIR)/sdk_jpeg.c \
 	$(SRC_DIR)/jmem_zz9k.c \
 	$(SRC_DIR)/sdk_surface.c \
@@ -244,16 +280,15 @@ FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 
 all: $(TARGET) $(FALLBACK_TARGET) size
 
-$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(OBJS)
+$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 	@echo 'Done.'
 
-$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(FALLBACK_OBJS)
+$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBMPEG2_LIB) $(A52_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(FALLBACK_OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(FALLBACK_OBJS) $(LIBS)
 	@echo 'Done.'
-
 $(LIBJPEG_TURBO_LIB):
 	@echo 'Building libjpeg-turbo dependency...'
 	cd ../.. && bash ./build_libjpeg_turbo.sh
@@ -271,6 +306,41 @@ $(LZMA_SDK_SRC)/C/LzmaDec.c:
 	cd ../.. && bash ./build_lzma_sdk.sh
 
 $(LZMA_SDK_SRC)/C/Lzma2Dec.c: $(LZMA_SDK_SRC)/C/LzmaDec.c
+$(LIBWEBP_DECODER_LIB): $(SRC_DIR)/webp/CMakeLists.txt $(SRC_DIR)/sdk_webp_alloc.h ../../build_libwebp.sh
+	@echo 'Building libwebp decoder/demux dependency...'
+	cd ../.. && bash ./build_libwebp.sh
+
+# libwebp creates the decoder and demux archives as one unit. Make the
+# demux archive wait for the sole producer, and rebuild that unit if only the
+# secondary archive was removed between invocations.
+$(LIBWEBP_DEMUX_LIB): $(LIBWEBP_DECODER_LIB)
+	@if test ! -f "$@"; then \
+		rm -f "$(LIBWEBP_DECODER_LIB)"; \
+		$(MAKE) "$(LIBWEBP_DECODER_LIB)"; \
+	fi
+	@test -f "$@"
+
+$(LIBMPEG2_LIB): ../../build_dvd_codecs.sh
+	@echo 'Building DVD decoder dependencies (libmpeg2/liba52)...'
+	cd ../.. && bash ./build_dvd_codecs.sh --arm
+
+# build_dvd_codecs.sh creates both archives in one run; make the a52 archive
+# wait for the sole producer and rebuild that unit if only the secondary
+# archive was removed between invocations (same pattern as libwebp).
+$(A52_LIB): $(LIBMPEG2_LIB)
+	@if test ! -f "$@"; then \
+		rm -f "$(LIBMPEG2_LIB)"; \
+		$(MAKE) "$(LIBMPEG2_LIB)"; \
+	fi
+	@test -f "$@"
+
+$(LIBFLAC_LIB): ../../build_flac.sh $(SRC_DIR)/sdk_flac_alloc.h
+	@echo 'Building decoder-only libFLAC dependency...'
+	cd ../.. && bash ./build_flac.sh --arm
+
+$(LIBVORBIS_LIB): ../../build_vorbis.sh $(SRC_DIR)/sdk_vorbis_alloc.h
+	@echo 'Building decoder-only libogg/Tremor dependency...'
+	cd ../.. && bash ./build_vorbis.sh --arm
 
 $(LZMA_SDK_BUILD)/LzmaDec.o: $(LZMA_SDK_SRC)/C/LzmaDec.c
 	@mkdir -p $(dir $@)
@@ -342,6 +412,34 @@ $(BUILD_DIR)/gfx.o: $(SRC_DIR)/gfx.c
 $(BUILD_DIR)/sdk_video_plmpeg.o: $(SRC_DIR)/sdk_video_plmpeg.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
+
+# DVD hot path (U11 experiment): demux + MPEG-2 decode and AC-3 downmix in
+# the same -O3 tier as the pl_mpeg backend. The MPEG-2 and AC-3 wrappers
+# include libmpeg2/liba52 headers that exist only after the pinned dependency
+# build, so those objects depend on the archives.
+$(BUILD_DIR)/sdk_dvd_ps.o: $(SRC_DIR)/sdk_dvd_ps.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
+
+$(BUILD_DIR)/sdk_video_mpeg2.o: $(SRC_DIR)/sdk_video_mpeg2.c $(LIBMPEG2_LIB) $(A52_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
+
+$(BUILD_DIR)/sdk_dvd_ac3.o: $(SRC_DIR)/sdk_dvd_ac3.c $(LIBMPEG2_LIB) $(A52_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
+
+# U7 FLAC backend: includes libFLAC headers that exist only after the pinned
+# dependency build, so the object depends on the archive (DVD codec pattern).
+$(BUILD_DIR)/sdk_audio_flac.o: $(SRC_DIR)/sdk_audio_flac.c $(LIBFLAC_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -o $@ $<
+
+# U8 Vorbis backend: includes libogg/Tremor headers that exist only after the
+# pinned dependency build, so the object depends on the archive.
+$(BUILD_DIR)/sdk_audio_vorbis.o: $(SRC_DIR)/sdk_audio_vorbis.c $(LIBVORBIS_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -o $@ $<
 
 # Vendored LZH decode core (LHa for UNIX) + firmware I/O shim: every TU here
 # includes lha.h, which does `#include <config.h>` (angle-bracket). Two flags

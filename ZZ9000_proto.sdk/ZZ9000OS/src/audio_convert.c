@@ -17,9 +17,21 @@ static const struct zz_audio_convert_ratio *ratio_for(uint32_t in_rate,
 		if (out_rate == 48000U)
 			return &zz_audio_convert_ratio_8000_48000;
 		break;
+	case 11025U:
+		if (out_rate == 48000U)
+			return &zz_audio_convert_ratio_11025_48000;
+		break;
 	case 12000U:
 		if (out_rate == 48000U)
 			return &zz_audio_convert_ratio_12000_48000;
+		break;
+	case 16000U:
+		if (out_rate == 48000U)
+			return &zz_audio_convert_ratio_16000_48000;
+		break;
+	case 22050U:
+		if (out_rate == 48000U)
+			return &zz_audio_convert_ratio_22050_48000;
 		break;
 	case 24000U:
 		if (out_rate == 48000U)
@@ -32,6 +44,14 @@ static const struct zz_audio_convert_ratio *ratio_for(uint32_t in_rate,
 	case 44100U:
 		if (out_rate == 48000U)
 			return &zz_audio_convert_ratio_44100_48000;
+		break;
+	case 88200U:
+		if (out_rate == 48000U)
+			return &zz_audio_convert_ratio_88200_48000;
+		break;
+	case 96000U:
+		if (out_rate == 48000U)
+			return &zz_audio_convert_ratio_96000_48000;
 		break;
 	case 48000U:
 		switch (out_rate) {

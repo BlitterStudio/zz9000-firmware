@@ -132,6 +132,9 @@ int ZZ9KDecodeMp3(ZZ9KLibrary *library,
 int ZZ9KAudioStreamBegin(ZZ9KLibrary *library,
                          const ZZ9KAudioStreamBeginDesc *desc,
                          ZZ9KAudioStreamResult *result);
+int ZZ9KAudioStreamBeginEx(ZZ9KLibrary *library,
+                           const ZZ9KAudioStreamBeginExDesc *desc,
+                           ZZ9KAudioStreamResult *result);
 int ZZ9KAudioStreamFeed(ZZ9KLibrary *library,
                         const ZZ9KAudioStreamFeedDesc *desc,
                         ZZ9KAudioStreamResult *result);
@@ -159,6 +162,18 @@ int ZZ9KImageSessionFeed(ZZ9KLibrary *library,
                          ZZ9KImageSessionResult *result);
 int ZZ9KImageSessionClose(ZZ9KLibrary *library, uint32_t session,
                           uint32_t flags);
+int ZZ9KImageAnimationFrameNext(ZZ9KLibrary *library, uint32_t session,
+                                uint32_t flags,
+                                ZZ9KImageAnimationFrameResult *result);
+int ZZ9KImageAnimationFramePresent(ZZ9KLibrary *library, uint32_t session,
+                                   uint32_t frame_token, uint32_t flags,
+                                   ZZ9KImageAnimationFrameResult *result);
+int ZZ9KImageAnimationFrameRetire(ZZ9KLibrary *library, uint32_t session,
+                                  uint32_t frame_token, uint32_t flags,
+                                  ZZ9KImageAnimationFrameResult *result);
+int ZZ9KImageAnimationRestart(ZZ9KLibrary *library, uint32_t session,
+                              uint32_t flags,
+                              ZZ9KImageAnimationFrameResult *result);
 int ZZ9KCryptoHash(ZZ9KLibrary *library, const ZZ9KCryptoHashDesc *desc,
                    ZZ9KCryptoResult *result);
 int ZZ9KCryptoHashBatch(ZZ9KLibrary *library,

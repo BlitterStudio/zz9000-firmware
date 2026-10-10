@@ -164,6 +164,117 @@ static int test_null_scratch_requires_memory_source(void)
 
   return 0;
 }
+static int test_webp_dimension_reader_and_detection(void)
+{
+  static const uint8_t webp_test_lossy[] = {
+    0x52, 0x49, 0x46, 0x46, 0x64, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+    0x56, 0x50, 0x38, 0x20, 0x58, 0x00, 0x00, 0x00, 0xf0, 0x02, 0x00, 0x9d,
+    0x01, 0x2a, 0x03, 0x00, 0x05, 0x00, 0x02, 0x00, 0x34, 0x25, 0xb0, 0x02
+  };
+  static const uint8_t webp_test_alpha[] = {
+    0x52, 0x49, 0x46, 0x46, 0x62, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+    0x56, 0x50, 0x38, 0x4c, 0x55, 0x00, 0x00, 0x00, 0x2f, 0x02, 0xc0, 0x00,
+    0x10, 0x57, 0x40, 0x20, 0x40, 0x91
+  };
+  static const uint8_t webp_test_anim[] = {
+    0x52, 0x49, 0x46, 0x46, 0x84, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+    0x56, 0x50, 0x38, 0x58, 0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x05, 0x00, 0x00, 0x03, 0x00, 0x00
+  };
+  static const uint8_t non_webp_wave[] = {
+    0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45,
+    0x66, 0x6d, 0x74, 0x20, 0x10, 0x00, 0x00, 0x00
+  };
+  ZZ9KPictureSource source;
+  ZZ9KPictureCodec codec;
+  ZZ9KPicturePngPalette palette;
+  uint32_t width;
+  uint32_t height;
+  int has_alpha;
+  uint8_t interlace;
+
+  /* 1. Lossy WebP detection */
+  memset(&source, 0, sizeof(source));
+  source.memory = webp_test_lossy;
+  source.size = sizeof(webp_test_lossy);
+  source.type = ZZ9K_PICTURE_SOURCE_MEMORY;
+  codec = ZZ9K_PICTURE_CODEC_UNKNOWN;
+  width = height = 0U;
+  has_alpha = -1;
+  interlace = 0xffU;
+  if (!zz9k_picture_read_dimensions(
+          &source, &codec, &width, &height, &has_alpha, &interlace, &palette)) {
+    return 1;
+  }
+  if (codec != ZZ9K_PICTURE_CODEC_WEBP || width != 3U || height != 5U ||
+      has_alpha != 0 || source.position != 0U) {
+    return 2;
+  }
+
+  /* 2. Lossless WebP detection with alpha */
+  memset(&source, 0, sizeof(source));
+  source.memory = webp_test_alpha;
+  source.size = sizeof(webp_test_alpha);
+  source.type = ZZ9K_PICTURE_SOURCE_MEMORY;
+  codec = ZZ9K_PICTURE_CODEC_UNKNOWN;
+  width = height = 0U;
+  has_alpha = -1;
+  if (!zz9k_picture_read_dimensions(
+          &source, &codec, &width, &height, &has_alpha, &interlace, &palette)) {
+    return 3;
+  }
+  if (codec != ZZ9K_PICTURE_CODEC_WEBP || width != 3U || height != 4U ||
+      has_alpha != 1 || source.position != 0U) {
+    return 4;
+  }
+
+  /* 3. Extended WebP detection (animated canvas geometry) */
+  memset(&source, 0, sizeof(source));
+  source.memory = webp_test_anim;
+  source.size = sizeof(webp_test_anim);
+  source.type = ZZ9K_PICTURE_SOURCE_MEMORY;
+  codec = ZZ9K_PICTURE_CODEC_UNKNOWN;
+  width = height = 0U;
+  has_alpha = -1;
+  if (!zz9k_picture_read_dimensions(
+          &source, &codec, &width, &height, &has_alpha, &interlace, &palette)) {
+    return 5;
+  }
+  if (codec != ZZ9K_PICTURE_CODEC_WEBP || width != 6U || height != 4U ||
+      has_alpha != 0 || source.position != 0U) {
+    return 6;
+  }
+
+  /* 4. Non-WebP RIFF/WAVE rejection and position restoration */
+  memset(&source, 0, sizeof(source));
+  source.memory = non_webp_wave;
+  source.size = sizeof(non_webp_wave);
+  source.type = ZZ9K_PICTURE_SOURCE_MEMORY;
+  codec = ZZ9K_PICTURE_CODEC_UNKNOWN;
+  if (zz9k_picture_read_dimensions(
+          &source, &codec, &width, &height, &has_alpha, &interlace, &palette)) {
+    return 7;
+  }
+  if (source.position != 0U) {
+    return 8;
+  }
+
+  return 0;
+}
+
+static int test_webp_codec_mappings_and_names(void)
+{
+  if (zz9k_picture_image_codec(ZZ9K_PICTURE_CODEC_WEBP) !=
+      ZZ9K_IMAGE_CODEC_WEBP) {
+    return 1;
+  }
+  if (strcmp(zz9k_picture_object_name(ZZ9K_PICTURE_CODEC_WEBP),
+             "ZZ9000 WebP") != 0) {
+    return 2;
+  }
+  return 0;
+}
+
 
 int main(void)
 {
@@ -184,6 +295,14 @@ int main(void)
   result = test_null_scratch_requires_memory_source();
   if (result != 0) {
     return 30 + result;
+  }
+  result = test_webp_dimension_reader_and_detection();
+  if (result != 0) {
+    return 40 + result;
+  }
+  result = test_webp_codec_mappings_and_names();
+  if (result != 0) {
+    return 50 + result;
   }
 
   return 0;

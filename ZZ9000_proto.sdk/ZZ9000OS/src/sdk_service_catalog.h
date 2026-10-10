@@ -29,6 +29,25 @@ struct SDKServiceDescriptor {
 	const char *name;
 };
 
+/*
+ * Hardware qualification flavor. WebP, FLAC and Ogg Vorbis are implemented
+ * but stay unadvertised in release firmware until they pass physical
+ * Z2/Z3 qualification. A firmware built with
+ * EXTRA_CFLAGS=-DZZ9000_QUALIFY_UNADVERTISED advertises their service flags
+ * so the shipped clients exercise them on real hardware. Never package that
+ * flavor as a release.
+ */
+#ifdef ZZ9000_QUALIFY_UNADVERTISED
+#define SDK_QUALIFY_IMAGE_FLAGS \
+	(SDK_SERVICE_FLAG_IMAGE_WEBP | SDK_SERVICE_FLAG_IMAGE_WEBP_ANIMATION)
+#define SDK_QUALIFY_AUDIO_FLAGS \
+	(SDK_SERVICE_FLAG_AUDIO_FLAC_STREAM | \
+	 SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM)
+#else
+#define SDK_QUALIFY_IMAGE_FLAGS 0U
+#define SDK_QUALIFY_AUDIO_FLAGS 0U
+#endif
+
 static const struct SDKServiceDescriptor sdk_services[] = {
 	{
 		.service_id = SDK_SERVICE_CORE,
@@ -72,9 +91,10 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_IMAGE_SCALE_CLIPPED |
 			SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA |
 			SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT |
-			SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565,
+			SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565 |
+			SDK_QUALIFY_IMAGE_FLAGS,
 		.opcode_base = SDK_SERVICE_IMAGE,
-		.opcode_count = 8,
+		.opcode_count = 12,
 		.name = "image"
 	},
 	{
@@ -112,11 +132,18 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_AUDIO_CONTROL |
 			SDK_SERVICE_FLAG_AUDIO_FABRIC |
 			SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE |
-			SDK_SERVICE_FLAG_AUDIO_STREAM_GAIN,
+			SDK_SERVICE_FLAG_AUDIO_STREAM_GAIN |
+			SDK_QUALIFY_AUDIO_FLAGS,
+		/* SDK_SERVICE_FLAG_AUDIO_FLAC_STREAM (BeginEx FLAC, U7) and
+		 * SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM (BeginEx Ogg Vorbis, U8)
+		 * are implemented but advertised only by the qualification
+		 * flavor above; SDK_CAP_AUDIO_FLAC/VORBIS stay off until
+		 * physical Z2/Z3 qualification. */
 		.opcode_base = SDK_SERVICE_AUDIO,
-		.opcode_count = 22,	/* 0x0500..0x0515 incl. audio control plane,
+		.opcode_count = 23,	/* 0x0500..0x0516 incl. audio control plane,
 			 * fabric lease plane (0x0512-0x0514; 0x050f..0x0511
-			 * reserved gaps), and per-stream gain (0x0515). */
+			 * reserved gaps), per-stream gain (0x0515), and
+			 * codec-aware stream begin (0x0516). */
 		.name = "audio"
 	},
 	{

@@ -38,6 +38,7 @@ struct SDKImageStreamBegin {
 	 * heap objects live in the owning core's cache, so affinity can
 	 * never change mid-session. */
 	uint32_t core1_affine;
+	uint32_t direct_arm_local;
 };
 
 struct SDKImageStreamFeed {
@@ -64,11 +65,37 @@ struct SDKImageStreamResult {
 	uintptr_t flush_address;
 	uint32_t flush_length;
 };
+struct SDKImageAnimationFrameResult {
+	uint32_t session;
+	uint32_t state;
+	uint32_t canvas_width;
+	uint32_t canvas_height;
+	uint32_t frame_index;
+	uint32_t frame_duration_ms;
+	uint32_t loop_index;
+	uint32_t loop_count;
+	uint32_t frame_token;
+	uint32_t output_format;
+	uint32_t flags;
+	uint32_t reserved;
+};
+
 
 void sdk_image_stream_init(void);
 uint32_t sdk_image_stream_active_count(void);
 /* Session affinity lookup: 1 = core-1-affine, 0 = core-0, -1 = not found. */
 int sdk_image_stream_session_core1(uint32_t session);
+/* Completed WebP direct output written by core 1 requires a core-0 cache
+ * invalidate before its deferred completion publishes that ownership handoff. */
+int sdk_image_stream_complete_arm_local_output(uint32_t session,
+                                                uintptr_t *address,
+                                                uint32_t *length);
+/* The packed YUV422CGX canvas of an animation session whose outstanding
+ * frame has been presented; core 0 publishes it to the P96 PIP source at
+ * the PRESENT completion (the NEXT completion already invalidated it). */
+int sdk_image_stream_presented_canvas(uint32_t session, uintptr_t *address,
+                                      uint32_t *pitch, uint32_t *width,
+                                      uint32_t *height);
 /* Nonzero when any open session is core-1-affine (mailbox reset gating). */
 int sdk_image_stream_has_core1_sessions(void);
 /* After a core-1 fault: drop core-1-affine sessions' dangling codec
@@ -86,5 +113,19 @@ uint16_t sdk_image_stream_feed(const struct SDKImageStreamFeed *feed,
                                const uint8_t *src,
                                struct SDKImageStreamResult *result);
 uint16_t sdk_image_stream_close(uint32_t session);
+uint16_t sdk_image_stream_frame_next(uint32_t session,
+                                     uint32_t flags,
+                                     struct SDKImageAnimationFrameResult *result);
+uint16_t sdk_image_stream_frame_present(uint32_t session,
+                                        uint32_t frame_token,
+                                        uint32_t flags,
+                                        struct SDKImageAnimationFrameResult *result);
+uint16_t sdk_image_stream_frame_retire(uint32_t session,
+                                       uint32_t frame_token,
+                                       uint32_t flags,
+                                       struct SDKImageAnimationFrameResult *result);
+uint16_t sdk_image_stream_restart(uint32_t session,
+                                  uint32_t flags,
+                                  struct SDKImageAnimationFrameResult *result);
 
 #endif /* SDK_IMAGE_STREAM_H */

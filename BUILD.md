@@ -12,6 +12,10 @@ outputs land in `bootimage_work/`. CI runs the same scripts.
 | [`build_libjpeg_turbo.sh`](build_libjpeg_turbo.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/libjpeg-turbo/.../libjpeg.a` | Arm GNU Toolchain, `cmake`, `make`, `wget` |
 | [`build_zlib.sh`](build_zlib.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/zlib/.../libz.a` | Arm GNU Toolchain, `cmake`, `make`, `wget` |
 | [`build_libpng.sh`](build_libpng.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/libpng/.../liblibpng16_static.a` | Arm GNU Toolchain, `cmake`, `make`, `wget`; calls `build_zlib.sh` |
+| [`build_libwebp.sh`](build_libwebp.sh) | Pinned libwebp decoder/demux archives under `ZZ9000OS/build/deps/libwebp/1.6.0/{arm,host}/lib/` | Arm GNU Toolchain (native compiler with `--host`), `cmake`, `make`, `curl` or `wget` |
+| [`build_dvd_codecs.sh`](build_dvd_codecs.sh) | Pinned decoder-only libmpeg2 0.5.1 and liba52 0.7.4 archives under `ZZ9000OS/build/deps/{libmpeg2,a52dec}/.../{arm,host}/` (U11 DVD experiment; GPL-2.0-or-later, notices in `ZZ9000OS/src/dvd_codecs/`) | Arm GNU Toolchain (native compiler with `--host`), `make`, `curl` or `wget` |
+| [`build_flac.sh`](build_flac.sh) | Pinned decoder-only libFLAC 1.5.0 archive `libflacdec.a` under `ZZ9000OS/build/deps/flac/1.5.0/{arm,host}/` (U7 native FLAC; BSD-3-Clause, notice in `ZZ9000OS/src/flac/COPYING.Xiph`) | Arm GNU Toolchain (native compiler with `--host`), `xz`, `curl` or `wget` |
+| [`build_vorbis.sh`](build_vorbis.sh) | Pinned decoder-only libogg 1.3.6 + fixed-point Tremor (commit `820fb323`) archive `libvorbisdec.a` under `ZZ9000OS/build/deps/vorbis/ogg-1.3.6-tremor-820fb3237ea8/{arm,host}/` (U8 Ogg Vorbis; BSD-3-Clause, notices in `ZZ9000OS/src/vorbis/`) | Arm GNU Toolchain (native compiler with `--host`), `xz`, `gzip`, `curl` or `wget` |
 | [`build_lzma_sdk.sh`](build_lzma_sdk.sh) | LZMA SDK decoder sources under `ZZ9000_proto.sdk/ZZ9000OS/build/deps/lzma-sdk/` (compiled into `ZZ9000OS.elf` by `build_firmware.sh`) | `wget`, `7z`/`7za`/`7zr` |
 | [`build_bitstream.sh`](build_bitstream.sh) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Linux |
 | [`build_bitstream.ps1`](build_bitstream.ps1) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Windows |
@@ -19,13 +23,14 @@ outputs land in `bootimage_work/`. CI runs the same scripts.
 | [`build_bootimage.sh`](build_bootimage.sh) | `bootimage_work/BOOT.bin` | `bootgen` |
 | [`build_release_assets.sh`](build_release_assets.sh) | release ZIPs under `release/` | `bootgen`, `zip` |
 
-The scripts are composable — nothing calls anything else implicitly.
+Firmware dependency builders run automatically. FPGA, BOOT-image, and release
+packaging remain separate commands.
 
 ## Common flows
 
 **ARM firmware change only** (most iteration loops). Uses the committed
 bitstream. `build_firmware.sh` automatically downloads, verifies, and builds
-the libjpeg-turbo, zlib, libpng, and LZMA SDK dependencies under
+the libjpeg-turbo, zlib, libpng, libwebp, libmpeg2, liba52, libFLAC, libogg/Tremor and LZMA SDK dependencies under
 `ZZ9000OS/build/deps/` when needed:
 ```bash
 ./build_firmware.sh
@@ -92,6 +97,13 @@ Legacy USB mass-storage block support is disabled in firmware by
 default. SD HDF boot and the Poseidon USB proxy remain enabled. For an
 old-driver regression test, rebuild firmware with
 `EXTRA_CFLAGS=-DENABLE_LEGACY_USB_BLOCK_STORAGE=1`.
+
+WebP, FLAC and Ogg Vorbis decoding are built into every firmware but stay
+unadvertised until physical Zorro II/III qualification. A hardware
+qualification build advertises their service flags so the shipped clients
+use them: `EXTRA_CFLAGS=-DZZ9000_QUALIFY_UNADVERTISED ./build_firmware.sh`,
+then `./build_release_assets.sh --firmware-flavor qual`. Never publish that
+flavor as a release.
 
 ### Timing gates
 
@@ -176,6 +188,76 @@ Host-side suites (any machine with a C compiler):
 make -C test/rtg test        # RTG correctness regression
 make -C test/video test      # VDMA, native modes, overlays
 ```
+
+The Linux image-session suite runs the actual JPEG/PNG/WebP firmware decoder:
+```bash
+make -C test/image test
+make -C test/image sanitize
+make -C test/image fixtures smoke
+test/image/build/webp_fixture_extract animation /tmp/preview.webp
+test/image/build/webp_smoke /tmp/preview.webp /tmp/preview.ppm
+```
+It needs libjpeg, libpng and zlib development headers, CMake, and curl/wget.
+The WebP dependency is fetched with a pinned SHA-256 and built decoder/demux-only,
+without threads. `src/webp/{COPYING,PATENTS,AUTHORS}` under `ZZ9000OS` retains
+the upstream notices; binary distributions must carry the applicable notices.
+Tests cover stored reference pixels, fragmented input, bounded tile drains,
+malformed containers, allocation failure, tracker exhaustion and reset reclaim.
+The sanitizer target instruments the firmware host path and harness; the
+downloaded libwebp archives retain their normal release build configuration.
+The smoke command writes the first composited canvas of animated input, not
+animation playback. Host memory figures and sanitizers do not qualify physical
+Z2/Z3 cache behavior, supported image sizes, or throughput. WebP remains
+unadvertised pending client integration and target qualification.
+
+The native FLAC backend (`sdk_audio_flac.c`) has its own Linux suite, linked
+against the pinned decoder-only libFLAC host archive:
+```bash
+make -C test/flac test
+make -C test/flac sanitize
+test/flac/gen_fixtures.sh   # regenerate fixtures; needs the reference flac tool
+```
+`build_flac.sh` downloads `flac-1.5.0.tar.xz` (release 2025-02-11) from the
+xiph/flac GitHub release with a pinned SHA-256 and compiles only the stream
+decoder translation units (no encoder, Ogg, metadata editing, programs,
+examples or SIMD), integer-only, with every libFLAC allocation routed through
+`src/sdk_flac_alloc.h` into the tracked core-1 decode heap. Fixtures are
+encoded and reference-decoded by the `flac` tool recorded in
+`test/flac/flac_fixtures.h`; tests compare decoded PCM byte-for-byte and
+cover fragmented feeds, known/unknown totals, invalid metadata, CRC errors,
+truncation, multichannel and Ogg-FLAC rejection, allocation-failure injection
+and restart reclaim. Host figures are not physical Z2/Z3 measurements.
+
+The Ogg Vorbis backend (`sdk_audio_vorbis.c`, arena `sdk_vorbis_alloc.c`)
+has its own Linux suite, linked against the pinned libogg/Tremor host
+archive:
+```bash
+make -C test/vorbis test
+make -C test/vorbis sanitize
+test/vorbis/gen_fixtures.sh   # regenerate fixtures; needs ffmpeg with libvorbis
+```
+`build_vorbis.sh` downloads `libogg-1.3.6.tar.xz` (release 2025-06-16) from
+downloads.xiph.org and the Tremor master commit `820fb3237ea8` (2025-04-03)
+archive from gitlab.xiph.org, each with a pinned SHA-256, and compiles only
+libogg's framing/bitwise units and Tremor's synthesis core (no vorbisfile,
+examples, ARM assembly or low-accuracy path; Tremor has no encoder), with
+every allocation routed through `src/sdk_vorbis_alloc.h` into a per-stream
+arena of tracked core-1 decode-heap regions. Fixtures under
+`test/vorbis/fixtures/` are encoded by ffmpeg's libvorbis wrapper and
+reference-decoded by ffmpeg's independent floating-point Vorbis decoder
+(versions in `test/vorbis/vorbis_fixtures.h`); decoded PCM must match within
+4 LSB per sample and 1 LSB RMS, and be byte-identical across every chunking,
+ring size and drain pattern. Tests cover mono/stereo, three block-size
+pairs, packets split across pages, 192 KiB comment headers, bad CRC,
+missing/out-of-order headers, oversized setup headers and codebooks,
+truncation, page gaps, chained/multiplexed/Opus/Ogg-FLAC/3-channel
+rejection, allocation-failure injection and restart reclaim. Host figures
+are not physical Z2/Z3 measurements.
+
+For source-preserving Docker runs, mount this checkout read-only, copy the
+firmware/test tree into container-local storage, and clean copied build caches
+there before building. CMake caches contain absolute paths; copying an existing
+dependency build does not make it relocatable.
 
 Capture RTL simulations also run in CI with Verilator. They exercise the
 production C28/E7M clock controller, filtered and full-width PAL-shaped
@@ -323,6 +405,18 @@ is intentionally skipped.
 - The bitstream lives there because that's where `bootgen` reads it
   from per the BIF, and committing it makes CI work without Vivado.
 - The firmware ELF contains an initialized 8 KB `.bootrom_image` segment
-  at `0x3FCF0000`, so FSBL preloads the Zorro autoboot ROM before
-  `main()` starts. The default BOOT image layout still stays
-  `FSBL -> bitstream -> ZZ9000OS`.
+  at `0x3FCF0000`. `build_bootimage.sh` also packages that ROM as a data
+  partition (no exec address) ahead of the bitstream, giving
+  `FSBL -> bootrom.bin@0x3FCF0000 -> bitstream -> ZZ9000OS`. Once the
+  bitstream is up, the board answers autoconfig, and a cold A4000 can read
+  the DiagArea while FSBL is still copying the multi-megabyte firmware.
+  The DiagArea is fetched from DDR through the FPGA's ACP master, and the
+  stock FSBL opened that PL->PS path (level shifters, FPGA resets via
+  `ps7_post_config()`) only at handoff. The ZZ9000 FSBL therefore runs
+  `ps7_post_config()` right after the bitstream (`fsbl_hooks.c`), and
+  treats a PS partition without an exec address as data, so it neither
+  trips "Partition order invalid" nor becomes the handoff target
+  (`image_mover.c`). Cold boots of firmware past roughly 4 MB crashed
+  (guru `80000004`) with the old FSBL. `--no-preload-bootrom` drops the
+  ROM partition for diagnostics; the hand-run `bootimage.bif` keeps the
+  old layout, which the ZZ9000 FSBL still boots.

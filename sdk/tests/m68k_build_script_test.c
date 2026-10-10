@@ -142,15 +142,25 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name, "tools/zz9k-png.c");
   ok &= expect_contains(script, name, "-DZZ9K_PNG_NO_MAIN=1");
   ok &= expect_contains(script, name, "build/m68k/zz9k-png-view.o");
+  ok &= expect_contains(script, name, "tools/zz9k-webp.c");
+  ok &= expect_contains(script, name, "-DZZ9K_WEBP_NO_MAIN=1");
+  ok &= expect_contains(script, name, "build/m68k/zz9k-webp-view.o");
   ok &= expect_contains(script, name, "tools/zz9k-view.c");
   ok &= expect_contains(script, name,
                         "build/m68k/zz9k-jpeg-view.o "
                         "build/m68k/zz9k-png-view.o "
+                        "build/m68k/zz9k-webp-view.o "
                         "tools/zz9k-view.c");
   ok &= expect_contains(script, name, "tools/zz9k-dtprobe.c");
   ok &= expect_contains(script, name,
                         "amiga/datatypes/zz9k_picture_datatype.c");
   ok &= expect_contains(script, name, "build/zz9k-picture.datatype");
+  ok &= expect_contains(script, name,
+                        "amiga/datatypes/zz9k_sound_datatype.c");
+  ok &= expect_contains(script, name, "build/zz9k-sound.datatype");
+  ok &= expect_contains(script, name,
+                        "amiga/datatypes/zz9k_mp3_dthook_entry.S");
+  ok &= expect_contains(script, name, "build/dtcode/zz9k-mp3-recog");
   ok &= expect_not_contains(script, name, "-Wl,--gc-sections");
   ok &= expect_contains(script, name, "tools/zz9k-surfaceops.c");
   ok &= expect_contains(script, name,
@@ -195,6 +205,7 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name, "build/zz9k-view");
   ok &= expect_contains(script, name, "build/zz9k-dtprobe");
   ok &= expect_contains(script, name, "build/zz9k-picture.datatype");
+  ok &= expect_contains(script, name, "build/zz9k-sound.datatype");
   ok &= expect_contains(script, name, "build/zz9k-surfaceops");
 
   free(script);

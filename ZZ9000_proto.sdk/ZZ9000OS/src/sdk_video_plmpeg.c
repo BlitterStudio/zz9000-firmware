@@ -1089,5 +1089,8 @@ const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
 	/* Add future codec/container backends to this registry. */
 	if (codec == plmpeg_ops.codec && container == plmpeg_ops.container)
 		return &plmpeg_ops;
+	if (codec == SDK_VIDEO_CODEC_MPEG2 &&
+	    container == SDK_VIDEO_CONTAINER_MPEG_PS)
+		return sdk_video_mpeg2_backend_ops();
 	return 0;
 }

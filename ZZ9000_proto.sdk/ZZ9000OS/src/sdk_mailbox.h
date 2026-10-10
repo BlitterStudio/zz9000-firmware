@@ -71,6 +71,8 @@
  * (docs/audio-fabric.md); now advertised in the audio service word and
  * the global capability set. */
 #define SDK_CAP_AUDIO_FABRIC           (1U << 27)
+#define SDK_CAP_AUDIO_FLAC             (1U << 28)
+#define SDK_CAP_AUDIO_VORBIS           (1U << 29)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
@@ -139,6 +141,8 @@
 #define SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA  (1U << 25)
 #define SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT    (1U << 26)
 #define SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565 (1U << 27)
+#define SDK_SERVICE_FLAG_IMAGE_WEBP             (1U << 28)
+#define SDK_SERVICE_FLAG_IMAGE_WEBP_ANIMATION   (1U << 29)
 #define SDK_SERVICE_FLAG_AUDIO_MP3_DECODE       (1U << 16)
 #define SDK_SERVICE_FLAG_AUDIO_MP3_STREAM       (1U << 20)
 /* Control-plane audio opcodes (0x0509+) are dispatchable. Follows the
@@ -151,6 +155,8 @@
 #define SDK_SERVICE_FLAG_AUDIO_FABRIC (1U << 22)
 #define SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE (1U << 23)
 #define SDK_SERVICE_FLAG_AUDIO_STREAM_GAIN (1U << 24)
+#define SDK_SERVICE_FLAG_AUDIO_FLAC_STREAM (1U << 25)
+#define SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM (1U << 26)
 #define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
 #define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)
 #define SDK_SERVICE_FLAG_CODEC_GZIP             (1U << 18)
@@ -205,6 +211,10 @@
 #define SDK_OP_IMAGE_SESSION_FEED      0x0405U
 #define SDK_OP_IMAGE_SESSION_CLOSE     0x0406U
 #define SDK_OP_SCALE_IMAGE_CLIPPED     0x0407U
+#define SDK_OP_IMAGE_ANIMATION_FRAME_NEXT 0x0408U
+#define SDK_OP_IMAGE_ANIMATION_FRAME_PRESENT 0x0409U
+#define SDK_OP_IMAGE_ANIMATION_FRAME_RETIRE 0x040aU
+#define SDK_OP_IMAGE_ANIMATION_RESTART 0x040bU
 
 #define SDK_OP_DECODE_MP3              0x0500U
 #define SDK_OP_AUDIO_STREAM_BEGIN      0x0503U
@@ -238,6 +248,7 @@
 #define SDK_OP_AUDIO_RING_ACQUIRE      0x0513U
 #define SDK_OP_AUDIO_RING_RELEASE      0x0514U
 #define SDK_OP_AUDIO_STREAM_GAIN       0x0515U
+#define SDK_OP_AUDIO_STREAM_BEGIN_EX   0x0516U
 
 #define SDK_OP_DECOMPRESS              0x0600U
 #define SDK_OP_DECOMPRESS_TEST         0x0601U
@@ -980,6 +991,7 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_SURFACE_FORMAT_RGB555      6U
 #define SDK_SURFACE_FORMAT_BGRA8888    7U
 #define SDK_SURFACE_FORMAT_RGB888      8U
+#define SDK_SURFACE_FORMAT_YUV422CGX   9U
 
 #define SDK_SURFACE_FLAG_CPU_VISIBLE   (1U << 0)
 #define SDK_SURFACE_FLAG_FRAMEBUFFER   (1U << 1)
@@ -999,7 +1011,7 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_IMAGE_CODEC_JPEG           1U
 #define SDK_IMAGE_CODEC_PNG            2U
 #define SDK_IMAGE_CODEC_GIF            3U
-
+#define SDK_IMAGE_CODEC_WEBP           4U
 #define SDK_IMAGE_OUTPUT_SURFACE       1U
 #define SDK_IMAGE_OUTPUT_FRAMEBUFFER   2U
 #define SDK_IMAGE_OUTPUT_TILE_BUFFER   3U
@@ -1008,6 +1020,8 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_IMAGE_DECODE_FLAG_PRESERVE_ASPECT (1U << 1)
 #define SDK_IMAGE_DECODE_FLAG_DITHER          (1U << 2)
 
+#define SDK_IMAGE_SESSION_BEGIN_ANIMATION (1U << 3)
+
 #define SDK_IMAGE_SESSION_FEED_EOF     (1U << 0)
 
 #define SDK_IMAGE_SESSION_STATE_NEED_INPUT   1U
@@ -1015,14 +1029,28 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_IMAGE_SESSION_STATE_TILE_READY   3U
 #define SDK_IMAGE_SESSION_STATE_COMPLETE     4U
 #define SDK_IMAGE_SESSION_STATE_ERROR        5U
+#define SDK_IMAGE_SESSION_STATE_ANIMATION_READY 6U
+#define SDK_IMAGE_SESSION_STATE_ANIMATION_ENDED 7U
 
 #define SDK_IMAGE_SESSION_RESULT_HEADER_READY (1U << 0)
 #define SDK_IMAGE_SESSION_RESULT_PARTIAL      (1U << 1)
 #define SDK_IMAGE_SESSION_RESULT_SCALED       (1U << 2)
 
+#define SDK_IMAGE_ANIMATION_FRAME_FLAG_FRAME_READY (1U << 0)
+#define SDK_IMAGE_ANIMATION_FRAME_FLAG_LAST_FRAME  (1U << 1)
+#define SDK_IMAGE_ANIMATION_FRAME_FLAG_PRESENTED   (1U << 2)
+#define SDK_IMAGE_ANIMATION_FRAME_FLAG_ENDED       (1U << 3)
+
 #define SDK_AUDIO_SAMPLE_FORMAT_NONE   0U
 #define SDK_AUDIO_SAMPLE_FORMAT_S16LE  1U
 #define SDK_AUDIO_SAMPLE_FORMAT_S16BE  2U
+#define SDK_AUDIO_SAMPLE_FORMAT_S32LE  3U
+#define SDK_AUDIO_SAMPLE_FORMAT_S32BE  4U
+
+#define SDK_AUDIO_CODEC_UNKNOWN        0U
+#define SDK_AUDIO_CODEC_MP3            1U
+#define SDK_AUDIO_CODEC_FLAC           2U
+#define SDK_AUDIO_CODEC_VORBIS         3U
 #define SDK_AUDIO_DECODE_FLAG_EXPECT_END (1U << 0)
 #define SDK_AUDIO_DECODE_RESULT_END    (1U << 0)
 #define SDK_MAX_AUDIO_STREAMS          4U
@@ -1245,6 +1273,11 @@ int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
  * the audio fabric compositor (audio_fabric_isr, audio_fabric.h)
  * since U2. */
 void sdk_mailbox_audio_playback_pump(void);
+/* Background close of FLAC/Vorbis streams whose decoder heap belongs to
+ * core 1 (audio_stream_close.h): queue the core-1 release and clear the
+ * slot afterwards. Call from the core-0 main loop every pass; no-op when
+ * no stream is closing. */
+void sdk_mailbox_audio_stream_reap(void);
 
 /*
  * Run a crypto task's compute on the calling core. op_params points at one of

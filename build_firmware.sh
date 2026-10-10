@@ -55,6 +55,10 @@ if [ "$#" -eq 0 ] || [ "$1" != "clean" ] || [ "$#" -gt 1 ]; then
     bash ./build_libjpeg_turbo.sh
     bash ./build_libpng.sh
     bash ./build_lzma_sdk.sh
+    bash ./build_libwebp.sh
+    bash ./build_dvd_codecs.sh --arm
+    bash ./build_flac.sh --arm
+    bash ./build_vorbis.sh --arm
 fi
 
 make -C ZZ9000_proto.sdk/ZZ9000OS "$@"

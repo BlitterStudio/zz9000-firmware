@@ -1,6 +1,6 @@
 # ZZPlay — the ZZ9000 accelerated media player
 
-ZZPlay plays MPEG-1 Program Streams and MP3 files using the ZZ9000's ARM
+ZZPlay plays MPEG-1 Program Streams, MP3, native FLAC and Ogg Vorbis files using the ZZ9000's ARM
 coprocessor and FPGA video overlay. Video decoding happens on the card; on the
 accelerated Zorro III path no decoded video ever crosses the Zorro bus.
 
@@ -19,10 +19,13 @@ It works two ways:
 | MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video, card-decoded | MPEG-1 Layer II, card-decoded |
 | MPEG-1 Program Stream, video only | MPEG-1 video, card-decoded | none (a warning is printed) |
 | MPEG Layer III (`.mp3`) | — | card-decoded, CBR and VBR, mono or stereo |
+| Native FLAC (`.flac`) | — | card-decoded, mono or stereo, 4 to 24 bits, 8 to 192 kHz; on the card when the AX output can play the rate, otherwise AHI. Wider than 16 bits is narrowed to 16-bit |
+| Ogg Vorbis (`.ogg`, `.oga`) | — | card-decoded, one logical stream, mono or stereo, 8 to 192 kHz; on the card when the AX output can play the rate, otherwise AHI |
+| Animated WebP (`.webp`) | WebP animation, card-decoded | none |
 | Playlist (`.m3u`, `.m3u8`) | the files it lists | |
 
 The format is chosen by inspecting the file, not by its name. MPEG-1
-elementary streams, standalone MP2, MPEG-2 and other codecs are rejected with
+elementary streams, standalone MP2, MPEG-2, Ogg-FLAC, Ogg Opus, multichannel FLAC/Vorbis and other codecs are rejected with
 a specific message rather than being half-played. File extensions only decide
 what a drawer scan or the file requester offers.
 
@@ -84,7 +87,7 @@ From top to bottom:
   use, the elapsed and total time and the playback state, and a message line
   for notices and errors.
 - **Position slider**: drag it to seek. Seeking is available for MP3; it is
-  greyed out for MPEG-1 video, which plays from the start.
+  greyed out for MPEG-1 video, FLAC and Ogg Vorbis, which play from the start.
 - **Transport**: previous, play, pause, stop, next.
 - **Volume**: greyed out when the active output cannot change volume (see
   below).
@@ -160,12 +163,14 @@ holds the ZZ9000AX — ZZPlay falls back as `Auto` would and shows the output
 it really used. Only a backend named for one launch with `AUDIO=` (or
 `--audio=`) is strict and reports an error instead of falling back.
 
-**Volume** works through AHI (MP3 and video sound) and through MHI drivers
-that advertise a volume control. `mhizz9000.library` does on firmware with
-per-stream audio gain and zz9k.library 2.31 or newer: the slider then scales
-the MP3 below the level set in ZZTop's audio settings, where 100% is that
-level. With older firmware or libraries, and for ZZ9000AX direct output, the
-level belongs to ZZTop's audio settings and the slider is greyed out.
+**Volume** works through AHI (MP3, video sound, and FLAC or Ogg Vorbis when
+they play through AHI) and through outputs that advertise a volume control.
+`mhizz9000.library` does on firmware with per-stream audio gain and
+zz9k.library 2.31 or newer, and on-card FLAC or Ogg Vorbis does on the same
+firmware: the slider then scales the stream below the level set in ZZTop's
+audio settings, where 100% is that level. With older firmware, and for
+ZZ9000AX direct Program Stream output, the level belongs to ZZTop's audio
+settings and the slider is greyed out.
 
 ## Options
 
@@ -179,7 +184,7 @@ they override the saved settings without changing them.
 | `--audio=auto` | `AUDIO=AUTO` | Pick the best available backend (default) |
 | `--audio=ahi` | `AUDIO=AHI` | Card-accelerated decode, output through AHI |
 | `--audio=mhi` | `AUDIO=MHI` | The selected MHI driver; MP3 only |
-| `--audio=ax` | `AUDIO=AX` | Direct ZZ9000AX output; Program Stream only |
+| `--audio=ax` | `AUDIO=AX` | ZZ9000AX output: direct for a Program Stream, on-card for FLAC and Ogg Vorbis |
 | `--audio=none` | `AUDIO=NONE` | Mute |
 | `--ahiunit=N` | `AHIUNIT=N` | AHI unit 0-3 |
 | `--mhidriver=name` | `MHIDRIVER=name` | MHI driver file in `LIBS:MHI/`, e.g. `mhizz9000.library` |
@@ -210,14 +215,37 @@ and the player window shows what it chose.
   advertises it.
 - MHI is never offered for Program Stream audio: it is a Layer III interface.
   Asking for it explicitly reports that rather than playing silently.
+- **FLAC** and **Ogg Vorbis** `AUTO` plays them on the card. The card decodes
+  to 16-bit little-endian and the ZZ9000AX output consumes that PCM, so
+  nothing is read back over the bus. If that output is refused — older
+  firmware, a sample rate or channel count the AX pump cannot convert to
+  48 kHz, or the ZZ9000AX already in use — ZZPlay falls back to accelerated
+  decode plus AHI and the window shows the output it actually used. A saved
+  preference is not strict and falls back the same way. `AUDIO=AX` does not
+  fall back; it reports the refusal. `AUDIO=AHI` keeps AHI. `AUDIO=MHI` is
+  refused, because MHI is MP3 only; the message names the outputs that do
+  work (the card and AHI). The saved MP3 output does not apply. They need
+  firmware that advertises the matching stream service; without it ZZPlay
+  reports that accelerated FLAC or Ogg Vorbis streaming is unavailable. An
+  Ogg Vorbis duration comes from the stream's last page and
+  is shown only when that page belongs to the same stream. A chained Ogg
+  file plays its first link to its end (the firmware reports the next link
+  only after every byte of the first has been read), then stops with an
+  error saying the card cannot decode the rest; it is never reported as
+  completed. A multiplexed file is refused before anything plays.
+- The decoded-audio ring is sized from the stream's largest decoder unit
+  (an MP3 frame, a FLAC block, a Vorbis packet) and shrinks in bounded steps
+  when the compact Zorro II host window is short; if even one unit does not
+  fit, ZZPlay reports that there is not enough shared card memory for that
+  stream instead of starting it.
 
 Only one backend can own the ZZ9000AX daughterboard at a time. If another
 program holds it, an explicitly requested backend reports `BUSY` instead of
 stealing it, and `AUTO` falls back and says so.
 
-Pause through MHI stops essentially instantly. Through AHI it stops after the
-already-queued audio finishes, up to about 0.4 seconds, because that queue is
-what keeps playback gap-free.
+Pause through MHI, and through on-card FLAC or Ogg Vorbis, stops essentially
+instantly. Through AHI it stops after the already-queued audio finishes, up
+to about 0.4 seconds, because that queue is what keeps playback gap-free.
 
 ### Fullscreen
 

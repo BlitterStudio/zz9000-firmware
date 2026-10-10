@@ -4,7 +4,7 @@
  * Regenerate with: python util/gen_audio_convert_tables.py
  * Design: Kaiser windowed-sinc polyphase FIR, A = 80 dB,
  *         passband edge 0.45 * min(fs_in, fs_out), stopband edge
- *         min(fs_in, fs_out) - passband edge, causal delayed-symmetric
+ *         min(fs_in, fs_out) / 2, causal delayed-symmetric
  *         kernel, exact-rational phase stepping, unity DC gain per phase
  *         (Q14 tap sum == 16384, runtime round-shift 14), per-phase L1 <= 48000.
  */
@@ -38,7 +38,10 @@ struct zz_audio_convert_ratio {
 };
 
 extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_8000_48000; /* 8000 -> 48000 Hz */
+extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_11025_48000; /* 11025 -> 48000 Hz */
 extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_12000_48000; /* 12000 -> 48000 Hz */
+extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_16000_48000; /* 16000 -> 48000 Hz */
+extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_22050_48000; /* 22050 -> 48000 Hz */
 extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_24000_48000; /* 24000 -> 48000 Hz */
 extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_32000_48000; /* 32000 -> 48000 Hz */
 extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_44100_48000; /* 44100 -> 48000 Hz */
@@ -47,5 +50,7 @@ extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_48000_12000; /
 extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_48000_24000; /* 48000 -> 24000 Hz */
 extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_48000_32000; /* 48000 -> 32000 Hz */
 extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_48000_44100; /* 48000 -> 44100 Hz */
+extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_88200_48000; /* 88200 -> 48000 Hz */
+extern const struct zz_audio_convert_ratio zz_audio_convert_ratio_96000_48000; /* 96000 -> 48000 Hz */
 
 #endif /* ZZ_AUDIO_CONVERT_TABLES_H */

@@ -55,6 +55,18 @@ them unnecessary (64-bit is the reset default). All other 639 ops
 matched (old: 645 total, new: 639). Boot-path message strings were also
 verified present in the rebuild.
 
+## ZZ9000 changes to the stock FSBL source
+
+- `fsbl_hooks.c`: `FsblHookAfterBitstreamDload()` runs `ps7_post_config()`
+  (level shifters, FPGA resets), so the Zorro logic can reach DDR as soon
+  as it answers autoconfig, not only after the firmware is loaded.
+- `image_mover.c`: a PS partition without an exec address is data. It may
+  precede the bitstream and is never the handoff target. This lets
+  `build_bootimage.sh` put the autoboot ROM in DDR before the bitstream.
+
+These leave the PS register tables untouched (`compare_ps7_tables.py`:
+639/639 ops identical, 2026-10-09).
+
 ## Shipping (hardware gate)
 
 A broken FSBL = the card does not boot, no recovery over Zorro. Always:

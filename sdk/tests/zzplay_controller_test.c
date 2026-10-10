@@ -294,6 +294,43 @@ static int test_item_lifecycle(void)
 
   return 0;
 }
+static int test_webp_item_capabilities(void)
+{
+  ZZPlayController ctl;
+
+  zzplay_controller_init(&ctl, 100U, ZZPLAY_REPEAT_ONE, 0);
+  zzplay_controller_item_begin(&ctl);
+
+  /* WebP animation item: has_video=1, seekable=0, volume_supported=0 */
+  zzplay_controller_set_capabilities(&ctl, 0, 0, 1);
+  if (!ctl.now.has_video) return 1;
+  if (ctl.now.seekable) return 2;
+  if (ctl.now.volume_supported) return 3;
+
+  /* Seeking is rejected */
+  if (zzplay_controller_seek_to(&ctl, 5000U) != 0) return 4;
+
+  /* Fullscreen toggle works because has_video=1 */
+  if (!zzplay_controller_apply(&ctl, ZZPLAY_CONTROL_TOGGLE_FULLSCREEN)) return 5;
+  if (!zzplay_controller_take_fullscreen_toggle(&ctl)) return 6;
+
+  /* Position updates */
+  zzplay_controller_set_position(&ctl, 1250U, 1);
+  if (ctl.now.elapsed_ms != 1250U) return 7;
+
+  /* Pause / resume toggle */
+  if (!zzplay_controller_apply(&ctl, ZZPLAY_CONTROL_TOGGLE_PAUSE)) return 8;
+  if (!ctl.paused) return 9;
+  if (!zzplay_controller_apply(&ctl, ZZPLAY_CONTROL_TOGGLE_PAUSE)) return 10;
+  if (ctl.paused) return 11;
+
+  /* Track repeat */
+  if (zzplay_controller_loop_item(&ctl) != 1) return 12;
+
+  zzplay_controller_item_end(&ctl);
+  return 0;
+}
+
 
 int main(void)
 {
@@ -333,6 +370,11 @@ int main(void)
   if (rc) {
     fprintf(stderr, "test_item_lifecycle failed: %d\n", rc);
     return 7;
+  }
+  rc = test_webp_item_capabilities();
+  if (rc) {
+    fprintf(stderr, "test_webp_item_capabilities failed: %d\n", rc);
+    return 8;
   }
 
   printf("zzplay_controller_test: all tests passed\n");

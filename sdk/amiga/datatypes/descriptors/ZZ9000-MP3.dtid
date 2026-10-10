@@ -1,0 +1,21 @@
+# Source metadata for the packaged ZZ9000 MP3 DataTypes descriptor.
+# Copyright (C) 2024-2026, Dimitris Panokostas / BlitterStudio
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Recognition (KTD8): a bytewise dth_Mask cannot express "optional ID3v2 tag,
+# then a Layer III frame", and widening it to "ID3" would claim arbitrary ID3
+# data. The descriptor therefore has an empty mask and an embedded DTCD hook
+# (amiga/datatypes/zz9k_mp3_dthook.c, built as build/dtcode/zz9k-mp3-recog)
+# that claims a file only when a bounded ID3v2 tag, or none, is followed
+# directly by two consecutive matching Layer III frame headers. Layer I/II
+# and ID3-only data are not claimed. zz9k-sound.datatype re-validates every
+# file routed to it.
+FileName=Storage/DataTypes/ZZ9000-MP3
+Version=42.5
+DTName=ZZ9000-MP3,zz9k-sound
+ID=soun,mp3 
+Recog=none
+Code=zz9k-mp3-recog
+Pattern=#?
+Flags=Binary,n,10
+Install=inactive

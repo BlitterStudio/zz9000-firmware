@@ -534,6 +534,8 @@ static int test_audio_decode_builder_encodes_descriptor(void)
 static int test_audio_stream_builders_encode_descriptors(void)
 {
   ZZ9KAudioStreamBeginDesc begin;
+  ZZ9KAudioStreamBeginExDesc begin_ex;
+  const ZZ9KAudioStreamBeginExPayload *begin_ex_payload;
   ZZ9KAudioStreamFeedDesc feed;
   ZZ9KRequest request;
   const ZZ9KAudioStreamBeginPayload *begin_payload;
@@ -576,6 +578,34 @@ static int test_audio_stream_builders_encode_descriptors(void)
     return 6;
   }
 
+  memset(&begin_ex, 0, sizeof(begin_ex));
+  begin_ex.codec = ZZ9K_AUDIO_CODEC_MP3;
+  begin_ex.input_ring_handle = 0x40000031UL;
+  begin_ex.input_ring_capacity = 524288U;
+  begin_ex.pcm_ring_handle = 0x40000032UL;
+  begin_ex.pcm_ring_capacity = 1048576U;
+  begin_ex.output_format = ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE;
+  begin_ex.low_water_bytes = 32768U;
+  begin_ex.high_water_bytes = 65536U;
+
+  memset(&request, 0xff, sizeof(request));
+  if (zz9k_request_audio_stream_begin_ex(&request, &begin_ex) != ZZ9K_STATUS_OK) {
+    return 50;
+  }
+  if (request.entry.opcode != ZZ9K_OP_AUDIO_STREAM_BEGIN_EX) return 51;
+  if (request.entry.payload_len != sizeof(ZZ9KAudioStreamBeginExPayload)) return 52;
+  begin_ex_payload =
+      (const ZZ9KAudioStreamBeginExPayload *)request.entry.payload.inline_data;
+  if (zz9k_get_be32(begin_ex_payload->codec) != ZZ9K_AUDIO_CODEC_MP3) return 53;
+  if (zz9k_get_be32(begin_ex_payload->input_ring_handle) != 0x40000031UL) return 54;
+  if (zz9k_get_be32(begin_ex_payload->pcm_ring_capacity) != 1048576U) return 55;
+  if (zz9k_get_be32(begin_ex_payload->output_format) != ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE) return 56;
+
+  begin_ex.codec = 99U;
+  if (zz9k_request_audio_stream_begin_ex(&request, &begin_ex) != ZZ9K_STATUS_BAD_REQUEST) return 57;
+  begin_ex.codec = ZZ9K_AUDIO_CODEC_MP3;
+  begin_ex.flags = 1U;
+  if (zz9k_request_audio_stream_begin_ex(&request, &begin_ex) != ZZ9K_STATUS_BAD_REQUEST) return 58;
   memset(&feed, 0, sizeof(feed));
   feed.session = 7U;
   feed.src_handle = 0x40000033UL;

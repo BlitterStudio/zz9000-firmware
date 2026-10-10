@@ -8,7 +8,7 @@ The current library identity is:
 ```c
 #define ZZ9K_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 31
+#define ZZ9K_LIBRARY_REVISION 33
 ```
 
 Open the library with at least version 2:
@@ -531,9 +531,9 @@ backend capabilities:
 - `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_SCALING`: the backend can scale during JPEG
   decode.
 - `ZZ9K_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA`: streaming PNG decode can write
-  direct 32-bit BGRA output to a surface or mapped framebuffer. PNG tile output,
-  fit scaling, APNG, and interlaced PNG are intentionally not part of this first
-  decoder slice.
+  direct 32-bit BGRA output to a surface or mapped framebuffer. Image sessions
+  also support interlaced PNG and bounded tile output. PNG fit scaling and APNG
+  playback are not supported.
 - `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BILINEAR`: the scaler accepts
   `ZZ9K_SCALE_BILINEAR` for 32-bit surfaces.
 - `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_CLIPPED`: the scaler accepts clipped
@@ -552,11 +552,57 @@ The current libjpeg-turbo backend advertises baseline JPEG, progressive JPEG,
 direct BGRA output, and bounded fit scaling for image sessions. The fit path
 uses libjpeg-turbo DCT scaling first, then a bounded row scaler when the image
 is still larger than the target framebuffer.
-The current libpng backend advertises direct BGRA output only; use the generic
-ARM scaler after decode when PNG fit/upscale behavior is needed.
+The libpng backend uses direct or staged/tiled output as required by interlace
+and destination mode; use the generic ARM scaler for PNG fit/upscale behavior.
 `zz9k-services` prints these flags as `jpeg-baseline`, `jpeg-progressive`,
 `jpeg-direct-bgra`, `jpeg-scaling`, `png-direct-bgra`, `scale-bilinear`,
 `scale-clipped`, `streaming-input`, `tile-output`, and `framebuffer-output`.
+
+#### WebP firmware development contract (unadvertised)
+
+Codec ID `ZZ9K_IMAGE_CODEC_WEBP = 4` and image-service flag
+`ZZ9K_SERVICE_FLAG_IMAGE_WEBP = 1U << 28` are reserved. Firmware contains a
+libwebp 1.6.0 decoder, but does **not** advertise the flag. Public image helpers,
+picture.datatype, and zz9k-view now support WebP client integration (gated by
+`ZZ9K_SERVICE_FLAG_IMAGE_WEBP`). ZZPlay timed animation playback follows in U2b.
+Do not infer support from the codec constant or generic image-decode capability alone.
+
+The internal image-session path accepts lossy/lossless WebP and alpha. Animated
+input produces the first fully composited canvas, including frame offsets and
+transparent canvas regions. It validates the complete container before output;
+this preview does not certify decoding later frames and supplies no timed
+playback contract. No existing opcode, payload layout or LVO changes.
+
+- Input is assembled once in ARM-local storage using the declared RIFF length.
+  Each copied fragment is acknowledged immediately; no output is published until
+  EOF validates the container and the static image/first canvas decodes.
+- Tile output reuses the caller's bounded tile buffer. Drain with empty EOF feeds
+  after the compressed bytes are consumed, copy each `TILE_READY` result before
+  the next feed, and continue until `COMPLETE`. Drains consume zero input bytes.
+- Provisional safety caps: 8 MiB compressed input, 8192 pixels per dimension,
+  6 MiPixels per canvas, 1024 top-level chunks, 1024 nested chunks per frame,
+  and 256 animation frames. One WebP session reserves the shared 72 MiB
+  decode-state budget; actual input, canvases, allocation headers and decoder
+  workspace must fit that quota. All of a session's allocations come from its
+  own arena of a few large regions, so the animation frame count does not
+  consume entries of the 64-entry core-1 reset tracker. Exhausted memory or
+  tracker entries return `NO_MEMORY`, even for inputs within those caps.
+  These are implementation bounds, not measured supported-image guarantees.
+- Decoding requires core 1. ARM-local surface destinations must match the
+  decoded canvas dimensions exactly and use an explicit cache handoff. Partial
+  ARM-local destination rectangles and FIT decoding are unsupported. Existing
+  JPEG/PNG core routing is unchanged.
+- An animation surface pitch must hold whole two-pixel YUV422CGX macropixels
+  (`((width + 1) / 2) * 4` bytes). PRESENT copies the frame into the open
+  `RGBFB_YUV422CGX` P96 PIP source bitmap, clipped to that bitmap. The PIP must
+  be open before PRESENT, and its source width must be even. A PIP that is
+  reopened, for example by a fullscreen toggle, is repainted with the frame
+  still on show. A bound SDK video session takes precedence over the PIP.
+- Completed output, error and close release decoder allocations; a core-1 fault
+  poisons the session and reclaims tracked blocks without stale destructors.
+
+Physical Z2/Z3 memory, cache-coherence and throughput qualification, client
+integration, and distribution notices are release gates before advertising WebP.
 
 ### Image Tool Smoke Tests
 
@@ -620,16 +666,16 @@ draws into the window inner rectangle. Refresh and resize redraws query visible
 window clips before submitting clipped scale bands, and the affected
 framebuffer rectangle is backed up with ARM surface-copy operations unless
 `--keep` is supplied. Windowed restore copies only the currently visible clips
-from that backup surface. Static non-interlaced PNG files are supported; APNG,
-interlaced PNG, and tile output are still rejected.
+from that backup surface. Static PNG, including interlaced input, is supported;
+image sessions also support tile output. APNG playback remains unsupported.
 
 `zz9k-view` is the standalone ZZ9000 viewer for the SDK v2 image path. It
-accepts one or more JPEG or PNG files, opens one resizable Intuition window,
+accepts one or more JPEG, PNG, or WebP files, opens one resizable Intuition window,
 decodes the current image into an ARM-local surface, and redraws the fitted
 image through visible layer clips with sliced `ZZ9KScaleImageClipped()` jobs:
 
 ```sh
-zz9k-view Work:Pictures/test.jpg Work:Pictures/test.png
+zz9k-view Work:Pictures/test.jpg Work:Pictures/test.png Work:Pictures/test.webp
 ```
 
 Use Space/Right/Down for next image navigation, Left/Up/Backspace for previous,
@@ -638,6 +684,8 @@ Use Space/Right/Down for next image navigation, Left/Up/Backspace for previous,
 paths; `zz9k-view` is the user-facing demo viewer. With firmware advertising
 `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565`, it supports RGB555,
 RGB565, and native 32-bit BGRA RTG screens.
+Animated WebP displays its first composited canvas as a documented still preview;
+timed multi-frame animation playback belongs to ZZPlay.
 
 These CLI tools are hardware smoke tests. User-facing viewer and DataType output should
 enumerate visible layer or damage clip regions and submit clipped scale bands
@@ -900,11 +948,12 @@ request may carry `ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE` with a
 grant then answers under sample contract
 `ZZ9K_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE` with the validated
 rate echoed in its `source_rate` result word (populated as 48000 for
-bypass grants). The rate vocabulary is exactly the qualified conversion
-table — 8000, 12000, 24000, 32000, 44100, or 48000 Hz — and firmware
-converts each 20-ms source period (`rate/50 * 4` bytes) to the 48-kHz
-output domain with the qualified per-slot kernel; the ring geometry
-words still describe 3,840-byte periods. Firmware advertising this
+bypass grants). The lease rate vocabulary is the qualified conversion
+table restricted to rates whose 20 ms period is an integer frame count
+that fits one 48 kHz period — 8000, 12000, 16000, 22050, 24000, 32000,
+44100, or 48000 Hz — and firmware converts each 20-ms source period
+(`rate/50 * 4` bytes) to the 48-kHz output domain with the qualified
+per-slot kernel; the ring geometry words still describe 3,840-byte periods. Firmware advertising this
 reports `ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE` in the audio service;
 older firmware rejects any nonzero acquire-flags word with
 `ZZ9K_STATUS_BAD_REQUEST`, which is a client's fallback signal. The
@@ -1797,6 +1846,137 @@ is attenuation under the active scene: 0 is silence and 128 preserves the
 scene level. flags must be zero. A gain selected while unbound is retained
 for the next ZZ9KAudioStreamPlay; changing a currently bound session takes
 effect in the fabric pump without modifying the scene-owned master chain.
+
+Library revision 32 adds timed WebP animation frame LVOs:
+`ZZ9KImageAnimationFrameNext()`, `ZZ9KImageAnimationFramePresent()`,
+`ZZ9KImageAnimationFrameRetire()`, and `ZZ9KImageAnimationRestart()`.
+Callers must gate these on `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION`
+and `ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION`.
+
+Library revision 33 adds the codec-aware audio streaming begin LVO:
+`ZZ9KAudioStreamBeginEx()` at `ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX`. Callers must gate
+it on `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX`. Firmware without the
+BeginEx opcode answers `ZZ9K_STATUS_UNSUPPORTED`; there is no silent fallback
+to the MP3-only Begin, so MP3 clients that must run on older firmware keep
+using `ZZ9KAudioStreamBegin()`.
+
+### Codec-Aware Audio Streaming and PCM Contract
+
+`ZZ9KAudioStreamBeginEx()` generalizes the audio streaming session model to
+codecs beyond MP3 (e.g. FLAC, Vorbis) while preserving the proven bounded
+shared-memory streaming state machine (`ZZ9KAudioStreamFeed()`,
+`ZZ9KAudioStreamRead()`, `ZZ9KAudioStreamClose()`).
+
+- **Codecs**: Supported codecs are enumerated in `enum ZZ9KAudioCodec`:
+  `ZZ9K_AUDIO_CODEC_MP3` (1), `ZZ9K_AUDIO_CODEC_FLAC` (2), `ZZ9K_AUDIO_CODEC_VORBIS` (3).
+  The codec is specified explicitly in `ZZ9KAudioStreamBeginExDesc.codec`. Unknown or
+  unimplemented codec values are rejected with `ZZ9K_STATUS_BAD_REQUEST` or
+  `ZZ9K_STATUS_UNSUPPORTED`.
+- **Native Rate and Channels**: Setting `output_hz = 0` selects native source rate;
+  setting `output_channels = 0` selects native source channels (1 = mono, 2 = stereo).
+  The actual stream geometry is returned in `ZZ9KAudioStreamResult.sample_rate` and
+  `ZZ9KAudioStreamResult.channels`.
+- **PCM Container Format and Valid-Bit Semantics**: Supported sample formats are
+  `ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE` (1), `ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE` (2),
+  `ZZ9K_AUDIO_SAMPLE_FORMAT_S32LE` (3), and `ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE` (4).
+  For 16-bit containers, samples are signed 16-bit linear PCM.
+  For 32-bit containers, samples are signed 32-bit linear PCM. When decoding 24-bit sources
+  (e.g. 24-bit FLAC) into a 32-bit container, samples are left-aligned (shifted left by 8 bits,
+  MSB-aligned into bits 31..8, with bits 7..0 zeroed) to preserve unity scale and full dynamic range.
+  Requesting an unsupported format for a given codec (e.g. 32-bit output from the 16-bit MP3 backend)
+  returns `ZZ9K_STATUS_UNSUPPORTED`.
+- **Cursor Units and Invariants**: All cursor positions (`bytes_consumed`, `bytes_produced`,
+  `pcm_write`, `pcm_read`) and capacities are strictly byte-denominated. One audio PCM frame consists
+  of `channels * bytes_per_sample` bytes. Acknowledges (`pcm_read` in `ZZ9KAudioStreamRead`) must be
+  whole frames; partial frames are never published or consumed.
+- **Format Stability**: The decoded audio geometry (`sample_rate`, `channels`, `sample_format`) is fixed
+  upon initial header decode. Dynamic mid-stream geometry switching is forbidden; an unannounced
+  format change faults the stream.
+- **Single-Consumer Ownership**: An audio stream session operates in either unbound readback mode
+  (consumed via `ZZ9KAudioStreamRead()`) or bound playback mode (pumped to ZZ9000AX via
+  `ZZ9KAudioStreamPlay()`). A session cannot switch between consumer modes without explicit transition,
+  and attempting to bind playback while another session is active returns `ZZ9K_STATUS_BUSY`.
+- **EOF and Resumable Drain**: Feeding `ZZ9K_AUDIO_STREAM_FEED_EOF` marks permanent end of stream;
+  the session decodes all remaining input and signals `ZZ9K_AUDIO_STREAM_RESULT_DONE` once all PCM has
+  been read. Feeding `ZZ9K_AUDIO_STREAM_FEED_DRAIN` marks a starvation boundary; complete frames are
+  decoded, unread PCM drains to `ZZ9K_AUDIO_STREAM_RESULT_DRAINED`, and incomplete compressed data is
+  retained so subsequent feeds can seamlessly resume decoding.
+- **Cleanup and Reset**: Closing a session reclaims all decoder allocations and invalidates the session handle.
+  A firmware mailbox reset or restart invalidates every active session.
+
+**Native FLAC sessions** (`ZZ9K_AUDIO_CODEC_FLAC`, gated by
+`ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM`; both that flag and `ZZ9K_CAP_AUDIO_FLAC`
+stay unadvertised until physical qualification, so clients refuse FLAC on
+current firmware). Feed the whole native file from byte 0 (`fLaC`);
+firmware skips non-STREAMINFO metadata itself. `output_format` must be
+`S16BE` (sources of at most 16 bits), `S16LE` (the little-endian form of
+that 16-bit container; a deeper source is narrowed to the top 16 bits of
+the 32-bit MSB-justified sample), or `S32BE` (up to 24 bits). `S32LE`
+answers `ZZ9K_STATUS_UNSUPPORTED` at Begin; any other value is
+`ZZ9K_STATUS_BAD_REQUEST`. Samples are MSB-justified in a big-endian
+container (`value << (container_bits - source_bits)`), interleaved, native
+rate and channels; `S16LE` is that same 16-bit value stored little-endian.
+`sample_rate`/`channels` stay 0 until STREAMINFO is
+parsed. The first Feed that parses STREAMINFO returns
+`ZZ9K_STATUS_UNSUPPORTED` for more than two channels, more than 24 bits,
+`S16BE` with a deeper source, rates outside 8000..192000 Hz, Ogg-FLAC or
+ID3v2-prefixed input, or a largest frame that cannot fit `pcm_ring_capacity`.
+Corrupt, CRC-failing or truncated input faults with `ZZ9K_STATUS_IO_ERROR`;
+allocation failure with `ZZ9K_STATUS_NO_MEMORY`. Later Feed/Read calls repeat
+the fault status. A frame is decoded only once it is fully buffered (the next
+frame header is present, `FEED_EOF`, or a CRC-verified tail under
+`FEED_DRAIN`), so `input_ring_capacity` must hold at least one compressed
+frame plus a chunk; a ring that cannot accept the next chunk while the decoder
+waits for a frame faults `ZZ9K_STATUS_IO_ERROR`. `ZZ9KAudioStreamPlay()`
+binds an `S16LE` mono or stereo session whose rate the AX pump can convert
+to 48 kHz (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000,
+88200, 96000). Any other format, channel count, or rate answers
+`ZZ9K_STATUS_UNSUPPORTED` (the AHI fallback); Play before the rate is known
+answers `ZZ9K_STATUS_BAD_REQUEST`. Gain, Stop, Play-again, Feed EOF/drain
+and the result fields match an MP3 session. 11025 is converted in 40 ms
+quanta because 20 ms is not an integer frame count.
+
+**Ogg Vorbis sessions** (`ZZ9K_AUDIO_CODEC_VORBIS`, gated by
+`ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM`; both that flag and
+`ZZ9K_CAP_AUDIO_VORBIS` stay unadvertised until physical qualification, so
+clients refuse Vorbis on current firmware). Feed the whole `.ogg`/`.oga` file
+from byte 0 (the identification BOS page). `output_format` must be `S16BE`
+or `S16LE` (Tremor's fixed-point output narrowed to 16 bits, stored in the
+requested byte order); 32-bit formats answer `ZZ9K_STATUS_UNSUPPORTED` at
+Begin, as does firmware running without its
+second core (Vorbis decodes only on core 1). Samples are interleaved at the
+native rate and channels; `sample_rate`/`channels` stay 0 until the
+identification header is parsed. The Feed that parses it returns
+`ZZ9K_STATUS_UNSUPPORTED` for more than two channels or rates outside
+8000..192000 Hz; the first page answers `ZZ9K_STATUS_UNSUPPORTED` for a
+non-Vorbis logical stream (Opus, Ogg-FLAC, Theora, ...). Exactly one logical
+stream is decoded: a second BOS page (multiplexed, or a chained second link)
+stops decoding, later input is discarded, and once every PCM byte of the
+first stream has been published and acknowledged by `ZZ9KAudioStreamRead()`
+the next Feed or Read (possibly the Read that acknowledges the last bytes,
+whose acknowledgement still applies) returns `ZZ9K_STATUS_UNSUPPORTED`; a
+player can therefore play the first link completely and then stop with an
+unsupported-stream error. Bytes after the stream's EOS page that are not an
+Ogg page (for example an ID3v1 tag) are ignored. Corrupt (page CRC, lost or
+out-of-sequence page, broken packet, missing or out-of-order header) or
+truncated input (EOF before the EOS page or inside a packet) faults with
+`ZZ9K_STATUS_IO_ERROR`; allocation failure, including reaching the 1 MiB
+per-session decoder ceiling, with `ZZ9K_STATUS_NO_MEMORY`. Comment headers
+are validated while streaming and never buffered, so embedded cover art of
+any size is accepted. Setup headers and audio packets larger than 64 KiB,
+and codebooks with more than 8192 used entries, answer
+`ZZ9K_STATUS_UNSUPPORTED`. Later Feed/Read calls repeat the fault status.
+Firmware copies input into its own page buffer, so any `input_ring_capacity`
+works and a drained session simply waits for the next page. `ZZ9KAudioStreamPlay()`
+accepts an `S16LE` mono or stereo Vorbis session on the same pump rates as
+FLAC, and answers `ZZ9K_STATUS_UNSUPPORTED` otherwise. Gain, Stop, and the
+result fields match MP3.
+
+`ZZ9KAudioStreamClose()` of a FLAC or Vorbis session never answers
+`ZZ9K_STATUS_BUSY`: the session handle is invalid as soon as Close returns
+(further Feed/Read/Play/Close answer `ZZ9K_STATUS_BAD_HANDLE`), and when the
+decoder heap belongs to the second core the firmware releases it there in the
+background, keeping the session slot reserved until that has happened.
 
 `ZZ9KAudioStreamBeginDesc.low_water_bytes` is the PCM-ring refill
 threshold: while a session is bound to the AX output, the firmware tops the

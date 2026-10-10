@@ -8,6 +8,7 @@
 #define ZZ9K_REQUEST_H
 
 #include "zz9k/host.h"
+#include "zz9k/image.h"
 #include "zz9k/audio.h"
 #include "zz9k/compression.h"
 #include "zz9k/crypto.h"
@@ -425,19 +426,11 @@ static inline int zz9k_request_decode_gif(ZZ9KRequest *request,
   return zz9k_request_decode_image(request, ZZ9K_OP_DECODE_GIF, desc);
 }
 
-static inline int zz9k_image_codec_is_known(uint32_t codec)
-{
-  return codec == ZZ9K_IMAGE_CODEC_JPEG ||
-         codec == ZZ9K_IMAGE_CODEC_PNG ||
-         codec == ZZ9K_IMAGE_CODEC_GIF;
-}
-
 static inline int zz9k_request_image_session_begin(
     ZZ9KRequest *request, const ZZ9KImageSessionBeginDesc *desc)
 {
   ZZ9KImageSessionBeginPayload *payload;
-
-  if (!request || !desc || !zz9k_image_codec_is_known(desc->codec) ||
+  if (!request || !desc || !zz9k_image_codec_known(desc->codec) ||
       desc->output_format == ZZ9K_SURFACE_FORMAT_UNKNOWN) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
@@ -520,6 +513,88 @@ static inline int zz9k_request_image_session_close(ZZ9KRequest *request,
   zz9k_put_be32(payload->flags, flags);
   return ZZ9K_STATUS_OK;
 }
+static inline int zz9k_request_image_animation_frame_next(
+    ZZ9KRequest *request,
+    uint32_t session,
+    uint32_t flags)
+{
+  ZZ9KImageAnimationFrameRequestPayload *payload;
+
+  if (!request || session == 0U) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  zz9k_request_init(request, ZZ9K_OP_IMAGE_ANIMATION_FRAME_NEXT);
+  request->entry.payload_len = sizeof(ZZ9KImageAnimationFrameRequestPayload);
+  payload = (ZZ9KImageAnimationFrameRequestPayload *)request->entry.payload.inline_data;
+  zz9k_put_be32(payload->session, session);
+  zz9k_put_be32(payload->frame_token, 0U);
+  zz9k_put_be32(payload->flags, flags);
+  return ZZ9K_STATUS_OK;
+}
+
+static inline int zz9k_request_image_animation_frame_present(
+    ZZ9KRequest *request,
+    uint32_t session,
+    uint32_t frame_token,
+    uint32_t flags)
+{
+  ZZ9KImageAnimationFrameRequestPayload *payload;
+
+  if (!request || session == 0U || frame_token == 0U) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  zz9k_request_init(request, ZZ9K_OP_IMAGE_ANIMATION_FRAME_PRESENT);
+  request->entry.payload_len = sizeof(ZZ9KImageAnimationFrameRequestPayload);
+  payload = (ZZ9KImageAnimationFrameRequestPayload *)request->entry.payload.inline_data;
+  zz9k_put_be32(payload->session, session);
+  zz9k_put_be32(payload->frame_token, frame_token);
+  zz9k_put_be32(payload->flags, flags);
+  return ZZ9K_STATUS_OK;
+}
+
+static inline int zz9k_request_image_animation_frame_retire(
+    ZZ9KRequest *request,
+    uint32_t session,
+    uint32_t frame_token,
+    uint32_t flags)
+{
+  ZZ9KImageAnimationFrameRequestPayload *payload;
+
+  if (!request || session == 0U || frame_token == 0U) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  zz9k_request_init(request, ZZ9K_OP_IMAGE_ANIMATION_FRAME_RETIRE);
+  request->entry.payload_len = sizeof(ZZ9KImageAnimationFrameRequestPayload);
+  payload = (ZZ9KImageAnimationFrameRequestPayload *)request->entry.payload.inline_data;
+  zz9k_put_be32(payload->session, session);
+  zz9k_put_be32(payload->frame_token, frame_token);
+  zz9k_put_be32(payload->flags, flags);
+  return ZZ9K_STATUS_OK;
+}
+
+static inline int zz9k_request_image_animation_restart(
+    ZZ9KRequest *request,
+    uint32_t session,
+    uint32_t flags)
+{
+  ZZ9KImageAnimationFrameRequestPayload *payload;
+
+  if (!request || session == 0U) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  zz9k_request_init(request, ZZ9K_OP_IMAGE_ANIMATION_RESTART);
+  request->entry.payload_len = sizeof(ZZ9KImageAnimationFrameRequestPayload);
+  payload = (ZZ9KImageAnimationFrameRequestPayload *)request->entry.payload.inline_data;
+  zz9k_put_be32(payload->session, session);
+  zz9k_put_be32(payload->frame_token, 0U);
+  zz9k_put_be32(payload->flags, flags);
+  return ZZ9K_STATUS_OK;
+}
+
 
 static inline int zz9k_request_decode_mp3(ZZ9KRequest *request,
                                           const ZZ9KAudioDecodeDesc *desc)
@@ -589,6 +664,46 @@ static inline int zz9k_request_audio_stream_begin(
   zz9k_put_be32(payload->low_water_bytes, desc->low_water_bytes);
   zz9k_put_be32(payload->high_water_bytes, desc->high_water_bytes);
   zz9k_put_be32(payload->flags, desc->flags);
+  return ZZ9K_STATUS_OK;
+}
+
+static inline int zz9k_request_audio_stream_begin_ex(
+    ZZ9KRequest *request,
+    const ZZ9KAudioStreamBeginExDesc *desc)
+{
+  ZZ9KAudioStreamBeginExPayload *payload;
+
+  if (!request || !desc ||
+      !zz9k_audio_codec_known(desc->codec) ||
+      desc->input_ring_handle == ZZ9K_INVALID_HANDLE ||
+      desc->input_ring_capacity == 0U ||
+      desc->pcm_ring_handle == ZZ9K_INVALID_HANDLE ||
+      desc->pcm_ring_capacity == 0U ||
+      !zz9k_audio_sample_format_known(desc->output_format) ||
+      (desc->output_channels != 0U && desc->output_channels != 1U &&
+       desc->output_channels != 2U) ||
+      desc->low_water_bytes >= desc->pcm_ring_capacity ||
+      desc->high_water_bytes >= desc->pcm_ring_capacity ||
+      desc->flags != 0U) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  zz9k_request_init(request, ZZ9K_OP_AUDIO_STREAM_BEGIN_EX);
+  request->entry.payload_len = sizeof(ZZ9KAudioStreamBeginExPayload);
+  payload =
+      (ZZ9KAudioStreamBeginExPayload *)request->entry.payload.inline_data;
+  zz9k_put_be32(payload->codec, desc->codec);
+  zz9k_put_be32(payload->input_ring_handle, desc->input_ring_handle);
+  zz9k_put_be32(payload->input_ring_capacity, desc->input_ring_capacity);
+  zz9k_put_be32(payload->pcm_ring_handle, desc->pcm_ring_handle);
+  zz9k_put_be32(payload->pcm_ring_capacity, desc->pcm_ring_capacity);
+  zz9k_put_be32(payload->output_hz, desc->output_hz);
+  zz9k_put_be32(payload->output_channels, desc->output_channels);
+  zz9k_put_be32(payload->output_format, desc->output_format);
+  zz9k_put_be32(payload->low_water_bytes, desc->low_water_bytes);
+  zz9k_put_be32(payload->high_water_bytes, desc->high_water_bytes);
+  zz9k_put_be32(payload->flags, desc->flags);
+  zz9k_put_be32(payload->reserved, 0U);
   return ZZ9K_STATUS_OK;
 }
 

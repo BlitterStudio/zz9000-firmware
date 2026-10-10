@@ -178,6 +178,10 @@ enum ZZ9KOpcode {
   ZZ9K_OP_IMAGE_SESSION_FEED = ZZ9K_SERVICE_IMAGE + 0x05,
   ZZ9K_OP_IMAGE_SESSION_CLOSE = ZZ9K_SERVICE_IMAGE + 0x06,
   ZZ9K_OP_SCALE_IMAGE_CLIPPED = ZZ9K_SERVICE_IMAGE + 0x07,
+  ZZ9K_OP_IMAGE_ANIMATION_FRAME_NEXT = ZZ9K_SERVICE_IMAGE + 0x08,
+  ZZ9K_OP_IMAGE_ANIMATION_FRAME_PRESENT = ZZ9K_SERVICE_IMAGE + 0x09,
+  ZZ9K_OP_IMAGE_ANIMATION_FRAME_RETIRE = ZZ9K_SERVICE_IMAGE + 0x0a,
+  ZZ9K_OP_IMAGE_ANIMATION_RESTART = ZZ9K_SERVICE_IMAGE + 0x0b,
 
   ZZ9K_OP_DECODE_MP3 = ZZ9K_SERVICE_AUDIO + 0x00,
   ZZ9K_OP_MIX_AUDIO = ZZ9K_SERVICE_AUDIO + 0x01,
@@ -211,6 +215,7 @@ enum ZZ9KOpcode {
   ZZ9K_OP_AUDIO_RING_ACQUIRE = ZZ9K_SERVICE_AUDIO + 0x13,
   ZZ9K_OP_AUDIO_RING_RELEASE = ZZ9K_SERVICE_AUDIO + 0x14,
   ZZ9K_OP_AUDIO_STREAM_GAIN = ZZ9K_SERVICE_AUDIO + 0x15,
+  ZZ9K_OP_AUDIO_STREAM_BEGIN_EX = ZZ9K_SERVICE_AUDIO + 0x16,
 
   ZZ9K_OP_DECOMPRESS = ZZ9K_SERVICE_CODEC + 0x00,
   ZZ9K_OP_DECOMPRESS_TEST = ZZ9K_SERVICE_CODEC + 0x01,
@@ -288,7 +293,10 @@ enum ZZ9KCapability {
    * 0x0512+). Append-only but deliberately NOT advertised by any
    * capability word until the on-hardware verification session
    * qualifies them, per the ZZ9K_CAP_AUDIO_CONTROL (R12) discipline. */
-  ZZ9K_CAP_AUDIO_FABRIC = 1U << 27
+  ZZ9K_CAP_AUDIO_FABRIC = 1U << 27,
+  /* Codec capability flags for FLAC and Vorbis backends (unadvertised until qualified). */
+  ZZ9K_CAP_AUDIO_FLAC = 1U << 28,
+  ZZ9K_CAP_AUDIO_VORBIS = 1U << 29
 };
 
 #define ZZ9K_APERTURE_LAYOUT_GENERATION_SHIFT 16U
@@ -353,6 +361,8 @@ enum ZZ9KServiceFlags {
   ZZ9K_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA = 1U << 25,
   ZZ9K_SERVICE_FLAG_IMAGE_RGB888_OUTPUT = 1U << 26,
   ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565 = 1U << 27,
+  ZZ9K_SERVICE_FLAG_IMAGE_WEBP = 1U << 28,
+  ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION = 1U << 29,
 
   ZZ9K_SERVICE_FLAG_AUDIO_MP3_DECODE = 1U << 16,
   ZZ9K_SERVICE_FLAG_AUDIO_PCM_MIX = 1U << 17,
@@ -374,6 +384,9 @@ enum ZZ9KServiceFlags {
   ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE = 1U << 23,
   /* Per-session SDK stream attenuation through the fabric pump. */
   ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN = 1U << 24,
+  /* Stream capability flags for FLAC and Vorbis backends (unadvertised until qualified). */
+  ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM = 1U << 25,
+  ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM = 1U << 26,
 
 
   ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 = 1U << 16,
@@ -418,7 +431,13 @@ enum ZZ9KServiceFlags {
 enum ZZ9KAudioSampleFormat {
   ZZ9K_AUDIO_SAMPLE_FORMAT_NONE = 0,
   ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE = 1,
-  ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE = 2
+  ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE = 2,
+  /* 32-bit container formats: signed 32-bit linear PCM.
+   * When decoding 24-bit sources into a 32-bit container, samples are
+   * left-aligned (shifted left by 8 bits, occupying bits 31..8, with bits 7..0
+   * zeroed) to preserve unity scale / full dynamic range. */
+  ZZ9K_AUDIO_SAMPLE_FORMAT_S32LE = 3,
+  ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE = 4
 };
 
 enum ZZ9KAudioDecodeFlags {
@@ -736,6 +755,27 @@ typedef struct ZZ9KImageSessionClosePayload {
   uint8_t flags[4];
   uint8_t reserved[40];
 } ZZ9KImageSessionClosePayload;
+typedef struct ZZ9KImageAnimationFrameRequestPayload {
+  uint8_t session[4];
+  uint8_t frame_token[4];
+  uint8_t flags[4];
+  uint8_t reserved[36];
+} ZZ9KImageAnimationFrameRequestPayload;
+
+typedef struct ZZ9KImageAnimationFrameResultPayload {
+  uint8_t session[4];
+  uint8_t state[4];
+  uint8_t canvas_width[4];
+  uint8_t canvas_height[4];
+  uint8_t frame_index[4];
+  uint8_t frame_duration_ms[4];
+  uint8_t loop_index[4];
+  uint8_t loop_count[4];
+  uint8_t frame_token[4];
+  uint8_t output_format[4];
+  uint8_t flags[4];
+  uint8_t reserved[4];
+} ZZ9KImageAnimationFrameResultPayload;
 
 typedef struct ZZ9KAudioDecodePayload {
   uint8_t src_handle[4];
@@ -775,6 +815,23 @@ typedef struct ZZ9KAudioStreamBeginPayload {
   uint8_t flags[4];
   uint8_t reserved[8];
 } ZZ9KAudioStreamBeginPayload;
+
+/* Codec-aware stream begin payload (48 bytes inline).
+ * Replaces MP3-only Begin with generic codec and input ring fields. */
+typedef struct ZZ9KAudioStreamBeginExPayload {
+  uint8_t codec[4];
+  uint8_t input_ring_handle[4];
+  uint8_t input_ring_capacity[4];
+  uint8_t pcm_ring_handle[4];
+  uint8_t pcm_ring_capacity[4];
+  uint8_t output_hz[4];
+  uint8_t output_channels[4];
+  uint8_t output_format[4];
+  uint8_t low_water_bytes[4];
+  uint8_t high_water_bytes[4];
+  uint8_t flags[4];
+  uint8_t reserved[4];
+} ZZ9KAudioStreamBeginExPayload;
 
 typedef struct ZZ9KAudioStreamFeedPayload {
   uint8_t session[4];
@@ -1682,6 +1739,12 @@ typedef char ZZ9KImageSessionResultPayload_must_be_48_bytes[
 typedef char ZZ9KImageSessionClosePayload_must_be_48_bytes[
   (sizeof(ZZ9KImageSessionClosePayload) == 48U) ? 1 : -1
 ];
+typedef char ZZ9KImageAnimationFrameRequestPayload_must_be_48_bytes[
+  (sizeof(ZZ9KImageAnimationFrameRequestPayload) == 48U) ? 1 : -1
+];
+typedef char ZZ9KImageAnimationFrameResultPayload_must_be_48_bytes[
+  (sizeof(ZZ9KImageAnimationFrameResultPayload) == 48U) ? 1 : -1
+];
 typedef char ZZ9KAudioDecodePayload_must_be_48_bytes[
   (sizeof(ZZ9KAudioDecodePayload) == 48U) ? 1 : -1
 ];
@@ -2124,6 +2187,20 @@ typedef struct ZZ9KImageSessionResult {
   uint32_t bytes_written;
   uint32_t flags;
 } ZZ9KImageSessionResult;
+typedef struct ZZ9KImageAnimationFrameResult {
+  uint32_t session;
+  uint32_t state;
+  uint32_t canvas_width;
+  uint32_t canvas_height;
+  uint32_t frame_index;
+  uint32_t frame_duration_ms;
+  uint32_t loop_index;
+  uint32_t loop_count;
+  uint32_t frame_token;
+  uint32_t output_format;
+  uint32_t flags;
+  uint32_t reserved;
+} ZZ9KImageAnimationFrameResult;
 
 typedef struct ZZ9KAudioDecodeDesc {
   uint32_t src_handle;
@@ -2160,6 +2237,20 @@ typedef struct ZZ9KAudioStreamBeginDesc {
   uint32_t high_water_bytes;
   uint32_t flags;
 } ZZ9KAudioStreamBeginDesc;
+
+typedef struct ZZ9KAudioStreamBeginExDesc {
+  uint32_t codec;
+  uint32_t input_ring_handle;
+  uint32_t input_ring_capacity;
+  uint32_t pcm_ring_handle;
+  uint32_t pcm_ring_capacity;
+  uint32_t output_hz;
+  uint32_t output_channels;
+  uint32_t output_format;
+  uint32_t low_water_bytes;
+  uint32_t high_water_bytes;
+  uint32_t flags;
+} ZZ9KAudioStreamBeginExDesc;
 
 typedef struct ZZ9KAudioStreamFeedDesc {
   uint32_t session;
@@ -2559,7 +2650,8 @@ enum ZZ9KSurfaceFormat {
   ZZ9K_SURFACE_FORMAT_PLANAR = 5,
   ZZ9K_SURFACE_FORMAT_RGB555 = 6,
   ZZ9K_SURFACE_FORMAT_BGRA8888 = 7,
-  ZZ9K_SURFACE_FORMAT_RGB888 = 8
+  ZZ9K_SURFACE_FORMAT_RGB888 = 8,
+  ZZ9K_SURFACE_FORMAT_YUV422CGX = 9
 };
 
 enum ZZ9KSurfaceFlags {
@@ -2592,13 +2684,18 @@ enum ZZ9KImageDecodeResultFlags {
 enum ZZ9KImageCodec {
   ZZ9K_IMAGE_CODEC_JPEG = 1U,
   ZZ9K_IMAGE_CODEC_PNG = 2U,
-  ZZ9K_IMAGE_CODEC_GIF = 3U
+  ZZ9K_IMAGE_CODEC_GIF = 3U,
+  ZZ9K_IMAGE_CODEC_WEBP = 4U
 };
 
 enum ZZ9KImageOutputMode {
   ZZ9K_IMAGE_OUTPUT_SURFACE = 1U,
   ZZ9K_IMAGE_OUTPUT_FRAMEBUFFER = 2U,
   ZZ9K_IMAGE_OUTPUT_TILE_BUFFER = 3U
+};
+
+enum ZZ9KImageSessionBeginFlags {
+  ZZ9K_IMAGE_SESSION_BEGIN_ANIMATION = 1U << 3
 };
 
 enum ZZ9KImageSessionFeedFlags {
@@ -2610,7 +2707,9 @@ enum ZZ9KImageSessionState {
   ZZ9K_IMAGE_SESSION_STATE_HEADER_READY = 2U,
   ZZ9K_IMAGE_SESSION_STATE_TILE_READY = 3U,
   ZZ9K_IMAGE_SESSION_STATE_COMPLETE = 4U,
-  ZZ9K_IMAGE_SESSION_STATE_ERROR = 5U
+  ZZ9K_IMAGE_SESSION_STATE_ERROR = 5U,
+  ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY = 6U,
+  ZZ9K_IMAGE_SESSION_STATE_ANIMATION_ENDED = 7U
 };
 
 enum ZZ9KImageSessionResultFlags {
@@ -2618,6 +2717,13 @@ enum ZZ9KImageSessionResultFlags {
   ZZ9K_IMAGE_SESSION_RESULT_PARTIAL = 1U << 1,
   ZZ9K_IMAGE_SESSION_RESULT_SCALED = 1U << 2
 };
+enum ZZ9KImageAnimationFrameFlags {
+  ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_FRAME_READY = 1U << 0,
+  ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_LAST_FRAME = 1U << 1,
+  ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_PRESENTED = 1U << 2,
+  ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_ENDED = 1U << 3
+};
+
 
 enum ZZ9KAudioStreamFeedFlags {
   ZZ9K_AUDIO_STREAM_FEED_EOF = 1U << 0,
@@ -2640,6 +2746,13 @@ enum ZZ9KAudioStreamResultFlags {
   ZZ9K_AUDIO_STREAM_RESULT_BACKPRESSURE = 1U << 3,
   /* The most recent resumable drain reached the real output frontier. */
   ZZ9K_AUDIO_STREAM_RESULT_DRAINED = 1U << 4
+};
+
+enum ZZ9KAudioCodec {
+  ZZ9K_AUDIO_CODEC_UNKNOWN = 0,
+  ZZ9K_AUDIO_CODEC_MP3 = 1,
+  ZZ9K_AUDIO_CODEC_FLAC = 2,
+  ZZ9K_AUDIO_CODEC_VORBIS = 3
 };
 
 enum ZZ9KVideoCodec {

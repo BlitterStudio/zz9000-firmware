@@ -492,6 +492,7 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-controller.c
   tools/zzplay/zzplay-core.c
   tools/zzplay/zzplay-formats.c
+  tools/zzplay/zzplay-frame-clock.c
   tools/zzplay/zzplay-geometry.c
   tools/zzplay/zzplay-media.c
   tools/zzplay/zzplay-mp3-transport.c
@@ -547,6 +548,13 @@ add_executable(zzplay_audio_clock_test
 
 target_link_libraries(zzplay_audio_clock_test PRIVATE zzplay_core)
 add_test(NAME zzplay_audio_clock_test COMMAND zzplay_audio_clock_test)
+
+add_executable(zzplay_frame_clock_test
+  tests/zzplay_frame_clock_test.c
+)
+
+target_link_libraries(zzplay_frame_clock_test PRIVATE zzplay_core)
+add_test(NAME zzplay_frame_clock_test COMMAND zzplay_frame_clock_test)
 
 add_executable(zzplay_ax_test
   tests/zzplay_ax_test.c
@@ -1311,7 +1319,6 @@ target_link_libraries(picture_view_logic_test PRIVATE zz9k_picture_viewer)
 add_test(NAME picture_view_logic_test
   COMMAND picture_view_logic_test
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-view.c)
-
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 add_test(
@@ -1330,6 +1337,12 @@ add_test(
   COMMAND datatype_probe_source_test
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-dtprobe.c
 )
+add_executable(sound_datatype_contract_test
+  tests/sound_datatype_contract_test.c
+)
+
+add_test(NAME sound_datatype_contract_test
+         COMMAND sound_datatype_contract_test)
 
 add_executable(datatype_descriptor_test
   tests/datatype_descriptor_test.c
@@ -1343,6 +1356,10 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-JPEG.info
           ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-PNG.info
+          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-WebP.info
+          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-MP3.info
+          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-FLAC.info
+          ${CMAKE_CURRENT_SOURCE_DIR}/amiga/datatypes/descriptors/ZZ9000-OggVorbis.info
 )
 
 add_executable(scaletest_source_test
@@ -1474,6 +1491,19 @@ target_include_directories(audio_ring_contract_test
 
 add_test(NAME audio_ring_contract_test COMMAND audio_ring_contract_test)
 
+add_executable(audio_stream_contract_test
+  tests/audio_stream_contract_test.c
+)
+
+target_include_directories(audio_stream_contract_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/amiga/include
+)
+
+add_test(NAME audio_stream_contract_test COMMAND audio_stream_contract_test)
+
 add_executable(zz9k_fabriclease
   tools/zz9k-fabriclease.c
 )
@@ -1591,6 +1621,35 @@ target_compile_definitions(zz9k_png_view_backend PRIVATE ZZ9K_PNG_NO_MAIN=1)
 
 target_link_libraries(zz9k_png_view_backend PUBLIC zz9k_host zz9k_fb_common zz9k_image_window zz9k_picture_viewer)
 
+add_library(zz9k_webp_view_backend STATIC
+  tools/zz9k-webp.c
+)
+
+target_compile_definitions(zz9k_webp_view_backend PRIVATE ZZ9K_WEBP_NO_MAIN=1)
+
+target_link_libraries(zz9k_webp_view_backend PUBLIC zz9k_host zz9k_fb_common zz9k_image_window zz9k_picture_viewer)
+
+add_executable(webp_tool_logic_test
+  tests/webp_tool_logic_test.c
+)
+
+target_include_directories(webp_tool_logic_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools
+)
+
+target_link_libraries(webp_tool_logic_test PRIVATE
+  zz9k_host
+  zz9k_fb_common
+  zz9k_image_window
+  zz9k_picture_viewer
+  zz9k_webp_view_backend
+)
+add_test(NAME webp_tool_logic_test
+  COMMAND webp_tool_logic_test
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-webp.c)
 add_executable(zz9k_view
   tools/zz9k-view.c
 )
@@ -1602,6 +1661,7 @@ target_link_libraries(zz9k_view PRIVATE
   zz9k_picture_viewer
   zz9k_jpeg_view_backend
   zz9k_png_view_backend
+  zz9k_webp_view_backend
 )
 
 add_executable(zz9k_surface_info

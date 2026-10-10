@@ -7,6 +7,25 @@
 #include "zz9k/abi.h"
 #include <stddef.h>
 #include <stdint.h>
+typedef char webp_codec_is_4[
+  (ZZ9K_IMAGE_CODEC_WEBP == 4U) ? 1 : -1
+];
+
+typedef char webp_image_flag_is_bit_28[
+  (ZZ9K_SERVICE_FLAG_IMAGE_WEBP == (1U << 28)) ? 1 : -1
+];
+typedef char webp_image_animation_flag_is_bit_29[
+  (ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION == (1U << 29)) ? 1 : -1
+];
+
+typedef char image_animation_request_payload_is_48_bytes[
+  (sizeof(ZZ9KImageAnimationFrameRequestPayload) == 48U) ? 1 : -1
+];
+
+typedef char image_animation_result_payload_is_48_bytes[
+  (sizeof(ZZ9KImageAnimationFrameResultPayload) == 48U) ? 1 : -1
+];
+
 
 typedef char mailbox_entry_is_64_bytes[
   (sizeof(ZZ9KMailboxEntry) == ZZ9K_MAILBOX_ENTRY_SIZE) ? 1 : -1
@@ -115,6 +134,10 @@ typedef char audio_stream_begin_payload_is_48_bytes[
 typedef char audio_stream_feed_payload_is_48_bytes[
   (sizeof(ZZ9KAudioStreamFeedPayload) == 48U) ? 1 : -1
 ];
+typedef char audio_stream_begin_ex_payload_is_48_bytes[
+  (sizeof(ZZ9KAudioStreamBeginExPayload) == 48U) ? 1 : -1
+];
+
 
 typedef char audio_stream_read_payload_is_48_bytes[
   (sizeof(ZZ9KAudioStreamReadPayload) == 48U) ? 1 : -1
@@ -392,6 +415,18 @@ int main(void)
   if (ZZ9K_OP_AUDIO_RING_RELEASE != ZZ9K_SERVICE_AUDIO + 0x14U) return 125;
   if (ZZ9K_OP_AUDIO_STREAM_GAIN != 0x0515U) return 141;
   if (ZZ9K_OP_AUDIO_STREAM_GAIN != ZZ9K_SERVICE_AUDIO + 0x15U) return 142;
+  if (ZZ9K_OP_AUDIO_STREAM_BEGIN_EX != 0x0516U) return 144;
+  if (ZZ9K_OP_AUDIO_STREAM_BEGIN_EX != ZZ9K_SERVICE_AUDIO + 0x16U) return 145;
+  if (ZZ9K_CAP_AUDIO_FLAC != (1U << 28)) return 146;
+  if (ZZ9K_CAP_AUDIO_VORBIS != (1U << 29)) return 147;
+  if (ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM != (1U << 25)) return 148;
+  if (ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM != (1U << 26)) return 149;
+  if (ZZ9K_AUDIO_CODEC_UNKNOWN != 0U ||
+      ZZ9K_AUDIO_CODEC_MP3 != 1U ||
+      ZZ9K_AUDIO_CODEC_FLAC != 2U ||
+      ZZ9K_AUDIO_CODEC_VORBIS != 3U) return 150;
+  if (ZZ9K_AUDIO_SAMPLE_FORMAT_S32LE != 3U ||
+      ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE != 4U) return 151;
   if (ZZ9K_OP_AUDIO_FABRIC_STATE_GET != ZZ9K_SERVICE_AUDIO + 0x12U) {
     return 128;
   }

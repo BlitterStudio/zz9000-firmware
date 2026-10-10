@@ -13,6 +13,16 @@ static const char *const zzplay_mpeg_ps_extensions[] = {
 static const char *const zzplay_mp3_extensions[] = {
   "mp3", NULL
 };
+static const char *const zzplay_webp_extensions[] = {
+  "webp", NULL
+};
+static const char *const zzplay_flac_extensions[] = {
+  "flac", NULL
+};
+static const char *const zzplay_vorbis_extensions[] = {
+  "ogg", "oga", NULL
+};
+
 
 static const ZZPlayFormat zzplay_formats_table[] = {
   {
@@ -25,6 +35,24 @@ static const ZZPlayFormat zzplay_formats_table[] = {
     ZZPLAY_MEDIA_KIND_MP3,
     "MPEG Layer III",
     zzplay_mp3_extensions,
+    0U
+  },
+  {
+    ZZPLAY_MEDIA_KIND_WEBP,
+    "Animated WebP",
+    zzplay_webp_extensions,
+    ZZPLAY_FORMAT_HAS_VIDEO
+  },
+  {
+    ZZPLAY_MEDIA_KIND_FLAC,
+    "FLAC",
+    zzplay_flac_extensions,
+    0U
+  },
+  {
+    ZZPLAY_MEDIA_KIND_VORBIS,
+    "Ogg Vorbis",
+    zzplay_vorbis_extensions,
     0U
   }
 };

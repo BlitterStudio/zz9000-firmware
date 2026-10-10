@@ -50,6 +50,7 @@
 #include "fsbl.h"
 #include "xstatus.h"
 #include "fsbl_hooks.h"
+#include "ps7_init.h"
 
 /************************** Variable Definitions *****************************/
 
@@ -102,11 +103,23 @@ u32 FsblHookAfterBitstreamDload(void)
 
 	Status = XST_SUCCESS;
 
-	/*
-	 * User logic to be added here.
-	 * Errors to be stored in the status variable and returned
-	 */
 	fsbl_printf(DEBUG_INFO, "In FsblHookAfterBitstreamDload function \r\n");
+
+	/*
+	 * ZZ9000: open the PL->PS path now, not only at handoff. Once the
+	 * bitstream is up, the Zorro logic answers autoconfig, and Kickstart
+	 * reads the autoboot DiagArea through the FPGA's ACP master. With the
+	 * level shifters and the ACP/AXI resets still closed, those reads
+	 * cannot complete until FsblHandoff(), i.e. until the whole firmware
+	 * is loaded. The A4000 bus timeout then fed Kickstart garbage (guru
+	 * 80000004) on cold boots once the firmware grew past about 4 MB.
+	 * ps7_post_config() is exactly what FsblHandoff() runs; repeating it
+	 * there is harmless.
+	 */
+#ifdef PS7_POST_CONFIG
+	ps7_post_config();
+	SlcrUnlock();
+#endif
 
 	return (Status);
 }

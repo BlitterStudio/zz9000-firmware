@@ -17,16 +17,29 @@ extern "C" {
 static inline int zz9k_audio_sample_format_known(uint32_t format)
 {
   return format == ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE ||
-         format == ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE;
+         format == ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE ||
+         format == ZZ9K_AUDIO_SAMPLE_FORMAT_S32LE ||
+         format == ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE;
 }
 
-/* Source-rate vocabulary of rate-bearing leases: exactly the
- * qualified conversion table (and the AHI mix-rate table). 48000 is
- * the bypass rate and is always in vocabulary. */
+static inline int zz9k_audio_codec_known(uint32_t codec)
+{
+  return codec == ZZ9K_AUDIO_CODEC_MP3 ||
+         codec == ZZ9K_AUDIO_CODEC_FLAC ||
+         codec == ZZ9K_AUDIO_CODEC_VORBIS;
+}
+
+/* Source-rate vocabulary of rate-bearing leases: the qualified
+ * source->48 kHz table, restricted to rates whose 20 ms period is an
+ * integer frame count that fits one 48 kHz period (960 stereo frames).
+ * 48000 is the bypass rate. 11025, 88200 and 96000 convert on the
+ * stream pump only; a lease of those rates is refused. Keep this list
+ * identical to fabric_rate_known() in audio_fabric_lease.c. */
 static inline int zz9k_audio_ring_rate_known(uint32_t rate)
 {
-  return rate == 8000U || rate == 12000U || rate == 24000U ||
-         rate == 32000U || rate == 44100U || rate == 48000U;
+  return rate == 8000U || rate == 12000U || rate == 16000U ||
+         rate == 22050U || rate == 24000U || rate == 32000U ||
+         rate == 44100U || rate == 48000U;
 }
 
 static inline int zz9k_audio_build_decode_desc(
@@ -96,6 +109,49 @@ static inline int zz9k_audio_build_stream_begin_desc(
   memset(desc, 0, sizeof(*desc));
   desc->mp3_ring_handle = mp3_ring_handle;
   desc->mp3_ring_capacity = mp3_ring_capacity;
+  desc->pcm_ring_handle = pcm_ring_handle;
+  desc->pcm_ring_capacity = pcm_ring_capacity;
+  desc->output_hz = output_hz;
+  desc->output_channels = output_channels;
+  desc->output_format = output_format;
+  desc->low_water_bytes = low_water_bytes;
+  desc->high_water_bytes = high_water_bytes;
+  desc->flags = flags;
+  return 1;
+}
+
+static inline int zz9k_audio_build_stream_begin_ex_desc(
+    ZZ9KAudioStreamBeginExDesc *desc,
+    uint32_t codec,
+    uint32_t input_ring_handle,
+    uint32_t input_ring_capacity,
+    uint32_t pcm_ring_handle,
+    uint32_t pcm_ring_capacity,
+    uint32_t output_hz,
+    uint32_t output_channels,
+    uint32_t output_format,
+    uint32_t low_water_bytes,
+    uint32_t high_water_bytes,
+    uint32_t flags)
+{
+  if (!desc || !zz9k_audio_codec_known(codec) ||
+      input_ring_handle == ZZ9K_INVALID_HANDLE ||
+      input_ring_capacity == 0U ||
+      pcm_ring_handle == ZZ9K_INVALID_HANDLE ||
+      pcm_ring_capacity == 0U ||
+      !zz9k_audio_sample_format_known(output_format) ||
+      (output_channels != 0U && output_channels != 1U &&
+       output_channels != 2U) ||
+      low_water_bytes >= pcm_ring_capacity ||
+      high_water_bytes >= pcm_ring_capacity ||
+      flags != 0U) {
+    return 0;
+  }
+
+  memset(desc, 0, sizeof(*desc));
+  desc->codec = codec;
+  desc->input_ring_handle = input_ring_handle;
+  desc->input_ring_capacity = input_ring_capacity;
   desc->pcm_ring_handle = pcm_ring_handle;
   desc->pcm_ring_capacity = pcm_ring_capacity;
   desc->output_hz = output_hz;

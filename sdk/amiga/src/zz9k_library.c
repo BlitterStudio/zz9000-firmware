@@ -738,6 +738,17 @@ int ZZ9KAudioStreamBegin(ZZ9KLibrary *library,
   return zz9k_audio_stream_begin(library->ctx, desc, result);
 }
 
+int ZZ9KAudioStreamBeginEx(ZZ9KLibrary *library,
+                           const ZZ9KAudioStreamBeginExDesc *desc,
+                           ZZ9KAudioStreamResult *result)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_audio_stream_begin_ex(library->ctx, desc, result);
+}
+
 int ZZ9KAudioStreamFeed(ZZ9KLibrary *library,
                         const ZZ9KAudioStreamFeedDesc *desc,
                         ZZ9KAudioStreamResult *result)
@@ -845,6 +856,52 @@ int ZZ9KImageSessionClose(ZZ9KLibrary *library, uint32_t session,
 
   return zz9k_image_session_close(library->ctx, session, flags);
 }
+int ZZ9KImageAnimationFrameNext(ZZ9KLibrary *library, uint32_t session,
+                                uint32_t flags,
+                                ZZ9KImageAnimationFrameResult *result)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_image_animation_frame_next(library->ctx, session, flags, result);
+}
+
+int ZZ9KImageAnimationFramePresent(ZZ9KLibrary *library, uint32_t session,
+                                   uint32_t frame_token, uint32_t flags,
+                                   ZZ9KImageAnimationFrameResult *result)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_image_animation_frame_present(
+      library->ctx, session, frame_token, flags, result);
+}
+
+int ZZ9KImageAnimationFrameRetire(ZZ9KLibrary *library, uint32_t session,
+                                  uint32_t frame_token, uint32_t flags,
+                                  ZZ9KImageAnimationFrameResult *result)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_image_animation_frame_retire(
+      library->ctx, session, frame_token, flags, result);
+}
+
+int ZZ9KImageAnimationRestart(ZZ9KLibrary *library, uint32_t session,
+                              uint32_t flags,
+                              ZZ9KImageAnimationFrameResult *result)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_image_animation_restart(library->ctx, session, flags, result);
+}
+
 
 int ZZ9KCryptoHash(ZZ9KLibrary *library, const ZZ9KCryptoHashDesc *desc,
                    ZZ9KCryptoResult *result)
