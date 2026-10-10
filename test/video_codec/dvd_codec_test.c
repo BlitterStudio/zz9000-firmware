@@ -552,7 +552,8 @@ struct acked_result {
 
 /* Runs the backend like a player would: writes in chunks, acknowledges at
  * most max_ack PCM bytes per decode call, hashes the PCM in ack order, and
- * stops at DONE (or fails after a bounded number of calls). */
+ * at DONE plays the rest of the ring out (or fails after a bounded number
+ * of calls). */
 static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
                      uint32_t audio_codec, uint32_t ring_capacity,
                      uint32_t max_ack, struct acked_result *out)
@@ -614,7 +615,7 @@ static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
 		    info.pcm_produced > acked) {
 			uint64_t step = info.pcm_produced - acked;
 
-			if (step > max_ack)
+			if (step > max_ack && res != SDK_VIDEO_BACKEND_DONE)
 				step = max_ack;
 			while (step != 0U) {
 				uint32_t at = (uint32_t)(acked % ring_capacity);
@@ -1807,11 +1808,13 @@ static int test_starved_ring_keeps_video(void)
 	return 0;
 }
 
-/* 8d. At end of input with every picture decoded and all audio routed,
- * unacknowledged PCM still in the ring must read as BACKPRESSURE (the
- * session is busy playing audio out), never NEED_INPUT: a player that
- * has written everything answers NEED_INPUT with "truncated stream". */
-static int test_eof_unacked_pcm_is_busy(void)
+/* 8d. At end of input with every picture decoded and all audio decoded,
+ * the stream is DONE (AUDIO_DONE) even with PCM still unacknowledged, and
+ * never NEED_INPUT (which a player that has written everything reports as
+ * a truncated stream). The client plays the tail out after DONE: an AHI
+ * client copies whole periods until then, so a decoder waiting for the
+ * tail's acknowledgement would never finish. */
+static int test_eof_unacked_pcm_is_done(void)
 {
 	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	struct SDKVideoMediaConfig cfg = {0};
@@ -1869,20 +1872,24 @@ static int test_eof_unacked_pcm_is_busy(void)
 			ops->ack_media(decoder, acked);
 		}
 	}
-	if (offset < zz9k_dvd_ac3_192_fixture_len || res == 0) {
+	if (offset < zz9k_dvd_ac3_192_fixture_len ||
+	    res != SDK_VIDEO_BACKEND_DONE ||
+	    !ops->get_media_info(decoder, &info) ||
+	    info.pcm_produced <= info.pcm_acknowledged ||
+	    (info.flags & SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE) == 0U) {
+		fprintf(stderr, "test_eof_unacked_pcm: decode returned %d "
+		        "produced=%llu acked=%llu flags=%lx\n", res,
+		        (unsigned long long)info.pcm_produced,
+		        (unsigned long long)info.pcm_acknowledged,
+		        (unsigned long)info.flags);
 		ops->destroy(decoder);
 		return 5;
 	}
-	if (res != SDK_VIDEO_BACKEND_BACKPRESSURE) {
-		fprintf(stderr, "test_eof_unacked_pcm: decode returned %d "
-		        "(expected BACKPRESSURE %d)\n", res,
-		        SDK_VIDEO_BACKEND_BACKPRESSURE);
+	/* The client drains the tail; the stream stays DONE. */
+	if (!ops->ack_media(decoder, info.pcm_produced)) {
 		ops->destroy(decoder);
 		return 6;
 	}
-	/* The client drains the tail and the session then completes. */
-	(void)ops->get_media_info(decoder, &info);
-	ops->ack_media(decoder, info.pcm_produced);
 	res = ops->decode(decoder, &frame);
 	ops->destroy(decoder);
 	if (res != SDK_VIDEO_BACKEND_DONE)
@@ -2379,11 +2386,11 @@ int main(void)
 	}
 	printf("PASS: test_starved_ring_keeps_video (full ring never freezes video)\n");
 
-	if ((err = test_eof_unacked_pcm_is_busy()) != 0) {
-		fprintf(stderr, "FAIL: test_eof_unacked_pcm_is_busy (code %d)\n", err);
+	if ((err = test_eof_unacked_pcm_is_done()) != 0) {
+		fprintf(stderr, "FAIL: test_eof_unacked_pcm_is_done (code %d)\n", err);
 		return 240 + err;
 	}
-	printf("PASS: test_eof_unacked_pcm_is_busy (EOF tail PCM reads BUSY, then DONE)\n");
+	printf("PASS: test_eof_unacked_pcm_is_done (EOF with PCM unplayed is DONE)\n");
 
 	if ((err = test_audio_pts_tracks_pcm()) != 0) {
 		fprintf(stderr, "FAIL: test_audio_pts_tracks_pcm (code %d)\n", err);

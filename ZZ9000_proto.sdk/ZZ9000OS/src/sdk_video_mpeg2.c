@@ -220,8 +220,14 @@ static void ring_write(struct sdk_video_mpeg2 *d, const uint8_t *src,
 	d->pcm_produced += bytes;
 }
 
-/* Raise the sticky backpressure flag; it releases under the low-water
- * mark when the client acknowledges. */
+/* Raise the sticky backpressure flag; it releases when the client's
+ * acknowledgements leave room for the largest unit a decode writes at
+ * once (an AC-3 frame), or drain the ring to the low-water mark. Clients
+ * decode only when they want the next picture, so a ring left to drain to
+ * the low-water mark before refilling would run their audio queue down to
+ * the point where they present pictures early to get audio decoded. */
+#define M2_PCM_REFILL_BYTES SDK_DVD_AC3_FRAME_PCM_BYTES
+
 static void raise_backpressure(struct sdk_video_mpeg2 *d)
 {
 	if (!d->pcm_backpressure)
@@ -1312,18 +1318,13 @@ static int mpeg2_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 		if ((d->video_frames == 0U && d->audio_frames == 0U) ||
 		    (d->video_seen && d->video_frames == 0U))
 			return SDK_VIDEO_BACKEND_ERROR;
-		if (!d->media_configured ||
-		    d->pcm_produced == d->pcm_acknowledged) {
-			if (d->media_configured)
-				d->media_flags |=
-					SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE;
-			return SDK_VIDEO_BACKEND_DONE;
-		}
-		/* Every picture is decoded and every audio packet routed; the
-		 * PCM still in the ring is playing out. The session is busy,
-		 * not hungry: a client that has written everything must drain
-		 * its ring, not report a truncated stream. */
-		return SDK_VIDEO_BACKEND_BACKPRESSURE;
+		/* Every picture and every audio frame is decoded; PCM still
+		 * in the ring plays out after DONE, as with WebM. Waiting for
+		 * its acknowledgement would never end for a client that
+		 * copies whole output periods until the stream is done. */
+		if (d->media_configured)
+			d->media_flags |= SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE;
+		return SDK_VIDEO_BACKEND_DONE;
 	}
 	if (d->input_eof && d->media_configured && !audio_drained(d)) {
 		/* Audio packets are stuck behind a ring only the client can
@@ -1443,7 +1444,8 @@ static int mpeg2_ack_media(void *decoder, uint64_t acknowledged)
 		return 0;
 	d->pcm_acknowledged = acknowledged;
 	if (d->pcm_produced - d->pcm_acknowledged <=
-	    d->media.pcm_low_water_bytes) {
+	        d->media.pcm_low_water_bytes ||
+	    ring_free(d) >= M2_PCM_REFILL_BYTES) {
 		d->pcm_backpressure = 0U;
 		d->media_flags &= ~SDK_VIDEO_MEDIA_FLAG_BACKPRESSURE;
 	}

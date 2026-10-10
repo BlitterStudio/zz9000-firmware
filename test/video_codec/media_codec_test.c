@@ -165,11 +165,7 @@ static int decode_fixture_bytes(const uint8_t *bytes, uint32_t length,
 			return 7;
 		}
 	}
-	/* With every picture out, unacknowledged PCM keeps the decoder busy
-	 * (BACKPRESSURE) instead of DONE: the client must drain the ring. */
-	while (decode_result != SDK_VIDEO_BACKEND_DONE &&
-	       decode_result != SDK_VIDEO_BACKEND_BACKPRESSURE &&
-	       guard++ < 1000U) {
+	while (decode_result != SDK_VIDEO_BACKEND_DONE && guard++ < 1000U) {
 		decode_result = ops->decode(decoder, &frame);
 		if (decode_result == SDK_VIDEO_BACKEND_FRAME) {
 			int frame_result =
@@ -185,9 +181,9 @@ static int decode_fixture_bytes(const uint8_t *bytes, uint32_t length,
 			return 9;
 		}
 	}
-	if ((decode_result != SDK_VIDEO_BACKEND_DONE &&
-	     (decode_result != SDK_VIDEO_BACKEND_BACKPRESSURE ||
-	      audio_codec != SDK_VIDEO_MEDIA_AUDIO_MP2)) ||
+	/* DONE with the decoded PCM still unacknowledged in the ring: the
+	 * client plays the tail out after the stream ends. */
+	if (decode_result != SDK_VIDEO_BACKEND_DONE ||
 	    !ops->get_media_info(decoder, &media)) {
 		ops->destroy(decoder);
 		return 10;
@@ -220,9 +216,7 @@ static int decode_fixture_bytes(const uint8_t *bytes, uint32_t length,
 				pcm_ring + block * 4608U, 4608U);
 		if (!ops->ack_media(decoder, media.pcm_produced) ||
 		    !ops->get_media_info(decoder, &media) ||
-		    media.pcm_acknowledged != media.pcm_produced ||
-		    ops->decode(decoder, &frame) != SDK_VIDEO_BACKEND_DONE ||
-		    !ops->get_media_info(decoder, &media)) {
+		    media.pcm_acknowledged != media.pcm_produced) {
 			ops->destroy(decoder);
 			return 12;
 		}
