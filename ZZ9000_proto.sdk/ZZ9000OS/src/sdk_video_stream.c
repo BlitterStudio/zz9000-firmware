@@ -6,6 +6,7 @@
 
 #include "sdk_video_stream.h"
 
+#include "card_pool.h"
 #include "memorymap.h"
 #include "overlay.h"
 #include "sdk_video_backend.h"
@@ -195,7 +196,9 @@ void sdk_video_stream_poison_core1_sessions(void)
 
 		if (!session->in_use)
 			continue;
-		/* The decode-reclaim pass already freed the backend graph. */
+		/* The decode-reclaim pass already freed the backend graph; the
+		 * decoder memory it took from the card pool goes by owner. */
+		card_pool_release_owner(&card_pool, session->media.pool_owner);
 		session->decoder = 0;
 		memset(&session->direct_frame, 0, sizeof(session->direct_frame));
 		session->direct_frame_valid = 0U;
@@ -313,6 +316,8 @@ uint16_t sdk_video_stream_begin_owned(
 		begin->pcm_low_water_bytes;
 	session->media.pcm_high_water_bytes =
 		begin->pcm_high_water_bytes;
+	session->media.pool_owner =
+		CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, session->id);
 	session->owner = (uint8_t)owner;
 	session->in_use = 1U;
 	fill_result(session, SDK_VIDEO_SESSION_STATE_NEED_INPUT, 0U,

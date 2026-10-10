@@ -9,10 +9,12 @@ LIBVORBIS_ROOT := $(ROOT)/ZZ9000_proto.sdk/ZZ9000OS/build/deps/vorbis/ogg-1.3.6-
 HOST_LIBVORBIS := $(LIBVORBIS_ROOT)/libvorbisdec.a
 BUILD := build
 RUNTIME := $(FIRMWARE_SRC)/sdk_audio_vorbis.c $(FIRMWARE_SRC)/sdk_vorbis_alloc.c \
-	$(FIRMWARE_SRC)/sdk_decode_reclaim.c host_runtime.c
+	$(FIRMWARE_SRC)/sdk_decode_reclaim.c $(FIRMWARE_SRC)/card_pool.c \
+	$(FIRMWARE_SRC)/sdk_smp_lock.c ../card_pool/host_card_pool.c host_runtime.c
 HEADERS := $(FIRMWARE_SRC)/sdk_audio_vorbis.h $(FIRMWARE_SRC)/sdk_vorbis_alloc.h \
-	$(FIRMWARE_SRC)/sdk_audio_codec_io.h host_runtime.h vorbis_fixtures.h
-INCLUDES := -I$(FIRMWARE_SRC) -I$(LIBVORBIS_ROOT)/include -I.
+	$(FIRMWARE_SRC)/sdk_audio_codec_io.h $(FIRMWARE_SRC)/card_pool.h \
+	../card_pool/host_card_pool.h host_runtime.h vorbis_fixtures.h
+INCLUDES := -I$(FIRMWARE_SRC) -I$(LIBVORBIS_ROOT)/include -I../card_pool -I.
 
 .PHONY: test sanitize clean
 

@@ -8,9 +8,11 @@ BUILD := build
 HOST_LIBWEBP := $(LIBWEBP_ROOT)/lib/libwebpdecoder.a
 HOST_DEMUX := $(LIBWEBP_ROOT)/lib/libwebpdemux.a
 RUNTIME := $(FIRMWARE_SRC)/sdk_image_stream.c $(FIRMWARE_SRC)/sdk_jpeg.c $(FIRMWARE_SRC)/sdk_surface.c $(FIRMWARE_SRC)/sdk_smp_lock.c \
-	$(FIRMWARE_SRC)/sdk_decode_reclaim.c $(FIRMWARE_SRC)/sdk_webp_alloc.c $(FIRMWARE_SRC)/sdk_vorbis_alloc.c
-INCLUDES := -I$(FIRMWARE_SRC) -Imock -I$(LIBWEBP_ROOT)/include
-LDLIBS := $(HOST_DEMUX) $(HOST_LIBWEBP) -lpng -ljpeg -lz -lm
+	$(FIRMWARE_SRC)/sdk_decode_reclaim.c $(FIRMWARE_SRC)/sdk_webp_alloc.c $(FIRMWARE_SRC)/sdk_vorbis_alloc.c \
+	$(FIRMWARE_SRC)/card_pool.c ../card_pool/host_card_pool.c
+INCLUDES := -I$(FIRMWARE_SRC) -Imock -I../card_pool -I$(LIBWEBP_ROOT)/include
+# host_runtime.c observes the WebP arenas' pool allocations through the wrap.
+LDLIBS := -Wl,--wrap=card_pool_alloc $(HOST_DEMUX) $(HOST_LIBWEBP) -lpng -ljpeg -lz -lm
 
 .PHONY: test smoke fixtures sanitize clean
 

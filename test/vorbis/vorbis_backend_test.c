@@ -21,6 +21,8 @@
 #include "sdk_decode_reclaim.h"
 #include "sdk_mailbox.h"
 #include "host_runtime.h"
+#include "card_pool.h"
+#include "host_card_pool.h"
 #include "vorbis_fixtures.h"
 
 /* Tremor (full-precision 32x32->64 fixed point, then >> 9 and clip) against
@@ -561,7 +563,7 @@ static void test_allocation_failures(void)
 	for (i = 0; i < sizeof(limits) / sizeof(limits[0]); i++) {
 		host_runtime_reset();
 		sim_init(&g_sim, IN_CAP, 65536U);
-		sdk_vorbis_heap_init(&g_sim.st.heap, 4096U, limits[i]);
+		sdk_vorbis_heap_init(&g_sim.st.heap, 4096U, limits[i], 0U);
 		st = run_fed(&g_sim, ogg.data, ogg.len, 4096U, 0);
 		CHECK(st == SDK_STATUS_NO_MEMORY, "limit %u -> %u", limits[i], st);
 		finish(&g_sim, "limit");
@@ -569,7 +571,7 @@ static void test_allocation_failures(void)
 	/* Small regions: more of them, same output, within the region cap. */
 	host_runtime_reset();
 	sim_init(&g_sim, IN_CAP, 65536U);
-	sdk_vorbis_heap_init(&g_sim.st.heap, 16384U, SDK_VORBIS_ALLOC_LIMIT);
+	sdk_vorbis_heap_init(&g_sim.st.heap, 16384U, SDK_VORBIS_ALLOC_LIMIT, 0U);
 	st = run_fed(&g_sim, ogg.data, ogg.len, 4096U, 0);
 	CHECK(st == SDK_STATUS_OK || st == SDK_STATUS_NO_MEMORY,
 	      "16 KiB regions: %u", st);
@@ -627,7 +629,7 @@ static void test_arena(void)
 	unsigned round, i;
 
 	host_runtime_reset();
-	sdk_vorbis_heap_init(&heap, 32768U, 512U * 1024U);
+	sdk_vorbis_heap_init(&heap, 32768U, 512U * 1024U, 0U);
 	sdk_vorbis_heap_select(&heap, 0);
 	for (round = 0U; round < 20000U; round++) {
 		uint32_t k, n;
@@ -692,7 +694,7 @@ static void test_arena_regions(void)
 	unsigned i;
 
 	host_runtime_reset();
-	sdk_vorbis_heap_init(&heap, 65536U, 1024U * 1024U);
+	sdk_vorbis_heap_init(&heap, 65536U, 1024U * 1024U, 0U);
 	sdk_vorbis_heap_select(&heap, 0);
 	/* Three 40 KiB blocks: three default regions (192 KiB) before. */
 	a = sdk_vorbis_malloc(40000U);
@@ -716,7 +718,7 @@ static void test_arena_regions(void)
 	/* 160 KiB limit, 64 KiB regions: 1 KiB blocks must reach past the
 	 * two whole regions into a partial third one. */
 	host_runtime_reset();
-	sdk_vorbis_heap_init(&heap, 65536U, 160U * 1024U);
+	sdk_vorbis_heap_init(&heap, 65536U, 160U * 1024U, 0U);
 	sdk_vorbis_heap_select(&heap, 0);
 	for (i = 0U; i < 256U; i++) {
 		small[i] = sdk_vorbis_malloc(1024U);
@@ -732,6 +734,79 @@ static void test_arena_regions(void)
 	      "partial region returned");
 	sdk_vorbis_heap_select(0, 0);
 	check_clean("arena partial region");
+}
+
+/* Arenas with a card pool owner (WebM, WebP): regions come from the pool
+ * instead of the decode heap, two owners never share a region, and a
+ * poison handler's owner release reclaims an arena without its help. */
+static void test_arena_pool(void)
+{
+	const uint32_t owner_a = CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, 1U);
+	const uint32_t owner_b = CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, 2U);
+	const uint32_t owner_c = CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, 3U);
+	struct sdk_vorbis_heap a, b, legacy;
+	uint32_t region_a, region_c;
+	uint8_t *pa, *pb, *pl;
+	unsigned i;
+
+	host_runtime_reset();
+	host_card_pool_reset(8U << 20);
+	sdk_vorbis_heap_init(&a, 65536U, 1024U * 1024U, owner_a);
+	sdk_vorbis_heap_select(&a, 0);
+	pa = (uint8_t *)sdk_vorbis_malloc(1000U);
+	CHECK(pa && sdk_vorbis_heap_regions(&a) == 1U &&
+	      host_runtime_live_blocks() == 0U &&
+	      card_pool.class_used[CARD_POOL_CLASS_MEDIA] == 65536U,
+	      "owned arena region from the pool: %u B pooled, %u heap blocks",
+	      card_pool.class_used[CARD_POOL_CLASS_MEDIA],
+	      host_runtime_live_blocks());
+	region_a = (uint32_t)(uintptr_t)a.region[0];
+
+	sdk_vorbis_heap_init(&b, 65536U, 1024U * 1024U, owner_b);
+	sdk_vorbis_heap_select(&b, 0);
+	pb = (uint8_t *)sdk_vorbis_malloc(1000U);
+	CHECK(pb && b.region[0] != a.region[0] &&
+	      (pb + 1000U <= a.region[0] || pb >= a.region[0] + 65536U),
+	      "two owners share a region");
+	memset(pb, 0x5A, 1000U);
+	memset(pa, 0xA5, 1000U);
+
+	/* Core-1 fault: the poison handler releases owner A, then forgets. */
+	CHECK(card_pool_release_owner(&card_pool, owner_a) == 65536U,
+	      "owner release freed the wrong amount");
+	sdk_vorbis_heap_forget(&a);
+	CHECK(sdk_vorbis_heap_regions(&a) == 0U && a.used == 0U,
+	      "forgotten arena still holds regions");
+	for (i = 0U; i < 1000U; i++)
+		if (pb[i] != 0x5A)
+			break;
+	CHECK(i == 1000U, "releasing owner A touched owner B's data");
+	/* A's page is handed out again; A's stale free must not take it. */
+	region_c = card_pool_alloc(&card_pool, 65536U, owner_c);
+	CHECK(region_c == region_a, "freed page not reused (%08x)", region_c);
+	CHECK(card_pool_free(&card_pool, region_a, owner_a) == 0 &&
+	      card_pool_free(&card_pool, region_c, owner_c) == 1,
+	      "stale free from a released owner was honoured");
+
+	/* The arena's own limit still fails cleanly with pool space left. */
+	sdk_vorbis_heap_select(&b, 0);
+	CHECK(sdk_vorbis_malloc(2U * 1024U * 1024U) == 0 &&
+	      host_card_pool_used() == 65536U,
+	      "arena limit not enforced on pool regions");
+	sdk_vorbis_free(pb);
+	CHECK(sdk_vorbis_heap_regions(&b) == 0U && host_card_pool_used() == 0U,
+	      "freed pool region not returned");
+
+	/* No owner: the decode heap, as before. */
+	sdk_vorbis_heap_init(&legacy, 65536U, 1024U * 1024U, 0U);
+	sdk_vorbis_heap_select(&legacy, 0);
+	pl = (uint8_t *)sdk_vorbis_malloc(1000U);
+	CHECK(pl && host_runtime_live_blocks() == 1U &&
+	      host_card_pool_used() == 0U,
+	      "ownerless arena left the decode heap");
+	sdk_vorbis_free(pl);
+	sdk_vorbis_heap_select(0, 0);
+	check_clean("arena pool");
 }
 
 
@@ -774,6 +849,7 @@ int main(int argc, char **argv)
 		fixture_dir = argv[1];
 	test_arena();
 	test_arena_regions();
+	test_arena_pool();
 	test_fixtures();
 	test_s16le();
 	test_rejections();

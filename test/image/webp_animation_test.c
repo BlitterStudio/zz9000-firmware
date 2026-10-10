@@ -13,6 +13,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "sdk_decode_reclaim.h"
+#include "card_pool.h"
+#include "host_card_pool.h"
 #include "sdk_image_stream.h"
 #include "sdk_vorbis_alloc.h"
 #include "sdk_webp_alloc.h"
@@ -224,7 +226,7 @@ static int ref_open(struct ref_decoder *ref, const uint8_t *data, size_t len)
   WebPAnimInfo info;
 
   memset(ref, 0, sizeof(*ref));
-  sdk_vorbis_heap_init(&ref_heap, 256U * 1024U, 64U * 1024U * 1024U);
+  sdk_vorbis_heap_init(&ref_heap, 256U * 1024U, 64U * 1024U * 1024U, 0U);
   sdk_webp_alloc_select(&ref_heap);
   if (!WebPAnimDecoderOptionsInit(&options))
     return 0;
@@ -695,8 +697,8 @@ static int test_animation_close_releases_everything(void)
                                        pip, &sres, &session) ==
                    SDK_STATUS_OK,
                "ready-close session did not reach ready");
-  TEST_REQUIRE(sdk_decode_tracked_count() > 0U,
-               "retained animation owns no tracked allocations");
+  TEST_REQUIRE(host_card_pool_used() > 0U,
+               "retained animation holds no card pool memory");
   TEST_REQUIRE(sdk_image_stream_close(session) == SDK_STATUS_OK &&
                    sdk_image_stream_active_count() == 0U,
                "close during ready failed");
@@ -739,7 +741,6 @@ static int test_animation_poison_without_uaf(void)
   uint8_t pip[PIP_LEN];
   uint8_t recovered[3U * 5U * 4U];
   uint32_t session;
-  unsigned reclaimed;
 
   host_runtime_reset();
   TEST_REQUIRE(animation_open_and_feed(webp_anim3_blend_dispose_8x6,
@@ -754,13 +755,14 @@ static int test_animation_poison_without_uaf(void)
   TEST_REQUIRE(sdk_image_stream_frame_present(session, ares.frame_token, 0U,
                                               &ares) == SDK_STATUS_OK,
                "poison PRESENT failed (fault arrives mid-display)");
-  TEST_REQUIRE(sdk_decode_tracked_count() > 0U,
-               "poison session owns no tracked allocations");
+  TEST_REQUIRE(host_card_pool_used() > 0U,
+               "poison session holds no card pool memory");
 
-  /* scheduler fault path: poison (no destructors!) then reclaim */
+  /* scheduler fault path: poison (no destructors!) releases the session's
+   * pool owner, then the tracker reclaim runs */
   sdk_image_stream_poison_core1_sessions();
-  reclaimed = sdk_decode_reclaim(sdk_decode_heap_free);
-  TEST_REQUIRE(reclaimed > 0U && sdk_decode_tracked_count() == 0U,
+  (void)sdk_decode_reclaim(sdk_decode_heap_free);
+  TEST_REQUIRE(host_card_pool_used() == 0U && sdk_decode_tracked_count() == 0U,
                "fault reclaim did not free every animation allocation");
   TEST_REQUIRE(host_runtime_allocated_bytes() == 0U,
                "fault reclaim left host bytes allocated");
@@ -793,7 +795,7 @@ static int test_animation_poison_without_uaf(void)
   return 1;
 }
 
-/* ------------------------------- 9: many frames, bounded tracker slots */
+/* ------------------------------- 9: many frames, bounded arena regions */
 
 /* Repeats the first ANMF chunk of the 3-frame fixture `frames` times
  * behind its RIFF/VP8X/ANIM header. Returns a malloc'd container. */
@@ -835,8 +837,8 @@ static uint8_t *build_long_animation(uint32_t frames, size_t *length)
 
 /* libwebp's demuxer allocates per frame. On hardware a 72-frame clip
  * exhausted the 64-slot core-1 decode tracker and failed as out of memory;
- * the session arena must keep the tracked-block count bounded however long
- * the animation is, and every frame must still match the reference. */
+ * the session arena must keep its block count bounded however long the
+ * animation is, and every frame must still match the reference. */
 static int test_animation_many_frames_bounded_slots(void)
 {
   enum { FRAMES = 120 };
@@ -848,7 +850,7 @@ static int test_animation_many_frames_bounded_slots(void)
   uint8_t *data;
   size_t length = 0U;
   uint32_t session = 0U;
-  uint32_t max_tracked = 0U;
+  uint32_t max_blocks = 0U;
   uint32_t i;
   int timestamp = 0;
 
@@ -881,20 +883,21 @@ static int test_animation_many_frames_bounded_slots(void)
                      SDK_STATUS_OK &&
                      ares.frame_index == i,
                  "long animation NEXT failed");
-    if (sdk_decode_tracked_count() > max_tracked)
-      max_tracked = sdk_decode_tracked_count();
+    if (card_pool.block_count > max_blocks)
+      max_blocks = card_pool.block_count;
     TEST_REQUIRE(memcmp(pip, expected + (size_t)i * PIP_LEN, PIP_LEN) == 0,
                  "long animation frame mismatch");
     TEST_REQUIRE(retire_current(session, ares.frame_token, &ares),
                  "long animation frame cycle failed");
   }
-  TEST_REQUIRE(max_tracked <= SDK_VORBIS_HEAP_MAX_REGIONS,
-               "long animation held more tracked blocks than its arena");
+  TEST_REQUIRE(max_blocks <= SDK_VORBIS_HEAP_MAX_REGIONS,
+               "long animation held more pool blocks than its arena regions");
   TEST_REQUIRE(sdk_image_stream_close(session) == SDK_STATUS_OK &&
-                   sdk_decode_tracked_count() == 0U,
-               "long animation close left tracked blocks");
-  printf("long animation: %u frames, at most %u tracked blocks\n",
-         (unsigned)FRAMES, (unsigned)max_tracked);
+                   sdk_decode_tracked_count() == 0U &&
+                   host_card_pool_used() == 0U,
+               "long animation close left memory behind");
+  printf("long animation: %u frames, at most %u pool blocks\n",
+         (unsigned)FRAMES, (unsigned)max_blocks);
   free(expected);
   free(data);
   host_runtime_reset();

@@ -1,11 +1,13 @@
 /*
  * libogg/Tremor-private allocation arena; see sdk_vorbis_alloc.h.
  *
- * Every region comes from sdk_decode_heap_alloc(), so on core 1 it is
- * recorded in the decode tracker and reclaimed by a core-1 cold restart.
+ * An arena with a card pool owner takes its regions from the card pool,
+ * which reclaims them by owner. Otherwise every region comes from
+ * sdk_decode_heap_alloc(), so on core 1 it is recorded in the decode
+ * tracker and reclaimed by a core-1 cold restart.
  * Inside a region, blocks carry an 8-byte boundary tag (size with an in-use
  * bit, size of the previous block); free neighbours are always coalesced and
- * an all-free region is returned to the decode heap immediately.
+ * an all-free region is returned to its source immediately.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -14,6 +16,7 @@
 #include "sdk_compression.h"
 #include "sdk_decode_reclaim.h"
 #include "sdk_smp_lock.h"
+#include "card_pool.h"
 
 #define BLK_HDR  8U
 #define BLK_USED 1U
@@ -58,7 +61,11 @@ static int region_of(const struct sdk_vorbis_heap *h, const void *p)
 
 static void region_drop(struct sdk_vorbis_heap *h, unsigned r)
 {
-	sdk_decode_heap_free(h->region[r]);
+	if (h->pool_owner)
+		card_pool_free(&card_pool, (uint32_t)(uintptr_t)h->region[r],
+		               h->pool_owner);
+	else
+		sdk_decode_heap_free(h->region[r]);
 	h->used -= h->region_bytes[r];
 	h->region[r] = 0;
 	h->region_bytes[r] = 0U;
@@ -90,10 +97,15 @@ static int region_add(struct sdk_vorbis_heap *h, uint32_t need)
 		if (bytes > h->limit - h->used)
 			bytes = (h->limit - h->used) & ~7U;
 	}
-	if (smp_cpu_id() == 1 &&
-	    sdk_decode_tracked_count() >= SDK_DECODE_MAX_TRACKED)
-		return -1;
-	base = (uint8_t *)sdk_decode_heap_alloc(bytes);
+	if (h->pool_owner) {
+		base = (uint8_t *)(uintptr_t)card_pool_alloc(&card_pool, bytes,
+		                                             h->pool_owner);
+	} else {
+		if (smp_cpu_id() == 1 &&
+		    sdk_decode_tracked_count() >= SDK_DECODE_MAX_TRACKED)
+			return -1;
+		base = (uint8_t *)sdk_decode_heap_alloc(bytes);
+	}
 	if (!base)
 		return -1;
 	b = blk_at(base, 0U);
@@ -297,11 +309,12 @@ void *sdk_vorbis_realloc(void *ptr, size_t size)
 }
 
 void sdk_vorbis_heap_init(struct sdk_vorbis_heap *heap, uint32_t region_size,
-                          uint32_t limit)
+                          uint32_t limit, uint32_t pool_owner)
 {
 	memset(heap, 0, sizeof(*heap));
 	heap->region_size = (region_size + 7U) & ~7U;
 	heap->limit = limit;
+	heap->pool_owner = pool_owner;
 }
 
 void sdk_vorbis_heap_select(struct sdk_vorbis_heap *heap, jmp_buf *fail)

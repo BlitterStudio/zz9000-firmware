@@ -21,6 +21,8 @@ The card has 1 GB of DDR at `0x00000000`–`0x3FFFFFFF`. The BSP translation tab
 
 Large working memory for firmware services comes from the card pool (`card_pool.h`), not from new fixed ranges or the general heap. The pool hands out 64 KB pages to an owner — a class and an instance — and keeps a byte limit per class, so one service cannot take memory another needs. A session releases everything it owns in one call, and the firmware releases every non-permanent owner on an Amiga reset.
 
+Today the WebM decoder arena (MEDIA class, one owner per video session) and the WebP decoder arena (IMAGE class, one owner per image session) take their memory from the pool. When core 1 faults, the session poison handlers release those owners, so the pool gets the memory back whichever core allocated it.
+
 Range B is the Zorro III fast RAM window. The pool uses it only while `fast_ram` is off in `ZZ9000.CFG` (and always on Zorro II, which has no fast RAM). On every Amiga reset the firmware takes range B back and cleans the ARM data caches before the fast RAM decision is re-read, so a warm reset that switches fast RAM on hands the Amiga memory no ARM code still touches.
 
 ## Adding a range

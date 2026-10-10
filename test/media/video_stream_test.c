@@ -7,10 +7,18 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "card_pool.h"
 #include "sdk_mailbox.h"
 #include "sdk_video_backend.h"
 #include "sdk_video_stream.h"
 #include "webm_parse.h"
+
+/* Single-threaded host: the card pool's SMP lock has nothing to contend. */
+int smp_cpu_id(void) { return 0; }
+uint32_t smp_local_irq_save(void) { return 0U; }
+void smp_local_irq_restore(uint32_t s) { (void)s; }
+void smp_raw_spin_lock(volatile uint32_t *w) { *w = 1U; }
+void smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0U; }
 
 static uint8_t decoder_storage;
 static uint32_t create_calls;
@@ -64,9 +72,13 @@ static int mock_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 		? SDK_VIDEO_BACKEND_NEED_INPUT : SDK_VIDEO_BACKEND_ERROR;
 }
 
+static uint32_t configured_pool_owner;
+
 static int mock_configure_media(
 	void *decoder, const struct SDKVideoMediaConfig *config)
 {
+	if (config)
+		configured_pool_owner = config->pool_owner;
 	return decoder == &decoder_storage && config &&
 		(config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE ||
 		 config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2);
@@ -417,6 +429,73 @@ static int test_partial_write_progress(void)
 	return 0;
 }
 
+static int begin_and_write_media(uint32_t *session)
+{
+	struct SDKVideoStreamBegin begin;
+	struct SDKVideoStreamWrite write;
+	struct SDKVideoStreamResult result;
+	uint8_t input = 0U;
+
+	memset(&begin, 0, sizeof(begin));
+	begin.codec = SDK_VIDEO_CODEC_MPEG1;
+	begin.container = SDK_VIDEO_CONTAINER_MPEG_PS;
+	begin.width = 320U;
+	begin.height = 240U;
+	begin.output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_OK)
+		return 0;
+	*session = result.session;
+	memset(&write, 0, sizeof(write));
+	write.session = *session;
+	write.src = &input;
+	write.src_length = 1U;
+	return sdk_video_stream_write(&write, &result) == SDK_STATUS_OK;
+}
+
+/* The backend's decoder memory belongs to a card pool owner unique to the
+ * session, so a reused slot never inherits the previous owner, and a
+ * core-1 fault frees the session's pool memory by owner. */
+static int test_pool_owner_per_session(void)
+{
+	struct SDKVideoStreamResult result;
+	uint32_t session, owner_a, owner_b, mine, other;
+
+	card_pool_init(&card_pool);
+	card_pool_add_range(&card_pool, 0x30000000U, 0x31000000U, 0);
+	card_pool_open_range(&card_pool, 0);
+	sdk_video_stream_init();
+
+	configured_pool_owner = 0U;
+	if (!begin_and_write_media(&session))
+		return 40;
+	owner_a = configured_pool_owner;
+	if (CARD_POOL_OWNER_CLASS(owner_a) != CARD_POOL_CLASS_MEDIA)
+		return 41;
+	sdk_video_stream_close(session, &result);
+
+	configured_pool_owner = 0U;
+	if (!begin_and_write_media(&session))
+		return 42;
+	owner_b = configured_pool_owner;
+	if (CARD_POOL_OWNER_CLASS(owner_b) != CARD_POOL_CLASS_MEDIA ||
+	    owner_b == owner_a)
+		return 43;
+
+	/* Core-1 fault: poisoning frees this session's pool memory only. */
+	mine = card_pool_alloc(&card_pool, 0x10000U, owner_b);
+	other = card_pool_alloc(&card_pool, 0x10000U,
+	                        CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, 1U));
+	if (!mine || !other)
+		return 44;
+	sdk_video_stream_poison_core1_sessions();
+	if (card_pool.block_count != 1U || card_pool.blocks[0].addr != other)
+		return 45;
+	sdk_video_stream_close(session, &result);
+	return 0;
+}
+
 int main(void)
 {
 	int rc;
@@ -430,6 +509,8 @@ int main(void)
 	rc = test_decode_flag_forwarding();
 	if (rc != 0) return rc;
 	rc = test_partial_write_progress();
+	if (rc != 0) return rc;
+	rc = test_pool_owner_per_session();
 	if (rc != 0) return rc;
 	return 0;
 }

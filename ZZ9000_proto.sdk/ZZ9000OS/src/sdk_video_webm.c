@@ -140,7 +140,8 @@ struct sdk_video_webm {
 static void heap_select(struct sdk_video_webm *d)
 {
 	if (!d->heap_inited) {
-		sdk_vorbis_heap_init(&d->heap, WEBM_HEAP_REGION, WEBM_HEAP_LIMIT);
+		sdk_vorbis_heap_init(&d->heap, WEBM_HEAP_REGION, WEBM_HEAP_LIMIT,
+		                     d->media.pool_owner);
 		d->heap_inited = 1U;
 	}
 	sdk_vorbis_heap_select(&d->heap, &d->alloc_fail);

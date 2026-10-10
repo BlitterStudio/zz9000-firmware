@@ -74,6 +74,9 @@ struct SDKVideoMediaConfig {
 	uint32_t pcm_ring_capacity;
 	uint32_t pcm_low_water_bytes;
 	uint32_t pcm_high_water_bytes;
+	/* card_pool owner for the backend's decoder memory. Unique per
+	 * session, so a stale free from a closed session never matches. */
+	uint32_t pool_owner;
 };
 
 struct SDKVideoMediaInfo {

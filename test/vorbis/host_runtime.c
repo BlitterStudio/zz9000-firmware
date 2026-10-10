@@ -89,5 +89,10 @@ void sdk_decode_heap_free(void *ptr)
   free(ptr);
 }
 
-/* Decode work runs on the core-1 worker in firmware. */
+/* Decode work runs on the core-1 worker in firmware. The card pool's SMP
+ * lock has nothing to contend with in this single-threaded host. */
 int smp_cpu_id(void) { return 1; }
+uint32_t smp_local_irq_save(void) { return 0U; }
+void smp_local_irq_restore(uint32_t s) { (void)s; }
+void smp_raw_spin_lock(volatile uint32_t *w) { *w = 1U; }
+void smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0U; }
