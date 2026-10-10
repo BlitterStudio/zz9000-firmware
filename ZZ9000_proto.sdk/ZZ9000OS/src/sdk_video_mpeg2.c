@@ -104,6 +104,7 @@ struct sdk_video_mpeg2 {
 	struct SDKDVDLPCM lpcm;
 	struct SDKDVDAC3 ac3;
 	uint32_t ac3_packet_offset;  /* payload bytes of the head packet staged */
+	uint32_t lpcm_packet_offset; /* payload bytes of the head packet emitted */
 	struct SDKVideoMediaConfig media;
 	struct SDKMediaTimeline timeline;
 	struct m2_pts_slot pts_slot[M2_PTS_SLOTS];
@@ -122,6 +123,7 @@ struct sdk_video_mpeg2 {
 	uint32_t media_flags;
 	uint8_t audio_selected;
 	uint8_t mp2_selected;
+	uint8_t mp2_end_signalled;
 	uint8_t lpcm_selected;
 	uint8_t ac3_selected;
 	uint8_t media_configured;
@@ -205,8 +207,18 @@ static void ring_write(struct sdk_video_mpeg2 *d, const uint8_t *src,
 	d->pcm_produced += bytes;
 }
 
-/* Emit decoded units (whole stereo frames only) into the PCM ring. The
- * sticky backpressure flag releases under the low-water mark. */
+/* Raise the sticky backpressure flag; it releases under the low-water
+ * mark when the client acknowledges. */
+static void raise_backpressure(struct sdk_video_mpeg2 *d)
+{
+	if (!d->pcm_backpressure)
+		d->backpressure_events++;
+	d->pcm_backpressure = 1U;
+	d->media_flags |= SDK_VIDEO_MEDIA_FLAG_BACKPRESSURE;
+}
+
+/* Write whole stereo frames into the PCM ring. Callers check for room
+ * first: what does not fit is not written. */
 static uint32_t ring_emit(struct sdk_video_mpeg2 *d, const uint8_t *src,
                           uint32_t bytes)
 {
@@ -218,9 +230,7 @@ static uint32_t ring_emit(struct sdk_video_mpeg2 *d, const uint8_t *src,
 		return 0U;
 	free_bytes = ring_free(d);
 	if (free_bytes < 4U) {
-		d->pcm_backpressure = 1U;
-		d->backpressure_events++;
-		d->media_flags |= SDK_VIDEO_MEDIA_FLAG_BACKPRESSURE;
+		raise_backpressure(d);
 		return 0U;
 	}
 	if (bytes > free_bytes)
@@ -232,15 +242,22 @@ static uint32_t ring_emit(struct sdk_video_mpeg2 *d, const uint8_t *src,
 
 /* ---------------------------------------------------------------- audio */
 
+/* Decode MPEG audio frames while the ring has room for a whole one: a
+ * frame decoded into less room would lose its tail. */
 static void pump_mp2(struct sdk_video_mpeg2 *d)
 {
 	static uint8_t swap[PLM_AUDIO_SAMPLES_PER_FRAME * 4U];
 
 	while (!d->pcm_backpressure && !plm_audio_has_ended(d->mp2)) {
-		plm_samples_t *samples = plm_audio_decode(d->mp2);
+		plm_samples_t *samples;
 		uint32_t bytes;
 		uint32_t i;
 
+		if (ring_free(d) < sizeof(swap)) {
+			raise_backpressure(d);
+			break;
+		}
+		samples = plm_audio_decode(d->mp2);
 		if (!samples || samples->count == 0U)
 			break;
 		bytes = samples->count * 4U;
@@ -259,12 +276,12 @@ static void pump_mp2(struct sdk_video_mpeg2 *d)
 			swap[2U * i] = (uint8_t)((uint16_t)value >> 8);
 			swap[2U * i + 1U] = (uint8_t)value;
 		}
-		if (ring_emit(d, swap, bytes) == 0U)
-			break;
+		ring_emit(d, swap, bytes);
 		d->audio_frames++;
 	}
 }
 
+/* Returns 0 (packet stays queued) while the MPEG audio input is full. */
 static uint32_t route_mp2(struct sdk_video_mpeg2 *d,
                           const struct SDKDVDPSPacket *packet)
 {
@@ -282,43 +299,56 @@ static uint32_t route_mp2(struct sdk_video_mpeg2 *d,
 	return 1U;
 }
 
+/* Copy the packet's whole PCM frames into the ring as room allows, mono
+ * doubled to stereo. Returns 0 (packet stays queued, resumed at
+ * lpcm_packet_offset) when the ring is full. */
 static uint32_t route_lpcm(struct sdk_video_mpeg2 *d,
                            const struct SDKDVDPSPacket *packet)
 {
-	static uint8_t pcm[SDK_DVD_PS_PES_MAX * 2U];
-	uint32_t bytes;
+	static uint8_t pcm[4096U];
+	const uint8_t *payload = packet->data + SDK_DVD_LPCM_HEADER_BYTES;
+	uint32_t frame_bytes;
+	uint32_t length;
 
-	if (packet->length <= SDK_DVD_LPCM_HEADER_BYTES)
+	if (packet->length <= SDK_DVD_LPCM_HEADER_BYTES ||
+	    !sdk_dvd_lpcm_header(&d->lpcm, packet->data))
 		return 1U;
-	if (!sdk_dvd_lpcm_header(&d->lpcm, packet->data))
-		return 1U;
-	bytes = sdk_dvd_lpcm_unpack(
-		&d->lpcm, packet->data + SDK_DVD_LPCM_HEADER_BYTES,
-		packet->length - SDK_DVD_LPCM_HEADER_BYTES,
-		pcm, sizeof(pcm) / 2U);
-	if (bytes == 0U)
-		return 1U;
-	if (d->lpcm.channels == 2U) {
-		if (ring_emit(d, pcm, bytes) != 0U)
-			d->audio_frames++;
-	} else {
-		/* Dual-mono expansion keeps the ring stereo.
-		 * Unpack directly in reverse so in-place expansion never
-		 * overwrites unread samples. */
-		uint32_t frames = bytes / 2U;
+	frame_bytes = 2U * d->lpcm.channels;
+	length = packet->length - SDK_DVD_LPCM_HEADER_BYTES;
+	length -= length % frame_bytes;
+	while (d->lpcm_packet_offset < length) {
+		uint32_t frames = (length - d->lpcm_packet_offset) /
+		                  frame_bytes;
+		uint32_t room = ring_free(d) / 4U;
 		int32_t i;
 
-		if (frames * 4U > sizeof(pcm))
-			frames = sizeof(pcm) / 4U;
-		for (i = (int32_t)frames - 1; i >= 0; i--) {
-			pcm[4 * i + 3] = pcm[2 * i + 1];
-			pcm[4 * i + 2] = pcm[2 * i];
-			pcm[4 * i + 1] = pcm[2 * i + 1];
-			pcm[4 * i]     = pcm[2 * i];
+		if (d->pcm_backpressure || room == 0U) {
+			raise_backpressure(d);
+			return 0U;
 		}
-		if (ring_emit(d, pcm, 4U * frames) != 0U)
-			d->audio_frames++;
+		if (frames > room)
+			frames = room;
+		if (frames > sizeof(pcm) / 4U)
+			frames = sizeof(pcm) / 4U;
+		sdk_dvd_lpcm_unpack(&d->lpcm,
+		                    payload + d->lpcm_packet_offset,
+		                    frames * frame_bytes, pcm,
+		                    frames * frame_bytes);
+		/* Dual-mono expansion keeps the ring stereo; working
+		 * backwards never overwrites an unread sample. */
+		if (d->lpcm.channels == 1U) {
+			for (i = (int32_t)frames - 1; i >= 0; i--) {
+				pcm[4 * i + 3] = pcm[2 * i + 1];
+				pcm[4 * i + 2] = pcm[2 * i];
+				pcm[4 * i + 1] = pcm[2 * i + 1];
+				pcm[4 * i]     = pcm[2 * i];
+			}
+		}
+		ring_emit(d, pcm, frames * 4U);
+		d->lpcm_packet_offset += frames * frame_bytes;
 	}
+	d->lpcm_packet_offset = 0U;
+	d->audio_frames++;
 	return 1U;
 }
 
@@ -338,10 +368,7 @@ static uint32_t pump_ac3(struct sdk_video_mpeg2 *d)
 		 * a decoded frame would be lost: wait for the ack instead. */
 		if (d->pcm_backpressure ||
 		    ring_free(d) < SDK_DVD_AC3_FRAME_PCM_BYTES) {
-			if (!d->pcm_backpressure)
-				d->backpressure_events++;
-			d->pcm_backpressure = 1U;
-			d->media_flags |= SDK_VIDEO_MEDIA_FLAG_BACKPRESSURE;
+			raise_backpressure(d);
 			return 0U;
 		}
 		bytes = sdk_dvd_ac3_decode(&d->ac3, pcm, sizeof(pcm));
@@ -386,7 +413,8 @@ static uint32_t route_ac3(struct sdk_video_mpeg2 *d,
 	return 1U;
 }
 
-/* Returns 0 when the packet must stay queued (AC-3 behind a full ring). */
+/* Returns 0 when the packet must stay queued (behind a full ring, or a
+ * full MPEG audio input). */
 static uint32_t route_audio(struct sdk_video_mpeg2 *d,
                             const struct SDKDVDPSPacket *packet)
 {
@@ -418,22 +446,23 @@ static uint32_t route_audio(struct sdk_video_mpeg2 *d,
 		d->last_audio_pts = packet->pts;
 	}
 	if (packet->kind == SDK_DVD_PS_MP2)
-		route_mp2(d, packet);
-	else if (packet->kind == SDK_DVD_PS_LPCM)
-		route_lpcm(d, packet);
-	else
-		return route_ac3(d, packet);
-	return 1U;
+		return route_mp2(d, packet);
+	if (packet->kind == SDK_DVD_PS_LPCM)
+		return route_lpcm(d, packet);
+	return route_ac3(d, packet);
 }
 
 /* Drain the audio queue: before the stream kind is selected this scans
  * for the configured kind (bounded skip of other candidate streams); after
- * selection it decodes every matching packet up to backpressure. AC-3
- * frames left staged behind a full ring are decoded first. */
+ * selection it decodes every matching packet up to backpressure. Audio
+ * left decodable behind a full ring (AC-3 frames staged, MPEG audio in its
+ * input) is decoded first. */
 static void route_audio_queue(struct sdk_video_mpeg2 *d)
 {
 	if (d->ac3_selected && !pump_ac3(d))
 		return;
+	if (d->mp2_selected)
+		pump_mp2(d);
 	while (!d->pcm_backpressure) {
 		const struct SDKDVDPSPacket *packet =
 			sdk_dvd_ps_peek_audio(&d->demux);
@@ -773,9 +802,22 @@ static int audio_drained(struct sdk_video_mpeg2 *d)
 		return 1;
 	if (d->demux.audio.count != 0U || d->demux.staged != 0U)
 		return 0;
-	if (d->mp2_selected)
+	if (d->mp2_selected) {
+		/* Bytes short of a frame can never decode once the input has
+		 * ended (ffmpeg's DVD MP2 ends with one). pl_mpeg only
+		 * reports the end once it knows where the input stops, so
+		 * tell it, then decode whatever whole frames a full ring held
+		 * back: no later packet will pump them. */
+		if (d->input_eof) {
+			if (!d->mp2_end_signalled) {
+				plm_buffer_signal_end(d->mp2_input);
+				d->mp2_end_signalled = 1U;
+			}
+			pump_mp2(d);
+		}
 		return plm_audio_has_ended(d->mp2) ||
 		       plm_buffer_get_remaining(d->mp2_input) == 0U;
+	}
 	/* A trailing partial frame can never complete once input ended. */
 	if (d->ac3_selected)
 		return !sdk_dvd_ac3_frame_ready(&d->ac3);

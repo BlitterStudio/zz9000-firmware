@@ -55,11 +55,16 @@ static uint64_t fnv1a64(uint64_t hash, const uint8_t *bytes, uint32_t length)
 static int test_lpcm_exactness(void)
 {
 	struct SDKDVDLPCM lpcm = {0};
-	uint8_t hdr_stereo[7] = {0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00};
-	uint8_t hdr_mono[7]   = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-	uint8_t hdr_bad_rate[7] = {0x00, 0x00, 0x04, 0x10, 0x00, 0x00, 0x00};
-	uint8_t hdr_bad_bits[7] = {0x00, 0x00, 0x40, 0x10, 0x00, 0x00, 0x00};
-	uint8_t hdr_bad_chans[7] = {0x00, 0x00, 0x00, 0x50, 0x00, 0x00, 0x00};
+	/* The payload header as ffmpeg -f dvd writes it (dvd_ntsc_30 fixture):
+	 * substream id, frame count, first-access-unit pointer (2 bytes),
+	 * emphasis/mute/frame number, format, dynamic range. The format byte
+	 * holds quantization (bits 7-6), rate (5-4) and channels - 1 (2-0);
+	 * the pointer's low byte (0x04) must not be read as a channel count. */
+	uint8_t hdr_stereo[7] = {0xa0, 0x07, 0x00, 0x04, 0x0c, 0x01, 0x80};
+	uint8_t hdr_mono[7]   = {0xa0, 0x07, 0x00, 0x14, 0x0c, 0x00, 0x80};
+	uint8_t hdr_bad_rate[7] = {0xa0, 0x07, 0x00, 0x04, 0x0c, 0x11, 0x80};
+	uint8_t hdr_bad_bits[7] = {0xa0, 0x07, 0x00, 0x04, 0x0c, 0x41, 0x80};
+	uint8_t hdr_bad_chans[7] = {0xa0, 0x07, 0x00, 0x04, 0x0c, 0x05, 0x80};
 	uint8_t src[16];
 	uint8_t dst[32];
 	uint32_t bytes;
@@ -524,8 +529,8 @@ struct acked_result {
  * most max_ack PCM bytes per decode call, hashes the PCM in ack order, and
  * stops at DONE (or fails after a bounded number of calls). */
 static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
-                     uint32_t ring_capacity, uint32_t max_ack,
-                     struct acked_result *out)
+                     uint32_t audio_codec, uint32_t ring_capacity,
+                     uint32_t max_ack, struct acked_result *out)
 {
 	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
 	struct SDKVideoMediaConfig cfg = {0};
@@ -547,7 +552,7 @@ static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
 			ops->destroy(decoder);
 		return 1;
 	}
-	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.audio_codec = audio_codec;
 	cfg.pcm_ring = ring;
 	cfg.pcm_ring_capacity = ring_capacity;
 	cfg.pcm_low_water_bytes = 4096U;
@@ -702,7 +707,8 @@ static int test_ac3_192_all_frames(void)
 
 		if (run_acked(zz9k_dvd_ac3_192_fixture,
 		              zz9k_dvd_ac3_192_fixture_len, runs[i].chunk,
-		              runs[i].ring, runs[i].max_ack, &r) != 0)
+		              SDK_VIDEO_MEDIA_AUDIO_AC3, runs[i].ring,
+		              runs[i].max_ack, &r) != 0)
 			return 3;
 		if (!r.done) {
 			fprintf(stderr, "test_ac3_192 run %u: never DONE (pcm=%llu)\n",
@@ -794,8 +800,9 @@ static int test_ac3_truncated_mid_frame(void)
 
 	if (zz9k_dvd_ac3_192_fixture_len <= cut)
 		return 1;
-	if (run_acked(zz9k_dvd_ac3_192_fixture, cut, 2048U, 128U * 1024U,
-	              128U * 1024U, &r) != 0)
+	if (run_acked(zz9k_dvd_ac3_192_fixture, cut, 2048U,
+	              SDK_VIDEO_MEDIA_AUDIO_AC3, 128U * 1024U, 128U * 1024U,
+	              &r) != 0)
 		return 2;
 	if (!r.done)
 		return 3;
@@ -804,6 +811,124 @@ static int test_ac3_truncated_mid_frame(void)
 		return 4;
 	if (r.audio_frames == 0U || r.audio_frames >= 63U)
 		return 5;
+	return 0;
+}
+
+/* The same Program Stream with one stray byte appended to its last MPEG
+ * audio PES (length field grown to match). Returns the new length. */
+static uint32_t pad_last_mp2_pes(const uint8_t *src, uint32_t length,
+                                 uint8_t *dst)
+{
+	uint32_t i = 0U;
+	uint32_t last = UINT32_MAX;
+	uint32_t last_size = 0U;
+	uint32_t size;
+
+	while (i + 6U <= length) {
+		uint8_t sid;
+
+		if (src[i] != 0U || src[i + 1U] != 0U || src[i + 2U] != 1U) {
+			i++;
+			continue;
+		}
+		sid = src[i + 3U];
+		if (sid == 0xb9U)
+			size = 4U;
+		else if (sid == 0xbaU)
+			size = (src[i + 4U] & 0xc0U) == 0x40U
+				? 14U + (src[i + 13U] & 7U) : 12U;
+		else
+			size = 6U + ((uint32_t)src[i + 4U] << 8 | src[i + 5U]);
+		if (i + size > length)
+			break;
+		if (sid >= 0xc0U && sid <= 0xdfU) {
+			last = i;
+			last_size = size;
+		}
+		i += size;
+	}
+	if (last == UINT32_MAX)
+		return 0U;
+	memcpy(dst, src, last + last_size);
+	dst[last + last_size] = 0x00U;
+	memcpy(dst + last + last_size + 1U, src + last + last_size,
+	       length - last - last_size);
+	size = last_size - 6U + 1U;
+	dst[last + 4U] = (uint8_t)(size >> 8);
+	dst[last + 5U] = (uint8_t)size;
+	return length + 1U;
+}
+
+/* 6c'. An MPEG audio track that ends with bytes short of a frame (ffmpeg
+ * -target dvd output does): the fragment can never decode once input
+ * ended, so the stream must still reach DONE with every whole frame. */
+static int test_mp2_trailing_fragment(void)
+{
+	static uint8_t padded[sizeof(zz9k_dvd_pal_25p_fixture) + 1U];
+	struct acked_result whole, r;
+	uint32_t len = pad_last_mp2_pes(zz9k_dvd_pal_25p_fixture,
+	                                zz9k_dvd_pal_25p_fixture_len, padded);
+
+	if (len == 0U)
+		return 1;
+	if (run_acked(zz9k_dvd_pal_25p_fixture, zz9k_dvd_pal_25p_fixture_len,
+	              2048U, SDK_VIDEO_MEDIA_AUDIO_MP2, 64U * 1024U,
+	              64U * 1024U, &whole) != 0 || !whole.done)
+		return 2;
+	if (run_acked(padded, len, 2048U, SDK_VIDEO_MEDIA_AUDIO_MP2,
+	              64U * 1024U, 64U * 1024U, &r) != 0)
+		return 3;
+	if (!r.done) {
+		fprintf(stderr, "test_mp2_trailing_fragment: no DONE after %llu "
+		        "PCM bytes\n", (unsigned long long)r.pcm_bytes);
+		return 4;
+	}
+	if (r.pcm_bytes != whole.pcm_bytes || r.pcm_hash != whole.pcm_hash ||
+	    r.video_frames != whole.video_frames)
+		return 5;
+	return 0;
+}
+
+/* 6c''. A client that acknowledges in small steps keeps the PCM ring full:
+ * MPEG audio and LPCM must then wait for room like AC-3 does, not write
+ * part of a frame or packet and lose the rest. The PCM must match a run
+ * with a ring that never fills. */
+static int test_mp2_lpcm_full_ring(void)
+{
+	static const struct {
+		const uint8_t *stream;
+		uint32_t codec;
+	} runs[] = {
+		{ zz9k_dvd_pal_25p_fixture, SDK_VIDEO_MEDIA_AUDIO_MP2 },
+		{ zz9k_dvd_ntsc_30_fixture, SDK_VIDEO_MEDIA_AUDIO_LPCM },
+	};
+	uint32_t lengths[2];
+	uint32_t i;
+
+	/* The fixture lengths are not constant expressions. */
+	lengths[0] = zz9k_dvd_pal_25p_fixture_len;
+	lengths[1] = zz9k_dvd_ntsc_30_fixture_len;
+	for (i = 0U; i < 2U; i++) {
+		struct acked_result wide, tight;
+
+		if (run_acked(runs[i].stream, lengths[i], 2048U, runs[i].codec,
+		              256U * 1024U, 256U * 1024U, &wide) != 0 ||
+		    !wide.done || wide.pcm_bytes == 0U)
+			return (int)(1U + i * 4U);
+		if (run_acked(runs[i].stream, lengths[i], 2048U, runs[i].codec,
+		              8U * 1024U, 700U, &tight) != 0)
+			return (int)(2U + i * 4U);
+		if (!tight.done)
+			return (int)(3U + i * 4U);
+		if (tight.pcm_bytes != wide.pcm_bytes ||
+		    tight.pcm_hash != wide.pcm_hash) {
+			fprintf(stderr, "test_mp2_lpcm_full_ring: codec %u pcm=%llu "
+			        "(expected %llu)\n", runs[i].codec,
+			        (unsigned long long)tight.pcm_bytes,
+			        (unsigned long long)wide.pcm_bytes);
+			return (int)(4U + i * 4U);
+		}
+	}
 	return 0;
 }
 
@@ -1052,7 +1177,8 @@ static int test_ac3_substream_selection(void)
 	if (ref_frames != 7U)
 		return 4;
 	if (run_acked(zz9k_dvd_ac3_dual_fixture, zz9k_dvd_ac3_dual_fixture_len,
-	              1024U, 64U * 1024U, 64U * 1024U, &r) != 0)
+	              1024U, SDK_VIDEO_MEDIA_AUDIO_AC3, 64U * 1024U,
+	              64U * 1024U, &r) != 0)
 		return 5;
 	if (!r.done || r.audio_frames != 7U ||
 	    r.pcm_bytes != 7U * (uint64_t)SDK_DVD_AC3_FRAME_PCM_BYTES ||
@@ -1172,6 +1298,78 @@ static uint32_t strip_video(const uint8_t *src, uint32_t length, uint8_t *dst)
 	return n;
 }
 
+/* Whole stereo frames of LPCM audio the stream carries: the payload of
+ * every substream 0xa0 PES after its 7-byte header, cut to 4-byte frames
+ * per packet as the backend unpacks it. */
+static uint64_t lpcm_stereo_bytes(const uint8_t *src, uint32_t length)
+{
+	uint64_t total = 0U;
+	uint32_t i = 0U;
+
+	while (i + 9U <= length) {
+		uint8_t sid;
+		uint32_t size;
+
+		if (src[i] != 0U || src[i + 1U] != 0U || src[i + 2U] != 1U) {
+			i++;
+			continue;
+		}
+		sid = src[i + 3U];
+		if (sid == 0xb9U)
+			size = 4U;
+		else if (sid == 0xbaU)
+			size = (src[i + 4U] & 0xc0U) == 0x40U
+				? 14U + (src[i + 13U] & 7U) : 12U;
+		else
+			size = 6U + ((uint32_t)src[i + 4U] << 8 | src[i + 5U]);
+		if (i + size > length)
+			break;
+		if (sid == 0xbdU) {
+			uint32_t at = 9U + src[i + 8U];
+
+			if (at + 7U < size && src[i + at] == 0xa0U)
+				total += (size - at - 7U) & ~3U;
+		}
+		i += size;
+	}
+	return total;
+}
+
+/* MP2 and LPCM programs must end like AC-3 ones, and stereo LPCM must come
+ * out byte for byte as stored: a header misread as mono doubled it, and
+ * the MP2 decoder never saw the end of its input so DONE never came. */
+static int test_mp2_lpcm_reach_done(void)
+{
+	struct acked_result r;
+	uint64_t lpcm_bytes = lpcm_stereo_bytes(zz9k_dvd_ntsc_30_fixture,
+	                                        zz9k_dvd_ntsc_30_fixture_len);
+
+	if (run_acked(zz9k_dvd_pal_25p_fixture, zz9k_dvd_pal_25p_fixture_len,
+	              2048U, SDK_VIDEO_MEDIA_AUDIO_MP2, 64U * 1024U,
+	              64U * 1024U, &r) != 0)
+		return 1;
+	if (!r.done || r.video_frames != 5U || r.pcm_bytes == 0U ||
+	    r.pcm_bytes % (1152U * 4U) != 0U) {
+		fprintf(stderr, "test_mp2_lpcm: MP2 done=%d frames=%u pcm=%llu\n",
+		        r.done, r.video_frames, (unsigned long long)r.pcm_bytes);
+		return 2;
+	}
+	if (lpcm_bytes == 0U)
+		return 3;
+	if (run_acked(zz9k_dvd_ntsc_30_fixture, zz9k_dvd_ntsc_30_fixture_len,
+	              2048U, SDK_VIDEO_MEDIA_AUDIO_LPCM, 64U * 1024U,
+	              64U * 1024U, &r) != 0)
+		return 4;
+	if (!r.done || r.video_frames != 6U || r.pcm_bytes != lpcm_bytes) {
+		fprintf(stderr, "test_mp2_lpcm: LPCM done=%d frames=%u pcm=%llu "
+		        "(expected %llu)\n", r.done, r.video_frames,
+		        (unsigned long long)r.pcm_bytes,
+		        (unsigned long long)lpcm_bytes);
+		return 5;
+	}
+	return 0;
+}
+
 /* A stream with sound but no video (or whose video never has a sequence
  * header) must still end: libmpeg2 only reports STATE_END after a
  * sequence, so the backend waited forever for a video end. */
@@ -1189,8 +1387,8 @@ static int test_audio_only_reaches_done(void)
 	if (ac3_reference(audio_only, len, &ref_bytes, &ref_hash,
 	                  &ref_frames) != 0 || ref_frames == 0U)
 		return 2;
-	if (run_acked(audio_only, len, 2048U, 64U * 1024U, 64U * 1024U,
-	              &r) != 0)
+	if (run_acked(audio_only, len, 2048U, SDK_VIDEO_MEDIA_AUDIO_AC3,
+	              64U * 1024U, 64U * 1024U, &r) != 0)
 		return 3;
 	if (!r.done) {
 		fprintf(stderr, "test_audio_only: no DONE after %llu PCM bytes\n",
@@ -1310,6 +1508,24 @@ int main(void)
 		return 110 + err;
 	}
 	printf("PASS: test_audio_only_reaches_done (no video still ends DONE)\n");
+
+	if ((err = test_mp2_lpcm_reach_done()) != 0) {
+		fprintf(stderr, "FAIL: test_mp2_lpcm_reach_done (code %d)\n", err);
+		return 160 + err;
+	}
+	printf("PASS: test_mp2_lpcm_reach_done (MP2 and LPCM end, LPCM exact)\n");
+
+	if ((err = test_mp2_trailing_fragment()) != 0) {
+		fprintf(stderr, "FAIL: test_mp2_trailing_fragment (code %d)\n", err);
+		return 170 + err;
+	}
+	printf("PASS: test_mp2_trailing_fragment (MP2 fragment at the end)\n");
+
+	if ((err = test_mp2_lpcm_full_ring()) != 0) {
+		fprintf(stderr, "FAIL: test_mp2_lpcm_full_ring (code %d)\n", err);
+		return 180 + err;
+	}
+	printf("PASS: test_mp2_lpcm_full_ring (MP2/LPCM wait for ring room)\n");
 
 	printf("ALL DVD HOST TESTS PASSED.\n");
 	return 0;

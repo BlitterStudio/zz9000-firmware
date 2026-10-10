@@ -11,13 +11,14 @@ int sdk_dvd_lpcm_header(struct SDKDVDLPCM *lpcm, const uint8_t *header)
 
 	if (!lpcm || !header)
 		return 0;
-	/* Byte 2: quantization (bits 7-6) and sample rate (bits 3-2) as
-	 * written by the DVD-video LPCM substream header; byte 3: channel
-	 * count minus one in bits 7-4. Verified against ffmpeg -f dvd
-	 * fixtures in test/video_codec. */
-	quantization = (header[2] >> 6) & 3U;
-	rate = (header[2] >> 2) & 3U;
-	channels = ((header[3] >> 4) & 15U) + 1U;
+	/* The 7-byte header: substream id, frame count, first-access-unit
+	 * pointer (2 bytes), emphasis/mute/frame number, then the format
+	 * byte with quantization (bits 7-6), sample rate (bits 5-4) and
+	 * channel count minus one (bits 2-0), then dynamic range. Checked
+	 * against ffmpeg -f dvd output (test/video_codec dvd_ntsc_30). */
+	quantization = (header[5] >> 6) & 3U;
+	rate = (header[5] >> 4) & 3U;
+	channels = (header[5] & 7U) + 1U;
 	/* The experiment's deliberately-unclaimed variants stay out of scope:
 	 * only 48 kHz/16-bit mono or stereo is accepted. */
 	if (quantization != 0U || rate != 0U ||
