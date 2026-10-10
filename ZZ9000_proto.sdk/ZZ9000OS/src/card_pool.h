@@ -108,11 +108,14 @@ int card_pool_free(card_pool_t *pool, uint32_t addr, uint32_t owner);
 /* Free every block of one owner. Returns the bytes freed. */
 uint32_t card_pool_release_owner(card_pool_t *pool, uint32_t owner);
 
-/* Amiga reset, before the fast-RAM gate can reopen: revoke every revocable
- * range. Returns 1 when one was open, so ARM cache lines for it may still
- * be dirty and the caller must write them back before the Amiga can see
- * that memory; 0 when no ARM code had access to it. */
-int card_pool_take_back_lent(card_pool_t *pool);
+/* Whether a revocable range is lent out. Reads no lock: only core 0 opens
+ * and closes ranges, so its own answer cannot change underneath it. */
+int card_pool_has_lent(const card_pool_t *pool);
+/* Amiga reset, before the fast-RAM gate can reopen: revoke every lent
+ * range. The caller must first stop core 1 (which also frees a pool lock a
+ * faulted core 1 still holds) and afterwards write back the ARM cache
+ * lines for that memory. Takes no lock when nothing is lent. */
+void card_pool_take_back_lent(card_pool_t *pool);
 /* Amiga reset, after the module resets: release every owner except the
  * FIRMWARE class, then lend the revocable ranges again when the Amiga
  * cannot use them -- a Zorro II board has no fast-RAM window, and on

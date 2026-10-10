@@ -678,10 +678,11 @@ static int feed_video(struct sdk_video_mpeg2 *d)
 
 /* ----------------------------------------------------------------- ops */
 
-static void *mpeg2_create(void)
+static void *mpeg2_create(uint32_t pool_owner)
 {
 	struct sdk_video_mpeg2 *d;
 
+	(void)pool_owner;
 #ifndef SDK_VIDEO_HOST_TEST
 	mpeg2_malloc_hooks(m2_alloc_hook, m2_free_hook);
 #endif

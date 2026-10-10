@@ -129,6 +129,7 @@ struct sdk_video_webm {
 	uint8_t held_audio[WEBM_HELD_AUDIO];
 	uint32_t held_audio_len;
 	int64_t held_audio_tc;
+	uint32_t pool_owner;
 #ifndef SDK_VIDEO_HOST_TEST
 	struct sdk_vorbis_heap heap;
 	jmp_buf alloc_fail;
@@ -141,7 +142,7 @@ static void heap_select(struct sdk_video_webm *d)
 {
 	if (!d->heap_inited) {
 		sdk_vorbis_heap_init(&d->heap, WEBM_HEAP_REGION, WEBM_HEAP_LIMIT,
-		                     d->media.pool_owner);
+		                     d->pool_owner);
 		d->heap_inited = 1U;
 	}
 	sdk_vorbis_heap_select(&d->heap, &d->alloc_fail);
@@ -749,7 +750,7 @@ static int fill_video(struct sdk_video_webm *d, const struct webm_block *blk,
 	return 1;
 }
 
-static void *webm_create(uint32_t codec)
+static void *webm_create(uint32_t codec, uint32_t pool_owner)
 {
 	struct sdk_video_webm *d =
 		(struct sdk_video_webm *)WEBM_ALLOC(sizeof(*d));
@@ -758,6 +759,7 @@ static void *webm_create(uint32_t codec)
 		return 0;
 	memset(d, 0, sizeof(*d));
 	d->expect_codec = codec;
+	d->pool_owner = pool_owner;
 	d->first_audio_pts = SDK_VIDEO_MEDIA_NO_PTS;
 	d->current_audio_pts = SDK_VIDEO_MEDIA_NO_PTS;
 	d->audio_tail_pts = SDK_VIDEO_MEDIA_NO_PTS;
@@ -777,14 +779,14 @@ static void *webm_create(uint32_t codec)
 	return d;
 }
 
-static void *create_vp8(void)
+static void *create_vp8(uint32_t pool_owner)
 {
-	return webm_create(SDK_VIDEO_CODEC_VP8);
+	return webm_create(SDK_VIDEO_CODEC_VP8, pool_owner);
 }
 
-static void *create_vp9(void)
+static void *create_vp9(uint32_t pool_owner)
 {
-	return webm_create(SDK_VIDEO_CODEC_VP9);
+	return webm_create(SDK_VIDEO_CODEC_VP9, pool_owner);
 }
 
 static void webm_destroy(void *opaque)

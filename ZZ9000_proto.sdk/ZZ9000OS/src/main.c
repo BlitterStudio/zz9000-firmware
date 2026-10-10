@@ -445,17 +445,20 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	 * failed or too-slow re-read boots without Fast RAM. */
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6, 0);
 	/* Card pool range B is the fast-RAM window, lent to the ARM while fast
-	 * RAM is not advertised. Take it back before the gate can reopen. Its
-	 * blocks are dropped first, so nothing new lands there; the quiesce
-	 * then stops any core-1 task still writing a block it held, and both
-	 * cores write back and invalidate their data caches, so no dirty line
-	 * for the window can reach DDR once the Amiga owns it. Skipped when
-	 * the window was not lent, which keeps a fast-RAM board's reset as
-	 * quick as before. */
-	if (card_pool_take_back_lent(&card_pool)) {
+	 * RAM is not advertised. Take it back before the gate can reopen.
+	 * Core 1 goes first: the quiesce stops any task still writing a block
+	 * in the window, and core 1 cleans and invalidates its own L1. A core
+	 * 1 that faulted (possibly holding the pool lock) or does not answer
+	 * is cold-restarted instead, which also frees that lock, so the
+	 * take-back below cannot spin on it. Core 0 then writes back and
+	 * invalidates L1 and L2, so no dirty line for the window can reach
+	 * DDR once the Amiga owns it. Skipped when the window was not lent,
+	 * which keeps a fast-RAM board's reset as quick as before. */
+	if (card_pool_has_lent(&card_pool)) {
 		scheduler_quiesce_for_reset();
 		if (scheduler_core1_clean_dcache() != 0)
 			core1_cold_restart();
+		card_pool_take_back_lent(&card_pool);
 		Xil_DCacheFlush();
 	}
 	/* Cold boot reaches this handler right after main() decided the

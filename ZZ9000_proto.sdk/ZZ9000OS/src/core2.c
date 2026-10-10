@@ -102,6 +102,9 @@ static void record_fault(uint32_t code, const char *name)
 	 * under core 0.
 	 */
 	sdk_smp_lock_reset_malloc_if_owned();
+	/* Same for the card pool lock: WebM and WebP decodes on this core
+	 * allocate arena regions from the pool. */
+	sdk_smp_lock_reset_if_owned(&card_pool.lock);
 
 	taskq_shared_t *sh = scheduler_shared();
 	int slot = sh->core1_current_slot;

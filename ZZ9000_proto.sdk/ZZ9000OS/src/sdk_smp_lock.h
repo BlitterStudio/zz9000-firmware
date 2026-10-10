@@ -31,10 +31,11 @@ void sdk_smp_lock_release(sdk_smp_lock_t *l);
 void sdk_smp_lock_reset(sdk_smp_lock_t *l);
 
 /* ARM-only wrappers (implemented in sdk_smp_lock_arm.c under
- * #ifndef SMP_LOCK_HOST_TEST) operating on the file-static cross-core
- * allocator lock g_malloc_lock. Used by core-1 fault recovery (core2.c) to
+ * #ifndef SMP_LOCK_HOST_TEST) used by core-1 fault recovery (core2.c) to
  * free a lock that core 1 could have orphaned by faulting/being reset while
- * holding it mid-malloc/free. */
+ * holding it. The _malloc forms act on the file-static cross-core allocator
+ * lock g_malloc_lock. */
+void sdk_smp_lock_reset_if_owned(sdk_smp_lock_t *l); /* reset + dsb/sev only if this core owns it */
 void sdk_smp_lock_reset_malloc(void);          /* unconditional reset + dsb/sev */
 void sdk_smp_lock_reset_malloc_if_owned(void); /* reset + dsb/sev only if this core owns it */
 

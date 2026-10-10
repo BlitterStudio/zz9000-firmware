@@ -26,9 +26,12 @@ static uint32_t destroy_calls;
 static uint32_t write_calls;
 static uint32_t ack_calls;
 
-static void *mock_create(void)
+static uint32_t created_pool_owner;
+
+static void *mock_create(uint32_t pool_owner)
 {
 	create_calls++;
+	created_pool_owner = pool_owner;
 	return &decoder_storage;
 }
 
@@ -72,13 +75,9 @@ static int mock_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 		? SDK_VIDEO_BACKEND_NEED_INPUT : SDK_VIDEO_BACKEND_ERROR;
 }
 
-static uint32_t configured_pool_owner;
-
 static int mock_configure_media(
 	void *decoder, const struct SDKVideoMediaConfig *config)
 {
-	if (config)
-		configured_pool_owner = config->pool_owner;
 	return decoder == &decoder_storage && config &&
 		(config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE ||
 		 config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2);
@@ -429,7 +428,7 @@ static int test_partial_write_progress(void)
 	return 0;
 }
 
-static int begin_and_write_media(uint32_t *session)
+static int begin_and_write(uint32_t owner, uint32_t *session)
 {
 	struct SDKVideoStreamBegin begin;
 	struct SDKVideoStreamWrite write;
@@ -442,8 +441,7 @@ static int begin_and_write_media(uint32_t *session)
 	begin.width = 320U;
 	begin.height = 240U;
 	begin.output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin_owned(&begin, owner, &result) !=
 	    SDK_STATUS_OK)
 		return 0;
 	*session = result.session;
@@ -455,8 +453,9 @@ static int begin_and_write_media(uint32_t *session)
 }
 
 /* The backend's decoder memory belongs to a card pool owner unique to the
- * session, so a reused slot never inherits the previous owner, and a
- * core-1 fault frees the session's pool memory by owner. */
+ * session, whichever API opened it, so a reused slot never inherits the
+ * previous owner, and a core-1 fault frees the session's pool memory by
+ * owner. */
 static int test_pool_owner_per_session(void)
 {
 	struct SDKVideoStreamResult result;
@@ -467,18 +466,18 @@ static int test_pool_owner_per_session(void)
 	card_pool_open_range(&card_pool, 0);
 	sdk_video_stream_init();
 
-	configured_pool_owner = 0U;
-	if (!begin_and_write_media(&session))
+	created_pool_owner = 0U;
+	if (!begin_and_write(SDK_VIDEO_STREAM_OWNER_MEDIA, &session))
 		return 40;
-	owner_a = configured_pool_owner;
+	owner_a = created_pool_owner;
 	if (CARD_POOL_OWNER_CLASS(owner_a) != CARD_POOL_CLASS_MEDIA)
 		return 41;
 	sdk_video_stream_close(session, &result);
 
-	configured_pool_owner = 0U;
-	if (!begin_and_write_media(&session))
+	created_pool_owner = 0U;
+	if (!begin_and_write(SDK_VIDEO_STREAM_OWNER_LEGACY, &session))
 		return 42;
-	owner_b = configured_pool_owner;
+	owner_b = created_pool_owner;
 	if (CARD_POOL_OWNER_CLASS(owner_b) != CARD_POOL_CLASS_MEDIA ||
 	    owner_b == owner_a)
 		return 43;

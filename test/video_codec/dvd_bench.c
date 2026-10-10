@@ -26,7 +26,7 @@ static void bench(const char *label, const uint8_t *stream, uint32_t len, uint32
 	double t0 = now_sec();
 
 	for (int it = 0; it < iters; it++) {
-		void *dec = ops->create();
+		void *dec = ops->create(0U);
 		if (audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE) {
 			struct SDKVideoMediaConfig cfg = {0};
 			cfg.audio_codec = audio_codec;

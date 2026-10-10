@@ -208,16 +208,21 @@ uint32_t card_pool_release_owner(card_pool_t *pool, uint32_t owner)
     return release_where(pool, owner, 0);
 }
 
-int card_pool_take_back_lent(card_pool_t *pool)
+int card_pool_has_lent(const card_pool_t *pool)
 {
-    int was_open = 0;
     for (uint32_t r = 0; r < pool->range_count; r++) {
-        if (!pool->ranges[r].revocable)
-            continue;
-        was_open |= pool->ranges[r].open;
-        card_pool_revoke_range(pool, r);
+        if (pool->ranges[r].revocable && pool->ranges[r].open)
+            return 1;
     }
-    return was_open;
+    return 0;
+}
+
+void card_pool_take_back_lent(card_pool_t *pool)
+{
+    for (uint32_t r = 0; r < pool->range_count; r++) {
+        if (pool->ranges[r].revocable && pool->ranges[r].open)
+            card_pool_revoke_range(pool, r);
+    }
 }
 
 void card_pool_finish_amiga_reset(card_pool_t *pool, int is_zorro3,
