@@ -12,11 +12,13 @@ CPPFLAGS += -Istubs -I$(SRC_DIR)
 test: $(TARGET) rx-ring
 	$(TARGET)
 
-# The firmware's own RX ring functions and the bundled BSP ring code, extracted
+# The firmware's own RX ring and restart functions and the bundled BSP ring code, extracted
 # from source and run against a stub GEM (ASan + UBSan).
 rx-ring:
 	python3 run_rx_bd.py --cc $(CC)
 	python3 run_rx_init.py --cc $(CC)
+	python3 run_rx_restart.py --cc $(CC)
+	python3 run_rx_mac_restart.py --cc $(CC)
 
 $(TARGET): ethernet_mcast_test.c $(SRC_DIR)/ethernet_mcast.c \
 		$(SRC_DIR)/ethernet.h stubs/xemacps_hw.h
