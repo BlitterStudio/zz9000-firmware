@@ -18,7 +18,6 @@
 #include <string.h>
 
 #include "sdk_mailbox.h"
-#include "sdk_surface.h"
 
 static rfb_encoder cenc_enc;
 static rfb_geom    cenc_geom;
@@ -92,6 +91,19 @@ void sdk_console_snap_bgra_rgb565(uint8_t *dst, uint32_t dst_pitch,
 			d[0] = (uint8_t)(v >> 8);
 			d[1] = (uint8_t)v;
 		}
+	}
+}
+
+/* The surface format an RFB chunky format is encoded from as it is. */
+static uint32_t cenc_surface_format(rfb_u8 format)
+{
+	switch (format) {
+	case RFB_FMT_CLUT8:
+		return SDK_SURFACE_FORMAT_INDEX8;
+	case RFB_FMT_RGB565:
+		return SDK_SURFACE_FORMAT_RGB565;
+	default:
+		return SDK_SURFACE_FORMAT_UNKNOWN;
 	}
 }
 
@@ -219,12 +231,13 @@ uint16_t sdk_console_encode_band(const struct sdk_console_request *r,
 	 * chunky formats are served (one plane whatever the depth); a planar
 	 * request would make it read planes[1..depth-1], which do not exist.
 	 * For chunky formats depth is bits per pixel (8 CLUT8, 16 RGB565) and
-	 * must agree with the format, whose pixel size must be the
-	 * framebuffer's. */
+	 * must agree with the format, and the surface must hold that format
+	 * (or BGRA8888, converted).  Pixel size alone is not enough: a 15-bit
+	 * screen (RGB555) is two bytes a pixel too, and its bytes sent as
+	 * RGB565 come out in the wrong colours. */
 	if (!RFB_FMT_IS_CHUNKY(g.format) ||
 	    g.depth != 8u * RFB_FMT_PIXEL_BYTES(g.format) ||
-	    (!conv &&
-	     RFB_FMT_PIXEL_BYTES(g.format) != sdk_surface_format_bytes(fb->format)) ||
+	    (!conv && fb->format != cenc_surface_format(g.format)) ||
 	    (uint32_t)width * RFB_FMT_PIXEL_BYTES(g.format) > bpr ||
 	    (!conv && (uint32_t)height * bpr > fb->length) ||
 	    (conv && (uint32_t)height * fb->pitch > fb->length))

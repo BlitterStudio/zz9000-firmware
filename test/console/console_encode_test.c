@@ -216,6 +216,33 @@ static void test_rgb565_surface(void)
 	CHECK(w.ok && w.tiles == 4u);
 }
 
+/* A 15-bit screen is two bytes a pixel like RGB565, but its bytes are not
+ * RGB565: refused, so the client falls back instead of showing wrong
+ * colours. */
+static void test_rgb555_refused(void)
+{
+	static uint8_t px[32 * 2 * 16];
+	struct sdk_console_request r;
+	struct sdk_console_surface s;
+	uint32_t n;
+	uint16_t rf;
+
+	memset(px, 0x7c, sizeof(px));
+	make_surface(&s, SDK_SURFACE_FORMAT_RGB555, 32, 16, 64, px);
+	make_request(&r, 0x200u, 32, 16, 64, RFB_FMT_RGB565, 16, 16);
+	r.flags = SDK_CONSOLE_F_RESET;
+	CHECK(encode(&r, &s, &n, &rf) == SDK_STATUS_BAD_REQUEST);
+	CHECK(n == 0u);
+
+	/* Nor is any other two-byte surface, or a 16-bit one as CLUT8. */
+	s.format = SDK_SURFACE_FORMAT_UNKNOWN;
+	CHECK(encode(&r, &s, &n, &rf) == SDK_STATUS_BAD_REQUEST);
+	s.format = SDK_SURFACE_FORMAT_RGB565;
+	make_request(&r, 0x200u, 64, 16, 64, RFB_FMT_CLUT8, 16, 16);
+	s.width = 64u;
+	CHECK(encode(&r, &s, &n, &rf) == SDK_STATUS_BAD_REQUEST);
+}
+
 static void test_bgra_conversion(void)
 {
 	static const uint8_t bgra[8] = {
@@ -235,6 +262,7 @@ int main(void)
 	test_session_keyframes();
 	test_geometry_must_match();
 	test_rgb565_surface();
+	test_rgb555_refused();
 	test_bgra_conversion();
 
 	if (failures) {
