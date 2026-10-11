@@ -17,6 +17,7 @@
 #include "sdk_dvd_ps.h"
 #include "sdk_dvd_lpcm.h"
 #include "sdk_dvd_ac3.h"
+#include "sdk_mpeg2_neon.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1231,6 +1232,9 @@ static void *mpeg2_create(uint32_t pool_owner)
 		M2_FREE(d);
 		return 0;
 	}
+	/* mpeg2_init installed libmpeg2's C IDCT and motion compensation on
+	 * its first call; the NEON kernels replace them once checked. */
+	sdk_mpeg2_neon_install();
 	d->es = (uint8_t *)M2_MALLOC(M2_ES_CAPACITY);
 	d->video_fifo = (uint8_t *)M2_MALLOC(M2_VIDEO_FIFO_CAPACITY);
 	if (!d->es || !d->video_fifo) {

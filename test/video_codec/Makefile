@@ -49,7 +49,8 @@ MPEG_SRCS := $(FIRMWARE_SRC)/sdk_video_mpeg2.c \
 	$(FIRMWARE_SRC)/mp3/decode_mp3.c \
 	$(FIRMWARE_SRC)/sdk_media_timeline.c \
 	$(FIRMWARE_SRC)/sdk_media_profile.c \
-	$(FIRMWARE_SRC)/sdk_video_yuy2.c
+	$(FIRMWARE_SRC)/sdk_video_yuy2.c \
+	$(FIRMWARE_SRC)/sdk_mpeg2_neon.c
 MPEG_LIBS := $(LIBMPEG2_HOST_LIB) $(LIBA52_HOST_LIB)
 MPEG_FLAGS := $(DVD_ABI) -DSDK_VIDEO_HOST_TEST=1 -DSDK_MEDIA_HOST_TEST=1 \
 	-I$(FIRMWARE_SRC) $(DVD_INCLUDES)

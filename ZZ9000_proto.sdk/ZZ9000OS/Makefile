@@ -254,6 +254,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_dvd_lpcm.c \
 	$(SRC_DIR)/sdk_dvd_ac3.c \
 	$(SRC_DIR)/sdk_video_mpeg2.c \
+	$(SRC_DIR)/sdk_mpeg2_neon.c \
 	$(SRC_DIR)/sdk_jpeg.c \
 	$(SRC_DIR)/jmem_zz9k.c \
 	$(SRC_DIR)/sdk_surface.c \
@@ -434,6 +435,10 @@ $(BUILD_DIR)/sdk_dvd_ps.o: $(SRC_DIR)/sdk_dvd_ps.c
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
 $(BUILD_DIR)/sdk_video_mpeg2.o: $(SRC_DIR)/sdk_video_mpeg2.c $(LIBMPEG2_LIB) $(A52_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
+
+$(BUILD_DIR)/sdk_mpeg2_neon.o: $(SRC_DIR)/sdk_mpeg2_neon.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU_FLAGS) $(COMMON_FLAGS) -O3 -MMD -MP -o $@ $<
 
