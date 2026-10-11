@@ -84,7 +84,8 @@ uint16_t sdk_console_encode_band(const struct sdk_console_request *r,
                                  uint8_t *out, uint32_t out_capacity,
                                  uint32_t *out_len, uint16_t *reply_flags);
 
-/* A 32-bit screen (BGRA8888) converted to the wire's big-endian RGB565. */
+/* A 32-bit screen (BGRA8888) converted to the wire's big-endian RGB565.
+ * Bytes of each dst row past width * 2 are zeroed. */
 void sdk_console_snap_bgra_rgb565(uint8_t *dst, uint32_t dst_pitch,
                                   const uint8_t *src, uint32_t src_pitch,
                                   uint32_t width, uint32_t height);

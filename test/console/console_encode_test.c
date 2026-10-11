@@ -256,6 +256,58 @@ static void test_bgra_conversion(void)
 	CHECK(dst[2] == 0x00 && dst[3] == 0x1f);
 }
 
+/* The converter writes width * 2 bytes of each host row; the rest of the
+ * row, up to the host's pitch, must be zero, not what the buffer held. */
+static void test_bgra_padding_zeroed(void)
+{
+	static const uint8_t bgra[3 * 4 * 2] = {
+		0xff, 0xff, 0xff, 0, 0xff, 0xff, 0xff, 0, 0xff, 0xff, 0xff, 0,
+		0xff, 0xff, 0xff, 0, 0xff, 0xff, 0xff, 0, 0xff, 0xff, 0xff, 0
+	};
+	uint8_t dst[2 * 8];
+	uint32_t i;
+
+	memset(dst, 0xaa, sizeof(dst));
+	sdk_console_snap_bgra_rgb565(dst, 8, bgra, 12, 3, 2);
+	for (i = 0u; i < 6u; i++) {
+		CHECK(dst[i] == 0xff);
+		CHECK(dst[8u + i] == 0xff);
+	}
+	CHECK(dst[6] == 0 && dst[7] == 0);
+	CHECK(dst[14] == 0 && dst[15] == 0);
+}
+
+/* End to end: a CLUT8 session leaves 0xaa in the snapshot; a black 32-bit
+ * screen then asked as RGB565 with padded rows (bpr > width * 2) reuses
+ * that buffer.  Its keyframe against a zeroed shadow must be empty: a
+ * nonzero byte in it is the old frame leaking through the padding. */
+static void test_bgra_padding_not_sent(void)
+{
+	static uint8_t clut[64 * 16];
+	static uint8_t black[30 * 4 * 16];
+	struct sdk_console_request r;
+	struct sdk_console_surface s;
+	struct walk w;
+	uint32_t n;
+	uint16_t rf;
+
+	memset(clut, 0xaa, sizeof(clut));
+	make_surface(&s, SDK_SURFACE_FORMAT_INDEX8, 64, 16, 64, clut);
+	make_request(&r, 0x300u, 64, 16, 64, RFB_FMT_CLUT8, 16, 16);
+	r.flags = SDK_CONSOLE_F_RESET;
+	CHECK(encode(&r, &s, &n, &rf) == SDK_STATUS_OK);
+
+	memset(black, 0, sizeof(black));
+	make_surface(&s, SDK_SURFACE_FORMAT_BGRA8888, 30, 16, 30 * 4, black);
+	make_request(&r, 0x300u, 30, 16, 64, RFB_FMT_RGB565, 16, 16);
+	r.flags = SDK_CONSOLE_F_RESET;
+	CHECK(encode(&r, &s, &n, &rf) == SDK_STATUS_OK);
+	CHECK(rf & SDK_CONSOLE_RF_KEYFRAME);
+	w = walk_stream(out_buf, n, 16u * 16u);
+	CHECK(w.ok);
+	CHECK(w.tiles == 0u && !w.nonzero);
+}
+
 int main(void)
 {
 	test_parse_request();
@@ -264,6 +316,8 @@ int main(void)
 	test_rgb565_surface();
 	test_rgb555_refused();
 	test_bgra_conversion();
+	test_bgra_padding_zeroed();
+	test_bgra_padding_not_sent();
 
 	if (failures) {
 		printf("console_encode_test: %d failure(s)\n", failures);

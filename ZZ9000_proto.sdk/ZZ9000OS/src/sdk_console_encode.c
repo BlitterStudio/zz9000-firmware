@@ -72,7 +72,8 @@ void sdk_console_parse_request(const uint8_t p[SDK_CONSOLE_REQ_LEN],
 /* A 32-bit screen (BGRA8888: memory bytes B, G, R, A) served as RGB565, the
  * wire's truecolour format, big-endian.  Converting while the snapshot is
  * taken costs the ARM about what the copy did; without it the host reads four
- * bytes a pixel over Zorro and converts every one on the 68k. */
+ * bytes a pixel over Zorro and converts every one on the 68k.  The host's
+ * rows (dst_pitch) may be wider than the pixels; that padding is zeroed. */
 void sdk_console_snap_bgra_rgb565(uint8_t *dst, uint32_t dst_pitch,
                                   const uint8_t *src, uint32_t src_pitch,
                                   uint32_t width, uint32_t height)
@@ -91,6 +92,11 @@ void sdk_console_snap_bgra_rgb565(uint8_t *dst, uint32_t dst_pitch,
 			d[0] = (uint8_t)(v >> 8);
 			d[1] = (uint8_t)v;
 		}
+		/* The encoder compares and sends whole rows of dst_pitch,
+		 * so the padding past the pixels must not carry old heap
+		 * contents or an earlier snapshot. */
+		if (dst_pitch > width * 2u)
+			memset(d, 0, dst_pitch - width * 2u);
 	}
 }
 
