@@ -438,7 +438,10 @@ int ethernet_hw_ready = 0;
  * queued without a pause.  Derived from RXBD_CNT alone (MAX - RXBD_CNT) the
  * high mark would leave no room for queued frames at 64 descriptors. */
 #define ETH_BACKLOG_HIGH_WATERMARK (FRAME_MAX_BACKLOG - 8)
-#define ETH_BACKLOG_LOW_WATERMARK (FRAME_MAX_BACKLOG - RXBD_CNT + RXBD_CNT / 2)
+/* Release backpressure only once a whole ring fits under the high mark,
+ * so the release re-arms every descriptor: ACKs that arrive after the
+ * release do not refill, and READY has no periodic refill. */
+#define ETH_BACKLOG_LOW_WATERMARK (ETH_BACKLOG_HIGH_WATERMARK - RXBD_CNT)
 #define ETH_PAUSE_QUANTUM 0x0800
 
 static u16 ethernet_backlog_pending()

@@ -34,7 +34,7 @@ def macro(source, name, occurrence=0):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cc", default="clang")
-    cases = ["pressure", "offset2", "csum", "scan", "publish", "rollback", "cycle", "burst"]
+    cases = ["pressure", "offset2", "csum", "scan", "publish", "rollback", "cycle", "burst", "drain"]
     parser.add_argument("case", nargs="?", default="all", choices=["all"] + cases)
     args = parser.parse_args()
     here = Path(__file__).resolve().parent
@@ -51,7 +51,7 @@ def main():
     memmap = (src / "memorymap.h").read_text()
     definitions = [macro(eth_h, n) for n in ["FRAME_MAX_BACKLOG", "RXBD_CNT", "ETH_RX_LEN_OFFSET2"]]
     definitions += [macro(memmap, n) for n in ["RX_FRAME_PAD", "FRAME_SIZE"]]
-    definitions += [macro(firmware, n) for n in ["ETH_INVALID_BACKLOG_SLOT", "ETH_BACKLOG_HIGH_WATERMARK"]]
+    definitions += [macro(firmware, n) for n in ["ETH_INVALID_BACKLOG_SLOT", "ETH_BACKLOG_HIGH_WATERMARK", "ETH_BACKLOG_LOW_WATERMARK"]]
     definitions += [ring_type]
     definitions += [macro(hw, name) for name in ["XEMACPS_BD_ADDR_OFFSET", "XEMACPS_BD_STAT_OFFSET",
         "XEMACPS_RXBUF_NEW_MASK", "XEMACPS_RXBUF_WRAP_MASK", "XEMACPS_RXBUF_ADD_MASK",
@@ -63,7 +63,7 @@ def main():
     ring_functions = "\n\n".join(function(ring, name) for name in ["XEmacPs_BdRingAlloc",
         "XEmacPs_BdRingUnAlloc", "XEmacPs_BdRingToHw", "XEmacPs_BdRingFromHwRx", "XEmacPs_BdRingFree"])
     rx_functions = "\n\n".join(function(firmware, name) for name in ["ethernet_prepare_rx_bd",
-        "ethernet_unprepare_rx_bd", "ethernet_alloc_rx_frames", "XEmacPsRecvHandler"])
+        "ethernet_unprepare_rx_bd", "ethernet_alloc_rx_frames", "XEmacPsRecvHandler", "ethernet_receive_frame"])
     rx_functions = rx_functions.replace("void ethernet_alloc_rx_frames()", "void ethernet_alloc_rx_frames(void)")
     # BdGetLength is masked to 13 bits. Normalize its local type for the strict
     # host fixture; values and control flow are unchanged. The firmware's own
