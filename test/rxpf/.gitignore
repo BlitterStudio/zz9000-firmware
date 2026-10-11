@@ -1,0 +1,11 @@
+xvlog*.log
+xelab*.log
+xsim*.log
+xsim*.jou
+xvlog.pb
+xelab.pb
+xsim.dir/
+*.wdb
+mntzorro_sim.v
+webtalk*
+.Xil/
