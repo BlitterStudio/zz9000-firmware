@@ -33,6 +33,7 @@
 #include "zzplay-playlist.h"
 #include "zzplay-prefs.h"
 #include "zzplay-probe.h"
+#include "zzplay-reader.h"
 #include "zzplay-stats.h"
 #include "zzplay-stream.h"
 #include "zzplay-sync.h"
@@ -60,13 +61,10 @@
 #include <string.h>
 
 #define ZZPLAY_INPUT_BYTES (64U * 1024U)
-/* File reads land straight in the card-visible input buffer in sub-frame
- * chunks: the m68k is the present clock, and one 64 KB blocking read at
- * real-disk throughput stalled it for 1-2 frame periods, which showed as
- * a pause on every read. ~16 KB keeps a read under one frame period even
- * at ~2 MB/s and removes the staging copy entirely. */
-#define ZZPLAY_READ_CHUNK_BYTES (16U * 1024U)
-#define ZZPLAY_FEED_ROUNDS_PER_PASS 4U
+/* Bytes copied from the read-ahead ring to the card per pass at most. The
+ * m68k is the present clock, so a pass stays bounded; 128 KB a pass is
+ * 3.2 MB/s at 25 fps, well above DVD's 9.8 Mbit/s. */
+#define ZZPLAY_FEED_BYTES_PER_PASS (128U * 1024U)
 #define ZZPLAY_PCM_BYTES (128U * 1024U)
 #define ZZPLAY_Z2_INPUT_BYTES (24U * 1024U)
 #define ZZPLAY_Z2_PCM_BYTES (32U * 1024U)
@@ -138,6 +136,10 @@ typedef struct ZZPlayContainerPolicy {
   /* A discard far behind the audio clock makes the next decode skip to
    * the next keyframe (codecs whose keyframes may be seconds apart). */
   uint8_t keyframe_skip;
+  /* Any late discard makes the next decode skip B-pictures (MPEG): they
+   * cost a decode each and no other picture needs them, so a decoder only
+   * just behind catches up instead of decoding frames it then discards. */
+  uint8_t skip_late_b;
   /* Elapsed position comes from the decoded video PTS, not frame count. */
   uint8_t pts_position;
 } ZZPlayContainerPolicy;
@@ -148,6 +150,11 @@ struct ZZPlayRuntime {
   ZZPlayPrefs prefs;
   ZZPlayController *ctl;
   FILE *file;
+  /* Streaming players read through a read-ahead process; WebP still reads
+   * `file` directly. */
+  ZZPlayReader *reader;
+  const char *input_path;
+  uint8_t input_starved;
   ZZ9KContext *ctx;
   ZZ9KSharedBuffer input;
   ZZ9KSharedBuffer pcm;
@@ -1295,8 +1302,11 @@ static void zzplay_update_title(struct ZZPlayRuntime *runtime)
    uint32_t flags = 0U;
    int status;
  
-   /* Held across NEED_INPUT: the card has not reached a keyframe yet. */
-   if (runtime->container.keyframe_skip && runtime->decode_skip) {
+   /* Held across NEED_INPUT: the card has not reached a keyframe (or a
+    * reference picture) yet. */
+   if ((runtime->container.keyframe_skip ||
+        runtime->container.skip_late_b) &&
+       runtime->decode_skip) {
      flags = ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME;
    }
    status = zz9k_media_session_decode(
@@ -2100,9 +2110,10 @@ static int zzplay_retire_held_frame(
     TimeVal_Type started;
 
     zzplay_profile_begin(runtime, &started);
-    if (runtime->container.keyframe_skip &&
-        decision == ZZPLAY_SYNC_DISCARD &&
-        zzplay_sync_needs_keyframe_skip(drift)) {
+    if (decision == ZZPLAY_SYNC_DISCARD &&
+        (runtime->container.keyframe_skip
+             ? zzplay_sync_needs_keyframe_skip(drift)
+             : runtime->container.skip_late_b)) {
       runtime->decode_skip = 1U;
     }
     if (decision == ZZPLAY_SYNC_DISCARD) {
@@ -2358,6 +2369,8 @@ static int zzplay_release_resource(void *user,
       }
       break;
     case ZZPLAY_RESOURCE_INPUT_FILE:
+      zzplay_reader_close(runtime->reader);
+      runtime->reader = 0;
       if (runtime->file) {
         (void)fclose(runtime->file);
         runtime->file = 0;
@@ -2480,25 +2493,27 @@ static int zzplay_restart_session(struct ZZPlayRuntime *runtime,
   if (status != ZZ9K_STATUS_OK) {
     return status;
   }
-  if (fseek(runtime->file, 0L, SEEK_SET) != 0) {
+  /* A fresh reader starts again at the beginning of the file. */
+  zzplay_reader_close(runtime->reader);
+  runtime->reader = zzplay_reader_open(runtime->input_path);
+  if (!runtime->reader) {
     return ZZ9K_STATUS_IO_ERROR;
   }
   zzplay_transport_init(transport);
   return zzplay_begin_session(runtime);
 }
 
-/* One feed round: a 16 KB file read into the card-visible input buffer
- * plus the matching WRITE, or the continuation/EOF bookkeeping when the
- * previous round left work. Split out of the main loop so a pass can top
- * the card's input ring up while the loop is between frames; one chunk
- * per frame pass capped the sustained feed at ~400 KB/s (16 KB x 25 fps),
- * which starved decode whenever the stream's local bitrate exceeded it.
- * The m68k is the present clock, so rounds stay bounded and reads stay
- * sub-frame (ZZPLAY_READ_CHUNK_BYTES). */
+/* One feed round: the next read-ahead bytes copied into the card-visible
+ * input buffer plus the matching WRITE, or the continuation/EOF
+ * bookkeeping when the previous round left work. Split out of the main
+ * loop so a pass can top the card's input up while the loop is between
+ * frames. The disk is read by the reader process while the player waits on
+ * the card; a blocking read here cost up to a frame period per 16 KB. */
 typedef enum ZZPlayFeedResult {
   ZZPLAY_FEED_MORE = 0,        /* chunk fully accepted; ring may take more */
   ZZPLAY_FEED_BACKPRESSURE,    /* ring full or almost full (partial accept) */
-  ZZPLAY_FEED_DONE,            /* nothing left to feed (EOF sent) */
+  ZZPLAY_FEED_DONE,            /* nothing to feed now (EOF sent, or the
+                                  reader has no block ready yet) */
   ZZPLAY_FEED_ERROR            /* I/O or protocol failure; runtime failed */
 } ZZPlayFeedResult;
 
@@ -2509,44 +2524,49 @@ static ZZPlayFeedResult zzplay_feed_round(
   ZZ9KMediaSessionWriteDesc write;
   int status;
 
+  runtime->input_starved = 0U;
   if (transport->pending_length == 0U && !transport->eof) {
     TimeVal_Type started;
-    TimeVal_Type read_started;
-    TimeVal_Type read_ended;
-    size_t read_capacity = runtime->input.length;
-    size_t got;
+    TimeVal_Type copy_started;
+    TimeVal_Type copy_ended;
+    const uint8_t *data;
+    uint32_t available;
+    uint32_t take;
+    int eof;
 
-    if (read_capacity > ZZPLAY_READ_CHUNK_BYTES) {
-      read_capacity = ZZPLAY_READ_CHUNK_BYTES;
-    }
-    /* Read straight into the card-visible input buffer: the previous
-     * chunk was fully accepted (pending is empty), so offset zero is
-     * free. The write op below orders these stores to the card before
-     * the firmware can read them, exactly as the old staging copy
-     * did. */
-    zzplay_profile_begin(runtime, &started);
-    GetSysTime(&read_started);
-    got = fread((void *)runtime->input.data, 1U,
-                read_capacity, runtime->file);
-    GetSysTime(&read_ended);
-    zzplay_profile_end(
-        runtime, &started, ZZPLAY_PROFILE_FILE_READ);
-    if (runtime->trace) {
-      uint32_t read_us =
-          zzplay_elapsed_us(&read_started, &read_ended);
-
-      runtime->trace_reads++;
-      if (read_us > runtime->trace_read_max_us) {
-        runtime->trace_read_max_us = read_us;
-      }
-    }
-    if (ferror(runtime->file)) {
+    if (!zzplay_reader_peek(runtime->reader, &data, &available, &eof)) {
       zzplay_error(runtime, "zzplay: input read failed\n");
       zzplay_fail(runtime, ZZPLAY_FAILURE_IO, ZZ9K_STATUS_IO_ERROR);
       return ZZPLAY_FEED_ERROR;
     }
-    zzplay_transport_set_chunk(
-        transport, (uint32_t)got, got < read_capacity);
+    if (available == 0U && !eof) {
+      runtime->input_starved = 1U;
+      return ZZPLAY_FEED_DONE;
+    }
+    take = available < runtime->input.length
+               ? available : (uint32_t)runtime->input.length;
+    /* The previous chunk was fully accepted (pending is empty), so offset
+     * zero is free. The write op below orders these stores to the card
+     * before the firmware can read them. */
+    zzplay_profile_begin(runtime, &started);
+    GetSysTime(&copy_started);
+    if (take != 0U) {
+      CopyMem((APTR)data, (APTR)runtime->input.data, take);
+      zzplay_reader_consume(runtime->reader, take);
+    }
+    GetSysTime(&copy_ended);
+    zzplay_profile_end(
+        runtime, &started, ZZPLAY_PROFILE_INPUT_COPY);
+    if (runtime->trace) {
+      uint32_t copy_us =
+          zzplay_elapsed_us(&copy_started, &copy_ended);
+
+      runtime->trace_reads++;
+      if (copy_us > runtime->trace_read_max_us) {
+        runtime->trace_read_max_us = copy_us;
+      }
+    }
+    zzplay_transport_set_chunk(transport, take, eof && take == available);
   }
 
   if (transport->pending_length == 0U &&
@@ -2951,6 +2971,9 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
   policy->video_codec = info.is_mpeg2 ? ZZ9K_VIDEO_CODEC_MPEG2
                                       : ZZ9K_VIDEO_CODEC_MPEG1;
   policy->container = ZZ9K_VIDEO_CONTAINER_MPEG_PS;
+  policy->skip_late_b = 1U;
+  /* Skipped B-pictures return no frame, so a frame count runs slow. */
+  policy->pts_position = 1U;
   policy->audio_codec = zzplay_mpeg_audio_codec_id(info.audio_codec);
   if (info.is_mpeg2) {
     /* One flag covers MPEG-2 in a Program Stream with any of its audio
@@ -3120,8 +3143,9 @@ static ZZPlayEngineResult zzplay_engine_media_session(
   zzplay_core_init(&runtime.core);
   zzplay_transport_init(&transport);
 
-  runtime.file = fopen(run->path, "rb");
-  if (!runtime.file) {
+  runtime.input_path = run->path;
+  runtime.reader = zzplay_reader_open(run->path);
+  if (!runtime.reader) {
     zzplay_error(&runtime, "zzplay: cannot open %s\n", run->path);
     return ZZPLAY_ENGINE_FAILED;
   }
@@ -3433,7 +3457,13 @@ playback_session:
     }
 
     {
-      uint32_t feed_rounds = 0U;
+      /* Bounded per pass (the m68k is the present clock); a 24 KB Zorro 2
+       * input buffer gets as many rounds as it takes. */
+      const uint32_t feed_rounds_max =
+          runtime.input.length >= ZZPLAY_FEED_BYTES_PER_PASS
+              ? 1U
+              : ZZPLAY_FEED_BYTES_PER_PASS / (uint32_t)runtime.input.length;
+      uint32_t feed_rounds = 1U;
 
       for (;;) {
         const ZZPlayFeedResult feed = zzplay_feed_round(
@@ -3442,8 +3472,7 @@ playback_session:
         if (feed == ZZPLAY_FEED_ERROR) {
           goto playback_failed;
         }
-        if (feed != ZZPLAY_FEED_MORE ||
-            feed_rounds >= ZZPLAY_FEED_ROUNDS_PER_PASS) {
+        if (feed != ZZPLAY_FEED_MORE || feed_rounds >= feed_rounds_max) {
           break;
         }
         feed_rounds++;
@@ -3538,6 +3567,14 @@ playback_session:
         zzplay_fail(&runtime, ZZPLAY_FAILURE_IO,
                     ZZ9K_STATUS_IO_ERROR);
         break;
+      }
+      if (runtime.input_starved) {
+        /* The reader is still filling its next block: let it run. */
+        TimeVal_Type started;
+
+        zzplay_profile_begin(&runtime, &started);
+        zzplay_wait_us(&runtime.timer, ZZPLAY_SYNC_POLL_US);
+        zzplay_profile_end(&runtime, &started, ZZPLAY_PROFILE_FILE_READ);
       }
     }
   }
@@ -4474,8 +4511,8 @@ int main(int argc, char **argv)
               "# zzplay trace v1: F frame t=ms v=videoMs m=masterMs "
               "dr=driftMs d=decision(P/H/D/N) dec=decodeUs gap=us "
               "acc=inputBytesSinceLastF ni=needInputPolls "
-              "wb=writeBusy db=decodeBusy rd=fileReads "
-              "rmax=maxReadUs q=audioQueuedFrames und=underruns\n";
+              "wb=writeBusy db=decodeBusy rd=inputChunks "
+              "rmax=maxChunkCopyUs q=audioQueuedFrames und=underruns\n";
 
       /* No GetSysTime here: TimerBase is not open yet (see
        * zzplay_trace_ms). The clock anchors on the first traced
