@@ -221,8 +221,13 @@ static int parse_one(struct SDKDVDPSDemux *d)
 	}
 	payload_length = total - payload_at;
 	if (sid >= 0xe0U && sid <= 0xefU) {
-		queued = queue_packet(d, &d->video, SDK_DVD_PS_VIDEO, sid, 0U,
-		                      0U, p + payload_at, payload_length, pts, dts);
+		if (d->video_stream == 0U)
+			d->video_stream = sid;
+		if (sid != d->video_stream)
+			d->bytes_ignored += total;
+		else
+			queued = queue_packet(d, &d->video, SDK_DVD_PS_VIDEO, sid, 0U,
+			                      0U, p + payload_at, payload_length, pts, dts);
 	} else if (sid >= 0xc0U && sid <= 0xdfU) {
 		if (d->mp2_stream == 0U)
 			d->mp2_stream = sid;

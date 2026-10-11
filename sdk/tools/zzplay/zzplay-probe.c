@@ -485,9 +485,10 @@ static void zzplay_seq_put(ZZPlaySeqScan *scan, ZZPlayVideoInfo *info,
 }
 
 /* Program Stream demux reduced to what the probe needs: the payload of the
- * video PES packets, so a sequence header and its extensions are read
- * contiguously even when a muxer split them across packets and put other
- * streams' packets in between. */
+ * first video stream's PES packets, so a sequence header and its
+ * extensions are read contiguously even when a muxer split them across
+ * packets and put other streams' packets in between. Like the firmware
+ * demux, it follows the first video stream ID only. */
 typedef struct ZZPlayPSDemux {
   uint32_t shift;    /* last four bytes outside packets, for start codes */
   uint32_t skip;     /* bytes of the current packet to drop */
@@ -495,6 +496,7 @@ typedef struct ZZPlayPSDemux {
   uint32_t total;    /* current PES packet length, start code included */
   uint32_t hdr_len;  /* header bytes collected, start code included */
   uint32_t hdr_need; /* collect until hdr_len reaches it; 0 when idle */
+  uint8_t video_id;  /* latched video stream ID; 0 until the first one */
   uint8_t hdr[48];   /* MPEG-1 PES headers end within 6 + 34 bytes */
 } ZZPlayPSDemux;
 
@@ -516,8 +518,11 @@ static void zzplay_ps_header(ZZPlayPSDemux *d, ZZPlaySeqScan *es,
   }
   if (d->hdr_len == 6U) {
     d->total = 6U + (((uint32_t)d->hdr[4] << 8) | d->hdr[5]);
-    if (id < 0xe0U || id > 0xefU) {
-      d->skip = d->total - 6U; /* system header, audio, padding, ... */
+    if (id >= 0xe0U && id <= 0xefU && d->video_id == 0U) {
+      d->video_id = id;
+    }
+    if (id != d->video_id) {
+      d->skip = d->total - 6U; /* system header, audio, other video, ... */
     } else if (d->total > 6U) {
       d->hdr_need = d->total < 9U ? d->total : 9U;
     }

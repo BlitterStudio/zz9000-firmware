@@ -423,6 +423,49 @@ static int test_concatenated_video_sequences(void)
 	return 0;
 }
 
+static uint32_t retag_video_pes(uint8_t *stream, uint32_t length,
+                                uint8_t stream_id)
+{
+	uint32_t at;
+	uint32_t retagged = 0U;
+
+	for (at = 0U; at + 4U <= length; at++) {
+		if (stream[at] == 0U && stream[at + 1U] == 0U &&
+		    stream[at + 2U] == 1U && stream[at + 3U] == 0xe0U) {
+			stream[at + 3U] = stream_id;
+			retagged++;
+		}
+	}
+	return retagged;
+}
+
+/* A Program Stream selects its first video stream and skips the others. */
+static int test_primary_video_stream_selection(void)
+{
+	struct stream_result r;
+	uint8_t *stream;
+	uint32_t length = zz9k_dvd_pal_25p_fixture_len;
+	int rc;
+
+	stream = (uint8_t *)malloc(length * 2U);
+	if (!stream)
+		return 1;
+	memcpy(stream, zz9k_dvd_pal_25p_fixture, length);
+	memcpy(stream + length, zz9k_dvd_pal_25p_fixture, length);
+	if (retag_video_pes(stream + length, length, 0xe1U) == 0U) {
+		free(stream);
+		return 2;
+	}
+	rc = run_decode_test(stream, length * 2U, 197U,
+	                     TEST_MEDIA_AUDIO_NONE, &r);
+	free(stream);
+	if (rc != 0)
+		return 3;
+	if (r.frame_count != 5U || r.final_state != SDK_VIDEO_BACKEND_DONE)
+		return 4;
+	return 0;
+}
+
 /* A low-delay MPEG-2 sequence displays every picture at its slice, so its
  * final STATE_END has no delayed frame. EOF must reach DONE immediately. */
 static int test_low_delay_sequence_end(void)
@@ -2708,6 +2751,12 @@ int main(void)
 		return 35 + err;
 	}
 	printf("PASS: test_concatenated_video_sequences (all sequences decode)\n");
+	if ((err = test_primary_video_stream_selection()) != 0) {
+		fprintf(stderr, "FAIL: test_primary_video_stream_selection (code %d)\n",
+		        err);
+		return 36 + err;
+	}
+	printf("PASS: test_primary_video_stream_selection (first video stream only)\n");
 	if ((err = test_low_delay_sequence_end()) != 0) {
 		fprintf(stderr, "FAIL: test_low_delay_sequence_end (code %d)\n", err);
 		return 38 + err;

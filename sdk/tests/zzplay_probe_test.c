@@ -497,6 +497,47 @@ static int check_mpeg2_split_pes_probe(void)
          info.display_width == 1365U && info.display_height == 576U;
 }
 
+/* With two video streams the probe follows the first stream ID, as the
+ * firmware demux does, so the second stream's MPEG-2 headers cannot
+ * relabel an MPEG-1 first stream. */
+static int check_second_video_stream_ignored(void)
+{
+  static const uint8_t pack[] = {
+    0x00, 0x00, 0x01, 0xba, 0x44, 0x00, 0x04, 0x00,
+    0x04, 0x01, 0x00, 0x89, 0xc3, 0xf8
+  };
+  uint8_t buf[256];
+  uint8_t video[64];
+  size_t n = 0U;
+  size_t vn;
+  ZZPlayVideoInfo info;
+  FILE *file;
+
+  memcpy(buf + n, pack, sizeof(pack));
+  n += sizeof(pack);
+  vn = probe_put_seq_header(video, 352U, 288U, 1U, 3U);
+  n += probe_put_pes(buf + n, 0xe0U, video, vn);
+  vn = probe_put_seq_header(video, 720U, 576U, 3U, 3U);
+  vn += probe_put_seq_ext(video + vn);
+  n += probe_put_pes(buf + n, 0xe1U, video, vn);
+
+  file = tmpfile();
+  if (!file) {
+    return 0;
+  }
+  if (fwrite(buf, 1U, n, file) != n || fflush(file) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_file(file, &info)) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+  return !info.is_mpeg2 && info.width == 352U && info.height == 288U;
+}
+
 static int check_video_window_source(void)
 {
   ZZPlayVideoInfo info;
@@ -1081,6 +1122,9 @@ int main(void)
   }
   if (!check_mpeg2_split_pes_probe()) {
     return 26;
+  }
+  if (!check_second_video_stream_ignored()) {
+    return 27;
   }
   if (!check_video_window_source()) {
     return 24;
