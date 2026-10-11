@@ -109,8 +109,32 @@ static void driver_model_never_frees_a_busy_slot(void)
 	CHECK(q.done != 0, "the count advanced (and wrapped through uint16_t)");
 }
 
+static void watchdog_fires_only_on_a_stall(void)
+{
+	struct eth_tx_order q;
+	struct eth_tx_watch w;
+	memset(&q, 0, sizeof(q));
+	memset(&w, 0, sizeof(w));
+
+	CHECK(!eth_tx_order_stalled(&q, &w, 0, 100), "idle queue is never a stall");
+	eth_tx_order_push(&q, 1);	/* A */
+	eth_tx_order_push(&q, 1);	/* B */
+	CHECK(!eth_tx_order_stalled(&q, &w, 1000, 100), "first sight of outstanding work arms the timer");
+	CHECK(!eth_tx_order_stalled(&q, &w, 1099, 100), "no stall before the limit");
+	eth_tx_order_retire_bd(&q);	/* A done: progress restarts the timer */
+	CHECK(!eth_tx_order_stalled(&q, &w, 1150, 100), "progress re-arms");
+	CHECK(!eth_tx_order_stalled(&q, &w, 1249, 100), "still within the limit after progress");
+	CHECK(eth_tx_order_stalled(&q, &w, 1250, 100), "B outstanding with no progress for the limit is a stall");
+	eth_tx_order_flush(&q);		/* the restart */
+	CHECK(!eth_tx_order_stalled(&q, &w, 5000, 100), "flushed queue is no longer a stall");
+	CHECK(!w.armed, "an empty queue disarms the watch");
+	eth_tx_order_push(&q, 1);
+	CHECK(!eth_tx_order_stalled(&q, &w, 6000, 100), "a send after the restart starts a fresh timer");
+}
+
 int main(void)
 {
+	watchdog_fires_only_on_a_stall();
 	refusal_behind_outstanding_sends();
 	refusal_with_nothing_outstanding();
 	synchronous_bd_is_not_counted();

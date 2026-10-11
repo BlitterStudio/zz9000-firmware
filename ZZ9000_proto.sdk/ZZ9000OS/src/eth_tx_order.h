@@ -76,4 +76,30 @@ static inline void eth_tx_order_flush(struct eth_tx_order *q)
 	q->head = 0;
 }
 
+/* Async sends have no caller waiting with a timeout, unlike the synchronous
+ * path.  The main loop feeds this the time; it returns 1 once submissions
+ * are outstanding and none has retired for at least `limit` ticks, so the
+ * caller can restart the DMA (which flushes the queue). */
+struct eth_tx_watch {
+	uint64_t since;
+	uint16_t done;
+	uint8_t  armed;
+};
+
+static inline int eth_tx_order_stalled(const struct eth_tx_order *q,
+	struct eth_tx_watch *w, uint64_t now, uint64_t limit)
+{
+	if (q->len == 0) {
+		w->armed = 0;
+		return 0;
+	}
+	if (!w->armed || w->done != q->done) {
+		w->armed = 1;
+		w->done = q->done;
+		w->since = now;
+		return 0;
+	}
+	return now - w->since >= limit;
+}
+
 #endif
