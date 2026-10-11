@@ -1895,6 +1895,9 @@ static int zzplay_audio_pump(struct ZZPlayRuntime *runtime,
     status = zzplay_ax_poll(&runtime->ax);
     if (status == ZZ9K_STATUS_OK) {
       runtime->audio_result = runtime->ax.audio;
+      if (runtime->audio_origin_pts == ZZ9K_MEDIA_NO_PTS) {
+        status = zzplay_audio_query_origin(runtime);
+      }
     }
     return status;
   }

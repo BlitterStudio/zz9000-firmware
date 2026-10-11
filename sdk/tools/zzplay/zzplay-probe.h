@@ -22,6 +22,7 @@ typedef struct ZZPlayVideoInfo {
   int has_video_pes;
   int has_audio_pes;
   int is_mpeg2;
+  int has_sequence_display_extension;
   uint32_t display_width;
   uint32_t display_height;
   ZZPlayMediaAudio audio_codec;

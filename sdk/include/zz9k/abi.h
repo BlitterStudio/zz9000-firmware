@@ -434,9 +434,9 @@ enum ZZ9KServiceFlags {
   ZZ9K_SERVICE_FLAG_CRYPTO_P256_KEYGEN = 1U << 21
 };
 
-/* MPEG-2 video in Program Stream (.mpg/.vob) and Matroska files, with AC-3,
- * LPCM or MP2 audio decoded on the card. Advertised only by the
- * qualification flavor until it passes hardware qualification. Bit 31
+/* MPEG-2 video in Program Stream (.mpg/.vob) files, with AC-3, LPCM or MP2
+ * audio decoded on the card. Advertised only by the qualification flavor
+ * until it passes hardware qualification. Bit 31
  * does not fit an int enumerator in strict C, so it is a macro. */
 #define ZZ9K_SERVICE_FLAG_VIDEO_MPEG2 0x80000000UL
 

@@ -418,7 +418,11 @@ static int test_service_flag_names(void)
       !expect_name(zz9k_service_flag_name(
                        ZZ9K_SERVICE_VIDEO,
                        ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS),
-                   "media-vorbis")) {
+                   "media-vorbis") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_MPEG2),
+                   "mpeg2")) {
     return 24;
   }
   if (!expect_name(zz9k_service_flag_name(
@@ -612,7 +616,7 @@ static int test_service_flag_iteration(void)
   if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 15) != 0U) {
     return 50;
   }
-  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_VIDEO) != 19U ||
+  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_VIDEO) != 20U ||
       zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 4) !=
           ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 ||
       zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 5) !=
@@ -627,7 +631,9 @@ static int test_service_flag_iteration(void)
           ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8 ||
       zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 18) !=
           ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS ||
-      zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 19) != 0U) {
+      zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 19) !=
+          ZZ9K_SERVICE_FLAG_VIDEO_MPEG2 ||
+      zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 20) != 0U) {
     return 29;
   }
 

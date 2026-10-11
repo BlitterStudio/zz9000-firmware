@@ -11,9 +11,9 @@
 
 #define ZZPLAY_PROBE_BYTES (256U * 1024U)
 #define ZZPLAY_PROBE_CHUNK 4096U
-/* Covers a sequence header plus its extension run, so a header straddling
- * a chunk edge is re-read whole with the next chunk. */
-#define ZZPLAY_PROBE_CARRY 48U
+/* Covers a sequence header, both optional quantiser matrices and its
+ * extension run, so a header straddling a chunk edge is re-read whole. */
+#define ZZPLAY_PROBE_CARRY (12U + 2U * 64U + 64U)
 #define ZZPLAY_MP3_PROBE_BYTES 4096U
 
 static uint32_t zzplay_synchsafe_u28(const uint8_t *data)
@@ -162,9 +162,8 @@ static void zzplay_mpeg2_display_size(uint32_t width, uint32_t height,
     return;
   }
   if (aspect == 1U) {
-    /* Square samples: the display extension's area is the display size. */
-    *out_w = ext_w != 0U ? ext_w : width;
-    *out_h = ext_h != 0U ? ext_h : height;
+    *out_w = width;
+    *out_h = height;
     return;
   }
   num = (uint64_t)width * zzplay_mpeg2_dar_w[aspect] *
@@ -188,7 +187,8 @@ static void zzplay_probe_mpeg_extensions(const uint8_t *data,
                                          size_t from,
                                          int *is_mpeg2,
                                          uint32_t *ext_w,
-                                         uint32_t *ext_h)
+                                         uint32_t *ext_h,
+                                         int *has_display_extension)
 {
   size_t limit = from + 64U; /* a header's extension run is far shorter */
   size_t i;
@@ -215,6 +215,7 @@ static void zzplay_probe_mpeg_extensions(const uint8_t *data,
       if (base + 4U > length) {
         return;
       }
+      *has_display_extension = 1;
       if ((data[base + 1U] & 0x02U) != 0U) {
         *ext_w = ((uint32_t)data[base] << 6) |
                  (uint32_t)(data[base + 1U] >> 2);
@@ -237,14 +238,19 @@ int zzplay_probe_mpeg_sequence(const uint8_t *data,
 {
   size_t i;
 
-  if (!data || !info || length < 8U) {
+  if (!data || !info || length < 12U) {
     return 0;
   }
-  for (i = 0U; i + 8U <= length; i++) {
+  for (i = 0U; i + 12U <= length; i++) {
     uint32_t width;
     uint32_t height;
     uint32_t rate;
+    size_t extensions_at;
+    uint8_t load_intra;
+    uint8_t load_non_intra = 0U;
+    int matrices_visible = 1;
     int is_mpeg2 = 0;
+    int has_display_extension = 0;
     uint32_t ext_w = 0U;
     uint32_t ext_h = 0U;
 
@@ -260,17 +266,39 @@ int zzplay_probe_mpeg_sequence(const uint8_t *data,
     if (width == 0U || height == 0U || rate == 0U) {
       continue;
     }
-    /* A sequence extension after the header means MPEG-2; its display
-     * extension (when present) supplies the area the display aspect
-     * applies to. Extensions cut short by the buffer end are picked up
-     * when the probe re-reads this header with the next chunk's carry. */
-    zzplay_probe_mpeg_extensions(data, length, i + 8U, &is_mpeg2,
-                                  &ext_w, &ext_h);
+    /* A sequence extension after the full header means MPEG-2. The intra
+     * matrix begins in byte 11's low bit, so its trailing byte carries the
+     * following non-intra flag. Do not scan a partial matrix as extensions. */
+    load_intra = (uint8_t)(data[i + 11U] & 0x02U);
+    extensions_at = i + 12U;
+    if (load_intra != 0U) {
+      if (length < extensions_at + 64U) {
+        matrices_visible = 0;
+      } else {
+        load_non_intra = (uint8_t)(data[i + 75U] & 0x01U);
+        extensions_at += 64U;
+      }
+    } else {
+      load_non_intra = (uint8_t)(data[i + 11U] & 0x01U);
+    }
+    if (matrices_visible && load_non_intra != 0U) {
+      if (length < extensions_at + 64U) {
+        matrices_visible = 0;
+      } else {
+        extensions_at += 64U;
+      }
+    }
+    if (matrices_visible) {
+      zzplay_probe_mpeg_extensions(data, length, extensions_at, &is_mpeg2,
+                                    &ext_w, &ext_h,
+                                    &has_display_extension);
+    }
     info->width = width;
     info->height = height;
     info->frame_rate_milli = rate;
     is_mpeg2 = is_mpeg2 || info->is_mpeg2;
     info->is_mpeg2 = is_mpeg2;
+    info->has_sequence_display_extension = has_display_extension;
     info->display_width = 0U;
     info->display_height = 0U;
     if (is_mpeg2) {
@@ -408,10 +436,10 @@ int zzplay_probe_file(FILE *file, ZZPlayVideoInfo *info)
     zzplay_probe_mpeg_program(buffer, available, info);
     if (!found) {
       found = zzplay_probe_mpeg_sequence(buffer, available, info);
-    } else if (!info->is_mpeg2 || info->display_width == 0U) {
+    } else if (!info->is_mpeg2 || !info->has_sequence_display_extension) {
       /* Re-read repeat headers so a header whose extensions straddled a
        * chunk edge (or followed an MPEG-2 pack header) still yields the
-       * MPEG-2 mark and its display aspect. A no-find changes nothing. */
+       * MPEG-2 mark and its display extension. A no-find changes nothing. */
       (void)zzplay_probe_mpeg_sequence(buffer, available, info);
     }
     total += got;

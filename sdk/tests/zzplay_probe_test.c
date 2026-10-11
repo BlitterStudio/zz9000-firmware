@@ -11,9 +11,10 @@
 
 static int check_file_probe(void)
 {
-  uint8_t split[4101];
-  static const uint8_t header[8] = {
-    0x00U, 0x00U, 0x01U, 0xb3U, 0x14U, 0x00U, 0xf0U, 0x13U
+  uint8_t split[4105];
+  static const uint8_t header[12] = {
+    0x00U, 0x00U, 0x01U, 0xb3U, 0x14U, 0x00U, 0xf0U, 0x13U,
+    0x00U, 0x00U, 0x00U, 0x00U
   };
   FILE *file;
   ZZPlayVideoInfo info;
@@ -80,7 +81,8 @@ static size_t probe_put_seq_header(uint8_t *dst, uint32_t w, uint32_t h,
   dst[5] = (uint8_t)(((w & 0x0fU) << 4) | (h >> 8));
   dst[6] = (uint8_t)(h & 0xffU);
   dst[7] = (uint8_t)((aspect_code << 4) | rate_code);
-  return 8U;
+  dst[8] = 0x00; dst[9] = 0x00; dst[10] = 0x00; dst[11] = 0x00;
+  return 12U;
 }
 
 static size_t probe_put_seq_ext(uint8_t *dst)
@@ -194,6 +196,7 @@ static int check_mpeg2_aspect_probe(void)
   }
   n = probe_put_seq_header(buf, 720U, 576U, 1U, 3U);
   n += probe_put_seq_ext(buf + n);
+  n += probe_put_seq_display_ext(buf + n, 540U, 400U);
   memset(&info, 0, sizeof(info));
   if (!zzplay_probe_mpeg_sequence(buf, n, &info) ||
       info.display_width != 720U || info.display_height != 576U) {
@@ -208,6 +211,66 @@ static int check_mpeg2_aspect_probe(void)
       info.display_width != 1024U || info.display_height != 576U) {
     return 0;
   }
+  return 1;
+}
+
+static int check_mpeg2_display_extension_regressions(void)
+{
+  uint8_t buf[256];
+  uint8_t split[4101];
+  size_t n;
+  ZZPlayVideoInfo info;
+  FILE *file;
+
+  n = probe_put_seq_header(buf, 720U, 576U, 3U, 3U);
+  buf[11] |= 0x02U;
+  memset(buf + n, 0x55, 64U);
+  buf[n + 63U] &= 0xfeU;
+  n += 64U;
+  n += probe_put_seq_ext(buf + n);
+  n += probe_put_seq_display_ext(buf + n, 540U, 576U);
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) ||
+      info.display_width != 1365U || info.display_height != 576U) {
+    return 0;
+  }
+
+  n = probe_put_seq_header(buf, 720U, 576U, 3U, 3U);
+  buf[11] |= 0x02U;
+  memset(buf + n, 0, 64U);
+  buf[n] = 0x10U;
+  buf[n + 63U] |= 0x01U;
+  n += 64U;
+  memset(buf + n, 0x55, 64U);
+  n += 64U;
+  n += probe_put_seq_ext(buf + n);
+  n += probe_put_seq_display_ext(buf + n, 540U, 576U);
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) ||
+      info.display_width != 1365U || info.display_height != 576U) {
+    return 0;
+  }
+
+  memset(split, 0x55, sizeof(split));
+  n = 4096U - 12U - 10U - 4U;
+  n += probe_put_seq_header(split + n, 720U, 576U, 3U, 3U);
+  n += probe_put_seq_ext(split + n);
+  n += probe_put_seq_display_ext(split + n, 540U, 576U);
+  file = tmpfile();
+  if (!file) {
+    return 0;
+  }
+  if (fwrite(split, 1U, n, file) != n || fflush(file) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_file(file, &info) ||
+      info.display_width != 1365U || info.display_height != 576U) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
   return 1;
 }
 
@@ -802,7 +865,8 @@ static int check_webp_file_probe(void)
 int main(void)
 {
   static const uint8_t sequence[] = {
-    0xaa, 0x00, 0x00, 0x01, 0xb3, 0x13, 0xe0, 0xf3, 0x13
+    0xaa, 0x00, 0x00, 0x01, 0xb3, 0x13, 0xe0, 0xf3, 0x13,
+    0x00, 0x00, 0x00, 0x00
   };
   ZZPlayVideoInfo info;
   uint32_t accepted_total;
@@ -887,6 +951,9 @@ int main(void)
   }
   if (!check_mpeg2_aspect_probe()) {
     return 21;
+  }
+  if (!check_mpeg2_display_extension_regressions()) {
+    return 25;
   }
   if (!check_mpeg2_audio_priority_probe()) {
     return 22;
