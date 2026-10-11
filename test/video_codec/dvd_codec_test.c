@@ -441,6 +441,52 @@ static uint32_t set_sequence_rate(uint8_t *stream, uint32_t length,
 	return changed;
 }
 
+/* MPEG-2 sequence extension chroma_format is bits 2..1 after the
+ * extension id and profile-level byte. */
+static uint32_t set_sequence_chroma_422(uint8_t *stream, uint32_t length)
+{
+	uint32_t at;
+	uint32_t changed = 0U;
+
+	for (at = 0U; at + 6U <= length; at++) {
+		if (stream[at] == 0U && stream[at + 1U] == 0U &&
+		    stream[at + 2U] == 1U && stream[at + 3U] == 0xb5U &&
+		    (stream[at + 4U] >> 4) == 1U) {
+			stream[at + 5U] = (stream[at + 5U] & ~0x06U) | 0x04U;
+			changed++;
+		}
+	}
+	return changed;
+}
+
+/* The 4:2:0 display buffers must reject a 4:2:2 MPEG-2 sequence before
+ * publishing a frame. */
+static int test_unsupported_chroma_refused(void)
+{
+	struct stream_result r;
+	uint8_t *stream;
+	uint32_t length = zz9k_dvd_pal_25p_fixture_len;
+	int rc;
+
+	if (run_decode_test(zz9k_dvd_pal_25p_fixture, length, 197U,
+	                    TEST_MEDIA_AUDIO_NONE, &r) != 0 ||
+	    r.frame_count == 0U)
+		return 1;
+	stream = (uint8_t *)malloc(length);
+	if (!stream)
+		return 2;
+	memcpy(stream, zz9k_dvd_pal_25p_fixture, length);
+	if (set_sequence_chroma_422(stream, length) == 0U) {
+		free(stream);
+		return 3;
+	}
+	rc = run_decode_test(stream, length, 197U, TEST_MEDIA_AUDIO_NONE, &r);
+	free(stream);
+	if (rc != 6 || r.frame_count != 0U)
+		return 4;
+	return 0;
+}
+
 /* Remove optional PES fields so the decoder follows the derived clock. */
 static uint32_t strip_video_pes_pts(uint8_t *stream, uint32_t length)
 {
@@ -2992,6 +3038,12 @@ int main(void)
 		return 30 + err;
 	}
 	printf("PASS: test_pal_25p (PAL 720x576 25p + MP2 audio)\n");
+	if ((err = test_unsupported_chroma_refused()) != 0) {
+		fprintf(stderr, "FAIL: test_unsupported_chroma_refused (code %d)\n",
+		        err);
+		return 32 + err;
+	}
+	printf("PASS: test_unsupported_chroma_refused (4:2:2 rejected)\n");
 	if ((err = test_concatenated_video_sequences()) != 0) {
 		fprintf(stderr, "FAIL: test_concatenated_video_sequences (code %d)\n", err);
 		return 35 + err;

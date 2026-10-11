@@ -782,6 +782,12 @@ static int bind_fbufs(struct sdk_video_mpeg2 *d,
 
 	if (!geometry_ok(width, height))
 		return 0;
+	/* Frames are published and packed as 4:2:0; 4:2:2 and 4:4:4 MPEG-2
+	 * (chroma as tall, or as wide, as luma) would be read with the wrong
+	 * chroma geometry, so they are refused. */
+	if (sequence->chroma_width != sequence->width / 2U ||
+	    sequence->chroma_height != sequence->height / 2U)
+		return 0;
 	/* The session's display allocation is sized for its first sequence.
 	 * A later geometry cannot be presented safely without renegotiation. */
 	if (d->fbufs_bound)
@@ -1299,6 +1305,7 @@ static void *mpeg2_create(uint32_t pool_owner)
 	d->last_audio_pts = M2_NO_PTS;
 	d->decoder = mpeg2_init();
 	if (!d->decoder) {
+		sdk_dvd_ac3_destroy(&d->ac3);
 		M2_FREE(d);
 		return 0;
 	}
@@ -1311,6 +1318,7 @@ static void *mpeg2_create(uint32_t pool_owner)
 		M2_FREE(d->video_fifo);
 		M2_FREE(d->es);
 		mpeg2_close(d->decoder);
+		sdk_dvd_ac3_destroy(&d->ac3);
 		M2_FREE(d);
 		return 0;
 	}
