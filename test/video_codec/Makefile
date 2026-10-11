@@ -52,6 +52,18 @@ MPEG_SRCS := $(FIRMWARE_SRC)/sdk_video_mpeg2.c \
 	$(FIRMWARE_SRC)/sdk_video_yuy2.c \
 	$(FIRMWARE_SRC)/sdk_mpeg2_neon.c
 MPEG_LIBS := $(LIBMPEG2_HOST_LIB) $(LIBA52_HOST_LIB)
+# The firmware headers those sources include: a change to one must rebuild
+# every test binary below.
+MPEG_HDRS := $(FIRMWARE_SRC)/sdk_video_backend.h \
+	$(FIRMWARE_SRC)/sdk_dvd_ps.h \
+	$(FIRMWARE_SRC)/sdk_dvd_ac3.h \
+	$(FIRMWARE_SRC)/sdk_dvd_lpcm.h \
+	$(FIRMWARE_SRC)/sdk_media_timeline.h \
+	$(FIRMWARE_SRC)/sdk_media_profile.h \
+	$(FIRMWARE_SRC)/sdk_video_yuy2.h \
+	$(FIRMWARE_SRC)/sdk_mpeg2_neon.h \
+	$(FIRMWARE_SRC)/mp3/mp3.h
+MPEG_DEPS := $(MPEG_SRCS) $(MPEG_HDRS) $(MPEG_LIBS)
 MPEG_FLAGS := $(DVD_ABI) -DSDK_VIDEO_HOST_TEST=1 -DSDK_MEDIA_HOST_TEST=1 \
 	-I$(FIRMWARE_SRC) $(DVD_INCLUDES)
 
@@ -69,37 +81,34 @@ DVD_FIXTURES := dvd_pal_25p_fixture.inc \
 	dvd_ac3_192_fixture.inc \
 	dvd_ac3_dual_fixture.inc
 
-build/video_codec_test: video_codec_test.c $(MPEG1_FIXTURES) $(MPEG_SRCS) \
-	$(MPEG_LIBS)
+build/video_codec_test: video_codec_test.c $(MPEG1_FIXTURES) $(MPEG_DEPS)
 	mkdir -p build
 	$(CC) $(CFLAGS) $(MPEG_FLAGS) -o $@ video_codec_test.c $(MPEG_SRCS) \
 		$(MPEG_LIBS) -lm
 
-build/media_codec_test: media_codec_test.c $(MPEG1_FIXTURES) $(MPEG_SRCS) \
-	$(MPEG_LIBS)
+build/media_codec_test: media_codec_test.c $(MPEG1_FIXTURES) $(MPEG_DEPS)
 	mkdir -p build
 	$(CC) $(CFLAGS) $(MPEG_FLAGS) -o $@ media_codec_test.c $(MPEG_SRCS) \
 		$(MPEG_LIBS) -lm
 
 build/media_codec_test_sanitize: media_codec_test.c $(MPEG1_FIXTURES) \
-	$(MPEG_SRCS) $(MPEG_LIBS)
+	$(MPEG_DEPS)
 	mkdir -p build
 	$(CC) $(SANITIZE_CFLAGS) $(MPEG_FLAGS) -o $@ media_codec_test.c \
 		$(MPEG_SRCS) $(MPEG_LIBS) -lm
 
-build/dvd_codec_test: dvd_codec_test.c $(DVD_FIXTURES) $(MPEG_SRCS) \
-	$(MPEG_LIBS)
+build/dvd_codec_test: dvd_codec_test.c $(DVD_FIXTURES) $(MPEG_DEPS)
 	mkdir -p build
 	$(CC) $(CFLAGS) $(MPEG_FLAGS) -o $@ dvd_codec_test.c $(MPEG_SRCS) \
 		$(MPEG_LIBS) -lm
 
 build/dvd_codec_test_sanitize: dvd_codec_test.c $(DVD_FIXTURES) \
-	$(MPEG_SRCS) $(MPEG_LIBS)
+	$(MPEG_DEPS)
 	mkdir -p build
 	$(CC) $(SANITIZE_CFLAGS) $(MPEG_FLAGS) -o $@ dvd_codec_test.c \
 		$(MPEG_SRCS) $(MPEG_LIBS) -lm
 
-build/dvd_bench: dvd_bench.c $(DVD_FIXTURES) $(MPEG_SRCS) $(MPEG_LIBS)
+build/dvd_bench: dvd_bench.c $(DVD_FIXTURES) $(MPEG_DEPS)
 	mkdir -p build
 	$(CC) $(CFLAGS) $(MPEG_FLAGS) -o $@ dvd_bench.c $(MPEG_SRCS) \
 		$(MPEG_LIBS) -lm

@@ -37,6 +37,7 @@
 #include "dvd_ac3_dual_fixture.inc"
 
 #define PCM_RING_CAPACITY (128U * 1024U)
+#define TEST_MEDIA_AUDIO_NONE UINT32_MAX
 #define FNV64_OFFSET UINT64_C(14695981039346656037)
 
 static uint64_t fnv1a64(uint64_t hash, const uint8_t *bytes, uint32_t length)
@@ -193,6 +194,7 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 	uint8_t *pcm_ring = NULL;
 	struct SDKVideoDecodedFrame frame;
 	uint32_t offset = 0U;
+	int configure_no_audio = audio_codec == TEST_MEDIA_AUDIO_NONE;
 	int res = 0;
 
 	memset(out, 0, sizeof(*out));
@@ -202,19 +204,24 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 	if (!decoder)
 		return 1;
 
-	if (audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE) {
+	if (configure_no_audio)
+		audio_codec = SDK_VIDEO_MEDIA_AUDIO_NONE;
+	if (audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE || configure_no_audio) {
 		struct SDKVideoMediaConfig cfg = {0};
-		pcm_ring = (uint8_t *)malloc(PCM_RING_CAPACITY);
-		if (!pcm_ring) {
-			ops->destroy(decoder);
-			return 2;
-		}
-		memset(pcm_ring, 0, PCM_RING_CAPACITY);
+
 		cfg.audio_codec = audio_codec;
-		cfg.pcm_ring = pcm_ring;
-		cfg.pcm_ring_capacity = PCM_RING_CAPACITY;
-		cfg.pcm_low_water_bytes = 4096U;
-		cfg.pcm_high_water_bytes = PCM_RING_CAPACITY - 4096U;
+		if (audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE) {
+			pcm_ring = (uint8_t *)malloc(PCM_RING_CAPACITY);
+			if (!pcm_ring) {
+				ops->destroy(decoder);
+				return 2;
+			}
+			memset(pcm_ring, 0, PCM_RING_CAPACITY);
+			cfg.pcm_ring = pcm_ring;
+			cfg.pcm_ring_capacity = PCM_RING_CAPACITY;
+			cfg.pcm_low_water_bytes = 4096U;
+			cfg.pcm_high_water_bytes = PCM_RING_CAPACITY - 4096U;
+		}
 		if (!ops->configure_media(decoder, &cfg)) {
 			free(pcm_ring);
 			ops->destroy(decoder);
@@ -1286,6 +1293,68 @@ static uint32_t extract_video_es(const uint8_t *ps, uint32_t len,
 	return n;
 }
 
+/* An untagged 3:2 stream must advance each picture by the preceding
+ * picture's display duration, including its repeat-first-field. */
+static int test_ntsc_film_32_preceding_picture_timing(void)
+{
+	struct stream_result r;
+	uint8_t *es;
+	uint8_t *ps;
+	uint32_t es_len;
+	uint32_t i;
+	int rc;
+
+	es = (uint8_t *)malloc(zz9k_dvd_ntsc_film_32_fixture_len);
+	if (!es)
+		return 1;
+	es_len = extract_video_es(zz9k_dvd_ntsc_film_32_fixture,
+	                          zz9k_dvd_ntsc_film_32_fixture_len, es);
+	ps = (uint8_t *)malloc(es_len + 9U);
+	if (!ps || es_len == 0U || es_len > 65532U) {
+		free(es);
+		free(ps);
+		return 2;
+	}
+	ps[0] = 0U;
+	ps[1] = 0U;
+	ps[2] = 1U;
+	ps[3] = 0xe0U;
+	ps[4] = (uint8_t)((es_len + 3U) >> 8);
+	ps[5] = (uint8_t)(es_len + 3U);
+	ps[6] = 0x80U;
+	ps[7] = 0U;
+	ps[8] = 0U;
+	memcpy(ps + 9U, es, es_len);
+	rc = run_decode_test(ps, es_len + 9U, 0U,
+	                     TEST_MEDIA_AUDIO_NONE, &r);
+	free(ps);
+	free(es);
+	if (rc != 0)
+		return 3;
+	if (r.frame_count != 6U || r.frame_rate_milli == 0U)
+		return 4;
+	for (i = 1U; i < r.frame_count; i++) {
+		uint64_t numerator = (uint64_t)r.display_fields[i - 1U] *
+			500U * 90000U;
+		uint64_t floor_gap = numerator / r.frame_rate_milli;
+		uint64_t ceil_gap = (numerator + r.frame_rate_milli - 1U) /
+			r.frame_rate_milli;
+		uint64_t gap = r.media_pts[i] - r.media_pts[i - 1U];
+
+		if (r.raw_pts[i - 1U] != UINT64_MAX ||
+		    r.raw_pts[i] != UINT64_MAX ||
+		    gap < floor_gap || gap > ceil_gap) {
+			fprintf(stderr, "test_ntsc_film_32_timing: frame %u gap %llu "
+			        "(expected %llu..%llu)\n", i,
+			        (unsigned long long)gap,
+			        (unsigned long long)floor_gap,
+			        (unsigned long long)ceil_gap);
+			return 5;
+		}
+	}
+	return 0;
+}
+
 /* 6f. Video-only, with audio PES packets densely interleaved between tiny
  * video PES packets: every video pop re-pumps audio into the demux, and
  * that audio must not hold back the end of the stream. */
@@ -1433,6 +1502,55 @@ static uint32_t put_pes(uint8_t *dst, uint8_t sid, const uint8_t *payload,
 	dst[8] = 0x00;
 	memcpy(dst + 9, payload, length);
 	return 9U + length;
+}
+
+/* PTS is optional per PES. A timestamped packet later in a full drop run
+ * must still give the decoder a span to resynchronize. */
+static uint32_t put_pes_pts(uint8_t *dst, uint8_t sid,
+                            const uint8_t *payload, uint32_t length,
+                            uint64_t pts)
+{
+	uint32_t pes_length = 8U + length;
+
+	dst[0] = 0x00;
+	dst[1] = 0x00;
+	dst[2] = 0x01;
+	dst[3] = sid;
+	dst[4] = (uint8_t)(pes_length >> 8);
+	dst[5] = (uint8_t)pes_length;
+	dst[6] = 0x80;
+	dst[7] = 0x80;
+	dst[8] = 5U;
+	dst[9] = (uint8_t)(0x21U | ((pts >> 29) & 0x0eU));
+	dst[10] = (uint8_t)(pts >> 22);
+	dst[11] = (uint8_t)(0x01U | ((pts >> 14) & 0xfeU));
+	dst[12] = (uint8_t)(pts >> 7);
+	dst[13] = (uint8_t)(0x01U | ((pts & 0x7fU) << 1));
+	memcpy(dst + 14U, payload, length);
+	return 14U + length;
+}
+
+static int test_drop_run_uses_first_available_pts(void)
+{
+	struct SDKDVDPSDemux demux;
+	uint8_t ps[32];
+	uint8_t payload = 0U;
+	uint32_t accepted = 0U;
+	uint32_t length = put_pes(ps, 0xc0U, &payload, 1U);
+
+	length += put_pes_pts(ps + length, 0xc0U, &payload, 1U, 9000U);
+	sdk_dvd_ps_init(&demux);
+	demux.drop_audio_when_full = 1U;
+	demux.audio.count = SDK_DVD_PS_QUEUE_DEPTH;
+	sdk_dvd_ps_write(&demux, ps, length, &accepted, 1);
+	if (accepted != length || demux.audio_packets_dropped != 2U)
+		return 1;
+	if (!demux.first_dropped_audio_pts_valid ||
+	    !demux.last_dropped_audio_pts_valid ||
+	    demux.first_dropped_audio_pts != 9000U ||
+	    demux.last_dropped_audio_pts != 9000U)
+		return 2;
+	return 0;
 }
 
 /* Like AC-3, a stream with two MPEG audio tracks or two LPCM tracks must
@@ -1950,6 +2068,52 @@ static int patch_first_audio_pes_pts(uint8_t *ps, uint32_t len,
 	return 0;
 }
 
+/* Collect the timestamp of each timestamped audio PES in program order. */
+static uint32_t audio_pes_pts(const uint8_t *ps, uint32_t len,
+                              uint64_t *pts, uint32_t capacity)
+{
+	uint32_t at = 0U;
+	uint32_t count = 0U;
+
+	while (at + 6U <= len) {
+		uint32_t total;
+		uint8_t sid;
+
+		if (ps[at] != 0U || ps[at + 1U] != 0U || ps[at + 2U] != 1U) {
+			at++;
+			continue;
+		}
+		sid = ps[at + 3U];
+		if (sid == 0xbaU) {
+			at += 14U + (ps[at + 13U] & 7U);
+			continue;
+		}
+		if (sid == 0xb9U) {
+			at += 4U;
+			continue;
+		}
+		total = 6U + ((uint32_t)ps[at + 4U] << 8 | ps[at + 5U]);
+		if (total < 14U || at + total > len) {
+			at += 4U;
+			continue;
+		}
+		if ((sid == 0xbdU || (sid >= 0xc0U && sid <= 0xdfU)) &&
+		    (ps[at + 6U] & 0xc0U) == 0x80U &&
+		    (ps[at + 7U] & 0x80U) != 0U && ps[at + 8U] >= 5U) {
+			if (count < capacity) {
+				pts[count] = ((uint64_t)(ps[at + 9U] >> 1) & 7U) << 30 |
+				             (uint64_t)ps[at + 10U] << 22 |
+				             ((uint64_t)(ps[at + 11U] >> 1) & 0x7fU) << 15 |
+				             (uint64_t)ps[at + 12U] << 7 |
+				             ((uint64_t)(ps[at + 13U] >> 1) & 0x7fU);
+			}
+			count++;
+		}
+		at += total;
+	}
+	return count;
+}
+
 /* 9. The reported audio clock must track the PCM actually produced. */
 static int test_audio_pts_tracks_pcm(void)
 {
@@ -2146,6 +2310,12 @@ static int test_drop_resyncs_audio_clock(void)
 	uint32_t offset = 0U;
 	uint32_t frames = 0U;
 	uint32_t idle = 0U;
+	uint64_t packet_pts[64];
+	uint64_t first_audio_pts_before_drops = UINT64_MAX;
+	uint64_t last_audio_pts_before_drops = UINT64_MAX;
+	uint64_t first_retained_audio_pts = UINT64_MAX;
+	uint64_t first_audio_pts_after_resync = UINT64_MAX;
+	uint32_t packet_count;
 	int sink_state = 0; /* 0 starting, 1 alive, 2 dead, 3 revived */
 	int saw_rebased = 0;
 	int done = 0;
@@ -2162,6 +2332,15 @@ static int test_drop_resyncs_audio_clock(void)
 		ops->destroy(decoder);
 		return 2;
 	}
+	packet_count = audio_pes_pts(zz9k_dvd_ac3_192_fixture,
+	                             zz9k_dvd_ac3_192_fixture_len,
+	                             packet_pts,
+	                             sizeof(packet_pts) / sizeof(packet_pts[0]));
+	if (packet_count > sizeof(packet_pts) / sizeof(packet_pts[0])) {
+		ops->destroy(decoder);
+		return 3;
+	}
+
 	while (!done && idle < 4096U) {
 		uint32_t before = frames;
 		uint32_t accepted = 0U;
@@ -2185,15 +2364,25 @@ static int test_drop_resyncs_audio_clock(void)
 		if (ops->get_media_info(decoder, &info)) {
 			if (sink_state == 0 && info.pcm_acknowledged > 8192U)
 				sink_state = 1;
-			if (sink_state == 1)
+			if (sink_state == 1) {
+				first_audio_pts_before_drops = info.first_audio_pts;
 				sink_state = 2; /* the sink dies now */
+			}
 			if (sink_state == 2 &&
-			    info.audio_packets_dropped != 0U)
+			    info.audio_packets_dropped != 0U) {
+				last_audio_pts_before_drops = info.raw_pts;
 				sink_state = 3; /* revived after the drops */
+			}
 			if (sink_state != 2)
 				ops->ack_media(decoder, info.pcm_produced);
-			if ((info.flags & SDK_VIDEO_MEDIA_FLAG_REBASED) != 0U)
+			if ((info.flags & SDK_VIDEO_MEDIA_FLAG_REBASED) != 0U) {
 				saw_rebased = 1;
+				if (sink_state == 3 &&
+				    first_retained_audio_pts == UINT64_MAX) {
+					first_retained_audio_pts = info.raw_pts;
+					first_audio_pts_after_resync = info.first_audio_pts;
+				}
+			}
 		}
 		res = ops->decode(decoder, &frame);
 		if (res == SDK_VIDEO_BACKEND_ERROR) {
@@ -2208,19 +2397,48 @@ static int test_drop_resyncs_audio_clock(void)
 	}
 	(void)ops->get_media_info(decoder, &info);
 	ops->destroy(decoder);
-	if (!done || frames != 50U || info.audio_packets_dropped == 0U) {
+	if (!done || frames != 50U || info.audio_packets_dropped < 2U) {
 		fprintf(stderr, "test_drop_resyncs: done=%d frames=%u "
 		        "dropped=%u\n", done, frames,
 		        info.audio_packets_dropped);
 		return 5;
 	}
-	if (!saw_rebased || info.first_audio_pts == 0U ||
-	    info.first_audio_pts >= 180000U) {
-		fprintf(stderr, "test_drop_resyncs: rebased=%d first=%llu\n",
-		        saw_rebased,
-		        (unsigned long long)info.first_audio_pts);
+	if (!saw_rebased || first_audio_pts_before_drops == UINT64_MAX ||
+	    last_audio_pts_before_drops == UINT64_MAX ||
+	    first_retained_audio_pts == UINT64_MAX ||
+	    first_audio_pts_after_resync == UINT64_MAX) {
+		fprintf(stderr, "test_drop_resyncs: rebased=%d before=%llu "
+		        "retained=%llu first=%llu\n", saw_rebased,
+		        (unsigned long long)last_audio_pts_before_drops,
+		        (unsigned long long)first_retained_audio_pts,
+		        (unsigned long long)first_audio_pts_after_resync);
 		return 6;
 	}
+{
+	uint32_t i;
+	uint64_t first_dropped_pts = UINT64_MAX;
+
+	for (i = 0U; i + SDK_DVD_PS_QUEUE_DEPTH < packet_count; i++) {
+		if (packet_pts[i] == last_audio_pts_before_drops) {
+			first_dropped_pts = packet_pts[i + SDK_DVD_PS_QUEUE_DEPTH + 1U];
+			break;
+		}
+	}
+	if (first_dropped_pts == UINT64_MAX ||
+	    first_retained_audio_pts <= first_dropped_pts)
+		return 7;
+	if (first_audio_pts_after_resync != first_audio_pts_before_drops +
+	    first_retained_audio_pts - first_dropped_pts) {
+		fprintf(stderr, "test_drop_resyncs: first=%llu expected=%llu "
+		        "from dropped=%llu retained=%llu\n",
+		        (unsigned long long)first_audio_pts_after_resync,
+		        (unsigned long long)(first_audio_pts_before_drops +
+		        first_retained_audio_pts - first_dropped_pts),
+		        (unsigned long long)first_dropped_pts,
+		        (unsigned long long)first_retained_audio_pts);
+		return 8;
+	}
+}
 	return 0;
 }
 
@@ -2314,6 +2532,14 @@ int main(void)
 	}
 	printf("PASS: test_ntsc_film_32_cadence (NTSC film 24000/1001 3:2 cadence)\n");
 
+	if ((err = test_ntsc_film_32_preceding_picture_timing()) != 0) {
+		fprintf(stderr, "FAIL: test_ntsc_film_32_preceding_picture_timing "
+		        "(code %d)\n", err);
+		return 65 + err;
+	}
+	printf("PASS: test_ntsc_film_32_preceding_picture_timing "
+	       "(derived 3:2 PTS gaps)\n");
+
 	if ((err = test_demuxer_bounded_behavior()) != 0) {
 		fprintf(stderr, "FAIL: test_demuxer_bounded_behavior (code %d)\n", err);
 		return 70 + err;
@@ -2379,6 +2605,14 @@ int main(void)
 		return 220 + err;
 	}
 	printf("PASS: test_demux_audio_overflow_drop (audio overflow drops, parse continues)\n");
+
+	if ((err = test_drop_run_uses_first_available_pts()) != 0) {
+		fprintf(stderr, "FAIL: test_drop_run_uses_first_available_pts "
+		        "(code %d)\n", err);
+		return 225 + err;
+	}
+	printf("PASS: test_drop_run_uses_first_available_pts "
+	       "(untagged first audio drop)\n");
 
 	if ((err = test_starved_ring_keeps_video()) != 0) {
 		fprintf(stderr, "FAIL: test_starved_ring_keeps_video (code %d)\n", err);

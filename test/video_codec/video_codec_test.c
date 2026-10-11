@@ -490,6 +490,10 @@ static int test_streaming_decode(void)
 				ops->destroy(decoder);
 				return 4;
 			}
+			if (frame.time_millis != frames * 40U) {
+				ops->destroy(decoder);
+				return 13;
+			}
 			row_bytes = sdk_video_yuy2_row_bytes(frame.width);
 			yuy2 = (uint8_t *)malloc(row_bytes * frame.height);
 			if (!yuy2) {
@@ -538,6 +542,10 @@ static int test_streaming_decode(void)
 			uint32_t bytes_written;
 			uint32_t row;
 
+			if (frame.time_millis != frames * 40U) {
+				ops->destroy(decoder);
+				return 14;
+			}
 			row_bytes = sdk_video_yuy2_row_bytes(frame.width);
 			yuy2 = (uint8_t *)malloc(row_bytes * frame.height);
 			if (!yuy2 || !sdk_video_yuv420_to_yuy2(

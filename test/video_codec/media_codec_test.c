@@ -980,9 +980,7 @@ static int test_audio_only_stream(const struct media_summary *reference)
 	static const uint32_t chunks[] = {1U, 137U, 4096U};
 	struct media_summary expected;
 	struct media_summary actual;
-	uint32_t control;
-	uint32_t payload;
-	uint32_t end;
+	uint32_t offset;
 	uint32_t i;
 	uint8_t *bytes;
 	int result = 0;
@@ -992,9 +990,14 @@ static int test_audio_only_stream(const struct media_summary *reference)
 		return 1;
 	memcpy(bytes, zz9k_mpeg1_mp2_ps_fixture,
 	       zz9k_mpeg1_mp2_ps_fixture_len);
-	while (find_pes(bytes, zz9k_mpeg1_mp2_ps_fixture_len, 0xe0U, 0U,
-	                &control, &payload, &end))
-		bytes[control - 6U] = 0xbeU;
+	/* Every video PES start code becomes a padding stream's (0xbe): the
+	 * packet keeps its length and payload, so the demux skips it whole. */
+	for (offset = 0U; offset + 4U <= zz9k_mpeg1_mp2_ps_fixture_len;
+	     offset++) {
+		if (bytes[offset] == 0x00U && bytes[offset + 1U] == 0x00U &&
+		    bytes[offset + 2U] == 0x01U && bytes[offset + 3U] == 0xe0U)
+			bytes[offset + 3U] = 0xbeU;
+	}
 	for (i = 0U; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
 		result = decode_fixture_bytes(
 			bytes, zz9k_mpeg1_mp2_ps_fixture_len, chunks[i],

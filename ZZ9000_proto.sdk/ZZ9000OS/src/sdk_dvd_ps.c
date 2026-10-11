@@ -96,6 +96,7 @@ static int parse_one(struct SDKDVDPSDemux *d)
 	uint32_t payload_length;
 	uint64_t pts = SDK_DVD_PS_NO_TS;
 	uint64_t dts = SDK_DVD_PS_NO_TS;
+	uint32_t queued_audio_before = d->audio.count;
 	int queued = 1;
 
 	if (avail < 4U)
@@ -273,6 +274,17 @@ static int parse_one(struct SDKDVDPSDemux *d)
 			 * the video packets behind it) keeps moving; the owner
 			 * only sets the policy while video would otherwise
 			 * starve. */
+			if (!d->audio_drop_run_active) {
+				d->audio_drop_run_active = 1U;
+				d->first_dropped_audio_pts = pts;
+				d->first_dropped_audio_pts_valid =
+					pts != SDK_DVD_PS_NO_TS;
+				d->last_dropped_audio_pts_valid = 0U;
+			} else if (!d->first_dropped_audio_pts_valid &&
+			           pts != SDK_DVD_PS_NO_TS) {
+				d->first_dropped_audio_pts = pts;
+				d->first_dropped_audio_pts_valid = 1U;
+			}
 			if (pts != SDK_DVD_PS_NO_TS) {
 				d->last_dropped_audio_pts = pts;
 				d->last_dropped_audio_pts_valid = 1U;
@@ -288,6 +300,8 @@ static int parse_one(struct SDKDVDPSDemux *d)
 	}
 	if (queued < 0)
 		d->malformed_packets++;
+	if (d->audio.count != queued_audio_before)
+		d->audio_drop_run_active = 0U;
 	consume(d, total);
 	d->packets_seen++;
 	return 1;

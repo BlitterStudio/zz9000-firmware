@@ -121,6 +121,7 @@ struct sdk_video_mpeg2 {
 	uint64_t last_audio_pts;
 	uint64_t last_audio_pts_raw;
 	uint32_t video_frames;
+	uint32_t previous_picture_fields;
 	uint32_t audio_frames;
 	uint32_t backpressure_events;
 	uint32_t malformed;
@@ -323,13 +324,16 @@ static void clock_unclocked_audio(struct sdk_video_mpeg2 *d)
 static void resync_audio_after_drops(struct sdk_video_mpeg2 *d,
                                       uint64_t packet_pts)
 {
+	uint64_t first_dropped;
 	uint64_t last_dropped;
 
 	if (d->demux.audio_packets_dropped == d->audio_drops_routed)
 		return;
 	d->audio_drops_routed = d->demux.audio_packets_dropped;
-	if (!d->demux.last_dropped_audio_pts_valid)
+	if (!d->demux.first_dropped_audio_pts_valid ||
+	    !d->demux.last_dropped_audio_pts_valid)
 		return;
+	first_dropped = d->demux.first_dropped_audio_pts;
 	last_dropped = d->demux.last_dropped_audio_pts;
 	if (packet_pts == SDK_DVD_PS_NO_TS || packet_pts <= last_dropped) {
 		/* Kept packets queued before the drop run: the gap is still
@@ -339,7 +343,7 @@ static void resync_audio_after_drops(struct sdk_video_mpeg2 *d,
 		return;
 	}
 	{
-		uint64_t gap = packet_pts - last_dropped;
+		uint64_t gap = packet_pts - first_dropped;
 
 		if (gap > SDK_MEDIA_TIMELINE_PTS_MODULUS / 2U)
 			return;
@@ -829,7 +833,7 @@ static void picture_timestamps(const struct sdk_video_mpeg2 *d,
 	}
 }
 
-/* Advance the video clock one picture (its display fields) and let a
+/* Advance the video clock by the preceding picture's display fields and let a
  * tagged picture's raw PTS anchor it, exactly like the MPEG-1 backend:
  * observing raw PTS alone freezes the reported clock for up to the 1 s
  * discontinuity window, and a player pacing against that sees the picture
@@ -842,12 +846,15 @@ static uint64_t clock_picture(struct sdk_video_mpeg2 *d,
 	struct SDKMediaTimelineResult result;
 	uint64_t media_pts = M2_NO_PTS;
 	uint32_t fields = picture_display_fields(picture);
-	uint64_t step_units = (uint64_t)(fields < 2U ? 2U : fields) * 500U;
+	uint32_t previous_fields = d->previous_picture_fields;
+	uint64_t step_units = (uint64_t)(previous_fields < 2U
+		? 2U : previous_fields) * 500U;
 	uint32_t per_second = d->frame_rate_milli != 0U
 		? d->frame_rate_milli : 25000U;
 
 	picture_timestamps(d, picture, raw_pts, raw_dts);
 	d->video_frames++;
+	d->previous_picture_fields = fields;
 	if (!d->media_configured ||
 	    !sdk_media_timeline_map(&d->timeline, SDK_MEDIA_TIMELINE_VIDEO,
 	                            SDK_MEDIA_TIMELINE_NO_PTS, step_units,
@@ -883,13 +890,12 @@ static void fill_frame(struct sdk_video_mpeg2 *d,
 	uint64_t raw_dts;
 	uint64_t media_pts;
 	uint32_t timeline_flags = d->skipped_media_flags;
-	uint32_t ms_per_frame = d->frame_rate_milli != 0U
-		? (1000000U + d->frame_rate_milli / 2U) /
-			d->frame_rate_milli
-		: 40U;
+	uint32_t frame_rate_milli = d->frame_rate_milli != 0U
+		? d->frame_rate_milli : 25000U;
 	/* Time of this picture's slot: pictures counted before it, skipped
 	 * ones included. */
-	uint32_t time_millis = d->video_frames * ms_per_frame / 1000U;
+	uint32_t time_millis = (uint32_t)(
+		(uint64_t)d->video_frames * 1000000U / frame_rate_milli);
 
 	media_pts = clock_picture(d, picture, &raw_pts, &raw_dts,
 	                          &timeline_flags);
