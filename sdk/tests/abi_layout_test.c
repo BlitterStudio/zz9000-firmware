@@ -79,6 +79,32 @@ typedef char service_info_payload_is_48_bytes[
   (sizeof(ZZ9KServiceInfoPayload) == 48U) ? 1 : -1
 ];
 
+typedef char console_encode_payload_layout[
+  (sizeof(ZZ9KConsoleEncodePayload) == 48U &&
+   offsetof(ZZ9KConsoleEncodePayload, surface_handle) == 0U &&
+   offsetof(ZZ9KConsoleEncodePayload, out_handle) == 4U &&
+   offsetof(ZZ9KConsoleEncodePayload, out_capacity) == 8U &&
+   offsetof(ZZ9KConsoleEncodePayload, enc_flags) == 12U &&
+   offsetof(ZZ9KConsoleEncodePayload, width) == 16U &&
+   offsetof(ZZ9KConsoleEncodePayload, height) == 18U &&
+   offsetof(ZZ9KConsoleEncodePayload, bytes_per_row) == 20U &&
+   offsetof(ZZ9KConsoleEncodePayload, ty0) == 22U &&
+   offsetof(ZZ9KConsoleEncodePayload, ty1) == 24U &&
+   offsetof(ZZ9KConsoleEncodePayload, flags) == 26U &&
+   offsetof(ZZ9KConsoleEncodePayload, codec) == 28U &&
+   offsetof(ZZ9KConsoleEncodePayload, depth) == 30U &&
+   offsetof(ZZ9KConsoleEncodePayload, tile_w) == 31U &&
+   offsetof(ZZ9KConsoleEncodePayload, tile_h) == 32U &&
+   offsetof(ZZ9KConsoleEncodePayload, format) == 33U) ? 1 : -1
+];
+
+typedef char console_encode_result_payload_layout[
+  (sizeof(ZZ9KConsoleEncodeResultPayload) == 48U &&
+   offsetof(ZZ9KConsoleEncodeResultPayload, out_len) == 0U &&
+   offsetof(ZZ9KConsoleEncodeResultPayload, codec) == 4U &&
+   offsetof(ZZ9KConsoleEncodeResultPayload, flags) == 6U) ? 1 : -1
+];
+
 typedef char surface_info_payload_is_48_bytes[
   (sizeof(ZZ9KSurfaceInfoPayload) == 48U) ? 1 : -1
 ];
@@ -419,6 +445,9 @@ int main(void)
   if (ZZ9K_OP_AUDIO_STREAM_BEGIN_EX != ZZ9K_SERVICE_AUDIO + 0x16U) return 145;
   if (ZZ9K_CAP_AUDIO_FLAC != (1U << 28)) return 146;
   if (ZZ9K_CAP_AUDIO_VORBIS != (1U << 29)) return 147;
+  if (ZZ9K_CAP_CONSOLE_ENCODE != (1U << 30)) return 152;
+  if (ZZ9K_SERVICE_CONSOLE != 0x8200U) return 153;
+  if (ZZ9K_OP_CONSOLE_ENCODE != 0x8200U) return 154;
   if (ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM != (1U << 25)) return 148;
   if (ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM != (1U << 26)) return 149;
   if (ZZ9K_AUDIO_CODEC_UNKNOWN != 0U ||

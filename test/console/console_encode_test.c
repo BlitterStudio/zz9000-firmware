@@ -11,10 +11,49 @@
 
 #include "sdk_console_encode.h"
 #include "sdk_mailbox.h"
+#include "zz9k/abi.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The firmware's request/reply offsets and constants are the SDK's
+ * (sdk/include/zz9k/abi.h).  check-abi-mirror.sh compares the service,
+ * opcode and capability; this compares the payload layout. */
+#define SAME_OFFSET(f, off) (offsetof(ZZ9KConsoleEncodePayload, f) == (off))
+typedef char console_request_layout_mirrored[
+	(SAME_OFFSET(surface_handle, SDK_CONSOLE_REQ_SURFACE) &&
+	 SAME_OFFSET(out_handle, SDK_CONSOLE_REQ_OUT_HANDLE) &&
+	 SAME_OFFSET(out_capacity, SDK_CONSOLE_REQ_OUT_CAPACITY) &&
+	 SAME_OFFSET(enc_flags, SDK_CONSOLE_REQ_ENC_FLAGS) &&
+	 SAME_OFFSET(width, SDK_CONSOLE_REQ_WIDTH) &&
+	 SAME_OFFSET(height, SDK_CONSOLE_REQ_HEIGHT) &&
+	 SAME_OFFSET(bytes_per_row, SDK_CONSOLE_REQ_BYTES_PER_ROW) &&
+	 SAME_OFFSET(ty0, SDK_CONSOLE_REQ_TY0) &&
+	 SAME_OFFSET(ty1, SDK_CONSOLE_REQ_TY1) &&
+	 SAME_OFFSET(flags, SDK_CONSOLE_REQ_FLAGS) &&
+	 SAME_OFFSET(codec, SDK_CONSOLE_REQ_CODEC) &&
+	 SAME_OFFSET(depth, SDK_CONSOLE_REQ_DEPTH) &&
+	 SAME_OFFSET(tile_w, SDK_CONSOLE_REQ_TILE_W) &&
+	 SAME_OFFSET(tile_h, SDK_CONSOLE_REQ_TILE_H) &&
+	 SAME_OFFSET(format, SDK_CONSOLE_REQ_FORMAT) &&
+	 SAME_OFFSET(reserved, SDK_CONSOLE_REQ_LEN)) ? 1 : -1];
+typedef char console_reply_layout_mirrored[
+	(offsetof(ZZ9KConsoleEncodeResultPayload, out_len) ==
+	     SDK_CONSOLE_REPLY_OUT_LEN &&
+	 offsetof(ZZ9KConsoleEncodeResultPayload, codec) ==
+	     SDK_CONSOLE_REPLY_CODEC &&
+	 offsetof(ZZ9KConsoleEncodeResultPayload, flags) ==
+	     SDK_CONSOLE_REPLY_FLAGS &&
+	 offsetof(ZZ9KConsoleEncodeResultPayload, reserved) ==
+	     SDK_CONSOLE_REPLY_LEN) ? 1 : -1];
+typedef char console_constants_mirrored[
+	(ZZ9K_CONSOLE_ENCODE_RESET == SDK_CONSOLE_F_RESET &&
+	 ZZ9K_CONSOLE_ENCODE_RESULT_KEYFRAME == SDK_CONSOLE_RF_KEYFRAME &&
+	 ZZ9K_CONSOLE_CODEC_NONE == SDK_CONSOLE_CODEC_NONE &&
+	 ZZ9K_CAP_CONSOLE_ENCODE == SDK_CAP_CONSOLE_ENCODE &&
+	 ZZ9K_OP_CONSOLE_ENCODE == SDK_OP_CONSOLE_ENCODE) ? 1 : -1];
 
 static int failures;
 

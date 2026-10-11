@@ -119,6 +119,10 @@ static int test_service_capability_advertising_helpers(void)
           ZZ9K_SERVICE_VIDEO, ZZ9K_CAP_VIDEO_DECODE)) {
     return 13;
   }
+  if (zz9k_service_capability_mask(ZZ9K_SERVICE_CONSOLE) !=
+      ZZ9K_CAP_CONSOLE_ENCODE) {
+    return 14;
+  }
 
   return 0;
 }
@@ -174,6 +178,10 @@ static int test_capability_names(void)
   if (!expect_name(zz9k_capability_name(ZZ9K_CAP_AUDIO_FABRIC),
                    "audio-fabric")) {
     return 47;
+  }
+  if (!expect_name(zz9k_capability_name(ZZ9K_CAP_CONSOLE_ENCODE),
+                   "console-encode")) {
+    return 48;
   }
   if (zz9k_capability_name(0x80000000UL) != 0) {
     return 7;
