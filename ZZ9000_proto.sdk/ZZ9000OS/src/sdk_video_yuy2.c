@@ -109,6 +109,56 @@ int sdk_video_yuv420_to_yuy2_scalar(uint8_t *dst, uint32_t dst_pitch,
 	return 1;
 }
 
+int sdk_video_yuv420_to_yuy2_half(uint8_t *dst, uint32_t dst_pitch,
+	                              uint32_t width, uint32_t height,
+	                              const uint8_t *y, uint32_t y_pitch,
+	                              const uint8_t *cb, const uint8_t *cr,
+	                              uint32_t chroma_pitch,
+	                              uint32_t *bytes_written)
+{
+	uint32_t out_w = width / 2U;
+	uint32_t out_h = height / 2U;
+	uint32_t row_bytes = sdk_video_yuy2_row_bytes(out_w);
+	uint32_t full_pairs = out_w >> 1;
+	uint32_t row;
+
+	if (bytes_written)
+		*bytes_written = 0U;
+	if (!dst || !y || !cb || !cr || !out_w || !out_h ||
+	    dst_pitch < row_bytes || y_pitch < width ||
+	    chroma_pitch < ((width + 1U) >> 1) ||
+	    out_h > (0xffffffffU / dst_pitch))
+		return 0;
+
+	for (row = 0U; row < out_h; row++) {
+		uint8_t *d = dst + row * dst_pitch;
+		const uint8_t *luma = y + 2U * row * y_pitch;
+		/* Source row 2 * row pairs with chroma row `row`. */
+		const uint8_t *blue = cb + row * chroma_pitch;
+		const uint8_t *red = cr + row * chroma_pitch;
+		uint32_t pair;
+
+		/* Output pair p covers source pixels 4p..4p+3: luma 4p and
+		 * 4p + 2, chroma column 2p. */
+		for (pair = 0U; pair < full_pairs; pair++) {
+			d[0] = luma[4U * pair];
+			d[1] = blue[2U * pair];
+			d[2] = luma[4U * pair + 2U];
+			d[3] = red[2U * pair];
+			d += 4;
+		}
+		if ((out_w & 1U) != 0U) {
+			d[0] = luma[4U * full_pairs];
+			d[1] = blue[2U * full_pairs];
+			d[2] = luma[4U * full_pairs];
+			d[3] = red[2U * full_pairs];
+		}
+	}
+	if (bytes_written)
+		*bytes_written = row_bytes * out_h;
+	return 1;
+}
+
 #if SDK_VIDEO_YUY2_HAVE_NEON
 int sdk_video_yuv420_to_yuy2_neon(uint8_t *dst, uint32_t dst_pitch,
 	                              uint32_t width, uint32_t height,

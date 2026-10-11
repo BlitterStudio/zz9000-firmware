@@ -411,6 +411,13 @@ void sdk_media_session_close_retired(uint32_t session)
 	}
 }
 
+static int media_pcm_codec(uint32_t codec)
+{
+	return codec == SDK_MEDIA_AUDIO_MP2 ||
+	       codec == SDK_MEDIA_AUDIO_OPUS ||
+	       codec == SDK_MEDIA_AUDIO_VORBIS;
+}
+
 uint16_t sdk_media_session_begin(
 	const struct SDKMediaSessionBegin *begin,
 	struct SDKMediaSessionMainResult *result)
@@ -422,7 +429,7 @@ uint16_t sdk_media_session_begin(
 	if (!begin || !result || begin->flags != 0U)
 		return SDK_STATUS_BAD_REQUEST;
 	if (begin->audio_codec != SDK_MEDIA_AUDIO_NONE &&
-	    begin->audio_codec != SDK_MEDIA_AUDIO_MP2)
+	    !media_pcm_codec(begin->audio_codec))
 		return SDK_STATUS_UNSUPPORTED;
 	if (begin->audio_codec == SDK_MEDIA_AUDIO_NONE &&
 	    (begin->pcm_ring_handle != 0U || begin->pcm_ring ||
@@ -430,7 +437,7 @@ uint16_t sdk_media_session_begin(
 	     begin->pcm_low_water_bytes != 0U ||
 	     begin->pcm_high_water_bytes != 0U))
 		return SDK_STATUS_BAD_REQUEST;
-	if (begin->audio_codec == SDK_MEDIA_AUDIO_MP2 &&
+	if (media_pcm_codec(begin->audio_codec) &&
 	    (begin->pcm_ring_handle == 0U || !begin->pcm_ring ||
 	    begin->pcm_ring_capacity <
 		    1152U * SDK_VIDEO_MEDIA_PCM_FRAME_BYTES ||
@@ -522,7 +529,8 @@ uint16_t sdk_media_session_write(
 	if (status != SDK_STATUS_OK) {
 		if (status == SDK_STATUS_BUSY)
 			update_audio();
-		if (status == SDK_STATUS_IO_ERROR)
+		if (status == SDK_STATUS_IO_ERROR ||
+		    status == SDK_STATUS_UNSUPPORTED)
 			media.state = SDK_MEDIA_SESSION_STATE_ERROR;
 		return status;
 	}
@@ -543,7 +551,8 @@ uint16_t sdk_media_session_decode(
 	struct SDKVideoStreamResult video_result;
 	uint16_t status;
 
-	if (!result || session == 0U || flags != 0U)
+	if (!result || session == 0U ||
+	    (flags & ~SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME) != 0U)
 		return SDK_STATUS_BAD_REQUEST;
 	if (!active_session(session))
 		return SDK_STATUS_BAD_HANDLE;
@@ -557,11 +566,13 @@ uint16_t sdk_media_session_decode(
 	}
 	memset(&decode, 0, sizeof(decode));
 	decode.session = session;
+	decode.flags = flags;
 	status = sdk_video_stream_decode(&decode, &video_result);
 	if (status != SDK_STATUS_OK) {
 		if (status == SDK_STATUS_BUSY)
 			update_audio();
-		if (status == SDK_STATUS_IO_ERROR)
+		if (status == SDK_STATUS_IO_ERROR ||
+		    status == SDK_STATUS_UNSUPPORTED)
 			media.state = SDK_MEDIA_SESSION_STATE_ERROR;
 		return status;
 	}
@@ -755,7 +766,7 @@ uint16_t sdk_media_session_audio_bind(
 		return SDK_STATUS_BAD_HANDLE;
 	if (media.state == SDK_MEDIA_SESSION_STATE_ERROR)
 		return SDK_STATUS_IO_ERROR;
-	if (media.audio_codec != SDK_MEDIA_AUDIO_MP2)
+	if (!media_pcm_codec(media.audio_codec))
 		return SDK_STATUS_UNSUPPORTED;
 	if (!media.audio_bound) {
 		if (flags != 0U)

@@ -7,6 +7,7 @@
 #include "zz9k-picture-viewer.h"
 
 #include "zz9k/caps.h"
+#include "zz9k/image.h"
 #include "zz9k/image_geometry.h"
 #include <stdio.h>
 #include <string.h>
@@ -36,6 +37,9 @@ ZZ9KPictureViewerCodec zz9k_picture_viewer_detect_codec(
 	    memcmp(bytes, png_signature, sizeof(png_signature)) == 0) {
 		return ZZ9K_PICTURE_VIEWER_CODEC_PNG;
 	}
+	if (zz9k_webp_parse_header(bytes, length, NULL) == ZZ9K_WEBP_PARSE_READY) {
+		return ZZ9K_PICTURE_VIEWER_CODEC_WEBP;
+	}
 	return ZZ9K_PICTURE_VIEWER_CODEC_UNKNOWN;
 }
 
@@ -46,6 +50,8 @@ const char *zz9k_picture_viewer_codec_name(ZZ9KPictureViewerCodec codec)
 		return "JPEG";
 	case ZZ9K_PICTURE_VIEWER_CODEC_PNG:
 		return "PNG";
+	case ZZ9K_PICTURE_VIEWER_CODEC_WEBP:
+		return "WebP";
 	default:
 		return "unknown";
 	}

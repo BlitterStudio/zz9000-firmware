@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include "../tools/zzplay/zzplay-formats.h"
 #include "../tools/zzplay/zzplay-probe.h"
 #include "../tools/zzplay/zzplay-stats.h"
 #include "../tools/zzplay/zzplay-stream.h"
@@ -139,6 +140,152 @@ static int check_mp3_file_probe(void)
   return 1;
 }
 
+/* A native FLAC file is classified with its STREAMINFO geometry; the same
+ * bytes behind an Ogg page header are not claimed. */
+static int check_flac_file_probe(void)
+{
+  uint8_t stream[64];
+  ZZPlayProbeInfo probe;
+  FILE *file;
+  int ok;
+
+  memset(stream, 0, sizeof(stream));
+  memcpy(stream, "fLaC", 4U);
+  stream[4] = 0x80U;            /* last block, STREAMINFO */
+  stream[7] = 34U;
+  stream[8] = 0x10U;            /* 4096-sample blocks */
+  stream[10] = 0x10U;
+  stream[18] = 0x17U;           /* 96000 Hz, stereo, 24-bit */
+  stream[19] = 0x70U;
+  stream[20] = 0x03U;
+  stream[21] = 0x70U;
+  stream[23] = 0x01U;           /* 96000 samples */
+  stream[24] = 0x77U;
+  file = tmpfile();
+  if (!file || fwrite(stream, 1U, sizeof(stream), file) != sizeof(stream) ||
+      fflush(file) != 0) {
+    if (file) fclose(file);
+    return 0;
+  }
+  memset(&probe, 0, sizeof(probe));
+  ok = zzplay_probe_media_file(file, &probe) && ftell(file) == 0L &&
+       probe.kind == ZZPLAY_MEDIA_KIND_FLAC &&
+       probe.flac.sample_rate == 96000U && probe.flac.channels == 2U &&
+       probe.flac.bits_per_sample == 24U &&
+       probe.flac.total_samples == 96000U;
+  fclose(file);
+  if (!ok) {
+    return 0;
+  }
+  memcpy(stream, "OggS", 4U);
+  file = tmpfile();
+  if (!file || fwrite(stream, 1U, sizeof(stream), file) != sizeof(stream) ||
+      fflush(file) != 0) {
+    if (file) fclose(file);
+    return 0;
+  }
+  ok = !zzplay_probe_media_file(file, &probe) &&
+       probe.kind == ZZPLAY_MEDIA_KIND_UNSUPPORTED;
+  fclose(file);
+  return ok && zzplay_format_for_path("Work:a.FLAC") &&
+         zzplay_format_for_path("Work:a.FLAC")->kind ==
+             ZZPLAY_MEDIA_KIND_FLAC;
+}
+
+/* First page of a libvorbis (ffmpeg) stereo 44.1 kHz stream, verbatim. */
+static const uint8_t vorbis_first_page[58] = {
+  0x4f, 0x67, 0x67, 0x53, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x12, 0xea, 0x84, 0x19, 0x00, 0x00, 0x00, 0x00, 0xa6, 0xe9,
+  0x8d, 0xe1, 0x01, 0x1e, 0x01, 0x76, 0x6f, 0x72, 0x62, 0x69, 0x73, 0x00,
+  0x00, 0x00, 0x00, 0x02, 0x44, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x80, 0xb5, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xb8, 0x01
+};
+
+/* Appends a minimal Ogg page header (one empty segment) for `serial` with
+ * the given granule position. */
+static size_t put_ogg_page(uint8_t *out, uint32_t serial, uint64_t granule)
+{
+  int b;
+
+  memset(out, 0, 28U);
+  memcpy(out, "OggS", 4U);
+  for (b = 0; b < 8; b++) {
+    out[6 + b] = (uint8_t)(granule >> (8 * b));
+  }
+  for (b = 0; b < 4; b++) {
+    out[14 + b] = (uint8_t)(serial >> (8 * b));
+  }
+  out[26] = 1U;
+  return 28U;
+}
+
+static FILE *temp_with(const uint8_t *data, size_t length)
+{
+  FILE *file = tmpfile();
+
+  if (!file || fwrite(data, 1U, length, file) != length ||
+      fflush(file) != 0) {
+    if (file) fclose(file);
+    return 0;
+  }
+  return file;
+}
+
+/* An Ogg Vorbis file is classified from its identification page and its
+ * duration comes from the last page of the same logical stream; Ogg Opus
+ * is not claimed, and a tail holding only another stream's pages leaves
+ * the duration unknown. */
+static int check_vorbis_file_probe(void)
+{
+  uint8_t stream[256];
+  ZZPlayProbeInfo probe;
+  uint64_t granule = 0U;
+  size_t length = sizeof(vorbis_first_page);
+  FILE *file;
+  int ok;
+
+  memcpy(stream, vorbis_first_page, length);
+  length += put_ogg_page(stream + length, 0x1984ea12UL, 0U);
+  length += put_ogg_page(stream + length, 0x1984ea12UL, 44100U);
+  length += put_ogg_page(stream + length, 0x1984ea12UL, UINT64_MAX);
+  length += put_ogg_page(stream + length, 0x0badf00dUL, 99999U);
+  file = temp_with(stream, length);
+  if (!file) {
+    return 0;
+  }
+  memset(&probe, 0, sizeof(probe));
+  ok = zzplay_probe_media_file(file, &probe) && ftell(file) == 0L &&
+       probe.kind == ZZPLAY_MEDIA_KIND_VORBIS &&
+       probe.vorbis.sample_rate == 44100U && probe.vorbis.channels == 2U &&
+       probe.vorbis.serial == 0x1984ea12UL &&
+       probe.vorbis.nominal_bitrate == 112000U &&
+       zzplay_ogg_last_granule(file, probe.vorbis.serial, &granule) &&
+       granule == 44100U;
+  granule = 7U;
+  ok = ok && !zzplay_ogg_last_granule(file, 0x12345678UL, &granule) &&
+       granule == 7U;
+  fclose(file);
+  if (!ok) {
+    return 0;
+  }
+  memcpy(stream, vorbis_first_page, sizeof(vorbis_first_page));
+  memcpy(stream + 28, "\x13OpusHead", 9U);
+  stream[27] = 0x13U;
+  file = temp_with(stream, sizeof(vorbis_first_page));
+  if (!file) {
+    return 0;
+  }
+  ok = !zzplay_probe_media_file(file, &probe) &&
+       probe.kind == ZZPLAY_MEDIA_KIND_UNSUPPORTED;
+  fclose(file);
+  return ok && zzplay_format_for_path("Work:a.oga") &&
+         zzplay_format_for_path("Work:a.oga")->kind ==
+             ZZPLAY_MEDIA_KIND_VORBIS &&
+         zzplay_format_for_path("Work:a.OGG") &&
+         zzplay_format_for_path("Work:a.OGG")->kind ==
+             ZZPLAY_MEDIA_KIND_VORBIS;
+}
+
 static int check_stats_and_transport(void)
 {
   ZZPlayStatsCore stats;
@@ -205,6 +352,179 @@ static int check_stats_and_transport(void)
   transport.eof_sent = 1;
   return zzplay_transport_write_flags(&transport) == 0U;
 }
+static int check_webp_probe(void)
+{
+  static const uint8_t webp_lossy[] = {
+    0x52, 0x49, 0x46, 0x46, 0x64, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+    0x56, 0x50, 0x38, 0x20, 0x58, 0x00, 0x00, 0x00, 0xf0, 0x02, 0x00, 0x9d,
+    0x01, 0x2a, 0x03, 0x00, 0x05, 0x00, 0x02, 0x00, 0x34, 0x25, 0xb0, 0x02
+  };
+  static const uint8_t webp_alpha[] = {
+    0x52, 0x49, 0x46, 0x46, 0x62, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+    0x56, 0x50, 0x38, 0x4c, 0x55, 0x00, 0x00, 0x00, 0x2f, 0x02, 0xc0, 0x00,
+    0x10, 0x57, 0x40, 0x20, 0x40, 0x91
+  };
+  static const uint8_t webp_anim[] = {
+    0x52, 0x49, 0x46, 0x46, 0x84, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+    0x56, 0x50, 0x38, 0x58, 0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x05, 0x00, 0x00, 0x03, 0x00, 0x00
+  };
+  static const uint8_t wave_riff[] = {
+    0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45,
+    0x66, 0x6d, 0x74, 0x20, 0x10, 0x00, 0x00, 0x00
+  };
+  static const uint8_t avi_riff[] = {
+    0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x41, 0x56, 0x49, 0x20,
+    0x4c, 0x49, 0x53, 0x54, 0x10, 0x00, 0x00, 0x00
+  };
+  ZZPlayWebPInfo info;
+
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_webp(webp_anim, sizeof(webp_anim), &info)) {
+    return 0;
+  }
+  if (!info.is_animated || info.width != 6U || info.height != 4U) {
+    return 0;
+  }
+
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_webp(webp_lossy, sizeof(webp_lossy), &info)) {
+    return 0;
+  }
+  if (info.is_animated != 0 || info.width != 3U || info.height != 5U) {
+    return 0;
+  }
+
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_webp(webp_alpha, sizeof(webp_alpha), &info)) {
+    return 0;
+  }
+  if (info.is_animated != 0 || info.has_alpha == 0) {
+    return 0;
+  }
+
+  if (zzplay_probe_webp(wave_riff, sizeof(wave_riff), &info)) {
+    return 0;
+  }
+
+  if (zzplay_probe_webp(avi_riff, sizeof(avi_riff), &info)) {
+    return 0;
+  }
+
+  if (zzplay_probe_webp(webp_anim, 10U, &info) ||
+      zzplay_probe_webp(webp_anim, 29U, &info)) {
+    return 0;
+  }
+
+  if (zzplay_probe_webp(NULL, sizeof(webp_anim), &info) ||
+      zzplay_probe_webp(webp_anim, 0U, &info)) {
+    return 0;
+  }
+
+  info.width = 6U;
+  info.height = 4U;
+  info.is_animated = 1;
+  if (zzplay_webp_info_supported(&info)) return 0;
+  info.width = 320U;
+  info.height = 240U;
+  info.is_animated = 1;
+  if (!zzplay_webp_info_supported(&info)) return 0;
+  info.is_animated = 0;
+  if (zzplay_webp_info_supported(&info)) return 0;
+  if (zzplay_webp_info_supported(NULL)) return 0;
+
+  return 1;
+}
+
+static int check_webp_file_probe(void)
+{
+  static const uint8_t webp_anim[] = {
+    0x52, 0x49, 0x46, 0x46, 0x84, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+    0x56, 0x50, 0x38, 0x58, 0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x05, 0x00, 0x00, 0x03, 0x00, 0x00
+  };
+  static const uint8_t webp_lossy[] = {
+    0x52, 0x49, 0x46, 0x46, 0x64, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+    0x56, 0x50, 0x38, 0x20, 0x58, 0x00, 0x00, 0x00, 0xf0, 0x02, 0x00, 0x9d,
+    0x01, 0x2a, 0x03, 0x00, 0x05, 0x00, 0x02, 0x00, 0x34, 0x25, 0xb0, 0x02
+  };
+  static const uint8_t wave_riff[] = {
+    0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45,
+    0x66, 0x6d, 0x74, 0x20, 0x10, 0x00, 0x00, 0x00
+  };
+  FILE *file;
+  ZZPlayProbeInfo pinfo;
+
+  file = tmpfile();
+  if (!file) return 0;
+  if (fwrite(webp_anim, 1U, sizeof(webp_anim), file) != sizeof(webp_anim) ||
+      fflush(file) != 0 || fseek(file, 0L, SEEK_SET) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&pinfo, 0, sizeof(pinfo));
+  if (!zzplay_probe_media_file(file, &pinfo) ||
+      pinfo.kind != ZZPLAY_MEDIA_KIND_WEBP ||
+      !pinfo.webp.is_animated ||
+      pinfo.webp.width != 6U ||
+      pinfo.webp.height != 4U ||
+      ftell(file) != 0L) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+
+  file = tmpfile();
+  if (!file) return 0;
+  if (fwrite(webp_lossy, 1U, sizeof(webp_lossy), file) != sizeof(webp_lossy) ||
+      fflush(file) != 0 || fseek(file, 0L, SEEK_SET) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&pinfo, 0, sizeof(pinfo));
+  if (zzplay_probe_media_file(file, &pinfo) ||
+      pinfo.kind != ZZPLAY_MEDIA_KIND_UNSUPPORTED ||
+      ftell(file) != 0L) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+
+  file = tmpfile();
+  if (!file) return 0;
+  if (fwrite(wave_riff, 1U, sizeof(wave_riff), file) != sizeof(wave_riff) ||
+      fflush(file) != 0 || fseek(file, 0L, SEEK_SET) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&pinfo, 0, sizeof(pinfo));
+  if (zzplay_probe_media_file(file, &pinfo) ||
+      pinfo.kind != ZZPLAY_MEDIA_KIND_UNSUPPORTED ||
+      ftell(file) != 0L) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+
+  file = tmpfile();
+  if (!file) return 0;
+  if (fwrite(webp_anim, 1U, 14U, file) != 14U ||
+      fflush(file) != 0 || fseek(file, 0L, SEEK_SET) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&pinfo, 0, sizeof(pinfo));
+  if (zzplay_probe_media_file(file, &pinfo) ||
+      pinfo.kind != ZZPLAY_MEDIA_KIND_UNSUPPORTED ||
+      ftell(file) != 0L) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+
+  return 1;
+}
+
 
 int main(void)
 {
@@ -291,6 +611,18 @@ int main(void)
   }
   if (!check_mp3_file_probe()) {
     return 14;
+  }
+  if (!check_flac_file_probe()) {
+    return 17;
+  }
+  if (!check_vorbis_file_probe()) {
+    return 18;
+  }
+  if (!check_webp_probe()) {
+    return 15;
+  }
+  if (!check_webp_file_probe()) {
+    return 16;
   }
   return 0;
 }

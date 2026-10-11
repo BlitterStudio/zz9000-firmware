@@ -68,7 +68,8 @@ static int string_matches(const unsigned char *data, size_t length,
 
 static int validate_descriptor(const char *label, const struct byte_buffer *blob,
                                const char *name, const char *identifier,
-                               const unsigned char *recognition,
+                               const char *group, const char *base_name,
+                               const int *recognition,
                                size_t recognition_length, size_t expected_length)
 {
   const unsigned char *data = blob->data;
@@ -101,16 +102,18 @@ static int validate_descriptor(const char *label, const struct byte_buffer *blob
       dthd_length < 32U + recognition_length * 2U ||
       read_be32(dthd) != 32U + recognition_length * 2U ||
       read_be32(dthd + 4U) != 33U + recognition_length * 2U + strlen(name) ||
-      read_be32(dthd + 8U) != 46U + recognition_length * 2U + strlen(name) ||
+      read_be32(dthd + 8U) != 34U + recognition_length * 2U + strlen(name) +
+                                    strlen(base_name) ||
       read_be32(dthd + 12U) != 32U ||
       read_be16(dthd + 24U) != recognition_length ||
       read_be16(dthd + 28U) != 0U || read_be16(dthd + 30U) != 10U ||
-      memcmp(dthd + 16U, "pict", 4U) || memcmp(dthd + 20U, identifier, 4U) ||
+      memcmp(dthd + 16U, group, 4U) || memcmp(dthd + 20U, identifier, 4U) ||
       !string_matches(dthd, dthd_length, read_be32(dthd), name) ||
-      !string_matches(dthd, dthd_length, read_be32(dthd + 4U), "zz9k-picture") ||
+      !string_matches(dthd, dthd_length, read_be32(dthd + 4U), base_name) ||
       !string_matches(dthd, dthd_length, read_be32(dthd + 8U), "#?")) goto invalid;
   for (i = 0; i < recognition_length; ++i) {
-    if (read_be16(dthd + 32U + i * 2U) != recognition[i]) goto invalid;
+    unsigned int expected = recognition[i] < 0 ? 0xffffU : (unsigned int)recognition[i];
+    if (read_be16(dthd + 32U + i * 2U) != expected) goto invalid;
   }
   return 1;
 invalid:
@@ -129,13 +132,38 @@ static int validate_icon(const char *label, const struct byte_buffer *icon)
 }
 
 static int run_generator(const char *python, const char *generator,
-                         const char *source, const char *output)
+                         const char *source, const char *output,
+                         const char *code_dir)
 {
-  char command[4096];
-  int length = snprintf(command, sizeof(command),
-      "\"%s\" \"%s\" --source-dir \"%s\" --output-dir \"%s\"",
-      python, generator, source, output);
+  char command[4096], code_argument[1024] = "";
+  int length;
+  if (code_dir &&
+      (size_t)snprintf(code_argument, sizeof(code_argument),
+                       " --code-dir \"%s\"", code_dir) >= sizeof(code_argument))
+    return 0;
+#ifdef _WIN32
+  length = snprintf(command, sizeof(command),
+      "\"\"%s\" \"%s\" --source-dir \"%s\" --output-dir \"%s\"%s\"",
+      python, generator, source, output, code_argument);
+#else
+  length = snprintf(command, sizeof(command),
+      "\"%s\" \"%s\" --source-dir \"%s\" --output-dir \"%s\"%s",
+      python, generator, source, output, code_argument);
+#endif
   return length >= 0 && (size_t)length < sizeof(command) && system(command) == 0;
+}
+
+/* Stand-in recognition executable: the generator only requires an AmigaDOS
+ * hunk header and must embed the bytes verbatim. */
+static const unsigned char placeholder_code[] = {
+    0x00, 0x00, 0x03, 0xf3, 0x00, 0x00, 0x00, 0x00, 0x4e, 0x75, 0x4e, 0x71};
+
+static int write_file(const char *path, const void *data, size_t length)
+{
+  FILE *file = fopen(path, "wb");
+  int ok = file && fwrite(data, 1U, length, file) == length;
+  if (file && fclose(file) != 0) ok = 0;
+  return ok;
 }
 
 static int make_clean_directory(const char *path)
@@ -168,7 +196,7 @@ static int check_malformed_metadata(const char *python, const char *generator)
             "Pattern=#?\nFlags=Binary,n,10\nInstall=inactive\n",
             cases[index].destination, cases[index].recognition);
     fclose(file);
-    if (run_generator(python, generator, source, output)) {
+    if (run_generator(python, generator, source, output, 0)) {
       printf("generator accepted malformed metadata case %lu\n",
              (unsigned long)index);
       ok = 0;
@@ -241,7 +269,7 @@ static int check_webp_wildcards(const char *python, const char *generator)
         "Recog=52 49 46 46 ?? ?? ?? ?? 57 45 42 50\n"
         "Pattern=#?\nFlags=Binary,n,10\nInstall=inactive\n", file);
   fclose(file);
-  if (!run_generator(python, generator, source, output)) return 0;
+  if (!run_generator(python, generator, source, output, 0)) return 0;
   snprintf(output_path, sizeof(output_path), "%s/ZZ9000-WebP", output);
   descriptor = read_binary_file(output_path);
   ok = recognition_matches(&descriptor, webp_a, sizeof(webp_a)) &&
@@ -255,39 +283,202 @@ static int check_webp_wildcards(const char *python, const char *generator)
   return ok;
 }
 
+static const unsigned char *find_chunk(const struct byte_buffer *blob,
+                                       const char *id, size_t *length)
+{
+  size_t offset = 12U;
+  while (offset + 8U <= blob->length) {
+    unsigned long chunk_length = read_be32(blob->data + offset + 4U);
+    if (chunk_length > blob->length - offset - 8U) return 0;
+    if (!memcmp(blob->data + offset, id, 4U)) {
+      *length = (size_t)chunk_length;
+      return blob->data + offset + 8U;
+    }
+    offset += 8U + (size_t)chunk_length + (chunk_length & 1U);
+  }
+  return 0;
+}
+
+/* The MP3 descriptor delegates recognition to its DTCD hook: the mask must be
+ * empty so datatypes.library calls the hook, and the hook bytes are embedded
+ * verbatim. Byte masks cannot express "optional ID3v2 tag, then Layer III". */
+static int check_mp3_hook(const struct byte_buffer *descriptor)
+{
+  size_t length = 0;
+  const unsigned char *code = find_chunk(descriptor, "DTCD", &length);
+  int ok = code && length == sizeof(placeholder_code) &&
+           !memcmp(code, placeholder_code, sizeof(placeholder_code));
+  if (!ok) printf("ZZ9000-MP3: DTCD hook chunk missing or altered\n");
+  return ok;
+}
+
+static int expect_generator_rejects(const char *python, const char *generator,
+                                    const char *label, const char *metadata,
+                                    const char *code_dir)
+{
+  const char *source = "datatype_descriptor_test_code_source";
+  const char *output = "datatype_descriptor_test_code_output";
+  char path[256], output_path[256];
+  int rejected;
+  if (!make_clean_directory(source) || !make_clean_directory(output)) return 0;
+  snprintf(path, sizeof(path), "%s/bad.dtid", source);
+  snprintf(output_path, sizeof(output_path), "%s/bad", output);
+  if (!write_file(path, metadata, strlen(metadata))) return 0;
+  rejected = !run_generator(python, generator, source, output, code_dir);
+  if (!rejected) printf("generator accepted %s\n", label);
+  remove(output_path); remove(path);
+  remove_directory(source); remove_directory(output);
+  return rejected;
+}
+
+static int check_code_rules(const char *python, const char *generator,
+                            const char *code_dir)
+{
+  static const char base[] =
+      "FileName=Storage/DataTypes/bad\nVersion=42.5\nDTName=bad,zz9k-sound\n"
+      "ID=soun,bad<nul>\nPattern=#?\nFlags=Binary,n,10\nInstall=inactive\n";
+  static const char not_hunk[] = "not an executable";
+  char metadata[512], path[256];
+  int ok;
+  snprintf(metadata, sizeof(metadata), "%sRecog=none\n", base);
+  ok = expect_generator_rejects(python, generator,
+                                "an empty mask without a hook", metadata,
+                                code_dir);
+  snprintf(metadata, sizeof(metadata), "%sRecog=none\nCode=hook\n", base);
+  ok &= expect_generator_rejects(python, generator,
+                                 "a hook without --code-dir", metadata, 0);
+  snprintf(path, sizeof(path), "%s/hook", code_dir);
+  if (!write_file(path, not_hunk, sizeof(not_hunk))) return 0;
+  ok &= expect_generator_rejects(python, generator,
+                                 "a non-hunk hook", metadata, code_dir);
+  remove(path);
+  return ok;
+}
+
 int main(int argc, char **argv)
 {
-  static const unsigned char jpeg_recognition[] = {0xff, 0xd8, 0xff};
-  static const unsigned char png_recognition[] = {0x89, 0x50, 0x4e,
-                                                   0x47, 0x0d, 0x0a};
+  static const int jpeg_recognition[] = {0xff, 0xd8, 0xff};
+  static const int png_recognition[] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a};
+  static const int webp_recognition[] = {
+      0x52, 0x49, 0x46, 0x46, -1, -1, -1, -1, 0x57, 0x45, 0x42, 0x50
+  };
+  static const int flac_recognition[] = {0x66, 0x4c, 0x61, 0x43};
+  static const unsigned char native_flac[] = {'f', 'L', 'a', 'C', 0x00, 0x00};
+  static const unsigned char ogg_flac[] = {'O', 'g', 'g', 'S', 0x00, 0x02};
+  static const int vorbis_recognition[] = {
+      0x4f, 0x67, 0x67, 0x53, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, -1, -1, -1, -1, 0x00, 0x00, 0x00, 0x00, -1, -1, -1, -1,
+      0x01, 0x1e, 0x01, 0x76, 0x6f, 0x72, 0x62, 0x69, 0x73, 0x00, 0x00, 0x00,
+      0x00
+  };
+  /* First pages of an Ogg Vorbis, an Ogg Opus and an Ogg-FLAC stream: same
+   * page framing, different first packet. */
+  static const unsigned char vorbis_page[] = {
+      'O', 'g', 'g', 'S', 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0,
+      0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd,
+      0x01, 0x1e, 0x01, 'v', 'o', 'r', 'b', 'i', 's', 0, 0, 0, 0
+  };
+  static const unsigned char opus_page[] = {
+      'O', 'g', 'g', 'S', 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0,
+      0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd,
+      0x01, 0x13, 'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 0x01
+  };
+  static const unsigned char ogg_flac_page[] = {
+      'O', 'g', 'g', 'S', 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0,
+      0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd,
+      0x01, 0x33, 0x7f, 'F', 'L', 'A', 'C', 0x01, 0x00, 0, 1, 'f', 'L'
+  };
+  const char *code_dir = "datatype_descriptor_test_code";
+  char code_path[512];
   const char *output = "datatype_descriptor_test_output";
-  char jpeg_path[512], png_path[512];
-  struct byte_buffer jpeg, png, jpeg_icon, png_icon;
+  char jpeg_path[512], png_path[512], webp_path[512], mp3_path[512],
+      flac_path[512], vorbis_path[512];
+  struct byte_buffer jpeg, png, webp, mp3, flac, vorbis, jpeg_icon, png_icon,
+      webp_icon, mp3_icon, flac_icon, vorbis_icon;
   int ok;
-
-  if (argc != 6) {
-    printf("usage: %s <python> <generator> <descriptor-dir> <jpeg.info> <png.info>\n",
+  if (argc != 10) {
+    printf("usage: %s <python> <generator> <descriptor-dir> <jpeg.info> <png.info> <webp.info> <mp3.info> <flac.info> <oggvorbis.info>\n",
            argv[0]);
     return 2;
   }
-  if (!make_clean_directory(output) ||
-      !run_generator(argv[1], argv[2], argv[3], output)) return 1;
+  snprintf(code_path, sizeof(code_path), "%s/zz9k-mp3-recog", code_dir);
+  if (!make_clean_directory(output) || !make_clean_directory(code_dir) ||
+      !write_file(code_path, placeholder_code, sizeof(placeholder_code)) ||
+      !run_generator(argv[1], argv[2], argv[3], output, code_dir)) return 1;
   snprintf(jpeg_path, sizeof(jpeg_path), "%s/ZZ9000-JPEG", output);
   snprintf(png_path, sizeof(png_path), "%s/ZZ9000-PNG", output);
+  snprintf(webp_path, sizeof(webp_path), "%s/ZZ9000-WebP", output);
+  snprintf(mp3_path, sizeof(mp3_path), "%s/ZZ9000-MP3", output);
+  snprintf(flac_path, sizeof(flac_path), "%s/ZZ9000-FLAC", output);
+  snprintf(vorbis_path, sizeof(vorbis_path), "%s/ZZ9000-OggVorbis", output);
   jpeg = read_binary_file(jpeg_path);
   png = read_binary_file(png_path);
+  webp = read_binary_file(webp_path);
+  mp3 = read_binary_file(mp3_path);
+  flac = read_binary_file(flac_path);
+  vorbis = read_binary_file(vorbis_path);
   jpeg_icon = read_binary_file(argv[4]);
   png_icon = read_binary_file(argv[5]);
+  webp_icon = read_binary_file(argv[6]);
+  mp3_icon = read_binary_file(argv[7]);
+  flac_icon = read_binary_file(argv[8]);
+  vorbis_icon = read_binary_file(argv[9]);
   ok = validate_descriptor("ZZ9000-JPEG", &jpeg, "ZZ9000-JPEG", "jpeg",
-                           jpeg_recognition, sizeof(jpeg_recognition), 106U);
+                           "pict", "zz9k-picture",
+                           jpeg_recognition, sizeof(jpeg_recognition) / sizeof(jpeg_recognition[0]), 106U);
   ok &= validate_descriptor("ZZ9000-PNG", &png, "ZZ9000-PNG", "png\0",
-                            png_recognition, sizeof(png_recognition), 110U);
+                            "pict", "zz9k-picture",
+                            png_recognition, sizeof(png_recognition) / sizeof(png_recognition[0]), 110U);
+  ok &= validate_descriptor("ZZ9000-WebP", &webp, "ZZ9000-WebP", "webp",
+                            "pict", "zz9k-picture",
+                            webp_recognition, sizeof(webp_recognition) / sizeof(webp_recognition[0]), 124U);
+  ok &= validate_descriptor("ZZ9000-MP3", &mp3, "ZZ9000-MP3", "mp3 ",
+                            "soun", "zz9k-sound", 0, 0U, 116U);
+  ok &= validate_icon("ZZ9000-MP3.info", &mp3_icon);
+  ok &= validate_descriptor("ZZ9000-FLAC", &flac, "ZZ9000-FLAC", "flac",
+                            "soun", "zz9k-sound", flac_recognition,
+                            sizeof(flac_recognition) / sizeof(flac_recognition[0]),
+                            106U);
+  ok &= validate_icon("ZZ9000-FLAC.info", &flac_icon);
+  if (!recognition_matches(&flac, native_flac, sizeof(native_flac))) {
+    printf("ZZ9000-FLAC: failed to match native FLAC header\n");
+    ok = 0;
+  }
+  if (recognition_matches(&flac, ogg_flac, sizeof(ogg_flac))) {
+    printf("ZZ9000-FLAC: unexpectedly matched Ogg-FLAC header\n");
+    ok = 0;
+  }
+  ok &= validate_descriptor("ZZ9000-OggVorbis", &vorbis, "ZZ9000-OggVorbis",
+                            "oggv", "soun", "zz9k-sound", vorbis_recognition,
+                            sizeof(vorbis_recognition) /
+                                sizeof(vorbis_recognition[0]),
+                            186U);
+  ok &= validate_icon("ZZ9000-OggVorbis.info", &vorbis_icon);
+  if (!recognition_matches(&vorbis, vorbis_page, sizeof(vorbis_page))) {
+    printf("ZZ9000-OggVorbis: failed to match a Vorbis identification page\n");
+    ok = 0;
+  }
+  if (recognition_matches(&vorbis, opus_page, sizeof(opus_page)) ||
+      recognition_matches(&vorbis, ogg_flac_page, sizeof(ogg_flac_page))) {
+    printf("ZZ9000-OggVorbis: unexpectedly matched an Opus or Ogg-FLAC page\n");
+    ok = 0;
+  }
+  ok &= check_mp3_hook(&mp3);
+  ok &= check_code_rules(argv[1], argv[2], code_dir);
   ok &= validate_icon("ZZ9000-JPEG.info", &jpeg_icon);
   ok &= validate_icon("ZZ9000-PNG.info", &png_icon);
+  ok &= validate_icon("ZZ9000-WebP.info", &webp_icon);
   ok &= check_malformed_metadata(argv[1], argv[2]);
   ok &= check_webp_wildcards(argv[1], argv[2]);
-  free(jpeg.data); free(png.data); free(jpeg_icon.data); free(png_icon.data);
-  remove(jpeg_path); remove(png_path); remove_directory(output);
+  free(jpeg.data); free(png.data); free(webp.data);
+  free(mp3.data); free(mp3_icon.data);
+  free(flac.data); free(flac_icon.data);
+  free(vorbis.data); free(vorbis_icon.data);
+  remove(jpeg_path); remove(png_path); remove(webp_path); remove(mp3_path);
+  remove(flac_path); remove(vorbis_path);
+  remove(code_path);
+  remove_directory(output);
+  remove_directory(code_dir);
   return ok ? 0 : 1;
 }
 

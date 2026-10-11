@@ -258,13 +258,19 @@ taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len)
     return TASK_LONG;               /* full audio decode: always heavy */
   case TASKQ_OP_IMAGE_SESSION_FEED:
   case TASKQ_OP_IMAGE_SESSION_CLOSE:
+  case TASKQ_OP_IMAGE_ANIMATION_FRAME_NEXT:
+  case TASKQ_OP_IMAGE_ANIMATION_FRAME_PRESENT:
+  case TASKQ_OP_IMAGE_ANIMATION_FRAME_RETIRE:
+  case TASKQ_OP_IMAGE_ANIMATION_RESTART:
     /* MUST stay LONG regardless of size: the session codec state lives
      * in core 1's cache, so a core-0 SHORT drain would corrupt it. */
     return TASK_LONG;
   case TASKQ_OP_AUDIO_STREAM_FEED:
   case TASKQ_OP_AUDIO_STREAM_READ:
-    /* Same constraint: the stream's mp3 staging ring is cache-owned by
-     * core 1 for core-1-affine streams. */
+  case TASKQ_OP_AUDIO_STREAM_CLOSE:
+    /* Same constraint: the stream's mp3 staging ring (and a FLAC or
+     * Vorbis stream's decoder heap) is cache-owned by core 1 for
+     * core-1-affine streams. */
     return TASK_LONG;
   case TASKQ_OP_VIDEO_SESSION_WRITE:
   case TASKQ_OP_VIDEO_SESSION_DECODE:

@@ -458,13 +458,56 @@ static inline int zz9k_reply_image_session_result(
 
   if (result->session == 0U ||
       result->state < ZZ9K_IMAGE_SESSION_STATE_NEED_INPUT ||
-      result->state > ZZ9K_IMAGE_SESSION_STATE_ERROR) {
+      result->state > ZZ9K_IMAGE_SESSION_STATE_ANIMATION_ENDED) {
     memset(result, 0, sizeof(*result));
     return ZZ9K_STATUS_INTERNAL_ERROR;
   }
 
   return ZZ9K_STATUS_OK;
 }
+static inline int zz9k_reply_image_animation_frame_result(
+    const ZZ9KMailboxEntry *reply,
+    uint16_t opcode,
+    ZZ9KImageAnimationFrameResult *result)
+{
+  const uint8_t *payload;
+  int status;
+
+  if (!result) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  memset(result, 0, sizeof(*result));
+  status = zz9k_reply_require(reply, opcode,
+                              sizeof(ZZ9KImageAnimationFrameResultPayload));
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  payload = reply->payload.inline_data;
+  result->session = zz9k_get_be32(&payload[0]);
+  result->state = zz9k_get_be32(&payload[4]);
+  result->canvas_width = zz9k_get_be32(&payload[8]);
+  result->canvas_height = zz9k_get_be32(&payload[12]);
+  result->frame_index = zz9k_get_be32(&payload[16]);
+  result->frame_duration_ms = zz9k_get_be32(&payload[20]);
+  result->loop_index = zz9k_get_be32(&payload[24]);
+  result->loop_count = zz9k_get_be32(&payload[28]);
+  result->frame_token = zz9k_get_be32(&payload[32]);
+  result->output_format = zz9k_get_be32(&payload[36]);
+  result->flags = zz9k_get_be32(&payload[40]);
+  result->reserved = zz9k_get_be32(&payload[44]);
+
+  if (result->session == 0U ||
+      result->state < ZZ9K_IMAGE_SESSION_STATE_NEED_INPUT ||
+      result->state > ZZ9K_IMAGE_SESSION_STATE_ANIMATION_ENDED) {
+    memset(result, 0, sizeof(*result));
+    return ZZ9K_STATUS_INTERNAL_ERROR;
+  }
+
+  return ZZ9K_STATUS_OK;
+}
+
 
 static inline int zz9k_reply_audio_decode_result(
     const ZZ9KMailboxEntry *reply,
@@ -513,6 +556,7 @@ static inline int zz9k_reply_audio_stream_result(
 
   if (!result ||
       (opcode != ZZ9K_OP_AUDIO_STREAM_BEGIN &&
+       opcode != ZZ9K_OP_AUDIO_STREAM_BEGIN_EX &&
        opcode != ZZ9K_OP_AUDIO_STREAM_FEED &&
        opcode != ZZ9K_OP_AUDIO_STREAM_READ &&
        opcode != ZZ9K_OP_AUDIO_STREAM_CLOSE &&

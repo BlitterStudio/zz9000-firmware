@@ -35,6 +35,7 @@ struct SDKVideoStreamWrite {
 
 struct SDKVideoStreamDecode {
 	uint32_t session;
+	uint32_t flags;
 };
 
 struct SDKVideoStreamResult {

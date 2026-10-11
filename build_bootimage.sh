@@ -6,7 +6,7 @@
 #
 # Inputs:
 #   bootimage_work/FSBL_exec.elf              (committed)
-#   bootimage_work/bootrom.bin                (generated with --preload-bootrom)
+#   bootimage_work/bootrom.bin                (generated unless --no-preload-bootrom)
 #   bootimage_work/zz9000_ps_wrapper.bit      (committed or rebuilt by build_bitstream.sh)
 #   ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf  (rebuilt by build_firmware.sh)
 #
@@ -25,7 +25,7 @@ cd "$SCRIPT_DIR"
 usage() {
     cat >&2 <<'EOF'
 Usage: ./build_bootimage.sh [--bitstream PATH] [--firmware PATH]
-                            [--output PATH] [--preload-bootrom]
+                            [--output PATH] [--no-preload-bootrom]
 
 Options:
   --bitstream PATH   FPGA bitstream to package
@@ -34,15 +34,24 @@ Options:
                      (default: ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf)
   --output PATH      BOOT.bin output path
                      (default: bootimage_work/BOOT.bin)
-  --preload-bootrom  Add the 8 KB autoboot ROM data partition before the
-                     FPGA bitstream. Experimental; not used by release builds.
+  --no-preload-bootrom
+                     Leave out the 8 KB autoboot ROM data partition that
+                     normally precedes the FPGA bitstream (diagnostics only).
+                     Without it the ROM reaches DDR only as the firmware
+                     ELF's last segment.
 EOF
 }
 
 BITSTREAM=bootimage_work/zz9000_ps_wrapper.bit
 FIRMWARE=ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf
 OUTPUT=bootimage_work/BOOT.bin
-PRELOAD_BOOTROM=0
+# On by default. The ROM is a pure data partition (no exec address) ahead
+# of the bitstream, so it is in DDR before the FPGA can answer autoconfig;
+# the FSBL opens the PL->PS path right after the bitstream (fsbl_hooks.c).
+# Needs the ZZ9000 FSBL that treats exec-less PS partitions as data: the
+# stock Xilinx rule rejects any PS partition before the bitstream
+# ("Partition order invalid").
+PRELOAD_BOOTROM=1
 BOOTROM_IMAGE=bootimage_work/bootrom.bin
 BOOTROM_LOAD_ADDRESS=0x3FCF0000
 TMP_BIF=
@@ -82,7 +91,12 @@ while [ "$#" -gt 0 ]; do
             FIRMWARE=$2
             shift 2
             ;;
+        --no-preload-bootrom)
+            PRELOAD_BOOTROM=0
+            shift
+            ;;
         --preload-bootrom)
+            # Accepted for existing callers; preloading is the default.
             PRELOAD_BOOTROM=1
             shift
             ;;
@@ -152,7 +166,7 @@ echo "[bootimage] bitstream: $BITSTREAM"
 echo "[bootimage] firmware:  $FIRMWARE"
 echo "[bootimage] output:    $OUTPUT"
 if [ "$PRELOAD_BOOTROM" -eq 1 ]; then
-    echo "[bootimage] bootrom:   $BOOTROM_IMAGE -> $BOOTROM_LOAD_ADDRESS"
+    echo "[bootimage] bootrom:   $BOOTROM_IMAGE -> $BOOTROM_LOAD_ADDRESS (data, before bitstream)"
 fi
 
 mkdir -p "$(dirname "$OUTPUT")"

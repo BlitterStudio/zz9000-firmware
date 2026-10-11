@@ -29,6 +29,12 @@ import sys
 from fractions import Fraction
 
 RATES = [8000, 12000, 24000, 32000, 44100]
+# Source -> 48 kHz only. 11025's 20 ms period is not an integer frame
+# count (the pump converts a 40 ms quantum). 88200 and 96000 are
+# decimation: fst = min(in, out) / 2 is the output Nyquist, so energy
+# above 24 kHz is in the stop-band. Reverse (capture) ratios are not
+# generated; the lease plane does not accept these rates.
+PLAYBACK_RATES = [11025, 16000, 22050, 88200, 96000]
 MASTER = 48000
 ATTEN_DB = 80.0
 PASSBAND_FACTOR = 0.45
@@ -55,7 +61,7 @@ HEADER = """/*
  * Regenerate with: python util/gen_audio_convert_tables.py
  * Design: Kaiser windowed-sinc polyphase FIR, A = {atten:g} dB,
  *         passband edge {pbf} * min(fs_in, fs_out), stopband edge
- *         min(fs_in, fs_out) - passband edge, causal delayed-symmetric
+ *         min(fs_in, fs_out) / 2, causal delayed-symmetric
  *         kernel, exact-rational phase stepping, unity DC gain per phase
  *         (Q14 tap sum == 16384, runtime round-shift 14), per-phase L1 <= {l1}.
  */
@@ -101,7 +107,10 @@ def design_direction(in_rate, out_rate):
     q, p = frac.numerator, frac.denominator
     lo = min(in_rate, out_rate)
     fp = PASSBAND_FACTOR * lo  # -0.1 dB passband edge
-    fst = lo / 2.0             # stop-band edge at min-rate Nyquist
+    # Stop-band starts at the slower rate's Nyquist. For decimation that
+    # is the output Nyquist (anti-alias); a wider edge lets a sampled
+    # kernel's periodic replica passband land in-band for near-unity ratios.
+    fst = lo / 2.0
     # The -6 dB sinc cutoff sits mid-transition so the response is still
     # within ripple spec at fp and fully attenuated by fst.
     fc = (fp + fst) / 2.0
@@ -220,6 +229,8 @@ def main():
     for rate in RATES:
         directions.append(design_direction(rate, MASTER))  # playback
         directions.append(design_direction(MASTER, rate))  # capture
+    for rate in PLAYBACK_RATES:
+        directions.append(design_direction(rate, MASTER))  # pump only
     directions.sort(key=lambda d: (d["in_rate"], d["out_rate"]))
 
     tables_h = os.path.join(src_dir, "audio_convert_tables.h")

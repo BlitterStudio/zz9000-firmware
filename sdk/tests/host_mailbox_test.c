@@ -1686,6 +1686,84 @@ static int test_image_session_helpers_roundtrip_results(void)
   zz9k_close(ctx);
   return 0;
 }
+static int test_image_animation_helpers_roundtrip_results(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KContext *ctx;
+  ZZ9KBoard board;
+  ZZ9KImageAnimationFrameResult result;
+
+  init_mailbox(&mailbox);
+  memset(&board, 0, sizeof(board));
+  if (zz9k_attach_mailbox(&ctx, &board, &mailbox.descriptor, 0, 0) !=
+      ZZ9K_STATUS_OK) {
+    return 1;
+  }
+
+  prepare_completion_at(&mailbox, 0, 1, ZZ9K_OP_IMAGE_ANIMATION_FRAME_NEXT,
+                        ZZ9K_STATUS_OK,
+                        sizeof(ZZ9KImageAnimationFrameResultPayload));
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[0], 9U);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[4],
+                ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[8], 320U);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[12], 240U);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[16], 0U);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[20], 100U);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[24], 0U);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[28], 1U);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[32], 42U);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[36],
+                ZZ9K_SURFACE_FORMAT_YUV422CGX);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[40],
+                ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_FRAME_READY);
+
+  memset(&result, 0, sizeof(result));
+  if (zz9k_image_animation_frame_next(ctx, 9U, 0U, &result) != ZZ9K_STATUS_OK) {
+    zz9k_close(ctx);
+    return 2;
+  }
+  if (result.session != 9U || result.frame_token != 42U ||
+      result.frame_duration_ms != 100U) {
+    zz9k_close(ctx);
+    return 3;
+  }
+
+  prepare_completion_at(&mailbox, 1, 2, ZZ9K_OP_IMAGE_ANIMATION_FRAME_PRESENT,
+                        ZZ9K_STATUS_OK,
+                        sizeof(ZZ9KImageAnimationFrameResultPayload));
+  zz9k_put_be32(&mailbox.completion_ring[1].payload[0], 9U);
+  zz9k_put_be32(&mailbox.completion_ring[1].payload[4],
+                ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY);
+  zz9k_put_be32(&mailbox.completion_ring[1].payload[32], 42U);
+  zz9k_put_be32(&mailbox.completion_ring[1].payload[40],
+                ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_PRESENTED);
+
+  if (zz9k_image_animation_frame_present(ctx, 9U, 42U, 0U, &result) != ZZ9K_STATUS_OK) {
+    zz9k_close(ctx);
+    return 4;
+  }
+  if (result.flags != ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_PRESENTED) {
+    zz9k_close(ctx);
+    return 5;
+  }
+
+  prepare_completion_at(&mailbox, 2, 3, ZZ9K_OP_IMAGE_ANIMATION_RESTART,
+                        ZZ9K_STATUS_OK,
+                        sizeof(ZZ9KImageAnimationFrameResultPayload));
+  zz9k_put_be32(&mailbox.completion_ring[2].payload[0], 9U);
+  zz9k_put_be32(&mailbox.completion_ring[2].payload[4],
+                ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY);
+
+  if (zz9k_image_animation_restart(ctx, 9U, 0U, &result) != ZZ9K_STATUS_OK) {
+    zz9k_close(ctx);
+    return 6;
+  }
+
+  zz9k_close(ctx);
+  return 0;
+}
+
 
 static int test_crypto_hash_builds_request_and_maps_result(void)
 {
@@ -2600,6 +2678,65 @@ static int test_audio_stream_helpers_roundtrip_results(void)
   return 0;
 }
 
+static int test_audio_stream_begin_ex_roundtrip_results(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KContext *ctx;
+  ZZ9KBoard board;
+  ZZ9KAudioStreamBeginExDesc begin;
+  ZZ9KAudioStreamResult result;
+
+  init_mailbox(&mailbox);
+  memset(&board, 0, sizeof(board));
+  memset(&begin, 0, sizeof(begin));
+  begin.codec = ZZ9K_AUDIO_CODEC_MP3;
+  begin.input_ring_handle = 0x40000080UL;
+  begin.input_ring_capacity = 524288U;
+  begin.pcm_ring_handle = 0x40000081UL;
+  begin.pcm_ring_capacity = 1048576U;
+  begin.output_format = ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE;
+  begin.low_water_bytes = 32768U;
+  begin.high_water_bytes = 65536U;
+
+  prepare_completion(&mailbox, 1, ZZ9K_OP_AUDIO_STREAM_BEGIN_EX,
+                     ZZ9K_STATUS_OK,
+                     sizeof(ZZ9KAudioStreamResultPayload));
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[0], 12U);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[4],
+                ZZ9K_AUDIO_STREAM_STATE_STREAMING);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[16],
+                ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE);
+
+  if (zz9k_attach_mailbox(&ctx, &board, &mailbox.descriptor, 0, 0) !=
+      ZZ9K_STATUS_OK) {
+    return 1;
+  }
+
+  memset(&result, 0, sizeof(result));
+  if (zz9k_audio_stream_begin_ex(ctx, &begin, &result) != ZZ9K_STATUS_OK) {
+    zz9k_close(ctx);
+    return 2;
+  }
+  if (zz9k_get_be16(mailbox.request_ring[0].opcode) !=
+      ZZ9K_OP_AUDIO_STREAM_BEGIN_EX) {
+    zz9k_close(ctx);
+    return 3;
+  }
+  if (zz9k_get_be32(&mailbox.request_ring[0].payload[0]) !=
+          ZZ9K_AUDIO_CODEC_MP3 ||
+      zz9k_get_be32(&mailbox.request_ring[0].payload[4]) !=
+          0x40000080UL ||
+      zz9k_get_be32(&mailbox.request_ring[0].payload[16]) != 1048576U ||
+      result.session != 12U ||
+      result.state != ZZ9K_AUDIO_STREAM_STATE_STREAMING) {
+    zz9k_close(ctx);
+    return 4;
+  }
+
+  zz9k_close(ctx);
+  return 0;
+}
+
 static int test_audio_stream_play_stop_roundtrip_results(void)
 {
   struct TestMailbox mailbox;
@@ -3061,6 +3198,9 @@ int main(void)
   result = test_image_session_helpers_roundtrip_results();
   if (result) return 326 + result;
 
+  result = test_image_animation_helpers_roundtrip_results();
+  if (result) return 328 + result;
+
   result = test_crypto_hash_builds_request_and_maps_result();
   if (result) return 330 + result;
 
@@ -3087,6 +3227,9 @@ int main(void)
 
   result = test_audio_stream_helpers_roundtrip_results();
   if (result) return 344 + result;
+
+  result = test_audio_stream_begin_ex_roundtrip_results();
+  if (result) return 372 + result;
 
   result = test_audio_stream_play_stop_roundtrip_results();
   if (result) return 370 + result;

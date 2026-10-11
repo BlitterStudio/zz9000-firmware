@@ -1,5 +1,5 @@
 /*
- * Standalone JPEG/PNG image viewer for the ZZ9000 SDK image service.
+ * Standalone JPEG/PNG/WebP image viewer for the ZZ9000 SDK image service.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -7,7 +7,9 @@
 #include "zz9k-jpeg-view.h"
 #include "zz9k-picture-viewer.h"
 #include "zz9k-png-view.h"
+#include "zz9k-webp-view.h"
 #include "zz9k/caps.h"
+#include "zz9k/image.h"
 #include "zz9k/host.h"
 #include "zz9k/image_geometry.h"
 #include "zz9k/text.h"
@@ -25,7 +27,7 @@
 #define ZZ9K_VIEW_AMIGA 0
 #endif
 
-#define ZZ9K_VIEW_HEADER_BYTES 16U
+#define ZZ9K_VIEW_HEADER_BYTES ZZ9K_WEBP_HEADER_MIN_BYTES
 #define ZZ9K_VIEW_WINDOW_MIN_WIDTH 180U
 #define ZZ9K_VIEW_WINDOW_MIN_HEIGHT 120U
 #define ZZ9K_VIEW_WINDOW_MARGIN_X 32U
@@ -38,7 +40,7 @@ typedef enum ZZ9KViewDirection {
 
 static void zz9k_view_usage(void)
 {
-	printf("usage: zz9k-view file.jpg|file.png [more-images...]\n");
+	printf("usage: zz9k-view file.jpg|file.png|file.webp [more-images...]\n");
 	printf("       keys: Space/Right/Down next, Left/Up/Backspace previous, "
 	       "r redraw, q/Esc quit\n");
 }
@@ -153,7 +155,9 @@ static int zz9k_view_decode_image(ZZ9KContext *ctx,
 	if (codec == ZZ9K_PICTURE_VIEWER_CODEC_PNG) {
 		return zz9k_png_decode_viewer_image(ctx, framebuffer, path, image);
 	}
-
+	if (codec == ZZ9K_PICTURE_VIEWER_CODEC_WEBP) {
+		return zz9k_webp_decode_viewer_image(ctx, framebuffer, path, image);
+	}
 	printf("zz9k-view: unsupported image type for '%s'\n", path);
 	return 0;
 }

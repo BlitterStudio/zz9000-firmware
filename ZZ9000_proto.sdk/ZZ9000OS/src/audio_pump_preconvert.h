@@ -16,7 +16,8 @@
 #define AUDIO_PUMP_PRECONVERT_REPLAY_KEEP \
 	(AUDIO_PUMP_PRECONVERT_REPLAY_PERIODS * \
 	 AUDIO_PUMP_PRECONVERT_PERIOD_BYTES)
-#define AUDIO_PUMP_PRECONVERT_MAX_SOURCE_FRAMES 960U
+/* 96 kHz is 1920 source frames per 20 ms; 88.2 kHz is 1764. */
+#define AUDIO_PUMP_PRECONVERT_MAX_SOURCE_FRAMES 1920U
 
 struct audio_pump_preconvert_source {
 	uint8_t *ring;
@@ -37,7 +38,9 @@ struct audio_pump_preconvert {
 	uint32_t convert_rate;
 	struct zz_audio_convert convert;
 	int16_t source[AUDIO_PUMP_PRECONVERT_MAX_SOURCE_FRAMES * 2U];
-	int16_t output[AUDIO_PUMP_PRECONVERT_PERIOD_BYTES / 2U];
+	/* 11025 converts a 40 ms quantum (1920 output frames) so the
+	 * rational position lands on a call boundary. */
+	int16_t output[1920U * 2U];
 };
 
 void audio_pump_preconvert_reset(struct audio_pump_preconvert *state,

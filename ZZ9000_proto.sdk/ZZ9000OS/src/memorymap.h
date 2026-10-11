@@ -4,7 +4,11 @@
  */
 
 
-// FIXME allocate this memory properly
+// Card DDR map: every fixed range the firmware uses is defined in this file,
+// and docs/memory-map.md shows the whole 1 GB. Add a new range here first,
+// with an #error guard against its neighbours, then document it. Large
+// working memory for firmware services comes from the card pool
+// (CARD_POOL_* below), not from new fixed carve-outs.
 
 #define AUDIO_NUM_PERIODS           8
 #define AUDIO_BYTES_PER_PERIOD      3840
@@ -106,8 +110,7 @@
 // by the firmware until the SDK owns a formally reserved allocator region.
 // SDK_OP_DECOMPRESS_BATCH decodes entirely inside a host-provided arena
 // allocated from this shared heap (plus the LZH decoder's private <=64 KB
-// window) -- it reserves NO additional DDR region, so it cannot collide
-// with the Z3 fast-RAM window or the video codec scratch at 0x30000000.
+// window) -- it reserves NO additional DDR region.
 #define SDK_SHARED_HEAP_ADDRESS     0x03000000
 #define SDK_SHARED_HEAP_SIZE        0x003F0000
 #define SDK_SHARED_HEAP_END \
@@ -306,7 +309,9 @@
 // placed the board (mntzorro.v `Z3_FASTRAM_ARM_BASE`; bitstreams older than
 // 2026-07 instead reused the main-window offset, which made the landing zone
 // depend on relative board placement -- the hazard this pin removes).
-// The Amiga owns every byte of it: NOTHING on the ARM side may live here.
+// While fast RAM is advertised the Amiga owns every byte of it and nothing on
+// the ARM side may live here; otherwise the card pool lends it out as range B
+// and takes it back on every Amiga reset (card_pool.h).
 #define Z3_FASTRAM_DDR_ADDRESS      0x20000000
 #define Z3_FASTRAM_DDR_SIZE         0x10000000     // Z3_SIZE_256MB
 #define Z3_FASTRAM_DDR_END \
@@ -314,9 +319,6 @@
 
 #if Z3_FASTRAM_DDR_ADDRESS < 0x18000000
 #error "Z3 fast-RAM window must sit above the linker-managed DDR (ends 0x18000000)"
-#endif
-#if Z3_FASTRAM_DDR_END > 0x30000000
-#error "Z3 fast-RAM window overlaps codec scratch at 0x30000000"
 #endif
 
 // Dual-core scheduler task-queue control region. A small SCU-coherent slab in
@@ -413,6 +415,53 @@
 #endif
 #if SDK_CORE1_STACK_TOP > Z3_FASTRAM_DDR_ADDRESS
 #error "core-1 stack overlaps the Z3 fast-RAM DDR window"
+#endif
+
+// Card service pool (card_pool.c): the high DDR nothing else claims, handed
+// out in 64 KB pages to owner-tracked firmware services. A1 and A2 sit either
+// side of the core-1 stack, B is the Z3 fast-RAM window while it is not
+// advertised, and C runs up to the lowest of the fixed buffers at the top of
+// DDR. Each range is derived from its neighbours, so moving one of them moves
+// the pool with it.
+#define CARD_POOL_PAGE_SIZE         0x00010000
+#define CARD_POOL_A1_ADDRESS        SDK_TASKQ_REGION_END
+#define CARD_POOL_A1_END            SDK_CORE1_STACK_BASE
+#define CARD_POOL_A2_ADDRESS        SDK_CORE1_STACK_TOP
+#define CARD_POOL_A2_END            Z3_FASTRAM_DDR_ADDRESS
+#define CARD_POOL_B_ADDRESS         Z3_FASTRAM_DDR_ADDRESS
+#define CARD_POOL_B_END             Z3_FASTRAM_DDR_END
+#define CARD_POOL_C_ADDRESS         0x30000000
+#define CARD_POOL_C_END             AUDIO_TX_BUFFER_ADDRESS
+
+#if (CARD_POOL_A1_ADDRESS | CARD_POOL_A1_END | CARD_POOL_A2_ADDRESS | \
+     CARD_POOL_A2_END | CARD_POOL_B_ADDRESS | CARD_POOL_B_END | \
+     CARD_POOL_C_ADDRESS | CARD_POOL_C_END) & (CARD_POOL_PAGE_SIZE - 1)
+#error "card pool ranges must be page aligned"
+#endif
+#if CARD_POOL_A1_ADDRESS >= CARD_POOL_A1_END || \
+    CARD_POOL_A2_ADDRESS >= CARD_POOL_A2_END || \
+    CARD_POOL_C_ADDRESS >= CARD_POOL_C_END
+#error "card pool range is empty or inverted"
+#endif
+#if CARD_POOL_A1_ADDRESS < SDK_TASKQ_REGION_END || \
+    CARD_POOL_A1_END > SDK_CORE1_STACK_BASE || \
+    CARD_POOL_A2_ADDRESS < SDK_CORE1_STACK_TOP || \
+    CARD_POOL_A2_END > Z3_FASTRAM_DDR_ADDRESS
+#error "card pool range A overlaps the task queue, the core-1 stack or fast RAM"
+#endif
+#if CARD_POOL_C_ADDRESS < Z3_FASTRAM_DDR_END
+#error "card pool range C overlaps the Z3 fast-RAM window"
+#endif
+#if CARD_POOL_C_END > AUDIO_RX_BUFFER_ADDRESS || \
+    CARD_POOL_C_END > AUDIO_FABRIC_LEASE_RING1_ADDRESS || \
+    CARD_POOL_C_END > BOOT_ROM_ADDRESS || \
+    CARD_POOL_C_END > TX_BD_LIST_START_ADDRESS || \
+    CARD_POOL_C_END > RX_BD_LIST_START_ADDRESS || \
+    CARD_POOL_C_END > TX_FRAME_ADDRESS || \
+    CARD_POOL_C_END > RX_FRAME_ADDRESS || \
+    CARD_POOL_C_END > RX_BACKLOG_ADDRESS || \
+    CARD_POOL_C_END > USB_BLOCK_STORAGE_ADDRESS
+#error "card pool range C overlaps the buffers at the top of DDR"
 #endif
 
 // SDK v2 bootstrap mailbox (descriptor plus both rings; firmware publishes

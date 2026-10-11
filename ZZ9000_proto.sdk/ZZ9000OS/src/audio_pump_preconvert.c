@@ -72,9 +72,10 @@ static void preconvert_expand_mono(struct audio_pump_preconvert *state,
 	}
 }
 
-static void preconvert_write_period(struct audio_pump_preconvert *state)
+static void preconvert_write_period(struct audio_pump_preconvert *state,
+                                    const int16_t *samples)
 {
-	const uint8_t *src = (const uint8_t *)state->output;
+	const uint8_t *src = (const uint8_t *)samples;
 	uint32_t offset = state->produced % state->capacity;
 	uint32_t first = state->capacity - offset;
 
@@ -118,6 +119,9 @@ int audio_pump_preconvert_fill(struct audio_pump_preconvert *state,
 	uint64_t *source_consumed)
 {
 	uint32_t source_frames;
+	uint32_t out_frames;
+	uint32_t periods;
+	uint32_t period;
 	uint32_t source_bytes;
 	uint64_t available;
 	uint32_t pull;
@@ -133,17 +137,23 @@ int audio_pump_preconvert_fill(struct audio_pump_preconvert *state,
 	     source->sample_format != SDK_AUDIO_SAMPLE_FORMAT_S16BE))
 		return -1;
 	/* Space check keeps the rebuild reserve below the staged cursor
-	 * (see AUDIO_PUMP_PRECONVERT_REPLAY_KEEP): the decode side may
-	 * only refill space the queued-period rebuild can no longer
-	 * replay. */
+	 * (see AUDIO_PUMP_PRECONVERT_REPLAY_KEEP). 11025's 20 ms period
+	 * is 220.5 frames, so that rate converts a 40 ms quantum (441
+	 * frames -> 1920) and the rational position lands on the call
+	 * boundary. Every other pump rate divides 20 ms. */
+	source_frames = source->sample_rate == 11025U ? 441U :
+	                source->sample_rate / 50U;
+	out_frames = source->sample_rate == 11025U ? 1920U :
+	             (AUDIO_PUMP_PRECONVERT_PERIOD_BYTES / 4U);
+	periods = out_frames / (AUDIO_PUMP_PRECONVERT_PERIOD_BYTES / 4U);
+	if (source_frames == 0U ||
+	    source_frames > AUDIO_PUMP_PRECONVERT_MAX_SOURCE_FRAMES ||
+	    out_frames > 1920U)
+		return -1;
 	if (state->capacity - audio_pump_preconvert_used(state) <
-	    AUDIO_PUMP_PRECONVERT_PERIOD_BYTES +
+	    periods * AUDIO_PUMP_PRECONVERT_PERIOD_BYTES +
 	    AUDIO_PUMP_PRECONVERT_REPLAY_KEEP)
 		return 0;
-	source_frames = source->sample_rate / 50U;
-	if (source_frames == 0U ||
-	    source_frames > AUDIO_PUMP_PRECONVERT_MAX_SOURCE_FRAMES)
-		return -1;
 	source_bytes = source_frames * source->channels * 2U;
 	available = source->produced - source->consumed;
 	if (available >= source_bytes)
@@ -161,18 +171,17 @@ int audio_pump_preconvert_fill(struct audio_pump_preconvert *state,
 		zz_audio_convert_init(&state->convert, source->sample_rate, 48000U);
 	}
 	if (source->sample_rate != 48000U && state->convert.ratio == NULL) {
-		/* Off-table rate (e.g. 16/22.05 kHz): the pre-fabric pump
-		 * emitted a silent period while still advancing the source,
-		 * so drain and end-of-stream completed. Bailing out here
-		 * left the undecoded PCM permanently pending (PR #88
-		 * review). Emit the silent period and advance. */
-		memset(state->output, 0, sizeof(state->output));
+		/* Off-table rate: emit silence and still advance so drain
+		 * and end-of-stream complete (PR #88 review). */
+		memset(state->output, 0, (size_t)out_frames * 4U);
 	} else {
 		zz_audio_convert_stream(&state->convert, state->source,
 			state->output, (uint16_t)source_frames,
-			AUDIO_PUMP_PRECONVERT_PERIOD_BYTES / 4U);
+			(uint16_t)out_frames);
 	}
-	preconvert_write_period(state);
+	for (period = 0U; period < periods; period++)
+		preconvert_write_period(state,
+			state->output + (size_t)period * 960U * 2U);
 	*source_consumed = source->consumed + pull;
 	return 1;
 }

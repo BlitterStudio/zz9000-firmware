@@ -149,8 +149,10 @@ validated DataType descriptors before the MultiView/browser checks:
 ```text
 copy Storage/DataTypes/ZZ9000-JPEG#? TO DEVS:DataTypes/
 copy Storage/DataTypes/ZZ9000-PNG#? TO DEVS:DataTypes/
+copy Storage/DataTypes/ZZ9000-MP3#? TO DEVS:DataTypes/
 AddDataTypes DEVS:DataTypes/ZZ9000-JPEG
 AddDataTypes DEVS:DataTypes/ZZ9000-PNG
+AddDataTypes DEVS:DataTypes/ZZ9000-MP3
 AddDataTypes LIST
 ```
 
@@ -159,7 +161,7 @@ zz9k-jpeg Work:Pictures/test.jpg
 zz9k-jpeg --fb --hold 200 Work:Pictures/test.jpg
 zz9k-png Work:Pictures/test.png
 zz9k-png --fb --hold 200 Work:Pictures/test.png
-zz9k-view Work:Pictures/test.jpg Work:Pictures/test.png
+zz9k-view Work:Pictures/test.jpg Work:Pictures/test.png Work:Pictures/test.webp
 zz9k-dtprobe --client Work:Pictures/test.jpg
 zz9k-dtprobe --client Work:Pictures/test.png
 MultiView Work:Pictures/test.jpg
@@ -179,11 +181,12 @@ Expected pass signal:
 - `zz9k-view` opens one resizable viewer window, displays each image, and the
   next/previous keys navigate between the images.
 - Repeat `zz9k-view` in RGB555 (15-bit), RGB565 (16-bit), and BGRA8888
-  (32-bit) RTG modes; JPEG and PNG output has the expected colors in all three.
+  (32-bit) RTG modes; JPEG, PNG, and WebP output has the expected colors in all three.
+  Animated WebP displays its first composited canvas as a documented still preview.
 - Viewer resize and occlusion redraw through visible clips without corrupting
   surrounding RTG contents.
 - DataType descriptors are activated from `Storage/DataTypes`, and
-  `AddDataTypes LIST` shows `ZZ9000-JPEG` and `ZZ9000-PNG`.
+  `AddDataTypes LIST` shows `ZZ9000-JPEG`, `ZZ9000-PNG`, and `ZZ9000-MP3`.
 - DataTypes clients display JPEG and PNG through `zz9k-picture.datatype`.
 - Repeat the transparent-PNG DataType client and MUI startup checks on 8-,
   15-, 16-, and 32-bit screens. Low-depth modes must not enter the sustained
@@ -199,6 +202,74 @@ Failure routing:
 - Low-depth transparent-PNG startup or rendering stalls route to the
   `PDTA_Screen` alpha-flattening policy in `zz9k-picture.datatype`; missing
   transparency on a 32-bit screen routes to the retained RGBA path.
+
+## Sound DataType
+
+The MP3 sound datatype is optional. Activate its descriptor first (see the
+Image, Viewer, And DataTypes section), then check the whole-sample sound
+path with both an untagged Layer III file and one with a leading ID3v2 tag:
+
+```text
+AddDataTypes LIST
+MultiView Work:Audio/test-bare.mp3
+MultiView Work:Audio/test.mp3
+```
+
+Expected pass signal:
+
+- `AddDataTypes LIST` shows `ZZ9000-MP3` routed to `zz9k-sound.datatype`.
+- A sound DataTypes consumer (MultiView or any `GID_SOUND` client) opens
+  the file and plays it through the system `sound.datatype`: version 47
+  publishes 16-bit planes (left/right for stereo) at the source rate;
+  earlier versions get planar 8-bit mono.
+- Layer II files and bare ID3 data are not claimed by the `ZZ9000-MP3`
+  recognition hook, so they never reach `zz9k-sound.datatype`.
+- Repeated open/dispose of the same file leaves free memory stable; the
+  superclass frees the published planes exactly once per object.
+
+Failure routing:
+
+- A Layer III file that does not open: check that its first frame follows
+  the ID3v2 tag directly; the descriptor hook does not scan for a later
+  first frame. See [zz9k-sound-datatype.md](zz9k-sound-datatype.md).
+- Decode failures with `DTERROR_INVALID_DATA` route to the class
+  re-validation path; `ERROR_NOT_IMPLEMENTED` routes to missing
+  matched-firmware audio-stream service flags.
+- While ZZPlay plays through MHI, a datatype decode of another file must
+  not disturb either path: the datatype opens its own unbound audio-stream
+  session, and a saturated audio service makes the datatype decode fail
+  with a resource error instead of stealing the player session.
+
+### FLAC and Ogg Vorbis
+
+The same class decodes native FLAC and Ogg Vorbis once the firmware
+advertises the matching audio-stream service flag (`FLAC_STREAM`,
+`VORBIS_STREAM`). Current firmware implements both decoders but keeps them
+unadvertised until physical qualification, so on it the expected result is
+a clean refusal, not playback. Activate the optional descriptors, then:
+
+```text
+copy Storage/DataTypes/ZZ9000-FLAC#? TO DEVS:DataTypes/
+copy Storage/DataTypes/ZZ9000-OggVorbis#? TO DEVS:DataTypes/
+AddDataTypes DEVS:DataTypes/ZZ9000-FLAC DEVS:DataTypes/ZZ9000-OggVorbis
+MultiView Work:Audio/test.flac
+MultiView Work:Audio/test.ogg
+ZZPlay --audio=ahi Work:Audio/test.flac
+ZZPlay --audio=ahi Work:Audio/test.ogg
+```
+
+Expected pass signal:
+
+- `AddDataTypes LIST` shows `ZZ9000-FLAC` and `ZZ9000-OggVorbis` routed to
+  `zz9k-sound.datatype`; Ogg Opus and Ogg-FLAC files are not claimed.
+- Firmware without the service flag: object creation fails with
+  `ERROR_NOT_IMPLEMENTED` and ZZPlay reports that accelerated FLAC or Ogg
+  Vorbis streaming is unavailable; repeated attempts leave free memory
+  unchanged.
+- Firmware that advertises the flag: both play like MP3; 24-bit FLAC
+  publishes 32-bit planes on `sound.datatype` 47. A chained Ogg file fails
+  object creation, and ZZPlay plays its first link, then reports that the
+  card cannot decode the rest of the stream.
 
 ## Audio And MPEGA
 

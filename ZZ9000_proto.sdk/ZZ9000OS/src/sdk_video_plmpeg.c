@@ -437,11 +437,12 @@ static void plmpeg_load_es(plm_buffer_t *buffer, void *user)
 		buffer->has_ended = TRUE;
 }
 
-static void *plmpeg_create(void)
+static void *plmpeg_create(uint32_t pool_owner)
 {
 	struct sdk_video_plmpeg *decoder =
 		(struct sdk_video_plmpeg *)PLM_MALLOC(sizeof(*decoder));
 
+	(void)pool_owner;
 	if (!decoder)
 		return 0;
 	memset(decoder, 0, sizeof(*decoder));
@@ -959,14 +960,20 @@ static int plmpeg_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 	return SDK_VIDEO_BACKEND_FRAME;
 }
 
+/* An MPEG-1 Program Stream carries MP2 audio only. */
+static int plmpeg_audio_ok(uint32_t audio_codec)
+{
+	return audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE ||
+	       audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2;
+}
+
 static int plmpeg_configure_media(
 	void *opaque, const struct SDKVideoMediaConfig *config)
 {
 	struct sdk_video_plmpeg *decoder = (struct sdk_video_plmpeg *)opaque;
 
 	if (!decoder || !config || decoder->media_configured ||
-	    (config->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE &&
-	     config->audio_codec != SDK_VIDEO_MEDIA_AUDIO_MP2))
+	    !plmpeg_audio_ok(config->audio_codec))
 		return 0;
 	if (config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE) {
 		if (config->pcm_ring ||
@@ -1081,6 +1088,7 @@ static const struct SDKVideoDecoderOps plmpeg_ops = {
 	.configure_media = plmpeg_configure_media,
 	.get_media_info = plmpeg_get_media_info,
 	.ack_media = plmpeg_ack_media,
+	.audio_ok = plmpeg_audio_ok,
 };
 
 const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
@@ -1089,5 +1097,11 @@ const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
 	/* Add future codec/container backends to this registry. */
 	if (codec == plmpeg_ops.codec && container == plmpeg_ops.container)
 		return &plmpeg_ops;
+	if (codec == SDK_VIDEO_CODEC_MPEG2 &&
+	    container == SDK_VIDEO_CONTAINER_MPEG_PS)
+		return sdk_video_mpeg2_backend_ops();
+	if (container == SDK_VIDEO_CONTAINER_WEBM &&
+	    (codec == SDK_VIDEO_CODEC_VP8 || codec == SDK_VIDEO_CODEC_VP9))
+		return sdk_video_webm_ops(codec);
 	return 0;
 }

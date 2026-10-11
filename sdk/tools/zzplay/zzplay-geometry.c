@@ -47,6 +47,19 @@ ZZPlayRect zzplay_geometry_fit(uint16_t src_w, uint16_t src_h,
   return rect;
 }
 
+int zzplay_geometry_is_fitted(uint16_t width, uint16_t height,
+                              uint16_t src_w, uint16_t src_h)
+{
+  uint32_t across = (uint32_t)width * (uint32_t)src_h;
+  uint32_t down = (uint32_t)height * (uint32_t)src_w;
+  uint32_t error = across > down ? across - down : down - across;
+
+  /* width/height against src_w/src_h, cross-multiplied. A fit binds one
+   * side and rounds the other down, which leaves an error below src_w
+   * (width bound) or src_h (height bound): under one output pixel. */
+  return error < (src_w > src_h ? (uint32_t)src_w : (uint32_t)src_h);
+}
+
 int zzplay_geometry_is_exact(const ZZPlayRect *rect,
                              uint16_t src_w, uint16_t src_h)
 {

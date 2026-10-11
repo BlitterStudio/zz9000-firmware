@@ -93,6 +93,57 @@ static int test_session_result_decoder_rejects_invalid_reply(void)
 
   return 0;
 }
+static int test_animation_frame_result_decoder(void)
+{
+  ZZ9KMailboxEntry reply;
+  ZZ9KImageAnimationFrameResult result;
+
+  memset(&reply, 0, sizeof(reply));
+  reply.opcode = ZZ9K_OP_IMAGE_ANIMATION_FRAME_NEXT;
+  reply.status = ZZ9K_STATUS_OK;
+  reply.payload_len = sizeof(ZZ9KImageAnimationFrameResultPayload);
+  zz9k_put_be32(&reply.payload.inline_data[0], 7U);
+  zz9k_put_be32(&reply.payload.inline_data[4], ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY);
+  zz9k_put_be32(&reply.payload.inline_data[8], 320U);
+  zz9k_put_be32(&reply.payload.inline_data[12], 240U);
+  zz9k_put_be32(&reply.payload.inline_data[16], 3U);
+  zz9k_put_be32(&reply.payload.inline_data[20], 100U);
+  zz9k_put_be32(&reply.payload.inline_data[24], 1U);
+  zz9k_put_be32(&reply.payload.inline_data[28], 5U);
+  zz9k_put_be32(&reply.payload.inline_data[32], 42U);
+  zz9k_put_be32(&reply.payload.inline_data[36], ZZ9K_SURFACE_FORMAT_YUV422CGX);
+  zz9k_put_be32(&reply.payload.inline_data[40], ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_FRAME_READY);
+  zz9k_put_be32(&reply.payload.inline_data[44], 0U);
+
+  memset(&result, 0xff, sizeof(result));
+  if (zz9k_reply_image_animation_frame_result(
+          &reply, ZZ9K_OP_IMAGE_ANIMATION_FRAME_NEXT, &result) != ZZ9K_STATUS_OK) {
+    return 1;
+  }
+  if (result.session != 7U) return 2;
+  if (result.state != ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY) return 3;
+  if (result.canvas_width != 320U || result.canvas_height != 240U) return 4;
+  if (result.frame_index != 3U) return 5;
+  if (result.frame_duration_ms != 100U) return 6;
+  if (result.loop_index != 1U || result.loop_count != 5U) return 7;
+  if (result.frame_token != 42U) return 8;
+  if (result.output_format != ZZ9K_SURFACE_FORMAT_YUV422CGX) return 9;
+  if (result.flags != ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_FRAME_READY) return 10;
+
+  if (zz9k_reply_image_animation_frame_result(
+          &reply, ZZ9K_OP_IMAGE_ANIMATION_FRAME_PRESENT, &result) != ZZ9K_STATUS_INTERNAL_ERROR) {
+    return 11;
+  }
+
+  zz9k_put_be32(&reply.payload.inline_data[0], 0U);
+  if (zz9k_reply_image_animation_frame_result(
+          &reply, ZZ9K_OP_IMAGE_ANIMATION_FRAME_NEXT, &result) != ZZ9K_STATUS_INTERNAL_ERROR) {
+    return 12;
+  }
+
+  return 0;
+}
+
 
 int main(void)
 {
@@ -103,6 +154,9 @@ int main(void)
 
   result = test_session_result_decoder_rejects_invalid_reply();
   if (result) return 40 + result;
+
+  result = test_animation_frame_result_decoder();
+  if (result) return 70 + result;
 
   return 0;
 }

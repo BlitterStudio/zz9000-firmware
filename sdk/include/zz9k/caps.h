@@ -164,10 +164,10 @@ static inline uint32_t zz9k_known_capability_bit(uint32_t index)
 static inline uint32_t zz9k_known_service_flag_count(uint32_t service_id)
 {
   if (service_id == ZZ9K_SERVICE_IMAGE) {
-    return 16U;
+    return 18U;
   }
   if (service_id == ZZ9K_SERVICE_AUDIO) {
-    return 13U;
+    return 15U;
   }
   if (service_id == ZZ9K_SERVICE_CODEC) {
     return 19U;
@@ -176,7 +176,7 @@ static inline uint32_t zz9k_known_service_flag_count(uint32_t service_id)
     return 5U;
   }
   if (service_id == ZZ9K_SERVICE_VIDEO) {
-    return 15U;
+    return 19U;
   }
   if (service_id == ZZ9K_SERVICE_SURFACE) {
     return 5U;
@@ -226,6 +226,10 @@ static inline uint32_t zz9k_known_service_flag(uint32_t service_id,
       return ZZ9K_SERVICE_FLAG_IMAGE_RGB888_OUTPUT;
     case 15:
       return ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565;
+    case 16:
+      return ZZ9K_SERVICE_FLAG_IMAGE_WEBP;
+    case 17:
+      return ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION;
     default:
       return 0U;
     }
@@ -288,6 +292,10 @@ static inline uint32_t zz9k_known_service_flag(uint32_t service_id,
       return ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE;
     case 12:
       return ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN;
+    case 13:
+      return ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM;
+    case 14:
+      return ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM;
     default:
       return 0U;
     }
@@ -336,6 +344,14 @@ static inline uint32_t zz9k_known_service_flag(uint32_t service_id,
       return ZZ9K_SERVICE_FLAG_VIDEO_PCM_RING_STATUS;
     case 14:
       return ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND;
+    case 15:
+      return ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8;
+    case 16:
+      return ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9;
+    case 17:
+      return ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS;
+    case 18:
+      return ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS;
     default:
       return 0U;
     }
@@ -403,6 +419,10 @@ static inline const char *zz9k_capability_name(uint32_t capability_bit)
     return "audio-metering";
   case ZZ9K_CAP_AUDIO_FABRIC:
     return "audio-fabric";
+  case ZZ9K_CAP_AUDIO_FLAC:
+    return "audio-flac";
+  case ZZ9K_CAP_AUDIO_VORBIS:
+    return "audio-vorbis";
   default:
     return 0;
   }
@@ -450,6 +470,10 @@ static inline const char *zz9k_service_flag_name(uint32_t service_id,
       return "rgb888-output";
     case ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565:
       return "scale-bgra-to-rgb555-rgb565";
+    case ZZ9K_SERVICE_FLAG_IMAGE_WEBP:
+      return "webp";
+    case ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION:
+      return "webp-animation";
     default:
       return 0;
     }
@@ -512,6 +536,10 @@ static inline const char *zz9k_service_flag_name(uint32_t service_id,
       return "audio-fabric-rate";
     case ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN:
       return "stream-gain";
+    case ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM:
+      return "flac-stream";
+    case ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM:
+      return "vorbis-stream";
     default:
       return 0;
     }
@@ -560,6 +588,14 @@ static inline const char *zz9k_service_flag_name(uint32_t service_id,
       return "pcm-ring-status";
     case ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND:
       return "audio-bind";
+    case ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8:
+      return "webm-vp8";
+    case ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9:
+      return "webm-vp9";
+    case ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS:
+      return "media-opus";
+    case ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS:
+      return "media-vorbis";
     default:
       return 0;
     }

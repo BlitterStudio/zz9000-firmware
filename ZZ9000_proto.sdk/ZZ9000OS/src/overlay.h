@@ -81,6 +81,16 @@ void overlay_scheduler_reset(void);
 int overlay_video_frame_ready(uint32_t session);
 void overlay_video_session_closed(uint32_t session);
 
+/* Core-0 hook for SDK image animations (WebP), called at the PRESENT
+ * completion: copy the session's presented packed YUV422CGX canvas into
+ * the configured P96 PIP source bitmap, clipped to the source size, and
+ * flush it to DDR for the native plane or software compositor. The session
+ * is remembered and repainted at the next SET, so a reopened PIP shows the
+ * current frame. Refused (returns 0) without a configured CGX overlay,
+ * while the mode snapshot is stale, while an SDK video session owns the
+ * overlay, or once the session no longer has a presented frame. */
+int overlay_image_frame_present(uint32_t session);
+
 /* ISR helpers for the videocap takeover: while videocap owns the
  * scanout decisions the overlay present hook does not run, so the ISR
  * asks whether a shadow is still being scanned (to repoint VDMA away

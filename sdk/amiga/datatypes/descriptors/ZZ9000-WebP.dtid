@@ -1,0 +1,11 @@
+# Source metadata for the packaged ZZ9000 WebP DataTypes descriptor.
+# Copyright (C) 2024-2026, Dimitris Panokostas / BlitterStudio
+# SPDX-License-Identifier: GPL-3.0-or-later
+FileName=Storage/DataTypes/ZZ9000-WebP
+Version=42.5
+DTName=ZZ9000-WebP,zz9k-picture
+ID=pict,webp
+Recog=52 49 46 46 ?? ?? ?? ?? 57 45 42 50
+Pattern=#?
+Flags=Binary,n,10
+Install=inactive

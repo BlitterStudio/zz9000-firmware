@@ -64,40 +64,48 @@ static int begin_requests_native_geometry(const char *source)
   return 0;
 }
 
+/* argv[1] is zzplay-mp3.c (MHI bridge and backend policy), argv[2]
+ * zzplay-codec.c (the shared accelerated decode + AHI engine). */
 int main(int argc, char **argv)
 {
   char *source;
+  char *codec;
   int native_geometry;
   int ok;
 
-  if (argc != 2 || !(source = read_file(argv[1]))) return 2;
-  native_geometry = begin_requests_native_geometry(source);
+  if (argc != 3 || !(source = read_file(argv[1]))) return 2;
+  if (!(codec = read_file(argv[2]))) {
+    free(source);
+    return 2;
+  }
+  native_geometry = begin_requests_native_geometry(codec);
   if (!native_geometry) {
     printf("stream begin must request the file's native rate/channels; "
            "the firmware rejects a non-zero output geometry\n");
   }
   /* The function-signature and ordering assertions that used to run here
    * pinned the controls-callback structure the controller-driven rewrite
-   * removed; per the test policy they were deleted, not re-pinned. */
+   * removed, and the ring-size/host-flag text pinned the fixed Zorro II
+   * allocation the shrink ladder replaced; per the test policy they were
+   * deleted, not re-pinned. */
   ok = native_geometry &&
-       strstr(source, "zz9k_audio_stream_begin(") &&
-       strstr(source, "zz9k_audio_stream_feed(") &&
-       strstr(source, "zz9k_audio_stream_read(") &&
-       strstr(source, "zz9k_audio_stream_close(") &&
-       strstr(source, "zzplay_ahi_begin_drain(") &&
+       strstr(codec, "zz9k_audio_stream_begin(") &&
+       strstr(codec, "zz9k_audio_stream_feed(") &&
+       strstr(codec, "zz9k_audio_stream_read(") &&
+       strstr(codec, "zz9k_audio_stream_close(") &&
+       strstr(codec, "zzplay_ahi_begin_drain(") &&
        strstr(source, "ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE") &&
-       strstr(source, "ZZPLAY_MP3_Z2_PCM_CAPACITY (32UL * 1024UL)") &&
-       strstr(source, "ZZPLAY_MP3_Z2_STAGING_CAPACITY (16UL * 1024UL)") &&
-       strstr(source, "ZZ9K_ALLOC_CARD_ONLY, &decode->compressed") &&
-       strstr(source, "host_flags = ZZ9K_ALLOC_HOST_WINDOW") &&
        strstr(source, "AUTO falling back to accelerated decode + AHI") &&
        strstr(source, "direct AX is not a standalone MP3 backend") &&
        strstr(source, "zzplay_mhi_acquire(") &&
        strstr(source, "zzplay_mhi_play_file(") &&
        strstr(source, "MP3 MHI loop") &&
        !strstr(source, "zzplay_mp3_load_public") &&
-       !strstr(source, "mhilib.h") && !strstr(source, "mhizz9000.h");
+       !strstr(source, "mhilib.h") && !strstr(source, "mhizz9000.h") &&
+       !strstr(codec, "zzplay_mp3_load_public") &&
+       !strstr(codec, "mhilib.h") && !strstr(codec, "mhizz9000.h");
   if (!ok) printf("standalone MP3 policy/ownership wiring is incomplete\n");
+  free(codec);
   free(source);
   return ok ? 0 : 1;
 }

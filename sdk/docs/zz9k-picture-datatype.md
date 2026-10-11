@@ -15,7 +15,7 @@ The class binary installs as:
 Classes/DataTypes/zz9k-picture.datatype
 ```
 
-The JPEG and PNG recognition descriptors are packaged inactive under `Storage/DataTypes`
+The JPEG, PNG, and WebP recognition descriptors are packaged inactive under `Storage/DataTypes`
 so activation is an explicit install step:
 
 ```text
@@ -23,8 +23,9 @@ Storage/DataTypes/ZZ9000-JPEG
 Storage/DataTypes/ZZ9000-JPEG.info
 Storage/DataTypes/ZZ9000-PNG
 Storage/DataTypes/ZZ9000-PNG.info
+Storage/DataTypes/ZZ9000-WebP
+Storage/DataTypes/ZZ9000-WebP.info
 ```
-
 To activate the validated DataType path on a test or release-install system,
 install the class and copy the descriptors into `DEVS:DataTypes`:
 
@@ -32,12 +33,14 @@ install the class and copy the descriptors into `DEVS:DataTypes`:
 copy Classes/DataTypes/zz9k-picture.datatype TO SYS:Classes/DataTypes/
 copy Storage/DataTypes/ZZ9000-JPEG#? TO DEVS:DataTypes/
 copy Storage/DataTypes/ZZ9000-PNG#? TO DEVS:DataTypes/
+copy Storage/DataTypes/ZZ9000-WebP#? TO DEVS:DataTypes/
 AddDataTypes DEVS:DataTypes/ZZ9000-JPEG
 AddDataTypes DEVS:DataTypes/ZZ9000-PNG
+AddDataTypes DEVS:DataTypes/ZZ9000-WebP
 AddDataTypes LIST
 ```
 
-`AddDataTypes LIST` should show `ZZ9000-JPEG` and `ZZ9000-PNG` before
+`AddDataTypes LIST` should show `ZZ9000-JPEG`, `ZZ9000-PNG`, and `ZZ9000-WebP` before
 MultiView or browser clients are expected to route matching files to
 `zz9k-picture.datatype`. Keeping the descriptors in `Storage/DataTypes` by
 default prevents accidental global routing on systems that only want the SDK
@@ -67,8 +70,10 @@ The `--draw-window` mode opens a temporary public-screen window, runs layout
 if needed, adds the datatype object to that window, refreshes it, and hashes
 the actual screen pixels over a capped diagnostic rectangle.
 
-The class decodes JPEG and PNG, including transparent PNGs. On
-`picture.datatype v43` and `v47`, JPEG and PNG both use the validated
+The class decodes JPEG, PNG, and WebP, including transparent PNG and WebP images.
+For WebP, it recognizes lossy VP8, lossless VP8L, and extended VP8X containers
+(with alpha and first-canvas preview for animated files; timed multi-frame
+playback belongs to ZZPlay). On
 `PDTM_WRITEPIXELARRAY` path. On 32-bit screens, alpha PNGs keep their alpha
 state, request `RGBA8888` tiles from the SDK image service, prepare the picture
 object with `bmh_Masking = mskHasAlpha`, and write `PBPAFMT_RGBA` pixels through
@@ -172,9 +177,12 @@ python3 scripts/generate-datatype-descriptors.py --source-dir amiga/datatypes/de
 
 `Recog` contains hexadecimal bytes and optional `??` wildcard bytes. Wildcards
 allow recognition across variable fields, such as a RIFF size before a format
-identifier, without claiming every RIFF file. The compiler validates the
-inactive destination, header fields, recognition mask, and matching source name.
-Each source requires a same-name `.info` icon for packaging.
+identifier, without claiming every RIFF file. Formats a byte mask cannot
+describe set `Recog=none` and `Code=<file>`: the generator embeds that m68k
+hunk executable from `--code-dir` as the descriptor's `DTCD` recognition hook
+(see `zz9k-sound-datatype.md`). The compiler validates the inactive
+destination, header fields, recognition mask or hook, and matching source
+name. Each source requires a same-name `.info` icon for packaging.
 
 A new descriptor alone does not add decoding support. Add and qualify the
 firmware decoder, codec ID and advertised service support, SDK capability

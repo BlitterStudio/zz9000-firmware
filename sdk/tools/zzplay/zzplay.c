@@ -4,10 +4,10 @@
  *
  * The application loop owns the playlist, settings and the playback
  * controller; every media format is one row in zzplay_engines[] (see
- * zzplay-formats.h). MPEG-1 Program Stream playback lives here; standalone
- * MP3 is zzplay-mp3.c. All mailbox interaction is expressed as
- * codec/container/output descriptors so later backends do not require a
- * new player protocol.
+ * zzplay-formats.h). MPEG-1 Program Stream and WebM playback live here;
+ * standalone MP3 is zzplay-mp3.c and FLAC/Ogg Vorbis zzplay-codec-stream.c.
+ * All mailbox interaction is expressed as codec/container/output
+ * descriptors so later backends do not require a new player protocol.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
@@ -15,11 +15,14 @@
 #include "zzplay-ahi.h"
 #include "zzplay-audio.h"
 #include "zzplay-ax.h"
+#include "zzplay-codec-stream.h"
 #include "zzplay-controls.h"
 #include "zzplay-core.h"
+#include "zzplay-engine.h"
 #include "zzplay-controller.h"
 #include "zzplay-files.h"
 #include "zzplay-formats.h"
+#include "zzplay-frame-clock.h"
 #include "zzplay-geometry.h"
 #include "zzplay-gui.h"
 #include "zzplay-launch.h"
@@ -35,6 +38,7 @@
 #include "zzplay-sync.h"
 #include "zzplay-tags.h"
 #include "zzplay-video.h"
+#include "zzplay-webm.h"
 
 
 #include <devices/timer.h>
@@ -106,6 +110,38 @@ struct ZZPlayStats {
   uint8_t started;
 };
 
+/* Everything the media-session engine does differently per container,
+ * settled once when the item is prepared so the shared session loop never
+ * asks which container it is playing. A zero record (no title) is the
+ * WebP engine, which shares the runtime but has no media session. */
+typedef struct ZZPlayContainerPolicy {
+  /* Container label in the window title ("MPEG-1", "WebM"). */
+  const char *title;
+  /* Begin descriptor codec and container ids. */
+  uint32_t video_codec;
+  uint32_t container;
+  uint32_t audio_codec;
+  /* Video service flags the stream needs on top of the media-session
+   * baseline, and the audio flags it needs while audio is enabled. */
+  uint32_t video_flags;
+  uint32_t audio_flags;
+  /* Missing-service wording: when set, the video or audio codec whose own
+   * flags are absent is named ("<title> <name> is not supported by this
+   * firmware") before falling back to `service_missing`. */
+  const char *video_name;
+  const char *audio_name;
+  const char *service_missing;
+  /* UNSUPPORTED from Begin, or from a Write or Decode, means the card
+   * refused this stream; NULL reports the status like any other failure. */
+  const char *begin_refused;
+  const char *stream_refused;
+  /* A discard far behind the audio clock makes the next decode skip to
+   * the next keyframe (codecs whose keyframes may be seconds apart). */
+  uint8_t keyframe_skip;
+  /* Elapsed position comes from the decoded video PTS, not frame count. */
+  uint8_t pts_position;
+} ZZPlayContainerPolicy;
+
 struct ZZPlayRuntime {
   ZZPlayCore core;
   ZZPlayOptions options;
@@ -123,6 +159,10 @@ struct ZZPlayRuntime {
   struct Window *window;
   struct BitMap *bitmap;
   ZZPlayVideoInfo video_info;
+  ZZPlayContainerPolicy container;
+  uint32_t display_w;
+  uint32_t display_h;
+  uint8_t decode_skip;
   LONG pip_error;
   uint32_t session;
   uint32_t frames;
@@ -166,6 +206,7 @@ struct ZZPlayRuntime {
   uint8_t audio_refresh_needed;
   uint8_t audio_totals_captured;
   uint8_t frame_held;
+  uint32_t discard_run;  /* late frames discarded since one was shown */
   uint8_t pip_open_failed;
   /* Runtime UX state (U6). */
   ZZPlayWindowGeometry saved_geometry;
@@ -299,8 +340,8 @@ static void zzplay_usage(FILE *stream)
           "  --volume=N    starting volume, 0..100\n"
           "  --quiet       no progress output (the default from Workbench)\n"
           "  --verbose     force progress output even from Workbench\n"
-          "  --audio=...   select MPEG/MP3 audio output "
-          "(MP3 AUTO tries MHI, then accelerated decode + AHI)\n"
+          "  --audio=...   audio output (MP3 AUTO: MHI then AHI;\n"
+          "                FLAC/Ogg AUTO: card then AHI)\n"
           "  --trace[=p]   log per-frame timing diagnostics "
           "(default T:zzplay.trace)\n"
           "\n"
@@ -753,6 +794,12 @@ static void zzplay_force_geometry(struct ZZPlayRuntime *runtime,
  * SharePens leaves them obtainable - between them the PIP can get its key. */
 static UWORD zzplay_screen_pens[] = { (UWORD)~0 };
 
+/* The margins around the fitted video are the screen's background, pen 0,
+ * which a new screen otherwise takes from the Workbench palette; Intuition
+ * also refills uncovered screen areas with it when the window is resized.
+ * Make pen 0 black. Format: count << 16 | first pen, 32-bit R, G, B, 0. */
+static ULONG zzplay_screen_colors[] = { 1UL << 16, 0UL, 0UL, 0UL, 0UL };
+
 static const char *zzplay_pip_error_name(LONG error)
 {
   switch (error) {
@@ -787,6 +834,16 @@ static int zzplay_open_video_screen(struct ZZPlayRuntime *runtime)
       depth = current;
     }
   }
+  /* ZZ9000.card pixel-doubles every mode smaller than 640x480, and the
+   * card's overlay refuses doubled modes, so the PIP fails with "not
+   * available" on such a screen. Ask for at least 640x480; the window fit
+   * below scales a smaller video up to it. */
+  if (width < 640U) {
+    width = 640U;
+  }
+  if (height < 480U) {
+    height = 480U;
+  }
   mode = p96BestModeIDTags(
       P96BIDTAG_NominalWidth, (ULONG)width,
       P96BIDTAG_NominalHeight, (ULONG)height,
@@ -812,6 +869,7 @@ static int zzplay_open_video_screen(struct ZZPlayRuntime *runtime)
       P96SA_AutoScroll, FALSE,
       P96SA_SharePens, TRUE,
       P96SA_Pens, (ULONG)zzplay_screen_pens,
+      P96SA_Colors32, (ULONG)zzplay_screen_colors,
       TAG_DONE);
   if (!runtime->screen) {
     zzplay_info("zzplay: could not open a fullscreen display\n");
@@ -829,20 +887,54 @@ static void zzplay_close_video_screen(struct ZZPlayRuntime *runtime)
       zzplay_release_resource, runtime);
 }
 
-/* Where the windowed window should sit (fullscreen placement is a
- * zzplay_geometry_fit against the dedicated screen's real dimensions). */
+/* Display aspect when the file has one (WebM DisplayWidth/Height),
+ * otherwise the coded frame. The PIP source stays the coded size. */
+static void zzplay_aspect_pixels(const struct ZZPlayRuntime *runtime,
+                                 uint16_t *width, uint16_t *height)
+{
+  uint32_t w = runtime->display_w != 0U ? runtime->display_w
+                                        : runtime->video_info.width;
+  uint32_t h = runtime->display_h != 0U ? runtime->display_h
+                                        : runtime->video_info.height;
+
+  if (w == 0U || w > 65535U) {
+    w = runtime->video_info.width > 65535U ? 65535U
+                                           : runtime->video_info.width;
+  }
+  if (h == 0U || h > 65535U) {
+    h = runtime->video_info.height > 65535U ? 65535U
+                                            : runtime->video_info.height;
+  }
+  *width = (uint16_t)w;
+  *height = (uint16_t)h;
+}
+
+/* Where the windowed window should sit. A portrait frame taller than the
+ * Workbench is fitted, aspect preserved, rather than opened off-screen. */
 static ZZPlayRect zzplay_pip_placement(struct ZZPlayRuntime *runtime,
                                        int fullscreen)
 {
   ZZPlayRect rect;
+  uint16_t aspect_w;
+  uint16_t aspect_h;
+  uint16_t avail_w;
+  uint16_t avail_h;
 
   (void)fullscreen;
   if (zzplay_geometry_restore(&runtime->saved_geometry, &rect)) {
     return rect;
   }
+  zzplay_aspect_pixels(runtime, &aspect_w, &aspect_h);
   memset(&rect, 0, sizeof(rect));
-  rect.width = (uint16_t)runtime->video_info.width;
-  rect.height = (uint16_t)runtime->video_info.height;
+  rect.width = aspect_w;
+  rect.height = aspect_h;
+  if (runtime->screen_w > 32U && runtime->screen_h > 48U) {
+    avail_w = (uint16_t)(runtime->screen_w - 32U);
+    avail_h = (uint16_t)(runtime->screen_h - 48U);
+    if (aspect_w > avail_w || aspect_h > avail_h) {
+      return zzplay_geometry_fit(aspect_w, aspect_h, avail_w, avail_h);
+    }
+  }
   return rect;
 }
 
@@ -861,7 +953,10 @@ static int zzplay_open_pip_mode(struct ZZPlayRuntime *runtime,
 {
   ZZPlayRect placement;
   ZZPlayRect open_rect;
+  uint16_t aspect_w;
+  uint16_t aspect_h;
 
+  zzplay_aspect_pixels(runtime, &aspect_w, &aspect_h);
   if (fullscreen && !zzplay_open_video_screen(runtime)) {
     /* Say so rather than silently presenting a windowed player as though
      * the request had been honoured. */
@@ -878,30 +973,28 @@ static int zzplay_open_pip_mode(struct ZZPlayRuntime *runtime,
      * rectangle through the already-proven resize route below. */
     zzplay_cache_screen(runtime);
     placement = zzplay_geometry_fit(
-        (uint16_t)runtime->video_info.width,
-        (uint16_t)runtime->video_info.height,
-        runtime->screen_w ? runtime->screen_w
-                          : (uint16_t)runtime->video_info.width,
-        runtime->screen_h ? runtime->screen_h
-                          : (uint16_t)runtime->video_info.height);
+        aspect_w, aspect_h,
+        runtime->screen_w ? runtime->screen_w : aspect_w,
+        runtime->screen_h ? runtime->screen_h : aspect_h);
     if (placement.width == 0U || placement.height == 0U) {
       /* Degenerate screen information: fall back to 1:1 at the origin
        * rather than refusing to present at all. */
       placement.x = 0;
       placement.y = 0;
-      placement.width = (uint16_t)runtime->video_info.width;
-      placement.height = (uint16_t)runtime->video_info.height;
+      placement.width = aspect_w;
+      placement.height = aspect_h;
     }
     open_rect = placement;
     open_rect.width = (uint16_t)runtime->video_info.width;
     open_rect.height = (uint16_t)runtime->video_info.height;
   } else {
-    placement = zzplay_pip_placement(runtime, 0);
     zzplay_close_video_screen(runtime);
     /* The dedicated screen just closed: re-read the public screen so
      * the windowed reopen's limits match the Workbench, not the
-     * (smaller) fullscreen screen. */
+     * (smaller) fullscreen screen. A portrait frame is then fitted
+     * into that screen instead of opening taller than it. */
     zzplay_cache_screen(runtime);
+    placement = zzplay_pip_placement(runtime, 0);
     open_rect = placement;
   }
 
@@ -1007,6 +1100,8 @@ static void zzplay_apply_resize(struct ZZPlayRuntime *runtime)
   struct Window *window = runtime->window;
   uint16_t inner_w;
   uint16_t inner_h;
+  uint16_t aspect_w;
+  uint16_t aspect_h;
   ZZPlayRect fitted;
   LONG border_w;
   LONG border_h;
@@ -1018,13 +1113,16 @@ static void zzplay_apply_resize(struct ZZPlayRuntime *runtime)
   border_h = window->BorderTop + window->BorderBottom;
   inner_w = (uint16_t)(window->Width - border_w);
   inner_h = (uint16_t)(window->Height - border_h);
+  zzplay_aspect_pixels(runtime, &aspect_w, &aspect_h);
   fitted = zzplay_geometry_fit(
-      runtime->video_info.width, runtime->video_info.height,
+      aspect_w, aspect_h,
       inner_w, inner_h);
   if (fitted.width == 0U || fitted.height == 0U) {
     return;
   }
-  if (fitted.width != inner_w || fitted.height != inner_h) {
+  /* Only an off-aspect window is resized. Refitting a fitted one rounds
+   * down again, and the resize it causes comes straight back here. */
+  if (!zzplay_geometry_is_fitted(inner_w, inner_h, aspect_w, aspect_h)) {
     ChangeWindowBox(window, window->LeftEdge, window->TopEdge,
                     (LONG)fitted.width + border_w,
                     (LONG)fitted.height + border_h);
@@ -1131,24 +1229,46 @@ static void zzplay_update_title(struct ZZPlayRuntime *runtime)
   }
   state = runtime->core.state == ZZPLAY_STATE_PAUSED ? "paused"
                                                      : "playing";
-  sprintf(runtime->title, "ZZPlay - MPEG-1 - %s - %s - %s%s",
-          zzplay_audio_backend_name(runtime->audio_backend),
-          runtime->present_known
-              ? zzplay_present_path_name(runtime->present.path)
-              : "starting",
-          state,
-          runtime->options.loop_mode != ZZPLAY_LOOP_NONE ? " - loop"
-                                                         : "");
+  if (runtime->container.title) {
+    sprintf(runtime->title, "ZZPlay - %s - %s - %s - %s%s",
+            runtime->container.title,
+            zzplay_audio_backend_name(runtime->audio_backend),
+            runtime->present_known
+                ? zzplay_present_path_name(runtime->present.path)
+                : "starting",
+            state,
+            runtime->options.loop_mode != ZZPLAY_LOOP_NONE ? " - loop"
+                                                           : "");
+  } else {
+    sprintf(runtime->title, "ZZPlay - WebP - %s%s",
+            state,
+            (runtime->options.loop_mode != ZZPLAY_LOOP_NONE ||
+             zzplay_controller_loop_item(runtime->ctl)) ? " - loop"
+                                                        : "");
+  }
   SetWindowTitles(runtime->window, (CONST_STRPTR)runtime->title,
                   (CONST_STRPTR)~0UL);
   runtime->title_dirty = 0U;
 }
 
-static int zzplay_decode_once(ZZ9KContext *ctx, uint32_t session,
-                              ZZ9KMediaSessionMainResult *result)
-{
-  return zz9k_media_session_decode(ctx, session, 0U, result);
-}
+ static int zzplay_decode_once(struct ZZPlayRuntime *runtime,
+                               ZZ9KMediaSessionMainResult *result)
+ {
+   uint32_t flags = 0U;
+   int status;
+ 
+   /* Held across NEED_INPUT: the card has not reached a keyframe yet. */
+   if (runtime->container.keyframe_skip && runtime->decode_skip) {
+     flags = ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME;
+   }
+   status = zz9k_media_session_decode(
+       runtime->ctx, runtime->session, flags, result);
+   if (status == ZZ9K_STATUS_OK &&
+       (result->flags & ZZ9K_MEDIA_SESSION_RESULT_FRAME_HELD) != 0U) {
+     runtime->decode_skip = 0U;
+   }
+   return status;
+ }
 
 static int zzplay_ax_bind_call(
     void *user, uint32_t session, uint32_t flags,
@@ -1896,6 +2016,9 @@ static int zzplay_retire_held_frame(
     decision = zzplay_sync_resolve_audio_starvation(
         decision, zzplay_audio_queued_frames(runtime),
         zzplay_audio_low_water_frames(runtime));
+    decision = zzplay_sync_limit_discard_run(
+        decision, runtime->discard_run, drift,
+        runtime->container.keyframe_skip);
     if (decision == ZZPLAY_SYNC_HOLD) {
       runtime->trace_decision = 'H';
       zzplay_stats_record_sync(
@@ -1922,6 +2045,11 @@ static int zzplay_retire_held_frame(
     TimeVal_Type started;
 
     zzplay_profile_begin(runtime, &started);
+    if (runtime->container.keyframe_skip &&
+        decision == ZZPLAY_SYNC_DISCARD &&
+        zzplay_sync_needs_keyframe_skip(drift)) {
+      runtime->decode_skip = 1U;
+    }
     if (decision == ZZPLAY_SYNC_DISCARD) {
       status = zz9k_media_session_discard(
           runtime->ctx, runtime->session, 0U, result);
@@ -1935,6 +2063,8 @@ static int zzplay_retire_held_frame(
   if (status == ZZ9K_STATUS_OK) {
     runtime->trace_decision =
         decision == ZZPLAY_SYNC_DISCARD ? 'D' : 'P';
+    runtime->discard_run =
+        decision == ZZPLAY_SYNC_DISCARD ? runtime->discard_run + 1U : 0U;
     zzplay_stats_record_sync(
         &runtime->stats.core, decision, drift);
   }
@@ -2112,10 +2242,16 @@ static int zzplay_release_resource(void *user,
               runtime->ctx, runtime->session, 0U, &result);
           runtime->frame_held = 0U;
         }
+        /* BUSY lasts until the card's main loop hands the last presented
+         * frame to the compositor; give it a tick between attempts rather
+         * than spending every retry inside one loop iteration. */
         status = ZZ9K_STATUS_BUSY;
         for (retry = 0U;
              retry < 16U && status == ZZ9K_STATUS_BUSY;
              retry++) {
+          if (retry != 0U) {
+            Delay(1);
+          }
           status = zz9k_media_session_close(
               runtime->ctx, runtime->session, 0U, &result);
         }
@@ -2235,18 +2371,19 @@ static int zzplay_begin_session(struct ZZPlayRuntime *runtime)
   runtime->audio_refresh_needed = runtime->audio_enabled;
   runtime->audio_totals_captured = 0U;
   runtime->frame_held = 0U;
+  runtime->discard_run = 0U;
   if (runtime->audio_enabled) {
     zzplay_pcm_ring_init(&runtime->pcm_ring, &runtime->pcm);
   }
 
-  begin.video_codec = ZZ9K_VIDEO_CODEC_MPEG1;
-  begin.container = ZZ9K_VIDEO_CONTAINER_MPEG_PS;
-  begin.width = runtime->video_info.width;
-  begin.height = runtime->video_info.height;
-  begin.output_format = ZZ9K_VIDEO_OUTPUT_DIRECT_OVERLAY;
-  begin.audio_codec = runtime->audio_enabled
-                          ? ZZ9K_MEDIA_AUDIO_MP2
-                          : ZZ9K_MEDIA_AUDIO_NONE;
+   begin.video_codec = runtime->container.video_codec;
+   begin.container = runtime->container.container;
+   begin.width = runtime->video_info.width;
+   begin.height = runtime->video_info.height;
+   begin.output_format = ZZ9K_VIDEO_OUTPUT_DIRECT_OVERLAY;
+   begin.audio_codec = runtime->audio_enabled
+                           ? runtime->container.audio_codec
+                           : ZZ9K_MEDIA_AUDIO_NONE;
   if (runtime->audio_enabled) {
     begin.pcm_ring_handle = runtime->pcm.handle;
     begin.pcm_ring_capacity = runtime->pcm.length;
@@ -2386,8 +2523,13 @@ static ZZPlayFeedResult zzplay_feed_round(
     }
   }
   if (status != ZZ9K_STATUS_OK && status != ZZ9K_STATUS_BUSY) {
-    zzplay_error(runtime, "zzplay: stream write failed: %s\n",
-                 zz9k_status_name(status));
+    if (runtime->container.stream_refused &&
+        status == ZZ9K_STATUS_UNSUPPORTED) {
+      zzplay_error(runtime, "%s", runtime->container.stream_refused);
+    } else {
+      zzplay_error(runtime, "zzplay: stream write failed: %s\n",
+                   zz9k_status_name(status));
+    }
     zzplay_fail(runtime, ZZPLAY_FAILURE_IO, status);
     return ZZPLAY_FEED_ERROR;
   }
@@ -2500,7 +2642,7 @@ static void zzplay_app_open_gui(ZZPlayApp *app)
 }
 
 /* ------------------------------------------------------------------ */
-/* MPEG-1 Program Stream engine (the former main() playback body).     */
+/* Media-session engine: MPEG-1 PS and WebM (former main() body).     */
 /* ------------------------------------------------------------------ */
 
 /* PIP input plus the GUI pump, shared by the playback loop and the drain
@@ -2528,7 +2670,309 @@ static void zzplay_engine_stop_from_request(struct ZZPlayRuntime *runtime)
                        : ZZPLAY_STOP_WINDOW_CLOSE);
 }
 
-static ZZPlayEngineResult zzplay_engine_mpeg(const ZZPlayEngineRun *run)
+static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
+                               const ZZPlayEngineRun *run,
+                               ZZPlayBackendDecision *decision)
+{
+  const ZZPlayWebMInfo *webm;
+  ZZPlayMediaAudio media = ZZPLAY_MEDIA_AUDIO_NONE;
+  ZZPlayAudioBackend requested;
+  int strict = 0;
+  uint32_t rate;
+  char format[ZZPLAY_NOW_TEXT_MAX];
+
+  if (!run->probe) {
+    return 0;
+  }
+  webm = &run->probe->webm;
+  switch (webm->refusal) {
+  case ZZPLAY_WEBM_OK:
+    break;
+  case ZZPLAY_WEBM_MATROSKA:
+    zzplay_error(runtime,
+                 "zzplay: Matroska files that are not WebM are not supported\n");
+    goto refused;
+  case ZZPLAY_WEBM_TWO_VIDEO:
+    zzplay_error(runtime,
+                 "zzplay: WebM files with more than one video track "
+                 "are not supported\n");
+    goto refused;
+  case ZZPLAY_WEBM_TWO_AUDIO:
+    zzplay_error(runtime,
+                 "zzplay: WebM files with more than one audio track "
+                 "are not supported\n");
+    goto refused;
+  case ZZPLAY_WEBM_UNKNOWN_CODEC:
+    zzplay_error(runtime, "zzplay: unsupported WebM codec\n");
+    goto refused;
+  case ZZPLAY_WEBM_OVERSIZE:
+    zzplay_error(runtime,
+                 "zzplay: WebM video %lux%lu is larger than the card can play\n",
+                 (unsigned long)webm->width, (unsigned long)webm->height);
+    goto refused;
+  case ZZPLAY_WEBM_TRUNCATED:
+    zzplay_error(runtime, "zzplay: truncated WebM header\n");
+    goto refused;
+  case ZZPLAY_WEBM_NO_VIDEO:
+    zzplay_error(runtime, "zzplay: WebM file has no video track\n");
+    goto refused;
+  case ZZPLAY_WEBM_BAD_AUDIO:
+    zzplay_error(runtime,
+                 "zzplay: WebM audio must be mono or stereo, and Vorbis "
+                 "must be 8 to 96 kHz\n");
+    goto refused;
+  default:
+    zzplay_error(runtime, "zzplay: WebM file is not a supported stream\n");
+    goto refused;
+  }
+  if (webm->width == 0U || webm->height == 0U ||
+      !zzplay_webm_within_cap(webm->width, webm->height)) {
+    zzplay_error(runtime,
+                 "zzplay: WebM video %lux%lu is larger than the card can play\n",
+                 (unsigned long)webm->width, (unsigned long)webm->height);
+    goto refused;
+  }
+  memset(&info, 0, sizeof(info));
+  info.width = webm->width;
+  info.height = webm->height;
+  rate = webm->frame_rate_milli != 0U ? webm->frame_rate_milli : 30000U;
+  info.frame_rate_milli = rate;
+  runtime->video_info = info;
+  zzplay_webm_window_source(webm, &runtime->display_w, &runtime->display_h);
+  {
+    ZZPlayContainerPolicy *policy = &runtime->container;
+
+    memset(policy, 0, sizeof(*policy));
+    policy->title = "WebM";
+    policy->video_codec = zzplay_webm_video_codec_id(webm->video);
+    policy->container = ZZ9K_VIDEO_CONTAINER_WEBM;
+    policy->audio_codec = zzplay_webm_audio_codec_id(webm->audio);
+    policy->video_flags = webm->video == ZZPLAY_WEBM_VIDEO_VP9
+                              ? ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9
+                              : ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8;
+    policy->audio_flags =
+        webm->audio == ZZPLAY_WEBM_AUDIO_OPUS
+            ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS
+            : webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS
+                  ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS
+                  : 0U;
+    policy->video_name = zzplay_webm_video_name(webm->video);
+    policy->audio_name = zzplay_webm_audio_name(webm->audio);
+    policy->service_missing =
+        "zzplay: WebM playback is not supported by this firmware\n";
+    policy->begin_refused =
+        "zzplay: WebM playback was refused by the firmware\n";
+    policy->stream_refused = "zzplay: this WebM stream is not supported\n";
+    /* VP8/VP9 keyframes can be seconds apart; the container carries a
+     * real presentation timeline for the position display. */
+    policy->keyframe_skip = 1U;
+    policy->pts_position = 1U;
+  }
+  if (webm->audio == ZZPLAY_WEBM_AUDIO_OPUS) {
+    media = ZZPLAY_MEDIA_AUDIO_OPUS;
+  } else if (webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS) {
+    media = ZZPLAY_MEDIA_AUDIO_VORBIS;
+  }
+  requested = zzplay_prefs_requested_backend(
+      &runtime->prefs, &runtime->options, media, &strict);
+  runtime->audio_strict = (uint8_t)(strict ? 1 : 0);
+  if (webm->audio == ZZPLAY_WEBM_AUDIO_NONE &&
+      requested != ZZPLAY_AUDIO_AUTO && requested != ZZPLAY_AUDIO_NONE &&
+      strict) {
+    zzplay_error(runtime, "zzplay: the WebM file has no audio track\n");
+    goto refused;
+  }
+  memset(decision, 0, sizeof(*decision));
+  if (webm->audio != ZZPLAY_WEBM_AUDIO_NONE) {
+    ZZPlayAudioAvailability availability;
+
+    memset(&availability, 0, sizeof(availability));
+    availability.ahi = ZZPLAY_BACKEND_FREE;
+    availability.mhi = ZZPLAY_BACKEND_MISSING;
+    availability.ax = ZZPLAY_BACKEND_FREE;
+    *decision = zzplay_audio_select(media, requested, &availability);
+    if (decision->status != ZZPLAY_BACKEND_OK && !strict) {
+      *decision = zzplay_audio_select(
+          media, ZZPLAY_AUDIO_AUTO, &availability);
+    }
+    if (decision->status != ZZPLAY_BACKEND_OK) {
+      zzplay_error(runtime,
+                   "zzplay: audio backend %s cannot play WebM %s "
+                   "(status %u)\n",
+                   zzplay_audio_backend_name(requested),
+                   zzplay_webm_audio_name(webm->audio),
+                   (unsigned)decision->status);
+      zzplay_fail(runtime, ZZPLAY_FAILURE_CAPABILITY,
+                  ZZ9K_STATUS_UNSUPPORTED);
+      return 0;
+    }
+    runtime->audio_backend = decision->selected;
+    runtime->audio_enabled = decision->selected != ZZPLAY_AUDIO_NONE;
+  } else {
+    decision->status = ZZPLAY_BACKEND_OK;
+    decision->selected = ZZPLAY_AUDIO_NONE;
+    runtime->audio_backend = ZZPLAY_AUDIO_NONE;
+    zzplay_info("zzplay: warning: video-only WebM\n");
+  }
+  zzplay_info("zzplay: WebM %s %lux%lu%s\n",
+              zzplay_webm_video_name(webm->video),
+              (unsigned long)webm->width, (unsigned long)webm->height,
+              webm->audio == ZZPLAY_WEBM_AUDIO_NONE
+                  ? ", no audio"
+                  : "");
+  if (webm->pose_roll_present) {
+    int32_t roll = webm->pose_roll_milli;
+    int32_t whole;
+    int32_t frac;
+
+    if (roll < 0) {
+      frac = -roll;
+    } else {
+      frac = roll;
+    }
+    whole = frac / 1000;
+    frac = frac % 1000;
+    zzplay_info("zzplay: WebM projection pose roll %s%ld.%03ld degrees "
+                "(not applied)\n",
+                roll < 0 ? "-" : "", (long)whole, (long)frac);
+  }
+  zzplay_controller_set_capabilities(
+      runtime->ctl, 0, runtime->audio_backend == ZZPLAY_AUDIO_AHI, 1);
+  if (!zzplay_webm_format_line(webm, format, sizeof(format))) {
+    format[0] = '\0';
+  }
+  zzplay_controller_set_format(runtime->ctl, format);
+  zzplay_controller_set_duration(
+      runtime->ctl, webm->has_duration ? webm->duration_ms : 0U);
+  if (!zzplay_webm_realtime(webm->video, webm->width, webm->height)) {
+    zzplay_controller_set_message(
+        runtime->ctl, "large video: frames may be skipped");
+    zzplay_info("zzplay: large video: frames may be skipped\n");
+  }
+  zzplay_engine_refresh_output(runtime);
+  return 1;
+
+refused:
+  zzplay_fail(runtime, ZZPLAY_FAILURE_INVALID_INPUT, ZZ9K_STATUS_UNSUPPORTED);
+  return 0;
+}
+
+static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
+                               const ZZPlayEngineRun *run,
+                               ZZPlayBackendDecision *decision)
+{
+  ZZPlayAudioBackend requested;
+  int strict = 0;
+  ZZPlayContainerPolicy *policy = &runtime->container;
+
+  memset(policy, 0, sizeof(*policy));
+  policy->title = "MPEG-1";
+  policy->video_codec = ZZ9K_VIDEO_CODEC_MPEG1;
+  policy->container = ZZ9K_VIDEO_CONTAINER_MPEG_PS;
+  policy->audio_codec = ZZ9K_MEDIA_AUDIO_MP2;
+  policy->video_flags =
+      ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 | ZZ9K_SERVICE_FLAG_VIDEO_MPEG_PS;
+  policy->audio_flags = ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2;
+  policy->service_missing =
+      "zzplay: required MPEG-1/PS direct-overlay backend "
+      "is unavailable\n";
+
+  info = run->probe->video;
+  if (!zzplay_video_info_supported(&info)) {
+    zzplay_error(runtime, "zzplay: unsupported MPEG-1 video geometry\n");
+    zzplay_fail(runtime, ZZPLAY_FAILURE_INVALID_INPUT,
+                ZZ9K_STATUS_UNSUPPORTED);
+    return 0;
+  }
+  if (!info.is_program_stream || !info.has_video_pes) {
+    zzplay_error(runtime,
+            "zzplay: MPEG-1 elementary streams are not supported; "
+            "a Program Stream is required\n");
+    zzplay_fail(runtime, ZZPLAY_FAILURE_INVALID_INPUT,
+                ZZ9K_STATUS_UNSUPPORTED);
+    return 0;
+  }
+  requested = zzplay_prefs_requested_backend(
+      &runtime->prefs, &runtime->options, ZZPLAY_MEDIA_AUDIO_MP2, &strict);
+  runtime->audio_strict = (uint8_t)(strict ? 1 : 0);
+  if (!info.has_audio_pes &&
+      requested != ZZPLAY_AUDIO_AUTO && requested != ZZPLAY_AUDIO_NONE &&
+      strict) {
+    zzplay_error(runtime,
+            "zzplay: the Program Stream has no supported MP2 audio\n");
+    zzplay_fail(runtime, ZZPLAY_FAILURE_INVALID_INPUT,
+                ZZ9K_STATUS_UNSUPPORTED);
+    return 0;
+  }
+  runtime->video_info = info;
+  if (info.has_audio_pes) {
+    ZZPlayAudioAvailability availability;
+
+    memset(&availability, 0, sizeof(availability));
+    availability.ahi = ZZPLAY_BACKEND_FREE;
+    availability.mhi = ZZPLAY_BACKEND_MISSING;
+    availability.ax = ZZPLAY_BACKEND_FREE;
+    *decision = zzplay_audio_select(
+        ZZPLAY_MEDIA_AUDIO_MP2, requested, &availability);
+    if (decision->status != ZZPLAY_BACKEND_OK && !strict) {
+      /* A saved (non-strict) preference that cannot play falls back
+       * exactly like AUTO instead of failing the item. */
+      *decision = zzplay_audio_select(
+          ZZPLAY_MEDIA_AUDIO_MP2, ZZPLAY_AUDIO_AUTO, &availability);
+    }
+    if (decision->status != ZZPLAY_BACKEND_OK) {
+      zzplay_error(runtime,
+              "zzplay: audio backend %s cannot play Program "
+              "Stream MP2 (status %u)\n",
+              zzplay_audio_backend_name(requested),
+              (unsigned)decision->status);
+      zzplay_fail(runtime, ZZPLAY_FAILURE_CAPABILITY,
+                  ZZ9K_STATUS_UNSUPPORTED);
+      return 0;
+    }
+    runtime->audio_backend = decision->selected;
+    runtime->audio_enabled =
+        decision->selected != ZZPLAY_AUDIO_NONE;
+  } else {
+    memset(decision, 0, sizeof(*decision));
+    decision->status = ZZPLAY_BACKEND_OK;
+    decision->selected = ZZPLAY_AUDIO_NONE;
+    runtime->audio_backend = ZZPLAY_AUDIO_NONE;
+    zzplay_info("zzplay: warning: video-only Program Stream\n");
+  }
+  zzplay_info("zzplay: MPEG-1/PS %lux%lu, %lu.%03lu fps, "
+         "program audio %s\n",
+         (unsigned long)info.width, (unsigned long)info.height,
+         (unsigned long)(info.frame_rate_milli / 1000U),
+         (unsigned long)(info.frame_rate_milli % 1000U),
+         info.has_audio_pes ? "MP2" : "none");
+  zzplay_controller_set_capabilities(
+      runtime->ctl, 0, runtime->audio_backend == ZZPLAY_AUDIO_AHI, 1);
+  {
+    char format[ZZPLAY_NOW_TEXT_MAX];
+
+    sprintf(format, "MPEG-1 %lux%lu, %lu.%03lu fps, %s",
+            (unsigned long)info.width, (unsigned long)info.height,
+            (unsigned long)(info.frame_rate_milli / 1000U),
+            (unsigned long)(info.frame_rate_milli % 1000U),
+            info.has_audio_pes ? "MP2" : "no audio");
+    zzplay_controller_set_format(runtime->ctl, format);
+  }
+  zzplay_controller_set_duration(runtime->ctl, 0U);
+  zzplay_engine_refresh_output(runtime);
+  return 1;
+}
+
+/* Prepares one container's policy, video info and audio decision. */
+typedef int (*ZZPlayContainerPrepare)(struct ZZPlayRuntime *runtime,
+                                      const ZZPlayEngineRun *run,
+                                      ZZPlayBackendDecision *decision);
+
+/* One MPEG-1 Program Stream or WebM item through a card media session.
+ * The container's prepare step settles everything that differs between
+ * them (runtime.container); the session loop below is shared. */
+static ZZPlayEngineResult zzplay_engine_media_session(
+    const ZZPlayEngineRun *run, ZZPlayContainerPrepare prepare)
 {
   ZZ9KBoard board;
   ZZ9KCaps caps;
@@ -2536,7 +2980,6 @@ static ZZPlayEngineResult zzplay_engine_mpeg(const ZZPlayEngineRun *run)
   ZZ9KServiceInfo service;
   ZZ9KMediaSessionMainResult result;
   ZZPlayBackendDecision audio_decision;
-  ZZPlayAudioBackend requested;
   uint32_t frame_period_us;
   uint32_t input_bytes;
   uint32_t pcm_bytes;
@@ -2571,89 +3014,11 @@ static ZZPlayEngineResult zzplay_engine_mpeg(const ZZPlayEngineRun *run)
   (void)zzplay_resource_acquire(
       &runtime.core.resources, ZZPLAY_RESOURCE_INPUT_FILE);
 
-  info = run->probe->video;
-  if (!zzplay_video_info_supported(&info)) {
-    zzplay_error(&runtime, "zzplay: unsupported MPEG-1 video geometry\n");
-    zzplay_fail(&runtime, ZZPLAY_FAILURE_INVALID_INPUT,
-                ZZ9K_STATUS_UNSUPPORTED);
+  if (!prepare(&runtime, run, &audio_decision)) {
     goto cleanup;
   }
-  if (!info.is_program_stream || !info.has_video_pes) {
-    zzplay_error(&runtime,
-            "zzplay: MPEG-1 elementary streams are not supported; "
-            "a Program Stream is required\n");
-    zzplay_fail(&runtime, ZZPLAY_FAILURE_INVALID_INPUT,
-                ZZ9K_STATUS_UNSUPPORTED);
-    goto cleanup;
-  }
-  requested = zzplay_prefs_requested_backend(
-      &runtime.prefs, &runtime.options, ZZPLAY_MEDIA_AUDIO_MP2, &strict);
-  runtime.audio_strict = (uint8_t)(strict ? 1 : 0);
-  if (!info.has_audio_pes &&
-      requested != ZZPLAY_AUDIO_AUTO && requested != ZZPLAY_AUDIO_NONE &&
-      strict) {
-    zzplay_error(&runtime,
-            "zzplay: the Program Stream has no supported MP2 audio\n");
-    zzplay_fail(&runtime, ZZPLAY_FAILURE_INVALID_INPUT,
-                ZZ9K_STATUS_UNSUPPORTED);
-    goto cleanup;
-  }
-  runtime.video_info = info;
-  if (info.has_audio_pes) {
-    ZZPlayAudioAvailability availability;
-
-    memset(&availability, 0, sizeof(availability));
-    availability.ahi = ZZPLAY_BACKEND_FREE;
-    availability.mhi = ZZPLAY_BACKEND_MISSING;
-    availability.ax = ZZPLAY_BACKEND_FREE;
-    audio_decision = zzplay_audio_select(
-        ZZPLAY_MEDIA_AUDIO_MP2, requested, &availability);
-    if (audio_decision.status != ZZPLAY_BACKEND_OK && !strict) {
-      /* A saved (non-strict) preference that cannot play falls back
-       * exactly like AUTO instead of failing the item. */
-      audio_decision = zzplay_audio_select(
-          ZZPLAY_MEDIA_AUDIO_MP2, ZZPLAY_AUDIO_AUTO, &availability);
-    }
-    if (audio_decision.status != ZZPLAY_BACKEND_OK) {
-      zzplay_error(&runtime,
-              "zzplay: audio backend %s cannot play Program "
-              "Stream MP2 (status %u)\n",
-              zzplay_audio_backend_name(requested),
-              (unsigned)audio_decision.status);
-      zzplay_fail(&runtime, ZZPLAY_FAILURE_CAPABILITY,
-                  ZZ9K_STATUS_UNSUPPORTED);
-      goto cleanup;
-    }
-    runtime.audio_backend = audio_decision.selected;
-    runtime.audio_enabled =
-        audio_decision.selected != ZZPLAY_AUDIO_NONE;
-  } else {
-    memset(&audio_decision, 0, sizeof(audio_decision));
-    audio_decision.status = ZZPLAY_BACKEND_OK;
-    audio_decision.selected = ZZPLAY_AUDIO_NONE;
-    runtime.audio_backend = ZZPLAY_AUDIO_NONE;
-    zzplay_info("zzplay: warning: video-only Program Stream\n");
-  }
-  zzplay_info("zzplay: MPEG-1/PS %lux%lu, %lu.%03lu fps, "
-         "program audio %s\n",
-         (unsigned long)info.width, (unsigned long)info.height,
-         (unsigned long)(info.frame_rate_milli / 1000U),
-         (unsigned long)(info.frame_rate_milli % 1000U),
-         info.has_audio_pes ? "MP2" : "none");
-  zzplay_controller_set_capabilities(
-      runtime.ctl, 0, runtime.audio_backend == ZZPLAY_AUDIO_AHI, 1);
-  {
-    char format[ZZPLAY_NOW_TEXT_MAX];
-
-    sprintf(format, "MPEG-1 %lux%lu, %lu.%03lu fps, %s",
-            (unsigned long)info.width, (unsigned long)info.height,
-            (unsigned long)(info.frame_rate_milli / 1000U),
-            (unsigned long)(info.frame_rate_milli % 1000U),
-            info.has_audio_pes ? "MP2" : "no audio");
-    zzplay_controller_set_format(runtime.ctl, format);
-  }
-  zzplay_controller_set_duration(runtime.ctl, 0U);
-  zzplay_engine_refresh_output(&runtime);
+  strict = runtime.audio_strict;
+  info = runtime.video_info;
 
   if (zz9k_find_board(&board) != ZZ9K_STATUS_OK ||
       (board.zorro_version != 2U && board.zorro_version != 3U)) {
@@ -2712,17 +3077,37 @@ static ZZPlayEngineResult zzplay_engine_mpeg(const ZZPlayEngineRun *run)
   }
   cleanup_status = zz9k_query_service(
       runtime.ctx, ZZ9K_SERVICE_VIDEO, &service);
-  if (cleanup_status != ZZ9K_STATUS_OK ||
-      !zzplay_video_backend_available(service.flags) ||
-      (service.flags & ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_SESSION) == 0U ||
-      (runtime.audio_enabled &&
-       (service.flags & ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2) == 0U)) {
-    zzplay_error(&runtime,
-            "zzplay: required MPEG-1/PS direct-overlay backend "
-            "is unavailable\n");
-    zzplay_fail(&runtime, ZZPLAY_FAILURE_CAPABILITY,
-                ZZ9K_STATUS_UNSUPPORTED);
-    goto cleanup;
+  {
+    uint32_t need = ZZ9K_SERVICE_FLAG_VIDEO_DIRECT_OVERLAY |
+                    ZZ9K_SERVICE_FLAG_VIDEO_STREAMING_INPUT |
+                    ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_SESSION |
+                    runtime.container.video_flags;
+
+    if (runtime.audio_enabled) {
+      need |= runtime.container.audio_flags;
+    }
+    if (cleanup_status != ZZ9K_STATUS_OK ||
+        (service.flags & need) != need) {
+      const ZZPlayContainerPolicy *policy = &runtime.container;
+
+      if (policy->video_name &&
+          (service.flags & policy->video_flags) != policy->video_flags) {
+        zzplay_error(&runtime,
+                     "zzplay: %s %s is not supported by this firmware\n",
+                     policy->title, policy->video_name);
+      } else if (policy->audio_name && runtime.audio_enabled &&
+                 (service.flags & policy->audio_flags) !=
+                     policy->audio_flags) {
+        zzplay_error(&runtime,
+                     "zzplay: %s %s is not supported by this firmware\n",
+                     policy->title, policy->audio_name);
+      } else {
+        zzplay_error(&runtime, "%s", policy->service_missing);
+      }
+      zzplay_fail(&runtime, ZZPLAY_FAILURE_CAPABILITY,
+                  ZZ9K_STATUS_UNSUPPORTED);
+      goto cleanup;
+    }
   }
   runtime.ax_available =
       (uint8_t)((service.flags & ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND) != 0U);
@@ -2782,8 +3167,13 @@ static ZZPlayEngineResult zzplay_engine_mpeg(const ZZPlayEngineRun *run)
   }
   cleanup_status = zzplay_begin_session(&runtime);
   if (cleanup_status != ZZ9K_STATUS_OK) {
-    zzplay_error(&runtime, "zzplay: session begin failed: %s\n",
-            zz9k_status_name(cleanup_status));
+    if (runtime.container.begin_refused &&
+        cleanup_status == ZZ9K_STATUS_UNSUPPORTED) {
+      zzplay_error(&runtime, "%s", runtime.container.begin_refused);
+    } else {
+      zzplay_error(&runtime, "zzplay: session begin failed: %s\n",
+              zz9k_status_name(cleanup_status));
+    }
     zzplay_fail(&runtime, ZZPLAY_FAILURE_SESSION, cleanup_status);
     goto cleanup;
   }
@@ -2951,8 +3341,7 @@ playback_session:
       TimeVal_Type ended;
 
       GetSysTime(&started);
-      cleanup_status = zzplay_decode_once(
-          runtime.ctx, runtime.session, &result);
+      cleanup_status = zzplay_decode_once(&runtime, &result);
       GetSysTime(&ended);
       held_decode_us = zzplay_elapsed_us(&started, &ended);
       zzplay_stats_record_profile(
@@ -2970,8 +3359,13 @@ playback_session:
       continue;
     }
     if (cleanup_status != ZZ9K_STATUS_OK) {
-      zzplay_error(&runtime, "zzplay: media decode failed: %s\n",
-              zz9k_status_name(cleanup_status));
+      if (runtime.container.stream_refused &&
+          cleanup_status == ZZ9K_STATUS_UNSUPPORTED) {
+        zzplay_error(&runtime, "%s", runtime.container.stream_refused);
+      } else {
+        zzplay_error(&runtime, "zzplay: media decode failed: %s\n",
+                zz9k_status_name(cleanup_status));
+      }
       zzplay_fail(&runtime, ZZPLAY_FAILURE_SESSION,
               cleanup_status);
       break;
@@ -2996,11 +3390,22 @@ playback_session:
       if (gui_open) {
         /* Elapsed position from decoded frames is only visible in the
          * player window; one-shot MPEG has no seekable status to update. */
-        zzplay_controller_set_position(
-            runtime.ctl,
-            (uint32_t)((uint64_t)(runtime.frames - runtime.pass_frame_origin) *
-                       frame_period_us / 1000U),
-            1);
+        if (runtime.container.pts_position &&
+            result.video_pts != ZZ9K_MEDIA_NO_PTS) {
+          uint64_t elapsed_ms = result.video_pts / 90U;
+
+          zzplay_controller_set_position(
+              runtime.ctl,
+              elapsed_ms > 0xffffffffULL ? 0xffffffffU
+                                         : (uint32_t)elapsed_ms,
+              1);
+        } else {
+          zzplay_controller_set_position(
+              runtime.ctl,
+              (uint32_t)((uint64_t)(runtime.frames - runtime.pass_frame_origin) *
+                         frame_period_us / 1000U),
+              1);
+        }
       }
       continue;
     }
@@ -3146,8 +3551,401 @@ cleanup:
   return ZZPLAY_ENGINE_EOF;
 }
 
+static ZZPlayEngineResult zzplay_engine_mpeg(const ZZPlayEngineRun *run)
+{
+  return zzplay_engine_media_session(run, zzplay_prepare_mpeg);
+}
+
+static ZZPlayEngineResult zzplay_engine_webm(const ZZPlayEngineRun *run)
+{
+  return zzplay_engine_media_session(run, zzplay_prepare_webm);
+}
+
 /* ------------------------------------------------------------------ */
-/* Engine table and the application loop.                               */
+/* WebP animation engine.                                             */
+/* ------------------------------------------------------------------ */
+
+static ZZPlayEngineResult zzplay_engine_webp(const ZZPlayEngineRun *run)
+{
+  struct ZZPlayRuntime runtime;
+  ZZ9KBoard board;
+  ZZ9KServiceInfo service;
+  ZZ9KSharedBuffer staging;
+  ZZ9KSurface surface;
+  ZZ9KImageSessionBeginDesc begin;
+  ZZ9KImageSessionResult session_result;
+  ZZ9KImageAnimationFrameResult frame_result;
+  ZZPlayFrameClock clock;
+  ZZ9KRect output_rect;
+  uint32_t active_token = 0U;
+  uint32_t session = 0U;
+  uint32_t width;
+  uint32_t height;
+  uint32_t pitch;
+  uint64_t file_length = 0U;
+  uint64_t file_offset = 0U;
+  int cleanup_status;
+  ZZPlayEngineResult outcome = ZZPLAY_ENGINE_FAILED;
+  int session_open = 0;
+  int staging_allocated = 0;
+  int surface_allocated = 0;
+  int timer_open = 0;
+  int p96_open = 0;
+  int sdk_open = 0;
+
+  if (!run || !run->path || !run->ctl || !run->probe) {
+    return ZZPLAY_ENGINE_FAILED;
+  }
+  if (run->probe->kind != ZZPLAY_MEDIA_KIND_WEBP ||
+      !run->probe->webp.is_animated) {
+    return ZZPLAY_ENGINE_FAILED;
+  }
+  if (!zzplay_webp_info_supported(&run->probe->webp)) {
+    zzplay_info("zzplay: unsupported WebP animation geometry %lux%lu\n",
+                (unsigned long)run->probe->webp.width,
+                (unsigned long)run->probe->webp.height);
+    return ZZPLAY_ENGINE_FAILED;
+  }
+
+  memset(&runtime, 0, sizeof(runtime));
+  memset(&board, 0, sizeof(board));
+  memset(&service, 0, sizeof(service));
+  memset(&staging, 0, sizeof(staging));
+  memset(&surface, 0, sizeof(surface));
+  memset(&begin, 0, sizeof(begin));
+  memset(&session_result, 0, sizeof(session_result));
+  memset(&frame_result, 0, sizeof(frame_result));
+
+  runtime.ctl = run->ctl;
+  runtime.options = *run->options;
+  runtime.prefs = *run->prefs;
+  /* Packed YUV422 stores whole two-pixel macropixels: an odd-width canvas
+   * ends in a duplicated pixel. The PIP source and the surface pitch both
+   * cover that full final macropixel, which the firmware requires. */
+  runtime.video_info.width = (run->probe->webp.width + 1U) & ~1U;
+  runtime.video_info.height = run->probe->webp.height;
+  runtime.video_info.frame_rate_milli = 25000U;
+  zzplay_core_init(&runtime.core);
+
+  width = run->probe->webp.width;
+  height = run->probe->webp.height;
+  pitch = ((width + 1U) / 2U) * 4U;
+
+  runtime.file = fopen(run->path, "rb");
+  if (!runtime.file) {
+    zzplay_error(&runtime, "zzplay: cannot open %s\n", run->path);
+    return ZZPLAY_ENGINE_FAILED;
+  }
+  if (fseek(runtime.file, 0L, SEEK_END) == 0) {
+    long len = ftell(runtime.file);
+    if (len > 0) {
+      file_length = (uint64_t)len;
+    }
+    (void)fseek(runtime.file, 0L, SEEK_SET);
+  }
+
+  if (zz9k_find_board(&board) != ZZ9K_STATUS_OK ||
+      (board.zorro_version != 2U && board.zorro_version != 3U)) {
+    zzplay_error(&runtime,
+                 "zzplay: the P96 video window requires a supported ZZ9000 aperture\n");
+    zzplay_fail(&runtime, ZZPLAY_FAILURE_UNSUPPORTED_BOARD,
+                ZZ9K_STATUS_UNSUPPORTED);
+    goto cleanup;
+  }
+
+  P96Base = OpenLibrary((CONST_STRPTR)"Picasso96API.library", 2U);
+  if (!P96Base) {
+    zzplay_error(&runtime, "zzplay: cannot open Picasso96API.library\n");
+    zzplay_fail(&runtime, ZZPLAY_FAILURE_P96, ZZ9K_STATUS_UNSUPPORTED);
+    goto cleanup;
+  }
+  p96_open = 1;
+
+  cleanup_status = zz9k_open(&runtime.ctx);
+  if (cleanup_status != ZZ9K_STATUS_OK || !runtime.ctx) {
+    zzplay_error(&runtime, "zzplay: SDK open failed (%d)\n", cleanup_status);
+    zzplay_fail(&runtime, ZZPLAY_FAILURE_SDK, cleanup_status);
+    goto cleanup;
+  }
+  sdk_open = 1;
+
+  cleanup_status = zz9k_query_service(runtime.ctx, ZZ9K_SERVICE_IMAGE, &service);
+  if (cleanup_status != ZZ9K_STATUS_OK) {
+    zzplay_error(&runtime, "zzplay: image service query failed\n");
+    zzplay_fail(&runtime, ZZPLAY_FAILURE_CAPABILITY, ZZ9K_STATUS_UNSUPPORTED);
+    goto cleanup;
+  }
+  if ((service.flags & ZZ9K_SERVICE_FLAG_IMAGE_STREAMING_INPUT) == 0U ||
+      (service.flags & ZZ9K_SERVICE_FLAG_IMAGE_WEBP) == 0U) {
+    zzplay_error(&runtime, "zzplay: firmware does not support WebP streaming\n");
+    zzplay_fail(&runtime, ZZPLAY_FAILURE_CAPABILITY, ZZ9K_STATUS_UNSUPPORTED);
+    goto cleanup;
+  }
+
+  if (!zzplay_timer_open(&runtime.timer)) {
+    zzplay_error(&runtime, "zzplay: timer device open failed\n");
+    goto cleanup;
+  }
+  timer_open = 1;
+
+  zzplay_controller_set_capabilities(run->ctl, 0, 0, 1);
+  {
+    char format_buf[ZZPLAY_NOW_TEXT_MAX];
+    sprintf(format_buf, "WebP Animation %lux%lu",
+            (unsigned long)width, (unsigned long)height);
+    zzplay_controller_set_format(run->ctl, format_buf);
+  }
+  zzplay_controller_set_duration(run->ctl, 0U);
+
+  cleanup_status = zz9k_alloc_shared(runtime.ctx, 32768U, 16U,
+                                     ZZ9K_ALLOC_HOST_WINDOW, &staging);
+  if (cleanup_status != ZZ9K_STATUS_OK) {
+    zzplay_error(&runtime, "zzplay: WebP staging alloc failed (%d)\n", cleanup_status);
+    goto cleanup;
+  }
+  staging_allocated = 1;
+
+  cleanup_status = zz9k_alloc_surface_ex(
+      runtime.ctx, width, height, ZZ9K_SURFACE_FORMAT_YUV422CGX,
+      ZZ9K_SURFACE_FLAG_ARM_LOCAL, pitch, &surface);
+  if (cleanup_status != ZZ9K_STATUS_OK) {
+    zzplay_error(&runtime, "zzplay: WebP PIP surface alloc failed (%d)\n", cleanup_status);
+    goto cleanup;
+  }
+  surface_allocated = 1;
+
+  if (!zzplay_ensure_pip(&runtime)) {
+    zzplay_error(&runtime, "zzplay: cannot open P96 PIP window\n");
+    goto cleanup;
+  }
+
+  output_rect.x = 0U;
+  output_rect.y = 0U;
+  output_rect.w = width;
+  output_rect.h = height;
+  if (!zz9k_image_build_surface_session_begin_desc(
+          &begin, ZZ9K_IMAGE_CODEC_WEBP, surface.handle,
+          &output_rect, ZZ9K_SURFACE_FORMAT_YUV422CGX,
+          ZZ9K_IMAGE_SESSION_BEGIN_ANIMATION)) {
+    zzplay_error(&runtime, "zzplay: could not build WebP begin descriptor\n");
+    goto cleanup;
+  }
+
+  cleanup_status = zz9k_image_session_begin(runtime.ctx, &begin, &session_result);
+  if (cleanup_status != ZZ9K_STATUS_OK || session_result.session == 0U ||
+      session_result.state != ZZ9K_IMAGE_SESSION_STATE_NEED_INPUT) {
+    zzplay_error(&runtime, "zzplay: WebP animation session begin failed (%d)\n",
+                 cleanup_status);
+    goto cleanup;
+  }
+  session = session_result.session;
+  session_open = 1;
+
+  while (file_offset < file_length) {
+    size_t chunk = (size_t)(file_length - file_offset);
+    size_t bytes_read;
+    int is_eof;
+    ZZ9KImageSessionFeedDesc feed;
+
+    if (chunk > staging.length) {
+      chunk = (size_t)staging.length;
+    }
+    bytes_read = fread((void *)staging.data, 1U, chunk, runtime.file);
+    if (bytes_read == 0U && ferror(runtime.file)) {
+      zzplay_error(&runtime, "zzplay: error reading WebP file\n");
+      goto cleanup;
+    }
+    file_offset += (uint64_t)bytes_read;
+    is_eof = (file_offset >= file_length);
+
+    if (!zz9k_image_build_session_feed_desc(
+            &feed, session, staging.handle, 0U, (uint32_t)bytes_read,
+            is_eof ? ZZ9K_IMAGE_SESSION_FEED_EOF : 0U)) {
+      zzplay_error(&runtime, "zzplay: could not build feed desc\n");
+      goto cleanup;
+    }
+
+    cleanup_status = zz9k_image_session_feed(runtime.ctx, &feed, &session_result);
+    if (cleanup_status != ZZ9K_STATUS_OK) {
+      zzplay_error(&runtime, "zzplay: WebP feed failed (%d)\n", cleanup_status);
+      goto cleanup;
+    }
+  }
+
+  if (session_result.state != ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY) {
+    zzplay_error(&runtime, "zzplay: WebP not animation ready after EOF (state %u)\n",
+                 (unsigned)session_result.state);
+    goto cleanup;
+  }
+
+  zzplay_frame_clock_init(&clock, zzplay_controller_loop_item(run->ctl));
+
+  cleanup_status = zz9k_image_animation_frame_next(runtime.ctx, session, 0U, &frame_result);
+  if (cleanup_status != ZZ9K_STATUS_OK || frame_result.frame_token == 0U) {
+    zzplay_error(&runtime, "zzplay: failed to fetch first animation frame (%d)\n",
+                 cleanup_status);
+    goto cleanup;
+  }
+  active_token = frame_result.frame_token;
+
+  {
+    uint64_t now_us = zzplay_now_us();
+    zzplay_frame_clock_start(&clock, now_us, frame_result.frame_duration_ms);
+  }
+  zzplay_controller_set_position(run->ctl, 0U, 1);
+
+  (void)zz9k_image_animation_frame_present(runtime.ctx, session, active_token, 0U, &frame_result);
+  (void)zzplay_core_start(&runtime.core);
+
+  while (runtime.core.state == ZZPLAY_STATE_PLAYING ||
+         runtime.core.state == ZZPLAY_STATE_PAUSED) {
+    int resized = 0;
+    uint64_t now_us;
+    ZZPlayFrameAction action;
+
+    if (zzplay_engine_service_input(&runtime, &resized)) {
+      zzplay_engine_stop_from_request(&runtime);
+      outcome = ZZPLAY_ENGINE_STOPPED;
+      break;
+    }
+    if (resized) {
+      zzplay_apply_resize(&runtime);
+    }
+    if (zzplay_controller_take_fullscreen_toggle(runtime.ctl)) {
+      (void)zzplay_toggle_fullscreen(&runtime);
+    }
+    if ((runtime.core.state == ZZPLAY_STATE_PAUSED) != (runtime.ctl->paused != 0)) {
+      now_us = zzplay_now_us();
+      if (runtime.ctl->paused) {
+        runtime.core.state = ZZPLAY_STATE_PAUSED;
+        zzplay_frame_clock_pause(&clock, now_us);
+      } else {
+        runtime.core.state = ZZPLAY_STATE_PLAYING;
+        zzplay_frame_clock_resume(&clock, now_us);
+      }
+      zzplay_controller_set_engine_paused(runtime.ctl, runtime.core.state == ZZPLAY_STATE_PAUSED);
+      runtime.title_dirty = 1U;
+    }
+    zzplay_update_title(&runtime);
+
+    if (run->pump) {
+      run->pump(run->pump_user);
+    }
+
+    if (runtime.core.state == ZZPLAY_STATE_PAUSED) {
+      zzplay_wait_us(&runtime.timer, ZZPLAY_SYNC_POLL_US);
+      continue;
+    }
+
+    now_us = zzplay_now_us();
+    action = zzplay_frame_clock_poll(&clock, now_us);
+
+    if (action == ZZPLAY_FRAME_ACTION_WAIT) {
+      uint32_t slice_us = zzplay_frame_clock_wait_slice_us(&clock, now_us, ZZPLAY_SYNC_POLL_US);
+      if (slice_us > 0U) {
+        zzplay_wait_us(&runtime.timer, slice_us);
+      }
+      continue;
+    }
+
+    if (action == ZZPLAY_FRAME_ACTION_ADVANCE) {
+      if (active_token != 0U) {
+        (void)zz9k_image_animation_frame_retire(runtime.ctx, session, active_token, 0U, &frame_result);
+        active_token = 0U;
+      }
+      cleanup_status = zz9k_image_animation_frame_next(runtime.ctx, session, 0U, &frame_result);
+      if (cleanup_status != ZZ9K_STATUS_OK) {
+        zzplay_error(&runtime, "zzplay: next frame failed (%d)\n", cleanup_status);
+        outcome = ZZPLAY_ENGINE_FAILED;
+        break;
+      }
+      if (frame_result.state == ZZ9K_IMAGE_SESSION_STATE_ANIMATION_ENDED ||
+          (frame_result.flags & ZZ9K_IMAGE_ANIMATION_FRAME_FLAG_ENDED)) {
+        zzplay_frame_clock_on_end(&clock);
+        continue;
+      }
+      active_token = frame_result.frame_token;
+      now_us = zzplay_now_us();
+      zzplay_frame_clock_advance(&clock, now_us, frame_result.frame_duration_ms);
+      zzplay_controller_set_position(runtime.ctl, (uint32_t)clock.total_elapsed_ms, 1);
+      (void)zz9k_image_animation_frame_present(runtime.ctx, session, active_token, 0U, &frame_result);
+      continue;
+    }
+
+    if (action == ZZPLAY_FRAME_ACTION_RESTART) {
+      if (active_token != 0U) {
+        (void)zz9k_image_animation_frame_retire(runtime.ctx, session, active_token, 0U, &frame_result);
+        active_token = 0U;
+      }
+      cleanup_status = zz9k_image_animation_restart(runtime.ctx, session, 0U, &frame_result);
+      if (cleanup_status != ZZ9K_STATUS_OK) {
+        zzplay_error(&runtime, "zzplay: restart failed (%d)\n", cleanup_status);
+        outcome = ZZPLAY_ENGINE_FAILED;
+        break;
+      }
+      cleanup_status = zz9k_image_animation_frame_next(runtime.ctx, session, 0U, &frame_result);
+      if (cleanup_status != ZZ9K_STATUS_OK || frame_result.frame_token == 0U) {
+        zzplay_error(&runtime, "zzplay: restart next frame failed (%d)\n", cleanup_status);
+        outcome = ZZPLAY_ENGINE_FAILED;
+        break;
+      }
+      active_token = frame_result.frame_token;
+      now_us = zzplay_now_us();
+      zzplay_frame_clock_on_restart(&clock, now_us, frame_result.frame_duration_ms);
+      zzplay_controller_set_position(runtime.ctl, 0U, 1);
+      (void)zz9k_image_animation_frame_present(runtime.ctx, session, active_token, 0U, &frame_result);
+      continue;
+    }
+
+    if (action == ZZPLAY_FRAME_ACTION_EOF) {
+      outcome = ZZPLAY_ENGINE_EOF;
+      break;
+    }
+  }
+
+cleanup:
+  if (active_token != 0U) {
+    (void)zz9k_image_animation_frame_retire(runtime.ctx, session, active_token, 0U, &frame_result);
+    active_token = 0U;
+  }
+  if (session_open && session != 0U) {
+    (void)zz9k_image_session_close(runtime.ctx, session, 0U);
+    session = 0U;
+  }
+  if (surface_allocated && surface.handle != 0U) {
+    (void)zz9k_free_surface(runtime.ctx, surface.handle);
+    surface.handle = 0U;
+  }
+  if (staging_allocated && staging.handle != 0U) {
+    (void)zz9k_free_shared(runtime.ctx, staging.handle);
+    staging.handle = 0U;
+  }
+  zzplay_close_pip(&runtime);
+  zzplay_close_video_screen(&runtime);
+  if (timer_open) {
+    zzplay_timer_close(&runtime.timer);
+  }
+  if (runtime.file) {
+    fclose(runtime.file);
+    runtime.file = NULL;
+  }
+  if (sdk_open && runtime.ctx) {
+    (void)zz9k_close(runtime.ctx);
+    runtime.ctx = NULL;
+  }
+  if (p96_open && P96Base) {
+    CloseLibrary(P96Base);
+    P96Base = NULL;
+  }
+
+  if (run->ctl && run->ctl->request != ZZPLAY_REQUEST_NONE) {
+    return ZZPLAY_ENGINE_STOPPED;
+  }
+  return outcome;
+}
+
+/* ------------------------------------------------------------------ */
+/* Engine table and the application loop.                             */
 /* ------------------------------------------------------------------ */
 
 static const struct ZZPlayEngineEntry {
@@ -3155,9 +3953,12 @@ static const struct ZZPlayEngineEntry {
   ZZPlayEngineFn run;
 } zzplay_engines[] = {
   { ZZPLAY_MEDIA_KIND_MPEG_PS, zzplay_engine_mpeg },
-  { ZZPLAY_MEDIA_KIND_MP3, zzplay_mp3_run }
+  { ZZPLAY_MEDIA_KIND_MP3, zzplay_mp3_run },
+  { ZZPLAY_MEDIA_KIND_WEBP, zzplay_engine_webp },
+  { ZZPLAY_MEDIA_KIND_FLAC, zzplay_flac_run },
+   { ZZPLAY_MEDIA_KIND_VORBIS, zzplay_vorbis_run },
+   { ZZPLAY_MEDIA_KIND_WEBM, zzplay_engine_webm }
 };
-
 static ZZPlayEngineFn zzplay_engine_for_kind(ZZPlayMediaKind kind)
 {
   unsigned i;
@@ -3253,7 +4054,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   } else if (!engine) {
     zzplay_launch_reportf(
         &app->ctl, &app->options,
-        "cannot play %s: not a supported MPEG-1 Program Stream or MP3 file",
+         "cannot play %s: not a supported MPEG-1 Program Stream, WebM, MP3, FLAC, Ogg Vorbis or WebP animation file",
         app->item_path);
   } else {
     format = zzplay_format_for_kind(probe.kind);

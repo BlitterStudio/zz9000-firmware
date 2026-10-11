@@ -9,6 +9,7 @@
 #include "scheduler.h"
 #include "memorymap.h"
 #include "sdk_smp_lock.h"
+#include "card_pool.h"
 #include "sdk_compression.h"
 #include "sdk_image_stream.h"
 
@@ -101,6 +102,9 @@ static void record_fault(uint32_t code, const char *name)
 	 * under core 0.
 	 */
 	sdk_smp_lock_reset_malloc_if_owned();
+	/* Same for the card pool lock: WebM and WebP decodes on this core
+	 * allocate arena regions from the pool. */
+	sdk_smp_lock_reset_if_owned(&card_pool.lock);
 
 	taskq_shared_t *sh = scheduler_shared();
 	int slot = sh->core1_current_slot;
@@ -127,6 +131,9 @@ static void record_fault(uint32_t code, const char *name)
 		__asm__ __volatile__("dsb" ::: "memory");
 		for (;;) {
 			__asm__ __volatile__("wfe" ::: "memory");
+			/* Lets core 0's cold restart collect this core's dirty L1
+			 * lines (the fault may have left heap state in them). */
+			scheduler_core1_park_if_requested();
 		}
 	}
 
@@ -139,6 +146,34 @@ static void record_fault(uint32_t code, const char *name)
 }
 
 /*
+ * Ask an idle (or fault-parked) core 1 to write back its L1 D-cache and park
+ * before it is held in reset. A core in reset with its clock stopped cannot
+ * be snooped, so its dirty lines would be lost: the reclaim below would then
+ * free() decoder blocks against stale heap metadata (a FLAC/Vorbis stream at
+ * an Amiga warm reset took core 0 down with a data abort exactly so). A core
+ * stuck mid-task never answers; the bounded wait then falls back to the old
+ * unconditional reset.
+ */
+#define CORE1_PARK_SPINS 1000U   /* x 10 us */
+
+static void core1_park_for_reset(void)
+{
+	taskq_shared_t *sh = scheduler_shared();
+	uint32_t spins;
+
+	if (!sh->core1_alive)
+		return;
+	sh->core1_parked = 0U;
+	sh->core1_park_request = 1U;
+	dsb();
+	__asm__ __volatile__("sev" ::: "memory");
+	for (spins = 0U; spins < CORE1_PARK_SPINS && !sh->core1_parked; spins++)
+		usleep(10);
+	if (!sh->core1_parked)
+		printf("[core2] core 1 did not park before its restart\n");
+}
+
+/*
  * Cold-restart core 1 by re-running the CPU1 reset sequence (XAPP1079), so it
  * re-enters core1_entry from its reset vector. Used by the dual-core scheduler
  * (scheduler_core0_poll) to recover a worker that faulted and parked. 0xFFFFFFF0
@@ -148,7 +183,9 @@ void core1_cold_restart(void)
 {
 	volatile uint32_t *core1_addr = (volatile uint32_t *) 0xFFFFFFF0;
 	uint32_t RegVal;
+	taskq_shared_t *sh = scheduler_shared();
 
+	core1_park_for_reset();
 	*core1_addr = (uint32_t) core1_entry;
 	Xil_DCacheFlush();  /* the reset vector write must reach OCM before CPU1 reads it */
 
@@ -169,6 +206,9 @@ void core1_cold_restart(void)
 	 * restart paths: the fault path (record_fault -> scheduler_core0_poll)
 	 * and the quiesce-timeout path (scheduler_quiesce_for_reset).
 	 */
+	/* The card pool lock has the same exposure. Reset it first so the
+	 * dsb/sev in the malloc reset below publishes both. */
+	card_pool_reset_lock(&card_pool);
 	sdk_smp_lock_reset_malloc();
 
 	/*
@@ -187,6 +227,11 @@ void core1_cold_restart(void)
 	 * inflate state/window and LZMA probs/dict leak on every mid-decode reset.
 	 */
 	sdk_compression_reclaim_core1_decode();
+
+	/* Halted: the restarted worker must not find the old park request. */
+	sh->core1_park_request = 0U;
+	sh->core1_parked = 0U;
+	dsb();
 
 	RegVal &= ~A9_RST1_MASK;
 	Xil_Out32(A9_CPU_RST_CTRL, RegVal);

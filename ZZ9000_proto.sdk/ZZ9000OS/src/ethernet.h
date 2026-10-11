@@ -22,10 +22,18 @@
 #define ETH_CONFIG_CAP_LINK_STATE     0x0002
 /* Set once PHY auto-negotiation has completed and the EMAC is running. */
 #define ETH_CONFIG_LINK_READY         0x0100
+/* Read: ETH_CONFIG_RX_OFFSET2 below is understood. */
+#define ETH_CONFIG_CAP_RX_OFFSET2     0x0004
 #define ETH_CONFIG_HASH_SET            0x8000
 #define ETH_CONFIG_HASH_CLEAR          0x4000
 #define ETH_CONFIG_HASH_RESET          0x2000
 #define ETH_CONFIG_HASH_INDEX          0x003f
+/* Write 0x1000|on: place received frames 2 bytes further into the slot
+ * (GEM RX buffer offset), so the payload behind the 14-byte Ethernet header
+ * starts on a longword in the window.  Off after every Amiga reset; frames
+ * written that way carry ETH_RX_LEN_OFFSET2 in their length word. */
+#define ETH_CONFIG_RX_OFFSET2          0x1000
+#define ETH_RX_LEN_OFFSET2             0x8000
 
 enum {
 	ETH_TASK_SETUP,
@@ -39,6 +47,8 @@ extern int ethernet_hw_ready;
 
 int ethernet_init();
 void ethernet_set_multicast_hash(u16 command);
+void ethernet_set_rx_offset2(int on);
+void ethernet_set_rx_offset2_quiet(int on);
 u16 ethernet_get_multicast_config(void);
 u32 ethernet_emac_base(void);
 u32 ethernet_mac_lo_word(const uint8_t mac[6]);

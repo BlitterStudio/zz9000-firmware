@@ -79,15 +79,20 @@ void sdk_smp_lock_reset_malloc(void)
     __asm__ __volatile__("dsb\n\tsev" ::: "memory");
 }
 
-void sdk_smp_lock_reset_malloc_if_owned(void)
+void sdk_smp_lock_reset_if_owned(sdk_smp_lock_t *l)
 {
     /* Only free the lock if THIS core holds it. If core 1 faulted while
      * merely spinning to acquire, core 0 may legitimately own it -- freeing
      * it out from under core 0 would reintroduce the exact race this lock
      * exists to prevent. */
-    if (g_malloc_lock.owner == smp_cpu_id()) {
-        sdk_smp_lock_reset(&g_malloc_lock);
+    if (l->owner == smp_cpu_id()) {
+        sdk_smp_lock_reset(l);
         __asm__ __volatile__("dsb\n\tsev" ::: "memory");
     }
+}
+
+void sdk_smp_lock_reset_malloc_if_owned(void)
+{
+    sdk_smp_lock_reset_if_owned(&g_malloc_lock);
 }
 #endif /* !SMP_LOCK_HOST_TEST */

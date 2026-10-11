@@ -109,7 +109,9 @@ void zzplay_prefs_apply_options(ZZPlayPrefs *prefs,
  * output but may fall back. Otherwise
  * the saved preference for that media type applies, non-strict. A saved
  * preference that cannot apply to the media type (none can for
- * ZZPLAY_MEDIA_AUDIO_NONE) resolves to AUTO. */
+ * ZZPLAY_MEDIA_AUDIO_NONE, which is how FLAC and Ogg Vorbis ask) resolves
+ * to AUTO; on-card versus AHI for those files is decided after the card
+ * answers, not here. */
 ZZPlayAudioBackend zzplay_prefs_requested_backend(
     const ZZPlayPrefs *prefs, const ZZPlayOptions *options,
     ZZPlayMediaAudio media, int *strict);

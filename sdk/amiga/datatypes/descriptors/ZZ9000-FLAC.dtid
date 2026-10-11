@@ -1,0 +1,15 @@
+# Source metadata for the packaged ZZ9000 FLAC DataTypes descriptor.
+# Copyright (C) 2024-2026, Dimitris Panokostas / BlitterStudio
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Recognition (KTD8): native FLAC streams begin with the 4-byte marker
+# "fLaC" (0x66 0x4C 0x61 0x43). Ogg-FLAC begins with "OggS" and is not
+# claimed by this descriptor.
+FileName=Storage/DataTypes/ZZ9000-FLAC
+Version=42.5
+DTName=ZZ9000-FLAC,zz9k-sound
+ID=soun,flac
+Recog=66 4C 61 43
+Pattern=#?
+Flags=Binary,n,10
+Install=inactive

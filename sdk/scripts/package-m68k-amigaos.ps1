@@ -120,8 +120,10 @@ Copy-One "build/zz9k-view" "C/zz9k-view"
 Copy-One "build/zz9k-dtprobe" "C/zz9k-dtprobe"
 Copy-One "build/zz9k-picture.datatype" `
   "Classes/DataTypes/zz9k-picture.datatype"
+Copy-One "build/zz9k-sound.datatype" `
+  "Classes/DataTypes/zz9k-sound.datatype"
 $DescriptorDirectory = Join-Path $RepoRoot "amiga/datatypes/descriptors"
-& python "$RepoRoot\scripts\generate-datatype-descriptors.py" --source-dir $DescriptorDirectory --output-dir (Join-Path $PackageRoot "Storage/DataTypes")
+& python "$RepoRoot\scripts\generate-datatype-descriptors.py" --source-dir $DescriptorDirectory --output-dir (Join-Path $PackageRoot "Storage/DataTypes") --code-dir (Join-Path $RepoRoot "build/dtcode")
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Get-ChildItem -LiteralPath $DescriptorDirectory -Filter *.dtid -File |
   Sort-Object Name |
@@ -173,6 +175,7 @@ $GuideSpecs = @(
   "docs/zz9k-library.md:zz9k-library",
   "docs/zz9k-zorro2-services.md:zz9k-zorro2-services",
   "docs/zz9k-picture-datatype.md:zz9k-picture-datatype",
+  "docs/zz9k-sound-datatype.md:zz9k-sound-datatype",
   "docs/zzplay.md:ZZPlay",
   "docs/zz9k-amissl-provider.md:zz9k-amissl-provider"
 )

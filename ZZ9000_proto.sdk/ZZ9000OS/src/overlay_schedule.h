@@ -32,6 +32,21 @@ static inline uint32_t overlay_staging_pitch(uint16_t width,
 	return source_pitch >= visible ? source_pitch : visible;
 }
 
+/* The overlay VDMA shares the HP0 port with the desktop scanout. Packed
+ * frames up to 1280x720 (about 110 MB/s at 60 Hz) display; a 1920x1080 one
+ * (about 250 MB/s) showed only its first rows, then black, windowed and
+ * fullscreen (A4000). An SDK frame larger than this is therefore packed
+ * into its staging buffer at half width and height, in the same pitch,
+ * and the overlay scans that quarter-size frame and scales it. */
+#define OVERLAY_STAGING_FULL_PIXELS (1280U * 720U)
+
+static inline uint8_t overlay_staging_divisor(uint16_t width,
+	uint16_t height)
+{
+	return (uint32_t)width * height > OVERLAY_STAGING_FULL_PIXELS
+		? 2U : 1U;
+}
+
 static inline uint32_t overlay_buffer_bytes(uint32_t screen_pitch,
 	uint32_t screen_rows, uint32_t source_pitch, uint32_t source_rows)
 {

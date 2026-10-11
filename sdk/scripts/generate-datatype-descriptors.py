@@ -19,6 +19,12 @@ _REQUIRED_KEYS = {
     "Install",
 }
 
+# Optional: names an m68k hunk executable in --code-dir that becomes the
+# descriptor's DTCD recognition function. Recog=none (an empty mask) is only
+# valid together with Code, because an empty mask alone matches every file.
+_OPTIONAL_KEYS = {"Code"}
+_HUNK_HEADER = b"\x00\x00\x03\xf3"
+
 
 class DescriptorError(ValueError):
     pass
@@ -42,7 +48,7 @@ def _parse_source(path):
         if "=" not in line:
             _error(path, "line %u is not key=value" % line_number)
         key, value = line.split("=", 1)
-        if key not in _REQUIRED_KEYS:
+        if key not in _REQUIRED_KEYS and key not in _OPTIONAL_KEYS:
             _error(path, "line %u has unknown key %r" % (line_number, key))
         if key in values:
             _error(path, "line %u repeats %s" % (line_number, key))
@@ -78,7 +84,11 @@ def _fourcc(path, label, value):
     return encoded
 
 
-def _parse_recognition(path, value):
+def _parse_recognition(path, value, has_code):
+    if value == "none":
+        if not has_code:
+            _error(path, "Recog=none requires a Code recognition function")
+        return []
     fields = value.split()
     if not fields:
         _error(path, "Recog must contain at least one hexadecimal byte")
@@ -117,7 +127,22 @@ def _parse_flags(path, value):
     return 0, priority
 
 
-def _compile(path):
+def _read_code(path, name, code_dir):
+    if code_dir is None:
+        _error(path, "Code=%s requires --code-dir" % name)
+    if pathlib.PurePath(name).name != name:
+        _error(path, "Code must name a file inside --code-dir")
+    code_path = code_dir / name
+    try:
+        code = code_path.read_bytes()
+    except OSError as exc:
+        _error(path, "cannot read Code %s (%s)" % (code_path, exc.strerror))
+    if len(code) < 8 or code[:4] != _HUNK_HEADER:
+        _error(path, "Code %s is not an AmigaDOS hunk executable" % code_path)
+    return code
+
+
+def _compile(path, code_dir):
     values = _parse_source(path)
     _parse_version(path, values["Version"])
 
@@ -147,7 +172,8 @@ def _compile(path):
     if not pattern:
         _error(path, "Pattern must not be empty")
     flags, priority = _parse_flags(path, values["Flags"])
-    recognition = _parse_recognition(path, values["Recog"])
+    code = _read_code(path, values["Code"], code_dir) if "Code" in values else None
+    recognition = _parse_recognition(path, values["Recog"], code is not None)
 
     # The NDK defines dth_Mask as WORD[]. Values 0..255 match a byte;
     # -1 is the wildcard representation accepted by DataTypes.
@@ -176,28 +202,32 @@ def _compile(path):
         return chunk_id + struct.pack(">I", len(payload)) + payload + padding
 
     body = b"DTYP" + chunk(b"NAME", descriptor_name_bytes) + chunk(b"DTHD", dthd)
+    if code is not None:
+        body += chunk(b"DTCD", code)
     return b"FORM" + struct.pack(">I", len(body)) + body
 
 
-def generate(source_dir, output_dir):
+def generate(source_dir, output_dir, code_dir=None):
     sources = sorted(source_dir.glob("*.dtid"))
     if not sources:
         raise DescriptorError("%s: no .dtid descriptor sources" % source_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     for source in sources:
-        (output_dir / source.stem).write_bytes(_compile(source))
+        (output_dir / source.stem).write_bytes(_compile(source, code_dir))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", type=pathlib.Path, required=True)
     parser.add_argument("--output-dir", type=pathlib.Path, required=True)
+    parser.add_argument("--code-dir", type=pathlib.Path,
+                        help="directory holding Code= recognition executables")
     args = parser.parse_args(argv)
 
     if not args.source_dir.is_dir():
         parser.error("--source-dir is not a directory: %s" % args.source_dir)
     try:
-        generate(args.source_dir, args.output_dir)
+        generate(args.source_dir, args.output_dir, args.code_dir)
     except DescriptorError as exc:
         print("generate-datatype-descriptors: %s" % exc, file=sys.stderr)
         return 1

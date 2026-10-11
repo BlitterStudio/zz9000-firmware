@@ -504,6 +504,66 @@ static int test_image_session_uses_library_context(void)
   ZZ9KClose(&library);
   return 0;
 }
+static int test_image_animation_uses_library_context(void)
+{
+  struct TestMailbox mailbox;
+  ZZ9KLibrary library;
+  ZZ9KImageAnimationFrameResult result;
+
+  init_mailbox(&mailbox);
+  prepare_completion_at(&mailbox, 0, 1, ZZ9K_OP_IMAGE_ANIMATION_FRAME_NEXT,
+                        ZZ9K_STATUS_OK,
+                        sizeof(ZZ9KImageAnimationFrameResultPayload));
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[0], 7U);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[4],
+                ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY);
+  zz9k_put_be32(&mailbox.completion_ring[0].payload[32], 42U);
+
+  prepare_completion_at(&mailbox, 1, 2, ZZ9K_OP_IMAGE_ANIMATION_FRAME_PRESENT,
+                        ZZ9K_STATUS_OK,
+                        sizeof(ZZ9KImageAnimationFrameResultPayload));
+  zz9k_put_be32(&mailbox.completion_ring[1].payload[0], 7U);
+  zz9k_put_be32(&mailbox.completion_ring[1].payload[4],
+                ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY);
+  zz9k_put_be32(&mailbox.completion_ring[1].payload[32], 42U);
+
+  prepare_completion_at(&mailbox, 2, 3, ZZ9K_OP_IMAGE_ANIMATION_FRAME_RETIRE,
+                        ZZ9K_STATUS_OK,
+                        sizeof(ZZ9KImageAnimationFrameResultPayload));
+  zz9k_put_be32(&mailbox.completion_ring[2].payload[0], 7U);
+  zz9k_put_be32(&mailbox.completion_ring[2].payload[4],
+                ZZ9K_IMAGE_SESSION_STATE_ANIMATION_READY);
+
+  ZZ9KInit(&library);
+  if (attach_library(&library, &mailbox) != 0) return 1;
+
+  memset(&result, 0, sizeof(result));
+  if (ZZ9KImageAnimationFrameNext(&library, 7U, 0U, &result) != ZZ9K_STATUS_OK) {
+    return 2;
+  }
+  if (zz9k_get_be16(mailbox.request_ring[0].opcode) != ZZ9K_OP_IMAGE_ANIMATION_FRAME_NEXT) {
+    return 3;
+  }
+  if (result.frame_token != 42U) return 4;
+
+  if (ZZ9KImageAnimationFramePresent(&library, 7U, 42U, 0U, &result) != ZZ9K_STATUS_OK) {
+    return 5;
+  }
+  if (zz9k_get_be16(mailbox.request_ring[1].opcode) != ZZ9K_OP_IMAGE_ANIMATION_FRAME_PRESENT) {
+    return 6;
+  }
+
+  if (ZZ9KImageAnimationFrameRetire(&library, 7U, 42U, 0U, &result) != ZZ9K_STATUS_OK) {
+    return 7;
+  }
+  if (zz9k_get_be16(mailbox.request_ring[2].opcode) != ZZ9K_OP_IMAGE_ANIMATION_FRAME_RETIRE) {
+    return 8;
+  }
+
+  ZZ9KClose(&library);
+  return 0;
+}
+
 
 static int test_surface_ops_use_library_context(void)
 {
@@ -1272,6 +1332,9 @@ int main(void)
 
   result = test_image_session_uses_library_context();
   if (result) return 261 + result;
+
+  result = test_image_animation_uses_library_context();
+  if (result) return 263 + result;
 
   result = test_surface_ops_use_library_context();
   if (result) return 265 + result;

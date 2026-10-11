@@ -253,6 +253,16 @@ static int test_service_flag_names(void)
                    "scale-bgra-to-rgb555-rgb565")) {
     return 46;
   }
+  if (!expect_name(zz9k_service_flag_name(ZZ9K_SERVICE_IMAGE,
+                                          ZZ9K_SERVICE_FLAG_IMAGE_WEBP),
+                   "webp")) {
+    return 47;
+  }
+  if (!expect_name(zz9k_service_flag_name(ZZ9K_SERVICE_IMAGE,
+                                          ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION),
+                   "webp-animation")) {
+    return 48;
+  }
   if (zz9k_service_flag_name(ZZ9K_SERVICE_CRYPTO,
                              ZZ9K_SERVICE_FLAG_IMAGE_JPEG_DIRECT_BGRA) != 0) {
     return 4;
@@ -392,7 +402,23 @@ static int test_service_flag_names(void)
       !expect_name(zz9k_service_flag_name(
                        ZZ9K_SERVICE_VIDEO,
                        ZZ9K_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ),
-                   "timeline-90khz")) {
+                   "timeline-90khz") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8),
+                   "webm-vp8") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9),
+                   "webm-vp9") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS),
+                   "media-opus") ||
+      !expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_VIDEO,
+                       ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS),
+                   "media-vorbis")) {
     return 24;
   }
   if (!expect_name(zz9k_service_flag_name(
@@ -464,7 +490,7 @@ static int test_service_flag_iteration(void)
   if (zz9k_known_service_flag(ZZ9K_SERVICE_SURFACE, 5) != 0U) {
     return 45;
   }
-  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_IMAGE) != 16U) {
+  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_IMAGE) != 18U) {
     return 5;
   }
   if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 4) !=
@@ -483,7 +509,11 @@ static int test_service_flag_iteration(void)
       ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565) {
     return 21;
   }
-  if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 16) != 0U) return 47;
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 16) !=
+      ZZ9K_SERVICE_FLAG_IMAGE_WEBP) return 47;
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 17) !=
+      ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION) return 48;
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 18) != 0U) return 49;
   if (zz9k_known_service_flag_count(ZZ9K_SERVICE_CODEC) != 19U) {
     return 9;
   }
@@ -534,7 +564,7 @@ static int test_service_flag_iteration(void)
   if (zz9k_known_service_flag(ZZ9K_SERVICE_CODEC, 19) != 0U) {
     return 28;
   }
-  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_AUDIO) != 13U) {
+  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_AUDIO) != 15U) {
     return 20;
   }
   if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 4) !=
@@ -573,10 +603,16 @@ static int test_service_flag_iteration(void)
       ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN) {
     return 49;
   }
-  if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 13) != 0U) {
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 13) !=
+          ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM ||
+      zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 14) !=
+          ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM) {
+    return 51;
+  }
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 15) != 0U) {
     return 50;
   }
-  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_VIDEO) != 15U ||
+  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_VIDEO) != 19U ||
       zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 4) !=
           ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 ||
       zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 5) !=
@@ -587,7 +623,11 @@ static int test_service_flag_iteration(void)
           ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_SESSION ||
       zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 14) !=
           ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND ||
-      zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 15) != 0U) {
+      zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 15) !=
+          ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8 ||
+      zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 18) !=
+          ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS ||
+      zz9k_known_service_flag(ZZ9K_SERVICE_VIDEO, 19) != 0U) {
     return 29;
   }
 

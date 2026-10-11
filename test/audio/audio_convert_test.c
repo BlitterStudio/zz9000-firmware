@@ -164,6 +164,11 @@ static int test_table_integrity(void)
 		&zz_audio_convert_ratio_24000_48000,
 		&zz_audio_convert_ratio_32000_48000,
 		&zz_audio_convert_ratio_44100_48000,
+		&zz_audio_convert_ratio_11025_48000,
+		&zz_audio_convert_ratio_16000_48000,
+		&zz_audio_convert_ratio_22050_48000,
+		&zz_audio_convert_ratio_88200_48000,
+		&zz_audio_convert_ratio_96000_48000,
 		&zz_audio_convert_ratio_48000_8000,
 		&zz_audio_convert_ratio_48000_12000,
 		&zz_audio_convert_ratio_48000_24000,
@@ -983,6 +988,108 @@ static void report(void)
 	}
 }
 
+
+static double response_db(const struct zz_audio_convert_ratio *ratio,
+                          uint32_t in_rate, double freq_hz)
+{
+	double worst = -999.0;
+	uint32_t phase;
+
+	for (phase = 0U; phase < ratio->phases; phase++) {
+		double re = 0.0, im = 0.0;
+		double db;
+		uint32_t k;
+
+		for (k = 0U; k < ratio->taps; k++) {
+			double tau = (double)k +
+			    (double)phase / (double)ratio->phases -
+			    (double)(ratio->taps - 1U) / 2.0;
+
+			re += (double)ratio->coefs[phase][k] *
+			      cos(2.0 * M_PI * freq_hz / (double)in_rate * tau);
+			im += (double)ratio->coefs[phase][k] *
+			      sin(2.0 * M_PI * freq_hz / (double)in_rate * tau);
+		}
+		db = 20.0 * log10(sqrt(re * re + im * im) *
+		                  (double)ratio->recip[phase] /
+		                  (65536.0 * 16384.0) + 1e-30);
+		if (db > worst)
+			worst = db;
+	}
+	return worst;
+}
+
+static int test_new_playback_rates(void)
+{
+	static const struct {
+		uint32_t rate;
+		uint16_t in_n;
+		uint16_t out_n;
+		int decimate;
+	} cases[] = {
+		{ 11025U, 441U, 1920U, 0 },
+		{ 16000U, 320U, 960U, 0 },
+		{ 22050U, 441U, 960U, 0 },
+		{ 88200U, 1764U, 960U, 1 },
+		{ 96000U, 1920U, 960U, 1 },
+	};
+	static int16_t wide_in[1920U * 2U];
+	static int16_t wide_out[1920U * 2U];
+	uint32_t c;
+
+	check(zz_audio_convert_init(&(struct zz_audio_convert){ 0 },
+	                            48000U, 11025U) == 1,
+	      "11025 capture stays off-table", NULL);
+	for (c = 0U; c < sizeof(cases) / sizeof(cases[0]); c++) {
+		struct zz_audio_convert ctx;
+		char detail[96];
+		double sb;
+		uint32_t i;
+		int rc;
+		int ok = 1;
+
+		rc = zz_audio_convert_init(&ctx, cases[c].rate, 48000U);
+		snprintf(detail, sizeof(detail), "%lu Hz bank",
+		         (unsigned long)cases[c].rate);
+		check(rc == 0 && ctx.ratio != NULL, "playback bank", detail);
+		if (!ctx.ratio)
+			continue;
+		if (!cases[c].decimate) {
+			double ripple = worst_passband_ripple(ctx.ratio,
+			                                      cases[c].rate);
+
+			snprintf(detail, sizeof(detail),
+			         "%lu Hz ripple %.3f dB",
+			         (unsigned long)cases[c].rate, ripple);
+			check(ripple <= 0.1, "new rate passband", detail);
+		} else {
+			sb = response_db(ctx.ratio, cases[c].rate, 30000.0);
+			snprintf(detail, sizeof(detail),
+			         "%lu Hz 30 kHz stopband %.1f dB",
+			         (unsigned long)cases[c].rate, sb);
+			check(sb <= -40.0, "decimation stopband", detail);
+		}
+		zz_audio_convert_init(&ctx, cases[c].rate, 48000U);
+		for (i = 0U; i < 8U; i++) {
+			uint32_t n;
+
+			for (n = 0U; n < cases[c].in_n * 2U; n++)
+				wide_in[n] = 12000;
+			zz_audio_convert_stream(&ctx, wide_in, wide_out,
+			                        cases[c].in_n, cases[c].out_n);
+		}
+		for (i = 0U; i < cases[c].out_n * 2U; i++) {
+			int32_t d = (int32_t)wide_out[i] - 12000;
+
+			if (d < -2 || d > 2)
+				ok = 0;
+		}
+		snprintf(detail, sizeof(detail), "%lu Hz",
+		         (unsigned long)cases[c].rate);
+		check(ok, "new rate dc unity", detail);
+	}
+	return failures == 0;
+}
 int main(int argc, char **argv)
 {
 	if (argc == 2 && strcmp(argv[1], "--report") == 0) {
@@ -1005,7 +1112,7 @@ int main(int argc, char **argv)
 	test_mono_bit_identity();
 	test_saturation();
 	test_reset_semantics();
-
+	test_new_playback_rates();
 	if (failures == 0) {
 		printf("audio_convert_test: all tests passed\n");
 		return 0;

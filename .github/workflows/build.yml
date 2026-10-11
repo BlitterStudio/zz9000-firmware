@@ -111,6 +111,10 @@ jobs:
           bash test/video/run_videocap_verilator_sim.sh
       - name: Video codec regression suite
         run: make -C test/video_codec test
+      - name: FLAC stream backend suite
+        run: make -C test/flac test
+      - name: Ogg Vorbis stream backend suite
+        run: make -C test/vorbis test
       - name: Audio capture regression suite
         run: make -C test/audio test
       - name: Firmware-file restore suite
@@ -123,12 +127,16 @@ jobs:
         run: make -C test/config test
       - name: Surface allocator suite
         run: make -C test/allocator test
+      - name: Card pool suite
+        run: make -C test/card_pool test
       - name: Zorro II aperture layout suite
         run: make -C test/aperture test
       - name: MMU page split suite
         run: make -C test/mmu test
       - name: Media session suite
         run: make -C test/media test
+      - name: WebM demux suite
+        run: make -C test/webm test
       - name: Palette shadow suite
         run: make -C test/palette test
       - name: Ethernet multicast hash suite
@@ -229,15 +237,18 @@ jobs:
       - name: Export BOOTGEN
         run: echo "BOOTGEN=${{ github.workspace }}/.toolchain/bootgen/bootgen" >> "$GITHUB_ENV"
 
-      # Codec deps (zlib/libpng/libjpeg-turbo/lzma) are downloaded + built from
-      # source per run. Cache the built archives keyed on the build scripts
-      # (which pin the versions + sha256s) so unchanged runs skip the rebuild
-      # and survive an upstream mirror outage.
+      # Codec deps are downloaded + built from source per run. Cache the
+      # built archives keyed on every input that shapes them: the build
+      # scripts (which pin versions + sha256s and flags), the allocator
+      # headers the FLAC/Vorbis/libvpx/libopus/libwebp builds force-include,
+      # and the libwebp CMake shim. Several scripts (libvpx, libopus) treat
+      # an existing archive as up to date, so a change to any input must
+      # miss the cache rather than reuse a stale archive.
       - name: Cache codec deps
         uses: actions/cache@v5
         with:
           path: ZZ9000_proto.sdk/ZZ9000OS/build/deps
-          key: codec-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build_zlib.sh', 'build_libpng.sh', 'build_libjpeg_turbo.sh', 'build_lzma_sdk.sh') }}
+          key: codec-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build_zlib.sh', 'build_libpng.sh', 'build_libjpeg_turbo.sh', 'build_lzma_sdk.sh', 'build_libwebp.sh', 'build_dvd_codecs.sh', 'build_flac.sh', 'build_vorbis.sh', 'build_libvpx.sh', 'build_opus.sh', 'ZZ9000_proto.sdk/ZZ9000OS/src/sdk_webp_alloc.h', 'ZZ9000_proto.sdk/ZZ9000OS/src/sdk_flac_alloc.h', 'ZZ9000_proto.sdk/ZZ9000OS/src/sdk_vorbis_alloc.h', 'ZZ9000_proto.sdk/ZZ9000OS/src/webp/**') }}
 
       - name: Build firmware (ZZ9000OS.elf)
         run: ./build_firmware.sh
@@ -273,7 +284,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [build, host-tests, abi-mirror, sdk-host-tests, sdk-m68k-build]
+    needs: [build, host-tests, abi-mirror, sdk-host-tests, sdk-m68k-build, image-webp-host-tests]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -322,3 +333,19 @@ jobs:
           fi
           mapfile -t ASSETS < <(find release -maxdepth 1 -type f | sort)
           gh release create "$TAG" "${FLAGS[@]}" "${ASSETS[@]}"
+  image-webp-host-tests:
+    name: WebP image stream host tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Build and run read-only source test
+        run: |
+          docker run --rm -v "$PWD":/source:ro ubuntu:24.04 bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends build-essential ca-certificates cmake curl libjpeg-dev libpng-dev zlib1g-dev
+            mkdir /work
+            tar -C /source --exclude=.context -cf - . | tar -C /work -xf -
+            make -C /work/test/image test
+          '

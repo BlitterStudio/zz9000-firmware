@@ -108,7 +108,7 @@ static int decode_fixture_bytes(const uint8_t *bytes, uint32_t length,
 	if (!ops || !ops->configure_media || !ops->get_media_info ||
 	    !ops->ack_media)
 		return 1;
-	decoder = ops->create();
+	decoder = ops->create(0U);
 	if (!decoder)
 		return 2;
 	memset(&config, 0, sizeof(config));
@@ -260,7 +260,7 @@ static int test_audio_reserve_for_each_video(void)
 
 	if (!ops)
 		return 1;
-	decoder = ops->create();
+	decoder = ops->create(0U);
 	if (!decoder)
 		return 2;
 	memset(&config, 0, sizeof(config));
@@ -314,7 +314,7 @@ static int test_ring_backpressure_and_wrap(void)
 
 	if (!ops)
 		return 1;
-	decoder = ops->create();
+	decoder = ops->create(0U);
 	if (!decoder)
 		return 2;
 	memset(&config, 0, sizeof(config));
@@ -460,7 +460,7 @@ static int decode_to_terminal(const uint8_t *bytes, uint32_t length,
 	void *decoder;
 	int result = SDK_VIDEO_BACKEND_PROGRESS;
 
-	decoder = ops ? ops->create() : 0;
+	decoder = ops ? ops->create(0U) : 0;
 	if (!decoder)
 		return 0;
 	if (audio_codec != TEST_MEDIA_UNCONFIGURED) {
@@ -964,7 +964,7 @@ static int test_compressed_input_backpressure_is_recoverable(void)
 	void *decoder;
 	int result;
 
-	decoder = ops ? ops->create() : 0;
+	decoder = ops ? ops->create(0U) : 0;
 	if (!decoder)
 		return 1;
 	accepted = 0U;

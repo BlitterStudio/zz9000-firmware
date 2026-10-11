@@ -133,9 +133,13 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name, "build/zz9k-view");
   ok &= expect_contains(script, name, "build/zz9k-dtprobe");
   ok &= expect_contains(script, name, "build/zz9k-picture.datatype");
-  ok &= expect_contains(script, name, "Classes/DataTypes/zz9k-picture.datatype");
+  ok &= expect_contains(script, name, "build/zz9k-sound.datatype");
+  ok &= expect_contains(script, name, "Classes/DataTypes/zz9k-sound.datatype");
+  ok &= expect_contains(script, name, "docs/zz9k-sound-datatype.md");
   ok &= expect_contains(script, name,
                         "generate-datatype-descriptors.py");
+  ok &= expect_contains(script, name, "--code-dir");
+  ok &= expect_contains(script, name, "build/dtcode");
   ok &= expect_contains(script, name, "*.dtid");
   ok &= expect_contains(script, name, "Storage/DataTypes");
   ok &= expect_contains(script, name, ".info");
