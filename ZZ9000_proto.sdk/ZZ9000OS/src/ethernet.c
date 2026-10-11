@@ -1102,8 +1102,10 @@ u16 ethernet_get_rx_frames(void) {
 /* A shifted slot is filled by the 68k's ordinary CopyFromBuff callback.  The
  * ARM can inspect its strongly ordered DDR mapping without making the 68k
  * read back across Zorro.  Only whole, structurally valid IPv4 TCP/UDP
- * packets are eligible for the GEM's full checksum insertion.  UDP zero is
- * the IPv4 "checksum omitted" convention and must stay zero. */
+ * packets are eligible for the GEM's full checksum insertion.  The firmware
+ * does not zero a UDP checksum of 0 (the IPv4 "checksum omitted"
+ * convention); the GEM's insertion, enabled for every frame, may still
+ * fill it in. */
 static void ethernet_tx_prepare_shifted_checksum(volatile u8 *frame, u16 size) {
 	volatile u8 *ip;
 	u16 ihl, total, transport;

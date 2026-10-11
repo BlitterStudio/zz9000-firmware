@@ -99,10 +99,14 @@ void ethernet_reset_for_amiga();
  * 14-byte Ethernet header lands on a longword. */
 #define ETH_TX_OFFSET2        0x4000u
 /* Shifted frames only: the TCP/UDP checksum field holds the opener's
- * pseudo-header seed and the firmware zeroes it for the GEM's full checksum
- * insertion.  Without this bit a frame goes exactly as written (a raw or
- * unnegotiated frame keeps its bytes).  Staged frames are prepared by the
- * host. */
+ * pseudo-header seed and the firmware zeroes it so the GEM's checksum
+ * insertion computes the full checksum.  Without this bit the firmware
+ * leaves the frame's bytes alone.  The GEM's TX checksum insertion itself
+ * stays enabled for every frame, as on the synchronous path
+ * (XEmacPs_Reset() applies it), so the GEM can still rewrite the TCP/UDP
+ * checksum of an IPv4 frame sent without this bit, including a
+ * deliberately invalid one or a UDP checksum of 0.  Staged frames are
+ * prepared by the host. */
 #define ETH_TX_CSUM           0x2000u
 #define ETH_TX_SLOT_SHIFT     11
 #define ETH_TX_SLOT_MASK      0x3u
