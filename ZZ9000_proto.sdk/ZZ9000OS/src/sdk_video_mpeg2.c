@@ -41,6 +41,8 @@
 #define M2_VIDEO_FIFO_CAPACITY (1024U * 1024U)
 #define M2_VIDEO_FIFO_WRAP 0xffffffffU
 #define M2_MP2_CAPACITY (64U * 1024U)
+/* minimp3's largest stereo output is 4,608 bytes. */
+#define M2_MP2_PCM_BYTES (MINIMP3_MAX_SAMPLES_PER_FRAME * 2U)
 #define M2_PTS_SLOTS 64U
 /* Largest picture either codec decodes. libmpeg2 rounds the coded size up
  * to whole macroblocks (16 lines, 32 for interlaced MPEG-2), so the frame
@@ -198,9 +200,9 @@ static uint32_t ring_free(const struct sdk_video_mpeg2 *d)
 {
 	uint64_t pending = d->pcm_produced - d->pcm_acknowledged;
 
-	if (pending >= d->media.pcm_ring_capacity)
+	if (pending >= d->media.pcm_high_water_bytes)
 		return 0U;
-	return (uint32_t)(d->media.pcm_ring_capacity - pending);
+	return (uint32_t)(d->media.pcm_high_water_bytes - pending);
 }
 
 static void ring_write(struct sdk_video_mpeg2 *d, const uint8_t *src,
@@ -380,7 +382,7 @@ static int mpa_header_valid(const uint8_t *h)
 static void pump_mp2(struct sdk_video_mpeg2 *d, int at_end)
 {
 	static mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
-	static uint8_t swap[MINIMP3_MAX_SAMPLES_PER_FRAME * 2U];
+	static uint8_t swap[M2_MP2_PCM_BYTES];
 
 	while (!d->pcm_backpressure && d->mp2_input_len != 0U) {
 		const uint8_t *in = d->mp2_input + d->mp2_input_pos;
@@ -1430,14 +1432,25 @@ static int mpeg2_configure_media(void *decoder,
 		d->media_configured = 1U;
 		return 1;
 	}
-	if (!config->pcm_ring || config->pcm_ring_capacity == 0U ||
+	uint32_t pcm_unit = SDK_VIDEO_MEDIA_PCM_FRAME_BYTES;
+	/* Decoding stops at the high-water mark, so it must hold the largest
+	 * unit one decode writes at once (a whole AC-3 or MP2 frame), or the
+	 * backpressure that unit raises would never release. */
+	if (config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_AC3)
+		pcm_unit = SDK_DVD_AC3_FRAME_PCM_BYTES;
+	else if (config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2)
+		pcm_unit = M2_MP2_PCM_BYTES;
+	if (!config->pcm_ring || config->pcm_ring_capacity < pcm_unit ||
 	    config->pcm_ring_capacity > SDK_VIDEO_MEDIA_MAX_PCM_RING ||
-	    config->pcm_low_water_bytes >= config->pcm_ring_capacity)
-		return 0;
-	/* AC-3 decodes whole frames only: a ring that cannot hold one would
-	 * never emit audio and never drain. */
-	if (config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_AC3 &&
-	    config->pcm_ring_capacity < SDK_DVD_AC3_FRAME_PCM_BYTES)
+	    (config->pcm_ring_capacity &
+	     (SDK_VIDEO_MEDIA_PCM_FRAME_BYTES - 1U)) != 0U ||
+	    config->pcm_low_water_bytes >= config->pcm_high_water_bytes ||
+	    config->pcm_high_water_bytes < pcm_unit ||
+	    config->pcm_high_water_bytes > config->pcm_ring_capacity ||
+	    (config->pcm_low_water_bytes &
+	     (SDK_VIDEO_MEDIA_PCM_FRAME_BYTES - 1U)) != 0U ||
+	    (config->pcm_high_water_bytes &
+	     (SDK_VIDEO_MEDIA_PCM_FRAME_BYTES - 1U)) != 0U)
 		return 0;
 	if (config->audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2) {
 		d->mp2_input = (uint8_t *)M2_MALLOC(M2_MP2_CAPACITY);

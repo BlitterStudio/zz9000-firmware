@@ -551,6 +551,7 @@ static int test_demuxer_bounded_behavior(void)
 struct acked_result {
 	uint64_t pcm_bytes;
 	uint64_t pcm_hash;
+	uint64_t pcm_pending_peak;
 	uint32_t video_frames;
 	uint32_t audio_frames;
 	uint32_t media_flags;
@@ -561,9 +562,10 @@ struct acked_result {
  * most max_ack PCM bytes per decode call, hashes the PCM in ack order, and
  * at DONE plays the rest of the ring out (or fails after a bounded number
  * of calls). */
-static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
-                     uint32_t audio_codec, uint32_t ring_capacity,
-                     uint32_t max_ack, struct acked_result *out)
+static int run_acked_with_high(const uint8_t *stream, uint32_t length,
+			       uint32_t chunk, uint32_t audio_codec,
+			       uint32_t ring_capacity, uint32_t high_water,
+			       uint32_t max_ack, struct acked_result *out)
 {
 	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	struct SDKVideoMediaConfig cfg = {0};
@@ -589,7 +591,7 @@ static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
 	cfg.pcm_ring = ring;
 	cfg.pcm_ring_capacity = ring_capacity;
 	cfg.pcm_low_water_bytes = 4096U;
-	cfg.pcm_high_water_bytes = ring_capacity - 4096U;
+	cfg.pcm_high_water_bytes = high_water;
 	if (!ops->configure_media(decoder, &cfg)) {
 		free(ring);
 		ops->destroy(decoder);
@@ -620,8 +622,11 @@ static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
 			out->video_frames++;
 		if (ops->get_media_info(decoder, &info) &&
 		    info.pcm_produced > acked) {
+			uint64_t pending = info.pcm_produced - info.pcm_acknowledged;
 			uint64_t step = info.pcm_produced - acked;
 
+			if (pending > out->pcm_pending_peak)
+				out->pcm_pending_peak = pending;
 			if (step > max_ack && res != SDK_VIDEO_BACKEND_DONE)
 				step = max_ack;
 			while (step != 0U) {
@@ -649,6 +654,14 @@ static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
 	free(ring);
 	ops->destroy(decoder);
 	return 0;
+}
+
+static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
+                     uint32_t audio_codec, uint32_t ring_capacity,
+                     uint32_t max_ack, struct acked_result *out)
+{
+	return run_acked_with_high(stream, length, chunk, audio_codec,
+	                           ring_capacity, ring_capacity, max_ack, out);
 }
 
 /* Backend-independent reference: the demux plus the AC-3 wrapper with an
@@ -764,6 +777,34 @@ static int test_ac3_192_all_frames(void)
 	return 0;
 }
 
+/* A high-water limit is a hard bound on PCM the client has not played. */
+static int test_pcm_high_water_bound(void)
+{
+	static const struct {
+		const uint8_t *stream;
+		uint32_t length;
+		uint32_t audio_codec;
+	} runs[] = {
+		{zz9k_dvd_pal_25p_fixture, zz9k_dvd_pal_25p_fixture_len,
+		 SDK_VIDEO_MEDIA_AUDIO_MP2},
+		{zz9k_dvd_ac3_192_fixture, zz9k_dvd_ac3_192_fixture_len,
+		 SDK_VIDEO_MEDIA_AUDIO_AC3}
+	};
+	uint32_t i;
+
+	for (i = 0U; i < sizeof(runs) / sizeof(runs[0]); i++) {
+		struct acked_result r;
+
+		if (run_acked_with_high(runs[i].stream, runs[i].length, 2048U,
+		                        runs[i].audio_codec, 64U * 1024U,
+		                        9216U, 700U, &r) != 0)
+			return 1 + (int)i;
+		if (!r.done || r.pcm_bytes == 0U || r.pcm_pending_peak > 9216U)
+			return 3 + (int)i;
+	}
+	return 0;
+}
+
 /* 6b. A ring that cannot hold one decoded AC-3 frame would never emit
  * audio or drain: configure refuses it; exactly one frame is enough. */
 static int test_ac3_ring_floor(void)
@@ -777,6 +818,7 @@ static int test_ac3_ring_floor(void)
 	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
 	cfg.pcm_ring = ring;
 	cfg.pcm_low_water_bytes = 1024U;
+	cfg.pcm_high_water_bytes = SDK_DVD_AC3_FRAME_PCM_BYTES;
 	cfg.pcm_ring_capacity = SDK_DVD_AC3_FRAME_PCM_BYTES - 4U;
 	decoder = ops->create(0U);
 	if (!decoder)
@@ -793,6 +835,41 @@ static int test_ac3_ring_floor(void)
 		return 3;
 	if (!ok_exact)
 		return 4;
+	return 0;
+}
+
+static int rejects_pcm_marks(uint32_t audio_codec, uint32_t capacity,
+                             uint32_t low_water, uint32_t high_water)
+{
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
+	static uint8_t ring[8192U];
+	struct SDKVideoMediaConfig cfg = {0};
+	void *decoder = ops->create(0U);
+	int accepted;
+
+	if (!decoder)
+		return 0;
+	cfg.audio_codec = audio_codec;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = capacity;
+	cfg.pcm_low_water_bytes = low_water;
+	cfg.pcm_high_water_bytes = high_water;
+	accepted = ops->configure_media(decoder, &cfg);
+	ops->destroy(decoder);
+	return !accepted;
+}
+
+static int test_pcm_mark_validation(void)
+{
+	if (!rejects_pcm_marks(SDK_VIDEO_MEDIA_AUDIO_AC3, 8192U,
+	                       4096U, 8196U))
+		return 1;
+	if (!rejects_pcm_marks(SDK_VIDEO_MEDIA_AUDIO_AC3, 8192U,
+	                       4608U, 4608U))
+		return 2;
+	if (!rejects_pcm_marks(SDK_VIDEO_MEDIA_AUDIO_MP2, 8192U,
+	                       4092U, 4096U))
+		return 3;
 	return 0;
 }
 
@@ -1866,7 +1943,7 @@ static int test_starved_ring_keeps_video(void)
 	cfg.pcm_ring = ring;
 	cfg.pcm_ring_capacity = sizeof(ring);
 	cfg.pcm_low_water_bytes = 2048U;
-	cfg.pcm_high_water_bytes = 4608U;
+	cfg.pcm_high_water_bytes = SDK_DVD_AC3_FRAME_PCM_BYTES;
 	if (!ops->configure_media(decoder, &cfg)) {
 		ops->destroy(decoder);
 		return 2;
@@ -2242,7 +2319,7 @@ static int test_no_drops_before_first_ack(void)
 	cfg.pcm_ring = ring;
 	cfg.pcm_ring_capacity = sizeof(ring);
 	cfg.pcm_low_water_bytes = 2048U;
-	cfg.pcm_high_water_bytes = 4608U;
+	cfg.pcm_high_water_bytes = SDK_DVD_AC3_FRAME_PCM_BYTES;
 	if (!ops->configure_media(decoder, &cfg)) {
 		ops->destroy(decoder);
 		return 2;
@@ -2327,7 +2404,7 @@ static int test_drop_resyncs_audio_clock(void)
 	cfg.pcm_ring = ring;
 	cfg.pcm_ring_capacity = sizeof(ring);
 	cfg.pcm_low_water_bytes = 2048U;
-	cfg.pcm_high_water_bytes = 4608U;
+	cfg.pcm_high_water_bytes = SDK_DVD_AC3_FRAME_PCM_BYTES;
 	if (!ops->configure_media(decoder, &cfg)) {
 		ops->destroy(decoder);
 		return 2;
@@ -2552,11 +2629,23 @@ int main(void)
 	}
 	printf("PASS: test_ac3_192_all_frames (AC-3 2.0 192k: every frame, DONE)\n");
 
+	if ((err = test_pcm_high_water_bound()) != 0) {
+		fprintf(stderr, "FAIL: test_pcm_high_water_bound (code %d)\n", err);
+		return 90 + err;
+	}
+	printf("PASS: test_pcm_high_water_bound (MP2/AC-3 pending PCM bound)\n");
+
 	if ((err = test_ac3_ring_floor()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_ring_floor (code %d)\n", err);
 		return 100 + err;
 	}
 	printf("PASS: test_ac3_ring_floor (ring must hold one AC-3 frame)\n");
+
+	if ((err = test_pcm_mark_validation()) != 0) {
+		fprintf(stderr, "FAIL: test_pcm_mark_validation (code %d)\n", err);
+		return 105 + err;
+	}
+	printf("PASS: test_pcm_mark_validation (PCM water marks)\n");
 
 	if ((err = test_backend_audio_rules()) != 0) {
 		fprintf(stderr, "FAIL: test_backend_audio_rules (code %d)\n", err);
