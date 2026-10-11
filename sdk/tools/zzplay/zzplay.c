@@ -2951,6 +2951,60 @@ static const char *zzplay_mpeg_audio_name(ZZPlayMediaAudio audio)
   }
 }
 
+/* Service flags, codec and messages for an MPEG Program Stream, once the
+ * audio decision says whether its audio will be decoded. */
+static void zzplay_mpeg_service_policy(ZZPlayContainerPolicy *policy,
+                                       const ZZPlayVideoInfo *video,
+                                       int audio_decoded)
+{
+  policy->video_codec =
+      zzplay_mpeg_needs_mpeg2_backend(video, audio_decoded)
+          ? ZZ9K_VIDEO_CODEC_MPEG2
+          : ZZ9K_VIDEO_CODEC_MPEG1;
+  if (video->is_mpeg2) {
+    /* One flag covers MPEG-2 in a Program Stream with any of its audio
+     * codecs; MP2 additionally rides the baseline media-session flag. */
+    policy->video_flags = ZZ9K_SERVICE_FLAG_VIDEO_MPEG_PS |
+                          ZZ9K_SERVICE_FLAG_VIDEO_MPEG2;
+    policy->video_name = "video";
+    policy->audio_flags = video->audio_codec == ZZPLAY_MEDIA_AUDIO_MP2
+                              ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2
+                              : 0U;
+    policy->service_missing =
+        "zzplay: MPEG-2 playback is not supported by this firmware\n";
+    policy->begin_refused =
+        "zzplay: the firmware refused this MPEG-2 stream "
+        "(video larger than 800x600)\n";
+    return;
+  }
+  policy->video_flags =
+      ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 | ZZ9K_SERVICE_FLAG_VIDEO_MPEG_PS;
+  policy->video_name = "video";
+  if (policy->video_codec == ZZ9K_VIDEO_CODEC_MPEG2) {
+    /* MPEG-1 video with DVD audio: only the MPEG-2 backend decodes AC-3
+     * and LPCM, so its flag is an audio requirement that muted playback
+     * does not have. */
+    policy->audio_flags = ZZ9K_SERVICE_FLAG_VIDEO_MPEG2;
+    policy->audio_name = video->audio_codec == ZZPLAY_MEDIA_AUDIO_AC3
+                             ? "with AC-3 audio"
+                             : "with LPCM audio";
+    policy->service_missing =
+        "zzplay: MPEG-1 with AC-3 or LPCM audio is not supported by "
+        "this firmware\n";
+    policy->begin_refused =
+        "zzplay: the firmware refused this MPEG-1 stream "
+        "(video larger than 800x600)\n";
+    return;
+  }
+  policy->audio_flags = ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2;
+  policy->service_missing =
+      "zzplay: required MPEG-1/PS direct-overlay backend "
+      "is unavailable\n";
+  policy->begin_refused =
+      "zzplay: the firmware refused this MPEG-1 stream "
+      "(video larger than 800x600, or audio other than MP2)\n";
+}
+
 static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
                                const ZZPlayEngineRun *run,
                                ZZPlayBackendDecision *decision)
@@ -2962,38 +3016,11 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
   info = run->probe->video;
   memset(policy, 0, sizeof(*policy));
   policy->title = info.is_mpeg2 ? "MPEG-2" : "MPEG-1";
-  policy->video_codec = info.is_mpeg2 ? ZZ9K_VIDEO_CODEC_MPEG2
-                                      : ZZ9K_VIDEO_CODEC_MPEG1;
   policy->container = ZZ9K_VIDEO_CONTAINER_MPEG_PS;
   policy->skip_late_b = 1U;
   /* Skipped B-pictures return no frame, so a frame count runs slow. */
   policy->pts_position = 1U;
   policy->audio_codec = zzplay_mpeg_audio_codec_id(info.audio_codec);
-  if (info.is_mpeg2) {
-    /* One flag covers MPEG-2 in a Program Stream with any of its audio
-     * codecs; MP2 additionally rides the baseline media-session flag. */
-    policy->video_flags = ZZ9K_SERVICE_FLAG_VIDEO_MPEG_PS |
-                          ZZ9K_SERVICE_FLAG_VIDEO_MPEG2;
-    policy->video_name = "video";
-    policy->audio_flags = info.audio_codec == ZZPLAY_MEDIA_AUDIO_MP2
-                              ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2
-                              : 0U;
-    policy->service_missing =
-        "zzplay: MPEG-2 playback is not supported by this firmware\n";
-    policy->begin_refused =
-        "zzplay: the firmware refused this MPEG-2 stream "
-        "(video larger than 800x600)\n";
-  } else {
-    policy->video_flags =
-        ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 | ZZ9K_SERVICE_FLAG_VIDEO_MPEG_PS;
-    policy->audio_flags = ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2;
-    policy->service_missing =
-        "zzplay: required MPEG-1/PS direct-overlay backend "
-        "is unavailable\n";
-    policy->begin_refused =
-        "zzplay: the firmware refused this MPEG-1 stream "
-        "(video larger than 800x600, or audio other than MP2)\n";
-  }
 
   if (!zzplay_video_info_supported(&info)) {
     zzplay_error(runtime, "zzplay: unsupported %s video geometry\n",
@@ -3067,6 +3094,7 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
     runtime->audio_backend = ZZPLAY_AUDIO_NONE;
     zzplay_info("zzplay: warning: video-only Program Stream\n");
   }
+  zzplay_mpeg_service_policy(policy, &info, runtime->audio_enabled);
   zzplay_info("zzplay: %s/PS %lux%lu, %lu.%03lu fps, "
          "program audio %s\n",
          policy->title,

@@ -17,7 +17,7 @@ It works two ways:
 | Input | Video | Audio |
 | --- | --- | --- |
 | MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video up to 800x600, card-decoded; the firmware refuses larger files | MPEG audio (Layer I, II or III), card-decoded |
-| MPEG-2 Program Stream (`.mpg`, `.mpeg`, `.vob`) | MPEG-2 video up to 800x600, card-decoded; needs firmware that advertises MPEG-2 | AC-3, MP2 or LPCM, one track: AC-3 if the file has any, otherwise MP2, otherwise LPCM, card-decoded; firmware without the MPEG-2 service refuses the file rather than half-playing it |
+| MPEG-2 Program Stream (`.mpg`, `.mpeg`, `.vob`) | MPEG-2 video up to 800x600, card-decoded; needs firmware that advertises MPEG-2 | AC-3, MP2 or LPCM (16-bit 48 kHz mono or stereo), one track: AC-3 if the file has any, otherwise MP2, otherwise LPCM, card-decoded; other LPCM plays as video only; firmware without the MPEG-2 service refuses the file rather than half-playing it |
 | MPEG-2 Program Stream, video only | MPEG-2 video, card-decoded | none (a warning is printed) |
 | WebM (`.webm`, `.mkv`) | VP8 up to 1280x720 pixels, or VP9 up to 854x480, card-decoded, either orientation | Opus at 48 kHz, or Vorbis at 8 to 96 kHz, card-decoded; on the card when the firmware advertises it, otherwise AHI |
 | WebM, larger than that but within 1920 on the long side and 1920x1088 pixels | same codecs, best effort | audio stays continuous; video may skip ahead to the next keyframe |
@@ -31,9 +31,11 @@ It works two ways:
 The format is chosen by inspecting the file, not by its name. A WebM file is
 recognised by its EBML header and a `webm` DocType, so a misnamed file still
 plays and a Matroska file that is not WebM is refused. An MPEG file is
-known from its pack and sequence headers: MPEG-2 plays when the firmware
-advertises the MPEG-2 service and is refused with a message saying so
-otherwise. MPEG-1 elementary streams, standalone MP2, Ogg-FLAC, Ogg Opus,
+known from its video's sequence headers, not its pack headers: MPEG-2
+video, or MPEG-1 video with AC-3 or LPCM audio, needs the MPEG-2 service
+and is refused with a message saying so otherwise; MPEG-1 video with MP2
+audio, or played without audio, needs only MPEG-1. MPEG-1 elementary
+streams, standalone MP2, Ogg-FLAC, Ogg Opus,
 multichannel FLAC/Vorbis, a second WebM video track, an unknown WebM codec
 and other codecs are rejected with
 a specific message rather than being half-played. File extensions only decide

@@ -354,6 +354,28 @@ static size_t zzplay_pes_payload_at(const uint8_t *p, size_t avail)
   return payload_at < avail && payload_at < total ? payload_at : 0U;
 }
 
+/* DVD LPCM format byte (sixth byte of the substream header): quantisation
+ * in bits 7-6, sample rate in bits 5-4, channels minus one in bits 2-0.
+ * The firmware's sdk_dvd_lpcm_header() takes 16-bit 48 kHz mono or stereo
+ * only. */
+static int zzplay_lpcm_format_supported(uint8_t format)
+{
+  return (format & 0xf0U) == 0U && (format & 0x07U) <= 1U;
+}
+
+int zzplay_mpeg_needs_mpeg2_backend(const ZZPlayVideoInfo *info,
+                                    int audio_decoded)
+{
+  /* The MPEG-2 backend decodes MPEG-1 video too; it is needed for MPEG-2
+   * video and for decoded DVD audio, since the MPEG-1 backend takes MP2
+   * only. MPEG-1 video with MP2, or played without audio, stays on the
+   * release MPEG-1 service whatever the pack syntax. */
+  return info->is_mpeg2 ||
+         (audio_decoded &&
+          (info->audio_codec == ZZPLAY_MEDIA_AUDIO_AC3 ||
+           info->audio_codec == ZZPLAY_MEDIA_AUDIO_LPCM));
+}
+
 void zzplay_probe_mpeg_program(const uint8_t *data,
                                size_t length,
                                ZZPlayVideoInfo *info)
@@ -372,12 +394,10 @@ void zzplay_probe_mpeg_program(const uint8_t *data,
     }
     stream_id = data[i + 3U];
     if (stream_id == 0xbaU) {
+      /* The pack header's MPEG-2 syntax says nothing about the video
+       * codec: DVDs and VCD remuxes carry MPEG-1 video in MPEG-2 packs.
+       * Only a sequence extension marks MPEG-2 video. */
       info->is_program_stream = 1;
-      /* MPEG-2 pack headers start with marker bits '01'; MPEG-1 packs
-       * start with '0010'. Only a full 5th byte proves MPEG-2. */
-      if (i + 5U <= length && (data[i + 4U] & 0xc0U) == 0x40U) {
-        info->is_mpeg2 = 1;
-      }
     } else if (stream_id >= 0xe0U && stream_id <= 0xefU) {
       info->has_video_pes = 1;
     } else if (stream_id >= 0xc0U && stream_id <= 0xdfU) {
@@ -390,16 +410,25 @@ void zzplay_probe_mpeg_program(const uint8_t *data,
     } else if (stream_id == 0xbdU) {
       /* Private stream 1: AC-3 substreams 0x80-0x87, DVD LPCM 0xA0-0xA7.
        * AC-3 wins over MP2, MP2 over LPCM, matching the demux's choice. */
-      size_t payload = zzplay_pes_payload_at(data + i, length - i);
+      size_t avail = length - i;
+      size_t payload = zzplay_pes_payload_at(data + i, avail);
+      size_t total;
       uint8_t sub;
 
       if (payload != 0U) {
+        /* A non-zero payload offset proves the 6-byte PES header is
+         * visible. */
+        total = 6U + (((size_t)data[i + 4U] << 8) | data[i + 5U]);
         sub = data[i + payload];
         if (sub >= 0x80U && sub <= 0x87U) {
           info->has_audio_pes = 1;
           info->audio_codec = ZZPLAY_MEDIA_AUDIO_AC3;
         } else if (sub >= 0xa0U && sub <= 0xa7U &&
-                   info->audio_codec == ZZPLAY_MEDIA_AUDIO_NONE) {
+                   info->audio_codec == ZZPLAY_MEDIA_AUDIO_NONE &&
+                   payload + 5U < avail && payload + 5U < total &&
+                   zzplay_lpcm_format_supported(data[i + payload + 5U])) {
+          /* The firmware drops every LPCM packet whose format byte is not
+           * 48 kHz/16-bit mono or stereo, so other LPCM is no audio. */
           info->has_audio_pes = 1;
           info->audio_codec = ZZPLAY_MEDIA_AUDIO_LPCM;
         }
@@ -408,56 +437,214 @@ void zzplay_probe_mpeg_program(const uint8_t *data,
   }
 }
 
+/* Sequence-header scan over a byte window whose last ZZPLAY_PROBE_CARRY
+ * bytes are kept for the next window. */
+typedef struct ZZPlaySeqScan {
+  uint8_t *data;
+  size_t length;
+  int found;
+} ZZPlaySeqScan;
+
+static void zzplay_seq_carry(ZZPlaySeqScan *scan)
+{
+  if (scan->length > ZZPLAY_PROBE_CARRY) {
+    memmove(scan->data, scan->data + scan->length - ZZPLAY_PROBE_CARRY,
+            ZZPLAY_PROBE_CARRY);
+    scan->length = ZZPLAY_PROBE_CARRY;
+  }
+}
+
+static void zzplay_seq_scan(ZZPlaySeqScan *scan, ZZPlayVideoInfo *info)
+{
+  if (!scan->found) {
+    scan->found = zzplay_probe_mpeg_sequence(scan->data, scan->length, info);
+  } else if (!info->is_mpeg2 || !info->has_sequence_display_extension) {
+    /* Re-read repeat headers so a header whose extensions straddled a
+     * window edge still yields the MPEG-2 mark and its display extension.
+     * A no-find changes nothing. */
+    (void)zzplay_probe_mpeg_sequence(scan->data, scan->length, info);
+  }
+  zzplay_seq_carry(scan);
+}
+
+static void zzplay_seq_put(ZZPlaySeqScan *scan, ZZPlayVideoInfo *info,
+                           const uint8_t *src, size_t length)
+{
+  while (length != 0U) {
+    size_t room = ZZPLAY_PROBE_CHUNK + ZZPLAY_PROBE_CARRY - scan->length;
+    size_t take = length < room ? length : room;
+
+    memcpy(scan->data + scan->length, src, take);
+    scan->length += take;
+    src += take;
+    length -= take;
+    if (scan->length == ZZPLAY_PROBE_CHUNK + ZZPLAY_PROBE_CARRY) {
+      zzplay_seq_scan(scan, info);
+    }
+  }
+}
+
+/* Program Stream demux reduced to what the probe needs: the payload of the
+ * video PES packets, so a sequence header and its extensions are read
+ * contiguously even when a muxer split them across packets and put other
+ * streams' packets in between. */
+typedef struct ZZPlayPSDemux {
+  uint32_t shift;    /* last four bytes outside packets, for start codes */
+  uint32_t skip;     /* bytes of the current packet to drop */
+  uint32_t copy;     /* video payload bytes of the current packet left */
+  uint32_t total;    /* current PES packet length, start code included */
+  uint32_t hdr_len;  /* header bytes collected, start code included */
+  uint32_t hdr_need; /* collect until hdr_len reaches it; 0 when idle */
+  uint8_t hdr[48];   /* MPEG-1 PES headers end within 6 + 34 bytes */
+} ZZPlayPSDemux;
+
+static void zzplay_ps_header(ZZPlayPSDemux *d, ZZPlaySeqScan *es,
+                             ZZPlayVideoInfo *info)
+{
+  uint8_t id = d->hdr[3];
+  size_t payload;
+
+  d->hdr_need = 0U;
+  if (id == 0xbaU) {
+    /* MPEG-2 pack: 14 bytes plus stuffing; MPEG-1 pack: 12 bytes. */
+    if (d->hdr_len == 5U) {
+      d->hdr_need = (d->hdr[4] & 0xc0U) == 0x40U ? 14U : 12U;
+    } else if (d->hdr_len == 14U) {
+      d->skip = d->hdr[13] & 0x07U;
+    }
+    return;
+  }
+  if (d->hdr_len == 6U) {
+    d->total = 6U + (((uint32_t)d->hdr[4] << 8) | d->hdr[5]);
+    if (id < 0xe0U || id > 0xefU) {
+      d->skip = d->total - 6U; /* system header, audio, padding, ... */
+    } else if (d->total > 6U) {
+      d->hdr_need = d->total < 9U ? d->total : 9U;
+    }
+    return;
+  }
+  if (d->hdr_len >= 9U && (d->hdr[6] & 0xc0U) == 0x80U) {
+    payload = 9U + (size_t)d->hdr[8];
+    if (payload >= d->total) {
+      d->skip = d->total - 9U;
+    } else {
+      d->skip = (uint32_t)(payload - 9U);
+      d->copy = d->total - (uint32_t)payload;
+    }
+    return;
+  }
+  if (d->hdr_len < d->total && d->hdr_len < 40U) {
+    d->hdr_need = d->total < 40U ? d->total : 40U;
+    return;
+  }
+  payload = zzplay_pes_payload_at(d->hdr, d->hdr_len);
+  if (payload != 0U) {
+    zzplay_seq_put(es, info, d->hdr + payload, d->hdr_len - payload);
+    d->copy = d->total - d->hdr_len;
+  } else {
+    d->skip = d->total - d->hdr_len;
+  }
+}
+
+static void zzplay_ps_demux(ZZPlayPSDemux *d, const uint8_t *data,
+                            size_t length, ZZPlaySeqScan *es,
+                            ZZPlayVideoInfo *info)
+{
+  size_t i = 0U;
+
+  while (i < length) {
+    size_t take;
+
+    if (d->skip != 0U) {
+      take = length - i < d->skip ? length - i : d->skip;
+      d->skip -= (uint32_t)take;
+      i += take;
+    } else if (d->copy != 0U) {
+      take = length - i < d->copy ? length - i : d->copy;
+      zzplay_seq_put(es, info, data + i, take);
+      d->copy -= (uint32_t)take;
+      i += take;
+    } else if (d->hdr_need != 0U) {
+      d->hdr[d->hdr_len++] = data[i++];
+      if (d->hdr_len == d->hdr_need) {
+        zzplay_ps_header(d, es, info);
+      }
+    } else {
+      d->shift = (d->shift << 8) | data[i++];
+      if ((d->shift & 0xffffff00U) == 0x00000100U &&
+          (d->shift & 0xffU) > 0xb9U) {
+        /* A pack or PES start code; the program end code (b9) has no
+         * body. */
+        d->hdr[0] = 0x00U;
+        d->hdr[1] = 0x00U;
+        d->hdr[2] = 0x01U;
+        d->hdr[3] = (uint8_t)(d->shift & 0xffU);
+        d->hdr_len = 4U;
+        d->hdr_need = d->hdr[3] == 0xbaU ? 5U : 6U;
+        d->shift = 0xffffffffU;
+      }
+    }
+  }
+}
+
 int zzplay_probe_file(FILE *file, ZZPlayVideoInfo *info)
 {
   uint8_t *buffer;
-  size_t carry = 0U;
+  uint8_t *es_buffer;
+  ZZPlaySeqScan raw;
+  ZZPlaySeqScan es;
+  ZZPlayPSDemux demux;
   size_t total = 0U;
-  int found = 0;
 
   if (!file || !info || fseek(file, 0L, SEEK_SET) != 0) {
     return 0;
   }
   memset(info, 0, sizeof(*info));
   buffer = (uint8_t *)malloc(ZZPLAY_PROBE_CHUNK + ZZPLAY_PROBE_CARRY);
-  if (!buffer) {
+  es_buffer = (uint8_t *)malloc(ZZPLAY_PROBE_CHUNK + ZZPLAY_PROBE_CARRY);
+  if (!buffer || !es_buffer) {
+    free(es_buffer);
+    free(buffer);
     return 0;
   }
+  memset(&raw, 0, sizeof(raw));
+  memset(&es, 0, sizeof(es));
+  memset(&demux, 0, sizeof(demux));
+  raw.data = buffer;
+  es.data = es_buffer;
+  demux.shift = 0xffffffffU;
   while (total < ZZPLAY_PROBE_BYTES) {
     size_t want = ZZPLAY_PROBE_CHUNK;
     size_t got;
-    size_t available;
 
     if (want > ZZPLAY_PROBE_BYTES - total) {
       want = ZZPLAY_PROBE_BYTES - total;
     }
-    got = fread(buffer + carry, 1U, want, file);
-    available = carry + got;
-    zzplay_probe_mpeg_program(buffer, available, info);
-    if (!found) {
-      found = zzplay_probe_mpeg_sequence(buffer, available, info);
-    } else if (!info->is_mpeg2 || !info->has_sequence_display_extension) {
-      /* Re-read repeat headers so a header whose extensions straddled a
-       * chunk edge (or followed an MPEG-2 pack header) still yields the
-       * MPEG-2 mark and its display extension. A no-find changes nothing. */
-      (void)zzplay_probe_mpeg_sequence(buffer, available, info);
+    got = fread(buffer + raw.length, 1U, want, file);
+    raw.length += got;
+    zzplay_probe_mpeg_program(buffer, raw.length, info);
+    if (info->is_program_stream) {
+      /* Packs start a Program Stream, so the demux sees it from its
+       * first pack. */
+      zzplay_ps_demux(&demux, buffer + raw.length - got, got, &es, info);
+      zzplay_seq_scan(&es, info);
+      zzplay_seq_carry(&raw);
+    } else {
+      zzplay_seq_scan(&raw, info);
     }
     total += got;
     if (got == 0U) {
       break;
     }
-    carry = available < ZZPLAY_PROBE_CARRY
-                ? available
-                : ZZPLAY_PROBE_CARRY;
-    memmove(buffer, buffer + available - carry, carry);
   }
+  free(es_buffer);
   free(buffer);
   if (fseek(file, 0L, SEEK_SET) != 0) {
     clearerr(file);
     return 0;
   }
   clearerr(file);
-  return found;
+  return raw.found || es.found;
 }
 
 int zzplay_probe_webp(const uint8_t *data,

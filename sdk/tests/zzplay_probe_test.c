@@ -151,6 +151,7 @@ static int check_mpeg2_program_probe(void)
 static int check_mpeg1_unchanged_probe(void)
 {
   uint8_t buf[256];
+  uint8_t payload[8];
   size_t n = 0U;
   ZZPlayVideoInfo info;
 
@@ -164,8 +165,47 @@ static int check_mpeg1_unchanged_probe(void)
   }
   memset(&info, 0, sizeof(info));
   zzplay_probe_mpeg_program(buf, n, &info);
-  return info.is_program_stream && info.has_audio_pes && !info.is_mpeg2 &&
-         info.audio_codec == ZZPLAY_MEDIA_AUDIO_MP2;
+  if (!info.is_program_stream || !info.has_audio_pes || info.is_mpeg2 ||
+      info.audio_codec != ZZPLAY_MEDIA_AUDIO_MP2) {
+    return 0;
+  }
+
+  /* MPEG-1 video in MPEG-2 packs (VCD remuxes, DVD MPEG-1 titles): the
+   * pack syntax must not mark the video MPEG-2, so MP2 audio keeps the
+   * release MPEG-1 backend, while AC-3 needs the MPEG-2 one. */
+  n = 0U;
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xba;
+  buf[n++] = 0x44; /* MPEG-2 pack: marker bits 01 */
+  n += probe_put_seq_header(buf + n, 352U, 288U, 1U, 3U);
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xe0;
+  memset(payload, 0x11, sizeof(payload));
+  n += probe_put_pes(buf + n, 0xc0U, payload, 4U);
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, n, &info);
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) || info.is_mpeg2 ||
+      !info.is_program_stream ||
+      info.audio_codec != ZZPLAY_MEDIA_AUDIO_MP2 ||
+      zzplay_mpeg_needs_mpeg2_backend(&info, 1)) {
+    return 0;
+  }
+  payload[0] = 0x80;
+  n += probe_put_pes(buf + n, 0xbdU, payload, sizeof(payload));
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, n, &info);
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) || info.is_mpeg2 ||
+      info.audio_codec != ZZPLAY_MEDIA_AUDIO_AC3 ||
+      !zzplay_mpeg_needs_mpeg2_backend(&info, 1)) {
+    return 0;
+  }
+  /* Played without audio, AC-3 needs nothing beyond MPEG-1. */
+  if (zzplay_mpeg_needs_mpeg2_backend(&info, 0)) {
+    return 0;
+  }
+  /* MPEG-2 video needs the MPEG-2 backend whatever its audio. */
+  info.is_mpeg2 = 1;
+  info.audio_codec = ZZPLAY_MEDIA_AUDIO_MP2;
+  return zzplay_mpeg_needs_mpeg2_backend(&info, 1) &&
+         zzplay_mpeg_needs_mpeg2_backend(&info, 0);
 }
 
 static int check_mpeg2_aspect_probe(void)
@@ -281,10 +321,11 @@ static int check_mpeg2_audio_priority_probe(void)
   size_t n;
   ZZPlayVideoInfo info;
 
-  /* MP2 + LPCM: MP2 wins. */
+  /* MP2 + LPCM: MP2 wins. LPCM format byte 0x01: 16-bit 48 kHz stereo. */
   memset(payload, 0x55, sizeof(payload));
   n = probe_put_pes(buf, 0xc0U, payload, 4U);
   payload[0] = 0xa0;
+  payload[5] = 0x01;
   n += probe_put_pes(buf + n, 0xbdU, payload, sizeof(payload));
   memset(&info, 0, sizeof(info));
   zzplay_probe_mpeg_program(buf, n, &info);
@@ -295,7 +336,33 @@ static int check_mpeg2_audio_priority_probe(void)
   n = probe_put_pes(buf, 0xbdU, payload, sizeof(payload));
   memset(&info, 0, sizeof(info));
   zzplay_probe_mpeg_program(buf, n, &info);
-  if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_LPCM) {
+  if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_LPCM || !info.has_audio_pes) {
+    return 0;
+  }
+  /* LPCM the firmware drops (24-bit 96 kHz, 20-bit 48 kHz, 16-bit 5.1)
+   * is no audio, so playback falls back to video only. */
+  {
+    static const uint8_t unsupported[] = { 0x91U, 0x41U, 0x05U };
+    size_t k;
+
+    for (k = 0U; k < sizeof(unsupported); k++) {
+      payload[5] = unsupported[k];
+      n = probe_put_pes(buf, 0xbdU, payload, sizeof(payload));
+      memset(&info, 0, sizeof(info));
+      zzplay_probe_mpeg_program(buf, n, &info);
+      if (info.has_audio_pes ||
+          info.audio_codec != ZZPLAY_MEDIA_AUDIO_NONE) {
+        return 0;
+      }
+    }
+    payload[5] = 0x01;
+  }
+  /* An LPCM header the window cuts before its format byte decides
+   * nothing yet. */
+  n = probe_put_pes(buf, 0xbdU, payload, sizeof(payload));
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, 9U + 5U, &info);
+  if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_NONE) {
     return 0;
   }
   /* AC-3 + MP2 + LPCM: AC-3 wins. */
@@ -377,6 +444,57 @@ static int check_mpeg2_file_probe(void)
          info.frame_rate_milli == 25000U &&
          info.audio_codec == ZZPLAY_MEDIA_AUDIO_AC3 &&
          info.display_width == 1024U && info.display_height == 576U;
+}
+
+/* A muxer may end a video PES inside the sequence header's extension run
+ * and interleave other packets before the next video PES. The probe reads
+ * the video payload, not the raw stream, so the extensions still count. */
+static int check_mpeg2_split_pes_probe(void)
+{
+  static const uint8_t pack[] = {
+    0x00, 0x00, 0x01, 0xba, 0x44, 0x00, 0x04, 0x00,
+    0x04, 0x01, 0x00, 0x89, 0xc3, 0xf9, 0xff /* one stuffing byte */
+  };
+  uint8_t buf[512];
+  uint8_t video[64];
+  uint8_t audio[200];
+  size_t n = 0U;
+  size_t vn = 0U;
+  ZZPlayVideoInfo info;
+  FILE *file;
+
+  vn += probe_put_seq_header(video + vn, 720U, 576U, 3U, 3U);
+  vn += probe_put_seq_ext(video + vn);
+  vn += probe_put_seq_display_ext(video + vn, 540U, 576U);
+  memcpy(buf + n, pack, sizeof(pack));
+  n += sizeof(pack);
+  /* First video PES: the sequence header and the extension start code's
+   * first two bytes. */
+  n += probe_put_pes(buf + n, 0xe0U, video, 14U);
+  memset(audio, 0x33, sizeof(audio));
+  n += probe_put_pes(buf + n, 0xc0U, audio, sizeof(audio));
+  memcpy(buf + n, pack, sizeof(pack));
+  n += sizeof(pack);
+  n += probe_put_pes(buf + n, 0xe0U, video + 14U, vn - 14U);
+
+  file = tmpfile();
+  if (!file) {
+    return 0;
+  }
+  if (fwrite(buf, 1U, n, file) != n || fflush(file) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_file(file, &info)) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+  return info.is_program_stream && info.is_mpeg2 &&
+         info.width == 720U && info.height == 576U &&
+         info.audio_codec == ZZPLAY_MEDIA_AUDIO_MP2 &&
+         info.display_width == 1365U && info.display_height == 576U;
 }
 
 static int check_video_window_source(void)
@@ -960,6 +1078,9 @@ int main(void)
   }
   if (!check_mpeg2_file_probe()) {
     return 23;
+  }
+  if (!check_mpeg2_split_pes_probe()) {
+    return 26;
   }
   if (!check_video_window_source()) {
     return 24;
