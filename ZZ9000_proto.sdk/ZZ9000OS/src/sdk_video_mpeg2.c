@@ -82,6 +82,12 @@ struct m2_pts_slot {
 	uint8_t used;
 };
 
+/* libmpeg2 0.5.1 recycles its four pictures[] entries. */
+struct m2_picture_rate {
+	const mpeg2_picture_t *picture;
+	uint32_t frame_rate_milli;
+};
+
 /* A video PES in the FIFO: this header, then the payload padded to 8. */
 struct m2_video_entry {
 	uint64_t pts;
@@ -113,10 +119,15 @@ struct sdk_video_mpeg2 {
 	struct SDKVideoMediaConfig media;
 	struct SDKMediaTimeline timeline;
 	struct m2_pts_slot pts_slot[M2_PTS_SLOTS];
+	struct m2_picture_rate picture_rate[4];
 	uint32_t next_tag;
 	uint32_t width;
 	uint32_t height;
 	uint32_t frame_rate_milli;
+	uint32_t previous_picture_rate_milli;
+	uint64_t legacy_video_ticks;
+	uint64_t legacy_video_remainder;
+	uint32_t legacy_video_rate_milli;
 	uint64_t pcm_produced;
 	uint64_t pcm_acknowledged;
 	uint64_t first_audio_pts;
@@ -837,6 +848,41 @@ static void picture_timestamps(const struct sdk_video_mpeg2 *d,
 	}
 }
 
+
+static void picture_rate_store(struct sdk_video_mpeg2 *d,
+                               const mpeg2_picture_t *picture)
+{
+	uint32_t i;
+
+	if (!picture)
+		return;
+	for (i = 0U; i < sizeof(d->picture_rate) / sizeof(d->picture_rate[0]);
+	     i++) {
+		if (d->picture_rate[i].picture == picture ||
+		    d->picture_rate[i].picture == 0) {
+			d->picture_rate[i].picture = picture;
+			d->picture_rate[i].frame_rate_milli = d->frame_rate_milli;
+			return;
+		}
+	}
+	/* The decoder has four recycled picture entries; this path is only a
+	 * bounded fallback for an incompatible decoder implementation. */
+	d->picture_rate[0].picture = picture;
+	d->picture_rate[0].frame_rate_milli = d->frame_rate_milli;
+}
+
+static uint32_t picture_rate(const struct sdk_video_mpeg2 *d,
+				     const mpeg2_picture_t *picture)
+{
+	uint32_t i;
+
+	for (i = 0U; picture &&
+	     i < sizeof(d->picture_rate) / sizeof(d->picture_rate[0]); i++)
+		if (d->picture_rate[i].picture == picture &&
+		    d->picture_rate[i].frame_rate_milli != 0U)
+			return d->picture_rate[i].frame_rate_milli;
+	return d->frame_rate_milli != 0U ? d->frame_rate_milli : 25000U;
+}
 /* Advance the video clock by the preceding picture's display fields and let a
  * tagged picture's raw PTS anchor it, exactly like the MPEG-1 backend:
  * observing raw PTS alone freezes the reported clock for up to the 1 s
@@ -853,12 +899,26 @@ static uint64_t clock_picture(struct sdk_video_mpeg2 *d,
 	uint32_t previous_fields = d->previous_picture_fields;
 	uint64_t step_units = (uint64_t)(previous_fields < 2U
 		? 2U : previous_fields) * 500U;
-	uint32_t per_second = d->frame_rate_milli != 0U
-		? d->frame_rate_milli : 25000U;
+	uint32_t per_second = d->previous_picture_rate_milli != 0U
+		? d->previous_picture_rate_milli
+		: (d->frame_rate_milli != 0U ? d->frame_rate_milli : 25000U);
+	uint64_t scaled;
 
 	picture_timestamps(d, picture, raw_pts, raw_dts);
+	/* The slot ends after the preceding picture's duration. Keep a
+	 * separate integer clock for VIDEO_SESSION's millisecond timestamp. */
+	if (d->video_frames != 0U) {
+		if (d->legacy_video_rate_milli != per_second) {
+			d->legacy_video_remainder = 0U;
+			d->legacy_video_rate_milli = per_second;
+		}
+		scaled = step_units * UINT64_C(90000) + d->legacy_video_remainder;
+		d->legacy_video_ticks += scaled / per_second;
+		d->legacy_video_remainder = scaled % per_second;
+	}
 	d->video_frames++;
 	d->previous_picture_fields = fields;
+	d->previous_picture_rate_milli = picture_rate(d, picture);
 	if (!d->media_configured ||
 	    !sdk_media_timeline_map(&d->timeline, SDK_MEDIA_TIMELINE_VIDEO,
 	                            SDK_MEDIA_TIMELINE_NO_PTS, step_units,
@@ -894,15 +954,11 @@ static void fill_frame(struct sdk_video_mpeg2 *d,
 	uint64_t raw_dts;
 	uint64_t media_pts;
 	uint32_t timeline_flags = d->skipped_media_flags;
-	uint32_t frame_rate_milli = d->frame_rate_milli != 0U
-		? d->frame_rate_milli : 25000U;
-	/* Time of this picture's slot: pictures counted before it, skipped
-	 * ones included. */
-	uint32_t time_millis = (uint32_t)(
-		(uint64_t)d->video_frames * 1000000U / frame_rate_milli);
+	uint32_t time_millis;
 
 	media_pts = clock_picture(d, picture, &raw_pts, &raw_dts,
 	                          &timeline_flags);
+	time_millis = (uint32_t)(d->legacy_video_ticks / 90U);
 	d->skipped_media_flags = 0U;
 	memset(frame, 0, sizeof(*frame));
 	frame->width = d->width;
@@ -970,6 +1026,7 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 				info->sequence->frame_period);
 			break;
 		case STATE_PICTURE:
+			picture_rate_store(d, info->current_picture);
 			/* Late video: B-pictures go undecoded (no picture
 			 * predicts from them) until a reference picture is
 			 * returned; set per picture, both fields alike. */

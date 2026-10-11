@@ -142,6 +142,7 @@ struct stream_result {
 	uint32_t frame_rate_milli;
 	uint32_t picture_flags[16];
 	uint32_t display_fields[16];
+	uint32_t time_millis[16];
 	uint64_t raw_pts[16];
 	uint64_t media_pts[16];
 	uint64_t yuy2_hash;
@@ -170,6 +171,7 @@ static int record_frame(struct stream_result *out,
 		out->width = frame->width;
 		out->height = frame->height;
 		out->picture_flags[out->frame_count] = frame->picture_flags;
+		out->time_millis[out->frame_count] = frame->time_millis;
 		out->raw_pts[out->frame_count] = frame->raw_pts;
 		out->media_pts[out->frame_count] = frame->media_pts;
 		out->display_fields[out->frame_count] = frame->display_fields;
@@ -423,6 +425,118 @@ static int test_concatenated_video_sequences(void)
 	return 0;
 }
 
+static uint32_t set_sequence_rate(uint8_t *stream, uint32_t length,
+                                  uint8_t rate_code)
+{
+	uint32_t at;
+	uint32_t changed = 0U;
+
+	for (at = 0U; at + 8U <= length; at++) {
+		if (stream[at] == 0U && stream[at + 1U] == 0U &&
+		    stream[at + 2U] == 1U && stream[at + 3U] == 0xb3U) {
+			stream[at + 7U] = (stream[at + 7U] & 0xf0U) | rate_code;
+			changed++;
+		}
+	}
+	return changed;
+}
+
+/* Remove optional PES fields so the decoder follows the derived clock. */
+static uint32_t strip_video_pes_pts(uint8_t *stream, uint32_t length)
+{
+	uint32_t at = 0U;
+
+	while (at + 9U <= length) {
+		uint32_t total;
+		uint32_t optional;
+
+		if (stream[at] != 0U || stream[at + 1U] != 0U ||
+		    stream[at + 2U] != 1U || stream[at + 3U] != 0xe0U) {
+			at++;
+			continue;
+		}
+		total = 6U + ((uint32_t)stream[at + 4U] << 8) + stream[at + 5U];
+		if (total > length - at || (stream[at + 6U] & 0xc0U) != 0x80U) {
+			at++;
+			continue;
+		}
+		optional = stream[at + 8U];
+		if (optional > total - 9U)
+			return 0U;
+		if ((stream[at + 7U] & 0x80U) != 0U) {
+			memmove(stream + at + 9U, stream + at + 9U + optional,
+			        length - at - 9U - optional);
+			length -= optional;
+			total -= optional;
+			stream[at + 4U] = (uint8_t)((total - 6U) >> 8);
+			stream[at + 5U] = (uint8_t)(total - 6U);
+			stream[at + 7U] &= 0x3fU;
+			stream[at + 8U] = 0U;
+		}
+		at += total;
+	}
+	return length;
+}
+
+/* The next sequence's rate must not time the preceding picture's slot. */
+static int sequence_rate_transition_timing(int sequence_end)
+{
+	static const uint8_t end_pes[] = {
+		0U, 0U, 1U, 0xe0U, 0U, 7U, 0x80U, 0U, 0U,
+		0U, 0U, 1U, 0xb7U
+	};
+	struct stream_result r;
+	uint8_t *stream;
+	uint32_t first_length = zz9k_dvd_pal_25p_fixture_len;
+	uint32_t second_at = first_length;
+	uint32_t second_length;
+	uint64_t expected;
+	int rc;
+
+	stream = (uint8_t *)malloc(first_length * 2U + sizeof(end_pes));
+	if (!stream)
+		return 1;
+	memcpy(stream, zz9k_dvd_pal_25p_fixture, first_length);
+	if (sequence_end) {
+		memcpy(stream + second_at, end_pes, sizeof(end_pes));
+		second_at += sizeof(end_pes);
+	}
+	memcpy(stream + second_at, zz9k_dvd_pal_25p_fixture, first_length);
+	if (set_sequence_rate(stream + second_at, first_length, 4U) == 0U) {
+		free(stream);
+		return 2;
+	}
+	second_length = strip_video_pes_pts(stream + second_at, first_length);
+	if (second_length == 0U) {
+		free(stream);
+		return 3;
+	}
+	rc = run_decode_test(stream, second_at + second_length, 197U,
+	                     TEST_MEDIA_AUDIO_NONE, &r);
+	free(stream);
+	if (rc != 0 || r.frame_count != 10U ||
+	    r.final_state != SDK_VIDEO_BACKEND_DONE)
+		return 4;
+	if (r.raw_pts[5] != SDK_VIDEO_MEDIA_NO_PTS ||
+	    r.media_pts[5] - r.media_pts[4] != 3600U)
+		return 5;
+	expected = (UINT64_C(2) * 500U * 90000U) / 29970U;
+	if (r.media_pts[6] - r.media_pts[5] != expected ||
+	    r.time_millis[5] != 200U || r.time_millis[6] != 233U)
+		return 6;
+	return 0;
+}
+
+static int test_sequence_rate_transition_timing(void)
+{
+	return sequence_rate_transition_timing(0);
+}
+
+static int test_sequence_end_rate_transition_timing(void)
+{
+	return sequence_rate_transition_timing(1);
+}
+
 static uint32_t retag_video_pes(uint8_t *stream, uint32_t length,
                                 uint8_t stream_id)
 {
@@ -525,6 +639,138 @@ static int test_low_delay_sequence_end(void)
 	result = ops->decode(decoder, &frame);
 	ops->destroy(decoder);
 	return result == SDK_VIDEO_BACKEND_DONE ? 0 : 6;
+}
+
+/* Low-delay pictures must retain the rate decoded with each picture. */
+static int test_low_delay_rate_transition_timing(void)
+{
+	static const uint8_t video[] = {
+		0U, 0U, 1U, 0xb3U, 1U, 0U, 0x10U, 0x13U, 0xffU, 0xffU,
+		0xe0U, 0x18U, 0U, 0U, 1U, 0xb5U, 0x14U, 0x8aU, 0U, 1U,
+		0U, 0x80U, 0U, 0U, 1U, 0xb8U, 0U, 8U, 0U, 0x40U,
+		0U, 0U, 1U, 0U, 0U, 0x0fU, 0xffU, 0xf8U, 0U, 0U,
+		1U, 0xb5U, 0x8fU, 0xffU, 0xf3U, 0x41U, 0x80U, 0U, 0U,
+		1U, 1U, 0xfbU, 0xf8U, 0x7dU, 0x29U, 0x48U, 0x88U,
+		0U, 0U, 1U, 0xb7U
+	};
+	struct stream_result r;
+	uint8_t stream[10U * (9U + sizeof(video))];
+	uint32_t at = 0U;
+	uint32_t i;
+	uint64_t expected;
+	int rc;
+
+	for (i = 0U; i < 10U; i++) {
+		stream[at] = 0U;
+		stream[at + 1U] = 0U;
+		stream[at + 2U] = 1U;
+		stream[at + 3U] = 0xe0U;
+		stream[at + 4U] = 0U;
+		stream[at + 5U] = (uint8_t)(3U + sizeof(video));
+		stream[at + 6U] = 0x80U;
+		stream[at + 7U] = 0U;
+		stream[at + 8U] = 0U;
+		memcpy(stream + at + 9U, video, sizeof(video));
+		if (i >= 5U)
+			stream[at + 16U] = (stream[at + 16U] & 0xf0U) | 4U;
+		at += 9U + sizeof(video);
+	}
+	rc = run_decode_test(stream, at, 197U, TEST_MEDIA_AUDIO_NONE, &r);
+	if (rc != 0 || r.frame_count != 10U ||
+	    r.final_state != SDK_VIDEO_BACKEND_DONE)
+		return 1;
+	if (r.raw_pts[5] != SDK_VIDEO_MEDIA_NO_PTS ||
+	    r.media_pts[5] - r.media_pts[4] != 3600U)
+		return 2;
+	expected = (UINT64_C(2) * 500U * 90000U) / 29970U;
+	if (r.media_pts[6] - r.media_pts[5] != expected ||
+	    r.time_millis[5] != 200U || r.time_millis[6] != 233U)
+		return 3;
+	return 0;
+}
+
+/* Several pictures in one PES retain the rate captured at each header. */
+static int test_shared_pes_rate_transition_timing(void)
+{
+	static const uint8_t video[] = {
+		0U, 0U, 1U, 0xb3U, 1U, 0U, 0x10U, 0x13U, 0xffU, 0xffU,
+		0xe0U, 0x18U, 0U, 0U, 1U, 0xb5U, 0x14U, 0x8aU, 0U, 1U,
+		0U, 0x80U, 0U, 0U, 1U, 0xb8U, 0U, 8U, 0U, 0x40U,
+		0U, 0U, 1U, 0U, 0U, 0x0fU, 0xffU, 0xf8U, 0U, 0U,
+		1U, 0xb5U, 0x8fU, 0xffU, 0xf3U, 0x41U, 0x80U, 0U, 0U,
+		1U, 1U, 0xfbU, 0xf8U, 0x7dU, 0x29U, 0x48U, 0x88U,
+		0U, 0U, 1U, 0xb7U
+	};
+	struct stream_result r;
+	uint8_t stream[9U + 10U * sizeof(video)];
+	uint32_t payload_length = 10U * sizeof(video);
+	uint32_t i;
+	uint64_t expected;
+	int rc;
+
+	stream[0] = stream[1] = 0U;
+	stream[2] = 1U;
+	stream[3] = 0xe0U;
+	stream[4] = (uint8_t)((3U + payload_length) >> 8);
+	stream[5] = (uint8_t)(3U + payload_length);
+	stream[6] = 0x80U;
+	stream[7] = stream[8] = 0U;
+	for (i = 0U; i < 10U; i++) {
+		memcpy(stream + 9U + i * sizeof(video), video, sizeof(video));
+		if (i >= 5U)
+			stream[9U + i * sizeof(video) + 7U] =
+				(stream[9U + i * sizeof(video) + 7U] & 0xf0U) | 4U;
+	}
+	rc = run_decode_test(stream, sizeof(stream), 197U,
+	                     TEST_MEDIA_AUDIO_NONE, &r);
+	if (rc != 0 || r.frame_count != 10U ||
+	    r.final_state != SDK_VIDEO_BACKEND_DONE)
+		return 1;
+	expected = (UINT64_C(2) * 500U * 90000U) / 29970U;
+	if (r.media_pts[5] - r.media_pts[4] != 3600U ||
+	    r.media_pts[6] - r.media_pts[5] != expected ||
+	    r.time_millis[5] != 200U || r.time_millis[6] != 233U)
+		return 2;
+	return 0;
+}
+
+/* A tag on the first fragment survives until the split picture header. */
+static int test_split_picture_header_keeps_pts(void)
+{
+	static const uint8_t video[] = {
+		0U, 0U, 1U, 0xb3U, 1U, 0U, 0x10U, 0x13U, 0xffU, 0xffU,
+		0xe0U, 0x18U, 0U, 0U, 1U, 0xb5U, 0x14U, 0x8aU, 0U, 1U,
+		0U, 0x80U, 0U, 0U, 1U, 0xb8U, 0U, 8U, 0U, 0x40U,
+		0U, 0U, 1U, 0U, 0U, 0x0fU, 0xffU, 0xf8U, 0U, 0U,
+		1U, 0xb5U, 0x8fU, 0xffU, 0xf3U, 0x41U, 0x80U, 0U, 0U,
+		1U, 1U, 0xfbU, 0xf8U, 0x7dU, 0x29U, 0x48U, 0x88U,
+		0U, 0U, 1U, 0xb7U
+	};
+	struct stream_result r;
+	uint8_t stream[14U + 2U + 9U + 2U + 9U + sizeof(video) - 4U];
+	uint32_t at = 0U;
+	int rc;
+
+	stream[at++] = 0U; stream[at++] = 0U; stream[at++] = 1U;
+	stream[at++] = 0xe0U; stream[at++] = 0U; stream[at++] = 10U;
+	stream[at++] = 0x80U; stream[at++] = 0x80U; stream[at++] = 5U;
+	stream[at++] = 0x21U; stream[at++] = 0U; stream[at++] = 0x01U;
+	stream[at++] = 0x46U; stream[at++] = 0x51U;
+	memcpy(stream + at, video, 2U); at += 2U;
+	stream[at++] = 0U; stream[at++] = 0U; stream[at++] = 1U;
+	stream[at++] = 0xe0U; stream[at++] = 0U; stream[at++] = 5U;
+	stream[at++] = 0x80U; stream[at++] = 0U; stream[at++] = 0U;
+	memcpy(stream + at, video + 2U, 2U); at += 2U;
+	stream[at++] = 0U; stream[at++] = 0U; stream[at++] = 1U;
+	stream[at++] = 0xe0U;
+	stream[at++] = (uint8_t)((3U + sizeof(video) - 4U) >> 8);
+	stream[at++] = (uint8_t)(3U + sizeof(video) - 4U);
+	stream[at++] = 0x80U; stream[at++] = 0U; stream[at++] = 0U;
+	memcpy(stream + at, video + 4U, sizeof(video) - 4U); at += sizeof(video) - 4U;
+	rc = run_decode_test(stream, at, 197U, TEST_MEDIA_AUDIO_NONE, &r);
+	if (rc != 0 || r.frame_count != 1U || r.raw_pts[0] != 9000U)
+		return 1;
+	return 0;
 }
 
 
@@ -2751,6 +2997,18 @@ int main(void)
 		return 35 + err;
 	}
 	printf("PASS: test_concatenated_video_sequences (all sequences decode)\n");
+	if ((err = test_sequence_rate_transition_timing()) != 0) {
+		fprintf(stderr, "FAIL: test_sequence_rate_transition_timing (code %d)\n",
+		        err);
+		return 36 + err;
+	}
+	printf("PASS: test_sequence_rate_transition_timing (preceding rate)\n");
+	if ((err = test_sequence_end_rate_transition_timing()) != 0) {
+		fprintf(stderr, "FAIL: test_sequence_end_rate_transition_timing (code %d)\n",
+		        err);
+		return 37 + err;
+	}
+	printf("PASS: test_sequence_end_rate_transition_timing (b7 boundary)\n");
 	if ((err = test_primary_video_stream_selection()) != 0) {
 		fprintf(stderr, "FAIL: test_primary_video_stream_selection (code %d)\n",
 		        err);
@@ -2762,6 +3020,24 @@ int main(void)
 		return 38 + err;
 	}
 	printf("PASS: test_low_delay_sequence_end (EOF reaches DONE)\n");
+	if ((err = test_low_delay_rate_transition_timing()) != 0) {
+		fprintf(stderr, "FAIL: test_low_delay_rate_transition_timing (code %d)\n",
+		        err);
+		return 39 + err;
+	}
+	printf("PASS: test_low_delay_rate_transition_timing (picture rate)\n");
+	if ((err = test_shared_pes_rate_transition_timing()) != 0) {
+		fprintf(stderr, "FAIL: test_shared_pes_rate_transition_timing (code %d)\n",
+		        err);
+		return 40 + err;
+	}
+	printf("PASS: test_shared_pes_rate_transition_timing (per-picture rate)\n");
+	if ((err = test_split_picture_header_keeps_pts()) != 0) {
+		fprintf(stderr, "FAIL: test_split_picture_header_keeps_pts (code %d)\n",
+		        err);
+		return 45 + err;
+	}
+	printf("PASS: test_split_picture_header_keeps_pts (PTS fragment tag)\n");
 
 
 
