@@ -34,7 +34,7 @@ def macro(source, name, occurrence=0):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cc", default="clang")
-    cases = ["pressure", "scan", "publish", "rollback", "cycle", "burst"]
+    cases = ["pressure", "offset2", "scan", "publish", "rollback", "cycle", "burst"]
     parser.add_argument("case", nargs="?", default="all", choices=["all"] + cases)
     args = parser.parse_args()
     here = Path(__file__).resolve().parent
@@ -49,7 +49,7 @@ def main():
     src = root / "ZZ9000_proto.sdk/ZZ9000OS/src"
     eth_h = (src / "ethernet.h").read_text()
     memmap = (src / "memorymap.h").read_text()
-    definitions = [macro(eth_h, n) for n in ["FRAME_MAX_BACKLOG", "RXBD_CNT"]]
+    definitions = [macro(eth_h, n) for n in ["FRAME_MAX_BACKLOG", "RXBD_CNT", "ETH_RX_LEN_OFFSET2"]]
     definitions += [macro(memmap, n) for n in ["RX_FRAME_PAD", "FRAME_SIZE"]]
     definitions += [macro(firmware, n) for n in ["ETH_INVALID_BACKLOG_SLOT", "ETH_BACKLOG_HIGH_WATERMARK"]]
     definitions += [ring_type]

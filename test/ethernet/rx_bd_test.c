@@ -23,6 +23,7 @@ static unsigned barriers;
 #define dsb() ((void)++barriers)
 /* BSP_DEFINITIONS */
 #define W ETH_BACKLOG_HIGH_WATERMARK
+static u32 rx_offset_ring;
 typedef struct { struct { u32 BaseAddress; } Config; XEmacPs_BdRing RxRing; } XEmacPs;
 static XEmacPs EmacPsInstance;
 static XEmacPs_Bd descriptors[RXBD_CNT];
@@ -63,6 +64,7 @@ static u8 *ethernet_backlog_payload_ptr(u16 slot) { return (u8 *)(UINTPTR)(0x100
 static u8 *ethernet_backlog_slot_ptr(u16 slot) { assert(slot < FRAME_MAX_BACKLOG); return frame_bytes[slot]; }
 static unsigned payload_publications, header_publications;
 static u8 payload_published[FRAME_MAX_BACKLOG];
+static u32 last_payload_bytes;
 static void ethernet_backlog_slot_publish_from(u16 slot, u32 from, u32 bytes)
 {
     assert(slot < FRAME_MAX_BACKLOG && from + bytes <= FRAME_SIZE);
@@ -73,6 +75,7 @@ static void ethernet_backlog_slot_publish_from(u16 slot, u32 from, u32 bytes)
         payload_published[slot] = 0; header_publications++;
     } else {
         assert(from == 32 && !payload_published[slot]);
+        last_payload_bytes = bytes;
         payload_published[slot] = 1; payload_publications++;
     }
 }
@@ -95,7 +98,7 @@ static void setup(void)
     rx_backpressure = frames_dropped = frames_backlog_full = rx_slot_mismatch = 0;
     frames_backlog = frames_backlog_read = frames_backlog_write = frames_backlog_reserved = frames_backlog_reserve = frame_serial = 0;
     frames_received = barriers = grants = unsafe_grants = pauses = clears = watch_grants = 0;
-    payload_publications = header_publications = 0;
+    payload_publications = header_publications = 0; rx_offset_ring = 0;
     memset(payload_published, 0, sizeof(payload_published));
 }
 static void complete(unsigned bd)
@@ -124,6 +127,17 @@ int main(int argc, char **argv)
         assert(frame_bytes[W - 1][0] == 0x05 && frame_bytes[W - 1][1] == 0xea &&
                frame_bytes[W - 1][2] == 0x00 && frame_bytes[W - 1][3] == 0x02);
         puts("PASS pressure: completed descriptor stays CPU-owned while refill is withheld");
+    } else if (!strcmp(argv[1], "offset2")) {
+        /* A ring running with RX offset 2: the frame sits 2 bytes later, the
+           payload publication covers those bytes and the length word carries
+           ETH_RX_LEN_OFFSET2. */
+        rx_offset_ring = 2;
+        arm_last_slot(); complete(0); XEmacPsRecvHandler(&EmacPsInstance);
+        assert(payload_publications == 1 && header_publications == 1);
+        assert(last_payload_bytes == 1514u + RX_FRAME_PAD + 2u - 32u);
+        assert(frame_bytes[W - 1][0] == (0x80 | 0x05) && frame_bytes[W - 1][1] == 0xea &&
+               frame_bytes[W - 1][2] == 0x00 && frame_bytes[W - 1][3] == 0x02);
+        puts("PASS offset2: shifted frame is published in full and flagged in its length word");
     } else if (!strcmp(argv[1], "scan")) {
         arm_last_slot(); complete(0);
         /* Software-owned descriptors may retain old EOF/NEW from prior laps. */

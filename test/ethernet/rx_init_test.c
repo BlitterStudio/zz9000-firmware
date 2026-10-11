@@ -30,7 +30,10 @@ typedef u32 XEmacPs_Bd[2];
 #define MNTZ_BASE_ADDR 0u
 #define MNTZORRO_REG4 4u
 /* BSP_DEFINITIONS */
-typedef struct { XEmacPs_BdRing RxRing, TxRing; } XEmacPs;
+typedef struct { struct { u32 BaseAddress; } Config; XEmacPs_BdRing RxRing, TxRing; } XEmacPs;
+#define XEMACPS_NWCFG_OFFSET 0x4u
+#define XEMACPS_NWCFG_RXOFFS_MASK 0xC000u
+static u32 nwcfg, rx_offset_req, rx_offset_ring;
 static XEmacPs EmacPsInstance;
 static XEmacPs_Bd rx[RXBD_CNT], tx[TXBD_CNT];
 #define RX_BD_LIST_START_ADDRESS ((UINTPTR)rx)
@@ -66,6 +69,8 @@ static void bd_write(XEmacPs_Bd *bd, unsigned offset, UINTPTR value)
 #define XEmacPs_BdWrite(bd, offset, value) bd_write((bd), (offset), (value))
 /* BSP_FUNCTIONS */
 static int failing(const char *stage) { return failure && !strcmp(failure, stage); }
+static u32 XEmacPs_ReadReg(u32 base, u32 off) { (void)base; assert(off == XEMACPS_NWCFG_OFFSET); return nwcfg; }
+static void XEmacPs_WriteReg(u32 base, u32 off, u32 v) { (void)base; assert(off == XEMACPS_NWCFG_OFFSET && !running && grants == RXBD_CNT); nwcfg = v; }
 static void XEmacPs_Stop(XEmacPs *p) { assert(p == &EmacPsInstance); running = 0; stopped++; }
 static void ethernet_clear_backlog_slot(u16 slot)
 { assert(slot < FRAME_MAX_BACKLOG && !running); }
@@ -142,6 +147,7 @@ static void setup(void)
     memset(rx, 0xa5, sizeof(rx)); memset(tx, 0x5a, sizeof(tx));
     stopped = running = clears = creates = clones = allocs = prepared = 0;
     commits = barriers = grants = starts = 0;
+    nwcfg = 0x12340000u | XEMACPS_NWCFG_RXOFFS_MASK; rx_offset_ring = 7;
     failure = NULL; prepare_failure = 7;
     /* ethernet_init/restart callers initialize these before ring creation. */
     ethernet_clear_host_state();
@@ -157,12 +163,18 @@ static void check_success(void)
     assert(EmacPsInstance.RxRing.HwCnt == RXBD_CNT && !EmacPsInstance.RxRing.FreeCnt);
     assert(!EmacPsInstance.RxRing.PreCnt && !EmacPsInstance.RxRing.PostCnt);
     for (unsigned i = 0; i < RXBD_CNT; i++) assert(!(rx[i][0] & XEMACPS_RXBUF_NEW_MASK));
+    /* The ring runs with exactly the requested RX buffer offset; other NWCFG bits kept. */
+    assert((nwcfg & XEMACPS_NWCFG_RXOFFS_MASK) == (rx_offset_req << 14));
+    assert((nwcfg & ~XEMACPS_NWCFG_RXOFFS_MASK) == 0x12340000u && rx_offset_ring == rx_offset_req);
 }
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     if (!strcmp(argv[1], "success")) {
-        setup(); check_success();
+        setup(); rx_offset_req = 0; check_success();
+    } else if (!strcmp(argv[1], "offset2")) {
+        setup(); rx_offset_req = 2; check_success();
+        setup(); rx_offset_req = 0; check_success();
     } else {
         unsigned runs = !strcmp(argv[1], "prepare") ? 3 : 1;
         const unsigned positions[] = {0, 7, RXBD_CNT - 1};
