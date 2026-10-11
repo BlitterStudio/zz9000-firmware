@@ -497,6 +497,64 @@ static int check_mpeg2_split_pes_probe(void)
          info.display_width == 1365U && info.display_height == 576U;
 }
 
+/* A PES header may carry 255 header-data bytes. An LPCM packet whose
+ * header straddles the probe's 4 KiB window edge must still be read whole
+ * from the bytes carried into the next window. */
+static int check_long_pes_header_across_windows(void)
+{
+  static uint8_t buf[8192];
+  size_t n = 0U;
+  size_t pad;
+  size_t start;
+  uint8_t video[16];
+  ZZPlayVideoInfo info;
+  FILE *file;
+
+  memset(buf, 0, sizeof(buf));
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xba;
+  buf[n++] = 0x44; buf[n++] = 0x00; buf[n++] = 0x04; buf[n++] = 0x00;
+  buf[n++] = 0x04; buf[n++] = 0x01; buf[n++] = 0x00; buf[n++] = 0x89;
+  buf[n++] = 0xc3; buf[n++] = 0xf8;
+  n += probe_put_pes(buf + n, 0xe0U, video,
+                     probe_put_seq_header(video, 720U, 576U, 3U, 3U));
+  /* A padding packet places the LPCM start code 230 bytes before the
+   * window edge: its substream byte lands 34 bytes past it. */
+  start = 4096U - 230U;
+  pad = start - n - 6U;
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xbe;
+  buf[n++] = (uint8_t)(pad >> 8);
+  buf[n++] = (uint8_t)(pad & 0xffU);
+  memset(buf + n, 0xff, pad);
+  n += pad;
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xbd;
+  buf[n++] = (uint8_t)((3U + 255U + 64U) >> 8);
+  buf[n++] = (uint8_t)((3U + 255U + 64U) & 0xffU);
+  buf[n++] = 0x80; buf[n++] = 0x00; buf[n++] = 255U;
+  memset(buf + n, 0xff, 255U);
+  n += 255U;
+  memset(buf + n, 0x00, 64U);
+  buf[n] = 0xa0;       /* LPCM substream */
+  buf[n + 5U] = 0x01;  /* 16-bit 48 kHz stereo */
+  n += 64U;
+
+  file = tmpfile();
+  if (!file) {
+    return 0;
+  }
+  if (fwrite(buf, 1U, n, file) != n || fflush(file) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_file(file, &info)) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+  return info.has_audio_pes &&
+         info.audio_codec == ZZPLAY_MEDIA_AUDIO_LPCM;
+}
+
 /* With two video streams the probe follows the first stream ID, as the
  * firmware demux does, so the second stream's MPEG-2 headers cannot
  * relabel an MPEG-1 first stream. */
@@ -1125,6 +1183,9 @@ int main(void)
   }
   if (!check_second_video_stream_ignored()) {
     return 27;
+  }
+  if (!check_long_pes_header_across_windows()) {
+    return 28;
   }
   if (!check_video_window_source()) {
     return 24;

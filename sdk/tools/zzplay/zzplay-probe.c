@@ -11,9 +11,15 @@
 
 #define ZZPLAY_PROBE_BYTES (256U * 1024U)
 #define ZZPLAY_PROBE_CHUNK 4096U
-/* Covers a sequence header, both optional quantiser matrices and its
- * extension run, so a header straddling a chunk edge is re-read whole. */
-#define ZZPLAY_PROBE_CARRY (12U + 2U * 64U + 64U)
+/* Bytes kept from one window to the next: the longest structure the probe
+ * reads after a start code, so one that straddles a chunk edge is re-read
+ * whole. That is a PES packet's header (9 bytes plus up to 255 header data
+ * bytes) and the first 6 bytes of its payload (a DVD LPCM substream header
+ * up to its format byte); a sequence header with both quantiser matrices
+ * and its extension run (12 + 2 * 64 + 64 bytes) is shorter. */
+#define ZZPLAY_PROBE_CARRY (9U + 255U + 6U)
+typedef char zzplay_probe_carry_check[
+    (ZZPLAY_PROBE_CARRY >= 12U + 2U * 64U + 64U) ? 1 : -1];
 #define ZZPLAY_MP3_PROBE_BYTES 4096U
 
 static uint32_t zzplay_synchsafe_u28(const uint8_t *data)
