@@ -58,6 +58,9 @@ typedef signed int     rfb_s32;
 #define RFB_RGB565_DEPTH 16
 #define RFB_MAX_TILE_W   64   /* bytes */
 #define RFB_MAX_TILE_H   64   /* rows */
+/* A TILE op carries its tile index in 16 bits, so a geometry with more
+ * tiles than that is refused rather than wrapped. */
+#define RFB_MAX_TILES    65536u
 #define RFB_MAX_CAND     16
 
 /* Encoder layers, each switchable on its own.  The shipping set is

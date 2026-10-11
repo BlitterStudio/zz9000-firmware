@@ -25,7 +25,7 @@ static int failures;
 	} \
 } while (0)
 
-#define OUT_CAP (256u * 1024u)
+#define OUT_CAP (512u * 1024u)
 static uint8_t out_buf[OUT_CAP];
 
 struct walk {
@@ -308,6 +308,59 @@ static void test_bgra_padding_not_sent(void)
 	CHECK(w.tiles == 0u && !w.nonzero);
 }
 
+/* The wire's tile index is 16 bits.  65536 tiles fit (0..65535); one row
+ * of tiles more is refused by the encoder and by the service, where it was
+ * accepted and tile 65536 went out as tile 0. */
+static void test_tile_index_space(void)
+{
+	static uint8_t px[320 * 256];
+	rfb_geom g;
+	rfb_encoder e;
+	struct sdk_console_request r;
+	struct sdk_console_surface s;
+	uint32_t n;
+	uint16_t rf;
+
+	memset(&g, 0, sizeof(g));
+	g.format = RFB_FMT_CLUT8;
+	g.depth = 8u;
+	g.tile_w = 1u;
+	g.tile_h = 1u;
+	g.width = 256u;
+	g.bytes_per_row = 256u;
+	g.height = 256u;
+	CHECK(rfb_shadow_size(&g) == 256u * 256u);
+	g.height = 257u;
+	CHECK(rfb_shadow_size(&g) == 0u);
+	CHECK(rfb_scratch_size(&g, 0u, NULL) == 0u);
+	CHECK(rfb_worst_case_frame(&g) == 0u);
+	{
+		static uint8_t sh[256 * 257];
+		static uint8_t sc[4096];
+		CHECK(rfb_encoder_init(&e, &g, 0u, NULL, sh, sizeof(sh),
+		                       sc, sizeof(sc)) == RFB_E_GEOM);
+	}
+
+	/* The reviewer's case: 320x256 CLUT8, 1x1 tiles, 81920 tiles. */
+	memset(px, 1, sizeof(px));
+	make_surface(&s, SDK_SURFACE_FORMAT_INDEX8, 320, 256, 320, px);
+	make_request(&r, 0x400u, 320, 256, 320, RFB_FMT_CLUT8, 1, 1);
+	r.flags = SDK_CONSOLE_F_RESET;
+	CHECK(encode(&r, &s, &n, &rf) == SDK_STATUS_BAD_REQUEST);
+
+	/* 256x256 at 1x1 is exactly 65536 tiles: served, and the last tile
+	 * goes out as 65535. */
+	make_surface(&s, SDK_SURFACE_FORMAT_INDEX8, 256, 256, 256, px);
+	make_request(&r, 0x400u, 256, 256, 256, RFB_FMT_CLUT8, 1, 1);
+	r.flags = SDK_CONSOLE_F_RESET;
+	CHECK(encode(&r, &s, &n, &rf) == SDK_STATUS_OK);
+	{
+		struct walk w = walk_stream(out_buf, n, 1u);
+		CHECK(w.ok && w.tiles == 65536u);
+		CHECK(w.first_index == 0u && w.last_index == 65535u);
+	}
+}
+
 int main(void)
 {
 	test_parse_request();
@@ -318,6 +371,7 @@ int main(void)
 	test_bgra_conversion();
 	test_bgra_padding_zeroed();
 	test_bgra_padding_not_sent();
+	test_tile_index_space();
 
 	if (failures) {
 		printf("console_encode_test: %d failure(s)\n", failures);

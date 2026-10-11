@@ -283,6 +283,11 @@ static int rfb_geom_ok(const rfb_geom *g)
         return 0;
     if (g->tile_h < 1 || g->tile_h > RFB_MAX_TILE_H)
         return 0;
+    /* tiles_x/tiles_y are 16 bits and the wire's tile index is too: tile
+     * 65536 would go out as tile 0 and corrupt the viewer's image. */
+    if ((((rfb_u32)g->bytes_per_row + g->tile_w - 1u) / g->tile_w) *
+        (((rfb_u32)g->height + g->tile_h - 1u) / g->tile_h) > RFB_MAX_TILES)
+        return 0;
 
     /* Depth means a different thing per format, so each is checked
      * separately and a wrong one is refused at init. */

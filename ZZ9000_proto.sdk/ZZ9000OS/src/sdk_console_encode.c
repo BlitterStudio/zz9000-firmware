@@ -248,6 +248,10 @@ uint16_t sdk_console_encode_band(const struct sdk_console_request *r,
 	    (!conv && (uint32_t)height * bpr > fb->length) ||
 	    (conv && (uint32_t)height * fb->pitch > fb->length))
 		return SDK_STATUS_BAD_REQUEST;
+	/* A geometry the encoder refuses (e.g. more tiles than the wire's
+	 * 16-bit tile index) is the request's fault, not a memory shortage. */
+	if (rfb_shadow_size(&g) == 0u)
+		return SDK_STATUS_BAD_REQUEST;
 
 	/* One encoder, one owner.  A request through another output
 	 * buffer starts a new session from a zeroed shadow and a fresh band 0,
