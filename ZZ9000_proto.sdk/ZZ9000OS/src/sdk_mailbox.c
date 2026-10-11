@@ -8721,6 +8721,9 @@ void sdk_mailbox_init(void)
 	media_pcm_ring_session = 0U;
 	memset(shared_buffers, 0, sizeof(shared_buffers));
 	memset(surfaces, 0, sizeof(surfaces));
+	/* Shared-buffer handles restart at 1, so the console encoder's owner
+	 * (an output handle) would match a new client; drop its session. */
+	sdk_console_encode_reset();
 	/* Unbind AX playback before the table goes away: the fabric
 	 * reset above already dropped every producer, silenced the ring
 	 * it owned and retired the lease epochs (R7). */

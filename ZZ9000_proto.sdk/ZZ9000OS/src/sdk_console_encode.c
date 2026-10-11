@@ -38,6 +38,17 @@ static int         cenc_snap_ok;
  * buffer.  Another buffer is another client. */
 static uint32_t    cenc_owner;
 
+void sdk_console_encode_reset(void)
+{
+	cenc_ready = 0;
+	cenc_owner = 0u;
+	cenc_snap_ok = 0;
+	cenc_flags = 0u;
+	memset(&cenc_geom, 0, sizeof(cenc_geom));
+	if (cenc_shadow)
+		memset(cenc_shadow, 0, cenc_shadow_len);
+}
+
 static uint32_t rd_be32(const uint8_t *p)
 {
 	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |

@@ -17,7 +17,7 @@ DEPS := $(SRC_DIR)/sdk_console_encode.h $(SRC_DIR)/rfb/rfb_encode.h \
 .PHONY: test clean
 
 test: $(TARGET)
-	$(TARGET)
+	$(TARGET) $(SRC_DIR)/sdk_mailbox.c
 
 $(TARGET): $(SOURCES) $(DEPS)
 	@mkdir -p $(BUILD_DIR)

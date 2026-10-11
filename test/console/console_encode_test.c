@@ -361,7 +361,72 @@ static void test_tile_index_space(void)
 	}
 }
 
-int main(void)
+/* A warm reset restarts shared-buffer handles at 1, so a rebooted client
+ * can come back with the old output handle and the old geometry and no
+ * RESET flag.  After sdk_console_encode_reset() its band 0 must be a
+ * keyframe coded against a zero baseline, with the sequence restarted. */
+static void test_reset_forgets_session(void)
+{
+	static uint8_t px[64 * 32];
+	struct sdk_console_request r;
+	struct sdk_console_surface s;
+	struct walk w;
+	uint32_t n;
+	uint16_t rf;
+
+	memset(px, 0x33, sizeof(px));
+	make_surface(&s, SDK_SURFACE_FORMAT_INDEX8, 64, 32, 64, px);
+	make_request(&r, 0x1u, 64, 32, 64, RFB_FMT_CLUT8, 16, 16);
+	r.flags = SDK_CONSOLE_F_RESET;
+	CHECK(encode(&r, &s, &n, &rf) == SDK_STATUS_OK);
+	r.flags = 0u;
+	CHECK(encode(&r, &s, &n, &rf) == SDK_STATUS_OK);
+	CHECK(!(rf & SDK_CONSOLE_RF_KEYFRAME));
+	CHECK(out_buf[2] != 0u || out_buf[3] != 0u);    /* seq advanced */
+
+	sdk_console_encode_reset();
+
+	CHECK(encode(&r, &s, &n, &rf) == SDK_STATUS_OK);
+	CHECK(rf & SDK_CONSOLE_RF_KEYFRAME);
+	CHECK(out_buf[2] == 0u && out_buf[3] == 0u);    /* seq 0 */
+	w = walk_stream(out_buf, n, 16u * 16u);
+	CHECK(w.ok && w.tiles == 8u && w.nonzero);
+}
+
+/* sdk_mailbox_init() is the mailbox reset; it must call the reset above.
+ * The function needs the board, so its source is checked instead. */
+static void test_mailbox_init_resets(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	char *src;
+	const char *body;
+	const char *end;
+	const char *call;
+	long len;
+
+	CHECK(f != NULL);
+	if (!f)
+		return;
+	fseek(f, 0, SEEK_END);
+	len = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	src = (char *)malloc((size_t)len + 1u);
+	CHECK(src != NULL && fread(src, 1, (size_t)len, f) == (size_t)len);
+	fclose(f);
+	if (!src)
+		return;
+	src[len] = 0;
+	body = strstr(src, "\nvoid sdk_mailbox_init(void)\n{");
+	CHECK(body != NULL);
+	if (body) {
+		end = strstr(body, "\n}\n");
+		call = strstr(body, "\tsdk_console_encode_reset();");
+		CHECK(end != NULL && call != NULL && call < end);
+	}
+	free(src);
+}
+
+int main(int argc, char **argv)
 {
 	test_parse_request();
 	test_session_keyframes();
@@ -372,6 +437,11 @@ int main(void)
 	test_bgra_padding_zeroed();
 	test_bgra_padding_not_sent();
 	test_tile_index_space();
+	test_reset_forgets_session();
+	if (argc > 1)
+		test_mailbox_init_resets(argv[1]);
+	else
+		CHECK(!"usage: console_encode_test path/to/sdk_mailbox.c");
 
 	if (failures) {
 		printf("console_encode_test: %d failure(s)\n", failures);

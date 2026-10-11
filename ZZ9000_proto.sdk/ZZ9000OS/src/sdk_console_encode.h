@@ -84,6 +84,12 @@ uint16_t sdk_console_encode_band(const struct sdk_console_request *r,
                                  uint8_t *out, uint32_t out_capacity,
                                  uint32_t *out_len, uint16_t *reply_flags);
 
+/* Forget the session: the next request starts from a zeroed baseline, with
+ * a fresh sequence, and its band 0 is a keyframe.  sdk_mailbox_init() calls
+ * this, so a client after an Amiga warm reset never gets deltas against the
+ * screen its previous lifetime saw, even with the same output handle. */
+void sdk_console_encode_reset(void);
+
 /* A 32-bit screen (BGRA8888) converted to the wire's big-endian RGB565.
  * Bytes of each dst row past width * 2 are zeroed. */
 void sdk_console_snap_bgra_rgb565(uint8_t *dst, uint32_t dst_pitch,
