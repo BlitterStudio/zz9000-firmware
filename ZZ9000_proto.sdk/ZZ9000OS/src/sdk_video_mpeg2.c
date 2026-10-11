@@ -771,9 +771,11 @@ static int bind_fbufs(struct sdk_video_mpeg2 *d,
 
 	if (!geometry_ok(width, height))
 		return 0;
-	if (d->fbufs_bound && d->fbuf_stride == stride &&
-	    d->width == width && d->height == height)
-		return 1;
+	/* The session's display allocation is sized for its first sequence.
+	 * A later geometry cannot be presented safely without renegotiation. */
+	if (d->fbufs_bound)
+		return d->fbuf_stride == stride && d->width == width &&
+		       d->height == height;
 	mpeg2_stride(d->decoder, (int)stride);
 	d->fbuf_stride = stride;
 	d->width = width;
@@ -994,7 +996,8 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 			break;
 		case STATE_END:
 		case STATE_INVALID_END:
-			d->video_done = 1U;
+			/* A sequence end is also the boundary before another
+			 * sequence. STATE_BUFFER after the EOF flush is terminal. */
 			if (state == STATE_INVALID_END)
 				d->malformed++;
 			if (info->display_fbuf && d->fbufs_bound) {
@@ -1005,7 +1008,9 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 					got_frame = 1;
 				}
 			}
-			return got_frame ? 1 : 0;
+			if (got_frame)
+				return 1;
+			continue;
 		case STATE_INVALID:
 			d->malformed++;
 			break;

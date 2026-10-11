@@ -578,6 +578,65 @@ static int test_streaming_decode(void)
 		return 12;
 	return 0;
 }
+/* An I-only MPEG-1 sequence has no delayed frame at its sequence end. The
+ * first decode after the client signals EOF must complete, not need input. */
+static int test_ip_only_eof(void)
+{
+	static const uint8_t video[] = {
+		0U, 0U, 1U, 0xb3U, 1U, 0U, 0x10U, 0x13U, 0xffU, 0xffU,
+		0xe0U, 0x18U, 0U, 0U, 1U, 0xb8U, 0U, 8U, 0U, 0x40U,
+		0U, 0U, 1U, 0U, 0U, 0x0fU, 0xffU, 0xf8U, 0U, 0U,
+		1U, 1U, 0xfbU, 0xf8U, 0x7dU, 0x29U, 0x48U, 0x88U,
+		0U, 0U, 1U, 0xb7U
+	};
+	const struct SDKVideoDecoderOps *ops = sdk_video_backend_find(1U, 1U);
+	struct SDKVideoDecodedFrame frame;
+	uint8_t stream[9U + sizeof(video)];
+	uint32_t accepted = 0U;
+	uint32_t frames = 0U;
+	void *decoder;
+	int result;
+
+	if (!ops)
+		return 1;
+	stream[0] = 0U;
+	stream[1] = 0U;
+	stream[2] = 1U;
+	stream[3] = 0xe0U;
+	stream[4] = 0U;
+	stream[5] = (uint8_t)(3U + sizeof(video));
+	stream[6] = 0x80U;
+	stream[7] = 0U;
+	stream[8] = 0U;
+	memcpy(stream + 9U, video, sizeof(video));
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 2;
+	if (ops->write(decoder, stream, sizeof(stream), 0, &accepted) !=
+	    SDK_VIDEO_BACKEND_WRITE_OK || accepted != sizeof(stream)) {
+		ops->destroy(decoder);
+		return 3;
+	}
+	for (;;) {
+		result = ops->decode(decoder, &frame);
+		if (result != SDK_VIDEO_BACKEND_FRAME)
+			break;
+		frames++;
+	}
+	if (result != SDK_VIDEO_BACKEND_NEED_INPUT || frames != 1U) {
+		ops->destroy(decoder);
+		return 4;
+	}
+	if (ops->write(decoder, NULL, 0U, 1, &accepted) !=
+	    SDK_VIDEO_BACKEND_WRITE_OK || accepted != 0U) {
+		ops->destroy(decoder);
+		return 5;
+	}
+	result = ops->decode(decoder, &frame);
+	ops->destroy(decoder);
+	return result == SDK_VIDEO_BACKEND_DONE ? 0 : 6;
+}
+
 
 /* A 40x24 MPEG-1 picture is coded as 48x32 macroblocks: frames and stream
  * info carry the picture size (the session refuses frames that differ from
@@ -661,6 +720,9 @@ int main(void)
 	result = test_streaming_decode();
 	if (result != 0)
 		return 30 + result;
+	result = test_ip_only_eof();
+	if (result != 0)
+		return 160 + result;
 	result = test_picture_size_and_cap();
 	if (result != 0)
 		return 170 + result;

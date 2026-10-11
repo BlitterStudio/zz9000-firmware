@@ -3,11 +3,15 @@
  */
 #include "sdk_dvd_lpcm.h"
 
+int sdk_dvd_lpcm_format_supported(uint8_t format)
+{
+	return (format & 0xf0U) == 0U && (format & 7U) <= 1U;
+}
+
 int sdk_dvd_lpcm_header(struct SDKDVDLPCM *lpcm, const uint8_t *header)
 {
 	uint32_t channels;
 	uint32_t quantization;
-	uint32_t rate;
 
 	if (!lpcm || !header)
 		return 0;
@@ -17,12 +21,10 @@ int sdk_dvd_lpcm_header(struct SDKDVDLPCM *lpcm, const uint8_t *header)
 	 * channel count minus one (bits 2-0), then dynamic range. Checked
 	 * against ffmpeg -f dvd output (test/video_codec dvd_ntsc_30). */
 	quantization = (header[5] >> 6) & 3U;
-	rate = (header[5] >> 4) & 3U;
 	channels = (header[5] & 7U) + 1U;
 	/* The experiment's deliberately-unclaimed variants stay out of scope:
 	 * only 48 kHz/16-bit mono or stereo is accepted. */
-	if (quantization != 0U || rate != 0U ||
-	    (channels != 1U && channels != 2U))
+	if (!sdk_dvd_lpcm_format_supported(header[5]))
 		return 0;
 	if (lpcm->channels == 0U) {
 		lpcm->channels = (uint8_t)channels;

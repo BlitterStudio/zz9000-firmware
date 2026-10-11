@@ -400,6 +400,91 @@ static int test_pal_25p(void)
 
 	return 0;
 }
+/* A sequence end closes one MPEG sequence, not the Program Stream. */
+static int test_concatenated_video_sequences(void)
+{
+	struct stream_result r;
+	uint8_t *stream;
+	uint32_t length = zz9k_dvd_pal_25p_fixture_len;
+	int rc;
+
+	stream = (uint8_t *)malloc(length * 2U);
+	if (!stream)
+		return 1;
+	memcpy(stream, zz9k_dvd_pal_25p_fixture, length);
+	memcpy(stream + length, zz9k_dvd_pal_25p_fixture, length);
+	rc = run_decode_test(stream, length * 2U, 197U,
+	                     TEST_MEDIA_AUDIO_NONE, &r);
+	free(stream);
+	if (rc != 0)
+		return 2;
+	if (r.frame_count != 10U || r.final_state != SDK_VIDEO_BACKEND_DONE)
+		return 3;
+	return 0;
+}
+
+/* A low-delay MPEG-2 sequence displays every picture at its slice, so its
+ * final STATE_END has no delayed frame. EOF must reach DONE immediately. */
+static int test_low_delay_sequence_end(void)
+{
+	static const uint8_t video[] = {
+		0U, 0U, 1U, 0xb3U, 1U, 0U, 0x10U, 0x13U, 0xffU, 0xffU,
+		0xe0U, 0x18U, 0U, 0U, 1U, 0xb5U, 0x14U, 0x8aU, 0U, 1U,
+		0U, 0x80U, 0U, 0U, 1U, 0xb8U, 0U, 8U, 0U, 0x40U,
+		0U, 0U, 1U, 0U, 0U, 0x0fU, 0xffU, 0xf8U, 0U, 0U,
+		1U, 0xb5U, 0x8fU, 0xffU, 0xf3U, 0x41U, 0x80U, 0U, 0U,
+		1U, 1U, 0xfbU, 0xf8U, 0x7dU, 0x29U, 0x48U, 0x88U,
+		0U, 0U, 1U, 0xb7U
+	};
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
+	struct SDKVideoDecodedFrame frame;
+	uint8_t stream[9U + sizeof(video)];
+	void *decoder;
+	uint32_t accepted = 0U;
+	uint32_t frames = 0U;
+	int result;
+
+	if (!ops)
+		return 1;
+	stream[0] = 0U;
+	stream[1] = 0U;
+	stream[2] = 1U;
+	stream[3] = 0xe0U;
+	stream[4] = 0U;
+	stream[5] = (uint8_t)(3U + sizeof(video));
+	stream[6] = 0x80U;
+	stream[7] = 0U;
+	stream[8] = 0U;
+	memcpy(stream + 9U, video, sizeof(video));
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 2;
+	if (ops->write(decoder, stream, sizeof(stream), 0, &accepted) !=
+	    SDK_VIDEO_BACKEND_WRITE_OK || accepted != sizeof(stream)) {
+		ops->destroy(decoder);
+		return 3;
+	}
+	for (;;) {
+		result = ops->decode(decoder, &frame);
+		if (result != SDK_VIDEO_BACKEND_FRAME)
+			break;
+		frames++;
+	}
+	if (result != SDK_VIDEO_BACKEND_NEED_INPUT || frames != 1U) {
+		ops->destroy(decoder);
+		return 4;
+	}
+	if (ops->write(decoder, NULL, 0U, 1, &accepted) !=
+	    SDK_VIDEO_BACKEND_WRITE_OK || accepted != 0U) {
+		ops->destroy(decoder);
+		return 5;
+	}
+	result = ops->decode(decoder, &frame);
+	ops->destroy(decoder);
+	return result == SDK_VIDEO_BACKEND_DONE ? 0 : 6;
+}
+
+
 
 /* 2. PAL TFF Interlaced: 720x576, top-field-first, AC-3 audio, moving-field marker */
 static int test_pal_tff_interlaced(void)
@@ -1629,6 +1714,33 @@ static int test_drop_run_uses_first_available_pts(void)
 		return 2;
 	return 0;
 }
+/* An unsupported LPCM track before a usable one must not claim the single
+ * LPCM decoder slot. */
+static int test_lpcm_supported_track_selection(void)
+{
+	static const uint8_t unsupported[] = {
+		0xa0U, 0U, 0U, 0U, 0U, 0x10U, 0U, 0xdeU, 0xadU,
+		0xbeU, 0xefU
+	};
+	static const uint8_t supported[] = {
+		0xa1U, 0U, 0U, 0U, 0U, 0x01U, 0U, 0x11U, 0x22U,
+		0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U
+	};
+	struct acked_result r;
+	uint8_t ps[64];
+	uint32_t length;
+
+	length = put_pes(ps, 0xbdU, unsupported, sizeof(unsupported));
+	length += put_pes(ps + length, 0xbdU, supported, sizeof(supported));
+	if (run_acked(ps, length, 64U, SDK_VIDEO_MEDIA_AUDIO_LPCM,
+	              16U * 1024U, 16U * 1024U, &r) != 0)
+		return 1;
+	if (!r.done || r.audio_frames != 1U ||
+	    r.pcm_bytes != sizeof(supported) - SDK_DVD_LPCM_HEADER_BYTES)
+		return 2;
+	return 0;
+}
+
 
 /* Like AC-3, a stream with two MPEG audio tracks or two LPCM tracks must
  * reach the audio queue as one: interleaving another track's packets into
@@ -1649,6 +1761,7 @@ static int test_audio_track_selection(void)
 		n += put_pes(ps + n, 0xc0, payload, sizeof(payload));
 		n += put_pes(ps + n, 0xc1, payload, sizeof(payload));
 		payload[0] = 0xa0;
+		payload[5] = 0x01U;
 		n += put_pes(ps + n, 0xbd, payload, sizeof(payload));
 		payload[0] = 0xa1;
 		n += put_pes(ps + n, 0xbd, payload, sizeof(payload));
@@ -2590,6 +2703,18 @@ int main(void)
 		return 30 + err;
 	}
 	printf("PASS: test_pal_25p (PAL 720x576 25p + MP2 audio)\n");
+	if ((err = test_concatenated_video_sequences()) != 0) {
+		fprintf(stderr, "FAIL: test_concatenated_video_sequences (code %d)\n", err);
+		return 35 + err;
+	}
+	printf("PASS: test_concatenated_video_sequences (all sequences decode)\n");
+	if ((err = test_low_delay_sequence_end()) != 0) {
+		fprintf(stderr, "FAIL: test_low_delay_sequence_end (code %d)\n", err);
+		return 38 + err;
+	}
+	printf("PASS: test_low_delay_sequence_end (EOF reaches DONE)\n");
+
+
 
 	if ((err = test_pal_tff_interlaced()) != 0) {
 		fprintf(stderr, "FAIL: test_pal_tff_interlaced (code %d)\n", err);
@@ -2755,6 +2880,12 @@ int main(void)
 		return 100 + err;
 	}
 	printf("PASS: test_audio_track_selection (first MP2 stream and LPCM track only)\n");
+	if ((err = test_lpcm_supported_track_selection()) != 0) {
+		fprintf(stderr, "FAIL: test_lpcm_supported_track_selection (code %d)\n", err);
+		return 130 + err;
+	}
+	printf("PASS: test_lpcm_supported_track_selection (usable LPCM track)\n");
+
 
 	if ((err = test_audio_only_reaches_done()) != 0) {
 		fprintf(stderr, "FAIL: test_audio_only_reaches_done (code %d)\n", err);

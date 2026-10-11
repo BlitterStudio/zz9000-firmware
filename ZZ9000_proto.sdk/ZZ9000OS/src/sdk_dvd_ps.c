@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "sdk_dvd_ps.h"
+#include "sdk_dvd_lpcm.h"
 
 #include <string.h>
 
@@ -246,16 +247,22 @@ static int parse_one(struct SDKDVDPSDemux *d)
 					pts, dts);
 			}
 		} else if (sub >= 0xa0U && sub <= 0xa7U) {
-			if (d->lpcm_substream == 0U)
-				d->lpcm_substream = sub;
-			if (sub != d->lpcm_substream)
-				d->bytes_ignored += total;
-			else if (payload_length < 7U)
+			if (payload_length < 7U) {
 				queued = -1;
-			else
+			} else if (!sdk_dvd_lpcm_format_supported(p[payload_at + 5U])) {
+				d->bytes_ignored += total;
+			} else if (d->lpcm_substream == 0U) {
+				d->lpcm_substream = sub;
 				queued = queue_packet(d, &d->audio, SDK_DVD_PS_LPCM,
-					sid, sub, 7U, p + payload_at, payload_length,
-					pts, dts);
+				                      sid, sub, 7U, p + payload_at,
+				                      payload_length, pts, dts);
+			} else if (sub != d->lpcm_substream) {
+				d->bytes_ignored += total;
+			} else {
+				queued = queue_packet(d, &d->audio, SDK_DVD_PS_LPCM,
+				                      sid, sub, 7U, p + payload_at,
+				                      payload_length, pts, dts);
+			}
 		} else {
 			/* 0x20..0x3f subpictures and other private streams are not
 			 * part of the experiment; bounded skip is intentional. */
