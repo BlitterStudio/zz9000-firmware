@@ -353,11 +353,17 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	 * on hardware showed just the frame's first rows and then black (A4000:
 	 * a 1920x1080 window, and a 720x576 MPEG-2 frame letterboxed to 720x405
 	 * in fullscreen, while upscaled and 1:1 windows of the same clips were
-	 * correct). The fetcher's divisor scales what is actually scanned, so a
-	 * half-packed >720p frame still goes native into a 1280x720 window. */
+	 * correct). What is scanned decides: a P96 source is scanned at full
+	 * size, an SDK video session's half-packed >720p frame at half size, so
+	 * the latter still goes native into a 1280x720 window. A session binds
+	 * to the overlay at its first frame, after this SET, but players begin
+	 * it first, so an open session means staging frames will be scanned. */
 	uint8_t was_hw_active = ov.hw_active;
 	uint32_t hw_src_addr = ov.src_addr;
-	uint8_t scan_div = overlay_staging_divisor(src_w, src_h);
+	uint8_t scan_div =
+		(ov.direct_session != 0U || sdk_video_stream_active_count() != 0U)
+			? overlay_staging_divisor(src_w, src_h)
+			: 1U;
 	int32_t dst_right = (int32_t)dst_x + dst_w;
 	int32_t dst_bottom = (int32_t)dst_y + dst_h;
 

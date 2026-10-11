@@ -58,6 +58,7 @@ void surface_allocator_free(uint32_t addr)
 int scheduler_core1_available(void) { return 1; }
 static int hw_present;
 static unsigned hw_starts;
+static uint32_t open_video_sessions;
 static unsigned hw_buffer_swaps;
 static uint32_t hw_addr;
 static uint32_t hw_pitch;
@@ -122,6 +123,11 @@ int sdk_video_stream_get_direct_frame(uint32_t session,
 		return 0;
 	*frame = mock_direct_frame;
 	return 1;
+}
+
+uint32_t sdk_video_stream_active_count(void)
+{
+	return open_video_sessions;
 }
 
 int sdk_video_yuv420_to_yuy2(uint8_t *dst, uint32_t dst_pitch, uint32_t width,
@@ -414,11 +420,13 @@ static void test_downscaled_window_stays_composited(void)
 	check(last_compose.variant == 0xfeU,
 	      "an upscaled window packs for the native plane");
 
-	/* A >720p source is scanned at half size, so the gate compares against
-	 * the scan size, not the P96 source: a 1280x720 window keeps a
-	 * 1920x1080 source on the native plane. */
+	/* A >720p session frame is scanned at half size, so its gate compares
+	 * against the half-size scan: a 1280x720 window keeps a 1920x1080
+	 * session on the native plane. Players begin the session before the
+	 * SET; it binds to the overlay only at its first frame. */
 	reset();
 	hw_present = 1;
+	open_video_sessions = 1U;
 	starts = hw_starts;
 	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1280U, 720U);
 	check(hw_starts > starts,
@@ -427,6 +435,29 @@ static void test_downscaled_window_stays_composited(void)
 	check(last_compose.variant == 0xfdU && hw_src_w == 960U &&
 	      hw_src_h == 540U,
 	      "a >720p source still packs and scans at half size");
+	overlay_video_session_closed(23U);
+	open_video_sessions = 0U;
+
+	/* A legacy P96/cgxvideo source is scanned at full size: with no SDK
+	 * session open, the same window stays off the native plane. */
+	reset();
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1280U, 720U);
+	check(hw_starts == starts,
+	      "a downscaled P96 source stays on the software compositor");
+
+	/* A session bound before a re-SET (fullscreen toggle) is gated by its
+	 * half-size scan at that SET. */
+	reset();
+	hw_present = 1;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1920U, 1080U);
+	present_frame(25U);
+	starts = hw_starts;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1280U, 720U);
+	check(hw_starts > starts,
+	      "a bound session re-SET into a smaller window stays native");
+	overlay_video_session_closed(25U);
 
 	/* A window smaller than even the half-size scan composites. */
 	reset();
