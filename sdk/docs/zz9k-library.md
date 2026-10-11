@@ -770,7 +770,8 @@ ZZPlay --audio=mhi Work:Audio/test.mp3
 ZZPlay --audio=none --benchmark Work:Audio/test.mp3
 ```
 
-It accepts MPEG-1 Program Streams and standalone Layer III files. MPEG video
+It accepts MPEG-1 and MPEG-2 Program Streams and standalone Layer III files
+(see `zzplay.md` for the full format list). MPEG video
 opens a P96 overlay window, publishes decoder-owned planar frames directly,
 and paces through `timer.device`. Standalone MP3 playback uses the accelerated
 audio-stream service and generic AHI output, or the optional runtime

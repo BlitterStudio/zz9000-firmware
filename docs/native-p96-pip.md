@@ -438,7 +438,8 @@ IDCT experiments. They must not be copied as-is: nested rounded averages do
 not match MPEG's exact four-sample expression for all inputs, and several
 IDCT expressions add an explicit rounding bias and then use a rounding shift,
 applying the bias twice. ZZ9000 decodes MPEG-1 and MPEG-2 video with
-libmpeg2, built at `-O3` with Cortex-A9/NEON flags but using its portable C
-IDCT and motion compensation. A pixel-exact NEON path for those two hooks is
-a worthwhile performance follow-up, gated by C-vs-NEON equivalence tests
-running on an ARM target.
+libmpeg2 and replaces its C IDCT and motion compensation with NEON kernels
+(`sdk_mpeg2_neon.c`) that compute exactly what the C code computes. A check
+against the C code on the card decides whether they are installed; the C code
+stays in use if they disagree. `test/mpeg2_neon/run.sh` compares the two under
+qemu-arm.

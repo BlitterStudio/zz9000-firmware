@@ -53,6 +53,11 @@ the file names a display size different from the coded frame, that aspect
 is what the window uses. A projection roll hint is printed when progress
 output is on and is not applied.
 
+MPEG files drop late frames the same way (never more than two in a row),
+and after a late frame the card skips B-pictures, which no other picture
+depends on, until it returns the next reference picture. Their audio is not
+affected.
+
 ZZPlay keeps its formats in one registry, so support for further formats is
 added as the card's decoders grow; the *About* requester lists what the
 installed version plays.

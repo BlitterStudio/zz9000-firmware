@@ -31,8 +31,8 @@ struct SDKServiceDescriptor {
 
 /*
  * Hardware qualification flavor. WebP, FLAC, Ogg Vorbis, WebM
- * (VP8/VP9 + Opus/Vorbis) and MPEG-2 (Program Stream and Matroska, with
- * AC-3/LPCM/MP2) are implemented but stay unadvertised in release
+ * (VP8/VP9 + Opus/Vorbis) and MPEG-2 Program Stream (with AC-3/LPCM/MP2)
+ * are implemented but stay unadvertised in release
  * firmware until they pass physical Z2/Z3 qualification. A firmware built
  * with EXTRA_CFLAGS=-DZZ9000_QUALIFY_UNADVERTISED advertises their service
  * flags so the shipped clients exercise them on real hardware. Never
