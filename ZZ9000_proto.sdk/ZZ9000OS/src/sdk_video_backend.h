@@ -59,6 +59,12 @@ struct SDKVideoDecodedFrame {
 #define SDK_VIDEO_MEDIA_FLAG_REBASED       (1U << 4)
 #define SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE    (1U << 5)
 
+/* DECODE flag (the media session's SKIP_TO_KEYFRAME): video is late. WebM
+ * drops blocks up to the next keyframe; the MPEG Program Stream backend
+ * skips B-pictures, which no other picture references, until it returns a
+ * reference picture. */
+#define SDK_VIDEO_DECODE_SKIP_LATE (1U << 0)
+
 /* Picture structure reported per decoded frame (U11). TFF/BFF mirror the
  * MPEG-2 picture header; FIELD_PICTURE means field-coded (interlaced
  * picture structure); REPEAT_FIRST_FIELD carries the cadence bit. */
@@ -130,7 +136,8 @@ struct SDKVideoDecoderOps {
 	int (*get_media_info)(
 		void *decoder, struct SDKVideoMediaInfo *info);
 	int (*ack_media)(void *decoder, uint64_t acknowledged);
-	/* Optional. DECODE command flags; NULL ignores them. */
+	/* Optional. DECODE command flags (SDK_VIDEO_DECODE_SKIP_LATE), passed
+	 * before every decode; NULL ignores them. */
 	void (*set_decode_flags)(void *decoder, uint32_t flags);
 	/* Optional. Coded sizes the backend will decode, checked at session
 	 * begin; a refusal is UNSUPPORTED (the stream is valid, this card

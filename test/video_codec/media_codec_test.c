@@ -1070,6 +1070,75 @@ static int test_junk_before_final_mp2_frame(void)
 	return result;
 }
 
+/* With SKIP_LATE on every decode, B-pictures go undecoded: fewer frames
+ * come back, each still at its own slot on the clock (gaps are whole
+ * frame periods, some spanning the skipped B-pictures), and the audio is
+ * untouched. */
+static int test_late_skip_drops_b_pictures(void)
+{
+	const struct SDKVideoDecoderOps *ops = sdk_video_backend_find(1U, 1U);
+	struct SDKVideoMediaConfig config;
+	struct SDKVideoMediaInfo media;
+	struct SDKVideoDecodedFrame frame;
+	uint64_t last_pts = SDK_VIDEO_MEDIA_NO_PTS;
+	uint32_t accepted = 0U;
+	uint32_t frames = 0U;
+	uint32_t wide_gaps = 0U;
+	uint32_t guard = 0U;
+	void *decoder;
+	int result = SDK_VIDEO_BACKEND_PROGRESS;
+
+	if (!ops || !ops->set_decode_flags)
+		return 1;
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 2;
+	memset(&config, 0, sizeof(config));
+	config.audio_codec = SDK_VIDEO_MEDIA_AUDIO_MP2;
+	config.pcm_ring = pcm_ring;
+	config.pcm_ring_capacity = sizeof(pcm_ring);
+	config.pcm_low_water_bytes = 4608U;
+	config.pcm_high_water_bytes = sizeof(pcm_ring);
+	if (!ops->configure_media(decoder, &config) ||
+	    ops->write(decoder, zz9k_mpeg1_mp2_ps_fixture,
+	               zz9k_mpeg1_mp2_ps_fixture_len, 1, &accepted) !=
+	        SDK_VIDEO_BACKEND_WRITE_OK) {
+		ops->destroy(decoder);
+		return 3;
+	}
+	while (result != SDK_VIDEO_BACKEND_DONE && guard++ < 1000U) {
+		ops->set_decode_flags(decoder, SDK_VIDEO_DECODE_SKIP_LATE);
+		result = ops->decode(decoder, &frame);
+		if (result == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 4;
+		}
+		if (result != SDK_VIDEO_BACKEND_FRAME)
+			continue;
+		if (last_pts != SDK_VIDEO_MEDIA_NO_PTS) {
+			uint64_t gap = frame.media_pts - last_pts;
+
+			if (frame.media_pts <= last_pts || gap % 3600U != 0U) {
+				ops->destroy(decoder);
+				return 5;
+			}
+			if (gap > 3600U)
+				wide_gaps++;
+		}
+		last_pts = frame.media_pts;
+		frames++;
+	}
+	if (result != SDK_VIDEO_BACKEND_DONE || frames == 0U ||
+	    frames >= 12U || wide_gaps == 0U || last_pts > 39600U ||
+	    !ops->get_media_info(decoder, &media) ||
+	    media.pcm_produced != 73728U) {
+		ops->destroy(decoder);
+		return 6;
+	}
+	ops->destroy(decoder);
+	return 0;
+}
+
 /* Input the decoder has no room for is refused whole (BACKPRESSURE, none
  * taken), and decoding makes room again. */
 static int test_compressed_input_backpressure_is_recoverable(void)
@@ -1211,6 +1280,9 @@ int main(void)
 	result = test_junk_before_final_mp2_frame();
 	if (result != 0)
 		return 160 + result;
+	result = test_late_skip_drops_b_pictures();
+	if (result != 0)
+		return 170 + result;
 	printf("media fixture: frames=%lu rate=%lu pcm=%llu "
 	       "video=%016llx pcm=%016llx vpts=%llu..%llu "
 	       "apts=%llu..%llu tail=%llu\n",

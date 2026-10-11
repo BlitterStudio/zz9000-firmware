@@ -143,6 +143,8 @@ struct sdk_video_mpeg2 {
 	uint32_t unclocked_rate;
 	uint8_t video_origin_seen;
 	uint8_t video_seen;          /* a video PES reached libmpeg2 */
+	uint8_t skip_late;           /* this decode skips B-pictures */
+	uint32_t skipped_media_flags; /* timeline events of skipped pictures */
 	uint8_t mpeg1;
 	uint8_t failed;
 };
@@ -826,58 +828,71 @@ static void picture_timestamps(const struct sdk_video_mpeg2 *d,
 	}
 }
 
+/* Advance the video clock one picture (its display fields) and let a
+ * tagged picture's raw PTS anchor it, exactly like the MPEG-1 backend:
+ * observing raw PTS alone freezes the reported clock for up to the 1 s
+ * discontinuity window, and a player pacing against that sees the picture
+ * jump in ~1 s steps. Returns the picture's media time. */
+static uint64_t clock_picture(struct sdk_video_mpeg2 *d,
+                              const mpeg2_picture_t *picture,
+                              uint64_t *raw_pts, uint64_t *raw_dts,
+                              uint32_t *timeline_flags)
+{
+	struct SDKMediaTimelineResult result;
+	uint64_t media_pts = M2_NO_PTS;
+	uint32_t fields = picture_display_fields(picture);
+	uint64_t step_units = (uint64_t)(fields < 2U ? 2U : fields) * 500U;
+	uint32_t per_second = d->frame_rate_milli != 0U
+		? d->frame_rate_milli : 25000U;
+
+	picture_timestamps(d, picture, raw_pts, raw_dts);
+	d->video_frames++;
+	if (!d->media_configured ||
+	    !sdk_media_timeline_map(&d->timeline, SDK_MEDIA_TIMELINE_VIDEO,
+	                            SDK_MEDIA_TIMELINE_NO_PTS, step_units,
+	                            per_second, &result))
+		return M2_NO_PTS;
+	{
+		uint64_t origin = result.origin != SDK_MEDIA_TIMELINE_NO_PTS
+			? result.origin : 0U;
+
+		/* Before the first PTS the derived clock starts at 0; the
+		 * first tagged picture re-anchors it below. */
+		if (result.pts >= origin)
+			media_pts = result.pts - origin;
+	}
+	*timeline_flags |= timeline_media_flags(result.flags);
+	if (*raw_pts != M2_NO_PTS &&
+	    sdk_media_timeline_observe_ordered(&d->timeline,
+	                                       SDK_MEDIA_TIMELINE_VIDEO,
+	                                       *raw_pts, &result)) {
+		*timeline_flags |= timeline_media_flags(result.flags);
+		if (result.pts >= result.origin)
+			media_pts = result.pts - result.origin;
+	}
+	return media_pts;
+}
+
 static void fill_frame(struct sdk_video_mpeg2 *d,
                        const mpeg2_info_t *info,
                        struct SDKVideoDecodedFrame *frame)
 {
 	const mpeg2_picture_t *picture = info->display_picture;
-	struct SDKMediaTimelineResult result;
 	uint64_t raw_pts;
 	uint64_t raw_dts;
-	uint64_t media_pts = M2_NO_PTS;
-	uint32_t timeline_flags = 0U;
+	uint64_t media_pts;
+	uint32_t timeline_flags = d->skipped_media_flags;
 	uint32_t ms_per_frame = d->frame_rate_milli != 0U
 		? (1000000U + d->frame_rate_milli / 2U) /
 			d->frame_rate_milli
 		: 40U;
+	/* Time of this picture's slot: pictures counted before it, skipped
+	 * ones included. */
+	uint32_t time_millis = d->video_frames * ms_per_frame / 1000U;
 
-	picture_timestamps(d, picture, &raw_pts, &raw_dts);
-	if (d->media_configured) {
-		/* Advance the timeline one display frame per picture and let a
-		 * tagged picture's raw PTS anchor it, exactly like the MPEG-1
-		 * backend: observing raw PTS alone freezes the reported clock
-		 * for up to the 1 s discontinuity window, and a player pacing
-		 * against that sees the picture jump in ~1 s steps. */
-		uint32_t fields = picture_display_fields(picture);
-		uint64_t step_units = (uint64_t)(fields < 2U ? 2U : fields) *
-		                      500U;
-		uint32_t per_second = d->frame_rate_milli != 0U
-			? d->frame_rate_milli : 25000U;
-
-		if (sdk_media_timeline_map(&d->timeline,
-		                           SDK_MEDIA_TIMELINE_VIDEO,
-		                           SDK_MEDIA_TIMELINE_NO_PTS,
-		                           step_units, per_second, &result)) {
-			uint64_t origin =
-				result.origin != SDK_MEDIA_TIMELINE_NO_PTS
-					? result.origin : 0U;
-
-			/* Before the first PTS the derived clock starts at 0;
-			 * the first tagged picture re-anchors it below. */
-			if (result.pts >= origin)
-				media_pts = result.pts - origin;
-			timeline_flags |= timeline_media_flags(result.flags);
-			if (raw_pts != M2_NO_PTS &&
-			    sdk_media_timeline_observe_ordered(
-				    &d->timeline, SDK_MEDIA_TIMELINE_VIDEO,
-				    raw_pts, &result)) {
-				timeline_flags |=
-					timeline_media_flags(result.flags);
-				if (result.pts >= result.origin)
-					media_pts = result.pts - result.origin;
-			}
-		}
-	}
+	media_pts = clock_picture(d, picture, &raw_pts, &raw_dts,
+	                          &timeline_flags);
+	d->skipped_media_flags = 0U;
 	memset(frame, 0, sizeof(*frame));
 	frame->width = d->width;
 	frame->height = d->height;
@@ -886,14 +901,30 @@ static void fill_frame(struct sdk_video_mpeg2 *d,
 	frame->y = info->display_fbuf->buf[0];
 	frame->cb = info->display_fbuf->buf[1];
 	frame->cr = info->display_fbuf->buf[2];
-	frame->time_millis = d->video_frames * ms_per_frame / 1000U;
+	frame->time_millis = time_millis;
 	frame->media_pts = media_pts;
 	frame->raw_pts = raw_pts;
 	frame->raw_dts = raw_dts;
 	frame->media_flags = timeline_flags;
 	frame->picture_flags = picture_flags_of(picture);
 	frame->display_fields = picture_display_fields(picture);
-	d->video_frames++;
+}
+
+/* A picture libmpeg2 skipped (a late B-picture): its slot passes on the
+ * clock, and its timeline events ride on the next frame returned. */
+static void skip_picture(struct sdk_video_mpeg2 *d, const mpeg2_info_t *info)
+{
+	uint64_t raw_pts;
+	uint64_t raw_dts;
+
+	(void)clock_picture(d, info->display_picture, &raw_pts, &raw_dts,
+	                    &d->skipped_media_flags);
+}
+
+static int picture_skipped(const mpeg2_info_t *info)
+{
+	return info->display_picture &&
+	       (info->display_picture->flags & PIC_FLAG_SKIP) != 0U;
 }
 
 static int demux_drained(const struct sdk_video_mpeg2 *d)
@@ -927,6 +958,16 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 			d->frame_rate_milli = milli_from_period(
 				info->sequence->frame_period);
 			break;
+		case STATE_PICTURE:
+			/* Late video: B-pictures go undecoded (no picture
+			 * predicts from them) until a reference picture is
+			 * returned; set per picture, both fields alike. */
+			mpeg2_skip(d->decoder,
+			           d->skip_late && info->current_picture &&
+			           (info->current_picture->flags &
+			            PIC_MASK_CODING_TYPE) ==
+			                   PIC_FLAG_CODING_TYPE_B);
+			break;
 		case STATE_SLICE:
 		case STATE_SLICE_1ST:
 			if (info->display_fbuf) {
@@ -934,8 +975,12 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 					d->failed = 1U;
 					return -1;
 				}
-				fill_frame(d, info, out_frame);
-				got_frame = 1;
+				if (picture_skipped(info)) {
+					skip_picture(d, info);
+				} else {
+					fill_frame(d, info, out_frame);
+					got_frame = 1;
+				}
 			}
 			break;
 		case STATE_END:
@@ -944,8 +989,12 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 			if (state == STATE_INVALID_END)
 				d->malformed++;
 			if (info->display_fbuf && d->fbufs_bound) {
-				fill_frame(d, info, out_frame);
-				got_frame = 1;
+				if (picture_skipped(info)) {
+					skip_picture(d, info);
+				} else {
+					fill_frame(d, info, out_frame);
+					got_frame = 1;
+				}
 			}
 			return got_frame ? 1 : 0;
 		case STATE_INVALID:
@@ -1430,6 +1479,16 @@ static int mpeg2_get_media_info(void *decoder,
 	return 1;
 }
 
+/* SDK_VIDEO_DECODE_SKIP_LATE comes with every decode the client wants a
+ * late picture skipped for; the next decode without it decodes all. */
+static void mpeg2_set_decode_flags(void *decoder, uint32_t flags)
+{
+	struct sdk_video_mpeg2 *d = (struct sdk_video_mpeg2 *)decoder;
+
+	if (d)
+		d->skip_late = (flags & SDK_VIDEO_DECODE_SKIP_LATE) != 0U;
+}
+
 static int mpeg2_ack_media(void *decoder, uint64_t acknowledged)
 {
 	struct sdk_video_mpeg2 *d = (struct sdk_video_mpeg2 *)decoder;
@@ -1466,6 +1525,7 @@ static const struct SDKVideoDecoderOps mpeg1_ops = {
 	.configure_media = mpeg2_configure_media,
 	.get_media_info = mpeg2_get_media_info,
 	.ack_media = mpeg2_ack_media,
+	.set_decode_flags = mpeg2_set_decode_flags,
 	.geometry_ok = geometry_ok,
 	.audio_ok = mpeg1_audio_ok,
 };
@@ -1482,6 +1542,7 @@ static const struct SDKVideoDecoderOps mpeg2_ops = {
 	.configure_media = mpeg2_configure_media,
 	.get_media_info = mpeg2_get_media_info,
 	.ack_media = mpeg2_ack_media,
+	.set_decode_flags = mpeg2_set_decode_flags,
 	.geometry_ok = geometry_ok,
 	.audio_ok = mpeg2_audio_ok,
 };

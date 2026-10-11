@@ -804,7 +804,11 @@ up to 800&times;600; a larger `width` or `height` fails at Begin with
 `ZZ9K_STATUS_UNSUPPORTED`. Frames carry the picture size; plane pitches are
 the macroblock-rounded coded width. MPEG-1 sessions take audio
 `ZZ9K_MEDIA_AUDIO_NONE` or `ZZ9K_MEDIA_AUDIO_MP2`, MPEG-2 sessions also LPCM
-and AC-3.
+and AC-3. For these sessions `ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME` skips
+B-pictures (no other picture predicts from them) until the decode returns a
+reference picture; skipped pictures still advance the video clock, so a
+client that discarded a late frame can catch up without decoding pictures
+it would discard too.
 
 **WebM sessions** (`ZZ9K_VIDEO_CONTAINER_WEBM` with `ZZ9K_VIDEO_CODEC_VP8` or
 `ZZ9K_VIDEO_CODEC_VP9`, and audio `ZZ9K_MEDIA_AUDIO_NONE`,
