@@ -1615,7 +1615,9 @@ static uint64_t zzplay_audio_prebuffer_target_frames(
   } else if (runtime->container.audio_codec == ZZ9K_MEDIA_AUDIO_AC3) {
     unit_frames = 1536U;
   }
-  if (unit_frames > 1U) {
+  /* Whole codec frames, so the lead can actually be reached; a target
+   * smaller than one frame stays as it is rather than becoming zero. */
+  if (unit_frames > 1U && target >= unit_frames) {
     target -= target % unit_frames;
   }
   return target;
