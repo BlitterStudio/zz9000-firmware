@@ -217,6 +217,9 @@ struct ZZPlayRuntime {
   uint8_t audio_enabled;
   uint8_t audio_prepared;
   uint8_t audio_started;
+  /* AX may fall back after the first picture was admitted. Keep that
+   * admission pending until the prepared AHI sink has a real request. */
+  uint8_t audio_start_pending;
   uint8_t audio_status_known;
   uint8_t audio_refresh_needed;
   uint8_t audio_totals_captured;
@@ -568,6 +571,8 @@ static int zzplay_release_resource(void *user, ZZPlayResource resource);
 static const char *zzplay_audio_backend_name(ZZPlayAudioBackend backend);
 static uint32_t zzplay_pcm_low_water(uint32_t capacity);
 static uint32_t zzplay_pcm_high_water(uint32_t capacity);
+static int zzplay_audio_pump(struct ZZPlayRuntime *runtime,
+                             int flush_tail, int refresh_status);
 static int zzplay_engine_service_input(struct ZZPlayRuntime *runtime,
                                        int *resized);
 static void zzplay_engine_stop_from_request(
@@ -1864,17 +1869,32 @@ static int zzplay_audio_fallback_to_ahi(
       runtime, &runtime->audio_result);
 }
 
-static int zzplay_audio_start(struct ZZPlayRuntime *runtime)
+static int zzplay_audio_start(struct ZZPlayRuntime *runtime, int flush_tail)
 {
   int status;
 
   if (runtime->audio_backend == ZZPLAY_AUDIO_AX) {
     status = zzplay_ax_play(&runtime->ax);
-    if (status != ZZ9K_STATUS_OK) {
-      return zzplay_audio_fallback_to_ahi(runtime, status);
+    if (status == ZZ9K_STATUS_OK) {
+      runtime->audio_result = runtime->ax.audio;
+      runtime->audio_started = 1U;
+      return ZZ9K_STATUS_OK;
     }
-    runtime->audio_result = runtime->ax.audio;
-    runtime->audio_started = 1U;
+    status = zzplay_audio_fallback_to_ahi(runtime, status);
+    if (status != ZZ9K_STATUS_OK) {
+      return status;
+    }
+    /* AX owns the card-side pre-roll, not the newly prepared AHI requests.
+     * Move the current PCM ring into AHI before trying to start it. */
+    status = zzplay_audio_pump(runtime, flush_tail, 0);
+    if (status != ZZ9K_STATUS_OK) {
+      return status;
+    }
+    if (runtime->ahi.clock.queued_frames == 0U) {
+      return ZZ9K_STATUS_OK;
+    }
+  }
+  if (runtime->ahi.clock.queued_frames == 0U) {
     return ZZ9K_STATUS_OK;
   }
   if (!zzplay_ahi_play(&runtime->ahi)) {
@@ -1883,6 +1903,7 @@ static int zzplay_audio_start(struct ZZPlayRuntime *runtime)
   zzplay_audio_clock_start_presentation(
       &runtime->ahi.clock, zzplay_now_us());
   runtime->audio_started = 1U;
+  runtime->audio_start_pending = 0U;
   return ZZ9K_STATUS_OK;
 }
 
@@ -2168,7 +2189,7 @@ static int zzplay_audio_preroll_expired(
 static int zzplay_audio_start_if_ready(
     struct ZZPlayRuntime *runtime,
     const ZZ9KMediaSessionMainResult *result, int input_ended,
-    int no_more_pictures, int *pending_start)
+    int no_more_pictures, int defer_start, int *pending_start)
 {
   uint64_t queued_audio_frames;
   int status;
@@ -2204,7 +2225,13 @@ static int zzplay_audio_start_if_ready(
       return ZZ9K_STATUS_OK;
     }
   }
-  status = zzplay_audio_start(runtime);
+  if (defer_start) {
+    if (pending_start) {
+      *pending_start = 1;
+    }
+    return ZZ9K_STATUS_OK;
+  }
+  status = zzplay_audio_start(runtime, input_ended);
   if (status == ZZ9K_STATUS_OK && !runtime->audio_started &&
       pending_start) {
     *pending_start = 1;
@@ -2223,7 +2250,7 @@ static int zzplay_audio_start_if_decoder_blocked(
   }
   return zzplay_audio_start_if_ready(
       runtime, 0, input_ended,
-      zzplay_audio_pts_bypass_allowed(0, 1), 0);
+      zzplay_audio_pts_bypass_allowed(0, 1), 0, 0);
 }
 
 static int zzplay_retire_held_frame(
@@ -2242,16 +2269,13 @@ static int zzplay_retire_held_frame(
 
   *retired = 0;
   status = zzplay_audio_start_if_ready(
-      runtime, result, input_ended, 0, &pending_start);
+      runtime, result, input_ended, 0, 1, &pending_start);
   if (status != ZZ9K_STATUS_OK) {
     return status;
   }
-  if (pending_start) {
-    return ZZ9K_STATUS_OK;
-  }
-  /* The audio clock was just made live for this held picture. Present it
-   * before measuring drift so bind/preconvert time cannot discard frame one. */
-  if (!audio_was_started && runtime->audio_started) {
+  /* A ready held frame must be physically presented before programme audio
+   * is allowed to retire. This keeps the first master timestamp at zero. */
+  if (pending_start || (!audio_was_started && runtime->audio_started)) {
     decision = ZZPLAY_SYNC_PRESENT;
   } else if (!runtime->options.uncapped && runtime->audio_enabled &&
              runtime->audio_started &&
@@ -2329,6 +2353,18 @@ static int zzplay_retire_held_frame(
     zzplay_wait_us(&runtime->timer, ZZPLAY_SYNC_POLL_US);
     return ZZ9K_STATUS_OK;
   }
+  if (status == ZZ9K_STATUS_OK && pending_start) {
+    int start_pending;
+
+    /* The first picture is on screen. Its PTS passed admission above, so a
+     * subsequent decoder result cannot postpone its output start. */
+    status = zzplay_audio_start_if_ready(
+        runtime, 0, input_ended, 1, 0, &start_pending);
+    if (status != ZZ9K_STATUS_OK) {
+      return status;
+    }
+    runtime->audio_start_pending = (uint8_t)start_pending;
+  }
   if (status == ZZ9K_STATUS_OK) {
     *retired = 1;
   }
@@ -2371,7 +2407,7 @@ static int zzplay_drain_audio(struct ZZPlayRuntime *runtime)
       }
       if (!runtime->audio_started &&
           zzplay_audio_prebuffered_frames(runtime) != 0U) {
-        status = zzplay_audio_start(runtime);
+        status = zzplay_audio_start(runtime, 1);
         if (status != ZZ9K_STATUS_OK) {
           return status;
         }
@@ -2417,7 +2453,7 @@ static int zzplay_drain_audio(struct ZZPlayRuntime *runtime)
     }
     if (!runtime->audio_started && runtime->audio_prepared &&
         runtime->ahi.clock.queued_frames != 0U) {
-      int start_status = zzplay_audio_start(runtime);
+      int start_status = zzplay_audio_start(runtime, 1);
 
       if (start_status != ZZ9K_STATUS_OK) {
         return start_status;
@@ -2431,7 +2467,7 @@ static int zzplay_drain_audio(struct ZZPlayRuntime *runtime)
           return ZZ9K_STATUS_OK;
         }
         {
-          int start_status = zzplay_audio_start(runtime);
+          int start_status = zzplay_audio_start(runtime, 1);
 
           if (start_status != ZZ9K_STATUS_OK) {
             return start_status;
@@ -2629,6 +2665,7 @@ static int zzplay_begin_session(struct ZZPlayRuntime *runtime)
   runtime->audio_origin_pts = ZZ9K_MEDIA_NO_PTS;
   runtime->audio_prepared = 0U;
   runtime->audio_started = 0U;
+  runtime->audio_start_pending = 0U;
   runtime->audio_status_known = 0U;
   runtime->audio_refresh_needed = runtime->audio_enabled;
   runtime->audio_totals_captured = 0U;
@@ -3671,7 +3708,7 @@ playback_session:
       continue;
     }
     cleanup_status = zzplay_audio_pump(
-        &runtime, 0, runtime.audio_refresh_needed);
+        &runtime, transport.eof_sent, runtime.audio_refresh_needed);
     if (cleanup_status != ZZ9K_STATUS_OK) {
       zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
               zz9k_status_name(cleanup_status));
@@ -3679,10 +3716,26 @@ playback_session:
       break;
     }
     runtime.audio_refresh_needed = 0U;
+    if (runtime.audio_start_pending) {
+      /* A fallback's admitted AX lead can be shorter than one AHI period.
+       * It is still sufficient for the first request: submit the short
+       * request now rather than withholding all further card progress. */
+      cleanup_status = zzplay_audio_pump(&runtime, 1, 0);
+      if (cleanup_status == ZZ9K_STATUS_OK) {
+        cleanup_status = zzplay_audio_start(
+            &runtime, transport.eof_sent);
+      }
+      if (cleanup_status != ZZ9K_STATUS_OK) {
+        zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
+                zz9k_status_name(cleanup_status));
+        zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        break;
+      }
+    }
     if (!runtime.frame_held) {
       cleanup_status = zzplay_audio_start_if_ready(
           &runtime, 0, transport.eof_sent,
-          zzplay_audio_pts_bypass_allowed(media_done, 0), 0);
+          zzplay_audio_pts_bypass_allowed(media_done, 0), 0, 0);
       if (cleanup_status != ZZ9K_STATUS_OK) {
         zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
                 zz9k_status_name(cleanup_status));
@@ -3706,6 +3759,12 @@ playback_session:
     }
 
     if (runtime.frame_held) {
+      /* Continue writing/decoding until an empty fallback ring has PCM, but
+       * never present a second picture before that admitted start succeeds. */
+      if (runtime.audio_start_pending) {
+        zzplay_wait_us(&runtime.timer, ZZPLAY_SYNC_POLL_US);
+        continue;
+      }
       int retired;
 
       cleanup_status = zzplay_retire_held_frame(
