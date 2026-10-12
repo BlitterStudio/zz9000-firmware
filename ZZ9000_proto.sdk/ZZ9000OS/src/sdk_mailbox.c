@@ -4427,6 +4427,12 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session,
 	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP, source_rate);
 	audio_fabric_producer_gain_set(AUDIO_FABRIC_SLOT_PUMP,
 		AUDIO_FABRIC_GAIN_UNITY);
+	/* The pump slot remains frozen through setup. Publish the source now
+	 * so an initial media preconvert fill can reserve every available
+	 * period before go_live exposes the output clock. */
+	g_audio_playback.source_kind = source_kind;
+	g_audio_playback.paused = 0U;
+	g_audio_playback.session = session;
 	if (source_kind == AUDIO_PUMP_SOURCE_MEDIA) {
 		struct SDKMediaAudioSource media_source;
 
@@ -4489,16 +4495,13 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session,
 	 * double-counted) -- the same guard the lease-submit path applies. */
 	if (!audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP))
 		audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
-	g_audio_playback.source_kind = source_kind;
-	g_audio_playback.paused = 0U;
 	/* Name the output source for metering (R8) before the session
 	 * goes live. */
 	audio_scene_meter_output_identity(
 		audio_pump_meter_identity(source_kind));
-	/* Publish the session, then the slot: the next audio IRQ may now
-	 * stage PCM. */
+	/* The initial media preconvert fill completed while this slot was
+	 * frozen; now the next audio IRQ may stage its already-prepared PCM. */
 	__asm__ __volatile__("" ::: "memory");
-	g_audio_playback.session = session;
 	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
 }
 
