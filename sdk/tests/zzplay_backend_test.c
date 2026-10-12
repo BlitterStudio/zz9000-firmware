@@ -178,18 +178,20 @@ static int check_ps_audio_policy(void)
 
 static int check_audio_start_prebuffer(void)
 {
-  if (zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AHI, 0U, 9600U) ||
-      zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AHI, 4800U, 9600U) ||
-      zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AHI, 9600U, 0U) ||
-      !zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AHI, 9600U, 9600U) ||
-      !zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AHI, 12000U, 9600U) ||
-      !zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AX, 1U, 0U)) {
+  if (zzplay_audio_start_ready(0U, 9600U, 24000U, 0, 0, 0) ||
+      zzplay_audio_start_ready(4800U, 9600U, 24000U, 0, 0, 0) ||
+      zzplay_audio_start_ready(9600U, 0U, 24000U, 0, 0, 0) ||
+      !zzplay_audio_start_ready(9600U, 9600U, 24000U, 0, 0, 0) ||
+      !zzplay_audio_start_ready(12000U, 9600U, 24000U, 0, 0, 0) ||
+      zzplay_audio_start_ready(5999U, 9600U, 6000U, 0, 0, 0) ||
+      !zzplay_audio_start_ready(6000U, 9600U, 6000U, 0, 0, 0) ||
+      !zzplay_audio_start_ready(5760U, 6144U, 6144U, 1, 0, 0) ||
+      !zzplay_audio_start_ready(4800U, 9600U, 24000U, 0, 1, 0) ||
+      !zzplay_audio_start_ready(4800U, 9600U, 24000U, 0, 0, 1) ||
+      zzplay_audio_start_ready(0U, 9600U, 24000U, 1, 1, 1) ||
+      zzplay_audio_pts_bypass_allowed(0, 0) ||
+      !zzplay_audio_pts_bypass_allowed(1, 0) ||
+      !zzplay_audio_pts_bypass_allowed(0, 1)) {
     return 0;
   }
   return 1;

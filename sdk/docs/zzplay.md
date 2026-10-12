@@ -60,6 +60,14 @@ and after a late frame the card skips B-pictures, which no other picture
 depends on, until it returns the next reference picture. Their audio is not
 affected.
 
+Before a video starts, ZZPlay opens its window on the first picture and
+waits until 200 ms of sound is decoded (less when the audio buffer is
+smaller, as on Zorro II), so the first seconds play without gaps. For MPEG
+files it first hands the card up to 1 MiB of the file, which fills the
+card's read-ahead before the clock starts instead of during the first
+frames. Either wait gives up after a second, and a short clip starts with
+what it has.
+
 ZZPlay keeps its formats in one registry, so support for further formats is
 added as the card's decoders grow; the *About* requester lists what the
 installed version plays.

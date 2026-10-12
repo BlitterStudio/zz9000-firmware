@@ -67,6 +67,11 @@
  * clock, so a pass stays bounded; 128 KB a pass is 3.2 MB/s at 25 fps,
  * well above DVD's 9.8 Mbit/s. */
 #define ZZPLAY_FEED_BYTES_PER_PASS (128U * 1024U)
+/* MPEG/PS WRITE parses PES packets and fills the card's 1 MiB video FIFO.
+ * Do that one-off burst before the audio clock begins, not between its first
+ * pictures. The deadline also bounds a slow disk or Zorro 2 startup. */
+#define ZZPLAY_PREROLL_INPUT_BYTES (1024U * 1024U)
+#define ZZPLAY_PREROLL_DEADLINE_US 1000000U
 #define ZZPLAY_PCM_BYTES (128U * 1024U)
 #define ZZPLAY_Z2_INPUT_BYTES (24U * 1024U)
 #define ZZPLAY_Z2_PCM_BYTES (32U * 1024U)
@@ -181,6 +186,7 @@ struct ZZPlayRuntime {
   uint32_t completed_loops;
   uint64_t audio_origin_pts;
   uint64_t final_audio_frames;
+  TimeVal_Type audio_preroll_started;
   /* Per-item playback trace (diagnostics; --trace). dos.library
    * BPTR with one unbuffered Write() per line: diagnostics must not
    * take the player down with them, and partial data has to survive
@@ -214,6 +220,8 @@ struct ZZPlayRuntime {
   uint8_t audio_status_known;
   uint8_t audio_refresh_needed;
   uint8_t audio_totals_captured;
+  uint8_t audio_preroll_timing;
+  uint8_t audio_preroll_backpressure;
   uint8_t frame_held;
   uint32_t discard_run;  /* late frames discarded since one was shown */
   uint8_t pip_open_failed;
@@ -558,6 +566,8 @@ static uint32_t zzplay_elapsed_us(const TimeVal_Type *start,
 /* Defined further down; the window and drain helpers below need them. */
 static int zzplay_release_resource(void *user, ZZPlayResource resource);
 static const char *zzplay_audio_backend_name(ZZPlayAudioBackend backend);
+static uint32_t zzplay_pcm_low_water(uint32_t capacity);
+static uint32_t zzplay_pcm_high_water(uint32_t capacity);
 static int zzplay_engine_service_input(struct ZZPlayRuntime *runtime,
                                        int *resized);
 static void zzplay_engine_stop_from_request(
@@ -1310,6 +1320,7 @@ static void zzplay_update_title(struct ZZPlayRuntime *runtime)
        runtime->decode_skip) {
      flags = ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME;
    }
+   memset(result, 0, sizeof(*result));
    status = zz9k_media_session_decode(
        runtime->ctx, runtime->session, flags, result);
    if (status == ZZ9K_STATUS_OK &&
@@ -1542,6 +1553,63 @@ static uint64_t zzplay_audio_prebuffered_frames(
              : (runtime->audio_result.pcm_produced -
                 runtime->audio_result.pcm_acknowledged) /
                    frame_bytes;
+}
+/* AX holds this lead in the session PCM ring until it binds; AHI moves it
+ * into its two output requests first. The configured high-water mark bounds
+ * the lead on compact rings, so pre-roll cannot stall waiting for capacity. */
+static uint64_t zzplay_audio_prebuffer_high_water_frames(
+    const struct ZZPlayRuntime *runtime)
+{
+  uint32_t frame_bytes;
+
+  if (!runtime || !runtime->audio_prepared) {
+    return 0U;
+  }
+  frame_bytes = runtime->audio_result.channels * 2U;
+  return frame_bytes == 0U
+             ? 0U
+             : zzplay_pcm_high_water(runtime->pcm_ring.capacity) /
+                   frame_bytes;
+}
+
+static uint64_t zzplay_audio_prebuffer_target_frames(
+    const struct ZZPlayRuntime *runtime)
+{
+  uint64_t target;
+  uint64_t high_water;
+  uint32_t unit_frames = 1U;
+
+  if (!runtime || !runtime->audio_prepared ||
+      runtime->audio_result.sample_rate == 0U) {
+    return 0U;
+  }
+  target = (uint64_t)(runtime->audio_result.sample_rate /
+                      ZZPLAY_AHI_PERIODS_PER_SECOND) *
+           ZZPLAY_AHI_BUFFER_COUNT;
+  high_water = zzplay_audio_prebuffer_high_water_frames(runtime);
+  if (target > high_water) {
+    target = high_water;
+  }
+  if (runtime->container.container == ZZ9K_VIDEO_CONTAINER_WEBM) {
+    uint32_t frame_bytes = runtime->audio_result.channels * 2U;
+    uint64_t reachable = frame_bytes == 0U
+                             ? 0U
+                             : zzplay_pcm_low_water(runtime->pcm_ring.capacity) /
+                                   frame_bytes;
+
+    if (target > reachable) {
+      target = reachable;
+    }
+  }
+  if (runtime->container.audio_codec == ZZ9K_MEDIA_AUDIO_MP2) {
+    unit_frames = 1152U;
+  } else if (runtime->container.audio_codec == ZZ9K_MEDIA_AUDIO_AC3) {
+    unit_frames = 1536U;
+  }
+  if (unit_frames > 1U) {
+    target -= target % unit_frames;
+  }
+  return target;
 }
 
 static uint64_t zzplay_audio_queued_frames(
@@ -1872,10 +1940,43 @@ static int zzplay_toggle_pause(struct ZZPlayRuntime *runtime)
     if (!zzplay_core_resume(&runtime->core)) {
       return ZZ9K_STATUS_INTERNAL_ERROR;
     }
+    if (!runtime->audio_started && runtime->audio_enabled) {
+      runtime->audio_preroll_timing = 1U;
+      GetSysTime(&runtime->audio_preroll_started);
+    }
     zzplay_info("zzplay: resumed\n");
     return ZZ9K_STATUS_OK;
   }
   return ZZ9K_STATUS_BAD_REQUEST;
+}
+static int zzplay_audio_current_backpressure(
+    struct ZZPlayRuntime *runtime, int *backpressured)
+{
+  ZZ9KMediaSessionStatusResult status_result;
+  int status;
+
+  *backpressured = 0;
+  if (!runtime->audio_enabled || runtime->audio_started) {
+    return ZZ9K_STATUS_OK;
+  }
+  /* STATUS_AUDIO observes the decoder's ring state without acknowledging
+   * PCM. AUDIO_READ would clear WebM backpressure before this decision. */
+  status = zz9k_media_session_status(
+      runtime->ctx, runtime->session, ZZ9K_MEDIA_STATUS_AUDIO,
+      0U, &status_result);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  if (status_result.session != runtime->session ||
+      status_result.page != ZZ9K_MEDIA_STATUS_AUDIO) {
+    return ZZ9K_STATUS_INTERNAL_ERROR;
+  }
+  *backpressured =
+      (status_result.flags & ZZ9K_MEDIA_SESSION_RESULT_BACKPRESSURE) != 0U;
+  if (*backpressured) {
+    runtime->audio_preroll_backpressure = 1U;
+  }
+  return ZZ9K_STATUS_OK;
 }
 
 static int zzplay_audio_pump(struct ZZPlayRuntime *runtime,
@@ -1926,6 +2027,9 @@ static int zzplay_audio_pump(struct ZZPlayRuntime *runtime,
       return ZZ9K_STATUS_INTERNAL_ERROR;
     }
     runtime->audio_result = audio;
+    if ((audio.flags & ZZ9K_MEDIA_SESSION_RESULT_BACKPRESSURE) != 0U) {
+      runtime->audio_preroll_backpressure = 1U;
+    }
     runtime->audio_status_known = 1U;
   }
   status = zzplay_audio_prepare_from_result(
@@ -1993,9 +2097,32 @@ static int zzplay_audio_pump(struct ZZPlayRuntime *runtime,
       return ZZ9K_STATUS_INTERNAL_ERROR;
     }
     runtime->audio_result = audio;
+    if ((audio.flags & ZZ9K_MEDIA_SESSION_RESULT_BACKPRESSURE) != 0U) {
+      runtime->audio_preroll_backpressure = 1U;
+    }
     runtime->audio_status_known = 1U;
   }
   return ZZ9K_STATUS_OK;
+}
+
+/* AHI can stage PCM into a free request before its presentation clock starts.
+ * Only a pressure state that survives that staging requires an early start. */
+static int zzplay_audio_recheck_decoder_backpressure(
+    struct ZZPlayRuntime *runtime, int decoder_backpressured,
+    int *still_backpressured)
+{
+  int status;
+
+  *still_backpressured = decoder_backpressured;
+  if (!decoder_backpressured ||
+      runtime->audio_backend != ZZPLAY_AUDIO_AHI || runtime->audio_started) {
+    return ZZ9K_STATUS_OK;
+  }
+  status = zzplay_audio_pump(runtime, 0, 1);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  return zzplay_audio_current_backpressure(runtime, still_backpressured);
 }
 
 static uint32_t zzplay_sync_wait_us(int64_t drift_pts,
@@ -2020,51 +2147,102 @@ static uint32_t zzplay_sync_wait_us(int64_t drift_pts,
   return ZZPLAY_SYNC_POLL_US;
 }
 
+static int zzplay_audio_preroll_expired(
+    const struct ZZPlayRuntime *runtime)
+{
+  TimeVal_Type now;
+
+  if (!runtime || !runtime->audio_preroll_timing ||
+      runtime->audio_started) {
+    return 0;
+  }
+  GetSysTime(&now);
+  return zzplay_elapsed_us(&runtime->audio_preroll_started, &now) >=
+         ZZPLAY_PREROLL_DEADLINE_US;
+}
+
+static int zzplay_audio_start_if_ready(
+    struct ZZPlayRuntime *runtime,
+    const ZZ9KMediaSessionMainResult *result, int input_ended,
+    int no_more_pictures, int *pending_start)
+{
+  uint64_t queued_audio_frames;
+  int status;
+
+  if (pending_start) {
+    *pending_start = 0;
+  }
+  if (!runtime || runtime->audio_started || !runtime->audio_prepared) {
+    return ZZ9K_STATUS_OK;
+  }
+  queued_audio_frames = zzplay_audio_queued_frames(runtime);
+  if (!zzplay_audio_start_ready(
+          queued_audio_frames,
+          zzplay_audio_prebuffer_target_frames(runtime),
+          zzplay_audio_prebuffer_high_water_frames(runtime),
+          runtime->audio_preroll_backpressure, input_ended,
+          zzplay_audio_preroll_expired(runtime))) {
+    return ZZ9K_STATUS_OK;
+  }
+  if (!runtime->window) {
+    if (!result || !zzplay_ensure_pip(runtime)) {
+      return result ? ZZ9K_STATUS_UNSUPPORTED : ZZ9K_STATUS_OK;
+    }
+  }
+  /* EOF may only mean all bytes are staged in the card's FIFO. Keep its
+   * buffered pictures ordered against the audio origin; callers set
+   * no_more_pictures only when video cannot advance without audio. */
+  if (!no_more_pictures) {
+    if (!result ||
+        !zzplay_sync_audio_may_start(
+            result->video_pts, runtime->audio_origin_pts,
+            runtime->sync_policy.drop_late_pts)) {
+      return ZZ9K_STATUS_OK;
+    }
+  }
+  status = zzplay_audio_start(runtime);
+  if (status == ZZ9K_STATUS_OK && !runtime->audio_started &&
+      pending_start) {
+    *pending_start = 1;
+  }
+  return status;
+}
+
+/* Only the current decode result proves that its PCM ring blocks progress.
+ * Historical pressure still controls the bounded pre-roll size decision. */
+static int zzplay_audio_start_if_decoder_blocked(
+    struct ZZPlayRuntime *runtime, int input_ended,
+    int decoder_backpressured)
+{
+  if (!runtime || !decoder_backpressured) {
+    return ZZ9K_STATUS_OK;
+  }
+  return zzplay_audio_start_if_ready(
+      runtime, 0, input_ended,
+      zzplay_audio_pts_bypass_allowed(0, 1), 0);
+}
+
 static int zzplay_retire_held_frame(
     struct ZZPlayRuntime *runtime,
     ZZ9KMediaSessionMainResult *result,
     uint32_t frame_period_us,
     uint32_t decode_us,
+    int input_ended,
     int *retired)
 {
   ZZPlaySyncDecision decision = ZZPLAY_SYNC_PRESENT;
-  uint64_t queued_audio_frames =
-      zzplay_audio_queued_frames(runtime);
   int64_t drift = 0;
-  int ring_full;
+  int pending_start;
   int status;
 
-  /* A session reporting BACKPRESSURE has a PCM ring nothing is draining.
-   * If audio output has not started yet, waiting longer can only fill the
-   * ring further until video starves behind it, so the start gate is
-   * waived: losing the lead-in sync beats a frozen picture. */
-  ring_full = (runtime->audio_result.flags &
-               ZZ9K_MEDIA_SESSION_RESULT_BACKPRESSURE) != 0U;
-
   *retired = 0;
-  if (!runtime->audio_started && runtime->audio_prepared &&
-      (ring_full ||
-       zzplay_audio_start_ready(
-           runtime->audio_backend, queued_audio_frames,
-           runtime->ahi.clock.queue_limit_frames))) {
-    if (ring_full ||
-        zzplay_sync_audio_may_start(
-            result->video_pts, runtime->audio_origin_pts,
-            runtime->sync_policy.drop_late_pts)) {
-      if (!zzplay_ensure_pip(runtime)) {
-        return ZZ9K_STATUS_UNSUPPORTED;
-      }
-      status = zzplay_audio_start(runtime);
-      if (status != ZZ9K_STATUS_OK) {
-        return status;
-      }
-      if (!runtime->audio_started) {
-        /* AUTO selected AX but ownership was busy. The fallback AHI sink
-         * is prepared now; keep this decoder-owned frame held while the
-         * next loop copies its initial prebuffer. */
-        return ZZ9K_STATUS_OK;
-      }
-    }
+  status = zzplay_audio_start_if_ready(
+      runtime, result, input_ended, 0, &pending_start);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  if (pending_start) {
+    return ZZ9K_STATUS_OK;
   }
   if (!runtime->options.uncapped && runtime->audio_enabled &&
       runtime->audio_started &&
@@ -2445,6 +2623,8 @@ static int zzplay_begin_session(struct ZZPlayRuntime *runtime)
   runtime->audio_status_known = 0U;
   runtime->audio_refresh_needed = runtime->audio_enabled;
   runtime->audio_totals_captured = 0U;
+  runtime->audio_preroll_timing = 0U;
+  runtime->audio_preroll_backpressure = 0U;
   runtime->frame_held = 0U;
   runtime->discard_run = 0U;
   if (runtime->audio_enabled) {
@@ -2625,6 +2805,60 @@ static ZZPlayFeedResult zzplay_feed_round(
   }
   transport->eof_sent = 1;
   return ZZPLAY_FEED_DONE;
+}
+
+/* The MPEG/PS backend demuxes and moves video PES packets into its 1 MiB
+ * FIFO from WRITE, not DECODE. Fill that FIFO before the first presented
+ * frame so the reader's DOS Read/CopyMem work cannot consume startup time.
+ * WebM keeps its ordinary incremental write cadence. */
+static int zzplay_preroll_input(struct ZZPlayRuntime *runtime,
+                                ZZPlayTransport *transport,
+                                ZZ9KMediaSessionMainResult *result)
+{
+  TimeVal_Type started;
+  TimeVal_Type now;
+  uint32_t accepted_before;
+
+  if (runtime->container.container != ZZ9K_VIDEO_CONTAINER_MPEG_PS) {
+    return ZZ9K_STATUS_OK;
+  }
+  GetSysTime(&started);
+  accepted_before = transport->accepted_total;
+  for (;;) {
+    ZZPlayFeedResult feed;
+
+    if (transport->accepted_total - accepted_before >=
+        ZZPLAY_PREROLL_INPUT_BYTES) {
+      return ZZ9K_STATUS_OK;
+    }
+    feed = zzplay_feed_round(runtime, transport, result);
+    if (feed == ZZPLAY_FEED_ERROR) {
+      return ZZ9K_STATUS_IO_ERROR;
+    }
+    if (feed == ZZPLAY_FEED_BACKPRESSURE ||
+        (feed == ZZPLAY_FEED_DONE && transport->eof_sent)) {
+      return ZZ9K_STATUS_OK;
+    }
+    GetSysTime(&now);
+    if (zzplay_elapsed_us(&started, &now) >=
+        ZZPLAY_PREROLL_DEADLINE_US) {
+      return ZZ9K_STATUS_OK;
+    }
+    if (runtime->input_starved) {
+      zzplay_wait_us(&runtime->timer, ZZPLAY_SYNC_POLL_US);
+    }
+  }
+}
+
+static void zzplay_audio_preroll_arm(struct ZZPlayRuntime *runtime)
+{
+  if (!runtime) {
+    return;
+  }
+  runtime->audio_preroll_timing = runtime->audio_enabled;
+  if (runtime->audio_preroll_timing) {
+    GetSysTime(&runtime->audio_preroll_started);
+  }
 }
 
 /* The large statics live in static storage, not on the shell's stack: a
@@ -3348,7 +3582,19 @@ static ZZPlayEngineResult zzplay_engine_media_session(
   }
   (void)zzplay_resource_acquire(
       &runtime.core.resources, ZZPLAY_RESOURCE_TIMER);
-
+  cleanup_status = zzplay_preroll_input(&runtime, &transport, &result);
+  if (cleanup_status != ZZ9K_STATUS_OK) {
+    zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+    goto cleanup;
+  }
+  zzplay_audio_preroll_arm(&runtime);
+  /* Trace time starts at its first frame, after this unclocked input fill. */
+  runtime.trace_accepted = 0U;
+  runtime.trace_need_input = 0U;
+  runtime.trace_write_busy = 0U;
+  runtime.trace_decode_busy = 0U;
+  runtime.trace_reads = 0U;
+  runtime.trace_input_waits = 0U;
   frame_period_us = zzplay_frame_period_us(info.frame_rate_milli);
   zzplay_sync_policy_init(
       &runtime.sync_policy, info.frame_rate_milli, 1000U);
@@ -3424,6 +3670,17 @@ playback_session:
       break;
     }
     runtime.audio_refresh_needed = 0U;
+    if (!runtime.frame_held) {
+      cleanup_status = zzplay_audio_start_if_ready(
+          &runtime, 0, transport.eof_sent,
+          zzplay_audio_pts_bypass_allowed(media_done, 0), 0);
+      if (cleanup_status != ZZ9K_STATUS_OK) {
+        zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
+                zz9k_status_name(cleanup_status));
+        zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        break;
+      }
+    }
 
     if (runtime.trace) {
       uint32_t underruns = zzplay_audio_underruns(&runtime);
@@ -3444,7 +3701,7 @@ playback_session:
 
       cleanup_status = zzplay_retire_held_frame(
           &runtime, &result, frame_period_us, held_decode_us,
-          &retired);
+          transport.eof_sent, &retired);
       if (cleanup_status != ZZ9K_STATUS_OK) {
         if (runtime.pip_open_failed) {
           zzplay_error(&runtime,
@@ -3518,8 +3775,27 @@ playback_session:
       runtime.audio_refresh_needed = 1U;
     }
     if (cleanup_status == ZZ9K_STATUS_BUSY) {
+      int decoder_backpressured;
+
       if (runtime.trace) {
         runtime.trace_decode_busy++;
+      }
+      /* BUSY has no main-result payload, so query audio before any ACK. */
+      cleanup_status = zzplay_audio_current_backpressure(
+          &runtime, &decoder_backpressured);
+      if (cleanup_status == ZZ9K_STATUS_OK) {
+        cleanup_status = zzplay_audio_recheck_decoder_backpressure(
+            &runtime, decoder_backpressured, &decoder_backpressured);
+      }
+      if (cleanup_status == ZZ9K_STATUS_OK) {
+        cleanup_status = zzplay_audio_start_if_decoder_blocked(
+            &runtime, transport.eof_sent, decoder_backpressured);
+      }
+      if (cleanup_status != ZZ9K_STATUS_OK) {
+        zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
+                     zz9k_status_name(cleanup_status));
+        zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        break;
       }
       zzplay_wait_us(&runtime.timer, ZZPLAY_SYNC_POLL_US);
       continue;
@@ -3549,6 +3825,23 @@ playback_session:
           result.frame_rate_den);
     }
     action = zzplay_media_result_action(result.flags);
+    if (action != ZZPLAY_MEDIA_FRAME_HELD) {
+      int decoder_backpressured =
+          (result.flags & ZZ9K_MEDIA_SESSION_RESULT_BACKPRESSURE) != 0U;
+
+      cleanup_status = zzplay_audio_recheck_decoder_backpressure(
+          &runtime, decoder_backpressured, &decoder_backpressured);
+      if (cleanup_status == ZZ9K_STATUS_OK) {
+        cleanup_status = zzplay_audio_start_if_decoder_blocked(
+            &runtime, transport.eof_sent, decoder_backpressured);
+      }
+      if (cleanup_status != ZZ9K_STATUS_OK) {
+        zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
+                     zz9k_status_name(cleanup_status));
+        zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        break;
+      }
+    }
     if (action == ZZPLAY_MEDIA_FRAME_HELD) {
       runtime.frames++;
       runtime.frame_held = 1U;
@@ -3641,6 +3934,15 @@ playback_failed:
         media_done = 0;
         held_decode_us = 0U;
         memset(&result, 0, sizeof(result));
+        cleanup_status =
+            zzplay_preroll_input(&runtime, &transport, &result);
+        if (cleanup_status != ZZ9K_STATUS_OK) {
+          zzplay_error(&runtime, "zzplay: loop pre-roll failed: %s\n",
+                       zz9k_status_name(cleanup_status));
+          zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+          goto cleanup;
+        }
+        zzplay_audio_preroll_arm(&runtime);
         runtime.trace_accepted = 0U;
         runtime.trace_need_input = 0U;
         runtime.trace_write_busy = 0U;
