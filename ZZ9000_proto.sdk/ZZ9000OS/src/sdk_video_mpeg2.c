@@ -834,11 +834,20 @@ static uint32_t milli_from_period(uint32_t frame_period)
 	return (uint32_t)milli;
 }
 
-static uint32_t picture_display_fields(const mpeg2_picture_t *picture)
+/* Fields a displayed frame holds the screen for. libmpeg2 hands out a frame
+ * once per frame picture or per pair of field pictures; a pair is two
+ * one-field pictures, the second in display_picture_2nd. */
+static uint32_t picture_display_fields(const mpeg2_info_t *info)
 {
+	const mpeg2_picture_t *picture = info->display_picture;
+	uint32_t fields;
+
 	if (!picture || picture->nb_fields == 0U)
 		return 2U;
-	return picture->nb_fields;
+	fields = picture->nb_fields;
+	if (info->display_picture_2nd)
+		fields += info->display_picture_2nd->nb_fields;
+	return fields;
 }
 
 static uint32_t picture_flags_of(const mpeg2_picture_t *picture)
@@ -917,12 +926,12 @@ static uint32_t picture_rate(const struct sdk_video_mpeg2 *d,
  * jump in ~1 s steps. Returns the picture's media time. */
 static uint64_t clock_picture(struct sdk_video_mpeg2 *d,
                               const mpeg2_picture_t *picture,
+                              uint32_t fields,
                               uint64_t *raw_pts, uint64_t *raw_dts,
                               uint32_t *timeline_flags)
 {
 	struct SDKMediaTimelineResult result;
 	uint64_t media_pts = M2_NO_PTS;
-	uint32_t fields = picture_display_fields(picture);
 	uint32_t previous_fields = d->previous_picture_fields;
 	uint64_t step_units = (uint64_t)(previous_fields < 2U
 		? 2U : previous_fields) * 500U;
@@ -983,7 +992,8 @@ static void fill_frame(struct sdk_video_mpeg2 *d,
 	uint32_t timeline_flags = d->skipped_media_flags;
 	uint32_t time_millis;
 
-	media_pts = clock_picture(d, picture, &raw_pts, &raw_dts,
+	media_pts = clock_picture(d, picture, picture_display_fields(info),
+	                          &raw_pts, &raw_dts,
 	                          &timeline_flags);
 	time_millis = (uint32_t)(d->legacy_video_ticks / 90U);
 	d->skipped_media_flags = 0U;
@@ -1001,7 +1011,7 @@ static void fill_frame(struct sdk_video_mpeg2 *d,
 	frame->raw_dts = raw_dts;
 	frame->media_flags = timeline_flags;
 	frame->picture_flags = picture_flags_of(picture);
-	frame->display_fields = picture_display_fields(picture);
+	frame->display_fields = picture_display_fields(info);
 }
 
 /* A picture libmpeg2 skipped (a late B-picture): its slot passes on the
@@ -1011,7 +1021,8 @@ static void skip_picture(struct sdk_video_mpeg2 *d, const mpeg2_info_t *info)
 	uint64_t raw_pts;
 	uint64_t raw_dts;
 
-	(void)clock_picture(d, info->display_picture, &raw_pts, &raw_dts,
+	(void)clock_picture(d, info->display_picture,
+	                    picture_display_fields(info), &raw_pts, &raw_dts,
 	                    &d->skipped_media_flags);
 }
 
