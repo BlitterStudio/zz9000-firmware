@@ -4696,7 +4696,17 @@ static ZZPlayAppStep zzplay_app_idle(ZZPlayApp *app)
     }
     if (app->ctl.request == ZZPLAY_REQUEST_NONE) {
       uint32_t mask = zzplay_gui_signal_mask() | SIGBREAKF_CTRL_C;
-      uint32_t signals = Wait(mask);
+      uint32_t signals;
+
+      if (zzplay_gui_redraw_deferred()) {
+        /* A redraw waits for a menu or window drag to release the screen;
+         * nothing signals that, so look again after a tick. */
+        Delay(1);
+        signals = (uint32_t)SetSignal(0UL, SIGBREAKF_CTRL_C) &
+                  SIGBREAKF_CTRL_C;
+      } else {
+        signals = Wait(mask);
+      }
 
       if (zzplay_ctrl_c_requested != 0 ||
           (signals & SIGBREAKF_CTRL_C) != 0U) {

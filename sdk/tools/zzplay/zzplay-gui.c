@@ -1667,6 +1667,18 @@ uint32_t zzplay_gui_signal_mask(void)
   return mask;
 }
 
+int zzplay_gui_redraw_deferred(void)
+{
+  if (!player_win || !gui_context) {
+    return 0;
+  }
+  return (refresh_pending || settings_refresh_pending ||
+          (gui_context->controller &&
+           gui_context->controller->dirty != 0U))
+             ? 1
+             : 0;
+}
+
 int zzplay_gui_report(const char *message)
 {
   if (!player_win || !gui_context || !gui_context->controller) {
@@ -1741,16 +1753,9 @@ void zzplay_gui_poll(void)
     }
   }
 
-  /* 2. Settings window: a refresh deferred while the screen was locked,
-   * then IDCMP. */
-  if (settings_win && settings_refresh_pending &&
-      zzplay_gui_screen_free(settings_win)) {
-    settings_refresh_pending = 0;
-    GT_BeginRefresh(settings_win);
-    GT_EndRefresh(settings_win, TRUE);
-  }
-  /* The loop body can close the settings window (close gadget, Save, Use,
-   * Cancel), so re-check it before every GT_GetIMsg. */
+  /* 2. Settings window IDCMP. The loop body can close the settings window
+   * (close gadget, Save, Use, Cancel), so re-check it before every
+   * GT_GetIMsg. */
   if (settings_win && settings_win->UserPort) {
     while (settings_win &&
            (imsg = GT_GetIMsg(settings_win->UserPort)) != 0) {
@@ -1765,7 +1770,7 @@ void zzplay_gui_poll(void)
           break;
 
         case IDCMP_REFRESHWINDOW:
-          /* Refreshed above once the screen's layers are free. */
+          /* Refreshed below once the screen's layers are free. */
           settings_refresh_pending = 1;
           break;
 
@@ -1821,6 +1826,14 @@ void zzplay_gui_poll(void)
           break;
       }
     }
+  }
+  /* A refresh deferred while the screen was locked, or one received just
+   * above, is drawn once the screen's layers are free. */
+  if (settings_win && settings_refresh_pending &&
+      zzplay_gui_screen_free(settings_win)) {
+    settings_refresh_pending = 0;
+    GT_BeginRefresh(settings_win);
+    GT_EndRefresh(settings_win, TRUE);
   }
 
   /* 3. Player window IDCMP */

@@ -50,6 +50,11 @@ int zzplay_gui_is_open(void);
 /* Signals to Wait() on while idle: window ports and the AppWindow port. */
 uint32_t zzplay_gui_signal_mask(void);
 
+/* Nonzero while a window refresh or redraw waits for the screen's layers
+ * (a menu or window drag holds them): no message will announce that they
+ * are free again, so an idle caller must poll instead of Wait()ing. */
+int zzplay_gui_redraw_deferred(void);
+
 /* Drain all pending GUI input, apply completed requester results and playlist
  * operations, then redraw what changed.
  * Returns immediately when there is nothing to do. */
