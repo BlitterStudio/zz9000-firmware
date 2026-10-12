@@ -139,8 +139,7 @@ From top to bottom:
 
 Drop files, drawers or playlists from Workbench onto the window to add them;
 if nothing is playing, the first dropped file starts. Playback pauses while
-the dropped items are read and then continues, as it does while a file
-requester is open.
+the dropped items are read and then continues.
 
 The window position, volume, repeat, shuffle and the last drawer used in a
 file requester are remembered between sessions.
@@ -153,8 +152,11 @@ file requester are remembered between sessions.
 | Control | Play/Pause, Stop, Next, Previous, Seek forward, Seek back, Repeat (Off/Track/All), Shuffle, Fullscreen video |
 
 *Open...* replaces the playlist and starts playing; *Add files...* appends.
-Opening a requester while something plays pauses it, and playback resumes when
-the requester closes.
+File and About requesters run in a separate task, so playback, the time line
+and transport/volume controls keep working while one is open. ZZPlay ignores
+requests to open another requester until the first closes. Open stops the
+current item only after its selection is accepted. Close the requester before
+quitting; the player waits for it rather than leaving a requester task behind.
 
 ### Keys
 

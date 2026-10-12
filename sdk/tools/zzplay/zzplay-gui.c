@@ -7,12 +7,10 @@
 #include <exec/types.h>
 #include <graphics/gfxbase.h>
 #include <intuition/intuition.h>
-#include <libraries/asl.h>
 #include <libraries/gadtools.h>
 #include <workbench/startup.h>
 #include <workbench/workbench.h>
 
-#include <proto/asl.h>
 #include <proto/dos.h>
 #include <proto/exec.h>
 #include <proto/gadtools.h>
@@ -27,7 +25,7 @@
 #include "zzplay-controls.h"
 #include "zzplay-devices.h"
 #include "zzplay-files.h"
-#include "zzplay-formats.h"
+#include "zzplay-requester.h"
 
 /* Program-wide library base ownership per plan. */
 struct GfxBase *GfxBase;
@@ -35,7 +33,6 @@ struct Library *GadToolsBase;
 struct Library *WorkbenchBase;
 
 extern struct IntuitionBase *IntuitionBase;
-extern struct Library *AslBase;
 
 static int owns_gfx;
 static int owns_gadtools;
@@ -247,10 +244,6 @@ static const char *video_backend_labels[] = {
   0
 };
 
-/* --- Static buffers for modal ops to keep big frames off small stacks --- */
-static char modal_pattern_buf[128];
-static char modal_path_buf[ZZPLAY_PLAYLIST_PATH_MAX];
-static char modal_about_buf[512];
 
 static int gui_text_width(struct RastPort *rp, const char *text);
 /* Tag lists are passed as real arrays. Taking the address of the first
@@ -1038,216 +1031,113 @@ static void open_settings_window(void)
   GT_RefreshWindow(settings_win, 0);
 }
 
-/* --- Modal Operations --- */
+/* Drops can expand drawers and playlists synchronously, so retain the modal
+ * gate for them. ASL and About requesters use zzplay-requester.c instead. */
 static void execute_modal_op(ZZPlayModal op)
 {
   ZZPlayController *ctl;
   ZZPlayPlaylist *pl;
-  ZZPlayPrefs *prefs;
-  struct FileRequester *fr = 0;
-  int ok = 0;
+  int32_t first_added = -1;
+  uint32_t count_before;
+  uint32_t i;
 
-  if (!gui_context) {
+  if (!gui_context || op != ZZPLAY_MODAL_ADD_DROPPED) {
     return;
   }
   ctl = gui_context->controller;
   pl = gui_context->playlist;
-  prefs = gui_context->prefs;
+  count_before = pl->count;
+  for (i = 0U; i < drop_count; i++) {
+    uint32_t added = zzplay_files_add(pl, drop_paths[i]);
 
-  if (op == ZZPLAY_MODAL_ADD_DROPPED) {
-    int32_t first_added = -1;
-    uint32_t count_before = pl->count;
-    uint32_t i;
-
-    for (i = 0U; i < drop_count; i++) {
-      uint32_t added = zzplay_files_add(pl, drop_paths[i]);
-
-      if (added > 0U && first_added < 0) {
-        first_added = (int32_t)count_before;
-      }
-      count_before += added;
+    if (added > 0U && first_added < 0) {
+      first_added = (int32_t)count_before;
     }
-    drop_queue_free();
-    /* Dropping onto an idle player starts what was dropped; an item that
-     * is playing (paused by the gate) keeps playing afterwards. */
-    if (!ctl->item_active && first_added >= 0) {
+    count_before += added;
+  }
+  drop_queue_free();
+  if (!ctl->item_active && first_added >= 0) {
+    zzplay_controller_jump(ctl, first_added);
+  }
+  ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+}
+
+static void apply_requester_result(ZZPlayController *ctl, ZZPlayPlaylist *pl,
+                                   ZZPlayPrefs *prefs,
+                                   ZZPlayRequesterResult *result)
+{
+  int32_t first_added = -1;
+  uint32_t i;
+
+  if (!result->accepted) {
+    return;
+  }
+  if (result->drawer[0] != '\0' && prefs) {
+    strncpy(prefs->last_drawer, result->drawer, sizeof(prefs->last_drawer) - 1U);
+    prefs->last_drawer[sizeof(prefs->last_drawer) - 1U] = '\0';
+  }
+  switch (result->op) {
+  case ZZPLAY_MODAL_OPEN_FILES:
+  case ZZPLAY_MODAL_ADD_FILES:
+  case ZZPLAY_MODAL_ADD_DRAWER:
+  case ZZPLAY_MODAL_LOAD_PLAYLIST:
+    if (result->op == ZZPLAY_MODAL_OPEN_FILES) {
+      zzplay_playlist_clear(pl);
+    }
+    for (i = 0U; i < result->prepared.count; i++) {
+      const ZZPlayPlaylistEntry *entry = &result->prepared.entries[i];
+      int32_t index = zzplay_playlist_add(pl, entry->path);
+
+      if (index >= 0) {
+        zzplay_playlist_set_title(pl, (uint32_t)index, entry->title);
+        pl->entries[index].duration_ms = entry->duration_ms;
+        if (first_added < 0) {
+          first_added = index;
+        }
+      }
+    }
+    if (result->op == ZZPLAY_MODAL_OPEN_FILES && first_added >= 0) {
+      /* Replacing a playing list ends that item only after the user accepts. */
       zzplay_controller_jump(ctl, first_added);
     }
     ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+    break;
+
+  case ZZPLAY_MODAL_SAVE_PLAYLIST:
+    if (!result->saved) {
+      zzplay_controller_set_message(ctl, "Failed to save playlist");
+    }
+    break;
+
+  default:
+    break;
+  }
+}
+
+static void start_requester(ZZPlayModal op)
+{
+  if (zzplay_requester_active()) {
+    zzplay_controller_set_message(gui_context->controller,
+                                  "A file requester is already open");
     return;
   }
+  if (!zzplay_requester_start(op,
+                               gui_context->prefs ? gui_context->prefs->last_drawer : "",
+                               gui_context->version, gui_context->playlist,
+                               player_screen)) {
+    zzplay_controller_set_message(gui_context->controller,
+                                  "Unable to open requester");
+  }
+}
 
-  if (op == ZZPLAY_MODAL_ABOUT) {
-    struct EasyStruct es;
-    size_t count;
-    size_t i;
-
-    modal_about_buf[0] = '\0';
-    sprintf(modal_about_buf, "%.64s\n\nRegistered formats:\n",
-            gui_context->version ? gui_context->version : "ZZPlay");
-    count = zzplay_format_count();
-    for (i = 0U; i < count; i++) {
-      const ZZPlayFormat *fmt = zzplay_format_at(i);
-      if (fmt && fmt->name) {
-        strncat(modal_about_buf, "  ",
-                sizeof(modal_about_buf) - strlen(modal_about_buf) - 1U);
-        strncat(modal_about_buf, fmt->name,
-                sizeof(modal_about_buf) - strlen(modal_about_buf) - 1U);
-        strncat(modal_about_buf, "\n",
-                sizeof(modal_about_buf) - strlen(modal_about_buf) - 1U);
-      }
-    }
-
-    memset(&es, 0, sizeof(es));
-    es.es_StructSize = sizeof(struct EasyStruct);
-    es.es_Title = (CONST_STRPTR)"About ZZPlay";
-    es.es_TextFormat = (CONST_STRPTR)modal_about_buf;
-    es.es_GadgetFormat = (CONST_STRPTR)"OK";
-
-    EasyRequestArgs(player_win, &es, 0, 0);
+static void request_quit(ZZPlayController *ctl)
+{
+  if (zzplay_requester_active()) {
+    zzplay_controller_set_message(ctl,
+                                  "Close the file requester before quitting");
     return;
   }
-
-  if (!AslBase) {
-    AslBase = OpenLibrary((CONST_STRPTR)"asl.library", 37U);
-    if (!AslBase) {
-      zzplay_controller_set_message(ctl, "asl.library unavailable");
-      return;
-    }
-  }
-
-  switch (op) {
-    case ZZPLAY_MODAL_OPEN_FILES:
-    case ZZPLAY_MODAL_ADD_FILES:
-      zzplay_formats_pattern(modal_pattern_buf, sizeof(modal_pattern_buf), 1);
-      fr = (struct FileRequester *)AllocAslRequestTags(
-          ASL_FileRequest,
-          ASLFR_Window, (ULONG)player_win,
-          ASLFR_SleepWindow, TRUE,
-          ASLFR_TitleText, (ULONG)(op == ZZPLAY_MODAL_OPEN_FILES ? "Open File(s)"
-                                                                 : "Add File(s)"),
-          ASLFR_InitialDrawer, (ULONG)(prefs ? prefs->last_drawer : ""),
-          ASLFR_InitialPattern, (ULONG)modal_pattern_buf,
-          ASLFR_DoPatterns, TRUE,
-          ASLFR_DoMultiSelect, TRUE,
-          TAG_DONE);
-      break;
-
-    case ZZPLAY_MODAL_ADD_DRAWER:
-      fr = (struct FileRequester *)AllocAslRequestTags(
-          ASL_FileRequest,
-          ASLFR_Window, (ULONG)player_win,
-          ASLFR_SleepWindow, TRUE,
-          ASLFR_TitleText, (ULONG)"Select Drawer",
-          ASLFR_InitialDrawer, (ULONG)(prefs ? prefs->last_drawer : ""),
-          ASLFR_DrawersOnly, TRUE,
-          TAG_DONE);
-      break;
-
-    case ZZPLAY_MODAL_LOAD_PLAYLIST:
-      fr = (struct FileRequester *)AllocAslRequestTags(
-          ASL_FileRequest,
-          ASLFR_Window, (ULONG)player_win,
-          ASLFR_SleepWindow, TRUE,
-          ASLFR_TitleText, (ULONG)"Load Playlist",
-          ASLFR_InitialDrawer, (ULONG)(prefs ? prefs->last_drawer : ""),
-          ASLFR_InitialPattern, (ULONG)"#?.(m3u|m3u8)",
-          ASLFR_DoPatterns, TRUE,
-          TAG_DONE);
-      break;
-
-    case ZZPLAY_MODAL_SAVE_PLAYLIST:
-      fr = (struct FileRequester *)AllocAslRequestTags(
-          ASL_FileRequest,
-          ASLFR_Window, (ULONG)player_win,
-          ASLFR_SleepWindow, TRUE,
-          ASLFR_TitleText, (ULONG)"Save Playlist",
-          ASLFR_InitialDrawer, (ULONG)(prefs ? prefs->last_drawer : ""),
-          ASLFR_DoSaveMode, TRUE,
-          TAG_DONE);
-      break;
-
-    default:
-      break;
-  }
-
-  if (!fr) {
-    return;
-  }
-
-  ok = AslRequest(fr, 0);
-  if (ok) {
-    if (fr->fr_Drawer && prefs) {
-      strncpy(prefs->last_drawer, (const char *)fr->fr_Drawer,
-              sizeof(prefs->last_drawer) - 1U);
-      prefs->last_drawer[sizeof(prefs->last_drawer) - 1U] = '\0';
-    }
-
-    if (op == ZZPLAY_MODAL_OPEN_FILES || op == ZZPLAY_MODAL_ADD_FILES) {
-      int32_t first_added = -1;
-      uint32_t count_before = pl->count;
-      int i;
-
-      if (op == ZZPLAY_MODAL_OPEN_FILES) {
-        zzplay_playlist_clear(pl);
-        count_before = 0U;
-      }
-
-      if (fr->fr_NumArgs > 0) {
-        for (i = 0; i < fr->fr_NumArgs; i++) {
-          struct WBArg *arg = &fr->fr_ArgList[i];
-          uint32_t added = zzplay_files_add_lock(pl, (long)arg->wa_Lock,
-                                                 (const char *)arg->wa_Name);
-          if (added > 0U && first_added < 0) {
-            first_added = (int32_t)count_before;
-          }
-          count_before += added;
-        }
-      } else if (fr->fr_File && fr->fr_File[0] != '\0') {
-        zzplay_playlist_join(modal_path_buf, sizeof(modal_path_buf),
-                             (const char *)fr->fr_Drawer,
-                             (const char *)fr->fr_File);
-        if (zzplay_files_add(pl, modal_path_buf) > 0U) {
-          first_added = (int32_t)count_before;
-        }
-      }
-
-      if (op == ZZPLAY_MODAL_OPEN_FILES && first_added >= 0) {
-        zzplay_controller_jump(ctl, first_added);
-      }
-      ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
-    } else if (op == ZZPLAY_MODAL_ADD_DRAWER) {
-      if (fr->fr_Drawer && fr->fr_Drawer[0] != '\0') {
-        zzplay_files_add(pl, (const char *)fr->fr_Drawer);
-        ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
-      }
-    } else if (op == ZZPLAY_MODAL_LOAD_PLAYLIST) {
-      if (fr->fr_File && fr->fr_File[0] != '\0') {
-        zzplay_playlist_join(modal_path_buf, sizeof(modal_path_buf),
-                             (const char *)fr->fr_Drawer,
-                             (const char *)fr->fr_File);
-        zzplay_playlist_load_m3u(pl, modal_path_buf);
-        ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
-      }
-    } else if (op == ZZPLAY_MODAL_SAVE_PLAYLIST) {
-      if (fr->fr_File && fr->fr_File[0] != '\0') {
-        size_t len;
-        zzplay_playlist_join(modal_path_buf, sizeof(modal_path_buf),
-                             (const char *)fr->fr_Drawer,
-                             (const char *)fr->fr_File);
-        len = strlen(modal_path_buf);
-        if (!zzplay_playlist_is_playlist_path(modal_path_buf)) {
-          strncat(modal_path_buf, ".m3u",
-                  sizeof(modal_path_buf) - len - 1U);
-        }
-        if (!zzplay_playlist_save_m3u(pl, modal_path_buf)) {
-          zzplay_controller_set_message(ctl, "Failed to save playlist");
-        }
-      }
-    }
-  }
-
-  FreeAslRequest(fr);
+  zzplay_controller_request(ctl, ZZPLAY_REQUEST_QUIT);
 }
 
 /* Text width in the screen font, which is what GadTools renders labels in
@@ -1546,8 +1436,8 @@ int zzplay_gui_open(const ZZPlayGuiContext *context)
       WA_CloseGadget, TRUE,
       WA_DepthGadget, TRUE,
       WA_Activate, TRUE,
-      /* Smart refresh keeps the window intact while a file requester or the
-       * About box suspends the event loop (the same choice ZZTop makes). */
+      /* Smart refresh preserves the player while its independent requester
+       * process is active. */
       WA_SmartRefresh, TRUE,
       /* Without this Intuition renders the GadTools new-look menu layout
        * with the old-look pens: black text on a black strip on many
@@ -1597,6 +1487,13 @@ void zzplay_gui_close(void)
     gui_context->prefs->window_top = (int16_t)player_win->TopEdge;
   }
 
+  if (zzplay_requester_active() && gui_context && gui_context->controller) {
+    zzplay_controller_set_message(gui_context->controller,
+                                  "Close the file requester before quitting");
+  }
+  /* An ASL requester cannot be closed from another task. Wait for its child
+   * before tearing down the screen or letting this task exit. */
+  zzplay_requester_close();
   close_settings_window();
 
   if (app_window) {
@@ -1687,7 +1584,7 @@ uint32_t zzplay_gui_signal_mask(void)
   if (app_port) {
     mask |= (1UL << app_port->mp_SigBit);
   }
-
+  mask |= zzplay_requester_signal_mask();
   return mask;
 }
 
@@ -1714,6 +1611,7 @@ void zzplay_gui_poll(void)
   ZZPlayPlaylist *pl;
   ZZPlayPrefs *prefs;
   ZZPlayModal modal_op;
+  ZZPlayRequesterResult requester_result;
   struct IntuiMessage *imsg;
   struct AppMessage *amsg;
   ULONG last_event_s = 0UL;
@@ -1726,7 +1624,10 @@ void zzplay_gui_poll(void)
   ctl = gui_context->controller;
   pl = gui_context->playlist;
   prefs = gui_context->prefs;
-
+  if (zzplay_requester_take(&requester_result)) {
+    apply_requester_result(ctl, pl, prefs, &requester_result);
+    zzplay_requester_result_release(&requester_result);
+  }
   /* Cheap when idle: this runs on every pass of the playback loops. It
    * must look at the message queues themselves, not the signal bits - the
    * idle loop's Wait() clears those, and testing them made every message
@@ -1855,7 +1756,7 @@ void zzplay_gui_poll(void)
       switch (m_class) {
         case IDCMP_CLOSEWINDOW:
           GT_ReplyIMsg(imsg);
-          zzplay_controller_request(ctl, ZZPLAY_REQUEST_QUIT);
+          request_quit(ctl);
           break;
 
         case IDCMP_VANILLAKEY:
@@ -1981,7 +1882,7 @@ void zzplay_gui_poll(void)
                 break;
 
               case GID_PL_ADD:
-                zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_ADD_FILES);
+                start_requester(ZZPLAY_MODAL_ADD_FILES);
                 break;
 
               case GID_PL_REMOVE:
@@ -2004,11 +1905,11 @@ void zzplay_gui_poll(void)
                 break;
 
               case GID_PL_LOAD:
-                zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_LOAD_PLAYLIST);
+                start_requester(ZZPLAY_MODAL_LOAD_PLAYLIST);
                 break;
 
               case GID_PL_SAVE:
-                zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_SAVE_PLAYLIST);
+                start_requester(ZZPLAY_MODAL_SAVE_PLAYLIST);
                 break;
 
               default:
@@ -2027,28 +1928,28 @@ void zzplay_gui_poll(void)
 
               switch (mid) {
                 case MID_OPEN:
-                  zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_OPEN_FILES);
+                  start_requester(ZZPLAY_MODAL_OPEN_FILES);
                   break;
                 case MID_ADD_FILES:
-                  zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_ADD_FILES);
+                  start_requester(ZZPLAY_MODAL_ADD_FILES);
                   break;
                 case MID_ADD_DRAWER:
-                  zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_ADD_DRAWER);
+                  start_requester(ZZPLAY_MODAL_ADD_DRAWER);
                   break;
                 case MID_LOAD_PLAYLIST:
-                  zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_LOAD_PLAYLIST);
+                  start_requester(ZZPLAY_MODAL_LOAD_PLAYLIST);
                   break;
                 case MID_SAVE_PLAYLIST:
-                  zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_SAVE_PLAYLIST);
+                  start_requester(ZZPLAY_MODAL_SAVE_PLAYLIST);
                   break;
                 case MID_SETTINGS:
                   open_settings_window();
                   break;
                 case MID_ABOUT:
-                  zzplay_controller_begin_modal(ctl, ZZPLAY_MODAL_ABOUT);
+                  start_requester(ZZPLAY_MODAL_ABOUT);
                   break;
                 case MID_QUIT:
-                  zzplay_controller_request(ctl, ZZPLAY_REQUEST_QUIT);
+                  request_quit(ctl);
                   break;
 
                 case MID_PLAY_PAUSE:

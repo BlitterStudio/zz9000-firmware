@@ -8,9 +8,8 @@
  * The GUI never plays anything itself. It turns input into controller
  * requests and playlist edits, and redraws from the controller's dirty
  * bits. It is polled, never blocking, from both the idle loop and the
- * playback engines; the only blocking work it does (ASL requesters,
- * About) runs through the controller's modal gate, so an engine is
- * always paused first.
+ * playback engines. File and About requesters run in a child process, so
+ * polling and audio presentation continue while they are open.
  *
  * AmigaOS-only. SPDX-License-Identifier: GPL-3.0-or-later */
 
@@ -51,8 +50,8 @@ int zzplay_gui_is_open(void);
 /* Signals to Wait() on while idle: window ports and the AppWindow port. */
 uint32_t zzplay_gui_signal_mask(void);
 
-/* Drain all pending GUI input, apply it to the controller and playlist,
- * run a modal operation if the gate releases one, and redraw what changed.
+/* Drain all pending GUI input, apply completed requester results and playlist
+ * operations, then redraw what changed.
  * Returns immediately when there is nothing to do. */
 void zzplay_gui_poll(void);
 

@@ -1,12 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "zzplay-files.h"
+#include "zzplay-sys.h"
 
 #include <dos/dos.h>
 #include <dos/dosasl.h>
-#include <exec/memory.h>
 #include <proto/dos.h>
-#include <proto/exec.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -36,19 +35,25 @@ static int name_array_push(NameArray *arr, const char *name)
 
   if (arr->count >= arr->capacity) {
     uint32_t new_cap = arr->capacity ? (arr->capacity * 2U) : 16U;
-    char **new_items = (char **)realloc(arr->items,
-                                        (size_t)new_cap * sizeof(char *));
+    char **new_items = (char **)zzplay_alloc(
+        (size_t)new_cap * sizeof(char *));
+
     if (!new_items) {
       return 0;
     }
+    if (arr->count != 0U) {
+      memcpy(new_items, arr->items, (size_t)arr->count * sizeof(char *));
+    }
+    zzplay_free(arr->items);
     arr->items = new_items;
     arr->capacity = new_cap;
   }
 
-  copy = strdup(name);
+  copy = (char *)zzplay_alloc(strlen(name) + 1U);
   if (!copy) {
     return 0;
   }
+  strcpy(copy, name);
   arr->items[arr->count++] = copy;
   return 1;
 }
@@ -59,9 +64,9 @@ static void name_array_free(NameArray *arr)
 
   if (arr->items) {
     for (i = 0U; i < arr->count; i++) {
-      free(arr->items[i]);
+      zzplay_free(arr->items[i]);
     }
-    free(arr->items);
+    zzplay_free(arr->items);
     arr->items = 0;
   }
   arr->count = 0U;
@@ -84,12 +89,12 @@ static int is_wildcard_pattern(const char *path)
   if (buf_len < 128) {
     buf_len = 128;
   }
-  pat_buf = (UBYTE *)AllocVec((ULONG)buf_len, MEMF_PUBLIC | MEMF_CLEAR);
+  pat_buf = (UBYTE *)zzplay_alloc((size_t)buf_len);
   if (!pat_buf) {
     return 0;
   }
   res = ParsePatternNoCase((CONST_STRPTR)path, pat_buf, buf_len);
-  FreeVec(pat_buf);
+  zzplay_free(pat_buf);
   return (res == 1) ? 1 : 0;
 }
 
@@ -103,8 +108,7 @@ static uint32_t add_pattern(ZZPlayPlaylist *list, const char *pattern)
   if (!list || list->count >= ZZPLAY_PLAYLIST_MAX_ENTRIES) {
     return 0U;
   }
-  anchor = (struct AnchorPath *)AllocVec(
-      (ULONG)anchor_size, MEMF_PUBLIC | MEMF_CLEAR);
+  anchor = (struct AnchorPath *)zzplay_alloc(anchor_size);
   if (!anchor) {
     return 0U;
   }
@@ -139,7 +143,7 @@ static uint32_t add_pattern(ZZPlayPlaylist *list, const char *pattern)
     MatchEnd(anchor);
   }
 
-  FreeVec(anchor);
+  zzplay_free(anchor);
   return added;
 }
 
