@@ -40,6 +40,10 @@
  * MPEG-1. */
 #define M2_VIDEO_FIFO_CAPACITY (1024U * 1024U)
 #define M2_VIDEO_FIFO_WRAP 0xffffffffU
+/* Compressed PES audio is moved out of the four-packet demux queue during
+ * WRITE, just like video. This covers mux audio lag without decoding PCM. */
+#define M2_AUDIO_FIFO_CAPACITY (256U * 1024U)
+#define M2_AUDIO_FIFO_WRAP 0xffffffffU
 #define M2_MP2_CAPACITY (64U * 1024U)
 /* minimp3's largest stereo output is 4,608 bytes. */
 #define M2_MP2_PCM_BYTES (MINIMP3_MAX_SAMPLES_PER_FRAME * 2U)
@@ -96,16 +100,31 @@ struct m2_video_entry {
 	uint32_t reserved;
 };
 
+struct m2_audio_entry {
+	uint64_t pts;
+	uint64_t dts;
+	uint32_t length;
+	uint8_t stream_id;
+	uint8_t substream_id;
+	uint8_t kind;
+	uint8_t header_bytes;
+	uint8_t data[];
+};
+
 struct sdk_video_mpeg2 {
-	struct SDKDVDPSDemux demux;
-	mpeg2dec_t *decoder;
-	uint8_t *es;
-	uint8_t *video_fifo;         /* M2_VIDEO_FIFO_CAPACITY bytes */
-	uint32_t video_fifo_read;    /* offset of the oldest entry */
-	uint32_t video_fifo_write;   /* offset the next entry goes to */
-	uint32_t video_fifo_count;   /* entries queued */
+ 	struct SDKDVDPSDemux demux;
+ 	mpeg2dec_t *decoder;
+ 	uint8_t *es;
+ 	uint8_t *video_fifo;         /* M2_VIDEO_FIFO_CAPACITY bytes */
+ 	uint32_t video_fifo_read;    /* offset of the oldest entry */
+ 	uint32_t video_fifo_write;   /* offset the next entry goes to */
+ 	uint32_t video_fifo_count;   /* entries queued */
 	uint32_t fbuf_stride;
 	uint8_t fbufs_bound;
+	uint8_t *audio_fifo;         /* M2_AUDIO_FIFO_CAPACITY bytes */
+	uint32_t audio_fifo_read;
+	uint32_t audio_fifo_write;
+	uint32_t audio_fifo_count;
 	uint8_t *mp2_input;          /* M2_MP2_CAPACITY bytes of MPEG audio */
 	uint32_t mp2_input_pos;      /* first unread byte */
 	uint32_t mp2_input_len;      /* unread bytes */
@@ -477,7 +496,7 @@ static void pump_mp2(struct sdk_video_mpeg2 *d, int at_end)
  * partial frame the input keeps. Returns 0 (packet stays queued, resumed
  * at mp2_packet_offset) when the input is full behind a full ring. */
 static uint32_t route_mp2(struct sdk_video_mpeg2 *d,
-                          const struct SDKDVDPSPacket *packet)
+                          const struct m2_audio_entry *packet)
 {
 	while (d->mp2_packet_offset < packet->length) {
 		uint32_t n = packet->length - d->mp2_packet_offset;
@@ -507,7 +526,7 @@ static uint32_t route_mp2(struct sdk_video_mpeg2 *d,
  * doubled to stereo. Returns 0 (packet stays queued, resumed at
  * lpcm_packet_offset) when the ring is full. */
 static uint32_t route_lpcm(struct sdk_video_mpeg2 *d,
-                           const struct SDKDVDPSPacket *packet)
+                           const struct m2_audio_entry *packet)
 {
 	static uint8_t pcm[4096U];
 	const uint8_t *payload = packet->data + SDK_DVD_LPCM_HEADER_BYTES;
@@ -595,7 +614,7 @@ static uint32_t pump_ac3(struct sdk_video_mpeg2 *d)
  * it goes. Returns 0 (packet stays queued, resumed at ac3_packet_offset)
  * when the PCM ring is full. */
 static uint32_t route_ac3(struct sdk_video_mpeg2 *d,
-                          const struct SDKDVDPSPacket *packet)
+                          const struct m2_audio_entry *packet)
 {
 	const uint8_t *payload = packet->data + SDK_DVD_AC3_HEADER_BYTES;
 	uint32_t length;
@@ -628,7 +647,7 @@ static uint32_t route_ac3(struct sdk_video_mpeg2 *d,
 /* Returns 0 when the packet must stay queued (behind a full ring, or a
  * full MPEG audio input). */
 static uint32_t route_audio(struct sdk_video_mpeg2 *d,
-                            const struct SDKDVDPSPacket *packet)
+                            const struct m2_audio_entry *packet)
 {
 	if (!d->audio_selected) {
 		if (packet->kind == SDK_DVD_PS_MP2 &&
@@ -742,23 +761,25 @@ static void update_audio_drop_policy(struct sdk_video_mpeg2 *d)
  * selection it decodes every matching packet up to backpressure. Audio
  * left decodable behind a full ring (AC-3 frames staged, MPEG audio in its
  * input) is decoded first. */
+static struct m2_audio_entry *audio_fifo_head(struct sdk_video_mpeg2 *d);
+static void audio_fifo_pop(struct sdk_video_mpeg2 *d);
+static void buffer_audio(struct sdk_video_mpeg2 *d);
 static void route_audio_queue(struct sdk_video_mpeg2 *d)
 {
 	if (d->ac3_selected && !pump_ac3(d))
 		return;
 	if (d->mp2_selected)
 		pump_mp2(d, 0);
+	buffer_audio(d);
 	while (!d->pcm_backpressure) {
-		const struct SDKDVDPSPacket *packet =
-			sdk_dvd_ps_peek_audio(&d->demux);
+		struct m2_audio_entry *packet = audio_fifo_head(d);
+
 		if (!packet)
 			break;
-		if ((packet->kind == SDK_DVD_PS_MP2 ||
-		     packet->kind == SDK_DVD_PS_LPCM ||
-		     packet->kind == SDK_DVD_PS_AC3) &&
-		    !route_audio(d, packet))
+		if (!route_audio(d, packet))
 			break;
-		sdk_dvd_ps_pop_audio(&d->demux, 0);
+		audio_fifo_pop(d);
+		buffer_audio(d);
 	}
 }
 
@@ -1113,6 +1134,8 @@ static void drop_audio(struct sdk_video_mpeg2 *d)
 {
 	if (d->media_configured)
 		return;
+	d->audio_fifo_read = d->audio_fifo_write = 0U;
+	d->audio_fifo_count = 0U;
 	while (sdk_dvd_ps_peek_audio(&d->demux))
 		sdk_dvd_ps_pop_audio(&d->demux, 0);
 }
@@ -1148,6 +1171,7 @@ static void seed_audio_only_origin(struct sdk_video_mpeg2 *d)
 {
 	if (!d->video_origin_seen && !d->video_seen && d->input_eof &&
 	    d->demux.staged == 0U && d->demux.video.count == 0U &&
+	    d->audio_fifo_count == 0U &&
 	    d->stashed_audio_pts != SDK_DVD_PS_NO_TS)
 		seed_origin(d, d->stashed_audio_pts);
 }
@@ -1249,7 +1273,101 @@ static void buffer_video(struct sdk_video_mpeg2 *d)
 		drop_audio(d);
 	}
 }
+static uint32_t audio_entry_bytes(uint32_t length)
+{
+	return (uint32_t)sizeof(struct m2_audio_entry) + ((length + 7U) & ~7U);
+}
 
+static struct m2_audio_entry *audio_fifo_head(struct sdk_video_mpeg2 *d)
+{
+	struct m2_audio_entry *entry;
+
+	if (d->audio_fifo_count == 0U)
+		return 0;
+	if (M2_AUDIO_FIFO_CAPACITY - d->audio_fifo_read <
+	    sizeof(struct m2_audio_entry))
+		d->audio_fifo_read = 0U;
+	entry = (struct m2_audio_entry *)(d->audio_fifo + d->audio_fifo_read);
+	if (entry->length == M2_AUDIO_FIFO_WRAP) {
+		d->audio_fifo_read = 0U;
+		entry = (struct m2_audio_entry *)d->audio_fifo;
+	}
+	return entry;
+}
+
+static void audio_fifo_pop(struct sdk_video_mpeg2 *d)
+{
+	struct m2_audio_entry *entry = audio_fifo_head(d);
+
+	if (!entry)
+		return;
+	d->audio_fifo_read += audio_entry_bytes(entry->length);
+	if (--d->audio_fifo_count == 0U)
+		d->audio_fifo_read = d->audio_fifo_write = 0U;
+}
+
+static int audio_fifo_push(struct sdk_video_mpeg2 *d,
+	const struct SDKDVDPSPacket *packet)
+{
+	uint32_t need = audio_entry_bytes(packet->length);
+	uint32_t read = d->audio_fifo_read;
+	uint32_t write = d->audio_fifo_write;
+	uint32_t at;
+	struct m2_audio_entry *entry;
+
+	if (need > M2_AUDIO_FIFO_CAPACITY)
+		return 0;
+	if (d->audio_fifo_count == 0U) {
+		at = 0U;
+	} else if (write >= read) {
+		if (M2_AUDIO_FIFO_CAPACITY - write >= need) {
+			at = write;
+		} else if (need < read) {
+			if (M2_AUDIO_FIFO_CAPACITY - write >=
+			    sizeof(struct m2_audio_entry))
+				((struct m2_audio_entry *)(d->audio_fifo + write))->length =
+					M2_AUDIO_FIFO_WRAP;
+			at = 0U;
+		} else {
+			return 0;
+		}
+	} else if (read - write > need) {
+		at = write;
+	} else {
+		return 0;
+	}
+	entry = (struct m2_audio_entry *)(d->audio_fifo + at);
+	entry->pts = packet->pts;
+	entry->dts = packet->dts;
+	entry->length = packet->length;
+	entry->stream_id = packet->stream_id;
+	entry->substream_id = packet->substream_id;
+	entry->kind = packet->kind;
+	entry->header_bytes = packet->header_bytes;
+	memcpy(entry->data, packet->data, packet->length);
+	if (d->audio_fifo_count == 0U)
+		d->audio_fifo_read = 0U;
+	d->audio_fifo_write = at + need;
+	d->audio_fifo_count++;
+	return 1;
+}
+
+static void buffer_audio(struct sdk_video_mpeg2 *d)
+{
+	const struct SDKDVDPSPacket *packet;
+
+	if (!d->media_configured) {
+		drop_audio(d);
+		return;
+	}
+	if (d->pcm_backpressure && d->pcm_acknowledged != 0U)
+		return;
+	while ((packet = sdk_dvd_ps_peek_audio(&d->demux)) != 0) {
+		if (!audio_fifo_push(d, packet))
+			break;
+		sdk_dvd_ps_pop_audio(&d->demux, 0);
+	}
+}
 /* Hand one buffered PES to libmpeg2 per call. mpeg2_tag_picture() latches
  * the tag onto the next picture the decoder PARSES, so a PTS-bearing PES
  * must be tagged and handed over in its own step: batching several pictures
@@ -1314,7 +1432,9 @@ static void *mpeg2_create(uint32_t pool_owner)
 	sdk_mpeg2_neon_install();
 	d->es = (uint8_t *)M2_MALLOC(M2_ES_CAPACITY);
 	d->video_fifo = (uint8_t *)M2_MALLOC(M2_VIDEO_FIFO_CAPACITY);
-	if (!d->es || !d->video_fifo) {
+	d->audio_fifo = (uint8_t *)M2_MALLOC(M2_AUDIO_FIFO_CAPACITY);
+	if (!d->es || !d->video_fifo || !d->audio_fifo) {
+		M2_FREE(d->audio_fifo);
 		M2_FREE(d->video_fifo);
 		M2_FREE(d->es);
 		mpeg2_close(d->decoder);
@@ -1345,6 +1465,7 @@ static void mpeg2_destroy(void *decoder)
 		mpeg2_close(d->decoder);
 	M2_FREE(d->mp2_input);
 	sdk_dvd_ac3_destroy(&d->ac3);
+	M2_FREE(d->audio_fifo);
 	M2_FREE(d->video_fifo);
 	M2_FREE(d->es);
 	M2_FREE(d);
@@ -1362,12 +1483,13 @@ static int mpeg2_write(void *decoder, const uint8_t *src, uint32_t length,
 		return SDK_VIDEO_BACKEND_WRITE_ERROR;
 	update_audio_drop_policy(d);
 	sdk_dvd_ps_write(&d->demux, src, length, &used, eof);
-	/* Buffering video lets the demux parse further: offer it the rest
-	 * of this write as long as it takes more. */
+	/* Moving both PES kinds out of the demux lets WRITE reach the bounded
+	 * compressed FIFOs without waiting for a clocked decode. */
 	for (;;) {
 		uint32_t more = 0U;
 
 		buffer_video(d);
+		buffer_audio(d);
 		if (used == length)
 			break;
 		sdk_dvd_ps_write(&d->demux, src + used, length - used, &more,
@@ -1403,7 +1525,8 @@ static int audio_drained(struct sdk_video_mpeg2 *d)
 {
 	if (!d->media_configured || !d->audio_selected)
 		return 1;
-	if (d->demux.audio.count != 0U || d->demux.staged != 0U)
+	if (d->demux.audio.count != 0U || d->demux.staged != 0U ||
+	    d->audio_fifo_count != 0U)
 		return 0;
 	if (d->mp2_selected) {
 		/* Once the input has ended no later packet will pump the
@@ -1567,6 +1690,11 @@ static int mpeg2_get_media_info(void *decoder,
 	info->audio_frames = d->audio_frames;
 	info->backpressure_events = d->backpressure_events;
 	info->audio_packets_dropped = d->demux.audio_packets_dropped;
+#ifdef SDK_VIDEO_HOST_TEST
+	info->first_dropped_audio_pts =
+		d->demux.first_dropped_audio_pts_valid
+			? d->demux.first_dropped_audio_pts : M2_NO_PTS;
+#endif
 	info->flags = d->media_flags | d->media_event_flags;
 	d->media_event_flags = 0U;
 	return 1;

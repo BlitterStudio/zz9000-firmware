@@ -2593,7 +2593,7 @@ static int patch_first_audio_pes_pts(uint8_t *ps, uint32_t len,
 	return 0;
 }
 
-/* Collect the timestamp of each timestamped audio PES in program order. */
+/* Collect timestamped audio PES entries in Program Stream order. */
 static uint32_t audio_pes_pts(const uint8_t *ps, uint32_t len,
                               uint64_t *pts, uint32_t capacity)
 {
@@ -2638,7 +2638,6 @@ static uint32_t audio_pes_pts(const uint8_t *ps, uint32_t len,
 	}
 	return count;
 }
-
 /* 9. The reported audio clock must track the PCM actually produced. */
 static int test_audio_pts_tracks_pcm(void)
 {
@@ -2838,6 +2837,7 @@ static int test_drop_resyncs_audio_clock(void)
 	uint64_t packet_pts[64];
 	uint64_t first_audio_pts_before_drops = UINT64_MAX;
 	uint64_t last_audio_pts_before_drops = UINT64_MAX;
+	uint64_t first_dropped_audio_pts = UINT64_MAX;
 	uint64_t first_retained_audio_pts = UINT64_MAX;
 	uint64_t first_audio_pts_after_resync = UINT64_MAX;
 	uint32_t packet_count;
@@ -2896,6 +2896,8 @@ static int test_drop_resyncs_audio_clock(void)
 			if (sink_state == 2 &&
 			    info.audio_packets_dropped != 0U) {
 				last_audio_pts_before_drops = info.raw_pts;
+				first_dropped_audio_pts =
+					info.first_dropped_audio_pts;
 				sink_state = 3; /* revived after the drops */
 			}
 			if (sink_state != 2)
@@ -2930,40 +2932,41 @@ static int test_drop_resyncs_audio_clock(void)
 	}
 	if (!saw_rebased || first_audio_pts_before_drops == UINT64_MAX ||
 	    last_audio_pts_before_drops == UINT64_MAX ||
+	    first_dropped_audio_pts == UINT64_MAX ||
 	    first_retained_audio_pts == UINT64_MAX ||
 	    first_audio_pts_after_resync == UINT64_MAX) {
 		fprintf(stderr, "test_drop_resyncs: rebased=%d before=%llu "
-		        "retained=%llu first=%llu\n", saw_rebased,
+		        "dropped=%llu retained=%llu first=%llu\n", saw_rebased,
 		        (unsigned long long)last_audio_pts_before_drops,
+		        (unsigned long long)first_dropped_audio_pts,
 		        (unsigned long long)first_retained_audio_pts,
 		        (unsigned long long)first_audio_pts_after_resync);
 		return 6;
 	}
-{
-	uint32_t i;
-	uint64_t first_dropped_pts = UINT64_MAX;
+	{
+		uint32_t i;
+		int found = 0;
 
-	for (i = 0U; i + SDK_DVD_PS_QUEUE_DEPTH < packet_count; i++) {
-		if (packet_pts[i] == last_audio_pts_before_drops) {
-			first_dropped_pts = packet_pts[i + SDK_DVD_PS_QUEUE_DEPTH + 1U];
-			break;
+		for (i = 0U; i < packet_count; i++) {
+			if (packet_pts[i] == first_dropped_audio_pts) {
+				found = 1;
+				break;
+			}
 		}
+		if (!found || first_retained_audio_pts <= first_dropped_audio_pts)
+			return 7;
 	}
-	if (first_dropped_pts == UINT64_MAX ||
-	    first_retained_audio_pts <= first_dropped_pts)
-		return 7;
 	if (first_audio_pts_after_resync != first_audio_pts_before_drops +
-	    first_retained_audio_pts - first_dropped_pts) {
+	    first_retained_audio_pts - first_dropped_audio_pts) {
 		fprintf(stderr, "test_drop_resyncs: first=%llu expected=%llu "
 		        "from dropped=%llu retained=%llu\n",
 		        (unsigned long long)first_audio_pts_after_resync,
 		        (unsigned long long)(first_audio_pts_before_drops +
-		        first_retained_audio_pts - first_dropped_pts),
-		        (unsigned long long)first_dropped_pts,
+		        first_retained_audio_pts - first_dropped_audio_pts),
+		        (unsigned long long)first_dropped_audio_pts,
 		        (unsigned long long)first_retained_audio_pts);
 		return 8;
 	}
-}
 	return 0;
 }
 

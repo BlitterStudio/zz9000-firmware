@@ -97,6 +97,10 @@ struct SDKVideoMediaInfo {
 	uint32_t backpressure_events;
 	uint32_t audio_packets_dropped;
 	uint32_t flags;
+#ifdef SDK_VIDEO_HOST_TEST
+	/* Test-only observation of the exact program-time drop boundary. */
+	uint64_t first_dropped_audio_pts;
+#endif
 };
 
 enum sdk_video_backend_decode_result {
