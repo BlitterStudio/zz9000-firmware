@@ -2232,6 +2232,7 @@ static int zzplay_retire_held_frame(
 {
   ZZPlaySyncDecision decision = ZZPLAY_SYNC_PRESENT;
   int64_t drift = 0;
+  int audio_was_started = runtime->audio_started;
   int pending_start;
   int status;
 
@@ -2244,10 +2245,14 @@ static int zzplay_retire_held_frame(
   if (pending_start) {
     return ZZ9K_STATUS_OK;
   }
-  if (!runtime->options.uncapped && runtime->audio_enabled &&
-      runtime->audio_started &&
-      runtime->audio_origin_pts != ZZ9K_MEDIA_NO_PTS &&
-      result->video_pts != ZZ9K_MEDIA_NO_PTS) {
+  /* The audio clock was just made live for this held picture. Present it
+   * before measuring drift so bind/preconvert time cannot discard frame one. */
+  if (!audio_was_started && runtime->audio_started) {
+    decision = ZZPLAY_SYNC_PRESENT;
+  } else if (!runtime->options.uncapped && runtime->audio_enabled &&
+             runtime->audio_started &&
+             runtime->audio_origin_pts != ZZ9K_MEDIA_NO_PTS &&
+             result->video_pts != ZZ9K_MEDIA_NO_PTS) {
     uint64_t master_pts = zzplay_audio_master_pts(runtime);
 
     /* A backend audio-clock rebase (a dropped audio span) moves the
