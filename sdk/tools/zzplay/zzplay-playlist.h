@@ -50,6 +50,7 @@ typedef struct ZZPlayPlaylist {
   int32_t resume_pos;
   ZZPlayRepeat repeat;
   int shuffle;
+  int allocation_failed;    /* last mutation could not allocate storage */
   uint32_t rng;             /* xorshift32 state, never 0 */
 } ZZPlayPlaylist;
 

@@ -72,7 +72,7 @@ static int requester_add_path(const char *path)
   return 1;
 }
 
-static void requester_collect_files(struct FileRequester *fr)
+static int requester_collect_files(struct FileRequester *fr)
 {
   char path[ZZPLAY_PLAYLIST_PATH_MAX];
   int i;
@@ -81,7 +81,7 @@ static void requester_collect_files(struct FileRequester *fr)
     requester.result.paths = (char **)AllocVec(
         (ULONG)fr->fr_NumArgs * (ULONG)sizeof(char *), MEMF_PUBLIC | MEMF_CLEAR);
     if (!requester.result.paths) {
-      return;
+      return 0;
     }
     for (i = 0; i < fr->fr_NumArgs; i++) {
       struct WBArg *arg = &fr->fr_ArgList[i];
@@ -101,7 +101,9 @@ static void requester_collect_files(struct FileRequester *fr)
         strncat(path, (const char *)arg->wa_Name,
                 sizeof(path) - strlen(path) - 1U);
       }
-      requester_add_path(path);
+      if (!requester_add_path(path)) {
+        return 0;
+      }
     }
   } else if (fr->fr_File && fr->fr_File[0] != '\0') {
     requester_copy(path, sizeof(path), (const char *)fr->fr_Drawer);
@@ -112,10 +114,11 @@ static void requester_collect_files(struct FileRequester *fr)
     strncat(path, (const char *)fr->fr_File, sizeof(path) - strlen(path) - 1U);
     requester.result.paths = (char **)AllocVec(sizeof(char *),
                                                  MEMF_PUBLIC | MEMF_CLEAR);
-    if (requester.result.paths) {
-      requester_add_path(path);
+    if (!requester.result.paths || !requester_add_path(path)) {
+      return 0;
     }
   }
+  return 1;
 }
 
 static void requester_paths_free(void)
@@ -125,9 +128,19 @@ static void requester_paths_free(void)
   for (i = 0U; i < requester.result.path_count; i++) {
     FreeVec(requester.result.paths[i]);
   }
-  FreeVec(requester.result.paths);
+  if (requester.result.paths) {
+    FreeVec(requester.result.paths);
+  }
   requester.result.paths = 0;
   requester.result.path_count = 0U;
+}
+static void requester_fail(const char *message)
+{
+  requester.result.accepted = 0;
+  requester_copy(requester.result.error, sizeof(requester.result.error),
+                 message);
+  requester_paths_free();
+  zzplay_playlist_free(&requester.result.prepared);
 }
 
 static int requester_copy_playlist(ZZPlayPlaylist *dst,
@@ -153,7 +166,7 @@ static int requester_copy_playlist(ZZPlayPlaylist *dst,
   return 1;
 }
 
-static void requester_prepare_selection(void)
+static int requester_prepare_selection(void)
 {
   uint32_t i;
 
@@ -170,9 +183,17 @@ static void requester_prepare_selection(void)
       } else {
         zzplay_files_add(&requester.result.prepared, requester.result.paths[i]);
       }
+      if (requester.result.prepared.allocation_failed) {
+        break;
+      }
     }
   }
   requester_paths_free();
+  if (requester.result.prepared.allocation_failed) {
+    zzplay_playlist_free(&requester.result.prepared);
+    return 0;
+  }
+  return 1;
 }
 
 static void requester_save_snapshot(void)
@@ -275,18 +296,22 @@ static void requester_process(void)
   if (fr) {
     requester.result.accepted = AslRequest(fr, 0) ? 1 : 0;
     if (requester.result.accepted) {
+      int collected = 1;
+
       requester_copy(requester.result.drawer, sizeof(requester.result.drawer),
                      (const char *)fr->fr_Drawer);
       if (requester.result.op == ZZPLAY_MODAL_OPEN_FILES ||
           requester.result.op == ZZPLAY_MODAL_ADD_FILES ||
           (requester.result.op != ZZPLAY_MODAL_ADD_DRAWER &&
            fr->fr_File && fr->fr_File[0] != '\0')) {
-        requester_collect_files(fr);
+        collected = requester_collect_files(fr);
       }
-      if (requester.result.op == ZZPLAY_MODAL_SAVE_PLAYLIST) {
+      if (!collected) {
+        requester_fail("Not enough memory to prepare selection");
+      } else if (requester.result.op == ZZPLAY_MODAL_SAVE_PLAYLIST) {
         requester_save_snapshot();
-      } else {
-        requester_prepare_selection();
+      } else if (!requester_prepare_selection()) {
+        requester_fail("Not enough memory to prepare selection");
       }
     }
     FreeAslRequest(fr);

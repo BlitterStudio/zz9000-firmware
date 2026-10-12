@@ -1062,14 +1062,78 @@ static void execute_modal_op(ZZPlayModal op)
   ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
 }
 
+static int playlist_append_entries(ZZPlayPlaylist *dst,
+                                   const ZZPlayPlaylist *src,
+                                   int32_t *first_added, uint32_t *added,
+                                   int *truncated)
+{
+  uint32_t i;
+
+  for (i = 0U; i < src->count; i++) {
+    const ZZPlayPlaylistEntry *entry = &src->entries[i];
+    int32_t index = zzplay_playlist_add(dst, entry->path);
+
+    if (index < 0) {
+      if (dst->count == ZZPLAY_PLAYLIST_MAX_ENTRIES) {
+        if (truncated) {
+          *truncated = 1;
+        }
+        break;
+      }
+      return 0;
+    }
+    zzplay_playlist_set_title(dst, (uint32_t)index, entry->title);
+    dst->entries[index].duration_ms = entry->duration_ms;
+    dst->entries[index].failed = entry->failed;
+    if (first_added && *first_added < 0) {
+      *first_added = index;
+    }
+    if (added) {
+      (*added)++;
+    }
+  }
+  return 1;
+}
+
+static int playlist_clone(ZZPlayPlaylist *dst, const ZZPlayPlaylist *src)
+{
+  zzplay_playlist_init(dst);
+  dst->repeat = src->repeat;
+  dst->shuffle = 0;
+  dst->rng = src->rng;
+  if (!playlist_append_entries(dst, src, 0, 0, 0)) {
+    zzplay_playlist_free(dst);
+    return 0;
+  }
+  if (src->count != 0U) {
+    memcpy(dst->order, src->order, src->count * sizeof(*dst->order));
+  }
+  dst->current = src->current;
+  dst->resume_pos = src->resume_pos;
+  dst->repeat = src->repeat;
+  dst->shuffle = src->shuffle;
+  dst->rng = src->rng;
+  return 1;
+}
+
 static void apply_requester_result(ZZPlayController *ctl, ZZPlayPlaylist *pl,
                                    ZZPlayPrefs *prefs,
                                    ZZPlayRequesterResult *result)
 {
   int32_t first_added = -1;
-  uint32_t i;
+  uint32_t added = 0U;
+  int truncated = 0;
+  ZZPlayPlaylist next;
 
+  if (result->error[0] != '\0') {
+    zzplay_controller_set_message(ctl, result->error);
+    return;
+  }
   if (!result->accepted) {
+    return;
+  }
+  if (result->prepared.allocation_failed) {
+    zzplay_controller_set_message(ctl, "Unable to update playlist");
     return;
   }
   if (result->drawer[0] != '\0' && prefs) {
@@ -1078,27 +1142,42 @@ static void apply_requester_result(ZZPlayController *ctl, ZZPlayPlaylist *pl,
   }
   switch (result->op) {
   case ZZPLAY_MODAL_OPEN_FILES:
+    zzplay_playlist_init(&next);
+    next.repeat = pl->repeat;
+    next.shuffle = pl->shuffle;
+    next.rng = pl->rng;
+    if (!playlist_append_entries(&next, &result->prepared, &first_added, 0,
+                                 0)) {
+      zzplay_playlist_free(&next);
+      zzplay_controller_set_message(ctl, "Unable to update playlist");
+      return;
+    }
+    zzplay_playlist_free(pl);
+    *pl = next;
+    if (first_added >= 0) {
+      /* Replacing a playing list ends that item only after the user accepts. */
+      zzplay_controller_jump(ctl, first_added);
+    }
+    ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
+    break;
+
   case ZZPLAY_MODAL_ADD_FILES:
   case ZZPLAY_MODAL_ADD_DRAWER:
   case ZZPLAY_MODAL_LOAD_PLAYLIST:
-    if (result->op == ZZPLAY_MODAL_OPEN_FILES) {
-      zzplay_playlist_clear(pl);
+    if (!playlist_clone(&next, pl) ||
+        !playlist_append_entries(&next, &result->prepared, 0, &added,
+                                 &truncated)) {
+      zzplay_playlist_free(&next);
+      zzplay_controller_set_message(ctl, "Unable to update playlist");
+      return;
     }
-    for (i = 0U; i < result->prepared.count; i++) {
-      const ZZPlayPlaylistEntry *entry = &result->prepared.entries[i];
-      int32_t index = zzplay_playlist_add(pl, entry->path);
+    zzplay_playlist_free(pl);
+    *pl = next;
+    if (truncated) {
+      char message[64];
 
-      if (index >= 0) {
-        zzplay_playlist_set_title(pl, (uint32_t)index, entry->title);
-        pl->entries[index].duration_ms = entry->duration_ms;
-        if (first_added < 0) {
-          first_added = index;
-        }
-      }
-    }
-    if (result->op == ZZPLAY_MODAL_OPEN_FILES && first_added >= 0) {
-      /* Replacing a playing list ends that item only after the user accepts. */
-      zzplay_controller_jump(ctl, first_added);
+      sprintf(message, "Playlist full, %lu added", (unsigned long)added);
+      zzplay_controller_set_message(ctl, message);
     }
     ctl->dirty |= ZZPLAY_DIRTY_PLAYLIST;
     break;

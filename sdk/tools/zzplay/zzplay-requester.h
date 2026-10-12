@@ -19,6 +19,7 @@ typedef struct ZZPlayRequesterResult {
   ZZPlayModal op;
   int accepted;
   int saved;
+  char error[96];
   char drawer[ZZPLAY_PLAYLIST_PATH_MAX];
   char **paths;
   uint32_t path_count;

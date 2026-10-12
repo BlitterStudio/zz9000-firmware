@@ -79,7 +79,7 @@ static int compare_str_ptrs(const void *a, const void *b)
 }
 
 /* Returns 1 if path contains AmigaDOS wildcard characters. */
-static int is_wildcard_pattern(const char *path)
+static int is_wildcard_pattern(const char *path, ZZPlayPlaylist *list)
 {
   size_t len = strlen(path);
   LONG buf_len = (LONG)(len * 2U + 4U);
@@ -91,6 +91,7 @@ static int is_wildcard_pattern(const char *path)
   }
   pat_buf = (UBYTE *)zzplay_alloc((size_t)buf_len);
   if (!pat_buf) {
+    list->allocation_failed = 1;
     return 0;
   }
   res = ParsePatternNoCase((CONST_STRPTR)path, pat_buf, buf_len);
@@ -110,6 +111,7 @@ static uint32_t add_pattern(ZZPlayPlaylist *list, const char *pattern)
   }
   anchor = (struct AnchorPath *)zzplay_alloc(anchor_size);
   if (!anchor) {
+    list->allocation_failed = 1;
     return 0U;
   }
 
@@ -172,6 +174,7 @@ static uint32_t add_drawer(ZZPlayPlaylist *list, BPTR dir_lock,
 
   fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, 0);
   if (!fib) {
+    list->allocation_failed = 1;
     return 0U;
   }
 
@@ -186,12 +189,16 @@ static uint32_t add_drawer(ZZPlayPlaylist *list, BPTR dir_lock,
   while (ExNext(dir_lock, fib)) {
     const char *name = (const char *)fib->fib_FileName;
     if (fib->fib_DirEntryType < 0) {
-      if (zzplay_format_for_path(name) != 0) {
-        name_array_push(&files, name);
+      if (zzplay_format_for_path(name) != 0 &&
+          !name_array_push(&files, name)) {
+        list->allocation_failed = 1;
+        break;
       }
     } else if (fib->fib_DirEntryType > 0) {
-      if (depth + 1U < ZZPLAY_FILES_MAX_DEPTH) {
-        name_array_push(&subdrawers, name);
+      if (depth + 1U < ZZPLAY_FILES_MAX_DEPTH &&
+          !name_array_push(&subdrawers, name)) {
+        list->allocation_failed = 1;
+        break;
       }
     }
   }
@@ -251,7 +258,7 @@ uint32_t zzplay_files_add(ZZPlayPlaylist *list, const char *path)
     return 0U;
   }
 
-  if (is_wildcard_pattern(path)) {
+  if (is_wildcard_pattern(path, list)) {
     return add_pattern(list, path);
   }
 
@@ -263,6 +270,8 @@ uint32_t zzplay_files_add(ZZPlayPlaylist *list, const char *path)
         is_drawer = 1;
       }
       FreeDosObject(DOS_FIB, fib);
+    } else {
+      list->allocation_failed = 1;
     }
     if (is_drawer) {
       uint32_t added = add_drawer(list, lock, path, 0U);

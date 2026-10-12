@@ -77,6 +77,7 @@ void zzplay_playlist_clear(ZZPlayPlaylist *list)
   list->count = 0U;
   list->current = -1;
   list->resume_pos = -1;
+  list->allocation_failed = 0;
 }
 
 void zzplay_playlist_free(ZZPlayPlaylist *list)
@@ -119,6 +120,7 @@ int32_t zzplay_playlist_add(ZZPlayPlaylist *list, const char *path)
     if (!new_entries || !new_order) {
       zzplay_free(new_entries);
       zzplay_free(new_order);
+      list->allocation_failed = 1;
       return -1;
     }
     if (list->count != 0U) {
@@ -135,6 +137,7 @@ int32_t zzplay_playlist_add(ZZPlayPlaylist *list, const char *path)
 
   copy = (char *)zzplay_alloc(len + 1U);
   if (!copy) {
+    list->allocation_failed = 1;
     return -1;
   }
   memcpy(copy, path, len + 1U);
@@ -924,8 +927,11 @@ uint32_t zzplay_playlist_load_m3u(ZZPlayPlaylist *list, const char *path)
     return 0U;
   }
   if (!zzplay_file_read_all(path, 10U * 1024U * 1024U, (void **)&buf,
-                            &len) ||
-      len == 0U) {
+                            &len)) {
+    list->allocation_failed = 1;
+    return 0U;
+  }
+  if (len == 0U) {
     zzplay_free(buf);
     return 0U;
   }
