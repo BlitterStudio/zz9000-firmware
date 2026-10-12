@@ -4489,20 +4489,29 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session,
 		audio_playback_preconvert(
 			stream, AUDIO_PUMP_PRECONVERT_FILL_BUDGET);
 	}
-	/* Re-arm the shared fill frontier only when no other slot is
-	 * live: joining a live mix must never rewind it (the other
-	 * producers' staged periods would be re-filled and their staging
-	 * double-counted) -- the same guard the lease-submit path applies. */
-	if (!audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP))
-		audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
 	/* Name the output source for metering (R8) before the session
 	 * goes live. */
 	audio_scene_meter_output_identity(
 		audio_pump_meter_identity(source_kind));
-	/* The initial media preconvert fill completed while this slot was
-	 * frozen; now the next audio IRQ may stage its already-prepared PCM. */
-	__asm__ __volatile__("" ::: "memory");
-	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
+	/* Re-arm the shared fill frontier only when no other slot is
+	 * live: joining a live mix must never rewind it (the other
+	 * producers' staged periods would be re-filled and their staging
+	 * double-counted) -- the same guard the lease-submit path applies. */
+	if (!audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP)) {
+		audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
+		/* Direct 48 kHz media otherwise waits one formatter interrupt to
+		 * stage; a preconvert view otherwise has PCM only privately queued.
+		 * Keep priming and publication indivisible to the formatter ISR. */
+		if (!audio_fabric_producer_prime_and_go_live(
+			AUDIO_FABRIC_SLOT_PUMP)) {
+			/* A peer can become live after the optimistic check and before
+			 * the IRQ-masked recheck. It owns the shared frontier now, so
+			 * skip the prime but still publish this prepared producer. */
+			audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
+		}
+	} else {
+		audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
+	}
 }
 
 static void audio_playback_stop(void)

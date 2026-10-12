@@ -1012,6 +1012,41 @@ static void scenario_heartbeat(void)
 		grant.generation);
 }
 
+/* Startup priming is a fill operation, not a 20-ms formatter period. An
+ * attached but not-yet-live lease near its heartbeat deadline must therefore
+ * retain both its lease and measured age. */
+static void scenario_prime_preserves_lease_age(void)
+{
+	struct audio_fabric_ring_grant grant;
+	struct audio_fabric_slot_state before;
+	struct audio_fabric_slot_state after;
+
+	fabric_reset_state();
+	g_dma_count = 0U;
+	check(acquire_lease(AUDIO_FABRIC_SLOT_MAILBOX, 128U, &grant) ==
+	      AUDIO_FABRIC_LEASE_OK, "prime age: acquire frozen peer", "");
+	/* Two real formatter periods age this unpublished lease to one tick short
+	 * of the host harness timeout. */
+	fabric_pass();
+	fabric_pass();
+	before = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_prefill_constant(&g_model_b, PUMP_PCM);
+	(void)audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_PUMP, &g_ops_b);
+	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP, 48000U);
+	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
+	check(audio_fabric_producer_prime_and_go_live(
+			AUDIO_FABRIC_SLOT_PUMP) != 0,
+	      "prime age: initial PCM staged", "");
+	after = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(after.state == AUDIO_FABRIC_SLOT_STATE_LEASED &&
+	      after.heartbeat_ms == before.heartbeat_ms,
+	      "prime age: frozen peer heartbeat unchanged",
+	      fmt("before=%u after=%u", before.heartbeat_ms, after.heartbeat_ms));
+	(void)audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
+		grant.generation);
+}
+
 /* ---- E2. dead producer: unreadable line still revokes (PR #88) ---- */
 
 static void scenario_dead_line(void)
@@ -1384,6 +1419,7 @@ int main(void)
 	scenario_grace();
 	scenario_cursor_fault();
 	scenario_heartbeat();
+	scenario_prime_preserves_lease_age();
 	scenario_dead_line();
 	scenario_rebuild();
 	scenario_warm_reset();
