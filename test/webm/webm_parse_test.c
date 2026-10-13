@@ -268,6 +268,61 @@ static int test_audio_tracks(void)
 	}
 	return failed;
 }
+static int test_disabled_track_fields(void)
+{
+	struct buf seg = {0}, info = {0}, tracks = {0}, video = {0}, audio = {0}, cluster = {0};
+	struct buf vtrack = {0}, atrack = {0}, ebml = {0}, file = {0};
+	struct webm_demux d;
+	const struct webm_track *v;
+	const struct webm_track *a;
+	uint8_t scratch[4096];
+	uint8_t depth[] = {1, 0, 16};
+	uint8_t rate[] = {0x47, 0x3b, 0x80, 0x00};
+	uint8_t scale[] = {0x0f, 0x42, 0x40};
+	int failed = 0;
+
+	bu8(&vtrack, 0xD7, 1);
+	bu8(&vtrack, 0x83, 1);
+	bu8(&vtrack, 0xB9, 0);
+	belem(&vtrack, 0x86, "V_MPEG1", 7);
+	bu16(&video, 0xB0, 32);
+	bu16(&video, 0xBA, 16);
+	bnest(&vtrack, 0xE0, &video);
+	bnest(&tracks, 0xAE, &vtrack);
+	bu8(&atrack, 0xD7, 2);
+	bu8(&atrack, 0x83, 2);
+	bu8(&atrack, 0xB9, 0);
+	belem(&atrack, 0x86, "A_PCM/INT/LIT", 13);
+	belem(&audio, 0xB5, rate, sizeof(rate));
+	belem(&audio, 0x6264, depth, sizeof(depth));
+	bnest(&atrack, 0xE1, &audio);
+	bnest(&tracks, 0xAE, &atrack);
+	belem(&info, 0x2AD7B1, scale, sizeof(scale));
+	bnest(&seg, 0x1549A966, &info);
+	bnest(&seg, 0x1654AE6B, &tracks);
+	bu8(&cluster, 0xE7, 0);
+	bnest(&seg, 0x1F43B675, &cluster);
+	belem(&ebml, 0x4282, "matroska", 8);
+	bnest(&file, 0x1A45DFA3, &ebml);
+	bid(&file, 0x18538067);
+	bsize(&file, seg.n);
+	bput(&file, seg.p, seg.n);
+	free(seg.p);
+	if (open_file(file.p, file.n, 1, &d, scratch, sizeof(scratch)) != 0) {
+		fprintf(stderr, "disabled track fields: parse failed\n");
+		failed = 1;
+	} else {
+		v = webm_track(&d, 1);
+		a = webm_track(&d, 2);
+		if (!v || !a || a->channels != 1U || a->bit_depth != 65552U) {
+			fprintf(stderr, "disabled track fields: parse values\n");
+			failed = 1;
+		}
+		webm_close(&d);
+	}
+	free(file.p);
+	return failed;
+}
 
 /* Encoders put master and long elements inside Video and Audio: Colour
  * (here a copy of what ffmpeg writes for a BT.709 phone clip), Projection,
@@ -604,6 +659,7 @@ int main(void)
 	}
 	free(laced.p);
 	failed |= test_audio_tracks();
+	failed |= test_disabled_track_fields();
 	failed |= test_track_metadata_masters();
 	failed |= test_lacing();
 	failed |= test_multi_cluster();
