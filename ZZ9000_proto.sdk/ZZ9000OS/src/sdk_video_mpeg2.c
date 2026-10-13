@@ -1780,13 +1780,21 @@ static int mkv_take_audio(struct sdk_video_mpeg2 *d)
 	struct webm_block *blk = &d->mkv_audio_pending;
 	uint64_t pts;
 	uint32_t done;
+	int have_pts;
 
-	int have_pts = mkv_audio_pts(d, blk, &pts);
-
-	if (have_pts < 0)
-		return -1;
-	if (have_pts != 0)
-		mkv_observe_audio(d, pts);
+	/* Do not anchor a block while its predecessors wait in the PCM ring.
+	 * Once anchored, the block can take several calls to drain through the
+	 * compressed and PCM queues; never observe that same anchor again. */
+	if (d->pcm_backpressure)
+		return 0;
+	if (!d->mkv_audio_pending_observed) {
+		have_pts = mkv_audio_pts(d, blk, &pts);
+		if (have_pts < 0)
+			return -1;
+		if (have_pts != 0)
+			mkv_observe_audio(d, pts);
+		d->mkv_audio_pending_observed = 1U;
+	}
 	if (d->mp2_selected)
 		done = mkv_route_mp2(d, blk->data, blk->size);
 	else if (d->ac3_selected)

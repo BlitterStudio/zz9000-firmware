@@ -175,23 +175,30 @@ static void add_block(struct buf *cluster, uint8_t track, uint16_t timecode,
 }
 
 static void add_xiph_laced_audio_block(struct buf *cluster, uint16_t timecode,
-	const uint8_t *data, uint32_t length)
+	const uint8_t *data, uint32_t length, uint8_t frames,
+	uint8_t frame_copies)
 {
 	struct buf block = {0};
-	uint32_t remaining = length;
+	uint32_t frame_length = length * frame_copies;
+	uint32_t i, j;
 
 	byte(&block, 0x82U);
 	byte(&block, (uint8_t)(timecode >> 8));
 	byte(&block, (uint8_t)timecode);
 	byte(&block, 0x02U);
-	byte(&block, 1U);
-	while (remaining >= UINT8_MAX) {
-		byte(&block, UINT8_MAX);
-		remaining -= UINT8_MAX;
+	byte(&block, (uint8_t)(frames - 1U));
+	for (i = 0U; i + 1U < frames; i++) {
+		uint32_t remaining = frame_length;
+
+		while (remaining >= UINT8_MAX) {
+			byte(&block, UINT8_MAX);
+			remaining -= UINT8_MAX;
+		}
+		byte(&block, (uint8_t)remaining);
 	}
-	byte(&block, (uint8_t)remaining);
-	put(&block, data, length);
-	put(&block, data, length);
+	for (i = 0U; i < frames; i++)
+		for (j = 0U; j < frame_copies; j++)
+			put(&block, data, length);
 	nest(cluster, 0xA3, &block);
 }
 
@@ -221,7 +228,8 @@ static struct buf make_file_ex(const uint8_t *video, uint32_t video_length,
 	if (video_length)
 		add_block(&cluster, 1U, 0U, video, video_length);
 	if (audio_laced)
-		add_xiph_laced_audio_block(&cluster, audio_timecode, audio, audio_length);
+		add_xiph_laced_audio_block(&cluster, audio_timecode, audio, audio_length,
+			(uint8_t)audio_laced, 2U);
 	else if (audio_length)
 		add_block(&cluster, 2U, 0U, audio, audio_length);
 	nest(&segment, 0x1F43B675, &cluster);
@@ -605,8 +613,13 @@ static void test_laced_mp2_advances_audio_pts(void)
 	uint8_t ring[32768];
 	void *decoder;
 	unsigned guard;
+	unsigned acknowledgements = 0U;
+	uint64_t first_backpressure_pts = 0U;
+	uint64_t final_audio_pts = 0U;
+	uint64_t final_pcm = 0U;
 	int saw_block_pts = 0;
-	int decoded_audio = 0;
+	int saw_backpressure = 0;
+	int saw_done = 0;
 	int bad_flags = 0;
 
 	check(pes_payloads(zz9k_mpeg1_ps_fixture,
@@ -615,29 +628,52 @@ static void test_laced_mp2_advances_audio_pts(void)
 	check(pes_payloads(zz9k_mpeg1_mp2_ps_fixture,
 		(uint32_t)sizeof(zz9k_mpeg1_mp2_ps_fixture), 0xc0U, &audio),
 		"laced MP2 timeline audio fixture supplies elementary stream");
+	/* 24 laces each carry two MP2 frames, spanning more than a second. The
+	 * duration matches each decoded lace, while the small PCM ring makes it
+	 * resume over multiple calls. */
 	file = make_file_ex(video.p, video.n, "A_MPEG/L2", 2U, 16U,
-		audio.p, audio.n, 1, 1, 1, 0U, 1, 2000000U, 17U);
+		audio.p, audio.n, 1, 1, 1, 835918367U, 24, 2000000U, 17U);
 	decoder = open_stream(&file, SDK_VIDEO_MEDIA_AUDIO_MP2, ring,
 		sizeof(ring), sizeof(ring), 1);
 	if (decoder) {
-		for (guard = 0U; guard < 128U; guard++) {
-			(void)ops->decode(decoder, &frame);
+		for (guard = 0U; guard < 512U; guard++) {
+			int rc = ops->decode(decoder, &frame);
+
 			if (ops->get_media_info(decoder, &info)) {
 				if (info.raw_pts == 3060U)
 					saw_block_pts = 1;
-				if (info.pcm_produced != 0U && info.audio_pts != 0U)
-					decoded_audio = 1;
 				if ((info.flags & (SDK_VIDEO_MEDIA_FLAG_DISCONTINUITY |
 						   SDK_VIDEO_MEDIA_FLAG_REBASED)) != 0U)
 					bad_flags = 1;
+				final_audio_pts = info.audio_pts;
+				final_pcm = info.pcm_produced;
+				if (rc == SDK_VIDEO_BACKEND_BACKPRESSURE &&
+				    info.pcm_produced != 0U) {
+					if (!saw_backpressure)
+						first_backpressure_pts = info.audio_pts;
+					saw_backpressure = 1;
+					check(ops->ack_media(decoder, info.pcm_produced),
+						"laced MP2 acknowledges blocked PCM");
+					acknowledgements++;
+				}
+			}
+			if (rc == SDK_VIDEO_BACKEND_DONE) {
+				saw_done = 1;
+				break;
 			}
 		}
 		check(saw_block_pts,
 			"laced MP2 anchors the first frame at the scaled block PTS");
-		check(decoded_audio,
-			"laced MP2 decodes and advances the reported audio clock");
+		check(saw_backpressure && acknowledgements != 0U,
+			"laced MP2 resumes after PCM-ring acknowledgement");
+		check(first_backpressure_pts < 90000U,
+			"blocked laces do not rebase the audio clock one second ahead");
 		check(!bad_flags,
 			"laced MP2 timestamps do not rebase the audio timeline");
+		check(saw_done && final_pcm / 4U > 48000U && info.sample_rate != 0U &&
+		      final_audio_pts == 3060U +
+		      (final_pcm / 4U) * 90000U / info.sample_rate,
+			"later laces advance the audio clock by their decoded samples");
 		ops->destroy(decoder);
 	}
 	free(file.p);
