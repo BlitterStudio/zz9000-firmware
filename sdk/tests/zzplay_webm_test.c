@@ -298,6 +298,13 @@ static int check_matroska(void)
   if (!probe_ok(file, n, &info) || info.doc_type != ZZPLAY_WEBM_DOCTYPE_MATROSKA ||
       info.video != ZZPLAY_WEBM_VIDEO_MPEG2 || info.audio != ZZPLAY_WEBM_AUDIO_AC3 ||
       info.sample_rate != 48000U || info.channels != 2U) return 0;
+  {
+    char line[96];
+
+    /* The format line names the container the file is. */
+    if (!zzplay_webm_format_line(&info, line, sizeof(line)) ||
+        strncmp(line, "Matroska MPEG-2 720x480, AC-3", 29) != 0) return 0;
+  }
   /* Audio TrackEntries may precede their MPEG video TrackEntry. Unsupported
    * entries are ignored, and a supported AC-3 entry still wins. */
   tn = 0U;

@@ -3303,11 +3303,11 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     }
     policy->video_name = zzplay_webm_video_name(webm->video);
     policy->audio_name = zzplay_webm_audio_name(webm->audio);
-    policy->service_missing = mpeg_matroska ? "zzplay: Matroska MPEG playback is not supported by this firmware\n" : "zzplay: WebM playback is not supported by this firmware\n";
-    /* Firmware from before Matroska MPEG has no backend for it and refuses
-     * the session at begin. */
-    policy->begin_refused = mpeg_matroska ? "zzplay: the firmware refused this Matroska MPEG stream (it needs newer firmware, or the video size is unsupported)\n" : "zzplay: WebM playback was refused by the firmware\n";
-    policy->stream_refused = mpeg_matroska ? "zzplay: this Matroska MPEG stream is not supported\n" : "zzplay: this WebM stream is not supported\n";
+    policy->service_missing = mpeg_matroska ? "zzplay: Matroska MPEG playback is not supported by this firmware\n" : matroska ? "zzplay: Matroska playback is not supported by this firmware\n" : "zzplay: WebM playback is not supported by this firmware\n";
+    /* Firmware from before Matroska support refuses the session at
+     * begin. */
+    policy->begin_refused = mpeg_matroska ? "zzplay: the firmware refused this Matroska MPEG stream (it needs newer firmware, or the video size is unsupported)\n" : matroska ? "zzplay: Matroska playback was refused by the firmware (it may need newer firmware)\n" : "zzplay: WebM playback was refused by the firmware\n";
+    policy->stream_refused = mpeg_matroska ? "zzplay: this Matroska MPEG stream is not supported\n" : matroska ? "zzplay: this Matroska stream is not supported\n" : "zzplay: this WebM stream is not supported\n";
     /* MPEG in Matroska follows the Program Stream policy: skip late B
      * pictures, and recover a sustained lag at the next I picture. */
     policy->keyframe_skip = 1U;
@@ -3325,7 +3325,7 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
   if (webm->audio == ZZPLAY_WEBM_AUDIO_NONE &&
       requested != ZZPLAY_AUDIO_AUTO && requested != ZZPLAY_AUDIO_NONE &&
       strict) {
-    zzplay_error(runtime, "zzplay: the WebM file has no audio track\n");
+    zzplay_error(runtime, "zzplay: the %s file has no audio track\n", container_name);
     goto refused;
   }
   memset(decision, 0, sizeof(*decision));
@@ -3343,9 +3343,9 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     }
     if (decision->status != ZZPLAY_BACKEND_OK) {
       zzplay_error(runtime,
-                   "zzplay: audio backend %s cannot play WebM %s "
+                   "zzplay: audio backend %s cannot play %s %s "
                    "(status %u)\n",
-                   zzplay_audio_backend_name(requested),
+                   zzplay_audio_backend_name(requested), container_name,
                    zzplay_webm_audio_name(webm->audio),
                    (unsigned)decision->status);
       zzplay_fail(runtime, ZZPLAY_FAILURE_CAPABILITY,
@@ -3358,9 +3358,9 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     decision->status = ZZPLAY_BACKEND_OK;
     decision->selected = ZZPLAY_AUDIO_NONE;
     runtime->audio_backend = ZZPLAY_AUDIO_NONE;
-    zzplay_info("zzplay: warning: video-only WebM\n");
+    zzplay_info("zzplay: warning: video-only %s\n", container_name);
   }
-  zzplay_info("zzplay: WebM %s %lux%lu%s\n",
+  zzplay_info("zzplay: %s %s %lux%lu%s\n", container_name,
               zzplay_webm_video_name(webm->video),
               (unsigned long)webm->width, (unsigned long)webm->height,
               webm->audio == ZZPLAY_WEBM_AUDIO_NONE
@@ -3378,9 +3378,9 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     }
     whole = frac / 1000;
     frac = frac % 1000;
-    zzplay_info("zzplay: WebM projection pose roll %s%ld.%03ld degrees "
+    zzplay_info("zzplay: %s projection pose roll %s%ld.%03ld degrees "
                 "(not applied)\n",
-                roll < 0 ? "-" : "", (long)whole, (long)frac);
+                container_name, roll < 0 ? "-" : "", (long)whole, (long)frac);
   }
   zzplay_controller_set_capabilities(
       runtime->ctl, 0, runtime->audio_backend == ZZPLAY_AUDIO_AHI, 1);

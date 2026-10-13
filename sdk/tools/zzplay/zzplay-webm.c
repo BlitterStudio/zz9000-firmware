@@ -878,7 +878,9 @@ int zzplay_webm_format_line(const ZZPlayWebMInfo *info, char *out,
     return 0;
   }
   out[0] = '\0';
-  if (!zzplay_webm_append(out, capacity, &used, "WebM ") ||
+  if (!zzplay_webm_append(out, capacity, &used,
+                          zzplay_webm_doc_type_name(info->doc_type)) ||
+      !zzplay_webm_append(out, capacity, &used, " ") ||
       !zzplay_webm_append(out, capacity, &used,
                           zzplay_webm_video_name(info->video)) ||
       !zzplay_webm_append(out, capacity, &used, " ") ||
