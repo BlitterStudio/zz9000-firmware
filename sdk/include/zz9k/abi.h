@@ -297,7 +297,7 @@ enum ZZ9KCapability {
   /* Codec capability flags for FLAC and Vorbis backends (unadvertised until qualified). */
   ZZ9K_CAP_AUDIO_FLAC = 1U << 28,
   ZZ9K_CAP_AUDIO_VORBIS = 1U << 29,
-  /* Zorro-III card-pool MEDIA allocations for preloaded input. */
+  /* Zorro III: card-only allocations for preloaded media input. */
   ZZ9K_CAP_MEDIA_INPUT = 1U << 30
 };
 
@@ -331,8 +331,9 @@ enum ZZ9KApertureLayoutState {
  * is mappable). CARD_ONLY declares that the 68k never touches the buffer
  * contents: the library skips the board-window mapping and leaves
  * ZZ9KSharedBuffer.data NULL, so the buffer is usable by handle only.
- * MEDIA requires CARD_ONLY and asks firmware for owner-tracked MEDIA-pool
- * storage rather than the small shared heap.
+ * MEDIA requires CARD_ONLY and asks firmware for owner-tracked storage from
+ * the card pool's 64 MiB preload-input class rather than the small shared
+ * heap.
  * Generation-1 firmware publishes a board-relative layout and requires a
  * bootstrap acknowledgement before the host heap becomes active. The
  * library accepts only the canonical 2, 4, and software-ready 8 MB profiles,

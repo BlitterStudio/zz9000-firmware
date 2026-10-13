@@ -73,7 +73,7 @@
 #define SDK_CAP_AUDIO_FABRIC           (1U << 27)
 #define SDK_CAP_AUDIO_FLAC             (1U << 28)
 #define SDK_CAP_AUDIO_VORBIS           (1U << 29)
-/* Zorro-III card-pool MEDIA allocations for preloaded input. */
+/* Zorro III: card-only allocations for preloaded media input. */
 #define SDK_CAP_MEDIA_INPUT          (1U << 30)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
