@@ -5,7 +5,7 @@
 
 #include "zz9k/abi.h"
 
-#include <stdlib.h>
+#include "zzplay-sys.h"
 #include <string.h>
 
 #define ZZPLAY_WEBM_PROBE_MAX (256U * 1024U)
@@ -1001,7 +1001,7 @@ int zzplay_probe_webm(const uint8_t *data, size_t length, int capped,
   return 1;
 }
 
-int zzplay_probe_webm_file(FILE *file, ZZPlayWebMInfo *info)
+int zzplay_probe_webm_file(ZZPlayFile *file, ZZPlayWebMInfo *info)
 {
   uint8_t *buf;
   size_t got;
@@ -1012,25 +1012,25 @@ int zzplay_probe_webm_file(FILE *file, ZZPlayWebMInfo *info)
   if (!file || !info) {
     return 0;
   }
-  pos = ftell(file);
-  if (fseek(file, 0L, SEEK_SET) != 0) {
-    clearerr(file);
+  pos = zzplay_file_tell(file);
+  if (!zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN)) {
+    zzplay_file_clear_error(file);
     return 0;
   }
-  buf = (uint8_t *)malloc(ZZPLAY_WEBM_PROBE_MAX);
+  buf = (uint8_t *)zzplay_alloc(ZZPLAY_WEBM_PROBE_MAX);
   if (!buf) {
     if (pos >= 0L) {
-      (void)fseek(file, pos, SEEK_SET);
+      (void)zzplay_file_seek(file, pos, ZZPLAY_FILE_BEGIN);
     }
     return 0;
   }
-  got = fread(buf, 1U, ZZPLAY_WEBM_PROBE_MAX, file);
-  capped = got == ZZPLAY_WEBM_PROBE_MAX && !feof(file);
-  clearerr(file);
+  got = zzplay_file_read(file, buf, ZZPLAY_WEBM_PROBE_MAX);
+  capped = got == ZZPLAY_WEBM_PROBE_MAX && !zzplay_file_eof(file);
+  zzplay_file_clear_error(file);
   recognized = zzplay_probe_webm(buf, got, capped, info);
-  free(buf);
-  if (fseek(file, 0L, SEEK_SET) != 0) {
-    clearerr(file);
+  zzplay_free(buf);
+  if (!zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN)) {
+    zzplay_file_clear_error(file);
   }
   return recognized;
 }

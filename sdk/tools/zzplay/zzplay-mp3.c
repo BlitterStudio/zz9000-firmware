@@ -121,14 +121,14 @@ static ZZPlayEngineResult zzplay_mp3_mhi(ZZPlayCodecEngine *engine,
   (void)zzplay_mhi_set_volume(&sink, run->ctl->volume);
   zzplay_info("zzplay: selected audio backend MHI (card-local Layer III)\n");
   for (;;) {
-    FILE *file = fopen(run->path, "rb");
+    ZZPlayFile *file = zzplay_file_open(run->path, 0);
 
     if (!file) {
       *open_status = ZZPLAY_MHI_IO_ERROR;
       goto done;
     }
-    if (fseek(file, (long)bridge.offset, SEEK_SET) != 0) {
-      fclose(file);
+    if (!zzplay_file_seek(file, (long)bridge.offset, ZZPLAY_FILE_BEGIN)) {
+      zzplay_file_close(file);
       *open_status = ZZPLAY_MHI_IO_ERROR;
       goto done;
     }
@@ -136,7 +136,7 @@ static ZZPlayEngineResult zzplay_mp3_mhi(ZZPlayCodecEngine *engine,
     status = zzplay_mhi_play_file(
         &sink, file, zzplay_mp3_mhi_stop_thunk,
         zzplay_mp3_mhi_paused_thunk, &bridge);
-    fclose(file);
+    zzplay_file_close(file);
     if (bridge.seek_restart) {
       /* The seek was consumed inside the poll; restart the pass at the
        * new offset with the decoder still held. */

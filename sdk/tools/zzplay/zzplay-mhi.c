@@ -108,7 +108,7 @@ static int zzplay_mhi_ensure_buffers(ZZPlayMHISink *sink)
 
 ZZPlayMHIStatus zzplay_mhi_play_file(
     ZZPlayMHISink *sink,
-    FILE *file,
+    ZZPlayFile *file,
     ZZPlayMHIStopRequested stop_requested,
     ZZPlayMHIPaused paused,
     void *user)
@@ -127,11 +127,11 @@ ZZPlayMHIStatus zzplay_mhi_play_file(
     return ZZPLAY_MHI_NO_MEMORY;
   }
   for (i = 0U; i < ZZPLAY_MHI_BUFFER_COUNT; i++) {
-    size_t got = fread(sink->buffers[i], 1U,
-                       ZZPLAY_MHI_BUFFER_BYTES, file);
+    size_t got = zzplay_file_read(file, sink->buffers[i],
+                                  ZZPLAY_MHI_BUFFER_BYTES);
 
     if (got == 0U) {
-      if (ferror(file)) {
+      if (zzplay_file_error(file)) {
         goto done;
       }
       eof = 1;
@@ -185,11 +185,11 @@ ZZPlayMHIStatus zzplay_mhi_play_file(
       }
       queued--;
       if (!eof) {
-        size_t got = fread(sink->buffers[index], 1U,
-                           ZZPLAY_MHI_BUFFER_BYTES, file);
+        size_t got = zzplay_file_read(file, sink->buffers[index],
+                                      ZZPLAY_MHI_BUFFER_BYTES);
 
         if (got == 0U) {
-          if (ferror(file)) {
+          if (zzplay_file_error(file)) {
             goto done;
           }
           eof = 1;

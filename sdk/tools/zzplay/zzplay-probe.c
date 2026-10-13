@@ -6,7 +6,7 @@
 /* Shared with the sound DataType so both claim exactly the same files. */
 #include "../../amiga/datatypes/zz9k_sound_flac.h"
 #include "../../amiga/datatypes/zz9k_sound_vorbis.h"
-#include <stdlib.h>
+#include "zzplay-sys.h"
 #include <string.h>
 
 #define ZZPLAY_PROBE_BYTES (256U * 1024U)
@@ -598,7 +598,7 @@ static void zzplay_ps_demux(ZZPlayPSDemux *d, const uint8_t *data,
   }
 }
 
-int zzplay_probe_file(FILE *file, ZZPlayVideoInfo *info)
+int zzplay_probe_file(ZZPlayFile *file, ZZPlayVideoInfo *info)
 {
   uint8_t *buffer;
   uint8_t *es_buffer;
@@ -607,15 +607,16 @@ int zzplay_probe_file(FILE *file, ZZPlayVideoInfo *info)
   ZZPlayPSDemux demux;
   size_t total = 0U;
 
-  if (!file || !info || fseek(file, 0L, SEEK_SET) != 0) {
+  if (!file || !info ||
+      !zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN)) {
     return 0;
   }
   memset(info, 0, sizeof(*info));
-  buffer = (uint8_t *)malloc(ZZPLAY_PROBE_CHUNK + ZZPLAY_PROBE_CARRY);
-  es_buffer = (uint8_t *)malloc(ZZPLAY_PROBE_CHUNK + ZZPLAY_PROBE_CARRY);
+  buffer = (uint8_t *)zzplay_alloc(ZZPLAY_PROBE_CHUNK + ZZPLAY_PROBE_CARRY);
+  es_buffer = (uint8_t *)zzplay_alloc(ZZPLAY_PROBE_CHUNK + ZZPLAY_PROBE_CARRY);
   if (!buffer || !es_buffer) {
-    free(es_buffer);
-    free(buffer);
+    zzplay_free(es_buffer);
+    zzplay_free(buffer);
     return 0;
   }
   memset(&raw, 0, sizeof(raw));
@@ -631,7 +632,7 @@ int zzplay_probe_file(FILE *file, ZZPlayVideoInfo *info)
     if (want > ZZPLAY_PROBE_BYTES - total) {
       want = ZZPLAY_PROBE_BYTES - total;
     }
-    got = fread(buffer + raw.length, 1U, want, file);
+    got = zzplay_file_read(file, buffer + raw.length, want);
     raw.length += got;
     zzplay_probe_mpeg_program(buffer, raw.length, info);
     if (info->is_program_stream) {
@@ -648,13 +649,13 @@ int zzplay_probe_file(FILE *file, ZZPlayVideoInfo *info)
       break;
     }
   }
-  free(es_buffer);
-  free(buffer);
-  if (fseek(file, 0L, SEEK_SET) != 0) {
-    clearerr(file);
+  zzplay_free(es_buffer);
+  zzplay_free(buffer);
+  if (!zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN)) {
+    zzplay_file_clear_error(file);
     return 0;
   }
-  clearerr(file);
+  zzplay_file_clear_error(file);
   return raw.found || es.found;
 }
 
@@ -705,7 +706,7 @@ int zzplay_webp_info_supported(const ZZPlayWebPInfo *info)
          info->height <= ZZPLAY_WEBP_MAX_HEIGHT;
 }
 
-int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
+int zzplay_probe_media_file(ZZPlayFile *file, ZZPlayProbeInfo *info)
 {
   static uint8_t buffer[ZZPLAY_MP3_PROBE_BYTES];
   uint8_t id3[10];
@@ -717,11 +718,11 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
   }
   memset(info, 0, sizeof(*info));
 
-  if (fseek(file, 0L, SEEK_SET) != 0) {
-    clearerr(file);
+  if (!zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN)) {
+    zzplay_file_clear_error(file);
     return 0;
   }
-  got = fread(buffer, 1U, sizeof(buffer), file);
+  got = zzplay_file_read(file, buffer, sizeof(buffer));
   if (got >= 4U && buffer[0] == 0x1AU && buffer[1] == 0x45U &&
       buffer[2] == 0xDFU && buffer[3] == 0xA3U &&
       zzplay_probe_webm_file(file, &info->webm)) {
@@ -765,9 +766,9 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
     }
   }
 
-  clearerr(file);
-  if (fseek(file, 0L, SEEK_SET) != 0) {
-    clearerr(file);
+  zzplay_file_clear_error(file);
+  if (!zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN)) {
+    zzplay_file_clear_error(file);
     return 0;
   }
 
@@ -777,7 +778,7 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
     info->kind = ZZPLAY_MEDIA_KIND_MPEG_PS;
     return 1;
   }
-  if (fread(id3, 1U, sizeof(id3), file) == sizeof(id3) &&
+  if (zzplay_file_read(file, id3, sizeof(id3)) == sizeof(id3) &&
       memcmp(id3, "ID3", 3U) == 0) {
     uint32_t tag_bytes = zzplay_synchsafe_u28(id3 + 6U);
 
@@ -787,19 +788,19 @@ int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
     audio_offset = (long)(10U + tag_bytes +
                           ((id3[5] & 0x10U) != 0U ? 10U : 0U));
   }
-  clearerr(file);
-  if (fseek(file, audio_offset, SEEK_SET) != 0) {
+  zzplay_file_clear_error(file);
+  if (!zzplay_file_seek(file, audio_offset, ZZPLAY_FILE_BEGIN)) {
     goto done;
   }
-  got = fread(buffer, 1U, sizeof(buffer), file);
-  if (!ferror(file) && zzplay_probe_mp3(buffer, got, &info->mp3)) {
+  got = zzplay_file_read(file, buffer, sizeof(buffer));
+  if (!zzplay_file_error(file) && zzplay_probe_mp3(buffer, got, &info->mp3)) {
     info->kind = ZZPLAY_MEDIA_KIND_MP3;
   }
 
 done:
-  clearerr(file);
-  if (fseek(file, 0L, SEEK_SET) != 0) {
-    clearerr(file);
+  zzplay_file_clear_error(file);
+  if (!zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN)) {
+    zzplay_file_clear_error(file);
     return 0;
   }
   return info->kind != ZZPLAY_MEDIA_KIND_UNSUPPORTED;
@@ -812,7 +813,8 @@ int zzplay_video_info_supported(const ZZPlayVideoInfo *info)
          info->frame_rate_milli != 0U;
 }
 
-int zzplay_ogg_last_granule(FILE *file, uint32_t serial, uint64_t *granule)
+int zzplay_ogg_last_granule(ZZPlayFile *file, uint32_t serial,
+                            uint64_t *granule)
 {
   static uint8_t tail[64U * 1024U];
   long size;
@@ -820,18 +822,19 @@ int zzplay_ogg_last_granule(FILE *file, uint32_t serial, uint64_t *granule)
   size_t got;
   size_t i;
 
-  if (!file || !granule || fseek(file, 0L, SEEK_END) != 0 ||
-      (size = ftell(file)) < 27L) {
-    clearerr(file);
+  if (!file || !granule ||
+      !zzplay_file_seek(file, 0L, ZZPLAY_FILE_END) ||
+      (size = zzplay_file_tell(file)) < 27L) {
+    zzplay_file_clear_error(file);
     return 0;
   }
   start = size > (long)sizeof(tail) ? size - (long)sizeof(tail) : 0L;
-  if (fseek(file, start, SEEK_SET) != 0) {
-    clearerr(file);
+  if (!zzplay_file_seek(file, start, ZZPLAY_FILE_BEGIN)) {
+    zzplay_file_clear_error(file);
     return 0;
   }
-  got = fread(tail, 1U, (size_t)(size - start), file);
-  clearerr(file);
+  got = zzplay_file_read(file, tail, (size_t)(size - start));
+  zzplay_file_clear_error(file);
   for (i = got >= 27U ? got - 27U + 1U : 0U; i-- > 0U;) {
     const uint8_t *page = tail + i;
     uint64_t position = 0U;

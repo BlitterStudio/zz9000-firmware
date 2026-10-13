@@ -15,7 +15,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
+#include "zzplay-sys.h"
 
 #define ZZPLAY_TAG_TEXT_MAX 64U
 
@@ -47,7 +47,7 @@ int zzplay_tags_parse_id3v1(const uint8_t *trailer, size_t length,
 /* Read both tag kinds from an open file. Reads at most the first 64 KiB of
  * an ID3v2 tag for text frames (audio_start still reports the full size).
  * Restores the file position. Returns 1 when any field was found. */
-int zzplay_tags_read(FILE *file, ZZPlayTags *tags);
+int zzplay_tags_read(ZZPlayFile *file, ZZPlayTags *tags);
 
 /* "Artist - Title", "Title", or "" when neither is known. */
 void zzplay_tags_display(const ZZPlayTags *tags, char *out, size_t capacity);

@@ -19,8 +19,8 @@
 #include <proto/wb.h>
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include "zzplay-sys.h"
 
 #include "zzplay-controls.h"
 #include "zzplay-devices.h"
@@ -156,21 +156,41 @@ static uint32_t drop_count;
 static uint32_t drop_capacity;
 static char drop_path_buf[ZZPLAY_PLAYLIST_PATH_MAX];
 
+
+static char *gui_strdup(const char *text)
+{
+  char *copy;
+  size_t length;
+
+  if (!text) {
+    return 0;
+  }
+  length = strlen(text) + 1U;
+  copy = (char *)zzplay_alloc(length);
+  if (copy) {
+    memcpy(copy, text, length);
+  }
+  return copy;
+}
 static void drop_queue_push(const char *path)
 {
   char *copy;
 
   if (drop_count == drop_capacity) {
     uint32_t capacity = drop_capacity ? drop_capacity * 2U : 8U;
-    char **grown = (char **)realloc(drop_paths, capacity * sizeof(char *));
+    char **grown = (char **)zzplay_alloc(capacity * sizeof(char *));
+    if (grown && drop_paths) {
+      memcpy(grown, drop_paths, drop_count * sizeof(char *));
+    }
 
     if (!grown) {
       return;
     }
+    zzplay_free(drop_paths);
     drop_paths = grown;
     drop_capacity = capacity;
   }
-  copy = strdup(path);
+  copy = gui_strdup(path);
   if (copy) {
     drop_paths[drop_count++] = copy;
   }
@@ -181,9 +201,9 @@ static void drop_queue_free(void)
   uint32_t i;
 
   for (i = 0U; i < drop_count; i++) {
-    free(drop_paths[i]);
+    zzplay_free(drop_paths[i]);
   }
-  free(drop_paths);
+  zzplay_free(drop_paths);
   drop_paths = 0;
   drop_count = 0U;
   drop_capacity = 0U;
@@ -276,9 +296,9 @@ static void free_exec_list_nodes(struct List *list)
   }
   while ((node = RemHead(list)) != 0) {
     if (node->ln_Name) {
-      free(node->ln_Name);
+      zzplay_free(node->ln_Name);
     }
-    free(node);
+    zzplay_free(node);
   }
 }
 static void rebuild_playlist_nodes(void)
@@ -303,8 +323,8 @@ static void rebuild_playlist_nodes(void)
   for (i = 0U; i < pl->count; i++) {
     const char *disp = zzplay_playlist_display_name(pl, i);
     size_t len = strlen(disp);
-    char *name_buf = (char *)malloc(len + 8U);
-    struct Node *node = (struct Node *)malloc(sizeof(struct Node));
+    char *name_buf = (char *)zzplay_alloc(len + 8U);
+    struct Node *node = (struct Node *)zzplay_alloc(sizeof(struct Node));
 
     if (node && name_buf) {
       memset(node, 0, sizeof(*node));
@@ -319,8 +339,8 @@ static void rebuild_playlist_nodes(void)
       /* Row N must stay entry N for the click and Remove handlers, so
        * list only the entries before the first one that could not be
        * allocated rather than skipping it. */
-      if (name_buf) free(name_buf);
-      if (node) free(node);
+      if (name_buf) zzplay_free(name_buf);
+      if (node) zzplay_free(node);
       if (gui_context->controller) {
         zzplay_controller_set_message(gui_context->controller,
                                       "Not enough memory to list the "
@@ -847,11 +867,11 @@ static void open_settings_window(void)
   if (!found_current && settings_copy.mhi_driver[0] != '\0') {
     /* Current driver not found in LIBS:MHI, add as (missing) at the head */
     char name_buf[ZZPLAY_PREFS_DRIVER_MAX + 16];
-    struct Node *node = (struct Node *)malloc(sizeof(struct Node));
+    struct Node *node = (struct Node *)zzplay_alloc(sizeof(struct Node));
     char *dup_name;
 
     sprintf(name_buf, "%s (missing)", settings_copy.mhi_driver);
-    dup_name = strdup(name_buf);
+    dup_name = gui_strdup(name_buf);
     if (node && dup_name) {
       memset(node, 0, sizeof(*node));
       node->ln_Name = dup_name;
@@ -862,14 +882,14 @@ static void open_settings_window(void)
       mhi_count++;
       selected_mhi = 0;
     } else {
-      if (dup_name) free(dup_name);
-      if (node) free(node);
+      if (dup_name) zzplay_free(dup_name);
+      if (node) zzplay_free(node);
     }
   }
 
   for (i = 0U; i < disc_count; i++) {
-    struct Node *node = (struct Node *)malloc(sizeof(struct Node));
-    char *dup_name = strdup(discovered[i]);
+    struct Node *node = (struct Node *)zzplay_alloc(sizeof(struct Node));
+    char *dup_name = gui_strdup(discovered[i]);
 
     if (node && dup_name) {
       memset(node, 0, sizeof(*node));
@@ -884,8 +904,8 @@ static void open_settings_window(void)
       }
       mhi_count++;
     } else {
-      if (dup_name) free(dup_name);
-      if (node) free(node);
+      if (dup_name) zzplay_free(dup_name);
+      if (node) zzplay_free(node);
     }
   }
 
