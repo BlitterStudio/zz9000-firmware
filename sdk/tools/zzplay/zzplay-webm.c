@@ -37,6 +37,7 @@ enum {
   ID_DISPLAY_H = 0x54BA,
   ID_CHANNELS = 0x9F,
   ID_RATE = 0xB5,
+  ID_BIT_DEPTH = 0x6264,
   ID_PROJECTION = 0x7670,
   ID_POSE_ROLL = 0x7675,
   ID_CLUSTER = 0x1F43B675
@@ -77,6 +78,7 @@ typedef struct ZZPlayWebMCur {
   uint32_t channels;
   uint32_t rate;
   int saw_rate;
+  uint32_t bit_depth;
   int32_t pose_roll_milli;
   int pose_roll_present;
   uint64_t duration_ticks;
@@ -320,12 +322,17 @@ static void zzplay_webm_finish_track(ZZPlayWebMCur *cur)
     return;
   }
   if (cur->track_type != 2U) return;
-  if (matroska) {
+  if (matroska && (info->video == ZZPLAY_WEBM_VIDEO_MPEG1 ||
+                   info->video == ZZPLAY_WEBM_VIDEO_MPEG2)) {
     if (info->audio != ZZPLAY_WEBM_AUDIO_NONE) return;
     if (zzplay_webm_codec_is(cur,"A_AC3")) info->audio=ZZPLAY_WEBM_AUDIO_AC3;
     else if (zzplay_webm_codec_is(cur,"A_MPEG/L1")||zzplay_webm_codec_is(cur,"A_MPEG/L2")||zzplay_webm_codec_is(cur,"A_MPEG/L3")) info->audio=ZZPLAY_WEBM_AUDIO_MPEG;
-    else if (zzplay_webm_codec_is(cur,"A_PCM/INT/LIT")) info->audio=ZZPLAY_WEBM_AUDIO_LPCM;
-    else return;
+    else if (zzplay_webm_codec_is(cur,"A_PCM/INT/LIT")) {
+      if (!cur->saw_rate || cur->rate != 48000U ||
+          (cur->channels != 1U && cur->channels != 2U) ||
+          cur->bit_depth != 16U) return;
+      info->audio=ZZPLAY_WEBM_AUDIO_LPCM;
+    } else return;
     info->sample_rate=cur->saw_rate?cur->rate:0U;
   } else {
     if (++cur->audio_tracks>1) { zzplay_webm_fail(cur,ZZPLAY_WEBM_TWO_AUDIO); return; }
@@ -510,7 +517,7 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
     if ((kind == WALK_VIDEO &&
          (id == ID_WIDTH || id == ID_HEIGHT || id == ID_DISPLAY_W ||
           id == ID_DISPLAY_H)) ||
-        (kind == WALK_AUDIO && id == ID_CHANNELS)) {
+        (kind == WALK_AUDIO && (id == ID_CHANNELS || id == ID_BIT_DEPTH))) {
       uint64_t v;
 
       if (!zzplay_webm_payload(cur, size, &payload, &n) || n == 0U ||
@@ -531,8 +538,10 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
         cur->disp_w = (uint32_t)v;
       } else if (id == ID_DISPLAY_H) {
         cur->disp_h = (uint32_t)v;
-      } else {
+      } else if (id == ID_CHANNELS) {
         cur->channels = (uint32_t)v;
+      } else {
+        cur->bit_depth = (uint32_t)v;
       }
       continue;
     }
@@ -577,6 +586,7 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
       cur->disp_w = 0U;
       cur->disp_h = 0U;
       cur->channels = 0U;
+      cur->bit_depth = 0U;
       cur->rate = 0U;
       cur->saw_rate = 0;
       cur->pose_roll_milli = 0;
@@ -902,6 +912,7 @@ int zzplay_probe_webm(const uint8_t *data, size_t length, int capped,
     return 1;
   }
   if (info->audio != ZZPLAY_WEBM_AUDIO_NONE &&
+      info->audio != ZZPLAY_WEBM_AUDIO_AC3 &&
       (info->channels != 1U && info->channels != 2U)) {
     info->refusal = ZZPLAY_WEBM_BAD_AUDIO;
     return 1;

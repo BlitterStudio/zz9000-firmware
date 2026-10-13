@@ -25,6 +25,7 @@ enum {
 	ID_HEIGHT = 0xBA,
 	ID_CHANNELS = 0x9F,
 	ID_SAMPLERATE = 0xB5,
+	ID_BITDEPTH = 0x6264,
 	ID_DURATION = 0x23E383,
 	ID_ENCODINGS = 0x6D80,
 	ID_ENCRYPTION = 0x5035,
@@ -236,7 +237,8 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 				cn = (uint32_t)csz;
 				if (cn > 8U) {
 					if (cid == ID_WIDTH || cid == ID_HEIGHT ||
-					    cid == ID_CHANNELS || cid == ID_SAMPLERATE)
+					    cid == ID_CHANNELS || cid == ID_SAMPLERATE ||
+					    cid == ID_BITDEPTH)
 						return fail(d, WEBM_ERR_LAYOUT);
 					if (skip_n(d, cn) != 0)
 						return -1;
@@ -250,6 +252,8 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 					t->height = (uint32_t)be_uint(scratch, cn);
 				else if (cid == ID_CHANNELS)
 					t->channels = (uint16_t)be_uint(scratch, cn);
+				else if (cid == ID_BITDEPTH)
+					t->bit_depth = (uint16_t)be_uint(scratch, cn);
 				else if (cid == ID_SAMPLERATE && (cn == 4U || cn == 8U)) {
 					uint8_t le[8];
 					uint32_t i;

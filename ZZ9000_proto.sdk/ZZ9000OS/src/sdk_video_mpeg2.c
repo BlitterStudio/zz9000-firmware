@@ -995,20 +995,19 @@ static uint64_t clock_picture(struct sdk_video_mpeg2 *d,
 	d->previous_picture_rate_milli = picture_rate(d, picture);
 	if (!d->media_configured ||
 	    !sdk_media_timeline_map(&d->timeline, SDK_MEDIA_TIMELINE_VIDEO,
-	                            SDK_MEDIA_TIMELINE_NO_PTS, step_units,
-	                            per_second, &result))
+	                            d->mkv_container ? *raw_pts
+	                            : SDK_MEDIA_TIMELINE_NO_PTS,
+	                            step_units, per_second, &result))
 		return M2_NO_PTS;
 	{
 		uint64_t origin = result.origin != SDK_MEDIA_TIMELINE_NO_PTS
 			? result.origin : 0U;
 
-		/* Before the first PTS the derived clock starts at 0; the
-		 * first tagged picture re-anchors it below. */
 		if (result.pts >= origin)
 			media_pts = result.pts - origin;
 	}
 	*timeline_flags |= timeline_media_flags(result.flags);
-	if (*raw_pts != M2_NO_PTS &&
+	if (!d->mkv_container && *raw_pts != M2_NO_PTS &&
 	    sdk_media_timeline_observe_ordered(&d->timeline,
 	                                       SDK_MEDIA_TIMELINE_VIDEO,
 	                                       *raw_pts, &result)) {
@@ -1523,8 +1522,10 @@ static int mkv_select_audio(struct sdk_video_mpeg2 *d)
 		if (t->type != 2U || !match)
 			continue;
 		if (t->codec == WEBM_CODEC_PCM_LE &&
-		    (t->rate != 48000U || (t->channels != 1U && t->channels != 2U)))
-			return 0;
+		    (t->rate != 48000U ||
+		     (t->channels != 1U && t->channels != 2U) ||
+		     t->bit_depth != 16U))
+			continue;
 		d->mkv_audio_track = t->number;
 		d->audio_selected = 1U;
 		d->mp2_selected = t->codec == WEBM_CODEC_MPEG_AUDIO;
@@ -1755,6 +1756,29 @@ static int mkv_take_audio(struct sdk_video_mpeg2 *d)
 	d->mkv_audio_pending_observed = 0U;
 	return 1;
 }
+static int mkv_video_pts(const struct sdk_video_mpeg2 *d,
+	const struct webm_block *blk, uint64_t *pts)
+{
+	const struct webm_track *video = mkv_video_track(d);
+	uint64_t offset = 0U;
+	uint32_t rate;
+
+	if (!webm_pts90(blk->timecode, d->mkv_demux.scale_ns, pts))
+		return 0;
+	if (blk->lace_index == 0U)
+		return 1;
+	if (video && video->default_duration_ns != 0U)
+		offset = (video->default_duration_ns * UINT64_C(90) *
+			  blk->lace_index + UINT64_C(500000)) / UINT64_C(1000000);
+	else {
+		rate = d->frame_rate_milli != 0U ? d->frame_rate_milli : 25000U;
+		offset = (UINT64_C(90000000) * blk->lace_index + rate / 2U) / rate;
+	}
+	if (*pts > UINT64_MAX - offset)
+		return 0;
+	*pts += offset;
+	return 1;
+}
 
 static int mkv_feed_next(struct sdk_video_mpeg2 *d)
 {
@@ -1779,7 +1803,7 @@ static int mkv_feed_next(struct sdk_video_mpeg2 *d)
 	if (rc <= 0)
 		return rc;
 	if (blk.track == d->mkv_video_track) {
-		if (!webm_pts90(blk.timecode, d->mkv_demux.scale_ns, &pts))
+		if (!mkv_video_pts(d, &blk, &pts))
 			return -1;
 		if (!d->video_origin_seen)
 			seed_origin(d, pts);
@@ -1963,6 +1987,12 @@ static int mkv_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 		return d->mkv_unsupported ? SDK_VIDEO_BACKEND_UNSUPPORTED :
 			(d->failed || d->mkv_win.eof ? SDK_VIDEO_BACKEND_ERROR :
 			 SDK_VIDEO_BACKEND_NEED_INPUT);
+	if (d->media_configured) {
+		if (d->ac3_selected && !pump_ac3(d))
+			return SDK_VIDEO_BACKEND_BACKPRESSURE;
+		if (d->mp2_selected)
+			pump_mp2(d, d->input_eof);
+	}
 	for (;;) {
 		result = parse_video(d, frame);
 		if (result > 0)
@@ -1973,8 +2003,11 @@ static int mkv_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
 		if (result < 0)
 			return d->mkv_unsupported ? SDK_VIDEO_BACKEND_UNSUPPORTED :
 				SDK_VIDEO_BACKEND_ERROR;
-		if (result == 0)
+		if (result == 0) {
+			if (d->input_eof && !d->video_done)
+				continue;
 			break;
+		}
 	}
 	if (d->video_done && audio_drained(d)) {
 		if ((d->video_frames == 0U && d->audio_frames == 0U) ||
@@ -2195,9 +2228,9 @@ static int mpeg2_get_media_info(void *decoder,
 			info->sample_rate = d->mp2_rate;
 			info->channels = 2U;
 		}
-	} else if (d->pcmle_selected) {
-		info->sample_rate = d->mkv_pcm_rate;
-		info->channels = d->mkv_pcm_channels;
+		} else if (d->pcmle_selected) {
+			info->sample_rate = d->mkv_pcm_rate;
+			info->channels = 2U;
 	} else if (d->lpcm_selected) {
 		info->sample_rate = SDK_DVD_LPCM_SAMPLE_RATE_HZ;
 		info->channels = 2U;
