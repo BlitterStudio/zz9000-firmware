@@ -354,15 +354,16 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	 * a 1920x1080 window, and a 720x576 MPEG-2 frame letterboxed to 720x405
 	 * in fullscreen, while upscaled and 1:1 windows of the same clips were
 	 * correct). What is scanned decides: a P96 source is scanned at full
-	 * size, an SDK video session's half-packed >720p frame at half size, so
-	 * the latter still goes native into a 1280x720 window. A session binds
+	 * size, an SDK video session's half-packed frame at half size, so a
+	 * >720p frame, or one larger than its window, still goes native into
+	 * that window (overlay_session_divisor). A session binds
 	 * to the overlay at its first frame, after this SET, but players begin
 	 * it first, so an open session means staging frames will be scanned. */
 	uint8_t was_hw_active = ov.hw_active;
 	uint32_t hw_src_addr = ov.src_addr;
 	uint8_t scan_div =
 		(ov.direct_session != 0U || sdk_video_stream_active_count() != 0U)
-			? overlay_staging_divisor(src_w, src_h)
+			? overlay_session_divisor(src_w, src_h, dst_w, dst_h)
 			: 1U;
 	int32_t dst_right = (int32_t)dst_x + dst_w;
 	int32_t dst_bottom = (int32_t)dst_y + dst_h;
@@ -593,14 +594,16 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 			 * staging buffer using the pitch already programmed into the PL
 			 * VDMA. PL still performs RGB conversion/key/composition; this is
 			 * roughly half a frame write, not a full-screen shadow. A frame
-			 * too large for the overlay to fetch is packed at half size
-			 * (variant 0xfd), and the hand-off scans it at that size.
+			 * too large for the overlay to fetch, or larger than its
+			 * window, is packed at half size (variant 0xfd), and the
+			 * hand-off scans it at that size.
 			 * Interlaced frames (no PROGRESSIVE flag and TFF or BFF set -
 			 * backends that leave picture_flags 0 for progressive content
 			 * stay unblended) pack with the blend-deinterlace variant 0xfc
 			 * instead, which costs about the plain pack and removes the
 			 * comb lines a two-field frame shows as progressive. */
-			packed_div = overlay_staging_divisor(ov.src_w, ov.src_h);
+			packed_div = overlay_session_divisor(ov.src_w, ov.src_h,
+			                                     ov.dst_w, ov.dst_h);
 			p.dst_addr = ov.shadow[target];
 			p.dst_pitch = overlay_staging_pitch(ov.src_w, ov.src_pitch);
 			p.scr_h = (uint16_t)(ov.src_h / packed_div);

@@ -47,6 +47,23 @@ static inline uint8_t overlay_staging_divisor(uint16_t width,
 		? 2U : 1U;
 }
 
+/* Divisor an SDK session's frames are packed and scanned at for a window of
+ * dst_w x dst_h. The native plane cannot show a source smaller than it was
+ * scanned (it fetches one source row per displayed row), and the software
+ * compositor costs core 1 tens of ms per frame. A window smaller than the
+ * source therefore gets the half-size frame too, which the plane scales
+ * up, as long as that half-size frame still fits the window. */
+static inline uint8_t overlay_session_divisor(uint16_t src_w,
+	uint16_t src_h, int32_t dst_w, int32_t dst_h)
+{
+	if (overlay_staging_divisor(src_w, src_h) == 2U)
+		return 2U;
+	if ((dst_w < (int32_t)src_w || dst_h < (int32_t)src_h) &&
+	    dst_w >= (int32_t)(src_w / 2U) && dst_h >= (int32_t)(src_h / 2U))
+		return 2U;
+	return 1U;
+}
+
 static inline uint32_t overlay_buffer_bytes(uint32_t screen_pitch,
 	uint32_t screen_rows, uint32_t source_pitch, uint32_t source_rows)
 {
