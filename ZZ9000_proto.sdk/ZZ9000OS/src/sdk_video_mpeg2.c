@@ -1498,6 +1498,7 @@ static const struct webm_track *mkv_video_track(const struct sdk_video_mpeg2 *d)
 
 	for (i = 0U; i < d->mkv_demux.ntracks; i++)
 		if (d->mkv_demux.tracks[i].type == 1U &&
+		    d->mkv_demux.tracks[i].enabled &&
 		    d->mkv_demux.tracks[i].codec == d->mkv_expect_codec)
 			return &d->mkv_demux.tracks[i];
 	return 0;
@@ -1519,7 +1520,7 @@ static int mkv_select_audio(struct sdk_video_mpeg2 *d)
 		            (d->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_LPCM &&
 		             t->codec == WEBM_CODEC_PCM_LE);
 
-		if (t->type != 2U || !match)
+		if (t->type != 2U || !t->enabled || !match)
 			continue;
 		if (t->codec == WEBM_CODEC_PCM_LE &&
 		    (t->rate != 48000U ||
@@ -1733,13 +1734,43 @@ static uint32_t mkv_route_pcmle(struct sdk_video_mpeg2 *d,
 	return 1U;
 }
 
+static const struct webm_track *mkv_audio_track(const struct sdk_video_mpeg2 *d)
+{
+	unsigned i;
+
+	for (i = 0U; i < d->mkv_demux.ntracks; i++)
+		if (d->mkv_demux.tracks[i].type == 2U &&
+		    d->mkv_demux.tracks[i].number == d->mkv_audio_track)
+			return &d->mkv_demux.tracks[i];
+	return 0;
+}
+
+static int mkv_audio_pts(const struct sdk_video_mpeg2 *d,
+	const struct webm_block *blk, uint64_t *pts)
+{
+	const struct webm_track *audio = mkv_audio_track(d);
+	uint64_t offset;
+
+	if (!webm_pts90(blk->timecode, d->mkv_demux.scale_ns, pts))
+		return 0;
+	if (blk->lace_index == 0U || !audio ||
+	    audio->default_duration_ns == 0U)
+		return 1;
+	offset = (audio->default_duration_ns * UINT64_C(90) * blk->lace_index +
+		  UINT64_C(500000)) / UINT64_C(1000000);
+	if (*pts > UINT64_MAX - offset)
+		return 0;
+	*pts += offset;
+	return 1;
+}
+
 static int mkv_take_audio(struct sdk_video_mpeg2 *d)
 {
 	struct webm_block *blk = &d->mkv_audio_pending;
 	uint64_t pts;
 	uint32_t done;
 
-	if (!webm_pts90(blk->timecode, d->mkv_demux.scale_ns, &pts))
+	if (!mkv_audio_pts(d, blk, &pts))
 		return -1;
 	mkv_observe_audio(d, pts);
 	if (d->mp2_selected)

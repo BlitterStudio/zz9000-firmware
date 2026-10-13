@@ -59,8 +59,10 @@ struct webm_track {
 	uint32_t number;
 	uint8_t type; /* 1 video, 2 audio */
 	uint8_t codec;
-	uint16_t channels;
-	uint16_t bit_depth;
+	uint8_t enabled;
+	uint8_t channels_present;
+	uint32_t channels;
+	uint32_t bit_depth;
 	uint32_t rate;
 	uint32_t width;
 	uint32_t height;

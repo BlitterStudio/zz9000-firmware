@@ -2264,7 +2264,7 @@ static int zzplay_audio_start_if_ready(
     return ZZ9K_STATUS_OK;
   }
   if (!runtime->window) {
-    if (!result || !zzplay_ensure_pip(runtime)) {
+    if ((!result && !no_more_pictures) || !zzplay_ensure_pip(runtime)) {
       return result ? ZZ9K_STATUS_UNSUPPORTED : ZZ9K_STATUS_OK;
     }
   }

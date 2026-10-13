@@ -315,6 +315,14 @@ static void zzplay_webm_finish_track(ZZPlayWebMCur *cur)
     else if (matroska && zzplay_webm_codec_is(cur,"V_MPEG1")) info->video=ZZPLAY_WEBM_VIDEO_MPEG1;
     else if (matroska && zzplay_webm_codec_is(cur,"V_MPEG2")) info->video=ZZPLAY_WEBM_VIDEO_MPEG2;
     else { zzplay_webm_fail(cur,ZZPLAY_WEBM_UNKNOWN_CODEC); return; }
+    if ((info->video == ZZPLAY_WEBM_VIDEO_MPEG1 ||
+         info->video == ZZPLAY_WEBM_VIDEO_MPEG2) &&
+        (info->audio == ZZPLAY_WEBM_AUDIO_OPUS ||
+         info->audio == ZZPLAY_WEBM_AUDIO_VORBIS)) {
+      info->audio = ZZPLAY_WEBM_AUDIO_NONE;
+      info->sample_rate = 0U;
+      info->channels = 0U;
+    }
     if (!cur->pixel_w || !cur->pixel_h) { zzplay_webm_fail(cur,ZZPLAY_WEBM_HOSTILE); return; }
     info->width=cur->pixel_w; info->height=cur->pixel_h; info->display_width=cur->disp_w; info->display_height=cur->disp_h;
     info->pose_roll_milli=cur->pose_roll_milli; info->pose_roll_present=(uint8_t)cur->pose_roll_present;
@@ -322,8 +330,15 @@ static void zzplay_webm_finish_track(ZZPlayWebMCur *cur)
     return;
   }
   if (cur->track_type != 2U) return;
-  if (matroska && (info->video == ZZPLAY_WEBM_VIDEO_MPEG1 ||
-                   info->video == ZZPLAY_WEBM_VIDEO_MPEG2)) {
+  if (matroska &&
+      ((info->video == ZZPLAY_WEBM_VIDEO_MPEG1 ||
+        info->video == ZZPLAY_WEBM_VIDEO_MPEG2) ||
+       (info->video == ZZPLAY_WEBM_VIDEO_NONE &&
+        (zzplay_webm_codec_is(cur,"A_AC3") ||
+         zzplay_webm_codec_is(cur,"A_MPEG/L1") ||
+         zzplay_webm_codec_is(cur,"A_MPEG/L2") ||
+         zzplay_webm_codec_is(cur,"A_MPEG/L3") ||
+         zzplay_webm_codec_is(cur,"A_PCM/INT/LIT"))))) {
     if (info->audio != ZZPLAY_WEBM_AUDIO_NONE) return;
     if (zzplay_webm_codec_is(cur,"A_AC3")) info->audio=ZZPLAY_WEBM_AUDIO_AC3;
     else if (zzplay_webm_codec_is(cur,"A_MPEG/L1")||zzplay_webm_codec_is(cur,"A_MPEG/L2")||zzplay_webm_codec_is(cur,"A_MPEG/L3")) info->audio=ZZPLAY_WEBM_AUDIO_MPEG;
@@ -585,7 +600,7 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
       cur->pixel_h = 0U;
       cur->disp_w = 0U;
       cur->disp_h = 0U;
-      cur->channels = 0U;
+      cur->channels = 1U;
       cur->bit_depth = 0U;
       cur->rate = 0U;
       cur->saw_rate = 0;

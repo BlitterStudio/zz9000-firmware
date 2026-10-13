@@ -17,6 +17,7 @@ enum {
 	ID_TRACK = 0xAE,
 	ID_TRKNUM = 0xD7,
 	ID_TRKTYPE = 0x83,
+	ID_FLAGENABLED = 0xB9,
 	ID_CODECID = 0x86,
 	ID_CODECPRIV = 0x63A2,
 	ID_VIDEO = 0xE0,
@@ -213,6 +214,7 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		return fail(d, WEBM_ERR_LIMIT);
 	t = &d->tracks[d->ntracks];
 	memset(t, 0, sizeof(*t));
+	t->enabled = 1U;
 	while (room(d, end) > 1U) {
 		uint32_t id, n, child_end;
 		uint64_t size;
@@ -250,10 +252,15 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 					t->width = (uint32_t)be_uint(scratch, cn);
 				else if (cid == ID_HEIGHT)
 					t->height = (uint32_t)be_uint(scratch, cn);
-				else if (cid == ID_CHANNELS)
-					t->channels = (uint16_t)be_uint(scratch, cn);
-				else if (cid == ID_BITDEPTH)
-					t->bit_depth = (uint16_t)be_uint(scratch, cn);
+				else if (cid == ID_CHANNELS) {
+					t->channels = (uint32_t)be_uint(scratch, cn);
+					t->channels_present = 1U;
+				} else if (cid == ID_BITDEPTH) {
+					uint64_t depth = be_uint(scratch, cn);
+
+					t->bit_depth = depth > 0xffffffffULL
+						? 0xffffffffU : (uint32_t)depth;
+				}
 				else if (cid == ID_SAMPLERATE && (cn == 4U || cn == 8U)) {
 					uint8_t le[8];
 					uint32_t i;
@@ -299,7 +306,8 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 			t->default_duration_ns = be_uint(b, n);
 			continue;
 		}
-		if (id == ID_TRKNUM || id == ID_TRKTYPE || id == ID_CODECID) {
+		if (id == ID_TRKNUM || id == ID_TRKTYPE || id == ID_CODECID ||
+		    id == ID_FLAGENABLED) {
 			uint8_t tmp[64];
 
 			if (n >= sizeof(tmp))
@@ -310,6 +318,8 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 				t->number = (uint32_t)be_uint(tmp, n);
 			else if (id == ID_TRKTYPE)
 				t->type = (uint8_t)be_uint(tmp, n);
+			else if (id == ID_FLAGENABLED)
+				t->enabled = be_uint(tmp, n) != 0U;
 			else
 				t->codec = codec_id(tmp, n);
 			continue;
@@ -321,6 +331,8 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		return -1;
 	if (t->number == 0U)
 		return fail(d, WEBM_ERR_LAYOUT);
+	if (t->type == 2U && !t->channels_present)
+		t->channels = 1U;
 	if (t->type == 1U) {
 		if (d->have_video ||
 		    (d->is_matroska ? !matroska_video_codec(t->codec)
