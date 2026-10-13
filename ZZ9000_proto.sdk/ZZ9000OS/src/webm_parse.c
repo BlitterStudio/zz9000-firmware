@@ -211,7 +211,8 @@ static int webm_audio_codec(uint8_t codec)
  * eligible track, since every backend picks the first track of the codec
  * its client asked for. That bounds the table at one video track plus
  * one per audio codec, whatever the file declares; blocks of the other
- * tracks are skipped. */
+ * tracks are skipped. Audio the video's backend cannot play is dropped
+ * after the last TrackEntry (matroska_finish_tracks). */
 static int matroska_track_usable(const struct webm_demux *d,
 	const struct webm_track *t)
 {
@@ -330,8 +331,12 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		if (id == ID_CODECPRIV) {
 			/* Whether the track is kept is known only once all its
 			 * elements are read: a CodecPrivate that does not fit
-			 * is skipped, and fails the file only if the track is
-			 * kept. */
+			 * is skipped. It fails the file if a video track keeps
+			 * it. A Matroska audio track keeps going without it:
+			 * the audio codec the video backend will use is known
+			 * only after the last TrackEntry, and the backend
+			 * refuses a kept Vorbis/Opus track without headers if
+			 * it is played (AC-3, MPEG audio and PCM need none). */
 			if (n > WEBM_MAX_PRIV || d->priv_used > WEBM_MAX_PRIV - n) {
 				if (skip_n(d, n) != 0)
 					return -1;
@@ -388,7 +393,7 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		                    : !webm_video_codec(t->codec)))
 			return fail(d, WEBM_ERR_CODEC);
 		d->have_video = 1;
-	} else if (t->type == 2U && !d->is_matroska) {
+	} else if (t->type == 2U && t->enabled && !d->is_matroska) {
 		if (d->have_audio || !webm_audio_codec(t->codec))
 			return fail(d, WEBM_ERR_CODEC);
 		d->have_audio = 1;
@@ -399,10 +404,40 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		d->priv_used = priv_start;
 		return 0;
 	}
-	if (t == &spare || priv_overflow)
+	if (t == &spare ||
+	    (priv_overflow && !(d->is_matroska && t->type == 2U)))
 		return fail(d, WEBM_ERR_LIMIT);
 	d->ntracks++;
 	return 0;
+}
+
+/* After the last TrackEntry the video codec is known: drop Matroska audio
+ * the video's backend can never play (Opus/Vorbis with MPEG video; AC-3,
+ * MPEG audio and PCM with VP8/VP9). Their blocks are then skipped. */
+static void matroska_finish_tracks(struct webm_demux *d)
+{
+	unsigned i, kept = 0U;
+	int mpeg = 0;
+
+	if (!d->is_matroska)
+		return;
+	for (i = 0U; i < d->ntracks; i++)
+		if (d->tracks[i].type == 1U &&
+		    (d->tracks[i].codec == WEBM_CODEC_MPEG1 ||
+		     d->tracks[i].codec == WEBM_CODEC_MPEG2))
+			mpeg = 1;
+	for (i = 0U; i < d->ntracks; i++) {
+		const struct webm_track *t = &d->tracks[i];
+		int vp_audio = t->codec == WEBM_CODEC_OPUS ||
+		               t->codec == WEBM_CODEC_VORBIS;
+
+		if (t->type == 2U && (mpeg ? vp_audio : !vp_audio))
+			continue;
+		if (kept != i)
+			d->tracks[kept] = *t;
+		kept++;
+	}
+	d->ntracks = kept;
 }
 static int skip_container(struct webm_demux *d, uint32_t end, int kind)
 {
@@ -593,7 +628,8 @@ static int take_block(struct webm_demux *d, uint32_t size, int simple)
 }
 
 /* A block of a Matroska track that was not stored (subtitles, disabled
- * or unplayable tracks; see matroska_track_usable) is dropped whole. */
+ * or unplayable tracks; see matroska_track_usable and
+ * matroska_finish_tracks) is dropped whole. */
 static int lace_track_ignored(struct webm_demux *d)
 {
 	if (!d->is_matroska || webm_track(d, d->lace_track))
@@ -720,6 +756,7 @@ int webm_open(struct webm_demux *d, const struct webm_io *io, uint8_t *buf,
 		} else if (id == ID_TRACKS) {
 			if (skip_container(d, tell(d) + (uint32_t)size, 2) != 0)
 				return -1;
+			matroska_finish_tracks(d);
 		} else if (encrypted_id(id)) {
 			return fail(d, WEBM_ERR_CODEC);
 		} else if (skip_n(d, size) != 0) {
