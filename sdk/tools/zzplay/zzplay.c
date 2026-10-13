@@ -3305,7 +3305,9 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     policy->service_missing = mpeg_matroska ? "zzplay: Matroska MPEG playback is not supported by this firmware\n" : "zzplay: WebM playback is not supported by this firmware\n";
     policy->begin_refused = mpeg_matroska ? "zzplay: Matroska MPEG playback was refused by the firmware\n" : "zzplay: WebM playback was refused by the firmware\n";
     policy->stream_refused = mpeg_matroska ? "zzplay: this Matroska MPEG stream is not supported\n" : "zzplay: this WebM stream is not supported\n";
-    policy->keyframe_skip = mpeg_matroska ? 0U : 1U;
+    /* MPEG in Matroska follows the Program Stream policy: skip late B
+     * pictures, and recover a sustained lag at the next I picture. */
+    policy->keyframe_skip = 1U;
     policy->skip_late_b = mpeg_matroska ? 1U : 0U;
     policy->pts_position = 1U;
   }
