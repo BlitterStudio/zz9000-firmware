@@ -368,7 +368,28 @@ static int check_matroska_audio_layout(void)
   tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 6U, 2U);
   tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 2U, 3U);
   n = wrap_matroska(file, sizeof(file), tracks, tn);
-  return probe_ok(file, n, &info) && info.audio == ZZPLAY_WEBM_AUDIO_NONE;
+  if (!probe_ok(file, n, &info) || info.audio != ZZPLAY_WEBM_AUDIO_NONE) return 0;
+  /* EBML integers may take all 8 bytes: 16-bit stereo PCM written so is
+   * the PCM the firmware plays. */
+  {
+    static const uint8_t two8[8] = {0, 0, 0, 0, 0, 0, 0, 2};
+    static const uint8_t sixteen8[8] = {0, 0, 0, 0, 0, 0, 0, 16};
+    uint8_t audio[48], track[96];
+    size_t an = 0U, trn = 0U;
+
+    an = put_bytes(audio, sizeof(audio), an, 0xB5U, r48k, sizeof(r48k));
+    an = put_bytes(audio, sizeof(audio), an, 0x9FU, two8, sizeof(two8));
+    an = put_bytes(audio, sizeof(audio), an, 0x6264U, sixteen8, sizeof(sixteen8));
+    trn = put_uint(track, sizeof(track), trn, 0xD7U, 2U);
+    trn = put_uint(track, sizeof(track), trn, 0x83U, 2U);
+    trn = put_str(track, sizeof(track), trn, 0x86U, "A_PCM/INT/LIT");
+    trn = put_master(track, sizeof(track), trn, 0xE1U, audio, an);
+    tn = video_track(tracks, sizeof(tracks), 0U, "V_MPEG2", 720U, 480U, 0U, 0U, 40000000U, 0, 0U);
+    tn = put_master(tracks, sizeof(tracks), tn, 0xAEU, track, trn);
+    n = wrap_matroska(file, sizeof(file), tracks, tn);
+    return probe_ok(file, n, &info) && info.audio == ZZPLAY_WEBM_AUDIO_LPCM &&
+           info.channels == 2U;
+  }
 }
 static int check_matroska_disabled_video(void)
 {

@@ -607,13 +607,19 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
       cur->codec[n] = '\0';
       continue;
     }
+    /* EBML unsigned integers take 1-8 bytes, as the firmware reads them;
+     * values past 32 bits saturate, and the size and audio checks refuse
+     * them later. */
     if (kind == WALK_TRACK && id == ID_DEFAULT_DUR) {
+      uint64_t v;
+
       if (!zzplay_webm_payload(cur, size, &payload, &n) || n == 0U ||
-          n > 4U) {
+          n > 8U) {
         zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
         return 0;
       }
-      cur->track_default_ns = (uint32_t)zzplay_webm_be(payload, n);
+      v = zzplay_webm_be(payload, n);
+      cur->track_default_ns = v > 0xffffffffULL ? 0xffffffffU : (uint32_t)v;
       continue;
     }
     if ((kind == WALK_VIDEO &&
@@ -621,29 +627,27 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
           id == ID_DISPLAY_H)) ||
         (kind == WALK_AUDIO && (id == ID_CHANNELS || id == ID_BIT_DEPTH))) {
       uint64_t v;
+      uint32_t v32;
 
       if (!zzplay_webm_payload(cur, size, &payload, &n) || n == 0U ||
-          n > 4U) {
+          n > 8U) {
         zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
         return 0;
       }
       v = zzplay_webm_be(payload, n);
-      if (v > 0xffffffffULL) {
-        zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
-        return 0;
-      }
+      v32 = v > 0xffffffffULL ? 0xffffffffU : (uint32_t)v;
       if (id == ID_WIDTH) {
-        cur->pixel_w = (uint32_t)v;
+        cur->pixel_w = v32;
       } else if (id == ID_HEIGHT) {
-        cur->pixel_h = (uint32_t)v;
+        cur->pixel_h = v32;
       } else if (id == ID_DISPLAY_W) {
-        cur->disp_w = (uint32_t)v;
+        cur->disp_w = v32;
       } else if (id == ID_DISPLAY_H) {
-        cur->disp_h = (uint32_t)v;
+        cur->disp_h = v32;
       } else if (id == ID_CHANNELS) {
-        cur->channels = (uint32_t)v;
+        cur->channels = v32;
       } else {
-        cur->bit_depth = (uint32_t)v;
+        cur->bit_depth = v32;
       }
       continue;
     }
