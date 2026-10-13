@@ -67,6 +67,12 @@ typedef struct ZZPlayWebMCur {
   int saw_tracks;
   int stop;
   int header_done;
+  ZZPlayWebMAudio pending_webm_audio;
+  uint32_t pending_webm_rate;
+  uint32_t pending_webm_channels;
+  ZZPlayWebMAudio pending_mpeg_audio;
+  uint32_t pending_mpeg_rate;
+  uint32_t pending_mpeg_channels;
   uint32_t track_type;
   int track_enabled;
   uint32_t track_default_ns;
@@ -303,59 +309,107 @@ static int zzplay_webm_codec_is(const ZZPlayWebMCur *cur, const char *name)
   return strcmp(cur->codec, name) == 0;
 }
 
+static void zzplay_webm_set_audio(ZZPlayWebMInfo *info,
+                                  ZZPlayWebMAudio audio,
+                                  uint32_t rate, uint32_t channels)
+{
+  info->audio = audio;
+  info->sample_rate = rate;
+  info->channels = channels;
+}
+
+static ZZPlayWebMAudio zzplay_webm_webm_audio(const ZZPlayWebMCur *cur)
+{
+  if (zzplay_webm_codec_is(cur, "A_OPUS")) return ZZPLAY_WEBM_AUDIO_OPUS;
+  if (zzplay_webm_codec_is(cur, "A_VORBIS")) return ZZPLAY_WEBM_AUDIO_VORBIS;
+  return ZZPLAY_WEBM_AUDIO_NONE;
+}
+
+static ZZPlayWebMAudio zzplay_webm_mpeg_audio(const ZZPlayWebMCur *cur)
+{
+  if (zzplay_webm_codec_is(cur, "A_AC3")) return ZZPLAY_WEBM_AUDIO_AC3;
+  if (zzplay_webm_codec_is(cur, "A_MPEG/L1") ||
+      zzplay_webm_codec_is(cur, "A_MPEG/L2") ||
+      zzplay_webm_codec_is(cur, "A_MPEG/L3")) return ZZPLAY_WEBM_AUDIO_MPEG;
+  if (zzplay_webm_codec_is(cur, "A_PCM/INT/LIT") && cur->saw_rate &&
+      cur->rate == 48000U &&
+      (cur->channels == 1U || cur->channels == 2U) &&
+      cur->bit_depth == 16U) return ZZPLAY_WEBM_AUDIO_LPCM;
+  return ZZPLAY_WEBM_AUDIO_NONE;
+}
+
+static void zzplay_webm_select_matroska_audio(ZZPlayWebMCur *cur)
+{
+  ZZPlayWebMInfo *info = cur->info;
+
+  if (info->doc_type != ZZPLAY_WEBM_DOCTYPE_MATROSKA) return;
+  if (info->video == ZZPLAY_WEBM_VIDEO_MPEG1 ||
+      info->video == ZZPLAY_WEBM_VIDEO_MPEG2) {
+    if (cur->pending_mpeg_audio != ZZPLAY_WEBM_AUDIO_NONE)
+      zzplay_webm_set_audio(info, cur->pending_mpeg_audio,
+                            cur->pending_mpeg_rate,
+                            cur->pending_mpeg_channels);
+  } else if (cur->pending_webm_audio != ZZPLAY_WEBM_AUDIO_NONE) {
+    zzplay_webm_set_audio(info, cur->pending_webm_audio,
+                          cur->pending_webm_rate,
+                          cur->pending_webm_channels);
+  }
+}
+
 static void zzplay_webm_finish_track(ZZPlayWebMCur *cur)
 {
   ZZPlayWebMInfo *info = cur->info;
+  ZZPlayWebMAudio audio;
   int matroska = info->doc_type == ZZPLAY_WEBM_DOCTYPE_MATROSKA;
+
   if (!cur->track_enabled || cur->codec[0] == '\0') return;
   if (cur->track_type == 1U) {
     if (++cur->video_tracks > 1) { zzplay_webm_fail(cur, ZZPLAY_WEBM_TWO_VIDEO); return; }
-    if (zzplay_webm_codec_is(cur,"V_VP8")) info->video=ZZPLAY_WEBM_VIDEO_VP8;
-    else if (zzplay_webm_codec_is(cur,"V_VP9")) info->video=ZZPLAY_WEBM_VIDEO_VP9;
-    else if (matroska && zzplay_webm_codec_is(cur,"V_MPEG1")) info->video=ZZPLAY_WEBM_VIDEO_MPEG1;
-    else if (matroska && zzplay_webm_codec_is(cur,"V_MPEG2")) info->video=ZZPLAY_WEBM_VIDEO_MPEG2;
-    else { zzplay_webm_fail(cur,ZZPLAY_WEBM_UNKNOWN_CODEC); return; }
-    if ((info->video == ZZPLAY_WEBM_VIDEO_MPEG1 ||
-         info->video == ZZPLAY_WEBM_VIDEO_MPEG2) &&
-        (info->audio == ZZPLAY_WEBM_AUDIO_OPUS ||
-         info->audio == ZZPLAY_WEBM_AUDIO_VORBIS)) {
-      info->audio = ZZPLAY_WEBM_AUDIO_NONE;
-      info->sample_rate = 0U;
-      info->channels = 0U;
+    if (zzplay_webm_codec_is(cur, "V_VP8")) info->video = ZZPLAY_WEBM_VIDEO_VP8;
+    else if (zzplay_webm_codec_is(cur, "V_VP9")) info->video = ZZPLAY_WEBM_VIDEO_VP9;
+    else if (matroska && zzplay_webm_codec_is(cur, "V_MPEG1")) info->video = ZZPLAY_WEBM_VIDEO_MPEG1;
+    else if (matroska && zzplay_webm_codec_is(cur, "V_MPEG2")) info->video = ZZPLAY_WEBM_VIDEO_MPEG2;
+    else { zzplay_webm_fail(cur, ZZPLAY_WEBM_UNKNOWN_CODEC); return; }
+    if (!cur->pixel_w || !cur->pixel_h) { zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE); return; }
+    info->width = cur->pixel_w;
+    info->height = cur->pixel_h;
+    info->display_width = cur->disp_w;
+    info->display_height = cur->disp_h;
+    info->pose_roll_milli = cur->pose_roll_milli;
+    info->pose_roll_present = (uint8_t)cur->pose_roll_present;
+    if (cur->track_default_ns && cur->track_default_ns <= 1000000000U) {
+      uint64_t m = 1000000000000ULL / cur->track_default_ns;
+      if (m && m <= 240000U) info->frame_rate_milli = (uint32_t)m;
     }
-    if (!cur->pixel_w || !cur->pixel_h) { zzplay_webm_fail(cur,ZZPLAY_WEBM_HOSTILE); return; }
-    info->width=cur->pixel_w; info->height=cur->pixel_h; info->display_width=cur->disp_w; info->display_height=cur->disp_h;
-    info->pose_roll_milli=cur->pose_roll_milli; info->pose_roll_present=(uint8_t)cur->pose_roll_present;
-    if (cur->track_default_ns && cur->track_default_ns<=1000000000U) { uint64_t m=1000000000000ULL/cur->track_default_ns; if(m&&m<=240000U) info->frame_rate_milli=(uint32_t)m; }
     return;
   }
   if (cur->track_type != 2U) return;
-  if (matroska &&
-      ((info->video == ZZPLAY_WEBM_VIDEO_MPEG1 ||
-        info->video == ZZPLAY_WEBM_VIDEO_MPEG2) ||
-       (info->video == ZZPLAY_WEBM_VIDEO_NONE &&
-        (zzplay_webm_codec_is(cur,"A_AC3") ||
-         zzplay_webm_codec_is(cur,"A_MPEG/L1") ||
-         zzplay_webm_codec_is(cur,"A_MPEG/L2") ||
-         zzplay_webm_codec_is(cur,"A_MPEG/L3") ||
-         zzplay_webm_codec_is(cur,"A_PCM/INT/LIT"))))) {
-    if (info->audio != ZZPLAY_WEBM_AUDIO_NONE) return;
-    if (zzplay_webm_codec_is(cur,"A_AC3")) info->audio=ZZPLAY_WEBM_AUDIO_AC3;
-    else if (zzplay_webm_codec_is(cur,"A_MPEG/L1")||zzplay_webm_codec_is(cur,"A_MPEG/L2")||zzplay_webm_codec_is(cur,"A_MPEG/L3")) info->audio=ZZPLAY_WEBM_AUDIO_MPEG;
-    else if (zzplay_webm_codec_is(cur,"A_PCM/INT/LIT")) {
-      if (!cur->saw_rate || cur->rate != 48000U ||
-          (cur->channels != 1U && cur->channels != 2U) ||
-          cur->bit_depth != 16U) return;
-      info->audio=ZZPLAY_WEBM_AUDIO_LPCM;
-    } else return;
-    info->sample_rate=cur->saw_rate?cur->rate:0U;
-  } else {
-    if (++cur->audio_tracks>1) { zzplay_webm_fail(cur,ZZPLAY_WEBM_TWO_AUDIO); return; }
-    if (zzplay_webm_codec_is(cur,"A_OPUS")) { info->audio=ZZPLAY_WEBM_AUDIO_OPUS; info->sample_rate=48000U; }
-    else if (zzplay_webm_codec_is(cur,"A_VORBIS")) { info->audio=ZZPLAY_WEBM_AUDIO_VORBIS; info->sample_rate=cur->saw_rate?cur->rate:8000U; }
-    else { zzplay_webm_fail(cur,ZZPLAY_WEBM_UNKNOWN_CODEC); return; }
+  audio = zzplay_webm_webm_audio(cur);
+  if (matroska) {
+    if (audio != ZZPLAY_WEBM_AUDIO_NONE) {
+      if (cur->pending_webm_audio == ZZPLAY_WEBM_AUDIO_NONE) {
+        cur->pending_webm_audio = audio;
+        cur->pending_webm_rate = audio == ZZPLAY_WEBM_AUDIO_OPUS
+            ? 48000U : (cur->saw_rate ? cur->rate : 8000U);
+        cur->pending_webm_channels = cur->channels ? cur->channels : 1U;
+      }
+      return;
+    }
+    audio = zzplay_webm_mpeg_audio(cur);
+    if (audio != ZZPLAY_WEBM_AUDIO_NONE &&
+        cur->pending_mpeg_audio == ZZPLAY_WEBM_AUDIO_NONE) {
+      cur->pending_mpeg_audio = audio;
+      cur->pending_mpeg_rate = cur->saw_rate ? cur->rate : 0U;
+      cur->pending_mpeg_channels = cur->channels ? cur->channels : 1U;
+    }
+    return;
   }
-  info->channels=cur->channels?cur->channels:1U;
+  if (++cur->audio_tracks > 1) { zzplay_webm_fail(cur, ZZPLAY_WEBM_TWO_AUDIO); return; }
+  if (audio == ZZPLAY_WEBM_AUDIO_NONE) { zzplay_webm_fail(cur, ZZPLAY_WEBM_UNKNOWN_CODEC); return; }
+  zzplay_webm_set_audio(info, audio,
+                        audio == ZZPLAY_WEBM_AUDIO_OPUS ? 48000U :
+                        (cur->saw_rate ? cur->rate : 8000U),
+                        cur->channels ? cur->channels : 1U);
 }
 
 static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
@@ -922,6 +976,7 @@ int zzplay_probe_webm(const uint8_t *data, size_t length, int capped,
                                              : ZZPLAY_WEBM_TRUNCATED);
     return 1;
   }
+  zzplay_webm_select_matroska_audio(&cur);
   if (!zzplay_webm_within_cap(info->width, info->height)) {
     info->refusal = ZZPLAY_WEBM_OVERSIZE;
     return 1;
