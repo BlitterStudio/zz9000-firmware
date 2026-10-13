@@ -675,10 +675,11 @@ static int split_lace(struct webm_demux *d, uint32_t payload_off,
 
 /* A Block's key flag lives in its BlockGroup; webm_next sets it after the
  * group. A SimpleBlock carries its own. Returns 1, having read only the
- * track number, for a block of a Matroska track that was not stored
- * (subtitles, disabled or unplayable tracks; see matroska_track_usable and
- * matroska_finish_tracks): the caller skips the rest, so frame limits
- * apply only to blocks a backend reads. */
+ * track number, for a block no backend plays: of a Matroska track that
+ * was not stored (subtitles, disabled or unplayable tracks; see
+ * matroska_track_usable and matroska_finish_tracks), or of a stored track
+ * the backend did not select (webm_select_tracks). The caller skips the
+ * rest, so frame limits apply only to blocks a backend reads. */
 static int take_block(struct webm_demux *d, uint32_t size, int simple)
 {
 	uint32_t tlen = 1, i, track;
@@ -703,6 +704,9 @@ static int take_block(struct webm_demux *d, uint32_t size, int simple)
 		track = (track << 8) | d->buf[i];
 	if (d->is_matroska && !webm_track(d, track))
 		return 1;
+	if (d->selected && track != d->select_video &&
+	    track != d->select_audio && webm_track(d, track))
+		return 1;
 	if (size < 4 || size > d->buf_cap || size > WEBM_MAX_FRAME)
 		return fail(d, WEBM_ERR_LIMIT);
 	if (tlen + 3 > size)
@@ -717,6 +721,14 @@ static int take_block(struct webm_demux *d, uint32_t size, int simple)
 	d->lace_track = track;
 	d->lace_tc = d->cluster_tc + rel;
 	return 0;
+}
+
+void webm_select_tracks(struct webm_demux *d, uint32_t video,
+			uint32_t audio)
+{
+	d->selected = 1U;
+	d->select_video = video;
+	d->select_audio = audio;
 }
 
 static int emit(struct webm_demux *d, struct webm_block *blk)

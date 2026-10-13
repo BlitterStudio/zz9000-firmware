@@ -121,8 +121,12 @@ struct webm_demux {
 	 * WEBM_NEXT_SKIPPED between its children and resume there. */
 	uint32_t group_end;
 	uint8_t group_saw;     /* its Block was taken */
-	uint8_t group_ignored; /* its Block belongs to an unstored track */
+	uint8_t group_ignored; /* its Block is skipped (see take_block) */
 	uint8_t group_key;     /* no ReferenceBlock so far */
+	/* webm_select_tracks: when set, only these tracks' blocks are read. */
+	uint8_t selected;
+	uint32_t select_video;
+	uint32_t select_audio;
 	uint8_t lace_i;
 	uint8_t lace_n;
 	uint8_t lace_key;
@@ -143,6 +147,11 @@ int webm_open(struct webm_demux *d, const struct webm_io *io, uint8_t *buf,
 #define WEBM_NEXT_SKIPPED 2
 int webm_next(struct webm_demux *d, struct webm_block *blk);
 void webm_close(struct webm_demux *d);
+/* After webm_open, the tracks the backend plays (audio 0 = none): blocks
+ * of every other track are skipped by track number, before frame limits
+ * or buffering, so data no decoder reads cannot fail the stream. */
+void webm_select_tracks(struct webm_demux *d, uint32_t video,
+			uint32_t audio);
 const struct webm_track *webm_track(const struct webm_demux *d, uint32_t number);
 const uint8_t *webm_track_priv(const struct webm_demux *d,
 			       const struct webm_track *t);

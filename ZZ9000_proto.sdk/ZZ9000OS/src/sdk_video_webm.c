@@ -319,6 +319,10 @@ static int finish_open(struct sdk_video_webm *d)
 		d->unsupported = 1U;
 		return 0;
 	}
+	/* Blocks of other tracks (audio not chosen, or none) are skipped
+	 * unread. */
+	webm_select_tracks(&d->demux, d->video_track_number,
+			   d->audio_track_number);
 	d->opened = 1U;
 	webm_window_compact(&d->win);
 	return 1;

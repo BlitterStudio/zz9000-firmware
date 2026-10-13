@@ -1553,6 +1553,10 @@ static int mkv_finish_open(struct sdk_video_mpeg2 *d)
 	if (video->priv_len != 0U && !priv)
 		return 0;
 	d->mkv_video_track = video->number;
+	/* Blocks of other tracks (audio not chosen, or none) are skipped
+	 * unread. */
+	webm_select_tracks(&d->mkv_demux, d->mkv_video_track,
+			   d->mkv_audio_track);
 	d->frame_rate_milli = webm_rate_milli(video->default_duration_ns);
 	d->mkv_private_pending = video->priv_len != 0U;
 	d->mkv_opened = 1U;

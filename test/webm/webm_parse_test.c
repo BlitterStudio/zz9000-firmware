@@ -637,6 +637,49 @@ static int test_matroska_ignored_tracks(void)
 	return failed;
 }
 
+/* Once the backend selects its tracks, blocks of a stored but unselected
+ * track (here MP2 while AC-3 plays, or any audio when none plays) are
+ * skipped by track number, even one larger than WEBM_MAX_FRAME. */
+static int test_selected_tracks(void)
+{
+	static const struct mkv_track_spec spec[] = {
+		{1, 1, "V_MPEG2", 0, 0, 1, 0},
+		{2, 2, "A_AC3", 0, 0, 1, 0},
+		{3, 2, "A_MPEG/L2", MKV_BIG_BLOCK, 0, 1, 0},
+	};
+	static const uint32_t audio[2] = {2U, 0U};
+	static uint8_t frame[WEBM_MAX_FRAME];
+	static struct webm_demux d;
+	struct buf file = make_mkv_tracks("matroska", spec, 3U);
+	struct webm_block blk;
+	int failed = 0;
+	unsigned pass;
+
+	for (pass = 0U; pass < 2U; pass++) {
+		uint32_t seen[4] = {0};
+		int rc;
+
+		if (open_file(file.p, file.n, 1, &d, frame, sizeof(frame)) != 0) {
+			fprintf(stderr, "selected tracks: open err=%d\n", d.error);
+			failed = 1;
+			break;
+		}
+		webm_select_tracks(&d, 1U, audio[pass]);
+		while ((rc = webm_next(&d, &blk)) == 1)
+			seen[blk.track < 4U ? blk.track : 0U]++;
+		if (rc != 0 || seen[1] != 1U || seen[2] != (pass == 0U) ||
+		    seen[3] != 0U || seen[0] != 0U) {
+			fprintf(stderr, "selected tracks: audio %u rc=%d err=%d "
+				"seen %u/%u/%u\n", audio[pass], rc, d.error,
+				seen[1], seen[2], seen[3]);
+			failed = 1;
+		}
+		webm_close(&d);
+	}
+	free(file.p);
+	return failed;
+}
+
 /* Streams a file through a 64 KiB window in 4 KiB writes the way the
  * media backends do: mark and snapshot around each webm_next, rewind and
  * write more on WEBM_ERR_NEED, compact when a write does not fit. Data
@@ -1077,6 +1120,7 @@ int main(void)
 	failed |= test_disabled_track_fields();
 	failed |= test_matroska_ignored_tracks();
 	failed |= test_window_skips_large_ignored_data();
+	failed |= test_selected_tracks();
 	failed |= test_track_metadata_masters();
 	failed |= test_lacing();
 	failed |= test_multi_cluster();
