@@ -27,6 +27,8 @@ void card_pool_init(card_pool_t *pool)
     pool->lock = (sdk_smp_lock_t)SDK_SMP_LOCK_INIT;
     pool->class_limit[CARD_POOL_CLASS_FIRMWARE] = CARD_POOL_LIMIT_FIRMWARE;
     pool->class_limit[CARD_POOL_CLASS_MEDIA] = CARD_POOL_LIMIT_MEDIA;
+    pool->class_limit[CARD_POOL_CLASS_MEDIA_INPUT] =
+        CARD_POOL_LIMIT_MEDIA_INPUT;
     pool->class_limit[CARD_POOL_CLASS_IMAGE] = CARD_POOL_LIMIT_IMAGE;
 }
 

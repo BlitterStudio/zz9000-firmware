@@ -2650,6 +2650,11 @@ static int zzplay_preload_media(struct ZZPlayRuntime *runtime,
   status = ZZ9K_STATUS_OK;
 
 done:
+  if (status != ZZ9K_STATUS_OK && runtime->preload.handle != 0U) {
+    (void)zzplay_resource_release(
+        &runtime->core.resources, ZZPLAY_RESOURCE_PRELOAD_BUFFER,
+        zzplay_release_resource, runtime);
+  }
   if (file) {
     Close(file);
   }
@@ -3795,9 +3800,6 @@ static ZZPlayEngineResult zzplay_engine_media_session(
       goto cleanup;
     }
     if (cleanup_status != ZZ9K_STATUS_OK) {
-      (void)zzplay_resource_release(
-          &runtime.core.resources, ZZPLAY_RESOURCE_PRELOAD_BUFFER,
-          zzplay_release_resource, &runtime);
       zzplay_info("zzplay: preload failed (%s); streaming instead\n",
                   zz9k_status_name(cleanup_status));
       zzplay_controller_set_message(runtime.ctl,

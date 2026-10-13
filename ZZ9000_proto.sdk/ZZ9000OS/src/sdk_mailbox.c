@@ -2437,7 +2437,7 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 		if ((flags & SDK_ALLOC_CARD_ONLY) == 0U ||
 		    (flags & SDK_ALLOC_HOST_WINDOW) != 0U ||
-		    length > CARD_POOL_LIMIT_MEDIA ||
+		    length > CARD_POOL_LIMIT_MEDIA_INPUT ||
 		    alignment > CARD_POOL_PAGE_BYTES)
 			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	} else if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
@@ -2458,7 +2458,7 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	memset(slot, 0, sizeof(*slot));
 	slot->handle = next_handle();
 	if (media) {
-		owner = CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, slot->handle);
+		owner = CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, slot->handle);
 		address = card_pool_alloc(&card_pool, length, owner);
 	} else if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
 		address = find_free_host_window_region(length, alignment);

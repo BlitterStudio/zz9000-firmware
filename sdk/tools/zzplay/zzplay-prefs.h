@@ -14,6 +14,7 @@
  *   VOLUME=100            0..100
  *   REPEAT=OFF            OFF | ONE | ALL
  *   SHUFFLE=NO            YES | NO
+ *   PRELOAD=NO            YES | NO
  *   WINDOW=-1,-1          player window left,top; -1,-1 = default
  *   DRAWER=Work:Music     last drawer used in a file requester
  *
