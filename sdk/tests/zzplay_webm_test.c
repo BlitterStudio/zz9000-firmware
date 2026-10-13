@@ -277,6 +277,13 @@ static int check_matroska(void)
   if (!probe_ok(file, n, &info) || info.doc_type != ZZPLAY_WEBM_DOCTYPE_MATROSKA ||
       info.video != ZZPLAY_WEBM_VIDEO_MPEG2 || info.audio != ZZPLAY_WEBM_AUDIO_AC3 ||
       info.sample_rate != 48000U || info.channels != 2U) return 0;
+  /* Supported audio may precede its MPEG video TrackEntry. */
+  tn = 0U;
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_AC3", rate, sizeof(rate), 2U, 2U);
+  tn = video_track(tracks, sizeof(tracks), tn, "V_MPEG2", 720U, 480U, 0U, 0U, 40000000U, 0, 0U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.video != ZZPLAY_WEBM_VIDEO_MPEG2 ||
+      info.audio != ZZPLAY_WEBM_AUDIO_AC3 || info.channels != 2U) return 0;
   /* VP8/VP9 in a matroska DocType keeps the WebM audio choices. */
   tn = 0U;
   tn = video_track(tracks, sizeof(tracks), tn, "V_VP9", 640U, 360U, 0U, 0U, 0U, 0, 0U);
