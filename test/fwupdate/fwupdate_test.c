@@ -125,6 +125,30 @@ static void test_restore_bak_target_uses_old(void) {
     CHECK(!mock_exists("0:/BOOT.old"), ".old companion consumed");
 }
 
+/* The Amiga reads the mirror as one big-endian longword: magic, a
+ * sequence that changes on every completion, then the status. The
+ * neighbouring ROM bytes stay untouched. */
+static void test_status_mirror_layout_and_sequence(void) {
+    uint32_t words[3];  /* the mirror is one aligned longword */
+    uint8_t *rom = (uint8_t *)words;
+    uint8_t *mirror = rom + 4;
+    uint8_t first_seq;
+
+    printf("test_status_mirror_layout_and_sequence\n");
+    memset(rom, 0xAA, sizeof(words));
+    fw_update_publish_status(mirror, FWUP_ERR_WRITE);
+    CHECK(mirror[0] == FWUP_STATUS_MIRROR_MAGIC, "magic in byte 0");
+    CHECK(mirror[2] == 0x00 && mirror[3] == FWUP_ERR_WRITE,
+          "status big-endian in bytes 2..3");
+    CHECK(rom[3] == 0xAA && rom[8] == 0xAA, "neighbouring bytes untouched");
+    first_seq = mirror[1];
+
+    fw_update_publish_status(mirror, FWUP_OK);
+    CHECK(mirror[1] != first_seq, "sequence changes per completion");
+    CHECK(mirror[2] == 0x00 && mirror[3] == FWUP_OK,
+          "second status published");
+}
+
 int main(void) {
     test_restore_promotes_backup();
     test_restore_without_backup_fails();
@@ -132,6 +156,7 @@ int main(void) {
     test_restore_rejected_while_transfer_open();
     test_restore_with_missing_active_promotes();
     test_restore_bak_target_uses_old();
+    test_status_mirror_layout_and_sequence();
     printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

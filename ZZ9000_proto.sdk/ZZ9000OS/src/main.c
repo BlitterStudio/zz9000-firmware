@@ -814,6 +814,8 @@ int main() {
 				break;
 			}
 			fwup_status = result;
+			fw_update_publish_status((volatile uint8_t *)
+				(BOOT_ROM_ADDRESS + BOOT_ROM_FWUP_MIRROR_OFFSET), result);
 			fwup_pending = 0;
 			/* The firmware-update staging buffer is the same legacy
 			 * 0xa000..0xffff window used by the SDK bootstrap mailbox.

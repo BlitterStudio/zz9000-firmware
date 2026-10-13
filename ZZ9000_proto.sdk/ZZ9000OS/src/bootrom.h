@@ -16,6 +16,11 @@
  * bitstream), so the software read path must clamp accordingly. */
 #define BOOT_ROM_SIZE  0x2000u  /* 8 KB */
 
+/* The window's last longword (board offset 0x7FFC) is not part of the
+ * ROM image: it carries the FWUP status mirror (fw_update.h). Nothing
+ * else writes this window at runtime, unlike the shared I/O buffer. */
+#define BOOT_ROM_FWUP_MIRROR_OFFSET (BOOT_ROM_SIZE - 4u)
+
 void boot_rom_init();
 
 #endif
