@@ -175,6 +175,28 @@ static int check_player(const char *path)
     goto done;
   }
 
+  /* AUTO fallback moves the AX pre-roll into AHI before Play. A short lead
+   * is submitted as the first AHI request; an empty ring may keep feeding
+   * and decoding, but cannot present another picture while still pending. */
+  {
+    long fallback = find(s,
+        "status = zzplay_audio_fallback_to_ahi(runtime, status);");
+    long pump;
+
+    if (fallback < 0L) { rc = 30; goto done; }
+    pump = find(s + fallback,
+        "status = zzplay_audio_pump(runtime, flush_tail, 0);");
+    if (pump < 0L ||
+        find(s + pump, "if (runtime->ahi.clock.queued_frames == 0U)") < 0L ||
+        find(s + pump, "if (!zzplay_ahi_play(&runtime->ahi))") < 0L ||
+        find(s, "runtime->audio_start_pending = (uint8_t)start_pending;") < 0L ||
+        find(s, "cleanup_status = zzplay_audio_pump(&runtime, 1, 0);") < 0L ||
+        find(s, "never present a second picture before that admitted start succeeds") < 0L) {
+      rc = 31;
+      goto done;
+    }
+  }
+
 done:
   free(s);
   return rc;

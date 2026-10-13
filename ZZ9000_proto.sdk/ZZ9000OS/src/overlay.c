@@ -347,9 +347,23 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	/* Every P96 and cgxvideo client reaches the PL scaler through the existing
 	 * driver ABI; no player-specific interface is involved. Keep the software
 	 * compositor for rectangles that do not intersect the screen or exceed
-	 * the native line fetcher's source bounds. */
+	 * the native line fetcher's source bounds. The native plane is also kept
+	 * 1:1-or-larger only: its line fetcher is paced one requested source row
+	 * per displayed row, and every window below the scanned source size run
+	 * on hardware showed just the frame's first rows and then black (A4000:
+	 * a 1920x1080 window, and a 720x576 MPEG-2 frame letterboxed to 720x405
+	 * in fullscreen, while upscaled and 1:1 windows of the same clips were
+	 * correct). What is scanned decides: a P96 source is scanned at full
+	 * size, an SDK video session's half-packed >720p frame at half size, so
+	 * the latter still goes native into a 1280x720 window. A session binds
+	 * to the overlay at its first frame, after this SET, but players begin
+	 * it first, so an open session means staging frames will be scanned. */
 	uint8_t was_hw_active = ov.hw_active;
 	uint32_t hw_src_addr = ov.src_addr;
+	uint8_t scan_div =
+		(ov.direct_session != 0U || sdk_video_stream_active_count() != 0U)
+			? overlay_staging_divisor(src_w, src_h)
+			: 1U;
 	int32_t dst_right = (int32_t)dst_x + dst_w;
 	int32_t dst_bottom = (int32_t)dst_y + dst_h;
 
@@ -362,6 +376,8 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	ov.hw_active = 0;
 	if (overlay_hw_supported() && ov.active &&
 	    dst_w > 0 && dst_h > 0 &&
+	    (int32_t)dst_w >= (int32_t)(src_w / scan_div) &&
+	    (int32_t)dst_h >= (int32_t)(src_h / scan_div) &&
 	    dst_right > 0 && dst_bottom > 0 &&
 	    dst_x < (int32_t)vs->vmode_hsize &&
 	    dst_y < (int32_t)rows) {
@@ -570,17 +586,36 @@ void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 	if (ov.direct_session != 0U) {
 		p.src_addr = ov.direct_session;
 		if (ov.hw_active) {
+			struct SDKVideoDecodedFrame frame;
+			int interlaced = 0;
+
 			/* Convert decoder-owned planar420 into the non-scanned packed
 			 * staging buffer using the pitch already programmed into the PL
 			 * VDMA. PL still performs RGB conversion/key/composition; this is
 			 * roughly half a frame write, not a full-screen shadow. A frame
 			 * too large for the overlay to fetch is packed at half size
-			 * (variant 0xfd), and the hand-off scans it at that size. */
+			 * (variant 0xfd), and the hand-off scans it at that size.
+			 * Interlaced frames (no PROGRESSIVE flag and TFF or BFF set -
+			 * backends that leave picture_flags 0 for progressive content
+			 * stay unblended) pack with the blend-deinterlace variant 0xfc
+			 * instead, which costs about the plain pack and removes the
+			 * comb lines a two-field frame shows as progressive. */
 			packed_div = overlay_staging_divisor(ov.src_w, ov.src_h);
 			p.dst_addr = ov.shadow[target];
 			p.dst_pitch = overlay_staging_pitch(ov.src_w, ov.src_pitch);
 			p.scr_h = (uint16_t)(ov.src_h / packed_div);
-			p.variant = packed_div == 2U ? 0xfdU : 0xfeU;
+			if (packed_div != 2U &&
+			    sdk_video_stream_get_direct_frame(ov.direct_session,
+			                                      &frame) &&
+			    (frame.picture_flags &
+			     SDK_VIDEO_PICTURE_FLAG_PROGRESSIVE) == 0U &&
+			    ((frame.picture_flags &
+			      SDK_VIDEO_PICTURE_FLAG_TFF) != 0U ||
+			     (frame.picture_flags &
+			      SDK_VIDEO_PICTURE_FLAG_BFF) != 0U))
+				interlaced = 1;
+			p.variant = packed_div == 2U ? 0xfdU
+				: interlaced ? 0xfcU : 0xfeU;
 		} else {
 			p.variant = 0xffU;
 		}
@@ -603,7 +638,8 @@ uint16_t overlay_run_compose(const struct overlay_compose_params *p)
 	 * (see the flush comment in isr_video), so host writes snoop the
 	 * ARM caches. A defensive L1 range-invalidate pass here was
 	 * benched as a no-op and cost milliseconds per frame. */
-	if (p->variant == 0xfeU || p->variant == 0xfdU) {
+	if (p->variant == 0xfeU || p->variant == 0xfdU ||
+	    p->variant == 0xfcU) {
 		struct SDKVideoDecodedFrame frame;
 		uint32_t bytes_written;
 		uint32_t profile_start;
@@ -615,12 +651,24 @@ uint16_t overlay_run_compose(const struct overlay_compose_params *p)
 		/* Timed on its own: whether this pack is material against decode
 		 * is what gates the planar FPGA subproject (R13, U7). */
 		profile_start = sdk_media_profile_now_us();
-		packed = (p->variant == 0xfdU ? sdk_video_yuv420_to_yuy2_half
-		                              : sdk_video_yuv420_to_yuy2)(
-			(uint8_t *)p->dst_addr, p->dst_pitch,
-			frame.width, frame.height,
-			frame.y, frame.y_pitch, frame.cb, frame.cr,
-			frame.chroma_pitch, &bytes_written);
+		if (p->variant == 0xfdU)
+			packed = sdk_video_yuv420_to_yuy2_half(
+				(uint8_t *)p->dst_addr, p->dst_pitch,
+				frame.width, frame.height,
+				frame.y, frame.y_pitch, frame.cb, frame.cr,
+				frame.chroma_pitch, &bytes_written);
+		else if (p->variant == 0xfcU)
+			packed = sdk_video_yuv420_to_yuy2_blend(
+				(uint8_t *)p->dst_addr, p->dst_pitch,
+				frame.width, frame.height,
+				frame.y, frame.y_pitch, frame.cb, frame.cr,
+				frame.chroma_pitch, &bytes_written);
+		else
+			packed = sdk_video_yuv420_to_yuy2(
+				(uint8_t *)p->dst_addr, p->dst_pitch,
+				frame.width, frame.height,
+				frame.y, frame.y_pitch, frame.cb, frame.cr,
+				frame.chroma_pitch, &bytes_written);
 		sdk_media_profile_record(
 			SDK_MEDIA_PROFILE_YUY2_PACK, profile_start);
 		if (!packed)

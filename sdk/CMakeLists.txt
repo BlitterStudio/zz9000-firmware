@@ -499,6 +499,7 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-options.c
   tools/zzplay/zzplay-path.c
   tools/zzplay/zzplay-playlist.c
+  tools/zzplay/zzplay-sys.c
   tools/zzplay/zzplay-prefs.c
   tools/zzplay/zzplay-probe.c
   tools/zzplay/zzplay-stats.c

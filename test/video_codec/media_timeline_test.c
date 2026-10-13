@@ -174,7 +174,7 @@ static int test_ordered_output_ignores_reorder_jitter(void)
 	                            1U, 25U, &result) ||
 	    result.pts != 13600U)
 		return 1;
-	/* A demux PTS consumed while pl_mpeg is decoding a future I/P
+	/* A demux PTS consumed while the decoder holds a future I/P
 	 * reference must not retime the earlier B-frame returned now. */
 	if (!sdk_media_timeline_observe_ordered(
 	        &timeline, SDK_MEDIA_TIMELINE_VIDEO, 17200U, &result) ||

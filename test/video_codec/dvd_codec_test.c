@@ -37,6 +37,7 @@
 #include "dvd_ac3_dual_fixture.inc"
 
 #define PCM_RING_CAPACITY (128U * 1024U)
+#define TEST_MEDIA_AUDIO_NONE UINT32_MAX
 #define FNV64_OFFSET UINT64_C(14695981039346656037)
 
 static uint64_t fnv1a64(uint64_t hash, const uint8_t *bytes, uint32_t length)
@@ -50,16 +51,27 @@ static uint64_t fnv1a64(uint64_t hash, const uint8_t *bytes, uint32_t length)
 	return hash;
 }
 
+static const struct SDKVideoDecoderOps *mpeg2_ops(void)
+{
+	return sdk_video_backend_find(SDK_VIDEO_CODEC_MPEG2,
+	                              SDK_VIDEO_CONTAINER_MPEG_PS);
+}
+
 /* -------------------------------------------------------- LPCM exactness */
 
 static int test_lpcm_exactness(void)
 {
 	struct SDKDVDLPCM lpcm = {0};
-	uint8_t hdr_stereo[7] = {0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00};
-	uint8_t hdr_mono[7]   = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-	uint8_t hdr_bad_rate[7] = {0x00, 0x00, 0x04, 0x10, 0x00, 0x00, 0x00};
-	uint8_t hdr_bad_bits[7] = {0x00, 0x00, 0x40, 0x10, 0x00, 0x00, 0x00};
-	uint8_t hdr_bad_chans[7] = {0x00, 0x00, 0x00, 0x50, 0x00, 0x00, 0x00};
+	/* The payload header as ffmpeg -f dvd writes it (dvd_ntsc_30 fixture):
+	 * substream id, frame count, first-access-unit pointer (2 bytes),
+	 * emphasis/mute/frame number, format, dynamic range. The format byte
+	 * holds quantization (bits 7-6), rate (5-4) and channels - 1 (2-0);
+	 * the pointer's low byte (0x04) must not be read as a channel count. */
+	uint8_t hdr_stereo[7] = {0xa0, 0x07, 0x00, 0x04, 0x0c, 0x01, 0x80};
+	uint8_t hdr_mono[7]   = {0xa0, 0x07, 0x00, 0x14, 0x0c, 0x00, 0x80};
+	uint8_t hdr_bad_rate[7] = {0xa0, 0x07, 0x00, 0x04, 0x0c, 0x11, 0x80};
+	uint8_t hdr_bad_bits[7] = {0xa0, 0x07, 0x00, 0x04, 0x0c, 0x41, 0x80};
+	uint8_t hdr_bad_chans[7] = {0xa0, 0x07, 0x00, 0x04, 0x0c, 0x05, 0x80};
 	uint8_t src[16];
 	uint8_t dst[32];
 	uint32_t bytes;
@@ -130,7 +142,9 @@ struct stream_result {
 	uint32_t frame_rate_milli;
 	uint32_t picture_flags[16];
 	uint32_t display_fields[16];
+	uint32_t time_millis[16];
 	uint64_t raw_pts[16];
+	uint64_t media_pts[16];
 	uint64_t yuy2_hash;
 	uint64_t pcm_hash;
 	uint64_t pcm_produced;
@@ -139,6 +153,8 @@ struct stream_result {
 	uint32_t audio_channels;
 	int eof_state; /* decode result once the EOF write is all in */
 	int final_state;
+	uint64_t first_audio_pts;
+	uint64_t last_audio_pts;
 };
 
 /* Logs a decoded frame into out and hashes its YUY2 form. Returns 0 when
@@ -155,8 +171,10 @@ static int record_frame(struct stream_result *out,
 		out->width = frame->width;
 		out->height = frame->height;
 		out->picture_flags[out->frame_count] = frame->picture_flags;
-		out->display_fields[out->frame_count] = frame->display_fields;
+		out->time_millis[out->frame_count] = frame->time_millis;
 		out->raw_pts[out->frame_count] = frame->raw_pts;
+		out->media_pts[out->frame_count] = frame->media_pts;
+		out->display_fields[out->frame_count] = frame->display_fields;
 	}
 	ok = yuy2 && sdk_video_yuv420_to_yuy2(
 		yuy2, row_bytes, frame->width, frame->height,
@@ -173,11 +191,12 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
                            uint32_t chunk_size, uint32_t audio_codec,
                            struct stream_result *out)
 {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	void *decoder;
 	uint8_t *pcm_ring = NULL;
 	struct SDKVideoDecodedFrame frame;
 	uint32_t offset = 0U;
+	int configure_no_audio = audio_codec == TEST_MEDIA_AUDIO_NONE;
 	int res = 0;
 
 	memset(out, 0, sizeof(*out));
@@ -187,19 +206,24 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 	if (!decoder)
 		return 1;
 
-	if (audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE) {
+	if (configure_no_audio)
+		audio_codec = SDK_VIDEO_MEDIA_AUDIO_NONE;
+	if (audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE || configure_no_audio) {
 		struct SDKVideoMediaConfig cfg = {0};
-		pcm_ring = (uint8_t *)malloc(PCM_RING_CAPACITY);
-		if (!pcm_ring) {
-			ops->destroy(decoder);
-			return 2;
-		}
-		memset(pcm_ring, 0, PCM_RING_CAPACITY);
+
 		cfg.audio_codec = audio_codec;
-		cfg.pcm_ring = pcm_ring;
-		cfg.pcm_ring_capacity = PCM_RING_CAPACITY;
-		cfg.pcm_low_water_bytes = 4096U;
-		cfg.pcm_high_water_bytes = PCM_RING_CAPACITY - 4096U;
+		if (audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE) {
+			pcm_ring = (uint8_t *)malloc(PCM_RING_CAPACITY);
+			if (!pcm_ring) {
+				ops->destroy(decoder);
+				return 2;
+			}
+			memset(pcm_ring, 0, PCM_RING_CAPACITY);
+			cfg.pcm_ring = pcm_ring;
+			cfg.pcm_ring_capacity = PCM_RING_CAPACITY;
+			cfg.pcm_low_water_bytes = 4096U;
+			cfg.pcm_high_water_bytes = PCM_RING_CAPACITY - 4096U;
+		}
 		if (!ops->configure_media(decoder, &cfg)) {
 			free(pcm_ring);
 			ops->destroy(decoder);
@@ -258,12 +282,25 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 	/* Signal EOF with empty buffer */
 	{
 		uint32_t accepted = 0U;
+		uint32_t busy_rounds = 0U;
+		struct SDKVideoMediaInfo ainfo;
+
 		ops->write(decoder, NULL, 0U, 1, &accepted);
 		for (;;) {
 			res = ops->decode(decoder, &frame);
 			if (res != SDK_VIDEO_BACKEND_FRAME)
 				break;
 			(void)record_frame(out, &frame);
+		}
+		/* A session finishing its audio answers BACKPRESSURE until the
+		 * client acknowledges the PCM it holds, exactly like a player
+		 * draining at end of stream. */
+		while (res == SDK_VIDEO_BACKEND_BACKPRESSURE &&
+		       ops->get_media_info(decoder, &ainfo) &&
+		       ainfo.pcm_produced > ainfo.pcm_acknowledged &&
+		       ++busy_rounds < 1000U) {
+			ops->ack_media(decoder, ainfo.pcm_produced);
+			res = ops->decode(decoder, &frame);
 		}
 		out->final_state = res;
 	}
@@ -281,6 +318,8 @@ static int run_decode_test(const uint8_t *stream, uint32_t length,
 			out->pcm_produced = ainfo.pcm_produced;
 			out->audio_frames = ainfo.audio_frames;
 			out->audio_rate = ainfo.sample_rate;
+			out->last_audio_pts = ainfo.audio_pts;
+			out->first_audio_pts = ainfo.first_audio_pts;
 			out->audio_channels = ainfo.channels;
 			if (ainfo.pcm_produced != 0U) {
 				uint32_t hash_len = ainfo.pcm_produced > PCM_RING_CAPACITY
@@ -363,6 +402,424 @@ static int test_pal_25p(void)
 
 	return 0;
 }
+/* A sequence end closes one MPEG sequence, not the Program Stream. */
+static int test_concatenated_video_sequences(void)
+{
+	struct stream_result r;
+	uint8_t *stream;
+	uint32_t length = zz9k_dvd_pal_25p_fixture_len;
+	int rc;
+
+	stream = (uint8_t *)malloc(length * 2U);
+	if (!stream)
+		return 1;
+	memcpy(stream, zz9k_dvd_pal_25p_fixture, length);
+	memcpy(stream + length, zz9k_dvd_pal_25p_fixture, length);
+	rc = run_decode_test(stream, length * 2U, 197U,
+	                     TEST_MEDIA_AUDIO_NONE, &r);
+	free(stream);
+	if (rc != 0)
+		return 2;
+	if (r.frame_count != 10U || r.final_state != SDK_VIDEO_BACKEND_DONE)
+		return 3;
+	return 0;
+}
+
+static uint32_t set_sequence_rate(uint8_t *stream, uint32_t length,
+                                  uint8_t rate_code)
+{
+	uint32_t at;
+	uint32_t changed = 0U;
+
+	for (at = 0U; at + 8U <= length; at++) {
+		if (stream[at] == 0U && stream[at + 1U] == 0U &&
+		    stream[at + 2U] == 1U && stream[at + 3U] == 0xb3U) {
+			stream[at + 7U] = (stream[at + 7U] & 0xf0U) | rate_code;
+			changed++;
+		}
+	}
+	return changed;
+}
+
+/* MPEG-2 sequence extension chroma_format is bits 2..1 after the
+ * extension id and profile-level byte. */
+static uint32_t set_sequence_chroma_422(uint8_t *stream, uint32_t length)
+{
+	uint32_t at;
+	uint32_t changed = 0U;
+
+	for (at = 0U; at + 6U <= length; at++) {
+		if (stream[at] == 0U && stream[at + 1U] == 0U &&
+		    stream[at + 2U] == 1U && stream[at + 3U] == 0xb5U &&
+		    (stream[at + 4U] >> 4) == 1U) {
+			stream[at + 5U] = (stream[at + 5U] & ~0x06U) | 0x04U;
+			changed++;
+		}
+	}
+	return changed;
+}
+
+/* The 4:2:0 display buffers must reject a 4:2:2 MPEG-2 sequence before
+ * publishing a frame. */
+static int test_unsupported_chroma_refused(void)
+{
+	struct stream_result r;
+	uint8_t *stream;
+	uint32_t length = zz9k_dvd_pal_25p_fixture_len;
+	int rc;
+
+	if (run_decode_test(zz9k_dvd_pal_25p_fixture, length, 197U,
+	                    TEST_MEDIA_AUDIO_NONE, &r) != 0 ||
+	    r.frame_count == 0U)
+		return 1;
+	stream = (uint8_t *)malloc(length);
+	if (!stream)
+		return 2;
+	memcpy(stream, zz9k_dvd_pal_25p_fixture, length);
+	if (set_sequence_chroma_422(stream, length) == 0U) {
+		free(stream);
+		return 3;
+	}
+	rc = run_decode_test(stream, length, 197U, TEST_MEDIA_AUDIO_NONE, &r);
+	free(stream);
+	if (rc != 6 || r.frame_count != 0U)
+		return 4;
+	return 0;
+}
+
+/* Remove optional PES fields so the decoder follows the derived clock. */
+static uint32_t strip_video_pes_pts(uint8_t *stream, uint32_t length)
+{
+	uint32_t at = 0U;
+
+	while (at + 9U <= length) {
+		uint32_t total;
+		uint32_t optional;
+
+		if (stream[at] != 0U || stream[at + 1U] != 0U ||
+		    stream[at + 2U] != 1U || stream[at + 3U] != 0xe0U) {
+			at++;
+			continue;
+		}
+		total = 6U + ((uint32_t)stream[at + 4U] << 8) + stream[at + 5U];
+		if (total > length - at || (stream[at + 6U] & 0xc0U) != 0x80U) {
+			at++;
+			continue;
+		}
+		optional = stream[at + 8U];
+		if (optional > total - 9U)
+			return 0U;
+		if ((stream[at + 7U] & 0x80U) != 0U) {
+			memmove(stream + at + 9U, stream + at + 9U + optional,
+			        length - at - 9U - optional);
+			length -= optional;
+			total -= optional;
+			stream[at + 4U] = (uint8_t)((total - 6U) >> 8);
+			stream[at + 5U] = (uint8_t)(total - 6U);
+			stream[at + 7U] &= 0x3fU;
+			stream[at + 8U] = 0U;
+		}
+		at += total;
+	}
+	return length;
+}
+
+/* The next sequence's rate must not time the preceding picture's slot. */
+static int sequence_rate_transition_timing(int sequence_end)
+{
+	static const uint8_t end_pes[] = {
+		0U, 0U, 1U, 0xe0U, 0U, 7U, 0x80U, 0U, 0U,
+		0U, 0U, 1U, 0xb7U
+	};
+	struct stream_result r;
+	uint8_t *stream;
+	uint32_t first_length = zz9k_dvd_pal_25p_fixture_len;
+	uint32_t second_at = first_length;
+	uint32_t second_length;
+	uint64_t expected;
+	int rc;
+
+	stream = (uint8_t *)malloc(first_length * 2U + sizeof(end_pes));
+	if (!stream)
+		return 1;
+	memcpy(stream, zz9k_dvd_pal_25p_fixture, first_length);
+	if (sequence_end) {
+		memcpy(stream + second_at, end_pes, sizeof(end_pes));
+		second_at += sizeof(end_pes);
+	}
+	memcpy(stream + second_at, zz9k_dvd_pal_25p_fixture, first_length);
+	if (set_sequence_rate(stream + second_at, first_length, 4U) == 0U) {
+		free(stream);
+		return 2;
+	}
+	second_length = strip_video_pes_pts(stream + second_at, first_length);
+	if (second_length == 0U) {
+		free(stream);
+		return 3;
+	}
+	rc = run_decode_test(stream, second_at + second_length, 197U,
+	                     TEST_MEDIA_AUDIO_NONE, &r);
+	free(stream);
+	if (rc != 0 || r.frame_count != 10U ||
+	    r.final_state != SDK_VIDEO_BACKEND_DONE)
+		return 4;
+	if (r.raw_pts[5] != SDK_VIDEO_MEDIA_NO_PTS ||
+	    r.media_pts[5] - r.media_pts[4] != 3600U)
+		return 5;
+	expected = (UINT64_C(2) * 500U * 90000U) / 29970U;
+	if (r.media_pts[6] - r.media_pts[5] != expected ||
+	    r.time_millis[5] != 200U || r.time_millis[6] != 233U)
+		return 6;
+	return 0;
+}
+
+static int test_sequence_rate_transition_timing(void)
+{
+	return sequence_rate_transition_timing(0);
+}
+
+static int test_sequence_end_rate_transition_timing(void)
+{
+	return sequence_rate_transition_timing(1);
+}
+
+static uint32_t retag_video_pes(uint8_t *stream, uint32_t length,
+                                uint8_t stream_id)
+{
+	uint32_t at;
+	uint32_t retagged = 0U;
+
+	for (at = 0U; at + 4U <= length; at++) {
+		if (stream[at] == 0U && stream[at + 1U] == 0U &&
+		    stream[at + 2U] == 1U && stream[at + 3U] == 0xe0U) {
+			stream[at + 3U] = stream_id;
+			retagged++;
+		}
+	}
+	return retagged;
+}
+
+/* A Program Stream selects its first video stream and skips the others. */
+static int test_primary_video_stream_selection(void)
+{
+	struct stream_result r;
+	uint8_t *stream;
+	uint32_t length = zz9k_dvd_pal_25p_fixture_len;
+	int rc;
+
+	stream = (uint8_t *)malloc(length * 2U);
+	if (!stream)
+		return 1;
+	memcpy(stream, zz9k_dvd_pal_25p_fixture, length);
+	memcpy(stream + length, zz9k_dvd_pal_25p_fixture, length);
+	if (retag_video_pes(stream + length, length, 0xe1U) == 0U) {
+		free(stream);
+		return 2;
+	}
+	rc = run_decode_test(stream, length * 2U, 197U,
+	                     TEST_MEDIA_AUDIO_NONE, &r);
+	free(stream);
+	if (rc != 0)
+		return 3;
+	if (r.frame_count != 5U || r.final_state != SDK_VIDEO_BACKEND_DONE)
+		return 4;
+	return 0;
+}
+
+/* A low-delay MPEG-2 sequence displays every picture at its slice, so its
+ * final STATE_END has no delayed frame. EOF must reach DONE immediately. */
+static int test_low_delay_sequence_end(void)
+{
+	static const uint8_t video[] = {
+		0U, 0U, 1U, 0xb3U, 1U, 0U, 0x10U, 0x13U, 0xffU, 0xffU,
+		0xe0U, 0x18U, 0U, 0U, 1U, 0xb5U, 0x14U, 0x8aU, 0U, 1U,
+		0U, 0x80U, 0U, 0U, 1U, 0xb8U, 0U, 8U, 0U, 0x40U,
+		0U, 0U, 1U, 0U, 0U, 0x0fU, 0xffU, 0xf8U, 0U, 0U,
+		1U, 0xb5U, 0x8fU, 0xffU, 0xf3U, 0x41U, 0x80U, 0U, 0U,
+		1U, 1U, 0xfbU, 0xf8U, 0x7dU, 0x29U, 0x48U, 0x88U,
+		0U, 0U, 1U, 0xb7U
+	};
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
+	struct SDKVideoDecodedFrame frame;
+	uint8_t stream[9U + sizeof(video)];
+	void *decoder;
+	uint32_t accepted = 0U;
+	uint32_t frames = 0U;
+	int result;
+
+	if (!ops)
+		return 1;
+	stream[0] = 0U;
+	stream[1] = 0U;
+	stream[2] = 1U;
+	stream[3] = 0xe0U;
+	stream[4] = 0U;
+	stream[5] = (uint8_t)(3U + sizeof(video));
+	stream[6] = 0x80U;
+	stream[7] = 0U;
+	stream[8] = 0U;
+	memcpy(stream + 9U, video, sizeof(video));
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 2;
+	if (ops->write(decoder, stream, sizeof(stream), 0, &accepted) !=
+	    SDK_VIDEO_BACKEND_WRITE_OK || accepted != sizeof(stream)) {
+		ops->destroy(decoder);
+		return 3;
+	}
+	for (;;) {
+		result = ops->decode(decoder, &frame);
+		if (result != SDK_VIDEO_BACKEND_FRAME)
+			break;
+		frames++;
+	}
+	if (result != SDK_VIDEO_BACKEND_NEED_INPUT || frames != 1U) {
+		ops->destroy(decoder);
+		return 4;
+	}
+	if (ops->write(decoder, NULL, 0U, 1, &accepted) !=
+	    SDK_VIDEO_BACKEND_WRITE_OK || accepted != 0U) {
+		ops->destroy(decoder);
+		return 5;
+	}
+	result = ops->decode(decoder, &frame);
+	ops->destroy(decoder);
+	return result == SDK_VIDEO_BACKEND_DONE ? 0 : 6;
+}
+
+/* Low-delay pictures must retain the rate decoded with each picture. */
+static int test_low_delay_rate_transition_timing(void)
+{
+	static const uint8_t video[] = {
+		0U, 0U, 1U, 0xb3U, 1U, 0U, 0x10U, 0x13U, 0xffU, 0xffU,
+		0xe0U, 0x18U, 0U, 0U, 1U, 0xb5U, 0x14U, 0x8aU, 0U, 1U,
+		0U, 0x80U, 0U, 0U, 1U, 0xb8U, 0U, 8U, 0U, 0x40U,
+		0U, 0U, 1U, 0U, 0U, 0x0fU, 0xffU, 0xf8U, 0U, 0U,
+		1U, 0xb5U, 0x8fU, 0xffU, 0xf3U, 0x41U, 0x80U, 0U, 0U,
+		1U, 1U, 0xfbU, 0xf8U, 0x7dU, 0x29U, 0x48U, 0x88U,
+		0U, 0U, 1U, 0xb7U
+	};
+	struct stream_result r;
+	uint8_t stream[10U * (9U + sizeof(video))];
+	uint32_t at = 0U;
+	uint32_t i;
+	uint64_t expected;
+	int rc;
+
+	for (i = 0U; i < 10U; i++) {
+		stream[at] = 0U;
+		stream[at + 1U] = 0U;
+		stream[at + 2U] = 1U;
+		stream[at + 3U] = 0xe0U;
+		stream[at + 4U] = 0U;
+		stream[at + 5U] = (uint8_t)(3U + sizeof(video));
+		stream[at + 6U] = 0x80U;
+		stream[at + 7U] = 0U;
+		stream[at + 8U] = 0U;
+		memcpy(stream + at + 9U, video, sizeof(video));
+		if (i >= 5U)
+			stream[at + 16U] = (stream[at + 16U] & 0xf0U) | 4U;
+		at += 9U + sizeof(video);
+	}
+	rc = run_decode_test(stream, at, 197U, TEST_MEDIA_AUDIO_NONE, &r);
+	if (rc != 0 || r.frame_count != 10U ||
+	    r.final_state != SDK_VIDEO_BACKEND_DONE)
+		return 1;
+	if (r.raw_pts[5] != SDK_VIDEO_MEDIA_NO_PTS ||
+	    r.media_pts[5] - r.media_pts[4] != 3600U)
+		return 2;
+	expected = (UINT64_C(2) * 500U * 90000U) / 29970U;
+	if (r.media_pts[6] - r.media_pts[5] != expected ||
+	    r.time_millis[5] != 200U || r.time_millis[6] != 233U)
+		return 3;
+	return 0;
+}
+
+/* Several pictures in one PES retain the rate captured at each header. */
+static int test_shared_pes_rate_transition_timing(void)
+{
+	static const uint8_t video[] = {
+		0U, 0U, 1U, 0xb3U, 1U, 0U, 0x10U, 0x13U, 0xffU, 0xffU,
+		0xe0U, 0x18U, 0U, 0U, 1U, 0xb5U, 0x14U, 0x8aU, 0U, 1U,
+		0U, 0x80U, 0U, 0U, 1U, 0xb8U, 0U, 8U, 0U, 0x40U,
+		0U, 0U, 1U, 0U, 0U, 0x0fU, 0xffU, 0xf8U, 0U, 0U,
+		1U, 0xb5U, 0x8fU, 0xffU, 0xf3U, 0x41U, 0x80U, 0U, 0U,
+		1U, 1U, 0xfbU, 0xf8U, 0x7dU, 0x29U, 0x48U, 0x88U,
+		0U, 0U, 1U, 0xb7U
+	};
+	struct stream_result r;
+	uint8_t stream[9U + 10U * sizeof(video)];
+	uint32_t payload_length = 10U * sizeof(video);
+	uint32_t i;
+	uint64_t expected;
+	int rc;
+
+	stream[0] = stream[1] = 0U;
+	stream[2] = 1U;
+	stream[3] = 0xe0U;
+	stream[4] = (uint8_t)((3U + payload_length) >> 8);
+	stream[5] = (uint8_t)(3U + payload_length);
+	stream[6] = 0x80U;
+	stream[7] = stream[8] = 0U;
+	for (i = 0U; i < 10U; i++) {
+		memcpy(stream + 9U + i * sizeof(video), video, sizeof(video));
+		if (i >= 5U)
+			stream[9U + i * sizeof(video) + 7U] =
+				(stream[9U + i * sizeof(video) + 7U] & 0xf0U) | 4U;
+	}
+	rc = run_decode_test(stream, sizeof(stream), 197U,
+	                     TEST_MEDIA_AUDIO_NONE, &r);
+	if (rc != 0 || r.frame_count != 10U ||
+	    r.final_state != SDK_VIDEO_BACKEND_DONE)
+		return 1;
+	expected = (UINT64_C(2) * 500U * 90000U) / 29970U;
+	if (r.media_pts[5] - r.media_pts[4] != 3600U ||
+	    r.media_pts[6] - r.media_pts[5] != expected ||
+	    r.time_millis[5] != 200U || r.time_millis[6] != 233U)
+		return 2;
+	return 0;
+}
+
+/* A tag on the first fragment survives until the split picture header. */
+static int test_split_picture_header_keeps_pts(void)
+{
+	static const uint8_t video[] = {
+		0U, 0U, 1U, 0xb3U, 1U, 0U, 0x10U, 0x13U, 0xffU, 0xffU,
+		0xe0U, 0x18U, 0U, 0U, 1U, 0xb5U, 0x14U, 0x8aU, 0U, 1U,
+		0U, 0x80U, 0U, 0U, 1U, 0xb8U, 0U, 8U, 0U, 0x40U,
+		0U, 0U, 1U, 0U, 0U, 0x0fU, 0xffU, 0xf8U, 0U, 0U,
+		1U, 0xb5U, 0x8fU, 0xffU, 0xf3U, 0x41U, 0x80U, 0U, 0U,
+		1U, 1U, 0xfbU, 0xf8U, 0x7dU, 0x29U, 0x48U, 0x88U,
+		0U, 0U, 1U, 0xb7U
+	};
+	struct stream_result r;
+	uint8_t stream[14U + 2U + 9U + 2U + 9U + sizeof(video) - 4U];
+	uint32_t at = 0U;
+	int rc;
+
+	stream[at++] = 0U; stream[at++] = 0U; stream[at++] = 1U;
+	stream[at++] = 0xe0U; stream[at++] = 0U; stream[at++] = 10U;
+	stream[at++] = 0x80U; stream[at++] = 0x80U; stream[at++] = 5U;
+	stream[at++] = 0x21U; stream[at++] = 0U; stream[at++] = 0x01U;
+	stream[at++] = 0x46U; stream[at++] = 0x51U;
+	memcpy(stream + at, video, 2U); at += 2U;
+	stream[at++] = 0U; stream[at++] = 0U; stream[at++] = 1U;
+	stream[at++] = 0xe0U; stream[at++] = 0U; stream[at++] = 5U;
+	stream[at++] = 0x80U; stream[at++] = 0U; stream[at++] = 0U;
+	memcpy(stream + at, video + 2U, 2U); at += 2U;
+	stream[at++] = 0U; stream[at++] = 0U; stream[at++] = 1U;
+	stream[at++] = 0xe0U;
+	stream[at++] = (uint8_t)((3U + sizeof(video) - 4U) >> 8);
+	stream[at++] = (uint8_t)(3U + sizeof(video) - 4U);
+	stream[at++] = 0x80U; stream[at++] = 0U; stream[at++] = 0U;
+	memcpy(stream + at, video + 4U, sizeof(video) - 4U); at += sizeof(video) - 4U;
+	rc = run_decode_test(stream, at, 197U, TEST_MEDIA_AUDIO_NONE, &r);
+	if (rc != 0 || r.frame_count != 1U || r.raw_pts[0] != 9000U)
+		return 1;
+	return 0;
+}
+
+
 
 /* 2. PAL TFF Interlaced: 720x576, top-field-first, AC-3 audio, moving-field marker */
 static int test_pal_tff_interlaced(void)
@@ -514,6 +971,7 @@ static int test_demuxer_bounded_behavior(void)
 struct acked_result {
 	uint64_t pcm_bytes;
 	uint64_t pcm_hash;
+	uint64_t pcm_pending_peak;
 	uint32_t video_frames;
 	uint32_t audio_frames;
 	uint32_t media_flags;
@@ -522,12 +980,14 @@ struct acked_result {
 
 /* Runs the backend like a player would: writes in chunks, acknowledges at
  * most max_ack PCM bytes per decode call, hashes the PCM in ack order, and
- * stops at DONE (or fails after a bounded number of calls). */
-static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
-                     uint32_t ring_capacity, uint32_t max_ack,
-                     struct acked_result *out)
+ * at DONE plays the rest of the ring out (or fails after a bounded number
+ * of calls). */
+static int run_acked_with_high(const uint8_t *stream, uint32_t length,
+			       uint32_t chunk, uint32_t audio_codec,
+			       uint32_t ring_capacity, uint32_t high_water,
+			       uint32_t max_ack, struct acked_result *out)
 {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	struct SDKVideoMediaConfig cfg = {0};
 	struct SDKVideoDecodedFrame frame;
 	struct SDKVideoMediaInfo info;
@@ -547,11 +1007,11 @@ static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
 			ops->destroy(decoder);
 		return 1;
 	}
-	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.audio_codec = audio_codec;
 	cfg.pcm_ring = ring;
 	cfg.pcm_ring_capacity = ring_capacity;
 	cfg.pcm_low_water_bytes = 4096U;
-	cfg.pcm_high_water_bytes = ring_capacity - 4096U;
+	cfg.pcm_high_water_bytes = high_water;
 	if (!ops->configure_media(decoder, &cfg)) {
 		free(ring);
 		ops->destroy(decoder);
@@ -582,9 +1042,12 @@ static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
 			out->video_frames++;
 		if (ops->get_media_info(decoder, &info) &&
 		    info.pcm_produced > acked) {
+			uint64_t pending = info.pcm_produced - info.pcm_acknowledged;
 			uint64_t step = info.pcm_produced - acked;
 
-			if (step > max_ack)
+			if (pending > out->pcm_pending_peak)
+				out->pcm_pending_peak = pending;
+			if (step > max_ack && res != SDK_VIDEO_BACKEND_DONE)
 				step = max_ack;
 			while (step != 0U) {
 				uint32_t at = (uint32_t)(acked % ring_capacity);
@@ -611,6 +1074,14 @@ static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
 	free(ring);
 	ops->destroy(decoder);
 	return 0;
+}
+
+static int run_acked(const uint8_t *stream, uint32_t length, uint32_t chunk,
+                     uint32_t audio_codec, uint32_t ring_capacity,
+                     uint32_t max_ack, struct acked_result *out)
+{
+	return run_acked_with_high(stream, length, chunk, audio_codec,
+	                           ring_capacity, ring_capacity, max_ack, out);
 }
 
 /* Backend-independent reference: the demux plus the AC-3 wrapper with an
@@ -702,7 +1173,8 @@ static int test_ac3_192_all_frames(void)
 
 		if (run_acked(zz9k_dvd_ac3_192_fixture,
 		              zz9k_dvd_ac3_192_fixture_len, runs[i].chunk,
-		              runs[i].ring, runs[i].max_ack, &r) != 0)
+		              SDK_VIDEO_MEDIA_AUDIO_AC3, runs[i].ring,
+		              runs[i].max_ack, &r) != 0)
 			return 3;
 		if (!r.done) {
 			fprintf(stderr, "test_ac3_192 run %u: never DONE (pcm=%llu)\n",
@@ -725,11 +1197,39 @@ static int test_ac3_192_all_frames(void)
 	return 0;
 }
 
+/* A high-water limit is a hard bound on PCM the client has not played. */
+static int test_pcm_high_water_bound(void)
+{
+	static const struct {
+		const uint8_t *stream;
+		uint32_t length;
+		uint32_t audio_codec;
+	} runs[] = {
+		{zz9k_dvd_pal_25p_fixture, zz9k_dvd_pal_25p_fixture_len,
+		 SDK_VIDEO_MEDIA_AUDIO_MP2},
+		{zz9k_dvd_ac3_192_fixture, zz9k_dvd_ac3_192_fixture_len,
+		 SDK_VIDEO_MEDIA_AUDIO_AC3}
+	};
+	uint32_t i;
+
+	for (i = 0U; i < sizeof(runs) / sizeof(runs[0]); i++) {
+		struct acked_result r;
+
+		if (run_acked_with_high(runs[i].stream, runs[i].length, 2048U,
+		                        runs[i].audio_codec, 64U * 1024U,
+		                        9216U, 700U, &r) != 0)
+			return 1 + (int)i;
+		if (!r.done || r.pcm_bytes == 0U || r.pcm_pending_peak > 9216U)
+			return 3 + (int)i;
+	}
+	return 0;
+}
+
 /* 6b. A ring that cannot hold one decoded AC-3 frame would never emit
  * audio or drain: configure refuses it; exactly one frame is enough. */
 static int test_ac3_ring_floor(void)
 {
-	const struct SDKVideoDecoderOps *ops = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
 	static uint8_t ring[SDK_DVD_AC3_FRAME_PCM_BYTES];
 	struct SDKVideoMediaConfig cfg = {0};
 	void *decoder;
@@ -738,6 +1238,7 @@ static int test_ac3_ring_floor(void)
 	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
 	cfg.pcm_ring = ring;
 	cfg.pcm_low_water_bytes = 1024U;
+	cfg.pcm_high_water_bytes = SDK_DVD_AC3_FRAME_PCM_BYTES;
 	cfg.pcm_ring_capacity = SDK_DVD_AC3_FRAME_PCM_BYTES - 4U;
 	decoder = ops->create(0U);
 	if (!decoder)
@@ -757,6 +1258,41 @@ static int test_ac3_ring_floor(void)
 	return 0;
 }
 
+static int rejects_pcm_marks(uint32_t audio_codec, uint32_t capacity,
+                             uint32_t low_water, uint32_t high_water)
+{
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
+	static uint8_t ring[8192U];
+	struct SDKVideoMediaConfig cfg = {0};
+	void *decoder = ops->create(0U);
+	int accepted;
+
+	if (!decoder)
+		return 0;
+	cfg.audio_codec = audio_codec;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = capacity;
+	cfg.pcm_low_water_bytes = low_water;
+	cfg.pcm_high_water_bytes = high_water;
+	accepted = ops->configure_media(decoder, &cfg);
+	ops->destroy(decoder);
+	return !accepted;
+}
+
+static int test_pcm_mark_validation(void)
+{
+	if (!rejects_pcm_marks(SDK_VIDEO_MEDIA_AUDIO_AC3, 8192U,
+	                       4096U, 8196U))
+		return 1;
+	if (!rejects_pcm_marks(SDK_VIDEO_MEDIA_AUDIO_AC3, 8192U,
+	                       4608U, 4608U))
+		return 2;
+	if (!rejects_pcm_marks(SDK_VIDEO_MEDIA_AUDIO_MP2, 8192U,
+	                       4092U, 4096U))
+		return 3;
+	return 0;
+}
+
 /* The Program Stream backends own which media audio they accept: MPEG-1
  * carries MP2 or nothing; a DVD media session always carries MP2, LPCM
  * or AC-3. Neither takes the WebM codecs. */
@@ -764,7 +1300,7 @@ static int test_backend_audio_rules(void)
 {
 	const struct SDKVideoDecoderOps *m1 = sdk_video_backend_find(
 		SDK_VIDEO_CODEC_MPEG1, SDK_VIDEO_CONTAINER_MPEG_PS);
-	const struct SDKVideoDecoderOps *m2 = sdk_video_mpeg2_backend_ops();
+	const struct SDKVideoDecoderOps *m2 = mpeg2_ops();
 
 	if (!m1 || !m1->audio_ok || !m2 || !m2->audio_ok)
 		return 1;
@@ -774,13 +1310,82 @@ static int test_backend_audio_rules(void)
 	    m1->audio_ok(SDK_VIDEO_MEDIA_AUDIO_OPUS) ||
 	    m1->audio_ok(SDK_VIDEO_MEDIA_AUDIO_VORBIS))
 		return 2;
-	if (m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_NONE) ||
+	/* No audio is a media session too: ZZPlay opens video-only (or muted)
+	 * MPEG-2 files that way, as it does MPEG-1. */
+	if (!m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_NONE) ||
 	    !m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_MP2) ||
 	    !m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_LPCM) ||
 	    !m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_AC3) ||
 	    m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_OPUS) ||
 	    m2->audio_ok(SDK_VIDEO_MEDIA_AUDIO_VORBIS))
 		return 3;
+	return 0;
+}
+
+/* 6b'. A media session without audio decodes every picture, drops the
+ * Program Stream's audio and ends, exactly like an unconfigured decoder. */
+static int test_media_without_audio(void)
+{
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
+	struct SDKVideoMediaConfig cfg = {0};
+	struct SDKVideoMediaInfo info;
+	struct SDKVideoDecodedFrame frame;
+	struct stream_result legacy;
+	uint32_t offset = 0U;
+	uint32_t frames = 0U;
+	uint32_t calls;
+	int done = 0;
+	void *decoder;
+
+	if (run_decode_test(zz9k_dvd_ac3_192_fixture,
+	                    zz9k_dvd_ac3_192_fixture_len, 2048U,
+	                    SDK_VIDEO_MEDIA_AUDIO_NONE, &legacy) != 0 ||
+	    legacy.frame_count == 0U)
+		return 1;
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 2;
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_NONE;
+	if (!ops->configure_media(decoder, &cfg)) {
+		ops->destroy(decoder);
+		return 3;
+	}
+	for (calls = 0U; calls < 200000U && !done; calls++) {
+		int res;
+
+		if (offset < zz9k_dvd_ac3_192_fixture_len) {
+			uint32_t n = zz9k_dvd_ac3_192_fixture_len - offset;
+			uint32_t accepted = 0U;
+
+			if (n > 2048U)
+				n = 2048U;
+			if (!ops->write(decoder, zz9k_dvd_ac3_192_fixture + offset,
+			                n, offset + n >= zz9k_dvd_ac3_192_fixture_len,
+			                &accepted)) {
+				ops->destroy(decoder);
+				return 4;
+			}
+			offset += accepted;
+		}
+		res = ops->decode(decoder, &frame);
+		if (res == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 5;
+		}
+		if (res == SDK_VIDEO_BACKEND_FRAME)
+			frames++;
+		done = res == SDK_VIDEO_BACKEND_DONE;
+	}
+	if (ops->get_media_info(decoder, &info) && info.pcm_produced != 0U) {
+		ops->destroy(decoder);
+		return 6;
+	}
+	ops->destroy(decoder);
+	if (!done || frames != legacy.frame_count) {
+		fprintf(stderr, "test_media_without_audio: done=%d frames=%u "
+		        "(expected %u)\n", done, frames, legacy.frame_count);
+		return 7;
+	}
 	return 0;
 }
 
@@ -794,8 +1399,9 @@ static int test_ac3_truncated_mid_frame(void)
 
 	if (zz9k_dvd_ac3_192_fixture_len <= cut)
 		return 1;
-	if (run_acked(zz9k_dvd_ac3_192_fixture, cut, 2048U, 128U * 1024U,
-	              128U * 1024U, &r) != 0)
+	if (run_acked(zz9k_dvd_ac3_192_fixture, cut, 2048U,
+	              SDK_VIDEO_MEDIA_AUDIO_AC3, 128U * 1024U, 128U * 1024U,
+	              &r) != 0)
 		return 2;
 	if (!r.done)
 		return 3;
@@ -804,6 +1410,254 @@ static int test_ac3_truncated_mid_frame(void)
 		return 4;
 	if (r.audio_frames == 0U || r.audio_frames >= 63U)
 		return 5;
+	return 0;
+}
+
+/* The same Program Stream with one stray byte appended to its last MPEG
+ * audio PES (length field grown to match). Returns the new length. */
+static uint32_t pad_last_mp2_pes(const uint8_t *src, uint32_t length,
+                                 uint8_t *dst)
+{
+	uint32_t i = 0U;
+	uint32_t last = UINT32_MAX;
+	uint32_t last_size = 0U;
+	uint32_t size;
+
+	while (i + 6U <= length) {
+		uint8_t sid;
+
+		if (src[i] != 0U || src[i + 1U] != 0U || src[i + 2U] != 1U) {
+			i++;
+			continue;
+		}
+		sid = src[i + 3U];
+		if (sid == 0xb9U)
+			size = 4U;
+		else if (sid == 0xbaU)
+			size = (src[i + 4U] & 0xc0U) == 0x40U
+				? 14U + (src[i + 13U] & 7U) : 12U;
+		else
+			size = 6U + ((uint32_t)src[i + 4U] << 8 | src[i + 5U]);
+		if (i + size > length)
+			break;
+		if (sid >= 0xc0U && sid <= 0xdfU) {
+			last = i;
+			last_size = size;
+		}
+		i += size;
+	}
+	if (last == UINT32_MAX)
+		return 0U;
+	memcpy(dst, src, last + last_size);
+	dst[last + last_size] = 0x00U;
+	memcpy(dst + last + last_size + 1U, src + last + last_size,
+	       length - last - last_size);
+	size = last_size - 6U + 1U;
+	dst[last + 4U] = (uint8_t)(size >> 8);
+	dst[last + 5U] = (uint8_t)size;
+	return length + 1U;
+}
+
+/* 6c'. An MPEG audio track that ends with bytes short of a frame (ffmpeg
+ * -target dvd output does): the fragment can never decode once input
+ * ended, so the stream must still reach DONE with every whole frame. */
+static int test_mp2_trailing_fragment(void)
+{
+	static uint8_t padded[sizeof(zz9k_dvd_pal_25p_fixture) + 1U];
+	struct acked_result whole, r;
+	uint32_t len = pad_last_mp2_pes(zz9k_dvd_pal_25p_fixture,
+	                                zz9k_dvd_pal_25p_fixture_len, padded);
+
+	if (len == 0U)
+		return 1;
+	if (run_acked(zz9k_dvd_pal_25p_fixture, zz9k_dvd_pal_25p_fixture_len,
+	              2048U, SDK_VIDEO_MEDIA_AUDIO_MP2, 64U * 1024U,
+	              64U * 1024U, &whole) != 0 || !whole.done)
+		return 2;
+	if (run_acked(padded, len, 2048U, SDK_VIDEO_MEDIA_AUDIO_MP2,
+	              64U * 1024U, 64U * 1024U, &r) != 0)
+		return 3;
+	if (!r.done) {
+		fprintf(stderr, "test_mp2_trailing_fragment: no DONE after %llu "
+		        "PCM bytes\n", (unsigned long long)r.pcm_bytes);
+		return 4;
+	}
+	if (r.pcm_bytes != whole.pcm_bytes || r.pcm_hash != whole.pcm_hash ||
+	    r.video_frames != whole.video_frames)
+		return 5;
+	return 0;
+}
+
+/* 6c''. A client that acknowledges in small steps keeps the PCM ring full:
+ * MPEG audio and LPCM must then wait for room like AC-3 does, not write
+ * part of a frame or packet and lose the rest. The PCM must match a run
+ * with a ring that never fills. */
+static int test_mp2_lpcm_full_ring(void)
+{
+	static const struct {
+		const uint8_t *stream;
+		uint32_t codec;
+	} runs[] = {
+		{ zz9k_dvd_pal_25p_fixture, SDK_VIDEO_MEDIA_AUDIO_MP2 },
+		{ zz9k_dvd_ntsc_30_fixture, SDK_VIDEO_MEDIA_AUDIO_LPCM },
+	};
+	uint32_t lengths[2];
+	uint32_t i;
+
+	/* The fixture lengths are not constant expressions. */
+	lengths[0] = zz9k_dvd_pal_25p_fixture_len;
+	lengths[1] = zz9k_dvd_ntsc_30_fixture_len;
+	for (i = 0U; i < 2U; i++) {
+		struct acked_result wide, tight;
+
+		if (run_acked(runs[i].stream, lengths[i], 2048U, runs[i].codec,
+		              256U * 1024U, 256U * 1024U, &wide) != 0 ||
+		    !wide.done || wide.pcm_bytes == 0U)
+			return (int)(1U + i * 4U);
+		if (run_acked(runs[i].stream, lengths[i], 2048U, runs[i].codec,
+		              8U * 1024U, 700U, &tight) != 0)
+			return (int)(2U + i * 4U);
+		if (!tight.done)
+			return (int)(3U + i * 4U);
+		if (tight.pcm_bytes != wide.pcm_bytes ||
+		    tight.pcm_hash != wide.pcm_hash) {
+			fprintf(stderr, "test_mp2_lpcm_full_ring: codec %u pcm=%llu "
+			        "(expected %llu)\n", runs[i].codec,
+			        (unsigned long long)tight.pcm_bytes,
+			        (unsigned long long)wide.pcm_bytes);
+			return (int)(4U + i * 4U);
+		}
+	}
+	return 0;
+}
+
+#define BIG_MP2_ES_BYTES (140U * 1024U)
+
+/* The MPEG audio elementary stream of a Program Stream: every 0xc0 PES
+ * payload in order. */
+static uint32_t mp2_elementary(const uint8_t *src, uint32_t length,
+                               uint8_t *dst, uint32_t capacity)
+{
+	uint32_t i = 0U;
+	uint32_t n = 0U;
+
+	while (i + 9U <= length) {
+		uint8_t sid;
+		uint32_t size;
+
+		if (src[i] != 0U || src[i + 1U] != 0U || src[i + 2U] != 1U) {
+			i++;
+			continue;
+		}
+		sid = src[i + 3U];
+		if (sid == 0xb9U)
+			size = 4U;
+		else if (sid == 0xbaU)
+			size = (src[i + 4U] & 0xc0U) == 0x40U
+				? 14U + (src[i + 13U] & 7U) : 12U;
+		else
+			size = 6U + ((uint32_t)src[i + 4U] << 8 | src[i + 5U]);
+		if (i + size > length)
+			break;
+		if (sid == 0xc0U) {
+			uint32_t at = 9U + src[i + 8U];
+
+			if (at < size && n + (size - at) <= capacity) {
+				memcpy(dst + n, src + i + at, size - at);
+				n += size - at;
+			}
+		}
+		i += size;
+	}
+	return n;
+}
+
+/* An audio-only MPEG-2 Program Stream carrying es in 0xc0 PES packets of
+ * at most payload_max bytes, each behind its own pack header; the first
+ * carries PTS 0. */
+static uint32_t wrap_mp2_ps(const uint8_t *es, uint32_t es_len,
+                            uint32_t payload_max, uint8_t *dst)
+{
+	static const uint8_t pack[14] = {
+		0x00, 0x00, 0x01, 0xba, 0x44, 0x00, 0x04, 0x00, 0x04, 0x01,
+		0x01, 0x89, 0xc3, 0xf8
+	};
+	uint32_t at = 0U;
+	uint32_t n = 0U;
+
+	while (at < es_len) {
+		uint32_t take = es_len - at < payload_max ? es_len - at : payload_max;
+		uint32_t header = at == 0U ? 5U : 0U;
+		uint32_t pes_len = 3U + header + take;
+
+		memcpy(dst + n, pack, sizeof(pack));
+		n += sizeof(pack);
+		dst[n++] = 0x00; dst[n++] = 0x00; dst[n++] = 0x01; dst[n++] = 0xc0;
+		dst[n++] = (uint8_t)(pes_len >> 8);
+		dst[n++] = (uint8_t)pes_len;
+		dst[n++] = 0x81;
+		dst[n++] = header != 0U ? 0x80 : 0x00;
+		dst[n++] = (uint8_t)header;
+		if (header != 0U) {
+			static const uint8_t pts0[5] = { 0x21, 0x00, 0x01, 0x00, 0x01 };
+
+			memcpy(dst + n, pts0, sizeof(pts0));
+			n += sizeof(pts0);
+		}
+		memcpy(dst + n, es + at, take);
+		n += take;
+		at += take;
+	}
+	dst[n++] = 0x00; dst[n++] = 0x00; dst[n++] = 0x01; dst[n++] = 0xb9;
+	return n;
+}
+
+/* 6c'''. MPEG audio PES packets near the 64 KiB PES maximum: one never
+ * fits beside the partial frame the MPEG audio input keeps, so it must go
+ * in pieces rather than stay queued and hang the stream. The PCM must
+ * match the same audio carried in DVD-sized packets. */
+static int test_mp2_large_pes(void)
+{
+	static uint8_t source[BIG_MP2_ES_BYTES / 8U];
+	static uint8_t es[BIG_MP2_ES_BYTES];
+	static uint8_t small_ps[BIG_MP2_ES_BYTES + 4096U];
+	static uint8_t big_ps[BIG_MP2_ES_BYTES + 4096U];
+	struct acked_result small, big;
+	uint32_t source_len = mp2_elementary(zz9k_dvd_pal_25p_fixture,
+	                                     zz9k_dvd_pal_25p_fixture_len,
+	                                     source, sizeof(source));
+	uint32_t es_len = 0U;
+	uint32_t small_len, big_len;
+
+	if (source_len == 0U)
+		return 1;
+	/* Whole copies of the fixture's MPEG audio, end to end. */
+	while (es_len + source_len <= sizeof(es)) {
+		memcpy(es + es_len, source, source_len);
+		es_len += source_len;
+	}
+	/* 65520 = 97 frames of 672 bytes + 336: the second packet cannot fit
+	 * beside the 336-byte partial frame the first one leaves. */
+	if (es_len < 2U * 65520U)
+		return 2;
+	small_len = wrap_mp2_ps(es, es_len, 2000U, small_ps);
+	big_len = wrap_mp2_ps(es, es_len, 65520U, big_ps);
+	if (run_acked(small_ps, small_len, 2048U, SDK_VIDEO_MEDIA_AUDIO_MP2,
+	              64U * 1024U, 64U * 1024U, &small) != 0 || !small.done ||
+	    small.pcm_bytes == 0U)
+		return 3;
+	if (run_acked(big_ps, big_len, 2048U, SDK_VIDEO_MEDIA_AUDIO_MP2,
+	              64U * 1024U, 64U * 1024U, &big) != 0)
+		return 4;
+	if (!big.done) {
+		fprintf(stderr, "test_mp2_large_pes: no DONE after %llu PCM bytes "
+		        "(DVD-sized packets: %llu)\n",
+		        (unsigned long long)big.pcm_bytes,
+		        (unsigned long long)small.pcm_bytes);
+		return 5;
+	}
+	if (big.pcm_bytes != small.pcm_bytes || big.pcm_hash != small.pcm_hash)
+		return 6;
 	return 0;
 }
 
@@ -936,6 +1790,68 @@ static uint32_t extract_video_es(const uint8_t *ps, uint32_t len,
 	return n;
 }
 
+/* An untagged 3:2 stream must advance each picture by the preceding
+ * picture's display duration, including its repeat-first-field. */
+static int test_ntsc_film_32_preceding_picture_timing(void)
+{
+	struct stream_result r;
+	uint8_t *es;
+	uint8_t *ps;
+	uint32_t es_len;
+	uint32_t i;
+	int rc;
+
+	es = (uint8_t *)malloc(zz9k_dvd_ntsc_film_32_fixture_len);
+	if (!es)
+		return 1;
+	es_len = extract_video_es(zz9k_dvd_ntsc_film_32_fixture,
+	                          zz9k_dvd_ntsc_film_32_fixture_len, es);
+	ps = (uint8_t *)malloc(es_len + 9U);
+	if (!ps || es_len == 0U || es_len > 65532U) {
+		free(es);
+		free(ps);
+		return 2;
+	}
+	ps[0] = 0U;
+	ps[1] = 0U;
+	ps[2] = 1U;
+	ps[3] = 0xe0U;
+	ps[4] = (uint8_t)((es_len + 3U) >> 8);
+	ps[5] = (uint8_t)(es_len + 3U);
+	ps[6] = 0x80U;
+	ps[7] = 0U;
+	ps[8] = 0U;
+	memcpy(ps + 9U, es, es_len);
+	rc = run_decode_test(ps, es_len + 9U, 0U,
+	                     TEST_MEDIA_AUDIO_NONE, &r);
+	free(ps);
+	free(es);
+	if (rc != 0)
+		return 3;
+	if (r.frame_count != 6U || r.frame_rate_milli == 0U)
+		return 4;
+	for (i = 1U; i < r.frame_count; i++) {
+		uint64_t numerator = (uint64_t)r.display_fields[i - 1U] *
+			500U * 90000U;
+		uint64_t floor_gap = numerator / r.frame_rate_milli;
+		uint64_t ceil_gap = (numerator + r.frame_rate_milli - 1U) /
+			r.frame_rate_milli;
+		uint64_t gap = r.media_pts[i] - r.media_pts[i - 1U];
+
+		if (r.raw_pts[i - 1U] != UINT64_MAX ||
+		    r.raw_pts[i] != UINT64_MAX ||
+		    gap < floor_gap || gap > ceil_gap) {
+			fprintf(stderr, "test_ntsc_film_32_timing: frame %u gap %llu "
+			        "(expected %llu..%llu)\n", i,
+			        (unsigned long long)gap,
+			        (unsigned long long)floor_gap,
+			        (unsigned long long)ceil_gap);
+			return 5;
+		}
+	}
+	return 0;
+}
+
 /* 6f. Video-only, with audio PES packets densely interleaved between tiny
  * video PES packets: every video pop re-pumps audio into the demux, and
  * that audio must not hold back the end of the stream. */
@@ -1052,7 +1968,8 @@ static int test_ac3_substream_selection(void)
 	if (ref_frames != 7U)
 		return 4;
 	if (run_acked(zz9k_dvd_ac3_dual_fixture, zz9k_dvd_ac3_dual_fixture_len,
-	              1024U, 64U * 1024U, 64U * 1024U, &r) != 0)
+	              1024U, SDK_VIDEO_MEDIA_AUDIO_AC3, 64U * 1024U,
+	              64U * 1024U, &r) != 0)
 		return 5;
 	if (!r.done || r.audio_frames != 7U ||
 	    r.pcm_bytes != 7U * (uint64_t)SDK_DVD_AC3_FRAME_PCM_BYTES ||
@@ -1062,6 +1979,1043 @@ static int test_ac3_substream_selection(void)
 		return 6;
 	}
 	return 0;
+}
+
+/* An MPEG-2 PES packet without timestamps: 00 00 01 sid, length, 0x80,
+ * 0x00, header length 0, payload. */
+static uint32_t put_pes(uint8_t *dst, uint8_t sid, const uint8_t *payload,
+                        uint32_t length)
+{
+	uint32_t pes_length = 3U + length;
+
+	dst[0] = 0x00;
+	dst[1] = 0x00;
+	dst[2] = 0x01;
+	dst[3] = sid;
+	dst[4] = (uint8_t)(pes_length >> 8);
+	dst[5] = (uint8_t)pes_length;
+	dst[6] = 0x80;
+	dst[7] = 0x00;
+	dst[8] = 0x00;
+	memcpy(dst + 9, payload, length);
+	return 9U + length;
+}
+
+/* PTS is optional per PES. A timestamped packet later in a full drop run
+ * must still give the decoder a span to resynchronize. */
+static uint32_t put_pes_pts(uint8_t *dst, uint8_t sid,
+                            const uint8_t *payload, uint32_t length,
+                            uint64_t pts)
+{
+	uint32_t pes_length = 8U + length;
+
+	dst[0] = 0x00;
+	dst[1] = 0x00;
+	dst[2] = 0x01;
+	dst[3] = sid;
+	dst[4] = (uint8_t)(pes_length >> 8);
+	dst[5] = (uint8_t)pes_length;
+	dst[6] = 0x80;
+	dst[7] = 0x80;
+	dst[8] = 5U;
+	dst[9] = (uint8_t)(0x21U | ((pts >> 29) & 0x0eU));
+	dst[10] = (uint8_t)(pts >> 22);
+	dst[11] = (uint8_t)(0x01U | ((pts >> 14) & 0xfeU));
+	dst[12] = (uint8_t)(pts >> 7);
+	dst[13] = (uint8_t)(0x01U | ((pts & 0x7fU) << 1));
+	memcpy(dst + 14U, payload, length);
+	return 14U + length;
+}
+
+static int test_drop_run_uses_first_available_pts(void)
+{
+	struct SDKDVDPSDemux demux;
+	uint8_t ps[32];
+	uint8_t payload = 0U;
+	uint32_t accepted = 0U;
+	uint32_t length = put_pes(ps, 0xc0U, &payload, 1U);
+
+	length += put_pes_pts(ps + length, 0xc0U, &payload, 1U, 9000U);
+	sdk_dvd_ps_init(&demux);
+	demux.drop_audio_when_full = 1U;
+	demux.audio.count = SDK_DVD_PS_QUEUE_DEPTH;
+	sdk_dvd_ps_write(&demux, ps, length, &accepted, 1);
+	if (accepted != length || demux.audio_packets_dropped != 2U)
+		return 1;
+	if (!demux.first_dropped_audio_pts_valid ||
+	    !demux.last_dropped_audio_pts_valid ||
+	    demux.first_dropped_audio_pts != 9000U ||
+	    demux.last_dropped_audio_pts != 9000U)
+		return 2;
+	return 0;
+}
+/* An unsupported LPCM track before a usable one must not claim the single
+ * LPCM decoder slot. */
+static int test_lpcm_supported_track_selection(void)
+{
+	static const uint8_t unsupported[] = {
+		0xa0U, 0U, 0U, 0U, 0U, 0x10U, 0U, 0xdeU, 0xadU,
+		0xbeU, 0xefU
+	};
+	static const uint8_t supported[] = {
+		0xa1U, 0U, 0U, 0U, 0U, 0x01U, 0U, 0x11U, 0x22U,
+		0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U
+	};
+	struct acked_result r;
+	uint8_t ps[64];
+	uint32_t length;
+
+	length = put_pes(ps, 0xbdU, unsupported, sizeof(unsupported));
+	length += put_pes(ps + length, 0xbdU, supported, sizeof(supported));
+	if (run_acked(ps, length, 64U, SDK_VIDEO_MEDIA_AUDIO_LPCM,
+	              16U * 1024U, 16U * 1024U, &r) != 0)
+		return 1;
+	if (!r.done || r.audio_frames != 1U ||
+	    r.pcm_bytes != sizeof(supported) - SDK_DVD_LPCM_HEADER_BYTES)
+		return 2;
+	return 0;
+}
+
+
+/* Like AC-3, a stream with two MPEG audio tracks or two LPCM tracks must
+ * reach the audio queue as one: interleaving another track's packets into
+ * the one decoder plays both languages at once. The first one seen wins. */
+static int test_audio_track_selection(void)
+{
+	static struct SDKDVDPSDemux demux;
+	static uint8_t ps[2048];
+	uint8_t payload[32];
+	const struct SDKDVDPSPacket *p;
+	uint32_t n = 0U;
+	uint32_t accepted = 0U;
+	uint32_t mp2_c0 = 0U, lpcm_a0 = 0U, other = 0U;
+	uint32_t i;
+
+	memset(payload, 0x55, sizeof(payload));
+	for (i = 0U; i < 3U; i++) {
+		n += put_pes(ps + n, 0xc0, payload, sizeof(payload));
+		n += put_pes(ps + n, 0xc1, payload, sizeof(payload));
+		payload[0] = 0xa0;
+		payload[5] = 0x01U;
+		n += put_pes(ps + n, 0xbd, payload, sizeof(payload));
+		payload[0] = 0xa1;
+		n += put_pes(ps + n, 0xbd, payload, sizeof(payload));
+		payload[0] = 0x55;
+	}
+	sdk_dvd_ps_init(&demux);
+	for (i = 0U; i < 64U && !sdk_dvd_ps_done(&demux); i++) {
+		uint32_t more = 0U;
+
+		sdk_dvd_ps_write(&demux, ps + accepted, n - accepted, &more, 1);
+		accepted += more;
+		while ((p = sdk_dvd_ps_peek_audio(&demux)) != NULL) {
+			if (p->kind == SDK_DVD_PS_MP2 && p->stream_id == 0xc0U)
+				mp2_c0++;
+			else if (p->kind == SDK_DVD_PS_LPCM &&
+			         p->substream_id == 0xa0U)
+				lpcm_a0++;
+			else
+				other++;
+			sdk_dvd_ps_pop_audio(&demux, NULL);
+		}
+	}
+	if (!sdk_dvd_ps_done(&demux))
+		return 1;
+	if (other != 0U) {
+		fprintf(stderr, "test_audio_track_selection: %u packets of a second track\n",
+		        other);
+		return 2;
+	}
+	if (mp2_c0 != 3U || lpcm_a0 != 3U)
+		return 3;
+	return 0;
+}
+
+/* The same Program Stream with every video PES removed. */
+static uint32_t strip_video(const uint8_t *src, uint32_t length, uint8_t *dst)
+{
+	uint32_t i = 0U;
+	uint32_t n = 0U;
+
+	while (i + 4U <= length) {
+		uint8_t sid;
+		uint32_t size;
+
+		if (src[i] != 0U || src[i + 1U] != 0U || src[i + 2U] != 1U) {
+			dst[n++] = src[i++];
+			continue;
+		}
+		sid = src[i + 3U];
+		if (sid == 0xb9U)
+			size = 4U;
+		else if (sid == 0xbaU)
+			size = (src[i + 4U] & 0xc0U) == 0x40U
+				? 14U + (src[i + 13U] & 7U) : 12U;
+		else
+			size = 6U + ((uint32_t)src[i + 4U] << 8 | src[i + 5U]);
+		if (i + size > length)
+			size = length - i;
+		if (sid < 0xe0U || sid > 0xefU) {
+			memcpy(dst + n, src + i, size);
+			n += size;
+		}
+		i += size;
+	}
+	while (i < length)
+		dst[n++] = src[i++];
+	return n;
+}
+
+/* Whole stereo frames of LPCM audio the stream carries: the payload of
+ * every substream 0xa0 PES after its 7-byte header, cut to 4-byte frames
+ * per packet as the backend unpacks it. */
+static uint64_t lpcm_stereo_bytes(const uint8_t *src, uint32_t length)
+{
+	uint64_t total = 0U;
+	uint32_t i = 0U;
+
+	while (i + 9U <= length) {
+		uint8_t sid;
+		uint32_t size;
+
+		if (src[i] != 0U || src[i + 1U] != 0U || src[i + 2U] != 1U) {
+			i++;
+			continue;
+		}
+		sid = src[i + 3U];
+		if (sid == 0xb9U)
+			size = 4U;
+		else if (sid == 0xbaU)
+			size = (src[i + 4U] & 0xc0U) == 0x40U
+				? 14U + (src[i + 13U] & 7U) : 12U;
+		else
+			size = 6U + ((uint32_t)src[i + 4U] << 8 | src[i + 5U]);
+		if (i + size > length)
+			break;
+		if (sid == 0xbdU) {
+			uint32_t at = 9U + src[i + 8U];
+
+			if (at + 7U < size && src[i + at] == 0xa0U)
+				total += (size - at - 7U) & ~3U;
+		}
+		i += size;
+	}
+	return total;
+}
+
+/* MP2 and LPCM programs must end like AC-3 ones, and stereo LPCM must come
+ * out byte for byte as stored: a header misread as mono doubled it, and
+ * the MP2 decoder never saw the end of its input so DONE never came. */
+static int test_mp2_lpcm_reach_done(void)
+{
+	struct acked_result r;
+	uint64_t lpcm_bytes = lpcm_stereo_bytes(zz9k_dvd_ntsc_30_fixture,
+	                                        zz9k_dvd_ntsc_30_fixture_len);
+
+	if (run_acked(zz9k_dvd_pal_25p_fixture, zz9k_dvd_pal_25p_fixture_len,
+	              2048U, SDK_VIDEO_MEDIA_AUDIO_MP2, 64U * 1024U,
+	              64U * 1024U, &r) != 0)
+		return 1;
+	if (!r.done || r.video_frames != 5U || r.pcm_bytes == 0U ||
+	    r.pcm_bytes % (1152U * 4U) != 0U) {
+		fprintf(stderr, "test_mp2_lpcm: MP2 done=%d frames=%u pcm=%llu\n",
+		        r.done, r.video_frames, (unsigned long long)r.pcm_bytes);
+		return 2;
+	}
+	if (lpcm_bytes == 0U)
+		return 3;
+	if (run_acked(zz9k_dvd_ntsc_30_fixture, zz9k_dvd_ntsc_30_fixture_len,
+	              2048U, SDK_VIDEO_MEDIA_AUDIO_LPCM, 64U * 1024U,
+	              64U * 1024U, &r) != 0)
+		return 4;
+	if (!r.done || r.video_frames != 6U || r.pcm_bytes != lpcm_bytes) {
+		fprintf(stderr, "test_mp2_lpcm: LPCM done=%d frames=%u pcm=%llu "
+		        "(expected %llu)\n", r.done, r.video_frames,
+		        (unsigned long long)r.pcm_bytes,
+		        (unsigned long long)lpcm_bytes);
+		return 5;
+	}
+	return 0;
+}
+
+/* A stream with sound but no video (or whose video never has a sequence
+ * header) must still end: libmpeg2 only reports STATE_END after a
+ * sequence, so the backend waited forever for a video end. */
+static int test_audio_only_reaches_done(void)
+{
+	static uint8_t audio_only[sizeof(zz9k_dvd_ac3_192_fixture)];
+	struct acked_result r;
+	uint64_t ref_bytes, ref_hash;
+	uint32_t ref_frames;
+	uint32_t len = strip_video(zz9k_dvd_ac3_192_fixture,
+	                           zz9k_dvd_ac3_192_fixture_len, audio_only);
+
+	if (len == 0U || len >= zz9k_dvd_ac3_192_fixture_len)
+		return 1;
+	if (ac3_reference(audio_only, len, &ref_bytes, &ref_hash,
+	                  &ref_frames) != 0 || ref_frames == 0U)
+		return 2;
+	if (run_acked(audio_only, len, 2048U, SDK_VIDEO_MEDIA_AUDIO_AC3,
+	              64U * 1024U, 64U * 1024U, &r) != 0)
+		return 3;
+	if (!r.done) {
+		fprintf(stderr, "test_audio_only: no DONE after %llu PCM bytes\n",
+		        (unsigned long long)r.pcm_bytes);
+		return 4;
+	}
+	if (r.video_frames != 0U || r.pcm_bytes != ref_bytes ||
+	    r.pcm_hash != ref_hash)
+		return 5;
+	return 0;
+}
+
+/* 8. Timeline behaviour a player syncs against: the video media PTS must
+ * advance per frame (a stuck PTS makes the player discard in bursts), and
+ * the first audio PTS must be reported in the same rebased media space as
+ * the video PTS (a raw first audio PTS looks seconds ahead of video to a
+ * client and delays or deadlocks the audio start). */
+static int test_pts_advance_per_frame(void)
+{
+	struct stream_result r;
+	uint32_t i;
+
+	if (run_decode_test(zz9k_dvd_pal_25p_fixture,
+	                    zz9k_dvd_pal_25p_fixture_len, 197U,
+	                    SDK_VIDEO_MEDIA_AUDIO_MP2, &r) != 0)
+		return 1;
+	if (r.frame_count != 5U)
+		return 2;
+	for (i = 1U; i < r.frame_count; i++) {
+		if (r.media_pts[i] == UINT64_MAX ||
+		    r.media_pts[i] <= r.media_pts[i - 1U]) {
+			fprintf(stderr, "test_pts_advance: frame %u pts %llu "
+			        "(prev %llu) did not advance\n", i,
+			        (unsigned long long)r.media_pts[i],
+			        (unsigned long long)r.media_pts[i - 1U]);
+			return 3;
+		}
+		if (r.media_pts[i] - r.media_pts[i - 1U] > 2U * 3600U) {
+			fprintf(stderr, "test_pts_advance: frame %u jumped %llu "
+			        "ticks (max two PAL frame periods)\n", i,
+			        (unsigned long long)(
+			            r.media_pts[i] - r.media_pts[i - 1U]));
+			return 4;
+		}
+	}
+	if (r.first_audio_pts == UINT64_MAX || r.first_audio_pts > 9000U) {
+		fprintf(stderr, "test_pts_advance: first audio pts %llu is "
+		        "not in media space (<= 9000 expected)\n",
+		        (unsigned long long)r.first_audio_pts);
+		return 5;
+	}
+	return 0;
+}
+
+/* 8b. The demux must keep parsing video while the audio queue is full and
+ * the client is not draining the ring: with the overflow-drop policy set,
+ * audio packets beyond the queue are dropped (counted) instead of
+ * stalling every write behind the ring. */
+static int test_demux_audio_overflow_drop(void)
+{
+	struct SDKDVDPSDemux blocked;
+	struct SDKDVDPSDemux dropping;
+	uint32_t accepted_blocked = 0U;
+	uint32_t accepted_dropping = 0U;
+	uint32_t i;
+
+	sdk_dvd_ps_init(&blocked);
+	for (i = 0U; i < 64U; i++) {
+		uint32_t step = 0U;
+
+		sdk_dvd_ps_write(&blocked, zz9k_dvd_ac3_192_fixture,
+		                 zz9k_dvd_ac3_192_fixture_len, &step, 0);
+		accepted_blocked += step;
+		/* The decoder keeps taking video; audio is what nobody
+		 * drains. */
+		while (sdk_dvd_ps_peek_video(&blocked))
+			sdk_dvd_ps_pop_video(&blocked, NULL);
+		if (step == 0U)
+			break;
+	}
+	sdk_dvd_ps_init(&dropping);
+	dropping.drop_audio_when_full = 1U;
+	for (i = 0U; i < 64U; i++) {
+		uint32_t step = 0U;
+
+		sdk_dvd_ps_write(&dropping, zz9k_dvd_ac3_192_fixture,
+		                 zz9k_dvd_ac3_192_fixture_len, &step, 0);
+		accepted_dropping += step;
+		while (sdk_dvd_ps_peek_video(&dropping))
+			sdk_dvd_ps_pop_video(&dropping, NULL);
+		if (step == 0U)
+			break;
+	}
+	if (accepted_blocked >= zz9k_dvd_ac3_192_fixture_len)
+		return 1; /* baseline never blocked: the test proves nothing */
+	if (accepted_dropping <= accepted_blocked) {
+		fprintf(stderr, "test_demux_audio_overflow_drop: dropping "
+		        "accepted %u of %u (blocked accepted %u)\n",
+		        accepted_dropping, zz9k_dvd_ac3_192_fixture_len,
+		        accepted_blocked);
+		return 2;
+	}
+	if (dropping.audio_packets_dropped == 0U ||
+	    dropping.audio.count > SDK_DVD_PS_QUEUE_DEPTH)
+		return 3;
+	return 0;
+}
+
+/* 8c. A client that acknowledged audio and then died must not freeze
+ * video: the backend drops the audio it cannot route and every picture
+ * still decodes. (A ring never acknowledged is a prefill, not a dead
+ * sink; that case must not drop - see 9b.) */
+static int test_starved_ring_keeps_video(void)
+{
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
+	struct SDKVideoMediaConfig cfg = {0};
+	struct SDKVideoDecodedFrame frame;
+	struct SDKVideoMediaInfo info;
+	uint8_t ring[8U * 1024U];
+	void *decoder;
+	uint32_t offset = 0U;
+	uint32_t frames = 0U;
+	uint32_t idle = 0U;
+	int done = 0;
+	int busy = 0;
+	int sink_alive = 1;
+
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 1;
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = sizeof(ring);
+	cfg.pcm_low_water_bytes = 2048U;
+	cfg.pcm_high_water_bytes = SDK_DVD_AC3_FRAME_PCM_BYTES;
+	if (!ops->configure_media(decoder, &cfg)) {
+		ops->destroy(decoder);
+		return 2;
+	}
+	while (!done && !busy && idle < 4096U) {
+		uint32_t before = frames;
+		uint32_t accepted = 0U;
+		int res;
+
+		if (offset < zz9k_dvd_ac3_192_fixture_len) {
+			uint32_t n = zz9k_dvd_ac3_192_fixture_len - offset;
+
+			if (n > 2048U)
+				n = 2048U;
+			if (!ops->write(decoder,
+			                zz9k_dvd_ac3_192_fixture + offset, n,
+			                offset + n >=
+			                    zz9k_dvd_ac3_192_fixture_len,
+			                &accepted)) {
+				ops->destroy(decoder);
+				return 3;
+			}
+			offset += accepted;
+		}
+		/* The sink plays until it has consumed 8 KiB, then dies. */
+		if (sink_alive && ops->get_media_info(decoder, &info)) {
+			if (info.pcm_acknowledged > 8192U)
+				sink_alive = 0;
+			else
+				ops->ack_media(decoder, info.pcm_produced);
+		}
+		res = ops->decode(decoder, &frame);
+		if (res == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 4;
+		}
+		if (res == SDK_VIDEO_BACKEND_FRAME)
+			frames++;
+		done = res == SDK_VIDEO_BACKEND_DONE;
+		/* With the whole stream consumed, BUSY is the honest end for
+		 * a client that never acknowledges: video is complete and
+		 * audio waits on the ring. */
+		busy = res == SDK_VIDEO_BACKEND_BACKPRESSURE &&
+		       offset >= zz9k_dvd_ac3_192_fixture_len;
+		idle = (frames == before && offset <
+		        zz9k_dvd_ac3_192_fixture_len) ? idle + 1U : 0U;
+	}
+	(void)ops->get_media_info(decoder, &info);
+	ops->destroy(decoder);
+	if ((!done && !busy) || frames != 50U ||
+	    info.audio_packets_dropped == 0U) {
+		fprintf(stderr, "test_starved_ring: done=%d busy=%d frames=%u "
+		        "(expected 50) dropped=%u\n", done, busy, frames,
+		        info.audio_packets_dropped);
+		return 5;
+	}
+	return 0;
+}
+
+/* 8d. At end of input with every picture decoded and all audio decoded,
+ * the stream is DONE (AUDIO_DONE) even with PCM still unacknowledged, and
+ * never NEED_INPUT (which a player that has written everything reports as
+ * a truncated stream). The client plays the tail out after DONE: an AHI
+ * client copies whole periods until then, so a decoder waiting for the
+ * tail's acknowledgement would never finish. */
+static int test_eof_unacked_pcm_is_done(void)
+{
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
+	struct SDKVideoMediaConfig cfg = {0};
+	struct SDKVideoDecodedFrame frame;
+	struct SDKVideoMediaInfo info;
+	static uint8_t ring[128U * 1024U];
+	uint64_t acked = 0U;
+	void *decoder;
+	uint32_t offset = 0U;
+	uint32_t calls;
+	int res = 0;
+
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 1;
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = sizeof(ring);
+	cfg.pcm_low_water_bytes = 4096U;
+	cfg.pcm_high_water_bytes = sizeof(ring) - 4096U;
+	if (!ops->configure_media(decoder, &cfg)) {
+		ops->destroy(decoder);
+		return 2;
+	}
+	for (calls = 0U; calls < 200000U; calls++) {
+		if (offset < zz9k_dvd_ac3_192_fixture_len) {
+			uint32_t n = zz9k_dvd_ac3_192_fixture_len - offset;
+			uint32_t accepted = 0U;
+
+			if (n > 2048U)
+				n = 2048U;
+			if (!ops->write(decoder,
+			                zz9k_dvd_ac3_192_fixture + offset, n,
+			                offset + n >=
+			                    zz9k_dvd_ac3_192_fixture_len,
+			                &accepted)) {
+				ops->destroy(decoder);
+				return 3;
+			}
+			offset += accepted;
+		}
+		res = ops->decode(decoder, &frame);
+		if (res == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 4;
+		}
+		if (res == SDK_VIDEO_BACKEND_DONE)
+			break;
+		/* Ack like a playing client, but stop one AC-3 frame short
+		 * of the end so the ring finishes holding unacked PCM. */
+		if (ops->get_media_info(decoder, &info) &&
+		    info.pcm_produced > acked + SDK_DVD_AC3_FRAME_PCM_BYTES) {
+			acked = info.pcm_produced -
+			        SDK_DVD_AC3_FRAME_PCM_BYTES;
+			ops->ack_media(decoder, acked);
+		}
+	}
+	if (offset < zz9k_dvd_ac3_192_fixture_len ||
+	    res != SDK_VIDEO_BACKEND_DONE ||
+	    !ops->get_media_info(decoder, &info) ||
+	    info.pcm_produced <= info.pcm_acknowledged ||
+	    (info.flags & SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE) == 0U) {
+		fprintf(stderr, "test_eof_unacked_pcm: decode returned %d "
+		        "produced=%llu acked=%llu flags=%lx\n", res,
+		        (unsigned long long)info.pcm_produced,
+		        (unsigned long long)info.pcm_acknowledged,
+		        (unsigned long)info.flags);
+		ops->destroy(decoder);
+		return 5;
+	}
+	/* The client drains the tail; the stream stays DONE. */
+	if (!ops->ack_media(decoder, info.pcm_produced)) {
+		ops->destroy(decoder);
+		return 6;
+	}
+	res = ops->decode(decoder, &frame);
+	ops->destroy(decoder);
+	if (res != SDK_VIDEO_BACKEND_DONE)
+		return 7;
+	return 0;
+}
+
+/* Rewrites the PTS of the first audio PES (stream ids 0xbd/0xc0-0xdf)
+ * found in a Program Stream by delta ticks, leaving everything else
+ * byte-identical. Returns 1 when a PTS was patched. */
+static int patch_first_audio_pes_pts(uint8_t *ps, uint32_t len,
+                                     int64_t delta)
+{
+	uint32_t i = 0U;
+
+	while (i + 14U <= len) {
+		uint32_t total;
+		uint64_t pts;
+		uint8_t sid;
+		uint8_t flags;
+
+		if (ps[i] != 0U || ps[i + 1U] != 0U || ps[i + 2U] != 1U) {
+			i++;
+			continue;
+		}
+		sid = ps[i + 3U];
+		if (sid != 0xbdU && (sid < 0xc0U || sid > 0xdfU)) {
+			i += 4U;
+			continue;
+		}
+		total = 6U + ((uint32_t)ps[i + 4U] << 8) + ps[i + 5U];
+		if (total < 14U || i + total > len) {
+			i += 4U;
+			continue;
+		}
+		if ((ps[i + 6U] & 0xc0U) != 0x80U) {
+			i += total;
+			continue;
+		}
+		flags = ps[i + 7U];
+		if ((flags & 0x80U) == 0U || ps[i + 8U] < 5U) {
+			i += total;
+			continue;
+		}
+		pts = ((uint64_t)(ps[i + 9U] >> 1) & 7U) << 30 |
+		      (uint64_t)ps[i + 10U] << 22 |
+		      ((uint64_t)(ps[i + 11U] >> 1) & 0x7fU) << 15 |
+		      (uint64_t)ps[i + 12U] << 7 |
+		      ((uint64_t)(ps[i + 13U] >> 1) & 0x7fU);
+		pts = (pts + (uint64_t)delta) & ((UINT64_C(1) << 33) - 1U);
+		ps[i + 9U] = (uint8_t)(0x21U | ((pts >> 29) & 0x0eU));
+		ps[i + 10U] = (uint8_t)(pts >> 22);
+		ps[i + 11U] = (uint8_t)(0x01U | ((pts >> 14) & 0xfeU));
+		ps[i + 12U] = (uint8_t)(pts >> 7);
+		ps[i + 13U] = (uint8_t)(0x01U | ((pts & 0x7fU) << 1));
+		return 1;
+	}
+	return 0;
+}
+
+/* Collect timestamped audio PES entries in Program Stream order. */
+static uint32_t audio_pes_pts(const uint8_t *ps, uint32_t len,
+                              uint64_t *pts, uint32_t capacity)
+{
+	uint32_t at = 0U;
+	uint32_t count = 0U;
+
+	while (at + 6U <= len) {
+		uint32_t total;
+		uint8_t sid;
+
+		if (ps[at] != 0U || ps[at + 1U] != 0U || ps[at + 2U] != 1U) {
+			at++;
+			continue;
+		}
+		sid = ps[at + 3U];
+		if (sid == 0xbaU) {
+			at += 14U + (ps[at + 13U] & 7U);
+			continue;
+		}
+		if (sid == 0xb9U) {
+			at += 4U;
+			continue;
+		}
+		total = 6U + ((uint32_t)ps[at + 4U] << 8 | ps[at + 5U]);
+		if (total < 14U || at + total > len) {
+			at += 4U;
+			continue;
+		}
+		if ((sid == 0xbdU || (sid >= 0xc0U && sid <= 0xdfU)) &&
+		    (ps[at + 6U] & 0xc0U) == 0x80U &&
+		    (ps[at + 7U] & 0x80U) != 0U && ps[at + 8U] >= 5U) {
+			if (count < capacity) {
+				pts[count] = ((uint64_t)(ps[at + 9U] >> 1) & 7U) << 30 |
+				             (uint64_t)ps[at + 10U] << 22 |
+				             ((uint64_t)(ps[at + 11U] >> 1) & 0x7fU) << 15 |
+				             (uint64_t)ps[at + 12U] << 7 |
+				             ((uint64_t)(ps[at + 13U] >> 1) & 0x7fU);
+			}
+			count++;
+		}
+		at += total;
+	}
+	return count;
+}
+/* 9. The reported audio clock must track the PCM actually produced. */
+static int test_audio_pts_tracks_pcm(void)
+{
+	struct stream_result r;
+
+	if (run_decode_test(zz9k_dvd_pal_25p_fixture,
+	                    zz9k_dvd_pal_25p_fixture_len, 197U,
+	                    SDK_VIDEO_MEDIA_AUDIO_MP2, &r) != 0)
+		return 1;
+	if (r.last_audio_pts < 9000U || r.last_audio_pts > 24000U) {
+		fprintf(stderr, "test_audio_pts_tracks_pcm: last audio pts "
+		        "%llu (expected 9000..24000)\n",
+		        (unsigned long long)r.last_audio_pts);
+		return 2;
+	}
+	if (r.last_audio_pts <= r.first_audio_pts)
+		return 3;
+	return 0;
+}
+
+/* 9e. The audio clock must be published promptly and track PCM from the
+ * first frames on: a client (ZZPlay) caches first_audio_pts as soon as
+ * the format is known and paces video against origin + played; a backend
+ * that leaves it NO_PTS, or freezes audio_pts while PCM flows, breaks
+ * the master clock and the picture paces in bursts. Both small and large
+ * write chunks must behave (ZZPlay feeds 16 KiB). */
+static int test_audio_clock_published_early(void)
+{
+	static const uint32_t chunks[] = { 197U, 16384U };
+	uint32_t i;
+
+	for (i = 0U; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
+		const struct SDKVideoDecoderOps *ops = mpeg2_ops();
+		struct SDKVideoMediaConfig cfg = {0};
+		struct SDKVideoDecodedFrame frame;
+		struct SDKVideoMediaInfo info;
+		uint8_t *ring = (uint8_t *)malloc(PCM_RING_CAPACITY);
+		void *decoder;
+		uint32_t offset = 0U;
+		uint32_t frames = 0U;
+		int failed = 0;
+
+		if (!ring)
+			return 1;
+		decoder = ops->create(0U);
+		if (!decoder) {
+			free(ring);
+			return 2;
+		}
+		cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_MP2;
+		cfg.pcm_ring = ring;
+		cfg.pcm_ring_capacity = PCM_RING_CAPACITY;
+		cfg.pcm_low_water_bytes = 4096U;
+		cfg.pcm_high_water_bytes = PCM_RING_CAPACITY - 4096U;
+		if (!ops->configure_media(decoder, &cfg)) {
+			free(ring);
+			ops->destroy(decoder);
+			return 3;
+		}
+		while (frames < 2U &&
+		       offset < zz9k_dvd_pal_25p_fixture_len) {
+			uint32_t n = zz9k_dvd_pal_25p_fixture_len - offset;
+			uint32_t accepted = 0U;
+
+			if (n > chunks[i])
+				n = chunks[i];
+			if (!ops->write(decoder,
+			                zz9k_dvd_pal_25p_fixture + offset,
+			                n, 0, &accepted)) {
+				failed = 1;
+				break;
+			}
+			offset += accepted;
+			if (ops->get_media_info(decoder, &info) &&
+			    info.pcm_produced > info.pcm_acknowledged)
+				ops->ack_media(decoder, info.pcm_produced);
+			if (ops->decode(decoder, &frame) ==
+			    SDK_VIDEO_BACKEND_FRAME)
+				frames++;
+		}
+		(void)ops->get_media_info(decoder, &info);
+		ops->destroy(decoder);
+		free(ring);
+		if (failed || frames < 2U) {
+			fprintf(stderr, "test_audio_clock_early: chunk %u "
+			        "failed=%d frames=%u offset=%u\n",
+			        chunks[i], failed, frames, offset);
+			return (int)(4 + i);
+		}
+		if (info.first_audio_pts == UINT64_MAX ||
+		    info.audio_pts == UINT64_MAX ||
+		    info.audio_pts <= info.first_audio_pts) {
+			fprintf(stderr, "test_audio_clock_early: chunk %u "
+			        "first=%llu audio=%llu (frames %u)\n",
+			        chunks[i],
+			        (unsigned long long)info.first_audio_pts,
+			        (unsigned long long)info.audio_pts,
+			        frames);
+			return (int)(10 + i);
+		}
+	}
+	return 0;
+}
+
+/* 9b. A full ring before the client has ever acknowledged anything is a
+ * prefill, not a dead sink: audio must not be dropped while
+ * pcm_acknowledged is still zero. */
+static int test_no_drops_before_first_ack(void)
+{
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
+	struct SDKVideoMediaConfig cfg = {0};
+	struct SDKVideoDecodedFrame frame;
+	struct SDKVideoMediaInfo info;
+	uint8_t ring[8U * 1024U];
+	void *decoder;
+	uint32_t offset = 0U;
+	uint32_t frames = 0U;
+	uint32_t idle = 0U;
+	int saw_backpressure = 0;
+	int done = 0;
+
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 1;
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = sizeof(ring);
+	cfg.pcm_low_water_bytes = 2048U;
+	cfg.pcm_high_water_bytes = SDK_DVD_AC3_FRAME_PCM_BYTES;
+	if (!ops->configure_media(decoder, &cfg)) {
+		ops->destroy(decoder);
+		return 2;
+	}
+	while (!done && idle < 4096U) {
+		uint32_t before = frames;
+		uint32_t accepted = 0U;
+		int res;
+
+		if (offset < zz9k_dvd_ac3_192_fixture_len) {
+			uint32_t n = zz9k_dvd_ac3_192_fixture_len - offset;
+
+			if (n > 2048U)
+				n = 2048U;
+			if (!ops->write(decoder,
+			                zz9k_dvd_ac3_192_fixture + offset, n,
+			                offset + n >=
+			                    zz9k_dvd_ac3_192_fixture_len,
+			                &accepted)) {
+				ops->destroy(decoder);
+				return 3;
+			}
+			offset += accepted;
+		}
+		/* No acknowledgement at all until the ring has filled. */
+		if (saw_backpressure &&
+		    ops->get_media_info(decoder, &info))
+			ops->ack_media(decoder, info.pcm_produced);
+		res = ops->decode(decoder, &frame);
+		if (res == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 4;
+		}
+		if (res == SDK_VIDEO_BACKEND_FRAME)
+			frames++;
+		done = res == SDK_VIDEO_BACKEND_DONE;
+		if (ops->get_media_info(decoder, &info) &&
+		    (info.flags & SDK_VIDEO_MEDIA_FLAG_BACKPRESSURE) != 0U)
+			saw_backpressure = 1;
+		idle = (frames == before && offset <
+		        zz9k_dvd_ac3_192_fixture_len) ? idle + 1U : 0U;
+	}
+	(void)ops->get_media_info(decoder, &info);
+	ops->destroy(decoder);
+	if (!done || frames != 50U || info.audio_packets_dropped != 0U) {
+		fprintf(stderr, "test_no_drops_before_first_ack: done=%d "
+		        "frames=%u dropped=%u\n", done, frames,
+		        info.audio_packets_dropped);
+		return 5;
+	}
+	return 0;
+}
+
+/* 9c. When a started sink dies and audio is dropped, the reported audio
+ * clock must resync to the content that plays next: the first audio PTS
+ * moves forward by the dropped span and the rebase is signalled. */
+static int test_drop_resyncs_audio_clock(void)
+{
+	const struct SDKVideoDecoderOps *ops = mpeg2_ops();
+	struct SDKVideoMediaConfig cfg = {0};
+	struct SDKVideoDecodedFrame frame;
+	struct SDKVideoMediaInfo info;
+	static uint8_t ring[8U * 1024U];
+	void *decoder;
+	uint32_t offset = 0U;
+	uint32_t frames = 0U;
+	uint32_t idle = 0U;
+	uint64_t packet_pts[64];
+	uint64_t first_audio_pts_before_drops = UINT64_MAX;
+	uint64_t last_audio_pts_before_drops = UINT64_MAX;
+	uint64_t first_dropped_audio_pts = UINT64_MAX;
+	uint64_t first_retained_audio_pts = UINT64_MAX;
+	uint64_t first_audio_pts_after_resync = UINT64_MAX;
+	uint32_t packet_count;
+	int sink_state = 0; /* 0 starting, 1 alive, 2 dead, 3 revived */
+	int saw_rebased = 0;
+	int done = 0;
+
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 1;
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_AC3;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = sizeof(ring);
+	cfg.pcm_low_water_bytes = 2048U;
+	cfg.pcm_high_water_bytes = SDK_DVD_AC3_FRAME_PCM_BYTES;
+	if (!ops->configure_media(decoder, &cfg)) {
+		ops->destroy(decoder);
+		return 2;
+	}
+	packet_count = audio_pes_pts(zz9k_dvd_ac3_192_fixture,
+	                             zz9k_dvd_ac3_192_fixture_len,
+	                             packet_pts,
+	                             sizeof(packet_pts) / sizeof(packet_pts[0]));
+	if (packet_count > sizeof(packet_pts) / sizeof(packet_pts[0])) {
+		ops->destroy(decoder);
+		return 3;
+	}
+
+	while (!done && idle < 4096U) {
+		uint32_t before = frames;
+		uint32_t accepted = 0U;
+		int res;
+
+		if (offset < zz9k_dvd_ac3_192_fixture_len) {
+			uint32_t n = zz9k_dvd_ac3_192_fixture_len - offset;
+
+			if (n > 2048U)
+				n = 2048U;
+			if (!ops->write(decoder,
+			                zz9k_dvd_ac3_192_fixture + offset, n,
+			                offset + n >=
+			                    zz9k_dvd_ac3_192_fixture_len,
+			                &accepted)) {
+				ops->destroy(decoder);
+				return 3;
+			}
+			offset += accepted;
+		}
+		if (ops->get_media_info(decoder, &info)) {
+			if (sink_state == 0 && info.pcm_acknowledged > 8192U)
+				sink_state = 1;
+			if (sink_state == 1) {
+				first_audio_pts_before_drops = info.first_audio_pts;
+				sink_state = 2; /* the sink dies now */
+			}
+			if (sink_state == 2 &&
+			    info.audio_packets_dropped != 0U) {
+				last_audio_pts_before_drops = info.raw_pts;
+				first_dropped_audio_pts =
+					info.first_dropped_audio_pts;
+				sink_state = 3; /* revived after the drops */
+			}
+			if (sink_state != 2)
+				ops->ack_media(decoder, info.pcm_produced);
+			if ((info.flags & SDK_VIDEO_MEDIA_FLAG_REBASED) != 0U) {
+				saw_rebased = 1;
+				if (sink_state == 3 &&
+				    first_retained_audio_pts == UINT64_MAX) {
+					first_retained_audio_pts = info.raw_pts;
+					first_audio_pts_after_resync = info.first_audio_pts;
+				}
+			}
+		}
+		res = ops->decode(decoder, &frame);
+		if (res == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 4;
+		}
+		if (res == SDK_VIDEO_BACKEND_FRAME)
+			frames++;
+		done = res == SDK_VIDEO_BACKEND_DONE;
+		idle = (frames == before && offset <
+		        zz9k_dvd_ac3_192_fixture_len) ? idle + 1U : 0U;
+	}
+	(void)ops->get_media_info(decoder, &info);
+	ops->destroy(decoder);
+	if (!done || frames != 50U || info.audio_packets_dropped < 2U) {
+		fprintf(stderr, "test_drop_resyncs: done=%d frames=%u "
+		        "dropped=%u\n", done, frames,
+		        info.audio_packets_dropped);
+		return 5;
+	}
+	if (!saw_rebased || first_audio_pts_before_drops == UINT64_MAX ||
+	    last_audio_pts_before_drops == UINT64_MAX ||
+	    first_dropped_audio_pts == UINT64_MAX ||
+	    first_retained_audio_pts == UINT64_MAX ||
+	    first_audio_pts_after_resync == UINT64_MAX) {
+		fprintf(stderr, "test_drop_resyncs: rebased=%d before=%llu "
+		        "dropped=%llu retained=%llu first=%llu\n", saw_rebased,
+		        (unsigned long long)last_audio_pts_before_drops,
+		        (unsigned long long)first_dropped_audio_pts,
+		        (unsigned long long)first_retained_audio_pts,
+		        (unsigned long long)first_audio_pts_after_resync);
+		return 6;
+	}
+	{
+		uint32_t i;
+		int found = 0;
+
+		for (i = 0U; i < packet_count; i++) {
+			if (packet_pts[i] == first_dropped_audio_pts) {
+				found = 1;
+				break;
+			}
+		}
+		if (!found || first_retained_audio_pts <= first_dropped_audio_pts)
+			return 7;
+	}
+	if (first_audio_pts_after_resync != first_audio_pts_before_drops +
+	    first_retained_audio_pts - first_dropped_audio_pts) {
+		fprintf(stderr, "test_drop_resyncs: first=%llu expected=%llu "
+		        "from dropped=%llu retained=%llu\n",
+		        (unsigned long long)first_audio_pts_after_resync,
+		        (unsigned long long)(first_audio_pts_before_drops +
+		        first_retained_audio_pts - first_dropped_audio_pts),
+		        (unsigned long long)first_dropped_audio_pts,
+		        (unsigned long long)first_retained_audio_pts);
+		return 8;
+	}
+	return 0;
+}
+
+/* 9d. The timeline origin must come from the first VIDEO PTS: with audio
+ * shifted 300 ms before or after video, picture one reports media PTS 0
+ * and the first audio PTS reflects the real a/v offset (audio leading
+ * clamps to 0; audio trailing reads ~+300 ms). */
+static int test_timeline_origin_from_video(void)
+{
+	uint8_t *buf = (uint8_t *)malloc(zz9k_dvd_pal_25p_fixture_len);
+	static const int64_t deltas[2] = {-27000, 27000};
+	struct stream_result r;
+	uint32_t i;
+	int rc = 0;
+
+	if (!buf)
+		return 1;
+	for (i = 0U; i < 2U && rc == 0; i++) {
+		memcpy(buf, zz9k_dvd_pal_25p_fixture,
+		       zz9k_dvd_pal_25p_fixture_len);
+		if (!patch_first_audio_pes_pts(
+			    buf, zz9k_dvd_pal_25p_fixture_len, deltas[i])) {
+			rc = (int)(2 + i);
+			break;
+		}
+		rc = run_decode_test(buf, zz9k_dvd_pal_25p_fixture_len,
+		                     197U, SDK_VIDEO_MEDIA_AUDIO_MP2, &r);
+		if (rc != 0)
+			break;
+		if (r.media_pts[0] > 3600U ||
+		    r.media_pts[1] <= r.media_pts[0] ||
+		    r.media_pts[2] <= r.media_pts[1]) {
+			fprintf(stderr, "test_origin_from_video: delta %lld "
+			        "video pts %llu,%llu,%llu\n",
+			        (long long)deltas[i],
+			        (unsigned long long)r.media_pts[0],
+			        (unsigned long long)r.media_pts[1],
+			        (unsigned long long)r.media_pts[2]);
+			rc = (int)(10 + i);
+			break;
+		}
+		if (i == 0U && r.first_audio_pts != 0U)
+			rc = 20;
+		if (i == 1U && (r.first_audio_pts < 25200U ||
+		                r.first_audio_pts > 30600U))
+			rc = 30;
+	}
+	free(buf);
+	return rc;
 }
 
 int main(void)
@@ -1087,6 +3041,60 @@ int main(void)
 		return 30 + err;
 	}
 	printf("PASS: test_pal_25p (PAL 720x576 25p + MP2 audio)\n");
+	if ((err = test_unsupported_chroma_refused()) != 0) {
+		fprintf(stderr, "FAIL: test_unsupported_chroma_refused (code %d)\n",
+		        err);
+		return 32 + err;
+	}
+	printf("PASS: test_unsupported_chroma_refused (4:2:2 rejected)\n");
+	if ((err = test_concatenated_video_sequences()) != 0) {
+		fprintf(stderr, "FAIL: test_concatenated_video_sequences (code %d)\n", err);
+		return 35 + err;
+	}
+	printf("PASS: test_concatenated_video_sequences (all sequences decode)\n");
+	if ((err = test_sequence_rate_transition_timing()) != 0) {
+		fprintf(stderr, "FAIL: test_sequence_rate_transition_timing (code %d)\n",
+		        err);
+		return 36 + err;
+	}
+	printf("PASS: test_sequence_rate_transition_timing (preceding rate)\n");
+	if ((err = test_sequence_end_rate_transition_timing()) != 0) {
+		fprintf(stderr, "FAIL: test_sequence_end_rate_transition_timing (code %d)\n",
+		        err);
+		return 37 + err;
+	}
+	printf("PASS: test_sequence_end_rate_transition_timing (b7 boundary)\n");
+	if ((err = test_primary_video_stream_selection()) != 0) {
+		fprintf(stderr, "FAIL: test_primary_video_stream_selection (code %d)\n",
+		        err);
+		return 36 + err;
+	}
+	printf("PASS: test_primary_video_stream_selection (first video stream only)\n");
+	if ((err = test_low_delay_sequence_end()) != 0) {
+		fprintf(stderr, "FAIL: test_low_delay_sequence_end (code %d)\n", err);
+		return 38 + err;
+	}
+	printf("PASS: test_low_delay_sequence_end (EOF reaches DONE)\n");
+	if ((err = test_low_delay_rate_transition_timing()) != 0) {
+		fprintf(stderr, "FAIL: test_low_delay_rate_transition_timing (code %d)\n",
+		        err);
+		return 39 + err;
+	}
+	printf("PASS: test_low_delay_rate_transition_timing (picture rate)\n");
+	if ((err = test_shared_pes_rate_transition_timing()) != 0) {
+		fprintf(stderr, "FAIL: test_shared_pes_rate_transition_timing (code %d)\n",
+		        err);
+		return 40 + err;
+	}
+	printf("PASS: test_shared_pes_rate_transition_timing (per-picture rate)\n");
+	if ((err = test_split_picture_header_keeps_pts()) != 0) {
+		fprintf(stderr, "FAIL: test_split_picture_header_keeps_pts (code %d)\n",
+		        err);
+		return 45 + err;
+	}
+	printf("PASS: test_split_picture_header_keeps_pts (PTS fragment tag)\n");
+
+
 
 	if ((err = test_pal_tff_interlaced()) != 0) {
 		fprintf(stderr, "FAIL: test_pal_tff_interlaced (code %d)\n", err);
@@ -1106,6 +3114,14 @@ int main(void)
 	}
 	printf("PASS: test_ntsc_film_32_cadence (NTSC film 24000/1001 3:2 cadence)\n");
 
+	if ((err = test_ntsc_film_32_preceding_picture_timing()) != 0) {
+		fprintf(stderr, "FAIL: test_ntsc_film_32_preceding_picture_timing "
+		        "(code %d)\n", err);
+		return 65 + err;
+	}
+	printf("PASS: test_ntsc_film_32_preceding_picture_timing "
+	       "(derived 3:2 PTS gaps)\n");
+
 	if ((err = test_demuxer_bounded_behavior()) != 0) {
 		fprintf(stderr, "FAIL: test_demuxer_bounded_behavior (code %d)\n", err);
 		return 70 + err;
@@ -1118,17 +3134,35 @@ int main(void)
 	}
 	printf("PASS: test_ac3_192_all_frames (AC-3 2.0 192k: every frame, DONE)\n");
 
+	if ((err = test_pcm_high_water_bound()) != 0) {
+		fprintf(stderr, "FAIL: test_pcm_high_water_bound (code %d)\n", err);
+		return 90 + err;
+	}
+	printf("PASS: test_pcm_high_water_bound (MP2/AC-3 pending PCM bound)\n");
+
 	if ((err = test_ac3_ring_floor()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_ring_floor (code %d)\n", err);
 		return 100 + err;
 	}
 	printf("PASS: test_ac3_ring_floor (ring must hold one AC-3 frame)\n");
 
+	if ((err = test_pcm_mark_validation()) != 0) {
+		fprintf(stderr, "FAIL: test_pcm_mark_validation (code %d)\n", err);
+		return 105 + err;
+	}
+	printf("PASS: test_pcm_mark_validation (PCM water marks)\n");
+
 	if ((err = test_backend_audio_rules()) != 0) {
 		fprintf(stderr, "FAIL: test_backend_audio_rules (code %d)\n", err);
 		return 130 + err;
 	}
 	printf("PASS: test_backend_audio_rules (PS backends own their audio)\n");
+
+	if ((err = test_media_without_audio()) != 0) {
+		fprintf(stderr, "FAIL: test_media_without_audio (code %d)\n", err);
+		return 200 + err;
+	}
+	printf("PASS: test_media_without_audio (MPEG-2 media session, no audio)\n");
 
 	if ((err = test_ac3_truncated_mid_frame()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_truncated_mid_frame (code %d)\n", err);
@@ -1154,11 +3188,114 @@ int main(void)
 	}
 	printf("PASS: test_video_only_dense_audio (audio between every video PES)\n");
 
+	if ((err = test_pts_advance_per_frame()) != 0) {
+		fprintf(stderr, "FAIL: test_pts_advance_per_frame (code %d)\n", err);
+		return 210 + err;
+	}
+	printf("PASS: test_pts_advance_per_frame (per-frame PTS, media-space audio origin)\n");
+
+	if ((err = test_demux_audio_overflow_drop()) != 0) {
+		fprintf(stderr, "FAIL: test_demux_audio_overflow_drop (code %d)\n", err);
+		return 220 + err;
+	}
+	printf("PASS: test_demux_audio_overflow_drop (audio overflow drops, parse continues)\n");
+
+	if ((err = test_drop_run_uses_first_available_pts()) != 0) {
+		fprintf(stderr, "FAIL: test_drop_run_uses_first_available_pts "
+		        "(code %d)\n", err);
+		return 225 + err;
+	}
+	printf("PASS: test_drop_run_uses_first_available_pts "
+	       "(untagged first audio drop)\n");
+
+	if ((err = test_starved_ring_keeps_video()) != 0) {
+		fprintf(stderr, "FAIL: test_starved_ring_keeps_video (code %d)\n", err);
+		return 230 + err;
+	}
+	printf("PASS: test_starved_ring_keeps_video (full ring never freezes video)\n");
+
+	if ((err = test_eof_unacked_pcm_is_done()) != 0) {
+		fprintf(stderr, "FAIL: test_eof_unacked_pcm_is_done (code %d)\n", err);
+		return 240 + err;
+	}
+	printf("PASS: test_eof_unacked_pcm_is_done (EOF with PCM unplayed is DONE)\n");
+
+	if ((err = test_audio_pts_tracks_pcm()) != 0) {
+		fprintf(stderr, "FAIL: test_audio_pts_tracks_pcm (code %d)\n", err);
+		return 250 + err;
+	}
+	printf("PASS: test_audio_pts_tracks_pcm (audio clock follows produced PCM)\n");
+
+	if ((err = test_no_drops_before_first_ack()) != 0) {
+		fprintf(stderr, "FAIL: test_no_drops_before_first_ack (code %d)\n", err);
+		return 260 + err;
+	}
+	printf("PASS: test_no_drops_before_first_ack (prefill ring never drops audio)\n");
+
+	if ((err = test_audio_clock_published_early()) != 0) {
+		fprintf(stderr, "FAIL: test_audio_clock_published_early (code %d)\n", err);
+		return 290 + err;
+	}
+	printf("PASS: test_audio_clock_published_early (audio clock prompt, tracks PCM)\n");
+
+	if ((err = test_drop_resyncs_audio_clock()) != 0) {
+		fprintf(stderr, "FAIL: test_drop_resyncs_audio_clock (code %d)\n", err);
+		return 270 + err;
+	}
+	printf("PASS: test_drop_resyncs_audio_clock (drops rebase the audio clock)\n");
+
+	if ((err = test_timeline_origin_from_video()) != 0) {
+		fprintf(stderr, "FAIL: test_timeline_origin_from_video (code %d)\n", err);
+		return 280 + err;
+	}
+	printf("PASS: test_timeline_origin_from_video (origin from first video PTS)\n");
 	if ((err = test_ac3_substream_selection()) != 0) {
 		fprintf(stderr, "FAIL: test_ac3_substream_selection (code %d)\n", err);
 		return 90 + err;
 	}
 	printf("PASS: test_ac3_substream_selection (first AC-3 substream only)\n");
+
+	if ((err = test_audio_track_selection()) != 0) {
+		fprintf(stderr, "FAIL: test_audio_track_selection (code %d)\n", err);
+		return 100 + err;
+	}
+	printf("PASS: test_audio_track_selection (first MP2 stream and LPCM track only)\n");
+	if ((err = test_lpcm_supported_track_selection()) != 0) {
+		fprintf(stderr, "FAIL: test_lpcm_supported_track_selection (code %d)\n", err);
+		return 130 + err;
+	}
+	printf("PASS: test_lpcm_supported_track_selection (usable LPCM track)\n");
+
+
+	if ((err = test_audio_only_reaches_done()) != 0) {
+		fprintf(stderr, "FAIL: test_audio_only_reaches_done (code %d)\n", err);
+		return 110 + err;
+	}
+	printf("PASS: test_audio_only_reaches_done (no video still ends DONE)\n");
+
+	if ((err = test_mp2_lpcm_reach_done()) != 0) {
+		fprintf(stderr, "FAIL: test_mp2_lpcm_reach_done (code %d)\n", err);
+		return 160 + err;
+	}
+	printf("PASS: test_mp2_lpcm_reach_done (MP2 and LPCM end, LPCM exact)\n");
+
+	if ((err = test_mp2_trailing_fragment()) != 0) {
+		fprintf(stderr, "FAIL: test_mp2_trailing_fragment (code %d)\n", err);
+		return 170 + err;
+	}
+	printf("PASS: test_mp2_trailing_fragment (MP2 fragment at the end)\n");
+
+	if ((err = test_mp2_lpcm_full_ring()) != 0) {
+		fprintf(stderr, "FAIL: test_mp2_lpcm_full_ring (code %d)\n", err);
+		return 180 + err;
+	}
+	printf("PASS: test_mp2_lpcm_full_ring (MP2/LPCM wait for ring room)\n");
+
+	if ((err = test_mp2_large_pes()) != 0) {
+		fprintf(stderr, "FAIL: test_mp2_large_pes (code %d)\n", err);
+		return 190 + err;
+	}
+	printf("PASS: test_mp2_large_pes (64 KiB MPEG audio packets)\n");
 
 	printf("ALL DVD HOST TESTS PASSED.\n");
 	return 0;

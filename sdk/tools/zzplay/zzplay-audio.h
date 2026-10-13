@@ -20,7 +20,9 @@ typedef enum ZZPlayMediaAudio {
   ZZPLAY_MEDIA_AUDIO_MP2,
   ZZPLAY_MEDIA_AUDIO_MP3,
   ZZPLAY_MEDIA_AUDIO_OPUS,
-  ZZPLAY_MEDIA_AUDIO_VORBIS
+  ZZPLAY_MEDIA_AUDIO_VORBIS,
+  ZZPLAY_MEDIA_AUDIO_AC3,
+  ZZPLAY_MEDIA_AUDIO_LPCM
 } ZZPlayMediaAudio;
 
 typedef enum ZZPlayBackendAvailability {
@@ -67,9 +69,19 @@ ZZPlayBackendDecision zzplay_audio_select(
     ZZPlayMediaAudio media,
     ZZPlayAudioBackend requested,
     const ZZPlayAudioAvailability *availability);
-int zzplay_audio_start_ready(ZZPlayAudioBackend backend,
-                             uint64_t queued_frames,
-                             uint64_t prebuffer_target_frames);
+/* A complete pre-roll is preferred. Once the backend cannot add a complete
+ * audio unit, input has ended, or the armed pre-roll deadline expires, a
+ * nonempty lead is enough to prevent an unstartable session. */
+int zzplay_audio_start_ready(uint64_t queued_frames,
+                             uint64_t prebuffer_target_frames,
+                             uint64_t high_water_frames,
+                             int backpressure,
+                             int input_ended,
+                             int deadline_expired);
+/* Staged input EOF still leaves buffered video pictures. Decoder
+ * backpressure means the PCM ring prevents any more video progress. */
+int zzplay_audio_pts_bypass_allowed(int video_finished,
+                                    int decoder_backpressured);
 
 /* Runtime answer from BeginEx(S16LE) or Play. Preflight availability
  * cannot see these: an older firmware, an unconvertible rate, or a held

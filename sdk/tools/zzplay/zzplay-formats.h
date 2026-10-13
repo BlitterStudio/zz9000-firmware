@@ -28,7 +28,7 @@
 
 typedef struct ZZPlayFormat {
   ZZPlayMediaKind kind;
-  const char *name;         /* "MPEG-1 Program Stream" */
+  const char *name;         /* "MPEG Program Stream" */
   /* Lower-case extensions without the dot, NULL-terminated. */
   const char *const *extensions;
   uint32_t flags;

@@ -143,24 +143,35 @@ static int test_lifecycle_and_clock(void)
   if (zzplay_ax_prepare(&sink, &audio) != ZZ9K_STATUS_OK ||
       sink.frame_bytes != 4U || sink.bound)
     return 1;
-  if (zzplay_ax_play(&sink) != ZZ9K_STATUS_OK ||
-      !sink.bound || sink.paused || mock.bind_calls != 1U ||
-      mock.status_calls != 1U)
-    return 2;
-
+  /* A bind/status may observe already retired programme PCM. It remains in
+   * the media clock; startup ordering, rather than clock subtraction, keeps
+   * frame one aligned with it. */
   mock.retired_frames = 576U;
   mock.queued_frames = 960U;
   mock.staged_frames = 1536U;
-  mock.underruns = 1U;
-  if (zzplay_ax_poll(&sink) != ZZ9K_STATUS_OK ||
-      zzplay_ax_played_frames(&sink) != 576U ||
-      zzplay_ax_queued_frames(&sink) != 960U ||
-      sink.underruns != 1U)
-    return 3;
+  if (zzplay_ax_play(&sink) != ZZ9K_STATUS_OK ||
+      !sink.bound || sink.paused || mock.bind_calls != 1U ||
+      mock.status_calls != 1U ||
+      zzplay_ax_played_frames(&sink) != 576U)
+    return 2;
   expected_pts =
       54000U + 576U * UINT64_C(90000) / 44100U;
   if (zzplay_ax_clock_pts(&sink, 54000U) != expected_pts)
+    return 3;
+
+  mock.retired_frames = 1152U;
+  mock.queued_frames = 960U;
+  mock.staged_frames = 2112U;
+  mock.underruns = 1U;
+  if (zzplay_ax_poll(&sink) != ZZ9K_STATUS_OK ||
+      zzplay_ax_played_frames(&sink) != 1152U ||
+      zzplay_ax_queued_frames(&sink) != 960U ||
+      sink.underruns != 1U)
     return 4;
+  expected_pts =
+      54000U + 1152U * UINT64_C(90000) / 44100U;
+  if (zzplay_ax_clock_pts(&sink, 54000U) != expected_pts)
+    return 5;
 
   if (zzplay_ax_pause(&sink) != ZZ9K_STATUS_OK ||
       !sink.paused || sink.dma_queued_frames != 0U ||

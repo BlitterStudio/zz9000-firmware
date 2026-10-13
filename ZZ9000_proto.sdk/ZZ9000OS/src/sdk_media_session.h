@@ -85,6 +85,10 @@ void sdk_media_session_poison_core1(void);
 void sdk_media_session_present_queued(uint32_t session);
 void sdk_media_session_close_retired(uint32_t session);
 
+/* Nonzero for the audio codecs a media session decodes into a client PCM
+ * ring; their begin request must name one. */
+int sdk_media_session_audio_uses_ring(uint32_t codec);
+
 uint16_t sdk_media_session_begin(
 	const struct SDKMediaSessionBegin *begin,
 	struct SDKMediaSessionMainResult *result);

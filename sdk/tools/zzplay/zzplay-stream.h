@@ -17,7 +17,9 @@ typedef struct ZZPlayTransport {
 } ZZPlayTransport;
 
 void zzplay_transport_init(ZZPlayTransport *transport);
+/* The next chunk to write: length bytes at offset in the input buffer. */
 void zzplay_transport_set_chunk(ZZPlayTransport *transport,
+                                uint32_t offset,
                                 uint32_t length,
                                 int eof);
 int zzplay_transport_advance(ZZPlayTransport *transport,

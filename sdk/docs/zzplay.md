@@ -1,6 +1,6 @@
 # ZZPlay — the ZZ9000 accelerated media player
 
-ZZPlay plays MPEG-1 Program Streams, WebM, MP3, native FLAC and Ogg Vorbis files using the ZZ9000's ARM
+ZZPlay plays MPEG-1 and MPEG-2 Program Streams, WebM, MP3, native FLAC and Ogg Vorbis files using the ZZ9000's ARM
 coprocessor and FPGA video overlay. Video decoding happens on the card; on the
 accelerated Zorro III path no decoded video ever crosses the Zorro bus.
 
@@ -16,8 +16,9 @@ It works two ways:
 
 | Input | Video | Audio |
 | --- | --- | --- |
-| MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video, card-decoded | MPEG-1 Layer II, card-decoded |
-| MPEG-1 Program Stream, video only | MPEG-1 video, card-decoded | none (a warning is printed) |
+| MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video up to 800x600, card-decoded; the firmware refuses larger files | MPEG audio (Layer I, II or III), card-decoded |
+| MPEG-2 Program Stream (`.mpg`, `.mpeg`, `.vob`) | MPEG-2 video up to 800x600, card-decoded; needs firmware that advertises MPEG-2 | AC-3, MP2 or LPCM (16-bit 48 kHz mono or stereo), one track: AC-3 if the file has any, otherwise MP2, otherwise LPCM, card-decoded; other LPCM plays as video only; firmware without the MPEG-2 service refuses the file rather than half-playing it |
+| MPEG-2 Program Stream, video only | MPEG-2 video, card-decoded | none (a warning is printed) |
 | WebM (`.webm`, `.mkv`) | VP8 up to 1280x720 pixels, or VP9 up to 854x480, card-decoded, either orientation | Opus at 48 kHz, or Vorbis at 8 to 96 kHz, card-decoded; on the card when the firmware advertises it, otherwise AHI |
 | WebM, larger than that but within 1920 on the long side and 1920x1088 pixels | same codecs, best effort | audio stays continuous; video may skip ahead to the next keyframe |
 | WebM, video only | VP8 or VP9, card-decoded | none (a warning is printed) |
@@ -29,8 +30,14 @@ It works two ways:
 
 The format is chosen by inspecting the file, not by its name. A WebM file is
 recognised by its EBML header and a `webm` DocType, so a misnamed file still
-plays and a Matroska file that is not WebM is refused. MPEG-1
-elementary streams, standalone MP2, MPEG-2, Ogg-FLAC, Ogg Opus, multichannel FLAC/Vorbis, a second WebM video track, an unknown WebM codec and other codecs are rejected with
+plays and a Matroska file that is not WebM is refused. An MPEG file is
+known from its video's sequence headers, not its pack headers: MPEG-2
+video, or MPEG-1 video with AC-3 or LPCM audio, needs the MPEG-2 service
+and is refused with a message saying so otherwise; MPEG-1 video with MP2
+audio, or played without audio, needs only MPEG-1. MPEG-1 elementary
+streams, standalone MP2, Ogg-FLAC, Ogg Opus,
+multichannel FLAC/Vorbis, a second WebM video track, an unknown WebM codec
+and other codecs are rejected with
 a specific message rather than being half-played. File extensions only decide
 what a drawer scan or the file requester offers.
 
@@ -47,6 +54,19 @@ the aspect preserved and black bars at the sides rather than stretched. If
 the file names a display size different from the coded frame, that aspect
 is what the window uses. A projection roll hint is printed when progress
 output is on and is not applied.
+
+MPEG files drop late frames the same way (never more than two in a row),
+and after a late frame the card skips B-pictures, which no other picture
+depends on, until it returns the next reference picture. Their audio is not
+affected.
+
+Before a video starts, ZZPlay opens its window on the first picture and
+waits until 200 ms of sound is decoded (less when the audio buffer is
+smaller, as on Zorro II), so the first seconds play without gaps. For MPEG
+files it first hands the card up to 1 MiB of the file, which fills the
+card's read-ahead before the clock starts instead of during the first
+frames. Either wait gives up after a second, and a short clip starts with
+what it has.
 
 ZZPlay keeps its formats in one registry, so support for further formats is
 added as the card's decoders grow; the *About* requester lists what the
@@ -106,7 +126,8 @@ From top to bottom:
   use, the elapsed and total time and the playback state, and a message line
   for notices and errors.
 - **Position slider**: drag it to seek. Seeking is available for MP3; it is
-  greyed out for MPEG-1 video, WebM, FLAC and Ogg Vorbis, which play from the start.
+  greyed out for MPEG-1 and MPEG-2 video, WebM, FLAC and Ogg Vorbis, which play
+  from the start.
 - **Transport**: previous, play, pause, stop, next.
 - **Volume**: greyed out when the active output cannot change volume (see
   below).
@@ -118,8 +139,7 @@ From top to bottom:
 
 Drop files, drawers or playlists from Workbench onto the window to add them;
 if nothing is playing, the first dropped file starts. Playback pauses while
-the dropped items are read and then continues, as it does while a file
-requester is open.
+the dropped items are read and then continues.
 
 The window position, volume, repeat, shuffle and the last drawer used in a
 file requester are remembered between sessions.
@@ -132,8 +152,11 @@ file requester are remembered between sessions.
 | Control | Play/Pause, Stop, Next, Previous, Seek forward, Seek back, Repeat (Off/Track/All), Shuffle, Fullscreen video |
 
 *Open...* replaces the playlist and starts playing; *Add files...* appends.
-Opening a requester while something plays pauses it, and playback resumes when
-the requester closes.
+File and About requesters run in a separate task, so playback, the time line
+and transport/volume controls keep working while one is open. ZZPlay ignores
+requests to open another requester until the first closes. Open stops the
+current item only after its selection is accepted. Close the requester before
+quitting; the player waits for it rather than leaving a requester task behind.
 
 ### Keys
 
@@ -230,8 +253,10 @@ and the player window shows what it chose.
 
 - For **MP3**, `AUTO` prefers MHI when the selected MHI driver is installed
   and free, and otherwise uses accelerated decode plus AHI.
-- For **Program Stream MP2**, `AUTO` uses AHI, or direct AX where the firmware
-  advertises it.
+- For **Program Stream audio** — MP2, and the AC-3, MP2 or LPCM an
+  MPEG-2 file carries — `AUTO` uses AHI, or direct AX where the firmware
+  advertises it. The card decodes all three into the PCM ring, so the
+  outputs behave the same whichever the stream holds.
 - MHI is never offered for Program Stream or WebM audio: it is a Layer III
   interface. Asking for it explicitly reports that rather than playing silently.
 - **WebM Opus and Vorbis** use the video-sound choice: on the card when the

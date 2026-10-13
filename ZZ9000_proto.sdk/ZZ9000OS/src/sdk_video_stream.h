@@ -52,6 +52,7 @@ struct SDKVideoStreamResult {
 	uint64_t media_pts;
 	uint64_t raw_pts;
 	uint32_t media_flags;
+	uint32_t display_fields;
 };
 
 #define SDK_VIDEO_STREAM_OWNER_LEGACY 0U

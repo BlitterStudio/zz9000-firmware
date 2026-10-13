@@ -140,20 +140,58 @@ static int check_audio_policy(void)
   return 1;
 }
 
+/* Program Stream AC-3 and LPCM ride the same backends as MP2: card-decoded
+ * PCM into AHI, or the direct AX output. MHI stays MP3-only. */
+static int check_ps_audio_policy(void)
+{
+  static const ZZPlayMediaAudio kinds[2] = {
+    ZZPLAY_MEDIA_AUDIO_AC3, ZZPLAY_MEDIA_AUDIO_LPCM
+  };
+  size_t i;
+
+  for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+    if (!check_selection(kinds[i], ZZPLAY_AUDIO_AUTO,
+                         ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_FREE,
+                         ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_OK,
+                         ZZPLAY_AUDIO_AX, 0) ||
+        !check_selection(kinds[i], ZZPLAY_AUDIO_AUTO,
+                         ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_FREE,
+                         ZZPLAY_BACKEND_MISSING, ZZPLAY_BACKEND_OK,
+                         ZZPLAY_AUDIO_AHI, 1) ||
+        !check_selection(kinds[i], ZZPLAY_AUDIO_AHI,
+                         ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_MISSING,
+                         ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_OK,
+                         ZZPLAY_AUDIO_AHI, 0) ||
+        !check_selection(kinds[i], ZZPLAY_AUDIO_AX,
+                         ZZPLAY_BACKEND_MISSING, ZZPLAY_BACKEND_MISSING,
+                         ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_OK,
+                         ZZPLAY_AUDIO_AX, 0) ||
+        !check_selection(kinds[i], ZZPLAY_AUDIO_MHI,
+                         ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_FREE,
+                         ZZPLAY_BACKEND_FREE, ZZPLAY_BACKEND_UNSUPPORTED,
+                         ZZPLAY_AUDIO_NONE, 0)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static int check_audio_start_prebuffer(void)
 {
-  if (zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AHI, 0U, 9600U) ||
-      zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AHI, 4800U, 9600U) ||
-      zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AHI, 9600U, 0U) ||
-      !zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AHI, 9600U, 9600U) ||
-      !zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AHI, 12000U, 9600U) ||
-      !zzplay_audio_start_ready(
-          ZZPLAY_AUDIO_AX, 1U, 0U)) {
+  if (zzplay_audio_start_ready(0U, 9600U, 24000U, 0, 0, 0) ||
+      zzplay_audio_start_ready(4800U, 9600U, 24000U, 0, 0, 0) ||
+      zzplay_audio_start_ready(9600U, 0U, 24000U, 0, 0, 0) ||
+      !zzplay_audio_start_ready(9600U, 9600U, 24000U, 0, 0, 0) ||
+      !zzplay_audio_start_ready(12000U, 9600U, 24000U, 0, 0, 0) ||
+      zzplay_audio_start_ready(5999U, 9600U, 6000U, 0, 0, 0) ||
+      !zzplay_audio_start_ready(6000U, 9600U, 6000U, 0, 0, 0) ||
+      !zzplay_audio_start_ready(5760U, 6144U, 6144U, 1, 0, 0) ||
+      !zzplay_audio_start_ready(4800U, 9600U, 24000U, 0, 1, 0) ||
+      !zzplay_audio_start_ready(4800U, 9600U, 24000U, 0, 0, 1) ||
+      zzplay_audio_start_ready(0U, 9600U, 24000U, 1, 1, 1) ||
+      zzplay_audio_pts_bypass_allowed(0, 0) ||
+      !zzplay_audio_pts_bypass_allowed(1, 0) ||
+      !zzplay_audio_pts_bypass_allowed(0, 1)) {
     return 0;
   }
   return 1;
@@ -257,6 +295,9 @@ int main(void)
   }
   if (!check_card_policy()) {
     return 5;
+  }
+  if (!check_ps_audio_policy()) {
+    return 7;
   }
   if (!check_card_gain()) {
     return 6;

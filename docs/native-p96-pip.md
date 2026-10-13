@@ -24,12 +24,19 @@ variant, destination rectangle, activation, and color key. No application or
 driver API fork is introduced.
 
 Firmware and bitstream are a matched ABI. Packed sources with a positive
-destination size and a non-empty screen intersection select the native plane
-in the hardware-capable build, including up/down scaling and clipping.
-Release packaging must pair that firmware with bitstreams built from the
-matching formatter RTL. `ZZ9000OS-legacy-bitstream.elf`, whose hardware
-backend is compile-time inert, remains the compatibility fallback for
-installations that retain an older bitstream. Unsupported source bounds and
+destination size, a non-empty screen intersection, and a window at least as
+large as the scanned source select the native plane in the hardware-capable
+build, including upscaling and clipping. A window smaller than the scanned
+source (a user-resized PIP, or ZZPlay fullscreen letterboxing an anamorphic
+frame onto a screen at the coded size) stays on the ARM compositor: every
+hardware run of a downscaled native window showed only the frame's first
+rows and then black (A4000: a 1920x1080 window at full scan size, and a
+720x576 MPEG-2 frame letterboxed to 720x405), while upscaled and 1:1
+windows of the same clips were correct. Release packaging must pair that
+firmware with bitstreams built from the matching formatter RTL.
+`ZZ9000OS-legacy-bitstream.elf`, whose hardware backend is compile-time
+inert, remains the compatibility fallback for installations that retain an
+older bitstream. Unsupported source bounds, downscale requests, and
 legacy-bitstream operation retain the ARM compositor.
 
 SDK video sessions use the same P96 window/geometry. Their decoder-owned
@@ -59,7 +66,7 @@ and cgxvideo players benefit without modification.
 ## Stage 2: planar420 SDK source
 
 Add planar Y/Cb/Cr fetch support and explicit display/decode buffer fences.
-The active pl_mpeg display frame cannot be reused until PL has crossed its
+The active decoder display frame cannot be reused until PL has crossed its
 last visible overlay line. This removes the SDK's final display-surface copy
 while preserving P96 ownership of window geometry and lifetime.
 
@@ -430,7 +437,9 @@ Z3660's vendored `pl_mpeg.h` contains Cortex-A9 NEON motion-compensation and
 IDCT experiments. They must not be copied as-is: nested rounded averages do
 not match MPEG's exact four-sample expression for all inputs, and several
 IDCT expressions add an explicit rounding bias and then use a rounding shift,
-applying the bias twice. The ZZ9000 MPEG translation unit is already compiled
-at `-O3` with Cortex-A9/NEON flags. A corrected, pixel-exact NEON decoder path
-is a worthwhile post-PIP performance follow-up, gated by scalar-vs-NEON
-equivalence tests running on an ARM target.
+applying the bias twice. ZZ9000 decodes MPEG-1 and MPEG-2 video with
+libmpeg2 and replaces its C IDCT and motion compensation with NEON kernels
+(`sdk_mpeg2_neon.c`) that compute exactly what the C code computes. A check
+against the C code on the card decides whether they are installed; the C code
+stays in use if they disagree. `test/mpeg2_neon/run.sh` compares the two under
+qemu-arm.

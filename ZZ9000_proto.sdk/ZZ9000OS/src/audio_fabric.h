@@ -127,6 +127,9 @@ void audio_fabric_producer_detach(uint32_t slot);
  * ring (pause with a live peer); pair with audio_fabric_request_rebuild. */
 void audio_fabric_producer_clear(uint32_t slot);
 void audio_fabric_producer_freeze(uint32_t slot);
+/* Fill the initial DMA reserve and publish an isolated frozen slot as live
+ * under one local-IRQ critical section. Returns nonzero when real PCM staged. */
+int audio_fabric_producer_prime_and_go_live(uint32_t slot);
 void audio_fabric_producer_go_live(uint32_t slot);
 /* Shared-frontier guard for restart callers: nonzero when any slot
  * other than `slot` is live. Re-arming the shared fill frontier under

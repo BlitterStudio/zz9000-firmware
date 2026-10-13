@@ -15,10 +15,10 @@
  *  - "Now playing" text and position, written by engines and drawn by the
  *    player window, with dirty bits so the UI redraws only what changed.
  *
- * Modal operations (file requesters, About) block the task that runs them,
- * so they are gated: begin_modal() pauses an active item, and
- * modal_ready() only releases the operation once the engine has confirmed
- * it is actually holding (set_engine_paused) or no item is active.
+ * Synchronous playlist expansion may block the task that runs it, so the
+ * modal gate pauses an active item and releases the operation only when the
+ * engine has confirmed that it is holding (set_engine_paused) or no item is
+ * active. File and About requesters do not use this gate.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
@@ -50,6 +50,8 @@ typedef enum ZZPlayRequest {
   ZZPLAY_REQUEST_QUIT
 } ZZPlayRequest;
 
+/* Logical requester and synchronous-operation kinds. Only ADD_DROPPED uses
+ * the controller modal gate; the requester kinds run in a child process. */
 typedef enum ZZPlayModal {
   ZZPLAY_MODAL_NONE = 0,
   ZZPLAY_MODAL_OPEN_FILES,      /* replace the playlist, then play */
@@ -183,7 +185,7 @@ void zzplay_controller_set_capabilities(ZZPlayController *ctl,
                                         int seekable, int volume_supported,
                                         int has_video);
 
-/* --- Modal gate --- */
+/* --- Synchronous-operation gate --- */
 
 /* Queue a modal operation. Returns 0 when one is already pending. Pauses
  * an active, unpaused item and remembers to resume it. */

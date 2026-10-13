@@ -2,9 +2,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "zzplay-playlist.h"
+#include "zzplay-sys.h"
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 static uint32_t zzplay_xorshift32(uint32_t *state)
@@ -36,6 +35,21 @@ static void zzplay_fisher_yates(uint32_t *arr, uint32_t start, uint32_t count,
     arr[j] = tmp;
   }
 }
+static size_t zzplay_format_uint32(char *out, uint32_t value)
+{
+  char reversed[10];
+  size_t count = 0U;
+  size_t i;
+
+  do {
+    reversed[count++] = (char)('0' + value % 10U);
+    value /= 10U;
+  } while (value != 0U);
+  for (i = 0U; i < count; i++) {
+    out[i] = reversed[count - i - 1U];
+  }
+  return count;
+}
 
 void zzplay_playlist_init(ZZPlayPlaylist *list)
 {
@@ -57,12 +71,13 @@ void zzplay_playlist_clear(ZZPlayPlaylist *list)
     return;
   }
   for (i = 0U; i < list->count; i++) {
-    free(list->entries[i].path);
+    zzplay_free(list->entries[i].path);
     list->entries[i].path = NULL;
   }
   list->count = 0U;
   list->current = -1;
   list->resume_pos = -1;
+  list->allocation_failed = 0;
 }
 
 void zzplay_playlist_free(ZZPlayPlaylist *list)
@@ -71,8 +86,8 @@ void zzplay_playlist_free(ZZPlayPlaylist *list)
     return;
   }
   zzplay_playlist_clear(list);
-  free(list->entries);
-  free(list->order);
+  zzplay_free(list->entries);
+  zzplay_free(list->order);
   list->entries = NULL;
   list->order = NULL;
   list->capacity = 0U;
@@ -99,22 +114,30 @@ int32_t zzplay_playlist_add(ZZPlayPlaylist *list, const char *path)
     if (new_cap > ZZPLAY_PLAYLIST_MAX_ENTRIES) {
       new_cap = ZZPLAY_PLAYLIST_MAX_ENTRIES;
     }
-    new_entries = (ZZPlayPlaylistEntry *)realloc(
-        list->entries, new_cap * sizeof(ZZPlayPlaylistEntry));
-    if (!new_entries) {
+    new_entries = (ZZPlayPlaylistEntry *)zzplay_alloc(
+        new_cap * sizeof(ZZPlayPlaylistEntry));
+    new_order = (uint32_t *)zzplay_alloc(new_cap * sizeof(uint32_t));
+    if (!new_entries || !new_order) {
+      zzplay_free(new_entries);
+      zzplay_free(new_order);
+      list->allocation_failed = 1;
       return -1;
     }
+    if (list->count != 0U) {
+      memcpy(new_entries, list->entries,
+             list->count * sizeof(ZZPlayPlaylistEntry));
+      memcpy(new_order, list->order, list->count * sizeof(uint32_t));
+    }
+    zzplay_free(list->entries);
+    zzplay_free(list->order);
     list->entries = new_entries;
-    new_order = (uint32_t *)realloc(list->order, new_cap * sizeof(uint32_t));
-    if (!new_order) {
-      return -1;
-    }
     list->order = new_order;
     list->capacity = new_cap;
   }
 
-  copy = (char *)malloc(len + 1U);
+  copy = (char *)zzplay_alloc(len + 1U);
   if (!copy) {
+    list->allocation_failed = 1;
     return -1;
   }
   memcpy(copy, path, len + 1U);
@@ -171,7 +194,7 @@ int zzplay_playlist_remove(ZZPlayPlaylist *list, uint32_t index)
   if (!list || index >= list->count) {
     return 0;
   }
-  free(list->entries[index].path);
+  zzplay_free(list->entries[index].path);
 
   if (list->current == (int32_t)index) {
     list->current = -1;
@@ -845,19 +868,30 @@ size_t zzplay_playlist_format_m3u(const ZZPlayPlaylist *list, char *out,
     int has_dur = (e->duration_ms > 0U);
 
     if (has_title || has_dur) {
+      static const char extinf_prefix[] = "#EXTINF:";
       char extinf[ZZPLAY_PLAYLIST_TITLE_MAX + 32U];
-      int sec = has_dur ? (int)(e->duration_ms / 1000U) : -1;
-      int elen = snprintf(extinf, sizeof(extinf), "#EXTINF:%d,%s\n", sec,
-                          e->title);
-      if (elen > 0) {
-        size_t ulen = (size_t)elen;
-        needed += ulen;
-        if (out && capacity > written + 1U) {
-          size_t avail = capacity - written - 1U;
-          size_t copy = (avail < ulen) ? avail : ulen;
-          memcpy(out + written, extinf, copy);
-          written += copy;
-        }
+      size_t elen = sizeof(extinf_prefix) - 1U;
+      size_t title_len = strlen(e->title);
+      size_t ulen;
+
+      memcpy(extinf, extinf_prefix, elen);
+      if (has_dur) {
+        elen += zzplay_format_uint32(extinf + elen, e->duration_ms / 1000U);
+      } else {
+        extinf[elen++] = '-';
+        extinf[elen++] = '1';
+      }
+      extinf[elen++] = ',';
+      memcpy(extinf + elen, e->title, title_len);
+      elen += title_len;
+      extinf[elen++] = '\n';
+      ulen = elen;
+      needed += ulen;
+      if (out && capacity > written + 1U) {
+        size_t avail = capacity - written - 1U;
+        size_t copy = (avail < ulen) ? avail : ulen;
+        memcpy(out + written, extinf, copy);
+        written += copy;
       }
     }
 
@@ -884,8 +918,6 @@ size_t zzplay_playlist_format_m3u(const ZZPlayPlaylist *list, char *out,
 
 uint32_t zzplay_playlist_load_m3u(ZZPlayPlaylist *list, const char *path)
 {
-  FILE *f;
-  long sz;
   size_t len;
   char *buf;
   char drawer[ZZPLAY_PLAYLIST_PATH_MAX];
@@ -894,40 +926,19 @@ uint32_t zzplay_playlist_load_m3u(ZZPlayPlaylist *list, const char *path)
   if (!list || !path) {
     return 0U;
   }
-  f = fopen(path, "rb");
-  if (!f) {
+  if (!zzplay_file_read_all(path, 10U * 1024U * 1024U, (void **)&buf,
+                            &len)) {
+    list->allocation_failed = 1;
     return 0U;
   }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
+  if (len == 0U) {
+    zzplay_free(buf);
     return 0U;
   }
-  sz = ftell(f);
-  if (sz <= 0 || sz > 10 * 1024 * 1024) {
-    fclose(f);
-    return 0U;
-  }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return 0U;
-  }
-  len = (size_t)sz;
-  buf = (char *)malloc(len + 1U);
-  if (!buf) {
-    fclose(f);
-    return 0U;
-  }
-  if (fread(buf, 1U, len, f) != len) {
-    free(buf);
-    fclose(f);
-    return 0U;
-  }
-  fclose(f);
-  buf[len] = '\0';
 
   zzplay_playlist_drawer(drawer, sizeof(drawer), path);
   added = zzplay_playlist_parse_m3u(list, buf, len, drawer);
-  free(buf);
+  zzplay_free(buf);
   return added;
 }
 
@@ -935,28 +946,20 @@ int zzplay_playlist_save_m3u(const ZZPlayPlaylist *list, const char *path)
 {
   size_t needed;
   char *buf;
-  FILE *f;
-  size_t written;
+  int written;
 
   if (!list || !path) {
     return 0;
   }
   needed = zzplay_playlist_format_m3u(list, NULL, 0U);
-  buf = (char *)malloc(needed + 1U);
+  buf = (char *)zzplay_alloc(needed + 1U);
   if (!buf) {
     return 0;
   }
   zzplay_playlist_format_m3u(list, buf, needed + 1U);
-
-  f = fopen(path, "wb");
-  if (!f) {
-    free(buf);
-    return 0;
-  }
-  written = fwrite(buf, 1U, needed, f);
-  fclose(f);
-  free(buf);
-  return (written == needed) ? 1 : 0;
+  written = zzplay_file_write_all(path, buf, needed);
+  zzplay_free(buf);
+  return written;
 }
 
 int zzplay_playlist_is_playlist_path(const char *path)

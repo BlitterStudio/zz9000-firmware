@@ -9,9 +9,12 @@
 #include <string.h>
 
 #include "mpeg1_ps_fixture.inc"
+#include "mpeg1_crop_ps_fixture.inc"
 
-#define EXPECTED_FRAMES 5U
-#define EXPECTED_FNV64 UINT64_C(0x12cf0e63c2e2c840)
+/* All 6 pictures of the fixture, decoded by libmpeg2; every sample is
+ * within 1 of ffmpeg's decode of the same stream. */
+#define EXPECTED_FRAMES 6U
+#define EXPECTED_FNV64 UINT64_C(0x9db20b102d9ff58c)
 
 static uint64_t fnv1a64(uint64_t hash, const uint8_t *bytes, uint32_t length)
 {
@@ -206,6 +209,189 @@ static void yuy2_half_reference(uint8_t *dst, uint32_t dst_pitch,
 	}
 }
 
+/* U2: interlaced frames are blend-packed - output row r is the rounded
+ * average of luma rows r and r+1 (last row copied) and, within each chroma
+ * plane, of chroma rows (r>>1) and (r>>1)+1 (last chroma row copied),
+ * because 4:2:0 interlaced chroma rows alternate fields too. Written from
+ * that definition, not from the kernel. */
+static void yuy2_blend_reference(uint8_t *dst, uint32_t dst_pitch,
+                                 uint32_t width, uint32_t height,
+                                 const uint8_t *y, uint32_t y_pitch,
+                                 const uint8_t *cb, const uint8_t *cr,
+                                 uint32_t chroma_pitch)
+{
+	uint32_t chroma_rows = (height + 1U) / 2U;
+	uint32_t row;
+	uint32_t x;
+
+	for (row = 0U; row < height; row++) {
+		uint8_t *d = dst + row * dst_pitch;
+		const uint8_t *y0 = y + row * y_pitch;
+		const uint8_t *y1 = row + 1U < height
+			? y + (row + 1U) * y_pitch : y0;
+		uint32_t c = row >> 1;
+		const uint8_t *b0 = cb + c * chroma_pitch;
+		const uint8_t *r0 = cr + c * chroma_pitch;
+		const uint8_t *b1 = c + 1U < chroma_rows
+			? b0 + chroma_pitch : b0;
+		const uint8_t *r1 = c + 1U < chroma_rows
+			? r0 + chroma_pitch : r0;
+
+		for (x = 0U; x < width; x += 2U) {
+			uint32_t pair = x >> 1;
+			uint32_t xl = x + 1U < width ? x + 1U : x;
+
+			d[0] = (uint8_t)((y0[x] + y1[x] + 1U) >> 1);
+			d[1] = (uint8_t)((b0[pair] + b1[pair] + 1U) >> 1);
+			d[2] = (uint8_t)((y0[xl] + y1[xl] + 1U) >> 1);
+			d[3] = (uint8_t)((r0[pair] + r1[pair] + 1U) >> 1);
+			d += 4;
+		}
+	}
+}
+
+static int test_yuy2_blend_exactness_sweep(void)
+{
+	static const uint32_t widths[] = {
+		1U, 2U, 3U, 4U, 5U, 15U, 16U, 17U, 31U, 32U, 33U,
+		37U, 64U, 65U, 176U, 320U, 352U, 639U, 640U
+	};
+	static const uint32_t heights[] = { 1U, 2U, 3U, 5U, 16U };
+	static uint8_t luma[640 * 16];
+	static uint8_t blue[320 * 16];
+	static uint8_t red[320 * 16];
+	static uint8_t want[640 * 2 * 16];
+	static uint8_t got[sizeof(want)];
+	unsigned wi;
+	unsigned hi;
+	uint32_t i;
+
+	for (i = 0U; i < sizeof(luma); i++)
+		luma[i] = (uint8_t)(i * 7U + 1U);
+	for (i = 0U; i < sizeof(blue); i++) {
+		blue[i] = (uint8_t)(i * 13U + 5U);
+		red[i] = (uint8_t)(i * 29U + 200U);
+	}
+
+	for (wi = 0U; wi < sizeof(widths) / sizeof(widths[0]); wi++) {
+		for (hi = 0U; hi < sizeof(heights) / sizeof(heights[0]); hi++) {
+			uint32_t width = widths[wi];
+			uint32_t height = heights[hi];
+			uint32_t chroma_pitch = (width + 1U) / 2U;
+			uint32_t row_bytes = sdk_video_yuy2_row_bytes(width);
+			uint32_t pitch = row_bytes + 8U;
+			uint32_t written = 0U;
+
+			if (pitch * height > sizeof(want))
+				continue;
+			memset(want, 0xa5U, sizeof(want));
+			memset(got, 0xa5U, sizeof(got));
+			yuy2_blend_reference(want, pitch, width, height,
+			                     luma, width, blue, red,
+			                     chroma_pitch);
+			if (!sdk_video_yuv420_to_yuy2_blend_scalar(
+			        got, pitch, width, height, luma, width, blue,
+			        red, chroma_pitch, &written))
+				return 1;
+			if (written != row_bytes * height)
+				return 2;
+			if (memcmp(want, got, pitch * height) != 0)
+				return 3;
+
+			/* The dispatcher must agree too - on ARM that is the
+			 * vrhadd NEON kernel after its self check, on the
+			 * host it re-checks the scalar. */
+			memset(got, 0xa5U, sizeof(got));
+			if (!sdk_video_yuv420_to_yuy2_blend(
+			        got, pitch, width, height, luma, width, blue,
+			        red, chroma_pitch, &written))
+				return 4;
+			if (memcmp(want, got, pitch * height) != 0)
+				return 5;
+		}
+	}
+	return 0;
+}
+
+/* Interlacing must not disturb the progressive pack: with both fields
+ * holding the same data the blend is the identity, so a "blended" call on
+ * duplicated rows must equal the plain packer bit for bit. */
+static int test_blend_of_field_duplicated_frame_matches_plain(void)
+{
+	static uint8_t luma[320 * 16];
+	static uint8_t blue[160 * 16];
+	static uint8_t red[160 * 16];
+	static uint8_t plain[320 * 2 * 16];
+	static uint8_t blended[320 * 2 * 16];
+	uint32_t width = 320U;
+	uint32_t height = 16U;
+	uint32_t chroma_pitch = 160U;
+	uint32_t pitch = sdk_video_yuy2_row_bytes(width);
+	uint32_t i;
+	uint32_t x;
+
+	/* Every luma row identical and every chroma row identical (the two
+	 * fields agree completely): blending rows r and r+1, and chroma rows
+	 * c and c+1, must then be the identity, because (a + a + 1) >> 1 is
+	 * a. The row content still varies per column, so this is not a
+	 * constant-fill comparison. */
+	for (i = 0U; i < width; i++) {
+		uint8_t sample = (uint8_t)(i * 7U + 1U);
+
+		for (x = 0U; x < height; x++)
+			luma[x * width + i] = sample;
+	}
+	for (i = 0U; i < chroma_pitch; i++) {
+		uint8_t bsample = (uint8_t)(i * 13U + 5U);
+		uint8_t rsample = (uint8_t)(i * 29U + 200U);
+
+		for (x = 0U; x < height / 2U; x++) {
+			blue[x * chroma_pitch + i] = bsample;
+			red[x * chroma_pitch + i] = rsample;
+		}
+	}
+	memset(plain, 0xa5U, sizeof(plain));
+	memset(blended, 0x5aU, sizeof(blended));
+	if (!sdk_video_yuv420_to_yuy2_scalar(plain, pitch, width, height,
+	                                     luma, width, blue, red,
+	                                     chroma_pitch, 0))
+		return 1;
+	if (!sdk_video_yuv420_to_yuy2_blend(blended, pitch, width, height,
+	                                    luma, width, blue, red,
+	                                    chroma_pitch, 0))
+		return 2;
+	if (memcmp(plain, blended, pitch * height) != 0)
+		return 3;
+	return 0;
+}
+
+/* Bad geometry must be refused by the blend pack too. */
+static int test_yuy2_blend_rejects_bad_params(void)
+{
+	static uint8_t plane[64];
+	uint8_t dst[64];
+	uint32_t written = 1U;
+
+	if (sdk_video_yuv420_to_yuy2_blend(dst, 3U, 4U, 1U, plane, 4U,
+	                                   plane, plane, 2U, &written))
+		return 1;
+	if (written != 0U)
+		return 2;
+	if (sdk_video_yuv420_to_yuy2_blend(dst, 8U, 4U, 1U, plane, 3U,
+	                                   plane, plane, 2U, &written))
+		return 3;
+	if (sdk_video_yuv420_to_yuy2_blend(dst, 8U, 4U, 1U, plane, 4U,
+	                                   plane, plane, 1U, &written))
+		return 4;
+	if (sdk_video_yuv420_to_yuy2_blend(dst, 8U, 4U, 0U, plane, 4U,
+	                                   plane, plane, 2U, &written))
+		return 5;
+	if (sdk_video_yuv420_to_yuy2_blend(dst, 8U, 4U, 1U, 0, 4U,
+	                                   plane, plane, 2U, &written))
+		return 6;
+	return 0;
+}
+
 static int test_yuy2_half_pack(void)
 {
 	static const uint32_t widths[] = { 2U, 3U, 4U, 6U, 7U, 34U, 64U, 642U };
@@ -273,7 +459,7 @@ static int test_streaming_decode(void)
 	int result;
 
 	ops = sdk_video_backend_find(1U, 1U);
-	if (!ops || sdk_video_backend_find(2U, 1U) != 0)
+	if (!ops || ops->codec != 1U || ops->container != 1U)
 		return 1;
 	decoder = ops->create(0U);
 	if (!decoder)
@@ -303,6 +489,10 @@ static int test_streaming_decode(void)
 			if (frame.width != 32U || frame.height != 16U) {
 				ops->destroy(decoder);
 				return 4;
+			}
+			if (frame.time_millis != frames * 40U) {
+				ops->destroy(decoder);
+				return 13;
 			}
 			row_bytes = sdk_video_yuy2_row_bytes(frame.width);
 			yuy2 = (uint8_t *)malloc(row_bytes * frame.height);
@@ -352,6 +542,10 @@ static int test_streaming_decode(void)
 			uint32_t bytes_written;
 			uint32_t row;
 
+			if (frame.time_millis != frames * 40U) {
+				ops->destroy(decoder);
+				return 14;
+			}
 			row_bytes = sdk_video_yuy2_row_bytes(frame.width);
 			yuy2 = (uint8_t *)malloc(row_bytes * frame.height);
 			if (!yuy2 || !sdk_video_yuv420_to_yuy2(
@@ -384,6 +578,120 @@ static int test_streaming_decode(void)
 		return 12;
 	return 0;
 }
+/* An I-only MPEG-1 sequence has no delayed frame at its sequence end. The
+ * first decode after the client signals EOF must complete, not need input. */
+static int test_ip_only_eof(void)
+{
+	static const uint8_t video[] = {
+		0U, 0U, 1U, 0xb3U, 1U, 0U, 0x10U, 0x13U, 0xffU, 0xffU,
+		0xe0U, 0x18U, 0U, 0U, 1U, 0xb8U, 0U, 8U, 0U, 0x40U,
+		0U, 0U, 1U, 0U, 0U, 0x0fU, 0xffU, 0xf8U, 0U, 0U,
+		1U, 1U, 0xfbU, 0xf8U, 0x7dU, 0x29U, 0x48U, 0x88U,
+		0U, 0U, 1U, 0xb7U
+	};
+	const struct SDKVideoDecoderOps *ops = sdk_video_backend_find(1U, 1U);
+	struct SDKVideoDecodedFrame frame;
+	uint8_t stream[9U + sizeof(video)];
+	uint32_t accepted = 0U;
+	uint32_t frames = 0U;
+	void *decoder;
+	int result;
+
+	if (!ops)
+		return 1;
+	stream[0] = 0U;
+	stream[1] = 0U;
+	stream[2] = 1U;
+	stream[3] = 0xe0U;
+	stream[4] = 0U;
+	stream[5] = (uint8_t)(3U + sizeof(video));
+	stream[6] = 0x80U;
+	stream[7] = 0U;
+	stream[8] = 0U;
+	memcpy(stream + 9U, video, sizeof(video));
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 2;
+	if (ops->write(decoder, stream, sizeof(stream), 0, &accepted) !=
+	    SDK_VIDEO_BACKEND_WRITE_OK || accepted != sizeof(stream)) {
+		ops->destroy(decoder);
+		return 3;
+	}
+	for (;;) {
+		result = ops->decode(decoder, &frame);
+		if (result != SDK_VIDEO_BACKEND_FRAME)
+			break;
+		frames++;
+	}
+	if (result != SDK_VIDEO_BACKEND_NEED_INPUT || frames != 1U) {
+		ops->destroy(decoder);
+		return 4;
+	}
+	if (ops->write(decoder, NULL, 0U, 1, &accepted) !=
+	    SDK_VIDEO_BACKEND_WRITE_OK || accepted != 0U) {
+		ops->destroy(decoder);
+		return 5;
+	}
+	result = ops->decode(decoder, &frame);
+	ops->destroy(decoder);
+	return result == SDK_VIDEO_BACKEND_DONE ? 0 : 6;
+}
+
+
+/* A 40x24 MPEG-1 picture is coded as 48x32 macroblocks: frames and stream
+ * info carry the picture size (the session refuses frames that differ from
+ * the size the client began with) over the coded stride. Both Program
+ * Stream codecs decode up to 800x600. */
+static int test_picture_size_and_cap(void)
+{
+	const struct SDKVideoDecoderOps *m1 = sdk_video_backend_find(1U, 1U);
+	const struct SDKVideoDecoderOps *m2 = sdk_video_backend_find(2U, 1U);
+	struct SDKVideoDecoderInfo info;
+	struct SDKVideoDecodedFrame frame;
+	uint32_t accepted = 0U;
+	uint32_t frames = 0U;
+	uint32_t guard = 0U;
+	void *decoder;
+	int result;
+
+	if (!m1 || !m2 || !m1->geometry_ok || !m2->geometry_ok)
+		return 1;
+	if (!m1->geometry_ok(800U, 600U) || !m2->geometry_ok(800U, 600U) ||
+	    m1->geometry_ok(801U, 600U) || m2->geometry_ok(801U, 600U) ||
+	    m1->geometry_ok(800U, 601U) || m2->geometry_ok(800U, 601U) ||
+	    m1->geometry_ok(0U, 16U) || m2->geometry_ok(16U, 0U))
+		return 2;
+	decoder = m1->create(0U);
+	if (!decoder)
+		return 3;
+	if (m1->write(decoder, zz9k_mpeg1_crop_ps_fixture,
+	              zz9k_mpeg1_crop_ps_fixture_len, 1, &accepted) !=
+	        SDK_VIDEO_BACKEND_WRITE_OK ||
+	    accepted != zz9k_mpeg1_crop_ps_fixture_len) {
+		m1->destroy(decoder);
+		return 4;
+	}
+	do {
+		result = m1->decode(decoder, &frame);
+		if (result == SDK_VIDEO_BACKEND_FRAME) {
+			if (frame.width != 40U || frame.height != 24U ||
+			    frame.y_pitch != 48U || frame.chroma_pitch != 24U) {
+				m1->destroy(decoder);
+				return 5;
+			}
+			frames++;
+		}
+	} while (result != SDK_VIDEO_BACKEND_DONE &&
+	         result != SDK_VIDEO_BACKEND_ERROR && guard++ < 100U);
+	if (result != SDK_VIDEO_BACKEND_DONE || frames != 3U ||
+	    !m1->get_info(decoder, &info) || info.width != 40U ||
+	    info.height != 24U) {
+		m1->destroy(decoder);
+		return 6;
+	}
+	m1->destroy(decoder);
+	return 0;
+}
 
 int main(void)
 {
@@ -400,8 +708,23 @@ int main(void)
 	result = test_yuy2_half_pack();
 	if (result != 0)
 		return 90 + result;
+	result = test_yuy2_blend_exactness_sweep();
+	if (result != 0)
+		return 110 + result;
+	result = test_blend_of_field_duplicated_frame_matches_plain();
+	if (result != 0)
+		return 130 + result;
+	result = test_yuy2_blend_rejects_bad_params();
+	if (result != 0)
+		return 150 + result;
 	result = test_streaming_decode();
 	if (result != 0)
 		return 30 + result;
+	result = test_ip_only_eof();
+	if (result != 0)
+		return 160 + result;
+	result = test_picture_size_and_cap();
+	if (result != 0)
+		return 170 + result;
 	return 0;
 }

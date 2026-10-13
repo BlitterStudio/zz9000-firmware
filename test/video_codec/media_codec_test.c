@@ -38,7 +38,6 @@ struct media_summary {
 static uint8_t pcm_ring[PCM_RING_CAPACITY];
 static uint8_t expected_pcm[PCM_RING_CAPACITY];
 static uint8_t small_pcm_ring[10000];
-static uint8_t compressed_fill[256U * 1024U];
 static struct SDKVideoMediaInfo last_terminal_media;
 
 static uint64_t fnv1a64(uint64_t hash, const uint8_t *bytes, uint32_t length)
@@ -182,6 +181,8 @@ static int decode_fixture_bytes(const uint8_t *bytes, uint32_t length,
 			return 9;
 		}
 	}
+	/* DONE with the decoded PCM still unacknowledged in the ring: the
+	 * client plays the tail out after the stream ends. */
 	if (decode_result != SDK_VIDEO_BACKEND_DONE ||
 	    !ops->get_media_info(decoder, &media)) {
 		ops->destroy(decoder);
@@ -263,12 +264,15 @@ static int test_audio_reserve_for_each_video(void)
 	decoder = ops->create(0U);
 	if (!decoder)
 		return 2;
+	/* A ring smaller than the fixture's audio: each picture must still
+	 * arrive with at least the low-water mark of fresh PCM behind it
+	 * after the client drained everything before. */
 	memset(&config, 0, sizeof(config));
 	config.audio_codec = SDK_VIDEO_MEDIA_AUDIO_MP2;
 	config.pcm_ring = pcm_ring;
-	config.pcm_ring_capacity = sizeof(pcm_ring);
+	config.pcm_ring_capacity = 32U * 1024U;
 	config.pcm_low_water_bytes = 16U * 1024U;
-	config.pcm_high_water_bytes = 96U * 1024U;
+	config.pcm_high_water_bytes = 32U * 1024U;
 	if (!ops->configure_media(decoder, &config)) {
 		ops->destroy(decoder);
 		return 3;
@@ -386,9 +390,12 @@ static int test_ring_backpressure_and_wrap(void)
 		ops->destroy(decoder);
 		return 8;
 	}
+	/* Every picture is out, so the refill reports the decoder blocked on
+	 * the ring again (or progress, while pictures remain). */
 	result = ops->decode(decoder, &frame);
 	if ((result != SDK_VIDEO_BACKEND_PROGRESS &&
-	     result != SDK_VIDEO_BACKEND_FRAME) ||
+	     result != SDK_VIDEO_BACKEND_FRAME &&
+	     result != SDK_VIDEO_BACKEND_BACKPRESSURE) ||
 	    !ops->get_media_info(decoder, &media) ||
 	    media.pcm_produced != 13824U ||
 	    ring_hash(small_pcm_ring, sizeof(small_pcm_ring), 4608U, 4608U) !=
@@ -410,14 +417,18 @@ static int test_ring_backpressure_and_wrap(void)
 	while (result != SDK_VIDEO_BACKEND_DONE && guard++ < 1000U) {
 		result = ops->decode(decoder, &frame);
 		if (result == SDK_VIDEO_BACKEND_PROGRESS ||
-		    result == SDK_VIDEO_BACKEND_FRAME) {
+		    result == SDK_VIDEO_BACKEND_FRAME ||
+		    result == SDK_VIDEO_BACKEND_BACKPRESSURE) {
+			/* Backpressure with nothing left to acknowledge is a
+			 * stall: only new PCM may hold the decoder. */
 			if (!ops->get_media_info(decoder, &media) ||
+			    (result == SDK_VIDEO_BACKEND_BACKPRESSURE &&
+			     media.pcm_produced == media.pcm_acknowledged) ||
 			    !ops->ack_media(decoder, media.pcm_produced)) {
 				ops->destroy(decoder);
 				return 11;
 			}
-		} else if (result == SDK_VIDEO_BACKEND_BACKPRESSURE ||
-		           result == SDK_VIDEO_BACKEND_ERROR ||
+		} else if (result == SDK_VIDEO_BACKEND_ERROR ||
 		           result == SDK_VIDEO_BACKEND_UNSUPPORTED ||
 		           result == SDK_VIDEO_BACKEND_NEED_INPUT) {
 			fprintf(stderr, "small ring drain stopped: result=%d "
@@ -675,10 +686,10 @@ static int test_video_only_media_timing(void)
 		    memcmp(&actual, &expected, sizeof(actual)) != 0)
 			return 2;
 	}
-	if (expected.frames != 5U ||
-	    expected.video_hash != UINT64_C(0x12cf0e63c2e2c840) ||
-	    expected.first_video_pts != 48600U ||
-	    expected.last_video_pts != 63000U ||
+	if (expected.frames != 6U ||
+	    expected.video_hash != UINT64_C(0x9db20b102d9ff58c) ||
+	    expected.first_video_pts != 0U ||
+	    expected.last_video_pts != 18000U ||
 	    expected.pcm_produced != 0U)
 		return 3;
 	return 0;
@@ -791,7 +802,9 @@ done:
 	return result;
 }
 
-static int test_corrupt_selected_streams_fail(void)
+/* Undecodable video fails the stream; undecodable audio leaves a silent
+ * clip that plays its pictures to the end, like a missing audio track. */
+static int test_corrupt_selected_streams(void)
 {
 	uint8_t *corrupt_video;
 	uint8_t *corrupt_audio;
@@ -830,7 +843,7 @@ static int test_corrupt_selected_streams_fail(void)
 	if (!decode_to_terminal(
 		    corrupt_audio, zz9k_mpeg1_mp2_ps_fixture_len,
 		    SDK_VIDEO_MEDIA_AUDIO_MP2, &terminal, &produced) ||
-	    terminal != SDK_VIDEO_BACKEND_ERROR || produced != 0U) {
+	    terminal != SDK_VIDEO_BACKEND_DONE || produced != 0U) {
 		result = 4;
 		goto done;
 	}
@@ -859,18 +872,20 @@ static int test_supported_audio_variants(void)
 		    SDK_VIDEO_MEDIA_SAMPLE_S16BE)
 		return 1;
 	for (i = 0U; i < produced; i += 4U) {
-		/* The media ABI is always stereo; pl_mpeg deterministically
-		 * duplicates a mono MP2 source into left and right. */
+		/* The media ABI is always stereo; the backend duplicates a
+		 * mono MP2 source into left and right. */
 		if (pcm_ring[i] != pcm_ring[i + 2U] ||
 		    pcm_ring[i + 1U] != pcm_ring[i + 3U])
 			return 2;
 	}
 	hash = fnv1a64(
 		UINT64_C(14695981039346656037), pcm_ring, (uint32_t)produced);
+	/* 75 dB SNR against ffmpeg; audio starts 2247 ticks after the first
+	 * picture and ends 5760 samples (16200 ticks) later. */
 	if (produced != 23040U ||
-	    hash != UINT64_C(0x20f099ccd9e324c5) ||
-	    last_terminal_media.first_audio_pts != 50847U ||
-	    last_terminal_media.audio_pts != 67047U)
+	    hash != UINT64_C(0xe1bb064ec70552f5) ||
+	    last_terminal_media.first_audio_pts != 2247U ||
+	    last_terminal_media.audio_pts != 18447U)
 		return 3;
 
 	if (!decode_to_terminal(
@@ -885,10 +900,11 @@ static int test_supported_audio_variants(void)
 		return 4;
 	hash = fnv1a64(
 		UINT64_C(14695981039346656037), pcm_ring, (uint32_t)produced);
+	/* 72 dB SNR against ffmpeg; 8064 samples (15120 ticks) from 2698. */
 	if (produced != 32256U ||
-	    hash != UINT64_C(0x108d40660a10a62e) ||
-	    last_terminal_media.first_audio_pts != 51298U ||
-	    last_terminal_media.audio_pts != 66418U)
+	    hash != UINT64_C(0x18d502072525a072) ||
+	    last_terminal_media.first_audio_pts != 2698U ||
+	    last_terminal_media.audio_pts != 17818U)
 		return 5;
 	return 0;
 }
@@ -902,12 +918,13 @@ static int test_terminal_policies(void)
 	uint32_t i;
 	int terminal;
 
-	/* Explicit MP2 on a valid video-only PS is a specific unsupported
-	 * policy result; legacy video-only decoding remains supported. */
+	/* MP2 requested on a valid video-only PS plays the pictures and ends
+	 * without audio, like an MPEG-2 file whose configured track is
+	 * absent; legacy video-only decoding ends the same way. */
 	if (!decode_to_terminal(
 	        zz9k_mpeg1_ps_fixture, zz9k_mpeg1_ps_fixture_len,
 	        SDK_VIDEO_MEDIA_AUDIO_MP2, &terminal, &produced) ||
-	    terminal != SDK_VIDEO_BACKEND_UNSUPPORTED || produced != 0U)
+	    terminal != SDK_VIDEO_BACKEND_DONE || produced != 0U)
 		return 1;
 	if (!decode_to_terminal(
 	        zz9k_mpeg1_ps_fixture, zz9k_mpeg1_ps_fixture_len,
@@ -954,45 +971,228 @@ static int test_terminal_policies(void)
 	return 0;
 }
 
+/* An audio-only Program Stream (the fixture's video retyped as padding)
+ * anchors its audio clock however the input is chunked: the first audio
+ * PTS waits for a video origin that never comes, so the end of input must
+ * anchor it. */
+static int test_audio_only_stream(const struct media_summary *reference)
+{
+	static const uint32_t chunks[] = {1U, 137U, 4096U};
+	struct media_summary expected;
+	struct media_summary actual;
+	uint32_t offset;
+	uint32_t i;
+	uint8_t *bytes;
+	int result = 0;
+
+	bytes = (uint8_t *)malloc(zz9k_mpeg1_mp2_ps_fixture_len);
+	if (!bytes)
+		return 1;
+	memcpy(bytes, zz9k_mpeg1_mp2_ps_fixture,
+	       zz9k_mpeg1_mp2_ps_fixture_len);
+	/* Every video PES start code becomes a padding stream's (0xbe): the
+	 * packet keeps its length and payload, so the demux skips it whole. */
+	for (offset = 0U; offset + 4U <= zz9k_mpeg1_mp2_ps_fixture_len;
+	     offset++) {
+		if (bytes[offset] == 0x00U && bytes[offset + 1U] == 0x00U &&
+		    bytes[offset + 2U] == 0x01U && bytes[offset + 3U] == 0xe0U)
+			bytes[offset + 3U] = 0xbeU;
+	}
+	for (i = 0U; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
+		result = decode_fixture_bytes(
+			bytes, zz9k_mpeg1_mp2_ps_fixture_len, chunks[i],
+			SDK_VIDEO_MEDIA_AUDIO_MP2, i == 0U ? &expected : &actual);
+		if (result != 0) {
+			result = 2;
+			break;
+		}
+		if (i != 0U && memcmp(&actual, &expected, sizeof(actual)) != 0) {
+			result = 3;
+			break;
+		}
+	}
+	if (result == 0 &&
+	    (expected.frames != 0U ||
+	     expected.pcm_produced != reference->pcm_produced ||
+	     expected.pcm_hash != reference->pcm_hash ||
+	     expected.first_audio_pts != 0U ||
+	     expected.current_audio_pts != 37616U))
+		result = 4;
+	free(bytes);
+	return result;
+}
+
+/* A broken frame header in the last audio packet leaves junk ahead of the
+ * final frame at the end of input: that frame still decodes. Of the
+ * fixture's 16 frames only the one the header belonged to and the one
+ * before it, which can no longer be confirmed against a following header,
+ * are lost. */
+static int test_junk_before_final_mp2_frame(void)
+{
+	uint32_t control;
+	uint32_t payload = 0U;
+	uint32_t end = 0U;
+	uint32_t occurrence = 0U;
+	uint32_t last_payload = 0U;
+	uint32_t last_end = 0U;
+	uint32_t at;
+	uint32_t headers = 0U;
+	uint64_t produced;
+	uint8_t *bytes;
+	int terminal;
+	int result = 0;
+
+	bytes = (uint8_t *)malloc(zz9k_mpeg1_mp2_ps_fixture_len);
+	if (!bytes)
+		return 1;
+	memcpy(bytes, zz9k_mpeg1_mp2_ps_fixture,
+	       zz9k_mpeg1_mp2_ps_fixture_len);
+	while (find_pes(bytes, zz9k_mpeg1_mp2_ps_fixture_len, 0xc0U,
+	                occurrence, &control, &payload, &end)) {
+		last_payload = payload;
+		last_end = end;
+		occurrence++;
+	}
+	/* Break the second frame header that starts in the last packet. */
+	for (at = last_payload; at + 1U < last_end; at++) {
+		if (bytes[at] == 0xffU && (bytes[at + 1U] & 0xf0U) == 0xf0U &&
+		    ++headers == 2U) {
+			bytes[at] = 0U;
+			bytes[at + 1U] = 0U;
+			break;
+		}
+	}
+	if (headers != 2U ||
+	    !decode_to_terminal(bytes, zz9k_mpeg1_mp2_ps_fixture_len,
+	                        SDK_VIDEO_MEDIA_AUDIO_MP2, &terminal,
+	                        &produced) ||
+	    terminal != SDK_VIDEO_BACKEND_DONE ||
+	    produced != 73728U - 2U * 4608U)
+		result = 2;
+	free(bytes);
+	return result;
+}
+
+/* With SKIP_LATE on every decode, B-pictures go undecoded: fewer frames
+ * come back, each still at its own slot on the clock (gaps are whole
+ * frame periods, some spanning the skipped B-pictures), and the audio is
+ * untouched. */
+static int test_late_skip_drops_b_pictures(void)
+{
+	const struct SDKVideoDecoderOps *ops = sdk_video_backend_find(1U, 1U);
+	struct SDKVideoMediaConfig config;
+	struct SDKVideoMediaInfo media;
+	struct SDKVideoDecodedFrame frame;
+	uint64_t last_pts = SDK_VIDEO_MEDIA_NO_PTS;
+	uint32_t accepted = 0U;
+	uint32_t frames = 0U;
+	uint32_t wide_gaps = 0U;
+	uint32_t guard = 0U;
+	void *decoder;
+	int result = SDK_VIDEO_BACKEND_PROGRESS;
+
+	if (!ops || !ops->set_decode_flags)
+		return 1;
+	decoder = ops->create(0U);
+	if (!decoder)
+		return 2;
+	memset(&config, 0, sizeof(config));
+	config.audio_codec = SDK_VIDEO_MEDIA_AUDIO_MP2;
+	config.pcm_ring = pcm_ring;
+	config.pcm_ring_capacity = sizeof(pcm_ring);
+	config.pcm_low_water_bytes = 4608U;
+	config.pcm_high_water_bytes = sizeof(pcm_ring);
+	if (!ops->configure_media(decoder, &config) ||
+	    ops->write(decoder, zz9k_mpeg1_mp2_ps_fixture,
+	               zz9k_mpeg1_mp2_ps_fixture_len, 1, &accepted) !=
+	        SDK_VIDEO_BACKEND_WRITE_OK) {
+		ops->destroy(decoder);
+		return 3;
+	}
+	while (result != SDK_VIDEO_BACKEND_DONE && guard++ < 1000U) {
+		ops->set_decode_flags(decoder, SDK_VIDEO_DECODE_SKIP_LATE);
+		result = ops->decode(decoder, &frame);
+		if (result == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 4;
+		}
+		if (result != SDK_VIDEO_BACKEND_FRAME)
+			continue;
+		if (last_pts != SDK_VIDEO_MEDIA_NO_PTS) {
+			uint64_t gap = frame.media_pts - last_pts;
+
+			if (frame.media_pts <= last_pts || gap % 3600U != 0U) {
+				ops->destroy(decoder);
+				return 5;
+			}
+			if (gap > 3600U)
+				wide_gaps++;
+		}
+		last_pts = frame.media_pts;
+		frames++;
+	}
+	if (result != SDK_VIDEO_BACKEND_DONE || frames == 0U ||
+	    frames >= 12U || wide_gaps == 0U || last_pts > 39600U ||
+	    !ops->get_media_info(decoder, &media) ||
+	    media.pcm_produced != 73728U) {
+		ops->destroy(decoder);
+		return 6;
+	}
+	ops->destroy(decoder);
+	return 0;
+}
+
+/* Input the decoder has no room for is refused whole (BACKPRESSURE, none
+ * taken), and decoding makes room again. */
 static int test_compressed_input_backpressure_is_recoverable(void)
 {
 	const struct SDKVideoDecoderOps *ops =
 		sdk_video_backend_find(1U, 1U);
 	struct SDKVideoDecodedFrame frame;
-	uint8_t byte = 0U;
-	uint32_t accepted;
+	uint32_t accepted = 0U;
+	uint32_t offset = 0U;
+	uint32_t writes = 0U;
 	void *decoder;
+	int status = SDK_VIDEO_BACKEND_WRITE_OK;
 	int result;
 
 	decoder = ops ? ops->create(0U) : 0;
 	if (!decoder)
 		return 1;
-	accepted = 0U;
-	if (ops->write(
-	        decoder, compressed_fill, sizeof(compressed_fill), 0,
-	        &accepted) != SDK_VIDEO_BACKEND_WRITE_OK ||
-	    accepted != sizeof(compressed_fill)) {
+	/* The video fixture back to back, never decoded, fills the demux. */
+	while (writes++ < 10000U) {
+		accepted = 99U;
+		status = ops->write(
+			decoder, zz9k_mpeg1_ps_fixture + offset,
+			zz9k_mpeg1_ps_fixture_len - offset, 0, &accepted);
+		if (status != SDK_VIDEO_BACKEND_WRITE_OK)
+			break;
+		offset += accepted;
+		if (offset == zz9k_mpeg1_ps_fixture_len)
+			offset = 0U;
+	}
+	if (status != SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE || accepted != 0U) {
 		ops->destroy(decoder);
 		return 2;
 	}
-	accepted = 99U;
-	if (ops->write(decoder, &byte, 1U, 0, &accepted) !=
-	        SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE ||
-	    accepted != 0U) {
-		ops->destroy(decoder);
-		return 3;
+	/* Decoding hands queued packets to the decoder until the refused
+	 * input fits. */
+	for (writes = 0U; writes < 64U; writes++) {
+		result = ops->decode(decoder, &frame);
+		if (result == SDK_VIDEO_BACKEND_ERROR) {
+			ops->destroy(decoder);
+			return 3;
+		}
+		accepted = 0U;
+		status = ops->write(
+			decoder, zz9k_mpeg1_ps_fixture + offset,
+			zz9k_mpeg1_ps_fixture_len - offset, 0, &accepted);
+		if (status == SDK_VIDEO_BACKEND_WRITE_OK)
+			break;
 	}
-	result = ops->decode(decoder, &frame);
-	if (result != SDK_VIDEO_BACKEND_NEED_INPUT) {
+	if (status != SDK_VIDEO_BACKEND_WRITE_OK || accepted == 0U) {
 		ops->destroy(decoder);
 		return 4;
-	}
-	accepted = 0U;
-	if (ops->write(decoder, &byte, 1U, 0, &accepted) !=
-	        SDK_VIDEO_BACKEND_WRITE_OK ||
-	    accepted != 1U) {
-		ops->destroy(decoder);
-		return 5;
 	}
 	ops->destroy(decoder);
 	return 0;
@@ -1001,44 +1201,34 @@ static int test_compressed_input_backpressure_is_recoverable(void)
 int main(void)
 {
 	static const uint32_t chunks[] = {1U, 137U, 4096U};
+	/* libmpeg2 video (every sample within 1 of ffmpeg) and minimp3 MP2
+	 * (72 dB SNR against ffmpeg) for all 12 pictures and 16 audio
+	 * frames. Media time starts at the first video PTS; the audio
+	 * starts 6218 ticks (69 ms) later and ends 37616 ticks (18432
+	 * samples) after that. */
 	static const uint64_t block_hashes[16] = {
-		UINT64_C(0x42ac49d252dffbc6),
-		UINT64_C(0x3776106d66bd8652),
-		UINT64_C(0x11ddeac184762201),
-		UINT64_C(0x451815f81a9e4c0f),
-		UINT64_C(0xb6140c264768f7db),
-		UINT64_C(0x17a9a9308411665d),
-		UINT64_C(0xdf444fe90d903fe9),
-		UINT64_C(0xe729b8e7aa34c41d),
-		UINT64_C(0x0623fac0fcd46ec9),
-		UINT64_C(0xa3d3e15922419afd),
-		UINT64_C(0x1930fb467bf02bbd),
-		UINT64_C(0x83dc9f84968aea72),
-		UINT64_C(0x2f424f71dc19f69e),
-		UINT64_C(0xbe5af8adc89f1a37),
-		UINT64_C(0x59ab4acf91bd84dd),
-		UINT64_C(0xbbc61ea3de3b50d0),
+		UINT64_C(0x9cea2f298cc7cacd),
+		UINT64_C(0xd82219a28cae2b3c),
+		UINT64_C(0xbac39b59c99bb7d1),
+		UINT64_C(0x25f3bde94ae8a0b7),
+		UINT64_C(0x0c5a025d45a01f80),
+		UINT64_C(0x0d7802c5eaf441b1),
+		UINT64_C(0xfa3b3396e91ffb35),
+		UINT64_C(0xbc19a88b78215379),
+		UINT64_C(0x3ab793c438c75ab9),
+		UINT64_C(0xbff3bc26e858f4c9),
+		UINT64_C(0xa354663c99537ac9),
+		UINT64_C(0x227b933a2121f641),
+		UINT64_C(0x7b1d1e9827418952),
+		UINT64_C(0xbfdec46c54c79011),
+		UINT64_C(0x062cb3027a62c026),
+		UINT64_C(0x9cff553fb8b3f422),
 	};
 	struct media_summary expected;
 	struct media_summary actual;
-	uint64_t rate_units;
-	uint32_t rate_per_second;
 	uint32_t i;
 	int result;
 
-	if (!sdk_video_plmpeg_test_boundary_mp2_probe())
-		return 1;
-	if (!sdk_video_plmpeg_test_reserved_mp2_bitrate())
-		return 2;
-	if (!sdk_video_plmpeg_test_rate(
-	        23976U, &rate_units, &rate_per_second) ||
-	    rate_units != 1001U || rate_per_second != 24000U)
-		return 3;
-	if (!sdk_video_plmpeg_test_rate(
-	        24000U, &rate_units, &rate_per_second) ||
-	    rate_units != 1U || rate_per_second != 24U ||
-	    (UINT64_C(90000) * rate_units) / rate_per_second != 3750U)
-		return 4;
 	result = decode_fixture(chunks[0], &expected);
 	if (result != 0)
 		return 10 + result;
@@ -1047,17 +1237,16 @@ int main(void)
 		if (result != 0 || memcmp(&actual, &expected, sizeof(actual)) != 0)
 			return 30 + (result != 0 ? result : (int)i);
 	}
-	if (expected.frames != 11U ||
+	if (expected.frames != 12U ||
 	    expected.sample_rate != 44100U ||
 	    expected.pcm_produced != 73728U ||
-	    expected.video_hash != UINT64_C(0xb8e08ebc902ef95a) ||
-	    expected.pcm_hash != UINT64_C(0xb6dd1795a7c9298e) ||
-	    expected.first_video_pts != 48600U ||
-	    expected.first_audio_pts != 54818U ||
-	    expected.last_video_pts != 84600U ||
-	    expected.current_audio_pts != 92435U ||
-	    expected.audio_tail_pts != 94786U ||
-	    expected.first_audio_pts - expected.first_video_pts != 6218U)
+	    expected.video_hash != UINT64_C(0x950a1914877b58dd) ||
+	    expected.pcm_hash != UINT64_C(0x8eef47bcf7f994c4) ||
+	    expected.first_video_pts != 0U ||
+	    expected.first_audio_pts != 6218U ||
+	    expected.last_video_pts != 39600U ||
+	    expected.current_audio_pts != 43834U ||
+	    expected.audio_tail_pts != 43834U)
 		return 50;
 	for (i = 0U; i < 16U; i++) {
 		if (expected.pcm_block_hash[i] != block_hashes[i])
@@ -1085,9 +1274,18 @@ int main(void)
 	result = test_fixture_timeline_mutations(&expected);
 	if (result != 0)
 		return 130 + result;
-	result = test_corrupt_selected_streams_fail();
+	result = test_corrupt_selected_streams();
 	if (result != 0)
 		return 140 + result;
+	result = test_audio_only_stream(&expected);
+	if (result != 0)
+		return 150 + result;
+	result = test_junk_before_final_mp2_frame();
+	if (result != 0)
+		return 160 + result;
+	result = test_late_skip_drops_b_pictures();
+	if (result != 0)
+		return 170 + result;
 	printf("media fixture: frames=%lu rate=%lu pcm=%llu "
 	       "video=%016llx pcm=%016llx vpts=%llu..%llu "
 	       "apts=%llu..%llu tail=%llu\n",

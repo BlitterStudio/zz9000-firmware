@@ -9,6 +9,9 @@
 /* Bytes of the private_stream_1 LPCM substream header this unpacker skips. */
 #define SDK_DVD_LPCM_HEADER_BYTES 7U
 #define SDK_DVD_LPCM_SAMPLE_RATE_HZ 48000U
+/* True when a DVD LPCM format byte describes the supported 16-bit/48 kHz
+ * mono or stereo variant. */
+int sdk_dvd_lpcm_format_supported(uint8_t format);
 
 struct SDKDVDLPCM {
 	uint32_t produced_bytes;

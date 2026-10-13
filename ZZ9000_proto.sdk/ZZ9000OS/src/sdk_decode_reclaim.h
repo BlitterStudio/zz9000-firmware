@@ -39,7 +39,7 @@
  * zlib inflate uses 2 (state + window); LZMA/LZMA2 use 2-3 (probs + dict);
  * libjpeg (jmem_zz9k.c) allocates pool chunks and coefficient arrays --
  * typically well under a dozen, but a progressive decode of a large image
- * can go higher. A persistent video session keeps several pl_mpeg buffers
+ * can go higher. A persistent video session keeps several decoder buffers
  * live between requests, and that session may coexist with a one-shot image
  * decode. Overflow degrades safely (the block is simply not tracked and
  * would leak on a core-1 fault, never corrupt), but 64 leaves headroom for

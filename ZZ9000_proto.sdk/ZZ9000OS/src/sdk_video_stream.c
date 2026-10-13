@@ -286,11 +286,14 @@ uint16_t sdk_video_stream_begin_owned(
 	     begin->pcm_low_water_bytes != 0U ||
 	     begin->pcm_high_water_bytes != 0U))
 		return SDK_STATUS_BAD_REQUEST;
-	/* Media audio this firmware offers clients. LPCM and AC-3 stay off
-	 * the list until the MPEG-2/DVD backend is advertised. */
+	/* Media audio this firmware offers clients. Like the WebM codecs,
+	 * LPCM and AC-3 (MPEG-2 Program Stream) are always accepted; only
+	 * their service flag waits for qualification. */
 	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_MP2 &&
+	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_LPCM &&
+	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_AC3 &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_OPUS &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_VORBIS)
 		return SDK_STATUS_UNSUPPORTED;
@@ -438,7 +441,7 @@ uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 			? SDK_STATUS_UNSUPPORTED : SDK_STATUS_BAD_REQUEST;
 	}
 	/* The compose task is queued ahead of the client's next decode, so
-	 * pl_mpeg's decoder-owned planes remain valid until it retires. */
+	 * the decoder-owned planes remain valid until it retires. */
 	session->direct_frame = frame;
 	session->direct_frame_valid = 1U;
 	session->frame_number++;
@@ -448,6 +451,7 @@ uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 	result->media_pts = frame.media_pts;
 	result->raw_pts = frame.raw_pts;
 	result->media_flags = frame.media_flags;
+	result->display_fields = frame.display_fields;
 	return SDK_STATUS_OK;
 }
 

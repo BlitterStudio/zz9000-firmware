@@ -59,6 +59,12 @@ struct SDKVideoDecodedFrame {
 #define SDK_VIDEO_MEDIA_FLAG_REBASED       (1U << 4)
 #define SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE    (1U << 5)
 
+/* DECODE flag (the media session's SKIP_TO_KEYFRAME): video is late. WebM
+ * drops blocks up to the next keyframe; the MPEG Program Stream backend
+ * skips B-pictures, which no other picture references, until it returns a
+ * reference picture. */
+#define SDK_VIDEO_DECODE_SKIP_LATE (1U << 0)
+
 /* Picture structure reported per decoded frame (U11). TFF/BFF mirror the
  * MPEG-2 picture header; FIELD_PICTURE means field-coded (interlaced
  * picture structure); REPEAT_FIRST_FIELD carries the cadence bit. */
@@ -89,7 +95,12 @@ struct SDKVideoMediaInfo {
 	uint64_t raw_pts;
 	uint32_t audio_frames;
 	uint32_t backpressure_events;
+	uint32_t audio_packets_dropped;
 	uint32_t flags;
+#ifdef SDK_VIDEO_HOST_TEST
+	/* Test-only observation of the exact program-time drop boundary. */
+	uint64_t first_dropped_audio_pts;
+#endif
 };
 
 enum sdk_video_backend_decode_result {
@@ -129,7 +140,8 @@ struct SDKVideoDecoderOps {
 	int (*get_media_info)(
 		void *decoder, struct SDKVideoMediaInfo *info);
 	int (*ack_media)(void *decoder, uint64_t acknowledged);
-	/* Optional. DECODE command flags; NULL ignores them. */
+	/* Optional. DECODE command flags (SDK_VIDEO_DECODE_SKIP_LATE), passed
+	 * before every decode; NULL ignores them. */
 	void (*set_decode_flags)(void *decoder, uint32_t flags);
 	/* Optional. Coded sizes the backend will decode, checked at session
 	 * begin; a refusal is UNSUPPORTED (the stream is valid, this card
@@ -146,14 +158,5 @@ const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec);
 
 const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
 	                                                     uint32_t container);
-
-const struct SDKVideoDecoderOps *sdk_video_mpeg2_backend_ops(void);
-
-#ifdef SDK_VIDEO_HOST_TEST
-int sdk_video_plmpeg_test_boundary_mp2_probe(void);
-int sdk_video_plmpeg_test_reserved_mp2_bitrate(void);
-int sdk_video_plmpeg_test_rate(
-	uint32_t frame_rate_milli, uint64_t *units, uint32_t *per_second);
-#endif
 
 #endif /* SDK_VIDEO_BACKEND_H */

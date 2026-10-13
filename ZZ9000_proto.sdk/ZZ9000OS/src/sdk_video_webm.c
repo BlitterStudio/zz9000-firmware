@@ -1147,7 +1147,8 @@ static int webm_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 					  : SDK_VIDEO_BACKEND_NEED_INPUT;
 		}
 	}
-	webm_skip_start(&skip, (d->decode_flags & 1U) != 0U, WEBM_SKIP_BUDGET);
+	webm_skip_start(&skip, (d->decode_flags & SDK_VIDEO_DECODE_SKIP_LATE) != 0U,
+	                WEBM_SKIP_BUDGET);
 	for (;;) {
 		struct webm_block blk;
 		int rc;

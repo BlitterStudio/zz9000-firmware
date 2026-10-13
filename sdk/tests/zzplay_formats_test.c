@@ -27,8 +27,8 @@ static void check_pattern(int include_playlists, const char *want)
 
 int main(void)
 {
-  check_pattern(0, "#?.(mpg|mpeg|webm|mkv|mp3|webp|flac|ogg|oga)");
-  check_pattern(1, "#?.(mpg|mpeg|webm|mkv|mp3|webp|flac|ogg|oga|m3u|m3u8)");
+  check_pattern(0, "#?.(mpg|mpeg|vob|webm|mkv|mp3|webp|flac|ogg|oga)");
+  check_pattern(1, "#?.(mpg|mpeg|vob|webm|mkv|mp3|webp|flac|ogg|oga|m3u|m3u8)");
   if (zzplay_formats_pattern(0, 0U, 0)) {
     printf("null output unexpectedly succeeded\n");
     failures++;
@@ -63,6 +63,18 @@ int main(void)
     fmt = zzplay_format_for_path("sound.wav");
     if (fmt != NULL) {
       printf("zzplay_format_for_path(sound.wav) unexpectedly matched\n");
+      failures++;
+    }
+  }
+  {
+    const ZZPlayFormat *fmt = zzplay_format_for_path("movie.vob");
+    if (!fmt || fmt->kind != ZZPLAY_MEDIA_KIND_MPEG_PS) {
+      printf("zzplay_format_for_path(movie.vob) failed\n");
+      failures++;
+    }
+    fmt = zzplay_format_for_path("TITLE.VOB");
+    if (!fmt || fmt->kind != ZZPLAY_MEDIA_KIND_MPEG_PS) {
+      printf("zzplay_format_for_path(TITLE.VOB) failed\n");
       failures++;
     }
   }

@@ -12,13 +12,14 @@ void zzplay_transport_init(ZZPlayTransport *transport)
 }
 
 void zzplay_transport_set_chunk(ZZPlayTransport *transport,
+                                uint32_t offset,
                                 uint32_t length,
                                 int eof)
 {
   if (!transport) {
     return;
   }
-  transport->pending_offset = 0U;
+  transport->pending_offset = offset;
   transport->pending_length = length;
   transport->eof = eof ? 1 : 0;
 }

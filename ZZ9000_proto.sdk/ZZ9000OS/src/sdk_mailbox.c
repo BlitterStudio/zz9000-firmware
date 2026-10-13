@@ -4427,6 +4427,12 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session,
 	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP, source_rate);
 	audio_fabric_producer_gain_set(AUDIO_FABRIC_SLOT_PUMP,
 		AUDIO_FABRIC_GAIN_UNITY);
+	/* The pump slot remains frozen through setup. Publish the source now
+	 * so an initial media preconvert fill can reserve every available
+	 * period before go_live exposes the output clock. */
+	g_audio_playback.source_kind = source_kind;
+	g_audio_playback.paused = 0U;
+	g_audio_playback.session = session;
 	if (source_kind == AUDIO_PUMP_SOURCE_MEDIA) {
 		struct SDKMediaAudioSource media_source;
 
@@ -4483,23 +4489,29 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session,
 		audio_playback_preconvert(
 			stream, AUDIO_PUMP_PRECONVERT_FILL_BUDGET);
 	}
-	/* Re-arm the shared fill frontier only when no other slot is
-	 * live: joining a live mix must never rewind it (the other
-	 * producers' staged periods would be re-filled and their staging
-	 * double-counted) -- the same guard the lease-submit path applies. */
-	if (!audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP))
-		audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
-	g_audio_playback.source_kind = source_kind;
-	g_audio_playback.paused = 0U;
 	/* Name the output source for metering (R8) before the session
 	 * goes live. */
 	audio_scene_meter_output_identity(
 		audio_pump_meter_identity(source_kind));
-	/* Publish the session, then the slot: the next audio IRQ may now
-	 * stage PCM. */
-	__asm__ __volatile__("" ::: "memory");
-	g_audio_playback.session = session;
-	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
+	/* Re-arm the shared fill frontier only when no other slot is
+	 * live: joining a live mix must never rewind it (the other
+	 * producers' staged periods would be re-filled and their staging
+	 * double-counted) -- the same guard the lease-submit path applies. */
+	if (!audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP)) {
+		audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
+		/* Direct 48 kHz media otherwise waits one formatter interrupt to
+		 * stage; a preconvert view otherwise has PCM only privately queued.
+		 * Keep priming and publication indivisible to the formatter ISR. */
+		if (!audio_fabric_producer_prime_and_go_live(
+			AUDIO_FABRIC_SLOT_PUMP)) {
+			/* A peer can become live after the optimistic check and before
+			 * the IRQ-masked recheck. It owns the shared frontier now, so
+			 * skip the prime but still publish this prepared producer. */
+			audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
+		}
+	} else {
+		audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
+	}
 }
 
 static void audio_playback_stop(void)
@@ -5628,9 +5640,7 @@ static uint16_t handle_media_session_begin(
 	begin.flags = get_be32(payload->flags);
 	if (!bytes_are_zero(payload->reserved, sizeof(payload->reserved)))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2 ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_OPUS ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_VORBIS) {
+	if (sdk_media_session_audio_uses_ring(begin.audio_codec)) {
 		if (media_pcm_ring)
 			return complete_status(req, comp, SDK_STATUS_BUSY);
 		pcm_ring = find_shared_buffer(begin.pcm_ring_handle);
@@ -5643,9 +5653,7 @@ static uint16_t handle_media_session_begin(
 		begin.pcm_ring = (uint8_t *)(uintptr_t)pcm_ring->address;
 	}
 	status = sdk_media_session_begin(&begin, &result);
-	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2 ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_OPUS ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_VORBIS) {
+	if (sdk_media_session_audio_uses_ring(begin.audio_codec)) {
 		if (status == SDK_STATUS_OK) {
 			media_pcm_ring = pcm_ring;
 			media_pcm_ring_session = result.session;

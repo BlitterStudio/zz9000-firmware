@@ -8,9 +8,8 @@
  * The GUI never plays anything itself. It turns input into controller
  * requests and playlist edits, and redraws from the controller's dirty
  * bits. It is polled, never blocking, from both the idle loop and the
- * playback engines; the only blocking work it does (ASL requesters,
- * About) runs through the controller's modal gate, so an engine is
- * always paused first.
+ * playback engines. File and About requesters run in a child process, so
+ * polling and audio presentation continue while they are open.
  *
  * AmigaOS-only. SPDX-License-Identifier: GPL-3.0-or-later */
 
@@ -51,10 +50,24 @@ int zzplay_gui_is_open(void);
 /* Signals to Wait() on while idle: window ports and the AppWindow port. */
 uint32_t zzplay_gui_signal_mask(void);
 
-/* Drain all pending GUI input, apply it to the controller and playlist,
- * run a modal operation if the gate releases one, and redraw what changed.
+/* Nonzero while a window refresh or redraw waits for the screen's layers
+ * (a menu or window drag holds them): no message will announce that they
+ * are free again, so an idle caller must poll instead of Wait()ing. */
+int zzplay_gui_redraw_deferred(void);
+
+/* Drain all pending GUI input, apply completed requester results and playlist
+ * operations, then redraw what changed.
  * Returns immediately when there is nothing to do. */
 void zzplay_gui_poll(void);
+
+struct Window;
+
+/* Nonzero when nothing holds the layers of the window's screen. Intuition
+ * holds them while a menu is open or a window is dragged; rendering into
+ * any window on that screen then blocks, and since the GUI is polled from
+ * the playback loops, the sound would stop with it. Callers skip
+ * rendering while this returns 0 and do it on a later pass. */
+int zzplay_gui_screen_free(struct Window *window);
 
 /* Report a message to the user: shown in the player window's message line
  * when it is open. Returns 0 when there is no window to show it in. */

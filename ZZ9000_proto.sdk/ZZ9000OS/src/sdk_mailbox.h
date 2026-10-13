@@ -188,6 +188,8 @@
 #define SDK_SERVICE_FLAG_VIDEO_WEBM_VP9         (1U << 28)
 #define SDK_SERVICE_FLAG_VIDEO_MEDIA_OPUS       (1U << 29)
 #define SDK_SERVICE_FLAG_VIDEO_MEDIA_VORBIS     (1U << 30)
+/* MPEG-2 Program Stream with AC-3, LPCM, MP2, or no audio. */
+#define SDK_SERVICE_FLAG_VIDEO_MPEG2            (1U << 31)
 
 #define SDK_OP_NOP                     0x0000U
 #define SDK_OP_QUERY_CAPS              0x0001U
@@ -1074,6 +1076,7 @@ static inline void sdk_audio_meter_result_pack(
  * would race to own that plane until the ABI grows an explicit binding. */
 #define SDK_MAX_VIDEO_SESSIONS         1U
 #define SDK_VIDEO_CODEC_MPEG1          1U
+#define SDK_VIDEO_CODEC_MPEG2          2U
 #define SDK_VIDEO_CODEC_VP8            3U
 #define SDK_VIDEO_CODEC_VP9            4U
 #define SDK_VIDEO_CONTAINER_MPEG_PS    1U
@@ -1093,6 +1096,8 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_MEDIA_NO_PTS UINT64_C(0xffffffffffffffff)
 #define SDK_MEDIA_AUDIO_NONE 0U
 #define SDK_MEDIA_AUDIO_MP2 1U
+#define SDK_MEDIA_AUDIO_LPCM 2U
+#define SDK_MEDIA_AUDIO_AC3 3U
 #define SDK_MEDIA_AUDIO_OPUS 4U
 #define SDK_MEDIA_AUDIO_VORBIS 5U
 #define SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME (1U << 0)

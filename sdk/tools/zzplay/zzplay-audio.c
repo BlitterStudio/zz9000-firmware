@@ -37,6 +37,8 @@ static ZZPlayBackendAvailability zzplay_audio_availability(
 static int zzplay_audio_is_program(ZZPlayMediaAudio media)
 {
   return media == ZZPLAY_MEDIA_AUDIO_MP2 ||
+         media == ZZPLAY_MEDIA_AUDIO_AC3 ||
+         media == ZZPLAY_MEDIA_AUDIO_LPCM ||
          media == ZZPLAY_MEDIA_AUDIO_OPUS ||
          media == ZZPLAY_MEDIA_AUDIO_VORBIS;
 }
@@ -127,18 +129,28 @@ ZZPlayBackendDecision zzplay_audio_select(
   return decision;
 }
 
-int zzplay_audio_start_ready(ZZPlayAudioBackend backend,
-                             uint64_t queued_frames,
-                             uint64_t prebuffer_target_frames)
+int zzplay_audio_start_ready(uint64_t queued_frames,
+                             uint64_t prebuffer_target_frames,
+                             uint64_t high_water_frames,
+                             int backpressure,
+                             int input_ended,
+                             int deadline_expired)
 {
-  if (queued_frames == 0U) {
+  if (queued_frames == 0U || prebuffer_target_frames == 0U ||
+      high_water_frames == 0U) {
     return 0;
   }
-  if (backend != ZZPLAY_AUDIO_AHI) {
-    return 1;
+  if (prebuffer_target_frames > high_water_frames) {
+    prebuffer_target_frames = high_water_frames;
   }
-  return prebuffer_target_frames != 0U &&
-         queued_frames >= prebuffer_target_frames;
+  return queued_frames >= prebuffer_target_frames || backpressure ||
+         input_ended || deadline_expired;
+}
+
+int zzplay_audio_pts_bypass_allowed(int video_finished,
+                                    int decoder_backpressured)
+{
+  return video_finished || decoder_backpressured;
 }
 
 static const char zzplay_card_mhi_refusal[] =
