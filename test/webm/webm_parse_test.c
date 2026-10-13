@@ -279,6 +279,7 @@ static int test_disabled_track_fields(void)
 	uint8_t depth[] = {1, 0, 16};
 	uint8_t rate[] = {0x47, 0x3b, 0x80, 0x00};
 	uint8_t scale[] = {0x0f, 0x42, 0x40};
+	volatile uint32_t expected_depth = 65552U;
 	int failed = 0;
 
 	bu8(&vtrack, 0xD7, 1);
@@ -314,7 +315,8 @@ static int test_disabled_track_fields(void)
 	} else {
 		v = webm_track(&d, 1);
 		a = webm_track(&d, 2);
-		if (!v || !a || a->channels != 1U || a->bit_depth != 65552U) {
+		if (!v || !a || a->channels != 1U ||
+		    (uint32_t)a->bit_depth != expected_depth) {
 			fprintf(stderr, "disabled track fields: parse values\n");
 			failed = 1;
 		}
