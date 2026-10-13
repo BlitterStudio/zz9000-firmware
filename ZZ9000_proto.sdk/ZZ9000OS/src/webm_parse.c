@@ -242,6 +242,7 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 	struct webm_track *t;
 	struct webm_track spare;
 	uint32_t priv_start = d->priv_used;
+	int priv_overflow = 0;
 	uint8_t scratch[16];
 
 	/* WebM allows one video and one audio track, so a full table is an
@@ -327,8 +328,16 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		if (encrypted_id(id))
 			return fail(d, WEBM_ERR_CODEC);
 		if (id == ID_CODECPRIV) {
-			if (n > WEBM_MAX_PRIV || d->priv_used > WEBM_MAX_PRIV - n)
-				return fail(d, WEBM_ERR_LIMIT);
+			/* Whether the track is kept is known only once all its
+			 * elements are read: a CodecPrivate that does not fit
+			 * is skipped, and fails the file only if the track is
+			 * kept. */
+			if (n > WEBM_MAX_PRIV || d->priv_used > WEBM_MAX_PRIV - n) {
+				if (skip_n(d, n) != 0)
+					return -1;
+				priv_overflow = 1;
+				continue;
+			}
 			t->priv_off = d->priv_used;
 			if (n && read_full(d, d->priv_store + d->priv_used, n) != 0)
 				return -1;
@@ -390,7 +399,7 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		d->priv_used = priv_start;
 		return 0;
 	}
-	if (t == &spare)
+	if (t == &spare || priv_overflow)
 		return fail(d, WEBM_ERR_LIMIT);
 	d->ntracks++;
 	return 0;

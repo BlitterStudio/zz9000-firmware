@@ -338,39 +338,26 @@ static int test_disabled_track_fields(void)
 	return failed;
 }
 
-/* One Matroska TrackEntry per line below: more entries, and more
- * CodecPrivate, than the stored-track table and private store hold. Only
- * the video track and the first usable track of each audio codec are
- * stored, and only their blocks are returned. */
-static int test_matroska_ignored_tracks(void)
+struct mkv_track_spec {
+	uint8_t number, type;
+	const char *codec;
+	uint8_t disabled;
+	uint32_t priv;
+	uint8_t stored;
+};
+
+/* A Matroska file with one TrackEntry and one block per spec row. */
+static struct buf make_mkv_tracks(const struct mkv_track_spec *spec,
+				  unsigned count)
 {
-	static const struct {
-		uint8_t number, type;
-		const char *codec;
-		uint8_t disabled;
-		uint32_t priv;
-		uint8_t stored;
-	} spec[] = {
-		{1, 1, "V_MPEG2", 0, 0, 1},
-		{2, 2, "A_AAC", 0, 40000, 0},          /* no decoder here */
-		{3, 0x11, "S_TEXT/UTF8", 0, 40000, 0}, /* subtitles */
-		{4, 2, "A_AC3", 0, 0, 1},
-		{5, 2, "A_AC3", 0, 0, 0},              /* second AC-3 */
-		{6, 2, "A_MPEG/L2", 0, 0, 1},
-		{7, 0x11, "S_TEXT/UTF8", 0, 0, 0},
-		{8, 2, "A_MPEG/L2", 1, 0, 0},          /* disabled */
-	};
-	static struct webm_demux d;
-	static struct got g;
-	static uint8_t priv[40000];
+	static uint8_t priv[70000];
 	struct buf seg = {0}, info = {0}, tracks = {0}, cluster = {0};
 	struct buf ebml = {0}, file = {0};
 	uint8_t scale[] = {0x0f, 0x42, 0x40};
 	uint8_t payload[4] = {1, 2, 3, 4};
-	unsigned i, stored = 0U;
-	int failed = 0;
+	unsigned i;
 
-	for (i = 0U; i < sizeof(spec) / sizeof(spec[0]); i++) {
+	for (i = 0U; i < count; i++) {
 		struct buf t = {0}, video = {0};
 
 		bu8(&t, 0xD7, spec[i].number);
@@ -391,7 +378,7 @@ static int test_matroska_ignored_tracks(void)
 	bnest(&seg, 0x1549A966, &info);
 	bnest(&seg, 0x1654AE6B, &tracks);
 	bu8(&cluster, 0xE7, 0);
-	for (i = 0U; i < sizeof(spec) / sizeof(spec[0]); i++)
+	for (i = 0U; i < count; i++)
 		add_block(&cluster, 0xA3, spec[i].number, 0, 0x80, payload,
 			  sizeof(payload));
 	bnest(&seg, 0x1F43B675, &cluster);
@@ -401,6 +388,43 @@ static int test_matroska_ignored_tracks(void)
 	bsize(&file, seg.n);
 	bput(&file, seg.p, seg.n);
 	free(seg.p);
+	return file;
+}
+
+/* One Matroska TrackEntry per line below: more entries, and more
+ * CodecPrivate, than the stored-track table and private store hold (one
+ * alone is larger than the store). Only the video track and the first
+ * usable track of each audio codec are stored, and only their blocks are
+ * returned. */
+static int test_matroska_ignored_tracks(void)
+{
+	static const struct mkv_track_spec spec[] = {
+		{1, 1, "V_MPEG2", 0, 0, 1},
+		{2, 2, "A_AAC", 0, 70000, 0},          /* no decoder here */
+		{3, 0x11, "S_TEXT/UTF8", 0, 40000, 0}, /* subtitles */
+		{4, 2, "A_AC3", 0, 0, 1},
+		{5, 2, "A_AC3", 0, 0, 0},              /* second AC-3 */
+		{6, 2, "A_MPEG/L2", 0, 0, 1},
+		{7, 0x11, "S_TEXT/UTF8", 0, 0, 0},
+		{8, 2, "A_MPEG/L2", 1, 0, 0},          /* disabled */
+	};
+	/* A kept track whose CodecPrivate does not fit still fails. */
+	static const struct mkv_track_spec oversized[] = {
+		{1, 1, "V_MPEG2", 0, 70000, 1},
+	};
+	static struct webm_demux d;
+	static struct got g;
+	struct buf file = make_mkv_tracks(oversized, 1U);
+	unsigned i, stored = 0U;
+	int failed = 0;
+
+	if (collect(&file, 1, &d, &g) == 0 || d.error != WEBM_ERR_LIMIT) {
+		fprintf(stderr, "matroska oversized kept priv: err=%d\n",
+			d.error);
+		failed = 1;
+	}
+	free(file.p);
+	file = make_mkv_tracks(spec, sizeof(spec) / sizeof(spec[0]));
 
 	if (collect(&file, 1, &d, &g) != 0) {
 		fprintf(stderr, "matroska ignored tracks: err=%d\n", d.error);
