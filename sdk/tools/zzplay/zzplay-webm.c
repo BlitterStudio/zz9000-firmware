@@ -857,7 +857,7 @@ const char *zzplay_webm_video_name(ZZPlayWebMVideo v) { if(v==ZZPLAY_WEBM_VIDEO_
 const char *zzplay_webm_audio_name(ZZPlayWebMAudio a) { if(a==ZZPLAY_WEBM_AUDIO_MPEG)return "MPEG audio"; if(a==ZZPLAY_WEBM_AUDIO_AC3)return "AC-3"; if(a==ZZPLAY_WEBM_AUDIO_LPCM)return "LPCM"; if(a==ZZPLAY_WEBM_AUDIO_OPUS)return "Opus"; if(a==ZZPLAY_WEBM_AUDIO_VORBIS)return "Vorbis"; return "audio"; }
 uint32_t zzplay_matroska_required_flags(ZZPlayWebMVideo v, ZZPlayWebMAudio a) { uint32_t f=ZZ9K_SERVICE_FLAG_VIDEO_DIRECT_OVERLAY|ZZ9K_SERVICE_FLAG_VIDEO_STREAMING_INPUT|ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_SESSION|ZZ9K_SERVICE_FLAG_VIDEO_MPEG2; if(v!=ZZPLAY_WEBM_VIDEO_MPEG1&&v!=ZZPLAY_WEBM_VIDEO_MPEG2)return 0U; if(a==ZZPLAY_WEBM_AUDIO_MPEG)f|=ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2; return f; }
 int zzplay_matroska_service_ready(uint32_t f, ZZPlayWebMVideo v, ZZPlayWebMAudio a) { uint32_t n=zzplay_matroska_required_flags(v,a); return n&&(f&n)==n; }
-const char *zzplay_webm_doc_type_name(ZZPlayWebMDocType d) { return d==ZZPLAY_WEBM_DOCTYPE_MATROSKA ? "Matroska" : "WebM"; } 
+const char *zzplay_webm_doc_type_name(ZZPlayWebMDocType d) { return d==ZZPLAY_WEBM_DOCTYPE_MATROSKA ? "Matroska" : "WebM"; }
 
 int zzplay_probe_webm(const uint8_t *data, size_t length, int capped,
                       ZZPlayWebMInfo *info)
