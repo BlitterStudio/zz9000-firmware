@@ -701,7 +701,8 @@ int zzplay_webp_info_supported(const ZZPlayWebPInfo *info)
 {
   return info && info->is_animated &&
          info->width >= 16U && info->height >= 16U &&
-         zzplay_frame_size_supported(info->width, info->height);
+         info->width <= ZZPLAY_WEBP_MAX_WIDTH &&
+         info->height <= ZZPLAY_WEBP_MAX_HEIGHT;
 }
 
 int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)

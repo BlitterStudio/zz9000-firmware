@@ -11,8 +11,12 @@
 #include <stdint.h>
 #include <stdio.h>
 
+/* Video (MPEG, WebM): a 1920-pixel long side and 1920x1088 pixels, either
+ * orientation. Animated WebP keeps its own landscape 1920x1080 bound. */
 #define ZZPLAY_MAX_SIDE 1920U
 #define ZZPLAY_MAX_PIXELS (1920U * 1088U)
+#define ZZPLAY_WEBP_MAX_WIDTH 1920U
+#define ZZPLAY_WEBP_MAX_HEIGHT 1080U
 
 typedef struct ZZPlayVideoInfo {
   uint32_t width;

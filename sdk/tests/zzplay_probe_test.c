@@ -996,6 +996,18 @@ static int check_webp_probe(void)
   info.height = 240U;
   info.is_animated = 1;
   if (!zzplay_webp_info_supported(&info)) return 0;
+  /* The WebP bound is landscape 1920x1080, not the video envelope. */
+  info.width = 1920U;
+  info.height = 1080U;
+  if (!zzplay_webp_info_supported(&info)) return 0;
+  info.width = 1088U;
+  info.height = 1920U;
+  if (zzplay_webp_info_supported(&info)) return 0;
+  info.width = 1920U;
+  info.height = 1088U;
+  if (zzplay_webp_info_supported(&info)) return 0;
+  info.width = 320U;
+  info.height = 240U;
   info.is_animated = 0;
   if (zzplay_webp_info_supported(&info)) return 0;
   if (zzplay_webp_info_supported(NULL)) return 0;
