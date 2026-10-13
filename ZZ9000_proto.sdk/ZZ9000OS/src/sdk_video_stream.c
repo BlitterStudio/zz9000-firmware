@@ -14,9 +14,8 @@
 #include <string.h>
 #include <xil_cache.h>
 
-#define SDK_VIDEO_MAX_WIDTH 1920U
-#define SDK_VIDEO_MAX_HEIGHT 1080U
-#define SDK_VIDEO_MAX_PIXELS (SDK_VIDEO_MAX_WIDTH * SDK_VIDEO_MAX_HEIGHT)
+#define SDK_VIDEO_MAX_SIDE 1920U
+#define SDK_VIDEO_MAX_PIXELS (1920U * 1088U)
 #define SDK_VIDEO_MAX_WRITE_BYTES (256U * 1024U)
 
 struct SDKVideoStreamSession {
@@ -275,8 +274,8 @@ uint16_t sdk_video_stream_begin_owned(
 	if (ops && ops->geometry_ok) {
 		if (!ops->geometry_ok(begin->width, begin->height))
 			return SDK_STATUS_UNSUPPORTED;
-	} else if (begin->width > SDK_VIDEO_MAX_WIDTH ||
-		   begin->height > SDK_VIDEO_MAX_HEIGHT ||
+	} else if (begin->width > SDK_VIDEO_MAX_SIDE ||
+		   begin->height > SDK_VIDEO_MAX_SIDE ||
 		   begin->width > SDK_VIDEO_MAX_PIXELS / begin->height) {
 		return SDK_STATUS_BAD_REQUEST;
 	}

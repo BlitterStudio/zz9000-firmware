@@ -18,7 +18,7 @@ A Matroska file must declare the `webm` DocType to be accepted as WebM.
 
 | Input | Extensions offered in scans and requesters | Supported content |
 | --- | --- | --- |
-| MPEG Program Stream | `.mpg`, `.mpeg`, `.vob` | MPEG-1 or MPEG-2 video in a Program Stream, up to 800x600. Supported audio is MP2, AC-3, or 16-bit 48 kHz mono or stereo LPCM. MPEG elementary streams are rejected. |
+| MPEG Program Stream | `.mpg`, `.mpeg`, `.vob` | MPEG-1 or MPEG-2 video in a Program Stream, up to a 1920-pixel long side and 1920x1088 pixels in either orientation. Supported audio is MP2, AC-3, or 16-bit 48 kHz mono or stereo LPCM. MPEG elementary streams are rejected. |
 | WebM | `.webm`, `.mkv` | One VP8 or VP9 video track, with at most one Opus or Vorbis audio track. Video-only files are accepted. Opus is 48 kHz; Vorbis is mono or stereo at 8–96 kHz. The maximum is a 1920-pixel long side and 1920x1088 pixels. |
 | MPEG Layer III | `.mp3` | MP3 audio. |
 | Native FLAC | `.flac` | Native `fLaC` streams with a STREAMINFO first block, mono or stereo, 4–24 bits, and 8–192 kHz. Ogg-FLAC is rejected. |
@@ -29,8 +29,9 @@ A Matroska file must declare the `webm` DocType to be accepted as WebM.
 WebM and MPEG video have separate realtime thresholds. VP8 is realtime through
 1280x720, and VP9 through 854x480. Larger WebM files within the maximum can
 play, but late frames may be skipped. MPEG playback also skips late frames and
-can skip B-pictures until the next reference picture. Audio continues while
-frames are skipped.
+can skip B-pictures until the next reference picture. Above 800x600, MPEG
+playback is best effort: when video falls more than half a second behind, it
+skips ahead to the next I-picture. Audio continues while frames are skipped.
 
 WebM files with multiple video or audio tracks, unsupported codecs, invalid
 audio layouts, or oversized video are rejected. A WebM file has a video track;

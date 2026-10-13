@@ -392,10 +392,12 @@ static int test_decode_flag_forwarding(void)
 
 	memset(&decode, 0, sizeof(decode));
 	decode.session = result.session;
-	decode.flags = SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME;
+	decode.flags = SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME |
+	               SDK_MEDIA_DECODE_SKIP_TO_I_PICTURE;
 	if (sdk_video_stream_decode(&decode, &result) != SDK_STATUS_OK)
 		return 21;
-	if (last_decode_flags != SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME)
+	if (last_decode_flags != (SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME |
+	                          SDK_MEDIA_DECODE_SKIP_TO_I_PICTURE))
 		return 22;
 
 	sdk_video_stream_close(result.session, &result);

@@ -641,7 +641,7 @@ static int test_ip_only_eof(void)
 /* A 40x24 MPEG-1 picture is coded as 48x32 macroblocks: frames and stream
  * info carry the picture size (the session refuses frames that differ from
  * the size the client began with) over the coded stride. Both Program
- * Stream codecs decode up to 800x600. */
+ * Stream codecs decode up to a 1920-pixel side and 1920x1088 pixels. */
 static int test_picture_size_and_cap(void)
 {
 	const struct SDKVideoDecoderOps *m1 = sdk_video_backend_find(1U, 1U);
@@ -656,9 +656,11 @@ static int test_picture_size_and_cap(void)
 
 	if (!m1 || !m2 || !m1->geometry_ok || !m2->geometry_ok)
 		return 1;
-	if (!m1->geometry_ok(800U, 600U) || !m2->geometry_ok(800U, 600U) ||
-	    m1->geometry_ok(801U, 600U) || m2->geometry_ok(801U, 600U) ||
-	    m1->geometry_ok(800U, 601U) || m2->geometry_ok(800U, 601U) ||
+	if (!m1->geometry_ok(1280U, 720U) || !m2->geometry_ok(1280U, 720U) ||
+	    !m1->geometry_ok(1920U, 1088U) || !m2->geometry_ok(1920U, 1088U) ||
+	    !m1->geometry_ok(1088U, 1920U) || !m2->geometry_ok(1088U, 1920U) ||
+	    m1->geometry_ok(1921U, 1U) || m2->geometry_ok(1U, 1921U) ||
+	    m1->geometry_ok(1920U, 1089U) || m2->geometry_ok(1089U, 1920U) ||
 	    m1->geometry_ok(0U, 16U) || m2->geometry_ok(16U, 0U))
 		return 2;
 	decoder = m1->create(0U);

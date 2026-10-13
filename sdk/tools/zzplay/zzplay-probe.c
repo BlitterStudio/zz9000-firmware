@@ -685,12 +685,24 @@ int zzplay_probe_webp(const uint8_t *data,
   return 1;
 }
 
+static int zzplay_frame_size_supported(uint32_t width, uint32_t height)
+{
+  uint32_t side;
+
+  if (width == 0U || height == 0U) {
+    return 0;
+  }
+  side = width > height ? width : height;
+  return side <= ZZPLAY_MAX_SIDE &&
+         width <= ZZPLAY_MAX_PIXELS / height;
+}
+
 int zzplay_webp_info_supported(const ZZPlayWebPInfo *info)
 {
   return info && info->is_animated &&
          info->width >= 16U && info->height >= 16U &&
-         info->width <= ZZPLAY_MAX_WIDTH &&
-         info->height <= ZZPLAY_MAX_HEIGHT;
+         info->width <= ZZPLAY_WEBP_MAX_WIDTH &&
+         info->height <= ZZPLAY_WEBP_MAX_HEIGHT;
 }
 
 int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info)
@@ -796,8 +808,7 @@ done:
 int zzplay_video_info_supported(const ZZPlayVideoInfo *info)
 {
   return info && info->width >= 16U && info->height >= 16U &&
-         info->width <= ZZPLAY_MAX_WIDTH &&
-         info->height <= ZZPLAY_MAX_HEIGHT &&
+         zzplay_frame_size_supported(info->width, info->height) &&
          info->frame_rate_milli != 0U;
 }
 
