@@ -44,6 +44,7 @@
 
 
 #include <devices/timer.h>
+#include <exec/memory.h>
 #include <exec/libraries.h>
 #include <graphics/gfx.h>
 #include <intuition/intuition.h>
@@ -68,6 +69,9 @@
  * clock, so a pass stays bounded; 128 KB a pass is 3.2 MB/s at 25 fps,
  * well above DVD's 9.8 Mbit/s. */
 #define ZZPLAY_FEED_BYTES_PER_PASS (128U * 1024U)
+/* Preloading uses 16 KiB host reads/copies before playback starts. */
+#define ZZPLAY_PRELOAD_CHUNK_BYTES (16U * 1024U)
+#define ZZPLAY_PRELOAD_FEED_BYTES (64U * 1024U)
 /* MPEG/PS WRITE parses PES packets and fills the card's 1 MiB video FIFO.
  * Do that one-off burst before the audio clock begins, not between its first
  * pictures. The deadline also bounds a slow disk or Zorro 2 startup. */
@@ -168,6 +172,10 @@ struct ZZPlayRuntime {
   uint8_t input_starved;
   ZZ9KContext *ctx;
   ZZ9KSharedBuffer input;
+  ZZ9KSharedBuffer preload;
+  uint32_t preload_offset;
+  uint32_t preload_length;
+  uint8_t preloaded;
   ZZ9KSharedBuffer pcm;
   ZZPlayPCMRing pcm_ring;
   ZZPlayAHISink ahi;
@@ -2557,6 +2565,114 @@ static void zzplay_fail(struct ZZPlayRuntime *runtime,
   zzplay_core_fail(&runtime->core, failure, status);
 }
 
+/* Preload stays deliberately separate from the streaming reader: this is a
+ * one-shot transfer before a media session consumes any bytes. */
+static int zzplay_preload_cancel_requested(struct ZZPlayRuntime *runtime)
+{
+  if (zzplay_ctrl_c_requested != 0 ||
+      (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) != 0U) {
+    zzplay_ctrl_c_requested = 1;
+    (void)zzplay_controller_request(runtime->ctl, ZZPLAY_REQUEST_QUIT);
+  }
+  zzplay_gui_poll();
+  return zzplay_controller_item_should_end(runtime->ctl);
+}
+
+static int zzplay_preload_media(struct ZZPlayRuntime *runtime,
+                                const char *path)
+{
+  BPTR lock = 0;
+  BPTR file = 0;
+  struct FileInfoBlock *fib = 0;
+  uint8_t *stage = 0;
+  uint32_t offset = 0U;
+  uint32_t last_percent = UINT32_MAX;
+  int status = ZZ9K_STATUS_IO_ERROR;
+
+  lock = Lock((CONST_STRPTR)path, ACCESS_READ);
+  fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, 0);
+  if (!lock || !fib || !Examine(lock, fib) || fib->fib_Size <= 0) {
+    goto done;
+  }
+  runtime->preload_length = (uint32_t)fib->fib_Size;
+  if (zz9k_alloc_shared(runtime->ctx, runtime->preload_length, 64U,
+                        ZZ9K_ALLOC_CARD_ONLY | ZZ9K_ALLOC_MEDIA,
+                        &runtime->preload) != ZZ9K_STATUS_OK) {
+    status = ZZ9K_STATUS_NO_MEMORY;
+    goto done;
+  }
+  (void)zzplay_resource_acquire(&runtime->core.resources,
+                                ZZPLAY_RESOURCE_PRELOAD_BUFFER);
+  stage = (uint8_t *)AllocVec(ZZPLAY_PRELOAD_CHUNK_BYTES, MEMF_FAST);
+  file = Open((CONST_STRPTR)path, MODE_OLDFILE);
+  if (!stage || !file) {
+    goto done;
+  }
+  zzplay_info("zzplay: preloading %lu KiB to card DDR\n",
+              (unsigned long)(runtime->preload_length / 1024U));
+  while (offset < runtime->preload_length) {
+    uint32_t wanted = runtime->preload_length - offset;
+    LONG got;
+    uint32_t percent;
+
+    if (wanted > ZZPLAY_PRELOAD_CHUNK_BYTES) {
+      wanted = ZZPLAY_PRELOAD_CHUNK_BYTES;
+    }
+    got = Read(file, stage, (LONG)wanted);
+    if (got <= 0) {
+      /* A short file or read error after earlier chunks: the copy is
+       * incomplete, so release it and stream instead. */
+      status = ZZ9K_STATUS_IO_ERROR;
+      goto done;
+    }
+    CopyMem(stage, (APTR)runtime->input.data, (ULONG)got);
+    status = zz9k_mem_copy(runtime->ctx, runtime->preload.handle, offset,
+                           runtime->input.handle, 0U, (uint32_t)got);
+    if (status != ZZ9K_STATUS_OK) {
+      goto done;
+    }
+    offset += (uint32_t)got;
+    percent = (uint32_t)(((uint64_t)offset * 100U) /
+                         runtime->preload_length);
+    if (percent == 100U || percent >= last_percent + 5U ||
+        last_percent == UINT32_MAX) {
+      char message[48];
+
+      sprintf(message, "Preloading media: %lu%%", (unsigned long)percent);
+      zzplay_controller_set_message(runtime->ctl, message);
+      last_percent = percent;
+    }
+    if (zzplay_preload_cancel_requested(runtime)) {
+      status = ZZ9K_STATUS_CANCELLED;
+      goto done;
+    }
+  }
+  runtime->preloaded = 1U;
+  runtime->preload_offset = 0U;
+  zzplay_controller_set_message(runtime->ctl, "Media preloaded to card DDR");
+  status = ZZ9K_STATUS_OK;
+
+done:
+  if (status != ZZ9K_STATUS_OK && runtime->preload.handle != 0U) {
+    (void)zzplay_resource_release(
+        &runtime->core.resources, ZZPLAY_RESOURCE_PRELOAD_BUFFER,
+        zzplay_release_resource, runtime);
+  }
+  if (file) {
+    Close(file);
+  }
+  if (stage) {
+    FreeVec(stage);
+  }
+  if (fib) {
+    FreeDosObject(DOS_FIB, fib);
+  }
+  if (lock) {
+    UnLock(lock);
+  }
+  return status;
+}
+
 static int zzplay_release_resource(void *user,
                                    ZZPlayResource resource)
 {
@@ -2624,6 +2740,15 @@ static int zzplay_release_resource(void *user,
         (void)zz9k_free_shared(runtime->ctx, runtime->input.handle);
       }
       memset(&runtime->input, 0, sizeof(runtime->input));
+      break;
+    case ZZPLAY_RESOURCE_PRELOAD_BUFFER:
+      if (runtime->preload.handle != 0U && runtime->ctx) {
+        (void)zz9k_free_shared(runtime->ctx, runtime->preload.handle);
+      }
+      memset(&runtime->preload, 0, sizeof(runtime->preload));
+      runtime->preload_length = 0U;
+      runtime->preload_offset = 0U;
+      runtime->preloaded = 0U;
       break;
     case ZZPLAY_RESOURCE_SDK_CONTEXT:
       if (runtime->ctx) {
@@ -2781,13 +2906,17 @@ static int zzplay_restart_session(struct ZZPlayRuntime *runtime,
   if (status != ZZ9K_STATUS_OK) {
     return status;
   }
-  /* A fresh reader starts again at the beginning of the file. */
-  zzplay_reader_close(runtime->reader);
-  runtime->reader = zzplay_reader_open(
-      runtime->input_path, (uint8_t *)runtime->input.data,
-      (uint32_t)runtime->input.length);
-  if (!runtime->reader) {
-    return ZZ9K_STATUS_IO_ERROR;
+  if (runtime->preloaded) {
+    runtime->preload_offset = 0U;
+  } else {
+    /* A fresh reader starts again at the beginning of the file. */
+    zzplay_reader_close(runtime->reader);
+    runtime->reader = zzplay_reader_open(
+        runtime->input_path, (uint8_t *)runtime->input.data,
+        (uint32_t)runtime->input.length);
+    if (!runtime->reader) {
+      return ZZ9K_STATUS_IO_ERROR;
+    }
   }
   zzplay_transport_init(transport);
   return zzplay_begin_session(runtime);
@@ -2821,20 +2950,27 @@ static ZZPlayFeedResult zzplay_feed_round(
     uint32_t available;
     int eof;
 
-    if (!zzplay_reader_peek(runtime->reader, &offset, &available, &eof)) {
-      zzplay_error(runtime, "zzplay: input read failed\n");
-      zzplay_fail(runtime, ZZPLAY_FAILURE_IO, ZZ9K_STATUS_IO_ERROR);
-      return ZZPLAY_FEED_ERROR;
+    if (runtime->preloaded) {
+      offset = runtime->preload_offset;
+      available = runtime->preload_length - offset;
+      if (available > ZZPLAY_PRELOAD_FEED_BYTES) {
+        available = ZZPLAY_PRELOAD_FEED_BYTES;
+      }
+      eof = available == runtime->preload_length - offset;
+    } else {
+      if (!zzplay_reader_peek(runtime->reader, &offset, &available, &eof)) {
+        zzplay_error(runtime, "zzplay: input read failed\n");
+        zzplay_fail(runtime, ZZPLAY_FAILURE_IO, ZZ9K_STATUS_IO_ERROR);
+        return ZZPLAY_FEED_ERROR;
+      }
+      if (available == 0U && !eof) {
+        runtime->input_starved = 1U;
+        return ZZPLAY_FEED_DONE;
+      }
+      if (runtime->trace && available != 0U) {
+        runtime->trace_reads++;
+      }
     }
-    if (available == 0U && !eof) {
-      runtime->input_starved = 1U;
-      return ZZPLAY_FEED_DONE;
-    }
-    if (runtime->trace && available != 0U) {
-      runtime->trace_reads++;
-    }
-    /* The reader's stores to the slot precede its count, and the write op
-     * below orders them before the firmware can read the slot. */
     zzplay_transport_set_chunk(transport, offset, available, eof);
   }
 
@@ -2844,7 +2980,8 @@ static ZZPlayFeedResult zzplay_feed_round(
   }
   memset(&write, 0, sizeof(write));
   write.session = runtime->session;
-  write.src_handle = runtime->input.handle;
+  write.src_handle = runtime->preloaded ? runtime->preload.handle
+                                        : runtime->input.handle;
   write.src_offset = transport->pending_offset;
   write.src_length = transport->pending_length;
   write.flags = zzplay_transport_write_flags(transport);
@@ -2892,10 +3029,12 @@ static ZZPlayFeedResult zzplay_feed_round(
                   ZZ9K_STATUS_INTERNAL_ERROR);
       return ZZPLAY_FEED_ERROR;
     }
-    /* Accepted bytes are the card's now; a whole slot goes back to the
-     * reader. */
-    zzplay_reader_consume(runtime->reader,
-                          pending_before - transport->pending_length);
+    if (runtime->preloaded) {
+      runtime->preload_offset += pending_before - transport->pending_length;
+    } else {
+      zzplay_reader_consume(runtime->reader,
+                            pending_before - transport->pending_length);
+    }
     if (transport->pending_length != 0U) {
       return ZZPLAY_FEED_BACKPRESSURE;
     }
@@ -3474,6 +3613,7 @@ static ZZPlayEngineResult zzplay_engine_media_session(
   ZZ9KCaps caps;
   ZZ9KApertureLayout aperture;
   ZZ9KServiceInfo service;
+  ZZ9KServiceInfo memory_service;
   ZZ9KMediaSessionMainResult result;
   ZZPlayBackendDecision audio_decision;
   uint32_t frame_period_us;
@@ -3484,6 +3624,7 @@ static ZZPlayEngineResult zzplay_engine_media_session(
   int cleanup_status;
   int strict = 0;
   int gui_open;
+  int preload_enabled = 0;
 
   /* Fresh per-item state; options, prefs and the controller belong to
    * the application and are only read (the per-item options copy holds
@@ -3619,6 +3760,24 @@ static ZZPlayEngineResult zzplay_engine_media_session(
   zzplay_info("zzplay: selected audio backend %s%s\n",
          zzplay_audio_backend_name(runtime.audio_backend),
          audio_decision.fell_back ? " (fallback)" : "");
+  if (runtime.prefs.preload) {
+    cleanup_status = zz9k_query_service(
+        runtime.ctx, ZZ9K_SERVICE_MEMORY, &memory_service);
+    if (board.zorro_version != 3U) {
+      zzplay_info("zzplay: preload is Zorro III only; streaming instead\n");
+      zzplay_controller_set_message(runtime.ctl,
+                                    "Preload needs Zorro III; streaming");
+    } else if ((caps.capability_bits & ZZ9K_CAP_MEDIA_INPUT) == 0U ||
+               cleanup_status != ZZ9K_STATUS_OK ||
+               (memory_service.flags &
+                ZZ9K_SERVICE_FLAG_MEMORY_MEDIA_INPUT) == 0U) {
+      zzplay_info("zzplay: firmware lacks card preload; streaming instead\n");
+      zzplay_controller_set_message(runtime.ctl,
+                                    "Card preload unavailable; streaming");
+    } else {
+      preload_enabled = 1;
+    }
+  }
 
   input_bytes = board.zorro_version == 2U ? ZZPLAY_Z2_INPUT_BYTES
                                          : ZZPLAY_INPUT_BYTES;
@@ -3637,18 +3796,32 @@ static ZZPlayEngineResult zzplay_engine_media_session(
     zzplay_fail(&runtime, ZZPLAY_FAILURE_ALLOCATION, cleanup_status);
     goto cleanup;
   }
-  /* The reader fills this buffer: it opens once the buffer exists, and
-   * the buffer's release closes it first. */
-  runtime.reader = zzplay_reader_open(
-      run->path, (uint8_t *)runtime.input.data,
-      (uint32_t)runtime.input.length);
-  if (!runtime.reader) {
-    zzplay_error(&runtime, "zzplay: cannot open %s\n", run->path);
-    zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, ZZ9K_STATUS_IO_ERROR);
-    goto cleanup;
+  if (preload_enabled) {
+    cleanup_status = zzplay_preload_media(&runtime, run->path);
+    if (cleanup_status == ZZ9K_STATUS_CANCELLED) {
+      zzplay_engine_stop_from_request(&runtime);
+      goto cleanup;
+    }
+    if (cleanup_status != ZZ9K_STATUS_OK) {
+      zzplay_info("zzplay: preload failed (%s); streaming instead\n",
+                  zz9k_status_name(cleanup_status));
+      zzplay_controller_set_message(runtime.ctl,
+                                    "Preload failed; streaming instead");
+    }
   }
-  (void)zzplay_resource_acquire(
-      &runtime.core.resources, ZZPLAY_RESOURCE_INPUT_FILE);
+  if (!runtime.preloaded) {
+    /* The streaming reader owns this buffer until its resource releases. */
+    runtime.reader = zzplay_reader_open(
+        run->path, (uint8_t *)runtime.input.data,
+        (uint32_t)runtime.input.length);
+    if (!runtime.reader) {
+      zzplay_error(&runtime, "zzplay: cannot open %s\n", run->path);
+      zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, ZZ9K_STATUS_IO_ERROR);
+      goto cleanup;
+    }
+    (void)zzplay_resource_acquire(
+        &runtime.core.resources, ZZPLAY_RESOURCE_INPUT_FILE);
+  }
   if (runtime.audio_enabled) {
     cleanup_status = zz9k_alloc_shared(
         runtime.ctx, pcm_bytes, 64U,

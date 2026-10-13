@@ -137,6 +137,24 @@ reports `BUSY` when another program owns it; automatic selection can fall back.
 The player stores settings in `ENV:ZZPlay.prefs` for the current boot and in
 `ENVARC:ZZPlay.prefs` after **Save**. Invalid preference lines are ignored.
 
+## Preload to card memory
+
+**Preload whole file** in the player's settings window (stored as `PRELOAD`
+in the prefs file) is off by default. When it is on, ZZPlay copies an MPEG or
+WebM file to card memory before playback and plays it from there, so the
+Amiga does no file reads during playback. The copy shows its progress and can
+be cancelled with **Stop** or Ctrl-C; playback starts only after it completes.
+
+Preloading needs Zorro III and firmware that advertises it. The file must fit
+the card's 64 MiB preload budget, which is separate from decoder memory.
+Otherwise ZZPlay prints one notice and streams the file as usual, including
+on Zorro II, on older firmware, and when card memory is short.
+
+Repeat Track and `LOOP=N` replay from the copy already on the card. Repeat
+All, Previous and a new start preload the file again. The copy is freed when
+the item ends. If ZZPlay crashes before it frees the copy, the card keeps it
+until the next Amiga reset.
+
 ## Player controls
 
 The player window has a playlist, transport controls, a position slider,

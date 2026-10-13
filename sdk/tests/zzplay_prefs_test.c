@@ -20,6 +20,7 @@ static int test_prefs_parse_and_format(void)
       "VOLUME=75\n"
       "REPEAT=ONE\n"
       "SHUFFLE=YES\n"
+      "PRELOAD=YES\n"
       "WINDOW=120,45\n"
       "DRAWER=DH0:Music/MP3\n";
 
@@ -30,7 +31,7 @@ static int test_prefs_parse_and_format(void)
 
   zzplay_prefs_defaults(&prefs);
   accepted = zzplay_prefs_parse(&prefs, prefs_text, strlen(prefs_text));
-  if (accepted != 9U) return 1;
+  if (accepted != 10U) return 1;
 
   if (prefs.mp3_output != ZZPLAY_AUDIO_MHI) return 2;
   if (prefs.video_audio != ZZPLAY_AUDIO_AX) return 3;
@@ -39,6 +40,7 @@ static int test_prefs_parse_and_format(void)
   if (prefs.volume != 75U) return 6;
   if (prefs.repeat != ZZPLAY_REPEAT_ONE) return 7;
   if (!prefs.shuffle) return 8;
+  if (!prefs.preload) return 81;
   if (prefs.window_left != 120 || prefs.window_top != 45) return 9;
   if (strcmp(prefs.last_drawer, "DH0:Music/MP3") != 0) return 10;
 
@@ -52,6 +54,7 @@ static int test_prefs_parse_and_format(void)
   if (strstr(out_buf, "VOLUME=75\n") == NULL) return 16;
   if (strstr(out_buf, "REPEAT=ONE\n") == NULL) return 17;
   if (strstr(out_buf, "SHUFFLE=YES\n") == NULL) return 18;
+  if (strstr(out_buf, "PRELOAD=YES\n") == NULL) return 82;
   if (strstr(out_buf, "WINDOW=120,45\n") == NULL) return 19;
   if (strstr(out_buf, "DRAWER=DH0:Music/MP3\n") == NULL) return 20;
 
@@ -59,13 +62,14 @@ static int test_prefs_parse_and_format(void)
   {
     ZZPlayPrefs roundtrip;
     zzplay_prefs_defaults(&roundtrip);
-    if (zzplay_prefs_parse(&roundtrip, out_buf, strlen(out_buf)) != 9U)
+    if (zzplay_prefs_parse(&roundtrip, out_buf, strlen(out_buf)) != 10U)
       return 21;
     if (roundtrip.mp3_output != ZZPLAY_AUDIO_MHI) return 22;
     if (roundtrip.video_audio != ZZPLAY_AUDIO_AX) return 23;
     if (roundtrip.ahi_unit != 2U) return 24;
     if (roundtrip.volume != 75U) return 25;
     if (roundtrip.repeat != ZZPLAY_REPEAT_ONE) return 26;
+    if (!roundtrip.preload) return 83;
   }
 
   return 0;
@@ -102,6 +106,11 @@ static int test_prefs_bad_values(void)
   if (prefs.volume != 100U) return 7;
   zzplay_prefs_parse(&prefs, "VOLUME=-5\n", 10U);
   if (prefs.volume != 100U) return 8;
+
+  zzplay_prefs_parse(&prefs, "PRELOAD=YES\n", 12U);
+  if (!prefs.preload) return 13;
+  zzplay_prefs_parse(&prefs, "PRELOAD=maybe\n", 14U);
+  if (!prefs.preload) return 14;
 
   /* Valid driver validation helper */
   if (zzplay_prefs_valid_driver("mhizz9000.library") != 1) return 9;

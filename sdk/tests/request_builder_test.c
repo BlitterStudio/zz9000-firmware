@@ -66,7 +66,9 @@ static int test_memory_builders_encode_handles_and_lengths(void)
   const ZZ9KMemCopyPayload *copy_payload;
 
   memset(&request, 0xff, sizeof(request));
-  if (zz9k_request_alloc_shared(&request, 4096U, 64U, 0x12U) !=
+  if (zz9k_request_alloc_shared(
+          &request, 4096U, 64U,
+          ZZ9K_ALLOC_CARD_ONLY | ZZ9K_ALLOC_MEDIA) !=
       ZZ9K_STATUS_OK) {
     return 1;
   }
@@ -76,7 +78,8 @@ static int test_memory_builders_encode_handles_and_lengths(void)
       (const ZZ9KAllocSharedPayload *)request.entry.payload.inline_data;
   if (zz9k_get_be32(alloc_payload->length) != 4096U) return 4;
   if (zz9k_get_be32(alloc_payload->alignment) != 64U) return 5;
-  if (zz9k_get_be32(alloc_payload->flags) != 0x12U) return 6;
+  if (zz9k_get_be32(alloc_payload->flags) !=
+      (ZZ9K_ALLOC_CARD_ONLY | ZZ9K_ALLOC_MEDIA)) return 6;
 
   memset(&request, 0xff, sizeof(request));
   if (zz9k_request_mem_fill(&request, 7U, 8U, 9U, 0xabU) !=

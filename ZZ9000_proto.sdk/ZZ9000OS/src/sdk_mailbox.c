@@ -36,6 +36,7 @@
 #include "sdk_aperture_layout.h"
 #include "sdk_smp_lock.h"
 #include "memorymap.h"
+#include "card_pool.h"
 #include "mmu_page.h"
 #include "scheduler.h"
 #include "core2.h"
@@ -717,6 +718,7 @@ struct SDKSharedBuffer {
 	uint32_t length;
 	uint32_t flags;
 	uint32_t pin_count;
+	uint32_t pool_owner;
 	uint8_t in_use;
 };
 
@@ -1271,6 +1273,9 @@ static uint32_t mailbox_capability_bits(void)
 {
 	uint32_t capabilities = SDK_MAILBOX_BASE_CAPABILITY_BITS;
 
+	if (sdk_aperture_runtime_is_zorro3())
+		capabilities |= SDK_CAP_MEDIA_INPUT;
+
 	if (aperture_contract_present())
 		capabilities |= SDK_CAP_APERTURE_LAYOUT;
 	if (effective_host_window_size() != 0U)
@@ -1464,6 +1469,9 @@ static uint32_t service_flags(const struct SDKServiceDescriptor *service)
 		flags |= sdk_jpeg_service_flags();
 		flags |= SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA;
 	}
+	if (service->service_id == SDK_SERVICE_MEMORY &&
+	    sdk_aperture_runtime_is_zorro3())
+		flags |= SDK_SERVICE_FLAG_MEMORY_MEDIA_INPUT;
 	if (service->service_id == SDK_SERVICE_VIDEO &&
 	    audio_codec_present())
 		flags |= SDK_SERVICE_FLAG_VIDEO_AUDIO_BIND;
@@ -1925,6 +1933,8 @@ static int shared_buffer_live(const struct SDKSharedBuffer *buffer)
 		return 0;
 	if (buffer->handle == 0 || buffer->handle == SDK_INVALID_HANDLE)
 		return 0;
+	if ((buffer->flags & SDK_ALLOC_MEDIA) != 0U)
+		return buffer->pool_owner != 0U && buffer->length != 0U;
 	if ((buffer->flags & SDK_ALLOC_HOST_WINDOW) != 0U)
 		return host_window_range_valid(buffer->address, buffer->length);
 	return heap_range_valid(buffer->address, buffer->length);
@@ -2405,6 +2415,8 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	uint32_t alignment;
 	uint32_t flags;
 	uint32_t address;
+	uint32_t owner = 0U;
+	int media;
 
 	if (payload_len < 12U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -2413,18 +2425,28 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	length = get_be32(payload->length);
 	alignment = get_be32(payload->alignment);
 	flags = get_be32(payload->flags);
-	if (alignment == 0)
+	media = (flags & SDK_ALLOC_MEDIA) != 0U;
+	if (alignment == 0U)
 		alignment = 16U;
-	if (length == 0 || !is_power_of_two(alignment))
+	if (length == 0U || !is_power_of_two(alignment) ||
+	    (flags & ~(SDK_ALLOC_HOST_WINDOW | SDK_ALLOC_CARD_ONLY |
+	               SDK_ALLOC_MEDIA)) != 0U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
+	if (media) {
+		if (!sdk_aperture_runtime_is_zorro3())
+			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+		if ((flags & SDK_ALLOC_CARD_ONLY) == 0U ||
+		    (flags & SDK_ALLOC_HOST_WINDOW) != 0U ||
+		    length > CARD_POOL_LIMIT_MEDIA_INPUT ||
+		    alignment > CARD_POOL_PAGE_BYTES)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	} else if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
 		uint32_t host_window_size = effective_host_window_size();
 
 		if (host_window_size == 0U)
 			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 		if (length > host_window_size)
-			return complete_status(req, comp,
-			                       SDK_STATUS_BAD_REQUEST);
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	} else if (length > SDK_SHARED_HEAP_SIZE) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
@@ -2434,18 +2456,24 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	if (!slot)
 		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
 	memset(slot, 0, sizeof(*slot));
-
-	if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U)
-		address = find_free_host_window_region(length, alignment);
-	else
-		address = find_free_region(length, alignment);
-	if (address == 0)
-		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
-
 	slot->handle = next_handle();
+	if (media) {
+		owner = CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, slot->handle);
+		address = card_pool_alloc(&card_pool, length, owner);
+	} else if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
+		address = find_free_host_window_region(length, alignment);
+	} else {
+		address = find_free_region(length, alignment);
+	}
+	if (address == 0U) {
+		memset(slot, 0, sizeof(*slot));
+		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
+	}
+
 	slot->address = address;
 	slot->length = length;
 	slot->flags = flags;
+	slot->pool_owner = owner;
 	slot->in_use = 1;
 
 	write_completion(comp, req, SDK_STATUS_OK, sizeof(*info));
@@ -2476,6 +2504,9 @@ static uint16_t handle_free_shared(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	if (buffer->pin_count != 0U)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
+	if (buffer->pool_owner != 0U)
+		(void)card_pool_free(&card_pool, buffer->address,
+		                     buffer->pool_owner);
 
 	memset(buffer, 0, sizeof(*buffer));
 	return complete_status(req, comp, SDK_STATUS_OK);
@@ -8242,9 +8273,11 @@ static uint16_t handle_query_service(volatile struct SDKMailboxEntry *req,
 	if (service->service_id == SDK_SERVICE_CORE)
 		capabilities |= mailbox_capability_bits() &
 			SDK_CAP_APERTURE_LAYOUT;
-	if (service->service_id == SDK_SERVICE_MEMORY)
+	if (service->service_id == SDK_SERVICE_MEMORY) {
+		capabilities &= ~(SDK_CAP_HOST_WINDOW_HEAP | SDK_CAP_MEDIA_INPUT);
 		capabilities |= mailbox_capability_bits() &
-			SDK_CAP_HOST_WINDOW_HEAP;
+			(SDK_CAP_HOST_WINDOW_HEAP | SDK_CAP_MEDIA_INPUT);
+	}
 	sdk_service_write_info(info, service, capabilities, service_flags(service),
 			       sizeof(req->payload));
 	return SDK_STATUS_OK;

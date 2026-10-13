@@ -42,6 +42,7 @@ void zzplay_prefs_defaults(ZZPlayPrefs *prefs)
   prefs->volume = 100U;
   prefs->repeat = ZZPLAY_REPEAT_OFF;
   prefs->shuffle = 0;
+  prefs->preload = 0U;
   prefs->window_left = -1;
   prefs->window_top = -1;
   prefs->last_drawer[0] = '\0';
@@ -196,6 +197,14 @@ uint32_t zzplay_prefs_parse(ZZPlayPrefs *prefs, const char *text,
         prefs->video_audio = ZZPLAY_AUDIO_NONE;
         accepted++;
       }
+    } else if (zzplay_prefs_case_eq(key, "PRELOAD")) {
+      if (zzplay_prefs_case_eq(val, "YES")) {
+        prefs->preload = 1U;
+        accepted++;
+      } else if (zzplay_prefs_case_eq(val, "NO")) {
+        prefs->preload = 0U;
+        accepted++;
+      }
     } else if (zzplay_prefs_case_eq(key, "AHIUNIT")) {
       int u;
       if (zzplay_parse_int(val, &u) && u >= 0 && u <= 3) {
@@ -312,6 +321,7 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
       "VOLUME=%u\n"
       "REPEAT=%s\n"
       "SHUFFLE=%s\n"
+      "PRELOAD=%s\n"
       "WINDOW=%d,%d\n"
       "DRAWER=%s\n",
       zzplay_prefs_backend_name(prefs->mp3_output),
@@ -321,6 +331,7 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
       prefs->volume,
       zzplay_prefs_repeat_name(prefs->repeat),
       prefs->shuffle ? "YES" : "NO",
+      prefs->preload ? "YES" : "NO",
       (int)prefs->window_left, (int)prefs->window_top,
       prefs->last_drawer);
 

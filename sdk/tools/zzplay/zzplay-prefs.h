@@ -14,6 +14,7 @@
  *   VOLUME=100            0..100
  *   REPEAT=OFF            OFF | ONE | ALL
  *   SHUFFLE=NO            YES | NO
+ *   PRELOAD=NO            YES | NO
  *   WINDOW=-1,-1          player window left,top; -1,-1 = default
  *   DRAWER=Work:Music     last drawer used in a file requester
  *
@@ -49,6 +50,7 @@ typedef struct ZZPlayPrefs {
   ZZPlayAudioBackend video_audio;  /* AUTO, AHI, AX or NONE */
   uint32_t ahi_unit;               /* 0..3 */
   char mhi_driver[ZZPLAY_PREFS_DRIVER_MAX];
+  uint8_t preload;                /* preload full media file to card DDR */
   /* Session state, remembered automatically by the player window. */
   uint32_t volume;                 /* 0..100 */
   ZZPlayRepeat repeat;
