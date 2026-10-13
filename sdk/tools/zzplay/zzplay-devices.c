@@ -9,7 +9,6 @@
 #include <proto/dos.h>
 #include <proto/exec.h>
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 

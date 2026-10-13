@@ -11,7 +11,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
+#include "zzplay-sys.h"
 
 /* Longest side and pixel count the card will accept, either orientation.
  * Realtime is a smaller budget: above it audio stays continuous and video
@@ -75,7 +75,7 @@ typedef struct ZZPlayWebMInfo {
  * `data` is a prefix of a longer file rather than the whole file. */
 int zzplay_probe_webm(const uint8_t *data, size_t length, int capped,
                       ZZPlayWebMInfo *info);
-int zzplay_probe_webm_file(FILE *file, ZZPlayWebMInfo *info);
+int zzplay_probe_webm_file(ZZPlayFile *file, ZZPlayWebMInfo *info);
 void zzplay_webm_presentation_size(const ZZPlayWebMInfo *info,
                                    uint32_t *width, uint32_t *height);
 

@@ -18,7 +18,7 @@
 #include "zzplay-mp3-transport.h"
 
 #include <stdint.h>
-#include <stdio.h>
+#include "zzplay-sys.h"
 
 /* Everything the backends need about the item being played: MP3 (MHI or
  * AHI), FLAC and Ogg Vorbis (on-card or AHI). */
@@ -61,7 +61,7 @@ typedef struct ZZPlayCodecEngine {
  * on-card pass (zzplay-codec-stream.c) whose PCM the card pump plays. */
 typedef struct ZZPlayCodecDecode {
   ZZ9KContext *ctx;
-  FILE *file;
+  ZZPlayFile *file;
   ZZ9KSharedBuffer compressed;
   ZZ9KSharedBuffer pcm;
   ZZ9KSharedBuffer staging;

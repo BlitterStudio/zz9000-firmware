@@ -355,9 +355,9 @@ static ZZPlayCodecPassResult zzplay_card_play_once(ZZPlayCodecDecode *decode,
     zzplay_codec_pump(decode->engine);
 
     if (!decode->eof_sent) {
-      got = fread(zzplay_codec_chunk, 1U, decode->staging.length,
-                  decode->file);
-      if (got == 0U && ferror(decode->file)) {
+      got = zzplay_file_read(decode->file, zzplay_codec_chunk,
+                             decode->staging.length);
+      if (got == 0U && zzplay_file_error(decode->file)) {
         return ZZPLAY_CODEC_PASS_FAILED;
       }
       flags = got == 0U ? ZZ9K_AUDIO_STREAM_FEED_EOF : 0U;
@@ -466,7 +466,7 @@ static ZZPlayCardAttempt zzplay_card_ax_run(ZZPlayCodecEngine *engine)
     decode.gain_supported = (uint8_t)(gain ? 1U : 0U);
     decode.compact_z2 =
         (caps.capability_bits & ZZ9K_CAP_APERTURE_LAYOUT) != 0U;
-    decode.file = fopen(run->path, "rb");
+    decode.file = zzplay_file_open(run->path, 0);
     if (!decode.file) {
       zzplay_launch_reportf(engine->ctl, run->options, "cannot reopen %s",
                             run->path);
@@ -475,7 +475,8 @@ static ZZPlayCardAttempt zzplay_card_ax_run(ZZPlayCodecEngine *engine)
       zzplay_codec_decode_cleanup(&decode);
       goto done;
     }
-    if (fseek(decode.file, (long)engine->audio_start, SEEK_SET) != 0) {
+    if (!zzplay_file_seek(decode.file, (long)engine->audio_start,
+                          ZZPLAY_FILE_BEGIN)) {
       zzplay_launch_reportf(engine->ctl, run->options, "cannot seek in %s",
                             run->path);
       attempt.reported = 1;
@@ -684,7 +685,7 @@ ZZPlayEngineResult zzplay_vorbis_run(const ZZPlayEngineRun *run)
   const ZZPlayVorbisInfo *info;
   char format[ZZPLAY_NOW_TEXT_MAX];
   uint64_t granule = 0U;
-  FILE *file;
+  ZZPlayFile *file;
 
   if (!zzplay_card_stream_engine(run, &engine)) {
     return ZZPLAY_ENGINE_FAILED;
@@ -699,13 +700,13 @@ ZZPlayEngineResult zzplay_vorbis_run(const ZZPlayEngineRun *run)
   /* The duration is the last page's granule position (the stream's sample
    * count) when that page belongs to the same logical stream; otherwise it
    * stays unknown rather than estimated. */
-  file = fopen(run->path, "rb");
+  file = zzplay_file_open(run->path, 0);
   if (file) {
     if (zzplay_ogg_last_granule(file, info->serial, &granule) &&
         info->sample_rate != 0U) {
       engine.total_ms = (uint32_t)(granule * 1000ULL / info->sample_rate);
     }
-    fclose(file);
+    zzplay_file_close(file);
   }
   if (info->nominal_bitrate != 0U) {
     sprintf(format, "Ogg Vorbis %lu Hz, %s, ~%lu kbps",

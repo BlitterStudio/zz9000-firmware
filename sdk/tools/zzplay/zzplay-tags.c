@@ -3,8 +3,8 @@
 
 #include "zzplay-tags.h"
 
+#include "zzplay-sys.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 static uint32_t zzplay_syncsafe32(const uint8_t *b)
@@ -334,7 +334,7 @@ int zzplay_tags_parse_id3v1(const uint8_t *trailer, size_t length,
   return 1;
 }
 
-int zzplay_tags_read(FILE *file, ZZPlayTags *tags)
+int zzplay_tags_read(ZZPlayFile *file, ZZPlayTags *tags)
 {
   long orig_pos;
   long file_len;
@@ -346,21 +346,21 @@ int zzplay_tags_read(FILE *file, ZZPlayTags *tags)
   }
   memset(tags, 0, sizeof(*tags));
 
-  orig_pos = ftell(file);
+  orig_pos = zzplay_file_tell(file);
   if (orig_pos < 0) {
     return 0;
   }
-  if (fseek(file, 0, SEEK_END) != 0) {
+  if (!zzplay_file_seek(file, 0L, ZZPLAY_FILE_END)) {
     return 0;
   }
-  file_len = ftell(file);
+  file_len = zzplay_file_tell(file);
   if (file_len < 0) {
-    fseek(file, orig_pos, SEEK_SET);
+    zzplay_file_seek(file, orig_pos, ZZPLAY_FILE_BEGIN);
     return 0;
   }
 
-  if (fseek(file, 0, SEEK_SET) == 0 && file_len >= 10) {
-    if (fread(header, 1U, 10U, file) == 10U) {
+  if (zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN) && file_len >= 10) {
+    if (zzplay_file_read(file, header, 10U) == 10U) {
       v2_size = zzplay_tags_id3v2_size(header, 10U);
       if (v2_size > 0U) {
         size_t read_bytes = (v2_size > 65536U) ? 65536U : (size_t)v2_size;
@@ -368,13 +368,13 @@ int zzplay_tags_read(FILE *file, ZZPlayTags *tags)
         if (read_bytes > (size_t)file_len) {
           read_bytes = (size_t)file_len;
         }
-        v2_buf = (uint8_t *)malloc(read_bytes);
+        v2_buf = (uint8_t *)zzplay_alloc(read_bytes);
         if (v2_buf) {
-          fseek(file, 0, SEEK_SET);
-          if (fread(v2_buf, 1U, read_bytes, file) == read_bytes) {
+          zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN);
+          if (zzplay_file_read(file, v2_buf, read_bytes) == read_bytes) {
             zzplay_tags_parse_id3v2(v2_buf, read_bytes, tags);
           }
-          free(v2_buf);
+          zzplay_free(v2_buf);
         }
         tags->audio_start = v2_size;
       }
@@ -383,8 +383,8 @@ int zzplay_tags_read(FILE *file, ZZPlayTags *tags)
 
   if (file_len >= 128) {
     uint8_t v1_buf[128];
-    if (fseek(file, file_len - 128, SEEK_SET) == 0) {
-      if (fread(v1_buf, 1U, 128U, file) == 128U) {
+    if (zzplay_file_seek(file, file_len - 128L, ZZPLAY_FILE_BEGIN)) {
+      if (zzplay_file_read(file, v1_buf, 128U) == 128U) {
         if (zzplay_tags_parse_id3v1(v1_buf, 128U, tags)) {
           tags->trailer_bytes = 128U;
         }
@@ -392,7 +392,7 @@ int zzplay_tags_read(FILE *file, ZZPlayTags *tags)
     }
   }
 
-  fseek(file, orig_pos, SEEK_SET);
+  zzplay_file_seek(file, orig_pos, ZZPLAY_FILE_BEGIN);
 
   return (tags->title[0] != '\0' || tags->artist[0] != '\0' ||
           tags->album[0] != '\0')

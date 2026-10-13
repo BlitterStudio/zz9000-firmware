@@ -16,6 +16,7 @@
 #include "zzplay-audio.h"
 #include "zzplay-ax.h"
 #include "zzplay-codec-stream.h"
+#include "zzplay-sys.h"
 #include "zzplay-controls.h"
 #include "zzplay-core.h"
 #include "zzplay-engine.h"
@@ -164,7 +165,7 @@ struct ZZPlayRuntime {
   ZZPlayOptions options;
   ZZPlayPrefs prefs;
   ZZPlayController *ctl;
-  FILE *file;
+  ZZPlayFile *file;
   /* Streaming players read through a read-ahead process; WebP still reads
    * `file` directly. */
   ZZPlayReader *reader;
@@ -354,30 +355,25 @@ static void zzplay_usage(FILE *stream)
 {
   fprintf(stream,
           "%s\n"
-          "Usage: zzplay [--fps|--benchmark] [--loop[=count]] "
-          "[--fullscreen]\n"
+          "Usage: zzplay [--fps|--benchmark] [--loop[=count]] [--fullscreen]\n"
           "          [--audio=auto|ahi|mhi|ax|none] [--player[=no]]\n"
-          "          [--ahiunit=0..3] [--mhidriver=name] "
-          "[--volume=0..100]\n"
+          "          [--ahiunit=0..3] [--mhidriver=name] [--volume=0..100]\n"
           "          <file|drawer|pattern|playlist>...\n"
           "  --fps         rolling paced-playback and decode-call FPS\n"
           "  --benchmark   disable pacing and audio unless requested\n"
           "  --loop        repeat forever; --loop=N repeats N times\n"
           "  --fullscreen  start filling the screen, aspect preserved\n"
           "  --player      stay open as a desktop player (the default\n"
-          "                without files, and from Workbench); "
-          "--player=no\n"
+          "                without files, and from Workbench); --player=no\n"
           "                plays the named files once and exits\n"
           "  --ahiunit=N   ahi.device unit for AHI output (0..3)\n"
-          "  --mhidriver=N MHI driver file in LIBS:MHI/ "
-          "(default mhizz9000.library)\n"
+          "  --mhidriver=N MHI driver file in LIBS:MHI/ (default mhizz9000.library)\n"
           "  --volume=N    starting volume, 0..100\n"
           "  --quiet       no progress output (the default from Workbench)\n"
           "  --verbose     force progress output even from Workbench\n"
           "  --audio=...   audio output (MP3 AUTO: MHI then AHI;\n"
           "                FLAC/Ogg AUTO: card then AHI)\n"
-          "  --trace[=p]   log per-frame timing diagnostics "
-          "(default T:zzplay.trace)\n"
+          "  --trace[=p]   log per-frame timing diagnostics (default T:zzplay.trace)\n"
           "\n"
           "Several files, drawers, patterns or playlists (#?.m3u) may be\n"
           "named; each is expanded into the playlist.\n"
@@ -2782,7 +2778,7 @@ static int zzplay_release_resource(void *user,
       zzplay_reader_close(runtime->reader);
       runtime->reader = 0;
       if (runtime->file) {
-        (void)fclose(runtime->file);
+        (void)zzplay_file_close(runtime->file);
         runtime->file = 0;
       }
       break;
@@ -4408,17 +4404,17 @@ static ZZPlayEngineResult zzplay_engine_webp(const ZZPlayEngineRun *run)
   height = run->probe->webp.height;
   pitch = ((width + 1U) / 2U) * 4U;
 
-  runtime.file = fopen(run->path, "rb");
+  runtime.file = zzplay_file_open(run->path, 0);
   if (!runtime.file) {
     zzplay_error(&runtime, "zzplay: cannot open %s\n", run->path);
     return ZZPLAY_ENGINE_FAILED;
   }
-  if (fseek(runtime.file, 0L, SEEK_END) == 0) {
-    long len = ftell(runtime.file);
+  if (zzplay_file_seek(runtime.file, 0L, ZZPLAY_FILE_END)) {
+    long len = zzplay_file_tell(runtime.file);
     if (len > 0) {
       file_length = (uint64_t)len;
     }
-    (void)fseek(runtime.file, 0L, SEEK_SET);
+    (void)zzplay_file_seek(runtime.file, 0L, ZZPLAY_FILE_BEGIN);
   }
 
   if (zz9k_find_board(&board) != ZZ9K_STATUS_OK ||
@@ -4527,8 +4523,8 @@ static ZZPlayEngineResult zzplay_engine_webp(const ZZPlayEngineRun *run)
     if (chunk > staging.length) {
       chunk = (size_t)staging.length;
     }
-    bytes_read = fread((void *)staging.data, 1U, chunk, runtime.file);
-    if (bytes_read == 0U && ferror(runtime.file)) {
+    bytes_read = zzplay_file_read(runtime.file, (void *)staging.data, chunk);
+    if (bytes_read == 0U && zzplay_file_error(runtime.file)) {
       zzplay_error(&runtime, "zzplay: error reading WebP file\n");
       goto cleanup;
     }
@@ -4703,7 +4699,7 @@ cleanup:
     zzplay_timer_close(&runtime.timer);
   }
   if (runtime.file) {
-    fclose(runtime.file);
+    zzplay_file_close(runtime.file);
     runtime.file = NULL;
   }
   if (sdk_open && runtime.ctx) {
@@ -4761,7 +4757,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   const ZZPlayFormat *format;
   ZZPlayTags tags;
   ZZPlayRequest request;
-  FILE *file;
+  ZZPlayFile *file;
   uint64_t file_size = 0U;
   int32_t jump_index;
   uint32_t seek_ms;
@@ -4782,20 +4778,20 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
    * the same open file. */
   memset(&tags, 0, sizeof(tags));
   memset(&probe, 0, sizeof(probe));
-  file = fopen(app->item_path, "rb");
+  file = zzplay_file_open(app->item_path, 0);
   if (file) {
     long length = 0L;
 
     (void)zzplay_tags_read(file, &tags);
-    if (fseek(file, 0L, SEEK_END) == 0) {
-      length = ftell(file);
-      (void)fseek(file, 0L, SEEK_SET);
+    if (zzplay_file_seek(file, 0L, ZZPLAY_FILE_END)) {
+      length = zzplay_file_tell(file);
+      (void)zzplay_file_seek(file, 0L, ZZPLAY_FILE_BEGIN);
     }
     if (length > 0L) {
       file_size = (uint64_t)length;
     }
     probed = zzplay_probe_media_file(file, &probe);
-    fclose(file);
+    zzplay_file_close(file);
   }
   {
     char display[2 * ZZPLAY_TAG_TEXT_MAX + 8];
