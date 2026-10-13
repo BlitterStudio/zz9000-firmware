@@ -3294,12 +3294,19 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     policy->video_codec = zzplay_webm_video_codec_id(webm->video);
     policy->container = ZZ9K_VIDEO_CONTAINER_WEBM;
     policy->audio_codec = zzplay_webm_audio_codec_id(webm->audio);
-    policy->video_flags = mpeg_matroska ? ZZ9K_SERVICE_FLAG_VIDEO_MPEG2 : (webm->video == ZZPLAY_WEBM_VIDEO_VP9 ? ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9 : ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8);
-    policy->audio_flags = mpeg_matroska ? (webm->audio == ZZPLAY_WEBM_AUDIO_MPEG ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2 : 0U) : (webm->audio == ZZPLAY_WEBM_AUDIO_OPUS ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS : webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS : 0U);
+    if (mpeg_matroska) {
+      zzplay_matroska_mpeg_flags(webm->video, webm->audio,
+                                 &policy->video_flags, &policy->audio_flags);
+    } else {
+      policy->video_flags = webm->video == ZZPLAY_WEBM_VIDEO_VP9 ? ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9 : ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8;
+      policy->audio_flags = webm->audio == ZZPLAY_WEBM_AUDIO_OPUS ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS : webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS : 0U;
+    }
     policy->video_name = zzplay_webm_video_name(webm->video);
     policy->audio_name = zzplay_webm_audio_name(webm->audio);
     policy->service_missing = mpeg_matroska ? "zzplay: Matroska MPEG playback is not supported by this firmware\n" : "zzplay: WebM playback is not supported by this firmware\n";
-    policy->begin_refused = mpeg_matroska ? "zzplay: Matroska MPEG playback was refused by the firmware\n" : "zzplay: WebM playback was refused by the firmware\n";
+    /* Firmware from before Matroska MPEG has no backend for it and refuses
+     * the session at begin. */
+    policy->begin_refused = mpeg_matroska ? "zzplay: the firmware refused this Matroska MPEG stream (it needs newer firmware, or the video size is unsupported)\n" : "zzplay: WebM playback was refused by the firmware\n";
     policy->stream_refused = mpeg_matroska ? "zzplay: this Matroska MPEG stream is not supported\n" : "zzplay: this WebM stream is not supported\n";
     /* MPEG in Matroska follows the Program Stream policy: skip late B
      * pictures, and recover a sustained lag at the next I picture. */

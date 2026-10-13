@@ -934,8 +934,21 @@ uint32_t zzplay_webm_video_codec_id(ZZPlayWebMVideo v) { if(v==ZZPLAY_WEBM_VIDEO
 uint32_t zzplay_webm_audio_codec_id(ZZPlayWebMAudio a) { if(a==ZZPLAY_WEBM_AUDIO_MPEG)return ZZ9K_MEDIA_AUDIO_MP2; if(a==ZZPLAY_WEBM_AUDIO_AC3)return ZZ9K_MEDIA_AUDIO_AC3; if(a==ZZPLAY_WEBM_AUDIO_LPCM)return ZZ9K_MEDIA_AUDIO_LPCM; if(a==ZZPLAY_WEBM_AUDIO_OPUS)return ZZ9K_MEDIA_AUDIO_OPUS; if(a==ZZPLAY_WEBM_AUDIO_VORBIS)return ZZ9K_MEDIA_AUDIO_VORBIS; return ZZ9K_MEDIA_AUDIO_NONE; }
 const char *zzplay_webm_video_name(ZZPlayWebMVideo v) { if(v==ZZPLAY_WEBM_VIDEO_MPEG1)return "MPEG-1"; if(v==ZZPLAY_WEBM_VIDEO_MPEG2)return "MPEG-2"; if(v==ZZPLAY_WEBM_VIDEO_VP8)return "VP8"; if(v==ZZPLAY_WEBM_VIDEO_VP9)return "VP9"; return "video"; }
 const char *zzplay_webm_audio_name(ZZPlayWebMAudio a) { if(a==ZZPLAY_WEBM_AUDIO_MPEG)return "MPEG audio"; if(a==ZZPLAY_WEBM_AUDIO_AC3)return "AC-3"; if(a==ZZPLAY_WEBM_AUDIO_LPCM)return "LPCM"; if(a==ZZPLAY_WEBM_AUDIO_OPUS)return "Opus"; if(a==ZZPLAY_WEBM_AUDIO_VORBIS)return "Vorbis"; return "audio"; }
-uint32_t zzplay_matroska_required_flags(ZZPlayWebMVideo v, ZZPlayWebMAudio a) { uint32_t f=ZZ9K_SERVICE_FLAG_VIDEO_DIRECT_OVERLAY|ZZ9K_SERVICE_FLAG_VIDEO_STREAMING_INPUT|ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_SESSION|ZZ9K_SERVICE_FLAG_VIDEO_MPEG2; if(v!=ZZPLAY_WEBM_VIDEO_MPEG1&&v!=ZZPLAY_WEBM_VIDEO_MPEG2)return 0U; if(a==ZZPLAY_WEBM_AUDIO_MPEG)f|=ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2; return f; }
-int zzplay_matroska_service_ready(uint32_t f, ZZPlayWebMVideo v, ZZPlayWebMAudio a) { uint32_t n=zzplay_matroska_required_flags(v,a); return n&&(f&n)==n; }
+void zzplay_matroska_mpeg_flags(ZZPlayWebMVideo video, ZZPlayWebMAudio audio,
+                                uint32_t *video_flags, uint32_t *audio_flags)
+{
+  *video_flags = video == ZZPLAY_WEBM_VIDEO_MPEG1
+                     ? ZZ9K_SERVICE_FLAG_VIDEO_MPEG1
+                     : ZZ9K_SERVICE_FLAG_VIDEO_MPEG2;
+  if (audio == ZZPLAY_WEBM_AUDIO_MPEG) {
+    *audio_flags = ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2;
+  } else if (audio == ZZPLAY_WEBM_AUDIO_AC3 ||
+             audio == ZZPLAY_WEBM_AUDIO_LPCM) {
+    *audio_flags = ZZ9K_SERVICE_FLAG_VIDEO_MPEG2;
+  } else {
+    *audio_flags = 0U;
+  }
+}
 const char *zzplay_webm_doc_type_name(ZZPlayWebMDocType d) { return d==ZZPLAY_WEBM_DOCTYPE_MATROSKA ? "Matroska" : "WebM"; }
 
 int zzplay_probe_webm(const uint8_t *data, size_t length, int capped,

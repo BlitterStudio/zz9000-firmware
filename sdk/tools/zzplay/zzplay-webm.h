@@ -111,10 +111,13 @@ uint32_t zzplay_webm_required_flags(ZZPlayWebMVideo video,
                                    ZZPlayWebMAudio audio);
 int zzplay_webm_service_ready(uint32_t flags, ZZPlayWebMVideo video,
                               ZZPlayWebMAudio audio);
-uint32_t zzplay_matroska_required_flags(ZZPlayWebMVideo video,
-                                        ZZPlayWebMAudio audio);
-int zzplay_matroska_service_ready(uint32_t flags, ZZPlayWebMVideo video,
-                                  ZZPlayWebMAudio audio);
+/* Service flags for MPEG in Matroska, as for a Program Stream: MPEG-1
+ * video needs the MPEG-1 flag and MPEG-2 video the MPEG-2 flag. Decoded
+ * MPEG audio needs MEDIA_MP2. AC-3 and PCM are advertised with the
+ * MPEG-2 flag, so they need it with MPEG-1 video too. Callers add
+ * *audio_flags only when the audio will be decoded. */
+void zzplay_matroska_mpeg_flags(ZZPlayWebMVideo video, ZZPlayWebMAudio audio,
+                                uint32_t *video_flags, uint32_t *audio_flags);
 
 uint32_t zzplay_webm_video_codec_id(ZZPlayWebMVideo video);
 uint32_t zzplay_webm_audio_codec_id(ZZPlayWebMAudio audio);

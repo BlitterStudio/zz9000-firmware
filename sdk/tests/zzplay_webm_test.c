@@ -373,6 +373,36 @@ static int check_flags_and_backend(void)
   if (zzplay_prefs_requested_backend(&prefs, &options, ZZPLAY_MEDIA_AUDIO_OPUS, &strict) != ZZPLAY_AUDIO_AHI || strict != 0) return 0;
   return 1;
 }
+/* Release firmware advertises MPEG-1 and MP2 but not MPEG-2, which also
+ * carries the AC-3 and PCM audio. MPEG-1 in Matroska must not need it
+ * unless that audio is decoded. */
+static int check_matroska_mpeg_flags(void)
+{
+  const uint32_t release = ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 |
+                           ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2;
+  uint32_t video, audio;
+
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG1, ZZPLAY_WEBM_AUDIO_NONE,
+                             &video, &audio);
+  if ((release & video) != video || audio != 0U) return 0;
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG1, ZZPLAY_WEBM_AUDIO_MPEG,
+                             &video, &audio);
+  if ((release & (video | audio)) != (video | audio)) return 0;
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG1, ZZPLAY_WEBM_AUDIO_AC3,
+                             &video, &audio);
+  if ((release & video) != video ||
+      audio != ZZ9K_SERVICE_FLAG_VIDEO_MPEG2) return 0;
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG1, ZZPLAY_WEBM_AUDIO_LPCM,
+                             &video, &audio);
+  if (audio != ZZ9K_SERVICE_FLAG_VIDEO_MPEG2) return 0;
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG2, ZZPLAY_WEBM_AUDIO_NONE,
+                             &video, &audio);
+  if (video != ZZ9K_SERVICE_FLAG_VIDEO_MPEG2 || audio != 0U) return 0;
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG2, ZZPLAY_WEBM_AUDIO_MPEG,
+                             &video, &audio);
+  return video == ZZ9K_SERVICE_FLAG_VIDEO_MPEG2 &&
+         audio == ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2;
+}
 int main(void)
 {
   if (!check_vp8_opus()) fail("vp8+opus");
@@ -383,6 +413,7 @@ int main(void)
   if (!check_matroska()) fail("matroska");
   if (!check_matroska_disabled_video()) fail("matroska disabled video");
   if (!check_flags_and_backend()) fail("flags");
+  if (!check_matroska_mpeg_flags()) fail("matroska mpeg flags");
   if (failures) { printf("zzplay_webm_test: %d failure(s)\n", failures); return 1; }
   printf("zzplay_webm_test: all checks passed\n");
   return 0;
