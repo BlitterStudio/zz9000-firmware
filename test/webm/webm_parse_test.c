@@ -338,10 +338,17 @@ static int test_disabled_track_fields(void)
 	return failed;
 }
 
+enum {
+	MKV_DISABLED = 1,   /* FlagEnabled 0 */
+	MKV_PRIV_FIRST = 2, /* CodecPrivate before the other children */
+	MKV_FLAG_LAST = 4,  /* FlagEnabled after CodecPrivate */
+	MKV_BIG_BLOCK = 8   /* block larger than WEBM_MAX_FRAME */
+};
+
 struct mkv_track_spec {
 	uint8_t number, type;
 	const char *codec;
-	uint8_t disabled;
+	uint8_t flags;
 	uint32_t priv;
 	uint8_t stored;
 	uint8_t priv_dropped; /* stored without its CodecPrivate */
@@ -352,13 +359,24 @@ static uint8_t mkv_priv_byte(uint8_t number, uint32_t i)
 	return (uint8_t)(i * 7U + number);
 }
 
+static void mkv_add_priv(struct buf *t, const struct mkv_track_spec *s)
+{
+	static uint8_t priv[70000];
+	uint32_t j;
+
+	if (!s->priv)
+		return;
+	for (j = 0U; j < s->priv; j++)
+		priv[j] = mkv_priv_byte(s->number, j);
+	belem(t, 0x63A2, priv, s->priv);
+}
+
 /* A file of the given DocType with one TrackEntry and one block per spec
  * row. */
 static struct buf make_mkv_tracks(const char *doctype,
 				  const struct mkv_track_spec *spec,
 				  unsigned count)
 {
-	static uint8_t priv[70000];
 	struct buf seg = {0}, info = {0}, tracks = {0}, cluster = {0};
 	struct buf ebml = {0}, file = {0};
 	uint8_t scale[] = {0x0f, 0x42, 0x40};
@@ -367,19 +385,19 @@ static struct buf make_mkv_tracks(const char *doctype,
 
 	for (i = 0U; i < count; i++) {
 		struct buf t = {0}, video = {0};
+		uint8_t flags = spec[i].flags;
 
+		if (flags & MKV_PRIV_FIRST)
+			mkv_add_priv(&t, &spec[i]);
 		bu8(&t, 0xD7, spec[i].number);
 		bu8(&t, 0x83, spec[i].type);
 		belem(&t, 0x86, spec[i].codec, (uint32_t)strlen(spec[i].codec));
-		if (spec[i].disabled)
+		if ((flags & MKV_DISABLED) && !(flags & MKV_FLAG_LAST))
 			bu8(&t, 0xB9, 0);
-		if (spec[i].priv) {
-			uint32_t j;
-
-			for (j = 0U; j < spec[i].priv; j++)
-				priv[j] = mkv_priv_byte(spec[i].number, j);
-			belem(&t, 0x63A2, priv, spec[i].priv);
-		}
+		if (!(flags & MKV_PRIV_FIRST))
+			mkv_add_priv(&t, &spec[i]);
+		if ((flags & MKV_DISABLED) && (flags & MKV_FLAG_LAST))
+			bu8(&t, 0xB9, 0);
 		if (spec[i].type == 1U) {
 			bu16(&video, 0xB0, 32);
 			bu16(&video, 0xBA, 16);
@@ -391,9 +409,18 @@ static struct buf make_mkv_tracks(const char *doctype,
 	bnest(&seg, 0x1549A966, &info);
 	bnest(&seg, 0x1654AE6B, &tracks);
 	bu8(&cluster, 0xE7, 0);
-	for (i = 0U; i < count; i++)
-		add_block(&cluster, 0xA3, spec[i].number, 0, 0x80, payload,
-			  sizeof(payload));
+	for (i = 0U; i < count; i++) {
+		if (spec[i].flags & MKV_BIG_BLOCK) {
+			uint8_t *big = calloc(1U, WEBM_MAX_FRAME + 1U);
+
+			add_block(&cluster, 0xA3, spec[i].number, 0, 0x80, big,
+				  WEBM_MAX_FRAME + 1U);
+			free(big);
+		} else {
+			add_block(&cluster, 0xA3, spec[i].number, 0, 0x80,
+				  payload, sizeof(payload));
+		}
+	}
 	bnest(&seg, 0x1F43B675, &cluster);
 	belem(&ebml, 0x4282, doctype, (uint32_t)strlen(doctype));
 	bnest(&file, 0x1A45DFA3, &ebml);
@@ -417,7 +444,10 @@ static int check_stored_tracks(const char *name, const char *doctype,
 	unsigned i, stored = 0U;
 	int failed = 0;
 
-	if (collect(&file, 1, &d, &g) != 0) {
+	/* The frame buffer the firmware gives the demux. */
+	static uint8_t frame[WEBM_MAX_FRAME];
+
+	if (collect_in(&file, 1, &d, &g, frame, sizeof(frame)) != 0) {
 		fprintf(stderr, "%s: err=%d\n", name, d.error);
 		free(file.p);
 		return 1;
@@ -480,8 +510,8 @@ static int test_matroska_ignored_tracks(void)
 		{4, 2, "A_AC3", 0, 0, 1, 0},
 		{5, 2, "A_AC3", 0, 0, 0, 0},              /* second AC-3 */
 		{6, 2, "A_MPEG/L2", 0, 0, 1, 0},
-		{7, 0x11, "S_TEXT/UTF8", 0, 0, 0, 0},
-		{8, 2, "A_MPEG/L2", 1, 0, 0, 0},          /* disabled */
+		{7, 0x11, "S_TEXT/UTF8", MKV_BIG_BLOCK, 0, 0, 0},
+		{8, 2, "A_MPEG/L2", MKV_DISABLED, 0, 0, 0},
 		{9, 2, "A_VORBIS", 0, 70000, 0, 0},       /* not with MPEG */
 		{10, 2, "A_OPUS", 0, 19, 0, 0},
 	};
@@ -493,34 +523,46 @@ static int test_matroska_ignored_tracks(void)
 		{3, 2, "A_MPEG/L2", 0, 0, 0, 0},
 		{4, 1, "V_VP8", 0, 0, 1, 0},
 	};
-	/* A video track's CodecPrivate takes the room audio CodecPrivate
-	 * holds: first that of audio it cannot use (the Vorbis track, while
-	 * the AC-3 data moves down), then any. */
+	/* A video track's CodecPrivate takes the room Opus/Vorbis
+	 * CodecPrivate holds: first that of audio it cannot use, then the
+	 * largest. AC-3 CodecPrivate is never kept: its decoder reads none. */
 	static const struct mkv_track_spec mpeg_late[] = {
 		{1, 2, "A_VORBIS", 0, 60000, 0, 0},
-		{2, 2, "A_AC3", 0, 100, 1, 0},
+		{2, 2, "A_AC3", 0, 100, 1, 1},
 		{3, 1, "V_MPEG2", 0, 6000, 1, 0},
 	};
 	static const struct mkv_track_spec vp8_late[] = {
-		{1, 2, "A_OPUS", 0, 19, 1, 0},
-		{2, 2, "A_VORBIS", 0, 65000, 1, 1},
-		{3, 1, "V_VP8", 0, 1000, 1, 0},
-	};
-	/* All audio CodecPrivate evicted, incompatible first. */
-	static const struct mkv_track_spec vp8_all[] = {
 		{1, 2, "A_VORBIS", 0, 40000, 1, 1},
-		{2, 2, "A_AC3", 0, 25000, 0, 0},
+		{2, 2, "A_OPUS", 0, 20000, 1, 0},
 		{3, 1, "V_VP8", 0, 30000, 1, 0},
+	};
+	/* TrackEntry children come in any order: the video's CodecPrivate
+	 * before its TrackType, and a FlagEnabled 0 after the CodecPrivate of
+	 * a video track that is then not kept, which must not evict audio
+	 * CodecPrivate. */
+	static const struct mkv_track_spec priv_first[] = {
+		{1, 2, "A_VORBIS", 0, 60000, 0, 0},
+		{2, 1, "V_MPEG2", MKV_PRIV_FIRST, 6000, 1, 0},
+	};
+	static const struct mkv_track_spec disabled_late[] = {
+		{1, 2, "A_OPUS", 0, 30000, 1, 0},
+		{2, 2, "A_VORBIS", 0, 30000, 1, 0},
+		{3, 1, "V_VP8", MKV_DISABLED | MKV_FLAG_LAST, 10000, 0, 0},
+		{4, 1, "V_VP8", 0, 0, 1, 0},
 	};
 	/* WebM: a disabled audio track does not take the one audio slot. */
 	static const struct mkv_track_spec webm[] = {
 		{1, 1, "V_VP8", 0, 0, 1, 0},
-		{2, 2, "A_VORBIS", 1, 0, 1, 0},
+		{2, 2, "A_VORBIS", MKV_DISABLED, 0, 1, 0},
 		{3, 2, "A_OPUS", 0, 19, 1, 0},
 	};
-	/* A kept video track whose CodecPrivate does not fit still fails. */
+	/* A kept video track whose CodecPrivate or block does not fit still
+	 * fails. */
 	static const struct mkv_track_spec oversized[] = {
 		{1, 1, "V_MPEG2", 0, 70000, 1, 0},
+	};
+	static const struct mkv_track_spec big_block[] = {
+		{1, 1, "V_MPEG2", MKV_BIG_BLOCK, 0, 1, 0},
 	};
 	static struct webm_demux d;
 	static struct got g;
@@ -529,6 +571,13 @@ static int test_matroska_ignored_tracks(void)
 
 	if (collect(&file, 1, &d, &g) == 0 || d.error != WEBM_ERR_LIMIT) {
 		fprintf(stderr, "matroska oversized kept priv: err=%d\n",
+			d.error);
+		failed = 1;
+	}
+	free(file.p);
+	file = make_mkv_tracks("matroska", big_block, 1U);
+	if (collect(&file, 1, &d, &g) == 0 || d.error != WEBM_ERR_LIMIT) {
+		fprintf(stderr, "matroska oversized kept block: err=%d\n",
 			d.error);
 		failed = 1;
 	}
@@ -545,9 +594,13 @@ static int test_matroska_ignored_tracks(void)
 	failed |= check_stored_tracks("matroska late vp8", "matroska",
 				      vp8_late,
 				      sizeof(vp8_late) / sizeof(vp8_late[0]));
-	failed |= check_stored_tracks("matroska vp8 evicts all", "matroska",
-				      vp8_all,
-				      sizeof(vp8_all) / sizeof(vp8_all[0]));
+	failed |= check_stored_tracks("matroska priv first", "matroska",
+				      priv_first,
+				      sizeof(priv_first) / sizeof(priv_first[0]));
+	failed |= check_stored_tracks("matroska disabled late", "matroska",
+				      disabled_late,
+				      sizeof(disabled_late) /
+				      sizeof(disabled_late[0]));
 	return failed;
 }
 

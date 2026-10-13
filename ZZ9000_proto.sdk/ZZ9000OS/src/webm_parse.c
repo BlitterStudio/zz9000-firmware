@@ -304,11 +304,21 @@ static void matroska_make_room(struct webm_demux *d, uint8_t video,
 	}
 }
 
+/* The CodecPrivate a backend reads: the video's (VP9 features, MPEG
+ * sequence header) and the Opus or Vorbis headers. AC-3, MPEG audio and
+ * PCM decoders read none. */
+static int track_reads_priv(const struct webm_track *t)
+{
+	return t->type == 1U ||
+	       (t->type == 2U &&
+	        (t->codec == WEBM_CODEC_OPUS || t->codec == WEBM_CODEC_VORBIS));
+}
+
 static int parse_track(struct webm_demux *d, uint32_t end)
 {
 	struct webm_track *t;
 	struct webm_track spare;
-	uint32_t priv_start = d->priv_used;
+	uint32_t priv_len = 0U;
 	int priv_overflow = 0;
 	uint8_t scratch[16];
 
@@ -395,31 +405,21 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		if (encrypted_id(id))
 			return fail(d, WEBM_ERR_CODEC);
 		if (id == ID_CODECPRIV) {
-			/* A video track's CodecPrivate takes the room audio
-			 * CodecPrivate holds (matroska_make_room) when its
-			 * TrackType comes first, as muxers write it. What
-			 * still does not fit is skipped: that fails the file
-			 * if a video track keeps it, while a Matroska audio
-			 * track is kept without it, since whether its codec is
-			 * the one the video's backend plays is known only
-			 * after the last TrackEntry. */
-			if (d->is_matroska && t->type == 1U && t->enabled &&
-			    n <= WEBM_MAX_PRIV) {
-				matroska_make_room(d, t->codec, n);
-				/* Compaction moved the end of the store. */
-				priv_start = d->priv_used;
-			}
-			if (n > WEBM_MAX_PRIV || d->priv_used > WEBM_MAX_PRIV - n) {
+			/* TrackEntry children come in any order, so what to
+			 * do with it is decided once the entry is read. Until
+			 * then it waits in the frame buffer, which holds no
+			 * block before the first Cluster. */
+			if (n > WEBM_MAX_PRIV || n > d->buf_cap) {
 				if (skip_n(d, n) != 0)
 					return -1;
+				priv_len = 0U;
 				priv_overflow = 1;
 				continue;
 			}
-			t->priv_off = d->priv_used;
-			if (n && read_full(d, d->priv_store + d->priv_used, n) != 0)
+			if (n && read_full(d, d->buf, n) != 0)
 				return -1;
-			d->priv_used += n;
-			t->priv_len = n;
+			priv_len = n;
+			priv_overflow = 0;
 			continue;
 		}
 		if (id == ID_DURATION) {
@@ -470,14 +470,32 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 			return fail(d, WEBM_ERR_CODEC);
 		d->have_audio = 1;
 	}
-	if (d->is_matroska && !matroska_track_usable(d, t)) {
-		/* Not stored: its blocks are skipped, and its CodecPrivate
-		 * gives its space back. */
-		d->priv_used = priv_start;
-		return 0;
+	if (d->is_matroska && !matroska_track_usable(d, t))
+		return 0; /* Not stored: its blocks are skipped. */
+	if (t == &spare)
+		return fail(d, WEBM_ERR_LIMIT);
+	if (!track_reads_priv(t)) {
+		priv_len = 0U;
+		priv_overflow = 0;
 	}
-	if (t == &spare ||
-	    (priv_overflow && !(d->is_matroska && t->type == 2U)))
+	if (priv_len) {
+		/* The video's CodecPrivate comes first; that of Opus or
+		 * Vorbis is best effort. */
+		if (d->is_matroska && t->type == 1U)
+			matroska_make_room(d, t->codec, priv_len);
+		if (WEBM_MAX_PRIV - d->priv_used >= priv_len) {
+			memcpy(d->priv_store + d->priv_used, d->buf, priv_len);
+			t->priv_off = d->priv_used;
+			t->priv_len = priv_len;
+			d->priv_used += priv_len;
+		} else {
+			priv_overflow = 1;
+		}
+	}
+	/* A Matroska audio track is kept without CodecPrivate that does
+	 * not fit; the backend refuses Opus or Vorbis without headers only
+	 * if that track is played. */
+	if (priv_overflow && !(d->is_matroska && t->type == 2U))
 		return fail(d, WEBM_ERR_LIMIT);
 	d->ntracks++;
 	return 0;
@@ -663,7 +681,11 @@ static int split_lace(struct webm_demux *d, uint32_t payload_off,
 }
 
 /* A Block's key flag lives in its BlockGroup; webm_next sets it after the
- * group. A SimpleBlock carries its own. */
+ * group. A SimpleBlock carries its own. Returns 1 for a block of a
+ * Matroska track that was not stored (subtitles, disabled or unplayable
+ * tracks; see matroska_track_usable and matroska_finish_tracks): it is
+ * skipped after its track number, so frame limits apply only to blocks
+ * a backend reads. */
 static int take_block(struct webm_demux *d, uint32_t size, int simple)
 {
 	uint32_t tlen = 1, i, track;
@@ -671,19 +693,29 @@ static int take_block(struct webm_demux *d, uint32_t size, int simple)
 	int16_t rel;
 	unsigned lacing;
 
-	if (size < 4 || size > d->buf_cap || size > WEBM_MAX_FRAME)
+	if (size == 0U)
 		return fail(d, WEBM_ERR_LIMIT);
-	if (read_full(d, d->buf, size) != 0)
+	if (read_full(d, d->buf, 1U) != 0)
 		return -1;
 	while (tlen < 8 && (d->buf[0] & mark) == 0) {
 		mark >>= 1;
 		tlen++;
 	}
-	if (tlen + 3 > size)
+	if (tlen > size)
 		return fail(d, WEBM_ERR_LAYOUT);
+	if (tlen > 1U && read_full(d, d->buf + 1, tlen - 1U) != 0)
+		return -1;
 	track = (uint32_t)(d->buf[0] & (mark - 1U));
 	for (i = 1; i < tlen; i++)
 		track = (track << 8) | d->buf[i];
+	if (d->is_matroska && !webm_track(d, track))
+		return skip_n(d, size - tlen) != 0 ? -1 : 1;
+	if (size < 4 || size > d->buf_cap || size > WEBM_MAX_FRAME)
+		return fail(d, WEBM_ERR_LIMIT);
+	if (tlen + 3 > size)
+		return fail(d, WEBM_ERR_LAYOUT);
+	if (read_full(d, d->buf + tlen, size - tlen) != 0)
+		return -1;
 	rel = (int16_t)((d->buf[tlen] << 8) | d->buf[tlen + 1]);
 	lacing = (unsigned)((d->buf[tlen + 2] >> 1) & 3);
 	d->lace_key = simple ? (d->buf[tlen + 2] & 0x80) != 0 : 1;
@@ -692,17 +724,6 @@ static int take_block(struct webm_demux *d, uint32_t size, int simple)
 	d->lace_track = track;
 	d->lace_tc = d->cluster_tc + rel;
 	return 0;
-}
-
-/* A block of a Matroska track that was not stored (subtitles, disabled
- * or unplayable tracks; see matroska_track_usable and
- * matroska_finish_tracks) is dropped whole. */
-static int lace_track_ignored(struct webm_demux *d)
-{
-	if (!d->is_matroska || webm_track(d, d->lace_track))
-		return 0;
-	d->lace_i = d->lace_n;
-	return 1;
 }
 
 static int emit(struct webm_demux *d, struct webm_block *blk)
@@ -876,11 +897,14 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 			continue;
 		}
 		if (id == ID_SIMPLE || id == ID_BLOCK) {
+			int rc;
+
 			if (unknown || size > room_in(d, d->cluster_end))
 				return fail(d, WEBM_ERR_LAYOUT);
-			if (take_block(d, (uint32_t)size, id == ID_SIMPLE) != 0)
+			rc = take_block(d, (uint32_t)size, id == ID_SIMPLE);
+			if (rc < 0)
 				return -1;
-			if (lace_track_ignored(d))
+			if (rc > 0)
 				continue;
 			return emit(d, blk);
 		}
@@ -903,16 +927,18 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 				if (cid == ID_REFBLOCK)
 					key = 0;
 				if (cid == ID_BLOCK) {
-					if (take_block(d, (uint32_t)csz, 0) != 0)
+					int rc = take_block(d, (uint32_t)csz, 0);
+
+					if (rc < 0)
 						return -1;
-					saw = 1;
+					saw = rc == 0;
 				} else if (skip_n(d, csz) != 0) {
 					return -1;
 				}
 			}
 			if (skip_n(d, room(d, end)) != 0)
 				return -1;
-			if (saw && !lace_track_ignored(d)) {
+			if (saw) {
 				/* A ReferenceBlock may follow the Block, so the
 				 * key flag is known only once the group is read. */
 				d->lace_key = (uint8_t)key;

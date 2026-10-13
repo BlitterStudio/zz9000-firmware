@@ -294,17 +294,18 @@ struct got {
 	uint8_t data[MAX_GOT][320];
 };
 
-/* Demuxes a whole file; copies every block out. Returns the last webm_next
- * result (0 clean EOF) or the webm_open failure. */
-static inline int collect(const struct buf *f, int eof, struct webm_demux *d,
-		   struct got *g)
+/* Demuxes a whole file with the given frame buffer; copies every block
+ * out. Returns the last webm_next result (0 clean EOF) or the webm_open
+ * failure. */
+static inline int collect_in(const struct buf *f, int eof,
+			     struct webm_demux *d, struct got *g,
+			     uint8_t *scratch, uint32_t scap)
 {
-	static uint8_t scratch[8192];
 	struct webm_block blk;
 	int rc;
 
 	memset(g, 0, sizeof(*g));
-	rc = open_file(f->p, f->n, eof, d, scratch, sizeof(scratch));
+	rc = open_file(f->p, f->n, eof, d, scratch, scap);
 	if (rc != 0)
 		return rc;
 	for (;;) {
@@ -323,6 +324,15 @@ static inline int collect(const struct buf *f, int eof, struct webm_demux *d,
 		memcpy(g->data[g->n], blk.data, blk.size);
 		g->n++;
 	}
+}
+
+/* collect_in with a small frame buffer. */
+static inline int collect(const struct buf *f, int eof, struct webm_demux *d,
+		   struct got *g)
+{
+	static uint8_t scratch[8192];
+
+	return collect_in(f, eof, d, g, scratch, sizeof(scratch));
 }
 
 #endif /* EBML_BUILD_H */
