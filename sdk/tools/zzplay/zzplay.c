@@ -72,6 +72,9 @@
  * pictures. The deadline also bounds a slow disk or Zorro 2 startup. */
 #define ZZPLAY_PREROLL_INPUT_BYTES (1024U * 1024U)
 #define ZZPLAY_PREROLL_DEADLINE_US 1000000U
+/* Ticks (20 ms) start-up waits at most for Intuition to apply the PIP
+ * window's requested size before the first picture and the clock. */
+#define ZZPLAY_PIP_SETTLE_TICKS 25U
 #define ZZPLAY_PCM_BYTES (128U * 1024U)
 #define ZZPLAY_Z2_INPUT_BYTES (24U * 1024U)
 #define ZZPLAY_Z2_PCM_BYTES (32U * 1024U)
@@ -237,6 +240,7 @@ struct ZZPlayRuntime {
   uint8_t fullscreen;
   uint8_t present_known;
   uint8_t present_recheck;
+  ZZPlayRect pip_requested;  /* video area the last PIP open asked for */
   uint8_t title_dirty;
   char title[128];
 };
@@ -1089,11 +1093,41 @@ static int zzplay_open_pip_mode(struct ZZPlayRuntime *runtime,
    * geometry through the proven resize route; a 1:1 fullscreen (screen
    * exactly the video size) is already there. */
   zzplay_force_geometry(runtime, &placement);
+  runtime->pip_requested = placement;
   runtime->present_recheck = 1U;
   runtime->title_dirty = 1U;
   (void)zzplay_resource_acquire(
       &runtime->core.resources, ZZPLAY_RESOURCE_VIDEO_WINDOW);
   return 1;
+}
+
+/* ChangeWindowBox() is carried out later by Intuition, and P96 then moves
+ * the overlay to the new rectangle. At start-up, wait for that (bounded)
+ * before the first picture and the clock, so the reconfiguration does not
+ * land on the first clocked frames. */
+static void zzplay_settle_pip_geometry(struct ZZPlayRuntime *runtime)
+{
+  struct Window *window = runtime->window;
+  const ZZPlayRect *want = &runtime->pip_requested;
+  LONG outer_w;
+  LONG outer_h;
+  uint32_t ticks;
+
+  if (!window || want->width == 0U || want->height == 0U) {
+    return;
+  }
+  outer_w = (LONG)want->width + window->BorderLeft + window->BorderRight;
+  outer_h = (LONG)want->height + window->BorderTop + window->BorderBottom;
+  for (ticks = 0U; ticks < ZZPLAY_PIP_SETTLE_TICKS; ticks++) {
+    if (window->Width == outer_w && window->Height == outer_h &&
+        window->LeftEdge == (WORD)want->x &&
+        window->TopEdge == (WORD)want->y) {
+      /* One more tick lets P96 re-SET the overlay after Intuition. */
+      Delay(1);
+      return;
+    }
+    Delay(1);
+  }
 }
 
 static int zzplay_ensure_pip(struct ZZPlayRuntime *runtime)
@@ -1103,8 +1137,13 @@ static int zzplay_ensure_pip(struct ZZPlayRuntime *runtime)
   }
   /* A visible memory-window PIP exposes its key color until the first
    * formatter-backed frame arrives, so create it only at retirement. */
-  return zzplay_open_pip_mode(
-      runtime, runtime->options.fullscreen ? 1 : 0);
+  if (!zzplay_open_pip_mode(runtime, runtime->options.fullscreen ? 1 : 0)) {
+    return 0;
+  }
+  if (!runtime->audio_started) {
+    zzplay_settle_pip_geometry(runtime);
+  }
+  return 1;
 }
 
 /* Remember the current windowed placement so returning from fullscreen
