@@ -95,7 +95,7 @@ static void test_class_limit(void)
     CHECK(card_pool_alloc(&pool, PAGE, IMAGE(2)) == 0);
     CHECK(card_pool_alloc(&pool, MB(128), MEDIA(1)) != 0);
     CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == 0);
-    CHECK(card_pool_alloc(&pool, MB(128),
+    CHECK(card_pool_alloc(&pool, MB(64),
                           CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, 1)) != 0);
     CHECK(card_pool_alloc(&pool, PAGE,
                           CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, 2)) == 0);

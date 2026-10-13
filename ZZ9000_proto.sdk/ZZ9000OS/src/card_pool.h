@@ -42,7 +42,7 @@ enum card_pool_class {
 
 #define CARD_POOL_LIMIT_FIRMWARE    (64u << 20)
 #define CARD_POOL_LIMIT_MEDIA       (128u << 20)
-#define CARD_POOL_LIMIT_MEDIA_INPUT (128u << 20)
+#define CARD_POOL_LIMIT_MEDIA_INPUT (64u << 20)
 /* Matches the image decode budget all image sessions share
  * (SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES). */
 #define CARD_POOL_LIMIT_IMAGE       (72u << 20)
