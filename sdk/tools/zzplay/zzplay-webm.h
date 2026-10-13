@@ -29,19 +29,29 @@
 typedef enum ZZPlayWebMVideo {
   ZZPLAY_WEBM_VIDEO_NONE = 0,
   ZZPLAY_WEBM_VIDEO_VP8,
-  ZZPLAY_WEBM_VIDEO_VP9
+  ZZPLAY_WEBM_VIDEO_VP9,
+  ZZPLAY_WEBM_VIDEO_MPEG1,
+  ZZPLAY_WEBM_VIDEO_MPEG2
 } ZZPlayWebMVideo;
 
 typedef enum ZZPlayWebMAudio {
   ZZPLAY_WEBM_AUDIO_NONE = 0,
   ZZPLAY_WEBM_AUDIO_OPUS,
-  ZZPLAY_WEBM_AUDIO_VORBIS
+  ZZPLAY_WEBM_AUDIO_VORBIS,
+  ZZPLAY_WEBM_AUDIO_MPEG,
+  ZZPLAY_WEBM_AUDIO_AC3,
+  ZZPLAY_WEBM_AUDIO_LPCM
 } ZZPlayWebMAudio;
+
+typedef enum ZZPlayWebMDocType {
+  ZZPLAY_WEBM_DOCTYPE_NONE = 0,
+  ZZPLAY_WEBM_DOCTYPE_WEBM,
+  ZZPLAY_WEBM_DOCTYPE_MATROSKA
+} ZZPlayWebMDocType;
 
 typedef enum ZZPlayWebMRefusal {
   ZZPLAY_WEBM_OK = 0,
   ZZPLAY_WEBM_NOT_CONTAINER,
-  ZZPLAY_WEBM_MATROSKA,
   ZZPLAY_WEBM_TRUNCATED,
   ZZPLAY_WEBM_TWO_VIDEO,
   ZZPLAY_WEBM_TWO_AUDIO,
@@ -53,6 +63,7 @@ typedef enum ZZPlayWebMRefusal {
 } ZZPlayWebMRefusal;
 
 typedef struct ZZPlayWebMInfo {
+  ZZPlayWebMDocType doc_type;
   ZZPlayWebMVideo video;
   ZZPlayWebMAudio audio;
   ZZPlayWebMRefusal refusal;
@@ -100,11 +111,16 @@ uint32_t zzplay_webm_required_flags(ZZPlayWebMVideo video,
                                    ZZPlayWebMAudio audio);
 int zzplay_webm_service_ready(uint32_t flags, ZZPlayWebMVideo video,
                               ZZPlayWebMAudio audio);
+uint32_t zzplay_matroska_required_flags(ZZPlayWebMVideo video,
+                                        ZZPlayWebMAudio audio);
+int zzplay_matroska_service_ready(uint32_t flags, ZZPlayWebMVideo video,
+                                  ZZPlayWebMAudio audio);
 
 uint32_t zzplay_webm_video_codec_id(ZZPlayWebMVideo video);
 uint32_t zzplay_webm_audio_codec_id(ZZPlayWebMAudio audio);
 
 const char *zzplay_webm_video_name(ZZPlayWebMVideo video);
 const char *zzplay_webm_audio_name(ZZPlayWebMAudio audio);
+const char *zzplay_webm_doc_type_name(ZZPlayWebMDocType doc_type);
 
 #endif /* ZZPLAY_WEBM_H */

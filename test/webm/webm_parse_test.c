@@ -20,7 +20,8 @@ static struct buf make_webm(uint16_t w, uint16_t h, const char *codec,
 	uint8_t scale[3] = {0x0F, 0x42, 0x40};
 	uint8_t plain[] = {0x10, 0x00, 0x00, 1, 2, 3, 4, 5};
 	uint8_t laced[] = {1, 2, 0x11, 0x22, 0x33, 0x44, 0x55};
-	const char *webm = "webm";
+	const char *doctype = strncmp(codec, "V_MPEG", 6U) == 0
+		? "matroska" : "webm";
 
 	memset(&info, 0, sizeof(info));
 	memset(&video, 0, sizeof(video));
@@ -90,7 +91,7 @@ static struct buf make_webm(uint16_t w, uint16_t h, const char *codec,
 		free(b.p);
 		free(c.p);
 	}
-	belem(&ebml, 0x4282, webm, 4);
+	belem(&ebml, 0x4282, doctype, (uint32_t)strlen(doctype));
 	{
 		struct buf a = nest(0x1A45DFA3, &ebml);
 		struct buf b = nest(0x18538067, &seg);
@@ -585,6 +586,8 @@ int main(void)
 	failed |= expect_ok("vp8", 160, 120, "V_VP8", 1);
 	failed |= expect_ok("portrait", 320, 564, "V_VP8", 1);
 	failed |= expect_ok("odd", 271, 481, "V_VP9", 1);
+	failed |= expect_ok("matroska mpeg1", 160, 120, "V_MPEG1", 1);
+	failed |= expect_ok("matroska mpeg2", 160, 120, "V_MPEG2", 1);
 	failed |= expect_err("second", make_webm(160, 120, "V_VP8", 1, 0, 0, 0),
 			     WEBM_ERR_CODEC);
 	failed |= expect_err("unknown", make_webm(160, 120, "V_AV1", 0, 0, 0, 0),

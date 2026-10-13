@@ -38,9 +38,13 @@ enum {
 	WEBM_CODEC_VP8,
 	WEBM_CODEC_VP9,
 	WEBM_CODEC_OPUS,
-	WEBM_CODEC_VORBIS
+	WEBM_CODEC_VORBIS,
+	WEBM_CODEC_MPEG1,
+	WEBM_CODEC_MPEG2,
+	WEBM_CODEC_MPEG_AUDIO,
+	WEBM_CODEC_AC3,
+	WEBM_CODEC_PCM_LE
 };
-
 enum {
 	WEBM_OK = 0,
 	WEBM_ERR_IO,
@@ -97,6 +101,7 @@ struct webm_demux {
 	int error;
 	int have_video;
 	int have_audio;
+	uint8_t is_matroska;
 	uint32_t segment_end;
 	uint32_t cluster_end;
 	int64_t cluster_tc;

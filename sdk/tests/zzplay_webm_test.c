@@ -200,16 +200,14 @@ static int expect_refusal(const uint8_t *data, size_t n, ZZPlayWebMRefusal want,
 }
 static int check_refusals(void)
 {
-  uint8_t tracks[512], file[1024], matroska[128];
-  size_t tn, n, i;
-  /* SamplingFrequency as an 8-byte EBML float. */
-  static const uint8_t vorbis_4k[] = {0x40, 0xaf, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
-  static const uint8_t vorbis_8k[] = {0x40, 0xbf, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
-  static const uint8_t vorbis_44k[] = {0x40, 0xe5, 0x88, 0x80, 0x00, 0x00, 0x00, 0x00};
-  static const uint8_t vorbis_96k[] = {0x40, 0xf7, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
-  static const uint8_t vorbis_192k[] = {0x41, 0x07, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
-  i = ebml_header(matroska, sizeof(matroska), 0U, "matroska");
-  if (!expect_refusal(matroska, i, ZZPLAY_WEBM_MATROSKA, "matroska")) return 0;
+	uint8_t tracks[512], file[1024];
+	size_t tn, n;
+	/* SamplingFrequency as an 8-byte EBML float. */
+	static const uint8_t vorbis_4k[] = {0x40, 0xaf, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t vorbis_8k[] = {0x40, 0xbf, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t vorbis_44k[] = {0x40, 0xe5, 0x88, 0x80, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t vorbis_96k[] = {0x40, 0xf7, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t vorbis_192k[] = {0x41, 0x07, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
   tn = 0; tn = video_track(tracks, sizeof(tracks), tn, "V_VP8", 320, 240, 0, 0, 0, 0, 0);
   tn = video_track(tracks, sizeof(tracks), tn, "V_VP9", 160, 120, 0, 0, 0, 0, 0);
   n = wrap_segment(file, sizeof(file), tracks, tn, 0);

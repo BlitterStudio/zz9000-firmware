@@ -18,6 +18,8 @@
 #include "sdk_dvd_lpcm.h"
 #include "sdk_dvd_ac3.h"
 #include "sdk_mpeg2_neon.h"
+#include "webm_parse.h"
+#include "webm_window.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +34,8 @@
 
 /* One PES at a time is handed to libmpeg2 (a PES is at most 64 KiB). */
 #define M2_ES_CAPACITY (64U * 1024U)
+#define M2_MKV_WINDOW_CAP (WEBM_MAX_FRAME + (64U * 1024U))
+#define M2_MKV_INPUT_AHEAD (256U * 1024U)
 /* Video moved out of the demux ahead of decoding. A Program Stream can
  * carry a picture's audio well after it (non-DVD muxers lead video by
  * 0.5 s and more); without room for that much video, the demux could
@@ -180,6 +184,24 @@ struct sdk_video_mpeg2 {
 	uint32_t unclocked_rate;
 	uint8_t video_origin_seen;
 	uint8_t video_seen;          /* a video PES reached libmpeg2 */
+	struct webm_demux mkv_demux;
+	struct webm_window mkv_win;
+	uint8_t *mkv_block;
+	struct webm_block mkv_audio_pending;
+	uint32_t mkv_expect_codec;
+	uint32_t mkv_video_track;
+	uint32_t mkv_audio_track;
+	uint32_t mkv_audio_offset;
+	uint32_t mkv_pcm_rate;
+	uint16_t mkv_pcm_channels;
+	uint8_t mkv_container;
+	uint8_t mkv_opened;
+	uint8_t mkv_unsupported;
+	uint8_t mkv_input_wanted;
+	uint8_t mkv_private_pending;
+	uint8_t mkv_audio_pending_valid;
+	uint8_t mkv_audio_pending_observed;
+	uint8_t pcmle_selected;
 	uint8_t skip_late;           /* this decode skips B-pictures */
 	uint8_t skip_to_intra;       /* discard dependent pictures until a replacement I */
 	const mpeg2_picture_t *recovery_picture;
@@ -1050,6 +1072,8 @@ static int picture_skipped(const mpeg2_info_t *info)
 
 static int demux_drained(const struct sdk_video_mpeg2 *d)
 {
+	if (d->mkv_container)
+		return d->input_eof && !d->mkv_audio_pending_valid;
 	/* Audio still queued behind backpressure must not hold the video
 	 * end hostage: the sequence-end flush has to reach libmpeg2 while
 	 * queued audio waits for ring room the client may give later.
@@ -1467,6 +1491,314 @@ static int feed_video(struct sdk_video_mpeg2 *d)
 
 /* ----------------------------------------------------------------- ops */
 
+/* ----------------------------------------------------- Matroska input */
+
+static const struct webm_track *mkv_video_track(const struct sdk_video_mpeg2 *d)
+{
+	unsigned i;
+
+	for (i = 0U; i < d->mkv_demux.ntracks; i++)
+		if (d->mkv_demux.tracks[i].type == 1U &&
+		    d->mkv_demux.tracks[i].codec == d->mkv_expect_codec)
+			return &d->mkv_demux.tracks[i];
+	return 0;
+}
+
+static int mkv_select_audio(struct sdk_video_mpeg2 *d)
+{
+	unsigned i;
+
+	if (!d->media_configured ||
+	    d->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE)
+		return 1;
+	for (i = 0U; i < d->mkv_demux.ntracks; i++) {
+		const struct webm_track *t = &d->mkv_demux.tracks[i];
+		int match = (d->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_MP2 &&
+		             t->codec == WEBM_CODEC_MPEG_AUDIO) ||
+		            (d->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_AC3 &&
+		             t->codec == WEBM_CODEC_AC3) ||
+		            (d->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_LPCM &&
+		             t->codec == WEBM_CODEC_PCM_LE);
+
+		if (t->type != 2U || !match)
+			continue;
+		if (t->codec == WEBM_CODEC_PCM_LE &&
+		    (t->rate != 48000U || (t->channels != 1U && t->channels != 2U)))
+			return 0;
+		d->mkv_audio_track = t->number;
+		d->audio_selected = 1U;
+		d->mp2_selected = t->codec == WEBM_CODEC_MPEG_AUDIO;
+		d->ac3_selected = t->codec == WEBM_CODEC_AC3;
+		d->pcmle_selected = t->codec == WEBM_CODEC_PCM_LE;
+		d->mkv_pcm_rate = t->rate;
+		d->mkv_pcm_channels = t->channels;
+		return 1;
+	}
+	return 0;
+}
+
+static int mkv_finish_open(struct sdk_video_mpeg2 *d)
+{
+	const struct webm_track *video = mkv_video_track(d);
+	const uint8_t *priv;
+
+	if (!d->mkv_demux.is_matroska || !video ||
+	    !geometry_ok(video->width, video->height))
+		return 0;
+	if (!mkv_select_audio(d))
+		return 0;
+	priv = webm_track_priv(&d->mkv_demux, video);
+	if (video->priv_len != 0U && !priv)
+		return 0;
+	d->mkv_video_track = video->number;
+	d->frame_rate_milli = webm_rate_milli(video->default_duration_ns);
+	d->mkv_private_pending = video->priv_len != 0U;
+	d->mkv_opened = 1U;
+	webm_window_compact(&d->mkv_win);
+	return 1;
+}
+
+static int mkv_try_open(struct sdk_video_mpeg2 *d)
+{
+	struct webm_io io;
+	int rc;
+
+	if (d->mkv_opened)
+		return 1;
+	d->mkv_win.cursor = d->mkv_win.start;
+	webm_window_bind(&d->mkv_win, &io);
+	rc = webm_open(&d->mkv_demux, &io, d->mkv_block, WEBM_MAX_FRAME);
+	if (rc == 0) {
+		if (mkv_finish_open(d))
+			return 1;
+		d->mkv_unsupported = 1U;
+		return 0;
+	}
+	if (d->mkv_demux.error == WEBM_ERR_NEED) {
+		if (webm_window_exhausted(&d->mkv_win, d->mkv_win.start))
+			d->mkv_unsupported = 1U;
+		return 0;
+	}
+	if (d->mkv_demux.error == WEBM_ERR_CODEC ||
+	    d->mkv_demux.error == WEBM_ERR_LIMIT)
+		d->mkv_unsupported = 1U;
+	else
+		d->failed = 1U;
+	return 0;
+}
+
+static int mkv_next_block(struct sdk_video_mpeg2 *d, struct webm_block *blk)
+{
+	struct webm_demux saved;
+	int rc;
+
+	webm_window_mark(&d->mkv_win);
+	saved = d->mkv_demux;
+	rc = webm_next(&d->mkv_demux, blk);
+	if (rc < 0 && d->mkv_demux.error == WEBM_ERR_NEED) {
+		d->mkv_demux = saved;
+		webm_window_rewind(&d->mkv_win);
+		d->mkv_input_wanted = 1U;
+		if (webm_window_exhausted(&d->mkv_win, d->mkv_win.mark))
+			d->mkv_unsupported = 1U;
+		return 0;
+	}
+	if (rc == 0) {
+		d->input_eof = 1U;
+		return 0;
+	}
+	if (rc < 0) {
+		if (d->mkv_demux.error == WEBM_ERR_CODEC ||
+		    d->mkv_demux.error == WEBM_ERR_LIMIT)
+			d->mkv_unsupported = 1U;
+		else
+			d->failed = 1U;
+		return -1;
+	}
+	d->mkv_input_wanted = 0U;
+	return 1;
+}
+
+static void mkv_observe_audio(struct sdk_video_mpeg2 *d, uint64_t pts)
+{
+	struct SDKMediaTimelineResult observed;
+	uint64_t media_pts = 0U;
+
+	if (d->mkv_audio_pending_observed)
+		return;
+	d->mkv_audio_pending_observed = 1U;
+	if (d->video_origin_seen) {
+		if (sdk_media_timeline_observe_ordered(&d->timeline,
+			SDK_MEDIA_TIMELINE_AUDIO, pts, &observed)) {
+			d->media_event_flags |= timeline_media_flags(observed.flags);
+			if (observed.pts >= observed.origin)
+				media_pts = observed.pts - observed.origin;
+		}
+		if (d->first_audio_pts == M2_NO_PTS)
+			d->first_audio_pts = media_pts;
+		d->last_audio_pts_raw = pts;
+	} else if (d->stashed_audio_pts == SDK_DVD_PS_NO_TS) {
+		d->stashed_audio_pts = pts;
+	}
+}
+
+static uint32_t mkv_route_mp2(struct sdk_video_mpeg2 *d,
+	const uint8_t *data, uint32_t length)
+{
+	while (d->mkv_audio_offset < length) {
+		uint32_t n = length - d->mkv_audio_offset;
+		uint32_t room;
+
+		if (d->mp2_input_pos != 0U) {
+			memmove(d->mp2_input, d->mp2_input + d->mp2_input_pos,
+				d->mp2_input_len);
+			d->mp2_input_pos = 0U;
+		}
+		room = M2_MP2_CAPACITY - d->mp2_input_len;
+		if (room == 0U)
+			return 0U;
+		if (n > room)
+			n = room;
+		memcpy(d->mp2_input + d->mp2_input_len,
+		       data + d->mkv_audio_offset, n);
+		d->mp2_input_len += n;
+		d->mkv_audio_offset += n;
+		pump_mp2(d, 0);
+	}
+	d->mkv_audio_offset = 0U;
+	return 1U;
+}
+
+static uint32_t mkv_route_ac3(struct sdk_video_mpeg2 *d,
+	const uint8_t *data, uint32_t length)
+{
+	while (d->mkv_audio_offset < length) {
+		uint32_t taken;
+
+		if (!pump_ac3(d))
+			return 0U;
+		taken = sdk_dvd_ac3_feed(&d->ac3, data + d->mkv_audio_offset,
+					 length - d->mkv_audio_offset);
+		if (taken == 0U) {
+			d->malformed++;
+			sdk_dvd_ac3_reset(&d->ac3);
+			continue;
+		}
+		d->mkv_audio_offset += taken;
+	}
+	d->mkv_audio_offset = 0U;
+	pump_ac3(d);
+	return 1U;
+}
+
+static uint32_t mkv_route_pcmle(struct sdk_video_mpeg2 *d,
+	const uint8_t *data, uint32_t length)
+{
+	static uint8_t pcm[4096U];
+	uint32_t frame_bytes = 2U * d->mkv_pcm_channels;
+
+	if (frame_bytes == 0U || length % frame_bytes != 0U)
+		return 1U;
+	while (d->mkv_audio_offset < length) {
+		uint32_t frames = (length - d->mkv_audio_offset) / frame_bytes;
+		uint32_t room = ring_free(d) / 4U;
+		uint32_t i;
+
+		if (d->pcm_backpressure || room == 0U) {
+			raise_backpressure(d);
+			return 0U;
+		}
+		if (frames > room)
+			frames = room;
+		if (frames > sizeof(pcm) / 4U)
+			frames = sizeof(pcm) / 4U;
+		for (i = 0U; i < frames; i++) {
+			const uint8_t *in = data + d->mkv_audio_offset + i * frame_bytes;
+			uint16_t left = (uint16_t)in[0] | ((uint16_t)in[1] << 8);
+			uint16_t right = d->mkv_pcm_channels == 2U
+				? (uint16_t)in[2] | ((uint16_t)in[3] << 8) : left;
+
+			pcm[4U * i] = (uint8_t)(left >> 8);
+			pcm[4U * i + 1U] = (uint8_t)left;
+			pcm[4U * i + 2U] = (uint8_t)(right >> 8);
+			pcm[4U * i + 3U] = (uint8_t)right;
+		}
+		ring_emit(d, pcm, frames * 4U);
+		advance_audio_timeline(d, frames, 48000U);
+		d->mkv_audio_offset += frames * frame_bytes;
+	}
+	d->mkv_audio_offset = 0U;
+	d->audio_frames++;
+	return 1U;
+}
+
+static int mkv_take_audio(struct sdk_video_mpeg2 *d)
+{
+	struct webm_block *blk = &d->mkv_audio_pending;
+	uint64_t pts;
+	uint32_t done;
+
+	if (!webm_pts90(blk->timecode, d->mkv_demux.scale_ns, &pts))
+		return -1;
+	mkv_observe_audio(d, pts);
+	if (d->mp2_selected)
+		done = mkv_route_mp2(d, blk->data, blk->size);
+	else if (d->ac3_selected)
+		done = mkv_route_ac3(d, blk->data, blk->size);
+	else if (d->pcmle_selected)
+		done = mkv_route_pcmle(d, blk->data, blk->size);
+	else
+		done = 1U;
+	if (!done)
+		return 0;
+	d->mkv_audio_pending_valid = 0U;
+	d->mkv_audio_pending_observed = 0U;
+	return 1;
+}
+
+static int mkv_feed_next(struct sdk_video_mpeg2 *d)
+{
+	struct webm_block blk;
+	const uint8_t *priv;
+	uint32_t tag;
+	uint64_t pts;
+	int rc;
+
+	if (d->mkv_private_pending) {
+		const struct webm_track *video = mkv_video_track(d);
+
+		priv = webm_track_priv(&d->mkv_demux, video);
+		mpeg2_buffer(d->decoder, (uint8_t *)(uintptr_t)priv,
+			     (uint8_t *)(uintptr_t)priv + video->priv_len);
+		d->mkv_private_pending = 0U;
+		return 1;
+	}
+	if (d->mkv_audio_pending_valid)
+		return mkv_take_audio(d);
+	rc = mkv_next_block(d, &blk);
+	if (rc <= 0)
+		return rc;
+	if (blk.track == d->mkv_video_track) {
+		if (!webm_pts90(blk.timecode, d->mkv_demux.scale_ns, &pts))
+			return -1;
+		if (!d->video_origin_seen)
+			seed_origin(d, pts);
+		tag = d->next_tag++;
+		pts_slot_store(d, tag, pts, M2_NO_PTS);
+		mpeg2_tag_picture(d->decoder, tag, 0U);
+		mpeg2_buffer(d->decoder, (uint8_t *)(uintptr_t)blk.data,
+			     (uint8_t *)(uintptr_t)blk.data + blk.size);
+		d->video_seen = 1U;
+		return 1;
+	}
+	if (d->media_configured && d->mkv_audio_track != 0U &&
+	    blk.track == d->mkv_audio_track) {
+		d->mkv_audio_pending = blk;
+		d->mkv_audio_pending_valid = 1U;
+		return mkv_take_audio(d);
+	}
+	return 1;
+}
 static void *mpeg2_create(uint32_t pool_owner)
 {
 	struct sdk_video_mpeg2 *d;
@@ -1528,6 +1860,9 @@ static void mpeg2_destroy(void *decoder)
 	if (d->decoder)
 		mpeg2_close(d->decoder);
 	M2_FREE(d->mp2_input);
+	webm_close(&d->mkv_demux);
+	M2_FREE(d->mkv_block);
+	M2_FREE(d->mkv_win.data);
 	sdk_dvd_ac3_destroy(&d->ac3);
 	M2_FREE(d->audio_fifo);
 	M2_FREE(d->video_fifo);
@@ -1535,6 +1870,124 @@ static void mpeg2_destroy(void *decoder)
 	M2_FREE(d);
 }
 
+static void *mkv_create(uint32_t codec, uint32_t pool_owner)
+{
+	struct sdk_video_mpeg2 *d = mpeg2_create(pool_owner);
+
+	if (!d)
+		return 0;
+	d->mkv_block = (uint8_t *)M2_MALLOC(WEBM_MAX_FRAME);
+	webm_window_init(&d->mkv_win,
+		(uint8_t *)M2_MALLOC(M2_MKV_WINDOW_CAP), M2_MKV_WINDOW_CAP);
+	if (!d->mkv_block || !d->mkv_win.data) {
+		mpeg2_destroy(d);
+		return 0;
+	}
+	d->mkv_container = 1U;
+	d->mkv_expect_codec = codec == SDK_VIDEO_CODEC_MPEG1
+		? WEBM_CODEC_MPEG1 : WEBM_CODEC_MPEG2;
+	d->mpeg1 = codec == SDK_VIDEO_CODEC_MPEG1;
+	return d;
+}
+
+static void *mkv_mpeg1_create(uint32_t pool_owner)
+{
+	return mkv_create(SDK_VIDEO_CODEC_MPEG1, pool_owner);
+}
+
+static void *mkv_mpeg2_create(uint32_t pool_owner)
+{
+	return mkv_create(SDK_VIDEO_CODEC_MPEG2, pool_owner);
+}
+
+static int mkv_write(void *decoder, const uint8_t *src, uint32_t length,
+	int eof, uint32_t *accepted)
+{
+	struct sdk_video_mpeg2 *d = (struct sdk_video_mpeg2 *)decoder;
+	uint32_t space;
+
+	if (!d || d->failed || (!src && length != 0U))
+		return SDK_VIDEO_BACKEND_WRITE_ERROR;
+	if (d->mkv_unsupported)
+		return SDK_VIDEO_BACKEND_WRITE_UNSUPPORTED;
+	if (d->input_eof)
+		return SDK_VIDEO_BACKEND_WRITE_ERROR;
+	if (d->mkv_opened) {
+		uint32_t ahead = d->mkv_win.start + d->mkv_win.filled -
+			d->mkv_win.cursor;
+		uint32_t room = ahead < M2_MKV_INPUT_AHEAD
+			? M2_MKV_INPUT_AHEAD - ahead : 0U;
+
+		if (length != 0U && room == 0U && !d->mkv_input_wanted)
+			return SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE;
+		if (!d->mkv_input_wanted && length > room) {
+			length = room;
+			eof = 0;
+		}
+		if (length > webm_window_space(&d->mkv_win))
+			webm_window_compact(&d->mkv_win);
+	}
+	space = webm_window_space(&d->mkv_win);
+	if (length != 0U && space == 0U)
+		return SDK_VIDEO_BACKEND_WRITE_BACKPRESSURE;
+	if (length > space) {
+		length = space;
+		eof = 0;
+	}
+	(void)webm_window_append(&d->mkv_win, src, length);
+	if (length != 0U)
+		d->mkv_input_wanted = 0U;
+	if (eof)
+		d->mkv_win.eof = 1;
+	if (accepted)
+		*accepted = length;
+	if (!d->mkv_opened)
+		(void)mkv_try_open(d);
+	if (d->mkv_unsupported)
+		return SDK_VIDEO_BACKEND_WRITE_UNSUPPORTED;
+	return d->failed ? SDK_VIDEO_BACKEND_WRITE_ERROR
+			 : SDK_VIDEO_BACKEND_WRITE_OK;
+}
+
+static int audio_drained(struct sdk_video_mpeg2 *d);
+static int mkv_decode(void *decoder, struct SDKVideoDecodedFrame *frame)
+{
+	struct sdk_video_mpeg2 *d = (struct sdk_video_mpeg2 *)decoder;
+	int result;
+
+	if (!d || !frame || d->failed)
+		return SDK_VIDEO_BACKEND_ERROR;
+	if (d->mkv_unsupported)
+		return SDK_VIDEO_BACKEND_UNSUPPORTED;
+	if (!d->mkv_opened && !mkv_try_open(d))
+		return d->mkv_unsupported ? SDK_VIDEO_BACKEND_UNSUPPORTED :
+			(d->failed || d->mkv_win.eof ? SDK_VIDEO_BACKEND_ERROR :
+			 SDK_VIDEO_BACKEND_NEED_INPUT);
+	for (;;) {
+		result = parse_video(d, frame);
+		if (result > 0)
+			return SDK_VIDEO_BACKEND_FRAME;
+		if (result < 0)
+			return SDK_VIDEO_BACKEND_ERROR;
+		result = mkv_feed_next(d);
+		if (result < 0)
+			return d->mkv_unsupported ? SDK_VIDEO_BACKEND_UNSUPPORTED :
+				SDK_VIDEO_BACKEND_ERROR;
+		if (result == 0)
+			break;
+	}
+	if (d->video_done && audio_drained(d)) {
+		if ((d->video_frames == 0U && d->audio_frames == 0U) ||
+		    (d->video_seen && d->video_frames == 0U))
+			return SDK_VIDEO_BACKEND_ERROR;
+		if (d->media_configured)
+			d->media_flags |= SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE;
+		return SDK_VIDEO_BACKEND_DONE;
+	}
+	if (d->pcm_backpressure || d->mkv_audio_pending_valid)
+		return SDK_VIDEO_BACKEND_BACKPRESSURE;
+	return SDK_VIDEO_BACKEND_NEED_INPUT;
+}
 static int mpeg2_write(void *decoder, const uint8_t *src, uint32_t length,
                        int eof, uint32_t *accepted)
 {
@@ -1676,7 +2129,8 @@ static int mpeg2_configure_media(void *decoder,
 
 	if (!d || !config || d->media_configured)
 		return 0;
-	if (!(d->mpeg1 ? mpeg1_audio_ok : mpeg2_audio_ok)(config->audio_codec))
+	if (!(d->mkv_container ? mpeg2_audio_ok :
+	      (d->mpeg1 ? mpeg1_audio_ok : mpeg2_audio_ok))(config->audio_codec))
 		return 0;
 	/* No audio: no ring, and route_audio never selects a stream, so
 	 * every audio packet is dropped and the end waits on video only. */
@@ -1717,6 +2171,12 @@ static int mpeg2_configure_media(void *decoder,
 	}
 	d->media = *config;
 	d->media_configured = 1U;
+	if (d->mkv_opened && !mkv_select_audio(d)) {
+		d->media_configured = 0U;
+		M2_FREE(d->mp2_input);
+		d->mp2_input = 0;
+		return 0;
+	}
 	return 1;
 }
 
@@ -1735,6 +2195,9 @@ static int mpeg2_get_media_info(void *decoder,
 			info->sample_rate = d->mp2_rate;
 			info->channels = 2U;
 		}
+	} else if (d->pcmle_selected) {
+		info->sample_rate = d->mkv_pcm_rate;
+		info->channels = d->mkv_pcm_channels;
 	} else if (d->lpcm_selected) {
 		info->sample_rate = SDK_DVD_LPCM_SAMPLE_RATE_HZ;
 		info->channels = 2U;
@@ -1842,6 +2305,39 @@ static const struct SDKVideoDecoderOps mpeg2_ops = {
 	.geometry_ok = geometry_ok,
 	.audio_ok = mpeg2_audio_ok,
 };
+static const struct SDKVideoDecoderOps mkv_mpeg1_ops = {
+	.codec = SDK_VIDEO_CODEC_MPEG1,
+	.container = SDK_VIDEO_CONTAINER_WEBM,
+	.name = "libmpeg2 MPEG-1/Matroska",
+	.create = mkv_mpeg1_create,
+	.destroy = mpeg2_destroy,
+	.write = mkv_write,
+	.get_info = mpeg2_get_info,
+	.decode = mkv_decode,
+	.configure_media = mpeg2_configure_media,
+	.get_media_info = mpeg2_get_media_info,
+	.ack_media = mpeg2_ack_media,
+	.set_decode_flags = mpeg2_set_decode_flags,
+	.geometry_ok = geometry_ok,
+	.audio_ok = mpeg2_audio_ok,
+};
+
+static const struct SDKVideoDecoderOps mkv_mpeg2_ops = {
+	.codec = SDK_VIDEO_CODEC_MPEG2,
+	.container = SDK_VIDEO_CONTAINER_WEBM,
+	.name = "libmpeg2 MPEG-2/Matroska",
+	.create = mkv_mpeg2_create,
+	.destroy = mpeg2_destroy,
+	.write = mkv_write,
+	.get_info = mpeg2_get_info,
+	.decode = mkv_decode,
+	.configure_media = mpeg2_configure_media,
+	.get_media_info = mpeg2_get_media_info,
+	.ack_media = mpeg2_ack_media,
+	.set_decode_flags = mpeg2_set_decode_flags,
+	.geometry_ok = geometry_ok,
+	.audio_ok = mpeg2_audio_ok,
+};
 
 const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
 	                                                     uint32_t container)
@@ -1853,9 +2349,14 @@ const struct SDKVideoDecoderOps *sdk_video_backend_find(uint32_t codec,
 			return &mpeg2_ops;
 		return 0;
 	}
-	if (container == SDK_VIDEO_CONTAINER_WEBM &&
-	    (codec == SDK_VIDEO_CODEC_VP8 || codec == SDK_VIDEO_CODEC_VP9))
-		return sdk_video_webm_ops(codec);
+	if (container == SDK_VIDEO_CONTAINER_WEBM) {
+		if (codec == SDK_VIDEO_CODEC_MPEG1)
+			return &mkv_mpeg1_ops;
+		if (codec == SDK_VIDEO_CODEC_MPEG2)
+			return &mkv_mpeg2_ops;
+		if (codec == SDK_VIDEO_CODEC_VP8 || codec == SDK_VIDEO_CODEC_VP9)
+			return sdk_video_webm_ops(codec);
+	}
 	return 0;
 }
 

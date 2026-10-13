@@ -43,6 +43,8 @@ $(LIBA52_HOST_LIB): $(LIBMPEG2_HOST_LIB)
 # The MPEG-1/MPEG-2 Program Stream backend (libmpeg2 video, minimp3 MPEG
 # audio) and everything it links.
 MPEG_SRCS := $(FIRMWARE_SRC)/sdk_video_mpeg2.c \
+	$(FIRMWARE_SRC)/webm_parse.c \
+	$(FIRMWARE_SRC)/webm_window.c \
 	$(FIRMWARE_SRC)/sdk_dvd_ps.c \
 	$(FIRMWARE_SRC)/sdk_dvd_ac3.c \
 	$(FIRMWARE_SRC)/sdk_dvd_lpcm.c \

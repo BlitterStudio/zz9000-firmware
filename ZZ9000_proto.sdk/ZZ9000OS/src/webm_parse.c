@@ -162,6 +162,47 @@ static uint64_t be_uint(const uint8_t *p, uint32_t n)
 	return v;
 }
 
+static uint8_t codec_id(const uint8_t *p, uint32_t n)
+{
+	if (n == 5U && memcmp(p, "V_VP8", n) == 0)
+		return WEBM_CODEC_VP8;
+	if (n == 5U && memcmp(p, "V_VP9", n) == 0)
+		return WEBM_CODEC_VP9;
+	if (n == 7U && memcmp(p, "V_MPEG1", n) == 0)
+		return WEBM_CODEC_MPEG1;
+	if (n == 7U && memcmp(p, "V_MPEG2", n) == 0)
+		return WEBM_CODEC_MPEG2;
+	if (n == 6U && memcmp(p, "A_OPUS", n) == 0)
+		return WEBM_CODEC_OPUS;
+	if (n == 8U && memcmp(p, "A_VORBIS", n) == 0)
+		return WEBM_CODEC_VORBIS;
+	if (n == 9U && (memcmp(p, "A_MPEG/L1", n) == 0 ||
+		       memcmp(p, "A_MPEG/L2", n) == 0 ||
+		       memcmp(p, "A_MPEG/L3", n) == 0))
+		return WEBM_CODEC_MPEG_AUDIO;
+	if (n == 5U && memcmp(p, "A_AC3", n) == 0)
+		return WEBM_CODEC_AC3;
+	if (n == 13U && memcmp(p, "A_PCM/INT/LIT", n) == 0)
+		return WEBM_CODEC_PCM_LE;
+	return WEBM_CODEC_NONE;
+}
+
+static int matroska_video_codec(uint8_t codec)
+{
+	return codec == WEBM_CODEC_VP8 || codec == WEBM_CODEC_VP9 ||
+	       codec == WEBM_CODEC_MPEG1 || codec == WEBM_CODEC_MPEG2;
+}
+
+static int webm_video_codec(uint8_t codec)
+{
+	return codec == WEBM_CODEC_VP8 || codec == WEBM_CODEC_VP9;
+}
+
+static int webm_audio_codec(uint8_t codec)
+{
+	return codec == WEBM_CODEC_OPUS || codec == WEBM_CODEC_VORBIS;
+}
+
 static int parse_track(struct webm_demux *d, uint32_t end)
 {
 	struct webm_track *t;
@@ -193,13 +234,9 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 				if (cu || csz > room(d, child_end))
 					return fail(d, WEBM_ERR_LAYOUT);
 				cn = (uint32_t)csz;
-				/* Colour, Projection and other metadata the
-				 * demux does not read can be masters or longer
-				 * than any number it does read: skip them. */
 				if (cn > 8U) {
 					if (cid == ID_WIDTH || cid == ID_HEIGHT ||
-					    cid == ID_CHANNELS ||
-					    cid == ID_SAMPLERATE)
+					    cid == ID_CHANNELS || cid == ID_SAMPLERATE)
 						return fail(d, WEBM_ERR_LAYOUT);
 					if (skip_n(d, cn) != 0)
 						return -1;
@@ -213,19 +250,20 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 					t->height = (uint32_t)be_uint(scratch, cn);
 				else if (cid == ID_CHANNELS)
 					t->channels = (uint16_t)be_uint(scratch, cn);
-				else if (cid == ID_SAMPLERATE && (cn == 4 || cn == 8)) {
+				else if (cid == ID_SAMPLERATE && (cn == 4U || cn == 8U)) {
 					uint8_t le[8];
 					uint32_t i;
 					double rate;
 
-					for (i = 0; i < cn; i++)
+					for (i = 0U; i < cn; i++)
 						le[i] = scratch[cn - 1U - i];
-					if (cn == 4) {
+					if (cn == 4U) {
 						float f;
-						memcpy(&f, le, 4);
+
+						memcpy(&f, le, 4U);
 						rate = (double)f;
 					} else {
-						memcpy(&rate, le, 8);
+						memcpy(&rate, le, 8U);
 					}
 					if (rate > 0.0 && rate < 1000000.0)
 						t->rate = (uint32_t)(rate + 0.5);
@@ -250,7 +288,7 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		if (id == ID_DURATION) {
 			uint8_t b[8];
 
-			if (n == 0 || n > 8)
+			if (n == 0U || n > 8U)
 				return fail(d, WEBM_ERR_LAYOUT);
 			if (read_full(d, b, n) != 0)
 				return -1;
@@ -268,14 +306,8 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 				t->number = (uint32_t)be_uint(tmp, n);
 			else if (id == ID_TRKTYPE)
 				t->type = (uint8_t)be_uint(tmp, n);
-			else if (n >= 5 && memcmp(tmp, "V_VP8", 5) == 0)
-				t->codec = WEBM_CODEC_VP8;
-			else if (n >= 5 && memcmp(tmp, "V_VP9", 5) == 0)
-				t->codec = WEBM_CODEC_VP9;
-			else if (n >= 6 && memcmp(tmp, "A_OPUS", 6) == 0)
-				t->codec = WEBM_CODEC_OPUS;
-			else if (n >= 8 && memcmp(tmp, "A_VORBIS", 8) == 0)
-				t->codec = WEBM_CODEC_VORBIS;
+			else
+				t->codec = codec_id(tmp, n);
 			continue;
 		}
 		if (skip_n(d, n) != 0)
@@ -283,21 +315,22 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 	}
 	if (skip_n(d, room(d, end)) != 0)
 		return -1;
-	if (t->type == 1) {
+	if (t->number == 0U)
+		return fail(d, WEBM_ERR_LAYOUT);
+	if (t->type == 1U) {
 		if (d->have_video ||
-		    (t->codec != WEBM_CODEC_VP8 && t->codec != WEBM_CODEC_VP9))
+		    (d->is_matroska ? !matroska_video_codec(t->codec)
+		                    : !webm_video_codec(t->codec)))
 			return fail(d, WEBM_ERR_CODEC);
 		d->have_video = 1;
-	} else if (t->type == 2) {
-		if (d->have_audio ||
-		    (t->codec != WEBM_CODEC_OPUS && t->codec != WEBM_CODEC_VORBIS))
+	} else if (t->type == 2U && !d->is_matroska) {
+		if (d->have_audio || !webm_audio_codec(t->codec))
 			return fail(d, WEBM_ERR_CODEC);
 		d->have_audio = 1;
 	}
 	d->ntracks++;
 	return 0;
 }
-
 static int skip_container(struct webm_demux *d, uint32_t end, int kind)
 {
 	while (room(d, end) > 2U) {
@@ -563,9 +596,13 @@ int webm_open(struct webm_demux *d, const struct webm_io *io, uint8_t *buf,
 				if (read_full(d, doctype, (uint32_t)csz) != 0)
 					return -1;
 				doctype[csz] = 0;
-				if (strcmp((char *)doctype, "webm") != 0 &&
-				    strcmp((char *)doctype, "matroska") != 0)
+				if (strcmp((char *)doctype, "webm") == 0) {
+					d->is_matroska = 0U;
+				} else if (strcmp((char *)doctype, "matroska") == 0) {
+					d->is_matroska = 1U;
+				} else {
 					return fail(d, WEBM_ERR_CODEC);
+				}
 			} else if (skip_n(d, (uint32_t)csz) != 0) {
 				return -1;
 			}
@@ -773,6 +810,21 @@ int webm_payload_is_keyframe(uint8_t codec, const uint8_t *data, uint32_t size)
 
 	if (!data || size < 1U)
 		return 0;
+	if (codec == WEBM_CODEC_MPEG1 || codec == WEBM_CODEC_MPEG2) {
+		uint32_t i;
+
+		for (i = 0U; i + 4U <= size; i++) {
+			if (data[i] != 0U || data[i + 1U] != 0U ||
+			    data[i + 2U] != 1U)
+				continue;
+			if (data[i + 3U] == 0xb3U)
+				return 1;
+			if (data[i + 3U] == 0U && i + 6U <= size &&
+			    (data[i + 5U] & 0x38U) == 0x08U)
+				return 1;
+		}
+		return 0;
+	}
 	if (codec == WEBM_CODEC_VP8)
 		return size >= 3U && (data[0] & 1U) == 0U;
 	if (codec != WEBM_CODEC_VP9)

@@ -3218,8 +3218,10 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
                                ZZPlayBackendDecision *decision)
 {
   const ZZPlayWebMInfo *webm;
+  const char *container_name;
   ZZPlayMediaAudio media = ZZPLAY_MEDIA_AUDIO_NONE;
   ZZPlayAudioBackend requested;
+  int matroska;
   int strict = 0;
   uint32_t rate;
   char format[ZZPLAY_NOW_TEXT_MAX];
@@ -3228,13 +3230,11 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     return 0;
   }
   webm = &run->probe->webm;
+  matroska = webm->doc_type == ZZPLAY_WEBM_DOCTYPE_MATROSKA;
+  container_name = zzplay_webm_doc_type_name(webm->doc_type);
   switch (webm->refusal) {
   case ZZPLAY_WEBM_OK:
     break;
-  case ZZPLAY_WEBM_MATROSKA:
-    zzplay_error(runtime,
-                 "zzplay: Matroska files that are not WebM are not supported\n");
-    goto refused;
   case ZZPLAY_WEBM_TWO_VIDEO:
     zzplay_error(runtime,
                  "zzplay: WebM files with more than one video track "
@@ -3286,36 +3286,26 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     ZZPlayContainerPolicy *policy = &runtime->container;
 
     memset(policy, 0, sizeof(*policy));
-    policy->title = "WebM";
+    policy->title = container_name;
     policy->video_codec = zzplay_webm_video_codec_id(webm->video);
     policy->container = ZZ9K_VIDEO_CONTAINER_WEBM;
     policy->audio_codec = zzplay_webm_audio_codec_id(webm->audio);
-    policy->video_flags = webm->video == ZZPLAY_WEBM_VIDEO_VP9
-                              ? ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9
-                              : ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8;
-    policy->audio_flags =
-        webm->audio == ZZPLAY_WEBM_AUDIO_OPUS
-            ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS
-            : webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS
-                  ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS
-                  : 0U;
+    policy->video_flags = matroska ? ZZ9K_SERVICE_FLAG_VIDEO_MPEG2 : (webm->video == ZZPLAY_WEBM_VIDEO_VP9 ? ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9 : ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8);
+    policy->audio_flags = matroska ? (webm->audio == ZZPLAY_WEBM_AUDIO_MPEG ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2 : 0U) : (webm->audio == ZZPLAY_WEBM_AUDIO_OPUS ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS : webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS : 0U);
     policy->video_name = zzplay_webm_video_name(webm->video);
     policy->audio_name = zzplay_webm_audio_name(webm->audio);
-    policy->service_missing =
-        "zzplay: WebM playback is not supported by this firmware\n";
-    policy->begin_refused =
-        "zzplay: WebM playback was refused by the firmware\n";
-    policy->stream_refused = "zzplay: this WebM stream is not supported\n";
-    /* VP8/VP9 keyframes can be seconds apart; the container carries a
-     * real presentation timeline for the position display. */
-    policy->keyframe_skip = 1U;
+    policy->service_missing = matroska ? "zzplay: Matroska MPEG playback is not supported by this firmware\n" : "zzplay: WebM playback is not supported by this firmware\n";
+    policy->begin_refused = matroska ? "zzplay: Matroska MPEG playback was refused by the firmware\n" : "zzplay: WebM playback was refused by the firmware\n";
+    policy->stream_refused = matroska ? "zzplay: this Matroska MPEG stream is not supported\n" : "zzplay: this WebM stream is not supported\n";
+    policy->keyframe_skip = matroska ? 0U : 1U;
+    policy->skip_late_b = matroska ? 1U : 0U;
     policy->pts_position = 1U;
   }
-  if (webm->audio == ZZPLAY_WEBM_AUDIO_OPUS) {
-    media = ZZPLAY_MEDIA_AUDIO_OPUS;
-  } else if (webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS) {
-    media = ZZPLAY_MEDIA_AUDIO_VORBIS;
-  }
+  if (webm->audio == ZZPLAY_WEBM_AUDIO_OPUS) media = ZZPLAY_MEDIA_AUDIO_OPUS;
+  else if (webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS) media = ZZPLAY_MEDIA_AUDIO_VORBIS;
+  else if (webm->audio == ZZPLAY_WEBM_AUDIO_MPEG) media = ZZPLAY_MEDIA_AUDIO_MP2;
+  else if (webm->audio == ZZPLAY_WEBM_AUDIO_AC3) media = ZZPLAY_MEDIA_AUDIO_AC3;
+  else if (webm->audio == ZZPLAY_WEBM_AUDIO_LPCM) media = ZZPLAY_MEDIA_AUDIO_LPCM;
   requested = zzplay_prefs_requested_backend(
       &runtime->prefs, &runtime->options, media, &strict);
   runtime->audio_strict = (uint8_t)(strict ? 1 : 0);

@@ -304,62 +304,35 @@ static int zzplay_webm_codec_is(const ZZPlayWebMCur *cur, const char *name)
 static void zzplay_webm_finish_track(ZZPlayWebMCur *cur)
 {
   ZZPlayWebMInfo *info = cur->info;
-
-  if (!cur->track_enabled || cur->codec[0] == '\0') {
-    return;
-  }
+  int matroska = info->doc_type == ZZPLAY_WEBM_DOCTYPE_MATROSKA;
+  if (!cur->track_enabled || cur->codec[0] == '\0') return;
   if (cur->track_type == 1U) {
-    cur->video_tracks++;
-    if (cur->video_tracks > 1) {
-      zzplay_webm_fail(cur, ZZPLAY_WEBM_TWO_VIDEO);
-      return;
-    }
-    if (zzplay_webm_codec_is(cur, "V_VP8")) {
-      info->video = ZZPLAY_WEBM_VIDEO_VP8;
-    } else if (zzplay_webm_codec_is(cur, "V_VP9")) {
-      info->video = ZZPLAY_WEBM_VIDEO_VP9;
-    } else {
-      zzplay_webm_fail(cur, ZZPLAY_WEBM_UNKNOWN_CODEC);
-      return;
-    }
-    if (cur->pixel_w == 0U || cur->pixel_h == 0U) {
-      zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
-      return;
-    }
-    info->width = cur->pixel_w;
-    info->height = cur->pixel_h;
-    info->display_width = cur->disp_w;
-    info->display_height = cur->disp_h;
-    info->pose_roll_present = (uint8_t)cur->pose_roll_present;
-    info->pose_roll_milli = cur->pose_roll_milli;
-    if (cur->track_default_ns != 0U &&
-        cur->track_default_ns <= 1000000000U) {
-      uint64_t milli = 1000000000000ULL / cur->track_default_ns;
-
-      if (milli > 0U && milli <= 240000U) {
-        info->frame_rate_milli = (uint32_t)milli;
-      }
-    }
+    if (++cur->video_tracks > 1) { zzplay_webm_fail(cur, ZZPLAY_WEBM_TWO_VIDEO); return; }
+    if (!matroska && zzplay_webm_codec_is(cur,"V_VP8")) info->video=ZZPLAY_WEBM_VIDEO_VP8;
+    else if (!matroska && zzplay_webm_codec_is(cur,"V_VP9")) info->video=ZZPLAY_WEBM_VIDEO_VP9;
+    else if (matroska && zzplay_webm_codec_is(cur,"V_MPEG1")) info->video=ZZPLAY_WEBM_VIDEO_MPEG1;
+    else if (matroska && zzplay_webm_codec_is(cur,"V_MPEG2")) info->video=ZZPLAY_WEBM_VIDEO_MPEG2;
+    else { zzplay_webm_fail(cur,ZZPLAY_WEBM_UNKNOWN_CODEC); return; }
+    if (!cur->pixel_w || !cur->pixel_h) { zzplay_webm_fail(cur,ZZPLAY_WEBM_HOSTILE); return; }
+    info->width=cur->pixel_w; info->height=cur->pixel_h; info->display_width=cur->disp_w; info->display_height=cur->disp_h;
+    if (cur->track_default_ns && cur->track_default_ns<=1000000000U) { uint64_t m=1000000000000ULL/cur->track_default_ns; if(m&&m<=240000U) info->frame_rate_milli=(uint32_t)m; }
     return;
   }
-  if (cur->track_type == 2U) {
-    cur->audio_tracks++;
-    if (cur->audio_tracks > 1) {
-      zzplay_webm_fail(cur, ZZPLAY_WEBM_TWO_AUDIO);
-      return;
-    }
-    if (zzplay_webm_codec_is(cur, "A_OPUS")) {
-      info->audio = ZZPLAY_WEBM_AUDIO_OPUS;
-      info->sample_rate = 48000U;
-    } else if (zzplay_webm_codec_is(cur, "A_VORBIS")) {
-      info->audio = ZZPLAY_WEBM_AUDIO_VORBIS;
-      info->sample_rate = cur->saw_rate ? cur->rate : 8000U;
-    } else {
-      zzplay_webm_fail(cur, ZZPLAY_WEBM_UNKNOWN_CODEC);
-      return;
-    }
-    info->channels = cur->channels != 0U ? cur->channels : 1U;
+  if (cur->track_type != 2U) return;
+  if (matroska) {
+    if (info->audio != ZZPLAY_WEBM_AUDIO_NONE) return;
+    if (zzplay_webm_codec_is(cur,"A_AC3")) info->audio=ZZPLAY_WEBM_AUDIO_AC3;
+    else if (zzplay_webm_codec_is(cur,"A_MPEG/L1")||zzplay_webm_codec_is(cur,"A_MPEG/L2")||zzplay_webm_codec_is(cur,"A_MPEG/L3")) info->audio=ZZPLAY_WEBM_AUDIO_MPEG;
+    else if (zzplay_webm_codec_is(cur,"A_PCM/INT/LIT")) info->audio=ZZPLAY_WEBM_AUDIO_LPCM;
+    else return;
+    info->sample_rate=cur->saw_rate?cur->rate:0U;
+  } else {
+    if (++cur->audio_tracks>1) { zzplay_webm_fail(cur,ZZPLAY_WEBM_TWO_AUDIO); return; }
+    if (zzplay_webm_codec_is(cur,"A_OPUS")) { info->audio=ZZPLAY_WEBM_AUDIO_OPUS; info->sample_rate=48000U; }
+    else if (zzplay_webm_codec_is(cur,"A_VORBIS")) { info->audio=ZZPLAY_WEBM_AUDIO_VORBIS; info->sample_rate=cur->saw_rate?cur->rate:8000U; }
+    else { zzplay_webm_fail(cur,ZZPLAY_WEBM_UNKNOWN_CODEC); return; }
   }
+  info->channels=cur->channels?cur->channels:1U;
 }
 
 static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
@@ -446,12 +419,12 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
       }
       cur->saw_doctype = 1;
       if (n == 4U && memcmp(payload, "webm", 4U) == 0) {
+        cur->info->doc_type = ZZPLAY_WEBM_DOCTYPE_WEBM;
         cur->info->refusal = ZZPLAY_WEBM_OK;
       } else if (n == 8U && memcmp(payload, "matroska", 8U) == 0) {
-        zzplay_webm_fail(cur, ZZPLAY_WEBM_MATROSKA);
-      } else {
-        zzplay_webm_fail(cur, ZZPLAY_WEBM_NOT_CONTAINER);
-      }
+        cur->info->doc_type = ZZPLAY_WEBM_DOCTYPE_MATROSKA;
+        cur->info->refusal = ZZPLAY_WEBM_OK;
+      } else zzplay_webm_fail(cur, ZZPLAY_WEBM_NOT_CONTAINER);
       continue;
     }
     if (kind == WALK_EBML &&
@@ -877,49 +850,13 @@ int zzplay_webm_service_ready(uint32_t flags, ZZPlayWebMVideo video,
   return need != 0U && (flags & need) == need;
 }
 
-uint32_t zzplay_webm_video_codec_id(ZZPlayWebMVideo video)
-{
-  if (video == ZZPLAY_WEBM_VIDEO_VP8) {
-    return ZZ9K_VIDEO_CODEC_VP8;
-  }
-  if (video == ZZPLAY_WEBM_VIDEO_VP9) {
-    return ZZ9K_VIDEO_CODEC_VP9;
-  }
-  return 0U;
-}
-
-uint32_t zzplay_webm_audio_codec_id(ZZPlayWebMAudio audio)
-{
-  if (audio == ZZPLAY_WEBM_AUDIO_OPUS) {
-    return ZZ9K_MEDIA_AUDIO_OPUS;
-  }
-  if (audio == ZZPLAY_WEBM_AUDIO_VORBIS) {
-    return ZZ9K_MEDIA_AUDIO_VORBIS;
-  }
-  return ZZ9K_MEDIA_AUDIO_NONE;
-}
-
-const char *zzplay_webm_video_name(ZZPlayWebMVideo video)
-{
-  if (video == ZZPLAY_WEBM_VIDEO_VP8) {
-    return "VP8";
-  }
-  if (video == ZZPLAY_WEBM_VIDEO_VP9) {
-    return "VP9";
-  }
-  return "video";
-}
-
-const char *zzplay_webm_audio_name(ZZPlayWebMAudio audio)
-{
-  if (audio == ZZPLAY_WEBM_AUDIO_OPUS) {
-    return "Opus";
-  }
-  if (audio == ZZPLAY_WEBM_AUDIO_VORBIS) {
-    return "Vorbis";
-  }
-  return "audio";
-}
+uint32_t zzplay_webm_video_codec_id(ZZPlayWebMVideo v) { if(v==ZZPLAY_WEBM_VIDEO_MPEG1)return ZZ9K_VIDEO_CODEC_MPEG1; if(v==ZZPLAY_WEBM_VIDEO_MPEG2)return ZZ9K_VIDEO_CODEC_MPEG2; if(v==ZZPLAY_WEBM_VIDEO_VP8)return ZZ9K_VIDEO_CODEC_VP8; if(v==ZZPLAY_WEBM_VIDEO_VP9)return ZZ9K_VIDEO_CODEC_VP9; return 0U; }
+uint32_t zzplay_webm_audio_codec_id(ZZPlayWebMAudio a) { if(a==ZZPLAY_WEBM_AUDIO_MPEG)return ZZ9K_MEDIA_AUDIO_MP2; if(a==ZZPLAY_WEBM_AUDIO_AC3)return ZZ9K_MEDIA_AUDIO_AC3; if(a==ZZPLAY_WEBM_AUDIO_LPCM)return ZZ9K_MEDIA_AUDIO_LPCM; if(a==ZZPLAY_WEBM_AUDIO_OPUS)return ZZ9K_MEDIA_AUDIO_OPUS; if(a==ZZPLAY_WEBM_AUDIO_VORBIS)return ZZ9K_MEDIA_AUDIO_VORBIS; return ZZ9K_MEDIA_AUDIO_NONE; }
+const char *zzplay_webm_video_name(ZZPlayWebMVideo v) { if(v==ZZPLAY_WEBM_VIDEO_MPEG1)return "MPEG-1"; if(v==ZZPLAY_WEBM_VIDEO_MPEG2)return "MPEG-2"; if(v==ZZPLAY_WEBM_VIDEO_VP8)return "VP8"; if(v==ZZPLAY_WEBM_VIDEO_VP9)return "VP9"; return "video"; }
+const char *zzplay_webm_audio_name(ZZPlayWebMAudio a) { if(a==ZZPLAY_WEBM_AUDIO_MPEG)return "MPEG audio"; if(a==ZZPLAY_WEBM_AUDIO_AC3)return "AC-3"; if(a==ZZPLAY_WEBM_AUDIO_LPCM)return "LPCM"; if(a==ZZPLAY_WEBM_AUDIO_OPUS)return "Opus"; if(a==ZZPLAY_WEBM_AUDIO_VORBIS)return "Vorbis"; return "audio"; }
+uint32_t zzplay_matroska_required_flags(ZZPlayWebMVideo v, ZZPlayWebMAudio a) { uint32_t f=ZZ9K_SERVICE_FLAG_VIDEO_DIRECT_OVERLAY|ZZ9K_SERVICE_FLAG_VIDEO_STREAMING_INPUT|ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_SESSION|ZZ9K_SERVICE_FLAG_VIDEO_MPEG2; if(v!=ZZPLAY_WEBM_VIDEO_MPEG1&&v!=ZZPLAY_WEBM_VIDEO_MPEG2)return 0U; if(a==ZZPLAY_WEBM_AUDIO_MPEG)f|=ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2; return f; }
+int zzplay_matroska_service_ready(uint32_t f, ZZPlayWebMVideo v, ZZPlayWebMAudio a) { uint32_t n=zzplay_matroska_required_flags(v,a); return n&&(f&n)==n; }
+const char *zzplay_webm_doc_type_name(ZZPlayWebMDocType d) { return d==ZZPLAY_WEBM_DOCTYPE_MATROSKA ? "Matroska" : "WebM"; } 
 
 int zzplay_probe_webm(const uint8_t *data, size_t length, int capped,
                       ZZPlayWebMInfo *info)
@@ -949,10 +886,7 @@ int zzplay_probe_webm(const uint8_t *data, size_t length, int capped,
     }
     return 1;
   }
-  if (info->refusal == ZZPLAY_WEBM_MATROSKA ||
-      info->refusal == ZZPLAY_WEBM_NOT_CONTAINER) {
-    return 1;
-  }
+  if (info->refusal == ZZPLAY_WEBM_NOT_CONTAINER) return 1;
   if (info->refusal != ZZPLAY_WEBM_OK) {
     return 1;
   }
