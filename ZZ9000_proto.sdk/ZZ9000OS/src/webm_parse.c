@@ -269,69 +269,32 @@ static int matroska_audio_for_video(uint8_t video, uint8_t audio)
 	return mpeg ? !vp_audio : vp_audio;
 }
 
-/* The private store holds stored tracks' CodecPrivate in track order;
- * close the gaps dropped ones left. */
-static void priv_compact(struct webm_demux *d)
+/* The CodecPrivate a backend reads: an MPEG video's sequence header and
+ * Opus or Vorbis headers. The VP8/VP9 decoders and the AC-3, MPEG audio
+ * and PCM decoders read none. */
+static int track_reads_priv(const struct webm_track *t)
 {
-	uint32_t used = 0U;
-	unsigned i;
-
-	for (i = 0U; i < d->ntracks; i++) {
-		struct webm_track *a = &d->tracks[i];
-
-		if (a->priv_len == 0U) {
-			a->priv_off = 0U;
-			continue;
-		}
-		if (a->priv_off != used)
-			memmove(d->priv_store + used,
-				d->priv_store + a->priv_off, a->priv_len);
-		a->priv_off = used;
-		used += a->priv_len;
-	}
-	d->priv_used = used;
+	if (t->type == 1U)
+		return t->codec == WEBM_CODEC_MPEG1 || t->codec == WEBM_CODEC_MPEG2;
+	return t->type == 2U &&
+	       (t->codec == WEBM_CODEC_OPUS || t->codec == WEBM_CODEC_VORBIS);
 }
 
-/* The video track's CodecPrivate comes first; audio CodecPrivate is best
- * effort. To make room for n bytes of a video track's, drop the stored
- * CodecPrivate of audio that video cannot use, then of other audio,
- * largest first, until it fits. A kept Opus or Vorbis track without it
- * is refused by the backend only if that track is played. */
-static void matroska_make_room(struct webm_demux *d, uint8_t video,
-			       uint32_t n)
+/* Only an MPEG video and Opus or Vorbis audio keep CodecPrivate, and the
+ * MPEG backend plays neither of those, so when an MPEG video's does not
+ * fit, the audio CodecPrivate stored before it (all the store holds) is
+ * dropped. Those tracks are dropped after the last TrackEntry anyway. */
+static void matroska_make_room(struct webm_demux *d, uint32_t n)
 {
 	unsigned i;
 
 	if (WEBM_MAX_PRIV - d->priv_used >= n)
 		return;
-	for (i = 0U; i < d->ntracks; i++)
-		if (d->tracks[i].type == 2U &&
-		    !matroska_audio_for_video(video, d->tracks[i].codec))
-			d->tracks[i].priv_len = 0U;
-	priv_compact(d);
-	while (WEBM_MAX_PRIV - d->priv_used < n) {
-		struct webm_track *largest = NULL;
-
-		for (i = 0U; i < d->ntracks; i++)
-			if (d->tracks[i].type == 2U && d->tracks[i].priv_len &&
-			    (!largest ||
-			     d->tracks[i].priv_len > largest->priv_len))
-				largest = &d->tracks[i];
-		if (!largest)
-			return;
-		largest->priv_len = 0U;
-		priv_compact(d);
+	for (i = 0U; i < d->ntracks; i++) {
+		d->tracks[i].priv_off = 0U;
+		d->tracks[i].priv_len = 0U;
 	}
-}
-
-/* The CodecPrivate a backend reads: the video's (VP9 features, MPEG
- * sequence header) and the Opus or Vorbis headers. AC-3, MPEG audio and
- * PCM decoders read none. */
-static int track_reads_priv(const struct webm_track *t)
-{
-	return t->type == 1U ||
-	       (t->type == 2U &&
-	        (t->codec == WEBM_CODEC_OPUS || t->codec == WEBM_CODEC_VORBIS));
+	d->priv_used = 0U;
 }
 
 static int parse_track(struct webm_demux *d, uint32_t end)
@@ -509,10 +472,10 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		priv_overflow = 0;
 	}
 	if (priv_len) {
-		/* The video's CodecPrivate comes first; that of Opus or
-		 * Vorbis is best effort. */
+		/* An MPEG video's CodecPrivate comes first; Opus or Vorbis
+		 * headers are best effort. */
 		if (d->is_matroska && t->type == 1U)
-			matroska_make_room(d, t->codec, priv_len);
+			matroska_make_room(d, priv_len);
 		if (WEBM_MAX_PRIV - d->priv_used >= priv_len) {
 			memcpy(d->priv_store + d->priv_used, d->buf, priv_len);
 			t->priv_off = d->priv_used;
@@ -883,8 +846,66 @@ int webm_open(struct webm_demux *d, const struct webm_io *io, uint8_t *buf,
 	}
 }
 
+/* Reads the rest of the BlockGroup at d->group_end. Children are passed
+ * over through drop_n, so one larger than the input window (a Block of
+ * an unstored track, BlockAdditions, CodecState) returns
+ * WEBM_NEXT_SKIPPED and the next call resumes here. 1 with the group's
+ * block, 0 when it had none to return, -1 on error. */
+static int read_group(struct webm_demux *d, struct webm_block *blk)
+{
+	int rc;
+
+	while (room(d, d->group_end) > 1U) {
+		uint32_t cid;
+		uint64_t csz;
+		int cu = 0;
+
+		if (d->group_ignored) {
+			/* The rest of the group goes with its Block. */
+			rc = drop_n(d, room(d, d->group_end));
+			if (rc != 0)
+				return rc < 0 ? -1 : WEBM_NEXT_SKIPPED;
+			break;
+		}
+		if (read_id_size(d, &cid, &csz, &cu) != 0)
+			return -1;
+		if (cu || csz > room(d, d->group_end))
+			return fail(d, WEBM_ERR_LAYOUT);
+		if (cid == ID_REFBLOCK)
+			d->group_key = 0;
+		if (cid == ID_BLOCK && !d->group_saw) {
+			rc = take_block(d, (uint32_t)csz, 0);
+			if (rc < 0)
+				return -1;
+			d->group_saw = rc == 0;
+			d->group_ignored = rc > 0;
+			continue;
+		}
+		rc = drop_n(d, csz);
+		if (rc != 0)
+			return rc < 0 ? -1 : WEBM_NEXT_SKIPPED;
+	}
+	rc = drop_n(d, room(d, d->group_end));
+	if (rc != 0)
+		return rc < 0 ? -1 : WEBM_NEXT_SKIPPED;
+	d->group_end = 0U;
+	if (!d->group_saw)
+		return 0;
+	/* A ReferenceBlock may follow the Block, so the key flag is known
+	 * only once the group is read. */
+	d->lace_key = d->group_key;
+	return emit(d, blk);
+}
+
 int webm_next(struct webm_demux *d, struct webm_block *blk)
 {
+	/* A group resumes before its block's laces are returned. */
+	if (d->group_end) {
+		int rc = read_group(d, blk);
+
+		if (rc != 0)
+			return rc;
+	}
 	if (d->lace_i < d->lace_n)
 		return emit(d, blk);
 	for (;;) {
@@ -948,50 +969,15 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 			continue;
 		}
 		if (id == ID_GROUP) {
-			uint32_t end;
-			int saw = 0, ignored = 0, key = 1;
-
 			if (unknown || size > room_in(d, d->cluster_end))
 				return fail(d, WEBM_ERR_LAYOUT);
-			end = tell(d) + (uint32_t)size;
-			while (!ignored && room(d, end) > 1U) {
-				uint32_t cid;
-				uint64_t csz;
-				int cu = 0;
-
-				if (read_id_size(d, &cid, &csz, &cu) != 0)
-					return -1;
-				if (cu || csz > room(d, end))
-					return fail(d, WEBM_ERR_LAYOUT);
-				if (cid == ID_REFBLOCK)
-					key = 0;
-				if (cid == ID_BLOCK) {
-					rc = take_block(d, (uint32_t)csz, 0);
-					if (rc < 0)
-						return -1;
-					saw = rc == 0;
-					ignored = rc > 0;
-				} else if (skip_n(d, csz) != 0) {
-					return -1;
-				}
-			}
-			if (ignored) {
-				/* The rest of the group goes with its Block. */
-				rc = drop_n(d, room(d, end));
-				if (rc < 0)
-					return -1;
-				if (rc > 0)
-					return WEBM_NEXT_SKIPPED;
-				continue;
-			}
-			if (skip_n(d, room(d, end)) != 0)
-				return -1;
-			if (saw) {
-				/* A ReferenceBlock may follow the Block, so the
-				 * key flag is known only once the group is read. */
-				d->lace_key = (uint8_t)key;
-				return emit(d, blk);
-			}
+			d->group_end = tell(d) + (uint32_t)size;
+			d->group_saw = 0U;
+			d->group_ignored = 0U;
+			d->group_key = 1U;
+			rc = read_group(d, blk);
+			if (rc != 0)
+				return rc;
 			continue;
 		}
 		if (id == ID_CLUSTER) {

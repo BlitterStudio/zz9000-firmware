@@ -117,6 +117,12 @@ struct webm_demux {
 	uint32_t cluster_end;
 	int64_t cluster_tc;
 	int in_cluster;
+	/* A BlockGroup being read (group_end != 0): webm_next can return
+	 * WEBM_NEXT_SKIPPED between its children and resume there. */
+	uint32_t group_end;
+	uint8_t group_saw;     /* its Block was taken */
+	uint8_t group_ignored; /* its Block belongs to an unstored track */
+	uint8_t group_key;     /* no ReferenceBlock so far */
 	uint8_t lace_i;
 	uint8_t lace_n;
 	uint8_t lace_key;

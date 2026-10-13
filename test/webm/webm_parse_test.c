@@ -543,23 +543,25 @@ static int test_matroska_ignored_tracks(void)
 		{3, 2, "A_MPEG/L2", 0, 0, 0, 0},
 		{4, 1, "V_VP8", 0, 0, 1, 0},
 	};
-	/* A video track's CodecPrivate takes the room Opus/Vorbis
-	 * CodecPrivate holds: first that of audio it cannot use, then the
-	 * largest. AC-3 CodecPrivate is never kept: its decoder reads none. */
+	/* An MPEG video's CodecPrivate takes the room Opus/Vorbis headers
+	 * hold; those tracks are dropped with MPEG video anyway. AC-3
+	 * CodecPrivate is never kept: its decoder reads none. */
 	static const struct mkv_track_spec mpeg_late[] = {
 		{1, 2, "A_VORBIS", 0, 60000, 0, 0},
 		{2, 2, "A_AC3", 0, 100, 1, 1},
 		{3, 1, "V_MPEG2", 0, 6000, 1, 0},
 	};
+	/* The VP8/VP9 decoders read no CodecPrivate, so a VP video's is not
+	 * kept and never takes room from Opus or Vorbis headers. */
 	static const struct mkv_track_spec vp8_late[] = {
-		{1, 2, "A_VORBIS", 0, 40000, 1, 1},
+		{1, 2, "A_VORBIS", 0, 40000, 1, 0},
 		{2, 2, "A_OPUS", 0, 20000, 1, 0},
-		{3, 1, "V_VP8", 0, 30000, 1, 0},
+		{3, 1, "V_VP8", 0, 30000, 1, 1},
 	};
 	/* TrackEntry children come in any order: the video's CodecPrivate
 	 * before its TrackType, and a FlagEnabled 0 after the CodecPrivate of
-	 * a video track that is then not kept, which must not evict audio
-	 * CodecPrivate. */
+	 * an MPEG video track that is then not kept, which must not evict
+	 * the headers the VP8 track's audio needs. */
 	static const struct mkv_track_spec priv_first[] = {
 		{1, 2, "A_VORBIS", 0, 60000, 0, 0},
 		{2, 1, "V_MPEG2", MKV_PRIV_FIRST, 6000, 1, 0},
@@ -567,7 +569,7 @@ static int test_matroska_ignored_tracks(void)
 	static const struct mkv_track_spec disabled_late[] = {
 		{1, 2, "A_OPUS", 0, 30000, 1, 0},
 		{2, 2, "A_VORBIS", 0, 30000, 1, 0},
-		{3, 1, "V_VP8", MKV_DISABLED | MKV_FLAG_LAST, 10000, 0, 0},
+		{3, 1, "V_MPEG2", MKV_DISABLED | MKV_FLAG_LAST, 10000, 0, 0},
 		{4, 1, "V_VP8", 0, 0, 1, 0},
 	};
 	/* WebM: a disabled audio track does not take the one audio slot. */
@@ -637,9 +639,11 @@ static int test_matroska_ignored_tracks(void)
 
 /* Streams a file through a 64 KiB window in 4 KiB writes the way the
  * media backends do: mark and snapshot around each webm_next, rewind and
- * write more on WEBM_ERR_NEED, compact when a write does not fit. Blocks
- * of an unstored track and a top-level element, each larger than the
- * window, are passed over (WEBM_NEXT_SKIPPED) instead of exhausting it. */
+ * write more on WEBM_ERR_NEED, compact when a write does not fit. Data
+ * larger than the window that no backend reads (blocks of an unstored
+ * track, BlockAdditions before or after a group's Block, a top-level
+ * element) is passed over (WEBM_NEXT_SKIPPED) instead of exhausting it,
+ * and a kept block in such a group still comes back. */
 static int test_window_skips_large_ignored_data(void)
 {
 	static const struct mkv_track_spec spec[] = {
@@ -658,7 +662,9 @@ static int test_window_skips_large_ignored_data(void)
 	int rc;
 
 	/* After the first Cluster (one block per track): a SimpleBlock and a
-	 * BlockGroup of the subtitle track, a top-level Void, then a last
+	 * BlockGroup of the subtitle track, a subtitle group whose large
+	 * BlockAdditions comes before its Block, a video group whose large
+	 * BlockAdditions follows its Block, a top-level Void, then a last
 	 * video block; the large ones are 300000 bytes. */
 	bu8(&cluster, 0xE7, 0);
 	add_block(&cluster, 0xA3, 2, 0, 0x80, big, 300000U);
@@ -666,10 +672,16 @@ static int test_window_skips_large_ignored_data(void)
 	add_block(&group, 0xA1, 2, 2, 0, big, 300000U);
 	bnest(&cluster, 0xA0, &group);
 	add_block(&cluster, 0xA3, 1, 3, 0x80, payload, sizeof(payload));
+	belem(&group, 0x75A1, big, 300000U);
+	add_block(&group, 0xA1, 2, 4, 0, payload, sizeof(payload));
+	bnest(&cluster, 0xA0, &group);
+	add_block(&group, 0xA1, 1, 5, 0, payload, sizeof(payload));
+	belem(&group, 0x75A1, big, 300000U);
+	bnest(&cluster, 0xA0, &group);
 	bnest(&extra, 0x1F43B675, &cluster);
 	belem(&extra, 0xEC, big, 300000U);
 	bu8(&cluster, 0xE7, 0);
-	add_block(&cluster, 0xA3, 1, 4, 0x80, payload, sizeof(payload));
+	add_block(&cluster, 0xA3, 1, 6, 0x80, payload, sizeof(payload));
 	bnest(&extra, 0x1F43B675, &cluster);
 	free(big);
 	file = make_mkv_file("matroska", spec, 2U, &extra);
@@ -719,7 +731,7 @@ static int test_window_skips_large_ignored_data(void)
 		video += blk.track == 1U;
 	}
 	free(file.p);
-	if (rc != 0 || video != 4U || skipped == 0U) {
+	if (rc != 0 || video != 5U || skipped == 0U) {
 		fprintf(stderr, "window skip: rc=%d err=%d video=%u skipped=%u\n",
 			rc, d.error, video, skipped);
 		return 1;
