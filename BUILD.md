@@ -3,425 +3,307 @@
 Copyright (C) 2026, Dimitris Panokostas <midwan@gmail.com>
 SPDX-License-Identifier: GPL-3.0-or-later
 
-Small composable scripts, each doing one thing, run from the repo root. All
-outputs land in `bootimage_work/`. CI runs the same scripts.
+The normal build produces an ARM firmware ELF and packages it with the
+committed FPGA bitstream and FSBL into a BOOT image for the ZZ9000 SD card.
+Run every command in this guide from the repository root.
 
-| Script | What it builds | Needs |
-|---|---|---|
-| [`build_firmware.sh`](build_firmware.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf` | `arm-none-eabi-gcc` (Arm GNU Toolchain with newlib), host `cc` |
-| [`build_libjpeg_turbo.sh`](build_libjpeg_turbo.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/libjpeg-turbo/.../libjpeg.a` | Arm GNU Toolchain, `cmake`, `make`, `wget` |
-| [`build_zlib.sh`](build_zlib.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/zlib/.../libz.a` | Arm GNU Toolchain, `cmake`, `make`, `wget` |
-| [`build_libpng.sh`](build_libpng.sh) | `ZZ9000_proto.sdk/ZZ9000OS/build/deps/libpng/.../liblibpng16_static.a` | Arm GNU Toolchain, `cmake`, `make`, `wget`; calls `build_zlib.sh` |
-| [`build_libwebp.sh`](build_libwebp.sh) | Pinned libwebp decoder/demux archives under `ZZ9000OS/build/deps/libwebp/1.6.0/{arm,host}/lib/` | Arm GNU Toolchain (native compiler with `--host`), `cmake`, `make`, `curl` or `wget` |
-| [`build_dvd_codecs.sh`](build_dvd_codecs.sh) | Pinned decoder-only libmpeg2 0.5.1 and liba52 0.7.4 archives under `ZZ9000OS/build/deps/{libmpeg2,a52dec}/.../{arm,host}/` (U11 DVD experiment; GPL-2.0-or-later, notices in `ZZ9000OS/src/dvd_codecs/`) | Arm GNU Toolchain (native compiler with `--host`), `make`, `curl` or `wget` |
-| [`build_flac.sh`](build_flac.sh) | Pinned decoder-only libFLAC 1.5.0 archive `libflacdec.a` under `ZZ9000OS/build/deps/flac/1.5.0/{arm,host}/` (U7 native FLAC; BSD-3-Clause, notice in `ZZ9000OS/src/flac/COPYING.Xiph`) | Arm GNU Toolchain (native compiler with `--host`), `xz`, `curl` or `wget` |
-| [`build_vorbis.sh`](build_vorbis.sh) | Pinned decoder-only libogg 1.3.6 + fixed-point Tremor (commit `820fb323`) archive `libvorbisdec.a` under `ZZ9000OS/build/deps/vorbis/ogg-1.3.6-tremor-820fb3237ea8/{arm,host}/` (U8 Ogg Vorbis; BSD-3-Clause, notices in `ZZ9000OS/src/vorbis/`) | Arm GNU Toolchain (native compiler with `--host`), `xz`, `gzip`, `curl` or `wget` |
-| [`build_libvpx.sh`](build_libvpx.sh) | Pinned decoder-only libvpx 1.17.0 archive `libvpxdec.a` under `ZZ9000OS/build/deps/vpx/1.17.0/{arm,host}/` (WebM VP8/VP9; BSD-3-Clause plus patent grant, notices in `ZZ9000OS/src/webm_codecs/`) | Arm GNU Toolchain (native compiler with `--host`), `make`, `perl`, `curl` or `wget`; `nasm` or `yasm` for `--host` on x86 |
-| [`build_opus.sh`](build_opus.sh) | Pinned fixed-point libopus 1.6.1 archive `libopusdec.a` under `ZZ9000OS/build/deps/opus/1.6.1/{arm,host}/` (WebM Opus audio; BSD-3-Clause, notice in `ZZ9000OS/src/webm_codecs/COPYING.libopus`) | Arm GNU Toolchain (native compiler with `--host`), `make`, `curl` or `wget` |
-| [`build_lzma_sdk.sh`](build_lzma_sdk.sh) | LZMA SDK decoder sources under `ZZ9000_proto.sdk/ZZ9000OS/build/deps/lzma-sdk/` (compiled into `ZZ9000OS.elf` by `build_firmware.sh`) | `wget`, `7z`/`7za`/`7zr` |
-| [`build_bitstream.sh`](build_bitstream.sh) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Linux |
-| [`build_bitstream.ps1`](build_bitstream.ps1) | `bootimage_work/zz9000_ps_wrapper.bit` | Vivado 2018.3 on Windows |
-| [`build_variant_bitstreams.sh`](build_variant_bitstreams.sh) | all release variant `.bit` files | Vivado 2018.3 on Linux |
-| [`build_bootimage.sh`](build_bootimage.sh) | `bootimage_work/BOOT.bin` | `bootgen` |
-| [`build_release_assets.sh`](build_release_assets.sh) | release ZIPs under `release/` | `bootgen`, `zip` |
+## Build a BOOT image
 
-Firmware dependency builders run automatically. FPGA, BOOT-image, and release
-packaging remain separate commands.
+Install the official Arm GNU Toolchain with newlib so that
+`arm-none-eabi-gcc` and `arm-none-eabi-objcopy` are on `PATH`. Install a host
+C compiler as `cc`, plus `cmake`, `make`, `wget`, and `7z`, `7za`, or `7zr`.
+The firmware build fetches and builds its pinned codec dependencies when they
+are absent.
 
-## Common flows
-
-**ARM firmware change only** (most iteration loops). Uses the committed
-bitstream. `build_firmware.sh` automatically downloads, verifies, and builds
-the libjpeg-turbo, zlib, libpng, libwebp, libmpeg2, liba52, libFLAC, libogg/Tremor and LZMA SDK dependencies under
-`ZZ9000OS/build/deps/` when needed:
 ```bash
 ./build_firmware.sh
 ./build_bootimage.sh
 ```
 
-On Windows or on a machine without the Arm toolchain installed, use Docker.
-This follows the CI toolchain path and writes a separate BOOT image by
-default:
-```powershell
-.\build_firmware_docker.ps1
-```
-or from a POSIX shell:
-```bash
-./build_firmware_docker.sh
-```
-The Docker wrappers cache the official Arm GNU Toolchain and bootgen in Docker
-volumes named `zz9000-arm-toolchain` and `zz9000-bootgen`.
+The commands create these files:
 
-The firmware linker keeps low DDR below the framebuffer at `0x00200000`.
-Video/HDMI control code and constants use the existing high-DDR code region;
-mutable state retains the normal data/BSS placement. Keep the
-`firmware low sections overlap framebuffer memory` assertion intact: a
-failure means the image layout must be repaired, not the framebuffer boundary
-increased. Both normal and legacy-bitstream firmware targets depend on
-`src/lscript.ld`, so linker-script changes trigger relinking.
+| File | Purpose |
+|---|---|
+| `ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf` | Firmware for the default bitstream |
+| `ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS-legacy-bitstream.elf` | Firmware for legacy bitstreams |
+| `bootimage_work/BOOT.bin` | Image to copy to the ZZ9000 SD card |
+| `bootimage_work/bootrom.bin` | Generated 8 KiB autoboot ROM data partition |
 
-**USB proxy change** — run the bounded host models before building the ARM
-artifact:
+`build_firmware.sh` runs the dependency builders for libjpeg-turbo, libpng
+(and zlib), the LZMA SDK, libwebp, libmpeg2/liba52, libFLAC, Tremor/libogg,
+libvpx, and libopus before invoking `make -C ZZ9000_proto.sdk/ZZ9000OS`.
+Their sources and outputs are cached below
+`ZZ9000_proto.sdk/ZZ9000OS/build/deps/`.
 
-```bash
-make -C test/usb test
-```
+To remove the firmware build tree before rebuilding, run:
 
-Then verify the mirrored driver contract from a sibling
-`zz9000-drivers` checkout:
-
-```bash
-python3 ../zz9000-drivers/tools/check-usb-proxy-contract.py "$PWD"
-```
-
-ISO protocol changes must update firmware and driver constants together.
-Physical Poseidon qualification is separate from these host checks; record it
-in `zz9000-drivers/docs/usb-qualification-matrix.md`.
-
-**HDL change (bitstream rebuild)** — requires a Linux box with Vivado:
-```bash
-./build_bitstream.sh       # regenerates project from zz9000_project.tcl
-./build_firmware.sh        # in case firmware wasn't built yet
-./build_bootimage.sh
-```
-On Windows with Vivado 2018.3:
-```powershell
-.\build_bitstream.ps1
-```
-Commit the updated `bootimage_work/zz9000_ps_wrapper.bit` so CI (which
-does not run Vivado) picks up the change on the next pipeline.
-
-For cold-boot diagnostics, `./build_bitstream.sh --no-autoboot` builds a
-bitstream that does not advertise the Zorro autoboot ROM. The PowerShell
-equivalent is `.\build_bitstream.ps1 -NoAutoboot`.
-
-Legacy USB mass-storage block support is disabled in firmware by
-default. SD HDF boot and the Poseidon USB proxy remain enabled. For an
-old-driver regression test, rebuild firmware with
-`EXTRA_CFLAGS=-DENABLE_LEGACY_USB_BLOCK_STORAGE=1`.
-
-WebP, FLAC and Ogg Vorbis decoding are built into every firmware but stay
-unadvertised until physical Zorro II/III qualification. A hardware
-qualification build advertises their service flags so the shipped clients
-use them: `EXTRA_CFLAGS=-DZZ9000_QUALIFY_UNADVERTISED ./build_firmware.sh`,
-then `./build_release_assets.sh --firmware-flavor qual`. Never publish that
-flavor as a release.
-
-### Timing gates
-
-`build_bitstream.sh` / `build_bitstream.ps1` source three gate scripts after
-implementation (before `write_bitstream`): `verify_formatter_ooc_timing.tcl`,
-`verify_vcap_cdc_timing.tcl`, and `verify_runtime_pixel_timing.tcl`. The
-release timing gate fails the build on **any** negative setup or hold slack in
-**any** clock group (a per-clock loop over `get_clocks`, including port
-clocks such as `i2s_mclk` and `zorro_fcs` that launch input-delay paths), in
-addition to the dedicated 150 MHz runtime pixel-clock checks. The final
-`TIMING_GATE: PASS - ...` line is what CI-style greps key on; a failure
-raises a Tcl error naming the violating group and slack.
-
-The build runs implementation through the post-route `phys_opt_design` step
-before the gates execute. That step is load-bearing for the ADAU1701 I2S
-input capture (`tSODM` = 40 ns consumes the whole BCLK half period, so the
-fast-corner margin is only BCLK insertion minus pin-to-register delay; the
-trial build moved from −0.090 ns routed to +0.143 ns after post-route
-phys_opt). When that pass still leaves negative setup slack in any clock
-group, `post_route_phys_opt_retry.tcl` (a post-hook on the same step) runs
-it again, at most twice; designs that already meet timing are not touched.
-Treat a routed-checkpoint WNS of a few hundred picoseconds
-negative on `i2s_mclk` as "let phys_opt finish" rather than a real
-regression; the gated (final) netlist is the authority.
-
-Clock-domain crossings are bounded with `set_max_delay -datapath_only`
-instead of blanket false paths so XPM/FIFO-generated CDC constraints keep
-precedence (Vivado otherwise reports methodology TIMING-24 and leaves the
-boundary unanalyzed). Every exception in `ZZ9000_proto.srcs/constrs_1/new/`
-carries a comment stating its rationale; `check_timing` is expected to
-report no unconstrained input or output ports.
-
-
-**Native-PAL videocap default (issue #7)** — for setups that boot
-without the host driver (no startup-sequence, floppy-only demo
-sessions), the standard 60 Hz videocap default produces visible
-stutter on PAL chipset output. The supported way to change this is the
-`ZZ9000.CFG` file on the SD card (issue #33):
-```ini
-videocap_profile = filtered_pal_exact
-```
-The equivalent compile-time default still exists for manual builds
-(`EXTRA_CFLAGS=-DDEFAULT_NS_VIDEOCAP=1 ./build_firmware.sh`; the config
-file overrides it when present), but CI no longer packages a separate
-`ns-pal` release flavor. Do not reintroduce a PAL firmware-flavor
-release matrix just for this setting. **PAL Amiga only**: the genlock clock
-defaults assume a PAL chipset master, so on an NTSC machine you'd see
-clock-mismatch artifacts until the host driver loads and corrects it.
-Not all HDMI sinks accept the non-standard timing either, which is why
-the built-in default stays at 60 Hz.
-
-**Release variant bitstreams** — on the Vivado box:
-```bash
-./build_variant_bitstreams.sh
-```
-
-These are hardware/autoconfig bitstream variants, not separate firmware
-behavior flavors. The standard Zorro III build uses E7M capture; the
-A4000-only build uses the video-slot C28 capture clock. Zorro III FastRAM
-is a `fast_ram` `ZZ9000.CFG` setting, not a variant: the former
-`zorro3-nofast` pair is gone and its behavior is the fail-closed default.
-The script restores `mntzorro.v` and the canonical E7M bitstream afterward.
-To rebuild selected variants on Linux, for example:
-```bash
-./build_variant_bitstreams.sh zorro2 zorro3-aga
-```
-On Windows with Git Bash, pass both builders when selecting a C28 variant:
-```bash
-BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1" \
-C28_BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1 -CaptureC28 -OutputBitstream" \
-  ./build_variant_bitstreams.sh zorro3-aga
-```
-
-**Clean rebuild** — no Vivado, uses the committed bitstream:
 ```bash
 ./build_firmware.sh clean
 ./build_firmware.sh
 ./build_bootimage.sh
 ```
 
-## Tests
+`build_bootimage.sh` packages `bootimage_work/FSBL_exec.elf`,
+`bootimage_work/zz9000_ps_wrapper.bit`, and the default firmware ELF. Override
+an input or output only when preparing a separate image:
 
-Host-side suites (any machine with a C compiler):
 ```bash
-make -C test/rtg test        # RTG correctness regression
-make -C test/video test      # VDMA, native modes, overlays
+./build_bootimage.sh --bitstream path/to/zz9000_ps_wrapper.bit \
+  --firmware path/to/ZZ9000OS.elf --output path/to/BOOT.bin
 ```
 
-The Linux image-session suite runs the actual JPEG/PNG/WebP firmware decoder:
+The boot ROM data partition is included by default. Use
+`--no-preload-bootrom` only for diagnostics.
+
+Copy `bootimage_work/BOOT.bin` to the ZZ9000 SD card, then power-cycle the
+Amiga. Put `ZZ9000.CFG` beside `BOOT.bin` on the card to select supported
+runtime settings.
+
+## Build with Docker
+
+Use the Docker wrappers when the Arm toolchain is unavailable locally. Both
+use `debian:bookworm-slim` by default, cache the Arm GNU Toolchain and bootgen
+in the `zz9000-arm-toolchain` and `zz9000-bootgen` Docker volumes, and write
+`bootimage_work/BOOT-sdk-docker.bin` by default.
+
+From a POSIX shell:
+
 ```bash
-make -C test/image test
+./build_firmware_docker.sh
+```
+
+From PowerShell:
+
+```powershell
+.\build_firmware_docker.ps1
+```
+
+The POSIX wrapper accepts `--no-clean`, `--no-bootimage`, `--fsbl`, and
+`--output PATH`. The PowerShell wrapper accepts `-NoClean`, `-NoBootimage`,
+`-Image`, `-Output`, and `-ExtraCFlags`. `--fsbl` rebuilds the FSBL in the
+container but does not replace `bootimage_work/FSBL_exec.elf`.
+
+## Rebuild the FPGA bitstream
+
+Rebuild the bitstream after RTL, constraint, IP, or Vivado-project changes.
+The Linux and Windows builders recreate `ZZ9000_proto` from
+`zz9000_project.tcl`, run synthesis, implementation, and `write_bitstream`,
+then copy the generated bitstream into `bootimage_work/`.
+
+Use Vivado 2018.3. On Linux, the default installation is
+`/opt/Xilinx/Vivado/2018.3`; set `VIVADO_DIR` to another Vivado 2018.3
+installation. On Windows, pass `-VivadoBat` or set `VIVADO_BAT` or
+`VIVADO_DIR` if Vivado is not at one of the script's default locations.
+
+On Linux:
+
+```bash
+./build_bitstream.sh
+./build_firmware.sh
+./build_bootimage.sh
+```
+
+On Windows:
+
+```powershell
+.\build_bitstream.ps1
+```
+
+The default output is `bootimage_work/zz9000_ps_wrapper.bit`. The generated
+project targets `xc7z020clg400-1`. Commit the updated default bitstream with
+an RTL change because CI packages committed bitstreams and does not run
+Vivado.
+
+Build a diagnostic bitstream without the Zorro autoboot ROM advertisement:
+
+```bash
+./build_bitstream.sh --no-autoboot
+```
+
+```powershell
+.\build_bitstream.ps1 -NoAutoboot
+```
+
+Build the A4000 C28 capture candidate separately. Its default output is
+`bootimage_work/capture-c28/zz9000_ps_wrapper.bit`; it must not replace the
+default E7M bitstream.
+
+```bash
+./build_bitstream.sh --capture-c28
+```
+
+```powershell
+.\build_bitstream.ps1 -CaptureC28
+```
+
+The synthesis flow runs `verify_formatter_ooc_timing.tcl`,
+`verify_vcap_cdc_timing.tcl`, and `verify_runtime_pixel_timing.tcl` before
+`write_bitstream`. A failure stops the build. The final bitstream is written
+under `ZZ9000_proto/ZZ9000_proto.runs/impl_1/` before the builder copies it to
+its requested output.
+A recorded implementation trial improved the ADAU1701 I2S input routed slack
+from -0.090 ns to +0.143 ns after post-route `phys_opt_design`. The final
+gated implementation result, rather than an intermediate routed checkpoint,
+determines whether the bitstream is written.
+
+## Build hardware variants
+
+`build_variant_bitstreams.sh` changes the release-variant define block in
+`mntzorro.v` for each build, restores that file afterward, and writes the
+bitstreams below `bootimage_work/`.
+
+Build every release variant on the Linux Vivado host:
+
+```bash
+./build_variant_bitstreams.sh
+```
+
+Build selected variants:
+
+```bash
+./build_variant_bitstreams.sh zorro2 zorro3-aga
+```
+
+The supported variant names are `zorro3`, `zorro3-aga`, `zorro2`,
+`zorro2-2mb`, `a500`, `a500-2mb`, and `a500plus`. The standard `zorro3` build
+writes `bootimage_work/zz9000_ps_wrapper.bit`; the other outputs are under
+`bootimage_work/variants/`.
+
+From Git Bash on Windows, use the PowerShell builder. A selected C28 variant
+requires a C28 builder that ends with its output-path option:
+
+```bash
+BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1" \
+C28_BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./build_bitstream.ps1 -CaptureC28 -OutputBitstream" \
+  ./build_variant_bitstreams.sh zorro3-aga
+```
+
+## Package release assets
+
+Build the firmware and the required variant bitstreams before packaging a
+release. `build_release_assets.sh` writes ZIP files to `release/` by default.
+Each archive contains `BOOT.bin` and the sample `ZZ9000.CFG` in a directory
+named `zz9000-firmware-<tag>-<variant>`.
+
+```bash
+./build_release_assets.sh --tag v2.2.0 --require-all
+```
+
+Use `--output DIR` to choose another output directory. Use
+`--firmware-flavor SUFFIX` only when packaging an alternate firmware ELF; the
+standard Zorro III image remains `bootimage_work/BOOT.bin`.
+
+## Rebuild the FSBL
+
+The committed `bootimage_work/FSBL_exec.elf` is the default FSBL input for
+`build_bootimage.sh`. Rebuild it only after a Vivado build when the PS
+configuration has changed. `ps7_init_gpl.c` and `ps7_init_gpl.h` must match
+the `zz9000_ps_wrapper.sysdef` generated below
+`ZZ9000_proto/ZZ9000_proto.runs/impl_1/`.
+
+```bash
+util/refresh_ps7_init.sh
+./build_fsbl.sh
+```
+
+The FSBL ELF is written to
+`ZZ9000_proto.sdk/ZZ9000FSBL/build/ZZ9000FSBL.elf`. After validating the
+result and preparing recovery media, replace the boot-image input explicitly:
+
+```bash
+./build_fsbl.sh --install
+```
+
+`--install` copies the rebuilt ELF to `bootimage_work/FSBL_exec.elf`. A stale
+FSBL can program PS registers for a different bitstream configuration.
+
+## Targeted checks
+
+Run the host checks for the area you changed before building the BOOT image.
+
+| Change area | Command |
+|---|---|
+| USB proxy | `make -C test/usb test` |
+| RTG | `make -C test/rtg test` |
+| Video firmware | `make -C test/video test` |
+| JPEG, PNG, or WebP decoder | `make -C test/image test` |
+| FLAC decoder | `make -C test/flac test` |
+| Ogg Vorbis decoder | `make -C test/vorbis test` |
+
+The image, FLAC, and Vorbis suites also provide a `sanitize` target:
+
+```bash
 make -C test/image sanitize
-make -C test/image fixtures smoke
-test/image/build/webp_fixture_extract animation /tmp/preview.webp
-test/image/build/webp_smoke /tmp/preview.webp /tmp/preview.ppm
-```
-It needs libjpeg, libpng and zlib development headers, CMake, and curl/wget.
-The WebP dependency is fetched with a pinned SHA-256 and built decoder/demux-only,
-without threads. `src/webp/{COPYING,PATENTS,AUTHORS}` under `ZZ9000OS` retains
-the upstream notices; binary distributions must carry the applicable notices.
-Tests cover stored reference pixels, fragmented input, bounded tile drains,
-malformed containers, allocation failure, tracker exhaustion and reset reclaim.
-The sanitizer target instruments the firmware host path and harness; the
-downloaded libwebp archives retain their normal release build configuration.
-The smoke command writes the first composited canvas of animated input, not
-animation playback. Host memory figures and sanitizers do not qualify physical
-Z2/Z3 cache behavior, supported image sizes, or throughput. WebP remains
-unadvertised pending client integration and target qualification.
-
-The native FLAC backend (`sdk_audio_flac.c`) has its own Linux suite, linked
-against the pinned decoder-only libFLAC host archive:
-```bash
-make -C test/flac test
 make -C test/flac sanitize
-test/flac/gen_fixtures.sh   # regenerate fixtures; needs the reference flac tool
-```
-`build_flac.sh` downloads `flac-1.5.0.tar.xz` (release 2025-02-11) from the
-xiph/flac GitHub release with a pinned SHA-256 and compiles only the stream
-decoder translation units (no encoder, Ogg, metadata editing, programs,
-examples or SIMD), integer-only, with every libFLAC allocation routed through
-`src/sdk_flac_alloc.h` into the tracked core-1 decode heap. Fixtures are
-encoded and reference-decoded by the `flac` tool recorded in
-`test/flac/flac_fixtures.h`; tests compare decoded PCM byte-for-byte and
-cover fragmented feeds, known/unknown totals, invalid metadata, CRC errors,
-truncation, multichannel and Ogg-FLAC rejection, allocation-failure injection
-and restart reclaim. Host figures are not physical Z2/Z3 measurements.
-
-The Ogg Vorbis backend (`sdk_audio_vorbis.c`, arena `sdk_vorbis_alloc.c`)
-has its own Linux suite, linked against the pinned libogg/Tremor host
-archive:
-```bash
-make -C test/vorbis test
 make -C test/vorbis sanitize
-test/vorbis/gen_fixtures.sh   # regenerate fixtures; needs ffmpeg with libvorbis
 ```
-`build_vorbis.sh` downloads `libogg-1.3.6.tar.xz` (release 2025-06-16) from
-downloads.xiph.org and the Tremor master commit `820fb3237ea8` (2025-04-03)
-archive from gitlab.xiph.org, each with a pinned SHA-256, and compiles only
-libogg's framing/bitwise units and Tremor's synthesis core (no vorbisfile,
-examples, ARM assembly or low-accuracy path; Tremor has no encoder), with
-every allocation routed through `src/sdk_vorbis_alloc.h` into a per-stream
-arena of tracked core-1 decode-heap regions. Fixtures under
-`test/vorbis/fixtures/` are encoded by ffmpeg's libvorbis wrapper and
-reference-decoded by ffmpeg's independent floating-point Vorbis decoder
-(versions in `test/vorbis/vorbis_fixtures.h`); decoded PCM must match within
-4 LSB per sample and 1 LSB RMS, and be byte-identical across every chunking,
-ring size and drain pattern. Tests cover mono/stereo, three block-size
-pairs, packets split across pages, 192 KiB comment headers, bad CRC,
-missing/out-of-order headers, oversized setup headers and codebooks,
-truncation, page gaps, chained/multiplexed/Opus/Ogg-FLAC/3-channel
-rejection, allocation-failure injection and restart reclaim. Host figures
-are not physical Z2/Z3 measurements.
+For USB proxy ISO protocol changes, also check the matching driver checkout:
 
-For source-preserving Docker runs, mount this checkout read-only, copy the
-firmware/test tree into container-local storage, and clean copied build caches
-there before building. CMake caches contain absolute paths; copying an existing
-dependency build does not make it relocatable.
-
-Capture RTL simulations also run in CI with Verilator. They exercise the
-production C28/E7M clock controller, filtered and full-width PAL-shaped
-capture, the 28 MHz line origin, writeback layout, diagnostics, and the
-video-slot/Denise/Zorro II RGB pin mappings:
 ```bash
-bash test/video/run_videocap_clock_verilator.sh
-bash test/video/run_videocap_verilator_sim.sh
-```
-The sampler CI suite uses a test-only XPM handshake model. It does not
-replace vendor XPM, MMCM phase, IOB placement, routed timing, or physical
-capture qualification. Run the full sampler matrix against Vivado's XPM
-library before rebuilding FPGA bitstreams:
-```bash
-test/video/run_videocap_sim.sh
+python3 ../zz9000-drivers/tools/check-usb-proxy-contract.py "$PWD"
 ```
 
-Functional simulation of the video formatter (needs Vivado 2018.3 for
-xsim; run on the Vivado machine before committing `video_formatter.v`
-changes):
-```bash
-test/video/run_formatter_sim.sh current   # working-tree RTL
-test/video/run_formatter_sim.sh master    # committed baseline (sanity)
-```
-The testbench models the 64-bit VDMA stream (tkeep, tuser/tlast) and
-compares every displayed pixel against expected framebuffer contents
-across all color modes (8/15/16/32 bpp), scale_x/scale_y, odd-width
-tkeep tails, the native videocap shape and 1920-wide 32 bpp lines. The
-sweep fails if any configuration mismatches or fails to report.
+Keep firmware and driver constants synchronized. Physical Poseidon
+qualification remains separate from the host checks; record it in
+`zz9000-drivers/docs/usb-qualification-matrix.md`.
 
-Capture-clock phase regression (Vivado 2018.3 UNISIM; set `VIVADO_BIN` for a
-non-default installation):
+For FPGA changes, run the relevant simulation on the Vivado host. The
+formatter simulation accepts the working tree or the committed baseline:
+
 ```bash
+test/video/run_formatter_sim.sh current
+test/video/run_formatter_sim.sh master
 python3 test/video/run_videocap_phase_sim.py
-```
-This runs the production phase engine and MMCM, measuring both capture and
-grid clock displacement for positive, negative, and restored-zero targets.
-A completed phase request is not sufficient: enabling fine phase shift on
-both feedback and outputs cancels the intended clock movement.
-
-Variant elaboration (Vivado 2018.3 xvlog/xelab; set `VIVADO_BIN` for a
-non-default installation): compiles `MNTZorro` once for each release
-variant, using the `define blocks from `build_variant_bitstreams.sh`. Run it
-after RTL changes, before an hours-long variant rebuild:
-```bash
 python3 test/video/run_variant_elaboration.py
 ```
 
-## Flashing
+## Tool lookup and CI
 
-Copy `bootimage_work/BOOT.bin` to the ZZ9000 SD card (rename if needed
-depending on your QSPI/SD boot setup), power-cycle the Amiga.
+`build_bootimage.sh` locates bootgen in this order: `BOOTGEN`, `bootgen` on
+`PATH`, `bootgen/bootgen`, `bootgen/build/bin/bootgen`, then
+`/Users/midwan/Gitlab/bootgen/bootgen`. Build bootgen from
+<https://github.com/Xilinx/bootgen> if none of those locations contains it.
 
-## Toolchain locations
+GitHub Actions builds `ZZ9000OS.elf` and packages release assets from the
+committed bitstreams. It does not run Vivado. Tagged builds require every
+listed variant bitstream; branch and pull-request builds package the variants
+that are present.
 
-- **`arm-none-eabi-gcc`** (firmware):
-  - macOS: `brew install --cask gcc-arm-embedded`
-  - Linux: download from <https://developer.arm.com/downloads> — do **not**
-    use Debian's `gcc-arm-none-eabi` package; it uses picolibc and is
-    incompatible with the Xilinx BSP.
-- **Host C compiler** (firmware helper): `build_firmware.sh` uses `cc`
-  to generate an 8 KB boot ROM image from the checked-in diag/device
-  arrays, then embeds it as an initialized ELF section. Override with
-  `$CC_FOR_BUILD` if needed.
-- **`bootgen`** (packaging):
-  - Prebuilt: <https://github.com/Xilinx/bootgen> (clone + `make`). The
-    script finds it via `$BOOTGEN`, then `$PATH`, then a Mac default of
-    `/Users/midwan/Gitlab/bootgen/bootgen`.
-- **Vivado 2018.3** (bitstream):
-  - Linux: set `$VIVADO_DIR` if not at `/opt/Xilinx/Vivado/2018.3`.
-  - Windows: `build_bitstream.ps1` checks `$env:VIVADO_BAT`,
-    `$env:VIVADO_DIR`, `D:\Xilinx\Vivado\2018.3\bin\vivado.bat`, then
-    `C:\Xilinx\Vivado\2018.3\bin\vivado.bat`.
 
-## Xilinx Platform Cable setup
+## Additional host checks
 
-Vivado/JTAG workflows on Linux may need the legacy Xilinx USB firmware
-loader rules. The repository includes the required firmware blobs and
-udev rules under [`xilinx-xusb/`](xilinx-xusb/):
+The workflow also runs these host suites. Run the suites that cover the code
+you changed.
 
-```bash
-sudo apt install fxload
-sudo mkdir -p /etc/xilinx-xusb
-sudo cp xilinx-xusb/*.hex /etc/xilinx-xusb/
-sudo cp xilinx-xusb/xusbdfwu.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-```
+| Area | Command |
+|---|---|
+| Video codecs | `make -C test/video_codec test` |
+| RTG comparative micro-benchmarks | `make -C test/rtg bench` |
+| Media sessions | `make -C test/media test` |
+| Palette shadow state | `make -C test/palette test` |
+| Audio capture | `make -C test/audio test` |
+| `ZZ9000.CFG` parser and loader | `make -C test/config test` |
+| Dual-core scheduler | `make -C test/scheduler test` |
+| Surface allocator | `make -C test/allocator test` |
+| Zorro II aperture layout | `make -C test/aperture test` |
+| Firmware-file restore | `make -C test/fwupdate test` |
+| SD activity LED | `make -C test/sd_activity_led test` |
 
-udev will run `fxload` when the platform cable is plugged in. The cable
-LED should turn green after the firmware loads.
+Hardware validation remains necessary before treating bus-timing or performance
+changes as proven.
 
-## CI
+## Publish a release
 
-The GitHub Actions workflow
-[`.github/workflows/build.yml`](.github/workflows/build.yml) runs on
-every push and pull request: runs the host regression suites, including
-`test/usb`; installs the Arm GNU Toolchain (cached); builds bootgen from
-source (cached); then runs `./build_firmware.sh` +
-`./build_bootimage.sh` against the committed bitstream. It does **not**
-run Vivado — any HDL change must include an updated
-`bootimage_work/zz9000_ps_wrapper.bit` for CI to pick up the new logic.
-Release-style ZIP artifacts are uploaded per run.
-
-### Cutting a release
-
-Push a `v*` tag (e.g. `v2.2.0`, or `v2.2.0-rc1` for a pre-release) and
-the workflow will build the firmware and publish a GitHub Release with
-`zz9000-firmware-<tag>-<variant>.zip` archives attached. Each ZIP
-contains a directory with the user-facing `BOOT.bin` and sample
-`ZZ9000.CFG` file to copy to the ZZ9000 microSD card. The workflow
-packages one standard firmware flavor; the former `ns-pal` behavior is
-selected with `videocap_profile = filtered_pal_exact` in `ZZ9000.CFG`.
+Push an annotated `v*` tag after the firmware and every release bitstream have
+been committed. GitHub Actions builds the standard firmware image, packages
+every required variant with the sample `ZZ9000.CFG`, then creates a GitHub
+Release from the ZIP files. A tag containing `-`, such as `v2.3.0-rc1`,
+becomes a pre-release.
 
 ```bash
-git tag -a v2.2.0 -m "Firmware 2.2.0"
-git push origin v2.2.0
+git tag -a v2.3.0 -m "Firmware 2.3.0"
+git push origin v2.3.0
 ```
 
-Tags containing `-` are marked as pre-releases.
-
-CI cannot run Vivado, so it packages variants from committed bitstreams.
-The default Zorro III E7M bitstream is
-`bootimage_work/zz9000_ps_wrapper.bit`; the Zorro III no-RAM, A4000 C28,
-Zorro II, A500, and 2MB variants live under `bootimage_work/variants/`;
-see [`bootimage_work/variants/README.md`](bootimage_work/variants/README.md).
-Build them with `./build_variant_bitstreams.sh` on a Vivado machine.
-Tagged release builds require all listed bitstreams; branch/PR builds
-package whatever is present. The deprecated no-USB-autoboot variant
-is intentionally skipped.
-
-## Why `bootimage_work/` is the canonical output dir
-
-- `FSBL_exec.elf` lives there and is committed (saves having to rebuild
-  the FSBL, which needs Xilinx SDK 2018.3 — an old, painful dependency
-  we've chosen to avoid). **Warning:** the committed FSBL bakes in the
-  PS configuration (`ps7_init`) from the hardware design it was built
-  against. Changing any `PCW_*` parameter in `zz9000_project.tcl` does
-  NOT update it — the 2026-07 HP0 32→64-bit widening shipped with a
-  runtime guard in `video.c` (`video_hp0_bus_width_init()`) precisely
-  because the committed FSBL still programmed the port for 32 bits.
-  Clock, DDR or MIO `PCW_*` changes cannot be patched at runtime and
-  would require rebuilding the FSBL against a fresh hardware export.
-- `bootimage.bif` lives there, paths are repo-root-relative, same file
-  used by humans and CI.
-- The bitstream lives there because that's where `bootgen` reads it
-  from per the BIF, and committing it makes CI work without Vivado.
-- The firmware ELF contains an initialized 8 KB `.bootrom_image` segment
-  at `0x3FCF0000`. `build_bootimage.sh` also packages that ROM as a data
-  partition (no exec address) ahead of the bitstream, giving
-  `FSBL -> bootrom.bin@0x3FCF0000 -> bitstream -> ZZ9000OS`. Once the
-  bitstream is up, the board answers autoconfig, and a cold A4000 can read
-  the DiagArea while FSBL is still copying the multi-megabyte firmware.
-  The DiagArea is fetched from DDR through the FPGA's ACP master, and the
-  stock FSBL opened that PL->PS path (level shifters, FPGA resets via
-  `ps7_post_config()`) only at handoff. The ZZ9000 FSBL therefore runs
-  `ps7_post_config()` right after the bitstream (`fsbl_hooks.c`), and
-  treats a PS partition without an exec address as data, so it neither
-  trips "Partition order invalid" nor becomes the handoff target
-  (`image_mover.c`). Cold boots of firmware past roughly 4 MB crashed
-  (guru `80000004`) with the old FSBL. `--no-preload-bootrom` drops the
-  ROM partition for diagnostics; the hand-run `bootimage.bif` keeps the
-  old layout, which the ZZ9000 FSBL still boots.
+Use `ZZ9000.CFG` to select PAL or native-video defaults. Do not publish a
+separate `ns-pal` firmware flavor.

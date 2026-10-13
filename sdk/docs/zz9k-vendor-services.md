@@ -1,108 +1,86 @@
 # ZZ9000 Vendor Service Conventions
 
-The service ID space below `0x8000` belongs to the SDK: each value is an
-opcode *family* base owned by a firmware subsystem (`ZZ9K_SERVICE_CORE`
-`0x0000`, `…MEMORY` `0x0100`, `…SURFACE` `0x0200`, … `…MODULE` `0x0a00`; see
-`include/zz9k/abi.h`). `ZZ9K_SERVICE_VENDOR = 0x8000` opens the other half of
-the range for services the SDK does not define — loadable modules and
-third-party/vendor extensions (the JEDI renderer takes `0x8100`).
+`ZZ9K_SERVICE_VENDOR` (`0x8000`) marks the vendor-service namespace in the
+SDK ABI. A vendor service is described by `ZZ9KModuleServiceDesc` metadata and
+can be discovered with `ZZ9K_OP_QUERY_SERVICE` once its runtime registers it.
 
-These are the rules for living in that space. The registry
-(`include/zz9k/service_registry.h`) already *enforces* the hard ones at
-registration; this document is the intent behind them and the conventions the
-enforcement cannot express.
+Current firmware uses the static `sdk_services` catalog for service discovery.
+It has no vendor-service entry and does not dynamically load modules. A query
+for an unregistered service returns `ZZ9K_STATUS_NOT_FOUND`.
 
-## ID and opcode-range allocation
+## Define a vendor service
 
-A service is described by a `ZZ9KModuleServiceDesc` (`include/zz9k/module.h`)
-whose `service_id` doubles as its opcode-family base:
+Use `ZZ9KModuleManifest` and `ZZ9KModuleServiceDesc` from
+`include/zz9k/module.h` to describe a service. Follow these conventions when
+assigning a vendor service ID and its opcodes:
 
-- **Allocate vendor `service_id`s on `0x0100` boundaries** — `0x8100`,
-  `0x8200`, … — exactly like the SDK families below `0x8000`. This gives each
-  service up to 256 opcodes (`opcode_base = service_id`, `opcode_count <=
-  0x100`) and keeps opcodes readable (`0x81xx` is unambiguously "JEDI op xx").
-- **`opcode_base` MUST equal `service_id`** and `opcode_count` MUST NOT cross
-  into the next `0x0100` slot. The registry rejects a manifest whose services
-  have duplicate IDs or overlapping opcode ranges
-  (`zz9k_service_registry_services_conflict` → `ZZ9K_STATUS_BAD_REQUEST`), so a
-  collision fails loudly at load time rather than misdispatching — but that is
-  a backstop, not a substitute for picking a free slot.
-- **Record every assigned vendor ID** in this file's table below, the way the
-  SDK families are fixed in `abi.h`. Runtime rejection protects a single board;
-  the written registry prevents two vendors from ever shipping `0x8100`.
+1. Choose an unused `service_id` on a `0x0100` boundary at or above `0x8000`.
+   The mailbox opcode is 16 bits, so the available vendor slots run through
+   `0xff00`.
+2. Set `opcode_base` to `service_id` and keep `opcode_count` at `0x100` or
+   less. This reserves one `0x0100` opcode family per service.
+3. Start `version` at `1`. Increase it when an existing opcode changes its
+   request or reply layout, or changes its meaning. Adding an opcode at the
+   end of the range only changes `opcode_count`.
+4. Set `ZZ9K_SERVICE_FLAG_MODULE`. Do not set
+   `ZZ9K_SERVICE_FLAG_FIRMWARE` for a vendor service. Add
+   `ZZ9K_SERVICE_FLAG_ASYNC` or `ZZ9K_SERVICE_FLAG_ZERO_COPY` only when the
+   service implements that transport contract.
+5. Define `capability_bits` and any flag bits from bit 16 upward in the
+   service's published interface. They are private to that `service_id`.
 
-### Assigned vendor services
+Record each allocation here before publishing it, so two vendors never ship
+the same ID.
 
 | `service_id` | Owner | Notes |
-|--------------|-------|-------|
-| `0x8100`     | JEDI software renderer (TFE port) | ships as a loadable module |
+| --- | --- | --- |
+| `0x8100` | JEDI software renderer (TFE port) | Allocated for a loadable module. Current firmware does not register it. |
 
-## Discovery — `QUERY_SERVICE`
+## Discover and use a service
 
-Vendor services are discovered exactly like firmware services: a
-`ZZ9K_OP_QUERY_SERVICE` for the `service_id` returns a `ZZ9KServiceInfoPayload`
-(`zz9k_service_registry_make_info_payload`) carrying `version`,
-`capability_bits`, `flags`, `opcode_base`, `opcode_count`,
-`max_inline_payload`, and the 20-byte `name`. A service that is not registered
-is simply not found — a consumer MUST treat "not found" as "feature absent"
-and fall back, never assume a fixed vendor ID is present.
+1. Send `ZZ9K_OP_QUERY_SERVICE` with a big-endian `service_id` in
+   `ZZ9KQueryServicePayload`.
+2. Treat `ZZ9K_STATUS_NOT_FOUND` as an unavailable feature. Do not assume
+   that a vendor ID is present.
+3. On success, read `ZZ9KServiceInfoPayload`. It contains `service_id`,
+   `version`, `capability_bits`, `flags`, `opcode_base`, `opcode_count`,
+   `max_inline_payload`, and a 20-byte `name`.
+4. Check `version`, `capability_bits`, and flags before calling optional
+   opcodes. Do not use `ZZ9K_CAP_*` to advertise a vendor service: those bits
+   describe SDK-defined firmware capabilities.
+5. Keep an inline request payload within `max_inline_payload`. Use a shared
+   buffer for larger data when the service interface provides one.
 
-`max_inline_payload` is the largest request payload the service accepts inline
-in the mailbox entry; a consumer with more data uses a shared buffer and MUST
-NOT exceed the advertised inline size.
+## Metadata and registry limits
 
-## Versioning
+`ZZ9KModuleManifest` and `ZZ9KModuleServiceDesc` are each 64 bytes. A manifest
+can describe at most `ZZ9K_MODULE_MAX_SERVICES` (`16`) services. Service names
+are 20-byte, NUL-terminated fields. A manifest is rejected when a service has
+an `opcode_count` of zero or a `max_inline_payload` above 48 bytes, the mailbox
+payload capacity.
 
-`ZZ9KModuleServiceDesc.version` is the *service's own* version, independent of
-both the module's `module_version` and the SDK wire-ABI version. Convention:
+`ZZ9KServiceRegistry` stores at most
+`ZZ9K_SERVICE_REGISTRY_MAX_SERVICES` (`64`) services. It rejects duplicate
+service IDs and overlapping opcode ranges with `ZZ9K_STATUS_BAD_REQUEST`.
+The registry does not enforce the vendor ID range, `0x0100` alignment, or the
+requirement that `opcode_base` equal `service_id`; enforce those conventions in
+the service definition.
 
-- Start at `1`, increase monotonically.
-- Bump on any change that alters an existing opcode's request/reply layout or
-  semantics. Adding a new opcode at the end of the range (raising
-  `opcode_count`) does **not** require a bump — a consumer that does not know
-  the new opcode simply never calls it.
-- A consumer reads `version` from `QUERY_SERVICE` and gates version-dependent
-  opcodes on it.
+## Flags and capability bits
 
-## Flags
+The shared flags in bits 0–3 are `ZZ9K_SERVICE_FLAG_FIRMWARE`,
+`ZZ9K_SERVICE_FLAG_MODULE`, `ZZ9K_SERVICE_FLAG_ASYNC`, and
+`ZZ9K_SERVICE_FLAG_ZERO_COPY`. SDK services reuse bits 16 and above for
+service-specific meanings, including
+`ZZ9K_SERVICE_FLAG_IMAGE_JPEG_BASELINE` and
+`ZZ9K_SERVICE_FLAG_AUDIO_MP3_DECODE`, both at bit 16. A vendor service may do
+the same because consumers interpret those bits only after identifying the
+service.
 
-`ZZ9KModuleServiceDesc.flags` carries the generic `ZZ9K_SERVICE_FLAG_*` bits
-(`abi.h`): a vendor/module service MUST set `ZZ9K_SERVICE_FLAG_MODULE` and MUST
-NOT set `ZZ9K_SERVICE_FLAG_FIRMWARE` (it is not firmware-provided). `…_ASYNC`
-and `…_ZERO_COPY` describe the transport contract as usual. Bits `16` and above
-are a **per-service namespace**: their meaning is private to the `service_id`
-and may reuse the same bit another service uses for something unrelated (the
-SDK already does this — `…_IMAGE_JPEG_BASELINE` and `…_AUDIO_MP3_DECODE` both
-sit at bit 16). A vendor service defines and documents its own upper-bit flags;
-consumers interpret them only after matching the `service_id`.
+`ZZ9K_OP_QUERY_CAPS` reports the global `ZZ9K_CAP_*` capability word. The SDK
+maps those bits to its own service families, and `ZZ9K_SERVICE_VENDOR` has no
+mapping. Report vendor capabilities through the service's `capability_bits`
+field returned by `ZZ9K_OP_QUERY_SERVICE`.
 
-## Capabilities — NOT the global `ZZ9K_CAP_*` bits
-
-The global `ZZ9K_CAP_*` bits returned by `ZZ9K_OP_QUERY_CAPS` describe
-board-wide firmware families (`ZZ9K_CAP_CRYPTO`, `ZZ9K_CAP_IMAGE_DECODE`, …)
-and are owned by the SDK. **A vendor service MUST NOT claim or depend on a
-global `ZZ9K_CAP_*` bit** — those bits mean "the firmware family is present",
-not "this module is loaded".
-
-Instead a vendor service advertises what it can do through its own
-`capability_bits` field, returned by `QUERY_SERVICE`. Those bits are a
-per-`service_id` namespace defined by the service's published spec; a consumer
-discovers a vendor capability by querying the service and interpreting
-`capability_bits` against that spec, exactly as it interprets the upper flag
-bits. This keeps the scarce global capability word free for firmware families
-and lets any number of vendor services describe themselves without central bit
-allocation.
-
-## Checklist for a new vendor service
-
-1. Pick the next free `0x8N00` `service_id`; add it to the table above.
-2. Set `opcode_base = service_id`, `opcode_count <= 0x100`,
-   `max_inline_payload` to the real inline ceiling.
-3. Set `ZZ9K_SERVICE_FLAG_MODULE` (plus `…_ASYNC`/`…_ZERO_COPY` if applicable);
-   define any per-service flags in bits `>= 16` and document them.
-4. Start `version` at `1`; define the per-service `capability_bits` in a
-   published spec — never a global `ZZ9K_CAP_*` bit.
-5. Register through a `ZZ9KModuleManifest`; rely on the registry to reject
-   overlaps, but do not depend on it to choose your slot.
-
-See `docs/zz9k-modules.md` for the manifest shape and registration flow.
+See [SDK Modules](zz9k-modules.md) for the manifest layout and current module
+metadata support.

@@ -1,362 +1,170 @@
-# ZZPlay — the ZZ9000 accelerated media player
+# ZZPlay
 
-ZZPlay plays MPEG-1 and MPEG-2 Program Streams, WebM, MP3, native FLAC and Ogg Vorbis files using the ZZ9000's ARM
-coprocessor and FPGA video overlay. Video decoding happens on the card; on the
-accelerated Zorro III path no decoded video ever crosses the Zorro bus.
+ZZPlay is the ZZ9000 media player for AmigaOS. It decodes supported media on
+the card and presents video through the Picasso96 overlay. On an accelerated
+Zorro III system, decoded video stays on the card rather than crossing the
+Zorro bus.
 
-It works two ways:
+Start it as a desktop player from Workbench, or pass files from a shell for a
+one-shot playlist. A shell launch with files exits after playback; a shell
+launch without files opens the player. Workbench launches open the player
+unless `FULLSCREEN` or `PLAYER=NO` selects one-shot playback.
 
-- as a **desktop player**: a window with a playlist, transport buttons, a
-  position slider, volume, repeat and shuffle, which stays open until you quit
-  it;
-- as a **one-shot command**: `ZZPlay file` plays and exits, which is what
-  scripts and programs showing a video sequence want.
+## Supported input
 
-## What it plays
+ZZPlay identifies media from its contents. Extensions only control drawer scans
+and the file requester, so a correctly formed file can play under another name.
+A Matroska file must declare the `webm` DocType to be accepted as WebM.
 
-| Input | Video | Audio |
+| Input | Extensions offered in scans and requesters | Supported content |
 | --- | --- | --- |
-| MPEG-1 Program Stream (`.mpg`, `.mpeg`) | MPEG-1 video up to 800x600, card-decoded; the firmware refuses larger files | MPEG audio (Layer I, II or III), card-decoded |
-| MPEG-2 Program Stream (`.mpg`, `.mpeg`, `.vob`) | MPEG-2 video up to 800x600, card-decoded; needs firmware that advertises MPEG-2 | AC-3, MP2 or LPCM (16-bit 48 kHz mono or stereo), one track: AC-3 if the file has any, otherwise MP2, otherwise LPCM, card-decoded; other LPCM plays as video only; firmware without the MPEG-2 service refuses the file rather than half-playing it |
-| MPEG-2 Program Stream, video only | MPEG-2 video, card-decoded | none (a warning is printed) |
-| WebM (`.webm`, `.mkv`) | VP8 up to 1280x720 pixels, or VP9 up to 854x480, card-decoded, either orientation | Opus at 48 kHz, or Vorbis at 8 to 96 kHz, card-decoded; on the card when the firmware advertises it, otherwise AHI |
-| WebM, larger than that but within 1920 on the long side and 1920x1088 pixels | same codecs, best effort | audio stays continuous; video may skip ahead to the next keyframe |
-| WebM, video only | VP8 or VP9, card-decoded | none (a warning is printed) |
-| MPEG Layer III (`.mp3`) | — | card-decoded, CBR and VBR, mono or stereo |
-| Native FLAC (`.flac`) | — | card-decoded, mono or stereo, 4 to 24 bits, 8 to 192 kHz; on the card when the AX output can play the rate, otherwise AHI. Wider than 16 bits is narrowed to 16-bit |
-| Ogg Vorbis (`.ogg`, `.oga`) | — | card-decoded, one logical stream, mono or stereo, 8 to 192 kHz; on the card when the AX output can play the rate, otherwise AHI |
-| Animated WebP (`.webp`) | WebP animation, card-decoded | none |
-| Playlist (`.m3u`, `.m3u8`) | the files it lists | |
+| MPEG Program Stream | `.mpg`, `.mpeg`, `.vob` | MPEG-1 or MPEG-2 video in a Program Stream, up to 800x600. Supported audio is MP2, AC-3, or 16-bit 48 kHz mono or stereo LPCM. MPEG elementary streams are rejected. |
+| WebM | `.webm`, `.mkv` | One VP8 or VP9 video track, with at most one Opus or Vorbis audio track. Video-only files are accepted. Opus is 48 kHz; Vorbis is mono or stereo at 8–96 kHz. The maximum is a 1920-pixel long side and 1920x1088 pixels. |
+| MPEG Layer III | `.mp3` | MP3 audio. |
+| Native FLAC | `.flac` | Native `fLaC` streams with a STREAMINFO first block, mono or stereo, 4–24 bits, and 8–192 kHz. Ogg-FLAC is rejected. |
+| Ogg Vorbis | `.ogg`, `.oga` | A mono or stereo Vorbis stream at 8–192 kHz. Ogg Opus, Ogg-FLAC, and other Ogg codecs are rejected. |
+| Animated WebP | `.webp` | Animated WebP, 16–1920 pixels wide and 16–1080 pixels high. Still WebP images are rejected. |
+| Playlist | `.m3u`, `.m3u8` | Files listed by the playlist. |
 
-The format is chosen by inspecting the file, not by its name. A WebM file is
-recognised by its EBML header and a `webm` DocType, so a misnamed file still
-plays and a Matroska file that is not WebM is refused. An MPEG file is
-known from its video's sequence headers, not its pack headers: MPEG-2
-video, or MPEG-1 video with AC-3 or LPCM audio, needs the MPEG-2 service
-and is refused with a message saying so otherwise; MPEG-1 video with MP2
-audio, or played without audio, needs only MPEG-1. MPEG-1 elementary
-streams, standalone MP2, Ogg-FLAC, Ogg Opus,
-multichannel FLAC/Vorbis, a second WebM video track, an unknown WebM codec
-and other codecs are rejected with
-a specific message rather than being half-played. File extensions only decide
-what a drawer scan or the file requester offers.
+WebM and MPEG video have separate realtime thresholds. VP8 is realtime through
+1280x720, and VP9 through 854x480. Larger WebM files within the maximum can
+play, but late frames may be skipped. MPEG playback also skips late frames and
+can skip B-pictures until the next reference picture. Audio continues while
+frames are skipped.
 
-WebM larger than the realtime sizes above is not refused. The window says
-that frames may be skipped. Audio, when there is any, keeps playing. A frame
-that is decoded too late is dropped, but never more than two in a row, so
-a stream the card can only just decode still moves at a third of its frame
-rate or better. Video jumps to the next keyframe only when it is more than
-about half a second behind the sound. A video-only file is paced by its
-frame rate instead, so it does not skip. Anything past a 1920-pixel long
-side, or past 1920x1088 pixels, is refused before playback starts. Portrait
-frames, including odd sizes, are fitted to the window and to fullscreen with
-the aspect preserved and black bars at the sides rather than stretched. If
-the file names a display size different from the coded frame, that aspect
-is what the window uses. A projection roll hint is printed when progress
-output is on and is not applied.
+WebM files with multiple video or audio tracks, unsupported codecs, invalid
+audio layouts, or oversized video are rejected. A WebM file has a video track;
+audio-only WebM is rejected. FLAC and Vorbis do not support seeking. A chained
+or multiplexed Ogg Vorbis file stops with an error when the card reaches an
+unsupported continuation.
 
-MPEG files drop late frames the same way (never more than two in a row),
-and after a late frame the card skips B-pictures, which no other picture
-depends on, until it returns the next reference picture. Their audio is not
-affected.
+## Platform limits
 
-Before a video starts, ZZPlay opens its window on the first picture and
-waits until 200 ms of sound is decoded (less when the audio buffer is
-smaller, as on Zorro II), so the first seconds play without gaps. For MPEG
-files it first hands the card up to 1 MiB of the file, which fills the
-card's read-ahead before the clock starts instead of during the first
-frames. Either wait gives up after a second, and a short clip starts with
-what it has.
+ZZPlay requires a supported ZZ9000 Zorro II or Zorro III aperture, the
+Picasso96 API, and the firmware media-decode services required by the selected
+format. On Zorro II, the firmware must advertise an aperture layout and a PIP
+pool that fits the decoded video.
 
-ZZPlay keeps its formats in one registry, so support for further formats is
-added as the card's decoders grow; the *About* requester lists what the
-installed version plays.
+Recorded compatibility: a matched 4 MiB Zorro II stack provides a 224 KiB PIP
+source pool, where an aligned 352x288 YUY2 frame fits and a 640x360 frame does
+not. The 2 MiB profile has no PIP pool. MP3 remains available on both profiles.
 
-Video requires the Picasso96 overlay. Zorro III uses the normal firmware
-surface allocator. On a matched 4 MiB Zorro II stack, ZZPlay can instead use
-the driver-reserved 224 KiB PIP source pool when one complete aligned YUY2
-frame fits; 352x288 fits, while 640x360 does not. The 2 MiB profile has no PIP
-pool. Unsupported Zorro II geometry is reported clearly, and MP3 continues to
-work on both shipped Zorro II profiles.
+## Start playback
 
-## Starting it
+### Workbench
 
-**Workbench.** Double-click **ZZPlay** to open the player with an empty
-playlist, or select media files, drawers or playlists (shift-click for
-several), then double-click ZZPlay or drop them onto its icon: they are
-loaded and the first one starts. Double-clicking a project icon whose default
-tool is `ZZPlay` does the same for that file.
+Double-click **ZZPlay** to open an empty player. Select media files, drawers,
+or playlists and then double-click ZZPlay, or drop them on its icon. ZZPlay
+loads the selection and starts the first item.
 
-A copy of a suitable project icon ships as `Docs/ZZPlay-project.info`. To use
-it, copy it next to your media file and rename it to match — for example, for
-`Video:holiday.mpg`, copy it to `Video:holiday.mpg.info`.
+`Docs/ZZPlay-project.info` is a project icon template. Copy it beside a media
+file and give it the media file's name plus `.info`. For example, copy it to
+`Video:holiday.mpg.info` for `Video:holiday.mpg`.
 
-**Shell.** `ZZPlay [options] [file|drawer|pattern|playlist ...]`. The
-installer puts it in `SYS:Utilities/ZZ9000/` and offers to add that drawer to
-the command path; AmigaDOS is case-insensitive, so `zzplay` works too.
+### Shell
 
-- With files, ZZPlay plays them in order and exits — the one-shot behaviour
-  scripts rely on. A video shows only its video window; an audio file opens
-  the player window for the duration of the run.
-- Without files, it opens the desktop player.
-- `PLAYER` keeps the player open after the files have played; `PLAYER=NO`
-  makes a Workbench launch behave like the one-shot command.
+Run:
 
-Every argument can be a file, a drawer (its media files are added in name
-order, including sub-drawers up to four levels deep), an AmigaDOS pattern such
-as `Music:Album/#?.mp3`, or an `.m3u` playlist.
+```
+ZZPlay [options] [file|drawer|pattern|playlist ...]
+```
 
-Errors go to the shell when started from the shell, and to a requester when a
-one-shot run was started from Workbench. In the desktop player they appear on
-the player window's message line instead, and a file that cannot be played is
-skipped so the rest of the playlist continues.
+The installer places ZZPlay in `SYS:Utilities/ZZ9000/` and can add that drawer
+to the command path. File arguments, drawers, AmigaDOS patterns, and playlists
+can be mixed. A drawer adds matching files from sub-drawers up to four levels
+deep. At most 64 paths may appear on one command line; use a pattern, drawer,
+or playlist when more are needed.
 
-A Workbench launch is **quiet by default**: printing progress from Workbench
-makes AmigaDOS open an output window that stays open, so every playback would
-leave another one behind. Use `VERBOSE` if you want that output anyway.
-`BENCHMARK` stays verbose regardless, since its numbers are the point.
-
-## The player window
-
-From top to bottom:
-
-- **Now playing**: the title (artist and title from the MP3's ID3 tag when it
-  has one, otherwise the file name), the format line (sample rate, channels
-  and bitrate, or video size and frame rate), the audio output actually in
-  use, the elapsed and total time and the playback state, and a message line
-  for notices and errors.
-- **Position slider**: drag it to seek. Seeking is available for MP3; it is
-  greyed out for MPEG-1 and MPEG-2 video, WebM, FLAC and Ogg Vorbis, which play
-  from the start.
-- **Transport**: previous, play, pause, stop, next.
-- **Volume**: greyed out when the active output cannot change volume (see
-  below).
-- **Repeat** (off, track, all) and **Shuffle**.
-- **Playlist**: the current entry is marked with `»`. Double-click an entry to
-  play it. *Add...*, *Remove*, *Clear*, *Load...* and *Save...* edit it.
-  Removing the entry that is playing lets it finish; playback then
-  continues with the entry that followed it.
-
-Drop files, drawers or playlists from Workbench onto the window to add them;
-if nothing is playing, the first dropped file starts. Playback pauses while
-the dropped items are read and then continues.
-
-The window position, volume, repeat, shuffle and the last drawer used in a
-file requester are remembered between sessions.
-
-### Menus
-
-| Menu | Items |
-| --- | --- |
-| Project | Open..., Add files..., Add drawer..., Load playlist..., Save playlist..., Settings..., About..., Quit |
-| Control | Play/Pause, Stop, Next, Previous, Seek forward, Seek back, Repeat (Off/Track/All), Shuffle, Fullscreen video |
-
-*Open...* replaces the playlist and starts playing; *Add files...* appends.
-File and About requesters run in a separate task, so playback, the time line
-and transport/volume controls keep working while one is open. ZZPlay ignores
-requests to open another requester until the first closes. Open stops the
-current item only after its selection is accepted. Close the requester before
-quitting; the player waits for it rather than leaving a requester task behind.
-
-### Keys
-
-The same keys work in the player window and in the video window.
-
-| Key | Action |
-| --- | --- |
-| Space | Pause / resume (play, when stopped) |
-| Escape, Q | Stop |
-| N | Next |
-| P | Previous |
-| L | Repeat: off, track, all |
-| S | Shuffle on/off |
-| + / - , Cursor up / down | Volume |
-| Cursor right / left | Seek 10 seconds forward / back (MP3) |
-| F | Toggle fullscreen and window (video only) |
-| Ctrl-C | Quit (shell) |
-
-Closing the player window quits ZZPlay. Closing the video window stops the
-video; in a one-shot run that ends the run.
-
-Previous on the first entry restarts it, unless repeat-all is on, in which
-case it wraps to the last entry. Seeking to the very end moves to the next
-entry.
-
-## Settings
-
-*Project > Settings...* chooses where sound goes. Changes apply from the next
-item played.
-
-| Setting | Choices |
-| --- | --- |
-| MP3 output | Auto, MHI, AHI |
-| Video sound | Auto, AHI, ZZ9000AX direct, None |
-| AHI unit | Units 0-3, each shown with the audio mode the AHI preferences editor bound to it |
-| MHI driver | Any driver installed in `LIBS:MHI/` |
-
-**Save** keeps the settings across reboots (`ENVARC:ZZPlay.prefs`), **Use**
-keeps them until the next reboot (`ENV:ZZPlay.prefs`), **Cancel** discards
-the changes. The file is plain text and safe to edit; an unknown or invalid
-line is ignored rather than stopping ZZPlay.
-
-A saved output is a preference: when it cannot play a particular file — MHI
-cannot play the MP2 sound of a video, a driver is missing, another program
-holds the ZZ9000AX — ZZPlay falls back as `Auto` would and shows the output
-it really used. Only a backend named for one launch with `AUDIO=` (or
-`--audio=`) is strict and reports an error instead of falling back.
-
-**Volume** works through AHI (MP3, video sound, and FLAC or Ogg Vorbis when
-they play through AHI) and through outputs that advertise a volume control.
-`mhizz9000.library` does on firmware with per-stream audio gain and
-zz9k.library 2.31 or newer, and on-card FLAC or Ogg Vorbis does on the same
-firmware: the slider then scales the stream below the level set in ZZTop's
-audio settings, where 100% is that level. With older firmware, and for
-ZZ9000AX direct Program Stream output, the level belongs to ZZTop's audio
-settings and the slider is greyed out.
-
-## Options
-
-Every option has a Workbench ToolType with the same name and meaning. The
-shipped icon carries them disabled, in parentheses; remove the parentheses in
-Workbench's *Information* window to enable one. Options apply to one launch;
-they override the saved settings without changing them.
-
-| Shell | ToolType | Meaning |
-| --- | --- | --- |
-| `--audio=auto` | `AUDIO=AUTO` | Pick the best available backend (default) |
-| `--audio=ahi` | `AUDIO=AHI` | Card-accelerated decode, output through AHI |
-| `--audio=mhi` | `AUDIO=MHI` | The selected MHI driver; MP3 only |
-| `--audio=ax` | `AUDIO=AX` | ZZ9000AX output: direct for a Program Stream, on-card for FLAC and Ogg Vorbis |
-| `--audio=none` | `AUDIO=NONE` | Mute |
-| `--ahiunit=N` | `AHIUNIT=N` | AHI unit 0-3 |
-| `--mhidriver=name` | `MHIDRIVER=name` | MHI driver file in `LIBS:MHI/`, e.g. `mhizz9000.library` |
-| `--volume=N` | `VOLUME=N` | Starting volume, 0-100 |
-| `--player` | `PLAYER` | Stay open as a desktop player after the files have played |
-| `--player=no` | `PLAYER=NO` | Play the files and exit, also from Workbench |
-| `--loop` | `LOOP` | Repeat each file forever (repeat track) |
-| `--loop=N` | `LOOP=N` | Repeat each file N times after the first play |
-| `--fullscreen` | `FULLSCREEN` | Start videos fullscreen, no window furniture |
-| `--quiet` | `QUIET` | No progress output. The default from Workbench |
-| `--verbose` | `VERBOSE` | Force progress output even from Workbench |
-| `--fps` | `FPS` | Rolling playback and decode-call frame rates |
-| `--benchmark` | `BENCHMARK` | Remove pacing; implies `--fps`, and mutes audio unless a backend was named |
-| `--trace[=P]` | `TRACE[=P]` | Write per-frame timing diagnostics to the trace file (default `T:zzplay.trace`) |
-| `--help` | — | Print usage |
-
-At most 64 files can be named on one command line; use a pattern, a drawer
-or a playlist for more.
-
-### Choosing an audio backend
-
-`AUTO` never surprises you: it resolves the backend *before* playback starts
-and the player window shows what it chose.
-
-- For **MP3**, `AUTO` prefers MHI when the selected MHI driver is installed
-  and free, and otherwise uses accelerated decode plus AHI.
-- For **Program Stream audio** — MP2, and the AC-3, MP2 or LPCM an
-  MPEG-2 file carries — `AUTO` uses AHI, or direct AX where the firmware
-  advertises it. The card decodes all three into the PCM ring, so the
-  outputs behave the same whichever the stream holds.
-- MHI is never offered for Program Stream or WebM audio: it is a Layer III
-  interface. Asking for it explicitly reports that rather than playing silently.
-- **WebM Opus and Vorbis** use the video-sound choice: on the card when the
-  firmware advertises the matching codec, otherwise AHI. Opus is always
-  48 kHz. Vorbis uses the rate in the file, from 8 to 96 kHz. Firmware that
-  does not advertise WebM reports that rather than starting.
-- **FLAC** and **Ogg Vorbis** `AUTO` plays them on the card. The card decodes
-  to 16-bit little-endian and the ZZ9000AX output consumes that PCM, so
-  nothing is read back over the bus. If that output is refused — older
-  firmware, a sample rate or channel count the AX pump cannot convert to
-  48 kHz, or the ZZ9000AX already in use — ZZPlay falls back to accelerated
-  decode plus AHI and the window shows the output it actually used. A saved
-  preference is not strict and falls back the same way. `AUDIO=AX` does not
-  fall back; it reports the refusal. `AUDIO=AHI` keeps AHI. `AUDIO=MHI` is
-  refused, because MHI is MP3 only; the message names the outputs that do
-  work (the card and AHI). The saved MP3 output does not apply. They need
-  firmware that advertises the matching stream service; without it ZZPlay
-  reports that accelerated FLAC or Ogg Vorbis streaming is unavailable. An
-  Ogg Vorbis duration comes from the stream's last page and
-  is shown only when that page belongs to the same stream. A chained Ogg
-  file plays its first link to its end (the firmware reports the next link
-  only after every byte of the first has been read), then stops with an
-  error saying the card cannot decode the rest; it is never reported as
-  completed. A multiplexed file is refused before anything plays.
-- The decoded-audio ring is sized from the stream's largest decoder unit
-  (an MP3 frame, a FLAC block, a Vorbis packet) and shrinks in bounded steps
-  when the compact Zorro II host window is short; if even one unit does not
-  fit, ZZPlay reports that there is not enough shared card memory for that
-  stream instead of starting it.
-
-Only one backend can own the ZZ9000AX daughterboard at a time. If another
-program holds it, an explicitly requested backend reports `BUSY` instead of
-stealing it, and `AUTO` falls back and says so.
-
-Pause through MHI, and through on-card FLAC or Ogg Vorbis, stops essentially
-instantly. Through AHI it stops after the already-queued audio finishes, up
-to about 0.4 seconds, because that queue is what keeps playback gap-free.
-
-### Fullscreen
-
-Fullscreen opens a **dedicated screen** at the closest display mode and
-scales the picture to fill it, aspect preserved and centred -- the same
-scaling route a window resize takes, so 4:3 content on a 4:3 screen
-fills it completely, and everything else letterboxes or pillarboxes.
-Small dedicated modes render top-left on the card's minimum raster, so
-exact-size 1:1 screens are not used for presentation.
-
-Scaling is aspect-preserving -- the picture is never stretched -- and no
-part of Workbench is visible, so it suits a program showing a video
-sequence.
-
-Pressing F again closes that screen and returns to the exact window position
-and size you had before.
-
-If no display mode matches the video, ZZPlay says so and stays windowed
-rather than pretending the request succeeded.
-
-**Starting fullscreen.** `--fullscreen`, or the `FULLSCREEN` ToolType, starts
-that way with no window ever appearing on the desktop — which is what you
-want when another program is showing a video sequence and a framed window on
-the Workbench would break the effect. A Workbench launch with `FULLSCREEN`
-therefore plays and exits like the shell command, unless `PLAYER` is also
-set. Combine it with `--quiet` (already the default from Workbench) for a
-completely silent, chrome-free playback:
+For example:
 
 ```
 ZZPlay --fullscreen --quiet Video:intro.mpg
 ```
 
-### MP3 position and duration
+A one-shot shell launch reports errors to the shell. A one-shot Workbench
+launch uses a requester. The desktop player shows errors in its message line
+and skips an unplayable item so that the playlist can continue.
 
-The duration is estimated from the size of the audio data, so for a VBR file
-both it and the elapsed time are approximate; an approximate position is
-shown with a leading `~`. Through MHI the position is derived from the data
-handed to the driver and is also shown as approximate. Seeking jumps to the
-proportional position in the file, which is exact for CBR files and close
-for VBR files.
+## Options
 
-## Presentation path
+Shell options and Workbench ToolTypes use the same validation. ToolTypes are
+case-insensitive. The shipped icon keeps its ToolTypes disabled in parentheses;
+remove the parentheses in Workbench's Information window to enable one.
 
-ZZPlay reports which path actually presented your video, asked of the
-firmware rather than guessed:
+| Shell option | ToolType | Effect |
+| --- | --- | --- |
+| `--fps` | `FPS` | Show rolling paced-playback and decode-call frame rates. |
+| `--benchmark` | `BENCHMARK` | Disable pacing, enable `--fps`, and mute audio unless `--audio` explicitly selected a backend. |
+| `--loop` | `LOOP` | Repeat the current item forever. |
+| `--loop=N` | `LOOP=N` | Repeat the item `N` times after its first playback. `N` must be greater than zero. |
+| `--fullscreen` | `FULLSCREEN` | Start video fullscreen with preserved aspect ratio. |
+| `--player` | `PLAYER`, `PLAYER=YES`, `PLAYER=1`, `PLAYER=TRUE` | Keep the desktop player open after the playlist ends. |
+| `--player=no` | `PLAYER=NO`, `PLAYER=0`, `PLAYER=FALSE` | Play named files and exit. |
+| `--audio=auto` | `AUDIO=AUTO` | Select the available backend automatically. This is the default. |
+| `--audio=ahi` | `AUDIO=AHI` | Use AHI output. |
+| `--audio=mhi` | `AUDIO=MHI` | Use the selected MHI driver. MHI supports MP3 only. |
+| `--audio=ax` | `AUDIO=AX` | Request ZZ9000AX output. |
+| `--audio=none` | `AUDIO=NONE` | Decode without audio output. |
+| `--ahiunit=N` | `AHIUNIT=N` | Select AHI unit 0–3. |
+| `--mhidriver=name` | `MHIDRIVER=name` | Select an MHI driver from `LIBS:MHI/`. The default is `mhizz9000.library`. |
+| `--volume=N` | `VOLUME=N` | Set the initial volume from 0–100. |
+| `--quiet` | `QUIET` | Suppress progress output. This is the default for Workbench launches unless `--fps` or `BENCHMARK` applies. |
+| `--verbose` | `VERBOSE` | Print progress output from Workbench as well as shell launches. |
+| `--trace` | `TRACE` | Write per-frame timing diagnostics to `T:zzplay.trace`. |
+| `--trace=path` | `TRACE=path` | Write per-frame timing diagnostics to `path`. |
+| `--help` | None | Print command usage. |
 
-- **native 1:1** — exact size and fully visible, straight from the FPGA
-  overlay plane. The fastest path.
-- **native scaled** — resized or clipped, still handled by the overlay's
-  hardware scaler. Also keeps decoded video off the Zorro bus.
-- **card-local compositor** — the ARM software fallback, used only for source
-  geometry the overlay cannot express.
-- **unknown** — the installed firmware predates presentation reporting. This
-  is informational only; playback is unaffected.
+`--audio` must include one of `auto`, `ahi`, `mhi`, `ax`, or `none`. Options
+and file paths can be interleaved on the shell command line. Unknown options
+that begin with `--` are errors.
 
-Resizing the window switches between the first two and the change is
-reported. Restoring the window to exact size returns to native 1:1.
+## Audio output
+
+`AUTO` uses MHI for MP3 when the selected MHI driver is available, otherwise
+it uses accelerated decode with AHI. FLAC and Ogg Vorbis try card output and
+fall back to AHI if the card refuses the output or ZZ9000AX is busy. An
+explicit `AUDIO=AX` request is strict and reports failure instead of falling
+back. An explicit `AUDIO=MHI` request for FLAC or Ogg Vorbis is rejected.
+
+Program Stream and WebM audio use the video audio path. The required decoder
+service must be advertised by the firmware before playback begins. Video-only
+files can play without an audio backend.
+
+Only one backend can use the ZZ9000AX daughterboard at a time. A strict request
+reports `BUSY` when another program owns it; automatic selection can fall back.
+
+The player stores settings in `ENV:ZZPlay.prefs` for the current boot and in
+`ENVARC:ZZPlay.prefs` after **Save**. Invalid preference lines are ignored.
+
+## Player controls
+
+The player window has a playlist, transport controls, a position slider,
+volume, repeat, shuffle, and status text. Drag the position slider to seek in
+MP3 files. The slider is unavailable for MPEG video, WebM, FLAC, and Ogg
+Vorbis. Drop files, drawers, or playlists onto the player window to append
+them to the playlist.
+
+| Key | Action |
+| --- | --- |
+| Space | Pause or resume playback. Start playback when stopped. |
+| Escape, Q | Stop. |
+| N, P | Next or previous item. |
+| L | Cycle repeat through off, track, and all. |
+| S | Toggle shuffle. |
+| `+`, `-`, Cursor up, Cursor down | Change volume. |
+| Cursor right, Cursor left | Seek 10 seconds forward or back in MP3 playback. |
+| F | Toggle video fullscreen. |
+| Ctrl-C | Quit from a shell launch. |
+
+Fullscreen uses a dedicated screen and preserves the video's aspect ratio.
+Press `F` to return to the previous window position and size. If no display
+mode can present the video, ZZPlay remains windowed.
 
 ## Diagnostics
 
-`zz9k-mp3` remains the low-level MP3 decode diagnostic, producing raw or WAV
-output for exactness checking. ZZPlay is the player; `zz9k-mp3` is the
-instrument.
+`--benchmark` measures decode throughput without display pacing. `--fps` shows
+rolling playback and decode-call frame rates. `--trace` writes per-frame timing
+diagnostics.
 
-`--benchmark` disables pacing so decode throughput can be measured
-independently of display rate, and mutes audio unless a backend was named.
+`zz9k-mp3` remains the lower-level MP3 decoder diagnostic. Use it when raw or
+WAV output is needed for exactness checks.

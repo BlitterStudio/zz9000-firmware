@@ -1,85 +1,92 @@
 # Zorro II service support
 
-The current matched firmware, FPGA bitstream, RTG driver, and SDK extend a
-selected set of ARM services to Zorro II without pretending that its aperture
-is equivalent to Zorro III. The FPGA publishes an aperture-relative layout,
-the RTG driver validates it against the AutoConfig size and reserves every
-region, and the driver then acknowledges it. Firmware exposes the compact host
-heap and optional PIP pool only after that two-sided handshake.
+The current generation-2 Zorro II layout gives both the 2 MiB and 4 MiB
+apertures a 16 KiB CPU-visible host window. `zz9k-archive` and the adaptive
+AmiSSL provider can use that window. Several older client paths still request
+larger buffers and therefore cannot run their accelerated path on a
+current-generation layout.
 
-Keep all four components from the same release set. The aperture layout has
-two generations: generation 1 (the previously supported layout, still
-published by older matched sets and older FPGA/firmware pairs) and generation
-2 (current matched sets), which shrinks the negotiated host heap to 16 KiB on
-the 2 MiB and 4 MiB profiles and reserves the freed 48 KiB for the Z2 audio
-direct-ring grant. Descriptor regions, including the optional PIP pool,
-require the driver validation and ACK handshake with the descriptor's own
-generation token: an invalid or unacknowledged descriptor fails closed, and
-`zz9k-info` reports the raw and validated layout. Descriptor-absent legacy
-4 MiB stacks intentionally retain the historical fixed 64 KiB `HOST_WINDOW`
-path; this compatibility path does not expose negotiated layout or PIP
-features. Legacy 2 MiB stacks and unknown aperture sizes reject that path.
+Keep the FPGA bitstream, firmware, RTG driver, and SDK from one release set.
+The FPGA reports the aperture layout and its generation. The RTG driver
+validates that layout against the AutoConfig aperture and acknowledges it
+before firmware publishes the generation-2 host window or mailbox. An invalid
+or unacknowledged layout leaves those regions unavailable.
 
-## Shipped profiles
+## Layout profiles
 
-| Profile | Host heap (gen 2) | Host heap (gen 1 / legacy) | PIP source pool | Practical result |
-| --- | ---: | ---: | ---: | --- |
-| 2 MiB Zorro II / A500 | 16 KiB | 64 KiB | none | Compact audio, image, archive, and AmiSSL clients; no ZZPlay video |
-| 4 MiB Zorro II / A500 | 16 KiB | 64 KiB | 224 KiB | The same compact clients plus one bounded packed-YUV PIP source |
+| Aperture | Generation-2 host window | PIP source pool | Firmware layout |
+| --- | ---: | ---: | --- |
+| 2 MiB | 16 KiB | none | Audio direct-ring reservation and compact host window |
+| 4 MiB | 16 KiB | 224 KiB | Audio direct-ring reservation, compact host window, and PIP source pool |
+| 8 MiB | 80 KiB | 256 KiB | Defined by the firmware layout code |
 
-The source also defines a software-side 8 MiB profile, but there is no shipped
-or verified 8 MiB AutoConfig bitstream variant. Do not select or advertise it
-as a supported board profile.
+The host window is shared by all CPU-visible SDK allocations. Close idle
+clients before retrying an allocation. `zz9k-info` reports the aperture state,
+raw layout, host-window total and free space, largest free block, allocation
+count, and invalid-slot count.
 
-The host heap is shared by every CPU-visible SDK client. It is not provided
-per application. Card-only compressed, PCM, and decode rings do not consume
-it, but two clients whose visible working sets exceed the acknowledged
-generation's heap cannot run their accelerated paths concurrently. Close idle
-clients before diagnosing an allocation failure; `zz9k-info` reports total,
-free, largest-block, and invalid allocation counters.
+Generation 2 reserves 48 KiB from the former 64 KiB host window for one Zorro
+II audio direct-ring grant. Clients obtain the grant geometry from
+`SDK_OP_AUDIO_RING_ACQUIRE`; the reservation is unavailable to the shared
+allocator.
 
-## Client matrix
+## Current client matrix
 
-| Client or operation | 2 MiB | 4 MiB | Limits and fallback |
+| Client or operation | 2 MiB | 4 MiB | Current behavior |
 | --- | --- | --- | --- |
-| `mpega.library` | Yes | Yes | Card-only MP3 ring plus compact host-visible PCM/staging buffers. |
-| `mhizz9000.library` | Yes | Yes | Uses the host window for feed staging; requires the ZZ9000AX hardware. |
-| ZZPlay standalone MP3 with AHI or MHI | Yes | Yes | Uses a card-only compressed ring and compact PCM/staging windows. |
-| Accelerated `amissl.library` | Yes | Yes | X25519, P-256 ECDHE, P-256 ECDSA verify, RSA-2048 PKCS#1/SHA-256 verify, AES-GCM, and ChaCha20-Poly1305 use persistent exact-size host-window scratch. Provider open allocates a 32-byte probe to gate advertisement; if it fails, AmiSSL stays on its software provider. Other 16-byte-aligned slots grow lazily. A later allocation miss follows the operation's failure semantics: P-256 keygen/derive, ECDSA-P256 verify, RSA-2048 verify, and record crypto (AES-GCM and ChaCha20-Poly1305) fall back to software; X25519 is offload-or-fail and returns failure once advertised. |
-| `zz9k-view` streaming JPEG/PNG/WebP | Yes | Yes | Uses compact host-window staging. Image size is not limited to the heap because compressed data is streamed. Animated WebP displays its first composited canvas preview. |
-| `zz9k-picture.datatype` | Yes | Yes | Uses at most 24 KiB of compressed-input staging plus geometry-derived output tiles capped at 32 KiB. A row that cannot fit the tile cap rejects the accelerated DataType path without overrunning the window; fallback then depends on the caller's installed DataType selection. |
-| `zz9k-archive` streamed decode/test/extract | Yes | Yes | CPU-visible feed buffers are sized from the acknowledged host window: the combined cap is `min(48 KiB, host heap)`, split evenly between the input and output chunks, so a generation-2 profile (16 KiB heap) streams with 8 KiB chunks. The two chunks are allocated as one retry unit that shrinks in halves down to 4 KiB, so a window contended by another resident client degrades to a balanced smaller pair instead of failing the member; a terminal allocation failure names the window size alongside the shared-heap and host-window free/largest-block counters. Large LHA batch arenas are bypassed and retain the per-member/software fallback chain. |
-| ZZPlay MPEG-1 Program Stream video/PIP | No | Limited | Requires the 4 MiB profile and one full aligned YUY2 frame to fit the 224 KiB pool. 352x288 fits; 640x360 does not. P96 owns one fixed source allocation at a time. |
-| Arbitrary P96 offscreen bitmaps | No | No | The fixed pool is exposed only for the bounded PIP allocation; general offscreen allocation remains disabled. |
-| Zorro III Fast RAM or a Z3-sized shared heap | No | No | Neither facility can be reproduced usefully inside the Zorro II aperture. |
+| `mpega.library` | No | No | Its compact PCM ring is 32 KiB, followed by 16 KiB feed staging. Neither layout has a 32 KiB host window. |
+| ZZPlay with AHI | No | No | The compact AHI path allocates a 32 KiB PCM ring and 16 KiB staging buffer. |
+| ZZPlay card-local streaming | Limited | Limited | The card-local pass keeps PCM and compressed rings card-only and uses up to 16 KiB of host-window staging. It requires an otherwise free host window. |
+| Accelerated `amissl.library` | Yes | Yes | The provider advertises hardware algorithms only after a 32-byte host-window probe succeeds. Scratch allocations are 16-byte aligned and grow to the requested size. X25519 is offload-or-fail after advertisement. P-256 and AEAD operations can use the default provider after an offload miss. RSA-2048 PKCS#1/SHA-256 verification uses the default provider by default; set `ENV:ZZ9K_RSA_VERIFY_OFFLOAD` only to test the board path. |
+| `zz9k-view` JPEG, PNG, and WebP | No | No | Each viewer path requests a 32 KiB host-window staging buffer. |
+| `zz9k-picture.datatype` | Limited | Limited | Input staging is capped at 24 KiB and output tiles at 32 KiB. The accelerated path can run only when its chosen input and tile allocations fit the remaining host window. |
+| `zz9k-archive` streamed decode, test, and extract | Yes | Yes | Decode and extract use a combined CPU-visible budget of `min(48 KiB, host window)`, split between input and output. Verify-only output can be card-only. The 16 KiB profile therefore starts with 8 KiB chunks. A failed pair allocation retries at half size down to 4 KiB. |
+| ZZPlay MPEG Program Stream video/PIP | No | No | Current code accepts only an acknowledged generation-1 PIP layout. On that legacy 4 MiB layout, the 224 KiB pool fits a 352x288 YUY2 frame (202,752 bytes) and rejects 640x360 (460,800 bytes). |
 
-Several low-level diagnostics still call `zz9k_alloc_shared()` with the legacy
-default flags and therefore do not map their buffers through the negotiated
-Zorro II host window. This includes `zz9k-smoke`, `zz9k-inflate`, `zz9k-mp3`,
-`zz9k-hash`, `zz9k-chacha`, `zz9k-aead`, and `zz9k-cryptobench`. Plain
-file-output `zz9k-jpeg <file>` belongs in the same diagnostic category: its
-streaming input uses `HOST_WINDOW`, but its non-framebuffer tile output uses
-the legacy default allocation. On Zorro II, `zz9k-smoke`, `zz9k-inflate`,
-`zz9k-hash`, `zz9k-chacha`, `zz9k-aead`, and `zz9k-cryptobench` print an
-explanatory note at startup, before their accelerated sections fail;
-`zz9k-mp3` explains at the failing step and falls back to streaming decode,
-and `zz9k-jpeg` reports allocator diagnostics at the failure. Their failure on
-Zorro II does not mean the adapted production client for the same service is
-broken. For example, qualify TLS with the accelerated AmiSSL provider, archive
-decoding with `zz9k-archive`, and MP3 with `mpega.library`, MHI, or ZZPlay
-rather than those generic allocation diagnostics.
+## External integration notes
 
-## Qualification status
+The following compatibility facts belong to the RTG and audio integrations,
+which are outside this source tree:
 
-The layout, allocator, client guards, RTG reservation, and 2/4 MiB bitstream
-contracts have host-side regression and cross-build coverage. The existing
-MHI path has also been confirmed on a 4 MiB Zorro II A2000TX: ZZPlay MP3/MHI
-played normally, and AmigaAMP worked after its MHI settings were reset. AHI and
-MHI still cannot own the ZZ9000AX simultaneously; that is the existing audio
-ownership contract, not an aperture failure.
+| Integration | 2 MiB | 4 MiB | Constraint |
+| --- | --- | --- | --- |
+| `mhizz9000.library` | Yes | Yes | Uses the host window for feed staging and requires ZZ9000AX hardware. |
+| ZZPlay MP3 with MHI | Yes | Yes | The external MHI path has separate audio ownership from AHI. |
+| General P96 offscreen bitmaps | No | No | The fixed PIP pool is for one bounded source allocation; general offscreen allocation remains disabled. |
+| Zorro III Fast RAM or a Z3-sized shared heap | No | No | The Zorro II aperture does not provide either facility. |
 
-The wider matrix is not yet physically qualified. Before calling it
-hardware-validated, exercise 4 MiB PIP allocation/close cycles, interleave
-overlay and normal RTG operations, warm-reset the card, and run image,
-DataType, archive, AmiSSL, and audio host-window clients alone and in
-contention while watching `zz9k-info` memory diagnostics.
+## Checking a board
+
+1. Run `zz9k-info` after the matched stack has started.
+2. Confirm that the aperture state is `active` and that the reported layout
+   generation, aperture size, host window, and PIP pool match the board.
+3. Run one host-window client at a time first. Use the memory counters in
+   `zz9k-info` when combining clients.
+
+Generation 1 used a 64 KiB host window on the 2 MiB and 4 MiB layouts.
+Descriptor-absent legacy 4 MiB stacks retain that fixed window. Legacy 2 MiB
+stacks and unknown aperture sizes do not use it. Generation 2 is the current
+layout and requires the acknowledgement above.
+
+## Diagnostic scope
+
+`zz9k-smoke`, `zz9k-inflate`, `zz9k-mp3`, `zz9k-hash`, `zz9k-chacha`,
+`zz9k-aead`, and `zz9k-cryptobench` allocate their accelerated buffers from
+the default shared heap. That heap is not CPU-visible on Zorro II, so these
+tools do not qualify the adapted clients. `zz9k-jpeg <file>` also uses a
+default-heap tile output path.
+
+Use the accelerated AmiSSL provider for TLS and `zz9k-archive` for archive
+work when qualifying the generation-2 Zorro II paths. Test MHI and RTG
+integration against their own components.
+
+## Status
+
+Recorded hardware testing on a 4 MiB Zorro II A2000TX found that ZZPlay MP3
+with MHI played normally and that AmigaAMP worked after its MHI settings were
+reset. AHI and MHI cannot own the ZZ9000AX at the same time.
+
+The wider hardware matrix remains unqualified. It still needs 4 MiB PIP
+allocation and close cycles, interleaved overlay and RTG operations, a warm
+reset, and image, DataType, archive, AmiSSL, and audio host-window clients run
+alone and under contention while monitoring `zz9k-info` memory diagnostics.

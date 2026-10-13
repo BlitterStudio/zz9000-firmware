@@ -2,680 +2,110 @@
 
 # ZZ9000 Firmware
 
-FPGA logic and bare-metal ARM firmware for the MNT ZZ9000 Zorro II/III
-graphics and coprocessor card.
+ZZ9000 Firmware is the FPGA logic and bare-metal ARM software for the MNT
+ZZ9000 Zorro II/III graphics and coprocessor card. It builds the boot image
+for the Zynq-7020 and implements the card's Zorro interface, graphics output,
+native-video capture, and firmware-side services.
 
-This repository contains the Zorro bus interface, video formatter,
-scanline generator, AXI plumbing, boot image layout, and `ZZ9000OS`
-firmware that runs on the Zynq-7020 ARM core. The matching Amiga-side
-drivers and tools live in
+Use matching Amiga-side drivers and tools from
 [BlitterStudio/zz9000-drivers](https://github.com/BlitterStudio/zz9000-drivers).
+The [`sdk/`](sdk/) directory contains the SDK, its API documentation, client
+sources, and host tests.
 
-> **Fork notice:** this is the BlitterStudio firmware fork, maintained by
-> Dimitris Panokostas / midwan. It continues the original MNT ZZ9000
-> firmware sources, but is not affiliated with, endorsed by, or supported
-> by MNT Research GmbH. Hardware support questions belong with MNT;
-> firmware issues for this fork belong in this repository.
->
-> Original upstream: <https://source.mnt.re/amiga/zz9000-firmware>
+## What's different from the original MNT firmware
 
-## What Changed Since the Original MNT Firmware
+- Full-rate native capture and centered 1080p output profiles, with matching-tool calibration and live geometry support.
+- Picasso96 video overlay support and custom progressive modelines.
+- ZZ9000AX boot-time audio scenes, mixer baseline settings, and clean-level ceilings.
+- USB proxy protocol v2 with control, bulk, persistent-interrupt, and selected ISO transport paths.
+- Firmware-file updates from AmigaOS through the matching driver tools.
+- SDK media, image, archive, audio, and AmiSSL-provider components.
+- Release packages for Zorro III, AGA video-slot, Zorro II, and ZZ9500CX adapter variants.
 
-The original MNT project established the ZZ9000 hardware and its core Amiga
-support. This independent BlitterStudio fork continues from those pre-fork
-sources and turns the card into a broader, easier-to-use graphics and
-coprocessor platform. These are the highest-value differences for an owner:
+## Install firmware
 
-| Improvement | What it means in everyday use |
+Download a release ZIP from [GitHub Releases](https://github.com/BlitterStudio/zz9000-firmware/releases)
+that matches the target board variant. Each package contains `BOOT.bin` and a
+commented [`ZZ9000.CFG`](ZZ9000.CFG) sample.
+
+| Variant | Target |
 |---|---|
-| **Sharper and more compatible native Amiga video** | Full-rate variants preserve the complete 28 MHz Amiga pixel stream, including SuperHires detail. Native video can be shown pixel-exact at 1280x1024 or centered unchanged inside a monitor-friendly 1920x1080 picture with clean black borders. |
-| **Live picture positioning** | Current ZZTop and matched firmware can open a calibration screen and move the captured Amiga picture with the cursor keys. You no longer need a long edit, reboot, inspect, and repeat cycle just to center the image. |
-| **Faster, more capable RTG output** | The fork adds substantial Picasso96 acceleration and fixes, a 64-bit display path, high-resolution Zorro III modes including 1920x1080x32, monitor power management, improved scanlines, and a hardware-scaled video window. |
-| **Video and audio playback on the card** | The two ARM cores can decode MPEG-1 video and MPEG audio for the SDK's **ZZPlay** application, keeping the classic Amiga CPU free for the interface and other work. Playback can use a window on Workbench or a dedicated screen. |
-| **Hardware-assisted images, archives, audio and secure networking** | Firmware services accelerate JPEG/PNG work, MP3/audio streaming, LHA/LZH decompression, and selected cryptography used by the accelerated AmiSSL build. Applications fall back safely when a service is unavailable. |
-| **Settings without special firmware builds** | One readable `ZZ9000.CFG` file on the microSD card now controls native-video profiles, framing, scanlines, INT2, MAC address, PIP/off-screen features, and the boot HDF. The old separate `ns-pal` firmware flavor is no longer needed. |
-| **Updates and recovery from AmigaOS** | `ZZFwUpdate` can install firmware files without removing the microSD card, keeps a `.bak` copy when replacing a file, and can restore that backup if an update boots but misbehaves. |
-| **More supported machines and card configurations** | Releases maintain nine FPGA images covering AGA (video-slot) and E7M capture, Zorro III, Zorro II, A500/ZZ9500CX, 2 MB, no-Fast-RAM, and Super Denise configurations. |
+| `zorro3` | Zorro III A3000/A4000 systems using E7M capture |
+| `zorro3-aga` | A4000/A4000T AGA systems using video-slot capture |
+| `zorro2` | A2000 or other Zorro II system with a 4 MB window |
+| `zorro2-2mb` | A2000 or other Zorro II system with a 2 MB window |
+| `a500` | A500 with a ZZ9500CX Denise adapter and a 4 MB window |
+| `a500-2mb` | A500 with a ZZ9500CX Denise adapter and a 2 MB window |
+| `a500plus` | A500+ or Super Denise with a ZZ9500CX Denise adapter |
 
-The less visible work matters too: USB 2.0/Poseidon support, gigabit Ethernet,
-SD-card HDF boot, on-board audio improvements, safer Zorro II memory sharing,
-and a reproducible GCC/Docker/CI build and release process. FPGA releases are
-built and timing-checked for every supported hardware variant.
+1. Copy the package's `BOOT.bin` to the FAT32 microSD card as required by the
+   card's boot setup.
+2. To change boot settings, copy and edit `ZZ9000.CFG` in the same directory.
+3. Power-cycle the Amiga.
 
-The firmware, AmigaOS drivers, and SDK applications are designed as one
-matched release. This is especially important on Zorro II, where the current
-stack safely agrees which parts of the smaller 2 MB or 4 MB address window may
-be used. Both shipped Zorro II profiles support compact image, archive, audio,
-and secure-network services; the 4 MB profile also has room for one bounded
-ZZPlay picture-in-picture source. See the SDK's
-[plain-language Zorro II service matrix](https://github.com/BlitterStudio/zz9000-sdk/blob/master/docs/zz9k-zorro2-services.md)
-for the exact limits.
+The release packages use one `ZZ9000OS` ARM image with the bitstream selected
+for the board variant.
 
-## Installing Firmware
+## Configure the card
 
-Tagged releases attach ZIPs that each contain a user-facing `BOOT.bin`
-and sample `ZZ9000.CFG`. Release notes and change history live on the
-[GitHub Releases](https://github.com/BlitterStudio/zz9000-firmware/releases)
-page.
+`ZZ9000.CFG` is optional. The firmware reads it from the microSD root beside
+`BOOT.bin`. Read the [configuration and compatibility guide](docs/configuration.md)
+for every accepted key, its values and limits, native-video profiles, P96
+options, audio scenes, USB behavior, and Amiga MMU/cache settings.
 
-The direct update path is:
+`fast_ram` applies only when the selected hardware supports Zorro III Fast
+RAM. Its decision is fail-closed: a missing, malformed, unreadable, or `off`
+configuration does not advertise Fast RAM.
 
-1. Download or build the correct release ZIP for the target hardware.
-2. Extract its `BOOT.bin`.
-3. Copy `BOOT.bin` to the ZZ9000 FAT32 microSD card, using the filename
-   required by the card's QSPI/SD boot setup.
-4. Power-cycle the Amiga.
+Other focused implementation and protocol documents are in [`docs/`](docs/).
+The SDK material in [`sdk/docs/`](sdk/docs/) covers SDK-facing formats,
+services, and AmigaOS packaging.
 
-Firmware builds with FWUP support can also receive a new `BOOT.bin` from
-AmigaOS using `ZZFwUpdate` from
-[zz9000-drivers](https://github.com/BlitterStudio/zz9000-drivers). FWUP
-writes through the ZZ9000 register window to the mounted FAT32 microSD
-card, stages the upload through a temporary file, then replaces the
-target on close. If an existing file is replaced, it is kept as a
-same-name `.bak` backup, such as `BOOT.bak`.
+## Build and contribute
 
-FWUP accepts flat root-level filenames only: up to 64 characters, simple
-ASCII letters/digits plus `.`, `_`, and `-`, with no path separators.
-Power-cycle the Amiga after replacing `BOOT.bin`.
+Read [BUILD.md](BUILD.md) before building. It lists the supported toolchains,
+the firmware-only and HDL flows, dependency builders, release packaging, and
+commands for the relevant test suites.
 
-## Board / Bitstream Variants
+Firmware-only work uses the committed bitstream inputs in `bootimage_work/`.
+HDL work requires Vivado 2018.3 and an updated bitstream; GitHub Actions does
+not run Vivado. The workflow in [`.github/workflows/build.yml`](.github/workflows/build.yml)
+builds the firmware, checks the firmware/SDK mailbox ABI, packages releases,
+and runs host regression suites under [`test/`](test/).
 
-Use the ZIP whose board/bitstream variant matches the target machine:
-
-| Variant | Use for |
+| Area | Start here |
 |---|---|
-| `zorro3` | A3000/A4000 with optional Zorro III FastRAM; E7M capture |
-| `zorro3-aga` | A4000/A4000T AGA with the 28 MHz video-slot connection, optional Zorro III FastRAM; AGA capture (renamed from `zorro3-a4000-c28`) |
-| `zorro2` | A2000, Zorro II, 4 MB window |
-| `zorro2-2mb` | A2000, Zorro II, 2 MB window |
-| `a500` | A500 with ZZ9500CX Denise adapter, 4 MB window |
-| `a500-2mb` | A500 with ZZ9500CX Denise adapter, 2 MB window |
-| `a500plus` | A500+ or Super Denise with ZZ9500CX Denise adapter |
-
-These are hardware/autoconfig bitstream variants; they use one ARM firmware.
-Zorro III FastRAM is no longer a bitstream choice: it is off by default and
-enabled with `fast_ram = on` in [`ZZ9000.CFG`](ZZ9000.CFG) (fail-closed —
-absent, malformed, unreadable, or too-slow configuration boots without it,
-which is the old `zorro3-nofast` behavior). Former `zorro3-nofast` /
-`zorro3-nofast-aga` (former name) users need no CFG key; former `zorro3` /
-`zorro3-aga` (formerly `zorro3-a4000-c28`) users add `fast_ram = on` to keep their RAM. Changes
-take effect at the next reboot (a warm reset re-reads the card). If the
-card is unusually slow at a warm reset, the re-read can finish after the
-Amiga has already passed the Fast-RAM slot in autoconfig; the card then
-boots without Fast RAM for that one pass (never wrongly enabled) and the
-next reset picks it up again.
-
-The AGA (formerly A4000 C28) images require the video-slot C28 connection. Do not install
-them on an A3000 or Denise-adapter machine. Keep the E7M Zorro III images as
-the A3000 builds and as an A4000 fallback. Settings that used to require a
-separate firmware flavor or ENV: variables now live in the optional
-`ZZ9000.CFG` config file (see below). Older releases also
-shipped an `ns-pal` firmware flavor; its behavior is now the
-`filtered_pal_exact` native-video profile in `ZZ9000.CFG`.
-
-## Configuration File (ZZ9000.CFG)
-
-`ZZ9000.CFG` is an optional text file stored beside `BOOT.bin` in the root of
-the FAT32 microSD card. Firmware reads it at power-on; a soft reset does not
-reload it, except `fast_ram`, which every reset re-reads to re-derive the
-Fast-RAM advertisement. The easiest way to manage it is **ZZTop → Project →
-Settings**. Release ZIPs also include a fully commented
-[sample file](ZZ9000.CFG) for manual editing.
-
-The file controls these boot-time defaults:
-
-| Key | Purpose |
-|---|---|
-| `videocap_profile` | Native output: `full_60`, `full_exact`, `filtered_60` (default), `filtered_pal`, `filtered_pal_exact`, `filtered_ntsc_exact`, `centered_1080p_60`, `centered_1080p_50`, `centered_1080p_match` |
-| `videocap_sample` | Native-video capture sampling |
-| `videocap_phase` | Legacy E7M diagnostic phase, signed fine steps (`-255..255`); omit unless calibrated |
-| `videocap_c28_phase` | A4000 C28 diagnostic phase, independent fine steps (`-896..895`); requires matching AGA (video-slot C28) bitstream |
-| `videocap_crop_h` | Horizontal picture position; omit for Automatic |
-| `videocap_crop_v` | Vertical picture position; omit for Automatic |
-| `videocap_width` | Manual capture window width, 16-aligned words (`256..1280`); omit for Automatic |
-| `videocap_height` | Manual capture window height in source lines (`100..1024`); omit for Automatic |
-| `scanline_mode` | Scanline style, or off |
-| `scanline_parity` | Which line is darkened |
-| `int2` | Use INT2 instead of INT6 |
-| `fast_ram` | Zorro III Fast RAM (Z3 images only), off by default and fail-closed; see [Board / Bitstream Variants](#board--bitstream-variants) |
-| `offscreen_bitmaps` | Enable or disable Picasso96 off-screen bitmaps |
-| `video_overlay` | Enable or disable the Picasso96 video window |
-| `mac` | Ethernet MAC-address override |
-| `hdf` | Root-level HDF image used for SD-card boot (default `zz9000.hdf`); `off` disables SD boot |
-
-The audio control plane (ZZ9000AX) adds one group of keys per scene,
-the active selection, operator baseline and per-card clean ceilings.
-Values are plain decimals; band pairs and prefactor/volume pack two
-0-100 fields as `hi*128+lo`, and baseline packs mixer legs as
-`paula*256+ax` (0-255 each, 127 = 0 dB). The ceiling keys store
-**measured** clean single-source levels (1-4095): firmware weights
-Paula by `audio_ceiling_ax/audio_ceiling_paula`, caps each leg at its
-configured ceiling, then bounds the combined output with a limiter.
-With no saved calibration the conservative fallback ceilings are
-Paula 48 / AX 80, based on one R1 card's measurements; with no saved
-baseline, parity selects Paula 36 / AX 72 (weighted Level 132/160).
-These are not verified clean limits for every board. Existing saved
-`audio_ceiling_*` and `audio_baseline` values take precedence, including
-older 256/256 or 192/255 settings; remove or recalibrate those keys
-to adopt the new fallback. Do not increase ceilings to mask distortion.
-LPF, EQ, prefactor and volume process the **shared** Paula/AX output.
-Name keys pack two ASCII characters as `c1*256+c2`.
-
-| Key | Purpose |
-|---|---|
-| `audio_active` | Audio scene slot (0-7) applied at boot and after every warm reset |
-| `audio_baseline` | Operator Paula/AX balance packed paula*256+ax, replacing the old `ZZ9K_MIX_LEVELS` env var |
-| `audio_ceiling_paula` | Measured clean Paula-only ceiling (1-4095); pair with `audio_ceiling_ax` |
-| `audio_ceiling_ax` | Measured clean AX-only ceiling (1-4095); with the Paula ceiling it forms the enforced AX-equivalent boundary |
-| `audio_scene0_lpf` | Scene 1 low-pass cutoff in Hz (1-23900; 23900 = DSP default) |
-| `audio_scene0_eq01` | Scene 1 EQ bands 0+1 packed b0*128+b1 (each 0-100, 50 = 0 dB) |
-| `audio_scene0_eq23` | Scene 1 EQ bands 2+3 packed b2*128+b3 |
-| `audio_scene0_eq45` | Scene 1 EQ bands 4+5 packed b4*128+b5 |
-| `audio_scene0_eq67` | Scene 1 EQ bands 6+7 packed b6*128+b7 |
-| `audio_scene0_eq89` | Scene 1 EQ bands 8+9 packed b8*128+b9 |
-| `audio_scene0_out` | Scene 1 prefactor and volume packed pref*128+vol |
-| `audio_scene0_pan` | Scene 1 stereo pan (0 = left, 50 = center, 100 = right) |
-| `audio_scene0_nm1` | Scene 1 name chunk 1: two ASCII characters packed c1*256+c2 (nm1..nm8 hold up to 16 characters; a zero chunk terminates, trailing chunks may be omitted) |
-| `audio_scene0_nm2` | Scene 1 name chunk 2 |
-| `audio_scene0_nm3` | Scene 1 name chunk 3 |
-| `audio_scene0_nm4` | Scene 1 name chunk 4 |
-| `audio_scene0_nm5` | Scene 1 name chunk 5 |
-| `audio_scene0_nm6` | Scene 1 name chunk 6 |
-| `audio_scene0_nm7` | Scene 1 name chunk 7 |
-| `audio_scene0_nm8` | Scene 1 name chunk 8 |
-| `audio_scene1_lpf` | Scene 2 low-pass cutoff in Hz (1-23900) |
-| `audio_scene1_eq01` | Scene 2 EQ bands 0+1 packed b0*128+b1 |
-| `audio_scene1_eq23` | Scene 2 EQ bands 2+3 packed b2*128+b3 |
-| `audio_scene1_eq45` | Scene 2 EQ bands 4+5 packed b4*128+b5 |
-| `audio_scene1_eq67` | Scene 2 EQ bands 6+7 packed b6*128+b7 |
-| `audio_scene1_eq89` | Scene 2 EQ bands 8+9 packed b8*128+b9 |
-| `audio_scene1_out` | Scene 2 prefactor and volume packed pref*128+vol |
-| `audio_scene1_pan` | Scene 2 stereo pan |
-| `audio_scene1_nm1` | Scene 2 name chunk 1: two ASCII characters packed c1*256+c2 |
-| `audio_scene1_nm2` | Scene 2 name chunk 2 |
-| `audio_scene1_nm3` | Scene 2 name chunk 3 |
-| `audio_scene1_nm4` | Scene 2 name chunk 4 |
-| `audio_scene1_nm5` | Scene 2 name chunk 5 |
-| `audio_scene1_nm6` | Scene 2 name chunk 6 |
-| `audio_scene1_nm7` | Scene 2 name chunk 7 |
-| `audio_scene1_nm8` | Scene 2 name chunk 8 |
-| `audio_scene2_lpf` | Scene 3 low-pass cutoff in Hz (1-23900) |
-| `audio_scene2_eq01` | Scene 3 EQ bands 0+1 packed b0*128+b1 |
-| `audio_scene2_eq23` | Scene 3 EQ bands 2+3 packed b2*128+b3 |
-| `audio_scene2_eq45` | Scene 3 EQ bands 4+5 packed b4*128+b5 |
-| `audio_scene2_eq67` | Scene 3 EQ bands 6+7 packed b6*128+b7 |
-| `audio_scene2_eq89` | Scene 3 EQ bands 8+9 packed b8*128+b9 |
-| `audio_scene2_out` | Scene 3 prefactor and volume packed pref*128+vol |
-| `audio_scene2_pan` | Scene 3 stereo pan |
-| `audio_scene2_nm1` | Scene 3 name chunk 1: two ASCII characters packed c1*256+c2 |
-| `audio_scene2_nm2` | Scene 3 name chunk 2 |
-| `audio_scene2_nm3` | Scene 3 name chunk 3 |
-| `audio_scene2_nm4` | Scene 3 name chunk 4 |
-| `audio_scene2_nm5` | Scene 3 name chunk 5 |
-| `audio_scene2_nm6` | Scene 3 name chunk 6 |
-| `audio_scene2_nm7` | Scene 3 name chunk 7 |
-| `audio_scene2_nm8` | Scene 3 name chunk 8 |
-| `audio_scene3_lpf` | Scene 4 low-pass cutoff in Hz (1-23900) |
-| `audio_scene3_eq01` | Scene 4 EQ bands 0+1 packed b0*128+b1 |
-| `audio_scene3_eq23` | Scene 4 EQ bands 2+3 packed b2*128+b3 |
-| `audio_scene3_eq45` | Scene 4 EQ bands 4+5 packed b4*128+b5 |
-| `audio_scene3_eq67` | Scene 4 EQ bands 6+7 packed b6*128+b7 |
-| `audio_scene3_eq89` | Scene 4 EQ bands 8+9 packed b8*128+b9 |
-| `audio_scene3_out` | Scene 4 prefactor and volume packed pref*128+vol |
-| `audio_scene3_pan` | Scene 4 stereo pan |
-| `audio_scene3_nm1` | Scene 4 name chunk 1: two ASCII characters packed c1*256+c2 |
-| `audio_scene3_nm2` | Scene 4 name chunk 2 |
-| `audio_scene3_nm3` | Scene 4 name chunk 3 |
-| `audio_scene3_nm4` | Scene 4 name chunk 4 |
-| `audio_scene3_nm5` | Scene 4 name chunk 5 |
-| `audio_scene3_nm6` | Scene 4 name chunk 6 |
-| `audio_scene3_nm7` | Scene 4 name chunk 7 |
-| `audio_scene3_nm8` | Scene 4 name chunk 8 |
-| `audio_scene4_lpf` | Scene 5 low-pass cutoff in Hz (1-23900) |
-| `audio_scene4_eq01` | Scene 5 EQ bands 0+1 packed b0*128+b1 |
-| `audio_scene4_eq23` | Scene 5 EQ bands 2+3 packed b2*128+b3 |
-| `audio_scene4_eq45` | Scene 5 EQ bands 4+5 packed b4*128+b5 |
-| `audio_scene4_eq67` | Scene 5 EQ bands 6+7 packed b6*128+b7 |
-| `audio_scene4_eq89` | Scene 5 EQ bands 8+9 packed b8*128+b9 |
-| `audio_scene4_out` | Scene 5 prefactor and volume packed pref*128+vol |
-| `audio_scene4_pan` | Scene 5 stereo pan |
-| `audio_scene4_nm1` | Scene 5 name chunk 1: two ASCII characters packed c1*256+c2 |
-| `audio_scene4_nm2` | Scene 5 name chunk 2 |
-| `audio_scene4_nm3` | Scene 5 name chunk 3 |
-| `audio_scene4_nm4` | Scene 5 name chunk 4 |
-| `audio_scene4_nm5` | Scene 5 name chunk 5 |
-| `audio_scene4_nm6` | Scene 5 name chunk 6 |
-| `audio_scene4_nm7` | Scene 5 name chunk 7 |
-| `audio_scene4_nm8` | Scene 5 name chunk 8 |
-| `audio_scene5_lpf` | Scene 6 low-pass cutoff in Hz (1-23900) |
-| `audio_scene5_eq01` | Scene 6 EQ bands 0+1 packed b0*128+b1 |
-| `audio_scene5_eq23` | Scene 6 EQ bands 2+3 packed b2*128+b3 |
-| `audio_scene5_eq45` | Scene 6 EQ bands 4+5 packed b4*128+b5 |
-| `audio_scene5_eq67` | Scene 6 EQ bands 6+7 packed b6*128+b7 |
-| `audio_scene5_eq89` | Scene 6 EQ bands 8+9 packed b8*128+b9 |
-| `audio_scene5_out` | Scene 6 prefactor and volume packed pref*128+vol |
-| `audio_scene5_pan` | Scene 6 stereo pan |
-| `audio_scene5_nm1` | Scene 6 name chunk 1: two ASCII characters packed c1*256+c2 |
-| `audio_scene5_nm2` | Scene 6 name chunk 2 |
-| `audio_scene5_nm3` | Scene 6 name chunk 3 |
-| `audio_scene5_nm4` | Scene 6 name chunk 4 |
-| `audio_scene5_nm5` | Scene 6 name chunk 5 |
-| `audio_scene5_nm6` | Scene 6 name chunk 6 |
-| `audio_scene5_nm7` | Scene 6 name chunk 7 |
-| `audio_scene5_nm8` | Scene 6 name chunk 8 |
-| `audio_scene6_lpf` | Scene 7 low-pass cutoff in Hz (1-23900) |
-| `audio_scene6_eq01` | Scene 7 EQ bands 0+1 packed b0*128+b1 |
-| `audio_scene6_eq23` | Scene 7 EQ bands 2+3 packed b2*128+b3 |
-| `audio_scene6_eq45` | Scene 7 EQ bands 4+5 packed b4*128+b5 |
-| `audio_scene6_eq67` | Scene 7 EQ bands 6+7 packed b6*128+b7 |
-| `audio_scene6_eq89` | Scene 7 EQ bands 8+9 packed b8*128+b9 |
-| `audio_scene6_out` | Scene 7 prefactor and volume packed pref*128+vol |
-| `audio_scene6_pan` | Scene 7 stereo pan |
-| `audio_scene6_nm1` | Scene 7 name chunk 1: two ASCII characters packed c1*256+c2 |
-| `audio_scene6_nm2` | Scene 7 name chunk 2 |
-| `audio_scene6_nm3` | Scene 7 name chunk 3 |
-| `audio_scene6_nm4` | Scene 7 name chunk 4 |
-| `audio_scene6_nm5` | Scene 7 name chunk 5 |
-| `audio_scene6_nm6` | Scene 7 name chunk 6 |
-| `audio_scene6_nm7` | Scene 7 name chunk 7 |
-| `audio_scene6_nm8` | Scene 7 name chunk 8 |
-| `audio_scene7_lpf` | Scene 8 low-pass cutoff in Hz (1-23900) |
-| `audio_scene7_eq01` | Scene 8 EQ bands 0+1 packed b0*128+b1 |
-| `audio_scene7_eq23` | Scene 8 EQ bands 2+3 packed b2*128+b3 |
-| `audio_scene7_eq45` | Scene 8 EQ bands 4+5 packed b4*128+b5 |
-| `audio_scene7_eq67` | Scene 8 EQ bands 6+7 packed b6*128+b7 |
-| `audio_scene7_eq89` | Scene 8 EQ bands 8+9 packed b8*128+b9 |
-| `audio_scene7_out` | Scene 8 prefactor and volume packed pref*128+vol |
-| `audio_scene7_pan` | Scene 8 stereo pan |
-| `audio_scene7_nm1` | Scene 8 name chunk 1: two ASCII characters packed c1*256+c2 |
-| `audio_scene7_nm2` | Scene 8 name chunk 2 |
-| `audio_scene7_nm3` | Scene 8 name chunk 3 |
-| `audio_scene7_nm4` | Scene 8 name chunk 4 |
-| `audio_scene7_nm5` | Scene 8 name chunk 5 |
-| `audio_scene7_nm6` | Scene 8 name chunk 6 |
-| `audio_scene7_nm7` | Scene 8 name chunk 7 |
-| `audio_scene7_nm8` | Scene 8 name chunk 8 |
-
-Absent audio keys keep the firmware defaults. The firmware applies the
-saved active scene at cold boot and again after every Amiga warm
-reset, before any application can allocate the audio device.
-
-Both save mechanisms — ZZTop's Settings/Scandoubler **Save** and the
-firmware-backed Audio **Save** — regenerate the file from settings they
-know and keep the previous copy as `ZZ9000.bak`: hand-written comments
-are not preserved. The file parser reads at most 8 KiB; a larger file
-has its tail ignored, which the drivers can observe through the
-config-query key `ZZ_CONFIG_KEY_AUDIO_TRUNCATED` (the audio keys
-serialize last, so they are the first casualty of an oversized file).
-
-For most systems, leave missing options at their defaults. A minimal custom
-file might look like this:
-
-```ini
-videocap_profile = filtered_60
-scanline_mode = 2
-scanline_parity = 0
-```
-
-With no valid profile, `filtered_60` provides filtered 60 Hz output:
-800x600 for PAL input or 720x480 for NTSC input. Explicit `full_60` and
-`full_exact` selections preserve full SuperHires detail in a 1280x1024 output.
-Fullscan scales vertically by an integer factor on the classic power-of-two
-paths, so every source row is duplicated uniformly: PAL's 256 progressive or
-512 interlaced source rows fill the 1024-line raster at x4/x2, while 15 kHz
-NTSC letterboxes the same 800 lines for both 200 progressive rows at x4 and
-400 interlaced rows at x2 (112-line black bars, centered). Short-line
-NTSC-class sources such as Euro72 and DblNTSC do not take that letterbox:
-their row-class factor already shows the captured rows, and an 800-line
-viewport would clip the bottom. Progressive and interlaced 15 kHz pictures
-therefore render at one physical size per standard, matching a real monitor.
-
-On full-rate doubled sources such as DblPAL and Euro72, the measured
-640-pixel line is repeated 2x horizontally and the existing row-class
-factor scales vertically. A 640x512 class-2 source fills the 1280x1024
-capture raster; centered 1080p places that raster at (320,28). Class-1 and
-tall class-3 sources retain vertical x4 and x1 respectively. Filtered capture
-and short-line, non-doubled Super72 keep their existing horizontal sampling.
-SCALEX affects displayed pixels only; 32-bit VDMA rows retain their full
-content pitch.
-
-On supported full-rate variants,
-`centered_1080p_60` and `centered_1080p_50`
-place the native picture in a 1920x1080 signal with 320-pixel side borders
-and 28-line top/bottom borders; a 15 kHz NTSC source letterboxes inside
-that viewport with the same integer scaling. Their nominal 60/50 Hz
-timings run at approximately 60.03/50.02 Hz. Both use the closest legal
-100 MHz integer-PLL setting to 148.5 MHz: 52/5/7 = 148.5714286 MHz, with
-standard blanking unchanged. They are free-running, not input-genlocked.
-These native profiles are separate from Picasso96 RTG modes, but centered
-60 Hz shares its hardware timing preset with 1920x1080 RTG. The matching
-driver and stock Picasso96 settings use the updated clock metadata too.
-Centered 60 Hz needs firmware capability
-bit 3; centered 50 Hz needs both bits 3 and 4. These are advertised only
-on matching viewport/full-rate bitstreams. Use matching firmware, bitstream,
-`ZZ9000.card` and ZZTop. Current ZZTop hides unsupported centered choices
-and substitutes `full_60` when loading an unsupported selection; that
-fallback also applies when another configuration window saves a stored
-unsupported profile. Older firmware ignores an unknown profile token,
-which is not a guaranteed `full_60` fallback for hand-edited old stacks.
-Capture-window overrides use `videocap_width` and `videocap_height`; set either
-axis to 0 (or omit its CFG key) to retain that axis's automatic dimension.
-On a filtered profile the override is centered in the active mode canvas
-(800x600, 720x576, or 720x480), not in the 1280x1024 fullscan box.
-Firmware capability bit 8 accepts the live `CARD_FEATURE_VIDEOCAP_GEOMETRY`
-request; bit 10 adds the acknowledgement contract. The `REG_ZZ_CONFIG_KEY`
-runtime queries 28--34 report requested/applied width and height,
-request/applied serials, and status bits `APPLIED_VALID`, `PENDING`,
-and `REJECTED`. Requested values retain the override pair, including 0;
-applied values are the resolved/clipped VDMA word width and source-row count,
-not output pixels or necessarily the same numbers as the request. A request
-remains pending until stable native-vblank VDMA programming succeeds with
-that serial. RTG vblanks and VDMA configuration/address/start failures do
-not acknowledge it; a failed pending request retries on a stable native
-vblank. Tools must not treat a successful feature write as an applied window.
-
-Live calibration reads the capture-domain resolved automatic crop at
-`VCAP_LIVE_EFFECTIVE_CROP` (host offset `0x140c`), including doubled/short-line
-crop replacement and PAL/NTSC vertical changes. Crop axes and the live line
-count cross coherently into the AXI domain; a crop commit is acknowledged
-only after its resolved pair is visible there. `REG_ZZ_VIDEOCAP_STATS`
-(`0x4e`) returns the ten-bit frame line count with reserved bits zero in
-both word halves, including the upper half used by Zorro II reads.
-
-RTG/native switches keep the HDMI signal running when the complete output
-timing is unchanged; framebuffer layout, scaling and pixel format still update.
-For example, centered native 60 Hz and 1920x1080 RTG using the same preset
-do not need transmitter or pixel-clock retraining. Matching resolution alone
-is not enough: different refresh rates or sync timings still require an output
-mode change. Entering `centered_1080p_match` also retains its safe source-phase
-acquisition described below.
-
-The existing `full_exact` profile selects fixed PAL/NTSC timing
-approximations (about 49.93/59.95 Hz); it does not phase-lock to the input.
-The experimental `centered_1080p_match` profile instead tracks the captured
-source cadence by adjusting vertical blanking. Interlaced input uses a
-bounded field-pair phase correction rather than copying alternating field
-anchor intervals directly into output frame lengths; progressive input
-retains direct anchor tracking. This is not a fixed 50/60 Hz approximation.
-During interlaced acquisition or reacquisition, pixels remain hidden until
-the output reaches a safe capture/read phase. Cadence lock can precede this;
-monitor sync continues while the phase converges.
-Use the matching experimental bitstream, firmware, `ZZ9000.card` and ZZTop.
-The cadence-repair candidate passed native-pixel hardware testing on an
-A4000 with a default-Z3 ZZ9000: all tested interlace modes displayed correctly
-with no reported visual anomalies. This qualifies that tested setup, not
-monitor acceptance or tear-free operation on every machine.
-
-ZZTop's **Scandoubler** window groups dependent **Output**/**Refresh**,
-scanlines and parity. Its **Capture…** button opens sampling, framing and
-native-picture preview/calibration. Open it with the main **Scandoubler…**
-button directly above **Audio…**, or **Project > Scandoubler…**; the menu
-remains accessible when bottom buttons are off-screen.
-**Project > Settings…** opens INT2, MAC, HDF, offscreen-bitmap and video-overlay
-configuration; **Project > Audio…** opens audio controls.
-
-Each editor applies its own edits and ENV overrides while preserving
-supported settings from the other sections. General Settings Save keeps
-absent/commented native keys inactive rather than persisting default output
-or unsaved live scanline changes. Scandoubler Save activates its displayed
-native settings. Save keeps the previous file as `ZZ9000.bak`; power-cycle
-afterwards to apply Output/Refresh and other boot settings. Scanline mode
-and parity change live but still need Save for persistence.
-
-See the driver's [Output/Refresh profile table](https://github.com/BlitterStudio/zz9000-drivers#scandoubler-output-and-refresh)
-for every supported selector combination.
-
-Keep these rules in mind:
-
-- Existing `ENV:` variables and ZZ9000.card tooltypes take precedence over
-  equivalent file settings. Remove old overrides when migrating.
-- Use `videocap_profile` for new files. The older independent video keys remain
-  accepted only for compatibility.
-- Invalid or unknown entries are skipped rather than preventing boot.
-- Some options require matching current firmware, bitstream, and drivers.
-
-See the commented [ZZ9000.CFG sample](ZZ9000.CFG) for every accepted value and
-additional notes.
-
-## AGA video-slot capture clock (formerly A4000 C28)
-
-The separate AGA (`zorro3-aga`, formerly A4000 C28) bitstreams capture AGA pixels from the 28 MHz
-video-slot signal. They run the capture MMCM at approximately 908-916 MHz,
-with one capture clock per source pixel. E7M bitstreams remain available
-for A3000, other machines, and A4000 fallback; the clock source cannot be
-changed by ZZ9000.CFG alone. Other machines and adapter routes require
-separate clock qualification.
-
-Build the AGA (video-slot C28) release bitstream with Vivado 2018.3 using
-`build_variant_bitstreams.sh zorro3-aga`;
-see [BUILD.md](BUILD.md). For a separate single-image diagnostic build
-on Windows:
-
-```powershell
-.\build_bitstream.ps1 -CaptureC28
-```
-
-Its default output is `bootimage_work/capture-c28/zz9000_ps_wrapper.bit`,
-not the release bitstream. Package any diagnostic build with the matching
-ARM firmware using `build_bootimage.sh --bitstream` and a separate
-`--output` path. A missing or out-of-range C28 signal holds native
-capture inactive; independent host diagnostics remain available.
-
-Use the matching `ZZCapture` tool from the
-[drivers repository](https://github.com/BlitterStudio/zz9000-drivers)
-(`ZZCapture/README.md`) to inspect clocks and calibrate a still SuperHires pattern. It checks exact
-raw RGB values and frame stability, sweeps the complete phase circle, refines
-the clean boundaries, and retests their midpoint. On failure it attempts and
-checks entry-phase restoration, reporting any failure. On success it prints
-`videocap_c28_phase`; saving is explicit. Run `Stack 32768` in the Amiga Shell
-before applying a phase or starting calibration.
-This key is independent of the legacy diagnostic `videocap_phase` because
-the clocks use different phase units. Matching firmware and ZZTop preserve
-both values when saving other settings.
-
-Qualification needs cold and warm tests on affected PAL and NTSC machines,
-then lores, hires, SuperHires, progressive/interlaced and filtered/full-detail
-checks. Calibration samples raw input pixels; it does not qualify vertical
-geometry or the complete HDMI path. Keep the previous working BOOT image
-for comparison and restoration.
-
-## Custom Picasso96 Modelines
-
-Matched `ZZ9000.card` 2.11 and firmware advertising `ZZ_FW_CAP_CUSTOM_MODE`
-(capability bit 7) support custom progressive RTG timings, including 960x720.
-No new FPGA registers are required. The driver sends active dimensions,
-sync positions, totals, common sync polarity, and a legal pixel-clock PLL
-tuple through the existing custom-mode register window.
-
-Custom timings have these bounds:
-
-- Active width 320–2560 pixels, aligned to 8 pixels; height at least 200.
-- Positive front porch, sync width, and back porch on both axes; totals
-  at most 4095.
-- Pixel clock 25–165 MHz, resolved to the nearest supported PLL clock
-  within 0.5% of the request. P96 receives the achieved clock; requests
-  with no legal clock inside that tolerance are rejected.
-- Progressive scan only. Both syncs must have the same polarity: the
-  current formatter has one polarity bit shared by HSync and VSync.
-
-The firmware stages the whole modeline before applying it. Invalid or
-incomplete requests do not alter the live mode; a PLL lock failure triggers
-rollback to the previous output. Video interrupts are deferred during
-the transaction; audio and other interrupts remain enabled. Exact packaged presets retain their
-existing output timings. In particular, their historical P96 polarity
-flags do not change the fixed preset's polarity.
-
-Use P96's temporary test display before saving a custom mode. Firmware
-acceptance does not guarantee that the connected monitor supports it.
-Back up the installed `BOOT.bin`, `ZZ9000.card`, and P96 settings first;
-see the [driver instructions](https://github.com/BlitterStudio/zz9000-drivers#custom-picasso96-modelines).
-
-## USB host stack
-
-Firmware 2.8.0 RC3 and `zzusbhw.device` 2.2 form one USB proxy release. The
-matched pair negotiates protocol v2 before advertising persistent interrupt,
-simple ISO, or realtime ISO support. A driver that does not receive the
-required capability set leaves those public capabilities disabled rather than
-using an incompatible mailbox path.
-
-Implemented transport paths are control, bulk, persistent interrupt, and
-high-speed or split full-speed ISO IN/OUT. Full-speed ISO requires a
-high-speed hub transaction translator. Direct low-speed devices remain
-unadvertised. MIDIStreaming stays on its descriptor-defined bulk endpoints;
-enabling USB audio ISO does not reroute MIDI through ISO.
-
-Host-side models cover mailbox ownership, EHCI retirement, error mapping,
-periodic cadence, ISO descriptors/batches, and stop/reset races. These are not
-physical-device qualification. The current hardware evidence and every
-unavailable topology are listed in the drivers repository's
-[`docs/usb-qualification-matrix.md`](https://github.com/BlitterStudio/zz9000-drivers/blob/master/docs/usb-qualification-matrix.md).
-Run the matched `ZZDiag` binary on AmigaOS to capture driver/firmware
-capabilities, epochs, counters, queue state, schedule bits, and recent events.
-
-## Amiga MMU and Cache Notes
-
-On 68040/68060 systems, configure any pure ZZ9000 RAM window in the
-Amiga-side MMU tool. For the optional Zorro III FastRAM range,
-`Writethrough` has shown the best tested performance because CPU reads
-can still benefit from cache while writes reach the board immediately.
-In MuLibs/MMULib terms, this is typically:
-
-```text
-For 28014 5 SetCacheMode {base} {size} Valid Writethrough
-```
-
-Avoid `CopyBack` for ZZ9000 RAM unless the driver and workload are known
-to be cache-coherent. Keep MMIO, register, boot, USB, Ethernet, and other
-FPGA/ARM shared windows cache inhibited or data no-cache. If a machine is
-unstable with `Writethrough`, fall back to `Data NoCache` /
-`CacheInhibit` for the configured Zorro RAM range. Leave instruction
-cache enabled. 68030 systems do not need this workaround.
-
-If a 68040/68060 machine remains unstable with Zorro III FastRAM enabled,
-remove `fast_ram` from (or set `fast_ram = off` in) `ZZ9000.CFG` and reboot.
-
-## Building
-
-See [BUILD.md](BUILD.md) for the complete build flow and toolchain
-details. On this repo, the normal firmware/BOOT image loop uses the
-committed bitstream in `bootimage_work/` and does not require Vivado:
-
-```bash
-export PATH="$PWD/.toolchain/arm-gnu-toolchain/bin:$PATH"
-./build_firmware.sh clean
-./build_firmware.sh
-BOOTGEN="$PWD/.toolchain/bootgen/bootgen" ./build_bootimage.sh
-```
-
-The build scripts are intentionally composable:
-
-| Script | Output |
-|---|---|
-| [`build_firmware.sh`](build_firmware.sh) | `ZZ9000OS.elf` |
-| [`build_bootimage.sh`](build_bootimage.sh) | `BOOT.bin` |
-| [`build_release_assets.sh`](build_release_assets.sh) | release ZIPs |
-| [`build_bitstream.sh`](build_bitstream.sh) | default FPGA bitstream |
-| [`build_variant_bitstreams.sh`](build_variant_bitstreams.sh) | release variant bitstreams |
-
-Vivado 2018.3 is required only for bitstream rebuilds. CI does not run
-Vivado, so HDL changes must commit the rebuilt bitstream files under
-`bootimage_work/`.
-
-## Testing
-
-Firmware builds are covered by the GitHub Actions workflow in
-[`.github/workflows/build.yml`](.github/workflows/build.yml), which also
-runs every host suite below and checks the mailbox ABI against the SDK.
-All of them run locally without hardware:
-
-```bash
-make -C test/rtg test          # RTG correctness
-make -C test/rtg bench         # host micro-benchmarks (comparative only)
-make -C test/video test        # VDMA math + video_formatter invariants
-make -C test/video_codec test  # MPEG-1/MPEG-2 fixtures + exact YUY2 output
-make -C test/media test        # media session state and timing
-make -C test/palette test      # primary-CLUT shadow + query packing
-make -C test/audio test        # audio capture
-make -C test/config test       # ZZ9000.CFG parser/loader
-make -C test/scheduler test    # dual-core queue, routing, reclaim
-make -C test/allocator test    # surface allocator
-make -C test/aperture test     # Z2 aperture layout/ack contract
-make -C test/fwupdate test     # firmware-file restore
-make -C test/sd_activity_led test
-```
-
-The video pipeline has its own harness under [`test/video/`](test/video/):
-host-side checks (`make -C test/video test`) plus a functional Vivado xsim
-testbench that drives `video_formatter.v` with a modeled VDMA stream and
-compares every displayed pixel across all color modes, scaling modes and
-line widths:
-
-```bash
-test/video/run_formatter_sim.sh current   # working-tree formatter
-test/video/run_formatter_sim.sh master    # committed baseline
-```
-
-Hardware validation is still required before treating performance or bus
-timing changes as proven.
-
-## Release Process
-
-Release CI is tag-driven. Push a `v*` tag and the workflow builds the
-single standard firmware flavor, packages every committed hardware
-variant bitstream (each ZIP includes the sample `ZZ9000.CFG`), and
-publishes a GitHub Release. Tags containing `-`, such as
-`v2.3.0-rc1`, are marked as pre-releases. Do not add an extra
-`ns-pal` release flavor; use `ZZ9000.CFG` for PAL/native-video
-defaults and related boot-time settings.
-
-```bash
-git tag -a v2.3.0 -m "Firmware 2.3.0"
-git push origin v2.3.0
-```
-
-## Repository Layout
-
-| Path | Purpose |
-|---|---|
-| [`mntzorro.v`](mntzorro.v) | Zorro II/III bus interface, register window, video capture engine, and AXI bridge |
-| [`video_formatter.v`](video_formatter.v) | AXI-Stream video formatter and 24-bit RGB output path |
-| [`ZZ9000_proto.sdk/ZZ9000OS/src/`](ZZ9000_proto.sdk/ZZ9000OS/src/) | Bare-metal ARM firmware sources |
-| [`ZZ9000_proto.sdk/ZZ9000FSBL/src/`](ZZ9000_proto.sdk/ZZ9000FSBL/src/) | First-stage bootloader sources |
-| [`ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc`](ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc) | FPGA pin mapping and timing constraints |
-| [`zz9000_project.tcl`](zz9000_project.tcl) | Exported Vivado project/block design source |
-| [`bootimage_work/`](bootimage_work/) | Committed FSBL and bitstream inputs used by local and CI boot image builds |
-| [`test/rtg/`](test/rtg/) | Host-side RTG correctness and benchmark harness |
-| [`test/video/`](test/video/) | Video pipeline tests: host checks + xsim functional testbench for `video_formatter.v` |
-
-![ZZ9000 block design](gfx/zz9000-bd.png?raw=true)
-
-## Hardware
-
-The ZZ9000 is built around a Xilinx Zynq-7020 with FPGA fabric, dual
-Cortex-A9 cores, and 1 GB DDR3. Main board interfaces:
-
-- DVI output through the Silicon Image 9022 encoder
-- Gigabit Ethernet through the Micrel KSZ9031 PHY
-- FAT32 microSD card for firmware images and SD boot
-- USB 2.0 host port
-
-The hardware manual and schematics are available from MNT:
-<https://mntre.com/media/ZZ9000_info_md/zz9000-manual.pdf>
-
-## Credits
-
-- Original MNT ZZ9000 firmware sources: MNT Research GmbH and upstream
-  contributors.
-- Scanlines V1/V2: Xanxi, adapted for this fork by Dimitris Panokostas.
-- BlitterStudio fork features, including RTG performance work, 64-bit
-  scanout, USB host stack integration, SD boot/HDF work, FWUP/RESTORE,
-  `ZZ9000.CFG`, videocap fixes, SDK services, GCC build scripts, CI
-  packaging, and release infrastructure: Dimitris Panokostas.
-
-Per-file copyright notices are preserved in the source tree.
-
-## License
-
-SPDX-License-Identifier: `GPL-3.0-or-later`
-
-See [LICENSE](LICENSE).
+| ARM firmware | [`ZZ9000_proto.sdk/ZZ9000OS/src/`](ZZ9000_proto.sdk/ZZ9000OS/src/) |
+| First-stage bootloader | [`ZZ9000_proto.sdk/ZZ9000FSBL/src/`](ZZ9000_proto.sdk/ZZ9000FSBL/src/) |
+| Zorro interface and capture RTL | [`mntzorro.v`](mntzorro.v) |
+| Display formatter RTL | [`video_formatter.v`](video_formatter.v) |
+| FPGA constraints | [`ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc`](ZZ9000_proto.srcs/constrs_1/new/zz9000.xdc) |
+| Vivado project source | [`zz9000_project.tcl`](zz9000_project.tcl) |
+| SDK | [`sdk/`](sdk/) |
+| Tests | [`test/`](test/) |
+
+## Hardware and status
+
+The board uses a Xilinx Zynq-7020 with FPGA fabric, dual Cortex-A9 cores, and
+1 GB DDR3. It provides DVI through a Silicon Image 9022 encoder, gigabit
+Ethernet through a Micrel KSZ9031 PHY, a FAT32 microSD interface, and USB 2.0
+host. MNT publishes the [hardware manual and schematics](https://mntre.com/media/ZZ9000_info_md/zz9000-manual.pdf).
+
+`centered_1080p_match` remains experimental. Native-pixel testing on an A4000
+with a default-Z3 ZZ9000 reported correct display for all tested interlace
+modes and no visual anomalies. That observation does not establish monitor
+compatibility or tear-free operation on other systems.
+
+## History and license
+
+This independent BlitterStudio fork continues the original MNT ZZ9000 firmware
+sources. It is not affiliated with, endorsed by, or supported by MNT Research
+GmbH. Hardware support questions belong with MNT; firmware issues for this
+fork belong in this repository. Original upstream:
+<https://source.mnt.re/amiga/zz9000-firmware>.
+
+Original firmware sources are credited to MNT Research GmbH and contributors.
+Scanlines V1/V2 are by Xanxi and were adapted for this fork by Dimitris
+Panokostas. Per-file copyright notices remain in the source tree.
+
+SPDX-License-Identifier: `GPL-3.0-or-later`. See [LICENSE](LICENSE).
