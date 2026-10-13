@@ -566,7 +566,8 @@ uint16_t sdk_media_session_decode(
 	uint16_t status;
 
 	if (!result || session == 0U ||
-	    (flags & ~SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME) != 0U)
+	    (flags & ~(SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME |
+	               SDK_MEDIA_DECODE_SKIP_TO_I_PICTURE)) != 0U)
 		return SDK_STATUS_BAD_REQUEST;
 	if (!active_session(session))
 		return SDK_STATUS_BAD_HANDLE;

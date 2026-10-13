@@ -58,12 +58,13 @@ struct SDKVideoDecodedFrame {
 #define SDK_VIDEO_MEDIA_FLAG_DISCONTINUITY (1U << 3)
 #define SDK_VIDEO_MEDIA_FLAG_REBASED       (1U << 4)
 #define SDK_VIDEO_MEDIA_FLAG_AUDIO_DONE    (1U << 5)
-
 /* DECODE flag (the media session's SKIP_TO_KEYFRAME): video is late. WebM
  * drops blocks up to the next keyframe; the MPEG Program Stream backend
  * skips B-pictures, which no other picture references, until it returns a
  * reference picture. */
 #define SDK_VIDEO_DECODE_SKIP_LATE (1U << 0)
+/* MPEG far-lag recovery: discard dependent P/B pictures until an I picture. */
+#define SDK_VIDEO_DECODE_SKIP_TO_INTRA (1U << 1)
 
 /* Picture structure reported per decoded frame (U11). TFF/BFF mirror the
  * MPEG-2 picture header; FIELD_PICTURE means field-coded (interlaced
@@ -140,13 +141,14 @@ struct SDKVideoDecoderOps {
 	int (*get_media_info)(
 		void *decoder, struct SDKVideoMediaInfo *info);
 	int (*ack_media)(void *decoder, uint64_t acknowledged);
-	/* Optional. DECODE command flags (SDK_VIDEO_DECODE_SKIP_LATE), passed
-	 * before every decode; NULL ignores them. */
+	/* Optional. DECODE command flags (SDK_VIDEO_DECODE_SKIP_LATE and
+	 * SDK_VIDEO_DECODE_SKIP_TO_INTRA), passed before every decode; NULL
+	 * ignores them. */
 	void (*set_decode_flags)(void *decoder, uint32_t flags);
 	/* Optional. Coded sizes the backend will decode, checked at session
 	 * begin; a refusal is UNSUPPORTED (the stream is valid, this card
-	 * will not play it). NULL applies the session's generic 1920x1080
-	 * cap, which rejects larger sizes as BAD_REQUEST. */
+	 * will not play it). NULL applies the session's generic 1920-pixel-side
+	 * and 1920x1088-pixel cap, which rejects larger sizes as BAD_REQUEST. */
 	int (*geometry_ok)(uint32_t width, uint32_t height);
 	/* Optional. Media audio codecs this backend's container carries,
 	 * checked at session begin; a refusal is UNSUPPORTED. NULL accepts

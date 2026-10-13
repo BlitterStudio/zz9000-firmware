@@ -36,6 +36,7 @@
 #include "zzplay-reader.h"
 #include "zzplay-stats.h"
 #include "zzplay-stream.h"
+#include "zzplay-decode-policy.h"
 #include "zzplay-sync.h"
 #include "zzplay-tags.h"
 #include "zzplay-video.h"
@@ -179,7 +180,8 @@ struct ZZPlayRuntime {
   ZZPlayContainerPolicy container;
   uint32_t display_w;
   uint32_t display_h;
-  uint8_t decode_skip;
+  uint32_t decode_skip_flags;
+  uint8_t intra_skip_unsupported;
   LONG pip_error;
   uint32_t session;
   uint32_t frames;
@@ -1355,28 +1357,31 @@ static void zzplay_update_title(struct ZZPlayRuntime *runtime)
   runtime->title_dirty = 0U;
 }
 
- static int zzplay_decode_once(struct ZZPlayRuntime *runtime,
-                               ZZ9KMediaSessionMainResult *result)
- {
-   uint32_t flags = 0U;
-   int status;
- 
-   /* Held across NEED_INPUT: the card has not reached a keyframe (or a
-    * reference picture) yet. */
-   if ((runtime->container.keyframe_skip ||
-        runtime->container.skip_late_b) &&
-       runtime->decode_skip) {
-     flags = ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME;
-   }
-   memset(result, 0, sizeof(*result));
-   status = zz9k_media_session_decode(
-       runtime->ctx, runtime->session, flags, result);
-   if (status == ZZ9K_STATUS_OK &&
-       (result->flags & ZZ9K_MEDIA_SESSION_RESULT_FRAME_HELD) != 0U) {
-     runtime->decode_skip = 0U;
-   }
-   return status;
- }
+static int zzplay_decode_once(struct ZZPlayRuntime *runtime,
+                              ZZ9KMediaSessionMainResult *result)
+{
+  uint32_t flags = runtime->decode_skip_flags;
+  int status;
+
+  /* Held across NEED_INPUT until the card returns a replacement picture. */
+  memset(result, 0, sizeof(*result));
+  status = zz9k_media_session_decode(
+      runtime->ctx, runtime->session, flags, result);
+  if (zzplay_decode_retry_legacy(
+          flags, status, &runtime->intra_skip_unsupported, &flags)) {
+    /* Firmware before this flag treated it as an invalid request. Keep the
+     * ordinary B-picture policy and stop asking this session for recovery. */
+    runtime->decode_skip_flags = flags;
+    memset(result, 0, sizeof(*result));
+    status = zz9k_media_session_decode(
+        runtime->ctx, runtime->session, flags, result);
+  }
+  if (status == ZZ9K_STATUS_OK &&
+      (result->flags & ZZ9K_MEDIA_SESSION_RESULT_FRAME_HELD) != 0U) {
+    runtime->decode_skip_flags = 0U;
+  }
+  return status;
+}
 
 static int zzplay_ax_bind_call(
     void *user, uint32_t session, uint32_t flags,
@@ -2339,7 +2344,9 @@ static int zzplay_retire_held_frame(
         zzplay_audio_low_water_frames(runtime));
     decision = zzplay_sync_limit_discard_run(
         decision, runtime->discard_run, drift,
-        runtime->container.keyframe_skip);
+        runtime->container.keyframe_skip &&
+            (!runtime->container.skip_late_b ||
+             !runtime->intra_skip_unsupported));
     if (decision == ZZPLAY_SYNC_HOLD) {
       runtime->trace_decision = 'H';
       zzplay_stats_record_sync(
@@ -2366,11 +2373,18 @@ static int zzplay_retire_held_frame(
     TimeVal_Type started;
 
     zzplay_profile_begin(runtime, &started);
-    if (decision == ZZPLAY_SYNC_DISCARD &&
-        (runtime->container.keyframe_skip
-             ? zzplay_sync_needs_keyframe_skip(drift)
-             : runtime->container.skip_late_b)) {
-      runtime->decode_skip = 1U;
+    if (decision == ZZPLAY_SYNC_DISCARD) {
+      if (runtime->container.skip_late_b) {
+        runtime->decode_skip_flags |= ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME;
+      }
+      if (runtime->container.keyframe_skip &&
+          (!runtime->container.skip_late_b ||
+           !runtime->intra_skip_unsupported) &&
+          zzplay_sync_needs_keyframe_skip(drift)) {
+        runtime->decode_skip_flags |= runtime->container.skip_late_b
+            ? ZZ9K_MEDIA_DECODE_SKIP_TO_I_PICTURE
+            : ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME;
+      }
     }
     if (decision == ZZPLAY_SYNC_DISCARD) {
       status = zz9k_media_session_discard(
@@ -3295,7 +3309,7 @@ static void zzplay_mpeg_service_policy(ZZPlayContainerPolicy *policy,
         "zzplay: MPEG-2 playback is not supported by this firmware\n";
     policy->begin_refused =
         "zzplay: the firmware refused this MPEG-2 stream "
-        "(video larger than 800x600)\n";
+        "(unsupported video geometry)\n";
     return;
   }
   policy->video_flags =
@@ -3314,7 +3328,7 @@ static void zzplay_mpeg_service_policy(ZZPlayContainerPolicy *policy,
         "this firmware\n";
     policy->begin_refused =
         "zzplay: the firmware refused this MPEG-1 stream "
-        "(video larger than 800x600)\n";
+        "(unsupported video geometry)\n";
     return;
   }
   policy->audio_flags = ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2;
@@ -3323,7 +3337,7 @@ static void zzplay_mpeg_service_policy(ZZPlayContainerPolicy *policy,
       "is unavailable\n";
   policy->begin_refused =
       "zzplay: the firmware refused this MPEG-1 stream "
-      "(video larger than 800x600, or audio other than MP2)\n";
+      "(unsupported video geometry, or audio other than MP2)\n";
 }
 
 static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
@@ -3339,7 +3353,9 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
   policy->title = info.is_mpeg2 ? "MPEG-2" : "MPEG-1";
   policy->container = ZZ9K_VIDEO_CONTAINER_MPEG_PS;
   policy->skip_late_b = 1U;
-  /* Skipped B-pictures return no frame, so a frame count runs slow. */
+  /* A sustained reference-picture lag recovers at the next MPEG I picture. */
+  policy->keyframe_skip = 1U;
+  /* Skipped pictures return no frame, so a frame count runs slow. */
   policy->pts_position = 1U;
   policy->audio_codec = zzplay_mpeg_audio_codec_id(info.audio_codec);
 

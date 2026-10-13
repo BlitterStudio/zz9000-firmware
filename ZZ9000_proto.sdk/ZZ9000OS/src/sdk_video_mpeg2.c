@@ -1,6 +1,6 @@
 /*
- * libmpeg2 + bounded PS/VOB demux backend: MPEG-1 and MPEG-2 video up to
- * 800x600 in a Program Stream, with MP2 / DVD-LPCM / AC-3 audio.
+ * libmpeg2 + bounded PS/VOB demux backend: MPEG-1 and MPEG-2 video in a
+ * Program Stream, with MP2 / DVD-LPCM / AC-3 audio.
  *
  * The backend implements the codec-neutral sdk_video_backend contract with
  * the sdk_media_timeline integer clock and an S16BE PCM ring, so media
@@ -48,11 +48,14 @@
 /* minimp3's largest stereo output is 4,608 bytes. */
 #define M2_MP2_PCM_BYTES (MINIMP3_MAX_SAMPLES_PER_FRAME * 2U)
 #define M2_PTS_SLOTS 64U
-/* Largest picture either codec decodes. libmpeg2 rounds the coded size up
- * to whole macroblocks (16 lines, 32 for interlaced MPEG-2), so the frame
- * buffers can be up to 800x608. */
-#define M2_MAX_WIDTH 800U
-#define M2_MAX_HEIGHT 600U
+/* Largest visible picture either codec decodes. Keep this aligned with the
+ * WebM envelope: either orientation fits a 1920-pixel side and 1920x1088
+ * pixels. libmpeg2 rounds coded dimensions to 16-pixel macroblocks (and to
+ * 32 lines for interlaced MPEG-2). The worst rounded 4:2:0 frame inside the
+ * visible envelope is 1776x1216, or 3,239,424 bytes per frame buffer. */
+#define M2_MAX_SIDE 1920U
+#define M2_MAX_PIXELS (1920U * 1088U)
+#define M2_MAX_CODED_PIXELS (1776U * 1216U)
 
 #define M2_NO_PTS SDK_VIDEO_MEDIA_NO_PTS
 
@@ -178,6 +181,8 @@ struct sdk_video_mpeg2 {
 	uint8_t video_origin_seen;
 	uint8_t video_seen;          /* a video PES reached libmpeg2 */
 	uint8_t skip_late;           /* this decode skips B-pictures */
+	uint8_t skip_to_intra;       /* discard dependent pictures until a replacement I */
+	const mpeg2_picture_t *recovery_picture;
 	uint32_t skipped_media_flags; /* timeline events of skipped pictures */
 	uint8_t mpeg1;
 	uint8_t failed;
@@ -787,8 +792,12 @@ static void route_audio_queue(struct sdk_video_mpeg2 *d)
 
 static int geometry_ok(uint32_t width, uint32_t height)
 {
-	return width != 0U && height != 0U &&
-	       width <= M2_MAX_WIDTH && height <= M2_MAX_HEIGHT;
+	uint32_t side;
+
+	if (width == 0U || height == 0U)
+		return 0;
+	side = width > height ? width : height;
+	return side <= M2_MAX_SIDE && width <= M2_MAX_PIXELS / height;
 }
 
 /* Frames report the picture size; the planes keep libmpeg2's coded
@@ -808,6 +817,13 @@ static int bind_fbufs(struct sdk_video_mpeg2 *d,
 	 * chroma geometry, so they are refused. */
 	if (sequence->chroma_width != sequence->width / 2U ||
 	    sequence->chroma_height != sequence->height / 2U)
+		return 0;
+	/* Sequence dimensions are macroblock-rounded. Bound them separately so a
+	 * hostile header cannot make libmpeg2 allocate beyond the largest rounded
+	 * frame admitted by geometry_ok(). */
+	if (stride == 0U || sequence->height == 0U ||
+	    stride > M2_MAX_SIDE || sequence->height > M2_MAX_SIDE ||
+	    stride > M2_MAX_CODED_PIXELS / sequence->height)
 		return 0;
 	/* The session's display allocation is sized for its first sequence.
 	 * A later geometry cannot be presented safely without renegotiation. */
@@ -1063,17 +1079,35 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 			d->frame_rate_milli = milli_from_period(
 				info->sequence->frame_period);
 			break;
-		case STATE_PICTURE:
+		case STATE_PICTURE: {
+			uint32_t coding = 0U;
+			int skip = 0;
+
 			picture_rate_store(d, info->current_picture);
-			/* Late video: B-pictures go undecoded (no picture
-			 * predicts from them) until a reference picture is
-			 * returned; set per picture, both fields alike. */
-			mpeg2_skip(d->decoder,
-			           d->skip_late && info->current_picture &&
-			           (info->current_picture->flags &
-			            PIC_MASK_CODING_TYPE) ==
-			                   PIC_FLAG_CODING_TYPE_B);
+			if (info->current_picture)
+				coding = info->current_picture->flags &
+					PIC_MASK_CODING_TYPE;
+			/* Keep recovery latched until this I picture reaches display.
+			 * libmpeg2 exposes it only while decoding a following reference,
+			 * so that P must decode and become a valid successor. Before the I
+			 * is selected, and for open-GOP B pictures after it, skip dependent
+			 * pictures that would use the discarded reference chain. */
+			if (d->skip_to_intra) {
+				if (!d->recovery_picture) {
+					if (coding == PIC_FLAG_CODING_TYPE_I)
+						d->recovery_picture = info->current_picture;
+					else
+						skip = 1;
+				} else if (coding == PIC_FLAG_CODING_TYPE_B) {
+					skip = 1;
+				}
+			} else if (d->skip_late &&
+			           coding == PIC_FLAG_CODING_TYPE_B) {
+				skip = 1;
+			}
+			mpeg2_skip(d->decoder, skip);
 			break;
+		}
 		case STATE_SLICE:
 		case STATE_SLICE_1ST:
 			if (info->display_fbuf) {
@@ -1081,10 +1115,16 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 					d->failed = 1U;
 					return -1;
 				}
-				if (picture_skipped(info)) {
+				if (picture_skipped(info) ||
+				    (d->skip_to_intra &&
+				     info->display_picture != d->recovery_picture)) {
 					skip_picture(d, info);
 				} else {
 					fill_frame(d, info, out_frame);
+					if (d->skip_to_intra) {
+						d->skip_to_intra = 0U;
+						d->recovery_picture = 0;
+					}
 					got_frame = 1;
 				}
 			}
@@ -1096,10 +1136,16 @@ static int parse_video(struct sdk_video_mpeg2 *d,
 			if (state == STATE_INVALID_END)
 				d->malformed++;
 			if (info->display_fbuf && d->fbufs_bound) {
-				if (picture_skipped(info)) {
+				if (picture_skipped(info) ||
+				    (d->skip_to_intra &&
+				     info->display_picture != d->recovery_picture)) {
 					skip_picture(d, info);
 				} else {
 					fill_frame(d, info, out_frame);
+					if (d->skip_to_intra) {
+						d->skip_to_intra = 0U;
+						d->recovery_picture = 0;
+					}
 					got_frame = 1;
 				}
 			}
@@ -1390,6 +1436,13 @@ static int feed_video(struct sdk_video_mpeg2 *d)
 	uint32_t tag;
 
 	buffer_video(d);
+	/* Far-lag recovery may consume a GOP in one decode command. Keep moving
+	 * audio PES and PCM while its video FIFO is being drained, rather than
+	 * leaving later audio behind a bounded compressed-video queue. */
+	if (d->media_configured)
+		route_audio_queue(d);
+	else
+		drop_audio(d);
 	entry = video_fifo_head(d);
 	if (!entry)
 		return 0;
@@ -1711,14 +1764,25 @@ static int mpeg2_get_media_info(void *decoder,
 	return 1;
 }
 
-/* SDK_VIDEO_DECODE_SKIP_LATE comes with every decode the client wants a
- * late picture skipped for; the next decode without it decodes all. */
+/* SDK_VIDEO_DECODE_SKIP_LATE is a short-lag B-picture skip. A held
+ * SDK_VIDEO_DECODE_SKIP_TO_INTRA request remains latched until its replacement
+ * I picture reaches display. A new request after that frame re-arms recovery. */
 static void mpeg2_set_decode_flags(void *decoder, uint32_t flags)
 {
 	struct sdk_video_mpeg2 *d = (struct sdk_video_mpeg2 *)decoder;
 
-	if (d)
-		d->skip_late = (flags & SDK_VIDEO_DECODE_SKIP_LATE) != 0U;
+	if (!d)
+		return;
+	d->skip_late = (flags & SDK_VIDEO_DECODE_SKIP_LATE) != 0U;
+	if ((flags & SDK_VIDEO_DECODE_SKIP_TO_INTRA) != 0U) {
+		if (!d->skip_to_intra) {
+			d->skip_to_intra = 1U;
+			d->recovery_picture = 0;
+		}
+	} else {
+		d->skip_to_intra = 0U;
+		d->recovery_picture = 0;
+	}
 }
 
 static int mpeg2_ack_media(void *decoder, uint64_t acknowledged)

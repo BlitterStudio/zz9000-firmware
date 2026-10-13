@@ -51,12 +51,26 @@ static int check_file_probe(void)
   }
   fclose(file);
 
+  info.width = 1920U;
+  info.height = 1088U;
+  info.frame_rate_milli = 25000U;
+  if (!zzplay_video_info_supported(&info)) {
+    return 0;
+  }
+  info.width = 1088U;
+  info.height = 1920U;
+  if (!zzplay_video_info_supported(&info)) {
+    return 0;
+  }
+  info.width = 1920U;
+  info.height = 1089U;
+  if (zzplay_video_info_supported(&info)) {
+    return 0;
+  }
   info.width = 15U;
   info.height = 240U;
-  info.frame_rate_milli = 25000U;
   return !zzplay_video_info_supported(&info);
 }
-
 static int check_program_probe(void)
 {
   static const uint8_t program[] = {

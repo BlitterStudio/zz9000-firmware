@@ -11,8 +11,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define ZZPLAY_MAX_WIDTH 1920U
-#define ZZPLAY_MAX_HEIGHT 1080U
+#define ZZPLAY_MAX_SIDE 1920U
+#define ZZPLAY_MAX_PIXELS (1920U * 1088U)
 
 typedef struct ZZPlayVideoInfo {
   uint32_t width;

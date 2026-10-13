@@ -2816,9 +2816,12 @@ enum ZZ9KMediaSessionWriteFlags {
 };
 
 /* DECODE command flags (ZZ9KMediaSessionCommandPayload.flags). The 64-bit
- * value cursor stays zero. Other codecs ignore this bit. */
+ * value cursor stays zero. Other codecs ignore these flags. */
 enum ZZ9KMediaDecodeFlags {
-  ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME = 1U << 0
+  /* Existing late-frame gate: WebM skips to a keyframe; MPEG skips B pictures. */
+  ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME = 1U << 0,
+  /* MPEG far-lag recovery: discard dependent pictures until an I picture. */
+  ZZ9K_MEDIA_DECODE_SKIP_TO_I_PICTURE = 1U << 1
 };
 
 enum ZZ9KMediaAudioBindFlags {

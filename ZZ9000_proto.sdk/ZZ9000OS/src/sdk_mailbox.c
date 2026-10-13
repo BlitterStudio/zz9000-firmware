@@ -5718,7 +5718,8 @@ static uint16_t handle_media_session_deferred_simple(
 	p.flags = flags;
 	if (p.session == 0U ||
 	    (opcode == SDK_OP_MEDIA_SESSION_DECODE
-		     ? (flags & ~SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME) != 0U
+		     ? (flags & ~(SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME |
+		                  SDK_MEDIA_DECODE_SKIP_TO_I_PICTURE)) != 0U
 		     : flags != 0U) ||
 	    get_be32(payload->value_hi) != 0U ||
 	    get_be32(payload->value_lo) != 0U)
