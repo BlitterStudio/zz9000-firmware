@@ -253,7 +253,10 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 				else if (cid == ID_HEIGHT)
 					t->height = (uint32_t)be_uint(scratch, cn);
 				else if (cid == ID_CHANNELS) {
-					t->channels = (uint32_t)be_uint(scratch, cn);
+					uint64_t channels = be_uint(scratch, cn);
+
+					t->channels = channels > 0xffffffffULL
+						? 0xffffffffU : (uint32_t)channels;
 					t->channels_present = 1U;
 				} else if (cid == ID_BITDEPTH) {
 					uint64_t depth = be_uint(scratch, cn);
@@ -333,7 +336,7 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		return fail(d, WEBM_ERR_LAYOUT);
 	if (t->type == 2U && !t->channels_present)
 		t->channels = 1U;
-	if (t->type == 1U) {
+	if (t->type == 1U && t->enabled) {
 		if (d->have_video ||
 		    (d->is_matroska ? !matroska_video_codec(t->codec)
 		                    : !webm_video_codec(t->codec)))

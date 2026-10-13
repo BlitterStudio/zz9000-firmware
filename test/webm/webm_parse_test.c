@@ -271,12 +271,14 @@ static int test_audio_tracks(void)
 static int test_disabled_track_fields(void)
 {
 	struct buf seg = {0}, info = {0}, tracks = {0}, video = {0}, audio = {0}, cluster = {0};
-	struct buf vtrack = {0}, atrack = {0}, ebml = {0}, file = {0};
+	struct buf vtrack = {0}, replacement = {0}, atrack = {0}, ebml = {0}, file = {0};
 	struct webm_demux d;
 	const struct webm_track *v;
+	const struct webm_track *replacement_video;
 	const struct webm_track *a;
 	uint8_t scratch[4096];
 	uint8_t depth[] = {1, 0, 16};
+	uint8_t oversized_channels[] = {1, 0, 0, 0, 1};
 	uint8_t rate[] = {0x47, 0x3b, 0x80, 0x00};
 	uint8_t scale[] = {0x0f, 0x42, 0x40};
 	volatile uint32_t expected_depth = 65552U;
@@ -290,11 +292,19 @@ static int test_disabled_track_fields(void)
 	bu16(&video, 0xBA, 16);
 	bnest(&vtrack, 0xE0, &video);
 	bnest(&tracks, 0xAE, &vtrack);
+	bu8(&replacement, 0xD7, 3);
+	bu8(&replacement, 0x83, 1);
+	belem(&replacement, 0x86, "V_MPEG1", 7);
+	bu16(&video, 0xB0, 32);
+	bu16(&video, 0xBA, 16);
+	bnest(&replacement, 0xE0, &video);
+	bnest(&tracks, 0xAE, &replacement);
 	bu8(&atrack, 0xD7, 2);
 	bu8(&atrack, 0x83, 2);
 	bu8(&atrack, 0xB9, 0);
 	belem(&atrack, 0x86, "A_PCM/INT/LIT", 13);
 	belem(&audio, 0xB5, rate, sizeof(rate));
+	belem(&audio, 0x9F, oversized_channels, sizeof(oversized_channels));
 	belem(&audio, 0x6264, depth, sizeof(depth));
 	bnest(&atrack, 0xE1, &audio);
 	bnest(&tracks, 0xAE, &atrack);
@@ -314,8 +324,11 @@ static int test_disabled_track_fields(void)
 		failed = 1;
 	} else {
 		v = webm_track(&d, 1);
+		replacement_video = webm_track(&d, 3);
 		a = webm_track(&d, 2);
-		if (!v || !a || a->channels != 1U ||
+		if (!v || v->enabled || !replacement_video ||
+		    !replacement_video->enabled || !a || a->enabled ||
+		    a->channels != UINT32_MAX ||
 		    (uint32_t)a->bit_depth != expected_depth) {
 			fprintf(stderr, "disabled track fields: parse values\n");
 			failed = 1;

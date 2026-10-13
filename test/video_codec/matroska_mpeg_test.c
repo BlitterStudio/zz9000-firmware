@@ -119,12 +119,12 @@ static void nest(struct buf *to, uint32_t element_id, struct buf *body)
 	memset(body, 0, sizeof(*body));
 }
 
-static void add_video_track(struct buf *tracks, int enabled)
+static void add_video_track(struct buf *tracks, int enabled, uint8_t number)
 {
 	struct buf track = {0};
 	struct buf video = {0};
 
-	u8(&track, 0xD7, 1U);
+	u8(&track, 0xD7, number);
 	u8(&track, 0x83, 1U);
 	if (!enabled)
 		u8(&track, 0xB9, 0U);
@@ -174,17 +174,22 @@ static void add_block(struct buf *cluster, uint8_t track, uint16_t timecode,
 	nest(cluster, 0xA3, &block);
 }
 
-static void add_xiph_laced_audio_block(struct buf *cluster,
+static void add_xiph_laced_audio_block(struct buf *cluster, uint16_t timecode,
 	const uint8_t *data, uint32_t length)
 {
 	struct buf block = {0};
+	uint32_t remaining = length;
 
 	byte(&block, 0x82U);
-	byte(&block, 0U);
-	byte(&block, 0U);
+	byte(&block, (uint8_t)(timecode >> 8));
+	byte(&block, (uint8_t)timecode);
 	byte(&block, 0x02U);
 	byte(&block, 1U);
-	byte(&block, (uint8_t)length);
+	while (remaining >= UINT8_MAX) {
+		byte(&block, UINT8_MAX);
+		remaining -= UINT8_MAX;
+	}
+	byte(&block, (uint8_t)remaining);
 	put(&block, data, length);
 	put(&block, data, length);
 	nest(cluster, 0xA3, &block);
@@ -194,7 +199,7 @@ static struct buf make_file_ex(const uint8_t *video, uint32_t video_length,
 	const char *audio_codec, uint32_t channels, uint32_t bit_depth,
 	const uint8_t *audio, uint32_t audio_length, int video_enabled,
 	int audio_enabled, int channels_present, uint32_t default_duration_ns,
-	int audio_laced)
+	int audio_laced, uint32_t timecode_scale, uint16_t audio_timecode)
 {
 	struct buf file = {0};
 	struct buf ebml = {0};
@@ -202,13 +207,12 @@ static struct buf make_file_ex(const uint8_t *video, uint32_t video_length,
 	struct buf info = {0};
 	struct buf tracks = {0};
 	struct buf cluster = {0};
-	static const uint8_t scale[] = {0x0f, 0x42, 0x40};
+	u32(&info, 0x2AD7B1, timecode_scale);
 
 	elem(&ebml, 0x4282, "matroska", 8U);
 	nest(&file, 0x1A45DFA3, &ebml);
-	elem(&info, 0x2AD7B1, scale, sizeof(scale));
 	nest(&segment, 0x1549A966, &info);
-	add_video_track(&tracks, video_enabled);
+	add_video_track(&tracks, video_enabled, 1U);
 	if (audio_codec)
 		add_audio_track(&tracks, audio_codec, channels, bit_depth,
 			channels_present, audio_enabled, default_duration_ns);
@@ -217,7 +221,7 @@ static struct buf make_file_ex(const uint8_t *video, uint32_t video_length,
 	if (video_length)
 		add_block(&cluster, 1U, 0U, video, video_length);
 	if (audio_laced)
-		add_xiph_laced_audio_block(&cluster, audio, audio_length);
+		add_xiph_laced_audio_block(&cluster, audio_timecode, audio, audio_length);
 	else if (audio_length)
 		add_block(&cluster, 2U, 0U, audio, audio_length);
 	nest(&segment, 0x1F43B675, &cluster);
@@ -233,9 +237,33 @@ static struct buf make_file(const uint8_t *video, uint32_t video_length,
 	const uint8_t *audio, uint32_t audio_length)
 {
 	return make_file_ex(video, video_length, audio_codec, channels, bit_depth,
-		audio, audio_length, 1, 1, 1, 0U, 0);
+		audio, audio_length, 1, 1, 1, 0U, 0, 1000000U, 0U);
 }
 
+static struct buf make_replacement_video_file(void)
+{
+	struct buf file = {0};
+	struct buf ebml = {0};
+	struct buf segment = {0};
+	struct buf info = {0};
+	struct buf tracks = {0};
+	struct buf cluster = {0};
+
+	elem(&ebml, 0x4282, "matroska", 8U);
+	nest(&file, 0x1A45DFA3, &ebml);
+	u32(&info, 0x2AD7B1, 1000000U);
+	nest(&segment, 0x1549A966, &info);
+	add_video_track(&tracks, 0, 1U);
+	add_video_track(&tracks, 1, 3U);
+	nest(&segment, 0x1654AE6B, &tracks);
+	u8(&cluster, 0xE7, 0U);
+	nest(&segment, 0x1F43B675, &cluster);
+	id(&file, 0x18538067);
+	byte(&file, 0xffU);
+	put(&file, segment.p, segment.n);
+	free(segment.p);
+	return file;
+}
 /* Return concatenated payloads for PES stream_id. The fixture is a
  * program stream, but Matroska blocks carry elementary streams. */
 static int pes_payloads(const uint8_t *in, uint32_t length, uint8_t stream_id,
@@ -512,9 +540,9 @@ static void test_disabled_tracks_are_ineligible(void)
 {
 	uint8_t pcm[4] = {0};
 	struct buf video_disabled = make_file_ex(0, 0U, 0, 0U, 0U, 0, 0U,
-		0, 1, 1, 0U, 0);
+		0, 1, 1, 0U, 0, 1000000U, 0U);
 	struct buf audio_disabled = make_file_ex(0, 0U, "A_PCM/INT/LIT", 1U,
-		16U, pcm, sizeof(pcm), 1, 0, 1, 0U, 0);
+		16U, pcm, sizeof(pcm), 1, 0, 1, 0U, 0, 1000000U, 0U);
 
 	expect_write_unsupported(&video_disabled, SDK_VIDEO_MEDIA_AUDIO_NONE,
 		"disabled video track is ineligible");
@@ -524,14 +552,27 @@ static void test_disabled_tracks_are_ineligible(void)
 	free(audio_disabled.p);
 }
 
+static void test_enabled_replacement_video_is_selected(void)
+{
+	struct buf file = make_replacement_video_file();
+	void *decoder = open_stream(&file, SDK_VIDEO_MEDIA_AUDIO_NONE,
+		0, 0U, 0U, 1);
+
+	check(decoder != 0,
+		"enabled video replaces a disabled track with a distinct number");
+	if (decoder)
+		mkv_ops()->destroy(decoder);
+	free(file.p);
+}
+
 static void test_pcm_track_defaults_and_rejects_oversized_depth(void)
 {
 	uint8_t ring[4096];
 	uint8_t pcm[4] = {0};
 	struct buf mono = make_file_ex(0, 0U, "A_PCM/INT/LIT", 1U, 16U,
-		pcm, sizeof(pcm), 1, 1, 0, 0U, 0);
+		pcm, sizeof(pcm), 1, 1, 0, 0U, 0, 1000000U, 0U);
 	struct buf oversized = make_file_ex(0, 0U, "A_PCM/INT/LIT", 1U,
-		65552U, pcm, sizeof(pcm), 1, 1, 1, 0U, 0);
+		65552U, pcm, sizeof(pcm), 1, 1, 1, 0U, 0, 1000000U, 0U);
 	struct SDKVideoMediaInfo info;
 	const struct SDKVideoDecoderOps *ops = mkv_ops();
 	void *decoder = open_stream(&mono, SDK_VIDEO_MEDIA_AUDIO_LPCM, ring,
@@ -555,38 +596,52 @@ static void test_pcm_track_defaults_and_rejects_oversized_depth(void)
 
 static void test_laced_mp2_advances_audio_pts(void)
 {
-	static const uint8_t later_lace_payload[4] = {0xff, 0xfd, 0x90, 0x64};
 	const struct SDKVideoDecoderOps *ops = mkv_ops();
 	struct buf video = {0};
+	struct buf audio = {0};
 	struct buf file;
 	struct SDKVideoMediaInfo info;
 	struct SDKVideoDecodedFrame frame;
 	uint8_t ring[32768];
 	void *decoder;
 	unsigned guard;
-	int observed = 0;
+	int saw_block_pts = 0;
+	int decoded_audio = 0;
+	int bad_flags = 0;
 
 	check(pes_payloads(zz9k_mpeg1_ps_fixture,
 		(uint32_t)sizeof(zz9k_mpeg1_ps_fixture), 0xe0U, &video),
 		"laced MP2 timeline video fixture supplies elementary stream");
+	check(pes_payloads(zz9k_mpeg1_mp2_ps_fixture,
+		(uint32_t)sizeof(zz9k_mpeg1_mp2_ps_fixture), 0xc0U, &audio),
+		"laced MP2 timeline audio fixture supplies elementary stream");
 	file = make_file_ex(video.p, video.n, "A_MPEG/L2", 2U, 16U,
-		later_lace_payload, sizeof(later_lace_payload), 1, 1, 1,
-		20000000U, 1);
+		audio.p, audio.n, 1, 1, 1, 0U, 1, 2000000U, 17U);
 	decoder = open_stream(&file, SDK_VIDEO_MEDIA_AUDIO_MP2, ring,
 		sizeof(ring), sizeof(ring), 1);
 	if (decoder) {
-		for (guard = 0U; guard < 32U; guard++) {
+		for (guard = 0U; guard < 128U; guard++) {
 			(void)ops->decode(decoder, &frame);
-			if (ops->get_media_info(decoder, &info) && info.raw_pts == 1800U) {
-				observed = 1;
-				break;
+			if (ops->get_media_info(decoder, &info)) {
+				if (info.raw_pts == 3060U)
+					saw_block_pts = 1;
+				if (info.pcm_produced != 0U && info.audio_pts != 0U)
+					decoded_audio = 1;
+				if ((info.flags & (SDK_VIDEO_MEDIA_FLAG_DISCONTINUITY |
+						   SDK_VIDEO_MEDIA_FLAG_REBASED)) != 0U)
+					bad_flags = 1;
 			}
 		}
-		check(observed,
-			"later MP2 lace payload advances timeline by DefaultDuration");
+		check(saw_block_pts,
+			"laced MP2 anchors the first frame at the scaled block PTS");
+		check(decoded_audio,
+			"laced MP2 decodes and advances the reported audio clock");
+		check(!bad_flags,
+			"laced MP2 timestamps do not rebase the audio timeline");
 		ops->destroy(decoder);
 	}
 	free(file.p);
+	free(audio.p);
 	free(video.p);
 }
 
@@ -597,6 +652,7 @@ int main(void)
 	test_mp2_resumes_after_acknowledgement();
 	test_pcm_24bit_is_unsupported();
 	test_disabled_tracks_are_ineligible();
+	test_enabled_replacement_video_is_selected();
 	test_pcm_track_defaults_and_rejects_oversized_depth();
 	test_laced_mp2_advances_audio_pts();
 	if (failures != 0)
