@@ -73,6 +73,8 @@
 #define SDK_CAP_AUDIO_FABRIC           (1U << 27)
 #define SDK_CAP_AUDIO_FLAC             (1U << 28)
 #define SDK_CAP_AUDIO_VORBIS           (1U << 29)
+/* Zorro-III card-pool MEDIA allocations for preloaded input. */
+#define SDK_CAP_MEDIA_INPUT          (1U << 30)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
@@ -85,6 +87,8 @@
 // on sub-4 MB Z2 boards.
 #define SDK_ALLOC_HOST_WINDOW     (1U << 0)
 #define SDK_ALLOC_CARD_ONLY       (1U << 1)
+/* Requires CARD_ONLY; allocates from the owner-tracked MEDIA pool. */
+#define SDK_ALLOC_MEDIA           (1U << 2)
 
 #ifndef SDK_ENABLE_HDL_TRANSPORT
 #define SDK_ENABLE_HDL_TRANSPORT       0
@@ -128,6 +132,7 @@
 #define SDK_SERVICE_FLAG_MODULE        (1U << 1)
 #define SDK_SERVICE_FLAG_ASYNC         (1U << 2)
 #define SDK_SERVICE_FLAG_ZERO_COPY     (1U << 3)
+#define SDK_SERVICE_FLAG_MEMORY_MEDIA_INPUT (1U << 16)
 #define SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY  (1U << 16)
 #define SDK_SERVICE_FLAG_IMAGE_JPEG_BASELINE    (1U << 16)
 #define SDK_SERVICE_FLAG_IMAGE_JPEG_PROGRESSIVE (1U << 17)

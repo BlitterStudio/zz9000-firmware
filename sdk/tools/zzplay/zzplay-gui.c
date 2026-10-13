@@ -108,6 +108,7 @@ enum {
 enum {
   SGID_MP3_OUTPUT = 101,
   SGID_VIDEO_SOUND,
+  SGID_PRELOAD,
   SGID_AHI_UNIT,
   SGID_MHI_LIST,
   SGID_NOTE_TEXT,
@@ -758,6 +759,7 @@ static void apply_settings_device_fields(ZZPlayPrefs *dest,
   dest->video_audio = src->video_audio;
   dest->ahi_unit = src->ahi_unit;
   strncpy(dest->mhi_driver, src->mhi_driver, sizeof(dest->mhi_driver) - 1U);
+  dest->preload = src->preload;
   dest->mhi_driver[sizeof(dest->mhi_driver) - 1U] = '\0';
 }
 
@@ -788,7 +790,7 @@ static void open_settings_window(void)
    * possibly nested in a playback loop on a small shell stack. */
   static char discovered[ZZPLAY_DEVICES_MAX_MHI][ZZPLAY_PREFS_DRIVER_MAX];
   static const char *const setting_labels[] = {
-    "MP3 output", "Video sound", "AHI unit"
+    "MP3 output", "Video sound", "Preload media", "AHI unit"
   };
   struct RastPort *srp;
   int label_w;
@@ -892,7 +894,7 @@ static void open_settings_window(void)
    * screen font and offset by the window borders like the player window. */
   srp = &player_screen->RastPort;
   label_w = 0;
-  for (i = 0U; i < 3U; i++) {
+  for (i = 0U; i < 4U; i++) {
     int w = gui_text_width(srp, setting_labels[i]);
 
     if (w > label_w) {
@@ -901,6 +903,13 @@ static void open_settings_window(void)
   }
   label_w += 12;
   value_w = gui_text_width(srp, "ZZ9000AX") + 32;
+  {
+    int w = gui_text_width(srp, "Preload whole file") + 32;
+
+    if (w > value_w) {
+      value_w = w;
+    }
+  }
   for (i = 0U; i < ZZPLAY_PREFS_AHI_UNITS; i++) {
     int w = gui_text_width(srp, ahi_unit_labels[i]) + 32;
 
@@ -949,6 +958,14 @@ static void open_settings_window(void)
                    GTCY_Active,
                    (ULONG)video_backend_to_index(settings_copy.video_audio),
                    TAG_DONE));
+  cur_y += btn_h + ZZPLAY_GUI_SPACING;
+  gad = gui_gadget(CHECKBOX_KIND, gad, &ng,
+                   ZZPLAY_GUI_MARGIN + label_w, cur_y,
+                   CHECKBOXWIDTH, CHECKBOXHEIGHT, "Preload whole file",
+                   SGID_PRELOAD, PLACETEXT_RIGHT,
+                   GUI_TAGS(GTCB_Checked,
+                            settings_copy.preload ? TRUE : FALSE,
+                            TAG_DONE));
   cur_y += btn_h + ZZPLAY_GUI_SPACING;
 
   gad = gui_gadget(CYCLE_KIND, gad, &ng, ZZPLAY_GUI_MARGIN + label_w, cur_y,
@@ -1782,6 +1799,9 @@ void zzplay_gui_poll(void)
                 break;
               case SGID_VIDEO_SOUND:
                 settings_copy.video_audio = index_to_video_backend(m_code);
+                break;
+              case SGID_PRELOAD:
+                settings_copy.preload = m_code ? 1U : 0U;
                 break;
               case SGID_AHI_UNIT:
                 settings_copy.ahi_unit = (uint32_t)m_code;

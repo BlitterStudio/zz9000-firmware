@@ -49,6 +49,7 @@ typedef struct ZZPlayPrefs {
   ZZPlayAudioBackend video_audio;  /* AUTO, AHI, AX or NONE */
   uint32_t ahi_unit;               /* 0..3 */
   char mhi_driver[ZZPLAY_PREFS_DRIVER_MAX];
+  uint8_t preload;                /* preload full media file to card DDR */
   /* Session state, remembered automatically by the player window. */
   uint32_t volume;                 /* 0..100 */
   ZZPlayRepeat repeat;

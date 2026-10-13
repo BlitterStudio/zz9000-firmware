@@ -70,7 +70,8 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 	{
 		.service_id = SDK_SERVICE_MEMORY,
 		.version = 0x00020000U,
-		.capability_bits = SDK_CAP_SHARED_ALLOC | SDK_CAP_MEMORY_OPS,
+		.capability_bits = SDK_CAP_SHARED_ALLOC | SDK_CAP_MEMORY_OPS |
+			SDK_CAP_MEDIA_INPUT,
 		.flags = SDK_SERVICE_FLAG_FIRMWARE,
 		.opcode_base = SDK_SERVICE_MEMORY,
 		.opcode_count = 4,

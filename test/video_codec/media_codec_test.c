@@ -235,6 +235,31 @@ static int decode_fixture(uint32_t chunk_size, struct media_summary *summary)
 		SDK_VIDEO_MEDIA_AUDIO_MP2, summary);
 }
 
+/* A resident card allocation reaches the decoder through the same input
+ * queue, but starts at a different base address than the streaming buffer.
+ * Feed a copied fixture in ZZPlay's 64 KiB resident-page cadence and keep its
+ * complete decoded result byte-identical to the streamed source. */
+static int test_resident_copy_equivalence(const struct media_summary *streamed)
+{
+	struct media_summary resident_summary;
+	uint8_t *resident;
+	int result;
+
+	resident = (uint8_t *)malloc(zz9k_mpeg1_mp2_ps_fixture_len);
+	if (!resident)
+		return 1;
+	memcpy(resident, zz9k_mpeg1_mp2_ps_fixture,
+	       zz9k_mpeg1_mp2_ps_fixture_len);
+	result = decode_fixture_bytes(
+		resident, zz9k_mpeg1_mp2_ps_fixture_len, 64U * 1024U,
+		SDK_VIDEO_MEDIA_AUDIO_MP2, &resident_summary);
+	free(resident);
+	if (result != 0)
+		return 2;
+	return memcmp(&resident_summary, streamed, sizeof(resident_summary)) == 0
+		? 0 : 3;
+}
+
 static uint64_t ring_hash(const uint8_t *ring, uint32_t capacity,
 	                      uint64_t cursor, uint32_t length)
 {
@@ -1232,6 +1257,9 @@ int main(void)
 	result = decode_fixture(chunks[0], &expected);
 	if (result != 0)
 		return 10 + result;
+	result = test_resident_copy_equivalence(&expected);
+	if (result != 0)
+		return 20 + result;
 	for (i = 1U; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
 		result = decode_fixture(chunks[i], &actual);
 		if (result != 0 || memcmp(&actual, &expected, sizeof(actual)) != 0)
