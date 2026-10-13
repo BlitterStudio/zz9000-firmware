@@ -156,7 +156,7 @@ static inline struct buf nest(uint32_t id, struct buf *body)
 #define SEG_4GB 2  /* 0x100000010: past 32-bit offsets */
 #define SEG_EDGE 3 /* 0xFFFFFFF0: fits 32 bits, end wraps */
 
-/* 8-byte EBML size, for sizes the 1/2-byte bsize cannot express. */
+/* 8-byte EBML size, for sizes past what bsize writes (4 bytes). */
 static inline void bsize64(struct buf *b, uint64_t v)
 {
 	int i;

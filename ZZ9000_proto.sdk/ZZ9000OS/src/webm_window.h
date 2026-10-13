@@ -6,8 +6,10 @@
  * bytes before the read cursor, so the window holds only what the demux
  * may still need. mark/rewind save and restore the read cursor around one
  * demux call: when it runs out of input (WEBM_ERR_NEED) the caller rewinds
- * and retries after the next write. Free of codec libraries so host tests
- * can drive it directly.
+ * and retries after the next write. A skip past the held bytes (io->skip)
+ * empties the window and drops the skipped bytes as they are appended, so
+ * an element larger than the window can be passed over. Free of codec
+ * libraries so host tests can drive it directly.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -26,13 +28,14 @@ struct webm_window {
 	uint32_t cursor; /* stream offset of the next read */
 	int eof;
 	uint32_t mark; /* cursor saved by webm_window_mark */
+	uint32_t drop_left; /* skipped bytes still to arrive and be dropped */
 };
 
 void webm_window_init(struct webm_window *w, uint8_t *data, uint32_t cap);
-/* Points io at the window: read/seek/tell, no size (the stream length is
- * unknown until EOF). */
+/* Points io at the window: read/seek/tell/skip, no size (the stream
+ * length is unknown until EOF). */
 void webm_window_bind(struct webm_window *w, struct webm_io *io);
-/* Bytes an append can take without compacting. */
+/* Bytes an append can take without compacting, skipped bytes included. */
 uint32_t webm_window_space(const struct webm_window *w);
 /* 1 when all n bytes were appended, 0 (nothing appended) when they do not
  * fit. Never compacts: before the stream header parses, the demux restarts

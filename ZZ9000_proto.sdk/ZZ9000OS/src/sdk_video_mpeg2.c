@@ -1594,9 +1594,13 @@ static int mkv_next_block(struct sdk_video_mpeg2 *d, struct webm_block *blk)
 	struct webm_demux saved;
 	int rc;
 
-	webm_window_mark(&d->mkv_win);
-	saved = d->mkv_demux;
-	rc = webm_next(&d->mkv_demux, blk);
+	/* WEBM_NEXT_SKIPPED: input that had not arrived was dropped, so the
+	 * old mark and snapshot are gone; take new ones. */
+	do {
+		webm_window_mark(&d->mkv_win);
+		saved = d->mkv_demux;
+		rc = webm_next(&d->mkv_demux, blk);
+	} while (rc == WEBM_NEXT_SKIPPED);
 	if (rc < 0 && d->mkv_demux.error == WEBM_ERR_NEED) {
 		d->mkv_demux = saved;
 		webm_window_rewind(&d->mkv_win);

@@ -359,9 +359,13 @@ static int pull_block(struct sdk_video_webm *d, struct webm_block *blk)
 	struct webm_demux saved;
 	int rc;
 
-	webm_window_mark(&d->win);
-	saved = d->demux;
-	rc = webm_next(&d->demux, blk);
+	/* WEBM_NEXT_SKIPPED: input that had not arrived was dropped, so the
+	 * old mark and snapshot are gone; take new ones. */
+	do {
+		webm_window_mark(&d->win);
+		saved = d->demux;
+		rc = webm_next(&d->demux, blk);
+	} while (rc == WEBM_NEXT_SKIPPED);
 	if (rc < 0 && d->demux.error == WEBM_ERR_NEED) {
 		d->demux = saved;
 		webm_window_rewind(&d->win);

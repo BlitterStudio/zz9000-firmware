@@ -307,6 +307,28 @@ static void test_window(void)
 	check(webm_window_append(&w, src + 42, 20), "append after compact");
 	check(io.read(io.ctx, out, 22) == 22 && memcmp(out, src + 40, 22) == 0,
 	      "bytes stay ordered across compaction");
+	{
+		uint8_t more[16];
+
+		/* Stream offsets 62.. follow; a skip within the held bytes
+		 * is a seek, one past them empties the window and drops
+		 * the skipped bytes as they arrive. */
+		for (i = 0U; i < sizeof(more); i++)
+			more[i] = (uint8_t)(100U + i);
+		check(io.skip(io.ctx, 50) == 0 && io.tell(io.ctx) == 50U,
+		      "skip within held bytes seeks");
+		check(io.skip(io.ctx, 70) == 1 && w.start == 70U &&
+		      w.filled == 0U && io.tell(io.ctx) == 70U,
+		      "skip past held bytes empties the window");
+		check(webm_window_space(&w) == sizeof(store) + 8U,
+		      "space counts bytes still to drop");
+		check(io.skip(io.ctx, 80) == -2,
+		      "no second skip before the first one's bytes arrive");
+		check(webm_window_append(&w, more, 10) && w.filled == 2U,
+		      "append drops the skipped bytes");
+		check(io.read(io.ctx, out, 2) == 2 && out[0] == more[8] &&
+		      out[1] == more[9], "bytes after the skip read in place");
+	}
 
 	w.eof = 1;
 	check(io.read(io.ctx, out, 1) == 0, "EOF read returns 0");
@@ -534,21 +556,21 @@ static void test_invisible_frame(void)
 	ops->destroy(dec);
 }
 
-/* A Void inside the Cluster larger than the whole input window: the
- * client fills the window, the demux still needs the rest of the Void,
- * and nothing can ever free room. The stream must fail as unsupported
- * instead of answering BUSY/NEED_INPUT forever. */
-static void test_window_exhausted_by_skip(void)
+/* A Void inside the Cluster larger than the whole input window: its bytes
+ * are dropped as they arrive (io->skip), so the stream keeps asking for
+ * input instead of filling the window, and the block after it decodes. */
+static void test_window_skip_larger_than_window(void)
 {
-	static struct stream s;
+	static struct stream s, after;
 	static uint8_t zeros[64U * 1024U];
 	/* Void, 8-byte size 16 MiB. */
 	static const uint8_t void_head[] = {
 		0xEC, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00
 	};
+	const uint32_t void_size = 16U * 1024U * 1024U;
 	void *dec = open_decoder();
 	uint32_t fed = 0U;
-	int rc = SDK_VIDEO_BACKEND_NEED_INPUT;
+	int waiting = 1;
 
 	stream_head(&s);
 	stream_block(&s, 1, 1);
@@ -556,21 +578,24 @@ static void test_window_exhausted_by_skip(void)
 	check(decode(dec) == SDK_VIDEO_BACKEND_FRAME, "keyframe decodes");
 	check(feed(dec, void_head, sizeof(void_head), sizeof(void_head)),
 	      "huge Void header write");
-	for (;;) {
+	while (fed < void_size) {
+		uint32_t n = void_size - fed < sizeof(zeros)
+			? void_size - fed : (uint32_t)sizeof(zeros);
 		uint32_t accepted = 0U;
-		int wr = ops->write(dec, zeros, sizeof(zeros), 0, &accepted);
 
-		rc = decode(dec);
-		if (rc != SDK_VIDEO_BACKEND_NEED_INPUT)
+		if (decode(dec) != SDK_VIDEO_BACKEND_NEED_INPUT ||
+		    ops->write(dec, zeros, n, 0, &accepted) !=
+		    SDK_VIDEO_BACKEND_WRITE_OK || accepted == 0U) {
+			waiting = 0;
 			break;
-		if (wr != SDK_VIDEO_BACKEND_WRITE_OK)
-			break;
+		}
 		fed += accepted;
-		if (fed > 32U * 1024U * 1024U)
-			break;
 	}
-	check(rc == SDK_VIDEO_BACKEND_UNSUPPORTED,
-	      "skip larger than the window fails instead of waiting");
+	check(waiting, "skip larger than the window keeps taking input");
+	stream_block(&after, 1, 2);
+	check(feed(dec, after.bytes, after.n, after.n), "block after the Void");
+	check(decode(dec) == SDK_VIDEO_BACKEND_FRAME && ndecoded == 2U &&
+	      decoded[1] == 2U, "block after the Void decodes");
 	ops->destroy(dec);
 }
 
@@ -1048,7 +1073,7 @@ int main(void)
 		test_skip_without_keyframe();
 		test_skip_budget();
 		test_invisible_frame();
-		test_window_exhausted_by_skip();
+		test_window_skip_larger_than_window();
 		test_window_exhausted_in_header();
 		test_partial_final_write();
 		test_matroska_track_selection();

@@ -112,6 +112,26 @@ static int skip_n(struct webm_demux *d, uint64_t n)
 	return 0;
 }
 
+/* skip_n for webm_next: through io->skip when the caller provides it, so
+ * input not received yet is dropped as it arrives. 1 when it was: the
+ * caller can no longer rewind, so webm_next returns WEBM_NEXT_SKIPPED at
+ * once from a resume point. */
+static int drop_n(struct webm_demux *d, uint64_t n)
+{
+	int rc;
+
+	if (!d->io.skip || n == 0)
+		return skip_n(d, n);
+	if (n > room_in(d, 0U))
+		return fail(d, WEBM_ERR_LAYOUT);
+	rc = d->io.skip(d->io.ctx, tell(d) + (uint32_t)n);
+	if (rc == -2)
+		return fail(d, WEBM_ERR_NEED);
+	if (rc < 0)
+		return fail(d, WEBM_ERR_IO);
+	return rc != 0;
+}
+
 static int read_vint(struct webm_demux *d, uint64_t *val, uint32_t *len,
 		     int mask_len, int *unknown)
 {
@@ -320,6 +340,7 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 	struct webm_track spare;
 	uint32_t priv_len = 0U;
 	int priv_overflow = 0;
+	int encoded = 0;
 	uint8_t scratch[16];
 
 	/* WebM allows one video and one audio track, so a full table is an
@@ -402,8 +423,15 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 				return -1;
 			continue;
 		}
-		if (encrypted_id(id))
-			return fail(d, WEBM_ERR_CODEC);
+		if (encrypted_id(id)) {
+			/* ContentEncodings (compression or encryption): the
+			 * decoders read plain frames, so a kept track fails
+			 * closed below; a skipped one does not matter. */
+			if (skip_n(d, n) != 0)
+				return -1;
+			encoded = 1;
+			continue;
+		}
 		if (id == ID_CODECPRIV) {
 			/* TrackEntry children come in any order, so what to
 			 * do with it is decided once the entry is read. Until
@@ -472,6 +500,8 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 	}
 	if (d->is_matroska && !matroska_track_usable(d, t))
 		return 0; /* Not stored: its blocks are skipped. */
+	if (encoded)
+		return fail(d, WEBM_ERR_CODEC);
 	if (t == &spare)
 		return fail(d, WEBM_ERR_LIMIT);
 	if (!track_reads_priv(t)) {
@@ -681,11 +711,11 @@ static int split_lace(struct webm_demux *d, uint32_t payload_off,
 }
 
 /* A Block's key flag lives in its BlockGroup; webm_next sets it after the
- * group. A SimpleBlock carries its own. Returns 1 for a block of a
- * Matroska track that was not stored (subtitles, disabled or unplayable
- * tracks; see matroska_track_usable and matroska_finish_tracks): it is
- * skipped after its track number, so frame limits apply only to blocks
- * a backend reads. */
+ * group. A SimpleBlock carries its own. Returns 1, having read only the
+ * track number, for a block of a Matroska track that was not stored
+ * (subtitles, disabled or unplayable tracks; see matroska_track_usable and
+ * matroska_finish_tracks): the caller skips the rest, so frame limits
+ * apply only to blocks a backend reads. */
 static int take_block(struct webm_demux *d, uint32_t size, int simple)
 {
 	uint32_t tlen = 1, i, track;
@@ -709,7 +739,7 @@ static int take_block(struct webm_demux *d, uint32_t size, int simple)
 	for (i = 1; i < tlen; i++)
 		track = (track << 8) | d->buf[i];
 	if (d->is_matroska && !webm_track(d, track))
-		return skip_n(d, size - tlen) != 0 ? -1 : 1;
+		return 1;
 	if (size < 4 || size > d->buf_cap || size > WEBM_MAX_FRAME)
 		return fail(d, WEBM_ERR_LIMIT);
 	if (tlen + 3 > size)
@@ -860,7 +890,7 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 	for (;;) {
 		uint32_t id, pos;
 		uint64_t size;
-		int unknown = 0;
+		int unknown = 0, rc;
 
 		if (d->in_cluster && d->cluster_end &&
 		    room(d, d->cluster_end) == 0U)
@@ -882,8 +912,11 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 				return fail(d, WEBM_ERR_LAYOUT);
 			if (encrypted_id(id))
 				return fail(d, WEBM_ERR_CODEC);
-			if (skip_n(d, size) != 0)
+			rc = drop_n(d, size);
+			if (rc < 0)
 				return -1;
+			if (rc > 0)
+				return WEBM_NEXT_SKIPPED;
 			continue;
 		}
 		if (id == ID_CLUSTERTC) {
@@ -897,25 +930,31 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 			continue;
 		}
 		if (id == ID_SIMPLE || id == ID_BLOCK) {
-			int rc;
+			uint32_t block_end;
 
 			if (unknown || size > room_in(d, d->cluster_end))
 				return fail(d, WEBM_ERR_LAYOUT);
+			block_end = tell(d) + (uint32_t)size;
 			rc = take_block(d, (uint32_t)size, id == ID_SIMPLE);
 			if (rc < 0)
 				return -1;
+			if (rc == 0)
+				return emit(d, blk);
+			rc = drop_n(d, block_end - tell(d));
+			if (rc < 0)
+				return -1;
 			if (rc > 0)
-				continue;
-			return emit(d, blk);
+				return WEBM_NEXT_SKIPPED;
+			continue;
 		}
 		if (id == ID_GROUP) {
 			uint32_t end;
-			int saw = 0, key = 1;
+			int saw = 0, ignored = 0, key = 1;
 
 			if (unknown || size > room_in(d, d->cluster_end))
 				return fail(d, WEBM_ERR_LAYOUT);
 			end = tell(d) + (uint32_t)size;
-			while (room(d, end) > 1U) {
+			while (!ignored && room(d, end) > 1U) {
 				uint32_t cid;
 				uint64_t csz;
 				int cu = 0;
@@ -927,14 +966,23 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 				if (cid == ID_REFBLOCK)
 					key = 0;
 				if (cid == ID_BLOCK) {
-					int rc = take_block(d, (uint32_t)csz, 0);
-
+					rc = take_block(d, (uint32_t)csz, 0);
 					if (rc < 0)
 						return -1;
 					saw = rc == 0;
+					ignored = rc > 0;
 				} else if (skip_n(d, csz) != 0) {
 					return -1;
 				}
+			}
+			if (ignored) {
+				/* The rest of the group goes with its Block. */
+				rc = drop_n(d, room(d, end));
+				if (rc < 0)
+					return -1;
+				if (rc > 0)
+					return WEBM_NEXT_SKIPPED;
+				continue;
 			}
 			if (skip_n(d, room(d, end)) != 0)
 				return -1;
@@ -955,8 +1003,11 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 			return fail(d, WEBM_ERR_LAYOUT);
 		if (encrypted_id(id))
 			return fail(d, WEBM_ERR_CODEC);
-		if (skip_n(d, size) != 0)
+		rc = drop_n(d, size);
+		if (rc < 0)
 			return -1;
+		if (rc > 0)
+			return WEBM_NEXT_SKIPPED;
 	}
 }
 

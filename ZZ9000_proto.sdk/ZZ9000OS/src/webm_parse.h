@@ -88,13 +88,18 @@ struct webm_block {
 
 /* read: copy up to n bytes. Return count, 0 at EOF, -2 if more input
  * may still arrive. seek: absolute file offset; 0 ok, -1 hard error,
- * -2 not yet available. */
+ * -2 not yet available. skip (optional; seek is used without it): a
+ * forward seek past bytes no retry reads again, so ones not received yet
+ * may be dropped as they arrive: 0 done within held bytes, 1 done by
+ * dropping (the caller can no longer rewind before pos), -1 or -2 as
+ * seek. */
 struct webm_io {
 	void *ctx;
 	int (*read)(void *ctx, void *dst, uint32_t n);
 	int (*seek)(void *ctx, uint32_t pos);
 	uint32_t (*tell)(void *ctx);
 	uint32_t (*size)(void *ctx);
+	int (*skip)(void *ctx, uint32_t pos);
 };
 
 struct webm_demux {
@@ -125,7 +130,11 @@ struct webm_demux {
 
 int webm_open(struct webm_demux *d, const struct webm_io *io, uint8_t *buf,
 	      uint32_t cap);
-/* 1 = a block, 0 = clean EOF, -1 = error (d->error). */
+/* 1 = a block, 0 = clean EOF, -1 = error (d->error), WEBM_NEXT_SKIPPED =
+ * no block: io->skip dropped input that had not arrived (an ignored
+ * Matroska block or an element larger than the input held). The demux is
+ * at a new resume point: take a new snapshot or mark and call again. */
+#define WEBM_NEXT_SKIPPED 2
 int webm_next(struct webm_demux *d, struct webm_block *blk);
 void webm_close(struct webm_demux *d);
 const struct webm_track *webm_track(const struct webm_demux *d, uint32_t number);

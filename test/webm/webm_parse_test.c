@@ -7,6 +7,7 @@
  */
 #include "ebml_build.h"
 #include "webm_parse.h"
+#include "webm_window.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -342,7 +343,8 @@ enum {
 	MKV_DISABLED = 1,   /* FlagEnabled 0 */
 	MKV_PRIV_FIRST = 2, /* CodecPrivate before the other children */
 	MKV_FLAG_LAST = 4,  /* FlagEnabled after CodecPrivate */
-	MKV_BIG_BLOCK = 8   /* block larger than WEBM_MAX_FRAME */
+	MKV_BIG_BLOCK = 8,  /* block larger than WEBM_MAX_FRAME */
+	MKV_ENCODED = 16    /* ContentEncodings */
 };
 
 struct mkv_track_spec {
@@ -372,10 +374,10 @@ static void mkv_add_priv(struct buf *t, const struct mkv_track_spec *s)
 }
 
 /* A file of the given DocType with one TrackEntry and one block per spec
- * row. */
-static struct buf make_mkv_tracks(const char *doctype,
-				  const struct mkv_track_spec *spec,
-				  unsigned count)
+ * row in a first Cluster; extra (if any) follows it in the Segment. */
+static struct buf make_mkv_file(const char *doctype,
+				const struct mkv_track_spec *spec,
+				unsigned count, const struct buf *extra)
 {
 	struct buf seg = {0}, info = {0}, tracks = {0}, cluster = {0};
 	struct buf ebml = {0}, file = {0};
@@ -398,6 +400,11 @@ static struct buf make_mkv_tracks(const char *doctype,
 			mkv_add_priv(&t, &spec[i]);
 		if ((flags & MKV_DISABLED) && (flags & MKV_FLAG_LAST))
 			bu8(&t, 0xB9, 0);
+		if (flags & MKV_ENCODED) {
+			static const uint8_t encoding[] = {0x62, 0x40, 0x80};
+
+			belem(&t, 0x6D80, encoding, sizeof(encoding));
+		}
 		if (spec[i].type == 1U) {
 			bu16(&video, 0xB0, 32);
 			bu16(&video, 0xBA, 16);
@@ -422,6 +429,8 @@ static struct buf make_mkv_tracks(const char *doctype,
 		}
 	}
 	bnest(&seg, 0x1F43B675, &cluster);
+	if (extra)
+		bput(&seg, extra->p, extra->n);
 	belem(&ebml, 0x4282, doctype, (uint32_t)strlen(doctype));
 	bnest(&file, 0x1A45DFA3, &ebml);
 	bid(&file, 0x18538067);
@@ -429,6 +438,13 @@ static struct buf make_mkv_tracks(const char *doctype,
 	bput(&file, seg.p, seg.n);
 	free(seg.p);
 	return file;
+}
+
+static struct buf make_mkv_tracks(const char *doctype,
+				  const struct mkv_track_spec *spec,
+				  unsigned count)
+{
+	return make_mkv_file(doctype, spec, count, NULL);
 }
 
 /* Parses the file built from spec and checks which tracks are stored, that
@@ -514,6 +530,10 @@ static int test_matroska_ignored_tracks(void)
 		{8, 2, "A_MPEG/L2", MKV_DISABLED, 0, 0, 0},
 		{9, 2, "A_VORBIS", 0, 70000, 0, 0},       /* not with MPEG */
 		{10, 2, "A_OPUS", 0, 19, 0, 0},
+		/* Encoded tracks that are not kept do not matter. */
+		{11, 0x11, "S_TEXT/UTF8", MKV_ENCODED, 0, 0, 0},
+		{12, 2, "A_AAC", MKV_ENCODED, 0, 0, 0},
+		{13, 2, "A_AC3", MKV_ENCODED, 0, 0, 0},  /* second AC-3 */
 	};
 	/* The video can come last; the audio it cannot use is dropped once
 	 * all tracks are read. */
@@ -564,6 +584,10 @@ static int test_matroska_ignored_tracks(void)
 	static const struct mkv_track_spec big_block[] = {
 		{1, 1, "V_MPEG2", MKV_BIG_BLOCK, 0, 1, 0},
 	};
+	/* A kept encoded track fails closed. */
+	static const struct mkv_track_spec encoded[] = {
+		{1, 1, "V_MPEG2", MKV_ENCODED, 0, 1, 0},
+	};
 	static struct webm_demux d;
 	static struct got g;
 	struct buf file = make_mkv_tracks("matroska", oversized, 1U);
@@ -578,6 +602,13 @@ static int test_matroska_ignored_tracks(void)
 	file = make_mkv_tracks("matroska", big_block, 1U);
 	if (collect(&file, 1, &d, &g) == 0 || d.error != WEBM_ERR_LIMIT) {
 		fprintf(stderr, "matroska oversized kept block: err=%d\n",
+			d.error);
+		failed = 1;
+	}
+	free(file.p);
+	file = make_mkv_tracks("matroska", encoded, 1U);
+	if (collect(&file, 1, &d, &g) == 0 || d.error != WEBM_ERR_CODEC) {
+		fprintf(stderr, "matroska encoded kept track: err=%d\n",
 			d.error);
 		failed = 1;
 	}
@@ -602,6 +633,98 @@ static int test_matroska_ignored_tracks(void)
 				      sizeof(disabled_late) /
 				      sizeof(disabled_late[0]));
 	return failed;
+}
+
+/* Streams a file through a 64 KiB window in 4 KiB writes the way the
+ * media backends do: mark and snapshot around each webm_next, rewind and
+ * write more on WEBM_ERR_NEED, compact when a write does not fit. Blocks
+ * of an unstored track and a top-level element, each larger than the
+ * window, are passed over (WEBM_NEXT_SKIPPED) instead of exhausting it. */
+static int test_window_skips_large_ignored_data(void)
+{
+	static const struct mkv_track_spec spec[] = {
+		{1, 1, "V_MPEG2", 0, 0, 1, 0},
+		{2, 0x11, "S_TEXT/UTF8", 0, 0, 0, 0},
+	};
+	static uint8_t window_store[64U * 1024U], frame[32U * 1024U];
+	static struct webm_demux d, saved;
+	struct webm_window w;
+	struct webm_io io;
+	struct webm_block blk;
+	struct buf cluster = {0}, group = {0}, extra = {0}, file;
+	uint8_t payload[4] = {1, 2, 3, 4};
+	uint8_t *big = calloc(1U, 300000U);
+	uint32_t fed = 0U, video = 0U, skipped = 0U;
+	int rc;
+
+	/* After the first Cluster (one block per track): a SimpleBlock and a
+	 * BlockGroup of the subtitle track, a top-level Void, then a last
+	 * video block; the large ones are 300000 bytes. */
+	bu8(&cluster, 0xE7, 0);
+	add_block(&cluster, 0xA3, 2, 0, 0x80, big, 300000U);
+	add_block(&cluster, 0xA3, 1, 1, 0x80, payload, sizeof(payload));
+	add_block(&group, 0xA1, 2, 2, 0, big, 300000U);
+	bnest(&cluster, 0xA0, &group);
+	add_block(&cluster, 0xA3, 1, 3, 0x80, payload, sizeof(payload));
+	bnest(&extra, 0x1F43B675, &cluster);
+	belem(&extra, 0xEC, big, 300000U);
+	bu8(&cluster, 0xE7, 0);
+	add_block(&cluster, 0xA3, 1, 4, 0x80, payload, sizeof(payload));
+	bnest(&extra, 0x1F43B675, &cluster);
+	free(big);
+	file = make_mkv_file("matroska", spec, 2U, &extra);
+	free(extra.p);
+
+	webm_window_init(&w, window_store, sizeof(window_store));
+	webm_window_bind(&w, &io);
+	for (;;) {
+		w.cursor = w.start;
+		if (webm_open(&d, &io, frame, sizeof(frame)) == 0)
+			break;
+		if (d.error != WEBM_ERR_NEED || fed == file.n) {
+			fprintf(stderr, "window skip: open err=%d\n", d.error);
+			free(file.p);
+			return 1;
+		}
+		webm_window_append(&w, file.p + fed, 4096U < file.n - fed
+				   ? 4096U : file.n - fed);
+		fed += 4096U < file.n - fed ? 4096U : file.n - fed;
+		w.eof = fed == file.n;
+	}
+	webm_window_compact(&w);
+	for (;;) {
+		do {
+			webm_window_mark(&w);
+			saved = d;
+			rc = webm_next(&d, &blk);
+			skipped += rc == WEBM_NEXT_SKIPPED;
+		} while (rc == WEBM_NEXT_SKIPPED);
+		if (rc < 0 && d.error == WEBM_ERR_NEED) {
+			uint32_t n = file.n - fed < 4096U ? file.n - fed : 4096U;
+
+			d = saved;
+			webm_window_rewind(&w);
+			if (webm_window_exhausted(&w, w.mark) || n == 0U)
+				break;
+			if (n > webm_window_space(&w))
+				webm_window_compact(&w);
+			if (!webm_window_append(&w, file.p + fed, n))
+				break;
+			fed += n;
+			w.eof = fed == file.n;
+			continue;
+		}
+		if (rc <= 0)
+			break;
+		video += blk.track == 1U;
+	}
+	free(file.p);
+	if (rc != 0 || video != 4U || skipped == 0U) {
+		fprintf(stderr, "window skip: rc=%d err=%d video=%u skipped=%u\n",
+			rc, d.error, video, skipped);
+		return 1;
+	}
+	return 0;
 }
 
 /* Encoders put master and long elements inside Video and Audio: Colour
@@ -941,6 +1064,7 @@ int main(void)
 	failed |= test_audio_tracks();
 	failed |= test_disabled_track_fields();
 	failed |= test_matroska_ignored_tracks();
+	failed |= test_window_skips_large_ignored_data();
 	failed |= test_track_metadata_masters();
 	failed |= test_lacing();
 	failed |= test_multi_cluster();
