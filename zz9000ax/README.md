@@ -1,70 +1,56 @@
 # ZZ9000AX ADAU1701 production profile
 
-`dsp/limiter-postvolume.dspproj` (SigmaStudio 4.7) is the
-source-authoritative project for the ADAU1701 program embedded in the
-firmware: the original mixer/LPF/prefactor/EQ/volume chain plus the
-post-Volume stereo-linked peak limiter that ships engaged at 0.47 FS.
-The pre-limiter `zz9000ax/zz9000ax-mix1-lowpass-eq.dspproj` remains in
-the tree for history and comparison.
+The firmware loads the ADAU1701 program from
+`ZZ9000_proto.sdk/ZZ9000OS/src/adau_limiter_image.h`. Its authoritative
+SigmaStudio 4.7 project is `dsp/limiter-postvolume.dspproj`. The profile runs
+at 48 kHz and enables a post-volume, stereo-linked peak limiter at 0.47 FS on
+boot.
 
-Rate conversion in and out of this fixed 48-kHz domain is handled by the
-ARM-side qualified converter kernel; see `docs/audio-conversion.md` for
-the measured passband/stop-band/group-delay/cycle-cost table and the
-capture register contract.
+Firmware uses the fixed TDM8 capture transport. It writes and verifies
+`0x0c22` at codec register `0x081e`; ADC left and right use slots 0 and 1.
+The FPGA converts those slots to the stereo I2S stream used by the existing
+receiver, formatter, DMA, firmware, and AHI path. Rate conversion to and from
+this 48 kHz domain is described in
+[`docs/audio-conversion.md`](../docs/audio-conversion.md).
 
-## Production capture contract
+## Signal path
 
-The normal graph routes:
+The production graph routes physical left RCA / ADC0 to `Output5` / `DIG0`
+and physical right RCA / ADC1 to `Output6` / `DIG1`. It combines ADC/Paula
+stereo and FPGA playback in `St Mixer1`, then applies low-pass filtering,
+prefactor, equalizer, volume/pan, the limiter, and `DAC0` / `DAC1`.
 
-- physical left RCA / ADC0 to `Output5` / `DIG0`;
-- physical right RCA / ADC1 to `Output6` / `DIG1`;
-- physical ADC/Paula stereo and FPGA playback into `St Mixer1`; and
-- the combined mixer output through low-pass, prefactor, equalizer,
-  volume/pan, the stereo-linked limiter, and `DAC0` / `DAC1`.
+The capture taps precede the mixer and master scene chain. Recording therefore
+receives the physical inputs without FPGA playback feeding back into capture.
+All line-output sources join before the scene controls, so volume zero mutes
+both Paula and AX.
 
-The ADC capture taps remain before the mixer and master scene chain, so
-recording observes the physical inputs without internally feeding back
-FPGA playback. Every line-output source joins before the scene blocks;
-volume zero therefore mutes both Paula and AX.
-
-Firmware configures serial-output register `0x081e` to `0x0c22`: 48 kHz,
-16-bit TDM8 master mode with a 256*Fs (12.288 MHz) BCLK. `DIG0` and `DIG1`
-therefore occupy slots 0 and 1 on the existing `SDATA_OUT0` wire. The FPGA
-extracts those two slots and normalizes them to conventional stereo I2S for
-the existing Xilinx receiver, formatter, DMA, firmware, and AHI path.
-
-This fixed transport was selected by the a203 characterization image on real
-ZZ9000AX R1 hardware. Its deterministic TDM8 captures preserved both distinct
-channels exactly; conventional I2S produced an exact-zero right channel.
-Runtime mode switching, pattern generation, raw-frame snapshots, and the
-characterization control portal are not part of the production image.
-
-## Generated image identity
-
-| Input | SHA-256 |
-|---|---|
-| `dsp/limiter-postvolume.dspproj` | `5d002c6876c37a357cfd8b5f45791167be5d315162c2867b319bdaf683d697be` |
-| `Program_Data_Limiter_IC_1` (5120 bytes) | `b703b62adac2ee2d859384fcc92e8369d4273ed6d20f698cc5bd46d1630e9fd8` |
-| `Param_Data_Limiter_IC_1` (4096 bytes) | `7565c1b872f2abac46fd4dcd14f388164441ec1a0e0857d42f766f7099b21b8a` |
-
-The graph source and its program/parameter arrays are independent of the
-serial framing register, which firmware writes and verifies after every cold
-boot. Firmware also waits for the ADAU1701 PLL and boot-ROM copy, holds the DSP
-core at `0x0018` while loading, reads back every program and parameter word,
-and releases the core at `0x001c` only after the complete normal image is
-verified.
-
-## Regenerating and verifying
+## Regenerate the image
 
 1. Open `dsp/limiter-postvolume.dspproj` in SigmaStudio 4.7.
 2. Link, compile, save, and export the system files.
-3. Copy the exported `Program_Data_IC_1` and `Param_Data_IC_1` bodies
-   into `adau_limiter_image.h` (the loader symbols in `adau.h` alias
-   onto `Program_Data_Limiter_IC_1` / `Param_Data_Limiter_IC_1`).
-4. Update the three hashes above and in `test/audio/audio_profile_test.c`.
-5. Copy the generated parameter map to `adau_limiter_PARAM.h` if the
-   graph changes.
-6. Run `make -C test/audio test`.
+3. Copy the exported `Program_Data_IC_1` and `Param_Data_IC_1` bodies into
+   `ZZ9000_proto.sdk/ZZ9000OS/src/adau_limiter_image.h`. `adau.h` aliases
+   them as `Program_Data_Limiter_IC_1` and `Param_Data_Limiter_IC_1`.
+4. Copy the generated parameter map to
+   `ZZ9000_proto.sdk/ZZ9000OS/src/adau_limiter_PARAM.h` if the graph changed.
+5. Update the image identity values in `test/audio/audio_profile_test.c`.
+6. Run the profile test:
 
-`adau.h` deliberately supplies its own integration wrapper instead of
-including SigmaStudio's generated `SigmaStudioFW.h` and `*_REG.h` files.
+   ```sh
+   make -C test/audio test
+   ```
+
+Firmware holds the DSP core at `0x0018` while it loads and reads back the
+program and parameter data. It releases the core at `0x001c` only after the
+load succeeds.
+
+## Recorded hardware result
+
+The a203 characterization image on a ZZ9000AX R1 card captured two distinct
+channels through TDM8 slots 0 and 1. The conventional I2S setup produced an
+exact-zero right channel. The production image excludes the characterization
+mode, pattern generator, raw-frame snapshots, and its control portal.
+
+The pre-limiter project
+`zz9000ax/zz9000ax-mix1-lowpass-eq.dspproj` remains for comparison.

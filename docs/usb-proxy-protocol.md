@@ -1,114 +1,228 @@
 # ZZ9000 USB proxy protocol
 
-The USB proxy is a single-owner command/data aperture shared by Zynq firmware and `zzusbhw.device`. Multi-byte protocol fields are big-endian unless noted for USB setup packet fields. Commercial Poseidon 4.5 is above this contract and remains unchanged.
+The USB proxy lets a host driver submit USB work to the ARM firmware through a
+24 KiB shared aperture. Firmware recognizes the legacy command IDs and version 2
+framing. Version 2 adds request IDs, controller epochs, diagnostics, persistent
+interrupt queues, ISO batches, and a maintenance mailbox.
 
-## Aperture layout
+All multi-byte fields are big-endian, except `setup_wValue`, `setup_wIndex`, and
+`setup_wLength`. Those three setup-packet fields remain USB little-endian.
 
-| Offset | Size | Owner while pending | Contents |
-|---|---:|---|---|
-| `0` | 48 | Driver, then firmware | Legacy `ZZUSBCommand` prefix |
-| `48` | 16 | Driver, then firmware | v2 extension |
-| `64` | 16384 | Matching request only | v2 transfer staging payload |
-| `16448` | 4032 | Reserved | Future bounded transport metadata |
-| `20480` | 4096 | Firmware publisher | v2 diagnostic snapshot page (capability-gated) |
+## Aperture and submission
 
-The physical aperture remains 24576 bytes. A legacy peer may use the historical payload extent from offset 64; v2 never stages more than 16 KiB. The legacy prefix and data offset never move.
+| Byte range | Size | Use |
+|---|---:|---|
+| `0–47` | 48 | Primary `ZZUSBCommand` header |
+| `48–63` | 16 | Primary `ZZUSBProtocolExtension` header for v2 |
+| `64–16447` | 16384 | Primary v2 staging payload |
+| `16448–16511` | 64 | v2 maintenance mailbox headers |
+| `16512–20479` | 3968 | Maintenance mailbox staging payload |
+| `20480–24575` | 4096 | Diagnostic snapshot page |
 
-## Legacy prefix
+Version 1 stages data from offset `64` through the end of the aperture, for a
+maximum transfer of `24512` bytes. Version 2 limits primary staging to
+`ZZUSB_V2_DATA_MAX` (`16384` bytes). The maintenance mailbox uses the same
+48-byte command header and 16-byte v2 extension, with a maximum payload of
+`ZZUSB_MAINT_DATA_MAX` (`3968` bytes).
 
-The packed 48-byte prefix is, in order: command, status, device address, endpoint, direction, transfer type, maximum packet size, requested length, actual length, timeout, speed, interval, the eight-byte USB setup packet, split-hub address, split-hub port, flags, and reserved word. Setup `wValue`, `wIndex`, and `wLength` remain USB little-endian; the other multi-byte values are big-endian. Persistent periodic commands use the reserved word as a device generation so a reused USB address cannot inherit an earlier endpoint.
+The host owns a request until firmware completes it. It writes the primary
+headers and any OUT payload, then writes `REG_ZZ_USB_PROXY_CMD`. OR
+`ZZUSB_DOORBELL_V2` (`0x8000`) into that register value for a v2 request.
+Firmware snapshots the request before processing it and writes a completion
+only when the shared header still describes the same request. The v2 check also
+matches the request ID and controller epoch. A mismatch records a late
+completion and advances the controller epoch.
 
-`ZZUSB_FLAG_BULK_IN_POLL` (bit 3) marks an explicitly open-ended bulk-IN slice. An error-free qTD deadline returns `NAK` only with this flag; finite bulk requests return `TIMEOUT`. The flag is invalid for bulk OUT.
+The maintenance mailbox is polled when no primary request is pending. It
+accepts `QUERY_CAPS`, `ISO_QUEUE`, `ISO_REAP`, and `ISO_STOP`; other validated
+commands return `UNSUPPORTED`. It does not use the primary doorbell.
 
-## v2 extension
+## Headers and request lifetime
 
-| Relative offset | Type | Field | Rule |
-|---|---|---|---|
-| `0` | `u16` | version | Exactly `2` |
-| `2` | `u16` | header size | Exactly `64` |
-| `4` | `u32` | request ID | Nonzero, monotonically advances within a negotiated session |
-| `8` | `u32` | controller epoch | Zero only in `QUERY_CAPS`; otherwise must match firmware |
-| `12` | `u32` | capabilities | Firmware capabilities on completion |
-
-A v2 driver ORs `ZZUSB_DOORBELL_V2` into the existing command-register write. Old firmware ignores the doorbell value and therefore returns `BADPARAM` to the appended `QUERY_CAPS` command; new firmware uses the marker to distinguish v2 from stale bytes left in the previously unused gap. An old driver never sets the marker, so new firmware always interprets it as v1 even when the gap contains old v2 data.
-
-## Negotiation and lifecycle
-
-1. A new driver sends `QUERY_CAPS` with v2 version/header, request ID 1, and epoch 0.
-2. New firmware returns its nonzero controller epoch and only implemented capabilities. The matched base capability set covers v2 framing, request IDs, epochs, validation, bounded diagnostics, persistent periodic interrupt endpoints, simple and realtime ISO transport, the USB event IRQ, and precise errors.
-3. `BADPARAM` selects constrained legacy mode. No v2 capability is advertised.
-4. Every later v2 command carries the negotiated epoch and a new request ID. Firmware rejects zero, duplicate/out-of-order, or wrong-epoch work before EHCI access.
-5. A successful controller reset advances the epoch. A completion is accepted only when its request ID matches; a non-reset response must also carry the expected epoch.
-6. A local legacy timeout quarantines the driver transport. It must not overwrite the uncertain mailbox. Later lifecycle work replaces polling with acknowledged retirement/reset semantics.
-
-Firmware snapshots the command and OUT payload before starting EHCI. It copies IN data and completion metadata back only if the shared request still matches. This is exact for v2 IDs/epochs and a best-effort immutable-field fence for v1.
-
-## Persistent interrupt transport
-
-`PERIODIC_ARM` creates or reuses one EHCI interrupt queue keyed by epoch, device generation, address, endpoint, direction, speed, maximum packet, interval, and split topology. Full/low-speed split queues encode the transaction-translator think time and multi-TT slot in legal start/complete masks. Poseidon normalizes high-speed descriptor `bInterval` exponents to power-of-two microframe intervals before submitting `PERIODIC_ARM` or `PERIODIC_REAP`; the proxy carries those normalized values unchanged. Firmware retains at most 16 endpoints and one unread completion per endpoint; it pauses that endpoint rather than overwrite unread data.
-
-`PERIODIC_REAP` returns one matching completion. `NAK`, a zero-length IN transaction, and an all-zero hub change report are non-terminal to the Poseidon request. A successful reap rearms the retained descriptor no sooner than its declared interval. The first `STALL` from a split IN endpoint is deferred for 50 ms and retried once, giving the parent hub change endpoint time to report child removal before a disappearing HID endpoint enters Poseidon's clear-halt loop. Before queuing a nonzero hub change report, firmware retires any already-stalled split periodic child whose recorded hub address and port match an asserted port bit; unrelated live children and unrelated hub changes are untouched. Poseidon's subsequent `AbortIO` therefore observes an already quiesced child instead of unlinking its halted QH during class teardown. A repeated stall and all other transfer errors are terminal and retire the endpoint. `PERIODIC_STOP`, reset, detach, epoch advance, and controller recovery retire matching queues through the fenced EHCI unlink path.
-
-Firmware raises interrupt-source bit `16` in `REG_ZZ_CONFIG` only after it queues data or a terminal error. The Amiga interrupt server acknowledges only that source by writing `8 | 256` and signals the mailbox-owning worker; it never accesses the mailbox itself. More unread completions cause firmware to reassert the coalesced source after a reap. The driver installs this shared server on INT6 by default or INT2 when `ZZ9000.CFG` selects `INT2`.
-
-## Isochronous transport
-
-`ISO_QUEUE`, `ISO_REAP`, and `ISO_STOP` use transfer type ISO and are available only in negotiated v2 mode. The firmware retains at most eight batches globally, with at most 32 packets and 15840 data bytes per batch. High-speed endpoints use iTDs; full-speed endpoints are accepted only behind a high-speed hub and use split-transaction siTDs. Low-speed ISO is invalid. Poseidon normalizes high-speed intervals to microframes and full-speed intervals to frames before submitting hardware requests; the proxy carries those normalized power-of-two values unchanged.
-
-The batch header is 32 bytes:
+The packed `ZZUSBCommand` header is 48 bytes.
 
 | Offset | Type | Field |
 |---|---|---|
+| `0` | `u16` | command |
+| `2` | `u16` | status |
+| `4` | `u32` | device address |
+| `8` | `u16` | endpoint |
+| `10` | `u16` | direction, `0` for OUT or `0x80` for IN |
+| `12` | `u16` | transfer type |
+| `14` | `u16` | maximum packet size |
+| `16` | `u32` | requested data length |
+| `20` | `u32` | actual data length on completion |
+| `24` | `u32` | timeout in milliseconds |
+| `28` | `u16` | speed, low `0`, full `1`, high `2` |
+| `30` | `u16` | interval |
+| `32` | 8 bytes | USB setup packet |
+| `40` | `u16` | split-hub address |
+| `42` | `u16` | split-hub port |
+| `44` | `u16` | flags |
+| `46` | `u16` | reserved, used as the device generation by persistent endpoints |
+
+A v2 extension immediately follows the primary command header, or the
+maintenance command header.
+
+| Relative offset | Type | Field | Required value or completion value |
+|---|---|---|---|
+| `0` | `u16` | version | `2` |
+| `2` | `u16` | header size | `64` |
+| `4` | `u32` | request ID | Nonzero |
+| `8` | `u32` | controller epoch | Matches firmware except for `QUERY_CAPS` |
+| `12` | `u32` | capabilities | Firmware capability mask on a completed validated command |
+
+`QUERY_CAPS` requires a zero data length and accepts any nonzero request ID.
+It returns the firmware epoch and `ZZUSB_CAP_BASE`. Later v2 requests require a
+strictly newer request ID and the returned epoch. Firmware resets its remembered
+request ID whenever it advances the epoch. A port reset, a detected detach, a
+recovery reset, or a rejected late completion advances that epoch.
+
+`ZZUSB_CAP_BASE` currently includes these capability bits:
+
+| Bit | Identifier |
+|---:|---|
+| 0 | `ZZUSB_CAP_PROTOCOL_V2` |
+| 1 | `ZZUSB_CAP_REQUEST_ID` |
+| 2 | `ZZUSB_CAP_CONTROLLER_EPOCH` |
+| 3 | `ZZUSB_CAP_VALIDATION` |
+| 4 | `ZZUSB_CAP_DIAGNOSTICS` |
+| 5 | `ZZUSB_CAP_PERIODIC` |
+| 6 | `ZZUSB_CAP_ISO_SIMPLE` |
+| 7 | `ZZUSB_CAP_ISO_REALTIME` |
+| 8 | `ZZUSB_CAP_EVENT_IRQ` |
+| 9 | `ZZUSB_CAP_PRECISE_ERRORS` |
+| 10 | `ZZUSB_CAP_MAINTENANCE` |
+
+## Commands, statuses, and validation
+
+Legacy command IDs remain in the range `0x01–0x0c`. Version 2 additions occupy
+`0x0d–0x16`.
+
+| Command | Value | Firmware action |
+|---|---:|---|
+| `CONTROL_XFER` | `0x01` | Control transfer |
+| `BULK_XFER` | `0x02` | Bulk transfer |
+| `INT_XFER` | `0x03` | One interrupt transfer |
+| `ISO_XFER` | `0x04` | Returns `UNSUPPORTED` |
+| `RESET_PORT` | `0x05` | Reset the root port |
+| `RESUME_PORT`, `SUSPEND_PORT` | `0x06`, `0x07` | Return `UNSUPPORTED` |
+| `ENUMERATE` | `0x08` | Complete without payload work |
+| `QUERY_DEVICE`, `SET_ADDRESS` | `0x09`, `0x0a` | Return `UNSUPPORTED` |
+| `CLEAR_STALL` | `0x0b` | Clear the endpoint halt |
+| `CHECK_PORT` | `0x0c` | Read root-port state |
+| `QUERY_CAPS` | `0x0d` | Negotiate v2 framing and capabilities |
+| `RETIRE_EP` | `0x0e` | Clear the cached data toggle for an endpoint |
+| `CANCEL_EP` | `0x0f` | Stop matching periodic and ISO work |
+| `DIAG_SNAPSHOT` | `0x10` | Publish the diagnostic page |
+| `PERIODIC_ARM`, `PERIODIC_REAP`, `PERIODIC_STOP` | `0x11–0x13` | Persistent interrupt queue operations |
+| `ISO_QUEUE`, `ISO_REAP`, `ISO_STOP` | `0x14–0x16` | ISO batch operations |
+
+| Status | Value |
+|---|---:|
+| `OK` | `0x00` |
+| `PENDING` | `0x01` |
+| `ERROR` through `BADPARAM` | `0xff–0xf6` |
+| `UNSUPPORTED`, `STALE`, `CANCELLED`, `HOSTERROR`, `BUSY`, `NOMEM` | `0xf5–0xf0` |
+
+Firmware checks device addresses through `127`, endpoints through `15`,
+direction, speed, payload extent, transfer type, interval, packet size, and
+split topology. A split request uses hub address and port values from `1`
+through `127`; high-speed split requests are invalid. For v2 requests without
+the split flag, the split fields, multi-TT flag, and TT think-time bits must be
+zero. `ZZUSB_FLAG_BULK_IN_POLL` (`0x0008`) is valid only for bulk IN.
+
+Control transfers require endpoint zero, a packet size through `64`, matching
+setup `wLength`, and matching setup direction. Periodic requests use interrupt
+transfer type, a nonzero interval, and a payload through `1024` bytes. The v2
+periodic commands and ISO commands use normalized powers-of-two intervals through
+`32768` for high-speed endpoints.
+ISO accepts high-speed endpoints or full-speed split endpoints. Low-speed ISO is
+invalid.
+
+## Persistent interrupt queues and event source
+
+`PERIODIC_ARM` creates or reuses an endpoint keyed by epoch, device generation,
+address, endpoint, direction, speed, packet size, interval, and split topology.
+Firmware retains at most 16 endpoints and one unread completion per endpoint.
+It pauses an endpoint with an unread completion. `PERIODIC_REAP` returns the
+matching completion, and an IN endpoint rearms after a successful reap.
+
+A zero-length IN result and `NAK` do not queue a completion. For split IN
+endpoints, firmware defers the first `STALL` for 50 ms before reporting it. A
+terminal error or available data queues a completion.
+
+`AMIGA_INTERRUPT_USB` is bit 4 of the shared Amiga interrupt mask. Firmware
+asserts it while a periodic completion is ready or an ISO batch is ready, then
+clears it when neither condition remains. `ZZUSB_EVENT_ACK_GATE` (`1 << 3`) and
+`ZZUSB_EVENT_ACK_USB` (`1 << 8`) acknowledge that source together.
+
+## ISO batches
+
+ISO operations require v2 framing. Firmware retains at most eight batches,
+with at most 32 packets and `15840` data bytes in each batch. The primary
+mailbox can contain a maximum-size batch: 32 bytes of batch header, 32
+16-byte packet entries, and 15840 bytes of data. The maintenance mailbox has
+its separate 3968-byte payload limit.
+
+`ISO_QUEUE` receives a 32-byte batch header followed by 16-byte packet entries.
+OUT batches append data after the entries; IN batches contain metadata only.
+`ISO_REAP` returns the same metadata and appends data for IN batches. Packet
+offsets describe the requested layout, so later offsets stay unchanged after a
+short packet.
+
+| Header offset | Type | Field |
+|---|---|---|
 | `0` | `u32` | magic `0x5a49534f` (`ZISO`) |
-| `4` | `u16` | batch version `1` |
-| `6` | `u16` | flags; bit 0 requests ASAP scheduling |
+| `4` | `u16` | version `1` |
+| `6` | `u16` | flags, bit 0 is `ZZUSB_ISO_FLAG_ASAP` |
 | `8` | `u32` | nonzero batch ID |
 | `12` | `u16` | starting frame, modulo 2048 |
-| `14` | `u16` | packet count, 1-32 |
-| `16` | `u32` | total packet data extent |
-| `20` | `u8` | starting microframe, 0-7 |
-| `21` | 11 bytes | reserved, zero |
+| `14` | `u16` | packet count, `1–32` |
+| `16` | `u32` | total data extent |
+| `20` | `u8` | starting microframe, `0–7` |
+| `21` | 11 bytes | reserved |
 
-Each 16-byte packet entry contains requested length at offset 0, actual length at 2, status at 4, completed frame at 6, payload-relative data offset at 8, and completed microframe at 12. Remaining bytes are reserved. Packet status values are OK `0`, pending `1`, short `2`, missed `3`, underrun `4`, overrun `5`, cancelled `6`, offline `7`, transaction error `8`, and babble `9`.
+Each packet entry stores requested length at offset `0`, actual length at `2`,
+status at `4`, completed frame at `6`, data offset at `8`, and completed
+microframe at `12`. The packet status values are `OK` `0`, `PENDING` `1`,
+`SHORT` `2`, `MISSED` `3`, `UNDERRUN` `4`, `OVERRUN` `5`, `CANCELLED` `6`,
+`OFFLINE` `7`, transaction error `8`, and `BABBLE` `9`.
 
-An OUT queue contains header, packet entries, then the complete data extent. An IN queue contains metadata only. A successful reap returns metadata plus the complete data extent for IN and metadata only for OUT. Packet offsets describe the requested layout, so a short packet does not change later packet offsets. The driver accepts a reap only when its endpoint identity and batch ID are still outstanding.
+An explicit schedule uses the requested frame and microframe. An ASAP batch
+starts at least four frames ahead of the current frame and follows a matching
+active batch when necessary. Firmware reports `BUSY` for an overlapping
+schedule or when all batch slots are occupied. `ISO_STOP`, controller reset,
+and epoch invalidation retire matching descriptors before their batch storage is
+reused.
 
-Explicit scheduling preserves the requested frame and microframe. ASAP scheduling chooses a wrap-safe lead of at least four frames; later ASAP batches for the same endpoint chain after the last queued packet instead of choosing overlapping starts. Firmware raises the shared USB event source only for a reapable batch or actionable terminal condition. Pumping and harvesting are bounded in the main loop.
+## Diagnostic snapshot
 
-`ISO_STOP`, reset, detach, and epoch invalidation unlink active descriptors, wait for the asynchronous schedule to retire, release bandwidth reservations, and discard both active and completed-but-unreaped batches before their storage can be reused.
-
-## Diagnostic snapshot page
-
-`ZZUSB_CAP_DIAGNOSTICS` makes the final 4096 bytes directly readable while the command mailbox is pending. The page is big-endian and starts with:
+`ZZUSB_CAP_DIAGNOSTICS` exposes the final 4096 bytes of the aperture as a
+big-endian snapshot. Firmware publishes it when a v2 primary request arrives,
+after v2 command processing, and for `DIAG_SNAPSHOT`. Version 1 staging overlaps
+this page, so a legacy peer must not interpret it as diagnostics.
 
 | Offset | Type | Field |
 |---|---|---|
 | `0` | `u32` | magic `0x5a554447` |
-| `4` | `u32` | seqlock generation; odd while publishing |
+| `4` | `u32` | generation, odd during publication |
 | `8` | `u16` | snapshot version `1` |
 | `10` | `u16` | header size `128` |
-| `12` | `u32` | total page size |
-| `16` | `u32` | firmware capabilities |
+| `12` | `u32` | page size `4096` |
+| `16` | `u32` | capability mask |
 | `20` | `u32` | controller epoch |
 | `24` | `u32` | last request ID |
-| `28` | `u32` | next physical event-ring slot (`0`-`63`); when the ring is full this is also the oldest retained slot |
+| `28` | `u32` | next physical event slot |
 | `32` | `u32` | retained event count |
-| `36` | `u32` | overwritten/lost event count |
-| `40` | `u32` | queue state: mailbox in bits 0-7, periodic ready depth in bits 8-15, active periodic endpoints in bits 16-23 |
-| `44` | `u32` | EHCI command/status bits in the low half, aggregate periodic S/C masks in the high half |
-| `48` | 16 × `u32` | fixed counters |
-| `128` | 64 × 32 bytes | events in physical ring slots |
+| `36` | `u32` | lost event count |
+| `40` | `u32` | queue state |
+| `44` | `u32` | controller and schedule bits |
+| `48` | 16 × `u32` | counters |
+| `128` | 64 × 32 bytes | event slots |
 
-Each event contains sequence, request ID, epoch, detail, timestamp, type, status, address, topology, endpoint, direction, and schedule bits. Before the first wrap, the retained events occupy slots zero through `count - 1`. Once `count` is 64, readers start at the slot from offset 28 and wrap modulo 64 to traverse oldest-to-newest. The sequence stored in each event is the authoritative monotonic identity and lets readers detect overwritten or concurrently replaced slots. A reader copies only when the generation is even and unchanged before and after the copy. Firmware flushes the odd generation, page body, and final even generation in that order. A legacy peer neither advertises the capability nor has its aperture tail interpreted as a snapshot.
-
-## Validation
-
-Firmware rejects malformed values before controller access: device address above 127, endpoint above 15, invalid direction or speed, payload beyond the negotiated extent, inconsistent setup length, illegal transfer type or interval, invalid maximum packet size, high-speed split use, or incomplete split hub/port topology. Split hub address and port are 1-127. TT mode and think time are meaningful only when the split flag is present.
-
-## Append-only commands
-
-Commands `0x01`-`0x0c` retain their legacy values. v2 appends capability query, endpoint retire/cancel, diagnostic snapshot, periodic arm/reap/stop, and ISO queue/reap/stop commands at `0x0d`-`0x16`. Periodic and ISO commands are capability-gated and implemented by the matched firmware/driver release.
-
-## Append-only statuses
-
-Legacy status values through `BADPARAM` (`0xf6`) remain unchanged. v2 appends `UNSUPPORTED`, `STALE`, `CANCELLED`, `HOSTERROR`, `BUSY`, and `NOMEM` down through `0xf0`. Unknown appended statuses are host errors to legacy drivers. Actual length is valid only for the matching completion and never exceeds the negotiated staging extent.
+Events use physical ring slots. The next-slot field is the oldest retained slot
+after the 64-entry ring has wrapped. Each event sequence identifies its entry.
+Readers copy the page only when the generation is even and unchanged before and
+after the copy. Firmware writes an odd generation, flushes the page body, then
+writes and flushes the final even generation.
