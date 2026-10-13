@@ -78,6 +78,10 @@ int zzplay_audio_start_ready(uint64_t queued_frames,
                              int backpressure,
                              int input_ended,
                              int deadline_expired);
+/* A decoder that cannot produce another picture must still be able to open
+ * PIP for an otherwise-ready audio start. */
+int zzplay_audio_start_may_open_pip(int has_picture,
+                                    int video_cannot_advance);
 /* Staged input EOF still leaves buffered video pictures. Decoder
  * backpressure means the PCM ring prevents any more video progress. */
 int zzplay_audio_pts_bypass_allowed(int video_finished,

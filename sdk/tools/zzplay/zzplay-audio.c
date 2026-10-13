@@ -146,6 +146,11 @@ int zzplay_audio_start_ready(uint64_t queued_frames,
   return queued_frames >= prebuffer_target_frames || backpressure ||
          input_ended || deadline_expired;
 }
+int zzplay_audio_start_may_open_pip(int has_picture,
+                                    int video_cannot_advance)
+{
+  return has_picture || video_cannot_advance;
+}
 
 int zzplay_audio_pts_bypass_allowed(int video_finished,
                                     int decoder_backpressured)
