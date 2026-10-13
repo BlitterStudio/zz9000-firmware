@@ -24,18 +24,18 @@ flowchart LR
 
 The driver sends `OP_VIDEO_OVERLAY` with:
 
-- the P96-managed source bitmap and its real pitch
+- the P96-managed source bitmap and its actual pitch
 - the YUV422 layout
 - the destination rectangle
 - the active flag and the colour key
 
 The firmware checks this against the current screen mode and picks a path.
 
-**P96 sources.** The VDMA reads the packed YUV422 bitmap that P96 owns. It
+For a P96 source, the VDMA reads the packed YUV422 bitmap that P96 owns. It
 rescans that bitmap every frame, so a new picture written by the application
 appears without any work from the ARM.
 
-**SDK video sessions** (ZZPlay and other `zz9k.library` players). The decoder
+SDK video sessions come from ZZPlay and other `zz9k.library` players. The decoder
 outputs planar 4:2:0. Core 1 packs each frame into one of two packed-YUV422
 staging buffers that are not being scanned. At vblank, core 0 flushes the
 caches and points the VDMA at the new buffer. Frames larger than 1280x720 are
@@ -44,7 +44,7 @@ stream play natively in a 1280x720 window.
 
 ## When the native plane is used
 
-The native plane is used when all of these hold:
+The native plane is used when all of these are true:
 
 - The firmware was built with the hardware backend (not
   `ZZ9000OS-legacy-bitstream.elf`).
@@ -70,24 +70,23 @@ for one path is never shown on the other.
 
 ## Hardware
 
-- **Second VDMA.** An MM2S VDMA for the overlay shares HP0 with the main
-  scanout through a two-input AXI interconnect. Main scanout has AXI priority
-  15 and the overlay has 0, so a busy overlay can't starve the desktop. The
-  overlay reads DDR 64 bits at a time.
-- **`video_overlay_linebuffer.v`.** Ping-pong line buffers. The fetcher
+- An MM2S VDMA for the overlay shares HP0 with the main scanout through a
+  two-input AXI interconnect. Main scanout has AXI priority 15 and the overlay
+  has 0, so a busy overlay can't starve the desktop. The overlay reads DDR 64
+  bits at a time.
+- `video_overlay_linebuffer.v` contains ping-pong line buffers. The fetcher
   requests source row N+1 as soon as row N is ready, and fills the other bank
   while row N is displayed. Fetch requests, completed-row tags, and generation
   acknowledgements cross between the 100 MHz AXI clock and the pixel clock
   through three `xpm_cdc_handshake` instances.
-- **`video_overlay_pixel.v`.** Converts YUV to RGB using CCIR601 coefficients,
-  for all five packed YUV422 layouts. It compares each pixel with the RGB colour
+- `video_overlay_pixel.v` converts YUV to RGB using CCIR601 coefficients, for
+  all five packed YUV422 layouts, and compares each pixel with the RGB colour
   key.
-- **`video_formatter.v`.** Maps destination pixels and rows to source
-  coordinates, using nearest-neighbour scaling. It computes the scale steps
-  outside the pixel critical path. Line-buffer banks are not tied to source
-  row parity, which lets the fetcher skip rows. The overlay is composited
-  before the sprite and scanline post-processing, so the hardware pointer stays
-  on top.
+- `video_formatter.v` maps destination pixels and rows to source coordinates
+  with nearest-neighbour scaling. It computes the scale steps outside the pixel
+  critical path. Line-buffer banks are not tied to source row parity, which
+  lets the fetcher skip rows. The overlay is composited before the sprite and
+  scanline post-processing, so the hardware pointer stays on top.
 
 The firmware programs the formatter through video-control ops 22–27, defined
 in `video.h`:
@@ -113,7 +112,7 @@ The handoff runs in this order. Each step fixed a bug seen on hardware:
    `VSIZE` second. A running AXI VDMA only uses a new start address after
    `VSIZE` is written (AMD PG020).
 3. It advances the frame generation.
-4. The formatter holds at the end of the previous frame until the line-buffer
+4. The formatter stalls at the end of the previous frame until the line-buffer
    side acknowledges the new generation. Only then does it request line zero.
 
 The VDMA is connected directly to the line fetcher with no FIFO in between, so
@@ -129,41 +128,39 @@ ARM compositor.
 
 ## Status
 
-**Default `zorro3` passes on hardware:**
+### Hardware results on default `zorro3`
 
-- **Playback.** 640x480@30 MPEG-1 at exact size shows correct video with no
-  flicker. Paced playback runs at about 27–28 fps. Uncapped, it reaches
-  69.1 fps playback and 93.1 fps decode-call. A 318x240 clip, whose width is
-  an odd number of macroblocks, runs at 23 fps playback and 209 fps
-  decode-call.
-- **Window operations.** Moving, partial clipping and obscuring, resizing,
-  closing and reopening produce no artifacts.
-- **Depths.** Correct at 1280x1024 in both 16-bit and 32-bit.
-- **Players.** RiVA works through native P96 PIP and also through cgxvideo.
-- **Interaction with other features.** DPMS, the live scanline modes
-  off/classic/soft/gradient, and taking over native video or videocap and
-  returning all work. The scanline result shows that changing the control
-  doesn't disturb the PIP. It doesn't show visible shading drawn together with
-  the PIP: high-resolution RTG suppresses shading, and P96 modes scaled down to
-  low resolution can't show an overlay.
-- **Clean shutdown.** After closing, core 1 stays online, there are no failed
-  requests and no live buffers or surfaces, and the whole 4,128,768-byte
-  shared heap is free.
-- **Upscaling.** The same 640x480@30 clip with direct AX audio, at exact size
-  and in an enlarged window:
+- 640x480@30 MPEG-1 at exact size shows correct video with no flicker. Paced
+  playback runs at about 27–28 fps. Uncapped, it reaches 69.1 fps playback and
+  93.1 fps decode-call. A 318x240 clip, whose width is an odd number of
+  macroblocks, runs at 23 fps playback and 209 fps decode-call.
+- Moving, partial clipping and obscuring, resizing, closing and reopening
+  produce no artifacts.
+- The PIP is correct at 1280x1024 in both 16-bit and 32-bit.
+- RiVA works through native P96 PIP and also through cgxvideo.
+- DPMS, the live scanline modes off/classic/soft/gradient, and taking over
+  native video or videocap and returning all work. The scanline result shows
+  that changing the control doesn't disturb the PIP. It doesn't show visible
+  shading drawn together with the PIP, because high-resolution RTG suppresses
+  shading and P96 modes scaled down to low resolution can't show an overlay.
+- After closing, core 1 stays online, there are no failed requests and no live
+  buffers or surfaces, and all 4,128,768 bytes of the shared heap are free.
 
-  | Metric | Exact size | Enlarged |
-  | --- | ---: | ---: |
-  | Decoded frames | 4,405 | 4,405 |
-  | Presented frames | 4,379 | 4,374 |
-  | Discarded or late frames | 26 | 31 |
-  | Average playback | 29.916 fps | 29.925 fps |
-  | Audio underruns | 13 | 10 |
+Upscaling was measured with the same 640x480@30 clip and direct AX audio, at
+exact size and in an enlarged window:
 
-  The presented-ratio difference (0.0011) is under the 0.002 noise threshold,
-  and the two runs looked the same.
+| Metric | Exact size | Enlarged |
+| --- | ---: | ---: |
+| Decoded frames | 4,405 | 4,405 |
+| Presented frames | 4,379 | 4,374 |
+| Discarded or late frames | 26 | 31 |
+| Average playback | 29.916 fps | 29.925 fps |
+| Audio underruns | 13 | 10 |
 
-**Simulation and timing:**
+The presented-ratio difference (0.0011) is under the 0.002 noise threshold,
+and the two runs looked the same.
+
+### Simulation and timing
 
 - `video_overlay_pixel` simulation covers layout, luma, clamping and the key
   for all five layouts.
@@ -183,7 +180,7 @@ ARM compositor.
   +0.017 ns hold WHS on the pixel clock. All overlay CDC paths are recognised
   XPM handshakes.
 
-**Not yet qualified on hardware:**
+### Not yet qualified on hardware
 
 - The six non-default board variants. Their bitstreams pass synthesis,
   implementation, DRC, bus-skew and timing. Hardware acceptance has been
@@ -193,17 +190,17 @@ ARM compositor.
 
 ## Known limitations
 
-- **No native downscaling.** Every hardware test with a window smaller than
-  its scanned source showed the first rows of the frame and then black. On an
+- Windows smaller than their scanned source don't work natively. Every
+  hardware test of one showed the first rows of the frame and then black. On an
   A4000 this happened with a 1920x1080 window and with a 720x576 MPEG-2 frame
   letterboxed to 720x405, while 1:1 and enlarged windows of the same clips
   were correct. The line fetcher fetches one source row per displayed row,
   which is the likely cause. The firmware sends these windows to the ARM
   compositor, even though downscaling passes in xsim.
-- **Colour-key occlusion is opportunistic.** Other windows on top of the PIP
-  hide it only where the colour key matches.
-- **SDK frames still need a pack step.** Core 1 converts each planar 4:2:0
-  frame to packed YUV422 before the plane can read it.
+- Colour-key occlusion is opportunistic: other windows on top of the PIP hide
+  it only where the colour key matches.
+- SDK frames still need a pack step. Core 1 converts each planar 4:2:0 frame to
+  packed YUV422 before the plane can read it.
 
 ## Next step: planar 4:2:0 fetch
 
@@ -226,7 +223,7 @@ the design.
 | r7 | Mostly correct, still flickering | A full-width row had only horizontal blanking to load. Fetching and displaying a row became separate steps, so row N+1 is fetched while row N is shown. |
 | r8 | Worse flicker and random black rows | Row numbers, tags and valid flags crossed clock domains bit by bit. Replaced with bundled `xpm_cdc_handshake` transfers. |
 | r9 | Correct, no flicker | First hardware pass. |
-| r9b | PIP failed to open on a 16-bit Workbench | `ZZ_CreateFeature` in the driver always asked for half-width storage, which only gives the right packed-YUV pitch with a 32-bit friend bitmap. It now sizes the allocation from the friend's bytes per pixel and keeps a whole final YUV pair for odd widths. |
+| r9b | PIP failed to open on a 16-bit Workbench | `ZZ_CreateFeature` in the driver always asked for half-width storage, which only gives the required packed-YUV pitch with a 32-bit friend bitmap. It now sizes the allocation from the friend's bytes per pixel and reserves a complete final YUV pair for odd widths. |
 
 Nearest-neighbour scaling and clipping in the PL came later, in #64. Before
 that, any resized or clipped window used the ARM compositor. Downscaled
@@ -245,7 +242,7 @@ more thoroughly.
 
 Its MPEG-1 player does more of the work on the ARM. It buffers up to 1 MiB,
 copies FIFO data through a temporary allocation, converts planar output to
-RGB32 on the ARM, and flushes the whole RGB surface. ZZ9000 streams straight
+RGB32 on the ARM, and flushes the full RGB surface. ZZ9000 streams straight
 into the demuxer, keeps decoder-owned planar frames, writes only the packed
 YUY2 staging buffer, and does YUV-to-RGB conversion and composition in the PL.
 
