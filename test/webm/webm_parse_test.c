@@ -534,6 +534,10 @@ static int test_matroska_ignored_tracks(void)
 		{11, 0x11, "S_TEXT/UTF8", MKV_ENCODED, 0, 0, 0},
 		{12, 2, "A_AAC", MKV_ENCODED, 0, 0, 0},
 		{13, 2, "A_AC3", MKV_ENCODED, 0, 0, 0},  /* second AC-3 */
+		/* A CodecID longer than any codec played here (64+ bytes)
+		 * only makes its track unrecognized. */
+		{14, 2, "A_REALLY_LONG_CODEC_ID_THAT_NO_DECODER_HERE_KNOWS/"
+			"PROFILE/LEVEL/X", 0, 0, 0, 0},
 	};
 	/* The video can come last; the audio it cannot use is dropped once
 	 * all tracks are read. */

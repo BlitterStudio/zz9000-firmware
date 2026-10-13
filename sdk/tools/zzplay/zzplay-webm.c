@@ -592,10 +592,16 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
       continue;
     }
     if (kind == WALK_TRACK && id == ID_CODEC) {
-      if (!zzplay_webm_payload(cur, size, &payload, &n) || n == 0U ||
-          n >= sizeof(cur->codec)) {
+      if (!zzplay_webm_payload(cur, size, &payload, &n) || n == 0U) {
         zzplay_webm_fail(cur, ZZPLAY_WEBM_UNKNOWN_CODEC);
         return 0;
+      }
+      if (n >= sizeof(cur->codec)) {
+        /* Longer than any codec played here (A_AAC/MPEG4/LC/SBR): the
+         * track is unrecognized, which only a track that is played
+         * makes fatal. */
+        strcpy(cur->codec, "?");
+        continue;
       }
       memcpy(cur->codec, payload, n);
       cur->codec[n] = '\0';

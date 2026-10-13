@@ -320,6 +320,14 @@ static int check_matroska(void)
   n = wrap_matroska(file, sizeof(file), tracks, tn);
   if (!probe_ok(file, n, &info) || info.video != ZZPLAY_WEBM_VIDEO_MPEG2 ||
       info.audio != ZZPLAY_WEBM_AUDIO_AC3 || info.channels != 2U) return 0;
+  /* A CodecID longer than any played here only makes its track
+   * unrecognized. */
+  tn = 0U;
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_AAC/MPEG4/LC/SBR", rate, sizeof(rate), 2U, 2U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_AC3", rate, sizeof(rate), 2U, 3U);
+  tn = video_track(tracks, sizeof(tracks), tn, "V_MPEG2", 720U, 480U, 0U, 0U, 40000000U, 0, 0U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.audio != ZZPLAY_WEBM_AUDIO_AC3) return 0;
   /* VP8/VP9 in a matroska DocType keeps the WebM audio choices. */
   tn = 0U;
   tn = video_track(tracks, sizeof(tracks), tn, "V_VP9", 640U, 360U, 0U, 0U, 0U, 0, 0U);

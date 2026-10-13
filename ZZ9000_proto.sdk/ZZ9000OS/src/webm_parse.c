@@ -427,6 +427,15 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		    id == ID_FLAGENABLED) {
 			uint8_t tmp[64];
 
+			if (n >= sizeof(tmp) && id == ID_CODECID) {
+				/* Longer than any codec played here: the track
+				 * is unrecognized (WEBM_CODEC_NONE), which fails
+				 * the file only if the track is kept. */
+				if (skip_n(d, n) != 0)
+					return -1;
+				t->codec = WEBM_CODEC_NONE;
+				continue;
+			}
 			if (n >= sizeof(tmp))
 				return fail(d, WEBM_ERR_LIMIT);
 			if (read_full(d, tmp, n) != 0)
