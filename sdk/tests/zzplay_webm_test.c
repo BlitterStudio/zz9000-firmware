@@ -278,6 +278,11 @@ static int check_refusals(void)
   if (!expect_refusal(file, n, ZZPLAY_WEBM_OK, "vorbis 96k")) return 0;
   if (zzplay_webm_within_cap(1921U, 1080U) || zzplay_webm_within_cap(1920U, 1089U) ||
       zzplay_webm_realtime(ZZPLAY_WEBM_VIDEO_VP9, 1280U, 720U)) return 0;
+  /* MPEG in Matroska plays in real time up to 800x600 and is best effort
+   * above, so only the larger one is a "large video". */
+  if (!zzplay_webm_realtime(ZZPLAY_WEBM_VIDEO_MPEG1, 352U, 288U) ||
+      !zzplay_webm_realtime(ZZPLAY_WEBM_VIDEO_MPEG2, 720U, 576U) ||
+      zzplay_webm_realtime(ZZPLAY_WEBM_VIDEO_MPEG2, 1280U, 720U)) return 0;
   return 1;
 }
 static int check_matroska(void)

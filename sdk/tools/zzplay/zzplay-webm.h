@@ -20,6 +20,9 @@
 #define ZZPLAY_WEBM_MAX_PIXELS (1920U * 1088U)
 #define ZZPLAY_WEBM_VP8_REALTIME_PIXELS (1280U * 720U)
 #define ZZPLAY_WEBM_VP9_REALTIME_PIXELS (854U * 480U)
+/* MPEG-1/2 in Matroska: the size up to which MPEG plays in real time;
+ * larger MPEG is best effort (sdk/docs/zzplay.md). */
+#define ZZPLAY_WEBM_MPEG_REALTIME_PIXELS (800U * 600U)
 
 /* More than this many 90 kHz ticks behind the audio master means skip to
  * the next keyframe. Phone clips can place keyframes several seconds

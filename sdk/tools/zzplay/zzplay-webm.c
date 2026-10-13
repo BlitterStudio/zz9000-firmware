@@ -724,6 +724,9 @@ int zzplay_webm_realtime(ZZPlayWebMVideo video, uint32_t width,
     budget = ZZPLAY_WEBM_VP8_REALTIME_PIXELS;
   } else if (video == ZZPLAY_WEBM_VIDEO_VP9) {
     budget = ZZPLAY_WEBM_VP9_REALTIME_PIXELS;
+  } else if (video == ZZPLAY_WEBM_VIDEO_MPEG1 ||
+             video == ZZPLAY_WEBM_VIDEO_MPEG2) {
+    budget = ZZPLAY_WEBM_MPEG_REALTIME_PIXELS;
   } else {
     return 0;
   }
