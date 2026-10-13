@@ -14,12 +14,14 @@ unless `FULLSCREEN` or `PLAYER=NO` selects one-shot playback.
 
 ZZPlay identifies media from its contents. Extensions only control drawer scans
 and the file requester, so a correctly formed file can play under another name.
-A Matroska file must declare the `webm` DocType to be accepted as WebM.
+A WebM file must declare the `webm` DocType, and a Matroska file the
+`matroska` DocType.
 
 | Input | Extensions offered in scans and requesters | Supported content |
 | --- | --- | --- |
 | MPEG Program Stream | `.mpg`, `.mpeg`, `.vob` | MPEG-1 or MPEG-2 video in a Program Stream, up to a 1920-pixel long side and 1920x1088 pixels in either orientation. Supported audio is MP2, AC-3, or 16-bit 48 kHz mono or stereo LPCM. MPEG elementary streams are rejected. |
 | WebM | `.webm`, `.mkv` | One VP8 or VP9 video track, with at most one Opus or Vorbis audio track. Video-only files are accepted. Opus is 48 kHz; Vorbis is mono or stereo at 8–96 kHz. The maximum is a 1920-pixel long side and 1920x1088 pixels. |
+| Matroska | `.mkv` | One MPEG-1 or MPEG-2 video track up to 800x600, with AC-3, MPEG audio (Layer I, II or III), or 16-bit 48 kHz mono or stereo little-endian PCM. Matroska with VP8 or VP9 video plays like WebM, with Opus or Vorbis audio. ZZPlay plays the first supported, enabled audio track and ignores the rest; disabled tracks are ignored. Video-only files are accepted. MPEG-2 needs firmware that advertises it. |
 | MPEG Layer III | `.mp3` | MP3 audio. |
 | Native FLAC | `.flac` | Native `fLaC` streams with a STREAMINFO first block, mono or stereo, 4–24 bits, and 8–192 kHz. Ogg-FLAC is rejected. |
 | Ogg Vorbis | `.ogg`, `.oga` | A mono or stereo Vorbis stream at 8–192 kHz. Ogg Opus, Ogg-FLAC, and other Ogg codecs are rejected. |
@@ -34,8 +36,9 @@ playback is best effort: when video falls more than half a second behind, it
 skips ahead to the next I-picture. Audio continues while frames are skipped.
 
 WebM files with multiple video or audio tracks, unsupported codecs, invalid
-audio layouts, or oversized video are rejected. A WebM file has a video track;
-audio-only WebM is rejected. FLAC and Vorbis do not support seeking. A chained
+audio layouts, or oversized video are rejected; Matroska files may carry
+other audio tracks, which ZZPlay ignores. A WebM or Matroska file needs a video
+track; audio-only files are rejected. FLAC and Vorbis do not support seeking. A chained
 or multiplexed Ogg Vorbis file stops with an error when the card reaches an
 unsupported continuation.
 
