@@ -344,7 +344,13 @@ struct mkv_track_spec {
 	uint8_t disabled;
 	uint32_t priv;
 	uint8_t stored;
+	uint8_t priv_dropped; /* stored without its CodecPrivate */
 };
+
+static uint8_t mkv_priv_byte(uint8_t number, uint32_t i)
+{
+	return (uint8_t)(i * 7U + number);
+}
 
 /* A file of the given DocType with one TrackEntry and one block per spec
  * row. */
@@ -367,8 +373,13 @@ static struct buf make_mkv_tracks(const char *doctype,
 		belem(&t, 0x86, spec[i].codec, (uint32_t)strlen(spec[i].codec));
 		if (spec[i].disabled)
 			bu8(&t, 0xB9, 0);
-		if (spec[i].priv)
+		if (spec[i].priv) {
+			uint32_t j;
+
+			for (j = 0U; j < spec[i].priv; j++)
+				priv[j] = mkv_priv_byte(spec[i].number, j);
 			belem(&t, 0x63A2, priv, spec[i].priv);
+		}
 		if (spec[i].type == 1U) {
 			bu16(&video, 0xB0, 32);
 			bu16(&video, 0xBA, 16);
@@ -418,10 +429,25 @@ static int check_stored_tracks(const char *name, const char *doctype,
 			fprintf(stderr, "%s: track %u\n", name, spec[i].number);
 			failed = 1;
 		}
-		if (t && spec[i].priv > WEBM_MAX_PRIV && t->priv_len != 0U) {
-			fprintf(stderr, "%s: track %u priv\n", name,
-				spec[i].number);
-			failed = 1;
+		if (t) {
+			uint32_t len = spec[i].priv > WEBM_MAX_PRIV ||
+			               spec[i].priv_dropped ? 0U : spec[i].priv;
+			const uint8_t *p = webm_track_priv(&d, t);
+			uint32_t j;
+
+			if (t->priv_len != len || (len && !p)) {
+				fprintf(stderr, "%s: track %u priv %u\n", name,
+					spec[i].number, t->priv_len);
+				failed = 1;
+			}
+			for (j = 0U; p && j < t->priv_len; j++) {
+				if (p[j] != mkv_priv_byte(spec[i].number, j)) {
+					fprintf(stderr, "%s: track %u priv data\n",
+						name, spec[i].number);
+					failed = 1;
+					break;
+				}
+			}
 		}
 		if (spec[i].stored) {
 			if (stored >= g.n || g.track[stored] != spec[i].number) {
@@ -448,34 +474,53 @@ static int check_stored_tracks(const char *name, const char *doctype,
 static int test_matroska_ignored_tracks(void)
 {
 	static const struct mkv_track_spec mpeg[] = {
-		{1, 1, "V_MPEG2", 0, 0, 1},
-		{2, 2, "A_AAC", 0, 70000, 0},          /* no decoder here */
-		{3, 0x11, "S_TEXT/UTF8", 0, 40000, 0}, /* subtitles */
-		{4, 2, "A_AC3", 0, 0, 1},
-		{5, 2, "A_AC3", 0, 0, 0},              /* second AC-3 */
-		{6, 2, "A_MPEG/L2", 0, 0, 1},
-		{7, 0x11, "S_TEXT/UTF8", 0, 0, 0},
-		{8, 2, "A_MPEG/L2", 1, 0, 0},          /* disabled */
-		{9, 2, "A_VORBIS", 0, 70000, 0},       /* not with MPEG */
-		{10, 2, "A_OPUS", 0, 19, 0},
+		{1, 1, "V_MPEG2", 0, 0, 1, 0},
+		{2, 2, "A_AAC", 0, 70000, 0, 0},          /* no decoder here */
+		{3, 0x11, "S_TEXT/UTF8", 0, 40000, 0, 0}, /* subtitles */
+		{4, 2, "A_AC3", 0, 0, 1, 0},
+		{5, 2, "A_AC3", 0, 0, 0, 0},              /* second AC-3 */
+		{6, 2, "A_MPEG/L2", 0, 0, 1, 0},
+		{7, 0x11, "S_TEXT/UTF8", 0, 0, 0, 0},
+		{8, 2, "A_MPEG/L2", 1, 0, 0, 0},          /* disabled */
+		{9, 2, "A_VORBIS", 0, 70000, 0, 0},       /* not with MPEG */
+		{10, 2, "A_OPUS", 0, 19, 0, 0},
 	};
 	/* The video can come last; the audio it cannot use is dropped once
 	 * all tracks are read. */
 	static const struct mkv_track_spec vp8[] = {
-		{1, 2, "A_AC3", 0, 0, 0},
-		{2, 2, "A_VORBIS", 0, 70000, 1}, /* kept, without headers */
-		{3, 2, "A_MPEG/L2", 0, 0, 0},
-		{4, 1, "V_VP8", 0, 0, 1},
+		{1, 2, "A_AC3", 0, 0, 0, 0},
+		{2, 2, "A_VORBIS", 0, 70000, 1, 0}, /* kept, without headers */
+		{3, 2, "A_MPEG/L2", 0, 0, 0, 0},
+		{4, 1, "V_VP8", 0, 0, 1, 0},
+	};
+	/* A video track's CodecPrivate takes the room audio CodecPrivate
+	 * holds: first that of audio it cannot use (the Vorbis track, while
+	 * the AC-3 data moves down), then any. */
+	static const struct mkv_track_spec mpeg_late[] = {
+		{1, 2, "A_VORBIS", 0, 60000, 0, 0},
+		{2, 2, "A_AC3", 0, 100, 1, 0},
+		{3, 1, "V_MPEG2", 0, 6000, 1, 0},
+	};
+	static const struct mkv_track_spec vp8_late[] = {
+		{1, 2, "A_OPUS", 0, 19, 1, 0},
+		{2, 2, "A_VORBIS", 0, 65000, 1, 1},
+		{3, 1, "V_VP8", 0, 1000, 1, 0},
+	};
+	/* All audio CodecPrivate evicted, incompatible first. */
+	static const struct mkv_track_spec vp8_all[] = {
+		{1, 2, "A_VORBIS", 0, 40000, 1, 1},
+		{2, 2, "A_AC3", 0, 25000, 0, 0},
+		{3, 1, "V_VP8", 0, 30000, 1, 0},
 	};
 	/* WebM: a disabled audio track does not take the one audio slot. */
 	static const struct mkv_track_spec webm[] = {
-		{1, 1, "V_VP8", 0, 0, 1},
-		{2, 2, "A_VORBIS", 1, 0, 1},
-		{3, 2, "A_OPUS", 0, 19, 1},
+		{1, 1, "V_VP8", 0, 0, 1, 0},
+		{2, 2, "A_VORBIS", 1, 0, 1, 0},
+		{3, 2, "A_OPUS", 0, 19, 1, 0},
 	};
 	/* A kept video track whose CodecPrivate does not fit still fails. */
 	static const struct mkv_track_spec oversized[] = {
-		{1, 1, "V_MPEG2", 0, 70000, 1},
+		{1, 1, "V_MPEG2", 0, 70000, 1, 0},
 	};
 	static struct webm_demux d;
 	static struct got g;
@@ -494,6 +539,15 @@ static int test_matroska_ignored_tracks(void)
 				      sizeof(vp8) / sizeof(vp8[0]));
 	failed |= check_stored_tracks("webm disabled audio", "webm", webm,
 				      sizeof(webm) / sizeof(webm[0]));
+	failed |= check_stored_tracks("matroska late mpeg", "matroska",
+				      mpeg_late,
+				      sizeof(mpeg_late) / sizeof(mpeg_late[0]));
+	failed |= check_stored_tracks("matroska late vp8", "matroska",
+				      vp8_late,
+				      sizeof(vp8_late) / sizeof(vp8_late[0]));
+	failed |= check_stored_tracks("matroska vp8 evicts all", "matroska",
+				      vp8_all,
+				      sizeof(vp8_all) / sizeof(vp8_all[0]));
 	return failed;
 }
 

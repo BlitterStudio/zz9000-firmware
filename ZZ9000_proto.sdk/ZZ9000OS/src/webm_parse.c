@@ -238,6 +238,72 @@ static int matroska_track_usable(const struct webm_demux *d,
 	return 1;
 }
 
+/* Whether the backend of a video codec plays an audio codec: the VP8/VP9
+ * backend plays Opus and Vorbis, the MPEG backend AC-3, MPEG audio and
+ * PCM. */
+static int matroska_audio_for_video(uint8_t video, uint8_t audio)
+{
+	int mpeg = video == WEBM_CODEC_MPEG1 || video == WEBM_CODEC_MPEG2;
+	int vp_audio = audio == WEBM_CODEC_OPUS || audio == WEBM_CODEC_VORBIS;
+
+	return mpeg ? !vp_audio : vp_audio;
+}
+
+/* The private store holds stored tracks' CodecPrivate in track order;
+ * close the gaps dropped ones left. */
+static void priv_compact(struct webm_demux *d)
+{
+	uint32_t used = 0U;
+	unsigned i;
+
+	for (i = 0U; i < d->ntracks; i++) {
+		struct webm_track *a = &d->tracks[i];
+
+		if (a->priv_len == 0U) {
+			a->priv_off = 0U;
+			continue;
+		}
+		if (a->priv_off != used)
+			memmove(d->priv_store + used,
+				d->priv_store + a->priv_off, a->priv_len);
+		a->priv_off = used;
+		used += a->priv_len;
+	}
+	d->priv_used = used;
+}
+
+/* The video track's CodecPrivate comes first; audio CodecPrivate is best
+ * effort. To make room for n bytes of a video track's, drop the stored
+ * CodecPrivate of audio that video cannot use, then of other audio,
+ * largest first, until it fits. A kept Opus or Vorbis track without it
+ * is refused by the backend only if that track is played. */
+static void matroska_make_room(struct webm_demux *d, uint8_t video,
+			       uint32_t n)
+{
+	unsigned i;
+
+	if (WEBM_MAX_PRIV - d->priv_used >= n)
+		return;
+	for (i = 0U; i < d->ntracks; i++)
+		if (d->tracks[i].type == 2U &&
+		    !matroska_audio_for_video(video, d->tracks[i].codec))
+			d->tracks[i].priv_len = 0U;
+	priv_compact(d);
+	while (WEBM_MAX_PRIV - d->priv_used < n) {
+		struct webm_track *largest = NULL;
+
+		for (i = 0U; i < d->ntracks; i++)
+			if (d->tracks[i].type == 2U && d->tracks[i].priv_len &&
+			    (!largest ||
+			     d->tracks[i].priv_len > largest->priv_len))
+				largest = &d->tracks[i];
+		if (!largest)
+			return;
+		largest->priv_len = 0U;
+		priv_compact(d);
+	}
+}
+
 static int parse_track(struct webm_demux *d, uint32_t end)
 {
 	struct webm_track *t;
@@ -329,14 +395,20 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 		if (encrypted_id(id))
 			return fail(d, WEBM_ERR_CODEC);
 		if (id == ID_CODECPRIV) {
-			/* Whether the track is kept is known only once all its
-			 * elements are read: a CodecPrivate that does not fit
-			 * is skipped. It fails the file if a video track keeps
-			 * it. A Matroska audio track keeps going without it:
-			 * the audio codec the video backend will use is known
-			 * only after the last TrackEntry, and the backend
-			 * refuses a kept Vorbis/Opus track without headers if
-			 * it is played (AC-3, MPEG audio and PCM need none). */
+			/* A video track's CodecPrivate takes the room audio
+			 * CodecPrivate holds (matroska_make_room) when its
+			 * TrackType comes first, as muxers write it. What
+			 * still does not fit is skipped: that fails the file
+			 * if a video track keeps it, while a Matroska audio
+			 * track is kept without it, since whether its codec is
+			 * the one the video's backend plays is known only
+			 * after the last TrackEntry. */
+			if (d->is_matroska && t->type == 1U && t->enabled &&
+			    n <= WEBM_MAX_PRIV) {
+				matroska_make_room(d, t->codec, n);
+				/* Compaction moved the end of the store. */
+				priv_start = d->priv_used;
+			}
 			if (n > WEBM_MAX_PRIV || d->priv_used > WEBM_MAX_PRIV - n) {
 				if (skip_n(d, n) != 0)
 					return -1;
@@ -412,26 +484,21 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 }
 
 /* After the last TrackEntry the video codec is known: drop Matroska audio
- * the video's backend can never play (Opus/Vorbis with MPEG video; AC-3,
- * MPEG audio and PCM with VP8/VP9). Their blocks are then skipped. */
+ * the video's backend can never play. Their blocks are then skipped. */
 static void matroska_finish_tracks(struct webm_demux *d)
 {
 	unsigned i, kept = 0U;
-	int mpeg = 0;
+	uint8_t video = WEBM_CODEC_NONE;
 
 	if (!d->is_matroska)
 		return;
 	for (i = 0U; i < d->ntracks; i++)
-		if (d->tracks[i].type == 1U &&
-		    (d->tracks[i].codec == WEBM_CODEC_MPEG1 ||
-		     d->tracks[i].codec == WEBM_CODEC_MPEG2))
-			mpeg = 1;
+		if (d->tracks[i].type == 1U)
+			video = d->tracks[i].codec;
 	for (i = 0U; i < d->ntracks; i++) {
 		const struct webm_track *t = &d->tracks[i];
-		int vp_audio = t->codec == WEBM_CODEC_OPUS ||
-		               t->codec == WEBM_CODEC_VORBIS;
 
-		if (t->type == 2U && (mpeg ? vp_audio : !vp_audio))
+		if (t->type == 2U && !matroska_audio_for_video(video, t->codec))
 			continue;
 		if (kept != i)
 			d->tracks[kept] = *t;
