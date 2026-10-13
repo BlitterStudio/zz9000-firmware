@@ -93,9 +93,13 @@ int webm_window_append(struct webm_window *w, const uint8_t *src, uint32_t n)
 
 	if (n - drop > w->cap - w->filled)
 		return 0;
-	w->drop_left -= drop;
-	src += drop;
-	n -= drop;
+	if (drop != 0U) {
+		/* src may be NULL for an empty EOF write: never offset it
+		 * then. */
+		w->drop_left -= drop;
+		src += drop;
+		n -= drop;
+	}
 	if (n != 0U)
 		memcpy(w->data + w->filled, src, n);
 	w->filled += n;
