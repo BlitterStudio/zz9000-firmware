@@ -308,13 +308,14 @@ static void zzplay_webm_finish_track(ZZPlayWebMCur *cur)
   if (!cur->track_enabled || cur->codec[0] == '\0') return;
   if (cur->track_type == 1U) {
     if (++cur->video_tracks > 1) { zzplay_webm_fail(cur, ZZPLAY_WEBM_TWO_VIDEO); return; }
-    if (!matroska && zzplay_webm_codec_is(cur,"V_VP8")) info->video=ZZPLAY_WEBM_VIDEO_VP8;
-    else if (!matroska && zzplay_webm_codec_is(cur,"V_VP9")) info->video=ZZPLAY_WEBM_VIDEO_VP9;
+    if (zzplay_webm_codec_is(cur,"V_VP8")) info->video=ZZPLAY_WEBM_VIDEO_VP8;
+    else if (zzplay_webm_codec_is(cur,"V_VP9")) info->video=ZZPLAY_WEBM_VIDEO_VP9;
     else if (matroska && zzplay_webm_codec_is(cur,"V_MPEG1")) info->video=ZZPLAY_WEBM_VIDEO_MPEG1;
     else if (matroska && zzplay_webm_codec_is(cur,"V_MPEG2")) info->video=ZZPLAY_WEBM_VIDEO_MPEG2;
     else { zzplay_webm_fail(cur,ZZPLAY_WEBM_UNKNOWN_CODEC); return; }
     if (!cur->pixel_w || !cur->pixel_h) { zzplay_webm_fail(cur,ZZPLAY_WEBM_HOSTILE); return; }
     info->width=cur->pixel_w; info->height=cur->pixel_h; info->display_width=cur->disp_w; info->display_height=cur->disp_h;
+    info->pose_roll_milli=cur->pose_roll_milli; info->pose_roll_present=(uint8_t)cur->pose_roll_present;
     if (cur->track_default_ns && cur->track_default_ns<=1000000000U) { uint64_t m=1000000000000ULL/cur->track_default_ns; if(m&&m<=240000U) info->frame_rate_milli=(uint32_t)m; }
     return;
   }

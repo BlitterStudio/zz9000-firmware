@@ -3236,43 +3236,35 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
   case ZZPLAY_WEBM_OK:
     break;
   case ZZPLAY_WEBM_TWO_VIDEO:
-    zzplay_error(runtime,
-                 "zzplay: WebM files with more than one video track "
-                 "are not supported\n");
+    zzplay_error(runtime, "zzplay: %s files with more than one video track are not supported\n", container_name);
     goto refused;
   case ZZPLAY_WEBM_TWO_AUDIO:
-    zzplay_error(runtime,
-                 "zzplay: WebM files with more than one audio track "
-                 "are not supported\n");
+    zzplay_error(runtime, "zzplay: %s files with more than one audio track are not supported\n", container_name);
     goto refused;
   case ZZPLAY_WEBM_UNKNOWN_CODEC:
-    zzplay_error(runtime, "zzplay: unsupported WebM codec\n");
+    zzplay_error(runtime, "zzplay: unsupported %s codec\n", container_name);
     goto refused;
   case ZZPLAY_WEBM_OVERSIZE:
-    zzplay_error(runtime,
-                 "zzplay: WebM video %lux%lu is larger than the card can play\n",
-                 (unsigned long)webm->width, (unsigned long)webm->height);
+    zzplay_error(runtime, "zzplay: %s video %lux%lu is larger than the card can play\n", container_name, (unsigned long)webm->width, (unsigned long)webm->height);
     goto refused;
   case ZZPLAY_WEBM_TRUNCATED:
-    zzplay_error(runtime, "zzplay: truncated WebM header\n");
+    zzplay_error(runtime, "zzplay: truncated %s header\n", container_name);
     goto refused;
   case ZZPLAY_WEBM_NO_VIDEO:
-    zzplay_error(runtime, "zzplay: WebM file has no video track\n");
+    zzplay_error(runtime, "zzplay: %s file has no video track\n", container_name);
     goto refused;
   case ZZPLAY_WEBM_BAD_AUDIO:
-    zzplay_error(runtime,
-                 "zzplay: WebM audio must be mono or stereo, and Vorbis "
-                 "must be 8 to 96 kHz\n");
+    zzplay_error(runtime, "zzplay: unsupported %s audio format\n", container_name);
     goto refused;
   default:
-    zzplay_error(runtime, "zzplay: WebM file is not a supported stream\n");
+    zzplay_error(runtime, "zzplay: %s file is not a supported stream\n", container_name);
     goto refused;
   }
   if (webm->width == 0U || webm->height == 0U ||
       !zzplay_webm_within_cap(webm->width, webm->height)) {
     zzplay_error(runtime,
-                 "zzplay: WebM video %lux%lu is larger than the card can play\n",
-                 (unsigned long)webm->width, (unsigned long)webm->height);
+                 "zzplay: %s video %lux%lu is larger than the card can play\n",
+                 container_name, (unsigned long)webm->width, (unsigned long)webm->height);
     goto refused;
   }
   memset(&info, 0, sizeof(info));
