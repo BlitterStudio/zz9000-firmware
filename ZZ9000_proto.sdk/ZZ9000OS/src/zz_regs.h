@@ -210,6 +210,7 @@ enum zz_reg_offsets {
 #define ZZ_FW_CAP_VIDEOCAP_GEOMETRY (1U << 8)
 #define ZZ_FW_CAP_VIDEOCAP_STATS (1U << 9)
 #define ZZ_FW_CAP_VIDEOCAP_GEOMETRY_ACK (1U << 10)
+#define ZZ_FW_CAP_FWUP_STATUS_MIRROR (1U << 11)
 /* The centered 1080p profiles are intentionally excluded here: firmware
  * advertises them dynamically only when the loaded bitstream exposes both
  * required paths (viewport layout AND full-rate capture). Bit 3 stays the
@@ -252,11 +253,15 @@ enum zz_reg_offsets {
  * unconditional mask. Bit 10 adds the native-vblank ACK contract:
  * queries 28--34 report requested and successfully applied VDMA
  * geometry, serials, and status.
+ *
+ * Bit 11 is static: every completed FWUP command is mirrored into the
+ * last longword of the boot ROM window (fw_update.h), which a client can
+ * poll without waiting on the ARM main loop.
  */
 #define ZZ_FW_CAPABILITIES \
   (ZZ_FW_CAP_VIDEOCAP_PROFILE | ZZ_FW_CAP_VIDEOCAP_LIVE | \
    ZZ_FW_CAP_Z2_APERTURE_LAYOUT | ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN | \
-   ZZ_FW_CAP_CUSTOM_MODE)
+   ZZ_FW_CAP_CUSTOM_MODE | ZZ_FW_CAP_FWUP_STATUS_MIRROR)
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,
