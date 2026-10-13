@@ -24,6 +24,7 @@ static FIL  fwup_file;
 static int  fwup_open_flag = 0;
 static char fwup_path[FWUP_PATH_MAX];
 static uint32_t fwup_bytes_written = 0;
+static uint8_t fwup_mirror_seq = 0;
 
 static int ascii_upper(int c) {
     return (c >= 'a' && c <= 'z') ? (c - ('a' - 'A')) : c;
@@ -507,4 +508,19 @@ void fw_update_reset(void) {
     if (fwup_open_flag || fwup_path[0] != '\0') {
         fw_update_abort();
     }
+}
+
+void fw_update_publish_status(volatile uint8_t *mirror, uint16_t status) {
+    uint8_t word[4];
+    uint32_t value;
+
+    fwup_mirror_seq++;
+    word[0] = (uint8_t)FWUP_STATUS_MIRROR_MAGIC;
+    word[1] = fwup_mirror_seq;
+    word[2] = (uint8_t)(status >> 8);
+    word[3] = (uint8_t)status;
+    /* One aligned store: a direct read sees the old or the new word. */
+    memcpy(&value, word, sizeof(value));
+    *(volatile uint32_t *)mirror = value;
+    Xil_DCacheFlushRange((UINTPTR)mirror, 4);
 }
