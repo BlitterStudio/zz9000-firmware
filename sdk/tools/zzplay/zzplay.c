@@ -2620,6 +2620,9 @@ static int zzplay_preload_media(struct ZZPlayRuntime *runtime,
     }
     got = Read(file, stage, (LONG)wanted);
     if (got <= 0) {
+      /* A short file or read error after earlier chunks: the copy is
+       * incomplete, so release it and stream instead. */
+      status = ZZ9K_STATUS_IO_ERROR;
       goto done;
     }
     CopyMem(stage, (APTR)runtime->input.data, (ULONG)got);
