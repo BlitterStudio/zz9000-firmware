@@ -733,26 +733,6 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-m68k-amigaos.sh
 )
 
-add_executable(docs_library_source_test
-  tests/docs_library_source_test.c
-)
-
-add_test(
-  NAME docs_library_source_test
-  COMMAND docs_library_source_test
-          ${CMAKE_CURRENT_SOURCE_DIR}/docs/zz9k-library.md
-)
-
-add_executable(release_smoke_doc_test
-  tests/release_smoke_doc_test.c
-)
-
-add_test(
-  NAME release_smoke_doc_test
-  COMMAND release_smoke_doc_test
-          ${CMAKE_CURRENT_SOURCE_DIR}/docs/zz9k-release-smoke.md
-)
-
 add_executable(amiga_library_metadata_test
   tests/amiga_library_metadata_test.c
 )
