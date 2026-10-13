@@ -82,6 +82,8 @@ int zzplay_audio_start_ready(uint64_t queued_frames,
  * PIP for an otherwise-ready audio start. */
 int zzplay_audio_start_may_open_pip(int has_picture,
                                     int video_cannot_advance);
+/* A required PIP open is a playback failure, not a deferred audio start. */
+int zzplay_audio_pip_open_failed(int pip_required, int pip_opened);
 /* Staged input EOF still leaves buffered video pictures. Decoder
  * backpressure means the PCM ring prevents any more video progress. */
 int zzplay_audio_pts_bypass_allowed(int video_finished,

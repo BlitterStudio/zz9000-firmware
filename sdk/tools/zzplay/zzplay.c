@@ -2264,9 +2264,15 @@ static int zzplay_audio_start_if_ready(
     return ZZ9K_STATUS_OK;
   }
   if (!runtime->window) {
-    if (!zzplay_audio_start_may_open_pip(result != 0, no_more_pictures) ||
-        !zzplay_ensure_pip(runtime)) {
+    const int pip_required = zzplay_audio_start_may_open_pip(
+        result != 0, no_more_pictures);
+
+    if (!pip_required) {
       return result ? ZZ9K_STATUS_UNSUPPORTED : ZZ9K_STATUS_OK;
+    }
+    if (zzplay_audio_pip_open_failed(
+            pip_required, zzplay_ensure_pip(runtime))) {
+      return ZZ9K_STATUS_UNSUPPORTED;
     }
   }
   /* EOF may only mean all bytes are staged in the card's FIFO. Keep its
@@ -2672,6 +2678,13 @@ done:
     UnLock(lock);
   }
   return status;
+}
+
+static void zzplay_fail_pip_open(struct ZZPlayRuntime *runtime)
+{
+  zzplay_error(runtime, "zzplay: cannot open P96 PIP window (error %ld)\n",
+               (long)runtime->pip_error);
+  zzplay_fail(runtime, ZZPLAY_FAILURE_PIP, ZZ9K_STATUS_UNSUPPORTED);
 }
 
 static int zzplay_release_resource(void *user,
@@ -3952,9 +3965,13 @@ playback_session:
           &runtime, 0, transport.eof_sent,
           zzplay_audio_pts_bypass_allowed(media_done, 0), 0, 0);
       if (cleanup_status != ZZ9K_STATUS_OK) {
-        zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
-                zz9k_status_name(cleanup_status));
-        zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        if (runtime.pip_open_failed) {
+          zzplay_fail_pip_open(&runtime);
+        } else {
+          zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
+                  zz9k_status_name(cleanup_status));
+          zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        }
         break;
       }
     }
@@ -3987,11 +4004,7 @@ playback_session:
           transport.eof_sent, &retired);
       if (cleanup_status != ZZ9K_STATUS_OK) {
         if (runtime.pip_open_failed) {
-          zzplay_error(&runtime,
-                  "zzplay: cannot open P96 PIP window (error %ld)\n",
-                  (long)runtime.pip_error);
-          zzplay_fail(&runtime, ZZPLAY_FAILURE_PIP,
-                      ZZ9K_STATUS_UNSUPPORTED);
+          zzplay_fail_pip_open(&runtime);
         } else {
           zzplay_error(&runtime,
                   "zzplay: frame presentation failed: %s\n",
@@ -4075,9 +4088,13 @@ playback_session:
             &runtime, transport.eof_sent, decoder_backpressured);
       }
       if (cleanup_status != ZZ9K_STATUS_OK) {
-        zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
-                     zz9k_status_name(cleanup_status));
-        zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        if (runtime.pip_open_failed) {
+          zzplay_fail_pip_open(&runtime);
+        } else {
+          zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
+                       zz9k_status_name(cleanup_status));
+          zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        }
         break;
       }
       zzplay_wait_us(&runtime.timer, ZZPLAY_SYNC_POLL_US);
@@ -4119,9 +4136,13 @@ playback_session:
             &runtime, transport.eof_sent, decoder_backpressured);
       }
       if (cleanup_status != ZZ9K_STATUS_OK) {
-        zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
-                     zz9k_status_name(cleanup_status));
-        zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        if (runtime.pip_open_failed) {
+          zzplay_fail_pip_open(&runtime);
+        } else {
+          zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
+                       zz9k_status_name(cleanup_status));
+          zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        }
         break;
       }
     }

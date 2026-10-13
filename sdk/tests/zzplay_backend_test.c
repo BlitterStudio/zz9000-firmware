@@ -200,8 +200,10 @@ static int check_audio_start_prebuffer(void)
       !zzplay_audio_start_ready(2048U, 2048U, 6144U, 0, 0, 0) ||
       !zzplay_audio_start_may_open_pip(1, 0) ||
       zzplay_audio_start_may_open_pip(0, 0) ||
+      !zzplay_audio_pip_open_failed(1, 0) ||
+      zzplay_audio_pip_open_failed(1, 1) ||
+      zzplay_audio_pip_open_failed(0, 0) ||
       zzplay_audio_pts_bypass_allowed(0, 0) ||
-      !zzplay_audio_pts_bypass_allowed(1, 0) ||
       !zzplay_audio_pts_bypass_allowed(0, 1)) {
     return 0;
   }
