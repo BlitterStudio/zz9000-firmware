@@ -98,21 +98,23 @@ static inline void bid(struct buf *b, uint32_t id)
 
 static inline void bsize(struct buf *b, uint32_t n)
 {
-	if (n < 0x7FU) {
-		bbyte(b, (uint8_t)(0x80U | n));
-	} else if (n < 0x3FFFU) {
-		bbyte(b, (uint8_t)(0x40U | (n >> 8)));
-		bbyte(b, (uint8_t)n);
-	} else if (n < 0x1FFFFFU) {
-		bbyte(b, (uint8_t)(0x20U | (n >> 16)));
-		bbyte(b, (uint8_t)(n >> 8));
-		bbyte(b, (uint8_t)n);
-	} else {
-		bbyte(b, (uint8_t)(0x10U | (n >> 24)));
-		bbyte(b, (uint8_t)(n >> 16));
-		bbyte(b, (uint8_t)(n >> 8));
-		bbyte(b, (uint8_t)n);
-	}
+	uint8_t tmp[4];
+	uint32_t len, i;
+
+	if (n < 0x7FU)
+		len = 1U;
+	else if (n < 0x3FFFU)
+		len = 2U;
+	else if (n < 0x1FFFFFU)
+		len = 3U;
+	else
+		len = 4U;
+	for (i = 0U; i < len; i++)
+		tmp[i] = (uint8_t)(n >> (8U * (len - 1U - i)));
+	/* Length marker: the top bit of the first byte, shifted by the
+	 * number of following bytes. */
+	tmp[0] |= (uint8_t)(0x80U >> (len - 1U));
+	bput(b, tmp, len);
 }
 
 static inline void belem(struct buf *b, uint32_t id, const void *payload, uint32_t n)
