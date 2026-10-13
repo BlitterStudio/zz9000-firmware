@@ -40,13 +40,15 @@ ZZPlayFile *zzplay_file_open(const char *path, int writable)
   if (!path) {
     return 0;
   }
-  handle = Open((CONST_STRPTR)path, writable ? MODE_NEWFILE : MODE_OLDFILE);
-  if (!handle) {
-    return 0;
-  }
+  /* Allocate first: MODE_NEWFILE truncates the file, so a later
+   * allocation failure would lose saved preferences or a playlist. */
   file = (ZZPlayFile *)zzplay_alloc(sizeof(*file));
   if (!file) {
-    Close(handle);
+    return 0;
+  }
+  handle = Open((CONST_STRPTR)path, writable ? MODE_NEWFILE : MODE_OLDFILE);
+  if (!handle) {
+    zzplay_free(file);
     return 0;
   }
   file->handle = handle;
