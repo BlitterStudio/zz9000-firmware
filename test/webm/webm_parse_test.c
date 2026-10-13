@@ -281,7 +281,6 @@ static int test_disabled_track_fields(void)
 	uint8_t oversized_channels[] = {1, 0, 0, 0, 1};
 	uint8_t rate[] = {0x47, 0x3b, 0x80, 0x00};
 	uint8_t scale[] = {0x0f, 0x42, 0x40};
-	volatile uint32_t expected_depth = 65552U;
 	int failed = 0;
 
 	bu8(&vtrack, 0xD7, 1);
@@ -301,7 +300,6 @@ static int test_disabled_track_fields(void)
 	bnest(&tracks, 0xAE, &replacement);
 	bu8(&atrack, 0xD7, 2);
 	bu8(&atrack, 0x83, 2);
-	bu8(&atrack, 0xB9, 0);
 	belem(&atrack, 0x86, "A_PCM/INT/LIT", 13);
 	belem(&audio, 0xB5, rate, sizeof(rate));
 	belem(&audio, 0x9F, oversized_channels, sizeof(oversized_channels));
@@ -319,6 +317,9 @@ static int test_disabled_track_fields(void)
 	bsize(&file, seg.n);
 	bput(&file, seg.p, seg.n);
 	free(seg.p);
+	/* The disabled video track and the PCM track whose Channels and
+	 * BitDepth only look like stereo 16-bit when narrowed (2^32+1,
+	 * 65552) are not stored; the enabled replacement video is. */
 	if (open_file(file.p, file.n, 1, &d, scratch, sizeof(scratch)) != 0) {
 		fprintf(stderr, "disabled track fields: parse failed\n");
 		failed = 1;
@@ -326,15 +327,106 @@ static int test_disabled_track_fields(void)
 		v = webm_track(&d, 1);
 		replacement_video = webm_track(&d, 3);
 		a = webm_track(&d, 2);
-		if (!v || v->enabled || !replacement_video ||
-		    !replacement_video->enabled || !a || a->enabled ||
-		    a->channels != UINT32_MAX ||
-		    (uint32_t)a->bit_depth != expected_depth) {
+		if (v || !replacement_video || !replacement_video->enabled ||
+		    a || d.ntracks != 1U) {
 			fprintf(stderr, "disabled track fields: parse values\n");
 			failed = 1;
 		}
 		webm_close(&d);
 	}
+	free(file.p);
+	return failed;
+}
+
+/* One Matroska TrackEntry per line below: more entries, and more
+ * CodecPrivate, than the stored-track table and private store hold. Only
+ * the video track and the first usable track of each audio codec are
+ * stored, and only their blocks are returned. */
+static int test_matroska_ignored_tracks(void)
+{
+	static const struct {
+		uint8_t number, type;
+		const char *codec;
+		uint8_t disabled;
+		uint32_t priv;
+		uint8_t stored;
+	} spec[] = {
+		{1, 1, "V_MPEG2", 0, 0, 1},
+		{2, 2, "A_AAC", 0, 40000, 0},          /* no decoder here */
+		{3, 0x11, "S_TEXT/UTF8", 0, 40000, 0}, /* subtitles */
+		{4, 2, "A_AC3", 0, 0, 1},
+		{5, 2, "A_AC3", 0, 0, 0},              /* second AC-3 */
+		{6, 2, "A_MPEG/L2", 0, 0, 1},
+		{7, 0x11, "S_TEXT/UTF8", 0, 0, 0},
+		{8, 2, "A_MPEG/L2", 1, 0, 0},          /* disabled */
+	};
+	static struct webm_demux d;
+	static struct got g;
+	static uint8_t priv[40000];
+	struct buf seg = {0}, info = {0}, tracks = {0}, cluster = {0};
+	struct buf ebml = {0}, file = {0};
+	uint8_t scale[] = {0x0f, 0x42, 0x40};
+	uint8_t payload[4] = {1, 2, 3, 4};
+	unsigned i, stored = 0U;
+	int failed = 0;
+
+	for (i = 0U; i < sizeof(spec) / sizeof(spec[0]); i++) {
+		struct buf t = {0}, video = {0};
+
+		bu8(&t, 0xD7, spec[i].number);
+		bu8(&t, 0x83, spec[i].type);
+		belem(&t, 0x86, spec[i].codec, (uint32_t)strlen(spec[i].codec));
+		if (spec[i].disabled)
+			bu8(&t, 0xB9, 0);
+		if (spec[i].priv)
+			belem(&t, 0x63A2, priv, spec[i].priv);
+		if (spec[i].type == 1U) {
+			bu16(&video, 0xB0, 32);
+			bu16(&video, 0xBA, 16);
+			bnest(&t, 0xE0, &video);
+		}
+		bnest(&tracks, 0xAE, &t);
+	}
+	belem(&info, 0x2AD7B1, scale, sizeof(scale));
+	bnest(&seg, 0x1549A966, &info);
+	bnest(&seg, 0x1654AE6B, &tracks);
+	bu8(&cluster, 0xE7, 0);
+	for (i = 0U; i < sizeof(spec) / sizeof(spec[0]); i++)
+		add_block(&cluster, 0xA3, spec[i].number, 0, 0x80, payload,
+			  sizeof(payload));
+	bnest(&seg, 0x1F43B675, &cluster);
+	belem(&ebml, 0x4282, "matroska", 8);
+	bnest(&file, 0x1A45DFA3, &ebml);
+	bid(&file, 0x18538067);
+	bsize(&file, seg.n);
+	bput(&file, seg.p, seg.n);
+	free(seg.p);
+
+	if (collect(&file, 1, &d, &g) != 0) {
+		fprintf(stderr, "matroska ignored tracks: err=%d\n", d.error);
+		free(file.p);
+		return 1;
+	}
+	for (i = 0U; i < sizeof(spec) / sizeof(spec[0]); i++) {
+		if ((webm_track(&d, spec[i].number) != NULL) != spec[i].stored) {
+			fprintf(stderr, "matroska ignored tracks: track %u\n",
+				spec[i].number);
+			failed = 1;
+		}
+		if (spec[i].stored) {
+			if (stored >= g.n || g.track[stored] != spec[i].number) {
+				fprintf(stderr, "matroska ignored tracks: block %u\n",
+					spec[i].number);
+				failed = 1;
+			}
+			stored++;
+		}
+	}
+	if (g.n != stored) {
+		fprintf(stderr, "matroska ignored tracks: %u blocks\n", g.n);
+		failed = 1;
+	}
+	webm_close(&d);
 	free(file.p);
 	return failed;
 }
@@ -675,6 +767,7 @@ int main(void)
 	free(laced.p);
 	failed |= test_audio_tracks();
 	failed |= test_disabled_track_fields();
+	failed |= test_matroska_ignored_tracks();
 	failed |= test_track_metadata_masters();
 	failed |= test_lacing();
 	failed |= test_multi_cluster();

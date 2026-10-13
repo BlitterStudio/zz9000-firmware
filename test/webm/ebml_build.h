@@ -98,10 +98,19 @@ static inline void bid(struct buf *b, uint32_t id)
 
 static inline void bsize(struct buf *b, uint32_t n)
 {
-	if (n < 0x7FU)
+	if (n < 0x7FU) {
 		bbyte(b, (uint8_t)(0x80U | n));
-	else {
+	} else if (n < 0x3FFFU) {
 		bbyte(b, (uint8_t)(0x40U | (n >> 8)));
+		bbyte(b, (uint8_t)n);
+	} else if (n < 0x1FFFFFU) {
+		bbyte(b, (uint8_t)(0x20U | (n >> 16)));
+		bbyte(b, (uint8_t)(n >> 8));
+		bbyte(b, (uint8_t)n);
+	} else {
+		bbyte(b, (uint8_t)(0x10U | (n >> 24)));
+		bbyte(b, (uint8_t)(n >> 16));
+		bbyte(b, (uint8_t)(n >> 8));
 		bbyte(b, (uint8_t)n);
 	}
 }

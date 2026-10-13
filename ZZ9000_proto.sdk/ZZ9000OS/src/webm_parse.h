@@ -26,7 +26,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define WEBM_MAX_TRACKS 4
+/* Stored tracks: one video plus, in Matroska, the first usable track of
+ * each of the five audio codecs (other tracks are skipped, see
+ * matroska_track_usable in webm_parse.c). */
+#define WEBM_MAX_TRACKS 6
 #define WEBM_MAX_PRIV (64U * 1024U)
 #define WEBM_MAX_FRAME (4U * 1024U * 1024U)
 #define WEBM_MAX_LACE 32

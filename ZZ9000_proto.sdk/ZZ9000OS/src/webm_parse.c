@@ -205,14 +205,51 @@ static int webm_audio_codec(uint8_t codec)
 	return codec == WEBM_CODEC_OPUS || codec == WEBM_CODEC_VORBIS;
 }
 
+/* A Matroska file may carry subtitles, disabled tracks and audio no
+ * decoder here plays. Only tracks a backend can select take a table
+ * slot: the enabled video track and, per audio codec, the first enabled
+ * eligible track, since every backend picks the first track of the codec
+ * its client asked for. That bounds the table at one video track plus
+ * one per audio codec, whatever the file declares; blocks of the other
+ * tracks are skipped. */
+static int matroska_track_usable(const struct webm_demux *d,
+	const struct webm_track *t)
+{
+	unsigned i;
+
+	if (!t->enabled)
+		return 0;
+	if (t->type == 1U)
+		return 1;
+	if (t->type != 2U)
+		return 0;
+	if (t->codec != WEBM_CODEC_OPUS && t->codec != WEBM_CODEC_VORBIS &&
+	    t->codec != WEBM_CODEC_MPEG_AUDIO && t->codec != WEBM_CODEC_AC3 &&
+	    t->codec != WEBM_CODEC_PCM_LE)
+		return 0;
+	if (t->codec == WEBM_CODEC_PCM_LE &&
+	    (t->rate != 48000U || (t->channels != 1U && t->channels != 2U) ||
+	     t->bit_depth != 16U))
+		return 0;
+	for (i = 0U; i < d->ntracks; i++)
+		if (d->tracks[i].type == 2U && d->tracks[i].codec == t->codec)
+			return 0;
+	return 1;
+}
+
 static int parse_track(struct webm_demux *d, uint32_t end)
 {
 	struct webm_track *t;
+	struct webm_track spare;
+	uint32_t priv_start = d->priv_used;
 	uint8_t scratch[16];
 
-	if (d->ntracks >= WEBM_MAX_TRACKS)
+	/* WebM allows one video and one audio track, so a full table is an
+	 * error there; a Matroska track is parsed first and stored only if
+	 * a backend can use it. */
+	if (d->ntracks >= WEBM_MAX_TRACKS && !d->is_matroska)
 		return fail(d, WEBM_ERR_LIMIT);
-	t = &d->tracks[d->ntracks];
+	t = d->ntracks < WEBM_MAX_TRACKS ? &d->tracks[d->ntracks] : &spare;
 	memset(t, 0, sizeof(*t));
 	t->enabled = 1U;
 	while (room(d, end) > 1U) {
@@ -347,6 +384,14 @@ static int parse_track(struct webm_demux *d, uint32_t end)
 			return fail(d, WEBM_ERR_CODEC);
 		d->have_audio = 1;
 	}
+	if (d->is_matroska && !matroska_track_usable(d, t)) {
+		/* Not stored: its blocks are skipped, and its CodecPrivate
+		 * gives its space back. */
+		d->priv_used = priv_start;
+		return 0;
+	}
+	if (t == &spare)
+		return fail(d, WEBM_ERR_LIMIT);
 	d->ntracks++;
 	return 0;
 }
@@ -538,6 +583,16 @@ static int take_block(struct webm_demux *d, uint32_t size, int simple)
 	return 0;
 }
 
+/* A block of a Matroska track that was not stored (subtitles, disabled
+ * or unplayable tracks; see matroska_track_usable) is dropped whole. */
+static int lace_track_ignored(struct webm_demux *d)
+{
+	if (!d->is_matroska || webm_track(d, d->lace_track))
+		return 0;
+	d->lace_i = d->lace_n;
+	return 1;
+}
+
 static int emit(struct webm_demux *d, struct webm_block *blk)
 {
 	const struct webm_track *t = webm_track(d, d->lace_track);
@@ -712,6 +767,8 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 				return fail(d, WEBM_ERR_LAYOUT);
 			if (take_block(d, (uint32_t)size, id == ID_SIMPLE) != 0)
 				return -1;
+			if (lace_track_ignored(d))
+				continue;
 			return emit(d, blk);
 		}
 		if (id == ID_GROUP) {
@@ -742,7 +799,7 @@ int webm_next(struct webm_demux *d, struct webm_block *blk)
 			}
 			if (skip_n(d, room(d, end)) != 0)
 				return -1;
-			if (saw) {
+			if (saw && !lace_track_ignored(d)) {
 				/* A ReferenceBlock may follow the Block, so the
 				 * key flag is known only once the group is read. */
 				d->lace_key = (uint8_t)key;
