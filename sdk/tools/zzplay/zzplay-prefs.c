@@ -3,7 +3,7 @@
 
 #include "zzplay-prefs.h"
 
-#include <stdio.h>
+#include "zzplay-sys.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -353,7 +353,7 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
 
 int zzplay_prefs_load(ZZPlayPrefs *prefs, const char *path)
 {
-  FILE *f;
+  ZZPlayFile *f;
   long sz;
   char *buf;
   size_t len;
@@ -363,39 +363,39 @@ int zzplay_prefs_load(ZZPlayPrefs *prefs, const char *path)
   }
   zzplay_prefs_defaults(prefs);
 
-  f = fopen(path, "rb");
+  f = zzplay_file_open(path, 0);
   if (!f) {
     return 0;
   }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
+  if (!zzplay_file_seek(f, 0L, ZZPLAY_FILE_END)) {
+    zzplay_file_close(f);
     return 0;
   }
-  sz = ftell(f);
+  sz = zzplay_file_tell(f);
   if (sz <= 0 || sz > 1024 * 1024) {
-    fclose(f);
+    zzplay_file_close(f);
     return 1;
   }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
+  if (!zzplay_file_seek(f, 0L, ZZPLAY_FILE_BEGIN)) {
+    zzplay_file_close(f);
     return 0;
   }
   len = (size_t)sz;
-  buf = (char *)malloc(len + 1U);
+  buf = (char *)zzplay_alloc(len + 1U);
   if (!buf) {
-    fclose(f);
+    zzplay_file_close(f);
     return 0;
   }
-  if (fread(buf, 1U, len, f) != len) {
-    free(buf);
-    fclose(f);
+  if (zzplay_file_read(f, buf, len) != len) {
+    zzplay_free(buf);
+    zzplay_file_close(f);
     return 0;
   }
-  fclose(f);
+  zzplay_file_close(f);
   buf[len] = '\0';
 
   zzplay_prefs_parse(prefs, buf, len);
-  free(buf);
+  zzplay_free(buf);
   return 1;
 }
 
@@ -403,7 +403,7 @@ int zzplay_prefs_save(const ZZPlayPrefs *prefs, const char *path)
 {
   static char buf[ZZPLAY_PREFS_TEXT_MAX];
   size_t needed;
-  FILE *f;
+  ZZPlayFile *f;
   size_t written;
 
   if (!prefs || !path) {
@@ -413,12 +413,14 @@ int zzplay_prefs_save(const ZZPlayPrefs *prefs, const char *path)
   if (needed >= sizeof(buf)) {
     return 0;
   }
-  f = fopen(path, "wb");
+  f = zzplay_file_open(path, 1);
   if (!f) {
     return 0;
   }
-  written = fwrite(buf, 1U, needed, f);
-  fclose(f);
+  written = zzplay_file_write(f, buf, needed);
+  if (!zzplay_file_close(f)) {
+    return 0;
+  }
   return (written == needed) ? 1 : 0;
 }
 

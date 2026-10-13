@@ -60,7 +60,7 @@ int main(int argc, char **argv)
        strstr(source, "sink->buffers[") &&
        strstr(source, "FreeVec(sink->buffers[") &&
        strstr(source, "input_bytes") &&
-       strstr(source, "fread(") &&
+       strstr(source, "zzplay_file_read(") &&
        strstr(source, "MHIPlay(") && strstr(source, "MHIPause(") &&
        strstr(source,
               "if (MHIGetStatus(sink->decoder) != MHIF_PAUSED) {\n"
