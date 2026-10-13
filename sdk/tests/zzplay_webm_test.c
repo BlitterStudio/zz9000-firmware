@@ -325,6 +325,36 @@ static int check_matroska(void)
   n = wrap_matroska(file, sizeof(file), tracks, tn);
   return probe_ok(file, n, &info) && info.video == ZZPLAY_WEBM_VIDEO_VP8;
 }
+/* A Matroska audio track whose layout no decoder plays is passed over like
+ * an unknown codec. Only the first track of each codec counts: it is the
+ * one the firmware keeps and the backend plays. */
+static int check_matroska_audio_layout(void)
+{
+  uint8_t tracks[512], file[1024];
+  ZZPlayWebMInfo info;
+  size_t tn, n;
+  static const uint8_t r48k[] = {0x40, 0xe7, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
+  static const uint8_t r192k[] = {0x41, 0x07, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+  tn = video_track(tracks, sizeof(tracks), 0U, "V_VP8", 320U, 240U, 0U, 0U, 0U, 0, 0U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 6U, 2U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_VORBIS", r48k, sizeof(r48k), 2U, 3U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.audio != ZZPLAY_WEBM_AUDIO_VORBIS ||
+      info.channels != 2U) return 0;
+  tn = video_track(tracks, sizeof(tracks), 0U, "V_VP8", 320U, 240U, 0U, 0U, 0U, 0, 0U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_VORBIS", r192k, sizeof(r192k), 2U, 2U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 2U, 3U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.audio != ZZPLAY_WEBM_AUDIO_OPUS) return 0;
+  /* A second Opus track is not stored, so it cannot stand in for the
+   * first; the video plays without audio. */
+  tn = video_track(tracks, sizeof(tracks), 0U, "V_VP8", 320U, 240U, 0U, 0U, 0U, 0, 0U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 6U, 2U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 2U, 3U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  return probe_ok(file, n, &info) && info.audio == ZZPLAY_WEBM_AUDIO_NONE;
+}
 static int check_matroska_disabled_video(void)
 {
   uint8_t tracks[512], file[1024];
@@ -417,6 +447,7 @@ int main(void)
   if (!check_refusals()) fail("refusals");
   if (!check_matroska()) fail("matroska");
   if (!check_matroska_disabled_video()) fail("matroska disabled video");
+  if (!check_matroska_audio_layout()) fail("matroska audio layout");
   if (!check_flags_and_backend()) fail("flags");
   if (!check_matroska_mpeg_flags()) fail("matroska mpeg flags");
   if (failures) { printf("zzplay_webm_test: %d failure(s)\n", failures); return 1; }

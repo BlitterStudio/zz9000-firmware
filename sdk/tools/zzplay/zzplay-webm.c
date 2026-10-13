@@ -73,6 +73,7 @@ typedef struct ZZPlayWebMCur {
   ZZPlayWebMAudio pending_mpeg_audio;
   uint32_t pending_mpeg_rate;
   uint32_t pending_mpeg_channels;
+  uint32_t seen_audio_codecs; /* Matroska: 1 << ZZPlayWebMAudio */
   uint32_t track_type;
   int track_enabled;
   uint32_t track_default_ns;
@@ -338,6 +339,19 @@ static ZZPlayWebMAudio zzplay_webm_mpeg_audio(const ZZPlayWebMCur *cur)
   return ZZPLAY_WEBM_AUDIO_NONE;
 }
 
+/* Channel count and rate an audio decoder plays: AC-3 downmixes any
+ * layout, the others take mono or stereo, and Vorbis a bounded rate. */
+static int zzplay_webm_audio_layout_ok(ZZPlayWebMAudio audio, uint32_t rate,
+                                       uint32_t channels)
+{
+  if (audio != ZZPLAY_WEBM_AUDIO_AC3 && channels != 1U && channels != 2U)
+    return 0;
+  if (audio == ZZPLAY_WEBM_AUDIO_VORBIS &&
+      (rate < ZZPLAY_WEBM_VORBIS_MIN_RATE || rate > ZZPLAY_WEBM_VORBIS_MAX_RATE))
+    return 0;
+  return 1;
+}
+
 static void zzplay_webm_select_matroska_audio(ZZPlayWebMCur *cur)
 {
   ZZPlayWebMInfo *info = cur->info;
@@ -386,21 +400,34 @@ static void zzplay_webm_finish_track(ZZPlayWebMCur *cur)
   if (cur->track_type != 2U) return;
   audio = zzplay_webm_webm_audio(cur);
   if (matroska) {
-    if (audio != ZZPLAY_WEBM_AUDIO_NONE) {
-      if (cur->pending_webm_audio == ZZPLAY_WEBM_AUDIO_NONE) {
-        cur->pending_webm_audio = audio;
-        cur->pending_webm_rate = audio == ZZPLAY_WEBM_AUDIO_OPUS
-            ? 48000U : (cur->saw_rate ? cur->rate : 8000U);
-        cur->pending_webm_channels = cur->channels ? cur->channels : 1U;
-      }
-      return;
-    }
-    audio = zzplay_webm_mpeg_audio(cur);
-    if (audio != ZZPLAY_WEBM_AUDIO_NONE &&
-        cur->pending_mpeg_audio == ZZPLAY_WEBM_AUDIO_NONE) {
-      cur->pending_mpeg_audio = audio;
-      cur->pending_mpeg_rate = cur->saw_rate ? cur->rate : 0U;
-      cur->pending_mpeg_channels = cur->channels ? cur->channels : 1U;
+    /* The firmware keeps only the first enabled track of each audio
+     * codec, and the backend plays the first track of the codec asked
+     * for, so that track alone decides whether its codec is usable. The
+     * first usable one of each backend's family is chosen; a track whose
+     * layout no decoder plays is passed over like an unknown codec. */
+    int vp_audio = audio != ZZPLAY_WEBM_AUDIO_NONE;
+    ZZPlayWebMAudio *pending;
+    uint32_t rate, channels = cur->channels ? cur->channels : 1U;
+
+    if (!vp_audio) audio = zzplay_webm_mpeg_audio(cur);
+    if (audio == ZZPLAY_WEBM_AUDIO_NONE ||
+        (cur->seen_audio_codecs & (1UL << audio)) != 0U) return;
+    cur->seen_audio_codecs |= 1UL << audio;
+    if (vp_audio)
+      rate = audio == ZZPLAY_WEBM_AUDIO_OPUS
+          ? 48000U : (cur->saw_rate ? cur->rate : 8000U);
+    else
+      rate = cur->saw_rate ? cur->rate : 0U;
+    pending = vp_audio ? &cur->pending_webm_audio : &cur->pending_mpeg_audio;
+    if (*pending != ZZPLAY_WEBM_AUDIO_NONE ||
+        !zzplay_webm_audio_layout_ok(audio, rate, channels)) return;
+    *pending = audio;
+    if (vp_audio) {
+      cur->pending_webm_rate = rate;
+      cur->pending_webm_channels = channels;
+    } else {
+      cur->pending_mpeg_rate = rate;
+      cur->pending_mpeg_channels = channels;
     }
     return;
   }
@@ -998,14 +1025,8 @@ int zzplay_probe_webm(const uint8_t *data, size_t length, int capped,
     return 1;
   }
   if (info->audio != ZZPLAY_WEBM_AUDIO_NONE &&
-      info->audio != ZZPLAY_WEBM_AUDIO_AC3 &&
-      (info->channels != 1U && info->channels != 2U)) {
-    info->refusal = ZZPLAY_WEBM_BAD_AUDIO;
-    return 1;
-  }
-  if (info->audio == ZZPLAY_WEBM_AUDIO_VORBIS &&
-      (info->sample_rate < ZZPLAY_WEBM_VORBIS_MIN_RATE ||
-       info->sample_rate > ZZPLAY_WEBM_VORBIS_MAX_RATE)) {
+      !zzplay_webm_audio_layout_ok(info->audio, info->sample_rate,
+                                   info->channels)) {
     info->refusal = ZZPLAY_WEBM_BAD_AUDIO;
     return 1;
   }
