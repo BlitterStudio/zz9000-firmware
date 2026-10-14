@@ -305,6 +305,29 @@ static int zzplay_webm_payload(ZZPlayWebMCur *cur, uint64_t size,
   return 1;
 }
 
+/* An EBML unsigned integer: 0-8 bytes (0 bytes is the value 0), as the
+ * firmware reads them. Wider is hostile. */
+static int zzplay_webm_uint(ZZPlayWebMCur *cur, uint64_t size, uint64_t *v)
+{
+  const uint8_t *payload;
+  uint32_t n;
+
+  if (!zzplay_webm_payload(cur, size, &payload, &n)) {
+    return 0;
+  }
+  if (n > 8U) {
+    zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
+    return 0;
+  }
+  *v = zzplay_webm_be(payload, n);
+  return 1;
+}
+
+static uint32_t zzplay_webm_sat32(uint64_t v)
+{
+  return v > 0xffffffffULL ? 0xffffffffU : (uint32_t)v;
+}
+
 static int zzplay_webm_codec_is(const ZZPlayWebMCur *cur, const char *name)
 {
   return strcmp(cur->codec, name) == 0;
@@ -533,36 +556,29 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
     }
     if (kind == WALK_EBML &&
         (id == ID_EBML_MAX_ID || id == ID_EBML_MAX_SIZE)) {
-      if (!zzplay_webm_payload(cur, size, &payload, &n) || n == 0U ||
-          n > 4U) {
-        zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
+      uint64_t v;
+
+      if (!zzplay_webm_uint(cur, size, &v)) {
         return 0;
       }
-      if (zzplay_webm_be(payload, n) > 4U && id == ID_EBML_MAX_ID) {
-        zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
-        return 0;
-      }
-      if (zzplay_webm_be(payload, n) > 8U && id == ID_EBML_MAX_SIZE) {
+      if ((v > 4U && id == ID_EBML_MAX_ID) ||
+          (v > 8U && id == ID_EBML_MAX_SIZE)) {
         zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
         return 0;
       }
       continue;
     }
     if (kind == WALK_INFO && id == ID_SCALE) {
-      if (!zzplay_webm_payload(cur, size, &payload, &n) || n == 0U ||
-          n > 8U) {
+      uint64_t scale;
+
+      if (!zzplay_webm_uint(cur, size, &scale)) {
+        return 0;
+      }
+      if (scale == 0U || scale > 0xffffffffULL) {
         zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
         return 0;
       }
-      {
-        uint64_t scale = zzplay_webm_be(payload, n);
-
-        if (scale == 0U || scale > 0xffffffffULL) {
-          zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
-          return 0;
-        }
-        cur->info->timestamp_scale = (uint32_t)scale;
-      }
+      cur->info->timestamp_scale = (uint32_t)scale;
       continue;
     }
     if (kind == WALK_INFO && id == ID_DURATION &&
@@ -574,21 +590,24 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
       cur->saw_duration = 1;
       continue;
     }
+    /* Values past 32 bits saturate, as in the firmware; the track, size
+     * and audio checks refuse them afterwards. */
     if (kind == WALK_TRACK && id == ID_TYPE) {
-      if (!zzplay_webm_payload(cur, size, &payload, &n) || n == 0U ||
-          n > 4U) {
-        zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
+      uint64_t v;
+
+      if (!zzplay_webm_uint(cur, size, &v)) {
         return 0;
       }
-      cur->track_type = (uint32_t)zzplay_webm_be(payload, n);
+      cur->track_type = zzplay_webm_sat32(v);
       continue;
     }
     if (kind == WALK_TRACK && id == ID_FLAG_ENABLED) {
-      if (!zzplay_webm_payload(cur, size, &payload, &n) || n != 1U) {
-        zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
+      uint64_t v;
+
+      if (!zzplay_webm_uint(cur, size, &v)) {
         return 0;
       }
-      cur->track_enabled = payload[0] != 0U;
+      cur->track_enabled = v != 0U;
       continue;
     }
     if (kind == WALK_TRACK && id == ID_CODEC) {
@@ -607,19 +626,13 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
       cur->codec[n] = '\0';
       continue;
     }
-    /* EBML unsigned integers take 1-8 bytes, as the firmware reads them;
-     * values past 32 bits saturate, and the size and audio checks refuse
-     * them later. */
     if (kind == WALK_TRACK && id == ID_DEFAULT_DUR) {
       uint64_t v;
 
-      if (!zzplay_webm_payload(cur, size, &payload, &n) || n == 0U ||
-          n > 8U) {
-        zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
+      if (!zzplay_webm_uint(cur, size, &v)) {
         return 0;
       }
-      v = zzplay_webm_be(payload, n);
-      cur->track_default_ns = v > 0xffffffffULL ? 0xffffffffU : (uint32_t)v;
+      cur->track_default_ns = zzplay_webm_sat32(v);
       continue;
     }
     if ((kind == WALK_VIDEO &&
@@ -629,13 +642,10 @@ static int zzplay_webm_walk(ZZPlayWebMCur *cur, size_t end, int depth,
       uint64_t v;
       uint32_t v32;
 
-      if (!zzplay_webm_payload(cur, size, &payload, &n) || n == 0U ||
-          n > 8U) {
-        zzplay_webm_fail(cur, ZZPLAY_WEBM_HOSTILE);
+      if (!zzplay_webm_uint(cur, size, &v)) {
         return 0;
       }
-      v = zzplay_webm_be(payload, n);
-      v32 = v > 0xffffffffULL ? 0xffffffffU : (uint32_t)v;
+      v32 = zzplay_webm_sat32(v);
       if (id == ID_WIDTH) {
         cur->pixel_w = v32;
       } else if (id == ID_HEIGHT) {
