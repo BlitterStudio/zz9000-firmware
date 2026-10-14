@@ -195,9 +195,10 @@ and the two runs looked the same.
   (including rows that fall into vertical blanking), and an overlay stream
   that delivers a source row in about 60% of a raster line. The two-bank
   fetcher showed late rows in that last case; the four-bank one has none.
-- The scaling build meets timing in Vivado 2018.3: +0.917 ns setup WNS and
-  +0.017 ns hold WHS on the pixel clock. All overlay CDC paths are recognised
-  XPM handshakes.
+- The four-bank `zorro3-aga` build meets timing in Vivado 2018.3: +0.181 ns
+  setup and +0.024 ns hold on the 150 MHz pixel clock, where the worst paths
+  are in `video_source_sync`, not the overlay. The overlay crosses clock
+  domains only through its three XPM handshakes.
 
 ### Not yet qualified on hardware
 
