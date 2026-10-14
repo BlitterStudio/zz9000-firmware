@@ -346,19 +346,15 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 
 	/* Every P96 and cgxvideo client reaches the PL scaler through the existing
 	 * driver ABI; no player-specific interface is involved. Keep the software
-	 * compositor for rectangles that do not intersect the screen or exceed
-	 * the native line fetcher's source bounds. The native plane is also kept
-	 * 1:1-or-larger only: its line fetcher is paced one requested source row
-	 * per displayed row, and every window below the scanned source size run
-	 * on hardware showed just the frame's first rows and then black (A4000:
-	 * a 1920x1080 window, and a 720x576 MPEG-2 frame letterboxed to 720x405
-	 * in fullscreen, while upscaled and 1:1 windows of the same clips were
-	 * correct). What is scanned decides: a P96 source is scanned at full
-	 * size, an SDK video session's half-packed frame at half size, so a
-	 * >720p frame, or one larger than its window, still goes native into
-	 * that window (overlay_session_divisor). A session binds
-	 * to the overlay at its first frame, after this SET, but players begin
-	 * it first, so an open session means staging frames will be scanned. */
+	 * compositor for rectangles that do not intersect the screen, exceed the
+	 * native line fetcher's source bounds, or would need more than the native
+	 * plane's 1.5x downscale (overlay_native_fits). What is scanned decides:
+	 * a P96 source is scanned at full size, an SDK video session's half-packed
+	 * frame at half size, so a >720p frame, or one too large for its window,
+	 * still goes native into that window (overlay_session_divisor). A session
+	 * binds to the overlay at its first frame, after this SET, but players
+	 * begin it first, so an open session means staging frames will be
+	 * scanned. */
 	uint8_t was_hw_active = ov.hw_active;
 	uint32_t hw_src_addr = ov.src_addr;
 	uint8_t scan_div =
@@ -376,9 +372,8 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	ov.hw_handoff_addr = 0U;
 	ov.hw_active = 0;
 	if (overlay_hw_supported() && ov.active &&
-	    dst_w > 0 && dst_h > 0 &&
-	    (int32_t)dst_w >= (int32_t)(src_w / scan_div) &&
-	    (int32_t)dst_h >= (int32_t)(src_h / scan_div) &&
+	    overlay_native_fits(src_w / scan_div, src_h / scan_div,
+	                        dst_w, dst_h) &&
 	    dst_right > 0 && dst_bottom > 0 &&
 	    dst_x < (int32_t)vs->vmode_hsize &&
 	    dst_y < (int32_t)rows) {
