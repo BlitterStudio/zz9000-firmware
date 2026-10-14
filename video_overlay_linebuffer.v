@@ -2,17 +2,21 @@
 /*
  * P96 packed-YUV422 overlay line fetcher.
  *
- * The overlay VDMA is deliberately paced one source line at a time. Four
- * BRAM banks hold the displayed source line plus up to three later ones, so
- * the fetcher can run ahead of scanout. A downscale reads more source rows
- * than it displays; running ahead spreads the extra rows over several
- * raster lines instead of needing two whole rows inside one line. Bank
- * ownership is explicit: the pixel domain picks a bank that is empty or holds
- * a row the display has already passed (consumed_line), and the fetcher
- * drains skipped producer rows while tracking their real sequential row
- * numbers. The VDMA frame-start marker recovers a stopped/restarted or
- * overrun stream at the next frame instead of displaying source lines at the
- * wrong vertical position.
+ * The overlay VDMA is deliberately paced one source line at a time. BRAM
+ * banks (BANK_BITS sets how many) hold the two source rows the bilinear
+ * filter is blending plus later ones, so the fetcher can run ahead of
+ * scanout. A downscale blends more than one new source row per raster line;
+ * running ahead spreads those rows over several raster lines instead of
+ * needing two whole rows inside one line. Bank ownership is explicit: the
+ * pixel domain picks a bank that is empty or holds a row above the top row
+ * on display (consumed_line), and the fetcher drains skipped producer rows
+ * while tracking their real sequential row numbers. The VDMA frame-start
+ * marker recovers a stopped/restarted or overrun stream at the next frame
+ * instead of displaying source lines at the wrong vertical position.
+ *
+ * Every row is written to two copies, each split into even and odd
+ * macropixel words, so one pixel clock reads macropixels k and k+1 of both
+ * the top and the bottom row.
  *
  * Exactly one request is outstanding at a time. Each request carries a
  * toggle that its completion echoes, so a completion left over from before a
@@ -44,9 +48,19 @@ module video_overlay_linebuffer #(
 
   input                   pixel_clk,
   input                   display_enable,
-  input  [ADDR_WIDTH-1:0] read_addr,
+  /* Word addresses within a row, split by parity: a bilinear sample needs
+   * the two adjacent macropixels k and k+1, which are always one even and
+   * one odd word. */
+  input  [ADDR_WIDTH-2:0] read_addr_even,
+  input  [ADDR_WIDTH-2:0] read_addr_odd,
+  /* The two source rows a bilinear output row blends (equal at the bottom
+   * edge and for unscaled rows). */
   input  [11:0]           displayed_line,
-  output [31:0]           read_data,
+  input  [11:0]           displayed_line_next,
+  output [31:0]           read_top_even,
+  output [31:0]           read_top_odd,
+  output [31:0]           read_bottom_even,
+  output [31:0]           read_bottom_odd,
   output                  displayed_line_ready,
   output reg [11:0]       scheduler_line = 0,
   output reg [31:0]       accepted_generation = 0
@@ -54,12 +68,14 @@ module video_overlay_linebuffer #(
 
 localparam BANKS = 1 << BANK_BITS;
 localparam MAX_MACROPIXELS = (MAX_PIXELS + 1) / 2;
-/* Bank selection is the MSBs of the BRAM address, so each bank begins on a
- * 2**ADDR_WIDTH boundary. Allocate the complete address space; sizing this
- * as only BANKS*MAX_MACROPIXELS leaves the upper banks outside MEMORY_SIZE on
+/* Each row is stored twice (one copy per bilinear row port) and split into
+ * even and odd words, so four memories each hold half of every bank. Bank
+ * selection is the MSBs of the BRAM address, so each bank begins on a
+ * 2**(ADDR_WIDTH-1) boundary. Allocate the complete address space; sizing
+ * this to the used words leaves the upper banks outside MEMORY_SIZE on
  * hardware even though behavioral XPM simulation may appear to retain those
  * words. */
-localparam MEMORY_WORDS = (1 << (ADDR_WIDTH + BANK_BITS));
+localparam MEMORY_WORDS = (1 << (ADDR_WIDTH - 1 + BANK_BITS));
 localparam MSG_WIDTH = 12 + BANK_BITS + 1;
 localparam ST_SEEK_FRAME = 2'd0;
 localparam ST_READ_LINE  = 2'd1;
@@ -181,8 +197,6 @@ wire relabel_loaded_line = state == ST_WAIT_LINE && requested_line_pending &&
 wire write_in_range = write_addr < MAX_MACROPIXELS;
 wire [3:0] write_enable = (accept && storing_stream_line && write_in_range)
                             ? s_axis_tkeep : 4'b0000;
-wire [ADDR_WIDTH+BANK_BITS-1:0] memory_write_addr = {target_bank, write_addr};
-wire [ADDR_WIDTH+BANK_BITS-1:0] memory_read_addr;
 
 /* Do not let a newly restarted VDMA complete line zero before the pixel
  * domain has consumed the generation acknowledgement and invalidated the
@@ -372,52 +386,11 @@ end
  * so include that one write explicitly. */
 wire [3:0] memory_we = (accept && storing_seek_zero)
                        ? s_axis_tkeep : write_enable;
-wire [ADDR_WIDTH+BANK_BITS-1:0] effective_write_addr =
+wire [ADDR_WIDTH-1:0] write_word =
                        (state == ST_SEEK_FRAME || unexpected_sof)
-                         ? {target_bank, {ADDR_WIDTH{1'b0}}}
-                         : memory_write_addr;
-
-xpm_memory_sdpram #(
-  .MEMORY_SIZE(MEMORY_WORDS * 32),
-  .MEMORY_PRIMITIVE("block"),
-  .CLOCKING_MODE("independent_clock"),
-  .ECC_MODE("no_ecc"),
-  .MEMORY_INIT_FILE("none"),
-  .MEMORY_INIT_PARAM("0"),
-  .USE_MEM_INIT(0),
-  .WAKEUP_TIME("disable_sleep"),
-  .AUTO_SLEEP_TIME(0),
-  .MESSAGE_CONTROL(0),
-  .USE_EMBEDDED_CONSTRAINT(0),
-  .MEMORY_OPTIMIZATION("true"),
-  .WRITE_DATA_WIDTH_A(32),
-  .BYTE_WRITE_WIDTH_A(8),
-  .ADDR_WIDTH_A(ADDR_WIDTH + BANK_BITS),
-  .RST_MODE_A("SYNC"),
-  .READ_DATA_WIDTH_B(32),
-  .ADDR_WIDTH_B(ADDR_WIDTH + BANK_BITS),
-  .READ_RESET_VALUE_B("0"),
-  .READ_LATENCY_B(1),
-  .WRITE_MODE_B("read_first"),
-  .RST_MODE_B("SYNC")
-) overlay_line_memory (
-  .sleep(1'b0),
-  .clka(axis_clk),
-  .ena(1'b1),
-  .wea(memory_we),
-  .addra(effective_write_addr),
-  .dina(s_axis_tdata),
-  .injectsbiterra(1'b0),
-  .injectdbiterra(1'b0),
-  .clkb(pixel_clk),
-  .rstb(1'b0),
-  .enb(1'b1),
-  .regceb(1'b1),
-  .addrb(memory_read_addr),
-  .doutb(read_data),
-  .sbiterrb(),
-  .dbiterrb()
-);
+                         ? {ADDR_WIDTH{1'b0}} : write_addr;
+wire [ADDR_WIDTH+BANK_BITS-2:0] memory_write_addr =
+                       {target_bank, write_word[ADDR_WIDTH-1:1]};
 
 /* Pixel-domain ready tags are updated only from atomic completion messages.
  * A fetch request invalidates its destination bank before the AXI domain can
@@ -429,8 +402,10 @@ reg [BANK_BITS-1:0] request_bank = 0;
 reg request_toggle = 0;
 reg [BANKS-1:0] bank_free = 0;
 
-wire [BANKS-1:0] displayed_match;
-reg [BANK_BITS-1:0] displayed_bank;
+wire [BANKS-1:0] top_match;
+wire [BANKS-1:0] bottom_match;
+reg [BANK_BITS-1:0] top_bank;
+reg [BANK_BITS-1:0] bottom_bank;
 reg [BANK_BITS-1:0] free_bank;
 integer b;
 
@@ -438,24 +413,83 @@ genvar g;
 generate
   for (g = 0; g < BANKS; g = g + 1) begin : bank_tags
     initial pixel_ready_line[g] = 12'hfff;
-    assign displayed_match[g] = pixel_ready_valid[g] &&
-                                pixel_ready_line[g] == displayed_line;
+    assign top_match[g] = pixel_ready_valid[g] &&
+                          pixel_ready_line[g] == displayed_line;
+    assign bottom_match[g] = pixel_ready_valid[g] &&
+                             pixel_ready_line[g] == displayed_line_next;
   end
 endgenerate
 
 always @* begin
-  displayed_bank = 0;
+  top_bank = 0;
   for (b = BANKS - 1; b >= 0; b = b - 1)
-    if (displayed_match[b])
-      displayed_bank = b;
+    if (top_match[b])
+      top_bank = b;
+  bottom_bank = 0;
+  for (b = BANKS - 1; b >= 0; b = b - 1)
+    if (bottom_match[b])
+      bottom_bank = b;
   free_bank = 0;
   for (b = BANKS - 1; b >= 0; b = b - 1)
     if (bank_free[b])
       free_bank = b;
 end
 
-assign memory_read_addr = {displayed_bank, read_addr};
-assign displayed_line_ready = display_enable && |displayed_match;
+/* Memory m: bit 1 selects the row copy (0 top, 1 bottom), bit 0 the word
+ * parity. Every beat is written to both copies of its parity. */
+wire [31:0] read_data [0:3];
+generate
+  for (g = 0; g < 4; g = g + 1) begin : line_memory
+    xpm_memory_sdpram #(
+      .MEMORY_SIZE(MEMORY_WORDS * 32),
+      .MEMORY_PRIMITIVE("block"),
+      .CLOCKING_MODE("independent_clock"),
+      .ECC_MODE("no_ecc"),
+      .MEMORY_INIT_FILE("none"),
+      .MEMORY_INIT_PARAM("0"),
+      .USE_MEM_INIT(0),
+      .WAKEUP_TIME("disable_sleep"),
+      .AUTO_SLEEP_TIME(0),
+      .MESSAGE_CONTROL(0),
+      .USE_EMBEDDED_CONSTRAINT(0),
+      .MEMORY_OPTIMIZATION("true"),
+      .WRITE_DATA_WIDTH_A(32),
+      .BYTE_WRITE_WIDTH_A(8),
+      .ADDR_WIDTH_A(ADDR_WIDTH - 1 + BANK_BITS),
+      .RST_MODE_A("SYNC"),
+      .READ_DATA_WIDTH_B(32),
+      .ADDR_WIDTH_B(ADDR_WIDTH - 1 + BANK_BITS),
+      .READ_RESET_VALUE_B("0"),
+      .READ_LATENCY_B(1),
+      .WRITE_MODE_B("read_first"),
+      .RST_MODE_B("SYNC")
+    ) memory (
+      .sleep(1'b0),
+      .clka(axis_clk),
+      .ena(1'b1),
+      .wea(write_word[0] == (g % 2) ? memory_we : 4'b0000),
+      .addra(memory_write_addr),
+      .dina(s_axis_tdata),
+      .injectsbiterra(1'b0),
+      .injectdbiterra(1'b0),
+      .clkb(pixel_clk),
+      .rstb(1'b0),
+      .enb(1'b1),
+      .regceb(1'b1),
+      .addrb({(g / 2) ? bottom_bank : top_bank,
+              (g % 2) ? read_addr_odd : read_addr_even}),
+      .doutb(read_data[g]),
+      .sbiterrb(),
+      .dbiterrb()
+    );
+  end
+endgenerate
+
+assign read_top_even = read_data[0];
+assign read_top_odd = read_data[1];
+assign read_bottom_even = read_data[2];
+assign read_bottom_odd = read_data[3];
+assign displayed_line_ready = display_enable && |top_match && |bottom_match;
 assign fetch_ready = display_enable && !request_inflight && |bank_free;
 
 always @(posedge pixel_clk) begin

@@ -23,9 +23,11 @@ rm -rf "$SIMDIR"
 mkdir -p "$SIMDIR"
 cd "$SIMDIR"
 cp "$ROOT/video_formatter.v" "$ROOT/video_source_sync.v" \
-   "$ROOT/video_overlay_pixel.v" "$ROOT/video_overlay_linebuffer.v" .
-cp "$HERE/video_overlay_scale_tb.v" "$HERE/video_overlay_linebuffer_tb.v" .
-SOURCES="video_formatter.v video_source_sync.v video_overlay_pixel.v video_overlay_linebuffer.v video_overlay_scale_tb.v video_overlay_linebuffer_tb.v"
+   "$ROOT/video_overlay_pixel.v" "$ROOT/video_overlay_linebuffer.v" \
+   "$ROOT/video_overlay_filter.v" .
+cp "$HERE/video_overlay_scale_tb.v" "$HERE/video_overlay_linebuffer_tb.v" \
+   "$HERE/overlay_bilinear_ref.vh" .
+SOURCES="video_formatter.v video_source_sync.v video_overlay_pixel.v video_overlay_linebuffer.v video_overlay_filter.v video_overlay_scale_tb.v video_overlay_linebuffer_tb.v"
 
 tool() {
     local name="$1"; shift
@@ -59,6 +61,7 @@ POS_X=-10 POS_Y=-7
 SRC_W=36 SRC_H=20
 SRC_W=72 SRC_H=41
 SRC_W=72 SRC_H=80
+SRC_W=71 SRC_H=33 DST_W=97 DST_H=50 POS_X=-5
 SRC_W=100 SRC_H=41
 SWITCH=1 STOP_FRAMES=0 SET_DELAY=3000 SRC_W=36 SRC_H=29 DST_W=56 DST_H=31 NEW_SRC_W=72 NEW_SRC_H=58 NEW_DST_W=160 NEW_DST_H=96 NEW_POS_X=0 NEW_POS_Y=0
 SWITCH=1 STOP_FRAMES=1 SET_DELAY=2500 SRC_W=72 SRC_H=58 DST_W=60 DST_H=40 NEW_CANVAS_W=102 NEW_CANVAS_H=77 NEW_DVI_HALF_PS=7700 NEW_DST_W=102 NEW_DST_H=57 NEW_POS_X=0 NEW_POS_Y=10

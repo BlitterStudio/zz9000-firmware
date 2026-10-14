@@ -3,7 +3,7 @@
  * (ZZ9000OS)
  *
  * P96 video window (PIP) overlay. Packed-YUV windows with a visible screen
- * intersection use the native PL overlay plane, including nearest-neighbour
+ * intersection use the native PL overlay plane, including bilinear
  * scaling and clipping. Unsupported geometries retain the software shadow
  * compositor. SDK planar video frames are packed into two staging buffers
  * and handed to the same PL plane at vblank.

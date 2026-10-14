@@ -126,30 +126,36 @@ reg [15:0] overlay_source_height = 0;
 reg [23:0] overlay_key_rgb = 0;
 reg [31:0] overlay_frame_generation = 0;
 
-/* Scaling ratios are reduced to exact quotient/remainder steps outside the
- * pixel path. A small restoring divider runs only after geometry changes;
- * scanout itself then needs one add, one compare, and one subtract. */
+/* Scaling uses 16.16 fixed-point source positions. After a geometry change
+ * a small restoring divider computes step = (source << 16) / destination per
+ * axis, then the position of the first visible output pixel, centre-aligned:
+ * (d + 0.5) * step - 0.5 at d = clip. Scanout then needs one add per pixel
+ * and per row. */
 reg [15:0] overlay_calc_x = 0;
 reg [15:0] overlay_calc_y = 0;
 reg [15:0] overlay_calc_width = 0;
 reg [15:0] overlay_calc_height = 0;
 reg [15:0] overlay_calc_source_width = 0;
 reg [15:0] overlay_calc_source_height = 0;
-reg [31:0] overlay_calc_x_clip_product = 0;
-reg [31:0] overlay_calc_y_clip_product = 0;
-reg [15:0] overlay_x_step_integer = 0;
-reg [15:0] overlay_x_step_remainder = 0;
-reg [15:0] overlay_y_step_integer = 0;
-reg [15:0] overlay_y_step_remainder = 0;
-reg [15:0] overlay_x_start_source = 0;
-reg [15:0] overlay_x_start_remainder = 0;
-reg [15:0] overlay_y_start_source = 0;
-reg [15:0] overlay_y_start_remainder = 0;
+reg [15:0] overlay_calc_clip_x = 0;
+reg [15:0] overlay_calc_clip_y = 0;
+reg [31:0] overlay_x_step = 0;
+reg [31:0] overlay_y_step = 0;
+reg [47:0] overlay_x_clip_product = 0;
+reg [47:0] overlay_y_clip_product = 0;
+reg signed [31:0] overlay_x_start = 0;
+reg signed [31:0] overlay_y_start = 0;
+/* Last luma pixel, last macropixel word and last row of the source: the
+ * bilinear neighbours clamp there. */
+reg [11:0] overlay_luma_max = 0;
+reg [11:0] overlay_word_max = 0;
+reg [11:0] overlay_row_max = 0;
 reg overlay_scale_ready = 0;
 reg [31:0] overlay_scale_epoch = 0;
 
 reg overlay_div_busy = 0;
-reg [1:0] overlay_div_kind = 0;
+reg overlay_div_kind = 0;
+reg [1:0] overlay_start_stage = 0;
 reg [5:0] overlay_div_bit = 0;
 reg [31:0] overlay_dividend = 0;
 reg [15:0] overlay_divisor = 1;
@@ -253,8 +259,6 @@ reg [11:0] sprite_px; // vga domain
 reg [11:0] sprite_py; // vga domain
 reg [23:0] sprite_pix; // vga domain
 reg sprite_on; // vga domain
-reg [23:0] sprite_pix_d1, sprite_pix_d2, sprite_pix_d3, sprite_pix_d4;
-reg sprite_on_d1, sprite_on_d2, sprite_on_d3, sprite_on_d4;
 reg [11:0] vga_report_y; // vga domain
 reg [11:0] vga_report_y_next; // vga domain
 reg vga_selected_palette; // vga domain
@@ -609,20 +613,22 @@ always @(posedge m_axis_vid_aclk) begin
     overlay_calc_height <= 0;
     overlay_calc_source_width <= 0;
     overlay_calc_source_height <= 0;
-    overlay_calc_x_clip_product <= 0;
-    overlay_calc_y_clip_product <= 0;
-    overlay_x_step_integer <= 0;
-    overlay_x_step_remainder <= 0;
-    overlay_y_step_integer <= 0;
-    overlay_y_step_remainder <= 0;
-    overlay_x_start_source <= 0;
-    overlay_x_start_remainder <= 0;
-    overlay_y_start_source <= 0;
-    overlay_y_start_remainder <= 0;
+    overlay_calc_clip_x <= 0;
+    overlay_calc_clip_y <= 0;
+    overlay_x_step <= 0;
+    overlay_y_step <= 0;
+    overlay_x_clip_product <= 0;
+    overlay_y_clip_product <= 0;
+    overlay_x_start <= 0;
+    overlay_y_start <= 0;
+    overlay_luma_max <= 0;
+    overlay_word_max <= 0;
+    overlay_row_max <= 0;
     overlay_scale_ready <= 0;
     overlay_scale_epoch <= 0;
     overlay_div_busy <= 0;
     overlay_div_kind <= 0;
+    overlay_start_stage <= 0;
     overlay_div_bit <= 0;
     overlay_dividend <= 0;
     overlay_divisor <= 1;
@@ -635,18 +641,21 @@ always @(posedge m_axis_vid_aclk) begin
     overlay_calc_height <= overlay_height;
     overlay_calc_source_width <= overlay_source_width;
     overlay_calc_source_height <= overlay_source_height;
-    overlay_calc_x_clip_product <= overlay_clip_x *
-                                   overlay_source_width;
-    overlay_calc_y_clip_product <= overlay_clip_y *
-                                   overlay_source_height;
+    overlay_calc_clip_x <= overlay_clip_x;
+    overlay_calc_clip_y <= overlay_clip_y;
+    overlay_luma_max <= overlay_source_width[11:0] - 1'b1;
+    overlay_word_max <= overlay_source_width[12:1] + overlay_source_width[0]
+                        - 1'b1;
+    overlay_row_max <= overlay_source_height[11:0] - 1'b1;
     overlay_scale_ready <= 0;
+    overlay_start_stage <= 0;
     overlay_div_busy <= overlay_width != 0 &&
                         overlay_height != 0 &&
                         overlay_source_width != 0 &&
                         overlay_source_height != 0;
     overlay_div_kind <= 0;
     overlay_div_bit <= 31;
-    overlay_dividend <= {16'b0, overlay_source_width};
+    overlay_dividend <= {overlay_source_width, 16'b0};
     overlay_divisor <= overlay_width != 0 ? overlay_width : 16'b1;
     overlay_div_quotient <= 0;
     overlay_div_remainder <= 0;
@@ -659,44 +668,46 @@ always @(posedge m_axis_vid_aclk) begin
       overlay_div_bit <= 31;
       overlay_div_quotient <= 0;
       overlay_div_remainder <= 0;
-      case (overlay_div_kind)
-        2'd0: begin
-          overlay_x_step_integer <= overlay_div_result_quotient[15:0];
-          overlay_x_step_remainder <= overlay_div_result_remainder[15:0];
-          overlay_div_kind <= 1;
-          overlay_dividend <= {16'b0, overlay_calc_source_height};
-          overlay_divisor <= overlay_calc_height;
-        end
-        2'd1: begin
-          overlay_y_step_integer <= overlay_div_result_quotient[15:0];
-          overlay_y_step_remainder <= overlay_div_result_remainder[15:0];
-          overlay_div_kind <= 2;
-          overlay_dividend <= overlay_calc_x_clip_product;
-          overlay_divisor <= overlay_calc_width;
-        end
-        2'd2: begin
-          overlay_x_start_source <= overlay_div_result_quotient[15:0];
-          overlay_x_start_remainder <=
-            overlay_div_result_remainder[15:0];
-          overlay_div_kind <= 3;
-          overlay_dividend <= overlay_calc_y_clip_product;
-          overlay_divisor <= overlay_calc_height;
-        end
-        default: begin
-          overlay_y_start_source <= overlay_div_result_quotient[15:0];
-          overlay_y_start_remainder <=
-            overlay_div_result_remainder[15:0];
-          overlay_div_busy <= 0;
-          overlay_scale_ready <= 1;
-          overlay_scale_epoch <= overlay_scale_epoch + 1'b1;
-        end
-      endcase
+      if (!overlay_div_kind) begin
+        overlay_x_step <= overlay_div_result_quotient;
+        overlay_div_kind <= 1;
+        overlay_dividend <= {overlay_calc_source_height, 16'b0};
+        overlay_divisor <= overlay_calc_height;
+      end else begin
+        overlay_y_step <= overlay_div_result_quotient;
+        overlay_div_busy <= 0;
+        overlay_start_stage <= 1;
+      end
     end
+  end else if (overlay_start_stage == 1) begin
+    /* clip * step fits 32 bits for any clip inside the destination:
+     * it is the source position of the first visible pixel. */
+    overlay_x_clip_product <= overlay_calc_clip_x * overlay_x_step;
+    overlay_y_clip_product <= overlay_calc_clip_y * overlay_y_step;
+    overlay_start_stage <= 2;
+  end else if (overlay_start_stage == 2) begin
+    overlay_x_start <= $signed(overlay_x_clip_product[31:0]) +
+                       $signed({1'b0, overlay_x_step[31:1]}) -
+                       32'sd32768;
+    overlay_y_start <= $signed(overlay_y_clip_product[31:0]) +
+                       $signed({1'b0, overlay_y_step[31:1]}) -
+                       32'sd32768;
+    overlay_start_stage <= 0;
+    overlay_scale_ready <= 1;
+    overlay_scale_epoch <= overlay_scale_epoch + 1'b1;
   end
 end
 
 localparam PIPE_DELAY = 4;
-localparam OVERLAY_PIPE_DELAY = 4;
+/* The bilinear filter between the line buffer and the YUV converter. */
+localparam OVERLAY_FILTER_DELAY = 5;
+localparam OVERLAY_PIPE_DELAY = 4 + OVERLAY_FILTER_DELAY;
+/* Sprite pixels delayed to match the overlay pipeline. */
+reg [24*OVERLAY_PIPE_DELAY-1:0] sprite_pix_delay = 0;
+reg [OVERLAY_PIPE_DELAY-1:0] sprite_on_delay = 0;
+wire [23:0] sprite_pix_overlay =
+  sprite_pix_delay[24*OVERLAY_PIPE_DELAY-1 -: 24];
+wire sprite_on_overlay = sprite_on_delay[OVERLAY_PIPE_DELAY-1];
 
 reg [31:0] palout;
 reg [11:0] vga_v_rez;
@@ -750,43 +761,41 @@ reg signed [15:0] vga_overlay_x = 0;
 reg signed [15:0] vga_overlay_y = 0;
 reg [15:0] vga_overlay_width = 0;
 reg [15:0] vga_overlay_height = 0;
-reg [15:0] vga_overlay_x_step_integer = 0;
-reg [15:0] vga_overlay_x_step_remainder = 0;
-reg [15:0] vga_overlay_y_step_integer = 0;
-reg [15:0] vga_overlay_y_step_remainder = 0;
-reg [15:0] vga_overlay_x_start_source = 0;
-reg [15:0] vga_overlay_x_start_remainder = 0;
-reg [15:0] vga_overlay_y_start_source = 0;
-reg [15:0] vga_overlay_y_start_remainder = 0;
+reg [31:0] vga_overlay_x_step = 0;
+reg [31:0] vga_overlay_y_step = 0;
+reg signed [31:0] vga_overlay_x_start = 0;
+reg signed [31:0] vga_overlay_y_start = 0;
+reg [11:0] vga_overlay_luma_max = 0;
+reg [11:0] vga_overlay_word_max = 0;
+reg [11:0] vga_overlay_row_max = 0;
 reg [31:0] vga_overlay_scale_epoch = 0;
 reg [31:0] overlay_applied_scale_epoch = 0;
 reg [23:0] vga_overlay_key_rgb = 0;
 reg [31:0] vga_overlay_frame_generation = 0;
 reg [11:0] overlay_fetch_line = 0;
 reg overlay_fetch_request = 0;
-reg [15:0] overlay_scale_read_x = 0;
-/* Only the luma-phase bit of the delayed scale read position is consumed
- * (see overlay_selected_luma_phase). */
-reg overlay_scale_read_x_d1 = 0;
-reg [15:0] overlay_scale_x_error = 0;
-reg [15:0] overlay_scale_source_y = 0;
-reg [15:0] overlay_scale_y_error = 0;
-reg [15:0] vga_overlay_x_step_threshold = 1;
-reg [15:0] vga_overlay_y_step_threshold = 1;
+/* 16.16 source positions. overlay_pos_x belongs to the pixel whose line
+ * buffer read is presented in this cycle; overlay_pos_y to the raster row
+ * after the current one once h_rez has passed. */
+reg signed [31:0] overlay_pos_x = 0;
+reg signed [31:0] overlay_pos_y = 0;
 
 /* Coordinate state advances with the raster counters, but is registered
  * separately so overlay window/tag arithmetic never sits on the same
  * 150 MHz path as the fetch scheduler or BRAM bank selection. */
 reg signed [16:0] overlay_screen_x_position = 0;
 reg signed [16:0] overlay_local_x_position = 0;
-reg signed [16:0] overlay_read_x_position = 1;
 reg signed [16:0] overlay_screen_x_origin = 0;
 reg signed [16:0] overlay_local_x_origin = 0;
 reg signed [16:0] overlay_screen_y_origin = 0;
 reg signed [16:0] overlay_local_y_origin = 0;
 reg signed [16:0] overlay_screen_y_row = 0;
 reg signed [16:0] overlay_local_y_row = 0;
+/* The two source rows the current raster row blends, and the weight of the
+ * lower one. */
 reg [11:0] overlay_displayed_line_row = 0;
+reg [11:0] overlay_displayed_next_row = 0;
+reg [7:0] overlay_row_weight = 0;
 reg signed [16:0] overlay_visible_x1_unclipped_pre = 0;
 reg signed [16:0] overlay_visible_x0_minus_one = -1;
 reg signed [16:0] overlay_visible_x1_minus_one = -1;
@@ -800,70 +809,92 @@ reg overlay_scheduler_screen_y_nonnegative = 0;
  * window clipped at the screen bottom must not count them as consumed. */
 reg overlay_scheduler_row_visible = 0;
 
-/* Fetch-side vertical stepper. It walks the same source-row sequence as the
- * raster stepper, but at fetch pace: it issues each distinct source row once,
- * as soon as the line fetcher has a free bank, so fetching runs ahead of the
- * display instead of following it one row at a time. A 1:1 overlay is the
- * same sequence with a step of one. */
+/* Fetch-side row counter. The bilinear filter reads source rows r and r+1
+ * for every output row, and the native plane scales down at most 2x, so
+ * every source row from the window's first to the frame's last is needed:
+ * the fetcher issues them in order as soon as the line fetcher has a free
+ * bank, running ahead of the display. */
 reg [11:0] overlay_fetch_row = 0;
-reg [15:0] overlay_fetch_error = 0;
-reg [11:0] overlay_fetch_index = 0;
 reg overlay_fetch_issued = 0;
 reg overlay_fetch_active = 0;
 /* Set when the raster leaves the visible frame; the next generation clears
  * it. No request may be in flight across the vblank buffer flip. */
 reg overlay_frame_fetch_done = 0;
-/* Source row on display in the window; banks holding older rows are free. */
+/* Top source row on display in the window; banks holding older rows are
+ * free. */
 reg [11:0] overlay_consumed_line = 0;
 reg overlay_consumed_valid = 0;
 wire overlay_fetch_ready;
-wire overlay_fetch_carry =
-  overlay_fetch_error >= vga_overlay_y_step_threshold;
-wire [11:0] overlay_fetch_next_row =
-  overlay_fetch_row + vga_overlay_y_step_integer[11:0] + overlay_fetch_carry;
-/* An upscale maps several window rows to one source row. */
-wire overlay_fetch_repeat =
-  vga_overlay_y_step_integer == 0 && !overlay_fetch_carry;
-wire overlay_fetch_can_step =
-  {4'b0, overlay_fetch_index} + 16'd1 < vga_overlay_height;
 wire overlay_fetch_passed = overlay_consumed_valid &&
   overlay_fetch_row < overlay_consumed_line;
-/* A window clipped at the top starts at its first visible row. */
-wire [11:0] overlay_fetch_first_index =
-  vga_overlay_y < 0 ? (~vga_overlay_y[11:0] + 1'b1) : 12'd0;
 
 wire signed [16:0] overlay_screen_x = overlay_screen_x_position;
 wire signed [16:0] overlay_screen_y = overlay_screen_y_row;
 wire signed [16:0] overlay_local_x = overlay_local_x_position;
 wire signed [16:0] overlay_local_y = overlay_local_y_row;
-reg vga_overlay_scaling = 0;
 wire overlay_in_window = vga_overlay_enable &&
   overlay_local_x >= 0 && overlay_local_y >= 0 &&
   overlay_local_x < $signed({1'b0, vga_overlay_width}) &&
   overlay_local_y < $signed({1'b0, vga_overlay_height});
 wire [11:0] overlay_displayed_line = overlay_displayed_line_row;
-wire signed [16:0] overlay_read_x = overlay_read_x_position;
-wire [15:0] overlay_selected_read_x =
-  vga_overlay_scaling ? overlay_scale_read_x : overlay_read_x[15:0];
-wire overlay_selected_luma_phase =
-  vga_overlay_scaling ? overlay_scale_read_x_d1 : overlay_local_x[0];
-wire [10:0] overlay_read_addr = overlay_selected_read_x[11:1];
-wire overlay_scale_x_carry =
-  overlay_scale_x_error >= vga_overlay_x_step_threshold;
-wire overlay_scale_y_carry =
-  overlay_scale_y_error >= vga_overlay_y_step_threshold;
-wire [15:0] overlay_scale_x_error_added =
-  overlay_scale_x_error + vga_overlay_x_step_remainder;
-wire [15:0] overlay_scale_x_error_wrapped =
-  overlay_scale_x_error - vga_overlay_x_step_threshold;
-wire [15:0] overlay_scale_y_error_added =
-  overlay_scale_y_error + vga_overlay_y_step_remainder;
-wire [15:0] overlay_scale_y_error_wrapped =
-  overlay_scale_y_error - vga_overlay_y_step_threshold;
-wire [16:0] overlay_scale_next_source_y =
-  {1'b0, overlay_scale_source_y} +
-  {1'b0, vga_overlay_y_step_integer} +
-  overlay_scale_y_carry;
+
+/* Integer part of a non-negative 16.16 position, saturated to 12 bits. */
+function [11:0] overlay_floor12;
+  input signed [31:0] pos;
+  begin
+    if (pos < 0)
+      overlay_floor12 = 12'd0;
+    else if (pos[30:28] != 3'd0)
+      overlay_floor12 = 12'hfff;
+    else
+      overlay_floor12 = pos[27:16];
+  end
+endfunction
+
+/* Horizontal sample geometry of the pixel being read. Luma blends pixels
+ * i and i+1; chroma, co-sited with the even luma, blends macropixels k and
+ * k+1 at position pos/2. i lies in macropixel k and i+1 in k or k+1, so one
+ * even and one odd word per row cover every sample. Both clamp at the
+ * source edge with weight zero. */
+wire signed [31:0] overlay_pos_c = overlay_pos_x >>> 1;
+wire [11:0] overlay_luma_floor = overlay_floor12(overlay_pos_x);
+wire [11:0] overlay_word_floor = overlay_floor12(overlay_pos_c);
+wire overlay_luma_edge = overlay_luma_floor >= vga_overlay_luma_max;
+wire overlay_word_edge = overlay_word_floor >= vga_overlay_word_max;
+wire [11:0] overlay_luma_i =
+  overlay_luma_edge ? vga_overlay_luma_max : overlay_luma_floor;
+wire [11:0] overlay_word_k =
+  overlay_word_edge ? vga_overlay_word_max : overlay_word_floor;
+wire [7:0] overlay_luma_weight =
+  (overlay_pos_x < 0 || overlay_luma_edge) ? 8'd0 : overlay_pos_x[15:8];
+wire [7:0] overlay_chroma_weight =
+  (overlay_pos_c < 0 || overlay_word_edge) ? 8'd0 : overlay_pos_c[15:8];
+/* Word k < 1280, so k / 2 fits the line buffer's 10-bit half-row address. */
+wire [9:0] overlay_read_addr_odd = overlay_word_k[10:1];
+wire [9:0] overlay_read_addr_even =
+  overlay_word_k[10:1] + (overlay_word_k[0] && !overlay_word_edge);
+
+/* Vertical sample geometry of the next raster row, registered at the line
+ * wrap: the first row of a frame starts at the clipped start position. */
+wire signed [31:0] overlay_row_pos_select;
+wire [11:0] overlay_row_floor = overlay_floor12(overlay_row_pos_select);
+wire overlay_row_edge = overlay_row_floor >= vga_overlay_row_max;
+wire [11:0] overlay_row_r =
+  overlay_row_edge ? vga_overlay_row_max : overlay_row_floor;
+wire [11:0] overlay_row_r1 =
+  overlay_row_edge ? vga_overlay_row_max : overlay_row_floor + 1'b1;
+wire [7:0] overlay_row_w = (overlay_row_pos_select < 0 || overlay_row_edge)
+  ? 8'd0 : overlay_row_pos_select[15:8];
+/* The fetcher starts at the first visible row's top source row. */
+wire [11:0] overlay_fetch_start_floor = overlay_floor12(vga_overlay_y_start);
+wire [11:0] overlay_fetch_first_row =
+  overlay_fetch_start_floor >= vga_overlay_row_max
+    ? vga_overlay_row_max : overlay_fetch_start_floor;
+
+wire [31:0] overlay_read_top_even;
+wire [31:0] overlay_read_top_odd;
+wire [31:0] overlay_read_bottom_even;
+wire [31:0] overlay_read_bottom_odd;
 wire [31:0] overlay_yuv422;
 wire overlay_line_ready;
 wire [31:0] overlay_accepted_generation;
@@ -917,6 +948,8 @@ wire frame_wrap_this_line = source_sync_line_uses_sync
   : counter_y >= vga_v_max;
 wire [11:0] next_raster_y = frame_wrap_this_line
   ? 12'b0 : counter_y + 1'b1;
+assign overlay_row_pos_select =
+  frame_wrap_this_line ? vga_overlay_y_start : overlay_pos_y;
 reg [11:0] next_raster_y_staged = 0;
 wire [11:0] staged_next_scanout_content_y =
   next_raster_y_staged - vga_viewport_y;
@@ -1123,7 +1156,10 @@ always @(posedge m_axis_vid_aclk) begin
   end
 end
 
-video_overlay_linebuffer overlay_linebuffer (
+/* Eight banks: the two rows on display and up to six ahead. A bilinear
+ * downscale consumes up to two new rows per raster line, so the lookahead
+ * must absorb those bursts from a stream that delivers one row at a time. */
+video_overlay_linebuffer #(.BANK_BITS(3)) overlay_linebuffer (
   .axis_clk(m_axis_vid_aclk),
   .axis_resetn(aresetn),
   .s_axis_tdata(overlay_axis_tdata),
@@ -1138,9 +1174,14 @@ video_overlay_linebuffer overlay_linebuffer (
   .fetch_request(overlay_fetch_request),
   .pixel_clk(dvi_clk),
   .display_enable(vga_overlay_enable && vga_overlay_source_mode == 0),
-  .read_addr(overlay_read_addr),
+  .read_addr_even(overlay_read_addr_even),
+  .read_addr_odd(overlay_read_addr_odd),
   .displayed_line(overlay_displayed_line),
-  .read_data(overlay_yuv422),
+  .displayed_line_next(overlay_displayed_next_row),
+  .read_top_even(overlay_read_top_even),
+  .read_top_odd(overlay_read_top_odd),
+  .read_bottom_even(overlay_read_bottom_even),
+  .read_bottom_odd(overlay_read_bottom_odd),
   .displayed_line_ready(overlay_line_ready),
   .scheduler_line(overlay_scheduler_line),
   .fetch_ready(overlay_fetch_ready),
@@ -1149,19 +1190,47 @@ video_overlay_linebuffer overlay_linebuffer (
   .accepted_generation(overlay_accepted_generation)
 );
 
+video_overlay_filter overlay_filter (
+  .clk(dvi_clk),
+  .variant(vga_overlay_variant),
+  .luma_odd(overlay_luma_i[0]),
+  .luma_edge(overlay_luma_edge),
+  .luma_weight(overlay_luma_weight),
+  .word_odd(overlay_word_k[0]),
+  .word_edge(overlay_word_edge),
+  .chroma_weight(overlay_chroma_weight),
+  .row_weight(overlay_row_weight),
+  .top_even(overlay_read_top_even),
+  .top_odd(overlay_read_top_odd),
+  .bottom_even(overlay_read_bottom_even),
+  .bottom_odd(overlay_read_bottom_odd),
+  .yuv422(overlay_yuv422)
+);
+
+/* The base pixel and the window decision belong to the cycle the line
+ * buffer words arrive; hold them for the filter latency. */
+reg [24*OVERLAY_FILTER_DELAY-1:0] overlay_base_delay = 0;
+reg [OVERLAY_FILTER_DELAY-1:0] overlay_draw_delay = 0;
+always @(posedge dvi_clk) begin
+  overlay_base_delay <= {overlay_base_delay[24*OVERLAY_FILTER_DELAY-25:0],
+                         pixout[23:0]};
+  overlay_draw_delay <= {overlay_draw_delay[OVERLAY_FILTER_DELAY-2:0],
+                         overlay_in_window && overlay_line_ready &&
+                         vga_overlay_source_mode == 0};
+end
+
 wire [23:0] overlay_rgb;
 wire overlay_pixel_active;
 video_overlay_pixel overlay_pixel (
   .clk(dvi_clk),
   .resetn(aresetn),
-  .base_rgb(pixout[23:0]),
+  .base_rgb(overlay_base_delay[24*OVERLAY_FILTER_DELAY-1 -: 24]),
   .key_rgb(vga_overlay_key_rgb),
   .key_enable(vga_overlay_key_enable),
-  .overlay_enable(overlay_in_window && overlay_line_ready &&
-                  vga_overlay_source_mode == 0),
+  .overlay_enable(overlay_draw_delay[OVERLAY_FILTER_DELAY-1]),
   .yuv422(overlay_yuv422),
-  .variant(vga_overlay_variant),
-  .luma_phase(overlay_selected_luma_phase),
+  .variant(3'd0),
+  .luma_phase(1'b0),
   .out_rgb(overlay_rgb),
   .out_overlay(overlay_pixel_active)
 );
@@ -1169,8 +1238,8 @@ video_overlay_pixel overlay_pixel (
 wire [31:0] pixout_composited = vga_overlay_enable
   ? {8'b0, overlay_rgb} : pixout;
 wire [31:0] composed_rgb = vga_overlay_enable
-  ? ((sprite_on_d4 && sprite_pix_d4 != 'hff00ff)
-      ? sprite_pix_d4 : pixout_sl)
+  ? ((sprite_on_overlay && sprite_pix_overlay != 'hff00ff)
+      ? sprite_pix_overlay : pixout_sl)
   : ((sprite_on && sprite_pix != 'hff00ff) ? sprite_pix : pixout_sl);
 wire signed [16:0] viewport_output_x = viewport_output_x_position;
 wire [11:0] viewport_output_y = viewport_output_y_row;
@@ -1319,24 +1388,15 @@ always @(posedge dvi_clk) begin
     vga_overlay_y <= overlay_y;
     vga_overlay_width <= overlay_width;
     vga_overlay_height <= overlay_height;
-    vga_overlay_x_step_integer <= overlay_x_step_integer;
-    vga_overlay_x_step_remainder <= overlay_x_step_remainder;
-    vga_overlay_y_step_integer <= overlay_y_step_integer;
-    vga_overlay_y_step_remainder <= overlay_y_step_remainder;
-    vga_overlay_x_start_source <= overlay_x_start_source;
-    vga_overlay_x_start_remainder <= overlay_x_start_remainder;
-    vga_overlay_y_start_source <= overlay_y_start_source;
-    vga_overlay_y_start_remainder <= overlay_y_start_remainder;
+    vga_overlay_x_step <= overlay_x_step;
+    vga_overlay_y_step <= overlay_y_step;
+    vga_overlay_x_start <= overlay_x_start;
+    vga_overlay_y_start <= overlay_y_start;
+    vga_overlay_luma_max <= overlay_luma_max;
+    vga_overlay_word_max <= overlay_word_max;
+    vga_overlay_row_max <= overlay_row_max;
     vga_overlay_scale_epoch <= overlay_scale_epoch;
     vga_overlay_key_rgb <= overlay_key_rgb;
-    vga_overlay_scaling <=
-      overlay_source_width != overlay_width ||
-      overlay_source_height != overlay_height ||
-      overlay_x < 0 || overlay_y < 0;
-    vga_overlay_x_step_threshold <=
-      overlay_width - overlay_x_step_remainder;
-    vga_overlay_y_step_threshold <=
-      overlay_height - overlay_y_step_remainder;
   end
 
   /* Geometry is stable for a frame. Split clipped-bound and origin
@@ -1366,37 +1426,21 @@ always @(posedge dvi_clk) begin
     overlay_local_y < $signed({1'b0, vga_overlay_height});
   overlay_scheduler_screen_y_nonnegative <= overlay_screen_y >= 0;
   overlay_scheduler_row_visible <= counter_y < vga_v_rez;
-  overlay_scale_read_x_d1 <= overlay_scale_read_x[0];
   if (counter_x == 0) begin
-    overlay_scale_read_x <= vga_overlay_x_start_source;
-    overlay_scale_read_x_d1 <= vga_overlay_x_start_source[0];
-    overlay_scale_x_error <= vga_overlay_x_start_remainder;
-  end else if (vga_overlay_scaling &&
-               overlay_screen_x >= overlay_visible_x0_minus_one &&
+    overlay_pos_x <= vga_overlay_x_start;
+  end else if (overlay_screen_x >= overlay_visible_x0_minus_one &&
                overlay_screen_x < overlay_visible_x1_minus_one) begin
-    overlay_scale_read_x <= overlay_scale_read_x +
-      vga_overlay_x_step_integer +
-      overlay_scale_x_carry;
-    if (overlay_scale_x_carry)
-      overlay_scale_x_error <= overlay_scale_x_error_wrapped;
-    else
-      overlay_scale_x_error <= overlay_scale_x_error_added;
+    overlay_pos_x <= overlay_pos_x + $signed(vga_overlay_x_step);
   end
 
   if (counter_x == 0 && counter_y == 0) begin
-    overlay_scale_source_y <= vga_overlay_y_start_source;
-    overlay_scale_y_error <= vga_overlay_y_start_remainder;
+    overlay_pos_y <= vga_overlay_y_start;
   end else if (counter_x == vga_h_rez &&
-               vga_overlay_scaling &&
                overlay_screen_y >= 0 &&
                overlay_local_y >= 0 &&
                overlay_local_y + 17'sd1 <
                  $signed({1'b0, vga_overlay_height})) begin
-    overlay_scale_source_y <= overlay_scale_next_source_y[15:0];
-    if (overlay_scale_y_carry)
-      overlay_scale_y_error <= overlay_scale_y_error_wrapped;
-    else
-      overlay_scale_y_error <= overlay_scale_y_error_added;
+    overlay_pos_y <= overlay_pos_y + $signed(vga_overlay_y_step);
   end
   if (counter_y == 0) begin
     vga_sprite_x <= sprite_x;
@@ -1507,14 +1551,9 @@ always @(posedge dvi_clk) begin
     sprite_on <= 0;
   end
 
-  sprite_pix_d1 <= sprite_pix;
-  sprite_pix_d2 <= sprite_pix_d1;
-  sprite_pix_d3 <= sprite_pix_d2;
-  sprite_pix_d4 <= sprite_pix_d3;
-  sprite_on_d1 <= sprite_on;
-  sprite_on_d2 <= sprite_on_d1;
-  sprite_on_d3 <= sprite_on_d2;
-  sprite_on_d4 <= sprite_on_d3;
+  sprite_pix_delay <= {sprite_pix_delay[24*OVERLAY_PIPE_DELAY-25:0],
+                       sprite_pix};
+  sprite_on_delay <= {sprite_on_delay[OVERLAY_PIPE_DELAY-2:0], sprite_on};
 
 counter_y_d1 <= counter_y[1:0];
 counter_y_d2 <= counter_y_d1;
@@ -1585,7 +1624,9 @@ endcase
   if (counter_x >= vga_h_max) begin
     overlay_screen_x_position <= overlay_screen_x_origin;
     overlay_local_x_position <= overlay_local_x_origin;
-    overlay_read_x_position <= overlay_local_x_origin + 17'sd1;
+    overlay_displayed_line_row <= overlay_row_r;
+    overlay_displayed_next_row <= overlay_row_r1;
+    overlay_row_weight <= overlay_row_w;
     viewport_output_x_position <= -$signed(PIPE_DELAY) -
       (vga_overlay_enable ? $signed(OVERLAY_PIPE_DELAY) : 17'sd0);
     viewport_output_y_row <= next_raster_y - vga_scale_y_factor;
@@ -1593,22 +1634,13 @@ endcase
     if (frame_wrap_this_line) begin
       overlay_screen_y_row <= overlay_screen_y_origin;
       overlay_local_y_row <= overlay_local_y_origin;
-      overlay_displayed_line_row <= overlay_local_y_origin >= 0
-        ? (vga_overlay_scaling ? vga_overlay_y_start_source[11:0]
-                               : overlay_local_y_origin[11:0])
-        : 12'b0;
     end else begin
       overlay_screen_y_row <= overlay_screen_y_row + 17'sd1;
       overlay_local_y_row <= overlay_local_y_row + 17'sd1;
-      overlay_displayed_line_row <= overlay_local_y_row + 17'sd1 >= 0
-        ? (vga_overlay_scaling ? overlay_scale_source_y[11:0]
-                               : overlay_local_y_row[11:0] + 1'b1)
-        : 12'b0;
     end
   end else begin
     overlay_screen_x_position <= overlay_screen_x_position + 17'sd1;
     overlay_local_x_position <= overlay_local_x_position + 17'sd1;
-    overlay_read_x_position <= overlay_read_x_position + 17'sd1;
     viewport_output_x_position <= viewport_output_x_position + 17'sd1;
   end
 
@@ -1674,9 +1706,7 @@ endcase
      * restart at the correctly clipped source row either way. */
     vga_overlay_frame_generation <= overlay_accepted_generation;
     overlay_applied_scale_epoch <= vga_overlay_scale_epoch;
-    overlay_fetch_row <= vga_overlay_y_start_source[11:0];
-    overlay_fetch_error <= vga_overlay_y_start_remainder;
-    overlay_fetch_index <= overlay_fetch_first_index;
+    overlay_fetch_row <= overlay_fetch_first_row;
     overlay_fetch_issued <= 0;
     overlay_fetch_active <= 1;
     overlay_frame_fetch_done <= 0;
@@ -1693,17 +1723,9 @@ endcase
 
     if (overlay_fetch_active &&
         (overlay_fetch_issued || overlay_fetch_passed) &&
-        overlay_fetch_can_step) begin
-      overlay_fetch_row <= overlay_fetch_next_row;
-      overlay_fetch_index <= overlay_fetch_index + 1'b1;
-      if (overlay_fetch_carry)
-        overlay_fetch_error <= overlay_fetch_error -
-                               vga_overlay_y_step_threshold;
-      else
-        overlay_fetch_error <= overlay_fetch_error +
-                               vga_overlay_y_step_remainder;
-      if (!overlay_fetch_repeat)
-        overlay_fetch_issued <= 0;
+        overlay_fetch_row < vga_overlay_row_max) begin
+      overlay_fetch_row <= overlay_fetch_row + 1'b1;
+      overlay_fetch_issued <= 0;
     end else if (overlay_fetch_active && !overlay_fetch_issued &&
                  !overlay_fetch_passed && !overlay_frame_fetch_done &&
                  overlay_fetch_ready) begin

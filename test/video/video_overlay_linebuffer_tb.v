@@ -13,10 +13,11 @@ module video_overlay_linebuffer_tb;
   reg [11:0] fetch_line = 0;
   reg fetch_request = 0;
   reg [11:0] displayed_line = 0;
+  reg [11:0] displayed_line_next = 0;
   reg [11:0] consumed_line = 0;
   reg consumed_valid = 0;
-  reg [3:0] read_addr = 0;
-  wire [31:0] read_data;
+  reg [2:0] read_addr = 0;
+  wire [31:0] top_even, top_odd, bottom_even, bottom_odd;
   wire ready;
   wire fetch_ready;
   wire [31:0] accepted_generation;
@@ -32,14 +33,18 @@ module video_overlay_linebuffer_tb;
     .fetch_line(fetch_line), .fetch_request(fetch_request),
     .fetch_ready(fetch_ready),
     .consumed_line(consumed_line), .consumed_valid(consumed_valid),
-    .pixel_clk(pixel_clk), .display_enable(enable), .read_addr(read_addr),
+    .pixel_clk(pixel_clk), .display_enable(enable),
+    .read_addr_even(read_addr), .read_addr_odd(read_addr),
     .displayed_line(displayed_line),
-    .read_data(read_data), .displayed_line_ready(ready),
+    .displayed_line_next(displayed_line_next),
+    .read_top_even(top_even), .read_top_odd(top_odd),
+    .read_bottom_even(bottom_even), .read_bottom_odd(bottom_odd),
+    .displayed_line_ready(ready),
     .accepted_generation(accepted_generation)
   );
 
   initial begin
-    if (dut.MEMORY_WORDS != 64) begin
+    if (dut.MEMORY_WORDS != 32) begin
       $display("FAIL line-buffer banks do not span the full address space");
       failures = failures + 1;
     end
@@ -85,13 +90,19 @@ module video_overlay_linebuffer_tb;
     end
   endtask
 
-  task check_line(input integer n);
-    integer i;
+  function [31:0] word_of(input integer n, input integer i);
+    word_of = 32'h10000000 | (n << 8) | i;
+  endfunction
+
+  /* Both rows of a bilinear pair must be ready and readable at once, the
+   * top through one memory copy and the bottom through the other. */
+  task check_pair(input integer top, input integer bottom);
+    integer j;
     integer timeout;
-    reg [31:0] expected;
     begin
       check_seq = check_seq + 1;
-      displayed_line = n;
+      displayed_line = top;
+      displayed_line_next = bottom;
       /* The bank/tag selector is combinational but has multiple levels.
        * Advance one pixel clock before sampling the ready contract. */
       @(posedge pixel_clk); #1;
@@ -101,24 +112,30 @@ module video_overlay_linebuffer_tb;
         timeout = timeout + 1;
       end
       if (!ready) begin
-        $display("FAIL check %0d line %0d not ready state=%0d loaded=%0d requested=%0d pending=%0d valid=%b gen=%0d",
-                 check_seq, n, dut.state, dut.loaded_line,
+        $display("FAIL check %0d lines %0d/%0d not ready state=%0d loaded=%0d requested=%0d pending=%0d valid=%b gen=%0d",
+                 check_seq, top, bottom, dut.state, dut.loaded_line,
                  dut.requested_line_axis, dut.requested_line_pending,
                  dut.pixel_ready_valid, accepted_generation);
         failures = failures + 1;
       end
-      for (i = 0; i < 4; i = i + 1) begin
-        @(negedge pixel_clk); read_addr <= i;
+      for (j = 0; j < 2; j = j + 1) begin
+        @(negedge pixel_clk); read_addr <= j;
         @(posedge pixel_clk); @(posedge pixel_clk); #1;
-        expected = 32'h10000000 | (n << 8) | i;
-        if (read_data !== expected) begin
-          $display("FAIL check %0d line %0d word %0d got=%h exp=%h",
-                   check_seq, n, i,
-                   read_data, expected);
+        if (top_even !== word_of(top, 2 * j) ||
+            top_odd !== word_of(top, 2 * j + 1) ||
+            bottom_even !== word_of(bottom, 2 * j) ||
+            bottom_odd !== word_of(bottom, 2 * j + 1)) begin
+          $display("FAIL check %0d lines %0d/%0d words %0d/%0d got=%h %h %h %h",
+                   check_seq, top, bottom, 2 * j, 2 * j + 1,
+                   top_even, top_odd, bottom_even, bottom_odd);
           failures = failures + 1;
         end
       end
     end
+  endtask
+
+  task check_line(input integer n);
+    check_pair(n, n);
   endtask
 
   initial begin
@@ -230,6 +247,7 @@ module video_overlay_linebuffer_tb;
       failures = failures + 1;
     end
     check_line(0); check_line(3);
+    check_pair(0, 1); check_pair(2, 3);
     displayed_line = 2;
     consumed_line = 2; consumed_valid = 1;
     request_line(4);
@@ -238,8 +256,15 @@ module video_overlay_linebuffer_tb;
       $display("FAIL second request offered while one was outstanding");
       failures = failures + 1;
     end
+    /* A pair is ready only once both of its rows are. */
+    displayed_line = 3; displayed_line_next = 4;
+    repeat (3) @(posedge pixel_clk);
+    if (ready) begin
+      $display("FAIL pair 3/4 ready before row 4 arrived");
+      failures = failures + 1;
+    end
     line(4, 0);
-    check_line(2); check_line(3); check_line(4);
+    check_line(2); check_pair(3, 4); check_line(4);
 
     /* Re-requesting the row already loaded is answered from its bank. */
     request_line(4);

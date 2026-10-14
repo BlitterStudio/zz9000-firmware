@@ -73,25 +73,33 @@ for one path is never shown on the other.
   two-input AXI interconnect. Main scanout has AXI priority 15 and the overlay
   has 0, so a busy overlay can't starve the desktop. The overlay reads DDR 64
   bits at a time.
-- `video_overlay_linebuffer.v` holds four source rows in four BRAM banks: the
-  row on display and up to three after it. The formatter's fetch stepper walks
-  the same source-row sequence as scanout and requests the next row whenever
-  a bank is empty or holds a row the display has passed, so fetching runs
-  ahead of the display. A downscale skips source rows, but the VDMA still
-  streams them, so a downscaled window needs more than one source row per
-  raster line on average. Running ahead spreads that over the window instead
-  of needing two whole rows inside one raster line. If a row is still late,
-  the stepper skips the rows the display has already passed. One request is
-  outstanding at a time. Fetch requests, completed-row tags, and generation
-  acknowledgements cross between the 100 MHz AXI clock and the pixel clock
-  through three `xpm_cdc_handshake` instances.
-- `video_overlay_pixel.v` converts YUV to RGB using CCIR601 coefficients, for
-  all five packed YUV422 layouts, and compares each pixel with the RGB colour
-  key.
-- `video_formatter.v` maps destination pixels and rows to source coordinates
-  with nearest-neighbour scaling. It computes the scale steps outside the pixel
-  critical path. Line-buffer banks are not tied to source row parity, which
-  lets the fetcher skip rows. The overlay is composited before the sprite and
+- `video_overlay_linebuffer.v` holds eight source rows in eight BRAM banks:
+  the two rows the filter is blending and up to six after them. Each row is
+  stored twice, split into even and odd macropixel words, so one pixel clock
+  reads two neighbouring macropixels from both rows. The formatter's fetch
+  stepper requests every source row from the window's first in order,
+  whenever a bank is empty or holds a row above the top row on display, so
+  fetching runs ahead of the display. A downscaled window blends more than
+  one new source row per raster line on average; running ahead spreads that
+  over the window instead of needing two whole rows inside one raster line.
+  If a row is still late, the stepper skips the rows the display has
+  already passed. One request is outstanding at a time. Fetch requests,
+  completed-row tags, and generation acknowledgements cross between the
+  100 MHz AXI clock and the pixel clock through three `xpm_cdc_handshake`
+  instances.
+- `video_overlay_filter.v` scales bilinearly. Luma blends pixels i and i+1,
+  chroma blends macropixels k and k+1 at half the luma position, and the two
+  row results are blended with the row weight. Weights have 8 bits. A 1:1
+  window has zero weights everywhere, so its pixels pass through unchanged.
+  The filter adds five pixel-clock stages.
+- `video_overlay_pixel.v` converts YUV to RGB using CCIR601 coefficients and
+  compares each pixel with the RGB colour key. The filter unpacks all five
+  packed YUV422 layouts before it.
+- `video_formatter.v` maps destination pixels and rows to 16.16 fixed-point
+  source positions, centre-aligned: pixel d samples
+  `d * step + step / 2 - 0.5`, with `step = (source << 16) / destination`. It
+  computes the steps and the start position of a clipped window outside the
+  pixel critical path. The overlay is composited before the sprite and
   scanline post-processing, so the hardware pointer stays on top.
 
 The firmware programs the formatter through video-control ops 22–27, defined
@@ -176,7 +184,7 @@ and the two runs looked the same.
 
 - `video_overlay_pixel` simulation covers layout, luma, clamping and the key
   for all five layouts.
-- The formatter xsim sweep passes 12 of 12 configurations, with zero pixel
+- The formatter xsim sweep passes 31 of 31 configurations, with zero pixel
   mismatches. The sweep covers:
   - 32/16/15-bit base modes
   - odd widths
@@ -188,17 +196,18 @@ and the two runs looked the same.
   - bank wrap
   - disable and source-generation invalidation
   - a generation programmed while the overlay is disabled
-  - filling all four banks ahead of the display, reusing only passed rows,
-    and one outstanding request
+  - filling all banks ahead of the display, reusing only passed rows, and
+    one outstanding request
+  - reading two rows at once, and holding a row pair back until both rows
+    are loaded
 - `test/video/run_overlay_scale_sim.sh` checks every pixel of whole windows
-  for irregular downscales, upscales, 1:1, windows clipped at each edge
-  (including rows that fall into vertical blanking), and an overlay stream
-  that delivers a source row in about 60% of a raster line. The two-bank
-  fetcher showed late rows in that last case; the four-bank one has none.
-- The four-bank `zorro3-aga` build meets timing in Vivado 2018.3: +0.181 ns
-  setup and +0.024 ns hold on the 150 MHz pixel clock, where the worst paths
-  are in `video_source_sync`, not the overlay. The overlay crosses clock
-  domains only through its three XPM handshakes.
+  against a bit-exact bilinear reference (`overlay_bilinear_ref.vh`), with
+  luma and chroma varying per pixel and per row. It covers downscales,
+  upscales, 1:1, an odd source width, windows clipped at each edge
+  (including rows that fall into vertical blanking), the fullscreen toggle
+  with and without a mode change, and an overlay stream that delivers a
+  source row in about 60% of a raster line. That last case needs eight banks
+  with bilinear filtering; four left late rows.
 
 ### Not yet qualified on hardware
 
@@ -207,7 +216,9 @@ and the two runs looked the same.
   recorded only for default `zorro3`.
 - Wider clipping and scale-ratio coverage, which is part of the release
   matrix.
-- Native downscaling. The four-bank fetcher has passed simulation only.
+- Bilinear scaling and the eight-bank fetcher, which have passed simulation
+  only. The nearest-neighbour four-bank build before them showed resized
+  windows down to the 1.5x limit correctly on an A4000 (`zorro3-aga`).
 
 ## Known limitations
 

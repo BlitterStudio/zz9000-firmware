@@ -190,14 +190,27 @@ function [7:0] overlay_pattern_luma(input integer line,
   overlay_pattern_luma = 8'd24 + line * 8'd48 + pixel * 8'd4;
 endfunction
 
-function [31:0] expected_overlay_pixel(input integer line,
-                                       input integer pixel);
-  integer gray;
-  begin
-    gray = (298 * (overlay_pattern_luma(line, pixel) - 16) + 128) >> 8;
-    expected_overlay_pixel = {8'h00, gray[7:0], gray[7:0], gray[7:0]};
-  end
+function [7:0] overlay_pattern_u(input integer line, input integer word);
+  overlay_pattern_u = 8'd40 + line * 8'd50 + word * 8'd30;
 endfunction
+
+function [7:0] overlay_pattern_v(input integer line, input integer word);
+  overlay_pattern_v = 8'd200 - line * 8'd40 - word * 8'd20;
+endfunction
+
+function integer ovl_ref_y(input integer line, input integer pixel);
+  ovl_ref_y = overlay_pattern_luma(line, pixel);
+endfunction
+
+function integer ovl_ref_u(input integer line, input integer word);
+  ovl_ref_u = overlay_pattern_u(line, word);
+endfunction
+
+function integer ovl_ref_v(input integer line, input integer word);
+  ovl_ref_v = overlay_pattern_v(line, word);
+endfunction
+
+`include "overlay_bilinear_ref.vh"
 
 /* Model the firmware's vblank handoff: the vblank interrupt resets MM2S
  * wherever it is in the frame (the fetcher stops reading after the last
@@ -219,8 +232,8 @@ initial begin : overlay_vdma
         @(negedge aclk);
         if (overlay_pattern_mode)
           overlay_tdata <= {
-            8'd128, overlay_pattern_luma(ol, 2 * ow + 1),
-            8'd128, overlay_pattern_luma(ol, 2 * ow)};
+            overlay_pattern_v(ol, ow), overlay_pattern_luma(ol, 2 * ow + 1),
+            overlay_pattern_u(ol, ow), overlay_pattern_luma(ol, 2 * ow)};
         else
           overlay_tdata <= {8'd128, overlay_luma(ol),
                             8'd128, overlay_luma(ol)};
@@ -492,7 +505,6 @@ endtask
 
 // main
 integer i, x, mism, shown, overlay_start_frame, expected_row;
-integer overlay_src_x, overlay_src_y;
 reg [31:0] got, exp;
 initial begin
   cfg_cmode = 2;
@@ -786,8 +798,9 @@ initial begin
       end
 
     /* Resized overlays must remain on the packed-YUY2 hardware plane.
-     * Exercise nearest-neighbour upscaling in both axes with distinct luma
-     * at every source pixel, so byte/macropixel phase errors are visible. */
+     * Exercise bilinear upscaling in both axes with distinct luma at every
+     * source pixel and distinct chroma per macropixel, so byte/macropixel
+     * phase and weight errors are visible. */
     overlay_stream_width = 9;
     overlay_pattern_mode = 1;
     op(OP_OVERLAY_POS, (1 << 16) | 4);
@@ -799,9 +812,7 @@ initial begin
       for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 1 && i < 7 && x >= 4 && x < 22) begin
-          overlay_src_x = ((x - 4) * 9) / 18;
-          overlay_src_y = ((i - 1) * 3) / 6;
-          exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
+          exp = ovl_expected(x - 4, i - 1, 9, 3, 18, 6);
         end else begin
           exp = expected_pix(i, x);
         end
@@ -816,8 +827,8 @@ initial begin
         end
       end
 
-    /* Downscaling must select source coordinates deterministically and may
-     * skip source pixels/rows without relabelling the next AXI line. */
+    /* Downscaling blends neighbouring source pixels and rows; every source
+     * row is fetched in order without relabelling the next AXI line. */
     op(OP_OVERLAY_POS, (2 << 16) | 8);
     op(OP_OVERLAY_SIZE, (2 << 16) | 5);
     overlay_start_frame = frames;
@@ -826,9 +837,7 @@ initial begin
       for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 2 && i < 4 && x >= 8 && x < 13) begin
-          overlay_src_x = ((x - 8) * 9) / 5;
-          overlay_src_y = ((i - 2) * 3) / 2;
-          exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
+          exp = ovl_expected(x - 8, i - 2, 9, 3, 5, 2);
         end else begin
           exp = expected_pix(i, x);
         end
@@ -853,9 +862,7 @@ initial begin
       for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i < 3 && x < 14) begin
-          overlay_src_x = ((x + 4) * 9) / 18;
-          overlay_src_y = ((i + 3) * 3) / 6;
-          exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
+          exp = ovl_expected(x + 4, i + 3, 9, 3, 18, 6);
         end else begin
           exp = expected_pix(i, x);
         end

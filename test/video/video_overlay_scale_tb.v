@@ -1,9 +1,9 @@
 `timescale 1ns / 1ps
 /*
  * Native PIP overlay scaling across a whole window: every displayed overlay
- * pixel must come from the nearest-neighbour source pixel
- * floor(d * src / dst) in both axes, on every row, including downscales whose
- * vertical step skips source rows irregularly, windows clipped at any screen
+ * pixel must match the bit-exact bilinear reference (overlay_bilinear_ref.vh)
+ * in both axes and all three components, on every row, including
+ * downscales that blend every source row, windows clipped at any screen
  * edge, and an overlay stream too slow to deliver two source rows inside one
  * raster line (which the fetcher must absorb by running ahead).
  *
@@ -151,20 +151,33 @@ task op(input [7:0] o, input [31:0] d);
   end
 endtask
 
-/* Luma identifies the source row and column; chroma stays neutral so the
- * converted pixel is a plain gray. */
+/* Every sample differs from its neighbours, and chroma varies per row and
+ * macropixel, so a wrong row, column, weight or component shows. */
 function [7:0] src_luma(input integer line, input integer pixel);
   src_luma = 8'd16 + ((line * 37 + pixel * 11) % 219);
 endfunction
 
-function [31:0] expected_overlay_pixel(input integer line,
-                                       input integer pixel);
-  integer gray;
-  begin
-    gray = (298 * (src_luma(line, pixel) - 16) + 128) >> 8;
-    expected_overlay_pixel = {8'h00, gray[7:0], gray[7:0], gray[7:0]};
-  end
+function [7:0] src_u(input integer line, input integer word);
+  src_u = 8'd16 + ((line * 23 + word * 41) % 225);
 endfunction
+
+function [7:0] src_v(input integer line, input integer word);
+  src_v = 8'd16 + ((line * 59 + word * 17) % 225);
+endfunction
+
+function integer ovl_ref_y(input integer line, input integer pixel);
+  ovl_ref_y = src_luma(line, pixel);
+endfunction
+
+function integer ovl_ref_u(input integer line, input integer word);
+  ovl_ref_u = src_u(line, word);
+endfunction
+
+function integer ovl_ref_v(input integer line, input integer word);
+  ovl_ref_v = src_v(line, word);
+endfunction
+
+`include "overlay_bilinear_ref.vh"
 
 // Desktop VDMA: constant 32-bit framebuffer.
 reg stream_en = 0;
@@ -204,8 +217,8 @@ initial begin : overlay_vdma
     for (ol = 0; ol < src_h && !overlay_abort; ol = ol + 1)
       for (ow = 0; ow < (src_w + 1) / 2 && !overlay_abort; ow = ow + 1) begin
         @(negedge aclk);
-        overlay_tdata <= {8'd128, src_luma(ol, 2 * ow + 1),
-                          8'd128, src_luma(ol, 2 * ow)};
+        overlay_tdata <= {src_v(ol, ow), src_luma(ol, 2 * ow + 1),
+                          src_u(ol, ow), src_luma(ol, 2 * ow)};
         overlay_tuser <= (ol == 0 && ow == 0);
         overlay_tlast <= (ow == (src_w + 1) / 2 - 1);
         overlay_tvalid <= 1;
@@ -281,7 +294,7 @@ always @(posedge dvi_clk) begin
   end
 end
 
-integer i, x, mism, shown, start_frame, sx, sy, row_bad, bad_rows, first_bad;
+integer i, x, mism, shown, start_frame, row_bad, bad_rows, first_bad;
 integer sw, n_src_w, n_src_h, n_dst_w, n_dst_h, n_pos_x, n_pos_y;
 integer stop_frames, set_delay;
 integer n_canvas_w, n_canvas_h, n_dvi_half_ps, mode_delay, clock_gap;
@@ -438,9 +451,8 @@ initial begin
       got = cap[i * MAXW + x];
       if (i >= pos_y && i < pos_y + dst_h &&
           x >= pos_x && x < pos_x + dst_w) begin
-        sx = ((x - pos_x) * src_w) / dst_w;
-        sy = ((i - pos_y) * src_h) / dst_h;
-        exp = expected_overlay_pixel(sy, sx);
+        exp = ovl_expected(x - pos_x, i - pos_y, src_w, src_h,
+                           dst_w, dst_h);
       end else begin
         exp = FB_WORD;
       end
