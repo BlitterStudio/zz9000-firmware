@@ -5,6 +5,7 @@ SRC_DIR := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 MOCK_DIR := mock
 BUILD_DIR := build
 CONVERT_TARGET := $(BUILD_DIR)/audio_convert_test
+CONVERT_EXACT_TARGET := $(BUILD_DIR)/audio_convert_exact_test
 CAPTURE_TARGET := $(BUILD_DIR)/audio_capture_test
 PROFILE_TARGET := $(BUILD_DIR)/audio_profile_test
 PLAYBACK_TARGET := $(BUILD_DIR)/audio_playback_frontier_test
@@ -22,7 +23,7 @@ FABRIC_TARGET := $(BUILD_DIR)/audio_fabric_test
 RING_TARGET := $(BUILD_DIR)/audio_fabric_ring_test
 BENCH_SMOKE_TARGET := $(BUILD_DIR)/bench_smoke_test
 MEDIA_VIEW_TARGET := $(BUILD_DIR)/audio_pump_media_view_test
-TARGETS := $(CONVERT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
+TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
 	$(MEDIA_VIEW_TARGET) $(DRAIN_TARGET) $(CLOSE_TARGET) \
 	$(SCENE_TARGET) $(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
@@ -40,6 +41,7 @@ CPPFLAGS += -I$(MOCK_DIR) -I$(SRC_DIR) -Ihost_stubs
 
 test: $(TARGETS)
 	$(CONVERT_TARGET)
+	$(CONVERT_EXACT_TARGET)
 	$(CAPTURE_TARGET)
 	$(RATE_TARGET)
 	$(PRECONVERT_TARGET)
@@ -120,6 +122,13 @@ $(CONVERT_TARGET): audio_convert_test.c $(SRC_DIR)/audio_convert.c \
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_convert_test.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
+
+$(CONVERT_EXACT_TARGET): audio_convert_exact_test.c \
+	$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert.h \
+	$(SRC_DIR)/audio_convert_tables.c $(SRC_DIR)/audio_convert_tables.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_convert_exact_test.c \
+		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c
 
 $(CAPTURE_TARGET): audio_capture_test.c $(SRC_DIR)/audio_capture.c \
 	$(SRC_DIR)/audio_capture.h $(SRC_DIR)/audio_convert.c \

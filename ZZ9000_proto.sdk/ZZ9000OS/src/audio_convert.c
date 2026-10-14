@@ -9,6 +9,10 @@
 
 #include <string.h>
 
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 static const struct zz_audio_convert_ratio *ratio_for(uint32_t in_rate,
                                                       uint32_t out_rate)
 {
@@ -106,8 +110,7 @@ int zz_audio_convert_init(struct zz_audio_convert *ctx, uint32_t in_rate,
 
 /* Full-range taps need a 64-bit accumulator (sum|taps|*32767 exceeds
  * int32); each output is re-normalized by the phase's Q16 reciprocal
- * (16384/scale) before the final round-shift. SMLAL makes the 64-bit
- * accumulate native on the Cortex-A9. */
+ * (16384/scale) before the final round-shift. */
 static int16_t saturate_round(int64_t acc, uint32_t recip,
                               uint32_t *clips)
 {
@@ -124,6 +127,88 @@ static int16_t saturate_round(int64_t acc, uint32_t recip,
 		(*clips)++;
 	}
 	return (int16_t)value;
+}
+
+/* An output's window is taps input frames ending at its base, newest
+ * first: frames base, base-1, ... from the current input while they
+ * exist, then the carried history, then zeros before the stream start.
+ * Each part is contiguous, so it is summed without a per-tap branch.
+ * Integer sums are exact in any order, so every path below gives the
+ * same int64 result as the plain tap loop. */
+
+/* acc[ch] += sum over j < count of coef[j] * in[(last - j) * 2 + ch]. */
+static inline void dot_input(const int16_t *coef, const int16_t *in,
+                             int32_t last, uint32_t count, int64_t acc[2])
+{
+	uint32_t j = 0U;
+	int64_t left = 0;
+	int64_t right = 0;
+
+#if defined(__ARM_NEON)
+	{
+		/* vmull: exact 32-bit products (|p| <= 2^30); vpadal: exact
+		 * pairwise widening into 64-bit lanes. */
+		int64x2_t vl = vdupq_n_s64(0);
+		int64x2_t vr = vdupq_n_s64(0);
+
+		for (; j + 4U <= count; j += 4U) {
+			/* Frames last-j-3 .. last-j, oldest first, against
+			 * coef[j+3] .. coef[j]. */
+			int16x4x2_t f = vld2_s16(in + (last - (int32_t)j - 3) * 2);
+			int16x4_t c = vrev64_s16(vld1_s16(coef + j));
+
+			vl = vpadalq_s32(vl, vmull_s16(f.val[0], c));
+			vr = vpadalq_s32(vr, vmull_s16(f.val[1], c));
+		}
+		left = vgetq_lane_s64(vl, 0) + vgetq_lane_s64(vl, 1);
+		right = vgetq_lane_s64(vr, 0) + vgetq_lane_s64(vr, 1);
+	}
+#endif
+	for (; j < count; j++) {
+		const int16_t *frame = in + (last - (int32_t)j) * 2;
+
+		left += (int64_t)coef[j] * frame[0];
+		right += (int64_t)coef[j] * frame[1];
+	}
+	acc[0] += left;
+	acc[1] += right;
+}
+
+/* acc[ch] += sum over j < count of coef[j] * history[ch][last - j]. */
+static inline void dot_history(const int16_t *coef,
+                               const struct zz_audio_convert *ctx,
+                               int32_t last, uint32_t count, int64_t acc[2])
+{
+	const int16_t *hist_left = ctx->history[0];
+	const int16_t *hist_right = ctx->history[1];
+	uint32_t j = 0U;
+	int64_t left = 0;
+	int64_t right = 0;
+
+#if defined(__ARM_NEON)
+	{
+		int64x2_t vl = vdupq_n_s64(0);
+		int64x2_t vr = vdupq_n_s64(0);
+
+		for (; j + 4U <= count; j += 4U) {
+			int32_t first = last - (int32_t)j - 3;
+			int16x4_t c = vrev64_s16(vld1_s16(coef + j));
+
+			vl = vpadalq_s32(vl,
+			                 vmull_s16(vld1_s16(hist_left + first), c));
+			vr = vpadalq_s32(vr,
+			                 vmull_s16(vld1_s16(hist_right + first), c));
+		}
+		left = vgetq_lane_s64(vl, 0) + vgetq_lane_s64(vl, 1);
+		right = vgetq_lane_s64(vr, 0) + vgetq_lane_s64(vr, 1);
+	}
+#endif
+	for (; j < count; j++) {
+		left += (int64_t)coef[j] * hist_left[last - (int32_t)j];
+		right += (int64_t)coef[j] * hist_right[last - (int32_t)j];
+	}
+	acc[0] += left;
+	acc[1] += right;
 }
 
 /* Sample the virtual input stream at absolute-negative index idx
@@ -162,28 +247,23 @@ void zz_audio_convert_stream(struct zz_audio_convert *ctx,
 		const uint32_t phase = ctx->pos_frac % ratio->phases;
 		const int16_t *coef = ratio->coefs[phase];
 		const uint32_t recip = ratio->recip[phase];
-		const uint16_t taps = ratio->taps;
-		int32_t base = (int32_t)ctx->pos_int;
-		uint16_t ch;
+		const uint32_t taps = ratio->taps;
+		const uint32_t base = ctx->pos_int;
+		/* Taps on the current input, then on the history (the
+		 * rest of the window is before the stream start). */
+		const uint32_t from_in = base + 1U < taps ? base + 1U : taps;
+		uint32_t from_history = taps - from_in;
+		int64_t acc[2] = { 0, 0 };
 
-		for (ch = 0U; ch < 2U; ch++) {
-			int64_t acc = 0;
-			int32_t k;
-
-			for (k = 0; k < (int32_t)taps; k++) {
-				int32_t idx = base - k;
-				int16_t sample;
-
-				if (idx >= 0)
-					sample = in[(uint32_t)idx * 2U + ch];
-				else
-					sample = history_sample(ctx, ch,
-					                        idx);
-				acc += (int64_t)coef[k] * (int64_t)sample;
-			}
-			out[n * 2U + ch] =
-			    saturate_round(acc, recip, &ctx->clips);
-		}
+		if (from_history > ctx->history_len)
+			from_history = ctx->history_len;
+		dot_input(coef, in, (int32_t)base, from_in, acc);
+		if (from_history != 0U)
+			dot_history(coef + from_in, ctx,
+			            (int32_t)ctx->history_len - 1,
+			            from_history, acc);
+		out[n * 2U] = saturate_round(acc[0], recip, &ctx->clips);
+		out[n * 2U + 1U] = saturate_round(acc[1], recip, &ctx->clips);
 
 		ctx->pos_int += ratio->step_int;
 		ctx->pos_frac += ratio->step_num;
