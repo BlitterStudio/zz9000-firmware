@@ -321,6 +321,9 @@ static uint16_t fwup_status = 0;
 static uint16_t fwup_pending_cmd = 0;
 static uint32_t fwup_pending_len = 0;
 static volatile int fwup_pending = 0;
+/* The pending command's bytes are already copied out of the shared
+ * buffer, which may hold another client's data by the next pass. */
+static int fwup_staged = 0;
 
 static void fwup_publish(uint16_t result) {
 	fwup_status = result;
@@ -385,6 +388,7 @@ static void reset_storage_request_state() {
 	zz_config_save_reset();
 	fwup_status = 0;
 	fwup_pending = 0;
+	fwup_staged = 0;
 	fwup_pending_cmd = 0;
 	fwup_pending_len = 0;
 }
@@ -896,14 +900,27 @@ int main() {
 			 * reused, then let core 1 do the FatFs work: one SD write
 			 * has taken 0.72 s, and on this loop that holds every
 			 * Zorro register access (and with it the Amiga). */
-			fw_update_stage(fwup_pending_cmd,
-			                (const void *)USB_BLOCK_STORAGE_ADDRESS,
-			                fwup_pending_len);
-			if (sdk_mailbox_enqueue_internal(TASKQ_OP_FWUP, 0, 0))
+			if (!fwup_staged) {
+				fw_update_stage(fwup_pending_cmd,
+				                (const void *)USB_BLOCK_STORAGE_ADDRESS,
+				                fwup_pending_len);
+				fwup_staged = 1;
+			}
+			if (sdk_mailbox_enqueue_internal(TASKQ_OP_FWUP, 0, 0)) {
 				fw_update_mark_queued();
-			else
+				fwup_pending = 0;
+				fwup_staged = 0;
+			} else if (!scheduler_core1_available()) {
+				/* No core 1 (absent, or switched off after
+				 * faults): run inline as before, since a
+				 * firmware update is how such a card is fixed. */
 				fwup_publish(fw_update_run_staged());
-			fwup_pending = 0;
+				fwup_pending = 0;
+				fwup_staged = 0;
+			}
+			/* Otherwise all task slots are busy: the staged command
+			 * stays pending and is queued on a later pass, never run
+			 * here. */
 		}
 
 		/* Scene commit machine (P1): one verified-I2C setter step per
@@ -1630,6 +1647,8 @@ int main() {
 					 * driver polls REG_ZZ_FWUP_STATUS for completion. */
 					fwup_pending_cmd = zdata & 0xFFFF;
 					fwup_status = FWUP_STATUS_BUSY;
+					/* A new command replaces one not yet queued. */
+					fwup_staged = 0;
 					fwup_pending = 1;
 					break;
 				}
