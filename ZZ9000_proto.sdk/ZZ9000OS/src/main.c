@@ -333,11 +333,12 @@ static void fwup_publish(uint16_t result) {
 
 /* A FWUP job on core 1 owns FatFs and the SD card until it retires; core 0
  * code that needs either and cannot simply skip a main-loop pass waits
- * here. One SD write has been measured at 0.72 s, so the bound is 3 s; a
- * job past it means core 1 is wedged in the SD driver, and the quiesce
- * then restarts core 1 as for a reset. */
+ * here. One SD write has been measured at 0.72 s, so the bound is 3 s.
+ * Returns 1 once no job is running, 0 if one still is: a live caller then
+ * fails its own command (the task queue holds other clients' requests and
+ * stays untouched); only the reset path may stop core 1. */
 #define FWUP_WAIT_SPINS 30000u /* x 100 us */
-static void fwup_wait_idle(void) {
+static int fwup_wait_idle(void) {
 	uint32_t spins;
 
 	for (spins = 0; fw_update_busy() && spins < FWUP_WAIT_SPINS; spins++) {
@@ -347,10 +348,10 @@ static void fwup_wait_idle(void) {
 			usleep(100);
 	}
 	if (fw_update_busy()) {
-		printf("[FWUP] core-1 job still running after 3 s; restarting core 1\n");
-		scheduler_quiesce_for_reset();
-		fw_update_retire_failed();
+		printf("[FWUP] core-1 job still running after 3 s\n");
+		return 0;
 	}
+	return 1;
 }
 // debug things like individual reads/writes, greatly slowing the system down
 uint32_t debug_lowlevel = 0;
@@ -469,8 +470,13 @@ static void print_memory_line(void)
 void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* A FWUP job on core 1 may still own FatFs and the SD card; the
 	 * Fast-RAM re-read and the storage reset below use both, and the
-	 * mailbox quiesce would cut a long SD write short. */
-	fwup_wait_idle();
+	 * mailbox quiesce would cut a long SD write short. A job stuck past
+	 * the wait means core 1 is wedged in the SD driver: stop it now, as
+	 * the reset's own quiesce would, before core 0 touches the card. */
+	if (!fwup_wait_idle()) {
+		scheduler_quiesce_for_reset();
+		fw_update_forget_queued();
+	}
 	/* Fast-Ram gate (fast-ram-cfg KTD4): close the gate the moment a
 	 * reset is detected -- the fail-safe presentation -- then rederive
 	 * the decision from the SD file with the same bounded, fail-closed
@@ -1402,10 +1408,14 @@ int main() {
 					} else if (zdata == 1) {
 						/* Reads ZZ9000.CFG from SD: not while a
 						 * FWUP job owns the card. */
-						fwup_wait_idle();
-						config_file_status = zz_config_read_raw(
-							(void*)USB_BLOCK_STORAGE_ADDRESS,
-							ZZ_CONFIG_MAX_SIZE - 1, &config_file_len);
+						if (fwup_wait_idle()) {
+							config_file_status = zz_config_read_raw(
+								(void*)USB_BLOCK_STORAGE_ADDRESS,
+								ZZ_CONFIG_MAX_SIZE - 1, &config_file_len);
+						} else {
+							config_file_status = ZZ_CONFIG_FILE_IO_ERROR;
+							config_file_len = 0;
+						}
 						// push ARM D-cache writes to DDR so the Zorro-bus
 						// read (via AXI_HP, non-coherent) sees fresh bytes
 						Xil_DCacheFlushRange((UINTPTR)USB_BLOCK_STORAGE_ADDRESS,
@@ -1659,10 +1669,11 @@ int main() {
 					u32 cmd = cmd_word & 0xF;
 					u32 chunk_idx = (cmd_word >> 4) & 0xFFF;
 					/* Both commands read the SD card: not while a
-					 * FWUP job owns it. */
-					if (cmd >= 1 && cmd < 10)
-						fwup_wait_idle();
-					if (cmd == 1) {
+					 * FWUP job owns it (one that outlasts the wait
+					 * fails the command). */
+					if (cmd >= 1 && cmd < 10 && !fwup_wait_idle()) {
+						sd_boot_status = (uint16_t)-1;
+					} else if (cmd == 1) {
 						sd_boot_status = sd_boot_get_info((void*)USB_BLOCK_STORAGE_ADDRESS);
 						Xil_DCacheFlushRange((UINTPTR)USB_BLOCK_STORAGE_ADDRESS, 24u * 1024u);
 						printf("[SD] GETINFO -> %d\n", sd_boot_status);
