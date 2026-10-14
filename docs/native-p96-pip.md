@@ -91,7 +91,7 @@ for one path is never shown on the other.
   chroma blends macropixels k and k+1 at half the luma position, and the two
   row results are blended with the row weight. Weights have 8 bits. A 1:1
   window has zero weights everywhere, so its pixels pass through unchanged.
-  The filter adds five pixel-clock stages.
+  The line-buffer read and the filter add nine pixel-clock stages.
 - `video_overlay_pixel.v` converts YUV to RGB using CCIR601 coefficients and
   compares each pixel with the RGB colour key. The filter unpacks all five
   packed YUV422 layouts before it.
@@ -208,6 +208,14 @@ and the two runs looked the same.
   with and without a mode change, and an overlay stream that delivers a
   source row in about 60% of a raster line. That last case needs eight banks
   with bilinear filtering; four left late rows.
+- The bilinear `zorro3-aga` build meets timing in Vivado 2018.3: +0.162 ns
+  setup and +0.026 ns hold on the 150 MHz pixel clock, and uses 56.5 of 140
+  BRAM tiles and 19 DSPs. The first attempt missed by 1.87 ns: the BRAM
+  read address was computed from the position register in the same cycle
+  and fanned out to 32 RAMB36s. The read addresses, sample geometry and
+  bank selection are now registered, and reads use the BRAM output
+  register. The overlay crosses clock domains only through its three XPM
+  handshakes.
 
 ### Not yet qualified on hardware
 
