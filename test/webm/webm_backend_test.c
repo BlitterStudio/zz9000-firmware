@@ -307,6 +307,28 @@ static void test_window(void)
 	check(webm_window_append(&w, src + 42, 20), "append after compact");
 	check(io.read(io.ctx, out, 22) == 22 && memcmp(out, src + 40, 22) == 0,
 	      "bytes stay ordered across compaction");
+	{
+		uint8_t more[16];
+
+		/* Stream offsets 62.. follow; a skip within the held bytes
+		 * is a seek, one past them empties the window and drops
+		 * the skipped bytes as they arrive. */
+		for (i = 0U; i < sizeof(more); i++)
+			more[i] = (uint8_t)(100U + i);
+		check(io.skip(io.ctx, 50) == 0 && io.tell(io.ctx) == 50U,
+		      "skip within held bytes seeks");
+		check(io.skip(io.ctx, 70) == 1 && w.start == 70U &&
+		      w.filled == 0U && io.tell(io.ctx) == 70U,
+		      "skip past held bytes empties the window");
+		check(webm_window_space(&w) == sizeof(store) + 8U,
+		      "space counts bytes still to drop");
+		check(io.skip(io.ctx, 80) == -2,
+		      "no second skip before the first one's bytes arrive");
+		check(webm_window_append(&w, more, 10) && w.filled == 2U,
+		      "append drops the skipped bytes");
+		check(io.read(io.ctx, out, 2) == 2 && out[0] == more[8] &&
+		      out[1] == more[9], "bytes after the skip read in place");
+	}
 
 	w.eof = 1;
 	check(io.read(io.ctx, out, 1) == 0, "EOF read returns 0");
@@ -534,21 +556,21 @@ static void test_invisible_frame(void)
 	ops->destroy(dec);
 }
 
-/* A Void inside the Cluster larger than the whole input window: the
- * client fills the window, the demux still needs the rest of the Void,
- * and nothing can ever free room. The stream must fail as unsupported
- * instead of answering BUSY/NEED_INPUT forever. */
-static void test_window_exhausted_by_skip(void)
+/* A Void inside the Cluster larger than the whole input window: its bytes
+ * are dropped as they arrive (io->skip), so the stream keeps asking for
+ * input instead of filling the window, and the block after it decodes. */
+static void test_window_skip_larger_than_window(void)
 {
-	static struct stream s;
+	static struct stream s, after;
 	static uint8_t zeros[64U * 1024U];
 	/* Void, 8-byte size 16 MiB. */
 	static const uint8_t void_head[] = {
 		0xEC, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00
 	};
+	const uint32_t void_size = 16U * 1024U * 1024U;
 	void *dec = open_decoder();
 	uint32_t fed = 0U;
-	int rc = SDK_VIDEO_BACKEND_NEED_INPUT;
+	int waiting = 1;
 
 	stream_head(&s);
 	stream_block(&s, 1, 1);
@@ -556,21 +578,24 @@ static void test_window_exhausted_by_skip(void)
 	check(decode(dec) == SDK_VIDEO_BACKEND_FRAME, "keyframe decodes");
 	check(feed(dec, void_head, sizeof(void_head), sizeof(void_head)),
 	      "huge Void header write");
-	for (;;) {
+	while (fed < void_size) {
+		uint32_t n = void_size - fed < sizeof(zeros)
+			? void_size - fed : (uint32_t)sizeof(zeros);
 		uint32_t accepted = 0U;
-		int wr = ops->write(dec, zeros, sizeof(zeros), 0, &accepted);
 
-		rc = decode(dec);
-		if (rc != SDK_VIDEO_BACKEND_NEED_INPUT)
+		if (decode(dec) != SDK_VIDEO_BACKEND_NEED_INPUT ||
+		    ops->write(dec, zeros, n, 0, &accepted) !=
+		    SDK_VIDEO_BACKEND_WRITE_OK || accepted == 0U) {
+			waiting = 0;
 			break;
-		if (wr != SDK_VIDEO_BACKEND_WRITE_OK)
-			break;
+		}
 		fed += accepted;
-		if (fed > 32U * 1024U * 1024U)
-			break;
 	}
-	check(rc == SDK_VIDEO_BACKEND_UNSUPPORTED,
-	      "skip larger than the window fails instead of waiting");
+	check(waiting, "skip larger than the window keeps taking input");
+	stream_block(&after, 1, 2);
+	check(feed(dec, after.bytes, after.n, after.n), "block after the Void");
+	check(decode(dec) == SDK_VIDEO_BACKEND_FRAME && ndecoded == 2U &&
+	      decoded[1] == 2U, "block after the Void decodes");
 	ops->destroy(dec);
 }
 
@@ -803,6 +828,133 @@ static void stream_av_block(struct stream *s, uint8_t track, int key,
 	s->n += BLOCK_BYTES;
 }
 
+static void stream_matroska_select_head(struct stream *s)
+{
+	static const uint8_t head[] = {
+		0x1A, 0x45, 0xDF, 0xA3, 0x8B, 0x42, 0x82, 0x88,
+		'm', 'a', 't', 'r', 'o', 's', 'k', 'a',
+		0x18, 0x53, 0x80, 0x67, 0xFF,
+		0x15, 0x49, 0xA9, 0x66, 0x87, 0x2A, 0xD7, 0xB1,
+		0x83, 0x0F, 0x42, 0x40,
+		0x16, 0x54, 0xAE, 0x6B, 0x40, 0x80,
+		/* Disabled VP9 track 1. */
+		0xAE, 0x9A, 0xD7, 0x81, 0x01, 0x83, 0x81, 0x01,
+		0xB9, 0x81, 0x00, 0x86, 0x85, 'V', '_', 'V', 'P', '9',
+		0xE0, 0x88, 0xB0, 0x82, 0x00, 0xA0, 0xBA, 0x82, 0x00, 0x78,
+		/* Enabled VP8 track 3. */
+		0xAE, 0x97, 0xD7, 0x81, 0x03, 0x83, 0x81, 0x01,
+		0x86, 0x85, 'V', '_', 'V', 'P', '8',
+		0xE0, 0x88, 0xB0, 0x82, 0x00, 0xA0, 0xBA, 0x82, 0x00, 0x78,
+		/* Unsupported AC-3 track 2 before enabled Opus track 4. */
+		0xAE, 0x98, 0xD7, 0x81, 0x02, 0x83, 0x81, 0x02,
+		0x86, 0x85, 'A', '_', 'A', 'C', '3',
+		0xE1, 0x89, 0x9F, 0x81, 0x02, 0xB5, 0x84, 0x47, 0x3B, 0x80, 0x00,
+		0xAE, 0xAF, 0xD7, 0x81, 0x04, 0x83, 0x81, 0x02,
+		0x86, 0x86, 'A', '_', 'O', 'P', 'U', 'S',
+		0x63, 0xA2, 0x93, 'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, 2,
+		0x00, 0x00, 0x80, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0xE1, 0x89, 0x9F, 0x81, 0x02, 0xB5, 0x84, 0x47, 0x3B, 0x80, 0x00,
+		0x1F, 0x43, 0xB6, 0x75, 0xFF, 0xE7, 0x81, 0x00
+	};
+
+	memcpy(s->bytes, head, sizeof(head));
+	s->n = sizeof(head);
+}
+
+static void stream_matroska_double_opus_head(struct stream *s)
+{
+	static const uint8_t head[] = {
+		0x1A, 0x45, 0xDF, 0xA3, 0x8B, 0x42, 0x82, 0x88,
+		'm', 'a', 't', 'r', 'o', 's', 'k', 'a',
+		0x18, 0x53, 0x80, 0x67, 0xFF,
+		0x15, 0x49, 0xA9, 0x66, 0x87, 0x2A, 0xD7, 0xB1,
+		0x83, 0x0F, 0x42, 0x40,
+		0x16, 0x54, 0xAE, 0x6B, 0xFB,
+		0xAE, 0x97, 0xD7, 0x81, 0x01, 0x83, 0x81, 0x01,
+		0x86, 0x85, 'V', '_', 'V', 'P', '8',
+		0xE0, 0x88, 0xB0, 0x82, 0x00, 0xA0, 0xBA, 0x82, 0x00, 0x78,
+		0xAE, 0xAF, 0xD7, 0x81, 0x02, 0x83, 0x81, 0x02,
+		0x86, 0x86, 'A', '_', 'O', 'P', 'U', 'S',
+		0x63, 0xA2, 0x93, 'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, 2,
+		0x00, 0x00, 0x80, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0xE1, 0x89, 0x9F, 0x81, 0x02, 0xB5, 0x84, 0x47, 0x3B, 0x80, 0x00,
+		0xAE, 0xAF, 0xD7, 0x81, 0x03, 0x83, 0x81, 0x02,
+		0x86, 0x86, 'A', '_', 'O', 'P', 'U', 'S',
+		0x63, 0xA2, 0x93, 'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, 2,
+		0x00, 0x00, 0x80, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0xE1, 0x89, 0x9F, 0x81, 0x02, 0xB5, 0x84, 0x47, 0x3B, 0x80, 0x00,
+		0x1F, 0x43, 0xB6, 0x75, 0xFF, 0xE7, 0x81, 0x00
+	};
+
+	memcpy(s->bytes, head, sizeof(head));
+	s->n = sizeof(head);
+}
+
+static void test_matroska_track_selection(void)
+{
+	static struct stream s;
+	static uint8_t ring[8192];
+	struct SDKVideoMediaConfig cfg;
+	struct SDKVideoMediaInfo mi;
+	void *dec = ops->create(0U);
+	uint32_t accepted = 0U;
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_OPUS;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = sizeof(ring);
+	cfg.pcm_low_water_bytes = 3840U;
+	cfg.pcm_high_water_bytes = sizeof(ring);
+	check(dec && ops->configure_media(dec, &cfg), "Matroska track selection config");
+	ndecoded = 0U;
+	stream_matroska_select_head(&s);
+	stream_av_block(&s, 1U, 1, 1U, 0);
+	stream_av_block(&s, 3U, 1, 3U, 0);
+	stream_av_block(&s, 2U, 1, 0U, 0);
+	stream_av_block(&s, 4U, 1, 0U, 0);
+	check(feed(dec, s.bytes, s.n, s.n) &&
+	      ops->write(dec, 0, 0U, 1, &accepted) == SDK_VIDEO_BACKEND_WRITE_OK,
+	      "Matroska selected-track stream write");
+	check(decode(dec) == SDK_VIDEO_BACKEND_FRAME && ndecoded == 1U &&
+	      decoded[0] == 3U, "disabled video and its packet are ignored");
+	check(ops->get_media_info(dec, &mi) && mi.pcm_produced == 3840U,
+	      "first compatible Opus track is selected after AC-3");
+	ops->destroy(dec);
+}
+
+static void test_matroska_duplicate_opus_is_filtered(void)
+{
+	static struct stream s;
+	static uint8_t ring[8192];
+	struct SDKVideoMediaConfig cfg;
+	struct SDKVideoMediaInfo mi;
+	void *dec = ops->create(0U);
+	uint32_t accepted = 0U;
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.audio_codec = SDK_VIDEO_MEDIA_AUDIO_OPUS;
+	cfg.pcm_ring = ring;
+	cfg.pcm_ring_capacity = sizeof(ring);
+	cfg.pcm_low_water_bytes = 3840U;
+	cfg.pcm_high_water_bytes = sizeof(ring);
+	check(dec && ops->configure_media(dec, &cfg), "duplicate Opus config");
+	stream_matroska_double_opus_head(&s);
+	stream_av_block(&s, 1U, 1, 1U, 0);
+	stream_av_block(&s, 2U, 1, 0U, 0);
+	stream_av_block(&s, 3U, 1, 0U, 20);
+	check(feed(dec, s.bytes, s.n, s.n) &&
+	      ops->write(dec, 0, 0U, 1, &accepted) == SDK_VIDEO_BACKEND_WRITE_OK,
+	      "duplicate Opus stream write");
+	check(decode(dec) == SDK_VIDEO_BACKEND_FRAME &&
+	      ops->get_media_info(dec, &mi) && mi.pcm_produced == 3840U,
+	      "only the first compatible Opus track feeds PCM");
+	check(ops->ack_media(dec, mi.pcm_produced) &&
+	      decode(dec) == SDK_VIDEO_BACKEND_DONE &&
+	      ops->get_media_info(dec, &mi) && mi.pcm_produced == 3840U,
+	      "second Opus track remains filtered after acknowledgement");
+	ops->destroy(dec);
+}
+
 /* Muxers interleave WebM by timestamp, so each Opus packet sits just after
  * the picture it plays with. The host shows a picture when the audio clock
  * reaches it and only then asks for the next one, so the backend must
@@ -921,9 +1073,11 @@ int main(void)
 		test_skip_without_keyframe();
 		test_skip_budget();
 		test_invisible_frame();
-		test_window_exhausted_by_skip();
+		test_window_skip_larger_than_window();
 		test_window_exhausted_in_header();
 		test_partial_final_write();
+		test_matroska_track_selection();
+		test_matroska_duplicate_opus_is_filtered();
 		test_audio_demuxed_ahead_of_video();
 		test_input_ahead_is_limited();
 		test_block_larger_than_input_ahead();

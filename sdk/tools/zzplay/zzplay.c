@@ -2260,8 +2260,15 @@ static int zzplay_audio_start_if_ready(
     return ZZ9K_STATUS_OK;
   }
   if (!runtime->window) {
-    if (!result || !zzplay_ensure_pip(runtime)) {
+    const int pip_required = zzplay_audio_start_may_open_pip(
+        result != 0, no_more_pictures);
+
+    if (!pip_required) {
       return result ? ZZ9K_STATUS_UNSUPPORTED : ZZ9K_STATUS_OK;
+    }
+    if (zzplay_audio_pip_open_failed(
+            pip_required, zzplay_ensure_pip(runtime))) {
+      return ZZ9K_STATUS_UNSUPPORTED;
     }
   }
   /* EOF may only mean all bytes are staged in the card's FIFO. Keep its
@@ -2667,6 +2674,13 @@ done:
     UnLock(lock);
   }
   return status;
+}
+
+static void zzplay_fail_pip_open(struct ZZPlayRuntime *runtime)
+{
+  zzplay_error(runtime, "zzplay: cannot open P96 PIP window (error %ld)\n",
+               (long)runtime->pip_error);
+  zzplay_fail(runtime, ZZPLAY_FAILURE_PIP, ZZ9K_STATUS_UNSUPPORTED);
 }
 
 static int zzplay_release_resource(void *user,
@@ -3214,8 +3228,11 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
                                ZZPlayBackendDecision *decision)
 {
   const ZZPlayWebMInfo *webm;
+  const char *container_name;
   ZZPlayMediaAudio media = ZZPLAY_MEDIA_AUDIO_NONE;
   ZZPlayAudioBackend requested;
+  int matroska;
+  int mpeg_matroska;
   int strict = 0;
   uint32_t rate;
   char format[ZZPLAY_NOW_TEXT_MAX];
@@ -3224,51 +3241,42 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     return 0;
   }
   webm = &run->probe->webm;
+  matroska = webm->doc_type == ZZPLAY_WEBM_DOCTYPE_MATROSKA;
+  mpeg_matroska = matroska && (webm->video == ZZPLAY_WEBM_VIDEO_MPEG1 || webm->video == ZZPLAY_WEBM_VIDEO_MPEG2);
+  container_name = zzplay_webm_doc_type_name(webm->doc_type);
   switch (webm->refusal) {
   case ZZPLAY_WEBM_OK:
     break;
-  case ZZPLAY_WEBM_MATROSKA:
-    zzplay_error(runtime,
-                 "zzplay: Matroska files that are not WebM are not supported\n");
-    goto refused;
   case ZZPLAY_WEBM_TWO_VIDEO:
-    zzplay_error(runtime,
-                 "zzplay: WebM files with more than one video track "
-                 "are not supported\n");
+    zzplay_error(runtime, "zzplay: %s files with more than one video track are not supported\n", container_name);
     goto refused;
   case ZZPLAY_WEBM_TWO_AUDIO:
-    zzplay_error(runtime,
-                 "zzplay: WebM files with more than one audio track "
-                 "are not supported\n");
+    zzplay_error(runtime, "zzplay: %s files with more than one audio track are not supported\n", container_name);
     goto refused;
   case ZZPLAY_WEBM_UNKNOWN_CODEC:
-    zzplay_error(runtime, "zzplay: unsupported WebM codec\n");
+    zzplay_error(runtime, "zzplay: unsupported %s codec\n", container_name);
     goto refused;
   case ZZPLAY_WEBM_OVERSIZE:
-    zzplay_error(runtime,
-                 "zzplay: WebM video %lux%lu is larger than the card can play\n",
-                 (unsigned long)webm->width, (unsigned long)webm->height);
+    zzplay_error(runtime, "zzplay: %s video %lux%lu is larger than the card can play\n", container_name, (unsigned long)webm->width, (unsigned long)webm->height);
     goto refused;
   case ZZPLAY_WEBM_TRUNCATED:
-    zzplay_error(runtime, "zzplay: truncated WebM header\n");
+    zzplay_error(runtime, "zzplay: truncated %s header\n", container_name);
     goto refused;
   case ZZPLAY_WEBM_NO_VIDEO:
-    zzplay_error(runtime, "zzplay: WebM file has no video track\n");
+    zzplay_error(runtime, "zzplay: %s file has no video track\n", container_name);
     goto refused;
   case ZZPLAY_WEBM_BAD_AUDIO:
-    zzplay_error(runtime,
-                 "zzplay: WebM audio must be mono or stereo, and Vorbis "
-                 "must be 8 to 96 kHz\n");
+    zzplay_error(runtime, "zzplay: unsupported %s audio format\n", container_name);
     goto refused;
   default:
-    zzplay_error(runtime, "zzplay: WebM file is not a supported stream\n");
+    zzplay_error(runtime, "zzplay: %s file is not a supported stream\n", container_name);
     goto refused;
   }
   if (webm->width == 0U || webm->height == 0U ||
       !zzplay_webm_within_cap(webm->width, webm->height)) {
     zzplay_error(runtime,
-                 "zzplay: WebM video %lux%lu is larger than the card can play\n",
-                 (unsigned long)webm->width, (unsigned long)webm->height);
+                 "zzplay: %s video %lux%lu is larger than the card can play\n",
+                 container_name, (unsigned long)webm->width, (unsigned long)webm->height);
     goto refused;
   }
   memset(&info, 0, sizeof(info));
@@ -3282,43 +3290,42 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     ZZPlayContainerPolicy *policy = &runtime->container;
 
     memset(policy, 0, sizeof(*policy));
-    policy->title = "WebM";
+    policy->title = container_name;
     policy->video_codec = zzplay_webm_video_codec_id(webm->video);
     policy->container = ZZ9K_VIDEO_CONTAINER_WEBM;
     policy->audio_codec = zzplay_webm_audio_codec_id(webm->audio);
-    policy->video_flags = webm->video == ZZPLAY_WEBM_VIDEO_VP9
-                              ? ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9
-                              : ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8;
-    policy->audio_flags =
-        webm->audio == ZZPLAY_WEBM_AUDIO_OPUS
-            ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS
-            : webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS
-                  ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS
-                  : 0U;
+    if (mpeg_matroska) {
+      zzplay_matroska_mpeg_flags(webm->video, webm->audio,
+                                 &policy->video_flags, &policy->audio_flags);
+    } else {
+      policy->video_flags = webm->video == ZZPLAY_WEBM_VIDEO_VP9 ? ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9 : ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8;
+      policy->audio_flags = webm->audio == ZZPLAY_WEBM_AUDIO_OPUS ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS : webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS ? ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS : 0U;
+    }
     policy->video_name = zzplay_webm_video_name(webm->video);
     policy->audio_name = zzplay_webm_audio_name(webm->audio);
-    policy->service_missing =
-        "zzplay: WebM playback is not supported by this firmware\n";
-    policy->begin_refused =
-        "zzplay: WebM playback was refused by the firmware\n";
-    policy->stream_refused = "zzplay: this WebM stream is not supported\n";
-    /* VP8/VP9 keyframes can be seconds apart; the container carries a
-     * real presentation timeline for the position display. */
+    policy->service_missing = mpeg_matroska ? "zzplay: Matroska MPEG playback is not supported by this firmware\n" : matroska ? "zzplay: Matroska playback is not supported by this firmware\n" : "zzplay: WebM playback is not supported by this firmware\n";
+    /* Firmware from before Matroska support refuses the session at
+     * begin. */
+    policy->begin_refused = mpeg_matroska ? "zzplay: the firmware refused this Matroska MPEG stream (it needs newer firmware, or the video size is unsupported)\n" : matroska ? "zzplay: Matroska playback was refused by the firmware (it may need newer firmware)\n" : "zzplay: WebM playback was refused by the firmware\n";
+    policy->stream_refused = mpeg_matroska ? "zzplay: this Matroska MPEG stream is not supported\n" : matroska ? "zzplay: this Matroska stream is not supported\n" : "zzplay: this WebM stream is not supported\n";
+    /* MPEG in Matroska follows the Program Stream policy: skip late B
+     * pictures, and recover a sustained lag at the next I picture. */
     policy->keyframe_skip = 1U;
+    policy->skip_late_b = mpeg_matroska ? 1U : 0U;
     policy->pts_position = 1U;
   }
-  if (webm->audio == ZZPLAY_WEBM_AUDIO_OPUS) {
-    media = ZZPLAY_MEDIA_AUDIO_OPUS;
-  } else if (webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS) {
-    media = ZZPLAY_MEDIA_AUDIO_VORBIS;
-  }
+  if (webm->audio == ZZPLAY_WEBM_AUDIO_OPUS) media = ZZPLAY_MEDIA_AUDIO_OPUS;
+  else if (webm->audio == ZZPLAY_WEBM_AUDIO_VORBIS) media = ZZPLAY_MEDIA_AUDIO_VORBIS;
+  else if (webm->audio == ZZPLAY_WEBM_AUDIO_MPEG) media = ZZPLAY_MEDIA_AUDIO_MP2;
+  else if (webm->audio == ZZPLAY_WEBM_AUDIO_AC3) media = ZZPLAY_MEDIA_AUDIO_AC3;
+  else if (webm->audio == ZZPLAY_WEBM_AUDIO_LPCM) media = ZZPLAY_MEDIA_AUDIO_LPCM;
   requested = zzplay_prefs_requested_backend(
       &runtime->prefs, &runtime->options, media, &strict);
   runtime->audio_strict = (uint8_t)(strict ? 1 : 0);
   if (webm->audio == ZZPLAY_WEBM_AUDIO_NONE &&
       requested != ZZPLAY_AUDIO_AUTO && requested != ZZPLAY_AUDIO_NONE &&
       strict) {
-    zzplay_error(runtime, "zzplay: the WebM file has no audio track\n");
+    zzplay_error(runtime, "zzplay: the %s file has no audio track\n", container_name);
     goto refused;
   }
   memset(decision, 0, sizeof(*decision));
@@ -3336,9 +3343,9 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     }
     if (decision->status != ZZPLAY_BACKEND_OK) {
       zzplay_error(runtime,
-                   "zzplay: audio backend %s cannot play WebM %s "
+                   "zzplay: audio backend %s cannot play %s %s "
                    "(status %u)\n",
-                   zzplay_audio_backend_name(requested),
+                   zzplay_audio_backend_name(requested), container_name,
                    zzplay_webm_audio_name(webm->audio),
                    (unsigned)decision->status);
       zzplay_fail(runtime, ZZPLAY_FAILURE_CAPABILITY,
@@ -3351,9 +3358,9 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     decision->status = ZZPLAY_BACKEND_OK;
     decision->selected = ZZPLAY_AUDIO_NONE;
     runtime->audio_backend = ZZPLAY_AUDIO_NONE;
-    zzplay_info("zzplay: warning: video-only WebM\n");
+    zzplay_info("zzplay: warning: video-only %s\n", container_name);
   }
-  zzplay_info("zzplay: WebM %s %lux%lu%s\n",
+  zzplay_info("zzplay: %s %s %lux%lu%s\n", container_name,
               zzplay_webm_video_name(webm->video),
               (unsigned long)webm->width, (unsigned long)webm->height,
               webm->audio == ZZPLAY_WEBM_AUDIO_NONE
@@ -3371,9 +3378,9 @@ static int zzplay_prepare_webm(struct ZZPlayRuntime *runtime,
     }
     whole = frac / 1000;
     frac = frac % 1000;
-    zzplay_info("zzplay: WebM projection pose roll %s%ld.%03ld degrees "
+    zzplay_info("zzplay: %s projection pose roll %s%ld.%03ld degrees "
                 "(not applied)\n",
-                roll < 0 ? "-" : "", (long)whole, (long)frac);
+                container_name, roll < 0 ? "-" : "", (long)whole, (long)frac);
   }
   zzplay_controller_set_capabilities(
       runtime->ctl, 0, runtime->audio_backend == ZZPLAY_AUDIO_AHI, 1);
@@ -3963,9 +3970,13 @@ playback_session:
           &runtime, 0, transport.eof_sent,
           zzplay_audio_pts_bypass_allowed(media_done, 0), 0, 0);
       if (cleanup_status != ZZ9K_STATUS_OK) {
-        zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
-                zz9k_status_name(cleanup_status));
-        zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        if (runtime.pip_open_failed) {
+          zzplay_fail_pip_open(&runtime);
+        } else {
+          zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
+                  zz9k_status_name(cleanup_status));
+          zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        }
         break;
       }
     }
@@ -3998,11 +4009,7 @@ playback_session:
           transport.eof_sent, &retired);
       if (cleanup_status != ZZ9K_STATUS_OK) {
         if (runtime.pip_open_failed) {
-          zzplay_error(&runtime,
-                  "zzplay: cannot open P96 PIP window (error %ld)\n",
-                  (long)runtime.pip_error);
-          zzplay_fail(&runtime, ZZPLAY_FAILURE_PIP,
-                      ZZ9K_STATUS_UNSUPPORTED);
+          zzplay_fail_pip_open(&runtime);
         } else {
           zzplay_error(&runtime,
                   "zzplay: frame presentation failed: %s\n",
@@ -4086,9 +4093,13 @@ playback_session:
             &runtime, transport.eof_sent, decoder_backpressured);
       }
       if (cleanup_status != ZZ9K_STATUS_OK) {
-        zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
-                     zz9k_status_name(cleanup_status));
-        zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        if (runtime.pip_open_failed) {
+          zzplay_fail_pip_open(&runtime);
+        } else {
+          zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
+                       zz9k_status_name(cleanup_status));
+          zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        }
         break;
       }
       zzplay_wait_us(&runtime.timer, ZZPLAY_SYNC_POLL_US);
@@ -4130,9 +4141,13 @@ playback_session:
             &runtime, transport.eof_sent, decoder_backpressured);
       }
       if (cleanup_status != ZZ9K_STATUS_OK) {
-        zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
-                     zz9k_status_name(cleanup_status));
-        zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        if (runtime.pip_open_failed) {
+          zzplay_fail_pip_open(&runtime);
+        } else {
+          zzplay_error(&runtime, "zzplay: audio output failed: %s\n",
+                       zz9k_status_name(cleanup_status));
+          zzplay_fail(&runtime, ZZPLAY_FAILURE_IO, cleanup_status);
+        }
         break;
       }
     }

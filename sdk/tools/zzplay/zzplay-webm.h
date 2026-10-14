@@ -20,6 +20,9 @@
 #define ZZPLAY_WEBM_MAX_PIXELS (1920U * 1088U)
 #define ZZPLAY_WEBM_VP8_REALTIME_PIXELS (1280U * 720U)
 #define ZZPLAY_WEBM_VP9_REALTIME_PIXELS (854U * 480U)
+/* MPEG-1/2 in Matroska: the size up to which MPEG plays in real time;
+ * larger MPEG is best effort (sdk/docs/zzplay.md). */
+#define ZZPLAY_WEBM_MPEG_REALTIME_PIXELS (800U * 600U)
 
 /* More than this many 90 kHz ticks behind the audio master means skip to
  * the next keyframe. Phone clips can place keyframes several seconds
@@ -29,19 +32,29 @@
 typedef enum ZZPlayWebMVideo {
   ZZPLAY_WEBM_VIDEO_NONE = 0,
   ZZPLAY_WEBM_VIDEO_VP8,
-  ZZPLAY_WEBM_VIDEO_VP9
+  ZZPLAY_WEBM_VIDEO_VP9,
+  ZZPLAY_WEBM_VIDEO_MPEG1,
+  ZZPLAY_WEBM_VIDEO_MPEG2
 } ZZPlayWebMVideo;
 
 typedef enum ZZPlayWebMAudio {
   ZZPLAY_WEBM_AUDIO_NONE = 0,
   ZZPLAY_WEBM_AUDIO_OPUS,
-  ZZPLAY_WEBM_AUDIO_VORBIS
+  ZZPLAY_WEBM_AUDIO_VORBIS,
+  ZZPLAY_WEBM_AUDIO_MPEG,
+  ZZPLAY_WEBM_AUDIO_AC3,
+  ZZPLAY_WEBM_AUDIO_LPCM
 } ZZPlayWebMAudio;
+
+typedef enum ZZPlayWebMDocType {
+  ZZPLAY_WEBM_DOCTYPE_NONE = 0,
+  ZZPLAY_WEBM_DOCTYPE_WEBM,
+  ZZPLAY_WEBM_DOCTYPE_MATROSKA
+} ZZPlayWebMDocType;
 
 typedef enum ZZPlayWebMRefusal {
   ZZPLAY_WEBM_OK = 0,
   ZZPLAY_WEBM_NOT_CONTAINER,
-  ZZPLAY_WEBM_MATROSKA,
   ZZPLAY_WEBM_TRUNCATED,
   ZZPLAY_WEBM_TWO_VIDEO,
   ZZPLAY_WEBM_TWO_AUDIO,
@@ -53,6 +66,7 @@ typedef enum ZZPlayWebMRefusal {
 } ZZPlayWebMRefusal;
 
 typedef struct ZZPlayWebMInfo {
+  ZZPlayWebMDocType doc_type;
   ZZPlayWebMVideo video;
   ZZPlayWebMAudio audio;
   ZZPlayWebMRefusal refusal;
@@ -100,11 +114,19 @@ uint32_t zzplay_webm_required_flags(ZZPlayWebMVideo video,
                                    ZZPlayWebMAudio audio);
 int zzplay_webm_service_ready(uint32_t flags, ZZPlayWebMVideo video,
                               ZZPlayWebMAudio audio);
+/* Service flags for MPEG in Matroska, as for a Program Stream: MPEG-1
+ * video needs the MPEG-1 flag and MPEG-2 video the MPEG-2 flag. Decoded
+ * MPEG audio needs MEDIA_MP2. AC-3 and PCM are advertised with the
+ * MPEG-2 flag, so they need it with MPEG-1 video too. Callers add
+ * *audio_flags only when the audio will be decoded. */
+void zzplay_matroska_mpeg_flags(ZZPlayWebMVideo video, ZZPlayWebMAudio audio,
+                                uint32_t *video_flags, uint32_t *audio_flags);
 
 uint32_t zzplay_webm_video_codec_id(ZZPlayWebMVideo video);
 uint32_t zzplay_webm_audio_codec_id(ZZPlayWebMAudio audio);
 
 const char *zzplay_webm_video_name(ZZPlayWebMVideo video);
 const char *zzplay_webm_audio_name(ZZPlayWebMAudio audio);
+const char *zzplay_webm_doc_type_name(ZZPlayWebMDocType doc_type);
 
 #endif /* ZZPLAY_WEBM_H */

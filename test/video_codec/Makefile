@@ -7,10 +7,12 @@ FIRMWARE_SRC := ../../ZZ9000_proto.sdk/ZZ9000OS/src
 .PHONY: test clean
 
 test: build/video_codec_test build/media_timeline_test build/media_codec_test \
+	build/matroska_mpeg_test \
 	build/media_codec_test_sanitize build/dvd_codec_test build/dvd_codec_test_sanitize
 	build/video_codec_test
 	build/media_timeline_test
 	build/media_codec_test
+	build/matroska_mpeg_test
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 		build/media_codec_test_sanitize
 	build/dvd_codec_test
@@ -43,6 +45,8 @@ $(LIBA52_HOST_LIB): $(LIBMPEG2_HOST_LIB)
 # The MPEG-1/MPEG-2 Program Stream backend (libmpeg2 video, minimp3 MPEG
 # audio) and everything it links.
 MPEG_SRCS := $(FIRMWARE_SRC)/sdk_video_mpeg2.c \
+	$(FIRMWARE_SRC)/webm_parse.c \
+	$(FIRMWARE_SRC)/webm_window.c \
 	$(FIRMWARE_SRC)/sdk_dvd_ps.c \
 	$(FIRMWARE_SRC)/sdk_dvd_ac3.c \
 	$(FIRMWARE_SRC)/sdk_dvd_lpcm.c \
@@ -89,6 +93,10 @@ build/video_codec_test: video_codec_test.c $(MPEG1_FIXTURES) $(MPEG_DEPS)
 build/media_codec_test: media_codec_test.c $(MPEG1_FIXTURES) $(MPEG_DEPS)
 	mkdir -p build
 	$(CC) $(CFLAGS) $(MPEG_FLAGS) -o $@ media_codec_test.c $(MPEG_SRCS) \
+		$(MPEG_LIBS) -lm
+build/matroska_mpeg_test: matroska_mpeg_test.c $(MPEG1_FIXTURES) $(MPEG_DEPS)
+	mkdir -p build
+	$(CC) $(CFLAGS) $(MPEG_FLAGS) -o $@ matroska_mpeg_test.c $(MPEG_SRCS) \
 		$(MPEG_LIBS) -lm
 
 build/media_codec_test_sanitize: media_codec_test.c $(MPEG1_FIXTURES) \

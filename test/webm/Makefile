@@ -25,10 +25,11 @@ test: build/webm_parse_test build/webm_bounds_test build/webm_backend_test
 	build/webm_backend_test
 
 build/webm_parse_test: webm_parse_test.c ebml_build.h \
-	$(FIRMWARE_SRC)/webm_parse.c $(FIRMWARE_SRC)/webm_parse.h
+	$(FIRMWARE_SRC)/webm_parse.c $(FIRMWARE_SRC)/webm_parse.h \
+	$(FIRMWARE_SRC)/webm_window.c $(FIRMWARE_SRC)/webm_window.h
 	mkdir -p build
 	$(CC) $(CFLAGS) -I$(FIRMWARE_SRC) -o $@ webm_parse_test.c \
-		$(FIRMWARE_SRC)/webm_parse.c
+		$(FIRMWARE_SRC)/webm_parse.c $(FIRMWARE_SRC)/webm_window.c
 
 build/webm_bounds_test: webm_bounds_test.c ebml_build.h \
 	$(FIRMWARE_SRC)/webm_parse.c $(FIRMWARE_SRC)/webm_parse.h

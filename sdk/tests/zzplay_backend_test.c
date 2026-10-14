@@ -189,8 +189,21 @@ static int check_audio_start_prebuffer(void)
       !zzplay_audio_start_ready(4800U, 9600U, 24000U, 0, 1, 0) ||
       !zzplay_audio_start_ready(4800U, 9600U, 24000U, 0, 0, 1) ||
       zzplay_audio_start_ready(0U, 9600U, 24000U, 1, 1, 1) ||
+      /* A PCM decoder stalled below the MPEG/PS target can open PIP and
+       * start audio. MPEG/PS and WebM still wait below their targets without
+       * backpressure, while both retain their ordinary ready start. */
+      !zzplay_audio_start_ready(2048U, 5760U, 6144U, 1, 0, 0) ||
+      !zzplay_audio_start_may_open_pip(0, 1) ||
+      zzplay_audio_start_ready(5759U, 5760U, 6144U, 0, 0, 0) ||
+      !zzplay_audio_start_ready(5760U, 5760U, 6144U, 0, 0, 0) ||
+      zzplay_audio_start_ready(2047U, 2048U, 6144U, 0, 0, 0) ||
+      !zzplay_audio_start_ready(2048U, 2048U, 6144U, 0, 0, 0) ||
+      !zzplay_audio_start_may_open_pip(1, 0) ||
+      zzplay_audio_start_may_open_pip(0, 0) ||
+      !zzplay_audio_pip_open_failed(1, 0) ||
+      zzplay_audio_pip_open_failed(1, 1) ||
+      zzplay_audio_pip_open_failed(0, 0) ||
       zzplay_audio_pts_bypass_allowed(0, 0) ||
-      !zzplay_audio_pts_bypass_allowed(1, 0) ||
       !zzplay_audio_pts_bypass_allowed(0, 1)) {
     return 0;
   }

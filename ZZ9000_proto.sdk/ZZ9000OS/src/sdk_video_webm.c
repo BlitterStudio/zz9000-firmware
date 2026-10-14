@@ -75,6 +75,8 @@ struct sdk_video_webm {
 	struct webm_window win;
 	uint8_t *block;
 	uint32_t expect_codec;
+	uint32_t video_track_number;
+	uint32_t audio_track_number;
 	uint32_t decode_flags;
 	uint8_t opened;
 	uint8_t failed;
@@ -187,8 +189,9 @@ static const struct webm_track *video_track(const struct sdk_video_webm *d)
 {
 	unsigned i;
 
-	for (i = 0; i < d->demux.ntracks; i++)
-		if (d->demux.tracks[i].type == 1)
+	for (i = 0U; i < d->demux.ntracks; i++)
+		if (d->demux.tracks[i].type == 1U &&
+		    d->demux.tracks[i].enabled)
 			return &d->demux.tracks[i];
 	return 0;
 }
@@ -197,9 +200,17 @@ static const struct webm_track *audio_track(const struct sdk_video_webm *d)
 {
 	unsigned i;
 
-	for (i = 0; i < d->demux.ntracks; i++)
-		if (d->demux.tracks[i].type == 2)
-			return &d->demux.tracks[i];
+	for (i = 0U; i < d->demux.ntracks; i++) {
+		const struct webm_track *t = &d->demux.tracks[i];
+
+		if (t->type != 2U || !t->enabled)
+			continue;
+		if ((d->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_OPUS &&
+		     t->codec == WEBM_CODEC_OPUS) ||
+		    (d->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_VORBIS &&
+		     t->codec == WEBM_CODEC_VORBIS))
+			return t;
+	}
 	return 0;
 }
 
@@ -216,11 +227,7 @@ static int init_audio(struct sdk_video_webm *d)
 	}
 	if (!t)
 		return 0;
-	if (want == SDK_VIDEO_MEDIA_AUDIO_OPUS && t->codec != WEBM_CODEC_OPUS)
-		return 0;
-	if (want == SDK_VIDEO_MEDIA_AUDIO_VORBIS &&
-	    t->codec != WEBM_CODEC_VORBIS)
-		return 0;
+	d->audio_track_number = t->number;
 	priv = webm_track_priv(&d->demux, t);
 	if (t->codec == WEBM_CODEC_OPUS) {
 		int err = 0;
@@ -307,10 +314,15 @@ static int finish_open(struct sdk_video_webm *d)
 		d->unsupported = 1U;
 		return 0;
 	}
+	d->video_track_number = t->number;
 	if (!init_vpx(d) || !init_audio(d)) {
 		d->unsupported = 1U;
 		return 0;
 	}
+	/* Blocks of other tracks (audio not chosen, or none) are skipped
+	 * unread. */
+	webm_select_tracks(&d->demux, d->video_track_number,
+			   d->audio_track_number);
 	d->opened = 1U;
 	webm_window_compact(&d->win);
 	return 1;
@@ -351,9 +363,13 @@ static int pull_block(struct sdk_video_webm *d, struct webm_block *blk)
 	struct webm_demux saved;
 	int rc;
 
-	webm_window_mark(&d->win);
-	saved = d->demux;
-	rc = webm_next(&d->demux, blk);
+	/* WEBM_NEXT_SKIPPED: input that had not arrived was dropped, so the
+	 * old mark and snapshot are gone; take new ones. */
+	do {
+		webm_window_mark(&d->win);
+		saved = d->demux;
+		rc = webm_next(&d->demux, blk);
+	} while (rc == WEBM_NEXT_SKIPPED);
 	if (rc < 0 && d->demux.error == WEBM_ERR_NEED) {
 		d->demux = saved;
 		webm_window_rewind(&d->win);
@@ -669,6 +685,7 @@ static int take_audio(struct sdk_video_webm *d, const struct webm_block *blk)
 	int rc;
 
 	if (d->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_NONE ||
+	    blk->track != d->audio_track_number ||
 	    blk->codec != (d->media.audio_codec == SDK_VIDEO_MEDIA_AUDIO_OPUS
 				   ? WEBM_CODEC_OPUS : WEBM_CODEC_VORBIS))
 		return 1;
@@ -1094,7 +1111,7 @@ static int replenish_audio(struct sdk_video_webm *d)
 			return -1;
 		if (rc == 0)
 			return 1;
-		if (blk.codec == WEBM_CODEC_VP8 || blk.codec == WEBM_CODEC_VP9) {
+		if (blk.track == d->video_track_number) {
 			if (video_queue_push(d, &blk))
 				continue;
 			/* The block is already out of the demuxer and its
@@ -1188,8 +1205,7 @@ static int webm_decode(void *opaque, struct SDKVideoDecodedFrame *out)
 						: SDK_VIDEO_BACKEND_ERROR;
 				return SDK_VIDEO_BACKEND_NEED_INPUT;
 			}
-			video = blk.codec == WEBM_CODEC_VP8 ||
-				blk.codec == WEBM_CODEC_VP9;
+			video = blk.track == d->video_track_number;
 			if (!video) {
 				int audio = take_audio(d, &blk);
 
