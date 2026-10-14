@@ -50,7 +50,8 @@ module video_overlay_linebuffer #(
   input                   display_enable,
   /* Word addresses within a row, split by parity: a bilinear sample needs
    * the two adjacent macropixels k and k+1, which are always one even and
-   * one odd word. */
+   * one odd word. Drive them from registers; the words follow two pixel
+   * clocks later. */
   input  [ADDR_WIDTH-2:0] read_addr_even,
   input  [ADDR_WIDTH-2:0] read_addr_odd,
   /* The two source rows a bilinear output row blends (equal at the bottom
@@ -435,8 +436,20 @@ always @* begin
       free_bank = b;
 end
 
+/* The read addresses arrive registered; the bank selection is registered
+ * here too, so the BRAM address pins see only routing. It follows the row
+ * tags one pixel clock late, which only matters while a late row lands
+ * mid-line. */
+reg [BANK_BITS-1:0] top_bank_q = 0;
+reg [BANK_BITS-1:0] bottom_bank_q = 0;
+always @(posedge pixel_clk) begin
+  top_bank_q <= top_bank;
+  bottom_bank_q <= bottom_bank;
+end
+
 /* Memory m: bit 1 selects the row copy (0 top, 1 bottom), bit 0 the word
- * parity. Every beat is written to both copies of its parity. */
+ * parity. Every beat is written to both copies of its parity. Reads use the
+ * BRAM output register (READ_LATENCY 2) for the 150 MHz pixel clock. */
 wire [31:0] read_data [0:3];
 generate
   for (g = 0; g < 4; g = g + 1) begin : line_memory
@@ -460,7 +473,7 @@ generate
       .READ_DATA_WIDTH_B(32),
       .ADDR_WIDTH_B(ADDR_WIDTH - 1 + BANK_BITS),
       .READ_RESET_VALUE_B("0"),
-      .READ_LATENCY_B(1),
+      .READ_LATENCY_B(2),
       .WRITE_MODE_B("read_first"),
       .RST_MODE_B("SYNC")
     ) memory (
@@ -476,7 +489,7 @@ generate
       .rstb(1'b0),
       .enb(1'b1),
       .regceb(1'b1),
-      .addrb({(g / 2) ? bottom_bank : top_bank,
+      .addrb({(g / 2) ? bottom_bank_q : top_bank_q,
               (g % 2) ? read_addr_odd : read_addr_even}),
       .doutb(read_data[g]),
       .sbiterrb(),
@@ -493,8 +506,8 @@ assign displayed_line_ready = display_enable && |top_match && |bottom_match;
 assign fetch_ready = display_enable && !request_inflight && |bank_free;
 
 always @(posedge pixel_clk) begin
-  /* The visual BRAM address remains combinational and phase-locked.  Only
-   * the next-line scheduler consumes this registered query snapshot. */
+  /* Registered snapshot of the top row on display, for the fetch
+   * scheduler's consumed-row tracking. */
   scheduler_line <= displayed_line;
 
   /* A bank is free when it is empty or holds a row the display has passed.

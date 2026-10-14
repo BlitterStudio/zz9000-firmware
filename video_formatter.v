@@ -699,8 +699,10 @@ always @(posedge m_axis_vid_aclk) begin
 end
 
 localparam PIPE_DELAY = 4;
-/* The bilinear filter between the line buffer and the YUV converter. */
-localparam OVERLAY_FILTER_DELAY = 5;
+/* Cycles the line-buffer path adds before the YUV converter: the registered
+ * read address (1), the BRAM output register (1) and the bilinear filter
+ * (7). */
+localparam OVERLAY_FILTER_DELAY = 9;
 localparam OVERLAY_PIPE_DELAY = 4 + OVERLAY_FILTER_DELAY;
 /* Sprite pixels delayed to match the overlay pipeline. */
 reg [24*OVERLAY_PIPE_DELAY-1:0] sprite_pix_delay = 0;
@@ -870,21 +872,59 @@ wire [7:0] overlay_luma_weight =
 wire [7:0] overlay_chroma_weight =
   (overlay_pos_c < 0 || overlay_word_edge) ? 8'd0 : overlay_pos_c[15:8];
 /* Word k < 1280, so k / 2 fits the line buffer's 10-bit half-row address. */
-wire [9:0] overlay_read_addr_odd = overlay_word_k[10:1];
-wire [9:0] overlay_read_addr_even =
+wire [9:0] overlay_read_addr_odd_next = overlay_word_k[10:1];
+wire [9:0] overlay_read_addr_even_next =
   overlay_word_k[10:1] + (overlay_word_k[0] && !overlay_word_edge);
+/* The addresses and the filter's sample geometry are registered, so the
+ * BRAM address pins see only routing. */
+reg [9:0] overlay_read_addr_odd = 0;
+reg [9:0] overlay_read_addr_even = 0;
+reg overlay_sample_luma_odd = 0;
+reg overlay_sample_luma_edge = 0;
+reg [7:0] overlay_sample_luma_weight = 0;
+reg overlay_sample_word_odd = 0;
+reg overlay_sample_word_edge = 0;
+reg [7:0] overlay_sample_chroma_weight = 0;
+always @(posedge dvi_clk) begin
+  overlay_read_addr_odd <= overlay_read_addr_odd_next;
+  overlay_read_addr_even <= overlay_read_addr_even_next;
+  overlay_sample_luma_odd <= overlay_luma_i[0];
+  overlay_sample_luma_edge <= overlay_luma_edge;
+  overlay_sample_luma_weight <= overlay_luma_weight;
+  overlay_sample_word_odd <= overlay_word_k[0];
+  overlay_sample_word_edge <= overlay_word_edge;
+  overlay_sample_chroma_weight <= overlay_chroma_weight;
+end
 
-/* Vertical sample geometry of the next raster row, registered at the line
- * wrap: the first row of a frame starts at the clipped start position. */
-wire signed [31:0] overlay_row_pos_select;
-wire [11:0] overlay_row_floor = overlay_floor12(overlay_row_pos_select);
-wire overlay_row_edge = overlay_row_floor >= vga_overlay_row_max;
-wire [11:0] overlay_row_r =
-  overlay_row_edge ? vga_overlay_row_max : overlay_row_floor;
-wire [11:0] overlay_row_r1 =
-  overlay_row_edge ? vga_overlay_row_max : overlay_row_floor + 1'b1;
-wire [7:0] overlay_row_w = (overlay_row_pos_select < 0 || overlay_row_edge)
-  ? 8'd0 : overlay_row_pos_select[15:8];
+/* Vertical sample geometry {r, r + 1, weight} of a 16.16 row position. */
+function [31:0] overlay_row_sample;
+  input signed [31:0] pos;
+  input [11:0] last;
+  reg [11:0] floor_row;
+  reg [11:0] next_row;
+  begin
+    floor_row = overlay_floor12(pos);
+    next_row = floor_row + 1'b1;
+    if (floor_row >= last)
+      overlay_row_sample = {last, last, 8'd0};
+    else
+      overlay_row_sample = {floor_row, next_row,
+                            pos < 0 ? 8'd0 : pos[15:8]};
+  end
+endfunction
+
+/* Both candidates for the next raster row are registered ahead of the line
+ * wrap, which only picks one: the first row of a frame starts at the
+ * clipped start position, every other row at overlay_pos_y (advanced at
+ * h_rez, well before the wrap). */
+reg [31:0] overlay_row_start_sample = 0;
+reg [31:0] overlay_row_next_sample = 0;
+always @(posedge dvi_clk) begin
+  overlay_row_start_sample <=
+    overlay_row_sample(vga_overlay_y_start, vga_overlay_row_max);
+  overlay_row_next_sample <=
+    overlay_row_sample(overlay_pos_y, vga_overlay_row_max);
+end
 /* The fetcher starts at the first visible row's top source row. */
 wire [11:0] overlay_fetch_start_floor = overlay_floor12(vga_overlay_y_start);
 wire [11:0] overlay_fetch_first_row =
@@ -948,8 +988,6 @@ wire frame_wrap_this_line = source_sync_line_uses_sync
   : counter_y >= vga_v_max;
 wire [11:0] next_raster_y = frame_wrap_this_line
   ? 12'b0 : counter_y + 1'b1;
-assign overlay_row_pos_select =
-  frame_wrap_this_line ? vga_overlay_y_start : overlay_pos_y;
 reg [11:0] next_raster_y_staged = 0;
 wire [11:0] staged_next_scanout_content_y =
   next_raster_y_staged - vga_viewport_y;
@@ -1190,15 +1228,15 @@ video_overlay_linebuffer #(.BANK_BITS(3)) overlay_linebuffer (
   .accepted_generation(overlay_accepted_generation)
 );
 
-video_overlay_filter overlay_filter (
+video_overlay_filter #(.READ_LATENCY(2)) overlay_filter (
   .clk(dvi_clk),
   .variant(vga_overlay_variant),
-  .luma_odd(overlay_luma_i[0]),
-  .luma_edge(overlay_luma_edge),
-  .luma_weight(overlay_luma_weight),
-  .word_odd(overlay_word_k[0]),
-  .word_edge(overlay_word_edge),
-  .chroma_weight(overlay_chroma_weight),
+  .luma_odd(overlay_sample_luma_odd),
+  .luma_edge(overlay_sample_luma_edge),
+  .luma_weight(overlay_sample_luma_weight),
+  .word_odd(overlay_sample_word_odd),
+  .word_edge(overlay_sample_word_edge),
+  .chroma_weight(overlay_sample_chroma_weight),
   .row_weight(overlay_row_weight),
   .top_even(overlay_read_top_even),
   .top_odd(overlay_read_top_odd),
@@ -1207,8 +1245,8 @@ video_overlay_filter overlay_filter (
   .yuv422(overlay_yuv422)
 );
 
-/* The base pixel and the window decision belong to the cycle the line
- * buffer words arrive; hold them for the filter latency. */
+/* The base pixel and the window decision belong to the cycle after the one
+ * whose overlay_pos_x they show; hold them for the line-buffer path. */
 reg [24*OVERLAY_FILTER_DELAY-1:0] overlay_base_delay = 0;
 reg [OVERLAY_FILTER_DELAY-1:0] overlay_draw_delay = 0;
 always @(posedge dvi_clk) begin
@@ -1624,9 +1662,9 @@ endcase
   if (counter_x >= vga_h_max) begin
     overlay_screen_x_position <= overlay_screen_x_origin;
     overlay_local_x_position <= overlay_local_x_origin;
-    overlay_displayed_line_row <= overlay_row_r;
-    overlay_displayed_next_row <= overlay_row_r1;
-    overlay_row_weight <= overlay_row_w;
+    {overlay_displayed_line_row, overlay_displayed_next_row,
+     overlay_row_weight} <= frame_wrap_this_line
+      ? overlay_row_start_sample : overlay_row_next_sample;
     viewport_output_x_position <= -$signed(PIPE_DELAY) -
       (vga_overlay_enable ? $signed(OVERLAY_PIPE_DELAY) : 17'sd0);
     viewport_output_y_row <= next_raster_y - vga_scale_y_factor;

@@ -11,16 +11,18 @@
  *
  * lerp(a, b, w) = a + (((b - a) * w + 128) >>> 8), with w in 1/256 steps.
  * A weight of zero returns a exactly, so an unscaled window passes the
- * source through unchanged. Multiplies and adds sit in separate stages for
- * the 150 MHz pixel clock.
+ * source through unchanged. Subtracts, multiplies and adds sit in separate
+ * stages for the 150 MHz pixel clock.
  *
  * Timing: the geometry inputs arrive with the line-buffer read addresses;
- * the words arrive one cycle later; yuv422 is valid OVERLAY_FILTER_DELAY (5)
- * cycles after the words.
+ * the words arrive READ_LATENCY cycles later; yuv422 is valid seven cycles
+ * after the words.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
-module video_overlay_filter(
+module video_overlay_filter #(
+  parameter READ_LATENCY = 2
+)(
   input         clk,
   input  [2:0]  variant,
   input         luma_odd,
@@ -53,18 +55,24 @@ function [31:0] unpack;
   end
 endfunction
 
-/* (b - a) * w, the multiply half of lerp. */
-function signed [17:0] lerp_product;
+/* lerp(a, b, w) runs as b - a, then (b - a) * w, then
+ * a + round(product / 256), one register stage each. */
+function signed [8:0] lerp_diff;
   input [7:0] a;
   input [7:0] b;
-  input [7:0] w;
   begin
-    lerp_product = ($signed({1'b0, b}) - $signed({1'b0, a})) *
-                   $signed({1'b0, w});
+    lerp_diff = $signed({1'b0, b}) - $signed({1'b0, a});
   end
 endfunction
 
-/* a + round(product / 256), the add half of lerp. */
+function signed [17:0] lerp_product;
+  input signed [8:0] diff;
+  input [7:0] w;
+  begin
+    lerp_product = diff * $signed({1'b0, w});
+  end
+endfunction
+
 function [7:0] lerp_sum;
   input [7:0] a;
   input signed [17:0] product;
@@ -75,24 +83,30 @@ function [7:0] lerp_sum;
   end
 endfunction
 
-/* Geometry aligned with the words. */
-reg a_luma_odd = 0;
-reg a_luma_edge = 0;
-reg [7:0] a_luma_weight = 0;
-reg a_word_odd = 0;
-reg a_word_edge = 0;
-reg [7:0] a_chroma_weight = 0;
-reg [7:0] a_row_weight = 0;
+/* Geometry delayed to line up with the words. */
+localparam GEOMETRY_BITS = 28;
+reg [GEOMETRY_BITS-1:0] geometry_delay [0:READ_LATENCY-1];
+integer d;
+initial
+  for (d = 0; d < READ_LATENCY; d = d + 1)
+    geometry_delay[d] = 0;
 
 always @(posedge clk) begin
-  a_luma_odd <= luma_odd;
-  a_luma_edge <= luma_edge;
-  a_luma_weight <= luma_weight;
-  a_word_odd <= word_odd;
-  a_word_edge <= word_edge;
-  a_chroma_weight <= chroma_weight;
-  a_row_weight <= row_weight;
+  geometry_delay[0] <= {luma_odd, luma_edge, luma_weight, word_odd,
+                        word_edge, chroma_weight, row_weight};
+  for (d = 1; d < READ_LATENCY; d = d + 1)
+    geometry_delay[d] <= geometry_delay[d - 1];
 end
+
+wire a_luma_odd;
+wire a_luma_edge;
+wire [7:0] a_luma_weight;
+wire a_word_odd;
+wire a_word_edge;
+wire [7:0] a_chroma_weight;
+wire [7:0] a_row_weight;
+assign {a_luma_odd, a_luma_edge, a_luma_weight, a_word_odd, a_word_edge,
+        a_chroma_weight, a_row_weight} = geometry_delay[READ_LATENCY - 1];
 
 /* Words k and k+1 of each row; k+1 is k at the right edge. */
 wire [31:0] top_k = a_word_odd ? top_odd : top_even;
@@ -114,96 +128,101 @@ wire [7:0] bottom_y0 = a_luma_odd ? bottom_k_s[23:16] : bottom_k_s[31:24];
 wire [7:0] bottom_y1 = a_luma_edge ? bottom_y0 :
                        (a_luma_odd ? bottom_k1_s[31:24] : bottom_k_s[23:16]);
 
-/* Stage 1: samples. Index 0 top row, 1 bottom row. */
-reg [7:0] s1_y0 [0:1];
-reg [7:0] s1_y1 [0:1];
-reg [7:0] s1_u0 [0:1];
-reg [7:0] s1_u1 [0:1];
-reg [7:0] s1_v0 [0:1];
-reg [7:0] s1_v1 [0:1];
+/* Samples are indexed component * 2 + row: Y, U, V; top row 0, bottom 1. */
+localparam SAMPLES = 6;
+
+/* Stage 1: neighbour pairs (a, b) of each sample. */
+reg [7:0] s1_a [0:SAMPLES-1];
+reg [7:0] s1_b [0:SAMPLES-1];
 reg [7:0] s1_luma_weight = 0;
 reg [7:0] s1_chroma_weight = 0;
 reg [7:0] s1_row_weight = 0;
 
-/* Stage 2: horizontal products. */
-reg [7:0] s2_y [0:1];
-reg [7:0] s2_u [0:1];
-reg [7:0] s2_v [0:1];
-reg signed [17:0] s2_yp [0:1];
-reg signed [17:0] s2_up [0:1];
-reg signed [17:0] s2_vp [0:1];
+/* Stage 2: horizontal differences. */
+reg [7:0] s2_a [0:SAMPLES-1];
+reg signed [8:0] s2_diff [0:SAMPLES-1];
+reg [7:0] s2_luma_weight = 0;
+reg [7:0] s2_chroma_weight = 0;
 reg [7:0] s2_row_weight = 0;
 
-/* Stage 3: horizontally filtered rows. */
-reg [7:0] s3_y [0:1];
-reg [7:0] s3_u [0:1];
-reg [7:0] s3_v [0:1];
+/* Stage 3: horizontal products. */
+reg [7:0] s3_a [0:SAMPLES-1];
+reg signed [17:0] s3_product [0:SAMPLES-1];
 reg [7:0] s3_row_weight = 0;
 
-/* Stage 4: vertical products. */
-reg [7:0] s4_y = 0, s4_u = 0, s4_v = 0;
-reg signed [17:0] s4_yp = 0, s4_up = 0, s4_vp = 0;
+/* Stage 4: horizontally filtered rows. */
+reg [7:0] s4_h [0:SAMPLES-1];
+reg [7:0] s4_row_weight = 0;
 
-/* Stage 5: output. */
-reg [7:0] s5_y = 0, s5_u = 0, s5_v = 0;
+/* Stages 5-7: the vertical lerp per component. */
+reg [7:0] s5_top [0:2];
+reg signed [8:0] s5_diff [0:2];
+reg [7:0] s5_row_weight = 0;
+reg [7:0] s6_top [0:2];
+reg signed [17:0] s6_product [0:2];
+reg [7:0] s7_out [0:2];
 
 integer r;
 initial begin
-  for (r = 0; r < 2; r = r + 1) begin
-    s1_y0[r] = 0; s1_y1[r] = 0; s1_u0[r] = 0; s1_u1[r] = 0;
-    s1_v0[r] = 0; s1_v1[r] = 0;
-    s2_y[r] = 0; s2_u[r] = 0; s2_v[r] = 0;
-    s2_yp[r] = 0; s2_up[r] = 0; s2_vp[r] = 0;
-    s3_y[r] = 0; s3_u[r] = 0; s3_v[r] = 0;
+  for (r = 0; r < SAMPLES; r = r + 1) begin
+    s1_a[r] = 0; s1_b[r] = 0;
+    s2_a[r] = 0; s2_diff[r] = 0;
+    s3_a[r] = 0; s3_product[r] = 0;
+    s4_h[r] = 0;
+  end
+  for (r = 0; r < 3; r = r + 1) begin
+    s5_top[r] = 0; s5_diff[r] = 0;
+    s6_top[r] = 0; s6_product[r] = 0;
+    s7_out[r] = 0;
   end
 end
 
 always @(posedge clk) begin
-  s1_y0[0] <= top_y0;
-  s1_y1[0] <= top_y1;
-  s1_u0[0] <= top_k_s[15:8];
-  s1_u1[0] <= top_k1_s[15:8];
-  s1_v0[0] <= top_k_s[7:0];
-  s1_v1[0] <= top_k1_s[7:0];
-  s1_y0[1] <= bottom_y0;
-  s1_y1[1] <= bottom_y1;
-  s1_u0[1] <= bottom_k_s[15:8];
-  s1_u1[1] <= bottom_k1_s[15:8];
-  s1_v0[1] <= bottom_k_s[7:0];
-  s1_v1[1] <= bottom_k1_s[7:0];
+  s1_a[0] <= top_y0;              s1_b[0] <= top_y1;
+  s1_a[1] <= bottom_y0;           s1_b[1] <= bottom_y1;
+  s1_a[2] <= top_k_s[15:8];       s1_b[2] <= top_k1_s[15:8];
+  s1_a[3] <= bottom_k_s[15:8];    s1_b[3] <= bottom_k1_s[15:8];
+  s1_a[4] <= top_k_s[7:0];        s1_b[4] <= top_k1_s[7:0];
+  s1_a[5] <= bottom_k_s[7:0];     s1_b[5] <= bottom_k1_s[7:0];
   s1_luma_weight <= a_luma_weight;
   s1_chroma_weight <= a_chroma_weight;
   s1_row_weight <= a_row_weight;
 
-  for (r = 0; r < 2; r = r + 1) begin
-    s2_y[r] <= s1_y0[r];
-    s2_u[r] <= s1_u0[r];
-    s2_v[r] <= s1_v0[r];
-    s2_yp[r] <= lerp_product(s1_y0[r], s1_y1[r], s1_luma_weight);
-    s2_up[r] <= lerp_product(s1_u0[r], s1_u1[r], s1_chroma_weight);
-    s2_vp[r] <= lerp_product(s1_v0[r], s1_v1[r], s1_chroma_weight);
+  for (r = 0; r < SAMPLES; r = r + 1) begin
+    s2_a[r] <= s1_a[r];
+    s2_diff[r] <= lerp_diff(s1_a[r], s1_b[r]);
   end
+  s2_luma_weight <= s1_luma_weight;
+  s2_chroma_weight <= s1_chroma_weight;
   s2_row_weight <= s1_row_weight;
 
-  for (r = 0; r < 2; r = r + 1) begin
-    s3_y[r] <= lerp_sum(s2_y[r], s2_yp[r]);
-    s3_u[r] <= lerp_sum(s2_u[r], s2_up[r]);
-    s3_v[r] <= lerp_sum(s2_v[r], s2_vp[r]);
+  for (r = 0; r < SAMPLES; r = r + 1) begin
+    s3_a[r] <= s2_a[r];
+    s3_product[r] <= lerp_product(s2_diff[r],
+                                  r < 2 ? s2_luma_weight : s2_chroma_weight);
   end
   s3_row_weight <= s2_row_weight;
 
-  s4_y <= s3_y[0];
-  s4_u <= s3_u[0];
-  s4_v <= s3_v[0];
-  s4_yp <= lerp_product(s3_y[0], s3_y[1], s3_row_weight);
-  s4_up <= lerp_product(s3_u[0], s3_u[1], s3_row_weight);
-  s4_vp <= lerp_product(s3_v[0], s3_v[1], s3_row_weight);
+  for (r = 0; r < SAMPLES; r = r + 1)
+    s4_h[r] <= lerp_sum(s3_a[r], s3_product[r]);
+  s4_row_weight <= s3_row_weight;
 
-  s5_y <= lerp_sum(s4_y, s4_yp);
-  s5_u <= lerp_sum(s4_u, s4_up);
-  s5_v <= lerp_sum(s4_v, s4_vp);
+  for (r = 0; r < 3; r = r + 1) begin
+    s5_top[r] <= s4_h[2 * r];
+    s5_diff[r] <= lerp_diff(s4_h[2 * r], s4_h[2 * r + 1]);
+  end
+  s5_row_weight <= s4_row_weight;
+
+  for (r = 0; r < 3; r = r + 1) begin
+    s6_top[r] <= s5_top[r];
+    s6_product[r] <= lerp_product(s5_diff[r], s5_row_weight);
+  end
+
+  for (r = 0; r < 3; r = r + 1)
+    s7_out[r] <= lerp_sum(s6_top[r], s6_product[r]);
 end
 
-assign yuv422 = {s5_v, s5_y, s5_u, s5_y};
+/* CGX layout with both lumas equal: Y U Y V from byte 0. */
+assign yuv422 = {s7_out[2], s7_out[0], s7_out[1], s7_out[0]};
 
 endmodule
