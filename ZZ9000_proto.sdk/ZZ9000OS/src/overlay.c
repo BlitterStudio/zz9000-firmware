@@ -97,21 +97,41 @@ static uint8_t overlay_scan_divisor(uint32_t addr)
 	return 1U;
 }
 
+/* Last native-plane (re)program, printed from the main poll: a reprogram
+ * can run in the vblank ISR, where a UART line would delay the handoff. */
+static volatile struct {
+	uint32_t addr;
+	uint32_t gen;
+	uint16_t w, h;
+	uint8_t div;
+	uint8_t ok;
+	uint8_t pending;
+} ov_program_log;
+
 /* (Re)start the native overlay on `addr` with the geometry of the frame
  * held there. */
 static int overlay_hw_program(uint32_t addr)
 {
 	uint8_t div = overlay_scan_divisor(addr);
+	int ok;
 
 	ov.hw_generation++;
 	if (ov.hw_generation == 0U)
 		ov.hw_generation = 1U;
-	if (!overlay_hw_start_scaled(addr, ov.src_pitch,
+	ok = overlay_hw_start_scaled(addr, ov.src_pitch,
 	        (uint16_t)(ov.src_w / div), (uint16_t)(ov.src_h / div),
 	        ov.dst_x, ov.dst_y, (uint16_t)ov.dst_w, (uint16_t)ov.dst_h,
 	        ov.variant,
 	        overlay_key_to_rgb(ov.key_native, ov.snap_colormode),
-	        ov.key_enabled, ov.hw_generation))
+	        ov.key_enabled, ov.hw_generation);
+	ov_program_log.addr = addr;
+	ov_program_log.gen = ov.hw_generation;
+	ov_program_log.w = (uint16_t)(ov.src_w / div);
+	ov_program_log.h = (uint16_t)(ov.src_h / div);
+	ov_program_log.div = div;
+	ov_program_log.ok = ok ? 1U : 0U;
+	ov_program_log.pending = 1U;
+	if (!ok)
 		return 0;
 	ov.hw_scan_addr = addr;
 	ov.hw_scan_div = div;
@@ -533,6 +553,18 @@ uint32_t overlay_present_bufpos(struct ZZ_VIDEO_STATE *vs)
 
 void overlay_main_poll(struct ZZ_VIDEO_STATE *vs)
 {
+	if (ov_program_log.pending) {
+		ov_program_log.pending = 0U;
+		printf("[overlay] program %s addr %08lx scan %ux%u div %u gen %lu "
+		       "shadows %08lx/%08lx div %u/%u\n",
+		       ov_program_log.ok ? "ok" : "FAILED",
+		       (unsigned long)ov_program_log.addr,
+		       (unsigned)ov_program_log.w, (unsigned)ov_program_log.h,
+		       (unsigned)ov_program_log.div,
+		       (unsigned long)ov_program_log.gen,
+		       (unsigned long)ov.shadow[0], (unsigned long)ov.shadow[1],
+		       (unsigned)ov.shadow_div[0], (unsigned)ov.shadow_div[1]);
+	}
 	if (ov.free_pending && !ov.compose_in_flight && !ov.presenting) {
 		ov.free_pending = 0;
 		overlay_free_shadows();

@@ -28,8 +28,8 @@
  */
 module video_overlay_scale_tb;
 
-localparam MAXW = 1280;
-localparam MAXH = 720;
+localparam MAXW = 1920;
+localparam MAXH = 1080;
 
 localparam OP_COLORMODE = 1;
 localparam OP_DIMENSIONS = 2;
@@ -186,8 +186,11 @@ initial begin : vdma
   end
 end
 
-// Overlay VDMA, stopped and restarted by the vblank handoff below.
+// Overlay VDMA, stopped and restarted by the vblank handoff below. While the
+// firmware has the plane stopped (overlay_hw_active low) the channel is idle.
 reg overlay_stream_en = 0;
+reg overlay_hw_active = 1;
+reg overlay_set_busy = 0;
 reg overlay_restart = 0;
 reg overlay_abort;
 integer overlay_generation = 1;
@@ -196,6 +199,7 @@ initial begin : overlay_vdma
   ovl_beats = 0;
   wait (overlay_stream_en);
   forever begin
+    wait (overlay_hw_active === 1'b1);
     overlay_abort = 0;
     for (ol = 0; ol < src_h && !overlay_abort; ol = ol + 1)
       for (ow = 0; ow < (src_w + 1) / 2 && !overlay_abort; ow = ow + 1) begin
@@ -232,14 +236,18 @@ initial begin : overlay_vdma
   end
 end
 
+/* The vblank rearm skips while a SET reprograms the plane, as
+ * overlay_hw_set_buffer does while overlay_hw_start_scaled runs. */
 initial begin : overlay_rearm
   wait (overlay_stream_en);
   forever begin
     @(posedge control_vblank[1]);
-    overlay_restart = 1;
-    repeat (frame_cycles) @(negedge aclk);
-    overlay_generation = overlay_generation + 1;
-    op(OP_OVERLAY_FRAME, overlay_generation);
+    if (overlay_hw_active && !overlay_set_busy) begin
+      overlay_restart = 1;
+      repeat (frame_cycles) @(negedge aclk);
+      overlay_generation = overlay_generation + 1;
+      op(OP_OVERLAY_FRAME, overlay_generation);
+    end
   end
 end
 
@@ -274,6 +282,9 @@ always @(posedge dvi_clk) begin
 end
 
 integer i, x, mism, shown, start_frame, sx, sy, row_bad, bad_rows, first_bad;
+integer sw, n_src_w, n_src_h, n_dst_w, n_dst_h, n_pos_x, n_pos_y;
+integer stop_frames, set_delay;
+integer n_canvas_w, n_canvas_h, n_dvi_half_ps, mode_delay, clock_gap;
 reg [31:0] got, exp;
 initial begin
   canvas_w = 160; canvas_h = 96; hblank = 56; vblank = 8;
@@ -282,6 +293,7 @@ initial begin
   ovl_gap_every = 0; ovl_gap_cycles = 0;
   frame_cycles = 20; restart_cycles = 60;
   trace_on = 0; trace_frame = -1;
+  sw = 0; stop_frames = 1; set_delay = 0;
   if ($value$plusargs("CANVAS_W=%d", canvas_w)) ;
   if ($value$plusargs("CANVAS_H=%d", canvas_h)) ;
   if ($value$plusargs("HBLANK=%d", hblank)) ;
@@ -298,6 +310,32 @@ initial begin
   if ($value$plusargs("FRAME_CYCLES=%d", frame_cycles)) ;
   if ($value$plusargs("RESTART_CYCLES=%d", restart_cycles)) ;
   if ($value$plusargs("TRACE=%d", trace_on)) ;
+  /* +SWITCH=1: after the first window has settled, replay ZZPlay's
+   * fullscreen toggle: the PIP is closed (overlay_hw_stop) for STOP_FRAMES
+   * frames (0 = a plain SET on a live plane, like a resize), then
+   * overlay_hw_start_scaled programs the NEW_* geometry SET_DELAY aclk
+   * cycles after a vblank interrupt. */
+  if ($value$plusargs("SWITCH=%d", sw)) ;
+  n_src_w = src_w; n_src_h = src_h; n_dst_w = dst_w; n_dst_h = dst_h;
+  n_pos_x = pos_x; n_pos_y = pos_y;
+  if ($value$plusargs("NEW_SRC_W=%d", n_src_w)) ;
+  if ($value$plusargs("NEW_SRC_H=%d", n_src_h)) ;
+  if ($value$plusargs("NEW_DST_W=%d", n_dst_w)) ;
+  if ($value$plusargs("NEW_DST_H=%d", n_dst_h)) ;
+  if ($value$plusargs("NEW_POS_X=%d", n_pos_x)) ;
+  if ($value$plusargs("NEW_POS_Y=%d", n_pos_y)) ;
+  if ($value$plusargs("STOP_FRAMES=%d", stop_frames)) ;
+  if ($value$plusargs("SET_DELAY=%d", set_delay)) ;
+  /* NEW_CANVAS_W/H, NEW_DVI_HALF_PS: the fullscreen screen's mode, set
+   * MODE_DELAY aclk cycles after a vblank with the pixel clock stopped for
+   * CLOCK_GAP aclk cycles. */
+  n_canvas_w = canvas_w; n_canvas_h = canvas_h; n_dvi_half_ps = dvi_half_ps;
+  mode_delay = 0; clock_gap = 2000;
+  if ($value$plusargs("NEW_CANVAS_W=%d", n_canvas_w)) ;
+  if ($value$plusargs("NEW_CANVAS_H=%d", n_canvas_h)) ;
+  if ($value$plusargs("NEW_DVI_HALF_PS=%d", n_dvi_half_ps)) ;
+  if ($value$plusargs("MODE_DELAY=%d", mode_delay)) ;
+  if ($value$plusargs("CLOCK_GAP=%d", clock_gap)) ;
   dvi_half = dvi_half_ps / 1000.0;
   h_max = canvas_w + hblank;
   v_max = canvas_h + vblank;
@@ -333,6 +371,62 @@ initial begin
   start_frame = frames;
   trace_frame = start_frame + 4;
   wait (frames >= start_frame + 6);
+
+  if (sw) begin
+    if (stop_frames > 0) begin
+      overlay_hw_active = 0;
+      overlay_restart = 1;
+      op(OP_OVERLAY_CTRL, 0);
+      start_frame = frames;
+      wait (frames >= start_frame + stop_frames);
+    end
+    /* A fullscreen screen in another mode: the pixel clock stops while the
+     * PLL relocks, the raster is reprogrammed and the clock restarts at
+     * NEW_DVI_HALF_PS. */
+    if (n_canvas_w != canvas_w || n_canvas_h != canvas_h ||
+        n_dvi_half_ps != dvi_half_ps) begin
+      @(posedge control_vblank[1]);
+      repeat (mode_delay) @(negedge aclk);
+      dvi_ena = 0;
+      repeat (clock_gap) @(negedge aclk);
+      canvas_w = n_canvas_w; canvas_h = n_canvas_h;
+      h_max = canvas_w + hblank;
+      v_max = canvas_h + vblank;
+      vs_start = canvas_h + 2;
+      vs_end = canvas_h + 4;
+      beats_per_line = (canvas_w + 1) / 2;
+      op(OP_DIMENSIONS, (canvas_h << 16) | canvas_w);
+      op(OP_MAX, (v_max << 16) | h_max);
+      op(OP_HS, ((canvas_w + 16) << 16) | (canvas_w + 32));
+      op(OP_VS, (vs_start << 16) | vs_end);
+      dvi_half_ps = n_dvi_half_ps;
+      dvi_half = dvi_half_ps / 1000.0;
+      dvi_ena = 1;
+      start_frame = frames;
+      wait (frames >= start_frame + 2);
+    end
+    @(posedge control_vblank[1]);
+    repeat (set_delay) @(negedge aclk);
+    overlay_set_busy = 1;
+    op(OP_OVERLAY_CTRL, 0);
+    overlay_hw_active = 0;
+    overlay_restart = 1;
+    repeat (restart_cycles) @(negedge aclk);
+    src_w = n_src_w; src_h = n_src_h; dst_w = n_dst_w; dst_h = n_dst_h;
+    pos_x = n_pos_x; pos_y = n_pos_y;
+    overlay_hw_active = 1;
+    op(OP_OVERLAY_POS, ((pos_y & 32'hffff) << 16) | (pos_x & 32'hffff));
+    op(OP_OVERLAY_SIZE, (dst_h << 16) | dst_w);
+    op(OP_OVERLAY_KEY, 0);
+    op(OP_OVERLAY_SOURCE_SIZE, (src_h << 16) | src_w);
+    overlay_generation = overlay_generation + 1;
+    op(OP_OVERLAY_FRAME, overlay_generation);
+    op(OP_OVERLAY_CTRL, 1);
+    overlay_set_busy = 0;
+    start_frame = frames;
+    trace_frame = start_frame + 4;
+    wait (frames >= start_frame + 6);
+  end
 
   mism = 0;
   shown = 0;

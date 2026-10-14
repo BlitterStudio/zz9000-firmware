@@ -60,7 +60,13 @@ SRC_W=36 SRC_H=20
 SRC_W=72 SRC_H=41
 SRC_W=72 SRC_H=80
 SRC_W=100 SRC_H=41
+SWITCH=1 STOP_FRAMES=0 SET_DELAY=3000 SRC_W=36 SRC_H=29 DST_W=56 DST_H=31 NEW_SRC_W=72 NEW_SRC_H=58 NEW_DST_W=160 NEW_DST_H=96 NEW_POS_X=0 NEW_POS_Y=0
+SWITCH=1 STOP_FRAMES=1 SET_DELAY=2500 SRC_W=72 SRC_H=58 DST_W=60 DST_H=40 NEW_CANVAS_W=102 NEW_CANVAS_H=77 NEW_DVI_HALF_PS=7700 NEW_DST_W=102 NEW_DST_H=57 NEW_POS_X=0 NEW_POS_Y=10
 "
+# The SWITCH scenarios replay ZZPlay's fullscreen toggle after a resize:
+# half-size scan to a full-screen window on a live plane, and a native
+# downscale to a letterboxed window on a screen in another mode (pixel clock
+# stopped and changed).
 # The stream stall above delivers one source row in about 60% of a raster
 # line: two rows never fit in one line, so only a fetcher that runs ahead of
 # the display keeps every row on time.
