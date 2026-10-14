@@ -60,31 +60,49 @@ int zzplay_geometry_is_fitted(uint16_t width, uint16_t height,
   return error < (src_w > src_h ? (uint32_t)src_w : (uint32_t)src_h);
 }
 
-int zzplay_geometry_screen_upscales(uint16_t screen_w, uint16_t screen_h,
-                                    uint16_t display_w, uint16_t display_h,
-                                    uint16_t src_w, uint16_t src_h)
+int zzplay_geometry_depth_is_supported(uint16_t depth)
 {
-  ZZPlayRect fit;
-
-  if (display_w == 0U || display_h == 0U) {
-    display_w = src_w;
-    display_h = src_h;
-  }
-  if (display_w == 0U || display_h == 0U || src_w == 0U || src_h == 0U) {
-    return 0;
-  }
-  fit = zzplay_geometry_fit(display_w, display_h, screen_w, screen_h);
-  return fit.width != 0U && fit.height != 0U &&
-         fit.width >= src_w && fit.height >= src_h;
+  return depth == 15U || depth == 16U || depth == 32U;
 }
 
-/* ZZ9000.card pixel-doubles every mode smaller than 640x480 and the card's
- * overlay refuses doubled modes; 1920x1200 is the largest mode every
- * ZZ9000 variant offers. */
-#define ZZPLAY_SCREEN_FLOOR_W 640U
-#define ZZPLAY_SCREEN_FLOOR_H 480U
-#define ZZPLAY_SCREEN_CAP_W 1920U
-#define ZZPLAY_SCREEN_CAP_H 1200U
+int zzplay_geometry_is_doubled(uint16_t width, uint16_t height)
+{
+  return width < ZZPLAY_SCREEN_FLOOR_W || height < ZZPLAY_SCREEN_FLOOR_H;
+}
+
+void zzplay_geometry_fullscreen_plan(uint32_t wb_mode_id,
+                                     uint16_t wb_width,
+                                     uint16_t wb_height,
+                                     uint16_t wb_depth,
+                                     ZZPlayFullscreenPlan *plan)
+{
+  if (!plan) {
+    return;
+  }
+  memset(plan, 0, sizeof(*plan));
+
+  if (zzplay_geometry_depth_is_supported(wb_depth)) {
+    plan->target_depth = wb_depth;
+  } else {
+    plan->target_depth = 16U;
+  }
+
+  if (zzplay_geometry_is_doubled(wb_width, wb_height) ||
+      wb_mode_id == ZZPLAY_INVALID_MODE_ID) {
+    plan->action = ZZPLAY_FS_FALLBACK_LADDER;
+    return;
+  }
+
+  if (zzplay_geometry_depth_is_supported(wb_depth)) {
+    plan->action = ZZPLAY_FS_REUSE_MODE;
+    plan->mode_id = wb_mode_id;
+    return;
+  }
+
+  plan->action = ZZPLAY_FS_MATCH_WB_RES;
+  plan->width = wb_width;
+  plan->height = wb_height;
+}
 
 static const uint16_t zzplay_screen_request_percent[4] = {100U, 133U, 166U,
                                                           200U};

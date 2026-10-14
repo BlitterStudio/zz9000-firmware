@@ -45,16 +45,43 @@ int zzplay_geometry_is_fitted(uint16_t width, uint16_t height,
 int zzplay_geometry_is_exact(const ZZPlayRect *rect,
                              uint16_t src_w, uint16_t src_h);
 
-/* True when fitting the display size into a screen of `screen_w` x
- * `screen_h` never shrinks the coded frame: the card's overlay plane is
- * only proven with the window at or above the frame's size, so a
- * fullscreen screen that would letterbox the coded frame smaller must not
- * be chosen while a larger mode exists. `display_w/h` 0 means the file
- * names no aspect (MPEG-1, WebP) and the coded frame is the fit source. */
-int zzplay_geometry_screen_upscales(uint16_t screen_w, uint16_t screen_h,
-                                    uint16_t display_w, uint16_t display_h,
-                                    uint16_t src_w, uint16_t src_h);
+/* Display modes smaller than 640x480 are pixel-doubled by ZZ9000.card, and
+ * the hardware overlay refuses doubled modes. */
+#define ZZPLAY_SCREEN_FLOOR_W 640U
+#define ZZPLAY_SCREEN_FLOOR_H 480U
+#define ZZPLAY_SCREEN_CAP_W 1920U
+#define ZZPLAY_SCREEN_CAP_H 1200U
+#define ZZPLAY_INVALID_MODE_ID 0xFFFFFFFFUL
 
+typedef enum ZZPlayFullscreenAction {
+  ZZPLAY_FS_REUSE_MODE,     /* Workbench mode is usable directly: same ModeID and depth */
+  ZZPLAY_FS_MATCH_WB_RES,   /* 8-bit or unsupported depth: ask p96BestModeID for WB res at 16-bit */
+  ZZPLAY_FS_FALLBACK_LADDER /* Pixel-doubled (<640x480) or invalid WB: use request ladder */
+} ZZPlayFullscreenAction;
+
+typedef struct ZZPlayFullscreenPlan {
+  ZZPlayFullscreenAction action;
+  uint32_t mode_id;      /* DisplayID to open when action == ZZPLAY_FS_REUSE_MODE */
+  uint16_t width;        /* Width to request when action == ZZPLAY_FS_MATCH_WB_RES */
+  uint16_t height;       /* Height to request when action == ZZPLAY_FS_MATCH_WB_RES */
+  uint16_t target_depth; /* Depth to open screen at (15, 16, or 32) */
+} ZZPlayFullscreenPlan;
+
+/* True when depth is supported natively by the overlay (15, 16, or 32 bit). */
+int zzplay_geometry_depth_is_supported(uint16_t depth);
+
+/* True when screen width and height are pixel-doubled by ZZ9000.card (<640x480). */
+int zzplay_geometry_is_doubled(uint16_t width, uint16_t height);
+
+/* Decide how fullscreen should open based on the Workbench display mode and depth.
+ * - Usable 15, 16, or 32-bit mode: reuse wb_mode_id and depth directly (no monitor resync).
+ * - 8-bit or unaccelerated depth: match Workbench width and height at 16-bit depth.
+ * - Pixel-doubled (<640x480) or invalid mode: fallback to the request ladder. */
+void zzplay_geometry_fullscreen_plan(uint32_t wb_mode_id,
+                                     uint16_t wb_width,
+                                     uint16_t wb_height,
+                                     uint16_t wb_depth,
+                                     ZZPlayFullscreenPlan *plan);
 /* Nominal size to ask P96 for when opening the fullscreen screen.
  * Attempt 0 is the display size (coded frame without an aspect) with the
  * 640x480 floor the card's pixel-doubling refusal requires; later attempts

@@ -52,6 +52,7 @@
 #include <libraries/Picasso96.h>
 #include <proto/dos.h>
 #include <proto/exec.h>
+#include <proto/graphics.h>
 #include <proto/intuition.h>
 #include <proto/Picasso96.h>
 #include <proto/timer.h>
@@ -665,6 +666,9 @@ static void zzplay_cache_screen(struct ZZPlayRuntime *runtime)
    * system default public screen happens to be. */
   screen = LockPubScreen((CONST_STRPTR)"Workbench");
   if (!screen) {
+    screen = LockPubScreen(NULL);
+  }
+  if (!screen) {
     return;
   }
   runtime->screen_w = (uint16_t)screen->Width;
@@ -902,35 +906,59 @@ static int zzplay_open_video_screen(struct ZZPlayRuntime *runtime)
   uint16_t aspect_h;
   uint16_t req_w = 0U;
   uint16_t req_h = 0U;
-  ULONG depth = 16UL;
-  ULONG fallback_mode = (ULONG)INVALID_ID;
+  ULONG wb_mode_id = (ULONG)INVALID_ID;
+  uint16_t wb_width = 0U;
+  uint16_t wb_height = 0U;
+  ULONG wb_depth = 0UL;
+  struct Screen *wbscreen;
+  ZZPlayFullscreenPlan plan;
   ULONG rejected_mode = (ULONG)INVALID_ID;
   unsigned attempt;
 
   if (runtime->screen) {
     return 1;
   }
-  /* Match the Workbench depth where we know it: both 16- and 32-bit are
-   * hardware-qualified for the PIP, and the source stride P96 derives for
-   * the packed-YUV bitmap depends on it. */
-  if (runtime->window && runtime->window->WScreen) {
-    ULONG current = (ULONG)p96GetBitMapAttr(
-        runtime->window->WScreen->RastPort.BitMap, P96BMA_DEPTH);
-
-    if (current == 15UL || current == 16UL || current == 32UL) {
-      depth = current;
-    }
+  /* Query the Workbench screen itself: runtime->window is gone during a
+   * toggle and does not exist yet with -f. libnix opens graphics.library
+   * at startup, as it does intuition.library. */
+  wbscreen = LockPubScreen((CONST_STRPTR)"Workbench");
+  if (!wbscreen) {
+    wbscreen = LockPubScreen(NULL);
   }
-  /* The card's overlay only shows a window at or above the frame's size
-   * (an A4000 letterboxed a 720x576 MPEG-2 frame into 720x405 on a
-   * 720x576 screen and got the frame's top rows, while the same clip
-   * windowed at 1024x576 was correct), so ask for the video's display size
-   * first and keep growing the request until the fitted window cannot
-   * shrink the coded frame. The ladder starts at 640x480 because
-   * ZZ9000.card pixel-doubles every smaller mode and the overlay refuses
-   * doubled modes. A display no mode can hold without shrinking falls back
-   * to the first mode that opened; the firmware composites such windows in
-   * software instead of scanning them natively. */
+  if (wbscreen) {
+    wb_width = (uint16_t)wbscreen->Width;
+    wb_height = (uint16_t)wbscreen->Height;
+    wb_depth = (ULONG)p96GetBitMapAttr(
+        wbscreen->RastPort.BitMap, P96BMA_DEPTH);
+    wb_mode_id = (ULONG)GetVPModeID(&wbscreen->ViewPort);
+    UnlockPubScreen(NULL, wbscreen);
+  }
+
+  zzplay_geometry_fullscreen_plan(wb_mode_id, wb_width, wb_height,
+                                  (uint16_t)wb_depth, &plan);
+
+  if (plan.action == ZZPLAY_FS_REUSE_MODE) {
+    if (zzplay_open_screen_mode(runtime, plan.mode_id, plan.target_depth)) {
+      return 1;
+    }
+    rejected_mode = plan.mode_id;
+  } else if (plan.action == ZZPLAY_FS_MATCH_WB_RES) {
+    ULONG mode = p96BestModeIDTags(
+        P96BIDTAG_NominalWidth, (ULONG)plan.width,
+        P96BIDTAG_NominalHeight, (ULONG)plan.height,
+        P96BIDTAG_Depth, (ULONG)plan.target_depth,
+        TAG_DONE);
+
+    if (mode != (ULONG)INVALID_ID &&
+        zzplay_open_screen_mode(runtime, mode, plan.target_depth)) {
+      return 1;
+    }
+    rejected_mode = mode;
+  }
+
+  /* Fallback: Workbench mode cannot be used (pixel-doubled, mode refused, or
+   * invalid). Try the ladder requests. The card's overlay scales both up
+   * and down, so accept the first mode that opens. */
   zzplay_aspect_pixels(runtime, &aspect_w, &aspect_h);
   for (attempt = 0U;
        zzplay_geometry_screen_request(attempt, aspect_w, aspect_h,
@@ -939,37 +967,18 @@ static int zzplay_open_video_screen(struct ZZPlayRuntime *runtime)
     ULONG mode = p96BestModeIDTags(
         P96BIDTAG_NominalWidth, (ULONG)req_w,
         P96BIDTAG_NominalHeight, (ULONG)req_h,
-        P96BIDTAG_Depth, depth,
+        P96BIDTAG_Depth, (ULONG)plan.target_depth,
         TAG_DONE);
 
     if (mode == (ULONG)INVALID_ID || mode == rejected_mode) {
       continue;
     }
-    if (!zzplay_open_screen_mode(runtime, mode, depth)) {
-      rejected_mode = mode;
-      continue;
-    }
-    if (fallback_mode == (ULONG)INVALID_ID) {
-      fallback_mode = mode;
-    }
-    if (zzplay_geometry_screen_upscales(
-            (uint16_t)runtime->screen->Width,
-            (uint16_t)runtime->screen->Height,
-            aspect_w, aspect_h, src_w, src_h)) {
+    if (zzplay_open_screen_mode(runtime, mode, plan.target_depth)) {
       return 1;
     }
-    zzplay_close_video_screen(runtime);
     rejected_mode = mode;
   }
-  if (fallback_mode != (ULONG)INVALID_ID &&
-      zzplay_open_screen_mode(runtime, fallback_mode, depth)) {
-    zzplay_info("zzplay: no screen mode holds %ux%u without shrinking; "
-                "letterboxing instead\n",
-                (unsigned)aspect_w, (unsigned)aspect_h);
-    return 1;
-  }
-  zzplay_info("zzplay: no %ux%u screen mode available for fullscreen\n",
-              (unsigned)req_w, (unsigned)req_h);
+  zzplay_info("zzplay: no screen mode available for fullscreen\n");
   return 0;
 }
 
@@ -1056,8 +1065,14 @@ static int zzplay_open_pip_mode(struct ZZPlayRuntime *runtime,
       placement.height = aspect_h;
     }
     open_rect = placement;
-    open_rect.width = (uint16_t)runtime->video_info.width;
-    open_rect.height = (uint16_t)runtime->video_info.height;
+    if (placement.width > (uint16_t)runtime->video_info.width) {
+      open_rect.width = (uint16_t)runtime->video_info.width;
+      open_rect.x = (int16_t)(((uint32_t)runtime->screen_w - open_rect.width) / 2U);
+    }
+    if (placement.height > (uint16_t)runtime->video_info.height) {
+      open_rect.height = (uint16_t)runtime->video_info.height;
+      open_rect.y = (int16_t)(((uint32_t)runtime->screen_h - open_rect.height) / 2U);
+    }
   } else {
     zzplay_close_video_screen(runtime);
     /* The dedicated screen just closed: re-read the public screen so
