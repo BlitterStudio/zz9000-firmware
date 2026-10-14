@@ -248,11 +248,13 @@ qualification remains separate from the host checks; record it in
 `zz9000-drivers/docs/usb-qualification-matrix.md`.
 
 For FPGA changes, run the relevant simulation on the Vivado host. The
-formatter simulation accepts the working tree or the committed baseline:
+formatter simulation accepts the working tree or the committed baseline; the
+overlay scaling simulation covers the PIP line fetcher and scaler:
 
 ```bash
 test/video/run_formatter_sim.sh current
 test/video/run_formatter_sim.sh master
+test/video/run_overlay_scale_sim.sh
 python3 test/video/run_videocap_phase_sim.py
 python3 test/video/run_variant_elaboration.py
 ```

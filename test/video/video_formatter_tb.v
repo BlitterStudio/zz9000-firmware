@@ -167,7 +167,6 @@ end
 /* Three-line, nine-pixel black overlay.  Five 4-byte macropixels are sent per
  * line so the final (unused) luma exercises odd destination widths. */
 reg overlay_stream_en = 0;
-reg early_overlay_prefetch_seen = 0;
 integer overlay_stream_width = 9;
 integer overlay_frame_width;
 integer ol, ow;
@@ -200,12 +199,23 @@ function [31:0] expected_overlay_pixel(input integer line,
   end
 endfunction
 
+/* Model the firmware's vblank handoff: the vblank interrupt resets MM2S
+ * wherever it is in the frame (the fetcher stops reading after the last
+ * displayed row), commits the next generation while the channel is stopped,
+ * then restarts the frame. */
+reg overlay_vblank_seen = 0;
+reg overlay_frame_aborted;
+always @(posedge control_vblank[1])
+  overlay_vblank_seen = 1;
+
 initial begin : overlay_vdma
   wait (overlay_stream_en);
   forever begin
     overlay_frame_width = overlay_stream_width;
-    for (ol = 0; ol < 3; ol = ol + 1) begin
-      for (ow = 0; ow < (overlay_frame_width + 1) / 2; ow = ow + 1) begin
+    overlay_frame_aborted = 0;
+    for (ol = 0; ol < 3 && !overlay_frame_aborted; ol = ol + 1) begin
+      for (ow = 0; ow < (overlay_frame_width + 1) / 2 &&
+                   !overlay_frame_aborted; ow = ow + 1) begin
         @(negedge aclk);
         if (overlay_pattern_mode)
           overlay_tdata <= {
@@ -217,32 +227,24 @@ initial begin : overlay_vdma
         overlay_tuser <= (ol == 0 && ow == 0);
         overlay_tlast <= (ow == (overlay_frame_width + 1) / 2 - 1);
         overlay_tvalid <= 1;
-        while (overlay_tready !== 1'b1) @(negedge aclk);
-        @(posedge aclk);
+        while (overlay_tready !== 1'b1 && !overlay_vblank_seen)
+          @(negedge aclk);
+        if (overlay_vblank_seen)
+          overlay_frame_aborted = 1;
+        else
+          @(posedge aclk);
       end
     end
-    /* Model the real ISR ordering: MM2S remains stalled after the final row,
-     * then firmware commits/re-arms only after the vblank interrupt. */
     @(negedge aclk);
     overlay_tvalid <= 0;
     overlay_tuser <= 0;
     overlay_tlast <= 0;
-    wait (control_vblank[1] === 1'b1);
+    wait (overlay_vblank_seen === 1'b1);
+    overlay_vblank_seen = 0;
     overlay_stream_generation = overlay_stream_generation + 1;
     op(OP_OVERLAY_FRAME, overlay_stream_generation);
   end
 end
-
-/* The old design could not advance the fetch request until the final PIP
- * pixel because that same register selected the read bank. Require line one
- * to be requested earlier while line zero remains selected for display. */
-always @(posedge dvi_clk)
-  if (overlay_stream_en && uut.vga_overlay_enable &&
-      uut.overlay_displayed_line == 0 && uut.overlay_fetch_line == 1 &&
-      uut.overlay_screen_x <
-        ($signed(uut.vga_overlay_x) +
-         $signed({1'b0, uut.vga_overlay_width}) - 1))
-    early_overlay_prefetch_seen <= 1;
 `endif
 
 // framebuffer content generator: word w of line l, byte lanes ascend so
@@ -714,10 +716,6 @@ initial begin
     op(OP_OVERLAY_CTRL, 1); /* enable, no key, packed CGX */
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 5);
-    if (!early_overlay_prefetch_seen) begin
-      mism = mism + 1;
-      $display("OVERLAY PREFETCH MISMATCH line 1 was not requested early");
-    end
 
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
       for (x = 0; x < cfg_width; x = x + 1) begin

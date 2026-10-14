@@ -794,10 +794,43 @@ reg signed [16:0] viewport_output_x_position = 0;
 reg [11:0] viewport_output_y_row = 0;
 reg [11:0] scanout_source_line_row = 0;
 reg [12:0] viewport_output_x_end = 0;
-reg overlay_scheduler_scaling = 0;
 reg overlay_scheduler_y_in_window = 0;
 reg overlay_scheduler_screen_y_nonnegative = 0;
-reg [11:0] overlay_scheduler_next_source_y = 0;
+/* Window rows that fall into vertical blanking are never displayed; a
+ * window clipped at the screen bottom must not count them as consumed. */
+reg overlay_scheduler_row_visible = 0;
+
+/* Fetch-side vertical stepper. It walks the same source-row sequence as the
+ * raster stepper, but at fetch pace: it issues each distinct source row once,
+ * as soon as the line fetcher has a free bank, so fetching runs ahead of the
+ * display instead of following it one row at a time. A 1:1 overlay is the
+ * same sequence with a step of one. */
+reg [11:0] overlay_fetch_row = 0;
+reg [15:0] overlay_fetch_error = 0;
+reg [11:0] overlay_fetch_index = 0;
+reg overlay_fetch_issued = 0;
+reg overlay_fetch_active = 0;
+/* Set when the raster leaves the visible frame; the next generation clears
+ * it. No request may be in flight across the vblank buffer flip. */
+reg overlay_frame_fetch_done = 0;
+/* Source row on display in the window; banks holding older rows are free. */
+reg [11:0] overlay_consumed_line = 0;
+reg overlay_consumed_valid = 0;
+wire overlay_fetch_ready;
+wire overlay_fetch_carry =
+  overlay_fetch_error >= vga_overlay_y_step_threshold;
+wire [11:0] overlay_fetch_next_row =
+  overlay_fetch_row + vga_overlay_y_step_integer[11:0] + overlay_fetch_carry;
+/* An upscale maps several window rows to one source row. */
+wire overlay_fetch_repeat =
+  vga_overlay_y_step_integer == 0 && !overlay_fetch_carry;
+wire overlay_fetch_can_step =
+  {4'b0, overlay_fetch_index} + 16'd1 < vga_overlay_height;
+wire overlay_fetch_passed = overlay_consumed_valid &&
+  overlay_fetch_row < overlay_consumed_line;
+/* A window clipped at the top starts at its first visible row. */
+wire [11:0] overlay_fetch_first_index =
+  vga_overlay_y < 0 ? (~vga_overlay_y[11:0] + 1'b1) : 12'd0;
 
 wire signed [16:0] overlay_screen_x = overlay_screen_x_position;
 wire signed [16:0] overlay_screen_y = overlay_screen_y_row;
@@ -835,7 +868,6 @@ wire [31:0] overlay_yuv422;
 wire overlay_line_ready;
 wire [31:0] overlay_accepted_generation;
 wire [11:0] overlay_scheduler_line;
-wire overlay_scheduler_line_ready;
 
 /* Source-synchronous frame timing.  The controller sees the live dvi
  * domain geometry and the raster position, and decides once per line,
@@ -1111,7 +1143,9 @@ video_overlay_linebuffer overlay_linebuffer (
   .read_data(overlay_yuv422),
   .displayed_line_ready(overlay_line_ready),
   .scheduler_line(overlay_scheduler_line),
-  .scheduler_line_ready(overlay_scheduler_line_ready),
+  .fetch_ready(overlay_fetch_ready),
+  .consumed_line(overlay_consumed_line),
+  .consumed_valid(overlay_consumed_valid),
   .accepted_generation(overlay_accepted_generation)
 );
 
@@ -1327,12 +1361,11 @@ always @(posedge dvi_clk) begin
       : overlay_visible_x1_unclipped_pre) - 17'sd1;
   viewport_output_x_end <= {1'b0, vga_viewport_x} +
                            {1'b0, vga_viewport_width};
-  overlay_scheduler_scaling <= vga_overlay_scaling;
   overlay_scheduler_y_in_window <=
     overlay_local_y >= 0 &&
     overlay_local_y < $signed({1'b0, vga_overlay_height});
   overlay_scheduler_screen_y_nonnegative <= overlay_screen_y >= 0;
-  overlay_scheduler_next_source_y <= overlay_scale_next_source_y[11:0];
+  overlay_scheduler_row_visible <= counter_y < vga_v_rez;
   overlay_scale_read_x_d1 <= overlay_scale_read_x[0];
   if (counter_x == 0) begin
     overlay_scale_read_x <= vga_overlay_x_start_source;
@@ -1622,49 +1655,62 @@ endcase
     end
   end
 
-  /* Display selection follows the current PIP row while this independent
-   * fetch selector advances as soon as that row is known ready. MM2S can then
-   * fill the opposite BRAM bank throughout the current raster row instead of
-   * having only horizontal blanking after the final PIP pixel. Requiring the
-   * displayed line to be ready prevents a missed deadline from skipping an
-   * unfetched source row. */
+  /* Fetching runs ahead of the display: the fetch stepper issues the next
+   * distinct source row whenever the line fetcher has a free bank, and skips
+   * rows the display has already passed so a late row never leaves the
+   * fetcher behind for the rest of the frame. */
   if (!vga_overlay_enable) begin
     overlay_fetch_line <= 0;
+    overlay_fetch_active <= 0;
+    overlay_consumed_valid <= 0;
   end else if (overlay_accepted_generation !=
-               vga_overlay_frame_generation) begin
-    /* Firmware advances the generation only after committing the VDMA
-     * address/VSIZE at vblank. The line-buffer's atomic acknowledgement
-     * proves its AXI domain has stopped treating the old frame as active;
-     * only then may the pixel domain request the first visible source line. */
+               vga_overlay_frame_generation ||
+               overlay_applied_scale_epoch != vga_overlay_scale_epoch) begin
+    /* Firmware advances the generation at vblank with the VDMA stopped. The
+     * line-buffer's atomic acknowledgement proves its AXI domain has
+     * stopped treating the old frame as active; only then may the pixel
+     * domain request the first visible source line. Geometry can also change
+     * while a simulation or legacy producer retains the same generation:
+     * restart at the correctly clipped source row either way. */
     vga_overlay_frame_generation <= overlay_accepted_generation;
     overlay_applied_scale_epoch <= vga_overlay_scale_epoch;
-    overlay_fetch_line <= vga_overlay_scaling
-      ? vga_overlay_y_start_source[11:0] : 12'b0;
-    overlay_fetch_request <= 1;
-  end else if (overlay_applied_scale_epoch !=
-               vga_overlay_scale_epoch) begin
-    /* Geometry can change while a simulation or legacy producer retains the
-     * same frame generation. Restart at the correctly clipped source row. */
-    overlay_applied_scale_epoch <= vga_overlay_scale_epoch;
-    overlay_fetch_line <= vga_overlay_scaling
-      ? vga_overlay_y_start_source[11:0] : 12'b0;
-    overlay_fetch_request <= 1;
-  end else if (!overlay_scheduler_scaling &&
-               overlay_scheduler_y_in_window &&
-               overlay_scheduler_line_ready &&
-               overlay_fetch_line == overlay_scheduler_line) begin
-    if ({4'b0, overlay_scheduler_line} + 16'd1 < vga_overlay_height) begin
-      overlay_fetch_line <= overlay_scheduler_line + 1'b1;
-      overlay_fetch_request <= 1;
+    overlay_fetch_row <= vga_overlay_y_start_source[11:0];
+    overlay_fetch_error <= vga_overlay_y_start_remainder;
+    overlay_fetch_index <= overlay_fetch_first_index;
+    overlay_fetch_issued <= 0;
+    overlay_fetch_active <= 1;
+    overlay_frame_fetch_done <= 0;
+    overlay_consumed_valid <= 0;
+  end else begin
+    if (overlay_scheduler_y_in_window &&
+        overlay_scheduler_screen_y_nonnegative &&
+        overlay_scheduler_row_visible) begin
+      overlay_consumed_line <= overlay_scheduler_line;
+      overlay_consumed_valid <= 1;
     end
-  end else if (overlay_scheduler_scaling &&
-               overlay_scheduler_screen_y_nonnegative &&
-               overlay_scheduler_y_in_window &&
-               overlay_scheduler_line_ready &&
-               overlay_fetch_line == overlay_scheduler_line &&
-               overlay_scheduler_next_source_y != overlay_scheduler_line) begin
-    overlay_fetch_line <= overlay_scheduler_next_source_y;
-    overlay_fetch_request <= 1;
+    if (counter_y == vga_v_rez && counter_x == 0)
+      overlay_frame_fetch_done <= 1;
+
+    if (overlay_fetch_active &&
+        (overlay_fetch_issued || overlay_fetch_passed) &&
+        overlay_fetch_can_step) begin
+      overlay_fetch_row <= overlay_fetch_next_row;
+      overlay_fetch_index <= overlay_fetch_index + 1'b1;
+      if (overlay_fetch_carry)
+        overlay_fetch_error <= overlay_fetch_error -
+                               vga_overlay_y_step_threshold;
+      else
+        overlay_fetch_error <= overlay_fetch_error +
+                               vga_overlay_y_step_remainder;
+      if (!overlay_fetch_repeat)
+        overlay_fetch_issued <= 0;
+    end else if (overlay_fetch_active && !overlay_fetch_issued &&
+                 !overlay_fetch_passed && !overlay_frame_fetch_done &&
+                 overlay_fetch_ready) begin
+      overlay_fetch_line <= overlay_fetch_row;
+      overlay_fetch_request <= 1;
+      overlay_fetch_issued <= 1;
+    end
   end
 
   // signal synchronization point to fetch process

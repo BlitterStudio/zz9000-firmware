@@ -13,9 +13,12 @@ module video_overlay_linebuffer_tb;
   reg [11:0] fetch_line = 0;
   reg fetch_request = 0;
   reg [11:0] displayed_line = 0;
+  reg [11:0] consumed_line = 0;
+  reg consumed_valid = 0;
   reg [3:0] read_addr = 0;
   wire [31:0] read_data;
   wire ready;
+  wire fetch_ready;
   wire [31:0] accepted_generation;
   integer failures = 0;
   integer check_seq = 0;
@@ -27,6 +30,8 @@ module video_overlay_linebuffer_tb;
     .s_axis_tvalid(tvalid), .s_axis_tready(tready),
     .fetch_enable(enable), .fetch_generation(generation),
     .fetch_line(fetch_line), .fetch_request(fetch_request),
+    .fetch_ready(fetch_ready),
+    .consumed_line(consumed_line), .consumed_valid(consumed_valid),
     .pixel_clk(pixel_clk), .display_enable(enable), .read_addr(read_addr),
     .displayed_line(displayed_line),
     .read_data(read_data), .displayed_line_ready(ready),
@@ -34,7 +39,7 @@ module video_overlay_linebuffer_tb;
   );
 
   initial begin
-    if (dut.MEMORY_WORDS != 32) begin
+    if (dut.MEMORY_WORDS != 64) begin
       $display("FAIL line-buffer banks do not span the full address space");
       failures = failures + 1;
     end
@@ -59,9 +64,20 @@ module video_overlay_linebuffer_tb;
     end
   endtask
 
+  /* Requests follow the fetcher's single-outstanding contract. */
   task request_line(input integer n);
+    integer timeout;
     begin
+      timeout = 0;
       @(negedge pixel_clk);
+      while (!fetch_ready && timeout < 200) begin
+        @(negedge pixel_clk);
+        timeout = timeout + 1;
+      end
+      if (!fetch_ready) begin
+        $display("FAIL request for line %0d never became ready", n);
+        failures = failures + 1;
+      end
       fetch_line <= n;
       fetch_request <= 1;
       @(negedge pixel_clk);
@@ -85,12 +101,10 @@ module video_overlay_linebuffer_tb;
         timeout = timeout + 1;
       end
       if (!ready) begin
-        $display("FAIL check %0d line %0d not ready state=%0d loaded=%0d requested=%0d pending=%0d valid=%0d/%0d tag=%0d/%0d gen=%0d",
+        $display("FAIL check %0d line %0d not ready state=%0d loaded=%0d requested=%0d pending=%0d valid=%b gen=%0d",
                  check_seq, n, dut.state, dut.loaded_line,
                  dut.requested_line_axis, dut.requested_line_pending,
-                 dut.pixel_ready_valid0, dut.pixel_ready_valid1,
-                 dut.pixel_ready_line0, dut.pixel_ready_line1,
-                 accepted_generation);
+                 dut.pixel_ready_valid, accepted_generation);
         failures = failures + 1;
       end
       for (i = 0; i < 4; i = i + 1) begin
@@ -201,6 +215,37 @@ module video_overlay_linebuffer_tb;
     line(0, 1);
     line(1, 0);
     line(2, 0); check_line(2);
+
+    /* Lookahead: the fetcher fills every bank ahead of the display, then
+     * reuses only banks holding rows the display has already passed. */
+    generation = 5;
+    while (accepted_generation != 5) @(posedge pixel_clk);
+    request_line(0); line(0, 1);
+    request_line(1); line(1, 0);
+    request_line(2); line(2, 0);
+    request_line(3); line(3, 0);
+    repeat (40) @(posedge pixel_clk);
+    if (fetch_ready) begin
+      $display("FAIL fetcher offered a bank while every bank held an undisplayed row");
+      failures = failures + 1;
+    end
+    check_line(0); check_line(3);
+    displayed_line = 2;
+    consumed_line = 2; consumed_valid = 1;
+    request_line(4);
+    repeat (5) @(posedge pixel_clk);
+    if (fetch_ready) begin
+      $display("FAIL second request offered while one was outstanding");
+      failures = failures + 1;
+    end
+    line(4, 0);
+    check_line(2); check_line(3); check_line(4);
+
+    /* Re-requesting the row already loaded is answered from its bank. */
+    request_line(4);
+    request_line(5); line(5, 0);
+    check_line(4); check_line(5);
+    consumed_valid = 0;
 
     if (failures == 0) $display("video_overlay_linebuffer_tb: PASS");
     else $display("video_overlay_linebuffer_tb: %0d failure(s)", failures);
