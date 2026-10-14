@@ -59,13 +59,11 @@ static int overlay_vdma_reset(void)
 	return 1;
 }
 
-static int overlay_vdma_program(uint32_t src_addr, uint32_t src_pitch,
-                                uint32_t line_bytes, uint16_t height)
+static void overlay_vdma_start(uint32_t src_addr, uint32_t src_pitch,
+                               uint32_t line_bytes, uint16_t height)
 {
 	uint32_t addr = XAXIVDMA_MM2S_ADDR_OFFSET;
 
-	if (!overlay_vdma_reset())
-		return 0;
 	overlay_vdma_write(addr + XAXIVDMA_START_ADDR_OFFSET, src_addr);
 	overlay_vdma_write(addr + XAXIVDMA_STRD_FRMDLY_OFFSET, src_pitch);
 	overlay_vdma_write(addr + XAXIVDMA_HSIZE_OFFSET, line_bytes);
@@ -75,6 +73,14 @@ static int overlay_vdma_program(uint32_t src_addr, uint32_t src_pitch,
 	/* VSIZE is deliberately last: it starts the channel and commits all
 	 * direct-register transfer parameters to the internal block. */
 	overlay_vdma_write(addr + XAXIVDMA_VSIZE_OFFSET, height);
+}
+
+static int overlay_vdma_program(uint32_t src_addr, uint32_t src_pitch,
+                                uint32_t line_bytes, uint16_t height)
+{
+	if (!overlay_vdma_reset())
+		return 0;
+	overlay_vdma_start(src_addr, src_pitch, line_bytes, height);
 	return 1;
 }
 
@@ -99,12 +105,17 @@ void overlay_hw_set_buffer(uint32_t src_addr, uint32_t generation)
 		return;
 	/* The overlay stream is wired directly to the line fetcher. Resetting
 	 * here therefore clears every place that could retain an old staging
-	 * frame before the generation acknowledgement re-arms line zero. */
-	if (!overlay_vdma_program(src_addr, overlay_vdma_pitch,
-	                          overlay_vdma_line_bytes,
-	                          overlay_vdma_height))
+	 * frame before the generation acknowledgement re-arms line zero.
+	 * Commit the generation while the channel is stopped: a fetcher still
+	 * reading the old frame (a late row at vblank) accepts stream data, and
+	 * would take the new frame's first row as the old frame's if the
+	 * channel restarted first. The new generation holds the stream until
+	 * the display side has re-armed the first row. */
+	if (!overlay_vdma_reset())
 		return;
 	video_formatter_write(generation, MNTVF_OP_OVERLAY_FRAME);
+	overlay_vdma_start(src_addr, overlay_vdma_pitch,
+	                   overlay_vdma_line_bytes, overlay_vdma_height);
 }
 
 int overlay_hw_start_scaled(uint32_t src_addr, uint32_t src_pitch,
