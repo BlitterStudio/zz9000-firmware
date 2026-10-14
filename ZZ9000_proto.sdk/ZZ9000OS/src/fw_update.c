@@ -26,6 +26,19 @@ static char fwup_path[FWUP_PATH_MAX];
 static uint32_t fwup_bytes_written = 0;
 static uint8_t fwup_mirror_seq = 0;
 
+/* The staged job (fw_update_stage). A name is copied with room for a
+ * leading '/', FWUP_NAME_MAX characters and one more, so a longer name is
+ * still rejected after the copy is terminated. */
+#define FWUP_STAGED_NAME (FWUP_NAME_MAX + 3)
+static uint8_t  fwup_job_buf[FWUP_MAX_CHUNK] __attribute__((aligned(32)));
+static uint16_t fwup_job_cmd;
+static uint32_t fwup_job_len;
+/* Core 0 only: set when queued, cleared when the job retires or is
+ * dropped; the result waits for fw_update_take_result. */
+static int      fwup_job_queued;
+static int      fwup_job_done;
+static uint16_t fwup_job_result;
+
 static int ascii_upper(int c) {
     return (c >= 'a' && c <= 'z') ? (c - ('a' - 'A')) : c;
 }
@@ -523,4 +536,88 @@ void fw_update_publish_status(volatile uint8_t *mirror, uint16_t status) {
     memcpy(&value, word, sizeof(value));
     *(volatile uint32_t *)mirror = value;
     Xil_DCacheFlushRange((UINTPTR)mirror, 4);
+}
+
+uint16_t fw_update_run(uint16_t cmd, const void *buf, uint32_t len) {
+    switch (cmd) {
+    case FWUP_CMD_OPEN:
+        return fw_update_open((const char *)buf);
+    case FWUP_CMD_WRITE:
+        return fw_update_write(buf, len);
+    case FWUP_CMD_CLOSE:
+        return fw_update_close();
+    case FWUP_CMD_ABORT:
+        return fw_update_abort();
+    case FWUP_CMD_RESTORE:
+        /* Promotes the target's backup over it (see fw_update_restore). */
+        return fw_update_restore((const char *)buf);
+    default:
+        return FWUP_ERR_UNKNOWN;
+    }
+}
+
+void fw_update_stage(uint16_t cmd, const void *shared, uint32_t len) {
+    uint32_t n = 0;
+
+    fwup_job_cmd = cmd;
+    fwup_job_len = len;
+    if (cmd == FWUP_CMD_OPEN || cmd == FWUP_CMD_RESTORE) {
+        n = FWUP_STAGED_NAME;
+    } else if (cmd == FWUP_CMD_WRITE && len <= FWUP_MAX_CHUNK) {
+        n = len; /* an over-long WRITE is refused by fw_update_write */
+    }
+    /* The Zorro request loop stored these bytes through core 0's cache,
+     * so a plain copy reads them current. */
+    if (n != 0) {
+        memcpy(fwup_job_buf, shared, n);
+    }
+    if (cmd == FWUP_CMD_OPEN || cmd == FWUP_CMD_RESTORE) {
+        fwup_job_buf[FWUP_STAGED_NAME - 1] = '\0';
+    }
+    Xil_DCacheFlushRange((UINTPTR)fwup_job_buf, n ? n : 1);
+}
+
+uint16_t fw_update_run_staged(void) {
+    return fw_update_run(fwup_job_cmd, fwup_job_buf, fwup_job_len);
+}
+
+void fw_update_mark_queued(void) {
+    fwup_job_queued = 1;
+    fwup_job_done = 0;
+}
+
+void fw_update_retire(uint16_t result) {
+    fwup_job_queued = 0;
+    fwup_job_done = 1;
+    fwup_job_result = result;
+}
+
+void fw_update_retire_failed(void) {
+    /* The job faulted on core 1 before returning: report the failure
+     * as this command's own error so the client aborts the transfer. */
+    switch (fwup_job_cmd) {
+    case FWUP_CMD_OPEN:    fw_update_retire(FWUP_ERR_OPEN); break;
+    case FWUP_CMD_WRITE:   fw_update_retire(FWUP_ERR_WRITE); break;
+    case FWUP_CMD_CLOSE:   fw_update_retire(FWUP_ERR_CLOSE); break;
+    case FWUP_CMD_RESTORE: fw_update_retire(FWUP_ERR_RESTORE); break;
+    default:               fw_update_retire(FWUP_ERR_UNKNOWN); break;
+    }
+}
+
+void fw_update_forget_queued(void) {
+    fwup_job_queued = 0;
+    fwup_job_done = 0;
+}
+
+int fw_update_busy(void) {
+    return fwup_job_queued;
+}
+
+int fw_update_take_result(uint16_t *result) {
+    if (!fwup_job_done) {
+        return 0;
+    }
+    fwup_job_done = 0;
+    *result = fwup_job_result;
+    return 1;
 }

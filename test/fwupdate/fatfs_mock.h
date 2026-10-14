@@ -25,4 +25,9 @@ const char *mock_tag(const char *path);
  * 0 disables fault injection. Reset by mock_reset(). */
 void mock_fail_rename_at(int nth);
 
+/* Bytes written to `path` through f_write since it was opened: *len is
+ * the total, and up to MOCK_DATA_MAX of them are kept. NULL if absent. */
+#define MOCK_DATA_MAX 64
+const unsigned char *mock_data(const char *path, unsigned *len);
+
 #endif /* FATFS_MOCK_H */
