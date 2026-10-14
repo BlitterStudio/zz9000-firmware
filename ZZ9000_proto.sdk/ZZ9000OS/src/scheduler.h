@@ -78,6 +78,11 @@
  * TASK_LONG via the default case in taskq_class_for_opcode. */
 #define TASKQ_OP_VIDEO_COMPOSE       0x0700u
 
+/* Internal opcode: run the staged firmware-file push command
+ * (fw_update_run_staged) on core 1, so its FatFs and SD work never stalls
+ * the core-0 Zorro service. TASK_LONG via the default case. */
+#define TASKQ_OP_FWUP                0x0c00u
+
 typedef enum {
   TASK_FREE    = 0,
   TASK_QUEUED  = 1,

@@ -312,13 +312,47 @@ uint16_t sd_boot_status = 0;
 
 /* Firmware-file push state (REG_ZZ_FWUP_*). Same BUSY-then-result
  * protocol as the SD block path: writing REG_ZZ_FWUP_CMD sets
- * fwup_pending + fwup_status = 0xFFFF, the main loop runs the FatFs
- * call, then the m68k driver polls REG_ZZ_FWUP_STATUS. */
+ * fwup_pending + fwup_status = 0xFFFF; the main loop stages the command
+ * and queues it on core 1 (inline only when core 1 is unavailable), and
+ * the result goes to REG_ZZ_FWUP_STATUS and the status mirror once the
+ * job retires. */
 #define FWUP_STATUS_BUSY 0xFFFF
 static uint16_t fwup_status = 0;
 static uint16_t fwup_pending_cmd = 0;
 static uint32_t fwup_pending_len = 0;
 static volatile int fwup_pending = 0;
+/* The pending command's bytes are already copied out of the shared
+ * buffer, which may hold another client's data by the next pass. */
+static int fwup_staged = 0;
+
+static void fwup_publish(uint16_t result) {
+	fwup_status = result;
+	fw_update_publish_status((volatile uint8_t *)
+		(BOOT_ROM_ADDRESS + BOOT_ROM_FWUP_MIRROR_OFFSET), result);
+}
+
+/* A FWUP job on core 1 owns FatFs and the SD card until it retires; core 0
+ * code that needs either and cannot simply skip a main-loop pass waits
+ * here. One SD write has been measured at 0.72 s, so the bound is 3 s.
+ * Returns 1 once no job is running, 0 if one still is: a live caller then
+ * fails its own command (the task queue holds other clients' requests and
+ * stays untouched); only the reset path may stop core 1. */
+#define FWUP_WAIT_SPINS 30000u /* x 100 us */
+static int fwup_wait_idle(void) {
+	uint32_t spins;
+
+	for (spins = 0; fw_update_busy() && spins < FWUP_WAIT_SPINS; spins++) {
+		/* Harvests the finished job, which retires it. */
+		scheduler_core0_poll(1, 1);
+		if (fw_update_busy())
+			usleep(100);
+	}
+	if (fw_update_busy()) {
+		printf("[FWUP] core-1 job still running after 3 s\n");
+		return 0;
+	}
+	return 1;
+}
 // debug things like individual reads/writes, greatly slowing the system down
 uint32_t debug_lowlevel = 0;
 
@@ -355,6 +389,7 @@ static void reset_storage_request_state() {
 	zz_config_save_reset();
 	fwup_status = 0;
 	fwup_pending = 0;
+	fwup_staged = 0;
 	fwup_pending_cmd = 0;
 	fwup_pending_len = 0;
 }
@@ -433,6 +468,15 @@ static void print_memory_line(void)
 }
 
 void handle_amiga_reset(enum amiga_reset_mode mode) {
+	/* A FWUP job on core 1 may still own FatFs and the SD card; the
+	 * Fast-RAM re-read and the storage reset below use both, and the
+	 * mailbox quiesce would cut a long SD write short. A job stuck past
+	 * the wait means core 1 is wedged in the SD driver: stop it now, as
+	 * the reset's own quiesce would, before core 0 touches the card. */
+	if (!fwup_wait_idle()) {
+		scheduler_quiesce_for_reset();
+		fw_update_forget_queued();
+	}
 	/* Fast-Ram gate (fast-ram-cfg KTD4): close the gate the moment a
 	 * reset is detected -- the fail-safe presentation -- then rederive
 	 * the decision from the SD file with the same bounded, fail-closed
@@ -837,47 +881,52 @@ int main() {
 		}
 #endif
 
-		if (sd_read_pending) {
+		/* While a FWUP job runs on core 1 it owns FatFs and the SD
+		 * card; SD-drive requests wait (the Amiga keeps reading BUSY). */
+		if (sd_read_pending && !fw_update_busy()) {
 			sd_status = sd_storage_read_blocks(sd_storage_read_block, sd_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
 			sd_read_pending = 0;
 		}
-		if (sd_write_pending) {
+		if (sd_write_pending && !fw_update_busy()) {
 			sd_status = sd_storage_write_blocks(sd_storage_write_block, sd_read_write_num_blocks, (void*)USB_BLOCK_STORAGE_ADDRESS);
 			sd_write_pending = 0;
 		}
 
-		if (fwup_pending) {
+		{
 			uint16_t result;
-			switch (fwup_pending_cmd) {
-			case FWUP_CMD_OPEN:
-				/* Filename bytes were staged by the ARM Zorro request
-				 * loop as CPU stores into the shared buffer, so reading
-				 * them directly preserves dirty cache lines. */
-				result = fw_update_open((const char*)USB_BLOCK_STORAGE_ADDRESS);
-				break;
-			case FWUP_CMD_WRITE:
-				result = fw_update_write((const void*)USB_BLOCK_STORAGE_ADDRESS,
-				                         fwup_pending_len);
-				break;
-			case FWUP_CMD_CLOSE:
-				result = fw_update_close();
-				break;
-			case FWUP_CMD_ABORT:
-				result = fw_update_abort();
-				break;
-			case FWUP_CMD_RESTORE:
-				/* Target name staged in the shared buffer like OPEN;
-				 * promotes its backup over it (see fw_update_restore). */
-				result = fw_update_restore((const char*)USB_BLOCK_STORAGE_ADDRESS);
-				break;
-			default:
-				result = FWUP_ERR_UNKNOWN;
-				break;
+
+			/* A job retired (scheduler_core0_poll harvested it). A
+			 * command written meanwhile supersedes it, and only that
+			 * one's result is published. */
+			if (fw_update_take_result(&result) && !fwup_pending)
+				fwup_publish(result);
+		}
+		if (fwup_pending && !fw_update_busy()) {
+			/* Copy the command's bytes before the shared buffer is
+			 * reused, then let core 1 do the FatFs work: one SD write
+			 * has taken 0.72 s, and on this loop that holds every
+			 * Zorro register access (and with it the Amiga). */
+			if (!fwup_staged) {
+				fw_update_stage(fwup_pending_cmd,
+				                (const void *)USB_BLOCK_STORAGE_ADDRESS,
+				                fwup_pending_len);
+				fwup_staged = 1;
 			}
-			fwup_status = result;
-			fw_update_publish_status((volatile uint8_t *)
-				(BOOT_ROM_ADDRESS + BOOT_ROM_FWUP_MIRROR_OFFSET), result);
-			fwup_pending = 0;
+			if (sdk_mailbox_enqueue_internal(TASKQ_OP_FWUP, 0, 0)) {
+				fw_update_mark_queued();
+				fwup_pending = 0;
+				fwup_staged = 0;
+			} else if (!scheduler_core1_available()) {
+				/* No core 1 (absent, or switched off after
+				 * faults): run inline as before, since a
+				 * firmware update is how such a card is fixed. */
+				fwup_publish(fw_update_run_staged());
+				fwup_pending = 0;
+				fwup_staged = 0;
+			}
+			/* Otherwise all task slots are busy: the staged command
+			 * stays pending and is queued on a later pass, never run
+			 * here. */
 		}
 
 		/* Scene commit machine (P1): one verified-I2C setter step per
@@ -885,7 +934,10 @@ int main() {
 		 * runs, so a scene/equalizer commit's ~170-transaction
 		 * sequence interleaves with the per-period AHI traffic and
 		 * never blocks the mailbox dispatch below. */
-		audio_scene_poll();
+		/* Its scene saves write ZZ9000.CFG, so it waits out a FWUP
+		 * job that owns the SD card. */
+		if (!fw_update_busy())
+			audio_scene_poll();
 		u32 zstate = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 		u32 aperture_flags = sdk_aperture_runtime_flags();
 		/* Acknowledge late: firmware normally boots before the RTG driver.
@@ -1354,9 +1406,16 @@ int main() {
 						config_file_status = ZZ_CONFIG_FILE_IDLE;
 						config_file_len = 0;
 					} else if (zdata == 1) {
-						config_file_status = zz_config_read_raw(
-							(void*)USB_BLOCK_STORAGE_ADDRESS,
-							ZZ_CONFIG_MAX_SIZE - 1, &config_file_len);
+						/* Reads ZZ9000.CFG from SD: not while a
+						 * FWUP job owns the card. */
+						if (fwup_wait_idle()) {
+							config_file_status = zz_config_read_raw(
+								(void*)USB_BLOCK_STORAGE_ADDRESS,
+								ZZ_CONFIG_MAX_SIZE - 1, &config_file_len);
+						} else {
+							config_file_status = ZZ_CONFIG_FILE_IO_ERROR;
+							config_file_len = 0;
+						}
 						// push ARM D-cache writes to DDR so the Zorro-bus
 						// read (via AXI_HP, non-coherent) sees fresh bytes
 						Xil_DCacheFlushRange((UINTPTR)USB_BLOCK_STORAGE_ADDRESS,
@@ -1598,6 +1657,8 @@ int main() {
 					 * driver polls REG_ZZ_FWUP_STATUS for completion. */
 					fwup_pending_cmd = zdata & 0xFFFF;
 					fwup_status = FWUP_STATUS_BUSY;
+					/* A new command replaces one not yet queued. */
+					fwup_staged = 0;
 					fwup_pending = 1;
 					break;
 				}
@@ -1607,7 +1668,12 @@ int main() {
 					u32 cmd_word = zdata & 0xFFFF;
 					u32 cmd = cmd_word & 0xF;
 					u32 chunk_idx = (cmd_word >> 4) & 0xFFF;
-					if (cmd == 1) {
+					/* Both commands read the SD card: not while a
+					 * FWUP job owns it (one that outlasts the wait
+					 * fails the command). */
+					if (cmd >= 1 && cmd < 10 && !fwup_wait_idle()) {
+						sd_boot_status = (uint16_t)-1;
+					} else if (cmd == 1) {
 						sd_boot_status = sd_boot_get_info((void*)USB_BLOCK_STORAGE_ADDRESS);
 						Xil_DCacheFlushRange((UINTPTR)USB_BLOCK_STORAGE_ADDRESS, 24u * 1024u);
 						printf("[SD] GETINFO -> %d\n", sd_boot_status);
