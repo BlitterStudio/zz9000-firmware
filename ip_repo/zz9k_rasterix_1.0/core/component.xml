@@ -595,7 +595,7 @@
         <spirit:parameters>
           <spirit:parameter>
             <spirit:name>viewChecksum</spirit:name>
-            <spirit:value>b0e789fb</spirit:value>
+            <spirit:value>d7898dc1</spirit:value>
           </spirit:parameter>
         </spirit:parameters>
       </spirit:view>
@@ -611,7 +611,7 @@
         <spirit:parameters>
           <spirit:parameter>
             <spirit:name>viewChecksum</spirit:name>
-            <spirit:value>b0e789fb</spirit:value>
+            <spirit:value>d7898dc1</spirit:value>
           </spirit:parameter>
         </spirit:parameters>
       </spirit:view>
@@ -1621,7 +1621,7 @@
         <spirit:isIncludeFile>true</spirit:isIncludeFile>
       </spirit:file>
       <spirit:file>
-        <spirit:name>../../../rtl/rasterix/RasterIX/RasterizerCommands.vh</spirit:name>
+        <spirit:name>../../../rtl/rasterix/RasterIX/RegisterAndDescriptorDefines.vh</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
         <spirit:isIncludeFile>true</spirit:isIncludeFile>
       </spirit:file>
@@ -1631,7 +1631,7 @@
         <spirit:isIncludeFile>true</spirit:isIncludeFile>
       </spirit:file>
       <spirit:file>
-        <spirit:name>../../../rtl/rasterix/RasterIX/RegisterAndDescriptorDefines.vh</spirit:name>
+        <spirit:name>../../../rtl/rasterix/RasterIX/RasterizerCommands.vh</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
         <spirit:isIncludeFile>true</spirit:isIncludeFile>
       </spirit:file>
@@ -1685,10 +1685,6 @@
       </spirit:file>
       <spirit:file>
         <spirit:name>../../../rtl/rasterix/Float/rtl/float/ComputeRecip.v</spirit:name>
-        <spirit:fileType>verilogSource</spirit:fileType>
-      </spirit:file>
-      <spirit:file>
-        <spirit:name>../../../rtl/rasterix/RasterIX/DualPortRam.v</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
       </spirit:file>
       <spirit:file>
@@ -1933,6 +1929,10 @@
       </spirit:file>
       <spirit:file>
         <spirit:name>../../../rtl/rasterix/3rdParty/skidbuffer.v</spirit:name>
+        <spirit:fileType>verilogSource</spirit:fileType>
+      </spirit:file>
+      <spirit:file>
+        <spirit:name>../../../rtl/zz9k_rix/zz9k_rix_dual_port_ram.v</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
       </spirit:file>
       <spirit:file>
@@ -1970,7 +1970,7 @@
         <spirit:isIncludeFile>true</spirit:isIncludeFile>
       </spirit:file>
       <spirit:file>
-        <spirit:name>../../../rtl/rasterix/RasterIX/RasterizerCommands.vh</spirit:name>
+        <spirit:name>../../../rtl/rasterix/RasterIX/RegisterAndDescriptorDefines.vh</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
         <spirit:isIncludeFile>true</spirit:isIncludeFile>
       </spirit:file>
@@ -1980,7 +1980,7 @@
         <spirit:isIncludeFile>true</spirit:isIncludeFile>
       </spirit:file>
       <spirit:file>
-        <spirit:name>../../../rtl/rasterix/RasterIX/RegisterAndDescriptorDefines.vh</spirit:name>
+        <spirit:name>../../../rtl/rasterix/RasterIX/RasterizerCommands.vh</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
         <spirit:isIncludeFile>true</spirit:isIncludeFile>
       </spirit:file>
@@ -2034,10 +2034,6 @@
       </spirit:file>
       <spirit:file>
         <spirit:name>../../../rtl/rasterix/Float/rtl/float/ComputeRecip.v</spirit:name>
-        <spirit:fileType>verilogSource</spirit:fileType>
-      </spirit:file>
-      <spirit:file>
-        <spirit:name>../../../rtl/rasterix/RasterIX/DualPortRam.v</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
       </spirit:file>
       <spirit:file>
@@ -2282,6 +2278,10 @@
       </spirit:file>
       <spirit:file>
         <spirit:name>../../../rtl/rasterix/3rdParty/skidbuffer.v</spirit:name>
+        <spirit:fileType>verilogSource</spirit:fileType>
+      </spirit:file>
+      <spirit:file>
+        <spirit:name>../../../rtl/zz9k_rix/zz9k_rix_dual_port_ram.v</spirit:name>
         <spirit:fileType>verilogSource</spirit:fileType>
       </spirit:file>
       <spirit:file>
@@ -2342,14 +2342,14 @@
         <xilinx:xpmLibrary>XPM_MEMORY</xilinx:xpmLibrary>
       </xilinx:xpmLibraries>
       <xilinx:coreRevision>1</xilinx:coreRevision>
-      <xilinx:coreCreationDateTime>2026-10-15T21:07:18Z</xilinx:coreCreationDateTime>
+      <xilinx:coreCreationDateTime>2026-10-15T21:19:48Z</xilinx:coreCreationDateTime>
     </xilinx:coreExtensions>
     <xilinx:packagingInfo>
       <xilinx:xilinxVersion>2018.3</xilinx:xilinxVersion>
       <xilinx:checksum xilinx:scope="busInterfaces" xilinx:value="2d5bae00"/>
       <xilinx:checksum xilinx:scope="addressSpaces" xilinx:value="1387f2f3"/>
       <xilinx:checksum xilinx:scope="memoryMaps" xilinx:value="475749a7"/>
-      <xilinx:checksum xilinx:scope="fileGroups" xilinx:value="bf018aa1"/>
+      <xilinx:checksum xilinx:scope="fileGroups" xilinx:value="818cd33a"/>
       <xilinx:checksum xilinx:scope="ports" xilinx:value="939e1fae"/>
       <xilinx:checksum xilinx:scope="hdlParameters" xilinx:value="ee665cf5"/>
       <xilinx:checksum xilinx:scope="parameters" xilinx:value="c2444c3d"/>
