@@ -604,6 +604,62 @@ static int apply_key(const char *key, const char *value) {
 	return -2; /* unknown key */
 }
 
+static int token_span_eq(const char *s, unsigned len, const char *keyword) {
+	unsigned i = 0;
+
+	while (keyword[i]) {
+		if (i >= len || lower(s[i]) != keyword[i]) return 0;
+		i++;
+	}
+	return i == len;
+}
+
+static int audio_key_name(const char *key, unsigned len) {
+	static const char *const fields[] = {
+		"lpf", "eq01", "eq23", "eq45", "eq67", "eq89", "out", "pan",
+		"nm1", "nm2", "nm3", "nm4", "nm5", "nm6", "nm7", "nm8"
+	};
+	unsigned i;
+
+	if (token_span_eq(key, len, "audio_active") ||
+			token_span_eq(key, len, "audio_baseline") ||
+			token_span_eq(key, len, "audio_ceiling_paula") ||
+			token_span_eq(key, len, "audio_ceiling_ax"))
+		return 1;
+	if (len < sizeof("audio_scene0_") - 1 ||
+			!token_span_eq(key, sizeof("audio_scene") - 1,
+				"audio_scene") ||
+			key[sizeof("audio_scene") - 1] < '0' ||
+			key[sizeof("audio_scene") - 1] > '7' ||
+			key[sizeof("audio_scene")] != '_')
+		return 0;
+	key += sizeof("audio_scene0_") - 1;
+	len -= sizeof("audio_scene0_") - 1;
+	for (i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
+		if (token_span_eq(key, len, fields[i]))
+			return 1;
+	return 0;
+}
+
+int zz_config_line_is_audio_key(const char *line, unsigned len) {
+	unsigned start = 0, eq, key_end, value;
+
+	while (start < len && is_space(line[start])) start++;
+	eq = start;
+	while (eq < len && line[eq] != '=' && line[eq] != '#' &&
+			line[eq] != ';' && line[eq] != '\n')
+		eq++;
+	if (eq == len || line[eq] != '=') return 0;
+	key_end = eq;
+	while (key_end > start && is_space(line[key_end - 1])) key_end--;
+	if (key_end == start || !audio_key_name(line + start, key_end - start))
+		return 0;
+	value = eq + 1;
+	while (value < len && is_space(line[value])) value++;
+	return value < len && line[value] != '#' && line[value] != ';' &&
+		line[value] != '\n';
+}
+
 int zz_config_parse(const char *text, unsigned len) {
 	int accepted = 0;
 	unsigned pos = 0;
@@ -891,6 +947,93 @@ uint16_t zz_config_read_raw(void *buffer, uint32_t max_len, uint32_t *out_len) {
 	return ZZ_CONFIG_FILE_OK;
 }
 
+/* ---- resumable raw reader for the audio-save splice ----------------- */
+
+#define ZZ_CFG_READ_CHUNK 512u
+
+static FIL cfg_read_file;
+static char *cfg_read_buffer;
+static unsigned cfg_read_max;
+static unsigned cfg_read_pos;
+static int cfg_read_file_open;
+static int cfg_read_active;
+
+int zz_config_read_begin(void *buffer, unsigned max_len) {
+	if (cfg_read_active || buffer == NULL || max_len == 0 ||
+			max_len > ZZ_CONFIG_MAX_SIZE)
+		return -1;
+	memset(&cfg_read_file, 0, sizeof(cfg_read_file));
+	cfg_read_buffer = buffer;
+	cfg_read_max = max_len;
+	cfg_read_pos = 0;
+	cfg_read_file_open = 0;
+	cfg_read_active = 1;
+	return 0;
+}
+
+uint16_t zz_config_read_op(enum zz_config_read_op op, unsigned *out_len) {
+	FRESULT fr;
+	UINT nread = 0;
+
+	if (out_len) *out_len = 0;
+	if (!cfg_read_active) return ZZ_CONFIG_FILE_IO_ERROR;
+	switch (op) {
+	case ZZ_CFG_READ_OPEN_CFG:
+	case ZZ_CFG_READ_OPEN_BAK:
+		fr = f_open(&cfg_read_file,
+			op == ZZ_CFG_READ_OPEN_CFG ? ZZ_CONFIG_FILE_PATH :
+			ZZ_CONFIG_BAK_PATH, FA_READ);
+		if (fr == FR_NO_FILE || fr == FR_NO_PATH)
+			return ZZ_CONFIG_FILE_NO_FILE;
+		if (fr != FR_OK) {
+			printf("[CFG] splice read open failed: %d\n", (int)fr);
+			return ZZ_CONFIG_FILE_IO_ERROR;
+		}
+		cfg_read_file_open = 1;
+		return ZZ_CONFIG_FILE_OK;
+	case ZZ_CFG_READ: {
+		unsigned chunk;
+
+		if (!cfg_read_file_open) return ZZ_CONFIG_FILE_IO_ERROR;
+		chunk = cfg_read_max - cfg_read_pos;
+		if (chunk == 0) return ZZ_CONFIG_FILE_OK;
+		if (chunk > ZZ_CFG_READ_CHUNK) chunk = ZZ_CFG_READ_CHUNK;
+		fr = f_read(&cfg_read_file, cfg_read_buffer + cfg_read_pos,
+			chunk, &nread);
+		if (fr != FR_OK) {
+			printf("[CFG] splice read failed: %d\n", (int)fr);
+			return ZZ_CONFIG_FILE_IO_ERROR;
+		}
+		cfg_read_pos += nread;
+		if (nread == chunk && cfg_read_pos < cfg_read_max)
+			return ZZ_CONFIG_FILE_IDLE;
+		if (out_len) *out_len = cfg_read_pos;
+		return ZZ_CONFIG_FILE_OK;
+	}
+	case ZZ_CFG_READ_CLOSE:
+		if (!cfg_read_file_open) return ZZ_CONFIG_FILE_IO_ERROR;
+		fr = f_close(&cfg_read_file);
+		cfg_read_file_open = 0;
+		if (fr != FR_OK) {
+			printf("[CFG] splice read close failed: %d\n", (int)fr);
+			return ZZ_CONFIG_FILE_IO_ERROR;
+		}
+		return ZZ_CONFIG_FILE_OK;
+	default:
+		return ZZ_CONFIG_FILE_IO_ERROR;
+	}
+}
+
+void zz_config_read_end(void) {
+	if (cfg_read_active && cfg_read_file_open)
+		(void)f_close(&cfg_read_file);
+	cfg_read_buffer = NULL;
+	cfg_read_max = 0;
+	cfg_read_pos = 0;
+	cfg_read_file_open = 0;
+	cfg_read_active = 0;
+}
+
 uint16_t zz_config_query(uint16_t key, uint16_t *present) {
 	uint16_t p = 0, v = 0;
 
@@ -1154,9 +1297,7 @@ int zz_config_save_op(enum zz_config_save_op op) {
 	FRESULT fr;
 	UINT nwritten = 0;
 
-	if (!cfg_step_active) return -1;
-	switch (op) {
-	case ZZ_CFG_SAVE_RECOVER_BAK:
+	if (op == ZZ_CFG_SAVE_RECOVER_BAK) {
 		if (!cfg_step_backup_moved)
 			return 1;
 		fr = f_rename(ZZ_CONFIG_BAK_PATH, ZZ_CONFIG_FILE_PATH);
@@ -1164,6 +1305,9 @@ int zz_config_save_op(enum zz_config_save_op op) {
 			return -1;
 		cfg_step_backup_moved = 0;
 		return 1;
+	}
+	if (!cfg_step_active) return -1;
+	switch (op) {
 	case ZZ_CFG_SAVE_UNLINK_TEMP:
 		/* A partial temp from an interrupted save is junk; drop it
 		 * so the create-always open starts clean. */
@@ -1281,6 +1425,9 @@ void zz_config_save_end(void) {
 void zz_config_save_reset(void) {
 	FRESULT fr;
 
+	/* The audio save reads before it stages a temp writer; a warm reset
+	 * must release that handle too. */
+	zz_config_read_end();
 	if (!cfg_step_active && !cfg_save_temp_pending &&
 			!cfg_step_backup_moved)
 		return;

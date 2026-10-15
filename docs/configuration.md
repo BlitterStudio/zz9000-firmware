@@ -12,8 +12,10 @@ keeps Fast RAM disabled. The file is limited to 8 KiB; data after that limit
 is ignored.
 
 ZZTop can write this file through its Settings, Scandoubler, and Audio save
-commands. Those saves replace the file from the settings they manage and keep
-the previous version as `ZZ9000.BAK`; hand-written comments are not preserved.
+commands. Settings and Scandoubler saves replace the settings they manage and
+keep the previous version as `ZZ9000.BAK`. Audio Save preserves every
+non-audio line, including hand-written comments and unknown keys, and replaces
+only the audio keys.
 
 ## Native video capture
 
