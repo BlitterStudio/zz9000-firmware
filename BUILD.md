@@ -296,6 +296,13 @@ changes as proven.
 
 ## Publish a release
 
+Set `REVISION_MAJOR`, `REVISION_MINOR`, and `REVISION_PATCH` in
+`ZZ9000_proto.sdk/ZZ9000OS/src/main.c` to the release version first. The card
+reports these numbers, and ZZTop compares them with the latest release tag
+when it checks for updates. Tag builds run `util/check_release_version.sh`,
+which fails when the tag (ignoring any `-rc1` style suffix) and the
+`REVISION_*` values differ.
+
 Push an annotated `v*` tag after the firmware and every release bitstream have
 been committed. GitHub Actions builds the standard firmware image, packages
 every required variant with the sample `ZZ9000.CFG`, then creates a GitHub
@@ -303,9 +310,15 @@ Release from the ZIP files. A tag containing `-`, such as `v2.3.0-rc1`,
 becomes a pre-release.
 
 ```bash
+sh util/check_release_version.sh v2.3.0
 git tag -a v2.3.0 -m "Firmware 2.3.0"
 git push origin v2.3.0
 ```
+
+ZZTop downloads `zz9000-firmware-<tag>-<variant>.zip` from the latest
+non-prerelease release and installs the `BOOT.bin` inside it. Keep the asset
+names and the archive layout above stable, or older ZZTop versions will no
+longer find the image for their variant.
 
 Use `ZZ9000.CFG` to select PAL or native-video defaults. Do not publish a
 separate `ns-pal` firmware flavor.

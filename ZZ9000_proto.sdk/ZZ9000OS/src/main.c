@@ -93,6 +93,11 @@ void Xil_AssertNonVoid() {}
  * SDK additions use service flags and status pages that self-gate. */
 #define REVISION_MAJOR 2
 #define REVISION_MINOR 8
+/* Third release-tag component. REG_ZZ_FW_VERSION reads major.minor at
+ * 0xC0 and this at 0xC2 (ZZ_FW_CAP_FW_VERSION_PATCH); ZZTop compares the
+ * three against the latest GitHub release, and util/check_release_version.sh
+ * makes tag builds fail when they disagree with the tag. */
+#define REVISION_PATCH 1
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
@@ -1988,7 +1993,8 @@ int main() {
 								| (ethernet_send_result & 0xff00) << 16;
 						break;
 					case REG_ZZ_FW_VERSION:
-						data = (REVISION_MAJOR << 24 | REVISION_MINOR << 16);
+						data = (REVISION_MAJOR << 24 | REVISION_MINOR << 16 |
+						        REVISION_PATCH);
 						break;
 					case REG_ZZ_SDK_MAGIC:
 						/* The Zorro II mailbox appears with the
