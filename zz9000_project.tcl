@@ -384,6 +384,7 @@ if { [get_files audio_clock.v] == "" } {
 
 # Proc to create BD zz9000_ps
 proc cr_bd_zz9000_ps { parentCell } {
+  global rasterix
 # The design that will be created by this Tcl proc contains the following
 # module references:
 # MNTZorro_v0_1_S00_AXI, audio_clock, video_formatter, zz9k_rasterix (opt-in)
