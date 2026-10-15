@@ -147,7 +147,10 @@ enum ZZ9KService {
   ZZ9K_SERVICE_DIAG = 0x0900,
   ZZ9K_SERVICE_MODULE = 0x0a00,
   ZZ9K_SERVICE_VIDEO = 0x0b00,
-  ZZ9K_SERVICE_VENDOR = 0x8000
+  ZZ9K_SERVICE_VENDOR = 0x8000,
+  /* Vendor service: the AmiNetXDuo console encoder (RFB tile stream of the
+   * displayed framebuffer). */
+  ZZ9K_SERVICE_CONSOLE = 0x8200
 };
 
 enum ZZ9KOpcode {
@@ -249,7 +252,9 @@ enum ZZ9KOpcode {
   ZZ9K_OP_DIAG_READ = ZZ9K_SERVICE_DIAG + 0x00,
   ZZ9K_OP_DIAG_TIMING = ZZ9K_SERVICE_DIAG + 0x01,
   ZZ9K_OP_DIAG_SCHED = ZZ9K_SERVICE_DIAG + 0x02,
-  ZZ9K_OP_DIAG_MEMORY = ZZ9K_SERVICE_DIAG + 0x03
+  ZZ9K_OP_DIAG_MEMORY = ZZ9K_SERVICE_DIAG + 0x03,
+
+  ZZ9K_OP_CONSOLE_ENCODE = ZZ9K_SERVICE_CONSOLE + 0x00
 };
 
 enum ZZ9KCapability {
@@ -611,6 +616,42 @@ typedef struct ZZ9KServiceInfoPayload {
   uint8_t max_inline_payload[4];
   uint8_t name[20];
 } ZZ9KServiceInfoPayload;
+
+/* ZZ9K_OP_CONSOLE_ENCODE: encode tile rows [ty0, ty1) of the surface into
+ * the shared buffer as an RFB stream.  width .. format are the client's
+ * encoder geometry and must match the surface (format RGB565 of a BGRA8888
+ * surface is converted at bytes_per_row).  A new owner (output handle),
+ * geometry or encoder flags, or ZZ9K_CONSOLE_ENCODE_RESET, starts a new
+ * session whose band 0 is a keyframe. */
+#define ZZ9K_CONSOLE_ENCODE_RESET          0x0001U
+#define ZZ9K_CONSOLE_ENCODE_RESULT_KEYFRAME 0x0001U
+#define ZZ9K_CONSOLE_CODEC_NONE            0U
+
+typedef struct ZZ9KConsoleEncodePayload {
+  uint8_t surface_handle[4];
+  uint8_t out_handle[4];
+  uint8_t out_capacity[4];
+  uint8_t enc_flags[4];
+  uint8_t width[2];
+  uint8_t height[2];
+  uint8_t bytes_per_row[2];
+  uint8_t ty0[2];
+  uint8_t ty1[2];
+  uint8_t flags[2];
+  uint8_t codec[2];
+  uint8_t depth;
+  uint8_t tile_w;
+  uint8_t tile_h;
+  uint8_t format;
+  uint8_t reserved[14];
+} ZZ9KConsoleEncodePayload;
+
+typedef struct ZZ9KConsoleEncodeResultPayload {
+  uint8_t out_len[4];
+  uint8_t codec[2];
+  uint8_t flags[2];
+  uint8_t reserved[40];
+} ZZ9KConsoleEncodeResultPayload;
 
 typedef struct ZZ9KSurfaceInfoPayload {
   uint8_t handle[4];
@@ -1721,6 +1762,12 @@ typedef char ZZ9KSurfaceInfoPayload_must_be_48_bytes[
 ];
 typedef char ZZ9KAllocSurfacePayload_must_be_48_bytes[
   (sizeof(ZZ9KAllocSurfacePayload) == 48U) ? 1 : -1
+];
+typedef char ZZ9KConsoleEncodePayload_must_be_48_bytes[
+  (sizeof(ZZ9KConsoleEncodePayload) == 48U) ? 1 : -1
+];
+typedef char ZZ9KConsoleEncodeResultPayload_must_be_48_bytes[
+  (sizeof(ZZ9KConsoleEncodeResultPayload) == 48U) ? 1 : -1
 ];
 typedef char ZZ9KQueryPalettePayload_must_be_48_bytes[
   (sizeof(ZZ9KQueryPalettePayload) == 48U) ? 1 : -1

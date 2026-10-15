@@ -9,13 +9,17 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "xil_cache.h"
+#include <rfb/rfb_encode.h>
+#include "sdk_console_encode.h"
 #include "xil_mmu.h"
 #include "xtime_l.h"
 #include "sdk_palette.h"
 #include "sdk_mailbox.h"
 #include "sdk_service_catalog.h"
 #include "sdk_compression.h"
+#include <zlib.h>
 #include "lzh/zz9k_lzh.h"
 #include "sdk_crypto.h"
 #include "sdk_offload_params.h"
@@ -8350,6 +8354,94 @@ static int opcode_reserves_request_id_zero(uint16_t opcode)
 	}
 }
 
+/* ==== AmiNetXDuo console encoder (vendor service 0x8200) ===================
+ * The session, request checks and encode live in sdk_console_encode.c; this
+ * handler resolves the handles, deflates the result and posts it. */
+static uint8_t    *cenc_defl;        /* per-message deflate scratch */
+static uint32_t    cenc_defl_len;
+
+static uint16_t handle_console_encode(volatile struct SDKMailboxEntry *req,
+                                      volatile struct SDKMailboxEntry *comp,
+                                      uint16_t payload_len)
+{
+	uint8_t raw[SDK_CONSOLE_REQ_LEN];
+	struct sdk_console_request r;
+	struct sdk_console_surface s;
+	struct SDKSurface fb;
+	struct SDKSharedBuffer *out;
+	rfb_u8 *outp;
+	uint32_t i;
+	uint32_t n;
+	uint16_t status;
+	uint16_t reply_flags;
+
+	if (payload_len < SDK_CONSOLE_REQ_LEN)
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	for (i = 0u; i < SDK_CONSOLE_REQ_LEN; i++)
+		raw[i] = req->payload[i];
+	sdk_console_parse_request(raw, &r);
+
+	/* The surface the host mapped (ZZ9KMapFramebufferSurface).  A
+	 * stale handle is refused rather than quietly replaced by whatever the
+	 * display shows now, so the caller knows which pixels it would get; it
+	 * maps the framebuffer again, or falls back to its own encoder. */
+	if (!get_surface_info(r.surface_handle, &fb))
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	out = find_shared_buffer(r.out_handle);
+	if (!out || r.out_capacity == 0u ||
+	    !buffer_range_valid(out, 0u, r.out_capacity))
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	s.format = fb.format;
+	s.width = fb.width;
+	s.height = fb.height;
+	s.pitch = fb.pitch;
+	s.length = fb.length;
+	s.pixels = (const uint8_t *)(uintptr_t)fb.address;
+	outp = (rfb_u8 *)(uintptr_t)out->address;
+	status = sdk_console_encode_band(&r, &s, outp, r.out_capacity, &n,
+	                                 &reply_flags);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+
+	/* Deflate the ops payload (everything after the 4-byte header) in place, so
+	 * the wire carries the header raw -- version/flags/seq stay readable for the
+	 * viewer's seq-gap recovery -- and the compressed body follows.  The ARM has
+	 * spare cycles; the 68030 does not, which is exactly why compressing here
+	 * (not host-side) is the right place.  flags bit 0 tells the viewer to
+	 * inflate.  Kept raw if compression does not shrink it (tiny bands). */
+	if (n > 4u) {
+		uLong bound = compressBound((uLong)(n - 4u));
+		if (cenc_defl_len < (uint32_t)bound) {
+			free(cenc_defl);
+			cenc_defl = (uint8_t *)malloc(bound);
+			cenc_defl_len = cenc_defl ? (uint32_t)bound : 0u;
+		}
+		if (cenc_defl) {
+			uLongf clen = (uLongf)cenc_defl_len;
+			if (compress2(cenc_defl, &clen, (const Bytef *)(outp + 4),
+			              (uLong)(n - 4u), 6) == Z_OK &&
+			    4UL + clen < (uLong)n) {
+				memcpy(outp + 4, cenc_defl, clen);
+				outp[1] |= 0x01u;          /* flags: ops are zlib-deflated */
+				n = (uint32_t)(4UL + clen);
+			}
+		}
+	}
+
+	/* Publish to the 68k: flush the written span (Xil_DCacheFlushRange ends in
+	 * a DSB, so the store is ordered before the completion is posted). */
+	Xil_DCacheFlushRange((INTPTR)(uintptr_t)outp, n);
+
+	write_completion(comp, req, SDK_STATUS_OK, SDK_CONSOLE_REPLY_LEN);
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	put_be32(comp->payload + SDK_CONSOLE_REPLY_OUT_LEN, n);
+	put_be16(comp->payload + SDK_CONSOLE_REPLY_CODEC, SDK_CONSOLE_CODEC_NONE);
+	put_be16(comp->payload + SDK_CONSOLE_REPLY_FLAGS, reply_flags);
+	return SDK_STATUS_OK;
+}
+
 static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
                                volatile struct SDKMailboxEntry *comp,
                                uint32_t pending_requests)
@@ -8514,6 +8606,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_decompress_stream_close(req, comp, payload_len);
 	case SDK_OP_DECOMPRESS_BATCH:
 		return handle_decompress_batch(req, comp, payload_len);
+	case SDK_OP_CONSOLE_ENCODE:
+		return handle_console_encode(req, comp, payload_len);
 	case SDK_OP_CRYPTO_HASH:
 		return handle_crypto_hash(req, comp, payload_len);
 	case SDK_OP_CRYPTO_STREAM:
@@ -8681,6 +8775,9 @@ void sdk_mailbox_init(void)
 	media_pcm_ring_session = 0U;
 	memset(shared_buffers, 0, sizeof(shared_buffers));
 	memset(surfaces, 0, sizeof(surfaces));
+	/* Shared-buffer handles restart at 1, so the console encoder's owner
+	 * (an output handle) would match a new client; drop its session. */
+	sdk_console_encode_reset();
 	/* Unbind AX playback before the table goes away: the fabric
 	 * reset above already dropped every producer, silenced the ring
 	 * it owned and retired the lease epochs (R7). */

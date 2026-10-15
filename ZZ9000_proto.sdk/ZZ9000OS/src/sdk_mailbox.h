@@ -127,6 +127,7 @@
 #define SDK_SERVICE_CRYPTO             0x0800U
 #define SDK_SERVICE_DIAG               0x0900U
 #define SDK_SERVICE_VIDEO              0x0b00U
+#define SDK_SERVICE_CONSOLE            0x8200U   /* AmiNetXDuo console encoder */
 
 #define SDK_SERVICE_FLAG_FIRMWARE      (1U << 0)
 #define SDK_SERVICE_FLAG_MODULE        (1U << 1)
@@ -201,6 +202,7 @@
 #define SDK_OP_PING                    0x0002U
 #define SDK_OP_QUERY_SERVICE           0x0004U
 #define SDK_OP_QUERY_APERTURE_LAYOUT   0x0005U
+#define SDK_OP_CONSOLE_ENCODE          0x8200U
 
 #define SDK_OP_ALLOC_SHARED            0x0100U
 #define SDK_OP_FREE_SHARED             0x0101U

@@ -47,8 +47,8 @@ SECTIONS
 .text : {
    KEEP (*(.vectors))
    KEEP (*(.boot))
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *sdk_mpeg2_neon.o *sdk_video_webm.o *webm_parse.o *webm_window.o *libvpxdec.a:* *libopusdec.a:* *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o) .text)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *sdk_mpeg2_neon.o *sdk_video_webm.o *webm_parse.o *webm_window.o *libvpxdec.a:* *libopusdec.a:* *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o) .text.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *sdk_mpeg2_neon.o *sdk_video_webm.o *webm_parse.o *webm_window.o *libvpxdec.a:* *libopusdec.a:* *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o *sdk_console_encode.o *rfb_encode.o *rfb_words.o *deflate.c.obj *trees.c.obj) .text)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *sdk_mpeg2_neon.o *sdk_video_webm.o *webm_parse.o *webm_window.o *libvpxdec.a:* *libopusdec.a:* *audio_convert_tables.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o *sdk_console_encode.o *rfb_encode.o *rfb_words.o *deflate.c.obj *trees.c.obj) .text.*)
    *(.gnu.linkonce.t.*)
    *(.plt)
    *(.gnu_warning)
@@ -70,8 +70,8 @@ SECTIONS
 
 .rodata : {
    __rodata_start = .;
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *sdk_mpeg2_neon.o *sdk_video_webm.o *webm_parse.o *webm_window.o *libvpxdec.a:* *libopusdec.a:* *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o) .rodata)
-   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *sdk_mpeg2_neon.o *sdk_video_webm.o *webm_parse.o *webm_window.o *libvpxdec.a:* *libopusdec.a:* *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o) .rodata.*)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *sdk_mpeg2_neon.o *sdk_video_webm.o *webm_parse.o *webm_window.o *libvpxdec.a:* *libopusdec.a:* *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o *sdk_console_encode.o *rfb_encode.o *rfb_words.o *deflate.c.obj *trees.c.obj) .rodata)
+   *(EXCLUDE_FILE (*LzmaDec.o *Lzma2Dec.o *sdk_compression.o *sdk_image_stream.o *sdk_webp_alloc.o *libwebpdecoder.a:* *libwebpdemux.a:* *libmpeg2.a:* *liba52.a:* *libflacdec.a:* *sdk_flac_alloc.o *sdk_audio_flac.o *libvorbisdec.a:* *sdk_vorbis_alloc.o *sdk_audio_vorbis.o *sdk_video_stream.o *sdk_video_yuy2.o *sdk_dvd_ps.o *sdk_dvd_lpcm.o *sdk_dvd_ac3.o *sdk_video_mpeg2.o *sdk_mpeg2_neon.o *sdk_video_webm.o *webm_parse.o *webm_window.o *libvpxdec.a:* *libopusdec.a:* *audio_convert_tables.o *audio_scene.o *audio_fabric_lease.o *usb_proxy.o *ehci-iso.o *sdk_audio_control.o *ax.o *usb_proxy_iso.o *video.o *hdmi.o *sdk_console_encode.o *rfb_encode.o *rfb_words.o *deflate.c.obj *trees.c.obj) .rodata.*)
    *(.gnu.linkonce.r.*)
    __rodata_end = .;
 } > ps7_ddr_0
@@ -454,6 +454,38 @@ ASSERT(__z2_direct_ring_end <= (ORIGIN(ps7_ddr_0) + LENGTH(ps7_ddr_0)),
    *hdmi.o(.rodata.*)
    . = ALIGN(16);
    __video_text_end = .;
+} > ps7_ddr_hi
+/* The console encoder (SDK service 0x8200) runs only from a mailbox
+ * request, never on the boot path or in an interrupt: high DDR, with the
+ * zlib compressor it alone uses, so neither spends the fixed low-DDR budget
+ * below the framebuffer (16 KB free before it). */
+.console_text : {
+   . = ALIGN(16);
+   __console_text_start = .;
+   *sdk_console_encode.o(.text)
+   *sdk_console_encode.o(.text.*)
+   *sdk_console_encode.o(.rodata)
+   *sdk_console_encode.o(.rodata.*)
+   *rfb_encode.o(.text)
+   *rfb_encode.o(.text.*)
+   *rfb_encode.o(.rodata)
+   *rfb_encode.o(.rodata.*)
+   *rfb_words.o(.text)
+   *rfb_words.o(.text.*)
+   *rfb_words.o(.rodata)
+   *rfb_words.o(.rodata.*)
+   /* zlib's compressor: only the console encoder deflates (inflate, which
+    * the image decoders use, stays where it was). */
+   *deflate.c.obj(.text)
+   *deflate.c.obj(.text.*)
+   *deflate.c.obj(.rodata)
+   *deflate.c.obj(.rodata.*)
+   *trees.c.obj(.text)
+   *trees.c.obj(.text.*)
+   *trees.c.obj(.rodata)
+   *trees.c.obj(.rodata.*)
+   . = ALIGN(16);
+   __console_text_end = .;
 } > ps7_ddr_hi
 /* USB proxy dispatch and the isochronous scheduler are not boot-path code.
  * Keep them in high DDR so feature growth cannot consume the fixed low-DDR
