@@ -446,7 +446,7 @@ proc cr_bd_zz9000_ps { parentCell } {
   video_formatter\
   "
    if { $rasterix } {
-     append list_check_mods "  zz9k_rasterix\\\n"
+     append list_check_mods "  zz9k_rasterix\n"
    }
 
    set list_mods_missing ""
