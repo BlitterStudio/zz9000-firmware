@@ -42,7 +42,7 @@ module zz9k_rasterix #(
 
     input  wire                               m_axi_aclk,
     input  wire                               m_axi_aresetn,
-    output wire [7:0]                         m_axi_awid,
+    output wire [4:0]                         m_axi_awid,
     output wire [31:0]                        m_axi_awaddr,
     output wire [7:0]                         m_axi_awlen,
     output wire [2:0]                         m_axi_awsize,
@@ -57,11 +57,11 @@ module zz9k_rasterix #(
     output wire                               m_axi_wlast,
     output wire                               m_axi_wvalid,
     input  wire                               m_axi_wready,
-    input  wire [7:0]                         m_axi_bid,
+    input  wire [4:0]                         m_axi_bid,
     input  wire [1:0]                         m_axi_bresp,
     input  wire                               m_axi_bvalid,
     output wire                               m_axi_bready,
-    output wire [7:0]                         m_axi_arid,
+    output wire [4:0]                         m_axi_arid,
     output wire [31:0]                        m_axi_araddr,
     output wire [7:0]                         m_axi_arlen,
     output wire [2:0]                         m_axi_arsize,
@@ -71,7 +71,7 @@ module zz9k_rasterix #(
     output wire [2:0]                         m_axi_arprot,
     output wire                               m_axi_arvalid,
     input  wire                               m_axi_arready,
-    input  wire [7:0]                         m_axi_rid,
+    input  wire [4:0]                         m_axi_rid,
     input  wire [31:0]                        m_axi_rdata,
     input  wire [1:0]                         m_axi_rresp,
     input  wire                               m_axi_rlast,
@@ -121,7 +121,7 @@ module zz9k_rasterix #(
     wire rix_response_last;
     wire [31:0] rix_response_data;
 
-    wire [7:0] rix_m_axi_awid;
+    wire [4:0] rix_m_axi_awid;
     wire [31:0] rix_m_axi_awaddr;
     wire [7:0] rix_m_axi_awlen;
     wire [2:0] rix_m_axi_awsize;
@@ -135,7 +135,7 @@ module zz9k_rasterix #(
     wire rix_m_axi_wlast;
     wire rix_m_axi_wvalid;
     wire rix_m_axi_bready;
-    wire [7:0] rix_m_axi_arid;
+    wire [4:0] rix_m_axi_arid;
     wire [31:0] rix_m_axi_araddr;
     wire [7:0] rix_m_axi_arlen;
     wire [2:0] rix_m_axi_arsize;
@@ -340,7 +340,7 @@ module zz9k_rasterix #(
         .ENABLE_FOG(1),
         .MAX_TEXTURE_SIZE(256),
         .ADDR_WIDTH(32),
-        .ID_WIDTH(8),
+        .ID_WIDTH(5),
         .DATA_WIDTH(32),
         .STRB_WIDTH(4),
         .RASTERIZER_FLOAT_PRECISION(32),
