@@ -68,6 +68,9 @@ proc print_help {} {
   puts "$script_file -tclargs \[--project_name <name>\]"
   puts "$script_file -tclargs \[--no-autoboot\]"
   puts "$script_file -tclargs \[--capture-c28\]"
+  puts "$script_file -tclargs \[--rasterix\]"
+  puts "$script_file -tclargs \[--rasterix-tmu-count <1|2>\]"
+  puts "$script_file -tclargs \[--rasterix-framebuffer-size-lg <14|15>\]"
   puts "$script_file -tclargs \[--help\]\n"
   puts "Usage:"
   puts "Name                   Description"
@@ -77,10 +80,13 @@ proc print_help {} {
   puts "                       that was set with the \"-paths_relative_to\" switch"
   puts "                       when this script was generated.\n"
   puts "\[--project_name <name>\] Create project with the specified name. Default"
-  puts "                       name is the name of the project from where this"
-  puts "                       script was generated.\n"
+  puts "                       name is the name of the project from where this script"
+  puts "                       was generated.\n"
   puts "\[--no-autoboot\]        Build without advertising the Zorro autoboot ROM.\n"
   puts "\[--capture-c28\]        Opt-in A4000 C28 native capture clock candidate.\n"
+  puts "\[--rasterix\]           Include the opt-in RasterIX renderer fit trial.\n"
+  puts "\[--rasterix-tmu-count\] Select one or two RasterIX TMUs (default 1).\n"
+  puts "\[--rasterix-framebuffer-size-lg\] Select 16k or 32k pixel band (default 14).\n"
   puts "\[--help\]               Print help information for this script"
   puts "-------------------------------------------------------------------------\n"
   exit 0
@@ -88,6 +94,9 @@ proc print_help {} {
 
 set no_autoboot 0
 set capture_c28 0
+set rasterix 0
+set rasterix_tmu_count 1
+set rasterix_framebuffer_size_in_pixel_lg 14
 
 if { $::argc > 0 } {
   for {set i 0} {$i < $::argc} {incr i} {
@@ -97,6 +106,9 @@ if { $::argc > 0 } {
       "--project_name" { incr i; set _xil_proj_name_ [lindex $::argv $i] }
       "--no-autoboot"  { set no_autoboot 1 }
       "--capture-c28"  { set capture_c28 1 }
+      "--rasterix"     { set rasterix 1 }
+      "--rasterix-tmu-count" { incr i; set rasterix_tmu_count [lindex $::argv $i] }
+      "--rasterix-framebuffer-size-lg" { incr i; set rasterix_framebuffer_size_in_pixel_lg [lindex $::argv $i] }
       "--help"         { print_help }
       default {
         if { [regexp {^-} $option] } {
@@ -106,6 +118,13 @@ if { $::argc > 0 } {
       }
     }
   }
+}
+
+if {$rasterix_tmu_count ni {1 2}} {
+  error "RasterIX TMU count must be 1 or 2"
+}
+if {$rasterix_framebuffer_size_in_pixel_lg ni {14 15}} {
+  error "RasterIX framebuffer band log2 must be 14 or 15"
 }
 
 # Set the directory path for the original project from where this script was exported
@@ -198,6 +217,13 @@ if { $no_autoboot } {
   set_property verilog_define $verilog_defines $obj
   puts "INFO: VARIANT_DISABLE_AUTOBOOT set; Zorro autoboot ROM will not be advertised."
 }
+if { $rasterix } {
+  lappend verilog_defines \
+    "RASTERIX_TMU_COUNT=$rasterix_tmu_count" \
+    "RASTERIX_FRAMEBUFFER_SIZE_IN_PIXEL_LG=$rasterix_framebuffer_size_in_pixel_lg"
+  set_property verilog_define $verilog_defines $obj
+  puts "INFO: RasterIX enabled: TMUs=$rasterix_tmu_count framebuffer_band_log2=$rasterix_framebuffer_size_in_pixel_lg"
+}
 # Import local files from the original project
 set files [list \
  [file normalize "${origin_dir}/mntzorro.v" ]\
@@ -213,6 +239,21 @@ set files [list \
  [file normalize "${origin_dir}/ZZ9000_proto.srcs/sources_1/new/audio_clock.v" ]\
  [file normalize "${origin_dir}/ZZ9000_proto.srcs/sources_1/bd/zz9000_ps/hdl/zz9000_ps_wrapper.v" ]\
 ]
+if { $rasterix } {
+  foreach rasterix_dir {
+    rtl/zz9k_rix
+    rtl/rasterix/RasterIX
+    rtl/rasterix/Float/rtl/float
+    rtl/rasterix/3rdParty
+    rtl/rasterix/3rdParty/verilog-axi
+    rtl/rasterix/3rdParty/verilog-axis
+  } {
+    foreach rasterix_file [glob -nocomplain [file normalize "$origin_dir/$rasterix_dir/*.v"]] {
+      lappend files $rasterix_file
+    }
+  }
+  set_property include_dirs [list [file normalize "$origin_dir/rtl/rasterix/RasterIX"]] $obj
+}
 set imported_files [import_files -fileset sources_1 $files]
 
 # Set 'sources_1' fileset file properties for remote files
@@ -345,8 +386,7 @@ if { [get_files audio_clock.v] == "" } {
 proc cr_bd_zz9000_ps { parentCell } {
 # The design that will be created by this Tcl proc contains the following
 # module references:
-# MNTZorro_v0_1_S00_AXI, audio_clock, video_formatter
-
+# MNTZorro_v0_1_S00_AXI, audio_clock, video_formatter, zz9k_rasterix (opt-in)
 
 
   # CHANGE DESIGN NAME HERE
@@ -404,6 +444,9 @@ proc cr_bd_zz9000_ps { parentCell } {
   audio_clock\
   video_formatter\
   "
+   if { $rasterix } {
+     append list_check_mods "  zz9k_rasterix\\\n"
+   }
 
    set list_mods_missing ""
    common::send_msg_id "BD_TCL-006" "INFO" "Checking if the following modules exist in the project's sources: $list_check_mods ."
@@ -694,6 +737,18 @@ proc create_hier_cell_video { parentCell nameHier } {
      catch {common::send_msg_id "BD_TCL-106" "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
      return 1
    }
+  if { $rasterix } {
+    set block_name zz9k_rasterix
+    set block_cell_name zz9k_rasterix_0
+    if { [catch {set zz9k_rasterix_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
+      catch {common::send_msg_id "BD_TCL-105" "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+      return 1
+    } elseif { $zz9k_rasterix_0 eq "" } {
+      catch {common::send_msg_id "BD_TCL-106" "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+      return 1
+    }
+  }
+
 
   # Create instance: audio_formatter_0, and set properties
   set audio_formatter_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:audio_formatter:1.0 audio_formatter_0 ]
@@ -742,6 +797,16 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.NUM_MI {1} \
    CONFIG.S00_HAS_REGSLICE {3} \
  ] $axi_interconnect_2
+  if { $rasterix } {
+    # HP1's capture writeback remains highest priority. RasterIX is bounded by
+    # the lower-priority S01 slot, isolating scanout on HP0 from renderer DDR.
+    set_property -dict [ list \
+      CONFIG.NUM_SI {2} \
+      CONFIG.S00_ARB_PRIORITY {15} \
+      CONFIG.S01_ARB_PRIORITY {0} \
+      CONFIG.S01_HAS_REGSLICE {4} \
+    ] $axi_interconnect_2
+  }
 
   # Create instance: axi_interconnect_3, and set properties
   set axi_interconnect_3 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axi_interconnect_3 ]
@@ -1256,6 +1321,14 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.S00_HAS_DATA_FIFO {0} \
    CONFIG.S00_HAS_REGSLICE {3} \
  ] $ps7_0_axi_periph
+  if { $rasterix } {
+    # 0x83c60000 is in the existing GP1 peripheral aperture. Keep PS7
+    # configuration unchanged and extend only the fabric interconnect.
+    set_property -dict [ list \
+      CONFIG.NUM_MI {8} \
+      CONFIG.M07_HAS_REGSLICE {3} \
+    ] $ps7_0_axi_periph
+  }
 
   # Create instance: rst_ps7_0_25M, and set properties
   set rst_ps7_0_25M [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_ps7_0_25M ]
@@ -1321,6 +1394,10 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_intf_net -intf_net axi_interconnect_3_M00_AXI [get_bd_intf_pins axi_interconnect_3/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP2]
   connect_bd_intf_net -intf_net axi_interconnect_4_M00_AXI [get_bd_intf_pins axi_interconnect_4/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP3]
   connect_bd_intf_net -intf_net axi_register_slice_1_M_AXI [get_bd_intf_pins axi_register_slice_1/M_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_ACP]
+  if { $rasterix } {
+    connect_bd_intf_net -intf_net RasterIX_control [get_bd_intf_pins ps7_0_axi_periph/M07_AXI] [get_bd_intf_pins zz9k_rasterix_0/S_AXI]
+    connect_bd_intf_net -intf_net RasterIX_memory [get_bd_intf_pins zz9k_rasterix_0/M_AXI] [get_bd_intf_pins axi_interconnect_2/S01_AXI]
+  }
   connect_bd_intf_net -intf_net i2s_receiver_0_m_axis_aud [get_bd_intf_pins audio_formatter_1/s_axis_s2mm] [get_bd_intf_pins i2s_receiver_0/m_axis_aud]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
   connect_bd_intf_net -intf_net processing_system7_0_FIXED_IO [get_bd_intf_ports FIXED_IO] [get_bd_intf_pins processing_system7_0/FIXED_IO]
@@ -1424,6 +1501,11 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net xlslice_0_Dout [get_bd_ports VGA_R] [get_bd_pins xlslice_0/Dout]
   connect_bd_net -net xlslice_1_Dout [get_bd_ports VGA_G] [get_bd_pins xlslice_1/Dout]
   connect_bd_net -net xlslice_2_Dout [get_bd_ports VGA_B] [get_bd_pins xlslice_2/Dout]
+  if { $rasterix } {
+    connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins zz9k_rasterix_0/s_axi_aresetn] [get_bd_pins zz9k_rasterix_0/m_axi_aresetn] [get_bd_pins axi_interconnect_2/S01_ARESETN]
+    connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins zz9k_rasterix_0/s_axi_aclk] [get_bd_pins zz9k_rasterix_0/m_axi_aclk] [get_bd_pins axi_interconnect_2/S01_ACLK]
+  }
+
 
   # Create address segments
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces MNTZorro_v0_1_S00_AXI_0/m00_axi] [get_bd_addr_segs processing_system7_0/S_AXI_ACP/ACP_DDR_LOWOCM] SEG_processing_system7_0_ACP_DDR_LOWOCM
@@ -1433,6 +1515,10 @@ proc create_hier_cell_video { parentCell nameHier } {
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces MNTZorro_v0_1_S00_AXI_0/m01_axi] [get_bd_addr_segs processing_system7_0/S_AXI_HP1/HP1_DDR_LOWOCM] SEG_processing_system7_0_HP1_DDR_LOWOCM
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces audio_formatter_0/m_axi_mm2s] [get_bd_addr_segs processing_system7_0/S_AXI_HP2/HP2_DDR_LOWOCM] SEG_processing_system7_0_HP2_DDR_LOWOCM
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces audio_formatter_1/m_axi_s2mm] [get_bd_addr_segs processing_system7_0/S_AXI_HP3/HP3_DDR_LOWOCM] SEG_processing_system7_0_HP3_DDR_LOWOCM
+  if { $rasterix } {
+    create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces zz9k_rasterix_0/M_AXI] [get_bd_addr_segs processing_system7_0/S_AXI_HP1/HP1_DDR_LOWOCM] SEG_RasterIX_HP1_DDR_LOWOCM
+    create_bd_addr_seg -range 0x00010000 -offset 0x83C60000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs zz9k_rasterix_0/S_AXI/Reg] SEG_RasterIX_control_Reg
+  }
   create_bd_addr_seg -range 0x00010000 -offset 0x43C00000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs MNTZorro_v0_1_S00_AXI_0/S_AXI/reg0] SEG_MNTZorro_v0_1_S00_AXI_0_reg0
   create_bd_addr_seg -range 0x00010000 -offset 0x83C20000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs audio_formatter_0/s_axi_lite/reg0] SEG_audio_formatter_0_reg0
   create_bd_addr_seg -range 0x00010000 -offset 0x83C50000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs audio_formatter_1/s_axi_lite/reg0] SEG_audio_formatter_1_reg0

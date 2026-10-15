@@ -22,6 +22,15 @@ Build a diagnostic bitstream that does not advertise the Zorro autoboot ROM.
 Build the opt-in A4000 C28 capture candidate. Its default output is
 bootimage_work/capture-c28/zz9000_ps_wrapper.bit, separate from packaged builds.
 
+.PARAMETER RasterIX
+Build the opt-in RasterIX renderer fit trial.
+
+.PARAMETER RasterIXTMUCount
+RasterIX texture-mapping units (1 or 2; default 1).
+
+.PARAMETER RasterIXFramebufferSizeLog2
+RasterIX internal framebuffer band size in pixels (14 or 15; default 14).
+
 .PARAMETER OutputBitstream
 Optional output bitstream path, relative to the repository or absolute.
 A C28 build cannot overwrite bootimage_work/zz9000_ps_wrapper.bit.
@@ -32,6 +41,11 @@ param(
     [string]$VivadoBat,
     [switch]$NoAutoboot,
     [switch]$CaptureC28,
+    [switch]$RasterIX,
+    [ValidateSet(1, 2)]
+    [int]$RasterIXTMUCount = 1,
+    [ValidateSet(14, 15)]
+    [int]$RasterIXFramebufferSizeLog2 = 14,
     [string]$OutputBitstream
 )
 
@@ -166,6 +180,10 @@ if ($NoAutoboot) {
 if ($CaptureC28) {
     Write-Host '[bitstream] native capture clock: opt-in C28 candidate'
 }
+if ($RasterIX) {
+    Write-Host "[bitstream] RasterIX: TMUs=$RasterIXTMUCount framebuffer_band_log2=$RasterIXFramebufferSizeLog2"
+}
+
 
 $projectArgs = @('--origin_dir', '.')
 if ($NoAutoboot) {
@@ -173,6 +191,13 @@ if ($NoAutoboot) {
 }
 if ($CaptureC28) {
     $projectArgs += '--capture-c28'
+}
+if ($RasterIX) {
+    $projectArgs += '--rasterix'
+    $projectArgs += '--rasterix-tmu-count'
+    $projectArgs += $RasterIXTMUCount
+    $projectArgs += '--rasterix-framebuffer-size-lg'
+    $projectArgs += $RasterIXFramebufferSizeLog2
 }
 
 $projectDir = Join-Path $repoRoot 'ZZ9000_proto'
