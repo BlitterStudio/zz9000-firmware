@@ -50,15 +50,14 @@ The native plane is used when all of these are true:
   `ZZ9000OS-legacy-bitstream.elf`).
 - The window is active, has a positive size, and at least part of it is on
   screen. The window may extend past any screen edge; the PL clips it.
-- The window is at least as large as the scanned source in both directions.
-  A P96 source is scanned at full size. An SDK frame over 1280x720 is scanned
-  at half size.
+- The window is no more than 1.5 times smaller than the scanned source in
+  either direction. A P96 source is scanned at full size. An SDK frame is
+  scanned at half size when it is over 1280x720, or when its window is too
+  small for the full-size frame but not for the half-size one.
 - The source is no larger than 2560x4095.
 
-Everything else goes to the ARM compositor. The case that comes up most often
-is a window smaller than its source: a PIP the user has shrunk, or ZZPlay
-letterboxing an anamorphic frame onto a screen at the coded size. See
-[Known limitations](#known-limitations).
+Everything else goes to the ARM compositor: in practice, a window less than
+two thirds of its scanned source in width or height.
 
 Both paths reject a PIP when the screen uses scan-doubled modes (`scalemode`
 ≠ 0) or an 8-bit CLUT depth. In that case the PIP fails to open; the firmware
@@ -74,18 +73,33 @@ for one path is never shown on the other.
   two-input AXI interconnect. Main scanout has AXI priority 15 and the overlay
   has 0, so a busy overlay can't starve the desktop. The overlay reads DDR 64
   bits at a time.
-- `video_overlay_linebuffer.v` contains ping-pong line buffers. The fetcher
-  requests source row N+1 as soon as row N is ready, and fills the other bank
-  while row N is displayed. Fetch requests, completed-row tags, and generation
-  acknowledgements cross between the 100 MHz AXI clock and the pixel clock
-  through three `xpm_cdc_handshake` instances.
-- `video_overlay_pixel.v` converts YUV to RGB using CCIR601 coefficients, for
-  all five packed YUV422 layouts, and compares each pixel with the RGB colour
-  key.
-- `video_formatter.v` maps destination pixels and rows to source coordinates
-  with nearest-neighbour scaling. It computes the scale steps outside the pixel
-  critical path. Line-buffer banks are not tied to source row parity, which
-  lets the fetcher skip rows. The overlay is composited before the sprite and
+- `video_overlay_linebuffer.v` holds eight source rows in eight BRAM banks:
+  the two rows the filter is blending and up to six after them. Each row is
+  stored twice, split into even and odd macropixel words, so one pixel clock
+  reads two neighbouring macropixels from both rows. The formatter's fetch
+  stepper requests every source row from the window's first in order,
+  whenever a bank is empty or holds a row above the top row on display, so
+  fetching runs ahead of the display. A downscaled window blends more than
+  one new source row per raster line on average; running ahead spreads that
+  over the window instead of needing two whole rows inside one raster line.
+  If a row is still late, the stepper skips the rows the display has
+  already passed. One request is outstanding at a time. Fetch requests,
+  completed-row tags, and generation acknowledgements cross between the
+  100 MHz AXI clock and the pixel clock through three `xpm_cdc_handshake`
+  instances.
+- `video_overlay_filter.v` scales bilinearly. Luma blends pixels i and i+1,
+  chroma blends macropixels k and k+1 at half the luma position, and the two
+  row results are blended with the row weight. Weights have 8 bits. A 1:1
+  window has zero weights everywhere, so its pixels pass through unchanged.
+  The line-buffer read and the filter add nine pixel-clock stages.
+- `video_overlay_pixel.v` converts YUV to RGB using CCIR601 coefficients and
+  compares each pixel with the RGB colour key. The filter unpacks all five
+  packed YUV422 layouts before it.
+- `video_formatter.v` maps destination pixels and rows to 16.16 fixed-point
+  source positions, centre-aligned: pixel d samples
+  `d * step + step / 2 - 0.5`, with `step = (source << 16) / destination`. It
+  computes the steps and the start position of a clipped window outside the
+  pixel critical path. The overlay is composited before the sprite and
   scanline post-processing, so the hardware pointer stays on top.
 
 The firmware programs the formatter through video-control ops 22–27, defined
@@ -105,15 +119,29 @@ The VDMA address, pitch, HSIZE and VSIZE are AXI-Lite registers, written by
 
 ### Frame handoff
 
-The handoff runs in this order. Each step fixed a bug seen on hardware:
+The handoff runs in this order:
 
 1. At vblank, the ARM does the full L1+L2 cache flush first.
-2. It resets and reprograms the overlay VDMA, writing `START_ADDR` first and
-   `VSIZE` second. A running AXI VDMA only uses a new start address after
-   `VSIZE` is written (AMD PG020).
-3. It advances the frame generation.
-4. The formatter stalls at the end of the previous frame until the line-buffer
-   side acknowledges the new generation. Only then does it request line zero.
+2. It resets the overlay VDMA, which stops the stream, and reprograms it,
+   writing `START_ADDR` first and `VSIZE` last. A running AXI VDMA only uses
+   a new start address after `VSIZE` is written (AMD PG020).
+3. It advances the frame generation. If the fetcher is still reading a late
+   row of the old frame when the restarted stream presents its first beat,
+   it holds that start-of-frame beat instead of taking it as part of the old
+   frame. The new generation's search for the frame start then takes the
+   same beat.
+4. The line-buffer side acknowledges the new generation and the formatter
+   restarts its fetch stepper at the first visible source row. The fetcher
+   stops requesting rows once the raster leaves the visible frame.
+
+Committing the generation before restarting the VDMA was tried as the
+answer to the late row. On an A4000 that order showed a few top rows and
+then black on every frame after a shrunk window went fullscreen, and putting
+this order back cured it. The cause is unknown; the bench does not
+reproduce it. Without the held frame start, this order lost every frame in
+simulation of a 720p window on an overlay stream slowed to about a third of
+its rate: the late row took the frame start, and the new generation waited
+a whole stream frame for the next one.
 
 The VDMA is connected directly to the line fetcher with no FIFO in between, so
 no data from the old frame can survive the reset.
@@ -164,7 +192,7 @@ and the two runs looked the same.
 
 - `video_overlay_pixel` simulation covers layout, luma, clamping and the key
   for all five layouts.
-- The formatter xsim sweep passes 12 of 12 configurations, with zero pixel
+- The formatter xsim sweep passes 31 of 31 configurations, with zero pixel
   mismatches. The sweep covers:
   - 32/16/15-bit base modes
   - odd widths
@@ -176,9 +204,26 @@ and the two runs looked the same.
   - bank wrap
   - disable and source-generation invalidation
   - a generation programmed while the overlay is disabled
-- The scaling build meets timing in Vivado 2018.3: +0.917 ns setup WNS and
-  +0.017 ns hold WHS on the pixel clock. All overlay CDC paths are recognised
-  XPM handshakes.
+  - filling all banks ahead of the display, reusing only passed rows, and
+    one outstanding request
+  - reading two rows at once, and holding a row pair back until both rows
+    are loaded
+- `test/video/run_overlay_scale_sim.sh` checks every pixel of whole windows
+  against a bit-exact bilinear reference (`overlay_bilinear_ref.vh`), with
+  luma and chroma varying per pixel and per row. It covers downscales,
+  upscales, 1:1, an odd source width, windows clipped at each edge
+  (including rows that fall into vertical blanking), the fullscreen toggle
+  with and without a mode change, and an overlay stream that delivers a
+  source row in about 60% of a raster line. That last case needs eight banks
+  with bilinear filtering; four left late rows.
+- The bilinear `zorro3-aga` build meets timing in Vivado 2018.3: +0.162 ns
+  setup and +0.026 ns hold on the 150 MHz pixel clock, and uses 56.5 of 140
+  BRAM tiles and 19 DSPs. The first attempt missed by 1.87 ns: the BRAM
+  read address was computed from the position register in the same cycle
+  and fanned out to 32 RAMB36s. The read addresses, sample geometry and
+  bank selection are now registered, and reads use the BRAM output
+  register. The overlay crosses clock domains only through its three XPM
+  handshakes.
 
 ### Not yet qualified on hardware
 
@@ -187,16 +232,12 @@ and the two runs looked the same.
   recorded only for default `zorro3`.
 - Wider clipping and scale-ratio coverage, which is part of the release
   matrix.
+- Bilinear scaling and the eight-bank fetcher, which have passed simulation
+  only. The nearest-neighbour four-bank build before them showed resized
+  windows down to the 1.5x limit correctly on an A4000 (`zorro3-aga`).
 
 ## Known limitations
 
-- Windows smaller than their scanned source don't work natively. Every
-  hardware test of one showed the first rows of the frame and then black. On an
-  A4000 this happened with a 1920x1080 window and with a 720x576 MPEG-2 frame
-  letterboxed to 720x405, while 1:1 and enlarged windows of the same clips
-  were correct. The line fetcher fetches one source row per displayed row,
-  which is the likely cause. The firmware sends these windows to the ARM
-  compositor, even though downscaling passes in xsim.
 - Colour-key occlusion is opportunistic: other windows on top of the PIP hide
   it only where the colour key matches.
 - SDK frames still need a pack step. Core 1 converts each planar 4:2:0 frame to
@@ -227,8 +268,19 @@ the design.
 
 Nearest-neighbour scaling and clipping in the PL came later, in #64. Before
 that, any resized or clipped window used the ARM compositor. Downscaled
-windows were moved back to the compositor after the hardware failures
-described under [Known limitations](#known-limitations).
+windows then went back to the compositor: every hardware test of a window
+smaller than its scanned source showed the first rows of the frame and then
+black. On an A4000 this happened with a 1920x1080 window and with a 720x576
+MPEG-2 frame letterboxed to 720x405, while 1:1 and enlarged windows of the
+same clips were correct. The two-bank fetcher could only start a row once the
+previous one was on display, so each skipped source row put two rows inside
+one raster line. A row that arrived late was dropped, and at 1:1 it left the
+fetcher behind the display for the rest of the frame. Simulation shows late
+and dropped rows only when the stream is slow, as when the desktop scanout
+competes for HP0. It does not reproduce the 720x405 failure at that mode's
+27 MHz pixel clock, so the cause of that case is unconfirmed. The four-bank
+fetcher brought downscaled windows back to the native plane, up to a 1.5x
+reduction.
 
 ## Comparison with Z3660
 

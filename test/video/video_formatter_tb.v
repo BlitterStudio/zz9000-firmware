@@ -167,7 +167,6 @@ end
 /* Three-line, nine-pixel black overlay.  Five 4-byte macropixels are sent per
  * line so the final (unused) luma exercises odd destination widths. */
 reg overlay_stream_en = 0;
-reg early_overlay_prefetch_seen = 0;
 integer overlay_stream_width = 9;
 integer overlay_frame_width;
 integer ol, ow;
@@ -191,58 +190,89 @@ function [7:0] overlay_pattern_luma(input integer line,
   overlay_pattern_luma = 8'd24 + line * 8'd48 + pixel * 8'd4;
 endfunction
 
-function [31:0] expected_overlay_pixel(input integer line,
-                                       input integer pixel);
-  integer gray;
-  begin
-    gray = (298 * (overlay_pattern_luma(line, pixel) - 16) + 128) >> 8;
-    expected_overlay_pixel = {8'h00, gray[7:0], gray[7:0], gray[7:0]};
-  end
+function [7:0] overlay_pattern_u(input integer line, input integer word);
+  overlay_pattern_u = 8'd40 + line * 8'd50 + word * 8'd30;
 endfunction
+
+function [7:0] overlay_pattern_v(input integer line, input integer word);
+  overlay_pattern_v = 8'd200 - line * 8'd40 - word * 8'd20;
+endfunction
+
+function integer ovl_ref_y(input integer line, input integer pixel);
+  ovl_ref_y = overlay_pattern_luma(line, pixel);
+endfunction
+
+function integer ovl_ref_u(input integer line, input integer word);
+  ovl_ref_u = overlay_pattern_u(line, word);
+endfunction
+
+function integer ovl_ref_v(input integer line, input integer word);
+  ovl_ref_v = overlay_pattern_v(line, word);
+endfunction
+
+`include "overlay_bilinear_ref.vh"
+
+/* Model the firmware's vblank handoff on a park-mode VDMA: frames repeat
+ * back to back; the vblank interrupt resets MM2S wherever it is in the
+ * frame (the fetcher stops reading after the last displayed row), restarts
+ * the frame, then commits the next generation. */
+reg overlay_vblank_seen = 0;
+reg overlay_commit_pending = 0;
+reg overlay_frame_aborted;
+always @(posedge control_vblank[1])
+  overlay_vblank_seen = 1;
 
 initial begin : overlay_vdma
   wait (overlay_stream_en);
   forever begin
     overlay_frame_width = overlay_stream_width;
-    for (ol = 0; ol < 3; ol = ol + 1) begin
-      for (ow = 0; ow < (overlay_frame_width + 1) / 2; ow = ow + 1) begin
+    overlay_frame_aborted = 0;
+    for (ol = 0; ol < 3 && !overlay_frame_aborted; ol = ol + 1) begin
+      for (ow = 0; ow < (overlay_frame_width + 1) / 2 &&
+                   !overlay_frame_aborted; ow = ow + 1) begin
         @(negedge aclk);
         if (overlay_pattern_mode)
           overlay_tdata <= {
-            8'd128, overlay_pattern_luma(ol, 2 * ow + 1),
-            8'd128, overlay_pattern_luma(ol, 2 * ow)};
+            overlay_pattern_v(ol, ow), overlay_pattern_luma(ol, 2 * ow + 1),
+            overlay_pattern_u(ol, ow), overlay_pattern_luma(ol, 2 * ow)};
         else
           overlay_tdata <= {8'd128, overlay_luma(ol),
                             8'd128, overlay_luma(ol)};
         overlay_tuser <= (ol == 0 && ow == 0);
         overlay_tlast <= (ow == (overlay_frame_width + 1) / 2 - 1);
         overlay_tvalid <= 1;
-        while (overlay_tready !== 1'b1) @(negedge aclk);
-        @(posedge aclk);
+        /* tready may depend on tuser: sample it after this beat settles. */
+        #1;
+        while (overlay_tready !== 1'b1 && !overlay_vblank_seen) begin
+          @(negedge aclk); #1;
+        end
+        if (overlay_vblank_seen)
+          overlay_frame_aborted = 1;
+        else
+          @(posedge aclk);
       end
     end
-    /* Model the real ISR ordering: MM2S remains stalled after the final row,
-     * then firmware commits/re-arms only after the vblank interrupt. */
     @(negedge aclk);
     overlay_tvalid <= 0;
     overlay_tuser <= 0;
     overlay_tlast <= 0;
-    wait (control_vblank[1] === 1'b1);
-    overlay_stream_generation = overlay_stream_generation + 1;
-    op(OP_OVERLAY_FRAME, overlay_stream_generation);
+    if (overlay_frame_aborted) begin
+      overlay_vblank_seen = 0;
+      overlay_stream_generation = overlay_stream_generation + 1;
+      overlay_commit_pending = 1;
+    end
   end
 end
 
-/* The old design could not advance the fetch request until the final PIP
- * pixel because that same register selected the read bank. Require line one
- * to be requested earlier while line zero remains selected for display. */
-always @(posedge dvi_clk)
-  if (overlay_stream_en && uut.vga_overlay_enable &&
-      uut.overlay_displayed_line == 0 && uut.overlay_fetch_line == 1 &&
-      uut.overlay_screen_x <
-        ($signed(uut.vga_overlay_x) +
-         $signed({1'b0, uut.vga_overlay_width}) - 1))
-    early_overlay_prefetch_seen <= 1;
+/* The generation commit follows the restart, as in overlay_hw_set_buffer. */
+initial begin : overlay_commit
+  forever begin
+    wait (overlay_commit_pending === 1'b1);
+    overlay_commit_pending = 0;
+    repeat (40) @(negedge aclk);
+    op(OP_OVERLAY_FRAME, overlay_stream_generation);
+  end
+end
 `endif
 
 // framebuffer content generator: word w of line l, byte lanes ascend so
@@ -490,7 +520,6 @@ endtask
 
 // main
 integer i, x, mism, shown, overlay_start_frame, expected_row;
-integer overlay_src_x, overlay_src_y;
 reg [31:0] got, exp;
 initial begin
   cfg_cmode = 2;
@@ -714,10 +743,6 @@ initial begin
     op(OP_OVERLAY_CTRL, 1); /* enable, no key, packed CGX */
     overlay_start_frame = frames;
     wait (frames >= overlay_start_frame + 5);
-    if (!early_overlay_prefetch_seen) begin
-      mism = mism + 1;
-      $display("OVERLAY PREFETCH MISMATCH line 1 was not requested early");
-    end
 
     for (i = 0; i < DEFAULT_LINES; i = i + 1)
       for (x = 0; x < cfg_width; x = x + 1) begin
@@ -788,8 +813,9 @@ initial begin
       end
 
     /* Resized overlays must remain on the packed-YUY2 hardware plane.
-     * Exercise nearest-neighbour upscaling in both axes with distinct luma
-     * at every source pixel, so byte/macropixel phase errors are visible. */
+     * Exercise bilinear upscaling in both axes with distinct luma at every
+     * source pixel and distinct chroma per macropixel, so byte/macropixel
+     * phase and weight errors are visible. */
     overlay_stream_width = 9;
     overlay_pattern_mode = 1;
     op(OP_OVERLAY_POS, (1 << 16) | 4);
@@ -801,9 +827,7 @@ initial begin
       for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 1 && i < 7 && x >= 4 && x < 22) begin
-          overlay_src_x = ((x - 4) * 9) / 18;
-          overlay_src_y = ((i - 1) * 3) / 6;
-          exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
+          exp = ovl_expected(x - 4, i - 1, 9, 3, 18, 6);
         end else begin
           exp = expected_pix(i, x);
         end
@@ -818,8 +842,8 @@ initial begin
         end
       end
 
-    /* Downscaling must select source coordinates deterministically and may
-     * skip source pixels/rows without relabelling the next AXI line. */
+    /* Downscaling blends neighbouring source pixels and rows; every source
+     * row is fetched in order without relabelling the next AXI line. */
     op(OP_OVERLAY_POS, (2 << 16) | 8);
     op(OP_OVERLAY_SIZE, (2 << 16) | 5);
     overlay_start_frame = frames;
@@ -828,9 +852,7 @@ initial begin
       for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i >= 2 && i < 4 && x >= 8 && x < 13) begin
-          overlay_src_x = ((x - 8) * 9) / 5;
-          overlay_src_y = ((i - 2) * 3) / 2;
-          exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
+          exp = ovl_expected(x - 8, i - 2, 9, 3, 5, 2);
         end else begin
           exp = expected_pix(i, x);
         end
@@ -855,9 +877,7 @@ initial begin
       for (x = 0; x < cfg_width; x = x + 1) begin
         got = cap[i * MAXW + x];
         if (i < 3 && x < 14) begin
-          overlay_src_x = ((x + 4) * 9) / 18;
-          overlay_src_y = ((i + 3) * 3) / 6;
-          exp = expected_overlay_pixel(overlay_src_y, overlay_src_x);
+          exp = ovl_expected(x + 4, i + 3, 9, 3, 18, 6);
         end else begin
           exp = expected_pix(i, x);
         end

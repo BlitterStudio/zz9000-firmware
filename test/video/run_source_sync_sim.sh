@@ -30,17 +30,18 @@ cp "$ROOT/video_formatter.v" dut.v
 cp "$ROOT/video_source_sync.v" .
 cp "$ROOT/video_overlay_pixel.v" .
 cp "$ROOT/video_overlay_linebuffer.v" .
+cp "$ROOT/video_overlay_filter.v" .
 
 if [ "$ON_WINDOWS" = 1 ]; then
     TBS="$(cygpath -w "$HERE/video_source_sync_tb.v") $(cygpath -w "$HERE/video_source_sync_formatter_tb.v")"
-    cmd //c "$(cygpath -w "$VIVADO_BIN/xvlog.bat") dut.v video_source_sync.v video_overlay_pixel.v video_overlay_linebuffer.v $TBS $(cygpath -w "$GLBL")" > xvlog.log 2>&1 \
+    cmd //c "$(cygpath -w "$VIVADO_BIN/xvlog.bat") dut.v video_source_sync.v video_overlay_pixel.v video_overlay_linebuffer.v video_overlay_filter.v $TBS $(cygpath -w "$GLBL")" > xvlog.log 2>&1 \
         || { cat xvlog.log; exit 1; }
     cmd //c "$(cygpath -w "$VIVADO_BIN/xelab.bat") -L xpm work.video_source_sync_tb work.glbl -s tb_sync" > xelab_sync.log 2>&1 \
         || { cat xelab_sync.log; exit 1; }
     cmd //c "$(cygpath -w "$VIVADO_BIN/xelab.bat") -L xpm work.video_source_sync_formatter_tb work.glbl -s tb_fmt" > xelab_fmt.log 2>&1 \
         || { cat xelab_fmt.log; exit 1; }
 else
-    "$VIVADO_BIN/xvlog" dut.v video_source_sync.v video_overlay_pixel.v video_overlay_linebuffer.v "$HERE/video_source_sync_tb.v" "$HERE/video_source_sync_formatter_tb.v" "$GLBL" > xvlog.log 2>&1 \
+    "$VIVADO_BIN/xvlog" dut.v video_source_sync.v video_overlay_pixel.v video_overlay_linebuffer.v video_overlay_filter.v "$HERE/video_source_sync_tb.v" "$HERE/video_source_sync_formatter_tb.v" "$GLBL" > xvlog.log 2>&1 \
         || { cat xvlog.log; exit 1; }
     "$VIVADO_BIN/xelab" -L xpm work.video_source_sync_tb work.glbl -s tb_sync > xelab_sync.log 2>&1 \
         || { cat xelab_sync.log; exit 1; }

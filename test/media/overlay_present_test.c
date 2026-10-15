@@ -383,29 +383,41 @@ static void test_interlace_blend_variant(void)
 	hw_present = 0;
 }
 
-/* A destination smaller than the scanned source asks the native plane to
- * downscale. On hardware that shows only the frame's first rows (A4000: a
- * 720x576 MPEG-2 frame letterboxed into a 720x405 fullscreen window showed
- * a few rows then black, while the same clip's 1024x576 windowed upscale
- * was correct; the earlier 1920x1080 report had the same shape), so such
- * rectangles must stay on the software compositor. Windows at or above the
- * scan size keep the native plane. */
+/* The native plane scales a scanned frame down by up to 1.5x per axis
+ * (overlay_native_fits); smaller windows use the half-size scan when the
+ * source is an SDK session and that fits, else the software compositor.
+ * The A4000 case that first showed only a frame's top rows, a 720x576
+ * MPEG-2 frame letterboxed into a 720x405 window, is inside that bound. */
 static void test_downscaled_window_stays_composited(void)
 {
 	unsigned starts;
 
-	/* The failed fullscreen shape: 720x576 source, 720x405 window. */
+	/* 720x576 into 720x405: down to two thirds, native. */
 	reset();
 	vs.vmode_hsize = 720U;
 	vs.vmode_vdma_rows = 576U;
 	hw_present = 1;
 	starts = hw_starts;
 	set_overlay_rect(720U, 576U, 1440U, 0, 85, 720U, 405U);
-	check(hw_starts == starts,
-	      "a window below the scan size stays on the software compositor");
+	check(hw_starts > starts && hw_dst_w == 720 && hw_dst_h == 405 &&
+	      hw_src_w == 720U && hw_src_h == 576U,
+	      "a window down to two thirds of the scan scans natively");
 	present_frame(21U);
+	check(last_compose.variant == 0xfeU,
+	      "a natively downscaled window packs for the native plane");
+
+	/* Just under two thirds in one axis: the software compositor. */
+	reset();
+	vs.vmode_hsize = 720U;
+	vs.vmode_vdma_rows = 576U;
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(720U, 576U, 1440U, 0, 85, 479U, 405U);
+	check(hw_starts == starts,
+	      "a window below two thirds of the scan stays on the software compositor");
+	present_frame(26U);
 	check(last_compose.variant == 0xffU,
-	      "a downscaled window composites planar frames in software");
+	      "a window below two thirds composites planar frames in software");
 
 	/* The working windowed shape of the same clip keeps the native plane. */
 	reset();
@@ -438,14 +450,21 @@ static void test_downscaled_window_stays_composited(void)
 	overlay_video_session_closed(23U);
 	open_video_sessions = 0U;
 
-	/* A legacy P96/cgxvideo source is scanned at full size: with no SDK
-	 * session open, the same window stays off the native plane. */
+	/* A legacy P96/cgxvideo source is scanned at full size, so it gets no
+	 * half-size scan: down to two thirds it scans natively, below that it
+	 * composites. */
 	reset();
 	hw_present = 1;
 	starts = hw_starts;
 	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1280U, 720U);
+	check(hw_starts > starts && hw_src_w == 1920U && hw_src_h == 1080U,
+	      "a P96 source down to two thirds scans natively at full size");
+	reset();
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1200U, 675U);
 	check(hw_starts == starts,
-	      "a downscaled P96 source stays on the software compositor");
+	      "a P96 source below two thirds stays on the software compositor");
 
 	/* A session bound before a re-SET (fullscreen toggle) is gated by its
 	 * half-size scan at that SET. */
@@ -459,13 +478,13 @@ static void test_downscaled_window_stays_composited(void)
 	      "a bound session re-SET into a smaller window stays native");
 	overlay_video_session_closed(25U);
 
-	/* A window smaller than even the half-size scan composites. */
+	/* A window below two thirds of even the half-size scan composites. */
 	reset();
 	hw_present = 1;
 	starts = hw_starts;
-	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 800U, 450U);
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 600U, 338U);
 	check(hw_starts == starts,
-	      "a window below the half-size scan composites in software");
+	      "a window below the half-size scan's bound composites in software");
 	present_frame(24U);
 	check(last_compose.variant == 0xffU,
 	      "a sub-scan window composites planar frames in software");

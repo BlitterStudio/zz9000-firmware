@@ -47,19 +47,33 @@ static inline uint8_t overlay_staging_divisor(uint16_t width,
 		? 2U : 1U;
 }
 
+/* The native plane scales a scanned frame down by at most 1.5x per axis. It
+ * streams every source row, so a downscale fetches src_h/dst_h rows per
+ * displayed row; its line fetcher runs up to three rows ahead, which spreads
+ * that load over the window instead of bunching two rows into one raster
+ * line. The 1.5x limit caps the fetch at 1.5 times a 1:1 scan of the same
+ * frame. A window needing more gets the half-size frame instead: at that
+ * ratio it loses little detail and halves the fetch. */
+static inline int overlay_native_fits(uint32_t scan_w, uint32_t scan_h,
+	int32_t dst_w, int32_t dst_h)
+{
+	return dst_w > 0 && dst_h > 0 &&
+	       3U * (uint32_t)dst_w >= 2U * scan_w &&
+	       3U * (uint32_t)dst_h >= 2U * scan_h;
+}
+
 /* Divisor an SDK session's frames are packed and scanned at for a window of
- * dst_w x dst_h. The native plane cannot show a source smaller than it was
- * scanned (it fetches one source row per displayed row), and the software
- * compositor costs core 1 tens of ms per frame. A window smaller than the
- * source therefore gets the half-size frame too, which the plane scales
- * up, as long as that half-size frame still fits the window. */
+ * dst_w x dst_h: full size when the native plane can show it in that window,
+ * otherwise half size when that fits, since the software compositor costs
+ * core 1 tens of ms per frame. A window too small for either keeps the full
+ * frame for the software compositor. */
 static inline uint8_t overlay_session_divisor(uint16_t src_w,
 	uint16_t src_h, int32_t dst_w, int32_t dst_h)
 {
 	if (overlay_staging_divisor(src_w, src_h) == 2U)
 		return 2U;
-	if ((dst_w < (int32_t)src_w || dst_h < (int32_t)src_h) &&
-	    dst_w >= (int32_t)(src_w / 2U) && dst_h >= (int32_t)(src_h / 2U))
+	if (!overlay_native_fits(src_w, src_h, dst_w, dst_h) &&
+	    overlay_native_fits(src_w / 2U, src_h / 2U, dst_w, dst_h))
 		return 2U;
 	return 1U;
 }
