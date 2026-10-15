@@ -54,7 +54,11 @@ module video_overlay_linebuffer_tb;
     begin
       @(negedge axis_clk);
       tdata <= value; tuser <= sof; tlast <= eol; tvalid <= 1;
-      while (tready !== 1'b1) @(negedge axis_clk);
+      /* tready may depend on tuser: sample it after this beat settles. */
+      #1;
+      while (tready !== 1'b1) begin
+        @(negedge axis_clk); #1;
+      end
       @(posedge axis_clk); #1;
       @(negedge axis_clk); tvalid <= 0; tuser <= 0; tlast <= 0;
     end
@@ -185,10 +189,29 @@ module video_overlay_linebuffer_tb;
     line(0, 1);
     check_line(0);
 
-    /* If the producer wraps while a later line is requested, the SOF beat
-     * itself must become word zero of line zero (not land in the old bank). */
+    /* The VDMA restarts at vblank while a later row is still being read;
+     * the firmware commits the next generation just after. The SOF beat
+     * must be held, not consumed under the old generation, so the new
+     * generation's first row comes from that same beat. */
     request_line(3);
-    line(0, 1); check_line(0);
+    @(negedge axis_clk);
+    tdata <= word_of(0, 0); tuser <= 1; tlast <= 0; tvalid <= 1;
+    repeat (20) @(posedge axis_clk);
+    if (tready !== 1'b0) begin
+      $display("FAIL SOF accepted under the old generation while reading a later row");
+      failures = failures + 1;
+    end
+    generation = 100;
+    while (accepted_generation != 100) @(posedge pixel_clk);
+    request_line(0);
+    @(posedge axis_clk);
+    while (tready !== 1'b1) @(posedge axis_clk);
+    #1;
+    @(negedge axis_clk); tvalid <= 0; tuser <= 0;
+    beat(word_of(0, 1), 0, 0);
+    beat(word_of(0, 2), 0, 0);
+    beat(word_of(0, 3), 0, 1);
+    check_line(0);
 
     /* Wrap requests a fresh SOF.  Drain a stale tail first. */
     request_line(3);

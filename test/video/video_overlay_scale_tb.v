@@ -223,8 +223,11 @@ initial begin : overlay_vdma
         overlay_tuser <= (ol == 0 && ow == 0);
         overlay_tlast <= (ow == (src_w + 1) / 2 - 1);
         overlay_tvalid <= 1;
-        while (overlay_tready !== 1'b1 && !overlay_restart)
-          @(negedge aclk);
+        /* tready may depend on tuser: sample it after this beat settles. */
+        #1;
+        while (overlay_tready !== 1'b1 && !overlay_restart) begin
+          @(negedge aclk); #1;
+        end
         if (!overlay_restart) begin
           @(posedge aclk);
           ovl_beats = ovl_beats + 1;

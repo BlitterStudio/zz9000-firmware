@@ -241,8 +241,11 @@ initial begin : overlay_vdma
         overlay_tuser <= (ol == 0 && ow == 0);
         overlay_tlast <= (ow == (overlay_frame_width + 1) / 2 - 1);
         overlay_tvalid <= 1;
-        while (overlay_tready !== 1'b1 && !overlay_vblank_seen)
-          @(negedge aclk);
+        /* tready may depend on tuser: sample it after this beat settles. */
+        #1;
+        while (overlay_tready !== 1'b1 && !overlay_vblank_seen) begin
+          @(negedge aclk); #1;
+        end
         if (overlay_vblank_seen)
           overlay_frame_aborted = 1;
         else

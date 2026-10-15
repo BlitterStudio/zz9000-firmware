@@ -10,9 +10,10 @@
  * needing two whole rows inside one line. Bank ownership is explicit: the
  * pixel domain picks a bank that is empty or holds a row above the top row
  * on display (consumed_line), and the fetcher drains skipped producer rows
- * while tracking their real sequential row numbers. The VDMA frame-start
- * marker recovers a stopped/restarted or overrun stream at the next frame
- * instead of displaying source lines at the wrong vertical position.
+ * while tracking their real sequential row numbers. Only the VDMA
+ * frame-start marker starts row counting: a stream that was stopped and
+ * restarted is picked up at its SOF by the next generation, never
+ * displayed at the wrong vertical position.
  *
  * Every row is written to two copies, each split into even and odd
  * macropixel words, so one pixel clock reads macropixels k and k+1 of both
@@ -182,15 +183,13 @@ xpm_cdc_handshake #(
 );
 
 wire accept = s_axis_tvalid && s_axis_tready;
-wire unexpected_sof = accept && state == ST_READ_LINE && s_axis_tuser;
 wire storing_seek_zero = state == ST_SEEK_FRAME && s_axis_tuser &&
                          target_line == 0;
 wire storing_stream_line = state == ST_READ_LINE &&
-                           (unexpected_sof || stream_line == target_line);
+                           stream_line == target_line;
 wire stream_line_completed = accept && s_axis_tlast &&
                              (storing_seek_zero || storing_stream_line);
-wire [11:0] completed_line_value =
-  (storing_seek_zero || unexpected_sof) ? 12'b0 : stream_line;
+wire [11:0] completed_line_value = storing_seek_zero ? 12'b0 : stream_line;
 /* A repeated request for the row already loaded is answered from the bank
  * that holds it; the stream has moved past that row. */
 wire relabel_loaded_line = state == ST_WAIT_LINE && requested_line_pending &&
@@ -201,11 +200,19 @@ wire [3:0] write_enable = (accept && storing_stream_line && write_in_range)
 
 /* Do not let a newly restarted VDMA complete line zero before the pixel
  * domain has consumed the generation acknowledgement and invalidated the
- * prior frame's ready tags. */
+ * prior frame's ready tags.
+ *
+ * A frame start that arrives while a later row is still being read is the
+ * VDMA restarted at vblank, with the next generation about to follow (the
+ * firmware restarts the channel, then commits the generation). Hold it
+ * instead of consuming it under the old generation: the new generation's
+ * SOF search then takes this same beat. Consuming it would leave the new
+ * generation waiting a whole stream frame for the next SOF. */
 assign s_axis_tready = fetch_enable &&
                        fetch_generation == generation_sent &&
                        !await_zero_request &&
-                       (state == ST_SEEK_FRAME || state == ST_READ_LINE);
+                       (state == ST_SEEK_FRAME ||
+                        (state == ST_READ_LINE && !s_axis_tuser));
 
 always @(posedge axis_clk) begin
   if (!axis_resetn) begin
@@ -287,31 +294,18 @@ always @(posedge axis_clk) begin
       end
 
       ST_READ_LINE: begin
+        /* tready is low for an SOF beat here, so every accepted beat
+         * belongs to the current stream frame. */
         if (accept) begin
-          /* An unexpected SOF means the producer wrapped while recovery was
-           * pending. Preserve the established recovery contract: line zero
-           * becomes the completed row instead of being relabelled as the
-           * stale requested row. */
-          if (s_axis_tuser) begin
-            target_line <= 0;
-            stream_line <= 0;
-            write_addr <= 1;
-          end else if (stream_line == target_line) begin
+          if (stream_line == target_line)
             write_addr <= write_addr + 1'b1;
-          end
 
           if (s_axis_tlast) begin
             write_addr <= 0;
-            if (s_axis_tuser) begin
-              loaded_line <= 0;
-              stream_line <= 1;
-              state <= ST_WAIT_LINE;
-            end else if (stream_line == target_line) begin
+            stream_line <= stream_line + 1'b1;
+            if (stream_line == target_line) begin
               loaded_line <= stream_line;
-              stream_line <= stream_line + 1'b1;
               state <= ST_WAIT_LINE;
-            end else begin
-              stream_line <= stream_line + 1'b1;
             end
           end
         end
@@ -388,8 +382,7 @@ end
 wire [3:0] memory_we = (accept && storing_seek_zero)
                        ? s_axis_tkeep : write_enable;
 wire [ADDR_WIDTH-1:0] write_word =
-                       (state == ST_SEEK_FRAME || unexpected_sof)
-                         ? {ADDR_WIDTH{1'b0}} : write_addr;
+                       state == ST_SEEK_FRAME ? {ADDR_WIDTH{1'b0}} : write_addr;
 wire [ADDR_WIDTH+BANK_BITS-2:0] memory_write_addr =
                        {target_bank, write_word[ADDR_WIDTH-1:1]};
 
