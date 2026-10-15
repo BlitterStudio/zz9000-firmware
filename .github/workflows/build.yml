@@ -254,6 +254,13 @@ jobs:
           path: ZZ9000_proto.sdk/ZZ9000OS/build/deps
           key: codec-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build_zlib.sh', 'build_libpng.sh', 'build_libjpeg_turbo.sh', 'build_lzma_sdk.sh', 'build_libwebp.sh', 'build_dvd_codecs.sh', 'build_flac.sh', 'build_vorbis.sh', 'build_libvpx.sh', 'build_opus.sh', 'ZZ9000_proto.sdk/ZZ9000OS/src/sdk_webp_alloc.h', 'ZZ9000_proto.sdk/ZZ9000OS/src/sdk_flac_alloc.h', 'ZZ9000_proto.sdk/ZZ9000OS/src/sdk_vorbis_alloc.h', 'ZZ9000_proto.sdk/ZZ9000OS/src/webp/**') }}
 
+      # ZZTop offers an online update when the latest release tag is newer
+      # than the version the card reports; a tag that disagrees with
+      # REVISION_* would make every board offer the same update forever.
+      - name: Check tag matches firmware revision
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: sh util/check_release_version.sh "$GITHUB_REF_NAME"
+
       - name: Build firmware (ZZ9000OS.elf)
         run: ./build_firmware.sh
 
