@@ -11,7 +11,7 @@
  *    application loop consumes the request with take_request() and decides
  *    what plays next.
  *  - Live controls the engine applies without ending the item: pause,
- *    volume, fullscreen toggles, repeat/shuffle.
+ *    volume, the fullscreen video setting, repeat/shuffle.
  *  - "Now playing" text and position, written by engines and drawn by the
  *    player window, with dirty bits so the UI redraws only what changed.
  *
@@ -99,7 +99,9 @@ typedef struct ZZPlayController {
   int item_active;          /* an engine is playing an item */
   int paused;               /* what the user wants */
   int engine_paused;        /* what the engine confirms it is doing */
-  uint32_t fullscreen_toggles;
+  int fullscreen;           /* videos play fullscreen; a setting that
+                               outlives items, like repeat and shuffle */
+  int fullscreen_changed;   /* the playing video must follow it */
   ZZPlayRepeat repeat;
   int shuffle;
   uint32_t volume;          /* 0..ZZPLAY_VOLUME_MAX */
@@ -129,7 +131,8 @@ void zzplay_controller_init(ZZPlayController *ctl, uint32_t volume,
  *   SEEK_FORWARD/BACK  +-ZZPLAY_SEEK_STEP_MS from elapsed, only for an
  *                  active seekable item; back clamps at 0, forward past a
  *                  known end becomes NEXT
- *   TOGGLE_FULLSCREEN  counted only when the item has video
+ *   TOGGLE_FULLSCREEN  flip the fullscreen setting, idle or playing; a
+ *                  playing video is told to follow it
  * Returns 1 when the action changed anything. */
 int zzplay_controller_apply(ZZPlayController *ctl,
                             ZZPlayControlAction action);
@@ -145,6 +148,7 @@ void zzplay_controller_set_volume(ZZPlayController *ctl, uint32_t volume);
 void zzplay_controller_set_repeat(ZZPlayController *ctl,
                                   ZZPlayRepeat repeat);
 void zzplay_controller_set_shuffle(ZZPlayController *ctl, int shuffle);
+void zzplay_controller_set_fullscreen(ZZPlayController *ctl, int fullscreen);
 
 /* Any pending request ends the current item. */
 int zzplay_controller_item_should_end(const ZZPlayController *ctl);
@@ -163,8 +167,9 @@ void zzplay_controller_item_begin(ZZPlayController *ctl);
 /* The item ended: idle, unpaused, any modal pause released. */
 void zzplay_controller_item_end(ZZPlayController *ctl);
 void zzplay_controller_set_engine_paused(ZZPlayController *ctl, int paused);
-/* Consume one pending fullscreen toggle. */
-int zzplay_controller_take_fullscreen_toggle(ZZPlayController *ctl);
+/* Consume a fullscreen setting change made while this video plays; the
+ * engine then brings its presentation in line with ctl->fullscreen. */
+int zzplay_controller_take_fullscreen_change(ZZPlayController *ctl);
 /* Consume a volume change; returns 1 and the new volume when one is
  * pending. */
 int zzplay_controller_take_volume(ZZPlayController *ctl, uint32_t *volume);

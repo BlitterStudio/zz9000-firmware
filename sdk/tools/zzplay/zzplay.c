@@ -250,6 +250,10 @@ struct ZZPlayRuntime {
   uint16_t screen_w;
   uint16_t screen_h;
   uint8_t fullscreen;
+  /* Item teardown: hand a fullscreen screen to the app instead of closing
+   * it, so the next video in the playlist opens on it (see
+   * zzplay_app_keep_screen). */
+  uint8_t keep_screen;
   uint8_t present_known;
   uint8_t present_recheck;
   ZZPlayRect pip_requested;  /* video area the last PIP open asked for */
@@ -276,9 +280,65 @@ typedef struct ZZPlayApp {
   /* Private copy of the playing entry's path: playlist edits must not
    * free the path an engine is reading from. */
   char item_path[ZZPLAY_PLAYLIST_PATH_MAX];
+  /* The fullscreen screen between two videos: the item that used it has
+   * ended and the next one has not taken it yet. It holds its own
+   * Picasso96API reference, since every engine closes P96Base. */
+  struct Screen *video_screen;
+  struct Library *video_screen_p96;
 } ZZPlayApp;
 
 static ZZPlayApp app;
+
+/* Keep a fullscreen screen across the gap between two videos, so a
+ * fullscreen playlist never drops back to the Workbench between items.
+ * Returns 0 when it cannot be kept and must be closed now. */
+static int zzplay_app_keep_screen(struct Screen *screen)
+{
+  if (!screen || app.video_screen) {
+    return 0;
+  }
+  app.video_screen_p96 = OpenLibrary((CONST_STRPTR)"Picasso96API.library", 2U);
+  if (!app.video_screen_p96) {
+    return 0;
+  }
+  app.video_screen = screen;
+  return 1;
+}
+
+/* Give the kept screen to the item about to open fullscreen video on it.
+ * The engine has P96Base open, so the app's own reference goes. */
+static struct Screen *zzplay_app_take_screen(void)
+{
+  struct Screen *screen = app.video_screen;
+
+  if (!screen) {
+    return 0;
+  }
+  app.video_screen = 0;
+  CloseLibrary(app.video_screen_p96);
+  app.video_screen_p96 = 0;
+  return screen;
+}
+
+/* Back to the Workbench: nothing is going to present on the kept screen.
+ * A screen with no window on it would also take every key press, and a
+ * Workbench requester would open behind it. */
+static void zzplay_app_close_screen(void)
+{
+  struct Library *engine_base = P96Base;
+
+  if (!app.video_screen) {
+    return;
+  }
+  /* proto/Picasso96.h calls through the P96Base global, which no engine
+   * holds between items. */
+  P96Base = app.video_screen_p96;
+  p96CloseScreen(app.video_screen);
+  P96Base = engine_base;
+  CloseLibrary(app.video_screen_p96);
+  app.video_screen = 0;
+  app.video_screen_p96 = 0;
+}
 
 static uint32_t zzplay_elapsed_us(const TimeVal_Type *start,
                                   const TimeVal_Type *end);
@@ -349,6 +409,9 @@ static void zzplay_error(const struct ZZPlayRuntime *runtime,
   if (runtime && runtime->ctl) {
     zzplay_controller_set_message(runtime->ctl, text);
   }
+  /* An item that fails before it presents must not leave the previous
+   * video's screen hiding the message (or a modal requester). */
+  zzplay_app_close_screen();
   zzplay_launch_report_surface(&app.options, text);
 }
 
@@ -918,6 +981,14 @@ static int zzplay_open_video_screen(struct ZZPlayRuntime *runtime)
   if (runtime->screen) {
     return 1;
   }
+  /* The previous video in the playlist left its screen open: present on
+   * it rather than flash the Workbench by closing and reopening one. */
+  runtime->screen = zzplay_app_take_screen();
+  if (runtime->screen) {
+    (void)zzplay_resource_acquire(
+        &runtime->core.resources, ZZPLAY_RESOURCE_VIDEO_SCREEN);
+    return 1;
+  }
   /* Query the Workbench screen itself: runtime->window is gone during a
    * toggle and does not exist yet with -f. libnix opens graphics.library
    * at startup, as it does intuition.library. */
@@ -1078,6 +1149,9 @@ static int zzplay_open_pip_mode(struct ZZPlayRuntime *runtime,
     }
   } else {
     zzplay_close_video_screen(runtime);
+    /* Windowed after all (F before the first picture): a screen the
+     * previous video left open would hide this window. */
+    zzplay_app_close_screen();
     /* The dedicated screen just closed: re-read the public screen so
      * the windowed reopen's limits match the Workbench, not the
      * (smaller) fullscreen screen. A portrait frame is then fitted
@@ -1161,7 +1235,8 @@ static int zzplay_ensure_pip(struct ZZPlayRuntime *runtime)
   }
   /* A visible memory-window PIP exposes its key color until the first
    * formatter-backed frame arrives, so create it only at retirement. */
-  if (!zzplay_open_pip_mode(runtime, runtime->options.fullscreen ? 1 : 0)) {
+  if (!zzplay_open_pip_mode(runtime,
+                            runtime->ctl && runtime->ctl->fullscreen)) {
     return 0;
   }
   if (!runtime->audio_started) {
@@ -1216,6 +1291,19 @@ static int zzplay_toggle_fullscreen(struct ZZPlayRuntime *runtime)
     return 1;
   }
   return 0;
+}
+
+/* Bring the playing video in line with the fullscreen setting after the
+ * user changed it. Before the first picture there is no window yet, and
+ * zzplay_ensure_pip() opens it in the right mode. Returns 0 only when the
+ * video was left without a window. */
+static int zzplay_follow_fullscreen(struct ZZPlayRuntime *runtime)
+{
+  if (!zzplay_controller_take_fullscreen_change(runtime->ctl) ||
+      (runtime->fullscreen != 0U) == (runtime->ctl->fullscreen != 0)) {
+    return 1;
+  }
+  return zzplay_toggle_fullscreen(runtime);
 }
 
 /* Snap a user resize back to the source aspect (R7). */
@@ -2796,7 +2884,14 @@ static int zzplay_release_resource(void *user,
        * order guarantees it, since release runs from the highest index down
        * and the screen sits below the window. */
       if (runtime->screen) {
-        p96CloseScreen(runtime->screen);
+        /* Only an item's final teardown keeps it, and only while videos
+         * are still wanted fullscreen; the app closes it unless the next
+         * item presents on it. */
+        if (!(runtime->keep_screen && runtime->ctl &&
+              runtime->ctl->fullscreen &&
+              zzplay_app_keep_screen(runtime->screen))) {
+          p96CloseScreen(runtime->screen);
+        }
         runtime->screen = 0;
       }
       break;
@@ -3933,15 +4028,13 @@ playback_session:
           runtime.core.state == ZZPLAY_STATE_PAUSED);
       runtime.title_dirty = 1U;
     }
-    if (zzplay_controller_take_fullscreen_toggle(runtime.ctl)) {
-      if (!zzplay_toggle_fullscreen(&runtime)) {
-        zzplay_error(&runtime,
-                     "zzplay: cannot reopen the P96 PIP window "
-                     "(error %ld)\n", (long)runtime.pip_error);
-        zzplay_fail(&runtime, ZZPLAY_FAILURE_PIP,
-                    ZZ9K_STATUS_UNSUPPORTED);
-        break;
-      }
+    if (!zzplay_follow_fullscreen(&runtime)) {
+      zzplay_error(&runtime,
+                   "zzplay: cannot reopen the P96 PIP window "
+                   "(error %ld)\n", (long)runtime.pip_error);
+      zzplay_fail(&runtime, ZZPLAY_FAILURE_PIP,
+                  ZZ9K_STATUS_UNSUPPORTED);
+      break;
     }
     {
       uint32_t volume;
@@ -4310,6 +4403,10 @@ cleanup:
     zzplay_report_card_profile(&runtime);
   }
   zzplay_capture_audio_totals(&runtime);
+  /* A fullscreen screen outlives an item that played; the app decides
+   * whether the next item presents on it. A failed item gives it back, so
+   * its message is not hidden behind the next video. */
+  runtime.keep_screen = runtime.core.state != ZZPLAY_STATE_ERROR;
   cleanup_status = zzplay_resources_release_all(
       &runtime.core.resources, zzplay_release_resource, &runtime);
   if (runtime.core.state != ZZPLAY_STATE_ERROR &&
@@ -4617,9 +4714,7 @@ static ZZPlayEngineResult zzplay_engine_webp(const ZZPlayEngineRun *run)
     if (resized) {
       zzplay_apply_resize(&runtime);
     }
-    if (zzplay_controller_take_fullscreen_toggle(runtime.ctl)) {
-      (void)zzplay_toggle_fullscreen(&runtime);
-    }
+    (void)zzplay_follow_fullscreen(&runtime);
     if ((runtime.core.state == ZZPLAY_STATE_PAUSED) != (runtime.ctl->paused != 0)) {
       now_us = zzplay_now_us();
       if (runtime.ctl->paused) {
@@ -4727,6 +4822,7 @@ cleanup:
     staging.handle = 0U;
   }
   zzplay_close_pip(&runtime);
+  runtime.keep_screen = outcome != ZZPLAY_ENGINE_FAILED;
   zzplay_close_video_screen(&runtime);
   if (timer_open) {
     zzplay_timer_close(&runtime.timer);
@@ -4854,6 +4950,14 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   if (probed) {
     engine = zzplay_engine_for_kind(probe.kind);
   }
+  format = engine ? zzplay_format_for_kind(probe.kind) : 0;
+  /* Only a video about to play fullscreen presents on the screen the
+   * previous one left open; anything else (audio, an unplayable file, the
+   * setting just switched off) belongs on the Workbench. */
+  if (!format || (format->flags & ZZPLAY_FORMAT_HAS_VIDEO) == 0U ||
+      !app->ctl.fullscreen) {
+    zzplay_app_close_screen();
+  }
   if (!file) {
     zzplay_launch_reportf(&app->ctl, &app->options, "cannot open %s",
                           app->item_path);
@@ -4863,7 +4967,6 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
          "cannot play %s: not a supported MPEG Program Stream, WebM, MP3, FLAC, Ogg Vorbis or WebP animation file",
         app->item_path);
   } else {
-    format = zzplay_format_for_kind(probe.kind);
     /* A one-shot run shows only the video window; an audio-only item
      * opens the player window lazily, as the status window's
      * replacement, and keeps it until exit. */
@@ -4885,6 +4988,12 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     run.pump_user = app;
     app->start_seek_ms = 0U;
     outcome = engine(&run);
+    /* Some failures (an animation the card cannot take, say) end the item
+     * before it opens a window or reports anything: the screen the
+     * previous video left must not go on covering the player. */
+    if (outcome == ZZPLAY_ENGINE_FAILED) {
+      zzplay_app_close_screen();
+    }
   }
   /* A pending request outranks whatever the engine reported; consume it
    * before item_end clears the per-item state. */
@@ -4944,6 +5053,8 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
  * strand an operation that became runnable during item teardown. */
 static ZZPlayAppStep zzplay_app_idle(ZZPlayApp *app)
 {
+  /* Stopped, or the list ran out: show the player, not an empty screen. */
+  zzplay_app_close_screen();
   for (;;) {
     ZZPlayRequest request;
     int32_t jump_index = 0;
@@ -5071,6 +5182,7 @@ static int zzplay_app_run(ZZPlayApp *app)
         break;
     }
   }
+  zzplay_app_close_screen();
   if (step == ZZPLAY_APP_QUIT) {
     return 0;
   }
@@ -5135,11 +5247,13 @@ int main(int argc, char **argv)
     }
     zzplay_controller_init(&app.ctl, app.prefs.volume, repeat,
                            app.prefs.shuffle);
+    zzplay_controller_set_fullscreen(&app.ctl, app.prefs.fullscreen);
   }
   app.started_prefs = app.prefs;
   app.started_prefs.volume = app.ctl.volume;
   app.started_prefs.repeat = app.ctl.repeat;
   app.started_prefs.shuffle = app.ctl.shuffle;
+  app.started_prefs.fullscreen = app.ctl.fullscreen;
 
   zzplay_playlist_init(&app.playlist);
   for (i = 0U; i < app.options.path_count; i++) {
@@ -5203,14 +5317,16 @@ int main(int argc, char **argv)
     }
   }
   if (!app.player_mode) {
-    /* A one-shot run plays its list once, in order: remembered repeat
-     * and shuffle belong to the desktop player, and only this launch's
-     * LOOP may repeat a file. Also covers a player whose window failed. */
+    /* A one-shot run plays its list once, in order: remembered repeat,
+     * shuffle and fullscreen belong to the desktop player, and only this
+     * launch's LOOP may repeat a file and FULLSCREEN fill the screen.
+     * Also covers a player whose window failed. */
     zzplay_controller_set_repeat(
         &app.ctl, app.options.loop_mode == ZZPLAY_LOOP_FOREVER
                       ? ZZPLAY_REPEAT_ONE
                       : ZZPLAY_REPEAT_OFF);
     zzplay_controller_set_shuffle(&app.ctl, 0);
+    zzplay_controller_set_fullscreen(&app.ctl, app.options.fullscreen);
     zzplay_playlist_set_repeat(&app.playlist, app.ctl.repeat);
     zzplay_playlist_set_shuffle(&app.playlist, 0, 0U);
   }
@@ -5224,6 +5340,7 @@ int main(int argc, char **argv)
     app.prefs.volume = app.ctl.volume;
     app.prefs.repeat = app.ctl.repeat;
     app.prefs.shuffle = app.ctl.shuffle;
+    app.prefs.fullscreen = app.ctl.fullscreen;
     zzplay_prefs_settle_session(&app.prefs, &app.stored_prefs,
                                 &app.started_prefs);
     (void)zzplay_prefs_save_session(&app.prefs,

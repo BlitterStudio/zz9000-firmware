@@ -459,6 +459,12 @@ static void update_menu_checks(void)
         } else {
           item->Flags &= ~CHECKED;
         }
+      } else if (id == MID_FULLSCREEN) {
+        if (gui_context->controller->fullscreen) {
+          item->Flags |= CHECKED;
+        } else {
+          item->Flags &= ~CHECKED;
+        }
       }
       if (item->SubItem) {
         struct MenuItem *sub;
@@ -1337,7 +1343,7 @@ int zzplay_gui_open(const ZZPlayGuiContext *context)
     { NM_SUB,   (CONST_STRPTR)"Track",         0, CHECKIT, 5, (APTR)MID_REPEAT_TRACK },
     { NM_SUB,   (CONST_STRPTR)"All",           0, CHECKIT, 3, (APTR)MID_REPEAT_ALL },
     { NM_ITEM,  (CONST_STRPTR)"Shuffle",       0, CHECKIT | MENUTOGGLE, 0, (APTR)MID_SHUFFLE },
-    { NM_ITEM,  (CONST_STRPTR)"Fullscreen video", (CONST_STRPTR)"F", 0, 0, (APTR)MID_FULLSCREEN },
+    { NM_ITEM,  (CONST_STRPTR)"Fullscreen video", (CONST_STRPTR)"F", CHECKIT | MENUTOGGLE, 0, (APTR)MID_FULLSCREEN },
 
     { NM_END, 0, 0, 0, 0, 0 }
   };
@@ -2135,7 +2141,11 @@ void zzplay_gui_poll(void)
                   break;
 
                 case MID_FULLSCREEN:
-                  zzplay_controller_apply(ctl, ZZPLAY_CONTROL_TOGGLE_FULLSCREEN);
+                  {
+                    int full = (item->Flags & CHECKED) ? 1 : 0;
+                    zzplay_controller_set_fullscreen(ctl, full);
+                    if (prefs) prefs->fullscreen = full;
+                  }
                   break;
 
                 default:

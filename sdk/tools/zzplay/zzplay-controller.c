@@ -147,6 +147,24 @@ void zzplay_controller_set_shuffle(ZZPlayController *ctl, int shuffle)
   }
 }
 
+void zzplay_controller_set_fullscreen(ZZPlayController *ctl, int fullscreen)
+{
+  int norm;
+
+  if (!ctl) {
+    return;
+  }
+  norm = fullscreen ? 1 : 0;
+  if (ctl->fullscreen == norm) {
+    return;
+  }
+  ctl->fullscreen = norm;
+  ctl->dirty |= ZZPLAY_DIRTY_STATE;
+  if (ctl->item_active && ctl->now.has_video) {
+    ctl->fullscreen_changed = 1;
+  }
+}
+
 int zzplay_controller_apply(ZZPlayController *ctl,
                             ZZPlayControlAction action)
 {
@@ -225,11 +243,8 @@ int zzplay_controller_apply(ZZPlayController *ctl,
     }
 
   case ZZPLAY_CONTROL_TOGGLE_FULLSCREEN:
-    if (ctl->item_active && ctl->now.has_video) {
-      ctl->fullscreen_toggles++;
-      return 1;
-    }
-    return 0;
+    zzplay_controller_set_fullscreen(ctl, !ctl->fullscreen);
+    return 1;
 
   case ZZPLAY_CONTROL_NONE:
   default:
@@ -273,7 +288,7 @@ void zzplay_controller_item_begin(ZZPlayController *ctl)
   ctl->item_active = 1;
   ctl->paused = 0;
   ctl->engine_paused = 0;
-  ctl->fullscreen_toggles = 0U;
+  ctl->fullscreen_changed = 0;
 
   ctl->now.elapsed_ms = 0U;
   ctl->now.total_ms = 0U;
@@ -311,12 +326,12 @@ void zzplay_controller_set_engine_paused(ZZPlayController *ctl, int paused)
   ctl->engine_paused = paused ? 1 : 0;
 }
 
-int zzplay_controller_take_fullscreen_toggle(ZZPlayController *ctl)
+int zzplay_controller_take_fullscreen_change(ZZPlayController *ctl)
 {
-  if (!ctl || ctl->fullscreen_toggles == 0U) {
+  if (!ctl || !ctl->fullscreen_changed) {
     return 0;
   }
-  ctl->fullscreen_toggles--;
+  ctl->fullscreen_changed = 0;
   return 1;
 }
 

@@ -42,6 +42,7 @@ void zzplay_prefs_defaults(ZZPlayPrefs *prefs)
   prefs->volume = 100U;
   prefs->repeat = ZZPLAY_REPEAT_OFF;
   prefs->shuffle = 0;
+  prefs->fullscreen = 0;
   prefs->preload = 0U;
   prefs->window_left = -1;
   prefs->window_top = -1;
@@ -79,6 +80,21 @@ static int zzplay_parse_int(const char *str, int *val)
   }
   *val = (int)v;
   return 1;
+}
+
+static int zzplay_prefs_parse_flag(const char *val, int *flag)
+{
+  if (zzplay_prefs_case_eq(val, "YES") || zzplay_prefs_case_eq(val, "1") ||
+      zzplay_prefs_case_eq(val, "TRUE")) {
+    *flag = 1;
+    return 1;
+  }
+  if (zzplay_prefs_case_eq(val, "NO") || zzplay_prefs_case_eq(val, "0") ||
+      zzplay_prefs_case_eq(val, "FALSE")) {
+    *flag = 0;
+    return 1;
+  }
+  return 0;
 }
 
 uint32_t zzplay_prefs_parse(ZZPlayPrefs *prefs, const char *text,
@@ -235,14 +251,11 @@ uint32_t zzplay_prefs_parse(ZZPlayPrefs *prefs, const char *text,
         accepted++;
       }
     } else if (zzplay_prefs_case_eq(key, "SHUFFLE")) {
-      if (zzplay_prefs_case_eq(val, "YES") || zzplay_prefs_case_eq(val, "1") ||
-          zzplay_prefs_case_eq(val, "TRUE")) {
-        prefs->shuffle = 1;
+      if (zzplay_prefs_parse_flag(val, &prefs->shuffle)) {
         accepted++;
-      } else if (zzplay_prefs_case_eq(val, "NO") ||
-                 zzplay_prefs_case_eq(val, "0") ||
-                 zzplay_prefs_case_eq(val, "FALSE")) {
-        prefs->shuffle = 0;
+      }
+    } else if (zzplay_prefs_case_eq(key, "FULLSCREEN")) {
+      if (zzplay_prefs_parse_flag(val, &prefs->fullscreen)) {
         accepted++;
       }
     } else if (zzplay_prefs_case_eq(key, "WINDOW")) {
@@ -321,6 +334,7 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
       "VOLUME=%u\n"
       "REPEAT=%s\n"
       "SHUFFLE=%s\n"
+      "FULLSCREEN=%s\n"
       "PRELOAD=%s\n"
       "WINDOW=%d,%d\n"
       "DRAWER=%s\n",
@@ -331,6 +345,7 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
       prefs->volume,
       zzplay_prefs_repeat_name(prefs->repeat),
       prefs->shuffle ? "YES" : "NO",
+      prefs->fullscreen ? "YES" : "NO",
       prefs->preload ? "YES" : "NO",
       (int)prefs->window_left, (int)prefs->window_top,
       prefs->last_drawer);
@@ -432,6 +447,7 @@ void zzplay_prefs_copy_session(ZZPlayPrefs *to, const ZZPlayPrefs *from)
   to->volume = from->volume;
   to->repeat = from->repeat;
   to->shuffle = from->shuffle;
+  to->fullscreen = from->fullscreen;
   to->window_left = from->window_left;
   to->window_top = from->window_top;
   strncpy(to->last_drawer, from->last_drawer, sizeof(to->last_drawer) - 1U);
@@ -466,6 +482,9 @@ void zzplay_prefs_settle_session(ZZPlayPrefs *session,
   if (session->shuffle == started->shuffle) {
     session->shuffle = stored->shuffle;
   }
+  if (session->fullscreen == started->fullscreen) {
+    session->fullscreen = stored->fullscreen;
+  }
 }
 
 void zzplay_prefs_apply_options(ZZPlayPrefs *prefs,
@@ -484,6 +503,9 @@ void zzplay_prefs_apply_options(ZZPlayPrefs *prefs,
   }
   if (options->volume >= 0 && options->volume <= 100) {
     prefs->volume = (uint32_t)options->volume;
+  }
+  if (options->fullscreen) {
+    prefs->fullscreen = 1;
   }
 }
 
