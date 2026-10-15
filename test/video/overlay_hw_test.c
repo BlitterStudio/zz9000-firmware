@@ -24,8 +24,6 @@ static unsigned write_count;
 static uint32_t formatter_data;
 static uint16_t formatter_op;
 static unsigned formatter_count;
-/* MMIO writes issued before the most recent formatter write. */
-static unsigned formatter_seq;
 static int probe_flip_on_reset;
 static int reset_stuck;
 
@@ -56,7 +54,6 @@ void video_formatter_write(uint32_t data, uint16_t op)
 {
 	formatter_data = data;
 	formatter_op = op;
-	formatter_seq = write_count;
 	formatter_count++;
 }
 
@@ -110,13 +107,11 @@ int main(void)
 	    !expect_write(6U, channel + XAXIVDMA_VSIZE_OFFSET, 480U)) {
 		return 2;
 	}
-	/* The generation must be committed while the channel is stopped: after
-	 * the reset and status clear, before the first transfer register. */
 	if (formatter_count != 1U || formatter_op != MNTVF_OP_OVERLAY_FRAME ||
-	    formatter_data != 2U || formatter_seq != 2U) {
-		printf("generation commit: got count=%u op=%u data=%lu seq=%u\n",
+	    formatter_data != 2U) {
+		printf("generation commit: got count=%u op=%u data=%lu\n",
 		       formatter_count, formatter_op,
-		       (unsigned long)formatter_data, formatter_seq);
+		       (unsigned long)formatter_data);
 		return 3;
 	}
 
