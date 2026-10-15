@@ -4403,9 +4403,10 @@ cleanup:
     zzplay_report_card_profile(&runtime);
   }
   zzplay_capture_audio_totals(&runtime);
-  /* A fullscreen screen outlives the item; the app decides whether the
-   * next item presents on it. */
-  runtime.keep_screen = 1U;
+  /* A fullscreen screen outlives an item that played; the app decides
+   * whether the next item presents on it. A failed item gives it back, so
+   * its message is not hidden behind the next video. */
+  runtime.keep_screen = runtime.core.state != ZZPLAY_STATE_ERROR;
   cleanup_status = zzplay_resources_release_all(
       &runtime.core.resources, zzplay_release_resource, &runtime);
   if (runtime.core.state != ZZPLAY_STATE_ERROR &&
@@ -4821,7 +4822,7 @@ cleanup:
     staging.handle = 0U;
   }
   zzplay_close_pip(&runtime);
-  runtime.keep_screen = 1U;
+  runtime.keep_screen = outcome != ZZPLAY_ENGINE_FAILED;
   zzplay_close_video_screen(&runtime);
   if (timer_open) {
     zzplay_timer_close(&runtime.timer);
