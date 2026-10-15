@@ -299,7 +299,7 @@ enum ZZ9KCapability {
    * capability word until the on-hardware verification session
    * qualifies them, per the ZZ9K_CAP_AUDIO_CONTROL (R12) discipline. */
   ZZ9K_CAP_AUDIO_FABRIC = 1U << 27,
-  /* Codec capability flags for FLAC and Vorbis backends (unadvertised until qualified). */
+  /* Codec capability flags for the FLAC and Vorbis audio-stream backends. */
   ZZ9K_CAP_AUDIO_FLAC = 1U << 28,
   ZZ9K_CAP_AUDIO_VORBIS = 1U << 29,
   /* Zorro III: card-only allocations for preloaded media input. */
@@ -396,7 +396,7 @@ enum ZZ9KServiceFlags {
   ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE = 1U << 23,
   /* Per-session SDK stream attenuation through the fabric pump. */
   ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN = 1U << 24,
-  /* Stream capability flags for FLAC and Vorbis backends (unadvertised until qualified). */
+  /* Stream capability flags for the FLAC and Vorbis backends. */
   ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM = 1U << 25,
   ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM = 1U << 26,
 
@@ -412,8 +412,8 @@ enum ZZ9KServiceFlags {
   ZZ9K_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ = 1U << 24,
   ZZ9K_SERVICE_FLAG_VIDEO_PCM_RING_STATUS = 1U << 25,
   ZZ9K_SERVICE_FLAG_VIDEO_AUDIO_BIND = 1U << 26,
-  /* WebM backends. Implemented, advertised only by the qualification
-   * flavor (ZZ9000_QUALIFY_UNADVERTISED), same discipline as WebP/FLAC. */
+  /* WebM backends: VP8/VP9 video with Opus or Vorbis audio, also used for
+   * those codecs in Matroska. */
   ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8 = 1U << 27,
   ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9 = 1U << 28,
   ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS = 1U << 29,
@@ -446,10 +446,9 @@ enum ZZ9KServiceFlags {
   ZZ9K_SERVICE_FLAG_CRYPTO_P256_KEYGEN = 1U << 21
 };
 
-/* MPEG-2 video in Program Stream (.mpg/.vob) files, with AC-3, LPCM or MP2
- * audio decoded on the card. Advertised only by the qualification flavor
- * until it passes hardware qualification. Bit 31
- * does not fit an int enumerator in strict C, so it is a macro. */
+/* MPEG-2 video in Program Stream (.mpg/.vob) and Matroska files, with
+ * AC-3, LPCM or MP2 audio decoded on the card. Bit 31 does not fit an int
+ * enumerator in strict C, so it is a macro. */
 #define ZZ9K_SERVICE_FLAG_VIDEO_MPEG2 0x80000000UL
 
 enum ZZ9KAudioSampleFormat {

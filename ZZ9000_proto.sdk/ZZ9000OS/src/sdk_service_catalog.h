@@ -29,33 +29,6 @@ struct SDKServiceDescriptor {
 	const char *name;
 };
 
-/*
- * Hardware qualification flavor. WebP, FLAC, Ogg Vorbis, WebM
- * (VP8/VP9 + Opus/Vorbis) and MPEG-2 Program Stream (with AC-3/LPCM/MP2)
- * are implemented but stay unadvertised in release
- * firmware until they pass physical Z2/Z3 qualification. A firmware built
- * with EXTRA_CFLAGS=-DZZ9000_QUALIFY_UNADVERTISED advertises their service
- * flags so the shipped clients exercise them on real hardware. Never
- * package that flavor as a release.
- */
-#ifdef ZZ9000_QUALIFY_UNADVERTISED
-#define SDK_QUALIFY_IMAGE_FLAGS \
-	(SDK_SERVICE_FLAG_IMAGE_WEBP | SDK_SERVICE_FLAG_IMAGE_WEBP_ANIMATION)
-#define SDK_QUALIFY_AUDIO_FLAGS \
-	(SDK_SERVICE_FLAG_AUDIO_FLAC_STREAM | \
-	 SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM)
-#define SDK_QUALIFY_VIDEO_FLAGS \
-	(SDK_SERVICE_FLAG_VIDEO_WEBM_VP8 | \
-	 SDK_SERVICE_FLAG_VIDEO_WEBM_VP9 | \
-	 SDK_SERVICE_FLAG_VIDEO_MEDIA_OPUS | \
-	 SDK_SERVICE_FLAG_VIDEO_MEDIA_VORBIS | \
-	 SDK_SERVICE_FLAG_VIDEO_MPEG2)
-#else
-#define SDK_QUALIFY_IMAGE_FLAGS 0U
-#define SDK_QUALIFY_AUDIO_FLAGS 0U
-#define SDK_QUALIFY_VIDEO_FLAGS 0U
-#endif
-
 static const struct SDKServiceDescriptor sdk_services[] = {
 	{
 		.service_id = SDK_SERVICE_CORE,
@@ -101,7 +74,8 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA |
 			SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT |
 			SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565 |
-			SDK_QUALIFY_IMAGE_FLAGS,
+			SDK_SERVICE_FLAG_IMAGE_WEBP |
+			SDK_SERVICE_FLAG_IMAGE_WEBP_ANIMATION,
 		.opcode_base = SDK_SERVICE_IMAGE,
 		.opcode_count = 12,
 		.name = "image"
@@ -134,7 +108,8 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		.version = 0x00020001U,
 		.capability_bits = SDK_CAP_AUDIO_DECODE | SDK_CAP_AUDIO_PLAYBACK |
 			SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING |
-			SDK_CAP_AUDIO_FABRIC,
+			SDK_CAP_AUDIO_FABRIC | SDK_CAP_AUDIO_FLAC |
+			SDK_CAP_AUDIO_VORBIS,
 		.flags = SDK_SERVICE_FLAG_FIRMWARE |
 			SDK_SERVICE_FLAG_AUDIO_MP3_DECODE |
 			SDK_SERVICE_FLAG_AUDIO_MP3_STREAM |
@@ -142,12 +117,8 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_AUDIO_FABRIC |
 			SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE |
 			SDK_SERVICE_FLAG_AUDIO_STREAM_GAIN |
-			SDK_QUALIFY_AUDIO_FLAGS,
-		/* SDK_SERVICE_FLAG_AUDIO_FLAC_STREAM (BeginEx FLAC, U7) and
-		 * SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM (BeginEx Ogg Vorbis, U8)
-		 * are implemented but advertised only by the qualification
-		 * flavor above; SDK_CAP_AUDIO_FLAC/VORBIS stay off until
-		 * physical Z2/Z3 qualification. */
+			SDK_SERVICE_FLAG_AUDIO_FLAC_STREAM |
+			SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM,
 		.opcode_base = SDK_SERVICE_AUDIO,
 		.opcode_count = 23,	/* 0x0500..0x0516 incl. audio control plane,
 			 * fabric lease plane (0x0512-0x0514; 0x050f..0x0511
@@ -194,7 +165,11 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_VIDEO_EXPLICIT_PRESENT |
 			SDK_SERVICE_FLAG_VIDEO_TIMELINE_90KHZ |
 			SDK_SERVICE_FLAG_VIDEO_PCM_RING_STATUS |
-			SDK_QUALIFY_VIDEO_FLAGS,
+			SDK_SERVICE_FLAG_VIDEO_WEBM_VP8 |
+			SDK_SERVICE_FLAG_VIDEO_WEBM_VP9 |
+			SDK_SERVICE_FLAG_VIDEO_MEDIA_OPUS |
+			SDK_SERVICE_FLAG_VIDEO_MEDIA_VORBIS |
+			SDK_SERVICE_FLAG_VIDEO_MPEG2,
 		.opcode_base = SDK_SERVICE_VIDEO,
 		.opcode_count = 14,
 		.name = "video"

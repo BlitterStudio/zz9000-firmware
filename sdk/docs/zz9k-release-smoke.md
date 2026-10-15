@@ -150,8 +150,7 @@ default shared heap are Zorro III diagnostics.
    follows its ID3v2 tag. The recognition hook does not scan for a later frame.
    See [zz9k-sound-datatype.md](zz9k-sound-datatype.md).
 
-8. Check optional FLAC and Ogg Vorbis descriptors when the matched firmware
-   advertises their audio-stream flags.
+8. Check the FLAC and Ogg Vorbis descriptors.
 
    ```text
    copy Storage/DataTypes/ZZ9000-FLAC#? TO DEVS:DataTypes/
@@ -166,9 +165,8 @@ default shared heap are Zorro III diagnostics.
    **Expected pass signal:** `AddDataTypes LIST` routes `ZZ9000-FLAC` and
    `ZZ9000-OggVorbis` to `zz9k-sound.datatype`; Ogg Opus and Ogg-FLAC are not
    claimed. Firmware without the required `FLAC_STREAM` or `VORBIS_STREAM`
-   capability refuses the accelerated path with `ERROR_NOT_IMPLEMENTED`.
-   Current firmware leaves these capabilities unadvertised pending physical
-   qualification, so refusal is the expected observation for that firmware.
+   capability (releases older than the one that advertises them) refuses the
+   accelerated path with `ERROR_NOT_IMPLEMENTED`.
 
 9. Check audio decoding and output.
 
