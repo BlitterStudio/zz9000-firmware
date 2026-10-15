@@ -583,14 +583,14 @@ and destination mode; use the generic ARM scaler for PNG fit/upscale behavior.
 `jpeg-direct-bgra`, `jpeg-scaling`, `png-direct-bgra`, `scale-bilinear`,
 `scale-clipped`, `streaming-input`, `tile-output`, and `framebuffer-output`.
 
-#### WebP firmware development contract (unadvertised)
+#### WebP decoding
 
-Codec ID `ZZ9K_IMAGE_CODEC_WEBP = 4` and image-service flag
-`ZZ9K_SERVICE_FLAG_IMAGE_WEBP = 1U << 28` are reserved. Firmware contains a
-libwebp 1.6.0 decoder, but does **not** advertise the flag. Public image helpers,
-picture.datatype, and zz9k-view now support WebP client integration (gated by
-`ZZ9K_SERVICE_FLAG_IMAGE_WEBP`). ZZPlay timed animation playback follows in U2b.
-Do not infer support from the codec constant or generic image-decode capability alone.
+Codec ID `ZZ9K_IMAGE_CODEC_WEBP = 4` is gated by the image-service flag
+`ZZ9K_SERVICE_FLAG_IMAGE_WEBP = 1U << 28`. Firmware decodes with libwebp
+1.6.0. Public image helpers, picture.datatype, zz9k-view and ZZPlay use it
+when the flag is advertised; older firmware does not advertise it. Do not
+infer support from the codec constant or generic image-decode capability
+alone.
 
 The internal image-session path accepts lossy/lossless WebP and alpha. Animated
 input produces the first fully composited canvas, including frame offsets and
@@ -626,14 +626,14 @@ playback contract. No existing opcode, payload layout or LVO changes.
 - Completed output, error and close release decoder allocations; a core-1 fault
   poisons the session and reclaims tracked blocks without stale destructors.
 
-Physical Z2/Z3 memory, cache-coherence and throughput qualification, client
-integration, and distribution notices are release gates before advertising WebP.
+Firmware older than the release that advertises the flag lacks WebP, so a
+missing flag is a clean decline.
 
 The clipped scaler requires `ZZ9K_LIBRARY_MIN_REVISION_SCALE_IMAGE_CLIPPED` in addition to `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_CLIPPED`.
 
 ### Animation frames
 
-When the image service advertises `ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION`, the resident frame LVOs `ZZ9KImageAnimationFrameNext()`, `ZZ9KImageAnimationFramePresent()`, `ZZ9KImageAnimationFrameRetire()`, and `ZZ9KImageAnimationRestart()` control timed WebP frames. Require `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION`. The WebP contract below remains unadvertised until physical qualification.
+When the image service advertises `ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION`, the resident frame LVOs `ZZ9KImageAnimationFrameNext()`, `ZZ9KImageAnimationFramePresent()`, `ZZ9KImageAnimationFrameRetire()`, and `ZZ9KImageAnimationRestart()` control timed WebP frames. Require `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION`.
 
 ### Image Tool Smoke Tests
 
@@ -847,9 +847,7 @@ the video clock, so a client can catch up without holding audio behind video.
 `ZZ9K_VIDEO_CODEC_VP9`, and audio `ZZ9K_MEDIA_AUDIO_NONE`,
 `ZZ9K_MEDIA_AUDIO_OPUS`, or `ZZ9K_MEDIA_AUDIO_VORBIS`; gated by
 `ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP8`, `ZZ9K_SERVICE_FLAG_VIDEO_WEBM_VP9`,
-`ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS`, and `ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS`;
-these flags are unadvertised in release firmware until qualified, same
-discipline as WebP/FLAC).
+`ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS`, and `ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS`).
 
 The card accepts any frame size up to a safety cap: longest side &le; 1920
 and pixel count &le; 1920&times;1088 (2,088,960), in either orientation
@@ -925,9 +923,9 @@ shared-memory streaming state machine (`ZZ9KAudioStreamFeed()`,
 | Cleanup | Close reclaims decoder allocations and invalidates the session handle. A mailbox reset or firmware restart invalidates every active session. |
 
 #### Native FLAC sessions (`ZZ9K_AUDIO_CODEC_FLAC`, gated by
-`ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM`; both that flag and `ZZ9K_CAP_AUDIO_FLAC`
-stay unadvertised until physical qualification, so clients refuse FLAC on
-current firmware). Feed the whole native file from byte 0 (`fLaC`);
+`ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM` and `ZZ9K_CAP_AUDIO_FLAC`; firmware
+that does not advertise them refuses FLAC). Feed the whole native file from
+byte 0 (`fLaC`);
 firmware skips non-STREAMINFO metadata itself. `output_format` must be
 `S16BE` (sources of at most 16 bits), `S16LE` (the little-endian form of
 that 16-bit container; a deeper source is narrowed to the top 16 bits of
@@ -957,9 +955,9 @@ and the result fields match an MP3 session. 11025 is converted in 40 ms
 quanta because 20 ms is not an integer frame count.
 
 #### Ogg Vorbis sessions (`ZZ9K_AUDIO_CODEC_VORBIS`, gated by
-`ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM`; both that flag and
-`ZZ9K_CAP_AUDIO_VORBIS` stay unadvertised until physical qualification, so
-clients refuse Vorbis on current firmware). Feed the whole `.ogg`/`.oga` file
+`ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM` and `ZZ9K_CAP_AUDIO_VORBIS`;
+firmware that does not advertise them refuses Vorbis). Feed the whole
+`.ogg`/`.oga` file
 from byte 0 (the identification BOS page). `output_format` must be `S16BE`
 or `S16LE` (Tremor's fixed-point output narrowed to 16 bits, stored in the
 requested byte order); 32-bit formats answer `ZZ9K_STATUS_UNSUPPORTED` at

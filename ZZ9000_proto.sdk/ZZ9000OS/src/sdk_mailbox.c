@@ -74,7 +74,7 @@
 	 SDK_CAP_VIDEO_DECODE | \
 	 SDK_CAP_MEDIA_SESSION | SDK_CAP_AUDIO_STREAM_DRAIN | \
 	 SDK_CAP_AUDIO_CONTROL | SDK_CAP_AUDIO_METERING | \
-	 SDK_CAP_AUDIO_FABRIC)
+	 SDK_CAP_AUDIO_FABRIC | SDK_CAP_AUDIO_FLAC | SDK_CAP_AUDIO_VORBIS)
 /* Decode proceeds only with at least this much undecoded input (unless
  * EOF): enough for the largest legal MP3 frame (~1.4K, 2.3K free-format)
  * plus sync lookahead. It must stay WELL below any client's input-ring
