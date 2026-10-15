@@ -64,18 +64,21 @@ typedef struct ZZPlayFullscreenPlan {
   uint32_t mode_id;      /* DisplayID to open when action == ZZPLAY_FS_REUSE_MODE */
   uint16_t width;        /* Width to request when action == ZZPLAY_FS_MATCH_WB_RES */
   uint16_t height;       /* Height to request when action == ZZPLAY_FS_MATCH_WB_RES */
-  uint16_t target_depth; /* Depth to open screen at (15, 16, or 32) */
+  uint16_t target_depth; /* Depth to open screen at (15, 16, 24 or 32) */
 } ZZPlayFullscreenPlan;
 
-/* True when depth is supported natively by the overlay (15, 16, or 32 bit). */
+/* True when the overlay can show a PIP on a screen of this depth: 15/16-bit
+ * hicolor or truecolor. Picasso96 reports a 32-bit truecolor screen as
+ * depth 24 or 32. */
 int zzplay_geometry_depth_is_supported(uint16_t depth);
 
 /* True when screen width and height are pixel-doubled by ZZ9000.card (<640x480). */
 int zzplay_geometry_is_doubled(uint16_t width, uint16_t height);
 
 /* Decide how fullscreen should open based on the Workbench display mode and depth.
- * - Usable 15, 16, or 32-bit mode: reuse wb_mode_id and depth directly (no monitor resync).
- * - 8-bit or unaccelerated depth: match Workbench width and height at 16-bit depth.
+ * - Usable hicolor or truecolor mode: reuse wb_mode_id at the depth the
+ *   Workbench reports (no monitor resync).
+ * - 8-bit or other depth: match Workbench width and height at 16-bit depth.
  * - Pixel-doubled (<640x480) or invalid mode: fallback to the request ladder. */
 void zzplay_geometry_fullscreen_plan(uint32_t wb_mode_id,
                                      uint16_t wb_width,

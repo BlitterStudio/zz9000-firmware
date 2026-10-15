@@ -180,7 +180,7 @@ them to the playlist.
 
 Fullscreen uses a dedicated screen and preserves the video's aspect ratio,
 scaling up or down to fit the screen. When the Workbench display mode is
-usable (15, 16, or 32-bit depth, not pixel-doubled), fullscreen opens in that
+usable (15/16-bit or truecolor, not pixel-doubled), fullscreen opens in that
 same display mode without changing output resolution or refresh rate. An 8-bit
 (CLUT) Workbench switches depth only, opening at the Workbench's resolution in
 16-bit. If the mode cannot be opened or the Workbench mode is pixel-doubled,

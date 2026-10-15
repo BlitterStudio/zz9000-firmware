@@ -265,6 +265,13 @@ static int test_fullscreen_plan_reuse_modes(void)
   if (plan.mode_id != 0x50003000UL) return 8;
   if (plan.target_depth != 32U) return 9;
 
+  /* Truecolor Workbench reported as depth 24 (Picasso96 reports a
+   * 32-bit screen this way): reuse it at the depth it reports. */
+  zzplay_geometry_fullscreen_plan(0x50003001UL, 1280U, 720U, 24U, &plan);
+  if (plan.action != ZZPLAY_FS_REUSE_MODE) return 10;
+  if (plan.mode_id != 0x50003001UL) return 11;
+  if (plan.target_depth != 24U) return 12;
+
   return 0;
 }
 
@@ -284,8 +291,8 @@ static int test_fullscreen_plan_8bit_and_unsupported(void)
   if (plan.width != 800U || plan.height != 600U) return 5;
   if (plan.target_depth != 16U) return 6;
 
-  /* 24-bit unaccelerated depth */
-  zzplay_geometry_fullscreen_plan(0x50004002UL, 1024U, 768U, 24U, &plan);
+  /* 12-bit depth: not an overlay format */
+  zzplay_geometry_fullscreen_plan(0x50004002UL, 1024U, 768U, 12U, &plan);
   if (plan.action != ZZPLAY_FS_MATCH_WB_RES) return 7;
   if (plan.width != 1024U || plan.height != 768U) return 8;
   if (plan.target_depth != 16U) return 9;

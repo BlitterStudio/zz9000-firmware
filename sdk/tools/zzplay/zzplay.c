@@ -936,6 +936,9 @@ static int zzplay_open_video_screen(struct ZZPlayRuntime *runtime)
 
   zzplay_geometry_fullscreen_plan(wb_mode_id, wb_width, wb_height,
                                   (uint16_t)wb_depth, &plan);
+  zzplay_info("zzplay: fullscreen: Workbench mode %08lx %ux%u depth %lu\n",
+              (unsigned long)wb_mode_id, (unsigned)wb_width,
+              (unsigned)wb_height, (unsigned long)wb_depth);
 
   if (plan.action == ZZPLAY_FS_REUSE_MODE) {
     if (zzplay_open_screen_mode(runtime, plan.mode_id, plan.target_depth)) {

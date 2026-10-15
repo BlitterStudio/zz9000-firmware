@@ -62,7 +62,7 @@ int zzplay_geometry_is_fitted(uint16_t width, uint16_t height,
 
 int zzplay_geometry_depth_is_supported(uint16_t depth)
 {
-  return depth == 15U || depth == 16U || depth == 32U;
+  return depth == 15U || depth == 16U || depth == 24U || depth == 32U;
 }
 
 int zzplay_geometry_is_doubled(uint16_t width, uint16_t height)
