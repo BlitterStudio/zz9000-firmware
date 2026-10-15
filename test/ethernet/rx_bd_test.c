@@ -79,6 +79,10 @@ static void ethernet_backlog_slot_publish_from(u16 slot, u32 from, u32 bytes)
         payload_published[slot] = 1; payload_publications++;
     }
 }
+static unsigned frames_ack_rejected;
+static int ethernet_pause_rx_irq(void) { return 0; }
+static void ethernet_resume_rx_irq(int paused) { (void)paused; }
+static u8 *ethernet_current_receive_ptr(void) { return frame_bytes[frames_backlog_read]; }
 static u32 XEmacPs_ReadReg(u32 base, u32 offset) { (void)base; (void)offset; return 0; }
 static void XEmacPs_WriteReg(u32 base, u32 offset, u32 value) { (void)base; (void)offset; (void)value; }
 /* RX_FUNCTIONS */
@@ -176,6 +180,27 @@ int main(int argc, char **argv)
         assert(frames_backlog == W && r->FreeCnt == RXBD_CNT && !frames_backlog_reserved);
         assert(r->FreeHead == &descriptors[W % RXBD_CNT] && (descriptors[W % RXBD_CNT][0] & XEMACPS_RXBUF_NEW_MASK));
         puts("PASS burst: whole-ring completions stop exactly at watermark without stale-BD overcount");
+    } else if (!strcmp(argv[1], "drain")) {
+        /* Fill to the watermark, then let the host drain the whole backlog
+         * through the real ACK path while the sender is quiet. The release
+         * must re-arm the full ring, or the next burst drops frames that an
+         * empty backlog had room for. */
+        unsigned hw = 0;
+        ethernet_alloc_rx_frames();
+        while (r->HwCnt) {
+            unsigned n = r->HwCnt;
+            for (unsigned i = 0; i < n; i++) { complete(hw); hw = (hw + 1) % RXBD_CNT; }
+            XEmacPsRecvHandler(&EmacPsInstance);
+        }
+        assert(rx_backpressure && frames_backlog == W && !r->HwCnt);
+        while (frames_backlog) ethernet_receive_frame(1); /* legacy bare-advance ACK */
+        assert(!rx_backpressure && !frames_ack_rejected);
+        assert(r->HwCnt == RXBD_CNT && frames_backlog_reserved == RXBD_CNT);
+        /* A whole-ring burst now lands without a drop. */
+        for (unsigned i = 0; i < RXBD_CNT; i++) { complete(hw); hw = (hw + 1) % RXBD_CNT; }
+        XEmacPsRecvHandler(&EmacPsInstance);
+        assert(!frames_dropped && frames_backlog == RXBD_CNT);
+        puts("PASS drain: host drain through the ACK path re-arms the whole ring");
     } else {
         assert(!strcmp(argv[1], "cycle"));
         ethernet_alloc_rx_frames();
