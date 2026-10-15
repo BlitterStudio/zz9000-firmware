@@ -734,8 +734,6 @@ proc create_hier_cell_video { parentCell nameHier } {
       catch {common::send_msg_id "BD_TCL-105" "ERROR" "Unable to add RasterIX IP <$block_cell_name>: $errmsg"}
       return 1
     }
-    set_property -dict [list CONFIG.FREQ_HZ {100000000}] [get_bd_pins zz9k_rasterix_0/s_axi_aclk]
-    set_property -dict [list CONFIG.FREQ_HZ {100000000}] [get_bd_pins zz9k_rasterix_0/m_axi_aclk]
   }
 
 
