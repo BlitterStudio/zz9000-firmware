@@ -258,6 +258,11 @@ if { $rasterix } {
   set_property include_dirs [list [file normalize "$origin_dir/rtl/rasterix/RasterIX"]] $obj
 }
 set imported_files [import_files -fileset sources_1 $files]
+if { $rasterix } {
+  foreach rasterix_header [glob -nocomplain [file normalize "$origin_dir/rtl/rasterix/RasterIX/*.vh"]] {
+    set_property file_type {Verilog Header} [get_files -of_objects [get_filesets sources_1] [list "*[file tail $rasterix_header]"]]
+  }
+}
 
 # Set 'sources_1' fileset file properties for remote files
 # None
@@ -1521,7 +1526,12 @@ proc create_hier_cell_video { parentCell nameHier } {
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces audio_formatter_1/m_axi_s2mm] [get_bd_addr_segs processing_system7_0/S_AXI_HP3/HP3_DDR_LOWOCM] SEG_processing_system7_0_HP3_DDR_LOWOCM
   if { $rasterix } {
     create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces zz9k_rasterix_0/M_AXI] [get_bd_addr_segs processing_system7_0/S_AXI_HP1/HP1_DDR_LOWOCM] SEG_RasterIX_HP1_DDR_LOWOCM
-    create_bd_addr_seg -range 0x00010000 -offset 0x83C60000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs zz9k_rasterix_0/S_AXI/Reg] SEG_RasterIX_control_Reg
+    set rasterix_control_seg [get_bd_addr_segs -quiet zz9k_rasterix_0/S_AXI/Reg]
+    if {$rasterix_control_seg ne ""} {
+      create_bd_addr_seg -range 0x00010000 -offset 0x83C60000 [get_bd_addr_spaces processing_system7_0/Data] $rasterix_control_seg SEG_RasterIX_control_Reg
+    } else {
+      common::send_msg_id "ZZ9K_RIX-001" "WARNING" "RasterIX module reference has no IP-XACT control address segment."
+    }
   }
   create_bd_addr_seg -range 0x00010000 -offset 0x43C00000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs MNTZorro_v0_1_S00_AXI_0/S_AXI/reg0] SEG_MNTZorro_v0_1_S00_AXI_0_reg0
   create_bd_addr_seg -range 0x00010000 -offset 0x83C20000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs audio_formatter_0/s_axi_lite/reg0] SEG_audio_formatter_0_reg0
