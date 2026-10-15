@@ -9,8 +9,9 @@
  *
  * The overlay VDMA model follows the firmware's vblank handoff: frames run
  * back to back (park mode, no fsync); each vblank interrupt stops the
- * channel, commits the next generation FRAME_CYCLES later and restarts row 0
- * RESTART_CYCLES after the interrupt.
+ * channel, restarts row 0 RESTART_CYCLES later and commits the next
+ * generation FRAME_CYCLES after the interrupt (by default after the
+ * restart, as overlay_hw_set_buffer does).
  *
  * Plusargs (defaults in brackets):
  *   +CANVAS_W +CANVAS_H [160x96]   screen size
@@ -21,7 +22,7 @@
  *   +POS_X +POS_Y [8,4]            window position (may be negative)
  *   +OVL_GAP_EVERY +OVL_GAP_CYCLES stall the overlay stream GAP_CYCLES
  *                                  after every GAP_EVERY beats
- *   +FRAME_CYCLES [20] +RESTART_CYCLES [60]
+ *   +FRAME_CYCLES [100] +RESTART_CYCLES [60]
  *   +TRACE=1                       log fetch requests/completions
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -304,7 +305,7 @@ initial begin
   dvi_half_ps = 3400;
   src_w = 72; src_h = 58; dst_w = 72; dst_h = 41; pos_x = 8; pos_y = 4;
   ovl_gap_every = 0; ovl_gap_cycles = 0;
-  frame_cycles = 20; restart_cycles = 60;
+  frame_cycles = 100; restart_cycles = 60;
   trace_on = 0; trace_frame = -1;
   sw = 0; stop_frames = 1; set_delay = 0;
   if ($value$plusargs("CANVAS_W=%d", canvas_w)) ;

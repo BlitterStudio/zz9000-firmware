@@ -122,18 +122,27 @@ The VDMA address, pitch, HSIZE and VSIZE are AXI-Lite registers, written by
 The handoff runs in this order. Each step fixed a bug seen on hardware:
 
 1. At vblank, the ARM does the full L1+L2 cache flush first.
-2. It resets the overlay VDMA, which stops the stream.
-3. It advances the frame generation while the channel is stopped. A fetcher
-   still reading a late row of the old frame accepts stream data; if the
-   channel restarted first, it would take the new frame's first row as part
-   of the old frame.
-4. It reprograms the VDMA, writing `START_ADDR` first and `VSIZE` last. A
-   running AXI VDMA only uses a new start address after `VSIZE` is written
-   (AMD PG020).
-5. The line-buffer side acknowledges the new generation and the formatter
+2. It resets the overlay VDMA, which stops the stream, and reprograms it,
+   writing `START_ADDR` first and `VSIZE` last. A running AXI VDMA only uses
+   a new start address after `VSIZE` is written (AMD PG020).
+3. It advances the frame generation. The line fetcher holds the restarted
+   stream until the display side has acknowledged the generation and
+   re-armed the first row.
+4. The line-buffer side acknowledges the new generation and the formatter
    restarts its fetch stepper at the first visible source row. The fetcher
    stops requesting rows once the raster leaves the visible frame, so no
    request is in flight across the handoff.
+
+Committing the generation before restarting the VDMA was tried, so that a
+fetcher still reading a late row could not take the new frame's first row
+as part of the old frame. On an A4000 that order showed a few top rows and
+then black on every frame after a shrunk window went fullscreen, and
+putting this order back cured it. The cause is unknown; the bench does not
+reproduce it. With eight banks the fetcher finishes its last row long
+before vblank, so the late-row case does not arise in the bench either. If
+it did, the fetcher would wait for the next frame start: in park mode the
+VDMA repeats the frame back to back, so that costs about one stream frame
+(a millisecond or two at 720x576), not a lost display frame.
 
 The VDMA is connected directly to the line fetcher with no FIFO in between, so
 no data from the old frame can survive the reset.

@@ -212,11 +212,12 @@ endfunction
 
 `include "overlay_bilinear_ref.vh"
 
-/* Model the firmware's vblank handoff: the vblank interrupt resets MM2S
- * wherever it is in the frame (the fetcher stops reading after the last
- * displayed row), commits the next generation while the channel is stopped,
- * then restarts the frame. */
+/* Model the firmware's vblank handoff on a park-mode VDMA: frames repeat
+ * back to back; the vblank interrupt resets MM2S wherever it is in the
+ * frame (the fetcher stops reading after the last displayed row), restarts
+ * the frame, then commits the next generation. */
 reg overlay_vblank_seen = 0;
+reg overlay_commit_pending = 0;
 reg overlay_frame_aborted;
 always @(posedge control_vblank[1])
   overlay_vblank_seen = 1;
@@ -252,9 +253,20 @@ initial begin : overlay_vdma
     overlay_tvalid <= 0;
     overlay_tuser <= 0;
     overlay_tlast <= 0;
-    wait (overlay_vblank_seen === 1'b1);
-    overlay_vblank_seen = 0;
-    overlay_stream_generation = overlay_stream_generation + 1;
+    if (overlay_frame_aborted) begin
+      overlay_vblank_seen = 0;
+      overlay_stream_generation = overlay_stream_generation + 1;
+      overlay_commit_pending = 1;
+    end
+  end
+end
+
+/* The generation commit follows the restart, as in overlay_hw_set_buffer. */
+initial begin : overlay_commit
+  forever begin
+    wait (overlay_commit_pending === 1'b1);
+    overlay_commit_pending = 0;
+    repeat (40) @(negedge aclk);
     op(OP_OVERLAY_FRAME, overlay_stream_generation);
   end
 end
