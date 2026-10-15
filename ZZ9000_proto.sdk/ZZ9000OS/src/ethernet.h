@@ -76,7 +76,32 @@ void ethernet_reset_for_amiga();
  * retransmissions in ten seconds).
  */
 #define RXBD_CNT       64	/* Number of RxBDs to use */
-#define TXBD_CNT       2	/* Number of TxBDs to use */
+#define TXBD_CNT       4	/* Number of TxBDs to use: the four slots of the TX window */
+
+/*
+ * ASYNCHRONOUS TRANSMIT (REG_ZZ_ETH_TX with bit 15 set).
+ *
+ * ethernet_send_frame() holds the Zorro bus -- the 68k stalls in its write
+ * cycle -- until the GEM has sent, 100 us to 1 ms per frame (a usleep(100)
+ * poll).  Measured on an A3000 that was 16% of the CPU at 4.6 Mbit/s of TCP
+ * receive, spent on ACKs.  A driver that sets bit 15 of the length word
+ * instead names one of the four 2 KB slots of the TX window in bits 12..11
+ * and gets the bus back as soon as the BD is queued; it learns of
+ * completion from REG_ZZ_ETH_TX_STATUS: bit 15 says the firmware has this
+ * path at all (an older firmware reads the register as 0), bits 14..0 count
+ * frames finished -- sent, or dropped for want of a BD, which the driver
+ * cannot tell apart and need not: the slot is free either way.  A length
+ * word without bit 15 is the old synchronous send, unchanged, so existing
+ * drivers keep working.
+ */
+#define ETH_TX_ASYNC          0x8000u
+#define ETH_TX_SLOT_SHIFT     11
+#define ETH_TX_SLOT_MASK      0x3u
+#define ETH_TX_LEN_MASK       0x7ffu
+#define ETH_TX_STATUS_PRESENT 0x8000u
+#define ETH_TX_STATUS_COUNT   0x7fffu
+void ethernet_send_frame_async(u16 slot, u16 frame_size);
+u16 ethernet_get_tx_status(void);
 
 /*
  * REG_ZZ_ETH_RX_FRAMES: how many frames a sender may put on the wire at once.
