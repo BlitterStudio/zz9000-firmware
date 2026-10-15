@@ -79,6 +79,11 @@ localparam MAX_MACROPIXELS = (MAX_PIXELS + 1) / 2;
  * words. */
 localparam MEMORY_WORDS = (1 << (ADDR_WIDTH - 1 + BANK_BITS));
 localparam MSG_WIDTH = 12 + BANK_BITS + 1;
+/* Completions carry the low bits of the generation that produced them. A
+ * stale completion is at most one handshake old, and the generation
+ * advances at most once per handshake, so eight bits cannot alias. */
+localparam GEN_TAG_BITS = 8;
+localparam COMPLETION_WIDTH = MSG_WIDTH + GEN_TAG_BITS;
 localparam ST_SEEK_FRAME = 2'd0;
 localparam ST_READ_LINE  = 2'd1;
 localparam ST_WAIT_LINE  = 2'd2;
@@ -129,15 +134,17 @@ xpm_cdc_handshake #(
   .dest_ack(1'b0)
 );
 
-reg [MSG_WIDTH-1:0] completed_line_data = 0;
+reg [COMPLETION_WIDTH-1:0] completed_line_data = 0;
 reg completed_line_pending = 0;
 reg completed_line_send = 0;
 wire completed_line_received;
-wire [MSG_WIDTH-1:0] completed_line_pixel_data;
+wire [COMPLETION_WIDTH-1:0] completed_line_pixel_data;
 wire [11:0] completed_line_pixel = completed_line_pixel_data[11:0];
 wire [BANK_BITS-1:0] completed_bank_pixel =
   completed_line_pixel_data[12 +: BANK_BITS];
 wire completed_toggle_pixel = completed_line_pixel_data[MSG_WIDTH-1];
+wire [GEN_TAG_BITS-1:0] completed_generation_pixel =
+  completed_line_pixel_data[MSG_WIDTH +: GEN_TAG_BITS];
 wire completed_line_pixel_valid;
 
 xpm_cdc_handshake #(
@@ -146,7 +153,7 @@ xpm_cdc_handshake #(
   .INIT_SYNC_FF(0),
   .SIM_ASSERT_CHK(0),
   .SRC_SYNC_FF(3),
-  .WIDTH(MSG_WIDTH)
+  .WIDTH(COMPLETION_WIDTH)
 ) completed_line_cdc (
   .src_clk(axis_clk),
   .src_in(completed_line_data),
@@ -159,6 +166,11 @@ xpm_cdc_handshake #(
 );
 
 reg generation_send = 0;
+/* The value in flight: src_in must stay stable for the whole handshake, and
+ * generation_sent must record what the pixel side actually received, even
+ * if firmware commits another generation meanwhile (that one is sent by
+ * the next handshake). */
+reg [31:0] generation_send_value = 0;
 reg [31:0] generation_sent = 0;
 wire generation_received;
 wire [31:0] accepted_generation_pixel;
@@ -173,7 +185,7 @@ xpm_cdc_handshake #(
   .WIDTH(32)
 ) generation_cdc (
   .src_clk(axis_clk),
-  .src_in(fetch_generation),
+  .src_in(generation_send_value),
   .src_send(generation_send),
   .src_rcv(generation_received),
   .dest_clk(pixel_clk),
@@ -348,12 +360,14 @@ always @(posedge axis_clk) begin
       completed_line_pending <= 0;
     end
     if (stream_line_completed) begin
-      completed_line_data <= {target_toggle, target_bank,
+      completed_line_data <= {loaded_generation[GEN_TAG_BITS-1:0],
+                              target_toggle, target_bank,
                               completed_line_value};
       completed_line_pending <= 1;
     end else if (relabel_loaded_line && fetch_enable &&
                  fetch_generation == loaded_generation) begin
-      completed_line_data <= {requested_toggle_axis, target_bank,
+      completed_line_data <= {loaded_generation[GEN_TAG_BITS-1:0],
+                              requested_toggle_axis, target_bank,
                               loaded_line};
       completed_line_pending <= 1;
     end
@@ -365,15 +379,17 @@ end
 always @(posedge axis_clk) begin
   if (!axis_resetn) begin
     generation_send <= 0;
+    generation_send_value <= 0;
     generation_sent <= 0;
   end else if (generation_send) begin
     if (generation_received) begin
       generation_send <= 0;
-      generation_sent <= fetch_generation;
+      generation_sent <= generation_send_value;
     end
   end else if (!generation_received && fetch_enable &&
                fetch_generation != generation_sent) begin
     generation_send <= 1;
+    generation_send_value <= fetch_generation;
   end
 end
 
@@ -497,6 +513,11 @@ assign read_bottom_even = read_data[2];
 assign read_bottom_odd = read_data[3];
 assign displayed_line_ready = display_enable && |top_match && |bottom_match;
 assign fetch_ready = display_enable && !request_inflight && |bank_free;
+/* The generation the pixel side serves, including one acknowledged in this
+ * very cycle. */
+wire [GEN_TAG_BITS-1:0] current_generation_tag = accepted_generation_pixel_valid
+  ? accepted_generation_pixel[GEN_TAG_BITS-1:0]
+  : accepted_generation[GEN_TAG_BITS-1:0];
 
 always @(posedge pixel_clk) begin
   /* Registered snapshot of the top row on display, for the fetch
@@ -526,8 +547,14 @@ always @(posedge pixel_clk) begin
     request_inflight <= 0;
   end
 
-  /* Keep this after invalidation: completed data in a bank is valid. */
-  if (completed_line_pixel_valid) begin
+  /* Keep this after invalidation: completed data in a bank is valid. A
+   * completion from the previous generation can cross after (or with) the
+   * generation acknowledgement; its bank may already be reassigned, so it
+   * is dropped. New-generation rows cannot complete before the
+   * acknowledgement, because the stream is held until the first request,
+   * which the pixel side only makes after it. */
+  if (completed_line_pixel_valid &&
+      completed_generation_pixel == current_generation_tag) begin
     pixel_ready_line[completed_bank_pixel] <= completed_line_pixel;
     pixel_ready_valid[completed_bank_pixel] <= 1;
     if (completed_toggle_pixel == request_toggle)

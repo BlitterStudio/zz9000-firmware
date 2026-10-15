@@ -23,6 +23,8 @@ module video_overlay_linebuffer_tb;
   wire [31:0] accepted_generation;
   integer failures = 0;
   integer check_seq = 0;
+  integer k;
+  integer wait_cycles;
 
   video_overlay_linebuffer #(.MAX_PIXELS(16), .ADDR_WIDTH(4)) dut(
     .axis_clk(axis_clk), .axis_resetn(resetn),
@@ -295,6 +297,41 @@ module video_overlay_linebuffer_tb;
     check_line(4); check_line(5);
     consumed_valid = 0;
 
+    /* A row completed under the old generation can cross the clock domain
+     * with, or just after, the new generation's acknowledgement: the two
+     * travel through independent synchronizers. It must not mark its bank
+     * ready. Inject such a completion at the CDC output in the cycle of
+     * the acknowledgement (k = 0) and two cycles later (k = 1). The second
+     * generation is committed while the first acknowledgement is still in
+     * flight, so it must still reach the pixel side. */
+    for (k = 0; k < 2; k = k + 1) begin
+      generation = generation + 1;
+      wait_cycles = 0;
+      while (dut.accepted_generation_pixel_valid !== 1'b1 ||
+             dut.accepted_generation_pixel != generation) begin
+        @(posedge pixel_clk); #1;
+        wait_cycles = wait_cycles + 1;
+        if (wait_cycles > 200) begin
+          $display("FAIL generation %0d never acknowledged", generation);
+          failures = failures + 1;
+          $finish(1);
+        end
+      end
+      /* The acknowledgement is sampled at the next pixel clock edge. */
+      if (k == 1) repeat (2) @(posedge pixel_clk);
+      force dut.completed_line_pixel_data =
+        {generation[7:0] - 8'd1, 1'b0, 2'd1, 12'd7};
+      force dut.completed_line_pixel_valid = 1'b1;
+      @(posedge pixel_clk); #1;
+      release dut.completed_line_pixel_data;
+      release dut.completed_line_pixel_valid;
+      displayed_line = 7; displayed_line_next = 7;
+      repeat (3) @(posedge pixel_clk); #1;
+      if (ready) begin
+        $display("FAIL old-generation completion marked a bank ready (case %0d)", k);
+        failures = failures + 1;
+      end
+    end
     if (failures == 0) $display("video_overlay_linebuffer_tb: PASS");
     else $display("video_overlay_linebuffer_tb: %0d failure(s)", failures);
     $finish(failures != 0);
