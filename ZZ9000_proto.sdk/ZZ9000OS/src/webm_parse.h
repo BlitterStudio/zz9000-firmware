@@ -26,7 +26,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define WEBM_MAX_TRACKS 4
+/* Stored tracks: one video plus, in Matroska, the first usable track of
+ * each of the five audio codecs (other tracks are skipped, see
+ * matroska_track_usable in webm_parse.c). */
+#define WEBM_MAX_TRACKS 6
 #define WEBM_MAX_PRIV (64U * 1024U)
 #define WEBM_MAX_FRAME (4U * 1024U * 1024U)
 #define WEBM_MAX_LACE 32
@@ -38,9 +41,13 @@ enum {
 	WEBM_CODEC_VP8,
 	WEBM_CODEC_VP9,
 	WEBM_CODEC_OPUS,
-	WEBM_CODEC_VORBIS
+	WEBM_CODEC_VORBIS,
+	WEBM_CODEC_MPEG1,
+	WEBM_CODEC_MPEG2,
+	WEBM_CODEC_MPEG_AUDIO,
+	WEBM_CODEC_AC3,
+	WEBM_CODEC_PCM_LE
 };
-
 enum {
 	WEBM_OK = 0,
 	WEBM_ERR_IO,
@@ -55,7 +62,10 @@ struct webm_track {
 	uint32_t number;
 	uint8_t type; /* 1 video, 2 audio */
 	uint8_t codec;
-	uint16_t channels;
+	uint8_t enabled;
+	uint8_t channels_present;
+	uint32_t channels;
+	uint32_t bit_depth;
 	uint32_t rate;
 	uint32_t width;
 	uint32_t height;
@@ -78,13 +88,18 @@ struct webm_block {
 
 /* read: copy up to n bytes. Return count, 0 at EOF, -2 if more input
  * may still arrive. seek: absolute file offset; 0 ok, -1 hard error,
- * -2 not yet available. */
+ * -2 not yet available. skip (optional; seek is used without it): a
+ * forward seek past bytes no retry reads again, so ones not received yet
+ * may be dropped as they arrive: 0 done within held bytes, 1 done by
+ * dropping (the caller can no longer rewind before pos), -1 or -2 as
+ * seek. */
 struct webm_io {
 	void *ctx;
 	int (*read)(void *ctx, void *dst, uint32_t n);
 	int (*seek)(void *ctx, uint32_t pos);
 	uint32_t (*tell)(void *ctx);
 	uint32_t (*size)(void *ctx);
+	int (*skip)(void *ctx, uint32_t pos);
 };
 
 struct webm_demux {
@@ -97,10 +112,21 @@ struct webm_demux {
 	int error;
 	int have_video;
 	int have_audio;
+	uint8_t is_matroska;
 	uint32_t segment_end;
 	uint32_t cluster_end;
 	int64_t cluster_tc;
 	int in_cluster;
+	/* A BlockGroup being read (group_end != 0): webm_next can return
+	 * WEBM_NEXT_SKIPPED between its children and resume there. */
+	uint32_t group_end;
+	uint8_t group_saw;     /* its Block was taken */
+	uint8_t group_ignored; /* its Block is skipped (see take_block) */
+	uint8_t group_key;     /* no ReferenceBlock so far */
+	/* webm_select_tracks: when set, only these tracks' blocks are read. */
+	uint8_t selected;
+	uint32_t select_video;
+	uint32_t select_audio;
 	uint8_t lace_i;
 	uint8_t lace_n;
 	uint8_t lace_key;
@@ -114,9 +140,18 @@ struct webm_demux {
 
 int webm_open(struct webm_demux *d, const struct webm_io *io, uint8_t *buf,
 	      uint32_t cap);
-/* 1 = a block, 0 = clean EOF, -1 = error (d->error). */
+/* 1 = a block, 0 = clean EOF, -1 = error (d->error), WEBM_NEXT_SKIPPED =
+ * no block: io->skip dropped input that had not arrived (an ignored
+ * Matroska block or an element larger than the input held). The demux is
+ * at a new resume point: take a new snapshot or mark and call again. */
+#define WEBM_NEXT_SKIPPED 2
 int webm_next(struct webm_demux *d, struct webm_block *blk);
 void webm_close(struct webm_demux *d);
+/* After webm_open, the tracks the backend plays (audio 0 = none): blocks
+ * of every other track are skipped by track number, before frame limits
+ * or buffering, so data no decoder reads cannot fail the stream. */
+void webm_select_tracks(struct webm_demux *d, uint32_t video,
+			uint32_t audio);
 const struct webm_track *webm_track(const struct webm_demux *d, uint32_t number);
 const uint8_t *webm_track_priv(const struct webm_demux *d,
 			       const struct webm_track *t);

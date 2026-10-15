@@ -39,6 +39,10 @@ struct SDKDVDPSQueue {
 
 struct SDKDVDPSDemux {
 	uint8_t staging[SDK_DVD_PS_STAGING_CAPACITY];
+	/* Unparsed input is staging[head..staged). Parsing advances head;
+	 * bytes move down only when an append needs the room, never per
+	 * packet (newlib's unaligned memmove copies byte by byte). */
+	uint32_t head;
 	uint32_t staged;
 	struct SDKDVDPSQueue video;
 	struct SDKDVDPSQueue audio;
@@ -46,10 +50,28 @@ struct SDKDVDPSDemux {
 	uint64_t bytes_ignored;
 	uint32_t malformed_packets;
 	uint32_t backpressure_events;
-	/* AC-3 substream (0x80-0x87) this demux follows: the first one seen;
-	 * 0 until then. Other AC-3 substreams are skipped as ignored bytes. */
+	/* The first video stream (0xe0-0xef) and one track of each audio kind
+	 * are followed; packets from the others are ignored so one decoder never
+	 * sees interleaved tracks. */
+	uint8_t video_stream;
 	uint8_t ac3_substream;
+	uint8_t mp2_stream;
+	uint8_t lpcm_substream;
 	uint8_t eof;
+	/* Overflow policy: while set, audio packets that cannot be queued
+	 * (the decoder's PCM ring is full and the client is not draining it)
+	 * are dropped and counted instead of stopping the parse, so video
+	 * packets behind them keep flowing. The owner clears it as soon as
+	 * the client consumes again. */
+	uint8_t drop_audio_when_full;
+	uint32_t audio_packets_dropped;
+	uint64_t audio_bytes_dropped;
+	/* The decoder uses this span to skip every packet in a drop run. */
+	uint64_t first_dropped_audio_pts;
+	uint64_t last_dropped_audio_pts;
+	uint8_t first_dropped_audio_pts_valid;
+	uint8_t last_dropped_audio_pts_valid;
+	uint8_t audio_drop_run_active;
 };
 
 void sdk_dvd_ps_init(struct SDKDVDPSDemux *demux);

@@ -88,6 +88,99 @@ void core1_entry(void);  /* naked reset stub: 0xFFFFFFF0 points here; sets SP th
 
 struct core_fault_slot core1_fault __attribute__((aligned(32))) = { CORE_FAULT_NONE, {0} };
 
+/* Saved by the BSP vectors (asm_vectors.S) before the handler runs. */
+extern u32 DataAbortAddr;
+extern u32 PrefetchAbortAddr;
+extern u32 UndefinedExceptionAddr;
+
+/* The interrupted code's lr and sp: switch to its mode (SPSR) to read the
+ * banked registers, then come back. User and System share a bank. */
+static int read_interrupted_lr_sp(uint32_t *lr, uint32_t *sp)
+{
+	uint32_t spsr;
+	uint32_t mode;
+
+	__asm__ __volatile__("mrs %0, spsr" : "=r"(spsr));
+	mode = spsr & 0x1fU;
+	if (mode == 0x10U || mode == 0x1fU) {
+		__asm__ __volatile__(
+			"mrs r12, cpsr\n\t"
+			"cps #0x1f\n\t"
+			"mov %0, lr\n\t"
+			"mov %1, sp\n\t"
+			"msr cpsr_c, r12\n\t"
+			: "=&r"(*lr), "=&r"(*sp) : : "r12", "lr", "memory");
+		return 1;
+	}
+	if (mode == 0x13U) {
+		__asm__ __volatile__(
+			"mrs r12, cpsr\n\t"
+			"cps #0x13\n\t"
+			"mov %0, lr\n\t"
+			"mov %1, sp\n\t"
+			"msr cpsr_c, r12\n\t"
+			: "=&r"(*lr), "=&r"(*sp) : : "r12", "lr", "memory");
+		return 1;
+	}
+	return 0;
+}
+
+/* Where the fault happened: the faulting instruction (map it with the
+ * build's symbols.txt), the abort address and status registers, and the
+ * interrupted code's lr, sp and top stack words, whose code addresses
+ * give the callers. The vector table is shared, so this runs for a fault
+ * on either core. */
+static void print_fault_detail(uint32_t code)
+{
+	uint32_t cpu;
+	uint32_t status;
+	uint32_t addr;
+	uint32_t lr;
+	uint32_t sp;
+
+	__asm__ __volatile__("mrc p15, 0, %0, c0, c0, 5" : "=r"(cpu));
+	cpu &= 3U;
+	if (code == CORE_FAULT_DATA_ABORT) {
+		__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 0" : "=r"(status));
+		__asm__ __volatile__("mrc p15, 0, %0, c6, c0, 0" : "=r"(addr));
+		printf("[fault] cpu%lu pc=%08lx dfar=%08lx dfsr=%08lx\n",
+		       (unsigned long)cpu, (unsigned long)DataAbortAddr,
+		       (unsigned long)addr, (unsigned long)status);
+	} else if (code == CORE_FAULT_PREFETCH_ABORT) {
+		__asm__ __volatile__("mrc p15, 0, %0, c5, c0, 1" : "=r"(status));
+		__asm__ __volatile__("mrc p15, 0, %0, c6, c0, 2" : "=r"(addr));
+		printf("[fault] cpu%lu pc=%08lx ifar=%08lx ifsr=%08lx\n",
+		       (unsigned long)cpu, (unsigned long)PrefetchAbortAddr,
+		       (unsigned long)addr, (unsigned long)status);
+	} else if (code == CORE_FAULT_UNDEF) {
+		printf("[fault] cpu%lu pc=%08lx\n", (unsigned long)cpu,
+		       (unsigned long)UndefinedExceptionAddr);
+	} else {
+		return;
+	}
+	if (!read_interrupted_lr_sp(&lr, &sp))
+		return;
+	printf("[fault] lr=%08lx sp=%08lx\n", (unsigned long)lr,
+	       (unsigned long)sp);
+	/* 512 bytes: past a NEON-heavy frame (callee-saved d8-d15 plus
+	 * spills) to the caller's return address. Only an aligned sp with
+	 * that much DDR above it is read: a corrupt sp would abort again
+	 * inside this handler. */
+	if ((sp & 3U) == 0U && sp >= 0x00100000U &&
+	    sp <= 0x40000000U - 512U) {
+		const volatile uint32_t *stack =
+			(const volatile uint32_t *)(uintptr_t)sp;
+		unsigned i;
+
+		for (i = 0U; i < 128U; i += 8U)
+			printf("[fault] %08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx\n",
+			       (unsigned long)stack[i], (unsigned long)stack[i + 1U],
+			       (unsigned long)stack[i + 2U], (unsigned long)stack[i + 3U],
+			       (unsigned long)stack[i + 4U], (unsigned long)stack[i + 5U],
+			       (unsigned long)stack[i + 6U], (unsigned long)stack[i + 7U]);
+	}
+}
+
 static void record_fault(uint32_t code, const char *name)
 {
 	/*
@@ -112,6 +205,7 @@ static void record_fault(uint32_t code, const char *name)
 	core1_fault.code = code;
 	Xil_DCacheFlushRange((INTPTR)&core1_fault, sizeof(core1_fault));
 	printf("%s: arm_exception_handler()!\n", name);
+	print_fault_detail(code);
 
 	if (slot >= 0) {
 		/*

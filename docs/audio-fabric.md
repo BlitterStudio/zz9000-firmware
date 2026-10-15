@@ -1,224 +1,169 @@
-# ZZ9000AX audio fabric admitted budget and the measurement session
+# Audio fabric
 
-The audio fabric compositor (`audio_fabric.c`, plans U2/U3) mixes
-bounded producers into the formatter TX ring from the audio period
-interrupt. Admitting producers is a cycle-budget decision, and that
-decision comes from measurement, not assumption. This document defines
-the admitted-budget model, the instrument build that measures it, the
-bench method for the hardware session, the results table (not yet
-measured), the smoke checklist for that session, and the runbook that
-lands the capability advertising after a recorded pass.
+The audio fabric mixes SDK playback and direct-ring audio sources into the
+formatter TX ring. Firmware advertises it through `SDK_CAP_AUDIO_FABRIC`,
+`SDK_SERVICE_FLAG_AUDIO_FABRIC`, and `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE`.
+The fabric owns the output while a producer is active, so register-driven
+legacy playback cannot retarget the formatter during a mixed session.
 
-Host tests in `test/audio` enforce the compositor's mix and lease
-semantics; nothing on this page is measured until the hardware session
-records it.
+The formatter runs at 48 kHz. Each 20 ms period is 3,840 bytes of stereo
+S16 PCM, or 960 frames. The TX ring has eight periods. The FPGA audio
+formatter exposes the MM2S stream interface that reads this ring.
 
-## Reading "done" correctly (consumer honesty)
+## Audio path
 
-The fabric capability is advertised and the plane is qualified on
-hardware. The AHI migration (this matched set) makes the matched AHI
-driver the **first shipping consumer**: when the card advertises the
-fabric and `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE`, AHI acquires a
-rate-bearing lease at its selected mix frequency instead of the
-legacy register path, publishes PAUSED across Stop/Start, and mixes
-alongside the pump (MHI/ZZPlay) — the Amiga-side AHI/MHI interrupt
-exclusion is dropped on fabric-capable stacks. The proof client
-`zz9k-fabriclease` (SDK `tools/zz9k-fabriclease.c`) remains the
-bypass-plane exerciser. A rate-bearing lease acquires with
-`SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE` and a rate from the
-qualified vocabulary (8000/12000/24000/32000/44100/48000 Hz); the
-compositor converts per-slot with the qualified kernel and enforces
-the documented two-converting-producer budget at acquire time
-(refused acquires fail closed with BUSY). Firmware predating the
-rate flag rejects the flag with BAD_REQUEST — the driver's fallback
-signal back to the legacy exclusive path. The rate path's hardware
-session (AHI+MHI coexistence, rate modes, PAUSED, warm reset) is the
-remaining user gate before the coordinated `v2.8.0-rc3` tag.
+```mermaid
+flowchart LR
+  Pump["SDK playback pump<br/>slot 0"] --> Fabric
+  Lease["Direct-ring lease<br/>slot 1 or 2"] --> Rate
+  Rate["48 kHz: direct<br/>other accepted rates: main-loop conversion"] --> Fabric["audio_fabric_isr<br/>period mix and TX-ring write"]
+  Fabric --> TX["8-period formatter TX ring"]
+  TX --> Formatter["audio formatter MM2S"]
+```
 
-## The admitted-budget model
+`audio_fabric_isr()` runs from the audio formatter period interrupt. It fills
+a bounded period for each live slot, accumulates samples in `int32_t`, clamps
+the mix once to S16, flushes the completed TX period, and tracks each slot's
+retirement and underrun state. A late, paused, absent, or malformed source
+contributes silence for that period. Its underrun counter changes without
+blocking the other slots.
 
-The compositor runs once per audio formatter period: 20 ms, which is
-13.33M CPU cycles at the card's 666.67 MHz core clock. Everything the
-ISR does must fit inside that window with margin, concurrently with
-whatever core 0 was doing when the interrupt landed.
+The slot table has three entries.
 
-What the instrument build measures (one accumulator per stage, values
-in global-timer ticks — 2 ticks = 1 CPU cycle, see the method section):
+| Slot | Producer | Availability |
+| --- | --- | --- |
+| 0 | SDK playback pump | Always reserved for firmware |
+| 1 | Direct-ring lease | Leaseable when the active bus map provides it |
+| 2 | Direct-ring lease | Leaseable on Zorro III; otherwise depends on the bus map |
 
-| Stage | Spans |
-|---|---|
-| `isr` | One active compositor tick: frontier check through tail tracking, while at least one producer is live |
-| `fill[n]` | One whole `fabric_slot_fill` pass on slot n: ring pull, cache invalidate, byte-swap, metering, mono expand, gain |
-| `conv[n]` | The rate-conversion pass inside slot n's fill (polyphase resample only) |
-| `mix` | Mix zero + per-slot accumulate + saturating commit + the per-period TX cache flush |
+Zorro III provides two direct-ring grants. Zorro II provides one compact grant
+when the generation-2 aperture contract is valid and acknowledged. Older
+Zorro II bitstreams provide no grant map, so acquire returns `UNSUPPORTED`.
 
-Analytic baseline, from the qualified conversion kernel
-(`docs/audio-conversion.md`): worst-case playback conversion is the
-densest ratio, 44.1 kHz → 48 kHz (101 taps, 160 phases), at 193,920
-MAC per 20-ms period. One SMLAL per tap (1–2 cycles with loads) puts
-a single conversion-bearing producer near 0.19–0.39M cycles, about
-1.5–3% of the window. The conversion document's full-duplex worst
-case — 2,521,800 MAC (6 pump + 7 capture periods in one window),
-bounded near 2.5–5M cycles — is 19–38% of the window and remains the
-analytic ceiling context. All of these are host-derived estimates
-until this session's on-hardware rows replace them; per-ISR
-conversion capping stays the documented fallback if measurement ever
-fails to argue margin.
+## Ownership and direct rings
 
-Admission decision rule: the default admitted budget is **2
-conversion-bearing producers + 1 bypass producer** across the three
-slots, revised down if the measured rows argue it. Justification: the
-fill work is bounded per producer by construction (bounded ring walk,
-per-slot fill capped at one 48-kHz period), two worst-case conversion
-passes sit near 0.4–0.8M cycles (3–6% of the window) on top of mix and
-cache costs an order of magnitude below the window, and the bypass
-path is a period-sized copy. The bench rows below measure the
-constructible subset of that budget directly; the remainder is a
-linear extrapolation over identical per-slot work.
+The fabric has three ownership states: `AUDIO_FABRIC_IDLE`,
+`AUDIO_FABRIC_LEGACY_EXCLUSIVE`, and `AUDIO_FABRIC_ACTIVE`. A legacy playback
+client owns the formatter during `AUDIO_FABRIC_LEGACY_EXCLUSIVE`. A fabric
+producer cannot attach in that state. The first fabric producer resets the TX
+buffer to `AUDIO_TX_BUFFER_ADDRESS`; later producer changes leave the
+formatter configuration unchanged.
 
-## Measurement method (bench session)
+A direct-ring client uses the audio service opcodes below. The client writes
+PCM into the granted board-visible ring and publishes its producer line. PCM
+does not pass through mailbox payloads.
 
-Single session on target hardware, on the operator's own card, in the
-style of the saturation-ceiling session
-(`docs/audio-saturation-ceiling.md`).
+| Opcode | Value | Operation |
+| --- | --- | --- |
+| `SDK_OP_AUDIO_FABRIC_STATE_GET` | `0x0512` | Read one slot's framed state |
+| `SDK_OP_AUDIO_RING_ACQUIRE` | `0x0513` | Acquire a generation-bound PCM ring and control block |
+| `SDK_OP_AUDIO_RING_RELEASE` | `0x0514` | Release a generation-bound lease |
 
-**Instrument build.** No `instrument` image target exists; the mechanism is the firmware Makefile's `EXTRA_CFLAGS` seam plus compile-time guards in `audio_fabric.c`:
+The audio service advertises 23 opcodes, `0x0500` through `0x0516`. The
+retired copy-submit range `0x050f` through `0x0511` remains reserved.
 
-    make -C ZZ9000_proto.sdk/ZZ9000OS \
-        EXTRA_CFLAGS='-DAUDIO_FABRIC_BENCH'
+A successful acquire zeroes the PCM ring and control block, publishes a fresh
+generation, and begins in `LEASED`. The slot becomes `ACTIVE` after the first
+valid producer-line publication. A release stops the contribution, rebuilds
+queued periods from the remaining producers, and advances the generation. A
+release with a stale generation is idempotent. Firmware revokes a lease after
+a 2,000 ms heartbeat timeout.
 
-Package with `./build_bootimage.sh` and record the BOOT.bin SHA-256 like the ceiling session did. Both Zorro III direct-ring slots are natively grantable; the former three-slot admission flag no longer exists. With the benchmark flag off, every instrumentation hook compiles away.
+`SDK_OP_AUDIO_FABRIC_STATE_GET` reports the slot state, identity, generation,
+written and consumed byte cursors, heartbeat age, underruns, 16.16 peak, and
+clip count. A state read with `HOLD_RESET` requests reset of the lease peak
+window.
 
-**Report.** `main.c` polls `audio_fabric_bench_poll()` each main-loop
-pass; the ISR never prints. One block per second on the firmware
-serial console:
+## Source formats, conversion, and admission
 
-    FABRIC-BENCH hz=333333332 ticks (2 ticks = 1 CPU cycle)
-    FABRIC-BENCH isr avg=<t> peak=<t> n=<calls>
-    FABRIC-BENCH mix avg=<t> peak=<t> n=<calls>
-    FABRIC-BENCH slot0 fill avg=<t> peak=<t> n=<calls>
-    FABRIC-BENCH slot0 conv avg=<t> peak=<t> n=<calls>
-    ... slot1, slot2 ...
+A zero-flags acquire is a 48 kHz stereo S16LE bypass lease. A client can set
+`SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE` and supply a source rate. The
+mailbox currently accepts 8000, 12000, 24000, 32000, 44100, or 48000 Hz.
+`SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE` is valid only with the source-rate
+flag.
 
-`hz` is `COUNTS_PER_SECOND` (the ARM global timer, half the core
-clock): **cycles = 2 x ticks**. `avg` is cumulative ticks/calls,
-`peak` the worst single pass since boot, `n` the accumulated pass
-count. Each measured region includes its own two timer reads (tens of
-ns), which is why per-stage numbers are read against the whole-tick
-`isr` row rather than summed blindly.
+A direct-ring lease at 48 kHz feeds the compositor directly. A lease at any
+other accepted rate is converted into 48 kHz periods by
+`audio_fabric_lease_poll()` on the core-0 main loop. The ISR copies those
+staged periods; it does not run the lease FIR conversion.
 
-**Representative load profile.** Every row runs with core-1 MP3 decode
-active *and* RTG traffic active — the contention case the compositor
-exists for (heavy main-loop passes must not let the DMA overrun the TX
-frontier):
+At most two live producers may require conversion across the three slots. A
+48 kHz bypass lease may acquire a free slot. An acquire that would exceed the
+conversion limit returns `BUSY`. The SDK playback pump also counts when its
+bound source rate differs from 48 kHz.
 
-- Core-1 decode: ZZPlay or MHI playing an MP3 throughout the
-  measurement (the pump producer's decoder runs as a core-1 task).
-- RTG traffic: continuously drag a full-screen Workbench window (or
-  run any full-screen RTG animation), forcing sustained RTG blits
-  through the card while measuring.
+| Capability or flag | Value | Meaning |
+| --- | --- | --- |
+| `SDK_CAP_AUDIO_FABRIC` | bit 27 | Audio fabric is available |
+| `SDK_SERVICE_FLAG_AUDIO_FABRIC` | bit 22 | Direct-ring audio fabric is available in the audio service |
+| `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE` | bit 23 | Source-rate leases are available |
 
-**Producer configurations.** The lease plane's geometry was originally
-fixed bypass — 48 kHz stereo S16LE, `flags` required zero, the lease
-source pinned to 48000. The AHI migration later admitted
-conversion-bearing leases (the six-rate vocabulary below 48 kHz,
-budgeted by the two-converting-producer quota). Since the drivers#83
-follow-up to #100, those leases preconvert on the main loop:
-`audio_fabric_lease_poll()` stages whole converted 48-kHz periods into
-a per-slot ring, and the compositor ISR fill is copy-only for every
-producer. The quota still bounds total conversion cost; it now prices
-main-loop work instead of ISR time. The conversion rows pair the pump
-(an SDK playback binding at a non-48-kHz rate) with bypass leases:
+Clients should check the capability and service flags before using the
+opcodes. Firmware that does not recognize the source-rate flag returns
+`BAD_REQUEST`.
 
-| Row | Producers | How to produce it |
-|---|---|---|
-| B1 | Pump alone, 48 kHz bypass | ZZPlay/MHI playing a 48 kHz stereo MP3 |
-| B2 | Pump alone, 44.1 kHz worst-case conversion | ZZPlay/MHI playing a 44.1 kHz stereo MP3 (densest ratio, 160 phases) |
-| B3 | Pump 44.1 kHz + one bypass lease | B2 plus `zz9k-fabriclease` playing its generated 48 kHz tone |
-| B4 | Pump 44.1 kHz + two direct-ring producers (three sources) | The normal benchmark build; two independent `zz9k-fabriclease` instances acquire slots 1 and 2 |
+## Instrument build
 
-The three-source row measures the production admission path directly.
-Slot 0 remains the pump and the two Zorro III direct-ring slots are
-native peers. No instrument-only admission override is involved.
-Since leases can carry conversion-bearing rates themselves (pre-
-converted on the main loop), the two-conversion-bearing case is now
-constructible too: pair B2's converting pump with one converting
-direct-ring lease (a rate-bearing `zz9k-fabriclease`), and measure the
-main-loop poll cost while both convert. Until that row is measured,
-the second converting producer stays extrapolated: measured `slot0
-conv` doubled over identical per-slot converter instances, which the
-bounded per-slot work makes linear by construction.
+Defining `AUDIO_FABRIC_BENCH` enables firmware-only accounting. The build
+uses the existing `EXTRA_CFLAGS` seam:
 
-## Results — recorded PASS 2026-08-28 (operator session, PAL A4000 / R1 card)
+```
+make -C ZZ9000_proto.sdk/ZZ9000OS EXTRA_CFLAGS='-DAUDIO_FABRIC_BENCH'
+```
 
-Firmware: `feat/audio-fabric-compositor` commit `5e9bed8`; instrument image
-`BOOT-audio-bench.bin` SHA-256 `9b39eab1…1c28`; stock candidate
-`BOOT.bin` = `BOOT-audio-final-fixed.bin` SHA-256 `e89c387c…39f9`. All rows
-run with the representative load profile (core-1 MP3 decode + full-screen
-RTG drag). The operator confirmed PASS for every row; the per-stage numeric
-report blocks were not retained, so the cells below record the qualitative
-result and the underrun observation rather than transcribed timings.
+`audio_fabric_bench_poll()` runs from the main loop and prints one aggregate
+block per second. The ISR does not print. The report uses ARM global-timer
+ticks. `COUNTS_PER_SECOND` is half the 666.67 MHz core clock, so two ticks
+equal one CPU cycle.
 
-| Row | Configuration | Result | Underruns |
-|---|---|---|---|
-| B1 | pump 48 kHz bypass | PASS (user-confirmed 2026-08-28) | 0, stable |
-| B2 | pump 44.1 kHz conversion | PASS (user-confirmed 2026-08-28) | 0, stable |
-| B3 | B2 + 1 bypass lease | PASS (user-confirmed 2026-08-28) | 0, stable |
-| B4 | B2 + 2 direct-ring producers | PASS (user-confirmed 2026-08-28) | 0, stable |
+| Report row | Measured region |
+| --- | --- |
+| `isr` | An active compositor tick from frontier check through tail tracking |
+| `mix` | Mix clear, per-slot accumulation, S16 clamp, and TX cache flush |
+| `slotN fill` | Slot N fill, including source pull, byte order handling, metering, expansion, and gain |
+| `slotN conv` | Slot N conversion work measured by the compositor |
+| `frontier`, `txzero`, `slotN starve`, `slotN zero`, `slotN ring` | DMA movement and source-availability diagnostics |
 
-Admission-rule verdict: the default **2 conversion-bearing + 1 bypass**
-budget stands — every constructible row passed with stable counters and no
-audible defects, so nothing argues a revision. The per-stage timing cells
-were not transcribed; if a future session re-measures, replace the
-qualitative rows with the numeric avg/peak blocks and re-affirm the verdict.
+Each timing region includes two timer reads. Compare stage rows with the
+`isr` row instead of summing them.
 
-Sustained two-stream listening under RTG/network load on the stock candidate
-`BOOT.bin` also passed (user-confirmed 2026-08-28): zero audible drops, the
-fix state that closes the two-client drop investigation (handover Unit 29).
+For a hardware measurement, record the active producer configuration, the
+`isr` and `mix` average and peak values, every active `slotN fill` value,
+conversion rows when present, and underrun or starvation counters. Test the
+48 kHz pump, a converted pump, one bypass lease, and two direct-ring leases.
+Repeat the converted case with a rate-bearing lease to exercise both admitted
+conversion slots.
 
-## Hardware smoke checklist (verification session) — recorded PASS 2026-08-28
+## Hardware results
 
-Run on the instrument build `BOOT-audio-bench.bin` (SHA-256 `9b39eab1…1c28`,
-firmware `5e9bed8`) during the same operator session as the B rows. Every
-item below passed; observations recorded from the operator's confirmation.
+One bench session on 2026-08-28 (PAL A4000, R1 card) qualified the fabric.
+It ran before #110 moved lease rate conversion out of the ISR. Every row ran
+with core-1 MP3 decode and a full-screen RTG window drag in progress. The
+per-stage timing blocks were not kept, so the results are pass/fail only.
 
-| # | Item | Steps | Expected observation |
-|---|---|---|---|
-| S1 | Coexistence audible check | Start ZZPlay/MHI playing an MP3, then run `zz9k-fabriclease` alongside it | Both sources audible simultaneously, mixed without dropouts or level discontinuities |
-| S2 | Underrun counters stable | During S1 and each bench row, poll the per-slot state (`ZZ9K_OP_AUDIO_FABRIC_STATE_GET`) | Underrun counters for active slots stay 0 (or saturate only on deliberately starved producers); other slots' counters unaffected |
-| S3 | Ghost-period listen check | Rapidly cycle the lease: begin, feed briefly, release, repeat while listening | At most one residual period per release (the KTD3 ghost bound): no stuck tone, no stale audio, output returns to pump-only cleanly |
-| S4 | Warm reset during two producers | With pump + lease active and audible, warm-reset (Ctrl-Amiga-Amiga) | Fail-closed teardown: no stale audio after reboot, TX ring silent until a new producer starts, pre-reset lease handles never validate |
-| S5 | State read, ZZTop-independent | Drive every state read through the proof client / SDK opcodes, no ZZTop involvement | Framed per-slot snapshot self-consistent (state, cursors, underruns, 16.16 peak, clips); `HOLD_RESET` consumes the peak window |
+| Row | Producers | Result |
+| --- | --- | --- |
+| B1 | Pump alone, 48 kHz | Pass, 0 underruns |
+| B2 | Pump alone, 44.1 kHz conversion | Pass, 0 underruns |
+| B3 | B2 plus one 48 kHz lease | Pass, 0 underruns |
+| B4 | B2 plus two direct-ring leases | Pass, 0 underruns |
 
-All five items observed PASS by the operator on 2026-08-28: coexistence
-clean (S1), counters stable at 0 across the session (S2), ghost bound held
-on rapid cycling (S3), fail-closed warm reset (S4), framed snapshots
-self-consistent through the proof client (S5).
+The same session passed these checks:
 
-## Post-pass runbook — flip applied 2026-08-28 (local commits, unpushed)
+- Pump and lease audio mixed with no dropouts or level jumps.
+- Underrun counters stayed at 0 for active slots.
+- Rapid acquire, feed and release cycles left at most one residual period per
+  release.
+- A warm reset with two producers active left no stale audio, and handles
+  from before the reset no longer validated.
+- Framed state reads through `zz9k-fabriclease`, without ZZTop, were
+  self-consistent.
 
-On a recorded pass — the 2026-08-28 session above — the advertising flip
-lands as the matched-set sequence from the saturation-ceiling doc's
-coordination section:
+Two-stream listening under RTG and network load also ran with no audible
+drops. No session has measured two converting producers at once.
 
-1. **Firmware flip commit (applied):** `SDK_CAP_AUDIO_FABRIC` (bit 27)
-   added to the audio service word and the global capability set in the
-   `sdk_mailbox.c` service table, `SDK_SERVICE_FLAG_AUDIO_FABRIC` (bit 22)
-   reported, and the audio service's opcode count raised 15 -> **21**
-   (`0x0500..0x0514`: the fabric opcodes are `0x0512`-`0x0514`, with
-   `0x050f..0x0511` reserved gaps — this corrects the earlier draft's
-   "19" which stopped at `0x0512` and did not cover RING_ACQUIRE /
-   RING_RELEASE).
-2. **SDK flip (applied):** audio release requirement in
-   `tools/zz9k-services.c` bumped to caps/flags/opcode-count 21, and the
-   gated-advertising wording in `docs/zz9k-library.md` replaced.
-3. **Tag order** (drivers' `RELEASING.md` dependency order): SDK
-   first (merge + tag + push), then the drivers' `SDK_REF` bump to
-   that release commit, then firmware, then drivers; firmware and
-   drivers carry the same `vX.Y.Z`. **Not started — requires explicit
-   user approval, and the variant-bitstream rebuild with the widened
-   FIFO should land in the firmware release first.**
-4. This file's results table carries the recorded session and the
-   firmware/image SHAs. Re-read the honesty section above: the
-   advertised capability still waits on the AHI migration follow-on
-   for its first shipping consumer.
+## History
+
+| Earlier ABI state | Current rule | Reason retained in the ABI |
+| --- | --- | --- |
+| Copy-submit lease transport used `0x050f` through `0x0511`. | Those values remain reserved. Direct-ring operations start at `0x0512`. | Existing opcode values remain stable. |

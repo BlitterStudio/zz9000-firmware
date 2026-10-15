@@ -210,6 +210,175 @@ static int test_portrait_phone(void)
   return 0;
 }
 
+/* The fullscreen screen must be asked at the video's display size and then
+ * in growing steps, because the card's overlay plane only shows a window
+ * at or above the frame's size correctly (A4000: a 720x576 MPEG-2 frame
+ * letterboxed into a 720x405 window on a 720x576 screen showed just its
+ * top rows, while the same clip windowed at 1024x576 was correct). */
+static int test_fullscreen_screen_request(void)
+{
+  uint16_t w;
+  uint16_t h;
+
+  /* PAL 16:9: the first ask is the display size, not the coded 720x576. */
+  if (!zzplay_geometry_screen_request(0U, 1024U, 576U, 720U, 576U, &w, &h)) {
+    return 1;
+  }
+  if (w != 1024U || h != 576U) return 2;
+  /* The ladder grows, so a screen mode too small for the display can be
+   * left behind without ever asking for a downscale. */
+  if (!zzplay_geometry_screen_request(1U, 1024U, 576U, 720U, 576U, &w, &h)) {
+    return 3;
+  }
+  if (w <= 1024U || h <= 576U) return 4;
+  if (zzplay_geometry_screen_request(4U, 1024U, 576U, 720U, 576U, &w, &h)) {
+    return 5;
+  }
+  /* No display aspect (MPEG-1, WebP): the coded frame is the ask, with
+   * the historical 640x480 pixel-doubling floor. */
+  if (!zzplay_geometry_screen_request(0U, 0U, 0U, 320U, 288U, &w, &h)) {
+    return 6;
+  }
+  if (w != 640U || h != 480U) return 7;
+  return 0;
+}
+
+static int test_fullscreen_plan_reuse_modes(void)
+{
+  ZZPlayFullscreenPlan plan;
+
+  /* 15-bit Workbench */
+  zzplay_geometry_fullscreen_plan(0x50001000UL, 800U, 600U, 15U, &plan);
+  if (plan.action != ZZPLAY_FS_REUSE_MODE) return 1;
+  if (plan.mode_id != 0x50001000UL) return 2;
+  if (plan.target_depth != 15U) return 3;
+
+  /* 16-bit Workbench */
+  zzplay_geometry_fullscreen_plan(0x50002000UL, 1024U, 768U, 16U, &plan);
+  if (plan.action != ZZPLAY_FS_REUSE_MODE) return 4;
+  if (plan.mode_id != 0x50002000UL) return 5;
+  if (plan.target_depth != 16U) return 6;
+
+  /* 32-bit Workbench */
+  zzplay_geometry_fullscreen_plan(0x50003000UL, 1920U, 1080U, 32U, &plan);
+  if (plan.action != ZZPLAY_FS_REUSE_MODE) return 7;
+  if (plan.mode_id != 0x50003000UL) return 8;
+  if (plan.target_depth != 32U) return 9;
+
+  /* Truecolor Workbench reported as depth 24 (Picasso96 reports a
+   * 32-bit screen this way): reuse it at the depth it reports. */
+  zzplay_geometry_fullscreen_plan(0x50003001UL, 1280U, 720U, 24U, &plan);
+  if (plan.action != ZZPLAY_FS_REUSE_MODE) return 10;
+  if (plan.mode_id != 0x50003001UL) return 11;
+  if (plan.target_depth != 24U) return 12;
+
+  return 0;
+}
+
+static int test_fullscreen_plan_8bit_and_unsupported(void)
+{
+  ZZPlayFullscreenPlan plan;
+
+  /* 8-bit CLUT Workbench: matches resolution, forces 16-bit depth */
+  zzplay_geometry_fullscreen_plan(0x50004000UL, 1280U, 720U, 8U, &plan);
+  if (plan.action != ZZPLAY_FS_MATCH_WB_RES) return 1;
+  if (plan.width != 1280U || plan.height != 720U) return 2;
+  if (plan.target_depth != 16U) return 3;
+
+  /* 4-bit Workbench */
+  zzplay_geometry_fullscreen_plan(0x50004001UL, 800U, 600U, 4U, &plan);
+  if (plan.action != ZZPLAY_FS_MATCH_WB_RES) return 4;
+  if (plan.width != 800U || plan.height != 600U) return 5;
+  if (plan.target_depth != 16U) return 6;
+
+  /* 12-bit depth: not an overlay format */
+  zzplay_geometry_fullscreen_plan(0x50004002UL, 1024U, 768U, 12U, &plan);
+  if (plan.action != ZZPLAY_FS_MATCH_WB_RES) return 7;
+  if (plan.width != 1024U || plan.height != 768U) return 8;
+  if (plan.target_depth != 16U) return 9;
+
+  return 0;
+}
+
+static int test_fullscreen_plan_doubled_and_fallback(void)
+{
+  ZZPlayFullscreenPlan plan;
+
+  /* Width < 640: pixel-doubled, falls back to ladder */
+  zzplay_geometry_fullscreen_plan(0x50005000UL, 320U, 240U, 16U, &plan);
+  if (plan.action != ZZPLAY_FS_FALLBACK_LADDER) return 1;
+  if (plan.target_depth != 16U) return 2;
+
+  /* Width < 640 on 32-bit: preserves 32-bit depth in ladder */
+  zzplay_geometry_fullscreen_plan(0x50005001UL, 320U, 240U, 32U, &plan);
+  if (plan.action != ZZPLAY_FS_FALLBACK_LADDER) return 3;
+  if (plan.target_depth != 32U) return 4;
+
+  /* Height < 480: pixel-doubled */
+  zzplay_geometry_fullscreen_plan(0x50005002UL, 640U, 400U, 16U, &plan);
+  if (plan.action != ZZPLAY_FS_FALLBACK_LADDER) return 5;
+  if (plan.target_depth != 16U) return 6;
+
+  /* Width < 640 on 8-bit: falls back to 16-bit depth in ladder */
+  zzplay_geometry_fullscreen_plan(0x50005003UL, 320U, 256U, 8U, &plan);
+  if (plan.action != ZZPLAY_FS_FALLBACK_LADDER) return 7;
+  if (plan.target_depth != 16U) return 8;
+
+  /* Invalid mode ID: falls back to ladder */
+  zzplay_geometry_fullscreen_plan(ZZPLAY_INVALID_MODE_ID, 1920U, 1080U, 32U, &plan);
+  if (plan.action != ZZPLAY_FS_FALLBACK_LADDER) return 9;
+  if (plan.target_depth != 32U) return 10;
+
+  /* Invalid mode ID on 8-bit: falls back to 16-bit ladder */
+  zzplay_geometry_fullscreen_plan(ZZPLAY_INVALID_MODE_ID, 1024U, 768U, 8U, &plan);
+  if (plan.action != ZZPLAY_FS_FALLBACK_LADDER) return 11;
+  if (plan.target_depth != 16U) return 12;
+
+  return 0;
+}
+
+static int test_aspect_fit_up_and_down(void)
+{
+  ZZPlayRect r;
+
+  /* Fit UP (4:3 into 16:9 area: pillarboxed, centered) */
+  r = zzplay_geometry_fit(320U, 240U, 1920U, 1080U);
+  if (r.width != 1440U || r.height != 1080U) return 1;
+  if (r.x != 240 || r.y != 0) return 2;
+
+  /* Fit UP (16:9 into 16:10 area: letterboxed, centered) */
+  r = zzplay_geometry_fit(640U, 360U, 1920U, 1200U);
+  if (r.width != 1920U || r.height != 1080U) return 3;
+  if (r.x != 0 || r.y != 60) return 4;
+
+  /* Fit DOWN (16:9 into 4:3 area: letterboxed, centered) */
+  r = zzplay_geometry_fit(1920U, 1080U, 800U, 600U);
+  if (r.width != 800U || r.height != 450U) return 5;
+  if (r.x != 0 || r.y != 75) return 6;
+
+  /* Fit DOWN (16:9 into 640x480 area: letterboxed, centered) */
+  r = zzplay_geometry_fit(1920U, 1080U, 640U, 480U);
+  if (r.width != 640U || r.height != 360U) return 7;
+  if (r.x != 0 || r.y != 60) return 8;
+
+  /* Fit DOWN (4:3 into 16:9 area: pillarboxed, centered) */
+  r = zzplay_geometry_fit(1280U, 960U, 800U, 450U);
+  if (r.width != 600U || r.height != 450U) return 9;
+  if (r.x != 100 || r.y != 0) return 10;
+
+  /* Anamorphic fit DOWN (1024x576 aspect into 720x576 screen) */
+  r = zzplay_geometry_fit(1024U, 576U, 720U, 576U);
+  if (r.width != 720U || r.height != 405U) return 11;
+  if (r.x != 0 || r.y != 85) return 12;
+
+  /* Anamorphic fit UP (1024x576 aspect into 1920x1080 screen) */
+  r = zzplay_geometry_fit(1024U, 576U, 1920U, 1080U);
+  if (r.width != 1920U || r.height != 1080U) return 13;
+  if (r.x != 0 || r.y != 0) return 14;
+
+  return 0;
+}
+
 int main(void)
 {
   int rc;
@@ -231,6 +400,16 @@ int main(void)
   if (rc != 0) { printf("refit %d\n", rc); return 150 + rc; }
   rc = test_portrait_phone();
   if (rc != 0) { printf("portrait %d\n", rc); return 170 + rc; }
+  rc = test_fullscreen_screen_request();
+  if (rc != 0) { printf("fsrequest %d\n", rc); return 190 + rc; }
+  rc = test_fullscreen_plan_reuse_modes();
+  if (rc != 0) { printf("fsreuse %d\n", rc); return 210 + rc; }
+  rc = test_fullscreen_plan_8bit_and_unsupported();
+  if (rc != 0) { printf("fs8bit %d\n", rc); return 230 + rc; }
+  rc = test_fullscreen_plan_doubled_and_fallback();
+  if (rc != 0) { printf("fsdoubled %d\n", rc); return 250 + rc; }
+  rc = test_aspect_fit_up_and_down();
+  if (rc != 0) { printf("fsfit %d\n", rc); return 270 + rc; }
   printf("zzplay_geometry_test: all checks passed\n");
   return 0;
 }

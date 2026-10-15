@@ -411,6 +411,61 @@ static void scenario_mix(void)
 	mix_case("cancel", 12345, -12345);    /* 0 */
 }
 
+/* The first formatter period after a media bind must find actual source PCM
+ * already committed.  This covers both direct 48 kHz and preconverted views:
+ * the fabric only sees their common producer snapshot. */
+static void scenario_start_prime(void)
+{
+	fabric_reset_state();
+	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_prefill_constant(&g_model_b, 1234);
+	g_dma_count = 0U;
+	(void)audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_PUMP, &g_ops_b);
+	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP,
+					g_model_b.sample_rate);
+	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
+	check(audio_fabric_producer_prime_and_go_live(
+			AUDIO_FABRIC_SLOT_PUMP) != 0,
+	      "startup prime stages real PCM", "");
+	check(g_model_b.staged >= TICK_BYTES,
+	      "startup prime advances source staging", "");
+	dma_tick(1);
+	audio_fabric_isr();
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_PUMP) == 0U,
+	      "primed first formatter period has no underrun", "");
+}
+/* A direct peer may wake after the mailbox takes its optimistic no-peer
+ * branch. The atomic prime then refuses to touch the shared frontier; the
+ * caller must still publish the prepared pump into that live mix. */
+static void scenario_peer_wakes_during_start(void)
+{
+	struct audio_fabric_slot_state pump;
+
+	fabric_reset_state();
+	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_init(&g_model_c, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_prefill_constant(&g_model_b, 1234);
+	model_prefill_constant(&g_model_c, -1234);
+	(void)audio_fabric_producer_attach(
+		AUDIO_FABRIC_SLOT_MAILBOX, &g_ops_c);
+	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_MAILBOX, 48000U);
+	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_MAILBOX);
+	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_MAILBOX);
+	(void)audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_PUMP, &g_ops_b);
+	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP, 48000U);
+	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
+	check(audio_fabric_producer_prime_and_go_live(
+			AUDIO_FABRIC_SLOT_PUMP) == 0,
+	      "peer wake skips shared-frontier prime", "");
+	/* Mirror sdk_mailbox.c's checked zero-result path. */
+	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
+	check(audio_fabric_slot_state(
+			AUDIO_FABRIC_SLOT_PUMP, SDK_AUDIO_METER_IDENTITY_SDK_STREAM,
+			0, &pump) != 0 &&
+	      pump.state == SDK_AUDIO_FABRIC_SLOT_ACTIVE,
+	      "peer wake still publishes pump", "");
+}
+
 /* ---- scenario 3: three-way ownership gate ---- */
 
 static void scenario_gate(void)
@@ -1086,6 +1141,8 @@ int main(int argc, char **argv)
 	characterization_invariants();
 
 	scenario_mix();
+	scenario_start_prime();
+	scenario_peer_wakes_during_start();
 	scenario_pump_gain();
 	scenario_gate();
 	scenario_silence_policy();

@@ -209,6 +209,7 @@ set files [list \
  [file normalize "${origin_dir}/video_source_sync.v" ]\
  [file normalize "${origin_dir}/video_overlay_pixel.v" ]\
  [file normalize "${origin_dir}/video_overlay_linebuffer.v" ]\
+ [file normalize "${origin_dir}/video_overlay_filter.v" ]\
  [file normalize "${origin_dir}/ZZ9000_proto.srcs/sources_1/new/audio_clock.v" ]\
  [file normalize "${origin_dir}/ZZ9000_proto.srcs/sources_1/bd/zz9000_ps/hdl/zz9000_ps_wrapper.v" ]\
 ]
@@ -331,6 +332,9 @@ if { [get_files video_overlay_pixel.v] == "" } {
 }
 if { [get_files video_overlay_linebuffer.v] == "" } {
   import_files -quiet -fileset sources_1 video_overlay_linebuffer.v
+}
+if { [get_files video_overlay_filter.v] == "" } {
+  import_files -quiet -fileset sources_1 video_overlay_filter.v
 }
 if { [get_files audio_clock.v] == "" } {
   import_files -quiet -fileset sources_1 ZZ9000_proto.srcs/sources_1/new/audio_clock.v

@@ -30,8 +30,9 @@ struct SDKServiceDescriptor {
 };
 
 /*
- * Hardware qualification flavor. WebP, FLAC, Ogg Vorbis and WebM
- * (VP8/VP9 + Opus/Vorbis) are implemented but stay unadvertised in release
+ * Hardware qualification flavor. WebP, FLAC, Ogg Vorbis, WebM
+ * (VP8/VP9 + Opus/Vorbis) and MPEG-2 Program Stream (with AC-3/LPCM/MP2)
+ * are implemented but stay unadvertised in release
  * firmware until they pass physical Z2/Z3 qualification. A firmware built
  * with EXTRA_CFLAGS=-DZZ9000_QUALIFY_UNADVERTISED advertises their service
  * flags so the shipped clients exercise them on real hardware. Never
@@ -47,7 +48,8 @@ struct SDKServiceDescriptor {
 	(SDK_SERVICE_FLAG_VIDEO_WEBM_VP8 | \
 	 SDK_SERVICE_FLAG_VIDEO_WEBM_VP9 | \
 	 SDK_SERVICE_FLAG_VIDEO_MEDIA_OPUS | \
-	 SDK_SERVICE_FLAG_VIDEO_MEDIA_VORBIS)
+	 SDK_SERVICE_FLAG_VIDEO_MEDIA_VORBIS | \
+	 SDK_SERVICE_FLAG_VIDEO_MPEG2)
 #else
 #define SDK_QUALIFY_IMAGE_FLAGS 0U
 #define SDK_QUALIFY_AUDIO_FLAGS 0U
@@ -68,7 +70,8 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 	{
 		.service_id = SDK_SERVICE_MEMORY,
 		.version = 0x00020000U,
-		.capability_bits = SDK_CAP_SHARED_ALLOC | SDK_CAP_MEMORY_OPS,
+		.capability_bits = SDK_CAP_SHARED_ALLOC | SDK_CAP_MEMORY_OPS |
+			SDK_CAP_MEDIA_INPUT,
 		.flags = SDK_SERVICE_FLAG_FIRMWARE,
 		.opcode_base = SDK_SERVICE_MEMORY,
 		.opcode_count = 4,
@@ -199,7 +202,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 	{
 		.service_id = SDK_SERVICE_CONSOLE,
 		.version = 0x00020000U,
-		.capability_bits = SDK_CAP_CONSOLE_ENCODE,
+		.capability_bits = 0U,
 		.flags = SDK_SERVICE_FLAG_FIRMWARE,
 		.opcode_base = SDK_SERVICE_CONSOLE,
 		.opcode_count = 1,

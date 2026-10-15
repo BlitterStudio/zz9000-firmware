@@ -60,6 +60,89 @@ int zzplay_geometry_is_fitted(uint16_t width, uint16_t height,
   return error < (src_w > src_h ? (uint32_t)src_w : (uint32_t)src_h);
 }
 
+int zzplay_geometry_depth_is_supported(uint16_t depth)
+{
+  return depth == 15U || depth == 16U || depth == 24U || depth == 32U;
+}
+
+int zzplay_geometry_is_doubled(uint16_t width, uint16_t height)
+{
+  return width < ZZPLAY_SCREEN_FLOOR_W || height < ZZPLAY_SCREEN_FLOOR_H;
+}
+
+void zzplay_geometry_fullscreen_plan(uint32_t wb_mode_id,
+                                     uint16_t wb_width,
+                                     uint16_t wb_height,
+                                     uint16_t wb_depth,
+                                     ZZPlayFullscreenPlan *plan)
+{
+  if (!plan) {
+    return;
+  }
+  memset(plan, 0, sizeof(*plan));
+
+  if (zzplay_geometry_depth_is_supported(wb_depth)) {
+    plan->target_depth = wb_depth;
+  } else {
+    plan->target_depth = 16U;
+  }
+
+  if (zzplay_geometry_is_doubled(wb_width, wb_height) ||
+      wb_mode_id == ZZPLAY_INVALID_MODE_ID) {
+    plan->action = ZZPLAY_FS_FALLBACK_LADDER;
+    return;
+  }
+
+  if (zzplay_geometry_depth_is_supported(wb_depth)) {
+    plan->action = ZZPLAY_FS_REUSE_MODE;
+    plan->mode_id = wb_mode_id;
+    return;
+  }
+
+  plan->action = ZZPLAY_FS_MATCH_WB_RES;
+  plan->width = wb_width;
+  plan->height = wb_height;
+}
+
+static const uint16_t zzplay_screen_request_percent[4] = {100U, 133U, 166U,
+                                                          200U};
+
+int zzplay_geometry_screen_request(unsigned attempt,
+                                   uint16_t display_w, uint16_t display_h,
+                                   uint16_t src_w, uint16_t src_h,
+                                   uint16_t *req_w, uint16_t *req_h)
+{
+  uint32_t w = display_w;
+  uint32_t h = display_h;
+  uint32_t percent;
+
+  if (attempt >= 4U || req_w == 0 || req_h == 0) {
+    return 0;
+  }
+  if (w == 0U || h == 0U) {
+    w = src_w;
+    h = src_h;
+  }
+  percent = zzplay_screen_request_percent[attempt];
+  w = (w * percent) / 100U;
+  h = (h * percent) / 100U;
+  if (w < ZZPLAY_SCREEN_FLOOR_W) {
+    w = ZZPLAY_SCREEN_FLOOR_W;
+  }
+  if (h < ZZPLAY_SCREEN_FLOOR_H) {
+    h = ZZPLAY_SCREEN_FLOOR_H;
+  }
+  if (w > ZZPLAY_SCREEN_CAP_W) {
+    w = ZZPLAY_SCREEN_CAP_W;
+  }
+  if (h > ZZPLAY_SCREEN_CAP_H) {
+    h = ZZPLAY_SCREEN_CAP_H;
+  }
+  *req_w = (uint16_t)w;
+  *req_h = (uint16_t)h;
+  return 1;
+}
+
 int zzplay_geometry_is_exact(const ZZPlayRect *rect,
                              uint16_t src_w, uint16_t src_h)
 {

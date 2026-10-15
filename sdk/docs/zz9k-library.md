@@ -1,27 +1,22 @@
 # zz9k.library
 
-`zz9k.library` is the AmigaOS 3.x entry point for SDK v2. New Amiga-side
-programs should use it instead of talking to the mailbox registers directly.
+`zz9k.library` is the AmigaOS 3.x API for SDK v2. It serializes mailbox requests for Amiga-side programs and provides synchronous, asynchronous, and message-port calls for the firmware services described below. New programs should use the library instead of programming mailbox registers directly.
 
-The current library identity is:
+The current interface is `zz9k.library` version 2, revision 33 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
 
-```c
-#define ZZ9K_LIBRARY_NAME "zz9k.library"
-#define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 33
-```
+## Contents
 
-Open the library with at least version 2:
-
-```c
-#include "proto/zz9k.h"
-#include <proto/exec.h>
-
-struct Library *ZZ9KBase;
-
-ZZ9KBase = OpenLibrary((CONST_STRPTR)ZZ9K_LIBRARY_NAME,
-                       ZZ9K_LIBRARY_VERSION);
-```
+- [Build](#build)
+- [Headers and helpers](#developer-headers)
+- [ABI map](#abi-map)
+- [Calling the library](#synchronous-calls)
+- [Memory and surfaces](#shared-buffer-allocation-flags)
+- [Image service](#image-scaling) and [video service](#streaming-video-sessions)
+- [Audio service](#audio-decode-jobs), [control plane](#audio-control-plane-and-metering), and [direct rings](#audio-fabric-direct-ring-plane)
+- [Codec service](#decompression-jobs) and [crypto service](#crypto-hash-jobs)
+- [Asynchronous calls](#async-calls)
+- [Library compatibility history](#library-compatibility-history)
+- [Cancellation](#async-cancellation), [register clobbers](#register-clobbers), and [example](#example)
 
 ## Build
 
@@ -123,7 +118,7 @@ The command requires service discovery, queries the expected SDK v2 services,
 checks required capabilities, service flags, service version major, opcode base,
 and opcode count, and exits nonzero if the SDK and firmware do not match the
 current release contract. It also checks the capabilities the firmware
-advertises globally rather than per service — `AUDIO_STREAM_DRAIN`, which
+advertises globally rather than per service; `AUDIO_STREAM_DRAIN`, which
 `mhizz9000.library` requires before it will allocate a decoder,
 `HOST_WINDOW_HEAP`, which Zorro 2 MHI and `mpega.library` staging allocate
 from, and, when running on Zorro 2, `APERTURE_LAYOUT`, which makes that
@@ -233,6 +228,50 @@ if (zz9k_crypto_build_chacha20_desc(&stream, input.handle, 0,
 }
 ```
 
+## ABI map
+
+All multi-byte mailbox fields use the byte order defined by `zz9k/abi.h`. The service base identifies an opcode range; query the corresponding service before sending an optional opcode.
+
+| Service | Base | Main capability | Public descriptor types |
+| --- | ---: | --- | --- |
+| Core | `0x0000` | `ZZ9K_CAP_MAILBOX` | `ZZ9KCaps`, `ZZ9KServiceInfoPayload` |
+| Memory | `0x0100` | `ZZ9K_CAP_SHARED_ALLOC` | `ZZ9KSharedBuffer` |
+| Surface | `0x0200` | `ZZ9K_CAP_SURFACES` | `ZZ9KSurfaceDesc`, `ZZ9KPaletteQueryDesc` |
+| Image | `0x0400` | `ZZ9K_CAP_IMAGE_DECODE` / `ZZ9K_CAP_IMAGE_SCALE` | `ZZ9KScaleImageDesc`, `ZZ9KImageDecodeDesc`, `ZZ9KImageSession*Desc` |
+| Audio | `0x0500` | `ZZ9K_CAP_AUDIO_DECODE` | `ZZ9KAudio*Desc` |
+| Codec | `0x0600` | `ZZ9K_CAP_COMPRESSION` | `ZZ9KDecompress*Desc` |
+| Crypto | `0x0800` | `ZZ9K_CAP_CRYPTO` | `ZZ9KCrypto*Desc` |
+| Diagnostics | `0x0900` | `ZZ9K_CAP_DIAGNOSTICS` | `ZZ9KDiag*Payload` |
+| Video | `0x0b00` | `ZZ9K_CAP_VIDEO_DECODE` | `ZZ9KVideoSession*Desc`, `ZZ9KMediaSession*Desc` |
+
+### Opcode map
+
+| Service | Opcodes |
+| --- | --- |
+| Core | `0x0000` NOP, `0x0001` QUERY_CAPS, `0x0002` PING, `0x0003` CANCEL, `0x0004` QUERY_SERVICE, `0x0005` QUERY_APERTURE_LAYOUT |
+| Memory | `0x0100` ALLOC_SHARED, `0x0101` FREE_SHARED, `0x0102` MEM_FILL, `0x0103` MEM_COPY |
+| Surface | `0x0200` ALLOC_SURFACE, `0x0201` FREE_SURFACE, `0x0202` MAP_FRAMEBUFFER_SURFACE, `0x0203` FILL_SURFACE, `0x0204` COPY_SURFACE, `0x0205` QUERY_PALETTE |
+| Image | `0x0400` SCALE_IMAGE, `0x0401` DECODE_JPEG, `0x0402` DECODE_PNG, `0x0403` DECODE_GIF, `0x0404` IMAGE_SESSION_BEGIN, `0x0405` IMAGE_SESSION_FEED, `0x0406` IMAGE_SESSION_CLOSE, `0x0407` SCALE_IMAGE_CLIPPED, `0x0408` IMAGE_ANIMATION_FRAME_NEXT, `0x0409` IMAGE_ANIMATION_FRAME_PRESENT, `0x040a` IMAGE_ANIMATION_FRAME_RETIRE, `0x040b` IMAGE_ANIMATION_RESTART |
+| Audio | `0x0500` DECODE_MP3, `0x0501` MIX_AUDIO, `0x0502` RESAMPLE_AUDIO, `0x0503` STREAM_BEGIN, `0x0504` STREAM_FEED, `0x0505` STREAM_READ, `0x0506` STREAM_CLOSE, `0x0507` STREAM_PLAY, `0x0508` STREAM_STOP, `0x0509`–`0x050e` control and metering, `0x0512` FABRIC_STATE_GET, `0x0513` RING_ACQUIRE, `0x0514` RING_RELEASE, `0x0515` STREAM_GAIN, `0x0516` STREAM_BEGIN_EX |
+| Codec | `0x0600` DECOMPRESS, `0x0601` DECOMPRESS_TEST, `0x0602` STREAM_BEGIN, `0x0603` STREAM_READ, `0x0604` STREAM_CLOSE, `0x0605` STREAM_FEED, `0x0606` DECOMPRESS_BATCH |
+| Crypto | `0x0800` HASH, `0x0801` STREAM, `0x0802` AEAD, `0x0803` KX, `0x0804` VERIFY |
+| Diagnostics | `0x0900` DIAG_READ, `0x0901` DIAG_TIMING, `0x0902` DIAG_SCHED, `0x0903` DIAG_MEMORY |
+| Video | `0x0b00`–`0x0b03` video-session begin/write/decode/close; `0x0b04`–`0x0b0d` media-session begin/write/decode/audio-read/present/discard/status/audio-bind/audio-unbind/close |
+
+### Public descriptor layout
+
+The public descriptors use 32-bit fields. Builders in the named SDK header validate basic ranges and encode their matching mailbox payload.
+
+| Struct | Fields, in layout order | Header |
+| --- | --- | --- |
+| `ZZ9KSurfaceDesc` | `width`, `height`, `pitch`, `format`, `flags`, `handle`, `offset`, `reserved[5]` | `zz9k/abi.h` |
+| `ZZ9KScaleImageDesc` | `src_surface`, `dst_surface`, source `x/y/w/h`, destination `x/y/w/h`, `filter`, `flags` | `zz9k/abi.h` |
+| `ZZ9KImageDecodeDesc` | source handle/offset/length, destination surface and rectangle, `output_format`, `flags` | `zz9k/abi.h` |
+| `ZZ9KImageSessionBeginDesc` | `codec`, `output_mode`, destination surface and rectangle, `output_format`, tile handle/stride/rows, `flags` | `zz9k/abi.h` |
+| `ZZ9KAudioDecodeDesc` | source handle/offset/length, destination handle/offset/capacity, output rate/channels/format, `flags` | `zz9k/abi.h` |
+| `ZZ9KAudioStreamBeginDesc` | MP3 ring handle/capacity, PCM ring handle/capacity, output rate/channels/format, low/high water, `flags` | `zz9k/abi.h` |
+| `ZZ9KDecompressDesc` | source handle/offset/length, destination handle/offset/capacity, `algorithm`, `flags` | `zz9k/abi.h` |
+| `ZZ9KCryptoHashDesc` | source handle/offset/length, destination handle/offset, key handle/offset/length, `algorithm`, `flags` | `zz9k/abi.h` |
 ## Synchronous Calls
 
 Use high-level wrappers such as `ZZ9KQueryCaps()`, `ZZ9KPing()`,
@@ -255,6 +294,14 @@ if (ZZ9KQueryCaps(&caps) != ZZ9K_STATUS_OK) {
 ```
 
 For custom service calls, fill a `ZZ9KRequest` and call `ZZ9KCall()`.
+
+### Raw host contexts and completion IRQs
+
+`zz9k_open(ZZ9KContext **ctx)` discovers and opens a board context. `zz9k_attach_mailbox(ZZ9KContext **ctx, const ZZ9KBoard *board, volatile ZZ9KMailboxDescriptor *mailbox, volatile uint16_t *doorbell, volatile uint16_t *irq_ack)` attaches a context to already-known transport addresses. Close either with `zz9k_close()`.
+
+Raw contexts poll by default. `zz9k_arm_completion_irq(ctx)` makes `zz9k_call()` wait on the SDK completion interrupt when firmware advertises `ZZ9K_CAP_IRQ_COMPLETION`; it returns `ZZ9K_STATUS_UNSUPPORTED` on the host or without that capability. The arming task is the wake target, so one task must own every armed call. Use `zz9k_disarm_completion_irq()` to reverse it. An armed wait is bounded by a context offload budget set with `zz9k_set_offload_timeout_ms()`, or by `ENV:ZZ9K_SYNC_WAIT_TIMEOUT_MS` (default 5 seconds), read once per context. A slow call serializes the shared mailbox lock until it completes or times out.
+
+
 
 Prefer the typed request builders in `zz9k/request.h` over hand-packing
 mailbox payload bytes:
@@ -289,31 +336,14 @@ mailbox byte order before filling public SDK structs.
 
 ## Shared-Buffer Allocation Flags
 
-`ZZ9KAllocShared(length, alignment, flags, buffer)` accepts flag bits from
-`enum ZZ9KAllocFlags` (library revision 26+,
-`ZZ9K_LIBRARY_MIN_REVISION_ALLOC_FLAGS`):
+`ZZ9KAllocShared(length, alignment, flags, buffer)` accepts `enum ZZ9KAllocFlags` (library revision 26+, `ZZ9K_LIBRARY_MIN_REVISION_ALLOC_FLAGS`).
 
-- `ZZ9K_ALLOC_CARD_ONLY` — the 68k never touches the buffer contents; the
-  library skips the board-window mapping and `ZZ9KSharedBuffer.data` stays
-  `NULL` (same convention as `ZZ9K_SURFACE_FLAG_ARM_LOCAL` surfaces). Use
-  it for buffers that are only ever passed by handle — e.g. audio-stream
-  decode/PCM rings consumed on the card. This is what makes such buffers
-  allocatable on Zorro 2, where the default shared heap does not fit in
-  the 4 MB board window.
-- `ZZ9K_ALLOC_HOST_WINDOW` — the buffer must be CPU-visible. On Zorro 3
-  the library strips the bit (the whole shared heap already maps). On a
-  matched Zorro 2 stack, `ZZ9K_CAP_APERTURE_LAYOUT` publishes the exact
-  board-relative framebuffer, PIP, template, host, and audio regions. The
-  RTG driver acknowledges that descriptor only after reserving its regions;
-  the library then cross-checks it against the AutoConfig size and validates
-  the full returned allocation against the host region. Canonical 2 MB and
-  4 MB profiles both provide a 64 KB host heap;
-  the software-ready 8 MB profile provides 128 KB. Firmware without the
-  layout capability retains only the historical fixed 4 MB behavior, so a
-  legacy 2 MB request returns `ZZ9K_STATUS_UNSUPPORTED` without a mailbox
-  round trip. Every rejected returned allocation is freed on the card.
+| Flag | Value | Effect and limit |
+| --- | ---: | --- |
+| `ZZ9K_ALLOC_HOST_WINDOW` | `1U << 0` | Requires CPU-visible memory. Zorro III ignores the bit because the shared heap is mapped. On a matched Zorro II stack, the library validates the returned range against the acknowledged aperture layout and AutoConfig size. The 2 MB and 4 MB profiles provide a 64 KiB host heap; the software-ready 8 MB profile provides 128 KiB. Firmware without layout support retains the historical fixed 4 MB behavior, so a legacy 2 MB request returns `ZZ9K_STATUS_UNSUPPORTED` before a mailbox request. Rejected returned allocations are freed on the card. |
+| `ZZ9K_ALLOC_CARD_ONLY` | `1U << 1` | Keeps the allocation card-side. `ZZ9KSharedBuffer.data` is `NULL`, as for `ZZ9K_SURFACE_FLAG_ARM_LOCAL` surfaces. Use it for handle-only buffers such as audio rings. It avoids the Zorro II 4 MB board-window limit. |
 
-`zz9k_query_aperture_layout()` returns the validated generation-1 layout.
+`ZZ9K_CAP_APERTURE_LAYOUT` advertises a queryable aperture mapping. `zz9k_query_aperture_layout()` returns the validated generation-1 layout.
 `zz9k_read_diag_memory()` reports the layout state and host-heap total, free,
 largest-block, allocation, and invalid-slot counters used by `zz9k-info`.
 
@@ -387,12 +417,20 @@ The complementary direction is measured by the `CPU shared write 16K` and
 `CPU shared write 256K` lines: the Amiga's own CPU running `memcpy` from local
 RAM into a shared buffer over the Zorro bus. Unlike `ARM local copy` (which
 never crosses the bus) and `ARM mem copy` (which runs on the card), these lines
-capture the bandwidth the 68k side actually pays to push bytes to the card —
-the real per-frame budget for any 68k→ARM broadcast protocol (game state,
+capture the bandwidth the 68k side actually pays to push bytes to the card;
+the host-side per-frame budget for any 68k→ARM broadcast protocol (game state,
 offload payloads). The small block exposes per-transfer overhead; the large
 block shows the sustained Zorro write ceiling. Expect these to be far slower
 than the card-local lines, and to vary strongly with the host's Zorro
 implementation (Zorro II vs III, accelerator bus bridges).
+
+### Diagnostics
+
+`ZZ9KReadDiag(ZZ9KDiagInfo *diag)` returns completion counters, last status, pending request count, shared-buffer and heap usage, mailbox location and ring size. Library revision 12 (`ZZ9K_LIBRARY_MIN_REVISION_DIAG_SURFACES`) appends `surfaces_used` and `allocator_invalid_slots`; require that revision before reading those fields.
+
+### Palette query
+
+`ZZ9KQueryPalette()` reads the display-global INDEX8 CLUT into a caller-provided shared buffer. Set `ZZ9KPaletteQueryDesc.start` and `count` (at most `ZZ9K_PALETTE_MAX_ENTRIES`) and provide room for `count * ZZ9K_PALETTE_ENTRY_BYTES`. Entries are consecutive `0x00RRGGBB` words because the full 256-entry table does not fit in the 48-byte reply. `desc.surface` is reserved for future per-surface tables and does not select a palette. `ZZ9K_PALETTE_QUERY_FLAG_SECONDARY` is reserved; firmware returns `ZZ9K_STATUS_UNSUPPORTED` because it does not shadow the secondary CLUT. Require `ZZ9K_LIBRARY_MIN_REVISION_QUERY_PALETTE` and `ZZ9K_SERVICE_FLAG_SURFACE_PALETTE_QUERY`.
 
 ## Image Scaling
 
@@ -431,7 +469,7 @@ they preserve the full image-to-window mapping while optionally restricting
 writes to the current valid clip rectangle. The default SDK slice size is
 `ZZ9K_IMAGE_SCALE_DEFAULT_SLICE_ROWS`, currently 96 destination rows.
 
-`zz9k-scaletest` can exercise both paths on real hardware:
+`zz9k-scaletest` can exercise both paths on hardware:
 
 ```sh
 zz9k-scaletest --nearest
@@ -520,34 +558,21 @@ must still use `ZZ9KQueryCaps()` / `ZZ9KQueryService()` to confirm that
 `zz9k_image_stream_required_service_flags()` builds the service flag mask for a
 streaming JPEG or PNG session, including the output-mode-specific framebuffer or
 tile requirement when needed.
-The image service descriptor uses service-specific flag bits to advertise image
-backend capabilities:
+The image service descriptor reports backend capabilities through these flags.
 
-- `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_BASELINE`: baseline JPEG decode is available.
-- `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_PROGRESSIVE`: progressive JPEG decode is
-  available.
-- `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_DIRECT_BGRA`: the backend can emit BGRA pixels
-  directly instead of decoding to an intermediate RGB buffer first.
-- `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_SCALING`: the backend can scale during JPEG
-  decode.
-- `ZZ9K_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA`: streaming PNG decode can write
-  direct 32-bit BGRA output to a surface or mapped framebuffer. Image sessions
-  also support interlaced PNG and bounded tile output. PNG fit scaling and APNG
-  playback are not supported.
-- `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BILINEAR`: the scaler accepts
-  `ZZ9K_SCALE_BILINEAR` for 32-bit surfaces.
-- `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_CLIPPED`: the scaler accepts clipped
-  destination jobs through `ZZ9KScaleImageClipped()`.
-- `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565`: the scaler converts
-  BGRA8888 sources into RGB565 or RGB555 destinations for 16-bit and 15-bit
-  RTG screens.
-- `ZZ9K_SERVICE_FLAG_IMAGE_STREAMING_INPUT`: compressed input can be fed in
-  bounded chunks through an image session.
-- `ZZ9K_SERVICE_FLAG_IMAGE_TILE_OUTPUT`: image sessions can emit bounded
-  BGRA tiles instead of requiring a full output surface.
-- `ZZ9K_SERVICE_FLAG_IMAGE_FRAMEBUFFER_OUTPUT`: image sessions can write
-  directly to the mapped RTG framebuffer.
-
+| Flag | Meaning |
+| --- | --- |
+| `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_BASELINE` | Baseline JPEG decode is available. |
+| `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_PROGRESSIVE` | Progressive JPEG decode is available. |
+| `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_DIRECT_BGRA` | JPEG can emit BGRA without an intermediate RGB buffer. |
+| `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_SCALING` | JPEG decode can scale. |
+| `ZZ9K_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA` | Streaming PNG can write 32-bit BGRA to a surface or framebuffer. Interlaced PNG and tile output are supported; PNG fit scaling and APNG are not. |
+| `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BILINEAR` | `ZZ9K_SCALE_BILINEAR` is accepted for 32-bit surfaces. |
+| `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_CLIPPED` | `ZZ9KScaleImageClipped()` is available. |
+| `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565` | Scaling converts BGRA8888 to RGB555 or RGB565. |
+| `ZZ9K_SERVICE_FLAG_IMAGE_STREAMING_INPUT` | Image sessions accept bounded input chunks. |
+| `ZZ9K_SERVICE_FLAG_IMAGE_TILE_OUTPUT` | Image sessions can emit bounded BGRA tiles. |
+| `ZZ9K_SERVICE_FLAG_IMAGE_FRAMEBUFFER_OUTPUT` | Image sessions can write the mapped RTG framebuffer. |
 The current libjpeg-turbo backend advertises baseline JPEG, progressive JPEG,
 direct BGRA output, and bounded fit scaling for image sessions. The fit path
 uses libjpeg-turbo DCT scaling first, then a bounded row scaler when the image
@@ -603,6 +628,12 @@ playback contract. No existing opcode, payload layout or LVO changes.
 
 Physical Z2/Z3 memory, cache-coherence and throughput qualification, client
 integration, and distribution notices are release gates before advertising WebP.
+
+The clipped scaler requires `ZZ9K_LIBRARY_MIN_REVISION_SCALE_IMAGE_CLIPPED` in addition to `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_CLIPPED`.
+
+### Animation frames
+
+When the image service advertises `ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION`, the resident frame LVOs `ZZ9KImageAnimationFrameNext()`, `ZZ9KImageAnimationFramePresent()`, `ZZ9KImageAnimationFrameRetire()`, and `ZZ9KImageAnimationRestart()` control timed WebP frames. Require `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION`. The WebP contract below remains unadvertised until physical qualification.
 
 ### Image Tool Smoke Tests
 
@@ -770,7 +801,8 @@ ZZPlay --audio=mhi Work:Audio/test.mp3
 ZZPlay --audio=none --benchmark Work:Audio/test.mp3
 ```
 
-It accepts MPEG-1 Program Streams and standalone Layer III files. MPEG video
+It accepts MPEG-1 and MPEG-2 Program Streams and standalone Layer III files
+(see `zzplay.md` for the full format list). MPEG video
 opens a P96 overlay window, publishes decoder-owned planar frames directly,
 and paces through `timer.device`. Standalone MP3 playback uses the accelerated
 audio-stream service and generic AHI output, or the optional runtime
@@ -797,6 +829,19 @@ sampled every two seconds to keep its own overhead small. MPEG Program Stream
 audio is synchronized to video through AHI or compatible direct AX output.
 Additional codecs are registered as codec/container backend entries and
 advertised via service flags without changing the session lifecycle.
+
+**MPEG Program Stream sessions** (`ZZ9K_VIDEO_CODEC_MPEG1` or
+`ZZ9K_VIDEO_CODEC_MPEG2` with `ZZ9K_VIDEO_CONTAINER_MPEG_PS`) decode pictures
+up to a 1920-pixel side and 1920&times;1088 pixels in either orientation; a
+larger picture fails at Begin with `ZZ9K_STATUS_UNSUPPORTED`. At HD sizes playback
+is best effort: late video may be dropped to keep audio flowing. Frames carry
+the picture size; plane pitches are the macroblock-rounded coded width. MPEG-1 sessions take audio
+`ZZ9K_MEDIA_AUDIO_NONE` or `ZZ9K_MEDIA_AUDIO_MP2`, MPEG-2 sessions also LPCM
+and AC-3. For these sessions `ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME` skips
+B-pictures (no other picture predicts from them). When lag is far behind,
+`ZZ9K_MEDIA_DECODE_SKIP_TO_I_PICTURE` discards dependent P/B pictures until
+the next I picture resets the reference chain. Skipped pictures still advance
+the video clock, so a client can catch up without holding audio behind video.
 
 **WebM sessions** (`ZZ9K_VIDEO_CONTAINER_WEBM` with `ZZ9K_VIDEO_CODEC_VP8` or
 `ZZ9K_VIDEO_CODEC_VP9`, and audio `ZZ9K_MEDIA_AUDIO_NONE`,
@@ -828,7 +873,7 @@ pump. Timestamps from the Matroska container are converted internally to the
 The audio service reserves explicit feature flags for this service family:
 `mp3-decode`, `pcm-mix`, `resample`, and `pcm16-stereo`. Firmware must only
 advertise these after the matching `ZZ9K_OP_DECODE_MP3`, `ZZ9K_OP_MIX_AUDIO`,
-or `ZZ9K_OP_RESAMPLE_AUDIO` path is implemented and tested on real hardware.
+or `ZZ9K_OP_RESAMPLE_AUDIO` path is implemented and tested on hardware.
 `mp3-decode` is decode-to-PCM capability, not a promise that ZZ9000AX is
 installed. Firmware can expose MP3 decode for all ZZ9000 users and separately
 route decoded PCM to ZZ9000AX/card-local output when that optional hardware is
@@ -853,6 +898,119 @@ if (ZZ9KDecodeMp3(&desc, &result) == ZZ9K_STATUS_OK) {
 rate and channel count. Callers that need this resident LVO should check
 `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_DECODE`.
 
+The MP3-only `ZZ9KAudioStreamBegin(const ZZ9KAudioStreamBeginDesc *desc, ZZ9KAudioStreamResult *result)` begins the original stream contract. Use `ZZ9KAudioStreamBeginEx()` when the caller selects a codec explicitly. The result uses `ZZ9K_AUDIO_STREAM_RESULT_DONE` when EOF has been decoded and all PCM has been read. Its sample-format constants are `ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE`, `ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE`, `ZZ9K_AUDIO_SAMPLE_FORMAT_S32LE`, and `ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE`.
+
+### Stream playback and gain
+
+`ZZ9KAudioStreamPlay()` binds a stream to the ZZ9000AX output; `ZZ9KAudioStreamStop()` pauses playback and retains the session. Closing the session or resetting the mailbox unbinds it. Require `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK` and `ZZ9K_CAP_AUDIO_PLAYBACK`; unsupported firmware returns `ZZ9K_STATUS_UNSUPPORTED`. `ZZ9KAudioStreamSetGain(session, gain, flags, result)` requires `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN` and `ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN`. Gain is per session under the active scene: 0 is silence, 128 preserves the scene level, and `flags` must be zero. The request is `ZZ9K_OP_AUDIO_STREAM_GAIN` (`0x0515`); the LVO is `ZZ9K_LVO_AUDIO_STREAM_SET_GAIN` (`-318`).
+
+
+
+### Codec-aware audio streaming and PCM contract
+
+`ZZ9KAudioStreamBeginEx()` generalizes the audio streaming session model to
+codecs beyond MP3 (e.g. FLAC, Vorbis) while preserving the proven bounded
+shared-memory streaming state machine (`ZZ9KAudioStreamFeed()`,
+`ZZ9KAudioStreamRead()`, `ZZ9KAudioStreamClose()`).
+
+| Field | Contract |
+| --- | --- |
+| Codecs | `enum ZZ9KAudioCodec` defines `ZZ9K_AUDIO_CODEC_MP3` (1), `ZZ9K_AUDIO_CODEC_FLAC` (2), and `ZZ9K_AUDIO_CODEC_VORBIS` (3). `ZZ9KAudioStreamBeginExDesc.codec` selects the codec. Unknown or unavailable values return `ZZ9K_STATUS_BAD_REQUEST` or `ZZ9K_STATUS_UNSUPPORTED`. |
+| Native rate and channels | Set `output_hz` to 0 for the source rate and `output_channels` to 0 for the source channel count. `ZZ9KAudioStreamResult.sample_rate` and `channels` return the selected geometry. |
+| PCM format | `ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE` (1), `S16BE` (2), `S32LE` (3), and `S32BE` (4) select signed linear PCM containers. A 24-bit source in a 32-bit container is left-aligned: bits 31..8 contain the sample and bits 7..0 are zero. Unsupported codec/format combinations return `ZZ9K_STATUS_UNSUPPORTED`. |
+| Cursors | `bytes_consumed`, `bytes_produced`, `pcm_write`, `pcm_read`, and capacities are byte counts. A read acknowledgement must contain whole PCM frames (`channels * bytes_per_sample`). |
+| Format stability | Sample rate, channel count, and sample format become fixed after header decode. An unannounced format change faults the session. |
+| Consumer | A session is either unbound readback (`ZZ9KAudioStreamRead()`) or bound playback (`ZZ9KAudioStreamPlay()`). Binding while another session owns playback returns `ZZ9K_STATUS_BUSY`. |
+| End and drain | `ZZ9K_AUDIO_STREAM_FEED_EOF` finishes the stream and returns `ZZ9K_AUDIO_STREAM_RESULT_DONE` after PCM is consumed. `ZZ9K_AUDIO_STREAM_FEED_DRAIN` requires `ZZ9K_CAP_AUDIO_STREAM_DRAIN`, decodes complete frames, retires queued PCM to `ZZ9K_AUDIO_STREAM_RESULT_DRAINED`, and retains incomplete compressed input for a later feed. |
+| Cleanup | Close reclaims decoder allocations and invalidates the session handle. A mailbox reset or firmware restart invalidates every active session. |
+
+#### Native FLAC sessions (`ZZ9K_AUDIO_CODEC_FLAC`, gated by
+`ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM`; both that flag and `ZZ9K_CAP_AUDIO_FLAC`
+stay unadvertised until physical qualification, so clients refuse FLAC on
+current firmware). Feed the whole native file from byte 0 (`fLaC`);
+firmware skips non-STREAMINFO metadata itself. `output_format` must be
+`S16BE` (sources of at most 16 bits), `S16LE` (the little-endian form of
+that 16-bit container; a deeper source is narrowed to the top 16 bits of
+the 32-bit MSB-justified sample), or `S32BE` (up to 24 bits). `S32LE`
+answers `ZZ9K_STATUS_UNSUPPORTED` at Begin; any other value is
+`ZZ9K_STATUS_BAD_REQUEST`. Samples are MSB-justified in a big-endian
+container (`value << (container_bits - source_bits)`), interleaved, native
+rate and channels; `S16LE` is that same 16-bit value stored little-endian.
+`sample_rate`/`channels` stay 0 until STREAMINFO is
+parsed. The first Feed that parses STREAMINFO returns
+`ZZ9K_STATUS_UNSUPPORTED` for more than two channels, more than 24 bits,
+`S16BE` with a deeper source, rates outside 8000..192000 Hz, Ogg-FLAC or
+ID3v2-prefixed input, or a largest frame that cannot fit `pcm_ring_capacity`.
+Corrupt, CRC-failing or truncated input faults with `ZZ9K_STATUS_IO_ERROR`;
+allocation failure with `ZZ9K_STATUS_NO_MEMORY`. Later Feed/Read calls repeat
+the fault status. A frame is decoded only once it is fully buffered (the next
+frame header is present, `FEED_EOF`, or a CRC-verified tail under
+`FEED_DRAIN`), so `input_ring_capacity` must hold at least one compressed
+frame plus a chunk; a ring that cannot accept the next chunk while the decoder
+waits for a frame faults `ZZ9K_STATUS_IO_ERROR`. `ZZ9KAudioStreamPlay()`
+binds an `S16LE` mono or stereo session whose rate the AX pump can convert
+to 48 kHz (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000,
+88200, 96000). Any other format, channel count, or rate answers
+`ZZ9K_STATUS_UNSUPPORTED` (the AHI fallback); Play before the rate is known
+answers `ZZ9K_STATUS_BAD_REQUEST`. Gain, Stop, Play-again, Feed EOF/drain
+and the result fields match an MP3 session. 11025 is converted in 40 ms
+quanta because 20 ms is not an integer frame count.
+
+#### Ogg Vorbis sessions (`ZZ9K_AUDIO_CODEC_VORBIS`, gated by
+`ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM`; both that flag and
+`ZZ9K_CAP_AUDIO_VORBIS` stay unadvertised until physical qualification, so
+clients refuse Vorbis on current firmware). Feed the whole `.ogg`/`.oga` file
+from byte 0 (the identification BOS page). `output_format` must be `S16BE`
+or `S16LE` (Tremor's fixed-point output narrowed to 16 bits, stored in the
+requested byte order); 32-bit formats answer `ZZ9K_STATUS_UNSUPPORTED` at
+Begin, as does firmware running without its
+second core (Vorbis decodes only on core 1). Samples are interleaved at the
+native rate and channels; `sample_rate`/`channels` stay 0 until the
+identification header is parsed. The Feed that parses it returns
+`ZZ9K_STATUS_UNSUPPORTED` for more than two channels or rates outside
+8000..192000 Hz; the first page answers `ZZ9K_STATUS_UNSUPPORTED` for a
+non-Vorbis logical stream (Opus, Ogg-FLAC, Theora, ...). Exactly one logical
+stream is decoded: a second BOS page (multiplexed, or a chained second link)
+stops decoding, later input is discarded, and once every PCM byte of the
+first stream has been published and acknowledged by `ZZ9KAudioStreamRead()`
+the next Feed or Read (possibly the Read that acknowledges the last bytes,
+whose acknowledgement still applies) returns `ZZ9K_STATUS_UNSUPPORTED`; a
+player can therefore play the first link completely and then stop with an
+unsupported-stream error. Bytes after the stream's EOS page that are not an
+Ogg page (for example an ID3v1 tag) are ignored. Corrupt (page CRC, lost or
+out-of-sequence page, broken packet, missing or out-of-order header) or
+truncated input (EOF before the EOS page or inside a packet) faults with
+`ZZ9K_STATUS_IO_ERROR`; allocation failure, including reaching the 1 MiB
+per-session decoder ceiling, with `ZZ9K_STATUS_NO_MEMORY`. Comment headers
+are validated while streaming and never buffered, so embedded cover art of
+any size is accepted. Setup headers and audio packets larger than 64 KiB,
+and codebooks with more than 8192 used entries, answer
+`ZZ9K_STATUS_UNSUPPORTED`. Later Feed/Read calls repeat the fault status.
+Firmware copies input into its own page buffer, so any `input_ring_capacity`
+works and a drained session simply waits for the next page. `ZZ9KAudioStreamPlay()`
+accepts an `S16LE` mono or stereo Vorbis session on the same pump rates as
+FLAC, and answers `ZZ9K_STATUS_UNSUPPORTED` otherwise. Gain, Stop, and the
+result fields match MP3.
+
+`ZZ9KAudioStreamClose()` of a FLAC or Vorbis session never answers
+`ZZ9K_STATUS_BUSY`: the session handle is invalid as soon as Close returns
+(further Feed/Read/Play/Close answer `ZZ9K_STATUS_BAD_HANDLE`), and when the
+decoder heap belongs to the second core the firmware releases it there in the
+background, keeping the session slot reserved until that has happened.
+
+`ZZ9KAudioStreamBeginDesc.low_water_bytes` is the PCM-ring refill
+threshold: while a session is bound to the AX output, the firmware tops the
+decoded PCM ring back up whenever it drains to this level. It is validated
+against `pcm_ring_capacity` (as is `high_water_bytes`); pass zero to refill
+only on explicit feeds. `high_water_bytes` caps the amount of PCM firmware should produce in a
+single mailbox call; pass zero for the firmware default, or a value below the
+PCM ring capacity to keep decode work sliced for interactive callers.
+`zz9k-mp3` remains the low-level decode/transport diagnostic rather than the
+end-user media player. `zz9k-mp3 --stats` prints timing counters for file reads, staging-buffer
+copies, feed calls, PCM copies, output writes, and read acknowledgements. Run
+without `--out` to measure decode/mailbox throughput without pulling PCM back
+to DOS, then compare against `--out` to isolate transfer and filesystem cost.
+
 ## Audio Control Plane and Metering
 
 Firmware can expose a firmware-authoritative control plane over the audio
@@ -876,7 +1034,7 @@ as `ZZ9KAudio*Payload` structs in `include/zz9k/abi.h`. Staged scene
 parameters use the `ZZ9K_AUDIO_SCENE_PARAM_*` ids; note the value-word
 ranges deliberately differ per parameter: EQ/prefactor are 0..100 with 50 as
 0 dB, scene volume is 0..100 with 100 as 0 dB (the `audio_adau_set_vol_pan`
-range), while the pair parameters — baseline and trim balances — pack two
+range), while the pair parameters; baseline and trim balances; pack two
 0..255 mixer legs (127 = 0 dB each) like the historical
 `AP_DSP_SET_VOLUMES` register convention.
 
@@ -895,7 +1053,7 @@ parameters. They flow through two paths and no opcode of their own:
 `ZZ9K_AUDIO_SCENE_PARAM_NAME` (16) stages a name chunk through
 `ZZ9K_OP_AUDIO_SCENE_WRITE` (bits 15..8 = first char, 7..0 = second
 char, printable ASCII or the `0x0000` terminator; a rename stages the
-complete name — up to 8 chunks, 16 characters — then commits once,
+complete name; up to 8 chunks, 16 characters; then commits once,
 and the commit issues no DSP writes), and the `audio_scene<N>_nm1..8`
 keys persist names in `ZZ9000.CFG` with the same packing.
 `ZZ9K_OP_AUDIO_CONTROL_STATE_GET` deliberately does not report names:
@@ -912,8 +1070,8 @@ request is therefore not expressible; owners that want the baseline
 submit the reserved word.
 
 `ZZ9K_OP_AUDIO_SCENE_SAVE` runs the temp-then-replace SD sequence as a
-firmware state machine stepped by the service loop — at most one FatFs
-call per loop pass — so normal SD traffic interleaves with Zorro service
+firmware state machine stepped by the service loop; at most one FatFs
+call per loop pass; so normal SD traffic interleaves with Zorro service
 instead of holding the mailbox dispatch across the whole save. The
 firmware's SDPS command/read/write polls also carry a two-second
 deadline; a controller that never signals completion returns an I/O
@@ -921,7 +1079,7 @@ error instead of spinning core 0 forever (the historical freeze locked
 up the whole Amiga). The reply is therefore immediate:
 `ZZ9K_AUDIO_SCENE_SAVE_QUEUED` (3) when the machine started or queued
 behind an active DSP commit, `ZZ9K_AUDIO_SCENE_SAVE_BUSY` (4) when a
-previous save is still running (the new request is refused — retry
+previous save is still running (the new request is refused; retry
 after the current save settles), or an immediate
 `ZZ9K_AUDIO_SCENE_SAVE_REJECTED` when boundary validation runs before
 the reply. A save queued behind a DSP commit validates only after that
@@ -933,9 +1091,7 @@ most recent settled status afterwards.
 
 Calibrated matched firmware advertises `ZZ9K_CAP_AUDIO_CONTROL` (bit
 25), `ZZ9K_CAP_AUDIO_METERING` (bit 26), and
-`ZZ9K_SERVICE_FLAG_AUDIO_CONTROL` (bit 21). Its audio service reports
-15 opcodes through `0x050e`. Older or uncalibrated firmware omits the
-bits, so clients must still gate exactly like every other surface:
+`ZZ9K_SERVICE_FLAG_AUDIO_CONTROL` (bit 21). The current audio service descriptor reports 23 opcode slots through `0x0516`, including the reserved `0x050f`–`0x0511` gap. The control-plane subset occupies `0x0509` through `0x050e`. Older or uncalibrated firmware omits the bits, so clients must still gate exactly like every other surface:
 
 ```c
 if (!zz9k_has_capabilities(caps.capability_bits, ZZ9K_CAP_AUDIO_CONTROL)) {
@@ -956,7 +1112,7 @@ are documented in the firmware repo's
 
 The audio fabric grants generation-bound host-visible PCM rings to independent producers. Firmware reserves slot 0 for the playback pump. Zorro III exposes two direct-ring slots; Zorro II exposes one compact slot and refuses a second acquisition.
 
-The plane is advertised: the hardware qualification session passed on 2026-08-28 (firmware `docs/audio-fabric.md`), so firmware now sets `ZZ9K_CAP_AUDIO_FABRIC` and reports `ZZ9K_SERVICE_FLAG_AUDIO_FABRIC` in the audio service. Clients must still treat a missing capability as a clean decline — firmware older than the qualified release advertises nothing here.
+The plane is advertised: the hardware qualification session passed on 2026-08-28 (firmware `docs/audio-fabric.md`), so firmware now sets `ZZ9K_CAP_AUDIO_FABRIC` and reports `ZZ9K_SERVICE_FLAG_AUDIO_FABRIC` in the audio service. Clients must still treat a missing capability as a clean decline; firmware older than the qualified release advertises nothing here.
 
 | Opcode | Value | Purpose |
 | --- | --- | --- |
@@ -976,8 +1132,8 @@ grant then answers under sample contract
 rate echoed in its `source_rate` result word (populated as 48000 for
 bypass grants). The lease rate vocabulary is the qualified conversion
 table restricted to rates whose 20 ms period is an integer frame count
-that fits one 48 kHz period — 8000, 12000, 16000, 22050, 24000, 32000,
-44100, or 48000 Hz — and firmware converts each 20-ms source period
+that fits one 48 kHz period; 8000, 12000, 16000, 22050, 24000, 32000,
+44100, or 48000 Hz; and firmware converts each 20-ms source period
 (`rate/50 * 4` bytes) to the 48-kHz output domain with the qualified
 per-slot kernel; the ring geometry words still describe 3,840-byte periods. Firmware advertising this
 reports `ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE` in the audio service;
@@ -988,7 +1144,7 @@ selected AHI rate and leases the card-side conversion.
 
 The steady data path performs no mailbox copy. A producer writes PCM, makes the range visible, and commits its write cursor. Firmware validates the producer line, consumes complete periods, and returns ring credits through the consumed cursor. Producers use those credits for backpressure; `FABRIC_STATE_GET` is telemetry, not pacing.
 
-The typed client surface in `include/zz9k/audio.h` validates grants, wraps ring writes, publishes producer state, reads firmware credits, refreshes heartbeats, and performs generation-bound release. `tools/zz9k-fabriclease.c` exercises acquire, direct writes, credit pacing, heartbeat recovery, low-rate telemetry, drain, Ctrl-C cleanup, and Zorro II single-slot refusal.
+The typed client surface in `include/zz9k/audio.h` validates grants, wraps ring writes, publishes producer state, reads firmware credits, refreshes heartbeats, and performs generation-bound release. The resident mailbox path accepts a legacy bypass grant only when source-rate conversion was not requested. It validates that a returned grant matches the requested contract and source rate, then releases malformed or mismatched grants before reporting failure. `tools/zz9k-fabriclease.c` exercises acquire, direct writes, credit pacing, heartbeat recovery, low-rate telemetry, drain, Ctrl-C cleanup, and Zorro II single-slot refusal.
 
 Zorro II aperture-layout generation 2 reserves one 48-KiB direct region and leaves 16 KiB in the general host-window heap. Zorro III grants two 16-period rings. A firmware or bitstream that predates the matched layout is declined cleanly.
 
@@ -1581,441 +1737,43 @@ status = zz9k_event_wait_async_ports(&timer, ports, 2, 2,
                                      completed, 8, &drained, &signals);
 ```
 
-Library revision 3 added `ZZ9KWaitAsync()`. It waits for one queued async
-request while still allowing unrelated completions to be dispatched. Library
-revision 4 adds `ZZ9KWaitAsyncBatch()`, which waits until every entry in an
-async array is complete or the poll budget expires. On timeout it leaves
-unfinished requests queued; callers can cancel them explicitly or continue
-waiting later.
+Library-version availability is listed in [Library compatibility history](#library-compatibility-history).
 
-Library revision 16 makes the resident AmigaOS wait helpers IRQ-aware when the
-firmware advertises `ZZ9K_CAP_IRQ_COMPLETION`. `ZZ9KWaitAsync()` and
-`ZZ9KWaitAsyncBatch()` temporarily enable SDK completion interrupts, wait for
-the shared ZZ9000 interrupt server signal, then drain completions through the
-same dispatcher path. If IRQ completion is not available, the helpers keep the
-older polling behavior. Callers that need custom scheduling can still drive
-completion manually with `ZZ9KPoll()`.
+## Library compatibility history
 
-Library revision 17 adds a resident event dispatcher. After a successful
-`ZZ9KCallAsync()`, `ZZ9KCallAsyncBatch()`, `ZZ9KCallAsyncMsg()`, or
-`ZZ9KCallAsyncBatchMsg()`, the library starts a small dispatcher process when
-the firmware advertises `ZZ9K_CAP_IRQ_COMPLETION`. The dispatcher owns the SDK
-completion interrupt wait signal, drains completions inside the library, and
-posts the usual callback or Exec message-port reply. This lets event-driven
-programs wait on their own message ports without explicitly calling
-`ZZ9KPoll()`.
+Use the named minimum-revision constant whenever an application requires an LVO added after its oldest supported library revision. Firmware availability is separate: also query the relevant capability and service flag.
 
-`zz9k_event_wait_msg()` is a convenience wrapper around `Wait()` and `GetMsg()`
-for one outstanding request. It returns `ZZ9K_STATUS_OK`, the async completion
-status, `ZZ9K_STATUS_TIMEOUT`, `ZZ9K_STATUS_CANCELLED` when a caller-supplied
-cancel signal such as `SIGBREAKF_CTRL_C` wins, or `ZZ9K_STATUS_INTERNAL_ERROR`
-for an unexpected message/state. `zz9k_event_wait_async_port()` is the matching
-helper for several outstanding requests on one reply port.
-`zz9k_event_wait_async_ports()` and `zz9k_event_drain_async_ports()` handle the
-same pattern across several reply ports.
-Empty reply-port signals are treated as stale.
-The wait helpers keep waiting until a completion, cancel signal, or timeout is
-observed.
-`zz9k_event_wait_signal()` covers callback-style code that signals the caller's
-task rather than posting an Exec message. The older
-`ZZ9KWaitAsync()` and `ZZ9KWaitAsyncBatch()` helpers remain useful for
-compatibility paths and simple command-line tests, but new applications should
-usually wait on Exec message ports directly. That keeps SDK completions
-composable with Intuition windows, timers, sockets, and Ctrl-C handling.
+| Revision | Minimum-revision constant | Added or changed interface |
+| ---: | --- | --- |
+| 2 | `ZZ9K_LIBRARY_MIN_REVISION_CANCEL_ASYNC` | `ZZ9KCancelAsync()` |
+| 3 | `ZZ9K_LIBRARY_MIN_REVISION_WAIT_ASYNC` | `ZZ9KWaitAsync()` |
+| 4 | `ZZ9K_LIBRARY_MIN_REVISION_WAIT_ASYNC_BATCH` | `ZZ9KWaitAsyncBatch()` |
+| 5–10 | `ZZ9K_LIBRARY_MIN_REVISION_ACCEL_JOB_WRAPPERS` through `ZZ9K_LIBRARY_MIN_REVISION_CRYPTO_AEAD_BATCH` | Decode/hash, hash batch, stream, stream batch, AEAD, and AEAD batch wrappers |
+| 11–15 | `ZZ9K_LIBRARY_MIN_REVISION_SURFACE_OPS` through `ZZ9K_LIBRARY_MIN_REVISION_TYPED_IMAGE_DECODE` | Surface copy/fill, diagnostic surface fields, image sessions, clipped scaling, and typed image decode |
+| 16–17 | `ZZ9K_LIBRARY_MIN_REVISION_EVENT_DISPATCHER` | IRQ-aware waits and dispatcher-delivered callbacks or message-port completion |
+| 20 | None | INT6 remains the default. `ENV:ZZ9K_INT2` selects INT2 before the library installs its interrupt server. Firmware ABI 2.3+ can store `int2 = on` in `ZZ9000.CFG`; the environment variable wins. |
+| 21–22 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_DECODE`, `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM` | MP3 decode and bounded MP3 streaming |
+| 23–24 | `ZZ9K_LIBRARY_MIN_REVISION_CRYPTO_KX`, `ZZ9K_LIBRARY_MIN_REVISION_CRYPTO_VERIFY` | X25519, P-256 ECDH, and ECDSA-P256/RSA-PKCS1-2048 verification |
+| 25–29 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK` through `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_DRAIN` | Stream play/stop, allocation flags, drain, palette query, and hardened direct-ring lease validation |
+| 31 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN` | `ZZ9KAudioStreamSetGain()`; gain 0 is silence, 128 preserves scene level, and flags are zero |
+| 32 | `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION` | `ZZ9KImageAnimationFrameNext()`, Present, Retire, and Restart |
+| 33 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX` | `ZZ9KAudioStreamBeginEx()` at `ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX` (`-348`); older firmware returns `ZZ9K_STATUS_UNSUPPORTED`, with no implicit MP3-only fallback |
 
-Callbacks delivered by the dispatcher run in the dispatcher process. Keep them
-short: copy small status fields, signal your own task, and return. Do not call
-back into `zz9k.library` from such callbacks; use an Exec message port for
-larger event-driven workflows.
+### Async submission and wait helpers
 
-Programs that require dispatcher-delivered message-port completion should check:
+| Function | Contract |
+| --- | --- |
+| `ZZ9KCallAsync(async, request, callback, user_data)` | Queues one request with an optional callback. The callback runs in the dispatcher process, so it must not reenter `zz9k.library`. |
+| `ZZ9KCallAsyncBatch(asyncs, requests, count, callback, user_data, queued)` | Queues a batch and reports the accepted count through `queued`. |
+| `zz9k_event_wait_signal(timer, signal_mask, timeout_secs, cancel_mask, signals_out)` | Waits for a callback-style task signal. It returns `ZZ9K_STATUS_OK`, `ZZ9K_STATUS_CANCELLED`, `ZZ9K_STATUS_TIMEOUT`, or `ZZ9K_STATUS_INTERNAL_ERROR` for an unexpected wakeup. |
 
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_EVENT_DISPATCHER) {
-  /* fallback to ZZ9KPoll() / ZZ9KWaitAsync(), or refuse to run */
-}
-```
+### Wait helpers
 
-Library revision 20 keeps INT6 as the default interrupt line for the resident
-library, matching the historical ZZ9000 setup. If a system is configured to
-route the SDK completion interrupt through INT2, set `ENV:ZZ9K_INT2` before
-the resident library installs its SDK interrupt server. The standalone
-`zz9k-irqtest` diagnostic uses the same environment name. With firmware
-ABI 2.3+ the setting can instead live as `int2 = on` in the SD card's
-`ZZ9000.CFG` (editable from ZZTop's Settings window); the library, the
-diagnostic and the ZZ9000 device drivers all consult it through the same
-query interface, and an existing `ENV:ZZ9K_INT2` variable takes precedence
-over the config file.
-
-Raw-transport contexts (`zz9k_open` and `zz9k_attach_mailbox`) use the
-fine-grained polling path by default. A program may call
-`zz9k_arm_completion_irq` explicitly when one task owns the context for the
-entire armed lifetime. Do not arm shared library or provider contexts whose
-calls can arrive from different tasks: the interrupt wake target is the task
-that armed the context. The armed wait's hard bound is the context's
-wall-clock offload budget when set, otherwise
-`ENV:ZZ9K_SYNC_WAIT_TIMEOUT_MS` (default 5000), read once per context.
-
-Programs that require the wait helper should check:
-
-```c
-if (ZZ9KBase->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_WAIT_ASYNC) {
-  /* fallback or refuse to run */
-}
-```
-
-Programs that require the batch wait helper should check:
-
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_WAIT_ASYNC_BATCH) {
-  /* fallback or refuse to run */
-}
-```
-
-Library revision 5 added the convenience acceleration wrappers
-`ZZ9KDecodeImage()` and `ZZ9KCryptoHash()`. Programs that require them should
-check:
-
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_ACCEL_JOB_WRAPPERS) {
-  /* fallback or refuse to run */
-}
-```
-
-Library revision 6 added `ZZ9KCryptoHashBatch()`. Programs that require the
-public batch helper should check:
-
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_CRYPTO_HASH_BATCH) {
-  /* fallback or refuse to run */
-}
-```
-
-Library revision 7 added `ZZ9KCryptoStream()`. Programs that require stream
-cipher jobs should check:
-
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_CRYPTO_STREAM) {
-  /* fallback or refuse to run */
-}
-```
-
-Library revision 8 added `ZZ9KCryptoStreamBatch()`. Programs that require the
-stream batch helper should check:
-
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_CRYPTO_STREAM_BATCH) {
-  /* fallback or refuse to run */
-}
-```
-
-Library revision 9 added `ZZ9KCryptoAead()`. Programs that require AEAD jobs
-should check:
-
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_CRYPTO_AEAD) {
-  /* fallback or refuse to run */
-}
-```
-
-Library revision 10 added `ZZ9KCryptoAeadBatch()`. Programs that require the
-AEAD batch helper should check:
-
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_CRYPTO_AEAD_BATCH) {
-  /* fallback or refuse to run */
-}
-```
-
-Library revision 11 added `ZZ9KFillSurface()` and `ZZ9KCopySurface()`.
-Programs that require ARM-side surface fill/copy should check:
-
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_SURFACE_OPS) {
-  /* fallback or refuse to run */
-}
-```
-
-Library revision 12 extended `ZZ9KDiagInfo` with `surfaces_used` and
-`allocator_invalid_slots`. Programs that read these fields should check:
-
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_DIAG_SURFACES) {
-  /* field unavailable */
-}
-```
-
-Library revision 13 added public image-session wrappers:
-`ZZ9KImageSessionBegin()`, `ZZ9KImageSessionFeed()`, and
-`ZZ9KImageSessionClose()`. Programs that require bounded-input image decode
-through `zz9k.library` should check:
-
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_IMAGE_SESSIONS) {
-  /* fallback or refuse to run */
-}
-```
-
-Library revision 14 added `ZZ9KScaleImageClipped()`. Programs that require
-clip-aware ARM-side scaling should check:
-
-```c
-if (ZZ9KBase->lib_Revision <
-    ZZ9K_LIBRARY_MIN_REVISION_SCALE_IMAGE_CLIPPED) {
-  /* fallback or refuse to run */
-}
-```
-
-Library revision 21 added `ZZ9KDecodeMp3()`. Programs that require ARM-side
-MP3-to-PCM decode should check:
-
-```c
-if (ZZ9KBase->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_AUDIO_DECODE) {
-  /* fallback or refuse to run */
-}
-```
-
-Library revision 22 added MP3 streaming sessions. Programs that require
-bounded-memory MP3 decode should check:
-
-```c
-if (ZZ9KBase->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM) {
-  /* fallback or refuse to run */
-}
-```
-
-The streaming surface uses `ZZ9KAudioStreamBegin()`, `ZZ9KAudioStreamFeed()`,
-`ZZ9KAudioStreamRead()`, and `ZZ9KAudioStreamClose()` so large files do not
-need to fit in shared memory at once.
-
-Library revision 23 added X25519 key exchange via `ZZ9KCryptoKeyExchange()`.
-Programs that require it should check:
-
-```c
-if (ZZ9KBase->lib_Revision < ZZ9K_LIBRARY_MIN_REVISION_CRYPTO_KX) {
-  /* fallback or refuse to run */
-}
-```
-
-The firmware also advertises X25519 support through the crypto
-service flags; gate hardware use on `ZZ9K_SERVICE_FLAG_CRYPTO_X25519` from
-`ZZ9KQueryService()`.
-
-Library revision 24 added P-256 ECDH (the same `ZZ9KCryptoKeyExchange()` with
-`ZZ9K_CRYPTO_KX_P256` and a 65-byte uncompressed peer point) and signature
-verification via `ZZ9KCryptoVerify()`, which checks ECDSA-P256 or
-RSA-PKCS1-2048 signatures over a SHA-256 digest. Gate these on
-`ZZ9K_LIBRARY_MIN_REVISION_CRYPTO_VERIFY` and the
-`ZZ9K_SERVICE_FLAG_CRYPTO_P256`, `ZZ9K_SERVICE_FLAG_CRYPTO_ECDSA_P256`, and
-`ZZ9K_SERVICE_FLAG_CRYPTO_RSA_2048` service flags.
-
-Library revision 25 added `ZZ9KAudioStreamPlay()` and `ZZ9KAudioStreamStop()`,
-which bind an MP3 streaming session to the ZZ9000AX output so the firmware
-pumps decoded PCM straight to the audio hardware (stop pauses playback and
-keeps the session; close or a mailbox reset unbinds it implicitly). Both take
-the same `(session, flags, result)` arguments as `ZZ9KAudioStreamClose()` and
-return the standard audio-stream result. Gate on
-`ZZ9K_LIBRARY_MIN_REVISION_AUDIO_PLAYBACK` and the `ZZ9K_CAP_AUDIO_PLAYBACK`
-capability bit from `ZZ9KQueryCaps()`; the ops return
-`ZZ9K_STATUS_UNSUPPORTED` on firmware that does not implement them.
-
-Library revision 27 accepts `ZZ9K_AUDIO_STREAM_FEED_DRAIN` in
-`ZZ9KAudioStreamFeed()`. Unlike permanent EOF, a drain decodes every complete
-MP3 frame currently available, retains an incomplete compressed-frame tail,
-and reports `ZZ9K_AUDIO_STREAM_RESULT_DRAINED` only after decoded PCM and the
-bound AX DMA tail have retired. Later non-empty input resumes the same stream.
-Callers that use this flag must require
-`ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_DRAIN` and
-`ZZ9K_CAP_AUDIO_STREAM_DRAIN`; revision 26 and earlier reject the flag during
-client-side request validation.
-
-Library revision 28 added `ZZ9KQueryPalette()`, which reads the INDEX8 display
-CLUT into a caller shared buffer. Fill a `ZZ9KPaletteQueryDesc` with `start`
-and `count` (bounded by `ZZ9K_PALETTE_MAX_ENTRIES`) plus the
-`dst_handle`/`dst_offset` of a shared buffer with room for
-`count * ZZ9K_PALETTE_ENTRY_BYTES`; the 256-entry table cannot fit the fixed
-48-byte reply, so - as the crypto hash op does - the result is written to the
-destination buffer as consecutive `0x00RRGGBB` words. The palette is
-display-global: `desc.surface` is carried for future per-surface tables but
-does not select one, and reading it implies nothing about 8-bit overlay
-composition being available. `ZZ9K_PALETTE_QUERY_FLAG_SECONDARY` is reserved
-for the secondary (HI) CLUT, which firmware does not shadow, so it returns
-`ZZ9K_STATUS_UNSUPPORTED` rather than a silently wrong answer. Gate on
-`ZZ9K_LIBRARY_MIN_REVISION_QUERY_PALETTE` and the
-`ZZ9K_SERVICE_FLAG_SURFACE_PALETTE_QUERY` surface-service flag; the op returns
-`ZZ9K_STATUS_UNSUPPORTED` on firmware that does not implement it.
-
-Library revision 29 hardens direct audio-ring lease acquisition without adding
-an LVO. The resident mailbox path accepts the legacy bypass grant only for a
-request that did not ask for source-rate conversion, verifies that a returned
-grant matches the requested contract and source rate, and releases malformed
-or mismatched grants before reporting failure. This prevents a failed acquire
-from leaking a firmware lease and prevents clients from accepting a different
-audio contract than they requested.
-ZZ9K_OP_AUDIO_STREAM_GAIN is the per-session gain request. Library revision 31
-appends ZZ9KAudioStreamSetGain(session, gain, flags, result) at
-ZZ9K_LVO_AUDIO_STREAM_SET_GAIN; callers must gate it on
-ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN and the audio-service
-ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN. Gain is per audio-stream session and
-is attenuation under the active scene: 0 is silence and 128 preserves the
-scene level. flags must be zero. A gain selected while unbound is retained
-for the next ZZ9KAudioStreamPlay; changing a currently bound session takes
-effect in the fabric pump without modifying the scene-owned master chain.
-
-Library revision 32 adds timed WebP animation frame LVOs:
-`ZZ9KImageAnimationFrameNext()`, `ZZ9KImageAnimationFramePresent()`,
-`ZZ9KImageAnimationFrameRetire()`, and `ZZ9KImageAnimationRestart()`.
-Callers must gate these on `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION`
-and `ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION`.
-
-Library revision 33 adds the codec-aware audio streaming begin LVO:
-`ZZ9KAudioStreamBeginEx()` at `ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX`. Callers must gate
-it on `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX`. Firmware without the
-BeginEx opcode answers `ZZ9K_STATUS_UNSUPPORTED`; there is no silent fallback
-to the MP3-only Begin, so MP3 clients that must run on older firmware keep
-using `ZZ9KAudioStreamBegin()`.
-
-### Codec-Aware Audio Streaming and PCM Contract
-
-`ZZ9KAudioStreamBeginEx()` generalizes the audio streaming session model to
-codecs beyond MP3 (e.g. FLAC, Vorbis) while preserving the proven bounded
-shared-memory streaming state machine (`ZZ9KAudioStreamFeed()`,
-`ZZ9KAudioStreamRead()`, `ZZ9KAudioStreamClose()`).
-
-- **Codecs**: Supported codecs are enumerated in `enum ZZ9KAudioCodec`:
-  `ZZ9K_AUDIO_CODEC_MP3` (1), `ZZ9K_AUDIO_CODEC_FLAC` (2), `ZZ9K_AUDIO_CODEC_VORBIS` (3).
-  The codec is specified explicitly in `ZZ9KAudioStreamBeginExDesc.codec`. Unknown or
-  unimplemented codec values are rejected with `ZZ9K_STATUS_BAD_REQUEST` or
-  `ZZ9K_STATUS_UNSUPPORTED`.
-- **Native Rate and Channels**: Setting `output_hz = 0` selects native source rate;
-  setting `output_channels = 0` selects native source channels (1 = mono, 2 = stereo).
-  The actual stream geometry is returned in `ZZ9KAudioStreamResult.sample_rate` and
-  `ZZ9KAudioStreamResult.channels`.
-- **PCM Container Format and Valid-Bit Semantics**: Supported sample formats are
-  `ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE` (1), `ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE` (2),
-  `ZZ9K_AUDIO_SAMPLE_FORMAT_S32LE` (3), and `ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE` (4).
-  For 16-bit containers, samples are signed 16-bit linear PCM.
-  For 32-bit containers, samples are signed 32-bit linear PCM. When decoding 24-bit sources
-  (e.g. 24-bit FLAC) into a 32-bit container, samples are left-aligned (shifted left by 8 bits,
-  MSB-aligned into bits 31..8, with bits 7..0 zeroed) to preserve unity scale and full dynamic range.
-  Requesting an unsupported format for a given codec (e.g. 32-bit output from the 16-bit MP3 backend)
-  returns `ZZ9K_STATUS_UNSUPPORTED`.
-- **Cursor Units and Invariants**: All cursor positions (`bytes_consumed`, `bytes_produced`,
-  `pcm_write`, `pcm_read`) and capacities are strictly byte-denominated. One audio PCM frame consists
-  of `channels * bytes_per_sample` bytes. Acknowledges (`pcm_read` in `ZZ9KAudioStreamRead`) must be
-  whole frames; partial frames are never published or consumed.
-- **Format Stability**: The decoded audio geometry (`sample_rate`, `channels`, `sample_format`) is fixed
-  upon initial header decode. Dynamic mid-stream geometry switching is forbidden; an unannounced
-  format change faults the stream.
-- **Single-Consumer Ownership**: An audio stream session operates in either unbound readback mode
-  (consumed via `ZZ9KAudioStreamRead()`) or bound playback mode (pumped to ZZ9000AX via
-  `ZZ9KAudioStreamPlay()`). A session cannot switch between consumer modes without explicit transition,
-  and attempting to bind playback while another session is active returns `ZZ9K_STATUS_BUSY`.
-- **EOF and Resumable Drain**: Feeding `ZZ9K_AUDIO_STREAM_FEED_EOF` marks permanent end of stream;
-  the session decodes all remaining input and signals `ZZ9K_AUDIO_STREAM_RESULT_DONE` once all PCM has
-  been read. Feeding `ZZ9K_AUDIO_STREAM_FEED_DRAIN` marks a starvation boundary; complete frames are
-  decoded, unread PCM drains to `ZZ9K_AUDIO_STREAM_RESULT_DRAINED`, and incomplete compressed data is
-  retained so subsequent feeds can seamlessly resume decoding.
-- **Cleanup and Reset**: Closing a session reclaims all decoder allocations and invalidates the session handle.
-  A firmware mailbox reset or restart invalidates every active session.
-
-**Native FLAC sessions** (`ZZ9K_AUDIO_CODEC_FLAC`, gated by
-`ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM`; both that flag and `ZZ9K_CAP_AUDIO_FLAC`
-stay unadvertised until physical qualification, so clients refuse FLAC on
-current firmware). Feed the whole native file from byte 0 (`fLaC`);
-firmware skips non-STREAMINFO metadata itself. `output_format` must be
-`S16BE` (sources of at most 16 bits), `S16LE` (the little-endian form of
-that 16-bit container; a deeper source is narrowed to the top 16 bits of
-the 32-bit MSB-justified sample), or `S32BE` (up to 24 bits). `S32LE`
-answers `ZZ9K_STATUS_UNSUPPORTED` at Begin; any other value is
-`ZZ9K_STATUS_BAD_REQUEST`. Samples are MSB-justified in a big-endian
-container (`value << (container_bits - source_bits)`), interleaved, native
-rate and channels; `S16LE` is that same 16-bit value stored little-endian.
-`sample_rate`/`channels` stay 0 until STREAMINFO is
-parsed. The first Feed that parses STREAMINFO returns
-`ZZ9K_STATUS_UNSUPPORTED` for more than two channels, more than 24 bits,
-`S16BE` with a deeper source, rates outside 8000..192000 Hz, Ogg-FLAC or
-ID3v2-prefixed input, or a largest frame that cannot fit `pcm_ring_capacity`.
-Corrupt, CRC-failing or truncated input faults with `ZZ9K_STATUS_IO_ERROR`;
-allocation failure with `ZZ9K_STATUS_NO_MEMORY`. Later Feed/Read calls repeat
-the fault status. A frame is decoded only once it is fully buffered (the next
-frame header is present, `FEED_EOF`, or a CRC-verified tail under
-`FEED_DRAIN`), so `input_ring_capacity` must hold at least one compressed
-frame plus a chunk; a ring that cannot accept the next chunk while the decoder
-waits for a frame faults `ZZ9K_STATUS_IO_ERROR`. `ZZ9KAudioStreamPlay()`
-binds an `S16LE` mono or stereo session whose rate the AX pump can convert
-to 48 kHz (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000,
-88200, 96000). Any other format, channel count, or rate answers
-`ZZ9K_STATUS_UNSUPPORTED` (the AHI fallback); Play before the rate is known
-answers `ZZ9K_STATUS_BAD_REQUEST`. Gain, Stop, Play-again, Feed EOF/drain
-and the result fields match an MP3 session. 11025 is converted in 40 ms
-quanta because 20 ms is not an integer frame count.
-
-**Ogg Vorbis sessions** (`ZZ9K_AUDIO_CODEC_VORBIS`, gated by
-`ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM`; both that flag and
-`ZZ9K_CAP_AUDIO_VORBIS` stay unadvertised until physical qualification, so
-clients refuse Vorbis on current firmware). Feed the whole `.ogg`/`.oga` file
-from byte 0 (the identification BOS page). `output_format` must be `S16BE`
-or `S16LE` (Tremor's fixed-point output narrowed to 16 bits, stored in the
-requested byte order); 32-bit formats answer `ZZ9K_STATUS_UNSUPPORTED` at
-Begin, as does firmware running without its
-second core (Vorbis decodes only on core 1). Samples are interleaved at the
-native rate and channels; `sample_rate`/`channels` stay 0 until the
-identification header is parsed. The Feed that parses it returns
-`ZZ9K_STATUS_UNSUPPORTED` for more than two channels or rates outside
-8000..192000 Hz; the first page answers `ZZ9K_STATUS_UNSUPPORTED` for a
-non-Vorbis logical stream (Opus, Ogg-FLAC, Theora, ...). Exactly one logical
-stream is decoded: a second BOS page (multiplexed, or a chained second link)
-stops decoding, later input is discarded, and once every PCM byte of the
-first stream has been published and acknowledged by `ZZ9KAudioStreamRead()`
-the next Feed or Read (possibly the Read that acknowledges the last bytes,
-whose acknowledgement still applies) returns `ZZ9K_STATUS_UNSUPPORTED`; a
-player can therefore play the first link completely and then stop with an
-unsupported-stream error. Bytes after the stream's EOS page that are not an
-Ogg page (for example an ID3v1 tag) are ignored. Corrupt (page CRC, lost or
-out-of-sequence page, broken packet, missing or out-of-order header) or
-truncated input (EOF before the EOS page or inside a packet) faults with
-`ZZ9K_STATUS_IO_ERROR`; allocation failure, including reaching the 1 MiB
-per-session decoder ceiling, with `ZZ9K_STATUS_NO_MEMORY`. Comment headers
-are validated while streaming and never buffered, so embedded cover art of
-any size is accepted. Setup headers and audio packets larger than 64 KiB,
-and codebooks with more than 8192 used entries, answer
-`ZZ9K_STATUS_UNSUPPORTED`. Later Feed/Read calls repeat the fault status.
-Firmware copies input into its own page buffer, so any `input_ring_capacity`
-works and a drained session simply waits for the next page. `ZZ9KAudioStreamPlay()`
-accepts an `S16LE` mono or stereo Vorbis session on the same pump rates as
-FLAC, and answers `ZZ9K_STATUS_UNSUPPORTED` otherwise. Gain, Stop, and the
-result fields match MP3.
-
-`ZZ9KAudioStreamClose()` of a FLAC or Vorbis session never answers
-`ZZ9K_STATUS_BUSY`: the session handle is invalid as soon as Close returns
-(further Feed/Read/Play/Close answer `ZZ9K_STATUS_BAD_HANDLE`), and when the
-decoder heap belongs to the second core the firmware releases it there in the
-background, keeping the session slot reserved until that has happened.
-
-`ZZ9KAudioStreamBeginDesc.low_water_bytes` is the PCM-ring refill
-threshold: while a session is bound to the AX output, the firmware tops the
-decoded PCM ring back up whenever it drains to this level. It is validated
-against `pcm_ring_capacity` (as is `high_water_bytes`); pass zero to refill
-only on explicit feeds. `high_water_bytes` caps the amount of PCM firmware should produce in a
-single mailbox call; pass zero for the firmware default, or a value below the
-PCM ring capacity to keep decode work sliced for interactive callers.
-`zz9k-mp3` remains the low-level decode/transport diagnostic rather than the
-end-user media player. `zz9k-mp3 --stats` prints timing counters for file reads, staging-buffer
-copies, feed calls, PCM copies, output writes, and read acknowledgements. Run
-without `--out` to measure decode/mailbox throughput without pulling PCM back
-to DOS, then compare against `--out` to isolate transfer and filesystem cost.
+| Function | Behavior |
+| --- | --- |
+| `ZZ9KWaitAsync()` | Waits for one queued request while unrelated completions can still dispatch. |
+| `ZZ9KWaitAsyncBatch()` | Waits for every entry in an async array or until the poll budget expires. Unfinished requests remain queued. |
+| `ZZ9KCancelAsync()` | Removes a queued request, completes it locally with `ZZ9K_STATUS_CANCELLED`, and posts its ordinary callback or message-port completion. A later firmware completion is drained as stale. |
 
 ## Async Cancellation
 

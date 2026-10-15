@@ -3,7 +3,7 @@
 
 #include "zzplay-prefs.h"
 
-#include <stdio.h>
+#include "zzplay-sys.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,6 +42,7 @@ void zzplay_prefs_defaults(ZZPlayPrefs *prefs)
   prefs->volume = 100U;
   prefs->repeat = ZZPLAY_REPEAT_OFF;
   prefs->shuffle = 0;
+  prefs->preload = 0U;
   prefs->window_left = -1;
   prefs->window_top = -1;
   prefs->last_drawer[0] = '\0';
@@ -196,6 +197,14 @@ uint32_t zzplay_prefs_parse(ZZPlayPrefs *prefs, const char *text,
         prefs->video_audio = ZZPLAY_AUDIO_NONE;
         accepted++;
       }
+    } else if (zzplay_prefs_case_eq(key, "PRELOAD")) {
+      if (zzplay_prefs_case_eq(val, "YES")) {
+        prefs->preload = 1U;
+        accepted++;
+      } else if (zzplay_prefs_case_eq(val, "NO")) {
+        prefs->preload = 0U;
+        accepted++;
+      }
     } else if (zzplay_prefs_case_eq(key, "AHIUNIT")) {
       int u;
       if (zzplay_parse_int(val, &u) && u >= 0 && u <= 3) {
@@ -312,6 +321,7 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
       "VOLUME=%u\n"
       "REPEAT=%s\n"
       "SHUFFLE=%s\n"
+      "PRELOAD=%s\n"
       "WINDOW=%d,%d\n"
       "DRAWER=%s\n",
       zzplay_prefs_backend_name(prefs->mp3_output),
@@ -321,6 +331,7 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
       prefs->volume,
       zzplay_prefs_repeat_name(prefs->repeat),
       prefs->shuffle ? "YES" : "NO",
+      prefs->preload ? "YES" : "NO",
       (int)prefs->window_left, (int)prefs->window_top,
       prefs->last_drawer);
 
@@ -342,7 +353,7 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
 
 int zzplay_prefs_load(ZZPlayPrefs *prefs, const char *path)
 {
-  FILE *f;
+  ZZPlayFile *f;
   long sz;
   char *buf;
   size_t len;
@@ -352,39 +363,39 @@ int zzplay_prefs_load(ZZPlayPrefs *prefs, const char *path)
   }
   zzplay_prefs_defaults(prefs);
 
-  f = fopen(path, "rb");
+  f = zzplay_file_open(path, 0);
   if (!f) {
     return 0;
   }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
+  if (!zzplay_file_seek(f, 0L, ZZPLAY_FILE_END)) {
+    zzplay_file_close(f);
     return 0;
   }
-  sz = ftell(f);
+  sz = zzplay_file_tell(f);
   if (sz <= 0 || sz > 1024 * 1024) {
-    fclose(f);
+    zzplay_file_close(f);
     return 1;
   }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
+  if (!zzplay_file_seek(f, 0L, ZZPLAY_FILE_BEGIN)) {
+    zzplay_file_close(f);
     return 0;
   }
   len = (size_t)sz;
-  buf = (char *)malloc(len + 1U);
+  buf = (char *)zzplay_alloc(len + 1U);
   if (!buf) {
-    fclose(f);
+    zzplay_file_close(f);
     return 0;
   }
-  if (fread(buf, 1U, len, f) != len) {
-    free(buf);
-    fclose(f);
+  if (zzplay_file_read(f, buf, len) != len) {
+    zzplay_free(buf);
+    zzplay_file_close(f);
     return 0;
   }
-  fclose(f);
+  zzplay_file_close(f);
   buf[len] = '\0';
 
   zzplay_prefs_parse(prefs, buf, len);
-  free(buf);
+  zzplay_free(buf);
   return 1;
 }
 
@@ -392,7 +403,7 @@ int zzplay_prefs_save(const ZZPlayPrefs *prefs, const char *path)
 {
   static char buf[ZZPLAY_PREFS_TEXT_MAX];
   size_t needed;
-  FILE *f;
+  ZZPlayFile *f;
   size_t written;
 
   if (!prefs || !path) {
@@ -402,12 +413,14 @@ int zzplay_prefs_save(const ZZPlayPrefs *prefs, const char *path)
   if (needed >= sizeof(buf)) {
     return 0;
   }
-  f = fopen(path, "wb");
+  f = zzplay_file_open(path, 1);
   if (!f) {
     return 0;
   }
-  written = fwrite(buf, 1U, needed, f);
-  fclose(f);
+  written = zzplay_file_write(f, buf, needed);
+  if (!zzplay_file_close(f)) {
+    return 0;
+  }
   return (written == needed) ? 1 : 0;
 }
 
@@ -497,6 +510,8 @@ ZZPlayAudioBackend zzplay_prefs_requested_backend(
     return prefs->mp3_output;
   }
   if (media == ZZPLAY_MEDIA_AUDIO_MP2 ||
+      media == ZZPLAY_MEDIA_AUDIO_AC3 ||
+      media == ZZPLAY_MEDIA_AUDIO_LPCM ||
       media == ZZPLAY_MEDIA_AUDIO_OPUS ||
       media == ZZPLAY_MEDIA_AUDIO_VORBIS) {
     return prefs->video_audio;

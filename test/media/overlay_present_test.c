@@ -58,11 +58,14 @@ void surface_allocator_free(uint32_t addr)
 int scheduler_core1_available(void) { return 1; }
 static int hw_present;
 static unsigned hw_starts;
+static uint32_t open_video_sessions;
 static unsigned hw_buffer_swaps;
 static uint32_t hw_addr;
 static uint32_t hw_pitch;
 static uint16_t hw_src_w;
 static uint16_t hw_src_h;
+static int16_t hw_dst_w;
+static int16_t hw_dst_h;
 
 int overlay_hw_supported(void) { return hw_present; }
 void overlay_hw_stop(void) {}
@@ -79,7 +82,7 @@ int overlay_hw_start_scaled(uint32_t src, uint32_t pitch, uint16_t src_w,
                             uint32_t key_rgb, uint8_t key_enabled,
                             uint32_t generation)
 {
-	(void)dst_x; (void)dst_y; (void)dst_w; (void)dst_h; (void)variant;
+	(void)dst_x; (void)dst_y; (void)variant;
 	(void)key_rgb; (void)key_enabled; (void)generation;
 	if (!hw_present)
 		return 0;
@@ -88,6 +91,8 @@ int overlay_hw_start_scaled(uint32_t src, uint32_t pitch, uint16_t src_w,
 	hw_pitch = pitch;
 	hw_src_w = src_w;
 	hw_src_h = src_h;
+	hw_dst_w = (int16_t)dst_w;
+	hw_dst_h = (int16_t)dst_h;
 	return 1;
 }
 
@@ -107,12 +112,22 @@ int sdk_image_stream_presented_canvas(uint32_t session, uint32_t *address,
 	return 0;
 }
 
+static struct SDKVideoDecodedFrame mock_direct_frame;
+static int mock_direct_frame_valid;
+
 int sdk_video_stream_get_direct_frame(uint32_t session,
                                       struct SDKVideoDecodedFrame *frame)
 {
 	(void)session;
-	(void)frame;
-	return 0;
+	if (!mock_direct_frame_valid || !frame)
+		return 0;
+	*frame = mock_direct_frame;
+	return 1;
+}
+
+uint32_t sdk_video_stream_active_count(void)
+{
+	return open_video_sessions;
 }
 
 int sdk_video_yuv420_to_yuy2(uint8_t *dst, uint32_t dst_pitch, uint32_t width,
@@ -133,6 +148,18 @@ int sdk_video_yuv420_to_yuy2_half(uint8_t *dst, uint32_t dst_pitch,
                                   const uint8_t *cb, const uint8_t *cr,
                                   uint32_t chroma_pitch,
                                   uint32_t *bytes_written)
+{
+	return sdk_video_yuv420_to_yuy2(dst, dst_pitch, width, height, y,
+	                                y_pitch, cb, cr, chroma_pitch,
+	                                bytes_written);
+}
+
+int sdk_video_yuv420_to_yuy2_blend(uint8_t *dst, uint32_t dst_pitch,
+                                   uint32_t width, uint32_t height,
+                                   const uint8_t *y, uint32_t y_pitch,
+                                   const uint8_t *cb, const uint8_t *cr,
+                                   uint32_t chroma_pitch,
+                                   uint32_t *bytes_written)
 {
 	return sdk_video_yuv420_to_yuy2(dst, dst_pitch, width, height, y,
 	                                y_pitch, cb, cr, chroma_pitch,
@@ -213,24 +240,27 @@ static void stop_overlay(void)
 
 static void reset(void);
 
-static void set_overlay_source(uint16_t w, uint16_t h, uint16_t pitch)
+static void set_overlay_rect(uint16_t src_w, uint16_t src_h,
+                             uint16_t pitch, int16_t dst_x, int16_t dst_y,
+                             uint16_t dst_w, uint16_t dst_h)
 {
 	struct GFXData data;
 
 	memset(&data, 0, sizeof(data));
 	data.offset[1] = 0x00100000U;
 	data.pitch[1] = pitch;
-	data.x[0] = 16U;
-	data.y[0] = 16U;
-	data.x[1] = 320U;
-	data.y[1] = 240U;
-	data.x[2] = w;
-	data.y[2] = h;
+	data.x[0] = (uint16_t)dst_x;
+	data.y[0] = (uint16_t)dst_y;
+	data.x[1] = dst_w;
+	data.y[1] = dst_h;
+	data.x[2] = src_w;
+	data.y[2] = src_h;
 	data.user[0] = 2U;
 	data.u8_user[GFXDATA_U8_YUV_VARIANT] = YUV422_VARIANT_CGX;
 	overlay_handle_op(&vs, &data);
 	check(data.u32_user[0] == 0U, "overlay SET accepted");
 }
+
 
 /* One decoded frame through compose, publication and the vblank hand-off
  * to the native overlay. */
@@ -255,7 +285,7 @@ static void test_large_frames_scan_half_size(void)
 
 	reset();
 	hw_present = 1;
-	set_overlay_source(1920U, 1080U, 3840U);
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1920U, 1080U);
 	src = hw_addr;
 	check(hw_src_w == 1920U && hw_src_h == 1080U,
 	      "the P96 source is scanned at full size");
@@ -288,13 +318,176 @@ static void test_large_frames_scan_half_size(void)
 	/* A 720p frame still goes through at full size. */
 	reset();
 	hw_present = 1;
-	set_overlay_source(1280U, 720U, 2560U);
+	set_overlay_rect(1280U, 720U, 2560U, 0, 0, 1280U, 720U);
 	starts = hw_starts;
 	present_frame(8U);
 	check(last_compose.variant == 0xfeU && last_compose.scr_h == 720U,
 	      "a 720p session frame is packed at full size");
 	check(hw_starts == starts && hw_src_w == 1280U && hw_src_h == 720U,
 	      "a 720p hand-off keeps the full geometry");
+	hw_present = 0;
+}
+static void test_interlace_blend_variant(void)
+{
+	reset();
+	hw_present = 1;
+	set_overlay_rect(720U, 576U, 1440U, 0, 0, 1024U, 576U);
+
+	/* 1. Interlaced direct frame (TFF, no PROGRESSIVE) -> blend variant (0xfc) */
+	memset(&mock_direct_frame, 0, sizeof(mock_direct_frame));
+	mock_direct_frame.width = 720U;
+	mock_direct_frame.height = 576U;
+	mock_direct_frame.picture_flags = SDK_VIDEO_PICTURE_FLAG_TFF;
+	mock_direct_frame_valid = 1;
+	present_frame(11U);
+	check(last_compose.variant == 0xfcU,
+	      "an interlaced (TFF, no PROGRESSIVE) direct frame composes with the blend variant 0xfc");
+
+	/* Interlaced with BFF, no PROGRESSIVE -> blend variant (0xfc) */
+	mock_direct_frame.picture_flags = SDK_VIDEO_PICTURE_FLAG_BFF;
+	present_frame(11U);
+	check(last_compose.variant == 0xfcU,
+	      "an interlaced (BFF, no PROGRESSIVE) direct frame composes with the blend variant 0xfc");
+
+	/* 2. Progressive direct frame -> plain pack variant (0xfe) */
+	mock_direct_frame.picture_flags = SDK_VIDEO_PICTURE_FLAG_PROGRESSIVE;
+	present_frame(11U);
+	check(last_compose.variant == 0xfeU,
+	      "a progressive direct frame composes with 0xfe");
+
+	/* Progressive frame with TFF bit set (e.g. cadence) -> still plain pack (0xfe) */
+	mock_direct_frame.picture_flags = SDK_VIDEO_PICTURE_FLAG_PROGRESSIVE | SDK_VIDEO_PICTURE_FLAG_TFF;
+	present_frame(11U);
+	check(last_compose.variant == 0xfeU,
+	      "a progressive direct frame with TFF still composes with 0xfe");
+
+	/* Content without flags (e.g. a client-built frame) -> plain pack (0xfe) */
+	mock_direct_frame.picture_flags = 0U;
+	present_frame(11U);
+	check(last_compose.variant == 0xfeU,
+	      "a direct frame without picture_flags composes with 0xfe");
+
+	/* 3. >720p frame (1920x1080) -> half-size variant (0xfd) even if interlaced */
+	reset();
+	hw_present = 1;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1920U, 1080U);
+	mock_direct_frame.width = 1920U;
+	mock_direct_frame.height = 1080U;
+	mock_direct_frame.picture_flags = SDK_VIDEO_PICTURE_FLAG_TFF;
+	mock_direct_frame_valid = 1;
+	present_frame(12U);
+	check(last_compose.variant == 0xfdU,
+	      "a >720p interlaced direct frame composes with 0xfd");
+
+	mock_direct_frame_valid = 0;
+	hw_present = 0;
+}
+
+/* The native plane scales a scanned frame down by up to 1.5x per axis
+ * (overlay_native_fits); smaller windows use the half-size scan when the
+ * source is an SDK session and that fits, else the software compositor.
+ * The A4000 case that first showed only a frame's top rows, a 720x576
+ * MPEG-2 frame letterboxed into a 720x405 window, is inside that bound. */
+static void test_downscaled_window_stays_composited(void)
+{
+	unsigned starts;
+
+	/* 720x576 into 720x405: down to two thirds, native. */
+	reset();
+	vs.vmode_hsize = 720U;
+	vs.vmode_vdma_rows = 576U;
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(720U, 576U, 1440U, 0, 85, 720U, 405U);
+	check(hw_starts > starts && hw_dst_w == 720 && hw_dst_h == 405 &&
+	      hw_src_w == 720U && hw_src_h == 576U,
+	      "a window down to two thirds of the scan scans natively");
+	present_frame(21U);
+	check(last_compose.variant == 0xfeU,
+	      "a natively downscaled window packs for the native plane");
+
+	/* Just under two thirds in one axis: the software compositor. */
+	reset();
+	vs.vmode_hsize = 720U;
+	vs.vmode_vdma_rows = 576U;
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(720U, 576U, 1440U, 0, 85, 479U, 405U);
+	check(hw_starts == starts,
+	      "a window below two thirds of the scan stays on the software compositor");
+	present_frame(26U);
+	check(last_compose.variant == 0xffU,
+	      "a window below two thirds composites planar frames in software");
+
+	/* The working windowed shape of the same clip keeps the native plane. */
+	reset();
+	vs.vmode_hsize = 1280U;
+	vs.vmode_vdma_rows = 720U;
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(720U, 576U, 1440U, 128, 72, 1024U, 576U);
+	check(hw_starts > starts && hw_dst_w == 1024 && hw_dst_h == 576,
+	      "a window at or above the scan size scans natively");
+	present_frame(22U);
+	check(last_compose.variant == 0xfeU,
+	      "an upscaled window packs for the native plane");
+
+	/* A >720p session frame is scanned at half size, so its gate compares
+	 * against the half-size scan: a 1280x720 window keeps a 1920x1080
+	 * session on the native plane. Players begin the session before the
+	 * SET; it binds to the overlay only at its first frame. */
+	reset();
+	hw_present = 1;
+	open_video_sessions = 1U;
+	starts = hw_starts;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1280U, 720U);
+	check(hw_starts > starts,
+	      "a window at or above the half-size scan stays native");
+	present_frame(23U);
+	check(last_compose.variant == 0xfdU && hw_src_w == 960U &&
+	      hw_src_h == 540U,
+	      "a >720p source still packs and scans at half size");
+	overlay_video_session_closed(23U);
+	open_video_sessions = 0U;
+
+	/* A legacy P96/cgxvideo source is scanned at full size, so it gets no
+	 * half-size scan: down to two thirds it scans natively, below that it
+	 * composites. */
+	reset();
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1280U, 720U);
+	check(hw_starts > starts && hw_src_w == 1920U && hw_src_h == 1080U,
+	      "a P96 source down to two thirds scans natively at full size");
+	reset();
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1200U, 675U);
+	check(hw_starts == starts,
+	      "a P96 source below two thirds stays on the software compositor");
+
+	/* A session bound before a re-SET (fullscreen toggle) is gated by its
+	 * half-size scan at that SET. */
+	reset();
+	hw_present = 1;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1920U, 1080U);
+	present_frame(25U);
+	starts = hw_starts;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 1280U, 720U);
+	check(hw_starts > starts,
+	      "a bound session re-SET into a smaller window stays native");
+	overlay_video_session_closed(25U);
+
+	/* A window below two thirds of even the half-size scan composites. */
+	reset();
+	hw_present = 1;
+	starts = hw_starts;
+	set_overlay_rect(1920U, 1080U, 3840U, 0, 0, 600U, 338U);
+	check(hw_starts == starts,
+	      "a window below the half-size scan's bound composites in software");
+	present_frame(24U);
+	check(last_compose.variant == 0xffU,
+	      "a sub-scan window composites planar frames in software");
 	hw_present = 0;
 }
 
@@ -356,6 +549,8 @@ int main(void)
 	      "the re-SET overlay composes and releases");
 
 	test_large_frames_scan_half_size();
+	test_interlace_blend_variant();
+	test_downscaled_window_stays_composited();
 
 	if (failures) {
 		fprintf(stderr, "overlay_present_test: %d failure(s)\n", failures);

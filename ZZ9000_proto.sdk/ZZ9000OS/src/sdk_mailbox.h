@@ -73,7 +73,8 @@
 #define SDK_CAP_AUDIO_FABRIC           (1U << 27)
 #define SDK_CAP_AUDIO_FLAC             (1U << 28)
 #define SDK_CAP_AUDIO_VORBIS           (1U << 29)
-#define SDK_CAP_CONSOLE_ENCODE         (1U << 30)
+/* Zorro III: card-only allocations for preloaded media input. */
+#define SDK_CAP_MEDIA_INPUT          (1U << 30)
 
 // SDK_OP_ALLOC_SHARED flags. HOST_WINDOW places the buffer in the
 // host-window heap so a Zorro 2 host can map it; CARD_ONLY is a
@@ -86,6 +87,8 @@
 // on sub-4 MB Z2 boards.
 #define SDK_ALLOC_HOST_WINDOW     (1U << 0)
 #define SDK_ALLOC_CARD_ONLY       (1U << 1)
+/* Requires CARD_ONLY; allocates from the owner-tracked MEDIA pool. */
+#define SDK_ALLOC_MEDIA           (1U << 2)
 
 #ifndef SDK_ENABLE_HDL_TRANSPORT
 #define SDK_ENABLE_HDL_TRANSPORT       0
@@ -130,6 +133,7 @@
 #define SDK_SERVICE_FLAG_MODULE        (1U << 1)
 #define SDK_SERVICE_FLAG_ASYNC         (1U << 2)
 #define SDK_SERVICE_FLAG_ZERO_COPY     (1U << 3)
+#define SDK_SERVICE_FLAG_MEMORY_MEDIA_INPUT (1U << 16)
 #define SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY  (1U << 16)
 #define SDK_SERVICE_FLAG_IMAGE_JPEG_BASELINE    (1U << 16)
 #define SDK_SERVICE_FLAG_IMAGE_JPEG_PROGRESSIVE (1U << 17)
@@ -190,6 +194,8 @@
 #define SDK_SERVICE_FLAG_VIDEO_WEBM_VP9         (1U << 28)
 #define SDK_SERVICE_FLAG_VIDEO_MEDIA_OPUS       (1U << 29)
 #define SDK_SERVICE_FLAG_VIDEO_MEDIA_VORBIS     (1U << 30)
+/* MPEG-2 Program Stream with AC-3, LPCM, MP2, or no audio. */
+#define SDK_SERVICE_FLAG_VIDEO_MPEG2            (1U << 31)
 
 #define SDK_OP_NOP                     0x0000U
 #define SDK_OP_QUERY_CAPS              0x0001U
@@ -1077,6 +1083,7 @@ static inline void sdk_audio_meter_result_pack(
  * would race to own that plane until the ABI grows an explicit binding. */
 #define SDK_MAX_VIDEO_SESSIONS         1U
 #define SDK_VIDEO_CODEC_MPEG1          1U
+#define SDK_VIDEO_CODEC_MPEG2          2U
 #define SDK_VIDEO_CODEC_VP8            3U
 #define SDK_VIDEO_CODEC_VP9            4U
 #define SDK_VIDEO_CONTAINER_MPEG_PS    1U
@@ -1096,9 +1103,12 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_MEDIA_NO_PTS UINT64_C(0xffffffffffffffff)
 #define SDK_MEDIA_AUDIO_NONE 0U
 #define SDK_MEDIA_AUDIO_MP2 1U
+#define SDK_MEDIA_AUDIO_LPCM 2U
+#define SDK_MEDIA_AUDIO_AC3 3U
 #define SDK_MEDIA_AUDIO_OPUS 4U
 #define SDK_MEDIA_AUDIO_VORBIS 5U
 #define SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME (1U << 0)
+#define SDK_MEDIA_DECODE_SKIP_TO_I_PICTURE (1U << 1)
 #define SDK_MEDIA_SESSION_WRITE_EOF (1U << 0)
 #define SDK_MEDIA_AUDIO_BIND_PAUSE (1U << 0)
 #define SDK_MEDIA_SESSION_STATE_NEED_INPUT 1U

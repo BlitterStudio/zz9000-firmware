@@ -28,6 +28,7 @@ static int mock_present_accepted;
 static uint8_t mock_media_enabled;
 static uint8_t mock_decoder_ready;
 static uint8_t mock_audio_done;
+static uint32_t mock_display_fields;
 static uint64_t mock_pcm_produced;
 static uint64_t mock_pcm_acknowledged;
 static uint8_t pcm_ring[32768];
@@ -46,6 +47,7 @@ static void fill_video_result(struct SDKVideoStreamResult *result,
 	result->flags = flags;
 	result->media_pts = SDK_VIDEO_MEDIA_NO_PTS;
 	result->raw_pts = SDK_VIDEO_MEDIA_NO_PTS;
+	result->display_fields = mock_display_fields;
 }
 
 uint16_t sdk_video_stream_begin_owned(
@@ -196,6 +198,7 @@ static void reset_mocks(void)
 	mock_media_enabled = 0U;
 	mock_decoder_ready = 0U;
 	mock_audio_done = 0U;
+	mock_display_fields = 2U;
 	mock_pcm_produced = 0U;
 	mock_pcm_acknowledged = 0U;
 }
@@ -347,6 +350,61 @@ static int test_video_lifecycle(void)
 	return 0;
 }
 
+/* U2: repeat-first-field (3:2 pulldown) frames occupy display_fields/2
+ * frame durations, so the derived video PTS must advance by the PREVIOUS
+ * frame's field count, not by one frame flat. The mock stream runs at
+ * 25000 milli: one frame is 90000/25 = 3600 ticks, so a 3-field frame
+ * holds the screen for 5400 ticks. */
+static int test_repeat_first_field_duration(void)
+{
+	struct SDKMediaSessionBegin begin;
+	struct SDKMediaSessionWrite write;
+	struct SDKMediaSessionMainResult result;
+	uint8_t bytes[64];
+	uint16_t rc;
+
+	reset_mocks();
+	mock_display_fields = 3U;
+	sdk_media_session_init();
+	fill_begin(&begin);
+	rc = sdk_media_session_begin(&begin, &result);
+	if (rc != SDK_STATUS_OK)
+		return 1;
+
+	memset(&write, 0, sizeof(write));
+	write.session = mock_session;
+	write.src = bytes;
+	write.src_length = sizeof(bytes);
+	if (sdk_media_session_write(&write, &result) != SDK_STATUS_OK)
+		return 2;
+
+	/* Frame 0: 3 fields (repeat first field), derived PTS 0. */
+	if (sdk_media_session_decode(mock_session, 0U, &result) != SDK_STATUS_OK ||
+	    result.state != SDK_MEDIA_SESSION_STATE_FRAME_HELD ||
+	    result.video_pts != 0U)
+		return 3;
+	sdk_media_session_present(mock_session, 0U, &result);
+	sdk_media_session_present_queued(mock_session);
+
+	/* Frame 1: PTS = 0 + 3/2 frame durations = 5400, not 3600. */
+	if (sdk_media_session_decode(mock_session, 0U, &result) != SDK_STATUS_OK ||
+	    result.video_pts != 5400U)
+		return 4;
+
+	sdk_media_session_present(mock_session, 0U, &result);
+	sdk_media_session_present_queued(mock_session);
+
+	/* A following 2-field frame is timed by the 3 fields of the frame
+	 * before it: 5400 + 5400 = 10800 (the frame's own 2 fields time the
+	 * frame after it). */
+	mock_display_fields = 2U;
+	if (sdk_media_session_decode(mock_session, 0U, &result) != SDK_STATUS_OK)
+		return 5;
+	if (result.video_pts != 10800U)
+		return 6;
+	return 0;
+}
+
 static int test_errors_and_reclaim(void)
 {
 	struct SDKMediaSessionBegin begin;
@@ -358,7 +416,7 @@ static int test_errors_and_reclaim(void)
 	reset_mocks();
 	sdk_media_session_init();
 	fill_begin(&begin);
-	begin.audio_codec = 2U;
+	begin.audio_codec = 6U;	/* no such codec */
 	begin.pcm_ring_handle = 0x40000001U;
 	begin.pcm_ring_capacity = 32768U;
 	begin.pcm_low_water_bytes = 4096U;
@@ -668,6 +726,37 @@ static int test_mp2_audio_snapshot_and_ack(void)
 	return 0;
 }
 
+/* MPEG-2 Program Stream sessions carry LPCM or AC-3, decoded on the card
+ * into the PCM ring like MP2. */
+static int test_dvd_audio_codecs_begin(void)
+{
+	static const uint32_t codecs[2] = {
+		SDK_MEDIA_AUDIO_LPCM, SDK_MEDIA_AUDIO_AC3
+	};
+	struct SDKMediaSessionBegin begin;
+	struct SDKMediaSessionMainResult result;
+	unsigned i;
+
+	for (i = 0U; i < 2U; i++) {
+		reset_mocks();
+		sdk_media_session_init();
+		fill_begin(&begin);
+		begin.video_codec = SDK_VIDEO_CODEC_MPEG2;
+		begin.audio_codec = codecs[i];
+		begin.pcm_ring_handle = 0x40000001U;
+		begin.pcm_ring = pcm_ring;
+		begin.pcm_ring_capacity = sizeof(pcm_ring);
+		begin.pcm_low_water_bytes = 6144U;
+		begin.pcm_high_water_bytes = 24576U;
+		/* Before, both were refused here without reaching the
+		 * stream layer. */
+		if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK ||
+		    begin_calls != 1U)
+			return 1 + (int)i;
+	}
+	return 0;
+}
+
 static int test_mp2_direct_audio_output(void)
 {
 	struct SDKMediaSessionBegin begin;
@@ -856,6 +945,8 @@ int main(void)
 	if (rc != 0) return 10 + rc;
 	rc = test_video_lifecycle();
 	if (rc != 0) return 50 + rc;
+	rc = test_repeat_first_field_duration();
+	if (rc != 0) return 60 + rc;
 	rc = test_errors_and_reclaim();
 	if (rc != 0) return 90 + rc;
 	rc = test_presentation_status_page();
@@ -864,6 +955,8 @@ int main(void)
 	if (rc != 0) return 245 + rc;
 	rc = test_mp2_audio_snapshot_and_ack();
 	if (rc != 0) return 130 + rc;
+	rc = test_dvd_audio_codecs_begin();
+	if (rc != 0) return 120 + rc;
 	rc = test_mp2_direct_audio_output();
 	if (rc != 0) return 170 + rc;
 	rc = test_mp2_direct_audio_cursor_rollover();

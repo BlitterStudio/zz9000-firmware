@@ -1,436 +1,312 @@
-# Native FPGA P96 PIP design
+# Native P96 PIP (video overlay)
 
-Status: the native 1:1 foundation is merged on `master`. Local
-`feat/zzplay-media` commit `c6341f8` extends it with exact nearest-neighbour
-FPGA scaling, sparse source-row fetching, and screen-edge clipping. A
-640x480@30 hardware run presented 4,374/4,405 frames after resize versus
-4,379/4,405 at exact size; the user reported identical correct playback.
+The ZZ9000 shows Picasso96 PIP windows with a dedicated overlay plane in the
+FPGA. The PL fetches the YUV source straight from DDR, converts it to RGB, and
+composites it into the display while scanning out. The ARM only programs the
+plane and hands over new frames at vblank. When the PL plane can't handle a
+window, the ARM software compositor takes over, as it did before the plane
+existed.
 
-The earlier r7-r9 chronology below records how the 1:1 foundation was
-qualified. R9 replaced unsafe row/readiness clock-domain crossings with atomic
-XPM handshakes. R9b passed 16/32-bit display depth, scanline-control stability,
-and native-video/videocap takeover/return, completing the default-`zorro3`
-physical acceptance sequence. Non-default variants were rebuilt from the same
-then-current RTL on 2026-07-29. All six passed fresh-project synthesis,
-implementation, DRC, bus-skew, and timing gates, but remain
-hardware-unqualified until tested on their respective board variants.
+Applications don't need to change. Programs that call `p96PIP_*` directly,
+and programs that go through cgxvideo, use the same driver path.
 
-## Contract
+## How a frame reaches the screen
 
-Picasso96 remains the only public presentation API. Existing applications use
-`p96PIP_*` directly or through cgxvideo. The current driver continues sending
-`OP_VIDEO_OVERLAY` with the P96-managed source bitmap, real pitch, YUV422
-variant, destination rectangle, activation, and color key. No application or
-driver API fork is introduced.
+```mermaid
+flowchart LR
+  App["App / cgxvideo"] -->|p96PIP_*| Card["ZZ9000.card"]
+  Card -->|OP_VIDEO_OVERLAY| FW["ARM firmware<br/>overlay.c"]
+  FW -->|eligible| HW["overlay_hw.c<br/>VDMA + formatter ops"]
+  FW -->|not eligible| SW["ARM compositor<br/>RGB shadow buffers"]
+  HW --> VDMA["Overlay MM2S VDMA"] --> LB["Line buffer"] --> PX["YUV→RGB, colour key"] --> OUT["video_formatter scanout"]
+  SW --> OUT
+```
 
-Firmware and bitstream are a matched ABI. Packed sources with a positive
-destination size and a non-empty screen intersection select the native plane
-in the hardware-capable build, including up/down scaling and clipping.
-Release packaging must pair that firmware with bitstreams built from the
-matching formatter RTL. `ZZ9000OS-legacy-bitstream.elf`, whose hardware
-backend is compile-time inert, remains the compatibility fallback for
-installations that retain an older bitstream. Unsupported source bounds and
-legacy-bitstream operation retain the ARM compositor.
+The driver sends `OP_VIDEO_OVERLAY` with:
 
-SDK video sessions use the same P96 window/geometry. Their decoder-owned
-planar420 source is an internal firmware source mode, not a different player
-API.
+- the P96-managed source bitmap and its actual pitch
+- the YUV422 layout
+- the destination rectangle
+- the active flag and the colour key
 
-## Stage 1: packed P96 YUV422 plane
+The firmware checks this against the current screen mode and picks a path.
 
-Add a second MM2S VDMA sharing HP0 through a two-input AXI interconnect. It
-feeds ping-pong YUV422 line buffers in `video_formatter`.
+For a P96 source, the VDMA reads the packed YUV422 bitmap that P96 owns. It
+rescans that bitmap every frame, so a new picture written by the application
+appears without any work from the ARM.
 
-- 1:1 or scaled/clipped PIP: VDMA reads the P96 packed-YUV source while the
-  formatter maps destination pixels and rows to exact source coordinates.
-- SDK planar420 at 1:1: core 1 writes the non-scanned ping-pong packed-YUV422
-  staging surface; vblank publishes it only after the mandatory full L1+L2
-  flush, then VDMA reads it.
-- sparse vertical downscaling drains skipped sequential VDMA rows and writes
-  only requested rows into explicitly owned ping-pong banks.
-- FPGA performs CCIR601 YUV-to-RGB, RGB color-key comparison, scanout-time
-  composition, and normal sprite/scanline post-processing.
-- ARM no longer copies or flushes full-screen RGB shadows.
+SDK video sessions come from ZZPlay and other `zz9k.library` players. The decoder
+outputs planar 4:2:0. Core 1 packs each frame into one of two packed-YUV422
+staging buffers that are not being scanned. At vblank, core 0 flushes the
+caches and points the VDMA at the new buffer. Frames larger than 1280x720 are
+packed at half size, and the plane scales them back up. This lets a 1080p
+stream play natively in a 1280x720 window.
 
-The staging path is deliberately packed YUV, not RGB. SDK playback already
-avoids the dominant screen-sized RGB copy/conversion. Existing direct P96 PIP
-and cgxvideo players benefit without modification.
+## When the native plane is used
 
-## Stage 2: planar420 SDK source
+The native plane is used when all of these are true:
 
-Add planar Y/Cb/Cr fetch support and explicit display/decode buffer fences.
-The active pl_mpeg display frame cannot be reused until PL has crossed its
-last visible overlay line. This removes the SDK's final display-surface copy
-while preserving P96 ownership of window geometry and lifetime.
+- The firmware was built with the hardware backend (not
+  `ZZ9000OS-legacy-bitstream.elf`).
+- The window is active, has a positive size, and at least part of it is on
+  screen. The window may extend past any screen edge; the PL clips it.
+- The window is no more than 1.5 times smaller than the scanned source in
+  either direction. A P96 source is scanned at full size. An SDK frame is
+  scanned at half size when it is over 1280x720, or when its window is too
+  small for the full-size frame but not for the half-size one.
+- The source is no larger than 2560x4095.
 
-## Formatter controls
+Everything else goes to the ARM compositor: in practice, a window less than
+two thirds of its scanned source in width or height.
 
-Reserve video-control operations 22-27:
+Both paths reject a PIP when the screen uses scan-doubled modes (`scalemode`
+≠ 0) or an 8-bit CLUT depth. In that case the PIP fails to open; the firmware
+doesn't show an invisible overlay.
 
-| Op | Data |
-|---|---|
-| 22 `OVERLAY_CTRL` | enable, key enable, source mode, YUV422 variant |
-| 23 `OVERLAY_POS` | signed destination Y:X |
-| 24 `OVERLAY_SIZE` | destination H:W |
-| 25 `OVERLAY_KEY` | converted RGB888 key |
-| 26 `OVERLAY_SOURCE_SIZE` | source H:W |
-| 27 `OVERLAY_FRAME` | frame generation / fence token |
+Switching between paths drops any staged frames. The hardware path stages
+packed YUV and the software path stages full RGB screens, so a frame staged
+for one path is never shown on the other.
 
-VDMA address, pitch, HSIZE, and VSIZE remain AXI-Lite registers programmed by
-firmware. Geometry/control changes latch at vblank.
+## Hardware
 
-## Gate status (2026-07-29)
+- An MM2S VDMA for the overlay shares HP0 with the main scanout through a
+  two-input AXI interconnect. Main scanout has AXI priority 15 and the overlay
+  has 0, so a busy overlay can't starve the desktop. The overlay reads DDR 64
+  bits at a time.
+- `video_overlay_linebuffer.v` holds eight source rows in eight BRAM banks:
+  the two rows the filter is blending and up to six after them. Each row is
+  stored twice, split into even and odd macropixel words, so one pixel clock
+  reads two neighbouring macropixels from both rows. The formatter's fetch
+  stepper requests every source row from the window's first in order,
+  whenever a bank is empty or holds a row above the top row on display, so
+  fetching runs ahead of the display. A downscaled window blends more than
+  one new source row per raster line on average; running ahead spreads that
+  over the window instead of needing two whole rows inside one raster line.
+  If a row is still late, the stepper skips the rows the display has
+  already passed. One request is outstanding at a time. Fetch requests,
+  completed-row tags, and generation acknowledgements cross between the
+  100 MHz AXI clock and the pixel clock through three `xpm_cdc_handshake`
+  instances.
+- `video_overlay_filter.v` scales bilinearly. Luma blends pixels i and i+1,
+  chroma blends macropixels k and k+1 at half the luma position, and the two
+  row results are blended with the row weight. Weights have 8 bits. A 1:1
+  window has zero weights everywhere, so its pixels pass through unchanged.
+  The line-buffer read and the filter add nine pixel-clock stages.
+- `video_overlay_pixel.v` converts YUV to RGB using CCIR601 coefficients and
+  compares each pixel with the RGB colour key. The filter unpacks all five
+  packed YUV422 layouts before it.
+- `video_formatter.v` maps destination pixels and rows to 16.16 fixed-point
+  source positions, centre-aligned: pixel d samples
+  `d * step + step / 2 - 0.5`, with `step = (source << 16) / destination`. It
+  computes the steps and the start position of a clipped window outside the
+  pixel critical path. The overlay is composited before the sprite and
+  scanline post-processing, so the hardware pointer stays on top.
 
-1. **PASS:** `video_overlay_pixel` layout/luma/clamp/key simulation for all
-   five packed layouts.
-2. **PASS:** formatter xsim sweep, 12/12 mode/scale/width configurations;
-   overlay-enabled cases cover 32/16/15-bit base modes, odd width, and a
-   1920-pixel full-width transfer that cannot fit in horizontal blanking.
-3. **PASS for implemented scope:** line-buffer stalls, unexpected-SOF resync,
-   bank wrap, disable, source-generation invalidation, independent
-   fetch/display selection, and right-edge PIP timing. Resize/move cases
-   retain the software fallback.
-4. **PASS:** fresh default Vivado implementation, current-source fingerprint,
-   WNS +1.631 ns / TNS 0, 0 errors and 0 critical warnings in the formatter
-   synthesis and implementation logs.
-5. **PASS (complete build matrix):** all six non-default bitstreams were
-   regenerated from fresh Vivado projects using the current RTL. Each passes
-   synthesis, implementation, DRC, bus-skew, and timing gates. This enables
-   the native plane in the complete current bitstream set; the compatibility
-   ELF remains available only for genuinely older bitstreams.
-6. **FAIL HARDWARE (visual):** the resumed 640x480@30 `zzplay` run opened the
-   expected 1:1 window and processed frames, but the PIP contents stayed solid
-   cyan with slight flicker. No outside-window corruption was seen and the
-   hardware pointer remained topmost. Throughput results are diagnostic only
-   until pixels are correct.
-7. **PASS/DECISIVE DIAGNOSTIC:** keep the installed artifacts unchanged and
-   resize the window. Exact-size, fully visible geometry selects native PL;
-   resized or clipped geometry selects the ARM compositor. Capture `[overlay]
-   SET ok build ...` UART lines in both states and fingerprint `BOOT.bin`,
-   `zzplay`, `zz9k.library`, and `ZZ9000.card`.
-8. **PARTIAL FIX, r6 HARDWARE FAIL:** a running AXI VDMA direct-register channel only
-   commits a newly written `START_ADDR` after `VSIZE` is written. The native
-   flip wrote `START_ADDR` and advanced the formatter generation without that
-   commit, so the VDMA could continue scanning the initial cleared P96 source
-   instead of the decoder's packed-YUY2 staging surface. The flip now writes
-   `START_ADDR`, then `VSIZE`, then advances the generation. r6 changed the
-   display from cyan to real decoded pixels, confirming this defect, but the
-   image was vertically double/superimposed and flickered until resize.
-9. **PARTIAL FIX, r7 HARDWARE FAIL:** the formatter re-armed line zero at the
-   start of vblank, before the ARM vblank handler committed the next VDMA
-   address after its mandatory cache flush. MM2S could therefore start the
-   old frame and lose vertical phase when the later generation change forced
-   a resync. Native scanout now stays stalled at the completed frame boundary;
-   firmware resets/reprograms and re-arms every frame after the flush, and the
-   pixel domain requests line zero only after the line-buffer AXI domain
-   acknowledges that generation. The overlay VDMA is connected directly to
-   the line fetcher so no decoupling FIFO can retain old-frame beats across
-   the reset. Hardware r7 displayed a mostly correct, properly phased image,
-   but it still flickered noticeably.
-10. **R8 HARDWARE FAIL:** independent displayed-line and fetch-line
-    controls now request line N+1 as soon as displayed line N is ready while
-    continuing to read N from the other BRAM bank. Display selection follows
-    the source row at the next raster boundary. The matched bundle is
-    `bench-zzplay-native-p96-r8-line-prefetch`. Exact-size playback flickered
-    slightly worse than r7 and showed black horizontal rows at random
-    positions. A one-pixel resize remained stable through the ARM fallback.
-11. **PASS HARDWARE, DEFAULT `zorro3`:** 318-pixel odd-macroblock playback,
-    cgxvideo/RiVA, mode/depth changes, close/reopen, DPMS, all live scanline
-    control values, and native-video/videocap takeover and return. Color-key
-    occlusion remains opportunistic. **PASS BUILD/REPORT, NON-DEFAULT:** all
-    six current variants contain the native plane and meet their implementation
-    gates, but still require variant-specific physical acceptance.
+The firmware programs the formatter through video-control ops 22–27, defined
+in `video.h`:
 
-The geometry diagnostic in item 7 is now **PASS/DECISIVE**: correct video
-appeared only after resizing selected the ARM compositor, and close was clean.
-Decoder-owned planar output, frame-ready publication, P96 geometry switching,
-and software composition are exonerated for the cyan symptom. The resized
-path consumes planar420 directly, so it does **not** validate the native-only
-planar420-to-packed-YUY2 conversion, staging-buffer handoff, MM2S, line buffer,
-or formatter conversion.
+| Op | Name | Data |
+|---|---|---|
+| 22 | `MNTVF_OP_OVERLAY_CTRL` | enable, key enable, source mode, YUV422 layout |
+| 23 | `MNTVF_OP_OVERLAY_POS` | signed destination Y:X |
+| 24 | `MNTVF_OP_OVERLAY_SIZE` | destination H:W |
+| 25 | `MNTVF_OP_OVERLAY_KEY` | colour key as RGB888 |
+| 26 | `MNTVF_OP_OVERLAY_SOURCE_SIZE` | source H:W |
+| 27 | `MNTVF_OP_OVERLAY_FRAME` | frame generation token |
 
-### r3 hardware failure
+The VDMA address, pitch, HSIZE and VSIZE are AXI-Lite registers, written by
+`overlay_hw.c`. Geometry and control changes take effect at vblank.
 
-The first r3 hardware run produced corrupt output and flickering below/outside
-the PIP. An invalid XPM declaration was found: bank 1 began at address 2048
-while the declared memory ended at 2559. That declaration was corrected and
-test-guarded, but the implemented bitstream hash did not change because Vivado
-had already rounded the physical BRAM allocation. It was real source/simulation
-debt, but not a sufficient hardware root cause.
+### Frame handoff
 
-The corrected r5 gate addresses the defects that do change the implementation
-and match the observed symptoms:
+The handoff runs in this order:
 
-- primary scanout has AXI priority 15 over overlay priority 0 on shared HP0;
-- overlay DDR reads are 64-bit rather than 32-bit;
-- the next overlay row is requested at the PIP's final pixel, not the screen's
-  final pixel, giving a left-half window roughly half a scanline more prefetch;
-- SDK staging uses the P96 pitch programmed into VDMA and allocation covers
-  the larger of screen and staging spans;
-- hardware/software path transitions invalidate incompatible packed-YUV/RGB
-  shadows, and session close restores the live P96 source at flushed vblank;
-- formatter register writes are locally IRQ-atomic.
+1. At vblank, the ARM does the full L1+L2 cache flush first.
+2. It resets the overlay VDMA, which stops the stream, and reprograms it,
+   writing `START_ADDR` first and `VSIZE` last. A running AXI VDMA only uses
+   a new start address after `VSIZE` is written (AMD PG020).
+3. It advances the frame generation. If the fetcher is still reading a late
+   row of the old frame when the restarted stream presents its first beat,
+   it holds that start-of-frame beat instead of taking it as part of the old
+   frame. The new generation's search for the frame start then takes the
+   same beat.
+4. The line-buffer side acknowledges the new generation and the formatter
+   restarts its fetch stepper at the first visible source row. The fetcher
+   stops requesting rows once the raster leaves the visible frame.
 
-r3 and the discarded hash-identical intermediate r4 must not be reused.
+Committing the generation before restarting the VDMA was tried as the
+answer to the late row. On an A4000 that order showed a few top rows and
+then black on every frame after a shrunk window went fullscreen, and putting
+this order back cured it. The cause is unknown; the bench does not
+reproduce it. Without the held frame start, this order lost every frame in
+simulation of a 720p window on an overlay stream slowed to about a third of
+its rate: the late row took the frame start, and the new generation waited
+a whole stream frame for the next one.
 
-### 2026-07-26 cyan-frame result
+The VDMA is connected directly to the line fetcher with no FIFO in between, so
+no data from the old frame can survive the reset.
 
-`zz9k-services --check-release` passed and `zz9k-info` reported video service
-`0x0b00` version 1.0, video-decode capability, core 1 online, zero failed
-requests, and no shared allocations left in use. `zzplay` reported
-`direct planar overlay` for both runs:
+## Firmware and bitstream must match
 
-- uncapped: 3160 frames, 70.285 fps playback, 93.588 fps decode-call;
-- paced: 995 frames, 26.544 fps playback, 99.282 fps decode-call.
+The firmware and the bitstream share an ABI, and release packages have to pair
+them. The default firmware expects formatter RTL that includes the overlay
+plane. `ZZ9000OS-legacy-bitstream.elf` is built with the hardware backend
+switched off at compile time. It runs on older bitstreams and always uses the
+ARM compositor.
 
-The displayed frames were invalid, so these figures do not qualify playback
-performance. The lack of desktop/lower-screen corruption suggests the primary
-scanout starvation symptom from r3 is gone. It does not distinguish a stale or
-mismatched binary from a native VDMA/formatter defect; artifact fingerprints
-and the resize-to-ARM-fallback A/B come first.
+## Status
 
-The subsequent same-session A/B did distinguish the presentation branch:
-resized ARM output was correct. Source diagnosis may therefore proceed in the
-native-only staging/VDMA/formatter path even though artifact fingerprints
-remain required for the final release record.
+### Hardware results on default `zorro3`
 
-Source inspection then found the missing AXI VDMA dynamic-update commit.
-AMD's PG020 programming sequence specifies that live video-parameter and start
-address writes enter the internal transfer registers only after a `VSIZE`
-write. `overlay_hw_set_buffer()` previously changed the start address and PL
-generation only. It now writes the active height to `VSIZE` before advancing
-the generation, and `overlay_hw_test` verifies the MMIO order and stopped-state
-guard. A clean BOOT with SHA-256
-`7cfc2ed653c609b4c1ab40fbd8aa69991de3c4ee9833a49a803add4c10d5e1b3`
-was staged in `bench-zzplay-native-p96-r6-vdma-commit`; its failed hardware
-result is recorded below.
+- 640x480@30 MPEG-1 at exact size shows correct video with no flicker. Paced
+  playback runs at about 27–28 fps. Uncapped, it reaches 69.1 fps playback and
+  93.1 fps decode-call. A 318x240 clip, whose width is an odd number of
+  macroblocks, runs at 23 fps playback and 209 fps decode-call.
+- Moving, partial clipping and obscuring, resizing, closing and reopening
+  produce no artifacts.
+- The PIP is correct at 1280x1024 in both 16-bit and 32-bit.
+- RiVA works through native P96 PIP and also through cgxvideo.
+- DPMS, the live scanline modes off/classic/soft/gradient, and taking over
+  native video or videocap and returning all work. The scanline result shows
+  that changing the control doesn't disturb the PIP. It doesn't show visible
+  shading drawn together with the PIP, because high-resolution RTG suppresses
+  shading and P96 modes scaled down to low resolution can't show an overlay.
+- After closing, core 1 stays online, there are no failed requests and no live
+  buffers or surfaces, and all 4,128,768 bytes of the shared heap are free.
 
-### 2026-07-26 r6 frame-phase result
+Upscaling was measured with the same 640x480@30 clip and direct AX audio, at
+exact size and in an enlarged window:
 
-The fingerprinted r6 bundle did not pass. Correct video was not immediate:
-the native 640x480 window showed two top/bottom images superimposed with
-flicker. Resizing continued to select the correct ARM path. The absence of
-cyan proves that r6 did make the decoded packed-YUY2 staging surface visible,
-so the `VSIZE` change remains part of the fix rather than being reverted.
-
-RTL inspection then exposed the next ordering defect. The formatter requested
-line zero at vblank pixel zero, while `control_vblank` interrupts the ARM at
-the end of the visible-width position on that line. The ISR also performs the
-mandatory full L1/L2 flush before committing the overlay address and
-generation. Thus MM2S could already be consuming the old frame when the
-generation invalidated its line tags. The matched fix replaces this timing
-assumption with an acknowledged generation handoff. Review also removed the
-overlay's 32-beat AXI FIFO and made the post-flush handoff reset/reprogram
-MM2S, preventing either the FIFO or VDMA internals from retaining the old
-staging surface. It requires a rebuilt bitstream and matching firmware.
-
-The matched r7 bundle is
-`bench-zzplay-native-p96-r7-frame-handoff`. Its BOOT SHA-256 is
-`a253618c5d1ad950809df73c629a1d7678f8cd361556e09f8bfc717bef9b4daa`;
-the embedded default bitstream SHA-256 is
-`94bc2f59d0af1b022279b1bc040a69131486ed055f92b2de6b15b109cb35d8a6`.
-Payload hashes are verified.
-
-### 2026-07-26 r7 line-readiness result
-
-r7 is another partial fix, not a release candidate. The native 640x480 image
-was mostly correct and no longer solid cyan or vertically superimposed, which
-confirms the post-flush generation handoff and MM2S reset removed the stale
-frame/vertical-phase failure. It still flickered noticeably. Resizing the
-window by even one pixel immediately produced stable, correct ARM-composited
-output.
-
-The remaining native-only failure matches an intermittent line-buffer
-readiness miss. The current formatter cannot request line N+1 until the final
-visible PIP pixel of line N because the same line number selects both the BRAM
-display bank and the MM2S fetch target. For a full-width PIP, that leaves only
-horizontal blanking to fetch an entire packed-YUY2 row. When the line is not
-ready, the formatter deliberately shows the underlying desktop for that row,
-which appears as flicker without corrupting pixels outside the window.
-
-R8 splits those roles: it keeps line N selected for display, requests N+1 as
-soon as N is ready, fills the opposite BRAM bank throughout the current raster
-row, and derives display selection from the current source row at the
-following raster boundary.
-
-### 2026-07-26 r8 line-prefetch candidate
-
-The dedicated line-buffer xsim proves that advancing the fetch target does
-not disturb the currently displayed line or its readiness. The full formatter
-xsim passes 12/12 configurations with zero pixel mismatches, including
-row-distinct luma, odd/right-edge cases, and full-width stress through 1920
-pixels. A fresh Vivado project imported byte-identical current sources and
-meets timing at +1.631 ns WNS / 0 TNS. All RTG, video, config, scheduler, and
-video-codec host tests pass, followed by a clean ARM/newlib build.
-
-The matched hardware bundle is
-`bench-zzplay-native-p96-r8-line-prefetch`. Its BOOT SHA-256 is
-`22bd0171f49e7e489822b4f3386b289b72c069e13620bf5fcd5b8fdc60049679`;
-the embedded default bitstream SHA-256 is
-`293320172cfd42eb6752b3961b69a32a3bb900063caf00ae04dbdca932ab4ed2`.
-Its first gate is untouched exact-size 640x480 playback for at least ten
-seconds, followed by a one-pixel resize only as a control.
-
-Hardware failed that gate. Native playback was about 26 fps, but flicker was
-slightly worse than r7 and black horizontal lines appeared intermittently at
-random vertical positions. Resizing selected correct, stable ARM output at
-about 19–21 fps. R8 is diagnostic only; the result points to native
-line-readiness or bank-valid timing that the deterministic xsim source did not
-exercise.
-
-### 2026-07-26 r9 atomic-CDC candidate
-
-The implemented r8 CDC report identified the missing hardware behavior:
-binary fetch rows, completed-row tags, their valid flags, and the accepted
-generation crossed independently between the 100 MHz AXI and DVI pixel
-clocks. Several were reported as raw multi-bit synchronizers. A transition
-could therefore be sampled as a row number that never existed, or a valid
-flag could arrive with the wrong tag. That explains random missing rows while
-the deterministic same-clock-value RTL source still passed.
-
-R9 preserves r8's early N+1 prefetch but carries all dynamic metadata through
-three bundled-data `xpm_cdc_handshake` instances: fetch request/row,
-completed-row descriptor, and generation acknowledgement. A qualified pixel
-request invalidates its destination bank before AXI can overwrite it. The
-generation startup path also waits for an explicit line-zero request; the
-new regression covers firmware programming a generation while the overlay is
-disabled and then enabling it.
-
-Validation is complete:
-
-- dedicated line-buffer xsim: PASS, including the disabled-start sequence;
-- full current formatter xsim: PASS, 12/12 with zero mismatches through
-  1920-pixel stress;
-- pinned pre-64-bit reference formatter: PASS, 10/10 applicable cases;
-- implemented overlay line-buffer CDC paths: six total, all recognized
-  three-stage XPM handshake controls (`CDC-3` informational), with no r8 raw
-  row/tag/valid crossing remaining;
-- fresh imported RTL fingerprints match the built sources;
-- implementation timing: PASS, +1.011 ns WNS / 0 TNS;
-- all RTG/video/config/scheduler/video-codec host suites and a clean
-  ARM/newlib BOOT build: PASS.
-
-The matched bundle is
-`bench-zzplay-native-p96-r9-atomic-cdc`. Its BOOT SHA-256 is
-`10f074a51a17cbeaccfa35f965ec6491b1cca6741603d14d91f9beb0bf7d0aca`;
-the embedded default bitstream SHA-256 is
-`c4a8715798a717db1facbf17357e6a25567fcf134b5f16e5c54c5b1a0c140fc7`.
-
-The first launch did not reach that gate: core 1 was offline, so `zzplay`
-opened its P96 window and then reported
-`session begin failed: unsupported`. A full power cycle restored core 1
-without changing any artifact. The repeated untouched native run then showed
-correct video with no flicker or artifacts at about 27–28 fps. This is the
-first physical pass of the atomic-CDC line fetcher and clears the r8 random
-black-row defect. Retain the one-off offline event as a recurrence watch; it
-does not justify changing the scheduler without a failure from a known cold
-boot.
-
-The one-pixel resize selected correct ARM output and returning to exact size
-immediately restored correct native output. The bundled 318x240
-odd-macroblock-width clip measured 23 fps playback and 209 fps decode-call;
-its picture was also confirmed correct. The next gates are uncapped 640x480
-throughput, move/clip/depth transitions, close/reopen cleanup, and the rest of
-the P96 acceptance matrix.
-
-Those interaction/performance gates also pass. Uncapped 640x480 processed
-4,405 frames at 69.095 fps playback and 93.113 fps decode-call. Moving,
-partially clipping/obscuring, changing depth, restoring, closing, and reopening
-were artifact-free. Post-close diagnostics reported core 1 online, zero failed
-requests, zero shared buffers/surfaces in use, and the full 4,128,768-byte
-shared heap free. The corrected RiVA native-P96PIP binary and stock RiVA
-through cgxvideo then produced identical correct results, including movement,
-resize, and close. Refreshed diagnostics remained clean: core 1 online,
-8,912 completed requests, zero failures, no live buffers/surfaces, and the
-full heap free. DPMS is accepted from its existing hardware pass (ON,
-Standby, Suspend, Off, wake, and selector-cache follow-up). The subsequent
-scanline-control and videocap continuation passed on 2026-07-27.
-
-The first depth-change gate exposed a driver allocation bug before
-presentation: on a 1280x1024x16 Workbench, `zzplay` could not open the PIP
-window. P96 derives the managed source bitmap's storage from the visible
-friend. `ZZ_CreateFeature` always requested half width, which yields the
-required packed-YUV pitch for a 32-bit friend but only half the required pitch
-for a 16-bit friend; firmware correctly rejected that SET.
-
-The driver-only r9b fix chooses the nominal allocation width from the active
-friend's bytes-per-pixel and reserves a complete final YUV pair for odd source
-widths. The full RTG host suite passes, including 98 overlay checks, and the
-m68k card builds cleanly. The matched test bundle is
-`bench-zzplay-native-p96-r9b-16bit-pip`; its `ZZ9000.card` SHA-256 is
-`02351bbf229fe32a25816d1d024fd1c5a923528e54d278d29820ba4f591faa6f`.
-Hardware validation confirms correct PIP operation in both
-1280x1024x16 and 1280x1024x32 modes. The r9b depth-compatibility gate is
-therefore PASS.
-
-The user then completed the remaining default-`zorro3` continuation and
-reported all visual checks good. Live scanline modes off/classic/soft/gradient
-did not disturb exact-size native PIP; the resized ARM fallback and return
-remained clean. Native-video/videocap takeover, return to RTG,
-exact/resized/exact transitions, pointer ordering, and close cleanup all
-passed. High-resolution RTG intentionally suppresses visible scanline shading,
-and scaled low-resolution P96 modes make the overlay non-presentable, so this
-validates control stability rather than simultaneous visible shading with
-PIP. Final `Z:\results.txt` diagnostics reported core 1 online, 4,554
-completed requests, zero failures, no live buffers/surfaces, and all
-4,128,768 shared-heap bytes free. `ZZDiag` showed the final live scanline state
-as classic/even-dark rather than off.
-
-### FPGA scaling extension
-
-Local `feat/zzplay-media` commit `c6341f8` replaces the resized/clipped ARM
-shadow path with scanout-time nearest-neighbour scaling for supported
-packed-YUV sources. It keeps the public P96/cgxvideo ABI unchanged, preserves
-the 1:1 pixel path, computes exact quotient/remainder scale steps outside the
-pixel critical path, and assigns line-buffer banks independently of source-row
-parity so vertical downscaling can drain skipped rows safely.
-
-The full calibrated formatter sweep passes 12/12 configurations, including
-non-integer up/down scaling and negative-edge clipping. A fresh Vivado 2018.3
-implementation meets timing: the formatter pixel clock has +0.917 ns setup WNS
-and +0.017 ns hold WHS. The default bitstream was rebuilt from the regenerated
-project and packaged with the matched firmware.
-
-Default-Z3 hardware validation used the same 640x480@30 MPEG-1 Program Stream
-with direct AX audio in separate exact-size and enlarged-window runs:
-
-| Metric | Exact size | Resized |
+| Metric | Exact size | Enlarged |
 | --- | ---: | ---: |
 | Decoded frames | 4,405 | 4,405 |
 | Presented frames | 4,379 | 4,374 |
-| Discarded/late frames | 26 | 31 |
+| Discarded or late frames | 26 | 31 |
 | Average playback | 29.916 fps | 29.925 fps |
-| Audio frames | 6,476,544 | 6,476,544 |
 | Audio underruns | 13 | 10 |
 
-The presented-ratio difference is 0.001135, below the locked 0.002 noise
-threshold. The user reported that playback looked exactly the same in both
-scenarios, with no resize slowdown or visual regression. Wider clipping,
-downscale-ratio, and non-default-variant qualification remains part of the
-release matrix; the software compositor remains the compatibility fallback.
+The presented-ratio difference (0.0011) is under the 0.002 noise threshold,
+and the two runs looked the same.
 
-### Z3660 cross-check
+### Simulation and timing
 
-The sibling [Z3660 repository](https://github.com/shanshe/Z3660) was reviewed
-at `main` `1dddf7978fe4ec0203ab2b88f035525083e10ac3` (2026-07-22). Its PL uses a
-second VDMA and a single overlay line buffer, but still requests the next row
-at the visible-line boundary. Its formatter source explicitly notes a VDMA
-switch timing window that produces a flickering line. It has no generation
-acknowledgement or ready tags to transplant; the independent fetch/display
-split above is the stronger solution.
+- `video_overlay_pixel` simulation covers layout, luma, clamping and the key
+  for all five layouts.
+- The formatter xsim sweep passes 31 of 31 configurations, with zero pixel
+  mismatches. The sweep covers:
+  - 32/16/15-bit base modes
+  - odd widths
+  - a 1920-pixel full-width line
+  - non-integer up- and downscaling
+  - negative-edge clipping
+- The line-buffer xsim covers:
+  - stalls and resync after an unexpected SOF
+  - bank wrap
+  - disable and source-generation invalidation
+  - a generation programmed while the overlay is disabled
+  - filling all banks ahead of the display, reusing only passed rows, and
+    one outstanding request
+  - reading two rows at once, and holding a row pair back until both rows
+    are loaded
+- `test/video/run_overlay_scale_sim.sh` checks every pixel of whole windows
+  against a bit-exact bilinear reference (`overlay_bilinear_ref.vh`), with
+  luma and chroma varying per pixel and per row. It covers downscales,
+  upscales, 1:1, an odd source width, windows clipped at each edge
+  (including rows that fall into vertical blanking), the fullscreen toggle
+  with and without a mode change, and an overlay stream that delivers a
+  source row in about 60% of a raster line. That last case needs eight banks
+  with bilinear filtering; four left late rows.
+- The bilinear `zorro3-aga` build meets timing in Vivado 2018.3: +0.162 ns
+  setup and +0.026 ns hold on the 150 MHz pixel clock, and uses 56.5 of 140
+  BRAM tiles and 19 DSPs. The first attempt missed by 1.87 ns: the BRAM
+  read address was computed from the position register in the same cycle
+  and fanned out to 32 RAMB36s. The read addresses, sample geometry and
+  bank selection are now registered, and reads use the BRAM output
+  register. The overlay crosses clock domains only through its three XPM
+  handshakes.
 
-Its MPEG-1 implementation is also useful context but not a drop-in
-optimization. Z3660 buffers up to 1 MiB, copies available FIFO data through a
-temporary allocation, converts planar output to RGB32 on ARM, and flushes the
-full RGB surface. ZZ9000 already streams directly into the demuxer, exposes
-decoder-owned planar frames, writes only packed YUY2 staging, and performs
-YUV-to-RGB/composition in PL.
+### Not yet qualified on hardware
 
-Z3660's vendored `pl_mpeg.h` contains Cortex-A9 NEON motion-compensation and
-IDCT experiments. They must not be copied as-is: nested rounded averages do
-not match MPEG's exact four-sample expression for all inputs, and several
-IDCT expressions add an explicit rounding bias and then use a rounding shift,
-applying the bias twice. The ZZ9000 MPEG translation unit is already compiled
-at `-O3` with Cortex-A9/NEON flags. A corrected, pixel-exact NEON decoder path
-is a worthwhile post-PIP performance follow-up, gated by scalar-vs-NEON
-equivalence tests running on an ARM target.
+- The six non-default board variants. Their bitstreams pass synthesis,
+  implementation, DRC, bus-skew and timing. Hardware acceptance has been
+  recorded only for default `zorro3`.
+- Wider clipping and scale-ratio coverage, which is part of the release
+  matrix.
+- Bilinear scaling and the eight-bank fetcher, which have passed simulation
+  only. The nearest-neighbour four-bank build before them showed resized
+  windows down to the 1.5x limit correctly on an A4000 (`zorro3-aga`).
+
+## Known limitations
+
+- Colour-key occlusion is opportunistic: other windows on top of the PIP hide
+  it only where the colour key matches.
+- SDK frames still need a pack step. Core 1 converts each planar 4:2:0 frame to
+  packed YUV422 before the plane can read it.
+
+## Next step: planar 4:2:0 fetch
+
+The plane would read Y, Cb and Cr directly, using explicit fences between the
+display and decode buffers. The decoder could not reuse a displayed frame
+until the PL had passed its last visible overlay line. That removes the core 1
+pack step. P96 would still own the window geometry and lifetime.
+
+## Bring-up history
+
+The 1:1 plane needed nine hardware revisions (r3–r9b) before it showed
+correct video. The list gives the main faults in order. Each fix is still in
+the design.
+
+| Rev | What was seen | Cause and fix |
+|---|---|---|
+| r3 | Corrupt, flickering output below and outside the PIP | Main scanout starved on the shared HP0 port. Fixed by giving main scanout AXI priority, using 64-bit overlay reads, starting the next-row prefetch at the PIP's last pixel, allocating staging buffers with the P96 pitch, and making formatter register writes IRQ-atomic. An off-by-range XPM line-buffer declaration was also fixed; Vivado had already rounded the BRAM, so this didn't change the bitstream. |
+| r5 | PIP solid cyan | The VDMA kept scanning the cleared P96 source. A new `START_ADDR` only takes effect after `VSIZE` is written. |
+| r6 | Two frames superimposed vertically, with flicker | The formatter started line zero at vblank, before the ARM's cache flush and address commit. Replaced with the acknowledged generation handoff and a VDMA reset each frame, and the overlay FIFO was removed. |
+| r7 | Mostly correct, still flickering | A full-width row had only horizontal blanking to load. Fetching and displaying a row became separate steps, so row N+1 is fetched while row N is shown. |
+| r8 | Worse flicker and random black rows | Row numbers, tags and valid flags crossed clock domains bit by bit. Replaced with bundled `xpm_cdc_handshake` transfers. |
+| r9 | Correct, no flicker | First hardware pass. |
+| r9b | PIP failed to open on a 16-bit Workbench | `ZZ_CreateFeature` in the driver always asked for half-width storage, which only gives the required packed-YUV pitch with a 32-bit friend bitmap. It now sizes the allocation from the friend's bytes per pixel and reserves a complete final YUV pair for odd widths. |
+
+Nearest-neighbour scaling and clipping in the PL came later, in #64. Before
+that, any resized or clipped window used the ARM compositor. Downscaled
+windows then went back to the compositor: every hardware test of a window
+smaller than its scanned source showed the first rows of the frame and then
+black. On an A4000 this happened with a 1920x1080 window and with a 720x576
+MPEG-2 frame letterboxed to 720x405, while 1:1 and enlarged windows of the
+same clips were correct. The two-bank fetcher could only start a row once the
+previous one was on display, so each skipped source row put two rows inside
+one raster line. A row that arrived late was dropped, and at 1:1 it left the
+fetcher behind the display for the rest of the frame. Simulation shows late
+and dropped rows only when the stream is slow, as when the desktop scanout
+competes for HP0. It does not reproduce the 720x405 failure at that mode's
+27 MHz pixel clock, so the cause of that case is unconfirmed. The four-bank
+fetcher brought downscaled windows back to the native plane, up to a 1.5x
+reduction.
+
+## Comparison with Z3660
+
+The [Z3660](https://github.com/shanshe/Z3660) design was reviewed at `main`
+`1dddf79` (2026-07-22). It also uses a second VDMA, but has a single line buffer
+and fetches the next row at the visible-line boundary. Its own formatter source
+notes a VDMA switch timing window that causes a flickering line. It has no
+generation acknowledgement or ready tags, so ZZ9000 has nothing to take from
+it here. The fetch/display split described above addresses the same problem
+more thoroughly.
+
+Its MPEG-1 player does more of the work on the ARM. It buffers up to 1 MiB,
+copies FIFO data through a temporary allocation, converts planar output to
+RGB32 on the ARM, and flushes the full RGB surface. ZZ9000 streams straight
+into the demuxer, keeps decoder-owned planar frames, writes only the packed
+YUY2 staging buffer, and does YUV-to-RGB conversion and composition in the PL.
+
+The NEON motion-compensation and IDCT experiments in Z3660's vendored
+`pl_mpeg.h` are not bit-exact, so they can't be copied over:
+
+- Its nested rounded averages don't always match MPEG's four-sample formula.
+- Several IDCT expressions apply the rounding bias twice: once explicitly,
+  then again through a rounding shift.
+
+ZZ9000 decodes MPEG-1 and MPEG-2 with libmpeg2. Its NEON kernels in
+`sdk_mpeg2_neon.c` compute the same results as the C code. The card runs a
+one-off comparison against the C code before installing them and keeps using
+C if they differ.
+`test/mpeg2_neon/run.sh` runs the same comparison under qemu-arm.

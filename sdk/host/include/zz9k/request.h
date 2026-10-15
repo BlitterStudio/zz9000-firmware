@@ -1001,6 +1001,8 @@ static inline int zz9k_request_media_session_begin(
       desc->width == 0U || desc->height == 0U || desc->flags != 0U ||
       (desc->audio_codec != ZZ9K_MEDIA_AUDIO_NONE &&
        desc->audio_codec != ZZ9K_MEDIA_AUDIO_MP2 &&
+       desc->audio_codec != ZZ9K_MEDIA_AUDIO_LPCM &&
+       desc->audio_codec != ZZ9K_MEDIA_AUDIO_AC3 &&
        desc->audio_codec != ZZ9K_MEDIA_AUDIO_OPUS &&
        desc->audio_codec != ZZ9K_MEDIA_AUDIO_VORBIS) ||
       (desc->audio_codec == ZZ9K_MEDIA_AUDIO_NONE &&
@@ -1083,7 +1085,8 @@ static inline int zz9k_request_media_session_command_value(
       opcode == ZZ9K_OP_MEDIA_SESSION_AUDIO_BIND
           ? ZZ9K_MEDIA_AUDIO_BIND_PAUSE
           : opcode == ZZ9K_OP_MEDIA_SESSION_DECODE
-                ? ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME
+                ? (ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME |
+                   ZZ9K_MEDIA_DECODE_SKIP_TO_I_PICTURE)
                 : 0U;
 
   if (!request || !zz9k_media_command_opcode_known(opcode) ||

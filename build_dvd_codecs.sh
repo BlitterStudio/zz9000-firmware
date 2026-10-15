@@ -119,12 +119,22 @@ else
     CC_CMD="$(command -v "$CC_FOR_BUILD")"
     AR_CMD="$(command -v "$AR_FOR_BUILD")"
     RANLIB_CMD="$(command -v "$RANLIB_FOR_BUILD")"
-    CFLAGS_TARGET="-O2 -ffunction-sections -fdata-sections -fno-strict-aliasing"
+    # The firmware's arm-none-eabi ABI sizes enums to their values
+    # (short enums); host archives use the same so host tests see the
+    # enum sizes the card runs with. Callers compile with -fshort-enums.
+    CFLAGS_TARGET="-O2 -fshort-enums -ffunction-sections -fdata-sections \
+-fno-strict-aliasing"
 fi
 
 build_dir_for() {
     local lib="$1" ver="$2"
     echo "$OS_DIR/build/deps/$lib/$ver"
+}
+
+# An archive built with other flags (another enum size) would still link,
+# so each one records its flags and is rebuilt when they change.
+flags_match() {
+    [ -f "$1/build.flags" ] && [ "$(cat "$1/build.flags")" = "$CFLAGS_TARGET" ]
 }
 
 # --- libmpeg2 (decoder core only) ----------------------------------------
@@ -140,7 +150,20 @@ if [ ! -f "$MPEG2_SRC/libmpeg2/decode.c" ]; then
     mkdir -p "$MPEG2_SRC"
     tar xzf "$MPEG2_ARCHIVE" --strip-components=1 -C "$MPEG2_SRC"
 fi
-if [ ! -f "$MPEG2_LIB" ]; then
+# libmpeg2 returns a parsed state only when (int)state is above
+# STATE_INTERNAL_NORETURN, ((mpeg2_state_t)-1). With short enums that is
+# 255, so no state was ever returned: the sequence header was swallowed and
+# slices decoded without a picture, which crashed the card. Compare for
+# inequality, which is what the -1 sentinel means for any enum size.
+if ! grep -q 'state != STATE_INTERNAL_NORETURN' "$MPEG2_SRC/libmpeg2/decode.c"; then
+    sed 's/if ((int)state > (int)STATE_INTERNAL_NORETURN)/if (state != STATE_INTERNAL_NORETURN)/' \
+        "$MPEG2_SRC/libmpeg2/decode.c" > "$MPEG2_SRC/libmpeg2/decode.c.tmp"
+    mv "$MPEG2_SRC/libmpeg2/decode.c.tmp" "$MPEG2_SRC/libmpeg2/decode.c"
+    grep -q 'state != STATE_INTERNAL_NORETURN' "$MPEG2_SRC/libmpeg2/decode.c" || {
+        echo "ERROR: libmpeg2 short-enum patch did not apply" >&2; exit 1; }
+    rm -rf "$MPEG2_DIR/arm" "$MPEG2_DIR/host"
+fi
+if [ ! -f "$MPEG2_LIB" ] || ! flags_match "$MPEG2_OUT"; then
     rm -rf "$MPEG2_OUT"
     mkdir -p "$MPEG2_OUT/include" "$MPEG2_OUT/obj"
     # Portable decoder core; no ARCH_* define so every dispatcher selects
@@ -161,6 +184,7 @@ EOF
     "$RANLIB_CMD" "$MPEG2_LIB"
     cp "$MPEG2_SRC/include/mpeg2.h" "$MPEG2_OUT/include/mpeg2.h"
     rm -rf "$MPEG2_OUT/obj"
+    printf '%s' "$CFLAGS_TARGET" > "$MPEG2_OUT/build.flags"
     echo "[libmpeg2] built ($TARGET): $MPEG2_LIB"
 fi
 
@@ -177,7 +201,7 @@ if [ ! -f "$A52_SRC/liba52/parse.c" ]; then
     mkdir -p "$A52_SRC"
     tar xzf "$A52_ARCHIVE" --strip-components=1 -C "$A52_SRC"
 fi
-if [ ! -f "$A52_LIB" ]; then
+if [ ! -f "$A52_LIB" ] || ! flags_match "$A52_OUT"; then
     rm -rf "$A52_OUT"
     mkdir -p "$A52_OUT/include" "$A52_OUT/obj"
     # Default precision (sample_t = float); no runtime accel detection.
@@ -198,5 +222,6 @@ EOF
     cp "$A52_SRC/include/mm_accel.h" "$A52_OUT/include/mm_accel.h"
     cp "$A52_SRC/include/attributes.h" "$A52_OUT/include/attributes.h"
     rm -rf "$A52_OUT/obj"
+    printf '%s' "$CFLAGS_TARGET" > "$A52_OUT/build.flags"
     echo "[liba52] built ($TARGET): $A52_LIB"
 fi

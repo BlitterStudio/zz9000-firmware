@@ -302,8 +302,8 @@ enum ZZ9KCapability {
   /* Codec capability flags for FLAC and Vorbis backends (unadvertised until qualified). */
   ZZ9K_CAP_AUDIO_FLAC = 1U << 28,
   ZZ9K_CAP_AUDIO_VORBIS = 1U << 29,
-  /* ZZ9K_SERVICE_CONSOLE is present. */
-  ZZ9K_CAP_CONSOLE_ENCODE = 1U << 30
+  /* Zorro III: card-only allocations for preloaded media input. */
+  ZZ9K_CAP_MEDIA_INPUT = 1U << 30
 };
 
 #define ZZ9K_APERTURE_LAYOUT_GENERATION_SHIFT 16U
@@ -336,6 +336,9 @@ enum ZZ9KApertureLayoutState {
  * is mappable). CARD_ONLY declares that the 68k never touches the buffer
  * contents: the library skips the board-window mapping and leaves
  * ZZ9KSharedBuffer.data NULL, so the buffer is usable by handle only.
+ * MEDIA requires CARD_ONLY and asks firmware for owner-tracked storage from
+ * the card pool's 64 MiB preload-input class rather than the small shared
+ * heap.
  * Generation-1 firmware publishes a board-relative layout and requires a
  * bootstrap acknowledgement before the host heap becomes active. The
  * library accepts only the canonical 2, 4, and software-ready 8 MB profiles,
@@ -345,7 +348,8 @@ enum ZZ9KApertureLayoutState {
  */
 enum ZZ9KAllocFlags {
   ZZ9K_ALLOC_HOST_WINDOW = 1U << 0,
-  ZZ9K_ALLOC_CARD_ONLY = 1U << 1
+  ZZ9K_ALLOC_CARD_ONLY = 1U << 1,
+  ZZ9K_ALLOC_MEDIA = 1U << 2
 };
 
 #define ZZ9K_HOST_WINDOW_MIN_BOARD_SIZE 0x00400000U /* legacy fixed profile */
@@ -355,6 +359,7 @@ enum ZZ9KServiceFlags {
   ZZ9K_SERVICE_FLAG_MODULE = 1U << 1,
   ZZ9K_SERVICE_FLAG_ASYNC = 1U << 2,
   ZZ9K_SERVICE_FLAG_ZERO_COPY = 1U << 3,
+  ZZ9K_SERVICE_FLAG_MEMORY_MEDIA_INPUT = 1U << 16,
   ZZ9K_SERVICE_FLAG_SURFACE_PALETTE_QUERY = 1U << 16,
   ZZ9K_SERVICE_FLAG_IMAGE_JPEG_BASELINE = 1U << 16,
   ZZ9K_SERVICE_FLAG_IMAGE_JPEG_PROGRESSIVE = 1U << 17,
@@ -440,6 +445,12 @@ enum ZZ9KServiceFlags {
    * keygen, so the provider must gate ECDHE keygen offload on this bit. */
   ZZ9K_SERVICE_FLAG_CRYPTO_P256_KEYGEN = 1U << 21
 };
+
+/* MPEG-2 video in Program Stream (.mpg/.vob) files, with AC-3, LPCM or MP2
+ * audio decoded on the card. Advertised only by the qualification flavor
+ * until it passes hardware qualification. Bit 31
+ * does not fit an int enumerator in strict C, so it is a macro. */
+#define ZZ9K_SERVICE_FLAG_VIDEO_MPEG2 0x80000000UL
 
 enum ZZ9KAudioSampleFormat {
   ZZ9K_AUDIO_SAMPLE_FORMAT_NONE = 0,
@@ -2812,7 +2823,7 @@ enum ZZ9KAudioCodec {
 
 enum ZZ9KVideoCodec {
   ZZ9K_VIDEO_CODEC_MPEG1 = 1U,
-  /* 2 is reserved for MPEG-2. */
+  ZZ9K_VIDEO_CODEC_MPEG2 = 2U,
   ZZ9K_VIDEO_CODEC_VP8 = 3U,
   ZZ9K_VIDEO_CODEC_VP9 = 4U
 };
@@ -2848,8 +2859,8 @@ enum ZZ9KVideoSessionResultFlags {
 enum ZZ9KMediaAudioCodec {
   ZZ9K_MEDIA_AUDIO_NONE = 0U,
   ZZ9K_MEDIA_AUDIO_MP2 = 1U,
-  /* 2 and 3 are LPCM and AC3 inside the firmware DVD backend. Opus and
-   * Vorbis stay clear of that numeric space. */
+  ZZ9K_MEDIA_AUDIO_LPCM = 2U,
+  ZZ9K_MEDIA_AUDIO_AC3 = 3U,
   ZZ9K_MEDIA_AUDIO_OPUS = 4U,
   ZZ9K_MEDIA_AUDIO_VORBIS = 5U
 };
@@ -2859,9 +2870,12 @@ enum ZZ9KMediaSessionWriteFlags {
 };
 
 /* DECODE command flags (ZZ9KMediaSessionCommandPayload.flags). The 64-bit
- * value cursor stays zero. Other codecs ignore this bit. */
+ * value cursor stays zero. Other codecs ignore these flags. */
 enum ZZ9KMediaDecodeFlags {
-  ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME = 1U << 0
+  /* Existing late-frame gate: WebM skips to a keyframe; MPEG skips B pictures. */
+  ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME = 1U << 0,
+  /* MPEG far-lag recovery: discard dependent pictures until an I picture. */
+  ZZ9K_MEDIA_DECODE_SKIP_TO_I_PICTURE = 1U << 1
 };
 
 enum ZZ9KMediaAudioBindFlags {

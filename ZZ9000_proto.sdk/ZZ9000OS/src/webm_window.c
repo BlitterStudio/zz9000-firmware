@@ -37,6 +37,25 @@ static int win_seek(void *ctx, uint32_t pos)
 	return w->eof ? -1 : -2;
 }
 
+/* Past the held bytes, nothing before pos is read again: empty the window
+ * at pos and drop the rest of the skipped bytes as they are appended. */
+static int win_skip(void *ctx, uint32_t pos)
+{
+	struct webm_window *w = (struct webm_window *)ctx;
+	uint32_t end = w->start + w->filled;
+	int rc = win_seek(ctx, pos);
+
+	/* Still dropping: the bytes before pos have not arrived. */
+	if (rc != -2 || w->drop_left != 0U)
+		return rc;
+	w->drop_left = pos - end;
+	w->start = pos;
+	w->filled = 0U;
+	w->cursor = pos;
+	w->mark = pos;
+	return 1;
+}
+
 static uint32_t win_tell(void *ctx)
 {
 	return ((struct webm_window *)ctx)->cursor;
@@ -56,17 +75,31 @@ void webm_window_bind(struct webm_window *w, struct webm_io *io)
 	io->read = win_read;
 	io->seek = win_seek;
 	io->tell = win_tell;
+	io->skip = win_skip;
 }
 
 uint32_t webm_window_space(const struct webm_window *w)
 {
-	return w->cap - w->filled;
+	uint32_t space = w->cap - w->filled;
+
+	/* Skipped bytes still to arrive are dropped, not stored. */
+	return w->drop_left > UINT32_MAX - space ? UINT32_MAX
+	                                         : space + w->drop_left;
 }
 
 int webm_window_append(struct webm_window *w, const uint8_t *src, uint32_t n)
 {
-	if (n > w->cap - w->filled)
+	uint32_t drop = n < w->drop_left ? n : w->drop_left;
+
+	if (n - drop > w->cap - w->filled)
 		return 0;
+	if (drop != 0U) {
+		/* src may be NULL for an empty EOF write: never offset it
+		 * then. */
+		w->drop_left -= drop;
+		src += drop;
+		n -= drop;
+	}
 	if (n != 0U)
 		memcpy(w->data + w->filled, src, n);
 	w->filled += n;

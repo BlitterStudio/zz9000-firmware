@@ -7,7 +7,7 @@
 #include <string.h>
 
 static const char *const zzplay_mpeg_ps_extensions[] = {
-  "mpg", "mpeg", NULL
+  "mpg", "mpeg", "vob", NULL
 };
 
 static const char *const zzplay_webm_extensions[] = {
@@ -31,7 +31,7 @@ static const char *const zzplay_vorbis_extensions[] = {
 static const ZZPlayFormat zzplay_formats_table[] = {
   {
     ZZPLAY_MEDIA_KIND_MPEG_PS,
-    "MPEG-1 Program Stream",
+    "MPEG Program Stream",
     zzplay_mpeg_ps_extensions,
     ZZPLAY_FORMAT_HAS_VIDEO
   },

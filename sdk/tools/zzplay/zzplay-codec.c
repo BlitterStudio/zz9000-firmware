@@ -15,7 +15,6 @@
 
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define ZZPLAY_CODEC_PCM_CAPACITY ZZPLAY_MP3_DEFAULT_PCM_CAPACITY
@@ -514,8 +513,9 @@ static ZZPlayCodecPassResult zzplay_codec_decode_once(ZZPlayCodecDecode *decode)
     }
     zzplay_controller_set_engine_paused(decode->engine->ctl, 0);
     zzplay_codec_report_progress(decode);
-    got = fread(zzplay_codec_chunk, 1U, decode->staging.length, decode->file);
-    if (got == 0U && ferror(decode->file)) {
+    got = zzplay_file_read(decode->file, zzplay_codec_chunk,
+                           decode->staging.length);
+    if (got == 0U && zzplay_file_error(decode->file)) {
       return ZZPLAY_CODEC_PASS_FAILED;
     }
     flags = got == 0U ? ZZ9K_AUDIO_STREAM_FEED_EOF : 0U;
@@ -617,7 +617,7 @@ void zzplay_codec_decode_cleanup(ZZPlayCodecDecode *decode)
     decode->ahi = 0;
   }
   if (decode->file) {
-    fclose(decode->file);
+    zzplay_file_close(decode->file);
     decode->file = 0;
   }
 }
@@ -668,14 +668,14 @@ ZZPlayCodecEngine *engine, int *unavailable)
         (caps.capability_bits & ZZ9K_CAP_APERTURE_LAYOUT) != 0U;
     decode.engine = engine;
     decode.position_base_ms = base_ms;
-    decode.file = fopen(run->path, "rb");
+    decode.file = zzplay_file_open(run->path, 0);
     if (!decode.file) {
       zzplay_launch_reportf(engine->ctl, engine->run->options,
                             "cannot reopen %s", run->path);
       zzplay_codec_decode_cleanup(&decode);
       goto done;
     }
-    if (fseek(decode.file, (long)offset, SEEK_SET) != 0) {
+    if (!zzplay_file_seek(decode.file, (long)offset, ZZPLAY_FILE_BEGIN)) {
       zzplay_launch_reportf(engine->ctl, engine->run->options,
                             "cannot seek in %s", run->path);
       zzplay_codec_decode_cleanup(&decode);

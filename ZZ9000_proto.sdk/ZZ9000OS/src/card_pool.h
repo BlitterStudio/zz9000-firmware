@@ -31,16 +31,21 @@ enum card_pool_class {
     /* Permanent firmware allocations: survive Amiga resets, never placed in
      * a revocable range. */
     CARD_POOL_CLASS_FIRMWARE = 1,
+    /* Decoder working sets. */
     CARD_POOL_CLASS_MEDIA = 2,
     CARD_POOL_CLASS_IMAGE = 3,
+    /* Client-owned resident media input. This is deliberately distinct from
+     * decoder MEDIA: fault recovery releases decoder owners by session id. */
+    CARD_POOL_CLASS_MEDIA_INPUT = 4,
     CARD_POOL_CLASS_COUNT
 };
 
-#define CARD_POOL_LIMIT_FIRMWARE (64u << 20)
-#define CARD_POOL_LIMIT_MEDIA    (128u << 20)
+#define CARD_POOL_LIMIT_FIRMWARE    (64u << 20)
+#define CARD_POOL_LIMIT_MEDIA       (128u << 20)
+#define CARD_POOL_LIMIT_MEDIA_INPUT (64u << 20)
 /* Matches the image decode budget all image sessions share
  * (SDK_IMAGE_STREAM_MAX_DECODE_STATE_BYTES). */
-#define CARD_POOL_LIMIT_IMAGE    (72u << 20)
+#define CARD_POOL_LIMIT_IMAGE       (72u << 20)
 
 #define CARD_POOL_OWNER(cls, instance) \
     (((uint32_t)(cls) << 24) | ((uint32_t)(instance) & 0x00FFFFFFu))

@@ -11,9 +11,10 @@
 
 static int check_file_probe(void)
 {
-  uint8_t split[4101];
-  static const uint8_t header[8] = {
-    0x00U, 0x00U, 0x01U, 0xb3U, 0x14U, 0x00U, 0xf0U, 0x13U
+  uint8_t split[4105];
+  static const uint8_t header[12] = {
+    0x00U, 0x00U, 0x01U, 0xb3U, 0x14U, 0x00U, 0xf0U, 0x13U,
+    0x00U, 0x00U, 0x00U, 0x00U
   };
   FILE *file;
   ZZPlayVideoInfo info;
@@ -50,12 +51,26 @@ static int check_file_probe(void)
   }
   fclose(file);
 
+  info.width = 1920U;
+  info.height = 1088U;
+  info.frame_rate_milli = 25000U;
+  if (!zzplay_video_info_supported(&info)) {
+    return 0;
+  }
+  info.width = 1088U;
+  info.height = 1920U;
+  if (!zzplay_video_info_supported(&info)) {
+    return 0;
+  }
+  info.width = 1920U;
+  info.height = 1089U;
+  if (zzplay_video_info_supported(&info)) {
+    return 0;
+  }
   info.width = 15U;
   info.height = 240U;
-  info.frame_rate_milli = 25000U;
   return !zzplay_video_info_supported(&info);
 }
-
 static int check_program_probe(void)
 {
   static const uint8_t program[] = {
@@ -69,6 +84,558 @@ static int check_program_probe(void)
   zzplay_probe_mpeg_program(program, sizeof(program), &info);
   return info.is_program_stream && info.has_video_pes &&
          info.has_audio_pes;
+}
+
+/* Helpers to build MPEG-2 sequence headers, extensions and PES packets. */
+static size_t probe_put_seq_header(uint8_t *dst, uint32_t w, uint32_t h,
+                                   uint8_t aspect_code, uint8_t rate_code)
+{
+  dst[0] = 0x00; dst[1] = 0x00; dst[2] = 0x01; dst[3] = 0xb3;
+  dst[4] = (uint8_t)(w >> 4);
+  dst[5] = (uint8_t)(((w & 0x0fU) << 4) | (h >> 8));
+  dst[6] = (uint8_t)(h & 0xffU);
+  dst[7] = (uint8_t)((aspect_code << 4) | rate_code);
+  dst[8] = 0x00; dst[9] = 0x00; dst[10] = 0x00; dst[11] = 0x00;
+  return 12U;
+}
+
+static size_t probe_put_seq_ext(uint8_t *dst)
+{
+  dst[0] = 0x00; dst[1] = 0x00; dst[2] = 0x01; dst[3] = 0xb5;
+  dst[4] = 0x18; /* extension id 1, profile/level high nibble */
+  dst[5] = 0x14; /* progressive, chroma 4:2:0 */
+  dst[6] = 0x80; /* h/v size extension 0, marker */
+  dst[7] = 0x00;
+  dst[8] = 0x00;
+  dst[9] = 0x0b;
+  return 10U;
+}
+
+static size_t probe_put_seq_display_ext(uint8_t *dst, uint32_t dw, uint32_t dh)
+{
+  dst[0] = 0x00; dst[1] = 0x00; dst[2] = 0x01; dst[3] = 0xb5;
+  dst[4] = 0x22; /* extension id 2, video_format 1, no color description */
+  dst[5] = (uint8_t)(dw >> 6);
+  dst[6] = (uint8_t)(((dw & 0x3fU) << 2) | 0x02 | ((dh >> 13) & 1U));
+  dst[7] = (uint8_t)((dh >> 5) & 0xffU);
+  dst[8] = (uint8_t)((dh & 0x1fU) << 3);
+  return 9U;
+}
+
+static size_t probe_put_pes(uint8_t *dst, uint8_t stream_id,
+                            const uint8_t *payload, size_t payload_len)
+{
+  uint16_t pes_length = (uint16_t)(3U + payload_len);
+
+  dst[0] = 0x00; dst[1] = 0x00; dst[2] = 0x01; dst[3] = stream_id;
+  dst[4] = (uint8_t)(pes_length >> 8);
+  dst[5] = (uint8_t)(pes_length & 0xffU);
+  dst[6] = 0x80; dst[7] = 0x00; dst[8] = 0x00;
+  memcpy(dst + 9U, payload, payload_len);
+  return 9U + payload_len;
+}
+
+static int check_mpeg2_program_probe(void)
+{
+  uint8_t buf[256];
+  uint8_t payload[8];
+  size_t n = 0U;
+  ZZPlayVideoInfo info;
+
+  n += probe_put_seq_header(buf + n, 720U, 576U, 3U, 3U);
+  n += probe_put_seq_ext(buf + n);
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xe0;
+  memset(payload, 0x11, sizeof(payload));
+  payload[0] = 0x80;
+  n += probe_put_pes(buf + n, 0xbdU, payload, sizeof(payload));
+
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) ||
+      !info.is_mpeg2 || info.width != 720U || info.height != 576U ||
+      info.frame_rate_milli != 25000U) {
+    return 0;
+  }
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, n, &info);
+  return info.is_program_stream == 0 && info.has_video_pes &&
+         info.has_audio_pes &&
+         info.audio_codec == ZZPLAY_MEDIA_AUDIO_AC3;
+}
+
+static int check_mpeg1_unchanged_probe(void)
+{
+  uint8_t buf[256];
+  uint8_t payload[8];
+  size_t n = 0U;
+  ZZPlayVideoInfo info;
+
+  n += probe_put_seq_header(buf + n, 352U, 288U, 1U, 3U);
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xba;
+  buf[n++] = 0x21; /* MPEG-1 pack: marker bits 0010 */
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xc0;
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) || info.is_mpeg2) {
+    return 0;
+  }
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, n, &info);
+  if (!info.is_program_stream || !info.has_audio_pes || info.is_mpeg2 ||
+      info.audio_codec != ZZPLAY_MEDIA_AUDIO_MP2) {
+    return 0;
+  }
+
+  /* MPEG-1 video in MPEG-2 packs (VCD remuxes, DVD MPEG-1 titles): the
+   * pack syntax must not mark the video MPEG-2, so MP2 audio keeps the
+   * release MPEG-1 backend, while AC-3 needs the MPEG-2 one. */
+  n = 0U;
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xba;
+  buf[n++] = 0x44; /* MPEG-2 pack: marker bits 01 */
+  n += probe_put_seq_header(buf + n, 352U, 288U, 1U, 3U);
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xe0;
+  memset(payload, 0x11, sizeof(payload));
+  n += probe_put_pes(buf + n, 0xc0U, payload, 4U);
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, n, &info);
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) || info.is_mpeg2 ||
+      !info.is_program_stream ||
+      info.audio_codec != ZZPLAY_MEDIA_AUDIO_MP2 ||
+      zzplay_mpeg_needs_mpeg2_backend(&info, 1)) {
+    return 0;
+  }
+  payload[0] = 0x80;
+  n += probe_put_pes(buf + n, 0xbdU, payload, sizeof(payload));
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, n, &info);
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) || info.is_mpeg2 ||
+      info.audio_codec != ZZPLAY_MEDIA_AUDIO_AC3 ||
+      !zzplay_mpeg_needs_mpeg2_backend(&info, 1)) {
+    return 0;
+  }
+  /* Played without audio, AC-3 needs nothing beyond MPEG-1. */
+  if (zzplay_mpeg_needs_mpeg2_backend(&info, 0)) {
+    return 0;
+  }
+  /* MPEG-2 video needs the MPEG-2 backend whatever its audio. */
+  info.is_mpeg2 = 1;
+  info.audio_codec = ZZPLAY_MEDIA_AUDIO_MP2;
+  return zzplay_mpeg_needs_mpeg2_backend(&info, 1) &&
+         zzplay_mpeg_needs_mpeg2_backend(&info, 0);
+}
+
+static int check_mpeg2_aspect_probe(void)
+{
+  uint8_t buf[128];
+  size_t n;
+  ZZPlayVideoInfo info;
+
+  n = probe_put_seq_header(buf, 720U, 576U, 2U, 3U);
+  n += probe_put_seq_ext(buf + n);
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) ||
+      info.display_width != 768U || info.display_height != 576U) {
+    return 0;
+  }
+  n = probe_put_seq_header(buf, 720U, 576U, 3U, 3U);
+  n += probe_put_seq_ext(buf + n);
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) ||
+      info.display_width != 1024U || info.display_height != 576U) {
+    return 0;
+  }
+  n = probe_put_seq_header(buf, 720U, 576U, 4U, 3U);
+  n += probe_put_seq_ext(buf + n);
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) ||
+      info.display_width != 1272U || info.display_height != 576U) {
+    return 0;
+  }
+  n = probe_put_seq_header(buf, 720U, 576U, 1U, 3U);
+  n += probe_put_seq_ext(buf + n);
+  n += probe_put_seq_display_ext(buf + n, 540U, 400U);
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) ||
+      info.display_width != 720U || info.display_height != 576U) {
+    return 0;
+  }
+  /* A sequence display extension sets the area the aspect applies to. */
+  n = probe_put_seq_header(buf, 720U, 576U, 2U, 3U);
+  n += probe_put_seq_ext(buf + n);
+  n += probe_put_seq_display_ext(buf + n, 540U, 576U);
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) ||
+      info.display_width != 1024U || info.display_height != 576U) {
+    return 0;
+  }
+  return 1;
+}
+
+static int check_mpeg2_display_extension_regressions(void)
+{
+  uint8_t buf[256];
+  uint8_t split[4101];
+  size_t n;
+  ZZPlayVideoInfo info;
+  FILE *file;
+
+  n = probe_put_seq_header(buf, 720U, 576U, 3U, 3U);
+  buf[11] |= 0x02U;
+  memset(buf + n, 0x55, 64U);
+  buf[n + 63U] &= 0xfeU;
+  n += 64U;
+  n += probe_put_seq_ext(buf + n);
+  n += probe_put_seq_display_ext(buf + n, 540U, 576U);
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) ||
+      info.display_width != 1365U || info.display_height != 576U) {
+    return 0;
+  }
+
+  n = probe_put_seq_header(buf, 720U, 576U, 3U, 3U);
+  buf[11] |= 0x02U;
+  memset(buf + n, 0, 64U);
+  buf[n] = 0x10U;
+  buf[n + 63U] |= 0x01U;
+  n += 64U;
+  memset(buf + n, 0x55, 64U);
+  n += 64U;
+  n += probe_put_seq_ext(buf + n);
+  n += probe_put_seq_display_ext(buf + n, 540U, 576U);
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_mpeg_sequence(buf, n, &info) ||
+      info.display_width != 1365U || info.display_height != 576U) {
+    return 0;
+  }
+
+  memset(split, 0x55, sizeof(split));
+  n = 4096U - 12U - 10U - 4U;
+  n += probe_put_seq_header(split + n, 720U, 576U, 3U, 3U);
+  n += probe_put_seq_ext(split + n);
+  n += probe_put_seq_display_ext(split + n, 540U, 576U);
+  file = tmpfile();
+  if (!file) {
+    return 0;
+  }
+  if (fwrite(split, 1U, n, file) != n || fflush(file) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_file(file, &info) ||
+      info.display_width != 1365U || info.display_height != 576U) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+  return 1;
+}
+
+static int check_mpeg2_audio_priority_probe(void)
+{
+  uint8_t buf[256];
+  uint8_t payload[8];
+  size_t n;
+  ZZPlayVideoInfo info;
+
+  /* MP2 + LPCM: MP2 wins. LPCM format byte 0x01: 16-bit 48 kHz stereo. */
+  memset(payload, 0x55, sizeof(payload));
+  n = probe_put_pes(buf, 0xc0U, payload, 4U);
+  payload[0] = 0xa0;
+  payload[5] = 0x01;
+  n += probe_put_pes(buf + n, 0xbdU, payload, sizeof(payload));
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, n, &info);
+  if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_MP2) {
+    return 0;
+  }
+  /* LPCM only. */
+  n = probe_put_pes(buf, 0xbdU, payload, sizeof(payload));
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, n, &info);
+  if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_LPCM || !info.has_audio_pes) {
+    return 0;
+  }
+  /* LPCM the firmware drops (24-bit 96 kHz, 20-bit 48 kHz, 16-bit 5.1)
+   * is no audio, so playback falls back to video only. */
+  {
+    static const uint8_t unsupported[] = { 0x91U, 0x41U, 0x05U };
+    size_t k;
+
+    for (k = 0U; k < sizeof(unsupported); k++) {
+      payload[5] = unsupported[k];
+      n = probe_put_pes(buf, 0xbdU, payload, sizeof(payload));
+      memset(&info, 0, sizeof(info));
+      zzplay_probe_mpeg_program(buf, n, &info);
+      if (info.has_audio_pes ||
+          info.audio_codec != ZZPLAY_MEDIA_AUDIO_NONE) {
+        return 0;
+      }
+    }
+    payload[5] = 0x01;
+  }
+  /* An LPCM header the window cuts before its format byte decides
+   * nothing yet. */
+  n = probe_put_pes(buf, 0xbdU, payload, sizeof(payload));
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, 9U + 5U, &info);
+  if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_NONE) {
+    return 0;
+  }
+  /* AC-3 + MP2 + LPCM: AC-3 wins. */
+  payload[0] = 0x80;
+  n = probe_put_pes(buf, 0xbdU, payload, sizeof(payload));
+  n += probe_put_pes(buf + n, 0xc0U, payload, 4U);
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, n, &info);
+  if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_AC3) {
+    return 0;
+  }
+  /* A probe window that ends inside an LPCM PES's MPEG-2 header: its
+   * flags byte (0x84, data alignment) must not be read as an AC-3
+   * substream id, or the LPCM seen once the window moves on is ignored. */
+  payload[0] = 0xa0;
+  n = probe_put_pes(buf, 0xbdU, payload, sizeof(payload));
+  buf[6] = 0x84;
+  memset(&info, 0, sizeof(info));
+  zzplay_probe_mpeg_program(buf, 8U, &info);
+  if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_NONE) {
+    return 0;
+  }
+  zzplay_probe_mpeg_program(buf, n, &info);
+  if (info.audio_codec != ZZPLAY_MEDIA_AUDIO_LPCM) {
+    return 0;
+  }
+  /* Video only. */
+  memset(&info, 0, sizeof(info));
+  n = probe_put_pes(buf, 0xe0U, payload, 4U);
+  zzplay_probe_mpeg_program(buf, n, &info);
+  return !info.has_audio_pes &&
+         info.audio_codec == ZZPLAY_MEDIA_AUDIO_NONE;
+}
+
+static int check_mpeg2_file_probe(void)
+{
+  uint8_t buf[256];
+  uint8_t payload[8];
+  size_t n = 0U;
+  ZZPlayVideoInfo info;
+  FILE *file;
+
+  /* MPEG-2 pack header (bits '01') followed by a video PES carrying the
+   * sequence header + extensions, then an AC-3 PES. */
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xba;
+  buf[n++] = 0x44; buf[n++] = 0x00; buf[n++] = 0x04; buf[n++] = 0x00;
+  buf[n++] = 0x04; buf[n++] = 0x01; buf[n++] = 0x00; buf[n++] = 0x89;
+  buf[n++] = 0xc3; buf[n++] = 0xf8;
+  {
+    uint8_t video[64];
+    size_t vn = 0U;
+
+    vn += probe_put_seq_header(video + vn, 720U, 576U, 3U, 3U);
+    vn += probe_put_seq_ext(video + vn);
+    vn += probe_put_seq_display_ext(video + vn, 720U, 576U);
+    n += probe_put_pes(buf + n, 0xe0U, video, vn);
+  }
+  memset(payload, 0x33, sizeof(payload));
+  payload[0] = 0x81;
+  n += probe_put_pes(buf + n, 0xbdU, payload, sizeof(payload));
+
+  file = tmpfile();
+  if (!file) {
+    return 0;
+  }
+  if (fwrite(buf, 1U, n, file) != n || fflush(file) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_file(file, &info)) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+  return info.is_program_stream && info.has_video_pes &&
+         info.has_audio_pes && info.is_mpeg2 &&
+         info.width == 720U && info.height == 576U &&
+         info.frame_rate_milli == 25000U &&
+         info.audio_codec == ZZPLAY_MEDIA_AUDIO_AC3 &&
+         info.display_width == 1024U && info.display_height == 576U;
+}
+
+/* A muxer may end a video PES inside the sequence header's extension run
+ * and interleave other packets before the next video PES. The probe reads
+ * the video payload, not the raw stream, so the extensions still count. */
+static int check_mpeg2_split_pes_probe(void)
+{
+  static const uint8_t pack[] = {
+    0x00, 0x00, 0x01, 0xba, 0x44, 0x00, 0x04, 0x00,
+    0x04, 0x01, 0x00, 0x89, 0xc3, 0xf9, 0xff /* one stuffing byte */
+  };
+  uint8_t buf[512];
+  uint8_t video[64];
+  uint8_t audio[200];
+  size_t n = 0U;
+  size_t vn = 0U;
+  ZZPlayVideoInfo info;
+  FILE *file;
+
+  vn += probe_put_seq_header(video + vn, 720U, 576U, 3U, 3U);
+  vn += probe_put_seq_ext(video + vn);
+  vn += probe_put_seq_display_ext(video + vn, 540U, 576U);
+  memcpy(buf + n, pack, sizeof(pack));
+  n += sizeof(pack);
+  /* First video PES: the sequence header and the extension start code's
+   * first two bytes. */
+  n += probe_put_pes(buf + n, 0xe0U, video, 14U);
+  memset(audio, 0x33, sizeof(audio));
+  n += probe_put_pes(buf + n, 0xc0U, audio, sizeof(audio));
+  memcpy(buf + n, pack, sizeof(pack));
+  n += sizeof(pack);
+  n += probe_put_pes(buf + n, 0xe0U, video + 14U, vn - 14U);
+
+  file = tmpfile();
+  if (!file) {
+    return 0;
+  }
+  if (fwrite(buf, 1U, n, file) != n || fflush(file) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_file(file, &info)) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+  return info.is_program_stream && info.is_mpeg2 &&
+         info.width == 720U && info.height == 576U &&
+         info.audio_codec == ZZPLAY_MEDIA_AUDIO_MP2 &&
+         info.display_width == 1365U && info.display_height == 576U;
+}
+
+/* A PES header may carry 255 header-data bytes. An LPCM packet whose
+ * header straddles the probe's 4 KiB window edge must still be read whole
+ * from the bytes carried into the next window. */
+static int check_long_pes_header_across_windows(void)
+{
+  static uint8_t buf[8192];
+  size_t n = 0U;
+  size_t pad;
+  size_t start;
+  uint8_t video[16];
+  ZZPlayVideoInfo info;
+  FILE *file;
+
+  memset(buf, 0, sizeof(buf));
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xba;
+  buf[n++] = 0x44; buf[n++] = 0x00; buf[n++] = 0x04; buf[n++] = 0x00;
+  buf[n++] = 0x04; buf[n++] = 0x01; buf[n++] = 0x00; buf[n++] = 0x89;
+  buf[n++] = 0xc3; buf[n++] = 0xf8;
+  n += probe_put_pes(buf + n, 0xe0U, video,
+                     probe_put_seq_header(video, 720U, 576U, 3U, 3U));
+  /* A padding packet places the LPCM start code 230 bytes before the
+   * window edge: its substream byte lands 34 bytes past it. */
+  start = 4096U - 230U;
+  pad = start - n - 6U;
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xbe;
+  buf[n++] = (uint8_t)(pad >> 8);
+  buf[n++] = (uint8_t)(pad & 0xffU);
+  memset(buf + n, 0xff, pad);
+  n += pad;
+  buf[n++] = 0x00; buf[n++] = 0x00; buf[n++] = 0x01; buf[n++] = 0xbd;
+  buf[n++] = (uint8_t)((3U + 255U + 64U) >> 8);
+  buf[n++] = (uint8_t)((3U + 255U + 64U) & 0xffU);
+  buf[n++] = 0x80; buf[n++] = 0x00; buf[n++] = 255U;
+  memset(buf + n, 0xff, 255U);
+  n += 255U;
+  memset(buf + n, 0x00, 64U);
+  buf[n] = 0xa0;       /* LPCM substream */
+  buf[n + 5U] = 0x01;  /* 16-bit 48 kHz stereo */
+  n += 64U;
+
+  file = tmpfile();
+  if (!file) {
+    return 0;
+  }
+  if (fwrite(buf, 1U, n, file) != n || fflush(file) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_file(file, &info)) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+  return info.has_audio_pes &&
+         info.audio_codec == ZZPLAY_MEDIA_AUDIO_LPCM;
+}
+
+/* With two video streams the probe follows the first stream ID, as the
+ * firmware demux does, so the second stream's MPEG-2 headers cannot
+ * relabel an MPEG-1 first stream. */
+static int check_second_video_stream_ignored(void)
+{
+  static const uint8_t pack[] = {
+    0x00, 0x00, 0x01, 0xba, 0x44, 0x00, 0x04, 0x00,
+    0x04, 0x01, 0x00, 0x89, 0xc3, 0xf8
+  };
+  uint8_t buf[256];
+  uint8_t video[64];
+  size_t n = 0U;
+  size_t vn;
+  ZZPlayVideoInfo info;
+  FILE *file;
+
+  memcpy(buf + n, pack, sizeof(pack));
+  n += sizeof(pack);
+  vn = probe_put_seq_header(video, 352U, 288U, 1U, 3U);
+  n += probe_put_pes(buf + n, 0xe0U, video, vn);
+  vn = probe_put_seq_header(video, 720U, 576U, 3U, 3U);
+  vn += probe_put_seq_ext(video + vn);
+  n += probe_put_pes(buf + n, 0xe1U, video, vn);
+
+  file = tmpfile();
+  if (!file) {
+    return 0;
+  }
+  if (fwrite(buf, 1U, n, file) != n || fflush(file) != 0) {
+    fclose(file);
+    return 0;
+  }
+  memset(&info, 0, sizeof(info));
+  if (!zzplay_probe_file(file, &info)) {
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+  return !info.is_mpeg2 && info.width == 352U && info.height == 288U;
+}
+
+static int check_video_window_source(void)
+{
+  ZZPlayVideoInfo info;
+  uint32_t w;
+  uint32_t h;
+
+  memset(&info, 0, sizeof(info));
+  info.width = 720U;
+  info.height = 576U;
+  info.display_width = 1024U;
+  info.display_height = 576U;
+  zzplay_video_window_source(&info, &w, &h);
+  if (w != 1024U || h != 576U) {
+    return 0;
+  }
+  /* 4:3 PAL square-pixel size: also at or above the coded frame. */
+  info.display_width = 768U;
+  info.display_height = 576U;
+  zzplay_video_window_source(&info, &w, &h);
+  if (w != 768U || h != 576U) {
+    return 0;
+  }
+  info.display_width = 0U;
+  info.display_height = 0U;
+  zzplay_video_window_source(&info, &w, &h);
+  return w == 720U && h == 576U;
 }
 
 static int check_mp3_probe(void)
@@ -320,31 +887,31 @@ static int check_stats_and_transport(void)
   zzplay_stats_record_profile(
       &stats, ZZPLAY_PROFILE_PCM_COPY, 1250U);
   zzplay_stats_record_profile(
-      &stats, ZZPLAY_PROFILE_FILE_READ, 7000U);
+      &stats, ZZPLAY_PROFILE_INPUT_WAIT, 7000U);
   zzplay_stats_record_profile(
-      &stats, ZZPLAY_PROFILE_INPUT_COPY, 2000U);
+      &stats, ZZPLAY_PROFILE_SDK_WRITE, 2000U);
   zzplay_stats_record_profile(
       &stats, ZZPLAY_PROFILE_AHI_SUBMIT, 3000U);
   if (stats.profile[ZZPLAY_PROFILE_AUDIO_READ].calls != 2U ||
       stats.profile[ZZPLAY_PROFILE_AUDIO_READ].elapsed_us != 10000U ||
       zzplay_stats_profile_average_us(
           &stats, ZZPLAY_PROFILE_AUDIO_READ) != 5000U ||
-      stats.profile[ZZPLAY_PROFILE_FILE_READ].calls != 1U ||
-      stats.profile[ZZPLAY_PROFILE_INPUT_COPY].calls != 1U ||
+      stats.profile[ZZPLAY_PROFILE_INPUT_WAIT].calls != 1U ||
+      stats.profile[ZZPLAY_PROFILE_SDK_WRITE].calls != 1U ||
       stats.profile[ZZPLAY_PROFILE_AHI_SUBMIT].calls != 1U ||
       zzplay_stats_profile_total_us(&stats) != 23250U) {
     return 0;
   }
 
   zzplay_transport_init(&transport);
-  zzplay_transport_set_chunk(&transport, 4096U, 0);
+  zzplay_transport_set_chunk(&transport, 8192U, 4096U, 0);
   if (zzplay_transport_write_flags(&transport) != 0U ||
       !zzplay_transport_advance(&transport, 1024U) ||
-      transport.pending_offset != 1024U ||
+      transport.pending_offset != 9216U ||
       transport.pending_length != 3072U) {
     return 0;
   }
-  zzplay_transport_set_chunk(&transport, 0U, 1);
+  zzplay_transport_set_chunk(&transport, 0U, 0U, 1);
   if (zzplay_transport_write_flags(&transport) !=
       ZZ9K_VIDEO_SESSION_WRITE_EOF) {
     return 0;
@@ -429,6 +996,18 @@ static int check_webp_probe(void)
   info.height = 240U;
   info.is_animated = 1;
   if (!zzplay_webp_info_supported(&info)) return 0;
+  /* The WebP bound is landscape 1920x1080, not the video envelope. */
+  info.width = 1920U;
+  info.height = 1080U;
+  if (!zzplay_webp_info_supported(&info)) return 0;
+  info.width = 1088U;
+  info.height = 1920U;
+  if (zzplay_webp_info_supported(&info)) return 0;
+  info.width = 1920U;
+  info.height = 1088U;
+  if (zzplay_webp_info_supported(&info)) return 0;
+  info.width = 320U;
+  info.height = 240U;
   info.is_animated = 0;
   if (zzplay_webp_info_supported(&info)) return 0;
   if (zzplay_webp_info_supported(NULL)) return 0;
@@ -529,7 +1108,8 @@ static int check_webp_file_probe(void)
 int main(void)
 {
   static const uint8_t sequence[] = {
-    0xaa, 0x00, 0x00, 0x01, 0xb3, 0x13, 0xe0, 0xf3, 0x13
+    0xaa, 0x00, 0x00, 0x01, 0xb3, 0x13, 0xe0, 0xf3, 0x13,
+    0x00, 0x00, 0x00, 0x00
   };
   ZZPlayVideoInfo info;
   uint32_t accepted_total;
@@ -605,6 +1185,36 @@ int main(void)
   }
   if (!check_program_probe()) {
     return 12;
+  }
+  if (!check_mpeg2_program_probe()) {
+    return 19;
+  }
+  if (!check_mpeg1_unchanged_probe()) {
+    return 20;
+  }
+  if (!check_mpeg2_aspect_probe()) {
+    return 21;
+  }
+  if (!check_mpeg2_display_extension_regressions()) {
+    return 25;
+  }
+  if (!check_mpeg2_audio_priority_probe()) {
+    return 22;
+  }
+  if (!check_mpeg2_file_probe()) {
+    return 23;
+  }
+  if (!check_mpeg2_split_pes_probe()) {
+    return 26;
+  }
+  if (!check_second_video_stream_ignored()) {
+    return 27;
+  }
+  if (!check_long_pes_header_across_windows()) {
+    return 28;
+  }
+  if (!check_video_window_source()) {
+    return 24;
   }
   if (!check_mp3_probe()) {
     return 13;

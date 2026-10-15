@@ -93,6 +93,63 @@ void set_fb_limit(void* limit) {
 	fb_limit = (uint8_t*)limit;
 }
 
+static uintptr_t src_window_lo = 0;
+static uintptr_t src_window_hi = 0;
+
+void set_src_window(const void* lo, const void* hi) {
+	src_window_lo = (uintptr_t)lo;
+	src_window_hi = (uintptr_t)hi;
+}
+
+/* 1 when [base + offset, base + offset + len) lies inside the source window.
+ * Source pointers are card-memory base + a host-written 32-bit offset, so
+ * without this check a bad offset reads any ARM address, peripherals
+ * included. The sum is 64-bit so a huge row offset cannot wrap. */
+static int src_span_at(const void* base, uint64_t offset, uint64_t len) {
+	uint64_t a = (uint64_t)(uintptr_t)base + offset;
+
+	if (!src_window_hi)
+		return 1;
+	if (a < src_window_lo || a >= src_window_hi)
+		return 0;
+	return len <= src_window_hi - a;
+}
+
+int gfx_src_span_ok(const void* p, uint64_t len) {
+	return src_span_at(p, 0, len);
+}
+
+/* h rows of row_bytes each, the first at byte offset first from base and
+ * the rest pitch_bytes apart. */
+static int src_rows_ok(const void* base, uint64_t first, uint32_t h,
+	uint64_t pitch_bytes, uint64_t row_bytes) {
+	if (h == 0)
+		return 1;
+	return src_span_at(base, first, (uint64_t)(h - 1) * pitch_bytes + row_bytes);
+}
+
+/* Source rows read by a pixel copy whose source pitch is in 32-bit words. */
+static int copy_src_ok(const uint32_t* sp_src, uint32_t src_pitch,
+	uint16_t rect_sx, uint16_t rect_sy, uint16_t w, uint16_t h, uint32_t bpp) {
+	uint64_t pitch_bytes = (uint64_t)src_pitch * sizeof(uint32_t);
+
+	return src_rows_ok(sp_src, (uint64_t)rect_sy * pitch_bytes + (uint64_t)rect_sx * bpp,
+		h, pitch_bytes, (uint64_t)w * bpp);
+}
+
+/* Planar data after a header of head bytes: up to eight planes, each h rows
+ * of src_line_pitch bytes; the row loop wraps at h. A zero pitch would also
+ * divide by zero when the start byte is reduced modulo the pitch. */
+static int planar_src_ok(const uint8_t* bmp_data_src, uint32_t head,
+	uint8_t planes, uint16_t src_line_pitch, int16_t h) {
+	uint32_t used_planes = planes > 8 ? 8 : planes;
+
+	if (src_line_pitch == 0)
+		return 0;
+	return src_span_at(bmp_data_src, 0,
+		head + (uint64_t)used_planes * src_line_pitch * (uint16_t)h);
+}
+
 static uint32_t bytes_per_pixel(uint32_t color_format)
 {
 	switch (color_format) {
@@ -516,6 +573,9 @@ void copy_rect_nomask(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h
 
 	if (!clamp_rect_to_fb_bounds(rect_x1, &w, rect_y1, &h, color_format))
 		return;
+	if (!copy_src_ok(sp_src, src_pitch, rect_sx, rect_sy, w, h,
+		bytes_per_pixel(color_format)))
+		return;
 
 	uint32_t* dp = fb + (rect_y1 * fb_pitch);
 	uint32_t* sp = sp_src + (rect_sy * src_pitch);
@@ -618,6 +678,9 @@ void copy_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint1
 
 	if (!clamp_rect_to_fb_bounds(rect_x1, &w, rect_y1, &h, color_format))
 		return;
+	if (!copy_src_ok(sp_src, src_pitch, rect_sx, rect_sy, w, h,
+		bytes_per_pixel(color_format)))
+		return;
 
 	uint32_t* dp = fb + (rect_y1 * fb_pitch);
 	uint32_t* sp = sp_src + (rect_sy * src_pitch);
@@ -639,7 +702,21 @@ void copy_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint1
 
 	for (uint16_t y_line = 0; y_line < h; y_line++) {
 		if (x_reverse) {
-			for (int32_t x = (int32_t)w - 1; x >= 0; x--) {
+			int32_t x = w;
+#ifdef __ARM_NEON__
+			{
+				/* Right to left in 16-byte steps; each step loads before it
+				 * stores, so an overlapping rightward move stays a memmove. */
+				uint8_t *d8 = (uint8_t *)dp + rect_x1;
+				uint8_t *s8 = (uint8_t *)sp + rect_sx;
+				uint8x16_t vmask = vdupq_n_u8(mask);
+				while (x >= 16) {
+					x -= 16;
+					vst1q_u8(d8 + x, vbslq_u8(vmask, vld1q_u8(s8 + x), vld1q_u8(d8 + x)));
+				}
+			}
+#endif
+			for (x--; x >= 0; x--) {
 				((uint8_t *)dp)[rect_x1 + x] = (((uint8_t *)dp)[rect_x1 + x] & (mask ^ 0xFF)) | (((uint8_t *)sp)[rect_sx + x] & mask);
 			}
 		}
@@ -999,6 +1076,9 @@ void p2c_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 		return;
 	int16_t h_draw = (int16_t)h_draw_u16;
 
+	if (!planar_src_ok(bmp_data_src, 0, planes, src_line_pitch, h))
+		return;
+
 	uint32_t *dp = fb + (dy * fb_pitch);
 
 	uint8_t cur_bit, base_bit, base_byte;
@@ -1163,6 +1243,12 @@ void yuv422_to_rgb_rect(int16_t phase, int16_t dx, int16_t dy, int16_t w, int16_
 		return;
 	w = (int16_t)w_draw;
 	h = (int16_t)h_draw;
+
+	/* Each row reads whole 4-byte macropixels, plus one more when an odd
+	 * phase skips the first pixel. */
+	if (!src_rows_ok(src, 0, (uint32_t)h, src_pitch,
+		(((uint64_t)w + (uint32_t)(phase & 1) + 1) / 2) * 4))
+		return;
 
 	uint8_t y0_off = yuv422_layout[variant].y0;
 	uint8_t y1_off = yuv422_layout[variant].y1;
@@ -1488,6 +1574,9 @@ void p2d_rect(int16_t sx, int16_t sy, int16_t dx, int16_t dy, int16_t w, int16_t
 	uint8_t direct_copy = (draw_mode == MINTERM_SRC || draw_mode == MINTERM_NOTSRC);
 	uint8_t invert_planar = draw_mode & 0x01;
 
+	if (!planar_src_ok(bmp_data_src, 256 * 4, planes, src_line_pitch, h))
+		return;
+
 	uint32_t plane_size = src_line_pitch * h;
 	uint32_t *bmp_pal = (uint32_t *)bmp_data_src;
 	uint8_t *bmp_data = bmp_data_src + (256 * 4);
@@ -1732,6 +1821,9 @@ void pattern_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y1
 {
 	if (!clamp_rect_to_fb_bounds(rect_x1, &w, rect_y1, &h, color_format))
 		return;
+	/* One 16-bit word per row; rows wrap every loop_rows. */
+	if (loop_rows == 0 || !src_span_at(tmpl_data, 0, (uint64_t)loop_rows * 2))
+		return;
 
 	uint32_t rect_x2 = rect_x1 + w;
 	uint32_t *dp = fb + (rect_y1 * fb_pitch);
@@ -1897,6 +1989,11 @@ void template_fill_rect(uint32_t color_format, uint16_t rect_x1, uint16_t rect_y
 	uint8_t *tmpl_data, uint16_t tmpl_pitch)
 {
 	if (!clamp_rect_to_fb_bounds(rect_x1, &w, rect_y1, &h, color_format))
+		return;
+	/* Each row reads from byte x_offset / 8 through one byte past its last
+	 * pixel: the loop loads the next byte before it tests the row end. */
+	if (!src_rows_ok(tmpl_data, 0, h, tmpl_pitch,
+		(uint64_t)x_offset / 8 + ((x_offset % 8) + (uint32_t)w + 7) / 8 + 1))
 		return;
 
 	uint32_t rect_x2 = rect_x1 + w;
@@ -2094,9 +2191,21 @@ void acc_blit_rect(uintptr_t src, uintptr_t dest, uint16_t dx, uint16_t dy, uint
 			}
 			return;
 			break;
-		case 2: // Masked blit
+		case 2: { // Masked blit: bytes equal to mask_color leave dest alone
+#ifdef __ARM_NEON__
+			uint8x16_t vkey = vdupq_n_u8(mask_color);
+#endif
 			for (int y = 0; y < h; y++) {
-				for (int x = 0; x < w; x++) {
+				int x = 0;
+#ifdef __ARM_NEON__
+				/* Keyed lanes store the destination byte they loaded. */
+				for (; x + 16 <= w; x += 16) {
+					uint8x16_t s = vld1q_u8(sp + x);
+					uint8x16_t keyed = vceqq_u8(s, vkey);
+					vst1q_u8(dp + x, vbslq_u8(keyed, vld1q_u8(dp + x), s));
+				}
+#endif
+				for (; x < w; x++) {
 					if (sp[x] != mask_color)
 						dp[x] = sp[x];
 				}
@@ -2104,7 +2213,7 @@ void acc_blit_rect(uintptr_t src, uintptr_t dest, uint16_t dx, uint16_t dy, uint
 				sp += src_pitch;
 			}
 			return;
-			break;
+		}
 		default:
 			break;
 	}

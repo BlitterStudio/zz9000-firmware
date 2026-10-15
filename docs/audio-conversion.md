@@ -1,81 +1,91 @@
-# ZZ9000AX qualified 48-kHz audio conversion
+# ZZ9000AX audio conversion
 
-Every rate conversion between a non-48-kHz source and the card's fixed
-48-kHz output domain runs through one shared integer-only kernel
-(`ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert.c` with codegen'd `const`
-Q14 tables), used identically by the AHI per-period playback path, the
-SDK pump (stream and media bindings), and the capture receive conversion.
-The host test suite in `test/audio` is the acceptance gate.
+The firmware converts PCM between supported source rates and the 48 kHz
+stereo period used for playback and capture. `audio_convert.c` provides the
+shared fixed-point converter for legacy AHI playback, audio-fabric sources,
+SDK-pump preconversion, lease preconversion, and capture. A 48,000 Hz source
+uses the bypass path.
 
-## Measured numbers
+## Supported conversions
 
-Kernel: Kaiser windowed-sinc polyphase FIR, 80 dB design stop-band,
-passband edge 0.45 x min(fs_in, fs_out), stop-band from min(fs)/2, causal
-delayed-symmetric (backward history only), exact-rational integer phase
-(no drift), full-range int16 coefficients with a per-phase Q16 reciprocal
-(64-bit accumulation, SMLAL), no dither (matches legacy requantization
-behavior; TPDF is a documented follow-up if low-level THD+N testing ever
-misses target).
+The converter has generated FIR banks for these rate pairs. A pair not in the
+table selects no bank.
 
-Measured behavioral stop-band floor is at least 70 dB below a full-scale
-passband reference in every one of the ten directions (host-gated alias
-and image tests, coherent 1-second windows). The 80 dB design target is
-reached where the kernel's tap count permits it; on the dense ratios
-(44.1/32/24 kHz) the int16 coefficient width is the limiting factor.
-Passband ripple stays at 0.003-0.006 dB everywhere.
+| Input rate | Output rate | Use |
+|---|---:|---|
+| 8,000, 12,000, 24,000, 32,000, 44,100 Hz | 48,000 Hz | Standard playback rates |
+| 11,025, 16,000, 22,050, 88,200, 96,000 Hz | 48,000 Hz | Additional source-to-playback rates |
+| 48,000 Hz | 8,000, 12,000, 24,000, 32,000, 44,100 Hz | Capture output rates |
+| 48,000 Hz | 48,000 Hz | Bypass |
 
-Regenerate this table: `make -C test/audio && ./build/audio_convert_test --report`
+`zz_audio_convert_init()` returns `0` when it selects a bank. For an identity
+or other nonzero unlisted pair it returns `1`, leaves `ctx->ratio` null, and
+resets the instance. `zz_audio_convert_stream()` then copies the available
+frames and clears any remaining output frames. A zero input or output rate
+returns `-1`.
 
-| rate | direction | taps | phases | group delay (input samples) | passband ripple (dB) | MAC/period | table bytes |
-|---|---|---|---|---|---|---|---|
-| 8000 | playback->48k | 101 | 6 | 50 | 0.003 | 193920 | 1212 |
-| 12000 | playback->48k | 101 | 4 | 50 | 0.003 | 193920 | 808 |
-| 24000 | playback->48k | 101 | 2 | 50 | 0.003 | 193920 | 404 |
-| 32000 | playback->48k | 101 | 3 | 50 | 0.003 | 193920 | 606 |
-| 44100 | playback->48k | 101 | 160 | 50 | 0.003 | 193920 | 32320 |
-| 8000 | capture->rate | 603 | 1 | 301 | (see playback row) | 192960 | 1206 |
-| 12000 | capture->rate | 402 | 1 | 200 | (see playback row) | 192960 | 804 |
-| 24000 | capture->rate | 201 | 1 | 100 | (see playback row) | 192960 | 402 |
-| 32000 | capture->rate | 151 | 2 | 75 | (see playback row) | 193280 | 604 |
-| 44100 | capture->rate | 110 | 147 | 54 | (see playback row) | 194040 | 32340 |
+The caller decides how an unlisted rate reaches an output path:
 
-Host-gated behavioral checks (all in `test/audio/audio_convert_test.c`):
-DC unity within 2 LSB, alias rejection and upsampling-image rejection at
-least 72 dB below a passband reference (assembled core, coherent 1-second
-windows), coherent THD+N at 997 Hz at least 70 dB down through the
-densest ratio, bit-identical chunked-vs-whole conversion in both
-directions, exact per-period positions at all six rates, group delay
-within 1.5 output samples of the table, mono bit-identity, saturation
-with a clip counter, and atomic reset semantics.
+- The AHI path writes a silent 48 kHz period.
+- The pump writes silence and advances its source cursor.
+- The fabric fill path writes a silent period.
+- Capture treats an unsupported frame count as native 48 kHz and performs an
+  endian swap.
 
-Worst-case full-duplex burst (6 pump + 7 capture periods in one 20-ms
-window): 2,521,800 MAC. At the card's 666.67 MHz, one SMLAL per tap
-(1-2 cycles per MAC with loads) bounds this near 2.5-5M cycles, roughly
-19-38% of the 13.33M-cycle window. Card-side cycle cost is a
-host-derived analytic estimate until an on-hardware measurement run
-exists; per-ISR conversion capping is the documented fallback if that
-estimate ever fails to argue margin.
+## How conversion works
 
-## Playback rate support
+`util/gen_audio_convert_tables.py` generates
+`ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.c` and
+`ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.h`. The generated banks
+use a Kaiser windowed-sinc polyphase FIR with an 80 dB design attenuation, a
+passband edge of `0.45 * min(fs_in, fs_out)`, and a stopband edge of
+`min(fs_in, fs_out) / 2`.
 
-Playback conversion supports the six advertised rates (8/12/24/32/44.1
-and 48 kHz). A decoded stream or raw AHI period at any other rate
-(11.025, 16 and 22.05 kHz occur in the wild) has no qualified conversion
-path: the pump and the AHI per-period path emit a silent period and the
-stream keeps advancing. This is a deliberate change from the legacy
-linear resamplers, which accepted any rate at unqualified quality;
-extending the table set for those three rates is a documented follow-up
-if such content matters.
+Each phase uses signed 16-bit coefficients and a Q16 reciprocal. The converter
+accumulates in `int64_t`, rounds after normalization, saturates to `int16_t`,
+and increments the instance clip counter on saturation. Phase stepping uses
+the reduced rational input/output-rate ratio. The FIR reads its input sample
+and preceding samples, so the instance retains a history across calls.
+
+`zz_audio_convert_stream()` accepts interleaved stereo `int16_t` frames. Mono
+expansion and byte-order conversion occur at the caller. Input and output
+buffers MUST NOT overlap when a bank is active. The instance resets its phase,
+history, and clip counter through `zz_audio_convert_reset()`; initialization
+also resets that state.
+
+## Period rules
+
+The standard AHI geometry is one 20 ms source period to one 960-frame 48 kHz
+period. The source-frame counts are 160, 240, 480, 640, 882, and 960 for
+8, 12, 24, 32, 44.1, and 48 kHz respectively.
+
+The pump converts 11,025 Hz in 40 ms quanta because 20 ms is 220.5 frames.
+One pump conversion reads 441 frames and produces 1,920 frames, which it
+writes as two 960-frame periods. Other pump rates use `rate / 50` input frames
+per 960-frame output period.
 
 ## Capture register contract
 
-Supported frame counts are exactly 160/240/480/640/882/960 per 20-ms
-period (8/12/24/32/44.1/48 kHz). Other values in the register's 1-960
-range convert as native 48 kHz identity (endian swap only), matching the
-documented drivers contract. Conversion resets on record start, on a
-frame-count value change, and on RX buffer reassignment; routine
-same-value frame-count writes (the AHI driver issues one per playback
-period) are no-ops so full-duplex recording reaches steady state.
+Capture receives 960 S16LE stereo frames per 20 ms. Frame counts `160`, `240`,
+`480`, `640`, and `882` select conversion from 48 kHz. A count of `960`, a
+count outside `1` through `960`, or any other value in that range selects the
+48 kHz identity path, which writes S16BE samples.
 
-Coefficient tables are generated by `util/gen_audio_convert_tables.py`;
-never hand-edit `audio_convert_tables.c`/`.h`.
+Capture resets its converter at record start, when the frame-count value
+changes, and when the RX buffer is reassigned. Repeating the same frame-count
+value keeps the existing history.
+
+## Current status
+
+The generated tables are committed source. Regenerate them with:
+
+```
+python util/gen_audio_convert_tables.py
+```
+
+`make -C test/audio` builds and runs the converter, capture, AHI playback-rate,
+and pump-preconversion host tests along with the other audio test targets.
+The converter tests cover table integrity, response limits, alias and image
+rejection, chunked conversion, period geometry, group delay, mono output,
+saturation, reset behavior, and the additional source-to-48 kHz banks.
+

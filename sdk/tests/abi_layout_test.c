@@ -445,7 +445,6 @@ int main(void)
   if (ZZ9K_OP_AUDIO_STREAM_BEGIN_EX != ZZ9K_SERVICE_AUDIO + 0x16U) return 145;
   if (ZZ9K_CAP_AUDIO_FLAC != (1U << 28)) return 146;
   if (ZZ9K_CAP_AUDIO_VORBIS != (1U << 29)) return 147;
-  if (ZZ9K_CAP_CONSOLE_ENCODE != (1U << 30)) return 152;
   if (ZZ9K_SERVICE_CONSOLE != 0x8200U) return 153;
   if (ZZ9K_OP_CONSOLE_ENCODE != 0x8200U) return 154;
   if (ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM != (1U << 25)) return 148;

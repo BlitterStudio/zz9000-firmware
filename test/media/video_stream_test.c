@@ -286,6 +286,22 @@ static int test_webm_stream_envelopes(void)
 		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
 	    SDK_STATUS_UNSUPPORTED)
 		return 15;
+	/* LPCM and AC-3 (MPEG-2 Program Stream) pass the media list; which
+	 * container carries them is the backend's call, so with no backend
+	 * rule they begin. Before, the stream layer refused both. */
+	mock_ops.audio_ok = 0;
+	begin.audio_codec = SDK_MEDIA_AUDIO_LPCM;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_OK)
+		return 20;
+	sdk_video_stream_close(result.session, &result);
+	begin.audio_codec = SDK_MEDIA_AUDIO_AC3;
+	if (sdk_video_stream_begin_owned(
+		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	    SDK_STATUS_OK)
+		return 21;
+	sdk_video_stream_close(result.session, &result);
 	mock_ops.codec = SDK_VIDEO_CODEC_VP8;
 	mock_ops.container = SDK_VIDEO_CONTAINER_WEBM;
 	mock_ops.geometry_ok = mock_webm_geometry_ok;
@@ -376,10 +392,12 @@ static int test_decode_flag_forwarding(void)
 
 	memset(&decode, 0, sizeof(decode));
 	decode.session = result.session;
-	decode.flags = SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME;
+	decode.flags = SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME |
+	               SDK_MEDIA_DECODE_SKIP_TO_I_PICTURE;
 	if (sdk_video_stream_decode(&decode, &result) != SDK_STATUS_OK)
 		return 21;
-	if (last_decode_flags != SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME)
+	if (last_decode_flags != (SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME |
+	                          SDK_MEDIA_DECODE_SKIP_TO_I_PICTURE))
 		return 22;
 
 	sdk_video_stream_close(result.session, &result);

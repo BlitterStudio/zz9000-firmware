@@ -98,12 +98,23 @@ static inline void bid(struct buf *b, uint32_t id)
 
 static inline void bsize(struct buf *b, uint32_t n)
 {
+	uint8_t tmp[4];
+	uint32_t len, i;
+
 	if (n < 0x7FU)
-		bbyte(b, (uint8_t)(0x80U | n));
-	else {
-		bbyte(b, (uint8_t)(0x40U | (n >> 8)));
-		bbyte(b, (uint8_t)n);
-	}
+		len = 1U;
+	else if (n < 0x3FFFU)
+		len = 2U;
+	else if (n < 0x1FFFFFU)
+		len = 3U;
+	else
+		len = 4U;
+	for (i = 0U; i < len; i++)
+		tmp[i] = (uint8_t)(n >> (8U * (len - 1U - i)));
+	/* Length marker: the top bit of the first byte, shifted by the
+	 * number of following bytes. */
+	tmp[0] |= (uint8_t)(0x80U >> (len - 1U));
+	bput(b, tmp, len);
 }
 
 static inline void belem(struct buf *b, uint32_t id, const void *payload, uint32_t n)
@@ -145,7 +156,7 @@ static inline struct buf nest(uint32_t id, struct buf *body)
 #define SEG_4GB 2  /* 0x100000010: past 32-bit offsets */
 #define SEG_EDGE 3 /* 0xFFFFFFF0: fits 32 bits, end wraps */
 
-/* 8-byte EBML size, for sizes the 1/2-byte bsize cannot express. */
+/* 8-byte EBML size, for sizes past what bsize writes (4 bytes). */
 static inline void bsize64(struct buf *b, uint64_t v)
 {
 	int i;
@@ -283,17 +294,18 @@ struct got {
 	uint8_t data[MAX_GOT][320];
 };
 
-/* Demuxes a whole file; copies every block out. Returns the last webm_next
- * result (0 clean EOF) or the webm_open failure. */
-static inline int collect(const struct buf *f, int eof, struct webm_demux *d,
-		   struct got *g)
+/* Demuxes a whole file with the given frame buffer; copies every block
+ * out. Returns the last webm_next result (0 clean EOF) or the webm_open
+ * failure. */
+static inline int collect_in(const struct buf *f, int eof,
+			     struct webm_demux *d, struct got *g,
+			     uint8_t *scratch, uint32_t scap)
 {
-	static uint8_t scratch[8192];
 	struct webm_block blk;
 	int rc;
 
 	memset(g, 0, sizeof(*g));
-	rc = open_file(f->p, f->n, eof, d, scratch, sizeof(scratch));
+	rc = open_file(f->p, f->n, eof, d, scratch, scap);
 	if (rc != 0)
 		return rc;
 	for (;;) {
@@ -312,6 +324,15 @@ static inline int collect(const struct buf *f, int eof, struct webm_demux *d,
 		memcpy(g->data[g->n], blk.data, blk.size);
 		g->n++;
 	}
+}
+
+/* collect_in with a small frame buffer. */
+static inline int collect(const struct buf *f, int eof, struct webm_demux *d,
+		   struct got *g)
+{
+	static uint8_t scratch[8192];
+
+	return collect_in(f, eof, d, g, scratch, sizeof(scratch));
 }
 
 #endif /* EBML_BUILD_H */

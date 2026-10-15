@@ -69,6 +69,34 @@ function New-Fixture {
   }
 }
 
+function New-VideoFixture {
+  param(
+    [string]$Name,
+    [string]$Symbol,
+    [string]$Size,
+    [double]$Duration
+  )
+
+  $TempMpg = Join-Path ([System.IO.Path]::GetTempPath()) "$Name.mpg"
+  try {
+    & $Ffmpeg -hide_banner -loglevel error -y `
+      -f lavfi -i "testsrc2=size=${Size}:rate=25:duration=$Duration" `
+      -c:v mpeg1video -pix_fmt yuv420p -g 6 -bf 2 -q:v 4 `
+      -muxdelay 0 -muxpreload 0 -f mpeg $TempMpg
+    if ($LASTEXITCODE -ne 0) {
+      throw "ffmpeg failed with exit code $LASTEXITCODE"
+    }
+    Write-Include `
+      -Path (Join-Path $Here "$Name.inc") `
+      -Symbol $Symbol `
+      -Bytes ([System.IO.File]::ReadAllBytes($TempMpg))
+  } finally {
+    if ([System.IO.File]::Exists($TempMpg)) {
+      [System.IO.File]::Delete($TempMpg)
+    }
+  }
+}
+
 New-Fixture `
   -Name "mpeg1_mp2_ps_fixture" `
   -Symbol "zz9k_mpeg1_mp2_ps_fixture" `
@@ -84,3 +112,8 @@ New-Fixture `
   -Symbol "zz9k_mpeg1_mp2_stereo48_ps_fixture" `
   -Rate 48000 -Channels 2 `
   -VideoDuration 0.24 -AudioDuration 0.16 -AudioOffset 0.04
+# 40x24 codes as 48x32 macroblocks: frames must report the picture size.
+New-VideoFixture `
+  -Name "mpeg1_crop_ps_fixture" `
+  -Symbol "zz9k_mpeg1_crop_ps_fixture" `
+  -Size "40x24" -Duration 0.12

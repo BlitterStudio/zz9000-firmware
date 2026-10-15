@@ -147,6 +147,29 @@ static int test_request_builders(void)
       zz9k_get_be32(bp->pcm_low_water_bytes) != 4096U ||
       zz9k_get_be32(bp->pcm_high_water_bytes) != 24576U)
     return 5;
+  /* Every audio codec the card decodes for a media session must reach it:
+   * AC-3 and LPCM (MPEG-2 Program Stream) were refused here, so ZZPlay
+   * reported "bad request" for every DVD-style file. */
+  {
+    static const uint32_t codecs[] = {
+      ZZ9K_MEDIA_AUDIO_MP2, ZZ9K_MEDIA_AUDIO_LPCM, ZZ9K_MEDIA_AUDIO_AC3,
+      ZZ9K_MEDIA_AUDIO_OPUS, ZZ9K_MEDIA_AUDIO_VORBIS
+    };
+    unsigned i;
+
+    for (i = 0U; i < sizeof(codecs) / sizeof(codecs[0]); i++) {
+      begin.audio_codec = codecs[i];
+      if (zz9k_request_media_session_begin(&request, &begin) !=
+              ZZ9K_STATUS_OK ||
+          zz9k_get_be32(bp->audio_codec) != codecs[i])
+        return 70;
+    }
+    begin.audio_codec = ZZ9K_MEDIA_AUDIO_VORBIS + 1U;
+    if (zz9k_request_media_session_begin(&request, &begin) !=
+        ZZ9K_STATUS_BAD_REQUEST)
+      return 71;
+    begin.audio_codec = ZZ9K_MEDIA_AUDIO_MP2;
+  }
   begin.pcm_low_water_bytes = begin.pcm_high_water_bytes;
   if (zz9k_request_media_session_begin(&request, &begin) !=
       ZZ9K_STATUS_BAD_REQUEST)

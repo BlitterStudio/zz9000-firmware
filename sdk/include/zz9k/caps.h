@@ -59,8 +59,6 @@ static inline uint32_t zz9k_service_capability_mask(uint32_t service_id)
     return ZZ9K_CAP_MODULES;
   case ZZ9K_SERVICE_VIDEO:
     return ZZ9K_CAP_VIDEO_DECODE | ZZ9K_CAP_MEDIA_SESSION;
-  case ZZ9K_SERVICE_CONSOLE:
-    return ZZ9K_CAP_CONSOLE_ENCODE;
   default:
     return 0U;
   }
@@ -178,7 +176,7 @@ static inline uint32_t zz9k_known_service_flag_count(uint32_t service_id)
     return 5U;
   }
   if (service_id == ZZ9K_SERVICE_VIDEO) {
-    return 19U;
+    return 20U;
   }
   if (service_id == ZZ9K_SERVICE_SURFACE) {
     return 5U;
@@ -354,6 +352,9 @@ static inline uint32_t zz9k_known_service_flag(uint32_t service_id,
       return ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS;
     case 18:
       return ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS;
+    case 19:
+      return ZZ9K_SERVICE_FLAG_VIDEO_MPEG2;
+      return ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS;
     default:
       return 0U;
     }
@@ -425,8 +426,6 @@ static inline const char *zz9k_capability_name(uint32_t capability_bit)
     return "audio-flac";
   case ZZ9K_CAP_AUDIO_VORBIS:
     return "audio-vorbis";
-  case ZZ9K_CAP_CONSOLE_ENCODE:
-    return "console-encode";
   default:
     return 0;
   }
@@ -599,6 +598,9 @@ static inline const char *zz9k_service_flag_name(uint32_t service_id,
     case ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_OPUS:
       return "media-opus";
     case ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_VORBIS:
+      return "media-vorbis";
+    case ZZ9K_SERVICE_FLAG_VIDEO_MPEG2:
+      return "mpeg2";
       return "media-vorbis";
     default:
       return 0;

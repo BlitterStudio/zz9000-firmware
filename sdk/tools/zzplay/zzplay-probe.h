@@ -5,13 +5,18 @@
 #define ZZPLAY_PROBE_H
 
 #include "zzplay-webm.h"
+#include "zzplay-audio.h"
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
+#include "zzplay-sys.h"
 
-#define ZZPLAY_MAX_WIDTH 1920U
-#define ZZPLAY_MAX_HEIGHT 1080U
+/* Video (MPEG, WebM): a 1920-pixel long side and 1920x1088 pixels, either
+ * orientation. Animated WebP keeps its own landscape 1920x1080 bound. */
+#define ZZPLAY_MAX_SIDE 1920U
+#define ZZPLAY_MAX_PIXELS (1920U * 1088U)
+#define ZZPLAY_WEBP_MAX_WIDTH 1920U
+#define ZZPLAY_WEBP_MAX_HEIGHT 1080U
 
 typedef struct ZZPlayVideoInfo {
   uint32_t width;
@@ -20,6 +25,11 @@ typedef struct ZZPlayVideoInfo {
   int is_program_stream;
   int has_video_pes;
   int has_audio_pes;
+  int is_mpeg2;
+  int has_sequence_display_extension;
+  uint32_t display_width;
+  uint32_t display_height;
+  ZZPlayMediaAudio audio_codec;
 } ZZPlayVideoInfo;
 
 typedef struct ZZPlayMP3Info {
@@ -82,14 +92,20 @@ int zzplay_probe_mpeg_sequence(const uint8_t *data,
 void zzplay_probe_mpeg_program(const uint8_t *data,
                                size_t length,
                                ZZPlayVideoInfo *info);
-int zzplay_probe_file(FILE *file, ZZPlayVideoInfo *info);
+/* Whether a probed Program Stream needs the MPEG-2 backend: MPEG-2 video,
+ * or AC-3/LPCM audio that will be decoded. */
+int zzplay_mpeg_needs_mpeg2_backend(const ZZPlayVideoInfo *info,
+                                    int audio_decoded);
+int zzplay_probe_file(ZZPlayFile *file, ZZPlayVideoInfo *info);
+void zzplay_video_window_source(const ZZPlayVideoInfo *info,
+                                uint32_t *width, uint32_t *height);
 int zzplay_probe_mp3_frame(const uint8_t *data,
                            size_t length,
                            ZZPlayMP3Info *info);
 int zzplay_probe_mp3(const uint8_t *data,
                      size_t length,
                      ZZPlayMP3Info *info);
-int zzplay_probe_media_file(FILE *file, ZZPlayProbeInfo *info);
+int zzplay_probe_media_file(ZZPlayFile *file, ZZPlayProbeInfo *info);
 int zzplay_video_info_supported(const ZZPlayVideoInfo *info);
 int zzplay_probe_webp(const uint8_t *data,
                       size_t length,
@@ -99,6 +115,5 @@ int zzplay_webp_info_supported(const ZZPlayWebPInfo *info);
  * found in the final 64 KiB of `file` (for Vorbis, the stream's sample
  * count). Returns 0 when no such page is there, as with a chained file
  * whose last link has another serial. The file position is not restored. */
-int zzplay_ogg_last_granule(FILE *file, uint32_t serial, uint64_t *granule);
-
+int zzplay_ogg_last_granule(ZZPlayFile *file, uint32_t serial, uint64_t *granule);
 #endif /* ZZPLAY_PROBE_H */

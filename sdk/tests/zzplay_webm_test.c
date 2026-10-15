@@ -55,9 +55,10 @@ static size_t ebml_header(uint8_t *d, size_t cap, size_t i, const char *doctype)
   n = put_str(body, sizeof(body), n, 0x4282U, doctype);
   return put_master(d, cap, i, 0x1A45DFA3U, body, n);
 }
-static size_t video_track(uint8_t *d, size_t cap, size_t i, const char *codec,
-                          uint32_t w, uint32_t h, uint32_t dw, uint32_t dh,
-                          uint32_t default_ns, const uint8_t *roll, size_t roll_n)
+static size_t video_track_number_enabled(uint8_t *d, size_t cap, size_t i, const char *codec,
+                                         uint32_t w, uint32_t h, uint32_t dw, uint32_t dh,
+                                         uint32_t default_ns, const uint8_t *roll, size_t roll_n,
+                                         int enabled, uint32_t number)
 {
   uint8_t video[80], track[192], projection[24];
   size_t vn = 0U, tn = 0U, pn;
@@ -72,12 +73,27 @@ static size_t video_track(uint8_t *d, size_t cap, size_t i, const char *codec,
     vn = put_master(video, sizeof(video), vn, 0x7670U, projection, pn);
   }
   vn = put_bytes(video, sizeof(video), vn, 0x55B0U, (const uint8_t *)"c", 1U);
-  tn = put_uint(track, sizeof(track), tn, 0xD7U, 1U);
+  tn = put_uint(track, sizeof(track), tn, 0xD7U, number);
   tn = put_uint(track, sizeof(track), tn, 0x83U, 1U);
+  if (!enabled) tn = put_uint(track, sizeof(track), tn, 0xB9U, 0U);
   tn = put_str(track, sizeof(track), tn, 0x86U, codec);
   if (default_ns) tn = put_uint(track, sizeof(track), tn, 0x23E383U, default_ns);
   tn = put_master(track, sizeof(track), tn, 0xE0U, video, vn);
   return put_master(d, cap, i, 0xAEU, track, tn);
+}
+static size_t video_track_enabled(uint8_t *d, size_t cap, size_t i, const char *codec,
+                                  uint32_t w, uint32_t h, uint32_t dw, uint32_t dh,
+                                  uint32_t default_ns, const uint8_t *roll, size_t roll_n,
+                                  int enabled)
+{
+  return video_track_number_enabled(d, cap, i, codec, w, h, dw, dh, default_ns,
+                                    roll, roll_n, enabled, 1U);
+}
+static size_t video_track(uint8_t *d, size_t cap, size_t i, const char *codec,
+                          uint32_t w, uint32_t h, uint32_t dw, uint32_t dh,
+                          uint32_t default_ns, const uint8_t *roll, size_t roll_n)
+{
+  return video_track_enabled(d, cap, i, codec, w, h, dw, dh, default_ns, roll, roll_n, 1);
 }
 static size_t audio_track(uint8_t *d, size_t cap, size_t i, const char *codec,
                           const uint8_t *rate, size_t rate_n, uint32_t channels, uint32_t number)
@@ -91,7 +107,7 @@ static size_t audio_track(uint8_t *d, size_t cap, size_t i, const char *codec,
   tn = put_master(track, sizeof(track), tn, 0xE1U, audio, an);
   return put_master(d, cap, i, 0xAEU, track, tn);
 }
-static size_t wrap_segment(uint8_t *d, size_t cap, const uint8_t *body, size_t n, int with_seekhead)
+static size_t wrap_segment_doctype(uint8_t *d, size_t cap, const uint8_t *body, size_t n, int with_seekhead, const char *doctype)
 {
   uint8_t inner[1024], info[48], tracks[512];
   size_t m = 0U, in = 0U, trk = 0U, at;
@@ -107,9 +123,13 @@ static size_t wrap_segment(uint8_t *d, size_t cap, const uint8_t *body, size_t n
   if (m == (size_t)-1 || trk == (size_t)-1 || m + trk > sizeof(inner)) return (size_t)-1;
   memcpy(inner + m, tracks, trk);
   m += trk;
-  at = ebml_header(d, cap, 0U, "webm");
+  at = ebml_header(d, cap, 0U, doctype);
   return put_master(d, cap, at, 0x18538067U, inner, m);
 }
+static size_t wrap_segment(uint8_t *d, size_t cap, const uint8_t *body, size_t n, int with_seekhead)
+{ return wrap_segment_doctype(d, cap, body, n, with_seekhead, "webm"); }
+static size_t wrap_matroska(uint8_t *d, size_t cap, const uint8_t *body, size_t n)
+{ return wrap_segment_doctype(d, cap, body, n, 0, "matroska"); }
 static int probe_ok(const uint8_t *data, size_t n, ZZPlayWebMInfo *info)
 {
   if (!zzplay_probe_webm(data, n, 0, info) || info->refusal != ZZPLAY_WEBM_OK) {
@@ -200,16 +220,14 @@ static int expect_refusal(const uint8_t *data, size_t n, ZZPlayWebMRefusal want,
 }
 static int check_refusals(void)
 {
-  uint8_t tracks[512], file[1024], matroska[128];
-  size_t tn, n, i;
-  /* SamplingFrequency as an 8-byte EBML float. */
-  static const uint8_t vorbis_4k[] = {0x40, 0xaf, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
-  static const uint8_t vorbis_8k[] = {0x40, 0xbf, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
-  static const uint8_t vorbis_44k[] = {0x40, 0xe5, 0x88, 0x80, 0x00, 0x00, 0x00, 0x00};
-  static const uint8_t vorbis_96k[] = {0x40, 0xf7, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
-  static const uint8_t vorbis_192k[] = {0x41, 0x07, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
-  i = ebml_header(matroska, sizeof(matroska), 0U, "matroska");
-  if (!expect_refusal(matroska, i, ZZPLAY_WEBM_MATROSKA, "matroska")) return 0;
+	uint8_t tracks[512], file[1024];
+	size_t tn, n;
+	/* SamplingFrequency as an 8-byte EBML float. */
+	static const uint8_t vorbis_4k[] = {0x40, 0xaf, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t vorbis_8k[] = {0x40, 0xbf, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t vorbis_44k[] = {0x40, 0xe5, 0x88, 0x80, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t vorbis_96k[] = {0x40, 0xf7, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t vorbis_192k[] = {0x41, 0x07, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
   tn = 0; tn = video_track(tracks, sizeof(tracks), tn, "V_VP8", 320, 240, 0, 0, 0, 0, 0);
   tn = video_track(tracks, sizeof(tracks), tn, "V_VP9", 160, 120, 0, 0, 0, 0, 0);
   n = wrap_segment(file, sizeof(file), tracks, tn, 0);
@@ -260,7 +278,142 @@ static int check_refusals(void)
   if (!expect_refusal(file, n, ZZPLAY_WEBM_OK, "vorbis 96k")) return 0;
   if (zzplay_webm_within_cap(1921U, 1080U) || zzplay_webm_within_cap(1920U, 1089U) ||
       zzplay_webm_realtime(ZZPLAY_WEBM_VIDEO_VP9, 1280U, 720U)) return 0;
+  /* MPEG in Matroska plays in real time up to 800x600 and is best effort
+   * above, so only the larger one is a "large video". */
+  if (!zzplay_webm_realtime(ZZPLAY_WEBM_VIDEO_MPEG1, 352U, 288U) ||
+      !zzplay_webm_realtime(ZZPLAY_WEBM_VIDEO_MPEG2, 720U, 576U) ||
+      zzplay_webm_realtime(ZZPLAY_WEBM_VIDEO_MPEG2, 1280U, 720U)) return 0;
   return 1;
+}
+static int check_matroska(void)
+{
+  uint8_t tracks[512], file[1024];
+  ZZPlayWebMInfo info;
+  size_t tn = 0U, n;
+  static const uint8_t rate[] = {0x40, 0xe7, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
+  tn = video_track(tracks, sizeof(tracks), tn, "V_MPEG2", 720U, 480U, 0U, 0U, 40000000U, 0, 0U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_AAC", rate, sizeof(rate), 2U, 2U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_AC3", rate, sizeof(rate), 2U, 3U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.doc_type != ZZPLAY_WEBM_DOCTYPE_MATROSKA ||
+      info.video != ZZPLAY_WEBM_VIDEO_MPEG2 || info.audio != ZZPLAY_WEBM_AUDIO_AC3 ||
+      info.sample_rate != 48000U || info.channels != 2U) return 0;
+  {
+    char line[96];
+
+    /* The format line names the container the file is. */
+    if (!zzplay_webm_format_line(&info, line, sizeof(line)) ||
+        strncmp(line, "Matroska MPEG-2 720x480, AC-3", 29) != 0) return 0;
+  }
+  /* Audio TrackEntries may precede their MPEG video TrackEntry. Unsupported
+   * entries are ignored, and a supported AC-3 entry still wins. */
+  tn = 0U;
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_AAC", rate, sizeof(rate), 2U, 2U);
+  tn = video_track(tracks, sizeof(tracks), tn, "V_MPEG2", 720U, 480U, 0U, 0U, 40000000U, 0, 0U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.video != ZZPLAY_WEBM_VIDEO_MPEG2 ||
+      info.audio != ZZPLAY_WEBM_AUDIO_NONE) return 0;
+  tn = 0U;
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", rate, sizeof(rate), 2U, 2U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_AC3", rate, sizeof(rate), 2U, 3U);
+  tn = video_track(tracks, sizeof(tracks), tn, "V_MPEG2", 720U, 480U, 0U, 0U, 40000000U, 0, 0U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.video != ZZPLAY_WEBM_VIDEO_MPEG2 ||
+      info.audio != ZZPLAY_WEBM_AUDIO_AC3 || info.channels != 2U) return 0;
+  /* A CodecID longer than any played here only makes its track
+   * unrecognized. */
+  tn = 0U;
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_AAC/MPEG4/LC/SBR", rate, sizeof(rate), 2U, 2U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_AC3", rate, sizeof(rate), 2U, 3U);
+  tn = video_track(tracks, sizeof(tracks), tn, "V_MPEG2", 720U, 480U, 0U, 0U, 40000000U, 0, 0U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.audio != ZZPLAY_WEBM_AUDIO_AC3) return 0;
+  /* VP8/VP9 in a matroska DocType keeps the WebM audio choices. */
+  tn = 0U;
+  tn = video_track(tracks, sizeof(tracks), tn, "V_VP9", 640U, 360U, 0U, 0U, 0U, 0, 0U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 2U, 2U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.video != ZZPLAY_WEBM_VIDEO_VP9 ||
+      info.audio != ZZPLAY_WEBM_AUDIO_OPUS) return 0;
+  tn = 0U;
+  tn = video_track(tracks, sizeof(tracks), tn, "V_VP8", 320U, 240U, 0U, 0U, 0U, 0, 0U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  return probe_ok(file, n, &info) && info.video == ZZPLAY_WEBM_VIDEO_VP8;
+}
+/* A Matroska audio track whose layout no decoder plays is passed over like
+ * an unknown codec. Only the first track of each codec counts: it is the
+ * one the firmware keeps and the backend plays. */
+static int check_matroska_audio_layout(void)
+{
+  uint8_t tracks[512], file[1024];
+  ZZPlayWebMInfo info;
+  size_t tn, n;
+  static const uint8_t r48k[] = {0x40, 0xe7, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
+  static const uint8_t r192k[] = {0x41, 0x07, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+  tn = video_track(tracks, sizeof(tracks), 0U, "V_VP8", 320U, 240U, 0U, 0U, 0U, 0, 0U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 6U, 2U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_VORBIS", r48k, sizeof(r48k), 2U, 3U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.audio != ZZPLAY_WEBM_AUDIO_VORBIS ||
+      info.channels != 2U) return 0;
+  tn = video_track(tracks, sizeof(tracks), 0U, "V_VP8", 320U, 240U, 0U, 0U, 0U, 0, 0U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_VORBIS", r192k, sizeof(r192k), 2U, 2U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 2U, 3U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.audio != ZZPLAY_WEBM_AUDIO_OPUS) return 0;
+  /* A second Opus track is not stored, so it cannot stand in for the
+   * first; the video plays without audio. */
+  tn = video_track(tracks, sizeof(tracks), 0U, "V_VP8", 320U, 240U, 0U, 0U, 0U, 0, 0U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 6U, 2U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_OPUS", 0, 0U, 2U, 3U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  if (!probe_ok(file, n, &info) || info.audio != ZZPLAY_WEBM_AUDIO_NONE) return 0;
+  /* EBML integers may take all 8 bytes: 16-bit stereo PCM written so
+   * (TrackType, FlagEnabled, Channels, BitDepth) is the PCM the firmware
+   * plays. */
+  {
+    static const uint8_t one8[8] = {0, 0, 0, 0, 0, 0, 0, 1};
+    static const uint8_t two8[8] = {0, 0, 0, 0, 0, 0, 0, 2};
+    static const uint8_t sixteen8[8] = {0, 0, 0, 0, 0, 0, 0, 16};
+    uint8_t audio[48], track[112];
+    size_t an = 0U, trn = 0U;
+
+    an = put_bytes(audio, sizeof(audio), an, 0xB5U, r48k, sizeof(r48k));
+    an = put_bytes(audio, sizeof(audio), an, 0x9FU, two8, sizeof(two8));
+    an = put_bytes(audio, sizeof(audio), an, 0x6264U, sixteen8, sizeof(sixteen8));
+    trn = put_uint(track, sizeof(track), trn, 0xD7U, 2U);
+    trn = put_bytes(track, sizeof(track), trn, 0x83U, two8, sizeof(two8));
+    trn = put_bytes(track, sizeof(track), trn, 0xB9U, one8, sizeof(one8));
+    trn = put_str(track, sizeof(track), trn, 0x86U, "A_PCM/INT/LIT");
+    trn = put_master(track, sizeof(track), trn, 0xE1U, audio, an);
+    tn = video_track(tracks, sizeof(tracks), 0U, "V_MPEG2", 720U, 480U, 0U, 0U, 40000000U, 0, 0U);
+    tn = put_master(tracks, sizeof(tracks), tn, 0xAEU, track, trn);
+    n = wrap_matroska(file, sizeof(file), tracks, tn);
+    return probe_ok(file, n, &info) && info.audio == ZZPLAY_WEBM_AUDIO_LPCM &&
+           info.channels == 2U;
+  }
+}
+static int check_matroska_disabled_video(void)
+{
+  uint8_t tracks[512], file[1024];
+  ZZPlayWebMInfo info;
+  size_t tn = 0U, n;
+  static const uint8_t rate[] = {0x40, 0xe7, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00};
+  /* A disabled WebM video candidate must not affect later Matroska tracks. */
+  tn = video_track_number_enabled(tracks, sizeof(tracks), tn, "V_VP8", 640U, 360U,
+                                  0U, 0U, 0U, 0, 0U, 0, 1U);
+  tn = audio_track(tracks, sizeof(tracks), tn, "A_AC3", rate, sizeof(rate), 2U, 2U);
+  tn = video_track_number_enabled(tracks, sizeof(tracks), tn, "V_MPEG2", 720U, 480U,
+                                  0U, 0U, 40000000U, 0, 0U, 1, 3U);
+  n = wrap_matroska(file, sizeof(file), tracks, tn);
+  return probe_ok(file, n, &info) &&
+         info.doc_type == ZZPLAY_WEBM_DOCTYPE_MATROSKA &&
+         info.video == ZZPLAY_WEBM_VIDEO_MPEG2 &&
+         info.audio == ZZPLAY_WEBM_AUDIO_AC3 &&
+         info.width == 720U && info.height == 480U &&
+         info.frame_rate_milli == 25000U &&
+         info.sample_rate == 48000U && info.channels == 2U;
 }
 static int check_flags_and_backend(void)
 {
@@ -294,6 +447,36 @@ static int check_flags_and_backend(void)
   if (zzplay_prefs_requested_backend(&prefs, &options, ZZPLAY_MEDIA_AUDIO_OPUS, &strict) != ZZPLAY_AUDIO_AHI || strict != 0) return 0;
   return 1;
 }
+/* Release firmware advertises MPEG-1 and MP2 but not MPEG-2, which also
+ * carries the AC-3 and PCM audio. MPEG-1 in Matroska must not need it
+ * unless that audio is decoded. */
+static int check_matroska_mpeg_flags(void)
+{
+  const uint32_t release = ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 |
+                           ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2;
+  uint32_t video, audio;
+
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG1, ZZPLAY_WEBM_AUDIO_NONE,
+                             &video, &audio);
+  if ((release & video) != video || audio != 0U) return 0;
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG1, ZZPLAY_WEBM_AUDIO_MPEG,
+                             &video, &audio);
+  if ((release & (video | audio)) != (video | audio)) return 0;
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG1, ZZPLAY_WEBM_AUDIO_AC3,
+                             &video, &audio);
+  if ((release & video) != video ||
+      audio != ZZ9K_SERVICE_FLAG_VIDEO_MPEG2) return 0;
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG1, ZZPLAY_WEBM_AUDIO_LPCM,
+                             &video, &audio);
+  if (audio != ZZ9K_SERVICE_FLAG_VIDEO_MPEG2) return 0;
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG2, ZZPLAY_WEBM_AUDIO_NONE,
+                             &video, &audio);
+  if (video != ZZ9K_SERVICE_FLAG_VIDEO_MPEG2 || audio != 0U) return 0;
+  zzplay_matroska_mpeg_flags(ZZPLAY_WEBM_VIDEO_MPEG2, ZZPLAY_WEBM_AUDIO_MPEG,
+                             &video, &audio);
+  return video == ZZ9K_SERVICE_FLAG_VIDEO_MPEG2 &&
+         audio == ZZ9K_SERVICE_FLAG_VIDEO_MEDIA_MP2;
+}
 int main(void)
 {
   if (!check_vp8_opus()) fail("vp8+opus");
@@ -301,7 +484,11 @@ int main(void)
   if (!check_video_only_portrait()) fail("portrait");
   if (!check_portrait_odd()) fail("odd");
   if (!check_refusals()) fail("refusals");
+  if (!check_matroska()) fail("matroska");
+  if (!check_matroska_disabled_video()) fail("matroska disabled video");
+  if (!check_matroska_audio_layout()) fail("matroska audio layout");
   if (!check_flags_and_backend()) fail("flags");
+  if (!check_matroska_mpeg_flags()) fail("matroska mpeg flags");
   if (failures) { printf("zzplay_webm_test: %d failure(s)\n", failures); return 1; }
   printf("zzplay_webm_test: all checks passed\n");
   return 0;

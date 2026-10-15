@@ -95,6 +95,10 @@ static void test_class_limit(void)
     CHECK(card_pool_alloc(&pool, PAGE, IMAGE(2)) == 0);
     CHECK(card_pool_alloc(&pool, MB(128), MEDIA(1)) != 0);
     CHECK(card_pool_alloc(&pool, PAGE, MEDIA(1)) == 0);
+    CHECK(card_pool_alloc(&pool, MB(64),
+                          CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, 1)) != 0);
+    CHECK(card_pool_alloc(&pool, PAGE,
+                          CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, 2)) == 0);
     CHECK(card_pool_alloc(&pool, MB(64), FIRMWARE(1)) != 0);
     CHECK(card_pool_alloc(&pool, PAGE, FIRMWARE(2)) == 0);
     CHECK(card_pool_release_owner(&pool, IMAGE(1)) == MB(72));
@@ -136,6 +140,27 @@ static void test_release_owner_merges_gaps(void)
     /* Owner 7's blocks were untouched. */
     CHECK(card_pool_free(&pool, a, MEDIA(7)) == 1);
     CHECK(card_pool_free(&pool, d, MEDIA(7)) == 1);
+}
+
+static void test_shared_media_owner_isolated_from_session_reclaim(void)
+{
+    uint32_t session_owner = MEDIA(1);
+    uint32_t shared_owner =
+        CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, 1);
+    uint32_t session_block;
+    uint32_t shared_block;
+
+    two_ranges(4 * PAGE, PAGE);
+    session_block = card_pool_alloc(&pool, PAGE, session_owner);
+    shared_block = card_pool_alloc(&pool, PAGE, shared_owner);
+    CHECK(session_block == A_BASE);
+    CHECK(shared_block == A_BASE + PAGE);
+    CHECK(session_owner != shared_owner);
+    CHECK(card_pool_release_owner(&pool, session_owner) == PAGE);
+    CHECK(pool.block_count == 1);
+    CHECK(pool.blocks[0].addr == shared_block);
+    CHECK(pool.blocks[0].owner == shared_owner);
+    CHECK(card_pool_free(&pool, shared_block, shared_owner) == 1);
 }
 
 static void test_firmware_never_in_revocable(void)
@@ -322,6 +347,7 @@ int main(void)
     test_class_limit();
     test_wrong_owner_and_unknown_frees();
     test_release_owner_merges_gaps();
+    test_shared_media_owner_isolated_from_session_reclaim();
     test_firmware_never_in_revocable();
     test_reset_fast_ram_switches_on();
     test_reset_relends_when_unused();

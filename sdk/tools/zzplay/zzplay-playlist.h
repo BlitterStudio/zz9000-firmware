@@ -50,6 +50,7 @@ typedef struct ZZPlayPlaylist {
   int32_t resume_pos;
   ZZPlayRepeat repeat;
   int shuffle;
+  int allocation_failed;    /* last mutation could not allocate storage */
   uint32_t rng;             /* xorshift32 state, never 0 */
 } ZZPlayPlaylist;
 
@@ -146,8 +147,8 @@ uint32_t zzplay_playlist_parse_m3u(ZZPlayPlaylist *list, const char *text,
 size_t zzplay_playlist_format_m3u(const ZZPlayPlaylist *list, char *out,
                                   size_t capacity);
 
-/* stdio wrappers around parse/format. Return entries added / 1 on success,
- * 0 on any I/O failure. */
+/* Task-safe whole-file wrappers around parse/format. Return entries added / 1
+ * on success, 0 on any I/O failure. */
 uint32_t zzplay_playlist_load_m3u(ZZPlayPlaylist *list, const char *path);
 int zzplay_playlist_save_m3u(const ZZPlayPlaylist *list, const char *path);
 

@@ -15,6 +15,29 @@ int main(void)
 	assert(overlay_buffer_bytes(5120U, 720U, 1280U, 480U) ==
 	       5120U * 720U);
 
+	/* Above 1280x720 the frame is always packed at half size. */
+	assert(overlay_session_divisor(1920U, 1080U, 1920, 1080) == 2U);
+	/* 720p fullscreen on a 1280x720 screen stays full size... */
+	assert(overlay_session_divisor(1280U, 720U, 1280, 720) == 1U);
+	/* ...and so does the 1194x672 window of that screen: the native plane
+	 * scales it down. */
+	assert(overlay_session_divisor(1280U, 720U, 1194, 672) == 1U);
+	/* The native downscale limit is 1.5x per axis, inclusive. */
+	assert(overlay_native_fits(1280U, 720U, 854, 480));
+	assert(!overlay_native_fits(1280U, 720U, 853, 480));
+	assert(!overlay_native_fits(1280U, 720U, 854, 479));
+	assert(!overlay_native_fits(1280U, 720U, 0, 480));
+	assert(overlay_session_divisor(1280U, 720U, 854, 480) == 1U);
+	/* Past it the half-size frame is scanned, scaled up or down. */
+	assert(overlay_session_divisor(1280U, 720U, 853, 480) == 2U);
+	assert(overlay_session_divisor(1280U, 720U, 600, 340) == 2U);
+	/* Smaller sources in a larger window keep full size. */
+	assert(overlay_session_divisor(640U, 360U, 1194, 672) == 1U);
+	/* Too small even for the half-size frame: leave it full size for the
+	 * software compositor. */
+	assert(overlay_session_divisor(1280U, 720U, 400, 200) == 1U);
+	assert(!overlay_native_fits(1280U, 720U, 400, 200));
+
 	{
 		uint32_t handoff = 0U;
 

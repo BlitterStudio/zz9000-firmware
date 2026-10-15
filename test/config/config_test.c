@@ -511,7 +511,7 @@ static void test_videocap_c28_phase(void) {
         CHECK(zz_config_query(ZZ_CONFIG_KEY_VIDEOCAP_C28_PHASE, &present) == 895 && present);
     }
 
-    /* The firmware audio writer uses this same non-audio serializer. */
+    /* The present-key serializer keeps both clock-specific phase keys. */
     len = zz_config_emit_present_keys(saved, sizeof(saved), 0);
     CHECK(len > 0);
     CHECK(strstr(saved, "videocap_phase = -112\n") != NULL);
@@ -888,8 +888,8 @@ static void test_fastram_key(void) {
 }
 
 static void test_fastram_truncated_file(void) {
-    /* a file at the parse budget keeps the early `on` but sets
-     * cfg.truncated: the decision must fail closed */
+    /* A file at the parse budget keeps the early `on` but sets
+     * cfg.truncated: the decision must fail closed. */
     static char big[ZZ_CONFIG_MAX_SIZE];
     memset(big, '#', sizeof(big) - 1);
     big[sizeof(big) - 1] = 0;

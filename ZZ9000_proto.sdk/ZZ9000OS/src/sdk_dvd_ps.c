@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include "sdk_dvd_ps.h"
+#include "sdk_dvd_lpcm.h"
 
 #include <string.h>
 
@@ -27,9 +28,9 @@ static int valid_timestamp(const uint8_t *p, uint8_t prefix)
 
 static void consume(struct SDKDVDPSDemux *d, uint32_t bytes)
 {
-	if (bytes < d->staged)
-		memmove(d->staging, d->staging + bytes, d->staged - bytes);
-	d->staged -= bytes;
+	d->head += bytes;
+	if (d->head >= d->staged)
+		d->head = d->staged = 0U;
 }
 
 static int queue_packet(struct SDKDVDPSDemux *d, struct SDKDVDPSQueue *q,
@@ -80,28 +81,30 @@ static int need_more(struct SDKDVDPSDemux *d)
 {
 	if (!d->eof || d->staged == 0U)
 		return 2;
-	d->bytes_ignored += d->staged;
-	consume(d, d->staged);
+	d->bytes_ignored += d->staged - d->head;
+	consume(d, d->staged - d->head);
 	return 1;
 }
 
 /* 0: output queue blocked, 1: consumed a unit, 2: need more input. */
 static int parse_one(struct SDKDVDPSDemux *d)
 {
-	uint8_t *p = d->staging;
+	uint8_t *p = d->staging + d->head;
+	uint32_t avail = d->staged - d->head;
 	uint8_t sid;
 	uint32_t total;
 	uint32_t payload_at;
 	uint32_t payload_length;
 	uint64_t pts = SDK_DVD_PS_NO_TS;
 	uint64_t dts = SDK_DVD_PS_NO_TS;
+	uint32_t queued_audio_before = d->audio.count;
 	int queued = 1;
 
-	if (d->staged < 4U)
+	if (avail < 4U)
 		return need_more(d);
 	if (p[0] != 0U || p[1] != 0U || p[2] != 1U) {
-		uint32_t at = find_start(p, 1U, d->staged);
-		uint32_t drop = at == d->staged ? d->staged - 2U : at;
+		uint32_t at = find_start(p, 1U, avail);
+		uint32_t drop = at == avail ? avail - 2U : at;
 		d->bytes_ignored += drop;
 		consume(d, drop);
 		return 1;
@@ -112,10 +115,10 @@ static int parse_one(struct SDKDVDPSDemux *d)
 		return 1;
 	}
 	if (sid == 0xbaU) {
-		if (d->staged < 12U)
+		if (avail < 12U)
 			return need_more(d);
 		if ((p[4] & 0xc0U) == 0x40U) {
-			if (d->staged < 14U)
+			if (avail < 14U)
 				return need_more(d);
 			total = 14U + (p[13] & 7U);
 		} else if ((p[4] & 0xf0U) == 0x20U) {
@@ -125,20 +128,20 @@ static int parse_one(struct SDKDVDPSDemux *d)
 			consume(d, 4U);
 			return 1;
 		}
-		if (d->staged < total)
+		if (avail < total)
 			return need_more(d);
 		consume(d, total);
 		return 1;
 	}
-	if (d->staged < 6U)
+	if (avail < 6U)
 		return need_more(d);
 	total = 6U + be16(p + 4U);
 	if (total == 6U) {
-		uint32_t next = find_start(p, 6U, d->staged);
-		if (next == d->staged) {
+		uint32_t next = find_start(p, 6U, avail);
+		if (next == avail) {
 			if (!d->eof)
 				return 2;
-			total = d->staged;
+			total = avail;
 		} else {
 			total = next;
 		}
@@ -148,7 +151,7 @@ static int parse_one(struct SDKDVDPSDemux *d)
 		consume(d, 4U);
 		return 1;
 	}
-	if (d->staged < total)
+	if (avail < total)
 		return need_more(d);
 	if (sid == 0xbbU || sid == 0xbcU || sid == 0xbeU || sid == 0xbfU ||
 	    sid == 0xf0U || sid == 0xf1U || sid == 0xffU) {
@@ -218,17 +221,25 @@ static int parse_one(struct SDKDVDPSDemux *d)
 	}
 	payload_length = total - payload_at;
 	if (sid >= 0xe0U && sid <= 0xefU) {
-		queued = queue_packet(d, &d->video, SDK_DVD_PS_VIDEO, sid, 0U,
-		                      0U, p + payload_at, payload_length, pts, dts);
+		if (d->video_stream == 0U)
+			d->video_stream = sid;
+		if (sid != d->video_stream)
+			d->bytes_ignored += total;
+		else
+			queued = queue_packet(d, &d->video, SDK_DVD_PS_VIDEO, sid, 0U,
+			                      0U, p + payload_at, payload_length, pts, dts);
 	} else if (sid >= 0xc0U && sid <= 0xdfU) {
-		queued = queue_packet(d, &d->audio, SDK_DVD_PS_MP2, sid, 0U,
-		                      0U, p + payload_at, payload_length, pts, dts);
+		if (d->mp2_stream == 0U)
+			d->mp2_stream = sid;
+		if (sid != d->mp2_stream)
+			d->bytes_ignored += total;
+		else
+			queued = queue_packet(d, &d->audio, SDK_DVD_PS_MP2, sid,
+			                      0U, 0U, p + payload_at,
+			                      payload_length, pts, dts);
 	} else if (sid == 0xbdU && payload_length != 0U) {
 		uint8_t sub = p[payload_at];
 		if (sub >= 0x80U && sub <= 0x87U) {
-			/* One AC-3 track: the first substream seen. Packets of
-			 * the others would interleave foreign frames into the
-			 * one decoder, so they are skipped. */
 			if (d->ac3_substream == 0U)
 				d->ac3_substream = sub;
 			if (sub != d->ac3_substream) {
@@ -241,9 +252,22 @@ static int parse_one(struct SDKDVDPSDemux *d)
 					pts, dts);
 			}
 		} else if (sub >= 0xa0U && sub <= 0xa7U) {
-			if (payload_length < 7U) queued = -1;
-			else queued = queue_packet(d, &d->audio, SDK_DVD_PS_LPCM,
-				sid, sub, 7U, p + payload_at, payload_length, pts, dts);
+			if (payload_length < 7U) {
+				queued = -1;
+			} else if (!sdk_dvd_lpcm_format_supported(p[payload_at + 5U])) {
+				d->bytes_ignored += total;
+			} else if (d->lpcm_substream == 0U) {
+				d->lpcm_substream = sub;
+				queued = queue_packet(d, &d->audio, SDK_DVD_PS_LPCM,
+				                      sid, sub, 7U, p + payload_at,
+				                      payload_length, pts, dts);
+			} else if (sub != d->lpcm_substream) {
+				d->bytes_ignored += total;
+			} else {
+				queued = queue_packet(d, &d->audio, SDK_DVD_PS_LPCM,
+				                      sid, sub, 7U, p + payload_at,
+				                      payload_length, pts, dts);
+			}
 		} else {
 			/* 0x20..0x3f subpictures and other private streams are not
 			 * part of the experiment; bounded skip is intentional. */
@@ -252,10 +276,44 @@ static int parse_one(struct SDKDVDPSDemux *d)
 	} else {
 		d->bytes_ignored += total;
 	}
-	if (queued == 0)
+	if (queued == 0) {
+		int audio_packet = (sid >= 0xc0U && sid <= 0xdfU) ||
+		                   sid == 0xbdU;
+
+		if (d->drop_audio_when_full && audio_packet) {
+			/* The audio queue is full behind a PCM ring the client
+			 * is not draining. Drop this packet so the parse (and
+			 * the video packets behind it) keeps moving; the owner
+			 * only sets the policy while video would otherwise
+			 * starve. */
+			if (!d->audio_drop_run_active) {
+				d->audio_drop_run_active = 1U;
+				d->first_dropped_audio_pts = pts;
+				d->first_dropped_audio_pts_valid =
+					pts != SDK_DVD_PS_NO_TS;
+				d->last_dropped_audio_pts_valid = 0U;
+			} else if (!d->first_dropped_audio_pts_valid &&
+			           pts != SDK_DVD_PS_NO_TS) {
+				d->first_dropped_audio_pts = pts;
+				d->first_dropped_audio_pts_valid = 1U;
+			}
+			if (pts != SDK_DVD_PS_NO_TS) {
+				d->last_dropped_audio_pts = pts;
+				d->last_dropped_audio_pts_valid = 1U;
+			}
+			d->audio_packets_dropped++;
+			d->audio_bytes_dropped += total;
+			d->bytes_ignored += total;
+			consume(d, total);
+			d->packets_seen++;
+			return 1;
+		}
 		return 0;
+	}
 	if (queued < 0)
 		d->malformed_packets++;
+	if (d->audio.count != queued_audio_before)
+		d->audio_drop_run_active = 0U;
 	consume(d, total);
 	d->packets_seen++;
 	return 1;
@@ -285,6 +343,15 @@ void sdk_dvd_ps_write(struct SDKDVDPSDemux *d, const uint8_t *src,
 		if (state == 0)
 			break;
 		room = SDK_DVD_PS_STAGING_CAPACITY - d->staged;
+		if (room < length - used && d->head != 0U) {
+			/* Parsing stopped inside a unit: move just that
+			 * unit to the front, once per refill. */
+			memmove(d->staging, d->staging + d->head,
+			        d->staged - d->head);
+			d->staged -= d->head;
+			d->head = 0U;
+			room = SDK_DVD_PS_STAGING_CAPACITY - d->staged;
+		}
 		if (room == 0U)
 			break;
 		copy = length - used;

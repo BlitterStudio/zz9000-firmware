@@ -1,34 +1,89 @@
 # ZZ9000 card memory map
 
-The card has 1 GB of DDR at `0x00000000`–`0x3FFFFFFF`. The BSP translation table maps all of it as shareable, cacheable normal memory; code that changes that for a range (audio sections, Ethernet descriptors, the SDK mailbox) says so next to the range.
+The firmware uses a 1 GiB DDR address space from `0x00000000` through
+`0x3FFFFFFF`. Fixed reservations, the linker image, and the card pool divide
+that space. `memorymap.h` defines fixed firmware addresses; `lscript.ld`
+places the firmware image and its heap.
 
-`ZZ9000_proto.sdk/ZZ9000OS/src/memorymap.h` is the authority for every fixed address, and `ZZ9000_proto.sdk/ZZ9000OS/src/lscript.ld` places the firmware image and heap. This page is the overview.
+Ranges below use an exclusive end: `0x00000000`–`0x08000000` is 128 MiB.
 
-| Range | Size | Owner |
+## Current layout
+
+| Range | Size | Use |
+|---|---:|---|
+| `0x00000000`–`0x08000000` | 128 MiB | Low firmware image and board-memory services: framebuffer and RTG surfaces, SDK shared heap, and ARM-local surface heap. |
+| `0x08000000`–`0x08200000` | 2 MiB | Z3 SDK mailbox, direct audio rings, legacy AHI/MHI audio scratch, and the alignment gap before the high firmware region. |
+| `0x08200000`–`0x18000000` | 254 MiB | High firmware image, newlib heap, and ARM exception stacks. The default `_HEAP_SIZE` is 224 MiB. |
+| `0x18000000`–`0x18100000` | 1 MiB | Dual-core task queue and shared session tables (`SDK_TASKQ_REGION_*`). |
+| `0x18100000`–`0x1BF00000` | 62 MiB | Card-pool range A1. |
+| `0x1BF00000`–`0x1C000000` | 1 MiB | Core-1 stack (`SDK_CORE1_STACK_*`). |
+| `0x1C000000`–`0x20000000` | 64 MiB | Card-pool range A2. |
+| `0x20000000`–`0x30000000` | 256 MiB | Zorro III fast RAM while advertised; otherwise card-pool range B. |
+| `0x30000000`–`0x3FC00000` | 252 MiB | Card-pool range C. |
+| `0x3FC00000`–`0x40000000` | 4 MiB | Fixed audio, boot ROM, Ethernet, and SD/USB buffers. |
+
+The linker keeps its low image below `0x00200000`. Its high region begins at
+`0x08200000`, and an assertion prevents the image, heap, and stacks from
+reaching `0x18000000`.
+
+## Fixed buffers at the top of DDR
+
+The top 4 MiB is not card-pool memory. `memorymap.h` assigns it to these
+fixed users:
+
+| Address | Use |
+|---|---|
+| `0x3FC00000` | Default audio TX ring (`AUDIO_TX_BUFFER_ADDRESS`). |
+| `0x3FC20000` | Default audio RX ring (`AUDIO_RX_BUFFER_ADDRESS`). |
+| `0x3FC28000` | First audio-fabric lease ring. The second follows the 122,880-byte first ring. |
+| `0x3FCF0000`–`0x3FCF2000` | 8 KiB boot ROM image. |
+| `0x3FD00000`, `0x3FD08000` | Ethernet TX and RX descriptor lists. |
+| `0x3FD10000`, `0x3FD20000` | Ethernet TX and RX frame buffers. |
+| `0x3FE00000` | 256 KiB Ethernet receive backlog. |
+| `0x3FE40000` | Shared SD boot and USB proxy block buffer. |
+
+## Card pool
+
+The card pool supplies large firmware working areas in 64 KiB pages. Every
+allocation has an owner class and instance, so a session can release all of
+its allocations at once.
+
+| Class | Limit |
+|---|---:|
+| `FIRMWARE` | 64 MiB |
+| `MEDIA` | 128 MiB |
+| `IMAGE` | 72 MiB |
+
+At startup, ranges A1, A2, and C are open. Range B is registered as a
+revocable range but stays closed while Zorro III fast RAM is advertised. It
+opens when that window is available to firmware, including on Zorro II.
+Before an Amiga reset changes that decision, firmware revokes range B and
+flushes its data cache. Reset then releases every non-`FIRMWARE` owner.
+
+WebM decoder arenas use `MEDIA` owners, and WebP decoder arenas use `IMAGE`
+owners. The pool is preferred over new fixed carve-outs.
+
+## Cache attributes
+
+The BSP translation table initially maps DDR as shareable, write-back,
+write-allocate normal memory. Firmware changes the following areas for
+non-coherent users:
+
+| Range or address | Attribute | Reason |
 |---|---|---|
-| `0x00000000`–`0x08000000` | 128 MB | What the Amiga can reach through the Zorro board window: low firmware sections, the framebuffer and RTG surfaces, the SDK shared and ARM-local heaps |
-| `0x08000000`–`0x08200000` | 2 MB | Z3 SDK mailbox, audio direct rings and AHI/MHI audio scratch |
-| `0x08200000`–`0x18000000` | 254 MB | High firmware code, the general newlib heap (224 MB, `_HEAP_SIZE`), the stacks, and room for the code to grow |
-| `0x18000000`–`0x18100000` | 1 MB | Dual-core task queue and the shared session tables (`SDK_TASKQ_REGION_*`) |
-| `0x18100000`–`0x1BF00000` | 62 MB | Card pool range A1 |
-| `0x1BF00000`–`0x1C000000` | 1 MB | Core-1 stack (`SDK_CORE1_STACK_*`) |
-| `0x1C000000`–`0x20000000` | 64 MB | Card pool range A2 |
-| `0x20000000`–`0x30000000` | 256 MB | Zorro III fast RAM while it is advertised; card pool range B otherwise |
-| `0x30000000`–`0x3FC00000` | 252 MB | Card pool range C |
-| `0x3FC00000`–`0x40000000` | 4 MB | Default audio TX/RX rings, audio lease rings, boot ROM, Ethernet descriptors and frames, SD/USB block buffer |
+| `0x08100000`–`0x08200000` | Non-cacheable | Z3 SDK mailbox and direct-audio ring section. |
+| `0x3FC00000`–`0x3FD00000` | Non-cacheable | Audio formatter and audio-fabric lease rings. |
+| `0x3FD00000`, `0x3FE00000` | Strongly ordered | Ethernet descriptor list and receive backlog sections. |
 
-## The card pool
+With the Generation-2 aperture contract acknowledged, the Zorro II SDK
+mailbox uses one non-cacheable 4 KiB page immediately below its audio scratch
+range.
 
-Large working memory for firmware services comes from the card pool (`card_pool.h`), not from new fixed ranges or the general heap. The pool hands out 64 KB pages to an owner — a class and an instance — and keeps a byte limit per class, so one service cannot take memory another needs. A session releases everything it owns in one call, and the firmware releases every non-permanent owner on an Amiga reset.
+## Adding a fixed range
 
-Today the WebM decoder arena (MEDIA class, one owner per video session) and the WebP decoder arena (IMAGE class, one owner per image session) take their memory from the pool. When core 1 faults, the session poison handlers release those owners, so the pool gets the memory back whichever core allocated it.
+1. Define its start, size, and exclusive end in `memorymap.h`, deriving it
+   from a neighbour where possible.
+2. Add `#error` guards for both neighbours.
+3. Update the layout and cache-attribute tables here.
 
-Range B is the Zorro III fast RAM window. The pool uses it only while `fast_ram` is off in `ZZ9000.CFG` (and always on Zorro II, which has no fast RAM). On every Amiga reset the firmware takes range B back and cleans the ARM data caches before the fast RAM decision is re-read, so a warm reset that switches fast RAM on hands the Amiga memory no ARM code still touches.
-
-## Adding a range
-
-1. Define its start, size and end in `memorymap.h`, deriving it from a neighbour where you can.
-2. Add an `#error` guard against each neighbour.
-3. Update the table above.
-
-Prefer asking the card pool for memory over adding a fixed range. A fixed range is only right when hardware or the Amiga needs a stable address.
+Use the card pool unless hardware or the Amiga requires a stable address.

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "../tools/zzplay/zzplay-sync.h"
+#include "../tools/zzplay/zzplay-decode-policy.h"
 
 #include <stdint.h>
 
@@ -119,6 +120,25 @@ static int check_discard_run(void)
              ZZPLAY_SYNC_PRESENT;
 }
 
+static int check_legacy_decode_retry(void)
+{
+  uint8_t unsupported = 0U;
+  uint32_t retry = 0U;
+  uint32_t flags = ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME |
+                   ZZ9K_MEDIA_DECODE_SKIP_TO_I_PICTURE;
+
+  if (!zzplay_decode_retry_legacy(flags, ZZ9K_STATUS_BAD_REQUEST,
+                                  &unsupported, &retry) ||
+      unsupported != 1U ||
+      retry != ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME) {
+    return 0;
+  }
+  return !zzplay_decode_retry_legacy(
+             flags, ZZ9K_STATUS_OK, &unsupported, &retry) &&
+         !zzplay_decode_retry_legacy(
+             ZZ9K_MEDIA_DECODE_SKIP_TO_KEYFRAME, ZZ9K_STATUS_BAD_REQUEST,
+             &unsupported, &retry);
+}
 int main(void)
 {
   if (!check_periods()) {
@@ -141,6 +161,9 @@ int main(void)
   }
   if (!check_discard_run()) {
     return 7;
+  }
+  if (!check_legacy_decode_retry()) {
+    return 8;
   }
   return 0;
 }

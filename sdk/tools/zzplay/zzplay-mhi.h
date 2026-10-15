@@ -5,7 +5,7 @@
 #define ZZPLAY_MHI_H
 
 #include <stdint.h>
-#include <stdio.h>
+#include "zzplay-sys.h"
 
 #define ZZPLAY_MHI_BUFFER_COUNT 2U
 #define ZZPLAY_MHI_DRIVER_MAX 32U
@@ -52,7 +52,7 @@ ZZPlayMHIStatus zzplay_mhi_acquire(ZZPlayMHISink *sink,
  * `stop_requested` asked for the end of the item. */
 ZZPlayMHIStatus zzplay_mhi_play_file(
     ZZPlayMHISink *sink,
-    FILE *file,
+    ZZPlayFile *file,
     ZZPlayMHIStopRequested stop_requested,
     ZZPlayMHIPaused paused,
     void *user);

@@ -1,91 +1,131 @@
-# ZZ9000AX AHI recording firmware protocol
+# ZZ9000AX AHI recording protocol
 
-The FPGA design already routes the ZZ9000AX I2S input through an S2MM audio
-formatter into an eight-period DDR ring and connects its completion interrupt
-to the ARM. AHI recording therefore needs firmware and driver changes only;
-the Verilog, Vivado project and committed bitstreams are unchanged.
+ZZ9000AX firmware records the I2S receive stream into an eight-period DDR
+ring. With recording enabled, it converts each completed 48 kHz S16LE stereo
+period to the frame count selected through `REG_ZZ_AUDIO_SCALE`, writes S16BE
+stereo frames back to that period, and reports the result through
+`REG_ZZ_AUDIO_RX_STATUS`.
+
+Playback and recording use the shared Amiga audio interrupt. The playback
+completion status at `REG_ZZ_AUDIO_TX_STATUS` identifies the ring period that
+is safe to refill. Recording remains available if the SDK audio fabric owns
+playback; in that case firmware clears the requested playback bit and retains
+the recording bit.
+
+## How a capture period is published
+
+```mermaid
+flowchart LR
+  I2S[I2S receive stream] --> S2MM[S2MM formatter]
+  S2MM --> Ring[Eight-period DDR ring]
+  Ring --> RXISR[Receive ISR]
+  RXISR --> Convert[Convert and flush completed period]
+  Convert --> Status[Update RX status]
+  Status --> IRQ[Shared Amiga audio interrupt]
+  Status --> Driver[AHI driver]
+```
+
+The receive formatter writes 960 input frames, or 3840 bytes, to each ring
+period. The ISR derives the newest completed period from the DMA transfer
+count. If interrupt service was delayed, it publishes up to seven completed
+periods. The eighth slot is the formatter's active write target and is never
+published as backlog.
+
+For every published period, firmware performs these steps:
+
+1. Invalidates the completed DMA range from the CPU cache.
+2. Converts the period to the selected output frame count.
+3. Flushes `frame_count * 4` bytes and issues a data-synchronization barrier.
+4. Updates the packed receive status with that period and the next sequence.
+5. Raises the shared Amiga audio interrupt after processing the batch.
+
+The receive-status update is the publication boundary. A driver must wait for
+a changed sequence before reading a period. Sequences use 12 bits and wrap
+modulo 4096.
 
 ## Registers
 
-`REG_ZZ_AUDIO_CONFIG` (`0xF4`) retains codec presence in read bit 0. Writes are
-a control mask: bit 0 enables playback-period interrupts and bit 1 enables
-capture-ready interrupts. Older drivers write only zero or one and remain
-compatible. On reads, bit 1 advertises the packed transmit-period status at
-`0xF8`; the distinct read/write meaning makes this a stable capability marker
-that cannot be confused with an older firmware's raw 16-bit TX sequence.
+`REG_ZZ_AUDIO_CONFIG` is at `0xF4`. Its read and write meanings differ.
 
-`REG_ZZ_AUDIO_RX_STATUS` (`0xF6`) is read-only:
+| Access | Bits | Meaning |
+| --- | --- | --- |
+| Read | 0 | Codec present. |
+| Read | 1 | Packed transmit-period status available at `0xF8`. |
+| Write | 0 | Enable playback-period interrupts. |
+| Write | 1 | Enable capture-ready interrupts. |
 
-| Bits | Meaning |
-| --- | --- |
-| 15 | Capture protocol implemented. |
-| 14:12 | Newest completed receive-period index (0 through 7). |
-| 11:0 | Completion sequence, incremented modulo 4096. |
+Writes are masked to bits 0 and 1. Existing playback software that writes
+only zero or one therefore retains the same control values.
 
-Old firmware returns zero at `0xF6`, allowing a new driver to retain playback
-without advertising recording.
-
-`REG_ZZ_AUDIO_TX_STATUS` (`0xF8`) is read-only:
+`REG_ZZ_AUDIO_RX_STATUS` at `0xF6` is read-only.
 
 | Bits | Meaning |
 | --- | --- |
-| 15 | Transmit-period publication implemented. |
-| 14:12 | Most recently completed transmit-period index (0 through 7). |
-| 11:0 | Completion sequence, incremented modulo 4096. |
+| 15 | Capture protocol available. |
+| 14:12 | Newest completed receive-period index, 0 through 7. |
+| 11:0 | Completion sequence, modulo 4096. |
 
-Firmware publishes the status after every transmit period completes, before
-asserting the shared audio interrupt. A capable driver samples the sequence
-when playback starts and services playback only after observing a different
-value. It refills the published completed period rather than assuming that the
-continuously running formatter began at ring offset zero. This both
-distinguishes playback completions from capture-only wake-ups and prevents a
-startup write from touching the period MM2S is actively reading.
+`REG_ZZ_AUDIO_TX_STATUS` at `0xF8` is read-only.
 
-A new driver uses this layout only when both read bit 1 at `0xF4` and status
-bit 15 are set, otherwise it falls back to the legacy sequential cursor. An
-old driver still observes a changing 16-bit status when used with new
-firmware.
+| Bits | Meaning |
+| --- | --- |
+| 15 | Packed transmit-period status available. |
+| 14:12 | Most recently completed transmit-period index, 0 through 7. |
+| 11:0 | Completion sequence, modulo 4096. |
 
-## Publication order
+Firmware updates transmit status on every MM2S completion, before it raises a
+playback interrupt. A driver samples the sequence when playback starts and
+refills the reported completed period only after the sequence changes. This
+avoids assuming that the continuously running formatter starts at ring offset
+zero.
 
-The receive formatter writes 960 48 kHz S16LE stereo frames into each
-3840-byte period. While capture interrupts are enabled, the receive ISR:
+A driver should interpret packed transmit status only when both the read bit 1
+at `0xF4` and bit 15 at `0xF8` are set. The receive protocol is indicated by
+bit 15 at `0xF6`.
 
-1. invalidates the completed DMA period;
-2. converts it to the `REG_ZZ_AUDIO_SCALE` frame count through the shared
-   qualified band-limited kernel (`audio_convert.c`): the period is first
-   copied to CPU-side scratch (a long kernel reads inputs that early
-   outputs would overwrite in place), and the result is written back as
-   Amiga-native S16BE stereo. Filter history carries across periods
-   inside the converter instance while the exact per-period counts keep
-   the rational phase landing on every period boundary;
-3. flushes the valid `frame_count * 4` bytes and completes a memory barrier;
-4. publishes the period index and incremented sequence;
-5. asserts the existing shared Amiga audio interrupt;
+## Conversion rules and limits
 
-The sequence update is the publication boundary: the driver must not consume a
-period before observing its new sequence. Supported conversion counts are
-160/240/480/640/882/960 frames (8/12/24/32/44.1/48 kHz); any other value in
-the register's 1-960 range, including invalid values, converts as native
-48 kHz identity (960 frames, endian swap only).
+`REG_ZZ_AUDIO_SCALE` at `0x74` selects the capture output frame count. The
+input is always 960 frames at 48 kHz. Each frame is stereo S16LE on input and
+stereo S16BE after conversion.
+
+| Output frames | Output rate |
+| ---: | ---: |
+| 160 | 8 kHz |
+| 240 | 12 kHz |
+| 480 | 24 kHz |
+| 640 | 32 kHz |
+| 882 | 44.1 kHz |
+| 960 | 48 kHz |
+
+The converter preserves filter state between periods. A change to the selected
+frame count, recording start, or receive-ring reassignment resets that state.
+Repeated writes of the same frame count do not reset it.
+
+Values of zero or above 960 are clamped to 960 frames. Other values from 1
+through 959 use the 960-frame path, which changes sample byte order without
+resampling.
 
 ## Receive-ring retargeting
 
-Writes to `AP_RX_BUF_OFFS_HI/LO` select a pending receive ring; the formatter
-does not use that address until the main loop performs its deferred I2S/audio
-formatter reinitialization. Firmware disables capture publication before
-changing the CPU-side ring pointer. RX interrupts during this window are
-acknowledged but do not convert data, advance the receive sequence or interrupt
-the Amiga. Publication resumes only after the formatter DMA has restarted on
-the new ring.
+The driver selects an RX ring through `AP_RX_BUF_OFFS_HI` and
+`AP_RX_BUF_OFFS_LO` using `REG_ZZ_AUDIO_PARAM` and `REG_ZZ_AUDIO_VAL`. Write
+the high offset first and the low offset second. The low-offset write sets the
+new CPU-side pointer and schedules I2S and audio-formatter reinitialization in
+the main loop.
 
-The receive sequence remains monotonic across reinitialization. This lets a
-driver sample the status immediately after the buffer-register writes and
-still observe a distance of exactly one when the first period from the new
-ring is published.
+Firmware clears capture readiness before it exposes the pending ring pointer.
+Receive interrupts during that interval are acknowledged without conversion,
+sequence advancement, or an Amiga audio interrupt. After formatter restart,
+firmware enables capture readiness and begins publishing completed periods to
+the new ring. The receive sequence is retained across reassignment.
 
-The driver selects the ring using the existing `AP_RX_BUF_OFFS_HI/LO`
-parameters. Its stride remains 3840 bytes even when the requested rate produces
-fewer frames. At most the newest seven completed periods are recoverable after
-a delayed interrupt; the eighth ring slot is already the formatter's active
-write target and is never published as backlog.
+The ring stride is 3840 bytes at every output rate. Only the converted byte
+count changes.
+
+## Compatibility history
+
+| Earlier interface | Current handling |
+| --- | --- |
+| Playback used `REG_ZZ_AUDIO_CONFIG` as a zero-or-one control value. | Those values remain valid write masks. |
+| Playback used a sequential refill cursor. | Drivers can use the capability-gated packed status at `0xF8` to refill the completed period. |

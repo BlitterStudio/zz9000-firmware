@@ -40,6 +40,7 @@
 #include "sdk_aperture_layout.h"
 #include "sdk_smp_lock.h"
 #include "memorymap.h"
+#include "card_pool.h"
 #include "mmu_page.h"
 #include "scheduler.h"
 #include "core2.h"
@@ -48,6 +49,7 @@
 #include "video.h"
 #include "video_scale.h"
 #include "overlay.h"
+#include "fw_update.h"
 #include "mp3/mp3.h"
 #include "mp3/minimp3.h"
 #include "sdk_audio_flac.h"
@@ -721,6 +723,7 @@ struct SDKSharedBuffer {
 	uint32_t length;
 	uint32_t flags;
 	uint32_t pin_count;
+	uint32_t pool_owner;
 	uint8_t in_use;
 };
 
@@ -1275,6 +1278,9 @@ static uint32_t mailbox_capability_bits(void)
 {
 	uint32_t capabilities = SDK_MAILBOX_BASE_CAPABILITY_BITS;
 
+	if (sdk_aperture_runtime_is_zorro3())
+		capabilities |= SDK_CAP_MEDIA_INPUT;
+
 	if (aperture_contract_present())
 		capabilities |= SDK_CAP_APERTURE_LAYOUT;
 	if (effective_host_window_size() != 0U)
@@ -1468,6 +1474,9 @@ static uint32_t service_flags(const struct SDKServiceDescriptor *service)
 		flags |= sdk_jpeg_service_flags();
 		flags |= SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA;
 	}
+	if (service->service_id == SDK_SERVICE_MEMORY &&
+	    sdk_aperture_runtime_is_zorro3())
+		flags |= SDK_SERVICE_FLAG_MEMORY_MEDIA_INPUT;
 	if (service->service_id == SDK_SERVICE_VIDEO &&
 	    audio_codec_present())
 		flags |= SDK_SERVICE_FLAG_VIDEO_AUDIO_BIND;
@@ -1929,6 +1938,8 @@ static int shared_buffer_live(const struct SDKSharedBuffer *buffer)
 		return 0;
 	if (buffer->handle == 0 || buffer->handle == SDK_INVALID_HANDLE)
 		return 0;
+	if ((buffer->flags & SDK_ALLOC_MEDIA) != 0U)
+		return buffer->pool_owner != 0U && buffer->length != 0U;
 	if ((buffer->flags & SDK_ALLOC_HOST_WINDOW) != 0U)
 		return host_window_range_valid(buffer->address, buffer->length);
 	return heap_range_valid(buffer->address, buffer->length);
@@ -2409,6 +2420,8 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	uint32_t alignment;
 	uint32_t flags;
 	uint32_t address;
+	uint32_t owner = 0U;
+	int media;
 
 	if (payload_len < 12U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
@@ -2417,18 +2430,28 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	length = get_be32(payload->length);
 	alignment = get_be32(payload->alignment);
 	flags = get_be32(payload->flags);
-	if (alignment == 0)
+	media = (flags & SDK_ALLOC_MEDIA) != 0U;
+	if (alignment == 0U)
 		alignment = 16U;
-	if (length == 0 || !is_power_of_two(alignment))
+	if (length == 0U || !is_power_of_two(alignment) ||
+	    (flags & ~(SDK_ALLOC_HOST_WINDOW | SDK_ALLOC_CARD_ONLY |
+	               SDK_ALLOC_MEDIA)) != 0U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
+	if (media) {
+		if (!sdk_aperture_runtime_is_zorro3())
+			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+		if ((flags & SDK_ALLOC_CARD_ONLY) == 0U ||
+		    (flags & SDK_ALLOC_HOST_WINDOW) != 0U ||
+		    length > CARD_POOL_LIMIT_MEDIA_INPUT ||
+		    alignment > CARD_POOL_PAGE_BYTES)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	} else if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
 		uint32_t host_window_size = effective_host_window_size();
 
 		if (host_window_size == 0U)
 			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 		if (length > host_window_size)
-			return complete_status(req, comp,
-			                       SDK_STATUS_BAD_REQUEST);
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	} else if (length > SDK_SHARED_HEAP_SIZE) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
@@ -2438,18 +2461,24 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	if (!slot)
 		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
 	memset(slot, 0, sizeof(*slot));
-
-	if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U)
-		address = find_free_host_window_region(length, alignment);
-	else
-		address = find_free_region(length, alignment);
-	if (address == 0)
-		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
-
 	slot->handle = next_handle();
+	if (media) {
+		owner = CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, slot->handle);
+		address = card_pool_alloc(&card_pool, length, owner);
+	} else if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
+		address = find_free_host_window_region(length, alignment);
+	} else {
+		address = find_free_region(length, alignment);
+	}
+	if (address == 0U) {
+		memset(slot, 0, sizeof(*slot));
+		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
+	}
+
 	slot->address = address;
 	slot->length = length;
 	slot->flags = flags;
+	slot->pool_owner = owner;
 	slot->in_use = 1;
 
 	write_completion(comp, req, SDK_STATUS_OK, sizeof(*info));
@@ -2480,6 +2509,9 @@ static uint16_t handle_free_shared(volatile struct SDKMailboxEntry *req,
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 	if (buffer->pin_count != 0U)
 		return complete_status(req, comp, SDK_STATUS_BUSY);
+	if (buffer->pool_owner != 0U)
+		(void)card_pool_free(&card_pool, buffer->address,
+		                     buffer->pool_owner);
 
 	memset(buffer, 0, sizeof(*buffer));
 	return complete_status(req, comp, SDK_STATUS_OK);
@@ -4431,6 +4463,12 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session,
 	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP, source_rate);
 	audio_fabric_producer_gain_set(AUDIO_FABRIC_SLOT_PUMP,
 		AUDIO_FABRIC_GAIN_UNITY);
+	/* The pump slot remains frozen through setup. Publish the source now
+	 * so an initial media preconvert fill can reserve every available
+	 * period before go_live exposes the output clock. */
+	g_audio_playback.source_kind = source_kind;
+	g_audio_playback.paused = 0U;
+	g_audio_playback.session = session;
 	if (source_kind == AUDIO_PUMP_SOURCE_MEDIA) {
 		struct SDKMediaAudioSource media_source;
 
@@ -4487,23 +4525,29 @@ static void audio_playback_start(uint32_t source_kind, uint32_t session,
 		audio_playback_preconvert(
 			stream, AUDIO_PUMP_PRECONVERT_FILL_BUDGET);
 	}
-	/* Re-arm the shared fill frontier only when no other slot is
-	 * live: joining a live mix must never rewind it (the other
-	 * producers' staged periods would be re-filled and their staging
-	 * double-counted) -- the same guard the lease-submit path applies. */
-	if (!audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP))
-		audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
-	g_audio_playback.source_kind = source_kind;
-	g_audio_playback.paused = 0U;
 	/* Name the output source for metering (R8) before the session
 	 * goes live. */
 	audio_scene_meter_output_identity(
 		audio_pump_meter_identity(source_kind));
-	/* Publish the session, then the slot: the next audio IRQ may now
-	 * stage PCM. */
-	__asm__ __volatile__("" ::: "memory");
-	g_audio_playback.session = session;
-	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
+	/* Re-arm the shared fill frontier only when no other slot is
+	 * live: joining a live mix must never rewind it (the other
+	 * producers' staged periods would be re-filled and their staging
+	 * double-counted) -- the same guard the lease-submit path applies. */
+	if (!audio_fabric_others_live(AUDIO_FABRIC_SLOT_PUMP)) {
+		audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
+		/* Direct 48 kHz media otherwise waits one formatter interrupt to
+		 * stage; a preconvert view otherwise has PCM only privately queued.
+		 * Keep priming and publication indivisible to the formatter ISR. */
+		if (!audio_fabric_producer_prime_and_go_live(
+			AUDIO_FABRIC_SLOT_PUMP)) {
+			/* A peer can become live after the optimistic check and before
+			 * the IRQ-masked recheck. It owns the shared frontier now, so
+			 * skip the prime but still publish this prepared producer. */
+			audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
+		}
+	} else {
+		audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
+	}
 }
 
 static void audio_playback_stop(void)
@@ -5632,9 +5676,7 @@ static uint16_t handle_media_session_begin(
 	begin.flags = get_be32(payload->flags);
 	if (!bytes_are_zero(payload->reserved, sizeof(payload->reserved)))
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2 ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_OPUS ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_VORBIS) {
+	if (sdk_media_session_audio_uses_ring(begin.audio_codec)) {
 		if (media_pcm_ring)
 			return complete_status(req, comp, SDK_STATUS_BUSY);
 		pcm_ring = find_shared_buffer(begin.pcm_ring_handle);
@@ -5647,9 +5689,7 @@ static uint16_t handle_media_session_begin(
 		begin.pcm_ring = (uint8_t *)(uintptr_t)pcm_ring->address;
 	}
 	status = sdk_media_session_begin(&begin, &result);
-	if (begin.audio_codec == SDK_MEDIA_AUDIO_MP2 ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_OPUS ||
-	    begin.audio_codec == SDK_MEDIA_AUDIO_VORBIS) {
+	if (sdk_media_session_audio_uses_ring(begin.audio_codec)) {
 		if (status == SDK_STATUS_OK) {
 			media_pcm_ring = pcm_ring;
 			media_pcm_ring_session = result.session;
@@ -5714,7 +5754,8 @@ static uint16_t handle_media_session_deferred_simple(
 	p.flags = flags;
 	if (p.session == 0U ||
 	    (opcode == SDK_OP_MEDIA_SESSION_DECODE
-		     ? (flags & ~SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME) != 0U
+		     ? (flags & ~(SDK_MEDIA_DECODE_SKIP_TO_KEYFRAME |
+		                  SDK_MEDIA_DECODE_SKIP_TO_I_PICTURE)) != 0U
 		     : flags != 0U) ||
 	    get_be32(payload->value_hi) != 0U ||
 	    get_be32(payload->value_lo) != 0U)
@@ -6568,6 +6609,16 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		    (const struct overlay_compose_params *)d->op_params;
 		*result_len = 0U;
 		return overlay_run_compose(p);
+	}
+	case TASKQ_OP_FWUP: {
+		/* Core 1 owns FatFs and the SD card until this retires
+		 * (fw_update_busy holds core 0's users off). */
+		uint16_t r = fw_update_run_staged();
+
+		result_payload[0] = (uint8_t)(r >> 8);
+		result_payload[1] = (uint8_t)r;
+		*result_len = 2U;
+		return SDK_STATUS_OK;
 	}
 	case SDK_OP_IMAGE_SESSION_FEED: {
 		const struct imgsess_op_params *p =
@@ -8237,9 +8288,11 @@ static uint16_t handle_query_service(volatile struct SDKMailboxEntry *req,
 	if (service->service_id == SDK_SERVICE_CORE)
 		capabilities |= mailbox_capability_bits() &
 			SDK_CAP_APERTURE_LAYOUT;
-	if (service->service_id == SDK_SERVICE_MEMORY)
+	if (service->service_id == SDK_SERVICE_MEMORY) {
+		capabilities &= ~(SDK_CAP_HOST_WINDOW_HEAP | SDK_CAP_MEDIA_INPUT);
 		capabilities |= mailbox_capability_bits() &
-			SDK_CAP_HOST_WINDOW_HEAP;
+			(SDK_CAP_HOST_WINDOW_HEAP | SDK_CAP_MEDIA_INPUT);
+	}
 	sdk_service_write_info(info, service, capabilities, service_flags(service),
 			       sizeof(req->payload));
 	return SDK_STATUS_OK;
@@ -8679,9 +8732,10 @@ void sdk_mailbox_init(void)
 	 * generation tag stops the stale completion from posting, but only the
 	 * quiesce stops the write itself. No-op at cold boot (core 1 not yet up). */
 	scheduler_quiesce_for_reset();
-	/* internal tasks (video compose) were drained/dropped with the
-	 * queue and will never post their deferred completion */
+	/* internal tasks (video compose, FWUP) were drained/dropped with
+	 * the queue and will never post their deferred completion */
 	overlay_scheduler_reset();
+	fw_update_forget_queued();
 
 	select_mailbox_placement();
 	if (mailbox_base != 0U)
@@ -8961,6 +9015,13 @@ int sdk_mailbox_post_deferred(uint32_t request_id, uint32_t user_cookie,
 		 * producer's in-flight marker, dispatched by opcode. */
 		if (opcode == (uint16_t)TASKQ_OP_VIDEO_COMPOSE)
 			overlay_compose_retired(status == SDK_STATUS_OK);
+		else if (opcode == (uint16_t)TASKQ_OP_FWUP) {
+			if (status == SDK_STATUS_OK && payload && payload_len >= 2U)
+				fw_update_retire((uint16_t)((payload[0] << 8) |
+				                            payload[1]));
+			else
+				fw_update_retire_failed(); /* faulted on core 1 */
+		}
 		else if (opcode == (uint16_t)SDK_OP_AUDIO_STREAM_CLOSE) {
 			/* Background close: sdk_mailbox_audio_stream_reap
 			 * clears the slot once the task has left the queue. */

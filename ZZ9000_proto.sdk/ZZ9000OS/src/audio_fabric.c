@@ -32,6 +32,7 @@
 #include "ax.h"
 #include "memorymap.h"
 #include "sdk_mailbox.h"
+#include "sdk_smp_lock.h"
 #include "xil_cache.h"
 
 /* Instrument-build flags (plan U5, docs/audio-fabric.md): compile the
@@ -920,14 +921,9 @@ void audio_fabric_request_rebuild(uint32_t slot)
 			AUDIO_FABRIC_RING_BYTES;
 	}
 }
-/*
- * TX-fill compositor tick, called from the audio formatter period
- * interrupt every 20 ms. No-op unless the fabric owns the output
- * (with only frozen producers it still runs the direct-ring scan,
- * which may bring a first-published lease live). Integer-only; no
- * scheduler/taskq/printf access from here.
- */
-void audio_fabric_isr(void)
+/* Fill/retire work shared by the formatter ISR and isolated startup priming.
+ * The latter must not execute the once-per-period lease lifecycle tick. */
+static void audio_fabric_compositor_fill(void)
 {
 	uint8_t *tx = g_fabric_tx;
 	uint32_t pos_period;
@@ -940,18 +936,8 @@ void audio_fabric_isr(void)
 	uint64_t bench_mix;
 #endif
 
-
 	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
 		return;
-
-	/* Direct-ring leases first (plan U3): one scan per ISR over the
-	 * wired producer lines -- seqlock/generation/write-distance
-	 * validation, heartbeat aging, the LEASED -> ACTIVE transition
-	 * on the first publication, REVOKED teardown -- before any
-	 * frontier work. May bring a frozen lease live (the retire and
-	 * fill passes below then see it) or drop a revoked one (with
-	 * the last-producer silence when it was the only attachment). */
-	fabric_lease_isr_tick();
 #ifdef AUDIO_FABRIC_BENCH
 	/* Catch-up may run two FIRs. Start the isr sample before it so
 	 * the bench does not report a quiet interrupt when the fallback
@@ -1297,6 +1283,15 @@ void audio_fabric_isr(void)
 #endif
 }
 
+/* Formatter period tick: lease lifecycle advances exactly once here. */
+void audio_fabric_isr(void)
+{
+	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
+		return;
+	fabric_lease_isr_tick();
+	audio_fabric_compositor_fill();
+}
+
 int audio_fabric_producer_attach(uint32_t slot,
 	const struct audio_fabric_producer_ops *ops)
 {
@@ -1389,6 +1384,49 @@ void audio_fabric_producer_freeze(uint32_t slot)
 	s->frozen = 1U;
 }
 
+int audio_fabric_producer_prime_and_go_live(uint32_t slot)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+	uint32_t irq_state;
+	uint32_t i;
+	int primed = 0;
+
+	/* Priming rewrites the shared TX frontier, so it is only valid before
+	 * this slot or any peer becomes live. Publication is atomic with it: a
+	 * waiting lease must not activate and reset that frontier in between. */
+	if (s == NULL || !s->attached || !s->frozen || s->live ||
+	    audio_fabric_others_live(slot))
+		return 0;
+	irq_state = smp_local_irq_save();
+	/* The first live-peer check above avoids taking the critical section in
+	 * the ordinary mixed case. Recheck after masking the formatter: a direct
+	 * producer may have woken between that check and the mask. */
+	if (audio_fabric_others_live(slot)) {
+		smp_local_irq_restore(irq_state);
+		return 0;
+	}
+	if (s->ops->snapshot(&s->source) &&
+	    s->source.produced_bytes > s->source.staged_bytes) {
+		/* Reuse the bounded, cache-coherent fill path without advancing the
+		 * direct-ring heartbeat/lifecycle tick: this is not a formatter period. */
+		s->frozen = 0U;
+		s->live = 1U;
+		audio_fabric_compositor_fill();
+		for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
+			if (s->period_staged[i] != 0U) {
+				primed = 1;
+				break;
+			}
+		}
+	}
+	/* EOF/starved startup still publishes (the player has its bounded
+	 * preroll escape); it simply has no real reserve to report. */
+	s->frozen = 0U;
+	s->live = 1U;
+	smp_local_irq_restore(irq_state);
+	return primed;
+}
+
 void audio_fabric_producer_go_live(uint32_t slot)
 {
 	struct audio_fabric_slot *s = fabric_slot(slot);
@@ -1426,7 +1464,7 @@ void audio_fabric_producer_restart(uint32_t slot)
 		s->convert_rate = 0U;
 	} else if (s->preconvert.consumed != 0U) {
 		/* Mid-stream re-arm: rewind the staging AND its converter
-+		 * history together (credits stand; the re-conversion
+		 * history together (credits stand; the re-conversion
 		 * restarts from the credited cursor with fresh phase). */
 		zz_audio_convert_reset(&s->convert);
 		s->convert_rate = 0U;

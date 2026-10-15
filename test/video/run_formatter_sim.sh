@@ -24,6 +24,7 @@ REFERENCE_COMMIT="${FORMATTER_REFERENCE_COMMIT:-6e0cfc53b0135a271dc71d31b29dc864
 
 mkdir -p "$SIMDIR"
 cd "$SIMDIR"
+cp "$HERE/overlay_bilinear_ref.vh" .
 
 if [ "$VARIANT" = "master" ] || [ "$VARIANT" = "reference" ]; then
     git -C "$ROOT" show "$REFERENCE_COMMIT:video_formatter.v" > dut.v
@@ -34,8 +35,9 @@ else
     cp "$ROOT/video_source_sync.v" .
     cp "$ROOT/video_overlay_pixel.v" .
     cp "$ROOT/video_overlay_linebuffer.v" .
+    cp "$ROOT/video_overlay_filter.v" .
     DEFINE=""
-    EXTRA="video_source_sync.v video_overlay_pixel.v video_overlay_linebuffer.v"
+    EXTRA="video_source_sync.v video_overlay_pixel.v video_overlay_linebuffer.v video_overlay_filter.v"
 fi
 
 if [ "$ON_WINDOWS" = 1 ]; then
