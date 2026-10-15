@@ -177,9 +177,13 @@ if {[string equal [get_filesets -quiet sources_1] ""]} {
 
 # Set IP repository paths
 set obj [get_filesets sources_1]
-set_property "ip_repo_paths" [list \
+set ip_repo_paths [list \
   [file normalize "$origin_dir/ip_repo/MNTZorro_1.0"] \
-  [file normalize "$origin_dir/ip_repo/audio_formatter_v1_0"]] $obj
+  [file normalize "$origin_dir/ip_repo/audio_formatter_v1_0"]]
+if { $rasterix } {
+  lappend ip_repo_paths [file normalize "$origin_dir/ip_repo/zz9k_rasterix_1.0"]
+}
+set_property "ip_repo_paths" $ip_repo_paths $obj
 
 # Rebuild user ip_repo's index before adding any source files
 update_ip_catalog -rebuild
@@ -239,30 +243,7 @@ set files [list \
  [file normalize "${origin_dir}/ZZ9000_proto.srcs/sources_1/new/audio_clock.v" ]\
  [file normalize "${origin_dir}/ZZ9000_proto.srcs/sources_1/bd/zz9000_ps/hdl/zz9000_ps_wrapper.v" ]\
 ]
-if { $rasterix } {
-  foreach rasterix_dir {
-    rtl/zz9k_rix
-    rtl/rasterix/RasterIX
-    rtl/rasterix/Float/rtl/float
-    rtl/rasterix/3rdParty
-    rtl/rasterix/3rdParty/verilog-axi
-    rtl/rasterix/3rdParty/verilog-axis
-  } {
-    foreach rasterix_file [glob -nocomplain [file normalize "$origin_dir/$rasterix_dir/*.v"]] {
-      lappend files $rasterix_file
-    }
-  }
-  foreach rasterix_header [glob -nocomplain [file normalize "$origin_dir/rtl/rasterix/RasterIX/*.vh"]] {
-    lappend files $rasterix_header
-  }
-  set_property include_dirs [list [file normalize "$origin_dir/rtl/rasterix/RasterIX"]] $obj
-}
 set imported_files [import_files -fileset sources_1 $files]
-if { $rasterix } {
-  foreach rasterix_header [glob -nocomplain [file normalize "$origin_dir/rtl/rasterix/RasterIX/*.vh"]] {
-    set_property file_type {Verilog Header} [get_files -of_objects [get_filesets sources_1] [list "*[file tail $rasterix_header]"]]
-  }
-}
 
 # Set 'sources_1' fileset file properties for remote files
 # None
@@ -425,6 +406,9 @@ proc cr_bd_zz9000_ps { parentCell } {
   xilinx.com:ip:axi_vdma:6.3\
   xilinx.com:ip:axis_data_fifo:2.0\
   "
+   if { $rasterix } {
+     append list_check_ips "  zz9k.org:user:zz9k_rasterix:1.0\n"
+   }
 
    set list_ips_missing ""
    common::send_msg_id "BD_TCL-006" "INFO" "Checking if the following IPs exist in the project's IP catalog: $list_check_ips ."
@@ -453,9 +437,7 @@ proc cr_bd_zz9000_ps { parentCell } {
   audio_clock\
   video_formatter\
   "
-   if { $rasterix } {
-     append list_check_mods "  zz9k_rasterix\n"
-   }
+
 
    set list_mods_missing ""
    common::send_msg_id "BD_TCL-006" "INFO" "Checking if the following modules exist in the project's sources: $list_check_mods ."
@@ -747,13 +729,9 @@ proc create_hier_cell_video { parentCell nameHier } {
      return 1
    }
   if { $rasterix } {
-    set block_name zz9k_rasterix
     set block_cell_name zz9k_rasterix_0
-    if { [catch {set zz9k_rasterix_0 [create_bd_cell -type module -reference $block_name $block_cell_name] } errmsg] } {
-      catch {common::send_msg_id "BD_TCL-105" "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
-      return 1
-    } elseif { $zz9k_rasterix_0 eq "" } {
-      catch {common::send_msg_id "BD_TCL-106" "ERROR" "Unable to referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+    if { [catch {set zz9k_rasterix_0 [create_bd_cell -type ip -vlnv zz9k.org:user:zz9k_rasterix:1.0 $block_cell_name] } errmsg] } {
+      catch {common::send_msg_id "BD_TCL-105" "ERROR" "Unable to add RasterIX IP <$block_cell_name>: $errmsg"}
       return 1
     }
   }
@@ -1404,8 +1382,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_intf_net -intf_net axi_interconnect_4_M00_AXI [get_bd_intf_pins axi_interconnect_4/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP3]
   connect_bd_intf_net -intf_net axi_register_slice_1_M_AXI [get_bd_intf_pins axi_register_slice_1/M_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_ACP]
   if { $rasterix } {
-    connect_bd_intf_net -intf_net RasterIX_control [get_bd_intf_pins ps7_0_axi_periph/M07_AXI] [get_bd_intf_pins zz9k_rasterix_0/S_AXI]
-    connect_bd_intf_net -intf_net RasterIX_memory [get_bd_intf_pins zz9k_rasterix_0/M_AXI] [get_bd_intf_pins axi_interconnect_2/S01_AXI]
+    connect_bd_intf_net -intf_net RasterIX_control [get_bd_intf_pins ps7_0_axi_periph/M07_AXI] [get_bd_intf_pins zz9k_rasterix_0/s_axi]
+    connect_bd_intf_net -intf_net RasterIX_memory [get_bd_intf_pins zz9k_rasterix_0/m_axi] [get_bd_intf_pins axi_interconnect_2/S01_AXI]
   }
   connect_bd_intf_net -intf_net i2s_receiver_0_m_axis_aud [get_bd_intf_pins audio_formatter_1/s_axis_s2mm] [get_bd_intf_pins i2s_receiver_0/m_axis_aud]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
@@ -1525,13 +1503,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces audio_formatter_0/m_axi_mm2s] [get_bd_addr_segs processing_system7_0/S_AXI_HP2/HP2_DDR_LOWOCM] SEG_processing_system7_0_HP2_DDR_LOWOCM
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces audio_formatter_1/m_axi_s2mm] [get_bd_addr_segs processing_system7_0/S_AXI_HP3/HP3_DDR_LOWOCM] SEG_processing_system7_0_HP3_DDR_LOWOCM
   if { $rasterix } {
-    create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces zz9k_rasterix_0/M_AXI] [get_bd_addr_segs processing_system7_0/S_AXI_HP1/HP1_DDR_LOWOCM] SEG_RasterIX_HP1_DDR_LOWOCM
-    set rasterix_control_seg [get_bd_addr_segs -quiet zz9k_rasterix_0/S_AXI/Reg]
-    if {$rasterix_control_seg ne ""} {
-      create_bd_addr_seg -range 0x00010000 -offset 0x83C60000 [get_bd_addr_spaces processing_system7_0/Data] $rasterix_control_seg SEG_RasterIX_control_Reg
-    } else {
-      common::send_msg_id "ZZ9K_RIX-001" "WARNING" "RasterIX module reference has no IP-XACT control address segment."
-    }
+    create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces zz9k_rasterix_0/m_axi] [get_bd_addr_segs processing_system7_0/S_AXI_HP1/HP1_DDR_LOWOCM] SEG_RasterIX_HP1_DDR_LOWOCM
+    create_bd_addr_seg -range 0x00010000 -offset 0x83C60000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs zz9k_rasterix_0/s_axi/reg0] SEG_RasterIX_control_Reg
   }
   create_bd_addr_seg -range 0x00010000 -offset 0x43C00000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs MNTZorro_v0_1_S00_AXI_0/S_AXI/reg0] SEG_MNTZorro_v0_1_S00_AXI_0_reg0
   create_bd_addr_seg -range 0x00010000 -offset 0x83C20000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs audio_formatter_0/s_axi_lite/reg0] SEG_audio_formatter_0_reg0
