@@ -20,6 +20,7 @@ static int test_prefs_parse_and_format(void)
       "VOLUME=75\n"
       "REPEAT=ONE\n"
       "SHUFFLE=YES\n"
+      "FULLSCREEN=yes\n"
       "PRELOAD=YES\n"
       "WINDOW=120,45\n"
       "DRAWER=DH0:Music/MP3\n";
@@ -31,7 +32,7 @@ static int test_prefs_parse_and_format(void)
 
   zzplay_prefs_defaults(&prefs);
   accepted = zzplay_prefs_parse(&prefs, prefs_text, strlen(prefs_text));
-  if (accepted != 10U) return 1;
+  if (accepted != 11U) return 1;
 
   if (prefs.mp3_output != ZZPLAY_AUDIO_MHI) return 2;
   if (prefs.video_audio != ZZPLAY_AUDIO_AX) return 3;
@@ -40,6 +41,7 @@ static int test_prefs_parse_and_format(void)
   if (prefs.volume != 75U) return 6;
   if (prefs.repeat != ZZPLAY_REPEAT_ONE) return 7;
   if (!prefs.shuffle) return 8;
+  if (!prefs.fullscreen) return 84;
   if (!prefs.preload) return 81;
   if (prefs.window_left != 120 || prefs.window_top != 45) return 9;
   if (strcmp(prefs.last_drawer, "DH0:Music/MP3") != 0) return 10;
@@ -54,6 +56,7 @@ static int test_prefs_parse_and_format(void)
   if (strstr(out_buf, "VOLUME=75\n") == NULL) return 16;
   if (strstr(out_buf, "REPEAT=ONE\n") == NULL) return 17;
   if (strstr(out_buf, "SHUFFLE=YES\n") == NULL) return 18;
+  if (strstr(out_buf, "FULLSCREEN=YES\n") == NULL) return 85;
   if (strstr(out_buf, "PRELOAD=YES\n") == NULL) return 82;
   if (strstr(out_buf, "WINDOW=120,45\n") == NULL) return 19;
   if (strstr(out_buf, "DRAWER=DH0:Music/MP3\n") == NULL) return 20;
@@ -62,7 +65,7 @@ static int test_prefs_parse_and_format(void)
   {
     ZZPlayPrefs roundtrip;
     zzplay_prefs_defaults(&roundtrip);
-    if (zzplay_prefs_parse(&roundtrip, out_buf, strlen(out_buf)) != 10U)
+    if (zzplay_prefs_parse(&roundtrip, out_buf, strlen(out_buf)) != 11U)
       return 21;
     if (roundtrip.mp3_output != ZZPLAY_AUDIO_MHI) return 22;
     if (roundtrip.video_audio != ZZPLAY_AUDIO_AX) return 23;
@@ -70,6 +73,7 @@ static int test_prefs_parse_and_format(void)
     if (roundtrip.volume != 75U) return 25;
     if (roundtrip.repeat != ZZPLAY_REPEAT_ONE) return 26;
     if (!roundtrip.preload) return 83;
+    if (!roundtrip.fullscreen) return 86;
   }
 
   return 0;
@@ -142,6 +146,7 @@ static int test_session_read_modify_write(void)
   session.volume = 85U;
   session.repeat = ZZPLAY_REPEAT_ALL;
   session.shuffle = 1;
+  session.fullscreen = 1;
   session.window_left = 200;
   session.window_top = 150;
   strcpy(session.last_drawer, "RAM:T");
@@ -174,6 +179,7 @@ static int test_session_read_modify_write(void)
   if (verified.volume != 85U) return 8;
   if (verified.repeat != ZZPLAY_REPEAT_ALL) return 9;
   if (!verified.shuffle) return 10;
+  if (!verified.fullscreen) return 13;
   if (verified.window_left != 200 || verified.window_top != 150) return 11;
   if (strcmp(verified.last_drawer, "RAM:T") != 0) return 12;
 
@@ -186,7 +192,8 @@ static int test_session_settle_drops_launch_overrides(void)
   ZZPlayPrefs started;
   ZZPlayPrefs session;
 
-  /* Saved: volume 70, repeat off. This launch: VOLUME=20 and LOOP. */
+  /* Saved: volume 70, repeat off, windowed. This launch: VOLUME=20, LOOP
+   * and FULLSCREEN. */
   zzplay_prefs_defaults(&stored);
   stored.volume = 70U;
   stored.repeat = ZZPLAY_REPEAT_OFF;
@@ -194,6 +201,7 @@ static int test_session_settle_drops_launch_overrides(void)
   started = stored;
   started.volume = 20U;
   started.repeat = ZZPLAY_REPEAT_ONE;
+  started.fullscreen = 1;
 
   /* Untouched overrides fall back to the saved values. */
   session = started;
@@ -201,6 +209,7 @@ static int test_session_settle_drops_launch_overrides(void)
   if (session.volume != 70U) return 1;
   if (session.repeat != ZZPLAY_REPEAT_OFF) return 2;
   if (!session.shuffle) return 3;
+  if (session.fullscreen) return 7;
 
   /* Values the user changed during the session are remembered. */
   session = started;
@@ -211,6 +220,13 @@ static int test_session_settle_drops_launch_overrides(void)
   if (session.volume != 45U) return 4;
   if (session.repeat != ZZPLAY_REPEAT_ALL) return 5;
   if (session.shuffle) return 6;
+
+  /* Fullscreen switched on by the user, not by the launch, is kept. */
+  started = stored;
+  session = started;
+  session.fullscreen = 1;
+  zzplay_prefs_settle_session(&session, &stored, &started);
+  if (!session.fullscreen) return 8;
 
   return 0;
 }
@@ -283,6 +299,11 @@ static int test_requested_backend_matrix(void)
   if (prefs.ahi_unit != 2U) return 6;
   if (strcmp(prefs.mhi_driver, "cli_driver.library") != 0) return 7;
   if (prefs.volume != 40U) return 8;
+  /* FULLSCREEN for this launch turns a saved windowed setting on. */
+  prefs.fullscreen = 0;
+  options.fullscreen = 1;
+  zzplay_prefs_apply_options(&prefs, &options);
+  if (!prefs.fullscreen) return 11;
 
   return 0;
 }

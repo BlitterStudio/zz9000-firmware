@@ -101,7 +101,7 @@ remove the parentheses in Workbench's Information window to enable one.
 | `--benchmark` | `BENCHMARK` | Disable pacing, enable `--fps`, and mute audio unless `--audio` explicitly selected a backend. |
 | `--loop` | `LOOP` | Repeat the current item forever. |
 | `--loop=N` | `LOOP=N` | Repeat the item `N` times after its first playback. `N` must be greater than zero. |
-| `--fullscreen` | `FULLSCREEN` | Start video fullscreen with preserved aspect ratio. |
+| `--fullscreen` | `FULLSCREEN` | Start video fullscreen with preserved aspect ratio. In the desktop player this applies to this launch only; the saved **Fullscreen video** setting is unchanged unless you change it during the session. |
 | `--player` | `PLAYER`, `PLAYER=YES`, `PLAYER=1`, `PLAYER=TRUE` | Keep the desktop player open after the playlist ends. |
 | `--player=no` | `PLAYER=NO`, `PLAYER=0`, `PLAYER=FALSE` | Play named files and exit. |
 | `--audio=auto` | `AUDIO=AUTO` | Select the available backend automatically. This is the default. |
@@ -175,8 +175,14 @@ them to the playlist.
 | S | Toggle shuffle. |
 | `+`, `-`, Cursor up, Cursor down | Change volume. |
 | Cursor right, Cursor left | Seek 10 seconds forward or back in MP3 playback. |
-| F | Toggle video fullscreen. |
+| F | Turn the **Fullscreen video** setting on or off. A playing video switches immediately. |
 | Ctrl-C | Quit from a shell launch. |
+
+**Fullscreen video** in the Control menu (Amiga-F) is a setting: while it is
+checked, every video in the playlist plays fullscreen, and the desktop player
+remembers it in the prefs file (`FULLSCREEN`) for the next launch. It can be
+changed while nothing is playing. A one-shot launch plays fullscreen only when
+`--fullscreen` or `FULLSCREEN` is given.
 
 Fullscreen uses a dedicated screen and preserves the video's aspect ratio,
 scaling up or down to fit the screen. When the Workbench display mode is
@@ -187,6 +193,11 @@ same display mode without changing output resolution or refresh rate. An 8-bit
 ZZPlay falls back to finding an available display mode. Press `F` to return to
 the previous window position and size. If no display mode can present the video,
 ZZPlay remains windowed.
+
+When one video follows another in fullscreen, ZZPlay keeps the screen open
+between them, so the playlist does not return to the Workbench. It returns
+when playback stops or the playlist ends, before an audio-only item, and when
+an item fails, so that the message or requester is visible.
 
 ## Diagnostics
 

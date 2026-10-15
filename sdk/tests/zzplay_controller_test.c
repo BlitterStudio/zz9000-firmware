@@ -282,15 +282,29 @@ static int test_item_lifecycle(void)
   if (strcmp(ctl.now.message, "Persistent message") != 0) return 2;
   if (zzplay_controller_loop_item(&ctl) != 1) return 3;
 
-  /* Fullscreen toggle */
+  /* Fullscreen: the playing video follows a change once */
   zzplay_controller_set_capabilities(&ctl, 1, 1, 1); /* has video */
   if (!zzplay_controller_apply(&ctl, ZZPLAY_CONTROL_TOGGLE_FULLSCREEN)) return 4;
-  if (!zzplay_controller_take_fullscreen_toggle(&ctl)) return 5;
-  if (zzplay_controller_take_fullscreen_toggle(&ctl) != 0) return 6;
+  if (!ctl.fullscreen) return 41;
+  if (!zzplay_controller_take_fullscreen_change(&ctl)) return 5;
+  if (zzplay_controller_take_fullscreen_change(&ctl) != 0) return 6;
+  /* Setting it to what it already is asks the video for nothing */
+  zzplay_controller_set_fullscreen(&ctl, 1);
+  if (zzplay_controller_take_fullscreen_change(&ctl) != 0) return 42;
 
   /* Item end resets item_active */
   zzplay_controller_item_end(&ctl);
   if (ctl.item_active != 0) return 7;
+
+  /* Idle, the toggle still changes the setting the next video opens
+   * with, and the next item starts with nothing to follow. */
+  ctl.dirty = 0U;
+  if (!zzplay_controller_apply(&ctl, ZZPLAY_CONTROL_TOGGLE_FULLSCREEN)) return 8;
+  if (ctl.fullscreen) return 9;
+  if ((ctl.dirty & ZZPLAY_DIRTY_STATE) == 0U) return 10;
+  zzplay_controller_item_begin(&ctl);
+  if (zzplay_controller_take_fullscreen_change(&ctl) != 0) return 11;
+  if (ctl.fullscreen) return 12;
 
   return 0;
 }
@@ -312,7 +326,7 @@ static int test_webp_item_capabilities(void)
 
   /* Fullscreen toggle works because has_video=1 */
   if (!zzplay_controller_apply(&ctl, ZZPLAY_CONTROL_TOGGLE_FULLSCREEN)) return 5;
-  if (!zzplay_controller_take_fullscreen_toggle(&ctl)) return 6;
+  if (!zzplay_controller_take_fullscreen_change(&ctl)) return 6;
 
   /* Position updates */
   zzplay_controller_set_position(&ctl, 1250U, 1);

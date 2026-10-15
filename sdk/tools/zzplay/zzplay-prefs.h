@@ -14,6 +14,7 @@
  *   VOLUME=100            0..100
  *   REPEAT=OFF            OFF | ONE | ALL
  *   SHUFFLE=NO            YES | NO
+ *   FULLSCREEN=NO         YES | NO: play videos on a dedicated screen
  *   PRELOAD=NO            YES | NO
  *   WINDOW=-1,-1          player window left,top; -1,-1 = default
  *   DRAWER=Work:Music     last drawer used in a file requester
@@ -55,6 +56,7 @@ typedef struct ZZPlayPrefs {
   uint32_t volume;                 /* 0..100 */
   ZZPlayRepeat repeat;
   int shuffle;
+  int fullscreen;
   int16_t window_left;             /* -1 = default placement */
   int16_t window_top;
   char last_drawer[ZZPLAY_PREFS_DRAWER_MAX];
@@ -77,8 +79,8 @@ size_t zzplay_prefs_format(const ZZPlayPrefs *prefs, char *out,
 int zzplay_prefs_load(ZZPlayPrefs *prefs, const char *path);
 int zzplay_prefs_save(const ZZPlayPrefs *prefs, const char *path);
 
-/* Copy only the session-state fields (volume, repeat, shuffle, window,
- * drawer) from `from` into `to`. */
+/* Copy only the session-state fields (volume, repeat, shuffle, fullscreen,
+ * window, drawer) from `from` into `to`. */
 void zzplay_prefs_copy_session(ZZPlayPrefs *to, const ZZPlayPrefs *from);
 
 /* Read-modify-write: load `path` (defaults when missing), replace its
@@ -87,10 +89,11 @@ void zzplay_prefs_copy_session(ZZPlayPrefs *to, const ZZPlayPrefs *from);
  * "Use". Returns 1 on success. */
 int zzplay_prefs_save_session(const ZZPlayPrefs *current, const char *path);
 
-/* Keep launch-only overrides out of a remembered session: a volume, repeat
- * or shuffle value in `session` still where this launch `started` it goes
- * back to the `stored` setting, so VOLUME=N or LOOP never become the saved
- * default; a value the user changed during the session is kept. */
+/* Keep launch-only overrides out of a remembered session: a volume, repeat,
+ * shuffle or fullscreen value in `session` still where this launch
+ * `started` it goes back to the `stored` setting, so VOLUME=N, LOOP or
+ * FULLSCREEN never become the saved default; a value the user changed
+ * during the session is kept. */
 void zzplay_prefs_settle_session(ZZPlayPrefs *session,
                                  const ZZPlayPrefs *stored,
                                  const ZZPlayPrefs *started);
@@ -99,8 +102,8 @@ void zzplay_prefs_settle_session(ZZPlayPrefs *session,
  * ZZPLAY_PREFS_DRIVER_MAX, no ':' or '/'. */
 int zzplay_prefs_valid_driver(const char *name);
 
-/* Lay this launch's ToolType/CLI overrides (AHIUNIT, MHIDRIVER, VOLUME)
- * over the loaded settings. */
+/* Lay this launch's ToolType/CLI overrides (AHIUNIT, MHIDRIVER, VOLUME,
+ * FULLSCREEN) over the loaded settings. */
 void zzplay_prefs_apply_options(ZZPlayPrefs *prefs,
                                 const ZZPlayOptions *options);
 
