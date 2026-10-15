@@ -1489,8 +1489,10 @@ proc create_hier_cell_video { parentCell nameHier } {
   connect_bd_net -net xlslice_1_Dout [get_bd_ports VGA_G] [get_bd_pins xlslice_1/Dout]
   connect_bd_net -net xlslice_2_Dout [get_bd_ports VGA_B] [get_bd_pins xlslice_2/Dout]
   if { $rasterix } {
-    connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins zz9k_rasterix_0/s_axi_aresetn] [get_bd_pins zz9k_rasterix_0/m_axi_aresetn] [get_bd_pins axi_interconnect_2/S01_ARESETN]
-    connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins zz9k_rasterix_0/s_axi_aclk] [get_bd_pins zz9k_rasterix_0/m_axi_aclk] [get_bd_pins axi_interconnect_2/S01_ACLK]
+    # ps7_0_axi_periph runs on FCLK_CLK1; its new M07 port and the renderer run
+    # on FCLK_CLK0, so the interconnect inserts the clock converter on M07.
+    connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins zz9k_rasterix_0/s_axi_aresetn] [get_bd_pins zz9k_rasterix_0/m_axi_aresetn] [get_bd_pins axi_interconnect_2/S01_ARESETN] [get_bd_pins ps7_0_axi_periph/M07_ARESETN]
+    connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins zz9k_rasterix_0/s_axi_aclk] [get_bd_pins zz9k_rasterix_0/m_axi_aclk] [get_bd_pins axi_interconnect_2/S01_ACLK] [get_bd_pins ps7_0_axi_periph/M07_ACLK]
   }
 
 
