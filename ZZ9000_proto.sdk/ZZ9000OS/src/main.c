@@ -759,6 +759,11 @@ int main() {
 	// RTG rect ops may write anywhere in framebuffer + legacy surface
 	// memory, but never past it into the SDK heaps and beyond
 	apply_aperture_framebuffer_limit();
+	// Host-supplied blit and sprite sources are board offsets, so they must
+	// stay inside the card memory the Zorro III board window maps
+	// (ARM = board offset + ADDR_ADJ; Zorro II maps a prefix of it).
+	set_src_window((void *)(uintptr_t)ADDR_ADJ,
+		(void *)(uintptr_t)(ADDR_ADJ + Z3_MAIN_BOARD_WINDOW_SIZE));
 
 	surface_allocator_init(LEGACY_SURFACE_HEAP_ADDRESS, LEGACY_SURFACE_HEAP_SIZE);
 

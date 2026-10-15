@@ -1519,8 +1519,14 @@ void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite)
 	uint32_t *colors = vs.sprite_colors;
 	uint16_t w = vs.sprite_width;
 	uint16_t h = vs.sprite_height;
+	/* sprite_buf is 32x48 and the decoder reads at most two 32-pixel
+	 * planes per row; a wider request would index past both. */
 	if (h > 48) h = 48;
+	if (w > 32) w = 32;
 	uint8_t line_pitch = (w / 8) * 2;
+
+	if (!gfx_src_span_ok(data, (uint32_t)h * line_pitch + 8))
+		return;
 
 	if (!double_sprite) {
 		for (uint8_t y_line = 0; y_line < h; y_line++) {
@@ -1605,6 +1611,9 @@ void update_hw_sprite_clut(uint8_t *data_, uint8_t *colors, uint16_t w, uint16_t
 {
 	uint8_t *data = data_;
 	uint8_t color[4];
+
+	if (!gfx_src_span_ok(data, (uint32_t)(h < 48 ? h : 48) * w))
+		return;
 
 	for (int y = 0; y < h && y < 48; y++) {
 		for (int x = 0; x < w && x < 32; x++) {
