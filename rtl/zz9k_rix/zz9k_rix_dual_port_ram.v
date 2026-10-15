@@ -39,7 +39,6 @@ module DualPortRam #(
                 .READ_RESET_VALUE_B("0"),
                 .RST_MODE_A("SYNC"),
                 .RST_MODE_B("SYNC"),
-                .SIM_ASSERT_CHK(0),
                 .USE_EMBEDDED_CONSTRAINT(0),
                 .USE_MEM_INIT(0),
                 .WAKEUP_TIME("disable_sleep"),
