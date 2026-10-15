@@ -4988,6 +4988,12 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
     run.pump_user = app;
     app->start_seek_ms = 0U;
     outcome = engine(&run);
+    /* Some failures (an animation the card cannot take, say) end the item
+     * before it opens a window or reports anything: the screen the
+     * previous video left must not go on covering the player. */
+    if (outcome == ZZPLAY_ENGINE_FAILED) {
+      zzplay_app_close_screen();
+    }
   }
   /* A pending request outranks whatever the engine reported; consume it
    * before item_end clears the per-item state. */
