@@ -267,6 +267,11 @@ const char *zz_fastram_outcome_name(enum zz_fastram_outcome o);
  * (0 unless ZZ_CONFIG_FILE_OK). */
 uint16_t zz_config_read_raw(void *buffer, uint32_t max_len, uint32_t *out_len);
 
+/* True when one complete config line names an audio key. This follows
+ * zz_config_parse()'s leading-space, comment, `=` and case-insensitive
+ * key rules; the line must also contain a non-empty value. */
+int zz_config_line_is_audio_key(const char *line, unsigned len);
+
 /* Parse `len` bytes of config text into the global config. Pure —
  * exercised directly by the host unit tests. Returns the number of
  * key lines accepted. */
@@ -297,6 +302,33 @@ int zz_config_fastram_enabled(void);
 int zz_config_emit_present_keys(char *buf, unsigned size, int off);
 
 
+/* ---- resumable reader steps (the audio-save live-file splice) ---- */
+
+/* Each operation makes AT MOST ONE FatFs call. READ advances by one
+ * <=512-byte chunk and returns ZZ_CONFIG_FILE_IDLE until the file is
+ * staged. The caller treats a filled staging buffer as truncated input. */
+enum zz_config_read_op {
+	ZZ_CFG_READ_OPEN_CFG = 0,
+	ZZ_CFG_READ_OPEN_BAK,
+	ZZ_CFG_READ,
+	ZZ_CFG_READ_CLOSE
+};
+
+/* Stage a read into caller-owned storage. The caller must drive one of
+ * the open operations, then READ and CLOSE. Returns -1 for invalid or
+ * concurrent staging. */
+int zz_config_read_begin(void *buffer, unsigned max_len);
+
+/* Execute one reader operation. Returns ZZ_CONFIG_FILE_OK after a
+ * completed operation, ZZ_CONFIG_FILE_IDLE while READ needs another
+ * chunk, ZZ_CONFIG_FILE_NO_FILE when an open found no file, or
+ * ZZ_CONFIG_FILE_IO_ERROR. *out_len is set when READ completes. */
+uint16_t zz_config_read_op(enum zz_config_read_op op, unsigned *out_len);
+
+/* Release reader state. Closes an active handle for reset/error cleanup;
+ * normal callers first drive ZZ_CFG_READ_CLOSE. */
+void zz_config_read_end(void);
+
 /* ---- resumable writer steps (the non-blocking save machine) ---- */
 
 /* The individual operations of the save above. Each zz_config_save_op()
@@ -321,11 +353,13 @@ enum zz_config_save_op {
  * sequence is already staged or the length is out of range. */
 int zz_config_save_begin(const char *text, unsigned len);
 
-/* Perform one operation of a begun sequence. Returns 1 when the
- * operation completed (for ZZ_CFG_SAVE_WRITE: the whole text is
- * written), 0 when WRITE has more chunks queued, and -1 on a FatFs
- * failure (same diagnostics as zz_config_save_file; the original is
- * never touched, the partial temp stays for the reset hook). */
+/* Perform one operation of a begun sequence. RECOVER_BAK is also valid
+ * before staging, so an audio save can repair an interrupted rename before
+ * reading the live file. Returns 1 when the operation completed (for
+ * ZZ_CFG_SAVE_WRITE: the whole text is written), 0 when WRITE has more
+ * chunks queued, and -1 on a FatFs failure (same diagnostics as
+ * zz_config_save_file; the original is never touched, the partial temp
+ * stays for the reset hook). */
 int zz_config_save_op(enum zz_config_save_op op);
 
 /* End a resumable sequence, settled or abandoned. Closes an open temp

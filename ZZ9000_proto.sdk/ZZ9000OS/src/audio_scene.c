@@ -977,15 +977,15 @@ static void commit_step(void)
  * that never signals completion returns an IO error instead of
  * spinning core 0 forever (the hardware-reproduced system freeze).
  *
- * Validation and serialization run at start when the DSP commit
- * machine is idle. If a commit is active, SAVE_WAIT_COMMIT defers
- * that snapshot until the commit settles instead of draining I2C in
- * the mailbox request. The writer sequence is RECOVER_BAK ->
- * UNLINK_TEMP -> OPEN -> WRITE (chunked, ~one sector per step) ->
- * SYNC -> CLOSE -> UNLINK_BAK -> RENAME_TO_BAK ->
- * RENAME_TO_LIVE -> DONE, with RESTORE_BAK as the final-rename
- * failure path. The original is never touched until the committing
- * rename; a partial temp stays for the reset hook. */
+ * Validation and the audio snapshot run when the DSP commit machine is
+ * idle. If a commit is active, SAVE_WAIT_COMMIT defers that snapshot
+ * until it settles instead of draining I2C in the mailbox request. The
+ * save sequence is RECOVER_BAK -> READ -> SPLICE -> UNLINK_TEMP -> OPEN
+ * -> WRITE (chunked, ~one sector per step) -> SYNC -> CLOSE ->
+ * UNLINK_BAK -> RENAME_TO_BAK -> RENAME_TO_LIVE -> DONE, with
+ * RESTORE_BAK as the final-rename failure path. The original is never
+ * touched until the committing rename; a partial temp stays for the
+ * reset hook. */
 
 /* Whole-save logic budget. A full 4 KiB save needs ~15 one-call steps
  * (8 chunked writes); this catches a malformed state transition. The
@@ -996,6 +996,11 @@ enum scene_save_phase {
 	SAVE_IDLE = 0,
 	SAVE_WAIT_COMMIT,
 	SAVE_RECOVER_BAK,
+	SAVE_READ_OPEN_CFG,
+	SAVE_READ_OPEN_BAK,
+	SAVE_READ,
+	SAVE_READ_CLOSE,
+	SAVE_SPLICE,
 	SAVE_UNLINK_TEMP,
 	SAVE_OPEN,
 	SAVE_WRITE,
@@ -1010,23 +1015,87 @@ enum scene_save_phase {
 static struct {
 	enum scene_save_phase phase;
 	unsigned steps;
+	unsigned audio_len;
+	unsigned live_len;
 	int failed;  /* an IO step failed: close, then settle IO_ERROR */
 	int status;  /* last settled outcome (SAVE_OK after boot) */
 } save;
 
+/* save_buf snapshots queued audio. save_live_buf is the one extra 8 KiB
+ * workspace: it receives the live file and is overwritten in place with
+ * the spliced result after obsolete audio lines are removed. */
 static char save_buf[ZZ_CONFIG_MAX_SIZE];
+static char save_live_buf[ZZ_CONFIG_MAX_SIZE];
 static int save_prepare(void);
+
+/* Pure in-place splice: retain non-audio lines byte-for-byte, then append
+ * the already-captured audio block. */
+static int save_splice_live_config(char *text, unsigned len, unsigned size,
+		const char *audio, unsigned audio_len)
+{
+	unsigned in = 0, out = 0;
+
+	while (in < len) {
+		unsigned line = in;
+		unsigned line_len;
+
+		while (in < len && text[in] != '\n') in++;
+		if (in < len) in++;
+		line_len = in - line;
+		if (!zz_config_line_is_audio_key(text + line,
+				line_len && text[in - 1] == '\n' ? line_len - 1 :
+				line_len)) {
+			if (line_len > size - out) return -1;
+			memmove(text + out, text + line, line_len);
+			out += line_len;
+		}
+	}
+	if (out != 0 && text[out - 1] != '\n') {
+		if (out == size) return -1;
+		text[out++] = '\n';
+	}
+	if (audio_len > size - out) return -1;
+	memcpy(text + out, audio, audio_len);
+	return (int)(out + audio_len);
+}
+
+static int save_begin_fallback(void)
+{
+	int n;
+
+	n = snprintf(save_live_buf, sizeof(save_live_buf),
+		"# " ZZ_CONFIG_FILENAME " written by the firmware audio "
+		"Save; comments are not preserved\n");
+	if (n < 0 || (unsigned)n >= sizeof(save_live_buf)) return -1;
+	n = zz_config_emit_present_keys(save_live_buf, sizeof(save_live_buf), n);
+	if (n < 0 || save.audio_len >= sizeof(save_live_buf) - (unsigned)n)
+		return -1;
+	memcpy(save_live_buf + n, save_buf, save.audio_len);
+	n += (int)save.audio_len;
+	return zz_config_save_begin(save_live_buf, (unsigned)n);
+}
+
+static int save_begin_splice(void)
+{
+	int n = save_splice_live_config(save_live_buf, save.live_len,
+		sizeof(save_live_buf) - 1, save_buf, save.audio_len);
+
+	if (n < 0) return -1;
+	return zz_config_save_begin(save_live_buf, (unsigned)n);
+}
 
 static void save_settle(int status)
 {
 	save.phase = SAVE_IDLE;
 	save.status = status;
+	zz_config_read_end();
 	zz_config_save_end();
 }
 
 static void save_step(void)
 {
 	int rc;
+	uint16_t read_status;
 
 	/* Waiting for the DSP is not writer progress and has no finite
 	 * budget: live edits may legally coalesce more commit work. */
@@ -1038,16 +1107,73 @@ static void save_step(void)
 			save_settle(rc);
 		return;
 	}
-	if (++save.steps > SAVE_STEP_BUDGET) {
+	if (++save.steps > SAVE_STEP_BUDGET &&
+			save.phase != SAVE_READ_CLOSE) {
 		printf("[scene] save stalled: aborting after %u steps "
 			"(temp left for the reset hook)\n", save.steps);
-		save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		if (save.phase == SAVE_READ) {
+			save.failed = 1;
+			save.phase = SAVE_READ_CLOSE;
+		} else {
+			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		}
 		return;
 	}
 	switch (save.phase) {
 	case SAVE_RECOVER_BAK:
 		rc = zz_config_save_op(ZZ_CFG_SAVE_RECOVER_BAK);
-		if (rc < 0)
+		if (rc < 0 || zz_config_read_begin(save_live_buf,
+				sizeof(save_live_buf)) != 0)
+			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		else
+			save.phase = SAVE_READ_OPEN_CFG;
+		break;
+	case SAVE_READ_OPEN_CFG:
+		read_status = zz_config_read_op(ZZ_CFG_READ_OPEN_CFG, NULL);
+		if (read_status == ZZ_CONFIG_FILE_OK)
+			save.phase = SAVE_READ;
+		else if (read_status == ZZ_CONFIG_FILE_NO_FILE)
+			save.phase = SAVE_READ_OPEN_BAK;
+		else
+			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		break;
+	case SAVE_READ_OPEN_BAK:
+		read_status = zz_config_read_op(ZZ_CFG_READ_OPEN_BAK, NULL);
+		if (read_status == ZZ_CONFIG_FILE_OK) {
+			save.phase = SAVE_READ;
+		} else if (read_status == ZZ_CONFIG_FILE_NO_FILE) {
+			zz_config_read_end();
+			if (save_begin_fallback() != 0)
+				save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+			else
+				save.phase = SAVE_UNLINK_TEMP;
+		} else {
+			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		}
+		break;
+	case SAVE_READ:
+		read_status = zz_config_read_op(ZZ_CFG_READ, &save.live_len);
+		if (read_status == ZZ_CONFIG_FILE_IDLE) {
+			break;
+		} else if (read_status != ZZ_CONFIG_FILE_OK) {
+			save.failed = 1;
+			save.phase = SAVE_READ_CLOSE;
+		} else {
+			if (save.live_len >= sizeof(save_live_buf))
+				save.failed = 1;
+			save.phase = SAVE_READ_CLOSE;
+		}
+		break;
+	case SAVE_READ_CLOSE:
+		read_status = zz_config_read_op(ZZ_CFG_READ_CLOSE, NULL);
+		zz_config_read_end();
+		if (save.failed || read_status != ZZ_CONFIG_FILE_OK)
+			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
+		else
+			save.phase = SAVE_SPLICE;
+		break;
+	case SAVE_SPLICE:
+		if (save_begin_splice() != 0)
 			save_settle(AUDIO_SCENE_SAVE_IO_ERROR);
 		else
 			save.phase = SAVE_UNLINK_TEMP;
@@ -1958,26 +2084,15 @@ static int save_prepare(void)
 		}
 	}
 
-	/* Serialize the exact snapshot this queued save will persist.
-	 * Known non-audio keys come from parsed state; live audio keys are
-	 * regenerated so stale parsed values are never echoed. */
-	n = snprintf(save_buf, sizeof(save_buf),
-		"# " ZZ_CONFIG_FILENAME " written by the firmware audio "
-		"Save; comments are not preserved\n");
-	if (n < 0 || (unsigned)n >= sizeof(save_buf)) {
-		save.status = AUDIO_SCENE_SAVE_IO_ERROR;
-		return AUDIO_SCENE_SAVE_IO_ERROR;
-	}
-	n = zz_config_emit_present_keys(save_buf, sizeof(save_buf), n);
+	/* Capture only the audio block now. The save machine reads the live
+	 * CFG after recovering an interrupted rename, then splices this
+	 * immutable snapshot into that text. */
+	n = audio_scene_emit_keys(save_buf, sizeof(save_buf), 0);
 	if (n < 0) {
 		save.status = AUDIO_SCENE_SAVE_IO_ERROR;
 		return AUDIO_SCENE_SAVE_IO_ERROR;
 	}
-	n = audio_scene_emit_keys(save_buf, sizeof(save_buf), n);
-	if (n < 0 || zz_config_save_begin(save_buf, (unsigned)n) != 0) {
-		save.status = AUDIO_SCENE_SAVE_IO_ERROR;
-		return AUDIO_SCENE_SAVE_IO_ERROR;
-	}
+	save.audio_len = (unsigned)n;
 	save.steps = 0;
 	save.phase = SAVE_RECOVER_BAK;
 	return AUDIO_SCENE_SAVE_QUEUED;
@@ -1993,6 +2108,8 @@ int audio_scene_save_start(uint8_t index)
 		return AUDIO_SCENE_SAVE_BUSY;
 
 	save.steps = 0;
+	save.audio_len = 0;
+	save.live_len = 0;
 	save.failed = 0;
 	if (commit_in_progress) {
 		save.phase = SAVE_WAIT_COMMIT;

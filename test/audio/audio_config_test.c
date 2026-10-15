@@ -2,9 +2,9 @@
  * Host tests for the ZZ9000.CFG audio keys, boot wiring and the
  * persistence writer (plan U5): the audio control-plane key grammar
  * (KTD4) parses into scene state, corrupt or absent keys degrade to
- * the built-in defaults, the save regenerates the file from parsed
- * state plus live scene state through the temp-then-replace discipline
- * (KTD5), an injected mid-write failure leaves the original intact,
+ * the built-in defaults, the save splices its queued audio snapshot into
+ * the live file through the temp-then-replace discipline (KTD5), an
+ * injected mid-write failure leaves the original intact,
  * a scene above the enforced boundary is rejected before any I/O, and
  * the 4 KiB parse-budget truncation is observable through the query
  * key.
@@ -176,6 +176,18 @@ static void check_scene(int index, const struct audio_scene_def *want,
 		fmt("%s name", name),
 		fmt("got='%s' want='%s'", got ? got->name : "?",
 			want->name));
+}
+
+static unsigned count_substring(const char *text, const char *needle)
+{
+	unsigned count = 0;
+	size_t needle_len = strlen(needle);
+
+	while ((text = strstr(text, needle)) != NULL) {
+		count++;
+		text += needle_len;
+	}
+	return count;
 }
 
 /* One complete audio block: every one of the 132 audio keys (68
@@ -482,6 +494,139 @@ static void test_save_roundtrip(void)
 	(void)present;
 }
 
+/* ---- live CFG splice: preserve non-audio text, replace audio keys ---- */
+
+static void test_save_splices_live_config(void)
+{
+	static const char live[] =
+		"# hand-written comment\r\n"
+		"unknown_key = keep\r\n"
+		"\r\n"
+		"  VIDEOCAP_SAMPLE = even   # keep this spelling\r\n"
+		"audio_active = 1\r\n"
+		"Audio_Scene0_LPF = 12000\r\n"
+		"audio_activex = 1\r\n"
+		"# audio_active = 1\r\n"
+		"last_unknown = no newline";
+	static const char kept_prefix[] =
+		"# hand-written comment\r\n"
+		"unknown_key = keep\r\n"
+		"\r\n"
+		"  VIDEOCAP_SAMPLE = even   # keep this spelling\r\n"
+		"audio_activex = 1\r\n"
+		"# audio_active = 1\r\n"
+		"last_unknown = no newline\n";
+	struct audio_scene_def queued, later;
+	const char *saved;
+	int guard = 0;
+
+	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", live);
+	parse_str("videocap_sample = odd\nscanline_mode = 1\n");
+	audio_scene_init();
+	scene_of(&queued, 12345, 50, 50, 50, 50);
+	scene_of(&later, 8000, 50, 50, 50, 50);
+	check(audio_scene_write(0, &queued) == 0, "queued scene writes", NULL);
+	while (audio_scene_poll() && ++guard < 2000)
+		;
+	check(guard < 2000, "queued scene commit settles", NULL);
+
+	check(audio_scene_save_start(0) == AUDIO_SCENE_SAVE_QUEUED,
+		"live splice save queues", NULL);
+	check(audio_scene_write(0, &later) == 0,
+		"later scene edit queues after save snapshot", NULL);
+	guard = 0;
+	while (audio_scene_poll() && ++guard < 4000)
+		;
+	check(guard < 4000 && audio_scene_save_status() == AUDIO_SCENE_SAVE_OK,
+		"live splice save settles", NULL);
+
+	saved = mock_fs_file("0:/ZZ9000.CFG");
+	check(saved != NULL &&
+		memcmp(saved, kept_prefix, strlen(kept_prefix)) == 0,
+		"comments, blanks, unknown keys and CRLF survive verbatim",
+		saved ? saved : "(none)");
+	check(saved != NULL && strstr(saved, "videocap_sample = odd") == NULL,
+		"cold-boot non-audio value is not restored", NULL);
+	check(saved != NULL && strstr(saved, "Audio_Scene0_LPF = 12000") == NULL,
+		"old mixed-case audio key is removed", NULL);
+	check(saved != NULL &&
+		count_substring(saved, "\naudio_active = ") == 1 &&
+		count_substring(saved, "\naudio_scene0_lpf = ") == 1,
+		"audio keys are replaced once", NULL);
+	check(saved != NULL &&
+		strstr(saved, "audio_scene0_lpf = 12345\n") != NULL &&
+		strstr(saved, "audio_scene0_lpf = 8000\n") == NULL,
+		"save keeps its queued audio snapshot", NULL);
+	check(saved != NULL && strstr(saved, "audio_activex = 1\r\n") != NULL &&
+		strstr(saved, "# audio_active = 1\r\n") != NULL,
+		"audio-like comments and prefixes stay", NULL);
+}
+
+static void test_save_live_file_limit(void)
+{
+	static char live[ZZ_CONFIG_MAX_SIZE + 1];
+	unsigned off = 0;
+	int len;
+
+	for (int i = 0; i < 463; i++) {
+		memcpy(live + off, "audio_active = 0\n",
+			sizeof("audio_active = 0\n") - 1);
+		off += sizeof("audio_active = 0\n") - 1;
+	}
+	for (int i = 0; i < 16; i++) {
+		memcpy(live + off, "audio_baseline = 0\n",
+			sizeof("audio_baseline = 0\n") - 1);
+		off += sizeof("audio_baseline = 0\n") - 1;
+	}
+	memcpy(live + off, "audio_active = 0",
+		sizeof("audio_active = 0") - 1);
+	off += sizeof("audio_active = 0") - 1;
+	check(off == ZZ_CONFIG_MAX_SIZE - 1,
+		"8191-byte audio-only fixture has the boundary length", NULL);
+	live[off] = 0;
+
+	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", live);
+	parse_str("videocap_sample = odd\n");
+	audio_scene_init();
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK,
+		"8191-byte live CFG splices", NULL);
+
+	live[off++] = '\n';
+	live[off] = 0;
+	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", live);
+	parse_str("videocap_sample = odd\n");
+	audio_scene_init();
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_IO_ERROR,
+		"8192-byte live CFG reports IO error", NULL);
+	len = mock_fs_file_len("0:/ZZ9000.CFG");
+	check(len == ZZ_CONFIG_MAX_SIZE &&
+		memcmp(mock_fs_file("0:/ZZ9000.CFG"), live, sizeof(live)) == 0,
+		"8192-byte live CFG stays untouched", NULL);
+}
+
+static void test_save_no_file_uses_legacy_fallback(void)
+{
+	const char *saved;
+
+	mock_fs_reset();
+	parse_str("videocap_sample = even\n");
+	audio_scene_init();
+	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK,
+		"no-file save succeeds through fallback", NULL);
+	saved = mock_fs_file("0:/ZZ9000.CFG");
+	check(saved != NULL &&
+		strncmp(saved, "# ZZ9000.CFG written by the firmware audio "
+			"Save; comments are not preserved\n",
+			strlen("# ZZ9000.CFG written by the firmware audio "
+				"Save; comments are not preserved\n")) == 0 &&
+		strstr(saved, "videocap_sample = even\n") != NULL &&
+		strstr(saved, "audio_active = 0\n") != NULL,
+		"no-file output keeps the previous serializer form", NULL);
+}
+
 /* Every videocap_profile name must regenerate canonically. */
 static void test_save_regenerates_every_profile_name(void)
 {
@@ -664,17 +809,17 @@ static void test_save_nonblocking_machine(void)
 	check(audio_scene_save_start(200) == -1,
 		"invalid index still rejected while running", NULL);
 
-	/* At most one FatFs call per poll: recover is a no-op without an
-	 * orphan backup, followed by stale-temp unlink and create-open;
-	 * the fourth poll writes exactly one sector-sized chunk. */
-	(void)audio_scene_poll();
-	(void)audio_scene_poll();
-	(void)audio_scene_poll();
-	check(mock_fs_file("0:/ZZ9000.CFG") != NULL &&
-		strcmp(mock_fs_file("0:/ZZ9000.CFG"), "int2 = on\n") == 0,
-		"pre-write steps leave the original untouched", NULL);
+	/* The live file is opened and read before the atomic writer starts.
+	 * Every poll still advances no more than one FatFs call; wait for
+	 * the first sector write, then prove it was exactly one call. */
 	writes_before = mock_write_calls();
-	(void)audio_scene_poll();
+	guard = 0;
+	while (mock_write_calls() == writes_before && audio_scene_poll() &&
+			++guard < 100)
+		;
+	check(guard < 100 && mock_fs_file("0:/ZZ9000.CFG") != NULL &&
+		strcmp(mock_fs_file("0:/ZZ9000.CFG"), "int2 = on\n") == 0,
+		"live read leaves the original untouched before writing", NULL);
 	check(mock_write_calls() - writes_before == 1,
 		"one poll performs one write call",
 		fmt("writes=%d", mock_write_calls() - writes_before));
@@ -728,17 +873,16 @@ static void test_save_nonblocking_machine(void)
 		"recovered save persists the audio block", NULL);
 
 	/* A warm reset may land between poll steps. The storage reset hook
-	 * must close/abandon the staged writer before dropping the temp;
-	 * the scene machine then settles instead of leaving every future
-	 * save BUSY. */
+	 * also closes the new live-file reader before the scene machine
+	 * settles, so a future save is not refused BUSY. */
 	mock_fs_reset();
 	mock_fs_set_file("0:/ZZ9000.CFG", "int2 = on\n");
 	parse_str("int2 = on\n");
 	audio_scene_init();
 	check(audio_scene_save_start(0) == AUDIO_SCENE_SAVE_QUEUED,
 		"reset-interrupted save queues", NULL);
-	(void)audio_scene_poll(); /* unlink stale temp */
-	(void)audio_scene_poll(); /* open temp */
+	(void)audio_scene_poll(); /* recovery */
+	(void)audio_scene_poll(); /* open live CFG */
 	zz_config_save_reset();
 	guard = 0;
 	while (audio_scene_poll() && ++guard < 10)
@@ -936,6 +1080,16 @@ static void test_truncation_query_key(void)
 			present));
 
 	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", "videocap_sample = even\n");
+	check(zz_config_load() == 0, "small file loads", NULL);
+	check(zz_config_query(ZZ_CONFIG_KEY_AUDIO_TRUNCATED, &present) == 0 &&
+		present == 1,
+		"small file reports no truncation",
+		fmt("v=%u present=%u",
+			zz_config_query(ZZ_CONFIG_KEY_AUDIO_TRUNCATED, NULL),
+			present));
+
+	mock_fs_reset();
 	zz_config_reset();
 	zz_config_load();
 	present = 1;
@@ -978,6 +1132,9 @@ int main(void)
 	test_parse_all_audio_keys();
 	test_absent_and_corrupt_degrade();
 	test_save_roundtrip();
+	test_save_splices_live_config();
+	test_save_live_file_limit();
+	test_save_no_file_uses_legacy_fallback();
 	test_save_regenerates_every_profile_name();
 	test_save_budget();
 	test_save_midwrite_failure();
