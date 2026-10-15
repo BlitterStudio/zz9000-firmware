@@ -119,30 +119,29 @@ The VDMA address, pitch, HSIZE and VSIZE are AXI-Lite registers, written by
 
 ### Frame handoff
 
-The handoff runs in this order. Each step fixed a bug seen on hardware:
+The handoff runs in this order:
 
 1. At vblank, the ARM does the full L1+L2 cache flush first.
 2. It resets the overlay VDMA, which stops the stream, and reprograms it,
    writing `START_ADDR` first and `VSIZE` last. A running AXI VDMA only uses
    a new start address after `VSIZE` is written (AMD PG020).
-3. It advances the frame generation. The line fetcher holds the restarted
-   stream until the display side has acknowledged the generation and
-   re-armed the first row.
+3. It advances the frame generation. If the fetcher is still reading a late
+   row of the old frame when the restarted stream presents its first beat,
+   it holds that start-of-frame beat instead of taking it as part of the old
+   frame. The new generation's search for the frame start then takes the
+   same beat.
 4. The line-buffer side acknowledges the new generation and the formatter
    restarts its fetch stepper at the first visible source row. The fetcher
-   stops requesting rows once the raster leaves the visible frame, so no
-   request is in flight across the handoff.
+   stops requesting rows once the raster leaves the visible frame.
 
-Committing the generation before restarting the VDMA was tried, so that a
-fetcher still reading a late row could not take the new frame's first row
-as part of the old frame. On an A4000 that order showed a few top rows and
-then black on every frame after a shrunk window went fullscreen, and
-putting this order back cured it. The cause is unknown; the bench does not
-reproduce it. With eight banks the fetcher finishes its last row long
-before vblank, so the late-row case does not arise in the bench either. If
-it did, the fetcher would wait for the next frame start: in park mode the
-VDMA repeats the frame back to back, so that costs about one stream frame
-(a millisecond or two at 720x576), not a lost display frame.
+Committing the generation before restarting the VDMA was tried as the
+answer to the late row. On an A4000 that order showed a few top rows and
+then black on every frame after a shrunk window went fullscreen, and putting
+this order back cured it. The cause is unknown; the bench does not
+reproduce it. Without the held frame start, this order lost every frame in
+simulation of a 720p window on an overlay stream slowed to about a third of
+its rate: the late row took the frame start, and the new generation waited
+a whole stream frame for the next one.
 
 The VDMA is connected directly to the line fetcher with no FIFO in between, so
 no data from the old frame can survive the reset.
