@@ -252,6 +252,9 @@ if { $rasterix } {
       lappend files $rasterix_file
     }
   }
+  foreach rasterix_header [glob -nocomplain [file normalize "$origin_dir/rtl/rasterix/RasterIX/*.vh"]] {
+    lappend files $rasterix_header
+  }
   set_property include_dirs [list [file normalize "$origin_dir/rtl/rasterix/RasterIX"]] $obj
 }
 set imported_files [import_files -fileset sources_1 $files]
