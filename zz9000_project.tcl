@@ -102,14 +102,14 @@ if { $::argc > 0 } {
   for {set i 0} {$i < $::argc} {incr i} {
     set option [string trim [lindex $::argv $i]]
     switch -regexp -- $option {
-      "--origin_dir"   { incr i; set origin_dir [lindex $::argv $i] }
-      "--project_name" { incr i; set _xil_proj_name_ [lindex $::argv $i] }
-      "--no-autoboot"  { set no_autoboot 1 }
-      "--capture-c28"  { set capture_c28 1 }
-      "--rasterix"     { set rasterix 1 }
-      "--rasterix-tmu-count" { incr i; set rasterix_tmu_count [lindex $::argv $i] }
-      "--rasterix-framebuffer-size-lg" { incr i; set rasterix_framebuffer_size_in_pixel_lg [lindex $::argv $i] }
-      "--help"         { print_help }
+      {^--origin_dir$}   { incr i; set origin_dir [lindex $::argv $i] }
+      {^--project_name$} { incr i; set _xil_proj_name_ [lindex $::argv $i] }
+      {^--no-autoboot$}  { set no_autoboot 1 }
+      {^--capture-c28$}  { set capture_c28 1 }
+      {^--rasterix-tmu-count$} { incr i; set rasterix_tmu_count [lindex $::argv $i] }
+      {^--rasterix-framebuffer-size-lg$} { incr i; set rasterix_framebuffer_size_in_pixel_lg [lindex $::argv $i] }
+      {^--rasterix$}     { set rasterix 1 }
+      {^--help$}         { print_help }
       default {
         if { [regexp {^-} $option] } {
           puts "ERROR: Unknown option '$option' specified, please type '$script_file -tclargs --help' for usage info.\n"
