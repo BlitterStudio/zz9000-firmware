@@ -49,3 +49,6 @@ masscopy*.sh
 wave
 notes/
 docs/plans
+# Python host-test bytecode
+__pycache__/
+*.pyc

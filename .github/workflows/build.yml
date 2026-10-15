@@ -139,10 +139,12 @@ jobs:
         run: make -C test/webm test
       - name: Palette shadow suite
         run: make -C test/palette test
-      - name: Ethernet multicast hash suite
+      - name: Ethernet multicast hash and RX ring suites
         run: make -C test/ethernet test
       - name: Console encoder suite
         run: make -C test/console test
+      - name: Ethernet async TX completion-order suite
+        run: make -C test/eth_tx_order test
       - name: SDK surface helper suite
         run: |
           cc -std=c99 -Wall -Wextra -Werror \
