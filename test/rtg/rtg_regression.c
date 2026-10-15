@@ -741,6 +741,15 @@ static void test_copy(void)
 	ref_copy_rect_masked_8(18, 11, 33, 15, 7, 3,
 		expected_fb, FB_PITCH_WORDS, 0x5a);
 	check_frame("copy_rect masked 8");
+
+	/* Same-row move 5 bytes right: the right-to-left path must not read
+	 * bytes it has already written. */
+	seed_frame(0x2005);
+	copy_rect(12, 20, 40, 6, 7, 20, MNTVA_COLOR_8BIT,
+		actual_fb, FB_PITCH_WORDS, 0x5a);
+	ref_copy_rect_masked_8(12, 20, 40, 6, 7, 20,
+		expected_fb, FB_PITCH_WORDS, 0x5a);
+	check_frame("copy_rect masked 8 same-row overlap");
 }
 
 static void test_lines(void)
@@ -1122,10 +1131,19 @@ static void test_acc_blit(void)
 		(uint8_t *)expected_fb + 10 * row_bytes + 8, row_bytes, row_bytes);
 	check_frame("acc_blit_rect reverse overlap");
 
+	/* Key bytes must actually occur in the source, across full 16-byte
+	 * steps and the tail, or a blit that ignores the key passes too. */
 	seed_frame(0xa003);
+	for (int yy = 0; yy < 7; yy++) {
+		for (int xx = 0; xx < 37; xx += 3) {
+			size_t at = (size_t)(2 + yy) * row_bytes + 1 + (size_t)xx;
+			((uint8_t *)actual_fb)[at] = 0x42;
+			((uint8_t *)expected_fb)[at] = 0x42;
+		}
+	}
 	acc_blit_rect((uintptr_t)((uint8_t *)actual_fb + 2 * row_bytes + 1),
-		(uintptr_t)actual_fb, 60, 40, 20, 7, row_bytes, row_bytes, 2, 0x42);
-	ref_blit_bytes_masked(60, 40, 20, 7,
+		(uintptr_t)actual_fb, 60, 40, 37, 7, row_bytes, row_bytes, 2, 0x42);
+	ref_blit_bytes_masked(60, 40, 37, 7,
 		(uint8_t *)expected_fb + 2 * row_bytes + 1, row_bytes, row_bytes, 0x42);
 	check_frame("acc_blit_rect masked");
 }
@@ -1909,6 +1927,100 @@ static void test_fb_limit_clamp(void)
 	set_fb_limit(0);
 }
 
+/* Ops whose host-supplied source would be read past the source window are
+ * dropped whole; an op whose last source byte is the window's last byte
+ * still draws. Each pair below sets the window end to the exact span and
+ * then one byte short. */
+static void test_src_window(void)
+{
+	enum {
+		T_W = 35,
+		T_H = 11,
+		T_PITCH = 8,
+		P_W = 41,
+		P_H = 13,
+		P_PITCH = 8,
+		P_PLANES = 5,
+	};
+	const size_t row_bytes = FB_PITCH_WORDS * sizeof(uint32_t);
+	uint8_t tmpl[T_H * T_PITCH];
+	uint8_t planar[P_PLANES * P_PITCH * P_H];
+	/* x_offset 3, 35 pixels: bytes 0..4 per row plus the one-byte
+	 * look-ahead, so the last row reaches byte 5. */
+	const size_t tmpl_span = (T_H - 1) * T_PITCH + 6;
+	/* Rows 4..19 of an 8-bit copy from x 3, 35 pixels wide. */
+	const size_t copy_end = 4 * row_bytes + 3 + 15 * row_bytes + 35;
+	/* Phase 1, 20 pixels: 11 macropixels of 4 bytes on each of 8 rows. */
+	const size_t yuv_span = 7 * 96 + 11 * 4;
+
+	rng_state = 0x8001;
+	for (size_t i = 0; i < sizeof(tmpl); i++)
+		tmpl[i] = (uint8_t)rng32();
+	make_planar(planar, P_PLANES, P_PITCH, P_H, 0x8002);
+	fill_yuv_src(0x8003);
+
+	for (int short_by = 0; short_by <= 1; short_by++) {
+		const char *suffix = short_by ? "dropped one byte short" : "drawn at exact span";
+		char name[96];
+
+		seed_frame(0x8010 + short_by);
+		set_src_window(tmpl, tmpl + tmpl_span - short_by);
+		set_fb_bytes(actual_fb, row_bytes);
+		template_fill_rect(MNTVA_COLOR_8BIT, 9, 5, T_W, T_H, JAM2, 0xff,
+			0xa5000000, 0x5a000000, 3, 0, tmpl, T_PITCH);
+		set_fb_words(actual_fb, FB_PITCH_WORDS);
+		if (!short_by)
+			ref_template_fill_rect(MNTVA_COLOR_8BIT, 9, 5, T_W, T_H, JAM2, 0xff,
+				0xa5000000, 0x5a000000, 3, tmpl, T_PITCH);
+		snprintf(name, sizeof(name), "template %s", suffix);
+		check_frame(name);
+
+		seed_frame(0x8020 + short_by);
+		set_src_window(actual_fb, (uint8_t *)actual_fb + copy_end - short_by);
+		copy_rect_nomask(40, 30, 35, 16, 3, 4, MNTVA_COLOR_8BIT,
+			actual_fb, FB_PITCH_WORDS, MINTERM_SRC);
+		if (!short_by)
+			ref_copy_rect_src(40, 30, 35, 16, 3, 4, MNTVA_COLOR_8BIT,
+				expected_fb, FB_PITCH_WORDS);
+		snprintf(name, sizeof(name), "copy_rect_nomask %s", suffix);
+		check_frame(name);
+
+		seed_frame(0x8030 + short_by);
+		set_src_window(planar, planar + sizeof(planar) - short_by);
+		p2c_rect(3, 0, 10, 7, P_W, P_H, MINTERM_SRC,
+			P_PLANES, 0xff, 0x1f, P_PITCH, planar);
+		if (!short_by)
+			ref_p2c_rect(3, 0, 10, 7, P_W, P_H, P_H, MINTERM_SRC,
+				P_PLANES, 0x1f, P_PITCH, planar);
+		snprintf(name, sizeof(name), "p2c_rect %s", suffix);
+		check_frame(name);
+
+		seed_frame(0x8040 + short_by);
+		set_src_window(yuv_src, yuv_src + yuv_span - short_by);
+		yuv422_to_rgb_rect(1, 4, 6, 20, 8, YUV422_VARIANT_CGX,
+			MNTVA_COLOR_32BIT, 96, yuv_src);
+		if (!short_by)
+			ref_yuv422_rect(1, 4, 6, 20, 8, YUV422_VARIANT_CGX,
+				MNTVA_COLOR_32BIT, 96, yuv_src);
+		snprintf(name, sizeof(name), "yuv422 %s", suffix);
+		check_frame(name);
+	}
+	set_src_window(NULL, NULL);
+
+	/* Both would divide by zero before reading anything. */
+	seed_frame(0x8050);
+	set_fb_bytes(actual_fb, row_bytes);
+	pattern_fill_rect(MNTVA_COLOR_8BIT, 5, 4, 22, 18, JAM2, 0xFF,
+		0xaa000000, 0x55000000, 3, 2, tmpl, 16, 0);
+	set_fb_words(actual_fb, FB_PITCH_WORDS);
+	check_frame("pattern with zero loop rows dropped");
+
+	seed_frame(0x8051);
+	p2c_rect(3, 0, 10, 7, P_W, P_H, MINTERM_SRC,
+		P_PLANES, 0xff, 0x1f, 0, planar);
+	check_frame("p2c_rect with zero pitch dropped");
+}
+
 static uint64_t monotime_ns(void)
 {
 	struct timespec ts;
@@ -2072,6 +2184,7 @@ static void run_tests(void)
 	test_yuv();
 	test_overlay_composite();
 	test_fb_limit_clamp();
+	test_src_window();
 }
 
 int main(int argc, char **argv)

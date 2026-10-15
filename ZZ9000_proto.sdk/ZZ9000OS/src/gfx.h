@@ -55,6 +55,11 @@ void set_fb_bytes(uint32_t* fb_, uint32_t pitch_bytes);
 // Upper bound for fb-relative accelerated writes (end of legal video/surface
 // memory). 0 disables vertical limit clamping; row-pitch bounds still apply.
 void set_fb_limit(void* limit);
+// Card memory host-supplied sources may be read from: templates, patterns,
+// planar and YUV data, copy sources and sprite bitmaps. An op whose source
+// span leaves [lo, hi) is dropped. hi == NULL disables the check.
+void set_src_window(const void* lo, const void* hi);
+int gfx_src_span_ok(const void* p, uint64_t len);
 
 void fill_rect(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t rect_rgb, uint32_t color_format, uint8_t mask);
 void fill_rect_solid(uint16_t rect_x1, uint16_t rect_y1, uint16_t w, uint16_t h, uint32_t rect_rgb, uint32_t color_format);

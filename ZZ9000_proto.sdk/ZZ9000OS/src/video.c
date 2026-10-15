@@ -1511,6 +1511,23 @@ uint16_t video_custom_status(void)
 	return custom_txn.status;
 }
 
+/* Bytes update_hw_sprite() reads from its source: the last row's offset
+ * plus the four (up to 16 pixels, or doubled lores) or eight bytes it
+ * reads per row. A doubled sprite reads half as many rows. */
+static uint32_t hw_sprite_src_span(uint16_t w, uint16_t h,
+	uint8_t line_pitch, int double_sprite, int hires_sprite)
+{
+	uint32_t rows = double_sprite ? h / 2U : h;
+
+	if (rows == 0)
+		return 0;
+	if (!double_sprite)
+		return (rows - 1U) * line_pitch + (w <= 16 ? 4U : 8U);
+	if (!hires_sprite)
+		return (rows - 1U) * line_pitch / 2U + 4U;
+	return (rows - 1U) * line_pitch + 8U;
+}
+
 void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite)
 {
 	uint8_t cur_bit = 0x80;
@@ -1519,8 +1536,15 @@ void update_hw_sprite(uint8_t *data, int double_sprite, int hires_sprite)
 	uint32_t *colors = vs.sprite_colors;
 	uint16_t w = vs.sprite_width;
 	uint16_t h = vs.sprite_height;
+	/* sprite_buf is 32x48 and the decoder reads at most two 32-pixel
+	 * planes per row; a wider request would index past both. */
 	if (h > 48) h = 48;
+	if (w > 32) w = 32;
 	uint8_t line_pitch = (w / 8) * 2;
+
+	if (!gfx_src_span_ok(data, hw_sprite_src_span(w, h, line_pitch,
+		double_sprite, hires_sprite)))
+		return;
 
 	if (!double_sprite) {
 		for (uint8_t y_line = 0; y_line < h; y_line++) {
@@ -1605,6 +1629,9 @@ void update_hw_sprite_clut(uint8_t *data_, uint8_t *colors, uint16_t w, uint16_t
 {
 	uint8_t *data = data_;
 	uint8_t color[4];
+
+	if (!gfx_src_span_ok(data, (uint32_t)(h < 48 ? h : 48) * w))
+		return;
 
 	for (int y = 0; y < h && y < 48; y++) {
 		for (int x = 0; x < w && x < 32; x++) {
