@@ -785,13 +785,17 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.S00_HAS_REGSLICE {3} \
  ] $axi_interconnect_2
   if { $rasterix } {
-    # HP1's capture writeback remains highest priority. RasterIX is bounded by
-    # the lower-priority S01 slot, isolating scanout on HP0 from renderer DDR.
+    # Capture stays at the highest-priority S00 slot. RasterIX texture and
+    # framebuffer traffic use S01; the native 64-bit command reader uses S02.
+    # Keeping the reader separate avoids an in-wrapper AXI arbiter and lets the
+    # interconnect preserve capture's existing priority.
     set_property -dict [ list \
-      CONFIG.NUM_SI {2} \
+      CONFIG.NUM_SI {3} \
       CONFIG.S00_ARB_PRIORITY {15} \
       CONFIG.S01_ARB_PRIORITY {0} \
+      CONFIG.S02_ARB_PRIORITY {0} \
       CONFIG.S01_HAS_REGSLICE {4} \
+      CONFIG.S02_HAS_REGSLICE {4} \
     ] $axi_interconnect_2
   }
 
@@ -1222,7 +1226,7 @@ proc create_hier_cell_video { parentCell nameHier } {
    CONFIG.PCW_SMC_PERIPHERAL_DIVISOR0 {1} \
    CONFIG.PCW_SPI_PERIPHERAL_DIVISOR0 {1} \
    CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {64} \
-   CONFIG.PCW_S_AXI_HP1_DATA_WIDTH {32} \
+   CONFIG.PCW_S_AXI_HP1_DATA_WIDTH {64} \
    CONFIG.PCW_S_AXI_HP2_DATA_WIDTH {32} \
    CONFIG.PCW_S_AXI_HP3_DATA_WIDTH {32} \
    CONFIG.PCW_TPIU_PERIPHERAL_DIVISOR0 {1} \
@@ -1384,6 +1388,7 @@ proc create_hier_cell_video { parentCell nameHier } {
   if { $rasterix } {
     connect_bd_intf_net -intf_net RasterIX_control [get_bd_intf_pins ps7_0_axi_periph/M07_AXI] [get_bd_intf_pins zz9k_rasterix_0/s_axi]
     connect_bd_intf_net -intf_net RasterIX_memory [get_bd_intf_pins zz9k_rasterix_0/m_axi] [get_bd_intf_pins axi_interconnect_2/S01_AXI]
+    connect_bd_intf_net -intf_net RasterIX_command_memory [get_bd_intf_pins zz9k_rasterix_0/m_cmd_axi] [get_bd_intf_pins axi_interconnect_2/S02_AXI]
   }
   connect_bd_intf_net -intf_net i2s_receiver_0_m_axis_aud [get_bd_intf_pins audio_formatter_1/s_axis_s2mm] [get_bd_intf_pins i2s_receiver_0/m_axis_aud]
   connect_bd_intf_net -intf_net processing_system7_0_DDR [get_bd_intf_ports DDR] [get_bd_intf_pins processing_system7_0/DDR]
@@ -1491,8 +1496,8 @@ proc create_hier_cell_video { parentCell nameHier } {
   if { $rasterix } {
     # ps7_0_axi_periph runs on FCLK_CLK1; its new M07 port and the renderer run
     # on FCLK_CLK0, so the interconnect inserts the clock converter on M07.
-    connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins zz9k_rasterix_0/s_axi_aresetn] [get_bd_pins zz9k_rasterix_0/m_axi_aresetn] [get_bd_pins axi_interconnect_2/S01_ARESETN] [get_bd_pins ps7_0_axi_periph/M07_ARESETN]
-    connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins zz9k_rasterix_0/s_axi_aclk] [get_bd_pins zz9k_rasterix_0/m_axi_aclk] [get_bd_pins axi_interconnect_2/S01_ACLK] [get_bd_pins ps7_0_axi_periph/M07_ACLK]
+    connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins zz9k_rasterix_0/s_axi_aresetn] [get_bd_pins zz9k_rasterix_0/m_axi_aresetn] [get_bd_pins axi_interconnect_2/S01_ARESETN] [get_bd_pins axi_interconnect_2/S02_ARESETN] [get_bd_pins ps7_0_axi_periph/M07_ARESETN]
+    connect_bd_net -net processing_system7_0_FCLK_CLK0 [get_bd_pins zz9k_rasterix_0/s_axi_aclk] [get_bd_pins zz9k_rasterix_0/m_axi_aclk] [get_bd_pins axi_interconnect_2/S01_ACLK] [get_bd_pins axi_interconnect_2/S02_ACLK] [get_bd_pins ps7_0_axi_periph/M07_ACLK]
   }
 
 
@@ -1506,6 +1511,7 @@ proc create_hier_cell_video { parentCell nameHier } {
   create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces audio_formatter_1/m_axi_s2mm] [get_bd_addr_segs processing_system7_0/S_AXI_HP3/HP3_DDR_LOWOCM] SEG_processing_system7_0_HP3_DDR_LOWOCM
   if { $rasterix } {
     create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces zz9k_rasterix_0/m_axi] [get_bd_addr_segs processing_system7_0/S_AXI_HP1/HP1_DDR_LOWOCM] SEG_RasterIX_HP1_DDR_LOWOCM
+    create_bd_addr_seg -range 0x40000000 -offset 0x00000000 [get_bd_addr_spaces zz9k_rasterix_0/m_cmd_axi] [get_bd_addr_segs processing_system7_0/S_AXI_HP1/HP1_DDR_LOWOCM] SEG_RasterIX_command_HP1_DDR_LOWOCM
     create_bd_addr_seg -range 0x00010000 -offset 0x83C60000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs zz9k_rasterix_0/s_axi/reg0] SEG_RasterIX_control_Reg
   }
   create_bd_addr_seg -range 0x00010000 -offset 0x43C00000 [get_bd_addr_spaces processing_system7_0/Data] [get_bd_addr_segs MNTZorro_v0_1_S00_AXI_0/S_AXI/reg0] SEG_MNTZorro_v0_1_S00_AXI_0_reg0

@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // ZZ9000-specific integration for the vendored RasterIX_IF core.
 //
-// The AXI-Lite command FIFO is intentionally a small PIO transport for this
-// fit trial. It keeps the complete RasterIX command/memory path live without
-// adding a second DMA IP or changing PS7 configuration; production firmware
-// can replace it with an MM2S producer while retaining the same renderer port.
-
+// RasterIX uses m_axi for texture/framebuffer traffic.  Command buffers use
+// the independent 64-bit m_cmd_axi read master; axi_interconnect_2 arbitrates
+// both below its capture S00 slot, so capture writeback retains priority.
 `ifndef RASTERIX_TMU_COUNT
 `define RASTERIX_TMU_COUNT 1
 `endif
@@ -42,7 +40,7 @@ module zz9k_rasterix #(
 
     input  wire                               m_axi_aclk,
     input  wire                               m_axi_aresetn,
-    output wire [4:0]                         m_axi_awid,
+    output wire [3:0]                         m_axi_awid,
     output wire [31:0]                        m_axi_awaddr,
     output wire [7:0]                         m_axi_awlen,
     output wire [2:0]                         m_axi_awsize,
@@ -57,11 +55,11 @@ module zz9k_rasterix #(
     output wire                               m_axi_wlast,
     output wire                               m_axi_wvalid,
     input  wire                               m_axi_wready,
-    input  wire [4:0]                         m_axi_bid,
+    input  wire [3:0]                         m_axi_bid,
     input  wire [1:0]                         m_axi_bresp,
     input  wire                               m_axi_bvalid,
     output wire                               m_axi_bready,
-    output wire [4:0]                         m_axi_arid,
+    output wire [3:0]                         m_axi_arid,
     output wire [31:0]                        m_axi_araddr,
     output wire [7:0]                         m_axi_arlen,
     output wire [2:0]                         m_axi_arsize,
@@ -71,16 +69,32 @@ module zz9k_rasterix #(
     output wire [2:0]                         m_axi_arprot,
     output wire                               m_axi_arvalid,
     input  wire                               m_axi_arready,
-    input  wire [4:0]                         m_axi_rid,
+    input  wire [3:0]                         m_axi_rid,
     input  wire [31:0]                        m_axi_rdata,
     input  wire [1:0]                         m_axi_rresp,
     input  wire                               m_axi_rlast,
     input  wire                               m_axi_rvalid,
-    output wire                               m_axi_rready
+    output wire                               m_axi_rready,
+
+    output wire [3:0]                         m_cmd_axi_arid,
+    output wire [31:0]                        m_cmd_axi_araddr,
+    output wire [7:0]                         m_cmd_axi_arlen,
+    output wire [2:0]                         m_cmd_axi_arsize,
+    output wire [1:0]                         m_cmd_axi_arburst,
+    output wire                               m_cmd_axi_arlock,
+    output wire [3:0]                         m_cmd_axi_arcache,
+    output wire [2:0]                         m_cmd_axi_arprot,
+    output wire                               m_cmd_axi_arvalid,
+    input  wire                               m_cmd_axi_arready,
+    input  wire [3:0]                         m_cmd_axi_rid,
+    input  wire [63:0]                        m_cmd_axi_rdata,
+    input  wire [1:0]                         m_cmd_axi_rresp,
+    input  wire                               m_cmd_axi_rlast,
+    input  wire                               m_cmd_axi_rvalid,
+    output wire                               m_cmd_axi_rready
 );
     localparam [31:0] IDENTITY = 32'h5249_5831; // "RIX1"
-    localparam [31:0] VERSION = 32'h0001_0000;
-    localparam [3:0] CMD_FIFO_DEPTH_LG = 4;
+    localparam [31:0] VERSION = 32'h0001_0001;
 
     reg [C_S_AXI_ADDR_WIDTH-1:0] write_addr;
     reg [31:0] write_data;
@@ -102,6 +116,16 @@ module zz9k_rasterix #(
     reg [4:0] command_count;
     reg [7:0] write_transactions;
     reg [7:0] read_transactions;
+    reg [31:0] cmd_addr;
+    reg [31:0] cmd_words;
+    reg [31:0] submissions_accepted;
+    reg [31:0] submissions_completed;
+    reg completion_pending;
+    reg error_sticky;
+    reg irq_status;
+    reg [31:0] error_address;
+    reg pio_rejected;
+    reg start_rejected;
 
     wire renderer_clock;
     wire renderer_resetn;
@@ -109,6 +133,7 @@ module zz9k_rasterix #(
     wire command_fifo_full;
     wire command_pop;
     wire command_push;
+    wire pio_push_request;
     wire engine_idle;
     wire renderer_busy;
     wire renderer_triangle_rendering;
@@ -121,7 +146,20 @@ module zz9k_rasterix #(
     wire rix_response_last;
     wire [31:0] rix_response_data;
 
-    wire [4:0] rix_m_axi_awid;
+    wire fetch_submit_ready;
+    wire fetch_submit_request;
+    wire fetch_submit_fire;
+    wire fetch_busy;
+    wire fetch_command_valid;
+    wire fetch_command_ready;
+    wire fetch_command_last;
+    wire [31:0] fetch_command_data;
+    wire fetch_submission_done;
+    wire fetch_read_error;
+    wire [31:0] fetch_read_error_addr;
+    wire completion_ack;
+
+    wire [3:0] rix_m_axi_awid;
     wire [31:0] rix_m_axi_awaddr;
     wire [7:0] rix_m_axi_awlen;
     wire [2:0] rix_m_axi_awsize;
@@ -135,7 +173,7 @@ module zz9k_rasterix #(
     wire rix_m_axi_wlast;
     wire rix_m_axi_wvalid;
     wire rix_m_axi_bready;
-    wire [4:0] rix_m_axi_arid;
+    wire [3:0] rix_m_axi_arid;
     wire [31:0] rix_m_axi_araddr;
     wire [7:0] rix_m_axi_arlen;
     wire [2:0] rix_m_axi_arsize;
@@ -152,13 +190,14 @@ module zz9k_rasterix #(
 
     assign command_fifo_empty = (command_count == 0);
     assign command_fifo_full = (command_count == 16);
-    assign engine_idle = !renderer_busy && command_fifo_empty &&
-                         (write_transactions == 0) && (read_transactions == 0);
+    assign engine_idle = !renderer_busy && command_fifo_empty && !fetch_busy &&
+                         !completion_pending && (write_transactions == 0) &&
+                         (read_transactions == 0);
     assign renderer_resetn = m_axi_aresetn && !soft_reset_active;
 
-    // The CSR plane remains on FCLK0. Only the renderer itself is clocked by
-    // this BUFGCE. Disabling while active drains the command FIFO and all AXI
-    // responses before CE is lowered, so no accepted write can be abandoned.
+    // The BUFGCE stays open until fetched commands, renderer work, and its
+    // outstanding memory traffic have drained.  Software clears ENABLE then
+    // polls STATUS.IDLE before relying on the clock being stopped.
     BUFGCE renderer_clock_gate (
         .I(m_axi_aclk),
         .CE(renderer_clock_enable),
@@ -174,20 +213,30 @@ module zz9k_rasterix #(
     assign s_axi_rdata = read_data;
     assign s_axi_rresp = 2'b00;
 
-    assign rix_command_valid = renderer_clock_enable && !command_fifo_empty;
-    assign rix_command_data = command_fifo[command_read_ptr];
-    assign rix_command_last = command_last_fifo[command_read_ptr];
-    assign command_pop = rix_command_valid && rix_command_ready;
+    assign pio_push_request = write_addr_valid && write_data_valid &&
+                              !write_response_valid && write_strb[0] &&
+                              (write_addr[5:2] == 4'h5) && write_data[0];
+    assign command_push = pio_push_request && !fetch_busy && !command_fifo_full;
+    assign fetch_submit_request = write_addr_valid && write_data_valid &&
+                                  !write_response_valid && write_strb[0] &&
+                                  (write_addr[5:2] == 4'h9) && write_data[0];
+    assign fetch_submit_fire = fetch_submit_request && fetch_submit_ready &&
+                               (cmd_addr[2:0] == 3'd0) && (cmd_words != 0);
 
-    assign command_push = write_addr_valid && write_data_valid &&
-                          !write_response_valid && write_strb[0] &&
-                          (write_addr[5:2] == 4'h5) && write_data[0] &&
-                          !command_fifo_full;
+    assign rix_command_valid = renderer_clock_enable &&
+                               (fetch_command_valid || (!fetch_busy && !command_fifo_empty));
+    assign rix_command_data = fetch_command_valid ? fetch_command_data :
+                              command_fifo[command_read_ptr];
+    assign rix_command_last = fetch_command_valid ? fetch_command_last :
+                              command_last_fifo[command_read_ptr];
+    assign fetch_command_ready = renderer_clock_enable && fetch_command_valid &&
+                                 rix_command_ready;
+    assign command_pop = renderer_clock_enable && !fetch_busy &&
+                         !command_fifo_empty && rix_command_ready;
 
-    // RasterIX replies are consumed here; the current ARM service has no
-    // hardware ABI yet. Keeping the ready channel live prevents the command
-    // pipeline from being pruned and is safe because replies carry no target
-    // memory side effects.
+    // RasterIX replies are currently not part of the ARM ABI.  Keeping their
+    // ready channel asserted prevents pruning and is safe: replies have no
+    // target-memory side effects.
     wire rix_response_ready = 1'b1;
 
     assign m_axi_awid = rix_m_axi_awid;
@@ -215,6 +264,9 @@ module zz9k_rasterix #(
     assign m_axi_arvalid = renderer_clock_enable && rix_m_axi_arvalid;
     assign m_axi_rready = renderer_clock_enable && rix_m_axi_rready;
 
+    assign completion_ack = completion_pending && !renderer_busy &&
+                            (write_transactions == 0);
+
     always @(posedge s_axi_aclk) begin
         if (!s_axi_aresetn) begin
             write_addr_valid <= 1'b0;
@@ -232,6 +284,16 @@ module zz9k_rasterix #(
             command_count <= 5'd0;
             write_transactions <= 8'd0;
             read_transactions <= 8'd0;
+            cmd_addr <= 32'd0;
+            cmd_words <= 32'd0;
+            submissions_accepted <= 32'd0;
+            submissions_completed <= 32'd0;
+            completion_pending <= 1'b0;
+            error_sticky <= 1'b0;
+            irq_status <= 1'b0;
+            error_address <= 32'd0;
+            pio_rejected <= 1'b0;
+            start_rejected <= 1'b0;
         end else begin
             if (s_axi_awvalid && s_axi_awready) begin
                 write_addr <= s_axi_awaddr;
@@ -249,13 +311,22 @@ module zz9k_rasterix #(
                 case (s_axi_araddr[5:2])
                     4'h0: read_data <= IDENTITY;
                     4'h1: read_data <= VERSION;
-                    4'h2: read_data <= {30'd0, soft_reset_pending, enable_requested};
-                    4'h3: read_data <= {write_transactions, read_transactions, 10'd0,
-                                         1'b0, renderer_stall, renderer_triangle_rendering,
+                    4'h2: read_data <= {29'd0, error_sticky, soft_reset_pending, enable_requested};
+                    4'h3: read_data <= {read_transactions, write_transactions, 4'd0,
+                                         irq_status, start_rejected, pio_rejected, error_sticky,
+                                         completion_pending, fetch_submit_ready, fetch_busy,
+                                         renderer_stall, renderer_triangle_rendering,
                                          renderer_busy, engine_idle, renderer_clock_enable};
                     4'h4: read_data <= command_word;
                     4'h5: read_data <= {27'd0, command_count};
                     4'h6: read_data <= {16'd0, rix_response_data[15:0]};
+                    4'h7: read_data <= cmd_addr;
+                    4'h8: read_data <= cmd_words;
+                    4'h9: read_data <= {31'd0, fetch_submit_ready};
+                    4'hA: read_data <= submissions_accepted;
+                    4'hB: read_data <= submissions_completed;
+                    4'hC: read_data <= {29'd0, start_rejected, pio_rejected, error_sticky};
+                    4'hD: read_data <= error_address;
                     default: read_data <= 32'd0;
                 endcase
                 read_response_valid <= 1'b1;
@@ -274,6 +345,12 @@ module zz9k_rasterix #(
                                 soft_reset_pending <= 1'b1;
                                 renderer_clock_enable <= 1'b1;
                             end
+                            if (write_data[2]) begin
+                                error_sticky <= 1'b0;
+                                irq_status <= 1'b0;
+                                pio_rejected <= 1'b0;
+                                start_rejected <= 1'b0;
+                            end
                         end
                         4'h4: command_word <= write_data;
                         4'h5: if (command_push) begin
@@ -282,12 +359,40 @@ module zz9k_rasterix #(
                             command_write_ptr <= command_write_ptr + 1'b1;
                             renderer_clock_enable <= 1'b1;
                         end
+                        4'h7: cmd_addr <= write_data;
+                        4'h8: cmd_words <= write_data;
+                        4'h9: if (fetch_submit_request) begin
+                            if (cmd_addr[2:0] != 3'd0) begin
+                                error_sticky <= 1'b1;
+                                error_address <= cmd_addr;
+                            end else if (cmd_words == 0 || !fetch_submit_ready) begin
+                                start_rejected <= 1'b1;
+                            end else begin
+                                submissions_accepted <= submissions_accepted + 1'b1;
+                                renderer_clock_enable <= 1'b1;
+                            end
+                        end
                         default: begin end
                     endcase
                 end
+                if (pio_push_request && fetch_busy)
+                    pio_rejected <= 1'b1;
                 write_addr_valid <= 1'b0;
                 write_data_valid <= 1'b0;
                 write_response_valid <= 1'b1;
+            end
+
+            if (fetch_read_error) begin
+                error_sticky <= 1'b1;
+                irq_status <= 1'b1;
+                error_address <= fetch_read_error_addr;
+            end
+            if (fetch_submission_done)
+                completion_pending <= 1'b1;
+            if (completion_ack) begin
+                completion_pending <= 1'b0;
+                irq_status <= 1'b1;
+                submissions_completed <= submissions_completed + 1'b1;
             end
 
             if (soft_reset_pending && engine_idle) begin
@@ -319,10 +424,44 @@ module zz9k_rasterix #(
                 default: begin end
             endcase
 
-            if (!enable_requested && engine_idle && !soft_reset_pending)
+            if (!enable_requested && engine_idle && !soft_reset_pending &&
+                !command_push && !fetch_submit_fire)
                 renderer_clock_enable <= 1'b0;
         end
     end
+
+    zz9k_cmd_fetcher command_fetcher (
+        .aclk(m_axi_aclk),
+        .aresetn(m_axi_aresetn),
+        .submit_valid(fetch_submit_fire),
+        .submit_ready(fetch_submit_ready),
+        .submit_addr(cmd_addr),
+        .submit_words(cmd_words),
+        .busy(fetch_busy),
+        .m_cmd_axis_tvalid(fetch_command_valid),
+        .m_cmd_axis_tready(fetch_command_ready),
+        .m_cmd_axis_tlast(fetch_command_last),
+        .m_cmd_axis_tdata(fetch_command_data),
+        .submission_done(fetch_submission_done),
+        .completion_ack(completion_ack),
+        .read_error(fetch_read_error),
+        .read_error_addr(fetch_read_error_addr),
+        .m_axi_araddr(m_cmd_axi_araddr),
+        .m_axi_arlen(m_cmd_axi_arlen),
+        .m_axi_arsize(m_cmd_axi_arsize),
+        .m_axi_arburst(m_cmd_axi_arburst),
+        .m_axi_arlock(m_cmd_axi_arlock),
+        .m_axi_arcache(m_cmd_axi_arcache),
+        .m_axi_arprot(m_cmd_axi_arprot),
+        .m_axi_arvalid(m_cmd_axi_arvalid),
+        .m_axi_arready(m_cmd_axi_arready),
+        .m_axi_rdata(m_cmd_axi_rdata),
+        .m_axi_rresp(m_cmd_axi_rresp),
+        .m_axi_rlast(m_cmd_axi_rlast),
+        .m_axi_rvalid(m_cmd_axi_rvalid),
+        .m_axi_rready(m_cmd_axi_rready)
+    );
+    assign m_cmd_axi_arid = 4'd0;
 
     RasterIX_IF #(
         .FRAMEBUFFER_SIZE_IN_PIXEL_LG(`RASTERIX_FRAMEBUFFER_SIZE_IN_PIXEL_LG),
@@ -340,7 +479,7 @@ module zz9k_rasterix #(
         .ENABLE_FOG(1),
         .MAX_TEXTURE_SIZE(256),
         .ADDR_WIDTH(32),
-        .ID_WIDTH(5),
+        .ID_WIDTH(4),
         .DATA_WIDTH(32),
         .STRB_WIDTH(4),
         .RASTERIZER_FLOAT_PRECISION(32),
