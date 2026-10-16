@@ -8,7 +8,8 @@ Zorro bus.
 Start it as a desktop player from Workbench, or pass files from a shell for a
 one-shot playlist. A shell launch with files exits after playback; a shell
 launch without files opens the player. Workbench launches open the player
-unless `FULLSCREEN` or `PLAYER=NO` selects one-shot playback.
+unless `FULLSCREEN` or `PLAYER=NO` selects one-shot playback. Scripts can
+control a running ZZPlay through its [ARexx port](#arexx).
 
 ## Supported input
 
@@ -125,20 +126,26 @@ that begin with `--` are errors.
 ## Audio output
 
 `AUTO` uses MHI for MP3 when the selected MHI driver is available, otherwise
-it uses accelerated decode with AHI. FLAC and Ogg Vorbis try card output and
-fall back to AHI if the card refuses the output or ZZ9000AX is busy. An
-explicit `AUDIO=AX` request is strict and reports failure instead of falling
-back. An explicit `AUDIO=MHI` request for FLAC or Ogg Vorbis is rejected.
+it uses accelerated decode with AHI. For MPEG and WebM sound, `AUTO` tries the
+ZZ9000AX daughterboard first and then AHI. FLAC and Ogg Vorbis try card output
+and fall back to AHI if the card refuses the output or ZZ9000AX is busy; the
+MP3 and video settings do not apply to them. An explicit `AUDIO=AX` request is
+strict and reports failure instead of falling back. An explicit `AUDIO=MHI`
+request for FLAC or Ogg Vorbis is rejected.
 
-Program Stream and WebM audio use the video audio path. The required decoder
-service must be advertised by the firmware before playback begins. Video-only
-files can play without an audio backend.
+The required decoder service must be advertised by the firmware before
+playback begins. Video-only files can play without an audio backend.
 
 Only one backend can use the ZZ9000AX daughterboard at a time. A strict request
 reports `BUSY` when another program owns it; automatic selection can fall back.
 
-The player stores settings in `ENV:ZZPlay.prefs` for the current boot and in
-`ENVARC:ZZPlay.prefs` after **Save**. Invalid preference lines are ignored.
+The volume control works when the output can change its level: AHI always,
+card output for FLAC and Ogg Vorbis when the firmware offers stream gain, and
+MHI when the driver reports volume control (`mhizz9000.library` does with
+firmware that offers stream gain). Video sound on ZZ9000AX plays at a fixed
+level. When the output cannot change its level, the slider is disabled and the
+output line shows `(fixed volume)`. A new volume applies when you release the
+slider.
 
 ## Preload to card memory
 
@@ -158,13 +165,64 @@ All, Previous and a new start preload the file again. The copy is freed when
 the item ends. If ZZPlay crashes before it frees the copy, the card keeps it
 until the next Amiga reset.
 
-## Player controls
+## Player window
 
-The player window has a playlist, transport controls, a position slider,
-volume, repeat, shuffle, and status text. Drag the position slider to seek in
-MP3 files. The slider is unavailable for MPEG video, WebM, FLAC, and Ogg
-Vorbis. Drop files, drawers, or playlists onto the player window to append
-them to the playlist.
+The player window shows the title, the format, the audio output, and the
+position of the current item, followed by a position slider, the transport
+buttons (`|<`, **Play**, **Pause**, **Stop**, `>|`), the volume slider, the
+repeat cycle gadget, the **Shuffle** check box, and the playlist. A message
+line reports errors and notices. The window remembers its position.
+
+Drag the position slider to seek in MP3 files. The slider is unavailable for
+MPEG video, WebM, FLAC, Ogg Vorbis, and WebP animations.
+
+### Playlist
+
+The playlist marks the current entry with a double arrow. Double-click an
+entry to play it. The buttons below the list work on the playlist:
+
+| Button | Action |
+| --- | --- |
+| **Add...** | Append files chosen in a file requester. |
+| **Remove** | Remove the selected entry. A playing entry finishes playing, and the list continues after the entry's old place. |
+| **Clear** | Empty the playlist. The playing item continues. |
+| **Load...** | Append the entries of an M3U playlist. |
+| **Save...** | Save the playlist as extended M3U. `.m3u` is added when the name has no playlist extension. |
+
+Drop files, drawers, or playlists onto the player window to append them. When
+nothing is playing, playback starts with the first dropped item. Reading a
+large drawer pauses the playing item until the scan has finished.
+
+The file requesters run beside playback, so the current item keeps playing
+while one is open. ZZPlay does not quit while a file requester is open.
+
+An item that cannot be played is marked and skipped, and the playlist moves
+on. Changing the audio settings clears the marks; double-clicking the entry
+tries it again.
+
+### Menus
+
+| Menu | Item | Shortcut | Action |
+| --- | --- | --- | --- |
+| Project | Open... | Amiga-O | Replace the playlist with the chosen files and play the first one. |
+| Project | Add files... | Amiga-A | Append files. |
+| Project | Add drawer... | | Append the media files of a drawer and its sub-drawers. |
+| Project | Load playlist... | Amiga-L | Append the entries of an M3U playlist. |
+| Project | Save playlist... | Amiga-S | Save the playlist as extended M3U. |
+| Project | Settings... | Amiga-P | Open the settings window. |
+| Project | About... | | Show the version, the ARexx port name, and the supported formats. |
+| Project | Quit | Amiga-Q | Quit ZZPlay. |
+| Control | Play/Pause | | Pause or resume playback. Start playback when stopped. |
+| Control | Stop | | Stop. |
+| Control | Next, Previous | Amiga-N, Amiga-B | Next or previous item. |
+| Control | Seek forward, Seek back | | Seek 10 seconds in MP3 playback. |
+| Control | Repeat | | Off, Track, or All. |
+| Control | Shuffle | | Play the playlist in random order. |
+| Control | Fullscreen video | Amiga-F | Play videos fullscreen. See [Fullscreen video](#fullscreen-video). |
+
+### Keys
+
+These keys work in the player window and in the video window.
 
 | Key | Action |
 | --- | --- |
@@ -177,6 +235,48 @@ them to the playlist.
 | Cursor right, Cursor left | Seek 10 seconds forward or back in MP3 playback. |
 | F | Turn the **Fullscreen video** setting on or off. A playing video switches immediately. |
 | Ctrl-C | Quit from a shell launch. |
+
+## Settings
+
+**Settings...** in the Project menu opens the settings window:
+
+| Setting | Values | Effect |
+| --- | --- | --- |
+| MP3 output | Auto, MHI, AHI | Audio output for MP3 files. |
+| Video sound | Auto, AHI, ZZ9000AX, None | Audio output for MPEG and WebM sound. |
+| Preload media | on or off | Copy MPEG and WebM files to card memory before playback. See [Preload to card memory](#preload-to-card-memory). |
+| AHI unit | 0 to 3 | The `ahi.device` unit for every AHI output. |
+| MHI driver | drivers in `LIBS:MHI/` | The MHI driver for MP3 output. |
+
+Changes apply from the next item. **Save** keeps them in
+`ENVARC:ZZPlay.prefs` and `ENV:ZZPlay.prefs`, **Use** only in
+`ENV:ZZPlay.prefs` until the next reboot, and **Cancel** discards them. A
+saved output is a preference: when it cannot play an item, ZZPlay falls back
+as `AUTO` would. Only an `AUDIO=` option for one launch fails instead.
+
+When the desktop player quits, it also stores the volume, repeat, shuffle,
+**Fullscreen video**, its window position, and the last requester drawer in
+both files. A value that came from this launch's options (for example
+`VOLUME=N` or `LOOP`) is not stored unless you changed it during the session.
+
+The files hold one `KEY=VALUE` per line. Unknown keys are ignored, and an
+invalid value resets only that key:
+
+| Key | Values |
+| --- | --- |
+| `MP3OUTPUT` | `AUTO`, `MHI`, `AHI` |
+| `VIDEOAUDIO` | `AUTO`, `AHI`, `AX`, `NONE` |
+| `PRELOAD` | `YES`, `NO` |
+| `AHIUNIT` | `0` to `3` |
+| `MHIDRIVER` | a file name in `LIBS:MHI/` |
+| `VOLUME` | `0` to `100` |
+| `REPEAT` | `OFF`, `ONE`, `ALL` |
+| `SHUFFLE` | `YES`, `NO` |
+| `FULLSCREEN` | `YES`, `NO` |
+| `WINDOW` | `left,top` of the player window, `-1,-1` for the default |
+| `DRAWER` | the last drawer used in a file requester |
+
+## Fullscreen video
 
 **Fullscreen video** in the Control menu (Amiga-F) is a setting: while it is
 checked, every video in the playlist plays fullscreen, and the desktop player
@@ -198,6 +298,65 @@ When one video follows another in fullscreen, ZZPlay keeps the screen open
 between them, so the playlist does not return to the Workbench. It returns
 when playback stops or the playlist ends, before an audio-only item, and when
 an item fails, so that the message or requester is visible.
+
+## ARexx
+
+ZZPlay opens an ARexx port named `ZZPLAY` when `rexxsyslib.library` is
+available. A second copy running at the same time gets `ZZPLAY.1`, the next
+`ZZPLAY.2`, and so on. The About requester shows the name in use. The port is
+open in the desktop player and in one-shot runs, with or without a window.
+
+```rexx
+/* Queue a drawer and start the first track at half volume. */
+options results
+address 'ZZPLAY'
+'OPEN "Work:Music/Albums/Some Album"'
+'VOLUME 50'
+'TITLE'
+say 'Now playing:' result
+```
+
+Commands are not case-sensitive. Separate arguments with spaces and put
+double quotes around a path that contains spaces. Playlist positions count
+from 1. Times are whole seconds.
+
+| Command | Action |
+| --- | --- |
+| `PLAY [n]` | Start playback, or resume a paused item. With `n`, play entry `n`. |
+| `PAUSE`, `RESUME` | Pause or resume the playing item. |
+| `PLAYPAUSE` | Same as Space: pause, resume, or start when stopped. |
+| `STOP` | Stop. A one-shot run exits. |
+| `NEXT`, `PREVIOUS` | Next or previous item. |
+| `SEEK s` | Seek to second `s`. `SEEK +s` and `SEEK -s` move relative to the current position. Only where the position slider works. |
+| `VOLUME [v]` | Set the volume (0 to 100), or change it with `+v`/`-v`. Without an argument, return it. |
+| `REPEAT [mode]` | Set repeat to `OFF`, `TRACK` or `ALL`, or return it. |
+| `SHUFFLE [mode]` | Set shuffle to `ON`, `OFF` or `TOGGLE`, or return it. |
+| `FULLSCREEN [mode]` | Set the **Fullscreen video** setting to `ON`, `OFF` or `TOGGLE`, or return it. |
+| `ADD path...` | Append files, drawers, patterns or playlists, as a drop on the window does. Playback does not start. Returns the number of entries added. |
+| `OPEN path...` | Replace the playlist with the given paths and play the first entry. Returns the number of entries added. |
+| `CLEAR` | Empty the playlist. The playing item continues. |
+| `REMOVE n` | Remove entry `n`. |
+| `SAVEPLAYLIST file` | Save the playlist as extended M3U under exactly the name given. |
+| `STATUS` | Return `PLAYING`, `PAUSED` or `STOPPED`. |
+| `TITLE`, `FILE`, `FORMAT` | Return the title, path or format text of the playing item. While stopped, `TITLE` and `FILE` describe the entry `PLAY` would start. |
+| `POSITION`, `DURATION` | Return the position and length of the playing item in seconds (0 when stopped or unknown). |
+| `COUNT` | Return the number of playlist entries. |
+| `INDEX` | Return the position of the current entry, 0 when there is none. |
+| `ENTRY n` | Return the path of entry `n`. |
+| `SHOW` | Bring the player window to the front. |
+| `VERSION`, `HELP` | Return the version string or the command list. |
+| `QUIT` | Quit ZZPlay. |
+
+Values come back in `RESULT` when the script uses `OPTIONS RESULTS`. The
+return code is 0 on success. It is 5 when the command cannot apply right now,
+for example `PAUSE` with nothing playing, `SEEK` on a format without seeking,
+or `QUIT` while a file requester is open. It is 10 for an unknown command, a
+wrong argument, a position outside the playlist, or `ADD`/`OPEN` paths that
+add nothing (`OPEN` then leaves the playlist unchanged).
+
+`ADD` and `OPEN` read drawers and playlist files, which can take a while.
+Like a drop on the window, they pause the playing item while they run. The
+script waits for the reply, and commands from other scripts wait their turn.
 
 ## Diagnostics
 
