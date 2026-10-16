@@ -42,6 +42,17 @@ target_compile_definitions(rasterix_harness PRIVATE
     HARNESS_WIDTH=${RIX_CORE_MAX_DISPLAY_WIDTH}
     HARNESS_HEIGHT=${RIX_CORE_MAX_DISPLAY_HEIGHT}
     HARNESS_BAND_LG=${RIX_CORE_FRAMEBUFFER_SIZE_IN_PIXEL_LG})
+if(EXISTS "${RASTERIX_ROOT}/lib/gl/renderer/devicedatauploader/DeviceDataUploader.hpp")
+    target_compile_definitions(rasterix_harness PRIVATE HARNESS_DEVICE_DATA_UPLOADER=1)
+endif()
+file(READ "${RASTERIX_ROOT}/lib/utils/GenericMemoryBusConnector.hpp" RASTERIX_BUS_CONNECTOR)
+if(RASTERIX_BUS_CONNECTOR MATCHES "m_dlMemTx")
+    target_compile_definitions(rasterix_harness PRIVATE HARNESS_SPLIT_DISPLAY_LIST_MEMORY=1)
+endif()
+file(READ "${RASTERIX_ROOT}/lib/gl/IBusConnector.hpp" RASTERIX_BUS_INTERFACE)
+if(RASTERIX_BUS_INTERFACE MATCHES "offset")
+    target_compile_definitions(rasterix_harness PRIVATE HARNESS_WRITE_OFFSET=1)
+endif()
 target_compile_options(rasterix_harness PRIVATE -O3 -Wall -Wextra -Wpedantic)
 target_include_directories(rasterix_harness PRIVATE
     "${RASTERIX_ROOT}/lib"

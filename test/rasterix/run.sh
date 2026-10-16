@@ -13,8 +13,10 @@ ROOT_DOCKER=$(cygpath -aw "$ROOT")
 OUTPUT_DOCKER=$(cygpath -aw "$OUTPUT")
 export MSYS_NO_PATHCONV=1
 PROFILE=${RASTERIX_PROFILE:-zz9000}
+REVISION=${RASTERIX_REVISION:-9269a01c9bd4c3342bfa70ef8e3cdd751c15c6d0}
 docker run --rm \
     -e RASTERIX_PROFILE="$PROFILE" \
+    -e RASTERIX_REVISION="$REVISION" \
     -v "$ROOT_DOCKER:/src:ro" \
     -v "$OUTPUT_DOCKER:/out" \
     -v zz9000-rasterix-harness-cache:/cache \
@@ -32,23 +34,28 @@ work=/cache/RasterIX
 if test ! -d "$work/.git"; then
     git clone --quiet --recurse-submodules https://github.com/ToNi3141/RasterIX.git "$work"
 else
-    git -C "$work" fetch --quiet origin 9269a01c9bd4c3342bfa70ef8e3cdd751c15c6d0
+    git -C "$work" fetch --quiet origin
 fi
-git -C "$work" reset --hard --quiet 9269a01c9bd4c3342bfa70ef8e3cdd751c15c6d0
+git -C "$work" reset --hard --quiet "$RASTERIX_REVISION"
+git -C "$work" submodule foreach --recursive "git reset --hard --quiet"
 git -C "$work" submodule update --init --recursive --quiet
+revision=$(git -C "$work" rev-parse --short HEAD)
 
-# The production RTL source is the vendored dependency closure.  Refuse to
-# model a different implementation, then retain upstream-only top/display code.
-for part in RasterIX Float 3rdParty; do
-    test -d "/src/rtl/rasterix/$part"
-    while IFS= read -r -d "" source; do
-        relative=${source#"/src/rtl/rasterix/$part/"}
-        target="$work/rtl/$part/$relative"
-        test -f "$target"
-        cmp -s "$source" "$target"
-    done < <(find "/src/rtl/rasterix/$part" -type f -print0)
-    cp -a "/src/rtl/rasterix/$part/." "$work/rtl/$part/"
-done
+if test "$RASTERIX_REVISION" = 9269a01c9bd4c3342bfa70ef8e3cdd751c15c6d0; then
+    # The production RTL source is the vendored dependency closure. Refuse to
+    # model a different implementation, then retain upstream-only top/display code.
+    for part in RasterIX Float 3rdParty; do
+        test -d "/src/rtl/rasterix/$part"
+        while IFS= read -r -d "" source; do
+            relative=${source#"/src/rtl/rasterix/$part/"}
+            target="$work/rtl/$part/$relative"
+            test -f "$target"
+            cmp -s "$source" "$target"
+        done < <(find "/src/rtl/rasterix/$part" -type f -print0)
+        cp -a "/src/rtl/rasterix/$part/." "$work/rtl/$part/"
+    done
+fi
+
 
 case "${RASTERIX_PROFILE:-zz9000}" in
 zz9000)
@@ -71,8 +78,8 @@ esac
 
 build_one() {
     tmu=$1
-    obj="/cache/vobj-${RASTERIX_PROFILE}-tmu$tmu"
-    build="/cache/build-${RASTERIX_PROFILE}-tmu$tmu"
+    obj="/cache/vobj-${RASTERIX_PROFILE}-${revision}-tmu$tmu"
+    build="/cache/build-${RASTERIX_PROFILE}-${revision}-tmu$tmu"
     top="/cache/top-tmu$tmu.v"
     if test "$use_upstream_top" = 1; then
         top="$work/rtl/top/Verilator/top.v"

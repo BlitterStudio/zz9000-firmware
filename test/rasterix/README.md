@@ -20,6 +20,11 @@ audited copy of that top applies the ZZ9000 baseline: `RasterIX_IF`, 640x480,
 16,384-pixel internal RGB565/Z16 bands, stencil disabled, bilinear filtering,
 256-pixel maximum textures, 25-bit fixed-point interpolation and either one or
 two TMUs. No vendored RTL is modified.
+For regression triage only, `RASTERIX_PROFILE=upstream-verilator` selects
+upstream's unpatched Verilator top and matching historical library settings;
+`RASTERIX_REVISION=<commit>` checks out that revision in the disposable cache.
+Non-pinned revisions deliberately do not use the vendored RTL closure.
+
 
 Results and PNG frames are written to `test/rasterix/out/` by default (pass a
 different directory as the sole argument). Each `results-tmu*.json` contains

@@ -3,7 +3,11 @@
 #include "Vtop.h"
 #include "gl.h"
 #include "glu.h"
+#if defined(HARNESS_DEVICE_DATA_UPLOADER)
 #include "renderer/devicedatauploader/DeviceDataUploader.hpp"
+#else
+#include "threadrunner/NoThreadRunner.hpp"
+#endif
 #include "verilated.h"
 #include <array>
 #include <chrono>
@@ -39,9 +43,11 @@ public:
         : m_framebuffer(kWidth * kHeight * 3)
     {
         m_top.m_framebuffer_axis_tready = 1;
+#if defined(HARNESS_SPLIT_DISPLAY_LIST_MEMORY)
         m_top.m_cmd_resp_axis_tready = 0;
-        m_top.s_cmd_axis_tvalid = 0;
         m_top.s_cmd_axis_tlast = 0;
+#endif
+        m_top.s_cmd_axis_tvalid = 0;
         m_top.resetn = 0;
         clk();
         clk();
@@ -51,33 +57,18 @@ public:
 
     ~MeasuredVerilatorBus() override { m_top.final(); }
 
+#if defined(HARNESS_SPLIT_DISPLAY_LIST_MEMORY)
+#if defined(HARNESS_WRITE_OFFSET)
     void writeData(const uint8_t index, const uint32_t size, const uint32_t offset) override
     {
-        m_commandBytes += size;
-        const uint32_t* words = reinterpret_cast<const uint32_t*>(m_dlMemTx[index].data() + offset);
-        const uint64_t startCycles = m_cycles;
-        for (uint32_t word = 0; word < size / sizeof(*words);) {
-            if (m_cycles - startCycles > 200000ULL) {
-                std::ostringstream diagnostic;
-                diagnostic << "RasterIX command stream stalled after " << (m_cycles - startCycles)
-                           << " cycles (word=" << word << '/' << size / sizeof(*words)
-                           << ", cmd_ready=" << static_cast<unsigned>(m_top.s_cmd_axis_tready)
-                           << ", fb_valid=" << static_cast<unsigned>(m_top.m_framebuffer_axis_tvalid)
-                           << ", initial_words=";
-                for (uint32_t initial = 0; initial < 10 && initial < size / sizeof(*words); ++initial) {
-                    diagnostic << (initial == 0 ? "" : ":") << std::hex << words[initial] << std::dec;
-                }
-                diagnostic << ')';
-                throw std::runtime_error(diagnostic.str());
-            }
-            if (m_top.s_cmd_axis_tready) {
-                m_top.s_cmd_axis_tdata = words[word++];
-                m_top.s_cmd_axis_tvalid = 1;
-            }
-            clk();
-        }
-        m_top.s_cmd_axis_tvalid = 0;
+        writeWords(reinterpret_cast<const uint32_t*>(m_dlMemTx[index].data() + offset), size);
     }
+#else
+    void writeData(const uint8_t index, const uint32_t size) override
+    {
+        writeWords(reinterpret_cast<const uint32_t*>(m_dlMemTx[index].data()), size);
+    }
+#endif
 
     void readData(const uint8_t index, const uint32_t size) override
     {
@@ -93,6 +84,14 @@ public:
     }
 
     void blockUntilTransferIsComplete() override { }
+#else
+    void writeData(const uint8_t index, const uint32_t size) override
+    {
+        writeWords(reinterpret_cast<const uint32_t*>(m_dlMem[index].data()), size);
+    }
+
+    void blockUntilWriteComplete() override { }
+#endif
 
     void beginFrame()
     {
@@ -123,6 +122,32 @@ public:
     const std::vector<uint8_t>& framebuffer() const { return m_framebuffer; }
 
 private:
+    void writeWords(const uint32_t* words, const uint32_t size)
+    {
+        m_commandBytes += size;
+        const uint64_t startCycles = m_cycles;
+        for (uint32_t word = 0; word < size / sizeof(*words);) {
+            if (m_cycles - startCycles > 200000ULL) {
+                std::ostringstream diagnostic;
+                diagnostic << "RasterIX command stream stalled after " << (m_cycles - startCycles)
+                           << " cycles (word=" << word << '/' << size / sizeof(*words)
+                           << ", cmd_ready=" << static_cast<unsigned>(m_top.s_cmd_axis_tready)
+                           << ", fb_valid=" << static_cast<unsigned>(m_top.m_framebuffer_axis_tvalid)
+                           << ", initial_words=";
+                for (uint32_t initial = 0; initial < 10 && initial < size / sizeof(*words); ++initial) {
+                    diagnostic << (initial == 0 ? "" : ":") << std::hex << words[initial] << std::dec;
+                }
+                diagnostic << ')';
+                throw std::runtime_error(diagnostic.str());
+            }
+            if (m_top.s_cmd_axis_tready) {
+                m_top.s_cmd_axis_tdata = words[word++];
+                m_top.s_cmd_axis_tvalid = 1;
+            }
+            clk();
+        }
+        m_top.s_cmd_axis_tvalid = 0;
+    }
     void clk()
     {
         m_top.aclk = 1;
@@ -133,11 +158,14 @@ private:
         if (!m_top.resetn) {
             return;
         }
-        if (m_top.m_framebuffer_axis_tvalid && m_streamAddress < m_framebuffer.size()) {
-            const uint16_t pixel = m_top.m_framebuffer_axis_tdata;
-            m_framebuffer[m_streamAddress++] = static_cast<uint8_t>(((pixel >> 11) & 0x1f) * 255 / 31);
-            m_framebuffer[m_streamAddress++] = static_cast<uint8_t>(((pixel >> 5) & 0x3f) * 255 / 63);
-            m_framebuffer[m_streamAddress++] = static_cast<uint8_t>((pixel & 0x1f) * 255 / 31);
+        if (m_top.m_framebuffer_axis_tvalid) {
+            const uint32_t packedPixels = m_top.m_framebuffer_axis_tdata;
+            for (uint32_t lane = 0; lane < 2 && m_streamAddress < m_framebuffer.size(); ++lane) {
+                const uint16_t pixel = (packedPixels >> (lane * 16)) & 0xffff;
+                m_framebuffer[m_streamAddress++] = static_cast<uint8_t>(((pixel >> 11) & 0x1f) * 255 / 31);
+                m_framebuffer[m_streamAddress++] = static_cast<uint8_t>(((pixel >> 5) & 0x3f) * 255 / 63);
+                m_framebuffer[m_streamAddress++] = static_cast<uint8_t>((pixel & 0x1f) * 255 / 31);
+            }
         }
         if (m_streamAddress >= m_framebuffer.size() && m_top.m_framebuffer_axis_tlast) {
             m_streamAddress = 0;
@@ -490,8 +518,14 @@ int main(int argc, char** argv)
         const Options options = parseArguments(argc, argv);
         std::filesystem::create_directories(options.output / "frames");
         MeasuredVerilatorBus bus;
+#if defined(HARNESS_DEVICE_DATA_UPLOADER)
         rr::devicedatauploader::DeviceDataUploader device {bus};
         rr::RIXGL::createInstance(device);
+#else
+        rr::NoThreadRunner worker;
+        rr::NoThreadRunner upload;
+        rr::RIXGL::createInstance(bus, worker, upload);
+#endif
         Scenes scenes {options.tmuCount == 2};
 
         // Prime texture uploads, the display-list rotation, and the pipeline; do not report this cold work.
