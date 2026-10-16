@@ -36,7 +36,8 @@ add_subdirectory("${RASTERIX_ROOT}/lib" rasterix-lib)
 
 add_library(verilator_runtime STATIC
     /usr/share/verilator/include/verilated.cpp
-    /usr/share/verilator/include/verilated_threads.cpp)
+    /usr/share/verilator/include/verilated_threads.cpp
+    /usr/share/verilator/include/verilated_vcd_c.cpp)
 target_include_directories(verilator_runtime PUBLIC /usr/share/verilator/include)
 add_library(zz9000_rix_command STATIC
     c_backend.c
@@ -55,6 +56,9 @@ target_compile_definitions(rasterix_harness PRIVATE
     HARNESS_WIDTH=${RIX_CORE_MAX_DISPLAY_WIDTH}
     HARNESS_HEIGHT=${RIX_CORE_MAX_DISPLAY_HEIGHT}
     HARNESS_BAND_LG=${RIX_CORE_FRAMEBUFFER_SIZE_IN_PIXEL_LG})
+if(C_TRACE)
+    target_compile_definitions(rasterix_harness PRIVATE HARNESS_TRACE=1)
+endif()
 if(EXISTS "${RASTERIX_ROOT}/lib/gl/renderer/devicedatauploader/DeviceDataUploader.hpp")
     target_compile_definitions(rasterix_harness PRIVATE HARNESS_DEVICE_DATA_UPLOADER=1)
 endif()

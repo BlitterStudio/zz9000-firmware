@@ -9,6 +9,9 @@
 #include "threadrunner/NoThreadRunner.hpp"
 #endif
 #include "verilated.h"
+#if defined(HARNESS_TRACE)
+#include "verilated_vcd_c.h"
+#endif
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -43,6 +46,11 @@ public:
     MeasuredVerilatorBus()
         : m_framebuffer(kWidth * kHeight * 3)
     {
+#if defined(HARNESS_TRACE)
+        Verilated::traceEverOn(true);
+        m_top.trace(&m_trace, 99);
+        m_trace.open("/out/e3.vcd");
+#endif
         m_top.m_framebuffer_axis_tready = 1;
 #if defined(HARNESS_SPLIT_DISPLAY_LIST_MEMORY)
         m_top.m_cmd_resp_axis_tready = 0;
@@ -56,7 +64,13 @@ public:
         clk();
     }
 
-    ~MeasuredVerilatorBus() override { m_top.final(); }
+    ~MeasuredVerilatorBus() override
+    {
+#if defined(HARNESS_TRACE)
+        m_trace.close();
+#endif
+        m_top.final();
+    }
 
 #if defined(HARNESS_SPLIT_DISPLAY_LIST_MEMORY)
 #if defined(HARNESS_WRITE_OFFSET)
@@ -144,6 +158,14 @@ private:
     void writeWords(const uint32_t* words, const uint32_t size)
     {
         m_commandBytes += size;
+#if defined(HARNESS_TRACE)
+        for (uint32_t index = 0; index < size / sizeof(*words); ++index) {
+            if ((words[index] & 0xf0000000U) == 0x20000000U) {
+                std::cerr << "framebuffer_cmd word=" << index << " value=0x"
+                          << std::hex << words[index] << std::dec << '\n';
+            }
+        }
+#endif
         const uint64_t startCycles = m_cycles;
         for (uint32_t word = 0; word < size / sizeof(*words);) {
             if (m_cycles - startCycles > 200000ULL) {
@@ -174,10 +196,16 @@ private:
     }
     void clk()
     {
+        m_top.contextp()->timeInc(10U);
         m_top.aclk = 1;
         m_top.eval();
         m_top.aclk = 0;
         m_top.eval();
+#if defined(HARNESS_TRACE)
+        if (m_cycles < 6000U) {
+            m_trace.dump(m_top.contextp()->time());
+        }
+#endif
         ++m_cycles;
         if (!m_top.resetn) {
             return;
@@ -205,6 +233,9 @@ private:
     uint64_t m_completedFrames {};
     uint64_t m_targetCompletedFrames {};
     std::size_t m_streamAddress {};
+#if defined(HARNESS_TRACE)
+    VerilatedVcdC m_trace;
+#endif
 };
 
 struct Result {
@@ -529,6 +560,7 @@ void writeResults(const std::filesystem::path& path, const std::vector<Result>& 
 struct Options {
     uint32_t tmuCount {};
     std::filesystem::path output;
+    bool clearBackend {};
     bool cBackend {};
 };
 
@@ -543,12 +575,15 @@ Options parseArguments(int argc, char** argv)
             options.output = argv[++i];
         } else if (argument == "--backend" && i + 1 < argc) {
             const std::string backend = argv[++i];
-            if (backend != "c") {
-                throw std::runtime_error("only --backend c is supported");
+            if (backend == "c") {
+                options.cBackend = true;
+            } else if (backend == "clear") {
+                options.clearBackend = true;
+            } else if (backend != "gl") {
+                throw std::runtime_error("unknown backend");
             }
-            options.cBackend = true;
         } else {
-            throw std::runtime_error("usage: rasterix_harness --tmu <1|2> --output <directory> [--backend c]");
+            throw std::runtime_error("usage: rasterix_harness --tmu <1|2> --output <directory> [--backend c|clear|gl]");
         }
     }
     if ((options.tmuCount != 1 && options.tmuCount != 2) || options.output.empty()) {
@@ -580,6 +615,22 @@ int main(int argc, char** argv)
         rr::RIXGL::createInstance(bus, worker, upload);
 #endif
         Scenes scenes {options.tmuCount == 2};
+        if (options.clearBackend) {
+            bus.beginFrame();
+            const auto start = std::chrono::steady_clock::now();
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClearDepth(1.0);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            const auto stop = std::chrono::steady_clock::now();
+            rr::RIXGL::getInstance().swapDisplayList();
+            bus.waitForFrame();
+            const Result result {"gl_clear", bus.frameCycles(), bus.commandBytes(),
+                std::chrono::duration<double, std::milli>(stop - start).count(), fnv1a(bus.framebuffer())};
+            writeResults(options.output / ("results-clear-tmu" + std::to_string(options.tmuCount) + ".json"),
+                         {result}, options.tmuCount);
+            rr::RIXGL::destroy();
+            return 0;
+        }
 
         // Prime texture uploads, the display-list rotation, and the pipeline; do not report this cold work.
         bus.beginFrame();

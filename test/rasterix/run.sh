@@ -89,9 +89,11 @@ build_one() {
     obj="/cache/vobj-${RASTERIX_PROFILE}-${revision}-tmu$tmu"
     build="/cache/build-${RASTERIX_PROFILE}-${revision}-tmu$tmu"
     top="/cache/top-tmu$tmu.v"
-    c_backend_args=-DC_UNTEXTURED=false
+    c_backend_args="-DC_UNTEXTURED=false -DC_TRACE=false"
+    trace_args=
     if test "${RASTERIX_EXPERIMENT:-}" = e3; then
-        c_backend_args=-DC_UNTEXTURED=true
+        c_backend_args="-DC_UNTEXTURED=true -DC_TRACE=true"
+        trace_args=--trace
     fi
     if test "$use_upstream_top" = 1; then
         top="$work/rtl/top/Verilator/top.v"
@@ -99,7 +101,7 @@ build_one() {
         python3 /src/test/rasterix/patch_top.py "$work/rtl/top/Verilator/top.v" "$top" --tmu-count "$tmu" \
             --band-lg "$band_lg" --framebuffer-sub-pixel-width "$sub_pixel_width" --stencil "$stencil"
     fi
-    verilator -Wno-SELRANGE -Wno-lint -Wno-WIDTH -DUNITTEST -DVARIANT=if -CFLAGS "-O3 -DNDEBUG" \
+    verilator -Wno-SELRANGE -Wno-lint -Wno-WIDTH -DUNITTEST -DVARIANT=if -CFLAGS "-O3 -DNDEBUG" $trace_args \
         -DFRAMEBUFFER_SIZE_IN_PIXEL_LG="$band_lg" --cc "$top" --top-module top --Mdir "$obj" \
         -I"$work/rtl/RasterIX" -I"$work/rtl/3rdParty" -I"$work/rtl/Float/rtl/float" \
         -I"$work/rtl/3rdParty/verilog-axi" -I"$work/rtl/3rdParty/verilog-axis" -I"$work/rtl/Display"
