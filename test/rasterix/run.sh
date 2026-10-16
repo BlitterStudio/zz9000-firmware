@@ -54,6 +54,11 @@ if test "$RASTERIX_REVISION" = 9269a01c9bd4c3342bfa70ef8e3cdd751c15c6d0; then
             relative=${source#"/src/rtl/rasterix/$part/"}
             target="$work/rtl/$part/$relative"
             test -f "$target"
+            case "$part/$relative" in
+                Float/rtl/float/FloatToInt.v|RasterIX/TexEnv.v|RasterIX/TextureReaderContext.v)
+                    continue
+                    ;;
+            esac
             cmp -s "$source" "$target"
         done < <(find "/src/rtl/rasterix/$part" -type f -print0)
         cp -a "/src/rtl/rasterix/$part/." "$work/rtl/$part/"

@@ -66,6 +66,20 @@ module TextureReaderContext #(
             m_tr_valid <= 1'b0;
             s_trc_ready <= 1'b1;
             rSkidValid <= 1'b0;
+            /*
+             * Nearest filtering requests only texel 00, but the registered
+             * sample is four-wide.  Reset every cached lane so the unused
+             * neighbours cannot inject an unknown into downstream texenv
+             * pipeline state before a linear request has populated them.
+             */
+            rTexel00 <= { TEXEL_WIDTH { 1'b0 } };
+            rTexel01 <= { TEXEL_WIDTH { 1'b0 } };
+            rTexel10 <= { TEXEL_WIDTH { 1'b0 } };
+            rTexel11 <= { TEXEL_WIDTH { 1'b0 } };
+            m_tr_texel_00 <= { TEXEL_WIDTH { 1'b0 } };
+            m_tr_texel_01 <= { TEXEL_WIDTH { 1'b0 } };
+            m_tr_texel_10 <= { TEXEL_WIDTH { 1'b0 } };
+            m_tr_texel_11 <= { TEXEL_WIDTH { 1'b0 } };
         end
         else
         begin

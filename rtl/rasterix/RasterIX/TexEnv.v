@@ -218,7 +218,7 @@ module TexEnv
     reg signed [SUB_PIXEL_WIDTH_SIGNED - 1 : 0] v32;
     reg signed [SUB_PIXEL_WIDTH_SIGNED - 1 : 0] v33;
     always @(posedge aclk)
-    if (ce) begin : SelectColor
+    if (ce && s_valid) begin : SelectColor
         reg [SUB_PIXEL_WIDTH - 1 : 0] rt;
         reg [SUB_PIXEL_WIDTH - 1 : 0] gt;
         reg [SUB_PIXEL_WIDTH - 1 : 0] bt;

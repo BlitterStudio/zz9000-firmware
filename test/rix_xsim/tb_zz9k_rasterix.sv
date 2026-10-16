@@ -2,12 +2,18 @@
 // Real ZZ9000 RasterIX integration testbench.  The command buffer is an ARM
 // DDR image: FrameStreamingCore header/address followed by parser words.
 module tb_zz9k_rasterix;
+    // Keep low ARM DDR compact while translating MiniGL's physical buffers.
     localparam integer MEM_BYTES = 4 * 1024 * 1024;
     localparam [31:0] CMD_ADDR = 32'h0010_0000;
     localparam [31:0] COLOR_ADDR = 32'h0020_0000;
+    localparam [31:0] MINIGL_COLOR_ADDR = 32'h0782_0000;
+    localparam [31:0] MINIGL_DEPTH_ADDR = 32'h07b2_0000;
+    localparam [31:0] MINIGL_TEXTURE_ADDR = 32'h0038_0000;
     localparam integer WIDTH = 640;
     localparam integer HEIGHT = 480;
     localparam integer COLOR_BYTES = WIDTH * HEIGHT * 2;
+    localparam integer DEPTH_BYTES = WIDTH * HEIGHT * 4;
+    localparam integer TEXTURE_POOL_BYTES = 24 * 1024 * 1024;
     localparam integer TEXTURE_BYTES = 2048;
 
     reg clk;
@@ -121,6 +127,9 @@ module tb_zz9k_rasterix;
     );
 
     reg [7:0] memory [0:MEM_BYTES-1];
+    reg [7:0] color_memory [0:COLOR_BYTES-1];
+    reg [7:0] depth_memory [0:DEPTH_BYTES-1];
+    reg [7:0] texture_memory [0:TEXTURE_POOL_BYTES-1];
     reg [31:0] command_words [0:262143];
     reg [7:0] texture_bytes [0:TEXTURE_BYTES-1];
     integer i;
@@ -145,9 +154,32 @@ module tb_zz9k_rasterix;
     function [7:0] byte_at;
         input [31:0] address;
         begin
-            if (address < MEM_BYTES) byte_at = memory[address]; else byte_at = 8'h00;
+            if ((address >= MINIGL_COLOR_ADDR) && (address < MINIGL_COLOR_ADDR + COLOR_BYTES))
+                byte_at = color_memory[address - MINIGL_COLOR_ADDR];
+            else if ((address >= MINIGL_DEPTH_ADDR) && (address < MINIGL_DEPTH_ADDR + DEPTH_BYTES))
+                byte_at = depth_memory[address - MINIGL_DEPTH_ADDR];
+            else if ((address >= MINIGL_TEXTURE_ADDR) && (address < MINIGL_TEXTURE_ADDR + TEXTURE_POOL_BYTES))
+                byte_at = texture_memory[address - MINIGL_TEXTURE_ADDR];
+            else if (address < MEM_BYTES)
+                byte_at = memory[address];
+            else
+                byte_at = 8'h00;
         end
     endfunction
+    task write_byte;
+        input [31:0] address;
+        input [7:0] value;
+        begin
+            if ((address >= MINIGL_COLOR_ADDR) && (address < MINIGL_COLOR_ADDR + COLOR_BYTES))
+                color_memory[address - MINIGL_COLOR_ADDR] = value;
+            else if ((address >= MINIGL_DEPTH_ADDR) && (address < MINIGL_DEPTH_ADDR + DEPTH_BYTES))
+                depth_memory[address - MINIGL_DEPTH_ADDR] = value;
+            else if ((address >= MINIGL_TEXTURE_ADDR) && (address < MINIGL_TEXTURE_ADDR + TEXTURE_POOL_BYTES))
+                texture_memory[address - MINIGL_TEXTURE_ADDR] = value;
+            else if (address < MEM_BYTES)
+                memory[address] = value;
+        end
+    endtask
     function [31:0] word_at;
         input [31:0] address;
         begin
@@ -350,10 +382,10 @@ module tb_zz9k_rasterix;
             if (write_addr == 32'h0021_7a2c)
                 $display("S4_X_DDR_WRITE cycle=%0d addr=%08x data=%08x strb=%x",
                          cycle_count, write_addr, m_axi_wdata, m_axi_wstrb);
-            if (m_axi_wstrb[0]) memory[write_addr] <= m_axi_wdata[7:0];
-            if (m_axi_wstrb[1]) memory[write_addr + 1] <= m_axi_wdata[15:8];
-            if (m_axi_wstrb[2]) memory[write_addr + 2] <= m_axi_wdata[23:16];
-            if (m_axi_wstrb[3]) memory[write_addr + 3] <= m_axi_wdata[31:24];
+            if (m_axi_wstrb[0]) write_byte(write_addr, m_axi_wdata[7:0]);
+            if (m_axi_wstrb[1]) write_byte(write_addr + 1, m_axi_wdata[15:8]);
+            if (m_axi_wstrb[2]) write_byte(write_addr + 2, m_axi_wdata[23:16]);
+            if (m_axi_wstrb[3]) write_byte(write_addr + 3, m_axi_wdata[31:24]);
             write_addr <= write_addr + 4;
             write_left <= write_left - 1;
             if (m_axi_wlast) begin
@@ -406,12 +438,37 @@ module tb_zz9k_rasterix;
             $fwrite(fd, "P6\n640 480\n255\n");
             for (y = 0; y < HEIGHT; y = y + 1) begin
                 for (x = 0; x < WIDTH; x = x + 1) begin
-                    pixel = {memory[COLOR_ADDR + ((HEIGHT - 1 - y) * WIDTH + x) * 2 + 1],
-                             memory[COLOR_ADDR + ((HEIGHT - 1 - y) * WIDTH + x) * 2]};
+                    pixel = {byte_at(framebuffer_addr + ((HEIGHT - 1 - y) * WIDTH + x) * 2 + 1),
+                             byte_at(framebuffer_addr + ((HEIGHT - 1 - y) * WIDTH + x) * 2)};
                     red = {pixel[15:11], 3'b000};
                     green = {pixel[10:5], 2'b00};
                     blue = {pixel[4:0], 3'b000};
                     $fwrite(fd, "%c%c%c", red, green, blue);
+                end
+            end
+            $fclose(fd);
+        end
+    endtask
+    // Sparse DDR input: $readmemh-style @<byte-address> markers followed by
+    // one byte per line. Unspecified bytes remain zero.
+    task load_ddr;
+        input [8*512-1:0] name;
+        integer fd;
+        integer scan_result;
+        reg [8*1024-1:0] line;
+        reg [31:0] load_addr;
+        reg [7:0] load_value;
+        begin
+            fd = $fopen(name, "r");
+            if (fd == 0) $fatal(1, "cannot open DDR preload %0s", name);
+            load_addr = 0;
+            while (!$feof(fd)) begin
+                line = 0;
+                scan_result = $fgets(line, fd);
+                if ($sscanf(line, "@%h", load_addr) == 1) begin
+                end else if ($sscanf(line, "%h", load_value) == 1) begin
+                    write_byte(load_addr, load_value);
+                    load_addr = load_addr + 1;
                 end
             end
             $fclose(fd);
@@ -447,12 +504,23 @@ module tb_zz9k_rasterix;
     endtask
 
     reg [8*512-1:0] command_file;
+    reg [8*512-1:0] commands_file;
+    reg [8*512-1:0] ddr_file;
+    reg [8*512-1:0] patch_file;
     reg [8*512-1:0] texture_file;
     reg [8*512-1:0] ppm_file;
     reg [8*32-1:0] scene;
+    reg [31:0] framebuffer_addr;
     reg [31:0] status;
     reg [31:0] completed_before;
     integer cmd_count;
+    integer submission_offset;
+    integer submission_words;
+    integer submission_index;
+    integer command_complete;
+    integer multi_command;
+    integer capture_mode;
+    integer patch_after;
     integer timeout;
     integer poll_limit;
     reg [15:0] sample0, sample_mid, sample_out;
@@ -466,7 +534,21 @@ module tb_zz9k_rasterix;
         m_cmd_axi_arready = 0; m_cmd_axi_rid = 0; m_cmd_axi_rdata = 0; m_cmd_axi_rresp = 0; m_cmd_axi_rlast = 0; m_cmd_axi_rvalid = 0;
         cmd_read_active = 0; render_read_active = 0; write_active = 0; cmd_read_left = 0; render_read_left = 0; write_left = 0;
         render_read_id = 0; render_read_size = 0;
-        if (!$value$plusargs("CMD=%s", command_file)) $fatal(1, "CMD=<scene>.hex is required");
+        commands_file = "";
+        ddr_file = "";
+        patch_file = "";
+        patch_after = -1;
+        multi_command = $value$plusargs("CMDS=%s", commands_file);
+        if (multi_command == 0) begin
+            if (!$value$plusargs("CMD=%s", command_file)) $fatal(1, "CMD=<scene>.hex or CMDS=<capture>.hex is required");
+        end else
+            command_file = commands_file;
+        capture_mode = $value$plusargs("DDR=%s", ddr_file);
+        if ($value$plusargs("PATCH=%s", patch_file)) begin
+            if (!$value$plusargs("PATCH_AFTER=%d", patch_after) || patch_after < 0)
+                $fatal(1, "PATCH requires non-negative PATCH_AFTER");
+        end
+        framebuffer_addr = capture_mode ? MINIGL_COLOR_ADDR : COLOR_ADDR;
         if (!$value$plusargs("TEXTURE=%s", texture_file)) texture_file = "";
         if (!$value$plusargs("PPM=%s", ppm_file)) ppm_file = "frame.ppm";
         if (!$value$plusargs("SCENE=%s", scene)) scene = "s1";
@@ -476,51 +558,88 @@ module tb_zz9k_rasterix;
         poll_limit = 2000000;
         if ($value$plusargs("POLL_LIMIT=%d", poll_limit)) ;
         for (i = 0; i < MEM_BYTES; i = i + 1) memory[i] = 0;
+        for (i = 0; i < COLOR_BYTES; i = i + 1) color_memory[i] = 0;
+        for (i = 0; i < DEPTH_BYTES; i = i + 1) depth_memory[i] = 0;
+        for (i = 0; i < TEXTURE_POOL_BYTES; i = i + 1) texture_memory[i] = 0;
+        if (capture_mode != 0) load_ddr(ddr_file);
         if (texture_file != "") begin
             $readmemh(texture_file, texture_bytes);
-            for (i = 0; i < TEXTURE_BYTES; i = i + 1) memory[32'h0034_0000 + i] = texture_bytes[i];
+            for (i = 0; i < TEXTURE_BYTES; i = i + 1) write_byte(32'h0034_0000 + i, texture_bytes[i]);
         end
         $readmemh(command_file, command_words);
-        cmd_count = (command_words[0] & 28'h0fff_ffff) / 4 + 2;
+        if (multi_command != 0) begin
+            cmd_count = 0;
+            while ((cmd_count < 262144) && (command_words[cmd_count][31:28] === 4'h9)) begin
+                if (command_words[cmd_count][1:0] != 0)
+                    $fatal(1, "CMDS buffer %0d has unaligned byte count", cmd_count);
+                submission_words = (command_words[cmd_count] & 28'h0fff_ffff) / 4 + 2;
+                if ((submission_words < 2) || (cmd_count + submission_words > 262144))
+                    $fatal(1, "CMDS buffer at word %0d is invalid", cmd_count);
+                cmd_count = cmd_count + submission_words;
+            end
+            if (cmd_count == 0) $fatal(1, "CMDS contains no DSE buffers");
+        end else
+            cmd_count = (command_words[0] & 28'h0fff_ffff) / 4 + 2;
         for (i = 0; i < cmd_count; i = i + 1) begin
-            memory[CMD_ADDR + i * 4] = command_words[i][7:0];
-            memory[CMD_ADDR + i * 4 + 1] = command_words[i][15:8];
-            memory[CMD_ADDR + i * 4 + 2] = command_words[i][23:16];
-            memory[CMD_ADDR + i * 4 + 3] = command_words[i][31:24];
+            write_byte(CMD_ADDR + i * 4, command_words[i][7:0]);
+            write_byte(CMD_ADDR + i * 4 + 1, command_words[i][15:8]);
+            write_byte(CMD_ADDR + i * 4 + 2, command_words[i][23:16]);
+            write_byte(CMD_ADDR + i * 4 + 3, command_words[i][31:24]);
         end
         repeat (8) @(posedge clk);
         resetn = 1;
         axi_read(16'h0000, status);
         if (status != 32'h52495831) $fatal(1, "bad RIX identity %08x", status);
         axi_write(16'h0008, 1);
-        axi_read(16'h002c, completed_before);
-        axi_write(16'h001c, CMD_ADDR);
-        axi_write(16'h0020, cmd_count);
-        axi_write(16'h0024, 1);
-        timeout = 0;
-        while (timeout < poll_limit) begin
-            axi_read(16'h002c, status);
-            if (status == completed_before + 1) begin
-                $display("RESULT scene=%0s cycles=%0d command_words=%0d", scene, cycle_count, cmd_count);
-                dump_ppm(ppm_file);
-                for (i = 0; i < COLOR_BYTES; i = i + 1)
-                    if (^memory[COLOR_ADDR + i] === 1'bx) $fatal(1, "framebuffer contains unknown byte at %0d", i);
-                sample0 = {memory[COLOR_ADDR+1], memory[COLOR_ADDR]};
-                sample_out = {memory[COLOR_ADDR + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2 + 1], memory[COLOR_ADDR + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2]};
-                if (scene == "s4")
-                    sample_mid = {memory[COLOR_ADDR + ((HEIGHT - 1 - 150) * WIDTH + 200) * 2 + 1], memory[COLOR_ADDR + ((HEIGHT - 1 - 150) * WIDTH + 200) * 2]};
-                else
-                    sample_mid = {memory[COLOR_ADDR + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2 + 1], memory[COLOR_ADDR + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2]};
-                $display("SAMPLES scene=%0s clear=%04x interior=%04x exterior=%04x", scene, sample0, sample_mid, sample_out);
-                if (sample0 !== 16'hf800 || sample_out !== 16'hf800) $fatal(1, "clear/exterior expected red got %04x %04x", sample0, sample_out);
-                if (scene != "s1" && (sample_mid === 16'hf800 || (^sample_mid === 1'bx))) $fatal(1, "triangle interior is clear or unknown: %04x", sample_mid);
-                $display("PASS scene=%0s samples=%04x/%04x/%04x", scene, sample0, sample_mid, sample_out);
-                $finish;
+        submission_offset = 0;
+        submission_index = 0;
+        while (submission_offset < cmd_count) begin
+            submission_words = (command_words[submission_offset] & 28'h0fff_ffff) / 4 + 2;
+            axi_read(16'h002c, completed_before);
+            axi_write(16'h001c, CMD_ADDR + submission_offset * 4);
+            axi_write(16'h0020, submission_words);
+            axi_write(16'h0024, 1);
+            timeout = 0;
+            command_complete = 0;
+            while ((timeout < poll_limit) && (command_complete == 0)) begin
+                axi_read(16'h002c, status);
+                if (status == completed_before + 1) begin
+                    $display("RESULT scene=%0s submission=%0d cycles=%0d command_words=%0d",
+                             scene, submission_index, cycle_count, submission_words);
+                    command_complete = 1;
+                end
+                timeout = timeout + 1;
             end
-            timeout = timeout + 1;
+            if (command_complete == 0) begin
+                axi_read(16'h000c, status);
+                print_timeout;
+                $fatal(1, "completion timeout");
+            end
+            if (submission_index == patch_after) load_ddr(patch_file);
+            submission_offset = submission_offset + submission_words;
+            submission_index = submission_index + 1;
         end
-        axi_read(16'h000c, status);
-        print_timeout;
-        $fatal(1, "completion timeout");
+        dump_ppm(ppm_file);
+        for (i = 0; i < COLOR_BYTES; i = i + 1)
+            if (^byte_at(framebuffer_addr + i) === 1'bx)
+                $fatal(1, "framebuffer contains unknown byte at %0d", i);
+        if (capture_mode != 0) begin
+            $display("PASS scene=%0s submissions=%0d", scene, submission_index);
+        end else begin
+            sample0 = {byte_at(framebuffer_addr + 1), byte_at(framebuffer_addr)};
+            sample_out = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2 + 1),
+                          byte_at(framebuffer_addr + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2)};
+            if (scene == "s4")
+                sample_mid = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 150) * WIDTH + 200) * 2 + 1),
+                              byte_at(framebuffer_addr + ((HEIGHT - 1 - 150) * WIDTH + 200) * 2)};
+            else
+                sample_mid = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2 + 1),
+                              byte_at(framebuffer_addr + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2)};
+            $display("SAMPLES scene=%0s clear=%04x interior=%04x exterior=%04x", scene, sample0, sample_mid, sample_out);
+            if (sample0 !== 16'hf800 || sample_out !== 16'hf800) $fatal(1, "clear/exterior expected red got %04x %04x", sample0, sample_out);
+            if (scene != "s1" && (sample_mid === 16'hf800 || (^sample_mid === 1'bx))) $fatal(1, "triangle interior is clear or unknown: %04x", sample_mid);
+            $display("PASS scene=%0s samples=%04x/%04x/%04x", scene, sample0, sample_mid, sample_out);
+        end
+        $finish;
     end
 endmodule

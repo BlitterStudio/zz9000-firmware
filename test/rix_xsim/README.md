@@ -18,23 +18,60 @@ TMU0 and a texture source are configured. A MiniGL state mapper therefore must
 provide a valid texture state/page and retain a texture texenv source even for
 flat-primary-colour rendering.
 
-## S4 XSim classification
+## Captured MiniGL scenes
 
-S4 exposes an upstream RasterIX simulation defect, not an external DDR-model
-or command-stream X. At cycles 70051–70064, `TMU0.step2_texel00` is `ffff`
-while `step2_texel01`, `step2_texel10`, and `step2_texel11` are X. At cycle
-70064, `TexEnv` emits `xxxxxxff`; `PixelPipeline` commits that colour at
-cycle 70068 for `(279,91)`, and the colour buffer later writes it to DDR.
-The attribute colour and UV are known (`00ff00ff`, `(0,0)`).
+`run_xsim.bat ROOT OUT SCENE LATENCY` automatically selects capture mode when
+`OUT\SCENE\commands.hex` (or the singular `command.hex`) and `ddr.hex` exist.
+It passes `CMDS`, `DDR`, `PPM`, and `SCENE` to the testbench; the output is
+`OUT\SCENE\frame.ppm`. For example:
 
-The uninitialised values are the unneeded neighbour slots in
-`TextureReaderContext.v:47-50`. With nearest filtering,
-`TextureReaderController.v:71-76` deliberately treats neighbours as cache
-hits, so it fills only texel 00. `TextureReaderContext.v:76-89` nevertheless
-copies all four registers when it samples; registers 01/10/11 have no reset.
-`TextureFilter.v:115-134` correctly selects texel 00 for nearest filtering,
-but `TexEnv` can still observe the stale neighbour-derived pipeline state
-during the sparse radial stream. This is an RTL valid/data hazard, not a
-defined Xilinx power-up value; a production fix belongs upstream in the
-TextureReader/TexEnv pipeline. The testbench retains the full-frame X check
-and reports the condition rather than treating it as a simulator artefact.
+```bat
+run_xsim.bat D:\Github\zz9000-rasterix-fit D:\captures cleared 2
+```
+
+`commands.hex` contains one little-endian 32-bit DSE word per line. It may
+concatenate submissions: every buffer starts with
+`90000000 | parser_byte_count`, followed by its zero address word and parser
+words. The harness loads the words contiguously from `0x00100000` and submits
+each buffer in order after the prior completion.
+
+`ddr.hex` is a sparse, `$readmemh`-style byte file. Use `@` plus an eight-digit
+physical byte address on its own line, then one two-digit byte value per line;
+the address advances after each value. Unspecified bytes are zero:
+
+```text
+@00380000
+ff
+00
+```
+
+The harness maps MiniGL's `0x07820000` color and `0x07b20000` depth buffers
+to compact backing arrays, and maps the capture's 24 MiB texture pool from
+`0x00380000`; the sparse preload represents omitted bytes as zero. It writes
+the PPM from the physical color location. Direct single-buffer `CMD`/`TEXTURE`
+operation remains the S1–S4 path.
+For a mixed CPU/FPGA frame, an optional `handoff.ddr` is a sparse target
+snapshot written by the CPU fallback. The launcher applies it after captured
+submission 1 and before submission 2, preserving the real target hand-off.
+`compare_frames.py cpu.ppm frame.ppm diff.png comparison.json` quantizes the
+CPU RGBA reference to RGB565 before comparing it. Its pass limits are a
+one-LSB channel maximum, mean at most 0.02 LSB, and at most 0.25% of pixels
+either beyond one LSB or coverage mismatches. RGB565 quantization itself is
+lossless under this comparison; the nonzero aggregate allowance is reserved
+for a one-pixel raster edge band, not broad state, texture, or byte-order
+errors.
+
+
+
+## Texture-reader and conversion regressions
+
+The captured MiniGL scenes exercise three RTL boundary cases that the original
+synthetic scenes did not. `TextureReaderContext` emits a four-texel sample
+even when nearest filtering loaded only texel 00; all lanes are reset so
+unused neighbours cannot become unknown pipeline data. `TexEnv` advances its
+operand registers only on a valid input transfer, preserving data alignment
+through sparse texture-cache response streams. `FloatToInt` treats a zero
+right shift as having no discarded rounding bit rather than indexing bit `-1`;
+this occurs when converting normalized colour values in the `[0.5, 1.0)`
+range. The full-frame capture mode rejects any framebuffer unknowns, so all
+three regressions are covered by the real service streams.

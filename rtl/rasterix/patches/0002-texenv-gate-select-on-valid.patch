@@ -1,0 +1,12 @@
+diff --git a/RasterIX/TexEnv.v b/RasterIX/TexEnv.v
+index 20ee2a24..46f98da3 100644
+--- a/RasterIX/TexEnv.v
++++ b/RasterIX/TexEnv.v
+@@ -218,7 +218,7 @@ module TexEnv
+     reg signed [SUB_PIXEL_WIDTH_SIGNED - 1 : 0] v30;
+     reg signed [SUB_PIXEL_WIDTH_SIGNED - 1 : 0] v31;
+     reg signed [SUB_PIXEL_WIDTH_SIGNED - 1 : 0] v32;
+     reg signed [SUB_PIXEL_WIDTH_SIGNED - 1 : 0] v33;
+     always @(posedge aclk)
+-    if (ce) begin : SelectColor
++    if (ce && s_valid) begin : SelectColor
