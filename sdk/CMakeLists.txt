@@ -499,6 +499,7 @@ add_library(zzplay_core STATIC
   tools/zzplay/zzplay-options.c
   tools/zzplay/zzplay-path.c
   tools/zzplay/zzplay-playlist.c
+  tools/zzplay/zzplay-rexx-commands.c
   tools/zzplay/zzplay-sys.c
   tools/zzplay/zzplay-prefs.c
   tools/zzplay/zzplay-probe.c
@@ -619,6 +620,13 @@ add_executable(zzplay_playlist_test
 
 target_link_libraries(zzplay_playlist_test PRIVATE zzplay_core)
 add_test(NAME zzplay_playlist_test COMMAND zzplay_playlist_test)
+
+add_executable(zzplay_rexx_test
+  tests/zzplay_rexx_test.c
+)
+
+target_link_libraries(zzplay_rexx_test PRIVATE zzplay_core)
+add_test(NAME zzplay_rexx_test COMMAND zzplay_rexx_test)
 
 add_executable(zzplay_prefs_test
   tests/zzplay_prefs_test.c

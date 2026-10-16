@@ -1075,8 +1075,9 @@ static void open_settings_window(void)
 }
 
 /* Drops can expand drawers and playlists synchronously, so retain the modal
- * gate for them. ASL and About requesters use zzplay-requester.c instead. */
-static void execute_modal_op(ZZPlayModal op)
+ * gate for them. ASL and About requesters use zzplay-requester.c instead;
+ * the ARexx port runs its own gated commands. */
+static void add_dropped_files(void)
 {
   ZZPlayController *ctl;
   ZZPlayPlaylist *pl;
@@ -1084,7 +1085,7 @@ static void execute_modal_op(ZZPlayModal op)
   uint32_t count_before;
   uint32_t i;
 
-  if (!gui_context || op != ZZPLAY_MODAL_ADD_DROPPED) {
+  if (!gui_context) {
     return;
   }
   ctl = gui_context->controller;
@@ -1693,6 +1694,17 @@ int zzplay_gui_is_open(void)
   return (player_win != 0) ? 1 : 0;
 }
 
+int zzplay_gui_show(void)
+{
+  if (!player_win) {
+    return 0;
+  }
+  ScreenToFront(player_win->WScreen);
+  WindowToFront(player_win);
+  ActivateWindow(player_win);
+  return 1;
+}
+
 uint32_t zzplay_gui_signal_mask(void)
 {
   uint32_t mask = 0U;
@@ -1771,7 +1783,7 @@ void zzplay_gui_poll(void)
       !(settings_win && gui_port_pending(settings_win->UserPort)) &&
       !gui_port_pending(app_port) && ctl->dirty == 0U && !refresh_pending &&
       !settings_refresh_pending &&
-      zzplay_controller_modal_ready(ctl) == ZZPLAY_MODAL_NONE) {
+      zzplay_controller_modal_ready(ctl) != ZZPLAY_MODAL_ADD_DROPPED) {
     return;
   }
 
@@ -2169,10 +2181,10 @@ void zzplay_gui_poll(void)
     }
   }
 
-  /* 4. Modal Gate execution */
+  /* 4. Modal Gate execution: only the operation this window queued. */
   modal_op = zzplay_controller_modal_ready(ctl);
-  if (modal_op != ZZPLAY_MODAL_NONE) {
-    execute_modal_op(modal_op);
+  if (modal_op == ZZPLAY_MODAL_ADD_DROPPED) {
+    add_dropped_files();
     zzplay_controller_end_modal(ctl);
   }
   /* Drops that arrived while another operation held the gate. */

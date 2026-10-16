@@ -47,6 +47,10 @@ void zzplay_gui_close(void);
 
 int zzplay_gui_is_open(void);
 
+/* Bring the player window's screen and the window to the front and
+ * activate it. Returns 0 when it is not open. */
+int zzplay_gui_show(void);
+
 /* Signals to Wait() on while idle: window ports and the AppWindow port. */
 uint32_t zzplay_gui_signal_mask(void);
 

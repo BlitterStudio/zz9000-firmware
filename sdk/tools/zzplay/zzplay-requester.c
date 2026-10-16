@@ -21,6 +21,7 @@
 
 #include "zzplay-formats.h"
 #include "zzplay-files.h"
+#include "zzplay-rexx.h"
 
 extern struct Library *AslBase;
 
@@ -220,6 +221,11 @@ static void requester_show_about(void)
 
   requester_copy(text, sizeof(text),
                  requester.version[0] ? requester.version : "ZZPlay");
+  if (zzplay_rexx_port_name()) {
+    strncat(text, "\nARexx port: ", sizeof(text) - strlen(text) - 1U);
+    strncat(text, zzplay_rexx_port_name(),
+            sizeof(text) - strlen(text) - 1U);
+  }
   strncat(text, "\n\nRegistered formats:\n",
           sizeof(text) - strlen(text) - 1U);
   count = zzplay_format_count();

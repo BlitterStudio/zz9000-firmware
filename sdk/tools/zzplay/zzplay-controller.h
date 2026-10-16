@@ -1,8 +1,8 @@
 /* Playback controller: the one place where user input becomes player state.
  *
  * Every input surface (video window keys, player window gadgets and menus,
- * Ctrl-C) feeds this struct; every playback engine reads it. Nothing here
- * touches AmigaOS, so the whole state machine is host-testable.
+ * the ARexx port, Ctrl-C) feeds this struct; every playback engine reads it.
+ * Nothing here touches AmigaOS, so the whole state machine is host-testable.
  *
  * Three kinds of state live here:
  *
@@ -50,8 +50,9 @@ typedef enum ZZPlayRequest {
   ZZPLAY_REQUEST_QUIT
 } ZZPlayRequest;
 
-/* Logical requester and synchronous-operation kinds. Only ADD_DROPPED uses
- * the controller modal gate; the requester kinds run in a child process. */
+/* Logical requester and synchronous-operation kinds. ADD_DROPPED and REXX
+ * use the controller modal gate; the requester kinds run in a child
+ * process. */
 typedef enum ZZPlayModal {
   ZZPLAY_MODAL_NONE = 0,
   ZZPLAY_MODAL_OPEN_FILES,      /* replace the playlist, then play */
@@ -60,7 +61,8 @@ typedef enum ZZPlayModal {
   ZZPLAY_MODAL_LOAD_PLAYLIST,
   ZZPLAY_MODAL_SAVE_PLAYLIST,
   ZZPLAY_MODAL_ABOUT,
-  ZZPLAY_MODAL_ADD_DROPPED      /* expand files dropped on the window */
+  ZZPLAY_MODAL_ADD_DROPPED,     /* expand files dropped on the window */
+  ZZPLAY_MODAL_REXX             /* an ARexx command that expands paths */
 } ZZPlayModal;
 
 #define ZZPLAY_NOW_TEXT_MAX 96U
@@ -162,7 +164,9 @@ ZZPlayRequest zzplay_controller_take_request(ZZPlayController *ctl,
 /* --- Engine side --- */
 
 /* An item starts: not paused, position and per-item info cleared (the
- * message line is kept), everything dirty. */
+ * message line is kept), everything dirty. With a modal operation still
+ * queued it starts paused by the gate instead, which resumes it after the
+ * operation. */
 void zzplay_controller_item_begin(ZZPlayController *ctl);
 /* The item ended: idle, unpaused, any modal pause released. */
 void zzplay_controller_item_end(ZZPlayController *ctl);
