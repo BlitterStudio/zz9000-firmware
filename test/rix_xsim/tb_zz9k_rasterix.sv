@@ -13,6 +13,11 @@ module tb_zz9k_rasterix;
     localparam integer HEIGHT = 480;
     localparam integer COLOR_BYTES = WIDTH * HEIGHT * 2;
     localparam integer DEPTH_BYTES = WIDTH * HEIGHT * 4;
+    // RasterIX aligns each external framebuffer transfer to 2048 bytes.
+    // MiniGL's fixed ABI reserves complete 3 MiB surfaces, so model those
+    // ranges rather than only the 640x480 visible rectangles.
+    localparam integer MINIGL_COLOR_MEMORY_BYTES = 3 * 1024 * 1024;
+    localparam integer MINIGL_DEPTH_MEMORY_BYTES = 3 * 1024 * 1024;
     localparam integer TEXTURE_POOL_BYTES = 24 * 1024 * 1024;
     localparam integer TEXTURE_BYTES = 2048;
 
@@ -127,8 +132,8 @@ module tb_zz9k_rasterix;
     );
 
     reg [7:0] memory [0:MEM_BYTES-1];
-    reg [7:0] color_memory [0:COLOR_BYTES-1];
-    reg [7:0] depth_memory [0:DEPTH_BYTES-1];
+    reg [7:0] color_memory [0:MINIGL_COLOR_MEMORY_BYTES-1];
+    reg [7:0] depth_memory [0:MINIGL_DEPTH_MEMORY_BYTES-1];
     reg [7:0] texture_memory [0:TEXTURE_POOL_BYTES-1];
     reg [31:0] command_words [0:262143];
     reg [7:0] texture_bytes [0:TEXTURE_BYTES-1];
@@ -149,14 +154,15 @@ module tb_zz9k_rasterix;
     reg [31:0] write_addr;
     integer write_left;
     reg write_active;
+    reg write_error;
     reg [3:0] write_id;
 
     function [7:0] byte_at;
         input [31:0] address;
         begin
-            if ((address >= MINIGL_COLOR_ADDR) && (address < MINIGL_COLOR_ADDR + COLOR_BYTES))
+            if ((address >= MINIGL_COLOR_ADDR) && (address < MINIGL_COLOR_ADDR + MINIGL_COLOR_MEMORY_BYTES))
                 byte_at = color_memory[address - MINIGL_COLOR_ADDR];
-            else if ((address >= MINIGL_DEPTH_ADDR) && (address < MINIGL_DEPTH_ADDR + DEPTH_BYTES))
+            else if ((address >= MINIGL_DEPTH_ADDR) && (address < MINIGL_DEPTH_ADDR + MINIGL_DEPTH_MEMORY_BYTES))
                 byte_at = depth_memory[address - MINIGL_DEPTH_ADDR];
             else if ((address >= MINIGL_TEXTURE_ADDR) && (address < MINIGL_TEXTURE_ADDR + TEXTURE_POOL_BYTES))
                 byte_at = texture_memory[address - MINIGL_TEXTURE_ADDR];
@@ -170,12 +176,23 @@ module tb_zz9k_rasterix;
         input [31:0] address;
         begin
             address_mapped = ((address >= MINIGL_COLOR_ADDR) &&
-                              (address < MINIGL_COLOR_ADDR + COLOR_BYTES)) ||
+                              (address < MINIGL_COLOR_ADDR + MINIGL_COLOR_MEMORY_BYTES)) ||
                              ((address >= MINIGL_DEPTH_ADDR) &&
-                              (address < MINIGL_DEPTH_ADDR + DEPTH_BYTES)) ||
+                              (address < MINIGL_DEPTH_ADDR + MINIGL_DEPTH_MEMORY_BYTES)) ||
                              ((address >= MINIGL_TEXTURE_ADDR) &&
                               (address < MINIGL_TEXTURE_ADDR + TEXTURE_POOL_BYTES)) ||
                              (address < MEM_BYTES);
+        end
+    endfunction
+
+    function write_word_mapped;
+        input [31:0] address;
+        input [3:0] strobe;
+        begin
+            write_word_mapped = ((!strobe[0] || address_mapped(address)) &&
+                                 (!strobe[1] || address_mapped(address + 1)) &&
+                                 (!strobe[2] || address_mapped(address + 2)) &&
+                                 (!strobe[3] || address_mapped(address + 3)));
         end
     endfunction
 
@@ -183,9 +200,9 @@ module tb_zz9k_rasterix;
         input [31:0] address;
         input [7:0] value;
         begin
-            if ((address >= MINIGL_COLOR_ADDR) && (address < MINIGL_COLOR_ADDR + COLOR_BYTES))
+            if ((address >= MINIGL_COLOR_ADDR) && (address < MINIGL_COLOR_ADDR + MINIGL_COLOR_MEMORY_BYTES))
                 color_memory[address - MINIGL_COLOR_ADDR] = value;
-            else if ((address >= MINIGL_DEPTH_ADDR) && (address < MINIGL_DEPTH_ADDR + DEPTH_BYTES))
+            else if ((address >= MINIGL_DEPTH_ADDR) && (address < MINIGL_DEPTH_ADDR + MINIGL_DEPTH_MEMORY_BYTES))
                 depth_memory[address - MINIGL_DEPTH_ADDR] = value;
             else if ((address >= MINIGL_TEXTURE_ADDR) && (address < MINIGL_TEXTURE_ADDR + TEXTURE_POOL_BYTES))
                 texture_memory[address - MINIGL_TEXTURE_ADDR] = value;
@@ -391,9 +408,15 @@ module tb_zz9k_rasterix;
             write_active <= 1;
             write_addr <= m_axi_awaddr;
             write_left <= m_axi_awlen + 1;
+            write_error <= 0;
             write_id <= m_axi_awid;
         end
         if (m_axi_wvalid && m_axi_wready) begin
+            if (!write_word_mapped(write_addr, m_axi_wstrb)) begin
+                $error("renderer AXI write outside sparse DDR: %08x strb=%x",
+                       write_addr, m_axi_wstrb);
+                write_error <= 1;
+            end
             if (write_addr == 32'h0021_7a2c)
                 $display("S4_X_DDR_WRITE cycle=%0d addr=%08x data=%08x strb=%x",
                          cycle_count, write_addr, m_axi_wdata, m_axi_wstrb);
@@ -408,7 +431,7 @@ module tb_zz9k_rasterix;
                 write_active <= 0;
                 m_axi_bvalid <= 1;
                 m_axi_bid <= write_id;
-                m_axi_bresp <= 0;
+                m_axi_bresp <= (write_error || !write_word_mapped(write_addr, m_axi_wstrb)) ? 2 : 0;
             end
         end
         if (m_axi_bvalid && m_axi_bready) m_axi_bvalid <= 0;
@@ -547,7 +570,7 @@ module tb_zz9k_rasterix;
         m_axi_awready = 0; m_axi_wready = 0; m_axi_bid = 0; m_axi_bresp = 0; m_axi_bvalid = 0;
         m_axi_arready = 0; m_axi_rid = 0; m_axi_rdata = 0; m_axi_rresp = 0; m_axi_rlast = 0; m_axi_rvalid = 0;
         m_cmd_axi_arready = 0; m_cmd_axi_rid = 0; m_cmd_axi_rdata = 0; m_cmd_axi_rresp = 0; m_cmd_axi_rlast = 0; m_cmd_axi_rvalid = 0;
-        cmd_read_active = 0; render_read_active = 0; write_active = 0; cmd_read_left = 0; render_read_left = 0; write_left = 0;
+        cmd_read_active = 0; render_read_active = 0; write_active = 0; write_error = 0; cmd_read_left = 0; render_read_left = 0; write_left = 0;
         render_read_id = 0; render_read_size = 0;
         commands_file = "";
         ddr_file = "";
@@ -573,8 +596,8 @@ module tb_zz9k_rasterix;
         poll_limit = 2000000;
         if ($value$plusargs("POLL_LIMIT=%d", poll_limit)) ;
         for (i = 0; i < MEM_BYTES; i = i + 1) memory[i] = 0;
-        for (i = 0; i < COLOR_BYTES; i = i + 1) color_memory[i] = 0;
-        for (i = 0; i < DEPTH_BYTES; i = i + 1) depth_memory[i] = 0;
+        for (i = 0; i < MINIGL_COLOR_MEMORY_BYTES; i = i + 1) color_memory[i] = 0;
+        for (i = 0; i < MINIGL_DEPTH_MEMORY_BYTES; i = i + 1) depth_memory[i] = 0;
         for (i = 0; i < TEXTURE_POOL_BYTES; i = i + 1) texture_memory[i] = 0;
         if (capture_mode != 0) load_ddr(ddr_file);
         if (texture_file != "") begin
