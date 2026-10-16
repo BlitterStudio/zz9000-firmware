@@ -433,7 +433,7 @@ module RasterIXCoreEF #(
                 .s_fetch_arvalid(m_depth_arvalid),
                 .s_fetch_arlast(m_depth_arlast),
                 .s_fetch_arready(m_depth_arready),
-                .s_fetch_araddr(m_depth_araddr),
+                .s_fetch_araddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_depth_araddr }),
 
                 .s_frag_rvalid(m_depth_rvalid),
                 .s_frag_rready(m_depth_rready),
@@ -445,7 +445,7 @@ module RasterIXCoreEF #(
                 .s_frag_wready(m_depth_wready),
                 .s_frag_wdata(m_depth_wdata),
                 .s_frag_wstrb(m_depth_wstrb),
-                .s_frag_waddr(m_depth_waddr),
+                .s_frag_waddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_depth_waddr }),
                 .s_frag_wxpos(m_depth_wscreenPosX),
                 .s_frag_wypos(m_depth_wscreenPosY),
 
@@ -556,7 +556,7 @@ module RasterIXCoreEF #(
         .s_fetch_arvalid(m_color_arvalid),
         .s_fetch_arlast(m_color_arlast),
         .s_fetch_arready(m_color_arready),
-        .s_fetch_araddr(m_color_araddr),
+        .s_fetch_araddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_color_araddr }),
 
         .s_frag_rvalid(m_color_rvalid),
         .s_frag_rready(m_color_rready),
@@ -568,7 +568,7 @@ module RasterIXCoreEF #(
         .s_frag_wready(m_color_wready),
         .s_frag_wdata(XXX2RGB565(ColorBufferReduceVec(m_color_wdata))),
         .s_frag_wstrb(m_color_wstrb),
-        .s_frag_waddr(m_color_waddr),
+        .s_frag_waddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_color_waddr }),
         .s_frag_wxpos(m_color_wscreenPosX),
         .s_frag_wypos(m_color_wscreenPosY),
 
@@ -646,7 +646,7 @@ module RasterIXCoreEF #(
                 .s_fetch_arvalid(m_stencil_arvalid),
                 .s_fetch_arlast(m_stencil_arlast),
                 .s_fetch_arready(m_stencil_arready),
-                .s_fetch_araddr(m_stencil_araddr),
+                .s_fetch_araddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_stencil_araddr }),
 
                 .s_frag_rvalid(m_stencil_rvalid),
                 .s_frag_rready(m_stencil_rready),
@@ -658,7 +658,7 @@ module RasterIXCoreEF #(
                 .s_frag_wready(m_stencil_wready),
                 .s_frag_wdata(m_stencil_wdata),
                 .s_frag_wstrb(m_stencil_wstrb),
-                .s_frag_waddr(m_stencil_waddr),
+                .s_frag_waddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_stencil_waddr }),
                 .s_frag_wxpos(m_stencil_wscreenPosX),
                 .s_frag_wypos(m_stencil_wscreenPosY),
 

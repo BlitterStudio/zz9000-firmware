@@ -45,7 +45,7 @@ The vendored closure derives from RasterIX superproject `9269a01c9bd4c3342bfa70e
 ## Command-parser reset initialization
 
 - File: `RasterIX/CommandParser.v`
-- Patch: `patches/0005-command-parser-reset-initialization.patch`
+- Patch: `patches/0006-command-parser-reset-initialization.patch`
 - Evidence: `colorBufferApply`, `depthBufferApply`, `stencilBufferApply`, and
   related command registers were uninitialized on reset. In simulation, their
   undetermined `1'bx` state propagated through `colorBufferApplied` and
@@ -53,3 +53,18 @@ The vendored closure derives from RasterIX superproject `9269a01c9bd4c3342bfa70e
   `s_cmd_axis_tready = 0` and deadlocking the initial DMA stream.
 - Synthesis safety: adds defined reset values (0) to output registers; command
   decoding and execution cycles are unchanged.
+
+## EF framebuffer addresses are zero-extended
+
+- File: `RasterIX/RasterIXCoreEF.v`
+- Patch: `patches/0007-ef-zero-extend-framebuffer-addresses.patch`
+- Evidence: `m_color_araddr`/`m_color_waddr` (and depth/stencil equivalents)
+  are `FRAMEBUFFER_SIZE_IN_PIXEL_LG` bits wide while the `StreamFramebuffer`
+  fragment ports are `ADDR_WIDTH` bits. Passing the narrow vector undriven the
+  upper bits, which simulated as `Z`; `FramebufferMMU`'s
+  `(addr << PIXEL_WIDTH_LG) + confAddr` then produced `X` addresses, so every
+  rasterized fragment write was dropped and the EF triangle scenes rendered an
+  all-clear framebuffer. Zero-extending the pixel index first makes the same
+  scenes pass pixel checks.
+- Synthesis safety: only the constant-zero upper address bits change; the
+  pixel index and byte address arithmetic are unchanged.

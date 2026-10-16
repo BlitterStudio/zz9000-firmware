@@ -697,6 +697,21 @@ module tb_zz9k_rasterix;
         if (capture_mode != 0) begin
             $display("PASS scene=%0s submissions=%0d", scene, submission_index);
         end else begin
+            begin : CountNonClear
+                integer non_clear_count, first_nc_addr;
+                reg [15:0] first_nc_val;
+                non_clear_count = 0; first_nc_addr = -1; first_nc_val = 0;
+                for (i = 0; i < COLOR_BYTES; i = i + 2) begin
+                    if ({byte_at(framebuffer_addr + i + 1), byte_at(framebuffer_addr + i)} != 16'hf800) begin
+                        if (non_clear_count == 0) begin
+                            first_nc_addr = i;
+                            first_nc_val = {byte_at(framebuffer_addr + i + 1), byte_at(framebuffer_addr + i)};
+                        end
+                        non_clear_count = non_clear_count + 1;
+                    end
+                end
+                $display("NON_CLEAR_PIXELS = %0d first_addr=%x first_val=%04x", non_clear_count, first_nc_addr, first_nc_val);
+            end
             sample0 = {byte_at(framebuffer_addr + 1), byte_at(framebuffer_addr)};
             sample_out = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2 + 1),
                           byte_at(framebuffer_addr + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2)};

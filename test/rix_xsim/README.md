@@ -12,9 +12,10 @@
 
 The `ef-s1`–`ef-s4` counterparts set the same 640×480 RGB565 color target and
 16-bit depth target, but execute a single full-target color/depth `MEMSET` and
-draw directly to DDR.  They intentionally emit no band offsets, `COMMIT`, or
-`READ`.  Select the implementation with
-`RASTERIX_VARIANT=ef test/rix_xsim/run_xsim.sh s1 2`; IF remains the default.
+draw directly to DDR.  The frame ends with an upstream-style `COMMIT` flush
+(`Renderer::addCommitFramebufferCommand`); in EF that command only drains the
+write pipeline and acts as a no-op frame boundary.  The scenes emit no band
+offsets or `READ`.  Select the implementation with
 
 The DDR model accepts one render read or write transaction at a time.  It
 deasserts read-address readiness every fifth cycle, write-address readiness

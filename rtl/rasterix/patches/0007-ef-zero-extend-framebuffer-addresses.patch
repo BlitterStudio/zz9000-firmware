@@ -1,0 +1,21 @@
+diff --git a/RasterIX/RasterIXCoreEF.v b/RasterIX/RasterIXCoreEF.v
+--- a/RasterIX/RasterIXCoreEF.v
++++ b/RasterIX/RasterIXCoreEF.v
+@@ -433,8 +433,8 @@ module RasterIXCoreEF #(
+-                .s_fetch_araddr(m_depth_araddr),
++                .s_fetch_araddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_depth_araddr }),
+@@ -445,8 +445,8 @@ module RasterIXCoreEF #(
+-                .s_frag_waddr(m_depth_waddr),
++                .s_frag_waddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_depth_waddr }),
+@@ -556,8 +556,8 @@ module RasterIXCoreEF #(
+-        .s_fetch_araddr(m_color_araddr),
++        .s_fetch_araddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_color_araddr }),
+@@ -568,8 +568,8 @@ module RasterIXCoreEF #(
+-        .s_frag_waddr(m_color_waddr),
++        .s_frag_waddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_color_waddr }),
+@@ -646,8 +646,8 @@ module RasterIXCoreEF #(
+-                .s_fetch_araddr(m_stencil_araddr),
++                .s_fetch_araddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_stencil_araddr }),
+@@ -658,8 +658,8 @@ module RasterIXCoreEF #(
+-                .s_frag_waddr(m_stencil_waddr),
++                .s_frag_waddr({ { (ADDR_WIDTH - FRAMEBUFFER_SIZE_IN_PIXEL_LG) { 1'b0 } }, m_stencil_waddr }),

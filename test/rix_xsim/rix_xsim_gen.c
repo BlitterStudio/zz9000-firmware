@@ -176,6 +176,11 @@ static int emit_external_frame(RixCmdWriter *writer, const RixTriangle *triangle
             return 0;
         }
     }
+    if (!rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_COMMIT |
+                              RIX_FRAMEBUFFER_COLOR |
+                              RIX_FRAMEBUFFER_DEPTH, pixels)) {
+        return 0;
+    }
     return 1;
 }
 
