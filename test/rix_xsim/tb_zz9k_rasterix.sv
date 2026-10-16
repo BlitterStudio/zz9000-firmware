@@ -569,6 +569,7 @@ module tb_zz9k_rasterix;
     integer command_complete;
     integer multi_command;
     integer capture_mode;
+    integer size_probe;
     integer patch_after;
     integer timeout;
     integer poll_limit;
@@ -593,6 +594,7 @@ module tb_zz9k_rasterix;
         end else
             command_file = commands_file;
         capture_mode = $value$plusargs("DDR=%s", ddr_file);
+        size_probe = $test$plusargs("SIZE_PROBE");
         if ($value$plusargs("PATCH=%s", patch_file)) begin
             if (!$value$plusargs("PATCH_AFTER=%d", patch_after) || patch_after < 0)
                 $fatal(1, "PATCH requires non-negative PATCH_AFTER");
@@ -655,6 +657,11 @@ module tb_zz9k_rasterix;
                 if (status == completed_before + 1) begin
                     $display("RESULT scene=%0s submission=%0d cycles=%0d command_words=%0d",
                              scene, submission_index, cycle_count, submission_words);
+                    $display("IF_COUNTERS adapter=%0d handler_state=%0d handler_addr=%0d handler_beats=%0d",
+                             dut.renderer.axisToAxiCrossbar.axisToAxiAdapter.counter,
+                             dut.renderer.rixif.colorBuffer.commandHandler.cmdState,
+                             dut.renderer.rixif.colorBuffer.commandHandler.cmdMemAddr,
+                             dut.renderer.rixif.colorBuffer.commandHandler.cmdFbSizeInBeats);
                     command_complete = 1;
                 end
                 timeout = timeout + 1;
@@ -672,7 +679,7 @@ module tb_zz9k_rasterix;
         for (i = 0; i < COLOR_BYTES; i = i + 1)
             if (^byte_at(framebuffer_addr + i) === 1'bx)
                 $fatal(1, "framebuffer contains unknown byte at %0d", i);
-        if (capture_mode != 0) begin
+        if (capture_mode != 0 || size_probe != 0) begin
             $display("PASS scene=%0s submissions=%0d", scene, submission_index);
         end else begin
             sample0 = {byte_at(framebuffer_addr + 1), byte_at(framebuffer_addr)};

@@ -1,6 +1,6 @@
 # Local RasterIX patches
 
-The vendored closure derives from RasterIX superproject `9269a01c9bd4c3342bfa70ef8e3cdd751c15c6d0` (Float submodule `060bde1fc3c480f46495b740ddbe2bdf24958491`). The three files below intentionally differ from those blobs; every other file in `RasterIX`, `Float`, and `3rdParty` remains byte-identical and is checked by `test/rasterix/run.sh`.
+The four files below intentionally differ from those blobs; every other file in `RasterIX`, `Float`, and `3rdParty` remains byte-identical and is checked by `test/rasterix/run.sh`.
 
 ## FloatToInt zero-shift rounding
 
@@ -41,3 +41,22 @@ The vendored closure derives from RasterIX superproject `9269a01c9bd4c3342bfa70e
   undriven. The disabled depth branch had the equivalent error.
 - Synthesis safety: every external disabled-buffer port is now tied to its
   defined idle value; enabled-buffer generate branches are unchanged.
+
+## Internal framebuffer stream length is clamped
+
+- File: `RasterIX/InternalFramebufferCommandHandler.v`
+- Patch: `patches/0005-clamp-internal-framebuffer-streams.patch`
+- Evidence: with 16,384 pixels of internal color memory and two pixels per
+  stream beat, a 307,200-pixel COMMIT advertised 153,600 beats to the
+  `AxisToAxiAdapter` but the truncated handler limit stopped at 6,144 beats.
+  The adapter then held the command open indefinitely. The same mismatch
+  occurs whenever the requested length does not fit the internal address
+  width.
+- Stream semantics: the command size is converted once to beats, clamped to
+  the 8,192-beat internal memory capacity, and used both for the external
+  address transfer (COMMIT and READ) and the internal COMMIT/MEMSET terminal
+  condition. The one-bit-wider terminal count explicitly represents a full
+  band, rather than overloading zero after address wrap.
+- Synthesis safety: this changes only command-length bookkeeping and terminal
+  comparison widths; the framebuffer datapath, RAM addressing, and valid/ready
+  timing are unchanged.
