@@ -1,11 +1,15 @@
 # RasterIX XSim scenes
 
-`rix_xsim_gen.c` emits four real ZZ9000 RasterIX command streams for
-`tb_zz9k_rasterix.sv` and `run_xsim.bat`.
+`rix_xsim_gen.c` emits real ZZ9000 RasterIX command streams for
+`tb_zz9k_rasterix.sv` and `run_xsim.bat`, renders an analytic reference frame
+per scene with the exact `Rasterizer.v` edge rules, and gates replay through
+`compare_frames.py` full-image comparison via `run_scenes.sh` (builds the
+generator in gcc:13, replays `probe s1 s2 s3 s4`, fails on any mismatch).
 
 | Scene | Workload | TMU0 state |
 | --- | --- | --- |
 | `s1` | Clear and per-band colour commit | Enabled with an 8x8 white texture so the renderer configuration is consistent with draw scenes. |
+| `probe` | Asymmetric band-protocol probe: right triangles top-left/bottom-right and a 1-px vertical line crossing every band boundary. | Enabled with the 8x8 white texture; texenv uses the primary colour. |
 | `s2` | Flat-shaded green triangle | Enabled with the 8x8 white texture; texenv replaces with primary colour. |
 | `s3` | Textured triangle | Enabled with the deterministic 8x8 white texture. |
 | `s4` | 48-triangle radial stress scene | Enabled with the deterministic 8x8 white texture. |
