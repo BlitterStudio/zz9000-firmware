@@ -286,7 +286,10 @@ void zzplay_controller_item_begin(ZZPlayController *ctl)
     return;
   }
   ctl->item_active = 1;
-  ctl->paused = 0;
+  /* An operation queued as the previous item ended still waits for the
+   * gate: hold this item too, or it never opens while the list plays. */
+  ctl->paused = ctl->modal != ZZPLAY_MODAL_NONE ? 1 : 0;
+  ctl->modal_paused = ctl->paused;
   ctl->engine_paused = 0;
   ctl->fullscreen_changed = 0;
 

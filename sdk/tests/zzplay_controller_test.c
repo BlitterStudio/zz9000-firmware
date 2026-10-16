@@ -266,6 +266,23 @@ static int test_modal_gate(void)
   zzplay_controller_end_modal(&ctl);
   if (ctl.paused != 0) return 19;
 
+  /* Case 5: an operation queued as one item ended holds the next item,
+   * so the gate still opens while the playlist keeps playing. */
+  zzplay_controller_item_begin(&ctl);
+  if (!zzplay_controller_begin_modal(&ctl, ZZPLAY_MODAL_REXX)) return 20;
+  zzplay_controller_item_end(&ctl);
+  zzplay_controller_item_begin(&ctl);
+  if (!ctl.paused || !ctl.modal_paused) return 21;
+  if (zzplay_controller_modal_ready(&ctl) != ZZPLAY_MODAL_NONE) return 22;
+  zzplay_controller_set_engine_paused(&ctl, 1);
+  if (zzplay_controller_modal_ready(&ctl) != ZZPLAY_MODAL_REXX) return 23;
+  zzplay_controller_end_modal(&ctl);
+  if (ctl.paused) return 24;
+  /* Without a queued operation the next item starts playing. */
+  zzplay_controller_item_end(&ctl);
+  zzplay_controller_item_begin(&ctl);
+  if (ctl.paused || ctl.modal_paused) return 25;
+
   return 0;
 }
 
