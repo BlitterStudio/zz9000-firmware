@@ -760,8 +760,8 @@ module tb_zz9k_rasterix;
             sample_out = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2 + 1),
                           byte_at(framebuffer_addr + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2)};
             if (scene == "s4" || scene == "ef-s4")
-                sample_mid = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 150) * WIDTH + 200) * 2 + 1),
-                              byte_at(framebuffer_addr + ((HEIGHT - 1 - 150) * WIDTH + 200) * 2)};
+                sample_mid = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 330) * WIDTH + 200) * 2 + 1),
+                              byte_at(framebuffer_addr + ((HEIGHT - 1 - 330) * WIDTH + 200) * 2)};
             else
                 sample_mid = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2 + 1),
                               byte_at(framebuffer_addr + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2)};
