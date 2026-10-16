@@ -1,13 +1,22 @@
 @echo off
 setlocal EnableExtensions
 if "%~4"=="" (
-  echo Usage: run_xsim.bat ROOT OUT SCENE LATENCY
+  echo Usage: run_xsim.bat ROOT OUT SCENE LATENCY [if^|ef]
   exit /b 2
 )
 set ROOT=%~1
 set OUT=%~2
 set SCENE=%~3
 set LATENCY=%~4
+set VARIANT=%~5
+set XVLOG_VARIANT=
+if "%VARIANT%"=="" set VARIANT=if
+if /I "%VARIANT%"=="ef" (
+  set XVLOG_VARIANT=-d RASTERIX_VARIANT_EF
+) else if /I not "%VARIANT%"=="if" (
+  echo RasterIX variant must be if or ef
+  exit /b 2
+)
 if "%POLL_LIMIT%"=="" set POLL_LIMIT=2000000
 if "%TRACE_PIPE%"=="" set TRACE_PIPE=0
 set OUT_FWD=%OUT:\=/%
@@ -44,7 +53,7 @@ for %%F in ("%SIMROOT%\Float\rtl\float\*.v") do call xvlog --relax -sv -d UNITTE
 if errorlevel 1 exit /b %errorlevel%
 for %%F in ("%SIMROOT%\RasterIX\*.v") do call xvlog --relax -sv -d UNITTEST -i "%SIMROOT%\RasterIX" -i "%SIMROOT%\Float\rtl\float" -i "%SIMROOT%\3rdParty" -i "%SIMROOT%\3rdParty\verilog-axi" -i "%SIMROOT%\3rdParty\verilog-axis" "%%F"
 if errorlevel 1 exit /b %errorlevel%
-call xvlog --relax -sv -d UNITTEST -i "%SIMROOT%\RasterIX" -i "%SIMROOT%\Float\rtl\float" -i "%SIMROOT%\3rdParty" -i "%SIMROOT%\3rdParty\verilog-axi" -i "%SIMROOT%\3rdParty\verilog-axis" "%ROOT%\rtl\zz9k_rix\zz9k_cmd_fetcher.v" "%ROOT%\rtl\zz9k_rix\zz9k_rasterix.v" "%ROOT%\test\rix_xsim\tb_zz9k_rasterix.sv"
+call xvlog --relax -sv -d UNITTEST %XVLOG_VARIANT% -i "%SIMROOT%\RasterIX" -i "%SIMROOT%\Float\rtl\float" -i "%SIMROOT%\3rdParty" -i "%SIMROOT%\3rdParty\verilog-axi" -i "%SIMROOT%\3rdParty\verilog-axis" "%ROOT%\rtl\zz9k_rix\zz9k_cmd_fetcher.v" "%ROOT%\rtl\zz9k_rix\zz9k_rasterix.v" "%ROOT%\test\rix_xsim\tb_zz9k_rasterix.sv"
 if errorlevel 1 exit /b %errorlevel%
 call xvlog --relax "%XILINX_VIVADO%\data\verilog\src\glbl.v"
 if errorlevel 1 exit /b %errorlevel%

@@ -70,7 +70,7 @@ proc print_help {} {
   puts "$script_file -tclargs \[--capture-c28\]"
   puts "$script_file -tclargs \[--rasterix\]"
   puts "$script_file -tclargs \[--rasterix-tmu-count <1|2>\]"
-  puts "$script_file -tclargs \[--rasterix-framebuffer-size-lg <14|15>\]"
+  puts "$script_file -tclargs \[--rasterix-variant <if|ef>\]"
   puts "$script_file -tclargs \[--help\]\n"
   puts "Usage:"
   puts "Name                   Description"
@@ -86,7 +86,8 @@ proc print_help {} {
   puts "\[--capture-c28\]        Opt-in A4000 C28 native capture clock candidate.\n"
   puts "\[--rasterix\]           Include the opt-in RasterIX renderer fit trial.\n"
   puts "\[--rasterix-tmu-count\] Select one or two RasterIX TMUs (default 1).\n"
-  puts "\[--rasterix-framebuffer-size-lg\] Select 16k or 32k pixel band (default 14).\n"
+  puts "\[--rasterix-variant\] Select IF (default) or external-framebuffer EF.\n"
+  puts "\[--rasterix-framebuffer-size-lg\] Select 16k or 32k pixel band (IF only; default 14).\n"
   puts "\[--help\]               Print help information for this script"
   puts "-------------------------------------------------------------------------\n"
   exit 0
@@ -97,6 +98,7 @@ set capture_c28 0
 set rasterix 0
 set rasterix_tmu_count 1
 set rasterix_framebuffer_size_in_pixel_lg 14
+set rasterix_variant if
 
 if { $::argc > 0 } {
   for {set i 0} {$i < $::argc} {incr i} {
@@ -107,8 +109,8 @@ if { $::argc > 0 } {
       {^--no-autoboot$}  { set no_autoboot 1 }
       {^--capture-c28$}  { set capture_c28 1 }
       {^--rasterix-tmu-count$} { incr i; set rasterix_tmu_count [lindex $::argv $i] }
+      {^--rasterix-variant$} { incr i; set rasterix_variant [string tolower [lindex $::argv $i]] }
       {^--rasterix-framebuffer-size-lg$} { incr i; set rasterix_framebuffer_size_in_pixel_lg [lindex $::argv $i] }
-      {^--rasterix$}     { set rasterix 1 }
       {^--help$}         { print_help }
       default {
         if { [regexp {^-} $option] } {
@@ -122,6 +124,12 @@ if { $::argc > 0 } {
 
 if {$rasterix_tmu_count ni {1 2}} {
   error "RasterIX TMU count must be 1 or 2"
+}
+if {$rasterix_variant ni {if ef}} {
+  error "RasterIX variant must be if or ef"
+}
+if {$rasterix_variant eq "ef" && $rasterix_tmu_count != 1} {
+  error "RasterIX EF supports the TMU1 fit configuration only"
 }
 if {$rasterix_framebuffer_size_in_pixel_lg ni {14 15}} {
   error "RasterIX framebuffer band log2 must be 14 or 15"
@@ -226,8 +234,11 @@ if { $rasterix } {
     RASTERIX \
     "RASTERIX_TMU_COUNT=$rasterix_tmu_count" \
     "RASTERIX_FRAMEBUFFER_SIZE_IN_PIXEL_LG=$rasterix_framebuffer_size_in_pixel_lg"
+  if {$rasterix_variant eq "ef"} {
+    lappend verilog_defines RASTERIX_VARIANT_EF
+  }
   set_property verilog_define $verilog_defines $obj
-  puts "INFO: RasterIX enabled: TMUs=$rasterix_tmu_count framebuffer_band_log2=$rasterix_framebuffer_size_in_pixel_lg"
+  puts "INFO: RasterIX enabled: variant=$rasterix_variant TMUs=$rasterix_tmu_count framebuffer_band_log2=$rasterix_framebuffer_size_in_pixel_lg"
 }
 # Import local files from the original project
 set files [list \

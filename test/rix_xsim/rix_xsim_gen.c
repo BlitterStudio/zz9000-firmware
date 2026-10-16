@@ -146,6 +146,39 @@ static int emit_frame(RixCmdWriter *writer, const RixBandList *bands,
     return 1;
 }
 
+/*
+ * EF owns full color and depth targets in external DDR.  StreamFramebuffer
+ * derives the transfer extent from resolution, not the framebuffer command's
+ * size field; the field remains the visible pixel count for parser ABI
+ * compatibility.  It needs no band offset, COMMIT, or READ command.
+ */
+static int emit_external_frame(RixCmdWriter *writer, const RixTriangle *triangles,
+                               size_t triangle_count, const RixBandConfig *config)
+{
+    size_t index;
+    uint32_t pixels = (uint32_t)config->width * (uint32_t)config->height;
+
+    if (!rix_cmd_resolution(writer, config->width, config->height) ||
+        !rix_cmd_clear_color(writer, config->clear_color) ||
+        !rix_cmd_clear_depth(writer, config->clear_depth) ||
+        !rix_cmd_buffer_address(writer, RIX_REG_COLOR_BUFFER_ADDR,
+                                config->color_addr) ||
+        !rix_cmd_buffer_address(writer, RIX_REG_DEPTH_BUFFER_ADDR,
+                                config->depth_addr) ||
+        !rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_MEMSET |
+                              RIX_FRAMEBUFFER_COLOR |
+                              RIX_FRAMEBUFFER_DEPTH, pixels)) {
+        return 0;
+    }
+    for (index = 0U; index < triangle_count; ++index) {
+        if (!rix_cmd_triangle(writer, triangles[index].words,
+                              RIX_TRIANGLE_WORDS)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static RixVertex vertex(float x, float y, float z, uint32_t rgba, float s, float t)
 {
     RixVertex value;
@@ -341,7 +374,8 @@ static int write_texture_files(const char *directory, const uint8_t texture[TEXT
     return 1;
 }
 
-static int generate_scene(const char *directory, const char *name, unsigned int scene)
+static int generate_scene(const char *directory, const char *name,
+                          unsigned int scene, int external_framebuffer)
 {
     static uint8_t raw[COMMAND_CAPACITY];
     RixTriangle triangles[MAX_TRIANGLES];
@@ -391,8 +425,10 @@ static int generate_scene(const char *directory, const char *name, unsigned int 
     }
 
     rix_cmd_init(&writer, raw, sizeof(raw));
-    if (!setup_state(&writer, textured) || !emit_frame(&writer, &bands, &config) ||
-        writer.failed || writer.length == 0U || writer.length > 0x00ffffffU ||
+    if (!setup_state(&writer, textured) ||
+        !(external_framebuffer ?
+              emit_external_frame(&writer, triangles, triangle_count, &config) :
+              emit_frame(&writer, &bands, &config)) ||
         writer.length % 4U != 0U ||
         !make_path(binary_path, sizeof(binary_path), directory, name, ".bin") ||
         !make_path(hex_path, sizeof(hex_path), directory, name, ".hex") ||
@@ -401,7 +437,8 @@ static int generate_scene(const char *directory, const char *name, unsigned int 
         return 0;
     }
     printf("%s: words=%zu bytes=%zu bands=%u triangles=%zu\n", name,
-           writer.length / 4U + 2U, writer.length + 8U, bands.count, triangle_count);
+           writer.length / 4U + 2U, writer.length + 8U,
+           external_framebuffer ? 0U : bands.count, triangle_count);
     return 1;
 }
 
@@ -417,10 +454,14 @@ int main(int argc, char **argv)
     printf("layout: commands=0x%08x color=0x%08x depth=0x%08x texture=0x%08x\n",
            COMMAND_ADDRESS, COLOR_ADDRESS, DEPTH_ADDRESS, TEXTURE_ADDRESS);
     if (!write_texture_files(argv[1], texture) ||
-        !generate_scene(argv[1], "s1", 1U) ||
-        !generate_scene(argv[1], "s2", 2U) ||
-        !generate_scene(argv[1], "s3", 3U) ||
-        !generate_scene(argv[1], "s4", 4U)) {
+        !generate_scene(argv[1], "s1", 1U, 0) ||
+        !generate_scene(argv[1], "s2", 2U, 0) ||
+        !generate_scene(argv[1], "s3", 3U, 0) ||
+        !generate_scene(argv[1], "s4", 4U, 0) ||
+        !generate_scene(argv[1], "ef-s1", 1U, 1) ||
+        !generate_scene(argv[1], "ef-s2", 2U, 1) ||
+        !generate_scene(argv[1], "ef-s3", 3U, 1) ||
+        !generate_scene(argv[1], "ef-s4", 4U, 1)) {
         fprintf(stderr, "failed to write RasterIX XSim scene output to %s\n", argv[1]);
         return 1;
     }

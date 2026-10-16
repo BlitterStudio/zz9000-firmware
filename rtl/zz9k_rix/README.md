@@ -8,7 +8,7 @@ a dedicated S02 slot in `axi_interconnect_2`; capture remains S00 at priority
 remain priority 0.  This avoids an in-wrapper AXI arbiter and preserves capture
 priority.
 
-The fetcher forwards every DDR word directly to RasterIX_IF's
+The fetcher forwards every DDR word directly to the selected RasterIX
 `s_cmd_axis`, which is FrameStreamingCore's DSE st0 port, not CommandParser.
 Thus the ARM buffer **must** contain a DSE operation: a `0x90000000 | byte_count`
 header (st0 input to st1 output), an address beat (zero for inline parser
@@ -44,12 +44,23 @@ the ARM to prepare N+1 during N.
 error and cleared by `CONTROL[2]`.  It is intentionally not connected to a PS
 IRQ so PS7 configuration remains unchanged.
 
+## Renderer variants
+
+IF is the default `--rasterix-variant if` build and uses the configured
+internal framebuffer band.  Opt-in `--rasterix-variant ef` selects
+`RasterIX_EF` with RGB565 color, 16-bit depth, stencil disabled, one TMU,
+external texture memory/cache, 25-bit fixpoint interpolation, and coalesced
+external-memory transfers.  EF stores the complete color and depth targets in
+DDR, so its stream sets resolution and target addresses, clears with a full
+color/depth `MEMSET`, then sends triangles directly: it has no per-band
+offset, `COMMIT`, or `READ`.
+
 ## Framebuffer presentation
 
-ZZ9000's RTG path presents the committed DDR color target; it does not connect
+ZZ9000's RTG path presents the DDR color target; it does not connect
 RasterIX's framebuffer-page swap handshake.  The wrapper consequently supplies
-an immediate `fb_swapped` acknowledgement so ordinary color `MEMSET` and
-`COMMIT` commands can retire.  Command streams MUST NOT issue
+an immediate `fb_swapped` acknowledgement so IF color `MEMSET`/`COMMIT` and EF
+color `MEMSET` commands can retire.  Command streams MUST NOT issue
 `OP_FRAMEBUFFER SWAP` (including vsync swap): the renderer is acknowledged to
 avoid a hardware deadlock, but the wrapper sets sticky `ERROR_STATUS[0]` and
 `IRQ_STATUS` to flag the unsupported operation.

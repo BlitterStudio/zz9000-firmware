@@ -7,12 +7,12 @@ License: GPL-3.0-or-later (verbatim LICENSE included here)
 Float submodule: https://github.com/ToNi3141/Float.git @ 060bde1fc3c480f46495b740ddbe2bdf24958491
 
 This directory contains only the byte-identical dependency closure needed by
-RasterIX_IF/RasterIXCoreIF: RasterIX core, framebuffer, texture-cache and AXI
-helpers; Float arithmetic helpers; and the upstream GPL-3.0 license. The
-following upstream material is intentionally excluded: top-level board designs,
-RasterIX_EF/RasterIXCoreEF/RasterIX top-level variants, HyperRAM, simulations,
-and unrelated third-party IP. ZZ9000-specific integration is exclusively in
-rtl/zz9k_rix/.
+RasterIX_IF/RasterIXCoreIF and RasterIX_EF/RasterIXCoreEF: RasterIX core,
+framebuffer, texture-cache and AXI helpers; Float arithmetic helpers; and the
+upstream GPL-3.0 license. The following upstream material is intentionally
+excluded: top-level board designs, the configurable RasterIX top-level variant,
+HyperRAM, simulations, and unrelated third-party IP. ZZ9000-specific
+integration is exclusively in rtl/zz9k_rix/.
 
 Local synthesis-safe corrections are documented in `PATCHES.md` and retained
 as `patches/0001` through `0004`. `test/rasterix/run.sh` byte-compares every

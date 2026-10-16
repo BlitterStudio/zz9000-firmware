@@ -234,6 +234,7 @@ module tb_zz9k_rasterix;
 
     always @(posedge clk) begin
         cycle_count <= cycle_count + 1;
+`ifndef RASTERIX_VARIANT_EF
         if (trace_pipeline && (((cycle_count >= 115000) && (cycle_count <= 125000)) ||
             ((cycle_count != 0) && ((cycle_count % 100000) == 0))))
             $display("PIPE cycle=%0d rr=%b/%b sem=%b/%b lock=%0d attr=%b/%b,%b/%b pixready=%b bc2=%b/%b ar=%b/%b/%b alrp=%b/%b tmu=%b/%b/%b/%b frag=%b/%b concat=%b/%b full=%b empty=%b pfp=%b/%b out=%b/%b c=%b/%b/%b d=%b/%b/%b s=%b/%b/%b semcnt=%0d",
@@ -341,6 +342,7 @@ module tb_zz9k_rasterix;
             (^dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step5_texel === 1'bx))
             $display("TMU0_TEXENV_X cycle=%0d texel=%h", cycle_count,
                      dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step5_texel);
+`endif
 
         if (m_cmd_axi_arvalid && m_cmd_axi_arready) begin
             if (m_cmd_axi_arsize != 3'b011 || m_cmd_axi_arburst != 2'b01)
@@ -530,6 +532,18 @@ module tb_zz9k_rasterix;
             $display("cmd-ddr active=%b left=%0d rvalid=%b rready=%b rlast=%b arvalid=%b arready=%b",
                      cmd_read_active, cmd_read_left, m_cmd_axi_rvalid, m_cmd_axi_rready,
                      m_cmd_axi_rlast, m_cmd_axi_arvalid, m_cmd_axi_arready);
+`ifdef RASTERIX_VARIANT_EF
+            $display("DSE state=%0d EF parser state=%0d fbctl=%0d color apply/applied=%b/%b depth=%b/%b", 
+                     dut.renderer.dma.state, dut.renderer.rixef.graphicCore.commandParser.state,
+                     dut.renderer.rixef.graphicCore.commandParser.fbControlState,
+                     dut.renderer.rixef.graphicCore.commandParser.colorBufferApply,
+                     dut.renderer.rixef.graphicCore.commandParser.colorBufferApplied,
+                     dut.renderer.rixef.graphicCore.commandParser.depthBufferApply,
+                     dut.renderer.rixef.graphicCore.commandParser.depthBufferApplied);
+            $display("EF renderer busy=%b triangle=%b stall=%b",
+                     dut.renderer.perfBusy, dut.renderer.perfTriangleRendering,
+                     dut.renderer.perfRasterizerStall);
+`else
             $display("DSE state=%0d cmd parser state=%0d fbctl=%0d color apply/applied=%b/%b depth=%b/%b", 
                      dut.renderer.dma.state, dut.renderer.rixif.graphicCore.commandParser.state,
                      dut.renderer.rixif.graphicCore.commandParser.fbControlState,
@@ -549,6 +563,7 @@ module tb_zz9k_rasterix;
                      dut.renderer.axisToAxiCrossbar.axisToAxiAdapter.streamingDone,
                      dut.renderer.axisToAxiCrossbar.axisToAxiAdapter.addressGenerationDone,
                      dut.renderer.axisToAxiCrossbar.axisToAxiAdapter.counter, dut.renderer.perfBusy);
+`endif
         end
     endtask
 
@@ -655,6 +670,13 @@ module tb_zz9k_rasterix;
                 if (status == completed_before + 1) begin
                     $display("RESULT scene=%0s submission=%0d cycles=%0d command_words=%0d",
                              scene, submission_index, cycle_count, submission_words);
+`ifndef RASTERIX_VARIANT_EF
+                    $display("IF_COUNTERS adapter=%0d handler_state=%0d handler_addr=%0d handler_beats=%0d",
+                             dut.renderer.axisToAxiCrossbar.axisToAxiAdapter.counter,
+                             dut.renderer.rixif.colorBuffer.commandHandler.cmdState,
+                             dut.renderer.rixif.colorBuffer.commandHandler.cmdMemAddr,
+                             dut.renderer.rixif.colorBuffer.commandHandler.cmdFbSizeInBeats);
+`endif
                     command_complete = 1;
                 end
                 timeout = timeout + 1;
@@ -678,7 +700,7 @@ module tb_zz9k_rasterix;
             sample0 = {byte_at(framebuffer_addr + 1), byte_at(framebuffer_addr)};
             sample_out = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2 + 1),
                           byte_at(framebuffer_addr + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2)};
-            if (scene == "s4")
+            if (scene == "s4" || scene == "ef-s4")
                 sample_mid = {byte_at(framebuffer_addr + ((HEIGHT - 1 - 150) * WIDTH + 200) * 2 + 1),
                               byte_at(framebuffer_addr + ((HEIGHT - 1 - 150) * WIDTH + 200) * 2)};
             else
@@ -686,7 +708,9 @@ module tb_zz9k_rasterix;
                               byte_at(framebuffer_addr + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2)};
             $display("SAMPLES scene=%0s clear=%04x interior=%04x exterior=%04x", scene, sample0, sample_mid, sample_out);
             if (sample0 !== 16'hf800 || sample_out !== 16'hf800) $fatal(1, "clear/exterior expected red got %04x %04x", sample0, sample_out);
-            if (scene != "s1" && (sample_mid === 16'hf800 || (^sample_mid === 1'bx))) $fatal(1, "triangle interior is clear or unknown: %04x", sample_mid);
+            if (scene != "s1" && scene != "ef-s1" &&
+                (sample_mid === 16'hf800 || (^sample_mid === 1'bx)))
+                $fatal(1, "triangle interior is clear or unknown: %04x", sample_mid);
             $display("PASS scene=%0s samples=%04x/%04x/%04x", scene, sample0, sample_mid, sample_out);
         end
         $finish;

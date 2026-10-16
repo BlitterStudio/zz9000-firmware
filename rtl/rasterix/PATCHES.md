@@ -41,3 +41,15 @@ The vendored closure derives from RasterIX superproject `9269a01c9bd4c3342bfa70e
   undriven. The disabled depth branch had the equivalent error.
 - Synthesis safety: every external disabled-buffer port is now tied to its
   defined idle value; enabled-buffer generate branches are unchanged.
+
+## Command-parser reset initialization
+
+- File: `RasterIX/CommandParser.v`
+- Patch: `patches/0005-command-parser-reset-initialization.patch`
+- Evidence: `colorBufferApply`, `depthBufferApply`, `stencilBufferApply`, and
+  related command registers were uninitialized on reset. In simulation, their
+  undetermined `1'bx` state propagated through `colorBufferApplied` and
+  `framebufferFinished`, stalling the parser in `WAIT_FOR_IDLE` with
+  `s_cmd_axis_tready = 0` and deadlocking the initial DMA stream.
+- Synthesis safety: adds defined reset values (0) to output registers; command
+  decoding and execution cycles are unchanged.

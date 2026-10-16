@@ -148,6 +148,23 @@ module CommandParser #(
 
             fbControlState <= FB_CONTROL_WAITFORCOMMAND;
             framebufferCommandApply <= 0;
+            colorBufferApply <= 0;
+            colorBufferCmdCommit <= 0;
+            colorBufferCmdMemset <= 0;
+            colorBufferCmdSwap <= 0;
+            colorBufferCmdRead <= 0;
+            colorBufferCmdSwapEnableVsync <= 0;
+            colorBufferSize <= 0;
+            depthBufferApply <= 0;
+            depthBufferCmdCommit <= 0;
+            depthBufferCmdMemset <= 0;
+            depthBufferCmdRead <= 0;
+            depthBufferSize <= 0;
+            stencilBufferApply <= 0;
+            stencilBufferCmdCommit <= 0;
+            stencilBufferCmdMemset <= 0;
+            stencilBufferCmdRead <= 0;
+            stencilBufferSize <= 0;
             s_cmd_axis_tready <= 0;
 
             tvalid <= 0;

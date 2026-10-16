@@ -1,6 +1,6 @@
 # RasterIX XSim scenes
 
-`rix_xsim_gen.c` emits four real ZZ9000 RasterIX command streams for
+`rix_xsim_gen.c` emits IF and EF real ZZ9000 RasterIX command streams for
 `tb_zz9k_rasterix.sv` and `run_xsim.bat`.
 
 | Scene | Workload | TMU0 state |
@@ -9,6 +9,19 @@
 | `s2` | Flat-shaded green triangle | Enabled with the 8x8 white texture; texenv replaces with primary colour. |
 | `s3` | Textured triangle | Enabled with the deterministic 8x8 white texture. |
 | `s4` | 48-triangle radial stress scene | Enabled with the deterministic 8x8 white texture. |
+
+The `ef-s1`–`ef-s4` counterparts set the same 640×480 RGB565 color target and
+16-bit depth target, but execute a single full-target color/depth `MEMSET` and
+draw directly to DDR.  They intentionally emit no band offsets, `COMMIT`, or
+`READ`.  Select the implementation with
+`RASTERIX_VARIANT=ef test/rix_xsim/run_xsim.sh s1 2`; IF remains the default.
+
+The DDR model accepts one render read or write transaction at a time.  It
+deasserts read-address readiness every fifth cycle, write-address readiness
+every sixth, and write-data readiness every fourth; each read beat has the
+selected `LATENCY` idle cycles before becoming valid.  Cycle reports are at
+the 100 MHz renderer clock, so `LATENCY=2` is the nominal model and a larger
+latency is a shared-DDR sensitivity bound, not a board bandwidth measurement.
 
 TMU0 MUST remain enabled for every scene that reaches the pixel pipeline.
 `TextureMappingUnit.v:275-339` always sends and joins the texture-read

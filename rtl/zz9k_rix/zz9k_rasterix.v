@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// ZZ9000-specific integration for the vendored RasterIX_IF core.
+// ZZ9000-specific integration for the vendored RasterIX renderer.
 //
 // RasterIX uses m_axi for texture/framebuffer traffic.  Command buffers use
 // the independent 64-bit m_cmd_axi read master; axi_interconnect_2 arbitrates
@@ -195,9 +195,9 @@ module zz9k_rasterix #(
                          (read_transactions == 0);
     assign renderer_resetn = m_axi_aresetn && !soft_reset_active;
 
-    // The BUFGCE stays open until fetched commands, renderer work, and its
-    // outstanding memory traffic have drained.  Software clears ENABLE then
-    // polls STATUS.IDLE before relying on the clock being stopped.
+    // Keep reset visible through the gated clock.  Otherwise an initially
+    // disabled BUFGCE prevents renderer state from observing reset before the
+    // first submission.
     BUFGCE renderer_clock_gate (
         .I(m_axi_aclk),
         .CE(renderer_clock_enable),
@@ -275,7 +275,7 @@ module zz9k_rasterix #(
             read_response_valid <= 1'b0;
             read_data <= 32'd0;
             enable_requested <= 1'b0;
-            renderer_clock_enable <= 1'b0;
+            renderer_clock_enable <= 1'b1;
             soft_reset_pending <= 1'b0;
             soft_reset_active <= 1'b0;
             command_word <= 32'd0;
@@ -471,6 +471,32 @@ module zz9k_rasterix #(
     );
     assign m_cmd_axi_arid = 4'd0;
 
+`ifdef RASTERIX_VARIANT_EF
+    // EF renders RGB565 directly to external DDR.  Its StreamFramebuffer
+    // handles the 16-bit color/depth targets, so no IF band configuration is
+    // applicable here.
+    RasterIX_EF #(
+        .SUB_PIXEL_CALC_PRECISION(8),
+        .ENABLE_STENCIL_BUFFER(0),
+        .ENABLE_DEPTH_BUFFER(1),
+        .TMU_COUNT(1),
+        .ENABLE_MIPMAPPING(1),
+        .ENABLE_TEXTURE_FILTERING(1),
+        .TEXTURE_PAGE_SIZE(2048),
+        .ENABLE_EXTERNAL_TEXTURE_MEMORY(1),
+        .CACHE_SIZE(8192),
+        .ENABLE_FOG(1),
+        .MAX_TEXTURE_SIZE(256),
+        .ADDR_WIDTH(32),
+        .ID_WIDTH(4),
+        .DATA_WIDTH(32),
+        .STRB_WIDTH(4),
+        .ENABLE_MEMORY_COALESCING(1),
+        .RASTERIZER_FLOAT_PRECISION(32),
+        .RASTERIZER_FIXPOINT_PRECISION(25),
+        .RASTERIZER_ENABLE_FLOAT_INTERPOLATION(0)
+    )
+`else
     RasterIX_IF #(
         .FRAMEBUFFER_SIZE_IN_PIXEL_LG(`RASTERIX_FRAMEBUFFER_SIZE_IN_PIXEL_LG),
         .FRAMEBUFFER_SUB_PIXEL_WIDTH(5),
@@ -493,7 +519,9 @@ module zz9k_rasterix #(
         .RASTERIZER_FLOAT_PRECISION(32),
         .RASTERIZER_FIXPOINT_PRECISION(25),
         .RASTERIZER_ENABLE_FLOAT_INTERPOLATION(0)
-    ) renderer (
+    )
+`endif
+    renderer (
         .aclk(renderer_clock),
         .resetn(renderer_resetn),
         .s_cmd_axis_tvalid(rix_command_valid),
