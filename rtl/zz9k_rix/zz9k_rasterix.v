@@ -387,6 +387,14 @@ module zz9k_rasterix #(
                 irq_status <= 1'b1;
                 error_address <= fetch_read_error_addr;
             end
+            // ZZ9000 presents completed color targets through its RTG path,
+            // not RasterIX's display-page swap interface.  A swap is therefore
+            // acknowledged below only to keep the renderer from stalling, then
+            // reported to software as an unsupported stream operation.
+            if (rix_swap_fb) begin
+                error_sticky <= 1'b1;
+                irq_status <= 1'b1;
+            end
             if (fetch_submission_done)
                 completion_pending <= 1'b1;
             if (completion_ack) begin
@@ -500,7 +508,7 @@ module zz9k_rasterix #(
         .swap_fb_enable_vsync(rix_swap_fb_enable_vsync),
         .fb_addr(rix_fb_addr),
         .fb_size(rix_fb_size),
-        .fb_swapped(rix_swap_fb),
+        .fb_swapped(1'b1),
         .m_axi_awid(rix_m_axi_awid),
         .m_axi_awaddr(rix_m_axi_awaddr),
         .m_axi_awlen(rix_m_axi_awlen),

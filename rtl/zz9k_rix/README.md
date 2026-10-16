@@ -8,6 +8,13 @@ a dedicated S02 slot in `axi_interconnect_2`; capture remains S00 at priority
 remain priority 0.  This avoids an in-wrapper AXI arbiter and preserves capture
 priority.
 
+The fetcher forwards every DDR word directly to RasterIX_IF's
+`s_cmd_axis`, which is FrameStreamingCore's DSE st0 port, not CommandParser.
+Thus the ARM buffer **must** contain a DSE operation: a `0x90000000 | byte_count`
+header (st0 input to st1 output), an address beat (zero for inline parser
+payload), then the raw RasterIX parser words.  The wrapper fetcher adds no DSE
+headers.  The final fetched word carries `tlast`.
+
 ## CSR map
 
 | Offset | Name | Bits / meaning |
@@ -24,8 +31,8 @@ priority.
 | `0x24` | `CMD_START` | write bit 0 to enqueue `CMD_ADDR` / `CMD_WORDS`; read bit 0 is queue-ready |
 | `0x28` | `SUBMITTED` | accepted DDR submissions counter |
 | `0x2c` | `COMPLETED` | completed submissions counter |
-| `0x30` | `ERROR_STATUS` | bit 0 sticky AXI read response or misalignment error; bit 1 `PIO_REJECT`; bit 2 `START_REJECT` |
-| `0x34` | `ERROR_ADDR` | misaligned buffer address or failing AXI read-beat address |
+| `0x30` | `ERROR_STATUS` | bit 0 sticky AXI read response, misalignment, or unsupported RasterIX framebuffer `SWAP`; bit 1 `PIO_REJECT`; bit 2 `START_REJECT` |
+| `0x34` | `ERROR_ADDR` | misaligned buffer address or failing AXI read-beat address (unchanged for an unsupported `SWAP`) |
 
 The fetch queue holds two pending descriptors in addition to the active one.
 It deliberately waits for each submission's words to be consumed, RasterIX to
@@ -36,6 +43,16 @@ the ARM to prepare N+1 during N.
 `IRQ_STATUS` is a level status bit only; it is set by a completion or sticky
 error and cleared by `CONTROL[2]`.  It is intentionally not connected to a PS
 IRQ so PS7 configuration remains unchanged.
+
+## Framebuffer presentation
+
+ZZ9000's RTG path presents the committed DDR color target; it does not connect
+RasterIX's framebuffer-page swap handshake.  The wrapper consequently supplies
+an immediate `fb_swapped` acknowledgement so ordinary color `MEMSET` and
+`COMMIT` commands can retire.  Command streams MUST NOT issue
+`OP_FRAMEBUFFER SWAP` (including vsync swap): the renderer is acknowledged to
+avoid a hardware deadlock, but the wrapper sets sticky `ERROR_STATUS[0]` and
+`IRQ_STATUS` to flag the unsupported operation.
 
 ## Driver sequences
 

@@ -149,20 +149,21 @@ module zz9k_cmd_fetcher (
                     end
                     burst_beat_index <= burst_beat_index + 1'b1;
                 end
+                // submit_words is authoritative: the final AXI beat can contain
+                // either one or two 32-bit RasterIX words.
                 ST_LOW: if (m_cmd_axis_tready) begin
-                    words_left <= words_left - 1'b1;
                     if (high_word_valid) begin
                         state <= ST_HIGH;
-                    end else if (read_last) begin
+                    end else if (words_left == 1) begin
                         submission_done <= 1'b1;
                         state <= ST_HOLD;
-                    end else begin
+                    end else if (read_last) begin
                         state <= ST_R;
                     end
                 end
                 ST_HIGH: if (m_cmd_axis_tready) begin
                     words_left <= words_left - 1'b1;
-                    if (read_last && words_left == 2) begin
+                    if (words_left == 2) begin
                         submission_done <= 1'b1;
                         state <= ST_HOLD;
                     end else if (read_last) begin
