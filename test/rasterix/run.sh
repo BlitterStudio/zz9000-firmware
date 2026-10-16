@@ -47,7 +47,6 @@ for part in RasterIX Float 3rdParty; do
     done < <(find "/src/rtl/rasterix/$part" -type f -print0)
     cp -a "/src/rtl/rasterix/$part/." "$work/rtl/$part/"
 done
-python3 /src/test/rasterix/patch_top.py "$work/rtl/top/Verilator/top.v" /work/top.v --tmu-count 1
 
 build_one() {
     tmu=$1

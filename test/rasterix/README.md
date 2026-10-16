@@ -7,12 +7,14 @@ test/rasterix/run.sh
 ```
 
 The script runs Ubuntu 24.04 in Docker, installs its packaged compiler, CMake and
-Verilator, and prints their actual versions. The verified run used GCC 13.3.0,
-CMake 3.28.3, and Verilator 5.020 (Debian package `5.020-1`). It clones RasterIX at
-`9269a01c9bd4c3342bfa70ef8e3cdd751c15c6d0` with submodules, and compares the
-vendored `rtl/rasterix/{RasterIX,Float,3rdParty}` dependency closure byte for
-byte against that checkout. It substitutes that verified vendored closure into
-the container build. The rest of the upstream tree supplies the upstream
+Verilator, and prints their actual versions. The observed container versions are
+GCC 13.3.0, CMake 3.28.3, and Verilator 5.020 (Debian package `5.020-1`). A named
+Docker volume (`zz9000-rasterix-harness-cache`) retains only the disposable clone
+and compiled model between runs; the worktree remains mounted read-only. The script
+clones RasterIX at `9269a01c9bd4c3342bfa70ef8e3cdd751c15c6d0` with submodules, and
+compares the vendored `rtl/rasterix/{RasterIX,Float,3rdParty}` dependency closure
+byte for byte against that checkout. It substitutes that verified vendored closure
+into the container build. The rest of the upstream tree supplies the upstream
 `rtl/top/Verilator/top.v`, display support and C++17 GL frontend. A temporary,
 audited copy of that top applies the ZZ9000 baseline: `RasterIX_IF`, 640x480,
 16,384-pixel internal RGB565/Z16 bands, stencil disabled, bilinear filtering,
