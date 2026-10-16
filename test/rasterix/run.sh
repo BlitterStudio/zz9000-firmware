@@ -14,11 +14,14 @@ OUTPUT_DOCKER=$(cygpath -aw "$OUTPUT")
 export MSYS_NO_PATHCONV=1
 PROFILE=${RASTERIX_PROFILE:-zz9000}
 REVISION=${RASTERIX_REVISION:-9269a01c9bd4c3342bfa70ef8e3cdd751c15c6d0}
+MINIGL_ROOT=${MINIGL_ROOT:-D:/Github/zz9000-minigl-worktree/ZZ9000_proto.sdk/ZZ9000OS/src}
+MINIGL_DOCKER=$(cygpath -aw "$MINIGL_ROOT")
 docker run --rm \
     -e RASTERIX_PROFILE="$PROFILE" \
     -e RASTERIX_REVISION="$REVISION" \
     -v "$ROOT_DOCKER:/src:ro" \
     -v "$OUTPUT_DOCKER:/out" \
+    -v "$MINIGL_DOCKER:/minigl:ro" \
     -v zz9000-rasterix-harness-cache:/cache \
     ubuntu:24.04 \
     bash -lc '
@@ -97,9 +100,10 @@ build_one() {
         -DRIX_CORE_NUMBER_OF_TEXTURE_PAGES="$pages" -DRIX_CORE_NUMBER_OF_TEXTURES="$textures" -DRIX_CORE_TEXTURE_PAGE_SIZE="$page_bytes" \
         -DRIX_CORE_THREADED_RASTERIZATION="$threaded" -DRIX_CORE_THREADED_RASTERIZATION_DISPLAY_LIST_SIZE="$display_list_size" \
         -DRIX_CORE_COLOR_BUFFER_LOC_0=0x01E00000 -DRIX_CORE_COLOR_BUFFER_LOC_1=0x01E00000 -DRIX_CORE_COLOR_BUFFER_LOC_2=0x01C00000 \
-        -DRIX_CORE_DEPTH_BUFFER_LOC=0x01A00000 -DRIX_CORE_STENCIL_BUFFER_LOC=0x01900000 -DCMAKE_BUILD_TYPE=Release
+        -DRIX_CORE_DEPTH_BUFFER_LOC=0x01A00000 -DRIX_CORE_STENCIL_BUFFER_LOC=0x01900000 \
+        -DRIX_C_ROOT=/minigl -DCMAKE_BUILD_TYPE=Release
     cmake --build "$build" --parallel "$(nproc)"
-    timeout --foreground 45m "$build/rasterix_harness" --tmu "$tmu" --output /out
+    timeout --foreground 45m "$build/rasterix_harness" --tmu "$tmu" --output /out --backend "${RASTERIX_BACKEND:-c}"
 }
 
 for tmu in $tmu_list; do

@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+extern "C" size_t rix_harness_build_fill(uint8_t* bytes, size_t capacity);
 
 namespace {
 constexpr uint32_t kWidth = HARNESS_WIDTH;
@@ -120,6 +121,24 @@ public:
     uint64_t frameCycles() const { return m_cycles - m_frameStartCycles; }
     uint64_t commandBytes() const { return m_commandBytes; }
     const std::vector<uint8_t>& framebuffer() const { return m_framebuffer; }
+    void writeRawCommand(const uint8_t* bytes, const size_t size)
+    {
+        if ((size & 3U) != 0U || size > 0x00ffffffU) {
+            throw std::runtime_error("invalid raw RasterIX command stream length");
+        }
+        std::vector<uint32_t> stream;
+        stream.reserve((size / 4U) + 2U);
+        stream.push_back(0x90000000U | static_cast<uint32_t>(size));
+        stream.push_back(0U);
+        for (size_t offset = 0; offset < size; offset += 4U) {
+            stream.push_back(static_cast<uint32_t>(bytes[offset]) |
+                             (static_cast<uint32_t>(bytes[offset + 1U]) << 8U) |
+                             (static_cast<uint32_t>(bytes[offset + 2U]) << 16U) |
+                             (static_cast<uint32_t>(bytes[offset + 3U]) << 24U));
+        }
+        writeWords(stream.data(), static_cast<uint32_t>(stream.size() * sizeof(uint32_t)));
+    }
+
 
 private:
     void writeWords(const uint32_t* words, const uint32_t size)
@@ -136,6 +155,11 @@ private:
                            << ", initial_words=";
                 for (uint32_t initial = 0; initial < 10 && initial < size / sizeof(*words); ++initial) {
                     diagnostic << (initial == 0 ? "" : ":") << std::hex << words[initial] << std::dec;
+                }
+                diagnostic << ", recent_words=";
+                const uint32_t recentStart = word > 5U ? word - 5U : 0U;
+                for (uint32_t recent = recentStart; recent < word && recent < size / sizeof(*words); ++recent) {
+                    diagnostic << (recent == recentStart ? "" : ":") << std::hex << words[recent] << std::dec;
                 }
                 diagnostic << ')';
                 throw std::runtime_error(diagnostic.str());
@@ -462,6 +486,22 @@ void writePpm(const std::filesystem::path& path, const std::vector<uint8_t>& fra
     image << "P6\n" << kWidth << " " << kHeight << "\n255\n";
     image.write(reinterpret_cast<const char*>(framebuffer.data()), static_cast<std::streamsize>(framebuffer.size()));
 }
+Result runCBackendFill(MeasuredVerilatorBus& bus)
+{
+    std::vector<uint8_t> bytes(2U * 1024U * 1024U);
+    const auto start = std::chrono::steady_clock::now();
+    const size_t commandLength = rix_harness_build_fill(bytes.data(), bytes.size());
+    const auto stop = std::chrono::steady_clock::now();
+    if (commandLength == 0U) {
+        throw std::runtime_error("ZZ9000 C frame emission failed");
+    }
+    bus.beginFrame();
+    bus.writeRawCommand(bytes.data(), commandLength);
+    bus.waitForFrame();
+    return {"c_fill", bus.frameCycles(), bus.commandBytes(),
+            std::chrono::duration<double, std::milli>(stop - start).count(), fnv1a(bus.framebuffer())};
+}
+
 
 void writeResults(const std::filesystem::path& path, const std::vector<Result>& results, uint32_t tmuCount)
 {
@@ -489,6 +529,7 @@ void writeResults(const std::filesystem::path& path, const std::vector<Result>& 
 struct Options {
     uint32_t tmuCount {};
     std::filesystem::path output;
+    bool cBackend {};
 };
 
 Options parseArguments(int argc, char** argv)
@@ -500,8 +541,14 @@ Options parseArguments(int argc, char** argv)
             options.tmuCount = static_cast<uint32_t>(std::stoul(argv[++i]));
         } else if (argument == "--output" && i + 1 < argc) {
             options.output = argv[++i];
+        } else if (argument == "--backend" && i + 1 < argc) {
+            const std::string backend = argv[++i];
+            if (backend != "c") {
+                throw std::runtime_error("only --backend c is supported");
+            }
+            options.cBackend = true;
         } else {
-            throw std::runtime_error("usage: rasterix_harness --tmu <1|2> --output <directory>");
+            throw std::runtime_error("usage: rasterix_harness --tmu <1|2> --output <directory> [--backend c]");
         }
     }
     if ((options.tmuCount != 1 && options.tmuCount != 2) || options.output.empty()) {
@@ -518,6 +565,12 @@ int main(int argc, char** argv)
         const Options options = parseArguments(argc, argv);
         std::filesystem::create_directories(options.output / "frames");
         MeasuredVerilatorBus bus;
+        if (options.cBackend) {
+            const Result result = runCBackendFill(bus);
+            writePpm(options.output / "frames" / ("tmu" + std::to_string(options.tmuCount) + "_c_fill.ppm"), bus.framebuffer());
+            writeResults(options.output / ("results-c-tmu" + std::to_string(options.tmuCount) + ".json"), {result}, options.tmuCount);
+            return 0;
+        }
 #if defined(HARNESS_DEVICE_DATA_UPLOADER)
         rr::devicedatauploader::DeviceDataUploader device {bus};
         rr::RIXGL::createInstance(device);

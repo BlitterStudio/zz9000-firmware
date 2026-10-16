@@ -24,6 +24,19 @@ For regression triage only, `RASTERIX_PROFILE=upstream-verilator` selects
 upstream's unpatched Verilator top and matching historical library settings;
 `RASTERIX_REVISION=<commit>` checks out that revision in the disposable cache.
 Non-pinned revisions deliberately do not use the vendored RTL closure.
+The historical IF-read bisect found `5b4c171` good and `73c309a` bad. The
+crossbar's widened, explicitly wrapped `portSelect` was one relevant change; the
+same commit also makes `RasterIX_IF` route colour, depth and stencil through
+three framebuffer streams, implements depth/stencil `cmdRead` in
+`RasterIXCoreIF`, and changes the library renderer's intermediate upload/load
+framebuffer behaviour. It is therefore not a crossbar-only attribution.
+`RASTERIX_BACKEND=c` drives the pinned model with the real MiniGL
+`rix_cmd.c`, `rix_setup.c`, and `rix_bin.c` sources mounted read-only from
+`ZZ9000_proto.sdk/ZZ9000OS/src`. Its initial fill stream emits texture upload,
+clear, per-band MEMSET/COMMIT and triangles, and deliberately emits no
+`RIX_FRAMEBUFFER_READ`.
+
+
 
 
 Results and PNG frames are written to `test/rasterix/out/` by default (pass a

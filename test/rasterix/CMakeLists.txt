@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(zz9000_rasterix_harness LANGUAGES CXX)
+project(zz9000_rasterix_harness LANGUAGES C CXX)
 
 set(RIX_CORE_TMU_COUNT "${TMU_COUNT}" CACHE STRING "RasterIX TMU count")
 set(RIX_CORE_MAX_TEXTURE_SIZE 256 CACHE STRING "Maximum texture edge")
@@ -28,6 +28,9 @@ message(STATUS "RasterIX lib: TMU=${RIX_CORE_TMU_COUNT}, texture=${RIX_CORE_MAX_
 if(NOT DEFINED RASTERIX_ROOT OR NOT DEFINED VERILATOR_OBJDIR)
     message(FATAL_ERROR "RASTERIX_ROOT and VERILATOR_OBJDIR are required")
 endif()
+if(NOT DEFINED RIX_C_ROOT)
+    message(FATAL_ERROR "RIX_C_ROOT is required")
+endif()
 
 add_subdirectory("${RASTERIX_ROOT}/lib" rasterix-lib)
 
@@ -35,6 +38,13 @@ add_library(verilator_runtime STATIC
     /usr/share/verilator/include/verilated.cpp
     /usr/share/verilator/include/verilated_threads.cpp)
 target_include_directories(verilator_runtime PUBLIC /usr/share/verilator/include)
+add_library(zz9000_rix_command STATIC
+    c_backend.c
+    "${RIX_C_ROOT}/rix_cmd.c"
+    "${RIX_C_ROOT}/rix_setup.c"
+    "${RIX_C_ROOT}/rix_bin.c")
+target_include_directories(zz9000_rix_command PRIVATE "${RIX_C_ROOT}")
+
 
 add_executable(rasterix_harness harness.cpp)
 target_compile_features(rasterix_harness PRIVATE cxx_std_17)
@@ -59,4 +69,4 @@ target_include_directories(rasterix_harness PRIVATE
     "${RASTERIX_ROOT}/lib/utils"
     "${RASTERIX_ROOT}/lib/3rdParty/span/include"
     "${VERILATOR_OBJDIR}")
-target_link_libraries(rasterix_harness PRIVATE gl verilator_runtime "${VERILATOR_OBJDIR}/Vtop__ALL.a" pthread)
+target_link_libraries(rasterix_harness PRIVATE gl zz9000_rix_command verilator_runtime "${VERILATOR_OBJDIR}/Vtop__ALL.a" pthread m)
