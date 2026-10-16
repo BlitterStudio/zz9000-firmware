@@ -29,3 +29,15 @@ The vendored closure derives from RasterIX superproject `9269a01c9bd4c3342bfa70e
 - Patch: `patches/0003-texture-reader-reset-all-lanes.patch`
 - Evidence: nearest filtering populates texel 00 only while the registered sample has four lanes. Before a linear request, uninitialized neighbour lanes propagated X through the real MiniGL capture path.
 - Synthesis safety: adds reset values only; normal request, cache, and sampling behavior is unchanged.
+
+## Disabled depth/stencil ports are idle
+
+- File: `RasterIX/RasterIXCoreIF.v`
+- Patch: `patches/0004-idle-disabled-depth-stencil-ports.patch`
+- Evidence: the real gears capture stalled with crossbar port 2 selected and
+  its adapter streaming forever at 8,192 beats. With
+  `ENABLE_STENCIL_BUFFER=0`, the upstream else branch assigned undeclared
+  `m_stencil_*` names, leaving the actual `m_stencilbuffer_*` port-2 signals
+  undriven. The disabled depth branch had the equivalent error.
+- Synthesis safety: every external disabled-buffer port is now tied to its
+  defined idle value; enabled-buffer generate branches are unchanged.

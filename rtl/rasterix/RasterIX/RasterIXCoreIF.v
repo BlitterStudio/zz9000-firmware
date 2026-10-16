@@ -382,9 +382,15 @@ module RasterIXCoreIF #(
             assign m_depth_arlast = 0;
             assign depthBufferApplied = 1;
 
-            assign m_depth_axis_tvalid = 0;
-            assign s_depth_axis_tready = 1;
-            assign m_depth_avalid = 0;
+            assign m_depthbuffer_axis_tvalid = 0;
+            assign m_depthbuffer_axis_tlast = 0;
+            assign m_depthbuffer_axis_tdata = 0;
+            assign m_depthbuffer_axis_tstrb = 0;
+            assign s_depthbuffer_axis_tready = 1;
+            assign m_depthbuffer_avalid = 0;
+            assign m_depthbuffer_aaddr = 0;
+            assign m_depthbuffer_abeats = 0;
+            assign m_depthbuffer_arnw = 0;
         end
     endgenerate
 
@@ -574,9 +580,15 @@ module RasterIXCoreIF #(
             assign m_stencil_wready = 1;
             assign stencilBufferApplied = 1;
 
-            assign m_stencil_axis_tvalid = 0;
-            assign s_stencil_axis_tready = 1;
-            assign m_stencil_avalid = 0;
+            assign m_stencilbuffer_axis_tvalid = 0;
+            assign m_stencilbuffer_axis_tlast = 0;
+            assign m_stencilbuffer_axis_tdata = 0;
+            assign m_stencilbuffer_axis_tstrb = 0;
+            assign s_stencilbuffer_axis_tready = 1;
+            assign m_stencilbuffer_avalid = 0;
+            assign m_stencilbuffer_aaddr = 0;
+            assign m_stencilbuffer_abeats = 0;
+            assign m_stencilbuffer_arnw = 0;
         end
     endgenerate
 
