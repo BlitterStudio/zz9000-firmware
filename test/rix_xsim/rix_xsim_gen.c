@@ -187,6 +187,10 @@ static int add_triangle(RixBandList *bands, RixTriangle *triangles,
 static int setup_state(RixCmdWriter *writer, int textured)
 {
     RixFragmentState fragment;
+    RixTextureState state;
+    RixTexEnvState environment;
+    uint32_t pages[TEXTURE_BYTES / 2048U];
+    size_t index;
 
     memset(&fragment, 0, sizeof(fragment));
     fragment.depth_func = RIX_FUNC_ALWAYS;
@@ -197,37 +201,37 @@ static int setup_state(RixCmdWriter *writer, int textured)
     fragment.color_mask_a = 1U;
     fragment.src_factor = RIX_BLEND_ONE;
     fragment.dst_factor = RIX_BLEND_ZERO;
-    if (!rix_cmd_feature_enable(writer, textured ? RIX_FEATURE_TMU0 : 0U) ||
+    /*
+     * RasterIX's pixel pipeline always submits a TMU request, even when its
+     * final colour mux would bypass the unit.  The external TextureReader
+     * accepts those requests only while TMU0 and a texture source are enabled.
+     * Keep the reader live for flat shading, but use primary colour as the
+     * REPLACE source; source 1 remains TEXTURE solely to enable the reader.
+     */
+    if (!rix_cmd_feature_enable(writer, RIX_FEATURE_TMU0) ||
         !rix_cmd_fragment_state(writer, &fragment)) {
         return 0;
     }
-    if (textured) {
-        RixTextureState state;
-        RixTexEnvState environment;
-        uint32_t pages[TEXTURE_BYTES / 2048U];
-        size_t index;
-
-        memset(&state, 0, sizeof(state));
-        state.width_log2 = 6U;
-        state.height_log2 = 6U;
-        state.clamp_s = 1U;
-        state.clamp_t = 1U;
-        state.pixel_format = RIX_TEXTURE_RGB565;
-        memset(&environment, 0, sizeof(environment));
-        environment.combine_rgb = RIX_TEX_REPLACE;
-        environment.combine_alpha = RIX_TEX_REPLACE;
-        environment.src_rgb[0] = RIX_TEXSRC_TEXTURE;
-        environment.src_alpha[0] = RIX_TEXSRC_TEXTURE;
-        environment.operand_rgb[0] = RIX_TEXOP_SRC_COLOR;
-        environment.operand_alpha[0] = RIX_TEXAOP_SRC_ALPHA;
-        for (index = 0U; index < TEXTURE_BYTES / 2048U; ++index) {
-            pages[index] = TEXTURE_ADDRESS + (uint32_t)index * 2048U;
-        }
-        if (!rix_cmd_texture_state(writer, 0U, &state) ||
-            !rix_cmd_tex_env(writer, 0U, &environment) ||
-            !rix_cmd_texture_pages(writer, 0U, pages, TEXTURE_BYTES / 2048U)) {
-            return 0;
-        }
+    memset(&state, 0, sizeof(state));
+    state.width_log2 = 6U;
+    state.height_log2 = 6U;
+    state.clamp_s = 1U;
+    state.clamp_t = 1U;
+    state.pixel_format = RIX_TEXTURE_RGB565;
+    memset(&environment, 0, sizeof(environment));
+    environment.combine_rgb = RIX_TEX_REPLACE;
+    environment.combine_alpha = RIX_TEX_REPLACE;
+    environment.src_rgb[0] = textured ? RIX_TEXSRC_TEXTURE : RIX_TEXSRC_PRIMARY_COLOR;
+    environment.src_alpha[0] = textured ? RIX_TEXSRC_TEXTURE : RIX_TEXSRC_PRIMARY_COLOR;
+    environment.operand_rgb[0] = RIX_TEXOP_SRC_COLOR;
+    environment.operand_alpha[0] = RIX_TEXAOP_SRC_ALPHA;
+    for (index = 0U; index < TEXTURE_BYTES / 2048U; ++index) {
+        pages[index] = TEXTURE_ADDRESS + (uint32_t)index * 2048U;
+    }
+    if (!rix_cmd_texture_state(writer, 0U, &state) ||
+        !rix_cmd_tex_env(writer, 0U, &environment) ||
+        !rix_cmd_texture_pages(writer, 0U, pages, TEXTURE_BYTES / 2048U)) {
+        return 0;
     }
     return 1;
 }

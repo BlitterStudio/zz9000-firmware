@@ -125,6 +125,7 @@ module tb_zz9k_rasterix;
     integer i;
     integer latency;
     integer cycle_count;
+    integer trace_pipeline;
     reg [31:0] cmd_read_addr;
     integer cmd_read_left;
     integer cmd_read_delay;
@@ -133,6 +134,8 @@ module tb_zz9k_rasterix;
     integer render_read_left;
     integer render_read_delay;
     reg render_read_active;
+    reg [3:0] render_read_id;
+    reg [2:0] render_read_size;
     reg [31:0] write_addr;
     integer write_left;
     reg write_active;
@@ -168,6 +171,62 @@ module tb_zz9k_rasterix;
 
     always @(posedge clk) begin
         cycle_count <= cycle_count + 1;
+        if (trace_pipeline && (((cycle_count >= 115000) && (cycle_count <= 125000)) ||
+            ((cycle_count != 0) && ((cycle_count % 100000) == 0))))
+            $display("PIPE cycle=%0d rr=%b/%b sem=%b/%b lock=%0d attr=%b/%b,%b/%b pixready=%b bc2=%b/%b ar=%b/%b/%b alrp=%b/%b tmu=%b/%b/%b/%b frag=%b/%b concat=%b/%b full=%b empty=%b pfp=%b/%b out=%b/%b c=%b/%b/%b d=%b/%b/%b s=%b/%b/%b semcnt=%0d",
+                     cycle_count,
+                     dut.renderer.rixif.graphicCore.rasterizer_tvalid,
+                     dut.renderer.rixif.graphicCore.rasterizer_tready,
+                     dut.renderer.rixif.graphicCore.semaphoreRasterizerValid,
+                     dut.renderer.rixif.graphicCore.semaphoreRasterizerReady,
+                     dut.renderer.rixif.graphicCore.rasterizer_tpixel,
+                     dut.renderer.rixif.graphicCore.bc_attr_valid[0],
+                     dut.renderer.rixif.graphicCore.bc_attr_ready[0],
+                     dut.renderer.rixif.graphicCore.bc_attr_valid[1],
+                     dut.renderer.rixif.graphicCore.bc_attr_ready[1],
+                     dut.renderer.rixif.graphicCore.bc_pixel_ready,
+                     dut.renderer.rixif.graphicCore.bc2_valid,
+                     dut.renderer.rixif.graphicCore.bc2_ready,
+                     dut.renderer.rixif.graphicCore.m_color_arvalid,
+                     dut.renderer.rixif.graphicCore.m_depth_arvalid,
+                     dut.renderer.rixif.graphicCore.m_stencil_arvalid,
+                     dut.renderer.rixif.graphicCore.alrp_tvalid,
+                     dut.renderer.rixif.graphicCore.alrp_tready,
+                     dut.renderer.rixif.graphicCore.tr0_valid,
+                     dut.renderer.rixif.graphicCore.tr0_ready,
+                     dut.renderer.rixif.graphicCore.tr0_texel_valid,
+                     dut.renderer.rixif.graphicCore.tr0_texel_ready,
+                     dut.renderer.rixif.graphicCore.framebuffer_tvalid,
+                     dut.renderer.rixif.graphicCore.framebuffer_tready,
+                     dut.renderer.rixif.graphicCore.fragment_stream_out_tvalid,
+                     dut.renderer.rixif.graphicCore.fragment_stream_out_tready,
+                     dut.renderer.rixif.graphicCore.streamConcatFifo.stream_full,
+                     dut.renderer.rixif.graphicCore.streamConcatFifo.stream_empty,
+                     dut.renderer.rixif.graphicCore.framebuffer_pfp_wvalid,
+                     dut.renderer.rixif.graphicCore.framebuffer_pfp_wready,
+                     dut.renderer.rixif.graphicCore.framebuffer_bc_wvalid,
+                     dut.renderer.rixif.graphicCore.framebuffer_bc_wfull,
+                     dut.renderer.rixif.graphicCore.m_color_wvalid,
+                     dut.renderer.rixif.graphicCore.m_color_rvalid,
+                     dut.renderer.rixif.graphicCore.m_color_rready,
+                     dut.renderer.rixif.graphicCore.m_depth_wvalid,
+                     dut.renderer.rixif.graphicCore.m_depth_rvalid,
+                     dut.renderer.rixif.graphicCore.m_depth_rready,
+                     dut.renderer.rixif.graphicCore.m_stencil_wvalid,
+                     dut.renderer.rixif.graphicCore.m_stencil_rvalid,
+                     dut.renderer.rixif.graphicCore.m_stencil_rready,
+                     dut.renderer.rixif.graphicCore.concatSem.valuesCounter);
+        if (trace_pipeline && (cycle_count != 0) && ((cycle_count % 10000) == 0))
+            $display("RASTER cycle=%0d run=%b state=%0d x=%0d y=%0d ys=%0d ye=%0d line=%0d bb=%0d,%0d",
+                     cycle_count, dut.renderer.rixif.graphicCore.rasterizer.rasterizerRunning,
+                     dut.renderer.rixif.graphicCore.rasterizer.rasterizerState,
+                     dut.renderer.rixif.graphicCore.rasterizer.x,
+                     dut.renderer.rixif.graphicCore.rasterizer.y,
+                     dut.renderer.rixif.graphicCore.rasterizer.yScreen,
+                     dut.renderer.rixif.graphicCore.rasterizer.yScreenEnd,
+                     dut.renderer.rixif.graphicCore.rasterizer.lineBBStart,
+                     dut.renderer.rixif.graphicCore.rasterizer.bbStart,
+                     dut.renderer.rixif.graphicCore.rasterizer.bbEnd);
 
         if (m_cmd_axi_arvalid && m_cmd_axi_arready) begin
             if (m_cmd_axi_arsize != 3'b011 || m_cmd_axi_arburst != 2'b01)
@@ -204,13 +263,15 @@ module tb_zz9k_rasterix;
             render_read_left <= m_axi_arlen + 1;
             render_read_delay <= latency;
             render_read_active <= 1;
+            render_read_id <= m_axi_arid;
+            render_read_size <= m_axi_arsize;
         end
         if (render_read_active && !m_axi_rvalid) begin
             if (render_read_delay != 0) render_read_delay <= render_read_delay - 1;
             else begin
                 m_axi_rvalid <= 1;
                 m_axi_rdata <= word_at(render_read_addr);
-                m_axi_rid <= m_axi_arid;
+                m_axi_rid <= render_read_id;
                 m_axi_rresp <= 0;
                 m_axi_rlast <= (render_read_left == 1);
             end
@@ -221,7 +282,7 @@ module tb_zz9k_rasterix;
                 render_read_active <= 0;
                 m_axi_rlast <= 0;
             end else begin
-                render_read_addr <= render_read_addr + (1 << m_axi_arsize);
+                render_read_addr <= render_read_addr + (1 << render_read_size);
                 render_read_left <= render_read_left - 1;
                 render_read_delay <= latency;
             end
@@ -349,11 +410,14 @@ module tb_zz9k_rasterix;
         m_axi_arready = 0; m_axi_rid = 0; m_axi_rdata = 0; m_axi_rresp = 0; m_axi_rlast = 0; m_axi_rvalid = 0;
         m_cmd_axi_arready = 0; m_cmd_axi_rid = 0; m_cmd_axi_rdata = 0; m_cmd_axi_rresp = 0; m_cmd_axi_rlast = 0; m_cmd_axi_rvalid = 0;
         cmd_read_active = 0; render_read_active = 0; write_active = 0; cmd_read_left = 0; render_read_left = 0; write_left = 0;
+        render_read_id = 0; render_read_size = 0;
         if (!$value$plusargs("CMD=%s", command_file)) $fatal(1, "CMD=<scene>.hex is required");
         if (!$value$plusargs("TEXTURE=%s", texture_file)) texture_file = "";
         if (!$value$plusargs("PPM=%s", ppm_file)) ppm_file = "frame.ppm";
         if (!$value$plusargs("SCENE=%s", scene)) scene = "s1";
         if ($value$plusargs("LATENCY=%d", latency)) ;
+        trace_pipeline = 0;
+        if ($value$plusargs("TRACE_PIPE=%d", trace_pipeline)) ;
         poll_limit = 2000000;
         if ($value$plusargs("POLL_LIMIT=%d", poll_limit)) ;
         for (i = 0; i < MEM_BYTES; i = i + 1) memory[i] = 0;
@@ -386,9 +450,13 @@ module tb_zz9k_rasterix;
                 dump_ppm(ppm_file);
                 sample0 = {memory[COLOR_ADDR+1], memory[COLOR_ADDR]};
                 sample_out = {memory[COLOR_ADDR + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2 + 1], memory[COLOR_ADDR + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2]};
-                sample_mid = {memory[COLOR_ADDR + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2 + 1], memory[COLOR_ADDR + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2]};
+                if (scene == "s4")
+                    sample_mid = {memory[COLOR_ADDR + ((HEIGHT - 1 - 150) * WIDTH + 200) * 2 + 1], memory[COLOR_ADDR + ((HEIGHT - 1 - 150) * WIDTH + 200) * 2]};
+                else
+                    sample_mid = {memory[COLOR_ADDR + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2 + 1], memory[COLOR_ADDR + ((HEIGHT - 1 - 240) * WIDTH + 320) * 2]};
+                $display("SAMPLES scene=%0s clear=%04x interior=%04x exterior=%04x", scene, sample0, sample_mid, sample_out);
                 if (sample0 !== 16'hf800 || sample_out !== 16'hf800) $fatal(1, "clear/exterior expected red got %04x %04x", sample0, sample_out);
-                if (scene != "s1" && sample_mid === 16'hf800) $fatal(1, "triangle interior remained clear");
+                if (scene != "s1" && (sample_mid === 16'hf800 || (^sample_mid === 1'bx))) $fatal(1, "triangle interior is clear or unknown: %04x", sample_mid);
                 $display("PASS scene=%0s samples=%04x/%04x/%04x", scene, sample0, sample_mid, sample_out);
                 $finish;
             end
