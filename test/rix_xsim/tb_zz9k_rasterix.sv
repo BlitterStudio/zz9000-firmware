@@ -373,6 +373,9 @@ module tb_zz9k_rasterix;
         end
 
         if (m_axi_arvalid && m_axi_arready) begin
+            if (trace_pipeline)
+                $display("RENDER_AR cycle=%0d addr=%08x len=%0d id=%0d size=%0d",
+                         cycle_count, m_axi_araddr, m_axi_arlen, m_axi_arid, m_axi_arsize);
             render_read_addr <= m_axi_araddr;
             render_read_left <= m_axi_arlen + 1;
             render_read_delay <= latency;
@@ -393,6 +396,10 @@ module tb_zz9k_rasterix;
             end
         end
         if (m_axi_rvalid && m_axi_rready) begin
+            if (trace_pipeline && (m_axi_rlast || render_read_left == 1))
+                $display("RENDER_R_LAST cycle=%0d addr=%08x left=%0d id=%0d resp=%0d last=%b",
+                         cycle_count, render_read_addr, render_read_left, m_axi_rid,
+                         m_axi_rresp, m_axi_rlast);
             m_axi_rvalid <= 0;
             if (render_read_left == 1) begin
                 render_read_active <= 0;
@@ -403,6 +410,10 @@ module tb_zz9k_rasterix;
                 render_read_delay <= latency;
             end
         end
+        if (trace_pipeline && m_axi_rvalid && !m_axi_rready && ((cycle_count % 10000) == 0))
+            $display("RENDER_R_BACKPRESSURE cycle=%0d addr=%08x left=%0d id=%0d resp=%0d last=%b",
+                     cycle_count, render_read_addr, render_read_left, m_axi_rid,
+                     m_axi_rresp, m_axi_rlast);
 
         if (m_axi_awvalid && m_axi_awready) begin
             write_active <= 1;
