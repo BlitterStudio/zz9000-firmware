@@ -91,9 +91,11 @@ build_one() {
     top="/cache/top-tmu$tmu.v"
     c_backend_args="-DC_UNTEXTURED=false -DC_TRACE=false"
     trace_args=
+    verilator_args=
     if test "${RASTERIX_EXPERIMENT:-}" = e3; then
         c_backend_args="-DC_UNTEXTURED=true -DC_TRACE=true"
         trace_args=--trace
+        verilator_args="--x-assign unique --x-initial unique"
     fi
     if test "$use_upstream_top" = 1; then
         top="$work/rtl/top/Verilator/top.v"
@@ -101,7 +103,7 @@ build_one() {
         python3 /src/test/rasterix/patch_top.py "$work/rtl/top/Verilator/top.v" "$top" --tmu-count "$tmu" \
             --band-lg "$band_lg" --framebuffer-sub-pixel-width "$sub_pixel_width" --stencil "$stencil"
     fi
-    verilator -Wno-SELRANGE -Wno-lint -Wno-WIDTH -DUNITTEST -DVARIANT=if -CFLAGS "-O3 -DNDEBUG" $trace_args \
+    verilator -Wno-SELRANGE -Wno-lint -Wno-WIDTH -DUNITTEST -DVARIANT=if -CFLAGS "-O3 -DNDEBUG" $trace_args $verilator_args \
         -DFRAMEBUFFER_SIZE_IN_PIXEL_LG="$band_lg" --cc "$top" --top-module top --Mdir "$obj" \
         -I"$work/rtl/RasterIX" -I"$work/rtl/3rdParty" -I"$work/rtl/Float/rtl/float" \
         -I"$work/rtl/3rdParty/verilog-axi" -I"$work/rtl/3rdParty/verilog-axis" -I"$work/rtl/Display"
@@ -114,6 +116,16 @@ build_one() {
         -DRIX_CORE_DEPTH_BUFFER_LOC=0x01A00000 -DRIX_CORE_STENCIL_BUFFER_LOC=0x01900000 \
         -DRIX_C_ROOT=/minigl $c_backend_args -DCMAKE_BUILD_TYPE=Release
     cmake --build "$build" --parallel "$(nproc)"
+    if test "${RASTERIX_EXPERIMENT:-}" = e3; then
+        result=0
+        for seed in 1 2; do
+            if ! timeout --foreground 45m "$build/rasterix_harness" --tmu "$tmu" --output /out --backend "${RASTERIX_BACKEND:-c}" \
+                    +verilator+rand+reset+2 "+verilator+seed+$seed"; then
+                result=1
+            fi
+        done
+        return "$result"
+    fi
     timeout --foreground 45m "$build/rasterix_harness" --tmu "$tmu" --output /out --backend "${RASTERIX_BACKEND:-c}"
 }
 

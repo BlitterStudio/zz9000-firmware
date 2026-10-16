@@ -202,7 +202,7 @@ private:
         m_top.aclk = 0;
         m_top.eval();
 #if defined(HARNESS_TRACE)
-        if (m_cycles < 6000U) {
+        if (m_cycles < 1000U || m_cycles >= 198000U) {
             m_trace.dump(m_top.contextp()->time());
         }
 #endif
@@ -569,6 +569,9 @@ Options parseArguments(int argc, char** argv)
     Options options;
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
+        if (argument.rfind("+verilator+", 0) == 0) {
+            continue;
+        }
         if (argument == "--tmu" && i + 1 < argc) {
             options.tmuCount = static_cast<uint32_t>(std::stoul(argv[++i]));
         } else if (argument == "--output" && i + 1 < argc) {
@@ -597,6 +600,7 @@ Options parseArguments(int argc, char** argv)
 int main(int argc, char** argv)
 {
     try {
+        Verilated::commandArgs(argc, argv);
         const Options options = parseArguments(argc, argv);
         std::filesystem::create_directories(options.output / "frames");
         MeasuredVerilatorBus bus;
