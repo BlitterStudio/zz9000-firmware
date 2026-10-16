@@ -448,6 +448,46 @@ module tb_zz9k_rasterix;
         if (m_axi_bvalid && m_axi_bready) m_axi_bvalid <= 0;
     end
 
+    // Framebuffer command evidence: correlate every OP_FRAMEBUFFER the parser
+    // accepts with the per-port address requests the handlers raise, so a
+    // crossbar stall can be attributed to a concrete command word.
+    reg [31:0] last_fb_word;
+    reg [2:0] fb_avalid_prev;
+    always @(posedge clk) begin
+        if (resetn &&
+            (dut.renderer.rixif.graphicCore.commandParser.state == 1) &&
+            dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tvalid &&
+            dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tready &&
+            (dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tdata[31:28] == 4'h2)) begin
+            last_fb_word <= dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tdata;
+            $display("FB_OP cycle=%0d word=%08x commit=%b memset=%b swap=%b read=%b sel[cds]=%b%b%b size=%0d",
+                     cycle_count,
+                     dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tdata,
+                     dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tdata[0],
+                     dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tdata[1],
+                     dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tdata[2],
+                     dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tdata[3],
+                     dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tdata[6],
+                     dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tdata[5],
+                     dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tdata[4],
+                     dut.renderer.rixif.graphicCore.commandParser.s_cmd_axis_tdata[27:8]);
+        end
+        if (resetn && (dut.renderer.framebuffer_avalid != fb_avalid_prev)) begin
+            $display("FB_AVALID cycle=%0d ports=%b last_fb_word=%08x color[state=%0d avalid=%b beats=%0d] depth[state=%0d avalid=%b beats=%0d] xbar[active=%b port=%0d count=%0d]",
+                     cycle_count, dut.renderer.framebuffer_avalid, last_fb_word,
+                     dut.renderer.rixif.colorBuffer.commandHandler.cmdState,
+                     dut.renderer.rixif.colorBuffer.commandHandler.m_avalid,
+                     dut.renderer.rixif.colorBuffer.commandHandler.m_abeats,
+                     dut.renderer.rixif.genDepthBuffer.depthBuffer.commandHandler.cmdState,
+                     dut.renderer.rixif.genDepthBuffer.depthBuffer.commandHandler.m_avalid,
+                     dut.renderer.rixif.genDepthBuffer.depthBuffer.commandHandler.m_abeats,
+                     dut.renderer.axisToAxiCrossbar.transferActive,
+                     dut.renderer.axisToAxiCrossbar.portSelect,
+                     dut.renderer.axisToAxiCrossbar.axisToAxiAdapter.counter);
+        end
+        fb_avalid_prev <= dut.renderer.framebuffer_avalid;
+    end
+
     task axi_write;
         input [15:0] addr;
         input [31:0] data;
