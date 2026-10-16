@@ -24,6 +24,7 @@ constexpr uint32_t kHeight = 480;
 constexpr uint32_t kBandPixels = 1U << 14;
 constexpr uint32_t kWorldTriangles = 2048;
 constexpr uint32_t kParticles = 256;
+constexpr uint32_t kTextureEdge = 16;
 
 uint64_t fnv1a(const std::vector<uint8_t>& bytes)
 {
@@ -58,7 +59,16 @@ public:
     {
         m_commandBytes += size;
         const uint32_t* words = reinterpret_cast<const uint32_t*>(m_dlMemTx[index].data() + offset);
+        const uint64_t startCycles = m_cycles;
         for (uint32_t word = 0; word < size / sizeof(*words);) {
+            if (m_cycles - startCycles > 1000000ULL) {
+                std::ostringstream diagnostic;
+                diagnostic << "RasterIX command stream stalled after " << (m_cycles - startCycles)
+                           << " cycles (word=" << word << '/' << size / sizeof(*words)
+                           << ", cmd_ready=" << static_cast<unsigned>(m_top.s_cmd_axis_tready)
+                           << ", fb_valid=" << static_cast<unsigned>(m_top.m_framebuffer_axis_tvalid) << ')';
+                throw std::runtime_error(diagnostic.str());
+            }
             if (m_top.s_cmd_axis_tready) {
                 m_top.s_cmd_axis_tdata = words[word++];
                 m_top.s_cmd_axis_tvalid = 1;
@@ -344,13 +354,13 @@ private:
 
     void createTextures()
     {
-        std::vector<uint8_t> checker(256 * 256 * 4);
-        std::vector<uint8_t> light(256 * 256 * 4);
-        std::vector<uint8_t> alpha(256 * 256 * 4);
-        for (uint32_t y = 0; y < 256; ++y) {
-            for (uint32_t x = 0; x < 256; ++x) {
-                const std::size_t offset = (y * 256 + x) * 4;
-                const uint8_t c = ((x / 16) ^ (y / 16)) & 1 ? 210 : 72;
+        std::vector<uint8_t> checker(kTextureEdge * kTextureEdge * 4);
+        std::vector<uint8_t> light(kTextureEdge * kTextureEdge * 4);
+        std::vector<uint8_t> alpha(kTextureEdge * kTextureEdge * 4);
+        for (uint32_t y = 0; y < kTextureEdge; ++y) {
+            for (uint32_t x = 0; x < kTextureEdge; ++x) {
+                const std::size_t offset = (y * kTextureEdge + x) * 4;
+                const uint8_t c = ((x / 4) ^ (y / 4)) & 1 ? 210 : 72;
                 checker[offset] = c;
                 checker[offset + 1] = static_cast<uint8_t>(c * 3 / 4);
                 checker[offset + 2] = static_cast<uint8_t>(255 - c / 3);
@@ -387,11 +397,11 @@ private:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mipmapped ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
         if (!mipmapped) {
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 256, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kTextureEdge, kTextureEdge, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
             return;
         }
         std::vector<uint8_t> levelPixels = pixels;
-        for (uint32_t edge = 256, level = 0;; ++level, edge /= 2) {
+        for (uint32_t edge = kTextureEdge, level = 0;; ++level, edge /= 2) {
             glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, edge, edge, 0, GL_RGBA, GL_UNSIGNED_BYTE, levelPixels.data());
             if (edge == 1) {
                 break;
