@@ -43,6 +43,7 @@ LHA_OBJS="build/m68k/lha-bitio.o build/m68k/lha-crcio.o build/m68k/lha-dhuf.o bu
 ZZPLAY_SOURCES="tools/zzplay/zzplay-ahi.c tools/zzplay/zzplay-ahiprefs.c tools/zzplay/zzplay-audio.c tools/zzplay/zzplay-audio-clock.c tools/zzplay/zzplay-ax.c tools/zzplay/zzplay-codec.c tools/zzplay/zzplay-codec-stream.c tools/zzplay/zzplay-controller.c tools/zzplay/zzplay-core.c tools/zzplay/zzplay-devices.c tools/zzplay/zzplay-files.c tools/zzplay/zzplay-formats.c tools/zzplay/zzplay-frame-clock.c tools/zzplay/zzplay-geometry.c tools/zzplay/zzplay-gui.c tools/zzplay/zzplay-launch.c tools/zzplay/zzplay-media.c tools/zzplay/zzplay-mhi.c tools/zzplay/zzplay-mp3.c tools/zzplay/zzplay-mp3-transport.c tools/zzplay/zzplay-options.c tools/zzplay/zzplay-path.c tools/zzplay/zzplay-playlist.c tools/zzplay/zzplay-prefs.c tools/zzplay/zzplay-probe.c tools/zzplay/zzplay-reader.c tools/zzplay/zzplay-stats.c tools/zzplay/zzplay-stream.c tools/zzplay/zzplay-sync.c tools/zzplay/zzplay-tags.c tools/zzplay/zzplay-video.c tools/zzplay/zzplay-webm.c tools/zzplay/zzplay.c"
 
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-requester.c"
+ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-rexx.c tools/zzplay/zzplay-rexx-commands.c"
 ZZPLAY_SOURCES="$ZZPLAY_SOURCES tools/zzplay/zzplay-sys.c"
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga/include \
   build/m68k/zz9k_library_resident.o build/m68k/zz9k_library.o \

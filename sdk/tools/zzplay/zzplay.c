@@ -35,6 +35,7 @@
 #include "zzplay-prefs.h"
 #include "zzplay-probe.h"
 #include "zzplay-reader.h"
+#include "zzplay-rexx.h"
 #include "zzplay-stats.h"
 #include "zzplay-stream.h"
 #include "zzplay-decode-policy.h"
@@ -453,7 +454,10 @@ static void zzplay_usage(FILE *stream)
           "MHIDRIVER=name, VOLUME=n, QUIET, VERBOSE, TRACE[=PATH] and\n"
           "AUDIO=<backend> match the options above. A Workbench launch is\n"
           "quiet by default, because printing there makes AmigaDOS open an\n"
-          "output window that never closes.\n",
+          "output window that never closes.\n"
+          "\n"
+          "ARexx: send commands to the port ZZPLAY (ZZPLAY.1 for a second\n"
+          "copy); HELP lists them.\n",
           zzplay_version + 6);
 }
 
@@ -651,6 +655,14 @@ static int zzplay_engine_service_input(struct ZZPlayRuntime *runtime,
                                        int *resized);
 static void zzplay_engine_stop_from_request(
     struct ZZPlayRuntime *runtime);
+
+/* The input surfaces besides the video window: ARexx first, so the player
+ * window redraws what a command changed in the same pass. */
+static void zzplay_poll_input(void)
+{
+  zzplay_rexx_poll();
+  zzplay_gui_poll();
+}
 
 static ZZPlayControlAction zzplay_poll_control(
     struct ZZPlayRuntime *runtime, int *resized)
@@ -2683,7 +2695,7 @@ static int zzplay_preload_cancel_requested(struct ZZPlayRuntime *runtime)
     zzplay_ctrl_c_requested = 1;
     (void)zzplay_controller_request(runtime->ctl, ZZPLAY_REQUEST_QUIT);
   }
-  zzplay_gui_poll();
+  zzplay_poll_input();
   return zzplay_controller_item_should_end(runtime->ctl);
 }
 
@@ -3281,7 +3293,7 @@ static void zzplay_app_pump(void *user)
     zzplay_ctrl_c_requested = 1;
     (void)zzplay_controller_request(&app->ctl, ZZPLAY_REQUEST_QUIT);
   }
-  zzplay_gui_poll();
+  zzplay_poll_input();
   zzplay_app_after_input(app);
 }
 
@@ -3323,7 +3335,7 @@ static int zzplay_engine_service_input(struct ZZPlayRuntime *runtime,
      * item-ending requests the application loop then routes. */
     (void)zzplay_controller_apply(runtime->ctl, control);
   }
-  zzplay_gui_poll();
+  zzplay_poll_input();
   zzplay_app_after_input(&app);
   return zzplay_controller_item_should_end(runtime->ctl);
 }
@@ -5065,7 +5077,8 @@ static ZZPlayAppStep zzplay_app_idle(ZZPlayApp *app)
       return ZZPLAY_APP_QUIT;
     }
     if (app->ctl.request == ZZPLAY_REQUEST_NONE) {
-      uint32_t mask = zzplay_gui_signal_mask() | SIGBREAKF_CTRL_C;
+      uint32_t mask = zzplay_gui_signal_mask() | zzplay_rexx_signal_mask() |
+                      SIGBREAKF_CTRL_C;
       uint32_t signals;
 
       if (zzplay_gui_redraw_deferred()) {
@@ -5331,8 +5344,22 @@ int main(int argc, char **argv)
     zzplay_playlist_set_shuffle(&app.playlist, 0, 0U);
   }
 
+  {
+    ZZPlayRexxContext rexx;
+
+    rexx.controller = &app.ctl;
+    rexx.playlist = &app.playlist;
+    rexx.item_path = app.item_path;
+    rexx.version = zzplay_version + 6;
+    /* Without ARexx ZZPlay simply has no port. */
+    (void)zzplay_rexx_open(&rexx);
+  }
+
   exit_code = zzplay_app_run(&app);
 
+  /* Commands still queued are answered with an error before the state
+   * they would act on goes away. */
+  zzplay_rexx_close();
   /* Closing the window records its final position in prefs, so it must
    * happen before the session is saved. */
   zzplay_gui_close();
