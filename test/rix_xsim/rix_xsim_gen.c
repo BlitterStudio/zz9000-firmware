@@ -24,9 +24,9 @@
 #define DEPTH_PITCH (SCREEN_WIDTH * 2U)
 #define CLEAR_RGBA 0xff0000ffU
 #define COMMAND_CAPACITY (256U * 1024U)
-#define TEXTURE_WIDTH 64U
-#define TEXTURE_HEIGHT 64U
-#define TEXTURE_BYTES (TEXTURE_WIDTH * TEXTURE_HEIGHT * 2U)
+#define TEXTURE_WIDTH 8U
+#define TEXTURE_HEIGHT 8U
+#define TEXTURE_BYTES 2048U
 #define TEXTURE_WORDS (TEXTURE_BYTES / 4U)
 #define MAX_TRIANGLES 64U
 #define PI 3.14159265358979323846
@@ -213,8 +213,8 @@ static int setup_state(RixCmdWriter *writer, int textured)
         return 0;
     }
     memset(&state, 0, sizeof(state));
-    state.width_log2 = 6U;
-    state.height_log2 = 6U;
+    state.width_log2 = 3U;
+    state.height_log2 = 3U;
     state.clamp_s = 1U;
     state.clamp_t = 1U;
     state.pixel_format = RIX_TEXTURE_RGB565;
@@ -261,7 +261,7 @@ static int build_s4(RixBandList *bands, RixTriangle *triangles, size_t *count)
         double a1 = (double)(tooth + 1U) * 2.0 * PI / 24.0;
         double outer = tooth % 2U == 0U ? 156.0 : 130.0;
         double inner = 72.0;
-        uint32_t color = tooth % 2U == 0U ? 0x2080ffffU : 0xffa020ffU;
+        uint32_t color = 0x00ff00ffU;
         RixVertex i0 = vertex((float)(320.0 + inner * cos(a0)),
                               (float)(240.0 + inner * sin(a0)), 0.5f,
                               color, 0.0f, 0.0f);
@@ -289,11 +289,11 @@ static void make_texture(uint8_t texture[TEXTURE_BYTES])
     unsigned int x;
     unsigned int y;
 
+    memset(texture, 0, TEXTURE_BYTES);
     for (y = 0U; y < TEXTURE_HEIGHT; ++y) {
         for (x = 0U; x < TEXTURE_WIDTH; ++x) {
-            /* Both checker colors are non-red at the S3 triangle centre. */
-            rgba[y * TEXTURE_WIDTH + x] = ((x / 8U + y / 8U) & 1U) == 0U
-                                              ? 0x00ffffffU : 0xffff00ffU;
+            /* Flat scenes keep TMU0 live with this deterministic white texel. */
+            rgba[y * TEXTURE_WIDTH + x] = 0xffffffffU;
         }
     }
     (void)rix_texture_convert_rgba8_le(texture, TEXTURE_BYTES, rgba,
@@ -352,9 +352,11 @@ static int generate_scene(const char *directory, const char *name, unsigned int 
     size_t triangle_count = 0U;
     char binary_path[1024];
     char hex_path[1024];
-    int textured = scene == 3U;
+    int textured = scene == 3U || scene == 4U;
     int valid_scene;
 
+    memset(triangles, 0, sizeof(triangles));
+    memset(references, 0, sizeof(references));
     if (!rix_band_list_init(&bands, SCREEN_WIDTH, SCREEN_HEIGHT,
                             RIX_BAND_LAYOUT_COMPLETE, references, MAX_TRIANGLES)) {
         return 0;

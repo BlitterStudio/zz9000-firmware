@@ -8,6 +8,7 @@ module tb_zz9k_rasterix;
     localparam integer WIDTH = 640;
     localparam integer HEIGHT = 480;
     localparam integer COLOR_BYTES = WIDTH * HEIGHT * 2;
+    localparam integer TEXTURE_BYTES = 2048;
 
     reg clk;
     reg resetn;
@@ -121,7 +122,7 @@ module tb_zz9k_rasterix;
 
     reg [7:0] memory [0:MEM_BYTES-1];
     reg [31:0] command_words [0:262143];
-    reg [7:0] texture_bytes [0:8191];
+    reg [7:0] texture_bytes [0:TEXTURE_BYTES-1];
     integer i;
     integer latency;
     integer cycle_count;
@@ -227,6 +228,57 @@ module tb_zz9k_rasterix;
                      dut.renderer.rixif.graphicCore.rasterizer.lineBBStart,
                      dut.renderer.rixif.graphicCore.rasterizer.bbStart,
                      dut.renderer.rixif.graphicCore.rasterizer.bbEnd);
+        if (dut.renderer.rixif.graphicCore.m_color_wvalid &&
+            dut.renderer.rixif.graphicCore.m_color_waddr == 48407)
+            $display("S4_X_WRITE cycle=%0d xy=%0d,%0d color=%04x pfp=%04x fragment=%h",
+                     cycle_count,
+                     dut.renderer.rixif.graphicCore.m_color_wscreenPosX,
+                     dut.renderer.rixif.graphicCore.m_color_wscreenPosY,
+                     dut.renderer.rixif.graphicCore.m_color_wdata,
+                     dut.renderer.rixif.graphicCore.framebuffer_color_pfp_wdata,
+                     dut.renderer.rixif.graphicCore.framebuffer_tfragmentColor);
+        if (dut.renderer.rixif.graphicCore.framebuffer_pfp_wvalid &&
+            (^dut.renderer.rixif.graphicCore.framebuffer_color_pfp_wdata === 1'bx))
+            $display("PFP_X cycle=%0d addr=%0d xy=%0d,%0d color=%04x fragment=%h",
+                     cycle_count,
+                     dut.renderer.rixif.graphicCore.framebuffer_pfp_waddr,
+                     dut.renderer.rixif.graphicCore.framebuffer_pfp_wscreenPosX,
+                     dut.renderer.rixif.graphicCore.framebuffer_pfp_wscreenPosY,
+                     dut.renderer.rixif.graphicCore.framebuffer_color_pfp_wdata,
+                     dut.renderer.rixif.graphicCore.framebuffer_tfragmentColor);
+        if (dut.renderer.rixif.graphicCore.framebuffer_tvalid &&
+            (^dut.renderer.rixif.graphicCore.framebuffer_tfragmentColor === 1'bx))
+            $display("PIXEL_X cycle=%0d index=%0d xy=%0d,%0d color=%h attr_color=%h uv=%h,%h",
+                     cycle_count,
+                     dut.renderer.rixif.graphicCore.framebuffer_tindex,
+                     dut.renderer.rixif.graphicCore.framebuffer_tscreenPosX,
+                     dut.renderer.rixif.graphicCore.framebuffer_tscreenPosY,
+                     dut.renderer.rixif.graphicCore.framebuffer_tfragmentColor,
+                     {dut.renderer.rixif.graphicCore.alrp_tcolor_r,
+                      dut.renderer.rixif.graphicCore.alrp_tcolor_g,
+                      dut.renderer.rixif.graphicCore.alrp_tcolor_b,
+                      dut.renderer.rixif.graphicCore.alrp_tcolor_a},
+                     dut.renderer.rixif.graphicCore.alrp_ttexture0_s,
+                     dut.renderer.rixif.graphicCore.alrp_ttexture0_t);
+        if (dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step2_valid &&
+            (^{dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step2_texel00,
+               dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step2_texel01,
+               dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step2_texel10,
+               dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step2_texel11} === 1'bx))
+            $display("TMU0_TEXEL_X cycle=%0d texels=%h,%h,%h,%h",
+                     cycle_count,
+                     dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step2_texel00,
+                     dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step2_texel01,
+                     dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step2_texel10,
+                     dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step2_texel11);
+        if (dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step4_valid &&
+            (^dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step4_texel === 1'bx))
+            $display("TMU0_FILTER_X cycle=%0d texel=%h", cycle_count,
+                     dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step4_texel);
+        if (dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step5_valid &&
+            (^dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step5_texel === 1'bx))
+            $display("TMU0_TEXENV_X cycle=%0d texel=%h", cycle_count,
+                     dut.renderer.rixif.graphicCore.pixelPipeline.tmu0.step5_texel);
 
         if (m_cmd_axi_arvalid && m_cmd_axi_arready) begin
             if (m_cmd_axi_arsize != 3'b011 || m_cmd_axi_arburst != 2'b01)
@@ -295,6 +347,9 @@ module tb_zz9k_rasterix;
             write_id <= m_axi_awid;
         end
         if (m_axi_wvalid && m_axi_wready) begin
+            if (write_addr == 32'h0021_7a2c)
+                $display("S4_X_DDR_WRITE cycle=%0d addr=%08x data=%08x strb=%x",
+                         cycle_count, write_addr, m_axi_wdata, m_axi_wstrb);
             if (m_axi_wstrb[0]) memory[write_addr] <= m_axi_wdata[7:0];
             if (m_axi_wstrb[1]) memory[write_addr + 1] <= m_axi_wdata[15:8];
             if (m_axi_wstrb[2]) memory[write_addr + 2] <= m_axi_wdata[23:16];
@@ -423,7 +478,7 @@ module tb_zz9k_rasterix;
         for (i = 0; i < MEM_BYTES; i = i + 1) memory[i] = 0;
         if (texture_file != "") begin
             $readmemh(texture_file, texture_bytes);
-            for (i = 0; i < 8192; i = i + 1) memory[32'h0034_0000 + i] = texture_bytes[i];
+            for (i = 0; i < TEXTURE_BYTES; i = i + 1) memory[32'h0034_0000 + i] = texture_bytes[i];
         end
         $readmemh(command_file, command_words);
         cmd_count = (command_words[0] & 28'h0fff_ffff) / 4 + 2;
@@ -448,6 +503,8 @@ module tb_zz9k_rasterix;
             if (status == completed_before + 1) begin
                 $display("RESULT scene=%0s cycles=%0d command_words=%0d", scene, cycle_count, cmd_count);
                 dump_ppm(ppm_file);
+                for (i = 0; i < COLOR_BYTES; i = i + 1)
+                    if (^memory[COLOR_ADDR + i] === 1'bx) $fatal(1, "framebuffer contains unknown byte at %0d", i);
                 sample0 = {memory[COLOR_ADDR+1], memory[COLOR_ADDR]};
                 sample_out = {memory[COLOR_ADDR + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2 + 1], memory[COLOR_ADDR + ((HEIGHT - 1 - 10) * WIDTH + 10) * 2]};
                 if (scene == "s4")
