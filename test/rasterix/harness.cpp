@@ -5,23 +5,20 @@
 #include "glu.h"
 #include "renderer/devicedatauploader/DeviceDataUploader.hpp"
 #include "verilated.h"
-
 #include <array>
 #include <chrono>
-#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
-#include <sstream>
 #include <string>
 #include <vector>
 
 namespace {
-constexpr uint32_t kWidth = 640;
-constexpr uint32_t kHeight = 480;
-constexpr uint32_t kBandPixels = 1U << 14;
+constexpr uint32_t kWidth = HARNESS_WIDTH;
+constexpr uint32_t kHeight = HARNESS_HEIGHT;
+constexpr uint32_t kBandPixels = 1U << HARNESS_BAND_LG;
 constexpr uint32_t kWorldTriangles = 2048;
 constexpr uint32_t kParticles = 256;
 constexpr uint32_t kTextureEdge = 16;
@@ -41,7 +38,6 @@ public:
     MeasuredVerilatorBus()
         : m_framebuffer(kWidth * kHeight * 3)
     {
-        Verilated::traceEverOn(true);
         m_top.m_framebuffer_axis_tready = 1;
         m_top.m_cmd_resp_axis_tready = 0;
         m_top.s_cmd_axis_tvalid = 0;
@@ -61,12 +57,17 @@ public:
         const uint32_t* words = reinterpret_cast<const uint32_t*>(m_dlMemTx[index].data() + offset);
         const uint64_t startCycles = m_cycles;
         for (uint32_t word = 0; word < size / sizeof(*words);) {
-            if (m_cycles - startCycles > 1000000ULL) {
+            if (m_cycles - startCycles > 200000ULL) {
                 std::ostringstream diagnostic;
                 diagnostic << "RasterIX command stream stalled after " << (m_cycles - startCycles)
                            << " cycles (word=" << word << '/' << size / sizeof(*words)
                            << ", cmd_ready=" << static_cast<unsigned>(m_top.s_cmd_axis_tready)
-                           << ", fb_valid=" << static_cast<unsigned>(m_top.m_framebuffer_axis_tvalid) << ')';
+                           << ", fb_valid=" << static_cast<unsigned>(m_top.m_framebuffer_axis_tvalid)
+                           << ", initial_words=";
+                for (uint32_t initial = 0; initial < 10 && initial < size / sizeof(*words); ++initial) {
+                    diagnostic << (initial == 0 ? "" : ":") << std::hex << words[initial] << std::dec;
+                }
+                diagnostic << ')';
                 throw std::runtime_error(diagnostic.str());
             }
             if (m_top.s_cmd_axis_tready) {

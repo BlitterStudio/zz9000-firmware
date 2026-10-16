@@ -12,7 +12,9 @@ OUTPUT=$(mkdir -p "$OUTPUT" && cd -- "$OUTPUT" && pwd)
 ROOT_DOCKER=$(cygpath -aw "$ROOT")
 OUTPUT_DOCKER=$(cygpath -aw "$OUTPUT")
 export MSYS_NO_PATHCONV=1
+PROFILE=${RASTERIX_PROFILE:-zz9000}
 docker run --rm \
+    -e RASTERIX_PROFILE="$PROFILE" \
     -v "$ROOT_DOCKER:/src:ro" \
     -v "$OUTPUT_DOCKER:/out" \
     -v zz9000-rasterix-harness-cache:/cache \
@@ -48,24 +50,54 @@ for part in RasterIX Float 3rdParty; do
     cp -a "/src/rtl/rasterix/$part/." "$work/rtl/$part/"
 done
 
+case "${RASTERIX_PROFILE:-zz9000}" in
+zz9000)
+    band_lg=14; width=640; height=480; tmu_list="1 2"; sub_pixel_width=5; stencil=0; use_upstream_top=0
+    pages=256; textures=256; page_bytes=4096; threaded=false; display_list_size="1024*1024*4"
+    ;;
+upstream-nexys-rixif)
+    band_lg=17; width=1024; height=600; tmu_list=2; sub_pixel_width=6; stencil=1; use_upstream_top=0
+    pages=12288; textures=12288; page_bytes=2048; threaded=true; display_list_size="1024*1024*16"
+    ;;
+upstream-verilator)
+    band_lg=15; width=640; height=480; tmu_list=2; sub_pixel_width=6; stencil=1; use_upstream_top=1
+    pages=6912; textures=6912; page_bytes=4096; threaded=true; display_list_size=1048576
+    ;;
+*)
+    echo "unknown RASTERIX_PROFILE: $RASTERIX_PROFILE" >&2
+    exit 2
+    ;;
+esac
+
 build_one() {
     tmu=$1
-    obj="/cache/vobj-tmu$tmu"
-    build="/cache/build-tmu$tmu"
+    obj="/cache/vobj-${RASTERIX_PROFILE}-tmu$tmu"
+    build="/cache/build-${RASTERIX_PROFILE}-tmu$tmu"
     top="/cache/top-tmu$tmu.v"
-    python3 /src/test/rasterix/patch_top.py "$work/rtl/top/Verilator/top.v" "$top" --tmu-count "$tmu"
+    if test "$use_upstream_top" = 1; then
+        top="$work/rtl/top/Verilator/top.v"
+    else
+        python3 /src/test/rasterix/patch_top.py "$work/rtl/top/Verilator/top.v" "$top" --tmu-count "$tmu" \
+            --band-lg "$band_lg" --framebuffer-sub-pixel-width "$sub_pixel_width" --stencil "$stencil"
+    fi
     verilator -Wno-SELRANGE -Wno-lint -Wno-WIDTH -DUNITTEST -DVARIANT=if -CFLAGS "-O3 -DNDEBUG" \
-        -DFRAMEBUFFER_SIZE_IN_PIXEL_LG=14 --cc "$top" --top-module top --Mdir "$obj" \
+        -DFRAMEBUFFER_SIZE_IN_PIXEL_LG="$band_lg" --cc "$top" --top-module top --Mdir "$obj" \
         -I"$work/rtl/RasterIX" -I"$work/rtl/3rdParty" -I"$work/rtl/Float/rtl/float" \
         -I"$work/rtl/3rdParty/verilog-axi" -I"$work/rtl/3rdParty/verilog-axis" -I"$work/rtl/Display"
     make -s -j"$(nproc)" -C "$obj" -f Vtop.mk
-    cmake -S /src/test/rasterix -B "$build" -DRASTERIX_ROOT="$work" -DVERILATOR_OBJDIR="$obj" -DTMU_COUNT="$tmu" -DCMAKE_BUILD_TYPE=Release
+    cmake -S /src/test/rasterix -B "$build" -DRASTERIX_ROOT="$work" -DVERILATOR_OBJDIR="$obj" -DTMU_COUNT="$tmu" \
+        -DRIX_CORE_MAX_DISPLAY_WIDTH="$width" -DRIX_CORE_MAX_DISPLAY_HEIGHT="$height" -DRIX_CORE_FRAMEBUFFER_SIZE_IN_PIXEL_LG="$band_lg" \
+        -DRIX_CORE_NUMBER_OF_TEXTURE_PAGES="$pages" -DRIX_CORE_NUMBER_OF_TEXTURES="$textures" -DRIX_CORE_TEXTURE_PAGE_SIZE="$page_bytes" \
+        -DRIX_CORE_THREADED_RASTERIZATION="$threaded" -DRIX_CORE_THREADED_RASTERIZATION_DISPLAY_LIST_SIZE="$display_list_size" \
+        -DRIX_CORE_COLOR_BUFFER_LOC_0=0x01E00000 -DRIX_CORE_COLOR_BUFFER_LOC_1=0x01E00000 -DRIX_CORE_COLOR_BUFFER_LOC_2=0x01C00000 \
+        -DRIX_CORE_DEPTH_BUFFER_LOC=0x01A00000 -DRIX_CORE_STENCIL_BUFFER_LOC=0x01900000 -DCMAKE_BUILD_TYPE=Release
     cmake --build "$build" --parallel "$(nproc)"
     timeout --foreground 45m "$build/rasterix_harness" --tmu "$tmu" --output /out
 }
 
-build_one 1
-build_one 2
+for tmu in $tmu_list; do
+    build_one "$tmu"
+done
 for ppm in /out/frames/*.ppm; do
     python3 /src/test/rasterix/ppm_to_png.py "$ppm" "${ppm%.ppm}.png"
     rm "$ppm"
