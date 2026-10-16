@@ -19,6 +19,7 @@ MINIGL_DOCKER=$(cygpath -aw "$MINIGL_ROOT")
 docker run --rm \
     -e RASTERIX_PROFILE="$PROFILE" \
     -e RASTERIX_REVISION="$REVISION" \
+    -e RASTERIX_EXPERIMENT="${RASTERIX_EXPERIMENT:-}" \
     -v "$ROOT_DOCKER:/src:ro" \
     -v "$OUTPUT_DOCKER:/out" \
     -v "$MINIGL_DOCKER:/minigl:ro" \
@@ -57,6 +58,10 @@ if test "$RASTERIX_REVISION" = 9269a01c9bd4c3342bfa70ef8e3cdd751c15c6d0; then
         done < <(find "/src/rtl/rasterix/$part" -type f -print0)
         cp -a "/src/rtl/rasterix/$part/." "$work/rtl/$part/"
     done
+if test "${RASTERIX_EXPERIMENT:-}" = e1; then
+    python3 /src/test/rasterix/patch_crossbar.py "$work/rtl/RasterIX/AxisToAxiCrossbar.v"
+fi
+
 fi
 
 
@@ -84,6 +89,10 @@ build_one() {
     obj="/cache/vobj-${RASTERIX_PROFILE}-${revision}-tmu$tmu"
     build="/cache/build-${RASTERIX_PROFILE}-${revision}-tmu$tmu"
     top="/cache/top-tmu$tmu.v"
+    c_backend_args=-DC_UNTEXTURED=false
+    if test "${RASTERIX_EXPERIMENT:-}" = e3; then
+        c_backend_args=-DC_UNTEXTURED=true
+    fi
     if test "$use_upstream_top" = 1; then
         top="$work/rtl/top/Verilator/top.v"
     else
@@ -101,7 +110,7 @@ build_one() {
         -DRIX_CORE_THREADED_RASTERIZATION="$threaded" -DRIX_CORE_THREADED_RASTERIZATION_DISPLAY_LIST_SIZE="$display_list_size" \
         -DRIX_CORE_COLOR_BUFFER_LOC_0=0x01E00000 -DRIX_CORE_COLOR_BUFFER_LOC_1=0x01E00000 -DRIX_CORE_COLOR_BUFFER_LOC_2=0x01C00000 \
         -DRIX_CORE_DEPTH_BUFFER_LOC=0x01A00000 -DRIX_CORE_STENCIL_BUFFER_LOC=0x01900000 \
-        -DRIX_C_ROOT=/minigl -DCMAKE_BUILD_TYPE=Release
+        -DRIX_C_ROOT=/minigl $c_backend_args -DCMAKE_BUILD_TYPE=Release
     cmake --build "$build" --parallel "$(nproc)"
     timeout --foreground 45m "$build/rasterix_harness" --tmu "$tmu" --output /out --backend "${RASTERIX_BACKEND:-c}"
 }

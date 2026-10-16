@@ -44,6 +44,9 @@ add_library(zz9000_rix_command STATIC
     "${RIX_C_ROOT}/rix_setup.c"
     "${RIX_C_ROOT}/rix_bin.c")
 target_include_directories(zz9000_rix_command PRIVATE "${RIX_C_ROOT}")
+if(C_UNTEXTURED)
+    target_compile_definitions(zz9000_rix_command PRIVATE C_UNTEXTURED=1)
+endif()
 
 
 add_executable(rasterix_harness harness.cpp)

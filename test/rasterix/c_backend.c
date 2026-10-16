@@ -34,10 +34,15 @@ size_t rix_harness_build_fill(uint8_t *bytes, size_t capacity)
     texture.width_log2 = texture.height_log2 = 4U;
     texture.mag_linear = texture.min_linear = 1U;
     texture.pixel_format = RIX_TEXTURE_RGB565;
+#if !defined(C_UNTEXTURED)
     if (!rix_cmd_texture_pages(&writer, 0U, texels, 128U) ||
         !rix_cmd_feature_enable(&writer, RIX_FEATURE_DEPTH | RIX_FEATURE_TMU0) ||
         !rix_cmd_fragment_state(&writer, &fragment) ||
         !rix_cmd_texture_state(&writer, 0U, &texture) ||
+#else
+    if (!rix_cmd_feature_enable(&writer, RIX_FEATURE_DEPTH) ||
+        !rix_cmd_fragment_state(&writer, &fragment) ||
+#endif
         !rix_setup_triangle(&triangles[0], &vertices[0], &vertices[1], &vertices[2], 0) ||
         !rix_setup_triangle(&triangles[1], &vertices[0], &vertices[2], &vertices[3], 0) ||
         !rix_band_list_init(&bands, 640U, 480U, RIX_BAND_LAYOUT_COMPLETE, references, 2U) ||
