@@ -34,8 +34,8 @@ static int zzplay_rexx_blank(char c)
   return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-/* Case-insensitive match of `word` (ending at NUL or a blank) against an
- * upper-case keyword. */
+/* Case-insensitive match of a split word against an upper-case keyword. A
+ * quoted word keeps its blanks, so "ADD " is not ADD. */
 static int zzplay_rexx_word_is(const char *word, const char *keyword)
 {
   while (*keyword != '\0') {
@@ -45,7 +45,7 @@ static int zzplay_rexx_word_is(const char *word, const char *keyword)
     word++;
     keyword++;
   }
-  return *word == '\0' || zzplay_rexx_blank(*word);
+  return *word == '\0';
 }
 
 /* Split `line` in place. Returns the number of words, or -1 for an
@@ -708,6 +708,31 @@ static void zzplay_rexx_help(const ZZPlayRexxHost *host, uint32_t argc,
   reply->has_result = 1;
 }
 
+/* Whether the raw line's command word, read as the splitter reads it (bare,
+ * or in double quotes followed by a blank or the end), is `keyword`. */
+static int zzplay_rexx_command_is(const char *line, const char *keyword)
+{
+  int quoted = *line == '"';
+
+  if (quoted) {
+    line++;
+  }
+  while (*keyword != '\0') {
+    if (zzplay_rexx_upper(*line) != *keyword) {
+      return 0;
+    }
+    line++;
+    keyword++;
+  }
+  if (quoted) {
+    if (*line != '"') {
+      return 0;
+    }
+    line++;
+  }
+  return *line == '\0' || zzplay_rexx_blank(*line);
+}
+
 int zzplay_rexx_needs_gate(const char *line)
 {
   if (!line) {
@@ -716,8 +741,8 @@ int zzplay_rexx_needs_gate(const char *line)
   while (zzplay_rexx_blank(*line)) {
     line++;
   }
-  return zzplay_rexx_word_is(line, "ADD") ||
-         zzplay_rexx_word_is(line, "OPEN");
+  return zzplay_rexx_command_is(line, "ADD") ||
+         zzplay_rexx_command_is(line, "OPEN");
 }
 
 void zzplay_rexx_execute(const ZZPlayRexxHost *host, char *line,

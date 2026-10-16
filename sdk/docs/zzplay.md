@@ -244,7 +244,7 @@ These keys work in the player window and in the video window.
 | --- | --- | --- |
 | MP3 output | Auto, MHI, AHI | Audio output for MP3 files. |
 | Video sound | Auto, AHI, ZZ9000AX, None | Audio output for MPEG and WebM sound. |
-| Preload media | on or off | Copy MPEG and WebM files to card memory before playback. See [Preload to card memory](#preload-to-card-memory). |
+| Preload whole file | on or off | Copy MPEG and WebM files to card memory before playback. See [Preload to card memory](#preload-to-card-memory). |
 | AHI unit | 0 to 3 | The `ahi.device` unit for every AHI output. |
 | MHI driver | drivers in `LIBS:MHI/` | The MHI driver for MP3 output. |
 
@@ -338,7 +338,7 @@ from 1. Times are whole seconds.
 | `REMOVE n` | Remove entry `n`. |
 | `SAVEPLAYLIST file` | Save the playlist as extended M3U under exactly the name given. |
 | `STATUS` | Return `PLAYING`, `PAUSED` or `STOPPED`. |
-| `TITLE`, `FILE`, `FORMAT` | Return the title, path or format text of the playing item. While stopped, `TITLE` and `FILE` describe the entry `PLAY` would start. |
+| `TITLE`, `FILE`, `FORMAT` | Return the title, path or format text of the playing item. While stopped, `TITLE` and `FILE` describe the current entry, and are empty when there is none. |
 | `POSITION`, `DURATION` | Return the position and length of the playing item in seconds (0 when stopped or unknown). |
 | `COUNT` | Return the number of playlist entries. |
 | `INDEX` | Return the position of the current entry, 0 when there is none. |

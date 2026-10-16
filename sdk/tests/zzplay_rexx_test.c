@@ -157,6 +157,14 @@ static void test_parsing(void)
   CHECK(!zzplay_rexx_needs_gate("ADDX"));
   CHECK(!zzplay_rexx_needs_gate("PLAY 1"));
   CHECK(!zzplay_rexx_needs_gate("\"ADD\"x"));
+  /* A quoted command word runs as that command, so it is gated too. */
+  CHECK(zzplay_rexx_needs_gate("\"ADD\" Work:x"));
+  CHECK(zzplay_rexx_needs_gate("\t\"open\""));
+  /* A quoted word with blanks inside is not a command, gated or not. */
+  f.add_calls = 0U;
+  CHECK(!zzplay_rexx_needs_gate("\"ADD \" Work:x"));
+  CHECK(run(&f, "\"ADD \" Work:x") == ZZPLAY_REXX_RC_ERROR);
+  CHECK(f.add_calls == 0U);
   fixture_free(&f);
 }
 
