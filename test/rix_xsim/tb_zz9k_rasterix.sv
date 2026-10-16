@@ -166,6 +166,19 @@ module tb_zz9k_rasterix;
                 byte_at = 8'h00;
         end
     endfunction
+    function address_mapped;
+        input [31:0] address;
+        begin
+            address_mapped = ((address >= MINIGL_COLOR_ADDR) &&
+                              (address < MINIGL_COLOR_ADDR + COLOR_BYTES)) ||
+                             ((address >= MINIGL_DEPTH_ADDR) &&
+                              (address < MINIGL_DEPTH_ADDR + DEPTH_BYTES)) ||
+                             ((address >= MINIGL_TEXTURE_ADDR) &&
+                              (address < MINIGL_TEXTURE_ADDR + TEXTURE_POOL_BYTES)) ||
+                             (address < MEM_BYTES);
+        end
+    endfunction
+
     task write_byte;
         input [31:0] address;
         input [7:0] value;
@@ -356,7 +369,9 @@ module tb_zz9k_rasterix;
                 m_axi_rvalid <= 1;
                 m_axi_rdata <= word_at(render_read_addr);
                 m_axi_rid <= render_read_id;
-                m_axi_rresp <= 0;
+                m_axi_rresp <= address_mapped(render_read_addr) ? 0 : 2;
+                if (!address_mapped(render_read_addr))
+                    $error("renderer AXI read outside sparse DDR: %08x", render_read_addr);
                 m_axi_rlast <= (render_read_left == 1);
             end
         end
