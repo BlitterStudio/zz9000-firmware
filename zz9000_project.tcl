@@ -223,6 +223,7 @@ if { $no_autoboot } {
 }
 if { $rasterix } {
   lappend verilog_defines \
+    RASTERIX \
     "RASTERIX_TMU_COUNT=$rasterix_tmu_count" \
     "RASTERIX_FRAMEBUFFER_SIZE_IN_PIXEL_LG=$rasterix_framebuffer_size_in_pixel_lg"
   set_property verilog_define $verilog_defines $obj

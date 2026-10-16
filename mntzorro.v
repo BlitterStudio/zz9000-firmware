@@ -35,10 +35,18 @@
 `endif
 
 `define C_S_AXI_DATA_WIDTH 32
-`define C_S_AXI_ADDR_WIDTH 5
+`define C_S_AXI_ADDR_WIDTH 6
 
 `ifndef VCAP_DIAG_BUILD_ID
 `define VCAP_DIAG_BUILD_ID 32'h00000000
+`endif
+
+`ifdef RASTERIX
+`define MNTZORRO_RASTERIX_IDENTITY 32'h52495831
+`define MNTZORRO_RASTERIX_PRESENT 1'b1
+`else
+`define MNTZORRO_RASTERIX_IDENTITY 32'h00000000
+`define MNTZORRO_RASTERIX_PRESENT 1'b0
 `endif
 
 // Videocap sampler variant selection. This block must stay below the AXI
@@ -355,7 +363,7 @@ module MNTZorro_v0_1_S00_AXI
   // ADDR_LSB = 2 for 32 bits (n downto 2)
   // ADDR_LSB = 3 for 64 bits (n downto 3)
   localparam integer ADDR_LSB = (`C_S_AXI_DATA_WIDTH/32) + 1;
-  localparam integer OPT_MEM_ADDR_BITS = 2;
+  localparam integer OPT_MEM_ADDR_BITS = 3;
   //----------------------------------------------
   //-- Signals for user logic register space example
   //------------------------------------------------
@@ -497,54 +505,56 @@ module MNTZorro_v0_1_S00_AXI
         if (slv_reg_wren)
           begin
             case ( axi_awaddr[ADDR_LSB+OPT_MEM_ADDR_BITS:ADDR_LSB] )
-              3'h0:
+              4'h0:
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
                     // Respective byte enables are asserted as per write strobes
                     // Slave register 0
                     slv_reg0[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
-              3'h1:
+              4'h1:
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
                     // Respective byte enables are asserted as per write strobes
                     // Slave register 1
                     slv_reg1[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
-              3'h2:
+              4'h2:
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
                     // Respective byte enables are asserted as per write strobes
                     // Slave register 2
                     slv_reg2[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
-              3'h3:
+              4'h3:
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
                     // Respective byte enables are asserted as per write strobes
                     // Slave register 3
                     slv_reg3[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
-              3'h4:
+              4'h4:
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
                     // Respective byte enables are asserted as per write strobes
                     // Slave register 4
                     slv_reg4[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
-              3'h5:
+              4'h5:
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
                     // Respective byte enables are asserted as per write strobes
                     // Slave register 5
                     slv_reg5[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
-              3'h6:
+              4'h6:
                 for ( byte_index = 0; byte_index <= (`C_S_AXI_DATA_WIDTH/8)-1; byte_index = byte_index+1 )
                   if ( S_AXI_WSTRB[byte_index] == 1 ) begin
                     // Slave register 6 (issue #25: Z3 fast-RAM readiness flag)
                     slv_reg6[(byte_index*8) +: 8] <= S_AXI_WDATA[(byte_index*8) +: 8];
                   end
+              // 0x38 is a read-only build-presence identity. Writes are ignored.
+              4'he: begin end
               default : begin
                 slv_reg0 <= slv_reg0;
                 slv_reg1 <= slv_reg1;
@@ -671,7 +681,7 @@ module MNTZorro_v0_1_S00_AXI
               axi_rdata <= reg_data_out;     // register read data
               // REG4 returns the live low word and freezes its matching
               // high word for REG5. Writes retain their existing meanings.
-              if (axi_araddr[ADDR_LSB+OPT_MEM_ADDR_BITS:ADDR_LSB] == 3'h4)
+              if (axi_araddr[ADDR_LSB+OPT_MEM_ADDR_BITS:ADDR_LSB] == 4'h4)
                 source_sync_read_snapshot <= source_sync_diagnostic;
             end
         end
@@ -1097,7 +1107,8 @@ module MNTZorro_v0_1_S00_AXI
 `endif
   localparam [1:0] VCAP_DIAG_VARIANT_RGB_MODE = `VCAP_RGB_MODE;
   localparam [31:0] VCAP_DIAG_VARIANT_VALUE = {
-      16'h0001, 8'h00, VCAP_DIAG_VARIANT_AUTOBOOT,
+      16'h0001, 7'h00, `MNTZORRO_RASTERIX_PRESENT,
+      VCAP_DIAG_VARIANT_AUTOBOOT,
       VCAP_DIAG_VARIANT_RGB_MODE, (`VCAP_CSYNC_VSYNC != 0),
       (`VCAP_FULLRATE_INT != 0), VCAP_DIAG_VARIANT_2MB,
       VCAP_DIAG_VARIANT_FASTRAM, VCAP_DIAG_VARIANT_Z3
@@ -3624,19 +3635,20 @@ module MNTZorro_v0_1_S00_AXI
     begin
       // Address decoding for reading registers
       case ( axi_araddr[ADDR_LSB+OPT_MEM_ADDR_BITS:ADDR_LSB] )
-        3'h0   : reg_data_out <= out_reg0;
-        3'h1   : reg_data_out <= out_reg1;
-        3'h2   : reg_data_out <= out_reg2;
-        3'h3   : reg_data_out <= out_reg3;
-        3'h4   : reg_data_out <= source_sync_diagnostic[31:0];
-        3'h5   : reg_data_out <= source_sync_read_snapshot[63:32];
+        4'h0   : reg_data_out <= out_reg0;
+        4'h1   : reg_data_out <= out_reg1;
+        4'h2   : reg_data_out <= out_reg2;
+        4'h3   : reg_data_out <= out_reg3;
+        4'h4   : reg_data_out <= source_sync_diagnostic[31:0];
+        4'h5   : reg_data_out <= source_sync_read_snapshot[63:32];
         // Slot 6 is PS-written for the Z3 fast-RAM ready gate, but had no
         // readable value. Reuse its read direction for the host layout ack.
-        3'h6   : reg_data_out <= sdk_aperture_layout_ack ?
+        4'h6   : reg_data_out <= sdk_aperture_layout_ack ?
                     32'ha5020001 : 32'h00000000;
         // Exact compile-time aperture bytes. Z3 reports zero: its established
         // 128 MB layout is deliberately outside this Z2 contract.
-        3'h7   : reg_data_out <= SDK_APERTURE_SIZE_VALUE;
+        4'h7   : reg_data_out <= SDK_APERTURE_SIZE_VALUE;
+        4'he   : reg_data_out <= `MNTZORRO_RASTERIX_IDENTITY;
         default : reg_data_out <= 'h0;
       endcase
     end
