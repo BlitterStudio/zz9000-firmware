@@ -1,8 +1,20 @@
 /*
  * Host-side RasterIX scene generator for the XSim ZZ9000 wrapper harness.
  *
- * Build from this directory (or adjust the source path):
- *   gcc -std=c99 -Wall -Wextra -pedantic -I D:/Github/zz9000-minigl-worktree/ZZ9000_proto.sdk/ZZ9000OS/src rix_xsim_gen.c D:/Github/zz9000-minigl-worktree/ZZ9000_proto.sdk/ZZ9000OS/src/rix_cmd.c D:/Github/zz9000-minigl-worktree/ZZ9000_proto.sdk/ZZ9000OS/src/rix_setup.c D:/Github/zz9000-minigl-worktree/ZZ9000_proto.sdk/ZZ9000OS/src/rix_bin.c D:/Github/zz9000-minigl-worktree/ZZ9000_proto.sdk/ZZ9000OS/src/rix_texture.c -lm -o rix_xsim_gen
+ * Emits the verified per-band RasterIX_IF protocol (see rix_bin.h in the
+ * MiniGL worktree) plus an analytic reference frame per scene, rendered with
+ * the exact Rasterizer.v edge rules so compare_frames.py can gate full-frame
+ * output instead of point samples.
+ *
+ * Build and run inside gcc:13 (see run_scenes.sh):
+ *   gcc -std=c99 -Wall -Wextra -Werror \
+ *       -I /mg/ZZ9000_proto.sdk/ZZ9000OS/src \
+ *       /if/test/rix_xsim/rix_xsim_gen.c \
+ *       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_cmd.c \
+ *       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_setup.c \
+ *       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_bin.c \
+ *       /mg/ZZ9000_proto.sdk/ZZ9000OS/src/rix_texture.c \
+ *       -lm -o rix_xsim_gen && rix_xsim_gen <output-dir>
  */
 #include <math.h>
 #include <stdint.h>
@@ -97,55 +109,6 @@ static int write_dse_hex(const char *path, const uint8_t *raw, size_t raw_bytes)
     return ok;
 }
 
-static int emit_frame(RixCmdWriter *writer, const RixBandList *bands,
-                      const RixBandConfig *config)
-{
-    uint16_t index;
-
-    if (!rix_cmd_resolution(writer, config->width, config->height) ||
-        !rix_cmd_clear_color(writer, config->clear_color) ||
-        !rix_cmd_clear_depth(writer, config->clear_depth)) {
-        return 0;
-    }
-    for (index = 0U; index < bands->count; ++index) {
-        const RixBand *band = &bands->band[index];
-        uint32_t pixels = (uint32_t)config->width *
-                          (uint32_t)(band->y_end - band->y_start);
-        size_t reference;
-
-        if (!rix_cmd_y_offset(writer, band->y_start) ||
-            !rix_cmd_buffer_address(writer, RIX_REG_COLOR_BUFFER_ADDR,
-                                    config->color_addr +
-                                    (uint32_t)band->y_start * config->color_pitch) ||
-            !rix_cmd_buffer_address(writer, RIX_REG_DEPTH_BUFFER_ADDR,
-                                    config->depth_addr +
-                                    (uint32_t)band->y_start * config->depth_pitch) ||
-            !rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_MEMSET |
-                                  RIX_FRAMEBUFFER_COLOR |
-                                  RIX_FRAMEBUFFER_DEPTH, pixels)) {
-            return 0;
-        }
-        for (reference = 0U; reference < bands->reference_count; ++reference) {
-            RixTriangle triangle;
-            if (!rix_triangle_in_band(bands->references[reference],
-                                      band->y_start, band->y_end)) {
-                continue;
-            }
-            triangle = *bands->references[reference];
-            if (!rix_triangle_increment(&triangle, band->y_start, band->y_end) ||
-                !rix_cmd_triangle(writer, triangle.words, RIX_TRIANGLE_WORDS)) {
-                return 0;
-            }
-        }
-        /* The wrapper test only writes color back.  Do not commit depth. */
-        if (!rix_cmd_framebuffer(writer, RIX_FRAMEBUFFER_COMMIT |
-                                 RIX_FRAMEBUFFER_COLOR, pixels)) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
 /*
  * EF owns full color and depth targets in external DDR.  StreamFramebuffer
  * derives the transfer extent from resolution, not the framebuffer command's
@@ -183,7 +146,6 @@ static int emit_external_frame(RixCmdWriter *writer, const RixTriangle *triangle
     }
     return 1;
 }
-
 static RixVertex vertex(float x, float y, float z, uint32_t rgba, float s, float t)
 {
     RixVertex value;
@@ -198,11 +160,22 @@ static RixVertex vertex(float x, float y, float z, uint32_t rgba, float s, float
     return value;
 }
 
+/* Scene geometry in top-down screen coordinates; stored flipped to the
+ * RasterIX bottom-up axis exactly like minigl_rix_backend_add_triangle(). */
+typedef struct SceneTriangle {
+    RixTriangle prepared;
+    uint32_t paint_rgba;
+} SceneTriangle;
+
+static SceneTriangle scene_triangles[MAX_TRIANGLES];
+static size_t scene_triangle_count;
+
 static int add_triangle(RixBandList *bands, RixTriangle *triangles,
                         size_t *triangle_count, const RixVertex *v0,
                         const RixVertex *v1, const RixVertex *v2)
 {
     RixScissor scissor;
+    RixVertex f0, f1, f2;
     RixTriangle *triangle;
 
     if (*triangle_count >= MAX_TRIANGLES) {
@@ -213,12 +186,118 @@ static int add_triangle(RixBandList *bands, RixTriangle *triangles,
     scissor.end_x = SCREEN_WIDTH;
     scissor.end_y = SCREEN_HEIGHT;
     scissor.enabled = 1U;
+    f0 = *v0; f0.y = (float)SCREEN_HEIGHT - f0.y;
+    f1 = *v1; f1.y = (float)SCREEN_HEIGHT - f1.y;
+    f2 = *v2; f2.y = (float)SCREEN_HEIGHT - f2.y;
     triangle = &triangles[*triangle_count];
-    if (!rix_setup_triangle(triangle, v0, v1, v2, &scissor) ||
+    if (!rix_setup_triangle(triangle, &f0, &f1, &f2, &scissor) ||
         !rix_band_list_add(bands, triangle)) {
         return 0;
     }
+    scene_triangles[*triangle_count].prepared = *triangle;
+    scene_triangles[*triangle_count].paint_rgba = v0->rgba;
     ++*triangle_count;
+    return 1;
+}
+
+/*
+ * Analytic reference renderer.  Reproduces Rasterizer.v exactly: the edge
+ * functions of rix_setup_triangle evaluated per bounding box pixel with the
+ * RTL's inclusivity rule (edge0Inclusive <= incX > 0 || (incX == 0 && incY
+ * > 0)) and inside test (!E[31] && (E != 0 || inclusive)).  The band layout
+ * clamps the same bounding boxes, so full-box coverage equals the union of
+ * the per-band rasterizations.  Frames are stored bottom-up (PPM row =
+ * absolute RasterIX y), matching tb_zz9k_rasterix.sv's dump_ppm view of the
+ * top-down target memory.
+ */
+static uint16_t rgba_to_rgb565(uint32_t rgba)
+{
+    uint32_t r = (rgba >> 24) & 0xffU;
+    uint32_t g = (rgba >> 16) & 0xffU;
+    uint32_t b = (rgba >> 8) & 0xffU;
+
+    return (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
+}
+
+static void paint_reference(uint16_t *frame, const RixTriangle *triangle,
+                            uint16_t color565)
+{
+    int32_t bx = (int32_t)(triangle->words[RIX_WORD_BB_START] & 0xffffU);
+    int32_t by = (int32_t)(triangle->words[RIX_WORD_BB_START] >> 16);
+    int32_t ex = (int32_t)(triangle->words[RIX_WORD_BB_END] & 0xffffU);
+    int32_t ey = (int32_t)(triangle->words[RIX_WORD_BB_END] >> 16);
+    int32_t x;
+    int32_t y;
+
+    for (y = by; y < ey; ++y) {
+        for (x = bx; x < ex; ++x) {
+            unsigned int edge;
+            int inside = 1;
+
+            for (edge = 0U; edge < 3U; ++edge) {
+                int32_t wx = (int32_t)triangle->words[RIX_WORD_W_X + edge];
+                int32_t wy = (int32_t)triangle->words[RIX_WORD_W_Y + edge];
+                int32_t value = (int32_t)triangle->words[RIX_WORD_W_INIT + edge] +
+                                wx * (x - bx) + wy * (y - by);
+                int inclusive = wx > 0 || (wx == 0 && wy > 0);
+
+                if (value < 0 || (value == 0 && !inclusive)) {
+                    inside = 0;
+                    break;
+                }
+            }
+            if (inside) {
+                frame[y * (int32_t)SCREEN_WIDTH + x] = color565;
+            }
+        }
+    }
+}
+
+static int write_reference(const char *directory, const char *name,
+                           uint32_t clear_rgba, int textured)
+{
+    static uint16_t frame[SCREEN_WIDTH * SCREEN_HEIGHT];
+    char path[1024];
+    FILE *file;
+    unsigned int index;
+
+    for (index = 0U; index < SCREEN_WIDTH * SCREEN_HEIGHT; ++index) {
+        frame[index] = rgba_to_rgb565(clear_rgba);
+    }
+    for (index = 0U; index < scene_triangle_count; ++index) {
+        /* Textured scenes use the uniform white 8x8 texture with
+         * RIX_TEX_REPLACE, so every covered pixel is white. */
+        paint_reference(frame, &scene_triangles[index].prepared,
+                        textured ? 0xffffU
+                                 : rgba_to_rgb565(scene_triangles[index].paint_rgba));
+    }
+    if (!make_path(path, sizeof(path), directory, name, "_ref.ppm")) {
+        return 0;
+    }
+    file = fopen(path, "wb");
+    if (file == NULL) {
+        return 0;
+    }
+    if (fprintf(file, "P6\n%u %u\n255\n", SCREEN_WIDTH, SCREEN_HEIGHT) < 0) {
+        (void)fclose(file);
+        return 0;
+    }
+    for (index = 0U; index < SCREEN_WIDTH * SCREEN_HEIGHT; ++index) {
+        uint16_t pixel = frame[index];
+        uint8_t rgb[3] = {
+            (uint8_t)((pixel >> 11) << 3),
+            (uint8_t)((pixel >> 5 & 0x3fU) << 2),
+            (uint8_t)((pixel & 0x1fU) << 3)
+        };
+
+        if (fwrite(rgb, 1U, 3U, file) != 3U) {
+            (void)fclose(file);
+            return 0;
+        }
+    }
+    if (fclose(file) != 0) {
+        return 0;
+    }
     return 1;
 }
 
@@ -321,6 +400,30 @@ static int build_s4(RixBandList *bands, RixTriangle *triangles, size_t *count)
     return 1;
 }
 
+/*
+ * Asymmetric band-protocol probe: a small right triangle at the top-left
+ * (bands 0-2), one at the bottom-right (bands 16-18), and a one-pixel-wide
+ * vertical line through the screen centre crossing every band boundary.  A
+ * vertical flip swaps the corner triangles; a wrong Y offset, band-local
+ * rebase, or DDR row order shifts or mirrors individual 25-line bands.
+ */
+static int build_probe(RixBandList *bands, RixTriangle *triangles, size_t *count)
+{
+    RixVertex t0 = vertex(8.0f, 6.0f, 0.5f, 0x00ff00ffU, 0.0f, 0.0f);
+    RixVertex t1 = vertex(60.0f, 6.0f, 0.5f, 0x00ff00ffU, 1.0f, 0.0f);
+    RixVertex t2 = vertex(8.0f, 54.0f, 0.5f, 0x00ff00ffU, 0.0f, 1.0f);
+    RixVertex b0 = vertex(580.0f, 420.0f, 0.5f, 0x0000ffffU, 0.0f, 0.0f);
+    RixVertex b1 = vertex(632.0f, 420.0f, 0.5f, 0x0000ffffU, 1.0f, 0.0f);
+    RixVertex b2 = vertex(632.0f, 468.0f, 0.5f, 0x0000ffffU, 1.0f, 1.0f);
+    RixVertex l0 = vertex(320.0f, 5.0f, 0.5f, 0xffff00ffU, 0.0f, 0.0f);
+    RixVertex l1 = vertex(320.0f, 475.0f, 0.5f, 0xffff00ffU, 0.0f, 0.0f);
+    RixVertex l2 = vertex(321.0f, 475.0f, 0.5f, 0xffff00ffU, 0.0f, 0.0f);
+
+    return add_triangle(bands, triangles, count, &t0, &t1, &t2) &&
+           add_triangle(bands, triangles, count, &b0, &b1, &b2) &&
+           add_triangle(bands, triangles, count, &l0, &l1, &l2);
+}
+
 static void make_texture(uint8_t texture[TEXTURE_BYTES])
 {
     uint32_t rgba[TEXTURE_WIDTH * TEXTURE_HEIGHT];
@@ -396,11 +499,9 @@ static int generate_scene(const char *directory, const char *name,
 
     memset(triangles, 0, sizeof(triangles));
     memset(references, 0, sizeof(references));
+    scene_triangle_count = 0U;
     if (!rix_band_list_init(&bands, SCREEN_WIDTH, SCREEN_HEIGHT,
-                            RIX_BAND_LAYOUT_COMPLETE, references, MAX_TRIANGLES)) {
-        return 0;
-    }
-    if (bands.count != 20U) {
+                            references, MAX_TRIANGLES)) {
         return 0;
     }
     memset(&config, 0, sizeof(config));
@@ -422,19 +523,24 @@ static int generate_scene(const char *directory, const char *name,
         valid_scene = build_s3(&bands, triangles, &triangle_count);
     } else if (scene == 4U) {
         valid_scene = build_s4(&bands, triangles, &triangle_count);
+    } else if (scene == 5U) {
+        valid_scene = build_probe(&bands, triangles, &triangle_count);
     } else {
         valid_scene = 0;
     }
     if (!valid_scene) {
         return 0;
     }
+    scene_triangle_count = triangle_count;
 
     rix_cmd_init(&writer, raw, sizeof(raw));
     if (!setup_state(&writer, textured) ||
         !(external_framebuffer ?
               emit_external_frame(&writer, triangles, triangle_count, &config) :
-              emit_frame(&writer, &bands, &config)) ||
+              rix_band_emit_frame(&writer, &bands, &config)) ||
+        writer.failed || writer.length == 0U || writer.length > 0x00ffffffU ||
         writer.length % 4U != 0U ||
+        !write_reference(directory, name, CLEAR_RGBA, textured) ||
         !make_path(binary_path, sizeof(binary_path), directory, name, ".bin") ||
         !make_path(hex_path, sizeof(hex_path), directory, name, ".hex") ||
         !write_dse_bin(binary_path, raw, writer.length) ||
@@ -463,6 +569,7 @@ int main(int argc, char **argv)
         !generate_scene(argv[1], "s2", 2U, 0) ||
         !generate_scene(argv[1], "s3", 3U, 0) ||
         !generate_scene(argv[1], "s4", 4U, 0) ||
+        !generate_scene(argv[1], "probe", 5U, 0) ||
         !generate_scene(argv[1], "ef-s1", 1U, 1) ||
         !generate_scene(argv[1], "ef-s2", 2U, 1) ||
         !generate_scene(argv[1], "ef-s3", 3U, 1) ||
