@@ -108,6 +108,7 @@ if { $::argc > 0 } {
       {^--project_name$} { incr i; set _xil_proj_name_ [lindex $::argv $i] }
       {^--no-autoboot$}  { set no_autoboot 1 }
       {^--capture-c28$}  { set capture_c28 1 }
+      {^--rasterix$}     { set rasterix 1 }
       {^--rasterix-tmu-count$} { incr i; set rasterix_tmu_count [lindex $::argv $i] }
       {^--rasterix-variant$} { incr i; set rasterix_variant [string tolower [lindex $::argv $i]] }
       {^--rasterix-framebuffer-size-lg$} { incr i; set rasterix_framebuffer_size_in_pixel_lg [lindex $::argv $i] }
