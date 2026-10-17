@@ -55,7 +55,7 @@ if test "$RASTERIX_REVISION" = 9269a01c9bd4c3342bfa70ef8e3cdd751c15c6d0; then
             target="$work/rtl/$part/$relative"
             test -f "$target"
             case "$part/$relative" in
-                Float/rtl/float/FloatToInt.v|RasterIX/TexEnv.v|RasterIX/TextureReaderContext.v|RasterIX/RasterIXCoreIF.v|RasterIX/InternalFramebufferCommandHandler.v|RasterIX/CommandParser.v|RasterIX/RasterIXCoreEF.v)
+                Float/rtl/float/FloatToInt.v|RasterIX/TexEnv.v|RasterIX/TextureReaderContext.v|RasterIX/RasterIXCoreIF.v|RasterIX/InternalFramebufferCommandHandler.v|RasterIX/CommandParser.v|RasterIX/RasterIXCoreEF.v|RasterIX/StreamConcatFifo.v)
                     continue
                     ;;
             esac

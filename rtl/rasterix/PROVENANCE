@@ -15,6 +15,6 @@ HyperRAM, simulations, and unrelated third-party IP. ZZ9000-specific
 integration is exclusively in rtl/zz9k_rix/.
 
 Local synthesis-safe corrections are documented in `PATCHES.md` and retained
-as `patches/0001` through `0007`. `test/rasterix/run.sh` byte-compares every
+as `patches/0001` through `0008`. `test/rasterix/run.sh` byte-compares every
 vendored file against the pinned upstream revision except exactly those
 documented paths.

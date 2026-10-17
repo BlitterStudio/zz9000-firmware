@@ -1,6 +1,6 @@
 # Local RasterIX patches
 
-The seven files below intentionally differ from those blobs; every other file in `RasterIX`, `Float`, and `3rdParty` remains byte-identical and is checked by `test/rasterix/run.sh`.
+The eight files below intentionally differ from those blobs; every other file in `RasterIX`, `Float`, and `3rdParty` remains byte-identical and is checked by `test/rasterix/run.sh`.
 
 ## FloatToInt zero-shift rounding
 
@@ -87,3 +87,28 @@ The seven files below intentionally differ from those blobs; every other file in
   scenes pass pixel checks.
 - Synthesis safety: only the constant-zero upper address bits change; the
   pixel index and byte address arithmetic are unchanged.
+
+## StreamConcatFifo holds drained output data
+
+- File: `RasterIX/StreamConcatFifo.v`
+- Upstream blob: `7805a39c`
+- Local blob: `f0023cf6`
+- Patch: `patches/0008-streamconcatfifo-hold-drained-output.patch`
+- Evidence: the wire-v9 MiniGL blended_quad capture (two triangles with
+  blending over a shared diagonal) committed unknown bytes to the framebuffer
+  and aborted with "framebuffer contains unknown byte". Tracing the first X
+  showed the joined stream's registered-read sfifo outputs go undefined once a
+  fifo drains (unwritten BRAM slots); the per-fragment pipeline latches its
+  input lines every ready cycle, so an idle gap inside the blended triangle
+  stream contaminated the color blender's factor registers and produced X
+  fragment colors on the first beats after the gap. The patched run renders
+  the full 640x480 frame with zero coverage mismatches and zero pixels beyond
+  one LSB (bit-exact against the CPU reference), and gears, textured_lightmap
+  and the synthetic probe/s1-s4 scenes are unchanged.
+- Stream semantics: AXIS requires stable data only during transfers. While a
+  transfer is accepted the beat is steered combinationally from the fifo
+  outputs as before; between transfers the last accepted beat is held on the
+  lines instead of exposing the drained fifo's undefined BRAM read. Valid
+  generation, the pop condition, and every per-stream fifo are unchanged.
+- Synthesis safety: adds one hold register with reset and an output mux; no
+  timing, latency, or handshake change on any accepted transfer.
