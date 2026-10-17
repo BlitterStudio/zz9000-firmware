@@ -29,7 +29,7 @@ def ppm(path):
     maximum, pos = read_token(data, pos)
     if magic != b"P6" or maximum != b"255":
         raise ValueError(f"{path}: expected 8-bit binary PPM")
-    while pos < len(data) and data[pos] in b" \t\r\n":
+    if pos < len(data) and data[pos] in b" \t\r\n":
         pos += 1
     width, height = int(width), int(height)
     pixels = data[pos:]

@@ -200,6 +200,22 @@ module StreamConcatFifo
         end
     endgenerate
 
+    // ZZ9000 local patch: hold the last transferred beat on the data lines
+    // once the joined streams drain.  The registered-read sfifo outputs go
+    // undefined (unwritten BRAM slots) when a fifo empties, and the
+    // downstream per-fragment pipeline latches its input lines every ready
+    // cycle, so an idle gap inside a blended triangle stream used to
+    // contaminate the color blender with X and commit unknown pixels to the
+    // framebuffer.  AXIS requires stable data only during transfers; holding
+    // the previous beat keeps the lines defined at all times.
+    reg [STREAMO_WIDTH - 1 : 0] m_stream_data_hold;
+    always @(posedge aclk) begin
+        if (!resetn)
+            m_stream_data_hold <= {(STREAMO_WIDTH){1'b0}};
+        else if (stream_out_read)
+            m_stream_data_hold <= { s_stream3_data, s_stream2_data, s_stream1_data, s_stream0_data };
+    end
+
     assign m_stream_tvalid = complete_transfer_available;
-    assign m_stream_tdata = { s_stream3_data, s_stream2_data, s_stream1_data, s_stream0_data };
+    assign m_stream_tdata = stream_out_read ? { s_stream3_data, s_stream2_data, s_stream1_data, s_stream0_data } : m_stream_data_hold;
 endmodule
