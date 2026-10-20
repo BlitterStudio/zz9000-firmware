@@ -26,16 +26,16 @@ their relative timing.
 
 ## Formatter OOC timing
 
-The pre-change `build/memmap/zorro3-default/reports/formatter_ooc_timing_summary.rpt`
-reports formatter-pixel WNS/TNS/WHS of -0.793/-6.342/+0.164 ns (8 setup
-endpoints). The isolated post-change OOC synthesis, run on 2026-10-19, reports
-the same formatter-pixel WNS/TNS/WHS: -0.793/-6.342/+0.164 ns (8 setup
-endpoints) in `ZZ9000_proto/timing_reports/formatter_ooc_timing_summary.rpt`.
-It completed with zero errors and zero critical warnings. The tracked
-`verify_formatter_ooc_timing.tcl` rejected this isolated run only because its
-post-hook writes the report in `ZZ9000_proto/timing_reports`, while the
-verifier expects `<isolated-project>/timing_reports`; the report was produced
-and inspected at the former path.
+Fresh, isolated formatter OOC synthesis at `fe6d813b` completed on
+2026-10-19 19:55:32 +0200 with formatter-pixel WNS/TNS/WHS
+`-0.793/-6.342/+0.164 ns` (8 setup endpoints, 5520 timed pixel endpoints).
+The fresh head run completed on 2026-10-19 19:57:46 +0200 with
+`-0.793/-6.342/+0.164 ns` (8 setup endpoints, 5608 timed pixel endpoints).
+Thus this OOC constraint has not improved its aggregate WNS/WHS; its evidence
+is the recurring placed-design path table above, not a claimed OOC aggregate
+improvement. `report_formatter_ooc_timing.tcl` now writes beside the OOC run
+and `verify_formatter_ooc_timing.tcl` reads that exact run directory, so the
+fresh head report passes the generated-Tcl and 6.667/10.000 ns clock checks.
 
 ## I2S LRCLK timing
 
@@ -49,3 +49,9 @@ The unchanged `audio_clock_tb.sv` data checks pass with the new registered
 LRCLK assertion (`audio_clock fixed TDM8 slot-0/1 bridge PASS`), and the
 unchanged Xilinx receiver integration passes (`audio_clock + Xilinx I2S
 receiver fixed TDM PASS`).
+
+`audio_clock_i2s_tx_tb.sv` drives the production transmitter with the
+known `32'ha55a_3cc3` AXIS word sequence and the ADAU1701 TDM8 clock/LRCLK
+cadence. Its 32 serial-slot trace was run at `fe6d813b` with direct LRCLK
+and at head with `tx_lrclk_out`; the traces are bit-identical, including each
+slot's `raw_phase=126` relative to the external LRCLK transition.

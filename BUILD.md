@@ -146,6 +146,28 @@ from -0.090 ns to +0.143 ns after post-route `phys_opt_design`. The final
 gated implementation result, rather than an intermediate routed checkpoint,
 determines whether the bitstream is written.
 
+### Sweep placement directives for a timing-qualified variant
+
+Use the Windows sweep driver to build one variant serially through
+`Default`, `Explore`, `ExtraTimingOpt`, `ExtraNetDelay_high`, and
+`AltSpreadLogic_high`. It starts each clean implementation with
+`NUMBER_OF_PROCESSORS=4`, embeds the current eight-digit `VCAP_DIAG_BUILD_ID`
+(or the supplied `-BuildId`), and stops on the first implementation that
+passes every gate, including the pixel, overall, and I2S timing floors.
+
+```powershell
+.\build_timing_sweep.ps1 -Variant zorro3-aga
+```
+
+The driver writes the selected bitstream, final timing reports, per-attempt
+logs and reports, `SHA256SUMS`, and `sweep-summary.json` below
+`build/timing/<variant>/`; it also refreshes
+`build/timing/timing-sweep-summary.md`. It never writes a selected result to
+`bootimage_work/`. If every directive fails, the best attempt is selected by
+the smallest slack normalised to its applicable floor and retained with its
+post-route physical-optimization checkpoint for diagnosis; the command exits
+nonzero and does not select a bitstream.
+
 ## Build hardware variants
 
 `build_variant_bitstreams.sh` changes the release-variant define block in

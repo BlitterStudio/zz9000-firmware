@@ -38,8 +38,7 @@ if {[string first "read_xdc -unmanaged" $hook_text] < 0 ||
     error "Formatter OOC timing pre-hook does not read the tracked XDC"
 }
 
-set project_dir [get_property DIRECTORY [current_project]]
-set report_dir [file normalize [file join $project_dir timing_reports]]
+set report_dir [file normalize [file join $formatter_run_dir timing_reports]]
 set ooc_report [file join $report_dir formatter_ooc_timing_summary.rpt]
 if {![file exists $ooc_report]} {
     error "Formatter OOC synthesis post-hook did not produce $ooc_report"
