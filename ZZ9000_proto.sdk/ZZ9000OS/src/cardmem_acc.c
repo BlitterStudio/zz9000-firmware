@@ -71,3 +71,32 @@ int cardmem_acc_free(uint32_t target_be, uint32_t *reply_be)
         return 0;
     return surface_allocator_p96_free(FRAMEBUFFER_ADDRESS + target) == 0;
 }
+
+void cardmem_acc_dispatch(enum cardmem_acc_command command,
+			  uint32_t *offset0_be, uint32_t *offset1_be,
+			  uint8_t *accepted)
+{
+	uint32_t reply = 0U;
+	int result = 0;
+
+	if (!offset0_be || !accepted)
+		return;
+	*accepted = 0U;
+	switch (command) {
+	case CARDMEM_ACC_COMMAND_ALLOC:
+		if (offset1_be)
+			result = cardmem_acc_alloc(*offset0_be, *offset1_be, &reply);
+		break;
+	case CARDMEM_ACC_COMMAND_ALLOC_ABS:
+		if (offset1_be)
+			result = cardmem_acc_alloc_abs(*offset0_be, *offset1_be, &reply);
+		break;
+	case CARDMEM_ACC_COMMAND_FREE:
+		result = cardmem_acc_free(*offset0_be, &reply);
+		break;
+	default:
+		break;
+	}
+	*offset0_be = reply;
+	*accepted = result ? 1U : 0U;
+}

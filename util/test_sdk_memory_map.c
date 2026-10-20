@@ -142,9 +142,11 @@ int main(int argc, char **argv)
 	                          "cur_mem_offset = 0x3500000");
 
 	ok &= expect_contains(dma_acc, "dma_acc.c",
-	                      "cardmem_acc_alloc(");
+	                      "cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC");
 	ok &= expect_contains(dma_acc, "dma_acc.c",
-	                      "ACC_OP_CARDMEM_ALLOC_ABS");
+	                      "CARDMEM_ACC_COMMAND_ALLOC_ABS");
+	ok &= expect_contains(dma_acc, "dma_acc.c",
+	                      "CARDMEM_ACC_COMMAND_FREE");
 	ok &= expect_contains(dma_acc, "dma_acc.c",
 	                      "surface_allocator_firmware_alloc_aligned(");
 

@@ -7,23 +7,26 @@ places the firmware image and its heap.
 
 Ranges below use an exclusive end: `0x00000000`–`0x08000000` is 128 MiB.
 
-## Current layout
+## Shared Zorro III allocator
 
-Every boundary below is half-open. The Z3 main-board window holds two
-allocators that must never share an address. rtg.library allocates screens
-(and any bitmap the driver's AllocBitMap hook declines) itself inside the
-MemorySize the RTG driver reports, and the firmware cannot see those
-allocations. The driver therefore reports P96 VRAM up to the GFXData scratch
-only, and everything the firmware hands out comes from the host-visible heap
-above it.
+Every boundary below is half-open. On Zorro III, `0x00200000`–`0x08200000`
+is one shared allocator interval. P96 CARDMEM allocations scan from the
+bottom upward, so a screen at offset zero stays contiguous. Firmware-owned
+surfaces, capture backing, SDK allocations, and overlay buffers scan from the
+top downward. Neither owner can free the other's blocks.
+
+The CARDMEM protocol is enabled only when firmware capability bit 13
+(`ZZ_FW_CAP_P96_CARDMEM`) is advertised. A matched driver uses its accepted
+flag and big-endian offset reply, including an accepted offset of zero. An
+older firmware that lacks bit 13 keeps the driver's previous allocation path;
+it does not attempt CARDMEM commands.
 
 | Range | Size | Use |
 |---|---:|---|
 | `0x00000000`–`0x00100000` | 1 MiB | Low aperture/boot-reserved DDR. |
-| `0x00100000`–`0x00200000` | 1 MiB | Low exception vectors and MMU table only. |
-| `0x00200000`–`0x033F0000` | 49.9375 MiB | P96 VRAM, managed by rtg.library. The RTG driver's MemorySize ends here. |
-| `0x033F0000`–`0x08200000` | 78.0625 MiB | Firmware host-visible heap (one interval allocator): GFXData and template scratch, dynamic videocap backing, P96 off-screen surfaces from `ACC_OP_ALLOC_SURFACE`, SDK shared allocations, mailbox/direct-ring pages and the AHI/MHI scratch. |
-| `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. |
+| `0x00100000`–`0x00200000` | 1 MiB | Low firmware image and board services. |
+| `0x00200000`–`0x08200000` | 128 MiB | One host-visible allocator interval: P96 bottom-up; firmware top-down. |
+| `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. Qualification build `141c121` measured `__bss_end = 0x0848F670`, leaving 1,511,824 bytes of growth margin. |
 | `0x08600000`–`0x08700000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
 | `0x08700000`–`0x08800000` | 1 MiB | Full-descending core-1 stack. |
 | `0x08800000`–`0x09000000` | 8 MiB region | Newlib heap plus 22 KiB ARM exception-stack reservation. |
@@ -32,14 +35,20 @@ above it.
 | `0x2FE00000`–`0x3FE00000` | 256 MiB | Fast-RAM landing window when advertised; otherwise contiguous revocable card-pool tail. |
 | `0x3FE00000`–`0x40000000` | 2 MiB | RTL-pinned audio, Ethernet, boot ROM, and USB/SD belt. |
 
-### Zorro III SDK host window
+`reserve_host_control_ranges()` reinstalls these immutable Zorro III
+reservations after every allocator reset: GFXData
+`0x033F0000`–`0x03400000`; template scratch
+`0x03400000`–`0x03500000`; SDK host window
+`0x080F0000`–`0x08100000`; SDK mailbox
+`0x08100000`–`0x08110000`; direct-ring pages
+`0x081C0000`–`0x081E0000`; and AHI/MHI scratch
+`0x081E0000`–`0x08200000`. Capture backing is also allocated and retained
+at reset before either owner receives dynamic allocations.
 
-`SDK_ALLOC_HOST_WINDOW` uses the fixed 64 KiB reservation
-`0x080F0000`–`0x08100000` on Zorro III. It is in the firmware-owned
-host-visible heap and is reserved before P96 or SDK allocations, so it cannot
-overlap P96 VRAM. The former `0x005D0000` range remains the unchanged legacy
-Zorro II fallback; the firmware publishes the active address in allocation
-replies and `DIAG_MEMORY`.
+The host window is firmware-owned on Zorro III: `SDK_ALLOC_HOST_WINDOW`
+allocations land in its fixed reservation, and the firmware publishes the
+actual ARM address in allocation replies and `DIAG_MEMORY`. The
+`0x005D0000` fallback remains exclusively for legacy Zorro II behavior.
 
 The linker gives image/static and heap their own memory regions, so neither
 can grow across the task queue, core-1 stack, or first card-pool byte.

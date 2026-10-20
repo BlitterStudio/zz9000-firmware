@@ -12,6 +12,7 @@
 #include "surface_allocator.h"
 #include "memorymap.h"
 #include "cardmem_acc.h"
+#include "memorymap.h"
 
 /* Fake heap: addresses are never dereferenced by the allocator. */
 #define HEAP_BASE 0x03500000u
@@ -408,33 +409,58 @@ static void test_reset_reinstalls_reservations(void)
     CHECK(surface_allocator_p96_alloc(ALIGN, ALIGN) == HEAP_BASE);
 }
 
-static void test_cardmem_acc_handlers(void)
+static void test_cardmem_acc_dispatch(void)
 {
-    uint32_t reply;
-    int accepted;
+    uint32_t offset0;
+    uint32_t offset1;
+    uint8_t accepted;
     const uint32_t base = 0x00200000U;
 
     surface_allocator_init(base, 0x4000U);
-    accepted = cardmem_acc_alloc(be32(0x400U), be32(0x100U), &reply);
-    CHECK(accepted == 1);
-    CHECK(reply == 0U); /* A successful allocation at MemoryBase. */
-    accepted = cardmem_acc_alloc_abs(0U, be32(0x100U), &reply);
-    CHECK(accepted == 1);
-    CHECK(reply == 0U); /* ABS regrant of the offset-zero block. */
-    CHECK(cardmem_acc_free(0U, &reply) == 1);
-    CHECK(reply == 0U);
-    CHECK(cardmem_acc_free(0U, &reply) == 1);
-    CHECK(cardmem_acc_free(0U, &reply) == 0);
+    offset0 = be32(0x400U);
+    offset1 = be32(0x100U);
+    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC, &offset0, &offset1,
+                         &accepted);
+    CHECK(accepted == 1U);
+    CHECK(offset0 == 0U); /* Offset zero is a valid wire reply. */
 
-    accepted = cardmem_acc_alloc_abs(be32(0x1200U), be32(0x101U), &reply);
-    CHECK(accepted == 1);
-    CHECK(be32(reply) == 0x1200U);
-    CHECK(cardmem_acc_alloc_abs(be32(0x1200U), be32(0x100U), &reply) == 1);
-    CHECK(be32(reply) == 0x1200U);
-    CHECK(cardmem_acc_free(be32(0x1200U), &reply) == 1);
-    CHECK(cardmem_acc_free(be32(0x1200U), &reply) == 1);
-    CHECK(cardmem_acc_alloc_abs(be32(0x4000U), be32(0x100U), &reply) == 0);
-    CHECK(reply == 0U);
+    offset0 = 0U;
+    offset1 = be32(0x100U);
+    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC_ABS, &offset0, &offset1,
+                         &accepted);
+    CHECK(accepted == 1U);
+    CHECK(offset0 == 0U); /* Regrant preserves offset zero. */
+
+    offset0 = 0U;
+    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &offset0, 0, &accepted);
+    CHECK(accepted == 1U);
+    CHECK(offset0 == 0U);
+    offset0 = 0U;
+    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &offset0, 0, &accepted);
+    CHECK(accepted == 1U);
+    CHECK(offset0 == 0U);
+
+    offset0 = be32(0x4000U);
+    offset1 = be32(0x100U);
+    cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC_ABS, &offset0, &offset1,
+                         &accepted);
+    CHECK(accepted == 0U);
+    CHECK(offset0 == 0U);
+}
+
+static void test_z3_host_window_reservation(void)
+{
+    uint32_t screen;
+
+    surface_allocator_init(FRAMEBUFFER_ADDRESS,
+                           HOST_VISIBLE_HEAP_END - FRAMEBUFFER_ADDRESS);
+    Z3_HOST_CONTROL_RANGES(CHECK_CONTROL_RANGE)
+    screen = surface_allocator_p96_alloc(0x00800000U, ALIGN);
+    CHECK(screen == FRAMEBUFFER_ADDRESS);
+    CHECK(surface_allocator_p96_alloc_abs(SDK_HOST_WINDOW_Z3_ADDRESS,
+                                          SDK_HOST_WINDOW_HEAP_SIZE) == 0U);
+    CHECK(SDK_HOST_WINDOW_Z3_ADDRESS >= Z3_P96_VRAM_END);
+    CHECK(SDK_HOST_WINDOW_Z3_END <= HOST_VISIBLE_HEAP_END);
 }
 
 static void test_z3_host_window_reservation(void)
@@ -469,7 +495,8 @@ test_p96_firmware_interleaving();
     test_acc_surface_uses_firmware_heap();
     test_abs_regrant_reference();
     test_reset_reinstalls_reservations();
-    test_cardmem_acc_handlers();
+    test_cardmem_acc_dispatch();
+    test_z3_host_window_reservation();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

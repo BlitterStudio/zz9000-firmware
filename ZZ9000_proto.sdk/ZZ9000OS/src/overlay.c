@@ -150,11 +150,11 @@ static void overlay_free_shadows(void)
 	ov.shadow_size = 0;
 }
 
-/* Amiga reset: the legacy surface heap was just reinitialized, so the
- * shadow addresses are no longer ours - drop ALL overlay state without
- * touching the allocator. A compose still in flight may scribble into
- * the freshly reset heap once; the first P96 allocations happen
- * seconds later (driver boot), long after it retires. */
+/* Amiga reset reinitializes the shared allocator and drops every dynamic
+ * allocation, so the shadow addresses are no longer ours. Drop all overlay
+ * state without touching the allocator. A compose still in flight may scribble
+ * into the freshly reset heap once; the first P96 allocations happen seconds
+ * later (driver boot), long after it retires. */
 void overlay_amiga_reset(struct ZZ_VIDEO_STATE *vs)
 {
 	overlay_hw_stop();

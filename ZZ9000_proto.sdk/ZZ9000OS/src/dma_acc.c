@@ -224,17 +224,16 @@ void handle_acc_op(uint16_t zdata)
             break;
         }
         case ACC_OP_CARDMEM_ALLOC: {
-            uint32_t reply;
             uint32_t alignment = data->offset[0];
             uint32_t size = data->offset[1];
 
-            data->u8_user[0] = 0U;
             SWAP32(alignment);
             SWAP32(size);
-            if (cardmem_acc_alloc(data->offset[0], data->offset[1], &reply)) {
-                uint32_t offset = reply;
+            cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC, &data->offset[0],
+                                 &data->offset[1], &data->u8_user[0]);
+            if (data->u8_user[0]) {
+                uint32_t offset = data->offset[0];
 
-                data->u8_user[0] = 1U;
                 SWAP32(offset);
                 printf("[p96h] alloc +%lx %lu/%lu\n",
                        (unsigned long)offset,
@@ -243,42 +242,37 @@ void handle_acc_op(uint16_t zdata)
                 printf("[p96h] alloc reject %lu/%lu\n",
                        (unsigned long)size, (unsigned long)alignment);
             }
-            data->offset[0] = reply;
             break;
         }
         case ACC_OP_CARDMEM_ALLOC_ABS: {
-            uint32_t reply;
             uint32_t target = data->offset[0];
             uint32_t size = data->offset[1];
 
-            data->u8_user[0] = 0U;
             SWAP32(target);
             SWAP32(size);
-            if (cardmem_acc_alloc_abs(data->offset[0], data->offset[1],
-                                      &reply)) {
-                data->u8_user[0] = 1U;
+            cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_ALLOC_ABS,
+                                 &data->offset[0], &data->offset[1],
+                                 &data->u8_user[0]);
+            if (data->u8_user[0]) {
                 printf("[p96h] abs +%lx %lu\n", (unsigned long)target,
                        (unsigned long)size);
             } else {
                 printf("[p96h] abs reject +%lx %lu\n",
                        (unsigned long)target, (unsigned long)size);
             }
-            data->offset[0] = reply;
             break;
         }
         case ACC_OP_CARDMEM_FREE: {
-            uint32_t reply;
             uint32_t target = data->offset[0];
 
-            data->u8_user[0] = 0U;
             SWAP32(target);
-            if (cardmem_acc_free(data->offset[0], &reply)) {
-                data->u8_user[0] = 1U;
+            cardmem_acc_dispatch(CARDMEM_ACC_COMMAND_FREE, &data->offset[0],
+                                 0, &data->u8_user[0]);
+            if (data->u8_user[0]) {
                 printf("[p96h] free +%lx\n", (unsigned long)target);
             } else {
                 printf("[p96h] free reject +%lx\n", (unsigned long)target);
             }
-            data->offset[0] = reply;
             break;
         }
         case ACC_OP_SET_BPP_CONVERSION_TABLE: {
