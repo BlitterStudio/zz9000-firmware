@@ -234,6 +234,8 @@ void video_reset() {
 	videocap_detection_reset();
 	vs.framebuffer_pan_width = 0;
 	vs.framebuffer_pan_offset = 0;
+	vs.host_pan_width = 0;
+	vs.host_pan_offset = 0;
 	vs.split_request_pos = 0;
 
 	vs.sprite_colors[0] = 0x00ff00ff;
@@ -696,6 +698,12 @@ void isr_video(void *dummy) {
 		vs.videocap_backing_programmed != 0U;
 
 	if (!videocap_active) {
+		/* Capture overwrote framebuffer_pan_* with its own origin and
+		 * stride; give the RTG screen back the pan its driver set. */
+		if (vs.videocap_enabled_old) {
+			vs.framebuffer_pan_offset = vs.host_pan_offset;
+			vs.framebuffer_pan_width = vs.host_pan_width;
+		}
 		if (!vblank) {
 			// if this is not the vblank interrupt, set up the split buffer
 			// TODO: VDMA doesn't seem to like switching buffers in the middle of a frame.

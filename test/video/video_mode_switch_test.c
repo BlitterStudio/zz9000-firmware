@@ -173,10 +173,12 @@ int XAxiVdma_DmaConfig(XAxiVdma *instance, u16 direction,
 	dma_setup = *config;
 	return dma_config_status;
 }
+static UINTPTR dma_buffer_address;
 int XAxiVdma_DmaSetBufferAddr(XAxiVdma *instance, u16 direction,
 		UINTPTR *addresses)
 {
-	(void)instance; (void)direction; (void)addresses;
+	(void)instance; (void)direction;
+	dma_buffer_address = addresses[0];
 	return dma_address_status;
 }
 int XAxiVdma_DmaStart(XAxiVdma *instance, u16 direction)
@@ -848,6 +850,28 @@ int main(void)
 	assert(formatter_ops[MNTVF_OP_DIMENSIONS] ==
 	       (((uint32_t)preset_video_modes[ZZVMODE_1920x1080_60].vres << 16) |
 	        (uint32_t)preset_video_modes[ZZVMODE_1920x1080_60].hres));
+
+	/* P96 pans its RTG screen while the monitor still shows capture,
+	 * then switches back to RTG without panning again. Capture's own
+	 * origin must not replace that pan, or the RTG display scans the
+	 * capture buffer (black screen on hardware). */
+	video_mode_init(ZZVMODE_1280x720, 0, MNTVA_COLOR_32BIT);
+	videocap_zstate = (1U << 21) | (1U << 23);
+	vs.videocap_enabled_old = 0;
+	isr_video(NULL);
+	vs.host_pan_offset = 0x00123400U;
+	vs.host_pan_width = 1280U;
+	vs.framebuffer_pan_offset = vs.host_pan_offset;
+	vs.framebuffer_pan_width = vs.host_pan_width;
+	for (unsigned i = 0; i < VIDEO_VIDEOCAP_MODE_STABLE_VBLANKS + 2U; ++i)
+		isr_video(NULL);
+	assert(vs.framebuffer_pan_offset != 0x00123400U);
+	videocap_zstate = 1U << 21;
+	isr_video(NULL);
+	assert(vs.framebuffer_pan_offset == 0x00123400U);
+	assert(vs.framebuffer_pan_width == 1280U);
+	assert(dma_buffer_address ==
+	       (UINTPTR)vs.framebuffer + 0x00123400U);
 	puts("video mode switch: PASS");
 	return 0;
 }

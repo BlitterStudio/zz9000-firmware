@@ -471,6 +471,9 @@ static void activate_aperture_layout_if_acknowledged(void)
 
 static uint8_t amiga_boot_reset_pass = 1;
 
+/* ADAU write count when the last handle_amiga_reset() pass finished. */
+static uint32_t adau_writes_after_reset_pass;
+
 static void print_memory_line(void)
 {
 	extern char _heap_start[], _heap_end[];
@@ -506,6 +509,9 @@ static int fastram_can_advertise(void)
 }
 
 void handle_amiga_reset(enum amiga_reset_mode mode) {
+	/* amiga_boot_reset_pass is consumed by the Fast-RAM step below. */
+	const int boot_pass = amiga_boot_reset_pass;
+
 	/* A FWUP job on core 1 may still own FatFs and the SD card; the
 	 * Fast-RAM re-read and the storage reset below use both, and the
 	 * mailbox quiesce would cut a long SD write short. A job stuck past
@@ -556,14 +562,29 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
 		fastram_can_advertise() ? 1 : 0);
 
-	printf("    _______________   ___   ___   ___  \n");
-	printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
-	printf("      / /   / / (_) | | | | | | | | | |\n");
-	printf("     / /   / / \\__, | | | | | | | | |\n");
-	printf("    / /__ / /__  / /| |_| | |_| | |_| |\n");
-	printf("   /_____/_____|/_/  \\___/ \\___/ \\___/ \n\n");
-	printf("[reset] Amiga reset (%s)\r\n",
-	       mode == AMIGA_RESET_INIT_MEDIA ? "media init" : "fast");
+	/* The boot pass initialises card services; it is not an Amiga reset.
+	 * A real reset finds the audio DSP exactly as the previous pass left
+	 * it when nothing has written to it since (typically the reset right
+	 * after power-on, before any host driver runs): a Zorro reset does not
+	 * touch the audio path in the RTL. Keep it instead of reloading the
+	 * program and scene a second time. */
+	const int keep_dsp = !boot_pass && adau_enabled &&
+	                     audio_adau_write_count() ==
+	                     adau_writes_after_reset_pass;
+
+	if (boot_pass) {
+		printf("    _______________   ___   ___   ___  \n");
+		printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
+		printf("      / /   / / (_) | | | | | | | | | |\n");
+		printf("     / /   / / \\__, | | | | | | | | |\n");
+		printf("    / /__ / /__  / /| |_| | |_| | |_| |\n");
+		printf("   /_____/_____|/_/  \\___/ \\___/ \\___/ \n\n");
+		printf("[boot] card services init (%s)\r\n",
+		       mode == AMIGA_RESET_INIT_MEDIA ? "media" : "no media");
+	} else {
+		printf("[reset] Amiga reset%s\r\n",
+		       keep_dsp ? " (audio DSP unchanged: kept)" : "");
+	}
 
 	video_reset();
 
@@ -621,24 +642,28 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 		f-=0.0001;
 	}*/
 
-	// reset ADAU
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 0);
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 4);
-	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 0);
+	if (!keep_dsp) {
+		// reset ADAU
+		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 0);
+		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 8 | 4);
+		mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG5, 0);
 
-	adau_enabled = audio_adau_init(1);
-	audio_set_codec_present(adau_enabled);
+		adau_enabled = audio_adau_init(1);
+		audio_set_codec_present(adau_enabled);
 
-	/* The DSP now holds power-on defaults; the control plane re-applies
-	 * the active scene (R10) before the request loop below can service
-	 * any owner. Cold boot reaches this through main() -> this handler,
-	 * so boot and warm reset share the apply. A failed apply leaves the
-	 * DSP at those defaults; one retry covers a transient write failure
-	 * before owners can be serviced. */
-	if (adau_enabled && audio_scene_apply_after_dsp_init() == -1) {
-		printf("[scene] post-reset apply failed; DSP holds defaults\n");
-		audio_scene_apply_after_dsp_init();
+		/* The DSP now holds power-on defaults; the control plane
+		 * re-applies the active scene (R10) before the request loop
+		 * below can service any owner. Cold boot reaches this through
+		 * main() -> this handler, so boot and warm reset share the
+		 * apply. A failed apply leaves the DSP at those defaults; one
+		 * retry covers a transient write failure before owners can be
+		 * serviced. */
+		if (adau_enabled && audio_scene_apply_after_dsp_init() == -1) {
+			printf("[scene] post-reset apply failed; DSP holds defaults\n");
+			audio_scene_apply_after_dsp_init();
+		}
 	}
+	adau_writes_after_reset_pass = audio_adau_write_count();
 
 	// clear interrupt holding amiga
 	amiga_interrupt_clear(0xffffffff);
@@ -693,9 +718,13 @@ int main() {
 		 * the gate write so it cannot delay the decision, and the
 		 * only UART output this path produces before the service
 		 * bring-up. */
-		printf("[boot] fastram: %s cfg=%ums diag=%u\n",
+		printf("[boot] fastram: %s rtl-2fe00000=%s advertised=%s "
+		       "cfg=%ums diag=%u\n",
 			zz_fastram_outcome_name((enum zz_fastram_outcome)
 				zz_config_get()->fastram_outcome),
+			(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7) &
+			 MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000) ? "yes" : "no",
+			fastram_can_advertise() ? "yes" : "no",
 			load_ms, zz_config_diag_count());
 	}
 
@@ -861,6 +890,7 @@ int main() {
 	volatile struct ZZ9K_ENV* arm_run_env = arm_app_get_run_env();
 
 	// graphics temporary registers
+	uint32_t reg_pan_hi = 0;
 	uint16_t rect_x1 = 0;
 	uint16_t rect_x2 = 0;
 	uint16_t rect_x3 = 0;
@@ -1071,10 +1101,17 @@ int main() {
 				switch (zaddr) {
 				// Various blitter/video registers
 				case REG_ZZ_PAN_HI:
-					video_state->framebuffer_pan_offset = zdata << 16;
+					reg_pan_hi = zdata << 16;
 					break;
-				case REG_ZZ_PAN_LO:
-					video_state->framebuffer_pan_offset |= zdata;
+				case REG_ZZ_PAN_LO: {
+					u32 raw_pan = reg_pan_hi | zdata;
+
+					/* The native-display switch names the old fixed
+					 * capture area; capture derives its own origin, and
+					 * the RTG screen's pan must survive the switch. */
+					if (raw_pan == VIDEOCAP_NATIVE_PAN_LEGACY_BASE ||
+					    raw_pan == VIDEOCAP_NATIVE_PAN_LEGACY_TUNED)
+						break;
 
 					// cursor offset support for p96 panning
 					video_state->sprite_x_offset = rect_x1;
@@ -1086,9 +1123,13 @@ int main() {
 
 					video_state->framebuffer_pan_width = rect_x2;
 					u32 framebuffer_color_format = blitter_colormode;
+					video_state->framebuffer_pan_offset = raw_pan;
 					video_state->framebuffer_pan_offset += (rect_x1 << blitter_colormode);
 					video_state->framebuffer_pan_offset += (rect_y1 * (video_state->framebuffer_pan_width << framebuffer_color_format));
+					video_state->host_pan_offset = video_state->framebuffer_pan_offset;
+					video_state->host_pan_width = video_state->framebuffer_pan_width;
 					break;
+				}
 
 				case REG_ZZ_BLIT_SRC_HI:
 					blitter_src_offset = zdata << 16;

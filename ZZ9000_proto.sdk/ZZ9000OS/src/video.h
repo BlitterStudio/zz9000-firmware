@@ -176,6 +176,12 @@ struct ZZ_VIDEO_STATE {
 
 	uint32_t framebuffer_pan_offset;
 	uint32_t framebuffer_pan_width;
+	/* Last pan the host driver set for its RTG screen. Capture owns
+	 * framebuffer_pan_* while it is displayed; leaving capture restores
+	 * these, because P96 may pan its screen before it switches the
+	 * monitor back to RTG. */
+	uint32_t host_pan_offset;
+	uint32_t host_pan_width;
 	uint8_t scandoubler_mode_adjust;
 
 	int sprite_showing;
@@ -235,5 +241,12 @@ uint16_t video_custom_status(void);
 
 struct ZZ_VIDEO_STATE* video_get_state();
 void video_formatter_write(uint32_t data, uint16_t op);
+
+/* Raw REG_ZZ_PAN values the RTG driver writes when it switches to the
+ * native (capture) display (zz_vcap_native_pan_offset). They name the old
+ * fixed capture area, not an RTG screen: capture derives its own origin
+ * from the allocated backing, so these never become the host pan. */
+#define VIDEOCAP_NATIVE_PAN_LEGACY_BASE   0x00e00000U
+#define VIDEOCAP_NATIVE_PAN_LEGACY_TUNED  0x00dff2f8U
 
 #endif

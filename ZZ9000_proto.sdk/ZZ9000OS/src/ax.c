@@ -78,6 +78,22 @@ static volatile uint8_t audio_rx_last_completed_period =
 static volatile uint32_t audio_tx_producer_seq = 0;
 static int8_t audio_tx_meter_last_period = -1;
 
+/* Every I2C write to the ADAU1701 goes through adau_send(); the count lets
+ * the reset path tell whether anything has changed the DSP since it was
+ * last programmed. */
+static uint32_t adau_writes;
+
+static int adau_send(XIicPs *iic, u8 *buffer, s32 len, u8 i2c_addr)
+{
+	adau_writes++;
+	return XIicPs_MasterSendPolled(iic, buffer, len, i2c_addr);
+}
+
+uint32_t audio_adau_write_count(void)
+{
+	return adau_writes;
+}
+
 int adau_write16(u8 i2c_addr, u16 addr, u16 value) {
 	XIicPs* iic = &Iic2;
 	int status;
@@ -96,7 +112,7 @@ int adau_write16(u8 i2c_addr, u16 addr, u16 value) {
 			return -1;
 		}
 	}
-	status = XIicPs_MasterSendPolled(iic, buffer, 4, i2c_addr);
+	status = adau_send(iic, buffer, 4, i2c_addr);
 
 	return status;
 }
@@ -120,7 +136,7 @@ int adau_write24(u8 i2c_addr, u16 addr, u32 value) {
 			return -1;
 		}
 	}
-	status = XIicPs_MasterSendPolled(iic, buffer, 5, i2c_addr);
+	status = adau_send(iic, buffer, 5, i2c_addr);
 
 	return status;
 }
@@ -148,7 +164,7 @@ int adau_write40(u8 i2c_addr, u16 addr, u8* data) {
 		}
 	}
 
-	status = XIicPs_MasterSendPolled(iic, buffer, 2+5, i2c_addr);
+	status = adau_send(iic, buffer, 2+5, i2c_addr);
 	return status;
 }
 
@@ -174,7 +190,7 @@ int adau_write32(u8 i2c_addr, u16 addr, u8* data) {
 		}
 	}
 
-	status = XIicPs_MasterSendPolled(iic, buffer, 2+4, i2c_addr);
+	status = adau_send(iic, buffer, 2+4, i2c_addr);
 	return status;
 }
 
@@ -367,7 +383,7 @@ static int adau_write_burst(u8 i2c_addr, u16 addr, const u8 *data, u32 len)
 	memcpy(&buffer[2], data, len);
 	if (adau_wait_idle(iic) != 0)
 		return -1;
-	return XIicPs_MasterSendPolled(iic, buffer, (s32)(2U + len), i2c_addr);
+	return adau_send(iic, buffer, (s32)(2U + len), i2c_addr);
 }
 
 /* Burst read with the same auto-increment, for verification. */
