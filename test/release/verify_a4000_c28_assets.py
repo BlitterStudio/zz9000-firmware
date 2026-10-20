@@ -4,8 +4,11 @@
 import array
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import zipfile
 
 
@@ -61,10 +64,46 @@ def verify_variant(output_dir, tag, variant, expected):
     print(f"PASS {variant}: routed C28 bitstream {digest}, BOOT offset {offset:#x}")
 
 
+def verify_qualification_gate():
+    record = json.loads((ROOT / "bootimage_work/variants/timing-qualification.json").read_text(encoding="utf-8"))
+    script = ROOT / "build_release_assets.sh"
+    with tempfile.TemporaryDirectory() as temporary:
+        record_path = Path(temporary) / "timing-qualification.json"
+        environment = os.environ | {"ZZ9000_QUALIFICATION_RECORD": str(record_path)}
+
+        record["variants"]["zorro3"]["sha256"] = "0" * 64
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        mismatch = subprocess.run(
+            ["bash", str(script), "--check-qualification"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        if mismatch.returncode == 0:
+            raise ValueError("qualification gate accepted a mismatched bitstream SHA256")
+
+        record["variants"]["zorro3"]["sha256"] = hashlib.sha256(
+            (ROOT / record["variants"]["zorro3"]["bitstream"]).read_bytes()
+        ).hexdigest()
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        match = subprocess.run(
+            ["bash", str(script), "--check-qualification"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        if match.returncode != 0:
+            raise ValueError(f"qualification gate rejected matching records: {match.stderr}")
+    print("PASS release qualification gate rejects SHA mismatch and accepts matching records")
+
+
 def main():
     if len(sys.argv) != 3:
         raise SystemExit("Usage: verify_a4000_c28_assets.py OUTPUT_DIR BUILD_LABEL")
     output_dir, tag = Path(sys.argv[1]), sys.argv[2]
+    verify_qualification_gate()
     variants = json.loads(BUILDS.read_text(encoding="utf-8"))["bitstreams"]
     for variant, expected in variants.items():
         verify_variant(output_dir, tag, variant, expected)

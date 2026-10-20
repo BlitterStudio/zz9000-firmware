@@ -162,16 +162,17 @@ passes every gate, including the pixel, overall, and I2S timing floors.
 The driver writes the selected bitstream, final timing reports, per-attempt
 logs and reports, `SHA256SUMS`, and `sweep-summary.json` below
 `build/timing/<variant>/`; it also refreshes
-`build/timing/timing-sweep-summary.md`. It never writes a selected result to
-`bootimage_work/`. If every directive fails, the best attempt is selected by
-the smallest slack normalised to its applicable floor and retained with its
-post-route physical-optimization checkpoint for diagnosis; the command exits
-
-nonzero and does not select a bitstream.
+`build/timing/timing-sweep-summary.md` and updates the selected variant entry
+in `bootimage_work/variants/timing-qualification.json`. It never copies a
+selected bitstream to `bootimage_work/`. If every directive fails, the best
+attempt is selected by the smallest slack normalised to its applicable floor
+and retained with its post-route physical-optimization checkpoint for
+diagnosis; the command exits nonzero and does not update qualification.
 
 For a release, copy only timing-qualified selected results into
-`bootimage_work/`, update `bootimage_work/SHA256SUMS-variants.txt`, and retain
-the sweep reports under `build/timing/` as build evidence.
+`bootimage_work/`, then commit the matching bitstream and qualification record
+together. `build_release_assets.sh --require-all` checks every release-matrix
+bitstream against that passing record before it packages anything.
 
 ## Build hardware variants
 
@@ -195,6 +196,8 @@ The supported variant names are `zorro3`, `zorro3-aga`, `zorro2`,
 `zorro2-2mb`, `a500`, `a500-2mb`, and `a500plus`. The standard `zorro3` build
 writes `bootimage_work/zz9000_ps_wrapper.bit`; the other outputs are under
 `bootimage_work/variants/`.
+The canonical matrix is `bootimage_work/variants/variant-matrix.sh`; both build
+drivers and release packaging consume it.
 
 From Git Bash on Windows, use the PowerShell builder. A selected C28 variant
 requires a C28 builder that ends with its output-path option:
@@ -218,7 +221,9 @@ named `zz9000-firmware-<tag>-<variant>`.
 
 Use `--output DIR` to choose another output directory. Use
 `--firmware-flavor SUFFIX` only when packaging an alternate firmware ELF; the
-standard Zorro III image remains `bootimage_work/BOOT.bin`.
+standard Zorro III image remains `bootimage_work/BOOT.bin`. `--require-all`
+also verifies that every release-matrix bitstream has the exact SHA-256 of a
+passing entry in `bootimage_work/variants/timing-qualification.json`.
 
 ## Rebuild the FSBL
 

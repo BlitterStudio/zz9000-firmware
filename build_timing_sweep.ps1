@@ -9,13 +9,13 @@ Build one release variant through the ordered placement-directive timing sweep.
 Each directive is built from a clean Vivado project. The first build to pass
 all gates is selected. If none pass, the attempt with the largest minimum
 margin normalised to the four release floors is retained for diagnosis.
-Outputs are written under build/timing/<variant>/ and never to bootimage_work/.
+Build evidence is written under build/timing/<variant>/. A passing sweep also
+updates the selected variant's qualification record without copying bitstreams.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('zorro3', 'zorro3-aga', 'zorro2', 'zorro2-2mb', 'a500', 'a500plus', 'a500-2mb')]
     [string]$Variant,
     [ValidatePattern('^[0-9A-Fa-f]{8}$')]
     [string]$BuildId,
@@ -41,19 +41,56 @@ $floors = [ordered]@{ PixelSetupNs = 0.100; PixelHoldNs = 0.000; OverallSetupNs 
 # slack floor. Use it as the hold normalizer so comparison remains sensitive
 # to a marginal runtime-pixel hold result without dividing by zero.
 $normalizers = [ordered]@{ PixelSetupNs = 0.100; PixelHoldNs = 0.300; OverallSetupNs = 0.100; I2sSetupNs = 0.100 }
+$variantMatrixPath = Join-Path $repoRoot 'bootimage_work\variants\variant-matrix.sh'
+
+function Get-VariantDefinition {
+    param([string]$Name)
+
+    if (-not (Test-Path -LiteralPath $variantMatrixPath)) {
+        throw "Missing canonical variant matrix '$variantMatrixPath'."
+    }
+    foreach ($line in Get-Content -LiteralPath $variantMatrixPath) {
+        $match = [regex]::Match($line, "^\s*'(?<row>[^']+)'\s*$")
+        if (-not $match.Success) { continue }
+        $fields = $match.Groups['row'].Value -split '\|'
+        if ($fields.Count -ne 10) {
+            throw "Invalid canonical variant matrix row '$($match.Groups['row'].Value)'."
+        }
+        if ($fields[0] -ne $Name) { continue }
+        return [pscustomobject][ordered]@{
+            Name = $fields[0]; Bitstream = $fields[1]; Label = $fields[2]
+            Zorro2 = [int]$fields[3]; Zorro3 = [int]$fields[4]; Zz9500 = [int]$fields[5]
+            TwoMb = [int]$fields[6]; SuperDenise = [int]$fields[7]; Z3FastRam = [int]$fields[8]
+            CaptureC28 = [int]$fields[9]
+        }
+    }
+    throw "Unknown release variant '$Name' in canonical variant matrix."
+}
+
+function Get-DefineLine {
+    param([string]$Name, [int]$Enabled, [string]$Comment = '')
+    $prefix = if ($Enabled -eq 1) { '`define' } else { '//`define' }
+    return '{0} {1}{2}' -f $prefix, $Name, $Comment
+}
 
 function Get-VariantBlock {
-    param([string]$Name)
-    switch ($Name) {
-        'zorro3' { $bus = @('//`define ZORRO2', '`define ZORRO3'); $options = @('//`define VARIANT_ZZ9500', '//`define VARIANT_2MB', '//`define VARIANT_SUPERDENISE', '//`define VARIANT_FW20', '`define VARIANT_Z3_FASTRAM') }
-        'zorro3-aga' { $bus = @('//`define ZORRO2', '`define ZORRO3'); $options = @('//`define VARIANT_ZZ9500', '//`define VARIANT_2MB', '//`define VARIANT_SUPERDENISE', '//`define VARIANT_FW20', '`define VARIANT_Z3_FASTRAM') }
-        'zorro2' { $bus = @('`define ZORRO2', '//`define ZORRO3'); $options = @('//`define VARIANT_ZZ9500', '//`define VARIANT_2MB', '//`define VARIANT_SUPERDENISE', '//`define VARIANT_FW20', '//`define VARIANT_Z3_FASTRAM') }
-        'zorro2-2mb' { $bus = @('`define ZORRO2', '//`define ZORRO3'); $options = @('//`define VARIANT_ZZ9500', '`define VARIANT_2MB', '//`define VARIANT_SUPERDENISE', '//`define VARIANT_FW20', '//`define VARIANT_Z3_FASTRAM') }
-        'a500' { $bus = @('`define ZORRO2', '//`define ZORRO3'); $options = @('`define VARIANT_ZZ9500', '//`define VARIANT_2MB', '//`define VARIANT_SUPERDENISE', '//`define VARIANT_FW20', '//`define VARIANT_Z3_FASTRAM') }
-        'a500-2mb' { $bus = @('`define ZORRO2', '//`define ZORRO3'); $options = @('`define VARIANT_ZZ9500', '`define VARIANT_2MB', '//`define VARIANT_SUPERDENISE', '//`define VARIANT_FW20', '//`define VARIANT_Z3_FASTRAM') }
-        'a500plus' { $bus = @('`define ZORRO2', '//`define ZORRO3'); $options = @('//`define VARIANT_ZZ9500', '//`define VARIANT_2MB', '`define VARIANT_SUPERDENISE', '//`define VARIANT_FW20', '//`define VARIANT_Z3_FASTRAM') }
-    }
-    return (@('// ZORRO2/3 switch') + $bus + @('', '// use only together with ZORRO2:') + $options + @('`define VARIANT_AUTOBOOT', '', '`define C_S_AXI_DATA_WIDTH 32') -join "`n") + "`n"
+    param([pscustomobject]$Definition)
+    return (@(
+        '// ZORRO2/3 switch'
+        Get-DefineLine 'ZORRO2' $Definition.Zorro2
+        Get-DefineLine 'ZORRO3' $Definition.Zorro3
+        ''
+        '// use only together with ZORRO2:'
+        Get-DefineLine 'VARIANT_ZZ9500' $Definition.Zz9500 '        // uses Denise adapter/A500 specific video capture'
+        Get-DefineLine 'VARIANT_2MB' $Definition.TwoMb '           // uses only 2MB address space'
+        Get-DefineLine 'VARIANT_SUPERDENISE' $Definition.SuperDenise '   // for A500+ and super denise'
+        ''
+        '//`define VARIANT_FW20'
+        Get-DefineLine 'VARIANT_Z3_FASTRAM' $Definition.Z3FastRam
+        '`define VARIANT_AUTOBOOT        // enable autoboot ROM'
+        ''
+        '`define C_S_AXI_DATA_WIDTH 32'
+    ) -join "`n") + "`n"
 }
 
 function Get-Slack {
@@ -79,6 +116,50 @@ function Get-Sha256 {
     } finally {
         $sha256.Dispose()
     }
+}
+
+function Update-QualificationRecord {
+    param(
+        [pscustomobject]$Definition,
+        [string]$SelectedBitstream,
+        [pscustomobject]$SelectedAttempt
+    )
+
+    $recordPath = Join-Path $repoRoot 'bootimage_work\variants\timing-qualification.json'
+    $record = if (Test-Path -LiteralPath $recordPath) {
+        Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+    } else {
+        [pscustomobject][ordered]@{ schema_version = 1; variants = [pscustomobject]@{} }
+    }
+    if ($record.schema_version -ne 1) {
+        throw "Unsupported timing qualification schema in '$recordPath'."
+    }
+    if (-not $record.PSObject.Properties['variants']) {
+        $record | Add-Member -NotePropertyName variants -NotePropertyValue ([pscustomobject]@{})
+    }
+
+    $sourceRevision = (& git -C $repoRoot rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not determine the source revision for the timing qualification.'
+    }
+    $qualification = [pscustomobject][ordered]@{
+        bitstream = $Definition.Bitstream
+        sha256 = Get-Sha256 $SelectedBitstream
+        source_revision = $sourceRevision
+        build_id = $BuildId
+        placement_directive = $SelectedAttempt.Directive
+        pixel_slack_ns = [ordered]@{ setup = $SelectedAttempt.PixelSetupNs; hold = $SelectedAttempt.PixelHoldNs }
+        overall_slack_ns = [ordered]@{ setup = $SelectedAttempt.OverallSetupNs; hold = $SelectedAttempt.OverallHoldNs }
+        i2s_slack_ns = [ordered]@{ setup = $SelectedAttempt.I2sSetupNs }
+        sii9022_slack_ns = [ordered]@{ setup = $SelectedAttempt.Sii9022SetupNs; hold = $SelectedAttempt.Sii9022HoldNs }
+        gate_passed = $true
+    }
+    $record.variants | Add-Member -NotePropertyName $Definition.Name -NotePropertyValue $qualification -Force
+    [IO.File]::WriteAllText(
+        $recordPath,
+        (($record | ConvertTo-Json -Depth 8) + [Environment]::NewLine),
+        [Text.UTF8Encoding]::new($false)
+    )
 }
 
 function Write-Checksums {
@@ -112,6 +193,8 @@ function Write-AggregateSummary {
     [IO.File]::WriteAllLines((Join-Path $TimingRoot 'timing-sweep-summary.md'), [string[]]$lines, [Text.UTF8Encoding]::new($false))
 }
 
+$variantDefinition = Get-VariantDefinition $Variant
+
 $timingRoot = Join-Path $repoRoot 'build\timing'
 $stageDir = Join-Path $timingRoot $Variant
 $attemptsDir = Join-Path $stageDir 'attempts'
@@ -139,7 +222,7 @@ $sourceBytes = [IO.File]::ReadAllBytes($sourcePath)
 $sourceText = [Text.Encoding]::UTF8.GetString($sourceBytes)
 $variantPattern = '(?ms)^// ZORRO2/3 switch\r?\n.*?^`define C_S_AXI_DATA_WIDTH 32\r?\n'
 if (-not [regex]::IsMatch($sourceText, $variantPattern)) { throw 'Could not locate the variant define block in mntzorro.v.' }
-$updatedSource = [regex]::Replace($sourceText, $variantPattern, (Get-VariantBlock $Variant), 1)
+$updatedSource = [regex]::Replace($sourceText, $variantPattern, (Get-VariantBlock $variantDefinition), 1)
 $oldDirective = $env:ZZ9000_PLACE_DIRECTIVE
 $oldBuildId = $env:VCAP_DIAG_BUILD_ID
 $oldProcessors = $env:NUMBER_OF_PROCESSORS
@@ -159,7 +242,7 @@ try {
         $env:ZZ9000_PLACE_DIRECTIVE = $directive
         $builderArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $snapshotRoot 'build_bitstream.ps1'), '-OutputBitstream', $bitstream)
         if ($VivadoBat) { $builderArgs += @('-VivadoBat', $VivadoBat) }
-        if ($Variant -eq 'zorro3-aga') { $builderArgs += '-CaptureC28' }
+        if ($variantDefinition.CaptureC28 -eq 1) { $builderArgs += '-CaptureC28' }
         Write-Host "[timing-sweep] ${Variant}: $directive"
         $savedErrorActionPreference = $ErrorActionPreference
         try {
@@ -178,7 +261,7 @@ try {
         $attempt = [pscustomobject][ordered]@{
             Directive = $directive; ExitCode = $exitCode
             PixelSetupNs = Get-Slack $log 'runtime_150mhz_setup_slack'; PixelHoldNs = Get-Slack $log 'runtime_150mhz_hold_slack'
-            OverallSetupNs = Get-Slack $log 'overall_setup_slack'; I2sSetupNs = Get-Slack $log 'i2s_setup_slack'
+            OverallSetupNs = Get-Slack $log 'overall_setup_slack'; OverallHoldNs = Get-Slack $log 'overall_hold_slack'; I2sSetupNs = Get-Slack $log 'i2s_setup_slack'
             Sii9022SetupNs = Get-Slack $log 'sii9022_output_setup_slack'; Sii9022HoldNs = Get-Slack $log 'sii9022_output_hold_slack'
             GatePassed = ($exitCode -eq 0 -and $log -match 'TIMING_GATE: PASS - runtime pixel, overall, and i2s setup floors met')
             GateLines = @($log -split "`r?`n" | Where-Object { $_ -match 'TIMING_GATE:|Timing floor failed|Timing failed in' })
@@ -212,6 +295,9 @@ $summary = [pscustomobject][ordered]@{ Variant = $Variant; BuildId = $BuildId; D
 $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $stageDir 'sweep-summary.json') -Encoding utf8
 Write-Checksums -Directory $stageDir
 Write-AggregateSummary -TimingRoot $timingRoot
+if ($chosenAttempt) {
+    Update-QualificationRecord -Definition $variantDefinition -SelectedBitstream (Join-Path $stageDir 'zz9000_ps_wrapper.bit') -SelectedAttempt $chosenAttempt
+}
 if (-not $chosenAttempt) {
     $best = if ($bestAttempt) { "$($bestAttempt.Directive), normalized minimum margin $($bestAttempt.NormalizedMinimumMargin)" } else { 'no gate values extracted' }
     throw "No placement directive passed for $Variant; retained $best under $stageDir. See its final post-route physical-opt reports."

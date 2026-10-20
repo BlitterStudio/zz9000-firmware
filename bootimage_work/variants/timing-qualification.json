@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "variants": {
+    "zorro3": {
+      "bitstream": "bootimage_work/zz9000_ps_wrapper.bit",
+      "sha256": "894367d255e15d6847795db7e8dbe9113cf25969aa594482a1b97c7b4ace6622",
+      "source_revision": "c18d28ee9317e8484d92d812bef2e102c2380209",
+      "build_id": "c18d28ee",
+      "placement_directive": "Explore",
+      "pixel_slack_ns": { "setup": 0.128, "hold": 0.013 },
+      "overall_slack_ns": { "setup": 0.128, "hold": 0.013 },
+      "i2s_slack_ns": { "setup": 1.118 },
+      "sii9022_slack_ns": { "setup": 2.279, "hold": 0.714 },
+      "gate_passed": true
+    },
+    "zorro3-aga": {
+      "bitstream": "bootimage_work/variants/zz9000_ps_wrapper-zorro3-aga.bit",
+      "sha256": "ad168b46d1d9003e62c487071b6ab2de9603cf31d825b59d712763584915e04d",
+      "source_revision": "c18d28ee9317e8484d92d812bef2e102c2380209",
+      "build_id": "c18d28ee",
+      "placement_directive": "Default",
+      "pixel_slack_ns": { "setup": 0.212, "hold": 0.001 },
+      "overall_slack_ns": { "setup": 0.212, "hold": 0.001 },
+      "i2s_slack_ns": { "setup": 1.118 },
+      "sii9022_slack_ns": { "setup": 2.279, "hold": 0.714 },
+      "gate_passed": true
+    },
+    "zorro2": {
+      "bitstream": "bootimage_work/variants/zz9000_ps_wrapper-zorro2.bit",
+      "sha256": "e397265328fa4a5153c7dfac0c41e4148ab066609e04e6eadf16ed72f55ff548",
+      "source_revision": "c18d28ee9317e8484d92d812bef2e102c2380209",
+      "build_id": "c18d28ee",
+      "placement_directive": "Default",
+      "pixel_slack_ns": { "setup": 0.377, "hold": 0.019 },
+      "overall_slack_ns": { "setup": 0.377, "hold": 0.016 },
+      "i2s_slack_ns": { "setup": 1.118 },
+      "sii9022_slack_ns": { "setup": 2.279, "hold": 0.714 },
+      "gate_passed": true
+    },
+    "zorro2-2mb": {
+      "bitstream": "bootimage_work/variants/zz9000_ps_wrapper-zorro2-2mb.bit",
+      "sha256": "ed0c4fda829efc481d9b0b0ec063a9347de63e26c29ceb80cacff01e40753ee0",
+      "source_revision": "c18d28ee9317e8484d92d812bef2e102c2380209",
+      "build_id": "c18d28ee",
+      "placement_directive": "Default",
+      "pixel_slack_ns": { "setup": 0.152, "hold": 0.050 },
+      "overall_slack_ns": { "setup": 0.152, "hold": 0.050 },
+      "i2s_slack_ns": { "setup": 1.118 },
+      "sii9022_slack_ns": { "setup": 2.279, "hold": 0.714 },
+      "gate_passed": true
+    },
+    "a500": {
+      "bitstream": "bootimage_work/variants/zz9000_ps_wrapper-a500.bit",
+      "sha256": "141c654141a19beecbe6bc4274358c983e1eda9285f2362beff5b230fa3c8266",
+      "source_revision": "c18d28ee9317e8484d92d812bef2e102c2380209",
+      "build_id": "c18d28ee",
+      "placement_directive": "Default",
+      "pixel_slack_ns": { "setup": 0.145, "hold": 0.017 },
+      "overall_slack_ns": { "setup": 0.145, "hold": 0.017 },
+      "i2s_slack_ns": { "setup": 1.118 },
+      "sii9022_slack_ns": { "setup": 2.279, "hold": 0.714 },
+      "gate_passed": true
+    },
+    "a500-2mb": {
+      "bitstream": "bootimage_work/variants/zz9000_ps_wrapper-a500-2mb.bit",
+      "sha256": "71a52cbb29f2c0278791d90361c8dc6f136ffa54a2ac5756e5b1d51088bb0361",
+      "source_revision": "c18d28ee9317e8484d92d812bef2e102c2380209",
+      "build_id": "c18d28ee",
+      "placement_directive": "Default",
+      "pixel_slack_ns": { "setup": 0.155, "hold": 0.008 },
+      "overall_slack_ns": { "setup": 0.155, "hold": 0.008 },
+      "i2s_slack_ns": { "setup": 1.118 },
+      "sii9022_slack_ns": { "setup": 2.279, "hold": 0.714 },
+      "gate_passed": true
+    },
+    "a500plus": {
+      "bitstream": "bootimage_work/variants/zz9000_ps_wrapper-a500plus.bit",
+      "sha256": "1d9f2635ab33c4d71202c0dde8f929f1f220b1ef230b69e6f2c70169fc8ca5d2",
+      "source_revision": "c18d28ee9317e8484d92d812bef2e102c2380209",
+      "build_id": "c18d28ee",
+      "placement_directive": "Default",
+      "pixel_slack_ns": { "setup": 0.145, "hold": 0.017 },
+      "overall_slack_ns": { "setup": 0.145, "hold": 0.017 },
+      "i2s_slack_ns": { "setup": 1.118 },
+      "sii9022_slack_ns": { "setup": 2.279, "hold": 0.714 },
+      "gate_passed": true
+    }
+  }
+}

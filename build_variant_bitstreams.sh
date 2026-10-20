@@ -33,6 +33,7 @@ fi
 MNTZORRO=mntzorro.v
 CANONICAL_BIT=bootimage_work/zz9000_ps_wrapper.bit
 VARIANT_DIR=bootimage_work/variants
+source "$VARIANT_DIR/variant-matrix.sh"
 
 usage() {
     cat >&2 <<'EOF'
@@ -42,7 +43,7 @@ Builds all release variants when no variant is specified.
 
 Variants:
   zorro3          Zorro III / A3000 / A4000
-  zorro3-aga  A4000/A4000T AGA video-slot capture, Zorro III Fast RAM
+  zorro3-aga      A4000/A4000T AGA video-slot capture, Zorro III Fast RAM
   zorro2          Zorro II 4MB / A2000
   zorro2-2mb      Zorro II 2MB / A2000
   a500            A500 4MB / ZZ9500CX Denise adapter
@@ -51,140 +52,61 @@ Variants:
 EOF
 }
 
-all_variants=(zorro3 zorro3-aga zorro2 zorro2-2mb a500 a500-2mb a500plus)
+all_variants=()
+for row in "${VARIANT_MATRIX[@]}"; do
+    all_variants+=("${row%%|*}")
+done
 
 variant_label() {
-    case "$1" in
-        zorro3) echo "Zorro III / A3000 / A4000" ;;
-        zorro3-aga) echo "A4000/A4000T AGA, Zorro III Fast RAM" ;;
-        zorro2) echo "Zorro II 4MB / A2000" ;;
-        zorro2-2mb) echo "Zorro II 2MB / A2000" ;;
-        a500) echo "A500 4MB / ZZ9500CX Denise adapter" ;;
-        a500-2mb) echo "A500 2MB / ZZ9500CX Denise adapter" ;;
-        a500plus) echo "A500+ or Super Denise / ZZ9500CX Denise adapter" ;;
-        *) return 1 ;;
-    esac
+    local row variant bitstream label
+    row=$(variant_matrix_row "$1") || return 1
+    IFS='|' read -r variant bitstream label _ <<< "$row"
+    printf '%s\n' "$label"
 }
 
 variant_output() {
-    case "$1" in
-        zorro3) echo "$CANONICAL_BIT" ;;
-        zorro3-aga) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro3-aga.bit" ;;
-        zorro2) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro2.bit" ;;
-        zorro2-2mb) echo "$VARIANT_DIR/zz9000_ps_wrapper-zorro2-2mb.bit" ;;
-        a500) echo "$VARIANT_DIR/zz9000_ps_wrapper-a500.bit" ;;
-        a500-2mb) echo "$VARIANT_DIR/zz9000_ps_wrapper-a500-2mb.bit" ;;
-        a500plus) echo "$VARIANT_DIR/zz9000_ps_wrapper-a500plus.bit" ;;
-        *) return 1 ;;
-    esac
+    local row variant bitstream
+    row=$(variant_matrix_row "$1") || return 1
+    IFS='|' read -r variant bitstream _ <<< "$row"
+    printf '%s\n' "$bitstream"
+}
+
+variant_capture_c28() {
+    local row variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28
+    row=$(variant_matrix_row "$1") || return 1
+    IFS='|' read -r variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 <<< "$row"
+    printf '%s\n' "$capture_c28"
+}
+
+write_define() {
+    local name=$1 enabled=$2 suffix=${3:-}
+    if [ "$enabled" = 1 ]; then
+        printf '`define %s%s\n' "$name" "$suffix"
+    else
+        printf '//`define %s%s\n' "$name" "$suffix"
+    fi
 }
 
 variant_block() {
-    case "$1" in
-        zorro3|zorro3-aga)
-            cat <<'EOF'
+    local row variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28
+    row=$(variant_matrix_row "$1") || return 1
+    IFS='|' read -r variant bitstream label zorro2 zorro3 zz9500 two_mb superdenise z3_fastram capture_c28 <<< "$row"
+
+    cat <<'EOF'
 // ZORRO2/3 switch
-//`define ZORRO2
-`define ZORRO3
+EOF
+    write_define ZORRO2 "$zorro2"
+    write_define ZORRO3 "$zorro3"
+    cat <<'EOF'
 
 // use only together with ZORRO2:
-//`define VARIANT_ZZ9500        // uses Denise adapter/A500 specific video capture
-//`define VARIANT_2MB           // uses only 2MB address space
-//`define VARIANT_SUPERDENISE   // for A500+ and super denise
-
-//`define VARIANT_FW20
-`define VARIANT_Z3_FASTRAM
-`define VARIANT_AUTOBOOT        // enable autoboot ROM
-
 EOF
-            ;;
-        zorro2)
-            cat <<'EOF'
-// ZORRO2/3 switch
-`define ZORRO2
-//`define ZORRO3
-
-// use only together with ZORRO2:
-//`define VARIANT_ZZ9500        // uses Denise adapter/A500 specific video capture
-//`define VARIANT_2MB           // uses only 2MB address space
-//`define VARIANT_SUPERDENISE   // for A500+ and super denise
-
-//`define VARIANT_FW20
-//`define VARIANT_Z3_FASTRAM
-`define VARIANT_AUTOBOOT        // enable autoboot ROM
-
-EOF
-            ;;
-        zorro2-2mb)
-            cat <<'EOF'
-// ZORRO2/3 switch
-`define ZORRO2
-//`define ZORRO3
-
-// use only together with ZORRO2:
-//`define VARIANT_ZZ9500        // uses Denise adapter/A500 specific video capture
-`define VARIANT_2MB           // uses only 2MB address space
-//`define VARIANT_SUPERDENISE   // for A500+ and super denise
-
-//`define VARIANT_FW20
-//`define VARIANT_Z3_FASTRAM
-`define VARIANT_AUTOBOOT        // enable autoboot ROM
-
-EOF
-            ;;
-        a500)
-            cat <<'EOF'
-// ZORRO2/3 switch
-`define ZORRO2
-//`define ZORRO3
-
-// use only together with ZORRO2:
-`define VARIANT_ZZ9500        // uses Denise adapter/A500 specific video capture
-//`define VARIANT_2MB           // uses only 2MB address space
-//`define VARIANT_SUPERDENISE   // for A500+ and super denise
-
-//`define VARIANT_FW20
-//`define VARIANT_Z3_FASTRAM
-`define VARIANT_AUTOBOOT        // enable autoboot ROM
-
-EOF
-            ;;
-        a500-2mb)
-            cat <<'EOF'
-// ZORRO2/3 switch
-`define ZORRO2
-//`define ZORRO3
-
-// use only together with ZORRO2:
-`define VARIANT_ZZ9500        // uses Denise adapter/A500 specific video capture
-`define VARIANT_2MB           // uses only 2MB address space
-//`define VARIANT_SUPERDENISE   // for A500+ and super denise
-
-//`define VARIANT_FW20
-//`define VARIANT_Z3_FASTRAM
-`define VARIANT_AUTOBOOT        // enable autoboot ROM
-
-EOF
-            ;;
-        a500plus)
-            cat <<'EOF'
-// ZORRO2/3 switch
-`define ZORRO2
-//`define ZORRO3
-
-// use only together with ZORRO2:
-//`define VARIANT_ZZ9500        // uses Denise adapter/A500 specific video capture
-//`define VARIANT_2MB           // uses only 2MB address space
-`define VARIANT_SUPERDENISE   // for A500+ and super denise
-
-//`define VARIANT_FW20
-//`define VARIANT_Z3_FASTRAM
-`define VARIANT_AUTOBOOT        // enable autoboot ROM
-
-EOF
-            ;;
-        *) return 1 ;;
-    esac
+    write_define VARIANT_ZZ9500 "$zz9500" '        // uses Denise adapter/A500 specific video capture'
+    write_define VARIANT_2MB "$two_mb" '           // uses only 2MB address space'
+    write_define VARIANT_SUPERDENISE "$superdenise" '   // for A500+ and super denise'
+    printf '\n//`define VARIANT_FW20\n'
+    write_define VARIANT_Z3_FASTRAM "$z3_fastram"
+    printf '`define VARIANT_AUTOBOOT        // enable autoboot ROM\n\n'
 }
 
 replace_define_block() {
@@ -256,14 +178,10 @@ else
     C28_BUILDER_CMD=(./build_bitstream.sh --capture-c28 --output)
 fi
 for variant in "${selected[@]}"; do
-    case "$variant" in
-        zorro3-aga)
-            if [ "${#C28_BUILDER_CMD[@]}" -eq 0 ]; then
-                echo "ERROR: set C28_BITSTREAM_BUILDER to a C28 builder ending in its output-path option." >&2
-                exit 1
-            fi
-            ;;
-    esac
+    if [ "$(variant_capture_c28 "$variant")" = 1 ] && [ "${#C28_BUILDER_CMD[@]}" -eq 0 ]; then
+        echo "ERROR: set C28_BITSTREAM_BUILDER to a C28 builder ending in its output-path option." >&2
+        exit 1
+    fi
 done
 
 
@@ -314,19 +232,16 @@ for variant in "${selected[@]}"; do
     variant_block "$variant" > "$block_tmp"
     replace_define_block "$block_tmp"
 
-    case "$variant" in
-        zorro3-aga)
-            mkdir -p "$(dirname "$output")"
-            "${C28_BUILDER_CMD[@]}" "$output"
-            ;;
-        *)
-            "${BITSTREAM_BUILDER_CMD[@]}"
-            mkdir -p "$(dirname "$output")"
-            if [ "$output" != "$CANONICAL_BIT" ]; then
-                cp "$CANONICAL_BIT" "$output"
-            fi
-            ;;
-    esac
+    if [ "$(variant_capture_c28 "$variant")" = 1 ]; then
+        mkdir -p "$(dirname "$output")"
+        "${C28_BUILDER_CMD[@]}" "$output"
+    else
+        "${BITSTREAM_BUILDER_CMD[@]}"
+        mkdir -p "$(dirname "$output")"
+        if [ "$output" != "$CANONICAL_BIT" ]; then
+            cp "$CANONICAL_BIT" "$output"
+        fi
+    fi
     if [ "$variant" = zorro3 ]; then
         cp "$CANONICAL_BIT" "$zorro3_result"
     fi
