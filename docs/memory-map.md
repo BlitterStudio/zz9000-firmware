@@ -27,7 +27,7 @@ above it.
 | `0x08600000`–`0x08700000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
 | `0x08700000`–`0x08800000` | 1 MiB | Full-descending core-1 stack. |
 | `0x08800000`–`0x09000000` | 8 MiB region | Newlib heap plus 22 KiB ARM exception-stack reservation. `_sbrk` reports the 8,366,080-byte break reservation and peak use at reset. This is the 8 MiB minimum after a sub-1 MiB service-path peak, providing more than 2× margin. |
-| `0x09000000`–`0x2FE00000` | 510 MiB | Permanent prefix of the card pool. |
+| `0x09000000`–`0x2FE00000` | 622 MiB | Permanent prefix of the card pool. |
 | `0x2FE00000`–`0x3FE00000` | 256 MiB | Fast-RAM landing window when advertised; otherwise contiguous revocable card-pool tail. |
 | `0x3FE00000`–`0x40000000` | 2 MiB | RTL-pinned audio, Ethernet, boot ROM, and USB/SD belt. |
 
