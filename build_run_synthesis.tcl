@@ -46,6 +46,20 @@ if { [string match "*ERROR*" $synth_status] || [string match "*FAILED*" $synth_s
     exit 1
 }
 
+# Placement uses Vivado's default directive, as on master. ExtraTimingOpt
+# raised C28 overall/i2s WNS to +0.084/+0.179 ns but left the 150 MHz pixel
+# domain at +0.084 setup / +0.008 hold, and that image flickered on the A4000
+# at 1080p and in PAL HighRes Laced capture. The default-placement C28 image
+# (pixel +0.202/+0.044, i2s +0.024) was clean on the same machine with AHI
+# playback working. Qualification builds may override this to compare a
+# placement strategy without changing RTL.
+set placement_directive Default
+if {[info exists ::env(ZZ9000_PLACE_DIRECTIVE)] && $::env(ZZ9000_PLACE_DIRECTIVE) ne {}} {
+    set placement_directive $::env(ZZ9000_PLACE_DIRECTIVE)
+}
+puts "Implementation placement directive: $placement_directive"
+set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE $placement_directive [get_runs impl_1]
+
 set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.TCL.POST \
     [file join $script_dir post_route_phys_opt_retry.tcl] [get_runs impl_1]
 launch_runs impl_1 -to_step {phys_opt_design (Post-Route)} -jobs $njobs
