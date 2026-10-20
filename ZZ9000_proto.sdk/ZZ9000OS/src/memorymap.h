@@ -115,19 +115,26 @@
 // default allocations stay in the shared heap so Z2 crypto offload
 // keeps failing fast into its software fallback instead of squeezing
 // through this tiny region.
-// These constants are now the compatibility fallback for Z3 and bitstreams
+// These constants are the compatibility fallback for Z2 and bitstreams
 // without the generation-tagged aperture register. Generation-2 Z2
 // bitstreams expose RAM_SIZE through AXI slot 7 and use the window-relative
 // regions computed in sdk_aperture_layout.c; firmware publishes that dynamic
 // heap only after the host acknowledges the matching contract. The existing
 // SDK guard still prevents a legacy 2 MB host from using this 4 MB address.
 // Generation 2 carves the top 48 KiB of the 64 KiB fallback heap for
-// direct rings. Keep the fallback size intact for Z3 and legacy Z2.
+// direct rings. Keep the fallback size intact for Z2 and legacy Z2.
 #define SDK_HOST_WINDOW_HEAP_ADDRESS 0x005D0000
 #define SDK_HOST_WINDOW_HEAP_SIZE    0x00010000
 #define SDK_HOST_WINDOW_HEAP_GEN2_SIZE 0x00004000
 #define SDK_HOST_WINDOW_HEAP_END \
     (SDK_HOST_WINDOW_HEAP_ADDRESS + SDK_HOST_WINDOW_HEAP_SIZE)
+
+// Zorro III reserves a distinct 64 KiB host window in the firmware-owned
+// portion of the board window. It must not share the fixed Z2 compatibility
+// range above: P96 may use that range for an offset-zero display.
+#define SDK_HOST_WINDOW_Z3_ADDRESS 0x080F0000
+#define SDK_HOST_WINDOW_Z3_END \
+	(SDK_HOST_WINDOW_Z3_ADDRESS + SDK_HOST_WINDOW_HEAP_SIZE)
 
 #if SDK_HOST_WINDOW_HEAP_ADDRESS < FRAMEBUFFER_ADDRESS
 #error "host-window heap must sit inside the board-window DDR region"
@@ -443,6 +450,27 @@
 #if (SDK_MAILBOX_Z3_RESERVE_END - ADDR_ADJ) > Z3_MAIN_BOARD_WINDOW_SIZE
 #error "Z3 SDK mailbox lies outside the Zorro III main board aperture"
 #endif
+
+#if SDK_HOST_WINDOW_Z3_ADDRESS < HOST_VISIBLE_HEAP_ADDRESS || \
+    SDK_HOST_WINDOW_Z3_END > HOST_VISIBLE_HEAP_END
+#error "Z3 host window must fit the firmware host-visible heap"
+#endif
+#if SDK_HOST_WINDOW_Z3_END > SDK_MAILBOX_Z3_ADDRESS
+#error "Z3 host window overlaps the SDK mailbox reservation"
+#endif
+#if (SDK_HOST_WINDOW_Z3_END - ADDR_ADJ) > Z3_MAIN_BOARD_WINDOW_SIZE
+#error "Z3 host window lies outside the Zorro III main board aperture"
+#endif
+
+/* Immutable Z3 control ranges are reserved after every allocator reset. */
+#define Z3_HOST_CONTROL_RANGES(X) \
+	X(Z3_SCRATCH_ADDR, 0x00010000U) \
+	X(RTG_TEMPLATE_SCRATCH_ADDRESS, RTG_TEMPLATE_SCRATCH_SIZE) \
+	X(SDK_HOST_WINDOW_Z3_ADDRESS, SDK_HOST_WINDOW_HEAP_SIZE) \
+	X(SDK_MAILBOX_Z3_ADDRESS, SDK_MAILBOX_Z3_RESERVE_SIZE) \
+	X(SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS, \
+	  SDK_AUDIO_DIRECT_RING_Z3_RESERVE_SIZE) \
+	X(Z3_AUDIO_SCRATCH_ADDRESS, Z3_AUDIO_SCRATCH_SIZE)
 #define RX_FRAME_PAD 4
 #define FRAME_SIZE 2048
 

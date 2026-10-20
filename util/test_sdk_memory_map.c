@@ -114,6 +114,20 @@ int main(int argc, char **argv)
 	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "SDK_HOST_WINDOW_HEAP_END > (0x003F0000 + ADDR_ADJ)");
 	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_HOST_WINDOW_Z3_ADDRESS 0x080F0000");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_HOST_WINDOW_Z3_END");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define Z3_HOST_CONTROL_RANGES(X)");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "X(SDK_HOST_WINDOW_Z3_ADDRESS, SDK_HOST_WINDOW_HEAP_SIZE)");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "SDK_HOST_WINDOW_Z3_ADDRESS < HOST_VISIBLE_HEAP_ADDRESS");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "SDK_HOST_WINDOW_Z3_END > SDK_MAILBOX_Z3_ADDRESS");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "(SDK_HOST_WINDOW_Z3_END - ADDR_ADJ) > Z3_MAIN_BOARD_WINDOW_SIZE");
+	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "#define SDK_AUDIO_DIRECT_RING_Z3_SLOTS              2U");
 	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "#define SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS    0x081C0000");

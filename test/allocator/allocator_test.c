@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "surface_allocator.h"
+#include "memorymap.h"
 
 /* Fake heap: addresses are never dereferenced by the allocator. */
 #define HEAP_BASE 0x03500000u
@@ -35,6 +36,9 @@ static int checks = 0;
         printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
     } \
 } while (0)
+
+#define CHECK_CONTROL_RANGE(address, size) \
+    CHECK(surface_allocator_reserve((address), (size)) == 0);
 
 /* ---- tests ---------------------------------------------------------- */
 
@@ -319,6 +323,18 @@ static void test_churn(void) {
     CHECK(!bad);
 }
 
+static void test_z3_host_window_reservation(void)
+{
+    surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
+    Z3_HOST_CONTROL_RANGES(CHECK_CONTROL_RANGE)
+    CHECK(surface_allocator_block_size(SDK_HOST_WINDOW_Z3_ADDRESS) ==
+          SDK_HOST_WINDOW_HEAP_SIZE);
+    CHECK(surface_allocator_owns(SDK_HOST_WINDOW_Z3_ADDRESS,
+                                 SDK_HOST_WINDOW_HEAP_SIZE));
+    CHECK(SDK_HOST_WINDOW_Z3_ADDRESS >= Z3_P96_VRAM_END);
+    CHECK(SDK_HOST_WINDOW_Z3_END <= HOST_VISIBLE_HEAP_END);
+}
+
 /* ---------------------------------------------------------------------- */
 
 int main(void) {
@@ -334,6 +350,7 @@ int main(void) {
     test_reset();
     test_churn();
     test_p96_sdk_interleaving();
+    test_z3_host_window_reservation();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

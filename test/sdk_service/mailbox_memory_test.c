@@ -133,6 +133,8 @@ static void test_diag_uses_host_window_stats(const char *source_path)
 	CHECK(source != 0);
 	if (!source)
 		return;
+	CHECK(strstr(source, "return SDK_HOST_WINDOW_Z3_ADDRESS;") != 0);
+	CHECK(strstr(source, "return SDK_HOST_WINDOW_HEAP_ADDRESS;") != 0);
 	handler = strstr(source, "static uint16_t handle_diag_memory(");
 	handler_end = handler ? strstr(handler, "\nstatic uint16_t handle_query_service(") : 0;
 	CHECK(handler != 0);

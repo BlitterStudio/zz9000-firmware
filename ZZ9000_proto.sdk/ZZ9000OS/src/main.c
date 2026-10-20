@@ -425,15 +425,10 @@ typedef char z2_gfxdata_must_fit_template_scratch[
 
 static int reserve_host_control_ranges(void)
 {
-	return surface_allocator_reserve(Z3_SCRATCH_ADDR, 0x00010000U) == 0 &&
-	       surface_allocator_reserve(RTG_TEMPLATE_SCRATCH_ADDRESS,
-	                                 RTG_TEMPLATE_SCRATCH_SIZE) == 0 &&
-	       surface_allocator_reserve(SDK_MAILBOX_Z3_ADDRESS,
-	                                 SDK_MAILBOX_Z3_RESERVE_SIZE) == 0 &&
-	       surface_allocator_reserve(SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS,
-	                                 SDK_AUDIO_DIRECT_RING_Z3_RESERVE_SIZE) == 0 &&
-	       surface_allocator_reserve(Z3_AUDIO_SCRATCH_ADDRESS,
-	                                 Z3_AUDIO_SCRATCH_SIZE) == 0;
+#define RESERVE_HOST_CONTROL_RANGE(address, size) \
+	&& surface_allocator_reserve((address), (size)) == 0
+	return 1 Z3_HOST_CONTROL_RANGES(RESERVE_HOST_CONTROL_RANGE);
+#undef RESERVE_HOST_CONTROL_RANGE
 }
 
 static void apply_aperture_framebuffer_limit(void)

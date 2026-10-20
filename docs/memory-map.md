@@ -31,6 +31,15 @@ above it.
 | `0x2FE00000`–`0x3FE00000` | 256 MiB | Fast-RAM landing window when advertised; otherwise contiguous revocable card-pool tail. |
 | `0x3FE00000`–`0x40000000` | 2 MiB | RTL-pinned audio, Ethernet, boot ROM, and USB/SD belt. |
 
+### Zorro III SDK host window
+
+`SDK_ALLOC_HOST_WINDOW` uses the fixed 64 KiB reservation
+`0x080F0000`–`0x08100000` on Zorro III. It is in the firmware-owned
+host-visible heap and is reserved before P96 or SDK allocations, so it cannot
+overlap P96 VRAM. The former `0x005D0000` range remains the unchanged legacy
+Zorro II fallback; the firmware publishes the active address in allocation
+replies and `DIAG_MEMORY`.
+
 The linker gives image/static and heap their own memory regions, so neither
 can grow across the task queue, core-1 stack, or first card-pool byte.
 

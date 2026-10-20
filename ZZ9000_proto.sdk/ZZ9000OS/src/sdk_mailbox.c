@@ -1258,12 +1258,12 @@ static uint32_t effective_host_window_address(void)
 {
 	if (aperture_contract_present())
 		return sdk_aperture_host_window_address();
-	/* Compatibility for Z3 and old 4 MB Z2 bitstreams which expose no
-	 * generation-tagged aperture register. The existing host library rejects
-	 * this legacy address on sub-4 MB boards. New 2 MB bitstreams expose the
-	 * exact size and therefore take the acknowledged dynamic path instead. */
-	if (sdk_aperture_runtime_is_zorro3() ||
-	    sdk_aperture_runtime_is_legacy())
+	/* Z3 owns a reserved host window above P96 VRAM. Legacy Z2 remains at
+	 * its fixed compatibility address; generation-2 Z2 uses the negotiated
+	 * aperture address above. */
+	if (sdk_aperture_runtime_is_zorro3())
+		return SDK_HOST_WINDOW_Z3_ADDRESS;
+	if (sdk_aperture_runtime_is_legacy())
 		return SDK_HOST_WINDOW_HEAP_ADDRESS;
 	/* A nonzero but unsupported FPGA-reported size is not a legacy image.
 	 * Keep the host heap disabled instead of guessing at a 4 MB address. */
