@@ -2158,6 +2158,47 @@ static void heap_free_stats(uint32_t *free_total, uint32_t *largest_free)
 	surface_allocator_free_stats(free_total, largest_free);
 }
 
+static void host_window_free_stats(uint32_t base, uint32_t size,
+				   uint32_t *free_total,
+				   uint32_t *largest_free)
+{
+	uint32_t end;
+	uint32_t cursor;
+	uint32_t i;
+
+	if (!free_total || !largest_free)
+		return;
+	*free_total = 0U;
+	*largest_free = 0U;
+	if (base == 0U || size == 0U || base > UINT32_MAX - size)
+		return;
+
+	end = base + size;
+	cursor = base;
+	for (;;) {
+		uint32_t next_start = end;
+		uint32_t next_end = end;
+
+		for (i = 0U; i < SDK_MAX_SHARED_BUFFERS; i++) {
+			const struct SDKSharedBuffer *buffer = &shared_buffers[i];
+
+			if (!shared_buffer_live(buffer) ||
+			    (buffer->flags & SDK_ALLOC_HOST_WINDOW) == 0U ||
+			    buffer->address < cursor ||
+			    buffer->address >= next_start)
+				continue;
+			next_start = buffer->address;
+			next_end = buffer->address + buffer->length;
+		}
+		*free_total += next_start - cursor;
+		if (next_start - cursor > *largest_free)
+			*largest_free = next_start - cursor;
+		if (next_start == end)
+			break;
+		cursor = next_end;
+	}
+}
+
 static uint32_t count_host_window_allocations(void)
 {
 	uint32_t i;
@@ -8094,7 +8135,8 @@ static uint16_t handle_diag_memory(volatile struct SDKMailboxEntry *req,
 
 	invalid_slots = sanitize_allocator_metadata();
 	if (host_arm != 0U && host_total != 0U) {
-		heap_free_stats(&free_total, &largest_free);
+		host_window_free_stats(host_arm, host_total,
+				       &free_total, &largest_free);
 		host_board = host_arm - SDK_APERTURE_ARM_ADDRESS_ADJUSTMENT;
 	} else if ((flags & SDK_APERTURE_FLAG_VALID) != 0U) {
 		host_board = layout->host_window.base;

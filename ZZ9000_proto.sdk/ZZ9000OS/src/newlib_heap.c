@@ -2,6 +2,7 @@
  * Strong replacement for the BSP's weak _sbrk.  The heap bounds are linker
  * symbols; the counters describe live break consumption, not its reservation.
  */
+#include <errno.h>
 #include <sys/types.h>
 #include <stdint.h>
 #include "xil_types.h"
@@ -19,15 +20,22 @@ caddr_t _sbrk(s32 increment)
 {
     uint8_t *previous;
     uint8_t *next;
+    uint32_t decrement;
 
     if (heap_break == 0)
         heap_break = _heap_start;
     previous = heap_break;
     if (increment >= 0) {
-        if ((uint32_t)increment > (uint32_t)(_heap_end - heap_break))
+        if ((uint32_t)increment > (uint32_t)(_heap_end - heap_break)) {
+            errno = ENOMEM;
             return (caddr_t)-1;
-    } else if ((uint32_t)(-increment) > (uint32_t)(heap_break - _heap_start)) {
-        return (caddr_t)-1;
+        }
+    } else {
+        decrement = (uint32_t)(-(increment + 1)) + 1U;
+        if (decrement > (uint32_t)(heap_break - _heap_start)) {
+            errno = ENOMEM;
+            return (caddr_t)-1;
+        }
     }
     next = heap_break + increment;
     heap_break = next;
