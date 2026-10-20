@@ -51,7 +51,7 @@ typedef struct ZZ9KMediaClock {
  * Clients must map the address published in ZZ9K_REG_SDK_MAILBOX_HI/LO and
  * size the rings from the descriptor, never assume a placement.
  */
-#define ZZ9K_MAPPED_IO_ARM_START    0x3FE40000UL
+#define ZZ9K_MAPPED_IO_ARM_START    0x3FF70000UL
 #define ZZ9K_MAPPED_IO_BOARD_OFFSET 0x0000A000UL
 #define ZZ9K_MAPPED_IO_WINDOW_SIZE  0x00006000UL
 

@@ -55,6 +55,10 @@ can grow across the task queue, core-1 stack, or first card-pool byte.
 | `0x3FF30000`–`0x3FF70000` | Ethernet receive backlog. |
 | `0x3FF70000`–`0x3FF76000` | Shared SD boot and USB proxy block buffer. |
 
+The legacy mapped-I/O host window (`ZZ9K_MAPPED_IO_ARM_START`) is the
+`0x3FF70000` USB/SD buffer. It must move with that buffer rather than alias a
+card-local audio range.
+
 ## Card pool and Fast RAM
 
 The card pool supplies 64 KiB pages, tracked by owner class and instance.

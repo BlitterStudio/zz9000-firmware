@@ -1137,6 +1137,7 @@ static int test_alloc_surface_maps_legacy_io_window_address(void)
   expected_ptr = (uintptr_t)board.board_addr + ZZ9K_MAPPED_IO_BOARD_OFFSET +
                  window_offset;
   if ((uintptr_t)surface.data != expected_ptr) return 5;
+  if (ZZ9K_MAPPED_IO_ARM_START != 0x3FF70000UL) return 6;
 
   zz9k_close(ctx);
   return 0;
