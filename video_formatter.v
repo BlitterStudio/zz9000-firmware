@@ -699,11 +699,12 @@ always @(posedge m_axis_vid_aclk) begin
 end
 
 localparam PIPE_DELAY = 4;
-/* Cycles the line-buffer path adds before the YUV converter: the registered
- * read address (1), the BRAM output register (1) and the bilinear filter
- * (7). */
-localparam OVERLAY_FILTER_DELAY = 9;
-localparam OVERLAY_PIPE_DELAY = 4 + OVERLAY_FILTER_DELAY;
+/* Cycles from the registered source-position stage to the YUV converter:
+ * source-position stage (1), registered BRAM address (1), BRAM output
+ * register (1), and the eight-stage bilinear filter. */
+localparam OVERLAY_FILTER_DELAY = 11;
+/* The converter's registered clamp/output stage adds five cycles. */
+localparam OVERLAY_PIPE_DELAY = 5 + OVERLAY_FILTER_DELAY;
 /* Sprite pixels delayed to match the overlay pipeline. */
 reg [24*OVERLAY_PIPE_DELAY-1:0] sprite_pix_delay = 0;
 reg [OVERLAY_PIPE_DELAY-1:0] sprite_on_delay = 0;
@@ -714,9 +715,11 @@ wire sprite_on_overlay = sprite_on_delay[OVERLAY_PIPE_DELAY-1];
 reg [31:0] palout;
 reg [11:0] vga_v_rez;
 reg [11:0] vga_h_rez;
+reg [11:0] vga_h_rez_plus_pipe = 0;
 reg [11:0] vga_h_rez_delayed;
 reg [11:0] vga_v_max;
 reg [11:0] vga_h_max;
+reg [11:0] fractional_line_update_x = 0;
 reg [11:0] vga_h_sync_start;
 reg [11:0] vga_h_sync_end;
 reg [11:0] vga_h_sync_start_delayed;
@@ -729,6 +732,9 @@ reg [11:0] vga_viewport_x = 0;
 reg [11:0] vga_viewport_y = 0;
 reg [11:0] vga_viewport_width = 0;
 reg [11:0] vga_viewport_height = 0;
+reg viewport_has_left_border = 0;
+reg [11:0] viewport_scanout_first = 0;
+reg [12:0] viewport_scanout_last = 0;
 reg viewport_initialized = 0;
 reg viewport_geometry_ready = 0;
 
@@ -781,6 +787,13 @@ reg overlay_fetch_request = 0;
  * after the current one once h_rez has passed. */
 reg signed [31:0] overlay_pos_x = 0;
 reg signed [31:0] overlay_pos_y = 0;
+/* Source positions are staged before address/weight generation so the
+ * 16.16 floor, edge and parity logic cannot sit on the BRAM address path. */
+reg signed [31:0] overlay_pos_x_staged = 0;
+reg signed [31:0] overlay_pos_x_start = 0;
+reg signed [31:0] overlay_pos_x_step = 0;
+reg signed [31:0] overlay_pos_y_start = 0;
+reg signed [31:0] overlay_pos_y_step = 0;
 
 /* Coordinate state advances with the raster counters, but is registered
  * separately so overlay window/tag arithmetic never sits on the same
@@ -858,8 +871,8 @@ endfunction
  * k+1 at position pos/2. i lies in macropixel k and i+1 in k or k+1, so one
  * even and one odd word per row cover every sample. Both clamp at the
  * source edge with weight zero. */
-wire signed [31:0] overlay_pos_c = overlay_pos_x >>> 1;
-wire [11:0] overlay_luma_floor = overlay_floor12(overlay_pos_x);
+wire signed [31:0] overlay_pos_c = overlay_pos_x_staged >>> 1;
+wire [11:0] overlay_luma_floor = overlay_floor12(overlay_pos_x_staged);
 wire [11:0] overlay_word_floor = overlay_floor12(overlay_pos_c);
 wire overlay_luma_edge = overlay_luma_floor >= vga_overlay_luma_max;
 wire overlay_word_edge = overlay_word_floor >= vga_overlay_word_max;
@@ -868,7 +881,8 @@ wire [11:0] overlay_luma_i =
 wire [11:0] overlay_word_k =
   overlay_word_edge ? vga_overlay_word_max : overlay_word_floor;
 wire [7:0] overlay_luma_weight =
-  (overlay_pos_x < 0 || overlay_luma_edge) ? 8'd0 : overlay_pos_x[15:8];
+  (overlay_pos_x_staged < 0 || overlay_luma_edge) ? 8'd0 :
+  overlay_pos_x_staged[15:8];
 wire [7:0] overlay_chroma_weight =
   (overlay_pos_c < 0 || overlay_word_edge) ? 8'd0 : overlay_pos_c[15:8];
 /* Word k < 1280, so k / 2 fits the line buffer's 10-bit half-row address. */
@@ -886,6 +900,8 @@ reg overlay_sample_word_odd = 0;
 reg overlay_sample_word_edge = 0;
 reg [7:0] overlay_sample_chroma_weight = 0;
 always @(posedge dvi_clk) begin
+  overlay_pos_x_staged <= overlay_pos_x;
+
   overlay_read_addr_odd <= overlay_read_addr_odd_next;
   overlay_read_addr_even <= overlay_read_addr_even_next;
   overlay_sample_luma_odd <= overlay_luma_i[0];
@@ -1080,7 +1096,7 @@ always @(posedge dvi_clk) begin
   if (!aresetn || !fractional_scale_y) begin
     fractional_source_line <= 0;
     fractional_y_error <= 0;
-  end else if (counter_x + 1'b1 == vga_h_max) begin
+  end else if (counter_x == fractional_line_update_x) begin
     if (!fractional_next_row_advances_latched) begin
       fractional_source_line <= 0;
       fractional_y_error <= 0;
@@ -1393,8 +1409,10 @@ always @(posedge dvi_clk) begin
   /* Preserve the established canvas timing path.  The rectangle itself is
    * atomic; geometry is blacked out while a mode transaction is unsettled. */
   vga_h_rez <= screen_width;
+  vga_h_rez_plus_pipe <= vga_h_rez + PIPE_DELAY;
   vga_v_rez <= screen_height;
   vga_h_max <= screen_h_max - 1'b1;
+  fractional_line_update_x <= vga_h_max - 1'b1;
   vga_v_max <= screen_v_max - 1'b1;
   /* screen_h_sync_start/end are quasi-static mode config written once per
    * mode change on m_axis_vid_aclk (OP_HS); this continuous resample on
@@ -1406,7 +1424,7 @@ always @(posedge dvi_clk) begin
                               (vga_overlay_enable ? OVERLAY_PIPE_DELAY : 0);
   vga_h_sync_end_delayed <= vga_h_sync_end + PIPE_DELAY +
                             (vga_overlay_enable ? OVERLAY_PIPE_DELAY : 0);
-  vga_h_rez_delayed <= vga_h_rez + PIPE_DELAY +
+  vga_h_rez_delayed <= vga_h_rez_plus_pipe +
                        (vga_overlay_enable ? OVERLAY_PIPE_DELAY : 0);
 
   vga_v_sync_start <= screen_v_sync_start;
@@ -1430,6 +1448,10 @@ always @(posedge dvi_clk) begin
     vga_overlay_y_step <= overlay_y_step;
     vga_overlay_x_start <= overlay_x_start;
     vga_overlay_y_start <= overlay_y_start;
+    overlay_pos_x_step <= overlay_x_step;
+    overlay_pos_y_step <= overlay_y_step;
+    overlay_pos_x_start <= overlay_x_start;
+    overlay_pos_y_start <= overlay_y_start;
     vga_overlay_luma_max <= overlay_luma_max;
     vga_overlay_word_max <= overlay_word_max;
     vga_overlay_row_max <= overlay_row_max;
@@ -1459,26 +1481,33 @@ always @(posedge dvi_clk) begin
       : overlay_visible_x1_unclipped_pre) - 17'sd1;
   viewport_output_x_end <= {1'b0, vga_viewport_x} +
                            {1'b0, vga_viewport_width};
+  /* These frame-stable viewport terms keep the wide rectangle bounds off
+   * counter_scanout's reset path. */
+  viewport_has_left_border <= vga_viewport_x != 0;
+  viewport_scanout_first <= vga_viewport_x - 1'b1;
+  viewport_scanout_last <= {1'b0, vga_viewport_x} +
+                            {1'b0, vga_viewport_width};
+
   overlay_scheduler_y_in_window <=
     overlay_local_y >= 0 &&
     overlay_local_y < $signed({1'b0, vga_overlay_height});
   overlay_scheduler_screen_y_nonnegative <= overlay_screen_y >= 0;
   overlay_scheduler_row_visible <= counter_y < vga_v_rez;
   if (counter_x == 0) begin
-    overlay_pos_x <= vga_overlay_x_start;
+    overlay_pos_x <= overlay_pos_x_start;
   end else if (overlay_screen_x >= overlay_visible_x0_minus_one &&
                overlay_screen_x < overlay_visible_x1_minus_one) begin
-    overlay_pos_x <= overlay_pos_x + $signed(vga_overlay_x_step);
+    overlay_pos_x <= overlay_pos_x + overlay_pos_x_step;
   end
 
   if (counter_x == 0 && counter_y == 0) begin
-    overlay_pos_y <= vga_overlay_y_start;
+    overlay_pos_y <= overlay_pos_y_start;
   end else if (counter_x == vga_h_rez &&
                overlay_screen_y >= 0 &&
                overlay_local_y >= 0 &&
                overlay_local_y + 17'sd1 <
                  $signed({1'b0, vga_overlay_height})) begin
-    overlay_pos_y <= overlay_pos_y + $signed(vga_overlay_y_step);
+    overlay_pos_y <= overlay_pos_y + overlay_pos_y_step;
   end
   if (counter_y == 0) begin
     vga_sprite_x <= sprite_x;
@@ -1541,9 +1570,10 @@ always @(posedge dvi_clk) begin
   /* A viewport with a left border primes scanout at viewport_x - 1. Full-
    * frame content has no such counter value, so use raster wrap as its
    * logical x = -1 cycle and avoid duplicating source column zero. */
-  if ((counter_x + 1'b1 < vga_viewport_x ||
-       counter_x > vga_viewport_x + vga_viewport_width) &&
-      !(counter_x >= vga_h_max && vga_viewport_x == 0)) begin
+  if (((viewport_has_left_border &&
+        counter_x < viewport_scanout_first) ||
+       {1'b0, counter_x} > viewport_scanout_last) &&
+      !(counter_x >= vga_h_max && !viewport_has_left_border)) begin
     counter_scanout  <= 0;
     counter_subpixel <= counter_scanout_step;
   end else begin

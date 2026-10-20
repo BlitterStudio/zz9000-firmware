@@ -29,7 +29,9 @@ The capture interface remains 16-bit stereo I2S. `zz9000_project.tcl`
 configures `i2s_receiver_0` and `i2s_transmitter_0` as 16-bit slaves. Its
 `audio_clock_0/bclk_out` net clocks both IP cores, and
 `audio_clock_0/mclk_out` clocks both cores and `audio_formatter_0`.
-`I2SO_LRCLK` feeds `audio_clock_0/lrclk_in` and the transmitter's `lrclk_in`.
+`I2SO_LRCLK` enters `audio_clock_0/lrclk_in`; its IOB input register drives
+the transmitter through `audio_clock_0/tx_lrclk_out`, rather than feeding the
+transmitter directly from the pad.
 
 The current capture implementation converts completed 48 kHz S16LE stereo DMA
 periods with `audio_convert.c`. The shared integer-only conversion kernel is

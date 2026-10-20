@@ -37,6 +37,8 @@ reg s2_draw;
 reg signed [20:0] s3_r, s3_g, s3_b;
 reg [23:0] s3_base;
 reg s3_draw;
+reg [23:0] s4_rgb;
+reg s4_draw;
 
 reg [7:0] y_byte, u_byte, v_byte;
 
@@ -91,6 +93,7 @@ always @(posedge clk) begin
     s2_base <= 0; s2_draw <= 0;
     s3_r <= 0; s3_g <= 0; s3_b <= 0;
     s3_base <= 0; s3_draw <= 0;
+    s4_rgb <= 0; s4_draw <= 0;
     out_rgb <= 0; out_overlay <= 0;
   end else begin
     s1_c <= $signed({1'b0, y_byte}) - 10'sd16;
@@ -113,15 +116,20 @@ always @(posedge clk) begin
     s3_base <= s2_base;
     s3_draw <= s2_draw;
 
-    if (s3_draw) begin
-      out_rgb[23:16] <= clamp8($signed(s3_r) >>> 8);
-      out_rgb[15:8]  <= clamp8($signed(s3_g) >>> 8);
-      out_rgb[7:0]   <= clamp8($signed(s3_b) >>> 8);
-      out_overlay <= 1'b1;
-    end else begin
-      out_rgb <= s3_base;
-      out_overlay <= 1'b0;
-    end
+    /* Register the clamp/key mux before the externally visible output.
+     * This removes the wide green-channel clamp from the hold-sensitive
+     * s3_g -> out_rgb path without changing the input/output bundle's
+     * ordering. */
+    if (s3_draw)
+      s4_rgb <= {clamp8($signed(s3_r) >>> 8),
+                 clamp8($signed(s3_g) >>> 8),
+                 clamp8($signed(s3_b) >>> 8)};
+    else
+      s4_rgb <= s3_base;
+    s4_draw <= s3_draw;
+
+    out_rgb <= s4_rgb;
+    out_overlay <= s4_draw;
   end
 end
 

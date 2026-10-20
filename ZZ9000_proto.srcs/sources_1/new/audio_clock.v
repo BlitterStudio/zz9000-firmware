@@ -15,6 +15,7 @@ module audio_clock(
     input wire sdata_in,
     output wire bclk_out,
     output wire mclk_out,
+    output wire tx_lrclk_out,
     output reg rx_lrclk_out,
     output reg rx_sdata_out
     );
@@ -48,6 +49,15 @@ module audio_clock(
 
     (* IOB = "TRUE" *) reg sampled_lrclk;
     (* IOB = "TRUE" *) reg sampled_sdata;
+    /*
+     * The transmitter sees this IOB register, not the unconstrained pad.
+     * It changes only at BCLK rising edges, so its following rSDataOut
+     * capture has a whole BCLK cycle rather than the codec's 40 ns tSODM
+     * input window to traverse fabric.
+     */
+    assign tx_lrclk_out = sampled_lrclk;
+
+
 
     always @(posedge bclk_in) begin
       if (reset_active) begin
@@ -98,13 +108,13 @@ module audio_clock(
         parsed_right <= 16'b0;
         normalized_left <= 16'b0;
         normalized_right <= 16'b0;
-
         serial_lrclk <= 1'b0;
         serial_bit <= 5'd15;
         serial_word <= 16'b0;
         rx_lrclk_out <= 1'b0;
         rx_sdata_out <= 1'b0;
       end else begin
+
         if ((sampled_lrclk != observed_lrclk) && !sampled_lrclk) begin
           if (frame_started && raw_bit_count == 9'd255 &&
               midframe_seen) begin

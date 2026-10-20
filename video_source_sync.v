@@ -233,6 +233,11 @@ reg [15:0] lines_since_anchor;
 wire interval_plausible = cfg_adopted && bounds_valid &&
   interval_ctr >= period_lo && interval_ctr <= period_hi;
 
+/* Configuration changes only at a frame boundary, while anchors are many
+ * raster lines away. Register the acceptance predicate so the wide watched
+ * geometry compare cannot feed the good-interval counter's CE directly. */
+reg interval_plausible_q;
+
 reg enable_q;
 wire enable_rise = enable && !enable_q;
 
@@ -256,6 +261,11 @@ reg signed [25:0] lace_interval_delta;
 wire signed [25:0] lace_quarter_delta = lace_interval_delta >>> 2;
 wire signed [25:0] lace_limit_signed = $signed({12'b0, lace_correction_limit});
 reg signed [14:0] lace_correction;
+
+/* This only changes at source loss, where one pixel of extra bookkeeping is
+ * immaterial; it removes the long line-age compare from the lace threshold
+ * register's control input. */
+reg lace_watchdog_expired;
 
 wire lsa_delay_met = !anchor_event &&
   (cfg_interlace
@@ -310,8 +320,8 @@ always @(posedge dvi_clk) begin
       anchor_pixel_age <= anchor_pixel_age + 25'd1;
 
     if (!enable || enable_rise || cfg_changed_d1 || !cfg_adopted ||
-        !cfg_interlace || (anchor_event && !interval_plausible) ||
-        (locked && lines_since_anchor > watchdog_limit)) begin
+        !cfg_interlace || (anchor_event && !interval_plausible_q) ||
+        lace_watchdog_expired) begin
       lace_interval_valid <= 1'b0;
       lace_pipe <= 3'b0;
       lace_delay_threshold <= lace_base_threshold;
@@ -380,8 +390,9 @@ always @(posedge dvi_clk) begin
     unlock_thr <= 16'd0;
     anchor_q <= 1'b0;
     enable_q <= 1'b0;
+    interval_plausible_q <= 1'b0;
+    lace_watchdog_expired <= 1'b0;
     interval_ctr <= 16'd0;
-    good_intervals <= 4'd0;
     locked <= 1'b0;
     warm_frames <= 2'd0;
     picture_ok <= 1'b0;
@@ -405,6 +416,9 @@ always @(posedge dvi_clk) begin
     cfg_changed_d1 <= cfg_changed;
     anchor_q <= anchor_toggle;
     enable_q <= enable;
+    interval_plausible_q <= interval_plausible;
+    lace_watchdog_expired <= locked && lines_since_anchor > watchdog_limit;
+
     video_hidden <= enable && !picture_ok;
 
     /* Per-line decisions, registered on the final cycle of the previous
@@ -528,7 +542,7 @@ always @(posedge dvi_clk) begin
     if (anchor_event) begin
       interval_ctr <= 16'd0;
       lines_since_anchor <= 16'd0;
-      if (interval_plausible) begin
+      if (interval_plausible_q) begin
         if (good_intervals != LOCK_INTERVALS)
           good_intervals <= good_intervals + 4'd1;
         if (good_intervals + 4'd1 >= LOCK_INTERVALS && !locked) begin

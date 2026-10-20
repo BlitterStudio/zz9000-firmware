@@ -13,12 +13,15 @@ module audio_clock_tb;
 
   wire bclk_out;
   wire mclk_out;
+  wire tx_lrclk_out;
   wire rx_lrclk_out;
   wire rx_sdata_out;
 
   integer source_frames = 0;
   integer output_edges = 0;
   reg observed_output_lrclk = 1'b0;
+  reg tx_lrclk_expected = 1'b0;
+  integer tx_lrclk_checks = 0;
 
   audio_clock dut (
     .bclk_in(bclk_in),
@@ -28,6 +31,7 @@ module audio_clock_tb;
     .sdata_in(sdata_in),
     .bclk_out(bclk_out),
     .mclk_out(mclk_out),
+    .tx_lrclk_out(tx_lrclk_out),
     .rx_lrclk_out(rx_lrclk_out),
     .rx_sdata_out(rx_sdata_out)
   );
@@ -105,6 +109,22 @@ module audio_clock_tb;
     end
   end
 
+  /* The transmitter-facing LRCLK comes from the IOB input sampler. It is
+   * stable over the falling edge after each rising-edge capture, which is
+   * the half-cycle that exposes tSODM on the unregistered pad path. */
+  always @(posedge bclk_in)
+    #1 tx_lrclk_expected = lrclk_in;
+
+  always @(negedge bclk_in) begin
+    #1;
+    if (!dut.reset_active) begin
+      if (tx_lrclk_out !== tx_lrclk_expected)
+        $fatal(1, "transmitter LRCLK was not registered before BCLK fall");
+      tx_lrclk_checks = tx_lrclk_checks + 1;
+    end
+  end
+
+
   initial begin
     repeat (8) @(posedge fclk_in);
     resetn = 1'b1;
@@ -120,6 +140,8 @@ module audio_clock_tb;
       $fatal(1, "normalized I2S frame clock did not advance");
     if (mclk_out !== bclk_in)
       $fatal(1, "codec master clock is not source-synchronous");
+    if (tx_lrclk_checks < 100)
+      $fatal(1, "transmitter LRCLK was not checked across a full frame");
 
     $display(
         "audio_clock fixed TDM8 slot-0/1 bridge PASS (L=%04x R=%04x edges=%0d)",
