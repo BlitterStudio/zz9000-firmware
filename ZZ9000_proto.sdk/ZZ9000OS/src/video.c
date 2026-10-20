@@ -119,6 +119,17 @@ int video_videocap_backing_reserve(void)
 		vs.videocap_backing_address = address;
 	}
 
+
+	return 1;
+}
+
+int video_videocap_backing_arm(void)
+{
+	uint32_t address = vs.videocap_backing_address;
+
+	if (address == 0U)
+		return 0;
+
 	if (vs.videocap_backing_programmed == 0U) {
 		video_formatter_write(address, MNTVF_OP_VIDEOCAP_ADDRESS);
 		vs.videocap_backing_programmed = 1U;

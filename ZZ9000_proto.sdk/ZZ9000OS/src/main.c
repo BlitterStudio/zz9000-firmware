@@ -921,6 +921,7 @@ int main() {
 	u32 zstate_raw = mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3);
 	int amiga_reset_seen = ((zstate_raw & 0xff) == 0);
 	int need_req_ack = 0;
+	int videocap_backing_arm_pending = 1;
 
 	// audio parameters (buffer locations)
 	uint16_t audio_params[ZZ_NUM_AUDIO_PARAMS];
@@ -2438,8 +2439,14 @@ int main() {
 				if (!amiga_reset_seen) {
 					handle_amiga_reset(AMIGA_RESET_FAST);
 					amiga_reset_seen = 1;
+					videocap_backing_arm_pending = 1;
 				}
 			} else {
+				if (videocap_backing_arm_pending) {
+					if (!video_videocap_backing_arm())
+						printf("[video] videocap backing unavailable after reset\n");
+					videocap_backing_arm_pending = 0;
+				}
 				amiga_reset_seen = 0;
 			}
 

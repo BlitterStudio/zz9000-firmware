@@ -145,8 +145,8 @@ struct ZZ_VIDEO_STATE {
 	int videocap_ns_vsync_applied;
 
 	/* Host-visible backing selected for capture writeback. The RTL clears
-	 * its address-valid latch on reset, so reserve/reprogram this before
-	 * any capture activation. */
+	 * its address-valid latch on reset; `videocap_backing_programmed` stays
+	 * clear until the Zorro reset state has exited and firmware arms it. */
 	uint32_t videocap_backing_address;
 	uint8_t videocap_backing_programmed;
 
@@ -203,9 +203,12 @@ struct ZZ_VIDEO_STATE {
 struct ZZ_VIDEO_STATE* video_init();
 void video_reset();
 
-/* Reserve host-visible capture backing and program MNTVF_OP_VIDEOCAP_ADDRESS.
- * Called after every surface_allocator_init(); safe to repeat. */
+/* Reserve host-visible capture backing after surface_allocator_init(). This
+ * only allocates the range; capture stays inactive until it is armed. */
 int video_videocap_backing_reserve(void);
+/* Program MNTVF_OP_VIDEOCAP_ADDRESS once for a reserved backing after the
+ * Zorro FSM exits reset. Safe to repeat. */
+int video_videocap_backing_arm(void);
 
 /* Runtime RTG scanout-geometry diagnostics (config keys 21-25):
  * value of a diagnostic key from the last video_mode_init snapshot. */

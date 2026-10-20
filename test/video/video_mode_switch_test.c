@@ -23,6 +23,7 @@ static uint32_t clock_mul_div, clock_div2;
 static unsigned clock_fail_locks;
 static uint8_t transmitter[256], i2c_register;
 static uint32_t formatter_data, formatter_ops[32];
+static unsigned videocap_address_writes;
 static uint32_t videocap_address_write;
 static XAxiVdma_DmaSetup dma_setup;
 static unsigned dma_starts;
@@ -99,8 +100,10 @@ void test_xil_out32(uintptr_t address, uint32_t value)
 		uint16_t op = (uint16_t)value;
 
 		formatter_ops[op & 31U] = formatter_data;
-		if (op == MNTVF_OP_VIDEOCAP_ADDRESS)
+		if (op == MNTVF_OP_VIDEOCAP_ADDRESS) {
+			++videocap_address_writes;
 			videocap_address_write = formatter_data;
+		}
 	}
 }
 
@@ -338,8 +341,26 @@ int main(void)
 	/* A native geometry ACK follows the successful VDMA programming, not the
 	 * accepted feature write. Every VDMA failure leaves the request pending;
 	 * the unchanged serial mismatch retries on the next stable vblank. */
+	videocap_address_writes = 0;
+	videocap_address_write = 0;
+	video_reset();
 	vs.framebuffer = capture_framebuffer;
+	/* Reset may reserve the backing but must not enable writeback while the
+	 * Zorro FSM still holds reset. Arming after reset releases programs the
+	 * backing exactly once and lets capture become active. */
+	assert(vs.videocap_backing_address == 0U);
+	assert(vs.videocap_backing_programmed == 0U);
+	assert(vs.videocap_enabled_old == 0);
 	assert(video_videocap_backing_reserve());
+	assert(vs.videocap_backing_address != 0U);
+	assert(vs.videocap_backing_programmed == 0U);
+	assert(videocap_address_writes == 0U);
+	assert(video_videocap_backing_arm());
+	assert(videocap_address_writes == 1U);
+	assert(videocap_address_write == vs.videocap_backing_address);
+	assert(vs.videocap_backing_programmed == 1U);
+	assert(video_videocap_backing_arm());
+	assert(videocap_address_writes == 1U);
 	vs.framebuffer_pan_offset = 0;
 	vs.videocap_enabled_old = 1;
 	vs.videocap_video_mode = ZZVMODE_800x600;
