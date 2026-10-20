@@ -80,16 +80,28 @@
 #define RTG_TEMPLATE_SCRATCH_END \
     (RTG_TEMPLATE_SCRATCH_ADDRESS + RTG_TEMPLATE_SCRATCH_SIZE)
 
-// P96 surfaces and SDK shared allocations occupy this single interval.
-#define Z3_P96_VRAM_END             HOST_VISIBLE_HEAP_END
-#define HOST_VISIBLE_HEAP_ADDRESS   FRAMEBUFFER_ADDRESS
+// The Z3 main-board window holds two allocators that must never share an
+// address. P96 manages its own board memory: rtg.library places screens and
+// any bitmap the driver's AllocBitMap hook declines anywhere in
+// [MemoryBase, MemoryBase + MemorySize), and the firmware never sees those
+// allocations. The RTG driver therefore reports exactly
+// Z3_P96_VRAM_ADDRESS..Z3_P96_VRAM_END as MemorySize. Everything the firmware
+// hands out (off-screen surfaces via ACC_OP_ALLOC_SURFACE, the capture
+// backing, SDK shared allocations, GFXData/template scratch, mailbox, direct
+// rings, AHI scratch) comes from the host-visible heap above it.
+#define Z3_P96_VRAM_ADDRESS         FRAMEBUFFER_ADDRESS
+#define Z3_P96_VRAM_END             Z3_SCRATCH_ADDR
+#define HOST_VISIBLE_HEAP_ADDRESS   Z3_P96_VRAM_END
 #define HOST_VISIBLE_HEAP_END       0x08200000
 #define HOST_VISIBLE_HEAP_SIZE \
     (HOST_VISIBLE_HEAP_END - HOST_VISIBLE_HEAP_ADDRESS)
 
-#if HOST_VISIBLE_HEAP_ADDRESS != FRAMEBUFFER_ADDRESS || \
+#if Z3_P96_VRAM_END != HOST_VISIBLE_HEAP_ADDRESS || \
     HOST_VISIBLE_HEAP_END != 0x08200000
-#error "host-visible heap must fill the aperture below the firmware image"
+#error "P96 VRAM and the host-visible heap must tile the aperture below the firmware image"
+#endif
+#if RTG_TEMPLATE_SCRATCH_ADDRESS < HOST_VISIBLE_HEAP_ADDRESS
+#error "RTG template scratch must sit in the firmware host-visible heap"
 #endif
 
 // Host-window heap: the ONLY SDK allocation region a Zorro 2 board can
@@ -150,8 +162,8 @@
     (Z3_AUDIO_SCRATCH_ADDRESS + Z3_AUDIO_SCRATCH_SIZE)
 #define FIRMWARE_HIGH_DDR_ADDRESS       0x08200000
 
-#if Z3_P96_VRAM_END != HOST_VISIBLE_HEAP_END
-#error "P96 VRAM must use the complete host-visible interval"
+#if Z3_SCRATCH_ADDR != Z3_P96_VRAM_END
+#error "Z3 GFXData scratch must start the firmware host-visible heap"
 #endif
 
 #if Z3_AUDIO_SCRATCH_END > HOST_VISIBLE_HEAP_END
@@ -376,7 +388,8 @@
 #error "DDR target partition must cover exactly 1 GiB"
 #endif
 #if DDR_LOW_APERTURE_END != FIRMWARE_LOW_DDR_ADDRESS || \
-    FIRMWARE_LOW_DDR_END != HOST_VISIBLE_HEAP_ADDRESS || \
+    FIRMWARE_LOW_DDR_END != Z3_P96_VRAM_ADDRESS || \
+    Z3_P96_VRAM_END != HOST_VISIBLE_HEAP_ADDRESS || \
     HOST_VISIBLE_HEAP_END != FIRMWARE_HIGH_DDR_ADDRESS || \
     FIRMWARE_IMAGE_END != SDK_TASKQ_REGION_ADDRESS || \
     SDK_TASKQ_REGION_END != SDK_CORE1_STACK_BASE || \

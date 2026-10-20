@@ -9,15 +9,20 @@ Ranges below use an exclusive end: `0x00000000`–`0x08000000` is 128 MiB.
 
 ## Current layout
 
-Every boundary below is half-open. The normal cacheable host-visible interval
-is one allocator shared by P96 off-screen surfaces and SDK shared allocations;
-it is not statically split between clients.
+Every boundary below is half-open. The Z3 main-board window holds two
+allocators that must never share an address. rtg.library allocates screens
+(and any bitmap the driver's AllocBitMap hook declines) itself inside the
+MemorySize the RTG driver reports, and the firmware cannot see those
+allocations. The driver therefore reports P96 VRAM up to the GFXData scratch
+only, and everything the firmware hands out comes from the host-visible heap
+above it.
 
 | Range | Size | Use |
 |---|---:|---|
 | `0x00000000`–`0x00100000` | 1 MiB | Low aperture/boot-reserved DDR. |
 | `0x00100000`–`0x00200000` | 1 MiB | Low firmware image and board services. |
-| `0x00200000`–`0x08200000` | 128 MiB | Single host-visible interval allocator. Dynamic videocap backing, P96 surfaces, SDK shared allocations, mailbox/direct-ring pages, and matched-driver scratch reservations are allocated here. |
+| `0x00200000`–`0x033F0000` | 49.9375 MiB | P96 VRAM, managed by rtg.library. The RTG driver's MemorySize ends here. |
+| `0x033F0000`–`0x08200000` | 78.0625 MiB | Firmware host-visible heap (one interval allocator): GFXData and template scratch, dynamic videocap backing, P96 off-screen surfaces from `ACC_OP_ALLOC_SURFACE`, SDK shared allocations, mailbox/direct-ring pages and the AHI/MHI scratch. |
 | `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. Qualification build `141c121` measured `__bss_end = 0x0848F670`, leaving 1,511,824 bytes of growth margin. |
 | `0x08600000`–`0x08700000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
 | `0x08700000`–`0x08800000` | 1 MiB | Full-descending core-1 stack. |

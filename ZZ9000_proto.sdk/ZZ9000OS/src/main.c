@@ -442,7 +442,9 @@ static void apply_aperture_framebuffer_limit(void)
 		set_fb_limit((uint8_t *)(uintptr_t)
 			(FRAMEBUFFER_ADDRESS + sdk_aperture_framebuffer_size()));
 	else
-		set_fb_limit((uint8_t *)(uintptr_t)Z3_P96_VRAM_END);
+		/* RTG rect ops target P96 VRAM and firmware-allocated
+		 * off-screen surfaces alike. */
+		set_fb_limit((uint8_t *)(uintptr_t)HOST_VISIBLE_HEAP_END);
 }
 
 static void clear_runtime_gfxdata(void)
