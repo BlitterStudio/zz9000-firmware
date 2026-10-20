@@ -789,6 +789,10 @@ struct jpeg_op_params {
 typedef char jpeg_op_params_size_check[
     (sizeof(struct jpeg_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
+/* One-shot minimp3 retains an index over the supplied complete buffer. Keep
+ * it bounded; callers needing arbitrarily long media use AUDIO_STREAM_*. */
+#define SDK_MP3_ONE_SHOT_MAX_INPUT (16U << 20)
+
 /*
  * Native-endian packed parameters for a deferred DECODE_MP3 task. Source
  * and destination are shared buffers, resolved and range-checked on
@@ -3214,7 +3218,8 @@ static uint16_t handle_decode_mp3(volatile struct SDKMailboxEntry *req,
 
 	if (!buffer_range_valid(src, src_offset, src_length) ||
 	    !buffer_range_valid(dst, dst_offset, dst_capacity) ||
-	    src_length == 0U || dst_capacity < 2U) {
+	    src_length == 0U || src_length > SDK_MP3_ONE_SHOT_MAX_INPUT ||
+	    dst_capacity < 2U) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
 	if ((flags & ~SDK_AUDIO_DECODE_FLAG_EXPECT_END) != 0U)
@@ -8089,8 +8094,7 @@ static uint16_t handle_diag_memory(volatile struct SDKMailboxEntry *req,
 
 	invalid_slots = sanitize_allocator_metadata();
 	if (host_arm != 0U && host_total != 0U) {
-		heap_free_stats_in(host_arm, host_total,
-				   &free_total, &largest_free);
+		heap_free_stats(&free_total, &largest_free);
 		host_board = host_arm - SDK_APERTURE_ARM_ADDRESS_ADJUSTMENT;
 	} else if ((flags & SDK_APERTURE_FLAG_VALID) != 0U) {
 		host_board = layout->host_window.base;
@@ -8214,6 +8218,9 @@ static int opcode_reserves_request_id_zero(uint16_t opcode)
 static uint8_t    *cenc_defl;        /* per-message deflate scratch */
 static uint32_t    cenc_defl_len;
 
+#define CENC_DEFLATE_POOL_OWNER \
+	CARD_POOL_OWNER(CARD_POOL_CLASS_CONSOLE, 1u)
+
 static uint16_t handle_console_encode(volatile struct SDKMailboxEntry *req,
                                       volatile struct SDKMailboxEntry *comp,
                                       uint16_t payload_len)
@@ -8268,8 +8275,12 @@ static uint16_t handle_console_encode(volatile struct SDKMailboxEntry *req,
 	if (n > 4u) {
 		uLong bound = compressBound((uLong)(n - 4u));
 		if (cenc_defl_len < (uint32_t)bound) {
-			free(cenc_defl);
-			cenc_defl = (uint8_t *)malloc(bound);
+			if (cenc_defl)
+				(void)card_pool_free(&card_pool,
+					(uint32_t)(uintptr_t)cenc_defl,
+					CENC_DEFLATE_POOL_OWNER);
+			cenc_defl = (uint8_t *)(uintptr_t)card_pool_alloc(&card_pool,
+				(uint32_t)bound, CENC_DEFLATE_POOL_OWNER);
 			cenc_defl_len = cenc_defl ? (uint32_t)bound : 0u;
 		}
 		if (cenc_defl) {
@@ -8632,6 +8643,10 @@ void sdk_mailbox_init(void)
 	/* Shared-buffer handles restart at 1, so the console encoder's owner
 	 * (an output handle) would match a new client; drop its session. */
 	sdk_console_encode_reset();
+	/* The encoder released the shared console owner; its mailbox-side
+	 * deflate pointer must not survive that owner reclaim. */
+	cenc_defl = 0;
+	cenc_defl_len = 0u;
 	/* Unbind AX playback before the table goes away: the fabric
 	 * reset above already dropped every producer, silenced the ring
 	 * it owned and retired the lease epochs (R7). */

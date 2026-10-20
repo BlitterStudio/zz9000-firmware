@@ -39,12 +39,15 @@ enum card_pool_class {
     CARD_POOL_CLASS_MEDIA_INPUT = 4,
     /* ARM-only SDK surfaces. They are released on every Amiga reset. */
     CARD_POOL_CLASS_SDK_SURFACE = 5,
+    /* RFB console shadow, snapshot, scratch, and deflate workspace. */
+    CARD_POOL_CLASS_CONSOLE = 6,
     CARD_POOL_CLASS_COUNT
 };
 
 #define CARD_POOL_LIMIT_FIRMWARE    (64u << 20)
 #define CARD_POOL_LIMIT_MEDIA       (128u << 20)
 #define CARD_POOL_LIMIT_MEDIA_INPUT (64u << 20)
+#define CARD_POOL_LIMIT_CONSOLE     (32u << 20)
 /* ARM-only client surfaces are card-resident and reset-reclaimable. */
 #define CARD_POOL_LIMIT_SDK_SURFACE (128u << 20)
 /* Matches the image decode budget all image sessions share

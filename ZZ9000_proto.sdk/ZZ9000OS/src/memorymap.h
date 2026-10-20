@@ -305,8 +305,9 @@
 #define Z3_FASTRAM_DDR_END \
     (Z3_FASTRAM_DDR_ADDRESS + Z3_FASTRAM_DDR_SIZE)
 
-// The high linker image stops before the scheduler's coherent task queue.
-#define FIRMWARE_IMAGE_END          0x0A000000
+// The 4 MiB high-image region ends 1,511,824 bytes above the measured
+// 0x0848f670 image/BSS high-water (qualification build 141c121).
+#define FIRMWARE_IMAGE_END          0x08600000
 #define SDK_TASKQ_REGION_ADDRESS    FIRMWARE_IMAGE_END
 #define SDK_TASKQ_REGION_SIZE       0x00100000
 #define SDK_TASKQ_REGION_END \
@@ -346,9 +347,11 @@
 #define SDK_CORE1_STACK_TOP \
     (SDK_CORE1_STACK_BASE + SDK_CORE1_STACK_SIZE)
 
-// The linker reserves a bounded newlib heap after the task and stack sections.
+// Measured service-path peak is below 1 MiB after decoder, console, and
+// media working sets moved to the card pool. Keep the 8 MiB minimum
+// reservation (including exception stacks) as the clear 2x margin.
 #define NEWLIB_HEAP_ADDRESS          SDK_CORE1_STACK_TOP
-#define NEWLIB_HEAP_SIZE             0x08000000
+#define NEWLIB_HEAP_SIZE             0x00800000
 #define NEWLIB_HEAP_END \
     (NEWLIB_HEAP_ADDRESS + NEWLIB_HEAP_SIZE)
 
@@ -393,7 +396,7 @@
     CARD_POOL_REVOCABLE_ADDRESS >= CARD_POOL_REVOCABLE_END
 #error "card pool range is empty or inverted"
 #endif
-#if SDK_CORE1_STACK_TOP != 0x0A200000
+#if SDK_CORE1_STACK_TOP != 0x08800000
 #error "core-1 stack top must remain a single-instruction ARM immediate"
 #endif
 

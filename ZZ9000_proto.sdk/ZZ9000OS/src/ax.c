@@ -1268,16 +1268,10 @@ void audio_set_tx_buffer(uint8_t* addr) {
 	printf("[audio] set tx buffer: %p\n", addr);
 	audio_tx_buffer = addr;
 	/*
-	 * Permanent coherency fix (two-client drop diagnosis, 2026-08): the
-	 * audio/fabric 1-MiB section at 0x3FC00000 holds the formatter TX
-	 * and RX rings, both direct-lease PCM rings, and their control
-	 * lines. Cached CPU access there is provably incoherent with the
-	 * Zorro producer writes: post-invalidate reads served stale L1/L2
-	 * lines (hex-dump proof: freshly invalidated reads returning
-	 * phase-shifted stale audio into the mix -- audible cancellation
-	 * dips with two identical tones. Mapping the section non-cacheable
-	 * removes the entire stale-line class; the flush/invalidate calls
-	 * on this section elsewhere become harmless no-ops on clean lines.
+	 * The audio/fabric 1-MiB section at 0x3FE00000 holds the formatter TX
+	 * and RX rings, both direct-lease PCM rings, and their control lines.
+	 * Cached CPU access there is incoherent with Zorro producer writes;
+	 * map it non-cacheable so stale L1/L2 lines cannot enter the mix.
 	 */
 	{
 		static uint8_t audio_section_remapped;

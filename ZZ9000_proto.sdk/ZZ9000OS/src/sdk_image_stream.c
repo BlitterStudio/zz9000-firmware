@@ -190,6 +190,51 @@ static uint32_t next_image_session_id;
  * fault can never land inside it.
  */
 static sdk_smp_lock_t image_decode_state_lock = SDK_SMP_LOCK_INIT;
+
+#define IMAGE_POOL_ALLOC_MAGIC 0x494D4750u
+
+struct image_pool_alloc_header {
+	uint32_t magic;
+	uint32_t base;
+	uint32_t owner;
+	uint32_t reserved;
+};
+
+void *sdk_image_decode_alloc(void *opaque, uint32_t size)
+{
+	struct SDKImageStreamSession *session =
+		(struct SDKImageStreamSession *)opaque;
+	struct image_pool_alloc_header *header;
+	uint32_t base;
+	uint32_t owner;
+
+	if (!session || size > UINT32_MAX - sizeof(*header))
+		return sdk_decode_heap_alloc(size);
+	owner = CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, session->session);
+	base = card_pool_alloc(&card_pool, size + sizeof(*header), owner);
+	if (!base)
+		return 0;
+	header = (struct image_pool_alloc_header *)(uintptr_t)base;
+	header->magic = IMAGE_POOL_ALLOC_MAGIC;
+	header->base = base;
+	header->owner = owner;
+	header->reserved = 0U;
+	return header + 1;
+}
+
+void sdk_image_decode_free(void *ptr)
+{
+	struct image_pool_alloc_header *header;
+
+	if (!ptr)
+		return;
+	header = ((struct image_pool_alloc_header *)ptr) - 1;
+	if (header->magic == IMAGE_POOL_ALLOC_MAGIC) {
+		(void)card_pool_free(&card_pool, header->base, header->owner);
+		return;
+	}
+	sdk_decode_heap_free(ptr);
+}
 static void destroy_webp(struct SDKImageStreamSession *session);
 
 static int reserve_decode_state(struct SDKImageStreamSession *session,
@@ -1078,26 +1123,25 @@ static void png_fail(struct SDKImageStreamSession *session, uint16_t status,
 }
 
 /*
- * libpng allocator hooks routed through the decode-reclaim wrappers so a
- * core-1 fault mid-decode can reclaim every block (plain malloc/free on
- * core 0) -- same guarantee as the libjpeg jmem_zz9k backend.
+ * Libpng provides its session through the error pointer, allowing every
+ * tracked decode allocation to carry that image session's pool owner.
  */
 static png_voidp png_decode_alloc(png_structp png_ptr, png_alloc_size_t size)
 {
-	(void)png_ptr;
-	return (png_voidp)sdk_decode_heap_alloc((size_t)size);
+	return (png_voidp)sdk_image_decode_alloc(png_get_error_ptr(png_ptr),
+	                                         (uint32_t)size);
 }
 
 static void png_decode_free(png_structp png_ptr, png_voidp ptr)
 {
 	(void)png_ptr;
-	sdk_decode_heap_free((void *)ptr);
+	sdk_image_decode_free((void *)ptr);
 }
 
 static void destroy_png(struct SDKImageStreamSession *session)
 {
 	if (session->png_interlace_buffer) {
-		sdk_decode_heap_free(session->png_interlace_buffer);
+		sdk_image_decode_free(session->png_interlace_buffer);
 		session->png_interlace_buffer = 0;
 	}
 	session->png_tile_staging = 0U;
@@ -1842,7 +1886,7 @@ static int png_prepare_interlace_storage(
 		return 0;
 	image_bytes = session->output_height * row_bytes;
 	session->png_interlace_buffer =
-	    (uint8_t *)sdk_decode_heap_alloc(image_bytes);
+	    (uint8_t *)sdk_image_decode_alloc(session, image_bytes);
 	if (!session->png_interlace_buffer)
 		return 0;
 	memset(session->png_interlace_buffer, 0, image_bytes);
@@ -1876,7 +1920,7 @@ static int png_prepare_tile_staging(struct SDKImageStreamSession *session)
 		return 0;
 	image_bytes = session->output_height * row_bytes;
 	session->png_interlace_buffer = (uint8_t *)
-	    sdk_decode_heap_alloc(image_bytes);
+	    sdk_image_decode_alloc(session, image_bytes);
 	if (!session->png_interlace_buffer)
 		return 0;
 	memset(session->png_interlace_buffer, 0, image_bytes);
@@ -2867,9 +2911,10 @@ void sdk_image_stream_poison_core1_sessions(void)
 		slot->webp_anim_decoder = 0;
 		slot->webp_tile_next_y = 0U;
 		slot->webp_decoded = 0U;
-		/* The arena's regions belong to the session's pool owner: free
-		 * them whichever core allocated them, then drop the pointers. */
-		card_pool_release_owner(&card_pool, slot->webp_heap.pool_owner);
+		/* JPEG, PNG, and WebP blocks use the same per-session IMAGE owner.
+		 * Release it before dropping dangling codec references. */
+		card_pool_release_owner(&card_pool,
+			CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, slot->session));
 		sdk_vorbis_heap_forget(&slot->webp_heap);
 		slot->webp_output_complete = 0U;
 		/* The session keeps its animation-mode identity (like codec/)

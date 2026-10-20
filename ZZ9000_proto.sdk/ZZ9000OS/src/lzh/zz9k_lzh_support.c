@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "../sdk_compression.h"
 #include <string.h>
 
 #include "lha.h"
@@ -153,7 +154,7 @@ zz9k_lzh_free_dtext(void)
     dtext = NULL;
     zz9k_lzh_dtext_reclaim.ptr = NULL;
     zz9k_lzh_flush_dtext_reclaim();  /* DRAM shows non-live before free */
-    free(ptr);
+    sdk_decode_heap_free(ptr);
 }
 
 void
@@ -166,7 +167,7 @@ zz9k_lzh_reclaim(void)
     if (ptr != NULL) {
         zz9k_lzh_dtext_reclaim.ptr = NULL;
         zz9k_lzh_flush_dtext_reclaim();
-        free(ptr);
+        sdk_decode_heap_free(ptr);
     }
     dtext = NULL;
 }
@@ -275,7 +276,7 @@ fatal_error(char *fmt, ...)
 void *
 xmalloc(size_t size)
 {
-    void *p = malloc(size ? size : 1);
+    void *p = sdk_decode_heap_alloc(size ? size : 1);
 
     if (!p)
         fatal_error("xmalloc: out of memory (%lu bytes)", (unsigned long)size);
@@ -285,7 +286,7 @@ xmalloc(size_t size)
 void *
 xrealloc(void *old, size_t size)
 {
-    void *p = realloc(old, size ? size : 1);
+    void *p = sdk_decode_heap_realloc(old, size ? size : 1);
 
     if (!p)
         fatal_error("xrealloc: out of memory (%lu bytes)", (unsigned long)size);
@@ -295,7 +296,7 @@ xrealloc(void *old, size_t size)
 void *
 xcalloc(size_t nmemb, size_t size)
 {
-    void *p = calloc(nmemb ? nmemb : 1, size ? size : 1);
+    void *p = sdk_decode_heap_calloc(nmemb ? nmemb : 1, size ? size : 1);
 
     if (!p)
         fatal_error("xcalloc: out of memory (%lu * %lu bytes)",

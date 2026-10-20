@@ -11,9 +11,9 @@
 /*******************************************************************/
 
 _STACK_SIZE = DEFINED(_STACK_SIZE) ? _STACK_SIZE : 0x4000;
-/* Image/static sections have their own bounded region; dynamic newlib data
- * is limited to the measured heap reservation below the core-1 sections. */
-_HEAP_SIZE = DEFINED(_HEAP_SIZE) ? _HEAP_SIZE : 0x08000000;
+/* The 8 MiB runtime region also contains the ARM exception stacks below,
+ * so the newlib break stops before that 22 KiB reservation. */
+_HEAP_SIZE = DEFINED(_HEAP_SIZE) ? _HEAP_SIZE : 0x007FA800;
 
 _ABORT_STACK_SIZE = DEFINED(_ABORT_STACK_SIZE) ? _ABORT_STACK_SIZE : 1024;
 _SUPERVISOR_STACK_SIZE = DEFINED(_SUPERVISOR_STACK_SIZE) ? _SUPERVISOR_STACK_SIZE : 2048;
@@ -26,10 +26,10 @@ _UNDEF_STACK_SIZE = DEFINED(_UNDEF_STACK_SIZE) ? _UNDEF_STACK_SIZE : 1024;
 MEMORY
 {
    ps7_ddr_0 : ORIGIN = 0x100000, LENGTH = 0x07F00000
-   /* Image/BSS: 0x08200000..0x0a000000. The adjacent 1 MiB task queue
+   /* Image/BSS: 0x08200000..0x08600000. The adjacent 1 MiB task queue
     * and core-1 stack are not linker-managed. */
-   ps7_ddr_hi : ORIGIN = 0x08200000, LENGTH = 0x01E00000
-   ps7_ddr_heap : ORIGIN = 0x0A200000, LENGTH = 0x08000000
+   ps7_ddr_hi : ORIGIN = 0x08200000, LENGTH = 0x00400000
+   ps7_ddr_heap : ORIGIN = 0x08800000, LENGTH = 0x00800000
    bootrom_ddr : ORIGIN = 0x3FEF0000, LENGTH = 0x2000
    ps7_ram_0 : ORIGIN = 0x0, LENGTH = 0x30000
    ps7_ram_1 : ORIGIN = 0xFFFF0000, LENGTH = 0xFE00
@@ -566,9 +566,9 @@ _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
 } > ps7_ddr_heap
 
 _end = .;
-ASSERT(__bss_end <= 0x0A000000,
+ASSERT(__bss_end <= 0x08600000,
        "firmware image/BSS reaches the task-queue region")
-ASSERT(_end <= 0x12200000,
+ASSERT(_end <= 0x09000000,
        "firmware heap and stacks reach the card-pool region")
 
 .bootrom_image : {

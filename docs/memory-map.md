@@ -18,11 +18,11 @@ it is not statically split between clients.
 | `0x00000000`–`0x00100000` | 1 MiB | Low aperture/boot-reserved DDR. |
 | `0x00100000`–`0x00200000` | 1 MiB | Low firmware image and board services. |
 | `0x00200000`–`0x08200000` | 128 MiB | Single host-visible interval allocator. Dynamic videocap backing, P96 surfaces, SDK shared allocations, mailbox/direct-ring pages, and matched-driver scratch reservations are allocated here. |
-| `0x08200000`–`0x0A000000` | 30 MiB | Firmware image and static data. The linker asserts image/BSS stays below the end. |
-| `0x0A000000`–`0x0A100000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
-| `0x0A100000`–`0x0A200000` | 1 MiB | Full-descending core-1 stack. |
-| `0x0A200000`–`0x12200000` | 128 MiB | Newlib heap. `_sbrk` reports current and peak break use at reset. |
-| `0x12200000`–`0x2FE00000` | 222 MiB | Permanent prefix of the card pool. |
+| `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. Qualification build `141c121` measured `__bss_end = 0x0848F670`, leaving 1,511,824 bytes of growth margin. |
+| `0x08600000`–`0x08700000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
+| `0x08700000`–`0x08800000` | 1 MiB | Full-descending core-1 stack. |
+| `0x08800000`–`0x09000000` | 8 MiB region | Newlib heap plus 22 KiB ARM exception-stack reservation. `_sbrk` reports the 8,366,080-byte break reservation and peak use at reset. This is the 8 MiB minimum after a sub-1 MiB service-path peak, providing more than 2× margin. |
+| `0x09000000`–`0x2FE00000` | 510 MiB | Permanent prefix of the card pool. |
 | `0x2FE00000`–`0x3FE00000` | 256 MiB | Fast-RAM landing window when advertised; otherwise contiguous revocable card-pool tail. |
 | `0x3FE00000`–`0x40000000` | 2 MiB | RTL-pinned audio, Ethernet, boot ROM, and USB/SD belt. |
 
@@ -45,10 +45,10 @@ can grow across the task queue, core-1 stack, or first card-pool byte.
 
 The card pool supplies 64 KiB pages, tracked by owner class and instance.
 `FIRMWARE` allocations persist through an Amiga reset; media, image, input,
-and ARM-only SDK-surface owners are reset-reclaimable. While Fast RAM is
-withheld, the revocable tail is opened immediately after the permanent prefix,
-forming one contiguous pool. Before re-advertising Fast RAM, firmware revokes
-that tail and flushes cached ownership.
+console, and ARM-only SDK-surface owners are reset-reclaimable. While Fast RAM
+is withheld, the revocable tail is opened immediately after the permanent
+prefix, forming one contiguous pool. Before re-advertising Fast RAM, firmware
+revokes that tail and flushes cached ownership.
 
 Fast RAM is advertised only when `fast_ram=on` is valid **and** RTL capability
 bit `MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000` is present in `MNTZORRO_REG7`.

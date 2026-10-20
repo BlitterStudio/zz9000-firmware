@@ -37,6 +37,7 @@ void smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0u; }
 #define IMAGE(i)    CARD_POOL_OWNER(CARD_POOL_CLASS_IMAGE, (i))
 #define FIRMWARE(i) CARD_POOL_OWNER(CARD_POOL_CLASS_FIRMWARE, (i))
 #define SDK_SURFACE(i) CARD_POOL_OWNER(CARD_POOL_CLASS_SDK_SURFACE, (i))
+#define CONSOLE(i)  CARD_POOL_OWNER(CARD_POOL_CLASS_CONSOLE, (i))
 
 static int failures = 0;
 static int checks = 0;
@@ -115,8 +116,12 @@ static void test_class_limit(void)
                           CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, 1)) != 0);
     CHECK(card_pool_alloc(&pool, PAGE,
                           CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA_INPUT, 2)) == 0);
+    CHECK(card_pool_alloc(&pool, MB(32), CONSOLE(1)) != 0);
+    CHECK(card_pool_alloc(&pool, PAGE, CONSOLE(2)) == 0);
     CHECK(card_pool_alloc(&pool, MB(64), FIRMWARE(1)) != 0);
     CHECK(card_pool_alloc(&pool, PAGE, FIRMWARE(2)) == 0);
+    CHECK(card_pool_release_owner(&pool, CONSOLE(1)) == MB(32));
+    CHECK(card_pool_alloc(&pool, PAGE, CONSOLE(2)) != 0);
     CHECK(card_pool_release_owner(&pool, IMAGE(1)) == MB(72));
     CHECK(card_pool_alloc(&pool, PAGE, IMAGE(2)) != 0);
 }
@@ -195,6 +200,37 @@ static void test_sdk_surface_reclaimed_on_reset(void)
     CHECK(pool.blocks[0].owner == FIRMWARE(1));
     CHECK(pool.class_used[CARD_POOL_CLASS_SDK_SURFACE] == 0U);
     CHECK(!card_pool_block_owned(&pool, surface, PAGE, SDK_SURFACE(1)));
+}
+
+static void test_console_reclaimed_on_reset(void)
+{
+    uint32_t console;
+
+    two_ranges(4 * PAGE, PAGE);
+    console = card_pool_alloc(&pool, PAGE, CONSOLE(1));
+    CHECK(console == A_BASE);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(pool.block_count == 0);
+    CHECK(pool.class_used[CARD_POOL_CLASS_CONSOLE] == 0U);
+    CHECK(!card_pool_block_owned(&pool, console, PAGE, CONSOLE(1)));
+}
+
+static void test_decode_classes_reclaimed_on_reset(void)
+{
+    uint32_t image;
+    uint32_t media;
+
+    two_ranges(4 * PAGE, PAGE);
+    image = card_pool_alloc(&pool, PAGE, IMAGE(1));
+    media = card_pool_alloc(&pool, PAGE, MEDIA(1));
+    CHECK(image == A_BASE);
+    CHECK(media == A_BASE + PAGE);
+    card_pool_finish_amiga_reset(&pool, 1, 1);
+    CHECK(pool.block_count == 0U);
+    CHECK(pool.class_used[CARD_POOL_CLASS_IMAGE] == 0U);
+    CHECK(pool.class_used[CARD_POOL_CLASS_MEDIA] == 0U);
+    CHECK(!card_pool_block_owned(&pool, image, PAGE, IMAGE(1)));
+    CHECK(!card_pool_block_owned(&pool, media, PAGE, MEDIA(1)));
 }
 
 static void test_firmware_never_in_revocable(void)
@@ -387,7 +423,9 @@ int main(void)
     test_release_owner_merges_gaps();
     test_shared_media_owner_isolated_from_session_reclaim();
     test_sdk_surface_reclaimed_on_reset();
+    test_console_reclaimed_on_reset();
     test_firmware_never_in_revocable();
+    test_decode_classes_reclaimed_on_reset();
     test_reset_fast_ram_switches_on();
     test_reset_relends_when_unused();
     test_lock_left_by_faulted_core();
