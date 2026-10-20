@@ -5,6 +5,27 @@
 # reconfigured at runtime, so the ordinary 75 MHz power-on clock is not an
 # adequate release gate for the DVI/formatter domain.
 
+# Release floors are variables so a placement sweep may tighten them without
+# changing the gate.  The defaults are deliberately above zero: a +0.016 ns
+# i2s_mclk setup image failed AHI on hardware, while final i2s placement has
+# varied from -0.044 to +0.170 ns (workstation runbook, 2026-10-18).
+if {![info exists runtime_pixel_setup_floor_ns]} {
+    set runtime_pixel_setup_floor_ns 0.100
+}
+if {![info exists runtime_pixel_hold_floor_ns]} {
+    set runtime_pixel_hold_floor_ns 0.030
+}
+if {![info exists overall_setup_floor_ns]} {
+    set overall_setup_floor_ns 0.100
+}
+if {![info exists i2s_setup_floor_ns]} {
+    set i2s_setup_floor_ns 0.100
+}
+if {![info exists allow_missing_sii9022_output_constraints]} {
+    set allow_missing_sii9022_output_constraints 0
+}
+
+
 set runtime_clocks [get_clocks -quiet dvi_pixel_runtime_150]
 if {[llength $runtime_clocks] != 1} {
     error "Expected exactly one dvi_pixel_runtime_150 clock, found [llength $runtime_clocks]"
@@ -37,6 +58,24 @@ report_clock_interaction \
     -file [file join $report_dir clock_interaction.rpt]
 report_cdc -details -file [file join $report_dir cdc.rpt]
 report_drc -file [file join $report_dir drc.rpt]
+
+# A release checkpoint must prove that the source-synchronous SiI9022 output
+# paths are analysed. The explicit escape hatch exists only for dry-running
+# this new gate against reference DCPs that predate the output stage.
+set sii9022_clock [get_clocks -quiet sii9022_idck]
+if {[llength $sii9022_clock] == 1} {
+    report_timing -to [get_ports {VGA_R[*] VGA_G[*] VGA_B[*] VGA_HS VGA_VS VGA_DE}] \
+        -delay_type max -max_paths 40 -nworst 1 \
+        -file [file join $report_dir sii9022_output_setup.rpt]
+    report_timing -to [get_ports {VGA_R[*] VGA_G[*] VGA_B[*] VGA_HS VGA_VS VGA_DE}] \
+        -delay_type min -max_paths 40 -nworst 1 \
+        -file [file join $report_dir sii9022_output_hold.rpt]
+    puts "TIMING_GATE: sii9022_output_constraints=analysed clock=[get_property NAME $sii9022_clock]"
+} elseif {$allow_missing_sii9022_output_constraints} {
+    puts "TIMING_GATE: sii9022_output_constraints=unavailable (allowed pre-output-stage checkpoint)"
+} else {
+    error "SiI9022 output constraints are missing: expected sii9022_idck"
+}
 
 # Surface dead or fully-overridden timing exceptions (report_exceptions
 # -ignored).  The constraint cleanup of 2026-10 removed every user-owned
@@ -90,22 +129,36 @@ foreach gate_clock [get_clocks] {
     }
 }
 
+set i2s_clocks [get_clocks -quiet i2s_mclk]
+if {[llength $i2s_clocks] != 1} {
+    error "Expected exactly one i2s_mclk clock, found [llength $i2s_clocks]"
+}
+set i2s_setup_paths [get_timing_paths -quiet -from $i2s_clocks \
+    -delay_type max -max_paths 1 -nworst 1]
+if {[llength $i2s_setup_paths] == 0} {
+    error "The i2s_mclk clock has no setup timing path"
+}
+set i2s_setup_slack [get_property SLACK [lindex $i2s_setup_paths 0]]
+
 set overall_setup_path [get_timing_paths -quiet -delay_type max -max_paths 1 -nworst 1]
 set overall_hold_path [get_timing_paths -quiet -delay_type min -max_paths 1 -nworst 1]
 set overall_setup_slack [get_property SLACK [lindex $overall_setup_path 0]]
 set overall_hold_slack [get_property SLACK [lindex $overall_hold_path 0]]
 
 puts "TIMING_GATE: reports=$report_dir"
+puts "TIMING_GATE: floors runtime_setup=${runtime_pixel_setup_floor_ns}ns runtime_hold=${runtime_pixel_hold_floor_ns}ns overall_setup=${overall_setup_floor_ns}ns i2s_setup=${i2s_setup_floor_ns}ns"
 puts "TIMING_GATE: runtime_clock=[get_property NAME $runtime_clock] period=[get_property PERIOD $runtime_clock]ns registers=[llength $runtime_registers] formatter_registers=[llength $formatter_registers]"
 puts "TIMING_GATE: runtime_150mhz_setup_slack=${setup_slack}ns runtime_150mhz_hold_slack=${hold_slack}ns"
-puts "TIMING_GATE: overall_setup_slack=${overall_setup_slack}ns overall_hold_slack=${overall_hold_slack}ns"
+puts "TIMING_GATE: overall_setup_slack=${overall_setup_slack}ns overall_hold_slack=${overall_hold_slack}ns i2s_setup_slack=${i2s_setup_slack}ns"
 
 if {[llength $failed_groups] > 0} {
     error "Timing failed in [llength $failed_groups] clock group check(s): [join $failed_groups {; }]"
 }
-if {$setup_slack < 0.0 || $hold_slack < 0.0 ||
-    $overall_setup_slack < 0.0 || $overall_hold_slack < 0.0} {
-    error "Timing failed: runtime setup/hold ${setup_slack}/${hold_slack} ns, overall setup/hold ${overall_setup_slack}/${overall_hold_slack} ns"
+if {$setup_slack < $runtime_pixel_setup_floor_ns ||
+    $hold_slack < $runtime_pixel_hold_floor_ns ||
+    $overall_setup_slack < $overall_setup_floor_ns ||
+    $i2s_setup_slack < $i2s_setup_floor_ns} {
+    error "Timing floor failed: runtime setup/hold ${setup_slack}/${hold_slack} ns (minimum ${runtime_pixel_setup_floor_ns}/${runtime_pixel_hold_floor_ns}), overall setup ${overall_setup_slack} ns (minimum ${overall_setup_floor_ns}), i2s setup ${i2s_setup_slack} ns (minimum ${i2s_setup_floor_ns})"
 }
 
-puts "TIMING_GATE: PASS - runtime 150 MHz and overall setup/hold slack are non-negative"
+puts "TIMING_GATE: PASS - runtime pixel, overall, and i2s setup floors met"

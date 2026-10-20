@@ -206,6 +206,7 @@ set files [list \
  [file normalize "${origin_dir}/videocap_calibration_capture.v" ]\
  [file normalize "${origin_dir}/videocap_writeback_layout.v" ]\
  [file normalize "${origin_dir}/video_formatter.v" ]\
+ [file normalize "${origin_dir}/vga_output_stage.v" ]\
  [file normalize "${origin_dir}/video_source_sync.v" ]\
  [file normalize "${origin_dir}/video_overlay_pixel.v" ]\
  [file normalize "${origin_dir}/video_overlay_linebuffer.v" ]\

@@ -196,6 +196,8 @@ set_property PACKAGE_PIN Y16 [get_ports VCAP_HSYNC]
 #set_property PULLUP TRUE [get_ports VCAP_HSYNC]
 
 
+# vga_output_stage.v packs VGA_R/G/B/HS/VS/DE in IOB output registers;
+# LVCMOS33 is the board-level SiI9022A video-input IOVCC contract.
 set_property IOSTANDARD LVCMOS33 [get_ports {VGA_R[0]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {VGA_R[1]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {VGA_R[2]}]
