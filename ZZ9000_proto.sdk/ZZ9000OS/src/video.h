@@ -113,6 +113,11 @@ static inline uint32_t videocap_control_width_only(uint32_t full_width)
  * or reinterpreted as a C28 calibration. */
 #define MNTVF_OP_VIDEOCAP_C28_PHASE 32
 
+/* ARM-only capture backing selection. `video_formatter_write()` sends the
+ * allocated DDR base as the payload; RTL accepts only nonzero 64-byte-aligned
+ * bases and stops writeback after reset until this is sent again. */
+#define MNTVF_OP_VIDEOCAP_ADDRESS 33
+
 enum zz_dpms_level {
 	ZZ_DPMS_ON,
 	ZZ_DPMS_STANDBY,

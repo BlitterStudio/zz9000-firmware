@@ -97,22 +97,19 @@
 `define Z3_SIZE_256MB 32'h10000000 // 256MB for Zorro 3
 `define ARM_MEMORY_START          32'h001f0000
 // Fixed DDR base for the Z3 fast-RAM PIC (VARIANT_Z3_FASTRAM). The fast
-// window used to reuse the main-window translation (z3addr - z3_ram_low),
-// which made its DDR placement depend on where AmigaOS autoconfig put the
-// two boards relative to each other: with the canonical A3000/A4000 layout
-// (RTG at 0x40000000, fast at 0x50000000) the 256 MB window landed on DDR
-// 0x101f0000..0x201f0000 — overlaying the firmware's upper linker DDR, the
-// SDK task queue (0x18000000) and the core-1 stack (0x1bf00000). Mapping
-// the fast window to a fixed base makes the ARM memory map independent of
-// board placement. Keep in sync with Z3_FASTRAM_DDR_* in
-// ZZ9000_proto.sdk/ZZ9000OS/src/memorymap.h.
-`define Z3_FASTRAM_ARM_BASE       32'h20000000
+// window must remain independent of where AmigaOS autoconfig puts either PIC.
+// Its 2 MiB alignment keeps it adjacent to the top-belt MMU boundary; the
+// translation delta does not require 256 MiB alignment. Keep in sync with
+// Z3_FASTRAM_DDR_* in ZZ9000_proto.sdk/ZZ9000OS/src/memorymap.h.
+`define Z3_FASTRAM_ARM_BASE       32'h2fe00000
 `define VIDEOCAP_ADDR             32'h01000000 // ARM_MEMORY_START+0xe0_0000
-`define BOOT_ROM_ADDRESS          32'h3fcf0000 // 1Kb boot rom
-`define TX_FRAME_ADDRESS          32'h3fd10000 // ethernet tx buffer
-`define RX_FRAME_ADDRESS          32'h3fd20000 // ethernet rx buffer (unused?)
-`define RX_BACKLOG_ADDRESS        32'h3fe00000 // ethernet rx buffer (128 slots x 2 KB = 256 KB)
-`define USB_BLOCK_STORAGE_ADDRESS 32'h3fe40000 // must sit past RX_BACKLOG (grew from 64 KB to 256 KB)
+// Top belt: one NC audio/boot section followed by one SO Ethernet/storage
+// section. Keep these in sync with memorymap.h and build_bootimage.sh.
+`define BOOT_ROM_ADDRESS          32'h3fef0000 // 8 KiB boot ROM
+`define TX_FRAME_ADDRESS          32'h3ff10000 // ethernet tx buffer
+`define RX_FRAME_ADDRESS          32'h3ff20000 // ethernet rx buffer (unused?)
+`define RX_BACKLOG_ADDRESS        32'h3ff30000 // 128 slots x 2 KiB
+`define USB_BLOCK_STORAGE_ADDRESS 32'h3ff70000 // shared SD boot / USB proxy buffer
 `define FRAME_SIZE 24'h2048 // max ethernet frame size
 
 `define C_M00_AXI_TARGET_SLAVE_BASE_ADDR 32'h10000000
@@ -1085,6 +1082,17 @@ module MNTZorro_v0_1_S00_AXI
 `else
   localparam VCAP_DIAG_VARIANT_FASTRAM = 1'b0;
 `endif
+`ifdef ZORRO3
+`ifdef VARIANT_Z3_FASTRAM
+  // The ARM mirrors this bit through REG7 so firmware fails closed when its
+  // 0x2fe00000 map meets an older bitstream.
+  localparam VCAP_DIAG_VARIANT_FASTRAM_2FE_BASE = 1'b1;
+`else
+  localparam VCAP_DIAG_VARIANT_FASTRAM_2FE_BASE = 1'b0;
+`endif
+`else
+  localparam VCAP_DIAG_VARIANT_FASTRAM_2FE_BASE = 1'b0;
+`endif
 `ifdef VARIANT_2MB
   localparam VCAP_DIAG_VARIANT_2MB = 1'b1;
 `else
@@ -1097,11 +1105,17 @@ module MNTZorro_v0_1_S00_AXI
 `endif
   localparam [1:0] VCAP_DIAG_VARIANT_RGB_MODE = `VCAP_RGB_MODE;
   localparam [31:0] VCAP_DIAG_VARIANT_VALUE = {
-      16'h0001, 8'h00, VCAP_DIAG_VARIANT_AUTOBOOT,
+      16'h0001, 7'h00, VCAP_DIAG_VARIANT_FASTRAM_2FE_BASE,
+      VCAP_DIAG_VARIANT_AUTOBOOT,
       VCAP_DIAG_VARIANT_RGB_MODE, (`VCAP_CSYNC_VSYNC != 0),
       (`VCAP_FULLRATE_INT != 0), VCAP_DIAG_VARIANT_2MB,
       VCAP_DIAG_VARIANT_FASTRAM, VCAP_DIAG_VARIANT_Z3
   };
+  // REG7's lower bits are the existing Z2 aperture byte count. Its high bit
+  // is zero on every older Z3 image, allowing new firmware to withhold Fast
+  // RAM rather than lend the wrong DDR interval to the host.
+  localparam [31:0] MNTZORRO_CAPABILITY_VALUE =
+      VCAP_DIAG_VARIANT_FASTRAM_2FE_BASE ? 32'h80000000 : 32'h00000000;
   // Raw sampler words immediately before the configured horizontal crop.
   // Host-visible direct-register offsets are 0x12e0 and 0x1300..0x13ff.
   localparam [15:0] VCAP_PRE_CROP_PROBE_META = 16'h02e0;
@@ -1283,6 +1297,7 @@ module MNTZorro_v0_1_S00_AXI
    * header, which reads the same address until the ARM publishes a frame,
    * therefore always sees DDR.  Any Zorro write, and a change of the
    * presented slot, retires the line. */
+  reg [31:0] rxpf_base = 0;    // DDR address of beat 0
   wire [31:0] rxpf_rx_addr = ((`RX_BACKLOG_ADDRESS - 32'h2000) + z3_mapped_addr +
                               {eth_rx_frame_select, 11'h0}) & 32'hfffffffc;
   // 16 beats, fewer near a 4 KB boundary (AXI bursts must not cross one)
@@ -1291,7 +1306,6 @@ module MNTZorro_v0_1_S00_AXI
   wire [31:0] rxpf_off = rxpf_rx_addr - rxpf_base;
   wire [3:0]  rxpf_hit_idx = rxpf_off[5:2];
   reg [31:0] rxpf_buf [0:15];
-  reg [31:0] rxpf_base = 0;    // DDR address of beat 0
   reg [4:0]  rxpf_total = 0;   // beats asked for
   reg [4:0]  rxpf_got = 0;     // beats landed
   reg        rxpf_valid = 0;   // the line may answer reads
@@ -1351,7 +1365,11 @@ module MNTZorro_v0_1_S00_AXI
 
   reg videocap_mode;
   reg videocap_mode_in;
+  // The default remains observable for diagnostic compatibility, but reset
+  // keeps writeback disarmed until firmware provides an allocated base through
+  // MNTVF_OP_VIDEOCAP_ADDRESS.
   reg [31:0] videocap_address = `VIDEOCAP_ADDR;
+  reg videocap_address_valid = 0;
   localparam [11:0] VCAP_CROP_H_COMPAT = 12'd188;
   localparam [11:0] VCAP_CROP_V_COMPAT = 12'd26;
   reg [31:0] videocap_control_staged_raw =
@@ -1364,6 +1382,10 @@ module MNTZorro_v0_1_S00_AXI
   reg video_control_axi_strobe_d = 0;
   wire video_control_axi_op16_event =
       axi_reg2[31] && !video_control_axi_strobe_d && axi_reg2[7:0] == 8'd16;
+  // ARM-only, 64-byte-aligned capture backing selection. This must not reuse
+  // the Zorro h10/h12 registers, which are REG_ZZ_X1/Y1.
+  wire video_control_axi_op33_event =
+      axi_reg2[31] && !video_control_axi_strobe_d && axi_reg2[7:0] == 8'd33;
   wire videocap_control_request_event = videocap_control_live_event ||
       video_control_axi_op16_event || videocap_control_zorro_event;
   wire [31:0] videocap_control_request_raw = videocap_control_live_event ?
@@ -2092,7 +2114,8 @@ module MNTZorro_v0_1_S00_AXI
           vc_beat <= 0;
           m01_axi_wlast <= 0;
 
-          if (!vcap_capture_ready_axi || vcap_loss_pending) begin
+          if (!vcap_capture_ready_axi || vcap_loss_pending ||
+              !videocap_address_valid) begin
             vcap_loss_pending <= !vcap_capture_ready_axi;
             videocap_save_x <= 0;
             videocap_save_line_done <= 10'h3ff;
@@ -2126,8 +2149,10 @@ module MNTZorro_v0_1_S00_AXI
           end
         end
         4'h4: begin
-          // videocap is disabled, lets wait here
-          if (videocap_mode_sync && vcap_capture_ready_axi) begin
+          // Capture cannot restart until firmware has armed an allocated,
+          // aligned backing range after reset.
+          if (videocap_mode_sync && vcap_capture_ready_axi &&
+              videocap_address_valid) begin
             videocap_save_state <= 0;
             // Restart at the next row origin so the freeze regs relatch
             // from the current mode instead of resuming a stale x into
@@ -2198,13 +2223,23 @@ module MNTZorro_v0_1_S00_AXI
     end
   end
 
-  // -- main zorro fsm ---------------------------------------------
   always @(posedge S_AXI_ACLK) begin
+    // An invalid request deliberately preserves the last working backing
+    // range. Reset revokes it so a reclaimed heap allocation is never written
+    // until firmware explicitly rearms capture.
+    if (!S_AXI_ARESETN || z_reset) begin
+      videocap_address <= `VIDEOCAP_ADDR;
+      videocap_address_valid <= 1'b0;
+    end else if (video_control_axi_op33_event &&
+        axi_reg3 != 32'h00000000 && axi_reg3[5:0] == 6'b000000) begin
+      videocap_address <= axi_reg3;
+      videocap_address_valid <= 1'b1;
+    end
+
     videocap_mode <= videocap_mode_in;
     videocap_control_live_event <= 1'b0;
     videocap_control_zorro_event <= 1'b0;
     video_control_axi_strobe_d <= axi_reg2[31];
-
     if (z_reset) begin
       zorro_state <= RESET;
     end
@@ -3472,8 +3507,8 @@ module MNTZorro_v0_1_S00_AXI
                 'h0E: scanline_parity     <= regdata_in[0];
                 //'h08: E7M_RESET <= regdata_in[0];
                 //'h0a: E7M_PWRDWN <= regdata_in[0];
-                'h10: videocap_address[31:16] <= regdata_in[15:0];
-                'h12: videocap_address[15:0] <= regdata_in[15:0];
+                // h10/h12 are REG_ZZ_X1/Y1, not videocap-address controls.
+                // Capture backing is ARM-only MNTVF_OP_VIDEOCAP_ADDRESS.
                 'h14: videocap_pitch <= regdata_in[15:0];
                 'h20: if (regdata_in[5:0]>0) dtack_timeout <= regdata_in[5:0];
                 //'h24: dataout_time[7:0]     <= regdata_in[7:0];
@@ -3634,9 +3669,11 @@ module MNTZorro_v0_1_S00_AXI
         // readable value. Reuse its read direction for the host layout ack.
         3'h6   : reg_data_out <= sdk_aperture_layout_ack ?
                     32'ha5020001 : 32'h00000000;
-        // Exact compile-time aperture bytes. Z3 reports zero: its established
-        // 128 MB layout is deliberately outside this Z2 contract.
-        3'h7   : reg_data_out <= SDK_APERTURE_SIZE_VALUE;
+        // Preserve the Z2 aperture byte count in the low bits. On matched Z3
+        // Fast-RAM images bit 31 advertises the relocated 0x2fe00000 landing
+        // zone; older bitstreams read zero and firmware must fail closed.
+        3'h7   : reg_data_out <= SDK_APERTURE_SIZE_VALUE |
+                    MNTZORRO_CAPABILITY_VALUE;
         default : reg_data_out <= 'h0;
       endcase
     end
