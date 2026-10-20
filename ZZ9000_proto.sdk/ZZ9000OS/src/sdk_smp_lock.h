@@ -39,4 +39,8 @@ void sdk_smp_lock_reset_if_owned(sdk_smp_lock_t *l); /* reset + dsb/sev only if 
 void sdk_smp_lock_reset_malloc(void);          /* unconditional reset + dsb/sev */
 void sdk_smp_lock_reset_malloc_if_owned(void); /* reset + dsb/sev only if this core owns it */
 
+/* Serialize a non-allocating heap-stat snapshot with newlib's allocator. */
+void sdk_smp_lock_malloc_acquire(void);
+void sdk_smp_lock_malloc_release(void);
+
 #endif /* SDK_SMP_LOCK_H */

@@ -41,6 +41,7 @@
 #include "sdk_smp_lock.h"
 #include "memorymap.h"
 #include "card_pool.h"
+#include "surface_allocator.h"
 #include "mmu_page.h"
 #include "scheduler.h"
 #include "core2.h"
@@ -736,6 +737,7 @@ struct SDKSurface {
 	uint32_t format;
 	uint32_t flags;
 	uint32_t length;
+	uint32_t pool_owner;
 	uint8_t in_use;
 };
 
@@ -1910,15 +1912,7 @@ static int range_valid(uint32_t address, uint32_t length,
 
 static int heap_range_valid(uint32_t address, uint32_t length)
 {
-	return range_valid(address, length,
-	                   SDK_SHARED_HEAP_ADDRESS, SDK_SHARED_HEAP_SIZE);
-}
-
-static int local_surface_range_valid(uint32_t address, uint32_t length)
-{
-	return range_valid(address, length,
-	                   SDK_LOCAL_SURFACE_HEAP_ADDRESS,
-	                   SDK_LOCAL_SURFACE_HEAP_SIZE);
+	return surface_allocator_owns(address, length);
 }
 
 static int host_window_range_valid(uint32_t address, uint32_t length)
@@ -1939,7 +1933,8 @@ static int shared_buffer_live(const struct SDKSharedBuffer *buffer)
 	if (buffer->handle == 0 || buffer->handle == SDK_INVALID_HANDLE)
 		return 0;
 	if ((buffer->flags & SDK_ALLOC_MEDIA) != 0U)
-		return buffer->pool_owner != 0U && buffer->length != 0U;
+		return card_pool_block_owned(&card_pool, buffer->address,
+		                             buffer->length, buffer->pool_owner);
 	if ((buffer->flags & SDK_ALLOC_HOST_WINDOW) != 0U)
 		return host_window_range_valid(buffer->address, buffer->length);
 	return heap_range_valid(buffer->address, buffer->length);
@@ -2028,8 +2023,8 @@ static int surface_live(const struct SDKSurface *surface)
 	if (surface->length != surface->pitch * surface->height)
 		return 0;
 	if (surface_is_arm_local(surface))
-		return local_surface_range_valid(surface->address,
-		                                 surface->length);
+		return card_pool_block_owned(&card_pool, surface->address,
+		                             surface->length, surface->pool_owner);
 	return heap_range_valid(surface->address, surface->length);
 }
 
@@ -2154,113 +2149,9 @@ static uint32_t count_used_surfaces(void)
 	return used;
 }
 
-static uint32_t find_allocation_end_containing(uint32_t address,
-                                               int local_surfaces)
-{
-	uint32_t i;
-
-	if (!local_surfaces) {
-		for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
-			uint32_t start;
-			uint32_t end;
-
-			if (!shared_buffer_live(&shared_buffers[i]))
-				continue;
-
-			start = shared_buffers[i].address;
-			end = start + shared_buffers[i].length;
-			if (address >= start && address < end)
-				return end;
-		}
-	}
-
-	for (i = 0; i < SDK_MAX_SURFACES; i++) {
-		uint32_t start;
-		uint32_t end;
-
-		if (!surface_live(&surfaces[i]))
-			continue;
-		if (surface_is_arm_local(&surfaces[i]) != local_surfaces)
-			continue;
-
-		start = surfaces[i].address;
-		end = start + surfaces[i].length;
-		if (address >= start && address < end)
-			return end;
-	}
-
-	return 0;
-}
-
-static uint32_t find_next_allocation_start(uint32_t address, uint32_t heap_end,
-                                           int local_surfaces)
-{
-	uint32_t i;
-	uint32_t next = heap_end;
-
-	if (!local_surfaces) {
-		for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
-			if (shared_buffer_live(&shared_buffers[i]) &&
-			    shared_buffers[i].address >= address &&
-			    shared_buffers[i].address < next) {
-				next = shared_buffers[i].address;
-			}
-		}
-	}
-
-	for (i = 0; i < SDK_MAX_SURFACES; i++) {
-		if (surface_live(&surfaces[i]) &&
-		    surface_is_arm_local(&surfaces[i]) == local_surfaces &&
-		    surfaces[i].address >= address &&
-		    surfaces[i].address < next) {
-			next = surfaces[i].address;
-		}
-	}
-
-	return next;
-}
-
-static void heap_free_stats_in(uint32_t base, uint32_t size,
-			       uint32_t *free_total, uint32_t *largest_free)
-{
-	uint32_t cursor = base;
-	uint32_t heap_end;
-	uint32_t total = 0;
-	uint32_t largest = 0;
-
-	if (base > UINT32_MAX - size) {
-		*free_total = 0U;
-		*largest_free = 0U;
-		return;
-	}
-	heap_end = base + size;
-
-	while (cursor < heap_end) {
-		uint32_t alloc_end = find_allocation_end_containing(cursor, 0);
-		uint32_t next_alloc;
-		uint32_t free_len;
-
-		if (alloc_end != 0) {
-			cursor = alloc_end;
-			continue;
-		}
-
-		next_alloc = find_next_allocation_start(cursor, heap_end, 0);
-		free_len = next_alloc - cursor;
-		total += free_len;
-		if (free_len > largest)
-			largest = free_len;
-		cursor = next_alloc;
-	}
-
-	*free_total = total;
-	*largest_free = largest;
-}
-
 static void heap_free_stats(uint32_t *free_total, uint32_t *largest_free)
 {
-	heap_free_stats_in(SDK_SHARED_HEAP_ADDRESS, SDK_SHARED_HEAP_SIZE,
-			   free_total, largest_free);
+	surface_allocator_free_stats(free_total, largest_free);
 }
 
 static uint32_t count_host_window_allocations(void)
@@ -2319,95 +2210,45 @@ static uint32_t next_handle(void)
 	return handle;
 }
 
-static uint32_t find_free_region_in(uint32_t base, uint32_t size,
-                                    uint32_t length, uint32_t alignment,
-                                    int local_surfaces)
+static uint32_t find_free_host_window_region(uint32_t length,
+					     uint32_t alignment)
 {
-	uint32_t heap_end = base + size;
-	uint32_t candidate = align_up(base, alignment);
+	uint32_t base = effective_host_window_address();
+	uint32_t size = effective_host_window_size();
+	uint32_t heap_end;
+	uint32_t candidate;
 	uint32_t i;
 
-	while (candidate != 0 && candidate < heap_end &&
-	       length <= (heap_end - candidate)) {
+	if (base == 0U || size == 0U || base > UINT32_MAX - size)
+		return 0U;
+	heap_end = base + size;
+	candidate = align_up(base, alignment);
+	while (candidate != 0U && candidate < heap_end &&
+	       length <= heap_end - candidate) {
 		int collision = 0;
 
-		if (!local_surfaces) {
-			for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
-				uint32_t block_start;
-				uint32_t block_end;
-
-				if (!shared_buffer_live(&shared_buffers[i]))
-					continue;
-
-				block_start = shared_buffers[i].address;
-				block_end = block_start + shared_buffers[i].length;
-				if (candidate + length <= block_start ||
-				    candidate >= block_end)
-					continue;
-
-				candidate = align_up(block_end, alignment);
-				collision = 1;
-				break;
-			}
-		}
-
-		if (collision)
-			continue;
-
-		for (i = 0; i < SDK_MAX_SURFACES; i++) {
+		for (i = 0; i < SDK_MAX_SHARED_BUFFERS; i++) {
 			uint32_t block_start;
 			uint32_t block_end;
 
-			if (!surface_live(&surfaces[i]))
+			if (!shared_buffer_live(&shared_buffers[i]) ||
+			    (shared_buffers[i].flags & SDK_ALLOC_HOST_WINDOW) == 0U)
 				continue;
-			if (surface_is_arm_local(&surfaces[i]) != local_surfaces)
+			block_start = shared_buffers[i].address;
+			block_end = block_start + shared_buffers[i].length;
+			if (candidate + length <= block_start ||
+			    candidate >= block_end)
 				continue;
-
-			block_start = surfaces[i].address;
-			block_end = block_start + surfaces[i].length;
-			if (candidate + length <= block_start || candidate >= block_end)
-				continue;
-
 			candidate = align_up(block_end, alignment);
 			collision = 1;
 			break;
 		}
-
 		if (!collision)
 			return candidate;
 	}
-
-	return 0;
+	return 0U;
 }
 
-static uint32_t find_free_region(uint32_t length, uint32_t alignment)
-{
-	return find_free_region_in(SDK_SHARED_HEAP_ADDRESS,
-	                           SDK_SHARED_HEAP_SIZE,
-	                           length, alignment, 0);
-}
-
-static uint32_t find_free_local_surface_region(uint32_t length,
-                                               uint32_t alignment)
-{
-	return find_free_region_in(SDK_LOCAL_SURFACE_HEAP_ADDRESS,
-	                           SDK_LOCAL_SURFACE_HEAP_SIZE,
-	                           length, alignment, 1);
-}
-
-static uint32_t find_free_host_window_region(uint32_t length,
-                                             uint32_t alignment)
-{
-	uint32_t base = effective_host_window_address();
-	uint32_t size = effective_host_window_size();
-
-	if (base == 0U || size == 0U)
-		return 0U;
-	/* Shared-heap blocks can never overlap a candidate here (disjoint
-	 * regions), so the region-agnostic overlap scan is reusable. */
-	return find_free_region_in(base, size,
-	                           length, alignment, 0);
-}
 
 static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
                                     volatile struct SDKMailboxEntry *comp,
@@ -2452,7 +2293,7 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 			return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 		if (length > host_window_size)
 			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	} else if (length > SDK_SHARED_HEAP_SIZE) {
+	} else if (length > surface_allocator_total_bytes()) {
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 	}
 
@@ -2468,7 +2309,7 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	} else if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
 		address = find_free_host_window_region(length, alignment);
 	} else {
-		address = find_free_region(length, alignment);
+		address = surface_allocator_alloc_aligned(length, alignment);
 	}
 	if (address == 0U) {
 		memset(slot, 0, sizeof(*slot));
@@ -2512,6 +2353,8 @@ static uint16_t handle_free_shared(volatile struct SDKMailboxEntry *req,
 	if (buffer->pool_owner != 0U)
 		(void)card_pool_free(&card_pool, buffer->address,
 		                     buffer->pool_owner);
+	else if ((buffer->flags & SDK_ALLOC_HOST_WINDOW) == 0U)
+		(void)surface_allocator_free(buffer->address);
 
 	memset(buffer, 0, sizeof(*buffer));
 	return complete_status(req, comp, SDK_STATUS_OK);
@@ -2791,9 +2634,9 @@ static uint16_t handle_alloc_surface(volatile struct SDKMailboxEntry *req,
 	length = pitch * height;
 	if (length == 0)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (arm_local && length > SDK_LOCAL_SURFACE_HEAP_SIZE)
+	if (arm_local && length > CARD_POOL_LIMIT_SDK_SURFACE)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
-	if (!arm_local && length > SDK_SHARED_HEAP_SIZE)
+	if (!arm_local && length > surface_allocator_total_bytes())
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
 
 	sanitize_allocator_metadata();
@@ -2801,13 +2644,19 @@ static uint16_t handle_alloc_surface(volatile struct SDKMailboxEntry *req,
 	if (!slot)
 		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
 
-	address = arm_local ? find_free_local_surface_region(length, 64U) :
-	                      find_free_region(length, 64U);
-	if (address == 0)
-		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
-
 	memset(slot, 0, sizeof(*slot));
 	slot->handle = next_surface_id();
+	if (arm_local) {
+		slot->pool_owner = CARD_POOL_OWNER(CARD_POOL_CLASS_SDK_SURFACE,
+						   slot->handle);
+		address = card_pool_alloc(&card_pool, length, slot->pool_owner);
+	} else {
+		address = surface_allocator_alloc_aligned(length, 64U);
+	}
+	if (address == 0U) {
+		memset(slot, 0, sizeof(*slot));
+		return complete_status(req, comp, SDK_STATUS_NO_MEMORY);
+	}
 	slot->address = address;
 	slot->width = width;
 	slot->height = height;
@@ -2847,6 +2696,11 @@ static uint16_t handle_free_surface(volatile struct SDKMailboxEntry *req,
 	if (!surface)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
 
+	if (surface->pool_owner != 0U)
+		(void)card_pool_free(&card_pool, surface->address,
+		                     surface->pool_owner);
+	else
+		(void)surface_allocator_free(surface->address);
 	memset(surface, 0, sizeof(*surface));
 	return complete_status(req, comp, SDK_STATUS_OK);
 }
@@ -2867,9 +2721,9 @@ static uint16_t service_try_defer(uint16_t opcode,
  * ARM-local surfaces are excluded because their cache contract is
  * single-core: they have no Zorro-side writer, so reads skip
  * invalidation (prepare_surface_for_arm_read) and rely on the reading
- * core's cache being authoritative. The local surface heap is NOT in
- * the SCU-coherent region, so letting these ops bounce between cores
- * would need invalidate/flush in both directions on every hop --
+ * ARM-local pool storage is NOT in the SCU-coherent region, so letting
+ * these ops bounce between cores would need invalidate/flush in both
+ * directions on every hop --
  * cheaper and safer to keep ARM-local work on core 0.
  */
 static int scale_defer_eligible(uint32_t src_handle, uint32_t dst_handle,
@@ -8135,7 +7989,7 @@ static uint16_t handle_diag_read(volatile struct SDKMailboxEntry *req,
 	put_be32(diag->last_status, sdk_status);
 	put_be32(diag->pending_requests, pending_requests);
 	put_be32(diag->shared_buffers_used, count_used_shared_buffers());
-	put_be32(diag->shared_heap_total, SDK_SHARED_HEAP_SIZE);
+	put_be32(diag->shared_heap_total, surface_allocator_total_bytes());
 	put_be32(diag->shared_heap_free, free_total);
 	put_be32(diag->shared_heap_largest_free, largest_free);
 	put_be32(diag->mailbox_arm_addr, (uint32_t)mailbox_base);

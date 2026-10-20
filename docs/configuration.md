@@ -155,8 +155,11 @@ for supported selector combinations.
 Fast RAM is disabled unless a valid `fast_ram = on` decision is available.
 The fast-RAM loader runs before the advertised Zorro slot is exposed, and it
 runs again on a later warm reset. A missing, malformed, unreadable, truncated,
-or too-slow configuration leaves Fast RAM disabled for that pass. On an
-unstable 68040/68060 system, remove `fast_ram` or set it to `off`, then reboot.
+or too-slow configuration leaves Fast RAM disabled for that pass. Firmware
+also requires the bitstream's `MNTZORRO_REG7` Fast-RAM-base capability; a
+new firmware therefore withholds Fast RAM from an older bitstream even when
+the configuration requests it. On an unstable 68040/68060 system, remove
+`fast_ram` or set it to `off`, then reboot.
 
 ## ZZ9000AX audio
 

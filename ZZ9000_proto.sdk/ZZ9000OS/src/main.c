@@ -70,6 +70,7 @@ void Xil_AssertNonVoid() {}
 #include "surface_allocator.h"
 #include "card_pool.h"
 #include "overlay.h"
+#include "newlib_heap.h"
 
 /* 2.4: RTG surface allocator with a real free — ZZ9000.card gates the
  * P96 off-screen bitmap hooks on this revision (older firmware would
@@ -422,13 +423,26 @@ static void init_storage_services() {
 typedef char z2_gfxdata_must_fit_template_scratch[
 	(sizeof(struct GFXData) <= 0x00010000U) ? 1 : -1];
 
+static int reserve_host_control_ranges(void)
+{
+	return surface_allocator_reserve(Z3_SCRATCH_ADDR, 0x00010000U) == 0 &&
+	       surface_allocator_reserve(RTG_TEMPLATE_SCRATCH_ADDRESS,
+	                                 RTG_TEMPLATE_SCRATCH_SIZE) == 0 &&
+	       surface_allocator_reserve(SDK_MAILBOX_Z3_ADDRESS,
+	                                 SDK_MAILBOX_Z3_RESERVE_SIZE) == 0 &&
+	       surface_allocator_reserve(SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS,
+	                                 SDK_AUDIO_DIRECT_RING_Z3_RESERVE_SIZE) == 0 &&
+	       surface_allocator_reserve(Z3_AUDIO_SCRATCH_ADDRESS,
+	                                 Z3_AUDIO_SCRATCH_SIZE) == 0;
+}
+
 static void apply_aperture_framebuffer_limit(void)
 {
 	if ((sdk_aperture_runtime_flags() & SDK_APERTURE_FLAG_VALID) != 0U)
 		set_fb_limit((uint8_t *)(uintptr_t)
 			(FRAMEBUFFER_ADDRESS + sdk_aperture_framebuffer_size()));
 	else
-		set_fb_limit((uint8_t *)(uintptr_t)LEGACY_SURFACE_HEAP_END);
+		set_fb_limit((uint8_t *)(uintptr_t)Z3_P96_VRAM_END);
 }
 
 static void clear_runtime_gfxdata(void)
@@ -458,18 +472,35 @@ static uint8_t amiga_boot_reset_pass = 1;
 static void print_memory_line(void)
 {
 	extern char _heap_start[], _heap_end[];
-	uint32_t a1 = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_A1);
-	uint32_t a2 = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_A2);
-	uint32_t c = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_C);
-	uint32_t b = card_pool_range_free_bytes(&card_pool, CARD_POOL_RANGE_B);
+	uint32_t permanent = card_pool_range_free_bytes(
+		&card_pool, CARD_POOL_RANGE_PERMANENT);
+	uint32_t revocable = card_pool_range_free_bytes(
+		&card_pool, CARD_POOL_RANGE_REVOCABLE);
+	uint32_t heap_used;
+	uint32_t heap_peak;
 
-	printf("[mem] heap %u MB, card pool %u MB free (A1 %u, A2 %u, C %u, "
-	       "B %s %u)\n",
-	       (unsigned)((uint32_t)(_heap_end - _heap_start) >> 20),
-	       (unsigned)((a1 + a2 + c + b) >> 20),
-	       (unsigned)(a1 >> 20), (unsigned)(a2 >> 20), (unsigned)(c >> 20),
-	       card_pool.ranges[CARD_POOL_RANGE_B].open ? "lent" : "fast-ram",
-	       (unsigned)(b >> 20));
+	newlib_heap_usage(&heap_used, &heap_peak);
+	printf("[mem] newlib reserved=%lu break-used=%lu peak-since-boot=%lu "
+	       "free=%lu; pool card-free=%lu revocable=%s:%lu\n",
+	       (unsigned long)(_heap_end - _heap_start),
+	       (unsigned long)heap_used, (unsigned long)heap_peak,
+	       (unsigned long)((_heap_end - _heap_start) - heap_used),
+	       (unsigned long)(permanent + revocable),
+	       card_pool_has_lent(&card_pool) ? "open" : "fast-ram",
+	       (unsigned long)revocable);
+}
+
+/*
+ * Fast RAM changes the ARM's ownership of the revocable pool tail. A new
+ * firmware must never advertise the 0x2fe00000 landing zone to an older
+ * bitstream that still decodes a different address, even when configuration
+ * requests it. REG7 is zero on older/Z2 variants, so this is fail closed.
+ */
+static int fastram_can_advertise(void)
+{
+	return zz_config_fastram_advertise() &&
+	       (mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7) &
+	        MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000) != 0U;
 }
 
 void handle_amiga_reset(enum amiga_reset_mode mode) {
@@ -521,7 +552,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 		zz_config_fastram_reload_warm(ZZ_CONFIG_FASTRAM_DEADLINE_MS);
 	amiga_boot_reset_pass = 0;
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
-		zz_config_fastram_advertise() ? 1 : 0);
+		fastram_can_advertise() ? 1 : 0);
 
 	printf("    _______________   ___   ___   ___  \n");
 	printf("   |___  /___  / _ \\ / _ \\ / _ \\ / _ \\ \n");
@@ -558,8 +589,10 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	audio_set_interrupt_mask(0);
 	interrupt_enabled_vblank = 0;
 
-	// drop all RTG off-screen surfaces; P96 re-allocates after reboot
-	surface_allocator_init(LEGACY_SURFACE_HEAP_ADDRESS, LEGACY_SURFACE_HEAP_SIZE);
+	// Drop all host-visible allocations; P96 and SDK clients re-allocate.
+	surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
+	if (!reserve_host_control_ranges() || !video_videocap_backing_reserve())
+		printf("[video] host-control or videocap backing unavailable after reset\n");
 	// the overlay shadows lived in that heap: drop the overlay too
 	overlay_amiga_reset(video_state);
 
@@ -621,7 +654,7 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	/* Every session went down above: give back what they held, and lend
 	 * the fast-RAM window again when the Amiga cannot use it. */
 	card_pool_finish_amiga_reset(&card_pool,
-		sdk_aperture_runtime_is_zorro3(), zz_config_fastram_advertise());
+		sdk_aperture_runtime_is_zorro3(), fastram_can_advertise());
 	print_memory_line();
 
 	// Used for testing the nonstandard VSync modes without the driver having to enable them.
@@ -649,7 +682,7 @@ int main() {
 	zz_config_load_fastram(ZZ_CONFIG_FASTRAM_DEADLINE_MS, 1);
 	XTime_GetTime(&fastram_t1);
 	mntzorro_write(MNTZ_BASE_ADDR, MNTZORRO_REG6,
-		zz_config_fastram_advertise() ? 1 : 0);
+		fastram_can_advertise() ? 1 : 0);
 	{
 		uint64_t load_counts = (uint64_t)(fastram_t1 - fastram_t0);
 		uint32_t load_ms = (uint32_t)((load_counts * 1000U) /
@@ -761,8 +794,7 @@ int main() {
 			                  cfg->videocap_height : 0));
 	}
 
-	// RTG rect ops may write anywhere in framebuffer + legacy surface
-	// memory, but never past it into the SDK heaps and beyond
+	// RTG rect operations can use the entire allocator-backed Z3 aperture.
 	apply_aperture_framebuffer_limit();
 	// Host-supplied blit and sprite sources are board offsets, so they must
 	// stay inside the card memory the Zorro III board window maps
@@ -770,7 +802,9 @@ int main() {
 	set_src_window((void *)(uintptr_t)ADDR_ADJ,
 		(void *)(uintptr_t)(ADDR_ADJ + Z3_MAIN_BOARD_WINDOW_SIZE));
 
-	surface_allocator_init(LEGACY_SURFACE_HEAP_ADDRESS, LEGACY_SURFACE_HEAP_SIZE);
+	surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
+	if (!reserve_host_control_ranges() || !video_videocap_backing_reserve())
+		printf("[video] host-control or videocap backing unavailable at boot\n");
 
 	xadc_init();
 

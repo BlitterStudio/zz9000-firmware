@@ -9,81 +9,64 @@ Ranges below use an exclusive end: `0x00000000`–`0x08000000` is 128 MiB.
 
 ## Current layout
 
+Every boundary below is half-open. The normal cacheable host-visible interval
+is one allocator shared by P96 off-screen surfaces and SDK shared allocations;
+it is not statically split between clients.
+
 | Range | Size | Use |
 |---|---:|---|
-| `0x00000000`–`0x08000000` | 128 MiB | Low firmware image and board-memory services: framebuffer and RTG surfaces, SDK shared heap, and ARM-local surface heap. |
-| `0x08000000`–`0x08200000` | 2 MiB | Z3 SDK mailbox, direct audio rings, legacy AHI/MHI audio scratch, and the alignment gap before the high firmware region. |
-| `0x08200000`–`0x18000000` | 254 MiB | High firmware image, newlib heap, and ARM exception stacks. The default `_HEAP_SIZE` is 224 MiB. |
-| `0x18000000`–`0x18100000` | 1 MiB | Dual-core task queue and shared session tables (`SDK_TASKQ_REGION_*`). |
-| `0x18100000`–`0x1BF00000` | 62 MiB | Card-pool range A1. |
-| `0x1BF00000`–`0x1C000000` | 1 MiB | Core-1 stack (`SDK_CORE1_STACK_*`). |
-| `0x1C000000`–`0x20000000` | 64 MiB | Card-pool range A2. |
-| `0x20000000`–`0x30000000` | 256 MiB | Zorro III fast RAM while advertised; otherwise card-pool range B. |
-| `0x30000000`–`0x3FC00000` | 252 MiB | Card-pool range C. |
-| `0x3FC00000`–`0x40000000` | 4 MiB | Fixed audio, boot ROM, Ethernet, and SD/USB buffers. |
+| `0x00000000`–`0x00100000` | 1 MiB | Low aperture/boot-reserved DDR. |
+| `0x00100000`–`0x00200000` | 1 MiB | Low firmware image and board services. |
+| `0x00200000`–`0x08200000` | 128 MiB | Single host-visible interval allocator. Dynamic videocap backing, P96 surfaces, SDK shared allocations, mailbox/direct-ring pages, and matched-driver scratch reservations are allocated here. |
+| `0x08200000`–`0x0A000000` | 30 MiB | Firmware image and static data. The linker asserts image/BSS stays below the end. |
+| `0x0A000000`–`0x0A100000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
+| `0x0A100000`–`0x0A200000` | 1 MiB | Full-descending core-1 stack. |
+| `0x0A200000`–`0x12200000` | 128 MiB | Newlib heap. `_sbrk` reports current and peak break use at reset. |
+| `0x12200000`–`0x2FE00000` | 222 MiB | Permanent prefix of the card pool. |
+| `0x2FE00000`–`0x3FE00000` | 256 MiB | Fast-RAM landing window when advertised; otherwise contiguous revocable card-pool tail. |
+| `0x3FE00000`–`0x40000000` | 2 MiB | RTL-pinned audio, Ethernet, boot ROM, and USB/SD belt. |
 
-The linker keeps its low image below `0x00200000`. Its high region begins at
-`0x08200000`, and an assertion prevents the image, heap, and stacks from
-reaching `0x18000000`.
+The linker gives image/static and heap their own memory regions, so neither
+can grow across the task queue, core-1 stack, or first card-pool byte.
 
-## Fixed buffers at the top of DDR
+## RTL-pinned top belt
 
-The top 4 MiB is not card-pool memory. `memorymap.h` assigns it to these
-fixed users:
-
-| Address | Use |
+| Address or range | Use |
 |---|---|
-| `0x3FC00000` | Default audio TX ring (`AUDIO_TX_BUFFER_ADDRESS`). |
-| `0x3FC20000` | Default audio RX ring (`AUDIO_RX_BUFFER_ADDRESS`). |
-| `0x3FC28000` | First audio-fabric lease ring. The second follows the 122,880-byte first ring. |
-| `0x3FCF0000`–`0x3FCF2000` | 8 KiB boot ROM image. |
-| `0x3FD00000`, `0x3FD08000` | Ethernet TX and RX descriptor lists. |
-| `0x3FD10000`, `0x3FD20000` | Ethernet TX and RX frame buffers. |
-| `0x3FE00000` | 256 KiB Ethernet receive backlog. |
-| `0x3FE40000` | Shared SD boot and USB proxy block buffer. |
+| `0x3FE00000`, `0x3FE20000` | Audio TX and RX formatter rings. |
+| `0x3FE28000`–`0x3FE64000` | Two audio-fabric lease rings. |
+| `0x3FEF0000`–`0x3FEF2000` | 8 KiB boot ROM image. |
+| `0x3FF00000`, `0x3FF08000` | Ethernet TX and RX descriptor lists. |
+| `0x3FF10000`, `0x3FF20000` | Ethernet TX and RX frame buffers. |
+| `0x3FF30000`–`0x3FF70000` | Ethernet receive backlog. |
+| `0x3FF70000`–`0x3FF76000` | Shared SD boot and USB proxy block buffer. |
 
-## Card pool
+## Card pool and Fast RAM
 
-The card pool supplies large firmware working areas in 64 KiB pages. Every
-allocation has an owner class and instance, so a session can release all of
-its allocations at once.
+The card pool supplies 64 KiB pages, tracked by owner class and instance.
+`FIRMWARE` allocations persist through an Amiga reset; media, image, input,
+and ARM-only SDK-surface owners are reset-reclaimable. While Fast RAM is
+withheld, the revocable tail is opened immediately after the permanent prefix,
+forming one contiguous pool. Before re-advertising Fast RAM, firmware revokes
+that tail and flushes cached ownership.
 
-| Class | Limit |
-|---|---:|
-| `FIRMWARE` | 64 MiB |
-| `MEDIA` | 128 MiB |
-| `IMAGE` | 72 MiB |
-
-At startup, ranges A1, A2, and C are open. Range B is registered as a
-revocable range but stays closed while Zorro III fast RAM is advertised. It
-opens when that window is available to firmware, including on Zorro II.
-Before an Amiga reset changes that decision, firmware revokes range B and
-flushes its data cache. Reset then releases every non-`FIRMWARE` owner.
-
-WebM decoder arenas use `MEDIA` owners, and WebP decoder arenas use `IMAGE`
-owners. The pool is preferred over new fixed carve-outs.
+Fast RAM is advertised only when `fast_ram=on` is valid **and** RTL capability
+bit `MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000` is present in `MNTZORRO_REG7`.
+This prevents new firmware from exposing Fast RAM on an old bitstream with a
+different DDR landing base.
 
 ## Cache attributes
 
-The BSP translation table initially maps DDR as shareable, write-back,
-write-allocate normal memory. Firmware changes the following areas for
-non-coherent users:
-
-| Range or address | Attribute | Reason |
-|---|---|---|
-| `0x08100000`–`0x08200000` | Non-cacheable | Z3 SDK mailbox and direct-audio ring section. |
-| `0x3FC00000`–`0x3FD00000` | Non-cacheable | Audio formatter and audio-fabric lease rings. |
-| `0x3FD00000`, `0x3FE00000` | Strongly ordered | Ethernet descriptor list and receive backlog sections. |
-
-With the Generation-2 aperture contract acknowledged, the Zorro II SDK
-mailbox uses one non-cacheable 4 KiB page immediately below its audio scratch
-range.
+DDR starts shareable write-back/write-allocate. The host-visible allocator
+uses the normal mapping except for its mailbox, direct-ring, and other
+non-coherent control pages, which use the existing second-level 4 KiB
+non-cacheable mappings. The RTL-pinned audio belt is non-cacheable; Ethernet
+descriptor/backlog storage uses its required strongly ordered mapping.
 
 ## Adding a fixed range
 
-1. Define its start, size, and exclusive end in `memorymap.h`, deriving it
-   from a neighbour where possible.
-2. Add `#error` guards for both neighbours.
-3. Update the layout and cache-attribute tables here.
+Use the card pool or the host-visible interval allocator unless hardware or
+the Amiga protocol requires a stable address. A true fixed range must have
+derived exclusive bounds, overlap assertions in `memorymap.h`, matching RTL
+definitions where applicable, and an entry in this document.
 
-Use the card pool unless hardware or the Amiga requires a stable address.

@@ -18,32 +18,32 @@
 #define MNT_FB_BASE     			0x00010000
 #define AUDIO_TX_BUFFER_SIZE        (AUDIO_BYTES_PER_PERIOD * AUDIO_NUM_PERIODS)
 
-#define Z3_SCRATCH_ADDR             0x033F0000 // FIXME @ _Bnu
-#define ADDR_ADJ                    (FRAMEBUFFER_ADDRESS - MNT_FB_BASE) // FIXME @ _Bnu
+// Framebuffer and all host-visible runtime allocations begin at the board
+// aperture's DDR base. The top 2 MiB is the RTL-pinned peripheral belt.
+#define Z3_SCRATCH_ADDR             0x033F0000
+#define ADDR_ADJ                    (FRAMEBUFFER_ADDRESS - MNT_FB_BASE)
 
-#define AUDIO_TX_BUFFER_ADDRESS     0x3FC00000 // default, changed by driver
-#define AUDIO_RX_BUFFER_ADDRESS     0x3FC20000 // default, changed by driver
-#define TX_BD_LIST_START_ADDRESS    0x3FD00000
-#define RX_BD_LIST_START_ADDRESS    0x3FD08000
-#define TX_FRAME_ADDRESS            0x3FD10000
-#define RX_FRAME_ADDRESS            0x3FD20000
-#define RX_BACKLOG_ADDRESS          0x3FE00000 // 128 * 2048 space (256 kB) — must match FRAME_MAX_BACKLOG
-#define USB_BLOCK_STORAGE_ADDRESS   0x3FE40000 // legacy name; shared SD boot / USB proxy buffer
-#define BOOT_ROM_ADDRESS            0x3FCF0000
+#define AUDIO_TX_BUFFER_ADDRESS     0x3FE00000
+#define AUDIO_RX_BUFFER_ADDRESS     0x3FE20000
+#define TX_BD_LIST_START_ADDRESS    0x3FF00000
+#define RX_BD_LIST_START_ADDRESS    0x3FF08000
+#define TX_FRAME_ADDRESS            0x3FF10000
+#define RX_FRAME_ADDRESS            0x3FF20000
+#define RX_BACKLOG_ADDRESS          0x3FF30000
+#define USB_BLOCK_STORAGE_ADDRESS   0x3FF70000
+#define BOOT_ROM_ADDRESS            0x3FEF0000
+#define BOOT_ROM_DDR_SIZE           0x00002000
+#define ETH_BD_LIST_SIZE            0x00008000
+#define ETH_FRAME_BUFFER_SIZE       0x00010000
+#define ETH_RX_BACKLOG_SIZE         0x00040000
+#define USB_BLOCK_STORAGE_SIZE       0x00006000
 
-// Audio fabric lease-plane card-side source rings (plan U3): one ring
-// per leaseable compositor slot (mailbox slot 1, firmware-reserved slot 2),
-// MHI pcm_ring geometry (16 periods x 3840 bytes). Claimed from the free
-// gap between the audio RX formatter ring and the boot ROM window: the RX
-// ring ends at 0x3FC27800 (AUDIO_NUM_PERIODS * AUDIO_BYTES_PER_PERIOD at
-// 0x3FC20000), the linker image never rises above 0x18000000 (ps7_ddr_0 +
-// ps7_ddr_hi + heap), and no other firmware or driver constant names this
-// sub-range. BEGIN zeroes its ring, so a fresh lease can never read a
-// previous lease's (or a previous firmware lifetime's) samples.
+// Audio fabric lease-plane card-side source rings (plan U3): one ring per
+// leaseable compositor slot. They are hardware-pinned in the top belt.
 #define AUDIO_FABRIC_LEASE_RING_PERIODS 32U
 #define AUDIO_FABRIC_LEASE_RING_BYTES \
     (AUDIO_FABRIC_LEASE_RING_PERIODS * AUDIO_BYTES_PER_PERIOD)
-#define AUDIO_FABRIC_LEASE_RING1_ADDRESS 0x3FC28000
+#define AUDIO_FABRIC_LEASE_RING1_ADDRESS 0x3FE28000
 #define AUDIO_FABRIC_LEASE_RING2_ADDRESS \
     (AUDIO_FABRIC_LEASE_RING1_ADDRESS + AUDIO_FABRIC_LEASE_RING_BYTES)
 #define AUDIO_FABRIC_LEASE_RINGS_END \
@@ -57,17 +57,40 @@
 #error "fabric lease rings overlap the boot ROM DDR window"
 #endif
 
+#if AUDIO_TX_BUFFER_ADDRESS + AUDIO_TX_BUFFER_SIZE > AUDIO_RX_BUFFER_ADDRESS || \
+    AUDIO_RX_BUFFER_ADDRESS + AUDIO_TX_BUFFER_SIZE > \
+        AUDIO_FABRIC_LEASE_RING1_ADDRESS || \
+    AUDIO_FABRIC_LEASE_RINGS_END > BOOT_ROM_ADDRESS || \
+    BOOT_ROM_ADDRESS + BOOT_ROM_DDR_SIZE > TX_BD_LIST_START_ADDRESS || \
+    TX_BD_LIST_START_ADDRESS + ETH_BD_LIST_SIZE > RX_BD_LIST_START_ADDRESS || \
+    RX_BD_LIST_START_ADDRESS + ETH_BD_LIST_SIZE > TX_FRAME_ADDRESS || \
+    TX_FRAME_ADDRESS + ETH_FRAME_BUFFER_SIZE > RX_FRAME_ADDRESS || \
+    RX_FRAME_ADDRESS + ETH_FRAME_BUFFER_SIZE > RX_BACKLOG_ADDRESS || \
+    RX_BACKLOG_ADDRESS + ETH_RX_BACKLOG_SIZE > USB_BLOCK_STORAGE_ADDRESS || \
+    USB_BLOCK_STORAGE_ADDRESS + USB_BLOCK_STORAGE_SIZE > 0x40000000
+#error "RTL-pinned top-belt ranges overlap"
+#endif
+
+/*
+ * These legacy scratch addresses are temporary reservations in the unified
+ * host allocator until the matched-driver descriptor replacement is active.
+ */
 #define RTG_TEMPLATE_SCRATCH_ADDRESS 0x03400000
 #define RTG_TEMPLATE_SCRATCH_SIZE    0x00100000
 #define RTG_TEMPLATE_SCRATCH_END \
     (RTG_TEMPLATE_SCRATCH_ADDRESS + RTG_TEMPLATE_SCRATCH_SIZE)
 
-#define LEGACY_SURFACE_HEAP_ADDRESS RTG_TEMPLATE_SCRATCH_END
-#define LEGACY_SURFACE_HEAP_SIZE    0x02B00000
-#define LEGACY_SURFACE_HEAP_END \
-    (LEGACY_SURFACE_HEAP_ADDRESS + LEGACY_SURFACE_HEAP_SIZE)
+// P96 surfaces and SDK shared allocations occupy this single interval.
+#define Z3_P96_VRAM_END             HOST_VISIBLE_HEAP_END
+#define HOST_VISIBLE_HEAP_ADDRESS   FRAMEBUFFER_ADDRESS
+#define HOST_VISIBLE_HEAP_END       0x08200000
+#define HOST_VISIBLE_HEAP_SIZE \
+    (HOST_VISIBLE_HEAP_END - HOST_VISIBLE_HEAP_ADDRESS)
 
-#define SDK_LOW_DDR_RESERVED_END     0x08000000
+#if HOST_VISIBLE_HEAP_ADDRESS != FRAMEBUFFER_ADDRESS || \
+    HOST_VISIBLE_HEAP_END != 0x08200000
+#error "host-visible heap must fill the aperture below the firmware image"
+#endif
 
 // Host-window heap: the ONLY SDK allocation region a Zorro 2 board can
 // reach. The Z2 autoconfig window is 4 MB, so the shared heap at
@@ -106,21 +129,8 @@
 #error "host-window heap overlaps the Z2 audio scratch"
 #endif
 
-// SDK v2 host-visible heap. Keep this below the 0x033f0000 scratch area used
-// by the firmware until the SDK owns a formally reserved allocator region.
-// SDK_OP_DECOMPRESS_BATCH decodes entirely inside a host-provided arena
-// allocated from this shared heap (plus the LZH decoder's private <=64 KB
-// window) -- it reserves NO additional DDR region.
-#define SDK_SHARED_HEAP_ADDRESS     0x03000000
-#define SDK_SHARED_HEAP_SIZE        0x003F0000
-#define SDK_SHARED_HEAP_END \
-    (SDK_SHARED_HEAP_ADDRESS + SDK_SHARED_HEAP_SIZE)
-// SDK ARM-local surface heap. This is card-side DDR only and intentionally
-// starts after the RTG template scratch and legacy accelerator surface heap.
-#define SDK_LOCAL_SURFACE_HEAP_ADDRESS 0x06000000
-#define SDK_LOCAL_SURFACE_HEAP_SIZE    0x02000000
-#define SDK_LOCAL_SURFACE_HEAP_END \
-    (SDK_LOCAL_SURFACE_HEAP_ADDRESS + SDK_LOCAL_SURFACE_HEAP_SIZE)
+// SDK shared allocations are drawn from HOST_VISIBLE_HEAP_* together with
+// P96 off-screen surfaces. ARM-local SDK surfaces use the card pool.
 
 // The legacy AHI/MHI drivers place their Zorro 3 TX/RX rings at the top of
 // the 128 MB main board aperture. The buffer offset written to firmware is
@@ -135,25 +145,17 @@
 #define Z3_MAIN_BOARD_WINDOW_SIZE       0x08000000
 #define Z3_AUDIO_SCRATCH_ADDRESS \
     (FRAMEBUFFER_ADDRESS + Z3_MAIN_BOARD_WINDOW_SIZE - 0x00020000)
-#define Z3_AUDIO_SCRATCH_SIZE           0x00010000
+#define Z3_AUDIO_SCRATCH_SIZE           0x00020000
 #define Z3_AUDIO_SCRATCH_END \
     (Z3_AUDIO_SCRATCH_ADDRESS + Z3_AUDIO_SCRATCH_SIZE)
 #define FIRMWARE_HIGH_DDR_ADDRESS       0x08200000
 
-#if SDK_LOCAL_SURFACE_HEAP_ADDRESS < LEGACY_SURFACE_HEAP_END
-#error "SDK ARM-local heap overlaps legacy accelerator surface heap"
+#if Z3_P96_VRAM_END != HOST_VISIBLE_HEAP_END
+#error "P96 VRAM must use the complete host-visible interval"
 #endif
 
-#if SDK_SHARED_HEAP_END > Z3_SCRATCH_ADDR
-#error "SDK shared heap overlaps Z3 scratch area"
-#endif
-
-#if SDK_LOCAL_SURFACE_HEAP_END > SDK_LOW_DDR_RESERVED_END
-#error "SDK ARM-local heap exceeds low DDR reservation"
-#endif
-
-#if Z3_AUDIO_SCRATCH_ADDRESS < SDK_LOW_DDR_RESERVED_END
-#error "Z3 audio scratch overlaps low DDR allocators"
+#if Z3_AUDIO_SCRATCH_END > HOST_VISIBLE_HEAP_END
+#error "Z3 audio scratch must fit the host-visible interval"
 #endif
 
 #if Z3_AUDIO_SCRATCH_END > FIRMWARE_HIGH_DDR_ADDRESS
@@ -167,13 +169,8 @@
 // each slot block's base, the ring at +0x80. Slot 0 is the firmware pump
 // and keeps the card-side lease rings above; only slots 1..N are granted.
 //
-// Zorro III: a 128 KiB reservation butted against the legacy AHI/MHI
-// audio scratch, split into two 64 KiB slot blocks. The window's top belt
-// is the only Z3 range that is simultaneously host-visible and outside
-// every allocator: the driver's hand-out ceiling is LEGACY_SURFACE_HEAP_END
-// (also the Z3 framebuffer limit set in main.c), linker-managed low DDR
-// ends at SDK_LOW_DDR_RESERVED_END, and the legacy TX/RX rings start at
-// Z3_AUDIO_SCRATCH_ADDRESS. 16 periods matches the MHI pcm_ring geometry.
+// Zorro III direct rings occupy 4 KiB non-cacheable pages in the common
+// host-visible interval; matched drivers obtain their address in the mailbox.
 #define SDK_AUDIO_DIRECT_RING_Z3_SLOTS              2U
 #define SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS    0x081C0000
 #define SDK_AUDIO_DIRECT_RING_Z3_RESERVE_SIZE       0x00020000
@@ -191,9 +188,6 @@
 
 #if SDK_AUDIO_DIRECT_RING_Z3_RESERVE_END != Z3_AUDIO_SCRATCH_ADDRESS
 #error "Z3 direct-ring reservation must end at the audio scratch base"
-#endif
-#if SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS < SDK_LOCAL_SURFACE_HEAP_END
-#error "Z3 direct-ring reservation overlaps the SDK ARM-local surface heap"
 #endif
 #if SDK_AUDIO_DIRECT_RING_Z3_CONTROL2_ADDRESS != \
     (SDK_AUDIO_DIRECT_RING_Z3_CONTROL1_ADDRESS + \
@@ -304,164 +298,103 @@
 #error "Z2 SDK mailbox must fit the non-cacheable page below the audio scratch"
 #endif
 
-// Z3 fast-RAM DDR window. VARIANT_Z3_FASTRAM bitstreams map the 256 MB
-// fast-RAM PIC to this FIXED range regardless of where AmigaOS autoconfig
-// placed the board (mntzorro.v `Z3_FASTRAM_ARM_BASE`; bitstreams older than
-// 2026-07 instead reused the main-window offset, which made the landing zone
-// depend on relative board placement -- the hazard this pin removes).
-// While fast RAM is advertised the Amiga owns every byte of it and nothing on
-// the ARM side may live here; otherwise the card pool lends it out as range B
-// and takes it back on every Amiga reset (card_pool.h).
-#define Z3_FASTRAM_DDR_ADDRESS      0x20000000
+// Z3 fast-RAM DDR landing window. A matched RTL bitstream maps the 256 MB
+// autoconfig PIC here; while advertised the ARM must not allocate this tail.
+#define Z3_FASTRAM_DDR_ADDRESS      0x2FE00000
 #define Z3_FASTRAM_DDR_SIZE         0x10000000     // Z3_SIZE_256MB
 #define Z3_FASTRAM_DDR_END \
     (Z3_FASTRAM_DDR_ADDRESS + Z3_FASTRAM_DDR_SIZE)
 
-#if Z3_FASTRAM_DDR_ADDRESS < 0x18000000
-#error "Z3 fast-RAM window must sit above the linker-managed DDR (ends 0x18000000)"
-#endif
-
-// Dual-core scheduler task-queue control region. A small SCU-coherent slab in
-// the 0x18000000..0x20000000 carve -- above the linker-managed DDR
-// (ps7_ddr_hi ends at 0x18000000) and below the Z3 fast-RAM DDR window at
-// 0x20000000. Holds the taskq_shared_t control block and, at
-// SDK_IMAGE_SESSIONS_OFFSET, the image-stream session table (both cores
-// touch session state, and the coherent section removes the need for manual
-// cache maintenance on it); crypto data buffers stay in SDK_SHARED_HEAP with
-// core-0 cache management.
-#define SDK_TASKQ_REGION_ADDRESS    0x18000000
-#define SDK_TASKQ_REGION_SIZE       0x00100000     // 1 MB (one MMU section)
+// The high linker image stops before the scheduler's coherent task queue.
+#define FIRMWARE_IMAGE_END          0x0A000000
+#define SDK_TASKQ_REGION_ADDRESS    FIRMWARE_IMAGE_END
+#define SDK_TASKQ_REGION_SIZE       0x00100000
 #define SDK_TASKQ_REGION_END \
     (SDK_TASKQ_REGION_ADDRESS + SDK_TASKQ_REGION_SIZE)
 
-// Image-stream session table, inside the coherent region above. The offset
-// leaves the queue control block its own space (guarded against
-// sizeof(taskq_shared_t) in scheduler_arm.c); the table size is guarded in
-// sdk_image_stream.c.
+// Image/session offsets are inside the coherent task-queue section.
 #define SDK_IMAGE_SESSIONS_OFFSET   0x00040000
 #define SDK_IMAGE_SESSIONS_ADDRESS \
     (SDK_TASKQ_REGION_ADDRESS + SDK_IMAGE_SESSIONS_OFFSET)
 #define SDK_IMAGE_SESSIONS_MAX_BYTES \
     (SDK_VIDEO_SESSIONS_OFFSET - SDK_IMAGE_SESSIONS_OFFSET)
-
-// Codec-neutral streaming video sessions. The table contains only session
-// metadata and decoder pointers; codec working memory stays on the tracked
-// newlib heap owned by core 1. Keeping this small carve immediately before
-// the audio table preserves nearly all of the image-session allowance.
 #define SDK_VIDEO_SESSIONS_OFFSET   0x000BF000
 #define SDK_VIDEO_SESSIONS_ADDRESS \
     (SDK_TASKQ_REGION_ADDRESS + SDK_VIDEO_SESSIONS_OFFSET)
 #define SDK_VIDEO_SESSIONS_MAX_BYTES \
     (SDK_MEDIA_SESSION_OFFSET - SDK_VIDEO_SESSIONS_OFFSET)
-
-// Singleton MPEG media-session state. Unlike the decoder graph (which remains
-// core-1-owned), this small control block is read by core 0 for explicit
-// presentation/status and by the AX audio ISR for card-local PCM playback.
-// Keep it in the SCU-coherent slab so its published cursors are visible without
-// trying to invalidate another core's dirty L1 lines.
 #define SDK_MEDIA_SESSION_OFFSET    0x000BFC00
 #define SDK_MEDIA_SESSION_ADDRESS \
     (SDK_TASKQ_REGION_ADDRESS + SDK_MEDIA_SESSION_OFFSET)
 #define SDK_MEDIA_SESSION_MAX_BYTES \
     (SDK_MEDIA_PROFILE_OFFSET - SDK_MEDIA_SESSION_OFFSET)
-
-// Per-stage media pipeline timing (U7). Carved from the tail of the media
-// session's 1 KB allowance rather than given its own region: it is tiny, and
-// it must sit in this same SCU-coherent slab because core 1 accumulates the
-// decode and pack stages while core 0 reads them for MEDIA_SESSION_STATUS.
 #define SDK_MEDIA_PROFILE_OFFSET    0x000BFF00
 #define SDK_MEDIA_PROFILE_ADDRESS \
     (SDK_TASKQ_REGION_ADDRESS + SDK_MEDIA_PROFILE_OFFSET)
 #define SDK_MEDIA_PROFILE_MAX_BYTES \
     (SDK_AUDIO_STREAMS_OFFSET - SDK_MEDIA_PROFILE_OFFSET)
-
-// Audio-stream session table, also inside the coherent region: streams may
-// be core-1-affine (feed/decode on the worker) while core 0 begins/closes
-// them. No heap objects hang off these (the decoder state is embedded), so
-// unlike the image sessions they need no fault-reclaim gating. Size guarded
-// in sdk_mailbox.c.
 #define SDK_AUDIO_STREAMS_OFFSET    0x000C0000
 #define SDK_AUDIO_STREAMS_ADDRESS \
     (SDK_TASKQ_REGION_ADDRESS + SDK_AUDIO_STREAMS_OFFSET)
 #define SDK_AUDIO_STREAMS_MAX_BYTES \
     (SDK_TASKQ_REGION_SIZE - SDK_AUDIO_STREAMS_OFFSET)
 
-#if SDK_TASKQ_REGION_ADDRESS < 0x18000000
-#error "task-queue region must sit above the linker-managed DDR (ends 0x18000000)"
-#endif
-#if defined(SDK_JEDI_REGION_ADDRESS)
-#if SDK_TASKQ_REGION_ADDRESS < (SDK_JEDI_REGION_ADDRESS + SDK_JEDI_REGION_SIZE)
-#error "task-queue region overlaps the JEDI region"
-#endif
-#endif
-#if SDK_TASKQ_REGION_END > Z3_FASTRAM_DDR_ADDRESS
-#error "task-queue region overlaps the Z3 fast-RAM DDR window"
-#endif
+// Core 1 uses a full-descending stack. Its top is encodable by the naked
+// reset stub's single ARM `mov sp, #immediate`.
+#define SDK_CORE1_STACK_BASE         SDK_TASKQ_REGION_END
+#define SDK_CORE1_STACK_SIZE         0x00100000
+#define SDK_CORE1_STACK_TOP \
+    (SDK_CORE1_STACK_BASE + SDK_CORE1_STACK_SIZE)
 
-// Dedicated core-1 stack (dual-core scheduler). The Cortex-A9 stack is
-// full-descending, so the CPU is given the TOP. Reserved in the
-// 0x18000000..0x20000000 carve, immediately above the task-queue region and
-// clear of every heap/framebuffer/DMA buffer below 0x08000000 -- the previous
-// hardcoded 0x06000000 core-1 SP sat on the seam of the surface heaps and
-// descended into the legacy accelerator heap. SDK_CORE1_STACK_TOP is chosen as
-// a valid ARM data-processing immediate (0x1C = 8-bit value, rotated) so the
-// reset stub can load SP in a single `mov` with no literal pool.
-#define SDK_CORE1_STACK_TOP     0x1C000000
-#define SDK_CORE1_STACK_SIZE    0x00100000     // 1 MB
-#define SDK_CORE1_STACK_BASE    (SDK_CORE1_STACK_TOP - SDK_CORE1_STACK_SIZE)
+// The linker reserves a bounded newlib heap after the task and stack sections.
+#define NEWLIB_HEAP_ADDRESS          SDK_CORE1_STACK_TOP
+#define NEWLIB_HEAP_SIZE             0x08000000
+#define NEWLIB_HEAP_END \
+    (NEWLIB_HEAP_ADDRESS + NEWLIB_HEAP_SIZE)
 
-#if SDK_CORE1_STACK_BASE < SDK_TASKQ_REGION_END
-#error "core-1 stack overlaps the task-queue region"
-#endif
-#if SDK_CORE1_STACK_TOP > Z3_FASTRAM_DDR_ADDRESS
-#error "core-1 stack overlaps the Z3 fast-RAM DDR window"
-#endif
+// Card service storage is one physical pool: a permanent prefix and a
+// revocable Fast-RAM tail. The tail opens only while Fast RAM is withheld.
+#define CARD_POOL_PAGE_SIZE          0x00010000
+#define CARD_POOL_PERMANENT_ADDRESS  NEWLIB_HEAP_END
+#define CARD_POOL_PERMANENT_END      Z3_FASTRAM_DDR_ADDRESS
+#define CARD_POOL_REVOCABLE_ADDRESS  Z3_FASTRAM_DDR_ADDRESS
+#define CARD_POOL_REVOCABLE_END      Z3_FASTRAM_DDR_END
 
-// Card service pool (card_pool.c): the high DDR nothing else claims, handed
-// out in 64 KB pages to owner-tracked firmware services. A1 and A2 sit either
-// side of the core-1 stack, B is the Z3 fast-RAM window while it is not
-// advertised, and C runs up to the lowest of the fixed buffers at the top of
-// DDR. Each range is derived from its neighbours, so moving one of them moves
-// the pool with it.
-#define CARD_POOL_PAGE_SIZE         0x00010000
-#define CARD_POOL_A1_ADDRESS        SDK_TASKQ_REGION_END
-#define CARD_POOL_A1_END            SDK_CORE1_STACK_BASE
-#define CARD_POOL_A2_ADDRESS        SDK_CORE1_STACK_TOP
-#define CARD_POOL_A2_END            Z3_FASTRAM_DDR_ADDRESS
-#define CARD_POOL_B_ADDRESS         Z3_FASTRAM_DDR_ADDRESS
-#define CARD_POOL_B_END             Z3_FASTRAM_DDR_END
-#define CARD_POOL_C_ADDRESS         0x30000000
-#define CARD_POOL_C_END             AUDIO_TX_BUFFER_ADDRESS
+// Complete target partition. Every interval is half-open and each end starts
+// its successor; changing a boundary without its neighbour stops the build.
+#define DDR_ADDRESS_START            0x00000000
+#define DDR_LOW_APERTURE_END         0x00100000
+#define FIRMWARE_LOW_DDR_ADDRESS     DDR_LOW_APERTURE_END
+#define FIRMWARE_LOW_DDR_END         FRAMEBUFFER_ADDRESS
+#define DDR_TOP_BELT_ADDRESS         AUDIO_TX_BUFFER_ADDRESS
+#define DDR_ADDRESS_END              0x40000000
 
-#if (CARD_POOL_A1_ADDRESS | CARD_POOL_A1_END | CARD_POOL_A2_ADDRESS | \
-     CARD_POOL_A2_END | CARD_POOL_B_ADDRESS | CARD_POOL_B_END | \
-     CARD_POOL_C_ADDRESS | CARD_POOL_C_END) & (CARD_POOL_PAGE_SIZE - 1)
-#error "card pool ranges must be page aligned"
+#if DDR_ADDRESS_START != 0x00000000 || DDR_ADDRESS_END != 0x40000000
+#error "DDR target partition must cover exactly 1 GiB"
 #endif
-#if CARD_POOL_A1_ADDRESS >= CARD_POOL_A1_END || \
-    CARD_POOL_A2_ADDRESS >= CARD_POOL_A2_END || \
-    CARD_POOL_C_ADDRESS >= CARD_POOL_C_END
+#if DDR_LOW_APERTURE_END != FIRMWARE_LOW_DDR_ADDRESS || \
+    FIRMWARE_LOW_DDR_END != HOST_VISIBLE_HEAP_ADDRESS || \
+    HOST_VISIBLE_HEAP_END != FIRMWARE_HIGH_DDR_ADDRESS || \
+    FIRMWARE_IMAGE_END != SDK_TASKQ_REGION_ADDRESS || \
+    SDK_TASKQ_REGION_END != SDK_CORE1_STACK_BASE || \
+    SDK_CORE1_STACK_TOP != NEWLIB_HEAP_ADDRESS || \
+    NEWLIB_HEAP_END != CARD_POOL_PERMANENT_ADDRESS || \
+    CARD_POOL_PERMANENT_END != CARD_POOL_REVOCABLE_ADDRESS || \
+    CARD_POOL_REVOCABLE_END != DDR_TOP_BELT_ADDRESS || \
+    Z3_FASTRAM_DDR_END != DDR_TOP_BELT_ADDRESS
+#error "DDR target partition has a gap or overlap"
+#endif
+#if (CARD_POOL_PERMANENT_ADDRESS | CARD_POOL_PERMANENT_END | \
+     CARD_POOL_REVOCABLE_ADDRESS | CARD_POOL_REVOCABLE_END) & \
+    (CARD_POOL_PAGE_SIZE - 1)
+#error "card pool bounds must be 64 KiB aligned"
+#endif
+#if CARD_POOL_PERMANENT_ADDRESS >= CARD_POOL_PERMANENT_END || \
+    CARD_POOL_REVOCABLE_ADDRESS >= CARD_POOL_REVOCABLE_END
 #error "card pool range is empty or inverted"
 #endif
-#if CARD_POOL_A1_ADDRESS < SDK_TASKQ_REGION_END || \
-    CARD_POOL_A1_END > SDK_CORE1_STACK_BASE || \
-    CARD_POOL_A2_ADDRESS < SDK_CORE1_STACK_TOP || \
-    CARD_POOL_A2_END > Z3_FASTRAM_DDR_ADDRESS
-#error "card pool range A overlaps the task queue, the core-1 stack or fast RAM"
-#endif
-#if CARD_POOL_C_ADDRESS < Z3_FASTRAM_DDR_END
-#error "card pool range C overlaps the Z3 fast-RAM window"
-#endif
-#if CARD_POOL_C_END > AUDIO_RX_BUFFER_ADDRESS || \
-    CARD_POOL_C_END > AUDIO_FABRIC_LEASE_RING1_ADDRESS || \
-    CARD_POOL_C_END > BOOT_ROM_ADDRESS || \
-    CARD_POOL_C_END > TX_BD_LIST_START_ADDRESS || \
-    CARD_POOL_C_END > RX_BD_LIST_START_ADDRESS || \
-    CARD_POOL_C_END > TX_FRAME_ADDRESS || \
-    CARD_POOL_C_END > RX_FRAME_ADDRESS || \
-    CARD_POOL_C_END > RX_BACKLOG_ADDRESS || \
-    CARD_POOL_C_END > USB_BLOCK_STORAGE_ADDRESS
-#error "card pool range C overlaps the buffers at the top of DDR"
+#if SDK_CORE1_STACK_TOP != 0x0A200000
+#error "core-1 stack top must remain a single-instruction ARM immediate"
 #endif
 
 // SDK v2 bootstrap mailbox (descriptor plus both rings; firmware publishes
@@ -470,12 +403,9 @@
 // uses the 0xa000..0xffff shared I/O buffer, which USB proxy transfers,
 // zzsd block I/O and firmware-update chunks overwrite (issue #129).
 //
-// Zorro III: a private block in the free 0x08000000..0x081C0000 belt below
-// the Z3 direct-ring reservation, reached through the main board aperture
-// (board offset = ARM - ADDR_ADJ). It shares the 1 MB section that
-// sdk_mailbox_init() maps non-cacheable with the direct rings: the Amiga
-// writes it through non-coherent AXI and the descriptor packs host- and
-// firmware-owned cursors into the same cache lines.
+// Zorro III: a 64 KiB control reservation inside the common host-visible
+// allocator. main.c reserves it before any P96/SDK client allocation. It
+// shares the second-level non-cacheable mapping with the direct-ring pages.
 //
 // Zorro II: the tail of the direct-ring reservation (SDK_MAILBOX_Z2_* above).
 #define SDK_MAILBOX_Z3_ADDRESS      0x08100000
@@ -483,8 +413,9 @@
 #define SDK_MAILBOX_Z3_RESERVE_END \
 	(SDK_MAILBOX_Z3_ADDRESS + SDK_MAILBOX_Z3_RESERVE_SIZE)
 
-#if SDK_MAILBOX_Z3_ADDRESS < SDK_LOW_DDR_RESERVED_END
-#error "Z3 SDK mailbox overlaps the linker-managed low DDR"
+#if SDK_MAILBOX_Z3_ADDRESS < HOST_VISIBLE_HEAP_ADDRESS || \
+    SDK_MAILBOX_Z3_RESERVE_END > HOST_VISIBLE_HEAP_END
+#error "Z3 SDK mailbox must fit the common host-visible allocator"
 #endif
 #if SDK_MAILBOX_Z3_RESERVE_END > SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS
 #error "Z3 SDK mailbox overlaps the Z3 direct-ring reservation"

@@ -144,6 +144,12 @@ struct ZZ_VIDEO_STATE {
 	int videocap_full_width_applied;
 	int videocap_ns_vsync_applied;
 
+	/* Host-visible backing selected for capture writeback. The RTL clears
+	 * its address-valid latch on reset, so reserve/reprogram this before
+	 * any capture activation. */
+	uint32_t videocap_backing_address;
+	uint8_t videocap_backing_programmed;
+
 	int interlace_old;
 	int videocap_ntsc_old;
 	int videocap_shres_old;
@@ -190,6 +196,10 @@ struct ZZ_VIDEO_STATE {
 
 struct ZZ_VIDEO_STATE* video_init();
 void video_reset();
+
+/* Reserve host-visible capture backing and program MNTVF_OP_VIDEOCAP_ADDRESS.
+ * Called after every surface_allocator_init(); safe to repeat. */
+int video_videocap_backing_reserve(void);
 
 /* Runtime RTG scanout-geometry diagnostics (config keys 21-25):
  * value of a diagnostic key from the last video_mode_init snapshot. */

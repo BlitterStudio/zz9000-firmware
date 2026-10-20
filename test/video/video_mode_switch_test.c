@@ -23,6 +23,7 @@ static uint32_t clock_mul_div, clock_div2;
 static unsigned clock_fail_locks;
 static uint8_t transmitter[256], i2c_register;
 static uint32_t formatter_data, formatter_ops[32];
+static uint32_t videocap_address_write;
 static XAxiVdma_DmaSetup dma_setup;
 static unsigned dma_starts;
 static uint32_t video_irq_enabled = 1;
@@ -50,6 +51,18 @@ static struct zz_config test_config = {
 const struct zz_config *zz_config_get(void)
 {
 	return &test_config;
+}
+
+uint32_t surface_allocator_alloc(uint32_t size)
+{
+	assert(size == VIDEO_VIDEOCAP_BACKING_RESERVATION_SIZE);
+	return FRAMEBUFFER_ADDRESS;
+}
+
+int surface_allocator_free(uint32_t address)
+{
+	assert(address == FRAMEBUFFER_ADDRESS);
+	return 0;
 }
 void Xil_L1DCacheFlush(void) {}
 void Xil_L2CacheFlush(void) {}
@@ -83,7 +96,11 @@ void test_xil_out32(uintptr_t address, uint32_t value)
 		formatter_data = value;
 	} else if (address == MNTZ_BASE_ADDR + MNTZORRO_REG2 &&
 	           (value & 0x80000000U)) {
-		formatter_ops[value & 31U] = formatter_data;
+		uint16_t op = (uint16_t)value;
+
+		formatter_ops[op & 31U] = formatter_data;
+		if (op == MNTVF_OP_VIDEOCAP_ADDRESS)
+			videocap_address_write = formatter_data;
 	}
 }
 
@@ -320,7 +337,8 @@ int main(void)
 	 * accepted feature write. Every VDMA failure leaves the request pending;
 	 * the unchanged serial mismatch retries on the next stable vblank. */
 	vs.framebuffer = capture_framebuffer;
-	vs.framebuffer_pan_offset = 0x00dff000;
+	assert(video_videocap_backing_reserve());
+	vs.framebuffer_pan_offset = 0;
 	vs.videocap_enabled_old = 1;
 	vs.videocap_video_mode = ZZVMODE_800x600;
 	vs.videocap_video_mode_applied = ZZVMODE_800x600;
@@ -442,14 +460,22 @@ int main(void)
 	geometry_native_vblank();
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == 0);
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (600U << 16 | 800U));
-	/* 15 kHz filtered 800x600 keeps the tuned origin. A short-line PAL
-	 * field on that same configured base is shown on 720x576 and must
-	 * start at the capture row, not 190 words before it. */
-	assert(vs.framebuffer_pan_offset == VIDEO_VDMA_CAPTURE_PAN_PAL_800X600);
+	/* PAL filtered 800x600 keeps its tuned origin relative to the
+	 * dynamically allocated capture backing. A short-line PAL field on
+	 * that same configured base is shown on 720x576 and starts at the
+	 * capture row. */
+	assert((vs.videocap_backing_address &
+		(VIDEO_VIDEOCAP_BACKING_ALIGNMENT - 1U)) == 0U);
+	assert(videocap_address_write == vs.videocap_backing_address);
+	assert(vs.framebuffer_pan_offset ==
+		vs.videocap_backing_address -
+		VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA -
+		FRAMEBUFFER_ADDRESS);
 	videocap_zstate |= 1U << 11;
 	assert(video_set_videocap_geometry(0, 0));
 	geometry_native_vblank();
-	assert(vs.framebuffer_pan_offset == VIDEO_VDMA_CAPTURE_PAN_BASE);
+	assert(vs.framebuffer_pan_offset ==
+		vs.videocap_backing_address - FRAMEBUFFER_ADDRESS);
 	assert(dma_setup.Stride == 720 * 4);
 	videocap_zstate &= ~(1U << 11);
 	vs.videocap_source_class_old = 0;

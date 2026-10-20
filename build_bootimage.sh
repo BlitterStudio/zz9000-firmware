@@ -53,7 +53,7 @@ OUTPUT=bootimage_work/BOOT.bin
 # ("Partition order invalid").
 PRELOAD_BOOTROM=1
 BOOTROM_IMAGE=bootimage_work/bootrom.bin
-BOOTROM_LOAD_ADDRESS=0x3FCF0000
+BOOTROM_LOAD_ADDRESS=0x3FEF0000
 TMP_BIF=
 TMP_BOOTROM_TOOL=
 
