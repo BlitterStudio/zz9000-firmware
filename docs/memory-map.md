@@ -60,6 +60,9 @@ bit `MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000` is present in `MNTZORRO_REG7`.
 This prevents new firmware from exposing Fast RAM on an old bitstream with a
 different DDR landing base.
 
+Firmware 2.9.0 requires the matching 2.9.0 bitstream. The Fast-RAM guard and
+the relocated landing window are a single hardware/software contract.
+
 ## Cache attributes
 
 DDR starts shareable write-back/write-allocate. The host-visible allocator

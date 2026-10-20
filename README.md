@@ -57,6 +57,10 @@ options, audio scenes, USB behavior, and Amiga MMU/cache settings.
 RAM. Its decision is fail-closed: a missing, malformed, unreadable, or `off`
 configuration does not advertise Fast RAM.
 
+Firmware 2.9.0 moves the Fast-RAM landing window and guards it in the FPGA.
+Install its matching bitstream and drivers as one update; do not pair the
+2.9.0 firmware with an older image.
+
 Other focused implementation and protocol documents are in [`docs/`](docs/).
 The SDK material in [`sdk/docs/`](sdk/docs/) covers SDK-facing formats,
 services, and AmigaOS packaging.

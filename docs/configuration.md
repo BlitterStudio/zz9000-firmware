@@ -161,6 +161,10 @@ new firmware therefore withholds Fast RAM from an older bitstream even when
 the configuration requests it. On an unstable 68040/68060 system, remove
 `fast_ram` or set it to `off`, then reboot.
 
+For firmware 2.9.0, install the matching 2.9.0 bitstream and RTG drivers
+before enabling `fast_ram`. The Fast-RAM location and its RTL guard changed
+together in this release.
+
 ## ZZ9000AX audio
 
 The audio control plane stores eight scenes, an active scene, a baseline, and

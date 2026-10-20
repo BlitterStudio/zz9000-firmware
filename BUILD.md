@@ -166,7 +166,12 @@ logs and reports, `SHA256SUMS`, and `sweep-summary.json` below
 `bootimage_work/`. If every directive fails, the best attempt is selected by
 the smallest slack normalised to its applicable floor and retained with its
 post-route physical-optimization checkpoint for diagnosis; the command exits
+
 nonzero and does not select a bitstream.
+
+For a release, copy only timing-qualified selected results into
+`bootimage_work/`, update `bootimage_work/SHA256SUMS-variants.txt`, and retain
+the sweep reports under `build/timing/` as build evidence.
 
 ## Build hardware variants
 
