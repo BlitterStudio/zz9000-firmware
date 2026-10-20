@@ -137,14 +137,16 @@ int main(int argc, char **argv)
 	                      "#define SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE       0x0000C000");
 
 	ok &= expect_contains(main_source, "main.c",
-	                      "surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS,");
+	                      "surface_allocator_init(FRAMEBUFFER_ADDRESS,");
 	ok &= expect_not_contains(main_source, "main.c",
 	                          "cur_mem_offset = 0x3500000");
 
 	ok &= expect_contains(dma_acc, "dma_acc.c",
-	                      "surface_allocator_alloc(sfc_size)");
+	                      "cardmem_acc_alloc(");
 	ok &= expect_contains(dma_acc, "dma_acc.c",
-	                      "not enough legacy surface heap");
+	                      "ACC_OP_CARDMEM_ALLOC_ABS");
+	ok &= expect_contains(dma_acc, "dma_acc.c",
+	                      "surface_allocator_firmware_alloc_aligned(");
 
 	free(memorymap);
 	free(main_source);

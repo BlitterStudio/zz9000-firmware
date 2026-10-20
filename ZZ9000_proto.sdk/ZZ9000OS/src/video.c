@@ -102,8 +102,9 @@ int video_videocap_backing_reserve(void)
 	uint32_t address = vs.videocap_backing_address;
 
 	if (address == 0U) {
-		uint32_t allocation = surface_allocator_alloc(
-			VIDEO_VIDEOCAP_BACKING_RESERVATION_SIZE);
+		uint32_t allocation = surface_allocator_firmware_alloc_aligned(
+			VIDEO_VIDEOCAP_BACKING_RESERVATION_SIZE,
+			SURFACE_ALLOCATOR_ALIGNMENT);
 
 		if (allocation == 0U)
 			return 0;
@@ -113,7 +114,7 @@ int video_videocap_backing_reserve(void)
 			~(VIDEO_VIDEOCAP_BACKING_ALIGNMENT - 1U);
 		if (address == 0U || address - allocation <
 		    VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA) {
-			(void)surface_allocator_free(allocation);
+			(void)surface_allocator_firmware_free(allocation);
 			return 0;
 		}
 		vs.videocap_backing_address = address;

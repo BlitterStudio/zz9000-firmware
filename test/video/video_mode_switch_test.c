@@ -54,13 +54,15 @@ const struct zz_config *zz_config_get(void)
 	return &test_config;
 }
 
-uint32_t surface_allocator_alloc(uint32_t size)
+uint32_t surface_allocator_firmware_alloc_aligned(uint32_t size,
+                                                  uint32_t alignment)
 {
 	assert(size == VIDEO_VIDEOCAP_BACKING_RESERVATION_SIZE);
+	(void)alignment;
 	return FRAMEBUFFER_ADDRESS;
 }
 
-int surface_allocator_free(uint32_t address)
+int surface_allocator_firmware_free(uint32_t address)
 {
 	assert(address == FRAMEBUFFER_ADDRESS);
 	return 0;

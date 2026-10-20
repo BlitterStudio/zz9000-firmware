@@ -80,15 +80,13 @@
 #define RTG_TEMPLATE_SCRATCH_END \
     (RTG_TEMPLATE_SCRATCH_ADDRESS + RTG_TEMPLATE_SCRATCH_SIZE)
 
-// The Z3 main-board window holds two allocators that must never share an
-// address. P96 manages its own board memory: rtg.library places screens and
-// any bitmap the driver's AllocBitMap hook declines anywhere in
-// [MemoryBase, MemoryBase + MemorySize), and the firmware never sees those
-// allocations. The RTG driver therefore reports exactly
-// Z3_P96_VRAM_ADDRESS..Z3_P96_VRAM_END as MemorySize. Everything the firmware
-// hands out (off-screen surfaces via ACC_OP_ALLOC_SURFACE, the capture
-// backing, SDK shared allocations, GFXData/template scratch, mailbox, direct
-// rings, AHI scratch) comes from the host-visible heap above it.
+// The shared Z3 allocator covers the complete card-visible window below the
+// firmware image. P96 CARDMEM commands allocate bottom-up; firmware-owned
+// surfaces, capture backing and SDK allocations allocate top-down. Fixed ABI
+// ranges below remain immutable reservations in that single allocator.
+//
+// Z3_P96_VRAM_* preserve the legacy display boundary used by older drivers;
+// they no longer divide allocator ownership.
 #define Z3_P96_VRAM_ADDRESS         FRAMEBUFFER_ADDRESS
 #define Z3_P96_VRAM_END             Z3_SCRATCH_ADDR
 #define HOST_VISIBLE_HEAP_ADDRESS   Z3_P96_VRAM_END
@@ -98,10 +96,10 @@
 
 #if Z3_P96_VRAM_END != HOST_VISIBLE_HEAP_ADDRESS || \
     HOST_VISIBLE_HEAP_END != 0x08200000
-#error "P96 VRAM and the host-visible heap must tile the aperture below the firmware image"
+#error "legacy P96 boundary and shared allocator end must match the DDR map"
 #endif
-#if RTG_TEMPLATE_SCRATCH_ADDRESS < HOST_VISIBLE_HEAP_ADDRESS
-#error "RTG template scratch must sit in the firmware host-visible heap"
+#if RTG_TEMPLATE_SCRATCH_ADDRESS < FRAMEBUFFER_ADDRESS
+#error "RTG template scratch must sit in the shared Z3 allocator"
 #endif
 
 // Host-window heap: the ONLY SDK allocation region a Zorro 2 board can

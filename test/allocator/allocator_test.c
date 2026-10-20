@@ -11,12 +11,18 @@
 #include <string.h>
 #include "surface_allocator.h"
 #include "memorymap.h"
+#include "cardmem_acc.h"
 
 /* Fake heap: addresses are never dereferenced by the allocator. */
 #define HEAP_BASE 0x03500000u
 #define HEAP_SIZE 0x00100000u /* 1 MB keeps exhaustion tests fast */
 #define ALIGN     SURFACE_ALLOCATOR_ALIGNMENT
 
+
+/* Existing allocator coverage exercises the P96 default-allocation path. */
+#define surface_allocator_alloc(size) \
+    surface_allocator_p96_alloc((size), ALIGN)
+#define surface_allocator_free(address) surface_allocator_p96_free(address)
 /* Host backing for the allocator's firmware SMP lock. */
 int smp_cpu_id(void) { return 0; }
 uint32_t smp_local_irq_save(void) { return 0; }
@@ -63,31 +69,31 @@ static void test_basic_alloc(void) {
     CHECK(surface_allocator_used_bytes() == 4 * ALIGN);
 }
 
-static void test_p96_sdk_interleaving(void) {
+static void test_p96_firmware_interleaving(void) {
     uint32_t p96_a;
-    uint32_t sdk;
+    uint32_t firmware;
     uint32_t p96_b;
-    uint32_t sdk_reused;
+    uint32_t firmware_reused;
     uint32_t free_total;
     uint32_t largest_free;
 
     surface_allocator_init(HEAP_BASE, HEAP_SIZE);
-    p96_a = surface_allocator_alloc(1024);
-    sdk = surface_allocator_alloc_aligned(300, 4096);
-    p96_b = surface_allocator_alloc(1024);
+    p96_a = surface_allocator_p96_alloc(1024, ALIGN);
+    firmware = surface_allocator_firmware_alloc_aligned(300, 4096);
+    p96_b = surface_allocator_p96_alloc(1024, ALIGN);
     CHECK(p96_a == HEAP_BASE);
-    CHECK(sdk == HEAP_BASE + 4096);
-    CHECK((sdk & 4095u) == 0u);
+    CHECK(firmware == HEAP_BASE + HEAP_SIZE - 4096);
+    CHECK((firmware & 4095u) == 0u);
     CHECK(p96_b == HEAP_BASE + 1024);
-    CHECK(surface_allocator_owns(p96_a, 1024));
-    CHECK(surface_allocator_owns(sdk, 300));
-    CHECK(!surface_allocator_owns(sdk, 513));
-    CHECK(surface_allocator_free(sdk) == 0);
-    sdk_reused = surface_allocator_alloc_aligned(128, 4096);
-    CHECK(sdk_reused == sdk);
+    CHECK(surface_allocator_firmware_owns(firmware, 300));
+    CHECK(!surface_allocator_firmware_owns(firmware, 513));
+    CHECK(!surface_allocator_firmware_owns(p96_a, 1024));
+    CHECK(surface_allocator_firmware_free(firmware) == 0);
+    firmware_reused = surface_allocator_firmware_alloc_aligned(128, 4096);
+    CHECK(firmware_reused == firmware);
     surface_allocator_free_stats(&free_total, &largest_free);
     CHECK(free_total == HEAP_SIZE - surface_allocator_used_bytes());
-    CHECK(largest_free >= HEAP_SIZE - 4608);
+    CHECK(largest_free == HEAP_SIZE - 6 * 1024);
 }
 
 static void test_zero_size(void) {
@@ -324,9 +330,111 @@ static void test_churn(void) {
             printf("FAIL churn(seed=%08x) op=%d: used %u != oracle %u\n",
                    seed, op, surface_allocator_used_bytes(), oracle_used_bytes);
             bad = 1;
+
         }
     }
     CHECK(!bad);
+}
+static uint32_t be32(uint32_t value)
+{
+    return ((value & 0x000000ffU) << 24) |
+           ((value & 0x0000ff00U) << 8) |
+           ((value & 0x00ff0000U) >> 8) |
+           ((value & 0xff000000U) >> 24);
+}
+
+static void test_owner_split_and_guards(void)
+{
+    uint32_t p96;
+    uint32_t firmware;
+
+    surface_allocator_init(HEAP_BASE, HEAP_SIZE);
+    CHECK(surface_allocator_reserve(HEAP_BASE + 0x4000U, 0x1000U) == 0);
+    p96 = surface_allocator_p96_alloc(0x1000U, 0x1000U);
+    firmware = surface_allocator_firmware_alloc_aligned(0x1000U, 0x1000U);
+    CHECK(p96 == HEAP_BASE);
+    CHECK(firmware == HEAP_BASE + HEAP_SIZE - 0x1000U);
+    CHECK(surface_allocator_p96_alloc_abs(HEAP_BASE + 0x4000U, 0x100U) == 0);
+    CHECK(surface_allocator_p96_free(firmware) == -1);
+    CHECK(surface_allocator_firmware_free(p96) == -1);
+    CHECK(surface_allocator_p96_free(p96) == 0);
+    CHECK(surface_allocator_firmware_free(firmware) == 0);
+    surface_allocator_init(HEAP_BASE, HEAP_SIZE);
+    firmware = surface_allocator_firmware_alloc_aligned(HEAP_SIZE, ALIGN);
+    CHECK(firmware == HEAP_BASE);
+    CHECK(surface_allocator_firmware_alloc_aligned(ALIGN, ALIGN) == 0U);
+    CHECK(surface_allocator_firmware_free(firmware) == 0);
+}
+
+static void test_acc_surface_uses_firmware_heap(void)
+{
+    uint32_t p96;
+    uint32_t acc_surface;
+
+    surface_allocator_init(HEAP_BASE, HEAP_SIZE);
+    p96 = surface_allocator_p96_alloc(ALIGN, ALIGN);
+    /* ACC_OP_ALLOC_SURFACE is the firmware ZZ_AllocBitMap path. */
+    acc_surface = surface_allocator_firmware_alloc_aligned(ALIGN, ALIGN);
+    CHECK(p96 == HEAP_BASE);
+    CHECK(acc_surface == HEAP_BASE + HEAP_SIZE - ALIGN);
+    CHECK(surface_allocator_firmware_free(acc_surface) == 0);
+    CHECK(surface_allocator_p96_free(p96) == 0);
+}
+
+static void test_abs_regrant_reference(void)
+{
+    const uint32_t target = HEAP_BASE + 0x2000U;
+
+    surface_allocator_init(HEAP_BASE, HEAP_SIZE);
+    CHECK(surface_allocator_p96_alloc_abs(target, 0x101U) == target);
+    CHECK(surface_allocator_p96_alloc_abs(target, 0x100U) == target);
+    CHECK(surface_allocator_p96_free(target) == 0);
+    CHECK(surface_allocator_block_size(target) == 0x200U);
+    CHECK(surface_allocator_p96_free(target) == 0);
+    CHECK(surface_allocator_block_size(target) == 0U);
+    CHECK(surface_allocator_p96_alloc_abs(target, 0x200U) == target);
+    CHECK(surface_allocator_p96_free(target) == 0);
+}
+
+static void test_reset_reinstalls_reservations(void)
+{
+    surface_allocator_init(HEAP_BASE, HEAP_SIZE);
+    CHECK(surface_allocator_reserve(HEAP_BASE + 0x2000U, 0x1000U) == 0);
+    CHECK(surface_allocator_p96_alloc_abs(HEAP_BASE + 0x2000U, ALIGN) == 0);
+    CHECK(surface_allocator_p96_alloc(ALIGN, ALIGN) == HEAP_BASE);
+    surface_allocator_init(HEAP_BASE, HEAP_SIZE);
+    CHECK(surface_allocator_reserve(HEAP_BASE + 0x2000U, 0x1000U) == 0);
+    CHECK(surface_allocator_p96_alloc_abs(HEAP_BASE + 0x2000U, ALIGN) == 0);
+    CHECK(surface_allocator_p96_alloc(ALIGN, ALIGN) == HEAP_BASE);
+}
+
+static void test_cardmem_acc_handlers(void)
+{
+    uint32_t reply;
+    int accepted;
+    const uint32_t base = 0x00200000U;
+
+    surface_allocator_init(base, 0x4000U);
+    accepted = cardmem_acc_alloc(be32(0x400U), be32(0x100U), &reply);
+    CHECK(accepted == 1);
+    CHECK(reply == 0U); /* A successful allocation at MemoryBase. */
+    accepted = cardmem_acc_alloc_abs(0U, be32(0x100U), &reply);
+    CHECK(accepted == 1);
+    CHECK(reply == 0U); /* ABS regrant of the offset-zero block. */
+    CHECK(cardmem_acc_free(0U, &reply) == 1);
+    CHECK(reply == 0U);
+    CHECK(cardmem_acc_free(0U, &reply) == 1);
+    CHECK(cardmem_acc_free(0U, &reply) == 0);
+
+    accepted = cardmem_acc_alloc_abs(be32(0x1200U), be32(0x101U), &reply);
+    CHECK(accepted == 1);
+    CHECK(be32(reply) == 0x1200U);
+    CHECK(cardmem_acc_alloc_abs(be32(0x1200U), be32(0x100U), &reply) == 1);
+    CHECK(be32(reply) == 0x1200U);
+    CHECK(cardmem_acc_free(be32(0x1200U), &reply) == 1);
+    CHECK(cardmem_acc_free(be32(0x1200U), &reply) == 1);
+    CHECK(cardmem_acc_alloc_abs(be32(0x4000U), be32(0x100U), &reply) == 0);
+    CHECK(reply == 0U);
 }
 
 static void test_z3_host_window_reservation(void)
@@ -355,8 +463,13 @@ int main(void) {
     test_slot_exhaustion();
     test_reset();
     test_churn();
-    test_p96_sdk_interleaving();
+test_p96_firmware_interleaving();
     test_z3_host_window_reservation();
+    test_owner_split_and_guards();
+    test_acc_surface_uses_firmware_heap();
+    test_abs_regrant_reference();
+    test_reset_reinstalls_reservations();
+    test_cardmem_acc_handlers();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -621,7 +621,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	interrupt_enabled_vblank = 0;
 
 	// Drop all host-visible allocations; P96 and SDK clients re-allocate.
-	surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
+	surface_allocator_init(FRAMEBUFFER_ADDRESS,
+		HOST_VISIBLE_HEAP_END - FRAMEBUFFER_ADDRESS);
 	if (!reserve_host_control_ranges() || !video_videocap_backing_reserve())
 		printf("[video] host-control or videocap backing unavailable after reset\n");
 	// the overlay shadows lived in that heap: drop the overlay too
@@ -847,7 +848,8 @@ int main() {
 	set_src_window((void *)(uintptr_t)ADDR_ADJ,
 		(void *)(uintptr_t)(ADDR_ADJ + Z3_MAIN_BOARD_WINDOW_SIZE));
 
-	surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
+	surface_allocator_init(FRAMEBUFFER_ADDRESS,
+		HOST_VISIBLE_HEAP_END - FRAMEBUFFER_ADDRESS);
 	if (!reserve_host_control_ranges() || !video_videocap_backing_reserve())
 		printf("[video] host-control or videocap backing unavailable at boot\n");
 

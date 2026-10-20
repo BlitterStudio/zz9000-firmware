@@ -8,8 +8,9 @@ TARGET := $(BUILD_DIR)/allocator_test
 CPPFLAGS += -I$(SRC_DIR)
 
 SOURCES := allocator_test.c $(SRC_DIR)/surface_allocator.c \
-	$(SRC_DIR)/sdk_smp_lock.c
-DEPS := $(SRC_DIR)/surface_allocator.h $(SRC_DIR)/sdk_smp_lock.h
+	$(SRC_DIR)/cardmem_acc.c $(SRC_DIR)/sdk_smp_lock.c
+DEPS := $(SRC_DIR)/surface_allocator.h $(SRC_DIR)/cardmem_acc.h \
+	$(SRC_DIR)/sdk_smp_lock.h
 
 .PHONY: test clean
 

@@ -2024,7 +2024,7 @@ static int range_valid(uint32_t address, uint32_t length,
 
 static int heap_range_valid(uint32_t address, uint32_t length)
 {
-	return surface_allocator_owns(address, length);
+	return surface_allocator_firmware_owns(address, length);
 }
 
 static int host_window_range_valid(uint32_t address, uint32_t length)
@@ -2463,7 +2463,7 @@ static uint16_t handle_alloc_shared(volatile struct SDKMailboxEntry *req,
 	} else if ((flags & SDK_ALLOC_HOST_WINDOW) != 0U) {
 		address = find_free_host_window_region(length, alignment);
 	} else {
-		address = surface_allocator_alloc_aligned(length, alignment);
+		address = surface_allocator_firmware_alloc_aligned(length, alignment);
 	}
 	if (address == 0U) {
 		memset(slot, 0, sizeof(*slot));
@@ -2508,7 +2508,7 @@ static uint16_t handle_free_shared(volatile struct SDKMailboxEntry *req,
 		(void)card_pool_free(&card_pool, buffer->address,
 		                     buffer->pool_owner);
 	else if ((buffer->flags & SDK_ALLOC_HOST_WINDOW) == 0U)
-		(void)surface_allocator_free(buffer->address);
+		(void)surface_allocator_firmware_free(buffer->address);
 
 	memset(buffer, 0, sizeof(*buffer));
 	return complete_status(req, comp, SDK_STATUS_OK);
@@ -2805,7 +2805,7 @@ static uint16_t handle_alloc_surface(volatile struct SDKMailboxEntry *req,
 						   slot->handle);
 		address = card_pool_alloc(&card_pool, length, slot->pool_owner);
 	} else {
-		address = surface_allocator_alloc_aligned(length, 64U);
+		address = surface_allocator_firmware_alloc_aligned(length, 64U);
 	}
 	if (address == 0U) {
 		memset(slot, 0, sizeof(*slot));
@@ -2854,7 +2854,7 @@ static uint16_t handle_free_surface(volatile struct SDKMailboxEntry *req,
 		(void)card_pool_free(&card_pool, surface->address,
 		                     surface->pool_owner);
 	else
-		(void)surface_allocator_free(surface->address);
+		(void)surface_allocator_firmware_free(surface->address);
 	memset(surface, 0, sizeof(*surface));
 	return complete_status(req, comp, SDK_STATUS_OK);
 }

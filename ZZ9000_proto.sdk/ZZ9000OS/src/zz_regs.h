@@ -221,6 +221,7 @@ enum zz_reg_offsets {
 #define ZZ_FW_CAP_FWUP_STATUS_MIRROR (1U << 11)
 #define ZZ_FW_CAP_FW_VERSION_PATCH (1U << 12)
 /* Bit 13 is reserved for the shared-heap prototype. */
+#define ZZ_FW_CAP_P96_CARDMEM (1U << 13)
 #define ZZ_FW_CAP_FWUP_MODULE_DIR (1U << 14)
 #define ZZ_FW_CAP_FIRMWARE_MODULES (1U << 15)
 /* The centered 1080p profiles are intentionally excluded here: firmware
@@ -283,8 +284,8 @@ enum zz_reg_offsets {
   (ZZ_FW_CAP_VIDEOCAP_PROFILE | ZZ_FW_CAP_VIDEOCAP_LIVE | \
    ZZ_FW_CAP_Z2_APERTURE_LAYOUT | ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN | \
    ZZ_FW_CAP_CUSTOM_MODE | ZZ_FW_CAP_FWUP_STATUS_MIRROR | \
-   ZZ_FW_CAP_FW_VERSION_PATCH | ZZ_FW_CAP_FWUP_MODULE_DIR | \
-   ZZ_FW_CAP_FIRMWARE_MODULES)
+ZZ_FW_CAP_FW_VERSION_PATCH | ZZ_FW_CAP_P96_CARDMEM | \
+   ZZ_FW_CAP_FWUP_MODULE_DIR | ZZ_FW_CAP_FIRMWARE_MODULES)
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,

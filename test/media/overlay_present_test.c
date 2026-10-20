@@ -42,17 +42,20 @@ int sdk_mailbox_enqueue_internal(uint32_t op, const void *payload,
 	return 1;
 }
 
-uint32_t surface_allocator_alloc(uint32_t size)
+uint32_t surface_allocator_firmware_alloc_aligned(uint32_t size,
+                                                  uint32_t alignment)
 {
 	uint32_t addr = next_surface;
 
+	(void)alignment;
 	next_surface += (size + 0xfffU) & ~0xfffU;
 	return addr;
 }
 
-void surface_allocator_free(uint32_t addr)
+int surface_allocator_firmware_free(uint32_t addr)
 {
 	(void)addr;
+	return 0;
 }
 
 int scheduler_core1_available(void) { return 1; }

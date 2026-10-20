@@ -164,6 +164,7 @@ C_SRCS = \
 	$(SRC_DIR)/dma_acc.c \
 	$(SRC_DIR)/dma_rtg.c \
 	$(SRC_DIR)/surface_allocator.c \
+	$(SRC_DIR)/cardmem_acc.c \
 	$(SRC_DIR)/card_pool.c \
 	$(SRC_DIR)/sdk_palette.c \
 	$(SRC_DIR)/overlay.c \

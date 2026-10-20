@@ -11,6 +11,7 @@
 #include "xil_cache.h"
 #include "surface_allocator.h"
 #include "sdk_aperture_layout.h"
+#include "cardmem_acc.h"
 
 /* Set only by the REG_ZZ_ALLOC_CLEAR_PROTOCOL register write (see
  * main.c); cleared on Amiga reset so a warm reboot re-handshakes. */
@@ -167,7 +168,8 @@ void handle_acc_op(uint16_t zdata)
             }
 
             uint32_t requested_size = sfc_size;
-            uint32_t sfc_addr = surface_allocator_alloc(sfc_size);
+            uint32_t sfc_addr = surface_allocator_firmware_alloc_aligned(
+                sfc_size, SURFACE_ALLOCATOR_ALIGNMENT);
             if (!sfc_addr) {
                 printf("not enough legacy surface heap for %d bytes.\n", sfc_size);
                 break;
@@ -214,11 +216,69 @@ void handle_acc_op(uint16_t zdata)
             data->offset[0] += (u32)FRAMEBUFFER_ADDRESS;
             printf("[acc] surface free +%lx\n",
                    (unsigned long)(data->offset[0] - (u32)FRAMEBUFFER_ADDRESS));
-            if (surface_allocator_free(data->offset[0]) != 0) {
+            if (surface_allocator_firmware_free(data->offset[0]) != 0) {
                 printf("Ignoring free of unknown surface at %p.\n",
                        (void *)data->offset[0]);
             }
             data->offset[0] = 0;
+            break;
+        }
+        case ACC_OP_CARDMEM_ALLOC: {
+            uint32_t reply;
+            uint32_t alignment = data->offset[0];
+            uint32_t size = data->offset[1];
+
+            data->u8_user[0] = 0U;
+            SWAP32(alignment);
+            SWAP32(size);
+            if (cardmem_acc_alloc(data->offset[0], data->offset[1], &reply)) {
+                uint32_t offset = reply;
+
+                data->u8_user[0] = 1U;
+                SWAP32(offset);
+                printf("[p96h] alloc +%lx %lu/%lu\n",
+                       (unsigned long)offset,
+                       (unsigned long)size, (unsigned long)alignment);
+            } else {
+                printf("[p96h] alloc reject %lu/%lu\n",
+                       (unsigned long)size, (unsigned long)alignment);
+            }
+            data->offset[0] = reply;
+            break;
+        }
+        case ACC_OP_CARDMEM_ALLOC_ABS: {
+            uint32_t reply;
+            uint32_t target = data->offset[0];
+            uint32_t size = data->offset[1];
+
+            data->u8_user[0] = 0U;
+            SWAP32(target);
+            SWAP32(size);
+            if (cardmem_acc_alloc_abs(data->offset[0], data->offset[1],
+                                      &reply)) {
+                data->u8_user[0] = 1U;
+                printf("[p96h] abs +%lx %lu\n", (unsigned long)target,
+                       (unsigned long)size);
+            } else {
+                printf("[p96h] abs reject +%lx %lu\n",
+                       (unsigned long)target, (unsigned long)size);
+            }
+            data->offset[0] = reply;
+            break;
+        }
+        case ACC_OP_CARDMEM_FREE: {
+            uint32_t reply;
+            uint32_t target = data->offset[0];
+
+            data->u8_user[0] = 0U;
+            SWAP32(target);
+            if (cardmem_acc_free(data->offset[0], &reply)) {
+                data->u8_user[0] = 1U;
+                printf("[p96h] free +%lx\n", (unsigned long)target);
+            } else {
+                printf("[p96h] free reject +%lx\n", (unsigned long)target);
+            }
+            data->offset[0] = reply;
             break;
         }
         case ACC_OP_SET_BPP_CONVERSION_TABLE: {

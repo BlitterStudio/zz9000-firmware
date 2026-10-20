@@ -142,7 +142,7 @@ static void overlay_free_shadows(void)
 {
 	for (int i = 0; i < 2; i++) {
 		if (ov.shadow[i]) {
-			surface_allocator_free(ov.shadow[i]);
+			surface_allocator_firmware_free(ov.shadow[i]);
 			ov.shadow[i] = 0;
 			ov.shadow_div[i] = 0U;
 		}
@@ -323,8 +323,10 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 		ov.front = -1;
 		ov.ready_idx = -1;
 		overlay_free_shadows();
-		ov.shadow[0] = surface_allocator_alloc(need);
-		ov.shadow[1] = surface_allocator_alloc(need);
+		ov.shadow[0] = surface_allocator_firmware_alloc_aligned(
+			need, SURFACE_ALLOCATOR_ALIGNMENT);
+		ov.shadow[1] = surface_allocator_firmware_alloc_aligned(
+			need, SURFACE_ALLOCATOR_ALIGNMENT);
 		if (!ov.shadow[0] || !ov.shadow[1]) {
 			overlay_free_shadows();
 			status = OVERLAY_STATUS_NO_MEMORY;
