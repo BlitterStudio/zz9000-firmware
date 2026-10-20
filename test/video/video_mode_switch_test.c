@@ -871,7 +871,7 @@ int main(void)
 	assert(vs.framebuffer_pan_offset == 0x00123400U);
 	assert(vs.framebuffer_pan_width == 1280U);
 	assert(dma_buffer_address ==
-	       (UINTPTR)vs.framebuffer + 0x00123400U);
+	       (UINTPTR)((uint32_t)(uintptr_t)vs.framebuffer + 0x00123400U));
 	puts("video mode switch: PASS");
 	return 0;
 }
