@@ -29,8 +29,8 @@
 #define MPEGA_LIBRARY_NAME "mpega.library"
 
 #define MPEGA_LIBRARY_VERSION 2
-#define MPEGA_LIBRARY_REVISION 125
-#define MPEGA_LIBRARY_DATE "13.08.2026"
+#define MPEGA_LIBRARY_REVISION 126
+#define MPEGA_LIBRARY_DATE "21.10.2026"
 
 /* Derive the $VER: string from the version macros rather than repeating the
  * numbers. They are the same identity read two ways -- lib_Version and
@@ -87,6 +87,10 @@ typedef struct MPEGACompatStream {
   ZZ9KSharedBuffer pcm_ring;
   ZZ9KSharedBuffer staging;
   ZZ9KAudioStreamResult result;
+  /* The open stream's id. Kept apart from `result`: the host layer zeroes a
+   * result struct whenever an operation fails, and the session must still
+   * be closed afterwards. */
+  uint32_t session;
   uint8_t *input_buffer;
   APTR hook_handle;
   BPTR file;
@@ -910,8 +914,9 @@ static void mpega_stream_end_session(MPEGACompatStream *state)
   }
   if (state->session_open) {
     (void)mpega_ack_pcm(state, 1);
-    (void)ZZ9KAudioStreamClose(state->result.session, 0, &close_result);
+    (void)ZZ9KAudioStreamClose(state->session, 0, &close_result);
     state->session_open = 0;
+    state->session = 0U;
   }
   if (state->mp3_allocated) {
     (void)ZZ9KFreeShared(state->mp3_ring.handle);
@@ -1227,6 +1232,7 @@ static int mpega_stream_begin(MPEGACompatStream *state)
   }
 
   state->session_open = 1;
+  state->session = state->result.session;
   state->pcm_read_offset = state->result.pcm_read;
   return 1;
 }
@@ -1250,6 +1256,7 @@ static int mpega_stream_feed_until_pcm(MPEGACompatStream *state)
 
   for (attempts = 0; attempts < MPEGA_MAX_FEED_ATTEMPTS; attempts++) {
     ZZ9KAudioStreamFeedDesc feed;
+    ZZ9KAudioStreamResult result;
     LONG got;
     uint32_t flags;
 
@@ -1284,14 +1291,15 @@ static int mpega_stream_feed_until_pcm(MPEGACompatStream *state)
     }
 
     if (!zz9k_audio_build_stream_feed_desc(
-            &feed, state->result.session, state->staging.handle, 0U,
+            &feed, state->session, state->staging.handle, 0U,
             (uint32_t)got, flags)) {
       return MPEGA_ERR_BADVALUE;
     }
 
-    if (ZZ9KAudioStreamFeed(&feed, &state->result) != ZZ9K_STATUS_OK) {
+    if (ZZ9KAudioStreamFeed(&feed, &result) != ZZ9K_STATUS_OK) {
       return MPEGA_ERR_BADFRAME;
     }
+    state->result = result;
     mpega_update_stream_info(state);
 
     if (mpega_pcm_available(state) != 0U) {
@@ -1569,6 +1577,8 @@ static uint32_t mpega_copy_pcm_wrapped(MPEGACompatStream *state,
 
 static int mpega_ack_pcm(MPEGACompatStream *state, int force)
 {
+  ZZ9KAudioStreamResult result;
+
   if (!state || !state->session_open) {
     return 0;
   }
@@ -1579,10 +1589,11 @@ static int mpega_ack_pcm(MPEGACompatStream *state, int force)
     return 1;
   }
 
-  if (ZZ9KAudioStreamRead(state->result.session, state->pcm_pending_ack_bytes,
-                          0U, &state->result) != ZZ9K_STATUS_OK) {
+  if (ZZ9KAudioStreamRead(state->session, state->pcm_pending_ack_bytes,
+                          0U, &result) != ZZ9K_STATUS_OK) {
     return 0;
   }
+  state->result = result;
 
   state->pcm_pending_ack_bytes = 0U;
   state->pcm_read_offset = state->result.pcm_read;

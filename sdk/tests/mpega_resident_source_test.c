@@ -94,7 +94,7 @@ int main(int argc, char **argv)
    * two ways, and hardcoding the string let them drift apart during the v2.8
    * freeze. Pin the macros and the derivation, not the rendered text. */
   ok &= expect_contains(source, "#define MPEGA_LIBRARY_VERSION 2");
-  ok &= expect_contains(source, "#define MPEGA_LIBRARY_REVISION 125");
+  ok &= expect_contains(source, "#define MPEGA_LIBRARY_REVISION 126");
   ok &= expect_contains(source,
                         "MPEGA_STRINGIFY(MPEGA_LIBRARY_VERSION)");
   ok &= expect_contains(source,
@@ -201,7 +201,6 @@ int main(int argc, char **argv)
   ok &= expect_contains(source, "zz9k_audio_build_stream_begin_desc");
   ok &= expect_contains(source, "ZZ9KAudioStreamBegin(&begin");
   ok &= expect_contains(source, "ZZ9KAudioStreamFeed(&feed");
-  ok &= expect_contains(source, "ZZ9KAudioStreamRead(state->result.session");
   ok &= expect_contains(source, "state->pcm_pending_ack_bytes");
   ok &= expect_contains(source, "#define MPEGA_PCM_ACK_BATCH_BYTES (192UL * 1024UL)");
   ok &= expect_not_contains(source, "#define MPEGA_PCM_ACK_BATCH_BYTES (128UL * 1024UL)");
@@ -217,7 +216,6 @@ int main(int argc, char **argv)
                         "    return 0;\n"
                         "  }\n"
                         "  if (status != MPEGA_ERR_NONE)");
-  ok &= expect_contains(source, "ZZ9KAudioStreamClose(state->result.session");
   ok &= expect_contains(source, "mpega_stream_end_session(state);");
   ok &= expect_not_contains(source, "MPEGA_DIAG_TRACE_CHECK_MPEG");
   ok &= expect_not_contains(source, "uint8_t diag_trace;");
