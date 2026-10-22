@@ -39,19 +39,51 @@ fresh head report passes the generated-Tcl and 6.667/10.000 ns clock checks.
 
 ## I2S LRCLK timing
 
-`audio_clock` samples `I2SO_LRCLK` in its existing `IOB=TRUE` BCLK input
-register and sends that registered value to `i2s_transmitter_0/lrclk_in` via
-`tx_lrclk_out`. This removes the pad-to-transmitter combinational LRCLK path
-that entered the transmitter's `rSDataOut` control logic through two LUTs.
-The ADAU1701 data sheet, [Table 7, Serial Input/Output Ports](https://www.analog.com/media/en/technical-documentation/data-sheets/ADAU1701.pdf), specifies serial-output-data delay `tSODM` up to 40 ns after falling BCLK and serial-input setup/hold `tSIS`/`tSIH` of 10 ns. Registering LRCLK at the next BCLK rising edge gives the transmitter a stable input for the following serial-data decision, instead of asking its control path to absorb the 40 ns pad-arrival interval. The added test checks this registered transmitter-facing LRCLK over a complete TDM frame.
+The first retiming attempt passed LRCLK through
+`audio_clock.sampled_lrclk`.  The ADAU1701 changes LRCLK 5–40 ns after BCLK
+falls (`tSODM`, [Table 7, Serial Input/Output Ports](https://www.analog.com/media/en/technical-documentation/data-sheets/ADAU1701.pdf)),
+so that IOB register changed at the following BCLK rising edge and shifted the
+TDM frame by one serial bit.  Hardware validation rejected it: MHI playback
+was loudly distorted.
 
-The unchanged `audio_clock_tb.sv` data checks pass with the new registered
-LRCLK assertion (`audio_clock fixed TDM8 slot-0/1 bridge PASS`), and the
-unchanged Xilinx receiver integration passes (`audio_clock + Xilinx I2S
-receiver fixed TDM PASS`).
+`audio_clock` regenerates transmitter LRCLK. Kept LUTs and a fabric
+falling-edge sampler keep the zero-minimum `tSODM` edge arriving after F0
+even with pad-to-pad skew; the sample at F1 therefore has about half a BCLK
+of setup margin and identifies the prior boundary. A free-running 256-bit
+phase counter predicts subsequent edges, and the transmitter receives only
+the falling-edge registered output, itself buffered past a coincident
+`clkgen[2]` rising edge by kept output LUTs so the transmitter resolves the
+previous value exactly as it does with the codec's `tSODM`-delayed LRCLK.
+Only a low transition preceded by a nominal half-frame of continuous LRCLK
+high (96..160 BCLK) steers the lock; wrong-format transitions, glitches and
+the first edge after a long idle are ignored, and a candidate timeout of 512
+BCLK drops the lock when the codec stops framing. Three consistent qualified
+frames acquire the lock; three consecutive phase mismatches or the timeout
+release it. Before lock, the output is held high so playback cannot begin
+with a malformed frame. The capture bridge continues to use its independent
+rising-edge LRCLK/SDATA samples.
 
-`audio_clock_i2s_tx_tb.sv` drives the production transmitter with the
-known `32'ha55a_3cc3` AXIS word sequence and the ADAU1701 TDM8 clock/LRCLK
-cadence. Its 32 serial-slot trace was run at `fe6d813b` with direct LRCLK
-and at head with `tx_lrclk_out`; the traces are bit-identical, including each
-slot's `raw_phase=126` relative to the external LRCLK transition.
+The registered-LRCLK trial's reported `+1.118 ns`, `+35 ns`, and `+29 ns`
+margins were from disconnected pins and are not timing evidence. The
+regenerator's connected transmitter path has roughly `+1.1 ns` setup
+margin in the qualified implementation.
+
+`audio_clock_i2s_tx_tb.sv` drives the production Xilinx transmitter and a
+direct-wiring reference through the firmware's boot sequence: absent
+clocks across PS reset release, static-high LRCLK with BCLK running, a
+64-BCLK wrong serial format before the 0x081E write, TDM8 lock, a
+mid-frame glitch pulse, a phase-shifted mid-stream codec restart, and the
+full second init pass.  Every segment must end locked with the
+regenerated LRCLK frame-aligned to the codec and the transmitter
+consuming AXIS words; the first two segments also require bit-exact
+SDATA against the direct reference.  The sweep covers tSODM 0, 5, 20, 35
+and 40 ns crossed with +-0.4 ns BCLK/LRCLK insertion skew (15 runs, all
+passing, three relocks and 61 rejected transitions each).  A negative
+topology run holds `i2s_transmitter_0/sclk_in` low; it reproduces the
+locked regenerator with no AXIS consumption.  The post-synthesis wiring
+gate requires `I2SO_LRCLK -> audio_clock_0/lrclk_in`,
+`audio_clock_0/tx_lrclk_out -> i2s_transmitter_0/lrclk_in`, and
+`audio_clock_0/bclk_out -> i2s_transmitter_0/sclk_in`.
+
+The release does not expose LRCLK diagnostics through the block design or
+the Zorro register map.

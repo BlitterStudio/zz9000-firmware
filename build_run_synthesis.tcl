@@ -46,6 +46,10 @@ if { [string match "*ERROR*" $synth_status] || [string match "*FAILED*" $synth_s
     exit 1
 }
 
+open_run synth_1
+source [file join $script_dir verify_i2s_tx_wiring.tcl]
+close_design
+
 # Placement uses Vivado's default directive, as on master. ExtraTimingOpt
 # raised C28 overall/i2s WNS to +0.084/+0.179 ns but left the 150 MHz pixel
 # domain at +0.084 setup / +0.008 hold, and that image flickered on the A4000

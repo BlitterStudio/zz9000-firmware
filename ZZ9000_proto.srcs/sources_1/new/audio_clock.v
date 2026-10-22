@@ -47,17 +47,91 @@ module audio_clock(
     reg [2:0] clkgen;
     assign bclk_out = clkgen[2];
 
+    /*
+     * Capture the receive stream on BCLK's rising edge.  The TDM bridge uses
+     * this sample; it must not feed the playback transmitter because it is
+     * one serial-bit late at the codec's maximum tSODM.
+     */
     (* IOB = "TRUE" *) reg sampled_lrclk;
     (* IOB = "TRUE" *) reg sampled_sdata;
+
     /*
-     * The transmitter sees this IOB register, not the unconstrained pad.
-     * It changes only at BCLK rising edges, so its following rSDataOut
-     * capture has a whole BCLK cycle rather than the codec's 40 ns tSODM
-     * input window to traverse fabric.
+     * The playback transmitter needs a frame edge at the same BCLK edge as
+     * the codec, but its direct pad-to-LUT path has only the 40 ns tSODM
+     * window.  Delay the input through kept LUTs before sampling it on the
+     * falling edge.  The extra stage keeps the zero-minimum tSODM edge
+     * arriving after F0 even with pad-to-pad skew, while its 40 ns maximum
+     * still has a full BCLK period before F1.  The sample at F1 identifies
+     * the F0 boundary; the regenerated output predicts the next boundaries
+     * and changes only on BCLK falling edges.
      */
-    assign tx_lrclk_out = sampled_lrclk;
+    (* KEEP = "TRUE", DONT_TOUCH = "TRUE" *) wire lrclk_safe1;
+    (* KEEP = "TRUE", DONT_TOUCH = "TRUE" *) wire lrclk_safe;
+    (* DONT_TOUCH = "TRUE" *) LUT1 #(.INIT(2'b10)) lrclk_hold_delay (
+        .I0(lrclk_in),
+        .O(lrclk_safe1)
+    );
+    (* DONT_TOUCH = "TRUE" *) LUT1 #(.INIT(2'b10)) lrclk_hold_delay2 (
+        .I0(lrclk_safe1),
+        .O(lrclk_safe)
+    );
 
+    /*
+     * Transmitter LRCLK regenerator.  Only a low transition preceded by a
+     * nominal half-frame of continuously high LRCLK (the TDM8 frame
+     * marker) steers the phase lock.  Transitions belonging to other serial
+     * formats, glitches, and the first edge after a long idle are counted
+     * but otherwise ignored, so a stationary disturbance can neither spoof
+     * nor permanently defeat the lock.  A candidate timeout drops the lock
+     * when the codec stops framing.
+     */
+    (* IOB = "FALSE", DONT_TOUCH = "TRUE" *) reg tx_lrclk_sampled;
+    reg [7:0] tx_phase;
+    reg [7:0] tx_lock_phase;
+    reg [1:0] tx_lock_samples;
+    reg [1:0] tx_lock_mismatches;
+    reg tx_regen_locked;
+    reg regenerated_tx_lrclk;
+    reg [7:0] tx_high_run;
+    reg [5:0] tx_lrclk_toggle_div;
+    reg [5:0] tx_lrclk_toggle_count;
+    reg [9:0] tx_candidate_timeout;
+    localparam [1:0] TX_LOCK_CONFIRM_SAMPLES = 2'd3;
+    localparam [1:0] TX_LOCK_MAX_MISMATCHES = 2'd3;
+    localparam [7:0] TX_FRAME_HIGH_MIN = 8'd96;
+    localparam [7:0] TX_FRAME_HIGH_MAX = 8'd160;
+    localparam [9:0] TX_LOCK_TIMEOUT = 10'd512;
 
+    wire tx_lrclk_falling = (lrclk_safe != tx_lrclk_sampled) && !lrclk_safe;
+    wire [7:0] observed_tx_fall_phase = tx_phase - 8'd1;
+    wire tx_frame_candidate = tx_lrclk_falling &&
+        (tx_high_run >= TX_FRAME_HIGH_MIN) &&
+        (tx_high_run <= TX_FRAME_HIGH_MAX);
+
+    /*
+     * The output register can change on the same BCLK falling edge that
+     * clocks clkgen[2] (the transmitter's sclk) high.  Kept LUT delay
+     * keeps the output transition past that edge's capture instant, so the
+     * transmitter resolves the previous value exactly as it does with the
+     * codec's tSODM-delayed LRCLK.
+     */
+    (* KEEP = "TRUE", DONT_TOUCH = "TRUE" *) wire tx_lrclk_delayed1;
+    (* KEEP = "TRUE", DONT_TOUCH = "TRUE" *) wire tx_lrclk_delayed2;
+    (* DONT_TOUCH = "TRUE" *) LUT1 #(.INIT(2'b10)) tx_lrclk_out_delay1 (
+        .I0(regenerated_tx_lrclk),
+        .O(tx_lrclk_delayed1)
+    );
+    (* DONT_TOUCH = "TRUE" *) LUT1 #(.INIT(2'b10)) tx_lrclk_out_delay2 (
+        .I0(tx_lrclk_delayed1),
+        .O(tx_lrclk_delayed2)
+    );
+    assign tx_lrclk_out = tx_lrclk_delayed2;
+
+    /*
+     * Count regenerated frame-clock transitions for the integration
+     * simulation. This state is local to the bridge and has no block-design
+     * or register-map exposure.
+     */
 
     always @(posedge bclk_in) begin
       if (reset_active) begin
@@ -113,7 +187,91 @@ module audio_clock(
         serial_word <= 16'b0;
         rx_lrclk_out <= 1'b0;
         rx_sdata_out <= 1'b0;
+        tx_lrclk_sampled <= 1'b1;
+        tx_phase <= 8'b0;
+        tx_lock_phase <= 8'b0;
+        tx_lock_samples <= 2'b0;
+        tx_lock_mismatches <= 2'b0;
+        tx_regen_locked <= 1'b0;
+        regenerated_tx_lrclk <= 1'b1;
+        tx_high_run <= 8'b0;
+        tx_candidate_timeout <= 10'b0;
+        tx_lrclk_toggle_div <= 6'b0;
+        tx_lrclk_toggle_count <= 6'b0;
       end else begin
+        /*
+         * Before three coherent codec frames have established a phase, hold
+         * LRCLK high rather than forwarding an asynchronous edge into the
+         * transmitter.  This intentionally withholds playback at codec
+         * startup/restart instead of producing a one-bit-corrupted frame.
+         */
+        tx_lrclk_sampled <= lrclk_safe;
+        tx_phase <= tx_phase + 1'b1;
+        tx_high_run <= lrclk_safe ?
+            (tx_high_run != 8'hff ? tx_high_run + 8'd1 : 8'hff) : 8'd0;
+
+        if (tx_frame_candidate)
+          tx_candidate_timeout <= 10'd0;
+        else if (tx_candidate_timeout != TX_LOCK_TIMEOUT)
+          tx_candidate_timeout <= tx_candidate_timeout + 10'd1;
+
+
+        if (tx_regen_locked && tx_candidate_timeout == TX_LOCK_TIMEOUT) begin
+          tx_regen_locked <= 1'b0;
+          tx_lock_samples <= 2'b0;
+          tx_lock_mismatches <= 2'b0;
+        end else if (tx_frame_candidate) begin
+          if (tx_regen_locked) begin
+            if (observed_tx_fall_phase == tx_lock_phase) begin
+              tx_lock_mismatches <= 2'b0;
+            end else if (tx_lock_mismatches ==
+                         TX_LOCK_MAX_MISMATCHES - 1'b1) begin
+              tx_regen_locked <= 1'b0;
+              tx_lock_phase <= observed_tx_fall_phase;
+              tx_lock_samples <= 2'd1;
+              tx_lock_mismatches <= 2'b0;
+            end else begin
+              tx_lock_mismatches <= tx_lock_mismatches + 2'd1;
+            end
+          end else begin
+            if (tx_lock_samples == 2'd0 ||
+                observed_tx_fall_phase != tx_lock_phase) begin
+              tx_lock_phase <= observed_tx_fall_phase;
+              tx_lock_samples <= 2'd1;
+            end else if (tx_lock_samples ==
+                         TX_LOCK_CONFIRM_SAMPLES - 1'b1) begin
+              tx_regen_locked <= 1'b1;
+              tx_lock_mismatches <= 2'b0;
+            end else begin
+              tx_lock_samples <= tx_lock_samples + 2'd1;
+            end
+          end
+        end
+
+        if (tx_regen_locked) begin
+          if (tx_phase == tx_lock_phase)
+            regenerated_tx_lrclk <= 1'b0;
+          else if (tx_phase == tx_lock_phase + 8'd128)
+            regenerated_tx_lrclk <= 1'b1;
+        end else begin
+          regenerated_tx_lrclk <= 1'b1;
+        end
+
+        /*
+         * Count actual regenerated frame-clock transitions after lock for
+         * the integration simulation.
+         */
+        if (tx_regen_locked &&
+            (tx_phase == tx_lock_phase ||
+             tx_phase == tx_lock_phase + 8'd128)) begin
+          if (tx_lrclk_toggle_div == 6'h3f) begin
+            tx_lrclk_toggle_div <= 6'b0;
+            tx_lrclk_toggle_count <= tx_lrclk_toggle_count + 6'd1;
+          end else begin
+            tx_lrclk_toggle_div <= tx_lrclk_toggle_div + 6'd1;
+          end
+        end
+
 
         if ((sampled_lrclk != observed_lrclk) && !sampled_lrclk) begin
           if (frame_started && raw_bit_count == 9'd255 &&

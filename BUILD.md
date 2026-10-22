@@ -137,14 +137,19 @@ default E7M bitstream.
 ```
 
 The synthesis flow runs `verify_formatter_ooc_timing.tcl`,
-`verify_vcap_cdc_timing.tcl`, and `verify_runtime_pixel_timing.tcl` before
-`write_bitstream`. A failure stops the build. The final bitstream is written
-under `ZZ9000_proto/ZZ9000_proto.runs/impl_1/` before the builder copies it to
-its requested output.
-A recorded implementation trial improved the ADAU1701 I2S input routed slack
-from -0.090 ns to +0.143 ns after post-route `phys_opt_design`. The final
-gated implementation result, rather than an intermediate routed checkpoint,
-determines whether the bitstream is written.
+`verify_i2s_tx_wiring.tcl`, `verify_vcap_cdc_timing.tcl`, and
+`verify_runtime_pixel_timing.tcl` before `write_bitstream`. A failure stops
+the build. The final bitstream is written under
+`ZZ9000_proto/ZZ9000_proto.runs/impl_1/` before the builder copies it to its
+requested output.
+
+The earlier registered-LRCLK experiment shifted the TDM frame by one serial
+bit and left the `I2SO_LRCLK` pad disconnected. Its reported `+1.118 ns`,
+`+35 ns`, and `+29 ns` margins are therefore invalid. The release uses the
+LRCLK regenerator instead; its qualified connected transmitter path has
+roughly `+1.1 ns` setup margin. The wiring gate requires the LRCLK pad to
+drive `audio_clock_0`, the regenerated LRCLK to drive the transmitter, and
+`audio_clock_0/bclk_out` to drive its serial clock.
 
 ### Sweep placement directives for a timing-qualified variant
 
