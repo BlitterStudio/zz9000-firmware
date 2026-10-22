@@ -17,6 +17,35 @@ first column identify the measurement source.
 | `vga_overlay_y_step -> overlay_pos_y`, ExtraTimingOpt hold +0.014 ns | Capture overlay start/step values at frame setup. | No steady-state raster latency; position uses the frame-consistent captured configuration. | The 31-case formatter sweep passes. |
 | `vga_h_rez -> vga_h_rez_delayed`, zorro3-aga Default hold +0.044 ns | Pipeline the base delayed resolution before overlay-delay selection. | No active-raster latency after mode setup; only the frame-setup value is staged. | The 31-case formatter sweep passes. |
 
+## Frame-setup retiming
+
+The 20-worst setup reports from all five `652cba73` Zorro III placement
+attempts and the passing Zorro III AGA placement show the following recurring
+configuration paths.  The Zorro III AGA report's 20 worst paths are all at
+least `+0.212 ns`; the table records its applicable range as a placement
+cross-check.  These are frame or line setup terms, so they can be prepared
+before their once-per-line or once-per-frame consumers without changing the
+RGB/sync/DE pipeline.
+
+| Recurring path family | Zorro III setup range before change | Zorro III AGA range | Retiming |
+| --- | --- | --- | --- |
+| `watch{1,2}_last -> cfg_line_clocks`, `cfg_nominal_len`, `cfg_last_pixel`, and `cfg_ext_max` enables | `+0.036` to `+0.142 ns` | `>= +0.350 ns` | Capture adopted geometry on every frame boundary; only `cfg_adopted` records whether that data may engage source sync. |
+| `watch{1,2}_last -> cfg_last_line` and `cfg_vsync_end` enables | `+0.127 ns` | `>= +0.380 ns` | Use the same always-captured frame-geometry bundle. |
+| `watch{1,2}_last -> good_intervals` enable | `+0.067 ns` | `+0.350 ns` | Register the live/adopted re-arm predicate before it reaches lock-state enables. |
+| `vga_scale_source_rows -> fractional_y_error` and its accumulator feedback | `+0.032` to `+0.117 ns` | `+0.385` to `+0.489 ns` | Calculate the next fractional accumulator state during the first two clocks of the line and commit it at the existing line-update edge. |
+| `vga_overlay_y_start -> overlay_row_start_sample` | `+0.031` to `+0.117 ns` | `>= +0.390 ns` | Stage the frame-start position and row limit before the floor/edge/weight calculation. |
+| `vga_viewport_height -> dvi_rgb` reset mux | `+0.072` to `+0.111 ns` | `+0.212` to `+0.368 ns` | Precompute the vertical viewport end, mirroring the existing horizontal-end register. |
+
+The source-sync validity predicate remains `cfg_adopt_now` at the frame wrap,
+so the established quiet window is unchanged. Geometry data is captured
+unconditionally only while source sync is disengaged or re-arming; the
+registered re-arm predicate removes the wide live/adopted comparison from
+lock-state enables. Fractional scaling snapshots its next state after
+`counter_x == 0` and commits it on the same `fractional_line_update_x` edge
+as before. The overlay start candidate is captured from VSYNC through the
+frame wrap, and the viewport-end register is the same sum that previously
+fed the active-pixel comparison directly.
+
 `video_overlay_filter` has one additional interpolation stage between the
 horizontal sum and vertical interpolation. The formatter changes
 `OVERLAY_FILTER_DELAY` from 9 to 11 and `OVERLAY_PIPE_DELAY` from 13 to 16,

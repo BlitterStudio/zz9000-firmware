@@ -818,6 +818,7 @@ reg signed [16:0] viewport_output_x_position = 0;
 reg [11:0] viewport_output_y_row = 0;
 reg [11:0] scanout_source_line_row = 0;
 reg [12:0] viewport_output_x_end = 0;
+reg [12:0] viewport_output_y_end = 0;
 reg overlay_scheduler_y_in_window = 0;
 reg overlay_scheduler_screen_y_nonnegative = 0;
 /* Window rows that fall into vertical blanking are never displayed; a
@@ -929,15 +930,18 @@ function [31:0] overlay_row_sample;
   end
 endfunction
 
-/* Both candidates for the next raster row are registered ahead of the line
- * wrap, which only picks one: the first row of a frame starts at the
- * clipped start position, every other row at overlay_pos_y (advanced at
- * h_rez, well before the wrap). */
+/* The frame-start candidate is quasi-static between VSYNC capture and the
+ * following frame wrap. Stage its inputs so the floor/edge calculation is
+ * not on the configuration-to-row-sample path. */
+reg signed [31:0] overlay_row_start_position = 0;
+reg [11:0] overlay_row_start_max = 0;
 reg [31:0] overlay_row_start_sample = 0;
 reg [31:0] overlay_row_next_sample = 0;
 always @(posedge dvi_clk) begin
+  overlay_row_start_position <= vga_overlay_y_start;
+  overlay_row_start_max <= vga_overlay_row_max;
   overlay_row_start_sample <=
-    overlay_row_sample(vga_overlay_y_start, vga_overlay_row_max);
+    overlay_row_sample(overlay_row_start_position, overlay_row_start_max);
   overlay_row_next_sample <=
     overlay_row_sample(overlay_pos_y, vga_overlay_row_max);
 end
@@ -1020,6 +1024,12 @@ reg [12:0] fractional_content_start = 0;
 reg [12:0] fractional_content_end = 0;
 reg [11:0] fractional_source_line = 0;
 reg [12:0] fractional_y_error = 0;
+/* The accumulator update occurs at the end of a line.  Its source state and
+ * geometry have been stable since the first pixels, so stage the result
+ * there rather than putting add/compare/subtract on the update register. */
+reg [12:0] fractional_y_sum_staged = 0;
+reg [11:0] fractional_next_source_line_staged = 0;
+reg [12:0] fractional_next_y_error_staged = 0;
 wire [12:0] fractional_y_sum =
   fractional_y_error + {1'b0, vga_scale_source_rows};
 wire fractional_y_advance =
@@ -1066,6 +1076,9 @@ always @(posedge dvi_clk) begin
     fractional_current_row_active_latched <= 0;
     fractional_prefetch_source_line_latched <= 0;
     fractional_prefetch_valid_latched <= 0;
+    fractional_y_sum_staged <= 0;
+    fractional_next_source_line_staged <= 0;
+    fractional_next_y_error_staged <= 0;
   end else begin
     fractional_content_start <=
       {1'b0, vga_viewport_y} + {1'b0, vga_scale_y_factor};
@@ -1080,6 +1093,7 @@ always @(posedge dvi_clk) begin
         fractional_current_row_active;
       fractional_prefetch_source_line_latched <=
         fractional_prefetch_source_line[11:0];
+      fractional_y_sum_staged <= fractional_y_sum;
     end else if (counter_x == 1) begin
       fractional_next_row_advances_latched <=
         fractional_next_row_advances;
@@ -1088,6 +1102,14 @@ always @(posedge dvi_clk) begin
         fractional_current_row_active_latched &&
         {1'b0, fractional_prefetch_source_line_latched} <
           {1'b0, vga_scale_source_rows};
+      if (fractional_y_sum_staged >= {1'b0, vga_viewport_height}) begin
+        fractional_next_source_line_staged <= fractional_source_line + 1'b1;
+        fractional_next_y_error_staged <=
+          fractional_y_sum_staged - {1'b0, vga_viewport_height};
+      end else begin
+        fractional_next_source_line_staged <= fractional_source_line;
+        fractional_next_y_error_staged <= fractional_y_sum_staged;
+      end
     end
   end
 end
@@ -1101,8 +1123,8 @@ always @(posedge dvi_clk) begin
       fractional_source_line <= 0;
       fractional_y_error <= 0;
     end else begin
-      fractional_source_line <= fractional_next_source_line;
-      fractional_y_error <= fractional_next_y_error;
+      fractional_source_line <= fractional_next_source_line_staged;
+      fractional_y_error <= fractional_next_y_error_staged;
     end
   end
 end
@@ -1302,7 +1324,7 @@ wire viewport_output_active = viewport_geometry_ready &&
   viewport_output_x >= $signed({1'b0, vga_viewport_x}) &&
   viewport_output_x < $signed({1'b0, viewport_output_x_end}) &&
   viewport_output_y >= vga_viewport_y &&
-  viewport_output_y < vga_viewport_y + vga_viewport_height;
+  {1'b0, viewport_output_y} < viewport_output_y_end;
 wire [1:0] scanline_content_y = counter_y_d2 - vga_viewport_y[1:0];
 
 wire [11:0] scanout_source_line = scanout_source_line_row;
@@ -1481,6 +1503,8 @@ always @(posedge dvi_clk) begin
       : overlay_visible_x1_unclipped_pre) - 17'sd1;
   viewport_output_x_end <= {1'b0, vga_viewport_x} +
                            {1'b0, vga_viewport_width};
+  viewport_output_y_end <= {1'b0, vga_viewport_y} +
+                           {1'b0, vga_viewport_height};
   /* These frame-stable viewport terms keep the wide rectangle bounds off
    * counter_scanout's reset path. */
   viewport_has_left_border <= vga_viewport_x != 0;

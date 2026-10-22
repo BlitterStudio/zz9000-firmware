@@ -181,6 +181,10 @@ wire cfg_changed_vs_adopted = !cfg_adopt_now ||
   vsync_end_line != cfg_vsync_end ||
   active_end_line != cfg_active_end ||
   interlace != cfg_interlace;
+/* Re-arm has no pixel-rate consumer. Register it independently so the
+ * live/adopted geometry comparisons never drive lock-state enables. */
+reg cfg_changed_vs_adopted_d1;
+
 
 wire [15:0] cfg_active_floor_w = {3'b0, cfg_active_end};
 wire [15:0] nominal_line = {4'b0, cfg_last_line};
@@ -364,6 +368,7 @@ always @(posedge dvi_clk) begin
     watch2_active <= 13'd0;
     watch2_interlace <= 1'b0;
     cfg_changed_d1 <= 1'b0;
+    cfg_changed_vs_adopted_d1 <= 1'b0;
     cfg_last_line <= 12'd0;
     cfg_last_pixel <= 12'd0;
     cfg_line_clocks <= 13'd0;
@@ -414,6 +419,7 @@ always @(posedge dvi_clk) begin
     watch1_active <= active_end_line;
     watch1_interlace <= interlace;
     cfg_changed_d1 <= cfg_changed;
+    cfg_changed_vs_adopted_d1 <= cfg_changed_vs_adopted;
     anchor_q <= anchor_toggle;
     enable_q <= enable;
     interval_plausible_q <= interval_plausible;
@@ -434,23 +440,23 @@ always @(posedge dvi_clk) begin
 
       if (line_uses_sync ? line_is_last : raster_y >= nominal_last_line) begin
         /* Frame wrap: adopt the geometry for the incoming frame. */
-        if (cfg_adopt_now) begin
-          cfg_last_line <= nominal_last_line;
-          cfg_last_pixel <= line_last_pixel;
-          cfg_line_clocks <= {1'b0, line_last_pixel} + 13'd1;
-          cfg_vsync_end <= vsync_end_line;
-          cfg_active_end <= active_end_line;
-          cfg_interlace <= interlace;
-          cfg_vsync_floor <= {4'b0, vsync_end_line} + 16'd1;
-          cfg_nominal_len <= {4'b0, nominal_last_line} + 16'd1;
-          cfg_ext_max <= {4'b0, nominal_last_line} + EXT_LINES;
-          cfg_adopted <= 1'b1;
-        end else begin
-          cfg_adopted <= 1'b0;
-        end
+        /* Keep the adopted data current at every frame boundary. Its
+         * validity remains exactly cfg_adopt_now, so unsettled geometry
+         * cannot engage source sync while the wide setup terms avoid CE
+         * routing to every adopted-data register. */
+        cfg_last_line <= nominal_last_line;
+        cfg_last_pixel <= line_last_pixel;
+        cfg_line_clocks <= {1'b0, line_last_pixel} + 13'd1;
+        cfg_vsync_end <= vsync_end_line;
+        cfg_active_end <= active_end_line;
+        cfg_interlace <= interlace;
+        cfg_vsync_floor <= {4'b0, vsync_end_line} + 16'd1;
+        cfg_nominal_len <= {4'b0, nominal_last_line} + 16'd1;
+        cfg_ext_max <= {4'b0, nominal_last_line} + EXT_LINES;
+        cfg_adopted <= cfg_adopt_now;
         bounds_pipe <= cfg_adopt_now ? 2'b10 : 2'b00;
 
-        if (cfg_changed_vs_adopted) begin
+        if (cfg_changed_vs_adopted_d1) begin
           /* Mode or interlace transition: re-arm from a clean state. */
           locked <= 1'b0;
           good_intervals <= 4'd0;
