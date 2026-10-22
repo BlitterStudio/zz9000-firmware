@@ -26,7 +26,7 @@ static uint32_t formatter_data, formatter_ops[32];
 static unsigned videocap_address_writes;
 static uint32_t videocap_address_write;
 static XAxiVdma_DmaSetup dma_setup;
-static unsigned dma_starts;
+static unsigned dma_configs, dma_starts;
 static uint32_t video_irq_enabled = 1;
 static unsigned inject_native_irq, deferred_native_irqs;
 static uint32_t videocap_zstate;
@@ -173,6 +173,7 @@ int XAxiVdma_DmaConfig(XAxiVdma *instance, u16 direction,
 		XAxiVdma_DmaSetup *config)
 {
 	(void)instance; (void)direction;
+	++dma_configs;
 	dma_setup = *config;
 	return dma_config_status;
 }
@@ -260,7 +261,7 @@ static uint16_t commit_custom(uint32_t color)
 
 static void clear_measurements(void)
 {
-	clock_reloads = tmds_interruptions = delay_us = dma_starts = 0;
+	clock_reloads = tmds_interruptions = delay_us = dma_configs = dma_starts = 0;
 	dma_cfg_initialize_status = dma_config_status = dma_address_status =
 		dma_start_status = XST_SUCCESS;
 }
@@ -311,6 +312,14 @@ int main(void)
 	/* The geometry section below counts setter calls from a boot that
 	 * never carried an override. */
 	vs.videocap_geometry_request_serial = 0;
+
+	/* The FPGA can signal vblank before the host selects an RTG mode.
+	 * That interrupt must not attempt a zero-geometry VDMA configuration. */
+	clear_measurements();
+	videocap_zstate = 1U << 21;
+	isr_video(NULL);
+	assert(dma_configs == 0 && dma_starts == 0);
+	videocap_zstate = 0;
 
 	/* Cold start must initialize the physical output. */
 	video_mode_init(ZZVMODE_1920x1080_60, 0, MNTVA_COLOR_16BIT565);
