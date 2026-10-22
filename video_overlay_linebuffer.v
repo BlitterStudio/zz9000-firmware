@@ -63,7 +63,7 @@ module video_overlay_linebuffer #(
   output [31:0]           read_top_odd,
   output [31:0]           read_bottom_even,
   output [31:0]           read_bottom_odd,
-  output                  displayed_line_ready,
+  output reg             displayed_line_ready = 0,
   output reg [11:0]       scheduler_line = 0,
   output reg [31:0]       accepted_generation = 0
 );
@@ -511,7 +511,6 @@ assign read_top_even = read_data[0];
 assign read_top_odd = read_data[1];
 assign read_bottom_even = read_data[2];
 assign read_bottom_odd = read_data[3];
-assign displayed_line_ready = display_enable && |top_match && |bottom_match;
 assign fetch_ready = display_enable && !request_inflight && |bank_free;
 /* The generation the pixel side serves, including one acknowledged in this
  * very cycle. */
@@ -523,6 +522,14 @@ always @(posedge pixel_clk) begin
   /* Registered snapshot of the top row on display, for the fetch
    * scheduler's consumed-row tracking. */
   scheduler_line <= displayed_line;
+  /* An acknowledged generation invalidates the old ready tags in this same
+   * cycle. Otherwise keep row-tag compare/routing off the formatter's
+   * overlay-draw pipeline. The BRAM data and ready indication are both
+   * stable for a line; this visibility stage is absorbed by that pipeline. */
+  if (accepted_generation_pixel_valid)
+    displayed_line_ready <= 1'b0;
+  else
+    displayed_line_ready <= display_enable && |top_match && |bottom_match;
 
   /* A bank is free when it is empty or holds a row the display has passed.
    * The outstanding request's bank stays reserved until its completion

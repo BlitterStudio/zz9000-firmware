@@ -94,27 +94,15 @@ int main(int argc, char **argv)
 	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "#define RTG_TEMPLATE_SCRATCH_SIZE    0x00100000");
 	ok &= expect_contains(memorymap, "memorymap.h",
-	                      "#define LEGACY_SURFACE_HEAP_ADDRESS");
+	                      "#define HOST_VISIBLE_HEAP_ADDRESS");
 	ok &= expect_contains(memorymap, "memorymap.h",
-	                      "#define LEGACY_SURFACE_HEAP_END");
-	ok &= expect_contains(memorymap, "memorymap.h",
-	                      "#define SDK_SHARED_HEAP_ADDRESS     0x03000000");
-	ok &= expect_contains(memorymap, "memorymap.h",
-	                      "#define SDK_SHARED_HEAP_SIZE        0x003F0000");
-	ok &= expect_contains(memorymap, "memorymap.h",
-	                      "#define SDK_SHARED_HEAP_END");
-	ok &= expect_contains(memorymap, "memorymap.h",
-	                      "SDK_SHARED_HEAP_END > Z3_SCRATCH_ADDR");
-	ok &= expect_contains(memorymap, "memorymap.h",
-	                      "#define SDK_LOCAL_SURFACE_HEAP_ADDRESS 0x06000000");
-	ok &= expect_contains(memorymap, "memorymap.h",
-	                      "#define SDK_LOCAL_SURFACE_HEAP_SIZE    0x02000000");
-	ok &= expect_contains(memorymap, "memorymap.h",
-	                      "SDK_LOCAL_SURFACE_HEAP_ADDRESS < LEGACY_SURFACE_HEAP_END");
-	ok &= expect_contains(memorymap, "memorymap.h",
-	                      "SDK_LOCAL_SURFACE_HEAP_END > SDK_LOW_DDR_RESERVED_END");
+	                      "#define HOST_VISIBLE_HEAP_END");
 	ok &= expect_not_contains(memorymap, "memorymap.h",
-	                          "#define SDK_LOCAL_SURFACE_HEAP_ADDRESS 0x03400000");
+	                          "#define LEGACY_SURFACE_HEAP_ADDRESS");
+	ok &= expect_not_contains(memorymap, "memorymap.h",
+	                          "#define SDK_SHARED_HEAP_ADDRESS");
+	ok &= expect_not_contains(memorymap, "memorymap.h",
+	                          "#define SDK_LOCAL_SURFACE_HEAP_ADDRESS");
 	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "#define SDK_HOST_WINDOW_HEAP_ADDRESS 0x005D0000");
 	ok &= expect_contains(memorymap, "memorymap.h",
@@ -126,6 +114,20 @@ int main(int argc, char **argv)
 	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "SDK_HOST_WINDOW_HEAP_END > (0x003F0000 + ADDR_ADJ)");
 	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_HOST_WINDOW_Z3_ADDRESS 0x080F0000");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define SDK_HOST_WINDOW_Z3_END");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "#define Z3_HOST_CONTROL_RANGES(X)");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "X(SDK_HOST_WINDOW_Z3_ADDRESS, SDK_HOST_WINDOW_HEAP_SIZE)");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "SDK_HOST_WINDOW_Z3_ADDRESS < HOST_VISIBLE_HEAP_ADDRESS");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "SDK_HOST_WINDOW_Z3_END > SDK_MAILBOX_Z3_ADDRESS");
+	ok &= expect_contains(memorymap, "memorymap.h",
+	                      "(SDK_HOST_WINDOW_Z3_END - ADDR_ADJ) > Z3_MAIN_BOARD_WINDOW_SIZE");
+	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "#define SDK_AUDIO_DIRECT_RING_Z3_SLOTS              2U");
 	ok &= expect_contains(memorymap, "memorymap.h",
 	                      "#define SDK_AUDIO_DIRECT_RING_Z3_RESERVE_ADDRESS    0x081C0000");
@@ -135,7 +137,7 @@ int main(int argc, char **argv)
 	                      "#define SDK_AUDIO_DIRECT_RING_Z2_RESERVE_SIZE       0x0000C000");
 
 	ok &= expect_contains(main_source, "main.c",
-	                      "surface_allocator_init(LEGACY_SURFACE_HEAP_ADDRESS, LEGACY_SURFACE_HEAP_SIZE)");
+	                      "surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS,");
 	ok &= expect_not_contains(main_source, "main.c",
 	                          "cur_mem_offset = 0x3500000");
 

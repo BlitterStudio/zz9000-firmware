@@ -11,6 +11,7 @@
 #include "sdk_compression.h"
 #include "sdk_smp_lock.h"
 #include "sdk_decode_reclaim.h"
+#include "card_pool.h"
 #include "Lzma2Dec.h"
 #include "LzmaDec.h"
 #include "zlib.h"
@@ -58,34 +59,86 @@ static struct SDKDecompressStreamSession decompress_streams[
 ];
 static uint32_t next_decompress_stream_id = 1U;
 
-/*
- * Heap wrappers for the decode backends. On core 1 the block is recorded (and
- * the table cleaned to DRAM via sdk_decode_flush_table) so core 0 can reclaim
- * it if the worker is cold-reset mid-decode; on core 0 (inline fallback, and
- * the stream/test paths, which never run on core 1) they are plain malloc/free
- * because core 0 is never force-reset. Ordering is deliberate -- track AFTER a
- * successful malloc, untrack-then-clean BEFORE free -- so a worker halted at any
- * point leaks at most one block and never exposes a freed pointer to core 0's
- * reclaim. See sdk_decode_reclaim.h.
- */
+/* Every large decode backend gets its own card-pool block. Keeping the
+ * allocation header immediately before the returned pointer makes free safe
+ * without consulting newlib metadata after a worker reset. */
+#define DECODE_POOL_MAGIC 0x44454350u
+#define DECODE_POOL_OWNER CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, 0x00fffffeu)
+
+struct decode_pool_header {
+	uint32_t magic;
+	uint32_t base;
+	uint32_t size;
+	uint32_t owner;
+};
+
 void *sdk_decode_heap_alloc(size_t size)
 {
-	void *p = malloc(size);
+	struct decode_pool_header *header;
+	uint32_t base;
 
-	if (p && smp_cpu_id() == 1) {
-		sdk_decode_track(p);
-		sdk_decode_flush_table();
-	}
-	return p;
+	if (size == 0U || size > UINT32_MAX - sizeof(*header))
+		return 0;
+	base = card_pool_alloc(&card_pool, (uint32_t)size + sizeof(*header),
+	                       DECODE_POOL_OWNER);
+	if (!base)
+		return 0;
+	header = (struct decode_pool_header *)(uintptr_t)base;
+	header->magic = DECODE_POOL_MAGIC;
+	header->base = base;
+	header->size = (uint32_t)size;
+	header->owner = DECODE_POOL_OWNER;
+	return header + 1;
 }
 
 void sdk_decode_heap_free(void *ptr)
 {
-	if (ptr && smp_cpu_id() == 1) {
-		sdk_decode_untrack(ptr);
-		sdk_decode_flush_table();   /* DRAM shows slot cleared before free */
+	struct decode_pool_header *header;
+
+	if (!ptr)
+		return;
+	header = ((struct decode_pool_header *)ptr) - 1;
+	if (header->magic == DECODE_POOL_MAGIC) {
+		(void)card_pool_free(&card_pool, header->base, header->owner);
+		return;
 	}
 	free(ptr);
+}
+
+void *sdk_decode_heap_realloc(void *ptr, size_t size)
+{
+	struct decode_pool_header *header;
+	void *fresh;
+	size_t copy;
+
+	if (!ptr)
+		return sdk_decode_heap_alloc(size);
+	if (size == 0U) {
+		sdk_decode_heap_free(ptr);
+		return 0;
+	}
+	header = ((struct decode_pool_header *)ptr) - 1;
+	if (header->magic != DECODE_POOL_MAGIC)
+		return realloc(ptr, size);
+	fresh = sdk_decode_heap_alloc(size);
+	if (!fresh)
+		return 0;
+	copy = header->size < size ? header->size : size;
+	memcpy(fresh, ptr, copy);
+	sdk_decode_heap_free(ptr);
+	return fresh;
+}
+
+void *sdk_decode_heap_calloc(size_t count, size_t size)
+{
+	void *ptr;
+
+	if (count != 0U && size > SIZE_MAX / count)
+		return 0;
+	ptr = sdk_decode_heap_alloc(count * size);
+	if (ptr)
+		memset(ptr, 0, count * size);
+	return ptr;
 }
 
 static void *lzma_alloc(ISzAllocPtr alloc, size_t size)
@@ -135,27 +188,15 @@ unsigned sdk_compression_reclaim_core1_decode(void)
 	unsigned reclaimed;
 
 	/*
-	 * Discard any stale copy of the table in core 0's cache so the read sees
-	 * core 1's last cleaned-to-DRAM state (invalidate, not flush: core 0 holds
-	 * no dirty table lines here -- the previous reclaim ended with a flush --
-	 * so nothing of core 1's fresh state is overwritten).
+	 * Decode working sets are card-pool owned: reclaiming their owner never
+	 * dereferences allocator metadata written by the halted core. Keep the
+	 * legacy table pass for paths not yet backed by this owner.
 	 */
+	reclaimed = card_pool_release_owner(&card_pool, DECODE_POOL_OWNER) != 0U;
 	sdk_decode_invalidate_table();
-	reclaimed = sdk_decode_reclaim(free);
-	/*
-	 * Push the cleared slots to DRAM before core 1 is released: the restarted
-	 * worker boots with an empty cache and must read the emptied table.
-	 */
+	reclaimed += sdk_decode_reclaim(free);
 	sdk_decode_flush_table();
-
-	/*
-	 * The LZH decode path's dtext window is tracked by its own cache-line
-	 * reclaim pointer (see zz9k_lzh_support.c) -- it is reclaimed separately
-	 * here rather than folded into `reclaimed`, which counts only tracked-table
-	 * slots.
-	 */
 	zz9k_lzh_reclaim();
-
 	return reclaimed;
 }
 

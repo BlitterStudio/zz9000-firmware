@@ -66,6 +66,16 @@ static sdk_smp_lock_t g_malloc_lock = SDK_SMP_LOCK_INIT;
 void __malloc_lock(struct _reent *r)   { (void)r; sdk_smp_lock_acquire(&g_malloc_lock); }
 void __malloc_unlock(struct _reent *r) { (void)r; sdk_smp_lock_release(&g_malloc_lock); }
 
+void sdk_smp_lock_malloc_acquire(void)
+{
+    sdk_smp_lock_acquire(&g_malloc_lock);
+}
+
+void sdk_smp_lock_malloc_release(void)
+{
+    sdk_smp_lock_release(&g_malloc_lock);
+}
+
 /*
  * Fault-recovery lock reset for g_malloc_lock. Core 1 runs decompress
  * (zlib/LZMA) and can therefore be holding this lock (mid-malloc/free) at the

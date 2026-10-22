@@ -35,6 +35,11 @@
 /* Read direction of REG6: generation-2 host aperture acknowledgement. */
 #define MNTZORRO_APERTURE_ACK_STATUS 0xa5020001UL
 
+/* Read direction of REG7: low bits retain the Z2 aperture byte count. Bit 31
+ * is set only by a Z3 Fast-RAM image whose host PIC lands at DDR 0x2fe00000.
+ * Old bitstreams return zero on Z3; firmware must withhold Fast RAM then. */
+#define MNTZORRO_CAP_Z3_FASTRAM_DDR_2FE00000 0x80000000UL
+
 #define MNTZORRO_STATUS_SDK_IRQ_ACK     (1UL << 18)
 #define MNTZORRO_STATUS_SDK_DOORBELL    (1UL << 19)
 #define MNTZORRO_STATUS_VCAP_VIEWPORT   (1UL << 15)

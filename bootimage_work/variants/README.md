@@ -17,6 +17,10 @@ scanlines, INT2, MAC address, HDF selection, and Zorro III Fast RAM.
 | `a500-2mb` | `bootimage_work/variants/zz9000_ps_wrapper-a500-2mb.bit` | A500 2 MB, ZZ9500CX Denise adapter |
 | `a500plus` | `bootimage_work/variants/zz9000_ps_wrapper-a500plus.bit` | A500+ or Super Denise, ZZ9500CX Denise adapter |
 
+`variant-matrix.sh` is the canonical release matrix consumed by the shell
+variant builder, release packager, and PowerShell timing sweep. Update it
+before adding, removing, or changing a release variant.
+
 ## Build
 
 Build all variants on the Vivado host from the repository root:
@@ -39,10 +43,12 @@ Bash as documented in `build_variant_bitstreams.sh`.
 ## Release requirements
 
 CI packages the bitstreams present in the tree. Tagged releases pass
-`--require-all`, so every image in the table must be present. The
-`zorro3-aga` C28 image is also checked against
-`a4000-c28-builds.json`; update its routed bitstream and record together after
-a C28 rebuild.
+`--require-all`, which requires every image in the table to have a matching
+passing SHA-256 entry in `timing-qualification.json`. The timing sweep updates
+that record with its selected result; copy the selected bitstream into the
+listed release path and commit both changes together. The `zorro3-aga` C28
+image is also checked against `a4000-c28-builds.json`; update its routed
+bitstream and record together after a C28 rebuild.
 
 The retired no-USB-autoboot images, `zorro3-nofast` images, and the `ns-pal`
 firmware flavor are outside the release matrix.

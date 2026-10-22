@@ -15,7 +15,7 @@
  * stages for the 150 MHz pixel clock.
  *
  * Timing: the geometry inputs arrive with the line-buffer read addresses;
- * the words arrive READ_LATENCY cycles later; yuv422 is valid seven cycles
+ * the words arrive READ_LATENCY cycles later; yuv422 is valid eight cycles
  * after the words.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -150,17 +150,22 @@ reg [7:0] s3_a [0:SAMPLES-1];
 reg signed [17:0] s3_product [0:SAMPLES-1];
 reg [7:0] s3_row_weight = 0;
 
-/* Stage 4: horizontally filtered rows. */
-reg [7:0] s4_h [0:SAMPLES-1];
-reg [7:0] s4_row_weight = 0;
+/* Stage 4 separates the product register from the horizontal lerp. */
+reg [7:0] s4_a [0:SAMPLES-1];
+reg signed [17:0] s4_product [0:SAMPLES-1];
+reg [7:0] s4_row_weight_pre = 0;
 
-/* Stages 5-7: the vertical lerp per component. */
-reg [7:0] s5_top [0:2];
-reg signed [8:0] s5_diff [0:2];
+/* Stage 5: horizontally filtered rows. */
+reg [7:0] s5_h [0:SAMPLES-1];
 reg [7:0] s5_row_weight = 0;
+
+/* Stages 6-8: the vertical lerp per component. */
 reg [7:0] s6_top [0:2];
-reg signed [17:0] s6_product [0:2];
-reg [7:0] s7_out [0:2];
+reg signed [8:0] s6_diff [0:2];
+reg [7:0] s6_row_weight = 0;
+reg [7:0] s7_top [0:2];
+reg signed [17:0] s7_product [0:2];
+reg [7:0] s8_out [0:2];
 
 integer r;
 initial begin
@@ -168,12 +173,13 @@ initial begin
     s1_a[r] = 0; s1_b[r] = 0;
     s2_a[r] = 0; s2_diff[r] = 0;
     s3_a[r] = 0; s3_product[r] = 0;
-    s4_h[r] = 0;
+    s4_a[r] = 0; s4_product[r] = 0;
+    s5_h[r] = 0;
   end
   for (r = 0; r < 3; r = r + 1) begin
-    s5_top[r] = 0; s5_diff[r] = 0;
-    s6_top[r] = 0; s6_product[r] = 0;
-    s7_out[r] = 0;
+    s6_top[r] = 0; s6_diff[r] = 0;
+    s7_top[r] = 0; s7_product[r] = 0;
+    s8_out[r] = 0;
   end
 end
 
@@ -203,26 +209,31 @@ always @(posedge clk) begin
   end
   s3_row_weight <= s2_row_weight;
 
-  for (r = 0; r < SAMPLES; r = r + 1)
-    s4_h[r] <= lerp_sum(s3_a[r], s3_product[r]);
-  s4_row_weight <= s3_row_weight;
-
-  for (r = 0; r < 3; r = r + 1) begin
-    s5_top[r] <= s4_h[2 * r];
-    s5_diff[r] <= lerp_diff(s4_h[2 * r], s4_h[2 * r + 1]);
+  for (r = 0; r < SAMPLES; r = r + 1) begin
+    s4_a[r] <= s3_a[r];
+    s4_product[r] <= s3_product[r];
   end
-  s5_row_weight <= s4_row_weight;
+  s4_row_weight_pre <= s3_row_weight;
+
+  for (r = 0; r < SAMPLES; r = r + 1)
+    s5_h[r] <= lerp_sum(s4_a[r], s4_product[r]);
+  s5_row_weight <= s4_row_weight_pre;
 
   for (r = 0; r < 3; r = r + 1) begin
-    s6_top[r] <= s5_top[r];
-    s6_product[r] <= lerp_product(s5_diff[r], s5_row_weight);
+    s6_top[r] <= s5_h[2 * r];
+    s6_diff[r] <= lerp_diff(s5_h[2 * r], s5_h[2 * r + 1]);
+  end
+  s6_row_weight <= s5_row_weight;
+
+  for (r = 0; r < 3; r = r + 1) begin
+    s7_top[r] <= s6_top[r];
+    s7_product[r] <= lerp_product(s6_diff[r], s6_row_weight);
   end
 
   for (r = 0; r < 3; r = r + 1)
-    s7_out[r] <= lerp_sum(s6_top[r], s6_product[r]);
+    s8_out[r] <= lerp_sum(s7_top[r], s7_product[r]);
 end
 
-/* CGX layout with both lumas equal: Y U Y V from byte 0. */
-assign yuv422 = {s7_out[2], s7_out[0], s7_out[1], s7_out[0]};
+assign yuv422 = {s8_out[2], s8_out[0], s8_out[1], s8_out[0]};
 
 endmodule

@@ -8,7 +8,7 @@
 module videocap_writeback_tb;
     localparam [31:0] BASE = 32'h08000000;
     integer expected_pitch = 32;
-    reg clk = 0, resetn = 0, capture_ready = 0;
+    reg clk = 0, resetn = 0, capture_ready = 0, address_valid = 1;
     reg [11:0] token = 0;
     reg [7:0] video_control_op = 0;
     reg [31:0] video_control_data = 0;
@@ -47,6 +47,7 @@ module videocap_writeback_tb;
         .S_AXI_ARESETN(1'b1), .z_reset(1'b0),
         .vcap_capture_ready_axi(capture_ready), .vcap_line_payload_axi(token),
         .videocap_mode(1'b1), .videocap_address(BASE),
+        .videocap_address_valid(address_valid),
         .video_control_op(video_control_op), .video_control_data(video_control_data),
         .videocap_control_applied_full_width(1'b1),
         .m01_axi_awready(awready), .m01_axi_wready(wready), .vcap_rdata(memory_data),
@@ -323,6 +324,7 @@ module videocap_writeback_tb;
     initial begin
         send_video_control(8'd2, 32'd32);
         send_video_control(8'd29, 32'd16); /* ordinary-mode viewport must not replace pitch */
+
         $display("CASE loss with AW pending in state 3 and W stalled before/after loss");
         start_case(5, 1);
         /* Let a newer completed-row token advance the handoff pipeline
@@ -421,6 +423,24 @@ module videocap_writeback_tb;
             "640-word viewport keeps row 2 at the 1280-word capture pitch");
         @(negedge clk); capture_ready = 0;
         drain_and_check_invalid();
+
+        $display("CASE writeback stays disarmed until its backing address is valid");
+        @(negedge clk); resetn = 0; capture_ready = 0; awready = 0; wready = 0; address_valid = 0;
+        clocks(4);
+        @(negedge clk); resetn = 1; capture_ready = 1;
+        clocks(8);
+        require(state == 4 && !awvalid && !wvalid,
+            "unarmed capture accepts no address or data transfer");
+        before_aw = total_aw;
+        @(negedge clk); address_valid = 1;
+        start_case(0, 0);
+        require(awaddr == BASE, "arming capture issues the configured backing address");
+        @(negedge clk); awready = 1;
+        clocks(1);
+        require(total_aw == before_aw + 1,
+            "armed capture accepts the configured backing address");
+        @(negedge clk); resetn = 0; capture_ready = 0; awready = 0; wready = 0;
+        clocks(2);
         if (failures)
             $display("RESULT FAIL writeback: %0d failures / %0d checks", failures, checks);
         else

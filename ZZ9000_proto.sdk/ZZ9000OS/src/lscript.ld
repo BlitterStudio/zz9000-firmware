@@ -11,10 +11,9 @@
 /*******************************************************************/
 
 _STACK_SIZE = DEFINED(_STACK_SIZE) ? _STACK_SIZE : 0x4000;
-/* ps7_ddr_hi is 254 MB and the high code before the heap is under 3 MB:
- * a 224 MB heap leaves about 25 MB for that code to grow. The linker
- * fails the build if heap and stacks no longer fit below 0x18000000. */
-_HEAP_SIZE = DEFINED(_HEAP_SIZE) ? _HEAP_SIZE : 0x0E000000;
+/* The 8 MiB runtime region also contains the ARM exception stacks below,
+ * so the newlib break stops before that 22 KiB reservation. */
+_HEAP_SIZE = DEFINED(_HEAP_SIZE) ? _HEAP_SIZE : 0x007FA800;
 
 _ABORT_STACK_SIZE = DEFINED(_ABORT_STACK_SIZE) ? _ABORT_STACK_SIZE : 1024;
 _SUPERVISOR_STACK_SIZE = DEFINED(_SUPERVISOR_STACK_SIZE) ? _SUPERVISOR_STACK_SIZE : 2048;
@@ -27,11 +26,11 @@ _UNDEF_STACK_SIZE = DEFINED(_UNDEF_STACK_SIZE) ? _UNDEF_STACK_SIZE : 1024;
 MEMORY
 {
    ps7_ddr_0 : ORIGIN = 0x100000, LENGTH = 0x07F00000
-   /* 0x081e0000..0x081f0000 is the host-visible Z3 AHI/MHI audio
-    * scratch window (see memorymap.h). Keep the firmware image, BSS and
-    * newlib heap above it; 0x08200000 preserves 1 MB MMU alignment. */
-   ps7_ddr_hi : ORIGIN = 0x08200000, LENGTH = 0x0FE00000
-   bootrom_ddr : ORIGIN = 0x3FCF0000, LENGTH = 0x2000
+   /* Image/BSS: 0x08200000..0x08600000. The adjacent 1 MiB task queue
+    * and core-1 stack are not linker-managed. */
+   ps7_ddr_hi : ORIGIN = 0x08200000, LENGTH = 0x00400000
+   ps7_ddr_heap : ORIGIN = 0x08800000, LENGTH = 0x00800000
+   bootrom_ddr : ORIGIN = 0x3FEF0000, LENGTH = 0x2000
    ps7_ram_0 : ORIGIN = 0x0, LENGTH = 0x30000
    ps7_ram_1 : ORIGIN = 0xFFFF0000, LENGTH = 0xFE00
 }
@@ -240,10 +239,10 @@ __framebuffer_start = 0x00200000;
 ASSERT(__firmware_low_end <= __framebuffer_start, "firmware low sections overlap framebuffer memory")
 
 /* Keep synchronized with Z3_AUDIO_SCRATCH_{ADDRESS,END} in memorymap.h.
- * The legacy audio RX formatter writes this window continuously after AHI
- * first opens, so an overlap corrupts persistent firmware heap state. */
+ * The matched audio driver receives this reservation through its discovery
+ * path; it stays out of the common host allocator. */
 __z3_audio_scratch_start = 0x081E0000;
-__z3_audio_scratch_end = 0x081F0000;
+__z3_audio_scratch_end = 0x08200000;
 ASSERT(ORIGIN(ps7_ddr_hi) >= __z3_audio_scratch_end,
        "firmware high DDR overlaps Z3 AHI/MHI audio scratch")
 
@@ -534,7 +533,7 @@ _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
    . += _HEAP_SIZE;
    _heap_end = .;
    HeapLimit = .;
-} > ps7_ddr_hi
+} > ps7_ddr_heap
 
 .stack (NOLOAD) : {
    . = ALIGN(16);
@@ -564,12 +563,13 @@ _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
    . += _UNDEF_STACK_SIZE;
    . = ALIGN(16);
    __undef_stack = .;
-} > ps7_ddr_hi
+} > ps7_ddr_heap
 
 _end = .;
-/* Keep synchronized with SDK_TASKQ_REGION_ADDRESS in memorymap.h: the task
- * queue, the core-1 stack and the card pool live above the linker image. */
-ASSERT(_end <= 0x18000000, "firmware image, heap and stacks reach the task-queue region")
+ASSERT(__bss_end <= 0x08600000,
+       "firmware image/BSS reaches the task-queue region")
+ASSERT(_end <= 0x09000000,
+       "firmware heap and stacks reach the card-pool region")
 
 .bootrom_image : {
    KEEP(*(.bootrom_image))

@@ -17,8 +17,8 @@ set pixel_registers [all_registers -clock $pixel_clock]
 if {[llength $pixel_registers] == 0} {
     error "Formatter OOC 150 MHz clock has no timed registers"
 }
-set hook_dir [file dirname [file normalize [info script]]]
-set report_dir [file join $hook_dir ZZ9000_proto timing_reports]
+set project_dir [get_property DIRECTORY [current_project]]
+set report_dir [file join $project_dir timing_reports]
 file mkdir $report_dir
 report_timing_summary -delay_type min_max -report_unconstrained \
     -file [file join $report_dir formatter_ooc_timing_summary.rpt]

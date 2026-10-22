@@ -137,14 +137,47 @@ default E7M bitstream.
 ```
 
 The synthesis flow runs `verify_formatter_ooc_timing.tcl`,
-`verify_vcap_cdc_timing.tcl`, and `verify_runtime_pixel_timing.tcl` before
-`write_bitstream`. A failure stops the build. The final bitstream is written
-under `ZZ9000_proto/ZZ9000_proto.runs/impl_1/` before the builder copies it to
-its requested output.
-A recorded implementation trial improved the ADAU1701 I2S input routed slack
-from -0.090 ns to +0.143 ns after post-route `phys_opt_design`. The final
-gated implementation result, rather than an intermediate routed checkpoint,
-determines whether the bitstream is written.
+`verify_i2s_tx_wiring.tcl`, `verify_vcap_cdc_timing.tcl`, and
+`verify_runtime_pixel_timing.tcl` before `write_bitstream`. A failure stops
+the build. The final bitstream is written under
+`ZZ9000_proto/ZZ9000_proto.runs/impl_1/` before the builder copies it to its
+requested output.
+
+The earlier registered-LRCLK experiment shifted the TDM frame by one serial
+bit and left the `I2SO_LRCLK` pad disconnected. Its reported `+1.118 ns`,
+`+35 ns`, and `+29 ns` margins are therefore invalid. The release uses the
+LRCLK regenerator instead; its qualified connected transmitter path has
+roughly `+1.1 ns` setup margin. The wiring gate requires the LRCLK pad to
+drive `audio_clock_0`, the regenerated LRCLK to drive the transmitter, and
+`audio_clock_0/bclk_out` to drive its serial clock.
+
+### Sweep placement directives for a timing-qualified variant
+
+Use the Windows sweep driver to build one variant serially through
+`Default`, `Explore`, `ExtraTimingOpt`, `ExtraNetDelay_high`, and
+`AltSpreadLogic_high`. It starts each clean implementation with
+`NUMBER_OF_PROCESSORS=4`, embeds the current eight-digit `VCAP_DIAG_BUILD_ID`
+(or the supplied `-BuildId`), and stops on the first implementation that
+passes every gate, including the pixel, overall, and I2S timing floors.
+
+```powershell
+.\build_timing_sweep.ps1 -Variant zorro3-aga
+```
+
+The driver writes the selected bitstream, final timing reports, per-attempt
+logs and reports, `SHA256SUMS`, and `sweep-summary.json` below
+`build/timing/<variant>/`; it also refreshes
+`build/timing/timing-sweep-summary.md` and updates the selected variant entry
+in `bootimage_work/variants/timing-qualification.json`. It never copies a
+selected bitstream to `bootimage_work/`. If every directive fails, the best
+attempt is selected by the smallest slack normalised to its applicable floor
+and retained with its post-route physical-optimization checkpoint for
+diagnosis; the command exits nonzero and does not update qualification.
+
+For a release, copy only timing-qualified selected results into
+`bootimage_work/`, then commit the matching bitstream and qualification record
+together. `build_release_assets.sh --require-all` checks every release-matrix
+bitstream against that passing record before it packages anything.
 
 ## Build hardware variants
 
@@ -168,6 +201,8 @@ The supported variant names are `zorro3`, `zorro3-aga`, `zorro2`,
 `zorro2-2mb`, `a500`, `a500-2mb`, and `a500plus`. The standard `zorro3` build
 writes `bootimage_work/zz9000_ps_wrapper.bit`; the other outputs are under
 `bootimage_work/variants/`.
+The canonical matrix is `bootimage_work/variants/variant-matrix.sh`; both build
+drivers and release packaging consume it.
 
 From Git Bash on Windows, use the PowerShell builder. A selected C28 variant
 requires a C28 builder that ends with its output-path option:
@@ -191,7 +226,9 @@ named `zz9000-firmware-<tag>-<variant>`.
 
 Use `--output DIR` to choose another output directory. Use
 `--firmware-flavor SUFFIX` only when packaging an alternate firmware ELF; the
-standard Zorro III image remains `bootimage_work/BOOT.bin`.
+standard Zorro III image remains `bootimage_work/BOOT.bin`. `--require-all`
+also verifies that every release-matrix bitstream has the exact SHA-256 of a
+passing entry in `bootimage_work/variants/timing-qualification.json`.
 
 ## Rebuild the FSBL
 

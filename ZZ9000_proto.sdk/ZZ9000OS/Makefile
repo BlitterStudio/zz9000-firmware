@@ -125,6 +125,7 @@ LDFLAGS += -Wl,-build-id=none
 LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -specs=$(SRC_DIR)/Xilinx.spec
 LDFLAGS += -Wl,-T -Wl,$(SRC_DIR)/lscript.ld
+LDFLAGS += -Wl,-Map,$(BUILD_DIR)/ZZ9000OS.map
 LDFLAGS += -L$(BSP_LIB)
 
 # Libraries (order matters for --start-group)
@@ -266,6 +267,7 @@ C_SRCS = \
 	$(SRC_DIR)/rfb/rfb_words.c \
 	$(SRC_DIR)/watchdog.c \
 	$(SRC_DIR)/newlib_compat.c \
+	$(SRC_DIR)/newlib_heap.c \
 	$(SRC_DIR)/sd_boot_deadline.c
 
 # Object files shared by both bitstream-capability firmware images.

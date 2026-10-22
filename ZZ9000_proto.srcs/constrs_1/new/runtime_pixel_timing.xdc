@@ -25,15 +25,37 @@ set_clock_groups -physically_exclusive \
 set_max_delay -datapath_only -from [get_clocks clk_fpga_0] -to [get_clocks dvi_pixel_runtime_150] 20.000
 set_max_delay -datapath_only -from [get_clocks dvi_pixel_runtime_150] -to [get_clocks clk_fpga_0] 20.000
 
-# VGA_R/G/B/HS/VS/DE feed the SiI9022 HDMI transmitter, which samples them
-# against the forwarded VGA_PCLK (an OBUF output of the same pixel clock).
-# The data registers are fabric flip-flops, not IOB registers; their
-# clock-to-pin delays (about 2.4-10.5 ns on the routed trial netlist) and
-# the SiI9022 setup/hold window relative to VGA_PCLK are not modelled here.
-# Output delays referenced to the internal pixel clock fail by 8-12 ns at
-# 150 MHz on that netlist, because they ignore the forwarded clock, so they
-# do not describe the interface.  The outputs keep the unconstrained
-# placement of the qualified baseline; the false path only makes that
-# explicit.  A correct source-synchronous model (a generated clock on
-# VGA_PCLK plus the SiI9022 tSU/tHD) is future work.
-set_false_path -to [get_ports {VGA_R[*] VGA_G[*] VGA_B[*] VGA_HS VGA_VS VGA_DE}]
+# VGA_R/G/B/HS/VS/DE feed the SiI9022A HDMI transmitter.  The final output
+# stage registers this complete bundle in IOBs, and an ODDR forwards VGA_PCLK.
+# Firmware clears the transmitter's EDGE bit (TPI 0x08 bit 4), so it samples
+# on VGA_PCLK's falling edge. SiI-DS-1076-E.01 Table 3.13/Figure 4.2 specifies
+# tSU=0.0 ns and tHD=1.8 ns for EDGE=0 at the board's 3.3 V IOVCC; that table
+# also applies the limits to RGB, DE, HSYNC, and VSYNC.
+#
+# The board trace length difference was not measured. Conservatively assume
+# data can arrive 0.20 ns later than VGA_PCLK for setup and 0.20 ns earlier
+# for hold [INFERENCE]. Thus the source-synchronous output model uses
+# max=tSU+0.20=0.20 ns and min=-(tHD+0.20)=-2.00 ns. The ODDR's rising edge
+# launches data, while the receiver's falling-edge sample is 3.333 ns later
+# at 150 MHz, deliberately centring the external data window.
+set vga_pclk_oddr_c [get_pins -quiet vga_output_stage_i/vga_pclk_oddr/C]
+if {[llength $vga_pclk_oddr_c] != 1} {
+  error "Expected one VGA_PCLK forwarding ODDR C pin, found [llength $vga_pclk_oddr_c]"
+}
+set default_pixel_clock [lindex $default_pixel_clocks 0]
+create_generated_clock -name sii9022_idck_default \
+  -source $vga_pclk_oddr_c -master_clock $default_pixel_clock -divide_by 1 \
+  [get_ports VGA_PCLK]
+create_generated_clock -name sii9022_idck -add \
+  -source $vga_pclk_oddr_c -master_clock dvi_pixel_runtime_150 -divide_by 1 \
+  [get_ports VGA_PCLK]
+set_clock_groups -physically_exclusive \
+  -group [get_clocks sii9022_idck_default] \
+  -group [get_clocks sii9022_idck]
+
+
+set sii9022_video_ports [get_ports {VGA_R[*] VGA_G[*] VGA_B[*] VGA_HS VGA_VS VGA_DE}]
+set_output_delay -clock sii9022_idck_default -clock_fall -max 0.200 $sii9022_video_ports
+set_output_delay -clock sii9022_idck_default -clock_fall -min -2.000 $sii9022_video_ports
+set_output_delay -clock sii9022_idck -clock_fall -max 0.200 -add_delay $sii9022_video_ports
+set_output_delay -clock sii9022_idck -clock_fall -min -2.000 -add_delay $sii9022_video_ports

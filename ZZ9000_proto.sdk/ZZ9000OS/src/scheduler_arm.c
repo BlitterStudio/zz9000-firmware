@@ -163,6 +163,33 @@ void scheduler_coherency_init_core0(void)
   Xil_SetTlbAttributes(SDK_TASKQ_REGION_ADDRESS, NORM_WB_CACHE);
 }
 
+/*
+ * Core-local MMU + D-cache enable for core 1. Xil_EnableMMU() is not safe
+ * here: its Xil_DCacheInvalidate()/Xil_ICacheInvalidate() also invalidate
+ * the shared PL310 L2 by way (xil_cache.c Xil_L2CacheInvalidate), which
+ * discards every dirty L2 line core 0 holds at that moment -- core 0 keeps
+ * running through core 1's boot and every cold restart. Core 0 enabled and
+ * owns the L2; core 1 only needs its own L1s, TLB and branch predictor clean
+ * of reset garbage before it turns translation and caching on.
+ */
+static void core1_enable_mmu_local(void)
+{
+  u32 sctlr;
+
+  Xil_L1DCacheInvalidate();
+  Xil_L1ICacheInvalidate();
+  mtcp(XREG_CP15_INVAL_UTLB_UNLOCKED, 0U);
+  mtcp(XREG_CP15_INVAL_BRANCH_ARRAY, 0U);
+  dsb();
+  isb();
+
+  sctlr = mfcp(XREG_CP15_SYS_CONTROL);
+  sctlr |= XREG_CP15_CONTROL_M_BIT | XREG_CP15_CONTROL_C_BIT;
+  mtcp(XREG_CP15_SYS_CONTROL, sctlr);
+  dsb();
+  isb();
+}
+
 void scheduler_coherency_init_core1(void)
 {
   /* Core 1 is entered straight from the CPU1 reset vector (core1_loop),
@@ -171,7 +198,8 @@ void scheduler_coherency_init_core1(void)
    *   1. point TTBR0 at the shared translation table (same table as core 0),
    *   2. set the domain access control (all domains manager),
    *   3. set ACTLR.SMP before enabling the D-cache,
-   *   4. enable MMU + D-cache (Xil_EnableMMU invalidates I/D caches first),
+   *   4. enable MMU + D-cache after invalidating this core's L1s and TLB only
+   *      (core1_enable_mmu_local; the shared L2 stays untouched),
    *   5. refresh the shareable attribute so this core's TLB reflects it.
    * The region was already marked shareable by scheduler_coherency_init_core0()
    * at boot, before this core started. */
@@ -184,11 +212,11 @@ void scheduler_coherency_init_core1(void)
 
   taskq_set_smp_bit();
 
-  Xil_EnableMMU();                                 /* enable MMU + D-cache */
+  core1_enable_mmu_local();                        /* enable MMU + D-cache */
 
   /* boot.S enables the I-cache on core 0 (SCTLR = M|C|I), but core 1 enters
-   * from its reset vector and bypasses boot.S; Xil_EnableMMU() sets only
-   * M|C. Without SCTLR.I every instruction fetch goes to L2/DDR -- measured
+   * from its reset vector and bypasses boot.S; core1_enable_mmu_local() sets
+   * only M|C. Without SCTLR.I every instruction fetch goes to L2/DDR -- measured
    * ~10-30x slowdown on tight decode loops (LZH batch chunks blew the 68k's
    * 5 s sync wait). L1-only variant on purpose: Xil_ICacheEnable() would
    * also re-run the shared PL310 L2 enable that core 0 already performed. */

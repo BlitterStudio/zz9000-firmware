@@ -18,6 +18,9 @@
 #include <string.h>
 
 #include "sdk_mailbox.h"
+#ifndef SDK_CONSOLE_HOST_TEST
+#include "card_pool.h"
+#endif
 
 static rfb_encoder cenc_enc;
 static rfb_geom    cenc_geom;
@@ -38,15 +41,54 @@ static int         cenc_snap_ok;
  * buffer.  Another buffer is another client. */
 static uint32_t    cenc_owner;
 
+#define CENC_POOL_OWNER CARD_POOL_OWNER(CARD_POOL_CLASS_CONSOLE, 1u)
+
+static rfb_u8 *cenc_alloc(uint32_t bytes)
+{
+#ifdef SDK_CONSOLE_HOST_TEST
+	return (rfb_u8 *)malloc(bytes);
+#else
+	return (rfb_u8 *)(uintptr_t)card_pool_alloc(&card_pool, bytes,
+	                                            CENC_POOL_OWNER);
+#endif
+}
+
+static void cenc_free(rfb_u8 *ptr)
+{
+#ifdef SDK_CONSOLE_HOST_TEST
+	free(ptr);
+#else
+	if (ptr)
+		(void)card_pool_free(&card_pool, (uint32_t)(uintptr_t)ptr,
+		                     CENC_POOL_OWNER);
+#endif
+}
+
+static void cenc_release(void)
+{
+#ifdef SDK_CONSOLE_HOST_TEST
+	free(cenc_shadow);
+	free(cenc_scratch);
+	free(cenc_snap);
+#else
+	(void)card_pool_release_owner(&card_pool, CENC_POOL_OWNER);
+#endif
+	cenc_shadow = 0;
+	cenc_scratch = 0;
+	cenc_snap = 0;
+	cenc_shadow_len = 0u;
+	cenc_scratch_len = 0u;
+	cenc_snap_len = 0u;
+}
+
 void sdk_console_encode_reset(void)
 {
+	cenc_release();
 	cenc_ready = 0;
 	cenc_owner = 0u;
 	cenc_snap_ok = 0;
 	cenc_flags = 0u;
 	memset(&cenc_geom, 0, sizeof(cenc_geom));
-	if (cenc_shadow)
-		memset(cenc_shadow, 0, cenc_shadow_len);
 }
 
 static uint32_t rd_be32(const uint8_t *p)
@@ -157,15 +199,14 @@ static int cenc_configure(const rfb_geom *g, rfb_u32 flags)
 		rfb_encoder enc;
 
 		if (shadow_len != cenc_shadow_len)
-			shadow = (rfb_u8 *)malloc(shadow_len);
+			shadow = cenc_alloc(shadow_len);
 		if (scratch_len != cenc_scratch_len)
-			scratch = (rfb_u8 *)malloc(scratch_len);
+			scratch = cenc_alloc(scratch_len);
 		if (!shadow || !scratch) {
 			if (shadow && shadow != cenc_shadow)
-				free(shadow);
+				cenc_free(shadow);
 			if (scratch && scratch != cenc_scratch)
-				free(scratch);
-			cenc_ready = 0;		/* the old state stays allocated, unused */
+				cenc_free(scratch);
 			return 0;
 		}
 
@@ -175,20 +216,20 @@ static int cenc_configure(const rfb_geom *g, rfb_u32 flags)
 		if (rfb_encoder_init(&enc, g, flags, &cfg, shadow, shadow_len,
 		                     scratch, scratch_len) != 0) {
 			if (shadow != cenc_shadow)
-				free(shadow);
+				cenc_free(shadow);
 			if (scratch != cenc_scratch)
-				free(scratch);
+				cenc_free(scratch);
 			cenc_ready = 0;
 			return 0;
 		}
 
 		if (shadow != cenc_shadow) {
-			free(cenc_shadow);
+			cenc_free(cenc_shadow);
 			cenc_shadow = shadow;
 			cenc_shadow_len = shadow_len;
 		}
 		if (scratch != cenc_scratch) {
-			free(cenc_scratch);
+			cenc_free(cenc_scratch);
 			cenc_scratch = scratch;
 			cenc_scratch_len = scratch_len;
 		}
@@ -289,8 +330,8 @@ uint16_t sdk_console_encode_band(const struct sdk_console_request *r,
 		uint32_t snap_need = conv ? (uint32_t)height * bpr : fb->length;
 
 		if (cenc_snap_len < snap_need) {
-			free(cenc_snap);
-			cenc_snap = (rfb_u8 *)malloc(snap_need);
+			cenc_free(cenc_snap);
+			cenc_snap = cenc_alloc(snap_need);
 			cenc_snap_len = cenc_snap ? snap_need : 0u;
 		}
 		if (!cenc_snap)

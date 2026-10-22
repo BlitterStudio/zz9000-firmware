@@ -278,9 +278,9 @@ void overlay_handle_op(struct ZZ_VIDEO_STATE *vs, struct GFXData *data)
 	     * when rtg.library's constructor made it, or from the legacy
 	     * surface heap (high) via the ZZ AllocBitMap hook. */
 	    src_addr < (uint32_t)FRAMEBUFFER_ADDRESS ||
-	    src_addr >= LEGACY_SURFACE_HEAP_END ||
+	    src_addr >= HOST_VISIBLE_HEAP_END ||
 	    (uint32_t)src_pitch * src_h >
-	    (uint32_t)LEGACY_SURFACE_HEAP_END - src_addr) {
+	    (uint32_t)HOST_VISIBLE_HEAP_END - src_addr) {
 		printf("[overlay] SET rejected: src %ux%u pitch %u dst %dx%d "
 		       "act %d variant %u scale %d cm %d rows %lu stride %lu\n",
 		       src_w, src_h, src_pitch, dst_w, dst_h, activating,

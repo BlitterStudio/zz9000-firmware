@@ -93,7 +93,8 @@ static struct sii9022_reg sii9022_mode[SII_MODE_REG_COUNT] = {
 	{ 0x05, 0x06 },
 	{ 0x06, 0xee },
 	{ 0x07, 0x02 },
-	{ 0x08, 0x70 }
+	/* 1x, 24-bit RGB, EDGE=0: sample on IDCK falling edge. */
+	{ 0x08, 0x60 }
 };
 
 /* Bit 1 causes two purple columns on DVI monitors, so keep DVI/HDMI

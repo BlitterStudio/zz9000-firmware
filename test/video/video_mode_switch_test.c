@@ -23,8 +23,10 @@ static uint32_t clock_mul_div, clock_div2;
 static unsigned clock_fail_locks;
 static uint8_t transmitter[256], i2c_register;
 static uint32_t formatter_data, formatter_ops[32];
+static unsigned videocap_address_writes;
+static uint32_t videocap_address_write;
 static XAxiVdma_DmaSetup dma_setup;
-static unsigned dma_starts;
+static unsigned dma_configs, dma_starts;
 static uint32_t video_irq_enabled = 1;
 static unsigned inject_native_irq, deferred_native_irqs;
 static uint32_t videocap_zstate;
@@ -50,6 +52,18 @@ static struct zz_config test_config = {
 const struct zz_config *zz_config_get(void)
 {
 	return &test_config;
+}
+
+uint32_t surface_allocator_alloc(uint32_t size)
+{
+	assert(size == VIDEO_VIDEOCAP_BACKING_RESERVATION_SIZE);
+	return FRAMEBUFFER_ADDRESS;
+}
+
+int surface_allocator_free(uint32_t address)
+{
+	assert(address == FRAMEBUFFER_ADDRESS);
+	return 0;
 }
 void Xil_L1DCacheFlush(void) {}
 void Xil_L2CacheFlush(void) {}
@@ -83,7 +97,13 @@ void test_xil_out32(uintptr_t address, uint32_t value)
 		formatter_data = value;
 	} else if (address == MNTZ_BASE_ADDR + MNTZORRO_REG2 &&
 	           (value & 0x80000000U)) {
-		formatter_ops[value & 31U] = formatter_data;
+		uint16_t op = (uint16_t)value;
+
+		formatter_ops[op & 31U] = formatter_data;
+		if (op == MNTVF_OP_VIDEOCAP_ADDRESS) {
+			++videocap_address_writes;
+			videocap_address_write = formatter_data;
+		}
 	}
 }
 
@@ -153,13 +173,16 @@ int XAxiVdma_DmaConfig(XAxiVdma *instance, u16 direction,
 		XAxiVdma_DmaSetup *config)
 {
 	(void)instance; (void)direction;
+	++dma_configs;
 	dma_setup = *config;
 	return dma_config_status;
 }
+static UINTPTR dma_buffer_address;
 int XAxiVdma_DmaSetBufferAddr(XAxiVdma *instance, u16 direction,
 		UINTPTR *addresses)
 {
-	(void)instance; (void)direction; (void)addresses;
+	(void)instance; (void)direction;
+	dma_buffer_address = addresses[0];
 	return dma_address_status;
 }
 int XAxiVdma_DmaStart(XAxiVdma *instance, u16 direction)
@@ -238,7 +261,7 @@ static uint16_t commit_custom(uint32_t color)
 
 static void clear_measurements(void)
 {
-	clock_reloads = tmds_interruptions = delay_us = dma_starts = 0;
+	clock_reloads = tmds_interruptions = delay_us = dma_configs = dma_starts = 0;
 	dma_cfg_initialize_status = dma_config_status = dma_address_status =
 		dma_start_status = XST_SUCCESS;
 }
@@ -290,6 +313,14 @@ int main(void)
 	 * never carried an override. */
 	vs.videocap_geometry_request_serial = 0;
 
+	/* The FPGA can signal vblank before the host selects an RTG mode.
+	 * That interrupt must not attempt a zero-geometry VDMA configuration. */
+	clear_measurements();
+	videocap_zstate = 1U << 21;
+	isr_video(NULL);
+	assert(dma_configs == 0 && dma_starts == 0);
+	videocap_zstate = 0;
+
 	/* Cold start must initialize the physical output. */
 	video_mode_init(ZZVMODE_1920x1080_60, 0, MNTVA_COLOR_16BIT565);
 	assert(clock_reloads == 1 && tmds_interruptions == 1);
@@ -319,8 +350,27 @@ int main(void)
 	/* A native geometry ACK follows the successful VDMA programming, not the
 	 * accepted feature write. Every VDMA failure leaves the request pending;
 	 * the unchanged serial mismatch retries on the next stable vblank. */
+	videocap_address_writes = 0;
+	videocap_address_write = 0;
+	video_reset();
 	vs.framebuffer = capture_framebuffer;
-	vs.framebuffer_pan_offset = 0x00dff000;
+	/* Reset may reserve the backing but must not enable writeback while the
+	 * Zorro FSM still holds reset. Arming after reset releases programs the
+	 * backing exactly once and lets capture become active. */
+	assert(vs.videocap_backing_address == 0U);
+	assert(vs.videocap_backing_programmed == 0U);
+	assert(vs.videocap_enabled_old == 0);
+	assert(video_videocap_backing_reserve());
+	assert(vs.videocap_backing_address != 0U);
+	assert(vs.videocap_backing_programmed == 0U);
+	assert(videocap_address_writes == 0U);
+	assert(video_videocap_backing_arm());
+	assert(videocap_address_writes == 1U);
+	assert(videocap_address_write == vs.videocap_backing_address);
+	assert(vs.videocap_backing_programmed == 1U);
+	assert(video_videocap_backing_arm());
+	assert(videocap_address_writes == 1U);
+	vs.framebuffer_pan_offset = 0;
 	vs.videocap_enabled_old = 1;
 	vs.videocap_video_mode = ZZVMODE_800x600;
 	vs.videocap_video_mode_applied = ZZVMODE_800x600;
@@ -442,14 +492,22 @@ int main(void)
 	geometry_native_vblank();
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_POS] == 0);
 	assert(formatter_ops[MNTVF_OP_VIEWPORT_SIZE_COMMIT] == (600U << 16 | 800U));
-	/* 15 kHz filtered 800x600 keeps the tuned origin. A short-line PAL
-	 * field on that same configured base is shown on 720x576 and must
-	 * start at the capture row, not 190 words before it. */
-	assert(vs.framebuffer_pan_offset == VIDEO_VDMA_CAPTURE_PAN_PAL_800X600);
+	/* PAL filtered 800x600 keeps its tuned origin relative to the
+	 * dynamically allocated capture backing. A short-line PAL field on
+	 * that same configured base is shown on 720x576 and starts at the
+	 * capture row. */
+	assert((vs.videocap_backing_address &
+		(VIDEO_VIDEOCAP_BACKING_ALIGNMENT - 1U)) == 0U);
+	assert(videocap_address_write == vs.videocap_backing_address);
+	assert(vs.framebuffer_pan_offset ==
+		vs.videocap_backing_address -
+		VIDEO_VIDEOCAP_PAL_800X600_SCANOUT_DELTA -
+		FRAMEBUFFER_ADDRESS);
 	videocap_zstate |= 1U << 11;
 	assert(video_set_videocap_geometry(0, 0));
 	geometry_native_vblank();
-	assert(vs.framebuffer_pan_offset == VIDEO_VDMA_CAPTURE_PAN_BASE);
+	assert(vs.framebuffer_pan_offset ==
+		vs.videocap_backing_address - FRAMEBUFFER_ADDRESS);
 	assert(dma_setup.Stride == 720 * 4);
 	videocap_zstate &= ~(1U << 11);
 	vs.videocap_source_class_old = 0;
@@ -822,6 +880,28 @@ int main(void)
 	assert(formatter_ops[MNTVF_OP_DIMENSIONS] ==
 	       (((uint32_t)preset_video_modes[ZZVMODE_1920x1080_60].vres << 16) |
 	        (uint32_t)preset_video_modes[ZZVMODE_1920x1080_60].hres));
+
+	/* P96 pans its RTG screen while the monitor still shows capture,
+	 * then switches back to RTG without panning again. Capture's own
+	 * origin must not replace that pan, or the RTG display scans the
+	 * capture buffer (black screen on hardware). */
+	video_mode_init(ZZVMODE_1280x720, 0, MNTVA_COLOR_32BIT);
+	videocap_zstate = (1U << 21) | (1U << 23);
+	vs.videocap_enabled_old = 0;
+	isr_video(NULL);
+	vs.host_pan_offset = 0x00123400U;
+	vs.host_pan_width = 1280U;
+	vs.framebuffer_pan_offset = vs.host_pan_offset;
+	vs.framebuffer_pan_width = vs.host_pan_width;
+	for (unsigned i = 0; i < VIDEO_VIDEOCAP_MODE_STABLE_VBLANKS + 2U; ++i)
+		isr_video(NULL);
+	assert(vs.framebuffer_pan_offset != 0x00123400U);
+	videocap_zstate = 1U << 21;
+	isr_video(NULL);
+	assert(vs.framebuffer_pan_offset == 0x00123400U);
+	assert(vs.framebuffer_pan_width == 1280U);
+	assert(dma_buffer_address ==
+	       (UINTPTR)((uint32_t)(uintptr_t)vs.framebuffer + 0x00123400U));
 	puts("video mode switch: PASS");
 	return 0;
 }

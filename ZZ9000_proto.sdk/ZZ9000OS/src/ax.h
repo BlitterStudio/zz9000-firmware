@@ -69,6 +69,8 @@ enum {
 };
 
 int audio_adau_init(int program_dsp);
+/* Number of I2C writes issued to the ADAU1701 since boot. */
+uint32_t audio_adau_write_count(void);
 void audio_init_i2s(void);
 void isr_audio(void *dummy);
 void isr_audio_rx(void *dummy);
