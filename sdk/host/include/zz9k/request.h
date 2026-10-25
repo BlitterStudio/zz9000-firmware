@@ -78,6 +78,18 @@ static inline int zz9k_request_query_aperture_layout(ZZ9KRequest *request)
   return ZZ9K_STATUS_OK;
 }
 
+static inline int zz9k_request_module_status(ZZ9KRequest *request,
+                                              uint32_t index)
+{
+  ZZ9KModuleStatusRequestPayload *payload;
+  if (!request) return ZZ9K_STATUS_BAD_REQUEST;
+  zz9k_request_init(request, ZZ9K_OP_MODULE_STATUS);
+  request->entry.payload_len = sizeof(ZZ9KModuleStatusRequestPayload);
+  payload = (ZZ9KModuleStatusRequestPayload *)request->entry.payload.inline_data;
+  zz9k_put_be32(payload->index, index);
+  return ZZ9K_STATUS_OK;
+}
+
 static inline int zz9k_request_alloc_shared(ZZ9KRequest *request,
                                             uint32_t length,
                                             uint32_t alignment,

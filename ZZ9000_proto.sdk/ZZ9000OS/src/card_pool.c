@@ -19,6 +19,10 @@
 #error "card pool page size differs between memorymap.h and card_pool.h"
 #endif
 
+#if CARD_POOL_PERMANENT_ADDRESS != FIRMWARE_MODULE_ARENA_END
+#error "module arena must reserve the first permanent card-pool pages"
+#endif
+
 card_pool_t card_pool;
 
 void card_pool_init(card_pool_t *pool)

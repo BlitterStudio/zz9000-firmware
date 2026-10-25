@@ -26,6 +26,17 @@ typedef struct ZZ9KBoard {
   uint32_t firmware_version;
 } ZZ9KBoard;
 
+typedef struct ZZ9KModuleStatus {
+  uint32_t id;
+  uint32_t version;
+  uint32_t abi_version;
+  uint32_t load_address;
+  uint32_t image_size;
+  uint32_t bss_size;
+  uint32_t state;
+  char name[16];
+} ZZ9KModuleStatus;
+
 typedef struct ZZ9KRequest {
   ZZ9KMailboxEntry entry;
 } ZZ9KRequest;
@@ -215,6 +226,8 @@ static inline int zz9k_aperture_range_free(
 }
 int zz9k_query_service(ZZ9KContext *ctx, uint32_t service_id,
                        ZZ9KServiceInfo *service);
+int zz9k_module_status(ZZ9KContext *ctx, uint32_t index,
+                       ZZ9KModuleStatus *status);
 int zz9k_ping(ZZ9KContext *ctx, const uint8_t *payload,
               uint32_t payload_len, uint8_t *reply_payload,
               uint32_t *reply_len);

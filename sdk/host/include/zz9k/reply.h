@@ -117,6 +117,29 @@ static inline int zz9k_reply_caps(const ZZ9KMailboxEntry *reply,
   return ZZ9K_STATUS_OK;
 }
 
+static inline int zz9k_reply_module_status(const ZZ9KMailboxEntry *reply,
+                                           ZZ9KModuleStatus *status)
+{
+  const ZZ9KModuleStatusPayload *payload;
+  int result;
+  if (!status) return ZZ9K_STATUS_BAD_REQUEST;
+  memset(status, 0, sizeof(*status));
+  result = zz9k_reply_require(reply, ZZ9K_OP_MODULE_STATUS,
+                              sizeof(ZZ9KModuleStatusPayload));
+  if (result != ZZ9K_STATUS_OK) return result;
+  payload = (const ZZ9KModuleStatusPayload *)reply->payload.inline_data;
+  status->id = zz9k_get_be32(payload->id);
+  status->version = zz9k_get_be32(payload->version);
+  status->abi_version = zz9k_get_be32(payload->abi_version);
+  status->load_address = zz9k_get_be32(payload->load_address);
+  status->image_size = zz9k_get_be32(payload->image_size);
+  status->bss_size = zz9k_get_be32(payload->bss_size);
+  status->state = zz9k_get_be32(payload->state);
+  memcpy(status->name, payload->name, sizeof(status->name));
+  status->name[sizeof(status->name) - 1] = '\\0';
+  return ZZ9K_STATUS_OK;
+}
+
 static inline int zz9k_reply_aperture_layout(
     const ZZ9KMailboxEntry *reply, ZZ9KApertureLayout *layout)
 {
