@@ -281,6 +281,16 @@ uint16_t sdk_video_stream_begin_owned(
 		if (module_status != SDK_STATUS_OK)
 			return module_status;
 	}
+	if ((begin->container == SDK_VIDEO_CONTAINER_MPEG_PS ||
+	     begin->container == SDK_VIDEO_CONTAINER_WEBM) &&
+	    (begin->codec == SDK_VIDEO_CODEC_MPEG1 ||
+	     begin->codec == SDK_VIDEO_CODEC_MPEG2)) {
+		uint16_t module_status =
+			zzm_registry_sdk_status(ZZM_MODULE_MPEG2);
+
+		if (module_status != SDK_STATUS_OK)
+			return module_status;
+	}
 	ops = sdk_video_backend_find(begin->codec, begin->container);
 	if (ops && ops->geometry_ok) {
 		if (!ops->geometry_ok(begin->width, begin->height))

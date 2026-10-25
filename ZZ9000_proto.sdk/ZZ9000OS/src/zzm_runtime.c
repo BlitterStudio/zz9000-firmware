@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "xil_cache.h"
 #include "card_pool.h"
+#include "zzm_registry.h"
 #include "zzm_runtime.h"
 
 static uint32_t module_card_alloc(uint32_t bytes, uint32_t owner)
@@ -28,9 +29,15 @@ static void module_log(const char *message)
     printf("[ZZM] %s\n", message ? message : "");
 }
 
+static int module_register_ops(uint32_t module_id, const void *ops,
+                               uint32_t ops_size)
+{
+    return zzm_registry_register_ops(module_id, ops, ops_size);
+}
+
 static const zzm_services_t services = {
     ZZM_MODULE_ABI_VERSION, sizeof(services), module_card_alloc, module_card_free,
-    module_dcache_clean, module_icache_invalidate, module_log,
+    module_dcache_clean, module_icache_invalidate, module_log, module_register_ops,
 };
 
 const zzm_services_t *zzm_runtime_services(void) { return &services; }

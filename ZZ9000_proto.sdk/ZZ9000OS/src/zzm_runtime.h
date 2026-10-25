@@ -12,6 +12,7 @@ typedef struct zzm_services {
     void (*dcache_clean)(uint32_t address, uint32_t length);
     void (*icache_invalidate)(uint32_t address, uint32_t length);
     void (*log)(const char *message);
+    int (*register_ops)(uint32_t module_id, const void *ops, uint32_t ops_size);
 } zzm_services_t;
 
 typedef int (*zzm_init_fn)(const zzm_services_t *services);
