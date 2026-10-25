@@ -128,7 +128,7 @@ LDFLAGS += -Wl,-Map,$(BUILD_DIR)/ZZ9000OS.map
 LDFLAGS += -L$(BSP_LIB)
 
 # Libraries (order matters for --start-group)
-LIBS = $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBVPX_LIB) $(LIBOPUS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
+LIBS = $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBPNG_LIB) $(ZLIB_LIB) $(LIBJPEG_TURBO_LIB) -lm -Wl,--start-group,-lxil,-lxilffs,-lgcc,-lc,--end-group
 
 # Source files
 C_SRCS = \
@@ -241,7 +241,6 @@ C_SRCS = \
 	$(SRC_DIR)/bearssl/ghash_ctmul.c \
 	$(SRC_DIR)/bearssl/gcm.c \
 	$(SRC_DIR)/sdk_image_stream.c \
-	$(SRC_DIR)/sdk_webp_alloc.c \
 	$(SRC_DIR)/sdk_flac_alloc.c \
 	$(SRC_DIR)/sdk_audio_flac.c \
 	$(SRC_DIR)/sdk_vorbis_alloc.c \
@@ -288,18 +287,20 @@ FALLBACK_TARGET = $(BUILD_DIR)/ZZ9000OS-legacy-bitstream.elf
 ZZM_PACKER = $(BUILD_DIR)/zzm_pack
 
 include modules/mpeg2/module.mk
+include modules/webm/module.mk
+include modules/webp/module.mk
 
 
 .PHONY: all clean size modules FORCE
 
 all: $(TARGET) $(FALLBACK_TARGET) size
 
-$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBVPX_LIB) $(LIBOPUS_LIB) $(OBJS)
+$(TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 	@echo 'Done.'
 
-$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBWEBP_DEMUX_LIB) $(LIBWEBP_DECODER_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(LIBVPX_LIB) $(LIBOPUS_LIB) $(FALLBACK_OBJS)
+$(FALLBACK_TARGET): $(SRC_DIR)/lscript.ld $(LIBJPEG_TURBO_LIB) $(LIBPNG_LIB) $(LIBFLAC_LIB) $(LIBVORBIS_LIB) $(FALLBACK_OBJS)
 	@echo 'Linking: $@'
 	$(CC) $(LDFLAGS) -o $@ $(FALLBACK_OBJS) $(LIBS)
 	@echo 'Done.'
@@ -481,4 +482,4 @@ size: $(TARGET)
 clean:
 	rm -rf $(BUILD_DIR)
 
--include $(OBJS:.o=.d) $(OVERLAY_HW_FALLBACK_OBJ:.o=.d) $(ZZM_MPEG2_OBJS:.o=.d)
+-include $(OBJS:.o=.d) $(OVERLAY_HW_FALLBACK_OBJ:.o=.d) $(ZZM_MPEG2_OBJS:.o=.d) $(ZZM_WEBM_OBJS:.o=.d) $(ZZM_WEBP_OBJS:.o=.d)

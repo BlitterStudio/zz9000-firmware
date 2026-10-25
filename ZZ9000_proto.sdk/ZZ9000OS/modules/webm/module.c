@@ -14,8 +14,8 @@ static const struct zzm_webm_ops webm_ops = {
 int zzm_module_init(const zzm_services_t *services)
 {
 	if (!services || services->abi_version != ZZM_MODULE_ABI_VERSION ||
-	    services->size < sizeof(*services))
+	    services->size < sizeof(*services) || !services->register_ops)
 		return -1;
-	return zzm_registry_register_ops(ZZM_MODULE_WEBM, &webm_ops,
-	                                sizeof(webm_ops)) ? 0 : -1;
+	return services->register_ops(ZZM_MODULE_WEBM, &webm_ops,
+	                              sizeof(webm_ops)) ? 0 : -1;
 }
