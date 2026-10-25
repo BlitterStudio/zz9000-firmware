@@ -4,9 +4,9 @@ ENTRY(zzm_module_init)
 MEMORY { module (rwx) : ORIGIN = ZZM_SLOT, LENGTH = ZZM_SLOT_SIZE }
 SECTIONS {
   .text : { *(.text .text.*) *(.rodata .rodata.*) } > module
-  .data : { *(.data .data.*) } > module
+  .data : { *(.data .data.*) *(.got .got.*) *(.got.plt) } > module
   .bss (NOLOAD) : { *(.bss .bss.*) *(COMMON) } > module
-  /DISCARD/ : { *(.rel.*) *(.rela.*) *(.got .got.*) *(.plt) }
+  /DISCARD/ : { *(.rel.*) *(.rela.*) *(.plt) }
 }
 ASSERT(SIZEOF(.text) + SIZEOF(.data) + SIZEOF(.bss) <= LENGTH(module),
        "module exceeds fixed slot")
