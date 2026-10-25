@@ -104,6 +104,28 @@ void *__wrap_realloc(void *ptr, size_t bytes)
 	return replacement;
 }
 
+/* Modules never own a newlib heap or host I/O. Allocation is redirected
+ * through the services table above; every fallback syscall is a hard fail. */
+int _write(int fd, const void *buffer, int length)
+{
+	(void)fd; (void)buffer; (void)length;
+	return -1;
+}
+int _close(int fd) { (void)fd; return -1; }
+int _fstat(int fd, void *status) { (void)fd; (void)status; return -1; }
+int _isatty(int fd) { (void)fd; return 0; }
+int _lseek(int fd, int offset, int whence)
+{
+	(void)fd; (void)offset; (void)whence;
+	return -1;
+}
+int _read(int fd, void *buffer, int length)
+{
+	(void)fd; (void)buffer; (void)length;
+	return -1;
+}
+void *_sbrk(ptrdiff_t increment) { (void)increment; return (void *)-1; }
+
 static const struct zzm_mpeg2_module_ops mpeg2_ops = {
 	.abi_version = ZZM_MPEG2_MODULE_OPS_ABI_VERSION,
 	.size = sizeof(mpeg2_ops),
