@@ -136,7 +136,7 @@ static inline int zz9k_reply_module_status(const ZZ9KMailboxEntry *reply,
   status->bss_size = zz9k_get_be32(payload->bss_size);
   status->state = zz9k_get_be32(payload->state);
   memcpy(status->name, payload->name, sizeof(status->name));
-  status->name[sizeof(status->name) - 1] = '\\0';
+  status->name[sizeof(status->name) - 1] = '\0';
   return ZZ9K_STATUS_OK;
 }
 
