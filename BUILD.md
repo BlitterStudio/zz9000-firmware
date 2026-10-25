@@ -217,8 +217,10 @@ C28_BITSTREAM_BUILDER="powershell -NoProfile -ExecutionPolicy Bypass -File ./bui
 
 Build the firmware and the required variant bitstreams before packaging a
 release. `build_release_assets.sh` writes ZIP files to `release/` by default.
-Each archive contains `BOOT.bin` and the sample `ZZ9000.CFG` in a directory
-named `zz9000-firmware-<tag>-<variant>`.
+Each archive directory is named `zz9000-firmware-<tag>-<variant>` and contains
+`BOOT.bin`, the sample `ZZ9000.CFG`, and `ZZ9K/*.ZZM` optional codec modules.
+Install every file in `ZZ9K/` before `BOOT.bin`; do not overwrite
+`ZZ9000.CFG`.
 
 ```bash
 ./build_release_assets.sh --tag v2.2.0 --require-all

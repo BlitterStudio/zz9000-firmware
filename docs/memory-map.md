@@ -20,14 +20,15 @@ above it.
 | Range | Size | Use |
 |---|---:|---|
 | `0x00000000`–`0x00100000` | 1 MiB | Low aperture/boot-reserved DDR. |
-| `0x00100000`–`0x00200000` | 1 MiB | Low firmware image and board services. |
+| `0x00100000`–`0x00200000` | 1 MiB | Low exception vectors and MMU table only. |
 | `0x00200000`–`0x033F0000` | 49.9375 MiB | P96 VRAM, managed by rtg.library. The RTG driver's MemorySize ends here. |
 | `0x033F0000`–`0x08200000` | 78.0625 MiB | Firmware host-visible heap (one interval allocator): GFXData and template scratch, dynamic videocap backing, P96 off-screen surfaces from `ACC_OP_ALLOC_SURFACE`, SDK shared allocations, mailbox/direct-ring pages and the AHI/MHI scratch. |
-| `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. Qualification build `141c121` measured `__bss_end = 0x0848F670`, leaving 1,511,824 bytes of growth margin. |
+| `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. |
 | `0x08600000`–`0x08700000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
 | `0x08700000`–`0x08800000` | 1 MiB | Full-descending core-1 stack. |
-| `0x08800000`–`0x09000000` | 8 MiB region | Newlib heap plus 22 KiB ARM exception-stack reservation. `_sbrk` reports the 8,366,080-byte break reservation and peak use at reset. This is the 8 MiB minimum after a sub-1 MiB service-path peak, providing more than 2× margin. |
-| `0x09000000`–`0x2FE00000` | 622 MiB | Permanent prefix of the card pool. |
+| `0x08800000`–`0x09000000` | 8 MiB region | Newlib heap plus 22 KiB ARM exception-stack reservation. |
+| `0x09000000`–`0x0A000000` | 16 MiB | Fixed external firmware-module arena: MPEG-2, WebM and WebP slots. |
+| `0x0A000000`–`0x2FE00000` | 606 MiB | Permanent prefix of the card pool. |
 | `0x2FE00000`–`0x3FE00000` | 256 MiB | Fast-RAM landing window when advertised; otherwise contiguous revocable card-pool tail. |
 | `0x3FE00000`–`0x40000000` | 2 MiB | RTL-pinned audio, Ethernet, boot ROM, and USB/SD belt. |
 

@@ -256,7 +256,15 @@ All multi-byte mailbox fields use the byte order defined by `zz9k/abi.h`. The se
 | Codec | `0x0600` DECOMPRESS, `0x0601` DECOMPRESS_TEST, `0x0602` STREAM_BEGIN, `0x0603` STREAM_READ, `0x0604` STREAM_CLOSE, `0x0605` STREAM_FEED, `0x0606` DECOMPRESS_BATCH |
 | Crypto | `0x0800` HASH, `0x0801` STREAM, `0x0802` AEAD, `0x0803` KX, `0x0804` VERIFY |
 | Diagnostics | `0x0900` DIAG_READ, `0x0901` DIAG_TIMING, `0x0902` DIAG_SCHED, `0x0903` DIAG_MEMORY |
+| Module | `0x0a00` MODULE_STATUS |
 | Video | `0x0b00`–`0x0b03` video-session begin/write/decode/close; `0x0b04`–`0x0b0d` media-session begin/write/decode/audio-read/present/discard/status/audio-bind/audio-unbind/close |
+
+`ZZ9K_OP_MODULE_STATUS` takes a 48-byte `ZZ9KModuleStatusRequestPayload`:
+the only nonzero field is the big-endian zero-based `index`. It returns a
+48-byte `ZZ9KModuleStatusPayload` with big-endian module ID, version, ABI,
+slot address, image and BSS sizes, and state; `name` is a NUL-terminated
+module name. State is loaded, missing, rejected ABI, rejected hash, or
+rejected slot. An index outside the fixed manifest returns `ZZ9K_STATUS_NOT_FOUND`.
 
 ### Public descriptor layout
 
