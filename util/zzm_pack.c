@@ -192,7 +192,7 @@ static int read_at(FILE *input, long file_size, uint32_t offset, void *buffer,
                    size_t size)
 {
     if ((uint64_t)offset > (uint64_t)file_size ||
-        size > (uint64_t)file_size - offset || (uint64_t)offset > LONG_MAX ||
+        size > (uint64_t)file_size - offset ||
         fseek(input, (long)offset, SEEK_SET) != 0 ||
         fread(buffer, 1, size, input) != size)
         return 0;
