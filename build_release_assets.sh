@@ -5,7 +5,7 @@
 # Each archive mirrors the public firmware ZIP shape:
 #   zz9000-firmware-<tag>-<variant>/BOOT.bin
 #   zz9000-firmware-<tag>-<variant>/ZZ9000.CFG
-#
+#   zz9000-firmware-<tag>-<variant>/ZZ9K/*.ZZM
 # CI can only package variants that already have a committed bitstream.
 # All seven committed release bitstreams contain the current hardware ABI,
 # including the native overlay and ZZ9000AX capture paths, so every archive
@@ -178,6 +178,15 @@ if [ ! -f ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf ]; then
     exit 1
 fi
 
+MODULE_DIR=ZZ9000_proto.sdk/ZZ9000OS/build/modules
+make -C ZZ9000_proto.sdk/ZZ9000OS modules
+for module in MPEG2.ZZM WEBM.ZZM WEBP.ZZM; do
+    if [ ! -f "$MODULE_DIR/$module" ]; then
+        echo "ERROR: missing built module $MODULE_DIR/$module." >&2
+        exit 1
+    fi
+done
+
 variant_defs=("${VARIANT_MATRIX[@]}")
 
 mkdir -p "$OUT_DIR"
@@ -225,6 +234,8 @@ for def in "${variant_defs[@]}"; do
     # Ship the (all-commented) sample config next to BOOT.bin so users
     # discover it; copying it to the SD card as-is changes nothing.
     cp ZZ9000.CFG "$archive_root/ZZ9000.CFG"
+    mkdir -p "$archive_root/ZZ9K"
+    cp "$MODULE_DIR"/*.ZZM "$archive_root/ZZ9K/"
 
     rm -f "$zip_path"
     (

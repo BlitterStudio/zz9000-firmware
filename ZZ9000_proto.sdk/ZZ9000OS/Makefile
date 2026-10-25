@@ -185,6 +185,7 @@ C_SRCS = \
 	$(SRC_DIR)/zzm_manifest.c \
 	$(SRC_DIR)/zzm_runtime.c \
 	$(SRC_DIR)/zzm_loader.c \
+	$(SRC_DIR)/zzm_registry.c \
 	$(SRC_DIR)/usb_proxy.c \
 	$(SRC_DIR)/usb_proxy_diag.c \
 	$(SRC_DIR)/usb_proxy_iso.c \
