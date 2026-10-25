@@ -295,11 +295,13 @@ jobs:
       # ZZ9000.CFG shipped inside every archive (issue #33). The
       # DEFAULT_NS_VIDEOCAP compile flag still works for manual builds.
 
-      - name: Upload artifacts
+      - name: Upload firmware and module artifacts
         uses: actions/upload-artifact@v7
         with:
           name: zz9000-firmware-${{ github.sha }}
-          path: release_assets/*.zip
+          path: |
+            release_assets/*.zip
+            release_assets/ZZ9K/*.ZZM
           if-no-files-found: error
           retention-days: 14
 

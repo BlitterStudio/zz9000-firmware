@@ -187,6 +187,11 @@ for module in MPEG2.ZZM WEBM.ZZM WEBP.ZZM; do
     fi
 done
 
+# Keep the modules alongside the archives for CI consumers that install a
+# firmware artifact directly rather than unpacking a release ZIP.
+mkdir -p "$OUT_DIR/ZZ9K"
+cp "$MODULE_DIR"/*.ZZM "$OUT_DIR/ZZ9K/"
+
 variant_defs=("${VARIANT_MATRIX[@]}")
 
 mkdir -p "$OUT_DIR"
