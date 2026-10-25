@@ -276,6 +276,12 @@ jobs:
           fi
           ./build_release_assets.sh "${ARGS[@]}"
 
+      - name: Check firmware DDR and BOOT.bin budgets
+        run: |
+          python3 util/check_firmware_size.py \
+            ZZ9000_proto.sdk/ZZ9000OS/build/ZZ9000OS.elf \
+            bootimage_work/BOOT.bin
+
       - name: Verify A4000 C28 release BOOT payloads
         run: |
           BUILD_LABEL="${GITHUB_REF_NAME//\//-}"
