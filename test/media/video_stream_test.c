@@ -20,6 +20,12 @@ void smp_local_irq_restore(uint32_t s) { (void)s; }
 void smp_raw_spin_lock(volatile uint32_t *w) { *w = 1U; }
 void smp_raw_spin_unlock(volatile uint32_t *w) { *w = 0U; }
 
+uint16_t zzm_registry_sdk_status(uint32_t module_id)
+{
+	(void)module_id;
+	return SDK_STATUS_OK;
+}
+
 static uint8_t decoder_storage;
 static uint32_t create_calls;
 static uint32_t destroy_calls;

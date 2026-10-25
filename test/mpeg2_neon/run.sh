@@ -36,6 +36,7 @@ apt-get install -y -qq gcc-arm-linux-gnueabihf libc6-dev-armhf-cross \
     qemu-user >/dev/null
 OS=/src/ZZ9000_proto.sdk/ZZ9000OS
 F=$OS/src
+W=$OS/modules/webm
 M=$OS/build/deps/libmpeg2/0.5.1/src
 A=$OS/build/deps/a52dec/0.7.4
 CC=arm-linux-gnueabihf-gcc
@@ -56,7 +57,7 @@ $CC $FW -std=c99 -Wall -Wextra -DSDK_VIDEO_HOST_TEST=1 \
     -DSDK_MEDIA_HOST_TEST=1 -I$F -I$M/include -I$A/host/include \
     -o mpeg2_neon_test \
     /src/test/mpeg2_neon/mpeg2_neon_test.c $F/sdk_mpeg2_neon.c \
-    $F/sdk_video_mpeg2.c $F/webm_parse.c $F/webm_window.c \
+    $F/sdk_video_mpeg2.c $W/webm_parse.c $W/webm_window.c \
     $F/sdk_dvd_ps.c $F/sdk_dvd_ac3.c \
     $F/sdk_dvd_lpcm.c $F/mp3/decode_mp3.c $F/sdk_media_timeline.c \
     $F/sdk_media_profile.c $F/sdk_video_yuy2.c m_*.o a_*.o -lm -static

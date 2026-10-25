@@ -1,6 +1,7 @@
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Werror -std=c99
 FIRMWARE_SRC := ../../ZZ9000_proto.sdk/ZZ9000OS/src
+WEBM_MODULE_SRC := $(FIRMWARE_SRC)/../modules/webm
 
 .PHONY: test clean
 
@@ -31,7 +32,7 @@ build/media_session_test: media_session_test.c \
 
 build/video_stream_test: video_stream_test.c mock/xil_cache.h \
 	$(FIRMWARE_SRC)/sdk_video_stream.c \
-	$(FIRMWARE_SRC)/webm_parse.c $(FIRMWARE_SRC)/webm_parse.h \
+	$(WEBM_MODULE_SRC)/webm_parse.c $(FIRMWARE_SRC)/webm_parse.h \
 	$(FIRMWARE_SRC)/sdk_video_stream.h \
 	$(FIRMWARE_SRC)/sdk_video_backend.h \
 	$(FIRMWARE_SRC)/sdk_mailbox.h \
@@ -40,7 +41,7 @@ build/video_stream_test: video_stream_test.c mock/xil_cache.h \
 	$(CC) $(CFLAGS) -DSDK_VIDEO_HOST_TEST=1 -Imock \
 		-I$(FIRMWARE_SRC) -o $@ video_stream_test.c \
 		$(FIRMWARE_SRC)/sdk_video_stream.c \
-		$(FIRMWARE_SRC)/webm_parse.c $(FIRMWARE_SRC)/card_pool.c \
+		$(WEBM_MODULE_SRC)/webm_parse.c $(FIRMWARE_SRC)/card_pool.c \
 		$(FIRMWARE_SRC)/sdk_smp_lock.c
 
 build/media_overlay_source_test: media_overlay_source_test.c \
