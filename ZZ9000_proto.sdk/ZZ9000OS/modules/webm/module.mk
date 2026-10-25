@@ -50,3 +50,5 @@ $(ZZM_WEBM_ELF): $(TARGET) $(ZZM_WEBM_OBJS) $(LIBVPX_LIB) $(LIBOPUS_LIB) \
 $(ZZM_WEBM_IMAGE): $(ZZM_WEBM_ELF) $(ZZM_PACKER)
 	@mkdir -p $(dir $@)
 	$(ZZM_PACKER) 2 1 $< $@
+
+modules: $(ZZM_WEBM_IMAGE)
