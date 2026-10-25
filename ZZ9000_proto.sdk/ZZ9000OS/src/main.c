@@ -92,6 +92,12 @@ void Xil_AssertNonVoid() {}
  * SDK additions use service flags and status pages that self-gate. */
 #define REVISION_MAJOR 2
 #define REVISION_MINOR 8
+/* Third release-tag component. A 16-bit read of REG_ZZ_FW_VERSION
+ * (0xC0) is still major.minor; a 16-bit read of 0xC2, which is
+ * REG_ZZ_SD_BOOT_CMD only for writes, is this patch
+ * (ZZ_FW_CAP_FW_VERSION_PATCH). Older firmware reads 0 there.
+ * util/check_release_version.sh fails a tag build that disagrees. */
+#define REVISION_PATCH 2
 
 #ifndef ZZ9000_SKIP_INITIAL_MEDIA_INIT
 #define ZZ9000_SKIP_INITIAL_MEDIA_INIT 0
@@ -1893,7 +1899,8 @@ int main() {
 								| (ethernet_send_result & 0xff00) << 16;
 						break;
 					case REG_ZZ_FW_VERSION:
-						data = (REVISION_MAJOR << 24 | REVISION_MINOR << 16);
+						data = (REVISION_MAJOR << 24 | REVISION_MINOR << 16 |
+						        REVISION_PATCH);
 						break;
 					case REG_ZZ_SDK_MAGIC:
 						sdk_mailbox_activate();

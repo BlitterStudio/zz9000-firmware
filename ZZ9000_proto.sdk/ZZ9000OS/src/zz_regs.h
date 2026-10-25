@@ -208,6 +208,7 @@ enum zz_reg_offsets {
 #define ZZ_FW_CAP_VIDEOCAP_SOURCE_SYNC (1U << 5)
 #define ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN (1U << 6)
 #define ZZ_FW_CAP_FWUP_STATUS_MIRROR (1U << 11)
+#define ZZ_FW_CAP_FW_VERSION_PATCH (1U << 12)
 /* The centered 1080p profiles are intentionally excluded here: firmware
  * advertises them dynamically only when the loaded bitstream exposes both
  * required paths (viewport layout AND full-rate capture). Bit 3 stays the
@@ -232,11 +233,17 @@ enum zz_reg_offsets {
  * Bit 11 is static: every completed FWUP command is mirrored into the
  * last longword of the boot ROM window (fw_update.h), which a client can
  * poll without waiting on the ARM main loop.
+ *
+ * Bit 12 is static: a 16-bit read of 0xC2 (the low half of the
+ * REG_ZZ_FW_VERSION longword; 0xC2 is REG_ZZ_SD_BOOT_CMD only for writes)
+ * returns the release patch number. Older firmware reads 0 there, so
+ * clients treat the patch level as unknown without this bit.
  */
 #define ZZ_FW_CAPABILITIES \
   (ZZ_FW_CAP_VIDEOCAP_PROFILE | ZZ_FW_CAP_VIDEOCAP_LIVE | \
    ZZ_FW_CAP_Z2_APERTURE_LAYOUT | ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN | \
-   ZZ_FW_CAP_CUSTOM_MODE | ZZ_FW_CAP_FWUP_STATUS_MIRROR)
+   ZZ_FW_CAP_CUSTOM_MODE | ZZ_FW_CAP_FWUP_STATUS_MIRROR | \
+   ZZ_FW_CAP_FW_VERSION_PATCH)
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,
