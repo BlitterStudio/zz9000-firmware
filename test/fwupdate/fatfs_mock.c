@@ -25,6 +25,8 @@ struct mock_file {
 };
 
 static struct mock_file g_files[MOCK_MAX_FILES];
+static char g_dirs[MOCK_MAX_FILES][MOCK_PATH_MAX];
+static int g_dir_count;
 static int g_rename_calls = 0;
 static int g_rename_fail_at = 0;
 
@@ -54,6 +56,8 @@ static int alloc_file(const char *path, const char *tag) {
 
 void mock_reset(void) {
     memset(g_files, 0, sizeof(g_files));
+    memset(g_dirs, 0, sizeof(g_dirs));
+    g_dir_count = 0;
     g_rename_calls = 0;
     g_rename_fail_at = 0;
 }
@@ -155,5 +159,16 @@ FRESULT f_unlink(const char *path) {
     int i = find_file(path);
     if (i < 0) return FR_NO_FILE;
     g_files[i].used = 0;
+    return FR_OK;
+}
+
+FRESULT f_mkdir(const char *path) {
+    for (int i = 0; i < g_dir_count; i++) {
+        if (strcmp(g_dirs[i], path) == 0) return FR_EXIST;
+    }
+    if (g_dir_count >= MOCK_MAX_FILES) return FR_DISK_ERR;
+    strncpy(g_dirs[g_dir_count], path, MOCK_PATH_MAX - 1);
+    g_dirs[g_dir_count][MOCK_PATH_MAX - 1] = '\0';
+    g_dir_count++;
     return FR_OK;
 }

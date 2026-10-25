@@ -209,6 +209,9 @@ enum zz_reg_offsets {
 #define ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN (1U << 6)
 #define ZZ_FW_CAP_FWUP_STATUS_MIRROR (1U << 11)
 #define ZZ_FW_CAP_FW_VERSION_PATCH (1U << 12)
+/* Bit 13 is reserved for the shared-heap prototype. */
+#define ZZ_FW_CAP_FWUP_MODULE_DIR (1U << 14)
+#define ZZ_FW_CAP_FIRMWARE_MODULES (1U << 15)
 /* The centered 1080p profiles are intentionally excluded here: firmware
  * advertises them dynamically only when the loaded bitstream exposes both
  * required paths (viewport layout AND full-rate capture). Bit 3 stays the
@@ -238,12 +241,16 @@ enum zz_reg_offsets {
  * REG_ZZ_FW_VERSION longword; 0xC2 is REG_ZZ_SD_BOOT_CMD only for writes)
  * returns the release patch number. Older firmware reads 0 there, so
  * clients treat the patch level as unknown without this bit.
+ *
+ * Bit 14 is static: FWUP accepts the bounded `ZZ9K/<8.3>` module
+ * destination and keeps its backup and discard files in that directory.
+ * Bit 15 is set only after the module runtime is linked into this image.
  */
 #define ZZ_FW_CAPABILITIES \
   (ZZ_FW_CAP_VIDEOCAP_PROFILE | ZZ_FW_CAP_VIDEOCAP_LIVE | \
    ZZ_FW_CAP_Z2_APERTURE_LAYOUT | ZZ_FW_CAP_VIDEOCAP_SCANOUT_ORIGIN | \
    ZZ_FW_CAP_CUSTOM_MODE | ZZ_FW_CAP_FWUP_STATUS_MIRROR | \
-   ZZ_FW_CAP_FW_VERSION_PATCH)
+   ZZ_FW_CAP_FW_VERSION_PATCH | ZZ_FW_CAP_FWUP_MODULE_DIR)
 
 enum zz9k_card_features {
   CARD_FEATURE_NONE,

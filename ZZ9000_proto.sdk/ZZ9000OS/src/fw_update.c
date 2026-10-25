@@ -15,7 +15,9 @@
 #define FWUP_MAX_CHUNK   24576u
 #define FWUP_VOLUME      "0:"
 #define FWUP_NAME_MAX    64
-#define FWUP_PATH_MAX    (FWUP_NAME_MAX + 4) /* "0:/" + name + NUL */
+#define FWUP_PATH_MAX    (FWUP_NAME_MAX + 10) /* "0:/ZZ9K/" + 8.3 + NUL */
+#define FWUP_MODULE_DIR  "ZZ9K"
+#define FWUP_MODULE_PATH FWUP_VOLUME "/" FWUP_MODULE_DIR
 #define FWUP_TEMP_PATH   FWUP_VOLUME "/ZZFWUP.TMP"
 #define FWUP_DISCARD_PATH FWUP_VOLUME "/ZZFWUP.DEL"
 #define FWUP_DISCARD_SLOTS 8
@@ -72,9 +74,17 @@ static int is_reserved_name(const char *name) {
 
 static void discard_slot_path(char *discard_path,
                               size_t discard_path_size,
+                              const char *target_path,
                               int slot) {
-    snprintf(discard_path, discard_path_size, FWUP_VOLUME "/ZZFWUP%02d.DEL",
-             slot);
+    const char *directory = (strncmp(target_path, FWUP_MODULE_PATH "/",
+                                     sizeof(FWUP_MODULE_PATH)) == 0)
+                                ? FWUP_MODULE_PATH "/"
+                                : FWUP_VOLUME "/";
+    if (slot < 0)
+        snprintf(discard_path, discard_path_size, "%sZZFWUP.DEL", directory);
+    else
+        snprintf(discard_path, discard_path_size, "%sZZFWUP%02d.DEL",
+                 directory, slot);
 }
 
 static uint16_t map_open_error(FRESULT fr) {
@@ -90,16 +100,45 @@ static uint16_t map_path_error(FRESULT fr) {
     return map_open_error(fr);
 }
 
-/* Allow `[A-Za-z0-9._-]` plus a single optional leading '/'. Rejects
- * '..', backslash, ':' (FatFs volume prefix), control chars, and any
- * other shenanigan that could escape the FAT root. We deliberately do
- * not support subdirectories — flat root only — to keep the validator
- * tight and the failure modes obvious. */
+/* Flat root targets retain their legacy name rule. Modules add exactly one
+ * uppercase `ZZ9K/` component and an uppercase 8.3 leaf.  FatFs runs without
+ * LFN, so accepting a longer or mixed-case leaf would make the wire contract
+ * lie about what reaches the card. */
+static int validate_module_leaf(const char *name) {
+    size_t base = 0, ext = 0;
+    int in_ext = 0;
+
+    if (!name || !*name) return 0;
+    for (const char *p = name; *p; p++) {
+        const char c = *p;
+        if (c == '.') {
+            if (in_ext || base == 0) return 0;
+            in_ext = 1;
+            continue;
+        }
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+            return 0;
+        if (in_ext) {
+            if (++ext > 3) return 0;
+        } else if (++base > 8) {
+            return 0;
+        }
+    }
+    return base && (!in_ext || ext);
+}
+
 static int validate_name(const char *raw, char *out_path) {
     if (!raw) return 0;
     const char *p = raw;
     if (*p == '/') p++; /* tolerate a single leading slash */
     if (*p == '\0') return 0;
+
+    if (strncmp(p, FWUP_MODULE_DIR "/", sizeof(FWUP_MODULE_DIR)) == 0) {
+        const char *leaf = p + sizeof(FWUP_MODULE_DIR);
+        if (!validate_module_leaf(leaf)) return 0;
+        snprintf(out_path, FWUP_PATH_MAX, FWUP_MODULE_PATH "/%s", leaf);
+        return 1;
+    }
 
     size_t n = 0;
     for (const char *q = p; *q; q++) {
@@ -115,20 +154,11 @@ static int validate_name(const char *raw, char *out_path) {
     }
     if (n == 0) return 0;
 
-    /* Reject ".." or a leading "." that would resolve to current dir. */
-    if (p[0] == '.' && (p[1] == '\0' || (p[1] == '.' && p[2] == '\0'))) {
+    if (p[0] == '.' && (p[1] == '\0' || (p[1] == '.' && p[2] == '\0')))
         return 0;
-    }
-    if (is_reserved_name(p)) {
-        return 0;
-    }
+    if (is_reserved_name(p)) return 0;
 
-    /* "0:/" + filename + NUL. */
-    out_path[0] = '0';
-    out_path[1] = ':';
-    out_path[2] = '/';
-    memcpy(out_path + 3, p, n);
-    out_path[3 + n] = '\0';
+    snprintf(out_path, FWUP_PATH_MAX, FWUP_VOLUME "/%s", p);
     return 1;
 }
 
@@ -144,14 +174,19 @@ static int make_backup_path(const char *target_path,
                             char *backup_path,
                             size_t backup_path_size) {
     const char *name = target_path;
-    if (name[0] == '0' && name[1] == ':' && name[2] == '/') {
-        name += 3;
+    const char *directory = FWUP_VOLUME "/";
+    const char *slash;
+    if (name[0] == '0' && name[1] == ':' && name[2] == '/') name += 3;
+    slash = strrchr(name, '/');
+    if (slash) {
+        if (strncmp(name, FWUP_MODULE_DIR "/", sizeof(FWUP_MODULE_DIR)) != 0)
+            return 0;
+        directory = FWUP_MODULE_PATH "/";
+        name = slash + 1;
     }
 
     size_t len = strlen(name);
-    if (len == 0 || len > FWUP_NAME_MAX || backup_path_size < FWUP_PATH_MAX) {
-        return 0;
-    }
+    if (len == 0 || len > FWUP_NAME_MAX) return 0;
 
     char backup_name[FWUP_NAME_MAX + 1];
     memcpy(backup_name, name, len + 1);
@@ -183,15 +218,20 @@ static int make_backup_path(const char *target_path,
         backup_name[FWUP_NAME_MAX] = '\0';
     }
 
-    snprintf(backup_path, backup_path_size, FWUP_VOLUME "/%s", backup_name);
-    return !ascii_ieq(target_path, backup_path);
+    const int written = snprintf(backup_path, backup_path_size, "%s%s",
+                                 directory, backup_name);
+    return written >= 0 && (size_t)written < backup_path_size &&
+           !ascii_ieq(target_path, backup_path);
 }
 
-static int reserve_discard_path(char *discard_path, size_t discard_path_size) {
+static int reserve_discard_path(char *discard_path, size_t discard_path_size,
+                                const char *target_path) {
+    char default_path[FWUP_PATH_MAX];
+    discard_slot_path(default_path, sizeof(default_path), target_path, -1);
     FILINFO info;
-    FRESULT fr = f_stat(FWUP_DISCARD_PATH, &info);
+    FRESULT fr = f_stat(default_path, &info);
     if (fr == FR_NO_FILE) {
-        strncpy(discard_path, FWUP_DISCARD_PATH, discard_path_size - 1);
+        strncpy(discard_path, default_path, discard_path_size - 1);
         discard_path[discard_path_size - 1] = '\0';
         return 1;
     }
@@ -201,18 +241,15 @@ static int reserve_discard_path(char *discard_path, size_t discard_path_size) {
     }
 
     for (int slot = 0; slot < FWUP_DISCARD_SLOTS; slot++) {
-        discard_slot_path(discard_path, discard_path_size, slot);
+        discard_slot_path(discard_path, discard_path_size, target_path, slot);
         fr = f_stat(discard_path, &info);
-        if (fr == FR_NO_FILE) {
-            return 1;
-        }
+        if (fr == FR_NO_FILE) return 1;
         if (fr != FR_OK) {
             printf("[FWUP] COMMIT discard slot check(%s) failed: %d\n",
                    discard_path, (int)fr);
             return 0;
         }
     }
-
     printf("[FWUP] COMMIT no free discard path; reboot to clean ZZFWUP*.DEL\n");
     return 0;
 }
@@ -234,9 +271,9 @@ static uint16_t commit_temp_file(void) {
     if (fr == FR_OK) {
         fr = f_stat(backup_path, &info);
         if (fr == FR_OK) {
-            if (!reserve_discard_path(discard_path, sizeof(discard_path))) {
+            if (!reserve_discard_path(discard_path, sizeof(discard_path),
+                                      fwup_path))
                 return FWUP_ERR_CLOSE;
-            }
             fr = f_rename(backup_path, discard_path);
             if (fr != FR_OK) {
                 printf("[FWUP] COMMIT displace backup(%s -> %s) failed: %d\n",
@@ -311,7 +348,8 @@ void fw_update_cleanup_backups(void) {
 
     for (int slot = 0; slot < FWUP_DISCARD_SLOTS; slot++) {
         char discard_path[FWUP_PATH_MAX];
-        discard_slot_path(discard_path, sizeof(discard_path), slot);
+        discard_slot_path(discard_path, sizeof(discard_path), FWUP_VOLUME "/",
+                          slot);
         fr = f_unlink(discard_path);
         if (fr == FR_OK) {
             printf("[FWUP] cleanup removed %s\n", discard_path);
@@ -339,6 +377,14 @@ uint16_t fw_update_open(const char *name_buf) {
         return FWUP_ERR_BAD_NAME;
     }
 
+    if (strncmp(path, FWUP_MODULE_PATH "/", sizeof(FWUP_MODULE_PATH)) == 0) {
+        FRESULT mkdir_result = f_mkdir(FWUP_MODULE_PATH);
+        if (mkdir_result != FR_OK && mkdir_result != FR_EXIST) {
+            printf("[FWUP] OPEN mkdir(%s) failed: %d\n", FWUP_MODULE_PATH,
+                   (int)mkdir_result);
+            return map_open_error(mkdir_result);
+        }
+    }
     FILINFO info;
     FRESULT fr = f_stat(path, &info);
     if (fr != FR_OK && fr != FR_NO_FILE) {
@@ -457,7 +503,7 @@ uint16_t fw_update_restore(const char *name_buf) {
     int displaced = 0;
     fr = f_stat(path, &info);
     if (fr == FR_OK) {
-        if (!reserve_discard_path(discard_path, sizeof(discard_path))) {
+        if (!reserve_discard_path(discard_path, sizeof(discard_path), path)) {
             return FWUP_ERR_RESTORE;
         }
         fr = f_rename(path, discard_path);
