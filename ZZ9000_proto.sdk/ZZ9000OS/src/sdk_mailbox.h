@@ -33,6 +33,8 @@
 #define SDK_STATUS_NO_MEMORY           6U
 #define SDK_STATUS_IO_ERROR            9U
 #define SDK_STATUS_NOT_FOUND           10U
+#define SDK_STATUS_MODULE_MISSING      11U
+#define SDK_STATUS_MODULE_MISMATCH     12U
 #define SDK_STATUS_INTERNAL_ERROR      0xffffU
 
 #define SDK_CAP_MAILBOX                (1U << 0)
@@ -44,6 +46,7 @@
 #define SDK_CAP_IMAGE_SCALE            (1U << 6)
 #define SDK_CAP_AUDIO_DECODE           (1U << 7)
 #define SDK_CAP_CRYPTO                 (1U << 8)
+#define SDK_CAP_MODULES                (1U << 9)
 #define SDK_CAP_AUDIO_PLAYBACK         (1U << 19)
 #define SDK_CAP_MEMORY_OPS             (1U << 10)
 #define SDK_CAP_DIAGNOSTICS            (1U << 11)
@@ -335,6 +338,30 @@ struct SDKCryptoVerifyPayload {
 #define SDK_OP_DIAG_TIMING             0x0901U
 #define SDK_OP_DIAG_SCHED              0x0902U
 #define SDK_OP_DIAG_MEMORY             0x0903U
+
+#define SDK_OP_MODULE_STATUS           0x0a00U
+#define SDK_MODULE_LOADED               0U
+#define SDK_MODULE_MISSING              1U
+#define SDK_MODULE_REJECTED_ABI         2U
+#define SDK_MODULE_REJECTED_HASH        3U
+#define SDK_MODULE_REJECTED_SLOT        4U
+
+struct SDKModuleStatusRequestPayload {
+	uint8_t index[4];
+	uint8_t reserved[44];
+};
+
+struct SDKModuleStatusPayload {
+	uint8_t id[4];
+	uint8_t version[4];
+	uint8_t abi_version[4];
+	uint8_t load_address[4];
+	uint8_t image_size[4];
+	uint8_t bss_size[4];
+	uint8_t state[4];
+	char name[16];
+	uint8_t reserved[4];
+};
 
 #define SDK_OP_VIDEO_SESSION_BEGIN     0x0b00U
 #define SDK_OP_VIDEO_SESSION_WRITE     0x0b01U

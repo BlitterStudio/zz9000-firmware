@@ -119,6 +119,8 @@ jobs:
         run: make -C test/audio test
       - name: Firmware-file restore suite
         run: make -C test/fwupdate test
+      - name: Firmware module loader suite
+        run: make -C test/modules test
       - name: SD activity LED suite
         run: make -C test/sd_activity_led test
       - name: Scheduler host tests

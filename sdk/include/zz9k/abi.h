@@ -123,6 +123,8 @@ enum ZZ9KStatus {
   ZZ9K_STATUS_CANCELLED = 8,
   ZZ9K_STATUS_IO_ERROR = 9,
   ZZ9K_STATUS_NOT_FOUND = 10,
+  ZZ9K_STATUS_MODULE_MISSING = 11,
+  ZZ9K_STATUS_MODULE_MISMATCH = 12,
   ZZ9K_STATUS_INTERNAL_ERROR = 0xffff
 };
 
@@ -258,6 +260,8 @@ enum ZZ9KOpcode {
   ZZ9K_OP_DIAG_SCHED = ZZ9K_SERVICE_DIAG + 0x02,
   ZZ9K_OP_DIAG_MEMORY = ZZ9K_SERVICE_DIAG + 0x03,
 
+  ZZ9K_OP_MODULE_STATUS = ZZ9K_SERVICE_MODULE + 0x00,
+
   ZZ9K_OP_CONSOLE_ENCODE = ZZ9K_SERVICE_CONSOLE + 0x00
 };
 
@@ -309,6 +313,31 @@ enum ZZ9KCapability {
   /* Zorro III: card-only allocations for preloaded media input. */
   ZZ9K_CAP_MEDIA_INPUT = 1U << 30
 };
+
+enum ZZ9KModuleState {
+  ZZ9K_MODULE_LOADED = 0,
+  ZZ9K_MODULE_MISSING = 1,
+  ZZ9K_MODULE_REJECTED_ABI = 2,
+  ZZ9K_MODULE_REJECTED_HASH = 3,
+  ZZ9K_MODULE_REJECTED_SLOT = 4
+};
+
+typedef struct ZZ9KModuleStatusRequestPayload {
+  uint8_t index[4];
+  uint8_t reserved[44];
+} ZZ9KModuleStatusRequestPayload;
+
+typedef struct ZZ9KModuleStatusPayload {
+  uint8_t id[4];
+  uint8_t version[4];
+  uint8_t abi_version[4];
+  uint8_t load_address[4];
+  uint8_t image_size[4];
+  uint8_t bss_size[4];
+  uint8_t state[4];
+  char name[16];
+  uint8_t reserved[4];
+} ZZ9KModuleStatusPayload;
 
 #define ZZ9K_APERTURE_LAYOUT_GENERATION_SHIFT 16U
 #define ZZ9K_APERTURE_LAYOUT_GENERATION_MASK  0xffff0000UL

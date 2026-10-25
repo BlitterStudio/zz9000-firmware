@@ -55,6 +55,7 @@
 #include "mp3/minimp3.h"
 #include "sdk_audio_flac.h"
 #include "sdk_audio_vorbis.h"
+#include "zzm_loader.h"
 
 /* Ring geometry is per placement (SDK_MAILBOX_Z3_RING_ENTRIES in the Zorro
  * III reservation, SDK_MAILBOX_Z2_RING_ENTRIES in the Zorro II one); the
@@ -69,7 +70,7 @@
 	 SDK_CAP_SHARED_ALLOC | SDK_CAP_SURFACES | \
 	 SDK_CAP_FRAMEBUFFER_SURFACE | SDK_CAP_IMAGE_DECODE | \
 	 SDK_CAP_IMAGE_SCALE | SDK_CAP_AUDIO_DECODE | \
-	 SDK_CAP_AUDIO_PLAYBACK | \
+	 SDK_CAP_AUDIO_PLAYBACK | SDK_CAP_MODULES | \
 	 SDK_CAP_MEMORY_OPS | SDK_CAP_CRYPTO | \
 	 SDK_CAP_DIAGNOSTICS | SDK_CAP_SURFACE_OPS | SDK_CAP_COMPRESSION | \
 	 SDK_CAP_VIDEO_DECODE | \
@@ -8420,6 +8421,32 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		put_be32(caps->completion_ring_entries, mailbox_ring_entries);
 		put_be32(caps->host_window_heap_size,
 		         effective_host_window_size());
+		return SDK_STATUS_OK;
+	}
+	case SDK_OP_MODULE_STATUS: {
+		const struct SDKModuleStatusRequestPayload *request =
+			(const struct SDKModuleStatusRequestPayload *)req->payload;
+		volatile struct SDKModuleStatusPayload *reply =
+			(volatile struct SDKModuleStatusPayload *)comp->payload;
+		zzm_status_t status;
+		if (payload_len != sizeof(*request))
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		for (uint32_t i = 0; i < sizeof(request->reserved); i++) {
+			if (request->reserved[i] != 0)
+				return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		}
+		if (!zzm_loader_status(get_be32(request->index), &status))
+			return complete_status(req, comp, SDK_STATUS_NOT_FOUND);
+		write_completion(comp, req, SDK_STATUS_OK, sizeof(*reply));
+		memset((void *)reply, 0, sizeof(*reply));
+		put_be32(reply->id, status.id);
+		put_be32(reply->version, status.version);
+		put_be32(reply->abi_version, status.abi_version);
+		put_be32(reply->load_address, status.load_address);
+		put_be32(reply->image_size, status.image_size);
+		put_be32(reply->bss_size, status.bss_size);
+		put_be32(reply->state, status.state);
+		memcpy((void *)reply->name, status.name, sizeof(reply->name));
 		return SDK_STATUS_OK;
 	}
 	case SDK_OP_QUERY_APERTURE_LAYOUT:

@@ -49,6 +49,7 @@ void Xil_AssertNonVoid() {}
 #include "sd_storage.h"
 #include "sd_boot.h"
 #include "fw_update.h"
+#include "zzm_loader.h"
 #include "interrupt.h"
 #include "bootrom.h"
 #include "core2.h"
@@ -856,6 +857,9 @@ int main() {
 	handle_amiga_reset(AMIGA_RESET_FAST);
 #else
 	handle_amiga_reset(AMIGA_RESET_INIT_MEDIA);
+	/* The initial media reset mounted SD. Load fixed-slot modules after the
+	 * permanent pool boundary is established and before core 1 accepts work. */
+	zzm_loader_boot_load();
 #endif
 
 	// Mark the task-queue region shareable-cacheable in the shared MMU table
