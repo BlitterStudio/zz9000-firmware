@@ -10,6 +10,8 @@
 #include "memorymap.h"
 #include "overlay.h"
 #include "sdk_video_backend.h"
+#include "zzm_format.h"
+#include "zzm_registry.h"
 
 #include <string.h>
 #include <xil_cache.h>
@@ -270,6 +272,15 @@ uint16_t sdk_video_stream_begin_owned(
 	    begin->output_format != SDK_VIDEO_OUTPUT_DIRECT_OVERLAY ||
 	    begin->width == 0U || begin->height == 0U)
 		return SDK_STATUS_BAD_REQUEST;
+	if (begin->container == SDK_VIDEO_CONTAINER_WEBM &&
+	    (begin->codec == SDK_VIDEO_CODEC_VP8 ||
+	     begin->codec == SDK_VIDEO_CODEC_VP9)) {
+		uint16_t module_status =
+			zzm_registry_sdk_status(ZZM_MODULE_WEBM);
+
+		if (module_status != SDK_STATUS_OK)
+			return module_status;
+	}
 	ops = sdk_video_backend_find(begin->codec, begin->container);
 	if (ops && ops->geometry_ok) {
 		if (!ops->geometry_ok(begin->width, begin->height))

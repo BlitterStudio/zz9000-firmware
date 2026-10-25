@@ -1274,7 +1274,7 @@ static const struct SDKVideoDecoderOps webm_vp9_ops = {
 	.audio_ok = webm_audio_ok
 };
 
-const struct SDKVideoDecoderOps *sdk_video_webm_ops(uint32_t codec)
+const struct SDKVideoDecoderOps *zzm_webm_ops(uint32_t codec)
 {
 	if (codec == SDK_VIDEO_CODEC_VP8)
 		return &webm_vp8_ops;
