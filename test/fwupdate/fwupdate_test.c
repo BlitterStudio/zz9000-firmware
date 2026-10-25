@@ -229,7 +229,7 @@ static void test_module_name_validation_and_paths(void) {
     CHECK(fw_update_write("new", 3) == FWUP_OK, "module update writes");
     mock_add_file("0:/ZZ9K/MPEG2.ZZM", "old");
     CHECK(fw_update_close() == FWUP_OK, "module update commits");
-    CHECK(mock_exists("0:/ZZ9K/MPEG2.bak"), "backup remains in module directory");
+    CHECK(mock_exists("0:/ZZ9K/MPEG2.BAK"), "backup remains in module directory");
     CHECK(mock_exists("0:/ZZ9K/MPEG2.ZZM"), "module target remains in directory");
 }
 

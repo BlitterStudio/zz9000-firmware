@@ -175,6 +175,8 @@ static int make_backup_path(const char *target_path,
                             size_t backup_path_size) {
     const char *name = target_path;
     const char *directory = FWUP_VOLUME "/";
+    const char *backup_ext = "bak";
+    const char *old_ext = "old";
     const char *slash;
     if (name[0] == '0' && name[1] == ':' && name[2] == '/') name += 3;
     slash = strrchr(name, '/');
@@ -182,6 +184,8 @@ static int make_backup_path(const char *target_path,
         if (strncmp(name, FWUP_MODULE_DIR "/", sizeof(FWUP_MODULE_DIR)) != 0)
             return 0;
         directory = FWUP_MODULE_PATH "/";
+        backup_ext = "BAK";
+        old_ext = "OLD";
         name = slash + 1;
     }
 
@@ -196,7 +200,7 @@ static int make_backup_path(const char *target_path,
         if (*p == '.') dot = p;
     }
 
-    const char *ext = (dot && ascii_ieq(dot + 1, "bak")) ? "old" : "bak";
+    const char *ext = (dot && ascii_ieq(dot + 1, "bak")) ? old_ext : backup_ext;
     size_t base_len = dot ? (size_t)(dot - backup_name) : len;
     if (dot && base_len + 4 <= FWUP_NAME_MAX) {
         backup_name[base_len] = '.';
